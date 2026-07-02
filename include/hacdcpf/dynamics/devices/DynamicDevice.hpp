@@ -60,6 +60,10 @@ class DynamicDevice {
     out.name = name();
     out.type = type();
     out.component_index = componentIndex();
+    out.model_standard = modelStandard();
+    out.model_name = modelName();
+    out.parameter_set = parameterSet();
+    out.model_profiles = modelProfiles();
     return out;
   }
 
@@ -84,6 +88,16 @@ class DynamicDevice {
   [[nodiscard]] virtual std::string name() const = 0;
   [[nodiscard]] virtual std::string type() const = 0;
   [[nodiscard]] virtual int componentIndex() const = 0;
+  [[nodiscard]] virtual std::string modelStandard() const { return "HACDCPF"; }
+  [[nodiscard]] virtual std::string modelName() const { return type(); }
+  [[nodiscard]] virtual std::string parameterSet() const { return {}; }
+  [[nodiscard]] virtual std::vector<DynamicModelProfile> modelProfiles() const {
+    DynamicModelProfile profile;
+    profile.standard = modelStandard();
+    profile.model_name = modelName();
+    profile.parameter_set = parameterSet();
+    return {profile};
+  }
 };
 
 }  // namespace hacdcpf::dynamics

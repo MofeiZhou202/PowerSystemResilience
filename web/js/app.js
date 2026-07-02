@@ -2664,18 +2664,57 @@ const App = (() => {
     return 'AC';
   }
 
+  function transientDefaultEventParams(type, value, duration) {
+    const params = {};
+    if (type === 'FaultShunt') {
+      if (Number(value) > 0) params.g_pu = Number(value);
+      if (Number(duration) > 0) params.duration_s = Number(duration);
+    } else if (type === 'ACLoadScale' || type === 'DCLoadScale') {
+      params.scale = Math.max(0, Number(value) || 0);
+    } else if (type === 'StoragePowerStep' || type === 'DCStoragePowerStep') {
+      params.p_ref_mw = Number(value) || 0;
+    }
+    return params;
+  }
+
+  function transientReadParamsInput() {
+    const raw = String(document.getElementById('trEventParams')?.value || '').trim();
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('params must be an object');
+      }
+      const params = {};
+      Object.entries(parsed).forEach(([key, value]) => {
+        const num = Number(value);
+        if (Number.isFinite(num)) params[key] = num;
+      });
+      return params;
+    } catch (err) {
+      throw new Error(`扰动参数 JSON 无效: ${err.message || err}`);
+    }
+  }
+
   function transientNormalizeEvent(raw, fallbackIndex = 0) {
     const type = raw?.type || '';
     if (!type) return null;
+    const value = numberOr(raw.value, 0.0);
+    const duration = Math.max(0, numberOr(raw.duration_s, 0.0));
+    const params = {
+      ...transientDefaultEventParams(type, value, duration),
+      ...(raw.params || {}),
+    };
     const event = {
       type,
       time_s: Math.max(0, numberOr(raw.time_s, 0.2)),
       component_index: Math.max(0, parseInt(raw.component_index ?? raw.target ?? 0, 10) || 0),
       bus: Math.max(0, parseInt(raw.bus ?? 0, 10) || 0),
-      value: numberOr(raw.value, 0.0),
-      duration_s: Math.max(0, numberOr(raw.duration_s, 0.0)),
+      value,
+      duration_s: duration,
       component_type: raw.component_type || transientEventDefaultDomain(type),
       label: String(raw.label || '').trim(),
+      params,
     };
     if (transientEventUsesBus(type)) {
       event.bus = event.bus || event.component_index;
@@ -2697,14 +2736,18 @@ const App = (() => {
     const domainEl = document.getElementById('trEventDomain');
     const domain = domainEl?.value || transientEventDefaultDomain(type);
     const target = parseInt(document.getElementById('trEventTarget')?.value, 10) || 0;
+    const value = numberOr(document.getElementById('trEventValue')?.value, type.includes('LoadScale') ? 1.10 : 0.0);
+    const duration = numberOr(document.getElementById('trEventDuration')?.value, type === 'FaultShunt' ? 0.08 : 0.0);
+    const params = transientReadParamsInput();
     const event = transientNormalizeEvent({
       type,
       time_s: numberOr(document.getElementById('trEventTime')?.value, 0.2),
       component_index: target,
       bus: transientEventUsesBus(type) ? target : 0,
-      value: numberOr(document.getElementById('trEventValue')?.value, type.includes('LoadScale') ? 1.10 : 0.0),
-      duration_s: numberOr(document.getElementById('trEventDuration')?.value, type === 'FaultShunt' ? 0.08 : 0.0),
+      value,
+      duration_s: duration,
       component_type: domain,
+      params,
       label: document.getElementById('trEventLabel')?.value || '',
     }, _transientEvents.length);
     return event;
@@ -2718,12 +2761,17 @@ const App = (() => {
       : (event.component_index ? `#${event.component_index}` : '全部');
     const pieces = [`${Number(event.time_s || 0).toFixed(3)}s`, type, target];
     if (event.type === 'FaultShunt') {
-      pieces.push(`g=${Number(event.value || 0).toFixed(3)}pu`);
+      const p = event.params || {};
+      if (p.r_pu != null || p.x_pu != null) {
+        pieces.push(`z=${Number(p.r_pu || 0).toExponential(1)}+j${Number(p.x_pu || 0).toExponential(1)}pu`);
+      } else {
+        pieces.push(`g=${Number(p.g_pu ?? event.value ?? 0).toFixed(3)}pu`);
+      }
       if (Number(event.duration_s) > 0) pieces.push(`${Number(event.duration_s).toFixed(3)}s`);
     } else if (event.type.includes('LoadScale')) {
-      pieces.push(`x${Number(event.value || 0).toFixed(3)}`);
+      pieces.push(`x${Number(event.params?.scale ?? event.value ?? 0).toFixed(3)}`);
     } else if (event.type.includes('StoragePowerStep')) {
-      pieces.push(`${Number(event.value || 0).toFixed(3)}MW`);
+      pieces.push(`${Number(event.params?.p_ref_mw ?? event.value ?? 0).toFixed(3)}MW`);
     }
     return pieces.join(' · ');
   }
@@ -2764,7 +2812,13 @@ const App = (() => {
   }
 
   function addTransientEventFromControls() {
-    const event = transientEventFromControls();
+    let event = null;
+    try {
+      event = transientEventFromControls();
+    } catch (err) {
+      setStatus(err.message || String(err), 'error');
+      return;
+    }
     if (!event) {
       setStatus('请选择一个暂态扰动类型', 'warn');
       return;
@@ -2785,6 +2839,7 @@ const App = (() => {
     const domainEl = document.getElementById('trEventDomain');
     const durationEl = document.getElementById('trEventDuration');
     const valueEl = document.getElementById('trEventValue');
+    const paramsEl = document.getElementById('trEventParams');
     if (domainEl) {
       domainEl.disabled = !(type === 'FaultShunt' || type === 'ClearFault' ||
         type === 'ACLoadScale' || type === 'DCLoadScale');
@@ -2796,6 +2851,21 @@ const App = (() => {
       else if (type.includes('LoadScale')) valueEl.title = '负荷倍率，例如 1.10 表示增加 10%';
       else if (type.includes('StoragePowerStep')) valueEl.title = '储能有功目标 MW';
       else valueEl.title = '该事件类型通常不需要值';
+    }
+    if (paramsEl) {
+      if (type === 'FaultShunt') {
+        paramsEl.placeholder = '{"r_pu":0.001,"x_pu":0.002}';
+        paramsEl.title = '可选：用 r_pu/x_pu 或 g_pu/b_pu 精确设置故障强度，也可写 duration_s';
+      } else if (type.includes('LoadScale')) {
+        paramsEl.placeholder = '{"scale":1.10}';
+        paramsEl.title = '可选：负荷倍率参数';
+      } else if (type.includes('StoragePowerStep')) {
+        paramsEl.placeholder = '{"p_ref_mw":-2.0}';
+        paramsEl.title = '可选：储能有功目标';
+      } else {
+        paramsEl.placeholder = '{}';
+        paramsEl.title = '可选事件参数，只保留数值字段';
+      }
     }
   }
 

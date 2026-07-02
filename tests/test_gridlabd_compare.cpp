@@ -265,6 +265,15 @@ void print_report_diagnostics(const hacdcpf::io::GridLABDComparisonReport& repor
     UNSCOPED_INFO("additional failed comparison items suppressed: "
                   << (printed - max_items));
   }
+  for (const auto& unsupported : report.unsupported_features) {
+    UNSCOPED_INFO("unsupported: " << unsupported);
+  }
+  for (const auto& reason : report.diagnostic_only_reasons) {
+    UNSCOPED_INFO("diagnostic-only: " << reason);
+  }
+  if (!report.equivalence_claim.empty()) {
+    UNSCOPED_INFO("equivalence claim: " << report.equivalence_claim);
+  }
   for (const auto& skipped : report.skipped) {
     UNSCOPED_INFO("skipped: " << skipped);
   }
@@ -321,7 +330,12 @@ hacdcpf::io::GridLABDComparisonReport run_optional_external_compare(
   }
   CHECK(report.gridlabd_run_attempted);
   CHECK(report.gridlabd_run_success);
+  CHECK(report.numerical_comparison_passed);
+  CHECK(report.equivalence_passed);
   CHECK(report.passed);
+  CHECK(report.unsupported_features.empty());
+  CHECK(report.diagnostic_only_reasons.empty());
+  CHECK(report.equivalence_claim.find("numerically equivalent") != std::string::npos);
   return report;
 }
 
@@ -446,12 +460,21 @@ TEST_CASE("GridLAB-D external diagnostic: PV bus voltage regulation is not exact
   INFO("GridLAB-D command: " << report.gridlabd_result.command);
   CHECK(report.gridlabd_run_attempted);
   CHECK(report.gridlabd_run_success);
+  CHECK_FALSE(report.equivalence_passed);
+  CHECK_FALSE(report.passed);
   CHECK_FALSE(report.warnings.empty());
   CHECK(std::any_of(report.warnings.begin(), report.warnings.end(),
                     [](const std::string& warning) {
                       return warning.find("PV voltage regulation") !=
                              std::string::npos;
                     }));
+  CHECK(std::any_of(report.diagnostic_only_reasons.begin(),
+                    report.diagnostic_only_reasons.end(),
+                    [](const std::string& reason) {
+                      return reason.find("PV bus voltage regulation") !=
+                             std::string::npos;
+                    }));
+  CHECK(report.equivalence_claim.find("Diagnostic-only") != std::string::npos);
   CHECK(failed_item_count(report) > 0);
 }
 
@@ -493,10 +516,14 @@ TEST_CASE("GridLAB-D external diagnostic: large PV-heavy transmission case runs"
   CHECK(report.hacdcpf_power_flow_converged);
   CHECK(report.gridlabd_run_attempted);
   CHECK(report.gridlabd_run_success);
+  CHECK_FALSE(report.numerical_comparison_passed);
+  CHECK_FALSE(report.equivalence_passed);
+  CHECK_FALSE(report.passed);
   CHECK(report.gridlabd_result.bus_voltages.size() >= 250);
   CHECK(std::any_of(report.warnings.begin(), report.warnings.end(),
                     [](const std::string& warning) {
                       return warning.find("PV voltage regulation") !=
                              std::string::npos;
                     }));
+  CHECK_FALSE(report.diagnostic_only_reasons.empty());
 }

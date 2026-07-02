@@ -9,6 +9,15 @@
 
 namespace hacdcpf::dynamics {
 
+struct DynamicModelProfile {
+  std::string standard;
+  std::string profile;
+  std::string model_name;
+  std::string parameter_set;
+  std::string source_id;
+  std::string notes;
+};
+
 struct DynamicDeviceOutput {
   std::string name;
   std::string type;
@@ -18,7 +27,26 @@ struct DynamicDeviceOutput {
   int canvas_index{-1};
   std::string component_domain;
   std::string source_type;
+  std::string model_standard;
+  std::string model_name;
+  std::string parameter_set;
+  std::vector<DynamicModelProfile> model_profiles;
   std::map<std::string, double> values;
+};
+
+struct DynamicAppliedEventRecord {
+  double time_s{0.0};
+  std::string type;
+  std::string label;
+  int component_index{0};
+  int target_id{0};
+  int bus{0};
+  int phase{-1};
+  double value{0.0};
+  double duration_s{0.0};
+  std::string component_type;
+  std::string target_type;
+  std::map<std::string, double> params;
 };
 
 struct DynamicInitializationSummary {
@@ -62,11 +90,22 @@ struct DynamicResults {
   std::vector<DynamicSnapshot> snapshots;
   std::vector<std::string> warnings;
   std::vector<std::string> applied_events;
+  std::vector<DynamicAppliedEventRecord> applied_event_records;
   DynamicInitializationSummary initialization;
 
   [[nodiscard]] const DynamicSnapshot* final_snapshot() const noexcept {
     return snapshots.empty() ? nullptr : &snapshots.back();
   }
 };
+
+struct DynamicResultExportOptions {
+  bool include_ac_voltage_magnitudes{true};
+  bool include_dc_voltages{true};
+  bool include_device_outputs{true};
+  char delimiter{','};
+};
+
+std::string to_csv(const DynamicResults& results,
+                   const DynamicResultExportOptions& options = {});
 
 }  // namespace hacdcpf::dynamics

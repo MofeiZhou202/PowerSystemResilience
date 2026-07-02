@@ -48,6 +48,31 @@ This is intentionally a snapshot validation harness, not a replacement transient
 
 > Is the algebraic AC network equilibrium used to initialize the transient DAE consistent with an independent distribution power-flow engine?
 
+The package should therefore not claim blanket equivalence with GridLAB-D for
+all AC distribution networks. The implemented claim is narrower and enforced by
+`GridLABDComparisonReport`:
+
+```text
+equivalence_passed =
+  GridLAB-D solved
+  AND HACDCPF PF solved
+  AND at least one bus/branch numerical comparison was performed
+  AND all compared values are within tolerance
+  AND unsupported_features is empty
+  AND diagnostic_only_reasons is empty
+```
+
+When this flag is true, the valid statement is:
+
+> HACDCPF is numerically equivalent to GridLAB-D for this declared balanced AC
+> algebraic snapshot within the configured tolerances.
+
+That statement is intentionally limited to the active AC snapshot: one
+swing/source, PQ buses, constant-power injections, passive lines, and simple
+two-winding transformer equivalents. It does not claim GridLAB-D object-library,
+unbalanced phase-domain, regulator-control, protection, DER-control, transient,
+or hybrid AC/DC equivalence.
+
 The harness is implemented in:
 
 ```text
@@ -94,6 +119,13 @@ diagnostic cases:
   - PV-bus voltage-regulation mismatch case
   - case300 AC scope, enabled with HACDCPF_GRIDLABD_RUN_LARGE=1
 ```
+
+Out-of-service branches in a feeder are ignored for the active snapshot
+equivalence gate. Parallel branches, PV buses, voltage-dependent loads,
+regulator controls, phase-shifting transformers, dynamic machines, converters,
+and hybrid AC/DC internals downgrade the report to diagnostic-only unless the
+bridge has an explicit one-to-one representation and numerical comparison for
+that feature.
 
 ## OpenDSS/GridLAB-D Text I/O
 
@@ -152,9 +184,12 @@ text import back to HybridPowerSystem
 HACDCPF PF / transient initialization checks
 ```
 
-Future extensions should add unbalanced phase-domain objects, regulator/control
-objects, and richer DER/controller projections through this I/O layer before
-claiming exact transient equivalence against external engines.
+Implemented native extensions now include unbalanced phase-domain transient
+network stamping, regulator/control preservation in internal JSON, model-profile
+metadata for IEEE/IEC/NERC-facing exchange, and richer DER/controller
+projection hooks. Exact transient equivalence against external engines is still
+claimed only after a matching external transient model and event-replay contract
+exists for that engine.
 
 The distinction matters. GridLAB-D is an excellent independent distribution
 power-flow oracle for PQ feeder snapshots, but the current export does not yet
@@ -176,9 +211,78 @@ For hybrid AC/DC systems, the first validation scope is AC-only:
 - DC buses and DC branches are not exported,
 - VSC converter internals are not exported,
 - converter boundary injections are disabled by default,
-- future work may enable converter AC terminal injections after the AC snapshot contract is stable.
+- converter AC terminal injections remain a controlled validation extension;
+  the native transient solver owns converter dynamics and can expose boundary
+  injections for snapshot checks.
 
 This keeps the validation claim precise. GridLAB-D checks the AC algebraic network and component projection; the dynamic solver still owns the GFL/GFM, synchronous-machine, DC-link, battery, and event-response equations.
+
+---
+
+# GUI Runtime and Contingency Controls
+
+The `暂态仿真` GUI panel is backed by:
+
+```text
+POST /api/session/run_transient
+tests/run_gui_server.cpp
+web/js/app.js
+web/css/style.css
+```
+
+The normal GUI flow is:
+
+```text
+load built-in / JSON / MATPOWER case
+        ↓
+canvas syncs to the server session
+        ↓
+run_power_flow_initialization solves the pre-event point
+        ↓
+trim_dynamic_initial_conditions projects device states to a DAE-consistent
+initial condition
+        ↓
+scheduled contingencies are replayed in chronological order
+        ↓
+results dashboard plots voltages, machine outputs, converter telemetry,
+observer points, applied-event records, and initialization residuals
+```
+
+The browser should not need several seconds of artificial no-event simulation to
+settle the PLL or control frequency. If the initialization residual
+`dynamic_fast_dxdt_inf_norm` is nonzero at the pre-event point, treat it as an
+initialization/model mismatch diagnostic.
+
+The contingency editor supports both quick values and named parameter JSON. The
+single `强度/值` field is mapped to solver parameters for common events, while
+the optional `参数(JSON)` field allows exact event definitions:
+
+| Event | Quick value maps to | Named parameters |
+|---|---|---|
+| `FaultShunt` | `g_pu` | `r_pu`, `x_pu`, `g_pu`, `b_pu`, `duration_s` |
+| `ACLoadScale` / `DCLoadScale` | `scale` | `scale` |
+| `StoragePowerStep` / `DCStoragePowerStep` | `p_ref_mw` | `p_ref_mw` |
+| branch/generator/converter trip/close | component index | `target_id`, `target_type`, future numeric parameters |
+
+Every scheduled event is echoed in `scheduled_events`; every actually applied
+event is returned in `applied_event_records` with its label, target, duration,
+and numeric parameters. This prevents predefined GUI faults from hiding their
+strength, location, or duration.
+
+The transient result pane intentionally expands wider than the default results
+panel and includes:
+
+- event-precondition diagnostics from the existing power-flow solvers,
+- traditional synchronous-machine frequency and electrical/mechanical power,
+- GFL/GFM converter PLL, droop frequency, current-limit, and DC-link telemetry,
+- local observer cards that can relink to canvas components when metadata is
+  available,
+- CSV/JSON export for recorded snapshots and device signals.
+
+If `/api/session/run_transient` is called before a case is loaded or synced, the
+server returns a JSON error such as `{"error":"No system loaded"}` instead of an
+empty body, so the GUI can report the real problem rather than a JSON parse
+failure.
 
 ---
 
@@ -1521,6 +1625,13 @@ Devices:
 - exciter,
 - ZIP load.
 
+Status:
+
+```text
+Implemented natively with DynamicSystem, device stamps, three-phase AC/DC
+network matrices, partitioned Heun/RK4/Euler, and Eigen SparseLU.
+```
+
 Goal:
 
 ```text
@@ -1537,6 +1648,13 @@ Add:
 - trapezoidal Newton,
 - numerical Jacobian,
 - sparse real-valued Newton system.
+
+Status:
+
+```text
+Implemented natively with backward Euler Newton, trapezoidal Newton,
+Rosenbrock-Euler, damped numerical Newton fallback, and sparse algebraic solves.
+```
 
 Goal:
 
@@ -1557,6 +1675,13 @@ Add:
 - battery,
 - PV.
 
+Status:
+
+```text
+Implemented natively for GFL/GFM VSCs, dynamic DC-link option, DC/DC converter,
+battery SOC dynamics, PV current-source dynamics, and converter telemetry.
+```
+
 Goal:
 
 ```text
@@ -1572,6 +1697,16 @@ Add:
 - SuiteSparse KLU,
 - SUNDIALS IDA,
 - optional PETSc/PARDISO.
+
+Status:
+
+```text
+Partially implemented. The public dynamic linear-solver enum includes KLU,
+UMFPACK, PARDISO, and PETSc slots. Eigen SparseLU is always available; KLU and
+UMFPACK are used only when the macos-release build detects SuiteSparse support.
+SUNDIALS IDA, PETSc TS, and PARDISO are explicit optional future backends, not
+silently emulated.
+```
 
 Goal:
 
@@ -1590,6 +1725,16 @@ Add:
 - ride-through,
 - UFLS/UVLS,
 - GridLAB-D/HELICS interface.
+
+Status:
+
+```text
+Implemented natively for event queues, branch/load/fault/converter/storage
+events, named contingency parameters, basic voltage/frequency relay blocks,
+structured applied-event records, and sampled/CSV transient result export.
+GridLAB-D snapshot validation is available for AC algebraic checks. HELICS and
+external transient co-simulation remain future optional integrations.
+```
 
 ---
 

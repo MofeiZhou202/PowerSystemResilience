@@ -1775,6 +1775,33 @@ const char* dynamic_solver_type_name(hacdcpf::dynamics::DynamicSolverType type) 
   return "PartitionedHeun";
 }
 
+const char* dynamic_linear_solver_type_name(hacdcpf::dynamics::DynamicLinearSolverType type) {
+  using hacdcpf::dynamics::DynamicLinearSolverType;
+  switch (type) {
+    case DynamicLinearSolverType::EigenSparseLU: return "EigenSparseLU";
+    case DynamicLinearSolverType::EigenSparseQR: return "EigenSparseQR";
+    case DynamicLinearSolverType::EigenBiCGSTAB: return "EigenBiCGSTAB";
+    case DynamicLinearSolverType::KLU: return "KLU";
+    case DynamicLinearSolverType::UMFPACK: return "UMFPACK";
+    case DynamicLinearSolverType::Pardiso: return "Pardiso";
+    case DynamicLinearSolverType::PETSc: return "PETSc";
+  }
+  return "EigenSparseLU";
+}
+
+hacdcpf::dynamics::DynamicLinearSolverType dynamic_linear_solver_type_from_json(const json& root) {
+  using hacdcpf::dynamics::DynamicLinearSolverType;
+  const std::string solver =
+      root.value("linear_solver", std::string("EigenSparseLU"));
+  if (solver == "klu" || solver == "KLU") return DynamicLinearSolverType::KLU;
+  if (solver == "umfpack" || solver == "UMFPACK") return DynamicLinearSolverType::UMFPACK;
+  if (solver == "bicgstab" || solver == "EigenBiCGSTAB") return DynamicLinearSolverType::EigenBiCGSTAB;
+  if (solver == "sparseqr" || solver == "EigenSparseQR") return DynamicLinearSolverType::EigenSparseQR;
+  if (solver == "pardiso" || solver == "Pardiso") return DynamicLinearSolverType::Pardiso;
+  if (solver == "petsc" || solver == "PETSc") return DynamicLinearSolverType::PETSc;
+  return DynamicLinearSolverType::EigenSparseLU;
+}
+
 hacdcpf::dynamics::DynamicSolverType dynamic_solver_type_from_json(const json& root) {
   using hacdcpf::dynamics::DynamicSolverType;
   const std::string solver =
@@ -1840,10 +1867,14 @@ json dynamic_event_to_json(const hacdcpf::dynamics::DynamicEvent& event) {
   return json{{"time_s", event.time_s},
               {"type", dynamic_event_type_name(event.type)},
               {"component_index", event.component_index},
+              {"target_id", event.target_id},
               {"bus", event.bus},
+              {"phase", event.phase},
               {"value", event.value},
               {"duration_s", event.duration_s},
               {"component_type", event.component_type},
+              {"target_type", event.target_type},
+              {"params", event.params},
               {"label", event.label}};
 }
 
@@ -1876,7 +1907,8 @@ std::vector<std::string> validate_dynamic_event(
   switch (event.type) {
     case DynamicEventType::FaultShunt: {
       const bool is_dc = event.component_type == "DC" || event.component_type == "dc";
-      const int bus = event.bus != 0 ? event.bus : event.component_index;
+      const int bus = event.bus != 0 ? event.bus : (event.target_id != 0 ? event.target_id
+                                                                          : event.component_index);
       if (bus == 0) {
         warn("fault bus is not set");
       } else if ((is_dc ? dyn.network.dcBusPosition(bus)
@@ -1884,17 +1916,25 @@ std::vector<std::string> validate_dynamic_event(
         warn(std::string(is_dc ? "DC" : "AC") + " fault bus " +
              std::to_string(bus) + " was not found");
       }
-      if (event.value <= 0.0) {
+      const bool has_impedance =
+          event.params.count("r_pu") != 0 || event.params.count("x_pu") != 0;
+      const bool has_admittance =
+          event.params.count("g_pu") != 0 || event.params.count("b_pu") != 0;
+      if (event.value <= 0.0 && !has_impedance && !has_admittance) {
         warn("fault intensity/admittance is not positive; solver will use the default strong shunt");
       }
-      if (event.duration_s <= 0.0) {
+      const auto duration_it = event.params.find("duration_s");
+      const double duration =
+          duration_it == event.params.end() ? event.duration_s : duration_it->second;
+      if (duration <= 0.0) {
         warn("fault duration is not positive; it will persist until an explicit ClearFault event");
       }
       break;
     }
     case DynamicEventType::ClearFault: {
       const bool is_dc = event.component_type == "DC" || event.component_type == "dc";
-      const int bus = event.bus != 0 ? event.bus : event.component_index;
+      const int bus = event.bus != 0 ? event.bus : (event.target_id != 0 ? event.target_id
+                                                                          : event.component_index);
       if (bus != 0 && (is_dc ? dyn.network.dcBusPosition(bus)
                              : dyn.network.acBusPosition(bus)) < 0) {
         warn(std::string(is_dc ? "DC" : "AC") + " clear-fault bus " +
@@ -1905,7 +1945,8 @@ std::vector<std::string> validate_dynamic_event(
     case DynamicEventType::ACLoadScale:
       if (event.value < 0.0) warn("load scale is negative and will be clipped to zero");
       if (event.bus != 0 || event.component_index != 0) {
-        const int bus = event.bus != 0 ? event.bus : event.component_index;
+        const int bus = event.bus != 0 ? event.bus : (event.target_id != 0 ? event.target_id
+                                                                            : event.component_index);
         if (bus != 0 && dyn.network.acBusPosition(bus) >= 0) {
           break;
         }
@@ -1920,7 +1961,8 @@ std::vector<std::string> validate_dynamic_event(
     case DynamicEventType::DCLoadScale:
       if (event.value < 0.0) warn("DC load scale is negative and will be clipped to zero");
       if (event.bus != 0 || event.component_index != 0) {
-        const int bus = event.bus != 0 ? event.bus : event.component_index;
+        const int bus = event.bus != 0 ? event.bus : (event.target_id != 0 ? event.target_id
+                                                                            : event.component_index);
         if (bus != 0 && dyn.network.dcBusPosition(bus) >= 0) {
           break;
         }
@@ -1988,6 +2030,7 @@ std::vector<std::string> validate_dynamic_event(
 
 json dynamic_options_to_json(const hacdcpf::dynamics::DynamicSolverOptions& opt) {
   return json{{"solver_type", dynamic_solver_type_name(opt.solver_type)},
+              {"linear_solver", dynamic_linear_solver_type_name(opt.linear_solver)},
               {"t_start_s", opt.t_start_s},
               {"t_end_s", opt.t_end_s},
               {"dt_s", opt.dt_s},
@@ -1995,6 +2038,10 @@ json dynamic_options_to_json(const hacdcpf::dynamics::DynamicSolverOptions& opt)
               {"max_newton_iters", opt.max_newton_iters},
               {"use_adaptive_step", opt.use_adaptive_step},
               {"record_every_step", opt.record_every_step},
+              {"record_initial_state", opt.record_initial_state},
+              {"output_every_steps", opt.output_every_steps},
+              {"output_interval_s", opt.output_interval_s},
+              {"max_recorded_snapshots", opt.max_recorded_snapshots},
               {"run_power_flow_initialization", opt.run_power_flow_initialization},
               {"trim_dynamic_initial_conditions", opt.trim_dynamic_initial_conditions},
               {"project_to_canonical", opt.project_to_canonical},
@@ -2019,6 +2066,23 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
   out["rejected_steps"] = result.rejected_steps;
   out["warnings"] = result.warnings;
   out["applied_events"] = result.applied_events;
+  json applied_event_records = json::array();
+  for (const auto& record : result.applied_event_records) {
+    applied_event_records.push_back(
+        json{{"time_s", record.time_s},
+             {"type", record.type},
+             {"label", record.label},
+             {"component_index", record.component_index},
+             {"target_id", record.target_id},
+             {"bus", record.bus},
+             {"phase", record.phase},
+             {"value", record.value},
+             {"duration_s", record.duration_s},
+             {"component_type", record.component_type},
+             {"target_type", record.target_type},
+             {"params", record.params}});
+  }
+  out["applied_event_records"] = applied_event_records;
   out["options"] = dynamic_options_to_json(opt);
   out["initialization"] =
       json{{"power_flow_requested", result.initialization.power_flow_requested},
@@ -2083,8 +2147,21 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
                  {"canvas_index", dev.canvas_index},
                  {"component_domain", dev.component_domain},
                  {"source_type", dev.source_type},
+                 {"model_standard", dev.model_standard},
+                 {"model_name", dev.model_name},
+                 {"parameter_set", dev.parameter_set},
                  {"bus", dev.bus},
                  {"values", json::object()}};
+        json profiles = json::array();
+        for (const auto& profile : dev.model_profiles) {
+          profiles.push_back(json{{"standard", profile.standard},
+                                  {"profile", profile.profile},
+                                  {"model_name", profile.model_name},
+                                  {"parameter_set", profile.parameter_set},
+                                  {"source_id", profile.source_id},
+                                  {"notes", profile.notes}});
+        }
+        device_series[key]["model_profiles"] = profiles;
       }
       for (const auto& [metric, value] : dev.values) {
         auto& arr = device_series[key]["values"][metric];
@@ -10611,6 +10688,7 @@ int main(int argc, char** argv) {
       const json j = json::parse(req.body.empty() ? "{}" : req.body);
       hacdcpf::dynamics::DynamicSolverOptions opt;
       opt.solver_type = dynamic_solver_type_from_json(j);
+      opt.linear_solver = dynamic_linear_solver_type_from_json(j);
       opt.t_start_s = j.value("t_start_s", 0.0);
       opt.t_end_s = j.value("t_end_s", 1.0);
       opt.dt_s = j.value("dt_s", 0.01);
@@ -10618,6 +10696,11 @@ int main(int argc, char** argv) {
       opt.max_newton_iters = j.value("max_newton_iters", opt.max_newton_iters);
       opt.use_adaptive_step = j.value("use_adaptive_step", false);
       opt.record_every_step = j.value("record_every_step", true);
+      opt.record_initial_state = j.value("record_initial_state", opt.record_initial_state);
+      opt.output_every_steps = j.value("output_every_steps", opt.output_every_steps);
+      opt.output_interval_s = j.value("output_interval_s", opt.output_interval_s);
+      opt.max_recorded_snapshots =
+          j.value("max_recorded_snapshots", opt.max_recorded_snapshots);
       opt.run_power_flow_initialization =
           j.value("run_power_flow_initialization", opt.run_power_flow_initialization);
       opt.trim_dynamic_initial_conditions =
@@ -10659,11 +10742,19 @@ int main(int argc, char** argv) {
           event.time_s = ej.value("time_s", 0.0);
           event.type = dynamic_event_type_from_json(ej.value("type", std::string("Custom")));
           event.component_index = ej.value("component_index", 0);
+          event.target_id = ej.value("target_id", 0);
           event.bus = ej.value("bus", 0);
+          event.phase = ej.value("phase", -1);
           event.value = ej.value("value", 0.0);
           event.duration_s = ej.value("duration_s", 0.0);
           event.component_type = ej.value("component_type", std::string());
+          event.target_type = ej.value("target_type", std::string());
           event.label = ej.value("label", std::string());
+          if (ej.contains("params") && ej["params"].is_object()) {
+            for (const auto& [key, value] : ej["params"].items()) {
+              if (value.is_number()) event.params[key] = value.get<double>();
+            }
+          }
           dyn.events.push_back(event);
         }
       }
@@ -10683,6 +10774,20 @@ int main(int argc, char** argv) {
       out["scheduled_events"] = scheduled_events;
       out["ac_bus_ids"] = dyn.network.ac_bus_ids;
       out["dc_bus_ids"] = dyn.network.dc_bus_ids;
+      if (j.value("include_csv", false)) {
+        hacdcpf::dynamics::DynamicResultExportOptions export_options;
+        if (j.contains("csv") && j["csv"].is_object()) {
+          const auto& csvj = j["csv"];
+          export_options.include_ac_voltage_magnitudes =
+              csvj.value("include_ac_voltage_magnitudes",
+                         export_options.include_ac_voltage_magnitudes);
+          export_options.include_dc_voltages =
+              csvj.value("include_dc_voltages", export_options.include_dc_voltages);
+          export_options.include_device_outputs =
+              csvj.value("include_device_outputs", export_options.include_device_outputs);
+        }
+        out["csv"] = hacdcpf::dynamics::to_csv(result, export_options);
+      }
       res.status = result.success ? 200 : 400;
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);

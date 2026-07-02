@@ -6,7 +6,7 @@
 #include <limits>
 #include <stdexcept>
 
-#include <Eigen/SparseLU>
+#include "hacdcpf/dynamics/solvers/SparseLinearSolver.hpp"
 
 namespace hacdcpf::dynamics {
 
@@ -257,15 +257,11 @@ bool DynamicSystem::solveNetwork(double t, std::string& error) {
       Idc_eff);
 
   if (network.acPhaseNodeCount() > 0) {
-    Eigen::SparseLU<Eigen::SparseMatrix<Complex>> solver;
-    solver.compute(Yac_eff);
-    if (solver.info() != Eigen::Success) {
-      error = "AC transient admittance factorization failed";
-      return false;
-    }
-    const Eigen::VectorXcd v = solver.solve(Iac_eff);
-    if (solver.info() != Eigen::Success) {
-      error = "AC transient network solve failed";
+    Eigen::VectorXcd v;
+    SparseLinearSolver solver(options.linear_solver);
+    const auto result = solver.solve(Yac_eff, Iac_eff, v);
+    if (!result.success) {
+      error = "AC transient network solve failed: " + result.message;
       return false;
     }
     y.Vac_abc = v;
@@ -273,15 +269,11 @@ bool DynamicSystem::solveNetwork(double t, std::string& error) {
   }
 
   if (network.dcBusCount() > 0) {
-    Eigen::SparseLU<Eigen::SparseMatrix<double>> solver;
-    solver.compute(Gdc_eff);
-    if (solver.info() != Eigen::Success) {
-      error = "DC transient conductance factorization failed";
-      return false;
-    }
-    const Eigen::VectorXd v = solver.solve(Idc_eff);
-    if (solver.info() != Eigen::Success) {
-      error = "DC transient network solve failed";
+    Eigen::VectorXd v;
+    SparseLinearSolver solver(options.linear_solver);
+    const auto result = solver.solve(Gdc_eff, Idc_eff, v);
+    if (!result.success) {
+      error = "DC transient network solve failed: " + result.message;
       return false;
     }
     for (Eigen::Index i = 0; i < v.size(); ++i) {

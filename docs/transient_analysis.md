@@ -48,6 +48,22 @@ GridLAB-D is used as an independent AC-scope check of $$g(x_0,y_0,u_0,t_0)=0$$ f
 
 Cases outside that shared scope are still valuable diagnostics but not exact equivalence claims. MATPOWER-style PV buses are the main example: until GridLAB-D export includes equivalent voltage-regulating generator behavior, non-slack generators are represented as negative constant-power injections, so PV-heavy transmission cases such as case300 are run-only diagnostics. DC networks, converter controls, and transient state equations remain inside the `dynamics` module and are cross-checked in later stages through boundary injections and event replay.
 
+The implemented GridLAB-D claim is now a report-level gate, not a prose
+promise. `GridLABDComparisonReport::equivalence_passed` is true only when
+GridLAB-D and HACDCPF both solve, at least one configured numerical comparison
+is performed, every comparison is inside tolerance, and the preflight
+classifier finds no unsupported or diagnostic-only features. Therefore the
+allowable claim is:
+
+> HACDCPF is numerically equivalent to GridLAB-D for this declared balanced AC
+> algebraic snapshot within the configured tolerances.
+
+It is not a claim of full GridLAB-D AC-distribution equivalence. Unbalanced
+phase-domain elements, voltage regulators, protection/control sequences, DER
+controllers, dynamic device equations, and hybrid AC/DC coupling remain separate
+verification scopes until they have explicit import/export mappings and
+point-by-point numerical checks.
+
 For data exchange and component-level verification, the module also provides an
 always-compiled OpenDSS/GridLAB-D text I/O layer. Its purpose is different from
 the external GridLAB-D run harness:

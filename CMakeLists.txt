@@ -300,7 +300,17 @@ set(HACDCPF_SOURCES
   src/dynamics/DynamicSystem.cpp
   src/dynamics/DynamicModelBuilder.cpp
   src/dynamics/DynamicSolver.cpp
+  src/dynamics/DynamicResults.cpp
   src/dynamics/devices/BasicDynamicDevices.cpp
+  src/dynamics/integration/ExplicitEuler.cpp
+  src/dynamics/integration/RK4.cpp
+  src/dynamics/integration/BackwardEuler.cpp
+  src/dynamics/integration/Trapezoidal.cpp
+  src/dynamics/integration/Rosenbrock.cpp
+  src/dynamics/solvers/SparseLinearSolver.cpp
+  src/dynamics/solvers/NewtonSolver.cpp
+  src/dynamics/solvers/AlgebraicNetworkSolver.cpp
+  src/dynamics/solvers/DaeSolver.cpp
   # ── optimal_power_flow ───────────────────────────────────────────────────
   src/optimal_power_flow/ac_opf.cpp
   src/optimal_power_flow/dc_opf.cpp
@@ -311,6 +321,7 @@ set(HACDCPF_SOURCES
   src/io/json_io.cpp
   src/io/matpower_parser.cpp
   src/io/case_builders.cpp
+  src/io/component_io_mapping.cpp
   src/io/external_grid_io.cpp
   src/io/gridlabd_bridge.cpp
   # ── validation ────────────────────────────────────────────────────────────

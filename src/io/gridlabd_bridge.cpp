@@ -744,6 +744,345 @@ void add_comparison_item(GridLABDComparisonReport& report,
   report.items.push_back(std::move(item));
 }
 
+struct GridLABDEquivalenceAssessment {
+  std::string scope;
+  std::string claim;
+  std::vector<std::string> unsupported_features;
+  std::vector<std::string> diagnostic_only_reasons;
+};
+
+void add_unique_reason(std::vector<std::string>& reasons, std::string reason) {
+  if (reason.empty()) return;
+  if (std::find(reasons.begin(), reasons.end(), reason) == reasons.end()) {
+    reasons.push_back(std::move(reason));
+  }
+}
+
+template <typename Range>
+int count_in_service(const Range& items) {
+  return static_cast<int>(std::count_if(
+      items.begin(), items.end(), [](const auto& item) {
+        return item.in_service;
+      }));
+}
+
+template <typename Range>
+bool any_in_service(const Range& items) {
+  return count_in_service(items) > 0;
+}
+
+bool has_dc_or_hybrid_scope(const HybridPowerSystem& sys) {
+  return any_in_service(sys.dc.buses) || any_in_service(sys.dc.branches) ||
+         any_in_service(sys.dc.loads) || any_in_service(sys.dc.storage) ||
+         any_in_service(sys.dc.dc_storage) ||
+         any_in_service(sys.dc.static_generators) ||
+         any_in_service(sys.dc.dc_static_generators) ||
+         any_in_service(sys.dc.pv_arrays) ||
+         any_in_service(sys.dc.dcdc_converters) ||
+         any_in_service(sys.dc.dc_circuit_breakers) ||
+         any_in_service(sys.vsc_converters) ||
+         any_in_service(sys.energy_routers) ||
+         any_in_service(sys.mobile_storage) || any_in_service(sys.vpps) ||
+         any_in_service(sys.microgrids);
+}
+
+bool has_three_phase_scope(const HybridPowerSystem& sys) {
+  if (!sys.three_phase_ac.has_value()) return false;
+  const auto& tp = *sys.three_phase_ac;
+  return any_in_service(tp.buses) || any_in_service(tp.lines) ||
+         any_in_service(tp.transformers) || any_in_service(tp.loads) ||
+         any_in_service(tp.generators) || any_in_service(tp.external_grids) ||
+         !tp.regulator_controls.empty();
+}
+
+GridLABDEquivalenceAssessment classify_gridlabd_equivalence_scope(
+    const HybridPowerSystem& original,
+    const GridLABDExportedSnapshot& snapshot,
+    const GridLABDComparisonOptions& options) {
+  GridLABDEquivalenceAssessment out;
+  out.scope =
+      "Balanced AC algebraic snapshot with one swing/source, PQ buses, "
+      "constant-power P/Q injections, passive AC lines, and simple "
+      "two-winding transformer equivalents.";
+
+  if (!options.compare_bus_voltages) {
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        "Bus-voltage comparison is disabled, so no GridLAB-D voltage "
+        "equivalence claim can be made for this run.");
+  }
+  if (!options.compare_branch_flows) {
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        "Branch-flow comparison is disabled, so this run is a solve/export "
+        "diagnostic rather than a component-by-component equivalence check.");
+  }
+
+  const auto& ac = original.ac;
+  int slack_buses = 0;
+  int pv_buses = 0;
+  int isolated_buses = 0;
+  for (const auto& bus : ac.buses) {
+    if (!bus.in_service) continue;
+    if (bus.bus_type == BusType::SLACK) ++slack_buses;
+    if (bus.bus_type == BusType::PV) ++pv_buses;
+    if (bus.bus_type == BusType::ISOLATED) ++isolated_buses;
+    if (std::abs(bus.gs_mw) > kTinyPowerMw ||
+        std::abs(bus.bs_mvar) > kTinyPowerMw) {
+      add_unique_reason(
+          out.diagnostic_only_reasons,
+          "Bus shunt conductance/susceptance is exported as an equivalent "
+          "constant-power injection; voltage-dependent shunt admittance is "
+          "not a one-to-one GridLAB-D object yet.");
+    }
+  }
+  if (slack_buses == 0) {
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        "No in-service SLACK bus was provided; the exporter selected a swing "
+        "bus, so the source reference is not an exact user-specified match.");
+  } else if (slack_buses > 1) {
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        "Multiple in-service SLACK buses are reduced to one GridLAB-D swing "
+        "bus in the current harness.");
+  }
+  if (pv_buses > 0) {
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        "PV bus voltage regulation is outside the current exact GridLAB-D "
+        "snapshot scope; non-slack voltage controls are collapsed to fixed "
+        "P/Q injections.");
+  }
+  if (isolated_buses > 0) {
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        "Isolated AC buses are present; the balanced GridLAB-D snapshot "
+        "does not currently preserve island/de-energized bus semantics.");
+  }
+
+  for (const auto& branch : ac.branches) {
+    if (!branch.in_service) continue;
+    if (std::abs(branch.shift_deg) > 1e-9) {
+      add_unique_reason(
+          out.unsupported_features,
+          "Phase-shifting AC branches are not exported to GridLAB-D by the "
+          "current bridge.");
+    }
+    if (std::hypot(branch.r_pu, branch.x_pu) < kTinyImpedance) {
+      add_unique_reason(
+          out.unsupported_features,
+          "Zero-impedance AC branches are skipped by the current GridLAB-D "
+          "bridge and require bus-merging or explicit switch mapping first.");
+    }
+  }
+
+  for (const auto& load : ac.loads) {
+    if (!load.in_service) continue;
+    if (load.model != LoadModel::ConstantPower) {
+      add_unique_reason(
+          out.diagnostic_only_reasons,
+          "Voltage-dependent ZIP/exponential load models are collapsed to "
+          "constant P/Q in the GridLAB-D comparison snapshot.");
+    }
+    if (load.motor_percent > 0.0) {
+      add_unique_reason(
+          out.diagnostic_only_reasons,
+          "Motor fractions on static loads are not exported as dynamic or "
+          "voltage-dependent GridLAB-D motor models in this harness.");
+    }
+  }
+
+  if (any_in_service(ac.flexible_loads)) {
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        "Flexible-load controllability is projected to fixed P/Q demand for "
+        "the GridLAB-D snapshot.");
+  }
+  if (any_in_service(ac.asymmetric_loads)) {
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        "Asymmetric/per-phase AC loads are aggregated to a balanced "
+        "three-phase load for the current GridLAB-D comparison.");
+  }
+  if (any_in_service(ac.motors)) {
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        "Asynchronous motors are represented as static equivalent demand; "
+        "motor dynamic and short-circuit behavior is native-only here.");
+  }
+  for (const auto& shunt : ac.shunts) {
+    if (!shunt.in_service) continue;
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        shunt.switchable
+            ? "Switchable shunts are exported as fixed equivalent P/Q "
+              "injections, so tap/step control is not exact."
+            : "Fixed shunts are exported as equivalent P/Q injections rather "
+              "than explicit voltage-dependent shunt admittances.");
+  }
+
+  for (const auto& gen : ac.generators) {
+    if (!gen.in_service || gen.is_slack) continue;
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        "Non-slack synchronous generators are exported as negative "
+        "constant-power loads; generator voltage regulation, Q limits, and "
+        "dynamic source behavior are not exact in the GridLAB-D snapshot.");
+  }
+  for (const auto& gen : ac.static_generators) {
+    if (!gen.in_service) continue;
+    if (gen.controllable || gen.k_p != 0.0 || gen.k_q != 0.0) {
+      add_unique_reason(
+          out.diagnostic_only_reasons,
+          "Controllable static-generator behavior is reduced to a fixed P/Q "
+          "boundary injection for the GridLAB-D snapshot.");
+    }
+  }
+  for (const auto& gen : ac.renewable_gens) {
+    if (!gen.in_service) continue;
+    if (gen.curtailable || gen.qmax_mvar != 0.0 || gen.qmin_mvar != 0.0) {
+      add_unique_reason(
+          out.diagnostic_only_reasons,
+          "Renewable generator controls and capability limits are reduced to "
+          "fixed P/Q injections in the GridLAB-D snapshot.");
+    }
+  }
+  for (const auto& pv : ac.pv_systems) {
+    if (!pv.in_service) continue;
+    if (pv.controllable || pv.control_mode != PVControlMode::MPPT ||
+        pv.qmax_mvar != 0.0 || pv.qmin_mvar != 0.0) {
+      add_unique_reason(
+          out.diagnostic_only_reasons,
+          "PV inverter controls are reduced to fixed P/Q injections in the "
+          "GridLAB-D AC snapshot.");
+    }
+  }
+  for (const auto& storage : ac.storage) {
+    if (!storage.in_service) continue;
+    if (storage.controllable || storage.grid_forming ||
+        !storage.control_mode.empty()) {
+      add_unique_reason(
+          out.diagnostic_only_reasons,
+          "Storage converter controls, grid-forming behavior, and SOC "
+          "dynamics are reduced to fixed P/Q injections in the GridLAB-D "
+          "snapshot.");
+    }
+  }
+
+  if (any_in_service(ac.transformers_3w)) {
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        "Three-winding transformers are projected to equivalent branches "
+        "before GridLAB-D export; this is not a one-to-one component match.");
+  }
+  for (const auto& transformer : ac.transformers_2w) {
+    if (!transformer.in_service) continue;
+    if (std::abs(transformer.shift_deg) > 1e-9) {
+      add_unique_reason(
+          out.unsupported_features,
+          "Phase-shifting two-winding transformers are not exactly exported "
+          "to GridLAB-D by the current bridge.");
+    }
+    if (transformer.tap_step_percent != 0.0 ||
+        transformer.tap_min != transformer.tap_max) {
+      add_unique_reason(
+          out.diagnostic_only_reasons,
+          "Transformer tap metadata is projected to a static transformer "
+          "equivalent; tap-controller behavior is not replayed in GridLAB-D.");
+    }
+    if (!transformer.vector_group.empty()) {
+      add_unique_reason(
+          out.diagnostic_only_reasons,
+          "Transformer vector-group semantics are not yet matched "
+          "component-by-component in the balanced GridLAB-D export.");
+    }
+  }
+  if (std::any_of(ac.regulator_controls.begin(), ac.regulator_controls.end(),
+                  [](const RegulatorControl& control) {
+                    return control.enabled;
+                  })) {
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        "Regulator controls are not exported as GridLAB-D tap-control "
+        "objects yet; only the static projected network is compared.");
+  }
+  if (any_in_service(ac.charging_stations) || any_in_service(ac.chargers)) {
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        "EV charging stations/chargers are aggregated to fixed P/Q demand in "
+        "the GridLAB-D snapshot.");
+  }
+
+  if (has_dc_or_hybrid_scope(original)) {
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        options.export_options.include_converter_boundary_injections
+            ? "Hybrid AC/DC and converter internals are represented only by "
+              "scheduled AC boundary injections in this GridLAB-D run."
+            : "Hybrid AC/DC networks, converters, energy routers, and mobile "
+              "storage are outside the current GridLAB-D AC-scope equivalence "
+              "claim.");
+  }
+  if (has_three_phase_scope(original)) {
+    add_unique_reason(
+        out.diagnostic_only_reasons,
+        "Native phase-domain AC components are reduced to a balanced "
+        "positive-sequence snapshot before GridLAB-D comparison.");
+  }
+
+  for (const auto& mapping : snapshot.branch_mappings) {
+    if (mapping.exported) continue;
+    if (mapping.skip_reason == "branch is out of service") {
+      continue;
+    }
+    if (mapping.exported_as_parallel_equivalent &&
+        mapping.skip_reason.find("merged into") != std::string::npos) {
+      add_unique_reason(
+          out.diagnostic_only_reasons,
+          "Parallel AC branches are merged into an equivalent GridLAB-D line; "
+          "network voltages are comparable, but individual parallel-branch "
+          "flows are not one-to-one recorder quantities.");
+      continue;
+    }
+    add_unique_reason(
+        out.unsupported_features,
+        "AC branch " + std::to_string(mapping.canonical_branch_index) +
+            " was not exported to GridLAB-D (" + mapping.skip_reason + ").");
+  }
+
+  const bool has_transformer_export = std::any_of(
+      snapshot.branch_mappings.begin(), snapshot.branch_mappings.end(),
+      [](const GridLABDBranchMapping& mapping) {
+        return mapping.exported && mapping.exported_as_transformer;
+      });
+
+  if (!out.unsupported_features.empty()) {
+    out.claim =
+        "No GridLAB-D equivalence claim: at least one AC network feature is "
+        "not represented by the generated GLM.";
+  } else if (!out.diagnostic_only_reasons.empty()) {
+    out.claim =
+        "Diagnostic-only GridLAB-D run: the exported GLM is useful for "
+        "spot-checking the solved AC snapshot, but it is outside the exact "
+        "balanced AC PQ-feeder equivalence scope.";
+  } else {
+    out.claim =
+        "Eligible GridLAB-D equivalence scope: this balanced AC algebraic "
+        "snapshot can support an equivalence claim after a successful "
+        "external GridLAB-D solve and numerical comparison. This does not "
+        "claim transient, unbalanced phase-domain, protection, DER-control, "
+        "regulator-control, or full GridLAB-D object-library equivalence.";
+    if (has_transformer_export && !options.compare_transformer_branch_flows) {
+      out.claim +=
+          " Transformer terminal voltages are included; transformer branch "
+          "flows are excluded from the default pass/fail unless "
+          "compare_transformer_branch_flows is enabled.";
+    }
+  }
+  return out;
+}
+
 }  // namespace
 
 GridLABDExecutable discover_gridlabd() {
@@ -1313,6 +1652,14 @@ GridLABDComparisonReport compare_gridlabd_snapshot(
     const HybridPowerSystem& sys,
     const GridLABDComparisonOptions& options) {
   GridLABDComparisonReport report;
+  auto apply_equivalence_assessment = [&]() {
+    const auto assessment = classify_gridlabd_equivalence_scope(
+        sys, report.exported_snapshot, options);
+    report.equivalence_scope = assessment.scope;
+    report.equivalence_claim = assessment.claim;
+    report.unsupported_features = assessment.unsupported_features;
+    report.diagnostic_only_reasons = assessment.diagnostic_only_reasons;
+  };
   const GridLABDExecutable discovered =
       options.run_options.executable.has_value()
           ? GridLABDExecutable{.available = is_executable_file(*options.run_options.executable),
@@ -1328,11 +1675,13 @@ GridLABDComparisonReport compare_gridlabd_snapshot(
     }
     report.exported_snapshot =
         export_gridlabd_snapshot(sys, temp_snapshot_dir(), options.export_options);
+    apply_equivalence_assessment();
     return report;
   }
 
   report.exported_snapshot =
       export_gridlabd_snapshot(sys, temp_snapshot_dir(), options.export_options);
+  apply_equivalence_assessment();
 
   try {
     report.hacdcpf_power_flow = solve_power_flow(sys);
@@ -1449,10 +1798,44 @@ GridLABDComparisonReport compare_gridlabd_snapshot(
     }
   }
 
-  report.passed =
+  const bool all_items_passed =
       report.hacdcpf_power_flow_converged && report.gridlabd_run_success &&
       std::all_of(report.items.begin(), report.items.end(),
                   [](const GridLABDComparisonItem& item) { return item.passed; });
+  report.numerical_comparison_passed = all_items_passed && !report.items.empty();
+  report.equivalence_passed =
+      report.numerical_comparison_passed &&
+      report.unsupported_features.empty() &&
+      report.diagnostic_only_reasons.empty();
+  report.passed = report.equivalence_passed;
+  if (report.equivalence_passed) {
+    report.equivalence_claim =
+        "HACDCPF is numerically equivalent to GridLAB-D for this declared "
+        "balanced AC algebraic snapshot within the configured tolerances. "
+        "This does not claim transient, unbalanced phase-domain, protection, "
+        "DER-control, regulator-control, or full GridLAB-D object-library "
+        "equivalence.";
+    const bool has_transformer_export = std::any_of(
+        report.exported_snapshot.branch_mappings.begin(),
+        report.exported_snapshot.branch_mappings.end(),
+        [](const GridLABDBranchMapping& mapping) {
+          return mapping.exported && mapping.exported_as_transformer;
+        });
+    if (has_transformer_export && !options.compare_transformer_branch_flows) {
+      report.equivalence_claim +=
+          " Transformer terminal voltages are included; transformer branch "
+          "flows are excluded from the default pass/fail unless "
+          "compare_transformer_branch_flows is enabled.";
+    }
+  } else if (!report.gridlabd_run_success || !report.hacdcpf_power_flow_converged ||
+             !report.numerical_comparison_passed) {
+    if (report.unsupported_features.empty() &&
+        report.diagnostic_only_reasons.empty()) {
+      report.equivalence_claim =
+          "Eligible GridLAB-D equivalence scope, but the external solve or "
+          "configured numerical comparison did not pass in this run.";
+    }
+  }
   return report;
 }
 

@@ -145,11 +145,17 @@ struct GridLABDComparisonReport {
   bool gridlabd_run_attempted{false};
   bool gridlabd_run_success{false};
   bool hacdcpf_power_flow_converged{false};
+  bool numerical_comparison_passed{false};
+  bool equivalence_passed{false};
   bool passed{false};
+  std::string equivalence_scope;
+  std::string equivalence_claim;
   PowerFlowResult hacdcpf_power_flow;
   GridLABDExportedSnapshot exported_snapshot;
   GridLABDRunResult gridlabd_result;
   std::vector<GridLABDComparisonItem> items;
+  std::vector<std::string> unsupported_features;
+  std::vector<std::string> diagnostic_only_reasons;
   std::vector<std::string> warnings;
   std::vector<std::string> skipped;
 };

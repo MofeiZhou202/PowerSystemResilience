@@ -1699,6 +1699,100 @@ static ThreePhaseExternalGrid three_phase_external_grid_from_json(const json& j)
   return e;
 }
 
+static json regulator_control_to_json(const RegulatorControl& c) {
+  json j;
+  j["index"] = c.index;
+  j["name"] = c.name;
+  j["transformer_index"] = c.transformer_index;
+  j["transformer_name"] = c.transformer_name;
+  j["winding"] = c.winding;
+  j["tap_winding"] = c.tap_winding;
+  j["monitored_bus"] = c.monitored_bus;
+  j["monitored_node"] = c.monitored_node;
+  j["vreg_volts"] = c.vreg_volts;
+  j["band_volts"] = c.band_volts;
+  j["ptratio"] = c.ptratio;
+  j["remote_ptratio"] = c.remote_ptratio;
+  j["ct_primary_amps"] = c.ct_primary_amps;
+  j["r_volts"] = c.r_volts;
+  j["x_volts"] = c.x_volts;
+  j["max_tap_change"] = c.max_tap_change;
+  j["reversible"] = c.reversible;
+  j["enabled"] = c.enabled;
+  return j;
+}
+
+static RegulatorControl regulator_control_from_json(const json& j) {
+  RegulatorControl c;
+  c.index = j.at("index").get<int>();
+  c.name = jget<std::string>(j, "name", "");
+  c.transformer_index = jget(j, "transformer_index", 0);
+  c.transformer_name = jget<std::string>(j, "transformer_name", "");
+  c.winding = jget(j, "winding", 0);
+  c.tap_winding = jget(j, "tap_winding", 0);
+  c.monitored_bus = jget(j, "monitored_bus", 0);
+  c.monitored_node = jget(j, "monitored_node", 1);
+  c.vreg_volts = jget(j, "vreg_volts", 0.0);
+  c.band_volts = jget(j, "band_volts", 0.0);
+  c.ptratio = jget(j, "ptratio", 0.0);
+  c.remote_ptratio = jget(j, "remote_ptratio", 0.0);
+  c.ct_primary_amps = jget(j, "ct_primary_amps", 0.0);
+  c.r_volts = jget(j, "r_volts", 0.0);
+  c.x_volts = jget(j, "x_volts", 0.0);
+  c.max_tap_change = jget(j, "max_tap_change", 1);
+  c.reversible = jget(j, "reversible", false);
+  c.enabled = jget(j, "enabled", true);
+  return c;
+}
+
+static json three_phase_regulator_control_to_json(
+    const ThreePhaseRegulatorControl& c) {
+  json j;
+  j["index"] = c.index;
+  j["name"] = c.name;
+  j["transformer_index"] = c.transformer_index;
+  j["transformer_name"] = c.transformer_name;
+  j["winding"] = c.winding;
+  j["tap_winding"] = c.tap_winding;
+  j["monitored_bus"] = c.monitored_bus;
+  j["monitored_node"] = c.monitored_node;
+  j["vreg_volts"] = c.vreg_volts;
+  j["band_volts"] = c.band_volts;
+  j["ptratio"] = c.ptratio;
+  j["remote_ptratio"] = c.remote_ptratio;
+  j["ct_primary_amps"] = c.ct_primary_amps;
+  j["r_volts"] = c.r_volts;
+  j["x_volts"] = c.x_volts;
+  j["max_tap_change"] = c.max_tap_change;
+  j["reversible"] = c.reversible;
+  j["enabled"] = c.enabled;
+  return j;
+}
+
+static ThreePhaseRegulatorControl three_phase_regulator_control_from_json(
+    const json& j) {
+  ThreePhaseRegulatorControl c;
+  c.index = j.at("index").get<int>();
+  c.name = jget<std::string>(j, "name", "");
+  c.transformer_index = jget(j, "transformer_index", 0);
+  c.transformer_name = jget<std::string>(j, "transformer_name", "");
+  c.winding = jget(j, "winding", 0);
+  c.tap_winding = jget(j, "tap_winding", 0);
+  c.monitored_bus = jget(j, "monitored_bus", 0);
+  c.monitored_node = jget(j, "monitored_node", 1);
+  c.vreg_volts = jget(j, "vreg_volts", 0.0);
+  c.band_volts = jget(j, "band_volts", 0.0);
+  c.ptratio = jget(j, "ptratio", 0.0);
+  c.remote_ptratio = jget(j, "remote_ptratio", 0.0);
+  c.ct_primary_amps = jget(j, "ct_primary_amps", 0.0);
+  c.r_volts = jget(j, "r_volts", 0.0);
+  c.x_volts = jget(j, "x_volts", 0.0);
+  c.max_tap_change = jget(j, "max_tap_change", 1);
+  c.reversible = jget(j, "reversible", false);
+  c.enabled = jget(j, "enabled", true);
+  return c;
+}
+
 static json three_phase_system_to_json(const ThreePhaseACSystem& sys) {
   json j;
   j["name"] = sys.name;
@@ -1716,6 +1810,10 @@ static json three_phase_system_to_json(const ThreePhaseACSystem& sys) {
   for (const auto& g : sys.generators) j["generators"].push_back(three_phase_generator_to_json(g));
   j["external_grids"] = json::array();
   for (const auto& e : sys.external_grids) j["external_grids"].push_back(three_phase_external_grid_to_json(e));
+  j["regulator_controls"] = json::array();
+  for (const auto& c : sys.regulator_controls) {
+    j["regulator_controls"].push_back(three_phase_regulator_control_to_json(c));
+  }
   return j;
 }
 
@@ -1741,6 +1839,9 @@ static ThreePhaseACSystem three_phase_system_from_json(const json& j) {
   }
   if (j.contains("external_grids")) {
     for (const auto& ej : j["external_grids"]) sys.external_grids.push_back(three_phase_external_grid_from_json(ej));
+  }
+  if (j.contains("regulator_controls")) {
+    for (const auto& cj : j["regulator_controls"]) sys.regulator_controls.push_back(three_phase_regulator_control_from_json(cj));
   }
   return sys;
 }
@@ -2326,6 +2427,9 @@ std::string to_json(const HybridPowerSystem& sys, int indent) {
   ac["transformers_3w"] = json::array();
   for (const auto& t : sys.ac.transformers_3w) ac["transformers_3w"].push_back(transformer3w_to_json(t));
 
+  ac["regulator_controls"] = json::array();
+  for (const auto& c : sys.ac.regulator_controls) ac["regulator_controls"].push_back(regulator_control_to_json(c));
+
   ac["switches"] = json::array();
   for (const auto& s : sys.ac.switches) ac["switches"].push_back(switch_to_json(s));
 
@@ -2452,6 +2556,8 @@ HybridPowerSystem from_json(const std::string& json_str) {
       for (const auto& j : ac["transformers_2w"]) sys.ac.transformers_2w.push_back(transformer2w_from_json(j));
     if (ac.contains("transformers_3w"))
       for (const auto& j : ac["transformers_3w"]) sys.ac.transformers_3w.push_back(transformer3w_from_json(j));
+    if (ac.contains("regulator_controls"))
+      for (const auto& j : ac["regulator_controls"]) sys.ac.regulator_controls.push_back(regulator_control_from_json(j));
     if (ac.contains("switches"))
       for (const auto& j : ac["switches"]) sys.ac.switches.push_back(switch_from_json(j));
     if (ac.contains("circuit_breakers"))

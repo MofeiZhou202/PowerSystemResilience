@@ -56,6 +56,50 @@ std::string event_label(const DynamicEvent& event) {
   return os.str();
 }
 
+std::string event_type_name(DynamicEventType type) {
+  switch (type) {
+    case DynamicEventType::ACBranchTrip: return "ACBranchTrip";
+    case DynamicEventType::ACBranchClose: return "ACBranchClose";
+    case DynamicEventType::DCBranchTrip: return "DCBranchTrip";
+    case DynamicEventType::DCBranchClose: return "DCBranchClose";
+    case DynamicEventType::ACLoadScale: return "ACLoadScale";
+    case DynamicEventType::DCLoadScale: return "DCLoadScale";
+    case DynamicEventType::GeneratorTrip: return "GeneratorTrip";
+    case DynamicEventType::VSCTrip: return "VSCTrip";
+    case DynamicEventType::DCDCTrip: return "DCDCTrip";
+    case DynamicEventType::StoragePowerStep: return "StoragePowerStep";
+    case DynamicEventType::DCStoragePowerStep: return "DCStoragePowerStep";
+    case DynamicEventType::FaultShunt: return "FaultShunt";
+    case DynamicEventType::ClearFault: return "ClearFault";
+    case DynamicEventType::Custom: return "Custom";
+  }
+  return "Custom";
+}
+
+DynamicAppliedEventRecord event_record(const DynamicEvent& event, double applied_time_s) {
+  DynamicAppliedEventRecord record;
+  record.time_s = applied_time_s;
+  record.type = event_type_name(event.type);
+  record.label = event_label(event);
+  record.component_index = event.component_index;
+  record.target_id = event.target_id;
+  record.bus = event.bus;
+  record.phase = event.phase;
+  record.value = event.value;
+  record.duration_s = event.duration_s;
+  record.component_type = event.component_type;
+  record.target_type = event.target_type;
+  record.params = event.params;
+  return record;
+}
+
+double event_param(const DynamicEvent& event,
+                   const std::string& key,
+                   double fallback) {
+  const auto it = event.params.find(key);
+  return it == event.params.end() ? fallback : it->second;
+}
+
 bool evaluate_derivatives(DynamicSystem& sys,
                           double t,
                           const Eigen::VectorXd& state,
@@ -116,15 +160,33 @@ bool apply_event_to_network(DynamicSystem& sys, const DynamicEvent& event) {
       const bool is_dc = event.component_type == "DC" || event.component_type == "dc";
       DynamicFaultShunt fault;
       fault.is_ac = !is_dc;
-      fault.bus = event.bus != 0 ? event.bus : event.component_index;
+      fault.bus = event.bus != 0 ? event.bus : (event.target_id != 0 ? event.target_id
+                                                                       : event.component_index);
       fault.bus_pos = is_dc ? sys.network.dcBusPosition(fault.bus)
                             : sys.network.acBusPosition(fault.bus);
-      fault.g_pu = event.value > 0.0
-                       ? event.value
-                       : 1.0 / std::max(1e-9, sys.options.min_branch_impedance_pu);
-      fault.b_pu = 0.0;
+      const double r_pu = event_param(event, "r_pu", 0.0);
+      const double x_pu = event_param(event, "x_pu", 0.0);
+      if (r_pu > 0.0 || x_pu != 0.0) {
+        const std::complex<double> z(std::max(0.0, r_pu), x_pu);
+        const std::complex<double> y =
+            std::abs(z) > 0.0
+                ? std::complex<double>(1.0, 0.0) / z
+                : std::complex<double>(1.0 / std::max(1e-9, sys.options.min_branch_impedance_pu),
+                                       0.0);
+        fault.g_pu = y.real();
+        fault.b_pu = y.imag();
+      } else {
+        fault.g_pu = event_param(
+            event,
+            "g_pu",
+            event.value > 0.0
+                ? event.value
+                : 1.0 / std::max(1e-9, sys.options.min_branch_impedance_pu));
+        fault.b_pu = event_param(event, "b_pu", 0.0);
+      }
       fault.active = fault.bus_pos >= 0;
-      fault.clear_time_s = event.duration_s > 0.0 ? event.time_s + event.duration_s : 0.0;
+      const double duration = event_param(event, "duration_s", event.duration_s);
+      fault.clear_time_s = duration > 0.0 ? event.time_s + duration : 0.0;
       if (fault.active) {
         sys.network.fault_shunts.push_back(fault);
         rebuild = true;
@@ -145,7 +207,7 @@ bool apply_event_to_network(DynamicSystem& sys, const DynamicEvent& event) {
       for (auto& load : sys.network.ac_bus_loads) {
         if (event.bus != 0 && load.bus != event.bus) continue;
         if (event.bus == 0 && event.component_index != 0 && load.bus != event.component_index) continue;
-        load.scale = std::max(0.0, event.value);
+        load.scale = std::max(0.0, event_param(event, "scale", event.value));
         rebuild = true;
       }
       break;
@@ -154,7 +216,7 @@ bool apply_event_to_network(DynamicSystem& sys, const DynamicEvent& event) {
       for (auto& load : sys.network.dc_bus_loads) {
         if (event.bus != 0 && load.bus != event.bus) continue;
         if (event.bus == 0 && event.component_index != 0 && load.bus != event.component_index) continue;
-        load.scale = std::max(0.0, event.value);
+        load.scale = std::max(0.0, event_param(event, "scale", event.value));
         rebuild = true;
       }
       break;
@@ -177,11 +239,41 @@ bool apply_events(DynamicSystem& sys, double t, DynamicResults& results) {
     event.applied = true;
     changed = true;
     results.applied_events.push_back(event_label(event));
+    results.applied_event_records.push_back(event_record(event, t));
   }
   if (rebuild) {
     sys.network.rebuildBaseMatrices(sys.options.singular_regularization_pu);
   }
   return changed;
+}
+
+bool should_record_snapshot(const DynamicSystem& system,
+                            const DynamicResults& results,
+                            int step,
+                            double t) {
+  const auto& opt = system.options;
+  if (!opt.record_every_step) return false;
+  if (opt.max_recorded_snapshots > 0 &&
+      static_cast<int>(results.snapshots.size()) >= opt.max_recorded_snapshots) {
+    return false;
+  }
+  const int stride = std::max(1, opt.output_every_steps);
+  if (step == 0) return opt.record_initial_state;
+  if (step % stride == 0) return true;
+  if (opt.output_interval_s > 0.0) {
+    const double k = std::round((t - opt.t_start_s) / opt.output_interval_s);
+    const double target = opt.t_start_s + k * opt.output_interval_s;
+    if (std::abs(t - target) <= 1e-9 * std::max(1.0, std::abs(t))) return true;
+  }
+  return false;
+}
+
+void record_snapshot_if_needed(DynamicSystem& system,
+                               DynamicResults& results,
+                               int step) {
+  if (should_record_snapshot(system, results, step, system.x.time_s)) {
+    results.snapshots.push_back(make_snapshot(system));
+  }
 }
 
 DynamicSolverType effective_solver_type(const DynamicSolverOptions& options,
@@ -421,9 +513,7 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
     return results;
   }
 
-  if (system.options.record_every_step) {
-    results.snapshots.push_back(make_snapshot(system));
-  }
+  record_snapshot_if_needed(system, results, 0);
 
   const DynamicSolverType solver_type = effective_solver_type(system.options, results);
   const double t_end = system.options.t_end_s;
@@ -510,12 +600,11 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
       results.steps = step;
       return results;
     }
-    if (system.options.record_every_step) {
-      results.snapshots.push_back(make_snapshot(system));
-    }
+    record_snapshot_if_needed(system, results, step);
   }
 
-  if (!system.options.record_every_step) {
+  if (results.snapshots.empty() ||
+      std::abs(results.snapshots.back().time_s - system.x.time_s) > 1e-12) {
     results.snapshots.push_back(make_snapshot(system));
   }
   results.success = true;

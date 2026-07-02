@@ -600,3 +600,184 @@ TEST_CASE("Implicit transient Newton solvers run without Heun fallback", "[dynam
   REQUIRE(trap.success);
   CHECK(trap.newton_iterations > 0);
 }
+
+TEST_CASE("Documented transient device headers expose executable standard profiles",
+          "[dynamics][devices][standards]") {
+  DynamicState x;
+  NetworkState y;
+  PowerFlowResult pf;
+  pf.va = {0.0};
+  y.resize(3, 0);
+  y.Vac_abc[0] = std::polar(1.0, 0.0);
+  y.Vac_abc[1] = std::polar(1.0, -2.0 * 3.14159265358979323846 / 3.0);
+  y.Vac_abc[2] = std::polar(1.0, 2.0 * 3.14159265358979323846 / 3.0);
+
+  GovernorDynamicParams governor_params;
+  governor_params.component_index = 7;
+  governor_params.base_mva = 100.0;
+  governor_params.p_ref_mw = 40.0;
+  Governor governor(governor_params);
+  ExciterDynamicParams exciter_params;
+  exciter_params.component_index = 8;
+  exciter_params.bus = 1;
+  exciter_params.bus_pos = 0;
+  Exciter exciter(exciter_params);
+  PVDynamicParams pv_params;
+  pv_params.component_index = 9;
+  pv_params.bus = 1;
+  pv_params.bus_pos = 0;
+  pv_params.p_ref_mw = 1.5;
+  pv_params.q_ref_mvar = 0.2;
+  PVDynamic pv(pv_params);
+  ProtectionRelayParams relay_params;
+  relay_params.component_index = 10;
+  relay_params.bus = 1;
+  relay_params.bus_pos = 0;
+  ProtectionRelay relay(relay_params);
+
+  std::vector<DynamicDevice*> devices{&governor, &exciter, &pv, &relay};
+  int offset = 0;
+  for (auto* device : devices) device->assignStateIndices(offset);
+  x.resize(static_cast<std::size_t>(offset));
+  for (auto* device : devices) device->initializeFromPowerFlow(pf, x, y);
+
+  Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(x.size());
+  for (auto* device : devices) device->computeDerivatives(0.0, x, y, dxdt);
+  CHECK(dxdt.allFinite());
+
+  DynamicStamp stamp(3, 0);
+  pv.stamp(0.0, x, y, stamp);
+  CHECK(stamp.Iac.norm() > 0.0);
+
+  CHECK(governor.output(x, y).model_standard == "IEEE");
+  CHECK(exciter.output(x, y).model_standard == "IEEE4215");
+  CHECK(pv.output(x, y).model_standard == "IEEE1547");
+  CHECK(relay.output(x, y).model_name == "VoltageFrequencyRelay");
+}
+
+TEST_CASE("Documented integrators and algebraic solvers advance dynamic systems",
+          "[dynamics][integration][solver]") {
+  const auto sys = make_hybrid_dc_case();
+  auto opt = fast_options();
+  opt.t_end_s = 0.01;
+  opt.dt_s = 0.01;
+  opt.solver_type = DynamicSolverType::PartitionedRK4;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+
+  AlgebraicNetworkSolver algebraic;
+  const auto algebraic_result = algebraic.solve(dyn, opt.t_start_s);
+  REQUIRE(algebraic_result.success);
+  CHECK(dyn.y.Vac_abc.size() > 0);
+
+  RK4 rk4;
+  const auto rk4_step = rk4.step(dyn, opt.t_start_s, opt.dt_s);
+  REQUIRE(rk4_step.success);
+  CHECK(rk4_step.derivative_evaluations == 4);
+  CHECK(dyn.x.dxdt.size() == dyn.x.x.size());
+
+  DynamicSystem dyn_be = builder.build(sys, opt);
+  BackwardEuler be;
+  DaeSolver dae(be);
+  const auto dae_step = dae.step(dyn_be, opt.t_start_s, opt.dt_s);
+  REQUIRE(dae_step.success);
+  CHECK(dae_step.nonlinear_iterations > 0);
+  CHECK(dyn_be.x.time_s == Catch::Approx(opt.dt_s));
+
+  Eigen::SparseMatrix<double> a(2, 2);
+  a.insert(0, 0) = 4.0;
+  a.insert(1, 1) = 2.0;
+  a.makeCompressed();
+  Eigen::VectorXd b(2);
+  b << 8.0, 6.0;
+  Eigen::VectorXd solved;
+  SparseLinearSolver sparse;
+  const auto solve_result = sparse.solve(a, b, solved);
+  REQUIRE(solve_result.success);
+  CHECK(solved[0] == Catch::Approx(2.0));
+  CHECK(solved[1] == Catch::Approx(3.0));
+}
+
+TEST_CASE("Transient results support sampled recording and CSV export",
+          "[dynamics][results][sampling]") {
+  const auto sys = make_hybrid_dc_case();
+  auto opt = fast_options();
+  opt.t_end_s = 0.05;
+  opt.dt_s = 0.01;
+  opt.record_every_step = true;
+  opt.output_every_steps = 2;
+
+  const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
+
+  REQUIRE(result.success);
+  REQUIRE(result.snapshots.size() == 4);
+  CHECK(result.snapshots.front().time_s == Catch::Approx(0.0));
+  CHECK(result.snapshots.back().time_s == Catch::Approx(0.05));
+
+  const std::string csv = to_csv(result);
+  CHECK(csv.find("time_s") != std::string::npos);
+  CHECK(csv.find("vac_0_mag_pu") != std::string::npos);
+  CHECK(csv.find("VSCGridFollowing_1_p_mw") != std::string::npos);
+}
+
+TEST_CASE("Transient contingencies carry named parameters and structured records",
+          "[dynamics][events][params]") {
+  const auto sys = make_hybrid_dc_case();
+  auto opt = fast_options();
+  opt.t_end_s = 0.03;
+  opt.dt_s = 0.01;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+
+  DynamicEvent fault;
+  fault.time_s = 0.01;
+  fault.type = DynamicEventType::FaultShunt;
+  fault.bus = 2;
+  fault.component_type = "AC";
+  fault.label = "parameterized AC fault";
+  fault.params["r_pu"] = 0.001;
+  fault.params["x_pu"] = 0.002;
+  fault.params["duration_s"] = 0.01;
+  dyn.events.push_back(fault);
+
+  DynamicEvent storage;
+  storage.time_s = 0.02;
+  storage.type = DynamicEventType::StoragePowerStep;
+  storage.component_index = 1;
+  storage.label = "storage dispatch";
+  storage.params["p_ref_mw"] = -2.0;
+  dyn.events.push_back(storage);
+
+  DynamicSolver solver;
+  const DynamicResults result = solver.solve(dyn);
+
+  REQUIRE(result.success);
+  REQUIRE(result.applied_event_records.size() == 2);
+  CHECK(result.applied_event_records.front().label == "parameterized AC fault");
+  CHECK(result.applied_event_records.front().params.at("r_pu") == Catch::Approx(0.001));
+  CHECK(result.applied_event_records.back().params.at("p_ref_mw") == Catch::Approx(-2.0));
+}
+
+TEST_CASE("Dynamic sparse linear solver accepts optional backend requests",
+          "[dynamics][solver][linear]") {
+  Eigen::SparseMatrix<double> a(2, 2);
+  a.insert(0, 0) = 3.0;
+  a.insert(1, 1) = 5.0;
+  a.makeCompressed();
+  Eigen::VectorXd b(2);
+  b << 6.0, 20.0;
+
+  for (const auto type : {DynamicLinearSolverType::EigenSparseLU,
+                          DynamicLinearSolverType::EigenBiCGSTAB,
+                          DynamicLinearSolverType::KLU,
+                          DynamicLinearSolverType::UMFPACK}) {
+    Eigen::VectorXd x;
+    SparseLinearSolver solver(type);
+    const auto result = solver.solve(a, b, x);
+    REQUIRE(result.success);
+    CHECK(x[0] == Catch::Approx(2.0));
+    CHECK(x[1] == Catch::Approx(4.0));
+  }
+}

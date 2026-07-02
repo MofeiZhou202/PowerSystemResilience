@@ -1,0 +1,419 @@
+#include <algorithm>
+#include <set>
+#include <string>
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
+
+#include "hacdcpf/io/component_io_mapping.hpp"
+#include "hacdcpf/io/json_io.hpp"
+#include "hacdcpf/model/hybrid_power_system.hpp"
+
+using Catch::Matchers::ContainsSubstring;
+
+namespace {
+
+hacdcpf::HybridPowerSystem make_system_with_all_io_component_tables() {
+  hacdcpf::HybridPowerSystem sys;
+  sys.name = "component_io_mapping_all_tables";
+  sys.base_mva = 10.0;
+  sys.ac.base_mva = 10.0;
+  sys.dc.base_mva = 10.0;
+
+  hacdcpf::ACBus ac1;
+  ac1.index = 1;
+  ac1.name = "ac_source";
+  ac1.bus_type = hacdcpf::BusType::SLACK;
+  ac1.base_kv = 12.47;
+  sys.ac.buses.push_back(ac1);
+
+  hacdcpf::ACBus ac2;
+  ac2.index = 2;
+  ac2.name = "ac_load";
+  ac2.bus_type = hacdcpf::BusType::PQ;
+  ac2.base_kv = 12.47;
+  sys.ac.buses.push_back(ac2);
+
+  hacdcpf::ACBranch br;
+  br.index = 1;
+  br.from_bus = 1;
+  br.to_bus = 2;
+  br.r_pu = 0.01;
+  br.x_pu = 0.03;
+  br.name = "ac_line";
+  sys.ac.branches.push_back(br);
+
+  hacdcpf::Generator gen;
+  gen.index = 1;
+  gen.bus = 1;
+  gen.is_slack = true;
+  gen.name = "slack";
+  sys.ac.generators.push_back(gen);
+
+  hacdcpf::StaticGenerator sgen;
+  sgen.index = 1;
+  sgen.bus = 2;
+  sgen.p_mw = 0.1;
+  sgen.name = "static_gen";
+  sys.ac.static_generators.push_back(sgen);
+
+  hacdcpf::Load load;
+  load.index = 1;
+  load.bus = 2;
+  load.p_mw = 0.4;
+  load.q_mvar = 0.1;
+  load.name = "load";
+  sys.ac.loads.push_back(load);
+
+  hacdcpf::FlexibleLoad flex;
+  flex.index = 1;
+  flex.bus = 2;
+  flex.p_mw = 0.2;
+  flex.name = "flex";
+  sys.ac.flexible_loads.push_back(flex);
+
+  hacdcpf::AsymmetricLoad asym;
+  asym.index = 1;
+  asym.bus = 2;
+  asym.pa_mw = 0.01;
+  asym.pb_mw = 0.02;
+  asym.pc_mw = 0.03;
+  asym.name = "asym";
+  sys.ac.asymmetric_loads.push_back(asym);
+
+  hacdcpf::Shunt shunt;
+  shunt.index = 1;
+  shunt.bus = 2;
+  shunt.bs_mvar = 0.02;
+  shunt.name = "shunt";
+  sys.ac.shunts.push_back(shunt);
+
+  hacdcpf::Storage storage;
+  storage.index = 1;
+  storage.bus = 2;
+  storage.p_mw = 0.05;
+  storage.name = "storage";
+  sys.ac.storage.push_back(storage);
+
+  hacdcpf::RenewableGen renewable;
+  renewable.index = 1;
+  renewable.bus = 2;
+  renewable.p_mw = 0.06;
+  renewable.name = "renewable";
+  sys.ac.renewable_gens.push_back(renewable);
+
+  hacdcpf::PVSystem pv;
+  pv.index = 1;
+  pv.bus = 2;
+  pv.p_mw = 0.07;
+  pv.name = "pv";
+  sys.ac.pv_systems.push_back(pv);
+
+  hacdcpf::ExternalGrid eg;
+  eg.index = 1;
+  eg.bus = 1;
+  eg.name = "external_grid";
+  sys.ac.external_grids.push_back(eg);
+
+  hacdcpf::Transformer2W tr2;
+  tr2.index = 1;
+  tr2.hv_bus = 1;
+  tr2.lv_bus = 2;
+  tr2.sn_mva = 1.0;
+  tr2.vk_percent = 5.0;
+  tr2.name = "tr2";
+  sys.ac.transformers_2w.push_back(tr2);
+
+  hacdcpf::Transformer3W tr3;
+  tr3.index = 1;
+  tr3.hv_bus = 1;
+  tr3.mv_bus = 2;
+  tr3.lv_bus = 2;
+  tr3.sn_hv_mva = 1.0;
+  tr3.sn_mv_mva = 1.0;
+  tr3.sn_lv_mva = 1.0;
+  tr3.name = "tr3";
+  sys.ac.transformers_3w.push_back(tr3);
+
+  hacdcpf::RegulatorControl reg;
+  reg.index = 1;
+  reg.name = "reg";
+  reg.transformer_index = 1;
+  reg.monitored_bus = 2;
+  reg.vreg_volts = 120.0;
+  reg.band_volts = 2.0;
+  reg.enabled = true;
+  sys.ac.regulator_controls.push_back(reg);
+
+  hacdcpf::Switch sw;
+  sw.index = 1;
+  sw.bus_from = 1;
+  sw.bus_to = 2;
+  sw.name = "switch";
+  sys.ac.switches.push_back(sw);
+
+  hacdcpf::CircuitBreaker cb;
+  cb.index = 1;
+  cb.bus_from = 1;
+  cb.bus_to = 2;
+  cb.name = "breaker";
+  sys.ac.circuit_breakers.push_back(cb);
+
+  hacdcpf::ChargingStation station;
+  station.index = 1;
+  station.bus = 2;
+  station.p_total_kw = 50.0;
+  station.name = "station";
+  sys.ac.charging_stations.push_back(station);
+
+  hacdcpf::Charger charger;
+  charger.index = 1;
+  charger.station_id = 1;
+  charger.p_ch_max_kw = 7.0;
+  charger.name = "charger";
+  sys.ac.chargers.push_back(charger);
+
+  hacdcpf::AsynchronousMotor motor;
+  motor.index = 1;
+  motor.bus = 2;
+  motor.sn_mva = 0.1;
+  motor.name = "motor";
+  sys.ac.motors.push_back(motor);
+
+  hacdcpf::DCBus dc1;
+  dc1.index = 1;
+  dc1.bus_type = hacdcpf::DCBusType::DC_V;
+  dc1.base_kv = 0.75;
+  sys.dc.buses.push_back(dc1);
+
+  hacdcpf::DCBus dc2;
+  dc2.index = 2;
+  dc2.bus_type = hacdcpf::DCBusType::DC_P;
+  dc2.base_kv = 0.75;
+  sys.dc.buses.push_back(dc2);
+
+  hacdcpf::DCBranch dcbr;
+  dcbr.index = 1;
+  dcbr.from_bus = 1;
+  dcbr.to_bus = 2;
+  dcbr.r_pu = 0.02;
+  sys.dc.branches.push_back(dcbr);
+
+  hacdcpf::DCLoad dcload;
+  dcload.index = 1;
+  dcload.bus = 2;
+  dcload.p_mw = 0.1;
+  sys.dc.loads.push_back(dcload);
+
+  hacdcpf::Storage dc_storage_legacy;
+  dc_storage_legacy.index = 1;
+  dc_storage_legacy.bus = 2;
+  dc_storage_legacy.p_mw = 0.03;
+  sys.dc.storage.push_back(dc_storage_legacy);
+
+  hacdcpf::DCStorage dc_storage;
+  dc_storage.index = 1;
+  dc_storage.bus = 2;
+  dc_storage.p_mw = 0.03;
+  sys.dc.dc_storage.push_back(dc_storage);
+
+  hacdcpf::StaticGenerator dc_sgen_legacy;
+  dc_sgen_legacy.index = 1;
+  dc_sgen_legacy.bus = 2;
+  dc_sgen_legacy.p_mw = 0.04;
+  sys.dc.static_generators.push_back(dc_sgen_legacy);
+
+  hacdcpf::StaticGeneratorDC dc_sgen;
+  dc_sgen.index = 1;
+  dc_sgen.bus = 2;
+  dc_sgen.p_set_mw = 0.04;
+  sys.dc.dc_static_generators.push_back(dc_sgen);
+
+  hacdcpf::PVArrayDC pvdc;
+  pvdc.index = 1;
+  pvdc.bus = 2;
+  pvdc.p_set_mw = 0.05;
+  sys.dc.pv_arrays.push_back(pvdc);
+
+  hacdcpf::DCDCConverter dcdc;
+  dcdc.index = 1;
+  dcdc.bus_in = 1;
+  dcdc.bus_out = 2;
+  sys.dc.dcdc_converters.push_back(dcdc);
+
+  hacdcpf::DCCircuitBreaker dccb;
+  dccb.index = 1;
+  dccb.bus_from = 1;
+  dccb.bus_to = 2;
+  sys.dc.dc_circuit_breakers.push_back(dccb);
+
+  hacdcpf::VSCConverter vsc;
+  vsc.index = 1;
+  vsc.bus_ac = 2;
+  vsc.bus_dc = 1;
+  vsc.p_set_mw = 0.1;
+  sys.vsc_converters.push_back(vsc);
+
+  hacdcpf::EnergyRouter er;
+  er.index = 1;
+  er.name = "er";
+  er.num_ports = 1;
+  hacdcpf::EnergyRouterPort port;
+  port.index = 1;
+  port.bus = 2;
+  port.port_type = hacdcpf::ERPortType::AC;
+  er.ports.push_back(port);
+  sys.energy_routers.push_back(er);
+
+  hacdcpf::MobileStorage mobile;
+  mobile.index = 1;
+  mobile.bus = 2;
+  mobile.p_mw = 0.02;
+  sys.mobile_storage.push_back(mobile);
+
+  hacdcpf::VirtualPowerPlant vpp;
+  vpp.index = 1;
+  vpp.pcc_bus = 2;
+  vpp.p_output_mw = 0.03;
+  sys.vpps.push_back(vpp);
+
+  hacdcpf::Microgrid microgrid;
+  microgrid.index = 1;
+  microgrid.pcc_bus = 2;
+  microgrid.p_exchange_mw = 0.04;
+  sys.microgrids.push_back(microgrid);
+
+  hacdcpf::ThreePhaseACSystem tp;
+  tp.base_mva = 10.0;
+  hacdcpf::ThreePhaseACBus tpb;
+  tpb.index = 1;
+  tpb.bus_type = hacdcpf::BusType::SLACK;
+  tp.buses.push_back(tpb);
+  hacdcpf::ThreePhaseACLine tpl;
+  tpl.index = 1;
+  tpl.from_bus = 1;
+  tpl.to_bus = 1;
+  tp.lines.push_back(tpl);
+  hacdcpf::ThreePhaseTransformer tpt;
+  tpt.index = 1;
+  tpt.hv_bus = 1;
+  tpt.lv_bus = 1;
+  tp.transformers.push_back(tpt);
+  hacdcpf::ThreePhaseLoad tpld;
+  tpld.index = 1;
+  tpld.bus = 1;
+  tpld.p_a_mw = 0.01;
+  tp.loads.push_back(tpld);
+  hacdcpf::ThreePhaseGenerator tpg;
+  tpg.index = 1;
+  tpg.bus = 1;
+  tpg.is_slack = true;
+  tp.generators.push_back(tpg);
+  hacdcpf::ThreePhaseExternalGrid tpeg;
+  tpeg.index = 1;
+  tpeg.bus = 1;
+  tp.external_grids.push_back(tpeg);
+  hacdcpf::ThreePhaseRegulatorControl tpreg;
+  tpreg.index = 1;
+  tpreg.transformer_index = 1;
+  tpreg.vreg_volts = 120.0;
+  tp.regulator_controls.push_back(tpreg);
+  sys.three_phase_ac = tp;
+
+  return sys;
+}
+
+}  // namespace
+
+TEST_CASE("Component IO registry covers every rich component collection",
+          "[io][mapping][coverage]") {
+  const auto& mappings = hacdcpf::io::component_io_mappings();
+  REQUIRE(mappings.size() >= 40);
+
+  std::set<std::string> paths;
+  for (const auto& mapping : mappings) {
+    CHECK_FALSE(mapping.component_type.empty());
+    CHECK_FALSE(mapping.collection_path.empty());
+    CHECK(paths.insert(mapping.collection_path).second);
+    CHECK(hacdcpf::io::policy_for_format(
+              mapping, hacdcpf::io::ComponentIOFormat::InternalJSON) ==
+          hacdcpf::io::ComponentIOPolicy::Exact);
+  }
+
+  CHECK(hacdcpf::io::find_component_io_mapping("ACBus").has_value());
+  CHECK(hacdcpf::io::find_component_io_mapping("VSCConverter").has_value());
+  CHECK(hacdcpf::io::find_component_io_mapping("NoSuchComponent").has_value() ==
+        false);
+
+  const auto vsc = hacdcpf::io::find_component_io_mapping("VSCConverter");
+  REQUIRE(vsc.has_value());
+  CHECK(std::any_of(vsc->standard_profiles.begin(),
+                    vsc->standard_profiles.end(),
+                    [](const hacdcpf::io::ComponentStandardProfile& profile) {
+                      return profile.family == hacdcpf::io::ComponentStandardFamily::NERC &&
+                             profile.model_name.find("REGC") != std::string::npos;
+                    }));
+  const auto gen = hacdcpf::io::find_component_io_mapping("Generator");
+  REQUIRE(gen.has_value());
+  CHECK(std::any_of(gen->standard_profiles.begin(),
+                    gen->standard_profiles.end(),
+                    [](const hacdcpf::io::ComponentStandardProfile& profile) {
+                      return profile.family ==
+                             hacdcpf::io::ComponentStandardFamily::IEEE4215;
+                    }));
+  CHECK(hacdcpf::io::to_string(
+            hacdcpf::io::ComponentStandardFamily::IEC61970CIM) ==
+        "IEC61970CIM");
+}
+
+TEST_CASE("Component IO coverage report classifies populated systems",
+          "[io][mapping][coverage][all_components]") {
+  const auto sys = make_system_with_all_io_component_tables();
+  const auto report = hacdcpf::io::analyze_component_io_coverage(sys);
+
+  CHECK(report.total_instances() > 40);
+  CHECK(report.unrepresented_instances(
+            hacdcpf::io::ComponentIOFormat::InternalJSON) == 0);
+  CHECK(report.unrepresented_instances(
+            hacdcpf::io::ComponentIOFormat::CanonicalModel) == 0);
+  CHECK(report.unrepresented_instances(
+            hacdcpf::io::ComponentIOFormat::GridLABD) > 0);
+  CHECK(report.unrepresented_instances(
+            hacdcpf::io::ComponentIOFormat::OpenDSS) > 0);
+
+  const auto gridlabd_diagnostics = hacdcpf::io::external_io_diagnostics(
+      report, hacdcpf::io::ComponentIOFormat::GridLABD);
+  const auto opendss_diagnostics = hacdcpf::io::external_io_diagnostics(
+      report, hacdcpf::io::ComponentIOFormat::OpenDSS);
+
+  REQUIRE_FALSE(gridlabd_diagnostics.empty());
+  REQUIRE_FALSE(opendss_diagnostics.empty());
+  CHECK_THAT(gridlabd_diagnostics.front(), ContainsSubstring("policy is"));
+  CHECK(std::any_of(gridlabd_diagnostics.begin(), gridlabd_diagnostics.end(),
+                    [](const std::string& line) {
+                      return line.find("dc.buses") != std::string::npos;
+                    }));
+  CHECK(std::any_of(opendss_diagnostics.begin(), opendss_diagnostics.end(),
+                    [](const std::string& line) {
+                      return line.find("vsc_converters") != std::string::npos;
+                    }));
+}
+
+TEST_CASE("Regulator controls are preserved by internal JSON",
+          "[io][json][mapping][roundtrip]") {
+  const auto sys = make_system_with_all_io_component_tables();
+  const auto restored = hacdcpf::io::from_json(hacdcpf::io::to_json(sys));
+
+  REQUIRE(restored.ac.regulator_controls.size() == 1);
+  CHECK(restored.ac.regulator_controls.front().name == "reg");
+  CHECK(restored.ac.regulator_controls.front().transformer_index == 1);
+  CHECK(restored.ac.regulator_controls.front().monitored_bus == 2);
+  CHECK(restored.ac.regulator_controls.front().enabled);
+
+  REQUIRE(restored.three_phase_ac.has_value());
+  REQUIRE(restored.three_phase_ac->regulator_controls.size() == 1);
+  CHECK(restored.three_phase_ac->regulator_controls.front().transformer_index ==
+        1);
+  CHECK(restored.three_phase_ac->regulator_controls.front().vreg_volts ==
+        120.0);
+}

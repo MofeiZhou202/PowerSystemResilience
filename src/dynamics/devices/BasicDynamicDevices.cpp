@@ -179,6 +179,10 @@ DynamicDeviceOutput make_output_base(const DynamicDevice& device,
   out.canvas_index = device.componentIndex();
   out.component_domain = component_domain;
   out.source_type = source_type;
+  out.model_standard = device.modelStandard();
+  out.model_name = device.modelName();
+  out.parameter_set = device.parameterSet();
+  out.model_profiles = device.modelProfiles();
   return out;
 }
 
@@ -253,7 +257,8 @@ void DynamicLoad::handleEvent(const DynamicEvent& event, DynamicState&, NetworkS
       event.component_index != params_.component_index) {
     return;
   }
-  params_.scale = std::max(0.0, event.value);
+  const auto it = event.params.find("scale");
+  params_.scale = std::max(0.0, it == event.params.end() ? event.value : it->second);
 }
 
 std::string DynamicLoad::name() const {
@@ -318,7 +323,8 @@ void ThreePhaseDynamicLoad::handleEvent(const DynamicEvent& event,
       event.component_index != params_.component_index) {
     return;
   }
-  params_.scale = std::max(0.0, event.value);
+  const auto it = event.params.find("scale");
+  params_.scale = std::max(0.0, it == event.params.end() ? event.value : it->second);
 }
 
 std::string ThreePhaseDynamicLoad::name() const {
@@ -386,7 +392,8 @@ void DCDynamicLoad::handleEvent(const DynamicEvent& event, DynamicState&, Networ
       event.component_index != params_.component_index) {
     return;
   }
-  params_.scale = std::max(0.0, event.value);
+  const auto it = event.params.find("scale");
+  params_.scale = std::max(0.0, it == event.params.end() ? event.value : it->second);
 }
 
 std::string DCDynamicLoad::name() const {
@@ -577,6 +584,151 @@ DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
     out.values["q_mvar"] = s.imag() * safe_base(params_.base_mva);
     out.values["i_rms_pu"] =
         std::sqrt((std::norm(i[0]) + std::norm(i[1]) + std::norm(i[2])) / 3.0);
+  }
+  add_voltage_metrics(out, y, params_.bus_pos);
+  return out;
+}
+
+Governor::Governor(GovernorDynamicParams params) : params_(std::move(params)) {}
+
+void Governor::assignStateIndices(int& offset) {
+  range_ = {offset, 1};
+  offset += range_.size;
+}
+
+void Governor::initializeFromPowerFlow(const PowerFlowResult&, DynamicState& x, NetworkState&) {
+  if (range_.empty()) return;
+  x.x[range_.offset] = params_.p_ref_mw / safe_base(params_.base_mva);
+}
+
+bool Governor::trimToNetworkEquilibrium(DynamicState& x, NetworkState&) {
+  if (!params_.in_service || range_.empty()) return false;
+  return set_if_changed(x.x,
+                        range_.offset,
+                        params_.p_ref_mw / safe_base(params_.base_mva));
+}
+
+void Governor::computeDerivatives(double,
+                                  const DynamicState& x,
+                                  const NetworkState&,
+                                  Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (!params_.in_service || range_.empty()) return;
+  double pref = params_.p_ref_mw / safe_base(params_.base_mva);
+  const double pmax = params_.pmax_mw > 0.0
+                          ? params_.pmax_mw / safe_base(params_.base_mva)
+                          : std::numeric_limits<double>::infinity();
+  const double pmin = params_.pmin_mw < 0.0
+                          ? params_.pmin_mw / safe_base(params_.base_mva)
+                          : -std::numeric_limits<double>::infinity();
+  pref = std::clamp(pref, pmin, pmax);
+  dxdt[range_.offset] = (pref - x.x[range_.offset]) /
+                        std::max(kMinTimeConstant, params_.t_s);
+}
+
+void Governor::stamp(double, const DynamicState&, const NetworkState&, DynamicStamp&) const {}
+
+void Governor::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
+  const bool matching = event.component_index == 0 ||
+                        event.component_index == params_.component_index;
+  if (!matching) return;
+  if (event.type == DynamicEventType::GeneratorTrip) {
+    params_.in_service = false;
+    if (!range_.empty() && range_.offset < x.x.size()) x.x[range_.offset] = 0.0;
+  } else if (event.type == DynamicEventType::Custom && event.component_type == "Governor") {
+    const auto it = event.params.find("p_ref_mw");
+    params_.p_ref_mw = it == event.params.end() ? event.value : it->second;
+  }
+}
+
+std::string Governor::name() const {
+  return params_.label.empty() ? params_.device_type + " " + std::to_string(params_.component_index)
+                               : params_.label;
+}
+
+DynamicDeviceOutput Governor::output(const DynamicState& x, const NetworkState&) const {
+  DynamicDeviceOutput out = make_output_base(*this,
+                                             0,
+                                             params_.canvas_type,
+                                             params_.component_domain,
+                                             params_.source_type);
+  out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  out.values["droop_r"] = params_.droop_r;
+  out.values["p_ref_mw"] = params_.p_ref_mw;
+  if (!range_.empty() && range_.offset < x.x.size()) {
+    out.values["p_mech_mw"] = x.x[range_.offset] * safe_base(params_.base_mva);
+  }
+  return out;
+}
+
+Exciter::Exciter(ExciterDynamicParams params) : params_(std::move(params)) {}
+
+void Exciter::assignStateIndices(int& offset) {
+  range_ = {offset, 1};
+  offset += range_.size;
+}
+
+void Exciter::initializeFromPowerFlow(const PowerFlowResult&, DynamicState& x, NetworkState& y) {
+  if (range_.empty()) return;
+  double vt = params_.v_ref_pu;
+  if (params_.bus_pos >= 0) vt = avg_voltage_mag(bus_voltage(y, params_.bus_pos));
+  x.x[range_.offset] = std::clamp(vt, params_.efd_min_pu, params_.efd_max_pu);
+}
+
+bool Exciter::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
+  if (!params_.in_service || range_.empty()) return false;
+  double vt = params_.v_ref_pu;
+  if (params_.bus_pos >= 0) vt = avg_voltage_mag(bus_voltage(y, params_.bus_pos));
+  return set_if_changed(x.x,
+                        range_.offset,
+                        std::clamp(vt, params_.efd_min_pu, params_.efd_max_pu));
+}
+
+void Exciter::computeDerivatives(double,
+                                 const DynamicState& x,
+                                 const NetworkState& y,
+                                 Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (!params_.in_service || range_.empty()) return;
+  double vt = params_.v_ref_pu;
+  if (params_.bus_pos >= 0) vt = avg_voltage_mag(bus_voltage(y, params_.bus_pos));
+  const double efd_cmd =
+      std::clamp(params_.ka * (params_.v_ref_pu - vt) + params_.v_ref_pu,
+                 params_.efd_min_pu,
+                 params_.efd_max_pu);
+  dxdt[range_.offset] = (efd_cmd - x.x[range_.offset]) /
+                        std::max(kMinTimeConstant, params_.ta_s);
+}
+
+void Exciter::stamp(double, const DynamicState&, const NetworkState&, DynamicStamp&) const {}
+
+void Exciter::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
+  const bool matching = event.component_index == 0 ||
+                        event.component_index == params_.component_index;
+  if (!matching) return;
+  if (event.type == DynamicEventType::GeneratorTrip) {
+    params_.in_service = false;
+    if (!range_.empty() && range_.offset < x.x.size()) x.x[range_.offset] = 0.0;
+  } else if (event.type == DynamicEventType::Custom && event.component_type == "Exciter") {
+    const auto it = event.params.find("v_ref_pu");
+    params_.v_ref_pu = it == event.params.end() ? event.value : it->second;
+  }
+}
+
+std::string Exciter::name() const {
+  return params_.label.empty() ? params_.device_type + " " + std::to_string(params_.component_index)
+                               : params_.label;
+}
+
+DynamicDeviceOutput Exciter::output(const DynamicState& x, const NetworkState& y) const {
+  DynamicDeviceOutput out = make_output_base(*this,
+                                             params_.bus,
+                                             params_.canvas_type,
+                                             params_.component_domain,
+                                             params_.source_type);
+  out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  out.values["v_ref_pu"] = params_.v_ref_pu;
+  out.values["ka"] = params_.ka;
+  if (!range_.empty() && range_.offset < x.x.size()) {
+    out.values["efd_pu"] = x.x[range_.offset];
   }
   add_voltage_metrics(out, y, params_.bus_pos);
   return out;
@@ -1127,6 +1279,118 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
   return out;
 }
 
+namespace {
+
+GridFormingInverterParams make_gfm_params(const VSCConverterDynamicParams& params) {
+  GridFormingInverterParams gfm;
+  gfm.component_index = params.component_index;
+  gfm.bus = params.bus;
+  gfm.bus_pos = params.bus_pos;
+  gfm.dc_bus_pos = params.dc_bus_pos;
+  gfm.label = params.label;
+  gfm.device_type = "VSCGridForming";
+  gfm.canvas_type = params.canvas_type;
+  gfm.component_domain = params.component_domain;
+  gfm.source_type = "vsc_grid_forming";
+  gfm.base_mva = params.base_mva;
+  gfm.p_ref_mw = params.p_ref_mw;
+  gfm.q_ref_mvar = params.q_ref_mvar;
+  gfm.v_ref_pu = params.v_ref_pu;
+  gfm.frequency_hz = params.f_ref_hz;
+  gfm.virtual_x_pu = 0.10;
+  gfm.current_limit_pu = params.current_limit_pu;
+  gfm.eta = params.eta;
+  gfm.dc_link_capacitance_s = params.dc_link_capacitance_s;
+  gfm.dc_link_conductance_pu = params.dc_link_conductance_pu;
+  gfm.vdc_ref_pu = params.vdc_ref_pu;
+  gfm.vdc_min_pu = params.vdc_min_pu;
+  gfm.vdc_max_pu = params.vdc_max_pu;
+  gfm.dc_link_mode = params.dc_link_mode;
+  gfm.in_service = params.in_service;
+  return gfm;
+}
+
+}  // namespace
+
+VSCConverterDynamic::VSCConverterDynamic(VSCConverterDynamicParams params)
+    : params_(std::move(params)),
+      gfm_(make_gfm_params(params_)),
+      gfl_(GridFollowingInverterParams(params_)) {}
+
+void VSCConverterDynamic::assignStateIndices(int& offset) {
+  if (params_.grid_forming) {
+    gfm_.assignStateIndices(offset);
+  } else {
+    gfl_.assignStateIndices(offset);
+  }
+}
+
+void VSCConverterDynamic::initializeFromPowerFlow(const PowerFlowResult& pf,
+                                                 DynamicState& x,
+                                                 NetworkState& y) {
+  if (params_.grid_forming) {
+    gfm_.initializeFromPowerFlow(pf, x, y);
+  } else {
+    gfl_.initializeFromPowerFlow(pf, x, y);
+  }
+}
+
+bool VSCConverterDynamic::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
+  return params_.grid_forming ? gfm_.trimToNetworkEquilibrium(x, y)
+                              : gfl_.trimToNetworkEquilibrium(x, y);
+}
+
+void VSCConverterDynamic::computeDerivatives(double t,
+                                            const DynamicState& x,
+                                            const NetworkState& y,
+                                            Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (params_.grid_forming) {
+    gfm_.computeDerivatives(t, x, y, dxdt);
+  } else {
+    gfl_.computeDerivatives(t, x, y, dxdt);
+  }
+}
+
+void VSCConverterDynamic::maskSlowStateResidual(Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (!params_.grid_forming) gfl_.maskSlowStateResidual(dxdt);
+}
+
+void VSCConverterDynamic::stamp(double t,
+                                const DynamicState& x,
+                                const NetworkState& y,
+                                DynamicStamp& stamp) const {
+  if (params_.grid_forming) {
+    gfm_.stamp(t, x, y, stamp);
+  } else {
+    gfl_.stamp(t, x, y, stamp);
+  }
+}
+
+void VSCConverterDynamic::handleEvent(const DynamicEvent& event,
+                                      DynamicState& x,
+                                      NetworkState& y) {
+  if (params_.grid_forming) {
+    gfm_.handleEvent(event, x, y);
+  } else {
+    gfl_.handleEvent(event, x, y);
+  }
+}
+
+DynamicDeviceOutput VSCConverterDynamic::output(const DynamicState& x,
+                                                const NetworkState& y) const {
+  DynamicDeviceOutput out = params_.grid_forming ? gfm_.output(x, y) : gfl_.output(x, y);
+  out.type = type();
+  out.model_standard = modelStandard();
+  out.model_name = modelName();
+  out.model_profiles = modelProfiles();
+  return out;
+}
+
+std::string VSCConverterDynamic::name() const {
+  return params_.label.empty() ? type() + " " + std::to_string(params_.component_index)
+                               : params_.label;
+}
+
 DCDCConverterDynamic::DCDCConverterDynamic(DCDCConverterDynamicParams params)
     : params_(std::move(params)) {}
 
@@ -1285,9 +1549,10 @@ void BatteryDynamic::handleEvent(const DynamicEvent& event, DynamicState& x, Net
   if (!matching) return;
   if ((params_.is_ac && event.type == DynamicEventType::StoragePowerStep) ||
       (!params_.is_ac && event.type == DynamicEventType::DCStoragePowerStep)) {
-    params_.p_ref_mw = event.value;
+    const auto it = event.params.find("p_ref_mw");
+    params_.p_ref_mw = it == event.params.end() ? event.value : it->second;
     if (!range_.empty() && range_.offset < x.x.size()) {
-      x.x[range_.offset] = event.value / std::max(1.0, params_.base_mva);
+      x.x[range_.offset] = params_.p_ref_mw / std::max(1.0, params_.base_mva);
     }
   }
 }
@@ -1318,6 +1583,189 @@ DynamicDeviceOutput BatteryDynamic::output(const DynamicState& x,
   } else {
     add_voltage_metrics(out, y, -1, params_.bus_pos);
   }
+  return out;
+}
+
+PVDynamic::PVDynamic(PVDynamicParams params) : params_(std::move(params)) {}
+
+void PVDynamic::assignStateIndices(int& offset) {
+  range_ = {offset, 2};
+  offset += range_.size;
+}
+
+void PVDynamic::initializeFromPowerFlow(const PowerFlowResult&, DynamicState& x, NetworkState&) {
+  if (range_.empty()) return;
+  x.x[range_.offset + 0] =
+      params_.p_ref_mw * std::max(0.0, params_.irradiance_pu) / safe_base(params_.base_mva);
+  x.x[range_.offset + 1] = params_.q_ref_mvar / safe_base(params_.base_mva);
+}
+
+bool PVDynamic::trimToNetworkEquilibrium(DynamicState& x, NetworkState&) {
+  if (!params_.in_service || range_.empty()) return false;
+  bool changed = false;
+  changed = set_if_changed(
+                x.x,
+                range_.offset + 0,
+                params_.p_ref_mw * std::max(0.0, params_.irradiance_pu) /
+                    safe_base(params_.base_mva)) ||
+            changed;
+  changed = set_if_changed(x.x,
+                           range_.offset + 1,
+                           params_.q_ref_mvar / safe_base(params_.base_mva)) ||
+            changed;
+  return changed;
+}
+
+void PVDynamic::computeDerivatives(double,
+                                   const DynamicState& x,
+                                   const NetworkState&,
+                                   Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (!params_.in_service || range_.empty()) return;
+  const double tau = std::max(kMinTimeConstant, params_.response_t_s);
+  const double p_ref = params_.p_ref_mw * std::max(0.0, params_.irradiance_pu) /
+                       safe_base(params_.base_mva);
+  const double q_ref = params_.q_ref_mvar / safe_base(params_.base_mva);
+  dxdt[range_.offset + 0] = (p_ref - x.x[range_.offset + 0]) / tau;
+  dxdt[range_.offset + 1] = (q_ref - x.x[range_.offset + 1]) / tau;
+}
+
+void PVDynamic::stamp(double,
+                      const DynamicState& x,
+                      const NetworkState& y,
+                      DynamicStamp& stamp) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
+  Complex s_total(x.x[range_.offset + 0], x.x[range_.offset + 1]);
+  if (params_.current_limit_pu > 0.0) {
+    const double vavg = std::max(kMinVoltage, avg_voltage_mag(v));
+    const double i_mag = std::abs(s_total) / vavg;
+    if (i_mag > params_.current_limit_pu) {
+      s_total *= params_.current_limit_pu / std::max(i_mag, 1e-9);
+    }
+  }
+  for (int phase = 0; phase < 3; ++phase) {
+    const Complex vv = std::abs(v[phase]) > kMinVoltage
+                           ? v[phase]
+                           : balanced_phasors(1.0, 0.0)[phase];
+    stamp.addAcCurrent(3 * params_.bus_pos + phase,
+                        std::conj((s_total / 3.0) / vv));
+  }
+}
+
+void PVDynamic::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
+  const bool matching = event.component_index == 0 ||
+                        event.component_index == params_.component_index;
+  if (!matching) return;
+  if (event.type == DynamicEventType::GeneratorTrip ||
+      event.type == DynamicEventType::VSCTrip) {
+    params_.in_service = false;
+    if (!range_.empty() && range_.offset + 1 < x.x.size()) {
+      x.x.segment(range_.offset, range_.size).setZero();
+    }
+  } else if (event.type == DynamicEventType::Custom && event.component_type == "PV") {
+    const auto it = event.params.find("irradiance_pu");
+    params_.irradiance_pu =
+        std::max(0.0, it == event.params.end() ? event.value : it->second);
+    const auto p_it = event.params.find("p_ref_mw");
+    if (p_it != event.params.end()) params_.p_ref_mw = p_it->second;
+    const auto q_it = event.params.find("q_ref_mvar");
+    if (q_it != event.params.end()) params_.q_ref_mvar = q_it->second;
+  }
+}
+
+std::string PVDynamic::name() const {
+  return params_.label.empty() ? "PV dynamic " + std::to_string(params_.component_index)
+                               : params_.label;
+}
+
+DynamicDeviceOutput PVDynamic::output(const DynamicState& x, const NetworkState& y) const {
+  DynamicDeviceOutput out = make_output_base(*this,
+                                             params_.bus,
+                                             params_.canvas_type,
+                                             params_.component_domain,
+                                             params_.source_type);
+  out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  out.values["irradiance_pu"] = params_.irradiance_pu;
+  out.values["current_limit_pu"] = params_.current_limit_pu;
+  if (!range_.empty() && range_.offset + 1 < x.x.size()) {
+    out.values["p_mw"] = x.x[range_.offset + 0] * safe_base(params_.base_mva);
+    out.values["q_mvar"] = x.x[range_.offset + 1] * safe_base(params_.base_mva);
+  }
+  add_voltage_metrics(out, y, params_.bus_pos);
+  return out;
+}
+
+ProtectionRelay::ProtectionRelay(ProtectionRelayParams params) : params_(std::move(params)) {}
+
+void ProtectionRelay::assignStateIndices(int& offset) {
+  range_ = {offset, 1};
+  offset += range_.size;
+}
+
+void ProtectionRelay::initializeFromPowerFlow(const PowerFlowResult&, DynamicState& x, NetworkState&) {
+  if (!range_.empty()) x.x[range_.offset] = 0.0;
+}
+
+bool ProtectionRelay::trimToNetworkEquilibrium(DynamicState& x, NetworkState&) {
+  if (range_.empty()) return false;
+  return set_if_changed(x.x, range_.offset, 0.0);
+}
+
+void ProtectionRelay::computeDerivatives(double,
+                                         const DynamicState& x,
+                                         const NetworkState& y,
+                                         Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (!params_.in_service || params_.tripped || range_.empty()) return;
+  const double v = params_.bus_pos >= 0 ? avg_voltage_mag(bus_voltage(y, params_.bus_pos)) : 1.0;
+  const bool voltage_violation =
+      v < params_.undervoltage_pickup_pu || v > params_.overvoltage_pickup_pu;
+  if (voltage_violation) {
+    dxdt[range_.offset] = 1.0;
+  } else {
+    dxdt[range_.offset] = -x.x[range_.offset] / std::max(kMinTimeConstant, params_.trip_delay_s);
+  }
+}
+
+void ProtectionRelay::stamp(double,
+                            const DynamicState&,
+                            const NetworkState&,
+                            DynamicStamp&) const {}
+
+void ProtectionRelay::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
+  const bool matching = event.component_index == 0 ||
+                        event.component_index == params_.component_index;
+  if (!matching) return;
+  if (event.type == DynamicEventType::Custom && event.component_type == "ProtectionRelay") {
+    params_.tripped = event.value != 0.0;
+    if (!range_.empty() && range_.offset < x.x.size() && !params_.tripped) {
+      x.x[range_.offset] = 0.0;
+    }
+  }
+}
+
+std::string ProtectionRelay::name() const {
+  return params_.label.empty()
+             ? "Protection relay " + std::to_string(params_.component_index)
+             : params_.label;
+}
+
+DynamicDeviceOutput ProtectionRelay::output(const DynamicState& x,
+                                            const NetworkState& y) const {
+  DynamicDeviceOutput out = make_output_base(*this,
+                                             params_.bus,
+                                             params_.canvas_type,
+                                             params_.component_domain,
+                                             params_.source_type);
+  const double timer =
+      (!range_.empty() && range_.offset < x.x.size()) ? std::max(0.0, x.x[range_.offset]) : 0.0;
+  out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  out.values["tripped"] = params_.tripped ? 1.0 : 0.0;
+  out.values["timer_s"] = timer;
+  out.values["trip_delay_s"] = params_.trip_delay_s;
+  out.values["pickup_active"] = timer >= params_.trip_delay_s ? 1.0 : 0.0;
+  out.values["undervoltage_pickup_pu"] = params_.undervoltage_pickup_pu;
+  out.values["overvoltage_pickup_pu"] = params_.overvoltage_pickup_pu;
+  add_voltage_metrics(out, y, params_.bus_pos);
   return out;
 }
 

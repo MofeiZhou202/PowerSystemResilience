@@ -38,6 +38,10 @@ hacdcpf_add_test(test_io_json             test_io_json.cpp)
 # engines, used by component-level cross-check and benchmark harnesses.
 hacdcpf_add_test(test_external_grid_io    test_external_grid_io.cpp)
 
+# I/O: explicit rich-component coverage contract for internal JSON, canonical
+# native models, GridLAB-D text snapshots, and OpenDSS text snapshots.
+hacdcpf_add_test(test_component_io_mapping test_component_io_mapping.cpp)
+
 # I/O: ETAP Excel round-circle (excel in / excel out). Requires OpenXLSX, so it
 # is only registered when ETAP support is compiled into the core library.
 if(HACDCPF_ENABLE_ETAP)

@@ -16,7 +16,13 @@ enum class DynamicSolverType {
 };
 
 enum class DynamicLinearSolverType {
-  EigenSparseLU
+  EigenSparseLU,
+  EigenSparseQR,
+  EigenBiCGSTAB,
+  KLU,
+  UMFPACK,
+  Pardiso,
+  PETSc
 };
 
 struct DynamicSolverOptions {
@@ -44,9 +50,13 @@ struct DynamicSolverOptions {
   bool include_constant_power_as_admittance{true};
   bool dynamic_dc_link{false};
   bool record_every_step{true};
+  bool record_initial_state{true};
   bool verbose{false};
   int max_step_halving{8};
   int max_dynamic_trim_iters{12};
+  int output_every_steps{1};
+  double output_interval_s{0.0};
+  int max_recorded_snapshots{0};
   double dynamic_trim_tol{1e-7};
 
   double source_stiffness_pu{1e4};
