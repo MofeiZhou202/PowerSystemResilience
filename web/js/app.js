@@ -6925,7 +6925,9 @@ const App = (() => {
       const acRepairs = parseNumList('resAcRepairDuration');
       const dcRepairs = parseNumList('resDcRepairDuration');
       const resilienceModel = document.getElementById('resModelSelect')?.value || 'RAStyleStageMILP';
-      const resilienceSolver = document.getElementById('resSolverSelect')?.value || 'Native';
+      const resilienceSolver = document.getElementById('resSolverSelect')?.value || 'Gurobi';
+      const considerSwitches = !!document.getElementById('resConsiderSwitches')?.checked;
+      const allowMess = !!document.getElementById('resAllowMess')?.checked;
       const manual_faults = [];
       acIds.forEach((id, i) => manual_faults.push({ branch_type: 'AC', branch_id: id, start_hr: atOr(acStarts, i, 0), repair_hr: atOr(acRepairs, i, 6), label: `AC branch ${id}` }));
       dcIds.forEach((id, i) => manual_faults.push({ branch_type: 'DC', branch_id: id, start_hr: atOr(dcStarts, i, 0), repair_hr: atOr(dcRepairs, i, 8), label: `DC branch ${id}` }));
@@ -6936,9 +6938,12 @@ const App = (() => {
         dc_fault_branch_ids: dcIds,
         manual_faults,
         mobile_storage_speed_kmh: num('resMobileSpeed', 40),
+        allow_mess_dispatch: allowMess,
+        mip_time_limit_s: Math.max(10, Math.round(num('resMipTimeLimit', 180))),
+        mip_gap: Math.max(0, num('resMipGap', 0.03)),
         resilience_model: resilienceModel,
         resilience_solver: resilienceSolver,
-        consider_switches: true,
+        consider_switches: considerSwitches,
         horizon_hours: Math.max(48, Math.ceil(latestEnd + 4)),
       };
     }
@@ -7009,16 +7014,20 @@ const App = (() => {
         mess_travel_speed_kmph: p.mobile_storage_speed_kmh,
         horizon_hours: p.horizon_hours,
         time_step_hr: 1.0,
+        mip_time_limit_s: p.mip_time_limit_s,
+        mip_gap: p.mip_gap,
         allow_reconfiguration: true,
-        allow_mess_dispatch: true,
+        allow_mess_dispatch: p.allow_mess_dispatch,
         run_power_flow: false,
-        consider_switches: true,
-        enable_disaster_stages: isRaStageModel,
+        consider_switches: p.consider_switches,
+        enable_disaster_stages: isRaStageModel && p.consider_switches,
         use_ra_style_stage_milp: isRaStageModel,
-        allow_stage1_open_switches: isRaStageModel,
-        allow_stage2_close_ties: isRaStageModel,
-        require_switch_for_nonfault_branch_operation: isRaStageModel,
-        allow_branch_operation_without_switch: !isRaStageModel,
+        use_strict_mip_for_mess: isRaStageModel && p.allow_mess_dispatch,
+        fallback_to_stage_mess_dispatch: true,
+        allow_stage1_open_switches: isRaStageModel && p.consider_switches,
+        allow_stage2_close_ties: isRaStageModel && p.consider_switches,
+        require_switch_for_nonfault_branch_operation: isRaStageModel && p.consider_switches,
+        allow_branch_operation_without_switch: !p.consider_switches,
         post_fault_reconfig_window_hr: 2.0,
       };
       if (Array.isArray(scenarioProfiles.loadProfile) && scenarioProfiles.loadProfile.length) {
@@ -7158,6 +7167,16 @@ const App = (() => {
       return key || '—';
     }
 
+    function messDispatchModelLabel(model) {
+      const key = String(model || '');
+      if (key === 'ra_residual_mess_milp') return 'RA残余切负荷移储MILP';
+      if (key === 'strict_mip') return 'Strict MIP';
+      if (key === 'stage_dispatch_fallback') return '阶段局部移储调度';
+      if (key === 'disabled') return '禁用';
+      if (key === 'none') return '无';
+      return key || '—';
+    }
+
     function summarizeMessTrace(trace) {
       const nums = arr => Array.isArray(arr) ? arr.map(Number).filter(Number.isFinite) : [];
       const unique = arr => Array.from(new Set((arr || []).filter(v => v !== null && v !== undefined && String(v) !== '')));
@@ -7250,6 +7269,7 @@ const App = (() => {
         ['目标值', nf(ms.objective_value, 3)],
         ['MIP Gap', nf(ms.mip_gap, 4)],
         ['运行时间 (s)', nf(ms.runtime_sec, 2)],
+        ['移储调度模型', messDispatchModelLabel(data.mess_dispatch_model)],
         ['可行', data.feasible === false ? '✗ 否' : '✓ 是'],
         ['状态', data.status ?? '—'],
         ['弹性指数', nf(data.resilience_index, 4), resilienceIndexTip],
@@ -7269,14 +7289,6 @@ const App = (() => {
       summaryHtml += '</tbody></table>';
 
       let detailHtml = '';
-      if (ms.formulation_notes) {
-        detailHtml += '<h4 style="margin:0 0 4px;">模型说明</h4>';
-        detailHtml += `<p class="empty-hint compact-hint">${escapeHtml(String(ms.formulation_notes))}</p>`;
-      } else if ((data.effective_model || data.model) === 'HeuristicSequential') {
-        detailHtml += '<h4 style="margin:0 0 4px;">模型说明</h4><p class="empty-hint compact-hint">启发式序贯模型使用移动储能路径分配，并在轨迹表中体现 bus / target_bus / status / remaining_travel_hr。</p>';
-      } else if ((data.effective_model || data.model) === 'MultiPeriodMIPLinDistFlow') {
-        detailHtml += '<h4 style="margin:0 0 4px;">模型说明</h4><p class="empty-hint compact-hint">多时段MIP模型包含移动储能时空路径约束，求解统计见评估指标。</p>';
-      }
       detailHtml += renderMessTrajectoryTable(data, nf);
       detailHtml += renderResilienceComparisonTable(nf);
       if (Array.isArray(data.fault_sequence) && data.fault_sequence.length) {

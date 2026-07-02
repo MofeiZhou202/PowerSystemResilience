@@ -13553,7 +13553,7 @@ int main(int argc, char** argv) {
             case hacdcpf::analysis::DistributionResilienceMIPSolver::Gurobi:
               return std::string{"Gurobi"};
           }
-          return std::string{"Native"};
+          return std::string{"Gurobi"};
         };
         auto parse_resilience_model = [&](const std::string& raw) {
           const std::string v = lower_copy(raw);
@@ -13569,15 +13569,19 @@ int main(int argc, char** argv) {
         auto parse_resilience_solver = [&](const std::string& raw) {
           const std::string v = lower_copy(raw);
           if (v == "highs") return hacdcpf::analysis::DistributionResilienceMIPSolver::HiGHS;
+          if (v == "native") return hacdcpf::analysis::DistributionResilienceMIPSolver::Native;
           if (v == "gurobi") return hacdcpf::analysis::DistributionResilienceMIPSolver::Gurobi;
-          return hacdcpf::analysis::DistributionResilienceMIPSolver::Native;
+          return hacdcpf::analysis::DistributionResilienceMIPSolver::Gurobi;
         };
         const std::string requested_model = string_value_any({"model", "resilience_model"}, "RAStyleStageMILP");
-        const std::string requested_solver = string_value_any({"mip_solver", "resilience_solver", "solver"}, "Native");
+        const std::string requested_solver = string_value_any({"mip_solver", "resilience_solver", "solver"}, "Gurobi");
         opts.model = parse_resilience_model(requested_model);
         opts.mip.solver = parse_resilience_solver(requested_solver);
-        if (j.contains("mip_gap") && j["mip_gap"].is_number()) opts.mip.mip_gap = j["mip_gap"].get<double>();
-        if (j.contains("mip_time_limit_s") && j["mip_time_limit_s"].is_number_integer()) opts.mip.max_time_s = j["mip_time_limit_s"].get<int>();
+        opts.use_strict_mip_for_mess = j.value("use_strict_mip_for_mess", true);
+        opts.fallback_to_stage_mess_dispatch = j.value("fallback_to_stage_mess_dispatch", true);
+        opts.mip.mip_gap = j.value("mip_gap", 0.03);
+        opts.mip.max_time_s = j.value("mip_time_limit_s", 180);
+        if (j.contains("mip_time_limit_s") && j["mip_time_limit_s"].is_number()) opts.mip.max_time_s = static_cast<int>(std::round(j["mip_time_limit_s"].get<double>()));
         if (j.contains("mip_max_nodes") && j["mip_max_nodes"].is_number_integer()) opts.mip.max_nodes = j["mip_max_nodes"].get<int>();
         if (j.contains("mip_num_threads") && j["mip_num_threads"].is_number_integer()) opts.mip.num_threads = j["mip_num_threads"].get<int>();
         auto parse_profile = [&](const char* key) {
@@ -13943,8 +13947,13 @@ int main(int argc, char** argv) {
         out["peak_shed_mw"] = result.peak_shed_mw;
         out["mess_energy_delivered_mwh"] = result.mess_energy_delivered_mwh;
         out["mess_travel_distance_km"] = result.mess_travel_distance_km;
+        out["mess_dispatch_model"] = result.mess_dispatch_model;
         out["total_switch_actions"] = result.total_switch_actions;
         out["total_repaired_faults"] = result.total_repaired_faults;
+        out["completed"] = result.completed;
+        out["total_ens_mwh"] = result.total_ens_mwh;
+        out["max_curtailment_mw"] = result.max_curtailment_mw;
+        out["restoration_time_hr"] = result.restoration_time_hr;
         out["scenario_profile_binding_diagnostics"] = json{
             {"scenario_profile_count", scenario_profile_count},
             {"load_profile_map_rows", load_profile_map_rows},
@@ -14182,7 +14191,13 @@ int main(int argc, char** argv) {
                                    {"objective_value", result.model_stats.objective_value},
                                    {"mip_gap", result.model_stats.mip_gap},
                                    {"runtime_sec", result.model_stats.runtime_sec},
-                                   {"formulation_notes", result.model_stats.formulation_notes}};
+                                   {"formulation_notes", result.model_stats.formulation_notes},
+                                   {"validity", json{{"dc_network_modelled", result.model_stats.validity.dc_network_modelled},
+                                                       {"vsc_dispatch_modelled", result.model_stats.validity.vsc_dispatch_modelled},
+                                                       {"ac_branch_flow_limits_enforced", result.model_stats.validity.ac_branch_flow_limits_enforced},
+                                                       {"lindistflow_voltage_envelope_enforced", result.model_stats.validity.lindistflow_voltage_envelope_enforced},
+                                                       {"radial_topology_enforced", result.model_stats.validity.radial_topology_enforced},
+                                                       {"mip_gap_within_tolerance", result.model_stats.validity.mip_gap_within_tolerance}}}};
         out["shed_critical"] = shed_critical;
         out["shed_high"] = shed_high;
         out["shed_medium"] = shed_medium;

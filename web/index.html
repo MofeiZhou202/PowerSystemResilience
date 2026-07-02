@@ -412,15 +412,24 @@
     <label class="sub-label" title="DC 修复时长（小时），单值或逗号列表">DC修复时长
       <input id="resDcRepairDuration" type="text" value="8" placeholder="8,8"/>
     </label>
-    <label class="sub-label" title="移动储能行驶速度 (km/h)">移储速度
+    <label class="sub-label" title="是否考虑移动储能 MESS；关闭可显著加快弹性评估">考虑移储
+      <input id="resAllowMess" type="checkbox"/>
+    </label>
+    <label class="sub-label" title="移动储能行驶速度 (km/h)，仅在考虑移储时生效">移储速度
       <input id="resMobileSpeed" type="number" value="40" min="0" step="5"/>
+    </label>
+    <label class="sub-label" title="MIP 求解时间上限（秒）；默认 180 秒。Native 求解器严格使用该限制，Gurobi 受后端适配器支持情况影响。">时限(s)
+      <input id="resMipTimeLimit" type="number" value="180" min="10" step="10"/>
+    </label>
+    <label class="sub-label" title="MIP 相对 gap；默认 0.03。较大 gap 可加快求解。">Gap
+      <input id="resMipGap" type="number" value="0.03" min="0" max="1" step="0.01"/>
     </label>
     <input id="resModelSelect" type="hidden" value="RAStyleStageMILP"/>
     <label class="sub-label" title="MIP模型使用的求解器；启发式序贯模型会忽略该选项">求解器
       <select id="resSolverSelect">
-        <option value="Native" selected>Native</option>
+        <option value="Native">Native</option>
         <option value="HiGHS">HiGHS</option>
-        <option value="Gurobi">Gurobi</option>
+        <option value="Gurobi" selected>Gurobi</option>
       </select>
     </label>
     <input id="resConsiderSwitches" type="checkbox" style="display:none"/>
