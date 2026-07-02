@@ -311,6 +311,8 @@ set(HACDCPF_SOURCES
   src/io/json_io.cpp
   src/io/matpower_parser.cpp
   src/io/case_builders.cpp
+  src/io/external_grid_io.cpp
+  src/io/gridlabd_bridge.cpp
   # ── validation ────────────────────────────────────────────────────────────
   src/validation/validate_system.cpp
   # ── api ──────────────────────────────────────────────────────────────────

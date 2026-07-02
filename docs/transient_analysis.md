@@ -32,6 +32,48 @@ where:
 - $$u$$ is the vector of control references, disturbances, and events,
 - $$t$$ is time.
 
+## Transient Equilibrium and External AC Cross-Check
+
+The pre-event point for transient stability must be a DAE equilibrium, not merely a numerically converged network solve. The static power flow provides the algebraic voltages and powers, then each dynamic device must initialize its internal states so that:
+
+$$
+f(x_0,y_0,u_0,t_0)=0,
+\qquad
+g(x_0,y_0,u_0,t_0)=0.
+$$
+
+If this consistency step is done correctly, the simulation should not need several artificial seconds to absorb initialization imbalance before the first scheduled contingency. Any control-frequency or PLL drift at the no-event start is therefore an initialization defect or a model-scope mismatch, not a required transient phenomenon.
+
+GridLAB-D is used as an independent AC-scope check of $$g(x_0,y_0,u_0,t_0)=0$$ for the network part. The current harness exports the canonical AC network to a balanced three-phase GridLAB-D snapshot and compares bus voltages and branch powers when the exported model is in the shared PQ feeder scope. It validates rich-to-canonical projection, AC component parameters, transformer export, and parallel-line equivalents before dynamic devices are attached.
+
+Cases outside that shared scope are still valuable diagnostics but not exact equivalence claims. MATPOWER-style PV buses are the main example: until GridLAB-D export includes equivalent voltage-regulating generator behavior, non-slack generators are represented as negative constant-power injections, so PV-heavy transmission cases such as case300 are run-only diagnostics. DC networks, converter controls, and transient state equations remain inside the `dynamics` module and are cross-checked in later stages through boundary injections and event replay.
+
+For data exchange and component-level verification, the module also provides an
+always-compiled OpenDSS/GridLAB-D text I/O layer. Its purpose is different from
+the external GridLAB-D run harness:
+
+$$
+\text{HybridPowerSystem}
+\longleftrightarrow
+\text{OpenDSS DSS / GridLAB-D GLM}
+\longleftrightarrow
+\text{HybridPowerSystem}.
+$$
+
+The first exact scope is the balanced AC algebraic network:
+
+- buses and slack/source references,
+- series lines with both engineering-unit and per-unit impedance recovery,
+- transformer equivalents with nameplate voltage/rating metadata,
+- constant-power loads and PQ/static generators.
+
+This bidirectional conversion is the foundation for point-by-point verification:
+each imported external component can be projected into the canonical network,
+solved by the HACDCPF power-flow engine, exported again, and compared against an
+external engine. Later transient verification should extend the same contract to
+phase-domain lines, regulator controls, DER controller blocks, and replayable
+contingency/event definitions before claiming DAE-level equivalence.
+
 ---
 
 # 1. Existing Static Hybrid AC/DC Power-Flow Formulation

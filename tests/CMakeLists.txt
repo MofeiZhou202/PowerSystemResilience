@@ -34,6 +34,10 @@ hacdcpf_add_test(test_hacdcdss            test_hacdcdss.cpp)
 # I/O: JSON round-trip, MATPOWER parsing, safe try_ variants, OPF/PF result ser.
 hacdcpf_add_test(test_io_json             test_io_json.cpp)
 
+# I/O: text-format conversion for OpenDSS/GridLAB-D without requiring external
+# engines, used by component-level cross-check and benchmark harnesses.
+hacdcpf_add_test(test_external_grid_io    test_external_grid_io.cpp)
+
 # I/O: ETAP Excel round-circle (excel in / excel out). Requires OpenXLSX, so it
 # is only registered when ETAP support is compiled into the core library.
 if(HACDCPF_ENABLE_ETAP)
@@ -145,6 +149,12 @@ hacdcpf_add_test(test_three_phase_nr_regulator test_three_phase_nr_regulator.cpp
 # Transient dynamics: rich/canonical model builder, device-stamped phasor
 # network solve, events, and hybrid AC/DC converter coupling.
 hacdcpf_add_test(test_transient_dynamics test_transient_dynamics.cpp)
+
+# GridLAB-D bridge: canonical AC snapshot export and optional external
+# component/feeder comparison. The test target is always built; external runs
+# skip cleanly unless gridlabd is available through HACDCPF_GRIDLABD_BIN,
+# GRIDLABD_BIN, PATH, or a sibling gridlab-d build.
+hacdcpf_add_test(test_gridlabd_compare test_gridlabd_compare.cpp)
 
 set(_HACDCPF_PHASE_DOMAIN_DATA_DIR
   "${CMAKE_SOURCE_DIR}/tests/data/phase_domain_julia")

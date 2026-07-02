@@ -11,6 +11,8 @@ Projection / Canonicalization
         ↓
 Static PF / OPF initialization
         ↓
+Optional GridLAB-D AC snapshot cross-check
+        ↓
 DynamicModelBuilder
         ↓
 DynamicSolverData
@@ -23,6 +25,160 @@ DynamicResults
 The core idea is:
 
 > Keep your existing PF/OPF module as the initialization and planning layer, then add a new `dynamics` runtime family that solves three-phase unbalanced hybrid AC/DC transient DAEs using sparse linear solvers and time integration.
+
+---
+
+# GridLAB-D Validation Harness
+
+The transient module now has a dedicated GridLAB-D bridge for AC-scope validation before the dynamic simulation starts:
+
+```text
+rich HybridPowerSystem
+        ↓
+project_to_canonical_models()
+        ↓
+canonical AC snapshot export (.glm)
+        ↓
+GridLAB-D powerflow solve, when gridlabd is installed
+        ↓
+bus-voltage / branch-flow comparison report
+```
+
+This is intentionally a snapshot validation harness, not a replacement transient engine. It answers the question:
+
+> Is the algebraic AC network equilibrium used to initialize the transient DAE consistent with an independent distribution power-flow engine?
+
+The harness is implemented in:
+
+```text
+include/hacdcpf/io/gridlabd_bridge.hpp
+src/io/gridlabd_bridge.cpp
+tests/test_gridlabd_compare.cpp
+```
+
+It exports balanced three-phase GridLAB-D models from the canonical AC network:
+
+- canonical buses become GridLAB-D `meter` or `load` objects,
+- canonical branches become direct-impedance `line_configuration` plus `overhead_line` objects,
+- voltage-base-changing or tapped branches become GridLAB-D `transformer_configuration` plus `transformer` objects,
+- plain parallel AC lines between the same two buses are merged into one equivalent branch before export because GridLAB-D reports one component flow per object,
+- loads, shunts, static generators, PV, renewable generation, and non-slack generators are folded into balanced constant-power bus injections,
+- branch provenance records whether the exported canonical branch came from an original `ACBranch`, `Transformer2W`, `Transformer3W`, `Switch`, or `CircuitBreaker`,
+- recorder CSV files capture bus voltage and branch power for comparison.
+
+The bridge discovers GridLAB-D at runtime from:
+
+```text
+HACDCPF_GRIDLABD_BIN
+GRIDLABD_BIN
+PATH
+../gridlab-d build locations
+```
+
+If no executable is available, tests skip the external comparison instead of failing. This is important because the repository may contain a sibling GridLAB-D source checkout without a built `gridlabd` binary.
+
+The validation ladder is:
+
+```text
+exact component cases:
+  - 2-bus source-line-load
+  - 3-bus radial feeder
+  - static generator as constant-power injection
+  - transformer export/run smoke with transformer branch-flow comparison disabled
+
+exact feeder cases:
+  - case33bw AC scope
+  - case69 AC scope, enabled with HACDCPF_GRIDLABD_RUN_LARGE=1
+
+diagnostic cases:
+  - PV-bus voltage-regulation mismatch case
+  - case300 AC scope, enabled with HACDCPF_GRIDLABD_RUN_LARGE=1
+```
+
+## OpenDSS/GridLAB-D Text I/O
+
+The validation harness is now complemented by an always-available text-format
+I/O layer:
+
+```text
+include/hacdcpf/io/external_grid_io.hpp
+src/io/external_grid_io.cpp
+tests/test_external_grid_io.cpp
+```
+
+It follows the same style as the JSON API:
+
+```cpp
+std::string dss = hacdcpf::io::to_opendss(sys);
+hacdcpf::HybridPowerSystem from_dss = hacdcpf::io::from_opendss(dss);
+
+std::string glm = hacdcpf::io::to_gridlabd(sys);
+hacdcpf::HybridPowerSystem from_glm = hacdcpf::io::from_gridlabd(glm);
+```
+
+File and exception-free variants are also available:
+
+```cpp
+hacdcpf::io::save_opendss(sys, "case.dss");
+auto safe = hacdcpf::io::try_load_gridlabd("case.glm");
+```
+
+The first supported conversion scope is the balanced AC network subset needed
+for point-by-point power-flow validation:
+
+- AC buses and slack/source buses,
+- AC lines with engineering-unit provenance and per-unit impedance,
+- voltage-base-changing/tapped branches as two-winding transformer equivalents,
+- GridLAB-D `meter`, `load`, `line_configuration`, `overhead_line`,
+  `transformer_configuration`, and `transformer` objects,
+- OpenDSS `Circuit`, `Vsource`, `Line`, `Transformer`, `Load`, `Generator`,
+  and `PVSystem` objects,
+- constant-power loads and PQ/static generators,
+- strict/permissive import modes with `*_with_report()` warnings and skipped
+  object lists.
+
+This is not tied to the optional OpenDSS C-API and does not require GridLAB-D to
+be installed. It gives the test harness a practical loop:
+
+```text
+internal JSON / built-in case
+        ↓
+OpenDSS or GridLAB-D text export
+        ↓
+external solver, when available
+        ↓
+text import back to HybridPowerSystem
+        ↓
+HACDCPF PF / transient initialization checks
+```
+
+Future extensions should add unbalanced phase-domain objects, regulator/control
+objects, and richer DER/controller projections through this I/O layer before
+claiming exact transient equivalence against external engines.
+
+The distinction matters. GridLAB-D is an excellent independent distribution
+power-flow oracle for PQ feeder snapshots, but the current export does not yet
+represent MATPOWER-style PV bus voltage regulation. Non-slack generators are
+therefore exported as negative constant-power loads. For PV-heavy transmission
+cases such as case300, the harness still exports the model, runs GridLAB-D, and
+parses recorder data, but it does not claim bus-voltage numerical equivalence.
+
+On this workspace the large comparison can be run with:
+
+```sh
+HACDCPF_GRIDLABD_BIN=/Users/tianyangzhao/Codes/gridlab-d \
+HACDCPF_GRIDLABD_RUN_LARGE=1 \
+./build/macos-release/tests/test_gridlabd_compare "[gridlabd][compare][external]" -s
+```
+
+For hybrid AC/DC systems, the first validation scope is AC-only:
+
+- DC buses and DC branches are not exported,
+- VSC converter internals are not exported,
+- converter boundary injections are disabled by default,
+- future work may enable converter AC terminal injections after the AC snapshot contract is stable.
+
+This keeps the validation claim precise. GridLAB-D checks the AC algebraic network and component projection; the dynamic solver still owns the GFL/GFM, synchronous-machine, DC-link, battery, and event-response equations.
 
 ---
 

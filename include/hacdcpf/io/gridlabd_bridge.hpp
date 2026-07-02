@@ -26,6 +26,9 @@ struct GridLABDExportOptions {
   bool include_metadata_comments{true};
   bool include_line_capacitance{true};
   bool include_converter_boundary_injections{false};
+  bool merge_parallel_branches{true};
+  int gridlabd_iteration_limit{100000};
+  int gridlabd_nr_iteration_limit{1000};
   double minimum_base_kv{0.12};
   double nominal_frequency_hz{50.0};
   std::string model_name{"hacdcpf_gridlabd_snapshot"};
@@ -44,7 +47,9 @@ struct GridLABDComparisonOptions {
   double va_tolerance_deg{0.5};
   double branch_p_tolerance_mw{2e-2};
   double branch_q_tolerance_mvar{2e-2};
+  bool compare_bus_voltages{true};
   bool compare_branch_flows{true};
+  bool compare_transformer_branch_flows{false};
   bool require_gridlabd{false};
 };
 
@@ -69,6 +74,10 @@ struct GridLABDBranchMapping {
   std::string gridlabd_name;
   std::string gridlabd_configuration_name;
   bool exported{false};
+  bool exported_as_transformer{false};
+  bool exported_as_parallel_equivalent{false};
+  int merged_into_canonical_branch_index{0};
+  std::vector<int> merged_canonical_branch_indices;
   std::string skip_reason;
 };
 
