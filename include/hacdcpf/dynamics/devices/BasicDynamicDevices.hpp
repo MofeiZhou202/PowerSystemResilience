@@ -20,6 +20,13 @@ enum class FrequencyEstimatorKind {
   FixedFrequency
 };
 
+enum class DynamicLoadModelKind {
+  ConstantPower,
+  ConstantCurrent,
+  ConstantImpedance,
+  ZIP
+};
+
 struct ACLoadDynamicParams {
   int component_index{0};
   int bus{0};
@@ -31,8 +38,16 @@ struct ACLoadDynamicParams {
   std::vector<DynamicModelProfile> model_profiles;
   double p_mw{0.0};
   double q_mvar{0.0};
+  double nominal_voltage_pu{1.0};
+  double z_weight_p{0.0};
+  double i_weight_p{0.0};
+  double p_weight_p{1.0};
+  double z_weight_q{0.0};
+  double i_weight_q{0.0};
+  double p_weight_q{1.0};
   double base_mva{100.0};
   double scale{1.0};
+  DynamicLoadModelKind model_kind{DynamicLoadModelKind::ConstantImpedance};
   bool in_service{true};
 };
 
@@ -222,9 +237,23 @@ struct VoltageSourceDynamicParams {
   double r_pu{0.0};
   double x_pu{0.10};
   double p_mech_mw{0.0};
+  double q_elec_mvar{0.0};
   double inertia_h{0.0};
   double damping_d{1.0};
   double droop_r{0.05};
+  double xd_pu{0.0};
+  double xq_pu{0.0};
+  double xdp_pu{0.0};
+  double xqp_pu{0.0};
+  double xdpp_pu{0.0};
+  double xl_pu{0.0};
+  double td0p_s{0.0};
+  double td0pp_s{0.0};
+  double tq0p_s{0.0};
+  double tq0pp_s{0.0};
+  double saturation_a{0.0};
+  double saturation_b{0.0};
+  bool psd_genrou_model{false};
   bool dynamic_angle{false};
   bool in_service{true};
 };
@@ -255,7 +284,7 @@ class SynchronousMachine : public DynamicDevice {
   [[nodiscard]] std::string type() const override { return params_.device_type; }
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
   [[nodiscard]] std::string modelStandard() const override { return "IEEE"; }
-  [[nodiscard]] std::string modelName() const override { return "ClassicalMachine"; }
+  [[nodiscard]] std::string modelName() const override;
   [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;

@@ -118,7 +118,10 @@ HACDCPF_RUN_PSD_COMPARE=1 ./build/macos-release/tests/test_transient_dynamics \
   "[dynamics][benchmark][psd][external]"
 ```
 
-Current limitation: the generator and load external comparisons are deliberately
-loose because HACDCPF still uses reduced dynamic subsets. They are evidence
-gates for trace plumbing and event alignment, not a claim of GENROU/ZIP waveform
-equivalence yet.
+The conventional component checks are now numerical PSD trace gates rather than
+plumbing-only checks. The ZIP constant-power case compares bus-102 and bus-103
+voltage-magnitude deviations against PSD Test 33. The GENROU case compares
+relative rotor speed tightly and relative rotor angle with a bounded envelope;
+the angle gate is intentionally broader than the inverter gates because HACDCPF
+still uses its synthesized three-phase network solve instead of PSD's exact
+positive-sequence residual DAE.

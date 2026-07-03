@@ -133,7 +133,7 @@ const App = (() => {
     document.body?.setAttribute('data-active-result-group', active);
     const panel = document.getElementById('rightPanel');
     if (panel) {
-      if (active === 'transient') {
+      if (active === 'transient' || active === 'modelIO') {
         const target = window.innerWidth <= 900 ? window.innerWidth : Math.round(Math.min(window.innerWidth * 0.66, 1180));
         const minUseful = window.innerWidth <= 900 ? window.innerWidth : Math.min(target, Math.max(560, window.innerWidth - 420));
         if (!panel.style.width || panel.offsetWidth < minUseful) {
@@ -145,6 +145,29 @@ const App = (() => {
         delete panel.dataset.autoTransientWidth;
       }
     }
+  }
+
+  function showModelIoStatus(title, rows = [], options = {}) {
+    const el = document.getElementById('modelIoResults');
+    if (!el) return;
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('modelIO');
+    const subtitle = options.subtitle || '统一 IO 操作记录';
+    const rowHtml = rows.length
+      ? rows.map(([label, value]) => `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(String(value ?? ''))}</td></tr>`).join('')
+      : '<tr><td colspan="2">暂无明细。</td></tr>';
+    const warnings = Array.isArray(options.warnings) && options.warnings.length
+      ? `<div class="transient-section-head"><h5>导入告警</h5><span>${options.warnings.length} 条</span></div>
+         <div class="transient-mini-grid">${options.warnings.map(w => `<div class="transient-mini-card"><strong>Warning</strong><span>${escapeHtml(w)}</span></div>`).join('')}</div>`
+      : '';
+    el.innerHTML = `
+      <div class="transient-section-head"><h5>${escapeHtml(title)}</h5><span>${escapeHtml(subtitle)}</span></div>
+      <div class="transient-table-scroll">
+        <table><tbody>${rowHtml}</tbody></table>
+      </div>
+      ${warnings}`;
+    switchTab('results');
   }
 
   // Build an inline attribute that makes a result row pan the canvas to a bus
@@ -835,31 +858,31 @@ const App = (() => {
   }
 
   // ========== Load Built-in Cases ==========
+  function fillSelectOptions(selectId, values, placeholder) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    select.innerHTML = `<option value="">${escapeHtml(placeholder)}</option>`;
+    (values || []).forEach(value => {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = value;
+      select.appendChild(opt);
+    });
+  }
+
   async function loadCaseList() {
     const data = await apiGet('/api/cases');
     if (!data) return;
-    const select = document.getElementById('caseSelect');
-    select.innerHTML = '<option value="">-- 加载算例 --</option>';
-    (data.cases || []).forEach(c => {
-      const opt = document.createElement('option');
-      opt.value = c;
-      opt.textContent = c;
-      select.appendChild(opt);
-    });
+    fillSelectOptions('caseSelect', data.cases, '-- 加载算例 --');
+    fillSelectOptions('ioCaseSelect', data.cases, '-- 选择算例 --');
     log(`已加载 ${(data.cases || []).length} 个内置算例`, 'success');
   }
 
   async function loadMatpowerFileList() {
     const data = await apiGet('/api/matpower_files');
     if (!data) return;
-    const select = document.getElementById('matpowerSelect');
-    select.innerHTML = '<option value="">-- MATPOWER文件 --</option>';
-    (data.files || []).forEach(f => {
-      const opt = document.createElement('option');
-      opt.value = f;
-      opt.textContent = f;
-      select.appendChild(opt);
-    });
+    fillSelectOptions('matpowerSelect', data.files, '-- MATPOWER文件 --');
+    fillSelectOptions('ioMatpowerSelect', data.files, '-- MATPOWER文件 --');
     log(`已加载 ${(data.files || []).length} 个MATPOWER文件`, 'success');
   }
 
@@ -887,6 +910,12 @@ const App = (() => {
         // Auto-run power flow after import
         log('自动运行潮流计算...', 'info');
         await runPowerFlow();
+        showModelIoStatus('MATPOWER 导入完成', [
+          ['文件', filename],
+          ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+          ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+          ['发电机', data.counts?.generators ?? data.generators ?? ''],
+        ], { subtitle: '已同步到画布并自动运行潮流' });
       } else {
         setStatus('加载失败', 'error');
       }
@@ -914,6 +943,13 @@ const App = (() => {
         }
       }
       setStatus('就绪');
+      showModelIoStatus('内置算例加载完成', [
+        ['算例', caseName],
+        ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+        ['DC母线', data.counts?.dc_buses ?? data.dc_buses ?? ''],
+        ['VSC', data.counts?.vsc_converters ?? data.vsc_converters ?? ''],
+      ], { subtitle: '当前后端会话与画布已更新' });
     } else {
       setStatus('加载失败', 'error');
     }
@@ -925,10 +961,13 @@ const App = (() => {
     if (data._raw_json) {
       try {
         const sys = JSON.parse(data._raw_json);
-        Canvas.loadFromSystemJson(sys);
-        _canvasDirty = false;  // backend already has the correct system
-        updateResilienceSwitchDefault();
-        invalidateAnalysisResults('系统已变更，旧潮流和碳流结果已失效');
+	        Canvas.loadFromSystemJson(sys);
+	        _canvasDirty = false;  // backend already has the correct system
+	        if ((data._has_three_phase_ac || sys.three_phase_ac) && document.getElementById('pfMethod')) {
+	          document.getElementById('pfMethod').value = 'three_phase';
+	        }
+	        updateResilienceSwitchDefault();
+	        invalidateAnalysisResults('系统已变更，旧潮流和碳流结果已失效');
         log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
       } catch (e) {
         log(`JSON解析失败: ${e.message}`, 'error');
@@ -937,6 +976,53 @@ const App = (() => {
     const warns = data._etap_warnings;
     if (Array.isArray(warns) && warns.length) {
       log(`${label}：${warns.length} 条导入告警（宽松模式）`, 'warn');
+    }
+  }
+
+  async function loadGridlabd(file) {
+    if (!file) return;
+    setStatus('导入GridLAB-D...', 'busy');
+    try {
+      const glm = await file.text();
+      const data = await apiPost('/api/session/load_gridlabd', { glm_string: glm });
+      if (!data) { setStatus('加载失败', 'error'); return; }
+      log(`已导入GridLAB-D GLM: ${file.name}`, 'success');
+      applyLoadedSystem(data, 'GridLAB-D GLM');
+      showModelIoStatus('GridLAB-D 导入完成', [
+        ['文件', file.name],
+        ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+        ['负荷', data.counts?.loads ?? data.loads ?? ''],
+      ], { subtitle: 'GLM 文本转换到当前系统', warnings: data._io_warnings || data._gridlabd_warnings || [] });
+      setStatus('就绪');
+    } catch (e) {
+      log(`导入GridLAB-D失败: ${e.message}`, 'error');
+      setStatus('加载失败', 'error');
+    }
+  }
+
+  async function loadOpendss(file) {
+    if (!file) return;
+    setStatus('导入OpenDSS...', 'busy');
+    try {
+      const dss = await file.text();
+	      const data = await apiPost('/api/session/load_opendss', { dss_string: dss, filename: file.name });
+      if (!data) { setStatus('加载失败', 'error'); return; }
+      log(`已导入OpenDSS DSS: ${file.name}`, 'success');
+      applyLoadedSystem(data, 'OpenDSS DSS');
+	      showModelIoStatus('OpenDSS 导入完成', [
+	        ['文件', file.name],
+	        ['导入路径', data._opendss_import_mode || ''],
+	        ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+	        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+	        ['三相母线', data.counts?.tp_buses ?? data.tp_buses ?? ''],
+	        ['三相线路', data.counts?.tp_lines ?? data.tp_lines ?? ''],
+	        ['负荷', data.counts?.loads ?? data.loads ?? ''],
+	      ], { subtitle: data._has_three_phase_ac ? 'DSS 已作为三相 abc 模型导入，并生成等值单线图' : 'DSS 文本转换到当前系统', warnings: data._io_warnings || data._opendss_warnings || [] });
+      setStatus('就绪');
+    } catch (e) {
+      log(`导入OpenDSS失败: ${e.message}`, 'error');
+      setStatus('加载失败', 'error');
     }
   }
 
@@ -979,6 +1065,12 @@ const App = (() => {
       }
       log(`已导入ETAP工作簿: ${file.name}`, 'success');
       applyLoadedSystem(data, 'ETAP工作簿');
+      showModelIoStatus('ETAP 工作簿导入完成', [
+        ['文件', file.name],
+        ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+        ['VSC', data.counts?.vsc_converters ?? data.vsc_converters ?? ''],
+      ], { subtitle: 'ETAP xlsx 转换到当前系统', warnings: data._etap_warnings || [] });
       setStatus('就绪');
     } catch (e) {
       log(`导入ETAP工作簿失败: ${e.message}`, 'error');
@@ -996,6 +1088,12 @@ const App = (() => {
       if (!data) { setStatus('加载失败', 'error'); return; }
       log(`已导入ETAP工程: ${file.name}`, 'success');
       applyLoadedSystem(data, 'ETAP工程');
+      showModelIoStatus('ETAP XML 导入完成', [
+        ['文件', file.name],
+        ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+        ['VSC', data.counts?.vsc_converters ?? data.vsc_converters ?? ''],
+      ], { subtitle: 'ETAP XML 转换到当前系统', warnings: data._etap_warnings || [] });
       setStatus('就绪');
     } catch (e) {
       log(`导入ETAP工程失败: ${e.message}`, 'error');
@@ -1012,6 +1110,10 @@ const App = (() => {
       updateResilienceSwitchDefault(true);
       invalidateAnalysisResults('系统已清空，旧潮流和碳流结果已失效');
       log('已创建空白系统', 'success');
+      showModelIoStatus('已创建空白系统', [
+        ['系统名', 'New System'],
+        ['Base MVA', '100'],
+      ], { subtitle: '当前会话已重置' });
       setStatus('就绪');
     } else {
       setStatus('创建失败', 'error');
@@ -1031,6 +1133,22 @@ const App = (() => {
     a.click();
     URL.revokeObjectURL(url);
     log('已导出系统JSON', 'success');
+    showModelIoStatus('JSON 导出完成', [
+      ['文件', 'power_system.json'],
+      ['大小', `${jsonStr.length} bytes`],
+    ], { subtitle: '从当前画布生成' });
+  }
+
+  function downloadTextFile(filename, text, mimeType = 'text/plain;charset=utf-8') {
+    const blob = new Blob([text], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   // Export the current system as an ETAP-schema .xlsx workbook (one sheet per
@@ -1071,6 +1189,10 @@ const App = (() => {
       a.click();
       URL.revokeObjectURL(url);
       log(`已导出ETAP工作簿: ${filename}`, 'success');
+      showModelIoStatus('ETAP 工作簿导出完成', [
+        ['文件', filename],
+        ['格式', 'xlsx'],
+      ], { subtitle: '从后端当前系统生成' });
       setStatus('就绪');
     } catch (err) {
       log(`导出ETAP失败: ${err.message}`, 'error');
@@ -1095,9 +1217,41 @@ const App = (() => {
       a.click();
       URL.revokeObjectURL(url);
       log(`已导出ETAP XML: ${a.download}`, 'success');
+      showModelIoStatus('ETAP XML 导出完成', [
+        ['文件', a.download],
+        ['大小', `${(data.xml_string || '').length} bytes`],
+      ], { subtitle: '从后端当前系统生成' });
       setStatus('就绪');
     } catch (err) {
       log(`导出ETAP XML失败: ${err.message}`, 'error');
+      setStatus('导出失败', 'error');
+    }
+  }
+
+  async function exportExternalGrid(format) {
+    const isGridlabd = format === 'gridlabd';
+    const label = isGridlabd ? 'GridLAB-D GLM' : 'OpenDSS DSS';
+    const endpoint = isGridlabd ? '/api/session/export_gridlabd' : '/api/session/export_opendss';
+    const ext = isGridlabd ? 'glm' : 'dss';
+    const mime = isGridlabd ? 'text/x-gridlabd;charset=utf-8' : 'text/x-opendss;charset=utf-8';
+    setStatus(`导出${label}中...`, 'busy');
+    try {
+      const ok = await syncToBackend();
+      if (!ok) { setStatus('导出失败', 'error'); return; }
+      const data = await apiPost(endpoint, {});
+      if (!data || data.error) throw new Error((data && data.error) || '导出失败');
+      const text = isGridlabd ? data.glm_string : data.dss_string;
+      const filename = `${data.name || 'system'}.${ext}`;
+      downloadTextFile(filename, text || '', mime);
+      log(`已导出${label}: ${filename}`, 'success');
+      showModelIoStatus(`${label} 导出完成`, [
+        ['文件', filename],
+        ['格式', ext],
+        ['大小', `${(text || '').length} bytes`],
+      ], { subtitle: '外部仿真工具文本导出', warnings: data.warnings || [] });
+      setStatus('就绪');
+    } catch (err) {
+      log(`导出${label}失败: ${err.message}`, 'error');
       setStatus('导出失败', 'error');
     }
   }
@@ -1112,6 +1266,7 @@ const App = (() => {
           json_string: JSON.stringify(sys)
         });
         if (data) {
+          let loadedName = sys?.name || '';
           if (data._raw_json) {
             // The backend strips unknown fields from the system JSON, so the
             // _canvas layout block (added by Canvas.buildSystemJson) is lost
@@ -1122,6 +1277,7 @@ const App = (() => {
             if (sys && sys._canvas && !raw._canvas) {
               raw._canvas = sys._canvas;
             }
+            loadedName = raw?.name || loadedName;
             Canvas.loadFromSystemJson(raw);
           } else {
             Canvas.loadFromSystemJson(sys);
@@ -1130,6 +1286,10 @@ const App = (() => {
           updateResilienceSwitchDefault();
           invalidateAnalysisResults('系统已导入，旧潮流和碳流结果已失效');
           log('已导入系统JSON', 'success');
+          showModelIoStatus('JSON 导入完成', [
+            ['文件', file.name],
+            ['系统名', loadedName],
+          ], { subtitle: 'JSON 已同步到后端并恢复画布' });
         }
       } catch (err) {
         log(`导入失败: ${err.message}`, 'error');
@@ -2647,6 +2807,15 @@ const App = (() => {
     ClearFault: '清除故障',
   };
 
+  const transientEditableDurationTypes = new Set([
+    'FaultShunt',
+    'ACLoadScale',
+    'DCLoadScale',
+    'StoragePowerStep',
+    'DCStoragePowerStep',
+    'Custom',
+  ]);
+
   function transientEventLabel(type) {
     return transientEventLabels[type] || type || '扰动';
   }
@@ -2671,8 +2840,10 @@ const App = (() => {
       if (Number(duration) > 0) params.duration_s = Number(duration);
     } else if (type === 'ACLoadScale' || type === 'DCLoadScale') {
       params.scale = Math.max(0, Number(value) || 0);
+      if (Number(duration) > 0) params.duration_s = Number(duration);
     } else if (type === 'StoragePowerStep' || type === 'DCStoragePowerStep') {
       params.p_ref_mw = Number(value) || 0;
+      if (Number(duration) > 0) params.duration_s = Number(duration);
     }
     return params;
   }
@@ -2770,8 +2941,10 @@ const App = (() => {
       if (Number(event.duration_s) > 0) pieces.push(`${Number(event.duration_s).toFixed(3)}s`);
     } else if (event.type.includes('LoadScale')) {
       pieces.push(`x${Number(event.params?.scale ?? event.value ?? 0).toFixed(3)}`);
+      if (Number(event.duration_s) > 0) pieces.push(`${Number(event.duration_s).toFixed(3)}s`);
     } else if (event.type.includes('StoragePowerStep')) {
       pieces.push(`${Number(event.params?.p_ref_mw ?? event.value ?? 0).toFixed(3)}MW`);
+      if (Number(event.duration_s) > 0) pieces.push(`${Number(event.duration_s).toFixed(3)}s`);
     }
     return pieces.join(' · ');
   }
@@ -2845,7 +3018,13 @@ const App = (() => {
         type === 'ACLoadScale' || type === 'DCLoadScale');
       domainEl.value = transientEventDefaultDomain(type);
     }
-    if (durationEl) durationEl.disabled = type !== 'FaultShunt';
+    if (durationEl) {
+      const editable = transientEditableDurationTypes.has(type);
+      durationEl.disabled = !editable;
+      durationEl.title = editable
+        ? '事件持续时间。母线故障会自动清除；负荷/储能阶跃会随事件一起记录，当前求解器中阶跃保持到后续事件修改。'
+        : '该事件为瞬时切换/跳闸，持续时间不参与求解。';
+    }
     if (valueEl) {
       if (type === 'FaultShunt') valueEl.title = '故障并联电导强度 g(pu)，越大表示故障越强';
       else if (type.includes('LoadScale')) valueEl.title = '负荷倍率，例如 1.10 表示增加 10%';
@@ -2857,11 +3036,11 @@ const App = (() => {
         paramsEl.placeholder = '{"r_pu":0.001,"x_pu":0.002}';
         paramsEl.title = '可选：用 r_pu/x_pu 或 g_pu/b_pu 精确设置故障强度，也可写 duration_s';
       } else if (type.includes('LoadScale')) {
-        paramsEl.placeholder = '{"scale":1.10}';
-        paramsEl.title = '可选：负荷倍率参数';
+        paramsEl.placeholder = '{"scale":1.10,"duration_s":0.20}';
+        paramsEl.title = '可选：负荷倍率和持续时间。当前求解器保持阶跃，后续可用反向事件恢复。';
       } else if (type.includes('StoragePowerStep')) {
-        paramsEl.placeholder = '{"p_ref_mw":-2.0}';
-        paramsEl.title = '可选：储能有功目标';
+        paramsEl.placeholder = '{"p_ref_mw":-2.0,"duration_s":0.20}';
+        paramsEl.title = '可选：储能有功目标和持续时间。当前求解器保持阶跃，后续可用新目标恢复。';
       } else {
         paramsEl.placeholder = '{}';
         paramsEl.title = '可选事件参数，只保留数值字段';
@@ -3027,6 +3206,221 @@ const App = (() => {
       }));
     }
     return rows.slice(0, 10);
+  }
+
+  function transientModelProfileRows(data) {
+    const rows = [];
+    const seen = new Set();
+    (data?.device_series || []).forEach(dev => {
+      const profiles = Array.isArray(dev.model_profiles) && dev.model_profiles.length
+        ? dev.model_profiles
+        : [{
+            standard: dev.model_standard || '',
+            model_name: dev.model_name || dev.type || '',
+            parameter_set: dev.parameter_set || '',
+            source_id: '',
+            notes: '',
+            components: [],
+            parameters: {},
+          }];
+      profiles.forEach(profile => {
+        const key = [
+          dev.type || '',
+          dev.component_index ?? '',
+          profile.standard || '',
+          profile.model_name || profile.model || '',
+          profile.parameter_set || '',
+        ].join('|');
+        if (seen.has(key)) return;
+        seen.add(key);
+        rows.push({ dev, profile });
+      });
+    });
+    return rows;
+  }
+
+  function transientModelProfileSummary(data) {
+    const rows = transientModelProfileRows(data);
+    const byStandard = new Map();
+    rows.forEach(({ profile }) => {
+      const std = profile.standard || 'Native';
+      byStandard.set(std, (byStandard.get(std) || 0) + 1);
+    });
+    return {
+      rows,
+      byStandard: Array.from(byStandard.entries()).sort((a, b) => b[1] - a[1]),
+      total: rows.length,
+    };
+  }
+
+  function transientRenderModelCompatibility(data) {
+    const summary = transientModelProfileSummary(data);
+    let html = '<div class="transient-section-head"><h5>动态模型 / 标准兼容性</h5><span>来自统一 JSON dynamic_model 与标准映射</span></div>';
+    html += '<div class="transient-model-summary">';
+    if (summary.byStandard.length) {
+      summary.byStandard.forEach(([std, count]) => {
+        html += `<span><strong>${escapeHtml(std)}</strong>${count}</span>`;
+      });
+    } else {
+      html += '<span><strong>Native</strong>0</span>';
+    }
+    html += '</div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>设备</th><th>标准</th><th>模型</th><th>参数集</th><th>组件控制块</th><th>参数数</th></tr></thead><tbody>';
+    if (summary.rows.length) {
+      summary.rows.slice(0, 48).forEach(({ dev, profile }) => {
+        const comps = Array.isArray(profile.components) ? profile.components : [];
+        const compText = comps.length
+          ? comps.map(c => `${c.type || ''}:${c.model || c.model_name || ''}`.replace(/^:/, '')).filter(Boolean).join(', ')
+          : (profile.profile || '');
+        const paramCount = Object.keys(profile.parameters || {}).length +
+          comps.reduce((sum, c) => sum + Object.keys(c.parameters || {}).length, 0);
+        html += `<tr>
+          <td>${escapeHtml(dev.name || `${dev.type || 'device'} ${dev.component_index ?? ''}`)}</td>
+          <td>${escapeHtml(profile.standard || dev.model_standard || 'Native')}</td>
+          <td>${escapeHtml(profile.model_name || profile.model || dev.model_name || dev.type || '')}</td>
+          <td>${escapeHtml(profile.parameter_set || dev.parameter_set || '')}</td>
+          <td>${escapeHtml(compText || '—')}</td>
+          <td>${paramCount}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="6">暂无动态模型配置。可在元件属性中填写 dynamic_model JSON。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+    return html;
+  }
+
+  function transientCompatibilityRatio(value, total) {
+    const n = Number(value);
+    const t = Number(total);
+    if (!Number.isFinite(n) || !Number.isFinite(t) || t <= 0) return '—';
+    return `${((n / t) * 100).toFixed(1)}%`;
+  }
+
+  function renderModelCompatibilityReport(data, options = {}) {
+    const targetId = options.targetId || 'modelIoResults';
+    const resultGroup = options.resultGroup || 'modelIO';
+    const title = options.title || '模型兼容性检查';
+    const subtitle = options.subtitle || '统一 IO registry / 当前画布系统';
+    const summary = data?.summary || {};
+    const coverage = Array.isArray(data?.coverage) ? data.coverage : [];
+    const mappings = Array.isArray(data?.mappings) ? data.mappings : [];
+    const diagnostics = data?.diagnostics || {};
+    const total = Number(summary.total_instances || 0);
+    const gridRepresented = Number(summary.gridlabd_represented || 0);
+    const openDssRepresented = Number(summary.opendss_represented || 0);
+
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup(resultGroup);
+
+    let html = `<div class="transient-section-head"><h5>${escapeHtml(title)}</h5><span>${escapeHtml(subtitle)}</span></div>`;
+    html += '<div class="transient-kpi-grid">';
+    [
+      ['当前元件实例', total, '个'],
+      ['GridLAB-D覆盖', transientCompatibilityRatio(gridRepresented, total), `${gridRepresented}/${total}`],
+      ['OpenDSS覆盖', transientCompatibilityRatio(openDssRepresented, total), `${openDssRepresented}/${total}`],
+      ['注册元件类型', mappings.length, '类'],
+      ['当前覆盖类型', coverage.length, '类'],
+    ].forEach(([label, value, unit]) => {
+      html += `<div class="transient-kpi"><div class="transient-kpi-label">${escapeHtml(label)}</div><div class="transient-kpi-value">${escapeHtml(String(value))}</div><div class="transient-kpi-label">${escapeHtml(String(unit || ''))}</div></div>`;
+    });
+    html += '</div>';
+
+    html += '<div class="transient-section-head"><h5>当前系统元件覆盖</h5><span>JSON / Canonical / GridLAB-D / OpenDSS</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>元件</th><th>路径</th><th>数量</th><th>JSON</th><th>Canonical</th><th>GridLAB-D</th><th>OpenDSS</th><th>验证范围</th><th>标准模型</th></tr></thead><tbody>';
+    if (coverage.length) {
+      coverage.forEach(row => {
+        const profiles = Array.isArray(row.standard_profiles) ? row.standard_profiles : [];
+        const profileText = profiles.map(p => `${p.family || ''}:${p.model_name || p.profile || ''}`.replace(/^:/, '')).filter(Boolean).join(', ');
+        html += `<tr>
+          <td>${escapeHtml(row.component_type || '')}</td>
+          <td>${escapeHtml(row.collection_path || '')}</td>
+          <td>${escapeHtml(String(row.count ?? 0))}</td>
+          <td>${escapeHtml(row.json_policy || '')}</td>
+          <td>${escapeHtml(row.canonical_policy || '')}</td>
+          <td>${escapeHtml(row.gridlabd_policy || '')}</td>
+          <td>${escapeHtml(row.opendss_policy || '')}</td>
+          <td>${escapeHtml(row.verification_scope || '')}</td>
+          <td>${escapeHtml(profileText || '—')}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="9">当前后端尚未加载系统；请先加载算例或同步画布。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
+    const diagGroups = [
+      ['GridLAB-D', Array.isArray(diagnostics.gridlabd) ? diagnostics.gridlabd : []],
+      ['OpenDSS', Array.isArray(diagnostics.opendss) ? diagnostics.opendss : []],
+    ];
+    html += '<div class="transient-section-head"><h5>外部工具诊断</h5><span>Unsupported / Internal-only / Diagnostic-only 会列出</span></div>';
+    html += '<div class="transient-mini-grid">';
+    diagGroups.forEach(([name, rows]) => {
+      html += `<div class="transient-mini-card"><strong>${escapeHtml(name)}</strong><span>${rows.length ? rows.map(escapeHtml).join('<br>') : '当前系统内元件均有可表示策略。'}</span></div>`;
+    });
+    html += '</div>';
+
+    const profileRows = [];
+    mappings.forEach(mapping => {
+      (Array.isArray(mapping.standard_profiles) ? mapping.standard_profiles : []).forEach(profile => {
+        profileRows.push({ mapping, profile });
+      });
+    });
+    html += '<div class="transient-section-head"><h5>标准模型注册表</h5><span>行业标准与本模块 rich/canonical 映射方向</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>元件类型</th><th>标准族</th><th>Profile</th><th>模型名</th><th>策略</th><th>验证</th><th>说明</th></tr></thead><tbody>';
+    if (profileRows.length) {
+      profileRows.forEach(({ mapping, profile }) => {
+        html += `<tr>
+          <td>${escapeHtml(mapping.component_type || '')}</td>
+          <td>${escapeHtml(profile.family || '')}</td>
+          <td>${escapeHtml(profile.profile || '')}</td>
+          <td>${escapeHtml(profile.model_name || '')}</td>
+          <td>${escapeHtml(profile.policy || '')}</td>
+          <td>${escapeHtml(profile.verification_scope || '')}</td>
+          <td>${escapeHtml(profile.notes || '')}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="7">尚未注册行业标准 profile。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
+    const el = document.getElementById(targetId);
+    if (el) el.innerHTML = html;
+  }
+
+  function renderTransientCompatibilityReport(data) {
+    renderModelCompatibilityReport(data, {
+      targetId: 'modelIoResults',
+      resultGroup: 'modelIO',
+      title: '暂态模型兼容性检查',
+      subtitle: '从暂态仿真入口触发，报告集中到模型IO',
+    });
+  }
+
+  async function runModelCompatibility(options = {}) {
+    setStatus('模型兼容性检查中...', 'busy');
+    if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+    const data = await apiGet('/api/io/model_compatibility');
+    if (data && !data.error) {
+      renderModelCompatibilityReport(data, options);
+      switchTab('results');
+      setStatus('模型兼容性检查完成');
+    } else {
+      const msg = data?.error || '模型兼容性检查失败';
+      log(msg, 'error');
+      setStatus(msg, 'error');
+    }
+  }
+
+  async function runTransientCompatibility() {
+    await runModelCompatibility({
+      targetId: 'modelIoResults',
+      resultGroup: 'modelIO',
+      title: '暂态模型兼容性检查',
+      subtitle: '动态模型 / rich-canonical / GridLAB-D / OpenDSS 兼容性',
+    });
   }
 
   function drawTransientDashboard(data) {
@@ -3233,6 +3627,7 @@ const App = (() => {
       html += '<div class="transient-mini-card"><strong>暂无观测点</strong><span>加载含母线或动态设备的算例后自动生成。</span></div>';
     }
     html += '</div>';
+    html += transientRenderModelCompatibility(data);
     html += '<div class="transient-dashboard-grid">';
     html += '<div id="trVoltageChart" class="transient-chart transient-chart-wide"></div>';
     html += '<div id="trAcHeatmap" class="transient-chart transient-chart-wide"></div>';
@@ -5585,10 +5980,16 @@ const App = (() => {
     div.innerHTML = html;
   }
 
-  function showPowerFlowBalanceDiagnostics(data, busMap) {
-    const section = document.getElementById('pfBalanceSection');
-    const div = document.getElementById('pfBalanceResults');
-    if (!section || !div) return;
+	  function showPowerFlowBalanceDiagnostics(data, busMap) {
+	    const section = document.getElementById('pfBalanceSection');
+	    const div = document.getElementById('pfBalanceResults');
+	    if (!section || !div) return;
+
+	    if (data.three_phase || data.method === 'three_phase' || Array.isArray(data.tp_bus_results)) {
+	      section.style.display = '';
+	      div.innerHTML = '<p class="empty-hint">三相不对称潮流使用 abc 域节点方程；这里不显示单相等值节点功率平衡诊断，请查看“三相节点电压 / OpenDSS对比”。</p>';
+	      return;
+	    }
 
     const sys = (typeof Canvas !== 'undefined' && Canvas.buildSystemJson)
       ? Canvas.buildSystemJson() : null;
@@ -5655,9 +6056,9 @@ const App = (() => {
       const sourceTable = sourceRows
         ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>平衡源承担功率(${pUnit()})</th><th>名称</th><th>主要构成</th></tr></thead><tbody>${sourceRows}</tbody></table>`
         : '';
-      div.innerHTML = status + sourceHint + imbalanceTable + sourceTable;
-      return;
-    }
+	      div.innerHTML = status + sourceHint + imbalanceTable + sourceTable;
+	      return;
+	    }
 
     const ac = new Map();
     const dc = new Map();
@@ -5760,7 +6161,41 @@ const App = (() => {
     function cDiv(a, b) {
       const den = b.re * b.re + b.im * b.im;
       return den > 0 ? complex((a.re * b.re + a.im * b.im) / den, (a.im * b.re - a.re * b.im) / den) : complex(0, 0);
-    }
+	  }
+
+	  function showThreePhasePowerFlowResults(data, busMap) {
+	    const section = document.getElementById('pfThreePhaseSection');
+	    const div = document.getElementById('pfThreePhaseResults');
+	    if (!section || !div) return;
+	    const rows = Array.isArray(data.tp_bus_results) ? data.tp_bus_results : [];
+	    if (!rows.length) {
+	      section.style.display = 'none';
+	      div.innerHTML = '';
+	      return;
+	    }
+	    section.style.display = '';
+	    const fmt = v => Number.isFinite(Number(v)) ? Number(v).toFixed(6) : '-';
+	    const afmt = v => Number.isFinite(Number(v)) ? Number(v).toFixed(3) : '-';
+	    const comp = data.opendss_reference?.comparison || null;
+	    let html = '';
+	    if (data.opendss_reference?.ran && comp) {
+	      const ok = !!comp.within_gui_tolerance;
+	      html += `<p class="empty-hint" style="color:${ok ? '#15803d' : '#b45309'}">OpenDSS对比：${ok ? '通过' : '存在偏差'}；点数 ${comp.count || 0}，max|ΔVm|=${Number(comp.max_vm_error_pu || 0).toExponential(3)} pu，max|Δθ|=${Number(comp.max_angle_error_deg || 0).toFixed(4)}°。</p>`;
+	    } else if (data.opendss_reference && data.opendss_reference.error) {
+	      html += `<p class="empty-hint" style="color:#b45309">OpenDSS参考未运行：${escapeHtml(data.opendss_reference.error)}</p>`;
+	    } else {
+	      html += '<p class="empty-hint">当前会话没有可解析的 OpenDSS master 路径，仅显示本模块三相结果。</p>';
+	    }
+	    html += '<table><thead><tr><th>Bus</th><th>名称</th><th>相</th><th>Va(pu)</th><th>∠A(°)</th><th>Vb(pu)</th><th>∠B(°)</th><th>Vc(pu)</th><th>∠C(°)</th></tr></thead><tbody>';
+	    rows.forEach(r => {
+	      const busId = Number(r.bus_id ?? r.bus);
+	      const compId = Number.isFinite(busId) ? busMap.ac?.[busId] : undefined;
+	      const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+	      html += `<tr${attr}><td>${Number.isFinite(busId) ? busId : ''}</td><td>${escapeHtml(r.name || '')}</td><td>${escapeHtml(r.phases || '')}</td><td>${fmt(r.vm_a_pu)}</td><td>${afmt(r.va_a_deg)}</td><td>${fmt(r.vm_b_pu)}</td><td>${afmt(r.va_b_deg)}</td><td>${fmt(r.vm_c_pu)}</td><td>${afmt(r.va_c_deg)}</td></tr>`;
+	    });
+	    html += '</tbody></table>';
+	    div.innerHTML = html;
+	  }
     function cConj(a) { return complex(a.re, -a.im); }
     function cNeg(a) { return complex(-a.re, -a.im); }
     const acVoltagePosByBus = new Map();
@@ -6087,8 +6522,9 @@ const App = (() => {
         <span class="result-value">${Number(data.residual || 0).toExponential(4)}</span></div>
     `;
 
-    const busMap = Canvas.getCompBusMap();
-    showPowerFlowBalanceDiagnostics(data, busMap);
+	    const busMap = Canvas.getCompBusMap();
+	    showPowerFlowBalanceDiagnostics(data, busMap);
+	    showThreePhasePowerFlowResults(data, busMap);
 
     const coordSec = document.getElementById('pfCoordSection');
     const coordDiv = document.getElementById('pfCoordResults');
@@ -7301,6 +7737,13 @@ const App = (() => {
       `<td>${mg.pcc_bus}</td><td>${mg.operating_mode}</td><td>${mg.p_exchange_mw}</td><td>${mg.capacity_mw}</td>`);
   }
 
+  function dynamicModelTextValue(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return '';
+    }
+    return JSON.stringify(value, null, 2);
+  }
+
   // ========== Property Editor ==========
   function onSelectionChanged(compId) {
     const propEmpty = document.getElementById('propEmpty');
@@ -7328,7 +7771,17 @@ const App = (() => {
     // Optional section dividers: when a field key matches, a header row is
     // inserted before it to group the OPF constraint-limit fields visually.
     const sectionHeaders = {
-      vsc_converter:  { r_conv_ac_pu: '约束限值 (OPF)', grid_forming: '构网与协调' },
+      generator:      { dynamic_model: '暂态模型参数' },
+      load:           { dynamic_model: '暂态模型参数' },
+      external_grid:  { dynamic_model: '暂态模型参数' },
+      storage:        { dynamic_model: '暂态模型参数' },
+      pv_system:      { dynamic_model: '暂态模型参数' },
+      static_generator: { dynamic_model: '暂态模型参数' },
+      vsc_converter:  { r_conv_ac_pu: '约束限值 (OPF)', grid_forming: '构网与协调', dynamic_model: '暂态模型参数' },
+      dc_load:        { dynamic_model: '暂态模型参数' },
+      dc_storage:     { dynamic_model: '暂态模型参数' },
+      dc_pv_array:    { dynamic_model: '暂态模型参数' },
+      asymmetric_load: { dynamic_model: '暂态模型参数' },
       dcdc_converter: { topology: '占空比约束 (OPF)' },
     };
     const secMap = sectionHeaders[comp.type] || null;
@@ -7352,7 +7805,17 @@ const App = (() => {
       lbl.textContent = label;
       div.appendChild(lbl);
 
-      if (typeof val === 'boolean') {
+      if (key === 'dynamic_model') {
+        const txt = document.createElement('textarea');
+        txt.dataset.field = key;
+        txt.className = 'prop-json-textarea';
+        txt.spellcheck = false;
+        txt.value = dynamicModelTextValue(val);
+        txt.placeholder = '{"standard":"PSS/E","model_name":"GENROU","parameters":{}}';
+        txt.title = '统一动态模型 JSON：standard/model_name/parameter_set/parameters/components。会随系统 JSON 同步并用于暂态模型构建。';
+        div.classList.add('prop-field-wide');
+        div.appendChild(txt);
+      } else if (typeof val === 'boolean') {
         const sel = document.createElement('select');
         sel.dataset.field = key;
         sel.innerHTML = `<option value="true" ${val ? 'selected' : ''}>是</option>
@@ -7478,18 +7941,47 @@ const App = (() => {
     const oldParams = Object.assign({}, comp.params);
     const fields = document.querySelectorAll('#propFields [data-field]');
     const changedKeys = new Set();
+    const updates = [];
+    let parseError = null;
     fields.forEach(el => {
+      if (parseError) return;
       const key = el.dataset.field;
       let val = el.value;
       // Type conversion
-      if (val === 'true') val = true;
+      if (key === 'dynamic_model') {
+        const raw = String(val || '').trim();
+        if (!raw) {
+          val = {};
+        } else {
+          try {
+            val = JSON.parse(raw);
+            if (!val || typeof val !== 'object' || Array.isArray(val)) {
+              throw new Error('dynamic_model must be a JSON object');
+            }
+          } catch (err) {
+            parseError = err;
+            return;
+          }
+        }
+      } else if (val === 'true') val = true;
       else if (val === 'false') val = false;
       else if (el.type === 'number' && val !== '') val = parseFloat(val);
       if (key === 'emission_factor_tco2_mwh') val = carbonFactorInputValue(val);
+      updates.push({ key, val });
+    });
+    if (parseError) {
+      const msg = `动态模型 JSON 无效: ${parseError.message || parseError}`;
+      setStatus(msg, 'error');
+      log(msg, 'error');
+      return;
+    }
+    updates.forEach(({ key, val }) => {
       const oldVal = comp.params[key];
       const sameNumber = typeof oldVal === 'number' && typeof val === 'number' &&
         Math.abs(oldVal - val) < 1e-12;
-      if (!sameNumber && oldVal !== val) changedKeys.add(key);
+      const sameJson = key === 'dynamic_model' &&
+        JSON.stringify(oldVal || {}) === JSON.stringify(val || {});
+      if (!sameNumber && !sameJson && oldVal !== val) changedKeys.add(key);
       comp.params[key] = val;
     });
 
@@ -7792,6 +8284,74 @@ const App = (() => {
       e.target.value = '';
     });
 
+    // Bar 3: unified model IO module
+    document.getElementById('btnIoLoadBuiltin')?.addEventListener('click', () => {
+      const caseName = document.getElementById('ioCaseSelect')?.value || '';
+      if (!caseName) {
+        log('请先在模型IO中选择一个内置算例', 'warn');
+        return;
+      }
+      loadBuiltinCase(caseName);
+    });
+    document.getElementById('btnIoLoadMatpower')?.addEventListener('click', () => {
+      const filename = document.getElementById('ioMatpowerSelect')?.value || '';
+      if (!filename) {
+        log('请先在模型IO中选择一个 MATPOWER 文件', 'warn');
+        return;
+      }
+      loadMatpowerCase(filename);
+    });
+    document.getElementById('btnIoImportJson')?.addEventListener('click', () => {
+      document.getElementById('fileImportJson')?.click();
+    });
+    document.getElementById('btnIoImportEtapXlsx')?.addEventListener('click', () => {
+      document.getElementById('fileImportEtapXlsx')?.click();
+    });
+    document.getElementById('btnIoImportEtapXml')?.addEventListener('click', () => {
+      document.getElementById('fileImportEtapXml')?.click();
+    });
+    document.getElementById('btnIoImportGridlabd')?.addEventListener('click', () => {
+      document.getElementById('fileImportGridlabd')?.click();
+    });
+    document.getElementById('fileImportGridlabd')?.addEventListener('change', (e) => {
+      const f = e.target.files[0];
+      e.target.value = '';
+      if (f) loadGridlabd(f);
+    });
+    document.getElementById('btnIoImportOpendss')?.addEventListener('click', () => {
+      document.getElementById('fileImportOpendss')?.click();
+    });
+    document.getElementById('fileImportOpendss')?.addEventListener('change', (e) => {
+      const f = e.target.files[0];
+      e.target.value = '';
+      if (f) loadOpendss(f);
+    });
+    document.getElementById('btnIoNewSystem')?.addEventListener('click', createNewSystem);
+    document.getElementById('btnIoExportJson')?.addEventListener('click', exportJson);
+    document.getElementById('btnIoExportEtap')?.addEventListener('click', exportEtap);
+    document.getElementById('btnIoExportEtapXml')?.addEventListener('click', exportEtapXml);
+    document.getElementById('btnIoExportGridlabd')?.addEventListener('click', () => exportExternalGrid('gridlabd'));
+    document.getElementById('btnIoExportOpendss')?.addEventListener('click', () => exportExternalGrid('opendss'));
+    document.getElementById('btnIoModelCompatibility')?.addEventListener('click', () => runModelCompatibility({
+      targetId: 'modelIoResults',
+      resultGroup: 'modelIO',
+      title: '模型兼容性检查',
+      subtitle: 'JSON / Canonical / GridLAB-D / OpenDSS / 标准模型映射',
+    }));
+    document.getElementById('btnIoSyncBackend')?.addEventListener('click', async () => {
+      setStatus('同步画布中...', 'busy');
+      const ok = await syncToBackend(true);
+      if (ok) {
+        showModelIoStatus('画布同步完成', [
+          ['同步方向', 'Canvas -> Backend session'],
+          ['状态', '成功'],
+        ], { subtitle: '后续导出和兼容性检查将使用当前画布系统' });
+        setStatus('同步完成');
+      } else {
+        setStatus('同步失败', 'error');
+      }
+    });
+
     // Calculation buttons (Bar 3 "运行..." buttons reuse original IDs where possible)
     document.getElementById('btnPowerFlow').addEventListener('click', runPowerFlow);
     document.getElementById('btnRunOpf')?.addEventListener('click', runOpf);
@@ -7847,6 +8407,7 @@ const App = (() => {
 
     // Bar 3: transient phasor dynamics
     document.getElementById('btnRunTransient')?.addEventListener('click', runTransientSimulation);
+    document.getElementById('btnTransientCompatibility')?.addEventListener('click', runTransientCompatibility);
     document.getElementById('trPowerFlowInit')?.addEventListener('change', updateTransientPfControls);
     document.getElementById('trEventType')?.addEventListener('change', updateTransientEventControls);
     document.getElementById('btnAddTransientEvent')?.addEventListener('click', addTransientEventFromControls);

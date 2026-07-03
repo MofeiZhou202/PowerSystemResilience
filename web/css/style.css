@@ -415,7 +415,8 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   flex-shrink: 0;
   overflow: hidden;
 }
-body[data-active-result-group="transient"] #rightPanel {
+body[data-active-result-group="transient"] #rightPanel,
+body[data-active-result-group="modelIO"] #rightPanel {
   width: clamp(760px, 66vw, 1180px);
   min-width: min(760px, calc(100vw - var(--lib-w) - 220px));
   max-width: 82vw;
@@ -469,7 +470,7 @@ body[data-active-result-group="transient"] #rightPanel {
   font-size: 11px;
   color: var(--ink2);
 }
-.prop-field input, .prop-field select {
+.prop-field input, .prop-field select, .prop-field textarea {
   padding: 4px 8px;
   border-radius: 4px;
   border: 1px solid var(--border);
@@ -478,7 +479,23 @@ body[data-active-result-group="transient"] #rightPanel {
   font: inherit;
   font-size: 12px;
 }
-.prop-field input:focus { border-color: var(--accent); outline: none; }
+.prop-field input:focus,
+.prop-field select:focus,
+.prop-field textarea:focus { border-color: var(--accent); outline: none; }
+.prop-field-wide {
+  margin-top: 2px;
+}
+.prop-json-textarea {
+  width: 100%;
+  min-height: 180px;
+  max-height: 420px;
+  resize: vertical;
+  line-height: 1.42;
+  font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+  white-space: pre;
+  overflow: auto;
+  tab-size: 2;
+}
 .prop-section-header {
   margin: 8px 0 2px;
   padding-top: 6px;
@@ -792,6 +809,7 @@ body[data-active-result-group="transient"] #rightPanel {
 #resultsContent[data-active-group="shortCircuit"] .result-group[data-result-group="shortCircuit"],
 #resultsContent[data-active-group="harmonics"]    .result-group[data-result-group="harmonics"],
 #resultsContent[data-active-group="transient"]    .result-group[data-result-group="transient"],
+#resultsContent[data-active-group="modelIO"]      .result-group[data-result-group="modelIO"],
 #resultsContent[data-active-group="topology"]     .result-group[data-result-group="topology"],
 #resultsContent[data-active-group="topologyAnalysis"] .result-group[data-result-group="topologyAnalysis"],
 #resultsContent[data-active-group="hosting"]      .result-group[data-result-group="hosting"],
@@ -898,6 +916,49 @@ body[data-active-result-group="transient"] #rightPanel {
   font-size: 11px;
   line-height: 1.45;
 }
+.transient-model-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 10px;
+}
+.transient-model-summary span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(86,182,194,0.08);
+  color: var(--ink2);
+  font-size: 12px;
+}
+.transient-model-summary strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+.transient-table-scroll {
+  max-width: 100%;
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 6px 0 12px;
+}
+.transient-table-scroll table {
+  margin-top: 0 !important;
+  min-width: 900px;
+}
+.transient-table-scroll th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.transient-table-scroll td {
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
 .transient-dashboard-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(330px, 1fr));
@@ -918,22 +979,28 @@ body[data-active-result-group="transient"] #rightPanel {
   height: 460px;
   min-height: 440px;
 }
-body[data-active-result-group="transient"] #tabResults {
+body[data-active-result-group="transient"] #tabResults,
+body[data-active-result-group="modelIO"] #tabResults {
   padding: 12px;
 }
-body[data-active-result-group="transient"] .result-group[data-result-group="transient"] .topo-section {
+body[data-active-result-group="transient"] .result-group[data-result-group="transient"] .topo-section,
+body[data-active-result-group="modelIO"] .result-group[data-result-group="modelIO"] .topo-section {
   margin-bottom: 0;
 }
-body[data-active-result-group="transient"] .result-group[data-result-group="transient"] .topo-section h4 {
+body[data-active-result-group="transient"] .result-group[data-result-group="transient"] .topo-section h4,
+body[data-active-result-group="modelIO"] .result-group[data-result-group="modelIO"] .topo-section h4 {
   font-size: 14px;
   padding: 2px 0 8px;
   margin-bottom: 8px;
 }
-#transientResults table {
+#transientResults table,
+#modelIoResults table {
   margin-top: 6px;
 }
 #transientResults th,
-#transientResults td {
+#transientResults td,
+#modelIoResults th,
+#modelIoResults td {
   font-size: 12px;
   padding: 5px 7px;
 }
@@ -942,14 +1009,20 @@ body[data-active-result-group="transient"] .result-group[data-result-group="tran
   .transient-chart-wide { grid-column: auto; }
 }
 @media (max-width: 900px) {
-  body[data-active-result-group="transient"] #rightPanel {
+  body[data-active-result-group="transient"] #rightPanel,
+  body[data-active-result-group="modelIO"] #rightPanel {
     width: 100vw;
     min-width: 0;
     max-width: none;
   }
   body[data-active-result-group="transient"] #componentLib,
+  body[data-active-result-group="modelIO"] #componentLib,
   body[data-active-result-group="transient"] #canvasContainer,
+  body[data-active-result-group="modelIO"] #canvasContainer,
   body[data-active-result-group="transient"] #rightPanelResizer {
+    display: none;
+  }
+  body[data-active-result-group="modelIO"] #rightPanelResizer {
     display: none;
   }
 }
@@ -1299,6 +1372,9 @@ body[data-active-result-group="transient"] .result-group[data-result-group="tran
   margin-left: 4px;
   white-space: nowrap;
 }
+.legacy-io-shortcut {
+  display: none !important;
+}
 
 /* ===== Bar 2: Module Bar ===== */
 .module-bar {
@@ -1364,10 +1440,54 @@ body[data-active-result-group="transient"] .result-group[data-result-group="tran
   min-width: 0;
 }
 .sub-section[data-sub="reliability"],
-.sub-section[data-sub="timeSeries"] {
+.sub-section[data-sub="timeSeries"],
+.sub-section[data-sub="modelIO"] {
   align-items: stretch;
   gap: 10px;
   flex-wrap: wrap;
+}
+.model-io-sub-section {
+  align-items: stretch;
+}
+.io-toolbar-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-height: 42px;
+  padding: 7px 9px;
+  border: 1px solid var(--sub-bar-border);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.025);
+}
+.io-toolbar-group:first-child {
+  flex: 1 1 740px;
+}
+.io-toolbar-group:nth-child(2) {
+  flex: 1 1 420px;
+}
+.io-toolbar-group:nth-child(3) {
+  flex: 1 1 360px;
+}
+.io-toolbar-group-title {
+  align-self: stretch;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px 0 0;
+  margin-right: 2px;
+  border-right: 1px solid rgba(255,255,255,0.12);
+  color: var(--accent2);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.model-io-sub-section .sub-label select {
+  width: min(260px, 32vw);
+  max-width: 280px;
+}
+.model-io-sub-section .sub-hint {
+  align-self: center;
+  max-width: 420px;
 }
 .transient-sub-section {
   flex-direction: column;

@@ -78,11 +78,18 @@ option(HACDCPF_ENABLE_OPENDSS "Build OpenDSS bridge (requires dss_capi)"   OFF)
 option(HACDCPF_ENABLE_OPENDSS_COMPARE
        "Build OpenDSS comparison tools and tests (requires dss_capi)"       OFF)
 option(HACDCPF_ENABLE_ETAP    "Build ETAP Excel import/export (requires OpenXLSX)" OFF)
+set(_hacdcpf_default_dss_capi_root
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dss_capi/dss_capi")
+if(APPLE AND EXISTS
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/harmonics_validation/.venv/lib/python3.9/site-packages/dss_python_backend/include/dss_capi_ctx.h")
+  set(_hacdcpf_default_dss_capi_root
+      "${CMAKE_CURRENT_SOURCE_DIR}/tools/harmonics_validation/.venv/lib/python3.9/site-packages/dss_python_backend")
+endif()
 set(HACDCPF_DSS_CAPI_ROOT
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dss_capi/dss_capi"
-    CACHE PATH "Vendored DSS C-API root used when HACDCPF_ENABLE_OPENDSS=ON")
+    "${_hacdcpf_default_dss_capi_root}"
+    CACHE PATH "DSS C-API root used when HACDCPF_ENABLE_OPENDSS=ON")
 set(HACDCPF_DSS_CAPI_PLATFORM "win_x64" CACHE STRING
-    "Vendored DSS C-API platform directory under lib/")
+    "Optional DSS C-API platform directory under lib/ for vendored bundles")
 
 # ── Dependencies (pulls in MIPSolvers + transitive: Eigen3, fmt, nlohmann_json,
 #                 HiGHS, optional Ipopt/SCIP) ─────────────────────────────────
@@ -165,12 +172,6 @@ include(cmake/Dependencies.cmake)
 set(HACDCPF_HAVE_OPENDSS OFF)
 set(HACDCPF_DSS_CAPI_RUNTIME_DLLS)
 if(HACDCPF_ENABLE_OPENDSS OR HACDCPF_ENABLE_OPENDSS_COMPARE)
-  if(NOT WIN32)
-    message(FATAL_ERROR
-      "The vendored DSS C-API bundle is currently Windows x64 only. "
-      "Add a platform-specific bundle before enabling OpenDSS here.")
-  endif()
-
   set(_hacdcpf_dss_capi_include "${HACDCPF_DSS_CAPI_ROOT}/include")
   set(_hacdcpf_dss_capi_lib_dir
       "${HACDCPF_DSS_CAPI_ROOT}/lib/${HACDCPF_DSS_CAPI_PLATFORM}")
@@ -185,29 +186,48 @@ if(HACDCPF_ENABLE_OPENDSS OR HACDCPF_ENABLE_OPENDSS_COMPARE)
 
   find_library(_hacdcpf_dss_capi_implib
     NAMES altdss_capi dss_capi
-    PATHS "${_hacdcpf_dss_capi_lib_dir}" "${HACDCPF_DSS_CAPI_ROOT}/lib"
+    PATHS
+      "${_hacdcpf_dss_capi_lib_dir}"
+      "${HACDCPF_DSS_CAPI_ROOT}/lib"
+      "${HACDCPF_DSS_CAPI_ROOT}"
     NO_DEFAULT_PATH)
   find_file(_hacdcpf_dss_capi_runtime
-    NAMES altdss_capi.dll dss_capi.dll
-    PATHS "${_hacdcpf_dss_capi_lib_dir}" "${HACDCPF_DSS_CAPI_ROOT}/bin"
+    NAMES
+      altdss_capi.dll
+      dss_capi.dll
+      libaltdss_capi.dylib
+      libdss_capi.dylib
+      libaltdss_capi.so
+      libdss_capi.so
+    PATHS
+      "${_hacdcpf_dss_capi_lib_dir}"
+      "${HACDCPF_DSS_CAPI_ROOT}/bin"
+      "${HACDCPF_DSS_CAPI_ROOT}/lib"
+      "${HACDCPF_DSS_CAPI_ROOT}"
     NO_DEFAULT_PATH)
 
   if(NOT _hacdcpf_dss_capi_implib OR NOT _hacdcpf_dss_capi_runtime)
     message(FATAL_ERROR
-      "OpenDSS is enabled, but the vendored DSS C-API library/runtime was not "
-      "found under ${HACDCPF_DSS_CAPI_ROOT}. Expected altdss_capi.lib/.dll.")
+      "OpenDSS is enabled, but the DSS C-API library/runtime was not found "
+      "under ${HACDCPF_DSS_CAPI_ROOT}. Expected altdss_capi/dss_capi "
+      "(.lib/.dll on Windows, .dylib on macOS, or .so on Linux).")
   endif()
 
   add_library(dss_capi::dss_capi SHARED IMPORTED GLOBAL)
   set_target_properties(dss_capi::dss_capi PROPERTIES
-    IMPORTED_IMPLIB "${_hacdcpf_dss_capi_implib}"
     IMPORTED_LOCATION "${_hacdcpf_dss_capi_runtime}"
     INTERFACE_INCLUDE_DIRECTORIES "${_hacdcpf_dss_capi_include}")
+  if(WIN32)
+    set_target_properties(dss_capi::dss_capi PROPERTIES
+      IMPORTED_IMPLIB "${_hacdcpf_dss_capi_implib}")
+  endif()
 
   get_filename_component(_hacdcpf_dss_capi_runtime_dir
     "${_hacdcpf_dss_capi_runtime}" DIRECTORY)
   file(GLOB _hacdcpf_dss_capi_all_dlls
-    "${_hacdcpf_dss_capi_runtime_dir}/*.dll")
+    "${_hacdcpf_dss_capi_runtime_dir}/*.dll"
+    "${_hacdcpf_dss_capi_runtime_dir}/*.dylib"
+    "${_hacdcpf_dss_capi_runtime_dir}/*.so")
   foreach(_hacdcpf_dss_capi_dll IN LISTS _hacdcpf_dss_capi_all_dlls)
     get_filename_component(_hacdcpf_dss_capi_dll_name
       "${_hacdcpf_dss_capi_dll}" NAME)
@@ -521,19 +541,23 @@ endif()
 if(HACDCPF_HAVE_OPENDSS_COMPARE)
   target_compile_definitions(hacdcpf PUBLIC HACDCPF_HAVE_OPENDSS_COMPARE=1)
 
-  add_executable(opendss_snapshot_adapter tools/opendss_snapshot_adapter.cpp)
-  target_link_libraries(opendss_snapshot_adapter PRIVATE hacdcpf::hacdcpf)
-  target_include_directories(opendss_snapshot_adapter PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tools")
-  target_compile_definitions(opendss_snapshot_adapter PRIVATE
-    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
-  hacdcpf_copy_opendss_runtime(opendss_snapshot_adapter)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/opendss_snapshot_adapter.cpp")
+    add_executable(opendss_snapshot_adapter tools/opendss_snapshot_adapter.cpp)
+    target_link_libraries(opendss_snapshot_adapter PRIVATE hacdcpf::hacdcpf)
+    target_include_directories(opendss_snapshot_adapter PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tools")
+    target_compile_definitions(opendss_snapshot_adapter PRIVATE
+      HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+    hacdcpf_copy_opendss_runtime(opendss_snapshot_adapter)
+  endif()
 
-  add_executable(opendss_pf_compare tools/opendss_pf_compare.cpp)
-  target_link_libraries(opendss_pf_compare PRIVATE hacdcpf::hacdcpf)
-  target_include_directories(opendss_pf_compare PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tools")
-  target_compile_definitions(opendss_pf_compare PRIVATE
-    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
-  hacdcpf_copy_opendss_runtime(opendss_pf_compare)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/opendss_pf_compare.cpp")
+    add_executable(opendss_pf_compare tools/opendss_pf_compare.cpp)
+    target_link_libraries(opendss_pf_compare PRIVATE hacdcpf::hacdcpf)
+    target_include_directories(opendss_pf_compare PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tools")
+    target_compile_definitions(opendss_pf_compare PRIVATE
+      HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+    hacdcpf_copy_opendss_runtime(opendss_pf_compare)
+  endif()
 endif()
 
 # ── Compiler flags ────────────────────────────────────────────────────────────

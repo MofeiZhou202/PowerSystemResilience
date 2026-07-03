@@ -2,14 +2,16 @@
 """End-to-end smoke test for the GUI/HTTP backend (run_gui_server).
 
 Starts the server, then drives the same REST endpoints the web UI uses and
-asserts on the responses.  Exercises the full ETAP import/export round-trip and
-the analysis endpoints so a regression in the GUI backend fails loudly in CI.
+asserts on the responses.  Exercises the full ETAP import/export round-trip,
+OpenDSS IEEE13 three-phase import/PF when available, and the analysis endpoints
+so a regression in the GUI backend fails loudly in CI.
 
 No third-party dependencies (urllib + subprocess from the standard library).
 
 Usage:
     python3 tools/gui_api_e2e.py [--server <path/to/run_gui_server>]
                                  [--data-dir <dir>] [--port <port>]
+                                 [--skip-etap]
 
 If --server is omitted, common build locations are searched.  Exit code is 0 on
 success, 1 on any failed check.
@@ -37,6 +39,8 @@ def find_server(explicit: str | None) -> Path:
             sys.exit(f"server binary not found: {p}")
         return p
     candidates = [
+        REPO_ROOT / "build" / "macos-release" / "run_gui_server",
+        REPO_ROOT / "build" / "macos-release" / "tests" / "run_gui_server",
         REPO_ROOT / "build" / "tests" / "run_gui_server",
         REPO_ROOT / "build" / "tests" / "run_gui_server.exe",
         REPO_ROOT / "build_rel" / "tests" / "run_gui_server",
@@ -101,11 +105,61 @@ def wait_up(base: str, timeout_s: float = 20.0) -> bool:
     return False
 
 
+def maybe_run_opendss_ieee13_smoke(c: Client, chk: Checker) -> None:
+    ieee13 = (
+        REPO_ROOT / "external_data" / "opendss_ieee_pes" /
+        "opendss_reference" / "13_node" / "official_full" /
+        "IEEE13Nodeckt.dss"
+    )
+    if not ieee13.exists():
+        print("10. OpenDSS IEEE13 three-phase smoke skipped (fixture missing)")
+        return
+
+    print("10. OpenDSS IEEE13 three-phase import + PF")
+    dss_text = ieee13.read_text(encoding="utf-8", errors="replace")
+    st, body = c.post_json(
+        "/api/session/load_opendss",
+        {
+            "dss_string": dss_text,
+            "filename": ieee13.name,
+            "dss_path": str(ieee13),
+        },
+    )
+    chk.check(
+        st == 200 and body.get("_has_three_phase_ac") is True,
+        f"load_opendss IEEE13 mode={body.get('_opendss_import_mode')} three_phase={body.get('_has_three_phase_ac')}",
+    )
+
+    st, pf = c.post_json(
+        "/api/session/pf",
+        {"method": "three_phase", "options": {"max_iter": 200, "tol": 1e-8}},
+    )
+    comp = (pf.get("opendss_reference") or {}).get("comparison") or {}
+    diag = pf.get("power_balance_diagnostics") or {}
+    chk.check(
+        st == 200 and pf.get("converged") is True and len(pf.get("tp_bus_results", [])) >= 13,
+        f"three_phase PF converged={pf.get('converged')} buses={len(pf.get('tp_bus_results', []))}",
+    )
+    chk.check(
+        diag.get("basis") == "three_phase_abc" and diag.get("ordinary") == [],
+        f"three_phase diagnostic basis={diag.get('basis')} ordinary={len(diag.get('ordinary', []))}",
+    )
+    chk.check(
+        comp.get("within_gui_tolerance") is True and comp.get("max_vm_error_pu", 1.0) < 1.0e-3,
+        f"OpenDSS comparison max_vm={comp.get('max_vm_error_pu')} count={comp.get('count')}",
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--server")
     ap.add_argument("--data-dir", default=str(REPO_ROOT / "data"))
     ap.add_argument("--port", type=int, default=0)
+    ap.add_argument(
+        "--skip-etap",
+        action="store_true",
+        help="skip ETAP-only export/import checks for builds without ETAP support",
+    )
     args = ap.parse_args()
 
     server = find_server(args.server)
@@ -161,51 +215,56 @@ def main() -> int:
             chk.check(opf.get("post_pf", {}).get("converged") is True and consistent is True,
                       f"opf->pf {case_name} post_pf={opf.get('post_pf', {}).get('converged')} consistent={consistent}")
 
-        print("4. reload built-in ieee14_acdc for ETAP export")
-        st, body = c.post_json("/api/session/load_builtin", {"case": "ieee14_acdc"})
-        counts = body.get("counts", {})
-        chk.check(st == 200 and counts.get("ac_buses") == 14,
-                  f"load_builtin -> {counts.get('ac_buses')} AC buses")
+        if args.skip_etap:
+            print("4-9. ETAP export/import checks skipped")
+        else:
+            print("4. reload built-in ieee14_acdc for ETAP export")
+            st, body = c.post_json("/api/session/load_builtin", {"case": "ieee14_acdc"})
+            counts = body.get("counts", {})
+            chk.check(st == 200 and counts.get("ac_buses") == 14,
+                      f"load_builtin -> {counts.get('ac_buses')} AC buses")
 
-        print("5. export ETAP .xlsx (binary)")
-        st, hdrs, xlsx = c.post_bytes("/api/session/export_etap", b"{}")
-        ctype = hdrs.get("Content-Type", "")
-        is_xlsx = xlsx[:2] == b"PK" and "spreadsheetml" in ctype
-        chk.check(st == 200 and is_xlsx,
-                  f"export_etap -> {len(xlsx)} bytes, ctype ok={is_xlsx}")
+            print("5. export ETAP .xlsx (binary)")
+            st, hdrs, xlsx = c.post_bytes("/api/session/export_etap", b"{}")
+            ctype = hdrs.get("Content-Type", "")
+            is_xlsx = xlsx[:2] == b"PK" and "spreadsheetml" in ctype
+            chk.check(st == 200 and is_xlsx,
+                      f"export_etap -> {len(xlsx)} bytes, ctype ok={is_xlsx}")
 
-        print("6. re-import the exported workbook (.xlsx upload)")
-        st, _, raw = c.post_bytes("/api/session/load_etap_xlsx", xlsx)
-        re_counts = json.loads(raw).get("counts", {})
-        chk.check(st == 200 and re_counts.get("ac_buses") == 14,
-                  f"load_etap_xlsx -> {re_counts.get('ac_buses')} AC buses")
+            print("6. re-import the exported workbook (.xlsx upload)")
+            st, _, raw = c.post_bytes("/api/session/load_etap_xlsx", xlsx)
+            re_counts = json.loads(raw).get("counts", {})
+            chk.check(st == 200 and re_counts.get("ac_buses") == 14,
+                      f"load_etap_xlsx -> {re_counts.get('ac_buses')} AC buses")
 
-        print("7. import a tiny native ETAP XML")
-        xml = (
-            '<PROJECT><COMPONENTS>'
-            '<BUS ID="B1" NominalkV="110" InService="true"/>'
-            '<BUS ID="B2" NominalkV="20" InService="true"/>'
-            '<UTIL ID="U1" Bus="B1" KV="110" OpVMag="100" PosR="0.1" PosX="1.0"/>'
-            '<XFORM2W ID="T1" FromBus="B1" ToBus="B2" PrimkV="110" SeckV="20" '
-            'AnsiMVA="40000" AnsiPosZ="10.5" AnsiPosXR="20"/>'
-            '<LUMPEDLOAD ID="LD1" Bus="B2" MVA="10" PF="90"/>'
-            '</COMPONENTS></PROJECT>'
-        )
-        st, body = c.post_json("/api/session/load_etap_xml", {"xml_string": xml})
-        xml_counts = body.get("counts", {})
-        chk.check(st == 200 and xml_counts.get("ac_buses") == 2,
-                  f"load_etap_xml -> {xml_counts.get('ac_buses')} AC buses")
+            print("7. import a tiny native ETAP XML")
+            xml = (
+                '<PROJECT><COMPONENTS>'
+                '<BUS ID="B1" NominalkV="110" InService="true"/>'
+                '<BUS ID="B2" NominalkV="20" InService="true"/>'
+                '<UTIL ID="U1" Bus="B1" KV="110" OpVMag="100" PosR="0.1" PosX="1.0"/>'
+                '<XFORM2W ID="T1" FromBus="B1" ToBus="B2" PrimkV="110" SeckV="20" '
+                'AnsiMVA="40000" AnsiPosZ="10.5" AnsiPosXR="20"/>'
+                '<LUMPEDLOAD ID="LD1" Bus="B2" MVA="10" PF="90"/>'
+                '</COMPONENTS></PROJECT>'
+            )
+            st, body = c.post_json("/api/session/load_etap_xml", {"xml_string": xml})
+            xml_counts = body.get("counts", {})
+            chk.check(st == 200 and xml_counts.get("ac_buses") == 2,
+                      f"load_etap_xml -> {xml_counts.get('ac_buses')} AC buses")
 
-        print("8. power flow on the imported XML system")
-        st, pf = c.post_json("/api/session/pf", {"method": "pure_ac", "options": {}})
-        chk.check(st == 200 and pf.get("converged") is True,
-                  f"pf converged={pf.get('converged')}")
+            print("8. power flow on the imported XML system")
+            st, pf = c.post_json("/api/session/pf", {"method": "pure_ac", "options": {}})
+            chk.check(st == 200 and pf.get("converged") is True,
+                      f"pf converged={pf.get('converged')}")
 
-        print("9. short-circuit on the imported system")
-        st, sc = c.post_json("/api/session/sc",
-                             {"options": {"fault_type": "3ph", "c_factor": 1.1}})
-        chk.check(st == 200 and len(sc.get("bus_results", [])) >= 1,
-                  f"sc -> {len(sc.get('bus_results', []))} bus results")
+            print("9. short-circuit on the imported system")
+            st, sc = c.post_json("/api/session/sc",
+                                 {"options": {"fault_type": "3ph", "c_factor": 1.1}})
+            chk.check(st == 200 and len(sc.get("bus_results", [])) >= 1,
+                      f"sc -> {len(sc.get('bus_results', []))} bus results")
+
+        maybe_run_opendss_ieee13_smoke(c, chk)
 
     finally:
         proc.terminate()

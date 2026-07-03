@@ -13,6 +13,21 @@ const Canvas = (() => {
     return Number.isFinite(n) ? n : fallback;
   }
 
+  function cloneDynamicModel(profile) {
+    if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return undefined;
+    try {
+      return JSON.parse(JSON.stringify(profile));
+    } catch (_) {
+      return undefined;
+    }
+  }
+
+  function addDynamicModel(row, params) {
+    const profile = cloneDynamicModel(params?.dynamic_model);
+    if (profile && Object.keys(profile).length > 0) row.dynamic_model = profile;
+    return row;
+  }
+
   // ========== Display Unit Helpers ==========
   function getPowerUnit() {
     const el = document.getElementById('pfDisplayUnit');
@@ -49,6 +64,17 @@ const Canvas = (() => {
     connectionStyle: 'avoid', // 'straight' | 'orthogonal' | 'avoid' (doc §10.2/§10.3)
     alignSnap: true,       // snap to neighbour x/y while dragging (doc §18 Phase 4)
   };
+
+  let _preservedModelBlocks = {};
+
+  function cloneJsonBlock(value) {
+    if (!value || typeof value !== 'object') return undefined;
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch (_) {
+      return undefined;
+    }
+  }
 
   // Cached routing context (obstacle boxes + grid + parallel-offset groups) used
   // by the §10.3 auto-avoidance router.  Rebuilt by buildRouteContext() before a
@@ -2139,8 +2165,8 @@ const Canvas = (() => {
     });
   }
 
-  function buildSystemJson() {
-    const sys = {
+	  function buildSystemJson() {
+	    const sys = {
       name: 'Canvas System',
       base_mva: state.baseMva || 100,
       ac: { buses: [], branches: [], generators: [], loads: [],
@@ -2155,8 +2181,11 @@ const Canvas = (() => {
       energy_routers: [],
       mobile_storage: [],
       vpps: [],
-      microgrids: []
-    };
+	      microgrids: []
+	    };
+	    if (_preservedModelBlocks.three_phase_ac) {
+	      sys.three_phase_ac = cloneJsonBlock(_preservedModelBlocks.three_phase_ac);
+	    }
 
     // Assign bus indices (1-based, matching MATPOWER/C++ convention).
     // Imported buses keep their original (possibly non-contiguous) index.
@@ -2285,7 +2314,7 @@ const Canvas = (() => {
       switch (comp.type) {
         case 'generator': {
           const busIdx = findBusIndex(comp.id, numOr(p.bus, 1));
-          sys.ac.generators.push({
+          sys.ac.generators.push(addDynamicModel({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : genIdx,
             name: p.name || `Gen ${genIdx}`,
             bus: busIdx,
@@ -2307,7 +2336,7 @@ const Canvas = (() => {
             shutdown_cost: numOr(p.shutdown_cost, 0),
             ramp_up_mw_min: numOr(p.ramp_up_mw_min, 0),
             ramp_dn_mw_min: numOr(p.ramp_dn_mw_min, 0),
-          });
+          }, p));
           genIdx++;
           // Update bus type to PV or SLACK
           const bus = sys.ac.buses.find(b => b.index === busIdx);
@@ -2319,7 +2348,7 @@ const Canvas = (() => {
         }
         case 'load': {
           const busIdx = findBusIndex(comp.id);
-          sys.ac.loads.push({
+          sys.ac.loads.push(addDynamicModel({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : loadIdx,
             name: p.name || `Load ${Number.isFinite(Number(p.index)) ? Number(p.index) : loadIdx}`,
             bus: busIdx,
@@ -2340,7 +2369,7 @@ const Canvas = (() => {
             n_customers: numOr(p.n_customers, 0),
             profile_id: numOr(p.profile_id, -1),
             in_service: p.in_service !== false,
-          });
+          }, p));
           loadIdx++;
           break;
         }
@@ -2448,7 +2477,7 @@ const Canvas = (() => {
             eg.emission_factor_profile_tco2_mwh =
               p.emission_factor_profile_tco2_mwh.map(Number).filter(Number.isFinite);
           }
-          sys.ac.external_grids.push(eg);
+          sys.ac.external_grids.push(addDynamicModel(eg, p));
           egIdx++;
           // Set bus as SLACK
           const bus = sys.ac.buses.find(b => b.index === busIdx);
@@ -2457,7 +2486,7 @@ const Canvas = (() => {
         }
         case 'storage': {
           const busIdx = findBusIndex(comp.id);
-          sys.ac.storage.push({
+          sys.ac.storage.push(addDynamicModel({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : storIdx,
             name: p.name || `ESS ${Number.isFinite(Number(p.index)) ? Number(p.index) : storIdx}`,
             bus: busIdx,
@@ -2477,13 +2506,13 @@ const Canvas = (() => {
             self_discharge_pct: numOr(p.self_discharge_pct, 0),
             profile_id: numOr(p.profile_id, -1),
             in_service: p.in_service !== false,
-          });
+          }, p));
           storIdx++;
           break;
         }
         case 'dc_storage': {
           const busIdx = findBusIndex(comp.id);
-          sys.dc.dc_storage.push({
+          sys.dc.dc_storage.push(addDynamicModel({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : dcStorIdx,
             name: p.name || `DC ESS ${Number.isFinite(Number(p.index)) ? Number(p.index) : dcStorIdx}`,
             bus: busIdx,
@@ -2500,7 +2529,7 @@ const Canvas = (() => {
             self_discharge_pct: numOr(p.self_discharge_pct, 0),
             profile_id: numOr(p.profile_id, -1),
             in_service: p.in_service !== false,
-          });
+          }, p));
           dcStorIdx++;
           break;
         }
@@ -2509,7 +2538,7 @@ const Canvas = (() => {
           const pvMode = p.control_mode || 'MPPT';
           const pvControllable = pvMode === 'Curtailed' ? true
             : (p.controllable === true || p.controllable === 'true');
-          sys.ac.pv_systems.push({
+          sys.ac.pv_systems.push(addDynamicModel({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : pvIdx,
             name: p.name || `PV ${Number.isFinite(Number(p.index)) ? Number(p.index) : pvIdx}`,
             bus: busIdx,
@@ -2538,7 +2567,7 @@ const Canvas = (() => {
             temperature: numOr(p.temperature, 25),
             profile_id: numOr(p.profile_id, -1),
             in_service: p.in_service !== false,
-          });
+          }, p));
           pvIdx++;
           break;
         }
@@ -2589,13 +2618,13 @@ const Canvas = (() => {
             co2_emission_rate: numOr(p.emission_factor_tco2_mwh ?? p.co2_emission_rate, 0),
             in_service: p.in_service !== false,
           };
-          if (isDcStaticGen) sys.dc.static_generators.push(row);
-          else sys.ac.static_generators.push(row);
+          if (isDcStaticGen) sys.dc.static_generators.push(addDynamicModel(row, p));
+          else sys.ac.static_generators.push(addDynamicModel(row, p));
           sgenIdx++;
           break;
         }
         case 'vsc_converter': {
-          sys.vsc_converters.push({
+          sys.vsc_converters.push(addDynamicModel({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : vscIdx,
             name: p.name || `VSC ${Number.isFinite(Number(p.index)) ? Number(p.index) : vscIdx}`,
             // Resolve from the wired 'ac'/'dc' ports (authoritative); typed value is fallback.
@@ -2635,13 +2664,13 @@ const Canvas = (() => {
             allow_dual_side_grid_forming: p.allow_dual_side_grid_forming === true || p.allow_dual_side_grid_forming === 'true',
             has_energy_buffer: p.has_energy_buffer === true || p.has_energy_buffer === 'true',
             in_service: p.in_service !== false,
-          });
+          }, p));
           vscIdx++;
           break;
         }
         case 'dc_load': {
           const busIdx = findBusIndex(comp.id);
-          sys.dc.loads.push({
+          sys.dc.loads.push(addDynamicModel({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : dcLoadIdx,
             name: p.name || `DC Load ${Number.isFinite(Number(p.index)) ? Number(p.index) : dcLoadIdx}`,
             bus: busIdx,
@@ -2652,7 +2681,7 @@ const Canvas = (() => {
             cost_mw: numOr(p.cost_mw, 0),
             profile_id: numOr(p.profile_id, -1),
             in_service: p.in_service !== false,
-          });
+          }, p));
           dcLoadIdx++;
           break;
         }
@@ -2672,7 +2701,7 @@ const Canvas = (() => {
         }
         case 'dc_pv_array': {
           const busIdx = findBusIndex(comp.id);
-          sys.dc.pv_arrays.push({
+          sys.dc.pv_arrays.push(addDynamicModel({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : dcPvIdx,
             name: p.name || `DC PV ${Number.isFinite(Number(p.index)) ? Number(p.index) : dcPvIdx}`,
             bus: busIdx,
@@ -2689,7 +2718,7 @@ const Canvas = (() => {
             beta_voc: numOr(p.beta_voc, 0),
             profile_id: numOr(p.profile_id, -1),
             in_service: p.in_service !== false,
-          });
+          }, p));
           dcPvIdx++;
           break;
         }
@@ -2794,7 +2823,7 @@ const Canvas = (() => {
         }
         case 'asymmetric_load': {
           const busIdx = findBusIndex(comp.id);
-          sys.ac.asymmetric_loads.push({
+          sys.ac.asymmetric_loads.push(addDynamicModel({
             index: sys.ac.asymmetric_loads.length, bus: busIdx,
             connection: p.connection || 'wye',
             grounded: p.grounded !== false,
@@ -2811,7 +2840,7 @@ const Canvas = (() => {
             controllable: p.controllable === true || p.controllable === 'true',
             priority: p.priority || 'Medium',
             in_service: p.in_service !== false,
-          });
+          }, p));
           break;
         }
         case 'shunt': {
@@ -2922,7 +2951,7 @@ const Canvas = (() => {
           break;
         }
         case 'dcdc_converter': {
-          sys.dcdc_converters.push({
+          sys.dcdc_converters.push(addDynamicModel({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : sys.dcdc_converters.length,
             name: p.name || `DCDC ${Number.isFinite(Number(p.index)) ? Number(p.index) : sys.dcdc_converters.length}`,
             // Resolve from the wired 'in'/'out' ports (authoritative); the typed
@@ -2945,7 +2974,7 @@ const Canvas = (() => {
             d_max: numOr(p.d_max, 0.95),
             n_ratio: numOr(p.n_ratio, 1.0),
             in_service: p.in_service !== false,
-          });
+          }, p));
           break;
         }
         case 'energy_router': {
@@ -3209,9 +3238,13 @@ const Canvas = (() => {
   }
 
   // ========== Load from JSON System ==========
-  function loadFromSystemJson(jsonSys) {
-    // Clear canvas
-    clearAll();
+	  function loadFromSystemJson(jsonSys) {
+	    // Clear canvas
+	    clearAll();
+	    _preservedModelBlocks = {};
+	    if (jsonSys?.three_phase_ac) {
+	      _preservedModelBlocks.three_phase_ac = cloneJsonBlock(jsonSys.three_phase_ac);
+	    }
 
     // Preserve system base MVA (critical for per-unit calculations)
     state.baseMva = jsonSys.base_mva || 100;
@@ -3310,6 +3343,7 @@ const Canvas = (() => {
         emission_factor_tco2_mwh: gen.emission_factor_tco2_mwh || gen.co2_emission_rate || 0,
         startup_cost: gen.startup_cost, shutdown_cost: gen.shutdown_cost,
         ramp_up_mw_min: gen.ramp_up_mw_min, ramp_dn_mw_min: gen.ramp_dn_mw_min,
+        dynamic_model: cloneDynamicModel(gen.dynamic_model) || COMP.defaults.generator.dynamic_model,
       }, busCompMap);
     });
 
@@ -3332,6 +3366,7 @@ const Canvas = (() => {
         priority: load.priority || 'Medium',
         n_customers: load.n_customers,
         profile_id: load.profile_id,
+        dynamic_model: cloneDynamicModel(load.dynamic_model) || COMP.defaults.load.dynamic_model,
         in_service: load.in_service !== false,
       }, busCompMap);
     });
@@ -3348,6 +3383,7 @@ const Canvas = (() => {
             p_mw: bus.pd_mw || 0,
             q_mvar: bus.qd_mvar || 0,
             scaling: 1.0,
+            dynamic_model: COMP.defaults.load.dynamic_model,
           }, busCompMap);
         }
       });
@@ -3376,6 +3412,7 @@ const Canvas = (() => {
         cost_c1: eg.cost_c1 || 0,
         cost_c0: eg.cost_c0 || 0,
         price_profile_id: eg.price_profile_id != null ? eg.price_profile_id : -1,
+        dynamic_model: cloneDynamicModel(eg.dynamic_model) || COMP.defaults.external_grid.dynamic_model,
       }, busCompMap, -80);
     });
 
@@ -3394,6 +3431,7 @@ const Canvas = (() => {
         qmax_mvar: s.qmax_mvar, qmin_mvar: s.qmin_mvar,
         self_discharge_pct: s.self_discharge_pct,
         profile_id: s.profile_id,
+        dynamic_model: cloneDynamicModel(s.dynamic_model) || COMP.defaults.storage.dynamic_model,
         in_service: s.in_service !== false,
       }, busCompMap);
     });
@@ -3418,6 +3456,7 @@ const Canvas = (() => {
         alpha_isc: pv.alpha_isc, beta_voc: pv.beta_voc,
         irradiance: pv.irradiance, temperature: pv.temperature,
         profile_id: pv.profile_id,
+        dynamic_model: cloneDynamicModel(pv.dynamic_model) || COMP.defaults.pv_system.dynamic_model,
         in_service: pv.in_service !== false,
       }, busCompMap);
     });
@@ -3581,6 +3620,7 @@ const Canvas = (() => {
         ac_grid_forming: vsc.ac_grid_forming === true,
         allow_dual_side_grid_forming: vsc.allow_dual_side_grid_forming === true,
         has_energy_buffer: vsc.has_energy_buffer === true,
+        dynamic_model: cloneDynamicModel(vsc.dynamic_model) || COMP.defaults.vsc_converter.dynamic_model,
         in_service: vsc.in_service !== false,
       });
       if (acCompId !== undefined) addConnection(comp.id, 'ac', acCompId, 'right');
@@ -3623,6 +3663,7 @@ const Canvas = (() => {
         p_min_mw: ld.p_min_mw,
         cost_mw: ld.cost_mw,
         profile_id: ld.profile_id,
+        dynamic_model: cloneDynamicModel(ld.dynamic_model) || COMP.defaults.dc_load.dynamic_model,
         in_service: ld.in_service !== false,
       }, dcBusCompMap);
     });
@@ -3641,6 +3682,7 @@ const Canvas = (() => {
         pmax_mw: sg.pmax_mw, pmin_mw: sg.pmin_mw,
         qmax_mvar: sg.qmax_mvar, qmin_mvar: sg.qmin_mvar,
         v_ref_pu: sg.v_ref_pu,
+        dynamic_model: cloneDynamicModel(sg.dynamic_model) || COMP.defaults.static_generator.dynamic_model,
         in_service: sg.in_service !== false,
       }, dcBusCompMap);
     });
@@ -3660,6 +3702,7 @@ const Canvas = (() => {
         pmax_mw: s.pmax_mw, pmin_mw: s.pmin_mw,
         self_discharge_pct: s.self_discharge_pct,
         profile_id: s.profile_id,
+        dynamic_model: cloneDynamicModel(s.dynamic_model) || COMP.defaults.dc_storage.dynamic_model,
         in_service: s.in_service !== false,
       }, dcBusCompMap);
     };
@@ -3679,6 +3722,7 @@ const Canvas = (() => {
         vmpp: pv.vmpp, impp: pv.impp, voc: pv.voc, isc: pv.isc,
         alpha_isc: pv.alpha_isc, beta_voc: pv.beta_voc,
         profile_id: pv.profile_id,
+        dynamic_model: cloneDynamicModel(pv.dynamic_model) || COMP.defaults.dc_pv_array.dynamic_model,
         in_service: pv.in_service !== false,
       }, dcBusCompMap);
     });
@@ -3698,6 +3742,7 @@ const Canvas = (() => {
         controllable: sg.controllable || false,
         v_ref_pu: sg.v_ref_pu,
         emission_factor_tco2_mwh: sg.emission_factor_tco2_mwh || sg.co2_emission_rate || 0,
+        dynamic_model: cloneDynamicModel(sg.dynamic_model) || COMP.defaults.static_generator.dynamic_model,
         in_service: sg.in_service !== false,
       }, busCompMap);
     });
@@ -3829,6 +3874,7 @@ const Canvas = (() => {
         const_p_percent: al.const_p_percent,
         controllable: al.controllable || false,
         priority: al.priority || 'Medium',
+        dynamic_model: cloneDynamicModel(al.dynamic_model) || COMP.defaults.asymmetric_load.dynamic_model,
         in_service: al.in_service !== false,
       }, busCompMap);
     });
@@ -3945,6 +3991,7 @@ const Canvas = (() => {
         d_min: dc.d_min ?? 0.05,
         d_max: dc.d_max ?? 0.95,
         n_ratio: dc.n_ratio ?? 1.0,
+        dynamic_model: cloneDynamicModel(dc.dynamic_model) || COMP.defaults.dcdc_converter.dynamic_model,
         in_service: dc.in_service !== false,
       });
       if (inCompId !== undefined) addConnection(comp.id, 'in', inCompId, 'right');

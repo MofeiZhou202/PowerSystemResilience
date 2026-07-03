@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Hybrid AC/DC Power System Simulator — ETAP-Style</title>
-<link rel="stylesheet" href="css/style.css?v=20260702-transient-contingencies"/>
+<link rel="stylesheet" href="css/style.css?v=20260703-model-io"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -12,7 +12,7 @@
 <!-- ===== Bar 1: Canvas Tools (Top Toolbar) ===== -->
 <div id="topToolbar" class="top-toolbar">
   <div class="logo-mini" title="Hybrid AC/DC Power System Simulator">⚡</div>
-  <button id="btnLoadCase" class="toolbar-btn" title="加载算例">加载算例</button>
+  <button id="btnLoadCase" class="toolbar-btn legacy-io-shortcut" title="加载算例">加载算例</button>
   <button id="btnSelect" class="toolbar-btn canvas-tool active" title="选择 (V)">选择</button>
   <button id="btnConnect" class="toolbar-btn canvas-tool" title="连线 (C)">连线</button>
   <button id="btnBoxSelect" class="toolbar-btn canvas-tool" title="框选 (拖拽空白区域)">框选</button>
@@ -41,12 +41,14 @@
   <button id="btnRotateCCW" class="toolbar-btn" title="逆时针旋转90° (Shift+R)">逆时针<br>旋转</button>
   <span class="toolbar-spacer"></span>
   <div class="toolbar-aux">
-    <button id="btnNewSystem" class="btn btn-sm" title="新建空白系统">新建</button>
-    <button id="btnExportJson" class="btn btn-sm" title="导出JSON">导出</button>
-    <button id="btnExportEtap" class="btn btn-sm" title="导出为 ETAP 工作簿 (.xlsx)">导出ETAP</button>
-    <button id="btnExportEtapXml" class="btn btn-sm" title="导出为 ETAP 工程 XML (.xml)">导出ETAP XML</button>
-    <button id="btnImportJson" class="btn btn-sm" title="导入JSON">导入</button>
+    <button id="btnNewSystem" class="btn btn-sm legacy-io-shortcut" title="新建空白系统">新建</button>
+    <button id="btnExportJson" class="btn btn-sm legacy-io-shortcut" title="导出JSON">导出</button>
+    <button id="btnExportEtap" class="btn btn-sm legacy-io-shortcut" title="导出为 ETAP 工作簿 (.xlsx)">导出ETAP</button>
+    <button id="btnExportEtapXml" class="btn btn-sm legacy-io-shortcut" title="导出为 ETAP 工程 XML (.xml)">导出ETAP XML</button>
+    <button id="btnImportJson" class="btn btn-sm legacy-io-shortcut" title="导入JSON">导入</button>
     <input type="file" id="fileImportJson" accept=".json" style="display:none"/>
+    <input type="file" id="fileImportGridlabd" accept=".glm,.txt" style="display:none"/>
+    <input type="file" id="fileImportOpendss" accept=".dss,.txt" style="display:none"/>
     <button id="btnToggleTheme" class="btn btn-sm" title="切换浅色 / 深色背景主题">🌓 主题</button>
     <span id="canvasInfo" class="canvas-info">0 元件 | 0 连接</span>
     <span id="statusBadge" class="badge">就绪</span>
@@ -55,6 +57,7 @@
 
 <!-- ===== Bar 2: Function Modules ===== -->
 <div id="moduleBar" class="module-bar">
+  <button id="moduleModelIO"      class="module-btn" data-module="modelIO">模型IO</button>
   <button id="modulePowerFlow"    class="module-btn" data-module="powerFlow">潮流计算</button>
   <button id="moduleOpf"          class="module-btn" data-module="opf">最优潮流</button>
   <button id="moduleShortCircuit" class="module-btn" data-module="shortCircuit">短路计算</button>
@@ -72,6 +75,44 @@
 
 <!-- ===== Bar 3: Sub-Toolbar (contextual) ===== -->
 <div id="subToolbar" class="sub-toolbar hidden">
+  <!-- Unified model input / output / compatibility -->
+  <div class="sub-section model-io-sub-section" data-sub="modelIO" hidden>
+    <div class="io-toolbar-group">
+      <div class="io-toolbar-group-title">输入</div>
+      <label class="sub-label">内置算例
+        <select id="ioCaseSelect" title="选择并加载内置算例">
+          <option value="">-- 选择算例 --</option>
+        </select>
+      </label>
+      <button id="btnIoLoadBuiltin" class="toolbar-btn run-btn" title="加载选中的内置算例">加载内置</button>
+      <label class="sub-label">MATPOWER
+        <select id="ioMatpowerSelect" title="选择并加载 MATPOWER 文件">
+          <option value="">-- MATPOWER文件 --</option>
+        </select>
+      </label>
+      <button id="btnIoLoadMatpower" class="toolbar-btn" title="加载选中的 MATPOWER 算例">加载MATPOWER</button>
+      <button id="btnIoImportJson" class="toolbar-btn" title="导入系统 JSON">导入JSON</button>
+      <button id="btnIoImportEtapXlsx" class="toolbar-btn" title="导入 ETAP 工作簿 (.xlsx)">导入ETAP</button>
+      <button id="btnIoImportEtapXml" class="toolbar-btn" title="导入 ETAP 工程 XML (.xml)">导入ETAP XML</button>
+      <button id="btnIoImportGridlabd" class="toolbar-btn" title="导入 GridLAB-D GLM 文本">导入GLM</button>
+      <button id="btnIoImportOpendss" class="toolbar-btn" title="导入 OpenDSS DSS 文本">导入DSS</button>
+      <button id="btnIoNewSystem" class="toolbar-btn" title="新建空白系统">新建</button>
+    </div>
+    <div class="io-toolbar-group">
+      <div class="io-toolbar-group-title">输出</div>
+      <button id="btnIoExportJson" class="toolbar-btn run-btn" title="导出当前系统 JSON">导出JSON</button>
+      <button id="btnIoExportEtap" class="toolbar-btn" title="导出 ETAP 工作簿 (.xlsx)">导出ETAP</button>
+      <button id="btnIoExportEtapXml" class="toolbar-btn" title="导出 ETAP 工程 XML (.xml)">导出ETAP XML</button>
+      <button id="btnIoExportGridlabd" class="toolbar-btn" title="导出 GridLAB-D GLM">导出GLM</button>
+      <button id="btnIoExportOpendss" class="toolbar-btn" title="导出 OpenDSS DSS">导出DSS</button>
+    </div>
+    <div class="io-toolbar-group">
+      <div class="io-toolbar-group-title">模型兼容</div>
+      <button id="btnIoModelCompatibility" class="toolbar-btn run-btn" title="检查当前系统与 JSON / Canonical / GridLAB-D / OpenDSS / 标准模型的兼容性">模型兼容</button>
+      <button id="btnIoSyncBackend" class="toolbar-btn" title="将当前画布同步到后端会话">同步画布</button>
+      <span class="sub-hint">统一入口：输入、输出、模型标准兼容性集中在这里。</span>
+    </div>
+  </div>
   <!-- Power flow -->
   <div class="sub-section" data-sub="powerFlow" hidden>
     <label class="sub-label">潮流算法
@@ -347,6 +388,7 @@
         <input id="trDcLinkG" type="number" value="20" step="1" min="0" style="width:58px"/>
       </label>
       <button id="btnRunTransient" class="toolbar-btn run-btn" title="运行暂态仿真">运行暂态</button>
+      <button id="btnTransientCompatibility" class="toolbar-btn" title="检查当前系统动态模型与 GridLAB-D / OpenDSS / 标准模型兼容性">模型兼容</button>
       <button id="btnExportTransient" class="toolbar-btn" title="导出暂态仿真结果 JSON">结果导出</button>
     </div>
     <div class="transient-toolbar-row transient-event-row">
@@ -1203,11 +1245,15 @@
           <h4>潮流结果 — 全部元件计算结果</h4>
           <div id="pfAllComponentsResults" class="topo-table-wrap"></div>
         </div>
-        <div class="topo-section">
-          <h4>潮流结果 — AC节点电压</h4>
-          <div id="pfBusResults" class="topo-table-wrap"></div>
-        </div>
-        <div class="topo-section" id="pfDcBusSection" style="display:none">
+	        <div class="topo-section">
+	          <h4>潮流结果 — AC节点电压</h4>
+	          <div id="pfBusResults" class="topo-table-wrap"></div>
+	        </div>
+	        <div class="topo-section" id="pfThreePhaseSection" style="display:none">
+	          <h4>潮流结果 — 三相节点电压 / OpenDSS对比</h4>
+	          <div id="pfThreePhaseResults" class="topo-table-wrap"></div>
+	        </div>
+	        <div class="topo-section" id="pfDcBusSection" style="display:none">
           <h4>潮流结果 — DC节点电压</h4>
           <div id="pfDcBusResults" class="topo-table-wrap"></div>
         </div>
@@ -1364,6 +1410,14 @@
             </div>
           </div>
         </div><!-- /result-group transient -->
+        <div class="result-group" data-result-group="modelIO">
+          <div class="topo-section">
+            <h4>模型IO / 标准兼容性</h4>
+            <div id="modelIoResults" class="topo-table-wrap">
+              <p class="empty-hint">导入、导出或检查模型兼容性后查看统一 IO 状态。</p>
+            </div>
+          </div>
+        </div><!-- /result-group modelIO -->
         <div class="result-group" data-result-group="topology">
         <div class="topo-section">
           <h4>拓扑重构结果</h4>
@@ -1597,8 +1651,8 @@
   </div>
 </div>
 
-<script src="js/components.js?v=20260702-transient-contingencies"></script>
-<script src="js/canvas.js?v=20260702-transient-contingencies"></script>
-<script src="js/app.js?v=20260702-transient-contingencies"></script>
+  <script src="js/components.js?v=20260703-model-io"></script>
+  <script src="js/canvas.js?v=20260703-model-io"></script>
+  <script src="js/app.js?v=20260703-model-io"></script>
 </body>
 </html>

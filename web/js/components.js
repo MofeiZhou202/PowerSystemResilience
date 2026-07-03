@@ -288,7 +288,18 @@ const COMP = (() => {
       startup_cost: 0, shutdown_cost: 0,
       ramp_up_mw_min: 0, ramp_dn_mw_min: 0,
       fuel_type: 'Thermal',
-      emission_factor_tco2_mwh: 0
+      emission_factor_tco2_mwh: 0,
+      dynamic_model: {
+        standard: 'PSS/E',
+        model_name: 'GENROU',
+        parameter_set: 'default',
+        components: [
+          { type: 'machine', model: 'GENROU', standard: 'PSS/E', parameter_set: 'default', parameters: { H: 3.5, D: 0.0, Xd: 1.8, Xq: 1.7, Xdp: 0.3, Xqp: 0.55, Xdpp: 0.25, Xqpp: 0.25, Td0p: 8.0, Tq0p: 0.4, Td0pp: 0.03, Tq0pp: 0.05 } },
+          { type: 'governor', model: 'TGOV1', standard: 'IEEE', parameter_set: 'default', parameters: { R: 0.05, T1: 0.5, T2: 2.0, T3: 7.0 } },
+          { type: 'exciter', model: 'EXAC1', standard: 'IEEE4215', parameter_set: 'placeholder', parameters: {} }
+        ],
+        parameters: {}
+      }
     },
     load: {
       name: 'Load', bus: 0, p_mw: 50, q_mvar: 20,
@@ -297,6 +308,12 @@ const COMP = (() => {
       z_percent_q: 0, i_percent_q: 0, p_percent_q: 100,
       controllable: false, p_min_mw: 0, cost_mw: 0,
       priority: 'Medium', n_customers: 0, profile_id: -1,
+      dynamic_model: {
+        standard: 'PSS/E',
+        model_name: 'ZIP',
+        parameter_set: 'default',
+        parameters: { z_percent_p: 0.0, i_percent_p: 0.0, p_percent_p: 100.0, z_percent_q: 0.0, i_percent_q: 0.0, p_percent_q: 100.0 }
+      },
       in_service: true
     },
     transformer_2w: {
@@ -325,6 +342,7 @@ const COMP = (() => {
       rx_max: 0.1, rx_min: 0.1,
       r_pu: 0, x_pu: 0, r0_pu: 0, x0_pu: 0,
       vn_kv: 0, emission_factor_tco2_mwh: 0,
+      dynamic_model: { standard: 'PSS/E', model_name: 'ExternalGrid', parameter_set: 'default' },
       controllable: false, in_service: true
     },
     storage: {
@@ -335,6 +353,15 @@ const COMP = (() => {
       pmax_mw: 10, pmin_mw: -10,
       qmax_mvar: 0, qmin_mvar: 0,
       self_discharge_pct: 0, profile_id: -1,
+      dynamic_model: {
+        standard: 'IEEE1547',
+        model_name: 'BatteryDynamic',
+        parameter_set: 'default',
+        components: [
+          { type: 'plant', model: 'BatteryDynamic', standard: 'HACDCPF', parameter_set: 'default', parameters: {} }
+        ],
+        parameters: {}
+      },
       in_service: true
     },
     pv_system: {
@@ -348,6 +375,16 @@ const COMP = (() => {
       vmpp: 0, impp: 0, voc: 0, isc: 0,
       alpha_isc: 0, beta_voc: 0,
       irradiance: 1000, temperature: 25, profile_id: -1,
+      dynamic_model: {
+        standard: 'IEEE1547',
+        model_name: 'PVDynamic',
+        parameter_set: 'default',
+        components: [
+          { type: 'plant', model: 'PVDynamic', standard: 'HACDCPF', parameter_set: 'default', parameters: {} },
+          { type: 'inverter', model: 'GridFollowingInverter', standard: 'NERC', parameter_set: 'REGC_A_REEC_A_subset', parameters: { pll_kp: 0.02, pll_ki: 1.0 } }
+        ],
+        parameters: {}
+      },
       in_service: true
     },
     renewable_gen: {
@@ -364,6 +401,7 @@ const COMP = (() => {
       pmax_mw: 0, pmin_mw: 0, qmax_mvar: 0, qmin_mvar: 0,
       scaling: 1.0, controllable: false, v_ref_pu: 0,
       emission_factor_tco2_mwh: 0,
+      dynamic_model: { standard: 'HACDCPF', model_name: 'StaticGeneratorInjection', parameter_set: 'default' },
       in_service: true
     },
     vsc_converter: {
@@ -384,6 +422,16 @@ const COMP = (() => {
       vn_ac_kv: 0, vn_dc_kv: 0,
       grid_forming: false, ac_grid_forming: false,
       allow_dual_side_grid_forming: false, has_energy_buffer: false,
+      dynamic_model: {
+        standard: 'NERC',
+        model_name: 'GridFollowingInverter',
+        parameter_set: 'REGC_A_REEC_A_subset',
+        components: [
+          { type: 'pll', model: 'KauraPLL', standard: 'PSD', parameter_set: 'default', parameters: { kp_pll: 0.02, ki_pll: 1.0 } },
+          { type: 'current_control', model: 'GFLCurrentControl', standard: 'NERC', parameter_set: 'default', parameters: { i_max_pu: 1.0 } }
+        ],
+        parameters: {}
+      },
       in_service: true
     },
     dc_bus: {
@@ -414,6 +462,7 @@ const COMP = (() => {
       name: 'DC Load', bus: 0, p_mw: 10,
       scaling: 1.0, controllable: false,
       p_min_mw: 0, cost_mw: 0, profile_id: -1,
+      dynamic_model: { standard: 'HACDCPF', model_name: 'DCDynamicLoad', parameter_set: 'constant_power' },
       in_service: true
     },
     dc_storage: {
@@ -423,6 +472,7 @@ const COMP = (() => {
       eta_charge: 0.95, eta_discharge: 0.95,
       pmax_mw: 10, pmin_mw: -10,
       self_discharge_pct: 0, profile_id: -1,
+      dynamic_model: { standard: 'IEEE1547', model_name: 'BatteryDynamic', parameter_set: 'dc_default' },
       in_service: true
     },
     dc_pv_array: {
@@ -432,6 +482,7 @@ const COMP = (() => {
       vmpp: 0, impp: 0, voc: 0, isc: 0,
       alpha_isc: 0, beta_voc: 0,
       profile_id: -1,
+      dynamic_model: { standard: 'IEEE1547', model_name: 'PVDynamic', parameter_set: 'dc_default' },
       in_service: true
     },
     motor: {
@@ -451,6 +502,7 @@ const COMP = (() => {
       name: 'AsymLoad', bus: 0, connection: 'wye', grounded: true,
       pa_mw: 10, qa_mvar: 3, pb_mw: 10, qb_mvar: 3, pc_mw: 10, qc_mvar: 3,
       scaling: 1.0, const_z_percent: 0, const_i_percent: 0, const_p_percent: 100,
+      dynamic_model: { standard: 'PSS/E', model_name: 'ZIP', parameter_set: 'per_phase' },
       controllable: false, priority: 'Medium', in_service: true
     },
     shunt: {
@@ -499,6 +551,12 @@ const COMP = (() => {
       eta: 0.98, r_eq_pu: 0.01, pmax_mw: 50, pmin_mw: -50,
       k_droop: 0.05,
       topology: 'Generic', d_min: 0.05, d_max: 0.95, n_ratio: 1.0,
+      dynamic_model: {
+        standard: 'HACDCPF',
+        model_name: 'DCDCConverterDynamic',
+        parameter_set: 'default',
+        parameters: { tau_s: 0.02 }
+      },
       in_service: true
     },
     energy_router: {
@@ -599,7 +657,7 @@ const COMP = (() => {
     pmin_mw: '最小有功(MW)', qmax_mvar: '最大无功(MVar)', qmin_mvar: '最小无功(MVar)',
     mbase_mva: '容量基准(MVA)', is_slack: '平衡节点', cost_c2: '成本系数c2',
     cost_c1: '成本系数c1', cost_c0: '成本系数c0', fuel_type: '燃料类型',
-    emission_factor_tco2_mwh: '碳排放因子(kg/MWh)',
+    emission_factor_tco2_mwh: '碳排放因子(kg/MWh)', dynamic_model: '动态模型(JSON)',
     p_mw: '有功(MW)', q_mvar: '无功(MVar)', scaling: '缩放因子',
     model: '负荷模型', priority: '优先级',
     hv_bus: '高压侧母线', lv_bus: '低压侧母线', sn_mva: '额定容量(MVA)',

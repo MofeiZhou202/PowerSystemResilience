@@ -5,6 +5,7 @@
 #include <cmath>
 #include <complex>
 #include <limits>
+#include <map>
 #include <unordered_set>
 
 #include <Eigen/LU>
@@ -117,6 +118,85 @@ void apply_gfm_profile(const hacdcpf::DynamicModelProfile& profile,
 void apply_voltage_source_profile(const hacdcpf::DynamicModelProfile& profile,
                                   VoltageSourceDynamicParams& params) {
   params.model_profiles = to_dynamic_profiles(profile);
+  if (profile.empty()) return;
+  auto find_param = [&](const std::initializer_list<const char*> keys,
+                        double fallback) {
+    for (const char* key : keys) {
+      const auto it = profile.parameters.find(key);
+      if (it != profile.parameters.end()) return it->second;
+    }
+    return fallback;
+  };
+  if (iequals(profile.model_name, "GENROU") ||
+      iequals(profile.model_name, "RoundRotorQuadratic") ||
+      iequals(profile.model_name, "RoundRotorExponential")) {
+    params.psd_genrou_model = true;
+    params.inertia_h = find_param({"H", "h"}, params.inertia_h);
+    params.damping_d = find_param({"D", "damping_d", "damping"}, params.damping_d);
+    params.xd_pu = find_param({"Xd", "xd"}, params.xd_pu);
+    params.xq_pu = find_param({"Xq", "xq"}, params.xq_pu);
+    params.xdp_pu = find_param({"Xd_p", "Xdp", "xd_p", "xdp"}, params.xdp_pu);
+    params.xqp_pu = find_param({"Xq_p", "Xqp", "xq_p", "xqp"}, params.xqp_pu);
+    params.xdpp_pu = find_param({"Xd_pp", "Xdpp", "xd_pp", "xdpp"}, params.xdpp_pu);
+    params.xl_pu = find_param({"Xl", "xl"}, params.xl_pu);
+    params.td0p_s = find_param({"Td0_p", "Td0p", "td0_p", "td0p"}, params.td0p_s);
+    params.td0pp_s = find_param({"Td0_pp", "Td0pp", "td0_pp", "td0pp"}, params.td0pp_s);
+    params.tq0p_s = find_param({"Tq0_p", "Tq0p", "tq0_p", "tq0p"}, params.tq0p_s);
+    params.tq0pp_s = find_param({"Tq0_pp", "Tq0pp", "tq0_pp", "tq0pp"}, params.tq0pp_s);
+    params.saturation_a = find_param({"Sat_A", "saturation_a", "Se_A"}, params.saturation_a);
+    params.saturation_b = find_param({"Sat_B", "saturation_b", "Se_B"}, params.saturation_b);
+  }
+}
+
+DynamicLoadModelKind load_model_kind_from_profile(
+    const Load& load,
+    const hacdcpf::DynamicModelProfile& profile) {
+  if (!profile.empty()) {
+    if (iequals(profile.model_name, "ConstantPowerLoad") ||
+        iequals(profile.model_name, "ConstantPower") ||
+        iequals(profile.model_name, "PowerLoad")) {
+      return DynamicLoadModelKind::ConstantPower;
+    }
+    if (iequals(profile.model_name, "ConstantCurrentLoad") ||
+        iequals(profile.model_name, "ConstantCurrent")) {
+      return DynamicLoadModelKind::ConstantCurrent;
+    }
+    if (iequals(profile.model_name, "ConstantImpedanceLoad") ||
+        iequals(profile.model_name, "ConstantImpedance")) {
+      return DynamicLoadModelKind::ConstantImpedance;
+    }
+    if (iequals(profile.model_name, "ZIP") ||
+        iequals(profile.model_name, "ZIPLoad") ||
+        iequals(profile.model_name, "StandardLoad")) {
+      return DynamicLoadModelKind::ZIP;
+    }
+  }
+  return load.model == LoadModel::ConstantPower ? DynamicLoadModelKind::ConstantPower
+                                                : DynamicLoadModelKind::ZIP;
+}
+
+double normalized_percent(double value, double fallback) {
+  if (!std::isfinite(value)) return fallback;
+  return value > 1.0 ? value / 100.0 : value;
+}
+
+void apply_load_profile(const Load& load, ACLoadDynamicParams& params) {
+  params.model_profiles = to_dynamic_profiles(load.dynamic_model);
+  params.model_kind = load_model_kind_from_profile(load, load.dynamic_model);
+  const double zp = normalized_percent(load.z_percent_p, 0.0);
+  const double ip = normalized_percent(load.i_percent_p, 0.0);
+  const double pp = normalized_percent(load.p_percent_p, 1.0);
+  const double zq = normalized_percent(load.z_percent_q, 0.0);
+  const double iq = normalized_percent(load.i_percent_q, 0.0);
+  const double pq = normalized_percent(load.p_percent_q, 1.0);
+  const double sum_p = zp + ip + pp;
+  const double sum_q = zq + iq + pq;
+  params.z_weight_p = sum_p > 0.0 ? zp / sum_p : 0.0;
+  params.i_weight_p = sum_p > 0.0 ? ip / sum_p : 0.0;
+  params.p_weight_p = sum_p > 0.0 ? pp / sum_p : 1.0;
+  params.z_weight_q = sum_q > 0.0 ? zq / sum_q : 0.0;
+  params.i_weight_q = sum_q > 0.0 ? iq / sum_q : 0.0;
+  params.p_weight_q = sum_q > 0.0 ? pq / sum_q : 1.0;
 }
 
 void apply_battery_profile(const hacdcpf::DynamicModelProfile& profile,
@@ -563,6 +643,9 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
         p.frequency_hz = network.frequency_hz;
         p.x_pu = positive_or(gen.xdpp_pu, positive_or(gen.xd_pu, 0.2));
         p.p_mech_mw = gen.p_mw;
+        p.q_elec_mvar = gen.q_mvar;
+        p.xd_pu = gen.xd_pu;
+        p.xdpp_pu = gen.xdpp_pu;
         p.inertia_h = gen.is_slack ? 5.0 : 1.0;
         p.dynamic_angle = !gen.is_slack;
         apply_voltage_source_profile(gen.dynamic_model, p);
@@ -650,6 +733,13 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.r_pu = gen.ra_pu;
     p.x_pu = positive_or(gen.xdpp_pu, positive_or(gen.xdp_pu, positive_or(gen.xd_pu, 0.2)));
     p.p_mech_mw = gen.pg_mw;
+    p.q_elec_mvar = gen.qg_mvar;
+    p.xd_pu = gen.xd_pu;
+    p.xq_pu = gen.xq_pu;
+    p.xdp_pu = gen.xdp_pu;
+    p.xdpp_pu = gen.xdpp_pu;
+    p.td0p_s = gen.td0p_s;
+    p.td0pp_s = gen.td0pp_s;
     p.inertia_h = positive_or(gen.inertia_h, gen.is_slack ? 5.0 : 1.0);
     p.droop_r = positive_or(gen.droop_r, 0.05);
     p.dynamic_angle = !gen.is_slack && gen.inertia_h > 0.0;
@@ -678,7 +768,12 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.p_mw = load.p_mw * load.scaling;
     p.q_mvar = load.q_mvar * load.scaling;
     p.base_mva = base_mva;
-    p.model_profiles = to_dynamic_profiles(load.dynamic_model);
+    if (bus_pos >= 0 && bus_pos < static_cast<int>(dyn.initial_power_flow.vm.size())) {
+      p.nominal_voltage_pu = positive_or(
+          dyn.initial_power_flow.vm[static_cast<std::size_t>(bus_pos)],
+          1.0);
+    }
+    apply_load_profile(load, p);
     dyn.devices.push_back(std::make_unique<DynamicLoad>(p));
   }
 

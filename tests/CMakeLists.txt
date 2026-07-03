@@ -11,6 +11,17 @@ function(hacdcpf_add_test target)
   catch_discover_tests(${target})
 endfunction()
 
+function(hacdcpf_add_plain_test target)
+  add_executable(${target} ${ARGN})
+  target_link_libraries(${target} PRIVATE hacdcpf::hacdcpf)
+  target_compile_definitions(${target} PRIVATE
+    HACDCPF_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+    HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
+  )
+  hacdcpf_copy_opendss_runtime(${target})
+  add_test(NAME ${target} COMMAND ${target})
+endfunction()
+
 hacdcpf_add_test(test_hacdcpf             test_hacdcpf.cpp)
 hacdcpf_add_test(test_all_components_pf   test_all_components_pf.cpp)
 hacdcpf_add_test(test_unified_pf_upgrade  test_unified_pf_upgrade.cpp)
@@ -163,16 +174,19 @@ hacdcpf_add_test(test_gridlabd_compare test_gridlabd_compare.cpp)
 set(_HACDCPF_PHASE_DOMAIN_DATA_DIR
   "${CMAKE_SOURCE_DIR}/tests/data/phase_domain_julia")
 if(HACDCPF_HAVE_OPENDSS AND EXISTS "${_HACDCPF_PHASE_DOMAIN_DATA_DIR}")
-  hacdcpf_add_test(test_phase_domain_multi_case_compact
+  hacdcpf_add_plain_test(test_phase_domain_multi_case_compact
     test_phase_domain_multi_case_compact.cpp)
-  hacdcpf_add_test(test_phase_domain_multi_case_compact_julia
+  hacdcpf_add_plain_test(test_phase_domain_multi_case_compact_julia
     test_phase_domain_multi_case_compact_julia.cpp)
 
-  if(EXISTS "${_HACDCPF_PHASE_DOMAIN_DATA_DIR}/IEEE123_Fixed/IEEE123Master_Fixed.dss")
-    hacdcpf_add_test(test_phase_domain_ieee123 test_phase_domain_ieee123.cpp)
-    hacdcpf_add_test(test_phase_domain_ieee123_generic_solver
-      test_phase_domain_ieee123_generic_solver.cpp)
-  endif()
+		  if(EXISTS "${_HACDCPF_PHASE_DOMAIN_DATA_DIR}/IEEE123_Fixed/IEEE123Master_Fixed.dss")
+		    hacdcpf_add_plain_test(test_phase_domain_ieee123 test_phase_domain_ieee123.cpp)
+		    hacdcpf_add_plain_test(test_phase_domain_ieee123_generic_solver
+		      test_phase_domain_ieee123_generic_solver.cpp)
+		  endif()
+		endif()
+if(HACDCPF_HAVE_OPENDSS AND EXISTS "${CMAKE_SOURCE_DIR}/external_data/opendss_ieee_pes/opendss_reference/13_node/official_full/IEEE13Nodeckt.dss")
+  hacdcpf_add_plain_test(test_phase_domain_ieee13 test_phase_domain_ieee13.cpp)
 endif()
 
 if(HACDCPF_HAVE_OPENDSS_COMPARE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_opendss_pf_compare.cpp")
@@ -317,6 +331,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
             "$<TARGET_FILE:run_gui_server>"
             "${CMAKE_BINARY_DIR}/run_gui_server"
     COMMENT "Copying run_gui_server to ${CMAKE_BINARY_DIR}/run_gui_server")
+  if(HACDCPF_HAVE_OPENDSS AND HACDCPF_DSS_CAPI_RUNTIME_DLLS)
+    add_custom_command(TARGET run_gui_server POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              ${HACDCPF_DSS_CAPI_RUNTIME_DLLS}
+              "${CMAKE_BINARY_DIR}"
+      COMMENT "Copying DSS C-API runtime DLLs for top-level run_gui_server"
+      VERBATIM)
+  endif()
 
   # End-to-end GUI/HTTP smoke test: starts the server and drives the REST API
   # (load case -> export ETAP .xlsx -> re-import -> import ETAP XML -> PF -> SC).

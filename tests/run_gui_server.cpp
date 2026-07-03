@@ -39,8 +39,10 @@
 #include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/case_builders.hpp"
+#include "hacdcpf/io/component_io_mapping.hpp"
 #include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/io/etap_io.hpp"
+#include "hacdcpf/io/external_grid_io.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
 #include "hacdcpf/power_flow/three_phase.hpp"
@@ -1252,6 +1254,8 @@ struct Session {
   std::mutex mu;
   std::optional<hacdcpf::HybridPowerSystem> current_system;
   std::string current_name{"(none)"};
+  std::optional<hacdcpf::ThreePhaseACSystem> preserved_three_phase_ac;
+  std::string preserved_three_phase_source_path;
   hacdcpf::TimeSeriesData ts_data;     // time-series profile store
   std::atomic<bool> busy{false};       // true while a heavy computation runs
   std::atomic<bool> cancel{false};     // set by cancel endpoint
@@ -1292,6 +1296,200 @@ void clear_cached_analysis(Session& s) {
   s.last_tspf_skip_uc = true;
   s.last_tspf_run_opf = false;
   s.last_tspf_num_steps = 0;
+}
+
+void clear_preserved_three_phase(Session& s) {
+  s.preserved_three_phase_ac.reset();
+  s.preserved_three_phase_source_path.clear();
+}
+
+std::string gui_lower_ascii(std::string text) {
+  std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+  return text;
+}
+
+std::filesystem::path project_root_path() {
+#ifdef HACDCPF_PROJECT_ROOT
+  return std::filesystem::path(HACDCPF_PROJECT_ROOT);
+#else
+  return std::filesystem::current_path();
+#endif
+}
+
+std::optional<std::filesystem::path> canonical_existing_path(
+    const std::filesystem::path& path) {
+  std::error_code ec;
+  if (!path.empty() && std::filesystem::exists(path, ec) && !ec) {
+    return std::filesystem::canonical(path, ec);
+  }
+  return std::nullopt;
+}
+
+std::optional<std::filesystem::path> resolve_gui_opendss_master_path(
+    const json& request,
+    const std::string& dss_text) {
+  std::vector<std::filesystem::path> candidates;
+  auto add_candidate = [&](const std::filesystem::path& path) {
+    if (!path.empty()) candidates.push_back(path);
+  };
+
+  const std::string explicit_path =
+      request.value("dss_path", request.value("path", std::string{}));
+  if (!explicit_path.empty()) {
+    const std::filesystem::path p(explicit_path);
+    add_candidate(p);
+    if (p.is_relative()) add_candidate(project_root_path() / p);
+  }
+
+  const std::string file_name =
+      request.value("filename", request.value("name", std::string{}));
+  const std::string lower_name = gui_lower_ascii(file_name);
+  if (lower_name == "ieee13nodeckt.dss" ||
+      dss_text.find("IEEE 13 Node") != std::string::npos ||
+      dss_text.find("IEEE13Nodeckt") != std::string::npos) {
+    add_candidate(project_root_path() / "external_data" / "opendss_ieee_pes" /
+                  "opendss_reference" / "13_node" / "official_full" /
+                  "IEEE13Nodeckt.dss");
+  }
+
+  if (!file_name.empty()) {
+    add_candidate(project_root_path() / file_name);
+    add_candidate(project_root_path() / "external_data" / "opendss_ieee_pes" /
+                  "opendss_reference" / "13_node" / "official_full" /
+                  file_name);
+    add_candidate(project_root_path() / "tests" / "data" / "phase_domain_julia" /
+                  file_name);
+  }
+
+  for (const auto& candidate : candidates) {
+    if (auto resolved = canonical_existing_path(candidate)) return resolved;
+  }
+  return std::nullopt;
+}
+
+json phase_mask_json(const hacdcpf::PhaseMask& mask) {
+  std::string phases;
+  if (mask.has(0)) phases.push_back('A');
+  if (mask.has(1)) phases.push_back('B');
+  if (mask.has(2)) phases.push_back('C');
+  return phases;
+}
+
+json phase_jpc_bus_results_to_json(
+    const hacdcpf::analysis::ThreePhaseJPCPhase& jpc) {
+  json rows = json::array();
+  for (std::size_t row_idx = 0; row_idx < jpc.bus_abc.size(); ++row_idx) {
+    const auto& row = jpc.bus_abc[row_idx];
+    const std::string name =
+        jpc.bus_id_to_name.count(row.bus_id) ? jpc.bus_id_to_name.at(row.bus_id)
+                                             : ("Bus " + std::to_string(row.bus_id));
+    json item{{"bus_id", row.bus_id},
+              {"name", name},
+              {"base_kv", row.base_kv},
+              {"bus_type", hacdcpf::bus_type_str(row.bus_type)},
+              {"phases", std::string{}}};
+    std::string phase_text;
+    const std::array<const char*, 3> phase_names = {"a", "b", "c"};
+    for (int phase = 0; phase < 3; ++phase) {
+      const bool has_phase = row.has_phase[static_cast<std::size_t>(phase)];
+      if (has_phase) phase_text.push_back(static_cast<char>('A' + phase));
+      const auto idx = row_idx * 3 + static_cast<std::size_t>(phase);
+      const auto v = idx < jpc.v_abc.size()
+                         ? jpc.v_abc[idx]
+                         : std::polar(row.vm_pu[static_cast<std::size_t>(phase)],
+                                      row.va_deg[static_cast<std::size_t>(phase)] *
+                                          M_PI / 180.0);
+      item[std::string("has_") + phase_names[phase]] = has_phase;
+      const std::string vm_key = std::string("vm_") + phase_names[phase] + "_pu";
+      const std::string va_key = std::string("va_") + phase_names[phase] + "_deg";
+      if (has_phase) {
+        item[vm_key] = std::abs(v);
+        item[va_key] = std::arg(v) * 180.0 / M_PI;
+      } else {
+        item[vm_key] = nullptr;
+        item[va_key] = nullptr;
+      }
+      item[std::string("pd_") + phase_names[phase] + "_mw"] =
+          row.pd_mw[static_cast<std::size_t>(phase)];
+      item[std::string("qd_") + phase_names[phase] + "_mvar"] =
+          row.qd_mvar[static_cast<std::size_t>(phase)];
+      item[std::string("pg_") + phase_names[phase] + "_mw"] =
+          row.pg_mw[static_cast<std::size_t>(phase)];
+      item[std::string("qg_") + phase_names[phase] + "_mvar"] =
+          row.qg_mvar[static_cast<std::size_t>(phase)];
+    }
+    item["phases"] = phase_text;
+    rows.push_back(std::move(item));
+  }
+  return rows;
+}
+
+double wrap_deg_diff(double lhs, double rhs) {
+  double diff = lhs - rhs;
+  while (diff > 180.0) diff -= 360.0;
+  while (diff < -180.0) diff += 360.0;
+  return diff;
+}
+
+json compare_phase_voltage_results(
+    const hacdcpf::analysis::ThreePhaseJPCPhase& lhs,
+    const hacdcpf::analysis::ThreePhaseJPCPhase& rhs) {
+  double max_vm_error = 0.0;
+  double max_angle_error = 0.0;
+  double sum_vm_error = 0.0;
+  double sum_angle_error = 0.0;
+  int count = 0;
+  json worst = json::object();
+  for (const auto& [bus_name, bus_id] : lhs.bus_name_to_id) {
+    auto lhs_row_it = std::find_if(
+        lhs.bus_abc.begin(), lhs.bus_abc.end(),
+        [&](const auto& row) { return row.bus_id == bus_id; });
+    if (lhs_row_it == lhs.bus_abc.end()) continue;
+    const std::string wanted = gui_lower_ascii(bus_name);
+    const auto rhs_name_it = std::find_if(
+        rhs.bus_name_to_id.begin(), rhs.bus_name_to_id.end(),
+        [&](const auto& item) { return gui_lower_ascii(item.first) == wanted; });
+    if (rhs_name_it == rhs.bus_name_to_id.end()) continue;
+    auto rhs_row_it = std::find_if(
+        rhs.bus_abc.begin(), rhs.bus_abc.end(),
+        [&](const auto& row) { return row.bus_id == rhs_name_it->second; });
+    if (rhs_row_it == rhs.bus_abc.end()) continue;
+    for (int phase = 0; phase < 3; ++phase) {
+      const std::size_t slot = static_cast<std::size_t>(phase);
+      if (!lhs_row_it->has_phase[slot] || !rhs_row_it->has_phase[slot]) continue;
+      const double vm_error = std::abs(lhs_row_it->vm_pu[slot] -
+                                       rhs_row_it->vm_pu[slot]);
+      const double angle_error =
+          std::abs(wrap_deg_diff(lhs_row_it->va_deg[slot],
+                                 rhs_row_it->va_deg[slot]));
+      if (vm_error > max_vm_error || angle_error > max_angle_error) {
+        worst = json{{"bus", bus_name},
+                     {"phase", std::string(1, static_cast<char>('A' + phase))},
+                     {"vm_error_pu", vm_error},
+                     {"angle_error_deg", angle_error},
+                     {"vm_ours_pu", lhs_row_it->vm_pu[slot]},
+                     {"vm_opendss_pu", rhs_row_it->vm_pu[slot]},
+                     {"va_ours_deg", lhs_row_it->va_deg[slot]},
+                     {"va_opendss_deg", rhs_row_it->va_deg[slot]}};
+      }
+      max_vm_error = std::max(max_vm_error, vm_error);
+      max_angle_error = std::max(max_angle_error, angle_error);
+      sum_vm_error += vm_error;
+      sum_angle_error += angle_error;
+      ++count;
+    }
+  }
+  return json{{"ran", true},
+              {"count", count},
+              {"max_vm_error_pu", max_vm_error},
+              {"avg_vm_error_pu", count > 0 ? sum_vm_error / count : 0.0},
+              {"max_angle_error_deg", max_angle_error},
+              {"avg_angle_error_deg", count > 0 ? sum_angle_error / count : 0.0},
+              {"within_gui_tolerance",
+               count > 0 && max_vm_error < 1.0e-3 && max_angle_error < 0.1},
+              {"worst", worst}};
 }
 
 void apply_current_carbon_factors_to_snapshot(
@@ -1876,6 +2074,42 @@ json dynamic_event_to_json(const hacdcpf::dynamics::DynamicEvent& event) {
               {"target_type", event.target_type},
               {"params", event.params},
               {"label", event.label}};
+}
+
+json component_standard_profile_to_json(
+    const hacdcpf::io::ComponentStandardProfile& profile) {
+  return json{{"family", hacdcpf::io::to_string(profile.family)},
+              {"profile", profile.profile},
+              {"model_name", profile.model_name},
+              {"policy", hacdcpf::io::to_string(profile.policy)},
+              {"verification_scope",
+               hacdcpf::io::to_string(profile.verification_scope)},
+              {"notes", profile.notes}};
+}
+
+json component_io_mapping_to_json(
+    const hacdcpf::io::ComponentIOMapping& mapping) {
+  json profiles = json::array();
+  for (const auto& profile : mapping.standard_profiles) {
+    profiles.push_back(component_standard_profile_to_json(profile));
+  }
+  return json{{"component_type", mapping.component_type},
+              {"collection_path", mapping.collection_path},
+              {"domain", hacdcpf::io::to_string(mapping.domain)},
+              {"json_policy", hacdcpf::io::to_string(mapping.json_policy)},
+              {"canonical_policy",
+               hacdcpf::io::to_string(mapping.canonical_policy)},
+              {"gridlabd_policy",
+               hacdcpf::io::to_string(mapping.gridlabd_policy)},
+              {"opendss_policy",
+               hacdcpf::io::to_string(mapping.opendss_policy)},
+              {"verification_scope",
+               hacdcpf::io::to_string(mapping.verification_scope)},
+              {"canonical_target", mapping.canonical_target},
+              {"gridlabd_target", mapping.gridlabd_target},
+              {"opendss_target", mapping.opendss_target},
+              {"standard_profiles", profiles},
+              {"notes", mapping.notes}};
 }
 
 template <typename T>
@@ -7500,6 +7734,81 @@ int main(int argc, char** argv) {
     res.set_content(out.dump(), "application/json");
   });
 
+  svr.Get("/api/io/model_compatibility",
+          [](const httplib::Request&, httplib::Response& res) {
+    try {
+      json out;
+      json mappings = json::array();
+      for (const auto& mapping : hacdcpf::io::component_io_mappings()) {
+        mappings.push_back(component_io_mapping_to_json(mapping));
+      }
+      out["mappings"] = mappings;
+      hacdcpf::HybridPowerSystem sys;
+      bool has_system = false;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (g_session.current_system) {
+          sys = *g_session.current_system;
+          has_system = true;
+        }
+      }
+      if (has_system) {
+        const auto report = hacdcpf::io::analyze_component_io_coverage(sys);
+        json coverage = json::array();
+        for (const auto& item : report.items) {
+          if (item.count == 0U) continue;
+          coverage.push_back(
+              json{{"component_type", item.mapping.component_type},
+                   {"collection_path", item.mapping.collection_path},
+                   {"count", item.count},
+                   {"json_policy",
+                    hacdcpf::io::to_string(item.mapping.json_policy)},
+                   {"canonical_policy",
+                    hacdcpf::io::to_string(item.mapping.canonical_policy)},
+                   {"gridlabd_policy",
+                    hacdcpf::io::to_string(item.mapping.gridlabd_policy)},
+                   {"opendss_policy",
+                    hacdcpf::io::to_string(item.mapping.opendss_policy)},
+                   {"verification_scope",
+                    hacdcpf::io::to_string(item.mapping.verification_scope)},
+                   {"standard_profiles",
+                    component_io_mapping_to_json(item.mapping)
+                        ["standard_profiles"]}});
+        }
+        out["coverage"] = coverage;
+        out["summary"] =
+            json{{"total_instances", report.total_instances()},
+                 {"gridlabd_represented",
+                  report.represented_instances(
+                      hacdcpf::io::ComponentIOFormat::GridLABD)},
+                 {"gridlabd_unrepresented",
+                  report.unrepresented_instances(
+                      hacdcpf::io::ComponentIOFormat::GridLABD)},
+                 {"opendss_represented",
+                  report.represented_instances(
+                      hacdcpf::io::ComponentIOFormat::OpenDSS)},
+                 {"opendss_unrepresented",
+                  report.unrepresented_instances(
+                      hacdcpf::io::ComponentIOFormat::OpenDSS)}};
+        out["diagnostics"] =
+            json{{"gridlabd",
+                  hacdcpf::io::external_io_diagnostics(
+                      report, hacdcpf::io::ComponentIOFormat::GridLABD)},
+                 {"opendss",
+                  hacdcpf::io::external_io_diagnostics(
+                      report, hacdcpf::io::ComponentIOFormat::OpenDSS)}};
+      } else {
+        out["coverage"] = json::array();
+        out["summary"] = json{{"total_instances", 0}};
+        out["diagnostics"] = json::object();
+      }
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
   // ---- Session: load system ----
   svr.Post("/api/session/load_builtin",
            [](const httplib::Request& req, httplib::Response& res) {
@@ -7507,11 +7816,12 @@ int main(int argc, char** argv) {
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       std::string name = j.value("case", "ieee24_3area_acdc_expanded");
       auto sys = build_case(name);
-      std::lock_guard<std::mutex> lk(g_session.mu);
-      g_session.current_system = std::move(sys);
-      g_session.current_name = name;
-      g_session.external_grid_carbon_profiles.clear();
-      clear_cached_analysis(g_session);
+	      std::lock_guard<std::mutex> lk(g_session.mu);
+	      g_session.current_system = std::move(sys);
+	      g_session.current_name = name;
+	      clear_preserved_three_phase(g_session);
+	      g_session.external_grid_carbon_profiles.clear();
+	      clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
       summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
       res.set_content(summary.dump(), "application/json");
@@ -7536,11 +7846,12 @@ int main(int argc, char** argv) {
       if (!fs::exists(fpath)) throw std::runtime_error("File not found: " + filename);
       auto sys = hacdcpf::io::parse_matpower(fpath.string());
       sys.name = filename;
-      std::lock_guard<std::mutex> lk(g_session.mu);
-      g_session.current_system = std::move(sys);
-      g_session.current_name = filename;
-      g_session.external_grid_carbon_profiles.clear();
-      clear_cached_analysis(g_session);
+	      std::lock_guard<std::mutex> lk(g_session.mu);
+	      g_session.current_system = std::move(sys);
+	      g_session.current_name = filename;
+	      clear_preserved_three_phase(g_session);
+	      g_session.external_grid_carbon_profiles.clear();
+	      clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
       summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
       res.set_content(summary.dump(), "application/json");
@@ -7556,12 +7867,19 @@ int main(int argc, char** argv) {
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       std::string js = j.value("json_string", "");
       if (js.empty()) throw std::runtime_error("Empty JSON string");
-      auto sys = hacdcpf::io::from_json(js);
+	      auto sys = hacdcpf::io::from_json(js);
 
-      std::lock_guard<std::mutex> lk(g_session.mu);
-      g_session.current_system = std::move(sys);
-      g_session.current_name = g_session.current_system->name;
-      g_session.external_grid_carbon_profiles.clear();
+	      std::lock_guard<std::mutex> lk(g_session.mu);
+	      if (!sys.three_phase_ac.has_value() && g_session.preserved_three_phase_ac.has_value()) {
+	        sys.three_phase_ac = g_session.preserved_three_phase_ac;
+	      } else if (sys.three_phase_ac.has_value()) {
+	        g_session.preserved_three_phase_ac = sys.three_phase_ac;
+	      } else {
+	        clear_preserved_three_phase(g_session);
+	      }
+	      g_session.current_system = std::move(sys);
+	      g_session.current_name = g_session.current_system->name;
+	      g_session.external_grid_carbon_profiles.clear();
       clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
       summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
@@ -7580,10 +7898,11 @@ int main(int argc, char** argv) {
       sys.base_mva = 100.0;
       sys.ac.base_mva = 100.0;
       sys.dc.base_mva = 100.0;
-      std::lock_guard<std::mutex> lk(g_session.mu);
-      g_session.current_system = std::move(sys);
-      g_session.current_name = "New System";
-      clear_cached_analysis(g_session);
+	      std::lock_guard<std::mutex> lk(g_session.mu);
+	      g_session.current_system = std::move(sys);
+	      g_session.current_name = "New System";
+	      clear_preserved_three_phase(g_session);
+	      clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
       summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
       res.set_content(summary.dump(), "application/json");
@@ -7697,6 +8016,152 @@ int main(int argc, char** argv) {
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
   });
+
+  // ---- Session: export/import text-based external grid formats ----
+  svr.Post("/api/session/export_gridlabd",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system) throw std::runtime_error("No system loaded");
+      hacdcpf::io::GridLABDExportOptions options;
+      const std::string glm = hacdcpf::io::to_gridlabd(*g_session.current_system, options);
+      std::string safe;
+      for (char ch : g_session.current_name) {
+        safe += (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')
+                    ? ch : '_';
+      }
+      if (safe.empty()) safe = "system";
+      res.set_content(json{{"glm_string", glm}, {"name", safe}}.dump(),
+                      "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/export_opendss",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system) throw std::runtime_error("No system loaded");
+      hacdcpf::io::OpenDSSExportOptions options;
+      const std::string dss = hacdcpf::io::to_opendss(*g_session.current_system, options);
+      std::string safe;
+      for (char ch : g_session.current_name) {
+        safe += (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')
+                    ? ch : '_';
+      }
+      if (safe.empty()) safe = "system";
+      res.set_content(json{{"dss_string", dss}, {"name", safe}}.dump(),
+                      "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+	  svr.Post("/api/session/load_gridlabd",
+	           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      const std::string glm = j.value("glm_string", "");
+      if (glm.empty()) throw std::runtime_error("Empty GridLAB-D GLM string");
+      hacdcpf::io::GridLABDImportOptions options;
+      options.mode = hacdcpf::io::ImportMode::Permissive;
+      auto report = hacdcpf::io::from_gridlabd_with_report(glm, options);
+	      std::lock_guard<std::mutex> lk(g_session.mu);
+	      g_session.current_system = std::move(report.system);
+	      g_session.current_name = g_session.current_system->name.empty()
+	                                   ? "GridLAB-D import"
+	                                   : g_session.current_system->name;
+	      clear_preserved_three_phase(g_session);
+	      clear_cached_analysis(g_session);
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_io_warnings"] = report.warnings;
+      summary["_io_skipped"] = report.skipped;
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+	  svr.Post("/api/session/load_opendss",
+	           [](const httplib::Request& req, httplib::Response& res) {
+	    try {
+	      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+	      const std::string dss = j.value("dss_string", "");
+	      if (dss.empty()) throw std::runtime_error("Empty OpenDSS DSS string");
+	      json warnings = json::array();
+	      json skipped = json::array();
+	      hacdcpf::HybridPowerSystem imported;
+	      bool used_phase_loader = false;
+	      std::string source_path;
+
+	      const auto master_path = resolve_gui_opendss_master_path(j, dss);
+	      if (master_path.has_value()) {
+	        try {
+	          auto tp = hacdcpf::analysis::load_three_phase_system_from_opendss(*master_path);
+	          if (!tp.buses.empty()) {
+	            hacdcpf::HybridPowerSystem phase_sys;
+	            phase_sys.name = master_path->filename().string();
+	            phase_sys.base_mva = tp.base_mva;
+	            phase_sys.ac.base_mva = tp.base_mva;
+	            phase_sys.ac.freq_hz = tp.base_freq_hz;
+	            phase_sys.three_phase_ac = tp;
+	            imported = hacdcpf::project_to_canonical_models(phase_sys, false);
+	            imported.three_phase_ac = std::move(tp);
+	            used_phase_loader = true;
+	            source_path = master_path->string();
+	          }
+	        } catch (const std::exception& ex) {
+	          warnings.push_back(
+	              std::string("Phase-domain OpenDSS import failed, falling back to text converter: ") +
+	              ex.what());
+	        }
+	      } else {
+	        warnings.push_back(
+	            "No resolvable OpenDSS master path was supplied. Relative Redirect/LineCode files "
+	            "cannot be loaded from a lone browser text upload; using simplified text conversion.");
+	      }
+
+	      if (!used_phase_loader) {
+	        hacdcpf::io::OpenDSSImportOptions options;
+	        options.mode = hacdcpf::io::ImportMode::Permissive;
+	        auto report = hacdcpf::io::from_opendss_with_report(dss, options);
+	        imported = std::move(report.system);
+	        for (const auto& w : report.warnings) warnings.push_back(w);
+	        for (const auto& s : report.skipped) skipped.push_back(s);
+	      }
+
+	      std::lock_guard<std::mutex> lk(g_session.mu);
+	      g_session.current_system = std::move(imported);
+	      g_session.current_name = g_session.current_system->name.empty()
+	                                   ? "OpenDSS import"
+	                                   : g_session.current_system->name;
+	      if (g_session.current_system->three_phase_ac.has_value()) {
+	        g_session.preserved_three_phase_ac = g_session.current_system->three_phase_ac;
+	        g_session.preserved_three_phase_source_path = source_path;
+	      } else {
+	        clear_preserved_three_phase(g_session);
+	      }
+	      clear_cached_analysis(g_session);
+	      auto summary = system_summary(*g_session.current_system);
+	      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+	      summary["_io_warnings"] = warnings;
+	      summary["_io_skipped"] = skipped;
+	      summary["_opendss_import_mode"] =
+	          used_phase_loader ? "phase_domain_opendss_capi" : "text_converter";
+	      summary["_opendss_source_path"] = source_path;
+	      summary["_has_three_phase_ac"] =
+	          g_session.current_system->three_phase_ac.has_value();
+	      res.set_content(summary.dump(), "application/json");
+	    } catch (const std::exception& e) {
+	      res.status = 400;
+	      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+	    }
+	  });
 
   // ---- Session: import a native ETAP project XML (e.g. Feeder.xml) ----
   svr.Post("/api/session/load_etap_xml",
@@ -10567,34 +11032,113 @@ int main(int argc, char** argv) {
         } else {
           add_solver_diagnostics(pf.diagnostics);
         }
-      } else if (method == "three_phase") {
-        if (!sys.three_phase_ac.has_value()) {
-          throw std::runtime_error("Three-phase subsystem not available in this case");
-        }
-        hacdcpf::powerflow::ThreePhaseFlowOptions tp_opt;
-        tp_opt.max_iter = opt.max_iter;
-        tp_opt.tol = opt.tol;
-        auto pf = hacdcpf::powerflow::solve_three_phase(*sys.three_phase_ac, tp_opt);
-        out["converged"] = pf.converged;
-        out["iterations"] = pf.iterations;
-        out["residual"] = pf.residual;
-        json vm = json::array();
-        json vm_a = json::array();
-        json vm_b = json::array();
-        json vm_c = json::array();
-        for (const auto& br : pf.bus_results) {
-          vm_a.push_back(br.vm_a_pu);
-          vm_b.push_back(br.vm_b_pu);
-          vm_c.push_back(br.vm_c_pu);
-          vm.push_back((br.vm_a_pu + br.vm_b_pu + br.vm_c_pu) / 3.0);
-        }
-        out["vm"] = vm;
-        out["vm_a"] = vm_a;
-        out["vm_b"] = vm_b;
-        out["vm_c"] = vm_c;
-      } else {
-        throw std::runtime_error("Unsupported power flow method: " + method);
-      }
+	      } else if (method == "three_phase") {
+	        if (!sys.three_phase_ac.has_value()) {
+	          throw std::runtime_error("Three-phase subsystem not available in this case");
+	        }
+	        std::string dss_source_path;
+	        {
+	          std::lock_guard<std::mutex> lk(g_session.mu);
+	          dss_source_path = g_session.preserved_three_phase_source_path;
+	        }
+	        hacdcpf::analysis::RunPFPhaseOptions tp_opt;
+	        tp_opt.algorithm = hacdcpf::analysis::PhaseDomainSolverAlgorithm::Compact;
+	        tp_opt.max_iter = opt.max_iter;
+	        tp_opt.tol = opt.tol;
+	        tp_opt.verbose = opt.verbose;
+	        tp_opt.vmin_pu = 0.95;
+	        if (!dss_source_path.empty()) tp_opt.dss_file_path = dss_source_path;
+	        auto pf = hacdcpf::analysis::runpf_phase(*sys.three_phase_ac, tp_opt);
+	        out["converged"] = pf.success;
+	        out["iterations"] = pf.iterations;
+	        out["residual"] = pf.residual;
+	        out["method_actual"] = "three_phase_compact_abc";
+	        out["solver_used"] = pf.solver_used;
+	        out["primary_solver"] = pf.primary_solver;
+	        out["result_source"] = pf.result_source;
+	        out["fallback_used"] = pf.fallback_used;
+	        out["primary_solver_failed_reason"] = pf.primary_solver_failed_reason;
+	        out["three_phase"] = true;
+	        out["tp_bus_results"] = phase_jpc_bus_results_to_json(pf);
+	        json vm = json::array();
+	        json va = json::array();
+	        json vm_a = json::array();
+	        json vm_b = json::array();
+	        json vm_c = json::array();
+	        json va_a = json::array();
+	        json va_b = json::array();
+	        json va_c = json::array();
+	        for (const auto& row : pf.bus_abc) {
+	          const auto active_vm = [&](int phase) -> double {
+	            return row.has_phase[static_cast<std::size_t>(phase)]
+	                       ? row.vm_pu[static_cast<std::size_t>(phase)]
+	                       : 0.0;
+	          };
+	          const auto active_va = [&](int phase) -> double {
+	            return row.has_phase[static_cast<std::size_t>(phase)]
+	                       ? row.va_deg[static_cast<std::size_t>(phase)]
+	                       : 0.0;
+	          };
+	          double vm_sum = 0.0;
+	          double va_sum = 0.0;
+	          int phase_count = 0;
+	          for (int phase = 0; phase < 3; ++phase) {
+	            if (!row.has_phase[static_cast<std::size_t>(phase)]) continue;
+	            vm_sum += row.vm_pu[static_cast<std::size_t>(phase)];
+	            va_sum += row.va_deg[static_cast<std::size_t>(phase)];
+	            ++phase_count;
+	          }
+	          vm.push_back(phase_count > 0 ? vm_sum / phase_count : 0.0);
+	          va.push_back((phase_count > 0 ? va_sum / phase_count : 0.0) * M_PI / 180.0);
+	          if (row.has_phase[0]) vm_a.push_back(active_vm(0)); else vm_a.push_back(nullptr);
+	          if (row.has_phase[1]) vm_b.push_back(active_vm(1)); else vm_b.push_back(nullptr);
+	          if (row.has_phase[2]) vm_c.push_back(active_vm(2)); else vm_c.push_back(nullptr);
+	          if (row.has_phase[0]) va_a.push_back(active_va(0)); else va_a.push_back(nullptr);
+	          if (row.has_phase[1]) va_b.push_back(active_va(1)); else va_b.push_back(nullptr);
+	          if (row.has_phase[2]) va_c.push_back(active_va(2)); else va_c.push_back(nullptr);
+	        }
+	        out["vm"] = vm;
+	        out["va"] = va;
+	        out["vm_a"] = vm_a;
+	        out["vm_b"] = vm_b;
+	        out["vm_c"] = vm_c;
+	        out["va_a_deg"] = va_a;
+	        out["va_b_deg"] = va_b;
+	        out["va_c_deg"] = va_c;
+	        out["power_balance_diagnostics"] =
+	            json{{"basis", "three_phase_abc"},
+	                 {"ordinary", json::array()},
+	                 {"sources", json::array()},
+	                 {"message",
+	                  "三相不对称潮流采用 abc 域节点方程；平衡诊断请查看三相节点电压和 OpenDSS 对比，不使用单相等值KCL表。"}};
+	        if (!dss_source_path.empty()) {
+	          try {
+	            hacdcpf::analysis::RunPFPhaseOptions ref_opt = tp_opt;
+	            ref_opt.algorithm = hacdcpf::analysis::PhaseDomainSolverAlgorithm::OpenDSS;
+	            ref_opt.dss_file_path = dss_source_path;
+	            auto ref = hacdcpf::analysis::runpf_phase(*sys.three_phase_ac, ref_opt);
+	            out["opendss_reference"] =
+	                json{{"ran", true},
+	                     {"converged", ref.success},
+	                     {"iterations", ref.iterations},
+	                     {"residual", ref.residual},
+	                     {"source_path", dss_source_path}};
+	            out["opendss_reference"]["comparison"] =
+	                compare_phase_voltage_results(pf, ref);
+	          } catch (const std::exception& ex) {
+	            out["opendss_reference"] =
+	                json{{"ran", false},
+	                     {"source_path", dss_source_path},
+	                     {"error", ex.what()}};
+	          }
+	        } else {
+	          out["opendss_reference"] =
+	              json{{"ran", false},
+	                   {"reason", "OpenDSS master path is not available for this session"}};
+	        }
+	      } else {
+	        throw std::runtime_error("Unsupported power flow method: " + method);
+	      }
 
       add_dc_branch_flows();
       // Surface solver diagnostics (e.g. auto-promoted converters, Vdc-limit

@@ -264,6 +264,8 @@ HybridPowerSystem make_psd_genrou_three_bus_subset_case() {
       {"Td0_pp", 0.03},
       {"Tq0_p", 0.4},
       {"Tq0_pp", 0.05},
+      {"Sat_A", 0.904688681931025},
+      {"Sat_B", 11.008066615170353},
   };
 
   sys.ac.generators = {slack, genrou};
@@ -435,6 +437,15 @@ std::string shell_quote(const std::string& value) {
   return out;
 }
 
+std::string safe_artifact_token(std::string value) {
+  for (char& ch : value) {
+    if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')) {
+      ch = '_';
+    }
+  }
+  return value;
+}
+
 std::filesystem::path psd_repo_path() {
   if (const char* env = std::getenv("HACDCPF_PSD_REPO")) {
     return env;
@@ -523,6 +534,13 @@ double max_common_abs_error(const CsvSeries& lhs,
   }
   REQUIRE(n > 0);
   return max_abs;
+}
+
+CsvSeries relative_to_initial(CsvSeries series) {
+  if (series.y.empty()) return series;
+  const double y0 = series.y.front();
+  for (double& value : series.y) value -= y0;
+  return series;
 }
 
 const DynamicDeviceOutput& require_device_output(const DynamicSnapshot& snapshot,
@@ -1056,6 +1074,9 @@ TEST_CASE("PSD validation ladder covers component, load, and system-level HACDCP
     opt.dt_s = 0.005;
     opt.record_every_step = true;
     opt.dynamic_trim_tol = 1e-7;
+    opt.max_dynamic_trim_iters = 20;
+    opt.algebraic_network_max_iters = 8;
+    opt.algebraic_network_tol = 1e-11;
 
     DynamicModelBuilder builder;
     DynamicSystem dyn = builder.build(sys, opt);
@@ -1250,7 +1271,9 @@ TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system tra
     double t_start{0.0};
     double t_end{2.0};
     double rms_tolerance{1.0};
+    double max_tolerance{1.0};
     std::string level;
+    bool compare_relative{false};
   };
 
   std::vector<ExternalSpec> specs;
@@ -1275,19 +1298,35 @@ TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system tra
     DynamicSolver solver;
     const DynamicResults result = solver.solve(dyn);
     REQUIRE(result.success);
-    auto local = device_output_series(result,
+    auto delta = device_output_series(result,
                                       "SynchronousMachine",
                                       2,
                                       "angle_rad",
                                       180.0 / 3.14159265358979323846);
-    write_csv_series(out_dir / "hacdcpf_psd_genrou_delta_deg.csv", local);
+    write_csv_series(out_dir / "hacdcpf_psd_genrou_delta_deg.csv", delta);
     specs.push_back({"genrou",
                      "generator-102-1:delta_deg",
-                     std::move(local),
+                     std::move(delta),
                      0.0,
                      2.0,
-                     360.0,
-                     "component"});
+                     5.0,
+                     12.0,
+                     "component",
+                     true});
+    auto omega = device_output_series(result,
+                                      "SynchronousMachine",
+                                      2,
+                                      "omega_pu");
+    write_csv_series(out_dir / "hacdcpf_psd_genrou_omega_pu.csv", omega);
+    specs.push_back({"genrou",
+                     "generator-102-1:omega_pu",
+                     std::move(omega),
+                     0.0,
+                     2.0,
+                     0.002,
+                     0.01,
+                     "component",
+                     true});
   }
 
   {
@@ -1310,15 +1349,28 @@ TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system tra
     DynamicSolver solver;
     const DynamicResults result = solver.solve(dyn);
     REQUIRE(result.success);
-    auto local = bus_voltage_mag_series(result, 2);
-    write_csv_series(out_dir / "hacdcpf_psd_zip_constant_power_v103.csv", local);
+    auto v103 = bus_voltage_mag_series(result, 2);
+    write_csv_series(out_dir / "hacdcpf_psd_zip_constant_power_v103.csv", v103);
     specs.push_back({"zip_constant_power",
                      "bus103:voltage_mag",
-                     std::move(local),
+                     std::move(v103),
                      0.0,
                      2.0,
-                     0.25,
-                     "component"});
+                     0.006,
+                     0.015,
+                     "component",
+                     true});
+    auto v102 = bus_voltage_mag_series(result, 1);
+    write_csv_series(out_dir / "hacdcpf_psd_zip_constant_power_v102.csv", v102);
+    specs.push_back({"zip_constant_power",
+                     "bus102:voltage_mag",
+                     std::move(v102),
+                     0.0,
+                     2.0,
+                     0.008,
+                     0.020,
+                     "component",
+                     true});
   }
 
   {
@@ -1342,14 +1394,16 @@ TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system tra
                      0.0,
                      2.0,
                      0.35,
-                     "system"});
+                     0.35,
+                     "system",
+                     false});
   }
 
   std::vector<ValidationMetric> metrics;
   for (const auto& spec : specs) {
     const std::filesystem::path psd_csv =
         out_dir / ("psd_" + spec.case_name + "_" +
-                   spec.signal.substr(spec.signal.find(':') + 1) + ".csv");
+                   safe_artifact_token(spec.signal) + ".csv");
     const std::filesystem::path psd_log =
         out_dir / ("psd_" + spec.case_name + ".log");
     const bool exported =
@@ -1362,17 +1416,21 @@ TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system tra
 
     const CsvSeries psd = read_csv_series(psd_csv);
     REQUIRE(psd.t.size() > 100);
-    const double rms = rms_common_error(spec.local, psd, spec.t_start, spec.t_end);
+    const CsvSeries local_cmp =
+        spec.compare_relative ? relative_to_initial(spec.local) : spec.local;
+    const CsvSeries psd_cmp =
+        spec.compare_relative ? relative_to_initial(psd) : psd;
+    const double rms = rms_common_error(local_cmp, psd_cmp, spec.t_start, spec.t_end);
     const double max_abs =
-        max_common_abs_error(spec.local, psd, spec.t_start, spec.t_end);
+        max_common_abs_error(local_cmp, psd_cmp, spec.t_start, spec.t_end);
     metrics.push_back({spec.level,
                        spec.case_name,
                        "PowerSimulationsDynamics.jl",
-                       spec.signal,
+                       spec.compare_relative ? spec.signal + "_relative" : spec.signal,
                        rms,
                        max_abs,
                        spec.rms_tolerance,
-                       rms < spec.rms_tolerance});
+                       rms < spec.rms_tolerance && max_abs < spec.max_tolerance});
   }
   write_validation_summary(out_dir / "psd_external_validation_summary.csv", metrics);
   for (const auto& metric : metrics) {

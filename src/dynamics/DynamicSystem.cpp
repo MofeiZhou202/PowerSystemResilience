@@ -239,47 +239,63 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
 }
 
 bool DynamicSystem::solveNetwork(double t, std::string& error) {
-  DynamicStamp stamp(network.acPhaseNodeCount(), network.dcBusCount());
-  for (const auto& device : devices) {
-    device->stamp(t, x, y, stamp);
-  }
+  const int max_iters = std::max(1, options.algebraic_network_max_iters);
+  const double tol = std::max(0.0, options.algebraic_network_tol);
+  for (int iter = 0; iter < max_iters; ++iter) {
+    const Eigen::VectorXcd vac_prev = y.Vac_abc;
+    const Eigen::VectorXd vdc_prev = y.Vdc;
 
-  Eigen::SparseMatrix<Complex> Yac_eff;
-  Eigen::SparseMatrix<double> Gdc_eff;
-  Eigen::VectorXcd Iac_eff;
-  Eigen::VectorXd Idc_eff;
-  network.assembleEffectiveMatrices(
-      stamp,
-      options.singular_regularization_pu,
-      Yac_eff,
-      Iac_eff,
-      Gdc_eff,
-      Idc_eff);
+    DynamicStamp stamp(network.acPhaseNodeCount(), network.dcBusCount());
+    for (const auto& device : devices) {
+      device->stamp(t, x, y, stamp);
+    }
 
-  if (network.acPhaseNodeCount() > 0) {
-    Eigen::VectorXcd v;
-    SparseLinearSolver solver(options.linear_solver);
-    const auto result = solver.solve(Yac_eff, Iac_eff, v);
-    if (!result.success) {
-      error = "AC transient network solve failed: " + result.message;
-      return false;
-    }
-    y.Vac_abc = v;
-    y.Iac_abc = Iac_eff;
-  }
+    Eigen::SparseMatrix<Complex> Yac_eff;
+    Eigen::SparseMatrix<double> Gdc_eff;
+    Eigen::VectorXcd Iac_eff;
+    Eigen::VectorXd Idc_eff;
+    network.assembleEffectiveMatrices(
+        stamp,
+        options.singular_regularization_pu,
+        Yac_eff,
+        Iac_eff,
+        Gdc_eff,
+        Idc_eff);
 
-  if (network.dcBusCount() > 0) {
-    Eigen::VectorXd v;
-    SparseLinearSolver solver(options.linear_solver);
-    const auto result = solver.solve(Gdc_eff, Idc_eff, v);
-    if (!result.success) {
-      error = "DC transient network solve failed: " + result.message;
-      return false;
+    if (network.acPhaseNodeCount() > 0) {
+      Eigen::VectorXcd v;
+      SparseLinearSolver solver(options.linear_solver);
+      const auto result = solver.solve(Yac_eff, Iac_eff, v);
+      if (!result.success) {
+        error = "AC transient network solve failed: " + result.message;
+        return false;
+      }
+      y.Vac_abc = v;
+      y.Iac_abc = Iac_eff;
     }
-    for (Eigen::Index i = 0; i < v.size(); ++i) {
-      y.Vdc[i] = finite_or(v[i], 1.0);
+
+    if (network.dcBusCount() > 0) {
+      Eigen::VectorXd v;
+      SparseLinearSolver solver(options.linear_solver);
+      const auto result = solver.solve(Gdc_eff, Idc_eff, v);
+      if (!result.success) {
+        error = "DC transient network solve failed: " + result.message;
+        return false;
+      }
+      for (Eigen::Index i = 0; i < v.size(); ++i) {
+        y.Vdc[i] = finite_or(v[i], 1.0);
+      }
+      y.Idc = Idc_eff;
     }
-    y.Idc = Idc_eff;
+
+    double delta = 0.0;
+    if (vac_prev.size() == y.Vac_abc.size() && y.Vac_abc.size() > 0) {
+      delta = std::max(delta, (y.Vac_abc - vac_prev).cwiseAbs().maxCoeff());
+    }
+    if (vdc_prev.size() == y.Vdc.size() && y.Vdc.size() > 0) {
+      delta = std::max(delta, (y.Vdc - vdc_prev).cwiseAbs().maxCoeff());
+    }
+    if (iter + 1 >= max_iters || delta <= tol) break;
   }
 
   for (auto& device : devices) {
