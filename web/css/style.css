@@ -534,6 +534,10 @@ body[data-active-result-group="modelIO"] #rightPanel {
   max-height: none;
   overflow: visible;
 }
+#modelIoResults.topo-table-wrap {
+  max-height: none;
+  overflow: visible;
+}
 .topo-table-wrap table {
   width: 100%;
   border-collapse: collapse;
@@ -819,6 +823,22 @@ body[data-active-result-group="modelIO"] #rightPanel {
 #resultsContent[data-active-group="resilience"]   .result-group[data-result-group="resilience"] {
   display: block;
 }
+.cost-formula-box {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  margin: 4px 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(97, 175, 239, 0.08);
+  color: var(--ink);
+  font-size: 12px;
+}
+.cost-formula-box span {
+  color: var(--ink2);
+}
 .scenario-generation-charts {
   width: 100%;
   margin: 6px 0 10px;
@@ -979,6 +999,50 @@ body[data-active-result-group="modelIO"] #rightPanel {
   height: 460px;
   min-height: 440px;
 }
+.model-io-dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(320px, 1fr));
+  gap: 12px;
+  margin: 12px 0 16px;
+}
+.model-io-chart {
+  min-width: 0;
+  height: 360px;
+  min-height: 360px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px;
+  background: rgba(255,255,255,0.02);
+}
+.model-io-chart-tall {
+  height: 430px;
+  min-height: 430px;
+}
+.model-io-severity {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+.model-io-severity-error {
+  background: rgba(224,108,117,0.18);
+  color: var(--red);
+  border: 1px solid rgba(224,108,117,0.45);
+}
+.model-io-severity-warning {
+  background: rgba(209,154,102,0.18);
+  color: var(--orange);
+  border: 1px solid rgba(209,154,102,0.45);
+}
+.model-io-severity-info {
+  background: rgba(97,175,239,0.16);
+  color: var(--accent);
+  border: 1px solid rgba(97,175,239,0.4);
+}
 body[data-active-result-group="transient"] #tabResults,
 body[data-active-result-group="modelIO"] #tabResults {
   padding: 12px;
@@ -1006,6 +1070,7 @@ body[data-active-result-group="modelIO"] .result-group[data-result-group="modelI
 }
 @media (max-width: 1150px) {
   .transient-dashboard-grid { grid-template-columns: 1fr; }
+  .model-io-dashboard-grid { grid-template-columns: 1fr; }
   .transient-chart-wide { grid-column: auto; }
 }
 @media (max-width: 900px) {

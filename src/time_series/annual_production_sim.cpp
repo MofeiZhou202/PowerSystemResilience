@@ -76,6 +76,74 @@ static TimeSeriesData slice_ts_data(const TimeSeriesData& full,
   return sub;
 }
 
+/// Conventional generator operating cost rate ($/h) from dispatch in MW.
+/// This is the reporting basis used by annual/monthly cost summaries regardless
+/// of whether the optimizer itself minimized cost, carbon, curtailment, or loss.
+static double generator_operating_cost_rate(
+    const HybridPowerSystem& sys,
+    const std::vector<double>& dispatch_mw,
+    const std::vector<int>* commitment = nullptr,
+    int t = 0) {
+  double cost = 0.0;
+  int gpos = 0;
+  for (const auto& gen : sys.ac.generators) {
+    if (!gen.in_service) continue;
+    if (gpos < static_cast<int>(dispatch_mw.size())) {
+      const double p = dispatch_mw[static_cast<size_t>(gpos)];
+      double u = std::abs(p) > 1e-8 ? 1.0 : 0.0;
+      if (commitment && gpos < static_cast<int>(commitment->size())) {
+        u = (*commitment)[static_cast<size_t>(gpos)] ? 1.0 : 0.0;
+      }
+      cost += std::max(0.0, gen.cost_c0) * u + gen.cost_c1 * p +
+              gen.cost_c2 * p * p;
+    }
+    ++gpos;
+  }
+  (void)t;
+  return cost;
+}
+
+static double generator_operating_cost_rate_from_uc(
+    const HybridPowerSystem& sys,
+    const UCSchedule& uc,
+    int t) {
+  std::vector<double> dispatch;
+  dispatch.reserve(uc.gen_dispatch.size());
+  for (const auto& row : uc.gen_dispatch) {
+    dispatch.push_back(
+        (t >= 0 && t < static_cast<int>(row.size()))
+            ? row[static_cast<size_t>(t)]
+            : 0.0);
+  }
+  std::vector<int> commitment;
+  commitment.reserve(uc.gen_commit.size());
+  for (const auto& row : uc.gen_commit) {
+    commitment.push_back(
+        (t >= 0 && t < static_cast<int>(row.size()))
+            ? row[static_cast<size_t>(t)]
+            : 0);
+  }
+  return generator_operating_cost_rate(
+      sys, dispatch, commitment.empty() ? nullptr : &commitment, t);
+}
+
+static double generator_operating_cost_rate_from_opf(
+    const HybridPowerSystem& sys,
+    const std::vector<double>& pg_mw) {
+  std::vector<double> active_dispatch;
+  active_dispatch.reserve(pg_mw.size());
+  const bool original_indexed = pg_mw.size() == sys.ac.generators.size();
+  int active_pos = 0;
+  for (size_t gi = 0; gi < sys.ac.generators.size(); ++gi) {
+    const auto& gen = sys.ac.generators[gi];
+    if (!gen.in_service) continue;
+    const size_t pos = original_indexed ? gi : static_cast<size_t>(active_pos);
+    active_dispatch.push_back(pos < pg_mw.size() ? pg_mw[pos] : 0.0);
+    ++active_pos;
+  }
+  return generator_operating_cost_rate(sys, active_dispatch);
+}
+
 /// Extract per-step metrics from a TimeSeriesPFResult into
 /// the corresponding range of AnnualStepResult entries.
 static void fill_step_results(std::vector<AnnualStepResult>& steps,
@@ -105,35 +173,19 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
     }
     // OPF convergence
     if (t < static_cast<int>(sub_result.opf_results.size())) {
-      sr.opf_converged =
-          sub_result.opf_results[static_cast<size_t>(t)].converged;
+      const auto& opf = sub_result.opf_results[static_cast<size_t>(t)];
+      sr.opf_converged = opf.converged;
       sr.opf_cost =
-          sub_result.opf_results[static_cast<size_t>(t)].objective;
+          (opf.converged && !opf.pg_mw.empty())
+              ? generator_operating_cost_rate_from_opf(sys, opf.pg_mw)
+              : generator_operating_cost_rate_from_uc(
+                    sys, sub_result.uc_schedule, t);
     } else {
       // No OPF for this step (e.g. dynamic SCED / UC-only): derive the step cost
       // from the UC generator dispatch using each unit's cost curve so the
       // production-cost objective is still populated.
-      double cost = 0.0;
-      int gpos = 0;
-      for (const auto& gg : sys.ac.generators) {
-        if (!gg.in_service) continue;
-        if (gpos < static_cast<int>(sub_result.uc_schedule.gen_dispatch.size()) &&
-            t < static_cast<int>(
-                    sub_result.uc_schedule.gen_dispatch[static_cast<size_t>(gpos)].size())) {
-          const double p =
-              sub_result.uc_schedule.gen_dispatch[static_cast<size_t>(gpos)][static_cast<size_t>(t)];
-          double u = 1.0;
-          if (gpos < static_cast<int>(sub_result.uc_schedule.gen_commit.size()) &&
-              t < static_cast<int>(
-                      sub_result.uc_schedule.gen_commit[static_cast<size_t>(gpos)].size())) {
-            u = sub_result.uc_schedule.gen_commit[static_cast<size_t>(gpos)][static_cast<size_t>(t)]
-                    ? 1.0 : 0.0;
-          }
-          cost += gg.cost_c0 * u + gg.cost_c1 * p + gg.cost_c2 * p * p;
-        }
-        ++gpos;
-      }
-      sr.opf_cost = cost;
+      sr.opf_cost = generator_operating_cost_rate_from_uc(
+          sys, sub_result.uc_schedule, t);
       sr.opf_converged = sub_result.uc_schedule.feasible;
     }
 
@@ -1002,19 +1054,7 @@ AnnualProductionSimResult solve_annual_production_simulation(
         }
         sr.total_ess_mw = ess;
 
-        // Approximate cost from generation
-        double cost = 0.0;
-        int gpos = 0;
-        for (const auto& gg : sys.ac.generators) {
-          if (!gg.in_service) { continue; }
-          if (gpos < static_cast<int>(ws.uc.gen_dispatch.size()) &&
-              t < static_cast<int>(ws.uc.gen_dispatch[static_cast<size_t>(gpos)].size())) {
-            double p = ws.uc.gen_dispatch[static_cast<size_t>(gpos)][static_cast<size_t>(t)];
-            cost += gg.cost_c0 + gg.cost_c1 * p + gg.cost_c2 * p * p;
-          }
-          ++gpos;
-        }
-        sr.opf_cost = cost;
+        sr.opf_cost = generator_operating_cost_rate_from_uc(sys, ws.uc, t);
         sr.opf_converged = true;
         sr.pf_converged = true;
       }

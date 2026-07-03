@@ -817,6 +817,15 @@ const App = (() => {
     return [];
   }
 
+  function firstFiniteNumber(...values) {
+    for (const value of values) {
+      if (value === null || value === undefined || value === '') continue;
+      const n = Number(value);
+      if (Number.isFinite(n)) return n;
+    }
+    return 0;
+  }
+
   function normalizePowerFlowResult(data) {
     if (!data || typeof data !== 'object') return data;
     data.geo_ac_branches = firstNonEmptyArray(data.geo_ac_branches, data.branch_flows);
@@ -2131,8 +2140,16 @@ const App = (() => {
         // Display results.  Always replace the previous GUI cache, including after
         // a failed run, so a later successful run is never masked by stale arrays.
         _lastPfData = pfData;
-        Canvas.showPowerFlowResults(pfData);
-        showPowerFlowResultsTables(pfData);
+        try {
+          showPowerFlowResultsTables(pfData);
+        } catch (err) {
+          log(`潮流结果表刷新失败: ${err.message || err}`, 'error');
+        }
+        try {
+          Canvas.showPowerFlowResults(pfData);
+        } catch (err) {
+          log(`潮流画布叠加刷新失败，结果表已更新: ${err.message || err}`, 'warn');
+        }
         switchTab('results');
       } else {
         setStatus('计算失败', 'error');
@@ -3297,6 +3314,216 @@ const App = (() => {
     return `${((n / t) * 100).toFixed(1)}%`;
   }
 
+  function modelIoCountBy(rows, key) {
+    const out = {};
+    (rows || []).forEach(row => {
+      const value = row?.[key] || '未分类';
+      out[value] = (out[value] || 0) + 1;
+    });
+    return out;
+  }
+
+  function modelIoRangeText(row) {
+    const min = row?.expected_min ?? row?.min;
+    const max = row?.expected_max ?? row?.max;
+    const unit = row?.units ? ` ${row.units}` : '';
+    if (min != null && max != null) {
+      return `${row.min_inclusive === false ? '(' : '['}${min}, ${max}${row.max_inclusive === false ? ')' : ']'}${unit}`;
+    }
+    if (min != null) return `${row.min_inclusive === false ? '>' : '≥'} ${min}${unit}`;
+    if (max != null) return `${row.max_inclusive === false ? '<' : '≤'} ${max}${unit}`;
+    return row?.required ? '必填' : '—';
+  }
+
+  function modelIoSeverityClass(severity) {
+    const s = String(severity || '').toLowerCase();
+    if (s === 'error') return 'model-io-severity-error';
+    if (s === 'warning') return 'model-io-severity-warning';
+    return 'model-io-severity-info';
+  }
+
+  function modelIoDimensionLabel(dimension) {
+    const labels = {
+      AssetIdentity: '资产身份',
+      TopologyConnectivity: '拓扑连通',
+      ElectricalParameters: '电气参数',
+      DynamicBehavior: '动态模型',
+      TelemetryObservability: '遥测观测',
+      StateSynchronization: '状态同步',
+      ScenarioEvents: '场景事件',
+      ReliabilityLifecycle: '可靠性生命周期',
+      StandardsInteroperability: '标准互操作',
+      NumericalValidation: '数值验证',
+      ProvenanceGovernance: '来源治理',
+    };
+    return labels[dimension] || dimension || '未分类';
+  }
+
+  function modelIoRatioPercent(value, digits = 0) {
+    const pct = Math.max(0, Math.min(1, Number(value || 0))) * 100;
+    return `${pct.toFixed(digits)}%`;
+  }
+
+  function drawModelIoCharts(data) {
+    if (typeof Plotly === 'undefined') return;
+    const summary = data?.summary || {};
+    const total = Number(summary.total_instances || 0);
+    const gridRepresented = Number(summary.gridlabd_represented || 0);
+    const dssRepresented = Number(summary.opendss_represented || 0);
+    const audit = data?.parameter_audit || {};
+    const auditSummary = audit.summary || {};
+    const rules = Array.isArray(data?.parameter_rules) ? data.parameter_rules : [];
+    const findings = Array.isArray(audit.findings) ? audit.findings : [];
+    const twin = data?.digital_twin_readiness || {};
+    const twinSummary = twin.summary || {};
+    const twinDimensions = Array.isArray(twin.dimensions) ? twin.dimensions : [];
+    const cfg = { responsive: true, displaylogo: false, modeBarButtonsToRemove: ['select2d', 'lasso2d'] };
+
+    const twinGaugeChart = document.getElementById('modelIoTwinGaugeChart');
+    if (twinGaugeChart) {
+      const readiness = Math.max(0, Math.min(1, Number(twinSummary.readiness_ratio || 0))) * 100;
+      Plotly.react(twinGaugeChart, [{
+        type: 'indicator',
+        mode: 'gauge+number',
+        value: readiness,
+        number: { suffix: '%', font: { size: 34 } },
+        title: { text: `${twinSummary.maturity_label || '未评估'}` },
+        gauge: {
+          axis: { range: [0, 100], tickwidth: 1 },
+          bar: { color: '#56b6c2' },
+          bgcolor: 'rgba(255,255,255,0.04)',
+          borderwidth: 1,
+          bordercolor: '#4b5563',
+          steps: [
+            { range: [0, 35], color: 'rgba(224,108,117,0.25)' },
+            { range: [35, 55], color: 'rgba(209,154,102,0.24)' },
+            { range: [55, 72], color: 'rgba(229,192,123,0.24)' },
+            { range: [72, 88], color: 'rgba(152,195,121,0.22)' },
+            { range: [88, 100], color: 'rgba(86,182,194,0.26)' },
+          ],
+          threshold: { line: { color: '#e06c75', width: 3 }, thickness: 0.75, value: 88 },
+        },
+      }], {
+        ...transientPlotLayout('数字孪生成熟度', ''),
+        xaxis: undefined,
+        yaxis: undefined,
+        margin: { l: 28, r: 28, t: 48, b: 28 },
+      }, cfg);
+    }
+
+    const twinDimensionChart = document.getElementById('modelIoTwinDimensionChart');
+    if (twinDimensionChart) {
+      if (twinDimensions.length) {
+        const labels = twinDimensions.map(row => modelIoDimensionLabel(row.dimension));
+        const values = twinDimensions.map(row => {
+          const max = Number(row.max_score || 0);
+          return max > 0 ? 100 * Number(row.score || 0) / max : 0;
+        });
+        Plotly.react(twinDimensionChart, [{
+          x: values,
+          y: labels,
+          type: 'bar',
+          orientation: 'h',
+          marker: {
+            color: values.map(v => v >= 88 ? '#56b6c2' : v >= 72 ? '#98c379' : v >= 55 ? '#e5c07b' : v >= 35 ? '#d19a66' : '#e06c75'),
+          },
+          text: values.map(v => `${v.toFixed(0)}%`),
+          textposition: 'auto',
+        }], {
+          ...transientPlotLayout('孪生维度就绪度', '%'),
+          xaxis: { range: [0, 100], title: '', automargin: true },
+          yaxis: { automargin: true },
+          margin: { l: 112, r: 18, t: 42, b: 34 },
+        }, cfg);
+      } else {
+        twinDimensionChart.innerHTML = '<p class="empty-hint">当前尚无数字孪生维度评分。</p>';
+      }
+    }
+
+    const coverageChart = document.getElementById('modelIoCoverageChart');
+    if (coverageChart) {
+      Plotly.react(coverageChart, [{
+        x: ['GridLAB-D', 'OpenDSS'],
+        y: [gridRepresented, dssRepresented],
+        name: '可表示',
+        type: 'bar',
+        marker: { color: '#56b6c2' },
+      }, {
+        x: ['GridLAB-D', 'OpenDSS'],
+        y: [Math.max(total - gridRepresented, 0), Math.max(total - dssRepresented, 0)],
+        name: '需投影/暂不支持',
+        type: 'bar',
+        marker: { color: '#d19a66' },
+      }], {
+        ...transientPlotLayout('外部格式覆盖', '元件数'),
+        xaxis: { title: '', automargin: true },
+        barmode: 'stack',
+      }, cfg);
+    }
+
+    const severityChart = document.getElementById('modelIoSeverityChart');
+    if (severityChart) {
+      const severity = {
+        Error: Number(auditSummary.errors || 0),
+        Warning: Number(auditSummary.warnings || 0),
+        Info: Number(auditSummary.info || 0),
+      };
+      if (Object.values(severity).some(v => v > 0)) {
+        Plotly.react(severityChart, [{
+          labels: Object.keys(severity),
+          values: Object.values(severity),
+          type: 'pie',
+          hole: 0.48,
+          marker: { colors: ['#e06c75', '#d19a66', '#61afef'] },
+          textinfo: 'label+value',
+        }], {
+          ...transientPlotLayout('参数健康等级', ''),
+          xaxis: undefined,
+          yaxis: undefined,
+          showlegend: false,
+        }, cfg);
+      } else {
+        severityChart.innerHTML = '<p class="empty-hint">当前无参数诊断项。</p>';
+      }
+    }
+
+    const categoryChart = document.getElementById('modelIoCategoryChart');
+    if (categoryChart) {
+      const byCategory = auditSummary.by_category || modelIoCountBy(findings, 'category');
+      const categoryValues = Object.values(byCategory).map(Number);
+      if (categoryValues.some(v => v > 0)) {
+        Plotly.react(categoryChart, [{
+          x: Object.keys(byCategory),
+          y: categoryValues,
+          type: 'bar',
+          marker: { color: ['#61afef', '#98c379', '#c678dd', '#e06c75', '#e5c07b'] },
+        }], {
+          ...transientPlotLayout('问题所属参数域', '发现数'),
+          xaxis: { title: '', automargin: true },
+        }, cfg);
+      } else {
+        categoryChart.innerHTML = '<p class="empty-hint">当前无越界参数域。</p>';
+      }
+    }
+
+    const standardsChart = document.getElementById('modelIoStandardsChart');
+    if (standardsChart) {
+      const byStandard = modelIoCountBy(rules, 'standard_family');
+      Plotly.react(standardsChart, [{
+        labels: Object.keys(byStandard),
+        values: Object.values(byStandard),
+        type: 'pie',
+        hole: 0.38,
+        textinfo: 'label+value',
+      }], {
+        ...transientPlotLayout('规则标准来源', ''),
+        xaxis: undefined,
+        yaxis: undefined,
+        showlegend: false,
+      }, cfg);
+    }
+  }
+
   function renderModelCompatibilityReport(data, options = {}) {
     const targetId = options.targetId || 'modelIoResults';
     const resultGroup = options.resultGroup || 'modelIO';
@@ -3306,9 +3533,23 @@ const App = (() => {
     const coverage = Array.isArray(data?.coverage) ? data.coverage : [];
     const mappings = Array.isArray(data?.mappings) ? data.mappings : [];
     const diagnostics = data?.diagnostics || {};
+    const parameterRules = Array.isArray(data?.parameter_rules) ? data.parameter_rules : [];
+    const parameterAudit = data?.parameter_audit || {};
+    const auditSummary = parameterAudit.summary || {};
+    const findings = Array.isArray(parameterAudit.findings) ? parameterAudit.findings : [];
+    const twinCriteria = Array.isArray(data?.digital_twin_criteria) ? data.digital_twin_criteria : [];
+    const twin = data?.digital_twin_readiness || {};
+    const twinSummary = twin.summary || {};
+    const twinFindings = Array.isArray(twin.findings) ? twin.findings : [];
     const total = Number(summary.total_instances || 0);
     const gridRepresented = Number(summary.gridlabd_represented || 0);
     const openDssRepresented = Number(summary.opendss_represented || 0);
+    const errors = Number(auditSummary.errors || 0);
+    const warnings = Number(auditSummary.warnings || 0);
+    const infos = Number(auditSummary.info || 0);
+    const twinReadiness = Number(twinSummary.readiness_ratio || 0);
+    const twinErrors = Number(twinSummary.errors || 0);
+    const twinWarnings = Number(twinSummary.warnings || 0);
 
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
@@ -3322,10 +3563,46 @@ const App = (() => {
       ['OpenDSS覆盖', transientCompatibilityRatio(openDssRepresented, total), `${openDssRepresented}/${total}`],
       ['注册元件类型', mappings.length, '类'],
       ['当前覆盖类型', coverage.length, '类'],
+      ['参数规则', parameterRules.length, '条'],
+      ['参数硬错误', errors, `警告 ${warnings} / 提示 ${infos}`],
+      ['已检查参数', auditSummary.checked_parameters || 0, `元件 ${auditSummary.component_instances_checked || 0}`],
+      ['孪生就绪度', modelIoRatioPercent(twinReadiness), twinSummary.maturity_label || '未评估'],
+      ['孪生成熟度', `L${twinSummary.maturity_level ?? 0}`, `缺口 ${twinErrors}/${twinWarnings}`],
     ].forEach(([label, value, unit]) => {
       html += `<div class="transient-kpi"><div class="transient-kpi-label">${escapeHtml(label)}</div><div class="transient-kpi-value">${escapeHtml(String(value))}</div><div class="transient-kpi-label">${escapeHtml(String(unit || ''))}</div></div>`;
     });
     html += '</div>';
+
+    html += '<div class="model-io-dashboard-grid">';
+    html += '<div id="modelIoTwinGaugeChart" class="model-io-chart"></div>';
+    html += '<div id="modelIoTwinDimensionChart" class="model-io-chart model-io-chart-tall"></div>';
+    html += '<div id="modelIoCoverageChart" class="model-io-chart"></div>';
+    html += '<div id="modelIoSeverityChart" class="model-io-chart"></div>';
+    html += '<div id="modelIoCategoryChart" class="model-io-chart"></div>';
+    html += '<div id="modelIoStandardsChart" class="model-io-chart"></div>';
+    html += '</div>';
+
+    html += '<div class="transient-section-head"><h5>数字孪生就绪诊断</h5><span>identity / topology / parameters / dynamics / telemetry / validation / governance</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>等级</th><th>维度</th><th>准则</th><th>得分</th><th>标准依据</th><th>证据</th><th>改进方向</th></tr></thead><tbody>';
+    if (twinFindings.length) {
+      twinFindings.forEach(row => {
+        const maxScore = Number(row.max_score || 0);
+        const scorePct = maxScore > 0 ? `${(100 * Number(row.score || 0) / maxScore).toFixed(0)}%` : '—';
+        const basis = `${row.standard_family || ''}${row.standard_profile ? ` / ${row.standard_profile}` : ''}`.replace(/^ \/ /, '');
+        html += `<tr>
+          <td><span class="model-io-severity ${modelIoSeverityClass(row.severity)}">${escapeHtml(row.severity || '')}</span></td>
+          <td>${escapeHtml(modelIoDimensionLabel(row.dimension))}</td>
+          <td>${escapeHtml(row.criterion_id || '')}<br>${escapeHtml(row.title || '')}</td>
+          <td>${escapeHtml(scorePct)}</td>
+          <td>${escapeHtml(basis || 'Native')}</td>
+          <td>${escapeHtml(row.evidence || '')}</td>
+          <td>${escapeHtml(row.message || '')}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="7">当前尚未加载系统；请先加载算例或同步画布。</td></tr>';
+    }
+    html += '</tbody></table></div>';
 
     html += '<div class="transient-section-head"><h5>当前系统元件覆盖</h5><span>JSON / Canonical / GridLAB-D / OpenDSS</span></div>';
     html += '<div class="transient-table-scroll"><table><thead><tr><th>元件</th><th>路径</th><th>数量</th><th>JSON</th><th>Canonical</th><th>GridLAB-D</th><th>OpenDSS</th><th>验证范围</th><th>标准模型</th></tr></thead><tbody>';
@@ -3361,6 +3638,33 @@ const App = (() => {
     });
     html += '</div>';
 
+    html += '<div class="transient-section-head"><h5>参数健康诊断</h5><span>static / dynamic / transient / failure / reliability</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>等级</th><th>元件</th><th>位置</th><th>参数域</th><th>参数</th><th>当前值</th><th>建议范围</th><th>标准依据</th><th>说明</th></tr></thead><tbody>';
+    if (findings.length) {
+      findings.slice(0, 300).forEach(row => {
+        const component = row.component_name || `${row.component_type || ''} ${row.component_index ?? row.component_position ?? ''}`;
+        const valueText = row.value == null ? '—' : String(row.value);
+        const basis = `${row.standard_family || ''}${row.standard_profile ? ` / ${row.standard_profile}` : ''}`.replace(/^ \/ /, '');
+        html += `<tr>
+          <td><span class="model-io-severity ${modelIoSeverityClass(row.severity)}">${escapeHtml(row.severity || '')}</span></td>
+          <td>${escapeHtml(component)}</td>
+          <td>${escapeHtml(row.collection_path || '')}${row.component_position != null ? ` #${escapeHtml(String(row.component_position))}` : ''}</td>
+          <td>${escapeHtml(row.category || '')}</td>
+          <td>${escapeHtml(row.parameter_path || '')}</td>
+          <td>${escapeHtml(valueText)}</td>
+          <td>${escapeHtml(modelIoRangeText(row))}</td>
+          <td>${escapeHtml(basis || 'Native')}</td>
+          <td>${escapeHtml(row.message || '')}</td>
+        </tr>`;
+      });
+      if (findings.length > 300) {
+        html += `<tr><td colspan="9">仅显示前 300 条；总计 ${escapeHtml(String(findings.length))} 条。</td></tr>`;
+      }
+    } else {
+      html += '<tr><td colspan="9">当前已检查参数没有发现越界或缺失项。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
     const profileRows = [];
     mappings.forEach(mapping => {
       (Array.isArray(mapping.standard_profiles) ? mapping.standard_profiles : []).forEach(profile => {
@@ -3386,8 +3690,57 @@ const App = (() => {
     }
     html += '</tbody></table></div>';
 
+    const ruleRows = parameterRules.slice(0, 360);
+    html += '<div class="transient-section-head"><h5>参数规则库</h5><span>可用于导入校验、参数估计和标准兼容审查</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>元件</th><th>路径</th><th>参数域</th><th>参数</th><th>范围</th><th>必填</th><th>标准族</th><th>Profile</th><th>等级</th></tr></thead><tbody>';
+    if (ruleRows.length) {
+      ruleRows.forEach(rule => {
+        html += `<tr>
+          <td>${escapeHtml(rule.component_type || '')}</td>
+          <td>${escapeHtml(rule.collection_path || '')}</td>
+          <td>${escapeHtml(rule.category || '')}</td>
+          <td>${escapeHtml(rule.parameter_path || '')}</td>
+          <td>${escapeHtml(modelIoRangeText(rule))}</td>
+          <td>${rule.required ? '是' : '否'}</td>
+          <td>${escapeHtml(rule.standard_family || '')}</td>
+          <td>${escapeHtml(rule.standard_profile || '')}</td>
+          <td>${escapeHtml(rule.range_severity || rule.missing_severity || '')}</td>
+        </tr>`;
+      });
+      if (parameterRules.length > ruleRows.length) {
+        html += `<tr><td colspan="9">仅显示前 ${ruleRows.length} 条；总计 ${escapeHtml(String(parameterRules.length))} 条。</td></tr>`;
+      }
+    } else {
+      html += '<tr><td colspan="9">尚未注册参数规则。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
+    html += '<div class="transient-section-head"><h5>数字孪生准则库</h5><span>Data IO 从文件交换走向运行孪生的统一验收口径</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>准则</th><th>维度</th><th>权重</th><th>失败等级</th><th>标准/Profile</th><th>说明</th></tr></thead><tbody>';
+    if (twinCriteria.length) {
+      twinCriteria.forEach(row => {
+        const basis = `${row.standard_family || ''}${row.standard_profile ? ` / ${row.standard_profile}` : ''}`.replace(/^ \/ /, '');
+        html += `<tr>
+          <td>${escapeHtml(row.criterion_id || '')}<br>${escapeHtml(row.title || '')}</td>
+          <td>${escapeHtml(modelIoDimensionLabel(row.dimension))}</td>
+          <td>${escapeHtml(String(row.weight ?? ''))}</td>
+          <td>${escapeHtml(row.severity_if_failed || '')}</td>
+          <td>${escapeHtml(basis || 'Native')}</td>
+          <td>${escapeHtml(row.description || '')}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="6">尚未注册数字孪生准则。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
     const el = document.getElementById(targetId);
-    if (el) el.innerHTML = html;
+    if (el) {
+      el.innerHTML = html;
+      drawModelIoCharts(data);
+      requestAnimationFrame(() => drawModelIoCharts(data));
+      setTimeout(() => drawModelIoCharts(data), 250);
+    }
   }
 
   function renderTransientCompatibilityReport(data) {
@@ -3404,8 +3757,8 @@ const App = (() => {
     if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
     const data = await apiGet('/api/io/model_compatibility');
     if (data && !data.error) {
-      renderModelCompatibilityReport(data, options);
       switchTab('results');
+      renderModelCompatibilityReport(data, options);
       setStatus('模型兼容性检查完成');
     } else {
       const msg = data?.error || '模型兼容性检查失败';
@@ -4680,7 +5033,13 @@ const App = (() => {
       }
     }
 
+    data.cost_formula = data.cost_formula || data.objective_formula || {};
     const fmt = (x, n = 0) => Number(x || 0).toLocaleString('en-US', { maximumFractionDigits: n });
+    const monthlyCostValue = (m) => firstFiniteNumber(
+      m?.total_cost, m?.cost, m?.production_cost, m?.objective_value);
+    const costFormulaTitle = data.cost_formula.title || '年度运行成本';
+    const costFormulaText = data.cost_formula.formula_text || data.cost_formula.description || '';
+    const costFormulaSource = data.cost_formula.dispatch_basis || data.cost_formula.source || data.solver_name || '';
     const feasClass = data.feasible ? 'result-converged' : 'result-failed';
     const annParExec = data.parallel_execution || {};
     const annWorkers = Number(data.parallel_workers || 1);
@@ -4704,6 +5063,10 @@ const App = (() => {
           <span class="result-value">${annParLabel}${annParDetail}</span></div>
         <div class="result-item"><span class="result-label">${data.objective_label || '年总运行成本 ($)'}</span>
           <span class="result-value">$${fmt(data.objective_value != null ? data.objective_value : data.total_cost)}</span></div>
+        <div class="result-item"><span class="result-label">成本口径</span>
+          <span class="result-value" title="${escapeHtml(costFormulaText)}">${escapeHtml(costFormulaTitle)}</span></div>
+        <div class="result-item"><span class="result-label">成本来源</span>
+          <span class="result-value">${escapeHtml(costFormulaSource || '—')}</span></div>
         <div class="result-item"><span class="result-label">墙钟用时</span>
           <span class="result-value">${(data._wallSeconds || 0).toFixed(1)} s</span></div>
         <div class="result-item"><span class="result-label">总发电量</span>
@@ -4772,17 +5135,29 @@ const App = (() => {
     if (mc && window.Plotly && ms.length) {
       const months = ms.map((m, i) => ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'][m.block_id != null ? m.block_id : i] || `块${i}`);
       Plotly.react(mc, [
-        { x: months, y: ms.map(m => m.total_cost), name: '月成本($)', type: 'bar', marker: { color: '#8e44ad' } },
-      ], Object.assign({ title: '月度成本', xaxis: theme.xaxis, yaxis: Object.assign({ title: '$' }, theme.yaxis) }, theme), { responsive: true });
+        { x: months, y: ms.map(monthlyCostValue), name: '月运行成本($)', type: 'bar', marker: { color: '#8e44ad' } },
+      ], Object.assign({
+        title: `月度成本 — ${costFormulaTitle}`,
+        xaxis: theme.xaxis,
+        yaxis: Object.assign({ title: '$' }, theme.yaxis),
+        annotations: costFormulaText ? [{
+          text: escapeHtml(costFormulaText),
+          xref: 'paper', yref: 'paper', x: 0, y: -0.22, showarrow: false,
+          align: 'left', font: { size: 10, color: '#8a909c' },
+        }] : [],
+      }, theme), { responsive: true });
+    } else if (mc) {
+      mc.innerHTML = '<p class="empty-hint">暂无月度成本数据</p>';
     }
 
     // Monthly table.
     const mt = document.getElementById('annualSimMonthlyTable');
     if (mt && ms.length) {
-      let html = '<table class="tbl"><thead><tr><th>月</th><th>发电(MWh)</th><th>负荷(MWh)</th><th>新能源(MWh)</th><th>弃电(MWh)</th><th>网损(MWh)</th><th>成本($)</th><th>PF收敛</th></tr></thead><tbody>';
+      let html = `<div class="cost-formula-box"><strong>${escapeHtml(costFormulaTitle)}</strong>${costFormulaText ? `<span>${escapeHtml(costFormulaText)}</span>` : ''}</div>`;
+      html += '<table class="tbl"><thead><tr><th>月</th><th>发电(MWh)</th><th>负荷(MWh)</th><th>新能源(MWh)</th><th>弃电(MWh)</th><th>网损(MWh)</th><th>成本($)</th><th>PF收敛</th></tr></thead><tbody>';
       ms.forEach((m, i) => {
         const mn = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'][m.block_id != null ? m.block_id : i] || `块${i}`;
-        html += `<tr><td>${mn}</td><td>${fmt(m.total_gen_mwh)}</td><td>${fmt(m.total_load_mwh)}</td><td>${fmt(m.total_renewable_mwh)}</td><td>${fmt(m.total_curtailment_mwh)}</td><td>${fmt(m.total_loss_mwh)}</td><td>${fmt(m.total_cost)}</td><td>${m.num_pf_converged}/${m.num_steps}</td></tr>`;
+        html += `<tr><td>${mn}</td><td>${fmt(m.total_gen_mwh)}</td><td>${fmt(m.total_load_mwh)}</td><td>${fmt(m.total_renewable_mwh)}</td><td>${fmt(m.total_curtailment_mwh)}</td><td>${fmt(m.total_loss_mwh)}</td><td>${fmt(monthlyCostValue(m))}</td><td>${m.num_pf_converged}/${m.num_steps}</td></tr>`;
       });
       html += '</tbody></table>';
       mt.innerHTML = html;

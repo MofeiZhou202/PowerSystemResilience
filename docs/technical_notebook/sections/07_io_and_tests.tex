@@ -80,6 +80,17 @@ workbook helpers such as \texttt{load\_xlsx}, \texttt{save\_xlsx},
 \texttt{save\_opf\_results\_xlsx}, \texttt{save\_opf\_results\_compact\_xlsx},
 and \texttt{save\_carbon\_results\_xlsx}.
 
+\paragraph{Model compatibility and digital-twin governance.}
+The GUI-facing endpoint \texttt{/api/io/model\_compatibility} now returns the
+component compatibility registry, current-system coverage, GridLAB-D/OpenDSS
+diagnostics, the parameter-rule catalog, the parameter audit report, the
+digital-twin readiness criteria, and the current digital-twin readiness report.
+The C++ entry points are documented in
+Section~\ref{sec:io_governance_digital_twin}.  This endpoint is intentionally
+used by both the dedicated \texttt{Data IO} panel and transient-compatibility
+launch points so import/export, standards, parameter health, and twin maturity
+remain in one user-facing report.
+
 % ------------------------------------------------------------
 \subsection{Pre-built Test Networks (\texttt{case\_builders.hpp})}
 \label{sec:case-builders}
@@ -120,13 +131,17 @@ Function & Description \\
 % ============================================================
 
 All tests use the Catch2 framework (fetched automatically by CMake via
-\texttt{FetchContent}).  The authoritative Release test tree used by this
-notebook is \texttt{build\_rel}; build and run with:
+\texttt{FetchContent}).  The current macOS release tree used by GUI and IO
+verification is \texttt{build/macos-release}; build and run focused IO checks
+with:
 \begin{verbatim}
-cmake -B build_rel -DCMAKE_BUILD_TYPE=Release -DHACDCPF_BUILD_TESTS=ON
-cmake --build build_rel
-ctest --test-dir build_rel --output-on-failure
+cmake --build build/macos-release --target run_gui_server test_component_io_mapping -j8
+./build/macos-release/tests/test_component_io_mapping
+node --check web/js/app.js
+node --check web/js/components.js
 \end{verbatim}
+For a full CTest sweep, run the configured release tree directly with
+\texttt{ctest --test-dir build/macos-release --output-on-failure}.
 
 % ------------------------------------------------------------
 \subsection{Test File Overview}
@@ -145,6 +160,7 @@ File & Coverage \\
 \texttt{test\_scaling\_regression.cpp} & Residual/variable/Jacobian scaling and conditioning guardrails. \\
 \texttt{test\_hacdcdss.cpp} & Current \texttt{hacdcpf} model/PF/DCOPF smoke suite, including validation, Y-bus/power-model checks, Newton PF, island/adaptive solver, distributed slack, and DCOPF regressions. \\
 \texttt{test\_io\_json.cpp} & JSON/JPC round-trips, safe import wrappers, PF/OPF result JSON, MATPOWER parser, and JPC rich-component preservation. \\
+\texttt{test\_component\_io\_mapping.cpp} & Component compatibility registry coverage, standard-profile declarations, parameter-rule catalog, parameter audit findings, dynamic-profile preservation through projection, and digital-twin readiness scoring. \\
 \texttt{test\_rich\_components.cpp} & Rich component JSON round-trips and builder coverage for transformers, DER, storage, switches, converters, DC components, VPPs, microgrids, and external grids. \\
 \texttt{test\_matpower\_cases.cpp} & Tier-1/Tier-2/Tier-3 MATPOWER convergence, safe PF wrappers, and DCOPF case regressions. \\
 \texttt{test\_validation.cpp} & Validation report API, validation levels, negative structural cases, VSC endpoint checks, and rich AC/DC guardrails. \\

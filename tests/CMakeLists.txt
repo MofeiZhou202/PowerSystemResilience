@@ -364,4 +364,17 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/validate_harmonics_xre
   add_executable(validate_harmonics_xref
     "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/validate_harmonics_xref.cpp")
   target_link_libraries(validate_harmonics_xref PRIVATE hacdcpf::hacdcpf)
+
+  set(_HACDCPF_HARMONICS_VALIDATION_PY
+      "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/.venv/bin/python")
+  if(EXISTS "${_HACDCPF_HARMONICS_VALIDATION_PY}" AND
+     EXISTS "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/compare_device_opendss.py")
+    add_custom_target(validate_harmonics_device_opendss
+      COMMAND "${_HACDCPF_HARMONICS_VALIDATION_PY}"
+              "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/compare_device_opendss.py"
+              --cpp-bin "$<TARGET_FILE:validate_harmonics_xref>"
+      DEPENDS validate_harmonics_xref
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      COMMENT "Running harmonic AC/DC device validation against OpenDSS")
+  endif()
 endif()

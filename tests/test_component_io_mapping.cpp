@@ -514,3 +514,264 @@ TEST_CASE("Dynamic profiles survive rich-to-canonical projection",
   CHECK(std::abs(er_dcdc->dynamic_model.parameters.at("dc_link_capacitance_s") -
                  0.15) <= 1e-12);
 }
+
+TEST_CASE("Component parameter rule catalog spans standards and categories",
+          "[io][mapping][parameters][standards]") {
+  const auto& rules = hacdcpf::io::component_parameter_rules();
+  REQUIRE(rules.size() >= 120);
+
+  auto has_rule = [&](const std::string& component,
+                      const std::string& parameter,
+                      hacdcpf::io::ComponentParameterCategory category) {
+    return std::any_of(
+        rules.begin(), rules.end(),
+        [&](const hacdcpf::io::ComponentParameterRule& rule) {
+          return rule.component_type == component &&
+                 rule.parameter_path == parameter &&
+                 rule.category == category;
+        });
+  };
+
+  CHECK(has_rule("ACBus", "base_kv",
+                 hacdcpf::io::ComponentParameterCategory::Static));
+  CHECK(has_rule("Generator", "dynamic_model",
+                 hacdcpf::io::ComponentParameterCategory::Dynamic));
+  CHECK(has_rule("VSCConverter", "i_max_pu",
+                 hacdcpf::io::ComponentParameterCategory::Transient));
+  CHECK(has_rule("Storage", "forced_outage_rate",
+                 hacdcpf::io::ComponentParameterCategory::Failure));
+  CHECK(has_rule("ACBranch", "mttr_hr",
+                 hacdcpf::io::ComponentParameterCategory::Reliability));
+
+  CHECK(std::any_of(
+      rules.begin(), rules.end(),
+      [](const hacdcpf::io::ComponentParameterRule& rule) {
+        return rule.standard_family ==
+               hacdcpf::io::ComponentStandardFamily::IEEE1547;
+      }));
+  CHECK(std::any_of(
+      rules.begin(), rules.end(),
+      [](const hacdcpf::io::ComponentParameterRule& rule) {
+        return rule.standard_family ==
+               hacdcpf::io::ComponentStandardFamily::IEC61970CIM;
+      }));
+  CHECK(hacdcpf::io::to_string(
+            hacdcpf::io::ComponentParameterSeverity::Warning) == "Warning");
+  CHECK(hacdcpf::io::to_string(
+            hacdcpf::io::ComponentParameterCategory::Transient) ==
+        "Transient");
+}
+
+TEST_CASE("Component parameter audit flags invalid rich-model values",
+          "[io][mapping][parameters][audit]") {
+  hacdcpf::HybridPowerSystem sys;
+
+  hacdcpf::ACBus bus;
+  bus.index = 1;
+  bus.name = "bad_bus";
+  bus.base_kv = -12.47;
+  bus.vm_pu = 1.8;
+  bus.vmin_pu = 1.2;
+  bus.vmax_pu = 0.8;
+  sys.ac.buses.push_back(bus);
+
+  hacdcpf::ACBranch branch;
+  branch.index = 1;
+  branch.name = "bad_branch";
+  branch.r_pu = -0.01;
+  branch.x_pu = 0.02;
+  branch.failure_rate = -1.0;
+  sys.ac.branches.push_back(branch);
+
+  hacdcpf::Transformer2W transformer;
+  transformer.index = 1;
+  transformer.name = "bad_transformer";
+  transformer.sn_mva = 0.0;
+  transformer.vn_hv_kv = 12.47;
+  transformer.vn_lv_kv = 0.48;
+  transformer.vk_percent = 4.0;
+  transformer.vkr_percent = 8.0;
+  sys.ac.transformers_2w.push_back(transformer);
+
+  hacdcpf::Generator generator;
+  generator.index = 1;
+  generator.name = "bad_generator";
+  generator.vg_pu = 1.0;
+  generator.pmin_mw = 20.0;
+  generator.pmax_mw = 10.0;
+  generator.dynamic_model.standard = "IEEE";
+  generator.dynamic_model.model_name = "GENROU";
+  generator.dynamic_model.parameters["H"] = 0.01;
+  generator.dynamic_model.parameters["pll_kp"] = 200.0;
+  sys.ac.generators.push_back(generator);
+
+  hacdcpf::Storage storage;
+  storage.index = 1;
+  storage.name = "bad_storage";
+  storage.soc_min = 0.2;
+  storage.soc_init = 1.2;
+  storage.soc_max = 0.9;
+  storage.eta_charge = 1.1;
+  storage.forced_outage_rate = 1.2;
+  sys.ac.storage.push_back(storage);
+
+  hacdcpf::VSCConverter vsc;
+  vsc.index = 1;
+  vsc.name = "bad_vsc";
+  vsc.eta = 1.2;
+  vsc.i_max_pu = 5.0;
+  vsc.pmin_mw = 5.0;
+  vsc.pmax_mw = -1.0;
+  vsc.dynamic_model.components.push_back(
+      {"pll", "", "", "", {{"ki_pll", -0.1}}});
+  sys.vsc_converters.push_back(vsc);
+
+  const auto report =
+      hacdcpf::io::analyze_component_parameter_quality(sys);
+
+  CHECK(report.component_instances_checked >= 6);
+  CHECK(report.checked_parameters > 20);
+  CHECK(report.count(hacdcpf::io::ComponentParameterSeverity::Error) >= 4);
+  CHECK(report.count(hacdcpf::io::ComponentParameterSeverity::Warning) >= 6);
+  CHECK(report.count(hacdcpf::io::ComponentParameterCategory::Static) > 0);
+  CHECK(report.count(hacdcpf::io::ComponentParameterCategory::Dynamic) > 0);
+  CHECK(report.count(hacdcpf::io::ComponentParameterCategory::Transient) > 0);
+  CHECK(report.count(hacdcpf::io::ComponentParameterCategory::Failure) > 0);
+
+  auto has_finding = [&](const std::string& component,
+                         const std::string& parameter_substring) {
+    return std::any_of(
+        report.findings.begin(), report.findings.end(),
+        [&](const hacdcpf::io::ComponentParameterFinding& finding) {
+          return finding.component_type == component &&
+                 finding.parameter_path.find(parameter_substring) !=
+                     std::string::npos;
+        });
+  };
+
+  CHECK(has_finding("ACBus", "base_kv"));
+  CHECK(has_finding("ACBus", "vmin_pu <= vmax_pu"));
+  CHECK(has_finding("Transformer2W", "vkr_percent <= vk_percent"));
+  CHECK(has_finding("Generator", "dynamic_model.parameters.H"));
+  CHECK(has_finding("Storage", "soc_init <= soc_max"));
+  CHECK(has_finding("Storage", "eta_charge"));
+  CHECK(has_finding("VSCConverter", "i_max_pu"));
+  CHECK(has_finding("VSCConverter", "dynamic_model.components.parameters.ki_pll"));
+}
+
+TEST_CASE("Digital twin readiness criteria cover the IO maturity dimensions",
+          "[io][mapping][digital_twin]") {
+  const auto& criteria = hacdcpf::io::digital_twin_readiness_criteria();
+  REQUIRE(criteria.size() >= 11);
+
+  std::set<hacdcpf::io::DigitalTwinDimension> dimensions;
+  for (const auto& criterion : criteria) {
+    CHECK_FALSE(criterion.criterion_id.empty());
+    CHECK_FALSE(criterion.title.empty());
+    CHECK(criterion.weight > 0.0);
+    dimensions.insert(criterion.dimension);
+  }
+
+  CHECK(dimensions.count(hacdcpf::io::DigitalTwinDimension::AssetIdentity) ==
+        1);
+  CHECK(dimensions.count(
+            hacdcpf::io::DigitalTwinDimension::TopologyConnectivity) == 1);
+  CHECK(dimensions.count(
+            hacdcpf::io::DigitalTwinDimension::ElectricalParameters) == 1);
+  CHECK(dimensions.count(hacdcpf::io::DigitalTwinDimension::DynamicBehavior) ==
+        1);
+  CHECK(dimensions.count(
+            hacdcpf::io::DigitalTwinDimension::TelemetryObservability) == 1);
+  CHECK(dimensions.count(
+            hacdcpf::io::DigitalTwinDimension::StateSynchronization) == 1);
+  CHECK(dimensions.count(hacdcpf::io::DigitalTwinDimension::ScenarioEvents) ==
+        1);
+  CHECK(dimensions.count(
+            hacdcpf::io::DigitalTwinDimension::ReliabilityLifecycle) == 1);
+  CHECK(dimensions.count(
+            hacdcpf::io::DigitalTwinDimension::StandardsInteroperability) == 1);
+  CHECK(dimensions.count(
+            hacdcpf::io::DigitalTwinDimension::NumericalValidation) == 1);
+  CHECK(dimensions.count(
+            hacdcpf::io::DigitalTwinDimension::ProvenanceGovernance) == 1);
+  CHECK(hacdcpf::io::to_string(
+            hacdcpf::io::DigitalTwinDimension::NumericalValidation) ==
+        "NumericalValidation");
+}
+
+TEST_CASE("Digital twin readiness reports low maturity for empty systems",
+          "[io][mapping][digital_twin]") {
+  const hacdcpf::HybridPowerSystem empty;
+  const auto report = hacdcpf::io::analyze_digital_twin_readiness(empty);
+
+  CHECK(report.max_score > 0.0);
+  CHECK(report.score == 0.0);
+  CHECK(report.readiness_ratio == 0.0);
+  CHECK(report.maturity_level == 0);
+  CHECK(report.count(hacdcpf::io::ComponentParameterSeverity::Error) >= 1);
+  CHECK_FALSE(report.findings.empty());
+}
+
+TEST_CASE("Digital twin readiness improves with dynamic and reliability metadata",
+          "[io][mapping][digital_twin]") {
+  auto base = make_system_with_all_io_component_tables();
+  auto richer = base;
+
+  auto add_profile = [](hacdcpf::DynamicModelProfile& profile,
+                        std::string standard,
+                        std::string model,
+                        std::string source) {
+    profile.standard = std::move(standard);
+    profile.model_name = std::move(model);
+    profile.parameter_set = "validated-default";
+    profile.source_id = std::move(source);
+    profile.parameters["H"] = 3.0;
+  };
+
+  REQUIRE_FALSE(richer.ac.generators.empty());
+  add_profile(richer.ac.generators.front().dynamic_model,
+              "IEEE",
+              "GENROU",
+              "unit-test-generator");
+  richer.ac.generators.front().forced_outage_rate = 0.03;
+  richer.ac.generators.front().mttr_hr = 12.0;
+  REQUIRE_FALSE(richer.ac.loads.empty());
+  add_profile(richer.ac.loads.front().dynamic_model,
+              "GridLABD",
+              "ZIP",
+              "unit-test-load");
+  richer.ac.loads.front().controllable = true;
+  REQUIRE_FALSE(richer.ac.storage.empty());
+  add_profile(richer.ac.storage.front().dynamic_model,
+              "IEEE1547",
+              "BESS_GFM",
+              "unit-test-storage");
+  richer.ac.storage.front().mtbf_battery_hr = 20000.0;
+  richer.ac.storage.front().mttr_battery_hr = 8.0;
+  REQUIRE_FALSE(richer.vsc_converters.empty());
+  add_profile(richer.vsc_converters.front().dynamic_model,
+              "NERC",
+              "REGC_A",
+              "unit-test-vsc");
+  richer.vsc_converters.front().forced_outage_rate = 0.02;
+  richer.vsc_converters.front().mttr_hr = 6.0;
+
+  const auto base_report =
+      hacdcpf::io::analyze_digital_twin_readiness(base);
+  const auto rich_report =
+      hacdcpf::io::analyze_digital_twin_readiness(richer);
+
+  CHECK(rich_report.score > base_report.score);
+  CHECK(rich_report.readiness_ratio > base_report.readiness_ratio);
+  CHECK(rich_report.count(hacdcpf::io::ComponentParameterSeverity::Error) <=
+        base_report.count(hacdcpf::io::ComponentParameterSeverity::Error));
+
+  const auto has_dynamic_finding = std::any_of(
+      rich_report.findings.begin(),
+      rich_report.findings.end(),
+      [](const hacdcpf::io::DigitalTwinReadinessFinding& finding) {
+        return finding.criterion_id == "DT-DYNAMIC-01" &&
+               finding.max_score > 0.0;
+      });
+  CHECK(has_dynamic_finding);
+}

@@ -2112,6 +2112,139 @@ json component_io_mapping_to_json(
               {"notes", mapping.notes}};
 }
 
+json component_parameter_rule_to_json(
+    const hacdcpf::io::ComponentParameterRule& rule) {
+  json out{{"component_type", rule.component_type},
+           {"collection_path", rule.collection_path},
+           {"parameter_path", rule.parameter_path},
+           {"category", hacdcpf::io::to_string(rule.category)},
+           {"required", rule.required},
+           {"standard_family", hacdcpf::io::to_string(rule.standard_family)},
+           {"standard_profile", rule.standard_profile},
+           {"units", rule.units},
+           {"missing_severity",
+            hacdcpf::io::to_string(rule.missing_severity)},
+           {"range_severity", hacdcpf::io::to_string(rule.range_severity)},
+           {"notes", rule.notes},
+           {"min_inclusive", rule.min_inclusive},
+           {"max_inclusive", rule.max_inclusive}};
+  if (rule.min_value) out["min"] = *rule.min_value;
+  if (rule.max_value) out["max"] = *rule.max_value;
+  return out;
+}
+
+json component_parameter_finding_to_json(
+    const hacdcpf::io::ComponentParameterFinding& finding) {
+  json out{{"component_type", finding.component_type},
+           {"collection_path", finding.collection_path},
+           {"component_position", finding.component_position},
+           {"component_index", finding.component_index},
+           {"component_name", finding.component_name},
+           {"parameter_path", finding.parameter_path},
+           {"category", hacdcpf::io::to_string(finding.category)},
+           {"severity", hacdcpf::io::to_string(finding.severity)},
+           {"required", finding.required},
+           {"standard_family",
+            hacdcpf::io::to_string(finding.standard_family)},
+           {"standard_profile", finding.standard_profile},
+           {"units", finding.units},
+           {"message", finding.message},
+           {"min_inclusive", finding.min_inclusive},
+           {"max_inclusive", finding.max_inclusive}};
+  if (finding.value) out["value"] = *finding.value;
+  if (finding.expected_min) out["expected_min"] = *finding.expected_min;
+  if (finding.expected_max) out["expected_max"] = *finding.expected_max;
+  return out;
+}
+
+json component_parameter_audit_to_json(
+    const hacdcpf::io::ComponentParameterAuditReport& report) {
+  using Category = hacdcpf::io::ComponentParameterCategory;
+  using Severity = hacdcpf::io::ComponentParameterSeverity;
+  json findings = json::array();
+  for (const auto& finding : report.findings) {
+    findings.push_back(component_parameter_finding_to_json(finding));
+  }
+  json by_category = json::object();
+  for (const auto category :
+       {Category::Static,
+        Category::Dynamic,
+        Category::Transient,
+        Category::Failure,
+        Category::Reliability}) {
+    by_category[hacdcpf::io::to_string(category)] = report.count(category);
+  }
+  return json{
+      {"summary",
+       json{{"component_instances_checked", report.component_instances_checked},
+            {"checked_parameters", report.checked_parameters},
+            {"findings_total", report.findings.size()},
+            {"errors", report.count(Severity::Error)},
+            {"warnings", report.count(Severity::Warning)},
+            {"info", report.count(Severity::Info)},
+            {"by_category", by_category}}},
+      {"findings", findings}};
+}
+
+json digital_twin_criterion_to_json(
+    const hacdcpf::io::DigitalTwinReadinessCriterion& criterion) {
+  return json{{"criterion_id", criterion.criterion_id},
+              {"dimension", hacdcpf::io::to_string(criterion.dimension)},
+              {"title", criterion.title},
+              {"description", criterion.description},
+              {"weight", criterion.weight},
+              {"severity_if_failed",
+               hacdcpf::io::to_string(criterion.severity_if_failed)},
+              {"standard_family",
+               hacdcpf::io::to_string(criterion.standard_family)},
+              {"standard_profile", criterion.standard_profile}};
+}
+
+json digital_twin_finding_to_json(
+    const hacdcpf::io::DigitalTwinReadinessFinding& finding) {
+  return json{{"criterion_id", finding.criterion_id},
+              {"dimension", hacdcpf::io::to_string(finding.dimension)},
+              {"severity", hacdcpf::io::to_string(finding.severity)},
+              {"score", finding.score},
+              {"max_score", finding.max_score},
+              {"title", finding.title},
+              {"message", finding.message},
+              {"evidence", finding.evidence},
+              {"standard_family",
+               hacdcpf::io::to_string(finding.standard_family)},
+              {"standard_profile", finding.standard_profile}};
+}
+
+json digital_twin_readiness_to_json(
+    const hacdcpf::io::DigitalTwinReadinessReport& report) {
+  using Severity = hacdcpf::io::ComponentParameterSeverity;
+  json dimensions = json::array();
+  for (const auto& item : report.dimension_scores) {
+    dimensions.push_back(json{{"dimension",
+                               hacdcpf::io::to_string(item.dimension)},
+                              {"score", item.score},
+                              {"max_score", item.max_score},
+                              {"findings", item.findings}});
+  }
+  json findings = json::array();
+  for (const auto& finding : report.findings) {
+    findings.push_back(digital_twin_finding_to_json(finding));
+  }
+  return json{
+      {"summary",
+       json{{"score", report.score},
+            {"max_score", report.max_score},
+            {"readiness_ratio", report.readiness_ratio},
+            {"maturity_level", report.maturity_level},
+            {"maturity_label", report.maturity_label},
+            {"findings_total", report.findings.size()},
+            {"errors", report.count(Severity::Error)},
+            {"warnings", report.count(Severity::Warning)},
+            {"info", report.count(Severity::Info)}}},
+      {"dimensions", dimensions},
+      {"findings", findings}};
+}
+
 template <typename T>
 bool indexed_component_exists(const std::vector<T>& rows, int index) {
   if (index == 0) return true;
@@ -3716,6 +3849,35 @@ void apply_uc_objective(hacdcpf::TimeSeriesPFOptions& opts, const json& j) {
     opts.w_loss = w.value("loss", 0.0);
     opts.w_curtailment = w.value("curtailment", 0.0);
   }
+}
+
+json cost_formula_json(const hacdcpf::TimeSeriesPFOptions& opts,
+                       const std::string& dispatch_basis,
+                       double step_hr) {
+  json j;
+  j["formula_id"] = "annual_dispatch_operating_cost_v1";
+  j["title"] = "统一运行成本";
+  j["units"] = "$";
+  j["dispatch_basis"] = dispatch_basis;
+  j["step_duration_hr"] = step_hr;
+  j["formula_text"] =
+      "sum_t sum_g (c0_g*u_g,t + c1_g*P_g,t + c2_g*P_g,t^2) * Δt";
+  j["description"] =
+      "月度/年度成本按实际调度出力重新计算；SCUC、SCED、OPF 共用同一报告口径。优化目标可选择成本、碳排、弃电、损耗或加权目标，但美元成本图始终使用该运行成本口径。";
+  j["objective_mode"] = uc_objective_label(opts.objective_mode);
+  j["terms"] = json::array(
+      {json{{"symbol", "c0*u"}, {"meaning", "机组空载/固定运行成本率 ($/h)"}},
+       json{{"symbol", "c1*P"}, {"meaning", "一次燃料成本率 ($/h)"}},
+       json{{"symbol", "c2*P^2"}, {"meaning", "二次燃料成本率 ($/h)"}},
+       json{{"symbol", "Δt"}, {"meaning", "时间步长 (h)"}}});
+  if (opts.objective_mode == hacdcpf::UCObjective::Weighted) {
+    j["objective_weights"] =
+        json{{"cost", opts.w_cost},
+             {"carbon", opts.w_carbon},
+             {"loss", opts.w_loss},
+             {"curtailment", opts.w_curtailment}};
+  }
+  return j;
 }
 
 hacdcpf::TimeSeriesData make_default_ts_data(int steps = 24) {
@@ -7743,6 +7905,17 @@ int main(int argc, char** argv) {
         mappings.push_back(component_io_mapping_to_json(mapping));
       }
       out["mappings"] = mappings;
+      json parameter_rules = json::array();
+      for (const auto& rule : hacdcpf::io::component_parameter_rules()) {
+        parameter_rules.push_back(component_parameter_rule_to_json(rule));
+      }
+      out["parameter_rules"] = parameter_rules;
+      json twin_criteria = json::array();
+      for (const auto& criterion :
+           hacdcpf::io::digital_twin_readiness_criteria()) {
+        twin_criteria.push_back(digital_twin_criterion_to_json(criterion));
+      }
+      out["digital_twin_criteria"] = twin_criteria;
       hacdcpf::HybridPowerSystem sys;
       bool has_system = false;
       {
@@ -7797,10 +7970,22 @@ int main(int argc, char** argv) {
                  {"opendss",
                   hacdcpf::io::external_io_diagnostics(
                       report, hacdcpf::io::ComponentIOFormat::OpenDSS)}};
+        out["parameter_audit"] =
+            component_parameter_audit_to_json(
+                hacdcpf::io::analyze_component_parameter_quality(sys));
+        out["digital_twin_readiness"] =
+            digital_twin_readiness_to_json(
+                hacdcpf::io::analyze_digital_twin_readiness(sys));
       } else {
         out["coverage"] = json::array();
         out["summary"] = json{{"total_instances", 0}};
         out["diagnostics"] = json::object();
+        out["parameter_audit"] =
+            component_parameter_audit_to_json(
+                hacdcpf::io::ComponentParameterAuditReport{});
+        out["digital_twin_readiness"] =
+            digital_twin_readiness_to_json(
+                hacdcpf::io::DigitalTwinReadinessReport{});
       }
       res.set_content(out.dump(), "application/json");
     } catch (const std::exception& e) {
@@ -14887,6 +15072,20 @@ int main(int argc, char** argv) {
         out["objective_value"] = result.total_cost;
         out["objective_label"] = "年总运行成本 ($)";
         out["objective_mode"] = uc_objective_label(opts.ts_pf_options.objective_mode);
+        {
+          const std::string basis =
+              opts.enable_parallel_daily
+                  ? ((opts.daily_mode == hacdcpf::analysis::DailySimMode::SCUC)
+                         ? "parallel daily SCUC dispatch with OPF/PF replay"
+                         : (opts.daily_mode == hacdcpf::analysis::DailySimMode::DynamicSCED)
+                               ? "parallel daily dynamic SCED dispatch"
+                               : "parallel daily dynamic OPF dispatch")
+                  : (opts.skip_replay ? "hierarchical UC schedule-only dispatch"
+                                      : "hierarchical UC with OPF/PF replay");
+          out["cost_formula"] =
+              cost_formula_json(opts.ts_pf_options, basis, result.step_duration_hr);
+          out["objective_formula"] = out["cost_formula"];
+        }
         out["constraints"] = json{
             {"network_constraints", enable_net},
             {"dc_network_constraints", enable_dc_net && enable_net},
@@ -14985,6 +15184,9 @@ int main(int argc, char** argv) {
                         {"total_loss_mwh", m.total_loss_mwh},
                         {"total_ens_mwh", m.total_ens_mwh},
                         {"total_cost", m.total_cost},
+                        {"cost", m.total_cost},
+                        {"production_cost", m.total_cost},
+                        {"objective_value", m.total_cost},
                         {"num_pf_converged", m.num_pf_converged},
                         {"num_steps", m.num_steps}});
         }
