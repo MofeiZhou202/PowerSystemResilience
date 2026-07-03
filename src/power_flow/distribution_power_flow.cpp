@@ -24,6 +24,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -1833,7 +1834,9 @@ double phase_shift_from_vector_group(const std::string& raw_group) {
 #ifdef HACDCPF_HAVE_OPENDSS
 class LocalDSSContext {
  public:
-  LocalDSSContext() : ctx_(ctx_New()) {
+  LocalDSSContext() {
+    io::ScopedDSSFloatingPointEnv fp_env;
+    ctx_ = ctx_New();
     if (ctx_ == nullptr) {
       throw std::runtime_error("Failed to create DSS C-API context");
     }
@@ -1844,6 +1847,7 @@ class LocalDSSContext {
 
   ~LocalDSSContext() {
     if (ctx_ != nullptr) {
+      io::ScopedDSSFloatingPointEnv fp_env;
       ctx_Dispose(ctx_);
     }
   }
@@ -1883,7 +1887,11 @@ std::vector<double> dss_get_double_array(
     Args... args) {
   double* values = nullptr;
   int32_t dims[4] = {0, 0, 0, 0};
-  fn(api.get(), &values, dims, args...);
+  if constexpr (std::is_invocable_v<Fn, const void*, double**, int32_t*, Args...>) {
+    fn(api.get(), &values, dims, args...);
+  } else {
+    fn(api.get(), &values, dims);
+  }
   api.check();
   if (values == nullptr || dims[0] <= 0) {
     return {};
@@ -1898,7 +1906,11 @@ std::vector<int32_t> dss_get_int_array(
     Args... args) {
   int32_t* values = nullptr;
   int32_t dims[4] = {0, 0, 0, 0};
-  fn(api.get(), &values, dims, args...);
+  if constexpr (std::is_invocable_v<Fn, const void*, int32_t**, int32_t*, Args...>) {
+    fn(api.get(), &values, dims, args...);
+  } else {
+    fn(api.get(), &values, dims);
+  }
   api.check();
   if (values == nullptr || dims[0] <= 0) {
     return {};
@@ -1913,7 +1925,11 @@ std::vector<std::string> dss_get_string_array(
     Args... args) {
   char** values = nullptr;
   int32_t dims[4] = {0, 0, 0, 0};
-  fn(api.get(), &values, dims, args...);
+  if constexpr (std::is_invocable_v<Fn, const void*, char***, int32_t*, Args...>) {
+    fn(api.get(), &values, dims, args...);
+  } else {
+    fn(api.get(), &values, dims);
+  }
   api.check();
 
   std::vector<std::string> out;
@@ -1957,6 +1973,7 @@ std::string dss_get_string_value(
 }
 
 void dss_run_command(const LocalDSSContext& api, const std::string& command) {
+  io::ScopedDSSFloatingPointEnv fp_env;
   ctx_Text_Set_Command(api.get(), command.c_str());
   api.check("ctx_Text_Set_Command");
 }
@@ -1983,9 +2000,34 @@ std::vector<std::string> load_dss_commands_with_continuations(
   std::vector<std::string> commands;
   std::string current;
   std::string raw_line;
+  bool in_block_comment = false;
   while (std::getline(input, raw_line)) {
-    const std::string trimmed = trim_local(raw_line);
-    if (trimmed.empty() || trimmed.front() == '!') {
+    std::string uncommented;
+    std::size_t pos = 0;
+    while (pos < raw_line.size()) {
+      if (in_block_comment) {
+        const std::size_t end = raw_line.find("*/", pos);
+        if (end == std::string::npos) {
+          pos = raw_line.size();
+          continue;
+        }
+        in_block_comment = false;
+        pos = end + 2;
+        continue;
+      }
+      const std::size_t start = raw_line.find("/*", pos);
+      if (start == std::string::npos) {
+        uncommented.append(raw_line.substr(pos));
+        break;
+      }
+      uncommented.append(raw_line.substr(pos, start - pos));
+      in_block_comment = true;
+      pos = start + 2;
+    }
+
+    const std::string trimmed = trim_local(uncommented);
+    if (trimmed.empty() || trimmed.front() == '!' ||
+        (trimmed.size() >= 2 && trimmed[0] == '/' && trimmed[1] == '/')) {
       continue;
     }
 
@@ -2016,27 +2058,22 @@ void compile_master_dss(
     const std::filesystem::path& master_dss) {
   const std::filesystem::path absolute_master =
       std::filesystem::absolute(master_dss);
-  const std::vector<std::string> merged_commands =
-      load_dss_commands_with_continuations(absolute_master);
+  if (!std::filesystem::exists(absolute_master)) {
+    throw std::runtime_error("DSS master file not found: " + absolute_master.string());
+  }
 
-  auto reset_context = [&]() {
-    ctx_DSS_ClearAll(api.get());
-    api.check("ctx_DSS_ClearAll");
-    ctx_DSS_Set_AllowChangeDir(api.get(), 1);
-    api.check("ctx_DSS_Set_AllowChangeDir");
-    ctx_DSS_Set_DataPath(api.get(), absolute_master.parent_path().string().c_str());
-    api.check("ctx_DSS_Set_DataPath");
-  };
+  ctx_DSS_ClearAll(api.get());
+  api.check("ctx_DSS_ClearAll");
+  ctx_DSS_Set_AllowChangeDir(api.get(), 1);
+  api.check("ctx_DSS_Set_AllowChangeDir");
+  ctx_DSS_Set_DataPath(api.get(), absolute_master.parent_path().string().c_str());
+  api.check("ctx_DSS_Set_DataPath");
 
-  auto compile_once = [&]() {
-    reset_context();
-    for (const auto& command : merged_commands) {
-      dss_run_command(api, command);
-    }
-  };
-
-  compile_once();
-  compile_once();
+  // Use OpenDSS' native compile path for the actual circuit state.  A previous
+  // manual replay of merged text commands was close for most elements, but it
+  // changed IEEE13 Reg2 by one tap versus OpenDSS compile because compile has
+  // additional parser/redirect/control side effects.
+  dss_run_command(api, "compile " + quote_path_for_dss(absolute_master));
 }
 
 std::string dss_active_property(
@@ -2599,6 +2636,13 @@ std::string dss_line_impedance_units(
     const std::string& line_units_raw) {
   const std::string line_units =
       normalize_dss_length_units(line_units_raw, "kft");
+  // DSS C-API's active Lines.Rmatrix/Xmatrix/Cmatrix getters return values
+  // converted to the active line's units, not the source LineCode units.  Use
+  // the line units when they are explicit; fall back to the LineCode units only
+  // for older/implicit DSS files where the line itself reports "none".
+  if (line_units != "none") {
+    return line_units;
+  }
   const std::string linecode_name = trim_ascii_copy(
       dss_get_string_value(api, ctx_Lines_Get_LineCode, "ctx_Lines_Get_LineCode"));
   if (linecode_name.empty()) {
@@ -3373,6 +3417,9 @@ OpenDSSSparseYMatrix build_opendss_sparse_y_matrix(
 ThreePhaseACSystem load_three_phase_system_from_opendss(
     const std::filesystem::path& master_dss,
     double base_mva) {
+  #ifdef HACDCPF_HAVE_OPENDSS
+  io::ScopedDSSFloatingPointEnv fp_env;
+  #endif
   ThreePhaseACSystem sys;
   sys.base_mva = (base_mva > 0.0) ? base_mva : 1.0;
   sys.name = master_dss.filename().string();

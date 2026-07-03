@@ -11,6 +11,17 @@ function(hacdcpf_add_test target)
   catch_discover_tests(${target})
 endfunction()
 
+function(hacdcpf_add_plain_test target)
+  add_executable(${target} ${ARGN})
+  target_link_libraries(${target} PRIVATE hacdcpf::hacdcpf)
+  target_compile_definitions(${target} PRIVATE
+    HACDCPF_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+    HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
+  )
+  hacdcpf_copy_opendss_runtime(${target})
+  add_test(NAME ${target} COMMAND ${target})
+endfunction()
+
 hacdcpf_add_test(test_hacdcpf             test_hacdcpf.cpp)
 hacdcpf_add_test(test_all_components_pf   test_all_components_pf.cpp)
 hacdcpf_add_test(test_unified_pf_upgrade  test_unified_pf_upgrade.cpp)
@@ -33,6 +44,23 @@ hacdcpf_add_test(test_hacdcdss            test_hacdcdss.cpp)
 
 # I/O: JSON round-trip, MATPOWER parsing, safe try_ variants, OPF/PF result ser.
 hacdcpf_add_test(test_io_json             test_io_json.cpp)
+
+# I/O: MATPOWER unit-discipline contract (§6.3).
+hacdcpf_add_test(test_io_matpower         test_io_matpower.cpp)
+
+# I/O: round-trip / conformance contract (§7).
+hacdcpf_add_test(test_io_roundtrip        test_io_roundtrip.cpp)
+
+# I/O: bounded CIM / CGMES 3.0 (EQ+SSH) import/export (§5).
+hacdcpf_add_test(test_io_cim              test_io_cim.cpp)
+
+# I/O: text-format conversion for OpenDSS/GridLAB-D without requiring external
+# engines, used by component-level cross-check and benchmark harnesses.
+hacdcpf_add_test(test_external_grid_io    test_external_grid_io.cpp)
+
+# I/O: explicit rich-component coverage contract for internal JSON, canonical
+# native models, GridLAB-D text snapshots, and OpenDSS text snapshots.
+hacdcpf_add_test(test_component_io_mapping test_component_io_mapping.cpp)
 
 # I/O: ETAP Excel round-circle (excel in / excel out). Requires OpenXLSX, so it
 # is only registered when ETAP support is compiled into the core library.
@@ -90,6 +118,7 @@ target_compile_options(test_powerflow_performance PRIVATE
   $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>
 )
 hacdcpf_copy_opendss_runtime(test_powerflow_performance)
+
 catch_discover_tests(test_powerflow_performance
   TEST_SUFFIX " [perf]"
   PROPERTIES LABELS "performance;slow"
@@ -141,19 +170,32 @@ hacdcpf_add_test(test_three_phase_nr_load_models test_three_phase_nr_load_models
 hacdcpf_add_test(test_three_phase_nr_transformer_source test_three_phase_nr_transformer_source.cpp)
 hacdcpf_add_test(test_three_phase_nr_regulator test_three_phase_nr_regulator.cpp)
 
+# Transient dynamics: rich/canonical model builder, device-stamped phasor
+# network solve, events, and hybrid AC/DC converter coupling.
+hacdcpf_add_test(test_transient_dynamics test_transient_dynamics.cpp)
+
+# GridLAB-D bridge: canonical AC snapshot export and optional external
+# component/feeder comparison. The test target is always built; external runs
+# skip cleanly unless gridlabd is available through HACDCPF_GRIDLABD_BIN,
+# GRIDLABD_BIN, PATH, or a sibling gridlab-d build.
+hacdcpf_add_test(test_gridlabd_compare test_gridlabd_compare.cpp)
+
 set(_HACDCPF_PHASE_DOMAIN_DATA_DIR
   "${CMAKE_SOURCE_DIR}/tests/data/phase_domain_julia")
 if(HACDCPF_HAVE_OPENDSS AND EXISTS "${_HACDCPF_PHASE_DOMAIN_DATA_DIR}")
-  hacdcpf_add_test(test_phase_domain_multi_case_compact
+  hacdcpf_add_plain_test(test_phase_domain_multi_case_compact
     test_phase_domain_multi_case_compact.cpp)
-  hacdcpf_add_test(test_phase_domain_multi_case_compact_julia
+  hacdcpf_add_plain_test(test_phase_domain_multi_case_compact_julia
     test_phase_domain_multi_case_compact_julia.cpp)
 
-  if(EXISTS "${_HACDCPF_PHASE_DOMAIN_DATA_DIR}/IEEE123_Fixed/IEEE123Master_Fixed.dss")
-    hacdcpf_add_test(test_phase_domain_ieee123 test_phase_domain_ieee123.cpp)
-    hacdcpf_add_test(test_phase_domain_ieee123_generic_solver
-      test_phase_domain_ieee123_generic_solver.cpp)
-  endif()
+		  if(EXISTS "${_HACDCPF_PHASE_DOMAIN_DATA_DIR}/IEEE123_Fixed/IEEE123Master_Fixed.dss")
+		    hacdcpf_add_plain_test(test_phase_domain_ieee123 test_phase_domain_ieee123.cpp)
+		    hacdcpf_add_plain_test(test_phase_domain_ieee123_generic_solver
+		      test_phase_domain_ieee123_generic_solver.cpp)
+		  endif()
+		endif()
+if(HACDCPF_HAVE_OPENDSS AND EXISTS "${CMAKE_SOURCE_DIR}/external_data/opendss_ieee_pes/opendss_reference/13_node/official_full/IEEE13Nodeckt.dss")
+  hacdcpf_add_plain_test(test_phase_domain_ieee13 test_phase_domain_ieee13.cpp)
 endif()
 
 if(HACDCPF_HAVE_OPENDSS_COMPARE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_opendss_pf_compare.cpp")
@@ -252,6 +294,12 @@ hacdcpf_add_test(test_reconfig_options test_reconfig_options.cpp)
 # TC-5 (missing-file error handling) runs unconditionally.
 hacdcpf_add_test(test_three_stage_reliability test_three_stage_reliability.cpp)
 
+# Unified reliability parameter resolver + hybrid AC/DC customer metrics.
+#   Verifies resolve_reliability_params() conversion rules, the DC-customer
+#   SAIFI/SAIDI fix (compute_distribution_indices), the data-quality summary,
+#   and the opt-in data policy through run_distribution_fmea.
+hacdcpf_add_test(test_reliability_resolver test_reliability_resolver.cpp)
+
 # LTM traffic framework: triangular FD sending/receiving, single-link LTM,
 # mesoscopic multi-link corridor, EV penetration sweep (station loading),
 # individual EV agent trajectory reconstruction (FIFO), and V2G potential.
@@ -293,6 +341,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
             "$<TARGET_FILE:run_gui_server>"
             "${CMAKE_BINARY_DIR}/run_gui_server"
     COMMENT "Copying run_gui_server to ${CMAKE_BINARY_DIR}/run_gui_server")
+  if(HACDCPF_HAVE_OPENDSS AND HACDCPF_DSS_CAPI_RUNTIME_DLLS)
+    add_custom_command(TARGET run_gui_server POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              ${HACDCPF_DSS_CAPI_RUNTIME_DLLS}
+              "${CMAKE_BINARY_DIR}"
+      COMMENT "Copying DSS C-API runtime DLLs for top-level run_gui_server"
+      VERBATIM)
+  endif()
 
   # End-to-end GUI/HTTP smoke test: starts the server and drives the REST API
   # (load case -> export ETAP .xlsx -> re-import -> import ETAP XML -> PF -> SC).
@@ -318,4 +374,17 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/validate_harmonics_xre
   add_executable(validate_harmonics_xref
     "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/validate_harmonics_xref.cpp")
   target_link_libraries(validate_harmonics_xref PRIVATE hacdcpf::hacdcpf)
+
+  set(_HACDCPF_HARMONICS_VALIDATION_PY
+      "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/.venv/bin/python")
+  if(EXISTS "${_HACDCPF_HARMONICS_VALIDATION_PY}" AND
+     EXISTS "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/compare_device_opendss.py")
+    add_custom_target(validate_harmonics_device_opendss
+      COMMAND "${_HACDCPF_HARMONICS_VALIDATION_PY}"
+              "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/compare_device_opendss.py"
+              --cpp-bin "$<TARGET_FILE:validate_harmonics_xref>"
+      DEPENDS validate_harmonics_xref
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      COMMENT "Running harmonic AC/DC device validation against OpenDSS")
+  endif()
 endif()

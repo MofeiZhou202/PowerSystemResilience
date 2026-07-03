@@ -67,16 +67,6 @@
       }
     },
     {
-      "name": "portable-no-suitesparse",
-      "displayName": "Portable Release without SuiteSparse",
-      "inherits": "base",
-      "generator": "Unix Makefiles",
-      "cacheVariables": {
-        "HACDCPF_USE_SUITESPARSE": "OFF",
-        "HACDCPF_ENABLE_IPOPT": "OFF"
-      }
-    },
-    {
       "name": "full-dev",
       "displayName": "Full Developer Build",
       "inherits": "base",
@@ -108,11 +98,6 @@
       "name": "windows-vcpkg-release",
       "configurePreset": "windows-vcpkg-release",
       "configuration": "Release",
-      "jobs": 8
-    },
-    {
-      "name": "portable-no-suitesparse",
-      "configurePreset": "portable-no-suitesparse",
       "jobs": 8
     },
     {

@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Hybrid AC/DC Power System Simulator — ETAP-Style</title>
-<link rel="stylesheet" href="css/style.css?v=20260621-harmonics"/>
+<link rel="stylesheet" href="css/style.css?v=20260703-results-io"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -12,7 +12,7 @@
 <!-- ===== Bar 1: Canvas Tools (Top Toolbar) ===== -->
 <div id="topToolbar" class="top-toolbar">
   <div class="logo-mini" title="Hybrid AC/DC Power System Simulator">⚡</div>
-  <button id="btnLoadCase" class="toolbar-btn" title="加载算例">加载算例</button>
+  <button id="btnLoadCase" class="toolbar-btn legacy-io-shortcut" title="加载算例">加载算例</button>
   <button id="btnSelect" class="toolbar-btn canvas-tool active" title="选择 (V)">选择</button>
   <button id="btnConnect" class="toolbar-btn canvas-tool" title="连线 (C)">连线</button>
   <button id="btnBoxSelect" class="toolbar-btn canvas-tool" title="框选 (拖拽空白区域)">框选</button>
@@ -41,12 +41,14 @@
   <button id="btnRotateCCW" class="toolbar-btn" title="逆时针旋转90° (Shift+R)">逆时针<br>旋转</button>
   <span class="toolbar-spacer"></span>
   <div class="toolbar-aux">
-    <button id="btnNewSystem" class="btn btn-sm" title="新建空白系统">新建</button>
-    <button id="btnExportJson" class="btn btn-sm" title="导出JSON">导出</button>
-    <button id="btnExportEtap" class="btn btn-sm" title="导出为 ETAP 工作簿 (.xlsx)">导出ETAP</button>
-    <button id="btnExportEtapXml" class="btn btn-sm" title="导出为 ETAP 工程 XML (.xml)">导出ETAP XML</button>
-    <button id="btnImportJson" class="btn btn-sm" title="导入JSON">导入</button>
+    <button id="btnNewSystem" class="btn btn-sm legacy-io-shortcut" title="新建空白系统">新建</button>
+    <button id="btnExportJson" class="btn btn-sm legacy-io-shortcut" title="导出JSON">导出</button>
+    <button id="btnExportEtap" class="btn btn-sm legacy-io-shortcut" title="导出为 ETAP 工作簿 (.xlsx)">导出ETAP</button>
+    <button id="btnExportEtapXml" class="btn btn-sm legacy-io-shortcut" title="导出为 ETAP 工程 XML (.xml)">导出ETAP XML</button>
+    <button id="btnImportJson" class="btn btn-sm legacy-io-shortcut" title="导入JSON">导入</button>
     <input type="file" id="fileImportJson" accept=".json" style="display:none"/>
+    <input type="file" id="fileImportGridlabd" accept=".glm,.txt" style="display:none"/>
+    <input type="file" id="fileImportOpendss" accept=".dss,.txt" style="display:none"/>
     <button id="btnToggleTheme" class="btn btn-sm" title="切换浅色 / 深色背景主题">🌓 主题</button>
     <span id="canvasInfo" class="canvas-info">0 元件 | 0 连接</span>
     <span id="statusBadge" class="badge">就绪</span>
@@ -55,10 +57,12 @@
 
 <!-- ===== Bar 2: Function Modules ===== -->
 <div id="moduleBar" class="module-bar">
+  <button id="moduleModelIO"      class="module-btn" data-module="modelIO">模型IO</button>
   <button id="modulePowerFlow"    class="module-btn" data-module="powerFlow">潮流计算</button>
   <button id="moduleOpf"          class="module-btn" data-module="opf">最优潮流</button>
   <button id="moduleShortCircuit" class="module-btn" data-module="shortCircuit">短路计算</button>
   <button id="moduleHarmonics"    class="module-btn" data-module="harmonics">谐波潮流</button>
+  <button id="moduleTransient"    class="module-btn" data-module="transient">暂态仿真</button>
   <button id="moduleTopology"     class="module-btn" data-module="topology">拓扑重构</button>
   <button id="moduleTopologyAnalysis" class="module-btn" data-module="topologyAnalysis">拓扑分析</button>
   <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries">时序生产模拟</button>
@@ -71,6 +75,44 @@
 
 <!-- ===== Bar 3: Sub-Toolbar (contextual) ===== -->
 <div id="subToolbar" class="sub-toolbar hidden">
+  <!-- Unified model input / output / compatibility -->
+  <div class="sub-section model-io-sub-section" data-sub="modelIO" hidden>
+    <div class="io-toolbar-group">
+      <div class="io-toolbar-group-title">输入</div>
+      <label class="sub-label">内置算例
+        <select id="ioCaseSelect" title="选择并加载内置算例">
+          <option value="">-- 选择算例 --</option>
+        </select>
+      </label>
+      <button id="btnIoLoadBuiltin" class="toolbar-btn run-btn" title="加载选中的内置算例">加载内置</button>
+      <label class="sub-label">MATPOWER
+        <select id="ioMatpowerSelect" title="选择并加载 MATPOWER 文件">
+          <option value="">-- MATPOWER文件 --</option>
+        </select>
+      </label>
+      <button id="btnIoLoadMatpower" class="toolbar-btn" title="加载选中的 MATPOWER 算例">加载MATPOWER</button>
+      <button id="btnIoImportJson" class="toolbar-btn" title="导入系统 JSON">导入JSON</button>
+      <button id="btnIoImportEtapXlsx" class="toolbar-btn" title="导入 ETAP 工作簿 (.xlsx)">导入ETAP</button>
+      <button id="btnIoImportEtapXml" class="toolbar-btn" title="导入 ETAP 工程 XML (.xml)">导入ETAP XML</button>
+      <button id="btnIoImportGridlabd" class="toolbar-btn" title="导入 GridLAB-D GLM 文本">导入GLM</button>
+      <button id="btnIoImportOpendss" class="toolbar-btn" title="导入 OpenDSS DSS 文本">导入DSS</button>
+      <button id="btnIoNewSystem" class="toolbar-btn" title="新建空白系统">新建</button>
+    </div>
+    <div class="io-toolbar-group">
+      <div class="io-toolbar-group-title">输出</div>
+      <button id="btnIoExportJson" class="toolbar-btn run-btn" title="导出当前系统 JSON">导出JSON</button>
+      <button id="btnIoExportEtap" class="toolbar-btn" title="导出 ETAP 工作簿 (.xlsx)">导出ETAP</button>
+      <button id="btnIoExportEtapXml" class="toolbar-btn" title="导出 ETAP 工程 XML (.xml)">导出ETAP XML</button>
+      <button id="btnIoExportGridlabd" class="toolbar-btn" title="导出 GridLAB-D GLM">导出GLM</button>
+      <button id="btnIoExportOpendss" class="toolbar-btn" title="导出 OpenDSS DSS">导出DSS</button>
+    </div>
+    <div class="io-toolbar-group">
+      <div class="io-toolbar-group-title">模型兼容</div>
+      <button id="btnIoModelCompatibility" class="toolbar-btn run-btn" title="检查当前系统与 JSON / Canonical / GridLAB-D / OpenDSS / 标准模型的兼容性">模型兼容</button>
+      <button id="btnIoSyncBackend" class="toolbar-btn" title="将当前画布同步到后端会话">同步画布</button>
+      <span class="sub-hint">统一入口：输入、输出、模型标准兼容性集中在这里。</span>
+    </div>
+  </div>
   <!-- Power flow -->
   <div class="sub-section" data-sub="powerFlow" hidden>
     <label class="sub-label">潮流算法
@@ -305,6 +347,98 @@
 
     <button id="btnRunHarmonics" class="toolbar-btn run-btn" title="运行谐波分析">运行</button>
   </div>
+  <!-- Transient phasor-domain dynamics -->
+  <div class="sub-section transient-sub-section" data-sub="transient" hidden>
+    <div class="transient-toolbar-row">
+      <label class="sub-label">积分器
+        <select id="trSolver" title="暂态积分/DAE求解器">
+          <option value="heun" selected>Heun 显式二阶</option>
+          <option value="rk4">RK4 显式四阶</option>
+          <option value="backward_euler">后退欧拉 Newton</option>
+          <option value="trapezoidal">梯形 Newton</option>
+          <option value="rosenbrock">Rosenbrock-Euler</option>
+          <option value="euler">Euler 显式</option>
+        </select>
+      </label>
+      <label class="sub-label">终止(s)
+        <input id="trEnd" type="number" value="1.0" step="0.05" min="0.001" style="width:72px"/>
+      </label>
+      <label class="sub-label">步长(s)
+        <input id="trDt" type="number" value="0.01" step="0.001" min="0.0001" style="width:72px"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="失败时自动缩小步长重试">
+        <input id="trAdaptive" type="checkbox" checked/><span>自适应</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="用现有潮流求解器计算事件前初始运行点">
+        <input id="trPowerFlowInit" type="checkbox" checked/><span>潮流初始化</span>
+      </label>
+      <label class="sub-label">PF迭代
+        <input id="trPfMaxIter" type="number" value="80" step="10" min="5" style="width:62px"/>
+      </label>
+      <label class="sub-label">PF容差
+        <input id="trPfTol" type="number" value="1e-8" step="1e-8" min="1e-12" style="width:82px"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="为带 DC 端口的 VSC 启用 DC 母线电容电压状态">
+        <input id="trDynamicDcLink" type="checkbox"/><span>DC链动态</span>
+      </label>
+      <label class="sub-label">Cdc(s)
+        <input id="trDcLinkC" type="number" value="0.10" step="0.01" min="0.001" style="width:70px"/>
+      </label>
+      <label class="sub-label">Gdc
+        <input id="trDcLinkG" type="number" value="20" step="1" min="0" style="width:58px"/>
+      </label>
+      <button id="btnRunTransient" class="toolbar-btn run-btn" title="运行暂态仿真">运行暂态</button>
+      <button id="btnTransientCompatibility" class="toolbar-btn" title="检查当前系统动态模型与 GridLAB-D / OpenDSS / 标准模型兼容性">模型兼容</button>
+      <button id="btnExportTransient" class="toolbar-btn" title="导出暂态仿真结果 JSON">结果导出</button>
+    </div>
+    <div class="transient-toolbar-row transient-event-row">
+      <label class="sub-label">扰动
+        <select id="trEventType" title="可选扰动事件">
+          <option value="">无</option>
+          <option value="FaultShunt">母线故障</option>
+          <option value="ClearFault">清除故障</option>
+          <option value="ACLoadScale">AC负荷阶跃</option>
+          <option value="DCLoadScale">DC负荷阶跃</option>
+          <option value="GeneratorTrip">发电机跳闸</option>
+          <option value="VSCTrip">VSC跳闸</option>
+          <option value="DCDCTrip">DC/DC跳闸</option>
+          <option value="ACBranchTrip">AC支路跳闸</option>
+          <option value="DCBranchTrip">DC支路跳闸</option>
+          <option value="ACBranchClose">AC支路合闸</option>
+          <option value="DCBranchClose">DC支路合闸</option>
+          <option value="StoragePowerStep">AC储能P阶跃</option>
+          <option value="DCStoragePowerStep">DC储能P阶跃</option>
+        </select>
+      </label>
+      <label class="sub-label">域
+        <select id="trEventDomain" title="故障/母线扰动的网络域">
+          <option value="AC" selected>AC</option>
+          <option value="DC">DC</option>
+        </select>
+      </label>
+      <label class="sub-label">t(s)
+        <input id="trEventTime" type="number" value="0.2" step="0.01" min="0" style="width:64px"/>
+      </label>
+      <label class="sub-label">对象
+        <input id="trEventTarget" type="number" value="1" step="1" min="0" style="width:58px"/>
+      </label>
+      <label class="sub-label">强度/值
+        <input id="trEventValue" type="number" value="0.5" step="0.1" style="width:72px"/>
+      </label>
+      <label class="sub-label">持续(s)
+        <input id="trEventDuration" type="number" value="0.08" step="0.01" min="0" style="width:64px"/>
+      </label>
+      <label class="sub-label">参数(JSON)
+        <input id="trEventParams" type="text" value="" placeholder='{"r_pu":0.001}' style="width:160px"/>
+      </label>
+      <label class="sub-label">标签
+        <input id="trEventLabel" type="text" value="" placeholder="可选" style="width:120px"/>
+      </label>
+      <button id="btnAddTransientEvent" class="toolbar-btn" title="加入暂态扰动序列">加入</button>
+      <button id="btnClearTransientEvents" class="toolbar-btn" title="清空暂态扰动序列">清空</button>
+      <div id="trEventSchedule" class="transient-event-schedule" aria-live="polite"></div>
+    </div>
+  </div>
   <!-- Topology reconstruction -->
   <div class="sub-section" data-sub="topology" hidden>
     <label class="sub-label">潮流 <select id="rcEnablePF"><option value="1" selected>LinDistFlow</option><option value="0">仅连通</option></select></label>
@@ -363,155 +497,164 @@
   </div>
   <!-- Time-series PF -->
   <div class="sub-section" data-sub="timeSeries" hidden>
-    <button id="btnImportIrradiance"  class="toolbar-btn" title="导入辐照强度时序数据 (JSON / Excel)">辐照强度<br>数据导入</button>
-    <button id="btnImportPrice"       class="toolbar-btn" title="导入电价时序数据 (JSON / Excel)">电价<br>数据导入</button>
-    <button id="btnImportLoadProfile" class="toolbar-btn" title="导入负荷波动时序数据 (JSON / Excel)">负荷波动<br>数据导入</button>
-    <button id="btnImportGeneratedRegularScenario" class="toolbar-btn" title="导入场景生成模块导出的常规场景 JSON">导入生成<br>场景</button>
-    <label class="sub-label sub-checkbox" title="勾选后运行时序潮流时使用导入生成场景中的时序数据；不勾选则沿用当前手动/默认时序配置">
-      <input id="regUseScenarioTimeSeries" type="checkbox"/>
-      <span>使用场景时序</span>
-    </label>
+    <div class="control-param-group ts-param-group" title="导入时序输入数据或场景生成模块输出">
+      <span class="control-param-title">数据输入</span>
+      <button id="btnImportIrradiance"  class="toolbar-btn" title="导入辐照强度时序数据 (JSON / Excel)">辐照强度<br>数据导入</button>
+      <button id="btnImportPrice"       class="toolbar-btn" title="导入电价时序数据 (JSON / Excel)">电价<br>数据导入</button>
+      <button id="btnImportLoadProfile" class="toolbar-btn" title="导入负荷波动时序数据 (JSON / Excel)">负荷波动<br>数据导入</button>
+      <button id="btnImportGeneratedRegularScenario" class="toolbar-btn" title="导入场景生成模块导出的常规场景 JSON">导入生成<br>场景</button>
+      <label class="sub-label sub-checkbox" title="勾选后运行时序潮流时使用导入生成场景中的时序数据；不勾选则沿用当前手动/默认时序配置">
+        <input id="regUseScenarioTimeSeries" type="checkbox"/>
+        <span>使用场景时序</span>
+      </label>
+    </div>
     <input type="file" id="fileImportGeneratedRegularScenario" accept=".json" style="display:none"/>
-    <span class="sub-sep" style="border-left:1px solid var(--border,#3e4451);margin:0 6px;height:34px;display:inline-block;"></span>
-    <span class="sub-group-label" style="font-weight:600;align-self:center;" title="以下为「时序潮流」与「年度仿真」共用的建模设置（求解器/网络约束/优化目标/各类丰富模型）">公共建模设置</span>
-    <label class="sub-label" title="机组组合(MILP)求解器：Auto 自动优选；Native 原生分支定界；HiGHS / SCIP 为外部 MILP 求解器">机组组合求解器
-      <select id="tspfUcSolver">
-        <option value="auto" selected>Auto (优选)</option>
-        <option value="native">Native B&amp;C</option>
-        <option value="highs">HiGHS</option>
-        <option value="scip">SCIP</option>
-      </select>
-    </label>
-    <label class="sub-label sub-checkbox" title="启用 AC 网络约束：在机组组合中加入 DC 潮流节点功率平衡与线路热稳定限值；关闭则使用单母线(铜板)平衡">
-      <input id="tspfNetworkConstraints" type="checkbox"/>
-      <span>网络约束(DC潮流)</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="启用 DC 网络耦合约束：在机组组合中显式建模 DC 母线节点平衡与 VSC/DCDC 换流器耦合（需同时启用网络约束）">
-      <input id="tspfDcNetworkConstraints" type="checkbox"/>
-      <span>DC网络耦合</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="显式 DC 支路潮流+热稳定限值：为每条 DC 支路增加传输潮流变量(|f|≤额定)，使功率可在 DC 母线间按线路容量传输（需启用 DC 网络耦合）">
-      <input id="tspfDcBranchFlows" type="checkbox"/>
-      <span>DC支路限值</span>
-    </label>
-    <label class="sub-label" title="旋转备用需求，占每步总负荷的百分比；0 表示不约束备用">旋转备用(%)
-      <input id="tspfReservePct" type="number" value="0" min="0" max="100" step="1"/>
-    </label>
-    <label class="sub-label sub-checkbox" title="将外部电网(变电站联络线)建模为可调电源：按 电价曲线×cost_c1(或静态cost_c1) 计价的净交换(进口/出口)。默认关闭以保持现有算例不变">
-      <input id="tspfExternalGrid" type="checkbox"/>
-      <span>外部电网交易</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="需求响应：柔性负荷可在 flex_up/flex_down 范围内调整(上调/下调)，附带不适惩罚。默认关闭，柔性负荷保持基线">
-      <input id="tspfDemandResponse" type="checkbox"/>
-      <span>需求响应</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="可转移模式：柔性负荷在时段间转移(全周期净偏差为零，能量守恒)；不勾选则为可调整模式(允许净增减)">
-      <input id="tspfDrShiftable" type="checkbox"/>
-      <span>可转移负荷</span>
-    </label>
-    <label class="sub-label" title="需求响应不适惩罚权重 ($/MWh 偏差)；越大越抑制负荷调整">DR惩罚
-      <input id="tspfDrPenalty" type="number" value="20" min="0" step="1"/>
-    </label>
-    <label class="sub-label sub-checkbox" title="可调分布式光伏/直流电源：将必发(must-take)的 AC光伏/DC光伏阵列/DC静态电源 变为可弃电变量，可在过电压/反向功率/过供条件下弃电。默认关闭，保持必发行为">
-      <input id="tspfDispatchablePv" type="checkbox"/>
-      <span>可调光伏</span>
-    </label>
-    <label class="sub-label" title="弃光惩罚权重 ($/MWh)；越大越避免弃电">弃光惩罚
-      <input id="tspfPvCurtailPenalty" type="number" value="50" min="0" step="1"/>
-    </label>
-    <label class="sub-label sub-checkbox" title="微网 PCC 交换+孤岛：每个微网在 PCC 母线有净交换(出力/受电，受 p_export_max/p_import_max 限制)与并网指示(二进制)，可由优化器选择并网/孤岛(孤岛时交换为零)。默认关闭">
-      <input id="tspfMicrogrid" type="checkbox"/>
-      <span>微网PCC交换</span>
-    </label>
-    <label class="sub-label" title="孤岛惩罚权重 ($/步)；越大越倾向保持并网">孤岛惩罚
-      <input id="tspfMgIslandPenalty" type="number" value="100" min="0" step="1"/>
-    </label>
-    <label class="sub-label sub-checkbox" title="储能循环老化成本：按 replacement_cost/(2·max_cycles·E) 对储能吞吐量($/MWh)计价以抑制无谓循环；daily_cycle_limit>0 时附加日循环上限。默认关闭">
-      <input id="tspfStorageDegradation" type="checkbox"/>
-      <span>储能退化成本</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="虚拟电厂(VPP)聚合调度：每个 VPP 在 PCC 母线注入净出力 p∈[pmin,pmax](受爬坡限制)，并维护聚合储能包络 e∈[0,E](E=e_storage_sum_mwh，半满起始)；E=0 时退化为纯发电型 VPP，仅受功率/爬坡约束。默认关闭">
-      <input id="tspfVpp" type="checkbox"/>
-      <span>虚拟电厂(VPP)</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="能量路由器(多端口变换器)：对仍保留显式端口(未在网络投影中展开为 VSC+DC/DC)的 EnergyRouter，按端口建立带损耗内部功率守恒(Σηj·p_in,j=Σp_out,j)的净注入，是两端口 VSC/DC-DC 耦合的 N 端口推广。默认关闭，端口被展开时为空操作">
-      <input id="tspfEnergyRouter" type="checkbox"/>
-      <span>能量路由器</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="移动储能：每个 MobileStorage 有带电量状态(soc∈[soc_min,soc_max])的带符号功率(+放电)；连接母线按 departure_time/arrival_time/status 的外生调度变化(出发前在当前母线，在途时功率强制为0，到达后在 target_bus)。转场时刻为给定输入(无逐母线指派二进制)。默认关闭">
-      <input id="tspfMobileStorage" type="checkbox"/>
-      <span>移动储能</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="移动储能协同选址(需先启用移动储能)：将固定调度升级为决策——每步在 origin 母线/target 母线/在途之间选择(二进制 z0/z1/w，z0+z1+w=1)；功率仅在所连母线注入(q0/q1 受 z 门控)；离开母线须经一个在途步；在途按行驶里程消耗电量；最短停留(由 t_stay_min_hr)抑制频繁切换。更大的 MILP。默认关闭">
-      <input id="tspfMobileCorelocate" type="checkbox"/>
-      <span>协同选址</span>
-    </label>
-    <label class="sub-label" title="优化目标：成本(燃料+启停)；碳排放(发电CO2)；最小弃电(最大化新能源消纳)；最小网损(发电量最小化代理)；加权(多目标)">优化目标
-      <select id="tspfObjective">
-        <option value="cost" selected>最小成本</option>
-        <option value="carbon">最小碳排放</option>
-        <option value="curtailment">最小弃电</option>
-        <option value="loss">最小网损(代理)</option>
-        <option value="weighted">加权多目标</option>
-      </select>
-    </label>
-    <span class="sub-sep" style="border-left:1px solid var(--border,#3e4451);margin:0 6px;height:34px;display:inline-block;"></span>
-    <span class="sub-group-label" style="font-weight:600;align-self:center;" title="时序潮流：在单一连续时段上按上面的公共设置求解 UC→OPF→PF（可选按日并行 / 日周期SOC）">时序潮流</span>
-    <label class="sub-label" title="时序潮流仿真时长（小时）；>24h 时保留并铺展导入的时序数据，可配合「按日并行」加速">仿真时间(小时)
-      <input id="simulationHours" type="number" value="24" min="1" step="1"/>
-    </label>
-    <label class="sub-label sub-checkbox" title="跳过机组组合优化（直接按现有出力分配进行潮流仿真）">
-      <input id="tspfSkipUC" type="checkbox" checked/>
-      <span>跳过机组组合</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="启用经济调度（OPF）：每步以最低运行成本重分配可调机组出力">
-      <input id="tspfRunOPF" type="checkbox"/>
-      <span>启用OPF优化调度</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="日内周期SOC：每个调度日终端储能 SOC 等于初始 SOC（储能日内能量自平衡）；也是按日并行的前提">
-      <input id="tspfCyclicSoc" type="checkbox"/>
-      <span>日内周期SOC</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="按日并行：当仿真时长跨多日时，将时段按日(每日周期SOC)拆分并多线程并行求解后拼接。SCIP 可完全并行；其他求解器安全串行">
-      <input id="tspfParallel" type="checkbox"/>
-      <span>按日并行</span>
-    </label>
-    <label class="sub-label" title="并行线程数；0 表示使用全部可用核心">线程数
-      <input id="tspfThreads" type="number" value="0" min="0" max="256" step="1"/>
-    </label>
-    <button id="btnRunTimeSeriesPF" class="toolbar-btn run-btn" title="运行时序潮流">运行时序潮流</button>
-    <button id="btnExportTspfResults" class="toolbar-btn" title="将时序潮流结果导出为 JSON 文件">结果导出</button>
-    <span class="sub-sep" style="border-left:1px solid var(--border,#3e4451);margin:0 6px;height:34px;display:inline-block;"></span>
-    <button id="btnToggleAnnualPanel" class="toolbar-btn" title="展开/收起年度并行生产模拟控制面板" aria-expanded="false">年度并行仿真 ▸</button>
-    <span id="annualSimControls" hidden>
-    <span class="sub-group-label" style="font-weight:600;align-self:center;" title="年度生产模拟：将一年按日并行分解求解（每日能量自平衡/周期SOC）">年度并行仿真</span>
-    <label class="sub-label" title="时间分辨率：6 小时(全年1460步) 或 1 小时(全年8760步)">分辨率
-      <select id="annResolution">
-        <option value="6h" selected>6 小时</option>
-        <option value="1h">1 小时</option>
-      </select>
-    </label>
-    <label class="sub-label" title="日内仿真模型：SCUC 安全约束机组组合；动态SCED 固定机组的安全约束经济调度；动态OPF 逐时段最优潮流">日内模型
-      <select id="annDailyMode">
-        <option value="scuc" selected>SCUC</option>
-        <option value="sced">动态 SCED</option>
-        <option value="dopf">动态 OPF</option>
-      </select>
-    </label>
-    <label class="sub-label sub-checkbox" title="启用按日并行：将全年分解为相互独立的日（每日周期SOC），多线程并行求解。SCIP 求解器可完全并行；其他求解器为安全串行">
-      <input id="annParallel" type="checkbox" checked/>
-      <span>按日并行</span>
-    </label>
-    <label class="sub-label" title="并行线程数；0 表示使用全部可用核心">线程数
-      <input id="annThreads" type="number" value="0" min="0" max="256" step="1"/>
-    </label>
-    <label class="sub-label sub-checkbox" title="每日终端储能 SOC 等于初始 SOC，使各日相互独立（并行的前提）">
-      <input id="annCyclicSoc" type="checkbox" checked/>
-      <span>日内周期SOC</span>
-    </label>
-    <button id="btnRunAnnualSim" class="toolbar-btn run-btn" title="运行年度并行生产模拟（复用上方机组组合求解器/网络约束/旋转备用/优化目标设置）">运行年度仿真</button>
-    <button id="btnExportAnnualSim" class="toolbar-btn" title="将年度生产模拟结果导出为 JSON 文件">年度结果导出</button>
-    </span>
+    <div class="control-param-group ts-param-group" title="以下为「时序潮流」与「年度仿真」共用的建模设置（求解器/网络约束/优化目标/各类丰富模型）">
+      <span class="control-param-title">公共建模</span>
+      <label class="sub-label" title="机组组合(MILP)求解器：Auto 自动优选；Native 原生分支定界；HiGHS / SCIP 为外部 MILP 求解器">机组组合求解器
+        <select id="tspfUcSolver">
+          <option value="auto" selected>Auto (优选)</option>
+          <option value="native">Native B&amp;C</option>
+          <option value="highs">HiGHS</option>
+          <option value="scip">SCIP</option>
+        </select>
+      </label>
+      <label class="sub-label sub-checkbox" title="启用 AC 网络约束：在机组组合中加入 DC 潮流节点功率平衡与线路热稳定限值；关闭则使用单母线(铜板)平衡">
+        <input id="tspfNetworkConstraints" type="checkbox"/>
+        <span>网络约束(DC潮流)</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="启用 DC 网络耦合约束：在机组组合中显式建模 DC 母线节点平衡与 VSC/DCDC 换流器耦合（需同时启用网络约束）">
+        <input id="tspfDcNetworkConstraints" type="checkbox"/>
+        <span>DC网络耦合</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="显式 DC 支路潮流+热稳定限值：为每条 DC 支路增加传输潮流变量(|f|≤额定)，使功率可在 DC 母线间按线路容量传输（需启用 DC 网络耦合）">
+        <input id="tspfDcBranchFlows" type="checkbox"/>
+        <span>DC支路限值</span>
+      </label>
+      <label class="sub-label" title="旋转备用需求，占每步总负荷的百分比；0 表示不约束备用">旋转备用(%)
+        <input id="tspfReservePct" type="number" value="0" min="0" max="100" step="1"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="将外部电网(变电站联络线)建模为可调电源：按 电价曲线×cost_c1(或静态cost_c1) 计价的净交换(进口/出口)。默认关闭以保持现有算例不变">
+        <input id="tspfExternalGrid" type="checkbox"/>
+        <span>外部电网交易</span>
+      </label>
+      <label class="sub-label" title="优化目标：成本(燃料+启停)；碳排放(发电CO2)；最小弃电(最大化新能源消纳)；最小网损(发电量最小化代理)；加权(多目标)">优化目标
+        <select id="tspfObjective">
+          <option value="cost" selected>最小成本</option>
+          <option value="carbon">最小碳排放</option>
+          <option value="curtailment">最小弃电</option>
+          <option value="loss">最小网损(代理)</option>
+          <option value="weighted">加权多目标</option>
+        </select>
+      </label>
+    </div>
+    <div class="control-param-group ts-param-group" title="需求响应、可再生能源、微网和聚合资源建模选项">
+      <span class="control-param-title">灵活资源</span>
+      <label class="sub-label sub-checkbox" title="需求响应：柔性负荷可在 flex_up/flex_down 范围内调整(上调/下调)，附带不适惩罚。默认关闭，柔性负荷保持基线">
+        <input id="tspfDemandResponse" type="checkbox"/>
+        <span>需求响应</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="可转移模式：柔性负荷在时段间转移(全周期净偏差为零，能量守恒)；不勾选则为可调整模式(允许净增减)">
+        <input id="tspfDrShiftable" type="checkbox"/>
+        <span>可转移负荷</span>
+      </label>
+      <label class="sub-label" title="需求响应不适惩罚权重 ($/MWh 偏差)；越大越抑制负荷调整">DR惩罚
+        <input id="tspfDrPenalty" type="number" value="20" min="0" step="1"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="可调分布式光伏/直流电源：将必发(must-take)的 AC光伏/DC光伏阵列/DC静态电源 变为可弃电变量，可在过电压/反向功率/过供条件下弃电。默认关闭，保持必发行为">
+        <input id="tspfDispatchablePv" type="checkbox"/>
+        <span>可调光伏</span>
+      </label>
+      <label class="sub-label" title="弃光惩罚权重 ($/MWh)；越大越避免弃电">弃光惩罚
+        <input id="tspfPvCurtailPenalty" type="number" value="50" min="0" step="1"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="微网 PCC 交换+孤岛：每个微网在 PCC 母线有净交换(出力/受电，受 p_export_max/p_import_max 限制)与并网指示(二进制)，可由优化器选择并网/孤岛(孤岛时交换为零)。默认关闭">
+        <input id="tspfMicrogrid" type="checkbox"/>
+        <span>微网PCC交换</span>
+      </label>
+      <label class="sub-label" title="孤岛惩罚权重 ($/步)；越大越倾向保持并网">孤岛惩罚
+        <input id="tspfMgIslandPenalty" type="number" value="100" min="0" step="1"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="储能循环老化成本：按 replacement_cost/(2·max_cycles·E) 对储能吞吐量($/MWh)计价以抑制无谓循环；daily_cycle_limit>0 时附加日循环上限。默认关闭">
+        <input id="tspfStorageDegradation" type="checkbox"/>
+        <span>储能退化成本</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="虚拟电厂(VPP)聚合调度：每个 VPP 在 PCC 母线注入净出力 p∈[pmin,pmax](受爬坡限制)，并维护聚合储能包络 e∈[0,E](E=e_storage_sum_mwh，半满起始)；E=0 时退化为纯发电型 VPP，仅受功率/爬坡约束。默认关闭">
+        <input id="tspfVpp" type="checkbox"/>
+        <span>虚拟电厂(VPP)</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="能量路由器(多端口变换器)：对仍保留显式端口(未在网络投影中展开为 VSC+DC/DC)的 EnergyRouter，按端口建立带损耗内部功率守恒(Σηj·p_in,j=Σp_out,j)的净注入，是两端口 VSC/DC-DC 耦合的 N 端口推广。默认关闭，端口被展开时为空操作">
+        <input id="tspfEnergyRouter" type="checkbox"/>
+        <span>能量路由器</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="移动储能：每个 MobileStorage 有带电量状态(soc∈[soc_min,soc_max])的带符号功率(+放电)；连接母线按 departure_time/arrival_time/status 的外生调度变化(出发前在当前母线，在途时功率强制为0，到达后在 target_bus)。转场时刻为给定输入(无逐母线指派二进制)。默认关闭">
+        <input id="tspfMobileStorage" type="checkbox"/>
+        <span>移动储能</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="移动储能协同选址(需先启用移动储能)：将固定调度升级为决策——每步在 origin 母线/target 母线/在途之间选择(二进制 z0/z1/w，z0+z1+w=1)；功率仅在所连母线注入(q0/q1 受 z 门控)；离开母线须经一个在途步；在途按行驶里程消耗电量；最短停留(由 t_stay_min_hr)抑制频繁切换。更大的 MILP。默认关闭">
+        <input id="tspfMobileCorelocate" type="checkbox"/>
+        <span>协同选址</span>
+      </label>
+    </div>
+    <div class="control-param-group ts-param-group ts-param-group-actions" title="时序潮流：在单一连续时段上按上面的公共设置求解 UC→OPF→PF（可选按日并行 / 日周期SOC）">
+      <span class="control-param-title">时序潮流</span>
+      <label class="sub-label" title="时序潮流仿真时长（小时）；>24h 时保留并铺展导入的时序数据，可配合「按日并行」加速">仿真时间(小时)
+        <input id="simulationHours" type="number" value="24" min="1" step="1"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="跳过机组组合优化（直接按现有出力分配进行潮流仿真）">
+        <input id="tspfSkipUC" type="checkbox" checked/>
+        <span>跳过机组组合</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="启用经济调度（OPF）：每步以最低运行成本重分配可调机组出力">
+        <input id="tspfRunOPF" type="checkbox"/>
+        <span>启用OPF优化调度</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="日内周期SOC：每个调度日终端储能 SOC 等于初始 SOC（储能日内能量自平衡）；也是按日并行的前提">
+        <input id="tspfCyclicSoc" type="checkbox"/>
+        <span>日内周期SOC</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="按日并行：当仿真时长跨多日时，将时段按日(每日周期SOC)拆分并多线程并行求解后拼接。Auto 会优先使用适合并行日分解的 SCIP，缺失时回退到 Native B&C；显式外部求解器可能安全串行">
+        <input id="tspfParallel" type="checkbox"/>
+        <span>按日并行</span>
+      </label>
+      <label class="sub-label" title="并行线程数；0 表示使用全部可用核心">线程数
+        <input id="tspfThreads" type="number" value="0" min="0" max="256" step="1"/>
+      </label>
+      <button id="btnRunTimeSeriesPF" class="toolbar-btn run-btn" title="运行时序潮流">运行<br>时序潮流</button>
+      <button id="btnExportTspfResults" class="toolbar-btn" title="将时序潮流结果导出为 JSON 文件">结果<br>导出</button>
+    </div>
+    <div class="control-param-group ts-param-group ts-annual-group ts-param-group-actions" title="年度生产模拟：将一年按日并行分解求解（每日能量自平衡/周期SOC）">
+      <span class="control-param-title">年度并行仿真</span>
+      <button id="btnToggleAnnualPanel" class="toolbar-btn" title="展开/收起年度并行生产模拟控制面板" aria-expanded="false">展开<br>年度设置 ▸</button>
+      <span id="annualSimControls" class="ts-annual-controls" hidden>
+        <label class="sub-label" title="时间分辨率：6 小时(全年1460步) 或 1 小时(全年8760步)">分辨率
+          <select id="annResolution">
+            <option value="6h" selected>6 小时</option>
+            <option value="1h">1 小时</option>
+          </select>
+        </label>
+        <label class="sub-label" title="日内仿真模型：SCUC 安全约束机组组合；动态SCED 固定机组的安全约束经济调度；动态OPF 逐时段最优潮流">日内模型
+          <select id="annDailyMode">
+            <option value="scuc" selected>SCUC</option>
+            <option value="sced">动态 SCED</option>
+            <option value="dopf">动态 OPF</option>
+          </select>
+        </label>
+        <label class="sub-label sub-checkbox" title="启用按日并行：将全年分解为相互独立的日（每日周期SOC），多线程并行求解。Auto 会优先使用适合并行日分解的 SCIP，缺失时回退到 Native B&C；显式外部求解器可能安全串行">
+          <input id="annParallel" type="checkbox" checked/>
+          <span>按日并行</span>
+        </label>
+        <label class="sub-label" title="并行线程数；0 表示使用全部可用核心">线程数
+          <input id="annThreads" type="number" value="0" min="0" max="256" step="1"/>
+        </label>
+        <label class="sub-label sub-checkbox" title="每日终端储能 SOC 等于初始 SOC，使各日相互独立（并行的前提）">
+          <input id="annCyclicSoc" type="checkbox" checked/>
+          <span>日内周期SOC</span>
+        </label>
+        <button id="btnRunAnnualSim" class="toolbar-btn run-btn" title="运行年度并行生产模拟（复用上方机组组合求解器/网络约束/旋转备用/优化目标设置）">运行年度<br>仿真</button>
+        <button id="btnExportAnnualSim" class="toolbar-btn" title="将年度生产模拟结果导出为 JSON 文件">年度结果<br>导出</button>
+      </span>
+    </div>
     <input type="file" id="fileImportIrradiance"  accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
     <input type="file" id="fileImportPrice"       accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
     <input type="file" id="fileImportLoadProfile" accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
@@ -522,18 +665,113 @@
   </div>
   <!-- Reliability -->
   <div class="sub-section" data-sub="reliability" hidden>
-    <label class="sub-label" title="可靠性分析方法">方法
-      <select id="relMethod">
-        <option value="nsq">非序贯蒙特卡洛 (NSQ)</option>
-        <option value="seq">序贯蒙特卡洛 (SEQ)</option>
-        <option value="fmea">FMEA (N-1 枚举)</option>
-        <option value="fd">频率-持续时间 (F&amp;D)</option>
-      </select>
-    </label>
-    <label class="sub-label" title="蒙特卡洛最大抽样次数 (NSQ) / 年数×10 (SEQ)">抽样次数
-      <input id="relMaxIter" type="number" value="2000" min="100" step="500"/>
-    </label>
-    <button id="btnImportGeneratedReliabilityScenario" class="toolbar-btn" title="导入场景生成模块导出的可靠性场景 JSON">导入生成<br>场景</button>
+    <div class="rel-param-group" title="可靠性元件参数来源与模板覆盖策略">
+      <span class="rel-param-title">元件建模</span>
+      <label class="sub-label" title="可靠性数据策略：命名模板现为可选（不再自动套用）">数据策略
+        <select id="relDataPolicy">
+          <option value="missing_only" selected>缺失项→默认值</option>
+          <option value="case_data_only">仅用例数据 (严格)</option>
+          <option value="overwrite_template">套用模板覆盖</option>
+        </select>
+      </label>
+      <label class="sub-label" title="命名可靠性模板（仅在“套用模板覆盖”模式生效）">模板
+        <select id="relTemplate">
+          <option value="none" selected>无</option>
+          <option value="ieee-rts-24">IEEE RTS-24</option>
+          <option value="comprehensive">综合混合示范</option>
+        </select>
+      </label>
+    </div>
+    <div class="rel-param-group" title="失效模式筛选：时基/按需、物理/cyber/control/protection">
+      <span class="rel-param-title">故障模式</span>
+      <label class="sub-label sub-checkbox" title="被动/时基：元件运行中按年故障率 λ 自然发生，例如线路永久故障、设备老化损坏">
+        <input id="relFmPassive" type="checkbox" checked/>
+        <span>时基失效</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="主动/按需：只有在开关、保护、控制动作被请求时才可能失败，例如拒动、误动、失败合闸">
+        <input id="relFmActive" type="checkbox" checked/>
+        <span>按需动作失效</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="物理设备：硬件、线路、电缆、变压器、功率器件等实体故障">
+        <input id="relFmPhysical" type="checkbox" checked/>
+        <span>设备物理</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="网络/控制：控制器不可用、通信中断、测量异常、设定值冻结等 cyber/control 失效">
+        <input id="relFmCyber" type="checkbox" checked/>
+        <span>网络控制</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="保护逻辑：继电保护拒动、误动、保护区扩大等影响故障隔离范围的模式">
+        <input id="relFmProtection" type="checkbox" checked/>
+        <span>保护逻辑</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="共因失效：枚举两个不同元件失效模式的 N-2 同时停运，按独立二阶重叠概率 U_i*U_j 加权（仅失效模式 FMEA）">
+        <input id="relFmN2" type="checkbox"/>
+        <span>N-2 共因</span>
+      </label>
+    </div>
+    <div class="rel-param-group" title="故障后果与恢复重构模型">
+      <span class="rel-param-title">故障分析</span>
+      <label class="sub-label" title="故障后果模型；选择三阶段恢复 MILP 时会调用三阶段可靠性评估器">后果模型
+        <select id="relPhysicalModel">
+          <option value="auto" selected>自动</option>
+          <option value="hybrid_network_lp">AC/DC 网络 LP</option>
+          <option value="ac_only_dcopf">AC DC-OPF</option>
+          <option value="restoration_milp">三阶段恢复 MILP</option>
+          <option value="generation_adequacy">发电充裕度 COPT</option>
+        </select>
+      </label>
+      <span id="relAnalysisHint" class="sub-hint"></span>
+      <label class="sub-label sub-checkbox" title="三阶段恢复重构：除 AC/DC 线路外，额外枚举 VSC/DC-DC 变换器、AC 开关、AC/DC 断路器以及发电机/变压器停运故障（仅三阶段恢复 MILP）">
+        <input id="relTsFaults" type="checkbox"/>
+        <span>三阶段扩展故障</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="三阶段 DC 子网用 DC LinDistFlow 潮流替代容量回退：母线电压下限、线路电阻压降与热稳定限制（仅三阶段恢复 MILP；默认开启，取消勾选则回退到容量法）">
+        <input id="relTsDcPf" type="checkbox" checked/>
+        <span>三阶段DC潮流</span>
+      </label>
+    </div>
+    <div class="rel-param-group rel-param-group-actions" title="统计评估方法、抽样规模与结果输出">
+      <span class="rel-param-title">统计指标与薄弱环节</span>
+      <label class="sub-label" title="选择结果面板优先展示的指标族；后端仍返回所有可用指标">指标
+        <select id="relMetricFocus">
+          <option value="all" selected>全部</option>
+          <option value="eens">EENS/EDNS</option>
+          <option value="lole">LOLE/LOLP</option>
+          <option value="customer">SAIFI/SAIDI</option>
+          <option value="cost">成本</option>
+        </select>
+      </label>
+      <label class="sub-label" title="选择薄弱环节排序依据：EENS 表示能量风险，LOLE 表示停电时长，频率表示故障发生次数，阶段切负荷适合三阶段恢复诊断">薄弱环节
+        <select id="relWeakBasis">
+          <option value="auto" selected>自动</option>
+          <option value="eens">按 EENS</option>
+          <option value="lole">按 LOLE</option>
+          <option value="frequency">按频率</option>
+          <option value="conditional">按条件风险</option>
+          <option value="stage_shed">按阶段切负荷</option>
+        </select>
+      </label>
+      <label class="sub-label" title="可靠性统计方法；三阶段恢复 MILP 已移动到故障分析后果模型">方法
+        <select id="relMethod">
+          <option value="nsq">非序贯蒙特卡洛 (NSQ)</option>
+          <option value="seq">序贯蒙特卡洛 (SEQ)</option>
+          <option value="fmea">元件 N-1 FMEA</option>
+          <option value="failure_mode_fmea">失效模式 FMEA</option>
+          <option value="fd">频率-持续时间 (F&amp;D)</option>
+        </select>
+      </label>
+      <label class="sub-label" title="蒙特卡洛最大抽样次数 (NSQ) / 年数×10 (SEQ)">抽样次数
+        <input id="relMaxIter" type="number" value="2000" min="100" step="500"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="并行评估独立样本、年份或故障枚举项">
+        <input id="relParallel" type="checkbox" checked/>
+        <span>并行</span>
+      </label>
+      <label class="sub-label" title="可靠性分析线程数；0 表示自动使用硬件并发数">线程
+        <input id="relParallelThreads" type="number" value="0" min="0" max="256" step="1"/>
+      </label>
+      <button id="btnImportGeneratedReliabilityScenario" class="toolbar-btn" title="导入场景生成模块导出的可靠性场景 JSON">导入生成<br>场景</button>
+    </div>
     <input type="file" id="fileImportGeneratedReliabilityScenario" accept=".json" style="display:none"/>
     <button id="btnRunReliability" class="toolbar-btn run-btn" title="运行可靠性分析">运行可靠性分析</button>
     <button id="btnExportReliabilityResults" class="toolbar-btn" title="将可靠性分析结果导出为 JSON">结果导出</button>
@@ -1028,11 +1266,15 @@
           <h4>潮流结果 — 全部元件计算结果</h4>
           <div id="pfAllComponentsResults" class="topo-table-wrap"></div>
         </div>
-        <div class="topo-section">
-          <h4>潮流结果 — AC节点电压</h4>
-          <div id="pfBusResults" class="topo-table-wrap"></div>
-        </div>
-        <div class="topo-section" id="pfDcBusSection" style="display:none">
+	        <div class="topo-section">
+	          <h4>潮流结果 — AC节点电压</h4>
+	          <div id="pfBusResults" class="topo-table-wrap"></div>
+	        </div>
+	        <div class="topo-section" id="pfThreePhaseSection" style="display:none">
+	          <h4>潮流结果 — 三相节点电压 / OpenDSS对比</h4>
+	          <div id="pfThreePhaseResults" class="topo-table-wrap"></div>
+	        </div>
+	        <div class="topo-section" id="pfDcBusSection" style="display:none">
           <h4>潮流结果 — DC节点电压</h4>
           <div id="pfDcBusResults" class="topo-table-wrap"></div>
         </div>
@@ -1181,6 +1423,22 @@
           <div id="hpfNewtonResults" class="topo-table-wrap"></div>
         </div>
         </div><!-- /result-group harmonics -->
+        <div class="result-group" data-result-group="transient">
+          <div class="topo-section">
+            <h4>暂态仿真结果</h4>
+            <div id="transientResults" class="topo-table-wrap">
+              <p class="empty-hint">运行暂态仿真后查看 GFL/GFM 控制、三相电压和 DC 电压动态。</p>
+            </div>
+          </div>
+        </div><!-- /result-group transient -->
+        <div class="result-group" data-result-group="modelIO">
+          <div class="topo-section">
+            <h4>模型IO / 标准兼容性</h4>
+            <div id="modelIoResults" class="topo-table-wrap">
+              <p class="empty-hint">导入、导出或检查模型兼容性后查看统一 IO 状态。</p>
+            </div>
+          </div>
+        </div><!-- /result-group modelIO -->
         <div class="result-group" data-result-group="topology">
         <div class="topo-section">
           <h4>拓扑重构结果</h4>
@@ -1414,8 +1672,8 @@
   </div>
 </div>
 
-<script src="js/components.js?v=20260628-generator-flow-results"></script>
-<script src="js/canvas.js?v=20260628-generator-flow-results"></script>
-<script src="js/app.js?v=20260628-generator-flow-results"></script>
+  <script src="js/components.js?v=20260703-model-io"></script>
+  <script src="js/canvas.js?v=20260703-results-io"></script>
+  <script src="js/app.js?v=20260703-results-io"></script>
 </body>
 </html>

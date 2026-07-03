@@ -45,6 +45,10 @@ data to numerical results.
 8. I/O and application API:
    `include/hacdcpf/io/*.hpp`, `src/io/*.cpp`,
    `include/hacdcpf/api/hacdcpf.hpp`, and `src/api/hacdcpf.cpp`.
+9. IO governance and digital-twin readiness:
+   `include/hacdcpf/io/component_io_mapping.hpp`,
+   `src/io/component_io_mapping.cpp`, and
+   [IO digital-twin review](@ref io_digital_twin_review).
 
 ## Useful Notebook Queries
 
@@ -66,6 +70,10 @@ Use the search box in the generated HTML for these review terms:
 - `solve_power_flow`
 - `solve_ac_opf`
 - `build_power_system_graph`
+- `component_io_mappings`
+- `analyze_component_parameter_quality`
+- `analyze_digital_twin_readiness`
+- `DigitalTwinReadinessReport`
 
 ## Current Result Metadata
 
@@ -84,6 +92,25 @@ requiring callers to infer it from the solver name.
   scope tag and validity flags.
 - `DCOPFResult` carries `solver_chain`, `objective_model`,
   `load_shedding_mw`, `branch_mu_valid`, and `converter_model_scope`.
+
+## IO Governance and Digital-Twin Readiness
+
+The `数据IO` module now exposes machine-readable governance data rather than
+only import/export handlers.
+
+- `component_io_mappings()` declares representation policy for native JSON,
+  canonical projection, GridLAB-D, and OpenDSS.
+- `component_parameter_rules()` exposes range/presence rules for static,
+  dynamic, transient, failure, and reliability parameters.
+- `analyze_component_parameter_quality()` applies those rules to a
+  `HybridPowerSystem`.
+- `analyze_digital_twin_readiness()` returns an L0--L5 maturity report with
+  eleven criteria spanning identity, topology, parameters, dynamics, telemetry,
+  state synchronization, events, reliability, standards interoperability,
+  numerical validation, and provenance.
+
+For a focused review, start at [IO digital-twin review](@ref
+io_digital_twin_review).
 
 ## Adding Better Function Notes
 

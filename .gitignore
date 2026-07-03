@@ -54,4 +54,6 @@ etap-main/
 .claude/
 
 
-harmonics_validation/
+tools/harmonics_validation/.venv/
+tools/harmonics_validation/*_report.json
+tools/harmonics_validation/cpp_result.json

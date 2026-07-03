@@ -241,7 +241,14 @@ void parse_gencost_row(const std::vector<double>& row, double& c2, double& c1, d
 
 }  // namespace
 
-HybridPowerSystem parse_matpower(const std::string& filepath) {
+namespace {
+
+// Core MATPOWER parser.  @p apply_conversions gates the non-standard kW/ohm
+// unit markers (§6.3); @p report (optional) receives uniform import
+// diagnostics and the resolved UnitAssertion / binding level.
+HybridPowerSystem parse_matpower_impl(const std::string& filepath,
+                                      bool apply_conversions,
+                                      ImportReport* report) {
   const std::string text = read_text_file(filepath);
 
   const double base_mva = parse_scalar_assignment(text, "mpc.baseMVA", 100.0);
@@ -254,16 +261,46 @@ HybridPowerSystem parse_matpower(const std::string& filepath) {
     throw std::runtime_error("MATPOWER parser: empty/invalid bus matrix: " + filepath);
   }
 
-  if (has_load_kw_conversion(text)) {
+  const bool has_kw_marker = has_load_kw_conversion(text);
+  const bool has_ohm_marker = has_branch_ohm_conversion(text);
+
+  if (report) {
+    report->binding_level = ImportBindingLevel::Rich;
+    if (has_kw_marker || has_ohm_marker) {
+      // Non-standard units: only trusted under best-effort (§6.3).
+      report->unit_assertion = apply_conversions ? UnitAssertion::BestEffort
+                                                  : UnitAssertion::Inferred;
+    } else {
+      // Standard MATPOWER is per-unit on baseMVA — units are asserted.
+      report->unit_assertion = UnitAssertion::Asserted;
+      report->add(ImportDisposition::Accepted, ImportReasonCode::Ok,
+                  ImportSeverity::Info, "mpc.baseMVA",
+                  "Units: per-unit on baseMVA = " + std::to_string(base_mva) +
+                      " MVA.");
+    }
+  }
+
+  if (has_kw_marker && apply_conversions) {
     for (auto& row : bus_rows) {
       if (row.size() >= 4) {
         row[2] /= 1e3;
         row[3] /= 1e3;
       }
     }
+    if (report)
+      report->add(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
+                  ImportSeverity::Warning, "mpc.bus[PD,QD]",
+                  "Load PD/QD converted from kW to MW via a non-standard file "
+                  "marker (best-effort).");
+  } else if (has_kw_marker && report) {
+    report->add(ImportDisposition::Skipped, ImportReasonCode::UnitInferred,
+                ImportSeverity::Warning, "mpc.bus[PD,QD]",
+                "Non-standard kW load marker present but not applied on the "
+                "twin path; enable best_effort_import or provide standard "
+                "per-unit values.");
   }
 
-  if (has_branch_ohm_conversion(text)) {
+  if (has_ohm_marker && apply_conversions) {
     double base_kv = 0.0;
     if (!bus_rows.empty() && bus_rows[0].size() >= 10) {
       base_kv = bus_rows[0][9];
@@ -277,6 +314,17 @@ HybridPowerSystem parse_matpower(const std::string& filepath) {
         }
       }
     }
+    if (report)
+      report->add(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
+                  ImportSeverity::Warning, "mpc.branch[BR_R,BR_X]",
+                  "Branch R/X converted from ohms to per-unit via a "
+                  "non-standard file marker (best-effort).");
+  } else if (has_ohm_marker && report) {
+    report->add(ImportDisposition::Skipped, ImportReasonCode::UnitInferred,
+                ImportSeverity::Warning, "mpc.branch[BR_R,BR_X]",
+                "Non-standard ohmic branch marker present but not applied on "
+                "the twin path; enable best_effort_import or provide per-unit "
+                "impedance.");
   }
 
   HybridPowerSystem sys;
@@ -495,6 +543,124 @@ HybridPowerSystem parse_matpower(const std::string& filepath) {
   }
 
   return sys;
+}
+
+}  // namespace
+
+HybridPowerSystem parse_matpower(const std::string& filepath) {
+  return parse_matpower_impl(filepath, /*apply_conversions=*/true,
+                             /*report=*/nullptr);
+}
+
+MatpowerImportResult parse_matpower(const std::string& filepath,
+                                    const MatpowerImportOptions& options) {
+  MatpowerImportResult result;
+  result.system = parse_matpower_impl(filepath, options.best_effort_import,
+                                      &result.report);
+  return result;
+}
+
+namespace {
+
+int internal_bus_type_to_matpower(BusType t) {
+  switch (t) {
+    case BusType::SLACK: return 3;
+    case BusType::PV:    return 2;
+    case BusType::PQ:    return 1;
+    default:             return 4;  // ISOLATED
+  }
+}
+
+std::string sanitize_identifier(const std::string& s) {
+  std::string out;
+  for (char c : s) {
+    out.push_back((std::isalnum(static_cast<unsigned char>(c)) || c == '_')
+                      ? c
+                      : '_');
+  }
+  if (out.empty() || std::isdigit(static_cast<unsigned char>(out[0])))
+    out = "case_" + out;
+  return out;
+}
+
+}  // namespace
+
+std::string to_matpower(const HybridPowerSystem& sys) {
+  std::ostringstream o;
+  o << "function mpc = "
+    << sanitize_identifier(sys.name.empty() ? "hacdcpf_export" : sys.name)
+    << "\n";
+  o << "mpc.version = '2';\n";
+  o << "mpc.baseMVA = " << sys.base_mva << ";\n";
+  if (!sys.dc.buses.empty() || !sys.vsc_converters.empty() ||
+      !sys.ac.transformers_2w.empty() || !sys.ac.transformers_3w.empty()) {
+    o << "% NOTE: DC network, converters, and transformers are out of scope "
+         "for this bounded AC export (structural loss).\n";
+  }
+
+  // Fold loads and shunts into per-bus injections.
+  std::unordered_map<int, double> pd, qd, gs, bs;
+  for (const auto& l : sys.ac.loads) {
+    pd[l.bus] += l.p_mw;
+    qd[l.bus] += l.q_mvar;
+  }
+  for (const auto& s : sys.ac.shunts) {
+    gs[s.bus] += s.gs_mw;
+    bs[s.bus] += s.bs_mvar;
+  }
+
+  o << "%% bus data\n"
+       "%\tbus_i\ttype\tPd\tQd\tGs\tBs\tarea\tVm\tVa\tbaseKV\tzone\tVmax\tVmin\n";
+  o << "mpc.bus = [\n";
+  for (const auto& b : sys.ac.buses) {
+    o << "\t" << b.index << "\t" << internal_bus_type_to_matpower(b.bus_type)
+      << "\t" << pd[b.index] << "\t" << qd[b.index] << "\t" << gs[b.index]
+      << "\t" << bs[b.index] << "\t1\t" << b.vm_pu << "\t" << b.va_deg << "\t"
+      << b.base_kv << "\t1\t" << b.vmax_pu << "\t" << b.vmin_pu << ";\n";
+  }
+  o << "];\n";
+
+  o << "%% generator data\n"
+       "%\tbus\tPg\tQg\tQmax\tQmin\tVg\tmBase\tstatus\tPmax\tPmin\n";
+  o << "mpc.gen = [\n";
+  for (const auto& g : sys.ac.generators) {
+    o << "\t" << g.bus << "\t" << g.pg_mw << "\t" << g.qg_mvar << "\t"
+      << g.qmax_mvar << "\t" << g.qmin_mvar << "\t" << g.vg_pu << "\t"
+      << (g.mbase_mva > 0.0 ? g.mbase_mva : sys.base_mva) << "\t"
+      << (g.in_service ? 1 : 0) << "\t" << g.pmax_mw << "\t" << g.pmin_mw
+      << "\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0;\n";
+  }
+  o << "];\n";
+
+  o << "%% branch data\n"
+       "%\tfbus\ttbus\tr\tx\tb\trateA\trateB\trateC\tratio\tangle\tstatus\t"
+       "angmin\tangmax\n";
+  o << "mpc.branch = [\n";
+  for (const auto& br : sys.ac.branches) {
+    o << "\t" << br.from_bus << "\t" << br.to_bus << "\t" << br.r_pu << "\t"
+      << br.x_pu << "\t" << br.b_pu << "\t" << br.rate_a_mva
+      << "\t0\t0\t0\t0\t1\t-360\t360;\n";
+  }
+  o << "];\n";
+
+  o << "%% generator cost data\n"
+       "%\tmodel\tstartup\tshutdown\tn\tc2\tc1\tc0\n";
+  o << "mpc.gencost = [\n";
+  for (const auto& g : sys.ac.generators) {
+    o << "\t2\t0\t0\t3\t" << g.cost_c2 << "\t" << g.cost_c1 << "\t" << g.cost_c0
+      << ";\n";
+  }
+  o << "];\n";
+
+  return o.str();
+}
+
+void save_matpower(const HybridPowerSystem& sys, const std::string& filepath) {
+  std::ofstream os(filepath);
+  if (!os)
+    throw std::runtime_error("MATPOWER export: cannot open for write " +
+                             filepath);
+  os << to_matpower(sys);
 }
 
 }  // namespace hacdcpf::io

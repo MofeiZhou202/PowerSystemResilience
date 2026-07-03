@@ -20,6 +20,7 @@
 #include "hacdcpf/model/enums/renewable_enums.hpp"
 #include "hacdcpf/model/enums/storage_enums.hpp"
 #include "hacdcpf/model/enums/switching_enums.hpp"
+#include "hacdcpf/model/dynamic_model_profile.hpp"
 
 namespace hacdcpf {
 
@@ -215,6 +216,8 @@ struct ExternalGrid {
   // Time-varying electricity price: profile_id -> cost_c1 at each timestep.
   // -1 = no profile (use static cost_c1).
   int price_profile_id{-1};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -237,6 +240,8 @@ struct AsynchronousMotor {
   double efficiency{0.95};
   double r0_pu{0.0};
   double x0_pu{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -297,6 +302,8 @@ struct Generator {
   double forced_outage_rate{0.0};
   double mttr_hr{0.0};
   double t_scheduled_hr{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -335,6 +342,8 @@ struct StaticGenerator {
   double t_scheduled_hr{0.0};
 
   double f_ref_hz{50.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -365,6 +374,8 @@ struct RenewableGen {
   double mtbf_hours{0.0};
   double mttr_hours{0.0};
   double t_scheduled_hr{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -414,6 +425,8 @@ struct PVSystem {
   double mttr_panel_hours{0.0};
   double mtbf_inverter_hours{0.0};
   double mttr_inverter_hours{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -458,6 +471,8 @@ struct Load {
   int sc_source_index{0};
   int motor_poles{2};
   double motor_efficiency{0.95};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -513,6 +528,7 @@ struct AsymmetricLoad {
 
   bool controllable{false};
   LoadPriority priority{LoadPriority::Medium};
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -574,6 +590,8 @@ struct Storage {
   double mttr_pcs_hr{0.0};
   double mtbf_bms_hr{0.0};
   double mttr_bms_hr{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -635,6 +653,8 @@ struct MobileStorage {
   double mttr_bms_hr{0.0};
   double mtbf_vehicle_hr{0.0};
   double mttr_vehicle_hr{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1032,6 +1052,8 @@ struct ThreePhaseLoad {
   double motor_percent{0.0};
   double lrc_pu{0.0};
   double x_r_ratio{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 struct ThreePhaseGenerator {
@@ -1061,6 +1083,8 @@ struct ThreePhaseGenerator {
   double x2_pu{0.0};
   double x0_pu{0.0};
   double r0_pu{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 struct ThreePhaseExternalGrid {
@@ -1100,6 +1124,8 @@ struct ThreePhaseExternalGrid {
   bool use_phase_impedance_matrix{false};
   PhaseValueMatrix3 r_matrix_pu{};
   PhaseValueMatrix3 x_matrix_pu{};
+
+  DynamicModelProfile dynamic_model;
 };
 
 struct ThreePhaseACSystem {

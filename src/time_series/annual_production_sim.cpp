@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <future>
 #include <numeric>
@@ -10,6 +11,7 @@
 #include <thread>
 #include <unordered_map>
 
+#include "hacdcpf/util/parallel_execution.hpp"
 #include "hacdcpf/util/thread_pool.hpp"
 
 namespace hacdcpf::analysis {
@@ -75,6 +77,256 @@ static TimeSeriesData slice_ts_data(const TimeSeriesData& full,
   return sub;
 }
 
+static constexpr double kDefaultReportedEnergyCostPerMWh = 20.0;
+static constexpr double kCostEpsilon = 1e-9;
+
+static double profile_scale(
+    const std::unordered_map<int, const TimeSeriesProfile*>& pmap,
+    int profile_id,
+    int t) {
+  auto it = pmap.find(profile_id);
+  if (it == pmap.end()) return 1.0;
+  if (t < 0 || t >= static_cast<int>(it->second->values.size())) return 1.0;
+  return it->second->values[static_cast<size_t>(t)];
+}
+
+static bool scheduled_value(const std::vector<std::vector<double>>& rows,
+                            size_t row,
+                            int t,
+                            double& value) {
+  if (row >= rows.size()) return false;
+  if (t < 0 || t >= static_cast<int>(rows[row].size())) return false;
+  value = rows[row][static_cast<size_t>(t)];
+  return true;
+}
+
+static bool is_renewable_sgen_type(SgenType type) {
+  return type == SgenType::PV || type == SgenType::Wind;
+}
+
+static bool looks_renewable_type(std::string text) {
+  std::transform(text.begin(), text.end(), text.begin(),
+                 [](unsigned char ch) {
+                   return static_cast<char>(std::tolower(ch));
+                 });
+  return text.find("pv") != std::string::npos ||
+         text.find("solar") != std::string::npos ||
+         text.find("wind") != std::string::npos;
+}
+
+static double static_generator_report_price(const StaticGenerator& sg) {
+  return is_renewable_sgen_type(sg.sgen_type)
+             ? 0.0
+             : kDefaultReportedEnergyCostPerMWh;
+}
+
+static double dc_static_generator_report_price(const StaticGeneratorDC& sg) {
+  return looks_renewable_type(sg.type) ? 0.0
+                                       : kDefaultReportedEnergyCostPerMWh;
+}
+
+struct ReportedProfileDispatch {
+  double dispatchable_generation_mw{0.0};
+  double renewable_generation_mw{0.0};
+  double dc_load_mw{0.0};
+  double cost_rate_per_hr{0.0};
+};
+
+static ReportedProfileDispatch reported_profile_dispatch(
+    const HybridPowerSystem& sys,
+    const UCSchedule& schedule,
+    const std::unordered_map<int, const TimeSeriesProfile*>& pmap,
+    int schedule_t,
+    int profile_t) {
+  ReportedProfileDispatch out;
+
+  for (const auto& sg : sys.ac.static_generators) {
+    if (!sg.in_service) continue;
+    const double p = std::max(0.0, sg.p_mw * sg.scaling);
+    if (p <= 0.0) continue;
+    if (is_renewable_sgen_type(sg.sgen_type)) {
+      out.renewable_generation_mw += p;
+    } else {
+      out.dispatchable_generation_mw += p;
+    }
+    out.cost_rate_per_hr += p * static_generator_report_price(sg);
+  }
+
+  for (const auto& pv : sys.ac.pv_systems) {
+    if (!pv.in_service) continue;
+    const double p =
+        std::max(0.0, pv.p_mw * profile_scale(pmap, pv.profile_id, profile_t));
+    out.renewable_generation_mw += p;
+  }
+
+  for (size_t k = 0; k < sys.dc.pv_arrays.size(); ++k) {
+    const auto& pv = sys.dc.pv_arrays[k];
+    if (!pv.in_service) continue;
+    double p = 0.0;
+    if (!scheduled_value(schedule.dc_pv_dispatch, k, schedule_t, p)) {
+      p = pv.p_set_mw * profile_scale(pmap, pv.profile_id, profile_t);
+    }
+    out.renewable_generation_mw += std::max(0.0, p);
+  }
+
+  for (const auto& sg : sys.dc.static_generators) {
+    if (!sg.in_service) continue;
+    const double p = std::max(0.0, sg.p_mw * sg.scaling);
+    if (p <= 0.0) continue;
+    if (is_renewable_sgen_type(sg.sgen_type)) {
+      out.renewable_generation_mw += p;
+    } else {
+      out.dispatchable_generation_mw += p;
+    }
+    out.cost_rate_per_hr += p * static_generator_report_price(sg);
+  }
+
+  for (size_t k = 0; k < sys.dc.dc_static_generators.size(); ++k) {
+    const auto& sg = sys.dc.dc_static_generators[k];
+    if (!sg.in_service) continue;
+    double p = 0.0;
+    if (!scheduled_value(schedule.dc_sgen_dispatch, k, schedule_t, p)) {
+      p = sg.p_set_mw * sg.scaling *
+          profile_scale(pmap, sg.profile_id, profile_t);
+    }
+    p = std::max(0.0, p);
+    if (p <= 0.0) continue;
+    if (looks_renewable_type(sg.type)) {
+      out.renewable_generation_mw += p;
+    } else {
+      out.dispatchable_generation_mw += p;
+    }
+    out.cost_rate_per_hr += p * dc_static_generator_report_price(sg);
+  }
+
+  for (size_t k = 0; k < sys.dc.loads.size(); ++k) {
+    const auto& ld = sys.dc.loads[k];
+    if (!ld.in_service) continue;
+    double p = 0.0;
+    if (!scheduled_value(schedule.dc_load_demand, k, schedule_t, p)) {
+      p = ld.p_mw * ld.scaling *
+          profile_scale(pmap, ld.profile_id, profile_t);
+    }
+    out.dc_load_mw += std::max(0.0, p);
+  }
+
+  return out;
+}
+
+static double reported_ac_renewable_mw(
+    const HybridPowerSystem& sys,
+    const UCSchedule& schedule,
+    const std::unordered_map<int, const TimeSeriesProfile*>& pmap,
+    int schedule_t,
+    int profile_t) {
+  double total = 0.0;
+  if (!schedule.renewable_dispatch.empty()) {
+    for (const auto& row : schedule.renewable_dispatch) {
+      if (schedule_t >= 0 && schedule_t < static_cast<int>(row.size())) {
+        total += row[static_cast<size_t>(schedule_t)];
+      }
+    }
+    return total;
+  }
+
+  for (const auto& ren : sys.ac.renewable_gens) {
+    if (!ren.in_service) continue;
+    const double base = ren.p_rated_mw > 0.0 ? ren.p_rated_mw : ren.p_mw;
+    total += std::max(0.0, base * profile_scale(pmap, ren.profile_id, profile_t));
+  }
+  return total;
+}
+
+static double reported_external_grid_price(
+    const HybridPowerSystem& sys,
+    const std::unordered_map<int, const TimeSeriesProfile*>& pmap,
+    int profile_t) {
+  double sum = 0.0;
+  int count = 0;
+  for (const auto& eg : sys.ac.external_grids) {
+    if (!eg.in_service) continue;
+    double price = eg.cost_c1;
+    if (eg.price_profile_id >= 0) {
+      const double prof = profile_scale(pmap, eg.price_profile_id, profile_t);
+      price = std::abs(eg.cost_c1) > kCostEpsilon ? eg.cost_c1 * prof : prof;
+    }
+    if (!std::isfinite(price) || price <= kCostEpsilon) {
+      price = kDefaultReportedEnergyCostPerMWh;
+    }
+    sum += price;
+    ++count;
+  }
+  return count > 0 ? sum / static_cast<double>(count) : 0.0;
+}
+
+/// Conventional generator operating cost rate ($/h) from dispatch in MW.
+/// This is the reporting basis used by annual/monthly cost summaries regardless
+/// of whether the optimizer itself minimized cost, carbon, curtailment, or loss.
+static double generator_operating_cost_rate(
+    const HybridPowerSystem& sys,
+    const std::vector<double>& dispatch_mw,
+    const std::vector<int>* commitment = nullptr,
+    int t = 0) {
+  double cost = 0.0;
+  int gpos = 0;
+  for (const auto& gen : sys.ac.generators) {
+    if (!gen.in_service) continue;
+    if (gpos < static_cast<int>(dispatch_mw.size())) {
+      const double p = dispatch_mw[static_cast<size_t>(gpos)];
+      double u = std::abs(p) > 1e-8 ? 1.0 : 0.0;
+      if (commitment && gpos < static_cast<int>(commitment->size())) {
+        u = (*commitment)[static_cast<size_t>(gpos)] ? 1.0 : 0.0;
+      }
+      cost += std::max(0.0, gen.cost_c0) * u + gen.cost_c1 * p +
+              gen.cost_c2 * p * p;
+    }
+    ++gpos;
+  }
+  (void)t;
+  return cost;
+}
+
+static double generator_operating_cost_rate_from_uc(
+    const HybridPowerSystem& sys,
+    const UCSchedule& uc,
+    int t) {
+  std::vector<double> dispatch;
+  dispatch.reserve(uc.gen_dispatch.size());
+  for (const auto& row : uc.gen_dispatch) {
+    dispatch.push_back(
+        (t >= 0 && t < static_cast<int>(row.size()))
+            ? row[static_cast<size_t>(t)]
+            : 0.0);
+  }
+  std::vector<int> commitment;
+  commitment.reserve(uc.gen_commit.size());
+  for (const auto& row : uc.gen_commit) {
+    commitment.push_back(
+        (t >= 0 && t < static_cast<int>(row.size()))
+            ? row[static_cast<size_t>(t)]
+            : 0);
+  }
+  return generator_operating_cost_rate(
+      sys, dispatch, commitment.empty() ? nullptr : &commitment, t);
+}
+
+static double generator_operating_cost_rate_from_opf(
+    const HybridPowerSystem& sys,
+    const std::vector<double>& pg_mw) {
+  std::vector<double> active_dispatch;
+  active_dispatch.reserve(pg_mw.size());
+  const bool original_indexed = pg_mw.size() == sys.ac.generators.size();
+  int active_pos = 0;
+  for (size_t gi = 0; gi < sys.ac.generators.size(); ++gi) {
+    const auto& gen = sys.ac.generators[gi];
+    if (!gen.in_service) continue;
+    const size_t pos = original_indexed ? gi : static_cast<size_t>(active_pos);
+    active_dispatch.push_back(pos < pg_mw.size() ? pg_mw[pos] : 0.0);
+    ++active_pos;
+  }
+  return generator_operating_cost_rate(sys, active_dispatch);
+}
+
 /// Extract per-step metrics from a TimeSeriesPFResult into
 /// the corresponding range of AnnualStepResult entries.
 static void fill_step_results(std::vector<AnnualStepResult>& steps,
@@ -97,6 +349,7 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
     const int g_idx = global_offset + t;
     if (g_idx >= static_cast<int>(steps.size())) break;
     auto& sr = steps[static_cast<size_t>(g_idx)];
+    double base_cost_rate = 0.0;
 
     // PF convergence
     if (t < static_cast<int>(sub_result.pf_results.size())) {
@@ -104,37 +357,24 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
     }
     // OPF convergence
     if (t < static_cast<int>(sub_result.opf_results.size())) {
-      sr.opf_converged =
-          sub_result.opf_results[static_cast<size_t>(t)].converged;
-      sr.opf_cost =
-          sub_result.opf_results[static_cast<size_t>(t)].objective;
+      const auto& opf = sub_result.opf_results[static_cast<size_t>(t)];
+      sr.opf_converged = opf.converged;
+      base_cost_rate =
+          (opf.converged && !opf.pg_mw.empty())
+              ? generator_operating_cost_rate_from_opf(sys, opf.pg_mw)
+              : generator_operating_cost_rate_from_uc(
+                    sys, sub_result.uc_schedule, t);
     } else {
       // No OPF for this step (e.g. dynamic SCED / UC-only): derive the step cost
       // from the UC generator dispatch using each unit's cost curve so the
       // production-cost objective is still populated.
-      double cost = 0.0;
-      int gpos = 0;
-      for (const auto& gg : sys.ac.generators) {
-        if (!gg.in_service) continue;
-        if (gpos < static_cast<int>(sub_result.uc_schedule.gen_dispatch.size()) &&
-            t < static_cast<int>(
-                    sub_result.uc_schedule.gen_dispatch[static_cast<size_t>(gpos)].size())) {
-          const double p =
-              sub_result.uc_schedule.gen_dispatch[static_cast<size_t>(gpos)][static_cast<size_t>(t)];
-          double u = 1.0;
-          if (gpos < static_cast<int>(sub_result.uc_schedule.gen_commit.size()) &&
-              t < static_cast<int>(
-                      sub_result.uc_schedule.gen_commit[static_cast<size_t>(gpos)].size())) {
-            u = sub_result.uc_schedule.gen_commit[static_cast<size_t>(gpos)][static_cast<size_t>(t)]
-                    ? 1.0 : 0.0;
-          }
-          cost += gg.cost_c0 * u + gg.cost_c1 * p + gg.cost_c2 * p * p;
-        }
-        ++gpos;
-      }
-      sr.opf_cost = cost;
+      base_cost_rate = generator_operating_cost_rate_from_uc(
+          sys, sub_result.uc_schedule, t);
       sr.opf_converged = sub_result.uc_schedule.feasible;
     }
+
+    const ReportedProfileDispatch reported =
+        reported_profile_dispatch(sys, sub_result.uc_schedule, pmap, t, t);
 
     // Aggregate generation from UC schedule
     double gen = 0.0;
@@ -142,7 +382,7 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
       const auto& disp = sub_result.uc_schedule.gen_dispatch[g];
       if (t < static_cast<int>(disp.size())) gen += disp[static_cast<size_t>(t)];
     }
-    sr.total_gen_mw = gen;
+    sr.total_gen_mw = gen + reported.dispatchable_generation_mw;
 
     // Aggregate load from profiles (ac.loads or bus pd_mw fallback)
     double load = 0.0;
@@ -157,16 +397,11 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
         if (bus.pd_mw > 0.0) load += bus.pd_mw * get_scale(0, t);
       }
     }
-    sr.total_load_mw = load;
+    sr.total_load_mw = load + reported.dc_load_mw;
 
     // Renewable dispatch
-    double ren = 0.0;
-    for (size_t r = 0;
-         r < sub_result.uc_schedule.renewable_dispatch.size(); ++r) {
-      const auto& rd = sub_result.uc_schedule.renewable_dispatch[r];
-      if (t < static_cast<int>(rd.size())) ren += rd[static_cast<size_t>(t)];
-    }
-    sr.total_renewable_mw = ren;
+    double ren = reported_ac_renewable_mw(sys, sub_result.uc_schedule, pmap, t, t);
+    sr.total_renewable_mw = ren + reported.renewable_generation_mw;
 
     // ESS net dispatch
     double ess = 0.0;
@@ -189,6 +424,17 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
         loss += dt_.loss_mw;
       sr.total_loss_mw = loss;
     }
+
+    const double supply_mw =
+        gen + ren + reported.dispatchable_generation_mw +
+        reported.renewable_generation_mw + std::max(0.0, ess);
+    const double need_mw =
+        sr.total_load_mw + std::max(0.0, sr.total_loss_mw) +
+        std::max(0.0, -ess);
+    const double import_mw = std::max(0.0, need_mw - supply_mw);
+    sr.opf_cost =
+        base_cost_rate + reported.cost_rate_per_hr +
+        import_mw * reported_external_grid_price(sys, pmap, t);
   }
 }
 
@@ -653,7 +899,11 @@ static AnnualProductionSimResult solve_parallel_daily(
       std::max(1, static_cast<int>(std::round(
                       static_cast<double>(opts.daily_window_hours) / dt)));
   const int num_days = (T_yr + steps_per_day - 1) / steps_per_day;
-  const TimeSeriesPFOptions day_opts = make_daily_pf_options(opts);
+  TimeSeriesPFOptions day_opts = make_daily_pf_options(opts);
+  day_opts.uc_solver =
+      hacdcpf::resolve_parallel_daily_uc_solver(day_opts.uc_solver);
+  day_opts.uc_solver_threads =
+      day_opts.uc_solver == UCSolverChoice::Native ? 1 : 0;
 
   // Dynamic-SCED commitment: optionally solve a representative (peak-load) day
   // as SCUC up front and reuse its commitment across every SCED day, instead of
@@ -688,6 +938,8 @@ static AnnualProductionSimResult solve_parallel_daily(
     scuc_opts.fix_commitment = false;
     scuc_opts.fixed_commitment_schedule = nullptr;
     scuc_opts.enforce_terminal_soc_cyclic = opts.enforce_daily_cyclic_soc;
+    scuc_opts.uc_solver =
+        hacdcpf::resolve_parallel_daily_uc_solver(scuc_opts.uc_solver);
     UCSchedule repr = solve_unit_commitment(sys, repr_ts, scuc_opts);
     if (repr.feasible && !repr.gen_commit.empty()) {
       repr_commit = repr.gen_commit;
@@ -697,15 +949,27 @@ static AnnualProductionSimResult solve_parallel_daily(
     // Otherwise eff_day_opts keeps fix_commitment=true (all-on fallback).
   }
 
-  // Concurrent solves are safe only when every solver used is instance-isolated:
-  //   * MILP: SCIP creates an independent environment per solve; HiGHS shares a
-  //     global scheduler and the native B&C is itself multi-threaded, so only
-  //     SCIP is dispatched lock-free.  DynamicOPF uses no MILP at all.
+  // Concurrent solves are safe only when every solver used owns its worker
+  // state. HiGHS/Gurobi share process-global scheduling state, so explicit
+  // selections are guarded to serial day execution. DynamicOPF uses no MILP.
   //   * OPF: forced to the native parity IPM above (no Ipopt/MUMPS global state).
   //   * PF: the Newton kernel keeps all state per-call.
   const bool uses_milp = (opts.daily_mode != DailySimMode::DynamicOPF);
-  const bool parallel_safe =
-      !uses_milp || (opts.ts_pf_options.uc_solver == UCSolverChoice::SCIP);
+  const bool parallel_safe = !uses_milp ||
+      hacdcpf::uc_solver_allows_parallel_daily(day_opts.uc_solver);
+  const std::string parallel_backend =
+      !uses_milp ? "no-milp"
+      : (day_opts.uc_solver == UCSolverChoice::SCIP) ? "scip"
+      : (day_opts.uc_solver == UCSolverChoice::Native) ? "native-bc"
+      : "guarded";
+  const std::string guard_reason = parallel_safe ? std::string()
+      : "explicit UC solver backend is guarded for concurrent daily solves";
+  auto parallel_info = util::make_parallel_execution_info(
+      true, opts.parallel_threads, num_days,
+      parallel_safe ? "parallel-daily/" + parallel_backend
+                    : "parallel-daily/serial-guarded",
+      parallel_backend, guard_reason);
+  const int workers = parallel_info.resolved_workers;
 
   // Per-day outputs are index-addressed so worker threads never write the same
   // slot (lock-free); they are stitched together after the parallel region.
@@ -753,11 +1017,7 @@ static AnnualProductionSimResult solve_parallel_daily(
   };
 
   if (parallel_safe && num_days > 1) {
-    int nthreads = opts.parallel_threads > 0
-                       ? opts.parallel_threads
-                       : static_cast<int>(std::thread::hardware_concurrency());
-    if (nthreads <= 0) nthreads = 1;
-    util::ThreadPool pool(std::min(nthreads, num_days));
+    util::ThreadPool pool(workers);
     std::vector<std::future<void>> futs;
     futs.reserve(static_cast<size_t>(num_days));
     for (int d = 0; d < num_days; ++d) {
@@ -806,6 +1066,17 @@ static AnnualProductionSimResult solve_parallel_daily(
                              : "dyn-OPF";
   result.solver_name = std::string("parallel-daily/") + mode_tag +
                        (parallel_safe ? "/parallel" : "/serial");
+  parallel_info.actual_parallel_evaluations =
+      parallel_info.effective ? num_days : 0;
+  parallel_info.serial_evaluations =
+      parallel_info.effective ? 0 : num_days;
+  if (!parallel_info.effective && parallel_info.guard_reason.empty()) {
+    parallel_info.guard_reason = util::insufficient_work_reason(parallel_info);
+  }
+  result.parallel_execution = parallel_info;
+  result.parallel_daily_effective = parallel_info.effective;
+  result.parallel_workers = workers;
+  result.parallel_mode = parallel_info.mode;
   return result;
 }
 
@@ -823,6 +1094,11 @@ AnnualProductionSimResult solve_annual_production_simulation(
   const double dt = ts_data.step_duration_hr;
   result.num_steps = T_yr;
   result.step_duration_hr = dt;
+  result.parallel_workers = 1;
+  result.parallel_mode = opts.enable_parallel_daily ? "parallel-daily" : "hierarchical";
+  result.parallel_execution = util::make_parallel_execution_info(
+      opts.enable_parallel_daily, opts.parallel_threads, 0,
+      result.parallel_mode);
 
   if (T_yr <= 0) {
     return result;
@@ -932,6 +1208,8 @@ AnnualProductionSimResult solve_annual_production_simulation(
         int g_idx = ws.start_step + t;
         if (g_idx < 0 || g_idx >= static_cast<int>(result.step_results.size())) continue;
         auto& sr = result.step_results[static_cast<size_t>(g_idx)];
+        const ReportedProfileDispatch reported =
+            reported_profile_dispatch(sys, ws.uc, pmap, t, g_idx);
 
         // Generation from UC schedule
         double gen = 0.0;
@@ -939,7 +1217,7 @@ AnnualProductionSimResult solve_annual_production_simulation(
           const auto& disp = ws.uc.gen_dispatch[g];
           if (t < static_cast<int>(disp.size())) gen += disp[static_cast<size_t>(t)];
         }
-        sr.total_gen_mw = gen;
+        sr.total_gen_mw = gen + reported.dispatchable_generation_mw;
 
         // Load from profiles (ac.loads + bus pd_mw fallback)
         double load = 0.0;
@@ -953,15 +1231,11 @@ AnnualProductionSimResult solve_annual_production_simulation(
             if (b.pd_mw > 0.0) load += b.pd_mw * get_scale(0, g_idx);
           }
         }
-        sr.total_load_mw = load;
+        sr.total_load_mw = load + reported.dc_load_mw;
 
         // Renewable dispatch
-        double ren = 0.0;
-        for (size_t r = 0; r < ws.uc.renewable_dispatch.size(); ++r) {
-          const auto& rd = ws.uc.renewable_dispatch[r];
-          if (t < static_cast<int>(rd.size())) ren += rd[static_cast<size_t>(t)];
-        }
-        sr.total_renewable_mw = ren;
+        double ren = reported_ac_renewable_mw(sys, ws.uc, pmap, t, g_idx);
+        sr.total_renewable_mw = ren + reported.renewable_generation_mw;
 
         // ESS net dispatch
         double ess = 0.0;
@@ -971,19 +1245,17 @@ AnnualProductionSimResult solve_annual_production_simulation(
         }
         sr.total_ess_mw = ess;
 
-        // Approximate cost from generation
-        double cost = 0.0;
-        int gpos = 0;
-        for (const auto& gg : sys.ac.generators) {
-          if (!gg.in_service) { continue; }
-          if (gpos < static_cast<int>(ws.uc.gen_dispatch.size()) &&
-              t < static_cast<int>(ws.uc.gen_dispatch[static_cast<size_t>(gpos)].size())) {
-            double p = ws.uc.gen_dispatch[static_cast<size_t>(gpos)][static_cast<size_t>(t)];
-            cost += gg.cost_c0 + gg.cost_c1 * p + gg.cost_c2 * p * p;
-          }
-          ++gpos;
-        }
-        sr.opf_cost = cost;
+        const double supply_mw =
+            gen + ren + reported.dispatchable_generation_mw +
+            reported.renewable_generation_mw + std::max(0.0, ess);
+        const double need_mw =
+            sr.total_load_mw + std::max(0.0, sr.total_loss_mw) +
+            std::max(0.0, -ess);
+        const double import_mw = std::max(0.0, need_mw - supply_mw);
+        sr.opf_cost =
+            generator_operating_cost_rate_from_uc(sys, ws.uc, t) +
+            reported.cost_rate_per_hr +
+            import_mw * reported_external_grid_price(sys, pmap, g_idx);
         sr.opf_converged = true;
         sr.pf_converged = true;
       }

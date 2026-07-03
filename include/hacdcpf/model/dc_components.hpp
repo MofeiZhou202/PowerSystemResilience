@@ -7,6 +7,7 @@
 
 #include <string>
 
+#include "hacdcpf/model/dynamic_model_profile.hpp"
 #include "hacdcpf/model/enums/bus_types.hpp"
 #include "hacdcpf/model/enums/load_enums.hpp"
 #include "hacdcpf/model/enums/switching_enums.hpp"
@@ -86,6 +87,8 @@ struct StaticGeneratorDC {
   double mtbf_hours{0.0};
   double mttr_hours{0.0};
   double t_scheduled_hr{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -115,6 +118,8 @@ struct PVArrayDC {
   double mtbf_hours{0.0};
   double mttr_hours{0.0};
   double t_scheduled_hr{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -140,6 +145,12 @@ struct DCLoad {
   double cost_mw{0.0};
   int profile_id{-1};
   LoadPriority priority{LoadPriority::Medium};
+
+  // Reliability / planning: number of served customers at this DC load, used
+  // for hybrid SAIFI/SAIDI customer weighting (mirrors AC Load::n_customers).
+  int n_customers{0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -187,6 +198,8 @@ struct DCStorage {
   double forced_outage_rate{0.0};
   double mttr_hr{0.0};
   double t_scheduled_hr{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -8,6 +8,12 @@ they can be toggled from the GUI. CBs, switches, AC/DC lines, and DC/DC
 converters are optimized over the **canonical** model space, then projected back
 to device operations.
 
+> **Companion / enhancement:** the reliability assessment math reference and
+> rigor audit — [`reliability_assessment_models.md`](reliability_assessment_models.md) —
+> documents how this ONR LinDistFlow model is reused as the per-stage restoration
+> kernel of the FMEA repair search and the three-stage reliability MILP, and
+> classifies every reliability formula as rigorous or heuristic.
+
 Implementation: `src/network_reconfiguration/topology_reconfiguration.cpp`
 (`run_topology_reconfiguration`) and `topology_analysis.cpp`
 (`solve_optimal_reconfiguration`).

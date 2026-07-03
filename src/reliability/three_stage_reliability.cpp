@@ -52,12 +52,32 @@ struct LoadPoint {
   int bus{0};
   double p_kw{0.0};
   double customers{1.0};
+  double q_kvar{0.0};  // F14: measured reactive demand (0 -> reconstruct from 0.9 PF)
 };
 
 struct SourcePoint {
   int bus{0};
   double p_kw{0.0};
 };
+
+enum class FaultKind { ACBranch, DCBranch, Generator, Transformer2W,
+                       VSCConverter, DCDCConverter, ACSwitch, ACCircuitBreaker,
+                       DCCircuitBreaker };
+
+std::string fault_kind_type(FaultKind kind) {
+  switch (kind) {
+    case FaultKind::ACBranch: return "ac_branch";
+    case FaultKind::DCBranch: return "dc_branch";
+    case FaultKind::Generator: return "generator";
+    case FaultKind::Transformer2W: return "transformer_2w";
+    case FaultKind::VSCConverter: return "vsc_converter";
+    case FaultKind::DCDCConverter: return "dcdc_converter";
+    case FaultKind::ACSwitch: return "ac_switch";
+    case FaultKind::ACCircuitBreaker: return "ac_circuit_breaker";
+    case FaultKind::DCCircuitBreaker: return "dc_circuit_breaker";
+  }
+  return "unknown";
+}
 
 struct FaultLine {
   int id{0};
@@ -67,6 +87,13 @@ struct FaultLine {
   int to_bus{0};
   bool normally_in_service{true};
   double failure_rate{0.0};
+  // Per-component stage durations (hr).  Isolation/switching default to the
+  // global boundary times (no per-branch field exists); the repair stage
+  // absorbs the faulted component's MTTR (r_m - tau_iso - tau_sw).
+  double tau_iso_hr{kTauSwitchHr};
+  double tau_sw_hr{kTauTrippingHr - kTauSwitchHr};
+  double tau_rep_hr{kTauRepairHr - kTauTrippingHr};
+  FaultKind kind{FaultKind::ACBranch};
 };
 
 struct NativeCase {
@@ -75,6 +102,11 @@ struct NativeCase {
   std::vector<LoadPoint> loads;
   std::vector<SourcePoint> sources;
   std::vector<FaultLine> faults;
+  bool include_generator_faults{false};
+  bool include_transformer_faults{false};
+  bool include_converter_faults{false};
+  bool include_switch_faults{false};
+  bool include_dc_power_flow{true};
 };
 
 std::string read_file_text(const fs::path& path) {
@@ -113,9 +145,15 @@ void add_source(std::vector<SourcePoint>& sources, int bus, double p_mw) {
   sources.push_back({bus, p_mw * 1000.0});
 }
 
-NativeCase build_native_case(const HybridPowerSystem& sys) {
+NativeCase build_native_case(const HybridPowerSystem& sys,
+                             const ThreeStageReliabilityOptions& options = {}) {
   NativeCase c;
   c.sys = sys;
+  c.include_generator_faults = options.include_generator_faults;
+  c.include_transformer_faults = options.include_transformer_faults;
+  c.include_converter_faults = options.include_converter_faults;
+  c.include_switch_faults = options.include_switch_faults;
+  c.include_dc_power_flow = options.include_dc_power_flow;
 
   for (const auto& b : sys.ac.buses) {
     if (b.in_service) add_bus(c.buses, b.index);
@@ -127,11 +165,12 @@ NativeCase build_native_case(const HybridPowerSystem& sys) {
   for (const auto& ld : sys.ac.loads) {
     if (!ld.in_service) continue;
     add_bus(c.buses, ld.bus);
-    c.loads.push_back({ld.bus, std::max(0.0, ld.p_mw * ld.scaling * 1000.0), load_customers(sys, ld)});
+    c.loads.push_back({ld.bus, std::max(0.0, ld.p_mw * ld.scaling * 1000.0),
+                       load_customers(sys, ld), ld.q_mvar * ld.scaling * 1000.0});
   }
   for (const auto& b : sys.ac.buses) {
     if (!b.in_service || b.pd_mw <= 1e-9) continue;
-    c.loads.push_back({b.index, b.pd_mw * 1000.0, bus_customers(b)});
+    c.loads.push_back({b.index, b.pd_mw * 1000.0, bus_customers(b), b.qd_mvar * 1000.0});
   }
   for (const auto& ld : sys.dc.loads) {
     if (!ld.in_service) continue;
@@ -195,8 +234,13 @@ NativeCase build_native_case(const HybridPowerSystem& sys) {
     add_bus(c.buses, br.from_bus);
     add_bus(c.buses, br.to_bus);
     if (!br.in_service) continue;  // out-of-service branches cannot fail
+    // Stage-3 repair duration from this branch's MTTR (per-component); isolation
+    // and switching keep the global defaults (no per-branch field exists).
+    const double r_ac = br.mttr_hr > 1e-9 ? br.mttr_hr : kTauRepairHr;
+    const double d3_ac = std::max(0.0, r_ac - kTauTrippingHr);
     c.faults.push_back({id++, true, i, br.from_bus, br.to_bus, br.in_service,
-                        br.failure_rate > 0.0 ? br.failure_rate : kDefaultFailureRate});
+                        br.failure_rate > 0.0 ? br.failure_rate : kDefaultFailureRate,
+                        kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_ac});
   }
   for (int i = 0; i < static_cast<int>(sys.dc.branches.size()); ++i) {
     const auto& br = sys.dc.branches[i];
@@ -204,8 +248,100 @@ NativeCase build_native_case(const HybridPowerSystem& sys) {
     add_bus(c.buses, br.to_bus + kDCBusOffset);
     if (!br.in_service) continue;  // out-of-service branches cannot fail
     double lambda = br.mtbf_hours > 0.0 ? 8760.0 / br.mtbf_hours : kDefaultFailureRate;
+    const double r_dc = br.mttr_hours > 1e-9 ? br.mttr_hours : kTauRepairHr;
+    const double d3_dc = std::max(0.0, r_dc - kTauTrippingHr);
     // from_bus/to_bus stored without offset — informational only, not used in stage_components
-    c.faults.push_back({id++, false, i, br.from_bus, br.to_bus, br.in_service, lambda});
+    c.faults.push_back({id++, false, i, br.from_bus, br.to_bus, br.in_service, lambda,
+                        kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_dc,
+                        FaultKind::DCBranch});
+  }
+  // Generator forced-outage contingencies (opt-in).  lambda from FOR + MTTR.
+  if (c.include_generator_faults) {
+    for (int i = 0; i < static_cast<int>(sys.ac.generators.size()); ++i) {
+      const auto& g = sys.ac.generators[i];
+      if (!g.in_service) continue;
+      if (hacdcpf::model::effective_capacity_mw(g) <= 1e-9) continue;
+      add_bus(c.buses, g.bus);
+      double lam = kDefaultFailureRate;
+      const double f = g.forced_outage_rate;
+      const double m = g.mttr_hr;
+      if (f > 0.0 && f < 1.0 && m > 1e-9) lam = f / ((1.0 - f) * m) * 8760.0;
+      const double r_g = m > 1e-9 ? m : kTauRepairHr;
+      const double d3_g = std::max(0.0, r_g - kTauTrippingHr);
+      c.faults.push_back({id++, true, i, g.bus, g.bus, true, lam,
+                          kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_g,
+                          FaultKind::Generator});
+    }
+  }
+  // 2-winding transformer outage contingencies (opt-in; modelled as edges).
+  if (c.include_transformer_faults) {
+    for (int i = 0; i < static_cast<int>(sys.ac.transformers_2w.size()); ++i) {
+      const auto& t = sys.ac.transformers_2w[i];
+      add_bus(c.buses, t.hv_bus);
+      add_bus(c.buses, t.lv_bus);
+      if (!t.in_service) continue;
+      double lam = t.mtbf_hours > 0.0 ? 8760.0 / t.mtbf_hours : kDefaultFailureRate;
+      const double r_t = t.mttr_hours > 1e-9 ? t.mttr_hours : kTauRepairHr;
+      const double d3_t = std::max(0.0, r_t - kTauTrippingHr);
+      c.faults.push_back({id++, true, i, t.hv_bus, t.lv_bus, true, lam,
+                          kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_t,
+                          FaultKind::Transformer2W});
+    }
+  }
+  // VSC / DC-DC converter outage contingencies (opt-in).  Handled by the DC
+  // connectivity fallback: a faulted converter drops its coupling + transfer.
+  if (c.include_converter_faults) {
+    for (int i = 0; i < static_cast<int>(sys.vsc_converters.size()); ++i) {
+      const auto& v = sys.vsc_converters[i];
+      if (!v.in_service) continue;
+      double lam = kDefaultFailureRate;
+      if (v.forced_outage_rate > 0.0 && v.forced_outage_rate < 1.0 && v.mttr_hr > 1e-9)
+        lam = v.forced_outage_rate / ((1.0 - v.forced_outage_rate) * v.mttr_hr) * 8760.0;
+      const double r_v = v.mttr_hr > 1e-9 ? v.mttr_hr : kTauRepairHr;
+      const double d3_v = std::max(0.0, r_v - kTauTrippingHr);
+      c.faults.push_back({id++, true, i, v.bus_ac, v.bus_dc, true, lam,
+                          kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_v,
+                          FaultKind::VSCConverter});
+    }
+    for (int i = 0; i < static_cast<int>(sys.dc.dcdc_converters.size()); ++i) {
+      const auto& d = sys.dc.dcdc_converters[i];
+      if (!d.in_service) continue;
+      double lam = d.mtbf_hours > 0.0 ? 8760.0 / d.mtbf_hours : kDefaultFailureRate;
+      const double r_d = d.mttr_hours > 1e-9 ? d.mttr_hours : kTauRepairHr;
+      const double d3_d = std::max(0.0, r_d - kTauTrippingHr);
+      c.faults.push_back({id++, false, i, d.bus_in, d.bus_out, true, lam,
+                          kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_d,
+                          FaultKind::DCDCConverter});
+    }
+  }
+  // AC switch / AC & DC circuit-breaker outage contingencies (opt-in).
+  if (c.include_switch_faults) {
+    for (int i = 0; i < static_cast<int>(sys.ac.switches.size()); ++i) {
+      const auto& sw = sys.ac.switches[i];
+      if (!sw.in_service) continue;
+      double lam = sw.mtbf_hours > 0.0 ? 8760.0 / sw.mtbf_hours : kDefaultFailureRate;
+      const double r_s = sw.mttr_hours > 1e-9 ? sw.mttr_hours : kTauRepairHr;
+      const double d3_s = std::max(0.0, r_s - kTauTrippingHr);
+      c.faults.push_back({id++, true, i, sw.bus_from, sw.bus_to, true, lam,
+                          kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_s,
+                          FaultKind::ACSwitch});
+    }
+    for (int i = 0; i < static_cast<int>(sys.ac.circuit_breakers.size()); ++i) {
+      const auto& cb = sys.ac.circuit_breakers[i];
+      if (!cb.in_service) continue;
+      const double d3_c = std::max(0.0, kTauRepairHr - kTauTrippingHr);
+      c.faults.push_back({id++, true, i, cb.bus_from, cb.bus_to, true, kDefaultFailureRate,
+                          kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_c,
+                          FaultKind::ACCircuitBreaker});
+    }
+    for (int i = 0; i < static_cast<int>(sys.dc.dc_circuit_breakers.size()); ++i) {
+      const auto& cb = sys.dc.dc_circuit_breakers[i];
+      if (!cb.in_service) continue;
+      const double d3_c = std::max(0.0, kTauRepairHr - kTauTrippingHr);
+      c.faults.push_back({id++, false, i, cb.bus_from, cb.bus_to, true, kDefaultFailureRate,
+                          kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_c,
+                          FaultKind::DCCircuitBreaker});
+    }
   }
 
   std::sort(c.buses.begin(), c.buses.end());
@@ -264,7 +400,13 @@ struct DSU {
 //                    z_ij = 1  ∀(i,j) ∉ (L^NO ∪ {k})
 //                  Stage 1: all switches remain at nominal position (no switching allowed).
 //                  Stage 2: normally-open switches are free (0 ≤ z_ij ≤ 1, binary) subject to C9.
-//                  Stage 3: fault branch is restored; all z_ij fixed at nominal (all n.c. = 1).
+//                  Stage 3: repair window — the fault branch stays FORCED-OPEN (z_k = 0,
+//                           it is repaired only at τ_RP) and the normally-open ties remain
+//                           free (the Stage-2 reconfiguration is held), subject to C9.  This
+//                           is topologically identical to Stage 2; only the duration differs
+//                           (τ_rep ≈ MTTR).  (F7 fix — Stage 3 previously restored the fault
+//                           and re-opened the ties, so unrestorable load was charged only the
+//                           brief switching window instead of the whole repair window.)
 //
 //   C9  (eq. 14):  Switch count:   Σ_{(i,j)∈L^NO} z_ij ≤ K^sw
 //
@@ -309,7 +451,8 @@ double vsc_transfer_capacity_kw(const VSCConverter& vsc) {
 // loads on buses with no AC equivalent are handled by the connectivity/capacity
 // fallback at the end of this function.
 StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int stage,
-                            int max_sw_ops = INT_MAX) {
+                            int max_sw_ops = INT_MAX,
+                            const std::unordered_set<int>* unavailable_ties = nullptr) {
   StageSolve out;
   const int nd_total = static_cast<int>(c.loads.size());
   out.shed_by_load.assign(c.loads.size(), 0.0);
@@ -339,6 +482,8 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     double s_max_mw;  // thermal limit in MW (= rate_a_mva, or default)
     bool normally_open;  // true if this is a normally-open switch
     bool failed;         // true if this is the faulted branch
+    int switch_index;    // Switch::index of the controlling tie (-1 if none)
+    int transformer_index{-1};  // sys.ac.transformers_2w index (-1 if not a transformer)
   };
   // Default branch rating: 2× total system demand (ensures feasibility when
   // no explicit rating is given, without making Big-M constraints too loose).
@@ -361,35 +506,77 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     branch_pair_seen[undirected_key(br.from_bus, br.to_bus)] = true;
 
     bool has_open_switch = false;
+    int open_switch_index = -1;
     for (const auto& sw : sys.ac.switches) {
       if (!sw.in_service) continue;
       if (!sw.closed &&
           ((sw.bus_from == br.from_bus && sw.bus_to == br.to_bus) ||
            (sw.bus_from == br.to_bus   && sw.bus_to == br.from_bus))) {
         has_open_switch = true;
+        open_switch_index = sw.index;
         break;
       }
     }
     const bool is_no_switch = !br.in_service || has_open_switch;
-    const bool is_failed = (fault.ac && b == fault.index);
+    const bool is_failed = (fault.kind == FaultKind::ACBranch && b == fault.index);
     const double s_max = br.rate_a_mva > 1e-9 ? br.rate_a_mva : default_rate_mw;
     ac_branches.push_back({b, it_f->second, it_t->second,
                            std::max(1e-6, br.r_pu),
                            std::max(1e-6, br.x_pu),
                            s_max,
                            is_no_switch,
-                           is_failed});
+                           is_failed,
+                           open_switch_index});
   }
-  for (const auto& sw : sys.ac.switches) {
+  for (int si = 0; si < static_cast<int>(sys.ac.switches.size()); ++si) {
+    const auto& sw = sys.ac.switches[si];
     if (!sw.in_service) continue;
     if (branch_pair_seen.count(undirected_key(sw.bus_from, sw.bus_to))) continue;
     auto it_f = ac_bus_pos.find(sw.bus_from);
     auto it_t = ac_bus_pos.find(sw.bus_to);
     if (it_f == ac_bus_pos.end() || it_t == ac_bus_pos.end()) continue;
+    const bool sw_failed = (fault.kind == FaultKind::ACSwitch && si == fault.index);
     ac_branches.push_back({-1, it_f->second, it_t->second,
                            1e-6, 1e-6, default_rate_mw,
                            !sw.closed,
-                           false});
+                           sw_failed,
+                           sw.index});
+    branch_pair_seen[undirected_key(sw.bus_from, sw.bus_to)] = true;
+  }
+  // AC circuit breakers as near-ideal restoration edges (opt-in switch faults),
+  // deduped against branch/switch pairs and forced open when faulted.
+  if (c.include_switch_faults) {
+    for (int ci = 0; ci < static_cast<int>(sys.ac.circuit_breakers.size()); ++ci) {
+      const auto& cb = sys.ac.circuit_breakers[ci];
+      if (!cb.in_service) continue;
+      if (branch_pair_seen.count(undirected_key(cb.bus_from, cb.bus_to))) continue;
+      auto it_f = ac_bus_pos.find(cb.bus_from);
+      auto it_t = ac_bus_pos.find(cb.bus_to);
+      if (it_f == ac_bus_pos.end() || it_t == ac_bus_pos.end()) continue;
+      const bool cb_failed = (fault.kind == FaultKind::ACCircuitBreaker && ci == fault.index);
+      ac_branches.push_back({-1, it_f->second, it_t->second,
+                             1e-6, 1e-6, default_rate_mw,
+                             !cb.closed, cb_failed, -1});
+      branch_pair_seen[undirected_key(cb.bus_from, cb.bus_to)] = true;
+    }
+  }
+  // Transformers as near-ideal capacity-limited restoration edges (opt-in).
+  // A faulted transformer edge is forced open in Stages 1/2 (isolation) and
+  // restored in Stage 3 (repair), exactly like a faulted branch.
+  if (c.include_transformer_faults) {
+    for (int t = 0; t < static_cast<int>(sys.ac.transformers_2w.size()); ++t) {
+      const auto& tr = sys.ac.transformers_2w[t];
+      if (!tr.in_service) continue;
+      auto it_f = ac_bus_pos.find(tr.hv_bus);
+      auto it_t = ac_bus_pos.find(tr.lv_bus);
+      if (it_f == ac_bus_pos.end() || it_t == ac_bus_pos.end()) continue;
+      const bool tf_failed =
+          (fault.kind == FaultKind::Transformer2W && t == fault.index);
+      const double s_max = tr.sn_mva > 1e-9 ? tr.sn_mva : default_rate_mw;
+      ac_branches.push_back({-1, it_f->second, it_t->second,
+                             1e-6, 1e-6, s_max,
+                             false, tf_failed, -1, t});
+    }
   }
   const int n_br = static_cast<int>(ac_branches.size());
 
@@ -415,8 +602,14 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     auto it = ac_bus_pos.find(eg.bus);
     if (it != ac_bus_pos.end()) q_gen_max[it->second] += cap;
   }
-  for (const auto& g : sys.ac.generators) {
+  for (int gi = 0; gi < static_cast<int>(sys.ac.generators.size()); ++gi) {
+    const auto& g = sys.ac.generators[gi];
     if (!g.in_service) continue;
+    // Generator forced outage: the unit is out for the whole event and is only
+    // repaired at the end of the repair window (tau_RP).  Stage 3 [tau_TP, tau_RP]
+    // IS that repair window, so the faulted unit stays out in all three stages
+    // (F7: Stage 3 is "during repair", not "after repair").
+    if (fault.kind == FaultKind::Generator && gi == fault.index) continue;
     mark_source(g.bus, g.pmax_mw > 0.0 ? g.pmax_mw : g.pg_mw);
     auto it = ac_bus_pos.find(g.bus);
     if (it != ac_bus_pos.end())
@@ -461,7 +654,10 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     load_ac_bus[li] = it->second;
     const double p_mw = std::max(0.0, c.loads[li].p_kw) / 1000.0;
     p_d[it->second] += p_mw;
-    q_d[it->second] += p_mw * 0.4843;  // tan(arccos(0.9)) ≈ 0.4843
+    // F14: use the load's measured reactive demand when provided; otherwise fall
+    // back to a uniform 0.9-PF reconstruction (tan(arccos(0.9)) approx 0.4843).
+    const double q_mvar = c.loads[li].q_kvar / 1000.0;
+    q_d[it->second] += (std::abs(q_mvar) > 1e-9) ? q_mvar : p_mw * 0.4843;
   }
   // Number of AC load points (those with AC bus)
   // (DC-only loads get connectivity fallback below)
@@ -501,7 +697,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     for (int b = 0; b < n_br; ++b) {
       const auto& br = ac_branches[b];
       if (br.normally_open) continue;
-      if (br.failed && stage < 3) continue;
+      if (br.failed) continue;  // F7: faulted branch is out in every stage
       source_dsu.unite(br.from_pos, br.to_pos);
     }
     std::unordered_set<int> source_components;
@@ -540,22 +736,35 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     const auto& br = ac_branches[b];
     double z_lb = 0.0, z_ub = 1.0;
 
-    // C7: Forced-open failed branch (eq. 12)
-    if (br.failed && stage < 3) {
+    // C7: Forced-open failed branch (eq. 12).  F7: the faulted element is out for
+    // the whole event and is only repaired at tau_RP, so it stays forced-open in
+    // ALL stages, including the Stage-3 repair window [tau_TP, tau_RP].
+    if (br.failed) {
       z_lb = 0.0; z_ub = 0.0;
     }
     // C8: z denotes energized branch use, not the mechanical switch handle.
     // Healthy normally-closed edges may de-energize when their endpoint bus is
     // shed; the radial/commodity constraints choose the energized forest.
-    // Normally-open ties stay open in Stage 1/3 and are candidate switches in Stage 2.
+    // Normally-open ties stay open only in Stage 1 (no switching yet); in Stage 2
+    // AND Stage 3 they are candidate switches, so the post-fault reconfiguration
+    // is HELD through the repair window (F7).
     else if (!br.normally_open) {
       z_lb = 0.0; z_ub = 1.0;
-    } else if (stage == 1 || stage == 3) {
-      // Stage 1: no switching — normally-open switches stay open
-      // Stage 3: repair restores everything to nominal (normally-open stays open)
+    } else if (stage == 1) {
+      // Stage 1: no switching — normally-open switches stay open.
       z_lb = 0.0; z_ub = 0.0;
     }
-    // Stage 2: normally-open switch — free binary variable, subject to C9 (count constraint)
+    // Stage 2 & 3: normally-open switch — free binary variable, subject to C9.
+
+    // Deterministic fail-to-close: a tie listed as unavailable cannot close in
+    // the reconfiguration stages (2 and 3), so its back-feed restoration path is
+    // lost for the entire repair window (F7).
+    if ((stage == 2 || stage == 3) && br.normally_open && !br.failed &&
+        unavailable_ties && br.switch_index >= 0 &&
+        unavailable_ties->count(br.switch_index) > 0) {
+      z_lb = 0.0;
+      z_ub = 0.0;
+    }
 
     // Fixed z (lb==ub) → Continuous: pure-LP path, avoids B&C postsolve issues.
     // Free z (lb < ub) → Binary: only for truly free NO switches in stage 2.
@@ -719,7 +928,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     add_le({{ off_f + b, -1.0}, { off_z + b, -commodity_cap}}, 0.0);  // -f ≤ cap·z
     add_le({{ off_z + b,  1.0}, { off_y + ac_branches[b].from_pos, -1.0}}, 0.0);
     add_le({{ off_z + b,  1.0}, { off_y + ac_branches[b].to_pos,   -1.0}}, 0.0);
-    if (!ac_branches[b].normally_open && !(ac_branches[b].failed && stage < 3)) {
+    if (!ac_branches[b].normally_open && !ac_branches[b].failed) {
       add_le({{ off_y + ac_branches[b].from_pos, 1.0},
               { off_y + ac_branches[b].to_pos,   1.0},
               { off_z + b,                      -1.0}},
@@ -748,9 +957,10 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   }
 
   // ── C9 (eq. 14): Switch count ≤ K^sw ────────────────────────────────────
-  // Σ_{(i,j)∈L^NO} z_ij ≤ K^sw   (Stage 2 only; K^sw = max_sw_ops)
-  // In stage 2, normally-open switches have free z_ij ∈ {0,1}.
-  if (stage == 2 && n_no_switch > 0) {
+  // Σ_{(i,j)∈L^NO} z_ij ≤ K^sw   (Stages 2 and 3; K^sw = max_sw_ops).
+  // The reconfiguration chosen at switching (Stage 2) is HELD through the repair
+  // window (Stage 3, F7), so the same switch-count budget applies in both.
+  if ((stage == 2 || stage == 3) && n_no_switch > 0) {
     std::vector<std::pair<int,double>> sw_terms;
     for (int b = 0; b < n_br; ++b) {
       if (ac_branches[b].normally_open) sw_terms.push_back({off_z + b, 1.0});
@@ -962,22 +1172,38 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     for (int b = 0; b < static_cast<int>(sys.ac.branches.size()); ++b) {
       const auto& br = sys.ac.branches[b];
       bool on = br.in_service;
-      if (fault.ac && b == fault.index && stage < 3) on = false;
-      if (stage >= 3 && br.in_service) on = true;
+      // F7: the faulted branch is out in every stage (repaired only at tau_RP);
+      // do not re-energize it in Stage 3.
+      if (fault.kind == FaultKind::ACBranch && b == fault.index) on = false;
       if (on) connect_dc(br.from_bus, br.to_bus);
     }
     for (int b = 0; b < static_cast<int>(sys.dc.branches.size()); ++b) {
       const auto& br = sys.dc.branches[b];
       bool on = br.in_service;
-      if (!fault.ac && b == fault.index && stage < 3) on = false;
-      if (stage >= 3 && br.in_service) on = true;
+      if (fault.kind == FaultKind::DCBranch && b == fault.index) on = false;  // F7
       if (on) connect_dc(br.from_bus + kDCBusOffset, br.to_bus + kDCBusOffset);
     }
-    for (const auto& vsc : sys.vsc_converters) {
-      if (vsc.in_service) connect_dc(vsc.bus_ac, vsc.bus_dc + kDCBusOffset);
+    for (int vi = 0; vi < static_cast<int>(sys.vsc_converters.size()); ++vi) {
+      const auto& vsc = sys.vsc_converters[vi];
+      if (!vsc.in_service) continue;
+      if (fault.kind == FaultKind::VSCConverter && vi == fault.index) continue;
+      connect_dc(vsc.bus_ac, vsc.bus_dc + kDCBusOffset);
     }
-    for (const auto& dc : sys.dc.dcdc_converters) {
-      if (dc.in_service) connect_dc(dc.bus_in + kDCBusOffset, dc.bus_out + kDCBusOffset);
+    for (int di = 0; di < static_cast<int>(sys.dc.dcdc_converters.size()); ++di) {
+      const auto& dc = sys.dc.dcdc_converters[di];
+      if (!dc.in_service) continue;
+      if (fault.kind == FaultKind::DCDCConverter && di == fault.index) continue;
+      connect_dc(dc.bus_in + kDCBusOffset, dc.bus_out + kDCBusOffset);
+    }
+    // DC circuit breakers as connectivity edges (opt-in switch/breaker faults):
+    // a faulted DC breaker is out for the event, disconnecting its DC segment.
+    if (c.include_switch_faults) {
+      for (int ci = 0; ci < static_cast<int>(sys.dc.dc_circuit_breakers.size()); ++ci) {
+        const auto& cb = sys.dc.dc_circuit_breakers[ci];
+        if (!cb.in_service || !cb.closed) continue;
+        if (fault.kind == FaultKind::DCCircuitBreaker && ci == fault.index) continue;
+        connect_dc(cb.bus_from + kDCBusOffset, cb.bus_to + kDCBusOffset);
+      }
     }
 
     std::unordered_map<int, int> dc_comp;
@@ -1001,8 +1227,10 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
           std::max(0.0, c.loads[li].p_kw - out.shed_by_load[li]);
     }
     std::unordered_map<int, double> comp_vsc_transfer_kw;
-    for (const auto& vsc : sys.vsc_converters) {
+    for (int vi = 0; vi < static_cast<int>(sys.vsc_converters.size()); ++vi) {
+      const auto& vsc = sys.vsc_converters[vi];
       if (!vsc.in_service) continue;
+      if (fault.kind == FaultKind::VSCConverter && vi == fault.index) continue;
       auto ac_it = dc_comp.find(vsc.bus_ac);
       auto dc_it = dc_comp.find(vsc.bus_dc + kDCBusOffset);
       if (ac_it == dc_comp.end() || dc_it == dc_comp.end()) continue;
@@ -1010,6 +1238,181 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
         comp_vsc_transfer_kw[ac_it->second] += vsc_transfer_capacity_kw(vsc);
       }
     }
+    // ── DC LinDistFlow power flow (opt-in) ────────────────────────────────
+    // When enabled, replace the aggregate capacity check with a per-bus DC power
+    // flow: v in [vmin^2, vmax^2], resistive drop v_j = v_i - 2 r P, per-branch
+    // thermal limits, DC sources, and VSC transfers budgeted by the AC surplus of
+    // the merged component.  Falls back to the capacity check if it cannot solve.
+    bool dc_pf_done = false;
+    if (c.include_dc_power_flow) {
+      dc_pf_done = [&]() -> bool {
+        std::vector<int> dcbus_ids;
+        std::unordered_map<int, int> dcpos;
+        for (const auto& b : sys.dc.buses) {
+          if (!b.in_service || dcpos.count(b.index)) continue;
+          dcpos[b.index] = static_cast<int>(dcbus_ids.size());
+          dcbus_ids.push_back(b.index);
+        }
+        const int ndcb = static_cast<int>(dcbus_ids.size());
+        if (ndcb == 0) return true;  // no DC buses -> nothing to shed
+
+        std::vector<double> vlo(ndcb, 0.81), vhi(ndcb, 1.21);
+        std::vector<char> vref(ndcb, 0);
+        std::vector<double> dcsrc_mw(ndcb, 0.0);
+        for (const auto& b : sys.dc.buses) {
+          auto it = dcpos.find(b.index);
+          if (it == dcpos.end()) continue;
+          vlo[it->second] = b.vmin_pu * b.vmin_pu;
+          vhi[it->second] = b.vmax_pu * b.vmax_pu;
+          if (b.bus_type == DCBusType::DC_V) vref[it->second] = 1;
+        }
+        for (const auto& s : c.sources) {
+          if (s.bus < kDCBusOffset) continue;
+          auto it = dcpos.find(s.bus - kDCBusOffset);
+          if (it != dcpos.end()) dcsrc_mw[it->second] += s.p_kw / 1000.0;
+        }
+        struct Edge { int f, t; double r, smax; };
+        std::vector<Edge> dcbrs, dcdcs;
+        for (int b = 0; b < static_cast<int>(sys.dc.branches.size()); ++b) {
+          const auto& br = sys.dc.branches[b];
+          if (!br.in_service) continue;
+          if (fault.kind == FaultKind::DCBranch && b == fault.index) continue;
+          auto itf = dcpos.find(br.from_bus), itt = dcpos.find(br.to_bus);
+          if (itf == dcpos.end() || itt == dcpos.end()) continue;
+          const double smax = br.rate_a_mva > 1e-9 ? br.rate_a_mva
+                            : (br.s_max_mva > 1e-9 ? br.s_max_mva : default_rate_mw);
+          dcbrs.push_back({itf->second, itt->second, std::max(1e-6, br.r_pu), smax});
+        }
+        for (int d = 0; d < static_cast<int>(sys.dc.dcdc_converters.size()); ++d) {
+          const auto& dd = sys.dc.dcdc_converters[d];
+          if (!dd.in_service) continue;
+          if (fault.kind == FaultKind::DCDCConverter && d == fault.index) continue;
+          auto itf = dcpos.find(dd.bus_in), itt = dcpos.find(dd.bus_out);
+          if (itf == dcpos.end() || itt == dcpos.end()) continue;
+          const double cap = std::max(std::abs(dd.pmax_mw), std::abs(dd.pmin_mw));
+          dcdcs.push_back({itf->second, itt->second, 0.0, cap > 1e-9 ? cap : default_rate_mw});
+        }
+        struct VscT { int dcb; double cap_mw; int accomp; };
+        std::vector<VscT> vscs;
+        for (int vi = 0; vi < static_cast<int>(sys.vsc_converters.size()); ++vi) {
+          const auto& v = sys.vsc_converters[vi];
+          if (!v.in_service) continue;
+          if (fault.kind == FaultKind::VSCConverter && vi == fault.index) continue;
+          auto itd = dcpos.find(v.bus_dc);
+          if (itd == dcpos.end()) continue;
+          vref[itd->second] = 1;  // VSC forms the DC voltage reference
+          auto acc = dc_comp.find(v.bus_ac);
+          vscs.push_back({itd->second, vsc_transfer_capacity_kw(v) / 1000.0,
+                          acc != dc_comp.end() ? acc->second : -1});
+        }
+        std::vector<int> dcload_li, dcload_pos;
+        std::vector<double> dcload_mw;
+        for (int li = 0; li < nd_total; ++li) {
+          if (load_ac_bus[li] >= 0) continue;
+          auto it = dcpos.find(c.loads[li].bus - kDCBusOffset);
+          if (it == dcpos.end()) { out.shed_by_load[li] = std::max(0.0, c.loads[li].p_kw); continue; }
+          dcload_li.push_back(li);
+          dcload_pos.push_back(it->second);
+          dcload_mw.push_back(std::max(0.0, c.loads[li].p_kw) / 1000.0);
+        }
+        const int nL = static_cast<int>(dcload_li.size());
+        const int nBr = static_cast<int>(dcbrs.size());
+        const int nDd = static_cast<int>(dcdcs.size());
+        const int nV = static_cast<int>(vscs.size());
+        // Layout: [shed_L][v_bus][P_br][psrc_bus][pvsc_V][pdcdc_Dd]
+        const int o_shed = 0, o_v = o_shed + nL, o_P = o_v + ndcb;
+        const int o_src = o_P + nBr, o_vsc = o_src + ndcb, o_dd = o_vsc + nV;
+        const int nvar = o_dd + nDd;
+
+        engine::MIPModel dcmip;
+        auto& dclp = dcmip.linear_part;
+        dclp.sense = engine::Sense::Minimize;
+        dclp.vars.resize(static_cast<size_t>(nvar));
+        dclp.c = Eigen::VectorXd::Zero(nvar);
+        for (int i = 0; i < nL; ++i) {
+          dclp.vars[o_shed + i] = {engine::VarType::Continuous, 0.0, dcload_mw[i], "dcshed"};
+          dclp.c[o_shed + i] = 1.0;
+        }
+        for (int i = 0; i < ndcb; ++i)
+          dclp.vars[o_v + i] = {engine::VarType::Continuous,
+                                vref[i] ? 1.0 : vlo[i], vref[i] ? 1.0 : vhi[i], "dcv"};
+        for (int i = 0; i < nBr; ++i)
+          dclp.vars[o_P + i] = {engine::VarType::Continuous, -dcbrs[i].smax, dcbrs[i].smax, "dcP"};
+        for (int i = 0; i < ndcb; ++i)
+          dclp.vars[o_src + i] = {engine::VarType::Continuous, 0.0, dcsrc_mw[i], "dcsrc"};
+        for (int i = 0; i < nV; ++i)
+          dclp.vars[o_vsc + i] = {engine::VarType::Continuous, 0.0, std::max(0.0, vscs[i].cap_mw), "dcvsc"};
+        for (int i = 0; i < nDd; ++i)
+          dclp.vars[o_dd + i] = {engine::VarType::Continuous, -dcdcs[i].smax, dcdcs[i].smax, "dcdc"};
+
+        std::vector<Eigen::Triplet<double>> eqT, inT;
+        std::vector<double> beqV, binV;
+        auto d_eq = [&](const std::vector<std::pair<int, double>>& t, double rhs) {
+          const int r = static_cast<int>(beqV.size());
+          for (const auto& [col, val] : t) if (std::abs(val) > 1e-12) eqT.emplace_back(r, col, val);
+          beqV.push_back(rhs);
+        };
+        auto d_le = [&](const std::vector<std::pair<int, double>>& t, double rhs) {
+          const int r = static_cast<int>(binV.size());
+          for (const auto& [col, val] : t) if (std::abs(val) > 1e-12) inT.emplace_back(r, col, val);
+          binV.push_back(rhs);
+        };
+        // Bus balance: (inflow - outflow) + src + vsc_in + dcdc_net + shed = demand
+        std::vector<std::vector<std::pair<int, double>>> busTerms(ndcb);
+        std::vector<double> busDemand(ndcb, 0.0);
+        for (int i = 0; i < nBr; ++i) {
+          busTerms[dcbrs[i].t].push_back({o_P + i, +1.0});
+          busTerms[dcbrs[i].f].push_back({o_P + i, -1.0});
+        }
+        for (int i = 0; i < ndcb; ++i) busTerms[i].push_back({o_src + i, +1.0});
+        for (int i = 0; i < nV; ++i) busTerms[vscs[i].dcb].push_back({o_vsc + i, +1.0});
+        for (int i = 0; i < nDd; ++i) {
+          busTerms[dcdcs[i].t].push_back({o_dd + i, +1.0});
+          busTerms[dcdcs[i].f].push_back({o_dd + i, -1.0});
+        }
+        for (int i = 0; i < nL; ++i) {
+          busTerms[dcload_pos[i]].push_back({o_shed + i, +1.0});
+          busDemand[dcload_pos[i]] += dcload_mw[i];
+        }
+        for (int b = 0; b < ndcb; ++b) d_eq(busTerms[b], busDemand[b]);
+        // Resistive voltage drop for each closed DC branch: v_f - v_t - 2 r P = 0
+        for (int i = 0; i < nBr; ++i)
+          d_eq({{o_v + dcbrs[i].f, 1.0}, {o_v + dcbrs[i].t, -1.0}, {o_P + i, -2.0 * dcbrs[i].r}}, 0.0);
+        // VSC transfer budget: total AC->DC transfer <= AC surplus of its component
+        std::unordered_map<int, std::vector<int>> vsc_by_comp;
+        for (int i = 0; i < nV; ++i)
+          if (vscs[i].accomp >= 0) vsc_by_comp[vscs[i].accomp].push_back(i);
+        for (const auto& [comp, vlist] : vsc_by_comp) {
+          auto sit = comp_ac_source_kw.find(comp);
+          auto vit = comp_ac_served_kw.find(comp);
+          const double surplus_mw = std::max(0.0,
+              (sit != comp_ac_source_kw.end() ? sit->second : 0.0) -
+              (vit != comp_ac_served_kw.end() ? vit->second : 0.0)) / 1000.0;
+          std::vector<std::pair<int, double>> t;
+          for (int i : vlist) t.push_back({o_vsc + i, 1.0});
+          d_le(t, surplus_mw);
+        }
+
+        const int neq = static_cast<int>(beqV.size()), nin = static_cast<int>(binV.size());
+        dclp.Aeq.resize(neq, nvar); dclp.beq.resize(neq);
+        dclp.Aeq.setFromTriplets(eqT.begin(), eqT.end()); dclp.Aeq.makeCompressed();
+        for (int r = 0; r < neq; ++r) dclp.beq[r] = beqV[r];
+        dclp.A.resize(nin, nvar); dclp.b.resize(nin);
+        dclp.A.setFromTriplets(inT.begin(), inT.end()); dclp.A.makeCompressed();
+        for (int r = 0; r < nin; ++r) dclp.b[r] = binV[r];
+
+        engine::SimplexOptions so;
+        so.max_iter = 20000; so.feasibility_tol = 1e-8; so.optimality_tol = 1e-8; so.verbose = false;
+        auto sr = engine::solve_lp_with_basis(dclp, so, nullptr);
+        if (!sr.result.stats.success || sr.result.x.size() != nvar) return false;
+        for (int i = 0; i < nL; ++i)
+          out.shed_by_load[dcload_li[i]] =
+              std::max(0.0, std::min(dcload_mw[i], sr.result.x[o_shed + i])) * 1000.0;
+        return true;
+      }();
+    }
+
+    if (!dc_pf_done) {
     // Proper per-component capacity check for DC loads
     std::unordered_map<int, double> dc_comp_demand;
     for (int li = 0; li < nd_total; ++li) {
@@ -1038,6 +1441,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
         out.shed_by_load[li] = li_kw * std::min(1.0, std::max(0.0, ratio));
       }
     }
+    }  // if (!dc_pf_done)
   }
 
   out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
@@ -1070,7 +1474,8 @@ void fill_summary(const NativeCase& c, ThreeStageReliabilityResult& r) {
 }
 
 void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
-                     int max_sw_ops = INT_MAX) {
+                     int max_sw_ops = INT_MAX,
+                     const std::unordered_set<int>& unavailable_ties = {}) {
   // Clamp negative values: negative has no sensible meaning; treat as 0
   // (no switching) rather than propagating a misleading negative count string.
   if (max_sw_ops < 0) max_sw_ops = 0;
@@ -1079,6 +1484,11 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
   r.nodal_cif.assign(c.loads.size(), 0.0);
   r.nodal_cid_min.assign(c.loads.size(), 0.0);
   r.faults.clear();
+  r.saifi = 0.0;
+  r.saidi_min = 0.0;
+  r.eens_kwh_yr = 0.0;
+  r.eens_cost = 0.0;
+  r.worst_line = 0;
 
   double total_customers = 0.0;
   for (const auto& ld : c.loads) total_customers += std::max(1.0, ld.customers);
@@ -1091,11 +1501,21 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
 
   for (const auto& fault : c.faults) {
     auto s1 = solve_stage_milp(c, fault, 1);
-    auto s2 = solve_stage_milp(c, fault, 2, max_sw_ops);  // switch-count limit applies only to Stage 2
-    auto s3 = solve_stage_milp(c, fault, 3);
+    auto s2 = solve_stage_milp(c, fault, 2, max_sw_ops, &unavailable_ties);
+    // F7: Stage 3 is the repair window [tau_TP, tau_RP] with the fault still out
+    // and the Stage-2 reconfiguration held, so it uses the same switch budget and
+    // unavailable-tie set as Stage 2 (previously it ran with defaults and a
+    // silently-restored fault, which zeroed the repair-window shed).
+    auto s3 = solve_stage_milp(c, fault, 3, max_sw_ops, &unavailable_ties);
 
     ThreeStageFaultDetail d;
     d.line_id = fault.id;
+    d.component_type = fault_kind_type(fault.kind);
+    d.component_index = fault.index;
+    d.ac = fault.ac;
+    d.from_bus = fault.from_bus;
+    d.to_bus = fault.to_bus;
+    d.failure_rate = fault.failure_rate;
     d.stage1_status = s1.status;
     d.stage2_status = s2.status;
     d.stage3_status = s3.status;
@@ -1114,11 +1534,18 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
     d.pls_stage2 = s2.shed_kw;
     d.pls_stage3 = s3.shed_kw;
     d.pls_total = d.pls_stage1 + d.pls_stage2 + d.pls_stage3;
-    // P1c: kTauSwitchHr/kTauTrippingHr/kTauRepairHr are boundary times
-    // (τ_SW, τ_TP, τ_RP).  Stage durations are τ_SW, τ_TP-τ_SW, τ_RP-τ_TP.
-    d.objective = d.pls_stage1 * kTauSwitchHr
-                + d.pls_stage2 * (kTauTrippingHr - kTauSwitchHr)
-                + d.pls_stage3 * (kTauRepairHr   - kTauTrippingHr);
+    // P1c: per-component stage durations from the faulted component's MTTR.
+    // Stage 1 = tau_iso, Stage 2 = tau_sw, Stage 3 = tau_rep (repair).
+    d.objective = d.pls_stage1 * fault.tau_iso_hr
+                + d.pls_stage2 * fault.tau_sw_hr
+                + d.pls_stage3 * fault.tau_rep_hr;
+    d.duration_hr = (d.pls_stage1 > 1e-6 ? fault.tau_iso_hr : 0.0)
+                  + (d.pls_stage2 > 1e-6 ? fault.tau_sw_hr : 0.0)
+                  + (d.pls_stage3 > 1e-6 ? fault.tau_rep_hr : 0.0);
+    d.ens_kwh = d.objective;
+    d.eens_contribution_mwh_yr = fault.failure_rate * d.ens_kwh / 1000.0;
+    d.lole_contribution_hr_yr = fault.failure_rate * d.duration_hr;
+    d.lolf_contribution_occ_yr = d.duration_hr > 0.0 ? fault.failure_rate : 0.0;
     // SOP power vectors: zero-filled. Full SOP dispatch optimization is not
     // yet implemented; the binary load-shedding MILP above does not dispatch
     // SOP active-power flows. A dedicated OPF-based restoration model is
@@ -1135,17 +1562,17 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
 
     for (size_t i = 0; i < c.loads.size(); ++i) {
       const double ens = fault.failure_rate *
-          (s1.shed_by_load[i] * kTauSwitchHr +
-           s2.shed_by_load[i] * (kTauTrippingHr - kTauSwitchHr) +
-           s3.shed_by_load[i] * (kTauRepairHr   - kTauTrippingHr));
+          (s1.shed_by_load[i] * fault.tau_iso_hr +
+           s2.shed_by_load[i] * fault.tau_sw_hr +
+           s3.shed_by_load[i] * fault.tau_rep_hr);
       r.nodal_eens_kwh_yr[i] += ens;
       r.eens_kwh_yr += ens;
       const bool interrupted = s1.shed_by_load[i] > 1e-6 || s2.shed_by_load[i] > 1e-6 || s3.shed_by_load[i] > 1e-6;
       if (interrupted) {
         const double cust = std::max(1.0, c.loads[i].customers);
-        const double duration_min = ((s1.shed_by_load[i] > 1e-6 ? kTauSwitchHr                      : 0.0) +
-                                     (s2.shed_by_load[i] > 1e-6 ? (kTauTrippingHr - kTauSwitchHr)  : 0.0) +
-                                     (s3.shed_by_load[i] > 1e-6 ? (kTauRepairHr   - kTauTrippingHr) : 0.0)) * 60.0;
+        const double duration_min = ((s1.shed_by_load[i] > 1e-6 ? fault.tau_iso_hr : 0.0) +
+                                     (s2.shed_by_load[i] > 1e-6 ? fault.tau_sw_hr  : 0.0) +
+                                     (s3.shed_by_load[i] > 1e-6 ? fault.tau_rep_hr : 0.0)) * 60.0;
         r.nodal_cif[i] += fault.failure_rate;
         r.nodal_cid_min[i] += fault.failure_rate * duration_min;
         weighted_interruptions += fault.failure_rate * cust;
@@ -1173,8 +1600,11 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
            ? std::string(" (no limit)")
            : " (≤ " + std::to_string(max_sw_ops) + " operations per fault)")
       + ". "
-        "N-1 contingency enumeration is branch-only: ACBranch and DCBranch outages are evaluated; "
-        "VSC, DCDC, switch, breaker, transformer, generator, load, and storage outages are not enumerated as faults. "
+        "N-1 contingency enumeration covers ACBranch and DCBranch outages by default; "
+        "generator, transformer, VSC/DC-DC converter, AC switch, and AC/DC circuit-breaker "
+        "outages are enumerated only when their opt-in flags are set (converter and "
+        "switch/breaker faults act through the DC connectivity fallback or as forced-open "
+        "AC edges; a load/storage outage is not enumerated as a standalone fault). "
        "DC sub-network: connectivity/capacity fallback with DC source capacity and "
        "AC-source surplus transferable through VSC capacity limits; no DC power-flow constraints. "
        "DCDC devices are still treated as lossless connectivity edges. "
@@ -1184,14 +1614,16 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
       // Validity flags describe whole-result physical coverage.  They are true for
       // pure-AC cases and intentionally false for hybrid cases because DC/VSC/SOP
       // physics are not part of the MILP.
-      r.model_scope = has_dc_or_vsc ? "ac-lindistflow-milp+dc-connectivity-fallback"
+      r.model_scope = has_dc_or_vsc
+                    ? (c.include_dc_power_flow ? "ac-lindistflow-milp+dc-lindistflow"
+                                              : "ac-lindistflow-milp+dc-connectivity-fallback")
                     : "ac-lindistflow-milp";
   r.validity = ThreeStageReliabilityResult::ValidityFlags{
         .branch_flow_enforced        = !has_dc_or_vsc,
         .voltage_constraints_enforced = !has_dc_or_vsc,
         .radial_topology_enforced    = !has_dc_or_vsc,
       .sop_dispatch_optimised      = false,  // VSC setpoints still zero
-      .dc_power_flow_enforced      = false,  // DC sub-network is connectivity-only
+      .dc_power_flow_enforced      = c.include_dc_power_flow && has_dc_or_vsc,
         .restoration_milp_solved     = !has_dc_or_vsc,
   };
 
@@ -1240,7 +1672,7 @@ ThreeStageReliabilityResult run_three_stage_reliability(
   }
   try {
     HybridPowerSystem sys = io::from_json(text);
-    NativeCase c = build_native_case(sys);
+    NativeCase c = build_native_case(sys, options);
     if (c.loads.empty()) {
       result.error = "case JSON contains no load points";
       return result;
@@ -1249,7 +1681,10 @@ ThreeStageReliabilityResult run_three_stage_reliability(
       result.error = "case JSON contains no AC/DC branch contingencies";
       return result;
     }
-    run_native_case(c, result, options.max_switch_operations);
+    std::unordered_set<int> unavailable_ties(
+        options.unavailable_tie_switch_ids.begin(),
+        options.unavailable_tie_switch_ids.end());
+    run_native_case(c, result, options.max_switch_operations, unavailable_ties);
   } catch (const std::exception& e) {
     result.error = std::string("failed to evaluate native three-stage reliability: ") + e.what();
   }
@@ -1266,7 +1701,7 @@ ThreeStageReliabilityResult run_three_stage_reliability_from_string(
   }
   try {
     HybridPowerSystem sys = io::from_json(case_json_text);
-    NativeCase c = build_native_case(sys);
+    NativeCase c = build_native_case(sys, options);
     if (c.loads.empty()) {
       result.error = "case JSON contains no load points";
       return result;
@@ -1275,7 +1710,10 @@ ThreeStageReliabilityResult run_three_stage_reliability_from_string(
       result.error = "case JSON contains no AC/DC branch contingencies";
       return result;
     }
-    run_native_case(c, result, options.max_switch_operations);
+    std::unordered_set<int> unavailable_ties(
+        options.unavailable_tie_switch_ids.begin(),
+        options.unavailable_tie_switch_ids.end());
+    run_native_case(c, result, options.max_switch_operations, unavailable_ties);
   } catch (const std::exception& e) {
     result.error = std::string("failed to evaluate native three-stage reliability: ") + e.what();
   }

@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "hacdcpf/model/dynamic_model_profile.hpp"
 #include "hacdcpf/model/enums/converter_enums.hpp"
 
 namespace hacdcpf {
@@ -122,6 +123,8 @@ struct VSCConverter {
   double t_scheduled_hr{0.0};
   // Derived MTBF -- see Generator::mtbf_hr note for convention.
   double mtbf_hr{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -165,6 +168,8 @@ struct DCDCConverter {
   double mtbf_hours{0.0};
   double mttr_hours{0.0};
   double t_scheduled_hr{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -193,6 +198,8 @@ struct EnergyRouterPort {
   double q_set_mvar{0.0};
   double v_set_pu{1.0};
   bool in_service{true};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -223,6 +230,8 @@ struct EnergyRouter {
 
   double mtbf_hours{0.0};
   double mttr_hours{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 }  // namespace hacdcpf

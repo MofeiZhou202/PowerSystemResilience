@@ -58,6 +58,7 @@ const App = (() => {
   let _lastAnnualData = null;
   let _lastCarbonData = null;
   let _lastDynamicCarbonData = null;
+  let _lastTransientData = null;
   let _lastReliabilityData = null;
   let _lastResilienceData = null;
   let _lastScenarioGenerationData = null;
@@ -69,6 +70,7 @@ const App = (() => {
   let _importedGeneratedScenario = null;
   let _lastImportedGeneratedScenarioKey = '';
   let _generatedScenarioTimeSeriesActive = false;
+  let _transientEvents = [];
   let _analysisQueue = Promise.resolve();
   let _activeLoadPromise = null;
 
@@ -115,6 +117,7 @@ const App = (() => {
     _lastTspfData = null;
     _lastCarbonData = null;
     _lastDynamicCarbonData = null;
+    _lastTransientData = null;
     if (typeof Canvas !== 'undefined' && Canvas.clearResults) Canvas.clearResults();
     if (reason) log(reason, 'info');
   }
@@ -126,7 +129,46 @@ const App = (() => {
   // visually mix their results.
   function setActiveResultGroup(name) {
     const rc = document.getElementById('resultsContent');
-    if (rc) rc.dataset.activeGroup = name || '';
+    const active = name || '';
+    if (rc) rc.dataset.activeGroup = active;
+    document.body?.setAttribute('data-active-result-group', active);
+    const panel = document.getElementById('rightPanel');
+    if (panel) {
+      if (active === 'transient' || active === 'modelIO') {
+        const target = window.innerWidth <= 900 ? window.innerWidth : Math.round(Math.min(window.innerWidth * 0.66, 1180));
+        const minUseful = window.innerWidth <= 900 ? window.innerWidth : Math.min(target, Math.max(560, window.innerWidth - 420));
+        if (!panel.style.width || panel.offsetWidth < minUseful) {
+          panel.style.width = `${minUseful}px`;
+          panel.dataset.autoTransientWidth = '1';
+        }
+      } else if (panel.dataset.autoTransientWidth === '1') {
+        panel.style.width = '';
+        delete panel.dataset.autoTransientWidth;
+      }
+    }
+  }
+
+  function showModelIoStatus(title, rows = [], options = {}) {
+    const el = document.getElementById('modelIoResults');
+    if (!el) return;
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('modelIO');
+    const subtitle = options.subtitle || '统一 IO 操作记录';
+    const rowHtml = rows.length
+      ? rows.map(([label, value]) => `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(String(value ?? ''))}</td></tr>`).join('')
+      : '<tr><td colspan="2">暂无明细。</td></tr>';
+    const warnings = Array.isArray(options.warnings) && options.warnings.length
+      ? `<div class="transient-section-head"><h5>导入告警</h5><span>${options.warnings.length} 条</span></div>
+         <div class="transient-mini-grid">${options.warnings.map(w => `<div class="transient-mini-card"><strong>Warning</strong><span>${escapeHtml(w)}</span></div>`).join('')}</div>`
+      : '';
+    el.innerHTML = `
+      <div class="transient-section-head"><h5>${escapeHtml(title)}</h5><span>${escapeHtml(subtitle)}</span></div>
+      <div class="transient-table-scroll">
+        <table><tbody>${rowHtml}</tbody></table>
+      </div>
+      ${warnings}`;
+    switchTab('results');
   }
 
   // Build an inline attribute that makes a result row pan the canvas to a bus
@@ -151,45 +193,189 @@ const App = (() => {
       ? ` class="topo-clickable" data-comp-id="${id}" onclick="Canvas.panToComponent(${id})"` : '';
   }
 
-  function rowCanvasCompId(row, maps) {
-    if (!row || !maps) return undefined;
-    const type = row.canvas_type;
-    const rawIndex = row.canvas_index ?? row.index;
-    const bucketAliases = {
+  function resultTypeKey(type) {
+    return String(type || '')
+      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+      .replace(/[-\s/]+/g, '_')
+      .replace(/__+/g, '_')
+      .toLowerCase();
+  }
+
+  function resultCanvasBucket(type, maps) {
+    if (!type || !maps) return undefined;
+    const raw = String(type);
+    if (maps[raw]) return raw;
+    const key = resultTypeKey(raw);
+    const aliases = {
+      ac: 'ac',
       ac_bus: 'ac',
+      bus_ac: 'ac',
+      dc: 'dc',
       dc_bus: 'dc',
+      bus_dc: 'dc',
+      branch: 'branch',
       ac_branch: 'branch',
-      dc_branch: 'dcBranch',
-      vsc_converter: 'vsc',
-      dcdc_converter: 'dcdcConverter',
-      energy_router: 'energyRouter',
-      dc_storage: 'dcStorage',
-      pv_system: 'pv',
-      dc_pv_array: 'dcPv',
-      renewable_gen: 'renGen',
-      static_generator: 'sgen',
-      external_grid: 'extGrid',
+      line: 'branch',
+      ac_line: 'branch',
+      transformer: 'trafo',
       transformer_2w: 'trafo',
+      transformer2_w: 'trafo',
+      transformer2w: 'trafo',
+      trafo: 'trafo',
       transformer_3w: 'trafo3w',
+      transformer3_w: 'trafo3w',
+      transformer3w: 'trafo3w',
+      trafo3w: 'trafo3w',
+      generator: 'gen',
+      synchronous_machine: 'gen',
+      three_phase_generator: 'gen',
+      gen: 'gen',
+      ac_load: 'load',
+      three_phase_load: 'load',
+      load: 'load',
+      external_grid: 'extGrid',
+      three_phase_external_grid: 'extGrid',
+      ext_grid: 'extGrid',
+      extgrid: 'extGrid',
+      storage: 'storage',
+      ac_storage: 'storage',
+      grid_forming_storage: 'storage',
+      pv_system: 'pv',
+      ac_pv_system: 'pv',
+      pv: 'pv',
+      renewable_gen: 'renGen',
+      renewable_generator: 'renGen',
+      ren_gen: 'renGen',
+      static_generator: 'sgen',
+      static_gen: 'sgen',
+      sgen: 'sgen',
+      dc_static_generator: 'dcSgen',
+      dc_static_gen: 'dcSgen',
+      dc_static_generator_ac: 'dcSgen',
+      dc_sgen: 'dcSgen',
+      switch: 'sw',
       switch_comp: 'sw',
+      ac_switch: 'sw',
+      sw: 'sw',
       circuit_breaker: 'cb',
+      ac_circuit_breaker: 'cb',
+      breaker: 'cb',
+      cb: 'cb',
       dc_circuit_breaker: 'dcCb',
-      mobile_storage: 'mobileStorage',
+      dc_breaker: 'dcCb',
+      dc_cb: 'dcCb',
+      motor: 'motor',
+      dc_branch: 'dcBranch',
+      dc_line: 'dcBranch',
+      dc_load: 'dcLoad',
+      dc_storage: 'dcStorage',
+      dc_pv_array: 'dcPv',
+      dc_pv: 'dcPv',
+      vsc: 'vsc',
+      vsc_converter: 'vsc',
+      vsc_grid_forming: 'vsc',
+      vsc_grid_following: 'vsc',
+      dcdc: 'dcdcConverter',
+      dc_dc: 'dcdcConverter',
+      dcdc_converter: 'dcdcConverter',
+      dc_dc_converter: 'dcdcConverter',
+      energy_router: 'energyRouter',
+      er: 'energyRouter',
+      shunt: 'shunt',
       flexible_load: 'flexLoad',
+      flex_load: 'flexLoad',
       asymmetric_load: 'asymLoad',
+      asym_load: 'asymLoad',
+      charger: 'charger',
       charging_station: 'chargingStation',
+      mobile_storage: 'mobileStorage',
+      vpp: 'vpp',
+      virtual_power_plant: 'vpp',
+      microgrid: 'microgrid',
     };
-    const bucket = type && (maps[type] ? type : bucketAliases[type]);
-    if (bucket && rawIndex != null && maps[bucket]) {
-      const idx = Number(rawIndex);
-      if (Number.isFinite(idx) && maps[bucket][idx] != null) return maps[bucket][idx];
+    const bucket = aliases[key] || aliases[raw];
+    return bucket && maps[bucket] ? bucket : undefined;
+  }
+
+  function validCanvasCompId(compId) {
+    const id = Number(compId);
+    if (!Number.isInteger(id)) return undefined;
+    if (typeof Canvas !== 'undefined' && Canvas.getComponent && !Canvas.getComponent(id)) return undefined;
+    return id;
+  }
+
+  function rowCanvasCompId(row, maps, options = {}) {
+    if (!row || !maps) return validCanvasCompId(options.fallbackCompId);
+    const directKeys = ['canvas_comp_id', 'comp_id', 'canvasComponentId', 'canvas_id'];
+    for (const key of directKeys) {
+      const hit = validCanvasCompId(row[key]);
+      if (hit !== undefined) return hit;
     }
-    const bus = row.bus ?? row.bus_ac ?? row.bus_in ?? row.from_bus ?? row.index;
-    const busMap = (type === 'dc' || type === 'dc_bus' || type === 'dcBranch' ||
-      type === 'dc_branch' || type === 'dc_storage' || type === 'dcdcConverter' ||
-      type === 'dcdc_converter') ? maps.dc : maps.ac;
-    const busId = Number(bus);
-    return Number.isFinite(busId) && busMap ? busMap[busId] : undefined;
+
+    const typeCandidates = [
+      row.canvas_type,
+      row.component_type,
+      row.canonical_component_type,
+      row.type,
+      row.bucket,
+      options.canvasType,
+    ].filter(v => v !== undefined && v !== null && String(v) !== '');
+    let bucket = undefined;
+    for (const t of typeCandidates) {
+      bucket = resultCanvasBucket(t, maps);
+      if (bucket) break;
+    }
+
+    if (bucket) {
+      const indexKeys = ['canvas_index', 'index', 'id', 'router_index', 'component_index'];
+      for (const key of indexKeys) {
+        const idx = Number(row[key]);
+        if (Number.isFinite(idx) && maps[bucket] && maps[bucket][idx] != null) {
+          return validCanvasCompId(maps[bucket][idx]);
+        }
+      }
+      const positionKeys = ['position', 'component_position', 'canvas_position', 'row_position'];
+      for (const key of positionKeys) {
+        const pos = Number(row[key]);
+        if (Number.isFinite(pos) && maps.byPosition && maps.byPosition[bucket] &&
+            maps.byPosition[bucket][pos] != null) {
+          return validCanvasCompId(maps.byPosition[bucket][pos]);
+        }
+      }
+      for (const key of positionKeys) {
+        const pos = Number(row[key]);
+        if (Number.isFinite(pos) && maps[bucket] && maps[bucket][pos] != null) {
+          return validCanvasCompId(maps[bucket][pos]);
+        }
+      }
+    }
+
+    const domainText = `${row.domain || row.component_domain || ''} ${typeCandidates.join(' ')} ${bucket || ''}`.toLowerCase();
+    const preferDc = /\bdc\b/.test(domainText) || ['dc', 'dcBranch', 'dcLoad', 'dcStorage', 'dcPv', 'dcCb', 'dcSgen', 'dcdcConverter'].includes(bucket);
+    const preferAc = /\bac\b/.test(domainText) || ['ac', 'branch', 'load', 'gen', 'extGrid', 'storage', 'pv', 'renGen', 'sgen', 'sw', 'cb', 'motor', 'shunt', 'trafo', 'trafo3w', 'flexLoad', 'asymLoad', 'charger', 'chargingStation', 'mobileStorage', 'vpp', 'microgrid'].includes(bucket);
+    const busKeys = preferDc && !preferAc
+      ? ['bus_dc', 'dc_bus', 'bus_in', 'bus_out', 'from_bus', 'to_bus', 'from', 'to', 'primary_bus', 'bus', 'index']
+      : preferAc && !preferDc
+      ? ['bus_ac', 'ac_bus', 'bus', 'from_bus', 'to_bus', 'from', 'to', 'hv_bus', 'mv_bus', 'lv_bus', 'primary_bus', 'index']
+      : ['bus_ac', 'ac_bus', 'bus_dc', 'dc_bus', 'bus', 'from_bus', 'to_bus', 'from', 'to', 'bus_in', 'bus_out', 'hv_bus', 'mv_bus', 'lv_bus', 'primary_bus', 'index'];
+    const tryBusKeys = (mapObj, keys) => {
+      if (!mapObj) return undefined;
+      for (const key of keys) {
+        const bus = Number(row[key]);
+        if (Number.isFinite(bus) && mapObj[bus] != null) return validCanvasCompId(mapObj[bus]);
+      }
+      return undefined;
+    };
+    const primary = preferDc && !preferAc ? maps.dc : maps.ac;
+    const secondary = preferDc && !preferAc ? maps.ac : maps.dc;
+    return tryBusKeys(primary, busKeys) ?? tryBusKeys(secondary, busKeys) ?? validCanvasCompId(options.fallbackCompId);
+  }
+
+  function canvasRowAttr(row, maps, options = {}) {
+    const compId = rowCanvasCompId(row, maps, options);
+    if (compId === undefined) return '';
+    const cls = options.className ? ` class="${escapeHtml(options.className)}"` : '';
+    return `${cls} data-comp-id="${compId}"`;
   }
 
   function positiveDemandMw(row) {
@@ -759,6 +945,16 @@ const App = (() => {
   }
 
   // ========== API Client ==========
+  async function parseJsonResponse(res) {
+    const text = await res.text();
+    if (!text.trim()) return {};
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      return { error: text || res.statusText || e.message };
+    }
+  }
+
   async function apiPost(path, body = {}, options = {}) {
     const url = `${API_BASE}${path}`;
     if (!options.quiet) log(`POST ${path}`, 'info');
@@ -768,7 +964,7 @@ const App = (() => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       if (!res.ok) {
         if (!options.quiet) log(`Error: ${data.error || res.statusText}`, 'error');
         return null;
@@ -792,11 +988,11 @@ const App = (() => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       if (!res.ok) {
-        const error = (data && data.error) || res.statusText;
+        const error = (data && (data.error || data.message)) || res.statusText;
         if (!options.quiet) log(`Error: ${error}`, 'error');
-        return { ok: false, data: null, error };
+        return { ok: false, data, error };
       }
       return { ok: true, data, error: null };
     } catch (e) {
@@ -809,7 +1005,7 @@ const App = (() => {
     const url = `${API_BASE}${path}`;
     try {
       const res = await fetch(url);
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       if (!res.ok) {
         if (!options.quiet) log(`Error: ${data.error || res.statusText}`, 'error');
         return null;
@@ -826,6 +1022,15 @@ const App = (() => {
       if (Array.isArray(value) && value.length > 0) return value;
     }
     return [];
+  }
+
+  function firstFiniteNumber(...values) {
+    for (const value of values) {
+      if (value === null || value === undefined || value === '') continue;
+      const n = Number(value);
+      if (Number.isFinite(n)) return n;
+    }
+    return 0;
   }
 
   function normalizePowerFlowResult(data) {
@@ -880,31 +1085,31 @@ const App = (() => {
   }
 
   // ========== Load Built-in Cases ==========
+  function fillSelectOptions(selectId, values, placeholder) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    select.innerHTML = `<option value="">${escapeHtml(placeholder)}</option>`;
+    (values || []).forEach(value => {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = value;
+      select.appendChild(opt);
+    });
+  }
+
   async function loadCaseList() {
     const data = await apiGet('/api/cases');
     if (!data) return;
-    const select = document.getElementById('caseSelect');
-    select.innerHTML = '<option value="">-- 加载算例 --</option>';
-    (data.cases || []).forEach(c => {
-      const opt = document.createElement('option');
-      opt.value = c;
-      opt.textContent = c;
-      select.appendChild(opt);
-    });
+    fillSelectOptions('caseSelect', data.cases, '-- 加载算例 --');
+    fillSelectOptions('ioCaseSelect', data.cases, '-- 选择算例 --');
     log(`已加载 ${(data.cases || []).length} 个内置算例`, 'success');
   }
 
   async function loadMatpowerFileList() {
     const data = await apiGet('/api/matpower_files');
     if (!data) return;
-    const select = document.getElementById('matpowerSelect');
-    select.innerHTML = '<option value="">-- MATPOWER文件 --</option>';
-    (data.files || []).forEach(f => {
-      const opt = document.createElement('option');
-      opt.value = f;
-      opt.textContent = f;
-      select.appendChild(opt);
-    });
+    fillSelectOptions('matpowerSelect', data.files, '-- MATPOWER文件 --');
+    fillSelectOptions('ioMatpowerSelect', data.files, '-- MATPOWER文件 --');
     log(`已加载 ${(data.files || []).length} 个MATPOWER文件`, 'success');
   }
 
@@ -932,6 +1137,12 @@ const App = (() => {
         // Auto-run power flow after import
         log('自动运行潮流计算...', 'info');
         await runPowerFlow();
+        showModelIoStatus('MATPOWER 导入完成', [
+          ['文件', filename],
+          ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+          ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+          ['发电机', data.counts?.generators ?? data.generators ?? ''],
+        ], { subtitle: '已同步到画布并自动运行潮流' });
       } else {
         setStatus('加载失败', 'error');
       }
@@ -959,6 +1170,13 @@ const App = (() => {
         }
       }
       setStatus('就绪');
+      showModelIoStatus('内置算例加载完成', [
+        ['算例', caseName],
+        ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+        ['DC母线', data.counts?.dc_buses ?? data.dc_buses ?? ''],
+        ['VSC', data.counts?.vsc_converters ?? data.vsc_converters ?? ''],
+      ], { subtitle: '当前后端会话与画布已更新' });
     } else {
       setStatus('加载失败', 'error');
     }
@@ -970,10 +1188,13 @@ const App = (() => {
     if (data._raw_json) {
       try {
         const sys = JSON.parse(data._raw_json);
-        Canvas.loadFromSystemJson(sys);
-        _canvasDirty = false;  // backend already has the correct system
-        updateResilienceSwitchDefault();
-        invalidateAnalysisResults('系统已变更，旧潮流和碳流结果已失效');
+	        Canvas.loadFromSystemJson(sys);
+	        _canvasDirty = false;  // backend already has the correct system
+	        if ((data._has_three_phase_ac || sys.three_phase_ac) && document.getElementById('pfMethod')) {
+	          document.getElementById('pfMethod').value = 'three_phase';
+	        }
+	        updateResilienceSwitchDefault();
+	        invalidateAnalysisResults('系统已变更，旧潮流和碳流结果已失效');
         log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
       } catch (e) {
         log(`JSON解析失败: ${e.message}`, 'error');
@@ -982,6 +1203,53 @@ const App = (() => {
     const warns = data._etap_warnings;
     if (Array.isArray(warns) && warns.length) {
       log(`${label}：${warns.length} 条导入告警（宽松模式）`, 'warn');
+    }
+  }
+
+  async function loadGridlabd(file) {
+    if (!file) return;
+    setStatus('导入GridLAB-D...', 'busy');
+    try {
+      const glm = await file.text();
+      const data = await apiPost('/api/session/load_gridlabd', { glm_string: glm });
+      if (!data) { setStatus('加载失败', 'error'); return; }
+      log(`已导入GridLAB-D GLM: ${file.name}`, 'success');
+      applyLoadedSystem(data, 'GridLAB-D GLM');
+      showModelIoStatus('GridLAB-D 导入完成', [
+        ['文件', file.name],
+        ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+        ['负荷', data.counts?.loads ?? data.loads ?? ''],
+      ], { subtitle: 'GLM 文本转换到当前系统', warnings: data._io_warnings || data._gridlabd_warnings || [] });
+      setStatus('就绪');
+    } catch (e) {
+      log(`导入GridLAB-D失败: ${e.message}`, 'error');
+      setStatus('加载失败', 'error');
+    }
+  }
+
+  async function loadOpendss(file) {
+    if (!file) return;
+    setStatus('导入OpenDSS...', 'busy');
+    try {
+      const dss = await file.text();
+	      const data = await apiPost('/api/session/load_opendss', { dss_string: dss, filename: file.name });
+      if (!data) { setStatus('加载失败', 'error'); return; }
+      log(`已导入OpenDSS DSS: ${file.name}`, 'success');
+      applyLoadedSystem(data, 'OpenDSS DSS');
+	      showModelIoStatus('OpenDSS 导入完成', [
+	        ['文件', file.name],
+	        ['导入路径', data._opendss_import_mode || ''],
+	        ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+	        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+	        ['三相母线', data.counts?.tp_buses ?? data.tp_buses ?? ''],
+	        ['三相线路', data.counts?.tp_lines ?? data.tp_lines ?? ''],
+	        ['负荷', data.counts?.loads ?? data.loads ?? ''],
+	      ], { subtitle: data._has_three_phase_ac ? 'DSS 已作为三相 abc 模型导入，并生成等值单线图' : 'DSS 文本转换到当前系统', warnings: data._io_warnings || data._opendss_warnings || [] });
+      setStatus('就绪');
+    } catch (e) {
+      log(`导入OpenDSS失败: ${e.message}`, 'error');
+      setStatus('加载失败', 'error');
     }
   }
 
@@ -1024,6 +1292,12 @@ const App = (() => {
       }
       log(`已导入ETAP工作簿: ${file.name}`, 'success');
       applyLoadedSystem(data, 'ETAP工作簿');
+      showModelIoStatus('ETAP 工作簿导入完成', [
+        ['文件', file.name],
+        ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+        ['VSC', data.counts?.vsc_converters ?? data.vsc_converters ?? ''],
+      ], { subtitle: 'ETAP xlsx 转换到当前系统', warnings: data._etap_warnings || [] });
       setStatus('就绪');
     } catch (e) {
       log(`导入ETAP工作簿失败: ${e.message}`, 'error');
@@ -1041,6 +1315,12 @@ const App = (() => {
       if (!data) { setStatus('加载失败', 'error'); return; }
       log(`已导入ETAP工程: ${file.name}`, 'success');
       applyLoadedSystem(data, 'ETAP工程');
+      showModelIoStatus('ETAP XML 导入完成', [
+        ['文件', file.name],
+        ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+        ['VSC', data.counts?.vsc_converters ?? data.vsc_converters ?? ''],
+      ], { subtitle: 'ETAP XML 转换到当前系统', warnings: data._etap_warnings || [] });
       setStatus('就绪');
     } catch (e) {
       log(`导入ETAP工程失败: ${e.message}`, 'error');
@@ -1057,6 +1337,10 @@ const App = (() => {
       updateResilienceSwitchDefault(true);
       invalidateAnalysisResults('系统已清空，旧潮流和碳流结果已失效');
       log('已创建空白系统', 'success');
+      showModelIoStatus('已创建空白系统', [
+        ['系统名', 'New System'],
+        ['Base MVA', '100'],
+      ], { subtitle: '当前会话已重置' });
       setStatus('就绪');
     } else {
       setStatus('创建失败', 'error');
@@ -1076,6 +1360,22 @@ const App = (() => {
     a.click();
     URL.revokeObjectURL(url);
     log('已导出系统JSON', 'success');
+    showModelIoStatus('JSON 导出完成', [
+      ['文件', 'power_system.json'],
+      ['大小', `${jsonStr.length} bytes`],
+    ], { subtitle: '从当前画布生成' });
+  }
+
+  function downloadTextFile(filename, text, mimeType = 'text/plain;charset=utf-8') {
+    const blob = new Blob([text], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   // Export the current system as an ETAP-schema .xlsx workbook (one sheet per
@@ -1116,6 +1416,10 @@ const App = (() => {
       a.click();
       URL.revokeObjectURL(url);
       log(`已导出ETAP工作簿: ${filename}`, 'success');
+      showModelIoStatus('ETAP 工作簿导出完成', [
+        ['文件', filename],
+        ['格式', 'xlsx'],
+      ], { subtitle: '从后端当前系统生成' });
       setStatus('就绪');
     } catch (err) {
       log(`导出ETAP失败: ${err.message}`, 'error');
@@ -1140,9 +1444,41 @@ const App = (() => {
       a.click();
       URL.revokeObjectURL(url);
       log(`已导出ETAP XML: ${a.download}`, 'success');
+      showModelIoStatus('ETAP XML 导出完成', [
+        ['文件', a.download],
+        ['大小', `${(data.xml_string || '').length} bytes`],
+      ], { subtitle: '从后端当前系统生成' });
       setStatus('就绪');
     } catch (err) {
       log(`导出ETAP XML失败: ${err.message}`, 'error');
+      setStatus('导出失败', 'error');
+    }
+  }
+
+  async function exportExternalGrid(format) {
+    const isGridlabd = format === 'gridlabd';
+    const label = isGridlabd ? 'GridLAB-D GLM' : 'OpenDSS DSS';
+    const endpoint = isGridlabd ? '/api/session/export_gridlabd' : '/api/session/export_opendss';
+    const ext = isGridlabd ? 'glm' : 'dss';
+    const mime = isGridlabd ? 'text/x-gridlabd;charset=utf-8' : 'text/x-opendss;charset=utf-8';
+    setStatus(`导出${label}中...`, 'busy');
+    try {
+      const ok = await syncToBackend();
+      if (!ok) { setStatus('导出失败', 'error'); return; }
+      const data = await apiPost(endpoint, {});
+      if (!data || data.error) throw new Error((data && data.error) || '导出失败');
+      const text = isGridlabd ? data.glm_string : data.dss_string;
+      const filename = `${data.name || 'system'}.${ext}`;
+      downloadTextFile(filename, text || '', mime);
+      log(`已导出${label}: ${filename}`, 'success');
+      showModelIoStatus(`${label} 导出完成`, [
+        ['文件', filename],
+        ['格式', ext],
+        ['大小', `${(text || '').length} bytes`],
+      ], { subtitle: '外部仿真工具文本导出', warnings: data.warnings || [] });
+      setStatus('就绪');
+    } catch (err) {
+      log(`导出${label}失败: ${err.message}`, 'error');
       setStatus('导出失败', 'error');
     }
   }
@@ -1157,6 +1493,7 @@ const App = (() => {
           json_string: JSON.stringify(sys)
         });
         if (data) {
+          let loadedName = sys?.name || '';
           if (data._raw_json) {
             // The backend strips unknown fields from the system JSON, so the
             // _canvas layout block (added by Canvas.buildSystemJson) is lost
@@ -1167,6 +1504,7 @@ const App = (() => {
             if (sys && sys._canvas && !raw._canvas) {
               raw._canvas = sys._canvas;
             }
+            loadedName = raw?.name || loadedName;
             Canvas.loadFromSystemJson(raw);
           } else {
             Canvas.loadFromSystemJson(sys);
@@ -1175,6 +1513,10 @@ const App = (() => {
           updateResilienceSwitchDefault();
           invalidateAnalysisResults('系统已导入，旧潮流和碳流结果已失效');
           log('已导入系统JSON', 'success');
+          showModelIoStatus('JSON 导入完成', [
+            ['文件', file.name],
+            ['系统名', loadedName],
+          ], { subtitle: 'JSON 已同步到后端并恢复画布' });
         }
       } catch (err) {
         log(`导入失败: ${err.message}`, 'error');
@@ -2016,8 +2358,16 @@ const App = (() => {
         // Display results.  Always replace the previous GUI cache, including after
         // a failed run, so a later successful run is never masked by stale arrays.
         _lastPfData = pfData;
-        Canvas.showPowerFlowResults(pfData);
-        showPowerFlowResultsTables(pfData);
+        try {
+          showPowerFlowResultsTables(pfData);
+        } catch (err) {
+          log(`潮流结果表刷新失败: ${err.message || err}`, 'error');
+        }
+        try {
+          Canvas.showPowerFlowResults(pfData);
+        } catch (err) {
+          log(`潮流画布叠加刷新失败，结果表已更新: ${err.message || err}`, 'warn');
+        }
         switchTab('results');
       } else {
         setStatus('计算失败', 'error');
@@ -2674,6 +3024,1331 @@ const App = (() => {
       const modes = (el.getAttribute('data-modes') || '').split(/\s+/);
       el.style.display = modes.includes(mode) ? '' : 'none';
     });
+  }
+
+  const transientEventLabels = {
+    ACBranchTrip: 'AC支路跳闸',
+    ACBranchClose: 'AC支路合闸',
+    DCBranchTrip: 'DC支路跳闸',
+    DCBranchClose: 'DC支路合闸',
+    ACLoadScale: 'AC负荷阶跃',
+    DCLoadScale: 'DC负荷阶跃',
+    GeneratorTrip: '发电机跳闸',
+    VSCTrip: 'VSC跳闸',
+    DCDCTrip: 'DC/DC跳闸',
+    StoragePowerStep: 'AC储能P阶跃',
+    DCStoragePowerStep: 'DC储能P阶跃',
+    FaultShunt: '母线故障',
+    ClearFault: '清除故障',
+  };
+
+  const transientEditableDurationTypes = new Set([
+    'FaultShunt',
+    'ACLoadScale',
+    'DCLoadScale',
+    'StoragePowerStep',
+    'DCStoragePowerStep',
+    'Custom',
+  ]);
+
+  function transientEventLabel(type) {
+    return transientEventLabels[type] || type || '扰动';
+  }
+
+  function transientEventUsesBus(eventType) {
+    return eventType === 'FaultShunt' || eventType === 'ClearFault' ||
+      eventType === 'ACLoadScale' || eventType === 'DCLoadScale';
+  }
+
+  function transientEventDefaultDomain(eventType) {
+    if (eventType === 'DCLoadScale' || eventType === 'DCBranchTrip' ||
+        eventType === 'DCBranchClose' || eventType === 'DCStoragePowerStep') {
+      return 'DC';
+    }
+    return 'AC';
+  }
+
+  function transientDefaultEventParams(type, value, duration) {
+    const params = {};
+    if (type === 'FaultShunt') {
+      if (Number(value) > 0) params.g_pu = Number(value);
+      if (Number(duration) > 0) params.duration_s = Number(duration);
+    } else if (type === 'ACLoadScale' || type === 'DCLoadScale') {
+      params.scale = Math.max(0, Number(value) || 0);
+      if (Number(duration) > 0) params.duration_s = Number(duration);
+    } else if (type === 'StoragePowerStep' || type === 'DCStoragePowerStep') {
+      params.p_ref_mw = Number(value) || 0;
+      if (Number(duration) > 0) params.duration_s = Number(duration);
+    }
+    return params;
+  }
+
+  function transientReadParamsInput() {
+    const raw = String(document.getElementById('trEventParams')?.value || '').trim();
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('params must be an object');
+      }
+      const params = {};
+      Object.entries(parsed).forEach(([key, value]) => {
+        const num = Number(value);
+        if (Number.isFinite(num)) params[key] = num;
+      });
+      return params;
+    } catch (err) {
+      throw new Error(`扰动参数 JSON 无效: ${err.message || err}`);
+    }
+  }
+
+  function transientNormalizeEvent(raw, fallbackIndex = 0) {
+    const type = raw?.type || '';
+    if (!type) return null;
+    const value = numberOr(raw.value, 0.0);
+    const duration = Math.max(0, numberOr(raw.duration_s, 0.0));
+    const params = {
+      ...transientDefaultEventParams(type, value, duration),
+      ...(raw.params || {}),
+    };
+    const event = {
+      type,
+      time_s: Math.max(0, numberOr(raw.time_s, 0.2)),
+      component_index: Math.max(0, parseInt(raw.component_index ?? raw.target ?? 0, 10) || 0),
+      bus: Math.max(0, parseInt(raw.bus ?? 0, 10) || 0),
+      value,
+      duration_s: duration,
+      component_type: raw.component_type || transientEventDefaultDomain(type),
+      label: String(raw.label || '').trim(),
+      params,
+    };
+    if (transientEventUsesBus(type)) {
+      event.bus = event.bus || event.component_index;
+      event.component_index = event.bus;
+    }
+    if (!event.label) {
+      const target = transientEventUsesBus(type)
+        ? `${event.component_type || 'AC'} bus ${event.bus || '*'}`
+        : (event.component_index ? `#${event.component_index}` : '全部');
+      event.label = `${transientEventLabel(type)} ${target}`;
+    }
+    event._id = raw._id || `tr_evt_${Date.now()}_${fallbackIndex}_${Math.random().toString(36).slice(2, 7)}`;
+    return event;
+  }
+
+  function transientEventFromControls() {
+    const type = document.getElementById('trEventType')?.value || '';
+    if (!type) return null;
+    const domainEl = document.getElementById('trEventDomain');
+    const domain = domainEl?.value || transientEventDefaultDomain(type);
+    const target = parseInt(document.getElementById('trEventTarget')?.value, 10) || 0;
+    const value = numberOr(document.getElementById('trEventValue')?.value, type.includes('LoadScale') ? 1.10 : 0.0);
+    const duration = numberOr(document.getElementById('trEventDuration')?.value, type === 'FaultShunt' ? 0.08 : 0.0);
+    const params = transientReadParamsInput();
+    const event = transientNormalizeEvent({
+      type,
+      time_s: numberOr(document.getElementById('trEventTime')?.value, 0.2),
+      component_index: target,
+      bus: transientEventUsesBus(type) ? target : 0,
+      value,
+      duration_s: duration,
+      component_type: domain,
+      params,
+      label: document.getElementById('trEventLabel')?.value || '',
+    }, _transientEvents.length);
+    return event;
+  }
+
+  function transientFormatEvent(event) {
+    if (!event) return '';
+    const type = transientEventLabel(event.type);
+    const target = transientEventUsesBus(event.type)
+      ? `${event.component_type || 'AC'} bus ${event.bus || event.component_index || '*'}`
+      : (event.component_index ? `#${event.component_index}` : '全部');
+    const pieces = [`${Number(event.time_s || 0).toFixed(3)}s`, type, target];
+    if (event.type === 'FaultShunt') {
+      const p = event.params || {};
+      if (p.r_pu != null || p.x_pu != null) {
+        pieces.push(`z=${Number(p.r_pu || 0).toExponential(1)}+j${Number(p.x_pu || 0).toExponential(1)}pu`);
+      } else {
+        pieces.push(`g=${Number(p.g_pu ?? event.value ?? 0).toFixed(3)}pu`);
+      }
+      if (Number(event.duration_s) > 0) pieces.push(`${Number(event.duration_s).toFixed(3)}s`);
+    } else if (event.type.includes('LoadScale')) {
+      pieces.push(`x${Number(event.params?.scale ?? event.value ?? 0).toFixed(3)}`);
+      if (Number(event.duration_s) > 0) pieces.push(`${Number(event.duration_s).toFixed(3)}s`);
+    } else if (event.type.includes('StoragePowerStep')) {
+      pieces.push(`${Number(event.params?.p_ref_mw ?? event.value ?? 0).toFixed(3)}MW`);
+      if (Number(event.duration_s) > 0) pieces.push(`${Number(event.duration_s).toFixed(3)}s`);
+    }
+    return pieces.join(' · ');
+  }
+
+  function transientSerializableEvents() {
+    return _transientEvents
+      .map((event, i) => transientNormalizeEvent(event, i))
+      .filter(Boolean)
+      .sort((a, b) => (a.time_s - b.time_s) || String(a.label).localeCompare(String(b.label)))
+      .map(({ _id, ...event }) => event);
+  }
+
+  function renderTransientEventSchedule() {
+    const box = document.getElementById('trEventSchedule');
+    if (!box) return;
+    if (!_transientEvents.length) {
+      box.innerHTML = '<span class="transient-event-empty">未设置扰动序列</span>';
+      return;
+    }
+    const events = _transientEvents
+      .map((event, i) => ({ event, i }))
+      .sort((a, b) => (a.event.time_s - b.event.time_s) || a.i - b.i);
+    box.innerHTML = events.map(({ event, i }) =>
+      `<span class="transient-event-chip" title="${escapeHtml(event.label || '')}">
+        ${escapeHtml(transientFormatEvent(event))}
+        <button type="button" data-tr-event-remove="${i}" aria-label="删除扰动">×</button>
+      </span>`
+    ).join('');
+    box.querySelectorAll('[data-tr-event-remove]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.trEventRemove, 10);
+        if (Number.isInteger(idx)) {
+          _transientEvents.splice(idx, 1);
+          renderTransientEventSchedule();
+        }
+      });
+    });
+  }
+
+  function addTransientEventFromControls() {
+    let event = null;
+    try {
+      event = transientEventFromControls();
+    } catch (err) {
+      setStatus(err.message || String(err), 'error');
+      return;
+    }
+    if (!event) {
+      setStatus('请选择一个暂态扰动类型', 'warn');
+      return;
+    }
+    _transientEvents.push(event);
+    renderTransientEventSchedule();
+    setStatus(`已加入扰动: ${transientFormatEvent(event)}`);
+  }
+
+  function clearTransientEvents() {
+    _transientEvents = [];
+    renderTransientEventSchedule();
+    setStatus('已清空暂态扰动序列');
+  }
+
+  function updateTransientEventControls() {
+    const type = document.getElementById('trEventType')?.value || '';
+    const domainEl = document.getElementById('trEventDomain');
+    const durationEl = document.getElementById('trEventDuration');
+    const valueEl = document.getElementById('trEventValue');
+    const paramsEl = document.getElementById('trEventParams');
+    if (domainEl) {
+      domainEl.disabled = !(type === 'FaultShunt' || type === 'ClearFault' ||
+        type === 'ACLoadScale' || type === 'DCLoadScale');
+      domainEl.value = transientEventDefaultDomain(type);
+    }
+    if (durationEl) {
+      const editable = transientEditableDurationTypes.has(type);
+      durationEl.disabled = !editable;
+      durationEl.title = editable
+        ? '事件持续时间。母线故障会自动清除；负荷/储能阶跃会随事件一起记录，当前求解器中阶跃保持到后续事件修改。'
+        : '该事件为瞬时切换/跳闸，持续时间不参与求解。';
+    }
+    if (valueEl) {
+      if (type === 'FaultShunt') valueEl.title = '故障并联电导强度 g(pu)，越大表示故障越强';
+      else if (type.includes('LoadScale')) valueEl.title = '负荷倍率，例如 1.10 表示增加 10%';
+      else if (type.includes('StoragePowerStep')) valueEl.title = '储能有功目标 MW';
+      else valueEl.title = '该事件类型通常不需要值';
+    }
+    if (paramsEl) {
+      if (type === 'FaultShunt') {
+        paramsEl.placeholder = '{"r_pu":0.001,"x_pu":0.002}';
+        paramsEl.title = '可选：用 r_pu/x_pu 或 g_pu/b_pu 精确设置故障强度，也可写 duration_s';
+      } else if (type.includes('LoadScale')) {
+        paramsEl.placeholder = '{"scale":1.10,"duration_s":0.20}';
+        paramsEl.title = '可选：负荷倍率和持续时间。当前求解器保持阶跃，后续可用反向事件恢复。';
+      } else if (type.includes('StoragePowerStep')) {
+        paramsEl.placeholder = '{"p_ref_mw":-2.0,"duration_s":0.20}';
+        paramsEl.title = '可选：储能有功目标和持续时间。当前求解器保持阶跃，后续可用新目标恢复。';
+      } else {
+        paramsEl.placeholder = '{}';
+        paramsEl.title = '可选事件参数，只保留数值字段';
+      }
+    }
+  }
+
+  function transientReadOptions() {
+    const events = transientSerializableEvents();
+    return {
+      solver_type: document.getElementById('trSolver')?.value || 'heun',
+      t_end_s: Math.max(0.001, numberOr(document.getElementById('trEnd')?.value, 1.0)),
+      dt_s: Math.max(0.0001, numberOr(document.getElementById('trDt')?.value, 0.01)),
+      use_adaptive_step: !!document.getElementById('trAdaptive')?.checked,
+      dynamic_dc_link: !!document.getElementById('trDynamicDcLink')?.checked,
+      dc_link_capacitance_s: Math.max(0.001, numberOr(document.getElementById('trDcLinkC')?.value, 0.10)),
+      dc_link_coupling_conductance_pu: Math.max(0.0, numberOr(document.getElementById('trDcLinkG')?.value, 20.0)),
+      run_power_flow_initialization: document.getElementById('trPowerFlowInit')?.checked !== false,
+      trim_dynamic_initial_conditions: true,
+      power_flow_options: {
+        max_iter: Math.max(5, parseInt(document.getElementById('trPfMaxIter')?.value, 10) || 80),
+        tol: Math.max(1e-12, numberOr(document.getElementById('trPfTol')?.value, 1e-8)),
+        enable_converter_coordination_check: true,
+      },
+      record_every_step: true,
+      events,
+    };
+  }
+
+  async function runTransientSimulation() {
+    setStatus('暂态仿真中...', 'busy');
+    if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+    const result = await apiPostResult('/api/session/run_transient', transientReadOptions());
+    const data = result.data;
+    if (result.ok && data && !data.error) {
+      _lastTransientData = data;
+      showTransientResults(data);
+      switchTab('results');
+      setStatus('暂态仿真完成');
+    } else {
+      const msg = result.error || data?.error || '暂态仿真失败';
+      log(`暂态仿真失败: ${msg}`, 'error');
+      setStatus(msg, 'error');
+    }
+  }
+
+  function updateTransientPfControls() {
+    const enabled = document.getElementById('trPowerFlowInit')?.checked !== false;
+    ['trPfMaxIter', 'trPfTol'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.disabled = !enabled;
+    });
+  }
+
+  function transientDeviceByType(data, pred) {
+    return (data?.device_series || []).filter(d => pred(String(d.type || '')));
+  }
+
+  function transientTraditionalGenerators(data) {
+    return (data?.device_series || []).filter(dev => {
+      const type = String(dev.type || '');
+      const source = String(dev.source_type || '');
+      return type === 'SynchronousMachine' || type === 'ExternalGrid' ||
+        type === 'ThreePhaseGenerator' || type === 'ThreePhaseExternalGrid' ||
+        source === 'generator' || source === 'external_grid' ||
+        source === 'three_phase_generator' || source === 'three_phase_external_grid';
+    });
+  }
+
+  function transientConverters(data) {
+    return (data?.device_series || []).filter(dev => {
+      const type = String(dev.type || '');
+      return type.includes('GridFollowing') || type.includes('GridForming') ||
+        type === 'DCDCConverter' || String(dev.canvas_type || '') === 'vsc';
+    });
+  }
+
+  function transientMetricTrace(dev, metric, name, color) {
+    const y = dev?.values?.[metric];
+    if (!Array.isArray(y) || !y.length) return null;
+    return {
+      x: _lastTransientData?.time_s || [],
+      y,
+      mode: 'lines',
+      name,
+      line: color ? { color } : undefined,
+      hovertemplate: `${escapeHtml(name)}<br>t=%{x:.4f}s<br>%{y:.4f}<extra></extra>`,
+    };
+  }
+
+  function transientPlotLayout(title, yTitle = '') {
+    return {
+      title: { text: title, font: { size: 14 }, x: 0.02, xanchor: 'left' },
+      margin: { l: 64, r: 24, t: 44, b: 52 },
+      xaxis: { title: 's', automargin: true },
+      yaxis: { title: yTitle, automargin: true },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      font: { color: getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() || '#dcdfe4' },
+    };
+  }
+
+  function transientPlotLayoutNoAxes(title) {
+    const layout = transientPlotLayout(title, '');
+    delete layout.xaxis;
+    delete layout.yaxis;
+    return layout;
+  }
+
+  function transientBusVoltageTrace(data, domain, busId, color) {
+    const ids = domain === 'DC' ? (data.dc_bus_ids || []) : (data.ac_bus_ids || []);
+    const matrix = domain === 'DC' ? (data.dc_voltage_matrix || []) : (data.ac_voltage_matrix || []);
+    const pos = ids.findIndex(id => Number(id) === Number(busId));
+    if (pos < 0 || !Array.isArray(matrix[pos])) return null;
+    return {
+      x: data.time_s || [],
+      y: matrix[pos],
+      mode: 'lines',
+      name: `${domain} bus ${busId}`,
+      line: color ? { color } : undefined,
+      hovertemplate: `${domain} bus ${busId}<br>t=%{x:.4f}s<br>V=%{y:.4f} pu<extra></extra>`,
+    };
+  }
+
+  function transientObserverRows(data) {
+    const rows = [];
+    const seen = new Set();
+    const add = row => {
+      const key = `${row.kind}:${row.domain || ''}:${row.bus || ''}:${row.compKey || ''}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      rows.push(row);
+    };
+    (data?.scheduled_events || []).forEach(event => {
+      const type = String(event.type || '');
+      if (type === 'FaultShunt' || type === 'ClearFault' || type.includes('LoadScale')) {
+        const domain = event.component_type === 'DC' || type === 'DCLoadScale' ? 'DC' : 'AC';
+        const bus = Number(event.bus || 0);
+        if (bus > 0) {
+          add({
+            kind: 'bus',
+            name: `${domain} bus ${bus}`,
+            domain,
+            bus,
+            reason: transientEventLabel(type),
+          });
+        }
+      }
+    });
+    const devices = [
+      ...transientTraditionalGenerators(data).slice(0, 4),
+      ...transientConverters(data).slice(0, 4),
+    ];
+    devices.forEach(dev => add({
+      kind: 'device',
+      name: dev.name || `${dev.type || 'device'} ${dev.component_index ?? ''}`,
+      domain: dev.component_domain || (String(dev.canvas_type || '').startsWith('dc') ? 'DC' : 'AC'),
+      bus: Number(dev.bus || 0),
+      compKey: `${dev.type}:${dev.component_index}:${dev.name}`,
+      dev,
+      reason: dev.type || '',
+    }));
+    if (!rows.length) {
+      (data?.ac_bus_ids || []).slice(0, 4).forEach(bus => add({
+        kind: 'bus',
+        name: `AC bus ${bus}`,
+        domain: 'AC',
+        bus,
+        reason: '电压观测',
+      }));
+    }
+    return rows.slice(0, 10);
+  }
+
+  function transientModelProfileRows(data) {
+    const rows = [];
+    const seen = new Set();
+    (data?.device_series || []).forEach(dev => {
+      const profiles = Array.isArray(dev.model_profiles) && dev.model_profiles.length
+        ? dev.model_profiles
+        : [{
+            standard: dev.model_standard || '',
+            model_name: dev.model_name || dev.type || '',
+            parameter_set: dev.parameter_set || '',
+            source_id: '',
+            notes: '',
+            components: [],
+            parameters: {},
+          }];
+      profiles.forEach(profile => {
+        const key = [
+          dev.type || '',
+          dev.component_index ?? '',
+          profile.standard || '',
+          profile.model_name || profile.model || '',
+          profile.parameter_set || '',
+        ].join('|');
+        if (seen.has(key)) return;
+        seen.add(key);
+        rows.push({ dev, profile });
+      });
+    });
+    return rows;
+  }
+
+  function transientModelProfileSummary(data) {
+    const rows = transientModelProfileRows(data);
+    const byStandard = new Map();
+    rows.forEach(({ profile }) => {
+      const std = profile.standard || 'Native';
+      byStandard.set(std, (byStandard.get(std) || 0) + 1);
+    });
+    return {
+      rows,
+      byStandard: Array.from(byStandard.entries()).sort((a, b) => b[1] - a[1]),
+      total: rows.length,
+    };
+  }
+
+  function transientRenderModelCompatibility(data) {
+    const summary = transientModelProfileSummary(data);
+    let html = '<div class="transient-section-head"><h5>动态模型 / 标准兼容性</h5><span>来自统一 JSON dynamic_model 与标准映射</span></div>';
+    html += '<div class="transient-model-summary">';
+    if (summary.byStandard.length) {
+      summary.byStandard.forEach(([std, count]) => {
+        html += `<span><strong>${escapeHtml(std)}</strong>${count}</span>`;
+      });
+    } else {
+      html += '<span><strong>Native</strong>0</span>';
+    }
+    html += '</div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>设备</th><th>标准</th><th>模型</th><th>参数集</th><th>组件控制块</th><th>参数数</th></tr></thead><tbody>';
+    if (summary.rows.length) {
+      summary.rows.slice(0, 48).forEach(({ dev, profile }) => {
+        const comps = Array.isArray(profile.components) ? profile.components : [];
+        const compText = comps.length
+          ? comps.map(c => `${c.type || ''}:${c.model || c.model_name || ''}`.replace(/^:/, '')).filter(Boolean).join(', ')
+          : (profile.profile || '');
+        const paramCount = Object.keys(profile.parameters || {}).length +
+          comps.reduce((sum, c) => sum + Object.keys(c.parameters || {}).length, 0);
+        html += `<tr>
+          <td>${escapeHtml(dev.name || `${dev.type || 'device'} ${dev.component_index ?? ''}`)}</td>
+          <td>${escapeHtml(profile.standard || dev.model_standard || 'Native')}</td>
+          <td>${escapeHtml(profile.model_name || profile.model || dev.model_name || dev.type || '')}</td>
+          <td>${escapeHtml(profile.parameter_set || dev.parameter_set || '')}</td>
+          <td>${escapeHtml(compText || '—')}</td>
+          <td>${paramCount}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="6">暂无动态模型配置。可在元件属性中填写 dynamic_model JSON。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+    return html;
+  }
+
+  function transientCompatibilityRatio(value, total) {
+    const n = Number(value);
+    const t = Number(total);
+    if (!Number.isFinite(n) || !Number.isFinite(t) || t <= 0) return '—';
+    return `${((n / t) * 100).toFixed(1)}%`;
+  }
+
+  function modelIoCountBy(rows, key) {
+    const out = {};
+    (rows || []).forEach(row => {
+      const value = row?.[key] || '未分类';
+      out[value] = (out[value] || 0) + 1;
+    });
+    return out;
+  }
+
+  function modelIoRangeText(row) {
+    const min = row?.expected_min ?? row?.min;
+    const max = row?.expected_max ?? row?.max;
+    const unit = row?.units ? ` ${row.units}` : '';
+    if (min != null && max != null) {
+      return `${row.min_inclusive === false ? '(' : '['}${min}, ${max}${row.max_inclusive === false ? ')' : ']'}${unit}`;
+    }
+    if (min != null) return `${row.min_inclusive === false ? '>' : '≥'} ${min}${unit}`;
+    if (max != null) return `${row.max_inclusive === false ? '<' : '≤'} ${max}${unit}`;
+    return row?.required ? '必填' : '—';
+  }
+
+  function modelIoSeverityClass(severity) {
+    const s = String(severity || '').toLowerCase();
+    if (s === 'error') return 'model-io-severity-error';
+    if (s === 'warning') return 'model-io-severity-warning';
+    return 'model-io-severity-info';
+  }
+
+  function modelIoDimensionLabel(dimension) {
+    const labels = {
+      AssetIdentity: '资产身份',
+      TopologyConnectivity: '拓扑连通',
+      ElectricalParameters: '电气参数',
+      DynamicBehavior: '动态模型',
+      TelemetryObservability: '遥测观测',
+      StateSynchronization: '状态同步',
+      ScenarioEvents: '场景事件',
+      ReliabilityLifecycle: '可靠性生命周期',
+      StandardsInteroperability: '标准互操作',
+      NumericalValidation: '数值验证',
+      ProvenanceGovernance: '来源治理',
+    };
+    return labels[dimension] || dimension || '未分类';
+  }
+
+  function modelIoRatioPercent(value, digits = 0) {
+    const pct = Math.max(0, Math.min(1, Number(value || 0))) * 100;
+    return `${pct.toFixed(digits)}%`;
+  }
+
+  function modelIoStatusBadge(value, passText = '通过', failText = '未通过') {
+    const ok = value === true || value === 'true' || value === 'pass' || value === 'passed';
+    const cls = ok ? 'model-io-badge-pass' : 'model-io-badge-fail';
+    return `<span class="model-io-badge ${cls}">${escapeHtml(ok ? passText : failText)}</span>`;
+  }
+
+  function modelIoPolicyCounts(mappings, field) {
+    const counts = {};
+    (mappings || []).forEach(row => {
+      const key = row?.[field] || 'Unknown';
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    return counts;
+  }
+
+  function modelIoPolicyCountsText(counts) {
+    const order = ['Exact', 'Equivalent', 'Projected', 'Aggregated', 'BoundaryInjection', 'InternalOnly', 'DiagnosticOnly', 'Unsupported', 'Unknown'];
+    const parts = order
+      .filter(key => Number(counts?.[key] || 0) > 0)
+      .map(key => `${key}:${counts[key]}`);
+    return parts.length ? parts.join(' / ') : '—';
+  }
+
+  function drawModelIoCharts(data) {
+    if (typeof Plotly === 'undefined') return;
+    const summary = data?.summary || {};
+    const total = Number(summary.total_instances || 0);
+    const gridRepresented = Number(summary.gridlabd_represented || 0);
+    const dssRepresented = Number(summary.opendss_represented || 0);
+    const audit = data?.parameter_audit || {};
+    const auditSummary = audit.summary || {};
+    const rules = Array.isArray(data?.parameter_rules) ? data.parameter_rules : [];
+    const findings = Array.isArray(audit.findings) ? audit.findings : [];
+    const twin = data?.digital_twin_readiness || {};
+    const twinSummary = twin.summary || {};
+    const twinDimensions = Array.isArray(twin.dimensions) ? twin.dimensions : [];
+    const cfg = { responsive: true, displaylogo: false, modeBarButtonsToRemove: ['select2d', 'lasso2d'] };
+
+    const twinGaugeChart = document.getElementById('modelIoTwinGaugeChart');
+    if (twinGaugeChart) {
+      const readiness = Math.max(0, Math.min(1, Number(twinSummary.readiness_ratio || 0))) * 100;
+      Plotly.react(twinGaugeChart, [{
+        type: 'indicator',
+        mode: 'gauge+number',
+        value: readiness,
+        number: { suffix: '%', font: { size: 34 } },
+        title: { text: `${twinSummary.maturity_label || '未评估'}` },
+        gauge: {
+          axis: { range: [0, 100], tickwidth: 1 },
+          bar: { color: '#56b6c2' },
+          bgcolor: 'rgba(255,255,255,0.04)',
+          borderwidth: 1,
+          bordercolor: '#4b5563',
+          steps: [
+            { range: [0, 35], color: 'rgba(224,108,117,0.25)' },
+            { range: [35, 55], color: 'rgba(209,154,102,0.24)' },
+            { range: [55, 72], color: 'rgba(229,192,123,0.24)' },
+            { range: [72, 88], color: 'rgba(152,195,121,0.22)' },
+            { range: [88, 100], color: 'rgba(86,182,194,0.26)' },
+          ],
+          threshold: { line: { color: '#e06c75', width: 3 }, thickness: 0.75, value: 88 },
+        },
+      }], {
+        ...transientPlotLayoutNoAxes('数字孪生成熟度'),
+        margin: { l: 28, r: 28, t: 48, b: 28 },
+      }, cfg);
+    }
+
+    const twinDimensionChart = document.getElementById('modelIoTwinDimensionChart');
+    if (twinDimensionChart) {
+      if (twinDimensions.length) {
+        const labels = twinDimensions.map(row => modelIoDimensionLabel(row.dimension));
+        const values = twinDimensions.map(row => {
+          const max = Number(row.max_score || 0);
+          return max > 0 ? 100 * Number(row.score || 0) / max : 0;
+        });
+        Plotly.react(twinDimensionChart, [{
+          x: values,
+          y: labels,
+          type: 'bar',
+          orientation: 'h',
+          marker: {
+            color: values.map(v => v >= 88 ? '#56b6c2' : v >= 72 ? '#98c379' : v >= 55 ? '#e5c07b' : v >= 35 ? '#d19a66' : '#e06c75'),
+          },
+          text: values.map(v => `${v.toFixed(0)}%`),
+          textposition: 'auto',
+        }], {
+          ...transientPlotLayout('孪生维度就绪度', '%'),
+          xaxis: { range: [0, 100], title: '', automargin: true },
+          yaxis: { automargin: true },
+          margin: { l: 112, r: 18, t: 42, b: 34 },
+        }, cfg);
+      } else {
+        twinDimensionChart.innerHTML = '<p class="empty-hint">当前尚无数字孪生维度评分。</p>';
+      }
+    }
+
+    const coverageChart = document.getElementById('modelIoCoverageChart');
+    if (coverageChart) {
+      Plotly.react(coverageChart, [{
+        x: ['GridLAB-D', 'OpenDSS'],
+        y: [gridRepresented, dssRepresented],
+        name: '可表示',
+        type: 'bar',
+        marker: { color: '#56b6c2' },
+      }, {
+        x: ['GridLAB-D', 'OpenDSS'],
+        y: [Math.max(total - gridRepresented, 0), Math.max(total - dssRepresented, 0)],
+        name: '需投影/暂不支持',
+        type: 'bar',
+        marker: { color: '#d19a66' },
+      }], {
+        ...transientPlotLayout('外部格式覆盖', '元件数'),
+        xaxis: { title: '', automargin: true },
+        barmode: 'stack',
+      }, cfg);
+    }
+
+    const severityChart = document.getElementById('modelIoSeverityChart');
+    if (severityChart) {
+      const severity = {
+        Error: Number(auditSummary.errors || 0),
+        Warning: Number(auditSummary.warnings || 0),
+        Info: Number(auditSummary.info || 0),
+      };
+      if (Object.values(severity).some(v => v > 0)) {
+        Plotly.react(severityChart, [{
+          labels: Object.keys(severity),
+          values: Object.values(severity),
+          type: 'pie',
+          hole: 0.48,
+          marker: { colors: ['#e06c75', '#d19a66', '#61afef'] },
+          textinfo: 'label+value',
+        }], {
+          ...transientPlotLayoutNoAxes('参数健康等级'),
+          showlegend: false,
+        }, cfg);
+      } else {
+        severityChart.innerHTML = '<p class="empty-hint">当前无参数诊断项。</p>';
+      }
+    }
+
+    const categoryChart = document.getElementById('modelIoCategoryChart');
+    if (categoryChart) {
+      const byCategory = auditSummary.by_category || modelIoCountBy(findings, 'category');
+      const categoryValues = Object.values(byCategory).map(Number);
+      if (categoryValues.some(v => v > 0)) {
+        Plotly.react(categoryChart, [{
+          x: Object.keys(byCategory),
+          y: categoryValues,
+          type: 'bar',
+          marker: { color: ['#61afef', '#98c379', '#c678dd', '#e06c75', '#e5c07b'] },
+        }], {
+          ...transientPlotLayout('问题所属参数域', '发现数'),
+          xaxis: { title: '', automargin: true },
+        }, cfg);
+      } else {
+        categoryChart.innerHTML = '<p class="empty-hint">当前无越界参数域。</p>';
+      }
+    }
+
+    const standardsChart = document.getElementById('modelIoStandardsChart');
+    if (standardsChart) {
+      const byStandard = modelIoCountBy(rules, 'standard_family');
+      Plotly.react(standardsChart, [{
+        labels: Object.keys(byStandard),
+        values: Object.values(byStandard),
+        type: 'pie',
+        hole: 0.38,
+        textinfo: 'label+value',
+      }], {
+        ...transientPlotLayoutNoAxes('规则标准来源'),
+        showlegend: false,
+      }, cfg);
+    }
+  }
+
+  function renderModelCompatibilityReport(data, options = {}) {
+    const targetId = options.targetId || 'modelIoResults';
+    const resultGroup = options.resultGroup || 'modelIO';
+    const title = options.title || '模型兼容性检查';
+    const subtitle = options.subtitle || '统一 IO registry / 当前画布系统';
+    const summary = data?.summary || {};
+    const coverage = Array.isArray(data?.coverage) ? data.coverage : [];
+    const mappings = Array.isArray(data?.mappings) ? data.mappings : [];
+    const diagnostics = data?.diagnostics || {};
+    const parameterRules = Array.isArray(data?.parameter_rules) ? data.parameter_rules : [];
+    const parameterAudit = data?.parameter_audit || {};
+    const auditSummary = parameterAudit.summary || {};
+    const findings = Array.isArray(parameterAudit.findings) ? parameterAudit.findings : [];
+    const twinCriteria = Array.isArray(data?.digital_twin_criteria) ? data.digital_twin_criteria : [];
+    const twin = data?.digital_twin_readiness || {};
+    const twinSummary = twin.summary || {};
+    const twinFindings = Array.isArray(twin.findings) ? twin.findings : [];
+    const twinGates = Array.isArray(twin.gates) ? twin.gates : [];
+    const roundTripRows = Array.isArray(twin.round_trip) ? twin.round_trip : [];
+    const twinDimensions = Array.isArray(twin.dimensions) ? twin.dimensions : [];
+    const total = Number(summary.total_instances || 0);
+    const gridRepresented = Number(summary.gridlabd_represented || 0);
+    const openDssRepresented = Number(summary.opendss_represented || 0);
+    const gridUnrepresented = Number(summary.gridlabd_unrepresented || 0);
+    const openDssUnrepresented = Number(summary.opendss_unrepresented || 0);
+    const errors = Number(auditSummary.errors || 0);
+    const warnings = Number(auditSummary.warnings || 0);
+    const infos = Number(auditSummary.info || 0);
+    const twinReadiness = Number(twinSummary.readiness_ratio || 0);
+    const twinErrors = Number(twinSummary.errors || 0);
+    const twinWarnings = Number(twinSummary.warnings || 0);
+
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup(resultGroup);
+
+    let html = `<div class="transient-section-head"><h5>${escapeHtml(title)}</h5><span>${escapeHtml(subtitle)}</span></div>`;
+    html += '<div class="transient-kpi-grid">';
+    [
+      ['当前元件实例', total, '个'],
+      ['GridLAB-D覆盖', transientCompatibilityRatio(gridRepresented, total), `${gridRepresented}/${total}`],
+      ['OpenDSS覆盖', transientCompatibilityRatio(openDssRepresented, total), `${openDssRepresented}/${total}`],
+      ['注册元件类型', mappings.length, '类'],
+      ['当前覆盖类型', coverage.length, '类'],
+      ['参数规则', parameterRules.length, '条'],
+      ['参数硬错误', errors, `警告 ${warnings} / 提示 ${infos}`],
+      ['已检查参数', auditSummary.checked_parameters || 0, `元件 ${auditSummary.component_instances_checked || 0}`],
+      ['孪生就绪度', modelIoRatioPercent(twinReadiness), twinSummary.maturity_label || '未评估'],
+      ['孪生成熟度', `L${twinSummary.maturity_level ?? 0}`, `缺口 ${twinErrors}/${twinWarnings}`],
+    ].forEach(([label, value, unit]) => {
+      html += `<div class="transient-kpi"><div class="transient-kpi-label">${escapeHtml(label)}</div><div class="transient-kpi-value">${escapeHtml(String(value))}</div><div class="transient-kpi-label">${escapeHtml(String(unit || ''))}</div></div>`;
+    });
+    html += '</div>';
+
+    html += '<div class="model-io-dashboard-grid">';
+    html += '<div id="modelIoTwinGaugeChart" class="model-io-chart"></div>';
+    html += '<div id="modelIoTwinDimensionChart" class="model-io-chart model-io-chart-tall"></div>';
+    html += '<div id="modelIoCoverageChart" class="model-io-chart"></div>';
+    html += '<div id="modelIoSeverityChart" class="model-io-chart"></div>';
+    html += '<div id="modelIoCategoryChart" class="model-io-chart"></div>';
+    html += '<div id="modelIoStandardsChart" class="model-io-chart"></div>';
+    html += '</div>';
+
+    html += '<div class="transient-section-head"><h5>成熟度门槛与 IO 证据</h5><span>弱链门槛 / round-trip conformance</span></div>';
+    html += '<div class="model-io-split-grid">';
+    html += '<div class="model-io-panel"><div class="model-io-panel-title">Fidelity / Integration Gates</div>';
+    html += '<div class="transient-table-scroll model-io-compact-scroll"><table><thead><tr><th>门槛</th><th>轴</th><th>等级</th><th>状态</th><th>证据</th></tr></thead><tbody>';
+    if (twinGates.length) {
+      twinGates.forEach(g => {
+        html += `<tr>
+          <td>${escapeHtml(g.gate_id || '')}</td>
+          <td>${escapeHtml(g.axis || '')}</td>
+          <td>${escapeHtml(String(g.level ?? ''))}</td>
+          <td>${modelIoStatusBadge(g.passed)}</td>
+          <td>${escapeHtml(g.evidence || g.title || '')}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="5">暂无门槛证据；请先加载或同步系统。</td></tr>';
+    }
+    html += '</tbody></table></div></div>';
+
+    html += '<div class="model-io-panel"><div class="model-io-panel-title">Round-trip / Adapter Evidence</div>';
+    html += '<div class="transient-table-scroll model-io-compact-scroll"><table><thead><tr><th>适配器</th><th>层级</th><th>一致性</th><th>保真</th><th>字段</th></tr></thead><tbody>';
+    if (roundTripRows.length) {
+      roundTripRows.forEach(rt => {
+        const checked = Number(rt.fields_checked || 0);
+        const mismatched = Number(rt.fields_mismatched || 0);
+        html += `<tr>
+          <td>${escapeHtml(rt.adapter || '')}</td>
+          <td>${escapeHtml(rt.level || '')}</td>
+          <td>${modelIoStatusBadge(rt.passed)}</td>
+          <td>${modelIoStatusBadge(rt.lossless, '无损', '有投影损失')}</td>
+          <td>${escapeHtml(`${checked - mismatched}/${checked} matched`)}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="5">暂无存档 round-trip 证据。</td></tr>';
+    }
+    html += '</tbody></table></div></div>';
+    html += '</div>';
+
+    const adapterRows = [
+      ['Internal JSON', 'json_policy', `${total}/${total}`, 'rich binding'],
+      ['Canonical Model', 'canonical_policy', `${mappings.length} registered`, 'canonical projection'],
+      ['GridLAB-D', 'gridlabd_policy', `${gridRepresented}/${gridRepresented + gridUnrepresented || total}`, 'external snapshot'],
+      ['OpenDSS', 'opendss_policy', `${openDssRepresented}/${openDssRepresented + openDssUnrepresented || total}`, 'external snapshot'],
+    ];
+    html += '<div class="transient-section-head"><h5>适配器能力矩阵</h5><span>registry policy / 当前实例覆盖</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>格式</th><th>绑定</th><th>Registry策略分布</th><th>当前覆盖</th></tr></thead><tbody>';
+    adapterRows.forEach(([label, field, current, binding]) => {
+      html += `<tr>
+        <td>${escapeHtml(label)}</td>
+        <td>${escapeHtml(binding)}</td>
+        <td>${escapeHtml(modelIoPolicyCountsText(modelIoPolicyCounts(mappings, field)))}</td>
+        <td>${escapeHtml(current)}</td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+
+    const telemetryDims = new Set(['TelemetryObservability', 'StateSynchronization', 'ScenarioEvents', 'ReliabilityLifecycle', 'ProvenanceGovernance', 'NumericalValidation']);
+    const telemetryRows = twinDimensions.filter(row => telemetryDims.has(row.dimension));
+    html += '<div class="transient-section-head"><h5>遥测 / 校准 / 验证准备</h5><span>I1 / I2 相关维度</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>维度</th><th>得分</th><th>发现数</th><th>主要缺口</th></tr></thead><tbody>';
+    if (telemetryRows.length) {
+      telemetryRows.forEach(dim => {
+        const maxScore = Number(dim.max_score || 0);
+        const pct = maxScore > 0 ? `${(100 * Number(dim.score || 0) / maxScore).toFixed(0)}%` : '—';
+        const gaps = twinFindings
+          .filter(f => f.dimension === dim.dimension)
+          .slice(0, 2)
+          .map(f => `${f.criterion_id || ''} ${f.message || f.title || ''}`.trim())
+          .filter(Boolean)
+          .map(escapeHtml)
+          .join('<br>');
+        html += `<tr>
+          <td>${escapeHtml(modelIoDimensionLabel(dim.dimension))}</td>
+          <td>${escapeHtml(pct)}</td>
+          <td>${escapeHtml(String(dim.findings ?? 0))}</td>
+          <td>${gaps || '—'}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="4">当前尚无 I1/I2 相关维度证据。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
+    const diagSummaryRows = [
+      ['GridLAB-D', Array.isArray(diagnostics.gridlabd) ? diagnostics.gridlabd.length : 0],
+      ['OpenDSS', Array.isArray(diagnostics.opendss) ? diagnostics.opendss.length : 0],
+    ];
+    html += '<div class="transient-section-head"><h5>导入诊断契约</h5><span>records / summary / binding level / unit assertion</span></div>';
+    html += '<div class="model-io-contract-grid">';
+    html += `<div class="model-io-contract-item"><strong>records</strong><span>${escapeHtml(diagSummaryRows.map(([k, n]) => `${k}:${n}`).join(' / '))}</span></div>`;
+    html += `<div class="model-io-contract-item"><strong>summary</strong><span>${escapeHtml(`参数错误 ${errors} / 警告 ${warnings} / 提示 ${infos}`)}</span></div>`;
+    html += `<div class="model-io-contract-item"><strong>binding level</strong><span>${escapeHtml(`F${twinSummary.fidelity_level ?? 0} / I${twinSummary.integration_level ?? 0}`)}</span></div>`;
+    html += `<div class="model-io-contract-item"><strong>unit assertion</strong><span>${escapeHtml(`${parameterRules.filter(r => r.units).length}/${parameterRules.length} rules with units`)}</span></div>`;
+    html += '</div>';
+
+    html += '<div class="transient-section-head"><h5>数字孪生就绪诊断</h5><span>identity / topology / parameters / dynamics / telemetry / validation / governance</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>等级</th><th>维度</th><th>准则</th><th>得分</th><th>标准依据</th><th>证据</th><th>改进方向</th></tr></thead><tbody>';
+    if (twinFindings.length) {
+      twinFindings.forEach(row => {
+        const maxScore = Number(row.max_score || 0);
+        const scorePct = maxScore > 0 ? `${(100 * Number(row.score || 0) / maxScore).toFixed(0)}%` : '—';
+        const basis = `${row.standard_family || ''}${row.standard_profile ? ` / ${row.standard_profile}` : ''}`.replace(/^ \/ /, '');
+        html += `<tr>
+          <td><span class="model-io-severity ${modelIoSeverityClass(row.severity)}">${escapeHtml(row.severity || '')}</span></td>
+          <td>${escapeHtml(modelIoDimensionLabel(row.dimension))}</td>
+          <td>${escapeHtml(row.criterion_id || '')}<br>${escapeHtml(row.title || '')}</td>
+          <td>${escapeHtml(scorePct)}</td>
+          <td>${escapeHtml(basis || 'Native')}</td>
+          <td>${escapeHtml(row.evidence || '')}</td>
+          <td>${escapeHtml(row.message || '')}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="7">当前尚未加载系统；请先加载算例或同步画布。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
+    html += '<div class="transient-section-head"><h5>当前系统元件覆盖</h5><span>JSON / Canonical / GridLAB-D / OpenDSS</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>元件</th><th>路径</th><th>数量</th><th>JSON</th><th>Canonical</th><th>GridLAB-D</th><th>OpenDSS</th><th>验证范围</th><th>标准模型</th></tr></thead><tbody>';
+    if (coverage.length) {
+      coverage.forEach(row => {
+        const profiles = Array.isArray(row.standard_profiles) ? row.standard_profiles : [];
+        const profileText = profiles.map(p => `${p.family || ''}:${p.model_name || p.profile || ''}`.replace(/^:/, '')).filter(Boolean).join(', ');
+        html += `<tr>
+          <td>${escapeHtml(row.component_type || '')}</td>
+          <td>${escapeHtml(row.collection_path || '')}</td>
+          <td>${escapeHtml(String(row.count ?? 0))}</td>
+          <td>${escapeHtml(row.json_policy || '')}</td>
+          <td>${escapeHtml(row.canonical_policy || '')}</td>
+          <td>${escapeHtml(row.gridlabd_policy || '')}</td>
+          <td>${escapeHtml(row.opendss_policy || '')}</td>
+          <td>${escapeHtml(row.verification_scope || '')}</td>
+          <td>${escapeHtml(profileText || '—')}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="9">当前后端尚未加载系统；请先加载算例或同步画布。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
+    const diagGroups = [
+      ['GridLAB-D', Array.isArray(diagnostics.gridlabd) ? diagnostics.gridlabd : []],
+      ['OpenDSS', Array.isArray(diagnostics.opendss) ? diagnostics.opendss : []],
+    ];
+    html += '<div class="transient-section-head"><h5>外部工具诊断</h5><span>Unsupported / Internal-only / Diagnostic-only 会列出</span></div>';
+    html += '<div class="transient-mini-grid">';
+    diagGroups.forEach(([name, rows]) => {
+      html += `<div class="transient-mini-card"><strong>${escapeHtml(name)}</strong><span>${rows.length ? rows.map(escapeHtml).join('<br>') : '当前系统内元件均有可表示策略。'}</span></div>`;
+    });
+    html += '</div>';
+
+    html += '<div class="transient-section-head"><h5>参数健康诊断</h5><span>static / dynamic / transient / failure / reliability</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>等级</th><th>元件</th><th>位置</th><th>参数域</th><th>参数</th><th>当前值</th><th>建议范围</th><th>标准依据</th><th>说明</th></tr></thead><tbody>';
+    if (findings.length) {
+      findings.slice(0, 300).forEach(row => {
+        const component = row.component_name || `${row.component_type || ''} ${row.component_index ?? row.component_position ?? ''}`;
+        const valueText = row.value == null ? '—' : String(row.value);
+        const basis = `${row.standard_family || ''}${row.standard_profile ? ` / ${row.standard_profile}` : ''}`.replace(/^ \/ /, '');
+        html += `<tr>
+          <td><span class="model-io-severity ${modelIoSeverityClass(row.severity)}">${escapeHtml(row.severity || '')}</span></td>
+          <td>${escapeHtml(component)}</td>
+          <td>${escapeHtml(row.collection_path || '')}${row.component_position != null ? ` #${escapeHtml(String(row.component_position))}` : ''}</td>
+          <td>${escapeHtml(row.category || '')}</td>
+          <td>${escapeHtml(row.parameter_path || '')}</td>
+          <td>${escapeHtml(valueText)}</td>
+          <td>${escapeHtml(modelIoRangeText(row))}</td>
+          <td>${escapeHtml(basis || 'Native')}</td>
+          <td>${escapeHtml(row.message || '')}</td>
+        </tr>`;
+      });
+      if (findings.length > 300) {
+        html += `<tr><td colspan="9">仅显示前 300 条；总计 ${escapeHtml(String(findings.length))} 条。</td></tr>`;
+      }
+    } else {
+      html += '<tr><td colspan="9">当前已检查参数没有发现越界或缺失项。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
+    const profileRows = [];
+    mappings.forEach(mapping => {
+      (Array.isArray(mapping.standard_profiles) ? mapping.standard_profiles : []).forEach(profile => {
+        profileRows.push({ mapping, profile });
+      });
+    });
+    html += '<div class="transient-section-head"><h5>标准模型注册表</h5><span>行业标准与本模块 rich/canonical 映射方向</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>元件类型</th><th>标准族</th><th>Profile</th><th>模型名</th><th>策略</th><th>验证</th><th>说明</th></tr></thead><tbody>';
+    if (profileRows.length) {
+      profileRows.forEach(({ mapping, profile }) => {
+        html += `<tr>
+          <td>${escapeHtml(mapping.component_type || '')}</td>
+          <td>${escapeHtml(profile.family || '')}</td>
+          <td>${escapeHtml(profile.profile || '')}</td>
+          <td>${escapeHtml(profile.model_name || '')}</td>
+          <td>${escapeHtml(profile.policy || '')}</td>
+          <td>${escapeHtml(profile.verification_scope || '')}</td>
+          <td>${escapeHtml(profile.notes || '')}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="7">尚未注册行业标准 profile。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
+    const ruleRows = parameterRules.slice(0, 360);
+    html += '<div class="transient-section-head"><h5>参数规则库</h5><span>可用于导入校验、参数估计和标准兼容审查</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>元件</th><th>路径</th><th>参数域</th><th>参数</th><th>范围</th><th>必填</th><th>标准族</th><th>Profile</th><th>等级</th></tr></thead><tbody>';
+    if (ruleRows.length) {
+      ruleRows.forEach(rule => {
+        html += `<tr>
+          <td>${escapeHtml(rule.component_type || '')}</td>
+          <td>${escapeHtml(rule.collection_path || '')}</td>
+          <td>${escapeHtml(rule.category || '')}</td>
+          <td>${escapeHtml(rule.parameter_path || '')}</td>
+          <td>${escapeHtml(modelIoRangeText(rule))}</td>
+          <td>${rule.required ? '是' : '否'}</td>
+          <td>${escapeHtml(rule.standard_family || '')}</td>
+          <td>${escapeHtml(rule.standard_profile || '')}</td>
+          <td>${escapeHtml(rule.range_severity || rule.missing_severity || '')}</td>
+        </tr>`;
+      });
+      if (parameterRules.length > ruleRows.length) {
+        html += `<tr><td colspan="9">仅显示前 ${ruleRows.length} 条；总计 ${escapeHtml(String(parameterRules.length))} 条。</td></tr>`;
+      }
+    } else {
+      html += '<tr><td colspan="9">尚未注册参数规则。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
+    html += '<div class="transient-section-head"><h5>数字孪生准则库</h5><span>Data IO 从文件交换走向运行孪生的统一验收口径</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>准则</th><th>维度</th><th>权重</th><th>失败等级</th><th>标准/Profile</th><th>说明</th></tr></thead><tbody>';
+    if (twinCriteria.length) {
+      twinCriteria.forEach(row => {
+        const basis = `${row.standard_family || ''}${row.standard_profile ? ` / ${row.standard_profile}` : ''}`.replace(/^ \/ /, '');
+        html += `<tr>
+          <td>${escapeHtml(row.criterion_id || '')}<br>${escapeHtml(row.title || '')}</td>
+          <td>${escapeHtml(modelIoDimensionLabel(row.dimension))}</td>
+          <td>${escapeHtml(String(row.weight ?? ''))}</td>
+          <td>${escapeHtml(row.severity_if_failed || '')}</td>
+          <td>${escapeHtml(basis || 'Native')}</td>
+          <td>${escapeHtml(row.description || '')}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="6">尚未注册数字孪生准则。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
+    const el = document.getElementById(targetId);
+    if (el) {
+      el.innerHTML = html;
+      drawModelIoCharts(data);
+      requestAnimationFrame(() => drawModelIoCharts(data));
+      setTimeout(() => drawModelIoCharts(data), 250);
+    }
+  }
+
+  function renderTransientCompatibilityReport(data) {
+    renderModelCompatibilityReport(data, {
+      targetId: 'modelIoResults',
+      resultGroup: 'modelIO',
+      title: '暂态模型兼容性检查',
+      subtitle: '从暂态仿真入口触发，报告集中到模型IO',
+    });
+  }
+
+  async function runModelCompatibility(options = {}) {
+    setStatus('模型兼容性检查中...', 'busy');
+    if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+    const data = await apiGet('/api/io/model_compatibility');
+    if (data && !data.error) {
+      switchTab('results');
+      renderModelCompatibilityReport(data, options);
+      setStatus('模型兼容性检查完成');
+    } else {
+      const msg = data?.error || '模型兼容性检查失败';
+      log(msg, 'error');
+      setStatus(msg, 'error');
+    }
+  }
+
+  async function runTransientCompatibility() {
+    await runModelCompatibility({
+      targetId: 'modelIoResults',
+      resultGroup: 'modelIO',
+      title: '暂态模型兼容性检查',
+      subtitle: '动态模型 / rich-canonical / GridLAB-D / OpenDSS 兼容性',
+    });
+  }
+
+  function drawTransientDashboard(data) {
+    if (typeof Plotly === 'undefined') return;
+    const tab = document.getElementById('tabResults');
+    if (tab && !tab.classList.contains('active')) {
+      return;
+    }
+    const t = data.time_s || [];
+    const cfg = {
+      responsive: true,
+      displaylogo: false,
+      modeBarButtonsToRemove: ['select2d', 'lasso2d'],
+    };
+    const voltageChart = document.getElementById('trVoltageChart');
+    if (voltageChart) {
+      Plotly.react(voltageChart, [
+        { x: t, y: data.max_ac_voltage_pu || [], mode: 'lines', name: 'AC max', line: { color: '#61afef' } },
+        { x: t, y: data.min_ac_voltage_pu || [], mode: 'lines', name: 'AC min', line: { color: '#e06c75' } },
+        { x: t, y: data.max_dc_voltage_pu || [], mode: 'lines', name: 'DC max', line: { color: '#98c379', dash: 'dot' } },
+        { x: t, y: data.min_dc_voltage_pu || [], mode: 'lines', name: 'DC min', line: { color: '#d19a66', dash: 'dot' } },
+      ], transientPlotLayout('电压包络', 'p.u.'), cfg);
+    }
+    const acHeat = document.getElementById('trAcHeatmap');
+    if (acHeat && Array.isArray(data.ac_voltage_matrix) && data.ac_voltage_matrix.length) {
+      Plotly.react(acHeat, [{
+        z: data.ac_voltage_matrix,
+        x: t,
+        y: data.ac_voltage_matrix.map((_, i) => `n${i + 1}`),
+        type: 'heatmap',
+        colorscale: 'Viridis',
+        colorbar: { title: 'p.u.' },
+      }], transientPlotLayout('三相节点电压热图', ''), cfg);
+    }
+    const freqChart = document.getElementById('trFreqChart');
+    const gfl = transientDeviceByType(data, type => type.includes('GridFollowing'));
+    const gfm = transientDeviceByType(data, type => type.includes('GridForming'));
+    const gens = transientTraditionalGenerators(data);
+    const converters = transientConverters(data);
+    const freqTraces = [];
+    gfl.slice(0, 4).forEach((dev, i) => {
+      const tr = transientMetricTrace(dev, 'pll_frequency_hz', `${dev.name} PLL`, ['#61afef', '#56b6c2', '#c678dd', '#e5c07b'][i % 4]);
+      if (tr) freqTraces.push(tr);
+    });
+    gfm.slice(0, 4).forEach((dev, i) => {
+      const tr = transientMetricTrace(dev, 'frequency_hz', `${dev.name} GFM`, ['#98c379', '#d19a66', '#e06c75', '#7c3aed'][i % 4]);
+      if (tr) freqTraces.push(tr);
+    });
+    if (freqChart) {
+      if (freqTraces.length) Plotly.react(freqChart, freqTraces, transientPlotLayout('控制频率 / PLL', 'Hz'), cfg);
+      else freqChart.innerHTML = '<p class="empty-hint">无 GFL/GFM 频率轨迹</p>';
+    }
+    const powerChart = document.getElementById('trPowerChart');
+    const pTraces = [];
+    converters.slice(0, 6).forEach((dev, i) => {
+      const tr = transientMetricTrace(dev, 'p_mw', `${dev.name} P`, ['#61afef', '#98c379', '#d19a66', '#e06c75', '#c678dd', '#56b6c2'][i % 6]);
+      if (tr) pTraces.push(tr);
+    });
+    if (powerChart) {
+      if (pTraces.length) Plotly.react(powerChart, pTraces, transientPlotLayout('逆变器有功响应', 'MW'), cfg);
+      else powerChart.innerHTML = '<p class="empty-hint">无逆变器功率轨迹</p>';
+    }
+    const currentChart = document.getElementById('trCurrentChart');
+    const iTraces = [];
+    gfl.slice(0, 4).forEach((dev, i) => {
+      const tr = transientMetricTrace(dev, 'i_mag_pu', `${dev.name} |I|`, ['#61afef', '#56b6c2', '#c678dd', '#e5c07b'][i % 4]);
+      if (tr) iTraces.push(tr);
+    });
+    gfm.slice(0, 4).forEach((dev, i) => {
+      const tr = transientMetricTrace(dev, 'i_rms_pu', `${dev.name} Irms`, ['#98c379', '#d19a66', '#e06c75', '#7c3aed'][i % 4]);
+      if (tr) iTraces.push(tr);
+    });
+    if (currentChart) {
+      if (iTraces.length) Plotly.react(currentChart, iTraces, transientPlotLayout('逆变器电流限幅', 'p.u.'), cfg);
+      else currentChart.innerHTML = '<p class="empty-hint">无逆变器电流轨迹</p>';
+    }
+    const dcLinkChart = document.getElementById('trDcLinkChart');
+    if (dcLinkChart) {
+      const dcLinkTraces = converters.slice(0, 6).map((dev, i) =>
+        transientMetricTrace(dev, 'vdc_link_pu', `${dev.name} Vdc`, ['#56b6c2', '#98c379', '#d19a66', '#c678dd', '#61afef', '#e06c75'][i % 6])
+      ).filter(Boolean);
+      if (dcLinkTraces.length) Plotly.react(dcLinkChart, dcLinkTraces, transientPlotLayout('DC链电压状态', 'p.u.'), cfg);
+      else dcLinkChart.innerHTML = '<p class="empty-hint">未启用动态 DC 链</p>';
+    }
+    const genFreqChart = document.getElementById('trGenFreqChart');
+    if (genFreqChart) {
+      const traces = gens.slice(0, 6).map((dev, i) =>
+        transientMetricTrace(dev, 'frequency_hz', `${dev.name} f`, ['#e06c75', '#d19a66', '#98c379', '#61afef', '#c678dd', '#56b6c2'][i % 6])
+      ).filter(Boolean);
+      if (traces.length) Plotly.react(genFreqChart, traces, transientPlotLayout('传统机组转速/频率', 'Hz'), cfg);
+      else genFreqChart.innerHTML = '<p class="empty-hint">无传统同步机/外部电网频率轨迹</p>';
+    }
+    const genPowerChart = document.getElementById('trGenPowerChart');
+    if (genPowerChart) {
+      const traces = [];
+      gens.slice(0, 4).forEach((dev, i) => {
+        const p = transientMetricTrace(dev, 'p_mw', `${dev.name} Pe`, ['#61afef', '#98c379', '#e06c75', '#c678dd'][i % 4]);
+        const pm = transientMetricTrace(dev, 'p_mech_mw', `${dev.name} Pm`, ['#61afef', '#98c379', '#e06c75', '#c678dd'][i % 4]);
+        if (p) traces.push(p);
+        if (pm) {
+          pm.line = { ...(pm.line || {}), dash: 'dot' };
+          traces.push(pm);
+        }
+      });
+      if (traces.length) Plotly.react(genPowerChart, traces, transientPlotLayout('传统机组电磁/机械功率', 'MW'), cfg);
+      else genPowerChart.innerHTML = '<p class="empty-hint">无传统机组功率轨迹</p>';
+    }
+    const observerChart = document.getElementById('trObserverChart');
+    if (observerChart) {
+      const palette = ['#61afef', '#e06c75', '#98c379', '#d19a66', '#c678dd', '#56b6c2', '#e5c07b', '#7c3aed'];
+      const traces = [];
+      transientObserverRows(data).forEach((row, i) => {
+        let tr = null;
+        if (row.kind === 'bus') {
+          tr = transientBusVoltageTrace(data, row.domain || 'AC', row.bus, palette[i % palette.length]);
+        } else if (row.dev) {
+          tr = transientMetricTrace(row.dev, 'v_pos_pu', `${row.name} V`, palette[i % palette.length]) ||
+            transientMetricTrace(row.dev, 'vdc_pu', `${row.name} Vdc`, palette[i % palette.length]);
+        }
+        if (tr) traces.push(tr);
+      });
+      if (traces.length) Plotly.react(observerChart, traces, transientPlotLayout('本地观测点电压', 'p.u.'), cfg);
+      else observerChart.innerHTML = '<p class="empty-hint">暂无可用本地观测轨迹</p>';
+    }
+    requestAnimationFrame(() => {
+      document.querySelectorAll('#transientResults .js-plotly-plot').forEach(el => {
+        try { Plotly.Plots.resize(el); } catch (_) {}
+      });
+    });
+  }
+
+  function showTransientResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('transient');
+    const nf = (v, d = 3) => Number.isFinite(Number(v)) ? Number(v).toFixed(d) : '—';
+    const final = data.final || {};
+    const init = data.initialization || {};
+    const gflCount = transientDeviceByType(data, type => type.includes('GridFollowing')).length;
+    const gfmCount = transientDeviceByType(data, type => type.includes('GridForming')).length;
+    const genCount = transientTraditionalGenerators(data).length;
+    const initStatus = init.power_flow_requested
+      ? (init.power_flow_converged ? 'PF收敛' : (init.fallback_voltage_setpoints ? 'PF未收敛/回退' : 'PF未收敛'))
+      : '设定值初始化';
+    let html = '<div class="transient-kpi-grid">';
+    [
+      ['初始点', initStatus, 't=0'],
+      ['步数', data.steps ?? 0, ''],
+      ['Newton', data.newton_iterations ?? 0, 'iter'],
+      ['GFL', gflCount, '台'],
+      ['GFM', gfmCount, '台'],
+      ['传统机组', genCount, '台'],
+      ['扰动数', Array.isArray(data.scheduled_events) ? data.scheduled_events.length : 0, '个'],
+      ['AC最低电压', nf(final.min_ac_voltage_pu), 'p.u.'],
+      ['DC最高电压', nf(final.max_dc_voltage_pu), 'p.u.'],
+    ].forEach(([label, value, unit]) => {
+      html += `<div class="transient-kpi"><div class="transient-kpi-label">${escapeHtml(label)}</div><div class="transient-kpi-value">${escapeHtml(String(value))}</div><div class="transient-kpi-label">${escapeHtml(unit)}</div></div>`;
+    });
+    html += '</div>';
+    if (Array.isArray(data.warnings) && data.warnings.length) {
+      html += `<div style="color:var(--orange);font-size:12px;margin:6px 0;">${data.warnings.map(escapeHtml).join('<br>')}</div>`;
+    }
+    const initWarnings = Array.isArray(init.warnings) && init.warnings.length
+      ? `<div class="transient-init-warnings">${init.warnings.map(escapeHtml).join('<br>')}</div>` : '';
+    html += '<div class="transient-init-panel">';
+    html += `<div><span>事件前初始点</span><strong>${escapeHtml(initStatus)}</strong></div>`;
+    html += `<div><span>PF迭代</span><strong>${escapeHtml(String(init.iterations ?? 0))}</strong></div>`;
+    html += `<div><span>PF残差</span><strong>${Number.isFinite(Number(init.residual)) ? Number(init.residual).toExponential(2) : '—'}</strong></div>`;
+    html += `<div><span>动态平衡</span><strong>${init.dynamic_trim_converged ? 'trim收敛' : 'trim未收敛'} / ${escapeHtml(String(init.dynamic_trim_iterations ?? 0))}次</strong></div>`;
+    html += `<div><span>快速状态残差</span><strong>${Number.isFinite(Number(init.dynamic_fast_dxdt_inf_norm)) ? Number(init.dynamic_fast_dxdt_inf_norm).toExponential(2) : '—'}</strong></div>`;
+    html += `<div><span>AC电压范围</span><strong>${nf(init.min_ac_voltage_pu)} - ${nf(init.max_ac_voltage_pu)} pu</strong></div>`;
+    html += `<div><span>DC电压范围</span><strong>${nf(init.min_dc_voltage_pu)} - ${nf(init.max_dc_voltage_pu)} pu</strong></div>`;
+    html += initWarnings;
+    html += '</div>';
+    const scheduledEvents = Array.isArray(data.scheduled_events) ? data.scheduled_events : [];
+    const appliedEvents = Array.isArray(data.applied_events) ? data.applied_events : [];
+    html += '<div class="transient-section-head"><h5>扰动序列</h5><span>计划 / 实际触发</span></div>';
+    html += '<div class="transient-mini-grid">';
+    if (scheduledEvents.length) {
+      scheduledEvents.forEach((event, i) => {
+        html += `<div class="transient-mini-card"><strong>${escapeHtml(event.label || transientEventLabel(event.type) || `Event ${i + 1}`)}</strong><span>${escapeHtml(transientFormatEvent(event))}</span></div>`;
+      });
+    } else {
+      html += '<div class="transient-mini-card"><strong>无扰动</strong><span>本次为事件前平衡点保持/小扰动检查。</span></div>';
+    }
+    html += `<div class="transient-mini-card"><strong>已触发</strong><span>${appliedEvents.length ? appliedEvents.map(escapeHtml).join('<br>') : '无'}</span></div>`;
+    html += '</div>';
+    const observerRows = transientObserverRows(data);
+    const maps = typeof Canvas !== 'undefined' && Canvas.getCompBusMap ? Canvas.getCompBusMap() : null;
+    html += '<div class="transient-section-head"><h5>本地观测点</h5><span>点击卡片定位画布元件</span></div>';
+    html += '<div class="transient-mini-grid">';
+    if (observerRows.length) {
+      observerRows.forEach(row => {
+        const compId = row.dev ? rowCanvasCompId(row.dev, maps)
+          : (row.domain === 'DC' ? maps?.dc?.[row.bus] : maps?.ac?.[row.bus]);
+        const cid = parseInt(compId, 10);
+        const clickable = Number.isInteger(cid);
+        const attr = clickable
+          ? ` class="transient-mini-card topo-clickable" data-comp-id="${cid}" onclick="Canvas.panToComponent(${cid})"`
+          : ' class="transient-mini-card"';
+        html += `<div${attr}><strong>${escapeHtml(row.name || 'Observer')}</strong><span>${escapeHtml(row.reason || '')}${row.bus ? `<br>${escapeHtml(row.domain || 'AC')} bus ${escapeHtml(String(row.bus))}` : ''}</span></div>`;
+      });
+    } else {
+      html += '<div class="transient-mini-card"><strong>暂无观测点</strong><span>加载含母线或动态设备的算例后自动生成。</span></div>';
+    }
+    html += '</div>';
+    html += transientRenderModelCompatibility(data);
+    html += '<div class="transient-dashboard-grid">';
+    html += '<div id="trVoltageChart" class="transient-chart transient-chart-wide"></div>';
+    html += '<div id="trAcHeatmap" class="transient-chart transient-chart-wide"></div>';
+    html += '<div id="trObserverChart" class="transient-chart transient-chart-wide"></div>';
+    html += '<div id="trGenFreqChart" class="transient-chart"></div>';
+    html += '<div id="trGenPowerChart" class="transient-chart"></div>';
+    html += '<div id="trFreqChart" class="transient-chart"></div>';
+    html += '<div id="trPowerChart" class="transient-chart"></div>';
+    html += '<div id="trCurrentChart" class="transient-chart"></div>';
+    html += '<div id="trDcLinkChart" class="transient-chart"></div>';
+    html += '</div>';
+    html += '<h5>动态设备</h5><table><thead><tr><th>设备</th><th>类型</th><th>母线</th><th>P(MW)</th><th>Q(Mvar)</th><th>频率/PLL(Hz)</th><th>|I|(pu)</th></tr></thead><tbody>';
+    (data.device_series || []).slice(0, 80).forEach(dev => {
+      const vals = dev.values || {};
+      const last = arr => Array.isArray(arr) && arr.length ? arr[arr.length - 1] : undefined;
+      const freq = last(vals.frequency_hz) ?? last(vals.pll_frequency_hz);
+      const imag = last(vals.i_mag_pu) ?? last(vals.i_rms_pu);
+      const compId = rowCanvasCompId(dev, maps);
+      const attr = compClickAttr(compId);
+      html += `<tr${attr}><td>${escapeHtml(dev.name || '')}</td><td>${escapeHtml(dev.type || '')}</td><td>${escapeHtml(String(dev.bus ?? ''))}</td><td>${nf(last(vals.p_mw), 3)}</td><td>${nf(last(vals.q_mvar), 3)}</td><td>${nf(freq, 3)}</td><td>${nf(imag, 4)}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    const el = document.getElementById('transientResults');
+    if (el) el.innerHTML = html;
+    drawTransientDashboard(data);
   }
 
   // Dispatch the harmonics run by the selected analysis mode.
@@ -3700,8 +5375,25 @@ const App = (() => {
       }
     }
 
+    data.cost_formula = data.cost_formula || data.objective_formula || {};
     const fmt = (x, n = 0) => Number(x || 0).toLocaleString('en-US', { maximumFractionDigits: n });
+    const monthlyCostValue = (m) => firstFiniteNumber(
+      m?.total_cost, m?.operating_cost, m?.total_operating_cost,
+      m?.generation_cost, m?.total_generation_cost,
+      m?.cost, m?.production_cost, m?.objective_value);
+    const costFormulaTitle = data.cost_formula.title || '年度运行成本';
+    const costFormulaText = data.cost_formula.formula_text || data.cost_formula.description || '';
+    const costFormulaSource = data.cost_formula.dispatch_basis || data.cost_formula.source || data.solver_name || '';
     const feasClass = data.feasible ? 'result-converged' : 'result-failed';
+    const annParExec = data.parallel_execution || {};
+    const annWorkers = Number(data.parallel_workers || 1);
+    const annParLabel = data.parallel_daily_effective
+      ? `按日并行 (${annWorkers}线程)`
+      : (data.parallel_daily ? '安全串行' : '串行');
+    const annParDetail = annParExec.work_items != null
+      ? ` · ${annParExec.work_items}项 · HW ${annParExec.hardware_threads || '—'}`
+        + (annParExec.guard_reason ? ` · ${escapeHtml(annParExec.guard_reason)}` : '')
+      : '';
     const summary = document.getElementById('annualSimSummary');
     if (summary) {
       summary.innerHTML = `
@@ -3712,9 +5404,13 @@ const App = (() => {
         <div class="result-item"><span class="result-label">时间步数</span>
           <span class="result-value">${data.num_steps} (${data.step_duration_hr}h)</span></div>
         <div class="result-item"><span class="result-label">并行</span>
-          <span class="result-value">${data.parallel_daily ? '按日并行' : '串行'}</span></div>
+          <span class="result-value">${annParLabel}${annParDetail}</span></div>
         <div class="result-item"><span class="result-label">${data.objective_label || '年总运行成本 ($)'}</span>
           <span class="result-value">$${fmt(data.objective_value != null ? data.objective_value : data.total_cost)}</span></div>
+        <div class="result-item"><span class="result-label">成本口径</span>
+          <span class="result-value" title="${escapeHtml(costFormulaText)}">${escapeHtml(costFormulaTitle)}</span></div>
+        <div class="result-item"><span class="result-label">成本来源</span>
+          <span class="result-value">${escapeHtml(costFormulaSource || '—')}</span></div>
         <div class="result-item"><span class="result-label">墙钟用时</span>
           <span class="result-value">${(data._wallSeconds || 0).toFixed(1)} s</span></div>
         <div class="result-item"><span class="result-label">总发电量</span>
@@ -3783,17 +5479,29 @@ const App = (() => {
     if (mc && window.Plotly && ms.length) {
       const months = ms.map((m, i) => ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'][m.block_id != null ? m.block_id : i] || `块${i}`);
       Plotly.react(mc, [
-        { x: months, y: ms.map(m => m.total_cost), name: '月成本($)', type: 'bar', marker: { color: '#8e44ad' } },
-      ], Object.assign({ title: '月度成本', xaxis: theme.xaxis, yaxis: Object.assign({ title: '$' }, theme.yaxis) }, theme), { responsive: true });
+        { x: months, y: ms.map(monthlyCostValue), name: '月运行成本($)', type: 'bar', marker: { color: '#8e44ad' } },
+      ], Object.assign({
+        title: `月度成本 — ${costFormulaTitle}`,
+        xaxis: theme.xaxis,
+        yaxis: Object.assign({ title: '$' }, theme.yaxis),
+        annotations: costFormulaText ? [{
+          text: escapeHtml(costFormulaText),
+          xref: 'paper', yref: 'paper', x: 0, y: -0.22, showarrow: false,
+          align: 'left', font: { size: 10, color: '#8a909c' },
+        }] : [],
+      }, theme), { responsive: true });
+    } else if (mc) {
+      mc.innerHTML = '<p class="empty-hint">暂无月度成本数据</p>';
     }
 
     // Monthly table.
     const mt = document.getElementById('annualSimMonthlyTable');
     if (mt && ms.length) {
-      let html = '<table class="tbl"><thead><tr><th>月</th><th>发电(MWh)</th><th>负荷(MWh)</th><th>新能源(MWh)</th><th>弃电(MWh)</th><th>网损(MWh)</th><th>成本($)</th><th>PF收敛</th></tr></thead><tbody>';
+      let html = `<div class="cost-formula-box"><strong>${escapeHtml(costFormulaTitle)}</strong>${costFormulaText ? `<span>${escapeHtml(costFormulaText)}</span>` : ''}</div>`;
+      html += '<table class="tbl"><thead><tr><th>月</th><th>发电(MWh)</th><th>负荷(MWh)</th><th>新能源(MWh)</th><th>弃电(MWh)</th><th>网损(MWh)</th><th>成本($)</th><th>PF收敛</th></tr></thead><tbody>';
       ms.forEach((m, i) => {
         const mn = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'][m.block_id != null ? m.block_id : i] || `块${i}`;
-        html += `<tr><td>${mn}</td><td>${fmt(m.total_gen_mwh)}</td><td>${fmt(m.total_load_mwh)}</td><td>${fmt(m.total_renewable_mwh)}</td><td>${fmt(m.total_curtailment_mwh)}</td><td>${fmt(m.total_loss_mwh)}</td><td>${fmt(m.total_cost)}</td><td>${m.num_pf_converged}/${m.num_steps}</td></tr>`;
+        html += `<tr><td>${mn}</td><td>${fmt(m.total_gen_mwh)}</td><td>${fmt(m.total_load_mwh)}</td><td>${fmt(m.total_renewable_mwh)}</td><td>${fmt(m.total_curtailment_mwh)}</td><td>${fmt(m.total_loss_mwh)}</td><td>${fmt(monthlyCostValue(m))}</td><td>${m.num_pf_converged}/${m.num_steps}</td></tr>`;
       });
       html += '</tbody></table>';
       mt.innerHTML = html;
@@ -3878,6 +5586,15 @@ const App = (() => {
     const objLabel = data.objective_label || '目标函数值';
     const objVal = (data.objective_value != null) ? data.objective_value : data.total_generation_cost;
     const solverTag = data.uc_solver_name || data.uc_solver_requested || '';
+    const parExec = data.parallel_execution || {};
+    const parWorkers = Number(data.parallel_workers || 1);
+    const parLabel = data.parallel_daily_effective
+      ? `按日并行 (${parWorkers}线程)`
+      : (data.parallel_mode === 'parallel-daily/serial-guarded' ? '安全串行' : '串行');
+    const parDetail = parExec.work_items != null
+      ? ` · ${parExec.work_items}项 · HW ${parExec.hardware_threads || '—'}`
+        + (parExec.guard_reason ? ` · ${escapeHtml(parExec.guard_reason)}` : '')
+      : '';
     summary.innerHTML = `
       <div class="result-item"><span class="result-label">时间步数</span>
         <span class="result-value">${data.num_steps}</span></div>
@@ -3890,6 +5607,8 @@ const App = (() => {
         <span class="result-value ${ucClass}">${ucStatus}${data.uc_solver_name ? ' (' + data.uc_solver_name + ')' : ''}</span></div>
       <div class="result-item"><span class="result-label">求解器</span>
         <span class="result-value">${solverTag || '—'}</span></div>
+      <div class="result-item"><span class="result-label">并行</span>
+        <span class="result-value">${parLabel}${parDetail}</span></div>
       <div class="result-item"><span class="result-label">${objLabel}</span>
         <span class="result-value">$${Number(objVal || 0).toFixed(0)}</span></div>
       <div class="result-item"><span class="result-label">约束集</span>
@@ -4108,64 +5827,70 @@ const App = (() => {
 
   function reliabilityComponentTypeLabel(type) {
     const labels = {
-      generator: '发电机',
-      ac_branch: 'AC线路',
-      dc_branch: 'DC线路',
-      vsc_converter: 'VSC换流器',
-      static_generator: '静态电源',
-      renewable_gen: '新能源电源',
-      storage: '储能',
-      transformer_2w: '双绕组变压器',
-      transformer_3w: '三绕组变压器',
-      dcdc_converter: 'DC/DC变换器',
-      dc_circuit_breaker: 'DC断路器',
-      dc_storage: 'DC储能',
-      dc_pv_array: 'DC光伏',
-      dc_static_generator: 'DC静态电源',
-      ac_switch: 'AC开关',
-      ac_circuit_breaker: 'AC断路器',
-      ac_pv_system: 'AC光伏',
-      dc_static_generator_ac: 'DC分布式电源',
-    };
+	      generator: '发电机',
+	      Generator: '发电机',
+	      ac_branch: 'AC线路',
+	      ACBranch: 'AC线路',
+	      dc_branch: 'DC线路',
+	      DCBranch: 'DC线路',
+	      vsc_converter: 'VSC换流器',
+	      VSCConverter: 'VSC换流器',
+	      static_generator: '静态电源',
+	      StaticGen: '静态电源',
+	      renewable_gen: '新能源电源',
+	      RenewableGen: '新能源电源',
+	      storage: '储能',
+	      ACStorage: '储能',
+	      transformer_2w: '双绕组变压器',
+	      Transformer2W: '双绕组变压器',
+	      transformer_3w: '三绕组变压器',
+	      Transformer3W: '三绕组变压器',
+	      dcdc_converter: 'DC/DC变换器',
+	      DCDCConverter: 'DC/DC变换器',
+	      dc_circuit_breaker: 'DC断路器',
+	      DCCircuitBreaker: 'DC断路器',
+	      dc_storage: 'DC储能',
+	      DCStorage: 'DC储能',
+	      dc_pv_array: 'DC光伏',
+	      DCPVArray: 'DC光伏',
+	      dc_static_generator: 'DC静态电源',
+	      DCStaticGen: 'DC静态电源',
+	      ac_switch: 'AC开关',
+	      ACSwitch: 'AC开关',
+	      ac_circuit_breaker: 'AC断路器',
+	      ACCircuitBreaker: 'AC断路器',
+	      ac_pv_system: 'AC光伏',
+	      ACPVSystem: 'AC光伏',
+	      dc_static_generator_ac: 'DC分布式电源',
+	      DCStaticGenAC: 'DC分布式电源',
+	    };
     return labels[type] || componentTypeLabel(type) || type || '—';
   }
 
-  function reliabilityContingencyCompId(c, maps) {
-    if (!c || !maps) return undefined;
-    const bucketName = c.canvas_type;
-    const key = Number(c.canvas_index);
-    if (bucketName && maps[bucketName] && Number.isFinite(key) && maps[bucketName][key] != null) {
-      return maps[bucketName][key];
-    }
-    const fallbackMap = {
-      generator: 'gen',
-      ac_branch: 'branch',
-      dc_branch: 'dcBranch',
-      vsc_converter: 'vsc',
-      static_generator: 'sgen',
-      renewable_gen: 'renGen',
-      storage: 'storage',
-      transformer_2w: 'trafo',
-      transformer_3w: 'trafo3w',
-      dcdc_converter: 'dcdcConverter',
-      dc_circuit_breaker: 'dcCb',
-      dc_storage: 'dcStorage',
-      dc_pv_array: 'dcPv',
-      dc_static_generator: 'dcNativeSgen',
-      ac_switch: 'sw',
-      ac_circuit_breaker: 'cb',
-      ac_pv_system: 'pv',
-      dc_static_generator_ac: 'dcSgen',
+  // Readable labels for failure-mode taxonomy tokens (activation / cause /
+  // consequence) emitted by the failure-mode FMEA engine.
+  function reliabilityFmLabel(value) {
+    const labels = {
+      // activation
+      passive: '时基/被动', active_on_demand: '按需动作',
+      // cause
+      physical: '物理', cyber_control: '网络控制', communication: '通信',
+      measurement: '测量', protection_logic: '保护逻辑',
+      human_operation: '人为操作', scheduled: '计划检修',
+      // consequence
+      forced_outage: '强制停运', derating: '降容', stuck_open: '卡断开',
+      stuck_closed: '卡闭合', fail_to_open: '拒动(分闸)', fail_to_close: '拒动(合闸)',
+      fail_to_trip: '拒动(跳闸)', nuisance_trip: '误动跳闸',
+      control_unavailable: '控制不可用', setpoint_frozen: '设定值冻结',
+      measurement_bias: '测量偏差', communication_loss: '通信中断',
+      grid_forming_unavailable: '构网能力丧失', protection_zone_trip: '保护区扩大',
     };
-    const fallbackBucket = fallbackMap[c.component_type];
-    if (fallbackBucket && maps[fallbackBucket] && Number.isFinite(key) && maps[fallbackBucket][key] != null) {
-      return maps[fallbackBucket][key];
-    }
-    const pos = Number(c.component_index);
-    if (fallbackBucket && maps[fallbackBucket] && Number.isFinite(pos) && maps[fallbackBucket][pos] != null) {
-      return maps[fallbackBucket][pos];
-    }
-    return undefined;
+    if (value === null || value === undefined || value === '') return '—';
+    return labels[value] || value;
+  }
+
+  function reliabilityContingencyCompId(c, maps) {
+    return rowCanvasCompId(c, maps);
   }
 
   function renderAllPowerFlowComponentStatus(data, busMap, options = {}) {
@@ -4619,7 +6344,7 @@ const App = (() => {
           break;
         }
         case 'external_grid': {
-          const buses = connectedBuses(comp.id);
+          const buses = resultConnectedBuses(comp.id);
           const ac = buses.find(b => b.domain === 'ac') || (p.bus ? { domain: 'ac', index: p.bus } : null);
           const eg = solvedExternalGridInjection(comp);
           detail = [
@@ -4905,10 +6630,16 @@ const App = (() => {
     div.innerHTML = html;
   }
 
-  function showPowerFlowBalanceDiagnostics(data, busMap) {
-    const section = document.getElementById('pfBalanceSection');
-    const div = document.getElementById('pfBalanceResults');
-    if (!section || !div) return;
+	  function showPowerFlowBalanceDiagnostics(data, busMap) {
+	    const section = document.getElementById('pfBalanceSection');
+	    const div = document.getElementById('pfBalanceResults');
+	    if (!section || !div) return;
+
+	    if (data.three_phase || data.method === 'three_phase' || Array.isArray(data.tp_bus_results)) {
+	      section.style.display = '';
+	      div.innerHTML = '<p class="empty-hint">三相不对称潮流使用 abc 域节点方程；这里不显示单相等值节点功率平衡诊断，请查看“三相节点电压 / OpenDSS对比”。</p>';
+	      return;
+	    }
 
     const sys = (typeof Canvas !== 'undefined' && Canvas.buildSystemJson)
       ? Canvas.buildSystemJson() : null;
@@ -4975,9 +6706,9 @@ const App = (() => {
       const sourceTable = sourceRows
         ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>平衡源承担功率(${pUnit()})</th><th>名称</th><th>主要构成</th></tr></thead><tbody>${sourceRows}</tbody></table>`
         : '';
-      div.innerHTML = status + sourceHint + imbalanceTable + sourceTable;
-      return;
-    }
+	      div.innerHTML = status + sourceHint + imbalanceTable + sourceTable;
+	      return;
+	    }
 
     const ac = new Map();
     const dc = new Map();
@@ -5080,7 +6811,41 @@ const App = (() => {
     function cDiv(a, b) {
       const den = b.re * b.re + b.im * b.im;
       return den > 0 ? complex((a.re * b.re + a.im * b.im) / den, (a.im * b.re - a.re * b.im) / den) : complex(0, 0);
-    }
+	  }
+
+	  function showThreePhasePowerFlowResults(data, busMap) {
+	    const section = document.getElementById('pfThreePhaseSection');
+	    const div = document.getElementById('pfThreePhaseResults');
+	    if (!section || !div) return;
+	    const rows = Array.isArray(data.tp_bus_results) ? data.tp_bus_results : [];
+	    if (!rows.length) {
+	      section.style.display = 'none';
+	      div.innerHTML = '';
+	      return;
+	    }
+	    section.style.display = '';
+	    const fmt = v => Number.isFinite(Number(v)) ? Number(v).toFixed(6) : '-';
+	    const afmt = v => Number.isFinite(Number(v)) ? Number(v).toFixed(3) : '-';
+	    const comp = data.opendss_reference?.comparison || null;
+	    let html = '';
+	    if (data.opendss_reference?.ran && comp) {
+	      const ok = !!comp.within_gui_tolerance;
+	      html += `<p class="empty-hint" style="color:${ok ? '#15803d' : '#b45309'}">OpenDSS对比：${ok ? '通过' : '存在偏差'}；点数 ${comp.count || 0}，max|ΔVm|=${Number(comp.max_vm_error_pu || 0).toExponential(3)} pu，max|Δθ|=${Number(comp.max_angle_error_deg || 0).toFixed(4)}°。</p>`;
+	    } else if (data.opendss_reference && data.opendss_reference.error) {
+	      html += `<p class="empty-hint" style="color:#b45309">OpenDSS参考未运行：${escapeHtml(data.opendss_reference.error)}</p>`;
+	    } else {
+	      html += '<p class="empty-hint">当前会话没有可解析的 OpenDSS master 路径，仅显示本模块三相结果。</p>';
+	    }
+	    html += '<table><thead><tr><th>Bus</th><th>名称</th><th>相</th><th>Va(pu)</th><th>∠A(°)</th><th>Vb(pu)</th><th>∠B(°)</th><th>Vc(pu)</th><th>∠C(°)</th></tr></thead><tbody>';
+	    rows.forEach(r => {
+	      const busId = Number(r.bus_id ?? r.bus);
+	      const compId = Number.isFinite(busId) ? busMap.ac?.[busId] : undefined;
+	      const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+	      html += `<tr${attr}><td>${Number.isFinite(busId) ? busId : ''}</td><td>${escapeHtml(r.name || '')}</td><td>${escapeHtml(r.phases || '')}</td><td>${fmt(r.vm_a_pu)}</td><td>${afmt(r.va_a_deg)}</td><td>${fmt(r.vm_b_pu)}</td><td>${afmt(r.va_b_deg)}</td><td>${fmt(r.vm_c_pu)}</td><td>${afmt(r.va_c_deg)}</td></tr>`;
+	    });
+	    html += '</tbody></table>';
+	    div.innerHTML = html;
+	  }
     function cConj(a) { return complex(a.re, -a.im); }
     function cNeg(a) { return complex(-a.re, -a.im); }
     const acVoltagePosByBus = new Map();
@@ -5407,8 +7172,24 @@ const App = (() => {
         <span class="result-value">${Number(data.residual || 0).toExponential(4)}</span></div>
     `;
 
-    const busMap = Canvas.getCompBusMap();
-    showPowerFlowBalanceDiagnostics(data, busMap);
+    let busMap = {};
+    try {
+      busMap = Canvas.getCompBusMap ? Canvas.getCompBusMap() : {};
+    } catch (err) {
+      console.warn('Failed to build canvas bus map for power-flow results:', err);
+      busMap = {};
+    }
+    try {
+      showPowerFlowBalanceDiagnostics(data, busMap);
+    } catch (err) {
+      console.warn('Failed to render power-flow balance diagnostics:', err);
+    }
+    try {
+      showThreePhasePowerFlowResults(data, busMap);
+    } catch (err) {
+      console.warn('Failed to render three-phase power-flow results:', err);
+    }
+    const resultRowAttr = (row, fallbackCompId) => canvasRowAttr(row, busMap, { fallbackCompId });
 
     const coordSec = document.getElementById('pfCoordSection');
     const coordDiv = document.getElementById('pfCoordResults');
@@ -5449,7 +7230,15 @@ const App = (() => {
       coordDiv.innerHTML = '';
     }
 
-    renderAllPowerFlowComponentStatus(data, busMap);
+    try {
+      renderAllPowerFlowComponentStatus(data, busMap);
+    } catch (err) {
+      console.warn('Failed to render all-component power-flow results:', err);
+      const section = document.getElementById('pfAllComponentsSection');
+      const div = document.getElementById('pfAllComponentsResults');
+      if (section) section.style.display = '';
+      if (div) div.innerHTML = '<p class="empty-hint">全部元件计算结果渲染失败；其余潮流结果已继续显示。</p>';
+    }
 
     const pfBusIdByPosition = (domain, i) => {
       const type = domain === 'dc' ? 'dc_bus' : 'ac_bus';
@@ -5471,8 +7260,10 @@ const App = (() => {
         const busLabel = busId ?? `pos ${i}`;
         const va = data.va ? (data.va[i] * 180 / Math.PI).toFixed(4) : '0';
         const color = vm < 0.95 ? 'color:#e06c75' : vm > 1.05 ? 'color:#d19a66' : '';
-        const compId = busId != null ? busMap.ac[busId] : undefined;
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const resultRow = (data.component_results || []).find(r =>
+          r.canvas_type === 'ac_bus' && (Number(r.position) === Number(i) || Number(r.index) === Number(busId))) ||
+          { canvas_type: 'ac_bus', index: busId, position: i };
+        const attr = resultRowAttr(resultRow, busId != null && busMap.ac ? busMap.ac[busId] : undefined);
         html += `<tr${attr}><td>${busLabel}</td><td style="${color}">${vm.toFixed(6)}</td><td>${va}</td></tr>`;
       });
       html += '</tbody></table>';
@@ -5500,8 +7291,9 @@ const App = (() => {
         const busId = pfBusIdByPosition('dc', i);
         const busLabel = busId ?? `pos ${i}`;
         const color = vdc < 0.95 ? 'color:#e06c75' : vdc > 1.05 ? 'color:#d19a66' : '';
-        const compId = busId != null ? busMap.dc[busId] : undefined;
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const resultRow = dcBusRows.find(r => Number(r.position) === Number(i) || Number(r.index) === Number(busId)) ||
+          { canvas_type: 'dc_bus', index: busId, position: i };
+        const attr = resultRowAttr(resultRow, busId != null && busMap.dc ? busMap.dc[busId] : undefined);
         const pNet = busId != null ? dcMetric(busId, 'P净注入') : null;
         html += `<tr${attr}><td>${busLabel}</td><td style="${color}">${vdc.toFixed(6)}</td><td>${pNet === null ? '-' : pFmt(pNet, 4)}</td></tr>`;
       });
@@ -5519,8 +7311,8 @@ const App = (() => {
       genSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>Bus</th><th>Name</th><th>Pg(${pUnit()})</th><th>Qg(${qUnit()})</th><th>Vg(pu)</th><th>Slack</th></tr></thead><tbody>`;
       data.geo_gen.forEach((g, i) => {
-        const compId = busMap.gen ? (busMap.gen[g.index] ?? busMap.gen[i]) : undefined;
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const attr = resultRowAttr({ ...g, canvas_type: g.canvas_type || 'generator', canvas_index: g.canvas_index ?? g.index, position: g.position ?? i },
+          busMap.gen ? (busMap.gen[g.index] ?? busMap.gen[i]) : undefined);
         html += `<tr${attr}><td>${g.index ?? i}</td><td>${g.bus}</td><td>${g.name || ''}</td>`;
         html += `<td>${pFmt(g.pg_mw, 4)}</td><td>${pFmt(g.qg_mvar, 4)}</td>`;
         html += `<td>${(g.vg_pu || 1).toFixed(4)}</td><td>${g.is_slack ? '✓' : ''}</td></tr>`;
@@ -5537,12 +7329,10 @@ const App = (() => {
     if (data.geo_ac_branches && data.geo_ac_branches.length > 0) {
       let html = `<table><thead><tr><th>#</th><th>From</th><th>To</th><th>Pf(${pUnit()})</th><th>Pt(${pUnit()})</th><th>Qf(${qUnit()})</th><th>Qt(${qUnit()})</th><th>Loss(${pUnit()})</th><th>Loading%</th></tr></thead><tbody>`;
       data.geo_ac_branches.forEach((br, i) => {
-        // Branches have no positional canvas id in the result, so link the row
-        // to one endpoint bus (the from-bus), which maps reliably via busMap.ac.
-        const compId = (busMap.branch && busMap.branch[br.index] !== undefined)
+        const fallbackCompId = (busMap.branch && busMap.branch[br.index] !== undefined)
           ? busMap.branch[br.index]
           : (busMap.ac ? busMap.ac[br.from] : undefined);
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const attr = resultRowAttr({ ...br, canvas_type: br.canvas_type || 'ac_branch', canvas_index: br.canvas_index ?? br.index, position: br.position ?? i, from_bus: br.from, to_bus: br.to }, fallbackCompId);
         const loss = (br.loss_mw != null) ? br.loss_mw : ((br.pf_mw || 0) + (br.pt_mw || 0));
         const ldg = br.loading_pct != null ? br.loading_pct.toFixed(1) + '%' : '-';
         const ldgStyle = (br.loading_pct || 0) > 100 ? ' style="color:#e06c75;font-weight:bold"' : '';
@@ -5557,8 +7347,7 @@ const App = (() => {
       // Fallback: old branch_abs (|P| only)
       let html = `<table><thead><tr><th>Branch</th><th>|P|(${pUnit()})</th></tr></thead><tbody>`;
       data.branch_abs.forEach((p, i) => {
-        const compId = busMap.branch[i];
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const attr = resultRowAttr({ canvas_type: 'ac_branch', index: i, position: i }, busMap.branch ? busMap.branch[i] : undefined);
         html += `<tr${attr}><td>${i}</td><td>${pFmt(p, 4)}</td></tr>`;
       });
       html += '</tbody></table>';
@@ -5575,10 +7364,10 @@ const App = (() => {
       dcBrSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>From</th><th>To</th><th>Pf(${pUnit()})</th><th>Pt(${pUnit()})</th><th>Loss(${pUnit()})</th></tr></thead><tbody>`;
       dcBrData.forEach((br, i) => {
-        const compId = busMap.dcBranch
+        const fallbackCompId = busMap.dcBranch
           ? (busMap.dcBranch[br.index] ?? busMap.dcBranch[i])
           : undefined;
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const attr = resultRowAttr({ ...br, canvas_type: br.canvas_type || 'dc_branch', canvas_index: br.canvas_index ?? br.index, position: br.position ?? i }, fallbackCompId);
         const from = br.from ?? br.from_bus ?? '-';
         const to = br.to ?? br.to_bus ?? '-';
         const pf = br.pf_mw || 0;
@@ -5600,9 +7389,10 @@ const App = (() => {
       t3wSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>HV</th><th>MV</th><th>LV</th><th>P_hv(${pUnit()})</th><th>P_mv(${pUnit()})</th><th>P_lv(${pUnit()})</th><th>Loss(${pUnit()})</th><th>Loading%</th></tr></thead><tbody>`;
       data.geo_trafo3w.forEach((tf, i) => {
+        const attr = resultRowAttr({ ...tf, canvas_type: tf.canvas_type || 'transformer_3w', canvas_index: tf.canvas_index ?? tf.index, position: tf.position ?? i });
         const ldg = tf.loading_pct != null ? tf.loading_pct.toFixed(1) + '%' : '-';
         const ldgStyle = (tf.loading_pct || 0) > 100 ? ' style="color:#e06c75;font-weight:bold"' : '';
-        html += `<tr><td>${tf.index ?? i}</td><td>${tf.hv_bus}</td><td>${tf.mv_bus}</td><td>${tf.lv_bus}</td>`;
+        html += `<tr${attr}><td>${tf.index ?? i}</td><td>${tf.hv_bus}</td><td>${tf.mv_bus}</td><td>${tf.lv_bus}</td>`;
         html += `<td>${pFmt(tf.p_hv_mw || 0, 3)}</td><td>${pFmt(tf.p_mv_mw || 0, 3)}</td><td>${pFmt(tf.p_lv_mw || 0, 3)}</td>`;
         html += `<td>${pFmt(tf.loss_mw || 0, 3)}</td><td${ldgStyle}>${ldg}</td></tr>`;
       });
@@ -5621,7 +7411,8 @@ const App = (() => {
       dcdcSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>Bus In</th><th>Bus Out</th><th>P_in(${pUnit()})</th><th>P_out(${pUnit()})</th><th>Loss(${pUnit()})</th></tr></thead><tbody>`;
       dcdcRows.forEach((d, i) => {
-        html += `<tr><td>${d.index ?? i}</td><td>${d.bus_in}</td><td>${d.bus_out}</td>`;
+        const attr = resultRowAttr({ ...d, canvas_type: d.canvas_type || 'dcdc_converter', canvas_index: d.canvas_index ?? d.index, position: d.position ?? i });
+        html += `<tr${attr}><td>${d.index ?? i}</td><td>${d.bus_in}</td><td>${d.bus_out}</td>`;
         html += `<td>${pFmt(d.p_in_mw || 0, 3)}</td><td>${pFmt(d.p_out_mw || 0, 3)}</td><td>${pFmt(d.loss_mw || 0, 3)}</td></tr>`;
       });
       html += '</tbody></table>';
@@ -5639,8 +7430,8 @@ const App = (() => {
       vscSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>AC Bus</th><th>DC Bus</th><th>Pac(${pUnit()})</th><th>Qac(${qUnit()})</th><th>Pdc(${pUnit()})</th><th>Loss(${pUnit()})</th></tr></thead><tbody>`;
       vscRows.forEach((v, i) => {
-        const compId = busMap.vsc ? (busMap.vsc[v.index] ?? busMap.vsc[i]) : undefined;
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const attr = resultRowAttr({ ...v, canvas_type: v.canvas_type || 'vsc_converter', canvas_index: v.canvas_index ?? v.index, position: v.position ?? i },
+          busMap.vsc ? (busMap.vsc[v.index] ?? busMap.vsc[i]) : undefined);
         html += `<tr${attr}><td>${v.index ?? i}</td><td>${v.bus_ac}</td><td>${v.bus_dc}</td>
                  <td>${v.p_ac_mw != null ? pFmt(v.p_ac_mw, 3) : '0'}</td><td>${v.q_ac_mvar != null ? pFmt(v.q_ac_mvar, 3) : '0'}</td>
                  <td>${v.p_dc_mw != null ? pFmt(v.p_dc_mw, 3) : '0'}</td><td>${v.loss_mw != null ? pFmt(v.loss_mw, 3) : '0'}</td></tr>`;
@@ -6621,6 +8412,13 @@ const App = (() => {
       `<td>${mg.pcc_bus}</td><td>${mg.operating_mode}</td><td>${mg.p_exchange_mw}</td><td>${mg.capacity_mw}</td>`);
   }
 
+  function dynamicModelTextValue(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return '';
+    }
+    return JSON.stringify(value, null, 2);
+  }
+
   // ========== Property Editor ==========
   function onSelectionChanged(compId) {
     const propEmpty = document.getElementById('propEmpty');
@@ -6648,7 +8446,17 @@ const App = (() => {
     // Optional section dividers: when a field key matches, a header row is
     // inserted before it to group the OPF constraint-limit fields visually.
     const sectionHeaders = {
-      vsc_converter:  { r_conv_ac_pu: '约束限值 (OPF)', grid_forming: '构网与协调' },
+      generator:      { dynamic_model: '暂态模型参数' },
+      load:           { dynamic_model: '暂态模型参数' },
+      external_grid:  { dynamic_model: '暂态模型参数' },
+      storage:        { dynamic_model: '暂态模型参数' },
+      pv_system:      { dynamic_model: '暂态模型参数' },
+      static_generator: { dynamic_model: '暂态模型参数' },
+      vsc_converter:  { r_conv_ac_pu: '约束限值 (OPF)', grid_forming: '构网与协调', dynamic_model: '暂态模型参数' },
+      dc_load:        { dynamic_model: '暂态模型参数' },
+      dc_storage:     { dynamic_model: '暂态模型参数' },
+      dc_pv_array:    { dynamic_model: '暂态模型参数' },
+      asymmetric_load: { dynamic_model: '暂态模型参数' },
       dcdc_converter: { topology: '占空比约束 (OPF)' },
     };
     const secMap = sectionHeaders[comp.type] || null;
@@ -6672,7 +8480,17 @@ const App = (() => {
       lbl.textContent = label;
       div.appendChild(lbl);
 
-      if (typeof val === 'boolean') {
+      if (key === 'dynamic_model') {
+        const txt = document.createElement('textarea');
+        txt.dataset.field = key;
+        txt.className = 'prop-json-textarea';
+        txt.spellcheck = false;
+        txt.value = dynamicModelTextValue(val);
+        txt.placeholder = '{"standard":"PSS/E","model_name":"GENROU","parameters":{}}';
+        txt.title = '统一动态模型 JSON：standard/model_name/parameter_set/parameters/components。会随系统 JSON 同步并用于暂态模型构建。';
+        div.classList.add('prop-field-wide');
+        div.appendChild(txt);
+      } else if (typeof val === 'boolean') {
         const sel = document.createElement('select');
         sel.dataset.field = key;
         sel.innerHTML = `<option value="true" ${val ? 'selected' : ''}>是</option>
@@ -6798,18 +8616,47 @@ const App = (() => {
     const oldParams = Object.assign({}, comp.params);
     const fields = document.querySelectorAll('#propFields [data-field]');
     const changedKeys = new Set();
+    const updates = [];
+    let parseError = null;
     fields.forEach(el => {
+      if (parseError) return;
       const key = el.dataset.field;
       let val = el.value;
       // Type conversion
-      if (val === 'true') val = true;
+      if (key === 'dynamic_model') {
+        const raw = String(val || '').trim();
+        if (!raw) {
+          val = {};
+        } else {
+          try {
+            val = JSON.parse(raw);
+            if (!val || typeof val !== 'object' || Array.isArray(val)) {
+              throw new Error('dynamic_model must be a JSON object');
+            }
+          } catch (err) {
+            parseError = err;
+            return;
+          }
+        }
+      } else if (val === 'true') val = true;
       else if (val === 'false') val = false;
       else if (el.type === 'number' && val !== '') val = parseFloat(val);
       if (key === 'emission_factor_tco2_mwh') val = carbonFactorInputValue(val);
+      updates.push({ key, val });
+    });
+    if (parseError) {
+      const msg = `动态模型 JSON 无效: ${parseError.message || parseError}`;
+      setStatus(msg, 'error');
+      log(msg, 'error');
+      return;
+    }
+    updates.forEach(({ key, val }) => {
       const oldVal = comp.params[key];
       const sameNumber = typeof oldVal === 'number' && typeof val === 'number' &&
         Math.abs(oldVal - val) < 1e-12;
-      if (!sameNumber && oldVal !== val) changedKeys.add(key);
+      const sameJson = key === 'dynamic_model' &&
+        JSON.stringify(oldVal || {}) === JSON.stringify(val || {});
+      if (!sameNumber && !sameJson && oldVal !== val) changedKeys.add(key);
       comp.params[key] = val;
     });
 
@@ -6905,6 +8752,9 @@ const App = (() => {
     document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
     document.querySelector(`.panel-tab[data-tab="${tabName}"]`)?.classList.add('active');
     document.getElementById('tab' + tabName.charAt(0).toUpperCase() + tabName.slice(1))?.classList.add('active');
+    if (tabName === 'results' && document.getElementById('resultsContent')?.dataset.activeGroup === 'transient' && _lastTransientData) {
+      requestAnimationFrame(() => drawTransientDashboard(_lastTransientData));
+    }
   }
 
   // ========== Component Library ==========
@@ -7109,6 +8959,74 @@ const App = (() => {
       e.target.value = '';
     });
 
+    // Bar 3: unified model IO module
+    document.getElementById('btnIoLoadBuiltin')?.addEventListener('click', () => {
+      const caseName = document.getElementById('ioCaseSelect')?.value || '';
+      if (!caseName) {
+        log('请先在模型IO中选择一个内置算例', 'warn');
+        return;
+      }
+      loadBuiltinCase(caseName);
+    });
+    document.getElementById('btnIoLoadMatpower')?.addEventListener('click', () => {
+      const filename = document.getElementById('ioMatpowerSelect')?.value || '';
+      if (!filename) {
+        log('请先在模型IO中选择一个 MATPOWER 文件', 'warn');
+        return;
+      }
+      loadMatpowerCase(filename);
+    });
+    document.getElementById('btnIoImportJson')?.addEventListener('click', () => {
+      document.getElementById('fileImportJson')?.click();
+    });
+    document.getElementById('btnIoImportEtapXlsx')?.addEventListener('click', () => {
+      document.getElementById('fileImportEtapXlsx')?.click();
+    });
+    document.getElementById('btnIoImportEtapXml')?.addEventListener('click', () => {
+      document.getElementById('fileImportEtapXml')?.click();
+    });
+    document.getElementById('btnIoImportGridlabd')?.addEventListener('click', () => {
+      document.getElementById('fileImportGridlabd')?.click();
+    });
+    document.getElementById('fileImportGridlabd')?.addEventListener('change', (e) => {
+      const f = e.target.files[0];
+      e.target.value = '';
+      if (f) loadGridlabd(f);
+    });
+    document.getElementById('btnIoImportOpendss')?.addEventListener('click', () => {
+      document.getElementById('fileImportOpendss')?.click();
+    });
+    document.getElementById('fileImportOpendss')?.addEventListener('change', (e) => {
+      const f = e.target.files[0];
+      e.target.value = '';
+      if (f) loadOpendss(f);
+    });
+    document.getElementById('btnIoNewSystem')?.addEventListener('click', createNewSystem);
+    document.getElementById('btnIoExportJson')?.addEventListener('click', exportJson);
+    document.getElementById('btnIoExportEtap')?.addEventListener('click', exportEtap);
+    document.getElementById('btnIoExportEtapXml')?.addEventListener('click', exportEtapXml);
+    document.getElementById('btnIoExportGridlabd')?.addEventListener('click', () => exportExternalGrid('gridlabd'));
+    document.getElementById('btnIoExportOpendss')?.addEventListener('click', () => exportExternalGrid('opendss'));
+    document.getElementById('btnIoModelCompatibility')?.addEventListener('click', () => runModelCompatibility({
+      targetId: 'modelIoResults',
+      resultGroup: 'modelIO',
+      title: '模型兼容性检查',
+      subtitle: 'JSON / Canonical / GridLAB-D / OpenDSS / 标准模型映射',
+    }));
+    document.getElementById('btnIoSyncBackend')?.addEventListener('click', async () => {
+      setStatus('同步画布中...', 'busy');
+      const ok = await syncToBackend(true);
+      if (ok) {
+        showModelIoStatus('画布同步完成', [
+          ['同步方向', 'Canvas -> Backend session'],
+          ['状态', '成功'],
+        ], { subtitle: '后续导出和兼容性检查将使用当前画布系统' });
+        setStatus('同步完成');
+      } else {
+        setStatus('同步失败', 'error');
+      }
+    });
+
     // Calculation buttons (Bar 3 "运行..." buttons reuse original IDs where possible)
     document.getElementById('btnPowerFlow').addEventListener('click', runPowerFlow);
     document.getElementById('btnRunOpf')?.addEventListener('click', runOpf);
@@ -7162,6 +9080,24 @@ const App = (() => {
     document.getElementById('hpfMode')?.addEventListener('change', hpfUpdateModeControls);
     hpfUpdateModeControls();
 
+    // Bar 3: transient phasor dynamics
+    document.getElementById('btnRunTransient')?.addEventListener('click', runTransientSimulation);
+    document.getElementById('btnTransientCompatibility')?.addEventListener('click', runTransientCompatibility);
+    document.getElementById('trPowerFlowInit')?.addEventListener('change', updateTransientPfControls);
+    document.getElementById('trEventType')?.addEventListener('change', updateTransientEventControls);
+    document.getElementById('btnAddTransientEvent')?.addEventListener('click', addTransientEventFromControls);
+    document.getElementById('btnClearTransientEvents')?.addEventListener('click', clearTransientEvents);
+    updateTransientPfControls();
+    updateTransientEventControls();
+    renderTransientEventSchedule();
+    document.getElementById('btnExportTransient')?.addEventListener('click', () => {
+      if (!_lastTransientData) {
+        log('暂无暂态仿真结果可导出，请先运行暂态仿真', 'warn');
+        return;
+      }
+      downloadJsonFile(`transient_results_${tsTagForFilename()}.json`, _lastTransientData);
+    });
+
     // Bar 3: topology
     document.getElementById('btnRunTopology')?.addEventListener('click', runTopologyReconfig);
 
@@ -7203,8 +9139,9 @@ const App = (() => {
       if (!panel || !btn) return;
       const show = panel.hasAttribute('hidden');
       if (show) panel.removeAttribute('hidden'); else panel.setAttribute('hidden', '');
+      panel.closest('.ts-annual-group')?.classList.toggle('ts-annual-expanded', show);
       btn.setAttribute('aria-expanded', show ? 'true' : 'false');
-      btn.textContent = show ? '年度并行仿真 ▾' : '年度并行仿真 ▸';
+      btn.innerHTML = show ? '收起<br>年度设置 ▾' : '展开<br>年度设置 ▸';
     });
     document.getElementById('btnRunAnnualSim')?.addEventListener('click', runAnnualSim);
     document.getElementById('btnExportAnnualSim')?.addEventListener('click', () => {
@@ -7269,105 +9206,619 @@ const App = (() => {
       log(`时序潮流结果已导出：${d.num_steps} 步 × ${nbus} 母线电压/相角 × ${nbr} 分支 Pf/Pt/Qf/Qt`, 'success');
     });
 
-    // Bar 3: Reliability — run (NSQ/SEQ/FMEA/F&D) + export. Backend live.
-    async function runReliability() {
-      setStatus('可靠性分析中...', 'busy');
-      if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
-      const method = (document.getElementById('relMethod')?.value) || 'nsq';
-      const maxIter = parseInt(document.getElementById('relMaxIter')?.value) || 2000;
-      const epMap = { nsq: 'run_reliability_nsq', seq: 'run_reliability_seq',
-                      fmea: 'run_reliability_fmea', fd: 'run_reliability_fd' };
-      const opts = {};
-      if (method === 'nsq') opts.max_iterations = maxIter;
-      else if (method === 'seq') { opts.max_years = Math.max(50, Math.round(maxIter / 10)); opts.hours_per_year = 8736; }
-      else if (method === 'fmea') { opts.load_scale_factor = 1.0; opts.apply_comprehensive_data = true; }
-      const data = await apiPost('/api/session/' + epMap[method], opts);
-      if (data && !data.error) {
-        _lastReliabilityData = Object.assign({ _method: method }, data);
-        showReliabilityResults(data, method);
+	    function updateReliabilityControlState() {
+	      const physicalModel = document.getElementById('relPhysicalModel')?.value || 'auto';
+	      const methodEl = document.getElementById('relMethod');
+	      const maxIterEl = document.getElementById('relMaxIter');
+	      const hintEl = document.getElementById('relAnalysisHint');
+	      const useThreeStage = physicalModel === 'restoration_milp';
+	      if (methodEl) methodEl.disabled = useThreeStage;
+	      if (maxIterEl) maxIterEl.disabled = useThreeStage;
+	      if (hintEl) {
+	        hintEl.textContent = useThreeStage
+	          ? '三阶段恢复 MILP 将作为独立可靠性评估运行'
+	          : '后果模型由所选统计方法自动匹配';
+	      }
+	    }
+
+	    // Bar 3: Reliability — run + export. Backend live.
+	    async function runReliability() {
+	      setStatus('可靠性分析中...', 'busy');
+	      if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+	      const selectedMethod = (document.getElementById('relMethod')?.value) || 'nsq';
+	      const physicalModel = (document.getElementById('relPhysicalModel')?.value) || 'auto';
+	      const method = physicalModel === 'restoration_milp' ? 'three_stage' : selectedMethod;
+	      const maxIter = parseInt(document.getElementById('relMaxIter')?.value) || 2000;
+	      const metricFocus = (document.getElementById('relMetricFocus')?.value) || 'all';
+	      const weakBasis = (document.getElementById('relWeakBasis')?.value) || 'auto';
+	      const relParallel = document.getElementById('relParallel')?.checked ?? true;
+	      const relParallelThreads = parseInt(document.getElementById('relParallelThreads')?.value, 10);
+	      const opts = {
+	        method,
+	        physical_model: physicalModel,
+	        data_policy: (document.getElementById('relDataPolicy')?.value) || 'missing_only',
+	        reliability_template: (document.getElementById('relTemplate')?.value) || 'none',
+	        load: { scale_factor: 1.0, hours_per_year: 8736 },
+	        execution: {
+	          parallel: relParallel,
+	          parallel_threads: Number.isFinite(relParallelThreads) ? relParallelThreads : 0,
+	        },
+	        monte_carlo: {
+	          max_iterations: method === 'seq' ? Math.max(50, Math.round(maxIter / 10)) : maxIter,
+	          cov_threshold: 0.05,
+	          compute_tail_risk: false,
+	          parallel: relParallel,
+	          parallel_threads: Number.isFinite(relParallelThreads) ? relParallelThreads : 0,
+	        },
+	        restoration: {
+	          enable_switch_reconfiguration: true,
+	          max_switch_actions: 2,
+	          parallel: relParallel,
+	          parallel_threads: Number.isFinite(relParallelThreads) ? relParallelThreads : 0,
+	          include_converter_faults: !!document.getElementById('relTsFaults')?.checked,
+	          include_switch_faults: !!document.getElementById('relTsFaults')?.checked,
+	          include_generator_faults: !!document.getElementById('relTsFaults')?.checked,
+	          include_transformer_faults: !!document.getElementById('relTsFaults')?.checked,
+	          include_dc_power_flow: !!document.getElementById('relTsDcPf')?.checked,
+	        },
+	        failure_mode_scope: {
+	          include_passive: !!document.getElementById('relFmPassive')?.checked,
+	          include_active_on_demand: !!document.getElementById('relFmActive')?.checked,
+	          include_physical: !!document.getElementById('relFmPhysical')?.checked,
+	          include_cyber_control: !!document.getElementById('relFmCyber')?.checked,
+	          include_communication: !!document.getElementById('relFmCyber')?.checked,
+	          include_measurement: !!document.getElementById('relFmCyber')?.checked,
+	          include_protection_logic: !!document.getElementById('relFmProtection')?.checked,
+	          include_human_operation: true,
+	          include_scheduled: false,
+	          only_in_service: true,
+	        },
+	        max_order: (document.getElementById('relFmN2')?.checked ? 2 : 1),
+	        reporting: { metric_focus: metricFocus, weak_basis: weakBasis },
+	      };
+	      const data = await apiPost('/api/session/run_reliability', opts);
+	      if (data && !data.error) {
+	        data._metric_focus = metricFocus;
+	        data._weak_basis = weakBasis;
+	        _lastReliabilityData = Object.assign({ _method: method }, data);
+	        showReliabilityResults(data, method);
         switchTab('results');
         setStatus('可靠性分析完成');
       } else {
         setStatus('计算失败', 'error');
-      }
-    }
+	      }
+	    }
 
-    function showReliabilityResults(data, method) {
-      document.getElementById('resultsEmpty').style.display = 'none';
-      document.getElementById('resultsContent').style.display = 'block';
-      setActiveResultGroup('reliability');
-      const nf = (v, d = 2) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '—';
-      const methodLabel = { nsq: '非序贯蒙特卡洛', seq: '序贯蒙特卡洛', fmea: 'FMEA (N-1)', fd: '频率-持续时间' }[method] || method;
-      let kpis = [];
-      if (method === 'fd') {
-        kpis = [
-          ['LOLP (失负荷概率)', nf(data.lolp, 6)],
-          ['LOLE (h/yr)', nf(data.lole_fd, 2)],
-          ['LOLF (occ/yr)', nf(data.lolf_fd, 2)],
-          ['LOLD (h/occ)', nf(data.lold, 2)],
-        ];
-      } else {
-        kpis = [
-          ['EENS (MWh/yr)', nf(data.eens_mwh_yr, 1)],
-          ['EDNS (MW)', nf(data.edns_mw, 3)],
-          ['LOLE (h/yr)', nf(data.lole_hr_yr, 2)],
-          ['LOLF (occ/yr)', nf(data.lolf_occ_yr, 2)],
-          ['PLC (%)', nf((data.plc ?? 0) * 100, 3)],
-        ];
-        if (method === 'fmea') {
-          kpis.push(['SAIFI', nf(data.saifi, 4)], ['SAIDI', nf(data.saidi, 4)], ['ASAI', nf(data.asai, 6)]);
-          if (data.n_contingencies != null) kpis.push(['故障枚举数', `${data.n_contingencies} (${data.n_with_loss ?? '?'} 含失负荷)`]);
+	    function relMetricValue(data, key) {
+	      const metrics = data && data.metrics ? data.metrics : null;
+	      if (metrics && Object.prototype.hasOwnProperty.call(metrics, key)) return metrics[key];
+	      return data ? data[key] : undefined;
+	    }
+
+	    function relMetricHtml(value, digits = 2, scale = 1) {
+	      if (value && typeof value === 'object' && value.available === false) {
+	        return `<span title="${escapeHtml(value.reason || 'not available')}">—</span>`;
+	      }
+	      const raw = value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'value')
+	        ? value.value : value;
+	      if (raw === null || raw === undefined) return '—';
+	      const n = Number(raw);
+	      if (Number.isFinite(n)) return (n * scale).toFixed(digits);
+	      return escapeHtml(String(raw));
+	    }
+
+	    function renderReliabilityPanel(title, inner) {
+	      return `<div style="border:1px solid var(--border,#3a3f4b);border-radius:6px;padding:8px 10px;margin:10px 0;">` +
+	             `<h5 style="margin:0 0 6px;">${escapeHtml(title)}</h5>${inner}</div>`;
+	    }
+
+		    function relNumber(value) {
+		      if (value && typeof value === 'object' && value.available === false) return null;
+		      if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'value')) value = value.value;
+		      const n = Number(value);
+		      return Number.isFinite(n) ? n : null;
+		    }
+
+		    function relSelectedMetricFocus(data) {
+		      return data?._metric_focus || document.getElementById('relMetricFocus')?.value || 'all';
+		    }
+
+		    function relSelectedWeakBasis(data, method) {
+		      const selected = data?._weak_basis || document.getElementById('relWeakBasis')?.value || 'auto';
+		      if (selected && selected !== 'auto') return selected;
+		      if (method === 'three_stage') return 'eens';
+		      if (method === 'nsq' || method === 'seq') return 'eens';
+		      if (method === 'fd') return 'frequency';
+		      return 'eens';
+		    }
+
+		    function relWeakBasisMeta(basis) {
+		      const metas = {
+		        eens: { label: 'EENS 贡献', unit: 'MWh/yr', digits: 3, axis: 'MWh/yr',
+		          help: '按期望未供电量排序，适合找能量风险最大的元件或失效模式。' },
+		        lole: { label: 'LOLE 贡献', unit: 'h/yr', digits: 3, axis: 'h/yr',
+		          help: '按失负荷持续时间贡献排序，适合找停电影响时间最长的薄弱环节。' },
+		        frequency: { label: '故障频率', unit: 'occ/yr', digits: 4, axis: 'occ/yr',
+		          help: '按导致失负荷的年发生频率排序，适合关注频繁动作或频繁停运模式。' },
+		        conditional: { label: '条件风险', unit: '', digits: 4, axis: '',
+		          help: '按蒙特卡洛 P(元件停运 | 系统失负荷) 或风险占比排序，适合解释抽样状态中的关联风险。' },
+		        stage_shed: { label: '阶段切负荷', unit: 'kW', digits: 1, axis: 'kW',
+		          help: '按三阶段恢复中的阶段切负荷总量排序，适合诊断隔离、重构和修复窗口的故障传播影响。' },
+		      };
+		      return metas[basis] || metas.eens;
+		    }
+
+		    function relMetricFocusLabel(focus) {
+		      const labels = {
+		        all: '全部指标',
+		        eens: 'EENS/EDNS',
+		        lole: 'LOLE/LOLP',
+		        customer: 'SAIFI/SAIDI',
+		        cost: '成本',
+		      };
+		      return labels[focus] || focus || '全部指标';
+		    }
+
+		    function relMetricField(row, basis) {
+		      const firstNumber = (...values) => {
+		        for (const value of values) {
+		          const n = relNumber(value);
+		          if (n !== null) return n;
+		        }
+		        return 0;
+		      };
+		      if (basis === 'lole') {
+		        return firstNumber(row?.lole_contribution_hr_yr, row?.lole_contribution);
+		      }
+		      if (basis === 'frequency') {
+		        return firstNumber(row?.lolf_contribution_occ_yr, row?.lolf_contribution,
+		          row?.frequency_per_year, row?.failure_rate, row?.joint_frequency_per_year);
+		      }
+		      if (basis === 'conditional') {
+		        return firstNumber(row?.conditional_down_given_loss, row?.loss_weighted_risk,
+		          row?.importance);
+		      }
+		      if (basis === 'stage_shed') {
+		        return firstNumber(row?.pls_total, row?.shed_kw,
+		          relNumber(row?.shed_mw ?? row?.total_shed_mw) !== null
+		            ? relNumber(row?.shed_mw ?? row?.total_shed_mw) * 1000.0
+		            : null);
+		      }
+		      return firstNumber(row?.associated_eens_mwh_yr, row?.eens_contribution_mwh_yr,
+		        row?.eens_contribution);
+		    }
+
+		    function relCandidateRows(data) {
+		      if (Array.isArray(data?.critical_components) && data.critical_components.length) return data.critical_components;
+		      if (Array.isArray(data?.contingencies) && data.contingencies.length) return data.contingencies;
+		      if (Array.isArray(data?.faults) && data.faults.length) return data.faults;
+		      return [];
+		    }
+
+		    function relRankRows(rows, basis) {
+		      return (rows || []).slice()
+		        .map(row => ({ row, score: relMetricField(row, basis) }))
+		        .filter(item => Number.isFinite(item.score) && item.score > 0)
+		        .sort((a, b) => b.score - a.score)
+		        .map(item => item.row);
+		    }
+
+		    function relFocusMetricKeys(focus) {
+		      const groups = {
+		        all: ['eens_mwh_yr', 'edns_mw', 'lole_hr_yr', 'lolf_occ_yr', 'lolp', 'plc', 'saifi', 'saidi', 'asai', 'eens_cost'],
+		        eens: ['eens_mwh_yr', 'eens_kwh_yr', 'edns_mw'],
+		        lole: ['lole_hr_yr', 'lolf_occ_yr', 'lolp', 'lold_hr', 'plc'],
+		        customer: ['saifi', 'saidi', 'saidi_min', 'caidi', 'asai'],
+		        cost: ['eens_cost', 'eens_mwh_yr'],
+		      };
+		      return new Set(groups[focus] || groups.all);
+		    }
+
+		    function renderReliabilityKpiTiles(data, method) {
+		      const focus = relSelectedMetricFocus(data);
+		      const allowed = relFocusMetricKeys(focus);
+		      const allItems = [
+		        ['EENS', 'eens_mwh_yr', 'MWh/yr', 1],
+		        ['EDNS', 'edns_mw', 'MW', 3],
+		        ['LOLE', 'lole_hr_yr', 'h/yr', 2],
+		        ['LOLF', 'lolf_occ_yr', 'occ/yr', 3],
+		        ['LOLP', 'lolp', '', 6],
+		        ['SAIFI', 'saifi', 'int/cust/yr', 3],
+		        ['SAIDI', 'saidi', 'h/cust/yr', 3],
+		        ['ASAI', 'asai', '', 6],
+		        ['PLC', 'plc', '%', 3, 100],
+		        ['EENS成本', 'eens_cost', '', 1],
+		      ];
+		      const items = allItems
+		        .filter(([, key]) => allowed.has(key))
+		        .map(([label, key, unit, digits, scale]) => [label, relMetricValue(data, key), unit, digits, scale])
+		        .filter(x => relNumber(x[1]) !== null);
+		      if (!items.length) return '';
+		      let html = '<div class="reliability-kpi-grid">';
+	      items.forEach(([label, value, unit, digits, scale]) => {
+	        html += `<div class="reliability-kpi-card">` +
+	                `<div class="reliability-kpi-label">${escapeHtml(label)}</div>` +
+	                `<div class="reliability-kpi-value">${relMetricHtml(value, digits, scale || 1)}</div>` +
+	                `<div class="reliability-kpi-unit">${escapeHtml(unit)}</div></div>`;
+	      });
+	      html += '</div>';
+	      return html;
+	    }
+
+		    function renderReliabilityDashboardShell(data, method) {
+		      const hasRisk = (Array.isArray(data.critical_components) && data.critical_components.length) ||
+		                      (Array.isArray(data.contingencies) && data.contingencies.length) ||
+		                      (Array.isArray(data.faults) && data.faults.length);
+	      const hasNodal = Array.isArray(data.nodal_eens_mwh_yr) && data.nodal_eens_mwh_yr.some(v => Number(v) > 0);
+	      const hasCoverage = !!data.failure_mode_coverage;
+	      const hasConv = (method === 'nsq' || method === 'seq') && Array.isArray(data.eens_history) && data.eens_history.length;
+	      if (!hasRisk && !hasNodal && !hasCoverage && !hasConv) return '';
+	      let html = '<div class="reliability-dashboard-grid">';
+	      if (hasRisk) html += '<div id="relRiskChart" class="reliability-chart reliability-chart-wide"></div>';
+	      if (hasNodal) html += '<div id="relNodalChart" class="reliability-chart"></div>';
+	      if (hasCoverage) html += '<div id="relFailureTaxonomyChart" class="reliability-chart"></div>';
+	      if (hasConv) html += '<div id="relConvChart" class="reliability-chart"></div>';
+	      html += '</div>';
+	      return renderReliabilityPanel('可靠性风险仪表盘', html);
+	    }
+
+	    function relPlotLayout(title, xTitle, yTitle) {
+	      return {
+	        title: { text: title, font: { size: 13 }, x: 0.02, xanchor: 'left' },
+	        margin: { l: 58, r: 18, t: 38, b: 70 },
+	        xaxis: { title: xTitle || '', tickangle: -30, automargin: true },
+	        yaxis: { title: yTitle || '', automargin: true },
+	        paper_bgcolor: 'rgba(0,0,0,0)',
+	        plot_bgcolor: 'rgba(0,0,0,0)',
+	        font: { color: '#dcdfe4' }
+	      };
+	    }
+
+		    function drawReliabilityDashboard(data, method) {
+		      if (typeof Plotly === 'undefined') return;
+		      const relMaps = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
+		      const basis = relSelectedWeakBasis(data, method);
+		      const basisMeta = relWeakBasisMeta(basis);
+		      const riskRows = relRankRows(relCandidateRows(data), basis).slice(0, 12).map(r => ({
+		        name: r.display_name || r.component_name || r.mode_id || `Line ${r.line_id ?? '—'}`,
+		        y: relMetricField(r, basis),
+		        pct: Number(r.loss_weighted_risk ?? r.importance ?? 0) || 0,
+		        compId: reliabilityContingencyCompId(r, relMaps),
+		      }));
+		      const riskChart = document.getElementById('relRiskChart');
+		      if (riskChart && riskRows.length) {
+		        Plotly.newPlot(riskChart, [{
+	          x: riskRows.map(r => r.y).reverse(),
+	          y: riskRows.map(r => r.name).reverse(),
+	          type: 'bar',
+	          orientation: 'h',
+		          marker: { color: riskRows.map((_, i) => i < 3 ? '#ff6b6b' : '#61afef').reverse() },
+		          customdata: riskRows.map(r => [r.pct, basisMeta.label, basisMeta.unit]).reverse(),
+		          hovertemplate: '%{y}<br>%{customdata[1]}=%{x:.3f} %{customdata[2]}<br>风险占比=%{customdata[0]:.3f}<extra></extra>'
+		        }], {
+		          ...relPlotLayout(`Top 风险元件/失效模式 (${basisMeta.label})`, basisMeta.axis, ''),
+		          margin: { l: 92, r: 18, t: 38, b: 48 },
+	          yaxis: { automargin: true }
+	        }, { responsive: true });
+	        if (riskChart.on) {
+	          riskChart.on('plotly_click', ev => {
+	            const idx = Number(ev?.points?.[0]?.pointIndex);
+	            const compId = Number.isInteger(idx) ? riskRows[riskRows.length - 1 - idx]?.compId : undefined;
+	            if (compId != null && typeof Canvas !== 'undefined' && Canvas.panToComponent) {
+	              Canvas.panToComponent(compId);
+	            }
+	          });
+	        }
+	      }
+	      const nodal = (data.nodal_eens_mwh_yr || [])
+	        .map((v, i) => {
+	          const bus = i + 1;
+	          const compId = relMaps ? (relMaps.ac?.[bus] ?? relMaps.dc?.[bus]) : undefined;
+	          return { bus, value: Number(v) || 0, compId };
+	        })
+	        .filter(r => r.value > 0)
+	        .sort((a, b) => b.value - a.value)
+	        .slice(0, 20);
+	      const nodalChart = document.getElementById('relNodalChart');
+	      if (nodalChart && nodal.length) {
+	        Plotly.newPlot(nodalChart, [{
+	          x: nodal.map(r => r.value).reverse(),
+	          y: nodal.map(r => `Bus ${r.bus}`).reverse(),
+	          type: 'bar',
+	          orientation: 'h',
+	          marker: { color: '#ff9f43' },
+	          hovertemplate: '%{y}<br>节点EENS=%{x:.3f} MWh/yr<extra></extra>'
+	        }], {
+	          ...relPlotLayout('负荷点影响', 'MWh/yr', ''),
+	          margin: { l: 74, r: 18, t: 38, b: 48 },
+	          yaxis: { automargin: true }
+	        }, { responsive: true });
+	        if (nodalChart.on) {
+	          nodalChart.on('plotly_click', ev => {
+	            const idx = Number(ev?.points?.[0]?.pointIndex);
+	            const compId = Number.isInteger(idx) ? nodal[nodal.length - 1 - idx]?.compId : undefined;
+	            if (compId != null && typeof Canvas !== 'undefined' && Canvas.panToComponent) {
+	              Canvas.panToComponent(compId);
+	            }
+	          });
+	        }
+	      }
+	      const cov = data.failure_mode_coverage;
+	      if (document.getElementById('relFailureTaxonomyChart') && cov) {
+	        Plotly.newPlot('relFailureTaxonomyChart', [{
+	          labels: ['被动时基', '主动按需', '物理设备', '网络/控制', '保护逻辑', '不支持'],
+	          values: [cov.modes_passive, cov.modes_active, cov.modes_physical, cov.modes_cyber_control, cov.modes_protection_logic, cov.modes_unsupported],
+	          type: 'pie',
+	          hole: 0.45,
+	          marker: { colors: ['#61afef', '#f5c542', '#98c379', '#c678dd', '#e06c75', '#5c6370'] }
+	        }], { ...relPlotLayout('失效模式分类', '', ''), margin: { l: 10, r: 10, t: 38, b: 10 } }, { responsive: true });
+	      }
+	      if (document.getElementById('relConvChart') && Array.isArray(data.eens_history) && data.eens_history.length) {
+	        const x = data.eens_history.map((_, i) => i + 1);
+	        Plotly.newPlot('relConvChart', [{ x, y: data.eens_history, mode: 'lines', name: 'EENS', line: { color: '#61afef' } }],
+	          relPlotLayout('EENS 收敛过程', '样本批次', 'MWh/yr'), { responsive: true });
+	      }
+	    }
+
+      function relScopeBadge(text, ok) {
+	      const bg = (ok === true) ? '#2e7d32' : (ok === false) ? '#b03a3a' : '#4a4f59';
+	      return `<span style="display:inline-block;padding:2px 8px;margin:2px 4px 2px 0;border-radius:10px;font-size:11px;background:${bg};color:#fff;">${escapeHtml(text)}</span>`;
+	    }
+	    function renderRelScopeHtml(data) {
+	      if (!data || !data.model_scope) return '';
+	      let h = '';
+	      h += `<b>有效分析：</b>${relScopeBadge(data.model_scope)}`;
+	      if (data.physical_model) h += ` <b>物理模型：</b>${relScopeBadge(data.physical_model)}`;
+	      if (data.data_policy) h += ` <b>数据策略：</b>${relScopeBadge(data.data_policy)}`;
+	      if (data.parallel_mode) {
+	        const pe = data.parallel_execution || {};
+	        let ptxt = `${data.parallel_effective ? '有效' : '串行'} ${data.parallel_workers || 1}线程`;
+	        if (pe.work_items != null) ptxt += ` / ${pe.work_items}项`;
+	        if (pe.guard_reason) ptxt += ` / ${pe.guard_reason}`;
+	        h += ` <b>并行：</b>${relScopeBadge(ptxt, !!data.parallel_effective)}`;
+	      }
+	      const v = data.validity || {};
+	      const vkeys = Object.keys(v);
+      if (vkeys.length) {
+        h += '<br><b>有效性：</b>';
+        if ('dc_load_curtailment_included' in v) {
+          h += relScopeBadge('DC负荷' + (v.dc_load_curtailment_included ? '已计入' : '未计入'), v.dc_load_curtailment_included);
+          h += relScopeBadge('VSC直流潮流' + (v.vsc_dc_power_flow_modelled ? '已建模' : '未建模'), v.vsc_dc_power_flow_modelled);
+          h += relScopeBadge('AC电压/无功' + (v.ac_voltage_reactive_feasibility_certified ? '已认证' : '未认证'), v.ac_voltage_reactive_feasibility_certified);
         } else {
-          kpis.push(['收敛', data.converged ? '✓ 是' : '✗ 否'], ['迭代/年数', data.iterations_used ?? '—'], ['最终 CoV', nf(data.final_cov, 4)]);
+          vkeys.forEach(k => { if (typeof v[k] === 'boolean') h += relScopeBadge(k.replace(/_/g, ' '), v[k]); });
         }
       }
-      let html = `<div style="margin-bottom:8px;"><b>方法：</b>${methodLabel}</div>`;
-      html += '<table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>';
-      for (const [k, v] of kpis) html += `<tr><td>${k}</td><td class="result-value">${v}</td></tr>`;
-      html += '</tbody></table>';
+      if (v.generation_adequacy_only) h += '<br>' + relScopeBadge('仅发电充裕度 — 无网络/DC/用户指标', false);
+	      const dq = data.data_quality;
+	      if (dq) {
+	        h += `<br><b>数据质量：</b>${dq.components_with_reliability_data}/${dq.components_total} 含用例数据，${dq.components_defaulted} 默认值`;
+	        if (dq.missing_required_data && dq.missing_required_data.length) h += ' ' + relScopeBadge(dq.missing_required_data.length + ' 缺失', false);
+	      }
+	      if (data.model_limitations) h += `<div style="color:var(--muted,#8a909c);font-size:11px;margin-top:6px;">${escapeHtml(data.model_limitations)}</div>`;
+	      return renderReliabilityPanel('有效分析方法', h);
+	    }
 
-      // Convergence chart (NSQ/SEQ)
-      if ((method === 'nsq' || method === 'seq') && Array.isArray(data.eens_history) && data.eens_history.length) {
-        html += '<h4 style="margin:10px 0 4px;">EENS 收敛过程</h4><div id="relConvChart" style="height:240px;"></div>';
-      }
-      // Critical components (NSQ/SEQ) — index is 0-based positional (generator
-      // or branch), the same space PF uses for busMap.gen[i] / busMap.branch[i].
-      if (Array.isArray(data.critical_components) && data.critical_components.length) {
-        html += '<h4 style="margin:10px 0 4px;">薄弱元件 (Top)</h4><table><thead><tr><th>#</th><th>类型</th><th>索引</th><th>重要度</th></tr></thead><tbody>';
-        const ccBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
-        data.critical_components.slice(0, 15).forEach((c, i) => {
-          const compId = ccBusMap ? (c.is_generator ? (ccBusMap.gen ? ccBusMap.gen[c.index] : undefined)
-                                                     : (ccBusMap.branch ? ccBusMap.branch[c.index] : undefined)) : undefined;
-          const clk = compId != null
-            ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
-          html += `<tr${clk}><td>${i + 1}</td><td>${c.is_generator ? '发电机' : '支路'}</td><td>${c.index ?? '—'}</td><td>${nf(c.importance, 4)}</td></tr>`;
-        });
+		    function renderReliabilityMetricsHtml(data, method) {
+		      const focus = relSelectedMetricFocus(data);
+		      const allowed = relFocusMetricKeys(focus);
+		      const rows = [
+		        ['EENS (MWh/yr)', 'eens_mwh_yr', 2, 1, 'eens'],
+		        ['EENS (kWh/yr)', 'eens_kwh_yr', 1, 1, 'eens'],
+		        ['EDNS (MW)', 'edns_mw', 3, 1, 'eens'],
+		        ['LOLE (h/yr)', 'lole_hr_yr', 2, 1, 'lole'],
+		        ['LOLF (occ/yr)', 'lolf_occ_yr', 3, 1, 'lole'],
+		        ['LOLP', 'lolp', 6, 1, 'lole'],
+		        ['LOLD (h/occ)', 'lold_hr', 2, 1, 'lole'],
+		        ['PLC (%)', 'plc', 3, 100, 'lole'],
+		        ['SAIFI', 'saifi', 4, 1, 'customer'],
+		        ['SAIDI (h/yr)', 'saidi', 4, 1, 'customer'],
+		        ['SAIDI (min/yr)', 'saidi_min', 2, 1, 'customer'],
+		        ['CAIDI', 'caidi', 4, 1, 'customer'],
+		        ['ASAI', 'asai', 6, 1, 'customer'],
+		        ['EENS 成本', 'eens_cost', 1, 1, 'cost'],
+		      ];
+		      let html = '<table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>';
+		      rows.forEach(([label, key, digits, scale]) => {
+		        if (focus !== 'all' && !allowed.has(key)) return;
+		        const value = relMetricValue(data, key);
+		        if (value === undefined && !(data.metrics && Object.prototype.hasOwnProperty.call(data.metrics, key))) return;
+		        html += `<tr><td>${escapeHtml(label)}</td><td class="result-value">${relMetricHtml(value, digits, scale || 1)}</td></tr>`;
+	      });
+		      if (method === 'nsq' || method === 'seq') {
+		        html += `<tr><td>收敛</td><td>${data.converged ? '是' : '否'}</td></tr>`;
+		        html += `<tr><td>迭代/年数</td><td>${data.iterations_used ?? '—'}</td></tr>`;
+		        html += `<tr><td>最终 CoV</td><td>${relMetricHtml(data.final_cov, 4)}</td></tr>`;
+		      }
+		      if (data.parallel_mode || data.parallel_workers != null) {
+		        const pEff = data.parallel_effective ? '有效' : (data.parallel ? '未触发' : '关闭');
+		        const pWorkers = Number(data.parallel_workers || 1);
+		        const pe = data.parallel_execution || {};
+		        const pExtra = pe.work_items != null
+		          ? ` · ${escapeHtml(String(pe.work_items))}项 · HW ${escapeHtml(String(pe.hardware_threads || '—'))}`
+		            + (pe.actual_parallel_evaluations != null ? ` · 并行评估 ${escapeHtml(String(pe.actual_parallel_evaluations))}` : '')
+		            + (pe.guard_reason ? ` · ${escapeHtml(pe.guard_reason)}` : '')
+		          : '';
+		        html += `<tr><td>并行执行</td><td>${escapeHtml(pEff)} · ${escapeHtml(String(pWorkers))} 线程 · ${escapeHtml(data.parallel_mode || 'serial')}${pExtra}</td></tr>`;
+		      }
+		      if (data.n_contingencies != null) {
+		        html += `<tr><td>枚举项</td><td>${data.n_contingencies}${data.n_with_loss != null ? ` (${data.n_with_loss} 含失负荷)` : ''}</td></tr>`;
+		      }
+		      html += '</tbody></table>';
+		      if (data.metric_semantics?.description) {
+		        html += `<div style="color:var(--muted,#8a909c);font-size:11px;margin-top:6px;">${escapeHtml(data.metric_semantics.description)}</div>`;
+		      }
+		      return renderReliabilityPanel('指标', html);
+		    }
+
+	    function renderFailureModeCoverageHtml(data) {
+	      const cov = data.failure_mode_coverage;
+	      if (!cov) return '';
+	      const rows = [
+	        ['元件数', cov.components_total],
+	        ['模式总数', cov.modes_total],
+	        ['启用/停用/不支持', `${cov.modes_enabled}/${cov.modes_disabled}/${cov.modes_unsupported}`],
+	        ['被动/主动', `${cov.modes_passive}/${cov.modes_active}`],
+	        ['物理/网络控制/保护', `${cov.modes_physical}/${cov.modes_cyber_control}/${cov.modes_protection_logic}`],
+	        ['用例/模板/缺失数据', `${cov.modes_case_data}/${cov.modes_template_or_default}/${cov.modes_missing_data}`],
+	      ];
+	      let html = '<table><tbody>';
+	      rows.forEach(([k, v]) => { html += `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(String(v ?? '—'))}</td></tr>`; });
+	      html += '</tbody></table>';
+	      return renderReliabilityPanel('失效模式覆盖', html);
+	    }
+
+		    function renderFailureModeLegendHtml(data) {
+		      const html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;font-size:12px;">' +
+		        '<div><b>时基失效</b><br><span style="color:var(--muted,#8a909c);">用年故障率 lambda 和修复时间 r；不可用度 U=lambda*r/(H+lambda*r)，确定性贡献为 lambda × 持续时间 × 后果。</span></div>' +
+		        '<div><b>按需动作失效</b><br><span style="color:var(--muted,#8a909c);">只在开断、保护或控制动作被请求时暴露；等效年频率为 demand frequency × probability per demand。</span></div>' +
+		        '<div><b>设备物理</b><br><span style="color:var(--muted,#8a909c);">硬件或一次设备故障，通常改变拓扑、容量、连通性或设备可用性。</span></div>' +
+		        '<div><b>网络控制</b><br><span style="color:var(--muted,#8a909c);">通信、测量、控制器或设定值异常，代表 cyber/control 层失效；恢复时间可独立于物理 MTTR。</span></div>' +
+		        '<div><b>保护逻辑</b><br><span style="color:var(--muted,#8a909c);">保护拒动、误动或保护区扩大，影响隔离范围和故障传播路径。</span></div>' +
+		        '<div><b>N-2 共因</b><br><span style="color:var(--muted,#8a909c);">当前按独立重叠 U_i × U_j 近似联合不可用度；用于筛查二阶薄弱组合。</span></div>' +
+		        '</div>';
+		      return renderReliabilityPanel('故障模式计算方法', html);
+		    }
+
+	    function renderReliabilityComponentModelHtml(data) {
+	      const dq = data.data_quality;
+	      const cov = data.failure_mode_coverage;
+	      let html = '';
+	      if (dq) {
+	        html += '<table><tbody>';
+	        html += `<tr><td>可靠性元件</td><td>${dq.components_total ?? 0}</td></tr>`;
+	        html += `<tr><td>用例含参</td><td>${dq.components_with_reliability_data ?? 0}</td></tr>`;
+	        html += `<tr><td>模板/默认补全</td><td>${dq.components_defaulted ?? 0}</td></tr>`;
+	        html += `<tr><td>缺失必需数据</td><td>${(dq.missing_required_data || []).length}</td></tr>`;
+	        html += '</tbody></table>';
+	      }
+	      if (cov) {
+	        html += `<div style="color:var(--muted,#8a909c);font-size:11px;margin-top:6px;">组件已展开为 ${cov.modes_total} 个失效模式，其中 ${cov.modes_active} 个主动模式、${cov.modes_passive} 个被动模式。</div>`;
+	      }
+	      return html ? renderReliabilityPanel('元件建模', html) : '';
+	    }
+
+		    function renderReliabilitySelectionHtml(data, method) {
+		      const focus = relSelectedMetricFocus(data);
+		      const basis = relSelectedWeakBasis(data, method);
+		      const meta = relWeakBasisMeta(basis);
+		      let html = `<b>指标聚焦：</b>${escapeHtml(relMetricFocusLabel(focus))} `;
+		      html += `<b style="margin-left:10px;">薄弱环节排序：</b>${escapeHtml(meta.label)}`;
+		      html += `<div style="color:var(--muted,#8a909c);font-size:11px;margin-top:6px;">${escapeHtml(meta.help)}</div>`;
+		      return renderReliabilityPanel('统计指标与薄弱环节', html);
+		    }
+
+		    function renderReliabilityRiskBasisHtml(method, basis) {
+		      const meta = relWeakBasisMeta(basis || 'eens');
+		      let prefix = `<div style="color:var(--muted,#8a909c);font-size:11px;margin:4px 0 8px;">当前按 ${escapeHtml(meta.label)} 排序。${escapeHtml(meta.help)} `;
+		      if (method === 'nsq' || method === 'seq') {
+		        return prefix +
+		          '蒙特卡洛薄弱元件反映抽样共停运状态中的关联风险；FMEA 按单一故障或失效模式的频率×后果排序，因此同一算例排序可以不同。</div>';
+		      }
+		      if (method === 'fmea' || method === 'failure_mode_fmea') {
+		        return prefix + 'FMEA 为确定性枚举，薄弱环节来自单一故障或失效模式的频率加权后果。</div>';
+		      }
+		      if (method === 'three_stage') {
+		        return prefix + '三阶段恢复为确定性频率加权评估，阶段1/2/3分别对应隔离、重构和修复窗口。</div>';
+		      }
+		      return prefix + '</div>';
+		    }
+
+		    function showReliabilityResults(data, method) {
+		      document.getElementById('resultsEmpty').style.display = 'none';
+		      document.getElementById('resultsContent').style.display = 'block';
+		      setActiveResultGroup('reliability');
+		      const nf = (v, d = 2) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '—';
+		      const methodLabel = { nsq: '非序贯蒙特卡洛', seq: '序贯蒙特卡洛', fmea: 'FMEA (N-1)', failure_mode_fmea: '失效模式 FMEA', fd: '频率-持续时间', three_stage: '三阶段恢复重构' }[method] || method;
+		      const weakBasis = relSelectedWeakBasis(data, method);
+		      const weakMeta = relWeakBasisMeta(weakBasis);
+		      const weakRows = relRankRows(relCandidateRows(data), weakBasis);
+		      let html = `<div style="margin-bottom:8px;"><b>方法：</b>${escapeHtml(methodLabel)}</div>`;
+		      html += renderReliabilityKpiTiles(data, method);
+		      html += renderReliabilityDashboardShell(data, method);
+		      html += renderReliabilityComponentModelHtml(data);
+		      html += renderFailureModeCoverageHtml(data);
+		      html += renderFailureModeLegendHtml(data);
+		      html += renderReliabilitySelectionHtml(data, method);
+		      html += renderRelScopeHtml(data);
+		      html += renderReliabilityMetricsHtml(data, method);
+		      if (weakRows.length) {
+		        html += `<h4 style="margin:10px 0 4px;">薄弱环节 (按 ${escapeHtml(weakMeta.label)})</h4>`;
+		        html += renderReliabilityRiskBasisHtml(method, weakBasis);
+		        html += `<table><thead><tr><th>#</th><th>元件/模式</th><th>类型</th><th>${escapeHtml(weakMeta.label)}</th><th>风险占比</th><th>关联EENS</th><th>LOLE</th></tr></thead><tbody>`;
+		        const ccBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
+		        weakRows.slice(0, 15).forEach((c, i) => {
+		          const compId = reliabilityContingencyCompId(c, ccBusMap);
+		          const clk = compClickAttr(compId);
+		          const fallbackName = c.line_id != null
+		            ? `故障 ${c.line_id} (${c.from_bus ?? '—'} -> ${c.to_bus ?? '—'})`
+		            : `${c.component_type || ''}[${c.index ?? c.component_index ?? ''}]`;
+		          const name = c.display_name || c.component_name || c.mode_id || fallbackName;
+		          const type = c.display_type || reliabilityComponentTypeLabel(c.component_type || c.canonical_component_type);
+		          html += `<tr${clk}><td>${i + 1}</td><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${nf(relMetricField(c, weakBasis), weakMeta.digits)} ${escapeHtml(weakMeta.unit)}</td><td>${nf(c.loss_weighted_risk ?? c.importance, 4)}</td><td>${nf(c.associated_eens_mwh_yr ?? c.eens_contribution, 3)}</td><td>${nf(c.lole_contribution_hr_yr ?? c.lole_contribution, 3)}</td></tr>`;
+		        });
+		        html += '</tbody></table>';
+		      } else if (relCandidateRows(data).length) {
+		        html += renderReliabilityPanel('薄弱环节', `<div style="color:var(--muted,#8a909c);font-size:12px;">当前排序依据“${escapeHtml(weakMeta.label)}”在该方法结果中没有可用的正贡献值；请切换薄弱环节排序依据或查看下方原始结果表。</div>`);
+		      }
+		      // FMEA top contingencies
+		      if ((method === 'fmea' || method === 'failure_mode_fmea') && Array.isArray(data.contingencies) && data.contingencies.length) {
+		        const contingencyRows = relRankRows(data.contingencies, weakBasis);
+		        html += `<h4 style="margin:10px 0 4px;">关键故障/失效模式 (按 ${escapeHtml(weakMeta.label)})</h4>`;
+		        html += renderReliabilityRiskBasisHtml(method, weakBasis);
+		        if (contingencyRows.length) {
+		          html += '<table><thead><tr><th>元件/模式</th><th>类型</th><th>激活</th><th>原因</th><th>后果</th><th>状态</th><th>EENS贡献</th><th>切负荷</th></tr></thead><tbody>';
+		          const relBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
+		          contingencyRows.slice(0, 15).forEach(c => {
+		            const compId = reliabilityContingencyCompId(c, relBusMap);
+		            const clk = compClickAttr(compId);
+		            const name = c.display_name || c.mode_id || c.component_name || '—';
+		            const type = c.display_type || reliabilityComponentTypeLabel(c.component_type);
+		            const supported = c.supported === false ? (c.unsupported_reason || '不支持') : (c.data_source || '已评估');
+		            html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${escapeHtml(reliabilityFmLabel(c.activation))}</td><td>${escapeHtml(reliabilityFmLabel(c.cause))}</td><td>${escapeHtml(reliabilityFmLabel(c.consequence))}</td><td>${escapeHtml(supported)}</td><td>${nf(c.eens_contribution, 2)}</td><td>${nf(c.shed_mw ?? c.total_shed_mw, 2)}</td></tr>`;
+		          });
+		          html += '</tbody></table>';
+		        } else {
+		          html += `<div style="color:var(--muted,#8a909c);font-size:12px;">该 FMEA 结果没有“${escapeHtml(weakMeta.label)}”排序值。</div>`;
+		        }
+		      }
+	      // Multi-mode (N-2) co-failures (failure-mode FMEA with max_order>=2)
+	      if (Array.isArray(data.co_contingencies) && data.co_contingencies.length) {
+	        html += '<h4 style="margin:10px 0 4px;">共因失效 (N-2 联合停运，按 EENS 贡献)</h4>';
+	        html += '<table><thead><tr><th>模式 A</th><th>模式 B</th><th>联合不可用度</th><th>切负荷(MW)</th><th>EENS贡献</th></tr></thead><tbody>';
+	        data.co_contingencies.slice(0, 15).forEach(co => {
+	          const a = co.mode_a || {}, b = co.mode_b || {};
+	          const na2 = (a.display_name || a.mode_id || '—') + ' · ' + reliabilityFmLabel(a.consequence);
+	          const nb2 = (b.display_name || b.mode_id || '—') + ' · ' + reliabilityFmLabel(b.consequence);
+	          const uij = (co.joint_unavailability != null) ? Number(co.joint_unavailability).toExponential(2) : '—';
+	          html += `<tr><td>${escapeHtml(na2)}</td><td>${escapeHtml(nb2)}</td><td>${uij}</td><td>${nf(co.total_shed_mw, 2)}</td><td>${nf(co.eens_contribution, 3)}</td></tr>`;
+	        });
+	        html += '</tbody></table>';
+	      }
+	      // Three-stage restoration: per-fault load shed by stage
+	      if (method === 'three_stage' && Array.isArray(data.faults) && data.faults.length) {
+	        const faultRows = relRankRows(data.faults, weakBasis);
+	        html += '<h4 style="margin:10px 0 4px;">三阶段故障传播与恢复</h4><table><thead><tr><th>元件</th><th>类型</th><th>状态</th><th>阶段1</th><th>阶段2</th><th>阶段3</th><th>合计(kW)</th><th>EENS</th><th>LOLE</th></tr></thead><tbody>';
+	        const tsMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
+	        faultRows.slice(0, 15).forEach(f => {
+	          const compId = reliabilityContingencyCompId(f, tsMap);
+	          const clk = compClickAttr(compId);
+	          const name = f.display_name || f.component_name || `故障 ${f.line_id} (${f.from_bus ?? '—'} -> ${f.to_bus ?? '—'})`;
+	          const type = f.display_type || reliabilityComponentTypeLabel(f.component_type);
+	          html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${escapeHtml(f.status || '')}</td><td>${nf(f.pls_stage1, 1)}</td><td>${nf(f.pls_stage2, 1)}</td><td>${nf(f.pls_stage3, 1)}</td><td>${nf(f.pls_total, 1)}</td><td>${nf(f.eens_contribution_mwh_yr ?? f.eens_contribution, 3)}</td><td>${nf(f.lole_contribution_hr_yr ?? f.lole_contribution, 3)}</td></tr>`;
+	        });
         html += '</tbody></table>';
       }
-      // FMEA top contingencies
-      if (method === 'fmea' && Array.isArray(data.contingencies) && data.contingencies.length) {
-        html += '<h4 style="margin:10px 0 4px;">关键故障 (按 EENS 贡献)</h4><table><thead><tr><th>元件</th><th>类型</th><th>EENS贡献(MWh/yr)</th><th>切负荷(MW)</th></tr></thead><tbody>';
-        const relBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
-        data.contingencies.slice(0, 15).forEach(c => {
-          const compId = reliabilityContingencyCompId(c, relBusMap);
-          const clk = compClickAttr(compId);
-          const name = c.display_name || c.component_name || '—';
-          const type = c.display_type || reliabilityComponentTypeLabel(c.component_type);
-          html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${nf(c.eens_contribution, 2)}</td><td>${nf(c.shed_mw, 2)}</td></tr>`;
-        });
-        html += '</tbody></table>';
-      }
-      document.getElementById('reliabilityResults').innerHTML = html;
+	      document.getElementById('reliabilityResults').innerHTML = html;
+	      drawReliabilityDashboard(data, method);
+	      if (typeof Canvas !== 'undefined' && Canvas.showReliabilityImpactResults) {
+	        Canvas.showReliabilityImpactResults(data);
+	      }
+	    }
 
-      if ((method === 'nsq' || method === 'seq') && typeof Plotly !== 'undefined' && Array.isArray(data.eens_history) && data.eens_history.length) {
-        const x = data.eens_history.map((_, i) => i + 1);
-        Plotly.newPlot('relConvChart', [{ x, y: data.eens_history, mode: 'lines', name: 'EENS', line: { color: '#61afef' } }],
-          { margin: { l: 55, r: 10, t: 10, b: 35 }, xaxis: { title: '样本批次' }, yaxis: { title: 'EENS (MWh/yr)' },
-            paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', font: { color: '#dcdfe4' } }, { responsive: true });
-      }
-    }
-
-    document.getElementById('btnRunReliability')?.addEventListener('click', runReliability);
+	    document.getElementById('relPhysicalModel')?.addEventListener('change', updateReliabilityControlState);
+	    updateReliabilityControlState();
+	    document.getElementById('btnRunReliability')?.addEventListener('click', runReliability);
     document.getElementById('btnExportReliabilityResults')?.addEventListener('click', () => {
       if (!_lastReliabilityData) {
         log('暂无可靠性分析结果可导出，请先运行可靠性分析', 'warn');
@@ -9534,7 +11985,10 @@ const App = (() => {
         let rafId = 0;
         const onMove = (ev) => {
           const newW = startW - (ev.clientX - startX);
-          panel.style.width = Math.max(240, Math.min(window.innerWidth * 0.6, newW)) + 'px';
+          const activeGroup = document.getElementById('resultsContent')?.dataset.activeGroup || '';
+          const minW = activeGroup === 'transient' ? Math.min(window.innerWidth - 360, 720) : 240;
+          const maxW = activeGroup === 'transient' ? window.innerWidth * 0.82 : window.innerWidth * 0.6;
+          panel.style.width = Math.max(minW, Math.min(maxW, newW)) + 'px';
           // Throttle Plotly resizes to animation frames
           if (!rafId) rafId = requestAnimationFrame(() => { resizePlotlyCharts(); rafId = 0; });
         };

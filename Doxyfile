@@ -8,6 +8,8 @@ OUTPUT_DIRECTORY       = docs/generated
 
 INPUT                  = docs/api_notebook.md \
                          docs/commenting_guide.md \
+                         docs/io_digital_twin_code_review.md \
+                         docs/digital_twin_data_io_architecture.md \
                          README.md \
                          include \
                          src

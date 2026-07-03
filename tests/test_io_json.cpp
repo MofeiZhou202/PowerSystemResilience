@@ -174,6 +174,89 @@ TEST_CASE("JSON round-trip: VSC short-circuit fields are preserved",
     CHECK(rt.ac_grid_forming);
 }
 
+TEST_CASE("JSON round-trip: dynamic model profiles are preserved",
+          "[io][json][roundtrip][dynamic]") {
+    auto orig = make_2bus();
+
+    DynamicModelProfile gen_profile;
+    gen_profile.standard = "IEEE";
+    gen_profile.model_name = "GENROU";
+    gen_profile.parameter_set = "thermal_demo";
+    gen_profile.source_id = "psse:GEN:1";
+    gen_profile.parameters["H"] = 3.5;
+    gen_profile.parameters["D"] = 0.1;
+    DynamicModelComponentProfile exciter;
+    exciter.type = "exciter";
+    exciter.standard = "IEEE4215";
+    exciter.model = "SEXS";
+    exciter.parameters["KA"] = 20.0;
+    gen_profile.components.push_back(exciter);
+    orig.ac.generators.front().dynamic_model = gen_profile;
+
+    PVSystem pv;
+    pv.index = 5;
+    pv.bus = 2;
+    pv.p_mw = 1.2;
+    pv.dynamic_model.standard = "NERC";
+    pv.dynamic_model.model_name = "REGC_A+REEC_A+REPCA_A";
+    pv.dynamic_model.parameter_set = "pv_plant_a";
+    pv.dynamic_model.components.push_back(
+        {"pll", "KauraPLL", "PSD", "default", {{"kp_pll", 0.01}, {"ki_pll", 1.0}}});
+    orig.ac.pv_systems.push_back(pv);
+
+    DCBus dc;
+    dc.index = 1;
+    dc.bus_type = DCBusType::DC_V;
+    orig.dc.buses = {dc};
+
+    VSCConverter vsc;
+    vsc.index = 8;
+    vsc.bus_ac = 2;
+    vsc.bus_dc = 1;
+    vsc.dynamic_model.standard = "NERC";
+    vsc.dynamic_model.model_name = "REGC_REEC_GFL_Subset";
+    vsc.dynamic_model.parameters["current_limit_pu"] = 1.2;
+    orig.vsc_converters = {vsc};
+
+    DCStorage dc_storage;
+    dc_storage.index = 4;
+    dc_storage.bus = 1;
+    dc_storage.dynamic_model.standard = "IEC";
+    dc_storage.dynamic_model.model_name = "BESS_DC_Link";
+    dc_storage.dynamic_model.parameters["capacitance_s"] = 0.25;
+    orig.dc.dc_storage = {dc_storage};
+
+    const auto restored = from_json(to_json(orig));
+
+    REQUIRE(restored.ac.generators.size() == 1);
+    CHECK(restored.ac.generators.front().dynamic_model.standard == "IEEE");
+    CHECK(restored.ac.generators.front().dynamic_model.model_name == "GENROU");
+    REQUIRE(restored.ac.generators.front().dynamic_model.components.size() == 1);
+    CHECK(restored.ac.generators.front().dynamic_model.components.front().model == "SEXS");
+    CHECK_THAT(restored.ac.generators.front().dynamic_model.parameters.at("H"),
+               WithinAbs(3.5, 1e-12));
+
+    REQUIRE(restored.ac.pv_systems.size() == 1);
+    CHECK(restored.ac.pv_systems.front().dynamic_model.components.front().model ==
+          "KauraPLL");
+    CHECK_THAT(restored.ac.pv_systems.front()
+                   .dynamic_model.components.front()
+                   .parameters.at("ki_pll"),
+               WithinAbs(1.0, 1e-12));
+
+    REQUIRE(restored.vsc_converters.size() == 1);
+    CHECK(restored.vsc_converters.front().dynamic_model.standard == "NERC");
+    CHECK_THAT(restored.vsc_converters.front()
+                   .dynamic_model.parameters.at("current_limit_pu"),
+               WithinAbs(1.2, 1e-12));
+
+    REQUIRE(restored.dc.dc_storage.size() == 1);
+    CHECK(restored.dc.dc_storage.front().dynamic_model.model_name == "BESS_DC_Link");
+    CHECK_THAT(restored.dc.dc_storage.front()
+                   .dynamic_model.parameters.at("capacitance_s"),
+               WithinAbs(0.25, 1e-12));
+}
+
 TEST_CASE("JSON round-trip: IEEE-14 AC/DC case preserves topology", "[io][json][roundtrip]") {
     auto orig = build_ieee14_acdc();
     const std::string json_str = to_json(orig);

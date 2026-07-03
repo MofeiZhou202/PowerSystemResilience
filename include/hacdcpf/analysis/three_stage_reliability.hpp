@@ -11,8 +11,14 @@
 //   Stage 1  [0, τ_SW]:        Fault isolation   — protect healthy zones
 //   Stage 2  [τ_SW, τ_TP]:     Post-fault reconfig — restore as many loads as
 //                              possible with switching operations
-//   Stage 3  [τ_TP, τ_RP]:     Post-repair reconfig — re-optimise topology
-//                              after the faulted component is repaired
+//   Stage 3  [τ_TP, τ_RP]:     Repair window — the faulted component is STILL
+//                              out (it is only repaired at τ_RP), and the Stage-2
+//                              reconfiguration is HELD.  This is the long window
+//                              (τ_RP ≈ MTTR); load that switching could not
+//                              restore is shed for its whole duration.  (Fixed:
+//                              Stage 3 used to re-close the faulted component and
+//                              re-open the ties, which zeroed the repair-window
+//                              shed for topology-isolated load.)
 //
 // No Julia runtime is required.
 // =============================================================================
@@ -30,6 +36,12 @@ namespace hacdcpf::analysis {
 /// Per-fault detail record produced by the three-stage reliability solver.
 struct ThreeStageFaultDetail {
   int line_id{0};
+  std::string component_type;  ///< canonical component type, e.g. "ac_branch"
+  int component_index{-1};     ///< position in the corresponding component vector
+  bool ac{true};
+  int from_bus{0};
+  int to_bus{0};
+  double failure_rate{0.0};    ///< occ / yr
   std::string status;         ///< "success" | "success (approximate)" | "failed"
   std::string stage1_status;
   std::string stage2_status;
@@ -42,6 +54,11 @@ struct ThreeStageFaultDetail {
   double pls_stage2{0.0};     ///< load shed in Stage 2 (kW)
   double pls_stage3{0.0};     ///< load shed in Stage 3 (kW)
   double pls_total{0.0};      ///< pls_stage1 + 2 + 3 (kW)
+  double duration_hr{0.0};    ///< loss duration used for LOLE when this fault sheds load
+  double ens_kwh{0.0};        ///< event energy not supplied before frequency weighting
+  double eens_contribution_mwh_yr{0.0};
+  double lole_contribution_hr_yr{0.0};
+  double lolf_contribution_occ_yr{0.0};
   std::vector<double> psop1;  ///< SOP power per device, Stage 1 (kW)
   std::vector<double> psop2;
   std::vector<double> psop3;
@@ -165,6 +182,45 @@ struct ThreeStageReliabilityOptions {
   /// Stage-2 normally-open switch closing.  Negative values are treated as 0.
   /// Typical field values are 1–5 operations per fault.
   int max_switch_operations{INT_MAX};
+
+  /// Switch indices (``Switch::index``) of normally-open ties that CANNOT be
+  /// closed during Stage-2 restoration (deterministic fail-to-close).  Use this
+  /// to evaluate the load-restoration impact of a tie switch's fail-to-close
+  /// failure mode: run once with the tie available and once with its id listed
+  /// here, then weight the load-shed difference by the switch's per-demand
+  /// failure probability.  Empty (default) = every in-service tie may close.
+  std::vector<int> unavailable_tie_switch_ids;
+
+  /// Include generator forced-outage contingencies in the fault set.  Default
+  /// off preserves the historical branch-only enumeration (so SAIFI/EENS and
+  /// fault counts are unchanged unless explicitly enabled).
+  bool include_generator_faults{false};
+
+  /// Include 2-winding transformer outage contingencies.  When enabled the
+  /// transformer is also modelled as a (near-ideal, capacity-limited)
+  /// restoration edge so its outage disconnects the downstream zone.  Default
+  /// off preserves the historical branch-only model.
+  bool include_transformer_faults{false};
+
+  /// Include VSC and DC-DC converter outage contingencies.  A faulted converter
+  /// is removed from the DC connectivity/capacity fallback for the event (its
+  /// AC<->DC or DC<->DC coupling and transfer capacity are lost), so DC loads
+  /// that depend on it are shed.  Default off preserves the branch-only model.
+  bool include_converter_faults{false};
+
+  /// Include AC switch and AC/DC circuit-breaker outage contingencies.  A
+  /// faulted AC switch/breaker edge is forced open in all three stages (like a
+  /// faulted branch); a faulted DC breaker is dropped from the DC connectivity
+  /// fallback.  Default off preserves the branch-only model.
+  bool include_switch_faults{false};
+
+  /// Use a DC LinDistFlow power flow for the DC subnetwork (per-bus voltage
+  /// bounds v in [vmin^2, vmax^2], resistive branch drop v_j = v_i - 2 r P, and
+  /// per-branch thermal limits), coupled to the AC MILP through per-component VSC
+  /// transfer budgets.  Default **on**: hybrid runs are physics-based by default,
+  /// and the aggregate capacity fallback is used automatically only if the DC LP
+  /// fails to solve.  Set false to force the legacy capacity-only fallback.
+  bool include_dc_power_flow{true};
 };
 
 // ─── Entry points ────────────────────────────────────────────────────────────

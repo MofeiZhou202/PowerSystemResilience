@@ -39,9 +39,11 @@
 #include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/case_builders.hpp"
+#include "hacdcpf/io/component_io_mapping.hpp"
 #include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/io/etap_io.hpp"
 #include "hacdcpf/io/scenario_bundle_io.hpp"
+#include "hacdcpf/io/external_grid_io.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
 #include "hacdcpf/power_flow/three_phase.hpp"
@@ -54,11 +56,14 @@
 #include "hacdcpf/carbon_analysis/carbon_analysis.hpp"
 #include "hacdcpf/carbon_analysis/annual_carbon_analysis.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
+#include "hacdcpf/reliability/failure_mode.hpp"
+#include "hacdcpf/analysis/three_stage_reliability.hpp"
 #include "hacdcpf/resilience/resilience_assessment.hpp"
 #include "hacdcpf/analysis/typhoon_resilience.hpp"
 #include "hacdcpf/analysis/scenario_generation.hpp"
 #include "hacdcpf/power_flow/island_detector.hpp"
 #include "hacdcpf/graph/graph.hpp"
+#include "hacdcpf/dynamics/dynamics.hpp"
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -1250,6 +1255,8 @@ struct Session {
   std::mutex mu;
   std::optional<hacdcpf::HybridPowerSystem> current_system;
   std::string current_name{"(none)"};
+  std::optional<hacdcpf::ThreePhaseACSystem> preserved_three_phase_ac;
+  std::string preserved_three_phase_source_path;
   hacdcpf::TimeSeriesData ts_data;     // time-series profile store
   std::atomic<bool> busy{false};       // true while a heavy computation runs
   std::atomic<bool> cancel{false};     // set by cancel endpoint
@@ -1296,6 +1303,200 @@ void clear_cached_analysis(Session& s) {
   s.last_tspf_skip_uc = true;
   s.last_tspf_run_opf = false;
   s.last_tspf_num_steps = 0;
+}
+
+void clear_preserved_three_phase(Session& s) {
+  s.preserved_three_phase_ac.reset();
+  s.preserved_three_phase_source_path.clear();
+}
+
+std::string gui_lower_ascii(std::string text) {
+  std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+  return text;
+}
+
+std::filesystem::path project_root_path() {
+#ifdef HACDCPF_PROJECT_ROOT
+  return std::filesystem::path(HACDCPF_PROJECT_ROOT);
+#else
+  return std::filesystem::current_path();
+#endif
+}
+
+std::optional<std::filesystem::path> canonical_existing_path(
+    const std::filesystem::path& path) {
+  std::error_code ec;
+  if (!path.empty() && std::filesystem::exists(path, ec) && !ec) {
+    return std::filesystem::canonical(path, ec);
+  }
+  return std::nullopt;
+}
+
+std::optional<std::filesystem::path> resolve_gui_opendss_master_path(
+    const json& request,
+    const std::string& dss_text) {
+  std::vector<std::filesystem::path> candidates;
+  auto add_candidate = [&](const std::filesystem::path& path) {
+    if (!path.empty()) candidates.push_back(path);
+  };
+
+  const std::string explicit_path =
+      request.value("dss_path", request.value("path", std::string{}));
+  if (!explicit_path.empty()) {
+    const std::filesystem::path p(explicit_path);
+    add_candidate(p);
+    if (p.is_relative()) add_candidate(project_root_path() / p);
+  }
+
+  const std::string file_name =
+      request.value("filename", request.value("name", std::string{}));
+  const std::string lower_name = gui_lower_ascii(file_name);
+  if (lower_name == "ieee13nodeckt.dss" ||
+      dss_text.find("IEEE 13 Node") != std::string::npos ||
+      dss_text.find("IEEE13Nodeckt") != std::string::npos) {
+    add_candidate(project_root_path() / "external_data" / "opendss_ieee_pes" /
+                  "opendss_reference" / "13_node" / "official_full" /
+                  "IEEE13Nodeckt.dss");
+  }
+
+  if (!file_name.empty()) {
+    add_candidate(project_root_path() / file_name);
+    add_candidate(project_root_path() / "external_data" / "opendss_ieee_pes" /
+                  "opendss_reference" / "13_node" / "official_full" /
+                  file_name);
+    add_candidate(project_root_path() / "tests" / "data" / "phase_domain_julia" /
+                  file_name);
+  }
+
+  for (const auto& candidate : candidates) {
+    if (auto resolved = canonical_existing_path(candidate)) return resolved;
+  }
+  return std::nullopt;
+}
+
+json phase_mask_json(const hacdcpf::PhaseMask& mask) {
+  std::string phases;
+  if (mask.has(0)) phases.push_back('A');
+  if (mask.has(1)) phases.push_back('B');
+  if (mask.has(2)) phases.push_back('C');
+  return phases;
+}
+
+json phase_jpc_bus_results_to_json(
+    const hacdcpf::analysis::ThreePhaseJPCPhase& jpc) {
+  json rows = json::array();
+  for (std::size_t row_idx = 0; row_idx < jpc.bus_abc.size(); ++row_idx) {
+    const auto& row = jpc.bus_abc[row_idx];
+    const std::string name =
+        jpc.bus_id_to_name.count(row.bus_id) ? jpc.bus_id_to_name.at(row.bus_id)
+                                             : ("Bus " + std::to_string(row.bus_id));
+    json item{{"bus_id", row.bus_id},
+              {"name", name},
+              {"base_kv", row.base_kv},
+              {"bus_type", hacdcpf::bus_type_str(row.bus_type)},
+              {"phases", std::string{}}};
+    std::string phase_text;
+    const std::array<const char*, 3> phase_names = {"a", "b", "c"};
+    for (int phase = 0; phase < 3; ++phase) {
+      const bool has_phase = row.has_phase[static_cast<std::size_t>(phase)];
+      if (has_phase) phase_text.push_back(static_cast<char>('A' + phase));
+      const auto idx = row_idx * 3 + static_cast<std::size_t>(phase);
+      const auto v = idx < jpc.v_abc.size()
+                         ? jpc.v_abc[idx]
+                         : std::polar(row.vm_pu[static_cast<std::size_t>(phase)],
+                                      row.va_deg[static_cast<std::size_t>(phase)] *
+                                          M_PI / 180.0);
+      item[std::string("has_") + phase_names[phase]] = has_phase;
+      const std::string vm_key = std::string("vm_") + phase_names[phase] + "_pu";
+      const std::string va_key = std::string("va_") + phase_names[phase] + "_deg";
+      if (has_phase) {
+        item[vm_key] = std::abs(v);
+        item[va_key] = std::arg(v) * 180.0 / M_PI;
+      } else {
+        item[vm_key] = nullptr;
+        item[va_key] = nullptr;
+      }
+      item[std::string("pd_") + phase_names[phase] + "_mw"] =
+          row.pd_mw[static_cast<std::size_t>(phase)];
+      item[std::string("qd_") + phase_names[phase] + "_mvar"] =
+          row.qd_mvar[static_cast<std::size_t>(phase)];
+      item[std::string("pg_") + phase_names[phase] + "_mw"] =
+          row.pg_mw[static_cast<std::size_t>(phase)];
+      item[std::string("qg_") + phase_names[phase] + "_mvar"] =
+          row.qg_mvar[static_cast<std::size_t>(phase)];
+    }
+    item["phases"] = phase_text;
+    rows.push_back(std::move(item));
+  }
+  return rows;
+}
+
+double wrap_deg_diff(double lhs, double rhs) {
+  double diff = lhs - rhs;
+  while (diff > 180.0) diff -= 360.0;
+  while (diff < -180.0) diff += 360.0;
+  return diff;
+}
+
+json compare_phase_voltage_results(
+    const hacdcpf::analysis::ThreePhaseJPCPhase& lhs,
+    const hacdcpf::analysis::ThreePhaseJPCPhase& rhs) {
+  double max_vm_error = 0.0;
+  double max_angle_error = 0.0;
+  double sum_vm_error = 0.0;
+  double sum_angle_error = 0.0;
+  int count = 0;
+  json worst = json::object();
+  for (const auto& [bus_name, bus_id] : lhs.bus_name_to_id) {
+    auto lhs_row_it = std::find_if(
+        lhs.bus_abc.begin(), lhs.bus_abc.end(),
+        [&](const auto& row) { return row.bus_id == bus_id; });
+    if (lhs_row_it == lhs.bus_abc.end()) continue;
+    const std::string wanted = gui_lower_ascii(bus_name);
+    const auto rhs_name_it = std::find_if(
+        rhs.bus_name_to_id.begin(), rhs.bus_name_to_id.end(),
+        [&](const auto& item) { return gui_lower_ascii(item.first) == wanted; });
+    if (rhs_name_it == rhs.bus_name_to_id.end()) continue;
+    auto rhs_row_it = std::find_if(
+        rhs.bus_abc.begin(), rhs.bus_abc.end(),
+        [&](const auto& row) { return row.bus_id == rhs_name_it->second; });
+    if (rhs_row_it == rhs.bus_abc.end()) continue;
+    for (int phase = 0; phase < 3; ++phase) {
+      const std::size_t slot = static_cast<std::size_t>(phase);
+      if (!lhs_row_it->has_phase[slot] || !rhs_row_it->has_phase[slot]) continue;
+      const double vm_error = std::abs(lhs_row_it->vm_pu[slot] -
+                                       rhs_row_it->vm_pu[slot]);
+      const double angle_error =
+          std::abs(wrap_deg_diff(lhs_row_it->va_deg[slot],
+                                 rhs_row_it->va_deg[slot]));
+      if (vm_error > max_vm_error || angle_error > max_angle_error) {
+        worst = json{{"bus", bus_name},
+                     {"phase", std::string(1, static_cast<char>('A' + phase))},
+                     {"vm_error_pu", vm_error},
+                     {"angle_error_deg", angle_error},
+                     {"vm_ours_pu", lhs_row_it->vm_pu[slot]},
+                     {"vm_opendss_pu", rhs_row_it->vm_pu[slot]},
+                     {"va_ours_deg", lhs_row_it->va_deg[slot]},
+                     {"va_opendss_deg", rhs_row_it->va_deg[slot]}};
+      }
+      max_vm_error = std::max(max_vm_error, vm_error);
+      max_angle_error = std::max(max_angle_error, angle_error);
+      sum_vm_error += vm_error;
+      sum_angle_error += angle_error;
+      ++count;
+    }
+  }
+  return json{{"ran", true},
+              {"count", count},
+              {"max_vm_error_pu", max_vm_error},
+              {"avg_vm_error_pu", count > 0 ? sum_vm_error / count : 0.0},
+              {"max_angle_error_deg", max_angle_error},
+              {"avg_angle_error_deg", count > 0 ? sum_angle_error / count : 0.0},
+              {"within_gui_tolerance",
+               count > 0 && max_vm_error < 1.0e-3 && max_angle_error < 0.1},
+              {"worst", worst}};
 }
 
 void apply_current_carbon_factors_to_snapshot(
@@ -1766,10 +1967,642 @@ json annual_carbon_to_json(const hacdcpf::analysis::AnnualCarbonAnalysisResult& 
   return out;
 }
 
+const char* dynamic_solver_type_name(hacdcpf::dynamics::DynamicSolverType type) {
+  using hacdcpf::dynamics::DynamicSolverType;
+  switch (type) {
+    case DynamicSolverType::PartitionedEuler: return "PartitionedEuler";
+    case DynamicSolverType::PartitionedHeun: return "PartitionedHeun";
+    case DynamicSolverType::PartitionedRK4: return "PartitionedRK4";
+    case DynamicSolverType::BackwardEulerNewton: return "BackwardEulerNewton";
+    case DynamicSolverType::TrapezoidalNewton: return "TrapezoidalNewton";
+    case DynamicSolverType::RosenbrockEuler: return "RosenbrockEuler";
+  }
+  return "PartitionedHeun";
+}
+
+const char* dynamic_linear_solver_type_name(hacdcpf::dynamics::DynamicLinearSolverType type) {
+  using hacdcpf::dynamics::DynamicLinearSolverType;
+  switch (type) {
+    case DynamicLinearSolverType::EigenSparseLU: return "EigenSparseLU";
+    case DynamicLinearSolverType::EigenSparseQR: return "EigenSparseQR";
+    case DynamicLinearSolverType::EigenBiCGSTAB: return "EigenBiCGSTAB";
+    case DynamicLinearSolverType::KLU: return "KLU";
+    case DynamicLinearSolverType::UMFPACK: return "UMFPACK";
+    case DynamicLinearSolverType::Pardiso: return "Pardiso";
+    case DynamicLinearSolverType::PETSc: return "PETSc";
+  }
+  return "EigenSparseLU";
+}
+
+hacdcpf::dynamics::DynamicLinearSolverType dynamic_linear_solver_type_from_json(const json& root) {
+  using hacdcpf::dynamics::DynamicLinearSolverType;
+  const std::string solver =
+      root.value("linear_solver", std::string("EigenSparseLU"));
+  if (solver == "klu" || solver == "KLU") return DynamicLinearSolverType::KLU;
+  if (solver == "umfpack" || solver == "UMFPACK") return DynamicLinearSolverType::UMFPACK;
+  if (solver == "bicgstab" || solver == "EigenBiCGSTAB") return DynamicLinearSolverType::EigenBiCGSTAB;
+  if (solver == "sparseqr" || solver == "EigenSparseQR") return DynamicLinearSolverType::EigenSparseQR;
+  if (solver == "pardiso" || solver == "Pardiso") return DynamicLinearSolverType::Pardiso;
+  if (solver == "petsc" || solver == "PETSc") return DynamicLinearSolverType::PETSc;
+  return DynamicLinearSolverType::EigenSparseLU;
+}
+
+hacdcpf::dynamics::DynamicSolverType dynamic_solver_type_from_json(const json& root) {
+  using hacdcpf::dynamics::DynamicSolverType;
+  const std::string solver =
+      root.value("solver_type", root.value("solver", std::string("heun")));
+  if (solver == "euler" || solver == "PartitionedEuler") {
+    return DynamicSolverType::PartitionedEuler;
+  }
+  if (solver == "rk4" || solver == "PartitionedRK4") {
+    return DynamicSolverType::PartitionedRK4;
+  }
+  if (solver == "backward_euler" || solver == "BackwardEulerNewton") {
+    return DynamicSolverType::BackwardEulerNewton;
+  }
+  if (solver == "trapezoidal" || solver == "TrapezoidalNewton") {
+    return DynamicSolverType::TrapezoidalNewton;
+  }
+  if (solver == "rosenbrock" || solver == "RosenbrockEuler") {
+    return DynamicSolverType::RosenbrockEuler;
+  }
+  return DynamicSolverType::PartitionedHeun;
+}
+
+hacdcpf::dynamics::DynamicEventType dynamic_event_type_from_json(const std::string& type) {
+  using hacdcpf::dynamics::DynamicEventType;
+  if (type == "ACBranchTrip") return DynamicEventType::ACBranchTrip;
+  if (type == "ACBranchClose") return DynamicEventType::ACBranchClose;
+  if (type == "DCBranchTrip") return DynamicEventType::DCBranchTrip;
+  if (type == "DCBranchClose") return DynamicEventType::DCBranchClose;
+  if (type == "ACLoadScale") return DynamicEventType::ACLoadScale;
+  if (type == "DCLoadScale") return DynamicEventType::DCLoadScale;
+  if (type == "GeneratorTrip") return DynamicEventType::GeneratorTrip;
+  if (type == "VSCTrip") return DynamicEventType::VSCTrip;
+  if (type == "DCDCTrip") return DynamicEventType::DCDCTrip;
+  if (type == "StoragePowerStep") return DynamicEventType::StoragePowerStep;
+  if (type == "DCStoragePowerStep") return DynamicEventType::DCStoragePowerStep;
+  if (type == "FaultShunt") return DynamicEventType::FaultShunt;
+  if (type == "ClearFault") return DynamicEventType::ClearFault;
+  return DynamicEventType::Custom;
+}
+
+const char* dynamic_event_type_name(hacdcpf::dynamics::DynamicEventType type) {
+  using hacdcpf::dynamics::DynamicEventType;
+  switch (type) {
+    case DynamicEventType::ACBranchTrip: return "ACBranchTrip";
+    case DynamicEventType::ACBranchClose: return "ACBranchClose";
+    case DynamicEventType::DCBranchTrip: return "DCBranchTrip";
+    case DynamicEventType::DCBranchClose: return "DCBranchClose";
+    case DynamicEventType::ACLoadScale: return "ACLoadScale";
+    case DynamicEventType::DCLoadScale: return "DCLoadScale";
+    case DynamicEventType::GeneratorTrip: return "GeneratorTrip";
+    case DynamicEventType::VSCTrip: return "VSCTrip";
+    case DynamicEventType::DCDCTrip: return "DCDCTrip";
+    case DynamicEventType::StoragePowerStep: return "StoragePowerStep";
+    case DynamicEventType::DCStoragePowerStep: return "DCStoragePowerStep";
+    case DynamicEventType::FaultShunt: return "FaultShunt";
+    case DynamicEventType::ClearFault: return "ClearFault";
+    case DynamicEventType::Custom: return "Custom";
+  }
+  return "Custom";
+}
+
+json dynamic_event_to_json(const hacdcpf::dynamics::DynamicEvent& event) {
+  return json{{"time_s", event.time_s},
+              {"type", dynamic_event_type_name(event.type)},
+              {"component_index", event.component_index},
+              {"target_id", event.target_id},
+              {"bus", event.bus},
+              {"phase", event.phase},
+              {"value", event.value},
+              {"duration_s", event.duration_s},
+              {"component_type", event.component_type},
+              {"target_type", event.target_type},
+              {"params", event.params},
+              {"label", event.label}};
+}
+
+json component_standard_profile_to_json(
+    const hacdcpf::io::ComponentStandardProfile& profile) {
+  return json{{"family", hacdcpf::io::to_string(profile.family)},
+              {"profile", profile.profile},
+              {"model_name", profile.model_name},
+              {"policy", hacdcpf::io::to_string(profile.policy)},
+              {"verification_scope",
+               hacdcpf::io::to_string(profile.verification_scope)},
+              {"notes", profile.notes}};
+}
+
+json component_io_mapping_to_json(
+    const hacdcpf::io::ComponentIOMapping& mapping) {
+  json profiles = json::array();
+  for (const auto& profile : mapping.standard_profiles) {
+    profiles.push_back(component_standard_profile_to_json(profile));
+  }
+  return json{{"component_type", mapping.component_type},
+              {"collection_path", mapping.collection_path},
+              {"domain", hacdcpf::io::to_string(mapping.domain)},
+              {"json_policy", hacdcpf::io::to_string(mapping.json_policy)},
+              {"canonical_policy",
+               hacdcpf::io::to_string(mapping.canonical_policy)},
+              {"gridlabd_policy",
+               hacdcpf::io::to_string(mapping.gridlabd_policy)},
+              {"opendss_policy",
+               hacdcpf::io::to_string(mapping.opendss_policy)},
+              {"verification_scope",
+               hacdcpf::io::to_string(mapping.verification_scope)},
+              {"canonical_target", mapping.canonical_target},
+              {"gridlabd_target", mapping.gridlabd_target},
+              {"opendss_target", mapping.opendss_target},
+              {"standard_profiles", profiles},
+              {"notes", mapping.notes}};
+}
+
+json component_parameter_rule_to_json(
+    const hacdcpf::io::ComponentParameterRule& rule) {
+  json out{{"component_type", rule.component_type},
+           {"collection_path", rule.collection_path},
+           {"parameter_path", rule.parameter_path},
+           {"category", hacdcpf::io::to_string(rule.category)},
+           {"required", rule.required},
+           {"standard_family", hacdcpf::io::to_string(rule.standard_family)},
+           {"standard_profile", rule.standard_profile},
+           {"units", rule.units},
+           {"missing_severity",
+            hacdcpf::io::to_string(rule.missing_severity)},
+           {"range_severity", hacdcpf::io::to_string(rule.range_severity)},
+           {"notes", rule.notes},
+           {"min_inclusive", rule.min_inclusive},
+           {"max_inclusive", rule.max_inclusive}};
+  if (rule.min_value) out["min"] = *rule.min_value;
+  if (rule.max_value) out["max"] = *rule.max_value;
+  return out;
+}
+
+json component_parameter_finding_to_json(
+    const hacdcpf::io::ComponentParameterFinding& finding) {
+  json out{{"component_type", finding.component_type},
+           {"collection_path", finding.collection_path},
+           {"component_position", finding.component_position},
+           {"component_index", finding.component_index},
+           {"component_name", finding.component_name},
+           {"parameter_path", finding.parameter_path},
+           {"category", hacdcpf::io::to_string(finding.category)},
+           {"severity", hacdcpf::io::to_string(finding.severity)},
+           {"required", finding.required},
+           {"standard_family",
+            hacdcpf::io::to_string(finding.standard_family)},
+           {"standard_profile", finding.standard_profile},
+           {"units", finding.units},
+           {"message", finding.message},
+           {"min_inclusive", finding.min_inclusive},
+           {"max_inclusive", finding.max_inclusive}};
+  if (finding.value) out["value"] = *finding.value;
+  if (finding.expected_min) out["expected_min"] = *finding.expected_min;
+  if (finding.expected_max) out["expected_max"] = *finding.expected_max;
+  return out;
+}
+
+json component_parameter_audit_to_json(
+    const hacdcpf::io::ComponentParameterAuditReport& report) {
+  using Category = hacdcpf::io::ComponentParameterCategory;
+  using Severity = hacdcpf::io::ComponentParameterSeverity;
+  json findings = json::array();
+  for (const auto& finding : report.findings) {
+    findings.push_back(component_parameter_finding_to_json(finding));
+  }
+  json by_category = json::object();
+  for (const auto category :
+       {Category::Static,
+        Category::Dynamic,
+        Category::Transient,
+        Category::Failure,
+        Category::Reliability}) {
+    by_category[hacdcpf::io::to_string(category)] = report.count(category);
+  }
+  return json{
+      {"summary",
+       json{{"component_instances_checked", report.component_instances_checked},
+            {"checked_parameters", report.checked_parameters},
+            {"findings_total", report.findings.size()},
+            {"errors", report.count(Severity::Error)},
+            {"warnings", report.count(Severity::Warning)},
+            {"info", report.count(Severity::Info)},
+            {"by_category", by_category}}},
+      {"findings", findings}};
+}
+
+json digital_twin_criterion_to_json(
+    const hacdcpf::io::DigitalTwinReadinessCriterion& criterion) {
+  return json{{"criterion_id", criterion.criterion_id},
+              {"dimension", hacdcpf::io::to_string(criterion.dimension)},
+              {"title", criterion.title},
+              {"description", criterion.description},
+              {"weight", criterion.weight},
+              {"severity_if_failed",
+               hacdcpf::io::to_string(criterion.severity_if_failed)},
+              {"standard_family",
+               hacdcpf::io::to_string(criterion.standard_family)},
+              {"standard_profile", criterion.standard_profile}};
+}
+
+json digital_twin_finding_to_json(
+    const hacdcpf::io::DigitalTwinReadinessFinding& finding) {
+  return json{{"criterion_id", finding.criterion_id},
+              {"dimension", hacdcpf::io::to_string(finding.dimension)},
+              {"severity", hacdcpf::io::to_string(finding.severity)},
+              {"score", finding.score},
+              {"max_score", finding.max_score},
+              {"title", finding.title},
+              {"message", finding.message},
+              {"evidence", finding.evidence},
+              {"standard_family",
+               hacdcpf::io::to_string(finding.standard_family)},
+              {"standard_profile", finding.standard_profile}};
+}
+
+json digital_twin_readiness_to_json(
+    const hacdcpf::io::DigitalTwinReadinessReport& report) {
+  using Severity = hacdcpf::io::ComponentParameterSeverity;
+  json dimensions = json::array();
+  for (const auto& item : report.dimension_scores) {
+    dimensions.push_back(json{{"dimension",
+                               hacdcpf::io::to_string(item.dimension)},
+                              {"score", item.score},
+                              {"max_score", item.max_score},
+                              {"findings", item.findings}});
+  }
+  json findings = json::array();
+  for (const auto& finding : report.findings) {
+    findings.push_back(digital_twin_finding_to_json(finding));
+  }
+  // Weakest-link maturity gates (F1..F3 / I1..I2) — §4.
+  json gates = json::array();
+  for (const auto& g : report.gates) {
+    gates.push_back(json{{"gate_id", g.gate_id},
+                         {"axis", g.axis},
+                         {"level", g.level},
+                         {"passed", g.passed},
+                         {"title", g.title},
+                         {"evidence", g.evidence}});
+  }
+  // Stored round-trip conformance evidence — §7.
+  json round_trip = json::array();
+  for (const auto& rt : report.round_trip_evidence) {
+    round_trip.push_back(json{{"adapter", rt.adapter},
+                              {"level", rt.level},
+                              {"passed", rt.passed},
+                              {"lossless", rt.lossless},
+                              {"fields_checked", rt.fields_checked},
+                              {"fields_mismatched", rt.fields_mismatched}});
+  }
+  return json{
+      {"summary",
+       json{{"score", report.score},
+            {"max_score", report.max_score},
+            {"readiness_ratio", report.readiness_ratio},
+            {"fidelity_level", report.fidelity_level},
+            {"fidelity_label", report.fidelity_label},
+            {"integration_level", report.integration_level},
+            {"integration_label", report.integration_label},
+            {"maturity_level", report.maturity_level},
+            {"maturity_label", report.maturity_label},
+            {"findings_total", report.findings.size()},
+            {"errors", report.count(Severity::Error)},
+            {"warnings", report.count(Severity::Warning)},
+            {"info", report.count(Severity::Info)}}},
+      {"gates", gates},
+      {"round_trip", round_trip},
+      {"dimensions", dimensions},
+      {"findings", findings}};
+}
+
+template <typename T>
+bool indexed_component_exists(const std::vector<T>& rows, int index) {
+  if (index == 0) return true;
+  return std::any_of(rows.begin(), rows.end(), [&](const auto& row) {
+    return row.index == index;
+  });
+}
+
+std::vector<std::string> validate_dynamic_event(
+    const hacdcpf::dynamics::DynamicEvent& event,
+    const hacdcpf::dynamics::DynamicSystem& dyn) {
+  using hacdcpf::dynamics::DynamicEventType;
+  std::vector<std::string> warnings;
+  const auto prefix = [&]() {
+    std::ostringstream os;
+    os << "Transient event " << dynamic_event_type_name(event.type) << " @ "
+       << event.time_s << "s: ";
+    return os.str();
+  };
+  const auto warn = [&](const std::string& msg) {
+    warnings.push_back(prefix() + msg);
+  };
+
+  if (!std::isfinite(event.time_s) || event.time_s < 0.0) {
+    warn("time must be non-negative");
+  }
+  switch (event.type) {
+    case DynamicEventType::FaultShunt: {
+      const bool is_dc = event.component_type == "DC" || event.component_type == "dc";
+      const int bus = event.bus != 0 ? event.bus : (event.target_id != 0 ? event.target_id
+                                                                          : event.component_index);
+      if (bus == 0) {
+        warn("fault bus is not set");
+      } else if ((is_dc ? dyn.network.dcBusPosition(bus)
+                        : dyn.network.acBusPosition(bus)) < 0) {
+        warn(std::string(is_dc ? "DC" : "AC") + " fault bus " +
+             std::to_string(bus) + " was not found");
+      }
+      const bool has_impedance =
+          event.params.count("r_pu") != 0 || event.params.count("x_pu") != 0;
+      const bool has_admittance =
+          event.params.count("g_pu") != 0 || event.params.count("b_pu") != 0;
+      if (event.value <= 0.0 && !has_impedance && !has_admittance) {
+        warn("fault intensity/admittance is not positive; solver will use the default strong shunt");
+      }
+      const auto duration_it = event.params.find("duration_s");
+      const double duration =
+          duration_it == event.params.end() ? event.duration_s : duration_it->second;
+      if (duration <= 0.0) {
+        warn("fault duration is not positive; it will persist until an explicit ClearFault event");
+      }
+      break;
+    }
+    case DynamicEventType::ClearFault: {
+      const bool is_dc = event.component_type == "DC" || event.component_type == "dc";
+      const int bus = event.bus != 0 ? event.bus : (event.target_id != 0 ? event.target_id
+                                                                          : event.component_index);
+      if (bus != 0 && (is_dc ? dyn.network.dcBusPosition(bus)
+                             : dyn.network.acBusPosition(bus)) < 0) {
+        warn(std::string(is_dc ? "DC" : "AC") + " clear-fault bus " +
+             std::to_string(bus) + " was not found");
+      }
+      break;
+    }
+    case DynamicEventType::ACLoadScale:
+      if (event.value < 0.0) warn("load scale is negative and will be clipped to zero");
+      if (event.bus != 0 || event.component_index != 0) {
+        const int bus = event.bus != 0 ? event.bus : (event.target_id != 0 ? event.target_id
+                                                                            : event.component_index);
+        if (bus != 0 && dyn.network.acBusPosition(bus) >= 0) {
+          break;
+        }
+        const bool exists =
+            indexed_component_exists(dyn.canonical_system.ac.loads, event.component_index) ||
+            (dyn.canonical_system.three_phase_ac &&
+             indexed_component_exists(dyn.canonical_system.three_phase_ac->loads,
+                                      event.component_index));
+        if (!exists) warn("AC load bus/index " + std::to_string(bus) + " was not found");
+      }
+      break;
+    case DynamicEventType::DCLoadScale:
+      if (event.value < 0.0) warn("DC load scale is negative and will be clipped to zero");
+      if (event.bus != 0 || event.component_index != 0) {
+        const int bus = event.bus != 0 ? event.bus : (event.target_id != 0 ? event.target_id
+                                                                            : event.component_index);
+        if (bus != 0 && dyn.network.dcBusPosition(bus) >= 0) {
+          break;
+        }
+        if (!indexed_component_exists(dyn.canonical_system.dc.loads, event.component_index)) {
+          warn("DC load bus/index " + std::to_string(bus) + " was not found");
+        }
+      }
+      break;
+    case DynamicEventType::ACBranchTrip:
+    case DynamicEventType::ACBranchClose:
+      if (!indexed_component_exists(dyn.network.ac_branches, event.component_index)) {
+        warn("AC branch index " + std::to_string(event.component_index) + " was not found");
+      }
+      break;
+    case DynamicEventType::DCBranchTrip:
+    case DynamicEventType::DCBranchClose:
+      if (!indexed_component_exists(dyn.network.dc_branches, event.component_index)) {
+        warn("DC branch index " + std::to_string(event.component_index) + " was not found");
+      }
+      break;
+    case DynamicEventType::GeneratorTrip: {
+      if (event.component_index != 0) {
+        const bool exists =
+            indexed_component_exists(dyn.canonical_system.ac.generators, event.component_index) ||
+            indexed_component_exists(dyn.canonical_system.ac.external_grids, event.component_index) ||
+            (dyn.canonical_system.three_phase_ac &&
+             (indexed_component_exists(dyn.canonical_system.three_phase_ac->generators,
+                                       event.component_index) ||
+              indexed_component_exists(dyn.canonical_system.three_phase_ac->external_grids,
+                                       event.component_index)));
+        if (!exists) warn("generator/external-grid index " + std::to_string(event.component_index) + " was not found");
+      }
+      break;
+    }
+    case DynamicEventType::VSCTrip:
+      if (event.component_index != 0 &&
+          !indexed_component_exists(dyn.canonical_system.vsc_converters, event.component_index)) {
+        warn("VSC index " + std::to_string(event.component_index) + " was not found");
+      }
+      break;
+    case DynamicEventType::DCDCTrip:
+      if (event.component_index != 0 &&
+          !indexed_component_exists(dyn.canonical_system.dc.dcdc_converters, event.component_index)) {
+        warn("DC/DC converter index " + std::to_string(event.component_index) + " was not found");
+      }
+      break;
+    case DynamicEventType::StoragePowerStep:
+      if (event.component_index != 0 &&
+          !indexed_component_exists(dyn.canonical_system.ac.storage, event.component_index)) {
+        warn("AC storage index " + std::to_string(event.component_index) + " was not found");
+      }
+      break;
+    case DynamicEventType::DCStoragePowerStep:
+      if (event.component_index != 0 &&
+          !indexed_component_exists(dyn.canonical_system.dc.storage, event.component_index)) {
+        warn("DC storage index " + std::to_string(event.component_index) + " was not found");
+      }
+      break;
+    case DynamicEventType::Custom:
+      warn("custom events are recorded but have no solver action yet");
+      break;
+  }
+  return warnings;
+}
+
+json dynamic_options_to_json(const hacdcpf::dynamics::DynamicSolverOptions& opt) {
+  return json{{"solver_type", dynamic_solver_type_name(opt.solver_type)},
+              {"linear_solver", dynamic_linear_solver_type_name(opt.linear_solver)},
+              {"t_start_s", opt.t_start_s},
+              {"t_end_s", opt.t_end_s},
+              {"dt_s", opt.dt_s},
+              {"newton_tol", opt.newton_tol},
+              {"max_newton_iters", opt.max_newton_iters},
+              {"use_adaptive_step", opt.use_adaptive_step},
+              {"record_every_step", opt.record_every_step},
+              {"record_initial_state", opt.record_initial_state},
+              {"output_every_steps", opt.output_every_steps},
+              {"output_interval_s", opt.output_interval_s},
+              {"max_recorded_snapshots", opt.max_recorded_snapshots},
+              {"run_power_flow_initialization", opt.run_power_flow_initialization},
+              {"trim_dynamic_initial_conditions", opt.trim_dynamic_initial_conditions},
+              {"project_to_canonical", opt.project_to_canonical},
+              {"synthesize_three_phase_if_absent", opt.synthesize_three_phase_if_absent},
+              {"dynamic_dc_link", opt.dynamic_dc_link},
+              {"source_stiffness_pu", opt.source_stiffness_pu},
+              {"inverter_virtual_reactance_pu", opt.inverter_virtual_reactance_pu},
+              {"dc_link_capacitance_s", opt.dc_link_capacitance_s},
+              {"dc_link_coupling_conductance_pu", opt.dc_link_coupling_conductance_pu},
+              {"dynamic_trim_tol", opt.dynamic_trim_tol},
+              {"max_dynamic_trim_iters", opt.max_dynamic_trim_iters}};
+}
+
+json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
+                             const hacdcpf::dynamics::DynamicSolverOptions& opt) {
+  json out;
+  out["success"] = result.success;
+  out["message"] = result.message;
+  out["steps"] = result.steps;
+  out["failed_step"] = result.failed_step;
+  out["newton_iterations"] = result.newton_iterations;
+  out["rejected_steps"] = result.rejected_steps;
+  out["warnings"] = result.warnings;
+  out["applied_events"] = result.applied_events;
+  json applied_event_records = json::array();
+  for (const auto& record : result.applied_event_records) {
+    applied_event_records.push_back(
+        json{{"time_s", record.time_s},
+             {"type", record.type},
+             {"label", record.label},
+             {"component_index", record.component_index},
+             {"target_id", record.target_id},
+             {"bus", record.bus},
+             {"phase", record.phase},
+             {"value", record.value},
+             {"duration_s", record.duration_s},
+             {"component_type", record.component_type},
+             {"target_type", record.target_type},
+             {"params", record.params}});
+  }
+  out["applied_event_records"] = applied_event_records;
+  out["options"] = dynamic_options_to_json(opt);
+  out["initialization"] =
+      json{{"power_flow_requested", result.initialization.power_flow_requested},
+           {"power_flow_converged", result.initialization.power_flow_converged},
+           {"fallback_voltage_setpoints", result.initialization.fallback_voltage_setpoints},
+           {"iterations", result.initialization.iterations},
+           {"residual", result.initialization.residual},
+           {"dynamic_trim_converged", result.initialization.dynamic_trim_converged},
+           {"dynamic_trim_iterations", result.initialization.dynamic_trim_iterations},
+           {"dynamic_initial_dxdt_inf_norm", result.initialization.dynamic_initial_dxdt_inf_norm},
+           {"dynamic_fast_dxdt_inf_norm", result.initialization.dynamic_fast_dxdt_inf_norm},
+           {"min_ac_voltage_pu", result.initialization.min_ac_voltage_pu},
+           {"max_ac_voltage_pu", result.initialization.max_ac_voltage_pu},
+           {"min_dc_voltage_pu", result.initialization.min_dc_voltage_pu},
+           {"max_dc_voltage_pu", result.initialization.max_dc_voltage_pu},
+           {"warnings", result.initialization.warnings}};
+
+  json times = json::array();
+  json min_ac = json::array();
+  json max_ac = json::array();
+  json min_dc = json::array();
+  json max_dc = json::array();
+  json frequency = json::array();
+  json ac_voltage_matrix = json::array();
+  json dc_voltage_matrix = json::array();
+  std::vector<json> ac_rows;
+  std::vector<json> dc_rows;
+  std::map<std::string, json> device_series;
+
+  for (const auto& snap : result.snapshots) {
+    times.push_back(snap.time_s);
+    min_ac.push_back(snap.min_ac_voltage_pu);
+    max_ac.push_back(snap.max_ac_voltage_pu);
+    min_dc.push_back(snap.min_dc_voltage_pu);
+    max_dc.push_back(snap.max_dc_voltage_pu);
+    frequency.push_back(snap.frequency_hz);
+
+    if (ac_rows.empty()) {
+      ac_rows.resize(static_cast<std::size_t>(snap.vac_abc.size()));
+      for (auto& row : ac_rows) row = json::array();
+    }
+    for (Eigen::Index i = 0; i < snap.vac_abc.size(); ++i) {
+      ac_rows[static_cast<std::size_t>(i)].push_back(std::abs(snap.vac_abc[i]));
+    }
+    if (dc_rows.empty()) {
+      dc_rows.resize(static_cast<std::size_t>(snap.vdc.size()));
+      for (auto& row : dc_rows) row = json::array();
+    }
+    for (Eigen::Index i = 0; i < snap.vdc.size(); ++i) {
+      dc_rows[static_cast<std::size_t>(i)].push_back(snap.vdc[i]);
+    }
+
+    for (const auto& dev : snap.device_outputs) {
+      const std::string key =
+          dev.type + ":" + std::to_string(dev.component_index) + ":" + dev.name;
+      if (!device_series.count(key)) {
+        device_series[key] =
+            json{{"name", dev.name},
+                 {"type", dev.type},
+                 {"component_index", dev.component_index},
+                 {"canvas_type", dev.canvas_type},
+                 {"canvas_index", dev.canvas_index},
+                 {"component_domain", dev.component_domain},
+                 {"source_type", dev.source_type},
+                 {"model_standard", dev.model_standard},
+                 {"model_name", dev.model_name},
+                 {"parameter_set", dev.parameter_set},
+                 {"bus", dev.bus},
+                 {"values", json::object()}};
+        json profiles = json::array();
+        for (const auto& profile : dev.model_profiles) {
+          profiles.push_back(json{{"standard", profile.standard},
+                                  {"profile", profile.profile},
+                                  {"model_name", profile.model_name},
+                                  {"parameter_set", profile.parameter_set},
+                                  {"source_id", profile.source_id},
+                                  {"notes", profile.notes}});
+        }
+        device_series[key]["model_profiles"] = profiles;
+      }
+      for (const auto& [metric, value] : dev.values) {
+        auto& arr = device_series[key]["values"][metric];
+        if (!arr.is_array()) arr = json::array();
+        arr.push_back(value);
+      }
+    }
+  }
+
+  for (const auto& row : ac_rows) ac_voltage_matrix.push_back(row);
+  for (const auto& row : dc_rows) dc_voltage_matrix.push_back(row);
+
+  json devices = json::array();
+  for (auto& [_, dev] : device_series) {
+    devices.push_back(dev);
+  }
+
+  out["time_s"] = times;
+  out["min_ac_voltage_pu"] = min_ac;
+  out["max_ac_voltage_pu"] = max_ac;
+  out["min_dc_voltage_pu"] = min_dc;
+  out["max_dc_voltage_pu"] = max_dc;
+  out["frequency_hz"] = frequency;
+  out["ac_voltage_matrix"] = ac_voltage_matrix;
+  out["dc_voltage_matrix"] = dc_voltage_matrix;
+  out["device_series"] = devices;
+  if (const auto* final = result.final_snapshot()) {
+    out["final"] = json{{"time_s", final->time_s},
+                        {"min_ac_voltage_pu", final->min_ac_voltage_pu},
+                        {"max_ac_voltage_pu", final->max_ac_voltage_pu},
+                        {"min_dc_voltage_pu", final->min_dc_voltage_pu},
+                        {"max_dc_voltage_pu", final->max_dc_voltage_pu}};
+  }
+  return out;
+}
+
 struct FMEAComponentPresentation {
   std::string display_name;
   std::string display_type;
   std::string canvas_type;
+  std::string component_domain;
   int canvas_index{-1};
   int primary_bus{0};
   int secondary_bus{0};
@@ -1819,10 +2652,12 @@ template <typename T>
 FMEAComponentPresentation fmea_one_bus_component(const std::vector<T>& items,
                                                  int position,
                                                  const std::string& display_type,
-                                                 const std::string& canvas_type) {
+                                                 const std::string& canvas_type,
+                                                 const std::string& component_domain = "AC") {
   FMEAComponentPresentation p;
   p.display_type = display_type;
   p.canvas_type = canvas_type;
+  p.component_domain = component_domain;
   if (position < 0 || position >= static_cast<int>(items.size())) {
     p.display_name = fmea_default_name(display_type, position);
     return p;
@@ -1854,13 +2689,13 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
   if (type == "ac_pv_system")
     return fmea_one_bus_component(sys.ac.pv_systems, position, label, "pv");
   if (type == "dc_storage")
-    return fmea_one_bus_component(sys.dc.storage, position, label, "dcStorage");
+    return fmea_one_bus_component(sys.dc.storage, position, label, "dcStorage", "DC");
   if (type == "dc_pv_array")
-    return fmea_one_bus_component(sys.dc.pv_arrays, position, label, "dcPv");
+    return fmea_one_bus_component(sys.dc.pv_arrays, position, label, "dcPv", "DC");
   if (type == "dc_static_generator_ac")
-    return fmea_one_bus_component(sys.dc.static_generators, position, label, "dcSgen");
+    return fmea_one_bus_component(sys.dc.static_generators, position, label, "dcSgen", "DC");
   if (type == "dc_static_generator")
-    return fmea_one_bus_component(sys.dc.dc_static_generators, position, label, "");
+    return fmea_one_bus_component(sys.dc.dc_static_generators, position, label, "", "DC");
 
   auto missing = [&] {
     p.canvas_index = -1;
@@ -1872,6 +2707,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.ac.branches.size())) return missing();
     const auto& br = sys.ac.branches[static_cast<size_t>(position)];
     p.canvas_type = "branch";
+    p.component_domain = "AC";
     p.canvas_index = br.index;
     p.primary_bus = br.from_bus;
     p.secondary_bus = br.to_bus;
@@ -1883,6 +2719,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.dc.branches.size())) return missing();
     const auto& br = sys.dc.branches[static_cast<size_t>(position)];
     p.canvas_type = "dcBranch";
+    p.component_domain = "DC";
     p.canvas_index = br.index;
     p.primary_bus = br.from_bus;
     p.secondary_bus = br.to_bus;
@@ -1894,6 +2731,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.ac.transformers_2w.size())) return missing();
     const auto& tr = sys.ac.transformers_2w[static_cast<size_t>(position)];
     p.canvas_type = "trafo";
+    p.component_domain = "AC";
     p.canvas_index = tr.index;
     p.primary_bus = tr.hv_bus;
     p.secondary_bus = tr.lv_bus;
@@ -1905,6 +2743,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.ac.transformers_3w.size())) return missing();
     const auto& tr = sys.ac.transformers_3w[static_cast<size_t>(position)];
     p.canvas_type = "trafo3w";
+    p.component_domain = "AC";
     p.canvas_index = tr.index;
     p.primary_bus = tr.hv_bus;
     p.secondary_bus = tr.lv_bus;
@@ -1919,6 +2758,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.vsc_converters.size())) return missing();
     const auto& v = sys.vsc_converters[static_cast<size_t>(position)];
     p.canvas_type = "vsc";
+    p.component_domain = "HYBRID";
     p.canvas_index = v.index;
     p.primary_bus = v.bus_ac;
     p.secondary_bus = v.bus_dc;
@@ -1933,6 +2773,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.dc.dcdc_converters.size())) return missing();
     const auto& dc = sys.dc.dcdc_converters[static_cast<size_t>(position)];
     p.canvas_type = "dcdcConverter";
+    p.component_domain = "DC";
     p.canvas_index = dc.index;
     p.primary_bus = dc.bus_in;
     p.secondary_bus = dc.bus_out;
@@ -1947,6 +2788,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.ac.switches.size())) return missing();
     const auto& sw = sys.ac.switches[static_cast<size_t>(position)];
     p.canvas_type = "sw";
+    p.component_domain = "AC";
     p.canvas_index = sw.index;
     p.primary_bus = sw.bus_from;
     p.secondary_bus = sw.bus_to;
@@ -1958,6 +2800,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.ac.circuit_breakers.size())) return missing();
     const auto& cb = sys.ac.circuit_breakers[static_cast<size_t>(position)];
     p.canvas_type = "cb";
+    p.component_domain = "AC";
     p.canvas_index = cb.index;
     p.primary_bus = cb.bus_from;
     p.secondary_bus = cb.bus_to;
@@ -1969,6 +2812,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.dc.dc_circuit_breakers.size())) return missing();
     const auto& cb = sys.dc.dc_circuit_breakers[static_cast<size_t>(position)];
     p.canvas_type = "dcCb";
+    p.component_domain = "DC";
     p.canvas_index = cb.index;
     p.primary_bus = cb.bus_from;
     p.secondary_bus = cb.bus_to;
@@ -1978,6 +2822,507 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
   }
 
   return p;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Reliability data policy + model-scope JSON helpers (code-review F2 & F4)
+// ═══════════════════════════════════════════════════════════════════════
+
+// Human-readable label for a resolved data policy (for API/GUI display).
+static std::string reliability_policy_label(
+    const hacdcpf::analysis::ReliabilityDataPolicy& pol) {
+  using P = hacdcpf::analysis::ReliabilityDefaultPolicy;
+  switch (pol.default_policy) {
+    case P::StrictCaseDataOnly: return "case_data_only";
+    case P::UseNamedTemplateForMissingOnly: return "missing_filled_with_defaults";
+    case P::OverwriteWithNamedTemplate:
+      return "overwrite_template:" + (pol.template_name.empty() ? "none"
+                                                                : pol.template_name);
+  }
+  return "case_data_only";
+}
+
+// Parse the reliability data policy from a request body and, when the policy is
+// "overwrite_template", apply the named reliability template to `sys`.
+// Templates are now OPT-IN (default = case data only) so a normal run never
+// silently overwrites case-specific reliability data (Finding 2).  The legacy
+// apply_ieee24_data / apply_comprehensive_data flags are honoured for
+// backward compatibility but default to false.
+static hacdcpf::analysis::ReliabilityDataPolicy parse_reliability_data_policy(
+    const json& j, hacdcpf::HybridPowerSystem& sys) {
+  using namespace hacdcpf::analysis;
+  ReliabilityDataPolicy pol;
+
+  std::string mode = j.value("data_policy", std::string("missing_only"));
+  std::string tmpl = j.value("reliability_template", std::string("none"));
+
+  // Backward-compatibility with the previous opt-out template flags.
+  const bool legacy_comp = j.value("apply_comprehensive_data", false);
+  const bool legacy_ieee = j.value("apply_ieee24_data", false);
+  if (legacy_comp) { mode = "overwrite_template"; tmpl = "comprehensive"; }
+  else if (legacy_ieee) { mode = "overwrite_template"; tmpl = "ieee-rts-24"; }
+
+  if (mode == "case_data_only" || mode == "strict") {
+    pol.default_policy = ReliabilityDefaultPolicy::StrictCaseDataOnly;
+  } else if (mode == "overwrite_template") {
+    pol.default_policy = ReliabilityDefaultPolicy::OverwriteWithNamedTemplate;
+  } else {  // "missing_only" (default)
+    pol.default_policy = ReliabilityDefaultPolicy::UseNamedTemplateForMissingOnly;
+  }
+  pol.template_name = tmpl;
+  pol.fail_on_missing_required_data = j.value("fail_on_missing", false);
+
+  if (pol.default_policy == ReliabilityDefaultPolicy::OverwriteWithNamedTemplate) {
+    if (tmpl == "comprehensive" || tmpl == "comprehensive-hybrid") {
+      apply_comprehensive_reliability_data(sys);
+    } else if (tmpl == "ieee-rts-24" || tmpl == "ieee24" || tmpl == "ieee-24") {
+      apply_ieee24_reliability_data(sys);
+    }
+  }
+  return pol;
+}
+
+static json reliability_validity_json(
+    const hacdcpf::analysis::ReliabilityResult::ValidityFlags& v) {
+  return json{
+      {"dc_load_curtailment_included", v.dc_load_curtailment_included},
+      {"vsc_dc_power_flow_modelled", v.vsc_dc_power_flow_modelled},
+      {"ac_opf_curtailment", v.ac_opf_curtailment},
+      {"ac_voltage_reactive_feasibility_certified",
+       v.ac_voltage_reactive_feasibility_certified}};
+}
+
+static json fmea_validity_json(
+    const hacdcpf::analysis::FMEAResult::ValidityFlags& v) {
+  return json{
+      {"dc_load_curtailment_included", v.dc_load_curtailment_included},
+      {"vsc_dc_power_flow_modelled", v.vsc_dc_power_flow_modelled},
+      {"ac_opf_curtailment", v.ac_opf_curtailment},
+      {"ac_voltage_reactive_feasibility_certified",
+       v.ac_voltage_reactive_feasibility_certified},
+      {"repair_ac_switch_reconfiguration_modelled",
+       v.repair_ac_switch_reconfiguration_modelled},
+      {"repair_dc_side_reconfiguration_modelled",
+       v.repair_dc_side_reconfiguration_modelled}};
+}
+
+static json reliability_parallel_json(bool requested,
+                                      bool effective,
+                                      int workers,
+                                      const std::string& mode) {
+  return json{{"requested", requested},
+              {"effective", effective},
+              {"workers", workers},
+              {"mode", mode}};
+}
+
+static json parallel_execution_json(
+    const hacdcpf::util::ParallelExecutionInfo& p) {
+  return json{{"requested", p.requested},
+              {"effective", p.effective},
+              {"requested_threads", p.requested_threads},
+              {"hardware_threads", p.hardware_threads},
+              {"workers", p.resolved_workers},
+              {"work_items", p.work_items},
+              {"mode", p.mode},
+              {"backend", p.backend},
+              {"guard_reason", p.guard_reason},
+              {"actual_parallel_evaluations", p.actual_parallel_evaluations},
+              {"serial_evaluations", p.serial_evaluations},
+              {"batch_size", p.batch_size},
+              {"cache_hits", p.cache_hits},
+              {"cache_misses", p.cache_misses},
+              {"n0_evaluations", p.n0_evaluations}};
+}
+
+static void add_reliability_parallel_json(json& out,
+                                          bool requested,
+                                          bool effective,
+                                          int workers,
+                                          const std::string& mode) {
+  out["parallel"] = requested;
+  out["parallel_effective"] = effective;
+  out["parallel_workers"] = workers;
+  out["parallel_mode"] = mode;
+  out["parallel_execution"] =
+      reliability_parallel_json(requested, effective, workers, mode);
+}
+
+static void add_reliability_parallel_json(
+    json& out,
+    bool requested,
+    const hacdcpf::util::ParallelExecutionInfo& info) {
+  auto effective_info = info;
+  effective_info.requested = requested;
+  out["parallel"] = requested;
+  out["parallel_effective"] = effective_info.effective;
+  out["parallel_workers"] = effective_info.resolved_workers;
+  out["parallel_mode"] = effective_info.mode;
+  out["parallel_execution"] = parallel_execution_json(effective_info);
+}
+
+static json reliability_data_quality_json(
+    const hacdcpf::analysis::ReliabilityDataQuality& dq) {
+  return json{
+      {"components_total", dq.components_total},
+      {"components_with_reliability_data", dq.components_with_reliability_data},
+      {"components_defaulted", dq.components_defaulted},
+      {"missing_required_data", dq.missing_required_data}};
+}
+
+static json failure_mode_coverage_json(
+    const hacdcpf::analysis::FailureModeCoverage& cov) {
+  return json{
+      {"components_total", cov.components_total},
+      {"modes_total", cov.modes_total},
+      {"modes_enabled", cov.modes_enabled},
+      {"modes_disabled", cov.modes_disabled},
+      {"modes_unsupported", cov.modes_unsupported},
+      {"modes_case_data", cov.modes_case_data},
+      {"modes_template_or_default", cov.modes_template_or_default},
+      {"modes_missing_data", cov.modes_missing_data},
+      {"modes_active", cov.modes_active},
+      {"modes_passive", cov.modes_passive},
+      {"modes_physical", cov.modes_physical},
+      {"modes_cyber_control", cov.modes_cyber_control},
+      {"modes_protection_logic", cov.modes_protection_logic}};
+}
+
+static hacdcpf::analysis::FailureModeCatalogOptions parse_failure_mode_catalog_options(
+    const json& j) {
+  hacdcpf::analysis::FailureModeCatalogOptions opt;
+  const json scope = j.value("failure_mode_scope", json::object());
+  opt.include_passive = scope.value("include_passive", true);
+  opt.include_active_on_demand = scope.value("include_active_on_demand", true);
+  opt.include_physical = scope.value("include_physical", true);
+  opt.include_cyber_control = scope.value("include_cyber_control", true);
+  opt.include_communication = scope.value("include_communication", true);
+  opt.include_measurement = scope.value("include_measurement", true);
+  opt.include_protection_logic = scope.value("include_protection_logic", true);
+  opt.include_human_operation = scope.value("include_human_operation", true);
+  opt.include_scheduled = scope.value("include_scheduled", false);
+  opt.only_in_service = scope.value("only_in_service", true);
+  opt.default_isolation_hr = scope.value("default_isolation_hr", 0.5);
+  opt.default_switching_hr = scope.value("default_switching_hr", 0.5);
+  return opt;
+}
+
+static json failure_mode_ref_json(
+    const hacdcpf::analysis::FailureModeRef& ref) {
+  return json{
+      {"component_kind", hacdcpf::analysis::to_string(ref.component.kind)},
+      {"component_index", ref.component.element_index},
+      {"component_name", ref.component.element_name},
+      {"component_domain", ref.component.domain},
+      {"stable_id", ref.component.stable_id},
+      {"mode_id", ref.mode_id},
+      {"display_name", ref.display_name},
+      {"activation", hacdcpf::analysis::to_string(ref.activation)},
+      {"cause", hacdcpf::analysis::to_string(ref.cause)},
+      {"consequence", hacdcpf::analysis::to_string(ref.consequence)}};
+}
+
+static std::string fmea_type_from_failure_kind(
+    hacdcpf::analysis::ReliabilityComponentKind kind) {
+  using K = hacdcpf::analysis::ReliabilityComponentKind;
+  switch (kind) {
+    case K::ACGenerator: return "generator";
+    case K::ACBranch: return "ac_branch";
+    case K::ACStaticGenerator: return "static_generator";
+    case K::ACRenewableGenerator: return "renewable_gen";
+    case K::ACStorage: return "storage";
+    case K::ACPVSystem: return "ac_pv_system";
+    case K::ACTransformer2W: return "transformer_2w";
+    case K::ACTransformer3W: return "transformer_3w";
+    case K::ACSwitch: return "ac_switch";
+    case K::ACCircuitBreaker: return "ac_circuit_breaker";
+    case K::DCBranch: return "dc_branch";
+    case K::DCStaticGenerator: return "dc_static_generator";
+    case K::DCStaticGeneratorAC: return "dc_static_generator_ac";
+    case K::DCDCConverter: return "dcdc_converter";
+    case K::DCCircuitBreaker: return "dc_circuit_breaker";
+    case K::DCStorage: return "dc_storage";
+    case K::DCPVArray: return "dc_pv_array";
+    case K::VSCConverter: return "vsc_converter";
+    default: return hacdcpf::analysis::to_string(kind);
+  }
+}
+
+static json failure_mode_contingency_json(
+    const hacdcpf::HybridPowerSystem& sys,
+    const hacdcpf::analysis::FailureModeContingency& c) {
+  const std::string component_type = fmea_type_from_failure_kind(c.ref.component.kind);
+  const auto meta = describe_fmea_component(
+      sys, component_type, c.ref.component.element_index);
+  json row = failure_mode_ref_json(c.ref);
+  row["component_type"] = component_type;
+  row["display_type"] = meta.display_type;
+  row["component_name"] = meta.display_name.empty()
+                              ? c.ref.component.element_name
+                              : meta.display_name;
+  row["canvas_type"] = meta.canvas_type;
+  row["canvas_index"] = meta.canvas_index;
+  row["component_domain"] = meta.component_domain.empty()
+                                ? c.ref.component.domain
+                                : meta.component_domain;
+  row["primary_bus"] = meta.primary_bus;
+  row["secondary_bus"] = meta.secondary_bus;
+  row["mappable"] = meta.mappable;
+  row["data_source"] = c.data_source;
+  row["supported"] = c.supported;
+  row["unsupported_reason"] = c.unsupported_reason;
+  row["frequency_per_year"] = c.frequency_per_year;
+  row["duration_hr"] = c.duration_hr;
+  row["total_shed_mw"] = c.total_shed_mw;
+  row["shed_mw"] = c.total_shed_mw;
+  row["eens_contribution"] = c.eens_contribution;
+  row["lole_contribution"] = c.lole_contribution;
+  row["causes_loss"] = c.causes_loss;
+  return row;
+}
+
+static json failure_mode_co_contingency_json(
+    const hacdcpf::HybridPowerSystem& sys,
+    const hacdcpf::analysis::FailureModeCoContingency& co) {
+  auto ref_row = [&](const hacdcpf::analysis::FailureModeRef& ref) {
+    const std::string ctype = fmea_type_from_failure_kind(ref.component.kind);
+    const auto meta = describe_fmea_component(sys, ctype, ref.component.element_index);
+    return json{
+        {"mode_id", ref.mode_id},
+        {"display_name", meta.display_name.empty() ? ref.display_name : meta.display_name},
+        {"component_type", ctype},
+        {"display_type", meta.display_type},
+        {"cause", hacdcpf::analysis::to_string(ref.cause)},
+        {"consequence", hacdcpf::analysis::to_string(ref.consequence)}};
+  };
+  return json{
+      {"mode_a", ref_row(co.mode_a)},
+      {"mode_b", ref_row(co.mode_b)},
+      {"joint_frequency_per_year", co.joint_frequency_per_year},
+      {"joint_unavailability", co.joint_unavailability},
+      {"duration_hr", co.duration_hr},
+      {"total_shed_mw", co.total_shed_mw},
+      {"eens_contribution", co.eens_contribution},
+      {"lole_contribution", co.lole_contribution},
+      {"causes_loss", co.causes_loss}};
+}
+
+static std::string mc_type_to_fmea_type(const std::string& type) {
+  static const std::unordered_map<std::string, std::string> map{
+      {"Generator", "generator"},
+      {"ACBranch", "ac_branch"},
+      {"StaticGen", "static_generator"},
+      {"RenewableGen", "renewable_gen"},
+      {"ACStorage", "storage"},
+      {"VSCConverter", "vsc_converter"},
+      {"DCBranch", "dc_branch"},
+      {"Transformer2W", "transformer_2w"},
+      {"Transformer3W", "transformer_3w"},
+      {"DCDCConverter", "dcdc_converter"},
+      {"DCCircuitBreaker", "dc_circuit_breaker"},
+      {"DCStorage", "dc_storage"},
+      {"DCPVArray", "dc_pv_array"},
+      {"ACSwitch", "ac_switch"},
+      {"ACCircuitBreaker", "ac_circuit_breaker"},
+      {"ACPVSystem", "ac_pv_system"},
+      {"DCStaticGenAC", "dc_static_generator_ac"},
+      {"DCStaticGen", "dc_static_generator"}};
+  const auto it = map.find(type);
+  return it == map.end() ? type : it->second;
+}
+
+static json mc_critical_component_json(
+    const hacdcpf::HybridPowerSystem& sys,
+    const hacdcpf::analysis::ReliabilityResult::ComponentImportance& ci) {
+  const std::string canonical_type = mc_type_to_fmea_type(ci.component_type);
+  const auto meta = describe_fmea_component(sys, canonical_type, ci.index);
+  return json{
+      {"index", ci.index},
+      {"component_index", ci.index},
+      {"is_generator", ci.is_generator},
+      {"importance", ci.importance},
+      {"loss_weighted_risk", ci.loss_weighted_risk},
+      {"conditional_down_given_loss", ci.conditional_down_given_loss},
+      {"associated_eens_mwh_yr", ci.associated_eens_mwh_yr},
+      {"component_type", ci.component_type},
+      {"canonical_component_type", canonical_type},
+      {"component_name", ci.component_name},
+      {"display_name", meta.display_name.empty() ? ci.component_name : meta.display_name},
+      {"display_type", meta.display_type.empty() ? fmea_type_label(canonical_type) : meta.display_type},
+      {"canvas_type", meta.canvas_type},
+      {"canvas_index", meta.canvas_index},
+      {"component_domain", meta.component_domain},
+      {"primary_bus", meta.primary_bus},
+      {"secondary_bus", meta.secondary_bus},
+      {"mappable", meta.mappable},
+      {"global_state_index", ci.global_state_index}};
+}
+
+static json three_stage_validity_json(
+    const hacdcpf::analysis::ThreeStageReliabilityResult::ValidityFlags& v) {
+  return json{
+      {"branch_flow_enforced", v.branch_flow_enforced},
+      {"voltage_constraints_enforced", v.voltage_constraints_enforced},
+      {"radial_topology_enforced", v.radial_topology_enforced},
+      {"sop_dispatch_optimised", v.sop_dispatch_optimised},
+      {"dc_power_flow_enforced", v.dc_power_flow_enforced},
+      {"restoration_milp_solved", v.restoration_milp_solved}};
+}
+
+static json three_stage_metrics_json(
+    const hacdcpf::analysis::ThreeStageReliabilityResult& r,
+    double hours_per_year) {
+  if (!std::isfinite(hours_per_year) || hours_per_year <= 0.0) hours_per_year = 8760.0;
+  double lole_hr_yr = 0.0;
+  double lolf_occ_yr = 0.0;
+  for (const auto& f : r.faults) {
+    lole_hr_yr += f.lole_contribution_hr_yr;
+    lolf_occ_yr += f.lolf_contribution_occ_yr;
+  }
+  const double eens_mwh_yr = r.eens_kwh_yr / 1000.0;
+  const double saidi_hr = r.saidi_min / 60.0;
+  const double lolp = std::clamp(lole_hr_yr / hours_per_year, 0.0, 1.0);
+  const double asai = std::clamp(1.0 - saidi_hr / hours_per_year, 0.0, 1.0);
+  json caidi = nullptr;
+  if (r.saifi > 1e-12) caidi = saidi_hr / r.saifi;
+  json lold = nullptr;
+  if (lolf_occ_yr > 1e-12) lold = lole_hr_yr / lolf_occ_yr;
+  return json{
+      {"eens_mwh_yr", eens_mwh_yr},
+      {"eens_kwh_yr", r.eens_kwh_yr},
+      {"edns_mw", eens_mwh_yr / hours_per_year},
+      {"lole_hr_yr", lole_hr_yr},
+      {"lolf_occ_yr", lolf_occ_yr},
+      {"lolp", lolp},
+      {"plc", lolp},
+      {"lold_hr", lold},
+      {"saifi", r.saifi},
+      {"saidi", saidi_hr},
+      {"saidi_min", r.saidi_min},
+      {"caidi", caidi},
+      {"asai", asai},
+      {"eens_cost", r.eens_cost}};
+}
+
+static json three_stage_fault_json(
+    const hacdcpf::HybridPowerSystem& sys,
+    const hacdcpf::analysis::ThreeStageFaultDetail& f) {
+  const auto meta = describe_fmea_component(sys, f.component_type, f.component_index);
+  const std::string domain = meta.component_domain.empty() ? (f.ac ? "AC" : "DC")
+                                                            : meta.component_domain;
+  return json{
+      {"line_id", f.line_id},
+      {"index", f.component_index},
+      {"component_index", f.component_index},
+      {"component_type", f.component_type},
+      {"component_name", meta.display_name},
+      {"display_name", meta.display_name},
+      {"display_type", meta.display_type},
+      {"canvas_type", meta.canvas_type},
+      {"canvas_index", meta.canvas_index},
+      {"component_domain", domain},
+      {"primary_bus", meta.primary_bus != 0 ? meta.primary_bus : f.from_bus},
+      {"secondary_bus", meta.secondary_bus != 0 ? meta.secondary_bus : f.to_bus},
+      {"mappable", meta.mappable},
+      {"ac", f.ac},
+      {"branch_type", f.ac ? "AC" : "DC"},
+      {"from_bus", f.from_bus},
+      {"to_bus", f.to_bus},
+      {"status", f.status},
+      {"stage1_status", f.stage1_status},
+      {"stage2_status", f.stage2_status},
+      {"stage3_status", f.stage3_status},
+      {"stage1_mip_gap", f.stage1_mip_gap},
+      {"stage2_mip_gap", f.stage2_mip_gap},
+      {"stage3_mip_gap", f.stage3_mip_gap},
+      {"failure_rate", f.failure_rate},
+      {"frequency_per_year", f.failure_rate},
+      {"duration_hr", f.duration_hr},
+      {"ens_kwh", f.ens_kwh},
+      {"ens_mwh", f.ens_kwh / 1000.0},
+      {"objective", f.objective},
+      {"pls_stage1", f.pls_stage1},
+      {"pls_stage2", f.pls_stage2},
+      {"pls_stage3", f.pls_stage3},
+      {"pls_total", f.pls_total},
+      {"shed_kw", f.pls_total},
+      {"shed_mw", f.pls_total / 1000.0},
+      {"eens_contribution", f.eens_contribution_mwh_yr},
+      {"eens_contribution_mwh_yr", f.eens_contribution_mwh_yr},
+      {"associated_eens_mwh_yr", f.eens_contribution_mwh_yr},
+      {"lole_contribution", f.lole_contribution_hr_yr},
+      {"lole_contribution_hr_yr", f.lole_contribution_hr_yr},
+      {"lolf_contribution", f.lolf_contribution_occ_yr},
+      {"lolf_contribution_occ_yr", f.lolf_contribution_occ_yr}};
+}
+
+static void populate_three_stage_result_json(
+    json& out,
+    const hacdcpf::HybridPowerSystem& sys,
+    const hacdcpf::analysis::ThreeStageReliabilityResult& r,
+    double hours_per_year) {
+  if (!std::isfinite(hours_per_year) || hours_per_year <= 0.0) hours_per_year = 8760.0;
+  out["physical_model"] = "ac_lindistflow_restoration_milp";
+  out["ok"] = r.ok;
+  if (!r.error.empty()) out["error_detail"] = r.error;
+  out["model_scope"] = r.model_scope;
+  out["model_limitations"] = r.model_limitations;
+  out["validity"] = three_stage_validity_json(r.validity);
+  out["counts"] = json{{"nb", r.nb}, {"nb_ac", r.nb_ac}, {"nb_dc", r.nb_dc},
+                       {"nl", r.nl}, {"nl_ac", r.nl_ac}, {"nl_dc", r.nl_dc},
+                       {"nl_vsc", r.nl_vsc}, {"nl_sop", r.nl_sop},
+                       {"nd", r.nd}, {"ng", r.ng}, {"nmg", r.nmg}};
+
+  json metrics = three_stage_metrics_json(r, hours_per_year);
+  out["metrics"] = metrics;
+  for (auto it = metrics.begin(); it != metrics.end(); ++it) out[it.key()] = it.value();
+  out["worst_line"] = r.worst_line;
+  out["metric_semantics"] = json{
+      {"type", "deterministic_frequency_weighted"},
+      {"hours_per_year", hours_per_year},
+      {"description",
+       "Three-stage metrics use FMEA-style lambda times consequence aggregation; "
+       "LOLP/PLC is LOLE divided by reporting hours, not a Monte Carlo sample probability."},
+      {"stage_duration_convention",
+       "Stage 1 isolation, Stage 2 switching restoration, Stage 3 repair window with "
+       "the faulted component still out and Stage-2 reconfiguration held."}};
+
+  json nodal = json::array();
+  for (double kwh : r.nodal_eens_kwh_yr) nodal.push_back(kwh / 1000.0);
+  out["nodal_eens_mwh_yr"] = nodal;
+
+  json faults = json::array();
+  int n_with_loss = 0;
+  for (const auto& f : r.faults) {
+    if (f.lolf_contribution_occ_yr > 0.0) n_with_loss++;
+    faults.push_back(three_stage_fault_json(sys, f));
+  }
+  out["faults"] = faults;
+  out["n_contingencies"] = r.faults.size();
+  out["n_with_loss"] = n_with_loss;
+
+  std::vector<json> crit_rows;
+  const double total_eens = metrics.value("eens_mwh_yr", 0.0);
+  for (const auto& row : faults) {
+    json c = row;
+    const double contribution = row.value("associated_eens_mwh_yr", 0.0);
+    c["importance"] = total_eens > 1e-12 ? contribution / total_eens : 0.0;
+    c["loss_weighted_risk"] = c["importance"];
+    c["conditional_down_given_loss"] = nullptr;
+    crit_rows.push_back(std::move(c));
+  }
+  std::sort(crit_rows.begin(), crit_rows.end(), [](const json& a, const json& b) {
+    const double ae = a.value("associated_eens_mwh_yr", 0.0);
+    const double be = b.value("associated_eens_mwh_yr", 0.0);
+    if (ae != be) return ae > be;
+    const double al = a.value("lole_contribution_hr_yr", 0.0);
+    const double bl = b.value("lole_contribution_hr_yr", 0.0);
+    if (al != bl) return al > bl;
+    return a.value("pls_total", 0.0) > b.value("pls_total", 0.0);
+  });
+  json critical = json::array();
+  for (const auto& row : crit_rows) critical.push_back(row);
+  out["critical_components"] = critical;
 }
 
 std::string opf_default_name(const std::string& display_type, int index) {
@@ -2537,6 +3882,43 @@ void apply_uc_objective(hacdcpf::TimeSeriesPFOptions& opts, const json& j) {
     opts.w_loss = w.value("loss", 0.0);
     opts.w_curtailment = w.value("curtailment", 0.0);
   }
+}
+
+json cost_formula_json(const hacdcpf::TimeSeriesPFOptions& opts,
+                       const std::string& dispatch_basis,
+                       double step_hr) {
+  json j;
+  j["formula_id"] = "annual_dispatch_operating_cost_v1";
+  j["title"] = "统一运行成本";
+  j["units"] = "$";
+  j["dispatch_basis"] = dispatch_basis;
+  j["step_duration_hr"] = step_hr;
+  j["fallback_marginal_cost_per_mwh"] = 20.0;
+  j["formula_text"] =
+      "sum_t [sum_g (c0_g*u_g,t + c1_g*P_g,t + c2_g*P_g,t^2) + "
+      "c_rep*P_staticDG,t + c_grid*P_import,t] * Δt";
+  j["description"] =
+      "月度/年度成本按实际调度出力重新计算；SCUC、SCED、OPF 共用同一报告口径。"
+      "常规机组使用其成本曲线；静态柴油/CHP/燃料电池等缺少显式成本字段的分布式电源、"
+      "以及无显式电价的外部电网进口，采用GUI默认20 $/MWh作为报告口径。"
+      "PV/风电等新能源默认边际燃料成本为0。优化目标可选择成本、碳排、弃电、损耗或加权目标，"
+      "但美元成本图始终使用该运行成本口径。";
+  j["objective_mode"] = uc_objective_label(opts.objective_mode);
+  j["terms"] = json::array(
+      {json{{"symbol", "c0*u"}, {"meaning", "机组空载/固定运行成本率 ($/h)"}},
+       json{{"symbol", "c1*P"}, {"meaning", "一次燃料成本率 ($/h)"}},
+       json{{"symbol", "c2*P^2"}, {"meaning", "二次燃料成本率 ($/h)"}},
+       json{{"symbol", "c_rep*P_staticDG"}, {"meaning", "缺省成本静态分布式电源报告成本率 ($/h)"}},
+       json{{"symbol", "c_grid*P_import"}, {"meaning", "外部电网进口报告成本率 ($/h)"}},
+       json{{"symbol", "Δt"}, {"meaning", "时间步长 (h)"}}});
+  if (opts.objective_mode == hacdcpf::UCObjective::Weighted) {
+    j["objective_weights"] =
+        json{{"cost", opts.w_cost},
+             {"carbon", opts.w_carbon},
+             {"loss", opts.w_loss},
+             {"curtailment", opts.w_curtailment}};
+  }
+  return j;
 }
 
 hacdcpf::TimeSeriesData make_default_ts_data(int steps = 24) {
@@ -3561,9 +4943,19 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
           <div><label>Load Scale Factor</label><input id="relLoadScale" type="number" min="0.5" max="3.0" step="0.05" value="1.0" title="Scale load (>1 reduces reserve margin)"/></div>
           <div><label>CoV Threshold</label><input id="relCovThresh" type="number" min="0.01" max="0.5" step="0.01" value="0.05"/></div>
           <div><label>Random Seed</label><input id="relSeed" type="number" min="0" max="999999" value="0" title="0 = non-deterministic"/></div>
-          <div style="display:flex;align-items:center;gap:4px;">
-            <input type="checkbox" id="relApplyIEEE24" checked/>
-            <label for="relApplyIEEE24" style="margin:0;">Apply IEEE-24 Reliability Data</label>
+          <div><label title="Reliability data policy: how missing component data is treated. Named templates are opt-in (no longer auto-applied).">Data Policy</label>
+            <select id="relDataPolicy">
+              <option value="missing_only" selected>Missing &rarr; generic defaults</option>
+              <option value="case_data_only">Case data only (strict)</option>
+              <option value="overwrite_template">Overwrite with template</option>
+            </select>
+          </div>
+          <div><label title="Named reliability template (only applied in Overwrite mode).">Template</label>
+            <select id="relTemplate">
+              <option value="none" selected>None</option>
+              <option value="ieee-rts-24">IEEE RTS-24</option>
+              <option value="comprehensive">Comprehensive hybrid</option>
+            </select>
           </div>
         </div>
         <!-- Advanced Options: Tail Risk -->
@@ -3608,12 +5000,7 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
         <details style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
           <summary style="cursor:pointer;font-weight:600;color:var(--accent);">&#128270; FMEA (Failure Modes &amp; Effects Analysis)</summary>
           <p style="color:var(--muted);font-size:0.9em;margin:6px 0 10px 0;">N-1 contingency enumeration for distribution system reliability. Evaluates each component failure individually.</p>
-          <div class="ctrl-row" style="margin-top:10px;">
-            <div style="display:flex;align-items:center;gap:4px;">
-              <input type="checkbox" id="relFmeaApplyComprehensive" checked/>
-              <label for="relFmeaApplyComprehensive" style="margin:0;">Apply Comprehensive Reliability Data</label>
-            </div>
-          </div>
+          <p style="color:var(--muted);font-size:0.85em;margin:0 0 8px 0;">Uses the shared <b>Data Policy</b> / <b>Template</b> selectors at the top. To reproduce the comprehensive hybrid demo, choose <b>Overwrite with template</b> + <b>Comprehensive hybrid</b>.</p>
           <div class="btn-group" style="margin-top:8px;">
             <button class="btn" style="background:#c0392b;color:#fff;" id="runFmeaBtn">&#9654; Run FMEA</button>
           </div>
@@ -3642,6 +5029,7 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
           <div class="kpi"><div id="relLOLECVar" class="v">-</div><div class="l">LOLE CVaR</div></div>
         </div>
         <div id="relStatus" class="status mono" style="margin-bottom:10px;">Set parameters above and run an analysis.</div>
+        <div id="relScopePanel" style="margin-bottom:10px;"></div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
           <div id="relConvergenceChart" class="chart" style="height:320px;"></div>
           <div id="relNodalEENSChart" class="chart" style="height:320px;"></div>
@@ -3657,6 +5045,7 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
             <div class="kpi"><div id="fmeaLOLF" class="v">-</div><div class="l">LOLF (occ/yr)</div></div>
             <div class="kpi"><div id="fmeaSAIFI" class="v">-</div><div class="l">SAIFI</div></div>
             <div class="kpi"><div id="fmeaSAIDI" class="v">-</div><div class="l">SAIDI</div></div>
+            <div class="kpi"><div id="fmeaCAIDI" class="v">-</div><div class="l">CAIDI</div></div>
             <div class="kpi"><div id="fmeaASAI" class="v">-</div><div class="l">ASAI</div></div>
             <div class="kpi"><div id="fmeaContingencies" class="v">-</div><div class="l">Contingencies</div></div>
           </div>
@@ -5138,10 +6527,39 @@ function getRelOpts(){
     load_scale_factor: parseFloat(document.getElementById('relLoadScale').value)||1.0,
     cov_threshold: parseFloat(document.getElementById('relCovThresh').value)||0.05,
     seed: parseInt(document.getElementById('relSeed').value)||0,
-    apply_ieee24_data: document.getElementById('relApplyIEEE24').checked,
+    data_policy: (document.getElementById('relDataPolicy')||{}).value||'missing_only',
+    reliability_template: (document.getElementById('relTemplate')||{}).value||'none',
     compute_tail_risk: document.getElementById('relTailRisk').checked,
     var_confidence: parseFloat(document.getElementById('relVarConf').value)||0.95,
   };
+}
+
+function relBadge(text,color){return '<span style="display:inline-block;padding:2px 8px;margin:2px 4px 2px 0;border-radius:10px;font-size:0.8em;background:'+color+';color:#fff;">'+text+'</span>';}
+function renderRelScope(body){
+  const el=document.getElementById('relScopePanel'); if(!el) return;
+  if(!body||!body.model_scope){el.innerHTML='';return;}
+  const yn=(b)=>b?'#27ae60':'#c0392b';
+  let h='<div style="border:1px solid var(--border);border-radius:6px;padding:8px 12px;background:#fafbfc;">';
+  h+='<b>Physical model:</b> '+relBadge(body.model_scope,'#34495e');
+  if(body.data_policy){h+=' &nbsp;<b>Data policy:</b> '+relBadge(body.data_policy,'#7f8c8d');}
+  const v=body.validity||{};
+  if('dc_load_curtailment_included' in v){
+    h+='<br><b>Validity:</b> ';
+    h+=relBadge('DC load '+(v.dc_load_curtailment_included?'included':'excluded'),yn(v.dc_load_curtailment_included));
+    h+=relBadge('VSC DC PF '+(v.vsc_dc_power_flow_modelled?'modelled':'not modelled'),yn(v.vsc_dc_power_flow_modelled));
+    h+=relBadge('AC OPF curtailment '+(v.ac_opf_curtailment?'yes':'no'),yn(v.ac_opf_curtailment));
+    h+=relBadge('AC voltage/Q '+(v.ac_voltage_reactive_feasibility_certified?'certified':'not certified'),yn(v.ac_voltage_reactive_feasibility_certified));
+    if('repair_ac_switch_reconfiguration_modelled' in v){h+=relBadge('AC switch reconfig '+(v.repair_ac_switch_reconfiguration_modelled?'on':'off'),yn(v.repair_ac_switch_reconfiguration_modelled));}
+  }
+  if(v.generation_adequacy_only){h+='<br>'+relBadge('Generation adequacy only — no network/DC/customer indices','#b57e2b');}
+  const dq=body.data_quality;
+  if(dq){
+    h+='<br><b>Data quality:</b> '+dq.components_with_reliability_data+'/'+dq.components_total+' with case data, '+dq.components_defaulted+' defaulted';
+    if(dq.missing_required_data&&dq.missing_required_data.length){h+=' '+relBadge(dq.missing_required_data.length+' missing data','#c0392b');}
+  }
+  if(body.model_limitations){h+='<div style="color:var(--muted);font-size:0.85em;margin-top:6px;">'+body.model_limitations+'</div>';}
+  h+='</div>';
+  el.innerHTML=h;
 }
 
 function updateRelKPIs(body, method){
@@ -5164,6 +6582,7 @@ function updateRelKPIs(body, method){
   } else {
     tailKPIs.style.display='none';
   }
+  renderRelScope(body);
 }
 
 function updateFDKPIs(body){
@@ -5175,6 +6594,7 @@ function updateFDKPIs(body){
   document.getElementById('relCoV').textContent='N/A';
   document.getElementById('relIters').textContent='Analytical';
   document.getElementById('relTailKPIs').style.display='none';
+  renderRelScope(body);
 }
 
 function plotRelConvergence(body, title){
@@ -5339,11 +6759,8 @@ let relLastFMEA=null;
 document.getElementById('runFmeaBtn').onclick=async()=>{
   if(!SYS){setStatus('Load a system first.',true);return;}
   try{
-    const opts={
-      load_scale_factor: parseFloat(document.getElementById('relLoadScale').value)||1.0,
-      apply_comprehensive_data: document.getElementById('relFmeaApplyComprehensive').checked,
-      verbose: false,
-    };
+    const opts=getRelOpts();
+    opts.verbose=false;
     setStatus('Running FMEA (N-1 contingency enumeration)...');
     document.getElementById('relStatus').textContent='Running FMEA analysis...';
     const body=await api('/api/session/run_reliability_fmea',opts);
@@ -5356,8 +6773,10 @@ document.getElementById('runFmeaBtn').onclick=async()=>{
     document.getElementById('fmeaLOLF').textContent=fmt(body.lolf_occ_yr,2);
     document.getElementById('fmeaSAIFI').textContent=fmt(body.saifi,4);
     document.getElementById('fmeaSAIDI').textContent=fmt(body.saidi,4);
+    var caidiEl=document.getElementById('fmeaCAIDI'); if(caidiEl) caidiEl.textContent=fmt(body.caidi,4);
     document.getElementById('fmeaASAI').textContent=fmt(body.asai,6);
-    document.getElementById('fmeaContingencies').textContent=body.n_contingencies+' ('+body.n_with_loss+' with loss)';
+    document.getElementById('fmeaContingencies').textContent=body.n_contingencies+' ('+body.n_with_loss+' with loss'+((body.n_with_loss_switching_only!=null&&body.n_with_loss_switching_only>0)?(', '+body.n_with_loss_switching_only+' switching-only'):'')+')';
+    renderRelScope(body);
     
     // Plot top contingencies (bar chart)
     if(body.contingencies&&body.contingencies.length>0){
@@ -6518,6 +7937,104 @@ int main(int argc, char** argv) {
     res.set_content(out.dump(), "application/json");
   });
 
+  svr.Get("/api/io/model_compatibility",
+          [](const httplib::Request&, httplib::Response& res) {
+    try {
+      json out;
+      json mappings = json::array();
+      for (const auto& mapping : hacdcpf::io::component_io_mappings()) {
+        mappings.push_back(component_io_mapping_to_json(mapping));
+      }
+      out["mappings"] = mappings;
+      json parameter_rules = json::array();
+      for (const auto& rule : hacdcpf::io::component_parameter_rules()) {
+        parameter_rules.push_back(component_parameter_rule_to_json(rule));
+      }
+      out["parameter_rules"] = parameter_rules;
+      json twin_criteria = json::array();
+      for (const auto& criterion :
+           hacdcpf::io::digital_twin_readiness_criteria()) {
+        twin_criteria.push_back(digital_twin_criterion_to_json(criterion));
+      }
+      out["digital_twin_criteria"] = twin_criteria;
+      hacdcpf::HybridPowerSystem sys;
+      bool has_system = false;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (g_session.current_system) {
+          sys = *g_session.current_system;
+          has_system = true;
+        }
+      }
+      if (has_system) {
+        const auto report = hacdcpf::io::analyze_component_io_coverage(sys);
+        json coverage = json::array();
+        for (const auto& item : report.items) {
+          if (item.count == 0U) continue;
+          coverage.push_back(
+              json{{"component_type", item.mapping.component_type},
+                   {"collection_path", item.mapping.collection_path},
+                   {"count", item.count},
+                   {"json_policy",
+                    hacdcpf::io::to_string(item.mapping.json_policy)},
+                   {"canonical_policy",
+                    hacdcpf::io::to_string(item.mapping.canonical_policy)},
+                   {"gridlabd_policy",
+                    hacdcpf::io::to_string(item.mapping.gridlabd_policy)},
+                   {"opendss_policy",
+                    hacdcpf::io::to_string(item.mapping.opendss_policy)},
+                   {"verification_scope",
+                    hacdcpf::io::to_string(item.mapping.verification_scope)},
+                   {"standard_profiles",
+                    component_io_mapping_to_json(item.mapping)
+                        ["standard_profiles"]}});
+        }
+        out["coverage"] = coverage;
+        out["summary"] =
+            json{{"total_instances", report.total_instances()},
+                 {"gridlabd_represented",
+                  report.represented_instances(
+                      hacdcpf::io::ComponentIOFormat::GridLABD)},
+                 {"gridlabd_unrepresented",
+                  report.unrepresented_instances(
+                      hacdcpf::io::ComponentIOFormat::GridLABD)},
+                 {"opendss_represented",
+                  report.represented_instances(
+                      hacdcpf::io::ComponentIOFormat::OpenDSS)},
+                 {"opendss_unrepresented",
+                  report.unrepresented_instances(
+                      hacdcpf::io::ComponentIOFormat::OpenDSS)}};
+        out["diagnostics"] =
+            json{{"gridlabd",
+                  hacdcpf::io::external_io_diagnostics(
+                      report, hacdcpf::io::ComponentIOFormat::GridLABD)},
+                 {"opendss",
+                  hacdcpf::io::external_io_diagnostics(
+                      report, hacdcpf::io::ComponentIOFormat::OpenDSS)}};
+        out["parameter_audit"] =
+            component_parameter_audit_to_json(
+                hacdcpf::io::analyze_component_parameter_quality(sys));
+        out["digital_twin_readiness"] =
+            digital_twin_readiness_to_json(
+                hacdcpf::io::analyze_digital_twin_readiness(sys));
+      } else {
+        out["coverage"] = json::array();
+        out["summary"] = json{{"total_instances", 0}};
+        out["diagnostics"] = json::object();
+        out["parameter_audit"] =
+            component_parameter_audit_to_json(
+                hacdcpf::io::ComponentParameterAuditReport{});
+        out["digital_twin_readiness"] =
+            digital_twin_readiness_to_json(
+                hacdcpf::io::DigitalTwinReadinessReport{});
+      }
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
   // ---- Session: load system ----
   svr.Post("/api/session/load_builtin",
            [](const httplib::Request& req, httplib::Response& res) {
@@ -6525,11 +8042,12 @@ int main(int argc, char** argv) {
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       std::string name = j.value("case", "ieee24_3area_acdc_expanded");
       auto sys = build_case(name);
-      std::lock_guard<std::mutex> lk(g_session.mu);
-      g_session.current_system = std::move(sys);
-      g_session.current_name = name;
-      g_session.external_grid_carbon_profiles.clear();
-      clear_cached_analysis(g_session);
+	      std::lock_guard<std::mutex> lk(g_session.mu);
+	      g_session.current_system = std::move(sys);
+	      g_session.current_name = name;
+	      clear_preserved_three_phase(g_session);
+	      g_session.external_grid_carbon_profiles.clear();
+	      clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
       summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
       res.set_content(summary.dump(), "application/json");
@@ -6554,11 +8072,12 @@ int main(int argc, char** argv) {
       if (!fs::exists(fpath)) throw std::runtime_error("File not found: " + filename);
       auto sys = hacdcpf::io::parse_matpower(fpath.string());
       sys.name = filename;
-      std::lock_guard<std::mutex> lk(g_session.mu);
-      g_session.current_system = std::move(sys);
-      g_session.current_name = filename;
-      g_session.external_grid_carbon_profiles.clear();
-      clear_cached_analysis(g_session);
+	      std::lock_guard<std::mutex> lk(g_session.mu);
+	      g_session.current_system = std::move(sys);
+	      g_session.current_name = filename;
+	      clear_preserved_three_phase(g_session);
+	      g_session.external_grid_carbon_profiles.clear();
+	      clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
       summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
       res.set_content(summary.dump(), "application/json");
@@ -6574,12 +8093,19 @@ int main(int argc, char** argv) {
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       std::string js = j.value("json_string", "");
       if (js.empty()) throw std::runtime_error("Empty JSON string");
-      auto sys = hacdcpf::io::from_json(js);
+	      auto sys = hacdcpf::io::from_json(js);
 
-      std::lock_guard<std::mutex> lk(g_session.mu);
-      g_session.current_system = std::move(sys);
-      g_session.current_name = g_session.current_system->name;
-      g_session.external_grid_carbon_profiles.clear();
+	      std::lock_guard<std::mutex> lk(g_session.mu);
+	      if (!sys.three_phase_ac.has_value() && g_session.preserved_three_phase_ac.has_value()) {
+	        sys.three_phase_ac = g_session.preserved_three_phase_ac;
+	      } else if (sys.three_phase_ac.has_value()) {
+	        g_session.preserved_three_phase_ac = sys.three_phase_ac;
+	      } else {
+	        clear_preserved_three_phase(g_session);
+	      }
+	      g_session.current_system = std::move(sys);
+	      g_session.current_name = g_session.current_system->name;
+	      g_session.external_grid_carbon_profiles.clear();
       clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
       summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
@@ -6598,10 +8124,11 @@ int main(int argc, char** argv) {
       sys.base_mva = 100.0;
       sys.ac.base_mva = 100.0;
       sys.dc.base_mva = 100.0;
-      std::lock_guard<std::mutex> lk(g_session.mu);
-      g_session.current_system = std::move(sys);
-      g_session.current_name = "New System";
-      clear_cached_analysis(g_session);
+	      std::lock_guard<std::mutex> lk(g_session.mu);
+	      g_session.current_system = std::move(sys);
+	      g_session.current_name = "New System";
+	      clear_preserved_three_phase(g_session);
+	      clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
       summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
       res.set_content(summary.dump(), "application/json");
@@ -6715,6 +8242,152 @@ int main(int argc, char** argv) {
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
   });
+
+  // ---- Session: export/import text-based external grid formats ----
+  svr.Post("/api/session/export_gridlabd",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system) throw std::runtime_error("No system loaded");
+      hacdcpf::io::GridLABDExportOptions options;
+      const std::string glm = hacdcpf::io::to_gridlabd(*g_session.current_system, options);
+      std::string safe;
+      for (char ch : g_session.current_name) {
+        safe += (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')
+                    ? ch : '_';
+      }
+      if (safe.empty()) safe = "system";
+      res.set_content(json{{"glm_string", glm}, {"name", safe}}.dump(),
+                      "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/export_opendss",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system) throw std::runtime_error("No system loaded");
+      hacdcpf::io::OpenDSSExportOptions options;
+      const std::string dss = hacdcpf::io::to_opendss(*g_session.current_system, options);
+      std::string safe;
+      for (char ch : g_session.current_name) {
+        safe += (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')
+                    ? ch : '_';
+      }
+      if (safe.empty()) safe = "system";
+      res.set_content(json{{"dss_string", dss}, {"name", safe}}.dump(),
+                      "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+	  svr.Post("/api/session/load_gridlabd",
+	           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      const std::string glm = j.value("glm_string", "");
+      if (glm.empty()) throw std::runtime_error("Empty GridLAB-D GLM string");
+      hacdcpf::io::GridLABDImportOptions options;
+      options.mode = hacdcpf::io::ImportMode::Permissive;
+      auto report = hacdcpf::io::from_gridlabd_with_report(glm, options);
+	      std::lock_guard<std::mutex> lk(g_session.mu);
+	      g_session.current_system = std::move(report.system);
+	      g_session.current_name = g_session.current_system->name.empty()
+	                                   ? "GridLAB-D import"
+	                                   : g_session.current_system->name;
+	      clear_preserved_three_phase(g_session);
+	      clear_cached_analysis(g_session);
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_io_warnings"] = report.warnings;
+      summary["_io_skipped"] = report.skipped;
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+	  svr.Post("/api/session/load_opendss",
+	           [](const httplib::Request& req, httplib::Response& res) {
+	    try {
+	      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+	      const std::string dss = j.value("dss_string", "");
+	      if (dss.empty()) throw std::runtime_error("Empty OpenDSS DSS string");
+	      json warnings = json::array();
+	      json skipped = json::array();
+	      hacdcpf::HybridPowerSystem imported;
+	      bool used_phase_loader = false;
+	      std::string source_path;
+
+	      const auto master_path = resolve_gui_opendss_master_path(j, dss);
+	      if (master_path.has_value()) {
+	        try {
+	          auto tp = hacdcpf::analysis::load_three_phase_system_from_opendss(*master_path);
+	          if (!tp.buses.empty()) {
+	            hacdcpf::HybridPowerSystem phase_sys;
+	            phase_sys.name = master_path->filename().string();
+	            phase_sys.base_mva = tp.base_mva;
+	            phase_sys.ac.base_mva = tp.base_mva;
+	            phase_sys.ac.freq_hz = tp.base_freq_hz;
+	            phase_sys.three_phase_ac = tp;
+	            imported = hacdcpf::project_to_canonical_models(phase_sys, false);
+	            imported.three_phase_ac = std::move(tp);
+	            used_phase_loader = true;
+	            source_path = master_path->string();
+	          }
+	        } catch (const std::exception& ex) {
+	          warnings.push_back(
+	              std::string("Phase-domain OpenDSS import failed, falling back to text converter: ") +
+	              ex.what());
+	        }
+	      } else {
+	        warnings.push_back(
+	            "No resolvable OpenDSS master path was supplied. Relative Redirect/LineCode files "
+	            "cannot be loaded from a lone browser text upload; using simplified text conversion.");
+	      }
+
+	      if (!used_phase_loader) {
+	        hacdcpf::io::OpenDSSImportOptions options;
+	        options.mode = hacdcpf::io::ImportMode::Permissive;
+	        auto report = hacdcpf::io::from_opendss_with_report(dss, options);
+	        imported = std::move(report.system);
+	        for (const auto& w : report.warnings) warnings.push_back(w);
+	        for (const auto& s : report.skipped) skipped.push_back(s);
+	      }
+
+	      std::lock_guard<std::mutex> lk(g_session.mu);
+	      g_session.current_system = std::move(imported);
+	      g_session.current_name = g_session.current_system->name.empty()
+	                                   ? "OpenDSS import"
+	                                   : g_session.current_system->name;
+	      if (g_session.current_system->three_phase_ac.has_value()) {
+	        g_session.preserved_three_phase_ac = g_session.current_system->three_phase_ac;
+	        g_session.preserved_three_phase_source_path = source_path;
+	      } else {
+	        clear_preserved_three_phase(g_session);
+	      }
+	      clear_cached_analysis(g_session);
+	      auto summary = system_summary(*g_session.current_system);
+	      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+	      summary["_io_warnings"] = warnings;
+	      summary["_io_skipped"] = skipped;
+	      summary["_opendss_import_mode"] =
+	          used_phase_loader ? "phase_domain_opendss_capi" : "text_converter";
+	      summary["_opendss_source_path"] = source_path;
+	      summary["_has_three_phase_ac"] =
+	          g_session.current_system->three_phase_ac.has_value();
+	      res.set_content(summary.dump(), "application/json");
+	    } catch (const std::exception& e) {
+	      res.status = 400;
+	      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+	    }
+	  });
 
   // ---- Session: import a native ETAP project XML (e.g. Feeder.xml) ----
   svr.Post("/api/session/load_etap_xml",
@@ -9683,34 +11356,113 @@ int main(int argc, char** argv) {
         } else {
           add_solver_diagnostics(pf.diagnostics);
         }
-      } else if (method == "three_phase") {
-        if (!sys.three_phase_ac.has_value()) {
-          throw std::runtime_error("Three-phase subsystem not available in this case");
-        }
-        hacdcpf::powerflow::ThreePhaseFlowOptions tp_opt;
-        tp_opt.max_iter = opt.max_iter;
-        tp_opt.tol = opt.tol;
-        auto pf = hacdcpf::powerflow::solve_three_phase(*sys.three_phase_ac, tp_opt);
-        out["converged"] = pf.converged;
-        out["iterations"] = pf.iterations;
-        out["residual"] = pf.residual;
-        json vm = json::array();
-        json vm_a = json::array();
-        json vm_b = json::array();
-        json vm_c = json::array();
-        for (const auto& br : pf.bus_results) {
-          vm_a.push_back(br.vm_a_pu);
-          vm_b.push_back(br.vm_b_pu);
-          vm_c.push_back(br.vm_c_pu);
-          vm.push_back((br.vm_a_pu + br.vm_b_pu + br.vm_c_pu) / 3.0);
-        }
-        out["vm"] = vm;
-        out["vm_a"] = vm_a;
-        out["vm_b"] = vm_b;
-        out["vm_c"] = vm_c;
-      } else {
-        throw std::runtime_error("Unsupported power flow method: " + method);
-      }
+	      } else if (method == "three_phase") {
+	        if (!sys.three_phase_ac.has_value()) {
+	          throw std::runtime_error("Three-phase subsystem not available in this case");
+	        }
+	        std::string dss_source_path;
+	        {
+	          std::lock_guard<std::mutex> lk(g_session.mu);
+	          dss_source_path = g_session.preserved_three_phase_source_path;
+	        }
+	        hacdcpf::analysis::RunPFPhaseOptions tp_opt;
+	        tp_opt.algorithm = hacdcpf::analysis::PhaseDomainSolverAlgorithm::Compact;
+	        tp_opt.max_iter = opt.max_iter;
+	        tp_opt.tol = opt.tol;
+	        tp_opt.verbose = opt.verbose;
+	        tp_opt.vmin_pu = 0.95;
+	        if (!dss_source_path.empty()) tp_opt.dss_file_path = dss_source_path;
+	        auto pf = hacdcpf::analysis::runpf_phase(*sys.three_phase_ac, tp_opt);
+	        out["converged"] = pf.success;
+	        out["iterations"] = pf.iterations;
+	        out["residual"] = pf.residual;
+	        out["method_actual"] = "three_phase_compact_abc";
+	        out["solver_used"] = pf.solver_used;
+	        out["primary_solver"] = pf.primary_solver;
+	        out["result_source"] = pf.result_source;
+	        out["fallback_used"] = pf.fallback_used;
+	        out["primary_solver_failed_reason"] = pf.primary_solver_failed_reason;
+	        out["three_phase"] = true;
+	        out["tp_bus_results"] = phase_jpc_bus_results_to_json(pf);
+	        json vm = json::array();
+	        json va = json::array();
+	        json vm_a = json::array();
+	        json vm_b = json::array();
+	        json vm_c = json::array();
+	        json va_a = json::array();
+	        json va_b = json::array();
+	        json va_c = json::array();
+	        for (const auto& row : pf.bus_abc) {
+	          const auto active_vm = [&](int phase) -> double {
+	            return row.has_phase[static_cast<std::size_t>(phase)]
+	                       ? row.vm_pu[static_cast<std::size_t>(phase)]
+	                       : 0.0;
+	          };
+	          const auto active_va = [&](int phase) -> double {
+	            return row.has_phase[static_cast<std::size_t>(phase)]
+	                       ? row.va_deg[static_cast<std::size_t>(phase)]
+	                       : 0.0;
+	          };
+	          double vm_sum = 0.0;
+	          double va_sum = 0.0;
+	          int phase_count = 0;
+	          for (int phase = 0; phase < 3; ++phase) {
+	            if (!row.has_phase[static_cast<std::size_t>(phase)]) continue;
+	            vm_sum += row.vm_pu[static_cast<std::size_t>(phase)];
+	            va_sum += row.va_deg[static_cast<std::size_t>(phase)];
+	            ++phase_count;
+	          }
+	          vm.push_back(phase_count > 0 ? vm_sum / phase_count : 0.0);
+	          va.push_back((phase_count > 0 ? va_sum / phase_count : 0.0) * M_PI / 180.0);
+	          if (row.has_phase[0]) vm_a.push_back(active_vm(0)); else vm_a.push_back(nullptr);
+	          if (row.has_phase[1]) vm_b.push_back(active_vm(1)); else vm_b.push_back(nullptr);
+	          if (row.has_phase[2]) vm_c.push_back(active_vm(2)); else vm_c.push_back(nullptr);
+	          if (row.has_phase[0]) va_a.push_back(active_va(0)); else va_a.push_back(nullptr);
+	          if (row.has_phase[1]) va_b.push_back(active_va(1)); else va_b.push_back(nullptr);
+	          if (row.has_phase[2]) va_c.push_back(active_va(2)); else va_c.push_back(nullptr);
+	        }
+	        out["vm"] = vm;
+	        out["va"] = va;
+	        out["vm_a"] = vm_a;
+	        out["vm_b"] = vm_b;
+	        out["vm_c"] = vm_c;
+	        out["va_a_deg"] = va_a;
+	        out["va_b_deg"] = va_b;
+	        out["va_c_deg"] = va_c;
+	        out["power_balance_diagnostics"] =
+	            json{{"basis", "three_phase_abc"},
+	                 {"ordinary", json::array()},
+	                 {"sources", json::array()},
+	                 {"message",
+	                  "三相不对称潮流采用 abc 域节点方程；平衡诊断请查看三相节点电压和 OpenDSS 对比，不使用单相等值KCL表。"}};
+	        if (!dss_source_path.empty()) {
+	          try {
+	            hacdcpf::analysis::RunPFPhaseOptions ref_opt = tp_opt;
+	            ref_opt.algorithm = hacdcpf::analysis::PhaseDomainSolverAlgorithm::OpenDSS;
+	            ref_opt.dss_file_path = dss_source_path;
+	            auto ref = hacdcpf::analysis::runpf_phase(*sys.three_phase_ac, ref_opt);
+	            out["opendss_reference"] =
+	                json{{"ran", true},
+	                     {"converged", ref.success},
+	                     {"iterations", ref.iterations},
+	                     {"residual", ref.residual},
+	                     {"source_path", dss_source_path}};
+	            out["opendss_reference"]["comparison"] =
+	                compare_phase_voltage_results(pf, ref);
+	          } catch (const std::exception& ex) {
+	            out["opendss_reference"] =
+	                json{{"ran", false},
+	                     {"source_path", dss_source_path},
+	                     {"error", ex.what()}};
+	          }
+	        } else {
+	          out["opendss_reference"] =
+	              json{{"ran", false},
+	                   {"reason", "OpenDSS master path is not available for this session"}};
+	        }
+	      } else {
+	        throw std::runtime_error("Unsupported power flow method: " + method);
+	      }
 
       add_dc_branch_flows();
       // Surface solver diagnostics (e.g. auto-promoted converters, Vdc-limit
@@ -9785,6 +11537,135 @@ int main(int argc, char** argv) {
   // Read-only structural analysis of the network graph: island / connectivity
   // detection, radiality, bridges (cut-edges), articulation points (cut-vertices)
   // and per-island validity diagnostics.  Backed by hacdcpf::graph.
+  svr.Post("/api/session/run_transient",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+
+      const json j = json::parse(req.body.empty() ? "{}" : req.body);
+      hacdcpf::dynamics::DynamicSolverOptions opt;
+      opt.solver_type = dynamic_solver_type_from_json(j);
+      opt.linear_solver = dynamic_linear_solver_type_from_json(j);
+      opt.t_start_s = j.value("t_start_s", 0.0);
+      opt.t_end_s = j.value("t_end_s", 1.0);
+      opt.dt_s = j.value("dt_s", 0.01);
+      opt.newton_tol = j.value("newton_tol", opt.newton_tol);
+      opt.max_newton_iters = j.value("max_newton_iters", opt.max_newton_iters);
+      opt.use_adaptive_step = j.value("use_adaptive_step", false);
+      opt.record_every_step = j.value("record_every_step", true);
+      opt.record_initial_state = j.value("record_initial_state", opt.record_initial_state);
+      opt.output_every_steps = j.value("output_every_steps", opt.output_every_steps);
+      opt.output_interval_s = j.value("output_interval_s", opt.output_interval_s);
+      opt.max_recorded_snapshots =
+          j.value("max_recorded_snapshots", opt.max_recorded_snapshots);
+      opt.run_power_flow_initialization =
+          j.value("run_power_flow_initialization", opt.run_power_flow_initialization);
+      opt.trim_dynamic_initial_conditions =
+          j.value("trim_dynamic_initial_conditions", opt.trim_dynamic_initial_conditions);
+      opt.dynamic_trim_tol = j.value("dynamic_trim_tol", opt.dynamic_trim_tol);
+      opt.max_dynamic_trim_iters =
+          j.value("max_dynamic_trim_iters", opt.max_dynamic_trim_iters);
+      if (j.contains("power_flow_options") && j["power_flow_options"].is_object()) {
+        const auto& pfj = j["power_flow_options"];
+        opt.power_flow_options.max_iter =
+            pfj.value("max_iter", opt.power_flow_options.max_iter);
+        opt.power_flow_options.tol =
+            pfj.value("tol", opt.power_flow_options.tol);
+        opt.power_flow_options.enable_converter_coordination_check =
+            pfj.value("enable_converter_coordination_check",
+                      opt.power_flow_options.enable_converter_coordination_check);
+      }
+      opt.project_to_canonical = j.value("project_to_canonical", true);
+      opt.synthesize_three_phase_if_absent =
+          j.value("synthesize_three_phase_if_absent", true);
+      opt.dynamic_dc_link = j.value("dynamic_dc_link", opt.dynamic_dc_link);
+      opt.source_stiffness_pu = j.value("source_stiffness_pu", opt.source_stiffness_pu);
+      opt.inverter_virtual_reactance_pu =
+          j.value("inverter_virtual_reactance_pu", opt.inverter_virtual_reactance_pu);
+      opt.dc_link_capacitance_s =
+          j.value("dc_link_capacitance_s", opt.dc_link_capacitance_s);
+      opt.dc_link_coupling_conductance_pu =
+          j.value("dc_link_coupling_conductance_pu",
+                  opt.dc_link_coupling_conductance_pu);
+      opt.singular_regularization_pu =
+          j.value("singular_regularization_pu", opt.singular_regularization_pu);
+      opt.max_step_halving = j.value("max_step_halving", opt.max_step_halving);
+
+      hacdcpf::dynamics::DynamicModelBuilder builder;
+      hacdcpf::dynamics::DynamicSystem dyn = builder.build(sys, opt);
+      if (j.contains("events") && j["events"].is_array()) {
+        for (const auto& ej : j["events"]) {
+          hacdcpf::dynamics::DynamicEvent event;
+          event.time_s = ej.value("time_s", 0.0);
+          event.type = dynamic_event_type_from_json(ej.value("type", std::string("Custom")));
+          event.component_index = ej.value("component_index", 0);
+          event.target_id = ej.value("target_id", 0);
+          event.bus = ej.value("bus", 0);
+          event.phase = ej.value("phase", -1);
+          event.value = ej.value("value", 0.0);
+          event.duration_s = ej.value("duration_s", 0.0);
+          event.component_type = ej.value("component_type", std::string());
+          event.target_type = ej.value("target_type", std::string());
+          event.label = ej.value("label", std::string());
+          if (ej.contains("params") && ej["params"].is_object()) {
+            for (const auto& [key, value] : ej["params"].items()) {
+              if (value.is_number()) event.params[key] = value.get<double>();
+            }
+          }
+          dyn.events.push_back(event);
+        }
+      }
+
+      json scheduled_events = json::array();
+      for (const auto& event : dyn.events) {
+        scheduled_events.push_back(dynamic_event_to_json(event));
+        auto validation_warnings = validate_dynamic_event(event, dyn);
+        dyn.warnings.insert(dyn.warnings.end(),
+                            validation_warnings.begin(),
+                            validation_warnings.end());
+      }
+
+      hacdcpf::dynamics::DynamicSolver solver;
+      const auto result = solver.solve(dyn);
+      json out = dynamic_results_to_json(result, opt);
+      out["scheduled_events"] = scheduled_events;
+      out["ac_bus_ids"] = dyn.network.ac_bus_ids;
+      out["dc_bus_ids"] = dyn.network.dc_bus_ids;
+      if (j.value("include_csv", false)) {
+        hacdcpf::dynamics::DynamicResultExportOptions export_options;
+        if (j.contains("csv") && j["csv"].is_object()) {
+          const auto& csvj = j["csv"];
+          export_options.include_ac_voltage_magnitudes =
+              csvj.value("include_ac_voltage_magnitudes",
+                         export_options.include_ac_voltage_magnitudes);
+          export_options.include_dc_voltages =
+              csvj.value("include_dc_voltages", export_options.include_dc_voltages);
+          export_options.include_device_outputs =
+              csvj.value("include_device_outputs", export_options.include_device_outputs);
+        }
+        out["csv"] = hacdcpf::dynamics::to_csv(result, export_options);
+      }
+      res.status = result.success ? 200 : 400;
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
   svr.Post("/api/session/topology",
            [](const httplib::Request&, httplib::Response& res) {
     try {
@@ -12207,6 +14088,11 @@ int main(int argc, char** argv) {
             {"economic_dispatch_opf", run_opf}};
         out["uc_feasible"] = result.uc_schedule.feasible;
         out["uc_solver_name"] = result.uc_schedule.solver_name;
+        out["parallel_daily_effective"] = result.parallel_daily_effective;
+        out["parallel_workers"] = result.parallel_workers;
+        out["parallel_mode"] = result.parallel_mode;
+        out["parallel_execution"] =
+            parallel_execution_json(result.parallel_execution);
         // Diagnostic: how many loads were materialized at PF time and how
         // many ended up bound to a profile id. Helps catch silent mapping
         // failures from the GUI side.
@@ -13359,9 +15245,28 @@ int main(int argc, char** argv) {
         out["uc_solver_requested"] = uc_solver_choice_label(uc_solver);
         out["solver_name"] = result.solver_name;
         out["parallel_daily"] = opts.enable_parallel_daily;
+        out["parallel_daily_effective"] = result.parallel_daily_effective;
+        out["parallel_workers"] = result.parallel_workers;
+        out["parallel_mode"] = result.parallel_mode;
+        out["parallel_execution"] =
+            parallel_execution_json(result.parallel_execution);
         out["objective_value"] = result.total_cost;
         out["objective_label"] = "年总运行成本 ($)";
         out["objective_mode"] = uc_objective_label(opts.ts_pf_options.objective_mode);
+        {
+          const std::string basis =
+              opts.enable_parallel_daily
+                  ? ((opts.daily_mode == hacdcpf::analysis::DailySimMode::SCUC)
+                         ? "parallel daily SCUC dispatch with OPF/PF replay"
+                         : (opts.daily_mode == hacdcpf::analysis::DailySimMode::DynamicSCED)
+                               ? "parallel daily dynamic SCED dispatch"
+                               : "parallel daily dynamic OPF dispatch")
+                  : (opts.skip_replay ? "hierarchical UC schedule-only dispatch"
+                                      : "hierarchical UC with OPF/PF replay");
+          out["cost_formula"] =
+              cost_formula_json(opts.ts_pf_options, basis, result.step_duration_hr);
+          out["objective_formula"] = out["cost_formula"];
+        }
         out["constraints"] = json{
             {"network_constraints", enable_net},
             {"dc_network_constraints", enable_dc_net && enable_net},
@@ -13460,6 +15365,9 @@ int main(int argc, char** argv) {
                         {"total_loss_mwh", m.total_loss_mwh},
                         {"total_ens_mwh", m.total_ens_mwh},
                         {"total_cost", m.total_cost},
+                        {"cost", m.total_cost},
+                        {"production_cost", m.total_cost},
+                        {"objective_value", m.total_cost},
                         {"num_pf_converged", m.num_pf_converged},
                         {"num_steps", m.num_steps}});
         }
@@ -13790,12 +15698,11 @@ int main(int argc, char** argv) {
         g_session.cancel.store(false);
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         
-        // Apply IEEE-24 reliability data if requested
-        if (j.value("apply_ieee24_data", true)) {
-          hacdcpf::analysis::apply_ieee24_reliability_data(sys);
-        }
+        // Reliability data policy (templates are opt-in — Finding 2).
+        auto pol = parse_reliability_data_policy(j, sys);
         
         hacdcpf::analysis::ReliabilityOptions opts;
+        opts.data_policy = pol;
         opts.max_iterations = j.value("max_iterations", 5000);
         opts.cov_threshold = j.value("cov_threshold", 0.05);
         opts.load_scale_factor = j.value("load_scale_factor", 1.0);
@@ -13803,6 +15710,8 @@ int main(int argc, char** argv) {
         opts.verbose = j.value("verbose", false);
         opts.compute_tail_risk = j.value("compute_tail_risk", false);
         opts.var_confidence = j.value("var_confidence", 0.95);
+        opts.enable_parallel = j.value("parallel", j.value("enable_parallel", true));
+        opts.parallel_threads = j.value("parallel_threads", 0);
         opts.opf_options.verbose = false;
         
         // Progress callback with cancellation support
@@ -13813,6 +15722,14 @@ int main(int argc, char** argv) {
         auto result = hacdcpf::analysis::run_nonsequential_mc(sys, opts);
         
         json out;
+        out["method"] = "nsq";
+        out["model_scope"] = result.model_scope;
+        out["model_limitations"] = result.model_limitations;
+        out["validity"] = reliability_validity_json(result.validity);
+        out["data_quality"] = reliability_data_quality_json(result.data_quality);
+        out["data_policy"] = reliability_policy_label(pol);
+        add_reliability_parallel_json(out, opts.enable_parallel,
+                                      result.parallel_execution);
         out["converged"] = result.converged;
         out["iterations_used"] = result.iterations_used;
         out["final_cov"] = result.final_cov;
@@ -13832,16 +15749,12 @@ int main(int argc, char** argv) {
           out["tail_risk"]["lole_cvar"] = result.tail_risk.lole_cvar;
         }
         
-        // Critical components
-        json crit_arr = json::array();
-        for (const auto& ci : result.critical_components) {
-          crit_arr.push_back({
-            {"index", ci.index},
-            {"is_generator", ci.is_generator},
-            {"importance", ci.importance}
-          });
-        }
-        out["critical_components"] = crit_arr;
+	        // Critical components (full metadata — Phase 0 task 2)
+	        json crit_arr = json::array();
+	        for (const auto& ci : result.critical_components) {
+	          crit_arr.push_back(mc_critical_component_json(sys, ci));
+	        }
+	        out["critical_components"] = crit_arr;
         
         res.set_content(out.dump(), "application/json");
         g_session.busy.store(false);
@@ -13870,12 +15783,11 @@ int main(int argc, char** argv) {
         g_session.cancel.store(false);
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         
-        // Apply IEEE-24 reliability data if requested
-        if (j.value("apply_ieee24_data", true)) {
-          hacdcpf::analysis::apply_ieee24_reliability_data(sys);
-        }
+        // Reliability data policy (templates are opt-in — Finding 2).
+        auto pol = parse_reliability_data_policy(j, sys);
         
         hacdcpf::analysis::ReliabilityOptions opts;
+        opts.data_policy = pol;
         opts.max_iterations = j.value("max_years", 500);
         opts.cov_threshold = j.value("cov_threshold", 0.05);
         opts.load_scale_factor = j.value("load_scale_factor", 1.0);
@@ -13884,6 +15796,8 @@ int main(int argc, char** argv) {
         opts.verbose = j.value("verbose", false);
         opts.compute_tail_risk = j.value("compute_tail_risk", false);
         opts.var_confidence = j.value("var_confidence", 0.95);
+        opts.enable_parallel = j.value("parallel", j.value("enable_parallel", true));
+        opts.parallel_threads = j.value("parallel_threads", 0);
         opts.opf_options.verbose = false;
         
         // Progress callback with cancellation support
@@ -13897,6 +15811,14 @@ int main(int argc, char** argv) {
         auto result = hacdcpf::analysis::run_sequential_mc(sys, load_profile, opts);
         
         json out;
+        out["method"] = "seq";
+        out["model_scope"] = result.model_scope;
+        out["model_limitations"] = result.model_limitations;
+        out["validity"] = reliability_validity_json(result.validity);
+        out["data_quality"] = reliability_data_quality_json(result.data_quality);
+        out["data_policy"] = reliability_policy_label(pol);
+        add_reliability_parallel_json(out, opts.enable_parallel,
+                                      result.parallel_execution);
         out["converged"] = result.converged;
         out["iterations_used"] = result.iterations_used;
         out["final_cov"] = result.final_cov;
@@ -13920,16 +15842,12 @@ int main(int argc, char** argv) {
           out["tail_risk"]["lole_cvar"] = result.tail_risk.lole_cvar;
         }
         
-        // Critical components
-        json crit_arr = json::array();
-        for (const auto& ci : result.critical_components) {
-          crit_arr.push_back({
-            {"index", ci.index},
-            {"is_generator", ci.is_generator},
-            {"importance", ci.importance}
-          });
-        }
-        out["critical_components"] = crit_arr;
+	        // Critical components (full metadata — Phase 0 task 2)
+	        json crit_arr = json::array();
+	        for (const auto& ci : result.critical_components) {
+	          crit_arr.push_back(mc_critical_component_json(sys, ci));
+	        }
+	        out["critical_components"] = crit_arr;
         
         res.set_content(out.dump(), "application/json");
         g_session.busy.store(false);
@@ -13958,20 +15876,27 @@ int main(int argc, char** argv) {
         g_session.cancel.store(false);
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         
-        // Apply comprehensive reliability data if requested
-        if (j.value("apply_comprehensive_data", true)) {
-          hacdcpf::analysis::apply_comprehensive_reliability_data(sys);
-        } else if (j.value("apply_ieee24_data", false)) {
-          hacdcpf::analysis::apply_ieee24_reliability_data(sys);
-        }
+        // Reliability data policy (templates are opt-in — Finding 2).
+        auto pol = parse_reliability_data_policy(j, sys);
         
         hacdcpf::analysis::FMEAOptions fmea_opts;
+        fmea_opts.data_policy = pol;
         fmea_opts.load_scale_factor = j.value("load_scale_factor", 1.0);
         fmea_opts.verbose = j.value("verbose", false);
+        fmea_opts.enable_parallel = j.value("parallel", j.value("enable_parallel", true));
+        fmea_opts.parallel_threads = j.value("parallel_threads", 0);
         
         auto result = hacdcpf::analysis::run_distribution_fmea(sys, fmea_opts);
         
         json out;
+        out["method"] = "fmea";
+        out["model_scope"] = result.model_scope;
+        out["model_limitations"] = result.model_limitations;
+        out["validity"] = fmea_validity_json(result.validity);
+        out["data_quality"] = reliability_data_quality_json(result.data_quality);
+        out["data_policy"] = reliability_policy_label(pol);
+        add_reliability_parallel_json(out, fmea_opts.enable_parallel,
+                                      result.parallel_execution);
         out["eens_mwh_yr"] = result.eens_mwh_yr;
         out["edns_mw"] = result.edns_mw;
         out["lole_hr_yr"] = result.lole_hr_yr;
@@ -13980,14 +15905,18 @@ int main(int argc, char** argv) {
         out["saidi"] = result.distribution_idx.saidi;
         out["caidi"] = result.distribution_idx.caidi;
         out["asai"] = result.distribution_idx.asai;
+        out["asui"] = result.distribution_idx.asui;
         out["n_contingencies"] = result.contingencies.size();
         
-        // Count contingencies with loss
-        int n_with_loss = 0;
+        // Contingencies causing ANY load loss (switching OR repair stage).
+        // Use the solver's count; the GUI previously tested shed_rep_mw alone
+        // and silently dropped switching-stage-only interruptions.
+        out["n_with_loss"] = result.n_loss_contingencies;
+        int n_with_loss_switching_only = 0;
         for (const auto& c : result.contingencies) {
-          if (c.shed_rep_mw > 0.01) n_with_loss++;
+          if (c.causes_loss_sw && !c.causes_loss_rep) n_with_loss_switching_only++;
         }
-        out["n_with_loss"] = n_with_loss;
+        out["n_with_loss_switching_only"] = n_with_loss_switching_only;
         
         // Contingencies sorted by EENS contribution (descending)
         auto sorted = result.contingencies;
@@ -13997,6 +15926,17 @@ int main(int argc, char** argv) {
         json cont_arr = json::array();
         for (const auto& c : sorted) {
           const auto meta = describe_fmea_component(sys, c.component_type, c.component_index);
+          json switch_actions = json::array();
+          for (const auto& sa : c.repair_switch_actions) {
+            switch_actions.push_back({
+              {"switch_index", sa.switch_index},
+              {"switch_name", sa.switch_name},
+              {"switch_type", sa.switch_type},
+              {"action", sa.action},
+              {"bus_from", sa.bus_from},
+              {"bus_to", sa.bus_to}
+            });
+          }
           cont_arr.push_back({
             {"component_name", meta.display_name},
             {"component_type", c.component_type},
@@ -14005,13 +15945,25 @@ int main(int argc, char** argv) {
             {"component_index", c.component_index},
             {"canvas_type", meta.canvas_type},
             {"canvas_index", meta.canvas_index},
+            {"component_domain", meta.component_domain},
             {"primary_bus", meta.primary_bus},
             {"secondary_bus", meta.secondary_bus},
             {"mappable", meta.mappable},
-            {"shed_mw", c.shed_rep_mw},
-            {"eens_contribution", c.eens_contribution},
             {"failure_rate", c.failure_rate},
-            {"repair_time", c.tau_rep_hr}
+            {"tau_sw_hr", c.tau_sw_hr},
+            {"tau_rep_hr", c.tau_rep_hr},
+            {"repair_time", c.tau_rep_hr},
+            {"shed_sw_mw", c.shed_sw_mw},
+            {"shed_rep_mw", c.shed_rep_mw},
+            {"shed_mw", c.shed_rep_mw},
+            {"ens_sw_mwh", c.ens_sw_mwh},
+            {"ens_rep_mwh", c.ens_rep_mwh},
+            {"eens_contribution", c.eens_contribution},
+            {"lole_contribution", c.lole_contribution},
+            {"causes_loss_sw", c.causes_loss_sw},
+            {"causes_loss_rep", c.causes_loss_rep},
+            {"repair_search_truncated", c.repair_search_truncated},
+            {"repair_switch_actions", switch_actions}
           });
         }
         out["contingencies"] = cont_arr;
@@ -14936,10 +16888,8 @@ int main(int argc, char** argv) {
         }
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         
-        // Apply IEEE-24 reliability data if requested
-        if (j.value("apply_ieee24_data", true)) {
-          hacdcpf::analysis::apply_ieee24_reliability_data(sys);
-        }
+        // Reliability data policy (templates are opt-in — Finding 2).
+        auto pol = parse_reliability_data_policy(j, sys);
         
         // Calculate total load (with optional scaling)
         double load_scale = j.value("load_scale_factor", 1.0);
@@ -14955,6 +16905,25 @@ int main(int argc, char** argv) {
         auto result = hacdcpf::analysis::run_frequency_duration_analysis(sys, total_load);
         
         json out;
+        // Frequency-duration is a GENERATION ADEQUACY method only (Finding 7):
+        // AC generators vs constant peak load, no network/DC/customer indices.
+        out["method"] = "fd";
+        out["model_scope"] = "generation-adequacy-fd";
+        out["model_limitations"] =
+            "Frequency-duration generation adequacy: AC generator capacity-outage "
+            "table against a constant peak load. Network contingencies, DC equipment, "
+            "branch limits, restoration, and load-point/customer interruption indices "
+            "(SAIFI/SAIDI/CAIDI/ASAI) are NOT modelled.";
+        out["validity"] = json{
+            {"dc_load_curtailment_included", false},
+            {"vsc_dc_power_flow_modelled", false},
+            {"ac_opf_curtailment", false},
+            {"network_contingencies_modelled", false},
+            {"customer_interruption_indices_available", false},
+            {"generation_adequacy_only", true}};
+        out["data_quality"] = reliability_data_quality_json(
+            hacdcpf::analysis::summarize_reliability_data_quality(sys, pol));
+        out["data_policy"] = reliability_policy_label(pol);
         out["lolp"] = result.lolp;
         out["lole_fd"] = result.lole_fd;
         out["lolf_fd"] = result.lolf_fd;
@@ -14965,6 +16934,308 @@ int main(int argc, char** argv) {
         
         res.set_content(out.dump(), "application/json");
       } catch (const std::exception& e) {
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Reliability Assessment (Three-Stage Fault-Recovery Restoration) ----
+    // Exposes the staged restoration reliability evaluator as a first-class
+    // reliability method (code-review item 5 / Finding 6).  The result already
+    // carries model_scope / validity / model_limitations declaring the AC
+    // LinDistFlow restoration MILP scope and the DC connectivity fallback.
+    svr.Post("/api/session/run_reliability_three_stage",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        auto pol = parse_reliability_data_policy(j, sys);  // templates opt-in
+
+        hacdcpf::analysis::ThreeStageReliabilityOptions opts;
+        if (j.contains("max_switch_operations"))
+          opts.max_switch_operations = j.value("max_switch_operations", INT_MAX);
+        opts.include_generator_faults = j.value("include_generator_faults", false);
+        opts.include_transformer_faults = j.value("include_transformer_faults", false);
+        opts.include_converter_faults = j.value("include_converter_faults", false);
+        opts.include_switch_faults = j.value("include_switch_faults", false);
+        opts.include_dc_power_flow = j.value("include_dc_power_flow", true);
+
+        const std::string case_json = hacdcpf::io::to_json(sys, 2);
+        auto r = hacdcpf::analysis::run_three_stage_reliability_from_string(case_json, opts);
+
+	        json out;
+	        out["method"] = "three_stage";
+	        out["data_policy"] = reliability_policy_label(pol);
+	        out["data_quality"] = reliability_data_quality_json(
+	            hacdcpf::analysis::summarize_reliability_data_quality(sys, pol));
+	        const json load = j.value("load", json::object());
+	        const double hours_per_year =
+	            load.value("hours_per_year", j.value("hours_per_year", 8760.0));
+	        populate_three_stage_result_json(out, sys, r, hours_per_year);
+	        res.set_content(out.dump(), "application/json");
+	        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Unified reliability endpoint (code-review Phase 4) ----
+    // One request/result contract dispatching to every method.  The legacy
+    // per-method endpoints above remain for backward compatibility.
+    svr.Post("/api/session/run_reliability",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        const std::string method = j.value("method", std::string("fmea"));
+        auto pol = parse_reliability_data_policy(j, sys);
+        const json load = j.value("load", json::object());
+        const json mc   = j.value("monte_carlo", json::object());
+        const json rest = j.value("restoration", json::object());
+        const json exec = j.value("execution", json::object());
+        const double load_scale =
+            load.value("scale_factor", j.value("load_scale_factor", 1.0));
+        const bool parallel_requested =
+            exec.value("parallel", j.value("parallel", true));
+        const int parallel_threads =
+            exec.value("parallel_threads", j.value("parallel_threads", 0));
+
+        auto na = [](const std::string& reason) {
+          return json{{"value", nullptr}, {"available", false}, {"reason", reason}};
+        };
+
+        json out;
+        out["method"] = method;
+        out["data_policy"] = reliability_policy_label(pol);
+
+        if (method == "nsq" || method == "seq") {
+          hacdcpf::analysis::ReliabilityOptions opts;
+          opts.data_policy = pol;
+          opts.load_scale_factor = load_scale;
+          opts.cov_threshold = mc.value("cov_threshold", 0.05);
+          opts.seed = mc.value("seed", 0);
+          opts.compute_tail_risk = mc.value("compute_tail_risk", false);
+          opts.var_confidence = mc.value("var_confidence", 0.95);
+          opts.hours_per_year = load.value("hours_per_year", 8736);
+          opts.enable_parallel = mc.value("parallel", parallel_requested);
+          opts.parallel_threads = mc.value("parallel_threads", parallel_threads);
+          opts.progress_callback = [](int, double, double) { return !g_session.cancel.load(); };
+          hacdcpf::analysis::ReliabilityResult r;
+          if (method == "seq") {
+            opts.max_iterations = mc.value("max_iterations", j.value("max_years", 500));
+            auto lp = hacdcpf::analysis::build_ieee_rts24_load_profile(opts.hours_per_year);
+            r = hacdcpf::analysis::run_sequential_mc(sys, lp, opts);
+          } else {
+            opts.max_iterations = mc.value("max_iterations", 5000);
+            r = hacdcpf::analysis::run_nonsequential_mc(sys, opts);
+          }
+	          out["physical_model"] =
+	              r.model_scope == "hybrid-acdc-network-lp" ? "hybrid_network_lp"
+	                                                        : "ac_only_dcopf";
+          out["model_scope"] = r.model_scope;
+          out["model_limitations"] = r.model_limitations;
+          out["validity"] = reliability_validity_json(r.validity);
+          out["data_quality"] = reliability_data_quality_json(r.data_quality);
+          add_reliability_parallel_json(out, opts.enable_parallel,
+                                        r.parallel_execution);
+          out["metrics"] = json{
+            {"eens_mwh_yr", r.eens_mwh_yr}, {"edns_mw", r.edns_mw},
+            {"lole_hr_yr", r.lole_hr_yr},
+            {"lolf_occ_yr", method == "seq" ? json(r.lolf_occ_yr)
+                                            : na("LOLF requires chronological simulation (sequential MC).")},
+            {"plc", r.plc},
+            {"saifi", na("Monte Carlo adequacy method does not compute customer indices.")},
+            {"saidi", na("Monte Carlo adequacy method does not compute customer indices.")},
+            {"caidi", na("Monte Carlo adequacy method does not compute customer indices.")},
+            {"asai",  na("Monte Carlo adequacy method does not compute customer indices.")}};
+	          out["converged"] = r.converged;
+	          out["iterations_used"] = r.iterations_used;
+	          out["final_cov"] = r.final_cov;
+	          out["eens_history"] = r.eens_history;
+	          out["nodal_eens_mwh_yr"] = r.nodal_eens_mwh_yr;
+	          json crit = json::array();
+	          for (const auto& ci : r.critical_components)
+	            crit.push_back(mc_critical_component_json(sys, ci));
+	          out["critical_components"] = crit;
+	        } else if (method == "fmea") {
+          hacdcpf::analysis::FMEAOptions fo;
+          fo.data_policy = pol;
+          fo.load_scale_factor = load_scale;
+          fo.switching_time_hr = rest.value("switching_time_hr", 0.5);
+          fo.enable_switch_reconfiguration = rest.value("enable_switch_reconfiguration", true);
+          fo.max_repair_switch_actions = rest.value("max_switch_actions", 2);
+          fo.max_repair_opf_calls = rest.value("max_physical_evaluations", 200);
+          fo.enable_parallel = rest.value("parallel", parallel_requested);
+          fo.parallel_threads = rest.value("parallel_threads", parallel_threads);
+          auto r = hacdcpf::analysis::run_distribution_fmea(sys, fo);
+          out["physical_model"] =
+              r.model_scope == "hybrid-acdc-network-lp" ? "hybrid_network_lp" : "ac_only_dcopf";
+          out["model_scope"] = r.model_scope;
+          out["model_limitations"] = r.model_limitations;
+          out["validity"] = fmea_validity_json(r.validity);
+          out["data_quality"] = reliability_data_quality_json(r.data_quality);
+          add_reliability_parallel_json(out, fo.enable_parallel,
+                                        r.parallel_execution);
+	          out["metrics"] = json{
+	            {"eens_mwh_yr", r.eens_mwh_yr}, {"edns_mw", r.edns_mw},
+	            {"lole_hr_yr", r.lole_hr_yr}, {"lolf_occ_yr", r.lolf_occ_yr},
+	            {"plc", na("FMEA reports frequency-weighted indices, not a sampled PLC.")},
+	            {"saifi", r.distribution_idx.saifi}, {"saidi", r.distribution_idx.saidi},
+	            {"caidi", r.distribution_idx.caidi}, {"asai", r.distribution_idx.asai}};
+	          out["n_contingencies"] = r.contingencies.size();
+	          out["n_with_loss"] = r.n_loss_contingencies;
+	          out["nodal_eens_mwh_yr"] = r.nodal_eens_mwh_yr;
+	          json cont = json::array();
+	          for (const auto& c : r.contingencies) {
+	            const auto meta = describe_fmea_component(sys, c.component_type, c.component_index);
+	            cont.push_back({
+	                {"component_name", meta.display_name},
+	                {"component_type", c.component_type},
+	                {"display_name", meta.display_name},
+	                {"display_type", meta.display_type},
+                {"component_index", c.component_index},
+                {"canvas_type", meta.canvas_type},
+                {"canvas_index", meta.canvas_index},
+                {"component_domain", meta.component_domain},
+                {"primary_bus", meta.primary_bus},
+	                {"secondary_bus", meta.secondary_bus},
+	                {"mappable", meta.mappable},
+	                {"failure_rate", c.failure_rate},
+	                {"duration_hr", c.tau_sw_hr + c.tau_rep_hr},
+	                {"tau_sw_hr", c.tau_sw_hr},
+	                {"tau_rep_hr", c.tau_rep_hr},
+	                {"shed_sw_mw", c.shed_sw_mw},
+	                {"shed_rep_mw", c.shed_rep_mw},
+	                {"shed_mw", c.shed_rep_mw},
+	                {"eens_contribution", c.eens_contribution},
+	                {"lole_contribution", c.lole_contribution},
+	                {"causes_loss_sw", c.causes_loss_sw},
+	                {"causes_loss_rep", c.causes_loss_rep}});
+	          }
+	          out["contingencies"] = cont;
+	        } else if (method == "failure_mode_fmea") {
+	          hacdcpf::analysis::FailureModeFMEAOptions fo;
+	          fo.data_policy = pol;
+	          fo.catalog = parse_failure_mode_catalog_options(j);
+	          fo.load_scale_factor = load_scale;
+	          fo.curtail_threshold_mw = j.value("curtail_threshold_mw", 0.01);
+	          fo.verbose = j.value("verbose", false);
+	          fo.max_order = j.value("max_order", 1);
+	          fo.min_pair_unavailability = j.value("min_pair_unavailability", 1e-10);
+	          fo.max_pairs_evaluated = j.value("max_pairs_evaluated", 50000);
+	          fo.enable_parallel = j.value("failure_mode_parallel", parallel_requested);
+	          fo.parallel_threads = j.value("failure_mode_parallel_threads", parallel_threads);
+	          auto r = hacdcpf::analysis::run_failure_mode_fmea(sys, fo);
+	          out["physical_model"] =
+	              r.model_scope.find("hybrid-acdc-network-lp") != std::string::npos
+	                  ? "failure_mode_hybrid_network_lp"
+	                  : "failure_mode_ac_only_dcopf";
+	          out["model_scope"] = r.model_scope;
+	          out["model_limitations"] = r.model_limitations;
+	          out["validity"] = json{
+	              {"failure_mode_catalog_modelled", true},
+	              {"active_on_demand_modes_modelled", fo.catalog.include_active_on_demand},
+	              {"passive_modes_modelled", fo.catalog.include_passive},
+	              {"physical_modes_modelled", fo.catalog.include_physical},
+	              {"cyber_control_modes_modelled", fo.catalog.include_cyber_control},
+	              {"communication_modes_modelled", fo.catalog.include_communication},
+	              {"protection_modes_modelled", fo.catalog.include_protection_logic}};
+	          out["data_quality"] = reliability_data_quality_json(r.data_quality);
+	          out["failure_mode_coverage"] = failure_mode_coverage_json(r.coverage);
+	          add_reliability_parallel_json(out, fo.enable_parallel,
+	                                        r.parallel_execution);
+		          out["metrics"] = json{
+		            {"eens_mwh_yr", r.eens_mwh_yr}, {"edns_mw", r.edns_mw},
+		            {"lole_hr_yr", r.lole_hr_yr}, {"lolf_occ_yr", r.lolf_occ_yr},
+		            {"plc", na("Failure-mode FMEA reports frequency-weighted indices, not a sampled PLC.")},
+		            {"saifi", r.distribution_idx.saifi}, {"saidi", r.distribution_idx.saidi},
+		            {"caidi", r.distribution_idx.caidi}, {"asai", r.distribution_idx.asai}};
+		          out["nodal_eens_mwh_yr"] = r.nodal_eens_mwh_yr;
+	          json modes = json::array();
+	          for (const auto& c : r.contingencies) {
+	            modes.push_back(failure_mode_contingency_json(sys, c));
+	          }
+	          out["failure_modes"] = modes;
+	          out["contingencies"] = modes;
+	          out["n_contingencies"] = r.contingencies.size();
+	          out["n_pairs_evaluated"] = r.n_pairs_evaluated;
+	          json co_modes = json::array();
+	          for (const auto& x : r.co_contingencies)
+	            co_modes.push_back(failure_mode_co_contingency_json(sys, x));
+	          out["co_contingencies"] = co_modes;
+	        } else if (method == "fd") {
+          double total_load = 0.0;
+          for (const auto& bus : sys.ac.buses) total_load += bus.pd_mw;
+          for (const auto& ld : sys.ac.loads) if (ld.in_service) total_load += ld.p_mw * ld.scaling;
+          total_load *= load_scale;
+          auto r = hacdcpf::analysis::run_frequency_duration_analysis(sys, total_load);
+          out["physical_model"] = "generation_adequacy_copt";
+          out["model_scope"] = "generation-adequacy-fd";
+          out["model_limitations"] =
+              "Frequency-duration generation adequacy: AC generator capacity-outage table "
+              "vs constant peak load. No network/DC/restoration/customer indices.";
+          out["validity"] = json{{"generation_adequacy_only", true},
+                                  {"network_contingencies_modelled", false},
+                                  {"customer_interruption_indices_available", false}};
+          out["data_quality"] = reliability_data_quality_json(
+              hacdcpf::analysis::summarize_reliability_data_quality(sys, pol));
+          out["metrics"] = json{
+            {"lolp", r.lolp}, {"lole_hr_yr", r.lole_fd}, {"lolf_occ_yr", r.lolf_fd},
+            {"lold_hr", r.lold},
+            {"eens_mwh_yr", na("F&D generation adequacy does not compute EENS.")},
+            {"saifi", na("F&D generation adequacy does not compute customer interruption indices.")},
+            {"saidi", na("F&D generation adequacy does not compute customer interruption indices.")},
+            {"caidi", na("F&D generation adequacy does not compute customer interruption indices.")},
+            {"asai",  na("F&D generation adequacy does not compute customer interruption indices.")}};
+          out["capacity_outage_levels"] = r.capacity_outage_levels;
+          out["cumulative_probability"] = r.cumulative_probability;
+          out["cumulative_frequency"] = r.cumulative_frequency;
+        } else if (method == "three_stage") {
+          hacdcpf::analysis::ThreeStageReliabilityOptions tso;
+          if (rest.contains("max_switch_operations"))
+            tso.max_switch_operations = rest.value("max_switch_operations", INT_MAX);
+          tso.include_generator_faults = rest.value("include_generator_faults", false);
+          tso.include_transformer_faults = rest.value("include_transformer_faults", false);
+          tso.include_converter_faults = rest.value("include_converter_faults", false);
+          tso.include_switch_faults = rest.value("include_switch_faults", false);
+          tso.include_dc_power_flow = rest.value("include_dc_power_flow", true);
+          const std::string case_json = hacdcpf::io::to_json(sys, 2);
+          auto r = hacdcpf::analysis::run_three_stage_reliability_from_string(case_json, tso);
+          out["data_quality"] = reliability_data_quality_json(
+              hacdcpf::analysis::summarize_reliability_data_quality(sys, pol));
+          const double hours_per_year = load.value("hours_per_year", 8760.0);
+          populate_three_stage_result_json(out, sys, r, hours_per_year);
+        } else {
+          throw std::runtime_error("Unknown reliability method: " + method);
+        }
+
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }

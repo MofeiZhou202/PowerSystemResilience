@@ -267,10 +267,31 @@ struct DetailedVoltageComparison {
   double avg_vm_error{0.0};
   double max_angle_error_deg{0.0};
   double avg_angle_error_deg{0.0};
+  std::string worst_bus;
+  int worst_phase{0};
+  double worst_vm_lhs{0.0};
+  double worst_vm_rhs{0.0};
+  double worst_angle_lhs_deg{0.0};
+  double worst_angle_rhs_deg{0.0};
   int count{0};
 };
 
+struct VoltageMismatchPoint {
+  std::string bus;
+  int phase{0};
+  double vm_lhs{0.0};
+  double vm_rhs{0.0};
+  double va_lhs_deg{0.0};
+  double va_rhs_deg{0.0};
+  double vm_error{0.0};
+  double angle_error_deg{0.0};
+};
+
 inline DetailedVoltageComparison compare_jpc_results_detailed(
+    const ThreePhaseJPCPhase& lhs,
+    const ThreePhaseJPCPhase& rhs);
+
+inline std::vector<VoltageMismatchPoint> compare_jpc_points(
     const ThreePhaseJPCPhase& lhs,
     const ThreePhaseJPCPhase& rhs);
 
@@ -302,6 +323,15 @@ inline DetailedVoltageComparison compare_jpc_results_detailed(
           std::abs(row_vm(*lhs_row, phase) - row_vm(*rhs_row, phase));
       const double angle_error_deg =
           std::abs(wrap_angle_diff_deg(row_va(*lhs_row, phase), row_va(*rhs_row, phase)));
+      if (vm_error > stats.max_vm_error ||
+          angle_error_deg > stats.max_angle_error_deg) {
+        stats.worst_bus = bus_name;
+        stats.worst_phase = phase + 1;
+        stats.worst_vm_lhs = row_vm(*lhs_row, phase);
+        stats.worst_vm_rhs = row_vm(*rhs_row, phase);
+        stats.worst_angle_lhs_deg = row_va(*lhs_row, phase);
+        stats.worst_angle_rhs_deg = row_va(*rhs_row, phase);
+      }
       stats.max_vm_error = std::max(stats.max_vm_error, vm_error);
       stats.max_angle_error_deg = std::max(stats.max_angle_error_deg, angle_error_deg);
       sum_vm_error += vm_error;
@@ -314,6 +344,42 @@ inline DetailedVoltageComparison compare_jpc_results_detailed(
     stats.avg_angle_error_deg = sum_angle_error_deg / static_cast<double>(stats.count);
   }
   return stats;
+}
+
+inline std::vector<VoltageMismatchPoint> compare_jpc_points(
+    const ThreePhaseJPCPhase& lhs,
+    const ThreePhaseJPCPhase& rhs) {
+  std::vector<VoltageMismatchPoint> points;
+  for (const auto& [bus_name, _] : lhs.bus_name_to_id) {
+    const PhaseDomainBusRow* lhs_row = find_bus_row(lhs, bus_name);
+    const PhaseDomainBusRow* rhs_row = find_bus_row_case_insensitive(rhs, bus_name);
+    if (lhs_row == nullptr || rhs_row == nullptr) continue;
+    for (int phase = 0; phase < 3; ++phase) {
+      if (!row_has_phase(*lhs_row, phase) || !row_has_phase(*rhs_row, phase)) continue;
+      const double vm_error =
+          std::abs(row_vm(*lhs_row, phase) - row_vm(*rhs_row, phase));
+      const double angle_error_deg =
+          std::abs(wrap_angle_diff_deg(row_va(*lhs_row, phase), row_va(*rhs_row, phase)));
+      points.push_back(VoltageMismatchPoint{
+          .bus = bus_name,
+          .phase = phase + 1,
+          .vm_lhs = row_vm(*lhs_row, phase),
+          .vm_rhs = row_vm(*rhs_row, phase),
+          .va_lhs_deg = row_va(*lhs_row, phase),
+          .va_rhs_deg = row_va(*rhs_row, phase),
+          .vm_error = vm_error,
+          .angle_error_deg = angle_error_deg,
+      });
+    }
+  }
+  std::sort(
+      points.begin(),
+      points.end(),
+      [](const VoltageMismatchPoint& lhs, const VoltageMismatchPoint& rhs) {
+        if (lhs.vm_error != rhs.vm_error) return lhs.vm_error > rhs.vm_error;
+        return lhs.angle_error_deg > rhs.angle_error_deg;
+      });
+  return points;
 }
 
 inline double sequence_angle_diff_deg(

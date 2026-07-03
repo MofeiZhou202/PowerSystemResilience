@@ -6,6 +6,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -17,7 +18,9 @@ namespace {
 
 class DSSContext {
  public:
-  DSSContext() : ctx_(ctx_New()) {
+  DSSContext() {
+    ScopedDSSFloatingPointEnv fp_env;
+    ctx_ = ctx_New();
     if (ctx_ == nullptr) {
       throw std::runtime_error("Failed to create DSS C-API context.");
     }
@@ -29,6 +32,7 @@ class DSSContext {
 
   ~DSSContext() {
     if (ctx_ != nullptr) {
+      ScopedDSSFloatingPointEnv fp_env;
       ctx_Dispose(ctx_);
     }
   }
@@ -97,7 +101,11 @@ template <typename Fn, typename... Args>
 std::vector<double> get_double_array(const DSSContext& api, Fn fn, Args... args) {
   double* values = nullptr;
   int32_t dims[4] = {0, 0, 0, 0};
-  fn(api.get(), &values, dims, args...);
+  if constexpr (std::is_invocable_v<Fn, const void*, double**, int32_t*, Args...>) {
+    fn(api.get(), &values, dims, args...);
+  } else {
+    fn(api.get(), &values, dims);
+  }
   api.check();
 
   if (values == nullptr || dims[0] <= 0) {
@@ -111,7 +119,11 @@ template <typename Fn, typename... Args>
 std::vector<int32_t> get_int_array(const DSSContext& api, Fn fn, Args... args) {
   int32_t* values = nullptr;
   int32_t dims[4] = {0, 0, 0, 0};
-  fn(api.get(), &values, dims, args...);
+  if constexpr (std::is_invocable_v<Fn, const void*, int32_t**, int32_t*, Args...>) {
+    fn(api.get(), &values, dims, args...);
+  } else {
+    fn(api.get(), &values, dims);
+  }
   api.check();
 
   if (values == nullptr || dims[0] <= 0) {
@@ -127,7 +139,11 @@ std::vector<std::string> get_string_array(const DSSContext& api,
                                           Args... args) {
   char** values = nullptr;
   int32_t dims[4] = {0, 0, 0, 0};
-  fn(api.get(), &values, dims, args...);
+  if constexpr (std::is_invocable_v<Fn, const void*, char***, int32_t*, Args...>) {
+    fn(api.get(), &values, dims, args...);
+  } else {
+    fn(api.get(), &values, dims);
+  }
   api.check();
 
   std::vector<std::string> out;
@@ -272,6 +288,7 @@ const char* opendss_pd_element_kind_to_string(OpenDSSPDElementKind kind) {
 
 OpenDSSSnapshotResult solve_opendss_snapshot(
     const std::filesystem::path& master_dss) {
+  ScopedDSSFloatingPointEnv fp_env;
   const std::filesystem::path absolute_master =
       std::filesystem::absolute(master_dss);
   if (!std::filesystem::exists(absolute_master)) {

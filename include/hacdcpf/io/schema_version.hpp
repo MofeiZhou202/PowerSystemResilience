@@ -10,7 +10,7 @@ namespace hacdcpf {
 namespace io {
 
 /// JSON schema version written to all serialised documents.
-static constexpr const char* kSchemaVersion  = "1.0";
+static constexpr const char* kSchemaVersion  = "1.1";  // 1.1: telemetry section (§10)
 /// Library package version.
 static constexpr const char* kPackageVersion = "0.5.0";
 
