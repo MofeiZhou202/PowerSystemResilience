@@ -192,62 +192,189 @@ const App = (() => {
       ? ` class="topo-clickable" data-comp-id="${id}" onclick="Canvas.panToComponent(${id})"` : '';
   }
 
-  function rowCanvasCompId(row, maps) {
-    if (!row || !maps) return undefined;
-    const type = row.canvas_type;
-    const rawIndex = row.canvas_index ?? row.index;
-    const bucketAliases = {
+  function resultTypeKey(type) {
+    return String(type || '')
+      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+      .replace(/[-\s/]+/g, '_')
+      .replace(/__+/g, '_')
+      .toLowerCase();
+  }
+
+  function resultCanvasBucket(type, maps) {
+    if (!type || !maps) return undefined;
+    const raw = String(type);
+    if (maps[raw]) return raw;
+    const key = resultTypeKey(raw);
+    const aliases = {
+      ac: 'ac',
       ac_bus: 'ac',
+      bus_ac: 'ac',
+      dc: 'dc',
       dc_bus: 'dc',
+      bus_dc: 'dc',
+      branch: 'branch',
       ac_branch: 'branch',
-      dc_branch: 'dcBranch',
-      ACLoad: 'load',
-      ThreePhaseLoad: 'load',
-      DCLoad: 'dcLoad',
-      ACStorage: 'storage',
-      DCStorage: 'dcStorage',
-      DCDCConverter: 'dcdcConverter',
-      GridFormingStorage: 'storage',
-      VSCGridForming: 'vsc',
-      VSCGridFollowing: 'vsc',
-      PVSystem: 'pv',
-      RenewableGen: 'renGen',
-      StaticGenerator: 'sgen',
-      ExternalGrid: 'extGrid',
-      SynchronousMachine: 'gen',
-      ThreePhaseGenerator: 'gen',
-      ThreePhaseExternalGrid: 'extGrid',
-      DCVoltageSource: 'dc',
-      vsc_converter: 'vsc',
-      dcdc_converter: 'dcdcConverter',
-      energy_router: 'energyRouter',
-      dc_storage: 'dcStorage',
-      pv_system: 'pv',
-      dc_pv_array: 'dcPv',
-      renewable_gen: 'renGen',
-      static_generator: 'sgen',
-      external_grid: 'extGrid',
+      line: 'branch',
+      ac_line: 'branch',
+      transformer: 'trafo',
       transformer_2w: 'trafo',
+      transformer2_w: 'trafo',
+      transformer2w: 'trafo',
+      trafo: 'trafo',
       transformer_3w: 'trafo3w',
+      transformer3_w: 'trafo3w',
+      transformer3w: 'trafo3w',
+      trafo3w: 'trafo3w',
+      generator: 'gen',
+      synchronous_machine: 'gen',
+      three_phase_generator: 'gen',
+      gen: 'gen',
+      ac_load: 'load',
+      three_phase_load: 'load',
+      load: 'load',
+      external_grid: 'extGrid',
+      three_phase_external_grid: 'extGrid',
+      ext_grid: 'extGrid',
+      extgrid: 'extGrid',
+      storage: 'storage',
+      ac_storage: 'storage',
+      grid_forming_storage: 'storage',
+      pv_system: 'pv',
+      ac_pv_system: 'pv',
+      pv: 'pv',
+      renewable_gen: 'renGen',
+      renewable_generator: 'renGen',
+      ren_gen: 'renGen',
+      static_generator: 'sgen',
+      static_gen: 'sgen',
+      sgen: 'sgen',
+      dc_static_generator: 'dcSgen',
+      dc_static_gen: 'dcSgen',
+      dc_static_generator_ac: 'dcSgen',
+      dc_sgen: 'dcSgen',
+      switch: 'sw',
       switch_comp: 'sw',
+      ac_switch: 'sw',
+      sw: 'sw',
       circuit_breaker: 'cb',
+      ac_circuit_breaker: 'cb',
+      breaker: 'cb',
+      cb: 'cb',
       dc_circuit_breaker: 'dcCb',
-      mobile_storage: 'mobileStorage',
+      dc_breaker: 'dcCb',
+      dc_cb: 'dcCb',
+      motor: 'motor',
+      dc_branch: 'dcBranch',
+      dc_line: 'dcBranch',
+      dc_load: 'dcLoad',
+      dc_storage: 'dcStorage',
+      dc_pv_array: 'dcPv',
+      dc_pv: 'dcPv',
+      vsc: 'vsc',
+      vsc_converter: 'vsc',
+      vsc_grid_forming: 'vsc',
+      vsc_grid_following: 'vsc',
+      dcdc: 'dcdcConverter',
+      dc_dc: 'dcdcConverter',
+      dcdc_converter: 'dcdcConverter',
+      dc_dc_converter: 'dcdcConverter',
+      energy_router: 'energyRouter',
+      er: 'energyRouter',
+      shunt: 'shunt',
       flexible_load: 'flexLoad',
+      flex_load: 'flexLoad',
       asymmetric_load: 'asymLoad',
+      asym_load: 'asymLoad',
+      charger: 'charger',
       charging_station: 'chargingStation',
+      mobile_storage: 'mobileStorage',
+      vpp: 'vpp',
+      virtual_power_plant: 'vpp',
+      microgrid: 'microgrid',
     };
-    const bucket = type && (maps[type] ? type : bucketAliases[type]);
-    if (bucket && rawIndex != null && maps[bucket]) {
-      const idx = Number(rawIndex);
-      if (Number.isFinite(idx) && maps[bucket][idx] != null) return maps[bucket][idx];
+    const bucket = aliases[key] || aliases[raw];
+    return bucket && maps[bucket] ? bucket : undefined;
+  }
+
+  function validCanvasCompId(compId) {
+    const id = Number(compId);
+    if (!Number.isInteger(id)) return undefined;
+    if (typeof Canvas !== 'undefined' && Canvas.getComponent && !Canvas.getComponent(id)) return undefined;
+    return id;
+  }
+
+  function rowCanvasCompId(row, maps, options = {}) {
+    if (!row || !maps) return validCanvasCompId(options.fallbackCompId);
+    const directKeys = ['canvas_comp_id', 'comp_id', 'canvasComponentId', 'canvas_id'];
+    for (const key of directKeys) {
+      const hit = validCanvasCompId(row[key]);
+      if (hit !== undefined) return hit;
     }
-    const bus = row.bus ?? row.bus_ac ?? row.bus_in ?? row.from_bus ?? row.index;
-    const busMap = (type === 'dc' || type === 'dc_bus' || type === 'dcBranch' ||
-      type === 'dc_branch' || type === 'dc_storage' || type === 'dcdcConverter' ||
-      type === 'dcdc_converter') ? maps.dc : maps.ac;
-    const busId = Number(bus);
-    return Number.isFinite(busId) && busMap ? busMap[busId] : undefined;
+
+    const typeCandidates = [
+      row.canvas_type,
+      row.component_type,
+      row.canonical_component_type,
+      row.type,
+      row.bucket,
+      options.canvasType,
+    ].filter(v => v !== undefined && v !== null && String(v) !== '');
+    let bucket = undefined;
+    for (const t of typeCandidates) {
+      bucket = resultCanvasBucket(t, maps);
+      if (bucket) break;
+    }
+
+    if (bucket) {
+      const indexKeys = ['canvas_index', 'index', 'id', 'router_index', 'component_index'];
+      for (const key of indexKeys) {
+        const idx = Number(row[key]);
+        if (Number.isFinite(idx) && maps[bucket] && maps[bucket][idx] != null) {
+          return validCanvasCompId(maps[bucket][idx]);
+        }
+      }
+      const positionKeys = ['position', 'component_position', 'canvas_position', 'row_position'];
+      for (const key of positionKeys) {
+        const pos = Number(row[key]);
+        if (Number.isFinite(pos) && maps.byPosition && maps.byPosition[bucket] &&
+            maps.byPosition[bucket][pos] != null) {
+          return validCanvasCompId(maps.byPosition[bucket][pos]);
+        }
+      }
+      for (const key of positionKeys) {
+        const pos = Number(row[key]);
+        if (Number.isFinite(pos) && maps[bucket] && maps[bucket][pos] != null) {
+          return validCanvasCompId(maps[bucket][pos]);
+        }
+      }
+    }
+
+    const domainText = `${row.domain || row.component_domain || ''} ${typeCandidates.join(' ')} ${bucket || ''}`.toLowerCase();
+    const preferDc = /\bdc\b/.test(domainText) || ['dc', 'dcBranch', 'dcLoad', 'dcStorage', 'dcPv', 'dcCb', 'dcSgen', 'dcdcConverter'].includes(bucket);
+    const preferAc = /\bac\b/.test(domainText) || ['ac', 'branch', 'load', 'gen', 'extGrid', 'storage', 'pv', 'renGen', 'sgen', 'sw', 'cb', 'motor', 'shunt', 'trafo', 'trafo3w', 'flexLoad', 'asymLoad', 'charger', 'chargingStation', 'mobileStorage', 'vpp', 'microgrid'].includes(bucket);
+    const busKeys = preferDc && !preferAc
+      ? ['bus_dc', 'dc_bus', 'bus_in', 'bus_out', 'from_bus', 'to_bus', 'from', 'to', 'primary_bus', 'bus', 'index']
+      : preferAc && !preferDc
+      ? ['bus_ac', 'ac_bus', 'bus', 'from_bus', 'to_bus', 'from', 'to', 'hv_bus', 'mv_bus', 'lv_bus', 'primary_bus', 'index']
+      : ['bus_ac', 'ac_bus', 'bus_dc', 'dc_bus', 'bus', 'from_bus', 'to_bus', 'from', 'to', 'bus_in', 'bus_out', 'hv_bus', 'mv_bus', 'lv_bus', 'primary_bus', 'index'];
+    const tryBusKeys = (mapObj, keys) => {
+      if (!mapObj) return undefined;
+      for (const key of keys) {
+        const bus = Number(row[key]);
+        if (Number.isFinite(bus) && mapObj[bus] != null) return validCanvasCompId(mapObj[bus]);
+      }
+      return undefined;
+    };
+    const primary = preferDc && !preferAc ? maps.dc : maps.ac;
+    const secondary = preferDc && !preferAc ? maps.ac : maps.dc;
+    return tryBusKeys(primary, busKeys) ?? tryBusKeys(secondary, busKeys) ?? validCanvasCompId(options.fallbackCompId);
+  }
+
+  function canvasRowAttr(row, maps, options = {}) {
+    const compId = rowCanvasCompId(row, maps, options);
+    if (compId === undefined) return '';
+    const cls = options.className ? ` class="${escapeHtml(options.className)}"` : '';
+    return `${cls} data-comp-id="${compId}"`;
   }
 
   function positiveDemandMw(row) {
@@ -3160,6 +3287,13 @@ const App = (() => {
     };
   }
 
+  function transientPlotLayoutNoAxes(title) {
+    const layout = transientPlotLayout(title, '');
+    delete layout.xaxis;
+    delete layout.yaxis;
+    return layout;
+  }
+
   function transientBusVoltageTrace(data, domain, busId, color) {
     const ids = domain === 'DC' ? (data.dc_bus_ids || []) : (data.ac_bus_ids || []);
     const matrix = domain === 'DC' ? (data.dc_voltage_matrix || []) : (data.ac_voltage_matrix || []);
@@ -3364,6 +3498,29 @@ const App = (() => {
     return `${pct.toFixed(digits)}%`;
   }
 
+  function modelIoStatusBadge(value, passText = '通过', failText = '未通过') {
+    const ok = value === true || value === 'true' || value === 'pass' || value === 'passed';
+    const cls = ok ? 'model-io-badge-pass' : 'model-io-badge-fail';
+    return `<span class="model-io-badge ${cls}">${escapeHtml(ok ? passText : failText)}</span>`;
+  }
+
+  function modelIoPolicyCounts(mappings, field) {
+    const counts = {};
+    (mappings || []).forEach(row => {
+      const key = row?.[field] || 'Unknown';
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    return counts;
+  }
+
+  function modelIoPolicyCountsText(counts) {
+    const order = ['Exact', 'Equivalent', 'Projected', 'Aggregated', 'BoundaryInjection', 'InternalOnly', 'DiagnosticOnly', 'Unsupported', 'Unknown'];
+    const parts = order
+      .filter(key => Number(counts?.[key] || 0) > 0)
+      .map(key => `${key}:${counts[key]}`);
+    return parts.length ? parts.join(' / ') : '—';
+  }
+
   function drawModelIoCharts(data) {
     if (typeof Plotly === 'undefined') return;
     const summary = data?.summary || {};
@@ -3404,9 +3561,7 @@ const App = (() => {
           threshold: { line: { color: '#e06c75', width: 3 }, thickness: 0.75, value: 88 },
         },
       }], {
-        ...transientPlotLayout('数字孪生成熟度', ''),
-        xaxis: undefined,
-        yaxis: undefined,
+        ...transientPlotLayoutNoAxes('数字孪生成熟度'),
         margin: { l: 28, r: 28, t: 48, b: 28 },
       }, cfg);
     }
@@ -3477,9 +3632,7 @@ const App = (() => {
           marker: { colors: ['#e06c75', '#d19a66', '#61afef'] },
           textinfo: 'label+value',
         }], {
-          ...transientPlotLayout('参数健康等级', ''),
-          xaxis: undefined,
-          yaxis: undefined,
+          ...transientPlotLayoutNoAxes('参数健康等级'),
           showlegend: false,
         }, cfg);
       } else {
@@ -3516,9 +3669,7 @@ const App = (() => {
         hole: 0.38,
         textinfo: 'label+value',
       }], {
-        ...transientPlotLayout('规则标准来源', ''),
-        xaxis: undefined,
-        yaxis: undefined,
+        ...transientPlotLayoutNoAxes('规则标准来源'),
         showlegend: false,
       }, cfg);
     }
@@ -3541,9 +3692,14 @@ const App = (() => {
     const twin = data?.digital_twin_readiness || {};
     const twinSummary = twin.summary || {};
     const twinFindings = Array.isArray(twin.findings) ? twin.findings : [];
+    const twinGates = Array.isArray(twin.gates) ? twin.gates : [];
+    const roundTripRows = Array.isArray(twin.round_trip) ? twin.round_trip : [];
+    const twinDimensions = Array.isArray(twin.dimensions) ? twin.dimensions : [];
     const total = Number(summary.total_instances || 0);
     const gridRepresented = Number(summary.gridlabd_represented || 0);
     const openDssRepresented = Number(summary.opendss_represented || 0);
+    const gridUnrepresented = Number(summary.gridlabd_unrepresented || 0);
+    const openDssUnrepresented = Number(summary.opendss_unrepresented || 0);
     const errors = Number(auditSummary.errors || 0);
     const warnings = Number(auditSummary.warnings || 0);
     const infos = Number(auditSummary.info || 0);
@@ -3580,6 +3736,102 @@ const App = (() => {
     html += '<div id="modelIoSeverityChart" class="model-io-chart"></div>';
     html += '<div id="modelIoCategoryChart" class="model-io-chart"></div>';
     html += '<div id="modelIoStandardsChart" class="model-io-chart"></div>';
+    html += '</div>';
+
+    html += '<div class="transient-section-head"><h5>成熟度门槛与 IO 证据</h5><span>弱链门槛 / round-trip conformance</span></div>';
+    html += '<div class="model-io-split-grid">';
+    html += '<div class="model-io-panel"><div class="model-io-panel-title">Fidelity / Integration Gates</div>';
+    html += '<div class="transient-table-scroll model-io-compact-scroll"><table><thead><tr><th>门槛</th><th>轴</th><th>等级</th><th>状态</th><th>证据</th></tr></thead><tbody>';
+    if (twinGates.length) {
+      twinGates.forEach(g => {
+        html += `<tr>
+          <td>${escapeHtml(g.gate_id || '')}</td>
+          <td>${escapeHtml(g.axis || '')}</td>
+          <td>${escapeHtml(String(g.level ?? ''))}</td>
+          <td>${modelIoStatusBadge(g.passed)}</td>
+          <td>${escapeHtml(g.evidence || g.title || '')}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="5">暂无门槛证据；请先加载或同步系统。</td></tr>';
+    }
+    html += '</tbody></table></div></div>';
+
+    html += '<div class="model-io-panel"><div class="model-io-panel-title">Round-trip / Adapter Evidence</div>';
+    html += '<div class="transient-table-scroll model-io-compact-scroll"><table><thead><tr><th>适配器</th><th>层级</th><th>一致性</th><th>保真</th><th>字段</th></tr></thead><tbody>';
+    if (roundTripRows.length) {
+      roundTripRows.forEach(rt => {
+        const checked = Number(rt.fields_checked || 0);
+        const mismatched = Number(rt.fields_mismatched || 0);
+        html += `<tr>
+          <td>${escapeHtml(rt.adapter || '')}</td>
+          <td>${escapeHtml(rt.level || '')}</td>
+          <td>${modelIoStatusBadge(rt.passed)}</td>
+          <td>${modelIoStatusBadge(rt.lossless, '无损', '有投影损失')}</td>
+          <td>${escapeHtml(`${checked - mismatched}/${checked} matched`)}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="5">暂无存档 round-trip 证据。</td></tr>';
+    }
+    html += '</tbody></table></div></div>';
+    html += '</div>';
+
+    const adapterRows = [
+      ['Internal JSON', 'json_policy', `${total}/${total}`, 'rich binding'],
+      ['Canonical Model', 'canonical_policy', `${mappings.length} registered`, 'canonical projection'],
+      ['GridLAB-D', 'gridlabd_policy', `${gridRepresented}/${gridRepresented + gridUnrepresented || total}`, 'external snapshot'],
+      ['OpenDSS', 'opendss_policy', `${openDssRepresented}/${openDssRepresented + openDssUnrepresented || total}`, 'external snapshot'],
+    ];
+    html += '<div class="transient-section-head"><h5>适配器能力矩阵</h5><span>registry policy / 当前实例覆盖</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>格式</th><th>绑定</th><th>Registry策略分布</th><th>当前覆盖</th></tr></thead><tbody>';
+    adapterRows.forEach(([label, field, current, binding]) => {
+      html += `<tr>
+        <td>${escapeHtml(label)}</td>
+        <td>${escapeHtml(binding)}</td>
+        <td>${escapeHtml(modelIoPolicyCountsText(modelIoPolicyCounts(mappings, field)))}</td>
+        <td>${escapeHtml(current)}</td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+
+    const telemetryDims = new Set(['TelemetryObservability', 'StateSynchronization', 'ScenarioEvents', 'ReliabilityLifecycle', 'ProvenanceGovernance', 'NumericalValidation']);
+    const telemetryRows = twinDimensions.filter(row => telemetryDims.has(row.dimension));
+    html += '<div class="transient-section-head"><h5>遥测 / 校准 / 验证准备</h5><span>I1 / I2 相关维度</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>维度</th><th>得分</th><th>发现数</th><th>主要缺口</th></tr></thead><tbody>';
+    if (telemetryRows.length) {
+      telemetryRows.forEach(dim => {
+        const maxScore = Number(dim.max_score || 0);
+        const pct = maxScore > 0 ? `${(100 * Number(dim.score || 0) / maxScore).toFixed(0)}%` : '—';
+        const gaps = twinFindings
+          .filter(f => f.dimension === dim.dimension)
+          .slice(0, 2)
+          .map(f => `${f.criterion_id || ''} ${f.message || f.title || ''}`.trim())
+          .filter(Boolean)
+          .map(escapeHtml)
+          .join('<br>');
+        html += `<tr>
+          <td>${escapeHtml(modelIoDimensionLabel(dim.dimension))}</td>
+          <td>${escapeHtml(pct)}</td>
+          <td>${escapeHtml(String(dim.findings ?? 0))}</td>
+          <td>${gaps || '—'}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="4">当前尚无 I1/I2 相关维度证据。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
+    const diagSummaryRows = [
+      ['GridLAB-D', Array.isArray(diagnostics.gridlabd) ? diagnostics.gridlabd.length : 0],
+      ['OpenDSS', Array.isArray(diagnostics.opendss) ? diagnostics.opendss.length : 0],
+    ];
+    html += '<div class="transient-section-head"><h5>导入诊断契约</h5><span>records / summary / binding level / unit assertion</span></div>';
+    html += '<div class="model-io-contract-grid">';
+    html += `<div class="model-io-contract-item"><strong>records</strong><span>${escapeHtml(diagSummaryRows.map(([k, n]) => `${k}:${n}`).join(' / '))}</span></div>`;
+    html += `<div class="model-io-contract-item"><strong>summary</strong><span>${escapeHtml(`参数错误 ${errors} / 警告 ${warnings} / 提示 ${infos}`)}</span></div>`;
+    html += `<div class="model-io-contract-item"><strong>binding level</strong><span>${escapeHtml(`F${twinSummary.fidelity_level ?? 0} / I${twinSummary.integration_level ?? 0}`)}</span></div>`;
+    html += `<div class="model-io-contract-item"><strong>unit assertion</strong><span>${escapeHtml(`${parameterRules.filter(r => r.units).length}/${parameterRules.length} rules with units`)}</span></div>`;
     html += '</div>';
 
     html += '<div class="transient-section-head"><h5>数字孪生就绪诊断</h5><span>identity / topology / parameters / dynamics / telemetry / validation / governance</span></div>';
@@ -5548,76 +5800,7 @@ const App = (() => {
   }
 
   function reliabilityContingencyCompId(c, maps) {
-    if (!c || !maps) return undefined;
-    const rawDirect = c.canvas_comp_id ?? c.comp_id;
-    if (rawDirect !== null && rawDirect !== undefined && rawDirect !== '') {
-      const direct = Number(rawDirect);
-      if (Number.isInteger(direct)) {
-        if (typeof Canvas === 'undefined' || !Canvas.getComponent || Canvas.getComponent(direct)) {
-          return direct;
-        }
-      }
-    }
-    const bucketName = c.canvas_type;
-    const key = Number(c.canvas_index);
-    if (bucketName && maps[bucketName] && Number.isFinite(key) && maps[bucketName][key] != null) {
-      return maps[bucketName][key];
-    }
-    const fallbackMap = {
-      generator: 'gen',
-      Generator: 'gen',
-      ac_branch: 'branch',
-      ACBranch: 'branch',
-      dc_branch: 'dcBranch',
-      DCBranch: 'dcBranch',
-      vsc_converter: 'vsc',
-      VSCConverter: 'vsc',
-      static_generator: 'sgen',
-      StaticGen: 'sgen',
-      renewable_gen: 'renGen',
-      RenewableGen: 'renGen',
-      storage: 'storage',
-      ACStorage: 'storage',
-      transformer_2w: 'trafo',
-      Transformer2W: 'trafo',
-      transformer_3w: 'trafo3w',
-      Transformer3W: 'trafo3w',
-      dcdc_converter: 'dcdcConverter',
-      DCDCConverter: 'dcdcConverter',
-      dc_circuit_breaker: 'dcCb',
-      DCCircuitBreaker: 'dcCb',
-      dc_storage: 'dcStorage',
-      DCStorage: 'dcStorage',
-      dc_pv_array: 'dcPv',
-      DCPVArray: 'dcPv',
-      ac_switch: 'sw',
-      ACSwitch: 'sw',
-      ac_circuit_breaker: 'cb',
-      ACCircuitBreaker: 'cb',
-      ac_pv_system: 'pv',
-      ACPVSystem: 'pv',
-      dc_static_generator_ac: 'dcSgen',
-      DCStaticGenAC: 'dcSgen',
-    };
-    const fallbackBucket = fallbackMap[c.component_type] || fallbackMap[c.canonical_component_type];
-    if (fallbackBucket && maps[fallbackBucket] && Number.isFinite(key) && maps[fallbackBucket][key] != null) {
-      return maps[fallbackBucket][key];
-    }
-    const pos = Number(c.component_index ?? c.index);
-    if (fallbackBucket && maps.byPosition && maps.byPosition[fallbackBucket] &&
-        Number.isFinite(pos) && maps.byPosition[fallbackBucket][pos] != null) {
-      return maps.byPosition[fallbackBucket][pos];
-    }
-    if (fallbackBucket && maps[fallbackBucket] && Number.isFinite(pos) && maps[fallbackBucket][pos] != null) {
-      return maps[fallbackBucket][pos];
-    }
-    const primaryBus = Number(c.primary_bus);
-    if (Number.isFinite(primaryBus) && primaryBus > 0) {
-      if (c.component_domain === 'DC' && maps.dc && maps.dc[primaryBus] != null) return maps.dc[primaryBus];
-      if (maps.ac && maps.ac[primaryBus] != null) return maps.ac[primaryBus];
-      if (maps.dc && maps.dc[primaryBus] != null) return maps.dc[primaryBus];
-    }
-    return undefined;
+    return rowCanvasCompId(c, maps);
   }
 
   function renderAllPowerFlowComponentStatus(data, busMap, options = {}) {
@@ -6916,6 +7099,7 @@ const App = (() => {
     } catch (err) {
       console.warn('Failed to render three-phase power-flow results:', err);
     }
+    const resultRowAttr = (row, fallbackCompId) => canvasRowAttr(row, busMap, { fallbackCompId });
 
     const coordSec = document.getElementById('pfCoordSection');
     const coordDiv = document.getElementById('pfCoordResults');
@@ -6986,8 +7170,10 @@ const App = (() => {
         const busLabel = busId ?? `pos ${i}`;
         const va = data.va ? (data.va[i] * 180 / Math.PI).toFixed(4) : '0';
         const color = vm < 0.95 ? 'color:#e06c75' : vm > 1.05 ? 'color:#d19a66' : '';
-        const compId = busId != null && busMap.ac ? busMap.ac[busId] : undefined;
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const resultRow = (data.component_results || []).find(r =>
+          r.canvas_type === 'ac_bus' && (Number(r.position) === Number(i) || Number(r.index) === Number(busId))) ||
+          { canvas_type: 'ac_bus', index: busId, position: i };
+        const attr = resultRowAttr(resultRow, busId != null && busMap.ac ? busMap.ac[busId] : undefined);
         html += `<tr${attr}><td>${busLabel}</td><td style="${color}">${vm.toFixed(6)}</td><td>${va}</td></tr>`;
       });
       html += '</tbody></table>';
@@ -7015,8 +7201,9 @@ const App = (() => {
         const busId = pfBusIdByPosition('dc', i);
         const busLabel = busId ?? `pos ${i}`;
         const color = vdc < 0.95 ? 'color:#e06c75' : vdc > 1.05 ? 'color:#d19a66' : '';
-        const compId = busId != null && busMap.dc ? busMap.dc[busId] : undefined;
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const resultRow = dcBusRows.find(r => Number(r.position) === Number(i) || Number(r.index) === Number(busId)) ||
+          { canvas_type: 'dc_bus', index: busId, position: i };
+        const attr = resultRowAttr(resultRow, busId != null && busMap.dc ? busMap.dc[busId] : undefined);
         const pNet = busId != null ? dcMetric(busId, 'P净注入') : null;
         html += `<tr${attr}><td>${busLabel}</td><td style="${color}">${vdc.toFixed(6)}</td><td>${pNet === null ? '-' : pFmt(pNet, 4)}</td></tr>`;
       });
@@ -7034,8 +7221,8 @@ const App = (() => {
       genSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>Bus</th><th>Name</th><th>Pg(${pUnit()})</th><th>Qg(${qUnit()})</th><th>Vg(pu)</th><th>Slack</th></tr></thead><tbody>`;
       data.geo_gen.forEach((g, i) => {
-        const compId = busMap.gen ? (busMap.gen[g.index] ?? busMap.gen[i]) : undefined;
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const attr = resultRowAttr({ ...g, canvas_type: g.canvas_type || 'generator', canvas_index: g.canvas_index ?? g.index, position: g.position ?? i },
+          busMap.gen ? (busMap.gen[g.index] ?? busMap.gen[i]) : undefined);
         html += `<tr${attr}><td>${g.index ?? i}</td><td>${g.bus}</td><td>${g.name || ''}</td>`;
         html += `<td>${pFmt(g.pg_mw, 4)}</td><td>${pFmt(g.qg_mvar, 4)}</td>`;
         html += `<td>${(g.vg_pu || 1).toFixed(4)}</td><td>${g.is_slack ? '✓' : ''}</td></tr>`;
@@ -7052,12 +7239,10 @@ const App = (() => {
     if (data.geo_ac_branches && data.geo_ac_branches.length > 0) {
       let html = `<table><thead><tr><th>#</th><th>From</th><th>To</th><th>Pf(${pUnit()})</th><th>Pt(${pUnit()})</th><th>Qf(${qUnit()})</th><th>Qt(${qUnit()})</th><th>Loss(${pUnit()})</th><th>Loading%</th></tr></thead><tbody>`;
       data.geo_ac_branches.forEach((br, i) => {
-        // Branches have no positional canvas id in the result, so link the row
-        // to one endpoint bus (the from-bus), which maps reliably via busMap.ac.
-        const compId = (busMap.branch && busMap.branch[br.index] !== undefined)
+        const fallbackCompId = (busMap.branch && busMap.branch[br.index] !== undefined)
           ? busMap.branch[br.index]
           : (busMap.ac ? busMap.ac[br.from] : undefined);
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const attr = resultRowAttr({ ...br, canvas_type: br.canvas_type || 'ac_branch', canvas_index: br.canvas_index ?? br.index, position: br.position ?? i, from_bus: br.from, to_bus: br.to }, fallbackCompId);
         const loss = (br.loss_mw != null) ? br.loss_mw : ((br.pf_mw || 0) + (br.pt_mw || 0));
         const ldg = br.loading_pct != null ? br.loading_pct.toFixed(1) + '%' : '-';
         const ldgStyle = (br.loading_pct || 0) > 100 ? ' style="color:#e06c75;font-weight:bold"' : '';
@@ -7072,8 +7257,7 @@ const App = (() => {
       // Fallback: old branch_abs (|P| only)
       let html = `<table><thead><tr><th>Branch</th><th>|P|(${pUnit()})</th></tr></thead><tbody>`;
       data.branch_abs.forEach((p, i) => {
-        const compId = busMap.branch ? busMap.branch[i] : undefined;
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const attr = resultRowAttr({ canvas_type: 'ac_branch', index: i, position: i }, busMap.branch ? busMap.branch[i] : undefined);
         html += `<tr${attr}><td>${i}</td><td>${pFmt(p, 4)}</td></tr>`;
       });
       html += '</tbody></table>';
@@ -7090,10 +7274,10 @@ const App = (() => {
       dcBrSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>From</th><th>To</th><th>Pf(${pUnit()})</th><th>Pt(${pUnit()})</th><th>Loss(${pUnit()})</th></tr></thead><tbody>`;
       dcBrData.forEach((br, i) => {
-        const compId = busMap.dcBranch
+        const fallbackCompId = busMap.dcBranch
           ? (busMap.dcBranch[br.index] ?? busMap.dcBranch[i])
           : undefined;
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const attr = resultRowAttr({ ...br, canvas_type: br.canvas_type || 'dc_branch', canvas_index: br.canvas_index ?? br.index, position: br.position ?? i }, fallbackCompId);
         const from = br.from ?? br.from_bus ?? '-';
         const to = br.to ?? br.to_bus ?? '-';
         const pf = br.pf_mw || 0;
@@ -7115,9 +7299,10 @@ const App = (() => {
       t3wSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>HV</th><th>MV</th><th>LV</th><th>P_hv(${pUnit()})</th><th>P_mv(${pUnit()})</th><th>P_lv(${pUnit()})</th><th>Loss(${pUnit()})</th><th>Loading%</th></tr></thead><tbody>`;
       data.geo_trafo3w.forEach((tf, i) => {
+        const attr = resultRowAttr({ ...tf, canvas_type: tf.canvas_type || 'transformer_3w', canvas_index: tf.canvas_index ?? tf.index, position: tf.position ?? i });
         const ldg = tf.loading_pct != null ? tf.loading_pct.toFixed(1) + '%' : '-';
         const ldgStyle = (tf.loading_pct || 0) > 100 ? ' style="color:#e06c75;font-weight:bold"' : '';
-        html += `<tr><td>${tf.index ?? i}</td><td>${tf.hv_bus}</td><td>${tf.mv_bus}</td><td>${tf.lv_bus}</td>`;
+        html += `<tr${attr}><td>${tf.index ?? i}</td><td>${tf.hv_bus}</td><td>${tf.mv_bus}</td><td>${tf.lv_bus}</td>`;
         html += `<td>${pFmt(tf.p_hv_mw || 0, 3)}</td><td>${pFmt(tf.p_mv_mw || 0, 3)}</td><td>${pFmt(tf.p_lv_mw || 0, 3)}</td>`;
         html += `<td>${pFmt(tf.loss_mw || 0, 3)}</td><td${ldgStyle}>${ldg}</td></tr>`;
       });
@@ -7136,7 +7321,8 @@ const App = (() => {
       dcdcSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>Bus In</th><th>Bus Out</th><th>P_in(${pUnit()})</th><th>P_out(${pUnit()})</th><th>Loss(${pUnit()})</th></tr></thead><tbody>`;
       dcdcRows.forEach((d, i) => {
-        html += `<tr><td>${d.index ?? i}</td><td>${d.bus_in}</td><td>${d.bus_out}</td>`;
+        const attr = resultRowAttr({ ...d, canvas_type: d.canvas_type || 'dcdc_converter', canvas_index: d.canvas_index ?? d.index, position: d.position ?? i });
+        html += `<tr${attr}><td>${d.index ?? i}</td><td>${d.bus_in}</td><td>${d.bus_out}</td>`;
         html += `<td>${pFmt(d.p_in_mw || 0, 3)}</td><td>${pFmt(d.p_out_mw || 0, 3)}</td><td>${pFmt(d.loss_mw || 0, 3)}</td></tr>`;
       });
       html += '</tbody></table>';
@@ -7154,8 +7340,8 @@ const App = (() => {
       vscSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>AC Bus</th><th>DC Bus</th><th>Pac(${pUnit()})</th><th>Qac(${qUnit()})</th><th>Pdc(${pUnit()})</th><th>Loss(${pUnit()})</th></tr></thead><tbody>`;
       vscRows.forEach((v, i) => {
-        const compId = busMap.vsc ? (busMap.vsc[v.index] ?? busMap.vsc[i]) : undefined;
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const attr = resultRowAttr({ ...v, canvas_type: v.canvas_type || 'vsc_converter', canvas_index: v.canvas_index ?? v.index, position: v.position ?? i },
+          busMap.vsc ? (busMap.vsc[v.index] ?? busMap.vsc[i]) : undefined);
         html += `<tr${attr}><td>${v.index ?? i}</td><td>${v.bus_ac}</td><td>${v.bus_dc}</td>
                  <td>${v.p_ac_mw != null ? pFmt(v.p_ac_mw, 3) : '0'}</td><td>${v.q_ac_mvar != null ? pFmt(v.q_ac_mvar, 3) : '0'}</td>
                  <td>${v.p_dc_mw != null ? pFmt(v.p_dc_mw, 3) : '0'}</td><td>${v.loss_mw != null ? pFmt(v.loss_mw, 3) : '0'}</td></tr>`;

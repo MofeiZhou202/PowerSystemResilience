@@ -1018,6 +1018,74 @@ body[data-active-result-group="modelIO"] #rightPanel {
   height: 430px;
   min-height: 430px;
 }
+.model-io-split-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(320px, 1fr));
+  gap: 12px;
+  margin: 8px 0 14px;
+}
+.model-io-panel {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.02);
+  padding: 8px;
+}
+.model-io-panel-title {
+  margin: 0 0 6px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+.model-io-compact-scroll {
+  max-height: 260px;
+  margin-bottom: 0;
+}
+.model-io-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.model-io-badge-pass {
+  background: rgba(152,195,121,0.18);
+  color: var(--green);
+  border: 1px solid rgba(152,195,121,0.45);
+}
+.model-io-badge-fail {
+  background: rgba(209,154,102,0.18);
+  color: var(--orange);
+  border: 1px solid rgba(209,154,102,0.45);
+}
+.model-io-contract-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(170px, 1fr));
+  gap: 10px;
+  margin: 8px 0 14px;
+}
+.model-io-contract-item {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.02);
+  padding: 8px 10px;
+}
+.model-io-contract-item strong {
+  display: block;
+  color: var(--accent);
+  font-size: 12px;
+  margin-bottom: 5px;
+}
+.model-io-contract-item span {
+  color: var(--ink2);
+  font-size: 12px;
+  line-height: 1.35;
+}
 .model-io-severity {
   display: inline-flex;
   align-items: center;
@@ -1071,6 +1139,8 @@ body[data-active-result-group="modelIO"] .result-group[data-result-group="modelI
 @media (max-width: 1150px) {
   .transient-dashboard-grid { grid-template-columns: 1fr; }
   .model-io-dashboard-grid { grid-template-columns: 1fr; }
+  .model-io-split-grid { grid-template-columns: 1fr; }
+  .model-io-contract-grid { grid-template-columns: repeat(2, minmax(170px, 1fr)); }
   .transient-chart-wide { grid-column: auto; }
 }
 @media (max-width: 900px) {
@@ -1090,6 +1160,7 @@ body[data-active-result-group="modelIO"] .result-group[data-result-group="modelI
   body[data-active-result-group="modelIO"] #rightPanelResizer {
     display: none;
   }
+  .model-io-contract-grid { grid-template-columns: 1fr; }
 }
 
 /* ── Topology analysis: island legend + canvas overlay ───────────────── */
