@@ -52,7 +52,7 @@ struct Defaults {
     static constexpr double kCostScaleFactor = 1.0;  ///< Objective cost scale ($/h)
 
     // ── JSON schema ───────────────────────────────────────────────────────────
-    static constexpr const char* kSchemaVersion  = "1.0";
+    static constexpr const char* kSchemaVersion  = "1.1";  // 1.1: telemetry (§10)
     static constexpr const char* kPackageVersion = "0.5.0";
 };
 

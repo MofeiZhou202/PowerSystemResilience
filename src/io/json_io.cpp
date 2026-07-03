@@ -2521,8 +2521,160 @@ static Microgrid microgrid_from_json(const json& j) {
 // ═══════════════════════════════════════════════════════════════════════
 // Top-level serialization
 // ═══════════════════════════════════════════════════════════════════════
+// ── Telemetry section serialization (§10) ────────────────────────────────────
+namespace {
+
+json time_base_to_json(const TimeBase& tb) {
+  json j;
+  j["epoch_utc"] = tb.epoch_utc;
+  j["timezone"] = tb.timezone;
+  j["resolution_s"] = tb.resolution_s;
+  j["resample"] = to_string(tb.resample);
+  return j;
+}
+
+TimeBase time_base_from_json(const json& j) {
+  TimeBase tb;
+  tb.epoch_utc = jget<std::string>(j, "epoch_utc", std::string());
+  tb.timezone = jget<std::string>(j, "timezone", std::string("UTC"));
+  tb.resolution_s = jget(j, "resolution_s", 1.0);
+  tb.resample =
+      resample_policy_from_string(jget<std::string>(j, "resample", std::string("hold")));
+  return tb;
+}
+
+json telemetry_binding_to_json(const TelemetryBinding& b) {
+  json j;
+  j["component_ref"] = b.component_ref;
+  j["measurement_type"] = to_string(b.measurement_type);
+  j["phase"] = b.phase;
+  j["unit"] = b.unit;
+  j["sign_convention"] = to_string(b.sign_convention);
+  j["reference_frame"] = to_string(b.reference_frame);
+  j["source_system"] = b.source_system;
+  j["tag"] = b.tag;
+  j["sampling_interval_s"] = b.sampling_interval_s;
+  j["deadband"] = b.deadband;
+  j["scale"] = b.scale;
+  j["cardinality"] = b.cardinality;
+  j["constrains_state"] = b.constrains_state;
+  j["quality"] = to_string(b.quality);
+  j["timestamp"] = b.timestamp;
+  return j;
+}
+
+TelemetryBinding telemetry_binding_from_json(const json& j) {
+  TelemetryBinding b;
+  b.component_ref = jget<std::string>(j, "component_ref", std::string());
+  b.measurement_type = measurement_type_from_string(
+      jget<std::string>(j, "measurement_type", std::string("voltage")));
+  b.phase = jget<std::string>(j, "phase", std::string());
+  b.unit = jget<std::string>(j, "unit", std::string());
+  b.sign_convention = sign_convention_from_string(
+      jget<std::string>(j, "sign_convention", std::string("load")));
+  b.reference_frame = reference_frame_from_string(
+      jget<std::string>(j, "reference_frame", std::string("phase_ground")));
+  b.source_system = jget<std::string>(j, "source_system", std::string());
+  b.tag = jget<std::string>(j, "tag", std::string());
+  b.sampling_interval_s = jget(j, "sampling_interval_s", 1.0);
+  b.deadband = jget(j, "deadband", 0.0);
+  b.scale = jget(j, "scale", 1.0);
+  b.cardinality = jget<std::string>(j, "cardinality", std::string("1:1"));
+  b.constrains_state = jget<std::string>(j, "constrains_state", std::string());
+  b.quality =
+      quality_flag_from_string(jget<std::string>(j, "quality", std::string("good")));
+  b.timestamp = jget<std::string>(j, "timestamp", std::string());
+  return b;
+}
+
+json telemetry_sample_to_json(const TelemetrySample& s) {
+  return json{{"timestamp", s.timestamp},
+              {"value", s.value},
+              {"quality", to_string(s.quality)}};
+}
+
+TelemetrySample telemetry_sample_from_json(const json& j) {
+  TelemetrySample s;
+  s.timestamp = jget<std::string>(j, "timestamp", std::string());
+  s.value = jget(j, "value", 0.0);
+  s.quality =
+      quality_flag_from_string(jget<std::string>(j, "quality", std::string("good")));
+  return s;
+}
+
+json telemetry_stream_to_json(const TelemetryStream& st) {
+  json j;
+  j["stream_id"] = st.stream_id;
+  j["time_base"] = time_base_to_json(st.time_base);
+  j["bindings"] = json::array();
+  for (const auto& b : st.bindings)
+    j["bindings"].push_back(telemetry_binding_to_json(b));
+  j["samples"] = json::array();
+  for (const auto& s : st.samples)
+    j["samples"].push_back(telemetry_sample_to_json(s));
+  return j;
+}
+
+TelemetryStream telemetry_stream_from_json(const json& j) {
+  TelemetryStream st;
+  st.stream_id = jget<std::string>(j, "stream_id", std::string());
+  if (j.contains("time_base")) st.time_base = time_base_from_json(j.at("time_base"));
+  if (j.contains("bindings"))
+    for (const auto& b : j.at("bindings"))
+      st.bindings.push_back(telemetry_binding_from_json(b));
+  if (j.contains("samples"))
+    for (const auto& s : j.at("samples"))
+      st.samples.push_back(telemetry_sample_from_json(s));
+  return st;
+}
+
+json state_seed_to_json(const StateSeed& s) {
+  json j;
+  j["timestamp"] = s.timestamp;
+  j["component_ref"] = s.component_ref;
+  j["quantity"] = s.quantity;
+  j["value"] = s.value;
+  j["provenance"] = s.provenance;
+  return j;
+}
+
+StateSeed state_seed_from_json(const json& j) {
+  StateSeed s;
+  s.timestamp = jget<std::string>(j, "timestamp", std::string());
+  s.component_ref = jget<std::string>(j, "component_ref", std::string());
+  s.quantity = jget<std::string>(j, "quantity", std::string());
+  s.value = jget(j, "value", 0.0);
+  s.provenance = jget<std::string>(j, "provenance", std::string());
+  return s;
+}
+
+json telemetry_section_to_json(const TelemetrySection& sec) {
+  json j;
+  j["streams"] = json::array();
+  for (const auto& st : sec.streams)
+    j["streams"].push_back(telemetry_stream_to_json(st));
+  j["state_seeds"] = json::array();
+  for (const auto& s : sec.state_seeds)
+    j["state_seeds"].push_back(state_seed_to_json(s));
+  return j;
+}
+
+TelemetrySection telemetry_section_from_json(const json& j) {
+  TelemetrySection sec;
+  if (j.contains("streams"))
+    for (const auto& st : j.at("streams"))
+      sec.streams.push_back(telemetry_stream_from_json(st));
+  if (j.contains("state_seeds"))
+    for (const auto& s : j.at("state_seeds"))
+      sec.state_seeds.push_back(state_seed_from_json(s));
+  return sec;
+}
+
+}  // namespace
+
 std::string to_json(const HybridPowerSystem& sys, int indent) {
   json root;
+  root["schema_version"] = kCurrentSchemaVersion;  // §3.3 on-disk contract stamp
   root["name"] = sys.name;
   root["base_mva"] = sys.base_mva;
 
@@ -2651,6 +2803,10 @@ std::string to_json(const HybridPowerSystem& sys, int indent) {
     root["three_phase_ac"] = three_phase_system_to_json(*sys.three_phase_ac);
   }
 
+  if (sys.telemetry && !sys.telemetry->empty()) {
+    root["telemetry"] = telemetry_section_to_json(*sys.telemetry);
+  }
+
   return root.dump(indent);
 }
 
@@ -2766,6 +2922,10 @@ HybridPowerSystem from_json(const std::string& json_str) {
     sys.three_phase_ac = three_phase_system_from_json(root["three_phase_ac"]);
   }
 
+  if (root.contains("telemetry")) {
+    sys.telemetry = telemetry_section_from_json(root.at("telemetry"));
+  }
+
   repair_legacy_transformer2w_branch_links(sys);
   return sys;
 }
@@ -2780,11 +2940,42 @@ HybridPowerSystem load_json(const std::string& path) {
   return from_json(content);
 }
 
+// ── Schema versioning ────────────────────────────────────────────────────────
+
+Result<bool> check_schema_version(const std::string& json_str) {
+  try {
+    const json j = json::parse(json_str);
+    if (!j.contains("schema_version")) {
+      // Legacy document without a stamp: treat as compatible (best-effort).
+      return true;
+    }
+    const std::string ver = j.at("schema_version").get<std::string>();
+    const int doc_major = std::stoi(ver);  // stoi stops at '.', e.g. "1.0" -> 1
+    const int cur_major = std::stoi(std::string(kCurrentSchemaVersion));
+    if (doc_major != cur_major) {
+      return Error{ErrorCode::SchemaVersionMismatch,
+                   "Incompatible schema version: document '" + ver +
+                       "' vs supported '" +
+                       std::string(kCurrentSchemaVersion) + "'",
+                   {}};
+    }
+    return true;
+  } catch (const std::exception& e) {
+    return Error{ErrorCode::ParseError,
+                 std::string("schema_version check failed: ") + e.what(), {}};
+  }
+}
+
 // ── Exception-free safe variants ─────────────────────────────────────────────
 
 Result<HybridPowerSystem> try_from_json(const std::string& json_str,
-                                        ImportMode /*mode*/) {
-  // ImportMode::Permissive tolerance reserved for future field-level handling.
+                                        ImportMode mode) {
+  // Schema-version gate (§3.3): Strict rejects an incompatible major version;
+  // Permissive proceeds best-effort so older/newer minor revisions still load.
+  const auto compat = check_schema_version(json_str);
+  if (!compat && mode == ImportMode::Strict) {
+    return compat.error();
+  }
   try {
     return from_json(json_str);
   } catch (const nlohmann::json::exception& e) {

@@ -45,6 +45,12 @@ hacdcpf_add_test(test_hacdcdss            test_hacdcdss.cpp)
 # I/O: JSON round-trip, MATPOWER parsing, safe try_ variants, OPF/PF result ser.
 hacdcpf_add_test(test_io_json             test_io_json.cpp)
 
+# I/O: MATPOWER unit-discipline contract (§6.3).
+hacdcpf_add_test(test_io_matpower         test_io_matpower.cpp)
+
+# I/O: round-trip / conformance contract (§7).
+hacdcpf_add_test(test_io_roundtrip        test_io_roundtrip.cpp)
+
 # I/O: text-format conversion for OpenDSS/GridLAB-D without requiring external
 # engines, used by component-level cross-check and benchmark harnesses.
 hacdcpf_add_test(test_external_grid_io    test_external_grid_io.cpp)

@@ -8,19 +8,14 @@
 #include "hacdcpf/power_flow/power_flow_result.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/optimal_power_flow/opf_result.hpp"
+#include "hacdcpf/io/import_report.hpp"  // ImportMode + uniform ImportReport contract
 
 namespace hacdcpf::io {
 // ── Import mode ──────────────────────────────────────────────────────────────
+// ImportMode is defined canonically in import_report.hpp (it is part of the
+// import contract). It remains in namespace hacdcpf::io, so existing users are
+// unaffected.
 
-/// Controls strictness of JSON / Excel import.
-enum class ImportMode {
-    /// Unknown fields cause an error; invalid enum strings cause an error;
-    /// missing required fields cause an error.
-    Strict,
-    /// Unknown fields become warnings in the result diagnostics;
-    /// invalid enum strings fall back to defaults with a warning.
-    Permissive,
-};
 // ── Schema versioning ─────────────────────────────────────────────────────────
 
 /// Current on-disk JSON schema version for HybridPowerSystem.

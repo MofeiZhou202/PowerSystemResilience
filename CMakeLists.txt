@@ -338,7 +338,9 @@ set(HACDCPF_SOURCES
   src/optimal_power_flow/parity_ipm.cpp
   src/optimal_power_flow/reactive_power_opt.cpp
   # ── io (always-available: JSON / MATPOWER / case builders) ───────────────
+  src/io/import_report.cpp
   src/io/json_io.cpp
+  src/io/roundtrip.cpp
   src/io/matpower_parser.cpp
   src/io/case_builders.cpp
   src/io/component_io_mapping.cpp

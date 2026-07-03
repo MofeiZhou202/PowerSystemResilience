@@ -3860,15 +3860,23 @@ json cost_formula_json(const hacdcpf::TimeSeriesPFOptions& opts,
   j["units"] = "$";
   j["dispatch_basis"] = dispatch_basis;
   j["step_duration_hr"] = step_hr;
+  j["fallback_marginal_cost_per_mwh"] = 20.0;
   j["formula_text"] =
-      "sum_t sum_g (c0_g*u_g,t + c1_g*P_g,t + c2_g*P_g,t^2) * Δt";
+      "sum_t [sum_g (c0_g*u_g,t + c1_g*P_g,t + c2_g*P_g,t^2) + "
+      "c_rep*P_staticDG,t + c_grid*P_import,t] * Δt";
   j["description"] =
-      "月度/年度成本按实际调度出力重新计算；SCUC、SCED、OPF 共用同一报告口径。优化目标可选择成本、碳排、弃电、损耗或加权目标，但美元成本图始终使用该运行成本口径。";
+      "月度/年度成本按实际调度出力重新计算；SCUC、SCED、OPF 共用同一报告口径。"
+      "常规机组使用其成本曲线；静态柴油/CHP/燃料电池等缺少显式成本字段的分布式电源、"
+      "以及无显式电价的外部电网进口，采用GUI默认20 $/MWh作为报告口径。"
+      "PV/风电等新能源默认边际燃料成本为0。优化目标可选择成本、碳排、弃电、损耗或加权目标，"
+      "但美元成本图始终使用该运行成本口径。";
   j["objective_mode"] = uc_objective_label(opts.objective_mode);
   j["terms"] = json::array(
       {json{{"symbol", "c0*u"}, {"meaning", "机组空载/固定运行成本率 ($/h)"}},
        json{{"symbol", "c1*P"}, {"meaning", "一次燃料成本率 ($/h)"}},
        json{{"symbol", "c2*P^2"}, {"meaning", "二次燃料成本率 ($/h)"}},
+       json{{"symbol", "c_rep*P_staticDG"}, {"meaning", "缺省成本静态分布式电源报告成本率 ($/h)"}},
+       json{{"symbol", "c_grid*P_import"}, {"meaning", "外部电网进口报告成本率 ($/h)"}},
        json{{"symbol", "Δt"}, {"meaning", "时间步长 (h)"}}});
   if (opts.objective_mode == hacdcpf::UCObjective::Weighted) {
     j["objective_weights"] =

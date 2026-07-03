@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/io/roundtrip.hpp"
 
 namespace hacdcpf::io {
 
@@ -200,17 +201,40 @@ struct DigitalTwinDimensionScore {
   std::size_t findings{0};
 };
 
-/// Weighted digital-twin maturity report for one loaded system.
+/// One weakest-link maturity gate on the fidelity or integration axis.
 ///
-/// The score is a weighted sum over registered criteria, normalized by the
-/// total available criterion weight.
-/// @c maturity_level is a coarse L0--L5 label derived from @c readiness_ratio.
+/// See docs/digital_twin_data_io_architecture.md §4: maturity gates rather than
+/// averages.  A level is achieved only when every gate at that level and below
+/// passes.  @c evidence explains why a gate passed or failed.
+struct DigitalTwinMaturityGate {
+  std::string gate_id;   ///< "F1".."F3" or "I1".."I2".
+  std::string axis;      ///< "fidelity" or "integration".
+  int level{0};          ///< The level this gate guards.
+  bool passed{false};
+  std::string title;
+  std::string evidence;
+};
+
+/// Digital-twin maturity report for one loaded system.
+///
+/// Two orthogonal, weakest-link gated axes (§4):
+///   - @c fidelity_level     F0..F3 (file-parsed → static → executable → validated)
+///   - @c integration_level  I0..I2 (offline → synchronized → closed-loop)
+/// @c maturity_level is the coarse legacy L0..L5 *projection* of (F,I), retained
+/// for display.  @c readiness_ratio is the weighted within-level completeness
+/// indicator (secondary, never the level selector).
 struct DigitalTwinReadinessReport {
   double score{0.0};
   double max_score{0.0};
   double readiness_ratio{0.0};
+  int fidelity_level{0};
+  std::string fidelity_label;
+  int integration_level{0};
+  std::string integration_label;
   int maturity_level{0};
   std::string maturity_label;
+  std::vector<DigitalTwinMaturityGate> gates;
+  std::vector<RoundTripEvidence> round_trip_evidence;
   std::vector<DigitalTwinDimensionScore> dimension_scores;
   std::vector<DigitalTwinReadinessFinding> findings;
 

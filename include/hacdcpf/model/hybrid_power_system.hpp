@@ -15,6 +15,7 @@
 #include "hacdcpf/model/dc_components.hpp"
 #include "hacdcpf/model/dynamic_model_profile.hpp"
 #include "hacdcpf/model/enums/grid_enums.hpp"
+#include "hacdcpf/model/telemetry.hpp"
 #include "hacdcpf/projection/canonical_network.hpp"
 
 namespace hacdcpf {
@@ -178,6 +179,10 @@ struct HybridPowerSystem {
 
   std::optional<BusMergeMap> bus_merge_map;
   std::optional<BranchExpandMap> branch_expand_map;
+
+  /// Optional telemetry + timestamped state seeds for the digital-twin
+  /// integration axis (§10).  Absent for offline models.
+  std::optional<TelemetrySection> telemetry;
 };
 
 // ═══════════════════════════════════════════════════════════════════════

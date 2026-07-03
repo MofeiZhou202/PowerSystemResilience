@@ -775,3 +775,95 @@ TEST_CASE("Digital twin readiness improves with dynamic and reliability metadata
       });
   CHECK(has_dynamic_finding);
 }
+
+TEST_CASE("Digital twin maturity is gated over two axes, not averaged",
+          "[io][mapping][digital_twin][maturity]") {
+  auto gate = [](const hacdcpf::io::DigitalTwinReadinessReport& r,
+                 const std::string& id)
+      -> const hacdcpf::io::DigitalTwinMaturityGate* {
+    for (const auto& g : r.gates)
+      if (g.gate_id == id) return &g;
+    return nullptr;
+  };
+
+  SECTION("empty system sits at F0/I0 with all gates failing") {
+    const hacdcpf::HybridPowerSystem empty;
+    const auto report = hacdcpf::io::analyze_digital_twin_readiness(empty);
+    CHECK(report.fidelity_level == 0);
+    CHECK(report.integration_level == 0);
+    CHECK(report.maturity_level == 0);
+    // F1, F2, F3, I1, I2 are all reported.
+    REQUIRE(report.gates.size() == 5);
+    for (const auto& g : report.gates) CHECK_FALSE(g.passed);
+  }
+
+  SECTION("a populated, well-formed system cannot reach F3 without stored "
+          "round-trip evidence, so maturity is capped below L4") {
+    const auto sys = make_system_with_all_io_component_tables();
+    const auto report = hacdcpf::io::analyze_digital_twin_readiness(sys);
+
+    // F3 is gated on round-trip evidence (§7), which does not exist yet.
+    const auto* f3 = gate(report, "F3");
+    REQUIRE(f3 != nullptr);
+    CHECK_FALSE(f3->passed);
+    CHECK(report.fidelity_level <= 2);
+
+    // Weakest-link projection: without F3, no L4/L5 regardless of other scores.
+    CHECK(report.maturity_level < 4);
+    // maturity_level is the projection of (F,I), not the weighted average.
+    const int expected =
+        (report.fidelity_level >= 3 && report.integration_level >= 2)   ? 5
+        : (report.fidelity_level >= 3 && report.integration_level >= 1) ? 4
+                                                                        : report.fidelity_level;
+    CHECK(report.maturity_level == expected);
+  }
+}
+
+TEST_CASE("Cross-field invariants flag electrically inconsistent nameplates",
+          "[io][mapping][parameters][cross_field]") {
+  using hacdcpf::io::ComponentParameterSeverity;
+  hacdcpf::HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+
+  hacdcpf::ACBus b1;
+  b1.index = 1;
+  b1.base_kv = 110.0;
+  hacdcpf::ACBus b2;
+  b2.index = 2;
+  b2.base_kv = 10.0;  // different voltage level than b1
+  sys.ac.buses = {b1, b2};
+
+  // A plain line spanning two voltage levels, with an implausible X/R ratio.
+  hacdcpf::ACBranch line;
+  line.index = 1;
+  line.from_bus = 1;
+  line.to_bus = 2;
+  line.r_pu = 0.0005;
+  line.x_pu = 1.0;
+  line.rate_a_mva = 50.0;
+  sys.ac.branches = {line};
+
+  // A generator whose P/Q operating box exceeds its MVA rating.
+  hacdcpf::Generator g;
+  g.bus = 1;
+  g.pmin_mw = 0.0;
+  g.pmax_mw = 100.0;
+  g.qmin_mvar = -80.0;
+  g.qmax_mvar = 80.0;
+  g.mbase_mva = 50.0;
+  sys.ac.generators = {g};
+
+  const auto report = hacdcpf::io::analyze_component_parameter_quality(sys);
+
+  const auto has = [&](const std::string& needle) {
+    return std::any_of(
+        report.findings.begin(), report.findings.end(),
+        [&](const hacdcpf::io::ComponentParameterFinding& f) {
+          return f.message.find(needle) != std::string::npos;
+        });
+  };
+  CHECK(has("capability infeasible"));       // sqrt(100^2+80^2)=128 > 50 MVA
+  CHECK(has("X/R ratio"));                    // 1.0/0.0005 = 2000
+  CHECK(has("different base voltages"));      // 110 kV vs 10 kV
+  CHECK(report.count(ComponentParameterSeverity::Warning) >= 3);
+}

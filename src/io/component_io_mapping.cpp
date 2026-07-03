@@ -1336,6 +1336,62 @@ void check_order(ComponentParameterAuditReport& report,
   }
 }
 
+// ── Cross-field electrical invariants (§6.2) ─────────────────────────────────
+// These catch models where every field is individually in range but the
+// combination is electrically invalid.  They are Warnings: they surface
+// data-quality problems without failing the F2 hard-error gate on borderline
+// nameplate rounding.
+
+/// Flags a nameplate whose P/Q operating box exceeds its apparent-power rating.
+void check_capability(ComponentParameterAuditReport& report,
+                      const ComponentIdentity& id,
+                      std::string parameter_path,
+                      double p_mw,
+                      double q_mvar,
+                      double s_mva,
+                      S family,
+                      std::string profile,
+                      double tol = 0.02) {
+  if (!std::isfinite(p_mw) || !std::isfinite(q_mvar) || !std::isfinite(s_mva))
+    return;
+  if (s_mva <= 0.0) return;  // no apparent-power rating to check against
+  ++report.checked_parameters;
+  const double apparent = std::hypot(p_mw, q_mvar);
+  if (apparent > s_mva * (1.0 + tol)) {
+    auto rule = parameter_rule(id.component_type, id.collection_path,
+                               std::move(parameter_path), C::Static,
+                               std::nullopt, std::nullopt, family,
+                               std::move(profile), "MVA", false, Sev::Warning,
+                               Sev::Warning);
+    add_finding(report, id, rule, Sev::Warning, apparent,
+                "capability infeasible: sqrt(P^2+Q^2) = " +
+                    format_double(apparent) + " MVA exceeds rating " +
+                    format_double(s_mva) + " MVA.");
+  }
+}
+
+/// Flags implausible line X/R ratios (data-entry / unit errors).
+void check_xr_ratio(ComponentParameterAuditReport& report,
+                    const ComponentIdentity& id,
+                    double r_pu,
+                    double x_pu,
+                    S family,
+                    std::string profile) {
+  if (!std::isfinite(r_pu) || !std::isfinite(x_pu)) return;
+  if (r_pu <= 0.0 || x_pu <= 0.0) return;  // zero/negative handled elsewhere
+  ++report.checked_parameters;
+  const double xr = x_pu / r_pu;
+  if (xr > 100.0 || xr < 0.02) {
+    auto rule = parameter_rule(id.component_type, id.collection_path,
+                               "x_pu/r_pu", C::Static, std::nullopt,
+                               std::nullopt, family, std::move(profile),
+                               "ratio", false, Sev::Info, Sev::Warning);
+    add_finding(report, id, rule, Sev::Warning, xr,
+                "X/R ratio = " + format_double(xr) +
+                    " is outside the plausible [0.02, 100] range.");
+  }
+}
+
 void check_percent_sum(ComponentParameterAuditReport& report,
                        const ComponentIdentity& id,
                        std::string parameter_path,
@@ -2082,13 +2138,145 @@ std::string maturity_label(int level) {
   return "Unknown";
 }
 
-int maturity_level(double readiness_ratio) {
-  if (readiness_ratio >= 0.88) return 5;
-  if (readiness_ratio >= 0.72) return 4;
-  if (readiness_ratio >= 0.55) return 3;
-  if (readiness_ratio >= 0.35) return 2;
-  if (readiness_ratio >= 0.15) return 1;
-  return 0;
+// ── Two-axis, weakest-link maturity gating (§4) ──────────────────────────────
+//
+// Maturity is GATED, not averaged.  Two orthogonal axes:
+//   Fidelity     F0..F3: file-parsed → static → executable → validated.
+//   Integration  I0..I2: offline → synchronized → closed-loop.
+// A level is achieved only when every gate at that level and below passes.
+// The weighted readiness_ratio remains a secondary within-level completeness
+// indicator, never the level selector.
+
+/// Minimum share of components that must carry stable names for F1 identity.
+constexpr double kIdentityGateRatio = 0.90;
+
+std::string fidelity_label(int level) {
+  switch (level) {
+    case 0: return "F0 file-parsed";
+    case 1: return "F1 static network model";
+    case 2: return "F2 executable model";
+    case 3: return "F3 validated model";
+  }
+  return "Unknown";
+}
+
+std::string integration_label(int level) {
+  switch (level) {
+    case 0: return "I0 offline";
+    case 1: return "I1 synchronized";
+    case 2: return "I2 closed-loop";
+  }
+  return "Unknown";
+}
+
+/// Legacy L0..L5 label projected from the two gated axes (§4.1 table):
+/// L0=F0, L1=F1, L2=F2, L3=F3, L4=F3&I1, L5=F3&I2.
+int project_maturity_level(int fidelity, int integration) {
+  if (fidelity >= 3 && integration >= 2) return 5;
+  if (fidelity >= 3 && integration >= 1) return 4;
+  return fidelity;  // F0..F3 → L0..L3
+}
+
+struct MaturityAxes {
+  int fidelity{0};
+  int integration{0};
+  std::vector<DigitalTwinMaturityGate> gates;
+};
+
+/// Evaluates the fidelity/integration gates for one loaded system.
+///
+/// @p roundtrip_evidence_passed is threaded in by the caller once round-trip
+/// conformance evidence exists (§7); until then F3 cannot be earned.
+MaturityAxes evaluate_maturity_gates(
+    const HybridPowerSystem& sys,
+    const ComponentIOCoverageReport& coverage,
+    const ComponentParameterAuditReport& audit,
+    const TwinCounts& counts,
+    const RoundTripEvidence& roundtrip) {
+  MaturityAxes out;
+  const std::size_t buses = bus_count(sys);
+  const std::size_t edges = topology_edge_count(sys);
+  const bool topology_ok = buses > 0U && edges > 0U;
+  const double identity_ratio =
+      counts.total_components > 0U
+          ? static_cast<double>(counts.named_components) /
+                static_cast<double>(counts.total_components)
+          : 0.0;
+
+  std::size_t populated = 0U, canonical_missing = 0U;
+  for (const auto& item : coverage.items) {
+    if (item.count == 0U) continue;
+    ++populated;
+    if (!is_represented_policy(item.mapping.canonical_policy)) ++canonical_missing;
+  }
+  const bool canonical_defined = populated > 0U && canonical_missing == 0U;
+  const std::size_t param_errors = audit.count(Sev::Error);
+
+  const auto add_gate = [&](std::string id, std::string axis, int level,
+                            bool passed, std::string title,
+                            std::string evidence) {
+    out.gates.push_back({std::move(id), std::move(axis), level, passed,
+                         std::move(title), std::move(evidence)});
+  };
+
+  // ── Fidelity axis ─────────────────────────────────────────────────────────
+  const bool f1 = topology_ok && identity_ratio >= kIdentityGateRatio;
+  add_gate("F1", "fidelity", 1, f1, "Stable identity + solvable topology",
+           std::to_string(counts.named_components) + "/" +
+               std::to_string(counts.total_components) + " components named; " +
+               std::to_string(buses) + " bus(es), " + std::to_string(edges) +
+               " edge(s).");
+  const bool f2 = f1 && param_errors == 0U && canonical_defined;
+  add_gate("F2", "fidelity", 2, f2,
+           "Checked parameters + canonical projection",
+           std::to_string(param_errors) + " parameter error(s); " +
+               std::to_string(populated - canonical_missing) + "/" +
+               std::to_string(populated) +
+               " populated collections have a canonical projection.");
+  const bool f3 = f2 && roundtrip.passed;
+  add_gate("F3", "fidelity", 3, f3,
+           "Stored round-trip / numerical validation",
+           roundtrip.passed
+               ? ("Round-trip (" + roundtrip.adapter + ") lossless over " +
+                  std::to_string(roundtrip.fields_checked) + " fields (§7).")
+               : ("Round-trip (" + roundtrip.adapter + ") not lossless: " +
+                  std::to_string(roundtrip.fields_mismatched) + "/" +
+                  std::to_string(roundtrip.fields_checked) +
+                  " fields mismatched (§7)."));
+  out.fidelity = f3 ? 3 : f2 ? 2 : f1 ? 1 : 0;
+
+  // ── Integration axis (orthogonal to fidelity) ─────────────────────────────
+  // Real telemetry bindings and timestamped state seeds drive I1 (§10); names
+  // are not telemetry channels.
+  const std::size_t telemetry_bindings =
+      sys.telemetry ? sys.telemetry->binding_count() : 0U;
+  const std::size_t telemetry_state_seeds =
+      sys.telemetry ? sys.telemetry->state_seeds.size() : 0U;
+  const bool telemetry_present = telemetry_bindings > 0U;
+  const bool state_seed_present = telemetry_state_seeds > 0U;
+  const bool events_present = counts.controllable_event_components > 0U;
+  const bool provenance_present = counts.provenance_components > 0U;
+  const bool i1 = telemetry_present && state_seed_present && events_present &&
+                  provenance_present;
+  add_gate("I1", "integration", 1, i1,
+           "Telemetry + state seeds + events + provenance",
+           std::to_string(telemetry_bindings) + " telemetry binding(s), " +
+               std::to_string(telemetry_state_seeds) + " state seed(s), " +
+               std::to_string(counts.controllable_event_components) +
+               " event surface(s), " +
+               std::to_string(counts.provenance_components) +
+               " provenance record(s).");
+  // TODO(P8/§6.4, P9): uncertainty fields + calibration/estimation history.
+  const bool uncertainty_present = false;
+  const bool calibration_history_present = false;
+  const bool i2 = i1 && uncertainty_present && calibration_history_present;
+  add_gate("I2", "integration", 2, i2,
+           "Uncertainty + calibration/estimation history",
+           "Uncertainty and calibration/estimation history not yet modeled "
+           "(§10, §6.4).");
+  out.integration = i2 ? 2 : i1 ? 1 : 0;
+
+  return out;
 }
 
 bool is_unsupported_external_policy(ComponentIOPolicy policy) {
@@ -2400,6 +2588,37 @@ ComponentIOCoverageReport analyze_component_io_coverage(
   return report;
 }
 
+/// Flags AC lines that connect buses at different base voltages (§6.2): a plain
+/// branch spanning two voltage levels should be modeled as a transformer.
+void audit_branch_base_voltage(ComponentParameterAuditReport& report,
+                               const HybridPowerSystem& sys) {
+  std::map<int, double> bus_kv;
+  for (const auto& b : sys.ac.buses) bus_kv[b.index] = b.base_kv;
+  std::size_t pos = 0;
+  for (const auto& br : sys.ac.branches) {
+    const std::size_t here = pos++;
+    const auto itf = bus_kv.find(br.from_bus);
+    const auto itt = bus_kv.find(br.to_bus);
+    if (itf == bus_kv.end() || itt == bus_kv.end()) continue;
+    const double kf = itf->second;
+    const double kt = itt->second;
+    if (kf <= 0.0 || kt <= 0.0) continue;
+    ++report.checked_parameters;
+    if (std::abs(kf - kt) / std::max(kf, kt) > 0.01) {
+      const ComponentIdentity id{"ACBranch", "ac.branches", here, br.index,
+                                 std::string{}};
+      auto rule = parameter_rule("ACBranch", "ac.branches", "from/to base_kv",
+                                 C::Static, std::nullopt, std::nullopt,
+                                 S::IEC61970CIM, "CIM BaseVoltage coherence",
+                                 "kV", false, Sev::Info, Sev::Warning);
+      add_finding(report, id, rule, Sev::Warning, kf,
+                  "branch connects buses at different base voltages (" +
+                      format_double(kf) + " kV vs " + format_double(kt) +
+                      " kV); model the transformer explicitly.");
+    }
+  }
+}
+
 ComponentParameterAuditReport analyze_component_parameter_quality(
     const HybridPowerSystem& sys) {
   ComponentParameterAuditReport report;
@@ -2419,6 +2638,8 @@ ComponentParameterAuditReport analyze_component_parameter_quality(
                    [&](const ComponentIdentity& id, const ACBranch& br) {
                      check_registered(report, id, "r_pu", br.r_pu);
                      check_registered(report, id, "x_pu", br.x_pu);
+                     check_xr_ratio(report, id, br.r_pu, br.x_pu,
+                                    S::IEC61970CIM, "ACLineSegment X/R");
                      check_registered(report, id, "rate_a_mva",
                                       br.rate_a_mva);
                      check_registered(report, id, "length_km", br.length_km);
@@ -2549,6 +2770,12 @@ ComponentParameterAuditReport analyze_component_parameter_quality(
                      check_order(report, id, "qmin_mvar <= qmax_mvar",
                                  gen.qmin_mvar, gen.qmax_mvar, C::Static,
                                  S::IEEE, "generator reactive limits", "MVAr");
+                     check_capability(report, id, "P/Q vs mbase_mva",
+                                      gen.pmax_mw,
+                                      std::max(std::abs(gen.qmax_mvar),
+                                               std::abs(gen.qmin_mvar)),
+                                      gen.mbase_mva, S::IEEE,
+                                      "generator capability");
                      check_registered(report, id, "forced_outage_rate",
                                       gen.forced_outage_rate);
                      check_registered(report, id, "mttr_hr", gen.mttr_hr);
@@ -3143,6 +3370,9 @@ ComponentParameterAuditReport analyze_component_parameter_quality(
                      });
   }
 
+  // Cross-collection invariant: AC lines must not span voltage levels (§6.2).
+  audit_branch_base_voltage(report, sys);
+
   std::stable_sort(report.findings.begin(),
                    report.findings.end(),
                    [](const ComponentParameterFinding& a,
@@ -3477,7 +3707,21 @@ DigitalTwinReadinessReport analyze_digital_twin_readiness(
 
   report.readiness_ratio =
       report.max_score > 0.0 ? bounded(report.score / report.max_score) : 0.0;
-  report.maturity_level = maturity_level(report.readiness_ratio);
+
+  // Maturity is gated (weakest-link over two axes), not derived from the
+  // weighted average (§4.2).  The self-contained JSON round-trip provides the
+  // stored conformance evidence the F3 gate requires (§7.2).
+  const RoundTripEvidence rt = json_roundtrip(sys);
+  report.round_trip_evidence.push_back(rt);
+  const MaturityAxes axes =
+      evaluate_maturity_gates(sys, coverage, parameter_audit, counts, rt);
+  report.fidelity_level = axes.fidelity;
+  report.fidelity_label = fidelity_label(axes.fidelity);
+  report.integration_level = axes.integration;
+  report.integration_label = integration_label(axes.integration);
+  report.gates = axes.gates;
+  report.maturity_level =
+      project_maturity_level(axes.fidelity, axes.integration);
   report.maturity_label = maturity_label(report.maturity_level);
   return report;
 }

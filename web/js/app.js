@@ -5036,7 +5036,9 @@ const App = (() => {
     data.cost_formula = data.cost_formula || data.objective_formula || {};
     const fmt = (x, n = 0) => Number(x || 0).toLocaleString('en-US', { maximumFractionDigits: n });
     const monthlyCostValue = (m) => firstFiniteNumber(
-      m?.total_cost, m?.cost, m?.production_cost, m?.objective_value);
+      m?.total_cost, m?.operating_cost, m?.total_operating_cost,
+      m?.generation_cost, m?.total_generation_cost,
+      m?.cost, m?.production_cost, m?.objective_value);
     const costFormulaTitle = data.cost_formula.title || '年度运行成本';
     const costFormulaText = data.cost_formula.formula_text || data.cost_formula.description || '';
     const costFormulaSource = data.cost_formula.dispatch_basis || data.cost_formula.source || data.solver_name || '';
@@ -6069,7 +6071,7 @@ const App = (() => {
           break;
         }
         case 'external_grid': {
-          const buses = connectedBuses(comp.id);
+          const buses = resultConnectedBuses(comp.id);
           const ac = buses.find(b => b.domain === 'ac') || (p.bus ? { domain: 'ac', index: p.bus } : null);
           const eg = solvedExternalGridInjection(comp);
           detail = [
@@ -6897,9 +6899,23 @@ const App = (() => {
         <span class="result-value">${Number(data.residual || 0).toExponential(4)}</span></div>
     `;
 
-	    const busMap = Canvas.getCompBusMap();
-	    showPowerFlowBalanceDiagnostics(data, busMap);
-	    showThreePhasePowerFlowResults(data, busMap);
+    let busMap = {};
+    try {
+      busMap = Canvas.getCompBusMap ? Canvas.getCompBusMap() : {};
+    } catch (err) {
+      console.warn('Failed to build canvas bus map for power-flow results:', err);
+      busMap = {};
+    }
+    try {
+      showPowerFlowBalanceDiagnostics(data, busMap);
+    } catch (err) {
+      console.warn('Failed to render power-flow balance diagnostics:', err);
+    }
+    try {
+      showThreePhasePowerFlowResults(data, busMap);
+    } catch (err) {
+      console.warn('Failed to render three-phase power-flow results:', err);
+    }
 
     const coordSec = document.getElementById('pfCoordSection');
     const coordDiv = document.getElementById('pfCoordResults');
@@ -6940,7 +6956,15 @@ const App = (() => {
       coordDiv.innerHTML = '';
     }
 
-    renderAllPowerFlowComponentStatus(data, busMap);
+    try {
+      renderAllPowerFlowComponentStatus(data, busMap);
+    } catch (err) {
+      console.warn('Failed to render all-component power-flow results:', err);
+      const section = document.getElementById('pfAllComponentsSection');
+      const div = document.getElementById('pfAllComponentsResults');
+      if (section) section.style.display = '';
+      if (div) div.innerHTML = '<p class="empty-hint">全部元件计算结果渲染失败；其余潮流结果已继续显示。</p>';
+    }
 
     const pfBusIdByPosition = (domain, i) => {
       const type = domain === 'dc' ? 'dc_bus' : 'ac_bus';
@@ -6962,7 +6986,7 @@ const App = (() => {
         const busLabel = busId ?? `pos ${i}`;
         const va = data.va ? (data.va[i] * 180 / Math.PI).toFixed(4) : '0';
         const color = vm < 0.95 ? 'color:#e06c75' : vm > 1.05 ? 'color:#d19a66' : '';
-        const compId = busId != null ? busMap.ac[busId] : undefined;
+        const compId = busId != null && busMap.ac ? busMap.ac[busId] : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
         html += `<tr${attr}><td>${busLabel}</td><td style="${color}">${vm.toFixed(6)}</td><td>${va}</td></tr>`;
       });
@@ -6991,7 +7015,7 @@ const App = (() => {
         const busId = pfBusIdByPosition('dc', i);
         const busLabel = busId ?? `pos ${i}`;
         const color = vdc < 0.95 ? 'color:#e06c75' : vdc > 1.05 ? 'color:#d19a66' : '';
-        const compId = busId != null ? busMap.dc[busId] : undefined;
+        const compId = busId != null && busMap.dc ? busMap.dc[busId] : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
         const pNet = busId != null ? dcMetric(busId, 'P净注入') : null;
         html += `<tr${attr}><td>${busLabel}</td><td style="${color}">${vdc.toFixed(6)}</td><td>${pNet === null ? '-' : pFmt(pNet, 4)}</td></tr>`;
@@ -7048,7 +7072,7 @@ const App = (() => {
       // Fallback: old branch_abs (|P| only)
       let html = `<table><thead><tr><th>Branch</th><th>|P|(${pUnit()})</th></tr></thead><tbody>`;
       data.branch_abs.forEach((p, i) => {
-        const compId = busMap.branch[i];
+        const compId = busMap.branch ? busMap.branch[i] : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
         html += `<tr${attr}><td>${i}</td><td>${pFmt(p, 4)}</td></tr>`;
       });

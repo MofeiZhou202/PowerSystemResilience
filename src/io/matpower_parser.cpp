@@ -241,7 +241,14 @@ void parse_gencost_row(const std::vector<double>& row, double& c2, double& c1, d
 
 }  // namespace
 
-HybridPowerSystem parse_matpower(const std::string& filepath) {
+namespace {
+
+// Core MATPOWER parser.  @p apply_conversions gates the non-standard kW/ohm
+// unit markers (§6.3); @p report (optional) receives uniform import
+// diagnostics and the resolved UnitAssertion / binding level.
+HybridPowerSystem parse_matpower_impl(const std::string& filepath,
+                                      bool apply_conversions,
+                                      ImportReport* report) {
   const std::string text = read_text_file(filepath);
 
   const double base_mva = parse_scalar_assignment(text, "mpc.baseMVA", 100.0);
@@ -254,16 +261,46 @@ HybridPowerSystem parse_matpower(const std::string& filepath) {
     throw std::runtime_error("MATPOWER parser: empty/invalid bus matrix: " + filepath);
   }
 
-  if (has_load_kw_conversion(text)) {
+  const bool has_kw_marker = has_load_kw_conversion(text);
+  const bool has_ohm_marker = has_branch_ohm_conversion(text);
+
+  if (report) {
+    report->binding_level = ImportBindingLevel::Rich;
+    if (has_kw_marker || has_ohm_marker) {
+      // Non-standard units: only trusted under best-effort (§6.3).
+      report->unit_assertion = apply_conversions ? UnitAssertion::BestEffort
+                                                  : UnitAssertion::Inferred;
+    } else {
+      // Standard MATPOWER is per-unit on baseMVA — units are asserted.
+      report->unit_assertion = UnitAssertion::Asserted;
+      report->add(ImportDisposition::Accepted, ImportReasonCode::Ok,
+                  ImportSeverity::Info, "mpc.baseMVA",
+                  "Units: per-unit on baseMVA = " + std::to_string(base_mva) +
+                      " MVA.");
+    }
+  }
+
+  if (has_kw_marker && apply_conversions) {
     for (auto& row : bus_rows) {
       if (row.size() >= 4) {
         row[2] /= 1e3;
         row[3] /= 1e3;
       }
     }
+    if (report)
+      report->add(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
+                  ImportSeverity::Warning, "mpc.bus[PD,QD]",
+                  "Load PD/QD converted from kW to MW via a non-standard file "
+                  "marker (best-effort).");
+  } else if (has_kw_marker && report) {
+    report->add(ImportDisposition::Skipped, ImportReasonCode::UnitInferred,
+                ImportSeverity::Warning, "mpc.bus[PD,QD]",
+                "Non-standard kW load marker present but not applied on the "
+                "twin path; enable best_effort_import or provide standard "
+                "per-unit values.");
   }
 
-  if (has_branch_ohm_conversion(text)) {
+  if (has_ohm_marker && apply_conversions) {
     double base_kv = 0.0;
     if (!bus_rows.empty() && bus_rows[0].size() >= 10) {
       base_kv = bus_rows[0][9];
@@ -277,6 +314,17 @@ HybridPowerSystem parse_matpower(const std::string& filepath) {
         }
       }
     }
+    if (report)
+      report->add(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
+                  ImportSeverity::Warning, "mpc.branch[BR_R,BR_X]",
+                  "Branch R/X converted from ohms to per-unit via a "
+                  "non-standard file marker (best-effort).");
+  } else if (has_ohm_marker && report) {
+    report->add(ImportDisposition::Skipped, ImportReasonCode::UnitInferred,
+                ImportSeverity::Warning, "mpc.branch[BR_R,BR_X]",
+                "Non-standard ohmic branch marker present but not applied on "
+                "the twin path; enable best_effort_import or provide per-unit "
+                "impedance.");
   }
 
   HybridPowerSystem sys;
@@ -495,6 +543,21 @@ HybridPowerSystem parse_matpower(const std::string& filepath) {
   }
 
   return sys;
+}
+
+}  // namespace
+
+HybridPowerSystem parse_matpower(const std::string& filepath) {
+  return parse_matpower_impl(filepath, /*apply_conversions=*/true,
+                             /*report=*/nullptr);
+}
+
+MatpowerImportResult parse_matpower(const std::string& filepath,
+                                    const MatpowerImportOptions& options) {
+  MatpowerImportResult result;
+  result.system = parse_matpower_impl(filepath, options.best_effort_import,
+                                      &result.report);
+  return result;
 }
 
 }  // namespace hacdcpf::io
