@@ -51,6 +51,9 @@ hacdcpf_add_test(test_io_matpower         test_io_matpower.cpp)
 # I/O: round-trip / conformance contract (§7).
 hacdcpf_add_test(test_io_roundtrip        test_io_roundtrip.cpp)
 
+# I/O: bounded CIM / CGMES 3.0 (EQ+SSH) import/export (§5).
+hacdcpf_add_test(test_io_cim              test_io_cim.cpp)
+
 # I/O: text-format conversion for OpenDSS/GridLAB-D without requiring external
 # engines, used by component-level cross-check and benchmark harnesses.
 hacdcpf_add_test(test_external_grid_io    test_external_grid_io.cpp)

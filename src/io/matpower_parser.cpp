@@ -560,4 +560,107 @@ MatpowerImportResult parse_matpower(const std::string& filepath,
   return result;
 }
 
+namespace {
+
+int internal_bus_type_to_matpower(BusType t) {
+  switch (t) {
+    case BusType::SLACK: return 3;
+    case BusType::PV:    return 2;
+    case BusType::PQ:    return 1;
+    default:             return 4;  // ISOLATED
+  }
+}
+
+std::string sanitize_identifier(const std::string& s) {
+  std::string out;
+  for (char c : s) {
+    out.push_back((std::isalnum(static_cast<unsigned char>(c)) || c == '_')
+                      ? c
+                      : '_');
+  }
+  if (out.empty() || std::isdigit(static_cast<unsigned char>(out[0])))
+    out = "case_" + out;
+  return out;
+}
+
+}  // namespace
+
+std::string to_matpower(const HybridPowerSystem& sys) {
+  std::ostringstream o;
+  o << "function mpc = "
+    << sanitize_identifier(sys.name.empty() ? "hacdcpf_export" : sys.name)
+    << "\n";
+  o << "mpc.version = '2';\n";
+  o << "mpc.baseMVA = " << sys.base_mva << ";\n";
+  if (!sys.dc.buses.empty() || !sys.vsc_converters.empty() ||
+      !sys.ac.transformers_2w.empty() || !sys.ac.transformers_3w.empty()) {
+    o << "% NOTE: DC network, converters, and transformers are out of scope "
+         "for this bounded AC export (structural loss).\n";
+  }
+
+  // Fold loads and shunts into per-bus injections.
+  std::unordered_map<int, double> pd, qd, gs, bs;
+  for (const auto& l : sys.ac.loads) {
+    pd[l.bus] += l.p_mw;
+    qd[l.bus] += l.q_mvar;
+  }
+  for (const auto& s : sys.ac.shunts) {
+    gs[s.bus] += s.gs_mw;
+    bs[s.bus] += s.bs_mvar;
+  }
+
+  o << "%% bus data\n"
+       "%\tbus_i\ttype\tPd\tQd\tGs\tBs\tarea\tVm\tVa\tbaseKV\tzone\tVmax\tVmin\n";
+  o << "mpc.bus = [\n";
+  for (const auto& b : sys.ac.buses) {
+    o << "\t" << b.index << "\t" << internal_bus_type_to_matpower(b.bus_type)
+      << "\t" << pd[b.index] << "\t" << qd[b.index] << "\t" << gs[b.index]
+      << "\t" << bs[b.index] << "\t1\t" << b.vm_pu << "\t" << b.va_deg << "\t"
+      << b.base_kv << "\t1\t" << b.vmax_pu << "\t" << b.vmin_pu << ";\n";
+  }
+  o << "];\n";
+
+  o << "%% generator data\n"
+       "%\tbus\tPg\tQg\tQmax\tQmin\tVg\tmBase\tstatus\tPmax\tPmin\n";
+  o << "mpc.gen = [\n";
+  for (const auto& g : sys.ac.generators) {
+    o << "\t" << g.bus << "\t" << g.pg_mw << "\t" << g.qg_mvar << "\t"
+      << g.qmax_mvar << "\t" << g.qmin_mvar << "\t" << g.vg_pu << "\t"
+      << (g.mbase_mva > 0.0 ? g.mbase_mva : sys.base_mva) << "\t"
+      << (g.in_service ? 1 : 0) << "\t" << g.pmax_mw << "\t" << g.pmin_mw
+      << "\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0;\n";
+  }
+  o << "];\n";
+
+  o << "%% branch data\n"
+       "%\tfbus\ttbus\tr\tx\tb\trateA\trateB\trateC\tratio\tangle\tstatus\t"
+       "angmin\tangmax\n";
+  o << "mpc.branch = [\n";
+  for (const auto& br : sys.ac.branches) {
+    o << "\t" << br.from_bus << "\t" << br.to_bus << "\t" << br.r_pu << "\t"
+      << br.x_pu << "\t" << br.b_pu << "\t" << br.rate_a_mva
+      << "\t0\t0\t0\t0\t1\t-360\t360;\n";
+  }
+  o << "];\n";
+
+  o << "%% generator cost data\n"
+       "%\tmodel\tstartup\tshutdown\tn\tc2\tc1\tc0\n";
+  o << "mpc.gencost = [\n";
+  for (const auto& g : sys.ac.generators) {
+    o << "\t2\t0\t0\t3\t" << g.cost_c2 << "\t" << g.cost_c1 << "\t" << g.cost_c0
+      << ";\n";
+  }
+  o << "];\n";
+
+  return o.str();
+}
+
+void save_matpower(const HybridPowerSystem& sys, const std::string& filepath) {
+  std::ofstream os(filepath);
+  if (!os)
+    throw std::runtime_error("MATPOWER export: cannot open for write " +
+                             filepath);
+  os << to_matpower(sys);
+}
+
 }  // namespace hacdcpf::io

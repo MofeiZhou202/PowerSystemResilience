@@ -120,6 +120,17 @@ struct ImportReport {
   [[nodiscard]] bool has_coerced_or_inferred() const;
 };
 
+/// Builds a uniform ImportReport from the legacy (warnings, skipped) message
+/// vectors that several importers (GridLAB-D, OpenDSS, ETAP) already produce.
+///
+/// This lets every importer surface the §8 contract without rewriting its
+/// internals: warnings become Coerced/Warning records and skipped items become
+/// Skipped/Warning records.
+[[nodiscard]] ImportReport uniform_report_from_messages(
+    const std::vector<std::string>& warnings,
+    const std::vector<std::string>& skipped, ImportBindingLevel level,
+    UnitAssertion unit_assertion = UnitAssertion::Asserted);
+
 /// Whether an import result is acceptable under @p mode (§8).
 ///
 /// - Strict:     no Error-severity records AND nothing coerced/inferred.

@@ -46,6 +46,24 @@ bool ImportReport::has_coerced_or_inferred() const {
   return false;
 }
 
+ImportReport uniform_report_from_messages(
+    const std::vector<std::string>& warnings,
+    const std::vector<std::string>& skipped, ImportBindingLevel level,
+    UnitAssertion unit_assertion) {
+  ImportReport report;
+  report.binding_level = level;
+  report.unit_assertion = unit_assertion;
+  for (const auto& w : warnings) {
+    report.add(ImportDisposition::Coerced, ImportReasonCode::Other,
+               ImportSeverity::Warning, std::string(), w);
+  }
+  for (const auto& s : skipped) {
+    report.add(ImportDisposition::Skipped, ImportReasonCode::StructuralLoss,
+               ImportSeverity::Warning, std::string(), s);
+  }
+  return report;
+}
+
 bool passes_mode(const ImportReport& report, ImportMode mode) {
   if (report.has_errors()) return false;
   if (mode == ImportMode::Strict) return !report.has_coerced_or_inferred();

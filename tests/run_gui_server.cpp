@@ -2230,17 +2230,43 @@ json digital_twin_readiness_to_json(
   for (const auto& finding : report.findings) {
     findings.push_back(digital_twin_finding_to_json(finding));
   }
+  // Weakest-link maturity gates (F1..F3 / I1..I2) — §4.
+  json gates = json::array();
+  for (const auto& g : report.gates) {
+    gates.push_back(json{{"gate_id", g.gate_id},
+                         {"axis", g.axis},
+                         {"level", g.level},
+                         {"passed", g.passed},
+                         {"title", g.title},
+                         {"evidence", g.evidence}});
+  }
+  // Stored round-trip conformance evidence — §7.
+  json round_trip = json::array();
+  for (const auto& rt : report.round_trip_evidence) {
+    round_trip.push_back(json{{"adapter", rt.adapter},
+                              {"level", rt.level},
+                              {"passed", rt.passed},
+                              {"lossless", rt.lossless},
+                              {"fields_checked", rt.fields_checked},
+                              {"fields_mismatched", rt.fields_mismatched}});
+  }
   return json{
       {"summary",
        json{{"score", report.score},
             {"max_score", report.max_score},
             {"readiness_ratio", report.readiness_ratio},
+            {"fidelity_level", report.fidelity_level},
+            {"fidelity_label", report.fidelity_label},
+            {"integration_level", report.integration_level},
+            {"integration_label", report.integration_label},
             {"maturity_level", report.maturity_level},
             {"maturity_label", report.maturity_label},
             {"findings_total", report.findings.size()},
             {"errors", report.count(Severity::Error)},
             {"warnings", report.count(Severity::Warning)},
             {"info", report.count(Severity::Info)}}},
+      {"gates", gates},
+      {"round_trip", round_trip},
       {"dimensions", dimensions},
       {"findings", findings}};
 }

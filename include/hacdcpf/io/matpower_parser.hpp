@@ -41,4 +41,15 @@ HybridPowerSystem parse_matpower(const std::string& filepath);
 MatpowerImportResult parse_matpower(const std::string& filepath,
                                     const MatpowerImportOptions& options);
 
+/// Export the bounded AC subset of a system to MATPOWER .m text (§13-#6).
+///
+/// Emits baseMVA, bus, gen, branch, and gencost matrices.  Loads and shunts are
+/// folded into bus Pd/Qd and Gs/Bs.  DC buses/branches, converters, and
+/// transformers are out of scope and omitted with a header comment noting the
+/// structural loss; the AC subset round-trips via parse_matpower.
+std::string to_matpower(const HybridPowerSystem& sys);
+
+/// Export to a MATPOWER .m file.
+void save_matpower(const HybridPowerSystem& sys, const std::string& filepath);
+
 }  // namespace hacdcpf::io

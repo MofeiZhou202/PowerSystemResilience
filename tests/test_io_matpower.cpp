@@ -79,3 +79,34 @@ TEST_CASE("MATPOWER twin path refuses heuristic unit inference",
     CHECK(coerced);
   }
 }
+
+TEST_CASE("MATPOWER export round-trips through the parser (§13-#6)",
+          "[io][matpower][export]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.name = "p6 export case";
+
+  ACBus b1; b1.index = 1; b1.bus_type = BusType::SLACK; b1.base_kv = 110.0;
+  ACBus b2; b2.index = 2; b2.bus_type = BusType::PQ; b2.base_kv = 110.0;
+  sys.ac.buses = {b1, b2};
+  ACBranch l; l.index = 1; l.from_bus = 1; l.to_bus = 2;
+  l.r_pu = 0.01; l.x_pu = 0.10; l.rate_a_mva = 100.0;
+  sys.ac.branches = {l};
+  Generator g; g.bus = 1; g.pg_mw = 50.0; g.pmax_mw = 100.0; g.pmin_mw = 0.0;
+  g.mbase_mva = 100.0; g.is_slack = true;
+  sys.ac.generators = {g};
+  Load ld; ld.bus = 2; ld.p_mw = 30.0; ld.q_mvar = 10.0;
+  sys.ac.loads = {ld};
+
+  const auto out =
+      std::filesystem::temp_directory_path() / "hacdcpf_p6_export.m";
+  hacdcpf::io::save_matpower(sys, out.string());
+  const auto back = hacdcpf::io::parse_matpower(out.string());
+
+  CHECK(back.ac.buses.size() == 2);
+  CHECK(back.ac.branches.size() == 1);
+  CHECK(back.ac.generators.size() == 1);
+  CHECK(std::abs(back.base_mva - 100.0) < 1e-9);
+  CHECK(std::abs(back.ac.branches.front().x_pu - 0.10) < 1e-9);
+}
