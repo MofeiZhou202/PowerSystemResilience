@@ -560,9 +560,13 @@
       <span>对比旧 k-medoids</span>
     </label>
     <button id="btnGenerateScenarios" class="toolbar-btn run-btn" title="按聚类数自动生成候选并聚类">生成场景</button>
-    <button id="btnExportRegularScenarioJson" class="toolbar-btn" title="导出常规代表场景为可导入算例 JSON">导出常规<br>JSON</button>
-    <button id="btnExportReliabilityScenarioJson" class="toolbar-btn" title="导出可靠性代表场景为可导入算例 JSON">导出可靠<br>JSON</button>
-    <button id="btnExportResilienceScenarioJson" class="toolbar-btn" title="导出弹性代表场景为可导入算例 JSON">导出弹性<br>JSON</button>
+    <button id="btnExportRegularScenarioJson" class="toolbar-btn" title="导出常规代表场景为标幺值/倍率空间 JSON">导出常规<br>JSON</button>
+    <button id="btnExportReliabilityScenarioJson" class="toolbar-btn" title="导出可靠性代表场景为标幺值/倍率空间 JSON">导出可靠<br>JSON</button>
+    <button id="btnExportResilienceScenarioJson" class="toolbar-btn" title="导出弹性代表场景为标幺值/倍率空间 JSON">导出弹性<br>JSON</button>
+    <button id="btnScenarioJsonToExcel" class="toolbar-btn" title="选择已导出的常规/可靠/弹性 JSON，并转换为 Excel 工作簿">JSON转<br>Excel</button>
+    <input type="file" id="fileScenarioJsonToExcel" accept=".json" style="display:none"/>
+    <button id="btnScenarioExcelToJson" class="toolbar-btn" title="选择场景 Excel 工作簿，并转换回对应 JSON">Excel转<br>JSON</button>
+    <input type="file" id="fileScenarioExcelToJson" accept=".xlsx" style="display:none"/>
     <button id="btnExportScenarioResults" class="toolbar-btn" title="将完整场景生成结果导出为 JSON">完整结果<br>导出</button>
     <button id="btnExportScenarioPlots" class="toolbar-btn" title="导出当前场景生成图表 PNG">导出图表</button>
   </div>
@@ -606,8 +610,25 @@
     <label class="sub-label" title="DC 修复时长（小时），单值或逗号列表">DC修复时长
       <input id="resDcRepairDuration" type="text" value="8" placeholder="8,8"/>
     </label>
-    <label class="sub-label" title="移动储能行驶速度 (km/h)">移储速度
+    <label class="sub-label" title="是否考虑移动储能 MESS；关闭可显著加快弹性评估">考虑移储
+      <input id="resAllowMess" type="checkbox"/>
+    </label>
+    <label class="sub-label" title="移动储能行驶速度 (km/h)，仅在考虑移储时生效">移储速度
       <input id="resMobileSpeed" type="number" value="40" min="0" step="5"/>
+    </label>
+    <label class="sub-label" title="MIP 求解时间上限（秒）；默认 180 秒。Native 求解器严格使用该限制，Gurobi 受后端适配器支持情况影响。">时限(s)
+      <input id="resMipTimeLimit" type="number" value="180" min="10" step="10"/>
+    </label>
+    <label class="sub-label" title="MIP 相对 gap；默认 0.03。较大 gap 可加快求解。">Gap
+      <input id="resMipGap" type="number" value="0.03" min="0" max="1" step="0.01"/>
+    </label>
+    <input id="resModelSelect" type="hidden" value="RAStyleStageMILP"/>
+    <label class="sub-label" title="MIP模型使用的求解器；启发式序贯模型会忽略该选项">求解器
+      <select id="resSolverSelect">
+        <option value="Native">Native</option>
+        <option value="HiGHS">HiGHS</option>
+        <option value="Gurobi" selected>Gurobi</option>
+      </select>
     </label>
     <input id="resConsiderSwitches" type="checkbox" style="display:none"/>
     <button id="btnRunResilience" class="toolbar-btn run-btn" title="运行弹性评估">运行弹性评估</button>

@@ -228,6 +228,14 @@ struct DistributionResilienceOptions {
   bool allow_branch_operation_without_switch{false};
   bool use_remote_switch_only{false};
 
+  /// Legacy RAStyleStageMILP MESS toggle.  When true, the RA-stage workflow
+  /// solves a dedicated MESS time-space routing/SOC MILP against the RA
+  /// residual bus shed using the selected MIP solver.  If that subproblem
+  /// cannot solve, the stage-local MESS dispatch can be used as a fallback
+  /// when fallback_to_stage_mess_dispatch is true.
+  bool use_strict_mip_for_mess{true};
+  bool fallback_to_stage_mess_dispatch{true};
+
   /// Strict restoration MIP options used when model ==
   /// MultiPeriodMIPLinDistFlow.
   DistributionResilienceMIPOptions mip;
@@ -373,6 +381,9 @@ struct DistributionResilienceResult {
   int total_switch_actions{0};
   int total_repaired_faults{0};
   bool feasible{true};
+  /// How MESS dispatch was populated in the result: stage_dispatch,
+  /// strict_mip, stage_dispatch_fallback, disabled, or none.
+  std::string mess_dispatch_model{"none"};
 
   // Legacy fields kept for backward compatibility.
   bool completed{false};

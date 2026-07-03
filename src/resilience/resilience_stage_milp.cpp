@@ -128,8 +128,11 @@ struct StageMessState {
   double pmax_mw{0.0};
   double e_rated_mwh{0.0};
   double e_min_mwh{0.0};
+  double e_max_mwh{0.0};
   double energy_mwh{0.0};
   double eta_discharge{1.0};
+  double e_consumption_mwh_km{0.0};
+  double max_travel_distance_km{kInf};
   double dispatch_mw{0.0};
   double arrival_time_hr{0.0};
   double remaining_travel_hr{0.0};
@@ -710,7 +713,9 @@ struct ModelBuilder {
     for (const auto& [col, val] : terms) if (std::abs(val) > kEps) ineq_trips.emplace_back(row, col, val);
     b.push_back(rhs);
   }
-  void finalize() {
+  void finalize(const DistributionResilienceOptions& opts) {
+    model.time_limit_sec = static_cast<double>(opts.mip.max_time_s);
+    model.mip_gap = opts.mip.mip_gap;
     auto& lp = model.linear_part;
     lp.sense = engine::Sense::Minimize;
     lp.vars = vars;
@@ -881,7 +886,7 @@ StageSolution solve_stage_milp(const StageData& data,
     }
   }
 
-  mb.finalize();
+  mb.finalize(opts);
 
   solver::BCOptions bc_opts;
   bc_opts.time_limit_sec = static_cast<double>(opts.mip.max_time_s);
@@ -1022,10 +1027,13 @@ std::vector<StageMessState> collect_stage_mess(const HybridPowerSystem& sys,
     s.e_rated_mwh = std::max(0.0, st.e_rated_mwh);
     const double soc_lo = std::min(st.soc_min, st.soc_max);
     s.e_min_mwh = soc_lo * s.e_rated_mwh;
+    s.e_max_mwh = std::max(0.0, s.e_rated_mwh);
     const double soc0 = std::max(soc_lo, st.soc_init);
     const double e0 = st.e_mwh > 0.0 ? st.e_mwh : soc0 * s.e_rated_mwh;
-    s.energy_mwh = std::max(s.e_min_mwh, e0);
+    s.energy_mwh = std::clamp(std::max(s.e_min_mwh, e0), s.e_min_mwh, s.e_max_mwh > kEps ? s.e_max_mwh : std::max(s.e_min_mwh, e0));
     s.eta_discharge = st.eta_discharge > 0.0 ? st.eta_discharge : 1.0;
+    s.e_consumption_mwh_km = std::max(0.0, st.e_consumption_mwh_km);
+    s.max_travel_distance_km = st.max_travel_distance_km > 0.0 ? st.max_travel_distance_km : kInf;
     s.arrival_time_hr = st.arrival_time;
     out.push_back(s);
   }
@@ -1106,6 +1114,590 @@ void apply_stage_mess_dispatch(const StageData& data,
     ms.remaining_travel_hr = st.remaining_travel_hr;
     sr.mess_states.push_back(ms);
   }
+}
+
+struct StageMessArc {
+  int from_pos{0};
+  int to_pos{0};
+  int depart_t{0};
+  int arrive_t{0};
+  double distance_km{0.0};
+  double travel_mwh{0.0};
+  bool is_stay{false};
+};
+
+struct StageMessOnlyIndex {
+  int T{0};
+  int n_bus{0};
+  int n_mess{0};
+  std::vector<int> energy;
+  std::vector<int> loc;
+  std::vector<int> dispatch;
+  std::vector<int> residual;
+  std::vector<std::vector<int>> arc;
+  int e_at(int m, int t) const { return energy[static_cast<size_t>(m * (T + 1) + t)]; }
+  int x_at(int m, int b, int t) const { return loc[static_cast<size_t>((t * n_mess + m) * n_bus + b)]; }
+  int d_at(int m, int b, int t) const { return dispatch[static_cast<size_t>((t * n_mess + m) * n_bus + b)]; }
+  int r_at(int b, int t) const { return residual[static_cast<size_t>(t * n_bus + b)]; }
+};
+
+struct StageMessOnlySolution {
+  bool feasible{false};
+  std::string status;
+  StageSolveStats stats;
+  std::vector<std::vector<MESSStateStep>> mess_states_by_step;
+  std::vector<std::unordered_map<int, double>> served_mw_by_ac_bus;
+  double delivered_mwh{0.0};
+  double travel_distance_km{0.0};
+};
+
+using StageMessAdj = std::vector<std::vector<std::pair<int, double>>>;
+
+StageMessAdj build_stage_mess_transport_graph(const HybridPowerSystem& sys,
+                                              const DistributionResilienceOptions& opts,
+                                              const std::unordered_map<int, int>& ac_bus_pos) {
+  StageMessAdj graph(ac_bus_pos.size());
+  auto add_edge = [&](int from_bus, int to_bus, double dist_km) {
+    const auto it_f = ac_bus_pos.find(from_bus);
+    const auto it_t = ac_bus_pos.find(to_bus);
+    if (it_f == ac_bus_pos.end() || it_t == ac_bus_pos.end()) return;
+    const double w = dist_km > kEps ? dist_km : 1.0;
+    graph[static_cast<size_t>(it_f->second)].push_back({it_t->second, w});
+    graph[static_cast<size_t>(it_t->second)].push_back({it_f->second, w});
+  };
+  if (!opts.transport_edges.empty()) {
+    for (const auto& e : opts.transport_edges) {
+      if (e.available) add_edge(e.from_bus, e.to_bus, e.distance_km);
+    }
+    return graph;
+  }
+  if (opts.use_electrical_graph_as_transport_proxy) {
+    for (const auto& br : sys.ac.branches) {
+      if (!br.in_service) continue;
+      add_edge(br.from_bus, br.to_bus, br.length_km);
+    }
+  }
+  return graph;
+}
+
+std::vector<double> stage_mess_shortest_distances(const StageMessAdj& graph, int start) {
+  std::vector<double> dist(graph.size(), kInf);
+  if (start < 0 || start >= static_cast<int>(graph.size())) return dist;
+  using Node = std::pair<double, int>;
+  std::priority_queue<Node, std::vector<Node>, std::greater<Node>> pq;
+  dist[static_cast<size_t>(start)] = 0.0;
+  pq.push({0.0, start});
+  while (!pq.empty()) {
+    const auto [d, u] = pq.top();
+    pq.pop();
+    if (d > dist[static_cast<size_t>(u)] + kEps) continue;
+    for (const auto& [v, w] : graph[static_cast<size_t>(u)]) {
+      const double nd = d + w;
+      if (nd + kEps < dist[static_cast<size_t>(v)]) {
+        dist[static_cast<size_t>(v)] = nd;
+        pq.push({nd, v});
+      }
+    }
+  }
+  return dist;
+}
+
+std::string stage_mess_solver_name(DistributionResilienceMIPSolver solver, int num_threads) {
+  return stage_solver_name(solver, num_threads);
+}
+
+engine::SolveResult solve_stage_mess_model(const engine::MIPModel& model,
+                                           const DistributionResilienceOptions& opts) {
+  solver::BCOptions bc_opts;
+  bc_opts.time_limit_sec = static_cast<double>(opts.mip.max_time_s);
+  bc_opts.max_nodes = opts.mip.max_nodes;
+  bc_opts.gap_tol = opts.mip.mip_gap;
+  if (opts.mip.num_threads > 0) {
+    bc_opts.num_threads = opts.mip.num_threads;
+  } else {
+    const int hw = static_cast<int>(std::thread::hardware_concurrency());
+    if (hw >= 4) bc_opts.num_threads = std::min(hw, 8);
+  }
+  bc_opts.branching = solver::BranchingStrategy::Pseudocost;
+  bc_opts.node_sel = to_bc_node_selection(opts.mip.native_node_selection);
+  bc_opts.use_feasibility_pump = true;
+  bc_opts.verbose = opts.mip.verbose;
+
+  switch (opts.mip.solver) {
+    case DistributionResilienceMIPSolver::Native: {
+      engine::NativeBranchAndCutAdapter adapter(bc_opts);
+      return adapter.solve_milp(model);
+    }
+    case DistributionResilienceMIPSolver::HiGHS: {
+      engine::HighsAdapter adapter;
+      return adapter.solve_milp(model);
+    }
+    case DistributionResilienceMIPSolver::Gurobi: {
+      engine::GurobiAdapter adapter;
+      return adapter.solve_milp(model);
+    }
+  }
+  return {};
+}
+
+StageMessOnlySolution make_stationary_mess_solution(const std::vector<StageMessState>& mess,
+                                                    int steps,
+                                                    double dt_hr,
+                                                    const std::string& status) {
+  StageMessOnlySolution sol;
+  sol.feasible = true;
+  sol.status = status;
+  sol.mess_states_by_step.assign(static_cast<size_t>(steps), {});
+  sol.served_mw_by_ac_bus.assign(static_cast<size_t>(steps), {});
+  for (int t = 0; t < steps; ++t) {
+    auto& states = sol.mess_states_by_step[static_cast<size_t>(t)];
+    states.reserve(mess.size());
+    for (const auto& st : mess) {
+      MESSStateStep ms;
+      ms.storage_index = st.storage_index;
+      ms.bus = st.ac_bus_id;
+      ms.target_bus = st.ac_bus_id;
+      ms.status = "Stationary";
+      ms.dispatch_mw = 0.0;
+      ms.energy_mwh = st.energy_mwh;
+      ms.soc = st.e_rated_mwh > kEps ? st.energy_mwh / st.e_rated_mwh : 0.0;
+      ms.arrival_time_hr = static_cast<double>(t) * dt_hr;
+      ms.remaining_travel_hr = 0.0;
+      states.push_back(ms);
+    }
+  }
+  return sol;
+}
+
+StageMessOnlySolution solve_ra_residual_mess_milp(
+    const HybridPowerSystem& sys,
+    const DistributionResilienceOptions& opts,
+    const std::vector<DistributionResilienceStepResult>& base_steps,
+    const std::vector<StageMessState>& mess) {
+  const int T = static_cast<int>(base_steps.size());
+  const double dt = opts.time_step_hr;
+  if (T <= 0 || mess.empty() || dt <= kEps) {
+    return make_stationary_mess_solution(mess, std::max(0, T), dt, "No MESS-only MILP input");
+  }
+
+  std::vector<int> ac_bus_ids;
+  ac_bus_ids.reserve(sys.ac.buses.size());
+  std::unordered_map<int, int> ac_bus_pos;
+  for (const auto& b : sys.ac.buses) {
+    if (!b.in_service) continue;
+    if (ac_bus_pos.count(b.index)) continue;
+    ac_bus_pos[b.index] = static_cast<int>(ac_bus_ids.size());
+    ac_bus_ids.push_back(b.index);
+  }
+  const int nb = static_cast<int>(ac_bus_ids.size());
+  const int nm = static_cast<int>(mess.size());
+  if (nb == 0) return make_stationary_mess_solution(mess, T, dt, "No AC buses for MESS-only MILP");
+
+  std::vector<std::vector<double>> residual(static_cast<size_t>(T), std::vector<double>(static_cast<size_t>(nb), 0.0));
+  std::vector<std::vector<double>> weight(static_cast<size_t>(T), std::vector<double>(static_cast<size_t>(nb), 1.0));
+  double total_residual_mwh = 0.0;
+  for (int t = 0; t < T; ++t) {
+    const auto& step = base_steps[static_cast<size_t>(t)];
+    for (size_t i = 0; i < step.bus_supply_kind.size() && i < step.bus_supply_index.size(); ++i) {
+      if (step.bus_supply_kind[i] != "AC") continue;
+      const auto it = ac_bus_pos.find(step.bus_supply_index[i]);
+      if (it == ac_bus_pos.end()) continue;
+      const int b = it->second;
+      const double shed = i < step.bus_supply_shed_mw.size() ? std::max(0.0, step.bus_supply_shed_mw[i]) : 0.0;
+      const double importance = i < step.bus_supply_importance.size() ? std::max(1.0, step.bus_supply_importance[i]) : 1.0;
+      residual[static_cast<size_t>(t)][static_cast<size_t>(b)] += shed;
+      weight[static_cast<size_t>(t)][static_cast<size_t>(b)] = std::max(weight[static_cast<size_t>(t)][static_cast<size_t>(b)], importance);
+      total_residual_mwh += shed * dt;
+    }
+  }
+  if (total_residual_mwh <= kEps) {
+    return make_stationary_mess_solution(mess, T, dt, "No RA residual shed for MESS-only MILP");
+  }
+
+  const auto graph = build_stage_mess_transport_graph(sys, opts, ac_bus_pos);
+  std::vector<std::vector<double>> dist(static_cast<size_t>(nb), std::vector<double>(static_cast<size_t>(nb), kInf));
+  for (int b = 0; b < nb; ++b) dist[static_cast<size_t>(b)] = stage_mess_shortest_distances(graph, b);
+
+  std::vector<std::vector<StageMessArc>> arcs(static_cast<size_t>(nm));
+  const double max_step_dist = std::max(opts.mess_travel_speed_kmph, 1.0) * dt;
+  for (int m = 0; m < nm; ++m) {
+    auto& ma = arcs[static_cast<size_t>(m)];
+    for (int t = 0; t < T - 1; ++t) {
+      for (int i = 0; i < nb; ++i) {
+        ma.push_back({i, i, t, t + 1, 0.0, 0.0, true});
+        for (int j = 0; j < nb; ++j) {
+          if (i == j) continue;
+          const double d = dist[static_cast<size_t>(i)][static_cast<size_t>(j)];
+          if (!std::isfinite(d) || d <= kEps || d > max_step_dist + kEps) continue;
+          if (d > mess[static_cast<size_t>(m)].max_travel_distance_km + kEps) continue;
+          ma.push_back({i, j, t, t + 1, d, d * mess[static_cast<size_t>(m)].e_consumption_mwh_km, false});
+        }
+      }
+    }
+  }
+
+  ModelBuilder mb;
+  StageMessOnlyIndex idx;
+  idx.T = T;
+  idx.n_bus = nb;
+  idx.n_mess = nm;
+  idx.arc.resize(static_cast<size_t>(nm));
+
+  auto add_var = [&](engine::VarType type, double lb, double ub, const std::string& name, double obj) {
+    return mb.add_var(type, lb, ub, name, obj);
+  };
+
+  for (int m = 0; m < nm; ++m) {
+    const auto& st = mess[static_cast<size_t>(m)];
+    for (int t = 0; t <= T; ++t) {
+      idx.energy.push_back(add_var(engine::VarType::Continuous, st.e_min_mwh, std::max(st.e_min_mwh, st.e_max_mwh),
+                                   "mre_" + std::to_string(m) + "_" + std::to_string(t), 0.0));
+    }
+  }
+  constexpr double kResidualPenaltyScale = 1000.0;
+  constexpr double kDispatchTieCost = 1.0e-4;
+  constexpr double kMoveTieCost = 1.0e-4;
+  for (int t = 0; t < T; ++t) {
+    for (int m = 0; m < nm; ++m) {
+      for (int b = 0; b < nb; ++b) {
+        idx.loc.push_back(add_var(engine::VarType::Binary, 0.0, 1.0,
+                                  "mrx_" + std::to_string(m) + "_" + std::to_string(b) + "_" + std::to_string(t), 0.0));
+        idx.dispatch.push_back(add_var(engine::VarType::Continuous, 0.0, mess[static_cast<size_t>(m)].pmax_mw,
+                                       "mrd_" + std::to_string(m) + "_" + std::to_string(b) + "_" + std::to_string(t),
+                                       kDispatchTieCost * dt));
+      }
+    }
+    for (int b = 0; b < nb; ++b) {
+      idx.residual.push_back(add_var(engine::VarType::Continuous, 0.0, residual[static_cast<size_t>(t)][static_cast<size_t>(b)],
+                                     "mrr_" + std::to_string(b) + "_" + std::to_string(t),
+                                     kResidualPenaltyScale * weight[static_cast<size_t>(t)][static_cast<size_t>(b)] * dt));
+    }
+  }
+  for (int m = 0; m < nm; ++m) {
+    auto& ids = idx.arc[static_cast<size_t>(m)];
+    ids.reserve(arcs[static_cast<size_t>(m)].size());
+    for (size_t a = 0; a < arcs[static_cast<size_t>(m)].size(); ++a) {
+      const auto& arc = arcs[static_cast<size_t>(m)][a];
+      const double obj = arc.is_stay ? 0.0 : opts.mip.mess_travel_cost_per_km * arc.distance_km + kMoveTieCost;
+      ids.push_back(add_var(engine::VarType::Binary, 0.0, 1.0,
+                            "mra_" + std::to_string(m) + "_" + std::to_string(a), obj));
+    }
+  }
+
+  for (int m = 0; m < nm; ++m) {
+    const auto& st = mess[static_cast<size_t>(m)];
+    mb.add_eq({{idx.e_at(m, 0), 1.0}}, st.energy_mwh);
+    const auto init_it = ac_bus_pos.find(st.ac_bus_id);
+    for (int b = 0; b < nb; ++b) {
+      mb.add_eq({{idx.x_at(m, b, 0), 1.0}}, init_it != ac_bus_pos.end() && b == init_it->second ? 1.0 : 0.0);
+    }
+    for (int t = 0; t < T; ++t) {
+      std::vector<std::pair<int, double>> one_loc;
+      for (int b = 0; b < nb; ++b) one_loc.push_back({idx.x_at(m, b, t), 1.0});
+      mb.add_eq(one_loc, 1.0);
+      for (int b = 0; b < nb; ++b) {
+        if (t < T - 1) {
+          std::vector<std::pair<int, double>> stay_terms{{idx.d_at(m, b, t), 1.0}};
+          for (size_t a = 0; a < arcs[static_cast<size_t>(m)].size(); ++a) {
+            const auto& arc = arcs[static_cast<size_t>(m)][a];
+            if (arc.depart_t == t && arc.from_pos == b && arc.is_stay) {
+              stay_terms.push_back({idx.arc[static_cast<size_t>(m)][a], -st.pmax_mw});
+            }
+          }
+          mb.add_le(stay_terms, 0.0);
+        } else {
+          mb.add_le({{idx.d_at(m, b, t), 1.0}, {idx.x_at(m, b, t), -st.pmax_mw}}, 0.0);
+        }
+      }
+      std::vector<std::pair<int, double>> energy_terms{{idx.e_at(m, t + 1), 1.0}, {idx.e_at(m, t), -1.0}};
+      for (int b = 0; b < nb; ++b) energy_terms.push_back({idx.d_at(m, b, t), dt / std::max(st.eta_discharge, 1.0e-6)});
+      if (t < T - 1) {
+        for (size_t a = 0; a < arcs[static_cast<size_t>(m)].size(); ++a) {
+          const auto& arc = arcs[static_cast<size_t>(m)][a];
+          if (arc.depart_t == t) energy_terms.push_back({idx.arc[static_cast<size_t>(m)][a], arc.travel_mwh});
+        }
+      }
+      mb.add_eq(energy_terms, 0.0);
+    }
+    std::vector<std::pair<int, double>> travel_terms;
+    for (size_t a = 0; a < arcs[static_cast<size_t>(m)].size(); ++a) {
+      travel_terms.push_back({idx.arc[static_cast<size_t>(m)][a], arcs[static_cast<size_t>(m)][a].distance_km});
+    }
+    if (!travel_terms.empty() && std::isfinite(st.max_travel_distance_km)) mb.add_le(travel_terms, st.max_travel_distance_km);
+
+    for (int t = 0; t < T - 1; ++t) {
+      for (int b = 0; b < nb; ++b) {
+        std::vector<std::pair<int, double>> depart{{idx.x_at(m, b, t), -1.0}};
+        std::vector<std::pair<int, double>> arrive{{idx.x_at(m, b, t + 1), -1.0}};
+        for (size_t a = 0; a < arcs[static_cast<size_t>(m)].size(); ++a) {
+          const auto& arc = arcs[static_cast<size_t>(m)][a];
+          if (arc.depart_t == t && arc.from_pos == b) depart.push_back({idx.arc[static_cast<size_t>(m)][a], 1.0});
+          if (arc.arrive_t == t + 1 && arc.to_pos == b) arrive.push_back({idx.arc[static_cast<size_t>(m)][a], 1.0});
+        }
+        mb.add_eq(depart, 0.0);
+        mb.add_eq(arrive, 0.0);
+      }
+    }
+  }
+  for (int t = 0; t < T; ++t) {
+    for (int b = 0; b < nb; ++b) {
+      std::vector<std::pair<int, double>> terms{{idx.r_at(b, t), 1.0}};
+      for (int m = 0; m < nm; ++m) terms.push_back({idx.d_at(m, b, t), 1.0});
+      mb.add_eq(terms, residual[static_cast<size_t>(t)][static_cast<size_t>(b)]);
+    }
+  }
+  mb.finalize(opts);
+
+  auto solve_result = solve_stage_mess_model(mb.model, opts);
+  StageMessOnlySolution sol;
+  sol.stats.num_variables = static_cast<int>(mb.model.linear_part.vars.size());
+  sol.stats.num_binary_variables = static_cast<int>(mb.model.binary_idx.size());
+  sol.stats.num_integer_variables = static_cast<int>(mb.model.integer_idx.size());
+  sol.stats.num_eq_constraints = static_cast<int>(mb.model.linear_part.Aeq.rows());
+  sol.stats.num_ineq_constraints = static_cast<int>(mb.model.linear_part.A.rows());
+  sol.stats.objective_value = solve_result.stats.objective;
+  sol.stats.mip_gap = solve_result.stats.mip_gap;
+  sol.stats.runtime_sec = solve_result.stats.runtime_sec;
+  sol.stats.solver_status = solve_result.stats.status;
+  sol.feasible = solve_result.stats.success && solve_result.x.size() == mb.model.linear_part.c.size();
+  sol.status = solve_result.stats.status;
+  if (!sol.feasible) return sol;
+
+  const auto& x = solve_result.x;
+  sol.mess_states_by_step.assign(static_cast<size_t>(T), {});
+  sol.served_mw_by_ac_bus.assign(static_cast<size_t>(T), {});
+  for (int t = 0; t < T; ++t) {
+    auto& states = sol.mess_states_by_step[static_cast<size_t>(t)];
+    states.reserve(static_cast<size_t>(nm));
+    for (int m = 0; m < nm; ++m) {
+      const auto& st = mess[static_cast<size_t>(m)];
+      int bus_pos = ac_bus_pos.count(st.ac_bus_id) ? ac_bus_pos.at(st.ac_bus_id) : 0;
+      double best = -1.0;
+      for (int b = 0; b < nb; ++b) {
+        const double xv = x[idx.x_at(m, b, t)];
+        if (xv > best) {
+          best = xv;
+          bus_pos = b;
+        }
+      }
+      double dispatch = 0.0;
+      for (int b = 0; b < nb; ++b) {
+        const double dval = std::max(0.0, x[idx.d_at(m, b, t)]);
+        if (dval <= 1.0e-7) continue;
+        dispatch += dval;
+        sol.served_mw_by_ac_bus[static_cast<size_t>(t)][ac_bus_ids[static_cast<size_t>(b)]] += dval;
+      }
+      const StageMessArc* moving = nullptr;
+      if (t < T - 1) {
+        for (size_t a = 0; a < arcs[static_cast<size_t>(m)].size(); ++a) {
+          if (x[idx.arc[static_cast<size_t>(m)][a]] <= 0.5) continue;
+          const auto& arc = arcs[static_cast<size_t>(m)][a];
+          if (arc.depart_t != t || arc.is_stay) continue;
+          moving = &arc;
+          sol.travel_distance_km += arc.distance_km;
+          break;
+        }
+      }
+      MESSStateStep ms;
+      ms.storage_index = st.storage_index;
+      ms.bus = ac_bus_ids[static_cast<size_t>(bus_pos)];
+      ms.target_bus = ms.bus;
+      ms.dispatch_mw = dispatch;
+      ms.energy_mwh = std::max(0.0, x[idx.e_at(m, t + 1)]);
+      ms.soc = st.e_rated_mwh > kEps ? std::clamp(ms.energy_mwh / st.e_rated_mwh, 0.0, 1.0) : 0.0;
+      ms.arrival_time_hr = static_cast<double>(t) * dt;
+      ms.remaining_travel_hr = 0.0;
+      ms.status = dispatch > kEps ? "Deployed" : "Stationary";
+      if (moving != nullptr) {
+        ms.bus = ac_bus_ids[static_cast<size_t>(moving->from_pos)];
+        ms.target_bus = ac_bus_ids[static_cast<size_t>(moving->to_pos)];
+        ms.status = "InTransit";
+        ms.remaining_travel_hr = dt;
+        ms.arrival_time_hr = static_cast<double>(t + 1) * dt;
+      }
+      states.push_back(ms);
+      sol.delivered_mwh += dispatch * dt;
+    }
+  }
+  return sol;
+}
+
+void recompute_step_supply_totals(DistributionResilienceStepResult& sr) {
+  sr.total_demand_mw = 0.0;
+  sr.served_mw = 0.0;
+  sr.shed_mw = 0.0;
+  sr.weighted_shed_mw = 0.0;
+  sr.shed_by_priority.assign(4, 0.0);
+  for (size_t i = 0; i < sr.bus_supply_demand_mw.size(); ++i) {
+    const double demand = std::max(0.0, sr.bus_supply_demand_mw[i]);
+    const double served = i < sr.bus_supply_served_mw.size() ? std::max(0.0, sr.bus_supply_served_mw[i]) : 0.0;
+    const double shed = i < sr.bus_supply_shed_mw.size() ? std::max(0.0, sr.bus_supply_shed_mw[i]) : std::max(0.0, demand - served);
+    const double importance = i < sr.bus_supply_importance.size() ? std::max(1.0, sr.bus_supply_importance[i]) : 1.0;
+    const int tier = i < sr.bus_supply_priority_tier.size() ? std::clamp(sr.bus_supply_priority_tier[i], 0, 3) : 3;
+    sr.total_demand_mw += demand;
+    sr.served_mw += served;
+    sr.shed_mw += shed;
+    sr.weighted_shed_mw += shed * importance;
+    sr.shed_by_priority[static_cast<size_t>(tier)] += shed;
+  }
+  sr.restoration_ratio = sr.total_demand_mw > kEps ? sr.served_mw / sr.total_demand_mw : 1.0;
+}
+
+void apply_mess_only_solution_to_steps(const StageMessOnlySolution& mess_sol,
+                                       std::vector<DistributionResilienceStepResult>& steps) {
+  for (size_t t = 0; t < steps.size(); ++t) {
+    auto& sr = steps[t];
+    if (t < mess_sol.served_mw_by_ac_bus.size()) {
+      for (const auto& [bus_id, served_total] : mess_sol.served_mw_by_ac_bus[t]) {
+        double remaining = served_total;
+        for (size_t i = 0; i < sr.bus_supply_kind.size() && i < sr.bus_supply_index.size(); ++i) {
+          if (remaining <= kEps) break;
+          if (sr.bus_supply_kind[i] != "AC" || sr.bus_supply_index[i] != bus_id) continue;
+          if (i >= sr.bus_supply_shed_mw.size() || i >= sr.bus_supply_served_mw.size()) continue;
+          const double serve = std::min(remaining, std::max(0.0, sr.bus_supply_shed_mw[i]));
+          sr.bus_supply_shed_mw[i] -= serve;
+          sr.bus_supply_served_mw[i] += serve;
+          remaining -= serve;
+        }
+      }
+    }
+    if (t < mess_sol.mess_states_by_step.size()) sr.mess_states = mess_sol.mess_states_by_step[t];
+    recompute_step_supply_totals(sr);
+  }
+}
+
+void apply_stage_mess_dispatch_to_steps(const std::vector<StageData>& step_data,
+                                        const std::vector<StageSolution>& step_solutions,
+                                        const DistributionResilienceOptions& opts,
+                                        std::vector<StageMessState> mess,
+                                        std::vector<DistributionResilienceStepResult>& steps) {
+  for (size_t t = 0; t < steps.size() && t < step_data.size() && t < step_solutions.size(); ++t) {
+    double delivered = 0.0;
+    apply_stage_mess_dispatch(step_data[t], step_solutions[t], opts.time_step_hr,
+                              opts.allow_mess_dispatch, mess, steps[t], delivered);
+  }
+}
+
+void accumulate_resilience_totals(DistributionResilienceResult& result,
+                                  const DistributionResilienceOptions& opts) {
+  result.total_switch_actions = 0;
+  result.total_demand_mwh = 0.0;
+  result.total_served_mwh = 0.0;
+  result.total_shed_mwh = 0.0;
+  result.weighted_unserved_mwh = 0.0;
+  result.total_repaired_faults = 0;
+  result.peak_shed_mw = 0.0;
+  result.mess_energy_delivered_mwh = 0.0;
+  for (const auto& sr : result.steps) {
+    result.total_switch_actions += sr.switch_actions;
+    result.total_demand_mwh += sr.total_demand_mw * opts.time_step_hr;
+    result.total_served_mwh += sr.served_mw * opts.time_step_hr;
+    result.total_shed_mwh += sr.shed_mw * opts.time_step_hr;
+    result.weighted_unserved_mwh += sr.weighted_shed_mw * opts.time_step_hr;
+    result.total_repaired_faults = std::max(result.total_repaired_faults, sr.repaired_faults);
+    result.peak_shed_mw = std::max(result.peak_shed_mw, sr.shed_mw);
+    for (const auto& ms : sr.mess_states) result.mess_energy_delivered_mwh += std::max(0.0, ms.dispatch_mw) * opts.time_step_hr;
+  }
+}
+
+void apply_strict_mip_mess_dispatch(const DistributionResilienceStepResult& strict_step,
+                                    double dt_hr,
+                                    std::unordered_map<int, double>& projected_energy_mwh,
+                                    std::unordered_map<int, double>& projected_energy_capacity_mwh,
+                                    std::unordered_map<int, double>& last_strict_energy_mwh,
+                                    std::unordered_map<int, double>& last_strict_dispatch_mw,
+                                    std::unordered_map<int, double>& last_applied_dispatch_mw,
+                                    std::unordered_map<int, bool>& last_strict_travel_evidence,
+                                    std::unordered_map<int, int>& projected_bus,
+                                    DistributionResilienceStepResult& sr,
+                                    double& delivered_mwh) {
+  delivered_mwh = 0.0;
+  sr.mess_states.clear();
+  if (strict_step.mess_states.empty()) return;
+
+  for (const auto& strict_ms : strict_step.mess_states) {
+    MESSStateStep ms = strict_ms;
+    const int storage_index = ms.storage_index;
+    const bool strict_travel_evidence = strict_ms.status == "InTransit" ||
+                                        strict_ms.target_bus != strict_ms.bus ||
+                                        strict_ms.remaining_travel_hr > kEps;
+    if (projected_energy_mwh.find(storage_index) == projected_energy_mwh.end()) {
+      projected_energy_mwh[storage_index] = strict_ms.energy_mwh;
+      projected_bus[storage_index] = strict_ms.bus;
+      if (strict_ms.soc > kEps) {
+        projected_energy_capacity_mwh[storage_index] = strict_ms.energy_mwh / strict_ms.soc;
+      }
+    } else {
+      const double strict_delta = last_strict_energy_mwh[storage_index] - strict_ms.energy_mwh;
+      const double strict_dispatch_delta = std::max(0.0, last_strict_dispatch_mw[storage_index]) * dt_hr;
+      const double applied_dispatch_delta = std::max(0.0, last_applied_dispatch_mw[storage_index]) * dt_hr;
+      const double travel_delta = last_strict_travel_evidence[storage_index]
+          ? std::max(0.0, strict_delta - strict_dispatch_delta)
+          : 0.0;
+      projected_energy_mwh[storage_index] = std::max(
+          0.0,
+          projected_energy_mwh[storage_index] - travel_delta - applied_dispatch_delta);
+    }
+    double usable_dispatch_mw = std::max(0.0, strict_ms.dispatch_mw);
+    double applied_dispatch_mw = 0.0;
+    if (dt_hr > kEps && usable_dispatch_mw > kEps && sr.shed_mw > kEps) {
+      for (size_t i = 0; i < sr.bus_supply_kind.size() && i < sr.bus_supply_index.size(); ++i) {
+        if (sr.bus_supply_kind[i] != "AC") continue;
+        if (sr.bus_supply_index[i] != strict_ms.bus) continue;
+        if (i >= sr.bus_supply_shed_mw.size() || i >= sr.bus_supply_served_mw.size()) continue;
+        const double serve = std::min(usable_dispatch_mw, std::max(0.0, sr.bus_supply_shed_mw[i]));
+        if (serve <= kEps) break;
+        sr.bus_supply_shed_mw[i] -= serve;
+        sr.bus_supply_served_mw[i] += serve;
+        sr.shed_mw = std::max(0.0, sr.shed_mw - serve);
+        sr.served_mw += serve;
+        const double importance = i < sr.bus_supply_importance.size()
+            ? std::max(1.0, sr.bus_supply_importance[i])
+            : 1.0;
+        sr.weighted_shed_mw = std::max(0.0, sr.weighted_shed_mw - serve * importance);
+        const int tier = i < sr.bus_supply_priority_tier.size()
+            ? std::clamp(sr.bus_supply_priority_tier[i], 0, 3)
+            : 3;
+        if (static_cast<size_t>(tier) < sr.shed_by_priority.size()) {
+          sr.shed_by_priority[static_cast<size_t>(tier)] =
+              std::max(0.0, sr.shed_by_priority[static_cast<size_t>(tier)] - serve);
+        }
+        usable_dispatch_mw -= serve;
+        applied_dispatch_mw += serve;
+        if (usable_dispatch_mw <= kEps) break;
+      }
+    }
+    ms.dispatch_mw = applied_dispatch_mw;
+    if (strict_travel_evidence) {
+      ms.bus = strict_ms.bus;
+      ms.target_bus = strict_ms.target_bus;
+      ms.status = strict_ms.status;
+      ms.remaining_travel_hr = strict_ms.remaining_travel_hr;
+      ms.arrival_time_hr = strict_ms.arrival_time_hr;
+    } else {
+      if (last_strict_travel_evidence[storage_index]) {
+        projected_bus[storage_index] = strict_ms.bus;
+      }
+      ms.bus = projected_bus[storage_index];
+      ms.target_bus = ms.bus;
+      ms.remaining_travel_hr = 0.0;
+      ms.arrival_time_hr = strict_ms.arrival_time_hr;
+      ms.status = applied_dispatch_mw > kEps ? "Deployed" : "Stationary";
+    }
+    if (strict_travel_evidence && strict_ms.status != "InTransit") {
+      projected_bus[storage_index] = strict_ms.bus;
+    }
+    ms.energy_mwh = projected_energy_mwh[storage_index];
+    const double cap = projected_energy_capacity_mwh[storage_index];
+    ms.soc = cap > kEps ? std::clamp(ms.energy_mwh / cap, 0.0, 1.0) : 0.0;
+    delivered_mwh += applied_dispatch_mw * dt_hr;
+    last_strict_energy_mwh[storage_index] = strict_ms.energy_mwh;
+    last_strict_dispatch_mw[storage_index] = strict_ms.dispatch_mw;
+    last_applied_dispatch_mw[storage_index] = applied_dispatch_mw;
+    last_strict_travel_evidence[storage_index] = strict_travel_evidence;
+    sr.mess_states.push_back(ms);
+  }
+  sr.restoration_ratio = sr.total_demand_mw > kEps ? sr.served_mw / sr.total_demand_mw : 1.0;
 }
 
 void fill_step_from_solution(DistributionResilienceStepResult& sr,
@@ -1217,6 +1809,13 @@ DistributionResilienceResult run_distribution_resilience_stage_milp_assessment(
   result.model_stats.model_built = true;
   result.model_stats.model_solved = true;
   result.model_stats.solver_name = stage_solver_name(opts.mip.solver, opts.mip.num_threads);
+  result.model_stats.model_scope = "ra-stage-topology-ac-dc-vsc";
+  result.model_stats.validity.dc_network_modelled = true;
+  result.model_stats.validity.vsc_dispatch_modelled = false;
+  result.model_stats.validity.ac_branch_flow_limits_enforced = false;
+  result.model_stats.validity.lindistflow_voltage_envelope_enforced = false;
+  result.model_stats.validity.radial_topology_enforced = true;
+  result.model_stats.validity.mip_gap_within_tolerance = true;
   result.model_stats.formulation_notes =
       "RA-Validation-style two-stage topology MILP: stage 1 fault isolation and stage 2 post-fault reconfiguration; AC/DC branches and VSC edges are included, DC branches are fixed unless faulted or protected by DC breakers.";
 
@@ -1228,6 +1827,10 @@ DistributionResilienceResult run_distribution_resilience_stage_milp_assessment(
   bool have_stage2 = false;
   bool used_virtual_branch_switches = false;
   std::set<int> repaired_fault_edges;
+  std::vector<StageData> step_data;
+  std::vector<StageSolution> step_solutions;
+  step_data.reserve(static_cast<size_t>(steps));
+  step_solutions.reserve(static_cast<size_t>(steps));
   std::vector<StageMessState> mess = collect_stage_mess(sys, build_stage_data(sys, opts, 0.0));
 
   for (int step = 0; step < steps; ++step) {
@@ -1276,10 +1879,6 @@ DistributionResilienceResult run_distribution_resilience_stage_milp_assessment(
       last_stage2 = sol;
       have_stage2 = sol.feasible;
     } else {
-      // Post-disaster repair: each hour greedily repair one still-damaged line.
-      // For every candidate line, assume it is repaired, run the reconfiguration-capable
-      // stage MIP with remaining damaged lines forced open, and choose the candidate with
-      // the smallest shed (equivalently highest supplied-load ratio).
       std::vector<int> repair_base_beta;
       const std::vector<int>* repair_prev_beta = nullptr;
       if (have_prev) {
@@ -1374,10 +1973,6 @@ DistributionResilienceResult run_distribution_resilience_stage_milp_assessment(
       result.model_stats.solver_status = sol.stats.solver_status;
     }
     fill_step_from_solution(sr, data, sol, have_prev ? &prev_sol : nullptr, faults, effective_stage, hour, opts.time_step_hr);
-    double step_mess_energy = 0.0;
-    apply_stage_mess_dispatch(data, sol, opts.time_step_hr, opts.allow_mess_dispatch,
-                              mess, sr, step_mess_energy);
-    result.mess_energy_delivered_mwh += step_mess_energy;
     if (stage == DistributionDisasterStage::PostDisasterRepair) {
       sr.active_faults = static_cast<int>(forced.size());
       sr.repaired_faults = static_cast<int>(repaired_fault_edges.size());
@@ -1389,15 +1984,58 @@ DistributionResilienceResult run_distribution_resilience_stage_milp_assessment(
     prev_sol = sol;
     have_prev = true;
 
-    result.total_switch_actions += sr.switch_actions;
-    result.total_demand_mwh += sr.total_demand_mw * opts.time_step_hr;
-    result.total_served_mwh += sr.served_mw * opts.time_step_hr;
-    result.total_shed_mwh += sr.shed_mw * opts.time_step_hr;
-    result.weighted_unserved_mwh += sr.weighted_shed_mw * opts.time_step_hr;
-    result.total_repaired_faults = std::max(result.total_repaired_faults, sr.repaired_faults);
-    result.peak_shed_mw = std::max(result.peak_shed_mw, sr.shed_mw);
+    step_data.push_back(std::move(data));
+    step_solutions.push_back(std::move(sol));
     result.steps.push_back(std::move(sr));
   }
+
+  if (result.feasible) {
+    if (!opts.allow_mess_dispatch) {
+      result.mess_dispatch_model = "disabled";
+    } else if (mess.empty()) {
+      result.mess_dispatch_model = "none";
+    } else if (opts.use_strict_mip_for_mess) {
+      const auto mess_sol = solve_ra_residual_mess_milp(sys, opts, result.steps, mess);
+      if (mess_sol.stats.num_variables > 0) {
+        result.model_stats.num_variables = std::max(result.model_stats.num_variables, mess_sol.stats.num_variables);
+        result.model_stats.num_binary_variables = std::max(result.model_stats.num_binary_variables, mess_sol.stats.num_binary_variables);
+        result.model_stats.num_integer_variables = std::max(result.model_stats.num_integer_variables, mess_sol.stats.num_integer_variables);
+        result.model_stats.num_eq_constraints = std::max(result.model_stats.num_eq_constraints, mess_sol.stats.num_eq_constraints);
+        result.model_stats.num_ineq_constraints = std::max(result.model_stats.num_ineq_constraints, mess_sol.stats.num_ineq_constraints);
+        result.model_stats.objective_value += mess_sol.stats.objective_value;
+        result.model_stats.mip_gap = std::max(result.model_stats.mip_gap, mess_sol.stats.mip_gap);
+        result.model_stats.runtime_sec += mess_sol.stats.runtime_sec;
+        result.model_stats.solver_status = mess_sol.stats.solver_status;
+        result.model_stats.validity.mip_gap_within_tolerance =
+            result.model_stats.validity.mip_gap_within_tolerance &&
+            mess_sol.stats.mip_gap <= opts.mip.mip_gap + 1.0e-9;
+      }
+      if (mess_sol.feasible) {
+        result.mess_dispatch_model = "ra_residual_mess_milp";
+        result.mess_travel_distance_km = mess_sol.travel_distance_km;
+        apply_mess_only_solution_to_steps(mess_sol, result.steps);
+        result.model_stats.formulation_notes +=
+            " MESS dispatch uses a dedicated RA-residual-shed time-space routing/SOC MILP solved with the user-selected solver; it no longer projects the AC-only strict restoration MIP trace.";
+      } else if (opts.fallback_to_stage_mess_dispatch) {
+        result.mess_dispatch_model = "stage_dispatch_fallback";
+        apply_stage_mess_dispatch_to_steps(step_data, step_solutions, opts, mess, result.steps);
+        result.model_stats.formulation_notes +=
+            " RA-residual MESS MILP unavailable within selected solver/time/gap limits; falling back to stage-local MESS dispatch (" +
+            mess_sol.status + ").";
+      } else {
+        result.mess_dispatch_model = "none";
+        result.model_stats.formulation_notes +=
+            " RA-residual MESS MILP unavailable and stage-local fallback disabled (" + mess_sol.status + ").";
+      }
+    } else if (opts.fallback_to_stage_mess_dispatch) {
+      result.mess_dispatch_model = "stage_dispatch_fallback";
+      apply_stage_mess_dispatch_to_steps(step_data, step_solutions, opts, mess, result.steps);
+    } else {
+      result.mess_dispatch_model = "none";
+    }
+  }
+
+  if (result.feasible) accumulate_resilience_totals(result, opts);
 
   if (!result.steps.empty()) {
     result.resilience_index = result.total_demand_mwh > kEps ? result.total_served_mwh / result.total_demand_mwh : 1.0;
@@ -1410,6 +2048,10 @@ DistributionResilienceResult run_distribution_resilience_stage_milp_assessment(
     result.model_stats.formulation_notes +=
         " No explicit switching devices were mapped; virtual operable AC/DC branch breakers were used for all physical branches.";
   }
+  result.total_ens_mwh = result.total_shed_mwh;
+  result.max_curtailment_mw = result.peak_shed_mw;
+  result.completed = result.feasible;
+  if (!result.steps.empty()) result.restoration_time_hr = result.steps.back().hour;
   if (result.status.empty()) result.status = result.feasible ? "RA-style stage MILP completed" : "Failed";
   return result;
 }

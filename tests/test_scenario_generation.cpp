@@ -5,6 +5,7 @@
 #include <cmath>
 #include <map>
 #include <string>
+#include <nlohmann/json.hpp>
 #include <vector>
 
 #include "hacdcpf/analysis/scenario_generation.hpp"
@@ -84,6 +85,20 @@ double feature(const ScenarioCandidate& candidate, const std::string& key) {
   return it->second;
 }
 
+std::vector<double> profile_values(const nlohmann::json& ts, const std::string& name) {
+  for (const auto& p : ts.value("profiles", nlohmann::json::array())) {
+    if (p.value("name", "") == name) return p.value("values", std::vector<double>{});
+  }
+  return {};
+}
+
+std::vector<double> profile_values(const TimeSeriesData& ts, const std::string& name) {
+  for (const auto& p : ts.profiles) {
+    if (p.name == name) return p.values;
+  }
+  return {};
+}
+
 std::vector<double> representative_feature_values(const RegularScenarioResult& result, const std::string& key) {
   std::vector<double> values;
   for (const auto& cluster : result.clusters) values.push_back(feature(cluster.representative, key));
@@ -127,6 +142,40 @@ TEST_CASE("Regular scenario generation applies SSP/year climate morphing to load
   CHECK(feature(high, "pv_sum") != Approx(feature(low, "pv_sum")));
   CHECK(feature(low, "climate_data_found") == Approx(1.0));
   CHECK(feature(high, "climate_data_found") == Approx(1.0));
+}
+
+TEST_CASE("Scenario generation prepares standard multiplier time series internally", "[scenario_generation]") {
+  const auto sys = make_regular_scenario_test_system();
+
+  RegularScenarioOptions regular;
+  regular.enabled = true;
+  regular.ssp = "ssp245";
+  regular.year = 2050;
+  regular.num_steps = 24;
+  regular.candidate_count = 1;
+  regular.cluster_count = 1;
+
+  ClusteringOptions clustering;
+  clustering.compare_baseline = false;
+  clustering.include_tail_anchors = false;
+  clustering.method = "weighted_k_medoids";
+
+  const auto result = generate_regular_scenarios(sys, regular, deterministic_perturbation(), clustering, nullptr);
+  REQUIRE(result.cluster_count == 1);
+
+  const auto& candidate = result.clusters.front().representative;
+  REQUIRE(!candidate.standard_time_series.empty());
+  const auto& ts = candidate.standard_time_series;
+  CHECK(ts.value("unit_space", "") == "dimensionless_multiplier");
+  const auto load_scale = profile_values(ts, "scenario_load_scale");
+  const auto pv_scale = profile_values(ts, "scenario_pv_scale");
+  REQUIRE(!load_scale.empty());
+  REQUIRE(!pv_scale.empty());
+  CHECK(load_scale.front() == Approx(profile_values(candidate.time_series, "total_load_mw").front() / 10.0));
+  CHECK(pv_scale.front() == Approx(profile_values(candidate.time_series, "pv_mw").front() / 5.0));
+  CHECK(ts["binding"].value("assign_all_pv_to", -1) == 2);
+  CHECK(ts["normalization"].value("base_load_mw", 0.0) == Approx(10.0));
+  CHECK(ts["normalization"].value("base_pv_mw", 0.0) == Approx(5.0));
 }
 
 TEST_CASE("Regular climate perturbation creates reproducible candidate variation", "[scenario_generation]") {

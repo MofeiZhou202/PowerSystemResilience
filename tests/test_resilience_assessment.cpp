@@ -208,6 +208,10 @@ static HybridPowerSystem make_single_bus_shortage() {
   return sys;
 }
 
+static bool has_mess_travel_evidence(const MESSStateStep& ms) {
+  return ms.status == "InTransit" || ms.target_bus != ms.bus || ms.remaining_travel_hr > 1e-9;
+}
+
 static HybridPowerSystem make_hybrid_no_switch_bus_load_case() {
   HybridPowerSystem sys;
 
@@ -587,6 +591,7 @@ TEST_CASE("Resilience stage MILP: MESS dispatch emits traces and energy", "[resi
   opts.horizon_hours = 3;
   opts.time_step_hr = 1.0;
   opts.allow_mess_dispatch = true;
+  opts.use_strict_mip_for_mess = false;
   opts.default_fault_count = 0;
 
   DistributionResilienceFault f;
@@ -608,6 +613,189 @@ TEST_CASE("Resilience stage MILP: MESS dispatch emits traces and energy", "[resi
   }
   CHECK(saw_dispatch);
   CHECK(saw_energy_drop);
+}
+
+TEST_CASE("Resilience stage MILP: strict MIP MESS routing can move and dispatch", "[resilience]") {
+  auto sys = make_radial_3bus();
+
+  MobileStorage mess;
+  mess.index = 7;
+  mess.name = "MESS-7";
+  mess.bus = 1;
+  mess.target_bus = 1;
+  mess.in_service = true;
+  mess.status = MobileStorageStatus::Stationary;
+  mess.pmax_mw = 1.0;
+  mess.p_rated_mw = 1.0;
+  mess.e_rated_mwh = 8.0;
+  mess.soc_init = 1.0;
+  mess.soc_min = 0.1;
+  mess.soc_max = 1.0;
+  mess.e_mwh = 8.0;
+  mess.eta_discharge = 1.0;
+  mess.e_consumption_mwh_km = 0.01;
+  mess.max_travel_distance_km = 10.0;
+  sys.mobile_storage = {mess};
+
+  DistributionResilienceOptions opts;
+  opts.model = DistributionResilienceModel::RAStyleStageMILP;
+  opts.use_ra_style_stage_milp = true;
+  opts.enable_disaster_stages = true;
+  opts.horizon_hours = 4;
+  opts.time_step_hr = 1.0;
+  opts.allow_mess_dispatch = true;
+  opts.use_strict_mip_for_mess = true;
+  opts.fallback_to_stage_mess_dispatch = false;
+  opts.default_fault_count = 0;
+  opts.mip.solver = DistributionResilienceMIPSolver::Native;
+  opts.mip.max_time_s = 20;
+  opts.mip.max_nodes = 20000;
+
+  DistributionResilienceFault f;
+  f.ac_branch_index = 1;
+  f.branch_kind = ResilienceBranchKind::AC;
+  f.branch_index = 1;
+  f.outage_start_hr = 0.0;
+  f.repair_duration_hr = 24.0;
+  opts.faults = {f};
+
+  auto r = run_distribution_resilience_assessment(sys, opts);
+  REQUIRE(r.feasible);
+  CHECK(r.mess_dispatch_model == "ra_residual_mess_milp");
+  bool saw_travel = false;
+  bool saw_dispatch = false;
+  bool saw_energy_drop = false;
+  bool have_prev = false;
+  MESSStateStep prev_ms;
+  for (const auto& step : r.steps) {
+    REQUIRE_FALSE(step.mess_states.empty());
+    const auto& ms = step.mess_states.front();
+    const bool travel_evidence = has_mess_travel_evidence(ms);
+    if (travel_evidence) saw_travel = true;
+    if (ms.dispatch_mw > 0.0) saw_dispatch = true;
+    if (ms.energy_mwh < mess.e_mwh - 1e-9) saw_energy_drop = true;
+    if (have_prev) {
+      if (ms.bus != prev_ms.bus) {
+        CHECK((has_mess_travel_evidence(prev_ms) || travel_evidence));
+      }
+      if (ms.energy_mwh < prev_ms.energy_mwh - 1e-9 && prev_ms.dispatch_mw <= 1e-9) {
+        CHECK(has_mess_travel_evidence(prev_ms));
+      }
+    }
+    prev_ms = ms;
+    have_prev = true;
+  }
+  CHECK(saw_travel);
+  CHECK(saw_dispatch);
+  CHECK(saw_energy_drop);
+  CHECK(r.mess_travel_distance_km > 0.0);
+  CHECK(r.mess_energy_delivered_mwh > 0.0);
+}
+
+TEST_CASE("Resilience stage MILP: no-fault MESS does not move without RA residual shed", "[resilience]") {
+  auto sys = make_radial_3bus();
+
+  MobileStorage mess;
+  mess.index = 9;
+  mess.name = "MESS-9";
+  mess.bus = 1;
+  mess.target_bus = 1;
+  mess.in_service = true;
+  mess.status = MobileStorageStatus::Stationary;
+  mess.pmax_mw = 1.0;
+  mess.p_rated_mw = 1.0;
+  mess.e_rated_mwh = 4.0;
+  mess.soc_init = 1.0;
+  mess.soc_min = 0.1;
+  mess.soc_max = 1.0;
+  mess.e_mwh = 4.0;
+  mess.eta_discharge = 1.0;
+  mess.e_consumption_mwh_km = 0.01;
+  mess.max_travel_distance_km = 10.0;
+  sys.mobile_storage = {mess};
+
+  DistributionResilienceOptions opts;
+  opts.model = DistributionResilienceModel::RAStyleStageMILP;
+  opts.use_ra_style_stage_milp = true;
+  opts.enable_disaster_stages = true;
+  opts.horizon_hours = 4;
+  opts.time_step_hr = 1.0;
+  opts.allow_mess_dispatch = true;
+  opts.use_strict_mip_for_mess = true;
+  opts.fallback_to_stage_mess_dispatch = false;
+  opts.default_fault_count = 0;
+  opts.faults.clear();
+  opts.mip.solver = DistributionResilienceMIPSolver::Native;
+  opts.mip.max_time_s = 20;
+  opts.mip.max_nodes = 20000;
+
+  auto r = run_distribution_resilience_assessment(sys, opts);
+  REQUIRE(r.feasible);
+  CHECK(r.mess_dispatch_model == "ra_residual_mess_milp");
+  CHECK(r.total_shed_mwh == Approx(0.0).margin(1e-9));
+  CHECK(r.mess_travel_distance_km == Approx(0.0).margin(1e-9));
+  CHECK(r.mess_energy_delivered_mwh == Approx(0.0).margin(1e-9));
+  for (const auto& step : r.steps) {
+    REQUIRE_FALSE(step.mess_states.empty());
+    const auto& ms = step.mess_states.front();
+    CHECK(ms.bus == mess.bus);
+    CHECK(ms.target_bus == mess.bus);
+    CHECK(ms.status != "InTransit");
+    CHECK(ms.remaining_travel_hr == Approx(0.0).margin(1e-9));
+    CHECK(ms.dispatch_mw == Approx(0.0).margin(1e-9));
+    CHECK(ms.energy_mwh == Approx(mess.e_mwh).margin(1e-9));
+  }
+}
+
+TEST_CASE("Resilience strict MIP: no-fault MESS does not move without benefit", "[resilience]") {
+  auto sys = make_radial_3bus();
+
+  MobileStorage mess;
+  mess.index = 8;
+  mess.name = "MESS-8";
+  mess.bus = 1;
+  mess.target_bus = 1;
+  mess.in_service = true;
+  mess.status = MobileStorageStatus::Stationary;
+  mess.pmax_mw = 1.0;
+  mess.p_rated_mw = 1.0;
+  mess.e_rated_mwh = 4.0;
+  mess.soc_init = 1.0;
+  mess.soc_min = 0.1;
+  mess.soc_max = 1.0;
+  mess.e_mwh = 4.0;
+  mess.eta_discharge = 1.0;
+  mess.e_consumption_mwh_km = 0.01;
+  mess.max_travel_distance_km = 10.0;
+  sys.mobile_storage = {mess};
+
+  DistributionResilienceOptions opts;
+  opts.model = DistributionResilienceModel::MultiPeriodMIPLinDistFlow;
+  opts.horizon_hours = 4;
+  opts.time_step_hr = 1.0;
+  opts.allow_mess_dispatch = true;
+  opts.default_fault_count = 0;
+  opts.faults.clear();
+  opts.mip.solver = DistributionResilienceMIPSolver::Native;
+  opts.mip.max_time_s = 20;
+  opts.mip.max_nodes = 20000;
+
+  auto r = run_distribution_resilience_mip_assessment(sys, opts);
+  REQUIRE(r.feasible);
+  CHECK(r.total_shed_mwh == Approx(0.0).margin(1e-9));
+  CHECK(r.mess_travel_distance_km == Approx(0.0).margin(1e-9));
+  CHECK(r.mess_energy_delivered_mwh == Approx(0.0).margin(1e-9));
+
+  for (const auto& step : r.steps) {
+    REQUIRE_FALSE(step.mess_states.empty());
+    const auto& ms = step.mess_states.front();
+    CHECK(ms.bus == mess.bus);
+    CHECK(ms.target_bus == mess.bus);
+    CHECK(ms.status != "InTransit");
+    CHECK(ms.remaining_travel_hr == Approx(0.0).margin(1e-9));
+    CHECK(ms.dispatch_mw == Approx(0.0).margin(1e-9));
+    CHECK(ms.energy_mwh == Approx(mess.e_mwh).margin(1e-9));
+  }
 }
 
 TEST_CASE("Resilience: demo data injection runs without crash", "[resilience]") {
