@@ -64,3 +64,50 @@ TEST_CASE("Schema version is stamped and gated by mode (§3.3)",
   CHECK(try_from_json(bad, ImportMode::Permissive).has_value());
 }
 
+TEST_CASE("Telemetry section round-trips and drives the I1 gate (§10)",
+          "[io][telemetry]") {
+  using namespace hacdcpf;
+  auto sys = io::build_ieee14_acdc();
+
+  TelemetrySection tel;
+  TelemetryStream st;
+  st.stream_id = "scada-1";
+  st.time_base.epoch_utc = "2026-07-03T00:00:00Z";
+  TelemetryBinding b;
+  b.component_ref = "ac.buses[1]";
+  b.measurement_type = MeasurementType::Voltage;
+  b.unit = "pu";
+  b.source_system = "SCADA";
+  b.tag = "BUS1.V";
+  b.constrains_state = "vm_pu@bus1";
+  st.bindings.push_back(b);
+  tel.streams.push_back(st);
+  StateSeed seed;
+  seed.timestamp = "2026-07-03T00:00:00Z";
+  seed.component_ref = "ac.buses[1]";
+  seed.quantity = "vm_pu";
+  seed.value = 1.02;
+  tel.state_seeds.push_back(seed);
+  sys.telemetry = tel;
+
+  // Telemetry survives the JSON round-trip losslessly.
+  const auto ev = io::json_roundtrip(sys);
+  INFO("mismatched=" << ev.fields_mismatched);
+  CHECK(ev.passed);
+
+  const auto restored = io::from_json(io::to_json(sys));
+  REQUIRE(restored.telemetry.has_value());
+  CHECK(restored.telemetry->binding_count() == 1);
+  REQUIRE(restored.telemetry->streams.size() == 1);
+  CHECK(restored.telemetry->streams.front().bindings.front().tag == "BUS1.V");
+  CHECK(restored.telemetry->state_seeds.size() == 1);
+
+  // The I1 integration gate now reads real telemetry bindings, not names.
+  const auto report = io::analyze_digital_twin_readiness(sys);
+  for (const auto& g : report.gates) {
+    if (g.gate_id == "I1") {
+      CHECK(g.evidence.find("1 telemetry binding") != std::string::npos);
+    }
+  }
+}
+
