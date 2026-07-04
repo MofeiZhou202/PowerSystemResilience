@@ -231,6 +231,150 @@ const COMP = (() => {
               <line x1="0" y1="-20" x2="0" y2="-32" stroke="#61afef" stroke-width="2"/>
               <text class="comp-label" x="0" y="32">${p.name||'MicroGrid'}</text>`;
     },
+    ies_electric_bus(p) {
+      return `<line x1="-42" y1="0" x2="42" y2="0" stroke="#61afef" stroke-width="6"/>
+              <circle cx="-42" cy="0" r="3" fill="#61afef"/><circle cx="42" cy="0" r="3" fill="#61afef"/>
+              <text class="comp-label" x="0" y="-13">${p.name||'电母线'}</text>
+              <text class="comp-value" x="0" y="17">Electric</text>`;
+    },
+    ies_heat_bus(p) {
+      return `<line x1="-42" y1="0" x2="42" y2="0" stroke="#e06c75" stroke-width="6"/>
+              <circle cx="-42" cy="0" r="3" fill="#e06c75"/><circle cx="42" cy="0" r="3" fill="#e06c75"/>
+              <text class="comp-label" x="0" y="-13">${p.name||'热母线'}</text>
+              <text class="comp-value" x="0" y="17">Heat</text>`;
+    },
+    ies_hydrogen_bus(p) {
+      return `<line x1="-42" y1="0" x2="42" y2="0" stroke="#56b6c2" stroke-width="6" stroke-dasharray="9 4"/>
+              <circle cx="-42" cy="0" r="3" fill="#56b6c2"/><circle cx="42" cy="0" r="3" fill="#56b6c2"/>
+              <text class="comp-label" x="0" y="-13">${p.name||'氢母线'}</text>
+              <text class="comp-value" x="0" y="17">Hydrogen</text>`;
+    },
+    ies_fuel_bus(p) {
+      return `<line x1="-42" y1="0" x2="42" y2="0" stroke="#e5c07b" stroke-width="6" stroke-dasharray="5 4"/>
+              <circle cx="-42" cy="0" r="3" fill="#e5c07b"/><circle cx="42" cy="0" r="3" fill="#e5c07b"/>
+              <text class="comp-label" x="0" y="-13">${p.name||'燃料母线'}</text>
+              <text class="comp-value" x="0" y="17">Fuel</text>`;
+    },
+    ies_grid(p) {
+      return `<rect x="-18" y="-18" width="36" height="36" rx="4" fill="none" stroke="#61afef" stroke-width="2"/>
+              <path d="M-10,0 Q-5,-8 0,0 Q5,8 10,0" fill="none" stroke="#61afef" stroke-width="2"/>
+              <line x1="18" y1="0" x2="32" y2="0" stroke="#61afef" stroke-width="2"/>
+              <text class="comp-label" x="0" y="31">${p.name||'电网'}</text>
+              <text class="comp-value" x="0" y="43">${p.import_limit_mw||0}MW</text>`;
+    },
+    ies_electric_load(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-8" stroke="#61afef" stroke-width="2"/>
+              <polygon points="-14,-8 14,-8 0,18" fill="none" stroke="#61afef" stroke-width="2"/>
+              <text class="comp-label" x="0" y="34">${p.name||'电负荷'}</text>
+              <text class="comp-value" x="0" y="46">${p.demand_mw||0}MW</text>`;
+    },
+    ies_heat_load(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-8" stroke="#e06c75" stroke-width="2"/>
+              <path d="M-14,18 C-8,-10 8,-10 14,18 Z" fill="none" stroke="#e06c75" stroke-width="2"/>
+              <text class="comp-label" x="0" y="34">${p.name||'热负荷'}</text>
+              <text class="comp-value" x="0" y="46">${p.demand_mw||0}MW</text>`;
+    },
+    ies_hydrogen_load(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-10" stroke="#56b6c2" stroke-width="2" stroke-dasharray="4 2"/>
+              <circle cx="0" cy="4" r="15" fill="none" stroke="#56b6c2" stroke-width="2"/>
+              <text x="0" y="8" text-anchor="middle" fill="#56b6c2" font-size="9" font-weight="700">H2</text>
+              <text class="comp-label" x="0" y="34">${p.name||'氢负荷'}</text>
+              <text class="comp-value" x="0" y="46">${p.demand_mw||0}MW</text>`;
+    },
+    ies_fuel_load(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-10" stroke="#e5c07b" stroke-width="2" stroke-dasharray="5 3"/>
+              <path d="M0,-8 C12,4 10,20 0,22 C-10,20 -12,4 0,-8 Z" fill="none" stroke="#e5c07b" stroke-width="2"/>
+              <text class="comp-label" x="0" y="38">${p.name||'燃料负荷'}</text>
+              <text class="comp-value" x="0" y="50">${p.demand_mw||0}MW</text>`;
+    },
+    ies_transport(p) {
+      return `<rect x="-22" y="-14" width="44" height="26" rx="5" fill="none" stroke="#98c379" stroke-width="2"/>
+              <circle cx="-12" cy="16" r="4" fill="none" stroke="#98c379" stroke-width="2"/>
+              <circle cx="12" cy="16" r="4" fill="none" stroke="#98c379" stroke-width="2"/>
+              <text x="0" y="4" text-anchor="middle" fill="#98c379" font-size="8" font-weight="700">EV/H2</text>
+              <text class="comp-label" x="0" y="33">${p.name||'交通需求'}</text>`;
+    },
+    ies_solar(p) {
+      return `<polygon points="-18,-14 18,-14 14,12 -14,12" fill="none" stroke="#e5c07b" stroke-width="2"/>
+              <line x1="-7" y1="-4" x2="7" y2="-4" stroke="#e5c07b" stroke-width="1"/>
+              <line x1="-5" y1="3" x2="5" y2="3" stroke="#e5c07b" stroke-width="1"/>
+              <line x1="0" y1="12" x2="0" y2="28" stroke="#e5c07b" stroke-width="2"/>
+              <text class="comp-label" x="0" y="43">${p.name||'光伏'}</text>
+              <text class="comp-value" x="0" y="55">${p.rated_mw||0}MW</text>`;
+    },
+    ies_wind(p) {
+      return `<line x1="0" y1="-2" x2="0" y2="28" stroke="#98c379" stroke-width="2"/>
+              <circle cx="0" cy="-4" r="3" fill="#98c379"/>
+              <path d="M0,-4 L0,-24 M0,-4 L18,6 M0,-4 L-18,6" stroke="#98c379" stroke-width="2"/>
+              <text class="comp-label" x="0" y="43">${p.name||'风电'}</text>
+              <text class="comp-value" x="0" y="55">${p.rated_mw||0}MW</text>`;
+    },
+    ies_chp(p) {
+      return `<rect x="-21" y="-18" width="42" height="36" rx="4" fill="none" stroke="#e06c75" stroke-width="2"/>
+              <text x="0" y="4" text-anchor="middle" fill="#e06c75" font-size="9" font-weight="700">CHP</text>
+              <line x1="-21" y1="0" x2="-34" y2="0" stroke="#e5c07b" stroke-width="2"/>
+              <line x1="21" y1="-6" x2="34" y2="-6" stroke="#61afef" stroke-width="2"/>
+              <line x1="21" y1="8" x2="34" y2="8" stroke="#e06c75" stroke-width="2"/>
+              <text class="comp-label" x="0" y="32">${p.name||'CHP'}</text>`;
+    },
+    ies_heat_pump(p) {
+      return `<rect x="-20" y="-16" width="40" height="32" rx="4" fill="none" stroke="#e06c75" stroke-width="2"/>
+              <text x="0" y="4" text-anchor="middle" fill="#e06c75" font-size="9" font-weight="700">HP</text>
+              <line x1="-20" y="0" x2="-34" y2="0" stroke="#61afef" stroke-width="2"/>
+              <line x1="20" y="0" x2="34" y2="0" stroke="#e06c75" stroke-width="2"/>
+              <text class="comp-label" x="0" y="30">${p.name||'热泵'}</text>
+              <text class="comp-value" x="0" y="42">COP ${p.cop||3.2}</text>`;
+    },
+    ies_electrolyzer(p) {
+      return `<rect x="-22" y="-16" width="44" height="32" rx="4" fill="none" stroke="#56b6c2" stroke-width="2"/>
+              <text x="0" y="4" text-anchor="middle" fill="#56b6c2" font-size="9" font-weight="700">EL</text>
+              <line x1="-22" y="0" x2="-34" y2="0" stroke="#61afef" stroke-width="2"/>
+              <line x1="22" y="0" x2="34" y2="0" stroke="#56b6c2" stroke-width="2" stroke-dasharray="4 2"/>
+              <text class="comp-label" x="0" y="30">${p.name||'电解槽'}</text>`;
+    },
+    ies_fuel_cell(p) {
+      return `<rect x="-22" y="-16" width="44" height="32" rx="4" fill="none" stroke="#56b6c2" stroke-width="2"/>
+              <text x="0" y="4" text-anchor="middle" fill="#56b6c2" font-size="9" font-weight="700">FC</text>
+              <line x1="-22" y="0" x2="-34" y2="0" stroke="#56b6c2" stroke-width="2" stroke-dasharray="4 2"/>
+              <line x1="22" y="0" x2="34" y2="0" stroke="#61afef" stroke-width="2"/>
+              <text class="comp-label" x="0" y="30">${p.name||'燃料电池'}</text>`;
+    },
+    ies_electric_storage(p) {
+      return `<rect x="-16" y="-14" width="32" height="24" rx="3" fill="none" stroke="#61afef" stroke-width="2"/>
+              <line x1="-9" y1="-4" x2="9" y2="-4" stroke="#61afef" stroke-width="2"/>
+              <line x1="0" y1="-9" x2="0" y2="1" stroke="#61afef" stroke-width="1.5"/>
+              <line x1="0" y1="-30" x2="0" y2="-14" stroke="#61afef" stroke-width="2"/>
+              <text class="comp-label" x="0" y="24">${p.name||'电储能'}</text>
+              <text class="comp-value" x="0" y="36">${p.capacity_mwh||0}MWh</text>`;
+    },
+    ies_thermal_storage(p) {
+      return `<rect x="-16" y="-14" width="32" height="24" rx="3" fill="none" stroke="#e06c75" stroke-width="2"/>
+              <path d="M-7,2 C-3,-9 3,-9 7,2" fill="none" stroke="#e06c75" stroke-width="2"/>
+              <line x1="0" y1="-30" x2="0" y2="-14" stroke="#e06c75" stroke-width="2"/>
+              <text class="comp-label" x="0" y="24">${p.name||'热储能'}</text>
+              <text class="comp-value" x="0" y="36">${p.capacity_mwh||0}MWh</text>`;
+    },
+    ies_hydrogen_storage(p) {
+      return `<rect x="-18" y="-14" width="36" height="24" rx="8" fill="none" stroke="#56b6c2" stroke-width="2" stroke-dasharray="5 3"/>
+              <text x="0" y="2" text-anchor="middle" fill="#56b6c2" font-size="8" font-weight="700">H2</text>
+              <line x1="0" y1="-30" x2="0" y2="-14" stroke="#56b6c2" stroke-width="2" stroke-dasharray="4 2"/>
+              <text class="comp-label" x="0" y="24">${p.name||'氢储能'}</text>
+              <text class="comp-value" x="0" y="36">${p.capacity_mwh||0}MWh</text>`;
+    },
+    ies_ccus(p) {
+      return `<rect x="-22" y="-16" width="44" height="32" rx="4" fill="none" stroke="#c678dd" stroke-width="2"/>
+              <text x="0" y="4" text-anchor="middle" fill="#c678dd" font-size="8" font-weight="700">CCUS</text>
+              <line x1="-22" y="0" x2="-34" y2="0" stroke="#c678dd" stroke-width="2"/>
+              <line x1="22" y1="0" x2="34" y2="0" stroke="#61afef" stroke-width="2"/>
+              <text class="comp-label" x="0" y="30">${p.name||'碳捕集'}</text>`;
+    },
+    ies_fuel_supply(p) {
+      return `<path d="M-18,-16 H18 V16 H-18 Z" fill="none" stroke="#e5c07b" stroke-width="2"/>
+              <path d="M-8,8 C-4,-8 4,-8 8,8" fill="none" stroke="#e5c07b" stroke-width="2"/>
+              <line x1="18" y1="0" x2="34" y2="0" stroke="#e5c07b" stroke-width="2" stroke-dasharray="5 3"/>
+              <text class="comp-label" x="0" y="31">${p.name||'燃料供应'}</text>
+              <text class="comp-value" x="0" y="43">${p.purchase_limit_mw||0}MW</text>`;
+    },
   };
 
   // ============= Port Definitions =============
@@ -269,6 +413,27 @@ const COMP = (() => {
                        {id:'top',   x:0, y:-34}, {id:'bottom', x:0, y:34}],
     vpp:              [{id:'top',   x:0, y:-30}],
     microgrid:        [{id:'pcc',   x:0, y:-32}],
+    ies_electric_bus: [{id:'left', x:-42, y:0}, {id:'right', x:42, y:0}, {id:'top', x:0, y:-6}, {id:'bottom', x:0, y:6}],
+    ies_heat_bus:     [{id:'left', x:-42, y:0}, {id:'right', x:42, y:0}, {id:'top', x:0, y:-6}, {id:'bottom', x:0, y:6}],
+    ies_hydrogen_bus: [{id:'left', x:-42, y:0}, {id:'right', x:42, y:0}, {id:'top', x:0, y:-6}, {id:'bottom', x:0, y:6}],
+    ies_fuel_bus:     [{id:'left', x:-42, y:0}, {id:'right', x:42, y:0}, {id:'top', x:0, y:-6}, {id:'bottom', x:0, y:6}],
+    ies_grid:         [{id:'electric', x:32, y:0}],
+    ies_electric_load:[{id:'electric', x:0, y:-30}],
+    ies_heat_load:    [{id:'heat', x:0, y:-30}],
+    ies_hydrogen_load:[{id:'hydrogen', x:0, y:-30}],
+    ies_fuel_load:    [{id:'fuel', x:0, y:-30}],
+    ies_transport:    [{id:'electric', x:-22, y:0}, {id:'hydrogen', x:22, y:0}, {id:'fuel', x:0, y:-14}],
+    ies_solar:        [{id:'electric', x:0, y:28}],
+    ies_wind:         [{id:'electric', x:0, y:28}],
+    ies_chp:          [{id:'fuel', x:-34, y:0}, {id:'electric', x:34, y:-6}, {id:'heat', x:34, y:8}],
+    ies_heat_pump:    [{id:'electric', x:-34, y:0}, {id:'heat', x:34, y:0}],
+    ies_electrolyzer: [{id:'electric', x:-34, y:0}, {id:'hydrogen', x:34, y:0}],
+    ies_fuel_cell:    [{id:'hydrogen', x:-34, y:0}, {id:'electric', x:34, y:0}],
+    ies_electric_storage: [{id:'electric', x:0, y:-30}],
+    ies_thermal_storage:  [{id:'heat', x:0, y:-30}],
+    ies_hydrogen_storage: [{id:'hydrogen', x:0, y:-30}],
+    ies_ccus:         [{id:'co2', x:-34, y:0}, {id:'electric', x:34, y:0}],
+    ies_fuel_supply:  [{id:'fuel', x:34, y:0}],
   };
 
   // ============= Default Parameters =============
@@ -408,6 +573,7 @@ const COMP = (() => {
       name: 'VSC', bus_ac: 0, bus_dc: 0,
       control_mode: 'PQ_MODE', type: 'two_level',
       p_set_mw: 100, q_set_mvar: 0,
+      p_is_hard_constraint: false, p_schedule_mw: 0, p_initial_mw: 0,
       pmax_mw: 200, pmin_mw: -200,
       qmax_mvar: 100, qmin_mvar: -100,
       eta: 0.98, loss_percent: 1.0, loss_mw: 0,
@@ -422,6 +588,7 @@ const COMP = (() => {
       vn_ac_kv: 0, vn_dc_kv: 0,
       grid_forming: false, ac_grid_forming: false,
       allow_dual_side_grid_forming: false, has_energy_buffer: false,
+      coordination_group_id: '', is_master: false, participation_factor: 0,
       dynamic_model: {
         standard: 'NERC',
         model_name: 'GridFollowingInverter',
@@ -598,6 +765,107 @@ const COMP = (() => {
       capacity_mw: 0, peak_load_mw: 0, f_set_hz: 50, v_set_pu: 1.0,
       k_droop: 0.05, area: 0, in_service: true
     },
+    ies_electric_bus: { name: '电母线', carrier: 'electricity', in_service: true },
+    ies_heat_bus: { name: '热母线', carrier: 'heat', in_service: true },
+    ies_hydrogen_bus: { name: '氢母线', carrier: 'hydrogen', in_service: true },
+    ies_fuel_bus: { name: '燃料母线', carrier: 'fuel', in_service: true },
+    ies_grid: {
+      name: '电网接口', import_limit_mw: 16, export_limit_mw: 5,
+      buy_price_per_mwh: 90, sell_price_per_mwh: 35,
+      carbon_tco2_mwh: 0.58,
+      _ies_buy_price_profile_values: [], _ies_sell_price_profile_values: [],
+      _ies_carbon_profile_values: [], _ies_profile_step_duration_hr: 1,
+      in_service: true
+    },
+    ies_electric_load: {
+      name: '电负荷', demand_mw: 8,
+      _ies_profile_name: '', _ies_profile_values: [], _ies_profile_step_duration_hr: 1,
+      in_service: true
+    },
+    ies_heat_load: {
+      name: '热负荷', demand_mw: 4,
+      _ies_profile_name: '', _ies_profile_values: [], _ies_profile_step_duration_hr: 1,
+      in_service: true
+    },
+    ies_hydrogen_load: {
+      name: '氢负荷', demand_mw: 0.2,
+      _ies_profile_name: '', _ies_profile_values: [], _ies_profile_step_duration_hr: 1,
+      in_service: true
+    },
+    ies_fuel_load: {
+      name: '燃料负荷', demand_mw: 0.1,
+      _ies_profile_name: '', _ies_profile_values: [], _ies_profile_step_duration_hr: 1,
+      in_service: true
+    },
+    ies_transport: {
+      name: '交通需求', demand_km_per_h: 120,
+      ev_ratio: 0.45, hv_ratio: 0.20, icv_ratio: 0.35,
+      alpha_ev_mwh_per_km: 0.00018,
+      alpha_hv_mwh_per_km: 0.00060,
+      alpha_icv_mwh_per_km: 0.00075,
+      _ies_profile_name: '', _ies_profile_values: [], _ies_profile_step_duration_hr: 1,
+      in_service: true
+    },
+    ies_solar: {
+      name: '光伏', rated_mw: 8, om_cost_per_mwh: 2,
+      availability_scale: 1.0,
+      _ies_profile_name: '', _ies_profile_values: [], _ies_profile_step_duration_hr: 1,
+      in_service: true
+    },
+    ies_wind: {
+      name: '风电', rated_mw: 4, om_cost_per_mwh: 3,
+      availability_scale: 1.0,
+      _ies_profile_name: '', _ies_profile_values: [], _ies_profile_step_duration_hr: 1,
+      in_service: true
+    },
+    ies_chp: {
+      name: 'CHP', power_max_mw: 4, heat_max_mw: 6,
+      eta_elec: 0.35, eta_heat: 0.45, eta_total: 0.82,
+      om_cost_per_mwh: 5, in_service: true
+    },
+    ies_heat_pump: {
+      name: '热泵', power_max_mw: 3, cop: 3.2,
+      om_cost_per_mwh: 1, in_service: true
+    },
+    ies_electrolyzer: {
+      name: '电解槽', power_max_mw: 3, eta: 0.65,
+      om_cost_per_mwh: 2, in_service: true
+    },
+    ies_fuel_cell: {
+      name: '燃料电池', power_max_mw: 2, eta: 0.52,
+      om_cost_per_mwh: 4, in_service: true
+    },
+    ies_electric_storage: {
+      name: '电储能', capacity_mwh: 10, initial_mwh: 2,
+      charge_max_mw: 4, discharge_max_mw: 4,
+      eta_charge: 0.95, eta_discharge: 0.95,
+      retention: 0.999, throughput_cost_per_mwh: 1,
+      in_service: true
+    },
+    ies_thermal_storage: {
+      name: '热储能', capacity_mwh: 8, initial_mwh: 2,
+      charge_max_mw: 3, discharge_max_mw: 3,
+      eta_charge: 0.95, eta_discharge: 0.95,
+      retention: 0.995, throughput_cost_per_mwh: 1,
+      in_service: true
+    },
+    ies_hydrogen_storage: {
+      name: '氢储能', storage_layer: 'daily',
+      capacity_mwh: 8, initial_mwh: 2,
+      charge_max_mw: 2, discharge_max_mw: 2,
+      retention: 0.999, throughput_cost_per_mwh: 1.5,
+      in_service: true
+    },
+    ies_ccus: {
+      name: '碳捕集', capture_fraction: 0.85,
+      max_tco2_per_h: 3, power_mwh_per_tco2: 0.12,
+      cost_per_tco2: 35, in_service: true
+    },
+    ies_fuel_supply: {
+      name: '燃料供应', purchase_limit_mw: 30,
+      cost_per_mwh: 38, carbon_tco2_mwh: 0.27,
+      in_service: true
+    },
   };
 
   // ============= Component Categories for Library Panel =============
@@ -644,6 +912,28 @@ const COMP = (() => {
       { type: 'vpp',               label: '虚拟电厂' },
       { type: 'microgrid',         label: '微电网' },
     ],
+    integratedEnergyComponents: [
+      { type: 'ies_electric_bus',      label: '电母线' },
+      { type: 'ies_heat_bus',          label: '热母线' },
+      { type: 'ies_hydrogen_bus',      label: '氢母线' },
+      { type: 'ies_fuel_bus',          label: '燃料母线' },
+      { type: 'ies_grid',              label: '电网接口' },
+      { type: 'ies_electric_load',     label: '电负荷' },
+      { type: 'ies_heat_load',         label: '热负荷' },
+      { type: 'ies_hydrogen_load',     label: '氢负荷' },
+      { type: 'ies_transport',         label: '交通需求' },
+      { type: 'ies_solar',             label: '光伏' },
+      { type: 'ies_wind',              label: '风电' },
+      { type: 'ies_chp',               label: 'CHP' },
+      { type: 'ies_heat_pump',         label: '热泵' },
+      { type: 'ies_electrolyzer',      label: '电解槽' },
+      { type: 'ies_fuel_cell',         label: '燃料电池' },
+      { type: 'ies_electric_storage',  label: '电储能' },
+      { type: 'ies_thermal_storage',   label: '热储能' },
+      { type: 'ies_hydrogen_storage',  label: '氢储能' },
+      { type: 'ies_ccus',              label: '碳捕集' },
+      { type: 'ies_fuel_supply',       label: '燃料供应' },
+    ],
   };
 
   // ============= Human-readable field labels =============
@@ -682,6 +972,7 @@ const COMP = (() => {
     sgen_type: '类型', controllable: '可控',
     bus_ac: 'AC侧母线', bus_dc: 'DC侧母线', control_mode: '控制模式',
     p_set_mw: '有功设定(MW)', q_set_mvar: '无功设定(MVar)',
+    p_is_hard_constraint: 'P硬约束', p_schedule_mw: 'P计划(MW)', p_initial_mw: 'P初值(MW)',
     r_conv_ac_pu: 'AC侧等效电阻(pu)',
     r_sc_pu: '短路电阻Rsc(pu)', x_sc_pu: '短路电抗Xsc(pu)',
     r2_sc_pu: '负序短路电阻R2(pu)', x2_sc_pu: '负序短路电抗X2(pu)',
@@ -691,6 +982,7 @@ const COMP = (() => {
     vn_ac_kv: 'AC额定电压(kV)', vn_dc_kv: 'DC额定电压(kV)',
     grid_forming: 'DC侧构网', ac_grid_forming: 'AC侧构网',
     allow_dual_side_grid_forming: '允许双侧构网', has_energy_buffer: '含储能缓冲',
+    coordination_group_id: '协调组ID', is_master: '主换流器', participation_factor: '参与因子',
     topology: 'DC/DC拓扑', d_min: '占空比下限 d_min', d_max: '占空比上限 d_max', n_ratio: '变压比 n',
     irradiance: '辐照度(W/m²)', temperature: '温度(℃)',
     num_series: '串联数', num_parallel: '并联数',
@@ -759,6 +1051,28 @@ const COMP = (() => {
     total_generation_mw: '总发电(MW)', total_storage_mwh: '总储能(MWh)',
     total_load_mw: '总负荷(MW)', capacity_mw: '容量(MW)', peak_load_mw: '峰值负荷(MW)',
     f_set_hz: '频率设定(Hz)', v_set_pu: '电压设定(pu)',
+    // Integrated energy canvas
+    carrier: '能源载体', demand_mw: '需求(MW)', demand_km_per_h: '交通需求(km/h)',
+    import_limit_mw: '购电上限(MW)', export_limit_mw: '售电上限(MW)',
+    buy_price_per_mwh: '购电价格', sell_price_per_mwh: '售电价格',
+    carbon_tco2_mwh: '碳因子(tCO2/MWh)', rated_mw: '额定功率(MW)',
+    availability_scale: '可用容量倍率', power_max_mw: '功率上限(MW)',
+    heat_max_mw: '供热上限(MW)', eta_elec: '发电效率', eta_heat: '供热效率',
+    eta_total: '总效率', om_cost_per_mwh: '运维成本/MWh', cop: 'COP',
+    capacity_mwh: '容量(MWh)', initial_mwh: '初始能量(MWh)',
+    charge_max_mw: '充电/充能上限(MW)', discharge_max_mw: '放电/释能上限(MW)',
+    retention: '时段保持率', throughput_cost_per_mwh: '吞吐成本/MWh',
+    storage_layer: '储氢层级', capture_fraction: '捕集比例',
+    max_tco2_per_h: '捕集上限(tCO2/h)', power_mwh_per_tco2: '捕集电耗(MWh/tCO2)',
+    cost_per_tco2: '捕集成本/tCO2', purchase_limit_mw: '采购上限(MW)',
+    cost_per_mwh: '成本/MWh', ev_ratio: 'EV比例', hv_ratio: '氢车比例',
+    icv_ratio: '燃油车比例', alpha_ev_mwh_per_km: 'EV能耗(MWh/km)',
+    alpha_hv_mwh_per_km: '氢车能耗(MWh/km)', alpha_icv_mwh_per_km: '燃油车能耗(MWh/km)',
+    _ies_profile_name: '时序名称', _ies_profile_values: '导入时序(JSON数组)',
+    _ies_profile_step_duration_hr: '时序步长(h)',
+    _ies_buy_price_profile_values: '购电价时序(JSON数组)',
+    _ies_sell_price_profile_values: '售电价时序(JSON数组)',
+    _ies_carbon_profile_values: '电网碳因子时序(JSON数组)',
   };
 
   // ============= Mapping component types to JSON keys =============

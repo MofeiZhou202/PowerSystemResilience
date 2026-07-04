@@ -76,6 +76,89 @@ const Canvas = (() => {
     }
   }
 
+  function isIntegratedEnergyCanvasType(type) {
+    return typeof type === 'string' && type.startsWith('ies_');
+  }
+
+  const IES_CARRIER_COLORS = {
+    electricity: '#61afef',
+    heat: '#e06c75',
+    hydrogen: '#56b6c2',
+    fuel: '#e5c07b',
+    co2: '#c678dd',
+    transport: '#98c379',
+  };
+
+  function carrierFromPort(portId) {
+    const p = String(portId || '').toLowerCase();
+    if (p.includes('electric') || p === 'ac' || p === 'dc') return 'electricity';
+    if (p.includes('heat') || p === 'thermal') return 'heat';
+    if (p.includes('hydrogen') || p.includes('h2')) return 'hydrogen';
+    if (p.includes('fuel') || p.includes('gas')) return 'fuel';
+    if (p.includes('co2') || p.includes('carbon')) return 'co2';
+    return null;
+  }
+
+  function carrierFromIesType(type) {
+    switch (type) {
+      case 'ies_electric_bus':
+      case 'ies_grid':
+      case 'ies_electric_load':
+      case 'ies_solar':
+      case 'ies_wind':
+      case 'ies_electric_storage':
+        return 'electricity';
+      case 'ies_heat_bus':
+      case 'ies_heat_load':
+      case 'ies_heat_pump':
+      case 'ies_thermal_storage':
+        return 'heat';
+      case 'ies_hydrogen_bus':
+      case 'ies_hydrogen_load':
+      case 'ies_electrolyzer':
+      case 'ies_fuel_cell':
+      case 'ies_hydrogen_storage':
+        return 'hydrogen';
+      case 'ies_fuel_bus':
+      case 'ies_fuel_load':
+      case 'ies_fuel_supply':
+      case 'ies_chp':
+        return 'fuel';
+      case 'ies_ccus':
+        return 'co2';
+      case 'ies_transport':
+        return 'transport';
+      default:
+        return null;
+    }
+  }
+
+  function inferIntegratedEnergyCarrier(conn) {
+    const fromComp = getComponent(conn.from.compId);
+    const toComp = getComponent(conn.to.compId);
+    if (!isIntegratedEnergyCanvasType(fromComp?.type) &&
+        !isIntegratedEnergyCanvasType(toComp?.type)) {
+      return null;
+    }
+    const portCarrier = carrierFromPort(conn.from.portId) || carrierFromPort(conn.to.portId);
+    if (portCarrier) return portCarrier;
+    return carrierFromIesType(fromComp?.type) || carrierFromIesType(toComp?.type);
+  }
+
+  function styleCarrierConnection(line, conn) {
+    const carrier = inferIntegratedEnergyCarrier(conn);
+    if (!carrier) return;
+    const color = IES_CARRIER_COLORS[carrier] || '#98c379';
+    line.dataset.carrier = carrier;
+    line.classList.add('conn-carrier', `conn-carrier-${carrier}`);
+    line.style.setProperty('--conn-carrier-color', color);
+    line.setAttribute('stroke', color);
+    line.setAttribute('stroke-width', carrier === 'co2' ? '2.5' : '3');
+    if (carrier === 'hydrogen' || carrier === 'fuel' || carrier === 'co2') {
+      line.setAttribute('stroke-dasharray', carrier === 'co2' ? '3 4' : '8 5');
+    }
+  }
+
   // Cached routing context (obstacle boxes + grid + parallel-offset groups) used
   // by the §10.3 auto-avoidance router.  Rebuilt by buildRouteContext() before a
   // full re-route; null means "route cheaply" (plain orthogonal) so live drag
@@ -876,6 +959,7 @@ const Canvas = (() => {
   function componentDomain(comp) {
     if (!comp) return null;
     const t = comp.type;
+    if (isIntegratedEnergyCanvasType(t)) return null;
     if (t === 'vsc_converter' || t === 'dcdc_converter' || t === 'energy_router') return 'converter';
     if (t.startsWith('dc_')) return 'dc';
     return 'ac';
@@ -952,6 +1036,7 @@ const Canvas = (() => {
     line.setAttribute('stroke', '#666');
     line.setAttribute('stroke-width', '2');
     line.classList.add('conn-line');
+    styleCarrierConnection(line, conn);
     g.appendChild(line);
 
     connectionsLayer.appendChild(g);
@@ -981,7 +1066,8 @@ const Canvas = (() => {
       state.tempLine.setAttribute('y1', pos.y);
       state.tempLine.setAttribute('x2', pos.x);
       state.tempLine.setAttribute('y2', pos.y);
-      state.tempLine.setAttribute('stroke', '#61afef');
+      const sourceCarrier = carrierFromPort(portId) || carrierFromIesType(getComponent(compId)?.type);
+      state.tempLine.setAttribute('stroke', IES_CARRIER_COLORS[sourceCarrier] || '#61afef');
       state.tempLine.setAttribute('stroke-width', '2');
       state.tempLine.setAttribute('stroke-dasharray', '6 3');
       tempLayer.appendChild(state.tempLine);
@@ -2633,6 +2719,9 @@ const Canvas = (() => {
             control_mode: p.control_mode || 'PQ_MODE',
             type: p.type || 'two_level',
             p_set_mw: numOr(p.p_set_mw, 0),
+            p_is_hard_constraint: p.p_is_hard_constraint === true || p.p_is_hard_constraint === 'true',
+            p_schedule_mw: numOr(p.p_schedule_mw, 0),
+            p_initial_mw: numOr(p.p_initial_mw, 0),
             q_set_mvar: numOr(p.q_set_mvar, 0),
             pmax_mw: numOr(p.pmax_mw, 200),
             pmin_mw: numOr(p.pmin_mw, -200),
@@ -2663,6 +2752,9 @@ const Canvas = (() => {
             ac_grid_forming: p.ac_grid_forming === true || p.ac_grid_forming === 'true',
             allow_dual_side_grid_forming: p.allow_dual_side_grid_forming === true || p.allow_dual_side_grid_forming === 'true',
             has_energy_buffer: p.has_energy_buffer === true || p.has_energy_buffer === 'true',
+            coordination_group_id: p.coordination_group_id || '',
+            is_master: p.is_master === true || p.is_master === 'true',
+            participation_factor: numOr(p.participation_factor, 0),
             in_service: p.in_service !== false,
           }, p));
           vscIdx++;
@@ -3129,13 +3221,19 @@ const Canvas = (() => {
                     document.documentElement.getAttribute('data-theme')) || 'dark',
         connectionStyle: state.connectionStyle || 'orthogonal',
         viewBox: { x: viewBox.x, y: viewBox.y, w: viewBox.w, h: viewBox.h },
-        components: state.components.map(c => ({
-          key: compKey[c.id],
-          type: c.type,
-          x: c.x,
-          y: c.y,
-          rotation: c.rotation || 0,
-        })),
+        components: state.components.map(c => {
+          const item = {
+            key: compKey[c.id],
+            type: c.type,
+            x: c.x,
+            y: c.y,
+            rotation: c.rotation || 0,
+          };
+          if (isIntegratedEnergyCanvasType(c.type)) {
+            item.params = cloneJsonBlock(c.params) || {};
+          }
+          return item;
+        }),
         connections: state.connections
           .map(cn => ({
             from: { key: compKey[cn.from.compId], port: cn.from.portId },
@@ -3593,6 +3691,9 @@ const Canvas = (() => {
         p_set_mw: vsc.p_set_mw, q_set_mvar: vsc.q_set_mvar,
         // Normalize control_mode: C++ uses "PQ"/"VDC_Q"/"VDC_VAC" but UI uses "PQ_MODE"
         control_mode: (vsc.control_mode === 'PQ' ? 'PQ_MODE' : vsc.control_mode) || 'PQ_MODE',
+        p_is_hard_constraint: vsc.p_is_hard_constraint === true,
+        p_schedule_mw: vsc.p_schedule_mw ?? 0,
+        p_initial_mw: vsc.p_initial_mw ?? 0,
         eta: vsc.eta,
         loss_percent: vsc.loss_percent,
         loss_mw: vsc.loss_mw,
@@ -3620,6 +3721,9 @@ const Canvas = (() => {
         ac_grid_forming: vsc.ac_grid_forming === true,
         allow_dual_side_grid_forming: vsc.allow_dual_side_grid_forming === true,
         has_energy_buffer: vsc.has_energy_buffer === true,
+        coordination_group_id: vsc.coordination_group_id || '',
+        is_master: vsc.is_master === true,
+        participation_factor: vsc.participation_factor ?? 0,
         dynamic_model: cloneDynamicModel(vsc.dynamic_model) || COMP.defaults.vsc_converter.dynamic_model,
         in_service: vsc.in_service !== false,
       });
@@ -4132,6 +4236,20 @@ const Canvas = (() => {
         in_service: mg.in_service !== false,
       }, busCompMap);
     });
+
+    // Integrated-energy canvas components are planning-model assets, not
+    // electrical-network elements. They live only in the saved canvas block, so
+    // recreate them before applying saved positions and connections.
+    if (jsonSys?._canvas && Array.isArray(jsonSys._canvas.components)) {
+      jsonSys._canvas.components.forEach(item => {
+        if (!item || !isIntegratedEnergyCanvasType(item.type) || !COMP.defaults[item.type]) return;
+        const params = {
+          ...COMP.defaults[item.type],
+          ...(cloneJsonBlock(item.params) || {}),
+        };
+        addComponent(item.type, numOr(item.x, 400), numOr(item.y, 400), params, numOr(item.rotation, 0));
+      });
+    }
 
     // If the JSON carries a saved canvas layout, restore positions /
     // connections / viewport exactly.  Otherwise fall back to autoLayout()

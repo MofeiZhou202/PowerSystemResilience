@@ -865,10 +865,27 @@ void SynchronousMachine::initializeFromPowerFlow(const PowerFlowResult& pf,
     }
     return;
   }
-  x.x[range_.offset + 0] = angle;
+  // Classical model: place the internal EMF *behind* the machine reactance so
+  // that at t=0 the machine injects its scheduled P+jQ into a terminal held at
+  // the power-flow voltage. Initializing E == Vt (as before) produces ~0 current
+  // and therefore ~0 electrical power, leaving a standing Pm-Pe imbalance that
+  // drives an undamped rotor swing (or, with equilibrium trimming enabled, a
+  // wrong low-power operating point).
+  double vm = params_.vm_set_pu;
+  if (params_.bus_pos >= 0 && params_.bus_pos < static_cast<int>(pf.vm.size())) {
+    vm = positive_or(pf.vm[static_cast<std::size_t>(params_.bus_pos)], vm);
+  }
+  const double p_pu = params_.p_mech_mw / safe_base(params_.base_mva);
+  const double q_pu = params_.q_elec_mvar / safe_base(params_.base_mva);
+  const Complex vt = std::polar(clamp_voltage(vm), angle);
+  const Complex s_phase(p_pu / 3.0, q_pu / 3.0);
+  const Complex i_phase = std::conj(s_phase / vt);
+  const Complex z(params_.r_pu, std::max(1e-5, params_.x_pu));
+  const Complex e_internal = vt + z * i_phase;
+  x.x[range_.offset + 0] = finite_value(std::arg(e_internal), angle);
   x.x[range_.offset + 1] = 1.0;
-  x.x[range_.offset + 2] = params_.vm_set_pu;
-  x.x[range_.offset + 3] = params_.p_mech_mw / std::max(1.0, params_.base_mva);
+  x.x[range_.offset + 2] = finite_value(std::abs(e_internal), vm);
+  x.x[range_.offset + 3] = p_pu;
 }
 
 bool SynchronousMachine::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
@@ -899,14 +916,26 @@ bool SynchronousMachine::trimToNetworkEquilibrium(DynamicState& x, NetworkState&
     return changed;
   }
   if (params_.dynamic_angle) {
-    const double theta = x.x[state_index(range_, 0)];
-    const double e_mag = x.x[state_index(range_, 2)];
+    // Re-derive the internal EMF from the network-solved terminal voltage and
+    // the scheduled S, then anchor Pm to the scheduled real power. This drives
+    // the machine to the *correct* equilibrium (delivering its scheduled MW with
+    // dx/dt=0), rather than the previous behaviour of dragging Pm down to match
+    // whatever near-zero power the E==Vt initial guess happened to produce.
+    const double p_pu = params_.p_mech_mw / safe_base(params_.base_mva);
+    const double q_pu = params_.q_elec_mvar / safe_base(params_.base_mva);
+    const Complex vt_raw = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+    const Complex vt = std::abs(vt_raw) > kMinVoltage
+                           ? vt_raw
+                           : std::polar(clamp_voltage(params_.vm_set_pu), std::arg(vt_raw));
+    const Complex s_phase(p_pu / 3.0, q_pu / 3.0);
+    const Complex i_phase = std::conj(s_phase / vt);
     const Complex z(params_.r_pu, std::max(1e-5, params_.x_pu));
-    const Complex yv = Complex(1.0, 0.0) / z;
-    const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
-    const Eigen::Vector3cd e = balanced_phasors(e_mag, theta);
-    const double pe = finite_value(average_complex_power(v, yv * (e - v)).real());
-    changed = set_if_changed(x.x, state_index(range_, 3), pe) || changed;
+    const Complex e_internal = vt + z * i_phase;
+    if (std::isfinite(std::abs(e_internal)) && std::abs(e_internal) > 0.0) {
+      changed = set_if_changed(x.x, state_index(range_, 0), std::arg(e_internal)) || changed;
+      changed = set_if_changed(x.x, state_index(range_, 2), std::abs(e_internal)) || changed;
+    }
+    changed = set_if_changed(x.x, state_index(range_, 3), p_pu) || changed;
   }
   return changed;
 }

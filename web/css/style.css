@@ -286,9 +286,20 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 #canvas .connection { cursor: pointer; }
 #canvas .connection path { fill: none; }
 #canvas .conn-line { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+#canvas .conn-carrier { stroke: var(--conn-carrier-color) !important; }
 #canvas .connection:hover .conn-line { stroke: var(--accent); stroke-width: 3; }
+#canvas .connection:hover .conn-carrier {
+  stroke: var(--conn-carrier-color) !important;
+  stroke-width: 3.5;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--conn-carrier-color) 55%, transparent));
+}
 #canvas .connection.conn-selected .conn-line { stroke: #e06c75; stroke-width: 3; stroke-dasharray: 6 3; }
 #canvas .connection.conn-selected:hover .conn-line { stroke: #e06c75; stroke-width: 4; }
+#canvas .connection.conn-selected .conn-carrier,
+#canvas .connection.conn-selected:hover .conn-carrier {
+  stroke: var(--conn-carrier-color) !important;
+  stroke-width: 4;
+}
 #canvas .topo-reconfig-overlay { fill: none; }
 /* Alignment guide shown while dragging (doc §18 Phase 4 — snap-on-drag) */
 #canvas .align-guide { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 4 4; opacity: 0.7; pointer-events: none; }
@@ -677,6 +688,12 @@ body[data-active-result-group="modelIO"] #rightPanel {
 }
 
 /* Results */
+.results-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-bottom: 8px;
+}
 .results-summary {
   padding: 10px;
   background: var(--bg3);
@@ -734,6 +751,21 @@ body[data-active-result-group="modelIO"] #rightPanel {
 .carbon-chart {
   height: 240px;
   margin: 4px 0 10px;
+}
+.carbon-sankey-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.carbon-sankey-chart {
+  width: 100%;
+  height: 380px;
+  background: rgba(33, 37, 43, 0.45);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 .dynamic-carbon-results {
   margin-top: 10px;
@@ -818,6 +850,7 @@ body[data-active-result-group="modelIO"] #rightPanel {
 #resultsContent[data-active-group="topologyAnalysis"] .result-group[data-result-group="topologyAnalysis"],
 #resultsContent[data-active-group="hosting"]      .result-group[data-result-group="hosting"],
 #resultsContent[data-active-group="timeSeries"]   .result-group[data-result-group="timeSeries"],
+#resultsContent[data-active-group="integratedEnergy"] .result-group[data-result-group="integratedEnergy"],
 #resultsContent[data-active-group="reliability"]  .result-group[data-result-group="reliability"],
 #resultsContent[data-active-group="scenarioGeneration"] .result-group[data-result-group="scenarioGeneration"],
 #resultsContent[data-active-group="resilience"]   .result-group[data-result-group="resilience"] {
@@ -838,6 +871,39 @@ body[data-active-result-group="modelIO"] #rightPanel {
 }
 .cost-formula-box span {
   color: var(--ink2);
+}
+
+.ies-sankey-chart {
+  width: 100%;
+  height: 420px;
+  background: rgba(33, 37, 43, 0.45);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.ies-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin: 6px 0;
+}
+.ies-kpi-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: rgba(97, 175, 239, 0.08);
+}
+.ies-kpi-card span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+.ies-kpi-card strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1.25;
 }
 .scenario-generation-charts {
   width: 100%;
@@ -1577,10 +1643,56 @@ body[data-active-result-group="modelIO"] .result-group[data-result-group="modelI
 }
 .sub-section[data-sub="reliability"],
 .sub-section[data-sub="timeSeries"],
+.sub-section[data-sub="integratedEnergy"],
 .sub-section[data-sub="modelIO"] {
   align-items: stretch;
   gap: 10px;
   flex-wrap: wrap;
+}
+.power-flow-sub-section {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 7px;
+}
+.pf-toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.pf-advanced-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 7px;
+  width: 100%;
+  padding-top: 7px;
+  border-top: 1px solid rgba(255,255,255,0.1);
+}
+.pf-advanced-panel[hidden] { display: none; }
+.pf-option-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--sub-bar-border);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.025);
+}
+.pf-option-title {
+  align-self: stretch;
+  display: inline-flex;
+  align-items: center;
+  min-width: 46px;
+  padding-right: 7px;
+  margin-right: 1px;
+  border-right: 1px solid rgba(255,255,255,0.12);
+  color: var(--accent2);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 .model-io-sub-section {
   align-items: stretch;

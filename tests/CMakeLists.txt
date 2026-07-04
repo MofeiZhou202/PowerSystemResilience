@@ -37,6 +37,7 @@ hacdcpf_add_test(test_uc_storage_degradation test_uc_storage_degradation.cpp)
 hacdcpf_add_test(test_uc_vpp               test_uc_vpp.cpp)
 hacdcpf_add_test(test_uc_energy_router     test_uc_energy_router.cpp)
 hacdcpf_add_test(test_uc_mobile_storage    test_uc_mobile_storage.cpp)
+hacdcpf_add_test(test_integrated_energy_campus test_integrated_energy_campus.cpp)
 hacdcpf_add_test(test_scaling_regression  test_scaling_regression.cpp)
 hacdcpf_add_test(test_hacdcdss            test_hacdcdss.cpp)
 

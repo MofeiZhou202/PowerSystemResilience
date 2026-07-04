@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Hybrid AC/DC Power System Simulator — ETAP-Style</title>
-<link rel="stylesheet" href="css/style.css?v=20260703-results-io"/>
+<link rel="stylesheet" href="css/style.css?v=20260703-pf-options"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -66,6 +66,7 @@
   <button id="moduleTopology"     class="module-btn" data-module="topology">拓扑重构</button>
   <button id="moduleTopologyAnalysis" class="module-btn" data-module="topologyAnalysis">拓扑分析</button>
   <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries">时序生产模拟</button>
+  <button id="moduleIntegratedEnergy" class="module-btn" data-module="integratedEnergy">园区综合能源</button>
   <button id="moduleHosting"      class="module-btn" data-module="hosting">承载力分析</button>
   <button id="moduleReliability"  class="module-btn" data-module="reliability">可靠性分析</button>
   <button id="moduleScenarioGeneration" class="module-btn" data-module="scenarioGeneration">场景生成</button>
@@ -101,6 +102,7 @@
     <div class="io-toolbar-group">
       <div class="io-toolbar-group-title">输出</div>
       <button id="btnIoExportJson" class="toolbar-btn run-btn" title="导出当前系统 JSON">导出JSON</button>
+      <button id="btnIoExportMatpower" class="toolbar-btn" title="导出当前系统的 MATPOWER AC 子集 (.m)">导出MATPOWER</button>
       <button id="btnIoExportEtap" class="toolbar-btn" title="导出 ETAP 工作簿 (.xlsx)">导出ETAP</button>
       <button id="btnIoExportEtapXml" class="toolbar-btn" title="导出 ETAP 工程 XML (.xml)">导出ETAP XML</button>
       <button id="btnIoExportGridlabd" class="toolbar-btn" title="导出 GridLAB-D GLM">导出GLM</button>
@@ -114,41 +116,128 @@
     </div>
   </div>
   <!-- Power flow -->
-  <div class="sub-section" data-sub="powerFlow" hidden>
-    <label class="sub-label">潮流算法
-      <select id="pfMethod" title="潮流计算方法">
-        <option value="ac_newton">交直流统一NR</option>
-        <option value="pure_ac">交流NR</option>
-        <option value="dc">直流潮流(B-θ)</option>
-        <option value="fdpf">快速解耦</option>
-        <option value="adaptive">自适应分区</option>
-        <option value="hybrid_linearized">混合线性化</option>
-        <option value="islanded">孤岛检测</option>
-        <option value="distributed_slack">分布式平衡</option>
-        <option value="three_phase">三相不对称</option>
-      </select>
-    </label>
-    <label class="sub-label">单位切换
-      <select id="pfDisplayUnit" title="功率显示单位">
-        <option value="MW">MW / MVar</option>
-        <option value="kW">kW / kVar</option>
-        <option value="W">W / Var</option>
-      </select>
-    </label>
-    <label class="sub-label">可视化
-      <select id="vizMode" title="可视化模式">
-        <option value="off">关闭</option>
-        <option value="flow">潮流方向</option>
-        <option value="heatmap">热力图</option>
-        <option value="both">方向+热力图</option>
-      </select>
-    </label>
-    <button id="btnPowerFlow" class="toolbar-btn run-btn" title="运行潮流计算">运行潮流计算</button>
-    <button id="btnExportPfResults" class="toolbar-btn" title="将潮流计算结果导出为 JSON 文件">结果导出</button>
-    <label class="sub-label sub-checkbox" title="混合 AC/DC 潮流必须校核 DC 岛电压形成与变换器协调可行性">
-      <input id="pfCoordCheck" type="checkbox" checked/>
-      <span>多变换器校核</span>
-    </label>
+  <div class="sub-section power-flow-sub-section" data-sub="powerFlow" hidden>
+    <div class="pf-toolbar-row">
+      <label class="sub-label">潮流算法
+        <select id="pfMethod" title="潮流计算方法">
+          <option value="ac_newton">交直流统一NR</option>
+          <option value="pure_ac">交流NR</option>
+          <option value="dc">直流潮流(B-θ)</option>
+          <option value="fdpf">快速解耦</option>
+          <option value="adaptive">自适应分区</option>
+          <option value="hybrid_linearized">混合线性化</option>
+          <option value="islanded">孤岛检测</option>
+          <option value="distributed_slack">分布式平衡</option>
+          <option value="three_phase">三相不对称</option>
+        </select>
+      </label>
+      <label class="sub-label">损耗模型
+        <select id="pfLossModel" title="VSC / DC-DC 损耗模型">
+          <option value="linear">线性</option>
+          <option value="current_based">电流相关</option>
+        </select>
+      </label>
+      <label class="sub-label">容差
+        <input id="pfTol" type="number" step="1e-10" value="1e-8" title="潮流收敛容差"/>
+      </label>
+      <label class="sub-label">最大迭代
+        <input id="pfMaxIter" type="number" min="1" step="1" value="100" title="NR / 统一潮流最大迭代"/>
+      </label>
+      <label class="sub-label">单位切换
+        <select id="pfDisplayUnit" title="功率显示单位">
+          <option value="MW">MW / MVar</option>
+          <option value="kW">kW / kVar</option>
+          <option value="W">W / Var</option>
+        </select>
+      </label>
+      <label class="sub-label">可视化
+        <select id="vizMode" title="可视化模式">
+          <option value="off">关闭</option>
+          <option value="flow">潮流方向</option>
+          <option value="heatmap">热力图</option>
+          <option value="both">方向+热力图</option>
+        </select>
+      </label>
+      <button id="btnPowerFlow" class="toolbar-btn run-btn" title="运行潮流计算">运行潮流计算</button>
+      <button id="btnExportPfResults" class="toolbar-btn" title="将潮流计算结果导出为 JSON 文件">结果导出</button>
+      <button id="btnPfAdvanced" class="toolbar-btn" type="button" aria-expanded="false" aria-controls="pfAdvancedPanel" title="展开高级潮流参数">高级潮流</button>
+      <label class="sub-label sub-checkbox" title="混合 AC/DC 潮流必须校核 DC 岛电压形成与变换器协调可行性">
+        <input id="pfCoordCheck" type="checkbox" checked/>
+        <span>多变换器校核</span>
+      </label>
+    </div>
+    <div id="pfAdvancedPanel" class="pf-advanced-panel" hidden>
+      <div class="pf-option-group">
+        <div class="pf-option-title">收敛</div>
+        <label class="sub-label">FDPF迭代<input id="pfFdpfMaxIter" type="number" min="1" step="1" value="1000"/></label>
+        <label class="sub-label">Δθ(rad)<input id="pfMaxDeltaVa" type="number" step="0.01" value="1.5"/></label>
+        <label class="sub-label">ΔV(pu)<input id="pfMaxDeltaVm" type="number" step="0.01" value="0.5"/></label>
+        <label class="sub-label">ΔVdc(pu)<input id="pfMaxDeltaVdc" type="number" step="0.01" value="0.5"/></label>
+        <label class="sub-label">线搜索<input id="pfMaxLineSearch" type="number" min="0" step="1" value="10"/></label>
+        <label class="sub-label">正则步<input id="pfMaxRegularization" type="number" min="0" step="1" value="8"/></label>
+        <label class="sub-label">λ0<input id="pfRegularizationLambda0" type="number" step="1e-7" value="1e-6"/></label>
+        <label class="sub-label">λ增长<input id="pfRegularizationGrowth" type="number" step="0.1" value="10"/></label>
+      </div>
+      <div class="pf-option-group">
+        <div class="pf-option-title">开关</div>
+        <label class="sub-label sub-checkbox"><input id="pfPvPqConversion" type="checkbox" checked/><span>PV/PQ</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfAutoSwing" type="checkbox" checked/><span>自动平衡</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfConverterModeSwitch" type="checkbox" checked/><span>换流器模式</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfRigidVdcFormer" type="checkbox"/><span>刚性Vdc源</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfCoupledJacobian" type="checkbox"/><span>耦合雅可比</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfAugmentedEquations" type="checkbox"/><span>增广方程</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfSemiSmoothNewton" type="checkbox"/><span>半光滑NR</span></label>
+      </div>
+      <div class="pf-option-group">
+        <div class="pf-option-title">换流器</div>
+        <label class="sub-label">Q滞环<input id="pfPvQHysteresis" type="number" step="0.001" value="0.01"/></label>
+        <label class="sub-label">恢复V差<input id="pfPvRecoverVmTol" type="number" step="0.001" value="0.01"/></label>
+        <label class="sub-label">Vdc高阈<input id="pfVdcSwitchHigh" type="number" step="0.001" value="0.03"/></label>
+        <label class="sub-label">Vdc低阈<input id="pfVdcSwitchLow" type="number" step="0.001" value="0.01"/></label>
+        <label class="sub-label">模式滞后<input id="pfModeHysteresis" type="number" min="0" step="1" value="2"/></label>
+      </div>
+      <div class="pf-option-group">
+        <div class="pf-option-title">全局化</div>
+        <label class="sub-label">策略
+          <select id="pfGlobalization">
+            <option value="line_search">线搜索</option>
+            <option value="trust_region">信赖域</option>
+            <option value="pseudo_transient">伪暂态</option>
+          </select>
+        </label>
+        <label class="sub-label">TR初值<input id="pfTrustRadius0" type="number" step="0.1" value="1"/></label>
+        <label class="sub-label">TR上限<input id="pfTrustRadiusMax" type="number" step="0.1" value="10"/></label>
+        <label class="sub-label">PTC初值<input id="pfPtcDelta0" type="number" step="0.1" value="1"/></label>
+        <label class="sub-label">PTC增长<input id="pfPtcGrowth" type="number" step="0.1" value="2"/></label>
+      </div>
+      <div class="pf-option-group">
+        <div class="pf-option-title">ZIP</div>
+        <label class="sub-label">P-Z<input id="pfZipPwZ" type="number" step="0.05" value="0"/></label>
+        <label class="sub-label">P-I<input id="pfZipPwI" type="number" step="0.05" value="0"/></label>
+        <label class="sub-label">P-P<input id="pfZipPwP" type="number" step="0.05" value="1"/></label>
+        <label class="sub-label">Q-Z<input id="pfZipQwZ" type="number" step="0.05" value="0"/></label>
+        <label class="sub-label">Q-I<input id="pfZipQwI" type="number" step="0.05" value="0"/></label>
+        <label class="sub-label">Q-P<input id="pfZipQwP" type="number" step="0.05" value="1"/></label>
+      </div>
+      <div class="pf-option-group">
+        <div class="pf-option-title">鲁棒</div>
+        <label class="sub-label sub-checkbox"><input id="pfRobustScaling" type="checkbox" checked/><span>缩放</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfRobustEquilibration" type="checkbox" checked/><span>行列均衡</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfRobustCondition" type="checkbox" checked/><span>条件监测</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfRobustNonmonotone" type="checkbox" checked/><span>非单调线搜索</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfRobustAutoFallback" type="checkbox"/><span>自动回退</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfRobustHomotopy" type="checkbox" checked/><span>同伦</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfRobustKrylov" type="checkbox"/><span>Krylov</span></label>
+        <label class="sub-label">最低Vm<input id="pfRobustMinVm" type="number" step="1e-8" value="1e-8"/></label>
+      </div>
+      <div class="pf-option-group">
+        <div class="pf-option-title">运行</div>
+        <label class="sub-label">AC线程<input id="pfAcEvalThreads" type="number" min="0" step="1" value="0"/></label>
+        <label class="sub-label sub-checkbox"><input id="pfSolverProfiling" type="checkbox"/><span>性能剖析</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfIterationLog" type="checkbox"/><span>迭代日志</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfVerbose" type="checkbox"/><span>Verbose</span></label>
+      </div>
+    </div>
   </div>
   <!-- Optimal power flow -->
   <div class="sub-section" data-sub="opf" hidden>
@@ -659,6 +748,108 @@
     <input type="file" id="fileImportPrice"       accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
     <input type="file" id="fileImportLoadProfile" accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
   </div>
+  <!-- Campus integrated energy simulation -->
+  <div class="sub-section integrated-energy-sub-section" data-sub="integratedEnergy" hidden>
+    <div class="control-param-group ies-param-group" title="园区综合能源仿真基础设置">
+      <span class="control-param-title">仿真</span>
+      <label class="sub-label">小时
+        <input id="iesHours" type="number" value="24" min="1" max="8760" step="1"/>
+      </label>
+      <label class="sub-label">求解器
+        <select id="iesSolver">
+          <option value="auto" selected>Auto</option>
+          <option value="highs">HiGHS</option>
+          <option value="scip">SCIP</option>
+          <option value="native">Native</option>
+        </select>
+      </label>
+      <label class="sub-label">目标
+        <select id="iesObjective">
+          <option value="cost" selected>成本</option>
+          <option value="carbon">碳排</option>
+          <option value="curtailment">弃能</option>
+          <option value="weighted">加权</option>
+        </select>
+      </label>
+      <label class="sub-label">购电上限(MW)
+        <input id="iesImportLimit" type="number" value="16" min="0" step="0.5"/>
+      </label>
+      <label class="sub-label">售电上限(MW)
+        <input id="iesExportLimit" type="number" value="5" min="0" step="0.5"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="启用后，优先从画布上的综合能源元件读取容量、负荷、储能和转换效率">
+        <input id="iesUseCanvas" type="checkbox" checked/>
+        <span>画布建模</span>
+      </label>
+      <button id="btnSeedIntegratedEnergyCanvas" class="toolbar-btn" title="在当前画布添加一套可编辑的园区综合能源示例元件">示例<br>画布</button>
+      <button id="btnImportIntegratedEnergyProfiles" class="toolbar-btn" title="导入园区综合能源负荷、可再生出力、电价和碳因子时序 (JSON / CSV)">时序<br>导入</button>
+    </div>
+    <div class="control-param-group ies-param-group" title="多能需求与新能源可用容量">
+      <span class="control-param-title">负荷/资源</span>
+      <label class="sub-label">电负荷(MW)
+        <input id="iesElectricLoad" type="number" value="8" min="0" step="0.1"/>
+      </label>
+      <label class="sub-label">热负荷(MW)
+        <input id="iesHeatLoad" type="number" value="4" min="0" step="0.1"/>
+      </label>
+      <label class="sub-label">氢负荷(MW)
+        <input id="iesHydrogenLoad" type="number" value="0.2" min="0" step="0.05"/>
+      </label>
+      <label class="sub-label">光伏(MW)
+        <input id="iesSolarRated" type="number" value="8" min="0" step="0.5"/>
+      </label>
+      <label class="sub-label">风电(MW)
+        <input id="iesWindRated" type="number" value="4" min="0" step="0.5"/>
+      </label>
+    </div>
+    <div class="control-param-group ies-param-group" title="能源转换与储能容量">
+      <span class="control-param-title">转换/储能</span>
+      <label class="sub-label">CHP电(MW)
+        <input id="iesChpPower" type="number" value="4" min="0" step="0.5"/>
+      </label>
+      <label class="sub-label">热泵(MW)
+        <input id="iesHeatPump" type="number" value="3" min="0" step="0.5"/>
+      </label>
+      <label class="sub-label">电解槽(MW)
+        <input id="iesElectrolyzer" type="number" value="3" min="0" step="0.5"/>
+      </label>
+      <label class="sub-label">燃料电池(MW)
+        <input id="iesFuelCell" type="number" value="2" min="0" step="0.5"/>
+      </label>
+      <label class="sub-label">电储能(MWh)
+        <input id="iesElectricStorage" type="number" value="10" min="0" step="1"/>
+      </label>
+      <label class="sub-label">氢储能(MWh)
+        <input id="iesHydrogenStorage" type="number" value="8" min="0" step="1"/>
+      </label>
+    </div>
+    <div class="control-param-group ies-param-group ies-param-group-actions" title="碳预算、交通与运行控制">
+      <span class="control-param-title">碳/交通</span>
+      <label class="sub-label sub-checkbox" title="启用总碳预算约束">
+        <input id="iesEnableCarbonBudget" type="checkbox"/>
+        <span>碳预算</span>
+      </label>
+      <label class="sub-label">预算(tCO2)
+        <input id="iesCarbonBudget" type="number" value="70" min="0" step="1"/>
+      </label>
+      <label class="sub-label">捕集率
+        <input id="iesCaptureFraction" type="number" value="0.85" min="0" max="1" step="0.05"/>
+      </label>
+      <label class="sub-label">EV比例
+        <input id="iesEvRatio" type="number" value="0.45" min="0" max="1" step="0.05"/>
+      </label>
+      <label class="sub-label">HV比例
+        <input id="iesHvRatio" type="number" value="0.20" min="0" max="1" step="0.05"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="终端储能回到初始能量，避免跨周期透支">
+        <input id="iesCyclicStorage" type="checkbox" checked/>
+        <span>周期储能</span>
+      </label>
+      <button id="btnRunIntegratedEnergy" class="toolbar-btn run-btn" title="运行园区综合能源仿真">运行<br>综合能源</button>
+      <button id="btnExportIntegratedEnergy" class="toolbar-btn" title="导出园区综合能源仿真结果">结果<br>导出</button>
+    </div>
+    <input type="file" id="fileImportIntegratedEnergyProfiles" accept=".json,.csv,.txt" style="display:none"/>
+  </div>
   <!-- Hosting capacity -->
   <div class="sub-section" data-sub="hosting" hidden>
     <button id="btnRunBearingCap" class="toolbar-btn run-btn" title="运行DG承载力评估">运行承载力评估</button>
@@ -922,6 +1113,10 @@
     <div class="lib-section">
       <h4>聚合资源</h4>
       <div class="lib-grid" id="aggregationComponents"></div>
+    </div>
+    <div class="lib-section">
+      <h4>综合能源</h4>
+      <div class="lib-grid" id="integratedEnergyComponents"></div>
     </div>
   </aside>
 
@@ -1231,6 +1426,9 @@
     <div id="tabResults" class="tab-content">
       <div id="resultsEmpty" class="empty-hint">运行计算后在此查看结果</div>
       <div id="resultsContent" style="display:none">
+        <div class="results-actions">
+          <button id="btnExportAllResults" class="toolbar-btn" title="将当前会话中已产生的分析结果合并导出为一个 JSON 文件">全部结果导出</button>
+        </div>
         <div id="resultsSummary" class="results-summary"></div>
         <div class="result-group" data-result-group="powerFlow">
         <div class="topo-section" id="pfBalanceSection" style="display:none">
@@ -1328,6 +1526,18 @@
         <div class="topo-section" id="carbonSummarySection">
           <h4 id="carbonSummaryTitle">碳流分析结果 — 概览</h4>
           <div id="carbonSummary" class="results-summary"></div>
+        </div>
+        <div class="topo-section" id="staticCarbonSankeySection">
+          <div class="carbon-sankey-header">
+            <h4>碳流分析结果 — 源荷追踪 Sankey</h4>
+            <label class="sub-label">显示
+              <select id="carbonSankeyMetric" title="切换 Sankey 连接值">
+                <option value="power">电力流(MW)</option>
+                <option value="carbon">碳流(tCO2)</option>
+              </select>
+            </label>
+          </div>
+          <div id="carbonSankeyFlowChart" class="carbon-sankey-chart"></div>
         </div>
         <div class="topo-section" id="staticCarbonBusSection">
           <h4>碳流分析结果 — 节点碳强度</h4>
@@ -1511,6 +1721,32 @@
           <div id="annualSimRenStats" class="topo-table-wrap"></div>
         </div>
         </div><!-- /result-group timeSeries -->
+        <div class="result-group" data-result-group="integratedEnergy">
+          <div class="topo-section" id="iesResultsSection">
+            <h4>园区综合能源仿真结果 — 概览</h4>
+            <div id="iesSummary" class="results-summary"></div>
+          </div>
+          <div class="topo-section">
+            <div class="carbon-sankey-header">
+              <h4>园区综合能源仿真结果 — 多能流 Sankey</h4>
+              <span class="sub-hint">电、热、氢、燃料按 MWh 汇总展示</span>
+            </div>
+            <div id="iesSankeyChart" class="ies-sankey-chart"></div>
+          </div>
+          <div class="topo-section">
+            <h4>园区综合能源仿真结果 — 电力调度</h4>
+            <div id="iesDispatchChart" class="tspf-chart"></div>
+          </div>
+          <div class="topo-section">
+            <h4>园区综合能源仿真结果 — 储能与碳</h4>
+            <div id="iesStorageChart" class="tspf-chart"></div>
+            <div id="iesCarbonChart" class="tspf-chart"></div>
+          </div>
+          <div class="topo-section">
+            <h4>园区综合能源仿真结果 — 关键时序</h4>
+            <div id="iesResultsTable" class="topo-table-wrap"></div>
+          </div>
+        </div><!-- /result-group integratedEnergy -->
         <div class="result-group" data-result-group="reliability">
           <div class="topo-section">
             <h4>可靠性分析结果</h4>
@@ -1652,7 +1888,7 @@
 </div>
 
   <script src="js/components.js?v=20260703-model-io"></script>
-  <script src="js/canvas.js?v=20260703-results-io"></script>
-  <script src="js/app.js?v=20260703-results-io"></script>
+  <script src="js/canvas.js?v=20260703-pf-options"></script>
+  <script src="js/app.js?v=20260703-pf-options"></script>
 </body>
 </html>

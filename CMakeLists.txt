@@ -399,6 +399,7 @@ set(HACDCPF_SOURCES
   src/time_series/time_series_pf.cpp
   src/time_series/annual_production_sim.cpp
   src/time_series/lifecycle_simulation.cpp
+  src/integrated_energy/integrated_energy_optimizer.cpp
   # ── power_models stubs (AML model builders) ──────────────────────────
   src/power_models/acopf_builder.cpp
   src/power_models/acdcopf_builder.cpp

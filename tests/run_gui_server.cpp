@@ -52,6 +52,7 @@
 #include "hacdcpf/time_series/time_series_pf.hpp"
 #include "hacdcpf/time_series/annual_production_sim.hpp"
 #include "hacdcpf/time_series/lifecycle_simulation.hpp"
+#include "hacdcpf/integrated_energy/integrated_energy_optimizer.hpp"
 #include "hacdcpf/carbon_analysis/carbon_analysis.hpp"
 #include "hacdcpf/carbon_analysis/annual_carbon_analysis.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
@@ -231,6 +232,263 @@ void apply_replay_zip_and_solver_flags(hacdcpf::powerflow::SolverData& data,
   data.enable_coupled_jacobian = opt.enable_coupled_jacobian;
   data.enable_augmented_equations = opt.enable_augmented_equations;
   data.enable_semi_smooth_newton = opt.enable_semi_smooth_newton;
+}
+
+std::string pf_loss_model_name(hacdcpf::LossModelType loss_model) {
+  return loss_model == hacdcpf::LossModelType::CurrentBased ? "current_based" : "linear";
+}
+
+std::string pf_globalization_name(hacdcpf::PowerFlowOptions::GlobalizationStrategy strategy) {
+  using GS = hacdcpf::PowerFlowOptions::GlobalizationStrategy;
+  switch (strategy) {
+    case GS::TrustRegion: return "trust_region";
+    case GS::PseudoTransient: return "pseudo_transient";
+    case GS::LineSearch: return "line_search";
+  }
+  return "line_search";
+}
+
+void set_if_bool(const json& o, const char* key, bool& target) {
+  if (o.contains(key) && o[key].is_boolean()) target = o[key].get<bool>();
+}
+
+void set_if_int(const json& o, const char* key, int& target) {
+  if (o.contains(key) && o[key].is_number()) target = o[key].get<int>();
+}
+
+void set_if_double(const json& o, const char* key, double& target) {
+  if (o.contains(key) && o[key].is_number()) target = o[key].get<double>();
+}
+
+void apply_pf_robust_options(const json& o,
+                             hacdcpf::powerflow::RobustNonlinearOptions& opt) {
+  set_if_bool(o, "enable_residual_scaling", opt.enable_residual_scaling);
+  set_if_bool(o, "enable_variable_scaling", opt.enable_variable_scaling);
+  set_if_bool(o, "enable_jacobian_row_col_equilibration",
+              opt.enable_jacobian_row_col_equilibration);
+  set_if_bool(o, "enable_condition_monitor", opt.enable_condition_monitor);
+  set_if_bool(o, "enable_nonmonotone_linesearch", opt.enable_nonmonotone_linesearch);
+  set_if_bool(o, "enable_smooth_ncp", opt.enable_smooth_ncp);
+  set_if_bool(o, "enable_activity_hysteresis", opt.enable_activity_hysteresis);
+  set_if_bool(o, "enable_lm_trust_region_fallback",
+              opt.enable_lm_trust_region_fallback);
+  set_if_bool(o, "enable_ptc_ser", opt.enable_ptc_ser);
+  set_if_bool(o, "enable_homotopy", opt.enable_homotopy);
+  set_if_bool(o, "enable_log_voltage", opt.enable_log_voltage);
+  set_if_bool(o, "auto_enable_log_voltage_on_failure",
+              opt.auto_enable_log_voltage_on_failure);
+  set_if_bool(o, "enable_newton_krylov_fallback",
+              opt.enable_newton_krylov_fallback);
+  set_if_bool(o, "enable_schur_preconditioner", opt.enable_schur_preconditioner);
+  set_if_bool(o, "enable_auto_fallback_scheduling",
+              opt.enable_auto_fallback_scheduling);
+
+  set_if_double(o, "min_scale", opt.min_scale);
+  set_if_double(o, "max_scale", opt.max_scale);
+  set_if_double(o, "min_vm_pu", opt.min_vm_pu);
+  set_if_double(o, "min_branch_x_pu", opt.min_branch_x_pu);
+  set_if_double(o, "bad_condition_threshold", opt.bad_condition_threshold);
+  set_if_double(o, "tiny_pivot_threshold", opt.tiny_pivot_threshold);
+  set_if_int(o, "nonmonotone_window", opt.nonmonotone_window);
+  set_if_double(o, "armijo_c", opt.armijo_c);
+  set_if_double(o, "line_search_beta", opt.line_search_beta);
+  set_if_int(o, "max_line_search_trials", opt.max_line_search_trials);
+  set_if_double(o, "ncp_mu0", opt.ncp_mu0);
+  set_if_double(o, "ncp_mu_min", opt.ncp_mu_min);
+  set_if_double(o, "ncp_mu_factor", opt.ncp_mu_factor);
+  set_if_double(o, "ncp_mu_factor_coarse", opt.ncp_mu_factor_coarse);
+  set_if_double(o, "ncp_mu_phase_transition", opt.ncp_mu_phase_transition);
+  set_if_int(o, "min_active_set_hold_iters", opt.min_active_set_hold_iters);
+  set_if_double(o, "q_limit_hysteresis", opt.q_limit_hysteresis);
+  set_if_double(o, "lm_lambda0", opt.lm_lambda0);
+  set_if_double(o, "lm_lambda_min", opt.lm_lambda_min);
+  set_if_double(o, "lm_lambda_max", opt.lm_lambda_max);
+  set_if_double(o, "trust_region_radius0", opt.trust_region_radius0);
+  set_if_double(o, "trust_region_radius_min", opt.trust_region_radius_min);
+  set_if_double(o, "trust_region_radius_max", opt.trust_region_radius_max);
+  set_if_double(o, "ptc_dt0", opt.ptc_dt0);
+  set_if_double(o, "ptc_dt_min", opt.ptc_dt_min);
+  set_if_double(o, "ptc_dt_max", opt.ptc_dt_max);
+  set_if_double(o, "ptc_gamma", opt.ptc_gamma);
+  set_if_double(o, "homotopy_step0", opt.homotopy_step0);
+  set_if_double(o, "homotopy_step_min", opt.homotopy_step_min);
+  set_if_double(o, "homotopy_step_max", opt.homotopy_step_max);
+  set_if_int(o, "homotopy_max_steps", opt.homotopy_max_steps);
+  set_if_double(o, "nk_condition_trigger", opt.nk_condition_trigger);
+  set_if_int(o, "gmres_restart", opt.gmres_restart);
+  set_if_int(o, "gmres_max_outer", opt.gmres_max_outer);
+  set_if_double(o, "gmres_tol", opt.gmres_tol);
+}
+
+void apply_power_flow_request_options(const json& root, hacdcpf::PowerFlowOptions& opt) {
+  const json* o = &root;
+  if (root.contains("options") && root["options"].is_object()) {
+    o = &root["options"];
+  }
+
+  set_if_int(*o, "max_iter", opt.max_iter);
+  set_if_double(*o, "tol", opt.tol);
+  set_if_int(*o, "fdpf_max_iter", opt.fdpf_max_iter);
+  set_if_bool(*o, "enable_pv_pq_conversion", opt.enable_pv_pq_conversion);
+  set_if_bool(*o, "enable_auto_swing_selection", opt.enable_auto_swing_selection);
+  set_if_bool(*o, "enable_converter_mode_switching",
+              opt.enable_converter_mode_switching);
+  set_if_bool(*o, "enable_converter_coordination_check",
+              opt.enable_converter_coordination_check);
+  set_if_bool(*o, "enable_rigid_vdc_former", opt.enable_rigid_vdc_former);
+  set_if_bool(*o, "verbose", opt.verbose);
+  set_if_bool(*o, "enable_solver_profiling", opt.enable_solver_profiling);
+  set_if_bool(*o, "enable_iteration_log", opt.enable_iteration_log);
+  set_if_int(*o, "ac_eval_threads", opt.ac_eval_threads);
+
+  set_if_double(*o, "pv_q_hysteresis_pu", opt.pv_q_hysteresis_pu);
+  set_if_double(*o, "pv_recover_vm_tol_pu", opt.pv_recover_vm_tol_pu);
+  set_if_double(*o, "max_delta_va_rad", opt.max_delta_va_rad);
+  set_if_double(*o, "max_delta_vm_pu", opt.max_delta_vm_pu);
+  set_if_double(*o, "max_delta_vdc_pu", opt.max_delta_vdc_pu);
+  set_if_int(*o, "max_line_search_steps", opt.max_line_search_steps);
+  set_if_int(*o, "max_regularization_steps", opt.max_regularization_steps);
+  set_if_double(*o, "regularization_lambda0", opt.regularization_lambda0);
+  set_if_double(*o, "regularization_growth", opt.regularization_growth);
+  set_if_double(*o, "converter_vdc_switch_high_pu",
+                opt.converter_vdc_switch_high_pu);
+  set_if_double(*o, "converter_vdc_switch_low_pu",
+                opt.converter_vdc_switch_low_pu);
+  set_if_int(*o, "mode_hysteresis_iters", opt.mode_hysteresis_iters);
+  set_if_bool(*o, "enable_coupled_jacobian", opt.enable_coupled_jacobian);
+  set_if_bool(*o, "enable_augmented_equations", opt.enable_augmented_equations);
+  set_if_bool(*o, "enable_semi_smooth_newton", opt.enable_semi_smooth_newton);
+
+  if (o->contains("loss_model") && (*o)["loss_model"].is_string()) {
+    const std::string lm = (*o)["loss_model"].get<std::string>();
+    opt.loss_model = lm == "current_based"
+        ? hacdcpf::LossModelType::CurrentBased
+        : hacdcpf::LossModelType::Linear;
+  }
+
+  if (o->contains("globalization") && (*o)["globalization"].is_string()) {
+    const std::string glob = (*o)["globalization"].get<std::string>();
+    using GS = hacdcpf::PowerFlowOptions::GlobalizationStrategy;
+    if (glob == "trust_region") opt.globalization = GS::TrustRegion;
+    else if (glob == "pseudo_transient") opt.globalization = GS::PseudoTransient;
+    else opt.globalization = GS::LineSearch;
+  }
+  set_if_double(*o, "trust_region_radius0", opt.trust_region_radius0);
+  set_if_double(*o, "trust_region_max", opt.trust_region_max);
+  set_if_double(*o, "ptc_delta0", opt.ptc_delta0);
+  set_if_double(*o, "ptc_growth", opt.ptc_growth);
+
+  if (o->contains("zip_pw") && (*o)["zip_pw"].is_array()) {
+    const auto& arr = (*o)["zip_pw"];
+    for (size_t k = 0; k < arr.size() && k < 3; ++k)
+      if (arr[k].is_number()) opt.zip_pw[k] = arr[k].get<double>();
+  }
+  if (o->contains("zip_qw") && (*o)["zip_qw"].is_array()) {
+    const auto& arr = (*o)["zip_qw"];
+    for (size_t k = 0; k < arr.size() && k < 3; ++k)
+      if (arr[k].is_number()) opt.zip_qw[k] = arr[k].get<double>();
+  }
+
+  if (o->contains("robust_nonlinear") && (*o)["robust_nonlinear"].is_object()) {
+    apply_pf_robust_options((*o)["robust_nonlinear"], opt.robust_nonlinear);
+  }
+}
+
+json pf_robust_options_to_json(const hacdcpf::powerflow::RobustNonlinearOptions& opt) {
+  return json{
+      {"enable_residual_scaling", opt.enable_residual_scaling},
+      {"enable_variable_scaling", opt.enable_variable_scaling},
+      {"enable_jacobian_row_col_equilibration",
+       opt.enable_jacobian_row_col_equilibration},
+      {"enable_condition_monitor", opt.enable_condition_monitor},
+      {"enable_nonmonotone_linesearch", opt.enable_nonmonotone_linesearch},
+      {"enable_smooth_ncp", opt.enable_smooth_ncp},
+      {"enable_activity_hysteresis", opt.enable_activity_hysteresis},
+      {"enable_lm_trust_region_fallback", opt.enable_lm_trust_region_fallback},
+      {"enable_ptc_ser", opt.enable_ptc_ser},
+      {"enable_homotopy", opt.enable_homotopy},
+      {"enable_log_voltage", opt.enable_log_voltage},
+      {"auto_enable_log_voltage_on_failure", opt.auto_enable_log_voltage_on_failure},
+      {"enable_newton_krylov_fallback", opt.enable_newton_krylov_fallback},
+      {"enable_schur_preconditioner", opt.enable_schur_preconditioner},
+      {"enable_auto_fallback_scheduling", opt.enable_auto_fallback_scheduling},
+      {"min_scale", opt.min_scale},
+      {"max_scale", opt.max_scale},
+      {"min_vm_pu", opt.min_vm_pu},
+      {"min_branch_x_pu", opt.min_branch_x_pu},
+      {"bad_condition_threshold", opt.bad_condition_threshold},
+      {"tiny_pivot_threshold", opt.tiny_pivot_threshold},
+      {"nonmonotone_window", opt.nonmonotone_window},
+      {"armijo_c", opt.armijo_c},
+      {"line_search_beta", opt.line_search_beta},
+      {"max_line_search_trials", opt.max_line_search_trials},
+      {"ncp_mu0", opt.ncp_mu0},
+      {"ncp_mu_min", opt.ncp_mu_min},
+      {"ncp_mu_factor", opt.ncp_mu_factor},
+      {"ncp_mu_factor_coarse", opt.ncp_mu_factor_coarse},
+      {"ncp_mu_phase_transition", opt.ncp_mu_phase_transition},
+      {"min_active_set_hold_iters", opt.min_active_set_hold_iters},
+      {"q_limit_hysteresis", opt.q_limit_hysteresis},
+      {"lm_lambda0", opt.lm_lambda0},
+      {"lm_lambda_min", opt.lm_lambda_min},
+      {"lm_lambda_max", opt.lm_lambda_max},
+      {"trust_region_radius0", opt.trust_region_radius0},
+      {"trust_region_radius_min", opt.trust_region_radius_min},
+      {"trust_region_radius_max", opt.trust_region_radius_max},
+      {"ptc_dt0", opt.ptc_dt0},
+      {"ptc_dt_min", opt.ptc_dt_min},
+      {"ptc_dt_max", opt.ptc_dt_max},
+      {"ptc_gamma", opt.ptc_gamma},
+      {"homotopy_step0", opt.homotopy_step0},
+      {"homotopy_step_min", opt.homotopy_step_min},
+      {"homotopy_step_max", opt.homotopy_step_max},
+      {"homotopy_max_steps", opt.homotopy_max_steps},
+      {"nk_condition_trigger", opt.nk_condition_trigger},
+      {"gmres_restart", opt.gmres_restart},
+      {"gmres_max_outer", opt.gmres_max_outer},
+      {"gmres_tol", opt.gmres_tol},
+  };
+}
+
+json power_flow_options_to_json(const hacdcpf::PowerFlowOptions& opt) {
+  return json{
+      {"max_iter", opt.max_iter},
+      {"tol", opt.tol},
+      {"fdpf_max_iter", opt.fdpf_max_iter},
+      {"enable_pv_pq_conversion", opt.enable_pv_pq_conversion},
+      {"enable_auto_swing_selection", opt.enable_auto_swing_selection},
+      {"enable_converter_mode_switching", opt.enable_converter_mode_switching},
+      {"enable_converter_coordination_check", opt.enable_converter_coordination_check},
+      {"enable_rigid_vdc_former", opt.enable_rigid_vdc_former},
+      {"verbose", opt.verbose},
+      {"enable_solver_profiling", opt.enable_solver_profiling},
+      {"enable_iteration_log", opt.enable_iteration_log},
+      {"ac_eval_threads", opt.ac_eval_threads},
+      {"pv_q_hysteresis_pu", opt.pv_q_hysteresis_pu},
+      {"pv_recover_vm_tol_pu", opt.pv_recover_vm_tol_pu},
+      {"max_delta_va_rad", opt.max_delta_va_rad},
+      {"max_delta_vm_pu", opt.max_delta_vm_pu},
+      {"max_delta_vdc_pu", opt.max_delta_vdc_pu},
+      {"max_line_search_steps", opt.max_line_search_steps},
+      {"max_regularization_steps", opt.max_regularization_steps},
+      {"regularization_lambda0", opt.regularization_lambda0},
+      {"regularization_growth", opt.regularization_growth},
+      {"converter_vdc_switch_high_pu", opt.converter_vdc_switch_high_pu},
+      {"converter_vdc_switch_low_pu", opt.converter_vdc_switch_low_pu},
+      {"mode_hysteresis_iters", opt.mode_hysteresis_iters},
+      {"loss_model", pf_loss_model_name(opt.loss_model)},
+      {"enable_coupled_jacobian", opt.enable_coupled_jacobian},
+      {"enable_augmented_equations", opt.enable_augmented_equations},
+      {"enable_semi_smooth_newton", opt.enable_semi_smooth_newton},
+      {"globalization", pf_globalization_name(opt.globalization)},
+      {"trust_region_radius0", opt.trust_region_radius0},
+      {"trust_region_max", opt.trust_region_max},
+      {"ptc_delta0", opt.ptc_delta0},
+      {"ptc_growth", opt.ptc_growth},
+      {"zip_pw", json::array({opt.zip_pw[0], opt.zip_pw[1], opt.zip_pw[2]})},
+      {"zip_qw", json::array({opt.zip_qw[0], opt.zip_qw[1], opt.zip_qw[2]})},
+      {"robust_nonlinear", pf_robust_options_to_json(opt.robust_nonlinear)},
+  };
 }
 
 void populate_projected_replay_results(const hacdcpf::powerflow::SolverData& data,
@@ -1708,6 +1966,14 @@ json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
   }
   out["dc_bus_carbon"] = dbc;
 
+  auto mw_map_to_json = [](const std::unordered_map<int, double>& values) {
+    json out_map;
+    for (const auto& [sid, mw] : values) {
+      out_map[std::to_string(sid)] = mw;
+    }
+    return out_map;
+  };
+
   json lc = json::array();
   for (const auto& l : carbon.load_carbon)
     lc.push_back({{"load_index", l.load_index},
@@ -1716,7 +1982,8 @@ json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
                   {"demand_mw", l.demand_mw},
                   {"display_demand_mw", std::abs(l.demand_mw)},
                   {"carbon_intensity_tco2_mwh", l.carbon_intensity_tco2_mwh},
-                  {"total_emissions_tco2", l.total_emissions_tco2}});
+                  {"total_emissions_tco2", l.total_emissions_tco2},
+                  {"generator_supply_mw", mw_map_to_json(l.generator_supply_mw)}});
   out["load_carbon"] = lc;
 
   json dlc = json::array();
@@ -1727,7 +1994,8 @@ json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
                    {"demand_mw", l.demand_mw},
                    {"display_demand_mw", std::abs(l.demand_mw)},
                    {"carbon_intensity_tco2_mwh", l.carbon_intensity_tco2_mwh},
-                   {"total_emissions_tco2", l.total_emissions_tco2}});
+                   {"total_emissions_tco2", l.total_emissions_tco2},
+                   {"generator_supply_mw", mw_map_to_json(l.generator_supply_mw)}});
   out["dc_load_carbon"] = dlc;
 
   json brcc = json::array();
@@ -1737,7 +2005,8 @@ json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
                     {"to_bus", b.to_bus},
                     {"loss_mw", b.loss_mw},
                     {"carbon_intensity_tco2_mwh", b.carbon_intensity_tco2_mwh},
-                    {"total_emissions_tco2", b.total_emissions_tco2}});
+                    {"total_emissions_tco2", b.total_emissions_tco2},
+                    {"generator_loss_mw", mw_map_to_json(b.generator_loss_mw)}});
   out["branch_carbon"] = brcc;
 
   json dbrcc = json::array();
@@ -1747,7 +2016,8 @@ json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
                      {"to_bus", b.to_bus},
                      {"loss_mw", b.loss_mw},
                      {"carbon_intensity_tco2_mwh", b.carbon_intensity_tco2_mwh},
-                     {"total_emissions_tco2", b.total_emissions_tco2}});
+                     {"total_emissions_tco2", b.total_emissions_tco2},
+                     {"generator_loss_mw", mw_map_to_json(b.generator_loss_mw)}});
   out["dc_branch_carbon"] = dbrcc;
 
   json vcc = json::array();
@@ -1756,7 +2026,9 @@ json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
                    {"bus_ac", v.bus_ac},
                    {"bus_dc", v.bus_dc},
                    {"loss_mw", v.loss_mw},
-                   {"total_emissions_tco2", v.total_emissions_tco2}});
+                   {"carbon_intensity_tco2_mwh", v.carbon_intensity_tco2_mwh},
+                   {"total_emissions_tco2", v.total_emissions_tco2},
+                   {"generator_loss_mw", mw_map_to_json(v.generator_loss_mw)}});
   out["vsc_carbon"] = vcc;
 
   json dcc = json::array();
@@ -1765,7 +2037,9 @@ json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
                    {"bus_in", d.bus_in},
                    {"bus_out", d.bus_out},
                    {"loss_mw", d.loss_mw},
-                   {"total_emissions_tco2", d.total_emissions_tco2}});
+                   {"carbon_intensity_tco2_mwh", d.carbon_intensity_tco2_mwh},
+                   {"total_emissions_tco2", d.total_emissions_tco2},
+                   {"generator_loss_mw", mw_map_to_json(d.generator_loss_mw)}});
   out["dcdc_carbon"] = dcc;
 
   json sc = json::array();
@@ -1781,61 +2055,116 @@ json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
                   {"stored_energy_mwh", s.stored_energy_mwh},
                   {"soc_carbon_intensity_tco2_mwh", s.soc_carbon_intensity_tco2_mwh},
                   {"carbon_intensity_tco2_mwh", s.carbon_intensity_tco2_mwh},
-                  {"total_emissions_tco2", s.total_emissions_tco2}});
+                  {"total_emissions_tco2", s.total_emissions_tco2},
+                  {"source_supply_mw", mw_map_to_json(s.source_supply_mw)}});
   out["storage_carbon"] = sc;
 
+  json erc = json::array();
+  for (const auto& er : carbon.energy_router_carbon) {
+    erc.push_back({{"router_index", er.router_index},
+                   {"input_power_mw", er.input_power_mw},
+                   {"output_power_mw", er.output_power_mw},
+                   {"loss_mw", er.loss_mw},
+                   {"active_input_ports", er.active_input_ports},
+                   {"active_output_ports", er.active_output_ports},
+                   {"carbon_intensity_tco2_mwh", er.carbon_intensity_tco2_mwh},
+                   {"total_emissions_tco2", er.total_emissions_tco2},
+                   {"source_loss_mw", mw_map_to_json(er.source_loss_mw)}});
+  }
+  out["energy_router_carbon"] = erc;
+  out["generator_loss_allocation"] = mw_map_to_json(carbon.generator_loss_allocation);
+
   json sk_labels = json::array(), sk_src = json::array(), sk_tgt = json::array(), sk_val = json::array();
+  json source_meta = json::array();
+  auto source_sys = hacdcpf::project_to_canonical_models(sys);
+  hacdcpf::materialize_dc_storage(source_sys);
+  auto push_source = [&](const std::string& label,
+                         const std::string& type,
+                         int component_index,
+                         int bus,
+                         bool is_dc,
+                         double p_mw,
+                         double ef) {
+    const int id = static_cast<int>(source_meta.size());
+    sk_labels.push_back(label);
+    source_meta.push_back(json{{"source_id", id},
+                               {"label", label},
+                               {"source_type", type},
+                               {"component_index", component_index},
+                               {"bus", bus},
+                               {"is_dc", is_dc},
+                               {"p_mw", p_mw},
+                               {"emission_factor_tco2_mwh", ef}});
+  };
   int src_idx = 0;
-  for (const auto& g : sys.ac.generators) {
+  for (const auto& g : source_sys.ac.generators) {
     if (!g.in_service) continue;
-    sk_labels.push_back(g.name.empty() ? "Gen" + std::to_string(g.index) : g.name);
+    push_source(g.name.empty() ? "Gen" + std::to_string(g.index) : g.name,
+                "generator", g.index, g.bus, false, std::max(g.pg_mw, 0.0),
+                g.emission_factor_tco2_mwh);
     src_idx++;
   }
-  for (const auto& eg : sys.ac.external_grids) {
+  for (const auto& eg : source_sys.ac.external_grids) {
     if (!eg.in_service) continue;
-    sk_labels.push_back(eg.name.empty() ? "Grid" + std::to_string(eg.index) : eg.name);
+    push_source(eg.name.empty() ? "Grid" + std::to_string(eg.index) : eg.name,
+                "external_grid", eg.index, eg.bus, false, 0.0,
+                eg.emission_factor_tco2_mwh);
     src_idx++;
   }
-  for (const auto& sg : sys.ac.static_generators) {
+  for (const auto& sg : source_sys.ac.static_generators) {
     if (!sg.in_service) continue;
-    sk_labels.push_back(sg.name.empty() ? "Sgen" + std::to_string(sg.index) : sg.name);
+    push_source(sg.name.empty() ? "Sgen" + std::to_string(sg.index) : sg.name,
+                "static_generator", sg.index, sg.bus, false,
+                std::max(0.0, sg.p_mw * sg.scaling), sg.co2_emission_rate);
     src_idx++;
   }
-  for (const auto& rg : sys.ac.renewable_gens) {
+  for (const auto& rg : source_sys.ac.renewable_gens) {
     if (!rg.in_service || rg.p_mw <= 1e-6) continue;
-    sk_labels.push_back(rg.name.empty() ? "Ren" + std::to_string(rg.index) : rg.name);
+    push_source(rg.name.empty() ? "Ren" + std::to_string(rg.index) : rg.name,
+                "renewable_generator", rg.index, rg.bus, false, rg.p_mw, 0.0);
     src_idx++;
   }
-  for (const auto& pv : sys.ac.pv_systems) {
+  for (const auto& pv : source_sys.ac.pv_systems) {
     if (!pv.in_service || pv.p_mw <= 1e-6) continue;
-    sk_labels.push_back(pv.name.empty() ? "PV" + std::to_string(pv.index) : pv.name);
+    push_source(pv.name.empty() ? "PV" + std::to_string(pv.index) : pv.name,
+                "pv_system", pv.index, pv.bus, false, pv.p_mw, 0.0);
     src_idx++;
   }
-  for (const auto& sg : sys.dc.static_generators) {
+  for (const auto& sg : source_sys.dc.static_generators) {
     if (!sg.in_service) continue;
-    sk_labels.push_back(sg.name.empty() ? "DCSgen" + std::to_string(sg.index) : sg.name);
+    push_source(sg.name.empty() ? "DCSgen" + std::to_string(sg.index) : sg.name,
+                "dc_static_generator", sg.index, sg.bus, true,
+                std::max(0.0, sg.p_mw * sg.scaling), sg.co2_emission_rate);
     src_idx++;
   }
-  for (const auto& sg : sys.dc.dc_static_generators) {
+  for (const auto& sg : source_sys.dc.dc_static_generators) {
     if (!sg.in_service) continue;
-    sk_labels.push_back(sg.name.empty() ? "DCGen" + std::to_string(sg.index) : sg.name);
+    push_source(sg.name.empty() ? "DCGen" + std::to_string(sg.index) : sg.name,
+                "dc_generator", sg.index, sg.bus, true,
+                std::max(0.0, sg.p_set_mw * sg.scaling), 0.0);
     src_idx++;
   }
-  for (const auto& pv : sys.dc.pv_arrays) {
+  for (const auto& pv : source_sys.dc.pv_arrays) {
     if (!pv.in_service || pv.p_set_mw <= 1e-6) continue;
-    sk_labels.push_back(pv.name.empty() ? "DCPV" + std::to_string(pv.index) : pv.name);
+    push_source(pv.name.empty() ? "DCPV" + std::to_string(pv.index) : pv.name,
+                "dc_pv_array", pv.index, pv.bus, true, pv.p_set_mw, 0.0);
     src_idx++;
   }
-  for (const auto& st : sys.ac.storage) {
+  for (const auto& st : source_sys.ac.storage) {
     if (!st.in_service || st.p_mw <= 1e-6) continue;
-    sk_labels.push_back(st.name.empty() ? "BESS" + std::to_string(st.index) : st.name);
+    push_source(st.name.empty() ? "BESS" + std::to_string(st.index) : st.name,
+                "storage_discharge", st.index, st.bus, false, st.p_mw,
+                st.soc_carbon_intensity_tco2_mwh);
     src_idx++;
   }
-  for (const auto& st : sys.dc.storage) {
+  for (const auto& st : source_sys.dc.storage) {
     if (!st.in_service || st.p_mw <= 1e-6) continue;
-    sk_labels.push_back(st.name.empty() ? "DCBESS" + std::to_string(st.index) : st.name);
+    push_source(st.name.empty() ? "DCBESS" + std::to_string(st.index) : st.name,
+                "dc_storage_discharge", st.index, st.bus, true, st.p_mw,
+                st.soc_carbon_intensity_tco2_mwh);
     src_idx++;
   }
+  out["carbon_sources"] = source_meta;
 
   const int n_sources = src_idx;
   for (const auto& l : carbon.load_carbon) sk_labels.push_back("Load@Bus" + std::to_string(l.bus));
@@ -3912,6 +4241,368 @@ json cost_formula_json(const hacdcpf::TimeSeriesPFOptions& opts,
              {"curtailment", opts.w_curtailment}};
   }
   return j;
+}
+
+double gui_json_number(const json& j, const std::string& key, double fallback) {
+  if (!j.contains(key) || !j.at(key).is_number()) return fallback;
+  const double value = j.at(key).get<double>();
+  return std::isfinite(value) ? value : fallback;
+}
+
+bool gui_json_bool(const json& j, const std::string& key, bool fallback) {
+  return (j.contains(key) && j.at(key).is_boolean()) ? j.at(key).get<bool>() : fallback;
+}
+
+void gui_apply_profile(const json& j,
+                       const std::string& key,
+                       std::vector<double>& dst,
+                       int n,
+                       double fallback) {
+  if (j.contains(key) && j.at(key).is_array()) {
+    dst.clear();
+    for (const auto& v : j.at(key)) {
+      if (v.is_number()) dst.push_back(v.get<double>());
+    }
+    return;
+  }
+  if (j.contains(key) && j.at(key).is_number()) {
+    dst.assign(static_cast<std::size_t>(std::max(0, n)), j.at(key).get<double>());
+  } else if (dst.empty()) {
+    dst.assign(static_cast<std::size_t>(std::max(0, n)), fallback);
+  }
+}
+
+hacdcpf::integrated_energy::CampusIESSolver campus_ies_solver_from_string(
+    const std::string& raw) {
+  const std::string v = gui_lower_ascii(raw);
+  if (v == "highs") return hacdcpf::integrated_energy::CampusIESSolver::HiGHS;
+  if (v == "scip") return hacdcpf::integrated_energy::CampusIESSolver::SCIP;
+  if (v == "gurobi") return hacdcpf::integrated_energy::CampusIESSolver::Gurobi;
+  if (v == "native") return hacdcpf::integrated_energy::CampusIESSolver::Native;
+  return hacdcpf::integrated_energy::CampusIESSolver::Auto;
+}
+
+hacdcpf::integrated_energy::CampusIESObjective campus_ies_objective_from_string(
+    const std::string& raw) {
+  const std::string v = gui_lower_ascii(raw);
+  if (v == "carbon" || v == "co2") {
+    return hacdcpf::integrated_energy::CampusIESObjective::Carbon;
+  }
+  if (v == "curtailment" || v == "curtail") {
+    return hacdcpf::integrated_energy::CampusIESObjective::MinCurtailment;
+  }
+  if (v == "weighted" || v == "multi") {
+    return hacdcpf::integrated_energy::CampusIESObjective::Weighted;
+  }
+  return hacdcpf::integrated_energy::CampusIESObjective::Cost;
+}
+
+const char* campus_ies_objective_label(
+    hacdcpf::integrated_energy::CampusIESObjective objective) {
+  switch (objective) {
+    case hacdcpf::integrated_energy::CampusIESObjective::Carbon: return "carbon";
+    case hacdcpf::integrated_energy::CampusIESObjective::MinCurtailment: return "curtailment";
+    case hacdcpf::integrated_energy::CampusIESObjective::Weighted: return "weighted";
+    case hacdcpf::integrated_energy::CampusIESObjective::Cost: return "cost";
+  }
+  return "cost";
+}
+
+hacdcpf::integrated_energy::CampusIESOptions campus_ies_options_from_json(
+    const json& j) {
+  hacdcpf::integrated_energy::CampusIESOptions opt;
+  opt.solver = campus_ies_solver_from_string(j.value("solver", std::string("auto")));
+  opt.objective = campus_ies_objective_from_string(j.value("objective", std::string("cost")));
+  opt.enable_grid_exchange_exclusivity =
+      gui_json_bool(j, "enable_grid_exchange_exclusivity", false);
+  opt.enable_storage_exclusivity = gui_json_bool(j, "enable_storage_exclusivity", false);
+  opt.enable_carbon_budget = gui_json_bool(j, "enable_carbon_budget", false);
+  opt.enforce_terminal_storage_cyclic =
+      gui_json_bool(j, "enforce_terminal_storage_cyclic", true);
+  opt.enable_transport = gui_json_bool(j, "enable_transport", true);
+  opt.enable_hydrogen_storage_layers =
+      gui_json_bool(j, "enable_hydrogen_storage_layers", true);
+  opt.time_limit_sec = gui_json_number(j, "time_limit_sec", 60.0);
+  opt.mip_gap_tol = gui_json_number(j, "mip_gap_tol", 1e-4);
+  if (j.contains("objective_weights") && j["objective_weights"].is_object()) {
+    const auto& w = j["objective_weights"];
+    opt.weight_cost = gui_json_number(w, "cost", opt.weight_cost);
+    opt.weight_carbon = gui_json_number(w, "carbon", opt.weight_carbon);
+    opt.weight_curtailment = gui_json_number(w, "curtailment", opt.weight_curtailment);
+  }
+  return opt;
+}
+
+hacdcpf::integrated_energy::CampusIESData campus_ies_data_from_json(
+    const json& j) {
+  using hacdcpf::integrated_energy::make_sample_campus_ies_data;
+  const int n = std::max(1, j.value("num_steps", j.value("hours", 24)));
+  hacdcpf::integrated_energy::CampusIESData d = make_sample_campus_ies_data(n);
+  d.num_steps = n;
+  d.step_duration_hr = gui_json_number(j, "step_duration_hr", d.step_duration_hr);
+  d.pcc_ac_bus = j.value("pcc_ac_bus", d.pcc_ac_bus);
+  d.import_limit_mw = gui_json_number(j, "import_limit_mw", d.import_limit_mw);
+  d.export_limit_mw = gui_json_number(j, "export_limit_mw", d.export_limit_mw);
+
+  const double old_solar = std::max(1e-9, d.solar_rated_mw);
+  const double old_wind = std::max(1e-9, d.wind_rated_mw);
+  d.solar_rated_mw = gui_json_number(j, "solar_rated_mw", d.solar_rated_mw);
+  d.wind_rated_mw = gui_json_number(j, "wind_rated_mw", d.wind_rated_mw);
+  if (!j.contains("solar_available_mw")) {
+    for (double& v : d.solar_available_mw) v *= d.solar_rated_mw / old_solar;
+  }
+  if (!j.contains("wind_available_mw")) {
+    for (double& v : d.wind_available_mw) v *= d.wind_rated_mw / old_wind;
+  }
+
+  gui_apply_profile(j, "electric_load_mw", d.electric_load_mw, n, 8.0);
+  gui_apply_profile(j, "heat_load_mw", d.heat_load_mw, n, 4.0);
+  gui_apply_profile(j, "hydrogen_load_mw", d.hydrogen_load_mw, n, 0.2);
+  gui_apply_profile(j, "fuel_load_mw", d.fuel_load_mw, n, 0.1);
+  gui_apply_profile(j, "transport_demand_km", d.transport_demand_km, n, 120.0);
+  gui_apply_profile(j, "solar_available_mw", d.solar_available_mw, n, 0.0);
+  gui_apply_profile(j, "wind_available_mw", d.wind_available_mw, n, 0.0);
+  gui_apply_profile(j, "grid_buy_price", d.grid_buy_price, n, 90.0);
+  gui_apply_profile(j, "grid_sell_price", d.grid_sell_price, n, 35.0);
+  gui_apply_profile(j, "grid_carbon_tco2_mwh", d.grid_carbon_tco2_mwh, n, 0.58);
+
+  d.chp_power_max_mw = gui_json_number(j, "chp_power_max_mw", d.chp_power_max_mw);
+  d.chp_heat_max_mw = gui_json_number(j, "chp_heat_max_mw", d.chp_heat_max_mw);
+  d.heat_pump_power_max_mw =
+      gui_json_number(j, "heat_pump_power_max_mw", d.heat_pump_power_max_mw);
+  d.electrolyzer_power_max_mw =
+      gui_json_number(j, "electrolyzer_power_max_mw", d.electrolyzer_power_max_mw);
+  d.fuel_cell_power_max_mw =
+      gui_json_number(j, "fuel_cell_power_max_mw", d.fuel_cell_power_max_mw);
+  d.fuel_purchase_limit_mw =
+      gui_json_number(j, "fuel_purchase_limit_mw", d.fuel_purchase_limit_mw);
+
+  d.electric_storage_capacity_mwh =
+      gui_json_number(j, "electric_storage_capacity_mwh", d.electric_storage_capacity_mwh);
+  d.electric_storage_initial_mwh =
+      gui_json_number(j, "electric_storage_initial_mwh", d.electric_storage_initial_mwh);
+  d.electric_storage_charge_max_mw =
+      gui_json_number(j, "electric_storage_charge_max_mw", d.electric_storage_charge_max_mw);
+  d.electric_storage_discharge_max_mw =
+      gui_json_number(j, "electric_storage_discharge_max_mw", d.electric_storage_discharge_max_mw);
+  d.thermal_storage_capacity_mwh =
+      gui_json_number(j, "thermal_storage_capacity_mwh", d.thermal_storage_capacity_mwh);
+  d.thermal_storage_initial_mwh =
+      gui_json_number(j, "thermal_storage_initial_mwh", d.thermal_storage_initial_mwh);
+  d.thermal_storage_charge_max_mw =
+      gui_json_number(j, "thermal_storage_charge_max_mw", d.thermal_storage_charge_max_mw);
+  d.thermal_storage_discharge_max_mw =
+      gui_json_number(j, "thermal_storage_discharge_max_mw", d.thermal_storage_discharge_max_mw);
+  d.hydrogen_storage_capacity_mwh =
+      gui_json_number(j, "hydrogen_storage_capacity_mwh", d.hydrogen_storage_capacity_mwh);
+  d.hydrogen_storage_initial_mwh =
+      gui_json_number(j, "hydrogen_storage_initial_mwh", d.hydrogen_storage_initial_mwh);
+  d.hydrogen_storage_charge_max_mw =
+      gui_json_number(j, "hydrogen_storage_charge_max_mw", d.hydrogen_storage_charge_max_mw);
+  d.hydrogen_storage_discharge_max_mw =
+      gui_json_number(j, "hydrogen_storage_discharge_max_mw", d.hydrogen_storage_discharge_max_mw);
+  d.weekly_hydrogen_storage_capacity_mwh =
+      gui_json_number(j, "weekly_hydrogen_storage_capacity_mwh",
+                      d.weekly_hydrogen_storage_capacity_mwh);
+  d.weekly_hydrogen_storage_initial_mwh =
+      gui_json_number(j, "weekly_hydrogen_storage_initial_mwh",
+                      d.weekly_hydrogen_storage_initial_mwh);
+  d.weekly_hydrogen_storage_charge_max_mw =
+      gui_json_number(j, "weekly_hydrogen_storage_charge_max_mw",
+                      d.weekly_hydrogen_storage_charge_max_mw);
+  d.weekly_hydrogen_storage_discharge_max_mw =
+      gui_json_number(j, "weekly_hydrogen_storage_discharge_max_mw",
+                      d.weekly_hydrogen_storage_discharge_max_mw);
+  d.seasonal_hydrogen_storage_capacity_mwh =
+      gui_json_number(j, "seasonal_hydrogen_storage_capacity_mwh",
+                      d.seasonal_hydrogen_storage_capacity_mwh);
+  d.seasonal_hydrogen_storage_initial_mwh =
+      gui_json_number(j, "seasonal_hydrogen_storage_initial_mwh",
+                      d.seasonal_hydrogen_storage_initial_mwh);
+  d.seasonal_hydrogen_storage_charge_max_mw =
+      gui_json_number(j, "seasonal_hydrogen_storage_charge_max_mw",
+                      d.seasonal_hydrogen_storage_charge_max_mw);
+  d.seasonal_hydrogen_storage_discharge_max_mw =
+      gui_json_number(j, "seasonal_hydrogen_storage_discharge_max_mw",
+                      d.seasonal_hydrogen_storage_discharge_max_mw);
+
+  d.eta_electrolysis = gui_json_number(j, "eta_electrolysis", d.eta_electrolysis);
+  d.eta_fuelcell = gui_json_number(j, "eta_fuelcell", d.eta_fuelcell);
+  d.cop_heatpump = gui_json_number(j, "cop_heatpump", d.cop_heatpump);
+  d.eta_chp_elec = gui_json_number(j, "eta_chp_elec", d.eta_chp_elec);
+  d.eta_chp_heat = gui_json_number(j, "eta_chp_heat", d.eta_chp_heat);
+  d.eta_chp_total = gui_json_number(j, "eta_chp_total", d.eta_chp_total);
+  d.eta_storage_charge = gui_json_number(j, "eta_storage_charge", d.eta_storage_charge);
+  d.eta_storage_discharge =
+      gui_json_number(j, "eta_storage_discharge", d.eta_storage_discharge);
+  d.electric_storage_retention =
+      gui_json_number(j, "electric_storage_retention", d.electric_storage_retention);
+  d.thermal_storage_retention =
+      gui_json_number(j, "thermal_storage_retention", d.thermal_storage_retention);
+  d.hydrogen_storage_retention =
+      gui_json_number(j, "hydrogen_storage_retention", d.hydrogen_storage_retention);
+  d.weekly_hydrogen_storage_retention =
+      gui_json_number(j, "weekly_hydrogen_storage_retention",
+                      d.weekly_hydrogen_storage_retention);
+  d.seasonal_hydrogen_storage_retention =
+      gui_json_number(j, "seasonal_hydrogen_storage_retention",
+                      d.seasonal_hydrogen_storage_retention);
+
+  d.ev_ratio = gui_json_number(j, "ev_ratio", d.ev_ratio);
+  d.hv_ratio = gui_json_number(j, "hv_ratio", d.hv_ratio);
+  d.icv_ratio = gui_json_number(j, "icv_ratio", d.icv_ratio);
+  d.alpha_ev_mwh_per_km = gui_json_number(j, "alpha_ev_mwh_per_km", d.alpha_ev_mwh_per_km);
+  d.alpha_hv_mwh_per_km = gui_json_number(j, "alpha_hv_mwh_per_km", d.alpha_hv_mwh_per_km);
+  d.alpha_icv_mwh_per_km =
+      gui_json_number(j, "alpha_icv_mwh_per_km", d.alpha_icv_mwh_per_km);
+
+  d.fuel_carbon_tco2_mwh = gui_json_number(j, "fuel_carbon_tco2_mwh", d.fuel_carbon_tco2_mwh);
+  d.co2_budget_tco2 = gui_json_number(j, "co2_budget_tco2", d.co2_budget_tco2);
+  d.ccus_capture_fraction =
+      gui_json_number(j, "ccus_capture_fraction", d.ccus_capture_fraction);
+  d.ccus_max_tco2_per_h =
+      gui_json_number(j, "ccus_max_tco2_per_h", d.ccus_max_tco2_per_h);
+  d.ccus_power_mwh_per_tco2 =
+      gui_json_number(j, "ccus_power_mwh_per_tco2", d.ccus_power_mwh_per_tco2);
+
+  d.fuel_cost_per_mwh = gui_json_number(j, "fuel_cost_per_mwh", d.fuel_cost_per_mwh);
+  d.solar_om_cost_per_mwh =
+      gui_json_number(j, "solar_om_cost_per_mwh", d.solar_om_cost_per_mwh);
+  d.wind_om_cost_per_mwh =
+      gui_json_number(j, "wind_om_cost_per_mwh", d.wind_om_cost_per_mwh);
+  d.chp_om_cost_per_mwh =
+      gui_json_number(j, "chp_om_cost_per_mwh", d.chp_om_cost_per_mwh);
+  d.heat_pump_om_cost_per_mwh =
+      gui_json_number(j, "heat_pump_om_cost_per_mwh", d.heat_pump_om_cost_per_mwh);
+  d.electrolyzer_om_cost_per_mwh =
+      gui_json_number(j, "electrolyzer_om_cost_per_mwh", d.electrolyzer_om_cost_per_mwh);
+  d.fuel_cell_om_cost_per_mwh =
+      gui_json_number(j, "fuel_cell_om_cost_per_mwh", d.fuel_cell_om_cost_per_mwh);
+  d.storage_throughput_cost_per_mwh =
+      gui_json_number(j, "storage_throughput_cost_per_mwh",
+                      d.storage_throughput_cost_per_mwh);
+  d.hydrogen_storage_throughput_cost_per_mwh =
+      gui_json_number(j, "hydrogen_storage_throughput_cost_per_mwh",
+                      d.hydrogen_storage_throughput_cost_per_mwh);
+  d.carbon_penalty_per_tco2 =
+      gui_json_number(j, "carbon_penalty_per_tco2", d.carbon_penalty_per_tco2);
+  d.ccus_cost_per_tco2 = gui_json_number(j, "ccus_cost_per_tco2", d.ccus_cost_per_tco2);
+  d.curtailment_cost_per_mwh =
+      gui_json_number(j, "curtailment_cost_per_mwh", d.curtailment_cost_per_mwh);
+  d.renewable_mandate_fraction =
+      gui_json_number(j, "renewable_mandate_fraction", d.renewable_mandate_fraction);
+
+  return d;
+}
+
+json campus_ies_sankey_json(
+    const std::vector<hacdcpf::integrated_energy::CampusIESSankeyFlow>& flows) {
+  std::map<std::string, int> node_index;
+  json labels = json::array();
+  json colors = json::array();
+  json sources = json::array();
+  json targets = json::array();
+  json values = json::array();
+  json carriers = json::array();
+
+  auto node_color = [](const std::string& label) {
+    if (label.find("Electric") != std::string::npos || label == "Grid" ||
+        label == "Solar" || label == "Wind") return "rgba(97,175,239,0.95)";
+    if (label.find("Heat") != std::string::npos || label == "CHP") return "rgba(224,108,117,0.95)";
+    if (label.find("Hydrogen") != std::string::npos || label.find("H2") != std::string::npos ||
+        label == "Electrolyzer" || label == "Fuel Cell") return "rgba(86,182,194,0.95)";
+    if (label.find("Fuel") != std::string::npos) return "rgba(229,192,123,0.95)";
+    return "rgba(152,195,121,0.95)";
+  };
+  auto add_node = [&](const std::string& label) {
+    const auto it = node_index.find(label);
+    if (it != node_index.end()) return it->second;
+    const int id = static_cast<int>(node_index.size());
+    node_index[label] = id;
+    labels.push_back(label);
+    colors.push_back(node_color(label));
+    return id;
+  };
+
+  for (const auto& f : flows) {
+    if (!std::isfinite(f.value_mwh) || f.value_mwh <= 1e-9) continue;
+    sources.push_back(add_node(f.source));
+    targets.push_back(add_node(f.target));
+    values.push_back(f.value_mwh);
+    carriers.push_back(f.carrier);
+  }
+
+  return json{{"nodes", json{{"label", labels}, {"color", colors}}},
+              {"links", json{{"source", sources},
+                              {"target", targets},
+                              {"value", values},
+                              {"carrier", carriers}}}};
+}
+
+json campus_ies_result_to_json(
+    const hacdcpf::integrated_energy::CampusIESResult& r,
+    hacdcpf::integrated_energy::CampusIESObjective objective) {
+  json out;
+  out["feasible"] = r.feasible;
+  out["optimal"] = r.optimal;
+  out["solver_name"] = r.solver_name;
+  out["status"] = r.status;
+  out["objective"] = r.objective;
+  out["objective_mode"] = campus_ies_objective_label(objective);
+  out["solve_time_sec"] = r.solve_time_sec;
+  out["summary"] = json{
+      {"total_cost", r.total_cost},
+      {"total_grid_import_mwh", r.total_grid_import_mwh},
+      {"total_grid_export_mwh", r.total_grid_export_mwh},
+      {"total_renewable_mwh", r.total_renewable_mwh},
+      {"total_renewable_available_mwh", r.total_renewable_available_mwh},
+      {"total_curtailment_mwh", r.total_curtailment_mwh},
+      {"renewable_utilization", r.renewable_utilization},
+      {"total_electric_load_mwh", r.total_electric_load_mwh},
+      {"total_heat_load_mwh", r.total_heat_load_mwh},
+      {"total_hydrogen_load_mwh", r.total_hydrogen_load_mwh},
+      {"total_fuel_load_mwh", r.total_fuel_load_mwh},
+      {"total_transport_km", r.total_transport_km},
+      {"total_emissions_tco2", r.total_emissions_tco2},
+      {"total_co2_captured_tco2", r.total_co2_captured_tco2},
+      {"total_carbon_residual_tco2", r.total_carbon_residual_tco2}};
+
+  out["p_grid_import_mw"] = r.p_grid_import_mw;
+  out["p_grid_export_mw"] = r.p_grid_export_mw;
+  out["p_pcc_mw"] = r.p_pcc_mw;
+  out["p_solar_mw"] = r.p_solar_mw;
+  out["p_wind_mw"] = r.p_wind_mw;
+  out["p_solar_curtail_mw"] = r.p_solar_curtail_mw;
+  out["p_wind_curtail_mw"] = r.p_wind_curtail_mw;
+  out["p_chp_mw"] = r.p_chp_mw;
+  out["q_chp_mw"] = r.q_chp_mw;
+  out["p_fuelcell_mw"] = r.p_fuelcell_mw;
+  out["p_heatpump_mw"] = r.p_heatpump_mw;
+  out["q_heatpump_mw"] = r.q_heatpump_mw;
+  out["p_electrolysis_h2_mw"] = r.p_electrolysis_h2_mw;
+  out["h_electrolysis_mw"] = r.h_electrolysis_mw;
+  out["p_storage_charge_mw"] = r.p_storage_charge_mw;
+  out["p_storage_discharge_mw"] = r.p_storage_discharge_mw;
+  out["e_storage_mwh"] = r.e_storage_mwh;
+  out["q_storage_mwh"] = r.q_storage_mwh;
+  out["h_storage_mwh"] = r.h_storage_mwh;
+  out["h_weekly_storage_mwh"] = r.h_weekly_storage_mwh;
+  out["h_seasonal_storage_mwh"] = r.h_seasonal_storage_mwh;
+  out["emissions_tco2"] = r.emissions_tco2;
+  out["co2_captured_tco2"] = r.co2_captured_tco2;
+  out["carbon_residual_tco2"] = r.carbon_residual_tco2;
+  out["p_ccus_mw"] = r.p_ccus_mw;
+
+  json flows = json::array();
+  for (const auto& f : r.sankey_flows) {
+    flows.push_back(json{{"source", f.source},
+                         {"target", f.target},
+                         {"value_mwh", f.value_mwh},
+                         {"carrier", f.carrier}});
+  }
+  out["sankey_flows"] = flows;
+  out["sankey"] = campus_ies_sankey_json(r.sankey_flows);
+  return out;
 }
 
 hacdcpf::TimeSeriesData make_default_ts_data(int steps = 24) {
@@ -8146,6 +8837,64 @@ int main(int argc, char** argv) {
     }
   });
 
+  // ---- Session: export the current system as a MATPOWER .m case ----
+  // MATPOWER is an AC steady-state format. The library exporter preserves the
+  // bounded AC subset and emits a header note in the .m file when hybrid/rich
+  // structures are outside that scope.
+  svr.Post("/api/session/export_matpower",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system) throw std::runtime_error("No system loaded");
+      const auto& sys = *g_session.current_system;
+      json warnings = json::array();
+      hacdcpf::HybridPowerSystem export_sys = sys;
+      const bool has_ac_rich_series = !sys.ac.transformers_2w.empty() ||
+          !sys.ac.transformers_3w.empty() || !sys.ac.switches.empty() ||
+          !sys.ac.circuit_breakers.empty();
+      if (has_ac_rich_series) {
+        try {
+          export_sys = hacdcpf::project_to_canonical_models(sys, /*strip_dead=*/false);
+          warnings.push_back(
+              "AC 变压器/开关/断路器已按 canonical 等值模型导出为 MATPOWER branch 行；原始设备铭牌字段不属于 MATPOWER 格式。");
+        } catch (const std::exception& e) {
+          warnings.push_back(
+              std::string("canonical 等值转换失败，已退回原始 AC 子集导出；部分 rich AC 串联设备可能被省略：") +
+              e.what());
+        }
+      }
+      const std::string matpower = hacdcpf::io::to_matpower(export_sys);
+      std::string safe;
+      for (char ch : g_session.current_name) {
+        safe += (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')
+                    ? ch : '_';
+      }
+      if (safe.empty()) safe = "system";
+
+      if (!sys.dc.buses.empty() || !sys.dc.branches.empty() ||
+          !sys.vsc_converters.empty() || !sys.dc.dcdc_converters.empty() ||
+          !sys.energy_routers.empty()) {
+        warnings.push_back(
+            "MATPOWER 导出当前为 AC 子集；DC 网络、换流器、DC/DC 和能量路由器不会写入 .m 文件。");
+      }
+      if (!sys.ac.static_generators.empty() || !sys.ac.renewable_gens.empty() ||
+          !sys.ac.pv_systems.empty() || !sys.ac.external_grids.empty() ||
+          !sys.ac.storage.empty()) {
+        warnings.push_back(
+            "静态电源、可再生电源、PV、外部电网和储能等 rich AC 元件未映射到 MATPOWER gen 矩阵。");
+      }
+
+      res.set_content(json{{"matpower_string", matpower},
+                           {"name", safe},
+                           {"warnings", warnings}}
+                          .dump(),
+                      "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
   // ---- Session: export the current system as an ETAP-schema .xlsx workbook ----
   // Returns the raw binary workbook (one sheet per ETAP element class) so the
   // browser can download it directly.  save_etap() throws if ETAP support is not
@@ -8669,27 +9418,7 @@ int main(int argc, char** argv) {
       const std::string method = j.value("method", std::string("ac_newton"));
 
       hacdcpf::PowerFlowOptions opt;
-      if (j.contains("options")) {
-        const auto& o = j["options"];
-        if (o.contains("max_iter")) opt.max_iter = o["max_iter"].get<int>();
-        if (o.contains("tol")) opt.tol = o["tol"].get<double>();
-        if (o.contains("fdpf_max_iter")) opt.fdpf_max_iter = o["fdpf_max_iter"].get<int>();
-        if (o.contains("enable_pv_pq_conversion")) opt.enable_pv_pq_conversion = o["enable_pv_pq_conversion"].get<bool>();
-        if (o.contains("enable_auto_swing_selection")) opt.enable_auto_swing_selection = o["enable_auto_swing_selection"].get<bool>();
-        if (o.contains("enable_converter_mode_switching")) opt.enable_converter_mode_switching = o["enable_converter_mode_switching"].get<bool>();
-        if (o.contains("enable_converter_coordination_check")) opt.enable_converter_coordination_check = o["enable_converter_coordination_check"].get<bool>();
-        if (o.contains("verbose")) opt.verbose = o["verbose"].get<bool>();
-        if (o.contains("pv_q_hysteresis_pu")) opt.pv_q_hysteresis_pu = o["pv_q_hysteresis_pu"].get<double>();
-        if (o.contains("pv_recover_vm_tol_pu")) opt.pv_recover_vm_tol_pu = o["pv_recover_vm_tol_pu"].get<double>();
-        if (o.contains("max_delta_va_rad")) opt.max_delta_va_rad = o["max_delta_va_rad"].get<double>();
-        if (o.contains("max_delta_vm_pu")) opt.max_delta_vm_pu = o["max_delta_vm_pu"].get<double>();
-        if (o.contains("max_delta_vdc_pu")) opt.max_delta_vdc_pu = o["max_delta_vdc_pu"].get<double>();
-        if (o.contains("loss_model")) {
-          const std::string lm = o["loss_model"].get<std::string>();
-          if (lm == "current_based") opt.loss_model = hacdcpf::LossModelType::CurrentBased;
-          else opt.loss_model = hacdcpf::LossModelType::Linear;
-        }
-      }
+      apply_power_flow_request_options(j, opt);
       // Honor the request's coordination-check flag (the GUI checkbox). Default
       // to enabled for hybrid AC/DC safety when the request omits it.
       if (!j.contains("options") || !j["options"].contains("enable_converter_coordination_check")) {
@@ -8718,6 +9447,7 @@ int main(int argc, char** argv) {
       out["ac_circuit_breaker_flows"] = json::array();
       out["dc_circuit_breaker_flows"] = json::array();
       out["notes"] = "";
+      out["options_effective"] = power_flow_options_to_json(opt);
 
       // Snapshot original energy routers BEFORE canonical projection clears them.
       // After solve_power_flow → project_to_canonical_models → expand_energy_routers,
@@ -11125,7 +11855,7 @@ int main(int argc, char** argv) {
         out["residual"] = pf.residual;
         out["vdc"] = pf.vdc;
         // Run AC PF to get branch flows and converter transfers for carbon analysis
-        auto ac_pf = hacdcpf::solve_power_flow(sys);
+        auto ac_pf = hacdcpf::solve_power_flow(sys, opt);
         if (ac_pf.converged) {
           add_transfers(ac_pf);
           add_geo_data(ac_pf);
@@ -11142,7 +11872,7 @@ int main(int argc, char** argv) {
         out["va"] = pf.va;
         for (const auto& p : pf.pf_mw) out["branch_abs"].push_back(std::abs(p));
         // Run AC PF to get converter transfers for carbon analysis
-        auto ac_pf = hacdcpf::solve_power_flow(sys);
+        auto ac_pf = hacdcpf::solve_power_flow(sys, opt);
         if (ac_pf.converged) {
           add_transfers(ac_pf);
           add_geo_data(ac_pf);
@@ -14228,6 +14958,68 @@ int main(int argc, char** argv) {
         g_session.busy.store(false);
         res.status = 500;
         res.set_content(json{{"error", "Unknown internal error in time-series PF"}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Campus integrated energy simulation (multi-carrier LP/MILP) ----
+    svr.Post("/api/session/run_campus_ies",
+             [](const httplib::Request& req, httplib::Response& res) {
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(),
+                        "application/json");
+        return;
+      }
+      try {
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        auto data = campus_ies_data_from_json(j);
+        auto options = campus_ies_options_from_json(j);
+        const auto result = hacdcpf::integrated_energy::solve_campus_ies(data, options);
+        json out = campus_ies_result_to_json(result, options.objective);
+        out["num_steps"] = data.num_steps;
+        out["step_duration_hr"] = data.step_duration_hr;
+        out["pcc_ac_bus"] = data.pcc_ac_bus;
+        out["canvas_model_used"] = j.value("canvas_model_used", false);
+        out["canvas_integrated_energy_component_count"] =
+            j.value("canvas_integrated_energy_component_count", 0);
+        if (j.contains("canvas_component_summary") && j["canvas_component_summary"].is_object()) {
+          out["canvas_component_summary"] = j["canvas_component_summary"];
+        }
+        out["inputs"] = json{
+            {"import_limit_mw", data.import_limit_mw},
+            {"export_limit_mw", data.export_limit_mw},
+            {"solar_rated_mw", data.solar_rated_mw},
+            {"wind_rated_mw", data.wind_rated_mw},
+            {"chp_power_max_mw", data.chp_power_max_mw},
+            {"heat_pump_power_max_mw", data.heat_pump_power_max_mw},
+            {"electrolyzer_power_max_mw", data.electrolyzer_power_max_mw},
+            {"fuel_cell_power_max_mw", data.fuel_cell_power_max_mw},
+            {"electric_storage_capacity_mwh", data.electric_storage_capacity_mwh},
+            {"thermal_storage_capacity_mwh", data.thermal_storage_capacity_mwh},
+            {"hydrogen_storage_capacity_mwh", data.hydrogen_storage_capacity_mwh},
+            {"co2_budget_tco2", data.co2_budget_tco2},
+            {"enable_carbon_budget", options.enable_carbon_budget}};
+        out["input_profiles"] = json{
+            {"electric_load_mw", data.electric_load_mw},
+            {"heat_load_mw", data.heat_load_mw},
+            {"hydrogen_load_mw", data.hydrogen_load_mw},
+            {"fuel_load_mw", data.fuel_load_mw},
+            {"transport_demand_km", data.transport_demand_km},
+            {"solar_available_mw", data.solar_available_mw},
+            {"wind_available_mw", data.wind_available_mw},
+            {"grid_buy_price", data.grid_buy_price},
+            {"grid_carbon_tco2_mwh", data.grid_carbon_tco2_mwh}};
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      } catch (...) {
+        g_session.busy.store(false);
+        res.status = 500;
+        res.set_content(json{{"error", "Unknown internal error in campus integrated energy simulation"}}.dump(),
+                        "application/json");
       }
     });
 

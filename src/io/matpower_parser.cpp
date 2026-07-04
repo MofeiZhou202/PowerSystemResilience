@@ -598,13 +598,23 @@ std::string to_matpower(const HybridPowerSystem& sys) {
          "for this bounded AC export (structural loss).\n";
   }
 
-  // Fold loads and shunts into per-bus injections.
+  // Fold loads and shunts into per-bus injections.  MATPOWER-imported systems
+  // store Pd/Qd and Gs/Bs directly on buses, while GUI-authored systems may use
+  // first-class Load/Shunt components; preserve both paths.
   std::unordered_map<int, double> pd, qd, gs, bs;
+  for (const auto& b : sys.ac.buses) {
+    pd[b.index] += b.pd_mw;
+    qd[b.index] += b.qd_mvar;
+    gs[b.index] += b.gs_mw;
+    bs[b.index] += b.bs_mvar;
+  }
   for (const auto& l : sys.ac.loads) {
-    pd[l.bus] += l.p_mw;
-    qd[l.bus] += l.q_mvar;
+    if (!l.in_service) continue;
+    pd[l.bus] += l.p_mw * l.scaling;
+    qd[l.bus] += l.q_mvar * l.scaling;
   }
   for (const auto& s : sys.ac.shunts) {
+    if (!s.in_service) continue;
     gs[s.bus] += s.gs_mw;
     bs[s.bus] += s.bs_mvar;
   }
@@ -613,10 +623,12 @@ std::string to_matpower(const HybridPowerSystem& sys) {
        "%\tbus_i\ttype\tPd\tQd\tGs\tBs\tarea\tVm\tVa\tbaseKV\tzone\tVmax\tVmin\n";
   o << "mpc.bus = [\n";
   for (const auto& b : sys.ac.buses) {
-    o << "\t" << b.index << "\t" << internal_bus_type_to_matpower(b.bus_type)
+    const int matpower_type = b.in_service ? internal_bus_type_to_matpower(b.bus_type) : 4;
+    o << "\t" << b.index << "\t" << matpower_type
       << "\t" << pd[b.index] << "\t" << qd[b.index] << "\t" << gs[b.index]
-      << "\t" << bs[b.index] << "\t1\t" << b.vm_pu << "\t" << b.va_deg << "\t"
-      << b.base_kv << "\t1\t" << b.vmax_pu << "\t" << b.vmin_pu << ";\n";
+      << "\t" << bs[b.index] << "\t" << b.area << "\t" << b.vm_pu << "\t"
+      << b.va_deg << "\t" << b.base_kv << "\t" << b.zone << "\t"
+      << b.vmax_pu << "\t" << b.vmin_pu << ";\n";
   }
   o << "];\n";
 
@@ -639,7 +651,9 @@ std::string to_matpower(const HybridPowerSystem& sys) {
   for (const auto& br : sys.ac.branches) {
     o << "\t" << br.from_bus << "\t" << br.to_bus << "\t" << br.r_pu << "\t"
       << br.x_pu << "\t" << br.b_pu << "\t" << br.rate_a_mva
-      << "\t0\t0\t0\t0\t1\t-360\t360;\n";
+      << "\t" << br.rate_b_mva << "\t" << br.rate_c_mva << "\t"
+      << br.tap << "\t" << br.shift_deg << "\t" << (br.in_service ? 1 : 0)
+      << "\t-360\t360;\n";
   }
   o << "];\n";
 

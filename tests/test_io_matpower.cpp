@@ -89,6 +89,7 @@ TEST_CASE("MATPOWER export round-trips through the parser (§13-#6)",
 
   ACBus b1; b1.index = 1; b1.bus_type = BusType::SLACK; b1.base_kv = 110.0;
   ACBus b2; b2.index = 2; b2.bus_type = BusType::PQ; b2.base_kv = 110.0;
+  b2.pd_mw = 5.0; b2.qd_mvar = 2.0;
   sys.ac.buses = {b1, b2};
   ACBranch l; l.index = 1; l.from_bus = 1; l.to_bus = 2;
   l.r_pu = 0.01; l.x_pu = 0.10; l.rate_a_mva = 100.0;
@@ -108,5 +109,7 @@ TEST_CASE("MATPOWER export round-trips through the parser (§13-#6)",
   CHECK(back.ac.branches.size() == 1);
   CHECK(back.ac.generators.size() == 1);
   CHECK(std::abs(back.base_mva - 100.0) < 1e-9);
+  CHECK(std::abs(back.ac.buses.at(1).pd_mw - 35.0) < 1e-9);
+  CHECK(std::abs(back.ac.buses.at(1).qd_mvar - 12.0) < 1e-9);
   CHECK(std::abs(back.ac.branches.front().x_pu - 0.10) < 1e-9);
 }

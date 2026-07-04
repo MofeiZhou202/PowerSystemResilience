@@ -55,6 +55,7 @@ const App = (() => {
   let _lastPfData = null;
   let _lastOpfData = null;
   let _lastTspfData = null;
+  let _lastIntegratedEnergyData = null;
   let _lastAnnualData = null;
   let _lastCarbonData = null;
   let _lastDynamicCarbonData = null;
@@ -114,6 +115,7 @@ const App = (() => {
     _lastPfData = null;
     _lastOpfData = null;
     _lastTspfData = null;
+    _lastIntegratedEnergyData = null;
     _lastCarbonData = null;
     _lastDynamicCarbonData = null;
     _lastTransientData = null;
@@ -864,6 +866,44 @@ const App = (() => {
     return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
   }
 
+  function buildResultsExportBundle() {
+    const results = {};
+    const add = (key, value) => {
+      if (value !== null && value !== undefined) results[key] = value;
+    };
+    add('power_flow', _lastPfData);
+    add('optimal_power_flow', _lastOpfData);
+    add('time_series_power_flow', _lastTspfData);
+    add('campus_integrated_energy', _lastIntegratedEnergyData);
+    add('annual_production_simulation', _lastAnnualData);
+    add('carbon_flow', _lastCarbonData);
+    add('dynamic_carbon_flow', _lastDynamicCarbonData);
+    add('transient_simulation', _lastTransientData);
+    add('reliability', _lastReliabilityData);
+    add('resilience', _lastResilienceData);
+    add('scenario_generation', _lastScenarioGenerationData);
+    add('topology_analysis', _lastTopoAnalysisData);
+    add('network_reduction', _lastNetReductionData);
+
+    return {
+      schema: 'hacdcpf.gui.results.bundle.v1',
+      exported_at: new Date().toISOString(),
+      active_result_group: document.getElementById('resultsContent')?.dataset.activeGroup || '',
+      display_unit: getPowerUnit(),
+      result_count: Object.keys(results).length,
+      results,
+    };
+  }
+
+  function exportAllCachedResults() {
+    const bundle = buildResultsExportBundle();
+    if (!bundle.result_count) {
+      log('暂无可导出的分析结果，请先运行至少一个计算', 'warn');
+      return false;
+    }
+    return downloadJsonFile(`gui_results_bundle_${tsTagForFilename()}.json`, bundle);
+  }
+
   // ========== API Client ==========
   async function parseJsonResponse(res) {
     const text = await res.text();
@@ -1364,6 +1404,29 @@ const App = (() => {
     }
   }
 
+  async function exportMatpower() {
+    setStatus('导出MATPOWER中...', 'busy');
+    try {
+      const ok = await syncToBackend();
+      if (!ok) { setStatus('导出失败', 'error'); return; }
+      const data = await apiPost('/api/session/export_matpower', {});
+      if (!data || data.error) throw new Error((data && data.error) || '导出失败');
+      const text = data.matpower_string || '';
+      const filename = `${data.name || 'system'}.m`;
+      downloadTextFile(filename, text, 'text/x-matlab;charset=utf-8');
+      log(`已导出MATPOWER: ${filename}`, 'success');
+      showModelIoStatus('MATPOWER 导出完成', [
+        ['文件', filename],
+        ['格式', 'MATPOWER case v2 (.m)'],
+        ['大小', `${text.length} bytes`],
+      ], { subtitle: '导出当前系统的 AC steady-state 子集', warnings: data.warnings || [] });
+      setStatus('就绪');
+    } catch (err) {
+      log(`导出MATPOWER失败: ${err.message}`, 'error');
+      setStatus('导出失败', 'error');
+    }
+  }
+
   async function exportExternalGrid(format) {
     const isGridlabd = format === 'gridlabd';
     const label = isGridlabd ? 'GridLAB-D GLM' : 'OpenDSS DSS';
@@ -1541,6 +1604,210 @@ const App = (() => {
     };
   }
 
+  function sourceColor(sourceId, alpha = 0.78) {
+    const palette = [
+      [97, 175, 239],
+      [152, 195, 121],
+      [229, 192, 123],
+      [224, 108, 117],
+      [198, 120, 221],
+      [86, 182, 194],
+      [209, 154, 102],
+      [171, 178, 191],
+    ];
+    const c = palette[Math.abs(Number(sourceId) || 0) % palette.length];
+    return `rgba(${c[0]},${c[1]},${c[2]},${alpha})`;
+  }
+
+  function sourceTypeLabel(type) {
+    const labels = {
+      generator: '发电机',
+      external_grid: '外部电网',
+      static_generator: '静态电源',
+      renewable_generator: '可再生电源',
+      pv_system: '光伏',
+      dc_static_generator: 'DC静态电源',
+      dc_generator: 'DC电源',
+      dc_pv_array: 'DC光伏',
+      storage_discharge: '储能放电',
+      dc_storage_discharge: 'DC储能放电',
+    };
+    return labels[type] || type || '源';
+  }
+
+  function carbonSourceMeta(data) {
+    const map = new Map();
+    const rows = Array.isArray(data?.carbon_sources) ? data.carbon_sources : [];
+    rows.forEach((row, i) => {
+      const id = Number(row.source_id ?? i);
+      if (!Number.isFinite(id)) return;
+      map.set(id, {
+        id,
+        label: row.label || `Source ${id}`,
+        type: row.source_type || 'source',
+        bus: row.bus,
+        isDc: row.is_dc === true,
+        pMw: numberOr(row.p_mw, 0),
+        ef: numberOr(row.emission_factor_tco2_mwh, 0),
+      });
+    });
+    if (!map.size && Array.isArray(data?.sankey_labels)) {
+      const maxSource = Math.max(-1, ...(data.sankey_sources || []).map(Number).filter(Number.isFinite));
+      for (let i = 0; i <= maxSource; ++i) {
+        map.set(i, { id: i, label: data.sankey_labels[i] || `Source ${i}`, type: 'source', ef: 0 });
+      }
+    }
+    return map;
+  }
+
+  function contributionEntries(mapLike) {
+    if (!mapLike || typeof mapLike !== 'object') return [];
+    return Object.entries(mapLike)
+      .map(([sid, mw]) => [Number(sid), numberOr(mw, 0)])
+      .filter(([sid, mw]) => Number.isFinite(sid) && Number.isFinite(mw) && Math.abs(mw) > 1e-9);
+  }
+
+  function renderCarbonSankey(data) {
+    const section = document.getElementById('staticCarbonSankeySection');
+    const div = document.getElementById('carbonSankeyFlowChart');
+    if (!section || !div) return;
+    section.style.display = '';
+    if (typeof Plotly === 'undefined') {
+      div.innerHTML = '<p class="empty-hint">Plotly 未加载，无法展示 Sankey 图。</p>';
+      return;
+    }
+
+    const metric = document.getElementById('carbonSankeyMetric')?.value || 'power';
+    const isCarbon = metric === 'carbon';
+    const sourceMap = carbonSourceMeta(data);
+    const labels = [];
+    const colors = [];
+    const nodeIndex = new Map();
+    const src = [];
+    const tgt = [];
+    const val = [];
+    const linkColor = [];
+    const custom = [];
+
+    const addNode = (key, label, color) => {
+      if (nodeIndex.has(key)) return nodeIndex.get(key);
+      const idx = labels.length;
+      nodeIndex.set(key, idx);
+      labels.push(label);
+      colors.push(color);
+      return idx;
+    };
+    const addSourceNode = (sid) => {
+      const meta = sourceMap.get(Number(sid)) || { id: sid, label: `Source ${sid}`, type: 'source', ef: 0 };
+      const label = `${meta.label} (${sourceTypeLabel(meta.type)})`;
+      return addNode(`source:${sid}`, label, sourceColor(sid, 0.95));
+    };
+    const linkValue = (sid, mw) => {
+      const ef = sourceMap.get(Number(sid))?.ef || 0;
+      return isCarbon ? Math.max(0, mw * ef) : Math.max(0, mw);
+    };
+    const addFlow = (sid, targetKey, targetLabel, mw, targetColor) => {
+      const powerMw = Math.max(0, numberOr(mw, 0));
+      if (powerMw <= 1e-9) return;
+      const value = linkValue(sid, powerMw);
+      const threshold = isCarbon ? 1e-7 : 1e-5;
+      if (value <= threshold) return;
+      const ef = sourceMap.get(Number(sid))?.ef || 0;
+      src.push(addSourceNode(sid));
+      tgt.push(addNode(targetKey, targetLabel, targetColor));
+      val.push(value);
+      linkColor.push(sourceColor(sid, 0.38));
+      custom.push([powerMw, powerMw * ef, carbonIntensityDisplay(ef)]);
+    };
+
+    const addLoadRows = (rows, isDc) => {
+      (rows || []).forEach(row => {
+        const prefix = isDc ? 'DC负荷' : 'AC负荷';
+        const targetKey = `${isDc ? 'dc' : 'ac'}-load:${row.load_index}:${row.bus}:${carbonLoadLabel(row)}`;
+        const targetLabel = `${prefix} ${carbonLoadLabel(row)} @ Bus ${row.bus}`;
+        contributionEntries(row.generator_supply_mw).forEach(([sid, mw]) => {
+          addFlow(sid, targetKey, targetLabel, mw, isDc ? 'rgba(86,182,194,0.95)' : 'rgba(152,195,121,0.95)');
+        });
+      });
+    };
+    addLoadRows(data.load_carbon || [], false);
+    addLoadRows(data.dc_load_carbon || [], true);
+
+    (data.storage_carbon || []).forEach(row => {
+      if (numberOr(row.p_mw, 0) >= 0 && !Object.keys(row.source_supply_mw || {}).length) return;
+      const targetKey = `storage-charge:${row.is_dc ? 'dc' : 'ac'}:${row.storage_index}:${row.bus}`;
+      const targetLabel = `${row.is_dc ? 'DC' : 'AC'}储能充电 ${row.storage_index} @ Bus ${row.bus}`;
+      contributionEntries(row.source_supply_mw).forEach(([sid, mw]) => {
+        addFlow(sid, targetKey, targetLabel, mw, 'rgba(198,120,221,0.95)');
+      });
+    });
+
+    const addLossCategory = (label, key, rows, mapField, color) => {
+      const sum = new Map();
+      (rows || []).forEach(row => {
+        contributionEntries(row[mapField]).forEach(([sid, mw]) => {
+          sum.set(sid, (sum.get(sid) || 0) + mw);
+        });
+      });
+      sum.forEach((mw, sid) => addFlow(sid, key, label, mw, color));
+    };
+    addLossCategory('AC支路损耗', 'loss:ac-branch', data.branch_carbon, 'generator_loss_mw', 'rgba(224,108,117,0.95)');
+    addLossCategory('DC支路损耗', 'loss:dc-branch', data.dc_branch_carbon, 'generator_loss_mw', 'rgba(224,108,117,0.86)');
+    addLossCategory('VSC换流损耗', 'loss:vsc', data.vsc_carbon, 'generator_loss_mw', 'rgba(209,154,102,0.95)');
+    addLossCategory('DC/DC损耗', 'loss:dcdc', data.dcdc_carbon, 'generator_loss_mw', 'rgba(209,154,102,0.86)');
+    addLossCategory('能量路由器损耗', 'loss:energy-router', data.energy_router_carbon, 'source_loss_mw', 'rgba(209,154,102,0.76)');
+
+    if (!src.length && Array.isArray(data.sankey_sources) && Array.isArray(data.sankey_targets)) {
+      (data.sankey_labels || []).forEach((label, i) => addNode(`legacy:${i}`, label, i < sourceMap.size ? sourceColor(i, 0.95) : 'rgba(152,195,121,0.95)'));
+      (data.sankey_values || []).forEach((mw, i) => {
+        const powerMw = numberOr(mw, 0);
+        if (powerMw <= 1e-9) return;
+        const s = Number(data.sankey_sources[i]);
+        const t = Number(data.sankey_targets[i]);
+        const value = isCarbon ? 0 : powerMw;
+        if (value <= 0) return;
+        src.push(s); tgt.push(t); val.push(value);
+        linkColor.push(sourceColor(s, 0.38));
+        custom.push([powerMw, 0, 0]);
+      });
+    }
+
+    if (!src.length) {
+      div.innerHTML = '<p class="empty-hint">暂无可用于 Sankey 的源荷追踪数据。</p>';
+      return;
+    }
+
+    const unit = isCarbon ? 'tCO2' : 'MW';
+    Plotly.newPlot(div, [{
+      type: 'sankey',
+      arrangement: 'snap',
+      node: {
+        pad: 16,
+        thickness: 16,
+        line: { color: 'rgba(255,255,255,0.22)', width: 0.5 },
+        label: labels,
+        color: colors,
+      },
+      link: {
+        source: src,
+        target: tgt,
+        value: val,
+        color: linkColor,
+        customdata: custom,
+        hovertemplate:
+          `%{source.label} → %{target.label}<br>` +
+          `显示值: %{value:.4f} ${unit}<br>` +
+          `电力: %{customdata[0]:.4f} MW<br>` +
+          `碳排: %{customdata[1]:.6f} tCO2<br>` +
+          `源碳因子: %{customdata[2]:.2f} ${carbonIntensityUnit()}<extra></extra>`,
+      },
+    }], {
+      ...carbonPlotTheme(isCarbon ? '源-荷碳流追踪' : '源-荷电力追踪'),
+      margin: { l: 12, r: 12, t: 34, b: 12 },
+      font: { color: '#dcdfe4', size: 11 },
+    }, { responsive: true, displaylogo: false });
+  }
+
   function componentBusIndex(compId) {
     const busMap = Canvas.getCompBusMap().ac || {};
     for (const conn of Canvas.state.connections || []) {
@@ -1691,6 +1958,7 @@ const App = (() => {
     document.getElementById('resultsContent').style.display = 'block';
     setActiveResultGroup('carbonFlow');
     document.getElementById('carbonSummaryTitle').textContent = '静态碳流分析结果 — 概览';
+    document.getElementById('staticCarbonSankeySection').style.display = '';
     document.getElementById('staticCarbonBusSection').style.display = '';
     document.getElementById('staticCarbonLoadSection').style.display = '';
     document.getElementById('staticCarbonBranchSection').style.display = '';
@@ -1721,6 +1989,7 @@ const App = (() => {
       ...(data.bus_carbon || []).map(b => ({ ...b, is_dc: false })),
       ...(data.dc_bus_carbon || []).map(b => ({ ...b, is_dc: true })),
     ];
+    renderCarbonSankey(data);
     renderCarbonPotentialChart(busRows);
     Canvas.clearCarbonPotentialResults?.();
 
@@ -2155,6 +2424,8 @@ const App = (() => {
     setActiveResultGroup('carbonFlow');
     switchTab('results');
     document.getElementById('carbonSummaryTitle').textContent = '动态碳流分析结果 — 概览';
+    document.getElementById('staticCarbonSankeySection').style.display = 'none';
+    document.getElementById('carbonSankeyFlowChart').innerHTML = '';
     document.getElementById('staticCarbonBusSection').style.display = 'none';
     document.getElementById('staticCarbonLoadSection').style.display = 'none';
     document.getElementById('staticCarbonBranchSection').style.display = 'none';
@@ -2224,6 +2495,82 @@ const App = (() => {
   }
 
   // ========== Power Flow ==========
+  function pfNumber(id, fallback) {
+    const el = document.getElementById(id);
+    if (!el) return fallback;
+    const n = Number(el.value);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  function pfInteger(id, fallback) {
+    const n = pfNumber(id, fallback);
+    return Number.isFinite(n) ? Math.trunc(n) : fallback;
+  }
+
+  function pfBool(id, fallback) {
+    const el = document.getElementById(id);
+    return el ? !!el.checked : fallback;
+  }
+
+  function readPowerFlowOptions() {
+    return {
+      max_iter: pfInteger('pfMaxIter', 100),
+      tol: pfNumber('pfTol', 1e-8),
+      fdpf_max_iter: pfInteger('pfFdpfMaxIter', 1000),
+      verbose: pfBool('pfVerbose', false),
+      enable_pv_pq_conversion: pfBool('pfPvPqConversion', true),
+      enable_auto_swing_selection: pfBool('pfAutoSwing', true),
+      enable_converter_mode_switching: pfBool('pfConverterModeSwitch', true),
+      enable_converter_coordination_check: pfBool('pfCoordCheck', true),
+      enable_rigid_vdc_former: pfBool('pfRigidVdcFormer', false),
+      loss_model: document.getElementById('pfLossModel')?.value || 'linear',
+      pv_q_hysteresis_pu: pfNumber('pfPvQHysteresis', 0.01),
+      pv_recover_vm_tol_pu: pfNumber('pfPvRecoverVmTol', 0.01),
+      converter_vdc_switch_high_pu: pfNumber('pfVdcSwitchHigh', 0.03),
+      converter_vdc_switch_low_pu: pfNumber('pfVdcSwitchLow', 0.01),
+      mode_hysteresis_iters: pfInteger('pfModeHysteresis', 2),
+      max_delta_va_rad: pfNumber('pfMaxDeltaVa', 1.5),
+      max_delta_vm_pu: pfNumber('pfMaxDeltaVm', 0.5),
+      max_delta_vdc_pu: pfNumber('pfMaxDeltaVdc', 0.5),
+      max_line_search_steps: pfInteger('pfMaxLineSearch', 10),
+      max_regularization_steps: pfInteger('pfMaxRegularization', 8),
+      regularization_lambda0: pfNumber('pfRegularizationLambda0', 1e-6),
+      regularization_growth: pfNumber('pfRegularizationGrowth', 10),
+      enable_coupled_jacobian: pfBool('pfCoupledJacobian', false),
+      enable_augmented_equations: pfBool('pfAugmentedEquations', false),
+      enable_semi_smooth_newton: pfBool('pfSemiSmoothNewton', false),
+      globalization: document.getElementById('pfGlobalization')?.value || 'line_search',
+      trust_region_radius0: pfNumber('pfTrustRadius0', 1),
+      trust_region_max: pfNumber('pfTrustRadiusMax', 10),
+      ptc_delta0: pfNumber('pfPtcDelta0', 1),
+      ptc_growth: pfNumber('pfPtcGrowth', 2),
+      zip_pw: [
+        pfNumber('pfZipPwP', 1),
+        pfNumber('pfZipPwI', 0),
+        pfNumber('pfZipPwZ', 0),
+      ],
+      zip_qw: [
+        pfNumber('pfZipQwP', 1),
+        pfNumber('pfZipQwI', 0),
+        pfNumber('pfZipQwZ', 0),
+      ],
+      ac_eval_threads: pfInteger('pfAcEvalThreads', 0),
+      enable_solver_profiling: pfBool('pfSolverProfiling', false),
+      enable_iteration_log: pfBool('pfIterationLog', false),
+      robust_nonlinear: {
+        enable_residual_scaling: pfBool('pfRobustScaling', true),
+        enable_variable_scaling: pfBool('pfRobustScaling', true),
+        enable_jacobian_row_col_equilibration: pfBool('pfRobustEquilibration', true),
+        enable_condition_monitor: pfBool('pfRobustCondition', true),
+        enable_nonmonotone_linesearch: pfBool('pfRobustNonmonotone', true),
+        enable_auto_fallback_scheduling: pfBool('pfRobustAutoFallback', false),
+        enable_homotopy: pfBool('pfRobustHomotopy', true),
+        enable_newton_krylov_fallback: pfBool('pfRobustKrylov', false),
+        min_vm_pu: pfNumber('pfRobustMinVm', 1e-8),
+      },
+    };
+  }
+
   async function runPowerFlow() {
     return withAnalysisQueue(async () => {
       setStatus('潮流计算中...', 'busy');
@@ -2235,22 +2582,18 @@ const App = (() => {
         return null;
       }
 
-      const coordCheckEl = document.getElementById('pfCoordCheck');
+      const pfOptions = readPowerFlowOptions();
       if (!await waitForBackendIdle()) {
         setStatus('后端繁忙', 'error');
         return null;
       }
       const data = await apiPost('/api/session/pf', {
         method: method,
-        options: {
-          max_iter: 100,
-          tol: 1e-8,
-          verbose: false,
-          enable_converter_coordination_check: coordCheckEl ? coordCheckEl.checked : true
-        }
+        options: pfOptions
       });
 
       if (data) {
+        data.options_requested = pfOptions;
         const pfData = normalizePowerFlowResult(data);
         const converged = pfData.converged;
         const islandInfo = pfData.islands_detected
@@ -6540,7 +6883,41 @@ const App = (() => {
     div.innerHTML = html;
   }
 
-	  function showPowerFlowBalanceDiagnostics(data, busMap) {
+  function showThreePhasePowerFlowResults(data, busMap) {
+    const section = document.getElementById('pfThreePhaseSection');
+    const div = document.getElementById('pfThreePhaseResults');
+    if (!section || !div) return;
+    const rows = Array.isArray(data.tp_bus_results) ? data.tp_bus_results : [];
+    if (!rows.length) {
+      section.style.display = 'none';
+      div.innerHTML = '';
+      return;
+    }
+    section.style.display = '';
+    const fmt = v => Number.isFinite(Number(v)) ? Number(v).toFixed(6) : '-';
+    const afmt = v => Number.isFinite(Number(v)) ? Number(v).toFixed(3) : '-';
+    const comp = data.opendss_reference?.comparison || null;
+    let html = '';
+    if (data.opendss_reference?.ran && comp) {
+      const ok = !!comp.within_gui_tolerance;
+      html += `<p class="empty-hint" style="color:${ok ? '#15803d' : '#b45309'}">OpenDSS对比：${ok ? '通过' : '存在偏差'}；点数 ${comp.count || 0}，max|ΔVm|=${Number(comp.max_vm_error_pu || 0).toExponential(3)} pu，max|Δθ|=${Number(comp.max_angle_error_deg || 0).toFixed(4)}°。</p>`;
+    } else if (data.opendss_reference && data.opendss_reference.error) {
+      html += `<p class="empty-hint" style="color:#b45309">OpenDSS参考未运行：${escapeHtml(data.opendss_reference.error)}</p>`;
+    } else {
+      html += '<p class="empty-hint">当前会话没有可解析的 OpenDSS master 路径，仅显示本模块三相结果。</p>';
+    }
+    html += '<table><thead><tr><th>Bus</th><th>名称</th><th>相</th><th>Va(pu)</th><th>∠A(°)</th><th>Vb(pu)</th><th>∠B(°)</th><th>Vc(pu)</th><th>∠C(°)</th></tr></thead><tbody>';
+    rows.forEach(r => {
+      const busId = Number(r.bus_id ?? r.bus);
+      const compId = Number.isFinite(busId) ? busMap.ac?.[busId] : undefined;
+      const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+      html += `<tr${attr}><td>${Number.isFinite(busId) ? busId : ''}</td><td>${escapeHtml(r.name || '')}</td><td>${escapeHtml(r.phases || '')}</td><td>${fmt(r.vm_a_pu)}</td><td>${afmt(r.va_a_deg)}</td><td>${fmt(r.vm_b_pu)}</td><td>${afmt(r.va_b_deg)}</td><td>${fmt(r.vm_c_pu)}</td><td>${afmt(r.va_c_deg)}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    div.innerHTML = html;
+  }
+
+  function showPowerFlowBalanceDiagnostics(data, busMap) {
 	    const section = document.getElementById('pfBalanceSection');
 	    const div = document.getElementById('pfBalanceResults');
 	    if (!section || !div) return;
@@ -6723,39 +7100,6 @@ const App = (() => {
       return den > 0 ? complex((a.re * b.re + a.im * b.im) / den, (a.im * b.re - a.re * b.im) / den) : complex(0, 0);
 	  }
 
-	  function showThreePhasePowerFlowResults(data, busMap) {
-	    const section = document.getElementById('pfThreePhaseSection');
-	    const div = document.getElementById('pfThreePhaseResults');
-	    if (!section || !div) return;
-	    const rows = Array.isArray(data.tp_bus_results) ? data.tp_bus_results : [];
-	    if (!rows.length) {
-	      section.style.display = 'none';
-	      div.innerHTML = '';
-	      return;
-	    }
-	    section.style.display = '';
-	    const fmt = v => Number.isFinite(Number(v)) ? Number(v).toFixed(6) : '-';
-	    const afmt = v => Number.isFinite(Number(v)) ? Number(v).toFixed(3) : '-';
-	    const comp = data.opendss_reference?.comparison || null;
-	    let html = '';
-	    if (data.opendss_reference?.ran && comp) {
-	      const ok = !!comp.within_gui_tolerance;
-	      html += `<p class="empty-hint" style="color:${ok ? '#15803d' : '#b45309'}">OpenDSS对比：${ok ? '通过' : '存在偏差'}；点数 ${comp.count || 0}，max|ΔVm|=${Number(comp.max_vm_error_pu || 0).toExponential(3)} pu，max|Δθ|=${Number(comp.max_angle_error_deg || 0).toFixed(4)}°。</p>`;
-	    } else if (data.opendss_reference && data.opendss_reference.error) {
-	      html += `<p class="empty-hint" style="color:#b45309">OpenDSS参考未运行：${escapeHtml(data.opendss_reference.error)}</p>`;
-	    } else {
-	      html += '<p class="empty-hint">当前会话没有可解析的 OpenDSS master 路径，仅显示本模块三相结果。</p>';
-	    }
-	    html += '<table><thead><tr><th>Bus</th><th>名称</th><th>相</th><th>Va(pu)</th><th>∠A(°)</th><th>Vb(pu)</th><th>∠B(°)</th><th>Vc(pu)</th><th>∠C(°)</th></tr></thead><tbody>';
-	    rows.forEach(r => {
-	      const busId = Number(r.bus_id ?? r.bus);
-	      const compId = Number.isFinite(busId) ? busMap.ac?.[busId] : undefined;
-	      const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
-	      html += `<tr${attr}><td>${Number.isFinite(busId) ? busId : ''}</td><td>${escapeHtml(r.name || '')}</td><td>${escapeHtml(r.phases || '')}</td><td>${fmt(r.vm_a_pu)}</td><td>${afmt(r.va_a_deg)}</td><td>${fmt(r.vm_b_pu)}</td><td>${afmt(r.va_b_deg)}</td><td>${fmt(r.vm_c_pu)}</td><td>${afmt(r.va_c_deg)}</td></tr>`;
-	    });
-	    html += '</tbody></table>';
-	    div.innerHTML = html;
-	  }
     function cConj(a) { return complex(a.re, -a.im); }
     function cNeg(a) { return complex(-a.re, -a.im); }
     const acVoltagePosByBus = new Map();
@@ -7070,6 +7414,21 @@ const App = (() => {
 
     // Summary
     const summary = document.getElementById('resultsSummary');
+    const opt = data.options_effective || data.options_requested || {};
+    const optNumber = (value, fallback = 0) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : fallback;
+    };
+    const boolLabel = (value) => value ? '开' : '关';
+    const lossLabel = opt.loss_model === 'current_based' ? '电流相关' : '线性';
+    const globLabel = opt.globalization === 'trust_region'
+      ? '信赖域'
+      : opt.globalization === 'pseudo_transient'
+        ? '伪暂态'
+        : '线搜索';
+    const zipText = (arr) => Array.isArray(arr)
+      ? arr.map(v => optNumber(v, 0).toFixed(2)).join('/')
+      : '';
     summary.innerHTML = `
       <div class="result-item"><span class="result-label">方法</span>
         <span class="result-value">${data.method_actual || data.method || ''}</span></div>
@@ -7080,6 +7439,14 @@ const App = (() => {
         <span class="result-value">${data.iterations || 0}</span></div>
       <div class="result-item"><span class="result-label">最大残差</span>
         <span class="result-value">${Number(data.residual || 0).toExponential(4)}</span></div>
+      <div class="result-item"><span class="result-label">求解参数</span>
+        <span class="result-value">tol=${optNumber(opt.tol, 0).toExponential(1)}, max=${opt.max_iter ?? '-'}</span></div>
+      <div class="result-item"><span class="result-label">损耗/全局化</span>
+        <span class="result-value">${lossLabel} / ${globLabel}</span></div>
+      <div class="result-item"><span class="result-label">模型开关</span>
+        <span class="result-value">PV/PQ=${boolLabel(opt.enable_pv_pq_conversion !== false)}, VSC=${boolLabel(opt.enable_converter_mode_switching !== false)}, 校核=${boolLabel(opt.enable_converter_coordination_check === true)}</span></div>
+      <div class="result-item"><span class="result-label">ZIP(P/Q)</span>
+        <span class="result-value">${zipText(opt.zip_pw) || '-'} / ${zipText(opt.zip_qw) || '-'}</span></div>
     `;
 
     let busMap = {};
@@ -8390,14 +8757,21 @@ const App = (() => {
       lbl.textContent = label;
       div.appendChild(lbl);
 
-      if (key === 'dynamic_model') {
+      const isJsonArrayField = Array.isArray(val) || /^_ies_.*profile.*values$/.test(key);
+      if (key === 'dynamic_model' || isJsonArrayField) {
         const txt = document.createElement('textarea');
         txt.dataset.field = key;
         txt.className = 'prop-json-textarea';
         txt.spellcheck = false;
-        txt.value = dynamicModelTextValue(val);
-        txt.placeholder = '{"standard":"PSS/E","model_name":"GENROU","parameters":{}}';
-        txt.title = '统一动态模型 JSON：standard/model_name/parameter_set/parameters/components。会随系统 JSON 同步并用于暂态模型构建。';
+        txt.value = key === 'dynamic_model'
+          ? dynamicModelTextValue(val)
+          : JSON.stringify(Array.isArray(val) ? val : [], null, 2);
+        txt.placeholder = key === 'dynamic_model'
+          ? '{"standard":"PSS/E","model_name":"GENROU","parameters":{}}'
+          : '[8, 10, 9, 7]';
+        txt.title = key === 'dynamic_model'
+          ? '统一动态模型 JSON：standard/model_name/parameter_set/parameters/components。会随系统 JSON 同步并用于暂态模型构建。'
+          : '导入或手工编辑的时序数组，长度应与园区综合能源仿真步数一致。';
         div.classList.add('prop-field-wide');
         div.appendChild(txt);
       } else if (typeof val === 'boolean') {
@@ -8548,6 +8922,20 @@ const App = (() => {
             return;
           }
         }
+      } else if (/^_ies_.*profile.*values$/.test(key)) {
+        const raw = String(val || '').trim();
+        if (!raw) {
+          val = [];
+        } else {
+          try {
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed)) throw new Error('profile values must be a JSON array');
+            val = parsed.map(Number).filter(Number.isFinite);
+          } catch (err) {
+            parseError = err;
+            return;
+          }
+        }
       } else if (val === 'true') val = true;
       else if (val === 'false') val = false;
       else if (el.type === 'number' && val !== '') val = parseFloat(val);
@@ -8555,7 +8943,7 @@ const App = (() => {
       updates.push({ key, val });
     });
     if (parseError) {
-      const msg = `动态模型 JSON 无效: ${parseError.message || parseError}`;
+      const msg = `JSON 字段无效: ${parseError.message || parseError}`;
       setStatus(msg, 'error');
       log(msg, 'error');
       return;
@@ -8564,7 +8952,7 @@ const App = (() => {
       const oldVal = comp.params[key];
       const sameNumber = typeof oldVal === 'number' && typeof val === 'number' &&
         Math.abs(oldVal - val) < 1e-12;
-      const sameJson = key === 'dynamic_model' &&
+      const sameJson = (key === 'dynamic_model' || /^_ies_.*profile.*values$/.test(key)) &&
         JSON.stringify(oldVal || {}) === JSON.stringify(val || {});
       if (!sameNumber && !sameJson && oldVal !== val) changedKeys.add(key);
       comp.params[key] = val;
@@ -8760,6 +9148,976 @@ const App = (() => {
     if (moduleName === 'resilience') markResilienceFaultBranches();
   }
 
+  function iesNumber(id, fallback) {
+    const v = Number(document.getElementById(id)?.value);
+    return Number.isFinite(v) ? v : fallback;
+  }
+
+  function iesNum(value, fallback = 0) {
+    if (value === null || value === undefined || value === '') return fallback;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  function iesParam(params, key, fallback = 0) {
+    return iesNum(params?.[key], fallback);
+  }
+
+  function iesActiveCanvasComponents() {
+    if (typeof Canvas === 'undefined' || !Array.isArray(Canvas.state?.components)) return [];
+    return Canvas.state.components.filter(comp =>
+      String(comp.type || '').startsWith('ies_') && comp.params?.in_service !== false);
+  }
+
+  function iesComponentsOf(components, type) {
+    return components.filter(comp => comp.type === type);
+  }
+
+  function iesSum(components, type, key) {
+    return iesComponentsOf(components, type)
+      .reduce((sum, comp) => sum + iesParam(comp.params, key, 0), 0);
+  }
+
+  function iesWeightedAverage(components, valueKey, weightKey, fallback) {
+    let wsum = 0;
+    let vsum = 0;
+    components.forEach(comp => {
+      const value = iesParam(comp.params, valueKey, NaN);
+      if (!Number.isFinite(value)) return;
+      const rawWeight = iesParam(comp.params, weightKey, 0);
+      const weight = rawWeight > 0 ? rawWeight : 1;
+      wsum += weight;
+      vsum += value * weight;
+    });
+    return wsum > 0 ? vsum / wsum : fallback;
+  }
+
+  function iesLegacyElectricLoadMw() {
+    if (typeof Canvas === 'undefined' || !Array.isArray(Canvas.state?.components)) return 0;
+    return Canvas.state.components.reduce((sum, comp) => {
+      const p = comp.params || {};
+      if (p.in_service === false) return sum;
+      if (comp.type === 'load') return sum + iesParam(p, 'p_mw', 0) * iesParam(p, 'scaling', 1);
+      if (comp.type === 'dc_load') return sum + iesParam(p, 'p_mw', 0) * iesParam(p, 'scaling', 1);
+      if (comp.type === 'charging_station') {
+        const directMw = iesParam(p, 'p_total_kw', 0) / 1000;
+        const maxMw = iesParam(p, 'max_power_kw', 0) * iesParam(p, 'utilization_rate', 0.3) / 1000;
+        return sum + (directMw > 0 ? directMw : maxMw);
+      }
+      return sum;
+    }, 0);
+  }
+
+  function iesLegacySolarRatedMw() {
+    if (typeof Canvas === 'undefined' || !Array.isArray(Canvas.state?.components)) return 0;
+    return Canvas.state.components.reduce((sum, comp) => {
+      const p = comp.params || {};
+      if (p.in_service === false) return sum;
+      if (comp.type === 'pv_system') return sum + (iesParam(p, 'p_rated_mw', 0) || iesParam(p, 'p_mw', 0));
+      if (comp.type === 'dc_pv_array') return sum + iesParam(p, 'p_set_mw', 0);
+      if (comp.type === 'static_generator' && String(p.sgen_type || '').toLowerCase().includes('pv')) {
+        return sum + (iesParam(p, 'p_rated_mw', 0) || iesParam(p, 'p_mw', 0));
+      }
+      return sum;
+    }, 0);
+  }
+
+  function iesLegacyWindRatedMw() {
+    if (typeof Canvas === 'undefined' || !Array.isArray(Canvas.state?.components)) return 0;
+    return Canvas.state.components.reduce((sum, comp) => {
+      const p = comp.params || {};
+      if (p.in_service === false || comp.type !== 'renewable_gen') return sum;
+      const kind = String(p.type || p.name || '').toLowerCase();
+      return kind.includes('wind') || kind.includes('风') ? sum + iesParam(p, 'p_rated_mw', iesParam(p, 'p_mw', 0)) : sum;
+    }, 0);
+  }
+
+  function iesLegacyElectricStorage() {
+    const out = { count: 0, energy: 0, initial: 0, charge: 0, discharge: 0 };
+    if (typeof Canvas === 'undefined' || !Array.isArray(Canvas.state?.components)) return out;
+    Canvas.state.components.forEach(comp => {
+      if (comp.type !== 'storage' && comp.type !== 'dc_storage') return;
+      const p = comp.params || {};
+      if (p.in_service === false) return;
+      const e = iesParam(p, 'e_rated_mwh', 0);
+      out.count += 1;
+      out.energy += e;
+      out.initial += e * iesParam(p, 'soc_init', 0.5);
+      out.charge += Math.max(iesParam(p, 'pmax_mw', 0), iesParam(p, 'p_rated_mw', 0));
+      out.discharge += Math.max(Math.abs(iesParam(p, 'pmin_mw', 0)), iesParam(p, 'p_rated_mw', 0));
+    });
+    return out;
+  }
+
+  function iesApplyStoragePayload(payload, rows, prefix) {
+    payload[`${prefix}_storage_capacity_mwh`] = rows.reduce((s, c) => s + iesParam(c.params, 'capacity_mwh', 0), 0);
+    payload[`${prefix}_storage_initial_mwh`] = rows.reduce((s, c) => s + iesParam(c.params, 'initial_mwh', 0), 0);
+    payload[`${prefix}_storage_charge_max_mw`] = rows.reduce((s, c) => s + iesParam(c.params, 'charge_max_mw', 0), 0);
+    payload[`${prefix}_storage_discharge_max_mw`] = rows.reduce((s, c) => s + iesParam(c.params, 'discharge_max_mw', 0), 0);
+  }
+
+  const IES_PROFILE_KEYS = [
+    'electric_load_mw', 'heat_load_mw', 'hydrogen_load_mw', 'fuel_load_mw',
+    'transport_demand_km', 'solar_available_mw', 'wind_available_mw',
+    'grid_buy_price', 'grid_sell_price', 'grid_carbon_tco2_mwh',
+  ];
+
+  const IES_PROFILE_ALIASES = {
+    electric_load_mw: ['electric_load_mw', 'electric_load', 'electricity_load', 'load_electric', 'power_load', '电负荷', '电力负荷', '用电负荷'],
+    heat_load_mw: ['heat_load_mw', 'thermal_load_mw', 'heat_load', 'thermal_load', '热负荷', '供热负荷'],
+    hydrogen_load_mw: ['hydrogen_load_mw', 'h2_load_mw', 'hydrogen_load', 'h2_load', '氢负荷', '氢气负荷'],
+    fuel_load_mw: ['fuel_load_mw', 'gas_load_mw', 'fuel_load', 'gas_load', '燃料负荷', '燃气负荷'],
+    transport_demand_km: ['transport_demand_km', 'transport_km', 'traffic_demand_km', '交通需求', '出行需求'],
+    solar_available_mw: ['solar_available_mw', 'pv_available_mw', 'solar_mw', 'pv_mw', 'solar', 'pv', '光伏', '光伏可用', '光伏出力'],
+    wind_available_mw: ['wind_available_mw', 'wind_mw', 'wind', '风电', '风电可用', '风电出力'],
+    grid_buy_price: ['grid_buy_price', 'buy_price', 'purchase_price', 'import_price', '购电价格', '购电价', '电价'],
+    grid_sell_price: ['grid_sell_price', 'sell_price', 'export_price', '售电价格', '售电价', '上网电价'],
+    grid_carbon_tco2_mwh: ['grid_carbon_tco2_mwh', 'grid_carbon', 'carbon_factor', 'co2_factor', '电网碳因子', '碳因子'],
+  };
+
+  const IES_PROFILE_ALIAS_MAP = (() => {
+    const out = {};
+    Object.entries(IES_PROFILE_ALIASES).forEach(([key, aliases]) => {
+      aliases.concat(key).forEach(alias => { out[iesProfileNameKey(alias)] = key; });
+    });
+    return out;
+  })();
+
+  function iesProfileNameKey(raw) {
+    return String(raw || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[：:;,，、|\/\\(){}<>_\-\s]/g, '')
+      .replace(/[\[\]]/g, '')
+      .replace(/（|）/g, '');
+  }
+
+  function iesCanonicalProfileKey(raw) {
+    const exact = String(raw || '').trim();
+    if (IES_PROFILE_KEYS.includes(exact)) return exact;
+    return IES_PROFILE_ALIAS_MAP[iesProfileNameKey(exact)] || null;
+  }
+
+  function iesNumericArray(values) {
+    if (!Array.isArray(values)) return [];
+    return values.map(Number).filter(Number.isFinite);
+  }
+
+  function iesAverage(values, fallback = 0) {
+    const arr = iesNumericArray(values);
+    if (!arr.length) return fallback;
+    return arr.reduce((sum, v) => sum + v, 0) / arr.length;
+  }
+
+  function iesMax(values, fallback = 0) {
+    const arr = iesNumericArray(values);
+    return arr.length ? Math.max(...arr) : fallback;
+  }
+
+  function iesProfileArray(params, key = '_ies_profile_values') {
+    const raw = params?.[key];
+    if (Array.isArray(raw)) return iesNumericArray(raw);
+    if (typeof raw === 'string' && raw.trim()) {
+      try { return iesNumericArray(JSON.parse(raw)); } catch (_) { return []; }
+    }
+    return [];
+  }
+
+  function iesProfileSeriesValue(values, idx, fallback = 0) {
+    if (!values.length) return fallback;
+    const raw = values[Math.min(idx, values.length - 1)];
+    return Number.isFinite(raw) ? raw : fallback;
+  }
+
+  function iesAggregateComponentProfiles(rows, fallbackFn, profileKey = '_ies_profile_values') {
+    const series = rows.map(comp => iesProfileArray(comp.params, profileKey));
+    const n = series.reduce((maxLen, arr) => Math.max(maxLen, arr.length), 0);
+    if (n <= 0) return null;
+    return Array.from({ length: n }, (_, t) =>
+      rows.reduce((sum, comp, i) => {
+        const fallback = Number(fallbackFn(comp)) || 0;
+        return sum + iesProfileSeriesValue(series[i], t, fallback);
+      }, 0));
+  }
+
+  function iesWeightedAverageProfile(rows, valueKey, weightKey, profileKey, fallback) {
+    const series = rows.map(comp => iesProfileArray(comp.params, profileKey));
+    const n = series.reduce((maxLen, arr) => Math.max(maxLen, arr.length), 0);
+    if (n <= 0) return null;
+    return Array.from({ length: n }, (_, t) => {
+      let weighted = 0;
+      let weightSum = 0;
+      rows.forEach((comp, i) => {
+        const weightRaw = iesParam(comp.params, weightKey, 0);
+        const weight = weightRaw > 0 ? weightRaw : 1;
+        const base = iesParam(comp.params, valueKey, fallback);
+        const value = iesProfileSeriesValue(series[i], t, base);
+        weighted += value * weight;
+        weightSum += weight;
+      });
+      return weightSum > 0 ? weighted / weightSum : fallback;
+    });
+  }
+
+  function iesCanvasProfileLength(components) {
+    const profileKeys = [
+      '_ies_profile_values',
+      '_ies_buy_price_profile_values',
+      '_ies_sell_price_profile_values',
+      '_ies_carbon_profile_values',
+    ];
+    return components.reduce((maxLen, comp) => {
+      profileKeys.forEach(key => { maxLen = Math.max(maxLen, iesProfileArray(comp.params, key).length); });
+      return maxLen;
+    }, 0);
+  }
+
+  function iesCanvasProfileStepDuration(components, fallback = 1.0) {
+    for (const comp of components) {
+      const step = iesParam(comp.params, '_ies_profile_step_duration_hr', NaN);
+      if (Number.isFinite(step) && step > 0) return step;
+    }
+    return fallback;
+  }
+
+  function iesSetProfile(comp, name, values, stepDuration, scalarKey, scalarMode = 'average') {
+    const arr = iesNumericArray(values);
+    if (!comp?.params || !arr.length) return false;
+    comp.params._ies_profile_name = name || comp.params.name || '';
+    comp.params._ies_profile_values = arr;
+    comp.params._ies_profile_step_duration_hr = stepDuration || 1.0;
+    if (scalarKey) {
+      const scalar = scalarMode === 'max' ? iesMax(arr, iesParam(comp.params, scalarKey, 0)) : iesAverage(arr, iesParam(comp.params, scalarKey, 0));
+      comp.params[scalarKey] = scalar;
+    }
+    return true;
+  }
+
+  function iesSetGridProfile(comp, key, values, stepDuration) {
+    const arr = iesNumericArray(values);
+    if (!comp?.params || !arr.length) return false;
+    const profileField = key === 'grid_buy_price' ? '_ies_buy_price_profile_values'
+      : key === 'grid_sell_price' ? '_ies_sell_price_profile_values'
+      : '_ies_carbon_profile_values';
+    const scalarField = key === 'grid_buy_price' ? 'buy_price_per_mwh'
+      : key === 'grid_sell_price' ? 'sell_price_per_mwh'
+      : 'carbon_tco2_mwh';
+    comp.params[profileField] = arr;
+    comp.params._ies_profile_step_duration_hr = stepDuration || 1.0;
+    comp.params[scalarField] = iesAverage(arr, iesParam(comp.params, scalarField, 0));
+    return true;
+  }
+
+  function iesDistributeProfile(rows, profile, weightFn, scalarKey, scalarMode = 'average') {
+    if (!rows.length || !profile?.values?.length) return 0;
+    const weights = rows.map(comp => Math.max(0, Number(weightFn(comp)) || 0));
+    const total = weights.reduce((sum, v) => sum + v, 0);
+    let applied = 0;
+    rows.forEach((comp, i) => {
+      const share = total > 1e-12 ? weights[i] / total : 1 / rows.length;
+      const values = profile.values.map(v => v * share);
+      if (iesSetProfile(comp, profile.name, values, profile.step_duration_hr, scalarKey, scalarMode)) applied += 1;
+    });
+    return applied;
+  }
+
+  function iesApplyNamedProfileToComponent(comp, profile) {
+    if (!comp || !profile?.values?.length) return false;
+    switch (comp.type) {
+      case 'ies_electric_load':
+      case 'ies_heat_load':
+      case 'ies_hydrogen_load':
+      case 'ies_fuel_load':
+        return iesSetProfile(comp, profile.name, profile.values, profile.step_duration_hr, 'demand_mw');
+      case 'ies_transport':
+        return iesSetProfile(comp, profile.name, profile.values, profile.step_duration_hr, 'demand_km_per_h');
+      case 'ies_solar':
+      case 'ies_wind':
+        return iesSetProfile(comp, profile.name, profile.values, profile.step_duration_hr, 'rated_mw', 'max');
+      default:
+        return false;
+    }
+  }
+
+  function iesReadBrowserFileText(file) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result || ''));
+      fr.onerror = () => reject(fr.error || new Error('file read failed'));
+      fr.readAsText(file, 'utf-8');
+    });
+  }
+
+  function iesPushImportedProfile(profiles, name, values, key, stepDuration) {
+    const arr = iesNumericArray(values);
+    if (!arr.length) return;
+    const canonical = key || iesCanonicalProfileKey(name);
+    profiles.push({
+      name: String(name || canonical || `profile_${profiles.length + 1}`),
+      key: canonical,
+      values: arr,
+      step_duration_hr: stepDuration || 1.0,
+    });
+  }
+
+  function parseIntegratedEnergyJsonProfiles(text) {
+    const j = JSON.parse(text);
+    const stepDuration = Number(j.step_duration_hr || j.time_series?.step_duration_hr || j._time_series?.step_duration_hr || 1.0) || 1.0;
+    const profiles = [];
+    IES_PROFILE_KEYS.forEach(key => iesPushImportedProfile(profiles, key, j[key], key, stepDuration));
+    const consumeContainer = container => {
+      if (!container) return;
+      if (Array.isArray(container)) {
+        container.forEach((p, i) => {
+          const values = p?.values ?? p?.p_mw_values ?? p?.data ?? p?.profile;
+          const name = p?.name ?? p?.field ?? p?.key ?? p?.id ?? `profile_${i + 1}`;
+          const key = p?.field || p?.key || iesCanonicalProfileKey(name);
+          iesPushImportedProfile(profiles, name, values, key, stepDuration);
+        });
+      } else if (typeof container === 'object') {
+        Object.entries(container).forEach(([name, values]) => {
+          iesPushImportedProfile(profiles, name, values, iesCanonicalProfileKey(name), stepDuration);
+        });
+      }
+    };
+    consumeContainer(j.profiles);
+    consumeContainer(j.load_profiles);
+    consumeContainer(j.time_series?.profiles);
+    consumeContainer(j._time_series?.profiles);
+    const detectedSteps = profiles.reduce((maxLen, p) => Math.max(maxLen, p.values.length), 0);
+    const numSteps = Math.round(Number(j.num_steps || j.time_series?.num_steps || j._time_series?.num_steps || detectedSteps));
+    if (!profiles.length || !Number.isInteger(numSteps) || numSteps <= 0) {
+      throw new Error('未找到有效的综合能源时序数组');
+    }
+    const bad = profiles.filter(p => p.values.length !== numSteps);
+    if (bad.length) {
+      throw new Error(`${bad.length} 条时序长度与 num_steps=${numSteps} 不一致`);
+    }
+    return { num_steps: numSteps, step_duration_hr: stepDuration, profiles };
+  }
+
+  function iesSplitDelimitedLine(line, delimiter) {
+    const out = [];
+    let cur = '';
+    let quoted = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (quoted && line[i + 1] === '"') { cur += '"'; i++; }
+        else quoted = !quoted;
+      } else if (ch === delimiter && !quoted) {
+        out.push(cur.trim().replace(/^"|"$/g, ''));
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    out.push(cur.trim().replace(/^"|"$/g, ''));
+    return out;
+  }
+
+  function parseIntegratedEnergyCsvProfiles(text) {
+    const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    if (lines.length < 2) throw new Error('CSV 至少需要表头和一行数据');
+    const first = lines[0];
+    const delimiter = first.includes('\t') ? '\t'
+      : ((first.match(/;/g) || []).length > (first.match(/,/g) || []).length ? ';' : ',');
+    const rows = lines.map(line => iesSplitDelimitedLine(line, delimiter));
+    const headers = rows[0];
+    const skipHeaders = new Set(['time', 'timestamp', 'datetime', 'date', 'hour', 'step', 't', '时间', '时刻', '步']);
+    const profiles = [];
+    headers.forEach((header, c) => {
+      if (!header || skipHeaders.has(iesProfileNameKey(header))) return;
+      const values = rows.slice(1).map(row => {
+        const n = Number.parseFloat(row[c]);
+        return Number.isFinite(n) ? n : 0;
+      });
+      if (values.length && values.some(v => Number.isFinite(v))) {
+        iesPushImportedProfile(profiles, header, values, iesCanonicalProfileKey(header), 1.0);
+      }
+    });
+    if (!profiles.length) throw new Error('CSV 未识别到任何数值时序列');
+    return { num_steps: profiles[0].values.length, step_duration_hr: 1.0, profiles };
+  }
+
+  function parseIntegratedEnergyProfiles(fileName, text) {
+    return /\.json$/i.test(fileName)
+      ? parseIntegratedEnergyJsonProfiles(text)
+      : parseIntegratedEnergyCsvProfiles(text);
+  }
+
+  function applyIntegratedEnergyImportedProfiles(bundle, fileName) {
+    const components = iesActiveCanvasComponents();
+    if (!components.length) {
+      log('综合能源时序导入：画布中没有投运的综合能源元件，请先添加或生成示例画布', 'warn');
+      return;
+    }
+
+    const profilesByKey = new Map();
+    bundle.profiles.forEach(profile => {
+      const key = profile.key || iesCanonicalProfileKey(profile.name);
+      if (key) profilesByKey.set(key, { ...profile, key, step_duration_hr: bundle.step_duration_hr });
+    });
+
+    let applied = 0;
+    const appliedNotes = [];
+    const distribute = (key, type, scalarKey, weightFn, scalarMode = 'average') => {
+      const profile = profilesByKey.get(key);
+      const rows = iesComponentsOf(components, type);
+      if (!profile || !rows.length) return;
+      const count = iesDistributeProfile(rows, profile, weightFn, scalarKey, scalarMode);
+      if (count > 0) {
+        applied += count;
+        appliedNotes.push(`${key}→${count}`);
+      }
+    };
+
+    distribute('electric_load_mw', 'ies_electric_load', 'demand_mw', comp => iesParam(comp.params, 'demand_mw', 0));
+    distribute('heat_load_mw', 'ies_heat_load', 'demand_mw', comp => iesParam(comp.params, 'demand_mw', 0));
+    distribute('hydrogen_load_mw', 'ies_hydrogen_load', 'demand_mw', comp => iesParam(comp.params, 'demand_mw', 0));
+    distribute('fuel_load_mw', 'ies_fuel_load', 'demand_mw', comp => iesParam(comp.params, 'demand_mw', 0));
+    distribute('transport_demand_km', 'ies_transport', 'demand_km_per_h', comp => iesParam(comp.params, 'demand_km_per_h', 0));
+    distribute('solar_available_mw', 'ies_solar', 'rated_mw', comp => iesParam(comp.params, 'rated_mw', 0), 'max');
+    distribute('wind_available_mw', 'ies_wind', 'rated_mw', comp => iesParam(comp.params, 'rated_mw', 0), 'max');
+
+    ['grid_buy_price', 'grid_sell_price', 'grid_carbon_tco2_mwh'].forEach(key => {
+      const profile = profilesByKey.get(key);
+      const rows = iesComponentsOf(components, 'ies_grid');
+      if (!profile || !rows.length) return;
+      let count = 0;
+      rows.forEach(comp => { if (iesSetGridProfile(comp, key, profile.values, bundle.step_duration_hr)) count += 1; });
+      if (count > 0) {
+        applied += count;
+        appliedNotes.push(`${key}→${count}`);
+      }
+    });
+
+    bundle.profiles.forEach(profile => {
+      const key = profile.key || iesCanonicalProfileKey(profile.name);
+      if (key && IES_PROFILE_KEYS.includes(key)) return;
+      const targetName = iesProfileNameKey(profile.name);
+      if (!targetName) return;
+      components.forEach(comp => {
+        if (iesProfileNameKey(comp.params?.name) !== targetName) return;
+        if (iesApplyNamedProfileToComponent(comp, { ...profile, step_duration_hr: bundle.step_duration_hr })) {
+          applied += 1;
+          appliedNotes.push(`${profile.name}→${comp.params?.name || comp.type}`);
+        }
+      });
+    });
+
+    if (applied <= 0) {
+      log(`综合能源时序导入：${fileName} 已解析，但未匹配到画布元件或标准字段`, 'warn');
+      return;
+    }
+
+    const hours = document.getElementById('iesHours');
+    if (hours) hours.value = String(bundle.num_steps);
+    _canvasDirty = true;
+    if (Canvas.state?.selectedId !== null && Canvas.state?.selectedId !== undefined) {
+      onSelectionChanged(Canvas.state.selectedId);
+    }
+    const shown = appliedNotes.slice(0, 6).join('，');
+    const more = appliedNotes.length > 6 ? `，等 ${appliedNotes.length} 项` : '';
+    log(`综合能源时序导入完成：${fileName}，${bundle.num_steps}步，已绑定 ${applied} 个元件/字段（${shown}${more}）`, 'success');
+  }
+
+  async function handleIntegratedEnergyProfilesImport(file) {
+    try {
+      const text = await iesReadBrowserFileText(file);
+      const bundle = parseIntegratedEnergyProfiles(file.name, text);
+      applyIntegratedEnergyImportedProfiles(bundle, file.name);
+    } catch (err) {
+      log(`综合能源时序导入失败：${err.message || err}`, 'error');
+      setStatus('综合能源时序导入失败', 'error');
+    }
+  }
+
+  function applyIntegratedEnergyCanvasPayload(payload) {
+    const useCanvas = document.getElementById('iesUseCanvas')?.checked !== false;
+    const components = iesActiveCanvasComponents();
+    payload.canvas_model_used = false;
+    payload.canvas_integrated_energy_component_count = components.length;
+    if (!useCanvas) return payload;
+
+    const typed = type => iesComponentsOf(components, type);
+    const has = type => typed(type).length > 0;
+    let usedCanvas = components.length > 0;
+    const profileSteps = iesCanvasProfileLength(components);
+    if (profileSteps > 0) {
+      payload.num_steps = profileSteps;
+      payload.step_duration_hr = iesCanvasProfileStepDuration(components, payload.step_duration_hr || 1.0);
+    }
+
+    const grids = typed('ies_grid');
+    if (grids.length) {
+      payload.import_limit_mw = grids.reduce((s, c) => s + iesParam(c.params, 'import_limit_mw', 0), 0);
+      payload.export_limit_mw = grids.reduce((s, c) => s + iesParam(c.params, 'export_limit_mw', 0), 0);
+      payload.grid_buy_price = iesWeightedAverage(grids, 'buy_price_per_mwh', 'import_limit_mw', 90);
+      payload.grid_sell_price = iesWeightedAverage(grids, 'sell_price_per_mwh', 'export_limit_mw', 35);
+      payload.grid_carbon_tco2_mwh = iesWeightedAverage(grids, 'carbon_tco2_mwh', 'import_limit_mw', 0.58);
+      payload.grid_buy_price =
+        iesWeightedAverageProfile(grids, 'buy_price_per_mwh', 'import_limit_mw', '_ies_buy_price_profile_values', payload.grid_buy_price) ||
+        payload.grid_buy_price;
+      payload.grid_sell_price =
+        iesWeightedAverageProfile(grids, 'sell_price_per_mwh', 'export_limit_mw', '_ies_sell_price_profile_values', payload.grid_sell_price) ||
+        payload.grid_sell_price;
+      payload.grid_carbon_tco2_mwh =
+        iesWeightedAverageProfile(grids, 'carbon_tco2_mwh', 'import_limit_mw', '_ies_carbon_profile_values', payload.grid_carbon_tco2_mwh) ||
+        payload.grid_carbon_tco2_mwh;
+    }
+
+    if (has('ies_electric_load')) {
+      const rows = typed('ies_electric_load');
+      payload.electric_load_mw =
+        iesAggregateComponentProfiles(rows, comp => iesParam(comp.params, 'demand_mw', 0)) ||
+        iesSum(components, 'ies_electric_load', 'demand_mw');
+    }
+    else {
+      const legacyLoad = iesLegacyElectricLoadMw();
+      if (legacyLoad > 0) { payload.electric_load_mw = legacyLoad; usedCanvas = true; }
+    }
+    if (has('ies_heat_load')) {
+      const rows = typed('ies_heat_load');
+      payload.heat_load_mw =
+        iesAggregateComponentProfiles(rows, comp => iesParam(comp.params, 'demand_mw', 0)) ||
+        iesSum(components, 'ies_heat_load', 'demand_mw');
+    }
+    if (has('ies_hydrogen_load')) {
+      const rows = typed('ies_hydrogen_load');
+      payload.hydrogen_load_mw =
+        iesAggregateComponentProfiles(rows, comp => iesParam(comp.params, 'demand_mw', 0)) ||
+        iesSum(components, 'ies_hydrogen_load', 'demand_mw');
+    }
+    if (has('ies_fuel_load')) {
+      const rows = typed('ies_fuel_load');
+      payload.fuel_load_mw =
+        iesAggregateComponentProfiles(rows, comp => iesParam(comp.params, 'demand_mw', 0)) ||
+        iesSum(components, 'ies_fuel_load', 'demand_mw');
+    }
+
+    const transport = typed('ies_transport');
+    if (transport.length) {
+      payload.transport_demand_km =
+        iesAggregateComponentProfiles(transport, comp => iesParam(comp.params, 'demand_km_per_h', 0)) ||
+        transport.reduce((s, c) => s + iesParam(c.params, 'demand_km_per_h', 0), 0);
+      payload.ev_ratio = iesWeightedAverage(transport, 'ev_ratio', 'demand_km_per_h', payload.ev_ratio);
+      payload.hv_ratio = iesWeightedAverage(transport, 'hv_ratio', 'demand_km_per_h', payload.hv_ratio);
+      payload.icv_ratio = iesWeightedAverage(transport, 'icv_ratio', 'demand_km_per_h', payload.icv_ratio);
+      const ratioTotal = payload.ev_ratio + payload.hv_ratio + payload.icv_ratio;
+      if (ratioTotal > 1e-9) {
+        payload.ev_ratio /= ratioTotal;
+        payload.hv_ratio /= ratioTotal;
+        payload.icv_ratio /= ratioTotal;
+      }
+      payload.alpha_ev_mwh_per_km = iesWeightedAverage(transport, 'alpha_ev_mwh_per_km', 'demand_km_per_h', 0.00018);
+      payload.alpha_hv_mwh_per_km = iesWeightedAverage(transport, 'alpha_hv_mwh_per_km', 'demand_km_per_h', 0.00060);
+      payload.alpha_icv_mwh_per_km = iesWeightedAverage(transport, 'alpha_icv_mwh_per_km', 'demand_km_per_h', 0.00075);
+    }
+
+    if (has('ies_solar')) {
+      const rows = typed('ies_solar');
+      payload.solar_rated_mw = rows.reduce((s, c) => s + iesParam(c.params, 'rated_mw', 0), 0);
+      payload.solar_om_cost_per_mwh = iesWeightedAverage(rows, 'om_cost_per_mwh', 'rated_mw', 2);
+      payload.solar_available_mw =
+        iesAggregateComponentProfiles(rows, comp =>
+          iesParam(comp.params, 'rated_mw', 0) * iesParam(comp.params, 'availability_scale', 1)) ||
+        payload.solar_available_mw;
+    } else {
+      const solar = iesLegacySolarRatedMw();
+      if (solar > 0) { payload.solar_rated_mw = solar; usedCanvas = true; }
+    }
+    if (has('ies_wind')) {
+      const rows = typed('ies_wind');
+      payload.wind_rated_mw = rows.reduce((s, c) => s + iesParam(c.params, 'rated_mw', 0), 0);
+      payload.wind_om_cost_per_mwh = iesWeightedAverage(rows, 'om_cost_per_mwh', 'rated_mw', 3);
+      payload.wind_available_mw =
+        iesAggregateComponentProfiles(rows, comp =>
+          iesParam(comp.params, 'rated_mw', 0) * iesParam(comp.params, 'availability_scale', 1)) ||
+        payload.wind_available_mw;
+    } else {
+      const wind = iesLegacyWindRatedMw();
+      if (wind > 0) { payload.wind_rated_mw = wind; usedCanvas = true; }
+    }
+
+    const chp = typed('ies_chp');
+    if (chp.length) {
+      payload.chp_power_max_mw = chp.reduce((s, c) => s + iesParam(c.params, 'power_max_mw', 0), 0);
+      payload.chp_heat_max_mw = chp.reduce((s, c) => s + iesParam(c.params, 'heat_max_mw', 0), 0);
+      payload.eta_chp_elec = iesWeightedAverage(chp, 'eta_elec', 'power_max_mw', 0.35);
+      payload.eta_chp_heat = iesWeightedAverage(chp, 'eta_heat', 'heat_max_mw', 0.45);
+      payload.eta_chp_total = iesWeightedAverage(chp, 'eta_total', 'power_max_mw', 0.82);
+      payload.chp_om_cost_per_mwh = iesWeightedAverage(chp, 'om_cost_per_mwh', 'power_max_mw', 5);
+    }
+
+    const heatPumps = typed('ies_heat_pump');
+    if (heatPumps.length) {
+      payload.heat_pump_power_max_mw = heatPumps.reduce((s, c) => s + iesParam(c.params, 'power_max_mw', 0), 0);
+      payload.cop_heatpump = iesWeightedAverage(heatPumps, 'cop', 'power_max_mw', 3.2);
+      payload.heat_pump_om_cost_per_mwh = iesWeightedAverage(heatPumps, 'om_cost_per_mwh', 'power_max_mw', 1);
+    }
+
+    const electrolyzers = typed('ies_electrolyzer');
+    if (electrolyzers.length) {
+      payload.electrolyzer_power_max_mw = electrolyzers.reduce((s, c) => s + iesParam(c.params, 'power_max_mw', 0), 0);
+      payload.eta_electrolysis = iesWeightedAverage(electrolyzers, 'eta', 'power_max_mw', 0.65);
+      payload.electrolyzer_om_cost_per_mwh = iesWeightedAverage(electrolyzers, 'om_cost_per_mwh', 'power_max_mw', 2);
+    }
+
+    const fuelCells = typed('ies_fuel_cell');
+    if (fuelCells.length) {
+      payload.fuel_cell_power_max_mw = fuelCells.reduce((s, c) => s + iesParam(c.params, 'power_max_mw', 0), 0);
+      payload.eta_fuelcell = iesWeightedAverage(fuelCells, 'eta', 'power_max_mw', 0.52);
+      payload.fuel_cell_om_cost_per_mwh = iesWeightedAverage(fuelCells, 'om_cost_per_mwh', 'power_max_mw', 4);
+    }
+
+    const eStores = typed('ies_electric_storage');
+    if (eStores.length) {
+      iesApplyStoragePayload(payload, eStores, 'electric');
+      payload.eta_storage_charge = iesWeightedAverage(eStores, 'eta_charge', 'capacity_mwh', 0.95);
+      payload.eta_storage_discharge = iesWeightedAverage(eStores, 'eta_discharge', 'capacity_mwh', 0.95);
+      payload.electric_storage_retention = iesWeightedAverage(eStores, 'retention', 'capacity_mwh', 0.999);
+      payload.storage_throughput_cost_per_mwh = iesWeightedAverage(eStores, 'throughput_cost_per_mwh', 'capacity_mwh', 1);
+    } else {
+      const legacyStorage = iesLegacyElectricStorage();
+      if (legacyStorage.count > 0) {
+        payload.electric_storage_capacity_mwh = legacyStorage.energy;
+        payload.electric_storage_initial_mwh = legacyStorage.initial;
+        payload.electric_storage_charge_max_mw = legacyStorage.charge;
+        payload.electric_storage_discharge_max_mw = legacyStorage.discharge;
+        usedCanvas = true;
+      }
+    }
+
+    const tStores = typed('ies_thermal_storage');
+    if (tStores.length) {
+      iesApplyStoragePayload(payload, tStores, 'thermal');
+      payload.thermal_storage_retention = iesWeightedAverage(tStores, 'retention', 'capacity_mwh', 0.995);
+    }
+
+    const hStores = typed('ies_hydrogen_storage');
+    if (hStores.length) {
+      const layerOf = comp => String(comp.params?.storage_layer || 'daily').toLowerCase();
+      const daily = hStores.filter(comp => !['weekly', 'seasonal'].includes(layerOf(comp)));
+      const weekly = hStores.filter(comp => layerOf(comp) === 'weekly');
+      const seasonal = hStores.filter(comp => layerOf(comp) === 'seasonal');
+      if (daily.length) iesApplyStoragePayload(payload, daily, 'hydrogen');
+      if (weekly.length) iesApplyStoragePayload(payload, weekly, 'weekly_hydrogen');
+      if (seasonal.length) iesApplyStoragePayload(payload, seasonal, 'seasonal_hydrogen');
+      payload.hydrogen_storage_retention = iesWeightedAverage(daily.length ? daily : hStores, 'retention', 'capacity_mwh', 0.999);
+      payload.weekly_hydrogen_storage_retention = iesWeightedAverage(weekly, 'retention', 'capacity_mwh', 0.9995);
+      payload.seasonal_hydrogen_storage_retention = iesWeightedAverage(seasonal, 'retention', 'capacity_mwh', 0.9998);
+      payload.hydrogen_storage_throughput_cost_per_mwh =
+        iesWeightedAverage(hStores, 'throughput_cost_per_mwh', 'capacity_mwh', 1.5);
+    }
+
+    const ccus = typed('ies_ccus');
+    if (ccus.length) {
+      payload.ccus_capture_fraction = iesWeightedAverage(ccus, 'capture_fraction', 'max_tco2_per_h', payload.ccus_capture_fraction);
+      payload.ccus_max_tco2_per_h = ccus.reduce((s, c) => s + iesParam(c.params, 'max_tco2_per_h', 0), 0);
+      payload.ccus_power_mwh_per_tco2 = iesWeightedAverage(ccus, 'power_mwh_per_tco2', 'max_tco2_per_h', 0.12);
+      payload.ccus_cost_per_tco2 = iesWeightedAverage(ccus, 'cost_per_tco2', 'max_tco2_per_h', 35);
+    }
+
+    const fuels = typed('ies_fuel_supply');
+    if (fuels.length) {
+      payload.fuel_purchase_limit_mw = fuels.reduce((s, c) => s + iesParam(c.params, 'purchase_limit_mw', 0), 0);
+      payload.fuel_cost_per_mwh = iesWeightedAverage(fuels, 'cost_per_mwh', 'purchase_limit_mw', 38);
+      payload.fuel_carbon_tco2_mwh = iesWeightedAverage(fuels, 'carbon_tco2_mwh', 'purchase_limit_mw', 0.27);
+    }
+
+    payload.canvas_model_used = usedCanvas;
+    payload.canvas_component_summary = components.reduce((acc, comp) => {
+      acc[comp.type] = (acc[comp.type] || 0) + 1;
+      return acc;
+    }, {});
+    return payload;
+  }
+
+  function collectIntegratedEnergyPayload() {
+    const evRatio = iesNumber('iesEvRatio', 0.45);
+    const hvRatio = iesNumber('iesHvRatio', 0.20);
+    const payload = {
+      num_steps: Math.max(1, Math.round(iesNumber('iesHours', 24))),
+      step_duration_hr: 1.0,
+      solver: document.getElementById('iesSolver')?.value || 'auto',
+      objective: document.getElementById('iesObjective')?.value || 'cost',
+      import_limit_mw: iesNumber('iesImportLimit', 16),
+      export_limit_mw: iesNumber('iesExportLimit', 5),
+      electric_load_mw: iesNumber('iesElectricLoad', 8),
+      heat_load_mw: iesNumber('iesHeatLoad', 4),
+      hydrogen_load_mw: iesNumber('iesHydrogenLoad', 0.2),
+      solar_rated_mw: iesNumber('iesSolarRated', 8),
+      wind_rated_mw: iesNumber('iesWindRated', 4),
+      chp_power_max_mw: iesNumber('iesChpPower', 4),
+      heat_pump_power_max_mw: iesNumber('iesHeatPump', 3),
+      electrolyzer_power_max_mw: iesNumber('iesElectrolyzer', 3),
+      fuel_cell_power_max_mw: iesNumber('iesFuelCell', 2),
+      electric_storage_capacity_mwh: iesNumber('iesElectricStorage', 10),
+      hydrogen_storage_capacity_mwh: iesNumber('iesHydrogenStorage', 8),
+      ev_ratio: evRatio,
+      hv_ratio: hvRatio,
+      icv_ratio: Math.max(0, 1 - evRatio - hvRatio),
+      enable_carbon_budget: document.getElementById('iesEnableCarbonBudget')?.checked || false,
+      co2_budget_tco2: iesNumber('iesCarbonBudget', 70),
+      ccus_capture_fraction: iesNumber('iesCaptureFraction', 0.85),
+      enforce_terminal_storage_cyclic: document.getElementById('iesCyclicStorage')?.checked !== false,
+      enable_hydrogen_storage_layers: true,
+    };
+    return applyIntegratedEnergyCanvasPayload(payload);
+  }
+
+  function seedIntegratedEnergyCanvas() {
+    if (typeof Canvas === 'undefined' || !Canvas.addComponent) return;
+    const existing = iesActiveCanvasComponents().length;
+    if (existing > 0 && !window.confirm('当前画布已有综合能源元件，是否继续追加示例？')) return;
+
+    const add = (type, x, y, params = {}) =>
+      Canvas.addComponent(type, x, y, { ...COMP.defaults[type], ...params });
+    const link = (a, ap, b, bp) => {
+      try { Canvas.addConnection(a.id, ap, b.id, bp); } catch (_) { /* keep sample creation best-effort */ }
+    };
+
+    const eBus = add('ies_electric_bus', 120, 140, { name: '园区电母线' });
+    const hBus = add('ies_heat_bus', 120, 320, { name: '园区热母线' });
+    const h2Bus = add('ies_hydrogen_bus', 520, 140, { name: '园区氢母线' });
+    const fuelBus = add('ies_fuel_bus', 520, 320, { name: '燃料母线' });
+
+    const grid = add('ies_grid', -100, 140);
+    const solar = add('ies_solar', 120, -40);
+    const wind = add('ies_wind', 300, -40);
+    const eLoad = add('ies_electric_load', 120, 235);
+    const heatLoad = add('ies_heat_load', 120, 415);
+    const h2Load = add('ies_hydrogen_load', 700, 140);
+    const transport = add('ies_transport', 705, 250);
+    const fuel = add('ies_fuel_supply', 705, 320);
+    const chp = add('ies_chp', 360, 320);
+    const heatPump = add('ies_heat_pump', 300, 220);
+    const electrolyzer = add('ies_electrolyzer', 340, 100);
+    const fuelCell = add('ies_fuel_cell', 520, 40);
+    const bess = add('ies_electric_storage', -100, 40);
+    const tes = add('ies_thermal_storage', -100, 320);
+    const h2Store = add('ies_hydrogen_storage', 520, 235);
+    const ccus = add('ies_ccus', 360, 420);
+
+    link(grid, 'electric', eBus, 'left');
+    link(solar, 'electric', eBus, 'top');
+    link(wind, 'electric', eBus, 'top');
+    link(eLoad, 'electric', eBus, 'bottom');
+    link(bess, 'electric', eBus, 'left');
+    link(heatLoad, 'heat', hBus, 'bottom');
+    link(tes, 'heat', hBus, 'left');
+    link(h2Load, 'hydrogen', h2Bus, 'right');
+    link(h2Store, 'hydrogen', h2Bus, 'bottom');
+    link(fuel, 'fuel', fuelBus, 'right');
+    link(chp, 'fuel', fuelBus, 'left');
+    link(chp, 'electric', eBus, 'right');
+    link(chp, 'heat', hBus, 'right');
+    link(heatPump, 'electric', eBus, 'right');
+    link(heatPump, 'heat', hBus, 'right');
+    link(electrolyzer, 'electric', eBus, 'right');
+    link(electrolyzer, 'hydrogen', h2Bus, 'left');
+    link(fuelCell, 'hydrogen', h2Bus, 'left');
+    link(fuelCell, 'electric', eBus, 'right');
+    link(transport, 'electric', eBus, 'right');
+    link(transport, 'hydrogen', h2Bus, 'right');
+    link(transport, 'fuel', fuelBus, 'right');
+    link(ccus, 'electric', eBus, 'right');
+
+    if (Canvas.zoomFit) Canvas.zoomFit();
+    _canvasDirty = true;
+    updateTopologyTables();
+    log('已添加园区综合能源示例画布，可直接选择元件修改容量、效率和成本参数。', 'success');
+  }
+
+  function iesFmt(value, digits = 2) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n.toFixed(digits) : '—';
+  }
+
+  function iesTimeAxis(data) {
+    const n = Number(data?.num_steps) || Math.max(0, (data?.p_grid_import_mw || []).length);
+    const dt = Number(data?.step_duration_hr) || 1;
+    return Array.from({ length: n }, (_, i) => i * dt);
+  }
+
+  function renderIntegratedEnergySummary(data) {
+    const el = document.getElementById('iesSummary');
+    if (!el) return;
+    const s = data.summary || {};
+    const cards = [
+      ['总成本', iesFmt(s.total_cost, 0)],
+      ['购电量', `${iesFmt(s.total_grid_import_mwh, 1)} MWh`],
+      ['新能源利用率', `${iesFmt(100 * Number(s.renewable_utilization || 0), 1)}%`],
+      ['弃能量', `${iesFmt(s.total_curtailment_mwh, 1)} MWh`],
+      ['碳排放', `${iesFmt(s.total_carbon_residual_tco2, 2)} tCO2`],
+      ['CO2捕集', `${iesFmt(s.total_co2_captured_tco2, 2)} tCO2`],
+      ['热负荷', `${iesFmt(s.total_heat_load_mwh, 1)} MWh`],
+      ['交通需求', `${iesFmt(s.total_transport_km, 0)} km`],
+    ];
+    const sourceText = data.canvas_model_used
+      ? `；来源：画布元件 (${Number(data.canvas_integrated_energy_component_count || 0)} 个)`
+      : '；来源：参数面板';
+    el.innerHTML = `
+      <div class="ies-kpi-grid">
+        ${cards.map(([label, value]) => `<div class="ies-kpi-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('')}
+      </div>
+      <div class="sub-hint">状态：${escapeHtml(data.status || '')}；求解器：${escapeHtml(data.solver_name || 'auto')}；目标：${escapeHtml(data.objective_mode || 'cost')}；耗时 ${iesFmt(data.solve_time_sec, 3)} s${escapeHtml(sourceText)}</div>`;
+  }
+
+  function iesCarrierColor(carrier, alpha = 0.45) {
+    const colors = {
+      electricity: `rgba(97,175,239,${alpha})`,
+      heat: `rgba(224,108,117,${alpha})`,
+      hydrogen: `rgba(86,182,194,${alpha})`,
+      fuel: `rgba(229,192,123,${alpha})`,
+    };
+    return colors[carrier] || `rgba(152,195,121,${alpha})`;
+  }
+
+  function renderIntegratedEnergySankey(data) {
+    const div = document.getElementById('iesSankeyChart');
+    if (!div) return;
+    if (typeof Plotly === 'undefined') {
+      div.innerHTML = '<p class="empty-hint">Plotly 未加载，无法展示 Sankey 图。</p>';
+      return;
+    }
+    const nodes = data.sankey?.nodes || {};
+    const links = data.sankey?.links || {};
+    const labels = nodes.label || [];
+    const values = links.value || [];
+    if (!labels.length || !values.length) {
+      div.innerHTML = '<p class="empty-hint">暂无可显示的多能流。</p>';
+      return;
+    }
+    const carriers = links.carrier || [];
+    Plotly.newPlot(div, [{
+      type: 'sankey',
+      arrangement: 'snap',
+      node: {
+        pad: 14,
+        thickness: 16,
+        line: { color: 'rgba(255,255,255,0.25)', width: 0.5 },
+        label: labels,
+        color: nodes.color || labels.map(() => 'rgba(97,175,239,0.95)'),
+      },
+      link: {
+        source: links.source || [],
+        target: links.target || [],
+        value: values,
+        color: carriers.map(c => iesCarrierColor(c, 0.38)),
+        customdata: carriers,
+        hovertemplate: '%{source.label} → %{target.label}<br>%{value:.2f} MWh<br>%{customdata}<extra></extra>',
+      },
+    }], {
+      margin: { l: 10, r: 10, t: 10, b: 10 },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      font: { color: '#dcdfe4', size: 11 },
+    }, { responsive: true });
+  }
+
+  function renderIntegratedEnergyCharts(data) {
+    if (typeof Plotly === 'undefined') return;
+    const x = iesTimeAxis(data);
+    const profiles = data.input_profiles || {};
+    const dispatchDiv = document.getElementById('iesDispatchChart');
+    if (dispatchDiv) {
+      Plotly.newPlot(dispatchDiv, [
+        { x, y: profiles.electric_load_mw || [], mode: 'lines', name: '电负荷', line: { color: '#e5c07b', width: 2 } },
+        { x, y: data.p_grid_import_mw || [], mode: 'lines', name: '购电', line: { color: '#61afef' } },
+        { x, y: data.p_solar_mw || [], mode: 'lines', name: '光伏', stackgroup: 'gen', line: { color: '#f5c542' } },
+        { x, y: data.p_wind_mw || [], mode: 'lines', name: '风电', stackgroup: 'gen', line: { color: '#98c379' } },
+        { x, y: data.p_chp_mw || [], mode: 'lines', name: 'CHP电', stackgroup: 'gen', line: { color: '#e06c75' } },
+        { x, y: data.p_fuelcell_mw || [], mode: 'lines', name: '燃料电池', stackgroup: 'gen', line: { color: '#56b6c2' } },
+        { x, y: data.p_grid_export_mw || [], mode: 'lines', name: '售电', line: { color: '#c678dd', dash: 'dot' } },
+      ], {
+        margin: { l: 55, r: 18, t: 20, b: 42 },
+        xaxis: { title: 'Hour' },
+        yaxis: { title: 'MW' },
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        font: { color: '#dcdfe4' },
+        legend: { orientation: 'h', y: -0.22 },
+      }, { responsive: true });
+    }
+    const storageDiv = document.getElementById('iesStorageChart');
+    if (storageDiv) {
+      const xs = Array.from({ length: (data.e_storage_mwh || []).length }, (_, i) => i);
+      Plotly.newPlot(storageDiv, [
+        { x: xs, y: data.e_storage_mwh || [], mode: 'lines', name: '电储能 MWh', line: { color: '#61afef' } },
+        { x: xs, y: data.q_storage_mwh || [], mode: 'lines', name: '热储能 MWh', line: { color: '#e06c75' } },
+        { x: xs, y: data.h_storage_mwh || [], mode: 'lines', name: '日内氢储 MWh', line: { color: '#56b6c2' } },
+        { x: xs, y: data.h_weekly_storage_mwh || [], mode: 'lines', name: '周间氢储 MWh', line: { color: '#c678dd' } },
+      ], {
+        margin: { l: 55, r: 18, t: 20, b: 42 },
+        xaxis: { title: 'State Step' },
+        yaxis: { title: 'MWh' },
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        font: { color: '#dcdfe4' },
+        legend: { orientation: 'h', y: -0.22 },
+      }, { responsive: true });
+    }
+    const carbonDiv = document.getElementById('iesCarbonChart');
+    if (carbonDiv) {
+      Plotly.newPlot(carbonDiv, [
+        { x, y: data.emissions_tco2 || [], type: 'bar', name: '总排放', marker: { color: '#e06c75' } },
+        { x, y: data.co2_captured_tco2 || [], type: 'bar', name: '捕集', marker: { color: '#56b6c2' } },
+        { x, y: data.carbon_residual_tco2 || [], mode: 'lines+markers', name: '残余碳', line: { color: '#e5c07b' } },
+      ], {
+        barmode: 'group',
+        margin: { l: 55, r: 18, t: 20, b: 42 },
+        xaxis: { title: 'Hour' },
+        yaxis: { title: 'tCO2' },
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        font: { color: '#dcdfe4' },
+        legend: { orientation: 'h', y: -0.22 },
+      }, { responsive: true });
+    }
+  }
+
+  function renderIntegratedEnergyTable(data) {
+    const el = document.getElementById('iesResultsTable');
+    if (!el) return;
+    const profiles = data.input_profiles || {};
+    const n = Math.min(Number(data.num_steps) || 0, 48);
+    let html = '<table><thead><tr><th>t</th><th>电负荷</th><th>购电</th><th>售电</th><th>光伏</th><th>风电</th><th>CHP</th><th>热泵</th><th>电解槽</th><th>CO2残余</th></tr></thead><tbody>';
+    for (let i = 0; i < n; ++i) {
+      html += `<tr><td>${i}</td><td>${iesFmt((profiles.electric_load_mw || [])[i])}</td><td>${iesFmt((data.p_grid_import_mw || [])[i])}</td><td>${iesFmt((data.p_grid_export_mw || [])[i])}</td><td>${iesFmt((data.p_solar_mw || [])[i])}</td><td>${iesFmt((data.p_wind_mw || [])[i])}</td><td>${iesFmt((data.p_chp_mw || [])[i])}</td><td>${iesFmt((data.p_heatpump_mw || [])[i])}</td><td>${iesFmt((data.p_electrolysis_h2_mw || [])[i])}</td><td>${iesFmt((data.carbon_residual_tco2 || [])[i], 3)}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    if ((Number(data.num_steps) || 0) > n) {
+      html += `<p class="empty-hint">仅显示前 ${n} 个时段，完整结果请导出 JSON。</p>`;
+    }
+    el.innerHTML = html;
+  }
+
+  function renderIntegratedEnergyResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('integratedEnergy');
+    renderIntegratedEnergySummary(data);
+    renderIntegratedEnergySankey(data);
+    renderIntegratedEnergyCharts(data);
+    renderIntegratedEnergyTable(data);
+    switchTab('results');
+  }
+
+  async function runIntegratedEnergy() {
+    setStatus('园区综合能源仿真中...', 'busy');
+    const payload = collectIntegratedEnergyPayload();
+    const data = await apiPost('/api/session/run_campus_ies', payload);
+    if (data && !data.error) {
+      _lastIntegratedEnergyData = data;
+      renderIntegratedEnergyResults(data);
+      setStatus(data.feasible ? '园区综合能源仿真完成' : '园区综合能源仿真未找到可行解',
+                data.feasible ? 'success' : 'warn');
+    } else {
+      setStatus('园区综合能源仿真失败', 'error');
+    }
+  }
+
   // ========== Init ==========
   // ---- Theme (light / dark background) ----
   // Keeps the dark palette as the default so existing users see no change until
@@ -8913,6 +10271,7 @@ const App = (() => {
     });
     document.getElementById('btnIoNewSystem')?.addEventListener('click', createNewSystem);
     document.getElementById('btnIoExportJson')?.addEventListener('click', exportJson);
+    document.getElementById('btnIoExportMatpower')?.addEventListener('click', exportMatpower);
     document.getElementById('btnIoExportEtap')?.addEventListener('click', exportEtap);
     document.getElementById('btnIoExportEtapXml')?.addEventListener('click', exportEtapXml);
     document.getElementById('btnIoExportGridlabd')?.addEventListener('click', () => exportExternalGrid('gridlabd'));
@@ -8938,9 +10297,22 @@ const App = (() => {
     });
 
     // Calculation buttons (Bar 3 "运行..." buttons reuse original IDs where possible)
+    document.getElementById('btnExportAllResults')?.addEventListener('click', exportAllCachedResults);
     document.getElementById('btnPowerFlow').addEventListener('click', runPowerFlow);
+    document.getElementById('btnPfAdvanced')?.addEventListener('click', () => {
+      const panel = document.getElementById('pfAdvancedPanel');
+      const btn = document.getElementById('btnPfAdvanced');
+      if (!panel || !btn) return;
+      const nextOpen = panel.hasAttribute('hidden');
+      panel.toggleAttribute('hidden', !nextOpen);
+      btn.classList.toggle('active', nextOpen);
+      btn.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+    });
     document.getElementById('btnRunOpf')?.addEventListener('click', runOpf);
     document.getElementById('btnCarbonFlow')?.addEventListener('click', runCarbonFlow);
+    document.getElementById('carbonSankeyMetric')?.addEventListener('change', () => {
+      if (_lastCarbonData) renderCarbonSankey(_lastCarbonData);
+    });
     document.getElementById('btnImportCarbonFactors')?.addEventListener('click', () => {
       document.getElementById('fileImportCarbonFactors')?.click();
     });
@@ -9043,6 +10415,23 @@ const App = (() => {
 
     // Bar 3: time-series — run directly with inline params (skip UC / OPF).
     document.getElementById('btnRunTimeSeriesPF')?.addEventListener('click', runTimeSeriesPF);
+    document.getElementById('btnSeedIntegratedEnergyCanvas')?.addEventListener('click', seedIntegratedEnergyCanvas);
+    document.getElementById('btnImportIntegratedEnergyProfiles')?.addEventListener('click', () => {
+      document.getElementById('fileImportIntegratedEnergyProfiles')?.click();
+    });
+    document.getElementById('fileImportIntegratedEnergyProfiles')?.addEventListener('change', async (e) => {
+      const file = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (file) await handleIntegratedEnergyProfilesImport(file);
+    });
+    document.getElementById('btnRunIntegratedEnergy')?.addEventListener('click', runIntegratedEnergy);
+    document.getElementById('btnExportIntegratedEnergy')?.addEventListener('click', () => {
+      if (!_lastIntegratedEnergyData) {
+        log('请先运行园区综合能源仿真', 'warn');
+        return;
+      }
+      downloadJsonFile(`campus_integrated_energy_${tsTagForFilename()}.json`, _lastIntegratedEnergyData);
+    });
     document.getElementById('btnToggleAnnualPanel')?.addEventListener('click', () => {
       const panel = document.getElementById('annualSimControls');
       const btn = document.getElementById('btnToggleAnnualPanel');

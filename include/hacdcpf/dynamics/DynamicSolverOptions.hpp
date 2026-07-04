@@ -53,7 +53,7 @@ struct DynamicSolverOptions {
   bool record_initial_state{true};
   bool verbose{false};
   int max_step_halving{8};
-  int max_dynamic_trim_iters{12};
+  int max_dynamic_trim_iters{40};
   int output_every_steps{1};
   double output_interval_s{0.0};
   int max_recorded_snapshots{0};

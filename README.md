@@ -282,6 +282,7 @@ Python 侧 `etap-main/src/canonical_schema.py` 提供与 C++ 完全一致的列�
 
 | 操作 | 入口 |
 |---|---|
+| 导出当前系统为 MATPOWER `.m` | `POST /api/session/export_matpower`（文本下载）；工具栏「导出MATPOWER」按钮 |
 | 导出当前系统为 ETAP `.xlsx` | `POST /api/session/export_etap`（二进制下载）；工具栏「导出ETAP」按钮 |
 | 导入 ETAP `.xlsx`（二进制上传） | `POST /api/session/load_etap_xlsx`；「加载算例」对话框「导入ETAP工作簿 (.xlsx)」 |
 | 导入原生 ETAP `.xml` | `POST /api/session/load_etap_xml`；「加载算例」对话框「导入ETAP工程 (.xml)」 |
