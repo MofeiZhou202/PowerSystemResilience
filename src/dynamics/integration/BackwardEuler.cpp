@@ -38,7 +38,7 @@ IntegrationStepResult BackwardEuler::step(DynamicSystem& system,
     }
     const Eigen::MatrixXd jr =
         Eigen::MatrixXd::Identity(x.size(), x.size()) - dt * jf;
-    const Eigen::VectorXd delta = jr.colPivHouseholderQr().solve(-residual);
+    const Eigen::VectorXd delta = jr.partialPivLu().solve(-residual);
     if (!delta.allFinite()) return detail::make_failure("Backward Euler Newton correction is non-finite");
 
     double alpha = 1.0;

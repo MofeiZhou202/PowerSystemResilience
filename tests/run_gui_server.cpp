@@ -2298,6 +2298,7 @@ const char* dynamic_solver_type_name(hacdcpf::dynamics::DynamicSolverType type) 
     case DynamicSolverType::BackwardEulerNewton: return "BackwardEulerNewton";
     case DynamicSolverType::TrapezoidalNewton: return "TrapezoidalNewton";
     case DynamicSolverType::RosenbrockEuler: return "RosenbrockEuler";
+    case DynamicSolverType::MassMatrixDae: return "MassMatrixDae";
   }
   return "PartitionedHeun";
 }
@@ -2347,6 +2348,9 @@ hacdcpf::dynamics::DynamicSolverType dynamic_solver_type_from_json(const json& r
   }
   if (solver == "rosenbrock" || solver == "RosenbrockEuler") {
     return DynamicSolverType::RosenbrockEuler;
+  }
+  if (solver == "mass_matrix_dae" || solver == "dae" || solver == "MassMatrixDae") {
+    return DynamicSolverType::MassMatrixDae;
   }
   return DynamicSolverType::PartitionedHeun;
 }

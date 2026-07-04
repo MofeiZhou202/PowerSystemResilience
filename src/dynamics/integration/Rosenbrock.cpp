@@ -22,7 +22,7 @@ IntegrationStepResult Rosenbrock::step(DynamicSystem& system,
   }
   const Eigen::MatrixXd a =
       Eigen::MatrixXd::Identity(x0.size(), x0.size()) - dt * jf;
-  const Eigen::VectorXd delta = a.colPivHouseholderQr().solve(dt * f0);
+  const Eigen::VectorXd delta = a.partialPivLu().solve(dt * f0);
   if (!delta.allFinite()) return detail::make_failure("Rosenbrock correction is non-finite");
   system.x.x = x0 + delta;
   Eigen::VectorXd f1;

@@ -38,7 +38,7 @@ IntegrationStepResult Trapezoidal::step(DynamicSystem& system,
     }
     const Eigen::MatrixXd jr =
         Eigen::MatrixXd::Identity(x.size(), x.size()) - 0.5 * dt * jf;
-    const Eigen::VectorXd delta = jr.colPivHouseholderQr().solve(-residual);
+    const Eigen::VectorXd delta = jr.partialPivLu().solve(-residual);
     if (!delta.allFinite()) return detail::make_failure("Trapezoidal Newton correction is non-finite");
 
     double alpha = 1.0;

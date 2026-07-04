@@ -12,7 +12,11 @@ enum class DynamicSolverType {
   PartitionedRK4,
   BackwardEulerNewton,
   TrapezoidalNewton,
-  RosenbrockEuler
+  RosenbrockEuler,
+  // Simultaneous mass-matrix DAE: bus voltages are algebraic states solved
+  // together with device states in one sparse Newton system per step (no nested
+  // network solve). See docs/dynamics_psid_parity_upgrade_plan.md, Phase 1.
+  MassMatrixDae
 };
 
 enum class DynamicLinearSolverType {

@@ -21,6 +21,27 @@ double finite_or(double value, double fallback) {
   return std::isfinite(value) ? value : fallback;
 }
 
+// Exact structural + numeric equality of two compressed sparse matrices, used to
+// decide whether a cached factorization can be reused. Cheap (O(nnz)) relative to
+// a re-factorization.
+template <typename T>
+bool sparse_matrices_equal(const Eigen::SparseMatrix<T>& a,
+                           const Eigen::SparseMatrix<T>& b) {
+  if (a.rows() != b.rows() || a.cols() != b.cols() || a.nonZeros() != b.nonZeros()) {
+    return false;
+  }
+  const Eigen::Index nnz = a.nonZeros();
+  const Eigen::Index outer = a.outerSize();
+  for (Eigen::Index i = 0; i <= outer; ++i) {
+    if (a.outerIndexPtr()[i] != b.outerIndexPtr()[i]) return false;
+  }
+  for (Eigen::Index i = 0; i < nnz; ++i) {
+    if (a.innerIndexPtr()[i] != b.innerIndexPtr()[i]) return false;
+    if (a.valuePtr()[i] != b.valuePtr()[i]) return false;
+  }
+  return true;
+}
+
 void mask_slow_residuals(const std::vector<std::unique_ptr<DynamicDevice>>& devices,
                          Eigen::VectorXd& dxdt) {
   for (const auto& device : devices) {
@@ -507,6 +528,66 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
   }
 }
 
+bool DynamicSystem::acSolveCached(const Eigen::SparseMatrix<Complex>& a,
+                                  const Eigen::VectorXcd& b, Eigen::VectorXcd& x,
+                                  std::string& error) {
+  if (options.linear_solver != DynamicLinearSolverType::EigenSparseLU) {
+    SparseLinearSolver solver(options.linear_solver);
+    const auto result = solver.solve(a, b, x);
+    if (!result.success) error = result.message;
+    return result.success && x.allFinite();
+  }
+  if (!network_cache) network_cache = std::make_unique<NetworkSolveCache>();
+  auto& c = *network_cache;
+  if (!c.ac_valid || !sparse_matrices_equal(a, c.ac_matrix)) {
+    c.ac_matrix = a;
+    c.ac_matrix.makeCompressed();
+    c.ac_lu.compute(c.ac_matrix);
+    if (c.ac_lu.info() != Eigen::Success) {
+      c.ac_valid = false;
+      error = "Complex sparse factorization failed";
+      return false;
+    }
+    c.ac_valid = true;
+  }
+  x = c.ac_lu.solve(b);
+  if (c.ac_lu.info() != Eigen::Success || !x.allFinite()) {
+    error = "Complex sparse solve failed";
+    return false;
+  }
+  return true;
+}
+
+bool DynamicSystem::dcSolveCached(const Eigen::SparseMatrix<double>& a,
+                                  const Eigen::VectorXd& b, Eigen::VectorXd& x,
+                                  std::string& error) {
+  if (options.linear_solver != DynamicLinearSolverType::EigenSparseLU) {
+    SparseLinearSolver solver(options.linear_solver);
+    const auto result = solver.solve(a, b, x);
+    if (!result.success) error = result.message;
+    return result.success && x.allFinite();
+  }
+  if (!network_cache) network_cache = std::make_unique<NetworkSolveCache>();
+  auto& c = *network_cache;
+  if (!c.dc_valid || !sparse_matrices_equal(a, c.dc_matrix)) {
+    c.dc_matrix = a;
+    c.dc_matrix.makeCompressed();
+    c.dc_lu.compute(c.dc_matrix);
+    if (c.dc_lu.info() != Eigen::Success) {
+      c.dc_valid = false;
+      error = "Real sparse factorization failed";
+      return false;
+    }
+    c.dc_valid = true;
+  }
+  x = c.dc_lu.solve(b);
+  if (c.dc_lu.info() != Eigen::Success || !x.allFinite()) {
+    error = "Real sparse solve failed";
+    return false;
+  }
+  return true;
+}
+
 bool DynamicSystem::solveNetwork(double t, std::string& error) {
   const int max_iters = std::max(1, options.algebraic_network_max_iters);
   const double tol = std::max(0.0, options.algebraic_network_tol);
@@ -537,14 +618,9 @@ bool DynamicSystem::solveNetwork(double t, std::string& error) {
 
     if (network.acPhaseNodeCount() > 0) {
       Eigen::VectorXcd v;
-      SparseLinearSolver solver(options.linear_solver);
-      const auto result = solver.solve(Yac_eff, Iac_eff, v);
-      if (!result.success) {
-        error = "AC transient network solve failed: " + result.message;
-        return false;
-      }
-      if (!v.allFinite()) {
-        error = "AC transient network solve produced non-finite voltages";
+      std::string solve_error;
+      if (!acSolveCached(Yac_eff, Iac_eff, v, solve_error)) {
+        error = "AC transient network solve failed: " + solve_error;
         return false;
       }
       y.Vac_abc = v;
@@ -553,10 +629,9 @@ bool DynamicSystem::solveNetwork(double t, std::string& error) {
 
     if (network.dcBusCount() > 0) {
       Eigen::VectorXd v;
-      SparseLinearSolver solver(options.linear_solver);
-      const auto result = solver.solve(Gdc_eff, Idc_eff, v);
-      if (!result.success) {
-        error = "DC transient network solve failed: " + result.message;
+      std::string solve_error;
+      if (!dcSolveCached(Gdc_eff, Idc_eff, v, solve_error)) {
+        error = "DC transient network solve failed: " + solve_error;
         return false;
       }
       for (Eigen::Index i = 0; i < v.size(); ++i) {

@@ -2493,6 +2493,62 @@ TEST_CASE("Updated GFM inverter exposes dynamic DC-link telemetry",
   CHECK(it->values.count("p_dc_mw") == 1);
 }
 
+TEST_CASE("Mass-matrix DAE core matches the partitioned backward-Euler oracle",
+          "[dynamics][dae]") {
+  // The simultaneous DAE (bus voltages as algebraic states, one sparse Newton
+  // solve per step) must reproduce the nested-network backward-Euler result,
+  // since both are backward Euler on the same system.
+  auto run_solver = [](DynamicSolverType type, bool event) {
+    DynamicSolverOptions opt;
+    opt.solver_type = type;
+    opt.t_end_s = 3.0;
+    opt.dt_s = 0.005;
+    auto sys = make_controlled_machine_case(false, false, false);
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(sys, opt);
+    if (event) {
+      DynamicEvent e;
+      e.time_s = 1.0;
+      e.type = DynamicEventType::ACLoadScale;
+      e.bus = 2;
+      e.value = 1.5;
+      dyn.events.push_back(e);
+    }
+    DynamicSolver solver;
+    return solver.solve(dyn);
+  };
+
+  SECTION("holds the scheduled equilibrium with no event") {
+    const DynamicResults dae = run_solver(DynamicSolverType::MassMatrixDae, false);
+    REQUIRE(dae.success);
+    const auto omega = device_output_series(dae, "SynchronousMachine", 2, "omega_pu");
+    const auto p = device_output_series(dae, "SynchronousMachine", 2, "p_mw");
+    CHECK(series_range(omega) < 1e-5);          // stays at synchronous speed
+    CHECK(p.y.front() == Catch::Approx(50.0).margin(0.5));  // delivers scheduled MW
+    CHECK(series_range(p) < 1e-2);
+  }
+
+  SECTION("matches BackwardEulerNewton under a load step") {
+    const DynamicResults dae = run_solver(DynamicSolverType::MassMatrixDae, true);
+    const DynamicResults be = run_solver(DynamicSolverType::BackwardEulerNewton, true);
+    REQUIRE(dae.success);
+    REQUIRE(be.success);
+    const auto od = device_output_series(dae, "SynchronousMachine", 2, "omega_pu");
+    const auto ob = device_output_series(be, "SynchronousMachine", 2, "omega_pu");
+    const auto pd = device_output_series(dae, "SynchronousMachine", 2, "p_mw");
+    const auto pb = device_output_series(be, "SynchronousMachine", 2, "p_mw");
+    REQUIRE(od.y.size() == ob.y.size());
+    double omega_maxdiff = 0.0;
+    double p_maxdiff = 0.0;
+    for (std::size_t i = 0; i < od.y.size(); ++i) {
+      omega_maxdiff = std::max(omega_maxdiff, std::abs(od.y[i] - ob.y[i]));
+      p_maxdiff = std::max(p_maxdiff, std::abs(pd.y[i] - pb.y[i]));
+    }
+    CHECK(omega_maxdiff < 1e-6);
+    CHECK(p_maxdiff < 1e-3);
+  }
+}
+
 TEST_CASE("Machine governor / AVR / PSS control blocks are wired and effective",
           "[dynamics][controls]") {
   const DynamicResults base = run_controlled_case(false, false, false);

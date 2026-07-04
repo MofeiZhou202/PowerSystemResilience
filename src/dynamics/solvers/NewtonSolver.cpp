@@ -44,7 +44,7 @@ NewtonSolverResult NewtonSolver::solve(ResidualFunction residual,
     if (!numerical_jacobian(residual, x, r, jac, error)) {
       return {false, iter, norm, error};
     }
-    const Eigen::VectorXd delta = jac.colPivHouseholderQr().solve(-r);
+    const Eigen::VectorXd delta = jac.partialPivLu().solve(-r);
     if (!delta.allFinite()) return {false, iter, norm, "Newton correction is non-finite"};
 
     double alpha = 1.0;

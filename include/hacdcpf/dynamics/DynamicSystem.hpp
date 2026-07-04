@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <Eigen/Sparse>
+#include <Eigen/SparseLU>
 
 #include "hacdcpf/dynamics/DynamicEvent.hpp"
 #include "hacdcpf/dynamics/DynamicSolverOptions.hpp"
@@ -114,6 +115,23 @@ class DynamicNetwork {
       Eigen::VectorXd& Idc_eff) const;
 };
 
+// Cached sparse factorizations of the effective network matrices. For the
+// current device set the effective admittance is state-independent (device
+// Norton stamps contribute constant admittance and only voltage-dependent
+// *current* injections), so the matrix is unchanged between events and can be
+// factored once and reused across every algebraic iteration, RHS evaluation, and
+// step. The cached matrix is compared to the freshly assembled one each call, so
+// correctness is preserved even if a device ever stamps a varying admittance
+// (the factorization is simply refreshed when the matrix actually changes).
+struct NetworkSolveCache {
+  Eigen::SparseLU<Eigen::SparseMatrix<std::complex<double>>> ac_lu;
+  Eigen::SparseLU<Eigen::SparseMatrix<double>> dc_lu;
+  Eigen::SparseMatrix<std::complex<double>> ac_matrix;
+  Eigen::SparseMatrix<double> dc_matrix;
+  bool ac_valid{false};
+  bool dc_valid{false};
+};
+
 struct DynamicSystem {
   HybridPowerSystem canonical_system;
   PowerFlowResult initial_power_flow;
@@ -125,6 +143,7 @@ struct DynamicSystem {
   NetworkState y;
   DynamicSolverOptions options;
   std::vector<std::string> warnings;
+  std::unique_ptr<NetworkSolveCache> network_cache;
 
   void assignStateIndices();
   void initializeStatesFromPowerFlow();
@@ -135,6 +154,15 @@ struct DynamicSystem {
                                          std::string& error);
   [[nodiscard]] double derivativeInfinityNorm(double t, std::string& error);
   [[nodiscard]] int stateCount() const noexcept { return x.size(); }
+
+ private:
+  // Solve A x = b reusing a cached factorization when A is unchanged. Falls back
+  // to a fresh per-call solve for non-default linear-solver backends.
+  bool acSolveCached(const Eigen::SparseMatrix<std::complex<double>>& a,
+                     const Eigen::VectorXcd& b, Eigen::VectorXcd& x,
+                     std::string& error);
+  bool dcSolveCached(const Eigen::SparseMatrix<double>& a, const Eigen::VectorXd& b,
+                     Eigen::VectorXd& x, std::string& error);
 };
 
 }  // namespace hacdcpf::dynamics

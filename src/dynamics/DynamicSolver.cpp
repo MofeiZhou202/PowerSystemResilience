@@ -519,7 +519,7 @@ StepOutcome step_backward_euler_newton(DynamicSystem& sys,
     Eigen::MatrixXd jf;
     if (!numerical_state_jacobian(sys, t + dt, x, f, jf, error)) return {};
     Eigen::MatrixXd jr = Eigen::MatrixXd::Identity(x.size(), x.size()) - dt * jf;
-    Eigen::VectorXd delta = jr.colPivHouseholderQr().solve(-residual);
+    Eigen::VectorXd delta = jr.partialPivLu().solve(-residual);
     if (!delta.allFinite()) {
       error = "Backward Euler Newton produced a non-finite correction";
       return {};
@@ -575,7 +575,7 @@ StepOutcome step_trapezoidal_newton(DynamicSystem& sys,
     Eigen::MatrixXd jf;
     if (!numerical_state_jacobian(sys, t + dt, x, f, jf, error)) return {};
     Eigen::MatrixXd jr = Eigen::MatrixXd::Identity(x.size(), x.size()) - 0.5 * dt * jf;
-    Eigen::VectorXd delta = jr.colPivHouseholderQr().solve(-residual);
+    Eigen::VectorXd delta = jr.partialPivLu().solve(-residual);
     if (!delta.allFinite()) {
       error = "Trapezoidal Newton produced a non-finite correction";
       return {};
@@ -618,7 +618,7 @@ StepOutcome step_rosenbrock_euler(DynamicSystem& sys,
   if (!numerical_state_jacobian(sys, t, x0, f0, jf, error)) return {};
   const Eigen::MatrixXd a =
       Eigen::MatrixXd::Identity(x0.size(), x0.size()) - dt * jf;
-  const Eigen::VectorXd delta = a.colPivHouseholderQr().solve(dt * f0);
+  const Eigen::VectorXd delta = a.partialPivLu().solve(dt * f0);
   if (!delta.allFinite()) {
     error = "Rosenbrock-Euler produced a non-finite correction";
     return {};
@@ -628,6 +628,286 @@ StepOutcome step_rosenbrock_euler(DynamicSystem& sys,
   if (!evaluate_derivatives(sys, t + dt, sys.x.x, f1, error)) return {};
   sys.x.dxdt = f1;
   return {sys.solveNetwork(t + dt, error), 1};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1 — simultaneous mass-matrix DAE core
+//
+// Unknown vector u = [ device states x ; Re(V_ac) ; Im(V_ac) ; V_dc ].
+// Backward-Euler residual (mass matrix M = 1 for device rows, 0 for network rows):
+//   device rows:  (x − x_prev) − dt·f(x,V) = 0
+//   network rows: g(x,V) = I_inj(x,V) − Y_eff·V = 0        (algebraic, no dt)
+// One sparse Jacobian is factored per Newton iteration for the whole coupled
+// system — there is no nested network solve inside the derivative evaluation.
+// ─────────────────────────────────────────────────────────────────────────────
+struct DaeLayout {
+  int n_x{0};
+  int n_ac{0};
+  int n_dc{0};
+  int ac_off{0};
+  int ai_off{0};
+  int dc_off{0};
+  int n{0};
+};
+
+DaeLayout make_dae_layout(const DynamicSystem& sys) {
+  DaeLayout L;
+  L.n_x = sys.x.size();
+  L.n_ac = sys.network.acPhaseNodeCount();
+  L.n_dc = sys.network.dcBusCount();
+  L.ac_off = L.n_x;
+  L.ai_off = L.n_x + L.n_ac;
+  L.dc_off = L.n_x + 2 * L.n_ac;
+  L.n = L.n_x + 2 * L.n_ac + L.n_dc;
+  return L;
+}
+
+void dae_pack(const DynamicSystem& sys, const DaeLayout& L, Eigen::VectorXd& u) {
+  u.resize(L.n);
+  for (int i = 0; i < L.n_x; ++i) u[i] = sys.x.x[i];
+  for (int i = 0; i < L.n_ac; ++i) {
+    u[L.ac_off + i] = sys.y.Vac_abc[i].real();
+    u[L.ai_off + i] = sys.y.Vac_abc[i].imag();
+  }
+  for (int i = 0; i < L.n_dc; ++i) u[L.dc_off + i] = sys.y.Vdc[i];
+}
+
+void dae_unpack(DynamicSystem& sys, const DaeLayout& L, const Eigen::VectorXd& u) {
+  for (int i = 0; i < L.n_x; ++i) sys.x.x[i] = u[i];
+  for (int i = 0; i < L.n_ac; ++i) {
+    sys.y.Vac_abc[i] = std::complex<double>(u[L.ac_off + i], u[L.ai_off + i]);
+  }
+  for (int i = 0; i < L.n_dc; ++i) sys.y.Vdc[i] = u[L.dc_off + i];
+}
+
+// Assemble the effective network matrices/currents for the current (x, V).
+void dae_assemble(DynamicSystem& sys, const DaeLayout& L, double t,
+                  Eigen::SparseMatrix<std::complex<double>>& Yac, Eigen::VectorXcd& Iac,
+                  Eigen::SparseMatrix<double>& Gdc, Eigen::VectorXd& Idc) {
+  DynamicStamp stamp(L.n_ac, L.n_dc);
+  for (const auto& device : sys.devices) device->stamp(t, sys.x, sys.y, stamp);
+  sys.network.assembleEffectiveMatrices(stamp, sys.options.singular_regularization_pu,
+                                        Yac, Iac, Gdc, Idc);
+}
+
+// R = [ (x−x_prev) − dt·f ; g_ac_re ; g_ac_im ; g_dc ].
+bool dae_residual(DynamicSystem& sys, const DaeLayout& L, double t, double dt,
+                  const Eigen::VectorXd& u, const Eigen::VectorXd& x_prev,
+                  Eigen::VectorXd& R, std::string& error) {
+  dae_unpack(sys, L, u);
+  Eigen::SparseMatrix<std::complex<double>> Yac;
+  Eigen::VectorXcd Iac;
+  Eigen::SparseMatrix<double> Gdc;
+  Eigen::VectorXd Idc;
+  dae_assemble(sys, L, t, Yac, Iac, Gdc, Idc);
+  Eigen::VectorXd f = Eigen::VectorXd::Zero(L.n_x);
+  for (const auto& device : sys.devices) device->computeDerivatives(t, sys.x, sys.y, f);
+
+  R.resize(L.n);
+  for (int i = 0; i < L.n_x; ++i) R[i] = (u[i] - x_prev[i]) - dt * f[i];
+  if (L.n_ac > 0) {
+    Eigen::VectorXcd Vac(L.n_ac);
+    for (int i = 0; i < L.n_ac; ++i) {
+      Vac[i] = std::complex<double>(u[L.ac_off + i], u[L.ai_off + i]);
+    }
+    const Eigen::VectorXcd g = Iac - Yac * Vac;
+    for (int i = 0; i < L.n_ac; ++i) {
+      R[L.ac_off + i] = g[i].real();
+      R[L.ai_off + i] = g[i].imag();
+    }
+  }
+  if (L.n_dc > 0) {
+    Eigen::VectorXd Vdc(L.n_dc);
+    for (int i = 0; i < L.n_dc; ++i) Vdc[i] = u[L.dc_off + i];
+    const Eigen::VectorXd g = Idc - Gdc * Vdc;
+    for (int i = 0; i < L.n_dc; ++i) R[L.dc_off + i] = g[i];
+  }
+  if (!R.allFinite()) {
+    error = "DAE residual produced a non-finite value";
+    return false;
+  }
+  return true;
+}
+
+// Refresh telemetry-facing algebraic outputs and stamped currents after a step.
+void dae_finalize(DynamicSystem& sys, const DaeLayout& L, double t) {
+  Eigen::SparseMatrix<std::complex<double>> Yac;
+  Eigen::VectorXcd Iac;
+  Eigen::SparseMatrix<double> Gdc;
+  Eigen::VectorXd Idc;
+  dae_assemble(sys, L, t, Yac, Iac, Gdc, Idc);
+  if (L.n_ac > 0) sys.y.Iac_abc = Iac;
+  if (L.n_dc > 0) sys.y.Idc = Idc;
+  for (auto& device : sys.devices) device->updateAlgebraicOutputs(sys.x, sys.y);
+}
+
+// One backward-Euler DAE step with a numerical sparse Jacobian factored once per
+// Newton iteration. Advances sys.x / sys.y to t+dt on success.
+StepOutcome dae_backward_euler_step(DynamicSystem& sys, const DaeLayout& L, double t,
+                                    double dt, std::string& error) {
+  const Eigen::VectorXd x_prev = sys.x.x;
+  Eigen::VectorXd u;
+  dae_pack(sys, L, u);
+  Eigen::VectorXd R;
+  if (!dae_residual(sys, L, t + dt, dt, u, x_prev, R, error)) return {};
+
+  const double eps = std::sqrt(std::numeric_limits<double>::epsilon());
+  std::vector<Eigen::Triplet<double>> triplets;
+  Eigen::VectorXd rp;
+  for (int iter = 0; iter < sys.options.max_newton_iters; ++iter) {
+    const double res_norm = R.lpNorm<Eigen::Infinity>();
+    if (res_norm <= sys.options.newton_tol) {
+      dae_unpack(sys, L, u);
+      return {true, iter + 1};
+    }
+    triplets.clear();
+    triplets.reserve(static_cast<std::size_t>(L.n) * 8);
+    for (int j = 0; j < L.n; ++j) {
+      const double h = eps * std::max(1.0, std::abs(u[j]));
+      Eigen::VectorXd up = u;
+      up[j] += h;
+      if (!dae_residual(sys, L, t + dt, dt, up, x_prev, rp, error)) return {};
+      for (int i = 0; i < L.n; ++i) {
+        const double d = (rp[i] - R[i]) / h;
+        if (d != 0.0) triplets.emplace_back(i, j, d);
+      }
+    }
+    Eigen::SparseMatrix<double> jac(L.n, L.n);
+    jac.setFromTriplets(triplets.begin(), triplets.end());
+    Eigen::SparseLU<Eigen::SparseMatrix<double>> lu;
+    lu.compute(jac);
+    if (lu.info() != Eigen::Success) {
+      error = "DAE Jacobian factorization failed";
+      return {};
+    }
+    const Eigen::VectorXd du = lu.solve(-R);
+    if (!du.allFinite()) {
+      error = "DAE Newton produced a non-finite correction";
+      return {};
+    }
+    double alpha = 1.0;
+    bool accepted = false;
+    const double min_alpha = std::max(1e-9, sys.options.newton_damping_min);
+    while (alpha >= min_alpha) {
+      const Eigen::VectorXd trial = u + alpha * du;
+      Eigen::VectorXd r_trial;
+      if (!dae_residual(sys, L, t + dt, dt, trial, x_prev, r_trial, error)) return {};
+      if (r_trial.lpNorm<Eigen::Infinity>() <=
+          (1.0 - 1e-4 * alpha) * std::max(res_norm, sys.options.newton_tol)) {
+        u = trial;
+        R = r_trial;
+        accepted = true;
+        break;
+      }
+      alpha *= 0.5;
+    }
+    if (!accepted) {
+      error = "DAE Newton line search failed";
+      return {};
+    }
+  }
+  error = "DAE Newton did not converge";
+  return {};
+}
+
+DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
+  DynamicResults results;
+  results.initialization = system.initialization;
+  results.warnings.insert(results.warnings.end(), system.warnings.begin(),
+                          system.warnings.end());
+
+  std::sort(system.events.begin(), system.events.end(),
+            [](const DynamicEvent& a, const DynamicEvent& b) {
+              return a.time_s < b.time_s;
+            });
+
+  system.x.time_s = system.options.t_start_s;
+  std::string error;
+  apply_events(system, system.x.time_s, results);
+  if (!system.solveNetwork(system.x.time_s, error)) {
+    results.success = false;
+    results.message = error;
+    results.failed_step = 0;
+    return results;
+  }
+  if (!check_numerical_health(system, system.x.time_s, error)) {
+    results.success = false;
+    results.message = error;
+    results.failed_step = 0;
+    return results;
+  }
+  record_snapshot_if_needed(system, results, 0);
+
+  const double t_end = system.options.t_end_s;
+  const double base_dt = system.options.dt_s;
+  DaeLayout layout = make_dae_layout(system);
+  int step = 0;
+
+  while (system.x.time_s < t_end - 1e-12) {
+    const double t = system.x.time_s;
+    if (apply_events(system, t, results)) {
+      if (!system.solveNetwork(t, error)) {
+        results.success = false;
+        results.message = error;
+        results.failed_step = step;
+        results.steps = step;
+        return results;
+      }
+      layout = make_dae_layout(system);
+    }
+    const double next_discontinuity = next_discontinuity_time(system, t);
+    double next_t = std::min(t + base_dt, t_end);
+    if (std::isfinite(next_discontinuity)) next_t = std::min(next_t, next_discontinuity);
+    if (next_t <= t + 1e-12) next_t = std::min(t + base_dt, t_end);
+    const double dt = next_t - t;
+
+    const Eigen::VectorXd x_before = system.x.x;
+    const NetworkState y_before = system.y;
+    StepOutcome outcome;
+    double attempted_dt = dt;
+    for (int retry = 0; retry <= system.options.max_step_halving; ++retry) {
+      system.x.x = x_before;
+      system.y = y_before;
+      error.clear();
+      outcome = dae_backward_euler_step(system, layout, t, attempted_dt, error);
+      if (outcome.ok) break;
+      if (!system.options.use_adaptive_step || retry == system.options.max_step_halving) break;
+      attempted_dt *= 0.5;
+      results.rejected_steps += 1;
+    }
+
+    ++step;
+    system.x.time_s = outcome.ok ? t + attempted_dt : t + dt;
+    results.newton_iterations += outcome.iterations;
+    if (!outcome.ok) {
+      results.success = false;
+      results.message = error;
+      results.failed_step = step;
+      results.steps = step;
+      return results;
+    }
+    dae_finalize(system, layout, system.x.time_s);
+    if (apply_events(system, system.x.time_s, results)) {
+      if (!system.solveNetwork(system.x.time_s, error)) {
+        results.success = false;
+        results.message = error;
+        results.failed_step = step;
+        results.steps = step;
+        return results;
+      }
+      layout = make_dae_layout(system);
+    }
+    record_snapshot_if_needed(system, results, step);
+  }
+
+  if (results.snapshots.empty() ||
+      std::abs(results.snapshots.back().time_s - system.x.time_s) > 1e-12) {
+    results.snapshots.push_back(make_snapshot(system));
+  }
+  results.success = true;
+  results.message = "Transient simulation completed (mass-matrix DAE)";
+  results.steps = step;
+  return results;
 }
 
 }  // namespace
@@ -648,6 +928,10 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
     results.success = false;
     results.message = "DynamicSolverOptions::t_end_s is before t_start_s";
     return results;
+  }
+
+  if (system.options.solver_type == DynamicSolverType::MassMatrixDae) {
+    return solve_mass_matrix_dae(system);
   }
 
   std::sort(system.events.begin(), system.events.end(),
@@ -733,6 +1017,11 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
           break;
         case DynamicSolverType::RosenbrockEuler:
           outcome = step_rosenbrock_euler(system, t, attempted_dt, error);
+          break;
+        case DynamicSolverType::MassMatrixDae:
+          // Dispatched by an early return in solve(); never reached here.
+          error = "internal error: MassMatrixDae reached the partitioned stepper";
+          outcome = {};
           break;
       }
       bool accepted = outcome.ok;
