@@ -2861,6 +2861,15 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
   }
   out["applied_event_records"] = applied_event_records;
   out["options"] = dynamic_options_to_json(opt);
+  json residual_diagnostics = json::array();
+  for (const auto& diag : result.initialization.dynamic_residual_diagnostics) {
+    residual_diagnostics.push_back(
+        json{{"device_name", diag.device_name},
+             {"device_type", diag.device_type},
+             {"component_index", diag.component_index},
+             {"state_index", diag.state_index},
+             {"residual", diag.residual}});
+  }
   out["initialization"] =
       json{{"power_flow_requested", result.initialization.power_flow_requested},
            {"power_flow_converged", result.initialization.power_flow_converged},
@@ -2875,6 +2884,7 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
            {"max_ac_voltage_pu", result.initialization.max_ac_voltage_pu},
            {"min_dc_voltage_pu", result.initialization.min_dc_voltage_pu},
            {"max_dc_voltage_pu", result.initialization.max_dc_voltage_pu},
+           {"dynamic_residual_diagnostics", residual_diagnostics},
            {"warnings", result.initialization.warnings}};
 
   json times = json::array();
@@ -12350,6 +12360,10 @@ int main(int argc, char** argv) {
       opt.dynamic_trim_tol = j.value("dynamic_trim_tol", opt.dynamic_trim_tol);
       opt.max_dynamic_trim_iters =
           j.value("max_dynamic_trim_iters", opt.max_dynamic_trim_iters);
+      opt.algebraic_network_max_iters =
+          j.value("algebraic_network_max_iters", opt.algebraic_network_max_iters);
+      opt.algebraic_network_tol =
+          j.value("algebraic_network_tol", opt.algebraic_network_tol);
       if (j.contains("power_flow_options") && j["power_flow_options"].is_object()) {
         const auto& pfj = j["power_flow_options"];
         opt.power_flow_options.max_iter =

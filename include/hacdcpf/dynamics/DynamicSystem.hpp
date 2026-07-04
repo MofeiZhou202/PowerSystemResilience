@@ -57,6 +57,7 @@ struct DynamicACBusLoad {
   int bus_pos{-1};
   double p_mw{0.0};
   double q_mvar{0.0};
+  double nominal_voltage_pu{1.0};
   double scale{1.0};
 };
 

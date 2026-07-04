@@ -3441,7 +3441,7 @@ const Canvas = (() => {
         emission_factor_tco2_mwh: gen.emission_factor_tco2_mwh || gen.co2_emission_rate || 0,
         startup_cost: gen.startup_cost, shutdown_cost: gen.shutdown_cost,
         ramp_up_mw_min: gen.ramp_up_mw_min, ramp_dn_mw_min: gen.ramp_dn_mw_min,
-        dynamic_model: cloneDynamicModel(gen.dynamic_model) || COMP.defaults.generator.dynamic_model,
+        dynamic_model: cloneDynamicModel(gen.dynamic_model),
       }, busCompMap);
     });
 

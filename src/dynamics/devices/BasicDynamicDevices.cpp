@@ -17,6 +17,7 @@ constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr double kTwoPi = 2.0 * kPi;
 constexpr double kMinVoltage = 1e-4;
 constexpr double kMinTimeConstant = 1e-4;
+constexpr double kMachinePowerBalanceTolPu = 1e-4;
 
 int state_index(const StateIndexRange& range, int local) {
   return range.offset + local;
@@ -154,6 +155,24 @@ double dc_link_network_power_pu(const NetworkState& y,
 double ac_to_dc_link_power_pu(double p_ac_pu, double eta) {
   const double eff = std::clamp(eta, 1e-6, 1.0);
   return p_ac_pu >= 0.0 ? p_ac_pu / eff : p_ac_pu * eff;
+}
+
+double dc_link_voltage_for_power_balance(const NetworkState& y,
+                                         int dc_bus_pos,
+                                         double p_ac_pu,
+                                         double conductance_pu,
+                                         double eta,
+                                         double fallback_vdc,
+                                         double vmin,
+                                         double vmax) {
+  if (dc_bus_pos < 0 || dc_bus_pos >= y.Vdc.size() || conductance_pu <= 0.0) {
+    return clamp_voltage_window(fallback_vdc, vmin, vmax);
+  }
+  const double vdc_bus = clamp_voltage(y.Vdc[dc_bus_pos]);
+  const double target_pdc = -ac_to_dc_link_power_pu(p_ac_pu, eta);
+  const double vdc_link =
+      vdc_bus + target_pdc / (conductance_pu * std::max(kMinVoltage, vdc_bus));
+  return clamp_voltage_window(vdc_link, vmin, vmax);
 }
 
 double dc_link_voltage_derivative(double p_ac_pu,
@@ -977,12 +996,18 @@ void SynchronousMachine::computeDerivatives(double,
     const double h = std::max(0.01, params_.inertia_h);
     const double wb = kTwoPi * params_.frequency_hz;
     dxdt[state_index(range_, 0)] = params_.dynamic_angle ? wb * (omega - 1.0) : 0.0;
-    dxdt[state_index(range_, 1)] =
-        params_.dynamic_angle
-            ? (tau_m - e.tau_e - params_.damping_d * (omega - 1.0) /
-                                      std::max(kMinVoltage, std::abs(omega))) /
-                  (2.0 * h)
-            : 0.0;
+    if (params_.dynamic_angle) {
+      const double swing_power =
+          tau_m - e.tau_e - params_.damping_d * (omega - 1.0) /
+                                std::max(kMinVoltage, std::abs(omega));
+      dxdt[state_index(range_, 1)] =
+          (std::abs(swing_power) <= kMachinePowerBalanceTolPu &&
+           std::abs(omega - 1.0) <= kMachinePowerBalanceTolPu)
+              ? 0.0
+              : swing_power / (2.0 * h);
+    } else {
+      dxdt[state_index(range_, 1)] = 0.0;
+    }
     dxdt[state_index(range_, 2)] = (vf - e.xad_ifd) / gp.td0p;
     dxdt[state_index(range_, 3)] = -e.xaq_i1q / gp.tq0p;
     dxdt[state_index(range_, 4)] =
@@ -1005,8 +1030,16 @@ void SynchronousMachine::computeDerivatives(double,
   const double wb = kTwoPi * params_.frequency_hz;
 
   dxdt[range_.offset + 0] = params_.dynamic_angle ? wb * (omega - 1.0) : 0.0;
-  dxdt[range_.offset + 1] =
-      params_.dynamic_angle ? (pm - pe - params_.damping_d * (omega - 1.0)) / (2.0 * h) : 0.0;
+  if (params_.dynamic_angle) {
+    const double swing_power = pm - pe - params_.damping_d * (omega - 1.0);
+    dxdt[range_.offset + 1] =
+        (std::abs(swing_power) <= kMachinePowerBalanceTolPu &&
+         std::abs(omega - 1.0) <= kMachinePowerBalanceTolPu)
+            ? 0.0
+            : swing_power / (2.0 * h);
+  } else {
+    dxdt[range_.offset + 1] = 0.0;
+  }
   // e_mag (field, idx 2) and pm (idx 3) are constant unless an exciter / governor
   // is attached, in which case that controller owns their derivative.
   if (!exciter_attached_) dxdt[range_.offset + 2] = 0.0;
@@ -1544,6 +1577,7 @@ bool GridFormingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkState
   const double p_ref = params_.p_ref_mw / safe_base(params_.base_mva);
   const double q_ref = params_.q_ref_mvar / safe_base(params_.base_mva);
   const Complex z(params_.virtual_r_pu, std::max(1e-5, params_.virtual_x_pu));
+  const Complex yv = Complex(1.0, 0.0) / z;
   const Complex s_ref(p_ref, q_ref);
   const Complex i_ref = std::conj(s_ref / v);
   const Complex e = v + z * i_ref;
@@ -1583,11 +1617,19 @@ bool GridFormingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkState
     if (params_.dc_bus_pos >= 0 && params_.dc_bus_pos < y.Vdc.size()) {
       vdc = y.Vdc[params_.dc_bus_pos];
     }
+    const Eigen::Vector3cd i = yv * (balanced_phasors(e_mag, theta) - vabc);
+    const double p_ac = finite_value(average_complex_power(vabc, i).real(), p_ref);
+    vdc = dc_link_voltage_for_power_balance(y,
+                                            params_.dc_bus_pos,
+                                            p_ac,
+                                            params_.dc_link_conductance_pu,
+                                            params_.eta,
+                                            vdc,
+                                            params_.vdc_min_pu,
+                                            params_.vdc_max_pu);
     changed = set_if_changed(x.x,
                              state_index(range_, 6),
-                             clamp_voltage_window(vdc,
-                                                  params_.vdc_min_pu,
-                                                  params_.vdc_max_pu)) || changed;
+                             vdc) || changed;
   }
   return changed;
 }
@@ -1881,11 +1923,19 @@ bool GridFollowingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkSta
     if (params_.dc_bus_pos >= 0 && params_.dc_bus_pos < y.Vdc.size()) {
       vdc = y.Vdc[params_.dc_bus_pos];
     }
+    const Eigen::Vector3cd current = balanced_current_from_dq(id, iq, theta);
+    const double p_ac = finite_value(average_complex_power(vabc, current).real(), p_ref);
+    vdc = dc_link_voltage_for_power_balance(y,
+                                            params_.dc_bus_pos,
+                                            p_ac,
+                                            params_.dc_link_conductance_pu,
+                                            params_.eta,
+                                            vdc,
+                                            params_.vdc_min_pu,
+                                            params_.vdc_max_pu);
     changed = set_if_changed(x.x,
                              state_index(range_, vdc_local),
-                             clamp_voltage_window(vdc,
-                                                  params_.vdc_min_pu,
-                                                  params_.vdc_max_pu)) || changed;
+                             vdc) || changed;
   }
   return changed;
 }

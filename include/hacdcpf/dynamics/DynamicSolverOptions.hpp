@@ -58,8 +58,8 @@ struct DynamicSolverOptions {
   double output_interval_s{0.0};
   int max_recorded_snapshots{0};
   double dynamic_trim_tol{1e-7};
-  int algebraic_network_max_iters{4};
-  double algebraic_network_tol{1e-9};
+  int algebraic_network_max_iters{20};
+  double algebraic_network_tol{1e-10};
 
   double source_stiffness_pu{1e4};
   double inverter_virtual_reactance_pu{0.10};

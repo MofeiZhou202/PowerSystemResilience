@@ -467,6 +467,14 @@
       <label class="sub-label">PF容差
         <input id="trPfTol" type="number" value="1e-8" step="1e-8" min="1e-12" style="width:82px"/>
       </label>
+      <label class="sub-label" title="暂态每个状态点内代数网络 g(x,y)=0 的最大迭代次数">
+        网络迭代
+        <input id="trAlgMaxIter" type="number" value="20" step="5" min="1" style="width:62px"/>
+      </label>
+      <label class="sub-label" title="暂态代数网络 g(x,y)=0 的收敛容差">
+        网络容差
+        <input id="trAlgTol" type="number" value="1e-10" step="1e-10" min="1e-12" style="width:82px"/>
+      </label>
       <label class="sub-label sub-checkbox" title="为带 DC 端口的 VSC 启用 DC 母线电容电压状态">
         <input id="trDynamicDcLink" type="checkbox"/><span>DC链动态</span>
       </label>

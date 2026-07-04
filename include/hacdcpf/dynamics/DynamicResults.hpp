@@ -49,6 +49,14 @@ struct DynamicAppliedEventRecord {
   std::map<std::string, double> params;
 };
 
+struct DynamicResidualDiagnostic {
+  std::string device_name;
+  std::string device_type;
+  int component_index{0};
+  int state_index{-1};
+  double residual{0.0};
+};
+
 struct DynamicInitializationSummary {
   bool power_flow_requested{true};
   bool power_flow_converged{false};
@@ -63,6 +71,7 @@ struct DynamicInitializationSummary {
   double max_ac_voltage_pu{0.0};
   double min_dc_voltage_pu{0.0};
   double max_dc_voltage_pu{0.0};
+  std::vector<DynamicResidualDiagnostic> dynamic_residual_diagnostics;
   std::vector<std::string> warnings;
 };
 

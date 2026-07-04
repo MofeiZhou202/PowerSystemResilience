@@ -3547,6 +3547,8 @@ const App = (() => {
       dc_link_coupling_conductance_pu: Math.max(0.0, numberOr(document.getElementById('trDcLinkG')?.value, 20.0)),
       run_power_flow_initialization: document.getElementById('trPowerFlowInit')?.checked !== false,
       trim_dynamic_initial_conditions: true,
+      algebraic_network_max_iters: Math.max(1, parseInt(document.getElementById('trAlgMaxIter')?.value, 10) || 20),
+      algebraic_network_tol: Math.max(1e-12, numberOr(document.getElementById('trAlgTol')?.value, 1e-10)),
       power_flow_options: {
         max_iter: Math.max(5, parseInt(document.getElementById('trPfMaxIter')?.value, 10) || 80),
         tol: Math.max(1e-12, numberOr(document.getElementById('trPfTol')?.value, 1e-8)),
@@ -4533,6 +4535,8 @@ const App = (() => {
     }
     const initWarnings = Array.isArray(init.warnings) && init.warnings.length
       ? `<div class="transient-init-warnings">${init.warnings.map(escapeHtml).join('<br>')}</div>` : '';
+    const residualDiagnostics = Array.isArray(init.dynamic_residual_diagnostics)
+      ? init.dynamic_residual_diagnostics.slice(0, 6) : [];
     html += '<div class="transient-init-panel">';
     html += `<div><span>事件前初始点</span><strong>${escapeHtml(initStatus)}</strong></div>`;
     html += `<div><span>PF迭代</span><strong>${escapeHtml(String(init.iterations ?? 0))}</strong></div>`;
@@ -4541,6 +4545,19 @@ const App = (() => {
     html += `<div><span>快速状态残差</span><strong>${Number.isFinite(Number(init.dynamic_fast_dxdt_inf_norm)) ? Number(init.dynamic_fast_dxdt_inf_norm).toExponential(2) : '—'}</strong></div>`;
     html += `<div><span>AC电压范围</span><strong>${nf(init.min_ac_voltage_pu)} - ${nf(init.max_ac_voltage_pu)} pu</strong></div>`;
     html += `<div><span>DC电压范围</span><strong>${nf(init.min_dc_voltage_pu)} - ${nf(init.max_dc_voltage_pu)} pu</strong></div>`;
+    if (residualDiagnostics.length) {
+      html += '<div class="transient-residual-diagnostics"><span>残差来源</span>';
+      html += residualDiagnostics.map(d => {
+        const value = Number(d.residual);
+        const residual = Number.isFinite(value) ? value.toExponential(2) : '—';
+        const name = d.device_name || d.device_type || 'Device';
+        const type = d.device_type ? ` / ${d.device_type}` : '';
+        const comp = Number.isFinite(Number(d.component_index)) ? `#${d.component_index}` : '';
+        const state = Number.isFinite(Number(d.state_index)) ? `x[${d.state_index}]` : 'x';
+        return `<strong>${escapeHtml(name)}${escapeHtml(comp)}${escapeHtml(type)} · ${escapeHtml(state)} = ${escapeHtml(residual)}</strong>`;
+      }).join('');
+      html += '</div>';
+    }
     html += initWarnings;
     html += '</div>';
     const scheduledEvents = Array.isArray(data.scheduled_events) ? data.scheduled_events : [];

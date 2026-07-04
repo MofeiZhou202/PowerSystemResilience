@@ -6,6 +6,8 @@
 #include <limits>
 #include <stdexcept>
 
+#include <Eigen/Dense>
+
 #include "hacdcpf/dynamics/solvers/SparseLinearSolver.hpp"
 
 namespace hacdcpf::dynamics {
@@ -16,6 +18,225 @@ using Complex = std::complex<double>;
 
 double finite_or(double value, double fallback) {
   return std::isfinite(value) ? value : fallback;
+}
+
+void mask_slow_residuals(const std::vector<std::unique_ptr<DynamicDevice>>& devices,
+                         Eigen::VectorXd& dxdt) {
+  for (const auto& device : devices) {
+    device->maskSlowStateResidual(dxdt);
+  }
+}
+
+std::vector<DynamicResidualDiagnostic> collect_residual_diagnostics(
+    const std::vector<std::unique_ptr<DynamicDevice>>& devices,
+    double t,
+    const DynamicState& x,
+    const NetworkState& y,
+    double min_abs_residual) {
+  std::vector<DynamicResidualDiagnostic> diagnostics;
+  if (x.x.size() == 0) return diagnostics;
+  for (const auto& device : devices) {
+    Eigen::VectorXd contribution = Eigen::VectorXd::Zero(x.x.size());
+    device->computeDerivatives(t, x, y, contribution);
+    mask_slow_residuals(devices, contribution);
+    if (contribution.size() == 0) continue;
+    Eigen::Index idx = 0;
+    const double max_abs = contribution.cwiseAbs().maxCoeff(&idx);
+    if (!std::isfinite(max_abs) || max_abs < min_abs_residual) continue;
+    DynamicResidualDiagnostic diag;
+    diag.device_name = device->name();
+    diag.device_type = device->type();
+    diag.component_index = device->componentIndex();
+    diag.state_index = static_cast<int>(idx);
+    diag.residual = contribution[idx];
+    diagnostics.push_back(std::move(diag));
+  }
+  std::sort(diagnostics.begin(),
+            diagnostics.end(),
+            [](const DynamicResidualDiagnostic& a, const DynamicResidualDiagnostic& b) {
+              return std::abs(a.residual) > std::abs(b.residual);
+            });
+  if (diagnostics.size() > 8) diagnostics.resize(8);
+  return diagnostics;
+}
+
+double inf_norm(const Eigen::VectorXd& v) {
+  return v.size() > 0 ? v.lpNorm<Eigen::Infinity>() : 0.0;
+}
+
+bool evaluate_masked_dynamic_residual(DynamicSystem& sys,
+                                      double t,
+                                      const Eigen::VectorXd& state,
+                                      Eigen::VectorXd& residual,
+                                      std::string& error) {
+  if (!sys.evaluateDerivatives(t, state, residual, error)) return false;
+  mask_slow_residuals(sys.devices, residual);
+  if (!residual.allFinite()) {
+    error = "Dynamic residual contains non-finite values";
+    return false;
+  }
+  return true;
+}
+
+bool numerical_masked_dynamic_jacobian(DynamicSystem& sys,
+                                       double t,
+                                       const Eigen::VectorXd& state,
+                                       const Eigen::VectorXd& residual0,
+                                       Eigen::MatrixXd& jac,
+                                       std::string& error) {
+  const Eigen::Index n = state.size();
+  jac = Eigen::MatrixXd::Zero(n, n);
+  if (n == 0) return true;
+  const double eps0 = std::sqrt(std::numeric_limits<double>::epsilon());
+  for (Eigen::Index col = 0; col < n; ++col) {
+    Eigen::VectorXd trial = state;
+    const double h = eps0 * std::max(1.0, std::abs(state[col]));
+    trial[col] += h;
+    Eigen::VectorXd residual_p;
+    if (!evaluate_masked_dynamic_residual(sys, t, trial, residual_p, error)) return false;
+    jac.col(col) = (residual_p - residual0) / h;
+  }
+  Eigen::VectorXd restored;
+  return evaluate_masked_dynamic_residual(sys, t, state, restored, error);
+}
+
+bool is_machine_controller(const DynamicDevice& device) {
+  const std::string type = device.type();
+  return type == "Governor" || type == "Exciter" || type == "PSS";
+}
+
+bool reanchor_machine_controllers(
+    const std::vector<std::unique_ptr<DynamicDevice>>& devices,
+    DynamicState& x,
+    NetworkState& y) {
+  bool changed = false;
+  for (const auto& device : devices) {
+    if (!is_machine_controller(*device)) continue;
+    changed = device->trimToNetworkEquilibrium(x, y) || changed;
+  }
+  return changed;
+}
+
+struct ConsistentInitializationResult {
+  bool converged{false};
+  int iterations{0};
+  double residual_norm{0.0};
+  std::string message;
+};
+
+ConsistentInitializationResult solve_consistent_dynamic_initial_state(
+    DynamicSystem& sys,
+    double t,
+    const Eigen::VectorXd& initial_state,
+    double tolerance,
+    int max_iterations) {
+  ConsistentInitializationResult result;
+  std::string error;
+  Eigen::VectorXd state = initial_state;
+  Eigen::VectorXd residual;
+  if (!evaluate_masked_dynamic_residual(sys, t, state, residual, error)) {
+    result.message = error;
+    result.residual_norm = std::numeric_limits<double>::infinity();
+    return result;
+  }
+  double norm = inf_norm(residual);
+  result.residual_norm = norm;
+  if (norm <= tolerance) {
+    result.converged = true;
+    sys.x.x = state;
+    return result;
+  }
+
+  double lambda = 1e-8;
+  const double min_alpha = std::max(1e-9, sys.options.newton_damping_min);
+  const int max_iters = std::max(1, max_iterations);
+  for (int iter = 0; iter < max_iters; ++iter) {
+    Eigen::MatrixXd jac;
+    if (!numerical_masked_dynamic_jacobian(sys, t, state, residual, jac, error)) {
+      result.message = error;
+      break;
+    }
+    auto try_delta = [&](Eigen::VectorXd delta) {
+      if (!delta.allFinite()) return false;
+      const double delta_inf = inf_norm(delta);
+      if (delta_inf > 5.0) {
+        delta *= 5.0 / delta_inf;
+      }
+      double alpha = 1.0;
+      while (alpha >= min_alpha) {
+        const Eigen::VectorXd trial = state + alpha * delta;
+        if (!trial.allFinite()) {
+          alpha *= 0.5;
+          continue;
+        }
+        Eigen::VectorXd trial_residual;
+        if (!evaluate_masked_dynamic_residual(sys, t, trial, trial_residual, error)) {
+          alpha *= 0.5;
+          continue;
+        }
+        const double trial_norm = inf_norm(trial_residual);
+        if (trial_norm <=
+            (1.0 - 1e-4 * alpha) * std::max(norm, tolerance)) {
+          state = trial;
+          residual = trial_residual;
+          norm = trial_norm;
+          return true;
+        }
+        alpha *= 0.5;
+      }
+      return false;
+    };
+
+    bool accepted =
+        try_delta(jac.completeOrthogonalDecomposition().solve(-residual));
+    if (accepted) {
+      lambda = std::max(1e-12, lambda * 0.1);
+      result.iterations = iter + 1;
+      result.residual_norm = norm;
+      if (norm <= tolerance) {
+        result.converged = true;
+        sys.x.x = state;
+        return result;
+      }
+      continue;
+    }
+
+    const Eigen::MatrixXd jt = jac.transpose();
+    const Eigen::MatrixXd jtj = jt * jac;
+    const Eigen::VectorXd rhs = -jt * residual;
+    const double diag_scale = std::max(1.0, jtj.diagonal().cwiseAbs().maxCoeff());
+
+    for (int damp_try = 0; damp_try < 8 && !accepted; ++damp_try) {
+      Eigen::MatrixXd a = jtj;
+      a.diagonal().array() += lambda * diag_scale;
+      Eigen::VectorXd delta = a.ldlt().solve(rhs);
+      accepted = try_delta(delta);
+      if (accepted) lambda = std::max(1e-12, lambda * 0.1);
+      if (!accepted) lambda *= 10.0;
+    }
+
+    result.iterations = iter + 1;
+    result.residual_norm = norm;
+    if (norm <= tolerance) {
+      result.converged = true;
+      sys.x.x = state;
+      return result;
+    }
+    if (!accepted) {
+      result.message = "DAE consistent-initialization Newton line search failed";
+      break;
+    }
+  }
+
+  sys.x.x = state;
+  Eigen::VectorXd final_residual;
+  if (evaluate_masked_dynamic_residual(sys, t, state, final_residual, error)) {
+    result.residual_norm = inf_norm(final_residual);
+  }
+  if (result.message.empty()) {
+    result.message = "DAE consistent-initialization Newton did not converge";
+  }
+  return result;
 }
 
 }  // namespace
@@ -63,7 +284,8 @@ void DynamicNetwork::rebuildBaseMatrices(double singular_regularization_pu) {
     if (load.bus_pos < 0 || base_mva <= 0.0 || load.scale <= 0.0) continue;
     const Complex s_pu(load.p_mw / base_mva * load.scale,
                        load.q_mvar / base_mva * load.scale);
-    const Complex y_load = std::conj(s_pu) / 3.0;
+    const double vm0 = std::max(1e-6, std::abs(load.nominal_voltage_pu));
+    const Complex y_load = std::conj(s_pu) / (3.0 * vm0 * vm0);
     for (int phase = 0; phase < 3; ++phase) {
       const int node = acPhaseNode(load.bus_pos, phase);
       y_triplets.emplace_back(node, node, y_load);
@@ -181,11 +403,15 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
     if (evaluateDerivatives(options.t_start_s, x.x, dxdt, error)) {
       initialization.dynamic_initial_dxdt_inf_norm =
           dxdt.size() > 0 ? dxdt.lpNorm<Eigen::Infinity>() : 0.0;
-      for (const auto& device : devices) {
-        device->maskSlowStateResidual(dxdt);
-      }
+      mask_slow_residuals(devices, dxdt);
       initialization.dynamic_fast_dxdt_inf_norm =
           dxdt.size() > 0 ? dxdt.lpNorm<Eigen::Infinity>() : 0.0;
+      initialization.dynamic_residual_diagnostics =
+          collect_residual_diagnostics(devices,
+                                       options.t_start_s,
+                                       x,
+                                       y,
+                                       std::max(1e-12, options.dynamic_trim_tol * 0.1));
     } else {
       initialization.warnings.push_back(error);
     }
@@ -195,6 +421,7 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
   std::string error;
   bool trimmed = false;
   double fast_norm = std::numeric_limits<double>::infinity();
+
   for (int iter = 0; iter < std::max(1, options.max_dynamic_trim_iters); ++iter) {
     if (!solveNetwork(options.t_start_s, error)) {
       initialization.warnings.push_back("Dynamic equilibrium trim skipped: " + error);
@@ -205,6 +432,12 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
     for (auto& device : devices) {
       changed = device->trimToNetworkEquilibrium(x, y) || changed;
     }
+    if (changed && !solveNetwork(options.t_start_s, error)) {
+      initialization.warnings.push_back("Dynamic equilibrium trim network refresh failed: " +
+                                       error);
+      break;
+    }
+    reanchor_machine_controllers(devices, x, y);
 
     Eigen::VectorXd dxdt;
     if (!evaluateDerivatives(options.t_start_s, x.x, dxdt, error)) {
@@ -214,10 +447,14 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
     x.dxdt = dxdt;
     initialization.dynamic_initial_dxdt_inf_norm =
         dxdt.size() > 0 ? dxdt.lpNorm<Eigen::Infinity>() : 0.0;
-    for (const auto& device : devices) {
-      device->maskSlowStateResidual(dxdt);
-    }
-    fast_norm = dxdt.size() > 0 ? dxdt.lpNorm<Eigen::Infinity>() : 0.0;
+    mask_slow_residuals(devices, dxdt);
+    fast_norm = inf_norm(dxdt);
+    initialization.dynamic_residual_diagnostics =
+        collect_residual_diagnostics(devices,
+                                     options.t_start_s,
+                                     x,
+                                     y,
+                                     std::max(1e-12, options.dynamic_trim_tol * 0.1));
     initialization.dynamic_trim_iterations = iter + 1;
     if (fast_norm <= options.dynamic_trim_tol || !changed) {
       trimmed = fast_norm <= options.dynamic_trim_tol;
@@ -225,7 +462,38 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
     }
   }
 
-  if (!std::isfinite(fast_norm)) {
+  if (!trimmed && std::isfinite(fast_norm)) {
+    const ConsistentInitializationResult consistent =
+        solve_consistent_dynamic_initial_state(*this,
+                                               options.t_start_s,
+                                               x.x,
+                                               options.dynamic_trim_tol,
+                                               options.max_dynamic_trim_iters);
+    initialization.dynamic_trim_iterations += consistent.iterations;
+    fast_norm = consistent.residual_norm;
+    trimmed = consistent.converged || fast_norm <= options.dynamic_trim_tol;
+    if (!trimmed && !consistent.message.empty()) {
+      initialization.warnings.push_back(consistent.message +
+                                       "; residual ||M f||_inf=" +
+                                       std::to_string(fast_norm));
+    }
+  }
+
+  Eigen::VectorXd final_dxdt;
+  if (evaluateDerivatives(options.t_start_s, x.x, final_dxdt, error)) {
+    x.dxdt = final_dxdt;
+    initialization.dynamic_initial_dxdt_inf_norm =
+        final_dxdt.size() > 0 ? final_dxdt.lpNorm<Eigen::Infinity>() : 0.0;
+    mask_slow_residuals(devices, final_dxdt);
+    fast_norm = inf_norm(final_dxdt);
+    trimmed = fast_norm <= options.dynamic_trim_tol;
+    initialization.dynamic_residual_diagnostics =
+        collect_residual_diagnostics(devices,
+                                     options.t_start_s,
+                                     x,
+                                     y,
+                                     std::max(1e-12, options.dynamic_trim_tol * 0.1));
+  } else if (!std::isfinite(fast_norm)) {
     fast_norm = derivativeInfinityNorm(options.t_start_s, error);
   }
   initialization.dynamic_fast_dxdt_inf_norm = std::isfinite(fast_norm) ? fast_norm : 0.0;

@@ -483,7 +483,8 @@ Eigen::Matrix3cd diag3(Complex value) {
 
 DynamicACBranch make_balanced_ac_branch(const ACBranch& branch,
                                         const DynamicNetwork& network,
-                                        double min_z) {
+                                        double min_z,
+                                        bool per_phase_equivalent) {
   DynamicACBranch dyn;
   dyn.index = branch.index;
   dyn.from_bus = branch.from_bus;
@@ -493,8 +494,9 @@ DynamicACBranch make_balanced_ac_branch(const ACBranch& branch,
   dyn.in_service = branch.in_service;
   Complex z(branch.r_pu, branch.x_pu);
   if (std::abs(z) < min_z) z = Complex(min_z, min_z);
-  const Complex y = Complex(1.0, 0.0) / z;
-  const Complex y_shunt(0.0, branch.b_pu / 2.0);
+  const double scale = per_phase_equivalent ? 1.0 / 3.0 : 1.0;
+  const Complex y = (Complex(1.0, 0.0) / z) * scale;
+  const Complex y_shunt(0.0, branch.b_pu / 2.0 * scale);
   const double tap_mag = branch.tap == 0.0 ? 1.0 : branch.tap;
   const Complex tap = std::polar(tap_mag, branch.shift_deg * kDegToRad);
   const Complex tap_conj = std::conj(tap);
@@ -634,6 +636,58 @@ void initialize_network_voltages(const HybridPowerSystem& sys,
   }
 }
 
+std::unordered_map<int, Complex> ac_device_injection_from_network_pf(
+    const DynamicNetwork& network,
+    const NetworkState& y) {
+  std::unordered_map<int, Complex> injections;
+  if (network.acPhaseNodeCount() == 0 || y.Vac_abc.size() != network.acPhaseNodeCount()) {
+    return injections;
+  }
+  const Eigen::VectorXcd currents = network.Yac_base * y.Vac_abc;
+  for (int pos = 0; pos < static_cast<int>(network.ac_bus_ids.size()); ++pos) {
+    Complex s{0.0, 0.0};
+    for (int phase = 0; phase < 3; ++phase) {
+      const int node = 3 * pos + phase;
+      s += y.Vac_abc[node] * std::conj(currents[node]);
+    }
+    injections[network.ac_bus_ids[static_cast<std::size_t>(pos)]] =
+        s * network.base_mva;
+  }
+  return injections;
+}
+
+std::unordered_map<int, Complex> explicit_ac_load_power_by_bus(
+    const HybridPowerSystem& sys) {
+  std::unordered_map<int, Complex> load_power;
+  for (const auto& load : sys.ac.loads) {
+    if (!load.in_service) continue;
+    const double scale = scale_or_one(load.scaling);
+    load_power[load.bus] += Complex(load.p_mw * scale, load.q_mvar * scale);
+  }
+  return load_power;
+}
+
+bool use_pf_bus_injection_machine_init(const HybridPowerSystem& sys) {
+  const bool has_machine_dynamic_profiles =
+      std::any_of(sys.ac.generators.begin(),
+                  sys.ac.generators.end(),
+                  [](const Generator& gen) {
+                    return gen.in_service && !gen.dynamic_model.empty();
+                  }) ||
+      std::any_of(sys.ac.external_grids.begin(),
+                  sys.ac.external_grids.end(),
+                  [](const ExternalGrid& grid) {
+                    return grid.in_service && !grid.dynamic_model.empty();
+                  });
+  return sys.dc.buses.empty() &&
+         sys.vsc_converters.empty() &&
+         sys.ac.static_generators.empty() &&
+         sys.ac.pv_systems.empty() &&
+         sys.ac.renewable_gens.empty() &&
+         sys.ac.storage.empty() &&
+         !has_machine_dynamic_profiles;
+}
+
 }  // namespace
 
 DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
@@ -673,6 +727,9 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     network.dc_bus_ids.push_back(bus.index);
   }
 
+  const bool pf_bus_injection_init =
+      use_pf_bus_injection_machine_init(dyn.canonical_system);
+
   for (const auto& bus : dyn.canonical_system.ac.buses) {
     if (!bus.in_service || bus.bus_type == BusType::ISOLATED) continue;
     const int bus_pos = network.acBusPosition(bus.index);
@@ -683,6 +740,12 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     load.bus_pos = bus_pos;
     load.p_mw = bus.pd_mw;
     load.q_mvar = bus.qd_mvar;
+    if (bus_pos >= 0 && bus_pos < static_cast<int>(dyn.initial_power_flow.vm.size())) {
+      load.nominal_voltage_pu =
+          positive_or(dyn.initial_power_flow.vm[static_cast<std::size_t>(bus_pos)], 1.0);
+    } else {
+      load.nominal_voltage_pu = positive_or(bus.vm_pu, 1.0);
+    }
     network.ac_bus_loads.push_back(load);
   }
 
@@ -710,7 +773,10 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
   } else {
     for (const auto& branch : dyn.canonical_system.ac.branches) {
       network.ac_branches.push_back(
-          make_balanced_ac_branch(branch, network, options.min_branch_impedance_pu));
+          make_balanced_ac_branch(branch,
+                                  network,
+                                  options.min_branch_impedance_pu,
+                                  pf_bus_injection_init));
     }
   }
 
@@ -718,6 +784,16 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     network.dc_branches.push_back(make_dc_branch(branch, network, options.min_branch_impedance_pu));
   }
   network.rebuildBaseMatrices(options.singular_regularization_pu);
+  initialize_network_voltages(dyn.canonical_system, dyn.initial_power_flow, dyn);
+  auto pf_ac_device_injection_mva =
+      pf_bus_injection_init ? ac_device_injection_from_network_pf(network, dyn.y)
+                            : std::unordered_map<int, Complex>{};
+  if (pf_bus_injection_init) {
+    for (const auto& [bus, load_power] :
+         explicit_ac_load_power_by_bus(dyn.canonical_system)) {
+      pf_ac_device_injection_mva[bus] += load_power;
+    }
+  }
 
   const double base_mva = network.base_mva;
 
@@ -895,6 +971,18 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.x_pu = positive_or(gen.xdpp_pu, positive_or(gen.xdp_pu, positive_or(gen.xd_pu, 0.2)));
     p.p_mech_mw = gen.pg_mw;
     p.q_elec_mvar = gen.qg_mvar;
+    if (pf_bus_injection_init &&
+        std::count_if(dyn.canonical_system.ac.generators.begin(),
+                      dyn.canonical_system.ac.generators.end(),
+                      [&](const Generator& other) {
+                        return other.in_service && other.bus == gen.bus;
+                      }) == 1) {
+      const auto inj = pf_ac_device_injection_mva.find(gen.bus);
+      if (inj != pf_ac_device_injection_mva.end()) {
+        p.p_mech_mw = inj->second.real();
+        p.q_elec_mvar = inj->second.imag();
+      }
+    }
     p.xd_pu = gen.xd_pu;
     p.xq_pu = gen.xq_pu;
     p.xdp_pu = gen.xdp_pu;
@@ -903,7 +991,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.td0pp_s = gen.td0pp_s;
     p.inertia_h = positive_or(gen.inertia_h, gen.is_slack ? 5.0 : 1.0);
     p.droop_r = positive_or(gen.droop_r, 0.05);
-    p.dynamic_angle = !gen.is_slack && gen.inertia_h > 0.0;
+    p.dynamic_angle = !gen.is_slack;
     apply_voltage_source_profile(gen.dynamic_model, p);
     auto machine = std::make_unique<SynchronousMachine>(p);
     SynchronousMachine* machine_ptr = machine.get();

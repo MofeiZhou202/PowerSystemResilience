@@ -12,6 +12,7 @@
 
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/dynamics/dynamics.hpp"
+#include "hacdcpf/io/matpower_parser.hpp"
 
 using namespace hacdcpf;
 using namespace hacdcpf::dynamics;
@@ -128,6 +129,30 @@ HybridPowerSystem make_hybrid_dc_case() {
   dcdc.eta = 0.97;
   sys.dc.dcdc_converters = {dcdc};
 
+  return sys;
+}
+
+HybridPowerSystem materialize_canvas_loads_from_bus_demand(HybridPowerSystem sys) {
+  sys.name = "Canvas System";
+  if (!sys.ac.loads.empty()) return sys;
+  for (const auto& bus : sys.ac.buses) {
+    if (!bus.in_service) continue;
+    if (std::abs(bus.pd_mw) < 1e-12 && std::abs(bus.qd_mvar) < 1e-12) continue;
+    Load load;
+    load.index = bus.index;
+    load.bus = bus.index;
+    load.name = "Load " + std::to_string(bus.index);
+    load.p_mw = bus.pd_mw;
+    load.q_mvar = bus.qd_mvar;
+    load.scaling = 1.0;
+    load.model = LoadModel::ConstantPower;
+    load.in_service = true;
+    sys.ac.loads.push_back(load);
+  }
+  for (auto& bus : sys.ac.buses) {
+    bus.pd_mw = 0.0;
+    bus.qd_mvar = 0.0;
+  }
   return sys;
 }
 
@@ -1137,6 +1162,74 @@ TEST_CASE("No-event dynamic equilibrium residual is a hard benchmark gate",
   const double p0 = vsc_p_mw(result.snapshots.front());
   const double p1 = final_vsc_p_mw(result);
   CHECK(p1 == Catch::Approx(p0).margin(5e-4));
+}
+
+TEST_CASE("Dynamic DC link trim balances converter power at the pre-event point",
+          "[dynamics][benchmark][equilibrium][dc-link]") {
+  const auto sys = make_hybrid_dc_case();
+  DynamicSolverOptions opt = fast_options();
+  opt.run_power_flow_initialization = true;
+  opt.dynamic_dc_link = true;
+  opt.t_end_s = 0.02;
+  opt.dt_s = 0.01;
+  opt.record_every_step = true;
+  opt.dynamic_trim_tol = 1e-7;
+
+  const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
+
+  REQUIRE(result.success);
+  CHECK(result.initialization.dynamic_trim_converged);
+  REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
+  REQUIRE_FALSE(result.snapshots.empty());
+  const auto& outputs = result.snapshots.front().device_outputs;
+  const auto vsc = std::find_if(outputs.begin(), outputs.end(), [](const DynamicDeviceOutput& out) {
+    return out.type == "VSCGridFollowing";
+  });
+  REQUIRE(vsc != outputs.end());
+  REQUIRE(vsc->values.count("dc_link_dynamic") == 1);
+  CHECK(vsc->values.at("dc_link_dynamic") == Catch::Approx(1.0));
+}
+
+TEST_CASE("Imported MATPOWER AC cases hold the no-event dynamic equilibrium",
+          "[dynamics][benchmark][equilibrium][matpower]") {
+  const std::filesystem::path matpower_dir =
+      std::filesystem::path(HACDCPF_PROJECT_ROOT) / "external_data" / "matpower";
+  for (const std::string filename : {"case9.m", "case30.m"}) {
+    const auto raw_sys = hacdcpf::io::parse_matpower((matpower_dir / filename).string());
+    for (const auto& [variant, sys] : {
+             std::pair<std::string, HybridPowerSystem>{"direct", raw_sys},
+             std::pair<std::string, HybridPowerSystem>{
+                 "canvas-sync",
+                 materialize_canvas_loads_from_bus_demand(raw_sys)}}) {
+      DynamicSolverOptions opt = fast_options();
+      opt.run_power_flow_initialization = true;
+      opt.t_end_s = 1.0;
+      opt.dt_s = 0.01;
+      opt.record_every_step = true;
+      opt.dynamic_trim_tol = 1e-7;
+      opt.power_flow_options.tol = 1e-10;
+      opt.power_flow_options.max_iter = 100;
+
+      const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
+
+      CAPTURE(filename, variant);
+      REQUIRE(result.success);
+      CHECK(result.initialization.power_flow_converged);
+      CHECK(result.initialization.dynamic_trim_converged);
+      REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
+      REQUIRE(result.snapshots.size() >= 2);
+      const auto& first = result.snapshots.front();
+      const auto& last = result.snapshots.back();
+      CHECK(last.min_ac_voltage_pu == Catch::Approx(first.min_ac_voltage_pu).margin(1e-8));
+      CHECK(last.max_ac_voltage_pu == Catch::Approx(first.max_ac_voltage_pu).margin(1e-8));
+      for (const auto& out : last.device_outputs) {
+        if (out.type != "SynchronousMachine") continue;
+        const auto omega_it = out.values.find("omega_pu");
+        REQUIRE(omega_it != out.values.end());
+        CHECK(omega_it->second == Catch::Approx(1.0).margin(1e-8));
+      }
+    }
+  }
 }
 
 TEST_CASE("PSD validation ladder covers component, load, and system-level HACDCPF anchors",

@@ -962,6 +962,18 @@ body[data-active-result-group="modelIO"] #rightPanel {
   font-size: 12px;
   line-height: 1.45;
 }
+.transient-residual-diagnostics {
+  grid-column: 1 / -1;
+  padding-top: 2px;
+}
+.transient-residual-diagnostics strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+}
 .transient-section-head {
   display: flex;
   align-items: baseline;
