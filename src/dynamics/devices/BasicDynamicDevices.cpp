@@ -309,9 +309,10 @@ Complex load_consuming_current(Complex v,
                                const ACLoadDynamicParams& params) {
   const double vr = v.real();
   const double vi = v.imag();
-  const double vmag = std::max(kMinVoltage, std::abs(v));
-  const double vmag2 = std::max(kMinVoltage * kMinVoltage, std::norm(v));
   const double v0c = std::max(kMinVoltage, v0);
+  const double v_floor = std::max(kMinVoltage, 0.20 * v0c);
+  const double vmag = std::max(v_floor, std::abs(v));
+  const double vmag2 = std::max(v_floor * v_floor, std::norm(v));
   auto current_from_weights = [&](double pz,
                                   double pi,
                                   double pp,
@@ -417,6 +418,149 @@ Complex psd_dq_to_ri(double delta, double id, double iq) {
   const double ir = std::sin(delta) * id + std::cos(delta) * iq;
   const double ii = -std::cos(delta) * id + std::sin(delta) * iq;
   return Complex(ir, ii);
+}
+
+bool machine_is_genrou(const VoltageSourceDynamicParams& params) {
+  return params.machine_model == SynchronousMachineModelKind::GENROU ||
+         params.psd_genrou_model;
+}
+
+bool machine_is_onedoneq(const VoltageSourceDynamicParams& params) {
+  return params.machine_model == SynchronousMachineModelKind::OneDOneQ;
+}
+
+int synchronous_machine_state_count(const VoltageSourceDynamicParams& params) {
+  if (machine_is_genrou(params)) return 8;
+  if (machine_is_onedoneq(params)) return 6;
+  return 4;
+}
+
+std::string synchronous_machine_model_name(const VoltageSourceDynamicParams& params) {
+  if (machine_is_onedoneq(params)) return "OneDOneQMachine";
+  if (machine_is_genrou(params)) {
+    return (!params.machine_model_name.empty() &&
+            params.machine_model_name != "ClassicalMachine")
+               ? params.machine_model_name
+               : "GENROU";
+  }
+  if (!params.machine_model_name.empty()) return params.machine_model_name;
+  return "ClassicalMachine";
+}
+
+struct OneDOneQParams {
+  double r{0.0};
+  double td0p{5.89};
+  double tq0p{0.6};
+  double xd{1.3125};
+  double xq{1.2578};
+  double xdp{0.1813};
+  double xqp{0.25};
+};
+
+OneDOneQParams onedoneq_params(const VoltageSourceDynamicParams& params) {
+  OneDOneQParams p;
+  p.r = std::max(0.0, params.r_pu);
+  p.xd = positive_or(params.xd_pu, 1.3125);
+  p.xq = positive_or(params.xq_pu, 1.2578);
+  p.xdp = positive_or(params.xdp_pu, positive_or(params.x_pu, 0.1813));
+  p.xqp = positive_or(params.xqp_pu, 0.25);
+  p.td0p = std::max(kMinTimeConstant, positive_or(params.td0p_s, 5.89));
+  p.tq0p = std::max(kMinTimeConstant, positive_or(params.tq0p_s, 0.6));
+  return p;
+}
+
+struct OneDOneQEval {
+  double id{0.0};
+  double iq{0.0};
+  double pe{0.0};
+  double qe{0.0};
+  double tau_e{0.0};
+  double vd{0.0};
+  double vq{0.0};
+  Complex current{0.0, 0.0};
+};
+
+OneDOneQEval evaluate_onedoneq(const OneDOneQParams& p,
+                               Complex v,
+                               double delta,
+                               double eq_p,
+                               double ed_p) {
+  OneDOneQEval out;
+  const auto [vd, vq] = psd_ri_to_dq(delta, v);
+  out.vd = vd;
+  out.vq = vq;
+  const double denom = std::max(1e-9, p.r * p.r + p.xdp * p.xqp);
+  out.id = (p.xqp * (eq_p - vq) + p.r * (ed_p - vd)) / denom;
+  out.iq = (-p.xdp * (ed_p - vd) + p.r * (eq_p - vq)) / denom;
+  out.pe = (vd + p.r * out.id) * out.id + (vq + p.r * out.iq) * out.iq;
+  out.qe = vq * out.id - vd * out.iq;
+  out.tau_e = out.pe;
+  out.current = psd_dq_to_ri(delta, out.id, out.iq);
+  return out;
+}
+
+Eigen::VectorXd onedoneq_initial_residual(const OneDOneQParams& p,
+                                          Complex v,
+                                          double p0,
+                                          double q0,
+                                          const Eigen::VectorXd& z) {
+  Eigen::VectorXd r = Eigen::VectorXd::Zero(5);
+  const double delta = z[0];
+  const double tau_m = z[1];
+  const double vf = z[2];
+  const double eq_p = z[3];
+  const double ed_p = z[4];
+  const OneDOneQEval e = evaluate_onedoneq(p, v, delta, eq_p, ed_p);
+  r[0] = tau_m - e.tau_e;
+  r[1] = p0 - e.pe;
+  r[2] = q0 - e.qe;
+  r[3] = -eq_p - (p.xd - p.xdp) * e.id + vf;
+  r[4] = -ed_p + (p.xq - p.xqp) * e.iq;
+  return r;
+}
+
+Eigen::VectorXd solve_onedoneq_initial_conditions(const OneDOneQParams& p,
+                                                  Complex v,
+                                                  double p0,
+                                                  double q0,
+                                                  Eigen::VectorXd z) {
+  Eigen::VectorXd best = z;
+  double best_norm =
+      onedoneq_initial_residual(p, v, p0, q0, z).lpNorm<Eigen::Infinity>();
+  const double eps = std::sqrt(std::numeric_limits<double>::epsilon());
+  for (int iter = 0; iter < 30; ++iter) {
+    const Eigen::VectorXd r = onedoneq_initial_residual(p, v, p0, q0, z);
+    const double norm = r.lpNorm<Eigen::Infinity>();
+    if (norm < best_norm) {
+      best = z;
+      best_norm = norm;
+    }
+    if (norm <= 1e-10) return z;
+    Eigen::MatrixXd jac(5, 5);
+    for (int col = 0; col < 5; ++col) {
+      Eigen::VectorXd zp = z;
+      const double h = eps * std::max(1.0, std::abs(z[col]));
+      zp[col] += h;
+      jac.col(col) = (onedoneq_initial_residual(p, v, p0, q0, zp) - r) / h;
+    }
+    const Eigen::VectorXd step = jac.colPivHouseholderQr().solve(-r);
+    if (!step.allFinite()) break;
+    bool accepted = false;
+    double alpha = 1.0;
+    while (alpha >= 1.0 / 1024.0) {
+      const Eigen::VectorXd trial = z + alpha * step;
+      const double trial_norm =
+          onedoneq_initial_residual(p, v, p0, q0, trial).lpNorm<Eigen::Infinity>();
+      if (std::isfinite(trial_norm) && trial_norm < norm) {
+        z = trial;
+        accepted = true;
+        break;
+      }
+      alpha *= 0.5;
+    }
+    if (!accepted) break;
+  }
+  return best;
 }
 
 struct GenrouEval {
@@ -818,21 +962,30 @@ SynchronousMachine::SynchronousMachine(VoltageSourceDynamicParams params)
     : params_(std::move(params)) {}
 
 void SynchronousMachine::assignStateIndices(int& offset) {
-  range_ = {offset, params_.psd_genrou_model ? 8 : 4};
+  range_ = {offset, synchronous_machine_state_count(params_)};
   offset += range_.size;
   // Publish the coupling link so attached controllers can address this machine's
   // speed / mechanical-power / field states. Local indices: omega=1 for both
-  // models; classical pm=3, e_mag(field)=2; GENROU tau_m=6, vf(field)=7.
+  // models; classical pm=3, e_mag(field)=2; OneDOneQ tau_m=4, vf=5; GENROU
+  // tau_m=6, vf(field)=7.
   link_.range = &range_;
   link_.valid = true;
-  link_.genrou = params_.psd_genrou_model && range_.size >= 8;
+  link_.genrou = machine_is_genrou(params_) && range_.size >= 8;
   link_.bus_pos = params_.bus_pos;
   link_.base_mva = params_.base_mva;
   link_.frequency_hz = params_.frequency_hz;
   link_.inertia_h = std::max(0.01, params_.inertia_h);
   link_.omega_local = 1;
-  link_.pm_local = link_.genrou ? 6 : 3;
-  link_.efd_local = link_.genrou ? 7 : 2;
+  if (link_.genrou) {
+    link_.pm_local = 6;
+    link_.efd_local = 7;
+  } else if (machine_is_onedoneq(params_) && range_.size >= 6) {
+    link_.pm_local = 4;
+    link_.efd_local = 5;
+  } else {
+    link_.pm_local = 3;
+    link_.efd_local = 2;
+  }
 }
 
 void SynchronousMachine::initializeFromPowerFlow(const PowerFlowResult& pf,
@@ -843,7 +996,40 @@ void SynchronousMachine::initializeFromPowerFlow(const PowerFlowResult& pf,
   if (params_.bus_pos >= 0 && params_.bus_pos < static_cast<int>(pf.va.size())) {
     angle = pf.va[static_cast<std::size_t>(params_.bus_pos)];
   }
-  if (params_.psd_genrou_model && range_.size >= 8) {
+  if (machine_is_onedoneq(params_) && range_.size >= 6) {
+    const OneDOneQParams mp = onedoneq_params(params_);
+    double vm = params_.vm_set_pu;
+    if (params_.bus_pos >= 0 && params_.bus_pos < static_cast<int>(pf.vm.size())) {
+      vm = positive_or(pf.vm[static_cast<std::size_t>(params_.bus_pos)], vm);
+    }
+    const Complex v = std::polar(vm, angle);
+    const Complex s(params_.p_mech_mw / safe_base(params_.base_mva),
+                    params_.q_elec_mvar / safe_base(params_.base_mva));
+    const Complex i_from_power = std::conj(s / v);
+    double delta = std::arg(v + Complex(mp.r, mp.xq) * i_from_power);
+    if (!std::isfinite(delta)) {
+      delta = angle;
+    }
+    const auto [vd0, vq0] = psd_ri_to_dq(delta, v);
+    Eigen::VectorXd z0(5);
+    z0 << delta, s.real(), 1.0, vq0, vd0;
+    const Eigen::VectorXd z =
+        solve_onedoneq_initial_conditions(mp, v, s.real(), s.imag(), z0);
+
+    x.x[state_index(range_, 0)] = finite_value(z[0], delta);
+    x.x[state_index(range_, 1)] = 1.0;
+    x.x[state_index(range_, 2)] = finite_value(z[3], vq0);
+    x.x[state_index(range_, 3)] = finite_value(z[4], vd0);
+    x.x[state_index(range_, 4)] = finite_value(z[1], s.real());
+    x.x[state_index(range_, 5)] = finite_value(z[2], 1.0);
+    if (params_.bus_pos >= 0 && y.Vac_abc.size() >= 3 * (params_.bus_pos + 1)) {
+      y.Vac_abc[3 * params_.bus_pos + 0] = std::polar(vm, angle);
+      y.Vac_abc[3 * params_.bus_pos + 1] = std::polar(vm, angle - 2.0 * kPi / 3.0);
+      y.Vac_abc[3 * params_.bus_pos + 2] = std::polar(vm, angle + 2.0 * kPi / 3.0);
+    }
+    return;
+  }
+  if (machine_is_genrou(params_) && range_.size >= 8) {
     const GenrouParams gp = genrou_params(params_);
     double vm = params_.vm_set_pu;
     if (params_.bus_pos >= 0 && params_.bus_pos < static_cast<int>(pf.vm.size())) {
@@ -924,7 +1110,26 @@ bool SynchronousMachine::trimToNetworkEquilibrium(DynamicState& x, NetworkState&
   if (!params_.in_service || range_.empty()) return false;
   bool changed = false;
   changed = set_if_changed(x.x, state_index(range_, 1), 1.0) || changed;
-  if (params_.psd_genrou_model && range_.size >= 8) {
+  if (machine_is_onedoneq(params_) && range_.size >= 6) {
+    const OneDOneQParams mp = onedoneq_params(params_);
+    const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+    const double p0 = params_.p_mech_mw / safe_base(params_.base_mva);
+    const double q0 = params_.q_elec_mvar / safe_base(params_.base_mva);
+    Eigen::VectorXd z0(5);
+    z0 << x.x[state_index(range_, 0)],
+          x.x[state_index(range_, 4)],
+          x.x[state_index(range_, 5)],
+          x.x[state_index(range_, 2)],
+          x.x[state_index(range_, 3)];
+    const Eigen::VectorXd z = solve_onedoneq_initial_conditions(mp, v, p0, q0, z0);
+    changed = set_if_changed(x.x, state_index(range_, 0), z[0]) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 2), z[3]) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 3), z[4]) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 4), z[1]) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 5), z[2]) || changed;
+    return changed;
+  }
+  if (machine_is_genrou(params_) && range_.size >= 8) {
     const GenrouParams gp = genrou_params(params_);
     const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
     const double p0 = params_.p_mech_mw / safe_base(params_.base_mva);
@@ -981,7 +1186,40 @@ void SynchronousMachine::computeDerivatives(double,
   const double omega = x.x[range_.offset + 1];
   const double e_mag = x.x[range_.offset + 2];
   const double pm = x.x[range_.offset + 3];
-  if (params_.psd_genrou_model && range_.size >= 8) {
+  if (machine_is_onedoneq(params_) && range_.size >= 6) {
+    const OneDOneQParams mp = onedoneq_params(params_);
+    const double delta = x.x[state_index(range_, 0)];
+    const double omega = x.x[state_index(range_, 1)];
+    const double eq_p = x.x[state_index(range_, 2)];
+    const double ed_p = x.x[state_index(range_, 3)];
+    const double tau_m = x.x[state_index(range_, 4)];
+    const double vf = x.x[state_index(range_, 5)];
+    const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+    const OneDOneQEval e = evaluate_onedoneq(mp, v, delta, eq_p, ed_p);
+    const double h = std::max(0.01, params_.inertia_h);
+    const double wb = kTwoPi * params_.frequency_hz;
+    dxdt[state_index(range_, 0)] = params_.dynamic_angle ? wb * (omega - 1.0) : 0.0;
+    if (params_.dynamic_angle) {
+      const double swing_power =
+          tau_m - e.tau_e - params_.damping_d * (omega - 1.0) /
+                                std::max(kMinVoltage, std::abs(omega));
+      dxdt[state_index(range_, 1)] =
+          (std::abs(swing_power) <= kMachinePowerBalanceTolPu &&
+           std::abs(omega - 1.0) <= kMachinePowerBalanceTolPu)
+              ? 0.0
+              : swing_power / (2.0 * h);
+    } else {
+      dxdt[state_index(range_, 1)] = 0.0;
+    }
+    dxdt[state_index(range_, 2)] =
+        (-eq_p - (mp.xd - mp.xdp) * e.id + vf) / mp.td0p;
+    dxdt[state_index(range_, 3)] =
+        (-ed_p + (mp.xq - mp.xqp) * e.iq) / mp.tq0p;
+    if (!governor_attached_) dxdt[state_index(range_, 4)] = 0.0;
+    if (!exciter_attached_) dxdt[state_index(range_, 5)] = 0.0;
+    return;
+  }
+  if (machine_is_genrou(params_) && range_.size >= 8) {
     const GenrouParams gp = genrou_params(params_);
     const double delta = x.x[state_index(range_, 0)];
     const double omega = x.x[state_index(range_, 1)];
@@ -1048,10 +1286,26 @@ void SynchronousMachine::computeDerivatives(double,
 
 void SynchronousMachine::stamp(double,
                                const DynamicState& x,
-                               const NetworkState&,
+                               const NetworkState& y,
                                DynamicStamp& stamp) const {
   if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
-  if (params_.psd_genrou_model && range_.size >= 8) {
+  if (machine_is_onedoneq(params_) && range_.size >= 6) {
+    const OneDOneQParams mp = onedoneq_params(params_);
+    const double delta = x.x[state_index(range_, 0)];
+    const double eq_p = x.x[state_index(range_, 2)];
+    const double ed_p = x.x[state_index(range_, 3)];
+    const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+    const OneDOneQEval e = evaluate_onedoneq(mp, v, delta, eq_p, ed_p);
+    const double x_eff = std::sqrt(std::max(1e-8, mp.xdp * mp.xqp));
+    const Complex z(mp.r, std::max(1e-5, x_eff));
+    const Complex yv = Complex(1.0, 0.0) / z;
+    const Complex e_ri = v + z * e.current;
+    const Eigen::Vector3cd e_src = balanced_phasors(std::abs(e_ri), std::arg(e_ri));
+    add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(yv));
+    add_balanced_current(stamp, params_.bus_pos, yv * e_src);
+    return;
+  }
+  if (machine_is_genrou(params_) && range_.size >= 8) {
     const GenrouParams gp = genrou_params(params_);
     const double delta = x.x[state_index(range_, 0)];
     const double eq_p = x.x[state_index(range_, 2)];
@@ -1093,7 +1347,7 @@ std::string SynchronousMachine::name() const {
 }
 
 std::string SynchronousMachine::modelName() const {
-  return params_.psd_genrou_model ? "GENROU" : "ClassicalMachine";
+  return synchronous_machine_model_name(params_);
 }
 
 std::vector<DynamicModelProfile> SynchronousMachine::modelProfiles() const {
@@ -1108,7 +1362,30 @@ DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
                                              params_.component_domain,
                                              params_.source_type);
   out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
-  if (params_.psd_genrou_model && !range_.empty() && range_.offset + 7 < x.x.size()) {
+  if (machine_is_onedoneq(params_) && !range_.empty() && range_.offset + 5 < x.x.size()) {
+    const OneDOneQParams mp = onedoneq_params(params_);
+    const double delta = x.x[state_index(range_, 0)];
+    const double omega = x.x[state_index(range_, 1)];
+    const double eq_p = x.x[state_index(range_, 2)];
+    const double ed_p = x.x[state_index(range_, 3)];
+    const double tau_m = x.x[state_index(range_, 4)];
+    const double vf = x.x[state_index(range_, 5)];
+    const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+    const OneDOneQEval e = evaluate_onedoneq(mp, v, delta, eq_p, ed_p);
+    out.values["angle_rad"] = delta;
+    out.values["delta_rad"] = delta;
+    out.values["omega_pu"] = omega;
+    out.values["frequency_hz"] = omega * params_.frequency_hz;
+    out.values["eq_p"] = eq_p;
+    out.values["ed_p"] = ed_p;
+    out.values["vf_pu"] = vf;
+    out.values["p_mech_mw"] = tau_m * safe_base(params_.base_mva);
+    out.values["p_mw"] = e.pe * safe_base(params_.base_mva);
+    out.values["q_mvar"] = e.qe * safe_base(params_.base_mva);
+    out.values["i_rms_pu"] = std::abs(e.current);
+    out.values["torque_e_pu"] = e.tau_e;
+    out.values["psd_onedoneq"] = 1.0;
+  } else if (machine_is_genrou(params_) && !range_.empty() && range_.offset + 7 < x.x.size()) {
     const GenrouParams gp = genrou_params(params_);
     const double delta = x.x[state_index(range_, 0)];
     const double omega = x.x[state_index(range_, 1)];
@@ -2043,8 +2320,7 @@ void GridFollowingInverter::stamp(double,
       stamp.addDcCurrent(params_.dc_bus_pos, g * vdc_link);
       return;
     }
-    const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
-    const double p_ac = average_complex_power(v, current).real();
+    const double p_ac = x.x[state_index(range_, 4)];
     const double p_dc_pu = -p_ac / std::max(1e-6, params_.eta);
     const double vdc = (params_.dc_bus_pos < y.Vdc.size()) ? clamp_voltage(y.Vdc[params_.dc_bus_pos]) : 1.0;
     stamp.addDcCurrent(params_.dc_bus_pos, p_dc_pu / vdc);

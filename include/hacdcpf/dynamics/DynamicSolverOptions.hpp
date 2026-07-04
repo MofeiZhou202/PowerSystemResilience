@@ -52,7 +52,7 @@ struct DynamicSolverOptions {
   bool record_every_step{true};
   bool record_initial_state{true};
   bool verbose{false};
-  int max_step_halving{8};
+  int max_step_halving{12};
   int max_dynamic_trim_iters{40};
   int output_every_steps{1};
   double output_interval_s{0.0};
@@ -60,6 +60,14 @@ struct DynamicSolverOptions {
   double dynamic_trim_tol{1e-7};
   int algebraic_network_max_iters{20};
   double algebraic_network_tol{1e-10};
+
+  double min_accepted_step_s{1e-7};
+  double voltage_collapse_min_ac_pu{0.05};
+  double voltage_collapse_min_dc_pu{0.05};
+  double voltage_blowup_max_ac_pu{2.50};
+  double voltage_blowup_max_dc_pu{2.50};
+  bool enforce_voltage_health_check{true};
+  bool allow_low_voltage_during_active_fault{true};
 
   double source_stiffness_pu{1e4};
   double inverter_virtual_reactance_pu{0.10};

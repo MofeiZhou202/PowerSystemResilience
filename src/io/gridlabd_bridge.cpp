@@ -391,6 +391,11 @@ struct BusInjection {
   double q_mvar{0.0};
 };
 
+struct BusShuntAdmittance {
+  double gs_mw{0.0};
+  double bs_mvar{0.0};
+};
+
 void add_injection(std::unordered_map<int, BusInjection>& by_bus,
                    int bus,
                    double p_mw,
@@ -398,6 +403,15 @@ void add_injection(std::unordered_map<int, BusInjection>& by_bus,
   if (bus == 0) return;
   by_bus[bus].p_mw += p_mw;
   by_bus[bus].q_mvar += q_mvar;
+}
+
+void add_shunt_admittance(std::unordered_map<int, BusShuntAdmittance>& by_bus,
+                          int bus,
+                          double gs_mw,
+                          double bs_mvar) {
+  if (bus == 0) return;
+  by_bus[bus].gs_mw += gs_mw;
+  by_bus[bus].bs_mvar += bs_mvar;
 }
 
 std::unordered_map<int, BusInjection> aggregate_constant_power_demand(
@@ -410,7 +424,9 @@ std::unordered_map<int, BusInjection> aggregate_constant_power_demand(
   for (const auto& bus : ac.buses) {
     if (!bus.in_service) continue;
     add_injection(by_bus, bus.index, bus.pd_mw, bus.qd_mvar);
-    add_injection(by_bus, bus.index, bus.gs_mw, -bus.bs_mvar);
+    if (!options.include_shunt_admittance_as_impedance) {
+      add_injection(by_bus, bus.index, bus.gs_mw, -bus.bs_mvar);
+    }
   }
   for (const auto& load : ac.loads) {
     if (!load.in_service) continue;
@@ -438,7 +454,9 @@ std::unordered_map<int, BusInjection> aggregate_constant_power_demand(
     if (sh.switchable && sh.n_steps > 0) {
       bs = sh.bs_per_step * sh.current_step;
     }
-    add_injection(by_bus, sh.bus, sh.gs_mw, -bs);
+    if (!options.include_shunt_admittance_as_impedance) {
+      add_injection(by_bus, sh.bus, sh.gs_mw, -bs);
+    }
   }
 
   for (const auto& gen : ac.generators) {
@@ -484,6 +502,28 @@ std::unordered_map<int, BusInjection> aggregate_constant_power_demand(
     }
   }
 
+  return by_bus;
+}
+
+std::unordered_map<int, BusShuntAdmittance> aggregate_shunt_admittance(
+    const HybridPowerSystem& sys,
+    const GridLABDExportOptions& options) {
+  std::unordered_map<int, BusShuntAdmittance> by_bus;
+  if (!options.include_shunt_admittance_as_impedance) return by_bus;
+
+  const auto& ac = sys.ac;
+  for (const auto& bus : ac.buses) {
+    if (!bus.in_service) continue;
+    add_shunt_admittance(by_bus, bus.index, bus.gs_mw, bus.bs_mvar);
+  }
+  for (const auto& sh : ac.shunts) {
+    if (!sh.in_service) continue;
+    double bs = sh.bs_mvar;
+    if (sh.switchable && sh.n_steps > 0) {
+      bs = sh.bs_per_step * sh.current_step;
+    }
+    add_shunt_admittance(by_bus, sh.bus, sh.gs_mw, bs);
+  }
   return by_bus;
 }
 
@@ -829,11 +869,13 @@ GridLABDEquivalenceAssessment classify_gridlabd_equivalence_scope(
     if (bus.bus_type == BusType::ISOLATED) ++isolated_buses;
     if (std::abs(bus.gs_mw) > kTinyPowerMw ||
         std::abs(bus.bs_mvar) > kTinyPowerMw) {
-      add_unique_reason(
-          out.diagnostic_only_reasons,
-          "Bus shunt conductance/susceptance is exported as an equivalent "
-          "constant-power injection; voltage-dependent shunt admittance is "
-          "not a one-to-one GridLAB-D object yet.");
+      if (!options.export_options.include_shunt_admittance_as_impedance) {
+        add_unique_reason(
+            out.diagnostic_only_reasons,
+            "Bus shunt conductance/susceptance is exported as an equivalent "
+            "constant-power injection; voltage-dependent shunt admittance is "
+            "not a one-to-one GridLAB-D object in this run.");
+      }
     }
   }
   if (slack_buses == 0) {
@@ -913,13 +955,20 @@ GridLABDEquivalenceAssessment classify_gridlabd_equivalence_scope(
   }
   for (const auto& shunt : ac.shunts) {
     if (!shunt.in_service) continue;
-    add_unique_reason(
-        out.diagnostic_only_reasons,
-        shunt.switchable
-            ? "Switchable shunts are exported as fixed equivalent P/Q "
-              "injections, so tap/step control is not exact."
-            : "Fixed shunts are exported as equivalent P/Q injections rather "
-              "than explicit voltage-dependent shunt admittances.");
+    if (shunt.switchable) {
+      add_unique_reason(
+          out.diagnostic_only_reasons,
+          options.export_options.include_shunt_admittance_as_impedance
+              ? "Switchable shunts are exported at their current fixed step; "
+                "step-control behavior is not replayed in GridLAB-D."
+              : "Switchable shunts are exported as fixed equivalent P/Q "
+                "injections, so tap/step control is not exact.");
+    } else if (!options.export_options.include_shunt_admittance_as_impedance) {
+      add_unique_reason(
+          out.diagnostic_only_reasons,
+          "Fixed shunts are exported as equivalent P/Q injections rather "
+          "than explicit voltage-dependent shunt admittances in this run.");
+    }
   }
 
   for (const auto& gen : ac.generators) {
@@ -1167,6 +1216,7 @@ GridLABDExportedSnapshot export_gridlabd_snapshot(
   const auto bus_pos = bus_pos_by_index(canonical.ac);
   auto demand_by_bus =
       aggregate_constant_power_demand(canonical, snapshot.warnings, options);
+  auto shunt_by_bus = aggregate_shunt_admittance(canonical, options);
   const auto slack_vm = slack_vm_by_bus(canonical.ac);
   const auto slack_va = slack_va_by_bus(canonical.ac);
 
@@ -1351,7 +1401,12 @@ GridLABDExportedSnapshot export_gridlabd_snapshot(
         demand_it != demand_by_bus.end() &&
         (std::abs(demand_it->second.p_mw) > kTinyPowerMw ||
          std::abs(demand_it->second.q_mvar) > kTinyPowerMw);
-    const std::string object_class = has_load ? "load" : "meter";
+    const auto shunt_it = shunt_by_bus.find(bus.index);
+    const bool has_shunt =
+        shunt_it != shunt_by_bus.end() &&
+        (std::abs(shunt_it->second.gs_mw) > kTinyPowerMw ||
+         std::abs(shunt_it->second.bs_mvar) > kTinyPowerMw);
+    const std::string object_class = (has_load || has_shunt) ? "load" : "meter";
     glm << "object " << object_class << " {\n";
     glm << "  name " << mapping.gridlabd_name << ";\n";
     glm << "  phases ABCN;\n";
@@ -1382,6 +1437,24 @@ GridLABDExportedSnapshot export_gridlabd_snapshot(
           .p_mw = demand.p_mw,
           .q_mvar = demand.q_mvar,
       });
+    }
+    if (has_shunt) {
+      const double base_mva =
+          canonical.base_mva > 0.0 ? canonical.base_mva : canonical.ac.base_mva;
+      const double zbase_ohm =
+          (mapping.base_kv_ll * mapping.base_kv_ll) /
+          std::max(1e-9, base_mva);
+      const std::complex<double> y_pu(shunt_it->second.gs_mw / base_mva,
+                                      shunt_it->second.bs_mvar / base_mva);
+      if (std::abs(y_pu) > kTinyImpedance) {
+        const std::complex<double> z_ohm = zbase_ohm / y_pu;
+        glm << "  constant_impedance_A "
+            << format_complex_rect(z_ohm.real(), z_ohm.imag()) << ";\n";
+        glm << "  constant_impedance_B "
+            << format_complex_rect(z_ohm.real(), z_ohm.imag()) << ";\n";
+        glm << "  constant_impedance_C "
+            << format_complex_rect(z_ohm.real(), z_ohm.imag()) << ";\n";
+      }
     }
     glm << "};\n\n";
 

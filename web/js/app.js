@@ -3542,6 +3542,16 @@ const App = (() => {
       t_end_s: Math.max(0.001, numberOr(document.getElementById('trEnd')?.value, 1.0)),
       dt_s: Math.max(0.0001, numberOr(document.getElementById('trDt')?.value, 0.01)),
       use_adaptive_step: !!document.getElementById('trAdaptive')?.checked,
+      rel_tol: Math.max(1e-10, numberOr(document.getElementById('trRelTol')?.value, 1e-6)),
+      abs_tol: Math.max(1e-12, numberOr(document.getElementById('trAbsTol')?.value, 1e-8)),
+      max_step_halving: Math.max(0, parseInt(document.getElementById('trMaxHalving')?.value, 10) || 12),
+      min_accepted_step_s: 1e-7,
+      enforce_voltage_health_check: true,
+      allow_low_voltage_during_active_fault: true,
+      voltage_collapse_min_ac_pu: Math.max(0, numberOr(document.getElementById('trMinVac')?.value, 0.05)),
+      voltage_collapse_min_dc_pu: Math.max(0, numberOr(document.getElementById('trMinVac')?.value, 0.05)),
+      voltage_blowup_max_ac_pu: 2.5,
+      voltage_blowup_max_dc_pu: 2.5,
       dynamic_dc_link: !!document.getElementById('trDynamicDcLink')?.checked,
       dc_link_capacitance_s: Math.max(0.001, numberOr(document.getElementById('trDcLinkC')?.value, 0.10)),
       dc_link_coupling_conductance_pu: Math.max(0.0, numberOr(document.getElementById('trDcLinkG')?.value, 20.0)),
@@ -3568,7 +3578,13 @@ const App = (() => {
       _lastTransientData = data;
       showTransientResults(data);
       switchTab('results');
-      setStatus('暂态仿真完成');
+      if (data.success === false) {
+        const msg = data.message || '暂态仿真失败';
+        log(`暂态仿真失败: ${msg}`, 'error');
+        setStatus(msg, 'error');
+      } else {
+        setStatus('暂态仿真完成');
+      }
     } else {
       const msg = result.error || data?.error || '暂态仿真失败';
       log(`暂态仿真失败: ${msg}`, 'error');
@@ -4519,6 +4535,9 @@ const App = (() => {
     [
       ['初始点', initStatus, 't=0'],
       ['步数', data.steps ?? 0, ''],
+      ['拒绝步', data.rejected_steps ?? 0, '次'],
+      ['最大误差', nf(data.max_local_error_norm, 2), 'scaled'],
+      ['最小步长', Number.isFinite(Number(data.min_accepted_step_s)) && Number(data.min_accepted_step_s) > 0 ? Number(data.min_accepted_step_s).toExponential(1) : '—', 's'],
       ['Newton', data.newton_iterations ?? 0, 'iter'],
       ['GFL', gflCount, '台'],
       ['GFM', gfmCount, '台'],

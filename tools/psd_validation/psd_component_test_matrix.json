@@ -1,0 +1,365 @@
+{
+  "format": "hacdcpf_psd_component_test_matrix.v1",
+  "updated": "2026-07-04",
+  "scope": "First-pass PowerSimulationsDynamics.jl component-test comparison focused on transmission-dynamics machines and IBRs.",
+  "status_legend": {
+    "compare-limited": "HACDCPF has a current model and an existing or near-existing trace hook, but it does not cover PSD's full residual/mass-matrix/small-signal test contract.",
+    "blocked-missing-model": "The PSD test's primary model is not implemented in the HACDCPF transient runtime.",
+    "blocked-missing-controller": "The base machine or IBR may exist, but a required PSD controller/block is not implemented.",
+    "blocked-missing-formulation": "The dynamic behavior may be partially present, but HACDCPF does not yet expose PSD-equivalent residual/mass-matrix/small-signal parity.",
+    "metadata-only": "The model identity can be preserved for IO, but behavior should not be compared yet."
+  },
+  "rows": [
+    {
+      "group": "machine",
+      "psd_tests": "Test 01 OMIB",
+      "psd_components": "BaseMachine / GENCLS, SingleMass",
+      "hacdcpf_candidate": "ClassicalMachine",
+      "status": "compare-limited",
+      "first_blocker": "No PSD-equivalent ResidualModel/MassMatrixModel/small-signal gate in HACDCPF.",
+      "next_action": "Use as the first machine smoke trace after defining accepted signals and tolerances."
+    },
+    {
+      "group": "machine",
+      "psd_tests": "Test 02",
+      "psd_components": "OneDOneQMachine, SingleMass",
+      "hacdcpf_candidate": "OneDOneQMachine",
+      "status": "compare-limited",
+      "first_blocker": "Local PSD Test 02 delta/omega/eq_p/ed_p trace gates pass over 0-2s, but HACDCPF does not yet provide PSD-equivalent ResidualModel, MassMatrixModel, eigenvalue, or PSAT trace parity.",
+      "next_action": "Implement the residual/mass-matrix/small-signal parity gate before claiming a full PSD Test 02 pass."
+    },
+    {
+      "group": "machine-ibr",
+      "psd_tests": "Test 10, Test 11",
+      "psd_components": "OneDOneQMachine, VSM inverter, static/dynamic branches",
+      "hacdcpf_candidate": "OneDOneQMachine",
+      "status": "blocked-missing-model",
+      "first_blocker": "VSM inverter is not implemented; Test 11 also needs dynamic branch behavior.",
+      "next_action": "Do not attempt these tests until VSM and dynamic branch models exist."
+    },
+    {
+      "group": "machine-controller",
+      "psd_tests": "Test 13",
+      "psd_components": "OneDOneQMachine with AVRTypeII / AVRSimple and TGTypeI variations",
+      "hacdcpf_candidate": "OneDOneQMachine",
+      "status": "blocked-missing-controller",
+      "first_blocker": "AVRTypeII, AVRSimple, and TGTypeI are not implemented as PSD-equivalent controllers.",
+      "next_action": "Run only after the OneDOneQ base trace passes and the required controller blocks are mapped."
+    },
+    {
+      "group": "machine",
+      "psd_tests": "Test 03",
+      "psd_components": "SimpleMarconatoMachine",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-model",
+      "first_blocker": "No SimpleMarconato runtime model.",
+      "next_action": "Defer until the basic machine ladder is complete."
+    },
+    {
+      "group": "machine",
+      "psd_tests": "Test 04, Test 25",
+      "psd_components": "MarconatoMachine, dynamic-line benchmark",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-model",
+      "first_blocker": "No Marconato runtime model; Test 25 also needs dynamic branch behavior.",
+      "next_action": "Do not attempt trace parity until Marconato and dynamic branches exist."
+    },
+    {
+      "group": "machine",
+      "psd_tests": "Test 05",
+      "psd_components": "SimpleAFMachine",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-model",
+      "first_blocker": "No Simple Anderson-Fouad runtime model.",
+      "next_action": "Defer behind GENROU/GENSAL coverage."
+    },
+    {
+      "group": "machine",
+      "psd_tests": "Test 06",
+      "psd_components": "AndersonFouadMachine",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-model",
+      "first_blocker": "No Anderson-Fouad runtime model.",
+      "next_action": "Defer behind GENROU/GENSAL coverage."
+    },
+    {
+      "group": "shaft",
+      "psd_tests": "Test 07",
+      "psd_components": "FiveMassShaft",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-model",
+      "first_blocker": "No multi-mass shaft model.",
+      "next_action": "Implement after single-mass machine parity is accepted."
+    },
+    {
+      "group": "machine",
+      "psd_tests": "Test 12",
+      "psd_components": "Two BaseMachine devices with TGTypeII",
+      "hacdcpf_candidate": "ClassicalMachine",
+      "status": "blocked-missing-controller",
+      "first_blocker": "TGTypeII is not implemented; full PSD formulation gates are also missing.",
+      "next_action": "Use only after TGTypeII or an accepted surrogate is defined."
+    },
+    {
+      "group": "machine",
+      "psd_tests": "Test 15",
+      "psd_components": "GENROU variants: normal, no saturation, high saturation",
+      "hacdcpf_candidate": "GENROU",
+      "status": "compare-limited",
+      "first_blocker": "Current comparison is a reduced trace gate, not PSD's full initialization, eigenvalue, ResidualModel, and MassMatrixModel contract.",
+      "next_action": "Promote GENROU to the first full machine comparison if you choose machine-first work."
+    },
+    {
+      "group": "machine",
+      "psd_tests": "Test 16",
+      "psd_components": "GENROE variants",
+      "hacdcpf_candidate": "GENROU metadata surrogate",
+      "status": "metadata-only",
+      "first_blocker": "No distinct GENROE exponential-saturation runtime model.",
+      "next_action": "Implement GENROE or explicitly decide to treat it as out of first release."
+    },
+    {
+      "group": "machine",
+      "psd_tests": "Test 18",
+      "psd_components": "GENSAL",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-model",
+      "first_blocker": "No salient-pole machine runtime model.",
+      "next_action": "Required before claiming broad synchronous-machine PSD parity."
+    },
+    {
+      "group": "machine",
+      "psd_tests": "Test 19",
+      "psd_components": "GENSAE",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-model",
+      "first_blocker": "No salient-pole exponential machine runtime model.",
+      "next_action": "Build after GENSAL if salient-pole machines are prioritized."
+    },
+    {
+      "group": "machine",
+      "psd_tests": "Test 35",
+      "psd_components": "Multi-generator PSSE case",
+      "hacdcpf_candidate": "ClassicalMachine / GENROU subsets",
+      "status": "blocked-missing-formulation",
+      "first_blocker": "System-level multi-machine PSD gates depend on missing model/controller coverage and full DAE parity.",
+      "next_action": "Defer until single-device machine tests pass."
+    },
+    {
+      "group": "machine",
+      "psd_tests": "Test 36",
+      "psd_components": "GENROU + SEXS + TGOV1 eigenvalues vs ANDES",
+      "hacdcpf_candidate": "GENROU + SEXS + TGOV1",
+      "status": "blocked-missing-formulation",
+      "first_blocker": "No PSD-equivalent small-signal/eigenvalue API in HACDCPF.",
+      "next_action": "Do not claim this until reduced Jacobian/eigenvalue tooling exists."
+    },
+    {
+      "group": "machine",
+      "psd_tests": "Test 45",
+      "psd_components": "SauerPaiMachine",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-model",
+      "first_blocker": "No Sauer-Pai runtime model.",
+      "next_action": "Defer behind GENROU/GENSAL unless explicitly prioritized."
+    },
+    {
+      "group": "machine-controller",
+      "psd_tests": "Test 17",
+      "psd_components": "GENROU + AVRTypeI",
+      "hacdcpf_candidate": "GENROU + IEEET1",
+      "status": "compare-limited",
+      "first_blocker": "IEEET1 profile exists, but full AVR state/limiter parity and PSD DAE gates are missing.",
+      "next_action": "Candidate after GENROU base trace is accepted."
+    },
+    {
+      "group": "machine-controller",
+      "psd_tests": "Test 20",
+      "psd_components": "ESAC1A",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-controller",
+      "first_blocker": "No ESAC1A runtime model.",
+      "next_action": "Add to AVR library only after selecting AVR priority."
+    },
+    {
+      "group": "machine-controller",
+      "psd_tests": "Test 21",
+      "psd_components": "GAST",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-controller",
+      "first_blocker": "No gas turbine governor runtime model.",
+      "next_action": "Add if gas-governor parity matters for the first benchmark set."
+    },
+    {
+      "group": "machine-controller",
+      "psd_tests": "Test 22",
+      "psd_components": "TGOV1",
+      "hacdcpf_candidate": "TGOV1",
+      "status": "compare-limited",
+      "first_blocker": "TGOV1 exists as a simplified controller; full mechanical-power trace/eigenvalue parity is not yet wired.",
+      "next_action": "Candidate for the first controller-by-controller comparison."
+    },
+    {
+      "group": "machine-controller",
+      "psd_tests": "Test 26",
+      "psd_components": "SEXS",
+      "hacdcpf_candidate": "SEXS",
+      "status": "compare-limited",
+      "first_blocker": "SEXS exists, but full field-voltage trace parity is not yet a hard gate.",
+      "next_action": "Candidate for the first AVR comparison."
+    },
+    {
+      "group": "machine-controller",
+      "psd_tests": "Test 30",
+      "psd_components": "IEEEST / STAB1-like stabilizer",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-controller",
+      "first_blocker": "No IEEEST/STAB1 runtime model.",
+      "next_action": "Defer behind PSS1A/SEXS/TGOV1."
+    },
+    {
+      "group": "machine-controller",
+      "psd_tests": "Test 31",
+      "psd_components": "HYGOV",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-controller",
+      "first_blocker": "No hydro governor runtime model.",
+      "next_action": "Add only if hydro governor parity is selected."
+    },
+    {
+      "group": "machine-controller",
+      "psd_tests": "Test 39, Test 40, Test 47, Test 55, Test 59, Test 61",
+      "psd_components": "EXST1, EXAC1, SCRX, ESST1A, ST6B, ST8C",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-controller",
+      "first_blocker": "These AVR/exciter families are not implemented.",
+      "next_action": "This is a model-library expansion decision, not a tolerance issue."
+    },
+    {
+      "group": "machine-controller",
+      "psd_tests": "Test 41, Test 52, Test 53, Test 54",
+      "psd_components": "STAB1, PSS2A, PSS2B, PSS2C",
+      "hacdcpf_candidate": "PSS1A only",
+      "status": "blocked-missing-controller",
+      "first_blocker": "PSD's stabilizer families are broader than HACDCPF's PSS1A subset.",
+      "next_action": "Pick PSS1A first or expand to STAB1/PSS2 families."
+    },
+    {
+      "group": "machine-controller",
+      "psd_tests": "Test 57, Test 58, Test 60, Test 62, Test 63",
+      "psd_components": "DEGOV, PIDGOV, WPIDHY, TGSimple, DEGOV1",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-controller",
+      "first_blocker": "These governor families are not implemented.",
+      "next_action": "Defer unless governor breadth is the first priority."
+    },
+    {
+      "group": "ibr",
+      "psd_tests": "Test 08",
+      "psd_components": "VSM inverter",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-model",
+      "first_blocker": "No VSM grid-forming inverter runtime model.",
+      "next_action": "Required before claiming PSD-level GFM IBR parity."
+    },
+    {
+      "group": "ibr",
+      "psd_tests": "Test 09, Test 10, Test 11, Test 27",
+      "psd_components": "VSM plus OneDOneQ machine / source-bus perturbations / dynamic branches",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-model",
+      "first_blocker": "VSM is missing; dynamic branch behavior is also missing for Test 11. OneDOneQ now exists as a named HACDCPF machine, but the combined VSM-machine tests are still blocked.",
+      "next_action": "Do not run as a first gate until VSM and dynamic branch models exist and the simpler OneDOneQ base trace passes."
+    },
+    {
+      "group": "ibr",
+      "psd_tests": "Test 14",
+      "psd_components": "Inverter reference case",
+      "hacdcpf_candidate": "GridFormingNortonDroop subset",
+      "status": "blocked-missing-formulation",
+      "first_blocker": "Reference-device semantics and PSD DAE parity are not aligned.",
+      "next_action": "Defer behind single-inverter GFM droop comparison."
+    },
+    {
+      "group": "ibr",
+      "psd_tests": "Test 23",
+      "psd_components": "Droop grid-forming inverter",
+      "hacdcpf_candidate": "GridFormingNortonDroop",
+      "status": "compare-limited",
+      "first_blocker": "HACDCPF droop is a compact Norton model, not PSD's full composed inverter/filter/controller stack.",
+      "next_action": "Candidate first GFM comparison if you accept subset parity."
+    },
+    {
+      "group": "ibr",
+      "psd_tests": "Test 24",
+      "psd_components": "Grid-following inverter with ReducedOrderPLL",
+      "hacdcpf_candidate": "REGC_REEC_GFL_Subset + ReducedOrderPLL",
+      "status": "compare-limited",
+      "first_blocker": "Existing hook compares selected active-power state only; PSD full eigenvalue and DAE gates remain missing.",
+      "next_action": "This is the strongest current IBR comparison candidate."
+    },
+    {
+      "group": "ibr",
+      "psd_tests": "Test 28",
+      "psd_components": "PeriodicVariableSource",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-model",
+      "first_blocker": "No periodic DC/source model.",
+      "next_action": "Defer unless source models are prioritized."
+    },
+    {
+      "group": "ibr",
+      "psd_tests": "Test 29",
+      "psd_components": "RENA / REPCA + REECB + REGCA",
+      "hacdcpf_candidate": "REGC_REEC_GFL_Subset",
+      "status": "metadata-only",
+      "first_blocker": "HACDCPF subset lacks many PSD RENA flags, limiters, and plant-control paths.",
+      "next_action": "Decide whether to implement NERC renewable stack before testing RENA cases."
+    },
+    {
+      "group": "ibr",
+      "psd_tests": "Test 42",
+      "psd_components": "DERA aggregate distributed generation",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-model",
+      "first_blocker": "No AggregateDistributedGenerationA/DERA runtime model.",
+      "next_action": "Separate DERA from generic GFL inverter work; it is its own IBR family."
+    },
+    {
+      "group": "ibr",
+      "psd_tests": "Test 43",
+      "psd_components": "REGCA voltage converter",
+      "hacdcpf_candidate": "REGC_REEC_GFL_Subset metadata",
+      "status": "metadata-only",
+      "first_blocker": "No RenewableEnergyVoltageConverterTypeA equivalent.",
+      "next_action": "Add after basic REGCA/REEC active-power traces pass."
+    },
+    {
+      "group": "ibr",
+      "psd_tests": "Test 44",
+      "psd_components": "VOC grid-forming inverter",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-model",
+      "first_blocker": "No virtual oscillator control runtime model.",
+      "next_action": "Required only if VOC is in the first GFM target set."
+    },
+    {
+      "group": "ibr",
+      "psd_tests": "Test 51",
+      "psd_components": "Grid-following inverter with KauraPLL",
+      "hacdcpf_candidate": "REGC_REEC_GFL_Subset + KauraPLL",
+      "status": "compare-limited",
+      "first_blocker": "Existing hook compares selected behavior only; full PSD eigenvalue and DAE gates remain missing.",
+      "next_action": "Pair with Test 24 for the first GFL comparison set."
+    },
+    {
+      "group": "dynamic-injection",
+      "psd_tests": "Test 49",
+      "psd_components": "CSVGN1",
+      "hacdcpf_candidate": "",
+      "status": "blocked-missing-model",
+      "first_blocker": "No CSVGN1 dynamic injector model.",
+      "next_action": "Defer unless this device is explicitly in scope."
+    }
+  ]
+}

@@ -91,8 +91,20 @@ julia --project=/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl/test \
   generator-102-1:delta_deg
 ```
 
+PSD Test 02 / OneDOneQ machine traces can be exported the same way:
+
+```bash
+julia --project=/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl/test \
+  tools/psd_validation/export_trace.jl \
+  /Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl \
+  onedoneq \
+  /tmp/psd_onedoneq_eq_p.csv \
+  generator-102-1:eq_p
+```
+
 Supported cases today:
 
+- `onedoneq` / `test02`
 - `genrou`
 - `zip_constant_power`
 - `test24` / `gridfollowing_reduced`
@@ -105,6 +117,8 @@ Supported signals today:
 - `<device>:delta_rad`
 - `<device>:delta_deg`
 - `<device>:omega_pu`
+- `<device>:eq_p`
+- `<device>:ed_p`
 - `<device>:frequency_pu`
 - `<device>:p_pu`
 - `<device>:q_pu`
@@ -125,3 +139,84 @@ relative rotor speed tightly and relative rotor angle with a bounded envelope;
 the angle gate is intentionally broader than the inverter gates because HACDCPF
 still uses its synthesized three-phase network solve instead of PSD's exact
 positive-sequence residual DAE.
+
+## PSD Input Snapshot Conversion
+
+`export_psd_snapshot.jl` converts a PSD/PowerSystems case into a neutral JSON
+manifest:
+
+```text
+hacdcpf_psd_snapshot.v1
+```
+
+The snapshot preserves:
+
+- static `PowerSystems.System` component identity,
+- PSD `DynamicInjection` devices,
+- generator slots: machine, shaft, AVR, governor, PSS,
+- inverter slots: DC source, frequency estimator, outer control, inner control,
+  converter, filter, limiter,
+- a best-effort HACDCPF `dynamic_model` candidate for currently supported
+  profiles.
+
+Run it with a named PSD validation case:
+
+```bash
+julia --project=/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl/test \
+  tools/psd_validation/export_psd_snapshot.jl \
+  /Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl \
+  test24 \
+  /tmp/hacdcpf_psd_test24_snapshot.json
+```
+
+It also accepts a PowerSystems JSON file, or a RAW/DYR pair:
+
+```bash
+julia --project=/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl/test \
+  tools/psd_validation/export_psd_snapshot.jl \
+  /Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl \
+  /path/to/case.raw \
+  /tmp/hacdcpf_psd_case_snapshot.json \
+  /path/to/case.dyr
+```
+
+This is an input-conversion manifest for comparison and validation. It is not
+yet a full HACDCPF network importer for every PSD/PowerSystems feature.
+
+## Model And Controller Crosswalk
+
+The model-by-model comparison lives in:
+
+```text
+tools/psd_validation/psd_hacdcpf_model_crosswalk.json
+```
+
+Regenerate the readable reports with:
+
+```bash
+python3 tools/psd_validation/compare_model_catalogs.py \
+  --out-md tools/psd_validation/psd_model_comparison.md \
+  --out-csv tools/psd_validation/psd_model_comparison.csv \
+  --fail-on-stale \
+  --print-summary
+```
+
+The generator cross-checks referenced HACDCPF model names against
+`src/dynamics/DynamicModelCatalog.cpp`, so a stale crosswalk row fails visibly.
+
+## Machine And IBR Component Test Gate
+
+For the first PSD-vs-HACDCPF decision gate, focus on transmission-dynamics
+machines and IBRs:
+
+```bash
+python3 tools/psd_validation/compare_component_tests.py \
+  --out-md tools/psd_validation/psd_component_test_matrix.md \
+  --out-csv tools/psd_validation/psd_component_test_matrix.csv \
+  --fail-on-blocked \
+  --print-summary
+```
+
+`--fail-on-blocked` intentionally returns non-zero while any PSD machine/IBR
+component test group is not comparable with the current HACDCPF runtime. This is
+the stop-and-decide point before implementing a large model library.

@@ -348,6 +348,7 @@ set(HACDCPF_SOURCES
   src/io/component_io_mapping.cpp
   src/io/external_grid_io.cpp
   src/io/gridlabd_bridge.cpp
+  src/io/gridlabd_validation.cpp
   # ── validation ────────────────────────────────────────────────────────────
   src/validation/validate_system.cpp
   # ── api ──────────────────────────────────────────────────────────────────
@@ -598,6 +599,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/matpower_pf_compare.cpp")
   add_executable(matpower_pf_compare tools/matpower_pf_compare.cpp)
   target_link_libraries(matpower_pf_compare PRIVATE hacdcpf::hacdcpf)
   hacdcpf_copy_opendss_runtime(matpower_pf_compare)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/gridlabd_validation_matrix.cpp")
+  add_executable(gridlabd_validation_matrix tools/gridlabd_validation_matrix.cpp)
+  target_link_libraries(gridlabd_validation_matrix PRIVATE hacdcpf::hacdcpf)
+  hacdcpf_copy_opendss_runtime(gridlabd_validation_matrix)
 endif()
 
 # ── Tests ─────────────────────────────────────────────────────────────────────

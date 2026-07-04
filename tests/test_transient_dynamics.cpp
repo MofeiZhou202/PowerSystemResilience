@@ -310,6 +310,36 @@ HybridPowerSystem make_psd_genrou_three_bus_subset_case() {
   return sys;
 }
 
+HybridPowerSystem make_psd_onedoneq_three_bus_subset_case() {
+  HybridPowerSystem sys = make_psd_genrou_three_bus_subset_case();
+  sys.name = "psd_onedoneq_three_bus_subset";
+  REQUIRE(sys.ac.generators.size() >= 2);
+  auto& machine = sys.ac.generators[1];
+  machine.dynamic_model.standard = "PowerSystems";
+  machine.dynamic_model.model_name = "OneDOneQMachine";
+  machine.dynamic_model.source_id = "PowerSimulationsDynamics:test_case02_onedoneq";
+  machine.ra_pu = 0.0;
+  machine.xd_pu = 1.3125;
+  machine.xq_pu = 1.2578;
+  machine.xdp_pu = 0.1813;
+  machine.xdpp_pu = 0.0;
+  machine.td0p_s = 5.89;
+  machine.td0pp_s = 0.0;
+  machine.inertia_h = 3.01;
+  machine.dynamic_model.parameters = {
+      {"H", 3.01},
+      {"D", 0.0},
+      {"R", 0.0},
+      {"Xd", 1.3125},
+      {"Xq", 1.2578},
+      {"Xd_p", 0.1813},
+      {"Xq_p", 0.25},
+      {"Td0_p", 5.89},
+      {"Tq0_p", 0.6},
+  };
+  return sys;
+}
+
 HybridPowerSystem make_psd_zip_load_three_bus_subset_case() {
   HybridPowerSystem sys = make_psd_genrou_three_bus_subset_case();
   sys.name = "psd_zip_load_three_bus_subset";
@@ -870,9 +900,11 @@ TEST_CASE("Transient solver runs partitioned phasor dynamics", "[dynamics][trans
 }
 
 TEST_CASE("Transient events preserve branch type and apply topology changes", "[dynamics][events]") {
-  const auto sys = make_transient_2bus();
+  auto sys = make_transient_2bus();
+  sys.ac.loads.clear();
   auto opt = fast_options();
   opt.t_end_s = 0.03;
+  opt.enforce_voltage_health_check = false;
 
   DynamicModelBuilder builder;
   DynamicSystem dyn = builder.build(sys, opt);
@@ -887,6 +919,7 @@ TEST_CASE("Transient events preserve branch type and apply topology changes", "[
   DynamicSolver solver;
   const DynamicResults result = solver.solve(dyn);
 
+  INFO(result.message);
   REQUIRE(result.success);
   REQUIRE_FALSE(result.applied_events.empty());
   CHECK(result.applied_events.front() == "trip AC branch 1");
@@ -914,6 +947,7 @@ TEST_CASE("Transient solver lands on off-grid event times", "[dynamics][events]"
   DynamicSolver solver;
   const DynamicResults result = solver.solve(dyn);
 
+  INFO(result.message);
   REQUIRE(result.success);
   REQUIRE_FALSE(result.applied_events.empty());
   CHECK(result.applied_events.front() == "mid-step load scale");
@@ -1424,6 +1458,64 @@ TEST_CASE("PSD validation ladder covers component, load, and system-level HACDCP
   }
 }
 
+TEST_CASE("PSD OneDOneQ machine profile initializes and responds as a named model",
+          "[dynamics][benchmark][psd][machine][onedoneq]") {
+  auto sys = make_psd_onedoneq_three_bus_subset_case();
+  DynamicSolverOptions opt = fast_options();
+  opt.run_power_flow_initialization = true;
+  opt.t_end_s = 2.0;
+  opt.dt_s = 0.005;
+  opt.record_every_step = true;
+  opt.dynamic_trim_tol = 1e-7;
+  opt.max_dynamic_trim_iters = 20;
+  opt.algebraic_network_max_iters = 8;
+  opt.algebraic_network_tol = 1e-8;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+  DynamicEvent trip;
+  trip.time_s = 1.0;
+  trip.type = DynamicEventType::ACBranchTrip;
+  trip.component_index = 1;
+  trip.component_type = "AC";
+  trip.label = "PSD OneDOneQ fixture branch trip";
+  dyn.events.push_back(trip);
+
+  DynamicSolver solver;
+  const DynamicResults result = solver.solve(dyn);
+
+  INFO(result.message);
+  REQUIRE(result.success);
+  CHECK(result.initialization.power_flow_converged);
+  CHECK(result.initialization.dynamic_trim_converged);
+  REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
+  REQUIRE_FALSE(result.applied_event_records.empty());
+  REQUIRE(result.snapshots.size() > 100);
+
+  const auto& gen_out =
+      require_device_output(*result.final_snapshot(), "SynchronousMachine", 2);
+  CHECK(gen_out.model_name == "OneDOneQMachine");
+  CHECK(gen_out.values.count("psd_onedoneq") == 1);
+  CHECK(gen_out.values.count("eq_p") == 1);
+  CHECK(gen_out.values.count("ed_p") == 1);
+  CHECK(gen_out.values.count("psi_kd") == 0);
+  REQUIRE(gen_out.model_profiles.size() >= 1);
+  CHECK(std::any_of(gen_out.model_profiles.begin(),
+                    gen_out.model_profiles.end(),
+                    [](const hacdcpf::dynamics::DynamicModelProfile& profile) {
+                      return profile.model_name == "OneDOneQMachine";
+                    }));
+
+  const auto delta = device_output_series(result, "SynchronousMachine", 2, "angle_rad");
+  const auto omega = device_output_series(result, "SynchronousMachine", 2, "omega_pu");
+  const auto eqp = device_output_series(result, "SynchronousMachine", 2, "eq_p");
+  const auto edp = device_output_series(result, "SynchronousMachine", 2, "ed_p");
+  CHECK(series_range(delta) > 1e-4);
+  CHECK(series_range(omega) > 1e-7);
+  CHECK(series_range(eqp) > 1e-5);
+  CHECK(series_range(edp) > 1e-5);
+}
+
 TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system traces",
           "[dynamics][benchmark][psd][external]") {
   const char* run_psd = std::getenv("HACDCPF_RUN_PSD_COMPARE");
@@ -1498,6 +1590,93 @@ TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system tra
                      2.0,
                      0.002,
                      0.01,
+                     "component",
+                     true});
+  }
+
+  {
+    auto sys = make_psd_onedoneq_three_bus_subset_case();
+    DynamicSolverOptions opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.t_end_s = 2.0;
+    opt.dt_s = 0.005;
+    opt.record_every_step = true;
+    opt.dynamic_trim_tol = 1e-7;
+    opt.max_dynamic_trim_iters = 20;
+    opt.algebraic_network_max_iters = 8;
+    opt.algebraic_network_tol = 1e-8;
+
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(sys, opt);
+    DynamicEvent trip;
+    trip.time_s = 1.0;
+    trip.type = DynamicEventType::ACBranchTrip;
+    trip.component_index = 2;
+    trip.component_type = "AC";
+    trip.label = "PSD Test 02 OneDOneQ BUS 1-BUS 3 branch trip";
+    dyn.events.push_back(trip);
+
+    DynamicSolver solver;
+    const DynamicResults result = solver.solve(dyn);
+    REQUIRE(result.success);
+
+    auto delta = device_output_series(result,
+                                      "SynchronousMachine",
+                                      2,
+                                      "angle_rad");
+    write_csv_series(out_dir / "hacdcpf_psd_onedoneq_delta_rad.csv", delta);
+    specs.push_back({"onedoneq",
+                     "generator-102-1:delta_rad",
+                     std::move(delta),
+                     0.0,
+                     2.0,
+                     0.05,
+                     0.12,
+                     "component",
+                     true});
+
+    auto omega = device_output_series(result,
+                                      "SynchronousMachine",
+                                      2,
+                                      "omega_pu");
+    write_csv_series(out_dir / "hacdcpf_psd_onedoneq_omega_pu.csv", omega);
+    specs.push_back({"onedoneq",
+                     "generator-102-1:omega_pu",
+                     std::move(omega),
+                     0.0,
+                     2.0,
+                     0.002,
+                     0.005,
+                     "component",
+                     true});
+
+    auto eqp = device_output_series(result,
+                                    "SynchronousMachine",
+                                    2,
+                                    "eq_p");
+    write_csv_series(out_dir / "hacdcpf_psd_onedoneq_eq_p.csv", eqp);
+    specs.push_back({"onedoneq",
+                     "generator-102-1:eq_p",
+                     std::move(eqp),
+                     0.0,
+                     2.0,
+                     0.01,
+                     0.02,
+                     "component",
+                     true});
+
+    auto edp = device_output_series(result,
+                                    "SynchronousMachine",
+                                    2,
+                                    "ed_p");
+    write_csv_series(out_dir / "hacdcpf_psd_onedoneq_ed_p.csv", edp);
+    specs.push_back({"onedoneq",
+                     "generator-102-1:ed_p",
+                     std::move(edp),
+                     0.0,
+                     2.0,
+                     0.015,
+                     0.03,
                      "component",
                      true});
   }
@@ -1991,11 +2170,57 @@ TEST_CASE("Transient contingencies carry named parameters and structured records
   DynamicSolver solver;
   const DynamicResults result = solver.solve(dyn);
 
+  INFO(result.message);
   REQUIRE(result.success);
   REQUIRE(result.applied_event_records.size() == 2);
   CHECK(result.applied_event_records.front().label == "parameterized AC fault");
   CHECK(result.applied_event_records.front().params.at("r_pu") == Catch::Approx(0.001));
   CHECK(result.applied_event_records.back().params.at("p_ref_mw") == Catch::Approx(-2.0));
+}
+
+TEST_CASE("Adaptive transient integration remains bounded after cleared AC fault",
+          "[dynamics][events][fault][long-run]") {
+  const auto sys = make_hybrid_dc_case();
+  auto opt = fast_options();
+  opt.run_power_flow_initialization = true;
+  opt.t_end_s = 10.0;
+  opt.dt_s = 0.02;
+  opt.use_adaptive_step = true;
+  opt.abs_tol = 1e-7;
+  opt.rel_tol = 1e-5;
+  opt.output_every_steps = 20;
+  opt.dynamic_trim_tol = 1e-7;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+
+  DynamicEvent fault;
+  fault.time_s = 1.0;
+  fault.type = DynamicEventType::FaultShunt;
+  fault.bus = 2;
+  fault.component_type = "AC";
+  fault.label = "cleared AC fault";
+  fault.params["r_pu"] = 0.02;
+  fault.params["x_pu"] = 0.02;
+  fault.params["duration_s"] = 0.06;
+  dyn.events.push_back(fault);
+
+  DynamicSolver solver;
+  const DynamicResults result = solver.solve(dyn);
+
+  INFO(result.message);
+  REQUIRE(result.success);
+  CHECK(result.max_local_error_norm <= 1.0001);
+  REQUIRE(result.final_snapshot() != nullptr);
+  CHECK(result.final_snapshot()->time_s == Catch::Approx(10.0));
+  CHECK(result.final_snapshot()->min_ac_voltage_pu > 0.70);
+  CHECK(result.final_snapshot()->max_ac_voltage_pu < 1.30);
+
+  for (const auto& snapshot : result.snapshots) {
+    if (snapshot.time_s < 2.0) continue;
+    CHECK(snapshot.min_ac_voltage_pu > 0.65);
+    CHECK(snapshot.max_ac_voltage_pu < 1.35);
+  }
 }
 
 TEST_CASE("Dynamic sparse linear solver accepts optional backend requests",

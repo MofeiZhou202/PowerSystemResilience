@@ -20,9 +20,9 @@ struct MachineControlLink {
   double base_mva{100.0};
   double frequency_hz{50.0};
   double inertia_h{1.0};
-  int omega_local{1};  // classical & GENROU: omega/speed at local index 1
-  int pm_local{3};     // classical pm (idx 3); GENROU tau_m (idx 6)
-  int efd_local{2};    // classical e_mag (idx 2); GENROU vf (idx 7)
+  int omega_local{1};  // machine speed at local index 1
+  int pm_local{3};     // classical pm=3; OneDOneQ tau_m=4; GENROU tau_m=6
+  int efd_local{2};    // classical field=2; OneDOneQ vf=5; GENROU vf=7
 
   [[nodiscard]] int omegaIndex() const { return range ? range->offset + omega_local : -1; }
   [[nodiscard]] int pmIndex() const { return range ? range->offset + pm_local : -1; }

@@ -20,6 +20,7 @@ pushfirst!(LOAD_PATH, TEST_FILES_DIR)
 using PowerSimulationsDynamics
 using PowerSystems
 using PowerSystemCaseBuilder
+using PowerFlows
 using Sundials
 using DelimitedFiles
 import LinearAlgebra
@@ -62,6 +63,10 @@ function export_signal(results, signal::String)
             return t, y .* 180.0 ./ pi
         elseif quantity == "omega_pu"
             return get_state_series(results, (ref, :ω))
+        elseif quantity == "eq_p"
+            return get_state_series(results, (ref, :eq_p))
+        elseif quantity == "ed_p"
+            return get_state_series(results, (ref, :ed_p))
         elseif quantity == "frequency_pu"
             return get_frequency_series(results, ref)
         elseif quantity == "p_pu"
@@ -73,6 +78,36 @@ function export_signal(results, signal::String)
         end
     end
     error("unsupported PSD export signal $(signal)")
+end
+
+function one_done_q_fault_ybus(sys)
+    fault_branches =
+        filter(x -> get_name(x) != "BUS 1-BUS 3-i_1", collect(get_components(Branch, sys)))
+    sorted_buses = sort(collect(get_components(ACBus, sys)); by = x -> get_number(x))
+    return PNM.Ybus(fault_branches, sorted_buses)[:, :]
+end
+
+function run_onedoneq()
+    sys = build_system(PSIDTestSystems, "psid_test_threebus_oneDoneQ")
+    pf = ACPowerFlow()
+    solve_powerflow!(pf, sys)
+    ybus_fault = one_done_q_fault_ybus(sys)
+    ybus_change = NetworkSwitch(1.0, ybus_fault)
+    work = mktempdir()
+    try
+        sim = Simulation(
+            ResidualModel,
+            sys,
+            work,
+            (0.0, 2.0),
+            ybus_change,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.005, saveat = 0.005)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
 end
 
 function run_genrou()
@@ -151,7 +186,9 @@ function run_gridfollowing(case_name::String)
 end
 
 results =
-    if CASE_NAME == "genrou"
+    if CASE_NAME == "onedoneq" || CASE_NAME == "test02"
+        run_onedoneq()
+    elseif CASE_NAME == "genrou"
         run_genrou()
     elseif CASE_NAME == "zip_constant_power"
         run_zip_constant_power()

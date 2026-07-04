@@ -289,14 +289,124 @@ DynamicSolverType effective_solver_type(const DynamicSolverOptions& options,
 struct StepOutcome {
   bool ok{false};
   int iterations{0};
+  double error_norm{0.0};
+  bool error_estimated{false};
 };
+
+double scaled_error_norm(const Eigen::VectorXd& reference,
+                         const Eigen::VectorXd& trial,
+                         const Eigen::VectorXd& error,
+                         const DynamicSolverOptions& opt) {
+  if (error.size() == 0) return 0.0;
+  double norm = 0.0;
+  const double abs_tol = std::max(0.0, opt.abs_tol);
+  const double rel_tol = std::max(0.0, opt.rel_tol);
+  for (Eigen::Index i = 0; i < error.size(); ++i) {
+    const double scale =
+        abs_tol + rel_tol * std::max(std::abs(reference[i]), std::abs(trial[i]));
+    norm = std::max(norm, std::abs(error[i]) / std::max(scale, 1e-16));
+  }
+  return norm;
+}
+
+bool has_active_fault(const DynamicSystem& sys) {
+  return std::any_of(sys.network.fault_shunts.begin(),
+                     sys.network.fault_shunts.end(),
+                     [](const DynamicFaultShunt& fault) { return fault.active; });
+}
+
+bool check_numerical_health(const DynamicSystem& sys,
+                            double t,
+                            std::string& error) {
+  const auto& opt = sys.options;
+  if (!sys.x.x.allFinite()) {
+    error = "Transient state contains non-finite values at t=" + std::to_string(t) + "s";
+    return false;
+  }
+  if (!opt.enforce_voltage_health_check) return true;
+
+  const bool skip_low_voltage =
+      opt.allow_low_voltage_during_active_fault && has_active_fault(sys);
+  if (sys.y.Vac_abc.size() > 0) {
+    double min_v = std::numeric_limits<double>::infinity();
+    double max_v = 0.0;
+    for (Eigen::Index i = 0; i < sys.y.Vac_abc.size(); ++i) {
+      const double v = std::abs(sys.y.Vac_abc[i]);
+      if (!std::isfinite(v)) {
+        error = "AC transient voltage contains non-finite values at t=" +
+                std::to_string(t) + "s";
+        return false;
+      }
+      min_v = std::min(min_v, v);
+      max_v = std::max(max_v, v);
+    }
+    if (!skip_low_voltage && min_v < opt.voltage_collapse_min_ac_pu) {
+      error = "AC voltage health check failed at t=" + std::to_string(t) +
+              "s; min |V|=" + std::to_string(min_v) + " pu < " +
+              std::to_string(opt.voltage_collapse_min_ac_pu) + " pu";
+      return false;
+    }
+    if (max_v > opt.voltage_blowup_max_ac_pu) {
+      error = "AC voltage health check failed at t=" + std::to_string(t) +
+              "s; max |V|=" + std::to_string(max_v) + " pu > " +
+              std::to_string(opt.voltage_blowup_max_ac_pu) + " pu";
+      return false;
+    }
+  }
+
+  if (sys.y.Vdc.size() > 0) {
+    double min_v = std::numeric_limits<double>::infinity();
+    double max_v = 0.0;
+    for (Eigen::Index i = 0; i < sys.y.Vdc.size(); ++i) {
+      const double v = sys.y.Vdc[i];
+      if (!std::isfinite(v)) {
+        error = "DC transient voltage contains non-finite values at t=" +
+                std::to_string(t) + "s";
+        return false;
+      }
+      min_v = std::min(min_v, std::abs(v));
+      max_v = std::max(max_v, std::abs(v));
+    }
+    if (!skip_low_voltage && min_v < opt.voltage_collapse_min_dc_pu) {
+      error = "DC voltage health check failed at t=" + std::to_string(t) +
+              "s; min |V|=" + std::to_string(min_v) + " pu < " +
+              std::to_string(opt.voltage_collapse_min_dc_pu) + " pu";
+      return false;
+    }
+    if (max_v > opt.voltage_blowup_max_dc_pu) {
+      error = "DC voltage health check failed at t=" + std::to_string(t) +
+              "s; max |V|=" + std::to_string(max_v) + " pu > " +
+              std::to_string(opt.voltage_blowup_max_dc_pu) + " pu";
+      return false;
+    }
+  }
+  return true;
+}
 
 StepOutcome step_euler(DynamicSystem& sys, double t, double dt, std::string& error) {
   Eigen::VectorXd k1;
-  if (!evaluate_derivatives(sys, t, sys.x.x, k1, error)) return {};
-  sys.x.x += dt * k1;
-  sys.x.dxdt = k1;
-  return {sys.solveNetwork(t + dt, error), 1};
+  const Eigen::VectorXd x0 = sys.x.x;
+  if (!evaluate_derivatives(sys, t, x0, k1, error)) return {};
+  StepOutcome outcome;
+  outcome.iterations = 1;
+  if (sys.options.use_adaptive_step && x0.size() > 0) {
+    const Eigen::VectorXd x_full = x0 + dt * k1;
+    const Eigen::VectorXd x_half = x0 + 0.5 * dt * k1;
+    Eigen::VectorXd k_half;
+    if (!evaluate_derivatives(sys, t + 0.5 * dt, x_half, k_half, error)) return {};
+    const Eigen::VectorXd x_two_half = x_half + 0.5 * dt * k_half;
+    outcome.iterations = 2;
+    outcome.error_estimated = true;
+    outcome.error_norm =
+        scaled_error_norm(x0, x_two_half, x_two_half - x_full, sys.options);
+    sys.x.x = x_two_half;
+    sys.x.dxdt = (x_two_half - x0) / dt;
+  } else {
+    sys.x.x = x0 + dt * k1;
+    sys.x.dxdt = k1;
+  }
+  outcome.ok = sys.solveNetwork(t + dt, error);
+  return outcome;
 }
 
 StepOutcome step_heun(DynamicSystem& sys, double t, double dt, std::string& error) {
@@ -305,21 +415,62 @@ StepOutcome step_heun(DynamicSystem& sys, double t, double dt, std::string& erro
   if (!evaluate_derivatives(sys, t, x0, k1, error)) return {};
   Eigen::VectorXd k2;
   if (!evaluate_derivatives(sys, t + dt, x0 + dt * k1, k2, error)) return {};
-  sys.x.x = x0 + 0.5 * dt * (k1 + k2);
+  const Eigen::VectorXd x_euler = x0 + dt * k1;
+  const Eigen::VectorXd x_heun = x0 + 0.5 * dt * (k1 + k2);
+  sys.x.x = x_heun;
   sys.x.dxdt = 0.5 * (k1 + k2);
-  return {sys.solveNetwork(t + dt, error), 2};
+  StepOutcome outcome;
+  outcome.ok = sys.solveNetwork(t + dt, error);
+  outcome.iterations = 2;
+  outcome.error_estimated = x0.size() > 0;
+  if (outcome.error_estimated) {
+    outcome.error_norm =
+        scaled_error_norm(x0, x_heun, x_heun - x_euler, sys.options);
+  }
+  return outcome;
+}
+
+bool rk4_state(DynamicSystem& sys,
+               double t,
+               const Eigen::VectorXd& x0,
+               double dt,
+               Eigen::VectorXd& x1,
+               std::string& error) {
+  Eigen::VectorXd k1, k2, k3, k4;
+  if (!evaluate_derivatives(sys, t, x0, k1, error)) return false;
+  if (!evaluate_derivatives(sys, t + 0.5 * dt, x0 + 0.5 * dt * k1, k2, error)) return false;
+  if (!evaluate_derivatives(sys, t + 0.5 * dt, x0 + 0.5 * dt * k2, k3, error)) return false;
+  if (!evaluate_derivatives(sys, t + dt, x0 + dt * k3, k4, error)) return false;
+  x1 = x0 + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4);
+  return true;
 }
 
 StepOutcome step_rk4(DynamicSystem& sys, double t, double dt, std::string& error) {
   const Eigen::VectorXd x0 = sys.x.x;
-  Eigen::VectorXd k1, k2, k3, k4;
-  if (!evaluate_derivatives(sys, t, x0, k1, error)) return {};
-  if (!evaluate_derivatives(sys, t + 0.5 * dt, x0 + 0.5 * dt * k1, k2, error)) return {};
-  if (!evaluate_derivatives(sys, t + 0.5 * dt, x0 + 0.5 * dt * k2, k3, error)) return {};
-  if (!evaluate_derivatives(sys, t + dt, x0 + dt * k3, k4, error)) return {};
-  sys.x.x = x0 + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4);
-  sys.x.dxdt = (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
-  return {sys.solveNetwork(t + dt, error), 4};
+  StepOutcome outcome;
+  Eigen::VectorXd x_full;
+  if (!rk4_state(sys, t, x0, dt, x_full, error)) return {};
+  outcome.iterations = 4;
+  Eigen::VectorXd x_next = x_full;
+  if (sys.options.use_adaptive_step && x0.size() > 0) {
+    Eigen::VectorXd x_mid;
+    if (!rk4_state(sys, t, x0, 0.5 * dt, x_mid, error)) return {};
+    Eigen::VectorXd x_half;
+    if (!rk4_state(sys, t + 0.5 * dt, x_mid, 0.5 * dt, x_half, error)) return {};
+    outcome.iterations = 12;
+    outcome.error_estimated = true;
+    outcome.error_norm =
+        scaled_error_norm(x0, x_half, (x_half - x_full) / 15.0, sys.options);
+    x_next = x_half;
+  }
+  sys.x.x = x_next;
+  if (dt > 0.0) {
+    sys.x.dxdt = (x_next - x0) / dt;
+  } else {
+    sys.x.dxdt = Eigen::VectorXd::Zero(x0.size());
+  }
+  outcome.ok = sys.solveNetwork(t + dt, error);
+  return outcome;
 }
 
 bool numerical_state_jacobian(DynamicSystem& sys,
@@ -340,7 +491,8 @@ bool numerical_state_jacobian(DynamicSystem& sys,
     if (!evaluate_derivatives(sys, t, perturbed, fp, error)) return false;
     jac.col(col) = (fp - f0) / h;
   }
-  return true;
+  Eigen::VectorXd restored;
+  return evaluate_derivatives(sys, t, state, restored, error);
 }
 
 StepOutcome step_backward_euler_newton(DynamicSystem& sys,
@@ -512,6 +664,12 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
     results.failed_step = 0;
     return results;
   }
+  if (!check_numerical_health(system, system.x.time_s, error)) {
+    results.success = false;
+    results.message = error;
+    results.failed_step = 0;
+    return results;
+  }
 
   record_snapshot_if_needed(system, results, 0);
 
@@ -523,6 +681,13 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
   while (system.x.time_s < t_end - 1e-12) {
     const double t = system.x.time_s;
     if (apply_events(system, t, results) && !system.solveNetwork(t, error)) {
+      results.success = false;
+      results.message = error;
+      results.failed_step = step;
+      results.steps = step;
+      return results;
+    }
+    if (!check_numerical_health(system, t, error)) {
       results.success = false;
       results.message = error;
       results.failed_step = step;
@@ -544,6 +709,8 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
     StepOutcome outcome;
     double attempted_dt = dt;
     double accepted_next_t = next_t;
+    std::string last_rejection;
+    bool step_accepted = false;
     for (int retry = 0; retry <= system.options.max_step_halving; ++retry) {
       system.x.x = x_before;
       system.y = y_before;
@@ -568,13 +735,32 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
           outcome = step_rosenbrock_euler(system, t, attempted_dt, error);
           break;
       }
-      if (outcome.ok) {
+      bool accepted = outcome.ok;
+      if (accepted && system.options.use_adaptive_step &&
+          outcome.error_estimated &&
+          outcome.error_norm > 1.0) {
+        accepted = false;
+        std::ostringstream os;
+        os << "adaptive local error check failed at t=" << t
+           << "s with dt=" << attempted_dt
+           << "s; scaled error=" << outcome.error_norm
+           << " > 1";
+        last_rejection = os.str();
+      }
+      if (accepted && !check_numerical_health(system, t + attempted_dt, error)) {
+        accepted = false;
+        last_rejection = error;
+      }
+      if (accepted) {
         accepted_next_t = t + attempted_dt;
+        last_rejection.clear();
+        step_accepted = true;
         break;
       }
+      if (last_rejection.empty()) last_rejection = error;
       if (!system.options.use_adaptive_step ||
           retry == system.options.max_step_halving ||
-          std::isfinite(next_discontinuity)) {
+          attempted_dt <= system.options.min_accepted_step_s * (1.0 + 1e-12)) {
         break;
       }
       attempted_dt *= 0.5;
@@ -584,16 +770,31 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
     ++step;
     system.x.time_s = accepted_next_t;
     results.newton_iterations += outcome.iterations;
-    if (!outcome.ok) {
+    if (!step_accepted) {
+      results.success = false;
+      results.message = !last_rejection.empty() ? last_rejection : error;
+      results.failed_step = step;
+      results.steps = step;
+      return results;
+    }
+    results.max_local_error_norm =
+        std::max(results.max_local_error_norm, outcome.error_norm);
+    results.min_accepted_step_s =
+        results.min_accepted_step_s == 0.0
+            ? attempted_dt
+            : std::min(results.min_accepted_step_s, attempted_dt);
+    results.max_accepted_step_s =
+        std::max(results.max_accepted_step_s, attempted_dt);
+
+    if (apply_events(system, system.x.time_s, results) &&
+        !system.solveNetwork(system.x.time_s, error)) {
       results.success = false;
       results.message = error;
       results.failed_step = step;
       results.steps = step;
       return results;
     }
-
-    if (apply_events(system, system.x.time_s, results) &&
-        !system.solveNetwork(system.x.time_s, error)) {
+    if (!check_numerical_health(system, system.x.time_s, error)) {
       results.success = false;
       results.message = error;
       results.failed_step = step;

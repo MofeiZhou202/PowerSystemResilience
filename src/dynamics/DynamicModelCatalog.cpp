@@ -46,6 +46,7 @@ std::vector<DynamicModelDescriptor> build_catalog() {
       "GENROU", "IEEE", "GENROU round-rotor machine", "machine",
       {real("H", {"h"}, "Inertia constant", "s", 3.5, 0.1, 30.0, "Rotor"),
        real("D", {"damping_d", "damping"}, "Damping", "pu", 0.0, 0.0, 10.0, "Rotor"),
+       real("R", {"Ra", "r"}, "Stator resistance", "pu", 0.0, 0.0, 1.0, "Reactances", true),
        real("Xd", {"xd"}, "d-axis synchronous reactance", "pu", 1.8, 0.1, 3.0, "Reactances"),
        real("Xq", {"xq"}, "q-axis synchronous reactance", "pu", 1.7, 0.1, 3.0, "Reactances"),
        real("Xd_p", {"Xdp", "xd_p", "xdp"}, "d-axis transient reactance", "pu", 0.30, 0.0, 2.0, "Reactances"),
@@ -58,6 +59,17 @@ std::vector<DynamicModelDescriptor> build_catalog() {
        real("Tq0_pp", {"Tq0pp", "tq0_pp", "tq0pp"}, "q-axis subtransient time const", "s", 0.05, 0.001, 1.0, "Time constants"),
        real("Sat_A", {"saturation_a", "Se_A"}, "Saturation coeff A", "", 0.0, 0.0, 5.0, "Saturation", true),
        real("Sat_B", {"saturation_b", "Se_B"}, "Saturation coeff B", "", 0.0, 0.0, 5.0, "Saturation", true)}));
+  c.push_back(model(
+      "OneDOneQMachine", "PowerSystems", "One d-axis / one q-axis machine", "machine",
+      {real("H", {"h"}, "Inertia constant", "s", 3.5, 0.1, 30.0, "Rotor"),
+       real("D", {"damping_d", "damping"}, "Damping", "pu", 0.0, 0.0, 10.0, "Rotor"),
+       real("R", {"Ra", "r"}, "Stator resistance", "pu", 0.0, 0.0, 1.0, "Reactances", true),
+       real("Xd", {"xd"}, "d-axis synchronous reactance", "pu", 1.3125, 0.1, 3.0, "Reactances"),
+       real("Xq", {"xq"}, "q-axis synchronous reactance", "pu", 1.2578, 0.1, 3.0, "Reactances"),
+       real("Xd_p", {"Xdp", "xd_p", "xdp"}, "d-axis transient reactance", "pu", 0.1813, 0.0, 2.0, "Reactances"),
+       real("Xq_p", {"Xqp", "xq_p", "xqp"}, "q-axis transient reactance", "pu", 0.25, 0.0, 2.0, "Reactances"),
+       real("Td0_p", {"Td0p", "td0_p", "td0p"}, "d-axis transient time const", "s", 5.89, 0.1, 20.0, "Time constants"),
+       real("Tq0_p", {"Tq0p", "tq0_p", "tq0p"}, "q-axis transient time const", "s", 0.6, 0.01, 10.0, "Time constants")}));
   c.push_back(model(
       "ClassicalMachine", "IEEE", "Classical (E' behind X') machine", "machine", {}));
 
@@ -186,7 +198,8 @@ std::vector<DynamicComponentComposition> build_composition() {
 
   comps.push_back(
       {"gen", "Synchronous generator", "AC",
-       {slot("machine", "Machine model", false, {"GENROU", "ClassicalMachine"}, "ClassicalMachine"),
+       {slot("machine", "Machine model", false,
+             {"GENROU", "OneDOneQMachine", "ClassicalMachine"}, "ClassicalMachine"),
         slot("governor", "Governor", true, {"TGOV1", "IEEEG1"}, "None"),
         slot("exciter", "Exciter / AVR", true, {"SEXS", "IEEET1"}, "None"),
         slot("pss", "Power system stabilizer", true, {"PSS1A"}, "None")}});

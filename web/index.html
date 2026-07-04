@@ -458,6 +458,18 @@
       <label class="sub-label sub-checkbox" title="失败时自动缩小步长重试">
         <input id="trAdaptive" type="checkbox" checked/><span>自适应</span>
       </label>
+      <label class="sub-label" title="显式积分局部误差相对容差；自适应开启时生效">
+        相对容差
+        <input id="trRelTol" type="number" value="1e-6" step="1e-6" min="1e-10" style="width:82px"/>
+      </label>
+      <label class="sub-label" title="显式积分局部误差绝对容差；自适应开启时生效">
+        绝对容差
+        <input id="trAbsTol" type="number" value="1e-8" step="1e-8" min="1e-12" style="width:82px"/>
+      </label>
+      <label class="sub-label" title="单步失败、误差过大或事件后电压异常时最多减半重试次数">
+        减半
+        <input id="trMaxHalving" type="number" value="12" step="1" min="0" max="20" style="width:52px"/>
+      </label>
       <label class="sub-label sub-checkbox" title="用现有潮流求解器计算事件前初始运行点">
         <input id="trPowerFlowInit" type="checkbox" checked/><span>潮流初始化</span>
       </label>
@@ -474,6 +486,10 @@
       <label class="sub-label" title="暂态代数网络 g(x,y)=0 的收敛容差">
         网络容差
         <input id="trAlgTol" type="number" value="1e-10" step="1e-10" min="1e-12" style="width:82px"/>
+      </label>
+      <label class="sub-label" title="非故障期间的AC电压健康下限；低于该值认为发生电压坍塌或数值失稳">
+        Vmin
+        <input id="trMinVac" type="number" value="0.05" step="0.01" min="0" max="1" style="width:58px"/>
       </label>
       <label class="sub-label sub-checkbox" title="为带 DC 端口的 VSC 启用 DC 母线电容电压状态">
         <input id="trDynamicDcLink" type="checkbox"/><span>DC链动态</span>

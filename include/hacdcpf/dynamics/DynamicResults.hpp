@@ -95,6 +95,9 @@ struct DynamicResults {
   int failed_step{-1};
   int newton_iterations{0};
   int rejected_steps{0};
+  double max_local_error_norm{0.0};
+  double min_accepted_step_s{0.0};
+  double max_accepted_step_s{0.0};
 
   std::vector<DynamicSnapshot> snapshots;
   std::vector<std::string> warnings;

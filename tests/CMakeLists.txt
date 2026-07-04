@@ -183,6 +183,7 @@ hacdcpf_add_test(test_transient_dynamics test_transient_dynamics.cpp)
 # skip cleanly unless gridlabd is available through HACDCPF_GRIDLABD_BIN,
 # GRIDLABD_BIN, PATH, or a sibling gridlab-d build.
 hacdcpf_add_test(test_gridlabd_compare test_gridlabd_compare.cpp)
+hacdcpf_add_test(test_gridlabd_failure_matrix test_gridlabd_failure_matrix.cpp)
 
 set(_HACDCPF_PHASE_DOMAIN_DATA_DIR
   "${CMAKE_SOURCE_DIR}/tests/data/phase_domain_julia")

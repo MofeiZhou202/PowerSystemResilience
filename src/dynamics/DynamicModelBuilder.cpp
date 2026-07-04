@@ -159,12 +159,29 @@ void apply_voltage_source_profile(const hacdcpf::DynamicModelProfile& profile,
     }
     return fallback;
   };
-  if (iequals(profile.model_name, "GENROU") ||
-      iequals(profile.model_name, "RoundRotorQuadratic") ||
-      iequals(profile.model_name, "RoundRotorExponential")) {
+  if (iequals(profile.model_name, "OneDOneQMachine") ||
+      iequals(profile.model_name, "OneDOneQ")) {
+    params.machine_model = SynchronousMachineModelKind::OneDOneQ;
+    params.machine_model_name = "OneDOneQMachine";
+    params.psd_genrou_model = false;
+    params.inertia_h = find_param({"H", "h"}, params.inertia_h);
+    params.damping_d = find_param({"D", "damping_d", "damping"}, params.damping_d);
+    params.r_pu = find_param({"R", "Ra", "r"}, params.r_pu);
+    params.xd_pu = find_param({"Xd", "xd"}, params.xd_pu);
+    params.xq_pu = find_param({"Xq", "xq"}, params.xq_pu);
+    params.xdp_pu = find_param({"Xd_p", "Xdp", "xd_p", "xdp"}, params.xdp_pu);
+    params.xqp_pu = find_param({"Xq_p", "Xqp", "xq_p", "xqp"}, params.xqp_pu);
+    params.td0p_s = find_param({"Td0_p", "Td0p", "td0_p", "td0p"}, params.td0p_s);
+    params.tq0p_s = find_param({"Tq0_p", "Tq0p", "tq0_p", "tq0p"}, params.tq0p_s);
+  } else if (iequals(profile.model_name, "GENROU") ||
+             iequals(profile.model_name, "RoundRotorQuadratic") ||
+             iequals(profile.model_name, "RoundRotorExponential")) {
+    params.machine_model = SynchronousMachineModelKind::GENROU;
+    params.machine_model_name = "GENROU";
     params.psd_genrou_model = true;
     params.inertia_h = find_param({"H", "h"}, params.inertia_h);
     params.damping_d = find_param({"D", "damping_d", "damping"}, params.damping_d);
+    params.r_pu = find_param({"R", "Ra", "r"}, params.r_pu);
     params.xd_pu = find_param({"Xd", "xd"}, params.xd_pu);
     params.xq_pu = find_param({"Xq", "xq"}, params.xq_pu);
     params.xdp_pu = find_param({"Xd_p", "Xdp", "xd_p", "xdp"}, params.xdp_pu);

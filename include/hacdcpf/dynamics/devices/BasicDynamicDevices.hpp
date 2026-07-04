@@ -28,6 +28,12 @@ enum class DynamicLoadModelKind {
   ZIP
 };
 
+enum class SynchronousMachineModelKind {
+  Classical,
+  OneDOneQ,
+  GENROU
+};
+
 struct ACLoadDynamicParams {
   int component_index{0};
   int bus{0};
@@ -254,6 +260,8 @@ struct VoltageSourceDynamicParams {
   double tq0pp_s{0.0};
   double saturation_a{0.0};
   double saturation_b{0.0};
+  SynchronousMachineModelKind machine_model{SynchronousMachineModelKind::Classical};
+  std::string machine_model_name{"ClassicalMachine"};
   bool psd_genrou_model{false};
   bool dynamic_angle{false};
   bool in_service{true};

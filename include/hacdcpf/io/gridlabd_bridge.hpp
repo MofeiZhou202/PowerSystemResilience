@@ -25,6 +25,7 @@ struct GridLABDExportOptions {
   bool include_branch_recorders{true};
   bool include_metadata_comments{true};
   bool include_line_capacitance{true};
+  bool include_shunt_admittance_as_impedance{true};
   bool include_converter_boundary_injections{false};
   bool merge_parallel_branches{true};
   int gridlabd_iteration_limit{100000};

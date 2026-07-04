@@ -4,6 +4,7 @@
 #include <cmath>
 #include <complex>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 
 #include <Eigen/Dense>
@@ -509,6 +510,10 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
 bool DynamicSystem::solveNetwork(double t, std::string& error) {
   const int max_iters = std::max(1, options.algebraic_network_max_iters);
   const double tol = std::max(0.0, options.algebraic_network_tol);
+  double final_delta = std::numeric_limits<double>::infinity();
+  double final_ac_delta = 0.0;
+  double final_dc_delta = 0.0;
+  bool converged = false;
   for (int iter = 0; iter < max_iters; ++iter) {
     const Eigen::VectorXcd vac_prev = y.Vac_abc;
     const Eigen::VectorXd vdc_prev = y.Vdc;
@@ -538,6 +543,10 @@ bool DynamicSystem::solveNetwork(double t, std::string& error) {
         error = "AC transient network solve failed: " + result.message;
         return false;
       }
+      if (!v.allFinite()) {
+        error = "AC transient network solve produced non-finite voltages";
+        return false;
+      }
       y.Vac_abc = v;
       y.Iac_abc = Iac_eff;
     }
@@ -551,19 +560,47 @@ bool DynamicSystem::solveNetwork(double t, std::string& error) {
         return false;
       }
       for (Eigen::Index i = 0; i < v.size(); ++i) {
+        if (!std::isfinite(v[i])) {
+          error = "DC transient network solve produced non-finite voltages";
+          return false;
+        }
         y.Vdc[i] = finite_or(v[i], 1.0);
       }
       y.Idc = Idc_eff;
     }
 
     double delta = 0.0;
+    double ac_delta = 0.0;
+    double dc_delta = 0.0;
     if (vac_prev.size() == y.Vac_abc.size() && y.Vac_abc.size() > 0) {
-      delta = std::max(delta, (y.Vac_abc - vac_prev).cwiseAbs().maxCoeff());
+      ac_delta = (y.Vac_abc - vac_prev).cwiseAbs().maxCoeff();
+      delta = std::max(delta, ac_delta);
     }
     if (vdc_prev.size() == y.Vdc.size() && y.Vdc.size() > 0) {
-      delta = std::max(delta, (y.Vdc - vdc_prev).cwiseAbs().maxCoeff());
+      dc_delta = (y.Vdc - vdc_prev).cwiseAbs().maxCoeff();
+      delta = std::max(delta, dc_delta);
     }
-    if (iter + 1 >= max_iters || delta <= tol) break;
+    final_delta = delta;
+    final_ac_delta = ac_delta;
+    final_dc_delta = dc_delta;
+    if (!std::isfinite(final_delta)) {
+      error = "Transient algebraic network iteration produced a non-finite residual";
+      return false;
+    }
+    if (delta <= tol) {
+      converged = true;
+      break;
+    }
+  }
+
+  if (!converged && final_delta > tol) {
+    std::ostringstream os;
+    os << "Transient algebraic network solve did not converge at t=" << t
+       << "s; voltage fixed-point residual=" << std::scientific << final_delta
+       << " > " << tol << " (AC=" << final_ac_delta
+       << ", DC=" << final_dc_delta << ")";
+    error = os.str();
+    return false;
   }
 
   for (auto& device : devices) {

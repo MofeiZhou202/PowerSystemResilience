@@ -2811,9 +2811,19 @@ json dynamic_options_to_json(const hacdcpf::dynamics::DynamicSolverOptions& opt)
               {"t_start_s", opt.t_start_s},
               {"t_end_s", opt.t_end_s},
               {"dt_s", opt.dt_s},
+              {"abs_tol", opt.abs_tol},
+              {"rel_tol", opt.rel_tol},
               {"newton_tol", opt.newton_tol},
               {"max_newton_iters", opt.max_newton_iters},
               {"use_adaptive_step", opt.use_adaptive_step},
+              {"max_step_halving", opt.max_step_halving},
+              {"min_accepted_step_s", opt.min_accepted_step_s},
+              {"enforce_voltage_health_check", opt.enforce_voltage_health_check},
+              {"allow_low_voltage_during_active_fault", opt.allow_low_voltage_during_active_fault},
+              {"voltage_collapse_min_ac_pu", opt.voltage_collapse_min_ac_pu},
+              {"voltage_collapse_min_dc_pu", opt.voltage_collapse_min_dc_pu},
+              {"voltage_blowup_max_ac_pu", opt.voltage_blowup_max_ac_pu},
+              {"voltage_blowup_max_dc_pu", opt.voltage_blowup_max_dc_pu},
               {"record_every_step", opt.record_every_step},
               {"record_initial_state", opt.record_initial_state},
               {"output_every_steps", opt.output_every_steps},
@@ -2841,6 +2851,9 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
   out["failed_step"] = result.failed_step;
   out["newton_iterations"] = result.newton_iterations;
   out["rejected_steps"] = result.rejected_steps;
+  out["max_local_error_norm"] = result.max_local_error_norm;
+  out["min_accepted_step_s"] = result.min_accepted_step_s;
+  out["max_accepted_step_s"] = result.max_accepted_step_s;
   out["warnings"] = result.warnings;
   out["applied_events"] = result.applied_events;
   json applied_event_records = json::array();
@@ -12344,6 +12357,8 @@ int main(int argc, char** argv) {
       opt.t_start_s = j.value("t_start_s", 0.0);
       opt.t_end_s = j.value("t_end_s", 1.0);
       opt.dt_s = j.value("dt_s", 0.01);
+      opt.abs_tol = j.value("abs_tol", opt.abs_tol);
+      opt.rel_tol = j.value("rel_tol", opt.rel_tol);
       opt.newton_tol = j.value("newton_tol", opt.newton_tol);
       opt.max_newton_iters = j.value("max_newton_iters", opt.max_newton_iters);
       opt.use_adaptive_step = j.value("use_adaptive_step", false);
@@ -12389,6 +12404,21 @@ int main(int argc, char** argv) {
       opt.singular_regularization_pu =
           j.value("singular_regularization_pu", opt.singular_regularization_pu);
       opt.max_step_halving = j.value("max_step_halving", opt.max_step_halving);
+      opt.min_accepted_step_s =
+          j.value("min_accepted_step_s", opt.min_accepted_step_s);
+      opt.enforce_voltage_health_check =
+          j.value("enforce_voltage_health_check", opt.enforce_voltage_health_check);
+      opt.allow_low_voltage_during_active_fault =
+          j.value("allow_low_voltage_during_active_fault",
+                  opt.allow_low_voltage_during_active_fault);
+      opt.voltage_collapse_min_ac_pu =
+          j.value("voltage_collapse_min_ac_pu", opt.voltage_collapse_min_ac_pu);
+      opt.voltage_collapse_min_dc_pu =
+          j.value("voltage_collapse_min_dc_pu", opt.voltage_collapse_min_dc_pu);
+      opt.voltage_blowup_max_ac_pu =
+          j.value("voltage_blowup_max_ac_pu", opt.voltage_blowup_max_ac_pu);
+      opt.voltage_blowup_max_dc_pu =
+          j.value("voltage_blowup_max_dc_pu", opt.voltage_blowup_max_dc_pu);
 
       hacdcpf::dynamics::DynamicModelBuilder builder;
       hacdcpf::dynamics::DynamicSystem dyn = builder.build(sys, opt);
