@@ -319,6 +319,7 @@ set(HACDCPF_SOURCES
   # ── dynamics / transient simulation ──────────────────────────────────────
   src/dynamics/DynamicSystem.cpp
   src/dynamics/DynamicModelBuilder.cpp
+  src/dynamics/DynamicModelCatalog.cpp
   src/dynamics/DynamicSolver.cpp
   src/dynamics/DynamicResults.cpp
   src/dynamics/devices/BasicDynamicDevices.cpp

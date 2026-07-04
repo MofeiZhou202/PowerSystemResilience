@@ -733,6 +733,86 @@ bool export_psd_gridfollowing_trace(const PsdGflCase& spec,
   return std::system(command.c_str()) == 0;
 }
 
+// Two-bus case with a non-slack classical machine at bus 2 that optionally
+// carries governor / AVR / PSS control blocks in its dynamic_model.
+HybridPowerSystem make_controlled_machine_case(bool governor, bool avr, bool pss) {
+  HybridPowerSystem sys;
+  sys.name = "controlled_machine";
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 50.0;
+
+  ACBus b1; b1.index = 1; b1.bus_type = BusType::SLACK; b1.vm_pu = 1.02; b1.va_deg = 0.0;
+  ACBus b2; b2.index = 2; b2.bus_type = BusType::PV; b2.vm_pu = 1.0; b2.va_deg = 0.0;
+  sys.ac.buses = {b1, b2};
+
+  ACBranch br; br.index = 1; br.from_bus = 1; br.to_bus = 2;
+  br.r_pu = 0.01; br.x_pu = 0.05; br.tap = 1.0;
+  sys.ac.branches = {br};
+
+  Generator gs; gs.index = 1; gs.bus = 1; gs.is_slack = true; gs.vg_pu = 1.02;
+  gs.pg_mw = 40.0; gs.xdpp_pu = 0.20; gs.qmax_mvar = 300; gs.qmin_mvar = -300;
+  Generator g2; g2.index = 2; g2.bus = 2; g2.is_slack = false; g2.vg_pu = 1.0;
+  g2.pg_mw = 50.0; g2.qg_mvar = 10.0; g2.xdpp_pu = 0.20; g2.inertia_h = 3.0;
+  g2.pmax_mw = 200.0; g2.pmin_mw = 0.0; g2.qmax_mvar = 300; g2.qmin_mvar = -300;
+  g2.dynamic_model.model_name = "ClassicalMachine";
+  auto add_block = [&](const std::string& type, const std::string& model,
+                       std::map<std::string, double> params) {
+    hacdcpf::DynamicModelComponentProfile c;
+    c.type = type; c.model = model; c.standard = "IEEE"; c.parameters = std::move(params);
+    g2.dynamic_model.components.push_back(std::move(c));
+  };
+  if (governor) add_block("governor", "TGOV1", {{"R", 0.05}, {"T1", 0.5}, {"T3", 0.5}});
+  if (avr) add_block("exciter", "SEXS", {{"Ka", 50.0}, {"Ta", 0.1}});
+  if (pss) add_block("pss", "PSS1A",
+                     {{"Ks", 10.0}, {"Tw", 10.0}, {"T1", 0.15}, {"T2", 0.03},
+                      {"T3", 0.15}, {"T4", 0.03}});
+  sys.ac.generators = {gs, g2};
+
+  Load ld; ld.index = 1; ld.bus = 2; ld.p_mw = 30.0; ld.q_mvar = 10.0;
+  sys.ac.loads = {ld};
+  return sys;
+}
+
+// Peak-to-peak swing of a series after a given time (post-disturbance).
+double series_swing_after(const CsvSeries& s, double t_after) {
+  double lo = std::numeric_limits<double>::infinity();
+  double hi = -std::numeric_limits<double>::infinity();
+  for (std::size_t i = 0; i < s.t.size(); ++i) {
+    if (s.t[i] < t_after) continue;
+    lo = std::min(lo, s.y[i]);
+    hi = std::max(hi, s.y[i]);
+  }
+  return (hi >= lo) ? hi - lo : 0.0;
+}
+
+double series_mean_after(const CsvSeries& s, double t_after) {
+  double sum = 0.0; int n = 0;
+  for (std::size_t i = 0; i < s.t.size(); ++i) {
+    if (s.t[i] < t_after) continue;
+    sum += s.y[i]; ++n;
+  }
+  return n > 0 ? sum / n : 0.0;
+}
+
+DynamicResults run_controlled_case(bool governor, bool avr, bool pss) {
+  DynamicSolverOptions opt;
+  opt.t_end_s = 6.0;
+  opt.dt_s = 0.005;
+  opt.record_every_step = true;
+  auto sys = make_controlled_machine_case(governor, avr, pss);
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+  DynamicEvent ev;
+  ev.time_s = 1.0;
+  ev.type = DynamicEventType::ACLoadScale;
+  ev.bus = 2;
+  ev.value = 1.6;  // +60% load step at the machine bus
+  dyn.events.push_back(ev);
+  DynamicSolver solver;
+  return solver.solve(dyn);
+}
+
 }  // namespace
 
 TEST_CASE("DynamicModelBuilder creates canonical transient system", "[dynamics][transient]") {
@@ -1597,6 +1677,49 @@ TEST_CASE("Updated GFM inverter exposes dynamic DC-link telemetry",
   CHECK(it->values.at("vdc_link_pu") < 2.0);
   CHECK(it->values.at("dc_link_dynamic") == Catch::Approx(1.0));
   CHECK(it->values.count("p_dc_mw") == 1);
+}
+
+TEST_CASE("Machine governor / AVR / PSS control blocks are wired and effective",
+          "[dynamics][controls]") {
+  const DynamicResults base = run_controlled_case(false, false, false);
+  const DynamicResults gov = run_controlled_case(true, false, false);
+  const DynamicResults avr = run_controlled_case(true, true, false);
+  const DynamicResults pss = run_controlled_case(true, true, true);
+
+  REQUIRE(base.success);
+  REQUIRE(gov.success);
+  REQUIRE(avr.success);
+  REQUIRE(pss.success);
+
+  // Controllers must not disturb the pre-event equilibrium.
+  CHECK(pss.initialization.dynamic_trim_converged);
+  CHECK(pss.initialization.dynamic_fast_dxdt_inf_norm <= 1e-6);
+
+  // Governor: mechanical power tracks the machine's scheduled dispatch at t0 and
+  // then responds to the disturbance (it is no longer a dead constant).
+  const auto pmech = device_output_series(gov, "Governor", 2, "p_mech_mw");
+  CHECK(pmech.y.front() == Catch::Approx(50.0).margin(1.0));
+  CHECK(series_swing_after(pmech, 1.0) > 1e-3);
+
+  // AVR: with excitation control the terminal voltage is held closer to its
+  // pre-event level than the uncontrolled machine, and the field voltage moves.
+  const auto v_base = device_output_series(base, "SynchronousMachine", 2, "v_pos_pu");
+  const auto v_avr = device_output_series(avr, "SynchronousMachine", 2, "v_pos_pu");
+  const double v0 = v_base.y.front();
+  CHECK(std::abs(series_mean_after(v_avr, 1.0) - v0) <
+        std::abs(series_mean_after(v_base, 1.0) - v0));
+  const auto efd = device_output_series(avr, "Exciter", 2, "efd_pu");
+  CHECK(series_swing_after(efd, 1.0) > 1e-3);
+
+  // PSS: the stabilizer improves damping of the electromechanical swing, so the
+  // post-event frequency swing is smaller than with AVR alone.
+  const auto f_avr = device_output_series(avr, "SynchronousMachine", 2, "frequency_hz");
+  const auto f_pss = device_output_series(pss, "SynchronousMachine", 2, "frequency_hz");
+  CHECK(series_swing_after(f_pss, 1.05) < series_swing_after(f_avr, 1.05));
+  // PSS output is a bounded stabilizing signal that starts at ~0 (equilibrium).
+  const auto vs = device_output_series(pss, "PSS", 2, "vs_pu");
+  CHECK(std::abs(vs.y.front()) < 1e-6);
+  CHECK(series_swing_after(vs, 1.0) > 1e-4);
 }
 
 TEST_CASE("Implicit transient Newton solvers run without Heun fallback", "[dynamics][solver]") {

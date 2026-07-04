@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "hacdcpf/dynamics/devices/DynamicDevice.hpp"
+#include "hacdcpf/dynamics/devices/MachineControlLink.hpp"
 
 namespace hacdcpf::dynamics {
 
@@ -289,13 +290,29 @@ class SynchronousMachine : public DynamicDevice {
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
 
+  // Control coupling: a governor/exciter attaches to this machine and drives the
+  // derivative of the machine-owned mechanical-power / field state. The link's
+  // range pointer resolves to the final state offset after assignStateIndices().
+  [[nodiscard]] const MachineControlLink* controlLink() const { return &link_; }
+  void markGovernorAttached() { governor_attached_ = true; }
+  void markExciterAttached() { exciter_attached_ = true; }
+
  private:
   VoltageSourceDynamicParams params_;
   StateIndexRange range_;
+  MachineControlLink link_;
+  bool governor_attached_{false};
+  bool exciter_attached_{false};
+};
+
+enum class GovernorModel {
+  TGOV1,
+  IEEEG1
 };
 
 struct GovernorDynamicParams {
   int component_index{0};
+  int machine_index{0};  // component index of the parent synchronous machine
   std::string label;
   std::string device_type{"Governor"};
   std::string canvas_type{"governor"};
@@ -304,10 +321,14 @@ struct GovernorDynamicParams {
   std::string model_standard{"IEEE"};
   std::string model_name{"TGOV1"};
   std::string parameter_set;
+  GovernorModel model{GovernorModel::TGOV1};
   double base_mva{100.0};
   double p_ref_mw{0.0};
   double droop_r{0.05};
-  double t_s{0.50};
+  double t_s{0.50};       // T1: governor/valve time constant (s)
+  double turbine_t_s{0.50};  // T3: turbine time constant (s)
+  double reheat_t_s{6.0};    // IEEEG1 reheat time constant (s)
+  double reheat_k{0.30};     // IEEEG1 HP fraction (0..1)
   double pmax_mw{0.0};
   double pmin_mw{0.0};
   bool in_service{true};
@@ -344,13 +365,25 @@ class Governor : public DynamicDevice {
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
 
+  // Attach to the parent machine so this governor drives the machine's mechanical
+  // power state. When unattached the governor keeps its legacy standalone
+  // behaviour (a single p_ref tracking state) for backward compatibility.
+  void attachMachine(const MachineControlLink* link) { machine_ = link; }
+
  private:
   GovernorDynamicParams params_;
   StateIndexRange range_;
+  const MachineControlLink* machine_{nullptr};
+};
+
+enum class ExciterModel {
+  SEXS,
+  IEEET1
 };
 
 struct ExciterDynamicParams {
   int component_index{0};
+  int machine_index{0};  // component index of the parent synchronous machine
   int bus{0};
   int bus_pos{-1};
   std::string label;
@@ -361,9 +394,11 @@ struct ExciterDynamicParams {
   std::string model_standard{"IEEE4215"};
   std::string model_name{"SEXS"};
   std::string parameter_set;
+  ExciterModel model{ExciterModel::SEXS};
   double v_ref_pu{1.0};
   double ka{20.0};
   double ta_s{0.05};
+  double te_s{0.40};       // IEEET1 exciter time constant (s)
   double efd_min_pu{0.0};
   double efd_max_pu{5.0};
   bool in_service{true};
@@ -400,9 +435,89 @@ class Exciter : public DynamicDevice {
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
 
+  // Attach to the parent machine so this exciter drives the machine's field
+  // state (GENROU vf / classical internal EMF). setPSS supplies an optional
+  // stabilizing signal that is summed into the voltage error.
+  void attachMachine(const MachineControlLink* link) { machine_ = link; }
+  void setPSS(const PSSOutputLink* pss) { pss_ = pss; }
+
  private:
+  [[nodiscard]] double terminalVoltage(const NetworkState& y) const;
+  void captureReference(const DynamicState& x, const NetworkState& y);
+
   ExciterDynamicParams params_;
   StateIndexRange range_;
+  const MachineControlLink* machine_{nullptr};
+  const PSSOutputLink* pss_{nullptr};
+  double v_ref_captured_{1.0};
+  double field0_{1.0};
+  bool captured_{false};
+};
+
+// ── Power System Stabilizer (single-input speed PSS, IEEE PSS1A subset) ──
+struct PSSDynamicParams {
+  int component_index{0};
+  int machine_index{0};
+  int bus{0};
+  int bus_pos{-1};
+  std::string label;
+  std::string device_type{"PSS"};
+  std::string canvas_type{"pss"};
+  std::string component_domain{"AC"};
+  std::string source_type{"pss"};
+  std::string model_standard{"IEEE"};
+  std::string model_name{"PSS1A"};
+  std::string parameter_set;
+  double ks{5.0};        // stabilizer gain
+  double tw_s{10.0};     // washout time constant (s)
+  double t1_s{0.15};     // lead-lag 1 numerator (s)
+  double t2_s{0.03};     // lead-lag 1 denominator (s)
+  double t3_s{0.15};     // lead-lag 2 numerator (s)
+  double t4_s{0.03};     // lead-lag 2 denominator (s)
+  double vs_max_pu{0.10};
+  double vs_min_pu{-0.10};
+  bool in_service{true};
+};
+
+class PowerSystemStabilizer : public DynamicDevice {
+ public:
+  explicit PowerSystemStabilizer(PSSDynamicParams params);
+
+  void assignStateIndices(int& offset) override;
+  void initializeFromPowerFlow(const PowerFlowResult& pf,
+                               DynamicState& x,
+                               NetworkState& y) override;
+  bool trimToNetworkEquilibrium(DynamicState& x,
+                                NetworkState& y) override;
+  void computeDerivatives(double t,
+                          const DynamicState& x,
+                          const NetworkState& y,
+                          Eigen::Ref<Eigen::VectorXd> dxdt) const override;
+  void stamp(double t,
+             const DynamicState& x,
+             const NetworkState& y,
+             DynamicStamp& stamp) const override;
+  void handleEvent(const DynamicEvent& event,
+                   DynamicState& x,
+                   NetworkState& y) override;
+
+  [[nodiscard]] std::string name() const override;
+  [[nodiscard]] std::string type() const override { return params_.device_type; }
+  [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] std::string modelStandard() const override { return params_.model_standard; }
+  [[nodiscard]] std::string modelName() const override { return params_.model_name; }
+  [[nodiscard]] std::string parameterSet() const override { return params_.parameter_set; }
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
+
+  void attachMachine(const MachineControlLink* link);
+  [[nodiscard]] const PSSOutputLink* pssLink() const { return &link_; }
+
+ private:
+  PSSDynamicParams params_;
+  StateIndexRange range_;
+  const MachineControlLink* machine_{nullptr};
+  PSSOutputLink link_;
 };
 
 struct GridFormingInverterParams {

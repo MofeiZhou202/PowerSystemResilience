@@ -2,6 +2,7 @@
 
 #include "hacdcpf/dynamics/DynamicEvent.hpp"
 #include "hacdcpf/dynamics/DynamicModelBuilder.hpp"
+#include "hacdcpf/dynamics/DynamicModelCatalog.hpp"
 #include "hacdcpf/dynamics/DynamicResults.hpp"
 #include "hacdcpf/dynamics/DynamicSolver.hpp"
 #include "hacdcpf/dynamics/DynamicSolverOptions.hpp"

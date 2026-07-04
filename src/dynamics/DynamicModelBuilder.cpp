@@ -70,6 +70,17 @@ bool iequals(std::string lhs, std::string rhs) {
   return lhs == rhs;
 }
 
+// Alias-tolerant numeric lookup over a parameter map.
+double param_or(const std::map<std::string, double>& m,
+                std::initializer_list<const char*> keys,
+                double fallback) {
+  for (const char* key : keys) {
+    const auto it = m.find(key);
+    if (it != m.end()) return it->second;
+  }
+  return fallback;
+}
+
 void apply_gfl_profile(const hacdcpf::DynamicModelProfile& profile,
                        GridFollowingInverterParams& params) {
   params.model_profiles = to_dynamic_profiles(profile);
@@ -103,16 +114,37 @@ void apply_gfl_profile(const hacdcpf::DynamicModelProfile& profile,
   if (it != profile.parameters.end()) params.pll_ki = it->second;
   it = profile.parameters.find("pll_lpf_t_s");
   if (it != profile.parameters.end()) params.pll_lpf_t_s = it->second;
+  const auto& p = profile.parameters;
+  params.response_t_s = param_or(p, {"response_t_s", "Tg", "Trv"}, params.response_t_s);
+  params.power_filter_t_s = param_or(p, {"power_filter_t_s", "Tp", "Tpf"}, params.power_filter_t_s);
+  params.current_limit_pu = param_or(p, {"current_limit_pu", "Imax", "imax_pu"}, params.current_limit_pu);
+  params.frequency_watt_droop_pu = param_or(p, {"frequency_watt_droop_pu", "Ddn", "kf"}, params.frequency_watt_droop_pu);
+  params.volt_var_droop_pu = param_or(p, {"volt_var_droop_pu", "Dvv", "kq"}, params.volt_var_droop_pu);
+}
+
+template <typename P>
+void apply_gfm_params(const std::map<std::string, double>& p, P& params) {
+  params.virtual_r_pu = param_or(p, {"virtual_r_pu", "Rv", "rv"}, params.virtual_r_pu);
+  params.virtual_x_pu = param_or(p, {"virtual_x_pu", "Xv", "xv"}, params.virtual_x_pu);
+  params.p_droop_pu = param_or(p, {"p_droop_pu", "mp", "Dp"}, params.p_droop_pu);
+  params.q_droop_pu = param_or(p, {"q_droop_pu", "mq", "Dq"}, params.q_droop_pu);
+  params.power_filter_t_s = param_or(p, {"power_filter_t_s", "Tf", "Tpf"}, params.power_filter_t_s);
+  params.voltage_control_t_s = param_or(p, {"voltage_control_t_s", "Tv"}, params.voltage_control_t_s);
+  params.voltage_kp = param_or(p, {"voltage_kp", "Kpv"}, params.voltage_kp);
+  params.voltage_ki = param_or(p, {"voltage_ki", "Kiv"}, params.voltage_ki);
+  params.current_limit_pu = param_or(p, {"current_limit_pu", "Imax", "imax_pu"}, params.current_limit_pu);
 }
 
 void apply_gfm_profile(const hacdcpf::DynamicModelProfile& profile,
                        GridFormingInverterParams& params) {
   params.model_profiles = to_dynamic_profiles(profile);
+  if (!profile.empty()) apply_gfm_params(profile.parameters, params);
 }
 
 void apply_gfm_profile(const hacdcpf::DynamicModelProfile& profile,
                        VSCConverterDynamicParams& params) {
   params.model_profiles = to_dynamic_profiles(profile);
+  if (!profile.empty()) apply_gfm_params(profile.parameters, params);
 }
 
 void apply_voltage_source_profile(const hacdcpf::DynamicModelProfile& profile,
@@ -145,6 +177,117 @@ void apply_voltage_source_profile(const hacdcpf::DynamicModelProfile& profile,
     params.tq0pp_s = find_param({"Tq0_pp", "Tq0pp", "tq0_pp", "tq0pp"}, params.tq0pp_s);
     params.saturation_a = find_param({"Sat_A", "saturation_a", "Se_A"}, params.saturation_a);
     params.saturation_b = find_param({"Sat_B", "saturation_b", "Se_B"}, params.saturation_b);
+  }
+}
+
+// Build a Governor from a machine's dynamic_model "governor" component profile.
+std::unique_ptr<Governor> make_governor(const hacdcpf::DynamicModelComponentProfile& comp,
+                                        const VoltageSourceDynamicParams& mp) {
+  GovernorDynamicParams g;
+  g.component_index = mp.component_index;
+  g.machine_index = mp.component_index;
+  g.label = label_or(mp.label, "Machine " + std::to_string(mp.component_index)) + " governor";
+  g.base_mva = mp.base_mva;
+  g.model_name = comp.model.empty() ? "TGOV1" : comp.model;
+  g.model = iequals(comp.model, "IEEEG1") ? GovernorModel::IEEEG1 : GovernorModel::TGOV1;
+  g.parameter_set = comp.parameter_set;
+  const auto& p = comp.parameters;
+  const double base = std::max(1.0, mp.base_mva);
+  g.droop_r = param_or(p, {"R", "droop_r", "droop"}, g.droop_r);
+  g.t_s = param_or(p, {"T1", "t1", "Tg", "valve_t_s"}, g.t_s);
+  g.turbine_t_s = param_or(p, {"T3", "t3", "Tt", "turbine_t_s"}, g.turbine_t_s);
+  g.reheat_t_s = param_or(p, {"Tr", "T5", "reheat_t_s"}, g.reheat_t_s);
+  g.reheat_k = param_or(p, {"K1", "Khp", "reheat_k"}, g.reheat_k);
+  const double vmax = param_or(p, {"Vmax", "pmax_pu"}, 0.0);
+  const double vmin = param_or(p, {"Vmin", "pmin_pu"}, 0.0);
+  g.pmax_mw = vmax > 0.0 ? vmax * base : param_or(p, {"pmax_mw", "Pmax"}, g.pmax_mw);
+  g.pmin_mw = vmin < 0.0 ? vmin * base : param_or(p, {"pmin_mw", "Pmin"}, g.pmin_mw);
+  return std::make_unique<Governor>(g);
+}
+
+// Build an Exciter/AVR from a machine's dynamic_model "exciter" component profile.
+std::unique_ptr<Exciter> make_exciter(const hacdcpf::DynamicModelComponentProfile& comp,
+                                      const VoltageSourceDynamicParams& mp) {
+  ExciterDynamicParams e;
+  e.component_index = mp.component_index;
+  e.machine_index = mp.component_index;
+  e.bus = mp.bus;
+  e.bus_pos = mp.bus_pos;
+  e.label = label_or(mp.label, "Machine " + std::to_string(mp.component_index)) + " exciter";
+  e.model_name = comp.model.empty() ? "SEXS" : comp.model;
+  e.model = iequals(comp.model, "IEEET1") ? ExciterModel::IEEET1 : ExciterModel::SEXS;
+  e.parameter_set = comp.parameter_set;
+  const auto& p = comp.parameters;
+  e.ka = param_or(p, {"Ka", "K", "ka"}, e.ka);
+  e.ta_s = param_or(p, {"Ta", "ta", "Tb"}, e.ta_s);
+  e.te_s = param_or(p, {"Te", "te"}, e.te_s);
+  e.efd_max_pu = param_or(p, {"Emax", "Vrmax", "efd_max_pu"}, e.efd_max_pu);
+  e.efd_min_pu = param_or(p, {"Emin", "Vrmin", "efd_min_pu"}, e.efd_min_pu);
+  e.v_ref_pu = param_or(p, {"Vref", "v_ref_pu"}, e.v_ref_pu);
+  return std::make_unique<Exciter>(e);
+}
+
+// Build a PSS from a machine's dynamic_model "pss" component profile.
+std::unique_ptr<PowerSystemStabilizer> make_pss(
+    const hacdcpf::DynamicModelComponentProfile& comp,
+    const VoltageSourceDynamicParams& mp) {
+  PSSDynamicParams s;
+  s.component_index = mp.component_index;
+  s.machine_index = mp.component_index;
+  s.bus = mp.bus;
+  s.bus_pos = mp.bus_pos;
+  s.label = label_or(mp.label, "Machine " + std::to_string(mp.component_index)) + " PSS";
+  s.model_name = comp.model.empty() ? "PSS1A" : comp.model;
+  s.parameter_set = comp.parameter_set;
+  const auto& p = comp.parameters;
+  s.ks = param_or(p, {"Ks", "Ks1", "ks"}, s.ks);
+  s.tw_s = param_or(p, {"Tw", "tw"}, s.tw_s);
+  s.t1_s = param_or(p, {"T1", "t1"}, s.t1_s);
+  s.t2_s = param_or(p, {"T2", "t2"}, s.t2_s);
+  s.t3_s = param_or(p, {"T3", "t3"}, s.t3_s);
+  s.t4_s = param_or(p, {"T4", "t4"}, s.t4_s);
+  s.vs_max_pu = param_or(p, {"Vsmax", "vs_max_pu", "Vstmax"}, s.vs_max_pu);
+  s.vs_min_pu = param_or(p, {"Vsmin", "vs_min_pu", "Vstmin"}, s.vs_min_pu);
+  return std::make_unique<PowerSystemStabilizer>(s);
+}
+
+// Instantiate and wire governor / exciter / PSS control blocks listed in a
+// machine's dynamic_model.components, attaching each to the just-created machine.
+void wire_machine_controllers(std::vector<std::unique_ptr<DynamicDevice>>& devices,
+                              SynchronousMachine* machine,
+                              const VoltageSourceDynamicParams& mp,
+                              const hacdcpf::DynamicModelProfile& dm,
+                              std::vector<std::string>& warnings) {
+  if (machine == nullptr) return;
+  Exciter* exciter = nullptr;
+  PowerSystemStabilizer* pss = nullptr;
+  bool has_pss = false;
+  for (const auto& comp : dm.components) {
+    if (iequals(comp.type, "governor") || iequals(comp.type, "turbine_governor")) {
+      auto g = make_governor(comp, mp);
+      g->attachMachine(machine->controlLink());
+      machine->markGovernorAttached();
+      devices.push_back(std::move(g));
+    } else if (iequals(comp.type, "exciter") || iequals(comp.type, "avr")) {
+      auto e = make_exciter(comp, mp);
+      e->attachMachine(machine->controlLink());
+      machine->markExciterAttached();
+      exciter = e.get();
+      devices.push_back(std::move(e));
+    } else if (iequals(comp.type, "pss") || iequals(comp.type, "stabilizer")) {
+      auto s = make_pss(comp, mp);
+      s->attachMachine(machine->controlLink());
+      pss = s.get();
+      has_pss = true;
+      devices.push_back(std::move(s));
+    }
+  }
+  if (has_pss && exciter != nullptr) {
+    exciter->setPSS(pss->pssLink());
+  } else if (has_pss) {
+    warnings.push_back(
+        "PSS on machine " + std::to_string(mp.component_index) +
+        " has no exciter/AVR to feed; its stabilizing signal will not affect the machine");
   }
 }
 
@@ -202,11 +345,26 @@ void apply_load_profile(const Load& load, ACLoadDynamicParams& params) {
 void apply_battery_profile(const hacdcpf::DynamicModelProfile& profile,
                            BatteryDynamicParams& params) {
   params.model_profiles = to_dynamic_profiles(profile);
+  if (profile.empty()) return;
+  const auto& p = profile.parameters;
+  params.response_t_s = param_or(p, {"response_t_s", "Tp", "tp"}, params.response_t_s);
+  params.e_rated_mwh = param_or(p, {"e_rated_mwh", "Erated"}, params.e_rated_mwh);
+  params.soc_init = param_or(p, {"soc_init", "SOC0", "soc0"}, params.soc_init);
+  params.soc_min = param_or(p, {"soc_min", "SOCmin"}, params.soc_min);
+  params.soc_max = param_or(p, {"soc_max", "SOCmax"}, params.soc_max);
+  params.eta_charge = param_or(p, {"eta_charge", "eta_c"}, params.eta_charge);
+  params.eta_discharge = param_or(p, {"eta_discharge", "eta_d"}, params.eta_discharge);
+  params.self_discharge_pct_per_h =
+      param_or(p, {"self_discharge_pct_per_h"}, params.self_discharge_pct_per_h);
 }
 
 void apply_dcdc_profile(const hacdcpf::DynamicModelProfile& profile,
                         DCDCConverterDynamicParams& params) {
   params.model_profiles = to_dynamic_profiles(profile);
+  if (profile.empty()) return;
+  const auto& p = profile.parameters;
+  params.eta = param_or(p, {"eta", "efficiency"}, params.eta);
+  params.response_t_s = param_or(p, {"response_t_s", "Tp", "tp"}, params.response_t_s);
 }
 
 std::pair<double, double> finite_range(const std::vector<double>& values) {
@@ -649,7 +807,10 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
         p.inertia_h = gen.is_slack ? 5.0 : 1.0;
         p.dynamic_angle = !gen.is_slack;
         apply_voltage_source_profile(gen.dynamic_model, p);
-        dyn.devices.push_back(std::make_unique<SynchronousMachine>(p));
+        auto machine = std::make_unique<SynchronousMachine>(p);
+        SynchronousMachine* machine_ptr = machine.get();
+        dyn.devices.push_back(std::move(machine));
+        wire_machine_controllers(dyn.devices, machine_ptr, p, gen.dynamic_model, dyn.warnings);
         voltage_source_buses.insert(gen.bus);
       } else {
         GridFollowingInverterParams p;
@@ -744,7 +905,10 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.droop_r = positive_or(gen.droop_r, 0.05);
     p.dynamic_angle = !gen.is_slack && gen.inertia_h > 0.0;
     apply_voltage_source_profile(gen.dynamic_model, p);
-    dyn.devices.push_back(std::make_unique<SynchronousMachine>(p));
+    auto machine = std::make_unique<SynchronousMachine>(p);
+    SynchronousMachine* machine_ptr = machine.get();
+    dyn.devices.push_back(std::move(machine));
+    wire_machine_controllers(dyn.devices, machine_ptr, p, gen.dynamic_model, dyn.warnings);
     voltage_source_buses.insert(gen.bus);
   }
 

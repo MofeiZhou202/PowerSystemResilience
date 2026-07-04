@@ -801,6 +801,19 @@ SynchronousMachine::SynchronousMachine(VoltageSourceDynamicParams params)
 void SynchronousMachine::assignStateIndices(int& offset) {
   range_ = {offset, params_.psd_genrou_model ? 8 : 4};
   offset += range_.size;
+  // Publish the coupling link so attached controllers can address this machine's
+  // speed / mechanical-power / field states. Local indices: omega=1 for both
+  // models; classical pm=3, e_mag(field)=2; GENROU tau_m=6, vf(field)=7.
+  link_.range = &range_;
+  link_.valid = true;
+  link_.genrou = params_.psd_genrou_model && range_.size >= 8;
+  link_.bus_pos = params_.bus_pos;
+  link_.base_mva = params_.base_mva;
+  link_.frequency_hz = params_.frequency_hz;
+  link_.inertia_h = std::max(0.01, params_.inertia_h);
+  link_.omega_local = 1;
+  link_.pm_local = link_.genrou ? 6 : 3;
+  link_.efd_local = link_.genrou ? 7 : 2;
 }
 
 void SynchronousMachine::initializeFromPowerFlow(const PowerFlowResult& pf,
@@ -976,8 +989,10 @@ void SynchronousMachine::computeDerivatives(double,
         (-psi_kd + eq_p - (gp.xdp - gp.xl) * e.id) / gp.td0pp;
     dxdt[state_index(range_, 5)] =
         (-psi_kq + ed_p + (gp.xqp - gp.xl) * e.iq) / gp.tq0pp;
-    dxdt[state_index(range_, 6)] = 0.0;
-    dxdt[state_index(range_, 7)] = 0.0;
+    // tau_m (idx 6) and vf (idx 7) are constant unless a governor / exciter is
+    // attached, in which case that controller owns their derivative.
+    if (!governor_attached_) dxdt[state_index(range_, 6)] = 0.0;
+    if (!exciter_attached_) dxdt[state_index(range_, 7)] = 0.0;
     return;
   }
   const Complex z(params_.r_pu, std::max(1e-5, params_.x_pu));
@@ -992,8 +1007,10 @@ void SynchronousMachine::computeDerivatives(double,
   dxdt[range_.offset + 0] = params_.dynamic_angle ? wb * (omega - 1.0) : 0.0;
   dxdt[range_.offset + 1] =
       params_.dynamic_angle ? (pm - pe - params_.damping_d * (omega - 1.0)) / (2.0 * h) : 0.0;
-  dxdt[range_.offset + 2] = 0.0;
-  dxdt[range_.offset + 3] = 0.0;
+  // e_mag (field, idx 2) and pm (idx 3) are constant unless an exciter / governor
+  // is attached, in which case that controller owns their derivative.
+  if (!exciter_attached_) dxdt[range_.offset + 2] = 0.0;
+  if (!governor_attached_) dxdt[range_.offset + 3] = 0.0;
 }
 
 void SynchronousMachine::stamp(double,
@@ -1110,23 +1127,60 @@ DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
   return out;
 }
 
+// Stabilizing signal Vs of a single-input speed PSS (washout + 2 lead-lag),
+// as a pure algebraic function of the PSS states and the machine speed. Shared
+// by PowerSystemStabilizer::output and Exciter::computeDerivatives so the AVR can
+// read Vs without a mutable cache. At equilibrium (omega=1, PSS states=0) Vs=0.
+static double pss_vs_output(const PSSOutputLink& L, const DynamicState& x) {
+  if (!L.valid || L.range == nullptr || L.machine == nullptr || !L.machine->valid) {
+    return 0.0;
+  }
+  const int o = L.range->offset;
+  if (o < 0 || o + 2 >= x.x.size()) return 0.0;
+  const int omega_idx = L.machine->omegaIndex();
+  if (omega_idx < 0 || omega_idx >= x.x.size()) return 0.0;
+  const double u = x.x[omega_idx] - 1.0;
+  const double t2 = std::max(kMinTimeConstant, L.t2_s);
+  const double t4 = std::max(kMinTimeConstant, L.t4_s);
+  const double y_w = L.ks * u - x.x[o + 0];
+  const double y1 = (L.t1_s / t2) * y_w + x.x[o + 1];
+  const double y2 = (L.t3_s / t4) * y1 + x.x[o + 2];
+  return std::clamp(y2, L.vs_min_pu, L.vs_max_pu);
+}
+
 Governor::Governor(GovernorDynamicParams params) : params_(std::move(params)) {}
 
 void Governor::assignStateIndices(int& offset) {
-  range_ = {offset, 1};
+  range_ = {offset, 1};  // one governor/valve state; machine owns the pm slot
   offset += range_.size;
 }
 
 void Governor::initializeFromPowerFlow(const PowerFlowResult&, DynamicState& x, NetworkState&) {
   if (range_.empty()) return;
-  x.x[range_.offset] = params_.p_ref_mw / safe_base(params_.base_mva);
+  double p0 = params_.p_ref_mw / safe_base(params_.base_mva);
+  if (machine_ != nullptr && machine_->valid) {
+    // Anchor the reference to the machine's initialized mechanical power so the
+    // valve/turbine train is at equilibrium (dx/dt = 0) at t0.
+    const int pm_idx = machine_->pmIndex();
+    if (pm_idx >= 0 && pm_idx < x.x.size()) {
+      p0 = x.x[pm_idx];
+      params_.p_ref_mw = p0 * safe_base(params_.base_mva);
+    }
+  }
+  x.x[range_.offset] = p0;  // valve position = scheduled power
 }
 
 bool Governor::trimToNetworkEquilibrium(DynamicState& x, NetworkState&) {
   if (!params_.in_service || range_.empty()) return false;
-  return set_if_changed(x.x,
-                        range_.offset,
-                        params_.p_ref_mw / safe_base(params_.base_mva));
+  double p0 = params_.p_ref_mw / safe_base(params_.base_mva);
+  if (machine_ != nullptr && machine_->valid) {
+    const int pm_idx = machine_->pmIndex();
+    if (pm_idx >= 0 && pm_idx < x.x.size()) {
+      p0 = x.x[pm_idx];
+      params_.p_ref_mw = p0 * safe_base(params_.base_mva);
+    }
+  }
+  return set_if_changed(x.x, range_.offset, p0);
 }
 
 void Governor::computeDerivatives(double,
@@ -1134,16 +1188,35 @@ void Governor::computeDerivatives(double,
                                   const NetworkState&,
                                   Eigen::Ref<Eigen::VectorXd> dxdt) const {
   if (!params_.in_service || range_.empty()) return;
-  double pref = params_.p_ref_mw / safe_base(params_.base_mva);
-  const double pmax = params_.pmax_mw > 0.0
-                          ? params_.pmax_mw / safe_base(params_.base_mva)
-                          : std::numeric_limits<double>::infinity();
-  const double pmin = params_.pmin_mw < 0.0
-                          ? params_.pmin_mw / safe_base(params_.base_mva)
-                          : -std::numeric_limits<double>::infinity();
-  pref = std::clamp(pref, pmin, pmax);
-  dxdt[range_.offset] = (pref - x.x[range_.offset]) /
-                        std::max(kMinTimeConstant, params_.t_s);
+  const double base = safe_base(params_.base_mva);
+  const double pmax = params_.pmax_mw > 0.0 ? params_.pmax_mw / base
+                                            : std::numeric_limits<double>::infinity();
+  const double pmin = params_.pmin_mw < 0.0 ? params_.pmin_mw / base
+                                            : -std::numeric_limits<double>::infinity();
+  const double pref = std::clamp(params_.p_ref_mw / base, pmin, pmax);
+  const double t1 = std::max(kMinTimeConstant, params_.t_s);
+  const double valve = x.x[range_.offset];
+
+  if (machine_ != nullptr && machine_->valid) {
+    // Load-reference-set governor: valve responds to droop about the speed
+    // deviation; the machine's pm/tau_m slot is the turbine output (lag of the
+    // valve). Reheat models (IEEEG1) simply use a longer turbine time constant.
+    const int omega_idx = machine_->omegaIndex();
+    const int pm_idx = machine_->pmIndex();
+    const double omega = (omega_idx >= 0 && omega_idx < x.x.size()) ? x.x[omega_idx] : 1.0;
+    const double droop = params_.droop_r > 1e-9 ? params_.droop_r : 0.05;
+    const double valve_cmd = std::clamp(pref - (omega - 1.0) / droop, pmin, pmax);
+    dxdt[range_.offset] = (valve_cmd - valve) / t1;
+    if (pm_idx >= 0 && pm_idx < x.x.size()) {
+      const double t_turb = std::max(
+          kMinTimeConstant,
+          params_.model == GovernorModel::IEEEG1 ? params_.reheat_t_s : params_.turbine_t_s);
+      dxdt[pm_idx] = (valve - x.x[pm_idx]) / t_turb;
+    }
+    return;
+  }
+  // Backward-compatible standalone behaviour: own state tracks the reference.
+  dxdt[range_.offset] = (pref - valve) / t1;
 }
 
 void Governor::stamp(double, const DynamicState&, const NetworkState&, DynamicStamp&) const {}
@@ -1175,7 +1248,16 @@ DynamicDeviceOutput Governor::output(const DynamicState& x, const NetworkState&)
   out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
   out.values["droop_r"] = params_.droop_r;
   out.values["p_ref_mw"] = params_.p_ref_mw;
+  out.values["attached"] = machine_ != nullptr ? 1.0 : 0.0;
   if (!range_.empty() && range_.offset < x.x.size()) {
+    out.values["valve_pu"] = x.x[range_.offset];
+  }
+  if (machine_ != nullptr && machine_->valid) {
+    const int pm_idx = machine_->pmIndex();
+    if (pm_idx >= 0 && pm_idx < x.x.size()) {
+      out.values["p_mech_mw"] = x.x[pm_idx] * safe_base(params_.base_mva);
+    }
+  } else if (!range_.empty() && range_.offset < x.x.size()) {
     out.values["p_mech_mw"] = x.x[range_.offset] * safe_base(params_.base_mva);
   }
   return out;
@@ -1184,39 +1266,88 @@ DynamicDeviceOutput Governor::output(const DynamicState& x, const NetworkState&)
 Exciter::Exciter(ExciterDynamicParams params) : params_(std::move(params)) {}
 
 void Exciter::assignStateIndices(int& offset) {
-  range_ = {offset, 1};
+  // When coupled to a machine the exciter drives the machine-owned field state
+  // and needs no state of its own; standalone it keeps a single efd state for
+  // backward compatibility.
+  range_ = {offset, machine_ != nullptr ? 0 : 1};
   offset += range_.size;
 }
 
-void Exciter::initializeFromPowerFlow(const PowerFlowResult&, DynamicState& x, NetworkState& y) {
-  if (range_.empty()) return;
+double Exciter::terminalVoltage(const NetworkState& y) const {
+  const int bus = machine_ != nullptr && machine_->valid ? machine_->bus_pos : params_.bus_pos;
+  if (bus < 0) return params_.v_ref_pu;
+  return std::abs(positive_sequence_voltage(bus_voltage(y, bus)));
+}
+
+void Exciter::captureReference(const DynamicState& x, const NetworkState& y) {
+  const double vt = terminalVoltage(y);
+  double field0 = params_.v_ref_pu;
+  if (machine_ != nullptr && machine_->valid) {
+    const int f = machine_->fieldIndex();
+    if (f >= 0 && f < x.x.size()) field0 = x.x[f];
+  } else if (!range_.empty() && range_.offset < x.x.size()) {
+    field0 = x.x[range_.offset];
+  }
+  field0_ = field0;
+  v_ref_captured_ = vt;  // hold the equilibrium terminal voltage as the AVR setpoint
+  captured_ = true;
+}
+
+void Exciter::initializeFromPowerFlow(const PowerFlowResult& pf, DynamicState& x, NetworkState& y) {
+  // Prefer the power-flow terminal voltage at init (network not yet solved here).
   double vt = params_.v_ref_pu;
-  if (params_.bus_pos >= 0) vt = avg_voltage_mag(bus_voltage(y, params_.bus_pos));
-  x.x[range_.offset] = std::clamp(vt, params_.efd_min_pu, params_.efd_max_pu);
+  const int bus = machine_ != nullptr && machine_->valid ? machine_->bus_pos : params_.bus_pos;
+  if (bus >= 0 && bus < static_cast<int>(pf.vm.size())) {
+    vt = positive_or(pf.vm[static_cast<std::size_t>(bus)], vt);
+  }
+  double field0 = params_.v_ref_pu;
+  if (machine_ != nullptr && machine_->valid) {
+    const int f = machine_->fieldIndex();
+    if (f >= 0 && f < x.x.size()) field0 = x.x[f];
+  } else if (!range_.empty()) {
+    field0 = std::clamp(vt, params_.efd_min_pu, params_.efd_max_pu);
+    x.x[range_.offset] = field0;
+  }
+  field0_ = field0;
+  v_ref_captured_ = vt;
+  captured_ = true;
 }
 
 bool Exciter::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
-  if (!params_.in_service || range_.empty()) return false;
-  double vt = params_.v_ref_pu;
-  if (params_.bus_pos >= 0) vt = avg_voltage_mag(bus_voltage(y, params_.bus_pos));
-  return set_if_changed(x.x,
-                        range_.offset,
-                        std::clamp(vt, params_.efd_min_pu, params_.efd_max_pu));
+  if (!params_.in_service) return false;
+  captureReference(x, y);  // re-anchor to the network-solved equilibrium
+  if (machine_ != nullptr) return false;  // coupled exciter owns no state to trim
+  if (range_.empty()) return false;
+  return set_if_changed(x.x, range_.offset,
+                        std::clamp(field0_, params_.efd_min_pu, params_.efd_max_pu));
 }
 
 void Exciter::computeDerivatives(double,
                                  const DynamicState& x,
                                  const NetworkState& y,
                                  Eigen::Ref<Eigen::VectorXd> dxdt) const {
-  if (!params_.in_service || range_.empty()) return;
-  double vt = params_.v_ref_pu;
-  if (params_.bus_pos >= 0) vt = avg_voltage_mag(bus_voltage(y, params_.bus_pos));
-  const double efd_cmd =
-      std::clamp(params_.ka * (params_.v_ref_pu - vt) + params_.v_ref_pu,
-                 params_.efd_min_pu,
-                 params_.efd_max_pu);
-  dxdt[range_.offset] = (efd_cmd - x.x[range_.offset]) /
-                        std::max(kMinTimeConstant, params_.ta_s);
+  if (!params_.in_service) return;
+  const double vt = terminalVoltage(y);
+  const double vref = captured_ ? v_ref_captured_ : params_.v_ref_pu;
+  const double vs = pss_ != nullptr ? pss_vs_output(*pss_, x) : 0.0;
+  const double t = std::max(
+      kMinTimeConstant,
+      params_.model == ExciterModel::IEEET1 ? params_.te_s : params_.ta_s);
+
+  if (machine_ != nullptr && machine_->valid) {
+    // Proportional AVR about the equilibrium field: efd_cmd = field0 +
+    // Ka*(Vref - Vt + Vs). Drives the machine-owned field state through a lag.
+    const int f = machine_->fieldIndex();
+    if (f < 0 || f >= x.x.size()) return;
+    const double efd_cmd = std::clamp(field0_ + params_.ka * (vref - vt + vs),
+                                      params_.efd_min_pu, params_.efd_max_pu);
+    dxdt[f] = (efd_cmd - x.x[f]) / t;
+    return;
+  }
+  if (range_.empty()) return;
+  const double efd_cmd = std::clamp(params_.ka * (vref - vt + vs) + vref,
+                                    params_.efd_min_pu, params_.efd_max_pu);
+  dxdt[range_.offset] = (efd_cmd - x.x[range_.offset]) / t;
 }
 
 void Exciter::stamp(double, const DynamicState&, const NetworkState&, DynamicStamp&) const {}
@@ -1231,6 +1362,7 @@ void Exciter::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkSta
   } else if (event.type == DynamicEventType::Custom && event.component_type == "Exciter") {
     const auto it = event.params.find("v_ref_pu");
     params_.v_ref_pu = it == event.params.end() ? event.value : it->second;
+    captured_ = false;  // re-capture the operating point on the next trim
   }
 }
 
@@ -1246,12 +1378,124 @@ DynamicDeviceOutput Exciter::output(const DynamicState& x, const NetworkState& y
                                              params_.component_domain,
                                              params_.source_type);
   out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
-  out.values["v_ref_pu"] = params_.v_ref_pu;
+  out.values["v_ref_pu"] = captured_ ? v_ref_captured_ : params_.v_ref_pu;
   out.values["ka"] = params_.ka;
-  if (!range_.empty() && range_.offset < x.x.size()) {
-    out.values["efd_pu"] = x.x[range_.offset];
+  out.values["attached"] = machine_ != nullptr ? 1.0 : 0.0;
+  double efd = field0_;
+  if (machine_ != nullptr && machine_->valid) {
+    const int f = machine_->fieldIndex();
+    if (f >= 0 && f < x.x.size()) efd = x.x[f];
+  } else if (!range_.empty() && range_.offset < x.x.size()) {
+    efd = x.x[range_.offset];
   }
-  add_voltage_metrics(out, y, params_.bus_pos);
+  out.values["efd_pu"] = efd;
+  add_voltage_metrics(out, y, machine_ != nullptr && machine_->valid ? machine_->bus_pos
+                                                                     : params_.bus_pos);
+  return out;
+}
+
+// ── Power System Stabilizer (PSS1A single-input speed stabilizer) ──
+PowerSystemStabilizer::PowerSystemStabilizer(PSSDynamicParams params)
+    : params_(std::move(params)) {}
+
+void PowerSystemStabilizer::attachMachine(const MachineControlLink* link) {
+  machine_ = link;
+  link_.machine = link;
+}
+
+void PowerSystemStabilizer::assignStateIndices(int& offset) {
+  range_ = {offset, 3};  // washout + two lead-lag states
+  offset += range_.size;
+  link_.range = &range_;
+  link_.machine = machine_;
+  link_.valid = machine_ != nullptr && machine_->valid;
+  link_.ks = params_.ks;
+  link_.tw_s = params_.tw_s;
+  link_.t1_s = params_.t1_s;
+  link_.t2_s = params_.t2_s;
+  link_.t3_s = params_.t3_s;
+  link_.t4_s = params_.t4_s;
+  link_.vs_max_pu = params_.vs_max_pu;
+  link_.vs_min_pu = params_.vs_min_pu;
+}
+
+void PowerSystemStabilizer::initializeFromPowerFlow(const PowerFlowResult&,
+                                                    DynamicState& x,
+                                                    NetworkState&) {
+  // Zero states => Vs = 0 at the (omega = 1) equilibrium, so the PSS cannot
+  // disturb the initialized operating point.
+  if (range_.empty()) return;
+  for (int k = 0; k < range_.size; ++k) x.x[state_index(range_, k)] = 0.0;
+  link_.valid = machine_ != nullptr && machine_->valid;
+}
+
+bool PowerSystemStabilizer::trimToNetworkEquilibrium(DynamicState& x, NetworkState&) {
+  if (!params_.in_service || range_.empty()) return false;
+  bool changed = false;
+  for (int k = 0; k < range_.size; ++k) {
+    changed = set_if_changed(x.x, state_index(range_, k), 0.0) || changed;
+  }
+  return changed;
+}
+
+void PowerSystemStabilizer::computeDerivatives(double,
+                                               const DynamicState& x,
+                                               const NetworkState&,
+                                               Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (!params_.in_service || range_.empty()) return;
+  if (machine_ == nullptr || !machine_->valid) {
+    for (int k = 0; k < range_.size; ++k) dxdt[state_index(range_, k)] = 0.0;
+    return;
+  }
+  const int omega_idx = machine_->omegaIndex();
+  const double u = (omega_idx >= 0 && omega_idx < x.x.size()) ? x.x[omega_idx] - 1.0 : 0.0;
+  const double tw = std::max(kMinTimeConstant, params_.tw_s);
+  const double t2 = std::max(kMinTimeConstant, params_.t2_s);
+  const double t4 = std::max(kMinTimeConstant, params_.t4_s);
+  const double x1 = x.x[state_index(range_, 0)];
+  const double x2 = x.x[state_index(range_, 1)];
+  const double x3 = x.x[state_index(range_, 2)];
+  const double y_w = params_.ks * u - x1;            // washout output
+  const double y1 = (params_.t1_s / t2) * y_w + x2;  // lead-lag 1 output
+  dxdt[state_index(range_, 0)] = (params_.ks * u - x1) / tw;
+  dxdt[state_index(range_, 1)] = ((1.0 - params_.t1_s / t2) * y_w - x2) / t2;
+  dxdt[state_index(range_, 2)] = ((1.0 - params_.t3_s / t4) * y1 - x3) / t4;
+}
+
+void PowerSystemStabilizer::stamp(double, const DynamicState&, const NetworkState&,
+                                  DynamicStamp&) const {}
+
+void PowerSystemStabilizer::handleEvent(const DynamicEvent& event, DynamicState& x,
+                                        NetworkState&) {
+  const bool matching = event.component_index == 0 ||
+                        event.component_index == params_.component_index;
+  if (!matching) return;
+  if (event.type == DynamicEventType::GeneratorTrip) {
+    params_.in_service = false;
+    if (!range_.empty()) {
+      for (int k = 0; k < range_.size; ++k) {
+        if (state_index(range_, k) < x.x.size()) x.x[state_index(range_, k)] = 0.0;
+      }
+    }
+  }
+}
+
+std::string PowerSystemStabilizer::name() const {
+  return params_.label.empty() ? params_.device_type + " " + std::to_string(params_.component_index)
+                               : params_.label;
+}
+
+DynamicDeviceOutput PowerSystemStabilizer::output(const DynamicState& x,
+                                                  const NetworkState&) const {
+  DynamicDeviceOutput out = make_output_base(*this,
+                                             params_.bus,
+                                             params_.canvas_type,
+                                             params_.component_domain,
+                                             params_.source_type);
+  out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  out.values["ks"] = params_.ks;
+  out.values["attached"] = machine_ != nullptr ? 1.0 : 0.0;
+  out.values["vs_pu"] = pss_vs_output(link_, x);
   return out;
 }
 

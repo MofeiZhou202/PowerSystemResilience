@@ -63,6 +63,9 @@ hacdcpf_add_test(test_external_grid_io    test_external_grid_io.cpp)
 # native models, GridLAB-D text snapshots, and OpenDSS text snapshots.
 hacdcpf_add_test(test_component_io_mapping test_component_io_mapping.cpp)
 
+# Dynamics: single-source parameter catalog stays aligned with the builder.
+hacdcpf_add_test(test_dynamic_model_catalog test_dynamic_model_catalog.cpp)
+
 # I/O: ETAP Excel round-circle (excel in / excel out). Requires OpenXLSX, so it
 # is only registered when ETAP support is compiled into the core library.
 if(HACDCPF_ENABLE_ETAP)

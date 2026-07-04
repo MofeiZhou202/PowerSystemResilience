@@ -2462,6 +2462,61 @@ json component_parameter_rule_to_json(
   return out;
 }
 
+json dynamic_param_descriptor_to_json(
+    const hacdcpf::dynamics::DynamicParamDescriptor& p) {
+  json out{{"key", p.key},
+           {"aliases", p.aliases},
+           {"label", p.label},
+           {"unit", p.unit},
+           {"kind", hacdcpf::dynamics::to_string(p.kind)},
+           {"default", p.default_value},
+           {"group", p.group},
+           {"advanced", p.advanced},
+           {"notes", p.notes}};
+  if (p.min_value) out["min"] = *p.min_value;
+  if (p.max_value) out["max"] = *p.max_value;
+  if (!p.enum_options.empty()) {
+    json opts = json::array();
+    for (const auto& o : p.enum_options) {
+      opts.push_back(json{{"value", o.value}, {"label", o.label}});
+    }
+    out["enum_options"] = opts;
+  }
+  return out;
+}
+
+json dynamic_model_descriptor_to_json(
+    const hacdcpf::dynamics::DynamicModelDescriptor& m) {
+  json params = json::array();
+  for (const auto& p : m.parameters) {
+    params.push_back(dynamic_param_descriptor_to_json(p));
+  }
+  return json{{"model_name", m.model_name},
+              {"standard", m.standard},
+              {"display_name", m.display_name},
+              {"block_role", m.block_role},
+              {"parameters_location", m.parameters_location},
+              {"parameters", params},
+              {"notes", m.notes}};
+}
+
+json dynamic_block_composition_to_json(
+    const hacdcpf::dynamics::DynamicComponentComposition& c) {
+  json slots = json::array();
+  for (const auto& s : c.slots) {
+    slots.push_back(json{{"slot", s.slot},
+                         {"label", s.label},
+                         {"optional", s.optional},
+                         {"model_names", s.model_names},
+                         {"default_model", s.default_model},
+                         {"visible_when_model", s.visible_when_model}});
+  }
+  return json{{"canvas_type", c.canvas_type},
+              {"display_name", c.display_name},
+              {"component_domain", c.component_domain},
+              {"slots", slots}};
+}
+
 json component_parameter_finding_to_json(
     const hacdcpf::io::ComponentParameterFinding& finding) {
   json out{{"component_type", finding.component_type},
@@ -8619,6 +8674,100 @@ int main(int argc, char** argv) {
     out["files"] = list_matpower_files(matpower_dir);
     out["data_dir"] = matpower_dir;
     res.set_content(out.dump(), "application/json");
+  });
+
+  // Transient/dynamic model parameter schema: the single source of truth the GUI
+  // uses to render structured governor / AVR / PSS / converter parameter editors.
+  svr.Get("/api/dynamics/model_schema",
+          [](const httplib::Request&, httplib::Response& res) {
+    try {
+      json out;
+      json models = json::array();
+      for (const auto& m : hacdcpf::dynamics::dynamic_model_catalog()) {
+        models.push_back(dynamic_model_descriptor_to_json(m));
+      }
+      out["models"] = models;
+      json comps = json::array();
+      for (const auto& c : hacdcpf::dynamics::dynamic_block_composition()) {
+        comps.push_back(dynamic_block_composition_to_json(c));
+      }
+      out["components"] = comps;
+      out["schema_version"] = 1;
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // Validate a user-entered dynamic_model against the schema: flag keys the
+  // engine does not consume (silently ignored) and out-of-range values.
+  svr.Post("/api/dynamics/validate_profile",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto body = json::parse(req.body.empty() ? "{}" : req.body);
+      const json dm = body.contains("dynamic_model") ? body["dynamic_model"] : body;
+      const std::string model_name = dm.value("model_name", "");
+      json warnings = json::array();
+      const auto model = hacdcpf::dynamics::find_dynamic_model(model_name);
+      json out;
+      out["model_name"] = model_name;
+      if (!model.has_value()) {
+        warnings.push_back(json{{"code", "unknown_model"},
+                                {"severity", "warning"},
+                                {"message", "Model '" + model_name +
+                                                "' is not in the transient catalog"}});
+        out["valid"] = false;
+        out["warnings"] = warnings;
+        res.set_content(out.dump(), "application/json");
+        return;
+      }
+      auto known_key = [&](const std::string& key) {
+        for (const auto& p : model->parameters) {
+          if (p.key == key) return true;
+          for (const auto& a : p.aliases) if (a == key) return true;
+        }
+        return false;
+      };
+      auto check_params = [&](const json& params) {
+        if (!params.is_object()) return;
+        for (auto it = params.begin(); it != params.end(); ++it) {
+          if (!known_key(it.key())) {
+            warnings.push_back(json{{"code", "unknown_key"},
+                                    {"key", it.key()},
+                                    {"severity", "warning"},
+                                    {"message", "Key '" + it.key() +
+                                                    "' is not consumed by " + model_name +
+                                                    " (ignored)"}});
+            continue;
+          }
+          if (!it.value().is_number()) continue;
+          const double v = it.value().get<double>();
+          for (const auto& p : model->parameters) {
+            if (p.key != it.key()) continue;
+            if ((p.min_value && v < *p.min_value) || (p.max_value && v > *p.max_value)) {
+              warnings.push_back(json{{"code", "out_of_range"},
+                                      {"key", it.key()},
+                                      {"value", v},
+                                      {"severity", "warning"},
+                                      {"message", "Value out of recommended range"}});
+            }
+          }
+        }
+      };
+      if (dm.contains("parameters")) check_params(dm["parameters"]);
+      if (dm.contains("components") && dm["components"].is_array()) {
+        for (const auto& comp : dm["components"]) {
+          if (comp.contains("parameters")) check_params(comp["parameters"]);
+        }
+      }
+      out["valid"] = warnings.empty();
+      out["warnings"] = warnings;
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
   });
 
   svr.Get("/api/io/model_compatibility",
