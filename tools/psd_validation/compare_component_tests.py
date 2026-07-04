@@ -25,6 +25,7 @@ CSV_COLUMNS = [
 ]
 
 BLOCKED_STATUSES = {
+    "compare-failing",
     "blocked-missing-model",
     "blocked-missing-controller",
     "blocked-missing-formulation",

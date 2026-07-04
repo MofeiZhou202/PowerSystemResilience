@@ -436,12 +436,17 @@ bool machine_is_onedoneq(const VoltageSourceDynamicParams& params) {
   return params.machine_model == SynchronousMachineModelKind::OneDOneQ;
 }
 
+bool machine_is_simple_marconato(const VoltageSourceDynamicParams& params) {
+  return params.machine_model == SynchronousMachineModelKind::SimpleMarconato;
+}
+
 bool machine_is_salient(const VoltageSourceDynamicParams& params) {
   return params.machine_model == SynchronousMachineModelKind::GENSAL ||
          params.machine_model == SynchronousMachineModelKind::GENSAE;
 }
 
 int synchronous_machine_state_count(const VoltageSourceDynamicParams& params) {
+  if (machine_is_simple_marconato(params)) return 8;
   if (machine_is_roundrotor(params)) return 8;
   if (machine_is_salient(params)) return 7;
   if (machine_is_onedoneq(params)) return 6;
@@ -450,6 +455,7 @@ int synchronous_machine_state_count(const VoltageSourceDynamicParams& params) {
 
 std::string synchronous_machine_model_name(const VoltageSourceDynamicParams& params) {
   if (machine_is_onedoneq(params)) return "OneDOneQMachine";
+  if (machine_is_simple_marconato(params)) return "SimpleMarconatoMachine";
   if (machine_is_roundrotor(params) || machine_is_salient(params)) {
     return (!params.machine_model_name.empty() &&
             params.machine_model_name != "ClassicalMachine")
@@ -564,6 +570,158 @@ Eigen::VectorXd solve_onedoneq_initial_conditions(const OneDOneQParams& p,
       const Eigen::VectorXd trial = z + alpha * step;
       const double trial_norm =
           onedoneq_initial_residual(p, v, p0, q0, trial).lpNorm<Eigen::Infinity>();
+      if (std::isfinite(trial_norm) && trial_norm < norm) {
+        z = trial;
+        accepted = true;
+        break;
+      }
+      alpha *= 0.5;
+    }
+    if (!accepted) break;
+  }
+  return best;
+}
+
+struct SimpleMarconatoParams {
+  double r{0.0};
+  double td0p{5.89};
+  double tq0p{0.6};
+  double td0pp{0.5};
+  double tq0pp{0.023};
+  double xd{1.3125};
+  double xq{1.2578};
+  double xdp{0.1813};
+  double xqp{0.25};
+  double xdpp{0.14};
+  double xqpp{0.18};
+  double t_aa{0.0};
+  double gamma_d{0.0};
+  double gamma_q{0.0};
+};
+
+double marconato_gamma(double tpp,
+                       double xpp,
+                       double tp,
+                       double xp,
+                       double x,
+                       double fallback) {
+  const double denom = tp * xp;
+  if (std::abs(denom) <= 1e-12) return fallback;
+  return (tpp * xpp / denom) * (x - xp);
+}
+
+SimpleMarconatoParams simple_marconato_params(const VoltageSourceDynamicParams& params) {
+  SimpleMarconatoParams p;
+  p.r = std::max(0.0, params.r_pu);
+  p.xd = positive_or(params.xd_pu, 1.3125);
+  p.xq = positive_or(params.xq_pu, 1.2578);
+  p.xdp = positive_or(params.xdp_pu, positive_or(params.x_pu, 0.1813));
+  p.xqp = positive_or(params.xqp_pu, 0.25);
+  p.xdpp = positive_or(params.xdpp_pu, 0.14);
+  p.xqpp = positive_or(params.xqpp_pu, 0.18);
+  p.td0p = std::max(kMinTimeConstant, positive_or(params.td0p_s, 5.89));
+  p.tq0p = std::max(kMinTimeConstant, positive_or(params.tq0p_s, 0.6));
+  p.td0pp = std::max(kMinTimeConstant, positive_or(params.td0pp_s, 0.5));
+  p.tq0pp = std::max(kMinTimeConstant, positive_or(params.tq0pp_s, 0.023));
+  p.t_aa = std::max(0.0, params.t_aa_s);
+  p.gamma_d = marconato_gamma(p.td0pp, p.xdpp, p.td0p, p.xdp, p.xd, 0.0);
+  p.gamma_q = marconato_gamma(p.tq0pp, p.xqpp, p.tq0p, p.xqp, p.xq, 0.0);
+  return p;
+}
+
+struct SimpleMarconatoEval {
+  double id{0.0};
+  double iq{0.0};
+  double pe{0.0};
+  double qe{0.0};
+  double tau_e{0.0};
+  double vd{0.0};
+  double vq{0.0};
+  Complex current{0.0, 0.0};
+};
+
+SimpleMarconatoEval evaluate_simple_marconato(const SimpleMarconatoParams& p,
+                                              Complex v,
+                                              double delta,
+                                              double eq_p,
+                                              double ed_p,
+                                              double eq_pp,
+                                              double ed_pp) {
+  (void)eq_p;
+  (void)ed_p;
+  SimpleMarconatoEval out;
+  const auto [vd, vq] = psd_ri_to_dq(delta, v);
+  out.vd = vd;
+  out.vq = vq;
+  const double denom = std::max(1e-9, p.r * p.r + p.xdpp * p.xqpp);
+  out.id = (p.xqpp * (eq_pp - vq) + p.r * (ed_pp - vd)) / denom;
+  out.iq = (-p.xdpp * (ed_pp - vd) + p.r * (eq_pp - vq)) / denom;
+  out.tau_e = (vd + p.r * out.id) * out.id + (vq + p.r * out.iq) * out.iq;
+  out.pe = vd * out.id + vq * out.iq;
+  out.qe = vq * out.id - vd * out.iq;
+  out.current = psd_dq_to_ri(delta, out.id, out.iq);
+  return out;
+}
+
+Eigen::VectorXd simple_marconato_initial_residual(const SimpleMarconatoParams& p,
+                                                  Complex v,
+                                                  double p0,
+                                                  double q0,
+                                                  const Eigen::VectorXd& z) {
+  Eigen::VectorXd r = Eigen::VectorXd::Zero(7);
+  const double delta = z[0];
+  const double tau_m = z[1];
+  const double vf = z[2];
+  const double eq_p = z[3];
+  const double ed_p = z[4];
+  const double eq_pp = z[5];
+  const double ed_pp = z[6];
+  const SimpleMarconatoEval e =
+      evaluate_simple_marconato(p, v, delta, eq_p, ed_p, eq_pp, ed_pp);
+  r[0] = tau_m - e.tau_e;
+  r[1] = p0 - e.pe;
+  r[2] = q0 - e.qe;
+  r[3] = -eq_p - (p.xd - p.xdp - p.gamma_d) * e.id +
+         (1.0 - p.t_aa / p.td0p) * vf;
+  r[4] = -ed_p + (p.xq - p.xqp - p.gamma_q) * e.iq;
+  r[5] = -eq_pp + eq_p - (p.xdp - p.xdpp + p.gamma_d) * e.id +
+         (p.t_aa / p.td0p) * vf;
+  r[6] = -ed_pp + ed_p + (p.xqp - p.xqpp + p.gamma_q) * e.iq;
+  return r;
+}
+
+Eigen::VectorXd solve_simple_marconato_initial_conditions(const SimpleMarconatoParams& p,
+                                                          Complex v,
+                                                          double p0,
+                                                          double q0,
+                                                          Eigen::VectorXd z) {
+  Eigen::VectorXd best = z;
+  double best_norm =
+      simple_marconato_initial_residual(p, v, p0, q0, z).lpNorm<Eigen::Infinity>();
+  const double eps = std::sqrt(std::numeric_limits<double>::epsilon());
+  for (int iter = 0; iter < 30; ++iter) {
+    const Eigen::VectorXd r = simple_marconato_initial_residual(p, v, p0, q0, z);
+    const double norm = r.lpNorm<Eigen::Infinity>();
+    if (norm < best_norm) {
+      best = z;
+      best_norm = norm;
+    }
+    if (norm <= 1e-10) return z;
+    Eigen::MatrixXd jac(7, 7);
+    for (int col = 0; col < 7; ++col) {
+      Eigen::VectorXd zp = z;
+      const double h = eps * std::max(1.0, std::abs(z[col]));
+      zp[col] += h;
+      jac.col(col) = (simple_marconato_initial_residual(p, v, p0, q0, zp) - r) / h;
+    }
+    const Eigen::VectorXd step = jac.colPivHouseholderQr().solve(-r);
+    if (!step.allFinite()) break;
+    bool accepted = false;
+    double alpha = 1.0;
+    while (alpha >= 1.0 / 1024.0) {
+      const Eigen::VectorXd trial = z + alpha * step;
+      const double trial_norm =
+          simple_marconato_initial_residual(p, v, p0, q0, trial).lpNorm<Eigen::Infinity>();
       if (std::isfinite(trial_norm) && trial_norm < norm) {
         z = trial;
         accepted = true;
@@ -1227,7 +1385,7 @@ void SynchronousMachine::assignStateIndices(int& offset) {
   // Publish the coupling link so attached controllers can address this machine's
   // speed / mechanical-power / field states. Local indices: omega=1 for both
   // models; classical pm=3, e_mag(field)=2; OneDOneQ tau_m=4, vf=5;
-  // round-rotor tau_m=6, vf=7; salient-pole tau_m=5, vf=6.
+  // SimpleMarconato / round-rotor tau_m=6, vf=7; salient-pole tau_m=5, vf=6.
   link_.range = &range_;
   link_.valid = true;
   link_.genrou = machine_is_roundrotor(params_) && range_.size >= 8;
@@ -1237,6 +1395,9 @@ void SynchronousMachine::assignStateIndices(int& offset) {
   link_.inertia_h = std::max(0.01, params_.inertia_h);
   link_.omega_local = 1;
   if (link_.genrou) {
+    link_.pm_local = 6;
+    link_.efd_local = 7;
+  } else if (machine_is_simple_marconato(params_) && range_.size >= 8) {
     link_.pm_local = 6;
     link_.efd_local = 7;
   } else if (machine_is_salient(params_) && range_.size >= 7) {
@@ -1285,6 +1446,41 @@ void SynchronousMachine::initializeFromPowerFlow(const PowerFlowResult& pf,
     x.x[state_index(range_, 3)] = finite_value(z[4], vd0);
     x.x[state_index(range_, 4)] = finite_value(z[1], s.real());
     x.x[state_index(range_, 5)] = finite_value(z[2], 1.0);
+    if (params_.bus_pos >= 0 && y.Vac_abc.size() >= 3 * (params_.bus_pos + 1)) {
+      y.Vac_abc[3 * params_.bus_pos + 0] = std::polar(vm, angle);
+      y.Vac_abc[3 * params_.bus_pos + 1] = std::polar(vm, angle - 2.0 * kPi / 3.0);
+      y.Vac_abc[3 * params_.bus_pos + 2] = std::polar(vm, angle + 2.0 * kPi / 3.0);
+    }
+    return;
+  }
+  if (machine_is_simple_marconato(params_) && range_.size >= 8) {
+    const SimpleMarconatoParams mp = simple_marconato_params(params_);
+    double vm = params_.vm_set_pu;
+    if (params_.bus_pos >= 0 && params_.bus_pos < static_cast<int>(pf.vm.size())) {
+      vm = positive_or(pf.vm[static_cast<std::size_t>(params_.bus_pos)], vm);
+    }
+    const Complex v = std::polar(vm, angle);
+    const Complex s(params_.p_mech_mw / safe_base(params_.base_mva),
+                    params_.q_elec_mvar / safe_base(params_.base_mva));
+    const Complex i_from_power = std::conj(s / v);
+    double delta = std::arg(v + Complex(mp.r, mp.xq) * i_from_power);
+    if (!std::isfinite(delta)) {
+      delta = angle;
+    }
+    const auto [vd0, vq0] = psd_ri_to_dq(delta, v);
+    Eigen::VectorXd z0(7);
+    z0 << delta, s.real(), 1.0, vq0, vd0, vq0, vd0;
+    const Eigen::VectorXd z =
+        solve_simple_marconato_initial_conditions(mp, v, s.real(), s.imag(), z0);
+
+    x.x[state_index(range_, 0)] = finite_value(z[0], delta);
+    x.x[state_index(range_, 1)] = 1.0;
+    x.x[state_index(range_, 2)] = finite_value(z[3], vq0);
+    x.x[state_index(range_, 3)] = finite_value(z[4], vd0);
+    x.x[state_index(range_, 4)] = finite_value(z[5], vq0);
+    x.x[state_index(range_, 5)] = finite_value(z[6], vd0);
+    x.x[state_index(range_, 6)] = finite_value(z[1], s.real());
+    x.x[state_index(range_, 7)] = finite_value(z[2], 1.0);
     if (params_.bus_pos >= 0 && y.Vac_abc.size() >= 3 * (params_.bus_pos + 1)) {
       y.Vac_abc[3 * params_.bus_pos + 0] = std::polar(vm, angle);
       y.Vac_abc[3 * params_.bus_pos + 1] = std::polar(vm, angle - 2.0 * kPi / 3.0);
@@ -1419,6 +1615,30 @@ bool SynchronousMachine::trimToNetworkEquilibrium(DynamicState& x, NetworkState&
     changed = set_if_changed(x.x, state_index(range_, 5), z[2]) || changed;
     return changed;
   }
+  if (machine_is_simple_marconato(params_) && range_.size >= 8) {
+    const SimpleMarconatoParams mp = simple_marconato_params(params_);
+    const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+    const double p0 = params_.p_mech_mw / safe_base(params_.base_mva);
+    const double q0 = params_.q_elec_mvar / safe_base(params_.base_mva);
+    Eigen::VectorXd z0(7);
+    z0 << x.x[state_index(range_, 0)],
+          x.x[state_index(range_, 6)],
+          x.x[state_index(range_, 7)],
+          x.x[state_index(range_, 2)],
+          x.x[state_index(range_, 3)],
+          x.x[state_index(range_, 4)],
+          x.x[state_index(range_, 5)];
+    const Eigen::VectorXd z =
+        solve_simple_marconato_initial_conditions(mp, v, p0, q0, z0);
+    changed = set_if_changed(x.x, state_index(range_, 0), z[0]) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 2), z[3]) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 3), z[4]) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 4), z[5]) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 5), z[6]) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 6), z[1]) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 7), z[2]) || changed;
+    return changed;
+  }
   if (machine_is_roundrotor(params_) && range_.size >= 8) {
     const GenrouParams gp = genrou_params(params_);
     const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
@@ -1528,6 +1748,48 @@ void SynchronousMachine::computeDerivatives(double,
         (-ed_p + (mp.xq - mp.xqp) * e.iq) / mp.tq0p;
     if (!governor_attached_) dxdt[state_index(range_, 4)] = 0.0;
     if (!exciter_attached_) dxdt[state_index(range_, 5)] = 0.0;
+    return;
+  }
+  if (machine_is_simple_marconato(params_) && range_.size >= 8) {
+    const SimpleMarconatoParams mp = simple_marconato_params(params_);
+    const double delta = x.x[state_index(range_, 0)];
+    const double omega = x.x[state_index(range_, 1)];
+    const double eq_p = x.x[state_index(range_, 2)];
+    const double ed_p = x.x[state_index(range_, 3)];
+    const double eq_pp = x.x[state_index(range_, 4)];
+    const double ed_pp = x.x[state_index(range_, 5)];
+    const double tau_m = x.x[state_index(range_, 6)];
+    const double vf = x.x[state_index(range_, 7)];
+    const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+    const SimpleMarconatoEval e =
+        evaluate_simple_marconato(mp, v, delta, eq_p, ed_p, eq_pp, ed_pp);
+    const double h = std::max(0.01, params_.inertia_h);
+    const double wb = kTwoPi * params_.frequency_hz;
+    dxdt[state_index(range_, 0)] = params_.dynamic_angle ? wb * (omega - 1.0) : 0.0;
+    if (params_.dynamic_angle) {
+      const double swing_power =
+          tau_m - e.tau_e - params_.damping_d * (omega - 1.0) /
+                                std::max(kMinVoltage, std::abs(omega));
+      dxdt[state_index(range_, 1)] =
+          (std::abs(swing_power) <= kMachinePowerBalanceTolPu &&
+           std::abs(omega - 1.0) <= kMachinePowerBalanceTolPu)
+              ? 0.0
+              : swing_power / (2.0 * h);
+    } else {
+      dxdt[state_index(range_, 1)] = 0.0;
+    }
+    dxdt[state_index(range_, 2)] =
+        (-eq_p - (mp.xd - mp.xdp - mp.gamma_d) * e.id +
+         (1.0 - mp.t_aa / mp.td0p) * vf) / mp.td0p;
+    dxdt[state_index(range_, 3)] =
+        (-ed_p + (mp.xq - mp.xqp - mp.gamma_q) * e.iq) / mp.tq0p;
+    dxdt[state_index(range_, 4)] =
+        (-eq_pp + eq_p - (mp.xdp - mp.xdpp + mp.gamma_d) * e.id +
+         (mp.t_aa / mp.td0p) * vf) / mp.td0pp;
+    dxdt[state_index(range_, 5)] =
+        (-ed_pp + ed_p + (mp.xqp - mp.xqpp + mp.gamma_q) * e.iq) / mp.tq0pp;
+    if (!governor_attached_) dxdt[state_index(range_, 6)] = 0.0;
+    if (!exciter_attached_) dxdt[state_index(range_, 7)] = 0.0;
     return;
   }
   if (machine_is_roundrotor(params_) && range_.size >= 8) {
@@ -1659,6 +1921,25 @@ void SynchronousMachine::stamp(double,
     add_balanced_current(stamp, params_.bus_pos, yv * e_src);
     return;
   }
+  if (machine_is_simple_marconato(params_) && range_.size >= 8) {
+    const SimpleMarconatoParams mp = simple_marconato_params(params_);
+    const double delta = x.x[state_index(range_, 0)];
+    const double eq_p = x.x[state_index(range_, 2)];
+    const double ed_p = x.x[state_index(range_, 3)];
+    const double eq_pp = x.x[state_index(range_, 4)];
+    const double ed_pp = x.x[state_index(range_, 5)];
+    const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+    const SimpleMarconatoEval eval =
+        evaluate_simple_marconato(mp, v, delta, eq_p, ed_p, eq_pp, ed_pp);
+    const double x_eff = std::sqrt(std::max(1e-8, mp.xdpp * mp.xqpp));
+    const Complex z(mp.r, std::max(1e-5, x_eff));
+    const Complex yv = Complex(1.0, 0.0) / z;
+    const Complex e_ri = v + z * eval.current;
+    const Eigen::Vector3cd e_src = balanced_phasors(std::abs(e_ri), std::arg(e_ri));
+    add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(yv));
+    add_balanced_current(stamp, params_.bus_pos, yv * e_src);
+    return;
+  }
   if (machine_is_roundrotor(params_) && range_.size >= 8) {
     const GenrouParams gp = genrou_params(params_);
     const double delta = x.x[state_index(range_, 0)];
@@ -1757,6 +2038,35 @@ DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
     out.values["i_rms_pu"] = std::abs(e.current);
     out.values["torque_e_pu"] = e.tau_e;
     out.values["psd_onedoneq"] = 1.0;
+  } else if (machine_is_simple_marconato(params_) && !range_.empty() &&
+             range_.offset + 7 < x.x.size()) {
+    const SimpleMarconatoParams mp = simple_marconato_params(params_);
+    const double delta = x.x[state_index(range_, 0)];
+    const double omega = x.x[state_index(range_, 1)];
+    const double eq_p = x.x[state_index(range_, 2)];
+    const double ed_p = x.x[state_index(range_, 3)];
+    const double eq_pp = x.x[state_index(range_, 4)];
+    const double ed_pp = x.x[state_index(range_, 5)];
+    const double tau_m = x.x[state_index(range_, 6)];
+    const double vf = x.x[state_index(range_, 7)];
+    const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+    const SimpleMarconatoEval e =
+        evaluate_simple_marconato(mp, v, delta, eq_p, ed_p, eq_pp, ed_pp);
+    out.values["angle_rad"] = delta;
+    out.values["delta_rad"] = delta;
+    out.values["omega_pu"] = omega;
+    out.values["frequency_hz"] = omega * params_.frequency_hz;
+    out.values["eq_p"] = eq_p;
+    out.values["ed_p"] = ed_p;
+    out.values["eq_pp"] = eq_pp;
+    out.values["ed_pp"] = ed_pp;
+    out.values["vf_pu"] = vf;
+    out.values["p_mech_mw"] = tau_m * safe_base(params_.base_mva);
+    out.values["p_mw"] = e.pe * safe_base(params_.base_mva);
+    out.values["q_mvar"] = e.qe * safe_base(params_.base_mva);
+    out.values["i_rms_pu"] = std::abs(e.current);
+    out.values["torque_e_pu"] = e.tau_e;
+    out.values["psd_simple_marconato"] = 1.0;
   } else if (machine_is_roundrotor(params_) && !range_.empty() && range_.offset + 7 < x.x.size()) {
     const GenrouParams gp = genrou_params(params_);
     const double delta = x.x[state_index(range_, 0)];

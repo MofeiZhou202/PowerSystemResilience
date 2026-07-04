@@ -67,6 +67,10 @@ function export_signal(results, signal::String)
             return get_state_series(results, (ref, :eq_p))
         elseif quantity == "ed_p"
             return get_state_series(results, (ref, :ed_p))
+        elseif quantity == "eq_pp"
+            return get_state_series(results, (ref, :eq_pp))
+        elseif quantity == "ed_pp"
+            return get_state_series(results, (ref, :ed_pp))
         elseif quantity == "psi_kd"
             return get_state_series(results, (ref, :ψ_kd))
         elseif quantity == "psi_kq"
@@ -102,6 +106,29 @@ function run_onedoneq()
     work = mktempdir()
     try
         sim = Simulation(
+            ResidualModel,
+            sys,
+            work,
+            (0.0, 2.0),
+            ybus_change,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.005, saveat = 0.005)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
+function run_simple_marconato()
+    sys = build_system(PSIDTestSystems, "psid_test_threebus_simple_marconato")
+    pf = ACPowerFlow()
+    solve_powerflow!(pf, sys)
+    ybus_fault = one_done_q_fault_ybus(sys)
+    ybus_change = NetworkSwitch(1.0, ybus_fault)
+    work = mktempdir()
+    try
+        sim = Simulation!(
             ResidualModel,
             sys,
             work,
@@ -198,6 +225,8 @@ end
 function run_case(case_name::String)
     if case_name == "onedoneq" || case_name == "test02"
         run_onedoneq()
+    elseif case_name == "simple_marconato" || case_name == "test03"
+        run_simple_marconato()
     elseif case_name == "genrou"
         run_genrou()
     elseif case_name == "genroe" || case_name == "test16"

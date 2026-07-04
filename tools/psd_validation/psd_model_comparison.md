@@ -6,16 +6,18 @@ This is a model-by-model and controller-by-controller comparison. It is not an e
 
 ## Summary
 
-- Rows: 43
+- Rows: 44
 - exact-or-close: 2
 - missing: 17
 - profile-only: 2
 - supported-subset: 22
+- trace-failing: 1
 
 ## Status Legend
 
 - `exact-or-close`: The named HACDCPF model is intended to be directly comparable for focused traces, subject to parameter and initialization matching.
 - `supported-subset`: HACDCPF has a named model or controller that captures the main behavior but omits PSD states, limiters, saturation, or formulation details.
+- `trace-failing`: A HACDCPF runtime/profile and trace hook exist, but the current PSD comparison gate does not pass.
 - `profile-only`: HACDCPF can preserve the profile identity in dynamic_model metadata, but the transient runtime does not yet implement equivalent behavior.
 - `missing`: No HACDCPF runtime counterpart is currently present.
 
@@ -37,7 +39,8 @@ This is a model-by-model and controller-by-controller comparison. It is not an e
 | generator | machine | SalientPoleQuadratic / GENSAL | machine | GENSAL | supported-subset | L2 | gensal:generator-102-1:psiq_pp | yes | Named salient-pole quadratic runtime and PSD Test 18 component trace gates exist for delta/omega/eq_p/psiq_pp. HACDCPF still lacks PSD residual/mass-matrix/small-signal parity. |
 | generator | machine | SalientPoleExponential / GENSAE | machine | GENSAE | supported-subset | L2 | gensae:generator-102-1:psiq_pp | yes | Named salient-pole exponential runtime and PSD Test 19 component trace gates exist for delta/omega/eq_p/psiq_pp. HACDCPF still lacks PSD residual/mass-matrix/small-signal parity. |
 | generator | machine | OneDOneQMachine | machine | OneDOneQMachine | supported-subset | L1 | onedoneq:generator-102-1:eq_p | yes | Named two-state OneDOneQ runtime path is implemented from the local PSD equations and initialization contract. Still lacks PSD ResidualModel/MassMatrixModel, eigenvalue parity, and an exact salient-machine algebraic network stamp. |
-| generator | machine | MarconatoMachine / SimpleMarconatoMachine | machine |  | missing | L0 |  | n/a | Needs a dedicated machine implementation and initialization path. |
+| generator | machine | SimpleMarconatoMachine | machine | SimpleMarconatoMachine | trace-failing | L1 | simple_marconato:generator-103-1:delta_rad | yes | Runtime, profile parser, local smoke test, and PSD Test 03 exporter exist, but the opt-in PSD comparison currently fails generator-103 delta_rad after the BUS 1-BUS 3 trip (relative rms about 0.0935 rad, max about 0.2119 rad). Stop before full MarconatoMachine. |
+| generator | machine | MarconatoMachine | machine |  | missing | L0 |  | n/a | Full MarconatoMachine is not implemented; blocked until SimpleMarconatoMachine Test 03 clears. |
 | generator | machine | SauerPaiMachine | machine |  | missing | L0 |  | n/a | No named HACDCPF Sauer-Pai machine counterpart. |
 | generator | machine | AndersonFouadMachine / SimpleAFMachine | machine |  | missing | L0 |  | n/a | No named HACDCPF Anderson-Fouad machine counterpart. |
 | generator | shaft | SingleMass | machine | ClassicalMachine | supported-subset | L1 | genrou:generator-102-1:omega_pu | yes | H and D are consumed by HACDCPF machine parameters; PSD models shaft as an explicit subcomponent. |

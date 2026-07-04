@@ -340,6 +340,157 @@ HybridPowerSystem make_psd_onedoneq_three_bus_subset_case() {
   return sys;
 }
 
+void apply_psd_simple_marconato_profile(Generator& machine) {
+  machine.ra_pu = 0.0;
+  machine.xd_pu = 1.3125;
+  machine.xq_pu = 1.2578;
+  machine.xdp_pu = 0.1813;
+  machine.xdpp_pu = 0.14;
+  machine.td0p_s = 5.89;
+  machine.td0pp_s = 0.5;
+  machine.inertia_h = 3.01;
+  machine.droop_r = 0.05;
+  machine.dynamic_model.standard = "PowerSystems";
+  machine.dynamic_model.model_name = "SimpleMarconatoMachine";
+  machine.dynamic_model.source_id = "PowerSimulationsDynamics:test_case03_simple_marconato";
+  machine.dynamic_model.parameters = {
+      {"H", 3.01},
+      {"D", 0.0},
+      {"R", 0.0},
+      {"Xd", 1.3125},
+      {"Xq", 1.2578},
+      {"Xd_p", 0.1813},
+      {"Xq_p", 0.25},
+      {"Xd_pp", 0.14},
+      {"Xq_pp", 0.18},
+      {"Td0_p", 5.89},
+      {"Tq0_p", 0.6},
+      {"Td0_pp", 0.5},
+      {"Tq0_pp", 0.023},
+      {"T_AA", 0.0},
+  };
+}
+
+HybridPowerSystem make_psd_simple_marconato_three_bus_case() {
+  HybridPowerSystem sys;
+  sys.name = "psd_simple_marconato_three_bus";
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 60.0;
+
+  ACBus b101;
+  b101.index = 101;
+  b101.name = "BUS 1";
+  b101.bus_type = BusType::SLACK;
+  b101.base_kv = 138.0;
+  b101.vm_pu = 1.02;
+  b101.va_deg = 0.0;
+  b101.in_service = true;
+
+  ACBus b102;
+  b102.index = 102;
+  b102.name = "BUS 2";
+  b102.bus_type = BusType::PV;
+  b102.base_kv = 138.0;
+  b102.vm_pu = 1.0142;
+  b102.va_deg = 0.0;
+  b102.in_service = true;
+
+  ACBus b103;
+  b103.index = 103;
+  b103.name = "BUS 3";
+  b103.bus_type = BusType::PV;
+  b103.base_kv = 138.0;
+  b103.vm_pu = 1.0059;
+  b103.va_deg = 0.0;
+  b103.in_service = true;
+
+  sys.ac.buses = {b101, b102, b103};
+
+  auto branch = [](int index, int from, int to) {
+    ACBranch br;
+    br.index = index;
+    br.from_bus = from;
+    br.to_bus = to;
+    br.r_pu = 0.01;
+    br.x_pu = 0.12;
+    br.tap = 1.0;
+    br.in_service = true;
+    br.name = "BUS " + std::to_string(from - 100) + "-BUS " +
+              std::to_string(to - 100) + "-i_1";
+    return br;
+  };
+  sys.ac.branches = {
+      branch(1, 101, 103),
+      branch(2, 101, 102),
+      branch(3, 102, 103),
+  };
+
+  ExternalGrid source;
+  source.index = 1;
+  source.bus = 101;
+  source.name = "InfBus";
+  source.in_service = true;
+  source.vm_pu = 1.02;
+  source.va_deg = 0.0;
+  source.r_pu = 0.0;
+  source.x_pu = 5.0e-6;
+  sys.ac.external_grids = {source};
+
+  Generator g102;
+  g102.index = 2;
+  g102.bus = 102;
+  g102.name = "generator-102-1";
+  g102.is_slack = false;
+  g102.in_service = true;
+  g102.pg_mw = 100.0;
+  g102.qg_mvar = 79.44866697732391;
+  g102.vg_pu = 1.0142;
+  g102.pmax_mw = 318.0;
+  g102.pmin_mw = 0.0;
+  g102.qmax_mvar = 100.0;
+  g102.qmin_mvar = -100.0;
+  apply_psd_simple_marconato_profile(g102);
+
+  Generator g103;
+  g103.index = 3;
+  g103.bus = 103;
+  g103.name = "generator-103-1";
+  g103.is_slack = false;
+  g103.in_service = true;
+  g103.pg_mw = 100.0;
+  g103.qg_mvar = 8.108131399904096;
+  g103.vg_pu = 1.0059;
+  g103.pmax_mw = 318.0;
+  g103.pmin_mw = 0.0;
+  g103.qmax_mvar = 100.0;
+  g103.qmin_mvar = -100.0;
+  apply_psd_simple_marconato_profile(g103);
+
+  sys.ac.generators = {g102, g103};
+
+  auto load = [](int index, int bus, double p_mw, double q_mvar) {
+    Load ld;
+    ld.index = index;
+    ld.bus = bus;
+    ld.name = "load" + std::to_string(bus) + "1";
+    ld.p_mw = p_mw;
+    ld.q_mvar = q_mvar;
+    ld.in_service = true;
+    ld.dynamic_model.standard = "PowerSystems";
+    ld.dynamic_model.model_name = "ConstantImpedanceLoad";
+    ld.dynamic_model.source_id = "PowerSimulationsDynamics:test_case03_simple_marconato";
+    return ld;
+  };
+  sys.ac.loads = {
+      load(1, 101, 150.0, 80.0),
+      load(2, 102, 170.0, 70.0),
+      load(3, 103, 50.0, 30.0),
+  };
+
+  return sys;
+}
+
 HybridPowerSystem make_psd_genroe_three_bus_subset_case(bool high_saturation = false) {
   HybridPowerSystem sys = make_psd_genrou_three_bus_subset_case();
   sys.name = high_saturation ? "psd_genroe_high_sat_three_bus_subset"
@@ -1596,6 +1747,73 @@ TEST_CASE("PSD OneDOneQ machine profile initializes and responds as a named mode
   CHECK(series_range(edp) > 1e-5);
 }
 
+TEST_CASE("PSD Test 03 SimpleMarconato machine profile initializes and responds",
+          "[dynamics][benchmark][psd][machine][simple-marconato]") {
+  auto sys = make_psd_simple_marconato_three_bus_case();
+  DynamicSolverOptions opt = fast_options();
+  opt.run_power_flow_initialization = true;
+  opt.t_end_s = 2.0;
+  opt.dt_s = 0.005;
+  opt.record_every_step = true;
+  opt.dynamic_trim_tol = 1e-7;
+  opt.max_dynamic_trim_iters = 20;
+  opt.algebraic_network_max_iters = 8;
+  opt.algebraic_network_tol = 1e-8;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+  DynamicEvent trip;
+  trip.time_s = 1.0;
+  trip.type = DynamicEventType::ACBranchTrip;
+  trip.component_index = 1;
+  trip.component_type = "AC";
+  trip.label = "PSD Test 03 SimpleMarconato BUS 1-BUS 3 branch trip";
+  dyn.events.push_back(trip);
+
+  DynamicSolver solver;
+  const DynamicResults result = solver.solve(dyn);
+
+  INFO(result.message);
+  REQUIRE(result.success);
+  CHECK(result.initialization.power_flow_converged);
+  CHECK(result.initialization.dynamic_trim_converged);
+  REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
+  REQUIRE_FALSE(result.applied_event_records.empty());
+  REQUIRE(result.snapshots.size() > 100);
+
+  for (const int component_index : {2, 3}) {
+    INFO("machine component " << component_index);
+    const auto& gen_out =
+        require_device_output(*result.final_snapshot(), "SynchronousMachine", component_index);
+    CHECK(gen_out.model_name == "SimpleMarconatoMachine");
+    CHECK(gen_out.values.count("psd_simple_marconato") == 1);
+    CHECK(gen_out.values.count("eq_p") == 1);
+    CHECK(gen_out.values.count("ed_p") == 1);
+    CHECK(gen_out.values.count("eq_pp") == 1);
+    CHECK(gen_out.values.count("ed_pp") == 1);
+    CHECK(gen_out.values.count("psi_kd") == 0);
+    REQUIRE(gen_out.model_profiles.size() >= 1);
+    CHECK(std::any_of(gen_out.model_profiles.begin(),
+                      gen_out.model_profiles.end(),
+                      [](const hacdcpf::dynamics::DynamicModelProfile& profile) {
+                        return profile.model_name == "SimpleMarconatoMachine";
+                      }));
+
+    const auto delta =
+        device_output_series(result, "SynchronousMachine", component_index, "angle_rad");
+    const auto omega =
+        device_output_series(result, "SynchronousMachine", component_index, "omega_pu");
+    const auto eqp =
+        device_output_series(result, "SynchronousMachine", component_index, "eq_p");
+    const auto edp =
+        device_output_series(result, "SynchronousMachine", component_index, "ed_p");
+    CHECK(series_range(delta) > 1e-4);
+    CHECK(series_range(omega) > 1e-7);
+    CHECK(series_range(eqp) > 1e-5);
+    CHECK(series_range(edp) > 1e-5);
+  }
+}
+
 TEST_CASE("PSD PSSE machine profiles initialize and expose distinct states",
           "[dynamics][benchmark][psd][machine][psse]") {
   struct MachineSmokeCase {
@@ -1902,6 +2120,70 @@ TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system tra
                      0.03,
                      "component",
                      true});
+  }
+
+  {
+    auto sys = make_psd_simple_marconato_three_bus_case();
+    DynamicSolverOptions opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.t_end_s = 2.0;
+    opt.dt_s = 0.005;
+    opt.record_every_step = true;
+    opt.dynamic_trim_tol = 1e-7;
+    opt.max_dynamic_trim_iters = 20;
+    opt.algebraic_network_max_iters = 8;
+    opt.algebraic_network_tol = 1e-8;
+
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(sys, opt);
+    DynamicEvent trip;
+    trip.time_s = 1.0;
+    trip.type = DynamicEventType::ACBranchTrip;
+    trip.component_index = 1;
+    trip.component_type = "AC";
+    trip.label = "PSD Test 03 SimpleMarconato BUS 1-BUS 3 branch trip";
+    dyn.events.push_back(trip);
+
+    DynamicSolver solver;
+    const DynamicResults result = solver.solve(dyn);
+    REQUIRE(result.success);
+
+    struct SimpleMarconatoDeviceSpec {
+      int component_index;
+      std::string psd_ref;
+    };
+    const std::vector<SimpleMarconatoDeviceSpec> devices = {
+        {2, "generator-102-1"},
+        {3, "generator-103-1"},
+    };
+    const std::vector<MachineTraceSpec> traces = {
+        {"angle_rad", "delta_rad", 0.05, 0.12},
+        {"omega_pu", "omega_pu", 0.002, 0.005},
+        {"eq_p", "eq_p", 0.02, 0.04},
+        {"ed_p", "ed_p", 0.02, 0.04},
+    };
+    for (const auto& device : devices) {
+      for (const auto& trace : traces) {
+        auto local = device_output_series(result,
+                                          "SynchronousMachine",
+                                          device.component_index,
+                                          trace.local_key);
+        write_csv_series(out_dir /
+                             ("hacdcpf_psd_simple_marconato_" +
+                              safe_artifact_token(device.psd_ref) + "_" +
+                              safe_artifact_token(trace.psd_quantity) + ".csv"),
+                         local);
+        specs.push_back({"simple_marconato",
+                         device.psd_ref + ":" + trace.psd_quantity,
+                         std::move(local),
+                         0.0,
+                         2.0,
+                         trace.rms_tolerance,
+                         trace.max_tolerance,
+                         "component",
+                         true});
+      }
+    }
   }
 
   append_psse_machine_specs(

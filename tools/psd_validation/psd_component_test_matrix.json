@@ -4,6 +4,7 @@
   "scope": "First-pass PowerSimulationsDynamics.jl component-test comparison focused on transmission-dynamics machines and IBRs.",
   "status_legend": {
     "compare-limited": "HACDCPF has a current model and an existing or near-existing trace hook, but it does not cover PSD's full residual/mass-matrix/small-signal test contract.",
+    "compare-failing": "HACDCPF has a current model and trace hook, but the current PSD comparison gate fails and must be treated as a stop/go blocker.",
     "blocked-missing-model": "The PSD test's primary model is not implemented in the HACDCPF transient runtime.",
     "blocked-missing-controller": "The base machine or IBR may exist, but a required PSD controller/block is not implemented.",
     "blocked-missing-formulation": "The dynamic behavior may be partially present, but HACDCPF does not yet expose PSD-equivalent residual/mass-matrix/small-signal parity.",
@@ -50,10 +51,10 @@
       "group": "machine",
       "psd_tests": "Test 03",
       "psd_components": "SimpleMarconatoMachine",
-      "hacdcpf_candidate": "",
-      "status": "blocked-missing-model",
-      "first_blocker": "No SimpleMarconato runtime model.",
-      "next_action": "Defer until the basic machine ladder is complete."
+      "hacdcpf_candidate": "SimpleMarconatoMachine",
+      "status": "compare-failing",
+      "first_blocker": "Runtime, PSD exporter, and local smoke gate exist, but the opt-in PSD Test 03 comparison fails generator-103 delta_rad_relative after the BUS 1-BUS 3 trip (rms about 0.0935 rad, max about 0.2119 rad).",
+      "next_action": "Stop before full MarconatoMachine; investigate the dynamic network/initialization angle drift for the bus-103 machine."
     },
     {
       "group": "machine",

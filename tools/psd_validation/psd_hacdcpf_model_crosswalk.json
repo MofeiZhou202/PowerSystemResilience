@@ -5,6 +5,7 @@
   "status_legend": {
     "exact-or-close": "The named HACDCPF model is intended to be directly comparable for focused traces, subject to parameter and initialization matching.",
     "supported-subset": "HACDCPF has a named model or controller that captures the main behavior but omits PSD states, limiters, saturation, or formulation details.",
+    "trace-failing": "A HACDCPF runtime/profile and trace hook exist, but the current PSD comparison gate does not pass.",
     "profile-only": "HACDCPF can preserve the profile identity in dynamic_model metadata, but the transient runtime does not yet implement equivalent behavior.",
     "missing": "No HACDCPF runtime counterpart is currently present."
   },
@@ -85,13 +86,24 @@
     {
       "domain": "generator",
       "psd_slot": "machine",
-      "psd_model": "MarconatoMachine / SimpleMarconatoMachine",
+      "psd_model": "SimpleMarconatoMachine",
+      "hacdcpf_slot": "machine",
+      "hacdcpf_model": "SimpleMarconatoMachine",
+      "status": "trace-failing",
+      "comparison_level": "L1",
+      "trace_case": "simple_marconato:generator-103-1:delta_rad",
+      "notes": "Runtime, profile parser, local smoke test, and PSD Test 03 exporter exist, but the opt-in PSD comparison currently fails generator-103 delta_rad after the BUS 1-BUS 3 trip (relative rms about 0.0935 rad, max about 0.2119 rad). Stop before full MarconatoMachine."
+    },
+    {
+      "domain": "generator",
+      "psd_slot": "machine",
+      "psd_model": "MarconatoMachine",
       "hacdcpf_slot": "machine",
       "hacdcpf_model": "",
       "status": "missing",
       "comparison_level": "L0",
       "trace_case": "",
-      "notes": "Needs a dedicated machine implementation and initialization path."
+      "notes": "Full MarconatoMachine is not implemented; blocked until SimpleMarconatoMachine Test 03 clears."
     },
     {
       "domain": "generator",

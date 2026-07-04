@@ -173,6 +173,25 @@ void apply_voltage_source_profile(const hacdcpf::DynamicModelProfile& profile,
     params.xqp_pu = find_param({"Xq_p", "Xqp", "xq_p", "xqp"}, params.xqp_pu);
     params.td0p_s = find_param({"Td0_p", "Td0p", "td0_p", "td0p"}, params.td0p_s);
     params.tq0p_s = find_param({"Tq0_p", "Tq0p", "tq0_p", "tq0p"}, params.tq0p_s);
+  } else if (iequals(profile.model_name, "SimpleMarconatoMachine") ||
+             iequals(profile.model_name, "SimpleMarconato")) {
+    params.machine_model = SynchronousMachineModelKind::SimpleMarconato;
+    params.machine_model_name = "SimpleMarconatoMachine";
+    params.psd_genrou_model = false;
+    params.inertia_h = find_param({"H", "h"}, params.inertia_h);
+    params.damping_d = find_param({"D", "damping_d", "damping"}, params.damping_d);
+    params.r_pu = find_param({"R", "Ra", "r"}, params.r_pu);
+    params.xd_pu = find_param({"Xd", "xd"}, params.xd_pu);
+    params.xq_pu = find_param({"Xq", "xq"}, params.xq_pu);
+    params.xdp_pu = find_param({"Xd_p", "Xdp", "xd_p", "xdp"}, params.xdp_pu);
+    params.xqp_pu = find_param({"Xq_p", "Xqp", "xq_p", "xqp"}, params.xqp_pu);
+    params.xdpp_pu = find_param({"Xd_pp", "Xdpp", "xd_pp", "xdpp"}, params.xdpp_pu);
+    params.xqpp_pu = find_param({"Xq_pp", "Xqpp", "xq_pp", "xqpp"}, params.xqpp_pu);
+    params.td0p_s = find_param({"Td0_p", "Td0p", "td0_p", "td0p"}, params.td0p_s);
+    params.tq0p_s = find_param({"Tq0_p", "Tq0p", "tq0_p", "tq0p"}, params.tq0p_s);
+    params.td0pp_s = find_param({"Td0_pp", "Td0pp", "td0_pp", "td0pp"}, params.td0pp_s);
+    params.tq0pp_s = find_param({"Tq0_pp", "Tq0pp", "tq0_pp", "tq0pp"}, params.tq0pp_s);
+    params.t_aa_s = find_param({"T_AA", "TAA", "t_aa", "taa"}, params.t_aa_s);
   } else if (iequals(profile.model_name, "GENROU") ||
              iequals(profile.model_name, "RoundRotorQuadratic")) {
     params.machine_model = SynchronousMachineModelKind::GENROU;

@@ -1,6 +1,6 @@
 # HACDCPF vs PowerSimulationsDynamics.jl Dynamic Capability Analysis
 
-Date: 2026-07-02
+Date: 2026-07-04
 
 This note compares the current transient modelling and analysis capability in
 this repository with the local sibling repository:
@@ -24,6 +24,47 @@ The right direction is not to depend on Fortran or to replace the C++ module.
 The right direction is to keep the HACDCPF hybrid AC/DC, three-phase,
 distribution, GUI, and IO architecture, then adopt a PowerSimulationsDynamics.jl
 style dynamic-component taxonomy and verification discipline.
+
+## 2026-07-04 Reinvestigation Result
+
+The live PSD ledgers are:
+
+- `tools/psd_validation/psd_model_comparison.md`
+- `tools/psd_validation/psd_component_test_matrix.md`
+
+They are the authority for current stop/go status. As of this update, the
+model crosswalk has 44 rows: 2 `exact-or-close`, 22 `supported-subset`, 1
+`trace-failing`, 2 `profile-only`, and 17 `missing`. The machine/IBR component
+gate has 39 rows: 12 `compare-limited`, 1 `compare-failing`, 12
+`blocked-missing-model`, 9 `blocked-missing-controller`, 3
+`blocked-missing-formulation`, and 2 `metadata-only`.
+
+Current answer to "can we pass the PSD machine/IBR component suite?" is no.
+The reason is not one tolerance problem. The suite is blocked by missing model
+families, missing controller families, and missing residual/mass-matrix and
+small-signal parity.
+
+What can be compared today is a reduced trace subset:
+
+- OneDOneQMachine from PSD Test 02: `delta`, `omega`, `eq_p`, `ed_p`.
+- GENROU from PSD Test 15: reduced machine trace gates.
+- GENROE from PSD Test 16, including high-saturation variant: `delta`,
+  `omega`, `eq_p`, `ed_p`.
+- GENSAL from PSD Test 18: `delta`, `omega`, `eq_p`, `psiq_pp`.
+- GENSAE from PSD Test 19: `delta`, `omega`, `eq_p`, `psiq_pp`.
+- SimpleMarconatoMachine from PSD Test 03 now has a runtime path and exporter,
+  but the external trace gate is not accepted because generator-103
+  `delta_rad_relative` fails after the BUS 1-BUS 3 trip.
+- Grid-following inverter Tests 24 and 51: selected active-power traces.
+- ZIP/constant-power load traces from PSD Test 33.
+
+These are useful validation gates, but they are not full PSD parity. Full pass
+claims require a residual/mass-matrix formulation, initialization residual
+checks at PSD scope, eigenvalue/small-signal comparison, and the remaining
+model/controller library.
+
+Julia and PowerSimulationsDynamics.jl remain local validation oracles only.
+They must not be linked into or required by the HACDCPF release module.
 
 ## Evidence Sources
 
@@ -75,13 +116,13 @@ PowerSimulationsDynamics.jl sources inspected:
 | Inverter GFM | Norton voltage-source droop model with telemetry and optional DC link | Droop inverter, VSM, VOC and average converter tests with PSCAD-style references | HACDCPF needs multiple standard GFM profiles |
 | AC filters | Algebraic Norton/reactance interface | RL and differential LCL filter models with mass-matrix entries | HACDCPF lacks selectable filter dynamics |
 | DC side | Native AC/DC network, DC buses, DC branches, VSC, DCDC, battery, PV, optional dynamic DC link | DC source component inside inverter meta-model; not a hybrid AC/DC network framework | HACDCPF is stronger here, but needs standard DC-source submodels |
-| Conventional machines | Classical machine plus simple governor/exciter subsets | Many machine, shaft, AVR, PSS, and governor families with initialization and tests | HACDCPF needs GENROU/GENSAL/AVR/PSS/governor family expansion |
+| Conventional machines | Classical, OneDOneQ, GENROU, GENROE, GENSAL, and GENSAE reduced runtime paths with selected PSD trace gates; simplified SEXS/TGOV1/IEEET1/PSS1A coverage | Many machine, shaft, AVR, PSS, and governor families with initialization, residual/mass-matrix, and eigenvalue tests | HACDCPF still needs Marconato, Anderson-Fouad, Sauer-Pai, five-mass shaft, broader controllers, and full DAE parity |
 | Initialization | Starts from power flow, initializes device states, runs local trim hooks, records `dynamic_fast_dxdt_inf_norm` | PF-based device initialization, inverter sequence, full nonlinear equilibrium solve, strict no-perturbation stationary expectation | HACDCPF needs system-wide DAE equilibrium solve |
 | Numerical formulation | Device-stamped partitioned phasor network, Euler/Heun/RK4, Backward Euler, trapezoidal, Rosenbrock-like step, numerical state Jacobian | `ResidualModel` and `MassMatrixModel`, simultaneous DAE formulation, SciML solvers, AD Jacobian | HACDCPF lacks full residual/mass-matrix DAE API and sparse Jacobian path |
 | Small signal | Not yet a first-class dynamic API | `get_jacobian`, reduced Jacobian, eigenvalues/eigenvectors, participation summaries | Major HACDCPF gap |
 | Perturbations | Branch trip/close, load scale, generator/VSC/DCDC trips, storage step, fault shunt, clear fault, structured event records | NetworkSwitch, BranchTrip, BranchImpedanceChange, GeneratorTrip, LoadTrip/Change, ControlReferenceChange, SourceBusVoltageChange, PerturbState | HACDCPF event family is good but should add control reference and impedance-change semantics |
 | IO/standards | Strong component IO registry, JSON, GridLAB-D/OpenDSS static text, standard profile metadata placeholders | Uses PowerSystems.jl dynamic model data and PSS/E-style benchmark fixtures | HACDCPF needs exact dynamic parameter-profile IO, not just metadata |
-| Verification | C++ synthetic transient tests, GUI route tests, GridLAB-D/OpenDSS static-network checks | Extensive benchmark tests against PSS/E, PSCAD, PSAT, ANDES; residual and mass-matrix variants | HACDCPF needs PSD-style benchmark ladder |
+| Verification | C++ synthetic transient tests, GUI route tests, GridLAB-D/OpenDSS static-network checks, and local opt-in PSD trace gates for selected machines/IBRs | Extensive benchmark tests against PSS/E, PSCAD, PSAT, ANDES; residual and mass-matrix variants | HACDCPF needs to promote trace gates into full residual/mass-matrix/small-signal gates before broad parity claims |
 | GUI | `暂态仿真` route, event editor, voltage/frequency/converter/generator/observer plots | Not the same GUI focus | HACDCPF GUI can become a differentiator once models are validated |
 
 ## HACDCPF Strengths To Preserve
@@ -346,9 +387,19 @@ Required GFM profiles:
 
 Current HACDCPF has:
 
-- classical machine,
-- simple governor defaulting to `TGOV1` metadata,
-- simple exciter defaulting to `SEXS` metadata.
+- `ClassicalMachine`,
+- `OneDOneQMachine`,
+- `GENROU`,
+- `GENROE`,
+- `GENSAL`,
+- `GENSAE`,
+- simplified `SEXS`, `IEEET1`, `TGOV1`, `IEEEG1`, and `PSS1A` profile/runtime
+  coverage.
+
+The machine trace gates are compare-limited, not full PSD test passes. They
+compare selected state trajectories, but they do not yet reproduce PSD's full
+initialization, `ResidualModel`, `MassMatrixModel`, PSAT/PSS/E benchmark, and
+small-signal contracts.
 
 PSD has many industry-style machine and controller families, including:
 
@@ -367,6 +418,18 @@ Required change:
   store the actual dynamic profile explicitly rather than inferring it only from
   fuel type.
 - Build benchmark cases one model family at a time.
+- Treat a PSD component row as passing only when the accepted trace signals and
+  the agreed formulation gates pass.
+
+Machine-first implementation order:
+
+1. `SimpleMarconatoMachine`, then `MarconatoMachine`.
+2. `SimpleAFMachine`, then `AndersonFouadMachine`.
+3. `SauerPaiMachine`.
+4. `FiveMassShaft`.
+5. Controller-by-controller expansion: first `SEXS`, `IEEET1`, and `TGOV1`
+   hard trace gates; then the missing AVR, governor, and PSS families selected
+   by the benchmark set.
 
 ### E. Initialization Gap
 
@@ -647,24 +710,33 @@ Extend `暂态仿真` so the GUI communicates model credibility, not just wavefo
 
 ## Proposed First Implementation Slice
 
-The highest-value first slice is:
+The current highest-value first slice is machine-first, because the local PSD
+suite exposes clear isolated machine tests and the selected comparison ladder
+starts there:
 
-1. Add dynamic profile schema and JSON round-trip.
-2. Refactor existing GFL/GFM into a composable inverter shell while preserving
-   existing behavior and tests.
-3. Implement KauraPLL, ReducedOrderPLL, and one REGC_A-style converter block.
-4. Add a PSD comparison harness for a single grid-following inverter infinite
-   bus case.
-5. Make no-event equilibrium residual a hard pass/fail in that benchmark.
+1. Keep Julia/PSD in `tools/psd_validation` and opt-in tests only.
+2. Add a PSD trace exporter case for `SimpleMarconatoMachine`.
+3. Implement the HACDCPF `SimpleMarconatoMachine` runtime and initialization
+   path.
+4. Gate it against PSD Test 03 with agreed signals: `delta`, `omega`, `eq_p`,
+   and `ed_p`.
+5. Current stop point: the Test 03 exporter and local smoke gate exist, but the
+   opt-in PSD comparison fails `generator-103-1:delta_rad_relative` after the
+   BUS 1-BUS 3 trip (rms about 0.0935 rad, max about 0.2119 rad). Do not proceed
+   to `MarconatoMachine` until this drift is resolved or explicitly accepted.
 
-This gives an end-to-end proof path:
+This gives a disciplined proof path:
 
 ```text
 profile IO -> canonical projection -> initialization -> time simulation
 -> PSD/PSS-E comparison -> GUI-visible claim
 ```
 
-After that, add REEC/REPCA and DERA, then GFM profiles.
+After `SimpleMarconatoMachine`, continue one model at a time:
+`MarconatoMachine`, `SimpleAFMachine`, `AndersonFouadMachine`,
+`SauerPaiMachine`, and `FiveMassShaft`. Controller work should follow the same
+pattern: one PSD test, one controller, one exported trace set, one stop/go
+decision.
 
 ## Claim Wording
 
@@ -680,6 +752,11 @@ Current non-defensible claim:
 
 > HACDCPF is equivalent to PowerSimulationsDynamics.jl for inverter-based
 > resource dynamics.
+
+Also non-defensible today:
+
+> HACDCPF passes the PowerSimulationsDynamics.jl machine and IBR component test
+> suite.
 
 Future claim after the roadmap:
 

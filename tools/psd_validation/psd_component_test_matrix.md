@@ -11,13 +11,15 @@ This is the first-pass gate for comparing PowerSimulationsDynamics.jl transmissi
 - Blocked rows: 27
 - blocked-missing-controller: 9
 - blocked-missing-formulation: 3
-- blocked-missing-model: 13
+- blocked-missing-model: 12
+- compare-failing: 1
 - compare-limited: 12
 - metadata-only: 2
 
 ## Status Legend
 
 - `compare-limited`: HACDCPF has a current model and an existing or near-existing trace hook, but it does not cover PSD's full residual/mass-matrix/small-signal test contract.
+- `compare-failing`: HACDCPF has a current model and trace hook, but the current PSD comparison gate fails and must be treated as a stop/go blocker.
 - `blocked-missing-model`: The PSD test's primary model is not implemented in the HACDCPF transient runtime.
 - `blocked-missing-controller`: The base machine or IBR may exist, but a required PSD controller/block is not implemented.
 - `blocked-missing-formulation`: The dynamic behavior may be partially present, but HACDCPF does not yet expose PSD-equivalent residual/mass-matrix/small-signal parity.
@@ -31,7 +33,7 @@ This is the first-pass gate for comparing PowerSimulationsDynamics.jl transmissi
 | machine | Test 02 | OneDOneQMachine, SingleMass | OneDOneQMachine | compare-limited | Local PSD Test 02 delta/omega/eq_p/ed_p trace gates pass over 0-2s, but HACDCPF does not yet provide PSD-equivalent ResidualModel, MassMatrixModel, eigenvalue, or PSAT trace parity. | Implement the residual/mass-matrix/small-signal parity gate before claiming a full PSD Test 02 pass. |
 | machine-ibr | Test 10, Test 11 | OneDOneQMachine, VSM inverter, static/dynamic branches | OneDOneQMachine | blocked-missing-model | VSM inverter is not implemented; Test 11 also needs dynamic branch behavior. | Do not attempt these tests until VSM and dynamic branch models exist. |
 | machine-controller | Test 13 | OneDOneQMachine with AVRTypeII / AVRSimple and TGTypeI variations | OneDOneQMachine | blocked-missing-controller | AVRTypeII, AVRSimple, and TGTypeI are not implemented as PSD-equivalent controllers. | Run only after the OneDOneQ base trace passes and the required controller blocks are mapped. |
-| machine | Test 03 | SimpleMarconatoMachine |  | blocked-missing-model | No SimpleMarconato runtime model. | Defer until the basic machine ladder is complete. |
+| machine | Test 03 | SimpleMarconatoMachine | SimpleMarconatoMachine | compare-failing | Runtime, PSD exporter, and local smoke gate exist, but the opt-in PSD Test 03 comparison fails generator-103 delta_rad_relative after the BUS 1-BUS 3 trip (rms about 0.0935 rad, max about 0.2119 rad). | Stop before full MarconatoMachine; investigate the dynamic network/initialization angle drift for the bus-103 machine. |
 | machine | Test 04, Test 25 | MarconatoMachine, dynamic-line benchmark |  | blocked-missing-model | No Marconato runtime model; Test 25 also needs dynamic branch behavior. | Do not attempt trace parity until Marconato and dynamic branches exist. |
 | machine | Test 05 | SimpleAFMachine |  | blocked-missing-model | No Simple Anderson-Fouad runtime model. | Defer behind GENROU/GENSAL coverage. |
 | machine | Test 06 | AndersonFouadMachine |  | blocked-missing-model | No Anderson-Fouad runtime model. | Defer behind GENROU/GENSAL coverage. |

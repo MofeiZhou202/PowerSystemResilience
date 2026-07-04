@@ -31,6 +31,7 @@ enum class DynamicLoadModelKind {
 enum class SynchronousMachineModelKind {
   Classical,
   OneDOneQ,
+  SimpleMarconato,
   GENROU,
   GENROE,
   GENSAL,
@@ -256,11 +257,13 @@ struct VoltageSourceDynamicParams {
   double xdp_pu{0.0};
   double xqp_pu{0.0};
   double xdpp_pu{0.0};
+  double xqpp_pu{0.0};
   double xl_pu{0.0};
   double td0p_s{0.0};
   double td0pp_s{0.0};
   double tq0p_s{0.0};
   double tq0pp_s{0.0};
+  double t_aa_s{0.0};
   double saturation_a{0.0};
   double saturation_b{0.0};
   SynchronousMachineModelKind machine_model{SynchronousMachineModelKind::Classical};

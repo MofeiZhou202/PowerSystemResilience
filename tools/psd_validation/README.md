@@ -122,6 +122,7 @@ julia --project=/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl/test \
 Supported cases today:
 
 - `onedoneq` / `test02`
+- `simple_marconato` / `test03`
 - `genrou`
 - `genroe` / `test16`
 - `genroe_high_sat` / `test16_high_sat`
@@ -140,6 +141,8 @@ Supported signals today:
 - `<device>:omega_pu`
 - `<device>:eq_p`
 - `<device>:ed_p`
+- `<device>:eq_pp`
+- `<device>:ed_pp`
 - `<device>:psi_kd`
 - `<device>:psi_kq`
 - `<device>:psiq_pp` / `<device>:psi_q_pp`
@@ -159,9 +162,11 @@ HACDCPF_RUN_PSD_COMPARE=1 ./build/macos-release/tests/test_transient_dynamics \
 The conventional component checks are now numerical PSD trace gates rather than
 plumbing-only checks. The ZIP constant-power case compares bus-102 and bus-103
 voltage-magnitude deviations against PSD Test 33. The machine gates cover GENROU,
-OneDOneQ, GENROE normal/high-saturation variants, GENSAL, and GENSAE traces.
-GENROE compares `delta_rad`/`omega_pu`/`eq_p`/`ed_p`; GENSAL and GENSAE compare
-`delta_rad`/`omega_pu`/`eq_p`/`psiq_pp`. The PSSE machine angle gate is
+OneDOneQ, SimpleMarconato, GENROE normal/high-saturation variants, GENSAL, and
+GENSAE traces. SimpleMarconato currently stops on a failing PSD Test 03
+`generator-103-1:delta_rad` comparison; do not proceed to full Marconato from
+this gate yet. GENROE compares `delta_rad`/`omega_pu`/`eq_p`/`ed_p`; GENSAL and
+GENSAE compare `delta_rad`/`omega_pu`/`eq_p`/`psiq_pp`. The PSSE machine angle gate is
 intentionally broader than the inverter gates because HACDCPF still uses its
 synthesized three-phase network solve instead of PSD's exact positive-sequence
 residual DAE.
