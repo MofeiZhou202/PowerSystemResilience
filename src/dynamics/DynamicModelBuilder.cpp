@@ -174,8 +174,7 @@ void apply_voltage_source_profile(const hacdcpf::DynamicModelProfile& profile,
     params.td0p_s = find_param({"Td0_p", "Td0p", "td0_p", "td0p"}, params.td0p_s);
     params.tq0p_s = find_param({"Tq0_p", "Tq0p", "tq0_p", "tq0p"}, params.tq0p_s);
   } else if (iequals(profile.model_name, "GENROU") ||
-             iequals(profile.model_name, "RoundRotorQuadratic") ||
-             iequals(profile.model_name, "RoundRotorExponential")) {
+             iequals(profile.model_name, "RoundRotorQuadratic")) {
     params.machine_model = SynchronousMachineModelKind::GENROU;
     params.machine_model_name = "GENROU";
     params.psd_genrou_model = true;
@@ -191,6 +190,49 @@ void apply_voltage_source_profile(const hacdcpf::DynamicModelProfile& profile,
     params.td0p_s = find_param({"Td0_p", "Td0p", "td0_p", "td0p"}, params.td0p_s);
     params.td0pp_s = find_param({"Td0_pp", "Td0pp", "td0_pp", "td0pp"}, params.td0pp_s);
     params.tq0p_s = find_param({"Tq0_p", "Tq0p", "tq0_p", "tq0p"}, params.tq0p_s);
+    params.tq0pp_s = find_param({"Tq0_pp", "Tq0pp", "tq0_pp", "tq0pp"}, params.tq0pp_s);
+    params.saturation_a = find_param({"Sat_A", "saturation_a", "Se_A"}, params.saturation_a);
+    params.saturation_b = find_param({"Sat_B", "saturation_b", "Se_B"}, params.saturation_b);
+  } else if (iequals(profile.model_name, "GENROE") ||
+             iequals(profile.model_name, "RoundRotorExponential")) {
+    params.machine_model = SynchronousMachineModelKind::GENROE;
+    params.machine_model_name = "GENROE";
+    params.psd_genrou_model = true;
+    params.inertia_h = find_param({"H", "h"}, params.inertia_h);
+    params.damping_d = find_param({"D", "damping_d", "damping"}, params.damping_d);
+    params.r_pu = find_param({"R", "Ra", "r"}, params.r_pu);
+    params.xd_pu = find_param({"Xd", "xd"}, params.xd_pu);
+    params.xq_pu = find_param({"Xq", "xq"}, params.xq_pu);
+    params.xdp_pu = find_param({"Xd_p", "Xdp", "xd_p", "xdp"}, params.xdp_pu);
+    params.xqp_pu = find_param({"Xq_p", "Xqp", "xq_p", "xqp"}, params.xqp_pu);
+    params.xdpp_pu = find_param({"Xd_pp", "Xdpp", "xd_pp", "xdpp"}, params.xdpp_pu);
+    params.xl_pu = find_param({"Xl", "xl"}, params.xl_pu);
+    params.td0p_s = find_param({"Td0_p", "Td0p", "td0_p", "td0p"}, params.td0p_s);
+    params.td0pp_s = find_param({"Td0_pp", "Td0pp", "td0_pp", "td0pp"}, params.td0pp_s);
+    params.tq0p_s = find_param({"Tq0_p", "Tq0p", "tq0_p", "tq0p"}, params.tq0p_s);
+    params.tq0pp_s = find_param({"Tq0_pp", "Tq0pp", "tq0_pp", "tq0pp"}, params.tq0pp_s);
+    params.saturation_a = find_param({"Sat_A", "saturation_a", "Se_A"}, params.saturation_a);
+    params.saturation_b = find_param({"Sat_B", "saturation_b", "Se_B"}, params.saturation_b);
+  } else if (iequals(profile.model_name, "GENSAL") ||
+             iequals(profile.model_name, "SalientPoleQuadratic") ||
+             iequals(profile.model_name, "GENSAE") ||
+             iequals(profile.model_name, "SalientPoleExponential")) {
+    const bool exponential = iequals(profile.model_name, "GENSAE") ||
+                             iequals(profile.model_name, "SalientPoleExponential");
+    params.machine_model = exponential ? SynchronousMachineModelKind::GENSAE
+                                       : SynchronousMachineModelKind::GENSAL;
+    params.machine_model_name = exponential ? "GENSAE" : "GENSAL";
+    params.psd_genrou_model = false;
+    params.inertia_h = find_param({"H", "h"}, params.inertia_h);
+    params.damping_d = find_param({"D", "damping_d", "damping"}, params.damping_d);
+    params.r_pu = find_param({"R", "Ra", "r"}, params.r_pu);
+    params.xd_pu = find_param({"Xd", "xd"}, params.xd_pu);
+    params.xq_pu = find_param({"Xq", "xq"}, params.xq_pu);
+    params.xdp_pu = find_param({"Xd_p", "Xdp", "xd_p", "xdp"}, params.xdp_pu);
+    params.xdpp_pu = find_param({"Xd_pp", "Xdpp", "xd_pp", "xdpp"}, params.xdpp_pu);
+    params.xl_pu = find_param({"Xl", "xl"}, params.xl_pu);
+    params.td0p_s = find_param({"Td0_p", "Td0p", "td0_p", "td0p"}, params.td0p_s);
+    params.td0pp_s = find_param({"Td0_pp", "Td0pp", "td0_pp", "td0pp"}, params.td0pp_s);
     params.tq0pp_s = find_param({"Tq0_pp", "Tq0pp", "tq0_pp", "tq0pp"}, params.tq0pp_s);
     params.saturation_a = find_param({"Sat_A", "saturation_a", "Se_A"}, params.saturation_a);
     params.saturation_b = find_param({"Sat_B", "saturation_b", "Se_B"}, params.saturation_b);

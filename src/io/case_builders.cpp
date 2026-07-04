@@ -306,7 +306,7 @@ int find_bus_index_by_original_id(const HybridPowerSystem& sys, int original_bus
 }
 
 void attach_case300_style_mtdc(HybridPowerSystem& sys) {
-  // Match Julia case300/case2000 overlay exactly:
+  // Match the case300/case2000 MTDC overlay exactly:
   // - 6 DC buses, 6 DC branches (closed ring)
   // - 6 converters at mapped AC bus IDs [8, 76, 119, 149, 198, 243]
   // - alternating modes with PQ setpoints [0.50, -, 0.30, 0.40, -, 0.35] p.u.
@@ -393,7 +393,7 @@ void attach_case2000_style_mtdc(HybridPowerSystem& sys) {
     return;
   }
 
-  // Match Julia build_case2000_acdc():
+  // Build the case2000 AC/DC overlay:
   // 1) choose strongest generator-like AC bus per area,
   // 2) build one DC bus per area in a ring + cross-link,
   // 3) place one converter per area, alternating PQ/VDC_Q.
@@ -459,7 +459,7 @@ void attach_case2000_style_mtdc(HybridPowerSystem& sys) {
   for (int i = 0; i < n_areas; ++i) {
     DCBus b;
     b.index = i + 1;
-    b.bus_type = DCBusType::DC_P;  // Match Julia _dc_bus default
+    b.bus_type = DCBusType::DC_P;
     b.vm_pu = 1.0;
     b.pd_mw = 0.0;
     b.in_service = true;
@@ -3535,7 +3535,7 @@ HybridPowerSystem build_five_province_acdc() {
     }
   }
 
-  // ---- Inter-BA AC Tielines (16 connections matching Julia template) ----
+  // ---- Inter-BA AC Tielines (16 template connections) ----
   struct TielineDef { int from_ba, to_ba; double capacity; };
   static const TielineDef kACTies[] = {
     // GD internal — aggregated multi-circuit corridors
@@ -3565,7 +3565,7 @@ HybridPowerSystem build_five_province_acdc() {
                "Tie_BA" + std::to_string(t.from_ba) + "_BA" + std::to_string(t.to_ba));
   }
 
-  // ---- HVDC Links (3 DC tielines matching Julia template) ----
+  // ---- HVDC Links (3 DC tielines) ----
   // DC Link 1: GD(BA1) ↔ YN(BA8) – 5000 MW 800 kV "West-East HVDC"
   // DC Link 2: GD(BA1) ↔ GZ(BA11) – 3200 MW 500 kV
   // DC Link 3: GD(BA2) ↔ HN(BA14) – 1200 MW submarine cable

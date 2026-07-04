@@ -65,10 +65,9 @@ fs::path reliability_data(const char* name) {
   return repo_root() / "tests" / "data" / "reliability" / name;
 }
 
-/// Run with default options; inherit stdio so CI logs show Julia output.
+/// Run with default native options.
 ThreeStageReliabilityResult run_case(const char* json_name) {
   ThreeStageReliabilityOptions opts;
-  opts.inherit_stdio = true;
   return run_three_stage_reliability(reliability_data(json_name), opts);
 }
 
@@ -135,7 +134,6 @@ TEST_CASE("Three-stage reliability — symbol linkage and project tree",
 
   // Verify symbol linkage: calling with empty JSON must return an error, not throw.
   ThreeStageReliabilityOptions opts;
-  opts.inherit_stdio = false;
   auto r = run_three_stage_reliability_from_string("", opts);
   CHECK(!r.ok);
   CHECK(!r.error.empty());
@@ -208,11 +206,9 @@ TEST_CASE("Three-stage reliability — converter fault set extends contingencies
   REQUIRE(fs::exists(path));
 
   ThreeStageReliabilityOptions base;
-  base.inherit_stdio = true;
   auto r_base = run_three_stage_reliability(path, base);
 
   ThreeStageReliabilityOptions with_conv;
-  with_conv.inherit_stdio = true;
   with_conv.include_converter_faults = true;  // case33mg_acdc has >=1 VSC
   auto r_conv = run_three_stage_reliability(path, with_conv);
 
@@ -245,11 +241,9 @@ TEST_CASE("Three-stage reliability — VSC fault islands a VSC-fed DC load",
   const std::string js = hacdcpf::io::to_json(sys, 2);
 
   ThreeStageReliabilityOptions base;
-  base.inherit_stdio = true;
   auto r_base = hacdcpf::analysis::run_three_stage_reliability_from_string(js, base);
 
   ThreeStageReliabilityOptions conv;
-  conv.inherit_stdio = true;
   conv.include_converter_faults = true;
   auto r_conv = hacdcpf::analysis::run_three_stage_reliability_from_string(js, conv);
 
@@ -292,12 +286,10 @@ TEST_CASE("Three-stage reliability — DC power flow captures a DC line-limit sh
   const std::string js = hacdcpf::io::to_json(sys, 2);
 
   ThreeStageReliabilityOptions cap;  // force the legacy capacity-only fallback
-  cap.inherit_stdio = true;
   cap.include_dc_power_flow = false;
   auto r_cap = hacdcpf::analysis::run_three_stage_reliability_from_string(js, cap);
 
   ThreeStageReliabilityOptions pf;
-  pf.inherit_stdio = true;
   pf.include_dc_power_flow = true;
   auto r_pf = hacdcpf::analysis::run_three_stage_reliability_from_string(js, pf);
 
@@ -355,7 +347,6 @@ TEST_CASE("Three-stage reliability — case33bw_acdc (33-bus BW + SOP)",
 TEST_CASE("Three-stage reliability — graceful error on missing case file",
           "[reliability][three_stage][error]") {
   ThreeStageReliabilityOptions opts;
-  opts.inherit_stdio = false;
   auto r = run_three_stage_reliability(
       reliability_data("nonexistent_case_12345.json"), opts);
 
@@ -386,7 +377,6 @@ TEST_CASE("Three-stage reliability — AC bus load is not counted twice",
   })json";
 
   ThreeStageReliabilityOptions opts;
-  opts.inherit_stdio = false;
   auto r = run_three_stage_reliability_from_string(json, opts);
   REQUIRE(r.ok);
   REQUIRE(r.faults.size() == 1);
@@ -426,7 +416,6 @@ TEST_CASE("Three-stage reliability — source capacity is finite, not infinite s
   })json";
 
   ThreeStageReliabilityOptions opts;
-  opts.inherit_stdio = false;
   auto r = run_three_stage_reliability_from_string(json, opts);
   REQUIRE(r.ok);
   REQUIRE(r.faults.size() == 2);  // one fault per parallel branch
@@ -462,7 +451,6 @@ TEST_CASE("Three-stage reliability — standalone AC switch is a Stage 2 candida
   })json";
 
   ThreeStageReliabilityOptions opts;
-  opts.inherit_stdio = false;
   opts.max_switch_operations = 1;
   auto r = run_three_stage_reliability_from_string(json, opts);
   REQUIRE(r.ok);
@@ -499,7 +487,6 @@ TEST_CASE("Three-stage reliability — unavailable tie (fail-to-close) loses Sta
 
   // Baseline: the tie may close -> Stage 2 fully restores the isolated feeder.
   ThreeStageReliabilityOptions opts;
-  opts.inherit_stdio = false;
   opts.max_switch_operations = 1;
   auto base = run_three_stage_reliability_from_string(json, opts);
   REQUIRE(base.ok);
@@ -543,7 +530,6 @@ TEST_CASE("Three-stage reliability — longer MTTR raises EENS (per-component re
       "vsc_converters":[],"dcdc_converters":[]
     })json";
     ThreeStageReliabilityOptions opts;
-    opts.inherit_stdio = false;
     return run_three_stage_reliability_from_string(json, opts);
   };
 
@@ -589,7 +575,6 @@ TEST_CASE("Three-stage reliability — F7: topology-isolated load is charged the
       "vsc_converters":[],"dcdc_converters":[]
     })json";
     ThreeStageReliabilityOptions opts;
-    opts.inherit_stdio = false;
     return run_three_stage_reliability_from_string(json, opts);
   };
 
@@ -654,7 +639,6 @@ TEST_CASE("Three-stage reliability — opt-in generator + transformer faults ext
   })json";
 
   ThreeStageReliabilityOptions base;
-  base.inherit_stdio = false;
   auto r_base = run_three_stage_reliability_from_string(json, base);
   REQUIRE(r_base.ok);
   const size_t n_base = r_base.faults.size();
@@ -747,7 +731,6 @@ TEST_CASE("Three-stage reliability — healthy closed loop must shed to stay rad
   })json";
 
   ThreeStageReliabilityOptions opts;
-  opts.inherit_stdio = false;
   auto r = run_three_stage_reliability_from_string(json, opts);
   REQUIRE(r.ok);
   REQUIRE(r.faults.size() == 4);
@@ -795,7 +778,6 @@ TEST_CASE("Three-stage reliability — VSC transfer limits AC source support for
   })json";
 
   ThreeStageReliabilityOptions opts;
-  opts.inherit_stdio = false;
   auto r = run_three_stage_reliability_from_string(json, opts);
   REQUIRE_FALSE(r.ok);
   REQUIRE(!r.error.empty());

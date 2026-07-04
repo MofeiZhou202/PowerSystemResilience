@@ -74,7 +74,7 @@ TEST_CASE("Dynamic model catalog covers the wired models", "[dynamics][catalog]"
   const auto& catalog = dynamic_model_catalog();
   REQUIRE(catalog.size() >= 15);
   for (const char* name :
-       {"GENROU", "OneDOneQMachine", "ClassicalMachine", "TGOV1", "IEEEG1",
+       {"GENROU", "GENROE", "GENSAL", "GENSAE", "OneDOneQMachine", "ClassicalMachine", "TGOV1", "IEEEG1",
         "SEXS", "IEEET1", "PSS1A", "REGC_REEC_GFL_Subset",
         "GridFormingNortonDroop", "ReducedOrderPLL", "KauraPLL", "FixedFrequency",
         "FirstOrderDCDCConverter", "BatterySOCFirstOrder", "ZIP"}) {

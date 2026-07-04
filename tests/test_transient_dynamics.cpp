@@ -340,6 +340,80 @@ HybridPowerSystem make_psd_onedoneq_three_bus_subset_case() {
   return sys;
 }
 
+HybridPowerSystem make_psd_genroe_three_bus_subset_case(bool high_saturation = false) {
+  HybridPowerSystem sys = make_psd_genrou_three_bus_subset_case();
+  sys.name = high_saturation ? "psd_genroe_high_sat_three_bus_subset"
+                             : "psd_genroe_three_bus_subset";
+  REQUIRE(sys.ac.generators.size() >= 2);
+  auto& machine = sys.ac.generators[1];
+  machine.dynamic_model.standard = "PSS/E";
+  machine.dynamic_model.model_name = "GENROE";
+  machine.dynamic_model.source_id = high_saturation
+                                        ? "PowerSimulationsDynamics:test_case16_genroe_high_sat"
+                                        : "PowerSimulationsDynamics:test_case16_genroe";
+  machine.ra_pu = 0.0;
+  machine.xd_pu = 1.8;
+  machine.xq_pu = 1.7;
+  machine.xdp_pu = 0.30;
+  machine.xdpp_pu = 0.25;
+  machine.td0p_s = 8.0;
+  machine.td0pp_s = 0.03;
+  machine.inertia_h = 6.175;
+  machine.dynamic_model.parameters = {
+      {"H", 6.175},
+      {"D", 0.05},
+      {"R", 0.0},
+      {"Xd", 1.8},
+      {"Xq", 1.7},
+      {"Xd_p", 0.30},
+      {"Xq_p", 0.55},
+      {"Xd_pp", 0.25},
+      {"Xl", 0.20},
+      {"Td0_p", 8.0},
+      {"Td0_pp", 0.03},
+      {"Tq0_p", 0.4},
+      {"Tq0_pp", 0.05},
+      {"Sat_A", high_saturation ? 16.431037153437266 : 10.52711883672175},
+      {"Sat_B", high_saturation ? 0.04 : 0.0392},
+  };
+  return sys;
+}
+
+HybridPowerSystem make_psd_gensal_three_bus_subset_case(bool exponential) {
+  HybridPowerSystem sys = make_psd_genrou_three_bus_subset_case();
+  sys.name = exponential ? "psd_gensae_three_bus_subset" : "psd_gensal_three_bus_subset";
+  REQUIRE(sys.ac.generators.size() >= 2);
+  auto& machine = sys.ac.generators[1];
+  machine.dynamic_model.standard = "PSS/E";
+  machine.dynamic_model.model_name = exponential ? "GENSAE" : "GENSAL";
+  machine.dynamic_model.source_id = exponential ? "PowerSimulationsDynamics:test_case19_gensae"
+                                                : "PowerSimulationsDynamics:test_case18_gensal";
+  machine.ra_pu = 0.0;
+  machine.xd_pu = 1.0;
+  machine.xq_pu = 0.75;
+  machine.xdp_pu = 0.40;
+  machine.xdpp_pu = 0.25;
+  machine.td0p_s = 5.0;
+  machine.td0pp_s = 0.05;
+  machine.inertia_h = 5.0;
+  machine.dynamic_model.parameters = {
+      {"H", 5.0},
+      {"D", 0.0},
+      {"R", 0.0},
+      {"Xd", 1.0},
+      {"Xq", 0.75},
+      {"Xd_p", 0.40},
+      {"Xd_pp", 0.25},
+      {"Xl", 0.10},
+      {"Td0_p", 5.0},
+      {"Td0_pp", 0.05},
+      {"Tq0_pp", 0.20},
+      {"Sat_A", exponential ? 9.484556531079702 : 0.8750546016608771},
+      {"Sat_B", exponential ? 0.11 : 7.046154363249024},
+  };
+  return sys;
+}
+
 HybridPowerSystem make_psd_zip_load_three_bus_subset_case() {
   HybridPowerSystem sys = make_psd_genrou_three_bus_subset_case();
   sys.name = "psd_zip_load_three_bus_subset";
@@ -728,10 +802,16 @@ CsvSeries hacdcpf_vsc_filtered_power_series(const DynamicResults& result,
   return local;
 }
 
-bool export_psd_trace(const std::string& psd_case,
-                      const std::string& signal,
-                      const std::filesystem::path& out_csv,
-                      const std::filesystem::path& log_file) {
+struct PsdTraceExportRequest {
+  std::string case_name;
+  std::string signal;
+  std::filesystem::path out_csv;
+};
+
+bool export_psd_traces_batch(const std::vector<PsdTraceExportRequest>& requests,
+                             const std::filesystem::path& log_file) {
+  if (requests.empty()) return true;
+
   const std::filesystem::path repo = psd_repo_path();
   const std::filesystem::path script =
       std::filesystem::path(HACDCPF_PROJECT_ROOT) /
@@ -739,23 +819,23 @@ bool export_psd_trace(const std::string& psd_case,
 
   INFO("PSD repo: " << repo);
   INFO("PSD generic exporter: " << script);
-  INFO("PSD case: " << psd_case << " signal: " << signal);
-  INFO("PSD output CSV: " << out_csv);
-  INFO("PSD log: " << log_file);
+  INFO("PSD batch request count: " << requests.size());
+  INFO("PSD batch log: " << log_file);
   REQUIRE(std::filesystem::exists(repo / "Project.toml"));
   REQUIRE(std::filesystem::exists(repo / "test" / "Project.toml"));
   REQUIRE(std::filesystem::exists(script));
 
-  const std::string command =
+  std::string command =
       "cd " + shell_quote(repo.string()) + " && " +
       shell_quote(julia_bin()) + " --project=" +
       shell_quote((repo / "test").string()) + " " +
       shell_quote(script.string()) + " " +
-      shell_quote(repo.string()) + " " +
-      shell_quote(psd_case) + " " +
-      shell_quote(out_csv.string()) + " " +
-      shell_quote(signal) + " > " +
-      shell_quote(log_file.string()) + " 2>&1";
+      shell_quote(repo.string()) + " --batch";
+  for (const auto& request : requests) {
+    command += " " + shell_quote(request.case_name + "|" + request.signal +
+                                 "=" + request.out_csv.string());
+  }
+  command += " > " + shell_quote(log_file.string()) + " 2>&1";
   return std::system(command.c_str()) == 0;
 }
 
@@ -1516,6 +1596,88 @@ TEST_CASE("PSD OneDOneQ machine profile initializes and responds as a named mode
   CHECK(series_range(edp) > 1e-5);
 }
 
+TEST_CASE("PSD PSSE machine profiles initialize and expose distinct states",
+          "[dynamics][benchmark][psd][machine][psse]") {
+  struct MachineSmokeCase {
+    std::string name;
+    HybridPowerSystem sys;
+    std::vector<std::string> required_keys;
+    std::vector<std::string> absent_keys;
+  };
+  std::vector<MachineSmokeCase> cases;
+  cases.push_back({"GENROE",
+                   make_psd_genroe_three_bus_subset_case(),
+                   {"psd_genroe", "eq_p", "ed_p", "psi_kd", "psi_kq"},
+                   {"psd_genrou", "psiq_pp"}});
+  cases.push_back({"GENSAL",
+                   make_psd_gensal_three_bus_subset_case(false),
+                   {"psd_gensal", "eq_p", "psi_kd", "psiq_pp"},
+                   {"ed_p", "psi_kq", "psd_gensae"}});
+  cases.push_back({"GENSAE",
+                   make_psd_gensal_three_bus_subset_case(true),
+                   {"psd_gensae", "eq_p", "psi_kd", "psiq_pp"},
+                   {"ed_p", "psi_kq", "psd_gensal"}});
+
+  for (auto& spec : cases) {
+    INFO(spec.name);
+    DynamicSolverOptions opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.t_end_s = 2.0;
+    opt.dt_s = 0.005;
+    opt.record_every_step = true;
+    opt.dynamic_trim_tol = 1e-7;
+    opt.max_dynamic_trim_iters = 20;
+    opt.algebraic_network_max_iters = 8;
+    opt.algebraic_network_tol = 1e-8;
+
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(spec.sys, opt);
+    DynamicEvent trip;
+    trip.time_s = 1.0;
+    trip.type = DynamicEventType::ACBranchTrip;
+    trip.component_index = 1;
+    trip.component_type = "AC";
+    trip.label = spec.name + " fixture branch trip";
+    dyn.events.push_back(trip);
+
+    DynamicSolver solver;
+    const DynamicResults result = solver.solve(dyn);
+
+    INFO(result.message);
+    REQUIRE(result.success);
+    CHECK(result.initialization.power_flow_converged);
+    CHECK(result.initialization.dynamic_trim_converged);
+    REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
+    REQUIRE(result.snapshots.size() > 100);
+
+    const auto& gen_out =
+        require_device_output(*result.final_snapshot(), "SynchronousMachine", 2);
+    CHECK(gen_out.model_name == spec.name);
+    for (const auto& key : spec.required_keys) {
+      INFO("required key " << key);
+      CHECK(gen_out.values.count(key) == 1);
+    }
+    for (const auto& key : spec.absent_keys) {
+      INFO("absent key " << key);
+      CHECK(gen_out.values.count(key) == 0);
+    }
+
+    const auto delta = device_output_series(result, "SynchronousMachine", 2, "angle_rad");
+    const auto omega = device_output_series(result, "SynchronousMachine", 2, "omega_pu");
+    const auto eqp = device_output_series(result, "SynchronousMachine", 2, "eq_p");
+    CHECK(series_range(delta) > 1e-4);
+    CHECK(series_range(omega) > 1e-7);
+    CHECK(series_range(eqp) > 1e-5);
+    if (spec.name == "GENROE") {
+      const auto edp = device_output_series(result, "SynchronousMachine", 2, "ed_p");
+      CHECK(series_range(edp) > 1e-5);
+    } else {
+      const auto psiqpp = device_output_series(result, "SynchronousMachine", 2, "psiq_pp");
+      CHECK(series_range(psiqpp) > 1e-5);
+    }
+  }
+}
+
 TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system traces",
           "[dynamics][benchmark][psd][external]") {
   const char* run_psd = std::getenv("HACDCPF_RUN_PSD_COMPARE");
@@ -1542,6 +1704,67 @@ TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system tra
   };
 
   std::vector<ExternalSpec> specs;
+
+  struct MachineTraceSpec {
+    std::string local_key;
+    std::string psd_quantity;
+    double rms_tolerance{1.0};
+    double max_tolerance{1.0};
+  };
+  constexpr double kPsseAngleRmsToleranceRad =
+      5.0 * 3.14159265358979323846 / 180.0;
+  constexpr double kPsseAngleMaxToleranceRad =
+      12.0 * 3.14159265358979323846 / 180.0;
+
+  auto append_psse_machine_specs =
+      [&](const std::string& case_name,
+          HybridPowerSystem sys,
+          const std::vector<MachineTraceSpec>& traces) {
+        DynamicSolverOptions opt = fast_options();
+        opt.run_power_flow_initialization = true;
+        opt.t_end_s = 2.0;
+        opt.dt_s = 0.005;
+        opt.record_every_step = true;
+        opt.dynamic_trim_tol = 1e-7;
+        opt.max_dynamic_trim_iters = 20;
+        opt.algebraic_network_max_iters = 8;
+        opt.algebraic_network_tol = 1e-8;
+
+        DynamicModelBuilder builder;
+        DynamicSystem dyn = builder.build(sys, opt);
+        DynamicEvent trip;
+        trip.time_s = 1.0;
+        trip.type = DynamicEventType::ACBranchTrip;
+        trip.component_index = 1;
+        trip.component_type = "AC";
+        trip.label = "PSD " + case_name + " BUS 1-BUS 2 branch trip";
+        dyn.events.push_back(trip);
+
+        DynamicSolver solver;
+        const DynamicResults result = solver.solve(dyn);
+        INFO(case_name << ": " << result.message);
+        REQUIRE(result.success);
+
+        for (const auto& trace : traces) {
+          auto local = device_output_series(result,
+                                            "SynchronousMachine",
+                                            2,
+                                            trace.local_key);
+          write_csv_series(out_dir /
+                               ("hacdcpf_psd_" + case_name + "_" +
+                                safe_artifact_token(trace.psd_quantity) + ".csv"),
+                           local);
+          specs.push_back({case_name,
+                           "generator-102-1:" + trace.psd_quantity,
+                           std::move(local),
+                           0.0,
+                           2.0,
+                           trace.rms_tolerance,
+                           trace.max_tolerance,
+                           "component",
+                           true});
+        }
+      };
 
   {
     auto sys = make_psd_genrou_three_bus_subset_case();
@@ -1681,6 +1904,38 @@ TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system tra
                      true});
   }
 
+  append_psse_machine_specs(
+      "genroe",
+      make_psd_genroe_three_bus_subset_case(),
+      {{"angle_rad", "delta_rad", kPsseAngleRmsToleranceRad, kPsseAngleMaxToleranceRad},
+       {"omega_pu", "omega_pu", 0.002, 0.005},
+       {"eq_p", "eq_p", 0.02, 0.04},
+       {"ed_p", "ed_p", 0.02, 0.04}});
+
+  append_psse_machine_specs(
+      "genroe_high_sat",
+      make_psd_genroe_three_bus_subset_case(true),
+      {{"angle_rad", "delta_rad", kPsseAngleRmsToleranceRad, kPsseAngleMaxToleranceRad},
+       {"omega_pu", "omega_pu", 0.002, 0.005},
+       {"eq_p", "eq_p", 0.02, 0.04},
+       {"ed_p", "ed_p", 0.02, 0.04}});
+
+  append_psse_machine_specs(
+      "gensal",
+      make_psd_gensal_three_bus_subset_case(false),
+      {{"angle_rad", "delta_rad", kPsseAngleRmsToleranceRad, kPsseAngleMaxToleranceRad},
+       {"omega_pu", "omega_pu", 0.002, 0.005},
+       {"eq_p", "eq_p", 0.02, 0.04},
+       {"psiq_pp", "psiq_pp", 0.02, 0.04}});
+
+  append_psse_machine_specs(
+      "gensae",
+      make_psd_gensal_three_bus_subset_case(true),
+      {{"angle_rad", "delta_rad", kPsseAngleRmsToleranceRad, kPsseAngleMaxToleranceRad},
+       {"omega_pu", "omega_pu", 0.002, 0.005},
+       {"eq_p", "eq_p", 0.02, 0.04},
+       {"psiq_pp", "psiq_pp", 0.02, 0.04}});
+
   {
     auto sys = make_psd_zip_load_three_bus_subset_case();
     DynamicSolverOptions opt = fast_options();
@@ -1751,22 +2006,27 @@ TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system tra
                      false});
   }
 
+  auto psd_csv_path = [&](const ExternalSpec& spec) {
+    return out_dir / ("psd_" + spec.case_name + "_" +
+                      safe_artifact_token(spec.signal) + ".csv");
+  };
+
+  std::vector<PsdTraceExportRequest> export_requests;
+  export_requests.reserve(specs.size());
+  for (const auto& spec : specs) {
+    export_requests.push_back({spec.case_name, spec.signal, psd_csv_path(spec)});
+  }
+  const std::filesystem::path psd_batch_log = out_dir / "psd_batch.log";
+  const bool exported = export_psd_traces_batch(export_requests, psd_batch_log);
+  INFO("PSD export failed. Inspect " << psd_batch_log
+       << ". Run `cd " << psd_repo_path()
+       << " && julia --project=test -e 'using Pkg; Pkg.instantiate()'` "
+       << "to install missing PSD test dependencies.");
+  REQUIRE(exported);
+
   std::vector<ValidationMetric> metrics;
   for (const auto& spec : specs) {
-    const std::filesystem::path psd_csv =
-        out_dir / ("psd_" + spec.case_name + "_" +
-                   safe_artifact_token(spec.signal) + ".csv");
-    const std::filesystem::path psd_log =
-        out_dir / ("psd_" + spec.case_name + ".log");
-    const bool exported =
-        export_psd_trace(spec.case_name, spec.signal, psd_csv, psd_log);
-    INFO("PSD export failed. Inspect " << psd_log
-         << ". Run `cd " << psd_repo_path()
-         << " && julia --project=test -e 'using Pkg; Pkg.instantiate()'` "
-         << "to install missing PSD test dependencies.");
-    REQUIRE(exported);
-
-    const CsvSeries psd = read_csv_series(psd_csv);
+    const CsvSeries psd = read_csv_series(psd_csv_path(spec));
     REQUIRE(psd.t.size() > 100);
     const CsvSeries local_cmp =
         spec.compare_relative ? relative_to_initial(spec.local) : spec.local;

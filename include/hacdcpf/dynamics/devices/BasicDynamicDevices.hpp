@@ -31,7 +31,10 @@ enum class DynamicLoadModelKind {
 enum class SynchronousMachineModelKind {
   Classical,
   OneDOneQ,
-  GENROU
+  GENROU,
+  GENROE,
+  GENSAL,
+  GENSAE
 };
 
 struct ACLoadDynamicParams {

@@ -3,6 +3,10 @@
 This folder contains reusable helpers for cross-checking HACDCPF transient
 models against PowerSimulationsDynamics.jl benchmark cases.
 
+These helpers are local validation tools only. They are not part of the HACDCPF
+release module, are not linked by the C++ library, and are only invoked by tests
+when a developer explicitly sets `HACDCPF_RUN_PSD_COMPARE=1`.
+
 ## Validation Ladder
 
 The C++ transient test suite now writes HACDCPF validation traces for three
@@ -80,7 +84,8 @@ julia --project=/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl/test \
 
 ## Generic PSD Trace Exporter
 
-`export_trace.jl` supports the broader validation ladder:
+`export_trace.jl` supports the broader validation ladder. The single-signal form
+is:
 
 ```bash
 julia --project=/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl/test \
@@ -89,6 +94,18 @@ julia --project=/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl/test \
   genrou \
   /tmp/psd_genrou_delta.csv \
   generator-102-1:delta_deg
+```
+
+For external test performance, prefer batch mode. It starts Julia once, runs each
+PSD case once, and writes all requested signals:
+
+```bash
+julia --project=/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl/test \
+  tools/psd_validation/export_trace.jl \
+  /Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl \
+  --batch \
+  'genroe|generator-102-1:delta_rad=/tmp/psd_genroe_delta.csv' \
+  'genroe|generator-102-1:omega_pu=/tmp/psd_genroe_omega.csv'
 ```
 
 PSD Test 02 / OneDOneQ machine traces can be exported the same way:
@@ -106,6 +123,10 @@ Supported cases today:
 
 - `onedoneq` / `test02`
 - `genrou`
+- `genroe` / `test16`
+- `genroe_high_sat` / `test16_high_sat`
+- `gensal` / `test18`
+- `gensae` / `test19`
 - `zip_constant_power`
 - `test24` / `gridfollowing_reduced`
 - `test51` / `gridfollowing_kaura`
@@ -119,6 +140,9 @@ Supported signals today:
 - `<device>:omega_pu`
 - `<device>:eq_p`
 - `<device>:ed_p`
+- `<device>:psi_kd`
+- `<device>:psi_kq`
+- `<device>:psiq_pp` / `<device>:psi_q_pp`
 - `<device>:frequency_pu`
 - `<device>:p_pu`
 - `<device>:q_pu`
@@ -134,11 +158,13 @@ HACDCPF_RUN_PSD_COMPARE=1 ./build/macos-release/tests/test_transient_dynamics \
 
 The conventional component checks are now numerical PSD trace gates rather than
 plumbing-only checks. The ZIP constant-power case compares bus-102 and bus-103
-voltage-magnitude deviations against PSD Test 33. The GENROU case compares
-relative rotor speed tightly and relative rotor angle with a bounded envelope;
-the angle gate is intentionally broader than the inverter gates because HACDCPF
-still uses its synthesized three-phase network solve instead of PSD's exact
-positive-sequence residual DAE.
+voltage-magnitude deviations against PSD Test 33. The machine gates cover GENROU,
+OneDOneQ, GENROE normal/high-saturation variants, GENSAL, and GENSAE traces.
+GENROE compares `delta_rad`/`omega_pu`/`eq_p`/`ed_p`; GENSAL and GENSAE compare
+`delta_rad`/`omega_pu`/`eq_p`/`psiq_pp`. The PSSE machine angle gate is
+intentionally broader than the inverter gates because HACDCPF still uses its
+synthesized three-phase network solve instead of PSD's exact positive-sequence
+residual DAE.
 
 ## PSD Input Snapshot Conversion
 

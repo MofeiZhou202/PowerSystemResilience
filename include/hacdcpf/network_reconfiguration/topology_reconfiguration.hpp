@@ -6,7 +6,7 @@
 //   1. 断开故障线路（可能导致部分节点失电）
 //   2. 在满足辐射状约束的前提下闭合联络开关，形成新的供电路径
 //
-// MILP 模型变量（对应 Julia TopologyAnalysis 实现）：
+// MILP 模型变量（对应 TopologyAnalysis 参考实现）：
 //   虚拟潮流: Fij (nl), Fij_vsc (nl_vsc), Fg (ng)  — 拓扑连通性
 //   开关状态: β (nl+nl_vsc) ∈{0,1}                  — 故障后线路通断
 //   根节点:   γ (ng) ∈{0,1}                          — 发电机根节点指示

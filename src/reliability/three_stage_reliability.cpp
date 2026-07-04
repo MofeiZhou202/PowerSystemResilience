@@ -1,10 +1,9 @@
 // =============================================================================
 // three_stage_reliability.cpp
 //
-// Native C++ three-stage fault-recovery reliability evaluator.  The previous
-// implementation was a Julia process bridge; this version keeps the public JSON
-// schema but evaluates the staged load restoration with the embedded MIPSolvers
-// C++ MILP engine.
+// Native C++ three-stage fault-recovery reliability evaluator.  This version
+// keeps the public JSON schema and evaluates staged load restoration with the
+// embedded MIPSolvers C++ MILP engine.
 // =============================================================================
 
 #include "hacdcpf/analysis/three_stage_reliability.hpp"

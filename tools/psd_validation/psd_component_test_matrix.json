@@ -113,28 +113,28 @@
       "group": "machine",
       "psd_tests": "Test 16",
       "psd_components": "GENROE variants",
-      "hacdcpf_candidate": "GENROU metadata surrogate",
-      "status": "metadata-only",
-      "first_blocker": "No distinct GENROE exponential-saturation runtime model.",
-      "next_action": "Implement GENROE or explicitly decide to treat it as out of first release."
+      "hacdcpf_candidate": "GENROE",
+      "status": "compare-limited",
+      "first_blocker": "Local PSD Test 16 GENROE normal and high-saturation delta/omega/eq_p/ed_p trace gates pass over 0-2s, but HACDCPF does not yet provide PSD-equivalent ResidualModel, MassMatrixModel, eigenvalue, or PSAT trace parity.",
+      "next_action": "Implement the residual/mass-matrix/small-signal parity gate before claiming a full PSD Test 16 pass."
     },
     {
       "group": "machine",
       "psd_tests": "Test 18",
       "psd_components": "GENSAL",
-      "hacdcpf_candidate": "",
-      "status": "blocked-missing-model",
-      "first_blocker": "No salient-pole machine runtime model.",
-      "next_action": "Required before claiming broad synchronous-machine PSD parity."
+      "hacdcpf_candidate": "GENSAL",
+      "status": "compare-limited",
+      "first_blocker": "Local PSD Test 18 delta/omega/eq_p/psiq_pp trace gates pass over 0-2s, but HACDCPF does not yet provide PSD-equivalent ResidualModel, MassMatrixModel, eigenvalue, or PSAT trace parity.",
+      "next_action": "Implement the residual/mass-matrix/small-signal parity gate before claiming a full PSD Test 18 pass."
     },
     {
       "group": "machine",
       "psd_tests": "Test 19",
       "psd_components": "GENSAE",
-      "hacdcpf_candidate": "",
-      "status": "blocked-missing-model",
-      "first_blocker": "No salient-pole exponential machine runtime model.",
-      "next_action": "Build after GENSAL if salient-pole machines are prioritized."
+      "hacdcpf_candidate": "GENSAE",
+      "status": "compare-limited",
+      "first_blocker": "Local PSD Test 19 delta/omega/eq_p/psiq_pp trace gates pass over 0-2s, but HACDCPF does not yet provide PSD-equivalent ResidualModel, MassMatrixModel, eigenvalue, or PSAT trace parity.",
+      "next_action": "Implement the residual/mass-matrix/small-signal parity gate before claiming a full PSD Test 19 pass."
     },
     {
       "group": "machine",

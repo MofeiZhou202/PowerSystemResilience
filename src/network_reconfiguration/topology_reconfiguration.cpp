@@ -4,7 +4,7 @@
 // 当发生线路故障 (ξ=1) 时，断开故障线路并在满足辐射状约束的前提下
 // 闭合联络开关，形成新的供电路径。
 //
-// 对应 Julia DistributionPowerFlow-runze/TopologyAnalysis 实现。
+// 对应 DistributionPowerFlow-runze/TopologyAnalysis 参考实现。
 //
 // MILP 变量布局 (0-based C++ indexing):
 //   Fij      [0,            nl)          虚拟潮流 (AC+DC 支路)
@@ -490,7 +490,7 @@ TopoReconfResult run_topology_reconfiguration(
   }
 
   // -------------------------------------------------------------------
-  // Safety bound propagation (Julia T5):
+  // Safety bound propagation (T5 reference):
   //   α=1,ζ=1 → β=1 | ζ=0 → β=0,Fij=0 | α=0,ζ=1 → β∈[0,1]
   // -------------------------------------------------------------------
   std::vector<double> lb(idx.n_vars, -1e20), ub(idx.n_vars, 1e20);

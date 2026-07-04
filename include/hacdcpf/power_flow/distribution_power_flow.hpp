@@ -268,7 +268,7 @@ struct ThreePhaseDPFResult {
 };
 
 // ---------------------------------------------------------------------------
-// Julia phase_domain-compatible shell
+// Phase-domain compatible shell
 // ---------------------------------------------------------------------------
 
 enum class PhaseDomainSolverAlgorithm {

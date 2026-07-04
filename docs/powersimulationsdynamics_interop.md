@@ -6,6 +6,9 @@ This is the next validation layer after the first PSD trace checks: keep the
 HACDCPF hybrid AC/DC runtime, but make PSD/PowerSystems data and results
 first-class comparison artifacts.
 
+This workflow is local validation only. It is not a release/runtime dependency
+and must not be linked into or required by the HACDCPF release module.
+
 ## Direction
 
 Use `PowerSimulationsDynamics.jl` as the reference implementation for dynamic

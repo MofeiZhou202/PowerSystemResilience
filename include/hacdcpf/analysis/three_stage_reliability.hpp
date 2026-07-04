@@ -20,7 +20,7 @@
 //                              re-open the ties, which zeroed the repair-window
 //                              shed for topology-isolated load.)
 //
-// No Julia runtime is required.
+// No external runtime is required.
 // =============================================================================
 
 #include <climits>
@@ -66,7 +66,7 @@ struct ThreeStageFaultDetail {
 
 // ─── SOP (Soft Open Point) configuration ────────────────────────────────────
 
-/// SOP (Soft Open Point) configuration as echoed by the Julia engine.
+/// SOP (Soft Open Point) configuration echoed by the native reliability solver.
 struct ThreeStageSopConfig {
   int id{0};
   int node_a{0};
@@ -154,26 +154,7 @@ struct ThreeStageReliabilityResult {
 
 // ─── Options ─────────────────────────────────────────────────────────────────
 
-/// Backward-compatible options. The native C++ implementation ignores the
-/// former Julia process-launch fields.
 struct ThreeStageReliabilityOptions {
-  /// Deprecated: ignored by the native C++ implementation.
-  std::filesystem::path julia_executable;
-
-  /// Deprecated: ignored by the native C++ implementation.
-  std::filesystem::path julia_project_dir;
-
-  /// Deprecated: ignored by the native C++ implementation.
-  std::filesystem::path cli_script;
-
-  /// Deprecated: ignored by the native C++ implementation.
-  std::filesystem::path workdir;
-
-  bool keep_workdir{false};
-
-  /// Deprecated: ignored by the native C++ implementation.
-  bool inherit_stdio{true};
-
   /// Maximum number of switching operations allowed during Stage 2 (post-fault
   /// switching restoration).  Each normally-open AC switch that is closed in
   /// Stage 2 to merge two distinct connected components counts as one

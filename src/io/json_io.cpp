@@ -3839,10 +3839,10 @@ TimeSeriesData time_series_data_from_json(const std::string& json_str) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// JPC (Julia Power Case) format serialization / deserialization
+// JPC matrix-case format serialization / deserialization
 // ═══════════════════════════════════════════════════════════════════════
 
-// Column indices for JPC matrices (matching Julia's idx.jl)
+// Column indices for JPC matrices
 namespace jpc_idx {
 // Bus columns (idx_bus)
 enum BusIdx {
@@ -4206,7 +4206,7 @@ std::string to_jpc_json(const HybridPowerSystem& sys, int indent) {
   
   // Rich component tables.  These are exported as structured records instead
   // of empty placeholders so JPC JSON export preserves model data even when a
-  // downstream Julia reader only consumes the matrix-style core tables.
+  // downstream matrix-case readers only consume the core tables.
   root["genDC"] = json::array();
   for (const auto& g : sys.dc.dc_static_generators) {
     root["genDC"].push_back(dc_static_generator_to_json(g));

@@ -6,7 +6,7 @@
 
 namespace hacdcpf::powerflow {
 
-// PV array empirical power model (Julia DistributionPowerFlow parity).
+// PV array empirical power model used by distribution power-flow parity checks.
 // P(V) = Isc * (1 - (V/Voc)^a)^b * (1 - c*(V/Vmpp)^2)
 // Constants: a = 10.0, b = 0.547596, c = 0.023812
 

@@ -43,33 +43,33 @@
       "psd_slot": "machine",
       "psd_model": "RoundRotorExponential / GENROE",
       "hacdcpf_slot": "machine",
-      "hacdcpf_model": "GENROU",
-      "status": "profile-only",
-      "comparison_level": "L0",
-      "trace_case": "",
-      "notes": "Can preserve identity as source metadata, but exponential saturation and exact GENROE behavior are not implemented as a separate HACDCPF model."
+      "hacdcpf_model": "GENROE",
+      "status": "supported-subset",
+      "comparison_level": "L2",
+      "trace_case": "genroe/genroe_high_sat:generator-102-1:eq_p",
+      "notes": "Distinct exponential-saturation runtime and PSD Test 16 normal/high-saturation component trace gates exist for delta/omega/eq_p/ed_p. HACDCPF remains a reduced runtime compared with PSD's full residual/mass-matrix/small-signal contract."
     },
     {
       "domain": "generator",
       "psd_slot": "machine",
       "psd_model": "SalientPoleQuadratic / GENSAL",
       "hacdcpf_slot": "machine",
-      "hacdcpf_model": "",
-      "status": "missing",
-      "comparison_level": "L0",
-      "trace_case": "",
-      "notes": "Add a salient-pole machine family before claiming model parity."
+      "hacdcpf_model": "GENSAL",
+      "status": "supported-subset",
+      "comparison_level": "L2",
+      "trace_case": "gensal:generator-102-1:psiq_pp",
+      "notes": "Named salient-pole quadratic runtime and PSD Test 18 component trace gates exist for delta/omega/eq_p/psiq_pp. HACDCPF still lacks PSD residual/mass-matrix/small-signal parity."
     },
     {
       "domain": "generator",
       "psd_slot": "machine",
       "psd_model": "SalientPoleExponential / GENSAE",
       "hacdcpf_slot": "machine",
-      "hacdcpf_model": "",
-      "status": "missing",
-      "comparison_level": "L0",
-      "trace_case": "",
-      "notes": "Requires salient-pole states plus exponential saturation."
+      "hacdcpf_model": "GENSAE",
+      "status": "supported-subset",
+      "comparison_level": "L2",
+      "trace_case": "gensae:generator-102-1:psiq_pp",
+      "notes": "Named salient-pole exponential runtime and PSD Test 19 component trace gates exist for delta/omega/eq_p/psiq_pp. HACDCPF still lacks PSD residual/mass-matrix/small-signal parity."
     },
     {
       "domain": "generator",

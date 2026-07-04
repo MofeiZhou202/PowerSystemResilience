@@ -518,7 +518,7 @@ void assemble_inequalities(const Problem& prob,
 }  // namespace
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Mehrotra Predictor-Corrector IPM — faithful port of Julia InteriorPointMethod.jl
+// Mehrotra Predictor-Corrector IPM
 // ═══════════════════════════════════════════════════════════════════════════════
 
 IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
@@ -637,7 +637,7 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   lagrangian_hessian(prob, x, lambda, get_nu_ptr(mu), Lxx, 1e-12);
   apply_obj_scale_hessian(Lxx, hdiag);
 
-  // Convergence measures (normalized, matching Julia)
+  // Convergence measures (normalized)
   double obj = obj_scale * objective(prob, x);
   const double obj0 = obj;  // reference for cost condition (NOT updated each iter)
 
@@ -750,7 +750,7 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
 
     // Equality Jacobian in the format needed for KKT: jg is meq × n
     // dg_for_kkt = Jg transposed for KKT fill: we pass jg directly (meq × n)
-    // In Julia: dg is n × neq, we pass it as-is. Our jg is meq × n.
+    // The reference formulation stores dg as n x neq; our jg is meq x n.
     // The KKT uses Jg (rows=constraints, cols=vars), matching our jg.
 
     // ────────────────────────────────────────────────────────────────
@@ -905,7 +905,7 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     }
 
     // ────────────────────────────────────────────────────────────────
-    // Accept step (no line search — direct acceptance per Julia)
+    // Accept step (no line search)
     // ────────────────────────────────────────────────────────────────
     x += alpha_p * dx;
     z += alpha_p * dz;

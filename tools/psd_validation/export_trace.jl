@@ -1,13 +1,13 @@
 #!/usr/bin/env julia
 
-if length(ARGS) < 4
-    error("usage: export_trace.jl <PowerSimulationsDynamics.jl repo> <case> <output.csv> <signal>")
+if length(ARGS) < 2
+    error(
+        "usage: export_trace.jl <PowerSimulationsDynamics.jl repo> <case> <output.csv> <signal>\n" *
+        "   or: export_trace.jl <PowerSimulationsDynamics.jl repo> --batch <case>|<signal>=<output.csv>...",
+    )
 end
 
 const PSD_REPO = abspath(ARGS[1])
-const CASE_NAME = ARGS[2]
-const OUT_CSV = ARGS[3]
-const SIGNAL = ARGS[4]
 const TEST_FILES_DIR = joinpath(PSD_REPO, "test")
 
 import Pkg
@@ -67,6 +67,12 @@ function export_signal(results, signal::String)
             return get_state_series(results, (ref, :eq_p))
         elseif quantity == "ed_p"
             return get_state_series(results, (ref, :ed_p))
+        elseif quantity == "psi_kd"
+            return get_state_series(results, (ref, :ψ_kd))
+        elseif quantity == "psi_kq"
+            return get_state_series(results, (ref, :ψ_kq))
+        elseif quantity == "psiq_pp" || quantity == "psi_q_pp"
+            return get_state_series(results, (ref, :ψq_pp))
         elseif quantity == "frequency_pu"
             return get_frequency_series(results, ref)
         elseif quantity == "p_pu"
@@ -110,9 +116,9 @@ function run_onedoneq()
     end
 end
 
-function run_genrou()
-    raw_file = joinpath(TEST_FILES_DIR, "benchmarks", "psse", "GENROU", "ThreeBusMulti.raw")
-    dyr_file = joinpath(TEST_FILES_DIR, "benchmarks", "psse", "GENROU", "ThreeBus_GENROU.dyr")
+function run_psse_machine_case(folder::String, dyr_name::String)
+    raw_file = joinpath(TEST_FILES_DIR, "benchmarks", "psse", folder, "ThreeBusMulti.raw")
+    dyr_file = joinpath(TEST_FILES_DIR, "benchmarks", "psse", folder, dyr_name)
     sys = System(raw_file, dyr_file)
     for l in get_components(PSY.StandardLoad, sys)
         transform_load_to_constant_impedance(l)
@@ -132,6 +138,10 @@ function run_genrou()
     finally
         rm(work; force = true, recursive = true)
     end
+end
+
+function run_genrou()
+    return run_psse_machine_case("GENROU", "ThreeBus_GENROU.dyr")
 end
 
 function run_zip_constant_power()
@@ -185,18 +195,75 @@ function run_gridfollowing(case_name::String)
     end
 end
 
-results =
-    if CASE_NAME == "onedoneq" || CASE_NAME == "test02"
+function run_case(case_name::String)
+    if case_name == "onedoneq" || case_name == "test02"
         run_onedoneq()
-    elseif CASE_NAME == "genrou"
+    elseif case_name == "genrou"
         run_genrou()
-    elseif CASE_NAME == "zip_constant_power"
+    elseif case_name == "genroe" || case_name == "test16"
+        run_psse_machine_case("GENROE", "ThreeBus_GENROE.dyr")
+    elseif case_name == "genroe_high_sat" || case_name == "test16_high_sat"
+        run_psse_machine_case("GENROE", "ThreeBus_GENROE_HIGH_SAT.dyr")
+    elseif case_name == "gensal" || case_name == "test18"
+        run_psse_machine_case("GENSAL", "ThreeBus_GENSAL.dyr")
+    elseif case_name == "gensae" || case_name == "test19"
+        run_psse_machine_case("GENSAE", "ThreeBus_GENSAE.dyr")
+    elseif case_name == "zip_constant_power"
         run_zip_constant_power()
-    elseif CASE_NAME in ("test24", "gridfollowing_reduced", "test51", "gridfollowing_kaura")
-        run_gridfollowing(CASE_NAME)
+    elseif case_name in ("test24", "gridfollowing_reduced", "test51", "gridfollowing_kaura")
+        run_gridfollowing(case_name)
     else
-        error("unsupported PSD validation case: $(CASE_NAME)")
+        error("unsupported PSD validation case: $(case_name)")
     end
+end
 
-t, y = export_signal(results, SIGNAL)
-write_series(OUT_CSV, t, y)
+function split_once(value::String, sep::String)
+    parts = split(value, sep; limit = 2)
+    length(parts) == 2 || error("expected '<left>$(sep)<right>', got $(value)")
+    return String(parts[1]), String(parts[2])
+end
+
+function export_case_signals(case_name::String, requests::Vector{Tuple{String, String}})
+    results = run_case(case_name)
+    for (signal, out_csv) in requests
+        t, y = export_signal(results, signal)
+        write_series(out_csv, t, y)
+    end
+end
+
+function export_batch(args)
+    batches = Dict{String, Vector{Tuple{String, String}}}()
+    case_order = String[]
+    for item in args
+        lhs, out_csv = split_once(String(item), "=")
+        case_name, signal = split_once(lhs, "|")
+        if !haskey(batches, case_name)
+            batches[case_name] = Tuple{String, String}[]
+            push!(case_order, case_name)
+        end
+        push!(batches[case_name], (signal, out_csv))
+    end
+    for case_name in case_order
+        export_case_signals(case_name, batches[case_name])
+    end
+end
+
+if ARGS[2] == "--batch"
+    length(ARGS) >= 3 ||
+        error("batch mode requires at least one '<case>|<signal>=<output.csv>' request")
+    export_batch(ARGS[3:end])
+elseif length(ARGS) >= 4 && ARGS[3] == "--batch"
+    case_name = ARGS[2]
+    requests = Tuple{String, String}[]
+    for item in ARGS[4:end]
+        signal, out_csv = split_once(String(item), "=")
+        push!(requests, (signal, out_csv))
+    end
+    export_case_signals(case_name, requests)
+elseif length(ARGS) >= 4
+    results = run_case(ARGS[2])
+    t, y = export_signal(results, ARGS[4])
+    write_series(ARGS[3], t, y)
+else
+    error("usage: export_trace.jl <PowerSimulationsDynamics.jl repo> <case> <output.csv> <signal>")
+end

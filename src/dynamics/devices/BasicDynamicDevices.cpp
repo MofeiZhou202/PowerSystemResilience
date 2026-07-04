@@ -360,6 +360,7 @@ struct GenrouParams {
   double xl{0.2};
   double sat_a{0.0};
   double sat_b{0.0};
+  bool exponential_saturation{false};
 };
 
 GenrouParams genrou_params(const VoltageSourceDynamicParams& params) {
@@ -377,6 +378,8 @@ GenrouParams genrou_params(const VoltageSourceDynamicParams& params) {
   p.tq0pp = std::max(kMinTimeConstant, positive_or(params.tq0pp_s, 0.05));
   p.sat_a = params.saturation_a;
   p.sat_b = params.saturation_b;
+  p.exponential_saturation =
+      params.machine_model == SynchronousMachineModelKind::GENROE;
   return p;
 }
 
@@ -405,6 +408,9 @@ double genrou_gamma_qd(const GenrouParams& p) {
 double genrou_saturation(const GenrouParams& p, double psi) {
   if (p.sat_a == 0.0 && p.sat_b == 0.0) return 0.0;
   const double x = std::max(kMinVoltage, psi);
+  if (p.exponential_saturation) {
+    return p.sat_b * std::pow(x, p.sat_a);
+  }
   return p.sat_b * (x - p.sat_a) * (x - p.sat_a) / x;
 }
 
@@ -420,8 +426,9 @@ Complex psd_dq_to_ri(double delta, double id, double iq) {
   return Complex(ir, ii);
 }
 
-bool machine_is_genrou(const VoltageSourceDynamicParams& params) {
+bool machine_is_roundrotor(const VoltageSourceDynamicParams& params) {
   return params.machine_model == SynchronousMachineModelKind::GENROU ||
+         params.machine_model == SynchronousMachineModelKind::GENROE ||
          params.psd_genrou_model;
 }
 
@@ -429,19 +436,25 @@ bool machine_is_onedoneq(const VoltageSourceDynamicParams& params) {
   return params.machine_model == SynchronousMachineModelKind::OneDOneQ;
 }
 
+bool machine_is_salient(const VoltageSourceDynamicParams& params) {
+  return params.machine_model == SynchronousMachineModelKind::GENSAL ||
+         params.machine_model == SynchronousMachineModelKind::GENSAE;
+}
+
 int synchronous_machine_state_count(const VoltageSourceDynamicParams& params) {
-  if (machine_is_genrou(params)) return 8;
+  if (machine_is_roundrotor(params)) return 8;
+  if (machine_is_salient(params)) return 7;
   if (machine_is_onedoneq(params)) return 6;
   return 4;
 }
 
 std::string synchronous_machine_model_name(const VoltageSourceDynamicParams& params) {
   if (machine_is_onedoneq(params)) return "OneDOneQMachine";
-  if (machine_is_genrou(params)) {
+  if (machine_is_roundrotor(params) || machine_is_salient(params)) {
     return (!params.machine_model_name.empty() &&
             params.machine_model_name != "ClassicalMachine")
                ? params.machine_model_name
-               : "GENROU";
+               : (machine_is_salient(params) ? "GENSAL" : "GENROU");
   }
   if (!params.machine_model_name.empty()) return params.machine_model_name;
   return "ClassicalMachine";
@@ -680,6 +693,253 @@ Eigen::VectorXd solve_genrou_initial_conditions(const GenrouParams& p,
     if (!accepted) break;
   }
   return best;
+}
+
+struct SalientParams {
+  double r{0.0};
+  double td0p{5.0};
+  double td0pp{0.05};
+  double tq0pp{0.2};
+  double xd{1.0};
+  double xq{0.75};
+  double xdp{0.4};
+  double xdpp{0.25};
+  double xl{0.1};
+  double sat_a{0.0};
+  double sat_b{0.0};
+  bool exponential_saturation{false};
+};
+
+SalientParams salient_params(const VoltageSourceDynamicParams& params) {
+  SalientParams p;
+  p.r = std::max(0.0, params.r_pu);
+  p.xd = positive_or(params.xd_pu, 1.0);
+  p.xq = positive_or(params.xq_pu, 0.75);
+  p.xdp = positive_or(params.xdp_pu, 0.4);
+  p.xdpp = positive_or(params.xdpp_pu, positive_or(params.x_pu, 0.25));
+  p.xl = positive_or(params.xl_pu, 0.1);
+  p.td0p = std::max(kMinTimeConstant, positive_or(params.td0p_s, 5.0));
+  p.td0pp = std::max(kMinTimeConstant, positive_or(params.td0pp_s, 0.05));
+  p.tq0pp = std::max(kMinTimeConstant, positive_or(params.tq0pp_s, 0.2));
+  p.sat_a = params.saturation_a;
+  p.sat_b = params.saturation_b;
+  p.exponential_saturation =
+      params.machine_model == SynchronousMachineModelKind::GENSAE;
+  return p;
+}
+
+double salient_gamma_d1(const SalientParams& p) {
+  return (p.xdpp - p.xl) / std::max(1e-9, p.xdp - p.xl);
+}
+
+double salient_gamma_q1(const SalientParams& p) {
+  return (p.xdp - p.xdpp) / std::max(1e-9, p.xdp - p.xl);
+}
+
+double salient_gamma_d2(const SalientParams& p) {
+  const double denom = std::max(1e-9, p.xdp - p.xl);
+  return (p.xdp - p.xdpp) / (denom * denom);
+}
+
+double salient_gamma_qd(const SalientParams& p) {
+  return (p.xq - p.xl) / std::max(1e-9, p.xd - p.xl);
+}
+
+double salient_saturation(const SalientParams& p, double x) {
+  if (p.sat_a == 0.0 && p.sat_b == 0.0) return 0.0;
+  const double v = std::max(kMinVoltage, x);
+  if (p.exponential_saturation) {
+    return p.sat_b * std::pow(v, p.sat_a);
+  }
+  return p.sat_b * (v - p.sat_a) * (v - p.sat_a) / v;
+}
+
+struct SalientEval {
+  double id{0.0};
+  double iq{0.0};
+  double pe{0.0};
+  double qe{0.0};
+  double tau_e{0.0};
+  double xad_ifd{0.0};
+  double psi_d_pp{0.0};
+  double psi_q_source{0.0};
+  double vd{0.0};
+  double vq{0.0};
+  Complex current{0.0, 0.0};
+};
+
+SalientEval evaluate_salient(const SalientParams& p,
+                             Complex v,
+                             double delta,
+                             double eq_p,
+                             double psi_kd,
+                             double psiq_pp) {
+  SalientEval out;
+  const auto [vd, vq] = psd_ri_to_dq(delta, v);
+  out.vd = vd;
+  out.vq = vq;
+  const double gd1 = salient_gamma_d1(p);
+  const double gq1 = salient_gamma_q1(p);
+  const double gd2 = salient_gamma_d2(p);
+  out.psi_d_pp = gd1 * eq_p + gq1 * psi_kd;
+  const double denom = std::max(1e-9, p.r * p.r + p.xdpp * p.xdpp);
+  if (p.exponential_saturation) {
+    out.id = (-p.r * (vd - psiq_pp) + p.xdpp * (-vq + out.psi_d_pp)) / denom;
+    out.iq = (p.xdpp * (vd - psiq_pp) + p.r * (-vq + out.psi_d_pp)) / denom;
+    const double psi_pp = std::hypot(out.psi_d_pp, psiq_pp);
+    const double se = salient_saturation(p, psi_pp);
+    out.xad_ifd =
+        eq_p + se * out.psi_d_pp +
+        (p.xd - p.xdp) * (out.id + gd2 * (eq_p - psi_kd - (p.xdp - p.xl) * out.id));
+    out.psi_q_source = psiq_pp;
+  } else {
+    out.id = (-p.r * (vd + psiq_pp) + p.xdpp * (out.psi_d_pp - vq)) / denom;
+    out.iq = (p.xdpp * (vd + psiq_pp) + p.r * (out.psi_d_pp - vq)) / denom;
+    const double se = salient_saturation(p, eq_p);
+    out.xad_ifd =
+        eq_p + se * eq_p +
+        (p.xd - p.xdp) * (out.id + gd2 * (eq_p - psi_kd - (p.xdp - p.xl) * out.id));
+    out.psi_q_source = -psiq_pp;
+  }
+  out.tau_e = out.id * (vd + out.id * p.r) + out.iq * (vq + out.iq * p.r);
+  out.pe = vd * out.id + vq * out.iq;
+  out.qe = vq * out.id - vd * out.iq;
+  out.current = psd_dq_to_ri(delta, out.id, out.iq);
+  return out;
+}
+
+Eigen::VectorXd salient_initial_residual(const SalientParams& p,
+                                         Complex v,
+                                         double p0,
+                                         double q0,
+                                         const Eigen::VectorXd& z) {
+  Eigen::VectorXd r = Eigen::VectorXd::Zero(6);
+  const double delta = z[0];
+  const double tau_m = z[1];
+  const double vf = z[2];
+  const double eq_p = z[3];
+  const double psi_kd = z[4];
+  const double psiq_pp = z[5];
+  const SalientEval e = evaluate_salient(p, v, delta, eq_p, psi_kd, psiq_pp);
+  r[0] = tau_m - e.tau_e;
+  r[1] = p0 - e.pe;
+  r[2] = q0 - e.qe;
+  r[3] = (vf - e.xad_ifd) / p.td0p;
+  r[4] = (-psi_kd + eq_p - (p.xdp - p.xl) * e.id) / p.td0pp;
+  if (p.exponential_saturation) {
+    const double psi_pp = std::hypot(e.psi_d_pp, psiq_pp);
+    const double se = salient_saturation(p, psi_pp);
+    r[5] = (-psiq_pp + (p.xq - p.xdpp) * e.iq -
+            se * salient_gamma_qd(p) * psiq_pp) / p.tq0pp;
+  } else {
+    r[5] = (-psiq_pp - (p.xq - p.xdpp) * e.iq) / p.tq0pp;
+  }
+  return r;
+}
+
+Eigen::VectorXd solve_salient_initial_conditions(const SalientParams& p,
+                                                 Complex v,
+                                                 double p0,
+                                                 double q0,
+                                                 Eigen::VectorXd z) {
+  Eigen::VectorXd best = z;
+  double best_norm =
+      salient_initial_residual(p, v, p0, q0, z).lpNorm<Eigen::Infinity>();
+  const double eps = std::sqrt(std::numeric_limits<double>::epsilon());
+  for (int iter = 0; iter < 30; ++iter) {
+    const Eigen::VectorXd r = salient_initial_residual(p, v, p0, q0, z);
+    const double norm = r.lpNorm<Eigen::Infinity>();
+    if (norm < best_norm) {
+      best = z;
+      best_norm = norm;
+    }
+    if (norm <= 1e-10) return z;
+    Eigen::MatrixXd jac(6, 6);
+    for (int col = 0; col < 6; ++col) {
+      Eigen::VectorXd zp = z;
+      const double h = eps * std::max(1.0, std::abs(z[col]));
+      zp[col] += h;
+      jac.col(col) = (salient_initial_residual(p, v, p0, q0, zp) - r) / h;
+    }
+    const Eigen::VectorXd step = jac.colPivHouseholderQr().solve(-r);
+    if (!step.allFinite()) break;
+    bool accepted = false;
+    double alpha = 1.0;
+    while (alpha >= 1.0 / 1024.0) {
+      const Eigen::VectorXd trial = z + alpha * step;
+      const double trial_norm =
+          salient_initial_residual(p, v, p0, q0, trial).lpNorm<Eigen::Infinity>();
+      if (std::isfinite(trial_norm) && trial_norm < norm) {
+        z = trial;
+        accepted = true;
+        break;
+      }
+      alpha *= 0.5;
+    }
+    if (!accepted) break;
+  }
+  return best;
+}
+
+Eigen::VectorXd salient_initial_guess(const SalientParams& p,
+                                      Complex v,
+                                      Complex s) {
+  const Complex i = std::conj(s / v);
+  double delta = std::arg(v + Complex(p.r, p.xq) * i);
+  double tau_m0 = s.real();
+  double vf0 = 1.0;
+  double eq_p0 = std::abs(v);
+  double psi_kd0 = eq_p0;
+  double psiq_pp0 = 0.0;
+  if (p.exponential_saturation) {
+    const Complex psi_pp0 = v + Complex(p.r, p.xdpp) * i;
+    const double psi_abs = std::max(kMinVoltage, std::abs(psi_pp0));
+    const double psi_ang = std::arg(psi_pp0);
+    const double se0 = salient_saturation(p, psi_abs);
+    const double a = psi_abs * (se0 * salient_gamma_qd(p) + 1.0);
+    const double b = (p.xdpp - p.xq) * std::abs(i);
+    const double theta_it = psi_ang - std::arg(i);
+    const double delta_denom = b * std::sin(theta_it) - a;
+    delta = psi_ang +
+            std::atan((b * std::cos(theta_it)) /
+                      (std::abs(delta_denom) > 1e-12 ? delta_denom : 1e-12));
+  }
+  if (!std::isfinite(delta)) {
+    delta = std::arg(v + Complex(p.r, p.xdpp) * i);
+  }
+  const auto [id0, iq0] = psd_ri_to_dq(delta, i);
+  const auto [vd0, vq0] = psd_ri_to_dq(delta, v);
+  const double gd1 = salient_gamma_d1(p);
+  const double gq1 = salient_gamma_q1(p);
+  const double gd2 = salient_gamma_d2(p);
+  if (p.exponential_saturation) {
+    const double psiq_src0 = vd0 - p.r * id0 - p.xdpp * iq0;
+    const double psidpp0 = vq0 + id0 * p.xdpp + iq0 * p.r;
+    const double psi_d0 = vq0 + p.r * iq0;
+    const double psi_q0 = -vd0 - p.r * id0;
+    eq_p0 = (psidpp0 + id0 * (p.xdp - p.xl) * gq1) /
+            std::max(1e-9, gd1 + gq1);
+    psi_kd0 = eq_p0 - id0 * (p.xdp - p.xl);
+    tau_m0 = psi_d0 * iq0 - psi_q0 * id0;
+    const double se0 = salient_saturation(p, std::hypot(psidpp0, psiq_src0));
+    vf0 = eq_p0 + id0 * (p.xd - p.xdp) + psidpp0 * se0;
+    psiq_pp0 = psiq_src0;
+  } else {
+    const double psi_d0 = vq0 + p.r * iq0;
+    const double psi_q0 = -vd0 - p.r * id0;
+    const double psidpp0 = vq0 + id0 * p.xdpp + iq0 * p.r;
+    psiq_pp0 = -(vd0 - iq0 * p.xdpp - id0 * p.r);
+    eq_p0 = (psidpp0 + id0 * (p.xdp - p.xl) * gq1) /
+            std::max(1e-9, gd1 + gq1);
+    psi_kd0 = eq_p0 - id0 * (p.xdp - p.xl);
+    tau_m0 = psi_d0 * iq0 - psi_q0 * id0;
+    const double se0 = salient_saturation(p, eq_p0);
+    vf0 = eq_p0 + id0 * (p.xd - p.xdp) + se0 * eq_p0;
+    (void)gd2;
+  }
+  Eigen::VectorXd z(6);
+  z << delta, tau_m0, vf0, eq_p0, psi_kd0, psiq_pp0;
+  return z;
 }
 
 }  // namespace
@@ -966,11 +1226,11 @@ void SynchronousMachine::assignStateIndices(int& offset) {
   offset += range_.size;
   // Publish the coupling link so attached controllers can address this machine's
   // speed / mechanical-power / field states. Local indices: omega=1 for both
-  // models; classical pm=3, e_mag(field)=2; OneDOneQ tau_m=4, vf=5; GENROU
-  // tau_m=6, vf(field)=7.
+  // models; classical pm=3, e_mag(field)=2; OneDOneQ tau_m=4, vf=5;
+  // round-rotor tau_m=6, vf=7; salient-pole tau_m=5, vf=6.
   link_.range = &range_;
   link_.valid = true;
-  link_.genrou = machine_is_genrou(params_) && range_.size >= 8;
+  link_.genrou = machine_is_roundrotor(params_) && range_.size >= 8;
   link_.bus_pos = params_.bus_pos;
   link_.base_mva = params_.base_mva;
   link_.frequency_hz = params_.frequency_hz;
@@ -979,6 +1239,9 @@ void SynchronousMachine::assignStateIndices(int& offset) {
   if (link_.genrou) {
     link_.pm_local = 6;
     link_.efd_local = 7;
+  } else if (machine_is_salient(params_) && range_.size >= 7) {
+    link_.pm_local = 5;
+    link_.efd_local = 6;
   } else if (machine_is_onedoneq(params_) && range_.size >= 6) {
     link_.pm_local = 4;
     link_.efd_local = 5;
@@ -1029,7 +1292,7 @@ void SynchronousMachine::initializeFromPowerFlow(const PowerFlowResult& pf,
     }
     return;
   }
-  if (machine_is_genrou(params_) && range_.size >= 8) {
+  if (machine_is_roundrotor(params_) && range_.size >= 8) {
     const GenrouParams gp = genrou_params(params_);
     double vm = params_.vm_set_pu;
     if (params_.bus_pos >= 0 && params_.bus_pos < static_cast<int>(pf.vm.size())) {
@@ -1083,6 +1346,33 @@ void SynchronousMachine::initializeFromPowerFlow(const PowerFlowResult& pf,
     }
     return;
   }
+  if (machine_is_salient(params_) && range_.size >= 7) {
+    const SalientParams sp = salient_params(params_);
+    double vm = params_.vm_set_pu;
+    if (params_.bus_pos >= 0 && params_.bus_pos < static_cast<int>(pf.vm.size())) {
+      vm = positive_or(pf.vm[static_cast<std::size_t>(params_.bus_pos)], vm);
+    }
+    const Complex v = std::polar(vm, angle);
+    const Complex s(params_.p_mech_mw / safe_base(params_.base_mva),
+                    params_.q_elec_mvar / safe_base(params_.base_mva));
+    const Eigen::VectorXd z0 = salient_initial_guess(sp, v, s);
+    const Eigen::VectorXd z =
+        solve_salient_initial_conditions(sp, v, s.real(), s.imag(), z0);
+
+    x.x[state_index(range_, 0)] = finite_value(z[0], z0[0]);
+    x.x[state_index(range_, 1)] = 1.0;
+    x.x[state_index(range_, 2)] = finite_value(z[3], z0[3]);
+    x.x[state_index(range_, 3)] = finite_value(z[4], z0[4]);
+    x.x[state_index(range_, 4)] = finite_value(z[5], z0[5]);
+    x.x[state_index(range_, 5)] = finite_value(z[1], z0[1]);
+    x.x[state_index(range_, 6)] = finite_value(z[2], z0[2]);
+    if (params_.bus_pos >= 0 && y.Vac_abc.size() >= 3 * (params_.bus_pos + 1)) {
+      y.Vac_abc[3 * params_.bus_pos + 0] = std::polar(vm, angle);
+      y.Vac_abc[3 * params_.bus_pos + 1] = std::polar(vm, angle - 2.0 * kPi / 3.0);
+      y.Vac_abc[3 * params_.bus_pos + 2] = std::polar(vm, angle + 2.0 * kPi / 3.0);
+    }
+    return;
+  }
   // Classical model: place the internal EMF *behind* the machine reactance so
   // that at t=0 the machine injects its scheduled P+jQ into a terminal held at
   // the power-flow voltage. Initializing E == Vt (as before) produces ~0 current
@@ -1129,7 +1419,7 @@ bool SynchronousMachine::trimToNetworkEquilibrium(DynamicState& x, NetworkState&
     changed = set_if_changed(x.x, state_index(range_, 5), z[2]) || changed;
     return changed;
   }
-  if (machine_is_genrou(params_) && range_.size >= 8) {
+  if (machine_is_roundrotor(params_) && range_.size >= 8) {
     const GenrouParams gp = genrou_params(params_);
     const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
     const double p0 = params_.p_mech_mw / safe_base(params_.base_mva);
@@ -1150,6 +1440,27 @@ bool SynchronousMachine::trimToNetworkEquilibrium(DynamicState& x, NetworkState&
     changed = set_if_changed(x.x, state_index(range_, 5), z[6]) || changed;
     changed = set_if_changed(x.x, state_index(range_, 6), z[1]) || changed;
     changed = set_if_changed(x.x, state_index(range_, 7), z[2]) || changed;
+    return changed;
+  }
+  if (machine_is_salient(params_) && range_.size >= 7) {
+    const SalientParams sp = salient_params(params_);
+    const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+    const double p0 = params_.p_mech_mw / safe_base(params_.base_mva);
+    const double q0 = params_.q_elec_mvar / safe_base(params_.base_mva);
+    Eigen::VectorXd z0(6);
+    z0 << x.x[state_index(range_, 0)],
+          x.x[state_index(range_, 5)],
+          x.x[state_index(range_, 6)],
+          x.x[state_index(range_, 2)],
+          x.x[state_index(range_, 3)],
+          x.x[state_index(range_, 4)];
+    const Eigen::VectorXd z = solve_salient_initial_conditions(sp, v, p0, q0, z0);
+    changed = set_if_changed(x.x, state_index(range_, 0), z[0]) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 2), z[3]) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 3), z[4]) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 4), z[5]) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 5), z[1]) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 6), z[2]) || changed;
     return changed;
   }
   if (params_.dynamic_angle) {
@@ -1219,7 +1530,7 @@ void SynchronousMachine::computeDerivatives(double,
     if (!exciter_attached_) dxdt[state_index(range_, 5)] = 0.0;
     return;
   }
-  if (machine_is_genrou(params_) && range_.size >= 8) {
+  if (machine_is_roundrotor(params_) && range_.size >= 8) {
     const GenrouParams gp = genrou_params(params_);
     const double delta = x.x[state_index(range_, 0)];
     const double omega = x.x[state_index(range_, 1)];
@@ -1256,6 +1567,49 @@ void SynchronousMachine::computeDerivatives(double,
     // attached, in which case that controller owns their derivative.
     if (!governor_attached_) dxdt[state_index(range_, 6)] = 0.0;
     if (!exciter_attached_) dxdt[state_index(range_, 7)] = 0.0;
+    return;
+  }
+  if (machine_is_salient(params_) && range_.size >= 7) {
+    const SalientParams sp = salient_params(params_);
+    const double delta = x.x[state_index(range_, 0)];
+    const double omega = x.x[state_index(range_, 1)];
+    const double eq_p = x.x[state_index(range_, 2)];
+    const double psi_kd = x.x[state_index(range_, 3)];
+    const double psiq_pp = x.x[state_index(range_, 4)];
+    const double tau_m = x.x[state_index(range_, 5)];
+    const double vf = x.x[state_index(range_, 6)];
+    const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+    const SalientEval e = evaluate_salient(sp, v, delta, eq_p, psi_kd, psiq_pp);
+    const double h = std::max(0.01, params_.inertia_h);
+    const double wb = kTwoPi * params_.frequency_hz;
+    dxdt[state_index(range_, 0)] = params_.dynamic_angle ? wb * (omega - 1.0) : 0.0;
+    if (params_.dynamic_angle) {
+      const double swing_power =
+          tau_m - e.tau_e - params_.damping_d * (omega - 1.0) /
+                                std::max(kMinVoltage, std::abs(omega));
+      dxdt[state_index(range_, 1)] =
+          (std::abs(swing_power) <= kMachinePowerBalanceTolPu &&
+           std::abs(omega - 1.0) <= kMachinePowerBalanceTolPu)
+              ? 0.0
+              : swing_power / (2.0 * h);
+    } else {
+      dxdt[state_index(range_, 1)] = 0.0;
+    }
+    dxdt[state_index(range_, 2)] = (vf - e.xad_ifd) / sp.td0p;
+    dxdt[state_index(range_, 3)] =
+        (-psi_kd + eq_p - (sp.xdp - sp.xl) * e.id) / sp.td0pp;
+    if (sp.exponential_saturation) {
+      const double psi_pp = std::hypot(e.psi_d_pp, psiq_pp);
+      const double se = salient_saturation(sp, psi_pp);
+      dxdt[state_index(range_, 4)] =
+          (-psiq_pp + (sp.xq - sp.xdpp) * e.iq -
+           se * salient_gamma_qd(sp) * psiq_pp) / sp.tq0pp;
+    } else {
+      dxdt[state_index(range_, 4)] =
+          (-psiq_pp - (sp.xq - sp.xdpp) * e.iq) / sp.tq0pp;
+    }
+    if (!governor_attached_) dxdt[state_index(range_, 5)] = 0.0;
+    if (!exciter_attached_) dxdt[state_index(range_, 6)] = 0.0;
     return;
   }
   const Complex z(params_.r_pu, std::max(1e-5, params_.x_pu));
@@ -1305,7 +1659,7 @@ void SynchronousMachine::stamp(double,
     add_balanced_current(stamp, params_.bus_pos, yv * e_src);
     return;
   }
-  if (machine_is_genrou(params_) && range_.size >= 8) {
+  if (machine_is_roundrotor(params_) && range_.size >= 8) {
     const GenrouParams gp = genrou_params(params_);
     const double delta = x.x[state_index(range_, 0)];
     const double eq_p = x.x[state_index(range_, 2)];
@@ -1319,6 +1673,24 @@ void SynchronousMachine::stamp(double,
     const double psi_d_pp = gd1 * eq_p + gd2 * (gp.xdp - gp.xl) * psi_kd;
     const Complex e_ri = psd_dq_to_ri(delta, psi_q_pp, psi_d_pp);
     const Complex z(gp.r, gp.xdpp);
+    const Complex yv = Complex(1.0, 0.0) / z;
+    const Eigen::Vector3cd e = balanced_phasors(std::abs(e_ri), std::arg(e_ri));
+    add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(yv));
+    add_balanced_current(stamp, params_.bus_pos, yv * e);
+    return;
+  }
+  if (machine_is_salient(params_) && range_.size >= 7) {
+    const SalientParams sp = salient_params(params_);
+    const double delta = x.x[state_index(range_, 0)];
+    const double eq_p = x.x[state_index(range_, 2)];
+    const double psi_kd = x.x[state_index(range_, 3)];
+    const double psiq_pp = x.x[state_index(range_, 4)];
+    const double gd1 = salient_gamma_d1(sp);
+    const double gq1 = salient_gamma_q1(sp);
+    const double psi_d_pp = gd1 * eq_p + gq1 * psi_kd;
+    const double psi_q_src = sp.exponential_saturation ? psiq_pp : -psiq_pp;
+    const Complex e_ri = psd_dq_to_ri(delta, psi_q_src, psi_d_pp);
+    const Complex z(sp.r, sp.xdpp);
     const Complex yv = Complex(1.0, 0.0) / z;
     const Eigen::Vector3cd e = balanced_phasors(std::abs(e_ri), std::arg(e_ri));
     add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(yv));
@@ -1385,7 +1757,7 @@ DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
     out.values["i_rms_pu"] = std::abs(e.current);
     out.values["torque_e_pu"] = e.tau_e;
     out.values["psd_onedoneq"] = 1.0;
-  } else if (machine_is_genrou(params_) && !range_.empty() && range_.offset + 7 < x.x.size()) {
+  } else if (machine_is_roundrotor(params_) && !range_.empty() && range_.offset + 7 < x.x.size()) {
     const GenrouParams gp = genrou_params(params_);
     const double delta = x.x[state_index(range_, 0)];
     const double omega = x.x[state_index(range_, 1)];
@@ -1411,7 +1783,34 @@ DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
     out.values["q_mvar"] = e.qe * safe_base(params_.base_mva);
     out.values["i_rms_pu"] = std::abs(e.current);
     out.values["torque_e_pu"] = e.tau_e;
-    out.values["psd_genrou"] = 1.0;
+    out.values[gp.exponential_saturation ? "psd_genroe" : "psd_genrou"] = 1.0;
+  } else if (machine_is_salient(params_) && !range_.empty() && range_.offset + 6 < x.x.size()) {
+    const SalientParams sp = salient_params(params_);
+    const double delta = x.x[state_index(range_, 0)];
+    const double omega = x.x[state_index(range_, 1)];
+    const double eq_p = x.x[state_index(range_, 2)];
+    const double psi_kd = x.x[state_index(range_, 3)];
+    const double psiq_pp = x.x[state_index(range_, 4)];
+    const double tau_m = x.x[state_index(range_, 5)];
+    const double vf = x.x[state_index(range_, 6)];
+    const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+    const SalientEval e = evaluate_salient(sp, v, delta, eq_p, psi_kd, psiq_pp);
+    out.values["angle_rad"] = delta;
+    out.values["delta_rad"] = delta;
+    out.values["omega_pu"] = omega;
+    out.values["frequency_hz"] = omega * params_.frequency_hz;
+    out.values["eq_p"] = eq_p;
+    out.values["psi_kd"] = psi_kd;
+    out.values["psiq_pp"] = psiq_pp;
+    out.values["psi_q_pp"] = psiq_pp;
+    out.values["psi_d_pp"] = e.psi_d_pp;
+    out.values["vf_pu"] = vf;
+    out.values["p_mech_mw"] = tau_m * safe_base(params_.base_mva);
+    out.values["p_mw"] = e.pe * safe_base(params_.base_mva);
+    out.values["q_mvar"] = e.qe * safe_base(params_.base_mva);
+    out.values["i_rms_pu"] = std::abs(e.current);
+    out.values["torque_e_pu"] = e.tau_e;
+    out.values[sp.exponential_saturation ? "psd_gensae" : "psd_gensal"] = 1.0;
   } else if (!range_.empty() && range_.offset + 3 < x.x.size()) {
     const double theta = x.x[state_index(range_, 0)];
     const double omega = x.x[state_index(range_, 1)];

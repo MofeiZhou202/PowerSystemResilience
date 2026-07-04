@@ -48,7 +48,7 @@ Result<HybridPowerSystem> try_from_json(const std::string& json_str,
 
 Result<HybridPowerSystem> try_load_json(const std::string& path,
                                         ImportMode mode = ImportMode::Strict);
-// ── JPC (Julia Power Case) format ────────────────────────────────────────────
+// ── JPC matrix-case format ───────────────────────────────────────────────────
 
 std::string to_jpc_json(const HybridPowerSystem& sys, int indent = 2);
 

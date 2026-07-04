@@ -8,12 +8,12 @@ This is the first-pass gate for comparing PowerSimulationsDynamics.jl transmissi
 
 - Can pass all listed component test groups now: `false`
 - Rows: 39
-- Blocked rows: 30
+- Blocked rows: 27
 - blocked-missing-controller: 9
 - blocked-missing-formulation: 3
-- blocked-missing-model: 15
-- compare-limited: 9
-- metadata-only: 3
+- blocked-missing-model: 13
+- compare-limited: 12
+- metadata-only: 2
 
 ## Status Legend
 
@@ -38,9 +38,9 @@ This is the first-pass gate for comparing PowerSimulationsDynamics.jl transmissi
 | shaft | Test 07 | FiveMassShaft |  | blocked-missing-model | No multi-mass shaft model. | Implement after single-mass machine parity is accepted. |
 | machine | Test 12 | Two BaseMachine devices with TGTypeII | ClassicalMachine | blocked-missing-controller | TGTypeII is not implemented; full PSD formulation gates are also missing. | Use only after TGTypeII or an accepted surrogate is defined. |
 | machine | Test 15 | GENROU variants: normal, no saturation, high saturation | GENROU | compare-limited | Current comparison is a reduced trace gate, not PSD's full initialization, eigenvalue, ResidualModel, and MassMatrixModel contract. | Promote GENROU to the first full machine comparison if you choose machine-first work. |
-| machine | Test 16 | GENROE variants | GENROU metadata surrogate | metadata-only | No distinct GENROE exponential-saturation runtime model. | Implement GENROE or explicitly decide to treat it as out of first release. |
-| machine | Test 18 | GENSAL |  | blocked-missing-model | No salient-pole machine runtime model. | Required before claiming broad synchronous-machine PSD parity. |
-| machine | Test 19 | GENSAE |  | blocked-missing-model | No salient-pole exponential machine runtime model. | Build after GENSAL if salient-pole machines are prioritized. |
+| machine | Test 16 | GENROE variants | GENROE | compare-limited | Local PSD Test 16 GENROE normal and high-saturation delta/omega/eq_p/ed_p trace gates pass over 0-2s, but HACDCPF does not yet provide PSD-equivalent ResidualModel, MassMatrixModel, eigenvalue, or PSAT trace parity. | Implement the residual/mass-matrix/small-signal parity gate before claiming a full PSD Test 16 pass. |
+| machine | Test 18 | GENSAL | GENSAL | compare-limited | Local PSD Test 18 delta/omega/eq_p/psiq_pp trace gates pass over 0-2s, but HACDCPF does not yet provide PSD-equivalent ResidualModel, MassMatrixModel, eigenvalue, or PSAT trace parity. | Implement the residual/mass-matrix/small-signal parity gate before claiming a full PSD Test 18 pass. |
+| machine | Test 19 | GENSAE | GENSAE | compare-limited | Local PSD Test 19 delta/omega/eq_p/psiq_pp trace gates pass over 0-2s, but HACDCPF does not yet provide PSD-equivalent ResidualModel, MassMatrixModel, eigenvalue, or PSAT trace parity. | Implement the residual/mass-matrix/small-signal parity gate before claiming a full PSD Test 19 pass. |
 | machine | Test 35 | Multi-generator PSSE case | ClassicalMachine / GENROU subsets | blocked-missing-formulation | System-level multi-machine PSD gates depend on missing model/controller coverage and full DAE parity. | Defer until single-device machine tests pass. |
 | machine | Test 36 | GENROU + SEXS + TGOV1 eigenvalues vs ANDES | GENROU + SEXS + TGOV1 | blocked-missing-formulation | No PSD-equivalent small-signal/eigenvalue API in HACDCPF. | Do not claim this until reduced Jacobian/eigenvalue tooling exists. |
 | machine | Test 45 | SauerPaiMachine |  | blocked-missing-model | No Sauer-Pai runtime model. | Defer behind GENROU/GENSAL unless explicitly prioritized. |

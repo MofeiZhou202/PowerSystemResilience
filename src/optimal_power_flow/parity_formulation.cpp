@@ -27,7 +27,7 @@ constexpr double kDcVoltAnchor = 1.0;
 
 double clamp_interior(double x, double lo, double hi) {
   const double w = hi - lo;
-  const double eps = std::max(1e-9, 0.01 * std::max(w, 1e-9));  // 1% margin (Julia :clamp_1pct)
+  const double eps = std::max(1e-9, 0.01 * std::max(w, 1e-9));  // 1% margin
   return std::clamp(x, lo + eps, hi - eps);
 }
 
@@ -677,7 +677,7 @@ void build_variable_bounds(const Problem& prob, Eigen::VectorXd& xmin, Eigen::Ve
   }
 }
 
-// DC warm start: solve B_red · θ = -P_inj for voltage angles (matching Julia)
+// DC warm start: solve B_red · θ = -P_inj for voltage angles.
 void dc_warm_start(const Problem& prob, Eigen::VectorXd& x0) {
   const auto& idx = prob.vidx;
   const int nb = idx.n_va;
@@ -1033,7 +1033,7 @@ void build_initial_point(const Problem& prob,
     }
   }
 
-  // Clamp to interior of bounds (1% margin matching Julia :clamp_1pct)
+  // Clamp to interior of bounds (1% margin)
   for (int i = 0; i < idx.n_total; ++i) {
     x0[i] = clamp_interior(x0[i], xmin[i], xmax[i]);
   }
