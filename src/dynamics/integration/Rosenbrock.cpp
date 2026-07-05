@@ -22,8 +22,10 @@ IntegrationStepResult Rosenbrock::step(DynamicSystem& system,
   }
   const Eigen::MatrixXd a =
       Eigen::MatrixXd::Identity(x0.size(), x0.size()) - dt * jf;
-  const Eigen::VectorXd delta = a.partialPivLu().solve(dt * f0);
-  if (!delta.allFinite()) return detail::make_failure("Rosenbrock correction is non-finite");
+  Eigen::VectorXd delta;
+  if (!detail::sparse_solve(a, dt * f0, delta, error)) {
+    return detail::make_failure(error);
+  }
   system.x.x = x0 + delta;
   Eigen::VectorXd f1;
   if (!detail::evaluate_derivatives(system, t + dt, system.x.x, f1, error)) {

@@ -33,6 +33,17 @@ TEST_CASE("diff_systems detects an injected mismatch", "[io][roundtrip]") {
   CHECK(ev.fields_mismatched >= 1);
 }
 
+TEST_CASE("AC branch dynamic RL selector round-trips through JSON",
+          "[io][roundtrip][dynamics]") {
+  auto sys = hacdcpf::io::build_ieee14_acdc();
+  REQUIRE_FALSE(sys.ac.branches.empty());
+  sys.ac.branches.front().dynamic_rl = true;
+
+  const auto restored = hacdcpf::io::from_json(hacdcpf::io::to_json(sys));
+  REQUIRE_FALSE(restored.ac.branches.empty());
+  CHECK(restored.ac.branches.front().dynamic_rl);
+}
+
 TEST_CASE("Round-trip evidence is stored and consistent with the F3 gate",
           "[io][roundtrip][maturity]") {
   const auto sys = hacdcpf::io::build_ieee14_acdc();
@@ -110,4 +121,3 @@ TEST_CASE("Telemetry section round-trips and drives the I1 gate (§10)",
     }
   }
 }
-

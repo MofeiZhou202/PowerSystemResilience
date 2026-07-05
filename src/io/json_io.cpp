@@ -341,6 +341,7 @@ static json ac_branch_to_json(const ACBranch& br) {
   j["b0_pu"] = br.b0_pu;
   j["failure_rate"] = br.failure_rate;
   j["mttr_hr"] = br.mttr_hr;
+  j["dynamic_rl"] = br.dynamic_rl;
   return j;
 }
 
@@ -365,6 +366,7 @@ static ACBranch ac_branch_from_json(const json& j) {
   br.b0_pu = jget(j, "b0_pu", 0.0);
   br.failure_rate = jget(j, "failure_rate", 0.0);
   br.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  br.dynamic_rl = jget(j, "dynamic_rl", false);
   return br;
 }
 

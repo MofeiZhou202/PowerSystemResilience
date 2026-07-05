@@ -4,8 +4,11 @@
 #include <cmath>
 #include <complex>
 #include <numeric>
+#include <vector>
 
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
+#include <Eigen/SparseLU>
 
 #include "hacdcpf/dynamics/DynamicStamp.hpp"
 #include "hacdcpf/dynamics/DynamicSystem.hpp"
@@ -125,6 +128,20 @@ std::vector<SmallSignalStateInfo> build_state_info(DynamicSystem& sys, int n_x) 
   return info;
 }
 
+Eigen::SparseMatrix<double> dense_to_sparse(const Eigen::MatrixXd& dense) {
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(dense.size()));
+  for (Eigen::Index j = 0; j < dense.cols(); ++j) {
+    for (Eigen::Index i = 0; i < dense.rows(); ++i) {
+      const double v = dense(i, j);
+      if (v != 0.0) triplets.emplace_back(i, j, v);
+    }
+  }
+  Eigen::SparseMatrix<double> sparse(dense.rows(), dense.cols());
+  sparse.setFromTriplets(triplets.begin(), triplets.end());
+  return sparse;
+}
+
 }  // namespace
 
 SmallSignalResult small_signal_analysis(DynamicSystem& system) {
@@ -196,13 +213,20 @@ SmallSignalResult small_signal_analysis(DynamicSystem& system) {
     const Eigen::MatrixXd f_y = J.topRightCorner(nd, na);
     const Eigen::MatrixXd g_x = J.bottomLeftCorner(na, nd);
     const Eigen::MatrixXd g_y = J.bottomRightCorner(na, na);
-    const Eigen::FullPivLU<Eigen::MatrixXd> lu(g_y);
-    if (!lu.isInvertible()) {
+    Eigen::SparseLU<Eigen::SparseMatrix<double>> lu;
+    lu.compute(dense_to_sparse(g_y));
+    if (lu.info() != Eigen::Success) {
       result.success = false;
       result.message = "Small-signal: algebraic (network) Jacobian block is singular";
       return result;
     }
-    A.noalias() -= f_y * lu.solve(g_x);
+    const Eigen::MatrixXd gy_solve = lu.solve(g_x);
+    if (lu.info() != Eigen::Success || !gy_solve.allFinite()) {
+      result.success = false;
+      result.message = "Small-signal: algebraic (network) sparse solve failed";
+      return result;
+    }
+    A.noalias() -= f_y * gy_solve;
   }
   result.reduced_jacobian = A;
   result.states = build_state_info(system, nd);

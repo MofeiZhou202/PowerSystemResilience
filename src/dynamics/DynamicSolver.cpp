@@ -4,8 +4,11 @@
 #include <cmath>
 #include <limits>
 #include <sstream>
+#include <vector>
 
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
+#include <Eigen/SparseLU>
 
 #include "hacdcpf/dynamics/DynamicModelBuilder.hpp"
 
@@ -309,6 +312,39 @@ double scaled_error_norm(const Eigen::VectorXd& reference,
   return norm;
 }
 
+Eigen::SparseMatrix<double> dense_to_sparse(const Eigen::MatrixXd& dense) {
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(dense.size()));
+  for (Eigen::Index j = 0; j < dense.cols(); ++j) {
+    for (Eigen::Index i = 0; i < dense.rows(); ++i) {
+      const double v = dense(i, j);
+      if (v != 0.0) triplets.emplace_back(i, j, v);
+    }
+  }
+  Eigen::SparseMatrix<double> sparse(dense.rows(), dense.cols());
+  sparse.setFromTriplets(triplets.begin(), triplets.end());
+  return sparse;
+}
+
+bool sparse_solve_dense_system(const Eigen::MatrixXd& dense,
+                               const Eigen::VectorXd& rhs,
+                               Eigen::VectorXd& x,
+                               std::string& error) {
+  Eigen::SparseMatrix<double> sparse = dense_to_sparse(dense);
+  Eigen::SparseLU<Eigen::SparseMatrix<double>> lu;
+  lu.compute(sparse);
+  if (lu.info() != Eigen::Success) {
+    error = "Sparse Newton correction factorization failed";
+    return false;
+  }
+  x = lu.solve(rhs);
+  if (lu.info() != Eigen::Success || !x.allFinite()) {
+    error = "Sparse Newton correction solve failed";
+    return false;
+  }
+  return true;
+}
+
 bool has_active_fault(const DynamicSystem& sys) {
   return std::any_of(sys.network.fault_shunts.begin(),
                      sys.network.fault_shunts.end(),
@@ -519,9 +555,8 @@ StepOutcome step_backward_euler_newton(DynamicSystem& sys,
     Eigen::MatrixXd jf;
     if (!numerical_state_jacobian(sys, t + dt, x, f, jf, error)) return {};
     Eigen::MatrixXd jr = Eigen::MatrixXd::Identity(x.size(), x.size()) - dt * jf;
-    Eigen::VectorXd delta = jr.partialPivLu().solve(-residual);
-    if (!delta.allFinite()) {
-      error = "Backward Euler Newton produced a non-finite correction";
+    Eigen::VectorXd delta;
+    if (!sparse_solve_dense_system(jr, -residual, delta, error)) {
       return {};
     }
     double alpha = 1.0;
@@ -575,9 +610,8 @@ StepOutcome step_trapezoidal_newton(DynamicSystem& sys,
     Eigen::MatrixXd jf;
     if (!numerical_state_jacobian(sys, t + dt, x, f, jf, error)) return {};
     Eigen::MatrixXd jr = Eigen::MatrixXd::Identity(x.size(), x.size()) - 0.5 * dt * jf;
-    Eigen::VectorXd delta = jr.partialPivLu().solve(-residual);
-    if (!delta.allFinite()) {
-      error = "Trapezoidal Newton produced a non-finite correction";
+    Eigen::VectorXd delta;
+    if (!sparse_solve_dense_system(jr, -residual, delta, error)) {
       return {};
     }
     double alpha = 1.0;
@@ -618,9 +652,8 @@ StepOutcome step_rosenbrock_euler(DynamicSystem& sys,
   if (!numerical_state_jacobian(sys, t, x0, f0, jf, error)) return {};
   const Eigen::MatrixXd a =
       Eigen::MatrixXd::Identity(x0.size(), x0.size()) - dt * jf;
-  const Eigen::VectorXd delta = a.partialPivLu().solve(dt * f0);
-  if (!delta.allFinite()) {
-    error = "Rosenbrock-Euler produced a non-finite correction";
+  Eigen::VectorXd delta;
+  if (!sparse_solve_dense_system(a, dt * f0, delta, error)) {
     return {};
   }
   sys.x.x = x0 + delta;

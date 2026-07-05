@@ -258,6 +258,34 @@ void apply_voltage_source_profile(const hacdcpf::DynamicModelProfile& profile,
   }
 }
 
+// Build a five-mass shaft from a machine's dynamic_model "shaft" component profile.
+std::unique_ptr<FiveMassShaft> make_five_mass_shaft(
+    const hacdcpf::DynamicModelComponentProfile& comp,
+    const VoltageSourceDynamicParams& mp) {
+  FiveMassShaftParams s;
+  s.component_index = mp.component_index;
+  s.machine_index = mp.component_index;
+  s.label = label_or(mp.label, "Machine " + std::to_string(mp.component_index)) + " shaft";
+  s.base_mva = mp.base_mva;
+  s.frequency_hz = mp.frequency_hz;
+  s.parameter_set = comp.parameter_set;
+  const auto& p = comp.parameters;
+  s.inertia_h[0] = param_or(p, {"H1", "H_hp", "h_hp"}, s.inertia_h[0]);
+  s.inertia_h[1] = param_or(p, {"H2", "H_ip", "h_ip"}, s.inertia_h[1]);
+  s.inertia_h[2] = param_or(p, {"H3", "H_lpa", "h_lpa"}, s.inertia_h[2]);
+  s.inertia_h[3] = param_or(p, {"H4", "H_lpb", "h_lpb"}, s.inertia_h[3]);
+  s.inertia_h[4] = param_or(p, {"H5", "H_gen", "h_gen"}, s.inertia_h[4]);
+  s.stiffness_pu[0] = param_or(p, {"K12", "K_hp_ip", "k12"}, s.stiffness_pu[0]);
+  s.stiffness_pu[1] = param_or(p, {"K23", "K_ip_lpa", "k23"}, s.stiffness_pu[1]);
+  s.stiffness_pu[2] = param_or(p, {"K34", "K_lpa_lpb", "k34"}, s.stiffness_pu[2]);
+  s.stiffness_pu[3] = param_or(p, {"K45", "K_lpb_gen", "k45"}, s.stiffness_pu[3]);
+  s.damping_pu[0] = param_or(p, {"D12", "D_hp_ip", "d12"}, s.damping_pu[0]);
+  s.damping_pu[1] = param_or(p, {"D23", "D_ip_lpa", "d23"}, s.damping_pu[1]);
+  s.damping_pu[2] = param_or(p, {"D34", "D_lpa_lpb", "d34"}, s.damping_pu[2]);
+  s.damping_pu[3] = param_or(p, {"D45", "D_lpb_gen", "d45"}, s.damping_pu[3]);
+  return std::make_unique<FiveMassShaft>(s);
+}
+
 // Build a Governor from a machine's dynamic_model "governor" component profile.
 std::unique_ptr<Governor> make_governor(const hacdcpf::DynamicModelComponentProfile& comp,
                                         const VoltageSourceDynamicParams& mp) {
@@ -267,7 +295,15 @@ std::unique_ptr<Governor> make_governor(const hacdcpf::DynamicModelComponentProf
   g.label = label_or(mp.label, "Machine " + std::to_string(mp.component_index)) + " governor";
   g.base_mva = mp.base_mva;
   g.model_name = comp.model.empty() ? "TGOV1" : comp.model;
-  g.model = iequals(comp.model, "IEEEG1") ? GovernorModel::IEEEG1 : GovernorModel::TGOV1;
+  if (iequals(comp.model, "IEEEG1")) {
+    g.model = GovernorModel::IEEEG1;
+  } else if (iequals(comp.model, "TGTypeI")) {
+    g.model = GovernorModel::TGTypeI;
+  } else if (iequals(comp.model, "TGTypeII")) {
+    g.model = GovernorModel::TGTypeII;
+  } else {
+    g.model = GovernorModel::TGOV1;
+  }
   g.parameter_set = comp.parameter_set;
   const auto& p = comp.parameters;
   const double base = std::max(1.0, mp.base_mva);
@@ -276,8 +312,18 @@ std::unique_ptr<Governor> make_governor(const hacdcpf::DynamicModelComponentProf
   g.turbine_t_s = param_or(p, {"T3", "t3", "Tt", "turbine_t_s"}, g.turbine_t_s);
   g.reheat_t_s = param_or(p, {"Tr", "T5", "reheat_t_s"}, g.reheat_t_s);
   g.reheat_k = param_or(p, {"K1", "Khp", "reheat_k"}, g.reheat_k);
-  const double vmax = param_or(p, {"Vmax", "pmax_pu"}, 0.0);
-  const double vmin = param_or(p, {"Vmin", "pmin_pu"}, 0.0);
+  if (g.model == GovernorModel::TGTypeI) {
+    g.t_s = param_or(p, {"Ts", "T_s", "T1", "t1"}, g.t_s);
+    g.tc_s = param_or(p, {"Tc", "T_c", "servo_t_s"}, g.tc_s);
+    g.t3_s = param_or(p, {"T3", "t3"}, g.t3_s);
+    g.t4_s = param_or(p, {"T4", "t4"}, g.t4_s);
+    g.t5_s = param_or(p, {"T5", "t5"}, g.t5_s);
+  } else if (g.model == GovernorModel::TGTypeII) {
+    g.t_s = param_or(p, {"T1", "t1"}, g.t_s);
+    g.turbine_t_s = param_or(p, {"T2", "t2"}, g.turbine_t_s);
+  }
+  const double vmax = param_or(p, {"Vmax", "pmax_pu", "tau_max"}, 0.0);
+  const double vmin = param_or(p, {"Vmin", "pmin_pu", "tau_min"}, 0.0);
   g.pmax_mw = vmax > 0.0 ? vmax * base : param_or(p, {"pmax_mw", "Pmax"}, g.pmax_mw);
   g.pmin_mw = vmin < 0.0 ? vmin * base : param_or(p, {"pmin_mw", "Pmin"}, g.pmin_mw);
   return std::make_unique<Governor>(g);
@@ -293,15 +339,39 @@ std::unique_ptr<Exciter> make_exciter(const hacdcpf::DynamicModelComponentProfil
   e.bus_pos = mp.bus_pos;
   e.label = label_or(mp.label, "Machine " + std::to_string(mp.component_index)) + " exciter";
   e.model_name = comp.model.empty() ? "SEXS" : comp.model;
-  e.model = iequals(comp.model, "IEEET1") ? ExciterModel::IEEET1 : ExciterModel::SEXS;
+  if (iequals(comp.model, "IEEET1")) {
+    e.model = ExciterModel::IEEET1;
+  } else if (iequals(comp.model, "AVRSimple")) {
+    e.model = ExciterModel::AVRSimple;
+  } else if (iequals(comp.model, "AVRTypeI")) {
+    e.model = ExciterModel::AVRTypeI;
+  } else if (iequals(comp.model, "AVRTypeII")) {
+    e.model = ExciterModel::AVRTypeII;
+  } else {
+    e.model = ExciterModel::SEXS;
+  }
   e.parameter_set = comp.parameter_set;
   const auto& p = comp.parameters;
   e.ka = param_or(p, {"Ka", "K", "ka"}, e.ka);
   e.ta_s = param_or(p, {"Ta", "ta", "Tb"}, e.ta_s);
   e.te_s = param_or(p, {"Te", "te"}, e.te_s);
+  e.kv = param_or(p, {"Kv", "kv"}, e.kv);
+  e.ke = param_or(p, {"Ke", "ke"}, e.ke);
+  e.kf = param_or(p, {"Kf", "kf"}, e.kf);
+  e.tf_s = param_or(p, {"Tf", "tf"}, e.tf_s);
+  e.tr_s = param_or(p, {"Tr", "tr"}, e.tr_s);
+  e.ae = param_or(p, {"Ae", "ae"}, e.ae);
+  e.be = param_or(p, {"Be", "be"}, e.be);
+  e.k0 = param_or(p, {"K0", "k0"}, e.k0);
+  e.t1_s = param_or(p, {"T1", "t1"}, e.t1_s);
+  e.t2_s = param_or(p, {"T2", "t2"}, e.t2_s);
+  e.t3_s = param_or(p, {"T3", "t3"}, e.t3_s);
+  e.t4_s = param_or(p, {"T4", "t4"}, e.t4_s);
+  e.va_max_pu = param_or(p, {"Va_max", "VaMax", "Vrmax", "Emax"}, e.va_max_pu);
+  e.va_min_pu = param_or(p, {"Va_min", "VaMin", "Vrmin", "Emin"}, e.va_min_pu);
   e.efd_max_pu = param_or(p, {"Emax", "Vrmax", "efd_max_pu"}, e.efd_max_pu);
   e.efd_min_pu = param_or(p, {"Emin", "Vrmin", "efd_min_pu"}, e.efd_min_pu);
-  e.v_ref_pu = param_or(p, {"Vref", "v_ref_pu"}, e.v_ref_pu);
+  e.v_ref_pu = param_or(p, {"Vref", "V_ref", "v_ref_pu"}, e.v_ref_pu);
   return std::make_unique<Exciter>(e);
 }
 
@@ -316,6 +386,13 @@ std::unique_ptr<PowerSystemStabilizer> make_pss(
   s.bus_pos = mp.bus_pos;
   s.label = label_or(mp.label, "Machine " + std::to_string(mp.component_index)) + " PSS";
   s.model_name = comp.model.empty() ? "PSS1A" : comp.model;
+  if (iequals(comp.model, "IEEEST")) {
+    s.model = PSSModel::IEEEST;
+  } else if (iequals(comp.model, "STAB1")) {
+    s.model = PSSModel::STAB1;
+  } else {
+    s.model = PSSModel::PSS1A;
+  }
   s.parameter_set = comp.parameter_set;
   const auto& p = comp.parameters;
   s.ks = param_or(p, {"Ks", "Ks1", "ks"}, s.ks);
@@ -324,8 +401,24 @@ std::unique_ptr<PowerSystemStabilizer> make_pss(
   s.t2_s = param_or(p, {"T2", "t2"}, s.t2_s);
   s.t3_s = param_or(p, {"T3", "t3"}, s.t3_s);
   s.t4_s = param_or(p, {"T4", "t4"}, s.t4_s);
-  s.vs_max_pu = param_or(p, {"Vsmax", "vs_max_pu", "Vstmax"}, s.vs_max_pu);
-  s.vs_min_pu = param_or(p, {"Vsmin", "vs_min_pu", "Vstmin"}, s.vs_min_pu);
+  s.vs_max_pu = param_or(p, {"Vsmax", "Lsmax", "ls_max", "vs_max_pu", "Vstmax"}, s.vs_max_pu);
+  s.vs_min_pu = param_or(p, {"Vsmin", "Lsmin", "ls_min", "vs_min_pu", "Vstmin"}, s.vs_min_pu);
+  s.a1 = param_or(p, {"A1", "a1"}, s.a1);
+  s.a2 = param_or(p, {"A2", "a2"}, s.a2);
+  s.a3 = param_or(p, {"A3", "a3"}, s.a3);
+  s.a4 = param_or(p, {"A4", "a4"}, s.a4);
+  s.a5 = param_or(p, {"A5", "a5"}, s.a5);
+  s.a6 = param_or(p, {"A6", "a6"}, s.a6);
+  s.t5_s = param_or(p, {"T5", "t5"}, s.t5_s);
+  s.t6_s = param_or(p, {"T6", "t6"}, s.t6_s);
+  s.vcu = param_or(p, {"Vcu", "V_CU", "vcu"}, s.vcu);
+  s.vcl = param_or(p, {"Vcl", "V_CL", "vcl"}, s.vcl);
+  s.input_code = static_cast<int>(param_or(p, {"input_code", "InputCode"}, s.input_code));
+  s.kt = param_or(p, {"KT", "Kt", "kt"}, s.kt);
+  s.stab_t_s = param_or(p, {"T", "Tw", "tw"}, s.stab_t_s);
+  s.t1_over_t3 = param_or(p, {"T1T3", "t1_over_t3"}, s.t1_over_t3);
+  s.t2_over_t4 = param_or(p, {"T2T4", "t2_over_t4"}, s.t2_over_t4);
+  s.h_lim = param_or(p, {"H_lim", "Hlim", "h_lim"}, s.h_lim);
   return std::make_unique<PowerSystemStabilizer>(s);
 }
 
@@ -341,7 +434,14 @@ void wire_machine_controllers(std::vector<std::unique_ptr<DynamicDevice>>& devic
   PowerSystemStabilizer* pss = nullptr;
   bool has_pss = false;
   for (const auto& comp : dm.components) {
-    if (iequals(comp.type, "governor") || iequals(comp.type, "turbine_governor")) {
+    if (iequals(comp.type, "shaft")) {
+      if (iequals(comp.model, "FiveMassShaft") || iequals(comp.model, "FiveMass") ||
+          iequals(comp.model, "FiveMassShaftBlock")) {
+        auto s = make_five_mass_shaft(comp, mp);
+        s->attachMachine(machine->controlLink());
+        devices.push_back(std::move(s));
+      }
+    } else if (iequals(comp.type, "governor") || iequals(comp.type, "turbine_governor")) {
       auto g = make_governor(comp, mp);
       g->attachMachine(machine->controlLink());
       machine->markGovernorAttached();
@@ -355,6 +455,7 @@ void wire_machine_controllers(std::vector<std::unique_ptr<DynamicDevice>>& devic
     } else if (iequals(comp.type, "pss") || iequals(comp.type, "stabilizer")) {
       auto s = make_pss(comp, mp);
       s->attachMachine(machine->controlLink());
+      machine->markPssAttached();
       pss = s.get();
       has_pss = true;
       devices.push_back(std::move(s));
@@ -583,6 +684,45 @@ DynamicACBranch make_balanced_ac_branch(const ACBranch& branch,
   dyn.y_tf = diag3(-y / tap);
   dyn.y_tt = diag3(y + y_shunt);
   return dyn;
+}
+
+DynamicACBranch make_balanced_ac_branch_shunt(const ACBranch& branch,
+                                              const DynamicNetwork& network,
+                                              bool per_phase_equivalent) {
+  DynamicACBranch dyn;
+  dyn.index = branch.index;
+  dyn.from_bus = branch.from_bus;
+  dyn.to_bus = branch.to_bus;
+  dyn.from_pos = network.acBusPosition(branch.from_bus);
+  dyn.to_pos = network.acBusPosition(branch.to_bus);
+  dyn.in_service = branch.in_service;
+  const double scale = per_phase_equivalent ? 1.0 / 3.0 : 1.0;
+  const Complex y_shunt(0.0, branch.b_pu / 2.0 * scale);
+  const double tap_mag = branch.tap == 0.0 ? 1.0 : branch.tap;
+  const Complex tap = std::polar(tap_mag, branch.shift_deg * kDegToRad);
+  const Complex tap_conj = std::conj(tap);
+  dyn.y_ff = diag3(y_shunt / (tap * tap_conj));
+  dyn.y_tt = diag3(y_shunt);
+  return dyn;
+}
+
+DynamicRLLineParams make_dynamic_rl_line_params(const ACBranch& branch,
+                                                const DynamicNetwork& network,
+                                                bool per_phase_equivalent) {
+  DynamicRLLineParams p;
+  p.component_index = branch.index;
+  p.from_bus = branch.from_bus;
+  p.to_bus = branch.to_bus;
+  p.from_pos = network.acBusPosition(branch.from_bus);
+  p.to_pos = network.acBusPosition(branch.to_bus);
+  p.label = label_or(branch.name, "Dynamic RL line " + std::to_string(branch.index));
+  p.base_mva = network.base_mva;
+  p.frequency_hz = network.frequency_hz;
+  const double scale = per_phase_equivalent ? 3.0 : 1.0;
+  p.r_pu = branch.r_pu * scale;
+  p.x_pu = branch.x_pu * scale;
+  p.in_service = branch.in_service;
+  return p;
 }
 
 DynamicACBranch make_three_phase_line_branch(const ThreePhaseACLine& line,
@@ -850,11 +990,28 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     }
   } else {
     for (const auto& branch : dyn.canonical_system.ac.branches) {
-      network.ac_branches.push_back(
-          make_balanced_ac_branch(branch,
-                                  network,
-                                  options.min_branch_impedance_pu,
-                                  pf_bus_injection_init));
+      const bool dynamic_rl_supported =
+          branch.dynamic_rl &&
+          nearly_equal(branch.tap == 0.0 ? 1.0 : branch.tap, 1.0) &&
+          nearly_equal(branch.shift_deg, 0.0) &&
+          std::abs(branch.x_pu) > 1e-12;
+      if (branch.dynamic_rl && !dynamic_rl_supported) {
+        dyn.warnings.push_back(
+            "AC branch " + std::to_string(branch.index) +
+            " requested dynamic_rl but has unsupported tap/shift or zero reactance; using static admittance");
+      }
+      if (dynamic_rl_supported) {
+        network.ac_branches.push_back(
+            make_balanced_ac_branch_shunt(branch, network, pf_bus_injection_init));
+        dyn.devices.push_back(std::make_unique<DynamicRLLine>(
+            make_dynamic_rl_line_params(branch, network, pf_bus_injection_init)));
+      } else {
+        network.ac_branches.push_back(
+            make_balanced_ac_branch(branch,
+                                    network,
+                                    options.min_branch_impedance_pu,
+                                    pf_bus_injection_init));
+      }
     }
   }
 

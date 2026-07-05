@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
+#include <Eigen/SparseLU>
 
 namespace hacdcpf::dynamics {
 
@@ -29,6 +32,30 @@ bool numerical_jacobian(const NewtonSolver::ResidualFunction& residual,
   return true;
 }
 
+Eigen::SparseMatrix<double> dense_to_sparse(const Eigen::MatrixXd& dense) {
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(dense.size()));
+  for (Eigen::Index col = 0; col < dense.cols(); ++col) {
+    for (Eigen::Index row = 0; row < dense.rows(); ++row) {
+      const double value = dense(row, col);
+      if (value != 0.0) triplets.emplace_back(row, col, value);
+    }
+  }
+  Eigen::SparseMatrix<double> sparse(dense.rows(), dense.cols());
+  sparse.setFromTriplets(triplets.begin(), triplets.end());
+  return sparse;
+}
+
+bool sparse_solve(const Eigen::MatrixXd& jac,
+                  const Eigen::VectorXd& rhs,
+                  Eigen::VectorXd& delta) {
+  Eigen::SparseLU<Eigen::SparseMatrix<double>> lu;
+  lu.compute(dense_to_sparse(jac));
+  if (lu.info() != Eigen::Success) return false;
+  delta = lu.solve(rhs);
+  return lu.info() == Eigen::Success && delta.allFinite();
+}
+
 }  // namespace
 
 NewtonSolverResult NewtonSolver::solve(ResidualFunction residual,
@@ -44,8 +71,10 @@ NewtonSolverResult NewtonSolver::solve(ResidualFunction residual,
     if (!numerical_jacobian(residual, x, r, jac, error)) {
       return {false, iter, norm, error};
     }
-    const Eigen::VectorXd delta = jac.partialPivLu().solve(-r);
-    if (!delta.allFinite()) return {false, iter, norm, "Newton correction is non-finite"};
+    Eigen::VectorXd delta;
+    if (!sparse_solve(jac, -r, delta)) {
+      return {false, iter, norm, "Newton sparse correction failed"};
+    }
 
     double alpha = 1.0;
     bool accepted = false;

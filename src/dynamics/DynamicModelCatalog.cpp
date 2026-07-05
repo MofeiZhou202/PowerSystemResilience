@@ -135,6 +135,23 @@ std::vector<DynamicModelDescriptor> build_catalog() {
        real("T_AA", {"TAA", "t_aa", "taa"}, "d-axis additional leakage time const", "s", 0.0, 0.0, 2.0, "Time constants", true)}));
   c.push_back(model(
       "ClassicalMachine", "IEEE", "Classical (E' behind X') machine", "machine", {}));
+  c.push_back(model(
+      "SingleMass", "PowerSimulationsDynamics", "Single-mass shaft", "shaft", {}));
+  c.push_back(model(
+      "FiveMassShaft", "PowerSimulationsDynamics", "Five-mass turbine-generator shaft", "shaft",
+      {real("H1", {"H_hp", "h_hp"}, "HP turbine inertia", "s", 0.30, 0.01, 30.0, "Inertia"),
+       real("H2", {"H_ip", "h_ip"}, "IP turbine inertia", "s", 0.30, 0.01, 30.0, "Inertia"),
+       real("H3", {"H_lpa", "h_lpa"}, "LPA turbine inertia", "s", 0.30, 0.01, 30.0, "Inertia"),
+       real("H4", {"H_lpb", "h_lpb"}, "LPB turbine inertia", "s", 0.30, 0.01, 30.0, "Inertia"),
+       real("H5", {"H_gen", "h_gen"}, "Generator inertia", "s", 1.80, 0.01, 30.0, "Inertia"),
+       real("K12", {"K_hp_ip", "k12"}, "HP-IP shaft stiffness", "pu/rad", 25.0, 0.001, 1e4, "Shaft"),
+       real("K23", {"K_ip_lpa", "k23"}, "IP-LPA shaft stiffness", "pu/rad", 25.0, 0.001, 1e4, "Shaft"),
+       real("K34", {"K_lpa_lpb", "k34"}, "LPA-LPB shaft stiffness", "pu/rad", 25.0, 0.001, 1e4, "Shaft"),
+       real("K45", {"K_lpb_gen", "k45"}, "LPB-generator shaft stiffness", "pu/rad", 25.0, 0.001, 1e4, "Shaft"),
+       real("D12", {"D_hp_ip", "d12"}, "HP-IP damping", "pu", 0.02, 0.0, 100.0, "Shaft", true),
+       real("D23", {"D_ip_lpa", "d23"}, "IP-LPA damping", "pu", 0.02, 0.0, 100.0, "Shaft", true),
+       real("D34", {"D_lpa_lpb", "d34"}, "LPA-LPB damping", "pu", 0.02, 0.0, 100.0, "Shaft", true),
+       real("D45", {"D_lpb_gen", "d45"}, "LPB-generator damping", "pu", 0.02, 0.0, 100.0, "Shaft", true)}));
 
   // ── Governors ──
   c.push_back(model(
@@ -153,8 +170,29 @@ std::vector<DynamicModelDescriptor> build_catalog() {
        real("K1", {"Khp", "reheat_k"}, "HP fraction", "", 0.30, 0.0, 1.0, "Reheat"),
        real("Vmax", {"pmax_pu"}, "Max valve/power", "pu", 0.0, 0.0, 2.0, "Limits", true),
        real("Vmin", {"pmin_pu"}, "Min valve/power", "pu", 0.0, -2.0, 0.0, "Limits", true)}));
+  c.push_back(model(
+      "TGTypeI", "PowerSystems", "Type I turbine governor", "governor",
+      {real("R", {"droop_r", "droop"}, "Droop", "pu", 0.05, 0.0, 0.2, "Droop"),
+       real("Ts", {"T_s", "T1"}, "Governor time const", "s", 0.2, 0.001, 20.0, "Time constants"),
+       real("Tc", {"T_c", "servo_t_s"}, "Servo time const", "s", 0.5, 0.001, 20.0, "Time constants"),
+       real("T3", {"t3"}, "Transient gain time const", "s", 0.1, 0.0, 20.0, "Time constants"),
+       real("T4", {"t4"}, "Power fraction time const", "s", 0.3, 0.0, 20.0, "Time constants"),
+       real("T5", {"t5"}, "Reheat time const", "s", 5.0, 0.001, 40.0, "Time constants"),
+       real("Vmax", {"pmax_pu", "tau_max"}, "Max valve/power", "pu", 0.0, 0.0, 2.0, "Limits", true),
+       real("Vmin", {"pmin_pu", "tau_min"}, "Min valve/power", "pu", 0.0, -2.0, 0.0, "Limits", true)}));
+  c.push_back(model(
+      "TGTypeII", "PowerSystems", "Type II turbine governor", "governor",
+      {real("R", {"droop_r", "droop"}, "Droop", "pu", 0.05, 0.0, 0.2, "Droop"),
+       real("T1", {"t1"}, "Lead-lag numerator", "s", 0.3, 0.0, 20.0, "Time constants"),
+       real("T2", {"t2"}, "Lead-lag denominator", "s", 0.5, 0.001, 20.0, "Time constants"),
+       real("Vmax", {"pmax_pu", "tau_max"}, "Max governor output", "pu", 0.0, 0.0, 2.0, "Limits", true),
+       real("Vmin", {"pmin_pu", "tau_min"}, "Min governor output", "pu", 0.0, -2.0, 0.0, "Limits", true)}));
 
   // ── Exciters / AVRs ──
+  c.push_back(model(
+      "AVRSimple", "PowerSystems", "Simple integrator AVR", "exciter",
+      {real("Kv", {"kv"}, "Voltage-error integrator gain", "1/s", 20.0, 0.0, 500.0, "Gain"),
+       real("V_ref", {"Vref", "v_ref_pu"}, "Voltage setpoint", "pu", 1.0, 0.5, 1.5, "Setpoint", true)}));
   c.push_back(model(
       "SEXS", "IEEE4215", "SEXS simplified excitation", "exciter",
       {real("Ka", {"K", "ka"}, "Regulator gain", "pu", 20.0, 1.0, 400.0, "Gain"),
@@ -170,6 +208,32 @@ std::vector<DynamicModelDescriptor> build_catalog() {
        real("Emax", {"Vrmax", "efd_max_pu"}, "Max field voltage", "pu", 5.0, 0.0, 10.0, "Limits"),
        real("Emin", {"Vrmin", "efd_min_pu"}, "Min field voltage", "pu", 0.0, -10.0, 5.0, "Limits"),
        real("Vref", {"v_ref_pu"}, "Voltage setpoint", "pu", 1.0, 0.5, 1.5, "Setpoint", true)}));
+  c.push_back(model(
+      "AVRTypeI", "PowerSystems", "Type I AVR", "exciter",
+      {real("Ka", {"ka"}, "Amplifier gain", "pu", 20.0, 0.0, 500.0, "Gain"),
+       real("Ke", {"ke"}, "Exciter gain", "pu", 1.0, 0.0, 20.0, "Gain"),
+       real("Kf", {"kf"}, "Stabilizing feedback gain", "pu", 0.0, 0.0, 20.0, "Gain"),
+       real("Ta", {"ta"}, "Amplifier time const", "s", 0.05, 0.001, 10.0, "Time constants"),
+       real("Te", {"te"}, "Exciter time const", "s", 0.4, 0.001, 20.0, "Time constants"),
+       real("Tf", {"tf"}, "Feedback time const", "s", 1.0, 0.001, 20.0, "Time constants"),
+       real("Tr", {"tr"}, "Measurement time const", "s", 0.01, 0.001, 10.0, "Time constants"),
+       real("Ae", {"ae"}, "Saturation coeff A", "", 0.0, 0.0, 20.0, "Saturation", true),
+       real("Be", {"be"}, "Saturation coeff B", "", 0.0, 0.0, 20.0, "Saturation", true),
+       real("V_ref", {"Vref", "v_ref_pu"}, "Voltage setpoint", "pu", 1.0, 0.5, 1.5, "Setpoint", true)}));
+  c.push_back(model(
+      "AVRTypeII", "PowerSystems", "Type II AVR", "exciter",
+      {real("K0", {"k0"}, "Regulator gain", "pu", 20.0, 0.0, 500.0, "Gain"),
+       real("T1", {"t1"}, "Lead-lag 1 denominator", "s", 0.05, 0.001, 20.0, "Time constants"),
+       real("T2", {"t2"}, "Lead-lag 1 numerator", "s", 0.01, 0.0, 20.0, "Time constants"),
+       real("T3", {"t3"}, "Lead-lag 2 denominator", "s", 0.05, 0.001, 20.0, "Time constants"),
+       real("T4", {"t4"}, "Lead-lag 2 numerator", "s", 0.01, 0.0, 20.0, "Time constants"),
+       real("Te", {"te"}, "Exciter time const", "s", 0.4, 0.001, 20.0, "Time constants"),
+       real("Tr", {"tr"}, "Measurement time const", "s", 0.01, 0.001, 10.0, "Time constants"),
+       real("Va_max", {"Vrmax", "Emax"}, "Max regulator output", "pu", 5.0, 0.0, 20.0, "Limits"),
+       real("Va_min", {"Vrmin", "Emin"}, "Min regulator output", "pu", -5.0, -20.0, 0.0, "Limits"),
+       real("Ae", {"ae"}, "Saturation coeff A", "", 0.0, 0.0, 20.0, "Saturation", true),
+       real("Be", {"be"}, "Saturation coeff B", "", 0.0, 0.0, 20.0, "Saturation", true),
+       real("V_ref", {"Vref", "v_ref_pu"}, "Voltage setpoint", "pu", 1.0, 0.5, 1.5, "Setpoint", true)}));
 
   // ── Power system stabilizer ──
   c.push_back(model(
@@ -182,6 +246,40 @@ std::vector<DynamicModelDescriptor> build_catalog() {
        real("T4", {"t4"}, "Lead-lag 2 denominator", "s", 0.03, 0.001, 2.0, "Lead-lag"),
        real("Vsmax", {"vs_max_pu", "Vstmax"}, "Max output", "pu", 0.10, 0.0, 0.5, "Limits"),
        real("Vsmin", {"vs_min_pu", "Vstmin"}, "Min output", "pu", -0.10, -0.5, 0.0, "Limits")}));
+  c.push_back(model(
+      "IEEEST", "IEEE", "IEEEST stabilizer", "pss",
+      {real("A1", {"a1"}, "Second-order filter A1", "", 0.0, 0.0, 20.0, "Filter"),
+       real("A2", {"a2"}, "Second-order filter A2", "", 1.0, 0.001, 20.0, "Filter"),
+       real("A3", {"a3"}, "Input filter A3", "", 1.0, 0.0, 20.0, "Filter"),
+       real("A4", {"a4"}, "Input filter A4", "", 1.0, 0.001, 20.0, "Filter"),
+       real("A5", {"a5"}, "Second-order numerator A5", "", 1.0, 0.0, 20.0, "Filter"),
+       real("A6", {"a6"}, "Second-order numerator A6", "", 0.0, 0.0, 20.0, "Filter"),
+       real("T1", {"t1"}, "Lead-lag 1 numerator", "s", 0.15, 0.0, 20.0, "Lead-lag"),
+       real("T2", {"t2"}, "Lead-lag 1 denominator", "s", 0.03, 0.001, 20.0, "Lead-lag"),
+       real("T3", {"t3"}, "Lead-lag 2 numerator", "s", 0.15, 0.0, 20.0, "Lead-lag"),
+       real("T4", {"t4"}, "Lead-lag 2 denominator", "s", 0.03, 0.001, 20.0, "Lead-lag"),
+       real("T5", {"t5"}, "Washout numerator", "s", 0.10, 0.0, 20.0, "Washout"),
+       real("T6", {"t6"}, "Washout denominator", "s", 0.05, 0.001, 20.0, "Washout"),
+       real("Ks", {"ks"}, "Stabilizer gain", "pu", 5.0, 0.0, 100.0, "Gain"),
+       real("Lsmax", {"Vsmax", "vs_max_pu"}, "Max output", "pu", 0.10, 0.0, 0.5, "Limits"),
+       real("Lsmin", {"Vsmin", "vs_min_pu"}, "Min output", "pu", -0.10, -0.5, 0.0, "Limits"),
+       real("Vcu", {"vcu"}, "Compensated voltage upper cutout", "pu", 0.0, 0.0, 2.0, "Limits", true),
+       real("Vcl", {"vcl"}, "Compensated voltage lower cutout", "pu", 0.0, 0.0, 2.0, "Limits", true)}));
+  c.push_back(model(
+      "STAB1", "IEEE", "STAB1 speed-sensitive stabilizer", "pss",
+      {real("KT", {"Kt", "kt"}, "K/T washout gain", "1/s", 5.0, 0.0, 100.0, "Gain"),
+       real("T", {"Tw", "tw"}, "Washout time const", "s", 10.0, 0.01, 40.0, "Washout"),
+       real("T1T3", {"t1_over_t3"}, "Lead-lag 1 ratio", "", 1.0, 0.0, 20.0, "Lead-lag"),
+       real("T3", {"t3"}, "Lead-lag 1 denominator", "s", 0.15, 0.01, 20.0, "Lead-lag"),
+       real("T2T4", {"t2_over_t4"}, "Lead-lag 2 ratio", "", 1.0, 0.0, 20.0, "Lead-lag"),
+       real("T4", {"t4"}, "Lead-lag 2 denominator", "s", 0.03, 0.01, 20.0, "Lead-lag"),
+       real("H_lim", {"Hlim", "h_lim"}, "Output limit", "pu", 0.10, 0.0, 0.5, "Limits")}));
+
+  // ── Dynamic branch models ──
+  c.push_back(model(
+      "DynamicRLLine", "PowerSimulationsDynamics", "Dynamic RL branch current", "branch",
+      {real("R", {"r_pu"}, "Series resistance", "pu", 0.01, 0.0, 2.0, "Series"),
+       real("X", {"x_pu"}, "Series reactance", "pu", 0.05, 0.001, 5.0, "Series")}));
 
   // ── Grid-following inverter (also used for PV / renewable / static gen) ──
   c.push_back(model(
@@ -207,6 +305,64 @@ std::vector<DynamicModelDescriptor> build_catalog() {
        real("voltage_kp", {"Kpv"}, "Voltage proportional gain", "", 0.1, 0.0, 10.0, "Voltage control", true),
        real("voltage_ki", {"Kiv"}, "Voltage integral gain", "", 10.0, 0.0, 100.0, "Voltage control", true),
        real("current_limit_pu", {"Imax", "imax_pu"}, "Current limit (0=off)", "pu", 0.0, 0.0, 3.0, "Limits")}));
+
+  // ── Phase-3 inverter composition blocks ──
+  c.push_back(model("AverageConverter", "PSID", "Average-value converter bridge",
+                    "converter", {}));
+  c.push_back(model("ConstantDCSource", "PSID", "Constant DC source",
+                    "dc_source", {}));
+  c.push_back(model(
+      "DynamicDCLink", "HACDCPF", "Dynamic DC-link source", "dc_source",
+      {real("dc_link_capacitance_s", {"Cdc", "Tdc"}, "DC-link capacitance",
+            "s", 0.10, 0.0, 10.0, "DC link"),
+       real("vdc_ref_pu", {"Vdc_ref"}, "DC voltage reference", "pu", 1.0,
+            0.1, 2.5, "DC link")}));
+  c.push_back(model(
+      "RLFilter", "PSID", "RL output filter", "filter",
+      {real("virtual_r_pu", {"Rf", "Rv", "rv"}, "Filter resistance", "pu",
+            0.0, 0.0, 1.0, "Filter"),
+       real("virtual_x_pu", {"Xf", "Xv", "xv"}, "Filter reactance", "pu",
+            0.10, 0.0, 1.0, "Filter")}));
+  c.push_back(model(
+      "LCLFilter", "PSID", "LCL output filter", "filter",
+      {real("virtual_r_pu", {"Rf", "Rv", "rv"}, "Series resistance", "pu",
+            0.0, 0.0, 1.0, "Filter"),
+       real("virtual_x_pu", {"Xf", "Xv", "xv"}, "Series reactance", "pu",
+            0.10, 0.0, 1.0, "Filter"),
+       real("Cf", {"filter_c_pu"}, "Filter capacitance", "pu", 0.0, 0.0,
+            10.0, "Filter", true)}));
+  c.push_back(model(
+      "GFLPQOuterControl", "NERC", "Grid-following P/Q outer control",
+      "outer_control",
+      {real("power_filter_t_s", {"Tp", "Tpf"}, "Power filter time const",
+            "s", 0.02, 0.0, 1.0, "Response"),
+       real("frequency_watt_droop_pu", {"Ddn", "kf"}, "Frequency-watt droop",
+            "pu", 0.0, 0.0, 50.0, "Droop", true),
+       real("volt_var_droop_pu", {"Dvv", "kq"}, "Volt-var droop", "pu",
+            0.0, 0.0, 50.0, "Droop", true)}));
+  c.push_back(model(
+      "GFMDroopOuterControl", "NERC", "Grid-forming droop outer control",
+      "outer_control",
+      {real("p_droop_pu", {"mp", "Dp"}, "P-f droop", "pu", 0.01, 0.0,
+            1.0, "Droop"),
+       real("q_droop_pu", {"mq", "Dq"}, "Q-V droop", "pu", 0.05, 0.0,
+            1.0, "Droop"),
+       real("power_filter_t_s", {"Tf", "Tpf"}, "Power filter time const",
+            "s", 0.05, 0.0, 1.0, "Response")}));
+  c.push_back(model(
+      "PIInnerCurrentControl", "PSID", "PI inner current control",
+      "inner_control",
+      {real("response_t_s", {"Tg", "Trv"}, "Current response time const",
+            "s", 0.02, 0.0, 1.0, "Response"),
+       real("current_limit_pu", {"Imax", "imax_pu"}, "Current limit (0=off)",
+            "pu", 0.0, 0.0, 3.0, "Limits")}));
+  c.push_back(model(
+      "VirtualImpedanceInnerControl", "HACDCPF",
+      "Virtual-impedance inner control", "inner_control",
+      {real("virtual_r_pu", {"Rv", "rv"}, "Virtual resistance", "pu", 0.0,
+            0.0, 1.0, "Virtual impedance"),
+       real("virtual_x_pu", {"Xv", "xv"}, "Virtual reactance", "pu", 0.10,
+            0.0, 1.0, "Virtual impedance")}));
 
   // ── PLL variants (component-level parameters under a "pll" child) ──
   for (const char* name : {"ReducedOrderPLL", "KauraPLL", "FixedFrequency"}) {
@@ -262,27 +418,50 @@ std::vector<DynamicComponentComposition> build_composition() {
   comps.push_back(
       {"gen", "Synchronous generator", "AC",
        {slot("machine", "Machine model", false,
-             {"GENROU", "GENROE", "GENSAL", "GENSAE", "OneDOneQMachine",
-              "SimpleMarconatoMachine", "ClassicalMachine"},
-             "ClassicalMachine"),
-        slot("governor", "Governor", true, {"TGOV1", "IEEEG1"}, "None"),
-        slot("exciter", "Exciter / AVR", true, {"SEXS", "IEEET1"}, "None"),
-        slot("pss", "Power system stabilizer", true, {"PSS1A"}, "None")}});
+	     {"GENROU", "GENROE", "GENSAL", "GENSAE", "OneDOneQMachine",
+	      "SimpleMarconatoMachine", "ClassicalMachine"},
+	     "ClassicalMachine"),
+        slot("shaft", "Shaft", true, {"SingleMass", "FiveMassShaft"}, "SingleMass"),
+	    slot("governor", "Governor", true,
+	         {"TGOV1", "IEEEG1", "TGTypeI", "TGTypeII"}, "None"),
+        slot("exciter", "Exciter / AVR", true,
+             {"SEXS", "IEEET1", "AVRSimple", "AVRTypeI", "AVRTypeII"}, "None"),
+        slot("pss", "Power system stabilizer", true,
+             {"PSS1A", "IEEEST", "STAB1"}, "None")}});
 
   comps.push_back(
       {"vsc", "VSC converter", "AC",
        {slot("converter", "Converter control", false,
              {"REGC_REEC_GFL_Subset", "GridFormingNortonDroop"}, "REGC_REEC_GFL_Subset"),
+        slot("converter_block", "Converter bridge", false,
+             {"AverageConverter"}, "AverageConverter"),
+        slot("dc_source", "DC source", true,
+             {"ConstantDCSource", "DynamicDCLink"}, "ConstantDCSource"),
+        slot("filter", "Output filter", false, {"RLFilter", "LCLFilter"}, "RLFilter"),
         slot("pll", "PLL", false, {"ReducedOrderPLL", "KauraPLL", "FixedFrequency"},
-             "ReducedOrderPLL", "REGC_REEC_GFL_Subset")}});
+             "ReducedOrderPLL", "REGC_REEC_GFL_Subset"),
+        slot("outer_control", "Outer control", false,
+             {"GFLPQOuterControl", "GFMDroopOuterControl"}, "GFLPQOuterControl"),
+        slot("inner_control", "Inner control", false,
+             {"PIInnerCurrentControl", "VirtualImpedanceInnerControl"},
+             "PIInnerCurrentControl")}});
 
   const auto gfl_component = [](std::string canvas, std::string name) {
     return DynamicComponentComposition{
         std::move(canvas), std::move(name), "AC",
         {slot("converter", "Converter control", false, {"REGC_REEC_GFL_Subset"},
               "REGC_REEC_GFL_Subset"),
+         slot("converter_block", "Converter bridge", false,
+              {"AverageConverter"}, "AverageConverter"),
+         slot("dc_source", "DC source", true,
+              {"ConstantDCSource", "DynamicDCLink"}, "ConstantDCSource"),
+         slot("filter", "Output filter", false, {"RLFilter", "LCLFilter"}, "RLFilter"),
          slot("pll", "PLL", false, {"ReducedOrderPLL", "KauraPLL", "FixedFrequency"},
-              "ReducedOrderPLL")}};
+              "ReducedOrderPLL"),
+         slot("outer_control", "Outer control", false,
+              {"GFLPQOuterControl"}, "GFLPQOuterControl"),
+         slot("inner_control", "Inner control", false,
+              {"PIInnerCurrentControl"}, "PIInnerCurrentControl")}};
   };
   comps.push_back(gfl_component("pv", "PV system"));
   comps.push_back(gfl_component("sgen", "Static generator"));
@@ -291,7 +470,14 @@ std::vector<DynamicComponentComposition> build_composition() {
   comps.push_back(
       {"storage", "Battery storage", "AC",
        {slot("storage", "Storage model", false, {"BatterySOCFirstOrder"}, "BatterySOCFirstOrder"),
-        slot("converter", "Grid-forming control", true, {"GridFormingNortonDroop"}, "None")}});
+        slot("converter", "Grid-forming control", true, {"GridFormingNortonDroop"}, "None"),
+        slot("converter_block", "Converter bridge", true,
+             {"AverageConverter"}, "None"),
+        slot("filter", "Output filter", true, {"RLFilter", "LCLFilter"}, "None"),
+        slot("outer_control", "Outer control", true,
+             {"GFMDroopOuterControl"}, "None"),
+        slot("inner_control", "Inner control", true,
+             {"VirtualImpedanceInnerControl"}, "None")}});
 
   comps.push_back(
       {"dcdcConverter", "DC/DC converter", "DC",

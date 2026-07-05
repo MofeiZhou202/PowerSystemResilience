@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -18,6 +19,8 @@ using namespace hacdcpf;
 using namespace hacdcpf::dynamics;
 
 namespace {
+
+using Complex = std::complex<double>;
 
 HybridPowerSystem make_transient_2bus() {
   HybridPowerSystem sys;
@@ -672,6 +675,17 @@ DynamicSolverOptions fast_options() {
   opt.run_power_flow_initialization = false;
   opt.singular_regularization_pu = 1e-7;
   return opt;
+}
+
+void set_balanced_voltage(NetworkState& y, int bus_pos, Complex v) {
+  constexpr double pi = 3.141592653589793238462643383279502884;
+  const int base = 3 * bus_pos;
+  REQUIRE(base + 2 < y.Vac_abc.size());
+  const double vm = std::abs(v);
+  const double va = std::arg(v);
+  y.Vac_abc[base + 0] = std::polar(vm, va);
+  y.Vac_abc[base + 1] = std::polar(vm, va - 2.0 * pi / 3.0);
+  y.Vac_abc[base + 2] = std::polar(vm, va + 2.0 * pi / 3.0);
 }
 
 double vsc_p_mw(const DynamicSnapshot& snapshot) {
@@ -2616,10 +2630,12 @@ TEST_CASE("Mass-matrix DAE core matches the partitioned backward-Euler oracle",
   // since both are backward Euler on the same system.
   auto run_solver = [](DynamicSolverType type, bool event) {
     DynamicSolverOptions opt;
-    opt.solver_type = type;
-    opt.t_end_s = 3.0;
-    opt.dt_s = 0.005;
-    auto sys = make_controlled_machine_case(false, false, false);
+	    opt.solver_type = type;
+	    opt.t_end_s = 3.0;
+	    opt.dt_s = 0.005;
+	    opt.algebraic_network_max_iters = 20;
+	    opt.algebraic_network_tol = 1e-10;
+	    auto sys = make_controlled_machine_case(false, false, false);
     DynamicModelBuilder builder;
     DynamicSystem dyn = builder.build(sys, opt);
     if (event) {
@@ -2784,6 +2800,167 @@ TEST_CASE("Documented transient device headers expose executable standard profil
   CHECK(exciter.output(x, y).model_standard == "IEEE4215");
   CHECK(pv.output(x, y).model_standard == "IEEE1547");
   CHECK(relay.output(x, y).model_name == "VoltageFrequencyRelay");
+}
+
+TEST_CASE("DynamicModelBuilder wires Phase 5 five-mass shaft blocks",
+          "[dynamics][shaft][transient]") {
+  auto sys = make_controlled_machine_case(false, false, false);
+  REQUIRE(sys.ac.generators.size() >= 2);
+  hacdcpf::DynamicModelComponentProfile shaft;
+  shaft.type = "shaft";
+  shaft.model = "FiveMassShaft";
+  shaft.standard = "PowerSimulationsDynamics";
+  shaft.parameters = {
+      {"H1", 0.5}, {"H2", 0.6}, {"H3", 0.7}, {"H4", 0.8}, {"H5", 1.0},
+      {"K12", 20.0}, {"K23", 18.0}, {"K34", 16.0}, {"K45", 14.0},
+  };
+  sys.ac.generators[1].dynamic_model.components.push_back(shaft);
+
+  DynamicSolverOptions opt;
+  opt.t_end_s = 0.02;
+  opt.dt_s = 0.01;
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+
+  const auto shaft_it = std::find_if(dyn.devices.begin(),
+                                     dyn.devices.end(),
+                                     [](const std::unique_ptr<DynamicDevice>& device) {
+                                       return device->type() == "Shaft" &&
+                                              device->modelName() == "FiveMassShaft";
+                                     });
+  REQUIRE(shaft_it != dyn.devices.end());
+  std::string error;
+  REQUIRE(dyn.solveNetwork(opt.t_start_s, error));
+  Eigen::VectorXd dxdt;
+  REQUIRE(dyn.evaluateDerivatives(opt.t_start_s, dyn.x.x, dxdt, error));
+  CHECK(dxdt.allFinite());
+
+  DynamicSolver solver;
+  DynamicResults r = solver.solve(dyn);
+  REQUIRE(r.success);
+  REQUIRE(r.final_snapshot() != nullptr);
+  const auto& outputs = r.final_snapshot()->device_outputs;
+  const auto out_it = std::find_if(outputs.begin(), outputs.end(), [](const DynamicDeviceOutput& out) {
+    return out.type == "Shaft" && out.model_name == "FiveMassShaft";
+  });
+  REQUIRE(out_it != outputs.end());
+  CHECK(out_it->values.at("state_count") == Catch::Approx(10.0));
+  CHECK(out_it->values.at("mass_count") == Catch::Approx(5.0));
+  CHECK(std::abs(out_it->values.at("omega_generator_pu") - 1.0) < 0.05);
+}
+
+TEST_CASE("Phase 5 dynamic RL line matches PSID branch current equations",
+          "[dynamics][branch][numerical]") {
+  DynamicRLLineParams params;
+  params.component_index = 12;
+  params.from_bus = 1;
+  params.to_bus = 2;
+  params.from_pos = 0;
+  params.to_pos = 1;
+  params.frequency_hz = 50.0;
+  params.r_pu = 0.02;
+  params.x_pu = 0.08;
+  DynamicRLLine line(params);
+
+  int offset = 0;
+  line.assignStateIndices(offset);
+  DynamicState x;
+  x.resize(static_cast<std::size_t>(offset));
+  x.x[0] = 0.20;
+  x.x[1] = -0.10;
+
+  NetworkState y;
+  y.resize(6, 0);
+  const Complex vf = std::polar(1.04, 0.06);
+  const Complex vt = std::polar(0.97, -0.03);
+  set_balanced_voltage(y, 0, vf);
+  set_balanced_voltage(y, 1, vt);
+
+  Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+  line.computeDerivatives(0.0, x, y, dxdt);
+
+  constexpr double pi = 3.141592653589793238462643383279502884;
+  const Complex dv = vf - vt;
+  const double omega_b = 2.0 * pi * 50.0;
+  CHECK(dxdt[0] == Catch::Approx(
+                      (omega_b / 0.08) * (dv.real() - (0.02 * 0.20 - 0.08 * -0.10))));
+  CHECK(dxdt[1] == Catch::Approx(
+                      (omega_b / 0.08) * (dv.imag() - (0.02 * -0.10 + 0.08 * 0.20))));
+
+  DynamicStamp stamp(6, 0);
+  line.stamp(0.0, x, y, stamp);
+  const Complex ia(0.20, -0.10);
+  CHECK(stamp.Iac[0].real() == Catch::Approx(-ia.real()));
+  CHECK(stamp.Iac[0].imag() == Catch::Approx(-ia.imag()));
+  CHECK(stamp.Iac[3].real() == Catch::Approx(ia.real()));
+  CHECK(stamp.Iac[3].imag() == Catch::Approx(ia.imag()));
+
+  DynamicState x_eq;
+  x_eq.resize(static_cast<std::size_t>(offset));
+  line.initializeFromPowerFlow(PowerFlowResult{}, x_eq, y);
+  Eigen::VectorXd dxdt_eq = Eigen::VectorXd::Zero(offset);
+  line.computeDerivatives(0.0, x_eq, y, dxdt_eq);
+  CHECK(dxdt_eq[0] == Catch::Approx(0.0).margin(1e-9));
+  CHECK(dxdt_eq[1] == Catch::Approx(0.0).margin(1e-9));
+
+  DynamicEvent trip;
+  trip.type = DynamicEventType::ACBranchTrip;
+  trip.component_index = 12;
+  line.handleEvent(trip, x_eq, y);
+  CHECK(x_eq.x[0] == Catch::Approx(0.0));
+  CHECK(x_eq.x[1] == Catch::Approx(0.0));
+  DynamicEvent close;
+  close.type = DynamicEventType::ACBranchClose;
+  close.component_index = 12;
+  line.handleEvent(close, x_eq, y);
+  const Complex i_eq = dv / Complex(0.02, 0.08);
+  CHECK(x_eq.x[0] == Catch::Approx(i_eq.real()));
+  CHECK(x_eq.x[1] == Catch::Approx(i_eq.imag()));
+}
+
+TEST_CASE("DynamicModelBuilder wires Phase 5 dynamic RL branches",
+          "[dynamics][branch][transient]") {
+  auto sys = make_transient_2bus();
+  REQUIRE_FALSE(sys.ac.branches.empty());
+  sys.ac.branches.front().dynamic_rl = true;
+  sys.ac.loads.clear();
+  ExternalGrid remote_grid;
+  remote_grid.index = 20;
+  remote_grid.bus = 2;
+  remote_grid.vm_pu = 1.0;
+  remote_grid.va_deg = 0.0;
+  remote_grid.in_service = true;
+  sys.ac.external_grids = {remote_grid};
+
+  auto opt = fast_options();
+  opt.solver_type = DynamicSolverType::BackwardEulerNewton;
+  opt.t_end_s = 2e-4;
+  opt.dt_s = 1e-4;
+  opt.record_every_step = true;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+
+  const auto line_it = std::find_if(dyn.devices.begin(),
+                                    dyn.devices.end(),
+                                    [](const std::unique_ptr<DynamicDevice>& device) {
+                                      return device->type() == "DynamicRLLine";
+                                    });
+  REQUIRE(line_it != dyn.devices.end());
+  REQUIRE_FALSE(dyn.network.ac_branches.empty());
+  CHECK(dyn.network.ac_branches.front().y_ft.norm() == Catch::Approx(0.0));
+  CHECK(dyn.network.ac_branches.front().y_tf.norm() == Catch::Approx(0.0));
+
+  std::string error;
+  REQUIRE(dyn.solveNetwork(opt.t_start_s, error));
+  Eigen::VectorXd dxdt;
+  REQUIRE(dyn.evaluateDerivatives(opt.t_start_s, dyn.x.x, dxdt, error));
+  CHECK(dxdt.allFinite());
+
+  const DynamicDeviceOutput out = (*line_it)->output(dyn.x, dyn.y);
+  CHECK(out.type == "DynamicRLLine");
+  CHECK(out.values.at("current_mag_pu") >= 0.0);
+  CHECK(out.values.at("in_service") == Catch::Approx(1.0));
 }
 
 TEST_CASE("Documented integrators and algebraic solvers advance dynamic systems",

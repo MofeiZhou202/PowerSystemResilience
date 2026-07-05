@@ -6,8 +6,11 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
+#include <Eigen/SparseLU>
 
 #include "hacdcpf/dynamics/solvers/SparseLinearSolver.hpp"
 
@@ -84,6 +87,30 @@ std::vector<DynamicResidualDiagnostic> collect_residual_diagnostics(
 
 double inf_norm(const Eigen::VectorXd& v) {
   return v.size() > 0 ? v.lpNorm<Eigen::Infinity>() : 0.0;
+}
+
+Eigen::SparseMatrix<double> dense_to_sparse(const Eigen::MatrixXd& dense) {
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(dense.size()));
+  for (Eigen::Index j = 0; j < dense.cols(); ++j) {
+    for (Eigen::Index i = 0; i < dense.rows(); ++i) {
+      const double v = dense(i, j);
+      if (v != 0.0) triplets.emplace_back(i, j, v);
+    }
+  }
+  Eigen::SparseMatrix<double> sparse(dense.rows(), dense.cols());
+  sparse.setFromTriplets(triplets.begin(), triplets.end());
+  return sparse;
+}
+
+bool sparse_solve_dense_system(const Eigen::MatrixXd& dense,
+                               const Eigen::VectorXd& rhs,
+                               Eigen::VectorXd& x) {
+  Eigen::SparseLU<Eigen::SparseMatrix<double>> lu;
+  lu.compute(dense_to_sparse(dense));
+  if (lu.info() != Eigen::Success) return false;
+  x = lu.solve(rhs);
+  return lu.info() == Eigen::Success && x.allFinite();
 }
 
 bool evaluate_masked_dynamic_residual(DynamicSystem& sys,
@@ -209,8 +236,9 @@ ConsistentInitializationResult solve_consistent_dynamic_initial_state(
       return false;
     };
 
-    bool accepted =
-        try_delta(jac.completeOrthogonalDecomposition().solve(-residual));
+    Eigen::VectorXd sparse_delta;
+    bool accepted = sparse_solve_dense_system(jac, -residual, sparse_delta) &&
+                    try_delta(sparse_delta);
     if (accepted) {
       lambda = std::max(1e-12, lambda * 0.1);
       result.iterations = iter + 1;
@@ -231,8 +259,8 @@ ConsistentInitializationResult solve_consistent_dynamic_initial_state(
     for (int damp_try = 0; damp_try < 8 && !accepted; ++damp_try) {
       Eigen::MatrixXd a = jtj;
       a.diagonal().array() += lambda * diag_scale;
-      Eigen::VectorXd delta = a.ldlt().solve(rhs);
-      accepted = try_delta(delta);
+      Eigen::VectorXd delta;
+      accepted = sparse_solve_dense_system(a, rhs, delta) && try_delta(delta);
       if (accepted) lambda = std::max(1e-12, lambda * 0.1);
       if (!accepted) lambda *= 10.0;
     }

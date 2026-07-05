@@ -3,8 +3,11 @@
 #include <cmath>
 #include <limits>
 #include <string>
+#include <vector>
 
 #include <Eigen/Core>
+#include <Eigen/Sparse>
+#include <Eigen/SparseLU>
 
 #include "hacdcpf/dynamics/DynamicSystem.hpp"
 
@@ -46,5 +49,37 @@ inline IntegrationStepResult make_failure(std::string message) {
   return result;
 }
 
-}  // namespace hacdcpf::dynamics::detail
+inline Eigen::SparseMatrix<double> dense_to_sparse(const Eigen::MatrixXd& dense) {
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(dense.size()));
+  for (Eigen::Index j = 0; j < dense.cols(); ++j) {
+    for (Eigen::Index i = 0; i < dense.rows(); ++i) {
+      const double v = dense(i, j);
+      if (v != 0.0) triplets.emplace_back(i, j, v);
+    }
+  }
+  Eigen::SparseMatrix<double> sparse(dense.rows(), dense.cols());
+  sparse.setFromTriplets(triplets.begin(), triplets.end());
+  return sparse;
+}
 
+inline bool sparse_solve(const Eigen::MatrixXd& dense,
+                         const Eigen::VectorXd& rhs,
+                         Eigen::VectorXd& x,
+                         std::string& error) {
+  Eigen::SparseMatrix<double> sparse = dense_to_sparse(dense);
+  Eigen::SparseLU<Eigen::SparseMatrix<double>> lu;
+  lu.compute(sparse);
+  if (lu.info() != Eigen::Success) {
+    error = "Sparse Newton correction factorization failed";
+    return false;
+  }
+  x = lu.solve(rhs);
+  if (lu.info() != Eigen::Success || !x.allFinite()) {
+    error = "Sparse Newton correction solve failed";
+    return false;
+  }
+  return true;
+}
+
+}  // namespace hacdcpf::dynamics::detail

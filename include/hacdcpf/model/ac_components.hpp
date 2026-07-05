@@ -96,6 +96,10 @@ struct ACBranch {
   double vn_hv_kv{0.0};
   double vn_lv_kv{0.0};
   double sn_mva{0.0};
+
+  // Dynamics: when true, the transient builder represents the branch series
+  // path as differential current states instead of a static Y-bus admittance.
+  bool dynamic_rl{false};
 };
 
 // ═══════════════════════════════════════════════════════════════════════

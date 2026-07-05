@@ -93,6 +93,66 @@ class DynamicLoad : public DynamicDevice {
   ACLoadDynamicParams params_;
 };
 
+struct DynamicRLLineParams {
+  int component_index{0};
+  int from_bus{0};
+  int to_bus{0};
+  int from_pos{-1};
+  int to_pos{-1};
+  std::string label;
+  std::string canvas_type{"branch"};
+  std::string component_domain{"AC"};
+  std::string source_type{"dynamic_rl_line"};
+  std::string model_standard{"PowerSimulationsDynamics"};
+  std::string model_name{"DynamicRLLine"};
+  std::string parameter_set;
+  double base_mva{100.0};
+  double frequency_hz{50.0};
+  double r_pu{0.0};
+  double x_pu{0.0};
+  bool in_service{true};
+};
+
+class DynamicRLLine : public DynamicDevice {
+ public:
+  explicit DynamicRLLine(DynamicRLLineParams params);
+
+  void assignStateIndices(int& offset) override;
+  void initializeFromPowerFlow(const PowerFlowResult& pf,
+                               DynamicState& x,
+                               NetworkState& y) override;
+  bool trimToNetworkEquilibrium(DynamicState& x,
+                                NetworkState& y) override;
+  void computeDerivatives(double t,
+                          const DynamicState& x,
+                          const NetworkState& y,
+                          Eigen::Ref<Eigen::VectorXd> dxdt) const override;
+  void stamp(double t,
+             const DynamicState& x,
+             const NetworkState& y,
+             DynamicStamp& stamp) const override;
+  void handleEvent(const DynamicEvent& event,
+                   DynamicState& x,
+                   NetworkState& y) override;
+
+  [[nodiscard]] std::string name() const override;
+  [[nodiscard]] std::string type() const override { return "DynamicRLLine"; }
+  [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] std::string modelStandard() const override { return params_.model_standard; }
+  [[nodiscard]] std::string modelName() const override { return params_.model_name; }
+  [[nodiscard]] std::string parameterSet() const override { return params_.parameter_set; }
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
+
+ private:
+  [[nodiscard]] std::complex<double> branchCurrent(const DynamicState& x) const;
+  [[nodiscard]] std::complex<double> voltageDrop(const NetworkState& y) const;
+  [[nodiscard]] std::complex<double> equilibriumCurrent(const NetworkState& y) const;
+
+  DynamicRLLineParams params_;
+  StateIndexRange range_;
+};
+
 struct ThreePhaseLoadDynamicParams {
   int component_index{0};
   int bus{0};
@@ -308,8 +368,15 @@ class SynchronousMachine : public DynamicDevice {
   // derivative of the machine-owned mechanical-power / field state. The link's
   // range pointer resolves to the final state offset after assignStateIndices().
   [[nodiscard]] const MachineControlLink* controlLink() const { return &link_; }
-  void markGovernorAttached() { governor_attached_ = true; }
-  void markExciterAttached() { exciter_attached_ = true; }
+  void markGovernorAttached() {
+    governor_attached_ = true;
+    link_.inner_vars.has_turbine_governor = true;
+  }
+  void markExciterAttached() {
+    exciter_attached_ = true;
+    link_.inner_vars.has_avr = true;
+  }
+  void markPssAttached() { link_.inner_vars.has_pss = true; }
 
  private:
   VoltageSourceDynamicParams params_;
@@ -319,9 +386,74 @@ class SynchronousMachine : public DynamicDevice {
   bool exciter_attached_{false};
 };
 
+struct FiveMassShaftParams {
+  int component_index{0};
+  int machine_index{0};
+  std::string label;
+  std::string device_type{"Shaft"};
+  std::string canvas_type{"shaft"};
+  std::string component_domain{"AC"};
+  std::string source_type{"shaft"};
+  std::string model_standard{"PowerSimulationsDynamics"};
+  std::string model_name{"FiveMassShaft"};
+  std::string parameter_set;
+  double base_mva{100.0};
+  double frequency_hz{50.0};
+  std::array<double, 5> inertia_h{{0.30, 0.30, 0.30, 0.30, 1.80}};
+  std::array<double, 4> stiffness_pu{{25.0, 25.0, 25.0, 25.0}};
+  std::array<double, 4> damping_pu{{0.02, 0.02, 0.02, 0.02}};
+  bool in_service{true};
+};
+
+class FiveMassShaft : public DynamicDevice {
+ public:
+  explicit FiveMassShaft(FiveMassShaftParams params);
+
+  void assignStateIndices(int& offset) override;
+  void initializeFromPowerFlow(const PowerFlowResult& pf,
+                               DynamicState& x,
+                               NetworkState& y) override;
+  bool trimToNetworkEquilibrium(DynamicState& x,
+                                NetworkState& y) override;
+  void computeDerivatives(double t,
+                          const DynamicState& x,
+                          const NetworkState& y,
+                          Eigen::Ref<Eigen::VectorXd> dxdt) const override;
+  void stamp(double t,
+             const DynamicState& x,
+             const NetworkState& y,
+             DynamicStamp& stamp) const override;
+  void handleEvent(const DynamicEvent& event,
+                   DynamicState& x,
+                   NetworkState& y) override;
+
+  [[nodiscard]] std::string name() const override;
+  [[nodiscard]] std::string type() const override { return params_.device_type; }
+  [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] std::string modelStandard() const override { return params_.model_standard; }
+  [[nodiscard]] std::string modelName() const override { return params_.model_name; }
+  [[nodiscard]] std::string parameterSet() const override { return params_.parameter_set; }
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
+
+  void attachMachine(const MachineControlLink* link) { machine_ = link; }
+
+ private:
+  void setEquilibrium(DynamicState& x) const;
+  [[nodiscard]] double mechanicalTorque(const DynamicState& x) const;
+  [[nodiscard]] double recoveredElectricalTorque(const DynamicState& x,
+                                                 Eigen::Ref<const Eigen::VectorXd> dxdt) const;
+
+  FiveMassShaftParams params_;
+  StateIndexRange range_;
+  const MachineControlLink* machine_{nullptr};
+};
+
 enum class GovernorModel {
   TGOV1,
-  IEEEG1
+  IEEEG1,
+  TGTypeI,
+  TGTypeII
 };
 
 struct GovernorDynamicParams {
@@ -343,6 +475,10 @@ struct GovernorDynamicParams {
   double turbine_t_s{0.50};  // T3: turbine time constant (s)
   double reheat_t_s{6.0};    // IEEEG1 reheat time constant (s)
   double reheat_k{0.30};     // IEEEG1 HP fraction (0..1)
+  double tc_s{0.50};         // TGTypeI servo time constant Tc (s)
+  double t3_s{0.10};         // TGTypeI transient gain time constant T3 (s)
+  double t4_s{0.30};         // TGTypeI power fraction time constant T4 (s)
+  double t5_s{5.00};         // TGTypeI reheat time constant T5 (s)
   double pmax_mw{0.0};
   double pmin_mw{0.0};
   bool in_service{true};
@@ -392,7 +528,10 @@ class Governor : public DynamicDevice {
 
 enum class ExciterModel {
   SEXS,
-  IEEET1
+  IEEET1,
+  AVRSimple,
+  AVRTypeI,
+  AVRTypeII
 };
 
 struct ExciterDynamicParams {
@@ -413,6 +552,20 @@ struct ExciterDynamicParams {
   double ka{20.0};
   double ta_s{0.05};
   double te_s{0.40};       // IEEET1 exciter time constant (s)
+  double kv{20.0};         // AVRSimple integrator gain
+  double ke{1.0};          // AVRTypeI exciter gain denominator
+  double kf{0.0};          // AVRTypeI stabilizing feedback gain
+  double tf_s{1.0};        // AVRTypeI feedback time constant (s)
+  double tr_s{0.01};       // AVRTypeI/II measurement time constant (s)
+  double ae{0.0};          // AVR saturation coefficient
+  double be{0.0};          // AVR saturation exponent coefficient
+  double k0{20.0};         // AVRTypeII regulator gain
+  double t1_s{0.05};       // AVRTypeII lead-lag numerator T1
+  double t2_s{0.01};       // AVRTypeII lead-lag denominator T2
+  double t3_s{0.05};       // AVRTypeII lead-lag numerator T3
+  double t4_s{0.01};       // AVRTypeII lead-lag denominator T4
+  double va_min_pu{-5.0};
+  double va_max_pu{5.0};
   double efd_min_pu{0.0};
   double efd_max_pu{5.0};
   bool in_service{true};
@@ -468,7 +621,13 @@ class Exciter : public DynamicDevice {
   bool captured_{false};
 };
 
-// ── Power System Stabilizer (single-input speed PSS, IEEE PSS1A subset) ──
+// ── Power System Stabilizer (single-input speed PSS variants) ──
+enum class PSSModel {
+  PSS1A,
+  IEEEST,
+  STAB1
+};
+
 struct PSSDynamicParams {
   int component_index{0};
   int machine_index{0};
@@ -482,6 +641,7 @@ struct PSSDynamicParams {
   std::string model_standard{"IEEE"};
   std::string model_name{"PSS1A"};
   std::string parameter_set;
+  PSSModel model{PSSModel::PSS1A};
   double ks{5.0};        // stabilizer gain
   double tw_s{10.0};     // washout time constant (s)
   double t1_s{0.15};     // lead-lag 1 numerator (s)
@@ -490,6 +650,22 @@ struct PSSDynamicParams {
   double t4_s{0.03};     // lead-lag 2 denominator (s)
   double vs_max_pu{0.10};
   double vs_min_pu{-0.10};
+  double a1{0.0};
+  double a2{1.0};
+  double a3{1.0};
+  double a4{1.0};
+  double a5{1.0};
+  double a6{0.0};
+  double t5_s{0.10};
+  double t6_s{0.05};
+  double vcu{0.0};
+  double vcl{0.0};
+  int input_code{1};
+  double kt{5.0};
+  double stab_t_s{10.0};
+  double t1_over_t3{1.0};
+  double t2_over_t4{1.0};
+  double h_lim{0.10};
   bool in_service{true};
 };
 
@@ -610,6 +786,7 @@ class GridFormingInverter : public DynamicDevice {
  private:
   GridFormingInverterParams params_;
   StateIndexRange range_;
+  InverterInnerVariableBus inner_vars_;
 };
 
 struct GridFollowingInverterParams {
@@ -686,6 +863,7 @@ class GridFollowingInverter : public DynamicDevice {
  private:
   GridFollowingInverterParams params_;
   StateIndexRange range_;
+  InverterInnerVariableBus inner_vars_;
 };
 
 struct VSCConverterDynamicParams : public GridFollowingInverterParams {

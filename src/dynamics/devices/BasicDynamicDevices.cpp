@@ -6,8 +6,11 @@
 #include <limits>
 #include <map>
 #include <string>
+#include <vector>
 
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
+#include <Eigen/SparseLU>
 
 namespace hacdcpf::dynamics {
 namespace {
@@ -21,6 +24,30 @@ constexpr double kMachinePowerBalanceTolPu = 1e-4;
 
 int state_index(const StateIndexRange& range, int local) {
   return range.offset + local;
+}
+
+Eigen::SparseMatrix<double> dense_to_sparse(const Eigen::MatrixXd& dense) {
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(dense.size()));
+  for (Eigen::Index j = 0; j < dense.cols(); ++j) {
+    for (Eigen::Index i = 0; i < dense.rows(); ++i) {
+      const double v = dense(i, j);
+      if (v != 0.0) triplets.emplace_back(i, j, v);
+    }
+  }
+  Eigen::SparseMatrix<double> sparse(dense.rows(), dense.cols());
+  sparse.setFromTriplets(triplets.begin(), triplets.end());
+  return sparse;
+}
+
+bool sparse_newton_step(const Eigen::MatrixXd& jac,
+                        const Eigen::VectorXd& rhs,
+                        Eigen::VectorXd& step) {
+  Eigen::SparseLU<Eigen::SparseMatrix<double>> lu;
+  lu.compute(dense_to_sparse(jac));
+  if (lu.info() != Eigen::Success) return false;
+  step = lu.solve(rhs);
+  return lu.info() == Eigen::Success && step.allFinite();
 }
 
 Eigen::Vector3cd balanced_phasors(double vm, double theta_rad) {
@@ -62,6 +89,14 @@ Complex phasor_from_dq(double d, double q, double theta_rad) {
 
 Eigen::Vector3cd balanced_current_from_dq(double id, double iq, double theta_rad) {
   const Complex ia = phasor_from_dq(id, iq, theta_rad);
+  Eigen::Vector3cd current;
+  current[0] = ia;
+  current[1] = ia * std::polar(1.0, -2.0 * kPi / 3.0);
+  current[2] = ia * std::polar(1.0, 2.0 * kPi / 3.0);
+  return current;
+}
+
+Eigen::Vector3cd balanced_current_from_positive_sequence(Complex ia) {
   Eigen::Vector3cd current;
   current[0] = ia;
   current[1] = ia * std::polar(1.0, -2.0 * kPi / 3.0);
@@ -277,6 +312,131 @@ void add_voltage_metrics(DynamicDeviceOutput& out,
   if (dc_bus_pos >= 0 && dc_bus_pos < y.Vdc.size()) {
     out.values["vdc_pu"] = y.Vdc[dc_bus_pos];
   }
+}
+
+void add_generator_inner_outputs(DynamicDeviceOutput& out,
+                                 const GeneratorInnerVariableSnapshot& snapshot) {
+  out.values["composed_generator"] = 1.0;
+  out.values["generator_inner_var_count"] =
+      static_cast<double>(kGeneratorInnerVarCount);
+  for (int i = 0; i < kGeneratorInnerVarCount; ++i) {
+    const auto slot = static_cast<GeneratorInnerVar>(i);
+    const std::string key = "inner_" + std::string(to_string(slot));
+    out.values[key + "_present"] =
+        snapshot.present[static_cast<std::size_t>(i)] ? 1.0 : 0.0;
+    if (snapshot.present[static_cast<std::size_t>(i)]) {
+      out.values[key] = snapshot.values[static_cast<std::size_t>(i)];
+    }
+  }
+}
+
+void add_generator_block_flags(DynamicDeviceOutput& out,
+                               const GeneratorInnerVariableBus& bus) {
+  out.values["block_machine"] = bus.has_machine ? 1.0 : 0.0;
+  out.values["block_shaft"] = bus.has_shaft ? 1.0 : 0.0;
+  out.values["block_avr"] = bus.has_avr ? 1.0 : 0.0;
+  out.values["block_turbine_governor"] =
+      bus.has_turbine_governor ? 1.0 : 0.0;
+  out.values["block_pss"] = bus.has_pss ? 1.0 : 0.0;
+}
+
+GeneratorInnerVariableSnapshot generator_inner_base_snapshot(
+    const GeneratorInnerVariableBus& bus,
+    const DynamicState& x,
+    const NetworkState& y) {
+  GeneratorInnerVariableSnapshot snapshot;
+  if (!bus.valid) return snapshot;
+  const Complex v = positive_sequence_voltage(bus_voltage(y, bus.bus_pos));
+  snapshot.set(GeneratorInnerVar::TerminalVoltageReal, v.real());
+  snapshot.set(GeneratorInnerVar::TerminalVoltageImag, v.imag());
+  snapshot.set(GeneratorInnerVar::StabilizerVoltage, 0.0);
+  const int tau_idx = bus.mechanicalTorqueIndex();
+  if (tau_idx >= 0 && tau_idx < x.x.size()) {
+    snapshot.set(GeneratorInnerVar::MechanicalTorque, x.x[tau_idx]);
+  }
+  const int field_idx = bus.fieldVoltageIndex();
+  if (field_idx >= 0 && field_idx < x.x.size()) {
+    snapshot.set(GeneratorInnerVar::FieldVoltage, x.x[field_idx]);
+  }
+  return snapshot;
+}
+
+void add_inverter_inner_outputs(DynamicDeviceOutput& out,
+                                const InverterInnerVariableSnapshot& snapshot) {
+  out.values["composed_inverter"] = 1.0;
+  out.values["inverter_inner_var_count"] =
+      static_cast<double>(kInverterInnerVarCount);
+  for (int i = 0; i < kInverterInnerVarCount; ++i) {
+    const auto slot = static_cast<InverterInnerVar>(i);
+    const std::string key = "inner_" + std::string(to_string(slot));
+    out.values[key + "_present"] =
+        snapshot.present[static_cast<std::size_t>(i)] ? 1.0 : 0.0;
+    if (snapshot.present[static_cast<std::size_t>(i)]) {
+      out.values[key] = snapshot.values[static_cast<std::size_t>(i)];
+    }
+  }
+}
+
+void add_inverter_block_flags(DynamicDeviceOutput& out,
+                              const InverterInnerVariableBus& bus) {
+  out.values["block_converter"] = bus.has_converter ? 1.0 : 0.0;
+  out.values["block_dc_source"] = bus.has_dc_source ? 1.0 : 0.0;
+  out.values["block_filter"] = bus.has_filter ? 1.0 : 0.0;
+  out.values["block_frequency_estimator"] =
+      bus.has_frequency_estimator ? 1.0 : 0.0;
+  out.values["block_outer_control"] = bus.has_outer_control ? 1.0 : 0.0;
+  out.values["block_inner_control"] = bus.has_inner_control ? 1.0 : 0.0;
+  out.values["inverter_grid_following"] = bus.grid_following ? 1.0 : 0.0;
+}
+
+double control_time(double value) {
+  return std::max(kMinTimeConstant, std::abs(value));
+}
+
+std::pair<double, double> low_pass_block(double u,
+                                         double y,
+                                         double k,
+                                         double t) {
+  const double tau = control_time(t);
+  return {y, (k * u - y) / tau};
+}
+
+std::pair<double, double> low_pass_modified_block(double u,
+                                                  double y,
+                                                  double k,
+                                                  double k_den,
+                                                  double t) {
+  const double tau = control_time(t);
+  return {y, (k * u - k_den * y) / tau};
+}
+
+std::pair<double, double> high_pass_block(double u,
+                                          double x,
+                                          double k,
+                                          double t) {
+  const double tau = control_time(t);
+  const double k_over_t = k / tau;
+  return {x + k_over_t * u, -(k_over_t * u + x) / tau};
+}
+
+std::pair<double, double> lead_lag_block(double u,
+                                         double x,
+                                         double k,
+                                         double t1,
+                                         double t2) {
+  const double denom = control_time(t2);
+  const double ratio = t1 / denom;
+  return {x + k * ratio * u, (k * (1.0 - ratio) * u - x) / denom};
+}
+
+double avr_saturation(double ae, double be, double vf) {
+  if (ae == 0.0 && be == 0.0) return 0.0;
+  return ae * std::exp(be * std::abs(vf));
+}
+
+double pss_output_limiter(double vss, double vct, double vcl, double vcu) {
+  if (vcl == 0.0 || vcu == 0.0) return vss;
+  return (vcl <= vct && vct <= vcu) ? vss : 0.0;
 }
 
 std::pair<double, double> limited_current(double id_ref,
@@ -562,8 +722,8 @@ Eigen::VectorXd solve_onedoneq_initial_conditions(const OneDOneQParams& p,
       zp[col] += h;
       jac.col(col) = (onedoneq_initial_residual(p, v, p0, q0, zp) - r) / h;
     }
-    const Eigen::VectorXd step = jac.colPivHouseholderQr().solve(-r);
-    if (!step.allFinite()) break;
+    Eigen::VectorXd step;
+    if (!sparse_newton_step(jac, -r, step)) break;
     bool accepted = false;
     double alpha = 1.0;
     while (alpha >= 1.0 / 1024.0) {
@@ -714,8 +874,8 @@ Eigen::VectorXd solve_simple_marconato_initial_conditions(const SimpleMarconatoP
       zp[col] += h;
       jac.col(col) = (simple_marconato_initial_residual(p, v, p0, q0, zp) - r) / h;
     }
-    const Eigen::VectorXd step = jac.colPivHouseholderQr().solve(-r);
-    if (!step.allFinite()) break;
+    Eigen::VectorXd step;
+    if (!sparse_newton_step(jac, -r, step)) break;
     bool accepted = false;
     double alpha = 1.0;
     while (alpha >= 1.0 / 1024.0) {
@@ -833,8 +993,8 @@ Eigen::VectorXd solve_genrou_initial_conditions(const GenrouParams& p,
       zp[col] += h;
       jac.col(col) = (genrou_initial_residual(p, v, p0, q0, zp) - r) / h;
     }
-    const Eigen::VectorXd step = jac.colPivHouseholderQr().solve(-r);
-    if (!step.allFinite()) break;
+    Eigen::VectorXd step;
+    if (!sparse_newton_step(jac, -r, step)) break;
     bool accepted = false;
     double alpha = 1.0;
     while (alpha >= 1.0 / 1024.0) {
@@ -1019,8 +1179,8 @@ Eigen::VectorXd solve_salient_initial_conditions(const SalientParams& p,
       zp[col] += h;
       jac.col(col) = (salient_initial_residual(p, v, p0, q0, zp) - r) / h;
     }
-    const Eigen::VectorXd step = jac.colPivHouseholderQr().solve(-r);
-    if (!step.allFinite()) break;
+    Eigen::VectorXd step;
+    if (!sparse_newton_step(jac, -r, step)) break;
     bool accepted = false;
     double alpha = 1.0;
     while (alpha >= 1.0 / 1024.0) {
@@ -1181,6 +1341,128 @@ DynamicDeviceOutput DynamicLoad::output(const DynamicState&,
   out.values["constant_impedance"] =
       params_.model_kind == DynamicLoadModelKind::ConstantImpedance ? 1.0 : 0.0;
   add_voltage_metrics(out, y, params_.bus_pos);
+  return out;
+}
+
+DynamicRLLine::DynamicRLLine(DynamicRLLineParams params) : params_(std::move(params)) {}
+
+void DynamicRLLine::assignStateIndices(int& offset) {
+  range_ = {offset, 2};
+  offset += range_.size;
+}
+
+Complex DynamicRLLine::voltageDrop(const NetworkState& y) const {
+  const Complex vf = positive_sequence_voltage(bus_voltage(y, params_.from_pos));
+  const Complex vt = positive_sequence_voltage(bus_voltage(y, params_.to_pos));
+  return vf - vt;
+}
+
+Complex DynamicRLLine::equilibriumCurrent(const NetworkState& y) const {
+  const Complex z(params_.r_pu, params_.x_pu);
+  if (std::abs(z) <= 1e-12) return Complex(0.0, 0.0);
+  return voltageDrop(y) / z;
+}
+
+Complex DynamicRLLine::branchCurrent(const DynamicState& x) const {
+  if (range_.empty() || state_index(range_, 1) >= x.x.size()) return Complex(0.0, 0.0);
+  return Complex(x.x[state_index(range_, 0)], x.x[state_index(range_, 1)]);
+}
+
+void DynamicRLLine::initializeFromPowerFlow(const PowerFlowResult&,
+                                            DynamicState& x,
+                                            NetworkState& y) {
+  if (range_.empty()) return;
+  const Complex i0 = params_.in_service ? equilibriumCurrent(y) : Complex(0.0, 0.0);
+  x.x[state_index(range_, 0)] = i0.real();
+  x.x[state_index(range_, 1)] = i0.imag();
+}
+
+bool DynamicRLLine::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
+  if (range_.empty()) return false;
+  const Complex i0 = params_.in_service ? equilibriumCurrent(y) : Complex(0.0, 0.0);
+  bool changed = false;
+  changed = set_if_changed(x.x, state_index(range_, 0), i0.real()) || changed;
+  changed = set_if_changed(x.x, state_index(range_, 1), i0.imag()) || changed;
+  return changed;
+}
+
+void DynamicRLLine::computeDerivatives(double,
+                                       const DynamicState& x,
+                                       const NetworkState& y,
+                                       Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (range_.empty()) return;
+  if (!params_.in_service ||
+      params_.from_pos < 0 ||
+      params_.to_pos < 0 ||
+      std::abs(params_.x_pu) <= 1e-12) {
+    dxdt[state_index(range_, 0)] = 0.0;
+    dxdt[state_index(range_, 1)] = 0.0;
+    return;
+  }
+  const Complex dv = voltageDrop(y);
+  const Complex i = branchCurrent(x);
+  const double omega_b = kTwoPi * positive_or(params_.frequency_hz, 50.0);
+  const double l = std::max(1e-12, std::abs(params_.x_pu));
+  dxdt[state_index(range_, 0)] =
+      (omega_b / l) * (dv.real() - (params_.r_pu * i.real() - params_.x_pu * i.imag()));
+  dxdt[state_index(range_, 1)] =
+      (omega_b / l) * (dv.imag() - (params_.r_pu * i.imag() + params_.x_pu * i.real()));
+}
+
+void DynamicRLLine::stamp(double,
+                          const DynamicState& x,
+                          const NetworkState&,
+                          DynamicStamp& stamp) const {
+  if (!params_.in_service || params_.from_pos < 0 || params_.to_pos < 0) return;
+  const Eigen::Vector3cd current =
+      balanced_current_from_positive_sequence(branchCurrent(x));
+  add_balanced_current(stamp, params_.from_pos, -current);
+  add_balanced_current(stamp, params_.to_pos, current);
+}
+
+void DynamicRLLine::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState& y) {
+  if (event.type != DynamicEventType::ACBranchTrip &&
+      event.type != DynamicEventType::ACBranchClose) {
+    return;
+  }
+  if (event.component_index != 0 && event.component_index != params_.component_index) return;
+  params_.in_service = event.type == DynamicEventType::ACBranchClose;
+  if (!range_.empty()) {
+    const Complex i = params_.in_service ? equilibriumCurrent(y) : Complex(0.0, 0.0);
+    x.x[state_index(range_, 0)] = i.real();
+    x.x[state_index(range_, 1)] = i.imag();
+  }
+}
+
+std::string DynamicRLLine::name() const {
+  if (!params_.label.empty()) return params_.label;
+  return "Dynamic RL line " + std::to_string(params_.component_index);
+}
+
+DynamicDeviceOutput DynamicRLLine::output(const DynamicState& x,
+                                          const NetworkState& y) const {
+  DynamicDeviceOutput out = make_output_base(*this,
+                                             params_.from_bus,
+                                             params_.canvas_type,
+                                             params_.component_domain,
+                                             params_.source_type);
+  const Complex i = branchCurrent(x);
+  const Complex vf = positive_sequence_voltage(bus_voltage(y, params_.from_pos));
+  const Complex vt = positive_sequence_voltage(bus_voltage(y, params_.to_pos));
+  const Complex s_from = vf * std::conj(i);
+  out.values["from_bus"] = static_cast<double>(params_.from_bus);
+  out.values["to_bus"] = static_cast<double>(params_.to_bus);
+  out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  out.values["r_pu"] = params_.r_pu;
+  out.values["x_pu"] = params_.x_pu;
+  out.values["current_r_pu"] = i.real();
+  out.values["current_i_pu"] = i.imag();
+  out.values["current_mag_pu"] = std::abs(i);
+  out.values["voltage_drop_r_pu"] = (vf - vt).real();
+  out.values["voltage_drop_i_pu"] = (vf - vt).imag();
+  out.values["p_from_mw"] = s_from.real() * safe_base(params_.base_mva);
+  out.values["q_from_mvar"] = s_from.imag() * safe_base(params_.base_mva);
+  add_voltage_metrics(out, y, params_.from_pos);
   return out;
 }
 
@@ -1382,6 +1664,10 @@ SynchronousMachine::SynchronousMachine(VoltageSourceDynamicParams params)
 void SynchronousMachine::assignStateIndices(int& offset) {
   range_ = {offset, synchronous_machine_state_count(params_)};
   offset += range_.size;
+  const bool has_turbine_governor = governor_attached_ ||
+                                    link_.inner_vars.has_turbine_governor;
+  const bool has_avr = exciter_attached_ || link_.inner_vars.has_avr;
+  const bool has_pss = link_.inner_vars.has_pss;
   // Publish the coupling link so attached controllers can address this machine's
   // speed / mechanical-power / field states. Local indices: omega=1 for both
   // models; classical pm=3, e_mag(field)=2; OneDOneQ tau_m=4, vf=5;
@@ -1410,6 +1696,23 @@ void SynchronousMachine::assignStateIndices(int& offset) {
     link_.pm_local = 3;
     link_.efd_local = 2;
   }
+  link_.inner_vars = GeneratorInnerVariableBus{};
+  link_.inner_vars.machine_range = &range_;
+  link_.inner_vars.valid = true;
+  link_.inner_vars.bus_pos = params_.bus_pos;
+  link_.inner_vars.base_mva = params_.base_mva;
+  link_.inner_vars.frequency_hz = params_.frequency_hz;
+  link_.inner_vars.inertia_h = std::max(0.01, params_.inertia_h);
+  link_.inner_vars.has_machine = true;
+  link_.inner_vars.has_shaft = true;
+  link_.inner_vars.has_turbine_governor = has_turbine_governor;
+  link_.inner_vars.has_avr = has_avr;
+  link_.inner_vars.has_pss = has_pss;
+  link_.inner_vars.omega_local = link_.omega_local;
+  link_.inner_vars.state_local[static_cast<std::size_t>(
+      static_cast<int>(GeneratorInnerVar::MechanicalTorque))] = link_.pm_local;
+  link_.inner_vars.state_local[static_cast<std::size_t>(
+      static_cast<int>(GeneratorInnerVar::FieldVoltage))] = link_.efd_local;
 }
 
 void SynchronousMachine::initializeFromPowerFlow(const PowerFlowResult& pf,
@@ -2015,6 +2318,8 @@ DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
                                              params_.component_domain,
                                              params_.source_type);
   out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  GeneratorInnerVariableSnapshot inner =
+      generator_inner_base_snapshot(link_.generatorBus(), x, y);
   if (machine_is_onedoneq(params_) && !range_.empty() && range_.offset + 5 < x.x.size()) {
     const OneDOneQParams mp = onedoneq_params(params_);
     const double delta = x.x[state_index(range_, 0)];
@@ -2038,6 +2343,10 @@ DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
     out.values["i_rms_pu"] = std::abs(e.current);
     out.values["torque_e_pu"] = e.tau_e;
     out.values["psd_onedoneq"] = 1.0;
+    inner.set(GeneratorInnerVar::ElectricalTorque, e.tau_e);
+    inner.set(GeneratorInnerVar::PsiD, eq_p);
+    inner.set(GeneratorInnerVar::PsiQ, ed_p);
+    inner.set(GeneratorInnerVar::XadIfd, vf);
   } else if (machine_is_simple_marconato(params_) && !range_.empty() &&
              range_.offset + 7 < x.x.size()) {
     const SimpleMarconatoParams mp = simple_marconato_params(params_);
@@ -2067,6 +2376,10 @@ DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
     out.values["i_rms_pu"] = std::abs(e.current);
     out.values["torque_e_pu"] = e.tau_e;
     out.values["psd_simple_marconato"] = 1.0;
+    inner.set(GeneratorInnerVar::ElectricalTorque, e.tau_e);
+    inner.set(GeneratorInnerVar::PsiD, eq_pp);
+    inner.set(GeneratorInnerVar::PsiQ, ed_pp);
+    inner.set(GeneratorInnerVar::XadIfd, vf);
   } else if (machine_is_roundrotor(params_) && !range_.empty() && range_.offset + 7 < x.x.size()) {
     const GenrouParams gp = genrou_params(params_);
     const double delta = x.x[state_index(range_, 0)];
@@ -2094,6 +2407,10 @@ DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
     out.values["i_rms_pu"] = std::abs(e.current);
     out.values["torque_e_pu"] = e.tau_e;
     out.values[gp.exponential_saturation ? "psd_genroe" : "psd_genrou"] = 1.0;
+    inner.set(GeneratorInnerVar::ElectricalTorque, e.tau_e);
+    inner.set(GeneratorInnerVar::PsiD, e.psi_d_pp);
+    inner.set(GeneratorInnerVar::PsiQ, e.psi_q_pp);
+    inner.set(GeneratorInnerVar::XadIfd, e.xad_ifd);
   } else if (machine_is_salient(params_) && !range_.empty() && range_.offset + 6 < x.x.size()) {
     const SalientParams sp = salient_params(params_);
     const double delta = x.x[state_index(range_, 0)];
@@ -2121,6 +2438,10 @@ DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
     out.values["i_rms_pu"] = std::abs(e.current);
     out.values["torque_e_pu"] = e.tau_e;
     out.values[sp.exponential_saturation ? "psd_gensae" : "psd_gensal"] = 1.0;
+    inner.set(GeneratorInnerVar::ElectricalTorque, e.tau_e);
+    inner.set(GeneratorInnerVar::PsiD, e.psi_d_pp);
+    inner.set(GeneratorInnerVar::PsiQ, e.psi_q_source);
+    inner.set(GeneratorInnerVar::XadIfd, e.xad_ifd);
   } else if (!range_.empty() && range_.offset + 3 < x.x.size()) {
     const double theta = x.x[state_index(range_, 0)];
     const double omega = x.x[state_index(range_, 1)];
@@ -2141,8 +2462,165 @@ DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
     out.values["q_mvar"] = s.imag() * safe_base(params_.base_mva);
     out.values["i_rms_pu"] =
         std::sqrt((std::norm(i[0]) + std::norm(i[1]) + std::norm(i[2])) / 3.0);
+    inner.set(GeneratorInnerVar::ElectricalTorque, s.real());
+    inner.set(GeneratorInnerVar::PsiD, e_mag);
+    inner.set(GeneratorInnerVar::PsiQ, 0.0);
+    inner.set(GeneratorInnerVar::XadIfd, e_mag);
   }
+  add_generator_inner_outputs(out, inner);
+  add_generator_block_flags(out, link_.generatorBus());
   add_voltage_metrics(out, y, params_.bus_pos);
+  return out;
+}
+
+FiveMassShaft::FiveMassShaft(FiveMassShaftParams params) : params_(std::move(params)) {}
+
+void FiveMassShaft::assignStateIndices(int& offset) {
+  range_ = {offset, 10};
+  offset += range_.size;
+}
+
+double FiveMassShaft::mechanicalTorque(const DynamicState& x) const {
+  if (machine_ != nullptr && machine_->valid) {
+    const int pm = machine_->pmIndex();
+    if (pm >= 0 && pm < x.x.size()) return x.x[pm];
+  }
+  return 0.0;
+}
+
+double FiveMassShaft::recoveredElectricalTorque(
+    const DynamicState& x,
+    Eigen::Ref<const Eigen::VectorXd> dxdt) const {
+  const double tau_m = mechanicalTorque(x);
+  if (machine_ == nullptr || !machine_->valid) return tau_m;
+  const int omega = machine_->omegaIndex();
+  if (omega < 0 || omega >= x.x.size() || omega >= dxdt.size()) return tau_m;
+  const double domega = dxdt[omega];
+  if (!std::isfinite(domega)) return tau_m;
+  return tau_m - 2.0 * std::max(0.01, machine_->inertia_h) * domega;
+}
+
+void FiveMassShaft::setEquilibrium(DynamicState& x) const {
+  if (range_.empty()) return;
+  double delta = 0.0;
+  double omega = 1.0;
+  if (machine_ != nullptr && machine_->valid && machine_->range != nullptr) {
+    const int d = machine_->range->offset;
+    const int w = machine_->omegaIndex();
+    if (d >= 0 && d < x.x.size()) delta = x.x[d];
+    if (w >= 0 && w < x.x.size()) omega = x.x[w];
+  }
+  const double tau = mechanicalTorque(x);
+  std::array<double, 5> theta{};
+  theta[4] = delta;
+  for (int k = 3; k >= 0; --k) {
+    const double stiffness = std::max(1e-9, std::abs(params_.stiffness_pu[static_cast<std::size_t>(k)]));
+    theta[static_cast<std::size_t>(k)] = theta[static_cast<std::size_t>(k + 1)] + tau / stiffness;
+  }
+  for (int i = 0; i < 5; ++i) {
+    x.x[state_index(range_, i)] = theta[static_cast<std::size_t>(i)];
+    x.x[state_index(range_, 5 + i)] = omega;
+  }
+}
+
+void FiveMassShaft::initializeFromPowerFlow(const PowerFlowResult&,
+                                            DynamicState& x,
+                                            NetworkState&) {
+  setEquilibrium(x);
+}
+
+bool FiveMassShaft::trimToNetworkEquilibrium(DynamicState& x, NetworkState&) {
+  if (!params_.in_service || range_.empty()) return false;
+  const Eigen::VectorXd before = x.x;
+  setEquilibrium(x);
+  return before.size() == x.x.size() && (before - x.x).cwiseAbs().maxCoeff() > 1e-12;
+}
+
+void FiveMassShaft::computeDerivatives(double,
+                                       const DynamicState& x,
+                                       const NetworkState&,
+                                       Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (!params_.in_service || range_.empty()) return;
+  std::array<double, 5> theta{};
+  std::array<double, 5> omega{};
+  for (int i = 0; i < 5; ++i) {
+    theta[static_cast<std::size_t>(i)] = x.x[state_index(range_, i)];
+    omega[static_cast<std::size_t>(i)] = x.x[state_index(range_, 5 + i)];
+  }
+  std::array<double, 4> torque{};
+  for (int i = 0; i < 4; ++i) {
+    const double k = params_.stiffness_pu[static_cast<std::size_t>(i)];
+    const double d = params_.damping_pu[static_cast<std::size_t>(i)];
+    torque[static_cast<std::size_t>(i)] =
+        k * (theta[static_cast<std::size_t>(i)] -
+             theta[static_cast<std::size_t>(i + 1)]) +
+        d * (omega[static_cast<std::size_t>(i)] -
+             omega[static_cast<std::size_t>(i + 1)]);
+  }
+  const double tau_m = mechanicalTorque(x);
+  const double tau_e = recoveredElectricalTorque(x, dxdt);
+  const double wb = kTwoPi * positive_or(params_.frequency_hz, 50.0);
+  for (int i = 0; i < 5; ++i) {
+    dxdt[state_index(range_, i)] = wb * (omega[static_cast<std::size_t>(i)] - 1.0);
+  }
+  const auto h = [&](int i) {
+    return std::max(0.01, params_.inertia_h[static_cast<std::size_t>(i)]);
+  };
+  dxdt[state_index(range_, 5)] = (tau_m - torque[0]) / (2.0 * h(0));
+  dxdt[state_index(range_, 6)] = (torque[0] - torque[1]) / (2.0 * h(1));
+  dxdt[state_index(range_, 7)] = (torque[1] - torque[2]) / (2.0 * h(2));
+  dxdt[state_index(range_, 8)] = (torque[2] - torque[3]) / (2.0 * h(3));
+  dxdt[state_index(range_, 9)] = (torque[3] - tau_e) / (2.0 * h(4));
+
+  if (machine_ != nullptr && machine_->valid && machine_->range != nullptr) {
+    const int delta = machine_->range->offset;
+    const int omega_idx = machine_->omegaIndex();
+    if (delta >= 0 && delta < dxdt.size()) dxdt[delta] = dxdt[state_index(range_, 4)];
+    if (omega_idx >= 0 && omega_idx < dxdt.size()) {
+      dxdt[omega_idx] = dxdt[state_index(range_, 9)];
+    }
+  }
+}
+
+void FiveMassShaft::stamp(double, const DynamicState&, const NetworkState&, DynamicStamp&) const {}
+
+void FiveMassShaft::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
+  const bool matching = event.component_index == 0 ||
+                        event.component_index == params_.component_index ||
+                        event.component_index == params_.machine_index;
+  if (!matching) return;
+  if (event.type == DynamicEventType::GeneratorTrip) {
+    params_.in_service = false;
+    if (!range_.empty()) {
+      for (int k = 0; k < range_.size; ++k) {
+        if (state_index(range_, k) < x.x.size()) x.x[state_index(range_, k)] = 0.0;
+      }
+    }
+  }
+}
+
+std::string FiveMassShaft::name() const {
+  return params_.label.empty() ? "Five-mass shaft " + std::to_string(params_.component_index)
+                               : params_.label;
+}
+
+DynamicDeviceOutput FiveMassShaft::output(const DynamicState& x, const NetworkState&) const {
+  DynamicDeviceOutput out = make_output_base(*this,
+                                             params_.machine_index,
+                                             params_.canvas_type,
+                                             params_.component_domain,
+                                             params_.source_type);
+  out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  out.values["mass_count"] = 5.0;
+  out.values["state_count"] = 10.0;
+  if (!range_.empty() && state_index(range_, 9) < x.x.size()) {
+    for (int i = 0; i < 5; ++i) {
+      out.values["theta_" + std::to_string(i + 1) + "_rad"] = x.x[state_index(range_, i)];
+      out.values["omega_" + std::to_string(i + 1) + "_pu"] = x.x[state_index(range_, 5 + i)];
+    }
+    out.values["omega_generator_pu"] = x.x[state_index(range_, 9)];
+    out.values["p_mech_input_mw"] = mechanicalTorque(x) * safe_base(params_.base_mva);
+  }
   return out;
 }
 
@@ -2159,6 +2637,35 @@ static double pss_vs_output(const PSSOutputLink& L, const DynamicState& x) {
   const int omega_idx = L.machine->omegaIndex();
   if (omega_idx < 0 || omega_idx >= x.x.size()) return 0.0;
   const double u = x.x[omega_idx] - 1.0;
+  if (L.model == 1) {
+    if (o + 6 >= x.x.size()) return 0.0;
+    const double xp1 = x.x[o + 0];
+    const double xp2 = x.x[o + 1];
+    const double xp3 = x.x[o + 2];
+    const double xp4 = x.x[o + 3];
+    const double xp5 = x.x[o + 4];
+    const double xp6 = x.x[o + 5];
+    const double xp7 = x.x[o + 6];
+    const double a2 = control_time(L.a2);
+    const double t2 = control_time(L.t2_s);
+    const double t4 = control_time(L.t4_s);
+    const double t6 = control_time(L.t6_s);
+    const double y_f =
+        (L.a6 / a2) * xp2 +
+        (L.a5 - L.a1 * (L.a6 / a2)) * xp3 +
+        (1.0 - L.a6 / a2) * xp4;
+    const double y_ll1 = xp5 + (L.t1_s / t2) * y_f;
+    const double y_ll2 = xp6 + (L.t3_s / t4) * y_ll1;
+    const double y_out = (L.ks * L.t5_s / t6) * (y_ll2 - xp7);
+    const double vss = std::clamp(y_out, L.vs_min_pu, L.vs_max_pu);
+    return pss_output_limiter(vss, 1.0, L.vcl, L.vcu);
+  }
+  if (L.model == 2) {
+    const double y_hp = x.x[o + 0] + L.kt * u;
+    const double y1 = x.x[o + 1] + L.t1_over_t3 * y_hp;
+    const double y2 = x.x[o + 2] + L.t2_over_t4 * y1;
+    return std::clamp(y2, -L.h_lim, L.h_lim);
+  }
   const double t2 = std::max(kMinTimeConstant, L.t2_s);
   const double t4 = std::max(kMinTimeConstant, L.t4_s);
   const double y_w = L.ks * u - x.x[o + 0];
@@ -2170,7 +2677,8 @@ static double pss_vs_output(const PSSOutputLink& L, const DynamicState& x) {
 Governor::Governor(GovernorDynamicParams params) : params_(std::move(params)) {}
 
 void Governor::assignStateIndices(int& offset) {
-  range_ = {offset, 1};  // one governor/valve state; machine owns the pm slot
+  const int count = params_.model == GovernorModel::TGTypeI ? 3 : 1;
+  range_ = {offset, count};  // machine owns the published tau_m/pm slot
   offset += range_.size;
 }
 
@@ -2186,7 +2694,18 @@ void Governor::initializeFromPowerFlow(const PowerFlowResult&, DynamicState& x, 
       params_.p_ref_mw = p0 * safe_base(params_.base_mva);
     }
   }
-  x.x[range_.offset] = p0;  // valve position = scheduled power
+  if (params_.model == GovernorModel::TGTypeI && range_.size >= 3) {
+    const double tc = control_time(params_.tc_s);
+    const double t3 = params_.t3_s;
+    const double t5 = control_time(params_.t5_s);
+    const double t4 = params_.t4_s;
+    x.x[state_index(range_, 0)] = p0;
+    x.x[state_index(range_, 1)] = (1.0 - t3 / tc) * p0;
+    x.x[state_index(range_, 2)] = (1.0 - t4 / t5) * p0;
+  } else {
+    x.x[range_.offset] =
+        params_.model == GovernorModel::TGTypeII ? 0.0 : p0;
+  }
 }
 
 bool Governor::trimToNetworkEquilibrium(DynamicState& x, NetworkState&) {
@@ -2199,7 +2718,21 @@ bool Governor::trimToNetworkEquilibrium(DynamicState& x, NetworkState&) {
       params_.p_ref_mw = p0 * safe_base(params_.base_mva);
     }
   }
-  return set_if_changed(x.x, range_.offset, p0);
+  bool changed = false;
+  if (params_.model == GovernorModel::TGTypeI && range_.size >= 3) {
+    const double tc = control_time(params_.tc_s);
+    const double t3 = params_.t3_s;
+    const double t5 = control_time(params_.t5_s);
+    const double t4 = params_.t4_s;
+    changed = set_if_changed(x.x, state_index(range_, 0), p0) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 1),
+                             (1.0 - t3 / tc) * p0) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 2),
+                             (1.0 - t4 / t5) * p0) || changed;
+    return changed;
+  }
+  return set_if_changed(x.x, range_.offset,
+                        params_.model == GovernorModel::TGTypeII ? 0.0 : p0);
 }
 
 void Governor::computeDerivatives(double,
@@ -2213,8 +2746,7 @@ void Governor::computeDerivatives(double,
   const double pmin = params_.pmin_mw < 0.0 ? params_.pmin_mw / base
                                             : -std::numeric_limits<double>::infinity();
   const double pref = std::clamp(params_.p_ref_mw / base, pmin, pmax);
-  const double t1 = std::max(kMinTimeConstant, params_.t_s);
-  const double valve = x.x[range_.offset];
+  const double t1 = control_time(params_.t_s);
 
   if (machine_ != nullptr && machine_->valid) {
     // Load-reference-set governor: valve responds to droop about the speed
@@ -2225,17 +2757,54 @@ void Governor::computeDerivatives(double,
     const double omega = (omega_idx >= 0 && omega_idx < x.x.size()) ? x.x[omega_idx] : 1.0;
     const double droop = params_.droop_r > 1e-9 ? params_.droop_r : 0.05;
     const double valve_cmd = std::clamp(pref - (omega - 1.0) / droop, pmin, pmax);
+    if (params_.model == GovernorModel::TGTypeI && range_.size >= 3) {
+      const double xg1 = x.x[state_index(range_, 0)];
+      const double xg2 = x.x[state_index(range_, 1)];
+      const double xg3 = x.x[state_index(range_, 2)];
+      const double ts = control_time(params_.t_s);
+      const double tc = control_time(params_.tc_s);
+      const double t3 = params_.t3_s;
+      const double t5 = control_time(params_.t5_s);
+      const double t4 = params_.t4_s;
+      const double dxg1 = (valve_cmd - xg1) / ts;
+      const double y_ll = xg2 + (t3 / tc) * xg1;
+      const double dxg2 = ((1.0 - t3 / tc) * xg1 - xg2) / tc;
+      const double tau_m = xg3 + (t4 / t5) * y_ll;
+      const double dxg3 = ((1.0 - t4 / t5) * y_ll - xg3) / t5;
+      dxdt[state_index(range_, 0)] = dxg1;
+      dxdt[state_index(range_, 1)] = dxg2;
+      dxdt[state_index(range_, 2)] = dxg3;
+      if (pm_idx >= 0 && pm_idx < x.x.size()) {
+        dxdt[pm_idx] = dxg3 + (t4 / t5) * (dxg2 + (t3 / tc) * dxg1);
+        if (std::abs(tau_m - x.x[pm_idx]) > 1e-8) {
+          dxdt[pm_idx] += (tau_m - x.x[pm_idx]) / t5;
+        }
+      }
+      return;
+    }
+    if (params_.model == GovernorModel::TGTypeII) {
+      const double xg = x.x[range_.offset];
+      const double t2 = control_time(params_.turbine_t_s);
+      const auto [tau_delta, dxg] =
+          lead_lag_block((1.0 - omega) / droop, xg, 1.0, params_.t_s, t2);
+      dxdt[range_.offset] = dxg;
+      if (pm_idx >= 0 && pm_idx < x.x.size()) {
+        const double tau_m = std::clamp(pref + tau_delta, pmin, pmax);
+        dxdt[pm_idx] = dxg + (tau_m - x.x[pm_idx]) / t2;
+      }
+      return;
+    }
+    const double valve = x.x[range_.offset];
     dxdt[range_.offset] = (valve_cmd - valve) / t1;
     if (pm_idx >= 0 && pm_idx < x.x.size()) {
-      const double t_turb = std::max(
-          kMinTimeConstant,
+      const double t_turb = control_time(
           params_.model == GovernorModel::IEEEG1 ? params_.reheat_t_s : params_.turbine_t_s);
       dxdt[pm_idx] = (valve - x.x[pm_idx]) / t_turb;
     }
     return;
   }
   // Backward-compatible standalone behaviour: own state tracks the reference.
-  dxdt[range_.offset] = (pref - valve) / t1;
+  dxdt[range_.offset] = (pref - x.x[range_.offset]) / t1;
 }
 
 void Governor::stamp(double, const DynamicState&, const NetworkState&, DynamicStamp&) const {}
@@ -2270,6 +2839,10 @@ DynamicDeviceOutput Governor::output(const DynamicState& x, const NetworkState&)
   out.values["attached"] = machine_ != nullptr ? 1.0 : 0.0;
   if (!range_.empty() && range_.offset < x.x.size()) {
     out.values["valve_pu"] = x.x[range_.offset];
+    if (params_.model == GovernorModel::TGTypeI && range_.size >= 3) {
+      out.values["servo_state_pu"] = x.x[state_index(range_, 1)];
+      out.values["reheat_state_pu"] = x.x[state_index(range_, 2)];
+    }
   }
   if (machine_ != nullptr && machine_->valid) {
     const int pm_idx = machine_->pmIndex();
@@ -2285,15 +2858,24 @@ DynamicDeviceOutput Governor::output(const DynamicState& x, const NetworkState&)
 Exciter::Exciter(ExciterDynamicParams params) : params_(std::move(params)) {}
 
 void Exciter::assignStateIndices(int& offset) {
-  // When coupled to a machine the exciter drives the machine-owned field state
-  // and needs no state of its own; standalone it keeps a single efd state for
-  // backward compatibility.
-  range_ = {offset, machine_ != nullptr ? 0 : 1};
+  int count = 1;
+  if (machine_ != nullptr) {
+    count = (params_.model == ExciterModel::AVRTypeI ||
+             params_.model == ExciterModel::AVRTypeII)
+                ? 3
+                : 0;
+  } else if (params_.model == ExciterModel::AVRTypeI ||
+             params_.model == ExciterModel::AVRTypeII) {
+    count = 4;
+  }
+  range_ = {offset, count};
   offset += range_.size;
 }
 
 double Exciter::terminalVoltage(const NetworkState& y) const {
-  const int bus = machine_ != nullptr && machine_->valid ? machine_->bus_pos : params_.bus_pos;
+  const int bus = machine_ != nullptr && machine_->valid
+                      ? machine_->generatorBus().bus_pos
+                      : params_.bus_pos;
   if (bus < 0) return params_.v_ref_pu;
   return std::abs(positive_sequence_voltage(bus_voltage(y, bus)));
 }
@@ -2315,7 +2897,9 @@ void Exciter::captureReference(const DynamicState& x, const NetworkState& y) {
 void Exciter::initializeFromPowerFlow(const PowerFlowResult& pf, DynamicState& x, NetworkState& y) {
   // Prefer the power-flow terminal voltage at init (network not yet solved here).
   double vt = params_.v_ref_pu;
-  const int bus = machine_ != nullptr && machine_->valid ? machine_->bus_pos : params_.bus_pos;
+  const int bus = machine_ != nullptr && machine_->valid
+                      ? machine_->generatorBus().bus_pos
+                      : params_.bus_pos;
   if (bus >= 0 && bus < static_cast<int>(pf.vm.size())) {
     vt = positive_or(pf.vm[static_cast<std::size_t>(bus)], vt);
   }
@@ -2329,12 +2913,98 @@ void Exciter::initializeFromPowerFlow(const PowerFlowResult& pf, DynamicState& x
   }
   field0_ = field0;
   v_ref_captured_ = vt;
+  if (params_.model == ExciterModel::AVRTypeI ||
+      params_.model == ExciterModel::AVRTypeII) {
+    const int base = range_.offset;
+    const bool attached = machine_ != nullptr && machine_->valid;
+    const int vr1_local = attached ? 0 : 1;
+    const int vr2_local = attached ? 1 : 2;
+    const int vm_local = attached ? 2 : 3;
+    const double vf = field0;
+    const double se = avr_saturation(params_.ae, params_.be, vf);
+    if (!attached && !range_.empty()) x.x[base] = vf;
+    if (params_.model == ExciterModel::AVRTypeI) {
+      const double ka = std::max(1e-9, std::abs(params_.ka));
+      const double ke = params_.ke;
+      const double tf = control_time(params_.tf_s);
+      const double vr1 = vf * (ke + se);
+      const double vr2 = -(params_.kf / tf) * vf;
+      x.x[base + vr1_local] = vr1;
+      x.x[base + vr2_local] = vr2;
+      x.x[base + vm_local] = vt;
+      v_ref_captured_ = vt + vr1 / ka;
+    } else {
+      const double k0 = std::max(1e-9, std::abs(params_.k0));
+      const double t1 = control_time(params_.t1_s);
+      const double t2 = params_.t2_s;
+      const double t3 = control_time(params_.t3_s);
+      const double t4 = params_.t4_s;
+      const double vr = std::clamp(vf * (1.0 + se),
+                                   params_.va_min_pu,
+                                   params_.va_max_pu);
+      const double u = vr / k0;
+      const double vr1 = k0 * (1.0 - t2 / t1) * u;
+      const double vr2 = ((1.0 - t4 / t3) * vr) / k0;
+      x.x[base + vr1_local] = vr1;
+      x.x[base + vr2_local] = vr2;
+      x.x[base + vm_local] = vt;
+      v_ref_captured_ = vt + u;
+    }
+  }
   captured_ = true;
 }
 
 bool Exciter::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
   if (!params_.in_service) return false;
   captureReference(x, y);  // re-anchor to the network-solved equilibrium
+  if (params_.model == ExciterModel::AVRTypeI ||
+      params_.model == ExciterModel::AVRTypeII) {
+    const bool attached = machine_ != nullptr && machine_->valid;
+    if (range_.empty()) return false;
+    const int base = range_.offset;
+    const int vr1_local = attached ? 0 : 1;
+    const int vr2_local = attached ? 1 : 2;
+    const int vm_local = attached ? 2 : 3;
+    const double vt = terminalVoltage(y);
+    double vf = field0_;
+    if (attached) {
+      const int f = machine_->fieldIndex();
+      if (f >= 0 && f < x.x.size()) vf = x.x[f];
+    } else if (base < x.x.size()) {
+      vf = x.x[base];
+    }
+    const double se = avr_saturation(params_.ae, params_.be, vf);
+    bool changed = false;
+    if (!attached) changed = set_if_changed(x.x, base, vf) || changed;
+    if (params_.model == ExciterModel::AVRTypeI) {
+      const double ka = std::max(1e-9, std::abs(params_.ka));
+      const double tf = control_time(params_.tf_s);
+      const double vr1 = vf * (params_.ke + se);
+      const double vr2 = -(params_.kf / tf) * vf;
+      v_ref_captured_ = vt + vr1 / ka;
+      changed = set_if_changed(x.x, base + vr1_local, vr1) || changed;
+      changed = set_if_changed(x.x, base + vr2_local, vr2) || changed;
+      changed = set_if_changed(x.x, base + vm_local, vt) || changed;
+    } else {
+      const double k0 = std::max(1e-9, std::abs(params_.k0));
+      const double t1 = control_time(params_.t1_s);
+      const double t2 = params_.t2_s;
+      const double t3 = control_time(params_.t3_s);
+      const double t4 = params_.t4_s;
+      const double vr = std::clamp(vf * (1.0 + se),
+                                   params_.va_min_pu,
+                                   params_.va_max_pu);
+      const double u = vr / k0;
+      const double vr1 = k0 * (1.0 - t2 / t1) * u;
+      const double vr2 = ((1.0 - t4 / t3) * vr) / k0;
+      v_ref_captured_ = vt + u;
+      changed = set_if_changed(x.x, base + vr1_local, vr1) || changed;
+      changed = set_if_changed(x.x, base + vr2_local, vr2) || changed;
+      changed = set_if_changed(x.x, base + vm_local, vt) || changed;
+    }
+    captured_ = true;
+    return changed;
+  }
   if (machine_ != nullptr) return false;  // coupled exciter owns no state to trim
   if (range_.empty()) return false;
   return set_if_changed(x.x, range_.offset,
@@ -2349,8 +3019,7 @@ void Exciter::computeDerivatives(double,
   const double vt = terminalVoltage(y);
   const double vref = captured_ ? v_ref_captured_ : params_.v_ref_pu;
   const double vs = pss_ != nullptr ? pss_vs_output(*pss_, x) : 0.0;
-  const double t = std::max(
-      kMinTimeConstant,
+  const double t = control_time(
       params_.model == ExciterModel::IEEET1 ? params_.te_s : params_.ta_s);
 
   if (machine_ != nullptr && machine_->valid) {
@@ -2358,12 +3027,92 @@ void Exciter::computeDerivatives(double,
     // Ka*(Vref - Vt + Vs). Drives the machine-owned field state through a lag.
     const int f = machine_->fieldIndex();
     if (f < 0 || f >= x.x.size()) return;
+    if (params_.model == ExciterModel::AVRSimple) {
+      dxdt[f] = params_.kv * (vref - vt);
+      return;
+    }
+    if ((params_.model == ExciterModel::AVRTypeI ||
+         params_.model == ExciterModel::AVRTypeII) &&
+        !range_.empty()) {
+      const int base = range_.offset;
+      const double vf = x.x[f];
+      const double vr1 = x.x[base + 0];
+      const double vr2 = x.x[base + 1];
+      const double vm = x.x[base + 2];
+      const auto vm_block = low_pass_block(vt, vm, 1.0, params_.tr_s);
+      const double dvm = vm_block.second;
+      dxdt[base + 2] = dvm;
+      const double se = avr_saturation(params_.ae, params_.be, vf);
+      if (params_.model == ExciterModel::AVRTypeI) {
+        const auto [yhp, dvr2] = high_pass_block(vf, vr2, params_.kf, params_.tf_s);
+        const auto [yr, dvr1] =
+            low_pass_block(vref + vs - vm - yhp, vr1, params_.ka, params_.ta_s);
+        (void)yr;
+        dxdt[base + 0] = dvr1;
+        dxdt[base + 1] = dvr2;
+        dxdt[f] =
+            low_pass_modified_block(vr1, vf, 1.0, params_.ke + se, params_.te_s).second;
+      } else {
+        const auto [yll1, dvr1] =
+            lead_lag_block(vref + vs - vm, vr1, params_.k0, params_.t2_s, params_.t1_s);
+        const auto [yll2, dvr2] =
+            lead_lag_block(yll1,
+                           params_.k0 * vr2,
+                           1.0,
+                           params_.k0 * params_.t4_s,
+                           params_.k0 * params_.t3_s);
+        const double vr = std::clamp(yll2, params_.va_min_pu, params_.va_max_pu);
+        dxdt[base + 0] = dvr1;
+        dxdt[base + 1] = dvr2;
+        dxdt[f] =
+            low_pass_modified_block(vr, vf, 1.0, 1.0 + se, params_.te_s).second;
+      }
+      return;
+    }
     const double efd_cmd = std::clamp(field0_ + params_.ka * (vref - vt + vs),
                                       params_.efd_min_pu, params_.efd_max_pu);
     dxdt[f] = (efd_cmd - x.x[f]) / t;
     return;
   }
   if (range_.empty()) return;
+  if (params_.model == ExciterModel::AVRSimple) {
+    dxdt[range_.offset] = params_.kv * (vref - vt);
+    return;
+  }
+  if ((params_.model == ExciterModel::AVRTypeI ||
+       params_.model == ExciterModel::AVRTypeII) &&
+      range_.size >= 4) {
+    const int base = range_.offset;
+    const double vf = x.x[base + 0];
+    const double vr1 = x.x[base + 1];
+    const double vr2 = x.x[base + 2];
+    const double vm = x.x[base + 3];
+    dxdt[base + 3] = low_pass_block(vt, vm, 1.0, params_.tr_s).second;
+    const double se = avr_saturation(params_.ae, params_.be, vf);
+    if (params_.model == ExciterModel::AVRTypeI) {
+      const auto [yhp, dvr2] = high_pass_block(vf, vr2, params_.kf, params_.tf_s);
+      dxdt[base + 1] =
+          low_pass_block(vref + vs - vm - yhp, vr1, params_.ka, params_.ta_s).second;
+      dxdt[base + 2] = dvr2;
+      dxdt[base + 0] =
+          low_pass_modified_block(vr1, vf, 1.0, params_.ke + se, params_.te_s).second;
+    } else {
+      const auto [yll1, dvr1] =
+          lead_lag_block(vref + vs - vm, vr1, params_.k0, params_.t2_s, params_.t1_s);
+      const auto [yll2, dvr2] =
+          lead_lag_block(yll1,
+                         params_.k0 * vr2,
+                         1.0,
+                         params_.k0 * params_.t4_s,
+                         params_.k0 * params_.t3_s);
+      const double vr = std::clamp(yll2, params_.va_min_pu, params_.va_max_pu);
+      dxdt[base + 1] = dvr1;
+      dxdt[base + 2] = dvr2;
+      dxdt[base + 0] =
+          low_pass_modified_block(vr, vf, 1.0, 1.0 + se, params_.te_s).second;
+    }
+    return;
+  }
   const double efd_cmd = std::clamp(params_.ka * (vref - vt + vs) + vref,
                                     params_.efd_min_pu, params_.efd_max_pu);
   dxdt[range_.offset] = (efd_cmd - x.x[range_.offset]) / t;
@@ -2408,8 +3157,9 @@ DynamicDeviceOutput Exciter::output(const DynamicState& x, const NetworkState& y
     efd = x.x[range_.offset];
   }
   out.values["efd_pu"] = efd;
-  add_voltage_metrics(out, y, machine_ != nullptr && machine_->valid ? machine_->bus_pos
-                                                                     : params_.bus_pos);
+  add_voltage_metrics(out, y, machine_ != nullptr && machine_->valid
+                                  ? machine_->generatorBus().bus_pos
+                                  : params_.bus_pos);
   return out;
 }
 
@@ -2423,11 +3173,13 @@ void PowerSystemStabilizer::attachMachine(const MachineControlLink* link) {
 }
 
 void PowerSystemStabilizer::assignStateIndices(int& offset) {
-  range_ = {offset, 3};  // washout + two lead-lag states
+  range_ = {offset, params_.model == PSSModel::IEEEST ? 7 : 3};
   offset += range_.size;
   link_.range = &range_;
   link_.machine = machine_;
   link_.valid = machine_ != nullptr && machine_->valid;
+  link_.model = params_.model == PSSModel::IEEEST ? 1
+                 : (params_.model == PSSModel::STAB1 ? 2 : 0);
   link_.ks = params_.ks;
   link_.tw_s = params_.tw_s;
   link_.t1_s = params_.t1_s;
@@ -2436,6 +3188,22 @@ void PowerSystemStabilizer::assignStateIndices(int& offset) {
   link_.t4_s = params_.t4_s;
   link_.vs_max_pu = params_.vs_max_pu;
   link_.vs_min_pu = params_.vs_min_pu;
+  link_.a1 = params_.a1;
+  link_.a2 = params_.a2;
+  link_.a3 = params_.a3;
+  link_.a4 = params_.a4;
+  link_.a5 = params_.a5;
+  link_.a6 = params_.a6;
+  link_.t5_s = params_.t5_s;
+  link_.t6_s = params_.t6_s;
+  link_.vcu = params_.vcu;
+  link_.vcl = params_.vcl;
+  link_.input_code = params_.input_code;
+  link_.kt = params_.kt;
+  link_.stab_t_s = params_.stab_t_s;
+  link_.t1_over_t3 = params_.t1_over_t3;
+  link_.t2_over_t4 = params_.t2_over_t4;
+  link_.h_lim = params_.h_lim;
 }
 
 void PowerSystemStabilizer::initializeFromPowerFlow(const PowerFlowResult&,
@@ -2468,9 +3236,59 @@ void PowerSystemStabilizer::computeDerivatives(double,
   }
   const int omega_idx = machine_->omegaIndex();
   const double u = (omega_idx >= 0 && omega_idx < x.x.size()) ? x.x[omega_idx] - 1.0 : 0.0;
-  const double tw = std::max(kMinTimeConstant, params_.tw_s);
-  const double t2 = std::max(kMinTimeConstant, params_.t2_s);
-  const double t4 = std::max(kMinTimeConstant, params_.t4_s);
+  if (params_.model == PSSModel::IEEEST && range_.size >= 7) {
+    const double xp1 = x.x[state_index(range_, 0)];
+    const double xp2 = x.x[state_index(range_, 1)];
+    const double xp3 = x.x[state_index(range_, 2)];
+    const double xp4 = x.x[state_index(range_, 3)];
+    const double xp5 = x.x[state_index(range_, 4)];
+    const double xp6 = x.x[state_index(range_, 5)];
+    const double xp7 = x.x[state_index(range_, 6)];
+    const double a2 = control_time(params_.a2);
+    const double a4 = control_time(params_.a4);
+    const double t2 = control_time(params_.t2_s);
+    const double t4 = control_time(params_.t4_s);
+    const double t6 = control_time(params_.t6_s);
+    dxdt[state_index(range_, 0)] =
+        (u - params_.a3 * xp1 - xp2) / a4;
+    dxdt[state_index(range_, 1)] = xp1;
+    dxdt[state_index(range_, 2)] =
+        (xp2 - params_.a1 * xp3 - xp4) / a2;
+    dxdt[state_index(range_, 3)] = xp3;
+    const double y_f =
+        (params_.a6 / a2) * xp2 +
+        (params_.a5 - params_.a1 * (params_.a6 / a2)) * xp3 +
+        (1.0 - params_.a6 / a2) * xp4;
+    const auto [y_ll1, dxp5] =
+        lead_lag_block(y_f, xp5, 1.0, params_.t1_s, t2);
+    const auto [y_ll2, dxp6] =
+        lead_lag_block(y_ll1, xp6, 1.0, params_.t3_s, t4);
+    const auto hp = high_pass_block(y_ll2, xp7, params_.ks * params_.t5_s, t6);
+    const double dxp7 = hp.second;
+    dxdt[state_index(range_, 4)] = dxp5;
+    dxdt[state_index(range_, 5)] = dxp6;
+    dxdt[state_index(range_, 6)] = dxp7;
+    return;
+  }
+  if (params_.model == PSSModel::STAB1) {
+    const double t = control_time(params_.stab_t_s);
+    const double t3 = control_time(params_.t3_s);
+    const double t4 = control_time(params_.t4_s);
+    const double x1 = x.x[state_index(range_, 0)];
+    const double x2 = x.x[state_index(range_, 1)];
+    const double x3 = x.x[state_index(range_, 2)];
+    const double y_hp = x1 + params_.kt * u;
+    const double y1 = x2 + params_.t1_over_t3 * y_hp;
+    dxdt[state_index(range_, 0)] = -(params_.kt * u + x1) / t;
+    dxdt[state_index(range_, 1)] =
+        ((1.0 - params_.t1_over_t3) * y_hp - x2) / t3;
+    dxdt[state_index(range_, 2)] =
+        ((1.0 - params_.t2_over_t4) * y1 - x3) / t4;
+    return;
+  }
+  const double tw = control_time(params_.tw_s);
+  const double t2 = control_time(params_.t2_s);
+  const double t4 = control_time(params_.t4_s);
   const double x1 = x.x[state_index(range_, 0)];
   const double x2 = x.x[state_index(range_, 1)];
   const double x3 = x.x[state_index(range_, 2)];
@@ -2527,6 +3345,24 @@ void GridFormingInverter::assignStateIndices(int& offset) {
                 ? 7
                 : 6};
   offset += range_.size;
+  inner_vars_ = InverterInnerVariableBus{};
+  inner_vars_.range = &range_;
+  inner_vars_.valid = true;
+  inner_vars_.bus_pos = params_.bus_pos;
+  inner_vars_.dc_bus_pos = params_.dc_bus_pos;
+  inner_vars_.grid_following = false;
+  inner_vars_.has_dc_source = params_.dc_bus_pos >= 0;
+  inner_vars_.has_frequency_estimator = false;
+  inner_vars_.state_local[static_cast<std::size_t>(
+      static_cast<int>(InverterInnerVar::VoltageReference))] = 1;
+  inner_vars_.state_local[static_cast<std::size_t>(
+      static_cast<int>(InverterInnerVar::FilteredActivePower))] = 2;
+  inner_vars_.state_local[static_cast<std::size_t>(
+      static_cast<int>(InverterInnerVar::FilteredReactivePower))] = 3;
+  if (range_.size > 6) {
+    inner_vars_.state_local[static_cast<std::size_t>(
+        static_cast<int>(InverterInnerVar::DCVoltage))] = 6;
+  }
 }
 
 void GridFormingInverter::initializeFromPowerFlow(const PowerFlowResult& pf,
@@ -2759,6 +3595,7 @@ DynamicDeviceOutput GridFormingInverter::output(const DynamicState& x,
                                              params_.source_type);
   out.values["control_mode"] = 1.0;
   out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  InverterInnerVariableSnapshot inner;
   if (!range_.empty() && state_index(range_, 5) < x.x.size()) {
     const double theta = x.x[state_index(range_, 0)];
     const double e_mag = x.x[state_index(range_, 1)];
@@ -2797,6 +3634,21 @@ DynamicDeviceOutput GridFormingInverter::output(const DynamicState& x,
             ? 1.0
             : 0.0;
     out.values["overload_pu"] = overload;
+    const Complex e_pos = std::polar(e_mag, theta);
+    const Complex v_pos = positive_sequence_voltage(v);
+    const Complex i_pos = positive_sequence_voltage(i);
+    inner.set(InverterInnerVar::VoltageReference, e_mag);
+    inner.set(InverterInnerVar::FrequencyReference, out.values["frequency_hz"]);
+    inner.set(InverterInnerVar::ConverterVoltageReal, e_pos.real());
+    inner.set(InverterInnerVar::ConverterVoltageImag, e_pos.imag());
+    inner.set(InverterInnerVar::FilterVoltageReal, v_pos.real());
+    inner.set(InverterInnerVar::FilterVoltageImag, v_pos.imag());
+    inner.set(InverterInnerVar::FilteredActivePower, pf);
+    inner.set(InverterInnerVar::FilteredReactivePower, qf);
+    inner.set(InverterInnerVar::FilterCurrentReal, i_pos.real());
+    inner.set(InverterInnerVar::FilterCurrentImag, i_pos.imag());
+    inner.set(InverterInnerVar::ConverterCurrentReal, i_pos.real());
+    inner.set(InverterInnerVar::ConverterCurrentImag, i_pos.imag());
     if (range_.size > 6 && state_index(range_, 6) < x.x.size()) {
       const double vdc_link = x.x[state_index(range_, 6)];
       out.values["vdc_link_pu"] = vdc_link;
@@ -2807,10 +3659,13 @@ DynamicDeviceOutput GridFormingInverter::output(const DynamicState& x,
                                    params_.dc_link_conductance_pu);
       out.values["p_dc_mw"] = pdc_net * safe_base(params_.base_mva);
       out.values["dc_link_dynamic"] = 1.0;
+      inner.set(InverterInnerVar::DCVoltage, vdc_link);
     } else {
       out.values["dc_link_dynamic"] = 0.0;
     }
   }
+  add_inverter_block_flags(out, inner_vars_);
+  add_inverter_inner_outputs(out, inner);
   add_voltage_metrics(out, y, params_.bus_pos, params_.dc_bus_pos);
   return out;
 }
@@ -2821,6 +3676,41 @@ GridFollowingInverter::GridFollowingInverter(GridFollowingInverterParams params)
 void GridFollowingInverter::assignStateIndices(int& offset) {
   range_ = {offset, gfl_state_count(params_)};
   offset += range_.size;
+  inner_vars_ = InverterInnerVariableBus{};
+  inner_vars_.range = &range_;
+  inner_vars_.valid = true;
+  inner_vars_.bus_pos = params_.bus_pos;
+  inner_vars_.dc_bus_pos = params_.dc_bus_pos;
+  inner_vars_.grid_following = true;
+  inner_vars_.has_dc_source =
+      params_.stamp_dc_power && params_.dc_bus_pos >= 0;
+  inner_vars_.state_local[static_cast<std::size_t>(
+      static_cast<int>(InverterInnerVar::PllAngle))] = 0;
+  inner_vars_.state_local[static_cast<std::size_t>(
+      static_cast<int>(InverterInnerVar::OuterCurrentD))] = 2;
+  inner_vars_.state_local[static_cast<std::size_t>(
+      static_cast<int>(InverterInnerVar::OuterCurrentQ))] = 3;
+  inner_vars_.state_local[static_cast<std::size_t>(
+      static_cast<int>(InverterInnerVar::InnerCurrentD))] = 2;
+  inner_vars_.state_local[static_cast<std::size_t>(
+      static_cast<int>(InverterInnerVar::InnerCurrentQ))] = 3;
+  inner_vars_.state_local[static_cast<std::size_t>(
+      static_cast<int>(InverterInnerVar::FilteredActivePower))] = 4;
+  inner_vars_.state_local[static_cast<std::size_t>(
+      static_cast<int>(InverterInnerVar::FilteredReactivePower))] = 5;
+  if (uses_kaura_pll(params_.frequency_estimator)) {
+    inner_vars_.state_local[static_cast<std::size_t>(
+        static_cast<int>(InverterInnerVar::PllVoltageD))] =
+        gfl_vdf_local(params_);
+    inner_vars_.state_local[static_cast<std::size_t>(
+        static_cast<int>(InverterInnerVar::PllVoltageQ))] =
+        gfl_vqf_local(params_);
+  }
+  const int vdc_local = gfl_vdc_local(params_);
+  if (vdc_local >= 0) {
+    inner_vars_.state_local[static_cast<std::size_t>(
+        static_cast<int>(InverterInnerVar::DCVoltage))] = vdc_local;
+  }
 }
 
 void GridFollowingInverter::initializeFromPowerFlow(const PowerFlowResult& pf,
@@ -3075,6 +3965,7 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
                                              params_.source_type);
   out.values["control_mode"] = 0.0;
   out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  InverterInnerVariableSnapshot inner;
   if (!range_.empty() && state_index(range_, 5) < x.x.size()) {
     const double theta = x.x[state_index(range_, 0)];
     const double xi_pll = x.x[state_index(range_, 1)];
@@ -3096,6 +3987,10 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
     const double q_nom = params_.q_ref_mvar / safe_base(params_.base_mva);
     const double id_ref = (vd * p_nom + vq * q_nom) / denom;
     const double iq_ref = (vq * p_nom - vd * q_nom) / denom;
+    const auto [id_cmd, iq_cmd] = limited_current(id_ref,
+                                                  iq_ref,
+                                                  params_.current_limit_pu,
+                                                  params_.reactive_current_priority);
     const double i_ref_mag = std::hypot(id_ref, iq_ref);
     out.values["pll_angle_rad"] = theta;
     out.values["pll_frequency_hz"] = params_.f_ref_hz * (1.0 + freq_error_pu);
@@ -3120,6 +4015,27 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
     out.values["q_ref_mvar"] = params_.q_ref_mvar;
     out.values["p_filtered_mw"] = x.x[state_index(range_, 4)] * safe_base(params_.base_mva);
     out.values["q_filtered_mvar"] = x.x[state_index(range_, 5)] * safe_base(params_.base_mva);
+    const Complex i_pos = phasor_from_dq(id, iq, theta);
+    inner.set(InverterInnerVar::PllAngle, theta);
+    inner.set(InverterInnerVar::PllOmega, 1.0 + freq_error_pu);
+    inner.set(InverterInnerVar::FilterVoltageReal, vpos.real());
+    inner.set(InverterInnerVar::FilterVoltageImag, vpos.imag());
+    inner.set(InverterInnerVar::PllVoltageD, vd);
+    inner.set(InverterInnerVar::PllVoltageQ, vq);
+    inner.set(InverterInnerVar::CurrentReferenceD, id_ref);
+    inner.set(InverterInnerVar::CurrentReferenceQ, iq_ref);
+    inner.set(InverterInnerVar::OuterCurrentD, id_cmd);
+    inner.set(InverterInnerVar::OuterCurrentQ, iq_cmd);
+    inner.set(InverterInnerVar::InnerCurrentD, id);
+    inner.set(InverterInnerVar::InnerCurrentQ, iq);
+    inner.set(InverterInnerVar::ConverterCurrentReal, i_pos.real());
+    inner.set(InverterInnerVar::ConverterCurrentImag, i_pos.imag());
+    inner.set(InverterInnerVar::FilterCurrentReal, i_pos.real());
+    inner.set(InverterInnerVar::FilterCurrentImag, i_pos.imag());
+    inner.set(InverterInnerVar::FilteredActivePower, x.x[state_index(range_, 4)]);
+    inner.set(InverterInnerVar::FilteredReactivePower, x.x[state_index(range_, 5)]);
+    inner.set(InverterInnerVar::VoltageReference, params_.v_ref_pu);
+    inner.set(InverterInnerVar::FrequencyReference, params_.f_ref_hz);
     const int vdc_local = gfl_vdc_local(params_);
     if (vdc_local >= 0 && state_index(range_, vdc_local) < x.x.size()) {
       const double vdc_link = x.x[state_index(range_, vdc_local)];
@@ -3131,10 +4047,13 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
                                    params_.dc_link_conductance_pu);
       out.values["p_dc_mw"] = pdc_net * safe_base(params_.base_mva);
       out.values["dc_link_dynamic"] = 1.0;
+      inner.set(InverterInnerVar::DCVoltage, vdc_link);
     } else {
       out.values["dc_link_dynamic"] = 0.0;
     }
   }
+  add_inverter_block_flags(out, inner_vars_);
+  add_inverter_inner_outputs(out, inner);
   add_voltage_metrics(out, y, params_.bus_pos, params_.dc_bus_pos);
   return out;
 }
