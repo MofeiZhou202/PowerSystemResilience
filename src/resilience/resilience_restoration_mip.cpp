@@ -25,6 +25,10 @@ namespace {
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
 constexpr double kEps = 1e-9;
+// Tiny secondary objective terms for MESS use.  They only break ties between
+// otherwise equivalent routes/dispatches; load-shed penalties are orders larger.
+constexpr double kMessMoveTieBreakCost = 1e-4;
+constexpr double kMessDispatchTieBreakCostPerMWh = 1e-4;
 
 std::string resilience_mip_solver_name(DistributionResilienceMIPSolver solver,
                                        int num_threads) {
@@ -619,6 +623,8 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
   out.idx.n_mess = static_cast<int>(out.mess.size());
 
   auto& milp = out.model;
+  milp.time_limit_sec = static_cast<double>(opts.mip.max_time_s);
+  milp.mip_gap = opts.mip.mip_gap;
   auto& lp = milp.linear_part;
   lp.sense = solver::Sense::Minimize;
 
@@ -745,7 +751,8 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
         out.idx.mess_dis.push_back(add_var(solver::VarType::Continuous,
                                            0.0,
                                            opts.allow_mess_dispatch ? out.mess[m].pmax_mw : 0.0,
-                                           "md_" + std::to_string(m) + "_" + std::to_string(i) + "_" + std::to_string(t), 0.0));
+                                           "md_" + std::to_string(m) + "_" + std::to_string(i) + "_" + std::to_string(t),
+                                           kMessDispatchTieBreakCostPerMWh * dt));
       }
     }
     if (T <= 1) continue;
@@ -765,11 +772,15 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
     }
     out.idx.mess_arc_var[m].reserve(mess_arcs[m].size());
     for (size_t a = 0; a < mess_arcs[m].size(); ++a) {
+      const double arc_cost = mess_arcs[m][a].is_stay
+          ? 0.0
+          : opts.mip.mess_travel_cost_per_km * mess_arcs[m][a].distance_km +
+                kMessMoveTieBreakCost;
       out.idx.mess_arc_var[m].push_back(add_var(solver::VarType::Binary,
                                                 0.0,
                                                 1.0,
                                                 "ma_" + std::to_string(m) + "_" + std::to_string(a),
-                                                mess_arcs[m][a].is_stay ? 0.0 : opts.mip.mess_travel_cost_per_km * mess_arcs[m][a].distance_km));
+                                                arc_cost));
     }
   }
   out.mess_arcs = mess_arcs;
@@ -1204,21 +1215,32 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
       }
       ms.bus = built.buses[static_cast<size_t>(bus_pos)].index;
       ms.target_bus = ms.bus;
+      ms.arrival_time_hr = sr.hour;
+      ms.remaining_travel_hr = 0.0;
       double dispatch = 0.0;
       for (size_t i = 0; i < built.buses.size(); ++i) dispatch += std::max(0.0, x[idx.md(static_cast<int>(m), static_cast<int>(i), t)]);
       ms.dispatch_mw = dispatch;
       ms.status = dispatch > kEps ? "Deployed" : "Stationary";
-      if (t < T - 1) {
-        for (size_t a = 0; a < built.idx.mess_arc_var[m].size() && a < built.mess_arcs[m].size(); ++a) {
-          if (x[built.idx.mess_arc_var[m][a]] <= 0.5) continue;
-          ms.target_bus = built.buses[static_cast<size_t>(built.mess_arcs[m][a].to_pos)].index;
-          if (!built.mess_arcs[m][a].is_stay) {
-            ms.status = "InTransit";
-            ms.remaining_travel_hr = std::max(0.0, static_cast<double>(built.mess_arcs[m][a].arrive_t - built.mess_arcs[m][a].depart_t) * opts.time_step_hr);
-            result.mess_travel_distance_km += built.mess_arcs[m][a].distance_km;
-          }
-          break;
+
+      const ArcDef* active_travel_arc = nullptr;
+      for (size_t a = 0; a < built.idx.mess_arc_var[m].size() && a < built.mess_arcs[m].size(); ++a) {
+        if (x[built.idx.mess_arc_var[m][a]] <= 0.5) continue;
+        const auto& arc = built.mess_arcs[m][a];
+        if (!arc.is_stay && arc.depart_t == t) {
+          result.mess_travel_distance_km += arc.distance_km;
         }
+        if (!arc.is_stay && arc.depart_t <= t && t < arc.arrive_t) {
+          active_travel_arc = &arc;
+        }
+      }
+      if (active_travel_arc != nullptr) {
+        ms.bus = built.buses[static_cast<size_t>(active_travel_arc->from_pos)].index;
+        ms.target_bus = built.buses[static_cast<size_t>(active_travel_arc->to_pos)].index;
+        ms.status = "InTransit";
+        ms.remaining_travel_hr = std::max(
+            0.0,
+            static_cast<double>(active_travel_arc->arrive_t - t) * opts.time_step_hr);
+        ms.arrival_time_hr = static_cast<double>(active_travel_arc->arrive_t) * opts.time_step_hr;
       }
       sr.mess_states.push_back(ms);
       result.mess_energy_delivered_mwh += dispatch * opts.time_step_hr;
@@ -1230,6 +1252,30 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
     result.total_shed_mwh += sr.shed_mw * opts.time_step_hr;
     result.peak_shed_mw = std::max(result.peak_shed_mw, sr.shed_mw);
     result.steps.push_back(std::move(sr));
+  }
+
+  if (result.total_shed_mwh <= kEps) {
+    std::unordered_map<int, MESSStateStep> initial_mess_state;
+    for (const auto& step : result.steps) {
+      for (const auto& ms : step.mess_states) {
+        initial_mess_state.emplace(ms.storage_index, ms);
+      }
+    }
+    for (auto& step : result.steps) {
+      for (auto& ms : step.mess_states) {
+        const auto it = initial_mess_state.find(ms.storage_index);
+        if (it == initial_mess_state.end()) continue;
+        ms.bus = it->second.bus;
+        ms.target_bus = it->second.bus;
+        ms.status = "Stationary";
+        ms.dispatch_mw = 0.0;
+        ms.energy_mwh = it->second.energy_mwh;
+        ms.soc = it->second.soc;
+        ms.arrival_time_hr = step.hour;
+        ms.remaining_travel_hr = 0.0;
+      }
+    }
+    result.mess_travel_distance_km = 0.0;
   }
 
   result.resilience_index = result.total_demand_mwh > kEps ? result.total_served_mwh / result.total_demand_mwh : 1.0;

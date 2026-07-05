@@ -138,28 +138,18 @@ bool is_wind_dc_static_gen(const StaticGeneratorDC& gen) {
   return type.find("wind") != std::string::npos || name.find("wind") != std::string::npos;
 }
 
-double base_load_mw(const HybridPowerSystem& sys) {
-  double total = 0.0;
-  if (!sys.ac.loads.empty()) {
-    for (const auto& load : sys.ac.loads) {
-      if (load.in_service) total += std::max(0.0, load.p_mw * load.scaling);
-    }
-  } else {
-    for (const auto& bus : sys.ac.buses) {
-      if (bus.in_service) total += std::max(0.0, bus.pd_mw);
-    }
-  }
-  if (!sys.dc.loads.empty()) {
-    for (const auto& load : sys.dc.loads) {
-      if (load.in_service) total += std::max(0.0, load.p_mw * load.scaling);
-    }
-  } else {
-    for (const auto& bus : sys.dc.buses) {
-      if (bus.in_service) total += std::max(0.0, bus.pd_mw);
-    }
-  }
-  return total;
-}
+struct LoadSiteBaseline {
+  std::string id;
+  std::string name;
+  bool is_dc{false};
+  bool is_bus_fallback{false};
+  int component_index{0};
+  int bus{0};
+  double base_mw{0.0};
+  double latitude{0.0};
+  double longitude{0.0};
+  bool has_coordinates{false};
+};
 
 struct RenewableBreakdown {
   double pv_mw{0.0};
@@ -216,6 +206,85 @@ std::optional<std::pair<double, double>> dc_bus_coordinates(const HybridPowerSys
     if (bus.index == bus_index && (std::abs(bus.latitude) > 1e-9 || std::abs(bus.longitude) > 1e-9)) return std::make_pair(bus.latitude, bus.longitude);
   }
   return std::nullopt;
+}
+
+std::vector<LoadSiteBaseline> collect_load_sites(const HybridPowerSystem& sys) {
+  std::vector<LoadSiteBaseline> sites;
+  auto add_site = [&](LoadSiteBaseline site, std::optional<std::pair<double, double>> coords) {
+    site.base_mw = std::max(0.0, site.base_mw);
+    if (site.base_mw <= 1e-9) return;
+    if (coords) {
+      site.latitude = coords->first;
+      site.longitude = coords->second;
+      site.has_coordinates = true;
+    }
+    sites.push_back(std::move(site));
+  };
+  if (!sys.ac.loads.empty()) {
+    for (std::size_t i = 0; i < sys.ac.loads.size(); ++i) {
+      const auto& load = sys.ac.loads[i];
+      if (!load.in_service) continue;
+      LoadSiteBaseline site;
+      site.id = component_id("ac_load", load.index);
+      site.name = display_name(load.name, "AC Load", load.index);
+      site.component_index = load.index;
+      site.bus = load.bus;
+      site.base_mw = load.p_mw * load.scaling;
+      add_site(std::move(site), ac_bus_coordinates(sys, load.bus));
+    }
+  } else {
+    for (std::size_t i = 0; i < sys.ac.buses.size(); ++i) {
+      const auto& bus = sys.ac.buses[i];
+      if (!bus.in_service) continue;
+      LoadSiteBaseline site;
+      site.id = component_id("ac_bus_load", bus.index);
+      site.name = display_name(bus.name, "AC Bus Load", bus.index);
+      site.is_bus_fallback = true;
+      site.component_index = bus.index;
+      site.bus = bus.index;
+      site.base_mw = bus.pd_mw;
+      const bool has_coords = std::abs(bus.latitude) > 1e-9 || std::abs(bus.longitude) > 1e-9;
+      add_site(std::move(site), has_coords ? std::make_optional(std::make_pair(bus.latitude, bus.longitude)) : std::nullopt);
+    }
+  }
+  if (!sys.dc.loads.empty()) {
+    for (std::size_t i = 0; i < sys.dc.loads.size(); ++i) {
+      const auto& load = sys.dc.loads[i];
+      if (!load.in_service) continue;
+      LoadSiteBaseline site;
+      site.id = component_id("dc_load", load.index);
+      site.name = display_name(load.name, "DC Load", load.index);
+      site.is_dc = true;
+      site.component_index = load.index;
+      site.bus = load.bus;
+      site.base_mw = load.p_mw * load.scaling;
+      add_site(std::move(site), dc_bus_coordinates(sys, load.bus));
+    }
+  } else {
+    for (std::size_t i = 0; i < sys.dc.buses.size(); ++i) {
+      const auto& bus = sys.dc.buses[i];
+      if (!bus.in_service) continue;
+      LoadSiteBaseline site;
+      site.id = component_id("dc_bus_load", bus.index);
+      site.name = display_name(bus.name, "DC Bus Load", bus.index);
+      site.is_dc = true;
+      site.is_bus_fallback = true;
+      site.component_index = bus.index;
+      site.bus = bus.index;
+      site.base_mw = bus.pd_mw;
+      const bool has_coords = std::abs(bus.latitude) > 1e-9 || std::abs(bus.longitude) > 1e-9;
+      add_site(std::move(site), has_coords ? std::make_optional(std::make_pair(bus.latitude, bus.longitude)) : std::nullopt);
+    }
+  }
+  return sites;
+}
+
+double sum_load_sites(const std::vector<LoadSiteBaseline>& sites) {
+  return std::accumulate(sites.begin(), sites.end(), 0.0, [](double sum, const auto& site) { return sum + site.base_mw; });
+}
+
+double base_load_mw(const HybridPowerSystem& sys) {
+  return sum_load_sites(collect_load_sites(sys));
 }
 
 RenewableBreakdown renewable_breakdown_mw(const HybridPowerSystem& sys) {
@@ -351,6 +420,25 @@ std::vector<double> synthesize_base_load(double base, int steps) {
     values[static_cast<std::size_t>(t)] = base * std::max(0.2, daily) * season;
   }
   return values;
+}
+
+std::vector<std::vector<double>> synthesize_base_load_profiles(const std::vector<LoadSiteBaseline>& sites, int steps) {
+  std::vector<std::vector<double>> profiles;
+  profiles.reserve(sites.size());
+  for (const auto& site : sites) profiles.push_back(synthesize_base_load(site.base_mw, steps));
+  return profiles;
+}
+
+std::vector<double> sum_profiles(const std::vector<std::vector<double>>& component_profiles, int steps = 0) {
+  int n = std::max(1, steps);
+  for (const auto& profile : component_profiles) n = std::max(n, static_cast<int>(profile.size()));
+  std::vector<double> total(static_cast<std::size_t>(n), 0.0);
+  for (const auto& profile : component_profiles) {
+    for (int t = 0; t < n; ++t) {
+      if (t < static_cast<int>(profile.size())) total[static_cast<std::size_t>(t)] += profile[static_cast<std::size_t>(t)];
+    }
+  }
+  return total;
 }
 
 std::vector<double> synthesize_base_pv(double base, int steps) {
@@ -627,20 +715,12 @@ double pv_reference_pu(double air_temp_c, double ghi_w_m2) {
   return clamp_value((ghi / kGStcWm2) * efficiency * kPvLossFactor, 0.0, 1.0);
 }
 
-std::pair<std::vector<double>, std::vector<double>> morph_regular_load_pv(
+std::vector<double> morph_regular_load_profile(
     const std::vector<double>& base_load,
-    const std::vector<double>& base_pv,
-    const std::vector<double>& base_temp_c,
-    const std::vector<double>& base_ghi_w_m2,
     const std::array<double, 12>& delta_t_c,
-    const std::array<double, 12>& delta_ghi_w_m2,
-    const std::vector<double>& load_hourly_factor,
-    const std::vector<double>& ghi_hourly_factor) {
-  const int steps = static_cast<int>(std::max(base_load.size(), base_pv.size()));
+    const std::vector<double>& load_hourly_factor) {
   std::vector<double> load = base_load;
-  std::vector<double> pv = base_pv;
-  load.resize(static_cast<std::size_t>(std::max(1, steps)), 0.0);
-  pv.resize(static_cast<std::size_t>(std::max(1, steps)), 0.0);
+  load.resize(static_cast<std::size_t>(std::max(1, static_cast<int>(load.size()))), 0.0);
   const auto value_or = [](const std::vector<double>& values, int index, double fallback) {
     return index >= 0 && index < static_cast<int>(values.size()) ? values[static_cast<std::size_t>(index)] : fallback;
   };
@@ -649,6 +729,34 @@ std::pair<std::vector<double>, std::vector<double>> morph_regular_load_pv(
     const double load_factor = 1.0 + kLoadTempBeta * delta_t_c[static_cast<std::size_t>(month)];
     load[static_cast<std::size_t>(t)] = std::max(0.0, load[static_cast<std::size_t>(t)] * load_factor * value_or(load_hourly_factor, t, 1.0));
   }
+  return load;
+}
+
+std::vector<std::vector<double>> morph_regular_load_components(
+    const std::vector<std::vector<double>>& base_load_components,
+    const std::array<double, 12>& delta_t_c,
+    const std::vector<std::vector<double>>& load_hourly_factors) {
+  std::vector<std::vector<double>> load_components;
+  load_components.reserve(base_load_components.size());
+  for (std::size_t i = 0; i < base_load_components.size(); ++i) {
+    const auto& factors = i < load_hourly_factors.size() ? load_hourly_factors[i] : std::vector<double>{};
+    load_components.push_back(morph_regular_load_profile(base_load_components[i], delta_t_c, factors));
+  }
+  return load_components;
+}
+
+std::vector<double> morph_regular_pv(
+    const std::vector<double>& base_pv,
+    const std::vector<double>& base_temp_c,
+    const std::vector<double>& base_ghi_w_m2,
+    const std::array<double, 12>& delta_t_c,
+    const std::array<double, 12>& delta_ghi_w_m2,
+    const std::vector<double>& ghi_hourly_factor) {
+  std::vector<double> pv = base_pv;
+  pv.resize(static_cast<std::size_t>(std::max(1, static_cast<int>(pv.size()))), 0.0);
+  const auto value_or = [](const std::vector<double>& values, int index, double fallback) {
+    return index >= 0 && index < static_cast<int>(values.size()) ? values[static_cast<std::size_t>(index)] : fallback;
+  };
   for (int t = 0; t < static_cast<int>(pv.size()); ++t) {
     const int month = month_index_for_hour(t, static_cast<int>(pv.size()));
     const double base_temp = value_or(base_temp_c, t, 25.0);
@@ -660,7 +768,20 @@ std::pair<std::vector<double>, std::vector<double>> morph_regular_load_pv(
     const double scale = base_pu > 1e-5 ? clamp_value(future_pu / base_pu, 0.0, 2.0) : 0.0;
     pv[static_cast<std::size_t>(t)] = std::max(0.0, pv[static_cast<std::size_t>(t)] * scale);
   }
-  return {std::move(load), std::move(pv)};
+  return pv;
+}
+
+std::pair<std::vector<double>, std::vector<double>> morph_regular_load_pv(
+    const std::vector<double>& base_load,
+    const std::vector<double>& base_pv,
+    const std::vector<double>& base_temp_c,
+    const std::vector<double>& base_ghi_w_m2,
+    const std::array<double, 12>& delta_t_c,
+    const std::array<double, 12>& delta_ghi_w_m2,
+    const std::vector<double>& load_hourly_factor,
+    const std::vector<double>& ghi_hourly_factor) {
+  return {morph_regular_load_profile(base_load, delta_t_c, load_hourly_factor),
+          morph_regular_pv(base_pv, base_temp_c, base_ghi_w_m2, delta_t_c, delta_ghi_w_m2, ghi_hourly_factor)};
 }
 
 double average_monthly(const std::array<double, 12>& values) {
@@ -740,6 +861,16 @@ std::vector<double> aggregate_bus_wind(const HybridPowerSystem& sys, const std::
   return wind;
 }
 
+std::vector<double> site_wind_profile(const LoadSiteBaseline& site, const std::vector<TyphoonTrackPoint>& track, int steps) {
+  std::vector<double> wind(static_cast<std::size_t>(std::max(1, steps)), 0.0);
+  if (track.empty()) return wind;
+  for (int t = 0; t < static_cast<int>(wind.size()); ++t) {
+    const auto& p = track[std::min<std::size_t>(t, track.size() - 1)];
+    wind[static_cast<std::size_t>(t)] = site.has_coordinates ? holland_wind_ms(p, site.latitude, site.longitude) : p.vmax_ms * 0.55;
+  }
+  return wind;
+}
+
 std::vector<double> wind_generation_from_track(const std::vector<WindResourceSite>& sites,
                                                const std::vector<TyphoonTrackPoint>& track,
                                                int steps,
@@ -792,6 +923,122 @@ TimeSeriesProfile make_profile(int id, std::string name, std::vector<double> val
   profile.name = std::move(name);
   profile.values = std::move(values);
   return profile;
+}
+
+std::vector<double> profile_values(const TimeSeriesData& ts, const std::string& name);
+bool has_profile_name(const TimeSeriesData& ts, const std::string& name);
+
+std::vector<double> scale_profile_values(const std::vector<double>& values, double base) {
+  std::vector<double> out;
+  out.reserve(values.size());
+  if (base <= 1e-9) return out;
+  for (const double value : values) out.push_back(value / base);
+  return out;
+}
+
+bool has_nonzero_value(const std::vector<double>& values) {
+  return std::any_of(values.begin(), values.end(), [](double value) { return std::abs(value) > 1e-9; });
+}
+
+void add_multiplier_profile(nlohmann::json& profiles,
+                            nlohmann::json& warnings,
+                            int id,
+                            const std::string& name,
+                            const std::string& domain,
+                            const std::vector<double>& raw_values,
+                            double base,
+                            const std::string& zero_base_warning) {
+  if (raw_values.empty()) return;
+  if (base <= 1e-9) {
+    if (has_nonzero_value(raw_values)) warnings.push_back(zero_base_warning);
+    return;
+  }
+  profiles.push_back({{"id", id},
+                      {"name", name},
+                      {"domain", domain},
+                      {"scope", "aggregate"},
+                      {"unit", "multiplier"},
+                      {"values", scale_profile_values(raw_values, base)}});
+}
+
+nlohmann::json standard_time_series_from_candidate(const ScenarioCandidate& c,
+                                                   const RenewableBreakdown& base_renewable,
+                                                   double base_load) {
+  nlohmann::json profiles = nlohmann::json::array();
+  nlohmann::json warnings = nlohmann::json::array();
+
+  const auto load = profile_values(c.time_series, "total_load_mw");
+  const auto pv = profile_values(c.time_series, "pv_mw");
+  const auto wind = profile_values(c.time_series, "wind_mw");
+  const auto storage_soc = profile_values(c.time_series, "storage_soc");
+
+  add_multiplier_profile(profiles, warnings, 0, "scenario_load_scale", "load", load, base_load,
+                         "Base load is zero; load multiplier profile is omitted.");
+
+  nlohmann::json load_profile_map = nlohmann::json::array();
+  std::string component_source = "none";
+  if (!c.component_load_profiles.is_null() && c.component_load_profiles.is_object()) {
+    const auto& component_profiles = c.component_load_profiles.value("profiles", nlohmann::json::array());
+    for (const auto& p : component_profiles) {
+      if (!p.is_object() || !p.contains("values")) continue;
+      nlohmann::json out = p;
+      out["domain"] = "load";
+      out["scope"] = "component";
+      out["unit"] = "multiplier";
+      profiles.push_back(std::move(out));
+    }
+    load_profile_map = c.component_load_profiles.value("load_profile_map", nlohmann::json::array());
+    component_source = c.component_load_profiles.value("source", std::string("backend_per_load_site"));
+  }
+
+  add_multiplier_profile(profiles, warnings, 1, "scenario_wind_scale", "wind", wind, base_renewable.wind_mw,
+                         "Base wind capacity is zero; wind multiplier profile is omitted.");
+  add_multiplier_profile(profiles, warnings, 2, "scenario_pv_scale", "pv", pv, base_renewable.pv_mw,
+                         "Base PV capacity is zero; PV multiplier profile is omitted.");
+
+  if (has_profile_name(c.time_series, "storage_soc") && !storage_soc.empty()) {
+    profiles.push_back({{"id", 7},
+                        {"name", "storage_soc"},
+                        {"domain", "storage"},
+                        {"scope", "aggregate"},
+                        {"unit", "soc_fraction"},
+                        {"values", storage_soc}});
+  }
+
+  const bool has_load_profile = std::any_of(profiles.begin(), profiles.end(), [](const nlohmann::json& p) {
+    return p.value("id", -1) == 0;
+  });
+  const bool has_wind_profile = std::any_of(profiles.begin(), profiles.end(), [](const nlohmann::json& p) {
+    return p.value("id", -1) == 1;
+  });
+  const bool has_pv_profile = std::any_of(profiles.begin(), profiles.end(), [](const nlohmann::json& p) {
+    return p.value("id", -1) == 2;
+  });
+  return {{"version", 1},
+          {"unit_space", "dimensionless_multiplier"},
+          {"profile_semantics", "source/load profiles are dimensionless multipliers against bound equipment base capacities"},
+          {"num_steps", c.time_series.num_steps},
+          {"step_duration_hr", c.time_series.step_duration_hr},
+          {"profiles", profiles},
+          {"binding", {{"assign_all_loads_to", load_profile_map.empty() ? (has_load_profile ? 0 : -1) : -1},
+                       {"assign_all_pv_to", has_pv_profile ? 2 : -1},
+                       {"load_profile_map", load_profile_map},
+                       {"resilience_load_profile_id", has_load_profile ? 0 : -1},
+                       {"resilience_wind_profile_id", has_wind_profile ? 1 : -1},
+                       {"resilience_pv_profile_id", has_pv_profile ? 2 : -1},
+                       {"resilience_renewable_profile_id", has_pv_profile ? 2 : (has_wind_profile ? 1 : -1)}}},
+          {"normalization", {{"base_load_mw", base_load},
+                              {"base_pv_mw", base_renewable.pv_mw},
+                              {"base_wind_mw", base_renewable.wind_mw},
+                              {"base_other_renewable_mw", base_renewable.other_mw},
+                              {"base_renewable_mw", base_renewable.total_mw()},
+                              {"profile_semantics", "dimensionless_multiplier"},
+                              {"component_load_profile_source", component_source}}},
+          {"warnings", warnings}};
+}
+
+void attach_standard_time_series(ScenarioCandidate& c, const RenewableBreakdown& base_renewable, double base_load) {
+  c.standard_time_series = standard_time_series_from_candidate(c, base_renewable, base_load);
 }
 
 TimeSeriesData make_time_series(const std::vector<double>& load,
@@ -917,6 +1164,93 @@ std::unordered_map<std::string, double> feature_summary(const std::vector<double
 
 void apply_factor(std::vector<double>& values, const std::vector<double>& factors) {
   for (std::size_t i = 0; i < values.size(); ++i) values[i] *= i < factors.size() ? factors[i] : 1.0;
+}
+
+std::vector<std::vector<double>> perturb_load_components(const std::vector<std::vector<double>>& base_load_components,
+                                                         const PerturbationOptions& opt,
+                                                         std::mt19937& rng) {
+  auto load_components = base_load_components;
+  if (!opt.enable_load_perturbation) return load_components;
+  for (auto& component : load_components) {
+    const auto factors = smooth_noise_factors(static_cast<int>(component.size()), opt.load_sigma,
+                                              opt.load_min_multiplier, opt.load_max_multiplier,
+                                              opt.block_hours, rng);
+    apply_factor(component, factors);
+  }
+  return load_components;
+}
+
+nlohmann::json component_load_profiles_to_json(const std::vector<LoadSiteBaseline>& sites,
+                                               const std::vector<std::vector<double>>& component_profiles,
+                                               int first_profile_id = 10) {
+  nlohmann::json profiles = nlohmann::json::array();
+  nlohmann::json map = nlohmann::json::array();
+  const std::size_t count = std::min(sites.size(), component_profiles.size());
+  for (std::size_t i = 0; i < count; ++i) {
+    const auto& site = sites[i];
+    const int profile_id = first_profile_id + static_cast<int>(i);
+    std::vector<double> scale;
+    scale.reserve(component_profiles[i].size());
+    for (const double value : component_profiles[i]) scale.push_back(site.base_mw > 1e-9 ? value / site.base_mw : 0.0);
+    const std::string kind = site.is_dc
+        ? (site.is_bus_fallback ? "DC_BUS" : "DC_LOAD")
+        : (site.is_bus_fallback ? "AC_BUS" : "AC_LOAD");
+    const std::string prefix = site.is_dc ? (site.is_bus_fallback ? "scenario_dc_bus_" : "scenario_dc_load_")
+                                          : (site.is_bus_fallback ? "scenario_ac_bus_" : "scenario_ac_load_");
+    profiles.push_back({{"id", profile_id},
+                        {"name", prefix + std::to_string(site.component_index) + "_scale"},
+                        {"values", scale},
+                        {"base_mw", site.base_mw},
+                        {"source_site_id", site.id}});
+    nlohmann::json row = {{"kind", kind}, {"profile_id", profile_id}, {"bus", site.bus}};
+    if (!site.is_bus_fallback) row["load_index"] = site.component_index;
+    map.push_back(std::move(row));
+  }
+  return {{"source", "backend_per_load_site"},
+          {"profile_semantics", "dimensionless_multiplier"},
+          {"site_count", count},
+          {"profiles", profiles},
+          {"load_profile_map", map}};
+}
+
+struct CandidateLoadRealization {
+  ScenarioCandidate candidate;
+  std::vector<std::vector<double>> load_components_after_perturbation;
+};
+
+CandidateLoadRealization make_candidate_with_load_components(const std::string& id, ScenarioFamily family,
+                                                             const std::vector<LoadSiteBaseline>& load_sites,
+                                                             const std::vector<std::vector<double>>& base_load_components,
+                                                             const std::vector<double>& base_pv,
+                                                             const std::vector<double>& base_wind,
+                                                             const std::vector<double>& base_other_renewable,
+                                                             const StorageSocBaseline& storage_baseline,
+                                                             const PerturbationOptions& opt,
+                                                             std::mt19937& rng) {
+  auto load_components = perturb_load_components(base_load_components, opt, rng);
+  const int renewable_steps = static_cast<int>(std::max({base_pv.size(), base_wind.size(), base_other_renewable.size(), std::size_t{1}}));
+  int load_steps = renewable_steps;
+  for (const auto& component : load_components) load_steps = std::max(load_steps, static_cast<int>(component.size()));
+  auto load = sum_profiles(load_components, load_steps);
+  auto renewable_factor = smooth_noise_factors(renewable_steps, opt.renewable_sigma,
+                                               opt.renewable_min_multiplier, opt.renewable_max_multiplier,
+                                               opt.block_hours, rng);
+  std::vector<double> pv = base_pv;
+  std::vector<double> wind = base_wind;
+  std::vector<double> other = base_other_renewable;
+  if (opt.enable_renewable_perturbation) {
+    apply_factor(pv, renewable_factor);
+    apply_factor(wind, renewable_factor);
+    apply_factor(other, renewable_factor);
+  }
+  const auto storage = make_storage_soc_profiles(storage_baseline, static_cast<int>(std::max(load.size(), sum_series(pv, wind, other).size())), opt, rng);
+  ScenarioCandidate c;
+  c.id = id;
+  c.family = family;
+  c.time_series = make_time_series(load, pv, wind, other, &storage);
+  c.features = feature_summary(load, pv, wind, other, &storage);
+  c.component_load_profiles = component_load_profiles_to_json(load_sites, load_components);
+  return {std::move(c), std::move(load_components)};
 }
 
 ScenarioCandidate make_candidate(const std::string& id, ScenarioFamily family,
@@ -1396,6 +1730,7 @@ nlohmann::json candidate_coverage_point(const ScenarioCandidate& c) {
 nlohmann::json candidate_to_json(const ScenarioCandidate& c) {
   nlohmann::json out = candidate_coverage_point(c);
   out["time_series"] = time_series_to_json(c.time_series);
+  if (!c.component_load_profiles.is_null() && !c.component_load_profiles.empty()) out["component_load_profiles"] = c.component_load_profiles;
   return out;
 }
 
@@ -1544,11 +1879,12 @@ RegularScenarioResult generate_regular_scenarios(const HybridPowerSystem& sys,
   RegularScenarioResult result;
   if (!options.enabled) return result;
   const int steps = std::max(1, options.num_steps);
-  const double load0 = base_load_mw(sys);
+  const auto load_sites = collect_load_sites(sys);
+  const double load0 = sum_load_sites(load_sites);
   const auto renewable0 = renewable_breakdown_mw(sys);
   if (warnings && load0 <= 1e-9) warnings->push_back("No positive load found; regular scenarios use zero load baseline.");
   if (warnings && renewable0.total_mw() <= 1e-9) warnings->push_back("No renewable resource found; regular scenarios use zero renewable baseline.");
-  const auto base_load = synthesize_base_load(load0, steps);
+  const auto base_load_components = synthesize_base_load_profiles(load_sites, steps);
   const auto base_pv = synthesize_base_pv(renewable0.pv_mw, steps);
   const auto base_wind = synthesize_base_wind(renewable0.wind_mw, steps);
   const auto base_other = synthesize_base_other_renewable(renewable0.other_mw, steps);
@@ -1579,7 +1915,7 @@ RegularScenarioResult generate_regular_scenarios(const HybridPowerSystem& sys,
       for (int i = 0; i < per_group_candidates; ++i) {
         std::array<double, 12> sampled_delta_t = climate.delta_t_c;
         std::array<double, 12> sampled_delta_ghi = climate.delta_ghi_w_m2;
-        std::vector<double> climate_load_factor(static_cast<std::size_t>(steps), 1.0);
+        std::vector<std::vector<double>> climate_load_factors(load_sites.size(), std::vector<double>(static_cast<std::size_t>(steps), 1.0));
         std::vector<double> climate_ghi_factor(static_cast<std::size_t>(steps), 1.0);
         if (perturbation.enable_climate_perturbation) {
           const std::string label = ssp + ":" + std::to_string(year);
@@ -1592,21 +1928,24 @@ RegularScenarioResult generate_regular_scenarios(const HybridPowerSystem& sys,
             sampled_delta_ghi[static_cast<std::size_t>(month)] *= 1.0 + ghi_noise_pct[static_cast<std::size_t>(month)] / 100.0;
           }
           climate_ghi_factor = smooth_block_percent_factors(steps, std::max(0.0, perturbation.climate_ghi_sigma_pct), perturbation.block_hours, climate_rng);
-          climate_load_factor = smooth_block_percent_factors(steps, std::max(0.0, perturbation.climate_load_sigma_pct), perturbation.block_hours, climate_rng);
+          for (auto& factor : climate_load_factors) {
+            factor = smooth_block_percent_factors(steps, std::max(0.0, perturbation.climate_load_sigma_pct), perturbation.block_hours, climate_rng);
+          }
         }
-        auto [regular_load, regular_pv] = morph_regular_load_pv(base_load, base_pv, base_temp, base_ghi,
-                                                                sampled_delta_t, sampled_delta_ghi,
-                                                                climate_load_factor, climate_ghi_factor);
+        auto regular_load_components = morph_regular_load_components(base_load_components, sampled_delta_t, climate_load_factors);
+        auto regular_pv = morph_regular_pv(base_pv, base_temp, base_ghi, sampled_delta_t, sampled_delta_ghi, climate_ghi_factor);
         const unsigned int seed = perturbation.seed + static_cast<unsigned int>(group_index * 100003 + i * 7919 + 17);
         std::mt19937 rng(seed);
-        auto c = make_candidate("regular:" + ssp + ":" + std::to_string(year) + ":" + std::to_string(i + 1), ScenarioFamily::Regular,
-                                regular_load, regular_pv, base_wind, base_other, storage_baseline, perturbation, rng);
+        auto realized = make_candidate_with_load_components("regular:" + ssp + ":" + std::to_string(year) + ":" + std::to_string(i + 1), ScenarioFamily::Regular,
+                                                           load_sites, regular_load_components, regular_pv, base_wind, base_other, storage_baseline, perturbation, rng);
+        auto c = std::move(realized.candidate);
         c.features["ssp_code"] = ssp == "ssp126" ? 126.0 : ssp == "ssp245" ? 245.0 : ssp == "ssp370" ? 370.0 : ssp == "ssp585" ? 585.0 : 0.0;
         c.features["year"] = static_cast<double>(year);
         c.features["regular_group"] = static_cast<double>(group_index);
         c.features["climate_annual_delta_T"] = average_monthly(sampled_delta_t);
         c.features["climate_annual_delta_GHI"] = average_monthly(sampled_delta_ghi);
         c.features["climate_data_found"] = climate.data_found ? 1.0 : 0.0;
+        attach_standard_time_series(c, renewable0, load0);
         for (int month = 0; month < 12; ++month) {
           c.features["climate_month_delta_T_" + std::to_string(month + 1)] = sampled_delta_t[static_cast<std::size_t>(month)];
           c.features["climate_month_delta_GHI_" + std::to_string(month + 1)] = sampled_delta_ghi[static_cast<std::size_t>(month)];
@@ -1654,6 +1993,8 @@ RegularScenarioResult generate_regular_scenarios(const HybridPowerSystem& sys,
                   {"storage_soc_sigma", perturbation.storage_soc_sigma},
                   {"storage_soc_min_multiplier", perturbation.storage_soc_min_multiplier},
                   {"storage_soc_max_multiplier", perturbation.storage_soc_max_multiplier},
+                  {"load_processing_granularity", "per_load_site"},
+                  {"load_site_count", load_sites.size()},
                   {"climate_morphing_enabled", true},
                   {"climate_formula", "tas_rsds_temperature_load_and_pv_reference_ratio"},
                   {"climate_perturbation_enabled", perturbation.enable_climate_perturbation},
@@ -1675,10 +2016,16 @@ ReliabilityScenarioResult generate_reliability_scenarios(const HybridPowerSystem
   if (!options.enabled) return result;
   const auto contingencies = enumerate_n1_contingencies(sys, options);
   nlohmann::json coverage_samples = nlohmann::json::array();
-  const double load0 = base_load_mw(sys);
+  const auto load_sites = collect_load_sites(sys);
+  const double load0 = sum_load_sites(load_sites);
   const auto renewable0 = renewable_breakdown_mw(sys);
   if (warnings && contingencies.empty()) warnings->push_back("No N-1 contingencies were enumerated for reliability scenarios.");
-  const std::vector<double> base_load{load0};
+  const auto base_load_components = [&]() {
+    std::vector<std::vector<double>> components;
+    components.reserve(load_sites.size());
+    for (const auto& site : load_sites) components.push_back(std::vector<double>{site.base_mw});
+    return components;
+  }();
   const std::vector<double> base_pv{renewable0.pv_mw};
   const std::vector<double> base_wind{renewable0.wind_mw};
   const std::vector<double> base_other{renewable0.other_mw};
@@ -1692,19 +2039,25 @@ ReliabilityScenarioResult generate_reliability_scenarios(const HybridPowerSystem
     candidates.reserve(static_cast<std::size_t>(candidate_count));
     for (int i = 0; i < candidate_count; ++i) {
       std::mt19937 rng(perturbation.seed + static_cast<unsigned int>(ci * 104729 + i * 1543 + 101));
-      auto c = make_candidate("reliability:" + contingencies[ci].id + ":" + std::to_string(i + 1),
-                              ScenarioFamily::Reliability, base_load, base_pv, base_wind, base_other, storage_baseline, perturbation, rng);
+      auto realized = make_candidate_with_load_components("reliability:" + contingencies[ci].id + ":" + std::to_string(i + 1),
+                                                          ScenarioFamily::Reliability, load_sites, base_load_components,
+                                                          base_pv, base_wind, base_other, storage_baseline, perturbation, rng);
+      auto c = std::move(realized.candidate);
       c.probability = 1.0 / static_cast<double>(candidate_count);
       c.contingency = contingencies[ci];
       c.features["contingency_component_index"] = static_cast<double>(contingencies[ci].component_index);
       c.features["contingency_ordinal"] = static_cast<double>(ci + 1);
+      attach_standard_time_series(c, renewable0, load0);
       coverage_samples.push_back(candidate_coverage_point(c));
       candidates.push_back(std::move(c));
     }
     ReliabilityContingencyScenarioGroup group;
     group.contingency = contingencies[ci];
     group.candidate_count = candidate_count;
-    group.audit = {{"num_steps", 1}, {"requested_cluster_count", options.cluster_count_per_contingency}};
+    group.audit = {{"num_steps", 1},
+                   {"requested_cluster_count", options.cluster_count_per_contingency},
+                   {"load_processing_granularity", "per_load_site"},
+                   {"load_site_count", load_sites.size()}};
     group.clusters = cluster_candidates(std::move(candidates), options.cluster_count_per_contingency, clustering, &group.audit);
     group.cluster_count = static_cast<int>(group.clusters.size());
     result.cluster_total += group.cluster_count;
@@ -1715,6 +2068,8 @@ ReliabilityScenarioResult generate_reliability_scenarios(const HybridPowerSystem
                   {"candidates_per_contingency", candidate_count},
                   {"component_catalog", "reliability_fmea"},
                   {"component_types", reliability_fmea_component_types_json()},
+                  {"load_processing_granularity", "per_load_site"},
+                  {"load_site_count", load_sites.size()},
                   {"storage_soc_uncertainty_enabled", perturbation.enable_storage_soc_perturbation},
                   {"storage_count", storage_baseline.count()},
                   {"storage_capacity_mwh", storage_baseline.total_capacity_mwh},
@@ -1734,10 +2089,11 @@ ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& 
   ResilienceScenarioResult result;
   if (!options.enabled) return result;
   const int steps = std::max(1, options.num_steps);
-  const double load0 = base_load_mw(sys);
+  const auto load_sites = collect_load_sites(sys);
+  const double load0 = sum_load_sites(load_sites);
   const auto renewable0 = renewable_breakdown_mw(sys);
   const auto wind_sites = wind_resource_sites(sys);
-  const auto base_load = synthesize_base_load(load0, steps);
+  const auto base_load_components = synthesize_base_load_profiles(load_sites, steps);
   const auto base_pv = synthesize_base_pv(renewable0.pv_mw, steps);
   const auto base_wind = synthesize_base_wind(renewable0.wind_mw, steps);
   const auto base_other = synthesize_base_other_renewable(renewable0.other_mw, steps);
@@ -1781,8 +2137,11 @@ ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& 
       const unsigned int seed = perturbation.seed + static_cast<unsigned int>(typhoon_category_ordinal(intensity) * 100003 + i * 4099 + 7001);
       const auto& sample = catalog.samples[category_indices[(start + static_cast<std::size_t>(i)) % category_indices.size()]];
       std::mt19937 rng(seed);
-      auto c = make_candidate("resilience:" + std::string(to_string(intensity)) + ":" + std::to_string(i + 1),
-                              ScenarioFamily::Resilience, base_load, base_pv, base_wind, base_other, storage_baseline, perturbation, rng);
+      auto realized = make_candidate_with_load_components("resilience:" + std::string(to_string(intensity)) + ":" + std::to_string(i + 1),
+                                                          ScenarioFamily::Resilience, load_sites, base_load_components,
+                                                          base_pv, base_wind, base_other, storage_baseline, perturbation, rng);
+      auto c = std::move(realized.candidate);
+      auto load_components = std::move(realized.load_components_after_perturbation);
       TyphoonScenarioOptions ty;
       ty.horizon_hours = steps;
       ty.time_step_hr = 1.0;
@@ -1831,9 +2190,24 @@ ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& 
       event.load_typhoon_multiplier.resize(static_cast<std::size_t>(steps), 1.0);
       event.wind_typhoon_multiplier.resize(static_cast<std::size_t>(steps), 1.0);
       event.renewable_typhoon_multiplier.resize(static_cast<std::size_t>(steps), 1.0);
-      for (int t = 0; t < steps; ++t) event.load_typhoon_multiplier[static_cast<std::size_t>(t)] = 1.0 - load_reduction(bus_wind[static_cast<std::size_t>(t)], typhoon_impact);
 
-      auto load = profile_values(c.time_series, "total_load_mw");
+      std::vector<std::vector<double>> typhoon_load_components = load_components;
+      std::vector<double> load_before_typhoon = sum_profiles(load_components, steps);
+      for (std::size_t site_idx = 0; site_idx < typhoon_load_components.size(); ++site_idx) {
+        const auto wind_profile = site_idx < load_sites.size()
+            ? site_wind_profile(load_sites[site_idx], generated.track, steps)
+            : bus_wind;
+        for (int t = 0; t < steps && t < static_cast<int>(typhoon_load_components[site_idx].size()); ++t) {
+          typhoon_load_components[site_idx][static_cast<std::size_t>(t)] *= 1.0 - load_reduction(wind_profile[static_cast<std::size_t>(t)], typhoon_impact);
+        }
+      }
+      auto load = sum_profiles(typhoon_load_components, steps);
+      for (int t = 0; t < steps; ++t) {
+        const double before = series_value(load_before_typhoon, t);
+        event.load_typhoon_multiplier[static_cast<std::size_t>(t)] = before > 1e-9 ? series_value(load, t) / before : 1.0;
+      }
+      c.component_load_profiles = component_load_profiles_to_json(load_sites, typhoon_load_components);
+
       auto pv = profile_values(c.time_series, "pv_mw");
       auto wind = profile_values(c.time_series, "wind_mw");
       auto other = profile_values(c.time_series, "other_renewable_mw");
@@ -1842,7 +2216,6 @@ ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& 
         const double wind0 = series_value(wind, t);
         const double other0 = series_value(other, t);
         const double renewable0_at_t = pv0 + wind0 + other0;
-        load[static_cast<std::size_t>(t)] *= event.load_typhoon_multiplier[static_cast<std::size_t>(t)];
         pv[static_cast<std::size_t>(t)] = pv0 * event.pv_typhoon_multiplier[static_cast<std::size_t>(t)] *
                                           pv_wind_derating[static_cast<std::size_t>(t)];
         if (wind0 > 1e-9) {
@@ -1864,6 +2237,7 @@ ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& 
       c.features["selected_track_max_vmax_ms"] = generated.selected_track_max_vmax_ms;
       c.features["typhoon_month"] = static_cast<double>(sample.month);
       c.features["net_load_mw"] = c.features["net_load_sum"];
+      attach_standard_time_series(c, renewable0, load0);
       for (const auto& risk : generated.branch_risks) c.features["peak_failure_probability"] = std::max(c.features["peak_failure_probability"], risk.peak_failure_probability);
       c.outage_signature.assign(static_cast<std::size_t>(sys.ac.branches.size() + sys.dc.branches.size()), 0);
       std::unordered_map<int, std::size_t> ac_branch_pos;
@@ -1897,6 +2271,8 @@ ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& 
     const int k = k_it == options.cluster_count_by_intensity.end() ? options.default_cluster_count : k_it->second;
     group.audit = {{"num_steps", steps},
                    {"requested_cluster_count", k},
+                   {"load_processing_granularity", "per_load_site"},
+                   {"load_site_count", load_sites.size()},
                    {"catalog_first_month", catalog_opts.first_month},
                    {"catalog_last_month", catalog_opts.last_month},
                    {"catalog_sample_count", catalog.samples.size()},
@@ -1917,6 +2293,8 @@ ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& 
                   {"catalog_counts", catalog_counts},
                   {"classification", "max_vmax_ms_skip_first_point"},
                   {"strict_category_sampling", true},
+                  {"load_processing_granularity", "per_load_site"},
+                  {"load_site_count", load_sites.size()},
                   {"storage_soc_uncertainty_enabled", perturbation.enable_storage_soc_perturbation},
                   {"storage_count", storage_baseline.count()},
                   {"storage_capacity_mwh", storage_baseline.total_capacity_mwh},

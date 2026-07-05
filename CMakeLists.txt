@@ -346,6 +346,7 @@ set(HACDCPF_SOURCES
   src/io/cim_io.cpp
   src/io/matpower_parser.cpp
   src/io/case_builders.cpp
+  src/io/scenario_bundle_io.cpp
   src/io/component_io_mapping.cpp
   src/io/external_grid_io.cpp
   src/io/gridlabd_bridge.cpp
