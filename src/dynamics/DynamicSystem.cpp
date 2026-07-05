@@ -45,6 +45,69 @@ bool sparse_matrices_equal(const Eigen::SparseMatrix<T>& a,
   return true;
 }
 
+template <typename T>
+bool triplets_equal(const std::vector<Eigen::Triplet<T>>& a,
+                    const std::vector<Eigen::Triplet<T>>& b) {
+  if (a.size() != b.size()) return false;
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    if (a[i].row() != b[i].row() || a[i].col() != b[i].col() ||
+        a[i].value() != b[i].value()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void assemble_ac_effective_matrix(const DynamicNetwork& network,
+                                  const DynamicStamp& stamp,
+                                  double singular_regularization_pu,
+                                  Eigen::SparseMatrix<Complex>& Yac_eff,
+                                  Eigen::VectorXcd& Iac_eff) {
+  std::vector<Eigen::Triplet<Complex>> y_triplets;
+  y_triplets.reserve(static_cast<std::size_t>(network.Yac_base.nonZeros()) +
+                     stamp.Yac_triplets.size() +
+                     static_cast<std::size_t>(network.acPhaseNodeCount()));
+  for (int col = 0; col < network.Yac_base.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<Complex>::InnerIterator it(network.Yac_base, col); it; ++it) {
+      y_triplets.emplace_back(it.row(), it.col(), it.value());
+    }
+  }
+  y_triplets.insert(y_triplets.end(), stamp.Yac_triplets.begin(), stamp.Yac_triplets.end());
+  if (singular_regularization_pu > 0.0 && network.Yac_base.nonZeros() == 0) {
+    for (int i = 0; i < network.acPhaseNodeCount(); ++i) {
+      y_triplets.emplace_back(i, i, Complex(singular_regularization_pu, 0.0));
+    }
+  }
+  Yac_eff.resize(network.acPhaseNodeCount(), network.acPhaseNodeCount());
+  Yac_eff.setFromTriplets(y_triplets.begin(), y_triplets.end());
+  Iac_eff = stamp.Iac;
+}
+
+void assemble_dc_effective_matrix(const DynamicNetwork& network,
+                                  const DynamicStamp& stamp,
+                                  double singular_regularization_pu,
+                                  Eigen::SparseMatrix<double>& Gdc_eff,
+                                  Eigen::VectorXd& Idc_eff) {
+  std::vector<Eigen::Triplet<double>> g_triplets;
+  g_triplets.reserve(static_cast<std::size_t>(network.Gdc_base.nonZeros()) +
+                     stamp.Gdc_triplets.size() +
+                     static_cast<std::size_t>(network.dcBusCount()));
+  for (int col = 0; col < network.Gdc_base.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(network.Gdc_base, col); it; ++it) {
+      g_triplets.emplace_back(it.row(), it.col(), it.value());
+    }
+  }
+  g_triplets.insert(g_triplets.end(), stamp.Gdc_triplets.begin(), stamp.Gdc_triplets.end());
+  if (singular_regularization_pu > 0.0 && network.Gdc_base.nonZeros() == 0) {
+    for (int i = 0; i < network.dcBusCount(); ++i) {
+      g_triplets.emplace_back(i, i, singular_regularization_pu);
+    }
+  }
+  Gdc_eff.resize(network.dcBusCount(), network.dcBusCount());
+  Gdc_eff.setFromTriplets(g_triplets.begin(), g_triplets.end());
+  Idc_eff = stamp.Idc;
+}
+
 void mask_slow_residuals(const std::vector<std::unique_ptr<DynamicDevice>>& devices,
                          Eigen::VectorXd& dxdt) {
   for (const auto& device : devices) {
@@ -393,41 +456,8 @@ void DynamicNetwork::assembleEffectiveMatrices(
     Eigen::VectorXcd& Iac_eff,
     Eigen::SparseMatrix<double>& Gdc_eff,
     Eigen::VectorXd& Idc_eff) const {
-  std::vector<Eigen::Triplet<Complex>> y_triplets;
-  y_triplets.reserve(static_cast<std::size_t>(Yac_base.nonZeros()) +
-                     stamp.Yac_triplets.size() + static_cast<std::size_t>(acPhaseNodeCount()));
-  for (int col = 0; col < Yac_base.outerSize(); ++col) {
-    for (Eigen::SparseMatrix<Complex>::InnerIterator it(Yac_base, col); it; ++it) {
-      y_triplets.emplace_back(it.row(), it.col(), it.value());
-    }
-  }
-  y_triplets.insert(y_triplets.end(), stamp.Yac_triplets.begin(), stamp.Yac_triplets.end());
-  if (singular_regularization_pu > 0.0 && Yac_base.nonZeros() == 0) {
-    for (int i = 0; i < acPhaseNodeCount(); ++i) {
-      y_triplets.emplace_back(i, i, Complex(singular_regularization_pu, 0.0));
-    }
-  }
-  Yac_eff.resize(acPhaseNodeCount(), acPhaseNodeCount());
-  Yac_eff.setFromTriplets(y_triplets.begin(), y_triplets.end());
-  Iac_eff = stamp.Iac;
-
-  std::vector<Eigen::Triplet<double>> g_triplets;
-  g_triplets.reserve(static_cast<std::size_t>(Gdc_base.nonZeros()) +
-                     stamp.Gdc_triplets.size() + static_cast<std::size_t>(dcBusCount()));
-  for (int col = 0; col < Gdc_base.outerSize(); ++col) {
-    for (Eigen::SparseMatrix<double>::InnerIterator it(Gdc_base, col); it; ++it) {
-      g_triplets.emplace_back(it.row(), it.col(), it.value());
-    }
-  }
-  g_triplets.insert(g_triplets.end(), stamp.Gdc_triplets.begin(), stamp.Gdc_triplets.end());
-  if (singular_regularization_pu > 0.0 && Gdc_base.nonZeros() == 0) {
-    for (int i = 0; i < dcBusCount(); ++i) {
-      g_triplets.emplace_back(i, i, singular_regularization_pu);
-    }
-  }
-  Gdc_eff.resize(dcBusCount(), dcBusCount());
-  Gdc_eff.setFromTriplets(g_triplets.begin(), g_triplets.end());
-  Idc_eff = stamp.Idc;
+  assemble_ac_effective_matrix(*this, stamp, singular_regularization_pu, Yac_eff, Iac_eff);
+  assemble_dc_effective_matrix(*this, stamp, singular_regularization_pu, Gdc_eff, Idc_eff);
 }
 
 void DynamicSystem::assignStateIndices() {
@@ -512,7 +542,8 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
     }
   }
 
-  if (!trimmed && std::isfinite(fast_norm)) {
+  if (!trimmed && std::isfinite(fast_norm) &&
+      options.use_consistent_dynamic_initialization) {
     const ConsistentInitializationResult consistent =
         solve_consistent_dynamic_initial_state(*this,
                                                options.t_start_s,
@@ -527,6 +558,11 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
                                        "; residual ||M f||_inf=" +
                                        std::to_string(fast_norm));
     }
+  } else if (!trimmed && std::isfinite(fast_norm)) {
+    initialization.warnings.push_back(
+        "Global consistent dynamic initialization was skipped; set "
+        "use_consistent_dynamic_initialization=true to run the full Newton trim "
+        "if the initial fast-state residual must meet dynamic_trim_tol");
   }
 
   Eigen::VectorXd final_dxdt;
@@ -632,22 +668,32 @@ bool DynamicSystem::solveNetwork(double t, std::string& error) {
       device->stamp(t, x, y, stamp);
     }
 
-    Eigen::SparseMatrix<Complex> Yac_eff;
-    Eigen::SparseMatrix<double> Gdc_eff;
-    Eigen::VectorXcd Iac_eff;
-    Eigen::VectorXd Idc_eff;
-    network.assembleEffectiveMatrices(
-        stamp,
-        options.singular_regularization_pu,
-        Yac_eff,
-        Iac_eff,
-        Gdc_eff,
-        Idc_eff);
-
     if (network.acPhaseNodeCount() > 0) {
+      Eigen::VectorXcd Iac_eff = stamp.Iac;
+      Eigen::SparseMatrix<Complex> Yac_eff;
+      const Eigen::SparseMatrix<Complex>* Yac_solve = nullptr;
+      NetworkSolveCache* cache = nullptr;
+      if (options.linear_solver == DynamicLinearSolverType::EigenSparseLU) {
+        if (!network_cache) network_cache = std::make_unique<NetworkSolveCache>();
+        cache = network_cache.get();
+      }
+      if (cache != nullptr && cache->ac_valid &&
+          triplets_equal(stamp.Yac_triplets, cache->ac_stamp_triplets) &&
+          cache->ac_matrix.rows() == network.acPhaseNodeCount() &&
+          cache->ac_matrix.cols() == network.acPhaseNodeCount()) {
+        Yac_solve = &cache->ac_matrix;
+      } else {
+        assemble_ac_effective_matrix(network,
+                                     stamp,
+                                     options.singular_regularization_pu,
+                                     Yac_eff,
+                                     Iac_eff);
+        if (cache != nullptr) cache->ac_stamp_triplets = stamp.Yac_triplets;
+        Yac_solve = &Yac_eff;
+      }
       Eigen::VectorXcd v;
       std::string solve_error;
-      if (!acSolveCached(Yac_eff, Iac_eff, v, solve_error)) {
+      if (!acSolveCached(*Yac_solve, Iac_eff, v, solve_error)) {
         error = "AC transient network solve failed: " + solve_error;
         return false;
       }
@@ -656,9 +702,31 @@ bool DynamicSystem::solveNetwork(double t, std::string& error) {
     }
 
     if (network.dcBusCount() > 0) {
+      Eigen::VectorXd Idc_eff = stamp.Idc;
+      Eigen::SparseMatrix<double> Gdc_eff;
+      const Eigen::SparseMatrix<double>* Gdc_solve = nullptr;
+      NetworkSolveCache* cache = nullptr;
+      if (options.linear_solver == DynamicLinearSolverType::EigenSparseLU) {
+        if (!network_cache) network_cache = std::make_unique<NetworkSolveCache>();
+        cache = network_cache.get();
+      }
+      if (cache != nullptr && cache->dc_valid &&
+          triplets_equal(stamp.Gdc_triplets, cache->dc_stamp_triplets) &&
+          cache->dc_matrix.rows() == network.dcBusCount() &&
+          cache->dc_matrix.cols() == network.dcBusCount()) {
+        Gdc_solve = &cache->dc_matrix;
+      } else {
+        assemble_dc_effective_matrix(network,
+                                     stamp,
+                                     options.singular_regularization_pu,
+                                     Gdc_eff,
+                                     Idc_eff);
+        if (cache != nullptr) cache->dc_stamp_triplets = stamp.Gdc_triplets;
+        Gdc_solve = &Gdc_eff;
+      }
       Eigen::VectorXd v;
       std::string solve_error;
-      if (!dcSolveCached(Gdc_eff, Idc_eff, v, solve_error)) {
+      if (!dcSolveCached(*Gdc_solve, Idc_eff, v, solve_error)) {
         error = "DC transient network solve failed: " + solve_error;
         return false;
       }

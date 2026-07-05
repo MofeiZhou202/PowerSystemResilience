@@ -128,6 +128,8 @@ struct NetworkSolveCache {
   Eigen::SparseLU<Eigen::SparseMatrix<double>> dc_lu;
   Eigen::SparseMatrix<std::complex<double>> ac_matrix;
   Eigen::SparseMatrix<double> dc_matrix;
+  std::vector<Eigen::Triplet<std::complex<double>>> ac_stamp_triplets;
+  std::vector<Eigen::Triplet<double>> dc_stamp_triplets;
   bool ac_valid{false};
   bool dc_valid{false};
 };

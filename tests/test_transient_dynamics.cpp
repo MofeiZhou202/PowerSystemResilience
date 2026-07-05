@@ -1100,6 +1100,7 @@ DynamicResults run_controlled_case(bool governor, bool avr, bool pss) {
   opt.t_end_s = 6.0;
   opt.dt_s = 0.005;
   opt.record_every_step = true;
+  opt.use_consistent_dynamic_initialization = true;
   auto sys = make_controlled_machine_case(governor, avr, pss);
   DynamicModelBuilder builder;
   DynamicSystem dyn = builder.build(sys, opt);
@@ -2543,6 +2544,7 @@ HybridPowerSystem make_small_signal_case(const std::string& model, bool avr, boo
 
 SmallSignalResult analyze_small_signal(const std::string& model, bool avr, bool pss) {
   DynamicSolverOptions opt;
+  opt.use_consistent_dynamic_initialization = true;
   auto sys = make_small_signal_case(model, avr, pss);
   DynamicModelBuilder builder;
   DynamicSystem dyn = builder.build(sys, opt);
@@ -2568,6 +2570,7 @@ double measure_swing_frequency_hz(const std::string& model) {
   opt.solver_type = DynamicSolverType::TrapezoidalNewton;
   opt.t_end_s = 8.0;
   opt.dt_s = 0.002;
+  opt.use_consistent_dynamic_initialization = true;
   auto sys = make_small_signal_case(model, false, false);
   DynamicModelBuilder builder;
   DynamicSystem dyn = builder.build(sys, opt);
@@ -2635,6 +2638,7 @@ TEST_CASE("Mass-matrix DAE core matches the partitioned backward-Euler oracle",
 	    opt.dt_s = 0.005;
 	    opt.algebraic_network_max_iters = 20;
 	    opt.algebraic_network_tol = 1e-10;
+	    opt.use_consistent_dynamic_initialization = true;
 	    auto sys = make_controlled_machine_case(false, false, false);
     DynamicModelBuilder builder;
     DynamicSystem dyn = builder.build(sys, opt);
@@ -3111,6 +3115,27 @@ TEST_CASE("Adaptive transient integration remains bounded after cleared AC fault
     if (snapshot.time_s < 2.0) continue;
     CHECK(snapshot.min_ac_voltage_pu > 0.65);
     CHECK(snapshot.max_ac_voltage_pu < 1.35);
+  }
+}
+
+TEST_CASE("Transient snapshots can skip per-device telemetry for fast UI runs",
+          "[dynamics][performance][snapshots]") {
+  const auto sys = make_hybrid_dc_case();
+  auto opt = fast_options();
+  opt.t_end_s = 0.03;
+  opt.dt_s = 0.01;
+  opt.record_every_step = true;
+  opt.record_device_outputs = false;
+
+  const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
+
+  INFO(result.message);
+  REQUIRE(result.success);
+  REQUIRE_FALSE(result.snapshots.empty());
+  CHECK(result.final_snapshot() != nullptr);
+  for (const auto& snapshot : result.snapshots) {
+    CHECK(snapshot.device_outputs.empty());
+    CHECK(snapshot.vac_abc.size() > 0);
   }
 }
 

@@ -15,7 +15,7 @@
 namespace hacdcpf::dynamics {
 namespace {
 
-DynamicSnapshot make_snapshot(const DynamicSystem& sys) {
+DynamicSnapshot make_snapshot(const DynamicSystem& sys, bool include_device_outputs) {
   DynamicSnapshot s;
   s.time_s = sys.x.time_s;
   s.state = sys.x.x;
@@ -45,9 +45,11 @@ DynamicSnapshot make_snapshot(const DynamicSystem& sys) {
   }
   if (!std::isfinite(s.min_dc_voltage_pu)) s.min_dc_voltage_pu = 0.0;
 
-  s.device_outputs.reserve(sys.devices.size());
-  for (const auto& device : sys.devices) {
-    s.device_outputs.push_back(device->output(sys.x, sys.y));
+  if (include_device_outputs) {
+    s.device_outputs.reserve(sys.devices.size());
+    for (const auto& device : sys.devices) {
+      s.device_outputs.push_back(device->output(sys.x, sys.y));
+    }
   }
   return s;
 }
@@ -246,6 +248,7 @@ bool apply_events(DynamicSystem& sys, double t, DynamicResults& results) {
   }
   if (rebuild) {
     sys.network.rebuildBaseMatrices(sys.options.singular_regularization_pu);
+    sys.network_cache.reset();
   }
   return changed;
 }
@@ -275,7 +278,8 @@ void record_snapshot_if_needed(DynamicSystem& system,
                                DynamicResults& results,
                                int step) {
   if (should_record_snapshot(system, results, step, system.x.time_s)) {
-    results.snapshots.push_back(make_snapshot(system));
+    results.snapshots.push_back(
+        make_snapshot(system, system.options.record_device_outputs));
   }
 }
 
@@ -935,7 +939,8 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
 
   if (results.snapshots.empty() ||
       std::abs(results.snapshots.back().time_s - system.x.time_s) > 1e-12) {
-    results.snapshots.push_back(make_snapshot(system));
+    results.snapshots.push_back(
+        make_snapshot(system, system.options.record_device_outputs));
   }
   results.success = true;
   results.message = "Transient simulation completed (mass-matrix DAE)";
@@ -1128,7 +1133,8 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
 
   if (results.snapshots.empty() ||
       std::abs(results.snapshots.back().time_s - system.x.time_s) > 1e-12) {
-    results.snapshots.push_back(make_snapshot(system));
+    results.snapshots.push_back(
+        make_snapshot(system, system.options.record_device_outputs));
   }
   results.success = true;
   results.message = "Transient simulation completed";

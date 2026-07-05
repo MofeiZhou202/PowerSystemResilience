@@ -2830,6 +2830,7 @@ json dynamic_options_to_json(const hacdcpf::dynamics::DynamicSolverOptions& opt)
               {"voltage_blowup_max_dc_pu", opt.voltage_blowup_max_dc_pu},
               {"record_every_step", opt.record_every_step},
               {"record_initial_state", opt.record_initial_state},
+              {"record_device_outputs", opt.record_device_outputs},
               {"output_every_steps", opt.output_every_steps},
               {"output_interval_s", opt.output_interval_s},
               {"max_recorded_snapshots", opt.max_recorded_snapshots},
@@ -2843,7 +2844,9 @@ json dynamic_options_to_json(const hacdcpf::dynamics::DynamicSolverOptions& opt)
               {"dc_link_capacitance_s", opt.dc_link_capacitance_s},
               {"dc_link_coupling_conductance_pu", opt.dc_link_coupling_conductance_pu},
               {"dynamic_trim_tol", opt.dynamic_trim_tol},
-              {"max_dynamic_trim_iters", opt.max_dynamic_trim_iters}};
+              {"max_dynamic_trim_iters", opt.max_dynamic_trim_iters},
+              {"use_consistent_dynamic_initialization",
+               opt.use_consistent_dynamic_initialization}};
 }
 
 json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
@@ -12368,10 +12371,26 @@ int main(int argc, char** argv) {
       opt.use_adaptive_step = j.value("use_adaptive_step", false);
       opt.record_every_step = j.value("record_every_step", true);
       opt.record_initial_state = j.value("record_initial_state", opt.record_initial_state);
+      opt.record_device_outputs = j.value("record_device_outputs", false);
       opt.output_every_steps = j.value("output_every_steps", opt.output_every_steps);
       opt.output_interval_s = j.value("output_interval_s", opt.output_interval_s);
       opt.max_recorded_snapshots =
           j.value("max_recorded_snapshots", opt.max_recorded_snapshots);
+      if (opt.record_every_step &&
+          !j.contains("output_every_steps") &&
+          !j.contains("output_interval_s")) {
+        const double span = std::max(0.0, opt.t_end_s - opt.t_start_s);
+        const int estimated_steps =
+            opt.dt_s > 0.0 ? static_cast<int>(std::ceil(span / opt.dt_s)) : 0;
+        const int snapshot_budget = std::max(16, j.value("snapshot_budget", 240));
+        opt.output_every_steps =
+            std::max(1, static_cast<int>(std::ceil(
+                            static_cast<double>(estimated_steps) /
+                            static_cast<double>(snapshot_budget))));
+        if (!j.contains("max_recorded_snapshots")) {
+          opt.max_recorded_snapshots = snapshot_budget + 2;
+        }
+      }
       opt.run_power_flow_initialization =
           j.value("run_power_flow_initialization", opt.run_power_flow_initialization);
       opt.trim_dynamic_initial_conditions =
@@ -12379,6 +12398,9 @@ int main(int argc, char** argv) {
       opt.dynamic_trim_tol = j.value("dynamic_trim_tol", opt.dynamic_trim_tol);
       opt.max_dynamic_trim_iters =
           j.value("max_dynamic_trim_iters", opt.max_dynamic_trim_iters);
+      opt.use_consistent_dynamic_initialization =
+          j.value("use_consistent_dynamic_initialization",
+                  opt.use_consistent_dynamic_initialization);
       opt.algebraic_network_max_iters =
           j.value("algebraic_network_max_iters", opt.algebraic_network_max_iters);
       opt.algebraic_network_tol =
