@@ -1,6 +1,6 @@
 {
   "format": "hacdcpf_psd_component_test_matrix.v1",
-  "updated": "2026-07-04",
+  "updated": "2026-07-05",
   "scope": "First-pass PowerSimulationsDynamics.jl component-test comparison focused on transmission-dynamics machines and IBRs.",
   "status_legend": {
     "compare-limited": "HACDCPF has a current model and an existing or near-existing trace hook, but it does not cover PSD's full residual/mass-matrix/small-signal test contract.",
@@ -9,6 +9,163 @@
     "blocked-missing-controller": "The base machine or IBR may exist, but a required PSD controller/block is not implemented.",
     "blocked-missing-formulation": "The dynamic behavior may be partially present, but HACDCPF does not yet expose PSD-equivalent residual/mass-matrix/small-signal parity.",
     "metadata-only": "The model identity can be preserved for IO, but behavior should not be compared yet."
+  },
+  "execution_manifest": {
+    "version": 1,
+    "description": "Opt-in executable PSD comparison gates consumed by tests/test_transient_dynamics.cpp. Cases remain narrow while HACDCPF grows PSD-equivalent residual-vector, mass-matrix, Jacobian, and small-signal APIs.",
+    "cases": [
+      {
+        "id": "psd-test03-simple-marconato-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 03",
+        "title": "SimpleMarconato PSD ResidualModel trace/internal diagnostics vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 03",
+          "psd_components": "SimpleMarconatoMachine"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory and initialized residual/mass/Jacobian/small-signal diagnostics compared against HACDCPF MassMatrixDae for the declared SimpleMarconato state traces and PSD-coordinate internal objects.",
+        "psd_case": "simple_marconato",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "NetworkSwitch",
+            "time_s": 1.0,
+            "branch": "BUS 1-BUS 3-i_1"
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_simple_marconato_three_bus_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "ACBranchTrip",
+            "time_s": 1.0,
+            "component_type": "AC",
+            "component_index": 1,
+            "label": "PSD Test 03 SimpleMarconato BUS 1-BUS 3 branch trip"
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 2,
+            "signals": [
+              {
+                "local_key": "angle_rad",
+                "psd_quantity": "delta_rad",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.05,
+                  "max": 0.12
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.002,
+                  "max": 0.005
+                }
+              },
+              {
+                "local_key": "eq_p",
+                "psd_quantity": "eq_p",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.02,
+                  "max": 0.04
+                }
+              },
+              {
+                "local_key": "ed_p",
+                "psd_quantity": "ed_p",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.02,
+                  "max": 0.04
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "generator-103-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 3,
+            "signals": [
+              {
+                "local_key": "angle_rad",
+                "psd_quantity": "delta_rad",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.05,
+                  "max": 0.12
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.002,
+                  "max": 0.005
+                }
+              },
+              {
+                "local_key": "eq_p",
+                "psd_quantity": "eq_p",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.02,
+                  "max": 0.04
+                }
+              },
+              {
+                "local_key": "ed_p",
+                "psd_quantity": "ed_p",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.02,
+                  "max": 0.04
+                }
+              }
+            ]
+          }
+        ],
+        "internal_diagnostics": {
+          "enabled": true,
+          "coordinate_system": "positive_sequence_psd_order",
+          "finite_difference_step": 0.0001,
+          "objects": [
+            "residual_vector",
+            "mass_diag",
+            "jacobian",
+            "reduced_jacobian",
+            "small_signal_eigenvalues"
+          ],
+          "tolerances": {
+            "mass_diag_max_abs": 1e-12,
+            "residual_inf_norm": 1e-6,
+            "jacobian_relative_fro": 0.0001,
+            "reduced_jacobian_relative_fro": 0.001,
+            "eigenvalue_nearest_max_abs": 0.05
+          },
+          "notes": "Initial internal PSD parity gate for Test 03. Dimensions, residual equilibrium, mass diagonal, unreduced full Jacobian, reduced Jacobian, and eigenvalue nearest-match metrics are all hard gates at the current parity level."
+        }
+      }
+    ]
   },
   "rows": [
     {
@@ -52,9 +209,10 @@
       "psd_tests": "Test 03",
       "psd_components": "SimpleMarconatoMachine",
       "hacdcpf_candidate": "SimpleMarconatoMachine",
-      "status": "compare-failing",
-      "first_blocker": "Runtime, PSD exporter, and local smoke gate exist, but the opt-in PSD Test 03 comparison fails generator-103 delta_rad_relative after the BUS 1-BUS 3 trip (rms about 0.0935 rad, max about 0.2119 rad).",
-      "next_action": "Stop before full MarconatoMachine; investigate the dynamic network/initialization angle drift for the bus-103 machine."
+      "execution_case_id": "psd-test03-simple-marconato-residual-vs-mass-matrix",
+      "status": "compare-limited",
+      "first_blocker": "Local smoke, opt-in PSD Test 03 trace gates, and the PSD-coordinate residual/mass/full-Jacobian/reduced-Jacobian/eigenvalue gate now pass.",
+      "next_action": "Reuse this Test 03 gate as the baseline for the full MarconatoMachine implementation."
     },
     {
       "group": "machine",
@@ -63,7 +221,7 @@
       "hacdcpf_candidate": "",
       "status": "blocked-missing-model",
       "first_blocker": "No Marconato runtime model; Test 25 also needs dynamic branch behavior.",
-      "next_action": "Do not attempt trace parity until Marconato and dynamic branches exist."
+      "next_action": "Implement MarconatoMachine using the now-passing SimpleMarconato Test 03 initialization and DAE comparison as the baseline."
     },
     {
       "group": "machine",
@@ -107,7 +265,7 @@
       "psd_components": "GENROU variants: normal, no saturation, high saturation",
       "hacdcpf_candidate": "GENROU",
       "status": "compare-limited",
-      "first_blocker": "Current comparison is a reduced trace gate, not PSD's full initialization, eigenvalue, ResidualModel, and MassMatrixModel contract.",
+      "first_blocker": "Local and opt-in PSD Test 15 reduced trace gates pass for selected GENROU delta/omega signals, but this is not PSD's full initialization, eigenvalue, ResidualModel, and MassMatrixModel contract.",
       "next_action": "Promote GENROU to the first full machine comparison if you choose machine-first work."
     },
     {
@@ -152,8 +310,8 @@
       "psd_components": "GENROU + SEXS + TGOV1 eigenvalues vs ANDES",
       "hacdcpf_candidate": "GENROU + SEXS + TGOV1",
       "status": "blocked-missing-formulation",
-      "first_blocker": "No PSD-equivalent small-signal/eigenvalue API in HACDCPF.",
-      "next_action": "Do not claim this until reduced Jacobian/eigenvalue tooling exists."
+      "first_blocker": "PSD-coordinate reduced-Jacobian/eigenvalue diagnostics now exist for SimpleMarconato Test 03 only; no GENROU + SEXS + TGOV1 Test 36 small-signal gate exists yet.",
+      "next_action": "Promote the diagnostic API from Test 03 to the GENROU + SEXS + TGOV1 stack before claiming this eigenvalue benchmark."
     },
     {
       "group": "machine",

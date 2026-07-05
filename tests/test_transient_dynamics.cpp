@@ -1,15 +1,21 @@
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <complex>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <limits>
+#include <map>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <nlohmann/json.hpp>
 
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/dynamics/dynamics.hpp"
@@ -21,6 +27,7 @@ using namespace hacdcpf::dynamics;
 namespace {
 
 using Complex = std::complex<double>;
+using Json = nlohmann::json;
 
 HybridPowerSystem make_transient_2bus() {
   HybridPowerSystem sys;
@@ -372,6 +379,26 @@ void apply_psd_simple_marconato_profile(Generator& machine) {
       {"Tq0_pp", 0.023},
       {"T_AA", 0.0},
   };
+
+  hacdcpf::DynamicModelComponentProfile avr;
+  avr.type = "exciter";
+  avr.model = "AVRTypeI";
+  avr.standard = "PowerSystems";
+  avr.parameter_set = "PowerSimulationsDynamics:test_case03_simple_marconato";
+  avr.parameters = {
+      {"Ka", 20.0},
+      {"Ke", 0.01},
+      {"Kf", 0.063},
+      {"Ta", 0.2},
+      {"Te", 0.314},
+      {"Tf", 0.35},
+      {"Tr", 0.001},
+      {"Va_min", -5.0},
+      {"Va_max", 5.0},
+      {"Ae", 0.0039},
+      {"Be", 1.555},
+  };
+  machine.dynamic_model.components.push_back(std::move(avr));
 }
 
 HybridPowerSystem make_psd_simple_marconato_three_bus_case() {
@@ -483,6 +510,7 @@ HybridPowerSystem make_psd_simple_marconato_three_bus_case() {
     ld.dynamic_model.standard = "PowerSystems";
     ld.dynamic_model.model_name = "ConstantImpedanceLoad";
     ld.dynamic_model.source_id = "PowerSimulationsDynamics:test_case03_simple_marconato";
+    ld.dynamic_model.parameters["phase_power_scale"] = 1.0;
     return ld;
   };
   sys.ac.loads = {
@@ -889,7 +917,8 @@ struct ValidationMetric {
   std::string signal;
   double rms_error{0.0};
   double max_abs_error{0.0};
-  double tolerance{0.0};
+  double rms_tolerance{0.0};
+  double max_tolerance{0.0};
   bool passed{false};
 };
 
@@ -897,7 +926,8 @@ void write_validation_summary(const std::filesystem::path& path,
                               const std::vector<ValidationMetric>& metrics) {
   std::ofstream out(path);
   REQUIRE(out.good());
-  out << "level,case,reference,signal,rms_error,max_abs_error,tolerance,passed\n";
+  out << "level,case,reference,signal,rms_error,max_abs_error,"
+         "rms_tolerance,max_tolerance,passed\n";
   for (const auto& metric : metrics) {
     out << metric.level << ","
         << metric.case_name << ","
@@ -905,8 +935,47 @@ void write_validation_summary(const std::filesystem::path& path,
         << metric.signal << ","
         << metric.rms_error << ","
         << metric.max_abs_error << ","
-        << metric.tolerance << ","
+        << metric.rms_tolerance << ","
+        << metric.max_tolerance << ","
         << (metric.passed ? "true" : "false") << "\n";
+  }
+}
+
+void append_pointwise_comparison_rows(std::ostream& out,
+                                      const std::string& level,
+                                      const std::string& case_name,
+                                      const std::string& signal,
+                                      const CsvSeries& local,
+                                      const CsvSeries& psd,
+                                      double t_start,
+                                      double t_end,
+                                      bool compare_relative) {
+  REQUIRE_FALSE(local.t.empty());
+  REQUIRE_FALSE(local.y.empty());
+  REQUIRE_FALSE(psd.t.empty());
+  REQUIRE_FALSE(psd.y.empty());
+  const double local0 = local.y.front();
+  const double psd0 = psd.y.front();
+  const char* alignment = compare_relative ? "relative_to_initial" : "absolute";
+  out << std::setprecision(17);
+  for (double t : local.t) {
+    if (t < t_start - 1e-12 || t > t_end + 1e-12) continue;
+    const double local_raw = interpolate_series(local, t);
+    const double psd_raw = interpolate_series(psd, t);
+    const double local_cmp = compare_relative ? local_raw - local0 : local_raw;
+    const double psd_cmp = compare_relative ? psd_raw - psd0 : psd_raw;
+    const double error = local_cmp - psd_cmp;
+    out << level << ","
+        << case_name << ","
+        << signal << ","
+        << alignment << ","
+        << t << ","
+        << local_raw << ","
+        << psd_raw << ","
+        << local_cmp << ","
+        << psd_cmp << ","
+        << error << ","
+        << std::abs(error) << "\n";
   }
 }
 
@@ -1002,6 +1071,590 @@ bool export_psd_traces_batch(const std::vector<PsdTraceExportRequest>& requests,
   }
   command += " > " + shell_quote(log_file.string()) + " 2>&1";
   return std::system(command.c_str()) == 0;
+}
+
+struct PsdInternalDiagnostics {
+  std::map<std::string, std::string> metadata;
+  std::vector<std::string> labels;
+  Eigen::VectorXd state;
+  Eigen::VectorXd residual;
+  Eigen::VectorXd mass_diag;
+  Eigen::MatrixXd jacobian;
+  Eigen::MatrixXd reduced_jacobian;
+  std::vector<Complex> eigenvalues;
+};
+
+bool export_psd_internal_diagnostics(const std::string& case_name,
+                                     const std::filesystem::path& out_dir,
+                                     const std::filesystem::path& log_file) {
+  const std::filesystem::path repo = psd_repo_path();
+  const std::filesystem::path script =
+      std::filesystem::path(HACDCPF_PROJECT_ROOT) /
+      "tools" / "psd_validation" / "export_internal_diagnostics.jl";
+
+  INFO("PSD repo: " << repo);
+  INFO("PSD internal exporter: " << script);
+  INFO("PSD internal output dir: " << out_dir);
+  INFO("PSD internal log: " << log_file);
+  REQUIRE(std::filesystem::exists(repo / "Project.toml"));
+  REQUIRE(std::filesystem::exists(repo / "test" / "Project.toml"));
+  REQUIRE(std::filesystem::exists(script));
+  std::filesystem::create_directories(out_dir);
+
+  const std::string command =
+      "cd " + shell_quote(repo.string()) + " && " +
+      shell_quote(julia_bin()) + " --project=" +
+      shell_quote((repo / "test").string()) + " " +
+      shell_quote(script.string()) + " " +
+      shell_quote(repo.string()) + " " +
+      shell_quote(case_name) + " " +
+      shell_quote(out_dir.string()) + " > " +
+      shell_quote(log_file.string()) + " 2>&1";
+  return std::system(command.c_str()) == 0;
+}
+
+std::map<std::string, std::string> read_key_value_csv(
+    const std::filesystem::path& path) {
+  std::map<std::string, std::string> values;
+  std::ifstream in(path);
+  REQUIRE(in.good());
+  std::string line;
+  bool first = true;
+  while (std::getline(in, line)) {
+    if (line.empty()) continue;
+    if (first) {
+      first = false;
+      if (line.rfind("key,", 0) == 0) continue;
+    }
+    const auto comma = line.find(',');
+    REQUIRE(comma != std::string::npos);
+    values[line.substr(0, comma)] = line.substr(comma + 1);
+  }
+  return values;
+}
+
+double metadata_double(const std::map<std::string, std::string>& metadata,
+                       const std::string& key) {
+  const auto it = metadata.find(key);
+  REQUIRE(it != metadata.end());
+  return std::stod(it->second);
+}
+
+int metadata_int(const std::map<std::string, std::string>& metadata,
+                 const std::string& key) {
+  return static_cast<int>(std::llround(metadata_double(metadata, key)));
+}
+
+Eigen::VectorXd read_index_value_vector(const std::filesystem::path& path) {
+  std::vector<double> values;
+  std::ifstream in(path);
+  REQUIRE(in.good());
+  std::string line;
+  bool first = true;
+  while (std::getline(in, line)) {
+    if (line.empty()) continue;
+    if (first) {
+      first = false;
+      if (line.rfind("index,", 0) == 0) continue;
+    }
+    std::replace(line.begin(), line.end(), ',', ' ');
+    std::istringstream iss(line);
+    int index = 0;
+    double value = 0.0;
+    REQUIRE(iss >> index >> value);
+    values.push_back(value);
+  }
+  Eigen::VectorXd out(static_cast<Eigen::Index>(values.size()));
+  for (Eigen::Index i = 0; i < out.size(); ++i) {
+    out[i] = values[static_cast<std::size_t>(i)];
+  }
+  return out;
+}
+
+Eigen::MatrixXd read_numeric_matrix_csv(const std::filesystem::path& path) {
+  std::vector<std::vector<double>> rows;
+  std::ifstream in(path);
+  REQUIRE(in.good());
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty()) continue;
+    std::replace(line.begin(), line.end(), ',', ' ');
+    std::istringstream iss(line);
+    std::vector<double> row;
+    double value = 0.0;
+    while (iss >> value) row.push_back(value);
+    if (!row.empty()) rows.push_back(std::move(row));
+  }
+  REQUIRE_FALSE(rows.empty());
+  const std::size_t cols = rows.front().size();
+  REQUIRE(cols > 0);
+  Eigen::MatrixXd out(static_cast<Eigen::Index>(rows.size()),
+                      static_cast<Eigen::Index>(cols));
+  for (std::size_t r = 0; r < rows.size(); ++r) {
+    REQUIRE(rows[r].size() == cols);
+    for (std::size_t c = 0; c < cols; ++c) {
+      out(static_cast<Eigen::Index>(r), static_cast<Eigen::Index>(c)) =
+          rows[r][c];
+    }
+  }
+  return out;
+}
+
+std::vector<Complex> read_eigenvalue_csv(const std::filesystem::path& path) {
+  std::vector<Complex> values;
+  std::ifstream in(path);
+  REQUIRE(in.good());
+  std::string line;
+  bool first = true;
+  while (std::getline(in, line)) {
+    if (line.empty()) continue;
+    if (first) {
+      first = false;
+      if (line.rfind("index,", 0) == 0) continue;
+    }
+    std::replace(line.begin(), line.end(), ',', ' ');
+    std::istringstream iss(line);
+    int index = 0;
+    double real = 0.0;
+    double imag = 0.0;
+    REQUIRE(iss >> index >> real >> imag);
+    values.emplace_back(real, imag);
+  }
+  return values;
+}
+
+std::vector<std::string> read_state_labels(const std::filesystem::path& path) {
+  std::vector<std::string> labels;
+  std::ifstream in(path);
+  REQUIRE(in.good());
+  std::string line;
+  bool first = true;
+  while (std::getline(in, line)) {
+    if (line.empty()) continue;
+    if (first) {
+      first = false;
+      if (line.rfind("index,", 0) == 0) continue;
+    }
+    const auto first_comma = line.find(',');
+    REQUIRE(first_comma != std::string::npos);
+    const auto second_comma = line.find(',', first_comma + 1);
+    REQUIRE(second_comma != std::string::npos);
+    labels.push_back(line.substr(first_comma + 1,
+                                 second_comma - first_comma - 1));
+  }
+  return labels;
+}
+
+PsdInternalDiagnostics read_psd_internal_diagnostics(
+    const std::filesystem::path& dir) {
+  PsdInternalDiagnostics diagnostics;
+  diagnostics.metadata = read_key_value_csv(dir / "metadata.csv");
+  diagnostics.labels = read_state_labels(dir / "state_table.csv");
+  diagnostics.residual = read_index_value_vector(dir / "residual.csv");
+  diagnostics.mass_diag = read_index_value_vector(dir / "mass_diag.csv");
+  diagnostics.jacobian = read_numeric_matrix_csv(dir / "jacobian.csv");
+  diagnostics.reduced_jacobian =
+      read_numeric_matrix_csv(dir / "reduced_jacobian.csv");
+  diagnostics.eigenvalues = read_eigenvalue_csv(dir / "eigenvalues.csv");
+
+  std::ifstream in(dir / "state_table.csv");
+  REQUIRE(in.good());
+  std::vector<double> state_values;
+  std::string line;
+  bool first = true;
+  while (std::getline(in, line)) {
+    if (line.empty()) continue;
+    if (first) {
+      first = false;
+      continue;
+    }
+    std::vector<std::string> fields;
+    std::stringstream ss(line);
+    std::string field;
+    while (std::getline(ss, field, ',')) fields.push_back(field);
+    REQUIRE(fields.size() >= 6);
+    state_values.push_back(std::stod(fields[2]));
+  }
+  diagnostics.state.resize(static_cast<Eigen::Index>(state_values.size()));
+  for (Eigen::Index i = 0; i < diagnostics.state.size(); ++i) {
+    diagnostics.state[i] = state_values[static_cast<std::size_t>(i)];
+  }
+  return diagnostics;
+}
+
+double max_abs_diff(const Eigen::VectorXd& lhs, const Eigen::VectorXd& rhs) {
+  REQUIRE(lhs.size() == rhs.size());
+  return lhs.size() == 0 ? 0.0 : (lhs - rhs).cwiseAbs().maxCoeff();
+}
+
+double relative_frobenius_error(const Eigen::MatrixXd& lhs,
+                                const Eigen::MatrixXd& rhs) {
+  REQUIRE(lhs.rows() == rhs.rows());
+  REQUIRE(lhs.cols() == rhs.cols());
+  const double denom = std::max(1.0, rhs.norm());
+  return (lhs - rhs).norm() / denom;
+}
+
+double max_abs_matrix_diff(const Eigen::MatrixXd& lhs,
+                           const Eigen::MatrixXd& rhs) {
+  REQUIRE(lhs.rows() == rhs.rows());
+  REQUIRE(lhs.cols() == rhs.cols());
+  return lhs.size() == 0 ? 0.0 : (lhs - rhs).cwiseAbs().maxCoeff();
+}
+
+double nearest_eigenvalue_max_error(std::vector<Complex> lhs,
+                                    const std::vector<Complex>& rhs) {
+  REQUIRE(lhs.size() == rhs.size());
+  double worst = 0.0;
+  std::vector<bool> used(lhs.size(), false);
+  for (const Complex target : rhs) {
+    double best = std::numeric_limits<double>::infinity();
+    std::size_t best_i = lhs.size();
+    for (std::size_t i = 0; i < lhs.size(); ++i) {
+      if (used[i]) continue;
+      const double err = std::abs(lhs[i] - target);
+      if (err < best) {
+        best = err;
+        best_i = i;
+      }
+    }
+    REQUIRE(best_i < lhs.size());
+    used[best_i] = true;
+    worst = std::max(worst, best);
+  }
+  return worst;
+}
+
+void write_vector_artifact(const std::filesystem::path& path,
+                           const Eigen::VectorXd& values) {
+  std::ofstream out(path);
+  REQUIRE(out.good());
+  out << std::setprecision(17);
+  out << "index,value\n";
+  for (Eigen::Index i = 0; i < values.size(); ++i) {
+    out << (i + 1) << "," << values[i] << "\n";
+  }
+}
+
+void write_matrix_artifact(const std::filesystem::path& path,
+                           const Eigen::MatrixXd& matrix) {
+  std::ofstream out(path);
+  REQUIRE(out.good());
+  out << std::setprecision(17);
+  for (Eigen::Index r = 0; r < matrix.rows(); ++r) {
+    for (Eigen::Index c = 0; c < matrix.cols(); ++c) {
+      if (c > 0) out << ",";
+      out << matrix(r, c);
+    }
+    out << "\n";
+  }
+}
+
+void write_eigen_artifact(const std::filesystem::path& path,
+                          const Eigen::VectorXcd& eigenvalues) {
+  std::ofstream out(path);
+  REQUIRE(out.good());
+  out << std::setprecision(17);
+  out << "index,real,imag\n";
+  for (Eigen::Index i = 0; i < eigenvalues.size(); ++i) {
+    out << (i + 1) << ","
+        << eigenvalues[i].real() << ","
+        << eigenvalues[i].imag() << "\n";
+  }
+}
+
+void write_hacdcpf_internal_diagnostics(
+    const std::filesystem::path& dir,
+    const DynamicDaeDiagnostics& diagnostics) {
+  std::filesystem::create_directories(dir);
+  {
+    std::ofstream out(dir / "metadata.csv");
+    REQUIRE(out.good());
+    out << std::setprecision(17);
+    out << "key,value\n";
+    out << "case,simple_marconato\n";
+    out << "formulation,MassMatrixDaeDiagnostic\n";
+    out << "coordinate_system," << diagnostics.coordinate_system << "\n";
+    out << "variable_count," << diagnostics.n_variables << "\n";
+    out << "algebraic_count," << diagnostics.n_algebraic << "\n";
+    out << "differential_count," << diagnostics.n_differential << "\n";
+    out << "residual_inf_norm," << diagnostics.residual_inf_norm << "\n";
+    out << "jacobian_rows," << diagnostics.jacobian.rows() << "\n";
+    out << "jacobian_cols," << diagnostics.jacobian.cols() << "\n";
+    out << "jacobian_inf_norm," << diagnostics.jacobian_inf_norm << "\n";
+    out << "reduced_jacobian_rows," << diagnostics.reduced_jacobian.rows() << "\n";
+    out << "reduced_jacobian_cols," << diagnostics.reduced_jacobian.cols() << "\n";
+    out << "reduced_jacobian_inf_norm,"
+        << diagnostics.reduced_jacobian_inf_norm << "\n";
+    out << "eigenvalue_count," << diagnostics.eigenvalues.size() << "\n";
+  }
+  {
+    std::ofstream out(dir / "state_table.csv");
+    REQUIRE(out.good());
+    out << std::setprecision(17);
+    out << "index,label,value,residual,mass_diag,is_differential\n";
+    for (std::size_t i = 0; i < diagnostics.states.size(); ++i) {
+      const auto& state = diagnostics.states[i];
+      out << (i + 1) << ","
+          << state.label << ","
+          << diagnostics.state[static_cast<Eigen::Index>(i)] << ","
+          << diagnostics.residual[static_cast<Eigen::Index>(i)] << ","
+          << diagnostics.mass_diag[static_cast<Eigen::Index>(i)] << ","
+          << (state.kind == "differential" ? 1 : 0) << "\n";
+    }
+  }
+  write_vector_artifact(dir / "mass_diag.csv", diagnostics.mass_diag);
+  write_vector_artifact(dir / "residual.csv", diagnostics.residual);
+  write_matrix_artifact(dir / "jacobian.csv", diagnostics.jacobian);
+  write_matrix_artifact(dir / "reduced_jacobian.csv",
+                        diagnostics.reduced_jacobian);
+  write_eigen_artifact(dir / "eigenvalues.csv", diagnostics.eigenvalues);
+}
+
+double manifest_internal_tolerance(const Json& raw_case,
+                                   const std::string& key,
+                                   double fallback) {
+  if (!raw_case.contains("internal_diagnostics")) return fallback;
+  const auto& internal = raw_case.at("internal_diagnostics");
+  if (!internal.contains("tolerances")) return fallback;
+  const auto& tolerances = internal.at("tolerances");
+  return tolerances.value(key, fallback);
+}
+
+struct ManifestSignalSpec {
+  std::string local_key;
+  std::string psd_quantity;
+  double rms_tolerance{1.0};
+  double max_tolerance{1.0};
+  bool compare_relative{false};
+};
+
+struct ManifestDeviceSpec {
+  std::string psd_ref;
+  std::string local_component_type;
+  int local_component_index{0};
+  std::vector<ManifestSignalSpec> signals;
+};
+
+struct ManifestExecutableCase {
+  std::string id;
+  std::string psd_case;
+  std::string psd_test;
+  std::string scope;
+  std::string gate_contract;
+  std::string reference_package;
+  std::string reference_formulation;
+  std::string reference_integrator;
+  std::string hacdcpf_fixture;
+  std::string hacdcpf_solver;
+  double t_start_s{0.0};
+  double t_end_s{2.0};
+  double dt_s{0.005};
+  double compare_start_s{0.0};
+  double compare_end_s{2.0};
+  DynamicEvent event;
+  std::vector<ManifestDeviceSpec> devices;
+};
+
+struct ManifestTraceComparison {
+  std::string manifest_id;
+  std::string psd_case;
+  std::string level;
+  std::string signal;
+  CsvSeries local;
+  double t_start{0.0};
+  double t_end{2.0};
+  double rms_tolerance{1.0};
+  double max_tolerance{1.0};
+  bool compare_relative{false};
+  std::string reference_label;
+};
+
+std::filesystem::path psd_component_test_matrix_path() {
+  return std::filesystem::path(HACDCPF_PROJECT_ROOT) /
+         "tools" / "psd_validation" / "psd_component_test_matrix.json";
+}
+
+Json load_psd_component_test_matrix() {
+  const std::filesystem::path matrix_path = psd_component_test_matrix_path();
+  INFO("PSD component test matrix: " << matrix_path);
+  std::ifstream in(matrix_path);
+  REQUIRE(in.good());
+  Json payload = Json::parse(in);
+  REQUIRE(payload.value("format", "") == "hacdcpf_psd_component_test_matrix.v1");
+  REQUIRE(payload.contains("rows"));
+  REQUIRE(payload.at("rows").is_array());
+  REQUIRE(payload.contains("execution_manifest"));
+  REQUIRE(payload.at("execution_manifest").is_object());
+  REQUIRE(payload.at("execution_manifest").value("version", 0) == 1);
+  REQUIRE(payload.at("execution_manifest").contains("cases"));
+  REQUIRE(payload.at("execution_manifest").at("cases").is_array());
+  return payload;
+}
+
+const Json* find_manifest_case(const Json& payload, const std::string& id) {
+  const auto& cases = payload.at("execution_manifest").at("cases");
+  for (const auto& candidate : cases) {
+    if (candidate.value("id", "") == id) return &candidate;
+  }
+  return nullptr;
+}
+
+bool manifest_row_selector_matches(const Json& row, const Json& selector) {
+  for (auto it = selector.begin(); it != selector.end(); ++it) {
+    if (!row.contains(it.key())) return false;
+    if (row.at(it.key()) != it.value()) return false;
+  }
+  return true;
+}
+
+const Json* find_manifest_row(const Json& payload, const Json& selector) {
+  for (const auto& row : payload.at("rows")) {
+    if (manifest_row_selector_matches(row, selector)) return &row;
+  }
+  return nullptr;
+}
+
+DynamicSolverType manifest_solver_type(const std::string& solver) {
+  if (solver == "PartitionedEuler") return DynamicSolverType::PartitionedEuler;
+  if (solver == "PartitionedHeun") return DynamicSolverType::PartitionedHeun;
+  if (solver == "PartitionedRK4") return DynamicSolverType::PartitionedRK4;
+  if (solver == "BackwardEulerNewton") return DynamicSolverType::BackwardEulerNewton;
+  if (solver == "TrapezoidalNewton") return DynamicSolverType::TrapezoidalNewton;
+  if (solver == "RosenbrockEuler") return DynamicSolverType::RosenbrockEuler;
+  REQUIRE(solver == "MassMatrixDae");
+  return DynamicSolverType::MassMatrixDae;
+}
+
+ManifestExecutableCase parse_manifest_executable_case(const Json& raw) {
+  REQUIRE(raw.value("enabled", false));
+  ManifestExecutableCase out;
+  out.id = raw.at("id").get<std::string>();
+  out.psd_case = raw.at("psd_case").get<std::string>();
+  out.psd_test = raw.at("psd_test").get<std::string>();
+  out.scope = raw.value("scope", "component");
+  out.gate_contract = raw.value("gate_contract", "");
+
+  const auto& reference = raw.at("psd_reference");
+  out.reference_package = reference.value("package", "PowerSimulationsDynamics.jl");
+  out.reference_formulation = reference.at("formulation").get<std::string>();
+  out.reference_integrator = reference.at("integrator").get<std::string>();
+
+  const auto& hacdcpf = raw.at("hacdcpf");
+  out.hacdcpf_fixture = hacdcpf.at("fixture").get<std::string>();
+  out.hacdcpf_solver = hacdcpf.at("solver").get<std::string>();
+
+  const auto& span = raw.at("time_span_s");
+  out.t_start_s = span.at("start").get<double>();
+  out.t_end_s = span.at("end").get<double>();
+  out.dt_s = raw.at("step_s").get<double>();
+
+  const auto& window = raw.at("comparison_window_s");
+  out.compare_start_s = window.at("start").get<double>();
+  out.compare_end_s = window.at("end").get<double>();
+
+  const auto& event = hacdcpf.at("event");
+  const std::string event_type = event.at("type").get<std::string>();
+  REQUIRE(event_type == "ACBranchTrip");
+  out.event.type = DynamicEventType::ACBranchTrip;
+  out.event.time_s = event.at("time_s").get<double>();
+  out.event.component_type = event.value("component_type", "AC");
+  out.event.component_index = event.at("component_index").get<int>();
+  out.event.label = event.value("label", out.id + " event");
+
+  for (const auto& raw_device : raw.at("comparisons")) {
+    ManifestDeviceSpec device;
+    device.psd_ref = raw_device.at("psd_ref").get<std::string>();
+    device.local_component_type =
+        raw_device.value("local_component_type", "SynchronousMachine");
+    device.local_component_index = raw_device.at("local_component_index").get<int>();
+    for (const auto& raw_signal : raw_device.at("signals")) {
+      ManifestSignalSpec signal;
+      signal.local_key = raw_signal.at("local_key").get<std::string>();
+      signal.psd_quantity = raw_signal.at("psd_quantity").get<std::string>();
+      const std::string alignment = raw_signal.value("alignment", "absolute");
+      REQUIRE((alignment == "absolute" || alignment == "relative_to_initial"));
+      signal.compare_relative = alignment == "relative_to_initial";
+      const auto& tolerances = raw_signal.at("tolerances");
+      signal.rms_tolerance = tolerances.at("rms").get<double>();
+      signal.max_tolerance = tolerances.at("max").get<double>();
+      device.signals.push_back(signal);
+    }
+    REQUIRE_FALSE(device.signals.empty());
+    out.devices.push_back(device);
+  }
+  REQUIRE_FALSE(out.devices.empty());
+  return out;
+}
+
+HybridPowerSystem make_manifest_system(const ManifestExecutableCase& spec) {
+  if (spec.hacdcpf_fixture == "make_psd_simple_marconato_three_bus_case") {
+    return make_psd_simple_marconato_three_bus_case();
+  }
+  FAIL("Unsupported PSD executable manifest fixture: " << spec.hacdcpf_fixture);
+  return HybridPowerSystem{};
+}
+
+DynamicResults run_manifest_hacdcpf_case(const ManifestExecutableCase& spec) {
+  auto sys = make_manifest_system(spec);
+  DynamicSolverOptions opt = fast_options();
+  opt.solver_type = manifest_solver_type(spec.hacdcpf_solver);
+  opt.run_power_flow_initialization = true;
+  opt.t_start_s = spec.t_start_s;
+  opt.t_end_s = spec.t_end_s;
+  opt.dt_s = spec.dt_s;
+  opt.record_every_step = true;
+  opt.dynamic_trim_tol = 1e-7;
+  opt.max_dynamic_trim_iters = 20;
+  opt.algebraic_network_max_iters = 8;
+  opt.algebraic_network_tol = 1e-8;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+  dyn.events.push_back(spec.event);
+
+  DynamicSolver solver;
+  return solver.solve(dyn);
+}
+
+std::vector<ManifestTraceComparison> build_manifest_trace_comparisons(
+    const ManifestExecutableCase& spec,
+    const DynamicResults& result,
+    const std::filesystem::path& out_dir) {
+  std::vector<ManifestTraceComparison> traces;
+  REQUIRE(result.final_snapshot() != nullptr);
+  for (const auto& device : spec.devices) {
+    const auto& final_out =
+        require_device_output(*result.final_snapshot(),
+                              device.local_component_type,
+                              device.local_component_index);
+    CHECK(final_out.model_name == "SimpleMarconatoMachine");
+    for (const auto& signal : device.signals) {
+      auto local = device_output_series(result,
+                                        device.local_component_type,
+                                        device.local_component_index,
+                                        signal.local_key);
+      const std::string psd_signal = device.psd_ref + ":" + signal.psd_quantity;
+      write_csv_series(out_dir /
+                           ("hacdcpf_manifest_" + safe_artifact_token(spec.id) +
+                            "_" + safe_artifact_token(psd_signal) + ".csv"),
+                       local);
+      traces.push_back({spec.id,
+                        spec.psd_case,
+                        spec.scope,
+                        psd_signal,
+                        std::move(local),
+                        spec.compare_start_s,
+                        spec.compare_end_s,
+                        signal.rms_tolerance,
+                        signal.max_tolerance,
+                        signal.compare_relative,
+                        spec.reference_package + " " +
+                            spec.reference_formulation + "/" +
+                            spec.reference_integrator});
+    }
+  }
+  return traces;
 }
 
 bool export_psd_gridfollowing_trace(const PsdGflCase& spec,
@@ -1583,6 +2236,7 @@ TEST_CASE("PSD validation ladder covers component, load, and system-level HACDCP
                        result.initialization.dynamic_fast_dxdt_inf_norm,
                        result.initialization.dynamic_fast_dxdt_inf_norm,
                        opt.dynamic_trim_tol,
+                       opt.dynamic_trim_tol,
                        result.initialization.dynamic_fast_dxdt_inf_norm <=
                            opt.dynamic_trim_tol});
   }
@@ -1634,6 +2288,7 @@ TEST_CASE("PSD validation ladder covers component, load, and system-level HACDCP
                        "voltage_response_range_bus103",
                        series_range(v103),
                        series_range(v103),
+                       1e-5,
                        1e-5,
                        series_range(v103) > 1e-5});
   }
@@ -1692,6 +2347,7 @@ TEST_CASE("PSD validation ladder covers component, load, and system-level HACDCP
                        "p_filtered_response_range_mw",
                        series_range(p_vsc),
                        series_range(p_vsc),
+                       0.5,
                        0.5,
                        series_range(p_vsc) > 0.5});
   }
@@ -1911,6 +2567,397 @@ TEST_CASE("PSD PSSE machine profiles initialize and expose distinct states",
   }
 }
 
+TEST_CASE("PSD component matrix executable manifest is internally consistent",
+          "[dynamics][benchmark][psd][manifest]") {
+  const Json payload = load_psd_component_test_matrix();
+  const auto& cases = payload.at("execution_manifest").at("cases");
+  REQUIRE_FALSE(cases.empty());
+
+  std::size_t enabled_count = 0;
+  bool found_simple_marconato_gate = false;
+  for (const auto& raw_case : cases) {
+    REQUIRE(raw_case.contains("id"));
+    REQUIRE(raw_case.contains("enabled"));
+    REQUIRE(raw_case.contains("row_selector"));
+    REQUIRE(raw_case.at("row_selector").is_object());
+
+    const Json* row = find_manifest_row(payload, raw_case.at("row_selector"));
+    REQUIRE(row != nullptr);
+    if (row->contains("execution_case_id")) {
+      CHECK(row->at("execution_case_id") == raw_case.at("id"));
+    }
+
+    if (!raw_case.value("enabled", false)) continue;
+    ++enabled_count;
+
+    const ManifestExecutableCase spec = parse_manifest_executable_case(raw_case);
+    CHECK_FALSE(spec.id.empty());
+    CHECK_FALSE(spec.psd_case.empty());
+    CHECK_FALSE(spec.gate_contract.empty());
+    CHECK(spec.t_start_s <= spec.compare_start_s);
+    CHECK(spec.compare_end_s <= spec.t_end_s);
+    CHECK(spec.dt_s > 0.0);
+    CHECK(row->value("status", "") == "compare-limited");
+
+    std::size_t signal_count = 0;
+    for (const auto& device : spec.devices) {
+      CHECK_FALSE(device.psd_ref.empty());
+      CHECK(device.local_component_index > 0);
+      signal_count += device.signals.size();
+      for (const auto& signal : device.signals) {
+        CHECK_FALSE(signal.local_key.empty());
+        CHECK_FALSE(signal.psd_quantity.empty());
+        CHECK(signal.rms_tolerance > 0.0);
+        CHECK(signal.max_tolerance > 0.0);
+      }
+    }
+    CHECK(signal_count > 0);
+
+    if (spec.id == "psd-test03-simple-marconato-residual-vs-mass-matrix") {
+      found_simple_marconato_gate = true;
+      CHECK(spec.psd_test == "Test 03");
+      CHECK(spec.psd_case == "simple_marconato");
+      CHECK(spec.reference_formulation == "ResidualModel");
+      CHECK(spec.reference_integrator == "IDA");
+      CHECK(spec.hacdcpf_fixture == "make_psd_simple_marconato_three_bus_case");
+      CHECK(spec.hacdcpf_solver == "MassMatrixDae");
+      CHECK(spec.devices.size() == 2);
+      CHECK(signal_count == 8);
+      REQUIRE(raw_case.contains("internal_diagnostics"));
+      const auto& internal = raw_case.at("internal_diagnostics");
+      CHECK(internal.value("enabled", false));
+      CHECK(internal.value("coordinate_system", "") ==
+            "positive_sequence_psd_order");
+      REQUIRE(internal.contains("objects"));
+      CHECK(internal.at("objects").size() >= 5);
+    }
+  }
+
+  CHECK(enabled_count >= 1);
+  CHECK(found_simple_marconato_gate);
+}
+
+TEST_CASE("PSD-order DynamicDaeDiagnostics exposes SimpleMarconato residual objects",
+          "[dynamics][benchmark][psd][diagnostics]") {
+  const Json payload = load_psd_component_test_matrix();
+  const Json* raw_case =
+      find_manifest_case(payload,
+                         "psd-test03-simple-marconato-residual-vs-mass-matrix");
+  REQUIRE(raw_case != nullptr);
+  const ManifestExecutableCase spec = parse_manifest_executable_case(*raw_case);
+
+  DynamicSolverOptions opt = fast_options();
+  opt.solver_type = DynamicSolverType::MassMatrixDae;
+  opt.run_power_flow_initialization = true;
+  opt.t_start_s = spec.t_start_s;
+  opt.t_end_s = spec.t_start_s;
+  opt.dt_s = spec.dt_s;
+  opt.dynamic_trim_tol = 1e-7;
+  opt.max_dynamic_trim_iters = 20;
+  opt.algebraic_network_max_iters = 8;
+  opt.algebraic_network_tol = 1e-8;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(make_manifest_system(spec), opt);
+  CHECK(dyn.initialization.power_flow_converged);
+  CHECK(dyn.initialization.dynamic_trim_converged);
+  std::string error;
+  REQUIRE(dyn.solveNetwork(opt.t_start_s, error));
+
+  DynamicDaeDiagnosticOptions diag_options;
+  diag_options.positive_sequence_projection = true;
+  diag_options.psd_simple_marconato_state_order = true;
+  diag_options.build_jacobian = true;
+  diag_options.finite_difference_step =
+      raw_case->at("internal_diagnostics").value("finite_difference_step", 1e-4);
+  const DynamicDaeDiagnostics diagnostics =
+      dynamic_dae_diagnostics(dyn, diag_options);
+  INFO(diagnostics.message);
+  REQUIRE(diagnostics.success);
+  CHECK(diagnostics.coordinate_system == "positive_sequence_psd_order");
+  REQUIRE(diagnostics.n_variables == 26);
+  REQUIRE(diagnostics.n_algebraic == 6);
+  REQUIRE(diagnostics.n_differential == 20);
+  REQUIRE(diagnostics.mass_diag.size() == 26);
+  for (Eigen::Index i = 0; i < diagnostics.mass_diag.size(); ++i) {
+    CHECK(diagnostics.mass_diag[i] == Catch::Approx(i < 6 ? 0.0 : 1.0).margin(1e-14));
+  }
+  CHECK(diagnostics.residual_inf_norm < 1e-6);
+  CHECK(diagnostics.jacobian.rows() == 26);
+  CHECK(diagnostics.jacobian.cols() == 26);
+  CHECK(diagnostics.reduced_jacobian.rows() == 20);
+  CHECK(diagnostics.reduced_jacobian.cols() == 20);
+  CHECK(diagnostics.eigenvalues.size() == 20);
+}
+
+TEST_CASE("PSD executable manifest gates SimpleMarconato Test 03 residual vs MassMatrixDae",
+          "[dynamics][benchmark][psd][manifest][external]") {
+  const char* run_psd = std::getenv("HACDCPF_RUN_PSD_COMPARE");
+  const bool run_external_psd = run_psd != nullptr && std::string(run_psd) == "1";
+  if (!run_external_psd) {
+    SUCCEED("Set HACDCPF_RUN_PSD_COMPARE=1 to run executable PSD manifest gates");
+    return;
+  }
+
+  const Json payload = load_psd_component_test_matrix();
+  const Json* raw_case =
+      find_manifest_case(payload,
+                         "psd-test03-simple-marconato-residual-vs-mass-matrix");
+  REQUIRE(raw_case != nullptr);
+  const ManifestExecutableCase spec = parse_manifest_executable_case(*raw_case);
+  REQUIRE(spec.reference_formulation == "ResidualModel");
+  REQUIRE(spec.reference_integrator == "IDA");
+  REQUIRE(spec.hacdcpf_solver == "MassMatrixDae");
+
+  const std::filesystem::path out_dir =
+      std::filesystem::temp_directory_path() / "hacdcpf_psd_manifest_validation";
+  std::filesystem::create_directories(out_dir);
+
+  const DynamicResults result = run_manifest_hacdcpf_case(spec);
+  INFO(spec.id << ": " << result.message);
+  REQUIRE(result.success);
+  CHECK(result.initialization.power_flow_converged);
+  CHECK(result.initialization.dynamic_trim_converged);
+  REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= 1e-7);
+  REQUIRE_FALSE(result.applied_event_records.empty());
+  REQUIRE(result.snapshots.size() > 100);
+
+  const std::vector<ManifestTraceComparison> traces =
+      build_manifest_trace_comparisons(spec, result, out_dir);
+  REQUIRE(traces.size() == 8);
+
+  auto psd_csv_path = [&](const ManifestTraceComparison& trace) {
+    return out_dir / ("psd_manifest_" + safe_artifact_token(trace.manifest_id) +
+                      "_" + safe_artifact_token(trace.signal) + ".csv");
+  };
+
+  std::vector<PsdTraceExportRequest> export_requests;
+  export_requests.reserve(traces.size());
+  for (const auto& trace : traces) {
+    export_requests.push_back({trace.psd_case, trace.signal, psd_csv_path(trace)});
+  }
+  const std::filesystem::path psd_batch_log = out_dir / "psd_manifest_batch.log";
+  const bool exported = export_psd_traces_batch(export_requests, psd_batch_log);
+  INFO("PSD manifest export failed. Inspect " << psd_batch_log
+       << ". Run `cd " << psd_repo_path()
+       << " && julia --project=test -e 'using Pkg; Pkg.instantiate()'` "
+       << "to install missing PSD test dependencies.");
+  REQUIRE(exported);
+
+  const std::filesystem::path pointwise_path =
+      out_dir / "psd_manifest_pointwise_comparison.csv";
+  std::ofstream pointwise(pointwise_path);
+  REQUIRE(pointwise.good());
+  pointwise << "level,case,signal,alignment,time_s,hacdcpf_raw,psd_raw,"
+               "hacdcpf_compare,psd_compare,error,abs_error\n";
+
+  std::vector<ValidationMetric> metrics;
+  for (const auto& trace : traces) {
+    const CsvSeries psd = read_csv_series(psd_csv_path(trace));
+    REQUIRE(psd.t.size() > 100);
+    append_pointwise_comparison_rows(pointwise,
+                                     trace.level,
+                                     trace.manifest_id,
+                                     trace.signal,
+                                     trace.local,
+                                     psd,
+                                     trace.t_start,
+                                     trace.t_end,
+                                     trace.compare_relative);
+    const CsvSeries local_cmp =
+        trace.compare_relative ? relative_to_initial(trace.local) : trace.local;
+    const CsvSeries psd_cmp =
+        trace.compare_relative ? relative_to_initial(psd) : psd;
+    const double rms =
+        rms_common_error(local_cmp, psd_cmp, trace.t_start, trace.t_end);
+    const double max_abs =
+        max_common_abs_error(local_cmp, psd_cmp, trace.t_start, trace.t_end);
+    metrics.push_back({trace.level,
+                       trace.manifest_id,
+                       trace.reference_label,
+                       trace.compare_relative ? trace.signal + "_relative"
+                                              : trace.signal,
+                       rms,
+                       max_abs,
+                       trace.rms_tolerance,
+                       trace.max_tolerance,
+                       rms < trace.rms_tolerance &&
+                           max_abs < trace.max_tolerance});
+  }
+  pointwise.close();
+
+  const std::filesystem::path summary_path =
+      out_dir / "psd_manifest_validation_summary.csv";
+  write_validation_summary(summary_path, metrics);
+  for (const auto& metric : metrics) {
+    INFO("PSD manifest artifact directory: " << out_dir);
+    INFO("PSD manifest summary CSV: " << summary_path);
+    INFO("PSD manifest pointwise comparison CSV: " << pointwise_path);
+    INFO(metric.level << " " << metric.case_name << " " << metric.signal
+                      << " rms=" << metric.rms_error
+                      << " max=" << metric.max_abs_error);
+    CHECK(metric.passed);
+  }
+}
+
+TEST_CASE("PSD executable manifest gates SimpleMarconato Test 03 internal DAE diagnostics",
+          "[dynamics][benchmark][psd][manifest][internal]") {
+  const char* run_psd = std::getenv("HACDCPF_RUN_PSD_COMPARE");
+  const bool run_external_psd = run_psd != nullptr && std::string(run_psd) == "1";
+  if (!run_external_psd) {
+    SUCCEED("Set HACDCPF_RUN_PSD_COMPARE=1 to run Julia-backed PSD internal diagnostics");
+    return;
+  }
+
+  const Json payload = load_psd_component_test_matrix();
+  const Json* raw_case =
+      find_manifest_case(payload,
+                         "psd-test03-simple-marconato-residual-vs-mass-matrix");
+  REQUIRE(raw_case != nullptr);
+  REQUIRE(raw_case->contains("internal_diagnostics"));
+  REQUIRE(raw_case->at("internal_diagnostics").value("enabled", false));
+  const ManifestExecutableCase spec = parse_manifest_executable_case(*raw_case);
+  REQUIRE(spec.psd_case == "simple_marconato");
+  REQUIRE(spec.hacdcpf_solver == "MassMatrixDae");
+
+  const std::filesystem::path out_dir =
+      std::filesystem::temp_directory_path() / "hacdcpf_psd_internal_validation";
+  const std::filesystem::path psd_dir = out_dir / "psd";
+  const std::filesystem::path local_dir = out_dir / "hacdcpf";
+  std::filesystem::create_directories(out_dir);
+
+  const std::filesystem::path psd_log = out_dir / "psd_internal_export.log";
+  const bool exported =
+      export_psd_internal_diagnostics(spec.psd_case, psd_dir, psd_log);
+  INFO("PSD internal export failed. Inspect " << psd_log
+       << ". Run `cd " << psd_repo_path()
+       << " && julia --project=test -e 'using Pkg; Pkg.instantiate()'` "
+       << "to install missing PSD test dependencies.");
+  REQUIRE(exported);
+  const PsdInternalDiagnostics psd = read_psd_internal_diagnostics(psd_dir);
+
+  DynamicSolverOptions opt = fast_options();
+  opt.solver_type = DynamicSolverType::MassMatrixDae;
+  opt.run_power_flow_initialization = true;
+  opt.t_start_s = spec.t_start_s;
+  opt.t_end_s = spec.t_start_s;
+  opt.dt_s = spec.dt_s;
+  opt.record_every_step = true;
+  opt.dynamic_trim_tol = 1e-7;
+  opt.max_dynamic_trim_iters = 20;
+  opt.algebraic_network_max_iters = 8;
+  opt.algebraic_network_tol = 1e-8;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(make_manifest_system(spec), opt);
+  INFO("HACDCPF dynamic trim residual: "
+       << dyn.initialization.dynamic_fast_dxdt_inf_norm);
+  CHECK(dyn.initialization.power_flow_converged);
+  CHECK(dyn.initialization.dynamic_trim_converged);
+
+  std::string error;
+  REQUIRE(dyn.solveNetwork(opt.t_start_s, error));
+
+  DynamicDaeDiagnosticOptions diag_options;
+  diag_options.positive_sequence_projection = true;
+  diag_options.psd_simple_marconato_state_order = true;
+  diag_options.build_jacobian = true;
+  diag_options.finite_difference_step =
+      raw_case->at("internal_diagnostics").value("finite_difference_step", 1e-4);
+  DynamicDaeDiagnostics local =
+      dynamic_dae_diagnostics(dyn, diag_options);
+  INFO(local.message);
+  REQUIRE(local.success);
+  write_hacdcpf_internal_diagnostics(local_dir, local);
+
+  const int psd_n = metadata_int(psd.metadata, "variable_count");
+  const int psd_alg = metadata_int(psd.metadata, "algebraic_count");
+  const int psd_diff = metadata_int(psd.metadata, "differential_count");
+  REQUIRE(local.n_variables == psd_n);
+  REQUIRE(local.n_algebraic == psd_alg);
+  REQUIRE(local.n_differential == psd_diff);
+  REQUIRE(psd.labels.size() == static_cast<std::size_t>(psd_n));
+  REQUIRE(local.states.size() == static_cast<std::size_t>(psd_n));
+  REQUIRE(psd.mass_diag.size() == local.mass_diag.size());
+  REQUIRE(psd.residual.size() == local.residual.size());
+  REQUIRE(psd.jacobian.rows() == local.jacobian.rows());
+  REQUIRE(psd.jacobian.cols() == local.jacobian.cols());
+  REQUIRE(psd.reduced_jacobian.rows() == local.reduced_jacobian.rows());
+  REQUIRE(psd.reduced_jacobian.cols() == local.reduced_jacobian.cols());
+  REQUIRE(psd.eigenvalues.size() ==
+          static_cast<std::size_t>(local.eigenvalues.size()));
+
+  std::vector<Complex> local_eigs;
+  local_eigs.reserve(static_cast<std::size_t>(local.eigenvalues.size()));
+  for (Eigen::Index i = 0; i < local.eigenvalues.size(); ++i) {
+    local_eigs.push_back(local.eigenvalues[i]);
+  }
+
+  const double mass_diag_error = max_abs_diff(local.mass_diag, psd.mass_diag);
+  const double psd_residual_inf = metadata_double(psd.metadata, "residual_inf_norm");
+  const double local_residual_inf = local.residual_inf_norm;
+  const double residual_pair_inf =
+      std::max(local_residual_inf, psd_residual_inf);
+  const double jacobian_rel =
+      relative_frobenius_error(local.jacobian, psd.jacobian);
+  const double jacobian_max =
+      max_abs_matrix_diff(local.jacobian, psd.jacobian);
+  const double reduced_rel =
+      relative_frobenius_error(local.reduced_jacobian, psd.reduced_jacobian);
+  const double reduced_max =
+      max_abs_matrix_diff(local.reduced_jacobian, psd.reduced_jacobian);
+  const double eigen_max =
+      nearest_eigenvalue_max_error(local_eigs, psd.eigenvalues);
+
+  const double mass_tol =
+      manifest_internal_tolerance(*raw_case, "mass_diag_max_abs", 1e-12);
+  const double residual_tol =
+      manifest_internal_tolerance(*raw_case, "residual_inf_norm", 1e-5);
+  const double jac_rel_tol =
+      manifest_internal_tolerance(*raw_case, "jacobian_relative_fro", 10.0);
+  const double reduced_rel_tol =
+      manifest_internal_tolerance(*raw_case, "reduced_jacobian_relative_fro", 10.0);
+  const double eigen_tol =
+      manifest_internal_tolerance(*raw_case, "eigenvalue_nearest_max_abs", 1e4);
+
+  const std::filesystem::path summary_path =
+      out_dir / "internal_comparison_summary.csv";
+  std::ofstream summary(summary_path);
+  REQUIRE(summary.good());
+  summary << "metric,value,tolerance,passed\n";
+  auto write_metric = [&](const std::string& name,
+                          double value,
+                          double tolerance) {
+    summary << name << "," << value << "," << tolerance << ","
+            << (value <= tolerance ? "true" : "false") << "\n";
+  };
+  auto write_info_metric = [&](const std::string& name, double value) {
+    summary << name << "," << value << ",informational,n/a\n";
+  };
+  write_metric("mass_diag_max_abs", mass_diag_error, mass_tol);
+  write_metric("residual_inf_norm_pair", residual_pair_inf, residual_tol);
+  write_metric("jacobian_relative_fro", jacobian_rel, jac_rel_tol);
+  write_info_metric("jacobian_max_abs", jacobian_max);
+  write_metric("reduced_jacobian_relative_fro", reduced_rel, reduced_rel_tol);
+  write_info_metric("reduced_jacobian_max_abs", reduced_max);
+  write_metric("eigenvalue_nearest_max_abs", eigen_max, eigen_tol);
+  summary.close();
+
+  INFO("PSD internal artifact directory: " << out_dir);
+  INFO("PSD internal summary CSV: " << summary_path);
+  INFO("mass_diag_error=" << mass_diag_error
+                          << " residual_pair_inf=" << residual_pair_inf
+                          << " jacobian_rel=" << jacobian_rel
+                          << " reduced_rel=" << reduced_rel
+                          << " eigen_max=" << eigen_max);
+
+  CHECK(mass_diag_error <= mass_tol);
+  CHECK(residual_pair_inf <= residual_tol);
+  CHECK(jacobian_rel <= jac_rel_tol);
+  CHECK(reduced_rel <= reduced_rel_tol);
+  CHECK(eigen_max <= eigen_tol);
+}
+
 TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system traces",
           "[dynamics][benchmark][psd][external]") {
   const char* run_psd = std::getenv("HACDCPF_RUN_PSD_COMPARE");
@@ -2018,6 +3065,7 @@ TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system tra
 
     DynamicSolver solver;
     const DynamicResults result = solver.solve(dyn);
+    INFO(result.message);
     REQUIRE(result.success);
     auto delta = device_output_series(result,
                                       "SynchronousMachine",
@@ -2140,6 +3188,7 @@ TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system tra
   {
     auto sys = make_psd_simple_marconato_three_bus_case();
     DynamicSolverOptions opt = fast_options();
+    opt.solver_type = DynamicSolverType::MassMatrixDae;
     opt.run_power_flow_initialization = true;
     opt.t_end_s = 2.0;
     opt.dt_s = 0.005;
@@ -2321,10 +3370,26 @@ TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system tra
        << "to install missing PSD test dependencies.");
   REQUIRE(exported);
 
+  const std::filesystem::path pointwise_path =
+      out_dir / "psd_external_pointwise_comparison.csv";
+  std::ofstream pointwise(pointwise_path);
+  REQUIRE(pointwise.good());
+  pointwise << "level,case,signal,alignment,time_s,hacdcpf_raw,psd_raw,"
+               "hacdcpf_compare,psd_compare,error,abs_error\n";
+
   std::vector<ValidationMetric> metrics;
   for (const auto& spec : specs) {
     const CsvSeries psd = read_csv_series(psd_csv_path(spec));
     REQUIRE(psd.t.size() > 100);
+    append_pointwise_comparison_rows(pointwise,
+                                     spec.level,
+                                     spec.case_name,
+                                     spec.signal,
+                                     spec.local,
+                                     psd,
+                                     spec.t_start,
+                                     spec.t_end,
+                                     spec.compare_relative);
     const CsvSeries local_cmp =
         spec.compare_relative ? relative_to_initial(spec.local) : spec.local;
     const CsvSeries psd_cmp =
@@ -2339,11 +3404,14 @@ TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system tra
                        rms,
                        max_abs,
                        spec.rms_tolerance,
+                       spec.max_tolerance,
                        rms < spec.rms_tolerance && max_abs < spec.max_tolerance});
   }
+  pointwise.close();
   write_validation_summary(out_dir / "psd_external_validation_summary.csv", metrics);
   for (const auto& metric : metrics) {
     INFO("PSD validation artifact directory: " << out_dir);
+    INFO("PSD pointwise comparison CSV: " << pointwise_path);
     INFO(metric.level << " " << metric.case_name << " " << metric.signal
                       << " rms=" << metric.rms_error
                       << " max=" << metric.max_abs_error);

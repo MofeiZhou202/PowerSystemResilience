@@ -505,6 +505,12 @@ double normalized_percent(double value, double fallback) {
 void apply_load_profile(const Load& load, ACLoadDynamicParams& params) {
   params.model_profiles = to_dynamic_profiles(load.dynamic_model);
   params.model_kind = load_model_kind_from_profile(load, load.dynamic_model);
+  if (!load.dynamic_model.empty()) {
+    params.phase_power_scale =
+        param_or(load.dynamic_model.parameters,
+                 {"phase_power_scale", "PhasePowerScale", "phase_scale"},
+                 params.phase_power_scale);
+  }
   const double zp = normalized_percent(load.z_percent_p, 0.0);
   const double ip = normalized_percent(load.i_percent_p, 0.0);
   const double pp = normalized_percent(load.p_percent_p, 1.0);
@@ -885,6 +891,30 @@ std::unordered_map<int, Complex> explicit_ac_load_power_by_bus(
   return load_power;
 }
 
+int in_service_external_grid_count_at_bus(const HybridPowerSystem& sys, int bus) {
+  return static_cast<int>(
+      std::count_if(sys.ac.external_grids.begin(),
+                    sys.ac.external_grids.end(),
+                    [&](const ExternalGrid& grid) {
+                      return grid.in_service && grid.bus == bus;
+                    }));
+}
+
+bool has_non_external_ac_source_at_bus(const HybridPowerSystem& sys, int bus) {
+  const auto at_bus = [&](const auto& device) {
+    return device.in_service && device.bus == bus;
+  };
+  return std::any_of(sys.ac.generators.begin(), sys.ac.generators.end(), at_bus) ||
+         std::any_of(sys.ac.static_generators.begin(),
+                     sys.ac.static_generators.end(),
+                     at_bus) ||
+         std::any_of(sys.ac.pv_systems.begin(), sys.ac.pv_systems.end(), at_bus) ||
+         std::any_of(sys.ac.renewable_gens.begin(),
+                     sys.ac.renewable_gens.end(),
+                     at_bus) ||
+         std::any_of(sys.ac.storage.begin(), sys.ac.storage.end(), at_bus);
+}
+
 bool use_pf_bus_injection_machine_init(const HybridPowerSystem& sys) {
   const bool has_machine_dynamic_profiles =
       std::any_of(sys.ac.generators.begin(),
@@ -1020,17 +1050,18 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
   }
   network.rebuildBaseMatrices(options.singular_regularization_pu);
   initialize_network_voltages(dyn.canonical_system, dyn.initial_power_flow, dyn);
-  auto pf_ac_device_injection_mva =
-      pf_bus_injection_init ? ac_device_injection_from_network_pf(network, dyn.y)
-                            : std::unordered_map<int, Complex>{};
-  if (pf_bus_injection_init) {
-    for (const auto& [bus, load_power] :
-         explicit_ac_load_power_by_bus(dyn.canonical_system)) {
-      pf_ac_device_injection_mva[bus] += load_power;
-    }
+  auto pf_ac_bus_device_injection_mva =
+      ac_device_injection_from_network_pf(network, dyn.y);
+  for (const auto& [bus, load_power] :
+       explicit_ac_load_power_by_bus(dyn.canonical_system)) {
+    pf_ac_bus_device_injection_mva[bus] += load_power;
   }
+  auto pf_ac_device_injection_mva =
+      pf_bus_injection_init ? pf_ac_bus_device_injection_mva
+                            : std::unordered_map<int, Complex>{};
 
   const double base_mva = network.base_mva;
+  const double ac_phase_power_scale = pf_bus_injection_init ? (1.0 / 3.0) : 1.0;
 
   std::unordered_set<int> explicit_dc_voltage_source_buses;
   for (const auto& conv : dyn.canonical_system.vsc_converters) {
@@ -1180,8 +1211,17 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.frequency_hz = network.frequency_hz;
     p.r_pu = grid.r_pu;
     p.x_pu = positive_or(grid.x_pu, 1.0 / std::max(1.0, options.source_stiffness_pu));
+    p.phase_power_scale = ac_phase_power_scale;
     p.in_service = true;
     apply_voltage_source_profile(grid.dynamic_model, p);
+    if (in_service_external_grid_count_at_bus(dyn.canonical_system, grid.bus) == 1 &&
+        !has_non_external_ac_source_at_bus(dyn.canonical_system, grid.bus)) {
+      const auto inj = pf_ac_bus_device_injection_mva.find(grid.bus);
+      if (inj != pf_ac_bus_device_injection_mva.end()) {
+        p.p_mech_mw = inj->second.real();
+        p.q_elec_mvar = inj->second.imag();
+      }
+    }
     dyn.devices.push_back(std::make_unique<SynchronousMachine>(p));
     voltage_source_buses.insert(grid.bus);
   }
@@ -1206,6 +1246,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.x_pu = positive_or(gen.xdpp_pu, positive_or(gen.xdp_pu, positive_or(gen.xd_pu, 0.2)));
     p.p_mech_mw = gen.pg_mw;
     p.q_elec_mvar = gen.qg_mvar;
+    p.phase_power_scale = ac_phase_power_scale;
     if (pf_bus_injection_init &&
         std::count_if(dyn.canonical_system.ac.generators.begin(),
                       dyn.canonical_system.ac.generators.end(),

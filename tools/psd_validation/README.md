@@ -159,17 +159,85 @@ HACDCPF_RUN_PSD_COMPARE=1 ./build/macos-release/tests/test_transient_dynamics \
   "[dynamics][benchmark][psd][external]"
 ```
 
+In addition to the RMS/max summary, the external comparison writes a pointwise
+CSV under:
+
+```text
+${TMPDIR}/hacdcpf_psd_validation/psd_external_pointwise_comparison.csv
+```
+
+Each row is one comparison sample with the PSD test case, signal, time,
+HACDCPF raw value, PSD raw value, aligned comparison values, signed error, and
+absolute error. Signals marked `relative_to_initial` use the same initial-value
+alignment as the pass/fail gate.
+
 The conventional component checks are now numerical PSD trace gates rather than
 plumbing-only checks. The ZIP constant-power case compares bus-102 and bus-103
 voltage-magnitude deviations against PSD Test 33. The machine gates cover GENROU,
 OneDOneQ, SimpleMarconato, GENROE normal/high-saturation variants, GENSAL, and
-GENSAE traces. SimpleMarconato currently stops on a failing PSD Test 03
-`generator-103-1:delta_rad` comparison; do not proceed to full Marconato from
-this gate yet. GENROE compares `delta_rad`/`omega_pu`/`eq_p`/`ed_p`; GENSAL and
-GENSAE compare `delta_rad`/`omega_pu`/`eq_p`/`psiq_pp`. The PSSE machine angle gate is
-intentionally broader than the inverter gates because HACDCPF still uses its
-synthesized three-phase network solve instead of PSD's exact positive-sequence
-residual DAE.
+GENSAE traces. SimpleMarconato now clears the PSD Test 03 trace gate for both
+machines, including `generator-103-1:delta_rad_relative` at about `0.00142` rms
+and `0.00402` max error. GENROE compares `delta_rad`/`omega_pu`/`eq_p`/`ed_p`;
+GENSAL and GENSAE compare `delta_rad`/`omega_pu`/`eq_p`/`psiq_pp`. The PSSE
+machine angle gate is intentionally broader than the inverter gates because
+HACDCPF still uses its synthesized three-phase network solve instead of PSD's
+exact positive-sequence residual DAE.
+
+## Executable Component Manifest
+
+`psd_component_test_matrix.json` is also an executable test manifest. The report
+rows remain the human-facing passability matrix, while
+`execution_manifest.cases[]` declares opt-in numerical gates that the C++ test
+suite can run directly.
+
+The always-on structural check validates that each enabled executable case maps
+to exactly one matrix row and has a complete fixture, solver, event, signal, and
+tolerance declaration:
+
+```bash
+./build/macos-release/tests/test_transient_dynamics \
+  "[dynamics][benchmark][psd][manifest]"
+```
+
+The first executable gate is PSD Test 03 SimpleMarconato. The external trace
+part compares PSD `ResidualModel`/`IDA` traces from `simple_marconato` against
+the HACDCPF `MassMatrixDae` trajectory for both machines and all declared
+`delta_rad`/`omega_pu`/`eq_p`/`ed_p` state traces:
+
+```bash
+HACDCPF_RUN_PSD_COMPARE=1 ./build/macos-release/tests/test_transient_dynamics \
+  "[dynamics][benchmark][psd][manifest][external]"
+```
+
+This writes artifacts under:
+
+```text
+${TMPDIR}/hacdcpf_psd_manifest_validation
+```
+
+The key files are `psd_manifest_validation_summary.csv`,
+`psd_manifest_pointwise_comparison.csv`, and `psd_manifest_batch.log`.
+
+The internal diagnostics part compares the initialized PSD-coordinate DAE
+objects for the same case: residual vector norm, mass diagonal, full finite-
+difference Jacobian, Schur-reduced Jacobian, and small-signal eigenvalues:
+
+```bash
+HACDCPF_RUN_PSD_COMPARE=1 ./build/macos-release/tests/test_transient_dynamics \
+  "[dynamics][benchmark][psd][manifest][internal]"
+```
+
+This writes artifacts under:
+
+```text
+${TMPDIR}/hacdcpf_psd_internal_validation
+```
+
+The key files are `internal_comparison_summary.csv`, `psd/state_table.csv`,
+`hacdcpf/state_table.csv`, and the paired `jacobian.csv`,
+`reduced_jacobian.csv`, and `eigenvalues.csv` files. The current residual,
+mass-diagonal, unreduced full-Jacobian, reduced-Jacobian, and eigenvalue gates
+are all tight for the accepted SimpleMarconato Test 03 baseline.
 
 ## PSD Input Snapshot Conversion
 

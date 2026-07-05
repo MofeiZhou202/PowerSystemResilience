@@ -113,6 +113,10 @@ Complex average_complex_power(const Eigen::Vector3cd& v,
   return s;
 }
 
+double phase_sum_to_total_power_scale(double phase_power_scale) {
+  return 1.0 / std::max(1e-9, 3.0 * std::abs(phase_power_scale));
+}
+
 void add_balanced_current(DynamicStamp& stamp, int bus_pos, const Eigen::Vector3cd& current) {
   if (bus_pos < 0) return;
   for (int phase = 0; phase < 3; ++phase) {
@@ -174,6 +178,13 @@ bool set_if_changed(Eigen::VectorXd& x, int idx, double value, double tol = 1e-1
 
 double safe_base(double base_mva) {
   return std::max(1.0, base_mva);
+}
+
+double source_series_reactance_pu(double x_pu) {
+  constexpr double kMinSourceReactance = 1e-8;
+  if (!std::isfinite(x_pu)) return kMinSourceReactance;
+  if (std::abs(x_pu) >= kMinSourceReactance) return x_pu;
+  return x_pu < 0.0 ? -kMinSourceReactance : kMinSourceReactance;
 }
 
 double dc_link_network_power_pu(const NetworkState& y,
@@ -1280,15 +1291,18 @@ void DynamicLoad::stamp(double,
   if (!params_.in_service || params_.bus_pos < 0 || params_.base_mva <= 0.0) return;
   const Complex s_pu(params_.p_mw / params_.base_mva * params_.scale,
                      params_.q_mvar / params_.base_mva * params_.scale);
+  const double phase_power_scale =
+      std::max(0.0, std::abs(params_.phase_power_scale));
   if (params_.model_kind == DynamicLoadModelKind::ConstantImpedance) {
-    const Complex y_load = std::conj(s_pu) / 3.0;
+    const double v0 = std::max(1e-6, std::abs(params_.nominal_voltage_pu));
+    const Complex y_load = std::conj(s_pu) * phase_power_scale / (v0 * v0);
     add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(y_load));
     return;
   }
 
   const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
-  const double p_phase = s_pu.real() / 3.0;
-  const double q_phase = s_pu.imag() / 3.0;
+  const double p_phase = s_pu.real() * phase_power_scale;
+  const double q_phase = s_pu.imag() * phase_power_scale;
   const double v0 = params_.nominal_voltage_pu > 0.0 ? params_.nominal_voltage_pu : 1.0;
   for (int phase = 0; phase < 3; ++phase) {
     const Complex consuming = load_consuming_current(v[phase],
@@ -1885,9 +1899,11 @@ void SynchronousMachine::initializeFromPowerFlow(const PowerFlowResult& pf,
   const double p_pu = params_.p_mech_mw / safe_base(params_.base_mva);
   const double q_pu = params_.q_elec_mvar / safe_base(params_.base_mva);
   const Complex vt = std::polar(clamp_voltage(vm), angle);
-  const Complex s_phase(p_pu / 3.0, q_pu / 3.0);
+  const double phase_power_scale =
+      std::max(0.0, std::abs(params_.phase_power_scale));
+  const Complex s_phase(p_pu * phase_power_scale, q_pu * phase_power_scale);
   const Complex i_phase = std::conj(s_phase / vt);
-  const Complex z(params_.r_pu, std::max(1e-5, params_.x_pu));
+  const Complex z(params_.r_pu, source_series_reactance_pu(params_.x_pu));
   const Complex e_internal = vt + z * i_phase;
   x.x[range_.offset + 0] = finite_value(std::arg(e_internal), angle);
   x.x[range_.offset + 1] = 1.0;
@@ -1998,9 +2014,11 @@ bool SynchronousMachine::trimToNetworkEquilibrium(DynamicState& x, NetworkState&
     const Complex vt = std::abs(vt_raw) > kMinVoltage
                            ? vt_raw
                            : std::polar(clamp_voltage(params_.vm_set_pu), std::arg(vt_raw));
-    const Complex s_phase(p_pu / 3.0, q_pu / 3.0);
+    const double phase_power_scale =
+        std::max(0.0, std::abs(params_.phase_power_scale));
+    const Complex s_phase(p_pu * phase_power_scale, q_pu * phase_power_scale);
     const Complex i_phase = std::conj(s_phase / vt);
-    const Complex z(params_.r_pu, std::max(1e-5, params_.x_pu));
+    const Complex z(params_.r_pu, source_series_reactance_pu(params_.x_pu));
     const Complex e_internal = vt + z * i_phase;
     if (std::isfinite(std::abs(e_internal)) && std::abs(e_internal) > 0.0) {
       changed = set_if_changed(x.x, state_index(range_, 0), std::arg(e_internal)) || changed;
@@ -2177,12 +2195,13 @@ void SynchronousMachine::computeDerivatives(double,
     if (!exciter_attached_) dxdt[state_index(range_, 6)] = 0.0;
     return;
   }
-  const Complex z(params_.r_pu, std::max(1e-5, params_.x_pu));
+  const Complex z(params_.r_pu, source_series_reactance_pu(params_.x_pu));
   const Complex yv = Complex(1.0, 0.0) / z;
   const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
   const Eigen::Vector3cd e = balanced_phasors(e_mag, theta);
   const Eigen::Vector3cd i = yv * (e - v);
-  const double pe = average_complex_power(v, i).real();
+  const double pe = average_complex_power(v, i).real() *
+                    phase_sum_to_total_power_scale(params_.phase_power_scale);
   const double h = std::max(0.01, params_.inertia_h);
   const double wb = kTwoPi * params_.frequency_hz;
 
@@ -2283,7 +2302,7 @@ void SynchronousMachine::stamp(double,
   }
   const double theta = x.x[range_.offset + 0];
   const double e_mag = x.x[range_.offset + 2];
-  const Complex z(params_.r_pu, std::max(1e-5, params_.x_pu));
+  const Complex z(params_.r_pu, source_series_reactance_pu(params_.x_pu));
   const Complex yv = Complex(1.0, 0.0) / z;
   const Eigen::Vector3cd e = balanced_phasors(e_mag, theta);
   add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(yv));
@@ -2452,12 +2471,13 @@ DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
     out.values["frequency_hz"] = omega * params_.frequency_hz;
     out.values["e_internal_pu"] = e_mag;
     out.values["p_mech_mw"] = pm * safe_base(params_.base_mva);
-    const Complex z(params_.r_pu, std::max(1e-5, params_.x_pu));
+    const Complex z(params_.r_pu, source_series_reactance_pu(params_.x_pu));
     const Complex yv = Complex(1.0, 0.0) / z;
     const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
     const Eigen::Vector3cd e = balanced_phasors(e_mag, theta);
     const Eigen::Vector3cd i = yv * (e - v);
-    const Complex s = average_complex_power(v, i);
+    const Complex s = average_complex_power(v, i) *
+                      phase_sum_to_total_power_scale(params_.phase_power_scale);
     out.values["p_mw"] = s.real() * safe_base(params_.base_mva);
     out.values["q_mvar"] = s.imag() * safe_base(params_.base_mva);
     out.values["i_rms_pu"] =

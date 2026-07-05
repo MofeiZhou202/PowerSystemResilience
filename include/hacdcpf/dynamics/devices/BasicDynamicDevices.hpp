@@ -50,6 +50,7 @@ struct ACLoadDynamicParams {
   double p_mw{0.0};
   double q_mvar{0.0};
   double nominal_voltage_pu{1.0};
+  double phase_power_scale{1.0 / 3.0};
   double z_weight_p{0.0};
   double i_weight_p{0.0};
   double p_weight_p{1.0};
@@ -309,6 +310,7 @@ struct VoltageSourceDynamicParams {
   double x_pu{0.10};
   double p_mech_mw{0.0};
   double q_elec_mvar{0.0};
+  double phase_power_scale{1.0 / 3.0};
   double inertia_h{0.0};
   double damping_d{1.0};
   double droop_r{0.05};

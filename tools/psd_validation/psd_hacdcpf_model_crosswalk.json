@@ -1,6 +1,6 @@
 {
   "format": "hacdcpf_psd_model_crosswalk.v1",
-  "updated": "2026-07-04",
+  "updated": "2026-07-05",
   "scope": "PowerSimulationsDynamics.jl / PowerSystems.jl dynamic-device model and controller crosswalk for HACDCPF transient validation.",
   "status_legend": {
     "exact-or-close": "The named HACDCPF model is intended to be directly comparable for focused traces, subject to parameter and initialization matching.",
@@ -89,10 +89,10 @@
       "psd_model": "SimpleMarconatoMachine",
       "hacdcpf_slot": "machine",
       "hacdcpf_model": "SimpleMarconatoMachine",
-      "status": "trace-failing",
-      "comparison_level": "L1",
+      "status": "supported-subset",
+      "comparison_level": "L2",
       "trace_case": "simple_marconato:generator-103-1:delta_rad",
-      "notes": "Runtime, profile parser, local smoke test, and PSD Test 03 exporter exist, but the opt-in PSD comparison currently fails generator-103 delta_rad after the BUS 1-BUS 3 trip (relative rms about 0.0935 rad, max about 0.2119 rad). Stop before full MarconatoMachine."
+      "notes": "Runtime, profile parser, local smoke test, PSD Test 03 trace gate, and PSD-coordinate residual/mass/full-Jacobian/reduced-Jacobian/eigenvalue gate now pass for both SimpleMarconato machines."
     },
     {
       "domain": "generator",
@@ -103,7 +103,7 @@
       "status": "missing",
       "comparison_level": "L0",
       "trace_case": "",
-      "notes": "Full MarconatoMachine is not implemented; blocked until SimpleMarconatoMachine Test 03 clears."
+      "notes": "Full MarconatoMachine is not implemented; SimpleMarconatoMachine Test 03 now clears and can be used as the baseline."
     },
     {
       "domain": "generator",
@@ -488,7 +488,7 @@
       "status": "profile-only",
       "comparison_level": "L4",
       "trace_case": "",
-      "notes": "HACDCPF has implicit integrators and diagnostics but not a PSD-equivalent full residual DAE API."
+      "notes": "HACDCPF now exposes a PSD-coordinate diagnostic residual/mass/Jacobian/small-signal object for the passing SimpleMarconato Test 03 case, but not a general PSD-equivalent full residual DAE API for all component stacks."
     },
     {
       "domain": "dae",
