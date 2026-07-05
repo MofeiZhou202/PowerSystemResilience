@@ -439,80 +439,102 @@
   <!-- Transient phasor-domain dynamics -->
   <div class="sub-section transient-sub-section" data-sub="transient" hidden>
     <div class="transient-toolbar-row">
-      <label class="sub-label">积分器
-        <select id="trSolver" title="暂态积分/DAE求解器">
-          <option value="heun" selected>Heun 显式二阶</option>
-          <option value="rk4">RK4 显式四阶</option>
-          <option value="backward_euler">后退欧拉 Newton</option>
-          <option value="trapezoidal">梯形 Newton</option>
-          <option value="rosenbrock">Rosenbrock-Euler</option>
-          <option value="euler">Euler 显式</option>
-        </select>
-      </label>
-      <label class="sub-label">终止(s)
-        <input id="trEnd" type="number" value="1.0" step="0.05" min="0.001" style="width:72px"/>
-      </label>
-      <label class="sub-label">步长(s)
-        <input id="trDt" type="number" value="0.01" step="0.001" min="0.0001" style="width:72px"/>
-      </label>
-      <label class="sub-label sub-checkbox" title="失败时自动缩小步长重试">
-        <input id="trAdaptive" type="checkbox" checked/><span>自适应</span>
-      </label>
-      <label class="sub-label" title="显式积分局部误差相对容差；自适应开启时生效">
-        相对容差
-        <input id="trRelTol" type="number" value="1e-6" step="1e-6" min="1e-10" style="width:82px"/>
-      </label>
-      <label class="sub-label" title="显式积分局部误差绝对容差；自适应开启时生效">
-        绝对容差
-        <input id="trAbsTol" type="number" value="1e-8" step="1e-8" min="1e-12" style="width:82px"/>
-      </label>
-      <label class="sub-label" title="单步失败、误差过大或事件后电压异常时最多减半重试次数">
-        减半
-        <input id="trMaxHalving" type="number" value="12" step="1" min="0" max="20" style="width:52px"/>
-      </label>
-      <label class="sub-label sub-checkbox" title="用现有潮流求解器计算事件前初始运行点">
-        <input id="trPowerFlowInit" type="checkbox" checked/><span>潮流初始化</span>
-      </label>
-      <label class="sub-label">PF迭代
-        <input id="trPfMaxIter" type="number" value="80" step="10" min="5" style="width:62px"/>
-      </label>
-      <label class="sub-label">PF容差
-        <input id="trPfTol" type="number" value="1e-8" step="1e-8" min="1e-12" style="width:82px"/>
-      </label>
-      <label class="sub-label" title="暂态每个状态点内代数网络 g(x,y)=0 的最大迭代次数">
-        网络迭代
-        <input id="trAlgMaxIter" type="number" value="20" step="5" min="1" style="width:62px"/>
-      </label>
-      <label class="sub-label" title="暂态代数网络 g(x,y)=0 的收敛容差">
-        网络容差
-        <input id="trAlgTol" type="number" value="1e-10" step="1e-10" min="1e-12" style="width:82px"/>
-      </label>
-      <label class="sub-label" title="非故障期间的AC电压健康下限；低于该值认为发生电压坍塌或数值失稳">
-        Vmin
-        <input id="trMinVac" type="number" value="0.05" step="0.01" min="0" max="1" style="width:58px"/>
-      </label>
-      <label class="sub-label sub-checkbox" title="为带 DC 端口的 VSC 启用 DC 母线电容电压状态">
-        <input id="trDynamicDcLink" type="checkbox"/><span>DC链动态</span>
-      </label>
-      <label class="sub-label">Cdc(s)
-        <input id="trDcLinkC" type="number" value="0.10" step="0.01" min="0.001" style="width:70px"/>
-      </label>
-      <label class="sub-label">Gdc
-        <input id="trDcLinkG" type="number" value="20" step="1" min="0" style="width:58px"/>
-      </label>
-      <label class="sub-label" title="指定要在“本地观测点”中显示的 AC 母线 ID，逗号分隔；留空则自动选取扰动母线和关键动态设备">
-        观测AC
-        <input id="trObserverAcBuses" type="text" value="" placeholder="1,5" style="width:82px"/>
-      </label>
-      <label class="sub-label" title="指定要在“本地观测点”中显示的 DC 母线 ID，逗号分隔；留空则自动选取扰动母线和关键动态设备">
-        观测DC
-        <input id="trObserverDcBuses" type="text" value="" placeholder="1,2" style="width:82px"/>
-      </label>
-      <button id="btnRunTransient" class="toolbar-btn run-btn" title="运行暂态仿真">运行暂态</button>
-      <button id="btnTransientCompatibility" class="toolbar-btn" title="检查当前系统动态模型与 GridLAB-D / OpenDSS / 标准模型兼容性">模型兼容</button>
-      <button id="btnExportTransient" class="toolbar-btn" title="导出暂态仿真结果 JSON">结果导出</button>
+      <div class="control-param-group transient-param-group" title="暂态积分器、仿真终止时间和基础步长">
+        <span class="control-param-title">时间/积分</span>
+        <label class="sub-label">积分器
+          <select id="trSolver" title="暂态积分/DAE求解器">
+            <option value="heun" selected>Heun 显式二阶</option>
+            <option value="rk4">RK4 显式四阶</option>
+            <option value="backward_euler">后退欧拉 Newton</option>
+            <option value="trapezoidal">梯形 Newton</option>
+            <option value="rosenbrock">Rosenbrock-Euler</option>
+            <option value="euler">Euler 显式</option>
+          </select>
+        </label>
+        <label class="sub-label">终止(s)
+          <input id="trEnd" type="number" value="1.0" step="0.05" min="0.001" style="width:72px"/>
+        </label>
+        <label class="sub-label">步长(s)
+          <input id="trDt" type="number" value="0.01" step="0.001" min="0.0001" style="width:72px"/>
+        </label>
+        <label class="sub-label sub-checkbox" title="失败时自动缩小步长重试">
+          <input id="trAdaptive" type="checkbox" checked/><span>自适应</span>
+        </label>
+      </div>
+      <div class="control-param-group transient-param-group" title="积分误差和代数网络收敛设置">
+        <span class="control-param-title">误差/网络</span>
+        <label class="sub-label" title="显式积分局部误差相对容差；自适应开启时生效">
+          相对容差
+          <input id="trRelTol" type="number" value="1e-6" step="1e-6" min="1e-10" style="width:82px"/>
+        </label>
+        <label class="sub-label" title="显式积分局部误差绝对容差；自适应开启时生效">
+          绝对容差
+          <input id="trAbsTol" type="number" value="1e-8" step="1e-8" min="1e-12" style="width:82px"/>
+        </label>
+        <label class="sub-label" title="单步失败、误差过大或事件后电压异常时最多减半重试次数">
+          减半
+          <input id="trMaxHalving" type="number" value="12" step="1" min="0" max="20" style="width:52px"/>
+        </label>
+        <label class="sub-label" title="暂态每个状态点内代数网络 g(x,y)=0 的最大迭代次数">
+          网络迭代
+          <input id="trAlgMaxIter" type="number" value="20" step="5" min="1" style="width:62px"/>
+        </label>
+        <label class="sub-label" title="暂态代数网络 g(x,y)=0 的收敛容差">
+          网络容差
+          <input id="trAlgTol" type="number" value="1e-10" step="1e-10" min="1e-12" style="width:82px"/>
+        </label>
+        <label class="sub-label" title="非故障期间的AC电压健康下限；低于该值认为发生电压坍塌或数值失稳">
+          Vmin
+          <input id="trMinVac" type="number" value="0.05" step="0.01" min="0" max="1" style="width:58px"/>
+        </label>
+      </div>
+      <div class="control-param-group transient-param-group" title="事件前运行点初始化，默认复用近期潮流结果以加速首次暂态运行">
+        <span class="control-param-title">初始化/PF</span>
+        <label class="sub-label sub-checkbox" title="用现有潮流求解器计算事件前初始运行点">
+          <input id="trPowerFlowInit" type="checkbox" checked/><span>潮流初始化</span>
+        </label>
+        <label class="sub-label">PF迭代
+          <input id="trPfMaxIter" type="number" value="80" step="10" min="5" style="width:62px"/>
+        </label>
+        <label class="sub-label">PF容差
+          <input id="trPfTol" type="number" value="1e-8" step="1e-8" min="1e-12" style="width:82px"/>
+        </label>
+      </div>
+      <div class="control-param-group transient-param-group" title="带 DC 端口 VSC 的 DC 链电容状态设置">
+        <span class="control-param-title">动态 DC 链</span>
+        <label class="sub-label sub-checkbox" title="为带 DC 端口的 VSC 启用 DC 母线电容电压状态">
+          <input id="trDynamicDcLink" type="checkbox"/><span>启用动态 DC 链</span>
+        </label>
+        <label class="sub-label">Cdc(s)
+          <input id="trDcLinkC" type="number" value="0.10" step="0.01" min="0.001" style="width:70px"/>
+        </label>
+        <label class="sub-label">Gdc
+          <input id="trDcLinkG" type="number" value="20" step="1" min="0" style="width:58px"/>
+        </label>
+      </div>
+      <div class="control-param-group transient-param-group" title="指定要在结果中显示的本地 AC/DC 母线观测点">
+        <span class="control-param-title">本地观测点</span>
+        <label class="sub-label" title="指定要在“本地观测点”中显示的 AC 母线 ID，逗号分隔；留空则自动选取扰动母线和关键动态设备">
+          观测AC
+          <input id="trObserverAcBuses" type="text" value="" placeholder="1,5" style="width:82px"/>
+        </label>
+        <label class="sub-label" title="指定要在“本地观测点”中显示的 DC 母线 ID，逗号分隔；留空则自动选取扰动母线和关键动态设备">
+          观测DC
+          <input id="trObserverDcBuses" type="text" value="" placeholder="1,2" style="width:82px"/>
+        </label>
+      </div>
+      <div class="control-param-group transient-param-group transient-param-group-actions" title="运行暂态、检查模型兼容性、导出结果以及控制动态设备轨迹输出">
+        <span class="control-param-title">运行/输出</span>
+        <label class="sub-label sub-checkbox" title="记录动态设备输出，用于传统机组、GFL/GFM、逆变器和 DC 链轨迹">
+          <input id="trRecordDeviceOutputs" type="checkbox" checked/><span>动态设备</span>
+        </label>
+        <button id="btnRunTransient" class="toolbar-btn run-btn" title="运行暂态仿真">运行暂态</button>
+        <button id="btnTransientCompatibility" class="toolbar-btn" title="检查当前系统动态模型与 GridLAB-D / OpenDSS / 标准模型兼容性">模型兼容</button>
+        <button id="btnExportTransient" class="toolbar-btn" title="导出暂态仿真结果 JSON">结果导出</button>
+      </div>
     </div>
-    <div class="transient-toolbar-row transient-event-row">
+    <div class="transient-toolbar-row transient-event-row control-param-group transient-param-group transient-event-group">
+      <span class="control-param-title">扰动序列</span>
       <label class="sub-label">扰动
         <select id="trEventType" title="可选扰动事件">
           <option value="">无</option>

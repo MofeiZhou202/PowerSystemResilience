@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdlib>
@@ -12489,10 +12490,14 @@ int main(int argc, char** argv) {
            [](const httplib::Request& req, httplib::Response& res) {
     try {
       hacdcpf::HybridPowerSystem sys;
+      std::optional<hacdcpf::PowerFlowResult> cached_pf;
+      std::string cached_pf_method;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
         sys = *g_session.current_system;
+        cached_pf = g_session.last_pf_result;
+        cached_pf_method = g_session.last_pf_method;
       }
       if (g_session.busy.exchange(true)) {
         res.status = 409;
@@ -12515,7 +12520,8 @@ int main(int argc, char** argv) {
       opt.use_adaptive_step = j.value("use_adaptive_step", false);
       opt.record_every_step = j.value("record_every_step", true);
       opt.record_initial_state = j.value("record_initial_state", opt.record_initial_state);
-      opt.record_device_outputs = j.value("record_device_outputs", false);
+      opt.record_device_outputs =
+          j.value("record_device_outputs", opt.record_device_outputs);
       opt.output_every_steps = j.value("output_every_steps", opt.output_every_steps);
       opt.output_interval_s = j.value("output_interval_s", opt.output_interval_s);
       opt.max_recorded_snapshots =
@@ -12537,6 +12543,7 @@ int main(int argc, char** argv) {
       }
       opt.run_power_flow_initialization =
           j.value("run_power_flow_initialization", opt.run_power_flow_initialization);
+      const bool requested_power_flow_initialization = opt.run_power_flow_initialization;
       opt.trim_dynamic_initial_conditions =
           j.value("trim_dynamic_initial_conditions", opt.trim_dynamic_initial_conditions);
       opt.dynamic_trim_tol = j.value("dynamic_trim_tol", opt.dynamic_trim_tol);
@@ -12590,8 +12597,30 @@ int main(int argc, char** argv) {
       opt.voltage_blowup_max_dc_pu =
           j.value("voltage_blowup_max_dc_pu", opt.voltage_blowup_max_dc_pu);
 
+      bool used_cached_power_flow_initialization = false;
+      if (requested_power_flow_initialization &&
+          j.value("use_cached_power_flow_initialization", true) &&
+          cached_pf && cached_pf->converged &&
+          cached_pf->vm.size() >= sys.ac.buses.size() &&
+          cached_pf->vdc.size() >= sys.dc.buses.size()) {
+        for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+          sys.ac.buses[i].vm_pu = cached_pf->vm[i];
+          if (i < cached_pf->va.size()) {
+            sys.ac.buses[i].va_deg = cached_pf->va[i] * 180.0 / M_PI;
+          }
+        }
+        for (size_t i = 0; i < sys.dc.buses.size(); ++i) {
+          sys.dc.buses[i].vm_pu = cached_pf->vdc[i];
+        }
+        opt.run_power_flow_initialization = false;
+        used_cached_power_flow_initialization = true;
+      }
+
+      const auto total_start = std::chrono::steady_clock::now();
+      const auto build_start = std::chrono::steady_clock::now();
       hacdcpf::dynamics::DynamicModelBuilder builder;
       hacdcpf::dynamics::DynamicSystem dyn = builder.build(sys, opt);
+      const auto build_end = std::chrono::steady_clock::now();
       if (j.contains("events") && j["events"].is_array()) {
         for (const auto& ej : j["events"]) {
           hacdcpf::dynamics::DynamicEvent event;
@@ -12625,8 +12654,25 @@ int main(int argc, char** argv) {
       }
 
       hacdcpf::dynamics::DynamicSolver solver;
+      const auto solve_start = std::chrono::steady_clock::now();
       const auto result = solver.solve(dyn);
+      const auto solve_end = std::chrono::steady_clock::now();
       json out = dynamic_results_to_json(result, opt);
+      const auto elapsed_ms = [](auto a, auto b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+      };
+      out["timing"] = json{
+          {"build_ms", elapsed_ms(build_start, build_end)},
+          {"solve_ms", elapsed_ms(solve_start, solve_end)},
+          {"total_ms", elapsed_ms(total_start, solve_end)},
+          {"cached_power_flow_initialization", used_cached_power_flow_initialization},
+          {"cached_power_flow_method", used_cached_power_flow_initialization ? cached_pf_method : ""}};
+      out["initialization"]["power_flow_requested_from_gui"] =
+          requested_power_flow_initialization;
+      out["initialization"]["cached_power_flow_initialization"] =
+          used_cached_power_flow_initialization;
+      out["initialization"]["cached_power_flow_method"] =
+          used_cached_power_flow_initialization ? cached_pf_method : "";
       out["scheduled_events"] = scheduled_events;
       out["ac_bus_ids"] = dyn.network.ac_bus_ids;
       out["dc_bus_ids"] = dyn.network.dc_bus_ids;

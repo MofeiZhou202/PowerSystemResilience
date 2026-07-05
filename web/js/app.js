@@ -1598,10 +1598,12 @@ const App = (() => {
     }
     const sys = Canvas.buildSystemJson();
     const jsonStr = JSON.stringify(sys);
-    console.log('[syncToBackend] canvas JSON length:', jsonStr.length);
-    console.log('[syncToBackend] DCDC converters:', JSON.stringify(sys.dcdc_converters, null, 2));
-    console.log('[syncToBackend] VSC converters:', JSON.stringify(sys.vsc_converters, null, 2));
-    console.log('[syncToBackend] DC buses:', JSON.stringify(sys.dc?.buses, null, 2));
+    if (window.__HACDCPF_DEBUG_SYNC) {
+      console.log('[syncToBackend] canvas JSON length:', jsonStr.length);
+      console.log('[syncToBackend] DCDC converters:', JSON.stringify(sys.dcdc_converters, null, 2));
+      console.log('[syncToBackend] VSC converters:', JSON.stringify(sys.vsc_converters, null, 2));
+      console.log('[syncToBackend] DC buses:', JSON.stringify(sys.dc?.buses, null, 2));
+    }
     window.__lastSyncJson = jsonStr;  // for debugging in console
     const data = await apiPost('/api/session/load_json_string', { json_string: jsonStr });
     if (!data) {
@@ -3690,13 +3692,14 @@ const App = (() => {
         enable_converter_coordination_check: true,
       },
       record_every_step: true,
+      record_device_outputs: document.getElementById('trRecordDeviceOutputs')?.checked !== false,
       events,
     };
   }
 
   async function runTransientSimulation() {
     setStatus('暂态仿真中...', 'busy');
-    if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+    if (!await syncToBackend()) { setStatus('同步失败', 'error'); return; }
     const result = await apiPostResult('/api/session/run_transient', transientReadOptions());
     const data = result.data;
     if (result.ok && data && !data.error) {
@@ -4589,7 +4592,7 @@ const App = (() => {
       if (tr) freqTraces.push(tr);
     });
     if (freqChart) {
-      if (freqTraces.length) Plotly.react(freqChart, freqTraces, transientPlotLayout('控制频率 / PLL', 'Hz'), cfg);
+      if (freqTraces.length) Plotly.react(freqChart, freqTraces, transientPlotLayout('GFL/GFM 频率轨迹', 'Hz'), cfg);
       else freqChart.innerHTML = '<p class="empty-hint">无 GFL/GFM 频率轨迹</p>';
     }
     const powerChart = document.getElementById('trPowerChart');
@@ -4599,7 +4602,7 @@ const App = (() => {
       if (tr) pTraces.push(tr);
     });
     if (powerChart) {
-      if (pTraces.length) Plotly.react(powerChart, pTraces, transientPlotLayout('逆变器有功响应', 'MW'), cfg);
+      if (pTraces.length) Plotly.react(powerChart, pTraces, transientPlotLayout('逆变器功率轨迹', 'MW'), cfg);
       else powerChart.innerHTML = '<p class="empty-hint">无逆变器功率轨迹</p>';
     }
     const currentChart = document.getElementById('trCurrentChart');
@@ -4613,7 +4616,7 @@ const App = (() => {
       if (tr) iTraces.push(tr);
     });
     if (currentChart) {
-      if (iTraces.length) Plotly.react(currentChart, iTraces, transientPlotLayout('逆变器电流限幅', 'p.u.'), cfg);
+      if (iTraces.length) Plotly.react(currentChart, iTraces, transientPlotLayout('逆变器电流轨迹', 'p.u.'), cfg);
       else currentChart.innerHTML = '<p class="empty-hint">无逆变器电流轨迹</p>';
     }
     const dcLinkChart = document.getElementById('trDcLinkChart');
@@ -4621,7 +4624,7 @@ const App = (() => {
       const dcLinkTraces = converters.slice(0, 6).map((dev, i) =>
         transientMetricTrace(dev, 'vdc_link_pu', `${dev.name} Vdc`, ['#56b6c2', '#98c379', '#d19a66', '#c678dd', '#61afef', '#e06c75'][i % 6])
       ).filter(Boolean);
-      if (dcLinkTraces.length) Plotly.react(dcLinkChart, dcLinkTraces, transientPlotLayout('DC链电压状态', 'p.u.'), cfg);
+      if (dcLinkTraces.length) Plotly.react(dcLinkChart, dcLinkTraces, transientPlotLayout('动态 DC 链电压轨迹', 'p.u.'), cfg);
       else dcLinkChart.innerHTML = '<p class="empty-hint">未启用动态 DC 链</p>';
     }
     const genFreqChart = document.getElementById('trGenFreqChart');
@@ -4629,7 +4632,7 @@ const App = (() => {
       const traces = gens.slice(0, 6).map((dev, i) =>
         transientMetricTrace(dev, 'frequency_hz', `${dev.name} f`, ['#e06c75', '#d19a66', '#98c379', '#61afef', '#c678dd', '#56b6c2'][i % 6])
       ).filter(Boolean);
-      if (traces.length) Plotly.react(genFreqChart, traces, transientPlotLayout('传统机组转速/频率', 'Hz'), cfg);
+      if (traces.length) Plotly.react(genFreqChart, traces, transientPlotLayout('传统同步机/外部电网频率轨迹', 'Hz'), cfg);
       else genFreqChart.innerHTML = '<p class="empty-hint">无传统同步机/外部电网频率轨迹</p>';
     }
     const genPowerChart = document.getElementById('trGenPowerChart');
@@ -4644,7 +4647,7 @@ const App = (() => {
           traces.push(pm);
         }
       });
-      if (traces.length) Plotly.react(genPowerChart, traces, transientPlotLayout('传统机组电磁/机械功率', 'MW'), cfg);
+      if (traces.length) Plotly.react(genPowerChart, traces, transientPlotLayout('传统机组功率轨迹', 'MW'), cfg);
       else genPowerChart.innerHTML = '<p class="empty-hint">无传统机组功率轨迹</p>';
     }
     const observerChart = document.getElementById('trObserverChart');
@@ -4681,6 +4684,9 @@ const App = (() => {
     const gflCount = transientDeviceByType(data, type => type.includes('GridFollowing')).length;
     const gfmCount = transientDeviceByType(data, type => type.includes('GridForming')).length;
     const genCount = transientTraditionalGenerators(data).length;
+    const opts = data.options || {};
+    const dynamicDcLinkOn = opts.dynamic_dc_link === true;
+    const recordDeviceOutputsOn = opts.record_device_outputs !== false;
     const initStatus = init.power_flow_requested
       ? (init.power_flow_converged ? 'PF收敛' : (init.fallback_voltage_setpoints ? 'PF未收敛/回退' : 'PF未收敛'))
       : '设定值初始化';
@@ -4695,6 +4701,8 @@ const App = (() => {
       ['GFL', gflCount, '台'],
       ['GFM', gfmCount, '台'],
       ['传统机组', genCount, '台'],
+      ['启用动态 DC 链', dynamicDcLinkOn ? '开' : '关', ''],
+      ['动态设备', recordDeviceOutputsOn ? (data.device_series?.length ?? 0) : '未记录', recordDeviceOutputsOn ? '台' : ''],
       ['扰动数', Array.isArray(data.scheduled_events) ? data.scheduled_events.length : 0, '个'],
       ['AC最低电压', nf(final.min_ac_voltage_pu), 'p.u.'],
       ['DC最高电压', nf(final.max_dc_voltage_pu), 'p.u.'],
@@ -4765,6 +4773,7 @@ const App = (() => {
     }
     html += '</div>';
     html += transientRenderModelCompatibility(data);
+    html += '<div class="transient-section-head"><h5>暂态轨迹</h5><span>传统机组 / GFL-GFM / 逆变器 / DC链</span></div>';
     html += '<div class="transient-dashboard-grid">';
     html += '<div id="trVoltageChart" class="transient-chart transient-chart-wide"></div>';
     html += '<div id="trAcHeatmap" class="transient-chart transient-chart-wide"></div>';

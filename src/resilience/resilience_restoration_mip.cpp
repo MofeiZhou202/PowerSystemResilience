@@ -422,6 +422,141 @@ int count_islands(const std::vector<BranchData>& branches,
   return comp;
 }
 
+DistributionResilienceResult make_no_fault_baseline_result(
+    const BuildArtifacts& built,
+    const DistributionResilienceOptions& opts) {
+  DistributionResilienceResult result;
+  result.model = DistributionResilienceModel::MultiPeriodMIPLinDistFlow;
+  result.model_stats = built.stats;
+  result.model_stats.model = DistributionResilienceModel::MultiPeriodMIPLinDistFlow;
+  result.model_stats.model_built = true;
+  result.model_stats.model_solved = true;
+  result.model_stats.model_scope = "ac-only-lindistflow";
+  result.model_stats.solver_name = "no-fault-baseline";
+  result.model_stats.solver_status = "No explicit faults; evaluated intact AC topology without MILP search";
+  result.model_stats.validity.mip_gap_within_tolerance = true;
+  result.model_stats.mip_gap = 0.0;
+  result.feasible = true;
+  result.status = "Strict multi-period MIP/LinDistFlow no-fault baseline evaluated without MILP search";
+
+  const int T = built.steps;
+  const int n_bus = static_cast<int>(built.buses.size());
+  std::vector<int> closed(static_cast<size_t>(built.branches.size()), 0);
+  std::vector<std::vector<int>> adj(static_cast<size_t>(n_bus));
+  for (size_t b = 0; b < built.branches.size(); ++b) {
+    const auto& br = built.branches[b];
+    if (!br.initial_closed) continue;
+    closed[b] = 1;
+    adj[static_cast<size_t>(br.from_pos)].push_back(br.to_pos);
+    adj[static_cast<size_t>(br.to_pos)].push_back(br.from_pos);
+  }
+
+  std::vector<int> comp(static_cast<size_t>(n_bus), -1);
+  int comp_count = 0;
+  for (int i = 0; i < n_bus; ++i) {
+    if (comp[static_cast<size_t>(i)] >= 0) continue;
+    std::vector<int> stack{i};
+    comp[static_cast<size_t>(i)] = comp_count;
+    while (!stack.empty()) {
+      const int u = stack.back();
+      stack.pop_back();
+      for (int v : adj[static_cast<size_t>(u)]) {
+        if (comp[static_cast<size_t>(v)] >= 0) continue;
+        comp[static_cast<size_t>(v)] = comp_count;
+        stack.push_back(v);
+      }
+    }
+    ++comp_count;
+  }
+
+  result.steps.reserve(static_cast<size_t>(T));
+  for (int t = 0; t < T; ++t) {
+    std::vector<double> comp_demand(static_cast<size_t>(comp_count), 0.0);
+    std::vector<double> comp_supply(static_cast<size_t>(comp_count), 0.0);
+    for (int i = 0; i < n_bus; ++i) {
+      const int c = comp[static_cast<size_t>(i)];
+      if (c < 0) continue;
+      comp_demand[static_cast<size_t>(c)] += built.demand_mw[static_cast<size_t>(t)][static_cast<size_t>(i)];
+      comp_supply[static_cast<size_t>(c)] += built.buses[static_cast<size_t>(i)].base_source_cap_mw;
+      comp_supply[static_cast<size_t>(c)] += built.buses[static_cast<size_t>(i)].dispatchable_gen_cap_mw;
+      comp_supply[static_cast<size_t>(c)] += built.renewable_avail_mw[static_cast<size_t>(t)][static_cast<size_t>(i)];
+    }
+
+    DistributionResilienceStepResult sr;
+    sr.step_index = t;
+    sr.hour = static_cast<double>(t) * opts.time_step_hr;
+    sr.shed_by_priority.assign(4, 0.0);
+    std::vector<int> energized(static_cast<size_t>(n_bus), 0);
+
+    for (int i = 0; i < n_bus; ++i) {
+      const int c = comp[static_cast<size_t>(i)];
+      const double demand = built.demand_mw[static_cast<size_t>(t)][static_cast<size_t>(i)];
+      const double ratio = (c >= 0 && comp_demand[static_cast<size_t>(c)] > kEps)
+          ? std::clamp(comp_supply[static_cast<size_t>(c)] / comp_demand[static_cast<size_t>(c)], 0.0, 1.0)
+          : 1.0;
+      const double served = demand * ratio;
+      const double shed = std::max(0.0, demand - served);
+      energized[static_cast<size_t>(i)] = ratio > kEps ? 1 : 0;
+
+      sr.total_demand_mw += demand;
+      sr.served_mw += served;
+      sr.shed_mw += shed;
+      sr.total_res_mw += built.renewable_avail_mw[static_cast<size_t>(t)][static_cast<size_t>(i)];
+      result.weighted_unserved_mwh +=
+          penalty_from_priority(built.buses[static_cast<size_t>(i)].priority, opts.mip) * shed * opts.time_step_hr;
+      const int pidx = static_cast<int>(built.buses[static_cast<size_t>(i)].priority);
+      if (static_cast<size_t>(pidx) < sr.shed_by_priority.size()) {
+        sr.shed_by_priority[static_cast<size_t>(pidx)] += shed;
+      }
+
+      sr.bus_supply_kind.push_back("AC");
+      sr.bus_supply_index.push_back(built.buses[static_cast<size_t>(i)].index);
+      sr.bus_supply_demand_mw.push_back(demand);
+      sr.bus_supply_served_mw.push_back(served);
+      sr.bus_supply_shed_mw.push_back(shed);
+      sr.bus_supply_priority_tier.push_back(pidx);
+      sr.bus_supply_importance.push_back(built.buses[static_cast<size_t>(i)].importance);
+    }
+
+    for (size_t b = 0; b < built.branches.size(); ++b) {
+      if (!closed[b]) sr.open_ac_branch_ids.push_back(built.branches[b].index);
+    }
+    sr.island_count = count_islands(built.branches, closed, energized);
+    sr.restoration_ratio = sr.total_demand_mw > kEps ? sr.served_mw / sr.total_demand_mw : 1.0;
+
+    for (const auto& m : built.mess) {
+      MESSStateStep ms;
+      ms.storage_index = m.index;
+      ms.bus = built.buses[static_cast<size_t>(m.init_bus_pos)].index;
+      ms.target_bus = ms.bus;
+      ms.status = "Stationary";
+      ms.energy_mwh = m.e_init_mwh;
+      ms.soc = m.e_max_mwh > kEps ? std::clamp(m.e_init_mwh / m.e_max_mwh, 0.0, 1.0) : 0.0;
+      ms.arrival_time_hr = sr.hour;
+      sr.mess_states.push_back(ms);
+    }
+
+    result.total_demand_mwh += sr.total_demand_mw * opts.time_step_hr;
+    result.total_served_mwh += sr.served_mw * opts.time_step_hr;
+    result.total_shed_mwh += sr.shed_mw * opts.time_step_hr;
+    result.peak_shed_mw = std::max(result.peak_shed_mw, sr.shed_mw);
+    result.steps.push_back(std::move(sr));
+  }
+
+  result.resilience_index = result.total_demand_mwh > kEps
+      ? result.total_served_mwh / result.total_demand_mwh
+      : 1.0;
+  double avg_ratio = 0.0;
+  for (const auto& step : result.steps) avg_ratio += step.restoration_ratio;
+  result.avg_restoration_ratio = result.steps.empty() ? 1.0 : avg_ratio / static_cast<double>(result.steps.size());
+  result.final_restoration_ratio = result.steps.empty() ? 1.0 : result.steps.back().restoration_ratio;
+  result.total_ens_mwh = result.total_shed_mwh;
+  result.max_curtailment_mw = result.peak_shed_mw;
+  result.completed = result.feasible;
+  if (!result.steps.empty()) result.restoration_time_hr = result.steps.back().hour;
+  return result;
+}
+
 // ── AC-ONLY MODEL SCOPE ───────────────────────────────────────────────────────
 // build_mip_skeleton() and run_distribution_resilience_mip_assessment() model
 // the AC distribution network only (sys.ac.buses, sys.ac.branches).
@@ -1017,6 +1152,9 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
   auto built = build_mip_skeleton(sys, opts);
   result.model_stats = built.stats;
   for (const auto& f : built.faults) result.fault_sequence.push_back({ResilienceBranchKind::AC, f.branch_index, f.start_hr, f.repair_hr, f.name});
+  if (built.faults.empty() && opts.faults.empty() && opts.default_fault_count <= 0) {
+    return make_no_fault_baseline_result(built, opts);
+  }
 
   solver::BCOptions bc_opts;
   bc_opts.time_limit_sec = static_cast<double>(opts.mip.max_time_s);

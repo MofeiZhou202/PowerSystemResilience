@@ -1268,6 +1268,108 @@ StageMessOnlySolution make_stationary_mess_solution(const std::vector<StageMessS
   return sol;
 }
 
+StageMessOnlySolution make_greedy_ra_residual_mess_solution(
+    const std::vector<int>& ac_bus_ids,
+    const std::unordered_map<int, int>& ac_bus_pos,
+    const std::vector<std::vector<double>>& residual,
+    const std::vector<std::vector<double>>& weight,
+    const std::vector<std::vector<double>>& dist,
+    const std::vector<StageMessState>& mess,
+    const DistributionResilienceOptions& opts,
+    const std::string& status) {
+  const int T = static_cast<int>(residual.size());
+  const int nb = static_cast<int>(ac_bus_ids.size());
+  const double dt = opts.time_step_hr;
+  StageMessOnlySolution sol;
+  sol.feasible = true;
+  sol.status = status;
+  sol.mess_states_by_step.assign(static_cast<size_t>(T), {});
+  sol.served_mw_by_ac_bus.assign(static_cast<size_t>(T), {});
+  if (T <= 0 || nb <= 0 || dt <= kEps) return sol;
+
+  std::vector<std::vector<double>> remaining = residual;
+  const double max_step_dist = std::max(opts.mess_travel_speed_kmph, 1.0) * dt;
+
+  for (const auto& st : mess) {
+    int current_pos = 0;
+    if (const auto it = ac_bus_pos.find(st.ac_bus_id); it != ac_bus_pos.end()) {
+      current_pos = it->second;
+    }
+    double energy_mwh = st.energy_mwh;
+    double traveled_km = 0.0;
+
+    for (int t = 0; t < T; ++t) {
+      MESSStateStep ms;
+      ms.storage_index = st.storage_index;
+      ms.bus = ac_bus_ids[static_cast<size_t>(current_pos)];
+      ms.target_bus = ms.bus;
+      ms.status = "Stationary";
+      ms.arrival_time_hr = static_cast<double>(t) * dt;
+      ms.remaining_travel_hr = 0.0;
+
+      const double usable_mwh = std::max(0.0, energy_mwh - st.e_min_mwh);
+      const double dispatch_cap_mw = dt > kEps
+          ? std::min(st.pmax_mw, usable_mwh * std::max(st.eta_discharge, 1.0e-6) / dt)
+          : 0.0;
+      const double local_need = remaining[static_cast<size_t>(t)][static_cast<size_t>(current_pos)];
+      const double dispatch_mw = std::min(dispatch_cap_mw, std::max(0.0, local_need));
+      if (dispatch_mw > 1.0e-7) {
+        remaining[static_cast<size_t>(t)][static_cast<size_t>(current_pos)] =
+            std::max(0.0, local_need - dispatch_mw);
+        sol.served_mw_by_ac_bus[static_cast<size_t>(t)][ms.bus] += dispatch_mw;
+        energy_mwh = std::max(st.e_min_mwh,
+                              energy_mwh - dispatch_mw * dt / std::max(st.eta_discharge, 1.0e-6));
+        sol.delivered_mwh += dispatch_mw * dt;
+        ms.dispatch_mw = dispatch_mw;
+        ms.status = "Deployed";
+      } else if (t + 1 < T && usable_mwh > kEps) {
+        auto future_score = [&](int bus_pos) {
+          double score = 0.0;
+          for (int tau = t + 1; tau < T; ++tau) {
+            score += remaining[static_cast<size_t>(tau)][static_cast<size_t>(bus_pos)] *
+                     weight[static_cast<size_t>(tau)][static_cast<size_t>(bus_pos)] * dt;
+          }
+          return score;
+        };
+
+        int best_pos = current_pos;
+        double best_score = future_score(current_pos);
+        for (int b = 0; b < nb; ++b) {
+          if (b == current_pos) continue;
+          const double d = dist[static_cast<size_t>(current_pos)][static_cast<size_t>(b)];
+          if (!std::isfinite(d) || d <= kEps || d > max_step_dist + kEps) continue;
+          if (traveled_km + d > st.max_travel_distance_km + kEps) continue;
+          const double travel_mwh = d * st.e_consumption_mwh_km;
+          if (energy_mwh - travel_mwh < st.e_min_mwh - kEps) continue;
+          const double score = future_score(b);
+          if (score > best_score + 1.0e-9) {
+            best_score = score;
+            best_pos = b;
+          }
+        }
+
+        if (best_pos != current_pos) {
+          const double d = dist[static_cast<size_t>(current_pos)][static_cast<size_t>(best_pos)];
+          energy_mwh = std::max(st.e_min_mwh, energy_mwh - d * st.e_consumption_mwh_km);
+          traveled_km += d;
+          sol.travel_distance_km += d;
+          ms.target_bus = ac_bus_ids[static_cast<size_t>(best_pos)];
+          ms.status = "InTransit";
+          ms.remaining_travel_hr = dt;
+          ms.arrival_time_hr = static_cast<double>(t + 1) * dt;
+          current_pos = best_pos;
+        }
+      }
+
+      ms.energy_mwh = energy_mwh;
+      ms.soc = st.e_rated_mwh > kEps ? std::clamp(energy_mwh / st.e_rated_mwh, 0.0, 1.0) : 0.0;
+      sol.mess_states_by_step[static_cast<size_t>(t)].push_back(ms);
+    }
+  }
+
+  return sol;
+}
+
 StageMessOnlySolution solve_ra_residual_mess_milp(
     const HybridPowerSystem& sys,
     const DistributionResilienceOptions& opts,
@@ -1460,7 +1562,20 @@ StageMessOnlySolution solve_ra_residual_mess_milp(
   sol.stats.solver_status = solve_result.stats.status;
   sol.feasible = solve_result.stats.success && solve_result.x.size() == mb.model.linear_part.c.size();
   sol.status = solve_result.stats.status;
-  if (!sol.feasible) return sol;
+  auto greedy_repair = [&]() {
+    StageMessOnlySolution greedy = make_greedy_ra_residual_mess_solution(
+        ac_bus_ids, ac_bus_pos, residual, weight, dist, mess, opts,
+        sol.status.empty()
+            ? "Constructive RA residual MESS routing fallback"
+            : sol.status + "; constructive RA residual MESS routing fallback");
+    greedy.stats = sol.stats;
+    return greedy;
+  };
+  if (!sol.feasible) {
+    StageMessOnlySolution greedy = greedy_repair();
+    if (greedy.delivered_mwh > kEps || greedy.travel_distance_km > kEps) return greedy;
+    return sol;
+  }
 
   const auto& x = solve_result.x;
   sol.mess_states_by_step.assign(static_cast<size_t>(T), {});
@@ -1517,6 +1632,10 @@ StageMessOnlySolution solve_ra_residual_mess_milp(
       states.push_back(ms);
       sol.delivered_mwh += dispatch * dt;
     }
+  }
+  if (total_residual_mwh > kEps && sol.delivered_mwh <= kEps) {
+    StageMessOnlySolution greedy = greedy_repair();
+    if (greedy.delivered_mwh > kEps || greedy.travel_distance_km > kEps) return greedy;
   }
   return sol;
 }
