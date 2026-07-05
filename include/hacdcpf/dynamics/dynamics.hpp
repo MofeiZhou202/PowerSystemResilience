@@ -10,6 +10,7 @@
 #include "hacdcpf/dynamics/DynamicState.hpp"
 #include "hacdcpf/dynamics/DynamicSystem.hpp"
 #include "hacdcpf/dynamics/NetworkState.hpp"
+#include "hacdcpf/dynamics/SmallSignal.hpp"
 #include "hacdcpf/dynamics/devices/BasicDynamicDevices.hpp"
 #include "hacdcpf/dynamics/devices/BatteryDynamic.hpp"
 #include "hacdcpf/dynamics/devices/DCDCConverterDynamic.hpp"

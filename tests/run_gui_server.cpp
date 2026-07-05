@@ -12488,6 +12488,86 @@ int main(int argc, char** argv) {
     }
   });
 
+  // Small-signal (modal) analysis about the initialized operating point:
+  // eigenvalues, damping ratios, and per-mode participation factors.
+  svr.Post("/api/session/small_signal",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      const json j = json::parse(req.body.empty() ? "{}" : req.body);
+      hacdcpf::dynamics::DynamicSolverOptions opt;
+      opt.t_start_s = j.value("t_start_s", 0.0);
+      opt.run_power_flow_initialization =
+          j.value("run_power_flow_initialization", opt.run_power_flow_initialization);
+      opt.trim_dynamic_initial_conditions =
+          j.value("trim_dynamic_initial_conditions", opt.trim_dynamic_initial_conditions);
+      opt.project_to_canonical = j.value("project_to_canonical", true);
+      opt.synthesize_three_phase_if_absent =
+          j.value("synthesize_three_phase_if_absent", true);
+      opt.source_stiffness_pu = j.value("source_stiffness_pu", opt.source_stiffness_pu);
+
+      hacdcpf::dynamics::DynamicModelBuilder builder;
+      hacdcpf::dynamics::DynamicSystem dyn = builder.build(sys, opt);
+      const hacdcpf::dynamics::SmallSignalResult ss =
+          hacdcpf::dynamics::small_signal_analysis(dyn);
+
+      json out;
+      out["success"] = ss.success;
+      out["message"] = ss.message;
+      out["n_differential"] = ss.n_differential;
+      out["n_algebraic"] = ss.n_algebraic;
+      out["stable"] = ss.stable;
+      json modes = json::array();
+      for (const auto& m : ss.modes) {
+        modes.push_back(json{{"real", m.eigen_real},
+                             {"imag", m.eigen_imag},
+                             {"frequency_hz", m.frequency_hz},
+                             {"damping_ratio", m.damping_ratio},
+                             {"oscillatory", m.oscillatory},
+                             {"dominant_state", m.dominant_state},
+                             {"dominant_state_index", m.dominant_state_index}});
+      }
+      out["modes"] = modes;
+      json states = json::array();
+      for (const auto& s : ss.states) {
+        states.push_back(json{{"index", s.index},
+                              {"label", s.label},
+                              {"device_name", s.device_name},
+                              {"device_type", s.device_type},
+                              {"component_index", s.component_index},
+                              {"local_index", s.local_index}});
+      }
+      out["states"] = states;
+      // Participation factors per mode, keeping only the significant contributors.
+      if (j.value("include_participation", true)) {
+        json part = json::array();
+        for (int i = 0; i < static_cast<int>(ss.modes.size()); ++i) {
+          json row = json::array();
+          for (int k = 0; k < ss.n_differential; ++k) {
+            const double p = ss.participation(i, k);
+            if (p >= 0.02) {  // drop negligible contributions
+              row.push_back(json{{"state", k},
+                                 {"label", ss.states[static_cast<std::size_t>(k)].label},
+                                 {"factor", p}});
+            }
+          }
+          part.push_back(row);
+        }
+        out["participation"] = part;
+      }
+      res.status = ss.success ? 200 : 400;
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
   svr.Post("/api/session/topology",
            [](const httplib::Request&, httplib::Response& res) {
     try {

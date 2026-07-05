@@ -2493,6 +2493,122 @@ TEST_CASE("Updated GFM inverter exposes dynamic DC-link telemetry",
   CHECK(it->values.count("p_dc_mw") == 1);
 }
 
+namespace {
+
+// Two-bus case with a non-slack machine (model selectable) at bus 2, optionally
+// carrying an AVR and PSS, for small-signal analysis.
+HybridPowerSystem make_small_signal_case(const std::string& model, bool avr, bool pss) {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 50.0;
+  ACBus b1; b1.index = 1; b1.bus_type = BusType::SLACK; b1.vm_pu = 1.02;
+  ACBus b2; b2.index = 2; b2.bus_type = BusType::PV; b2.vm_pu = 1.0;
+  sys.ac.buses = {b1, b2};
+  ACBranch br; br.index = 1; br.from_bus = 1; br.to_bus = 2; br.r_pu = 0.01; br.x_pu = 0.05; br.tap = 1.0;
+  sys.ac.branches = {br};
+  Generator gs; gs.index = 1; gs.bus = 1; gs.is_slack = true; gs.vg_pu = 1.02; gs.pg_mw = 40;
+  gs.xdpp_pu = 0.2; gs.qmax_mvar = 300; gs.qmin_mvar = -300;
+  Generator g2; g2.index = 2; g2.bus = 2; g2.vg_pu = 1.0; g2.pg_mw = 50; g2.qg_mvar = 10;
+  g2.xdpp_pu = 0.2; g2.inertia_h = 3.0; g2.pmax_mw = 200; g2.qmax_mvar = 300; g2.qmin_mvar = -300;
+  g2.dynamic_model.model_name = model;
+  auto add = [&](const std::string& type, const std::string& m,
+                 std::map<std::string, double> p) {
+    hacdcpf::DynamicModelComponentProfile c;
+    c.type = type; c.model = m; c.standard = "IEEE"; c.parameters = std::move(p);
+    g2.dynamic_model.components.push_back(std::move(c));
+  };
+  if (avr) add("exciter", "SEXS", {{"Ka", 50}, {"Ta", 0.1}});
+  if (pss) add("pss", "PSS1A", {{"Ks", 15}, {"Tw", 10}, {"T1", 0.15}, {"T2", 0.03},
+                                {"T3", 0.15}, {"T4", 0.03}});
+  sys.ac.generators = {gs, g2};
+  Load ld; ld.index = 1; ld.bus = 2; ld.p_mw = 30; ld.q_mvar = 10;
+  sys.ac.loads = {ld};
+  return sys;
+}
+
+SmallSignalResult analyze_small_signal(const std::string& model, bool avr, bool pss) {
+  DynamicSolverOptions opt;
+  auto sys = make_small_signal_case(model, avr, pss);
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+  return small_signal_analysis(dyn);
+}
+
+// The electromechanical mode: oscillatory, machine-dominant, sub-5 Hz, least damped.
+SmallSignalMode electromechanical_mode(const SmallSignalResult& r) {
+  SmallSignalMode best;
+  best.frequency_hz = -1.0;
+  best.damping_ratio = 1e30;
+  for (const auto& m : r.modes) {
+    if (!m.oscillatory || m.frequency_hz < 0.1 || m.frequency_hz > 5.0) continue;
+    if (m.dominant_state.find("SynchronousMachine") == std::string::npos) continue;
+    if (m.damping_ratio < best.damping_ratio) best = m;
+  }
+  return best;
+}
+
+// Independent time-domain estimate of the swing-mode frequency (peak spacing).
+double measure_swing_frequency_hz(const std::string& model) {
+  DynamicSolverOptions opt;
+  opt.solver_type = DynamicSolverType::TrapezoidalNewton;
+  opt.t_end_s = 8.0;
+  opt.dt_s = 0.002;
+  auto sys = make_small_signal_case(model, false, false);
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+  DynamicEvent e; e.time_s = 1.0; e.type = DynamicEventType::ACLoadScale; e.bus = 2; e.value = 1.2;
+  dyn.events.push_back(e);
+  DynamicSolver solver;
+  const DynamicResults r = solver.solve(dyn);
+  const auto w = device_output_series(r, "SynchronousMachine", 2, "omega_pu");
+  double wf = w.y.empty() ? 1.0 : w.y.back();
+  std::vector<double> peak_t;
+  for (std::size_t i = 1; i + 1 < w.y.size(); ++i) {
+    if (w.t[i] < 1.0) continue;
+    const double a = w.y[i] - wf, am = w.y[i - 1] - wf, ap = w.y[i + 1] - wf;
+    if (a > am && a > ap && a > 1e-6) peak_t.push_back(w.t[i]);
+  }
+  if (peak_t.size() < 2) return -1.0;
+  return 1.0 / ((peak_t.back() - peak_t.front()) / (peak_t.size() - 1));
+}
+
+}  // namespace
+
+TEST_CASE("Small-signal analysis eigenvalues match time-domain and rank controls",
+          "[dynamics][smallsignal]") {
+  SECTION("eigenvalue frequency matches the independent time-domain oscillation") {
+    const SmallSignalResult ss = analyze_small_signal("ClassicalMachine", false, false);
+    REQUIRE(ss.success);
+    CHECK(static_cast<int>(ss.modes.size()) == ss.n_differential);
+    CHECK(ss.n_algebraic > 0);
+    const SmallSignalMode em = electromechanical_mode(ss);
+    REQUIRE(em.frequency_hz > 0.0);
+    CHECK(em.dominant_state.find("SynchronousMachine") != std::string::npos);
+    CHECK(em.oscillatory);
+    const double f_time = measure_swing_frequency_hz("ClassicalMachine");
+    REQUIRE(f_time > 0.0);
+    CHECK(std::abs(em.frequency_hz - f_time) / f_time < 0.05);  // within 5%
+    // participation of each mode is a normalized distribution over states.
+    for (int i = 0; i < ss.n_differential; ++i) {
+      CHECK(ss.participation.row(i).sum() == Catch::Approx(1.0).margin(1e-6));
+    }
+  }
+
+  SECTION("a PSS increases the electromechanical damping ratio (GENROU)") {
+    const SmallSignalResult no_pss = analyze_small_signal("GENROU", true, false);
+    const SmallSignalResult with_pss = analyze_small_signal("GENROU", true, true);
+    REQUIRE(no_pss.success);
+    REQUIRE(with_pss.success);
+    const SmallSignalMode em0 = electromechanical_mode(no_pss);
+    const SmallSignalMode em1 = electromechanical_mode(with_pss);
+    REQUIRE(em0.frequency_hz > 0.0);
+    REQUIRE(em1.frequency_hz > 0.0);
+    CHECK(em0.damping_ratio > 0.0);                     // stable without PSS
+    CHECK(em1.damping_ratio > em0.damping_ratio + 0.05);  // PSS materially improves damping
+  }
+}
+
 TEST_CASE("Mass-matrix DAE core matches the partitioned backward-Euler oracle",
           "[dynamics][dae]") {
   // The simultaneous DAE (bus voltages as algebraic states, one sparse Newton
