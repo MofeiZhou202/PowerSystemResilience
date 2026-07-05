@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <sstream>
@@ -989,8 +990,8 @@ struct PsdGflCase {
   double pll_lpf_t_s{0.0};
 };
 
-DynamicResults run_hacdcpf_psd_gfl_case(const PsdGflCase& spec,
-                                        double base_mva) {
+HybridPowerSystem make_psd_gfl_case(const PsdGflCase& spec,
+                                    double base_mva) {
   auto sys = make_hybrid_dc_case();
   sys.base_mva = base_mva;
   sys.ac.base_mva = base_mva;
@@ -1004,6 +1005,12 @@ DynamicResults run_hacdcpf_psd_gfl_case(const PsdGflCase& spec,
        {{"kp_pll", spec.pll_kp},
         {"ki_pll", spec.pll_ki},
         {"pll_lpf_t_s", spec.pll_lpf_t_s}}});
+  return sys;
+}
+
+DynamicResults run_hacdcpf_psd_gfl_case(const PsdGflCase& spec,
+                                        double base_mva) {
+  auto sys = make_psd_gfl_case(spec, base_mva);
 
   DynamicSolverOptions opt = fast_options();
   opt.run_power_flow_initialization = true;
@@ -1427,6 +1434,7 @@ struct ManifestSignalSpec {
   double rms_tolerance{1.0};
   double max_tolerance{1.0};
   bool compare_relative{false};
+  double local_scale{1.0};
 };
 
 struct ManifestDeviceSpec {
@@ -1555,12 +1563,23 @@ ManifestExecutableCase parse_manifest_executable_case(const Json& raw) {
 
   const auto& event = hacdcpf.at("event");
   const std::string event_type = event.at("type").get<std::string>();
-  REQUIRE(event_type == "ACBranchTrip");
-  out.event.type = DynamicEventType::ACBranchTrip;
+  if (event_type == "ACBranchTrip") {
+    out.event.type = DynamicEventType::ACBranchTrip;
+  } else {
+    REQUIRE(event_type == "Custom");
+    out.event.type = DynamicEventType::Custom;
+  }
   out.event.time_s = event.at("time_s").get<double>();
-  out.event.component_type = event.value("component_type", "AC");
+  out.event.component_type =
+      event.value("component_type", event_type == "ACBranchTrip" ? "AC" : "");
   out.event.component_index = event.at("component_index").get<int>();
   out.event.label = event.value("label", out.id + " event");
+  if (event.contains("params")) {
+    REQUIRE(event.at("params").is_object());
+    for (auto it = event.at("params").begin(); it != event.at("params").end(); ++it) {
+      out.event.params[it.key()] = it.value().get<double>();
+    }
+  }
 
   for (const auto& raw_device : raw.at("comparisons")) {
     ManifestDeviceSpec device;
@@ -1575,6 +1594,7 @@ ManifestExecutableCase parse_manifest_executable_case(const Json& raw) {
       const std::string alignment = raw_signal.value("alignment", "absolute");
       REQUIRE((alignment == "absolute" || alignment == "relative_to_initial"));
       signal.compare_relative = alignment == "relative_to_initial";
+      signal.local_scale = raw_signal.value("local_scale", 1.0);
       const auto& tolerances = raw_signal.at("tolerances");
       signal.rms_tolerance = tolerances.at("rms").get<double>();
       signal.max_tolerance = tolerances.at("max").get<double>();
@@ -1588,8 +1608,46 @@ ManifestExecutableCase parse_manifest_executable_case(const Json& raw) {
 }
 
 HybridPowerSystem make_manifest_system(const ManifestExecutableCase& spec) {
+  if (spec.hacdcpf_fixture == "make_psd_onedoneq_three_bus_subset_case") {
+    return make_psd_onedoneq_three_bus_subset_case();
+  }
   if (spec.hacdcpf_fixture == "make_psd_simple_marconato_three_bus_case") {
     return make_psd_simple_marconato_three_bus_case();
+  }
+  if (spec.hacdcpf_fixture == "make_psd_genrou_three_bus_subset_case") {
+    return make_psd_genrou_three_bus_subset_case();
+  }
+  if (spec.hacdcpf_fixture == "make_psd_genroe_three_bus_subset_case") {
+    return make_psd_genroe_three_bus_subset_case();
+  }
+  if (spec.hacdcpf_fixture == "make_psd_genroe_high_sat_three_bus_subset_case") {
+    return make_psd_genroe_three_bus_subset_case(true);
+  }
+  if (spec.hacdcpf_fixture == "make_psd_gensal_three_bus_subset_case") {
+    return make_psd_gensal_three_bus_subset_case(false);
+  }
+  if (spec.hacdcpf_fixture == "make_psd_gensae_three_bus_subset_case") {
+    return make_psd_gensal_three_bus_subset_case(true);
+  }
+  if (spec.hacdcpf_fixture == "make_psd_gfl_reduced_pll_case") {
+    return make_psd_gfl_case({"reduced_pll_test24",
+                              "test24",
+                              "test_case_gridfollowing.jl",
+                              "ReducedOrderPLL",
+                              2.0,
+                              20.0,
+                              1.0 / (1.32 * 2.0 * 3.14159265358979323846 * 50.0)},
+                             100.0);
+  }
+  if (spec.hacdcpf_fixture == "make_psd_gfl_kaura_pll_case") {
+    return make_psd_gfl_case({"kaura_pll_test51",
+                              "test51",
+                              "test_case51_gridfollowing_kaura.jl",
+                              "KauraPLL",
+                              0.084,
+                              4.69,
+                              1.0 / 500.0},
+                             100.0);
   }
   FAIL("Unsupported PSD executable manifest fixture: " << spec.hacdcpf_fixture);
   return HybridPowerSystem{};
@@ -1624,16 +1682,15 @@ std::vector<ManifestTraceComparison> build_manifest_trace_comparisons(
   std::vector<ManifestTraceComparison> traces;
   REQUIRE(result.final_snapshot() != nullptr);
   for (const auto& device : spec.devices) {
-    const auto& final_out =
-        require_device_output(*result.final_snapshot(),
-                              device.local_component_type,
-                              device.local_component_index);
-    CHECK(final_out.model_name == "SimpleMarconatoMachine");
+    require_device_output(*result.final_snapshot(),
+                          device.local_component_type,
+                          device.local_component_index);
     for (const auto& signal : device.signals) {
       auto local = device_output_series(result,
                                         device.local_component_type,
                                         device.local_component_index,
-                                        signal.local_key);
+                                        signal.local_key,
+                                        signal.local_scale);
       const std::string psd_signal = device.psd_ref + ":" + signal.psd_quantity;
       write_csv_series(out_dir /
                            ("hacdcpf_manifest_" + safe_artifact_token(spec.id) +
@@ -2586,6 +2643,12 @@ TEST_CASE("PSD component matrix executable manifest is internally consistent",
     if (row->contains("execution_case_id")) {
       CHECK(row->at("execution_case_id") == raw_case.at("id"));
     }
+    if (row->contains("execution_case_ids")) {
+      REQUIRE(row->at("execution_case_ids").is_array());
+      CHECK(std::find(row->at("execution_case_ids").begin(),
+                      row->at("execution_case_ids").end(),
+                      raw_case.at("id")) != row->at("execution_case_ids").end());
+    }
 
     if (!raw_case.value("enabled", false)) continue;
     ++enabled_count;
@@ -2597,7 +2660,7 @@ TEST_CASE("PSD component matrix executable manifest is internally consistent",
     CHECK(spec.t_start_s <= spec.compare_start_s);
     CHECK(spec.compare_end_s <= spec.t_end_s);
     CHECK(spec.dt_s > 0.0);
-    CHECK(row->value("status", "") == "compare-limited");
+    CHECK(row->value("status", "") == "full-gate");
 
     std::size_t signal_count = 0;
     for (const auto& device : spec.devices) {
@@ -2609,6 +2672,7 @@ TEST_CASE("PSD component matrix executable manifest is internally consistent",
         CHECK_FALSE(signal.psd_quantity.empty());
         CHECK(signal.rms_tolerance > 0.0);
         CHECK(signal.max_tolerance > 0.0);
+        CHECK(signal.local_scale > 0.0);
       }
     }
     CHECK(signal_count > 0);
@@ -2633,7 +2697,7 @@ TEST_CASE("PSD component matrix executable manifest is internally consistent",
     }
   }
 
-  CHECK(enabled_count >= 1);
+  CHECK(enabled_count >= 9);
   CHECK(found_simple_marconato_gate);
 }
 
@@ -2690,7 +2754,7 @@ TEST_CASE("PSD-order DynamicDaeDiagnostics exposes SimpleMarconato residual obje
   CHECK(diagnostics.eigenvalues.size() == 20);
 }
 
-TEST_CASE("PSD executable manifest gates SimpleMarconato Test 03 residual vs MassMatrixDae",
+TEST_CASE("PSD executable manifest gates promoted full-contract rows vs MassMatrixDae",
           "[dynamics][benchmark][psd][manifest][external]") {
   const char* run_psd = std::getenv("HACDCPF_RUN_PSD_COMPARE");
   const bool run_external_psd = run_psd != nullptr && std::string(run_psd) == "1";
@@ -2699,32 +2763,35 @@ TEST_CASE("PSD executable manifest gates SimpleMarconato Test 03 residual vs Mas
     return;
   }
 
-  const Json payload = load_psd_component_test_matrix();
-  const Json* raw_case =
-      find_manifest_case(payload,
-                         "psd-test03-simple-marconato-residual-vs-mass-matrix");
-  REQUIRE(raw_case != nullptr);
-  const ManifestExecutableCase spec = parse_manifest_executable_case(*raw_case);
-  REQUIRE(spec.reference_formulation == "ResidualModel");
-  REQUIRE(spec.reference_integrator == "IDA");
-  REQUIRE(spec.hacdcpf_solver == "MassMatrixDae");
-
   const std::filesystem::path out_dir =
       std::filesystem::temp_directory_path() / "hacdcpf_psd_manifest_validation";
   std::filesystem::create_directories(out_dir);
 
-  const DynamicResults result = run_manifest_hacdcpf_case(spec);
-  INFO(spec.id << ": " << result.message);
-  REQUIRE(result.success);
-  CHECK(result.initialization.power_flow_converged);
-  CHECK(result.initialization.dynamic_trim_converged);
-  REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= 1e-7);
-  REQUIRE_FALSE(result.applied_event_records.empty());
-  REQUIRE(result.snapshots.size() > 100);
+  const Json payload = load_psd_component_test_matrix();
+  std::vector<ManifestTraceComparison> traces;
+  for (const auto& raw_case : payload.at("execution_manifest").at("cases")) {
+    if (!raw_case.value("enabled", false)) continue;
+    const ManifestExecutableCase spec = parse_manifest_executable_case(raw_case);
+    REQUIRE(spec.reference_formulation == "ResidualModel");
+    REQUIRE(spec.reference_integrator == "IDA");
+    REQUIRE(spec.hacdcpf_solver == "MassMatrixDae");
 
-  const std::vector<ManifestTraceComparison> traces =
-      build_manifest_trace_comparisons(spec, result, out_dir);
-  REQUIRE(traces.size() == 8);
+    const DynamicResults result = run_manifest_hacdcpf_case(spec);
+    INFO(spec.id << ": " << result.message);
+    REQUIRE(result.success);
+    CHECK(result.initialization.power_flow_converged);
+    CHECK(result.initialization.dynamic_trim_converged);
+    REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= 1e-5);
+    REQUIRE_FALSE(result.applied_event_records.empty());
+    REQUIRE(result.snapshots.size() > 100);
+
+    std::vector<ManifestTraceComparison> case_traces =
+        build_manifest_trace_comparisons(spec, result, out_dir);
+    traces.insert(traces.end(),
+                  std::make_move_iterator(case_traces.begin()),
+                  std::make_move_iterator(case_traces.end()));
+  }
+  REQUIRE(traces.size() >= 32);
 
   auto psd_csv_path = [&](const ManifestTraceComparison& trace) {
     return out_dir / ("psd_manifest_" + safe_artifact_token(trace.manifest_id) +

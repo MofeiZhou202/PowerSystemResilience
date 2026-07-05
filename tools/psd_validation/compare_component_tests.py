@@ -119,8 +119,15 @@ def validate_executable_cases(payload: Dict[str, object]) -> None:
         ]
         if len(matches) != 1:
             errors.append(f"{case_id}: row_selector matched {len(matches)} rows")
-        elif matches[0].get("execution_case_id", case_id) != case_id:
-            errors.append(f"{case_id}: matrix row execution_case_id does not match")
+        else:
+            row = matches[0]
+            row_case_id = row.get("execution_case_id")
+            row_case_ids = row.get("execution_case_ids")
+            if row_case_ids is not None:
+                if not isinstance(row_case_ids, list) or case_id not in row_case_ids:
+                    errors.append(f"{case_id}: matrix row execution_case_ids does not include case")
+            elif row_case_id is not None and row_case_id != case_id:
+                errors.append(f"{case_id}: matrix row execution_case_id does not match")
 
         reference = case.get("psd_reference", {})
         if not isinstance(reference, dict):
@@ -167,6 +174,9 @@ def validate_executable_cases(payload: Dict[str, object]) -> None:
                         value = tolerances.get(field)
                         if not isinstance(value, (int, float)) or value <= 0:
                             errors.append(f"{case_id}: tolerance {field} must be positive")
+                local_scale = signal.get("local_scale", 1.0)
+                if not isinstance(local_scale, (int, float)) or local_scale <= 0:
+                    errors.append(f"{case_id}: signal local_scale must be positive")
 
         internal = case.get("internal_diagnostics")
         if internal is not None:

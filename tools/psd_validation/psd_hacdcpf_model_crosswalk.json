@@ -37,7 +37,7 @@
       "status": "supported-subset",
       "comparison_level": "L2",
       "trace_case": "genrou:generator-102-1:delta_deg",
-      "notes": "Parameter profile and trace gate exist; HACDCPF remains a reduced runtime compared with PSD's full positive-sequence DAE implementation."
+      "notes": "Parameter profile and PSD Test 15 ResidualModel/IDA vs MassMatrixDae manifest gate now pass for the accepted GENROU delta/omega trace set; generic internal DAE-object parity remains future work."
     },
     {
       "domain": "generator",
@@ -48,7 +48,7 @@
       "status": "supported-subset",
       "comparison_level": "L2",
       "trace_case": "genroe/genroe_high_sat:generator-102-1:eq_p",
-      "notes": "Distinct exponential-saturation runtime and PSD Test 16 normal/high-saturation component trace gates exist for delta/omega/eq_p/ed_p. HACDCPF remains a reduced runtime compared with PSD's full residual/mass-matrix/small-signal contract."
+      "notes": "Distinct exponential-saturation runtime and PSD Test 16 normal/high-saturation ResidualModel/IDA vs MassMatrixDae manifest gates now pass for delta/omega/eq_p/ed_p; generic internal DAE-object parity remains future work."
     },
     {
       "domain": "generator",
@@ -59,7 +59,7 @@
       "status": "supported-subset",
       "comparison_level": "L2",
       "trace_case": "gensal:generator-102-1:psiq_pp",
-      "notes": "Named salient-pole quadratic runtime and PSD Test 18 component trace gates exist for delta/omega/eq_p/psiq_pp. HACDCPF still lacks PSD residual/mass-matrix/small-signal parity."
+      "notes": "Named salient-pole quadratic runtime and PSD Test 18 ResidualModel/IDA vs MassMatrixDae manifest gate now passes for delta/omega/eq_p/psiq_pp; generic internal DAE-object parity remains future work."
     },
     {
       "domain": "generator",
@@ -70,7 +70,7 @@
       "status": "supported-subset",
       "comparison_level": "L2",
       "trace_case": "gensae:generator-102-1:psiq_pp",
-      "notes": "Named salient-pole exponential runtime and PSD Test 19 component trace gates exist for delta/omega/eq_p/psiq_pp. HACDCPF still lacks PSD residual/mass-matrix/small-signal parity."
+      "notes": "Named salient-pole exponential runtime and PSD Test 19 ResidualModel/IDA vs MassMatrixDae manifest gate now passes for delta/omega/eq_p/psiq_pp; generic internal DAE-object parity remains future work."
     },
     {
       "domain": "generator",
@@ -79,9 +79,9 @@
       "hacdcpf_slot": "machine",
       "hacdcpf_model": "OneDOneQMachine",
       "status": "supported-subset",
-      "comparison_level": "L1",
+      "comparison_level": "L2",
       "trace_case": "onedoneq:generator-102-1:eq_p",
-      "notes": "Named two-state OneDOneQ runtime path is implemented from the local PSD equations and initialization contract. Still lacks PSD ResidualModel/MassMatrixModel, eigenvalue parity, and an exact salient-machine algebraic network stamp."
+      "notes": "Named two-state OneDOneQ runtime path and PSD Test 02 ResidualModel/IDA vs MassMatrixDae manifest gate now pass for delta/omega/eq_p/ed_p; generic internal DAE-object parity remains future work."
     },
     {
       "domain": "generator",
@@ -301,7 +301,7 @@
       "status": "supported-subset",
       "comparison_level": "L2",
       "trace_case": "test24:generator-102-1:p_oc",
-      "notes": "External PSD comparison hook exists for the reduced-order PLL grid-following case."
+      "notes": "PSD Test 24 ResidualModel/IDA vs MassMatrixDae manifest gate now passes for the ReducedOrderPLL GFL p_oc active-power trace."
     },
     {
       "domain": "inverter",
@@ -312,7 +312,7 @@
       "status": "supported-subset",
       "comparison_level": "L2",
       "trace_case": "test51:generator-102-1:p_oc",
-      "notes": "External PSD comparison hook exists for the Kaura PLL grid-following case."
+      "notes": "PSD Test 51 ResidualModel/IDA vs MassMatrixDae manifest gate now passes for the KauraPLL GFL p_oc active-power trace."
     },
     {
       "domain": "inverter",
@@ -488,7 +488,7 @@
       "status": "profile-only",
       "comparison_level": "L4",
       "trace_case": "",
-      "notes": "HACDCPF now exposes a PSD-coordinate diagnostic residual/mass/Jacobian/small-signal object for the passing SimpleMarconato Test 03 case, but not a general PSD-equivalent full residual DAE API for all component stacks."
+      "notes": "HACDCPF now has nine ResidualModel/IDA trace manifest gates against MassMatrixDae and exposes PSD-coordinate residual/mass/Jacobian/small-signal diagnostics for SimpleMarconato Test 03; the diagnostic object is not yet generic for all component stacks."
     },
     {
       "domain": "dae",
@@ -499,7 +499,7 @@
       "status": "missing",
       "comparison_level": "L4",
       "trace_case": "",
-      "notes": "Mass-matrix model and sparse Jacobian reduction remain future work."
+      "notes": "MassMatrixDae is the HACDCPF solver used by the executable manifest gates; a general PSD-equivalent MassMatrixModel object API remains future work."
     }
   ]
 }

@@ -4,6 +4,7 @@
   "scope": "First-pass PowerSimulationsDynamics.jl component-test comparison focused on transmission-dynamics machines and IBRs.",
   "status_legend": {
     "compare-limited": "HACDCPF has a current model and an existing or near-existing trace hook, but it does not cover PSD's full residual/mass-matrix/small-signal test contract.",
+    "full-gate": "HACDCPF has an executable PSD ResidualModel/IDA vs HACDCPF MassMatrixDae gate for the declared traces; internal DAE-object parity is included where declared.",
     "compare-failing": "HACDCPF has a current model and trace hook, but the current PSD comparison gate fails and must be treated as a stop/go blocker.",
     "blocked-missing-model": "The PSD test's primary model is not implemented in the HACDCPF transient runtime.",
     "blocked-missing-controller": "The base machine or IBR may exist, but a required PSD controller/block is not implemented.",
@@ -14,6 +15,94 @@
     "version": 1,
     "description": "Opt-in executable PSD comparison gates consumed by tests/test_transient_dynamics.cpp. Cases remain narrow while HACDCPF grows PSD-equivalent residual-vector, mass-matrix, Jacobian, and small-signal APIs.",
     "cases": [
+      {
+        "id": "psd-test02-onedoneq-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 02",
+        "title": "OneDOneQ PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 02",
+          "psd_components": "OneDOneQMachine, SingleMass"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for OneDOneQMachine delta/omega/eq_p/ed_p state traces.",
+        "psd_case": "onedoneq",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "NetworkSwitch",
+            "time_s": 1.0,
+            "branch": "BUS 1-BUS 3-i_1"
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_onedoneq_three_bus_subset_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "ACBranchTrip",
+            "time_s": 1.0,
+            "component_type": "AC",
+            "component_index": 2,
+            "label": "PSD Test 02 OneDOneQ BUS 1-BUS 3 branch trip"
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 2,
+            "signals": [
+              {
+                "local_key": "angle_rad",
+                "psd_quantity": "delta_rad",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.05,
+                  "max": 0.12
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.002,
+                  "max": 0.005
+                }
+              },
+              {
+                "local_key": "eq_p",
+                "psd_quantity": "eq_p",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.01,
+                  "max": 0.02
+                }
+              },
+              {
+                "local_key": "ed_p",
+                "psd_quantity": "ed_p",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.015,
+                  "max": 0.03
+                }
+              }
+            ]
+          }
+        ]
+      },
       {
         "id": "psd-test03-simple-marconato-residual-vs-mass-matrix",
         "enabled": true,
@@ -164,6 +253,561 @@
           },
           "notes": "Initial internal PSD parity gate for Test 03. Dimensions, residual equilibrium, mass diagonal, unreduced full Jacobian, reduced Jacobian, and eigenvalue nearest-match metrics are all hard gates at the current parity level."
         }
+      },
+      {
+        "id": "psd-test15-genrou-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 15",
+        "title": "GENROU PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 15",
+          "psd_components": "GENROU variants: normal, no saturation, high saturation"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the accepted GENROU delta/omega reduced trace set.",
+        "psd_case": "genrou",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "BranchTrip",
+            "time_s": 1.0,
+            "branch": "BUS 1-BUS 2-i_1"
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_genrou_three_bus_subset_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "ACBranchTrip",
+            "time_s": 1.0,
+            "component_type": "AC",
+            "component_index": 1,
+            "label": "PSD Test 15 GENROU BUS 1-BUS 2 branch trip"
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 2,
+            "signals": [
+              {
+                "local_key": "angle_rad",
+                "local_scale": 57.29577951308232,
+                "psd_quantity": "delta_deg",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 5.0,
+                  "max": 12.0
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.002,
+                  "max": 0.01
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test16-genroe-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 16",
+        "title": "GENROE PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 16",
+          "psd_components": "GENROE variants"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for GENROE delta/omega/eq_p/ed_p state traces.",
+        "psd_case": "genroe",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "BranchTrip",
+            "time_s": 1.0,
+            "branch": "BUS 1-BUS 2-i_1"
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_genroe_three_bus_subset_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "ACBranchTrip",
+            "time_s": 1.0,
+            "component_type": "AC",
+            "component_index": 1,
+            "label": "PSD Test 16 GENROE BUS 1-BUS 2 branch trip"
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 2,
+            "signals": [
+              {
+                "local_key": "angle_rad",
+                "psd_quantity": "delta_rad",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.08726646259971647,
+                  "max": 0.20943951023931953
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.002,
+                  "max": 0.005
+                }
+              },
+              {
+                "local_key": "eq_p",
+                "psd_quantity": "eq_p",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.02,
+                  "max": 0.04
+                }
+              },
+              {
+                "local_key": "ed_p",
+                "psd_quantity": "ed_p",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.02,
+                  "max": 0.04
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test16-genroe-high-sat-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 16",
+        "title": "GENROE high-saturation PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 16",
+          "psd_components": "GENROE variants"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for GENROE high-saturation delta/omega/eq_p/ed_p state traces.",
+        "psd_case": "genroe_high_sat",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "BranchTrip",
+            "time_s": 1.0,
+            "branch": "BUS 1-BUS 2-i_1"
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_genroe_high_sat_three_bus_subset_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "ACBranchTrip",
+            "time_s": 1.0,
+            "component_type": "AC",
+            "component_index": 1,
+            "label": "PSD Test 16 GENROE high-saturation BUS 1-BUS 2 branch trip"
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 2,
+            "signals": [
+              {
+                "local_key": "angle_rad",
+                "psd_quantity": "delta_rad",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.08726646259971647,
+                  "max": 0.20943951023931953
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.002,
+                  "max": 0.005
+                }
+              },
+              {
+                "local_key": "eq_p",
+                "psd_quantity": "eq_p",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.02,
+                  "max": 0.04
+                }
+              },
+              {
+                "local_key": "ed_p",
+                "psd_quantity": "ed_p",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.02,
+                  "max": 0.04
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test18-gensal-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 18",
+        "title": "GENSAL PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 18",
+          "psd_components": "GENSAL"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for GENSAL delta/omega/eq_p/psiq_pp state traces.",
+        "psd_case": "gensal",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "BranchTrip",
+            "time_s": 1.0,
+            "branch": "BUS 1-BUS 2-i_1"
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_gensal_three_bus_subset_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "ACBranchTrip",
+            "time_s": 1.0,
+            "component_type": "AC",
+            "component_index": 1,
+            "label": "PSD Test 18 GENSAL BUS 1-BUS 2 branch trip"
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 2,
+            "signals": [
+              {
+                "local_key": "angle_rad",
+                "psd_quantity": "delta_rad",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.08726646259971647,
+                  "max": 0.20943951023931953
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.002,
+                  "max": 0.005
+                }
+              },
+              {
+                "local_key": "eq_p",
+                "psd_quantity": "eq_p",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.02,
+                  "max": 0.04
+                }
+              },
+              {
+                "local_key": "psiq_pp",
+                "psd_quantity": "psiq_pp",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.02,
+                  "max": 0.04
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test19-gensae-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 19",
+        "title": "GENSAE PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 19",
+          "psd_components": "GENSAE"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for GENSAE delta/omega/eq_p/psiq_pp state traces.",
+        "psd_case": "gensae",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "BranchTrip",
+            "time_s": 1.0,
+            "branch": "BUS 1-BUS 2-i_1"
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_gensae_three_bus_subset_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "ACBranchTrip",
+            "time_s": 1.0,
+            "component_type": "AC",
+            "component_index": 1,
+            "label": "PSD Test 19 GENSAE BUS 1-BUS 2 branch trip"
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 2,
+            "signals": [
+              {
+                "local_key": "angle_rad",
+                "psd_quantity": "delta_rad",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.08726646259971647,
+                  "max": 0.20943951023931953
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.002,
+                  "max": 0.005
+                }
+              },
+              {
+                "local_key": "eq_p",
+                "psd_quantity": "eq_p",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.02,
+                  "max": 0.04
+                }
+              },
+              {
+                "local_key": "psiq_pp",
+                "psd_quantity": "psiq_pp",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.02,
+                  "max": 0.04
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test24-gfl-reduced-pll-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 24",
+        "title": "GFL ReducedOrderPLL PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "system",
+        "row_selector": {
+          "psd_tests": "Test 24",
+          "psd_components": "Grid-following inverter with ReducedOrderPLL"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the GFL ReducedOrderPLL p_oc active-power state trace.",
+        "psd_case": "test24",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "ControlReferenceChange",
+            "time_s": 1.0,
+            "field": "P_ref",
+            "value": 0.7
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_gfl_reduced_pll_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "Custom",
+            "time_s": 1.0,
+            "component_type": "VSC",
+            "component_index": 1,
+            "label": "PSD Test 24 GFL active-power reference step",
+            "params": {
+              "p_ref_mw": 70.0
+            }
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "VSCGridFollowing",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "p_filtered_mw",
+                "local_scale": 0.01,
+                "psd_quantity": "p_oc",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.05,
+                  "max": 0.15
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test51-gfl-kaura-pll-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 51",
+        "title": "GFL KauraPLL PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "system",
+        "row_selector": {
+          "psd_tests": "Test 51",
+          "psd_components": "Grid-following inverter with KauraPLL"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the GFL KauraPLL p_oc active-power state trace.",
+        "psd_case": "test51",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "ControlReferenceChange",
+            "time_s": 1.0,
+            "field": "P_ref",
+            "value": 0.7
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_gfl_kaura_pll_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "Custom",
+            "time_s": 1.0,
+            "component_type": "VSC",
+            "component_index": 1,
+            "label": "PSD Test 51 GFL active-power reference step",
+            "params": {
+              "p_ref_mw": 70.0
+            }
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "VSCGridFollowing",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "p_filtered_mw",
+                "local_scale": 0.01,
+                "psd_quantity": "p_oc",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.05,
+                  "max": 0.15
+                }
+              }
+            ]
+          }
+        ]
       }
     ]
   },
@@ -182,9 +826,10 @@
       "psd_tests": "Test 02",
       "psd_components": "OneDOneQMachine, SingleMass",
       "hacdcpf_candidate": "OneDOneQMachine",
-      "status": "compare-limited",
-      "first_blocker": "Local PSD Test 02 delta/omega/eq_p/ed_p trace gates pass over 0-2s, but HACDCPF does not yet provide PSD-equivalent ResidualModel, MassMatrixModel, eigenvalue, or PSAT trace parity.",
-      "next_action": "Implement the residual/mass-matrix/small-signal parity gate before claiming a full PSD Test 02 pass."
+      "execution_case_id": "psd-test02-onedoneq-residual-vs-mass-matrix",
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gate; delta/omega/eq_p/ed_p are hard manifest checks.",
+      "next_action": "Extend generic internal residual/mass/Jacobian/eigenvalue object parity beyond the SimpleMarconato-specific PSD state order."
     },
     {
       "group": "machine-ibr",
@@ -210,7 +855,7 @@
       "psd_components": "SimpleMarconatoMachine",
       "hacdcpf_candidate": "SimpleMarconatoMachine",
       "execution_case_id": "psd-test03-simple-marconato-residual-vs-mass-matrix",
-      "status": "compare-limited",
+      "status": "full-gate",
       "first_blocker": "Local smoke, opt-in PSD Test 03 trace gates, and the PSD-coordinate residual/mass/full-Jacobian/reduced-Jacobian/eigenvalue gate now pass.",
       "next_action": "Reuse this Test 03 gate as the baseline for the full MarconatoMachine implementation."
     },
@@ -264,36 +909,43 @@
       "psd_tests": "Test 15",
       "psd_components": "GENROU variants: normal, no saturation, high saturation",
       "hacdcpf_candidate": "GENROU",
-      "status": "compare-limited",
-      "first_blocker": "Local and opt-in PSD Test 15 reduced trace gates pass for selected GENROU delta/omega signals, but this is not PSD's full initialization, eigenvalue, ResidualModel, and MassMatrixModel contract.",
-      "next_action": "Promote GENROU to the first full machine comparison if you choose machine-first work."
+      "execution_case_id": "psd-test15-genrou-residual-vs-mass-matrix",
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gate; the accepted GENROU delta/omega reduced trace set is now a hard manifest check.",
+      "next_action": "Add no-saturation/high-saturation GENROU variants and generic internal DAE object parity as follow-on gates."
     },
     {
       "group": "machine",
       "psd_tests": "Test 16",
       "psd_components": "GENROE variants",
       "hacdcpf_candidate": "GENROE",
-      "status": "compare-limited",
-      "first_blocker": "Local PSD Test 16 GENROE normal and high-saturation delta/omega/eq_p/ed_p trace gates pass over 0-2s, but HACDCPF does not yet provide PSD-equivalent ResidualModel, MassMatrixModel, eigenvalue, or PSAT trace parity.",
-      "next_action": "Implement the residual/mass-matrix/small-signal parity gate before claiming a full PSD Test 16 pass."
+      "execution_case_ids": [
+        "psd-test16-genroe-residual-vs-mass-matrix",
+        "psd-test16-genroe-high-sat-residual-vs-mass-matrix"
+      ],
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gates; normal and high-saturation GENROE delta/omega/eq_p/ed_p traces are hard manifest checks.",
+      "next_action": "Extend generic internal residual/mass/Jacobian/eigenvalue object parity to the GENROE stack."
     },
     {
       "group": "machine",
       "psd_tests": "Test 18",
       "psd_components": "GENSAL",
       "hacdcpf_candidate": "GENSAL",
-      "status": "compare-limited",
-      "first_blocker": "Local PSD Test 18 delta/omega/eq_p/psiq_pp trace gates pass over 0-2s, but HACDCPF does not yet provide PSD-equivalent ResidualModel, MassMatrixModel, eigenvalue, or PSAT trace parity.",
-      "next_action": "Implement the residual/mass-matrix/small-signal parity gate before claiming a full PSD Test 18 pass."
+      "execution_case_id": "psd-test18-gensal-residual-vs-mass-matrix",
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gate; GENSAL delta/omega/eq_p/psiq_pp traces are hard manifest checks.",
+      "next_action": "Extend generic internal residual/mass/Jacobian/eigenvalue object parity to the GENSAL stack."
     },
     {
       "group": "machine",
       "psd_tests": "Test 19",
       "psd_components": "GENSAE",
       "hacdcpf_candidate": "GENSAE",
-      "status": "compare-limited",
-      "first_blocker": "Local PSD Test 19 delta/omega/eq_p/psiq_pp trace gates pass over 0-2s, but HACDCPF does not yet provide PSD-equivalent ResidualModel, MassMatrixModel, eigenvalue, or PSAT trace parity.",
-      "next_action": "Implement the residual/mass-matrix/small-signal parity gate before claiming a full PSD Test 19 pass."
+      "execution_case_id": "psd-test19-gensae-residual-vs-mass-matrix",
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gate; GENSAE delta/omega/eq_p/psiq_pp traces are hard manifest checks.",
+      "next_action": "Extend generic internal residual/mass/Jacobian/eigenvalue object parity to the GENSAE stack."
     },
     {
       "group": "machine",
@@ -453,9 +1105,10 @@
       "psd_tests": "Test 24",
       "psd_components": "Grid-following inverter with ReducedOrderPLL",
       "hacdcpf_candidate": "REGC_REEC_GFL_Subset + ReducedOrderPLL",
-      "status": "compare-limited",
-      "first_blocker": "Existing hook compares selected active-power state only; PSD full eigenvalue and DAE gates remain missing.",
-      "next_action": "This is the strongest current IBR comparison candidate."
+      "execution_case_id": "psd-test24-gfl-reduced-pll-residual-vs-mass-matrix",
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gate; the GFL ReducedOrderPLL p_oc active-power state is a hard manifest check.",
+      "next_action": "Add PLL angle/frequency and generic internal DAE object parity once the compact GFL state mapping is formalized."
     },
     {
       "group": "ibr",
@@ -507,9 +1160,10 @@
       "psd_tests": "Test 51",
       "psd_components": "Grid-following inverter with KauraPLL",
       "hacdcpf_candidate": "REGC_REEC_GFL_Subset + KauraPLL",
-      "status": "compare-limited",
-      "first_blocker": "Existing hook compares selected behavior only; full PSD eigenvalue and DAE gates remain missing.",
-      "next_action": "Pair with Test 24 for the first GFL comparison set."
+      "execution_case_id": "psd-test51-gfl-kaura-pll-residual-vs-mass-matrix",
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gate; the GFL KauraPLL p_oc active-power state is a hard manifest check.",
+      "next_action": "Pair with Test 24 to add PLL angle/frequency and generic internal DAE object parity once the compact GFL state mapping is formalized."
     },
     {
       "group": "dynamic-injection",

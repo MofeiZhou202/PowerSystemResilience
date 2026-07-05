@@ -199,10 +199,12 @@ tolerance declaration:
   "[dynamics][benchmark][psd][manifest]"
 ```
 
-The first executable gate is PSD Test 03 SimpleMarconato. The external trace
-part compares PSD `ResidualModel`/`IDA` traces from `simple_marconato` against
-the HACDCPF `MassMatrixDae` trajectory for both machines and all declared
-`delta_rad`/`omega_pu`/`eq_p`/`ed_p` state traces:
+The first executable gate set covers PSD Test 02 OneDOneQ, Test 03
+SimpleMarconato, Test 15 GENROU, Test 16 GENROE normal/high-saturation,
+Test 18 GENSAL, Test 19 GENSAE, Test 24 ReducedOrderPLL GFL, and Test 51
+KauraPLL GFL. The external trace part compares PSD `ResidualModel`/`IDA`
+traces against HACDCPF `MassMatrixDae` trajectories for all declared machine
+state and inverter active-power traces:
 
 ```bash
 HACDCPF_RUN_PSD_COMPARE=1 ./build/macos-release/tests/test_transient_dynamics \
@@ -218,9 +220,10 @@ ${TMPDIR}/hacdcpf_psd_manifest_validation
 The key files are `psd_manifest_validation_summary.csv`,
 `psd_manifest_pointwise_comparison.csv`, and `psd_manifest_batch.log`.
 
-The internal diagnostics part compares the initialized PSD-coordinate DAE
-objects for the same case: residual vector norm, mass diagonal, full finite-
-difference Jacobian, Schur-reduced Jacobian, and small-signal eigenvalues:
+The internal diagnostics part currently compares the initialized PSD-coordinate
+DAE objects for the SimpleMarconato Test 03 case: residual vector norm, mass
+diagonal, full finite-difference Jacobian, Schur-reduced Jacobian, and
+small-signal eigenvalues:
 
 ```bash
 HACDCPF_RUN_PSD_COMPARE=1 ./build/macos-release/tests/test_transient_dynamics \
