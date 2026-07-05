@@ -714,8 +714,7 @@ struct ModelBuilder {
     b.push_back(rhs);
   }
   void finalize(const DistributionResilienceOptions& opts) {
-    model.time_limit_sec = static_cast<double>(opts.mip.max_time_s);
-    model.mip_gap = opts.mip.mip_gap;
+    (void)opts;
     auto& lp = model.linear_part;
     lp.sense = engine::Sense::Minimize;
     lp.vars = vars;

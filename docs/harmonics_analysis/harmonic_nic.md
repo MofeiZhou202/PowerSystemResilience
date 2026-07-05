@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-05)
+> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Status: design/analysis reference; confirm behavior against current implementation before adopting conclusions.
+> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
 # 双端口 NIC 模块在频域谐波模型中的初始电压、电流如何分配？
 
 对于双端口 **NIC，Network-Interfacing Converter**，最关键的是先明确它在 HPF 中的**端口角色**。

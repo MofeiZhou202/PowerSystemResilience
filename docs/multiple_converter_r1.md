@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-05)
+> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Status: design/analysis reference; confirm behavior against current implementation before adopting conclusions.
+> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
 # AC/DC 变换器 AC 侧构网与 VSC 七类控制模式补充文档
 
 # 理论补充与工程实现建议

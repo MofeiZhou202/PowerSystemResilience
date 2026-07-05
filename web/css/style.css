@@ -1814,6 +1814,9 @@ body[data-active-result-group="modelIO"] .result-group[data-result-group="modelI
   color: var(--ink2);
   font-size: 11px;
 }
+.tr-fault-param {
+  display: none;
+}
 .sub-section[hidden] { display: none; }
 .sub-label {
   display: flex;

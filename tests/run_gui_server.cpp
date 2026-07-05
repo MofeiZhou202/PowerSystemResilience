@@ -2709,7 +2709,7 @@ std::vector<std::string> validate_dynamic_event(
       const bool has_admittance =
           event.params.count("g_pu") != 0 || event.params.count("b_pu") != 0;
       if (event.value <= 0.0 && !has_impedance && !has_admittance) {
-        warn("fault intensity/admittance is not positive; solver will use the default strong shunt");
+        warn("fault shunt has no positive g_pu value and no r_pu/x_pu or g_pu/b_pu parameters; solver will use the default strong shunt");
       }
       const auto duration_it = event.params.find("duration_s");
       const double duration =
@@ -5853,10 +5853,27 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
           <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resRunPF"/><label for="resRunPF" style="margin:0;">Run Power Flow</label></div>
         </div>
         <details style="margin-bottom:10px;border:1px solid var(--border);border-radius:8px;padding:6px 12px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);font-size:0.9em;">Advanced Fault / Stage Parameters</summary>
+          <div class="ctrl-row" style="margin-top:10px;">
+            <div><label>Model</label><select id="resModel"><option value="RAStyleStageMILP" selected>RA Stage MILP</option><option value="HeuristicSequential">Heuristic</option><option value="MultiPeriodMIPLinDistFlow">Strict MIP</option></select></div>
+            <div><label>Solver</label><select id="resSolver"><option value="Native">Native</option><option value="HiGHS">HiGHS</option><option value="Gurobi" selected>Gurobi</option></select></div>
+            <div><label>MIP Limit (s)</label><input id="resMipTimeLimit" type="number" min="10" step="10" value="180"/></div>
+            <div><label>MIP Gap</label><input id="resMipGap" type="number" min="0" max="1" step="0.01" value="0.03"/></div>
+            <div><label>Post-Fault Window (hr)</label><input id="resPostFaultWindow" type="number" min="0" step="0.5" value="2.0"/></div>
+            <div><label>AC Start (hr)</label><input id="resAcFaultStartHr" type="number" min="0" step="0.5" value="0"/></div>
+            <div><label>DC Start (hr)</label><input id="resDcFaultStartHr" type="number" min="0" step="0.5" value="0"/></div>
+            <div><label>AC Repair (hr)</label><input id="resAcRepairHours" type="number" min="0" step="0.5" value="6"/></div>
+            <div><label>DC Repair (hr)</label><input id="resDcRepairHours" type="number" min="0" step="0.5" value="8"/></div>
+            <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resConsiderSwitches" checked/><label for="resConsiderSwitches" style="margin:0;">Switch-Based Isolation</label></div>
+            <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resUseRemoteSwitchOnly"/><label for="resUseRemoteSwitchOnly" style="margin:0;">Remote Switches Only</label></div>
+            <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resAllowBranchWithoutSwitch"/><label for="resAllowBranchWithoutSwitch" style="margin:0;">Allow No-Switch Ops</label></div>
+          </div>
+        </details>
+        <details style="margin-bottom:10px;border:1px solid var(--border);border-radius:8px;padding:6px 12px;">
           <summary style="cursor:pointer;font-weight:600;color:var(--accent);font-size:0.9em;">&#9881; Manual Fault Sequence Editor</summary>
-          <p style="color:var(--muted);font-size:0.82em;margin:4px 0 8px 0;">Define individual faults with branch ID, start time and repair duration. Leave empty to use auto-generation above.</p>
+          <p style="color:var(--muted);font-size:0.82em;margin:4px 0 8px 0;">Define individual AC/DC branch faults with branch ID, start time and repair duration. Leave empty to use auto-generation above.</p>
           <table id="resFaultTable" style="width:100%;border-collapse:collapse;font-size:0.85em;">
-            <thead><tr style="background:var(--bg2);"><th style="padding:4px 8px;">Branch ID</th><th style="padding:4px 8px;">Start (hr)</th><th style="padding:4px 8px;">Repair (hr)</th><th style="padding:4px 8px;">Label</th><th style="width:40px;"></th></tr></thead>
+            <thead><tr style="background:var(--bg2);"><th style="padding:4px 8px;">Type</th><th style="padding:4px 8px;">Branch ID</th><th style="padding:4px 8px;">Start (hr)</th><th style="padding:4px 8px;">Repair (hr)</th><th style="padding:4px 8px;">Label</th><th style="width:40px;"></th></tr></thead>
             <tbody id="resFaultTableBody"></tbody>
           </table>
           <button class="btn" style="margin-top:6px;font-size:0.82em;padding:4px 12px;" onclick="addFaultRow()">+ Add Fault</button>
@@ -7586,10 +7603,12 @@ document.getElementById('runFmeaBtn').onclick=async()=>{
 };
 
 /* Distribution Resilience (MESS) */
-function addFaultRow(bid,shr,rhr,lbl){
+function addFaultRow(bid,shr,rhr,lbl,kind){
   const tbody=document.getElementById('resFaultTableBody');
   const tr=document.createElement('tr');
-  tr.innerHTML='<td><input type="number" min="1" value="'+(bid||'')+'" style="width:70px;"/></td>'
+  const branchKind=(String(kind||'AC').toUpperCase()==='DC')?'DC':'AC';
+  tr.innerHTML='<td><select style="width:70px;"><option value="AC"'+(branchKind==='AC'?' selected':'')+'>AC</option><option value="DC"'+(branchKind==='DC'?' selected':'')+'>DC</option></select></td>'
+    +'<td><input type="number" min="1" value="'+(bid||'')+'" style="width:70px;"/></td>'
     +'<td><input type="number" min="0" step="0.5" value="'+(shr||0)+'" style="width:70px;"/></td>'
     +'<td><input type="number" min="1" step="0.5" value="'+(rhr||6)+'" style="width:70px;"/></td>'
     +'<td><input type="text" value="'+(lbl||'')+'" style="width:120px;"/></td>'
@@ -7601,9 +7620,10 @@ function collectManualFaults(){
   const arr=[];
   rows.forEach(r=>{
     const cells=r.querySelectorAll('input');
+    const kind=(r.querySelector('select')||{}).value||'AC';
     const bid=parseInt(cells[0].value,10);
     if(!Number.isFinite(bid)||bid<=0) return;
-    arr.push({branch_id:bid,start_hr:parseFloat(cells[1].value)||0,repair_hr:parseFloat(cells[2].value)||6,label:cells[3].value||''});
+    arr.push({branch_type:kind,branch_id:bid,start_hr:parseFloat(cells[1].value)||0,repair_hr:parseFloat(cells[2].value)||6,label:cells[3].value||''});
   });
   return arr;
 }
@@ -7618,14 +7638,33 @@ async function runResilienceSingle(overrides={}){
     repair_time_hr: parseFloat(document.getElementById('resRepairHours').value)||6.0,
     default_fault_count: parseInt(document.getElementById('resFaultCount').value)||1,
     fault_branch_ids: faultIds,
+    ac_fault_branch_ids: faultIds,
     manual_faults: manualFaults,
     auto_fault_stagger_hr: parseFloat(document.getElementById('resFaultStagger').value)||0,
     auto_fault_start_hr: parseFloat(document.getElementById('resFaultStartHr').value)||0,
+    ac_fault_start_hr: parseFloat(document.getElementById('resAcFaultStartHr').value)||0,
+    dc_fault_start_hr: parseFloat(document.getElementById('resDcFaultStartHr').value)||0,
+    ac_repair_time_hr: parseFloat(document.getElementById('resAcRepairHours').value)||6.0,
+    dc_repair_time_hr: parseFloat(document.getElementById('resDcRepairHours').value)||8.0,
     mess_travel_speed_kmph: parseFloat(document.getElementById('resMessSpeed').value)||40.0,
     allow_reconfiguration: document.getElementById('resAllowReconfig').checked,
     allow_mess_dispatch: document.getElementById('resAllowMess').checked,
     apply_demo_data: document.getElementById('resApplyDemoData').checked,
     run_power_flow: document.getElementById('resRunPF').checked,
+    model: document.getElementById('resModel').value,
+    mip_solver: document.getElementById('resSolver').value,
+    mip_time_limit_s: parseFloat(document.getElementById('resMipTimeLimit').value)||180,
+    mip_gap: parseFloat(document.getElementById('resMipGap').value)||0.03,
+    consider_switches: document.getElementById('resConsiderSwitches').checked,
+    enable_disaster_stages: document.getElementById('resConsiderSwitches').checked,
+    use_switch_based_fault_isolation: document.getElementById('resConsiderSwitches').checked,
+    allow_stage1_open_switches: document.getElementById('resConsiderSwitches').checked,
+    allow_stage2_close_ties: document.getElementById('resConsiderSwitches').checked,
+    require_switch_for_nonfault_branch_operation: document.getElementById('resConsiderSwitches').checked&&!document.getElementById('resAllowBranchWithoutSwitch').checked,
+    allow_branch_operation_without_switch: document.getElementById('resAllowBranchWithoutSwitch').checked||!document.getElementById('resConsiderSwitches').checked,
+    use_remote_switch_only: document.getElementById('resUseRemoteSwitchOnly').checked,
+    post_fault_reconfig_window_hr: parseFloat(document.getElementById('resPostFaultWindow').value)||2.0,
+    disaster_post_fault_reconfig_window_hr: parseFloat(document.getElementById('resPostFaultWindow').value)||2.0,
   },overrides);
   return await api('/api/session/run_distribution_resilience',params);
 }
@@ -7647,7 +7686,7 @@ function plotResilienceResults(body,baseBody){
   if(body.fault_sequence&&body.fault_sequence.length>0){
     const tbody=document.getElementById('resFaultTableBody');
     tbody.innerHTML='';
-    body.fault_sequence.forEach(f=>{addFaultRow(f.branch_index,f.start_hr,f.repair_hr,f.name);});
+    body.fault_sequence.forEach(f=>{addFaultRow(f.branch_index,f.start_hr,f.repair_hr,f.name,f.branch_type||f.branch_kind||'AC');});
   }
 
   // Comparison improvement banner

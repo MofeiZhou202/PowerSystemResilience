@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-05)
+> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Status: implementation-backed reference.
+> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
 # 时序生产模拟 — Rich-Model Mathematical Derivation (Review Draft)
 
 > **Purpose.** This document (1) restates *exactly* the unit-commitment /

@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-05)
+> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Status: design/analysis reference; confirm behavior against current implementation before adopting conclusions.
+> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
 # 多换流器复杂直流网络中如何保持 AC 端口与 DC 端口稳态功率平衡？
 
 对于含有多个 VSC / NIC / DCDC / Energy Router 的复杂 DC 网络，保持 AC 端口与 DC 端口稳态功率平衡的关键是：

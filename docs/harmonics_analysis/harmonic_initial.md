@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-05)
+> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Status: design/analysis reference; confirm behavior against current implementation before adopting conclusions.
+> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
 # 如何将交直流混合潮流基波结果高效映射到频域谐波模型初始工况？
 
 你已有一个**统一迭代交直流混合潮流模块**，这是做混合 AC/DC 谐波潮流的最大优势。因为频域谐波模型并不是从零开始，而是应当以基波潮流的稳态解作为 **operating point**，再围绕该工作点建立：

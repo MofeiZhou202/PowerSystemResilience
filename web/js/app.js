@@ -3445,6 +3445,13 @@ const App = (() => {
     }
   }
 
+  function transientReadOptionalNumber(id) {
+    const raw = String(document.getElementById(id)?.value || '').trim();
+    if (!raw) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  }
+
   function transientNormalizeEvent(raw, fallbackIndex = 0) {
     const type = raw?.type || '';
     if (!type) return null;
@@ -3488,6 +3495,12 @@ const App = (() => {
     const value = numberOr(document.getElementById('trEventValue')?.value, type.includes('LoadScale') ? 1.10 : 0.0);
     const duration = numberOr(document.getElementById('trEventDuration')?.value, type === 'FaultShunt' ? 0.08 : 0.0);
     const params = transientReadParamsInput();
+    if (type === 'FaultShunt') {
+      const rPu = transientReadOptionalNumber('trFaultRPu');
+      const xPu = transientReadOptionalNumber('trFaultXPu');
+      if (rPu != null) params.r_pu = Math.max(0, rPu);
+      if (xPu != null) params.x_pu = xPu;
+    }
     const event = transientNormalizeEvent({
       type,
       time_s: numberOr(document.getElementById('trEventTime')?.value, 0.2),
@@ -3590,7 +3603,10 @@ const App = (() => {
     const domainEl = document.getElementById('trEventDomain');
     const durationEl = document.getElementById('trEventDuration');
     const valueEl = document.getElementById('trEventValue');
+    const valueWrap = document.getElementById('trEventValueWrap');
+    const valueLabel = document.getElementById('trEventValueLabel');
     const paramsEl = document.getElementById('trEventParams');
+    const faultParamEls = document.querySelectorAll('.tr-fault-param');
     if (domainEl) {
       domainEl.disabled = !(type === 'FaultShunt' || type === 'ClearFault' ||
         type === 'ACLoadScale' || type === 'DCLoadScale');
@@ -3604,15 +3620,33 @@ const App = (() => {
         : '该事件为瞬时切换/跳闸，持续时间不参与求解。';
     }
     if (valueEl) {
-      if (type === 'FaultShunt') valueEl.title = '故障并联电导强度 g(pu)，越大表示故障越强';
-      else if (type.includes('LoadScale')) valueEl.title = '负荷倍率，例如 1.10 表示增加 10%';
-      else if (type.includes('StoragePowerStep')) valueEl.title = '储能有功目标 MW';
-      else valueEl.title = '该事件类型通常不需要值';
+      valueEl.disabled = false;
+      if (type === 'FaultShunt') {
+        if (valueLabel) valueLabel.textContent = '导纳g(pu)';
+        valueEl.title = '母线故障并联电导 g(pu)，越大表示故障越强；如果填写 R/X，则后端优先使用 1/(R+jX)';
+        if (valueWrap) valueWrap.title = valueEl.title;
+      } else if (type.includes('LoadScale')) {
+        if (valueLabel) valueLabel.textContent = '负荷倍率';
+        valueEl.title = '负荷倍率，例如 1.10 表示增加 10%，0.80 表示降低 20%';
+        if (valueWrap) valueWrap.title = valueEl.title;
+      } else if (type.includes('StoragePowerStep')) {
+        if (valueLabel) valueLabel.textContent = 'P目标(MW)';
+        valueEl.title = '储能有功功率目标，正值为放电注入，负值为充电吸收';
+        if (valueWrap) valueWrap.title = valueEl.title;
+      } else {
+        if (valueLabel) valueLabel.textContent = '无需数值';
+        valueEl.disabled = true;
+        valueEl.title = '跳闸、合闸、清故障等事件只需要对象和时间，不读取该数值';
+        if (valueWrap) valueWrap.title = valueEl.title;
+      }
     }
+    faultParamEls.forEach(el => {
+      el.style.display = type === 'FaultShunt' ? 'flex' : 'none';
+    });
     if (paramsEl) {
       if (type === 'FaultShunt') {
         paramsEl.placeholder = '{"r_pu":0.001,"x_pu":0.002}';
-        paramsEl.title = '可选：用 r_pu/x_pu 或 g_pu/b_pu 精确设置故障强度，也可写 duration_s';
+        paramsEl.title = '可选高级参数：r_pu/x_pu 等值故障阻抗，或 g_pu/b_pu 等值故障导纳，也可写 duration_s';
       } else if (type.includes('LoadScale')) {
         paramsEl.placeholder = '{"scale":1.10,"duration_s":0.20}';
         paramsEl.title = '可选：负荷倍率和持续时间。当前求解器保持阶跃，后续可用反向事件恢复。';
@@ -3691,6 +3725,10 @@ const App = (() => {
     });
   }
 
+  function refreshTransientObserverSelection() {
+    if (_lastTransientData) showTransientResults(_lastTransientData);
+  }
+
   function transientDeviceByType(data, pred) {
     return (data?.device_series || []).filter(d => pred(String(d.type || '')));
   }
@@ -3761,6 +3799,15 @@ const App = (() => {
     };
   }
 
+  function transientObserverInputBuses() {
+    const read = id => parsePositiveIntText(document.getElementById(id)?.value || '')
+      .filter(v => Number.isFinite(v) && v > 0);
+    return {
+      AC: read('trObserverAcBuses'),
+      DC: read('trObserverDcBuses'),
+    };
+  }
+
   function transientObserverRows(data) {
     const rows = [];
     const seen = new Set();
@@ -3770,6 +3817,21 @@ const App = (() => {
       seen.add(key);
       rows.push(row);
     };
+    const userObservers = transientObserverInputBuses();
+    userObservers.AC.forEach(bus => add({
+      kind: 'bus',
+      name: `AC bus ${bus}`,
+      domain: 'AC',
+      bus,
+      reason: '用户指定',
+    }));
+    userObservers.DC.forEach(bus => add({
+      kind: 'bus',
+      name: `DC bus ${bus}`,
+      domain: 'DC',
+      bus,
+      reason: '用户指定',
+    }));
     (data?.scheduled_events || []).forEach(event => {
       const type = String(event.type || '');
       if (type === 'FaultShunt' || type === 'ClearFault' || type.includes('LoadScale')) {
@@ -10493,6 +10555,8 @@ const App = (() => {
     document.getElementById('btnTransientCompatibility')?.addEventListener('click', runTransientCompatibility);
     document.getElementById('trPowerFlowInit')?.addEventListener('change', updateTransientPfControls);
     document.getElementById('trEventType')?.addEventListener('change', updateTransientEventControls);
+    document.getElementById('trObserverAcBuses')?.addEventListener('change', refreshTransientObserverSelection);
+    document.getElementById('trObserverDcBuses')?.addEventListener('change', refreshTransientObserverSelection);
     document.getElementById('btnAddTransientEvent')?.addEventListener('click', addTransientEventFromControls);
     document.getElementById('btnClearTransientEvents')?.addEventListener('click', clearTransientEvents);
     updateTransientPfControls();
@@ -11403,23 +11467,31 @@ const App = (() => {
       const resilienceSolver = document.getElementById('resSolverSelect')?.value || 'Gurobi';
       const considerSwitches = !!document.getElementById('resConsiderSwitches')?.checked;
       const allowMess = !!document.getElementById('resAllowMess')?.checked;
+      const allowBranchWithoutSwitch = !!document.getElementById('resAllowBranchWithoutSwitch')?.checked;
       const manual_faults = [];
       acIds.forEach((id, i) => manual_faults.push({ branch_type: 'AC', branch_id: id, start_hr: atOr(acStarts, i, 0), repair_hr: atOr(acRepairs, i, 6), label: `AC branch ${id}` }));
       dcIds.forEach((id, i) => manual_faults.push({ branch_type: 'DC', branch_id: id, start_hr: atOr(dcStarts, i, 0), repair_hr: atOr(dcRepairs, i, 8), label: `DC branch ${id}` }));
       const latestEnd = manual_faults.reduce((m, f) => Math.max(m, Number(f.start_hr || 0) + Number(f.repair_hr || 0)), 0);
+      const requestedHorizon = Math.max(1, Math.ceil(num('resHorizonHours', 48)));
+      const postFaultWindow = Math.max(0, num('resPostFaultWindow', 2.0));
       return {
         fault_count:     num('resFaultCount', manual_faults.length || 1),
         ac_fault_branch_ids: acIds,
         dc_fault_branch_ids: dcIds,
         manual_faults,
+        load_scale_factor: Math.max(0, num('resLoadScale', 1.0)),
         mobile_storage_speed_kmh: num('resMobileSpeed', 40),
         allow_mess_dispatch: allowMess,
+        apply_demo_data: document.getElementById('resApplyDemoData')?.checked !== false,
         mip_time_limit_s: Math.max(10, Math.round(num('resMipTimeLimit', 180))),
         mip_gap: Math.max(0, num('resMipGap', 0.03)),
         resilience_model: resilienceModel,
         resilience_solver: resilienceSolver,
         consider_switches: considerSwitches,
-        horizon_hours: Math.max(48, Math.ceil(latestEnd + 4)),
+        use_remote_switch_only: !!document.getElementById('resUseRemoteSwitchOnly')?.checked,
+        allow_branch_operation_without_switch: allowBranchWithoutSwitch,
+        post_fault_reconfig_window_hr: postFaultWindow,
+        horizon_hours: Math.max(requestedHorizon, Math.ceil(latestEnd + 4)),
       };
     }
     document.getElementById('btnGenExtremeScenario')?.addEventListener('click', async () => {
@@ -11489,6 +11561,8 @@ const App = (() => {
         mess_travel_speed_kmph: p.mobile_storage_speed_kmh,
         horizon_hours: p.horizon_hours,
         time_step_hr: 1.0,
+        load_scale_factor: p.load_scale_factor,
+        apply_demo_data: p.apply_demo_data,
         mip_time_limit_s: p.mip_time_limit_s,
         mip_gap: p.mip_gap,
         allow_reconfiguration: true,
@@ -11501,9 +11575,11 @@ const App = (() => {
         fallback_to_stage_mess_dispatch: true,
         allow_stage1_open_switches: isRaStageModel && p.consider_switches,
         allow_stage2_close_ties: isRaStageModel && p.consider_switches,
-        require_switch_for_nonfault_branch_operation: isRaStageModel && p.consider_switches,
-        allow_branch_operation_without_switch: !p.consider_switches,
-        post_fault_reconfig_window_hr: 2.0,
+        require_switch_for_nonfault_branch_operation: isRaStageModel && p.consider_switches && !p.allow_branch_operation_without_switch,
+        allow_branch_operation_without_switch: p.allow_branch_operation_without_switch || !p.consider_switches,
+        use_remote_switch_only: p.use_remote_switch_only,
+        post_fault_reconfig_window_hr: p.post_fault_reconfig_window_hr,
+        disaster_post_fault_reconfig_window_hr: p.post_fault_reconfig_window_hr,
       };
       if (Array.isArray(scenarioProfiles.loadProfile) && scenarioProfiles.loadProfile.length) {
         params.load_profile = scenarioProfiles.loadProfile;

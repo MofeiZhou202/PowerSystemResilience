@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-05)
+> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Status: implementation-backed reference.
+> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
 # Code Review Commenting Guide {#commenting_guide}
 
 This project uses Doxygen comments as the source for the generated HTML

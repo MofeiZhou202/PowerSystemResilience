@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-05)
+> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Status: theoretical notebook reference; pair with runtime tests for production decisions.
+> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
 # 微观车辆行为 — Fleet 聚合 — CTM/LTM 动态传播 — 充放电反馈理论模型
 
 ## 1. 模型目标与总体结构

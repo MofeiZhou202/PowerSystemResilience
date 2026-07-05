@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-05)
+> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Status: design/analysis reference; confirm behavior against current implementation before adopting conclusions.
+> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
 # 混合 AC/DC 多变换器控制校核与统一潮流求解系统  
 # 理论文档与工程实践建议
 

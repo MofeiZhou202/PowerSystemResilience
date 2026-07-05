@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-05)
+> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Status: generated API review note; verify symbols against current headers and sources before citing.
+> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
 # Hybrid AC/DC C++ Notebook {#mainpage}
 
 This generated notebook is meant for code review: data structures, public APIs,

@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-05)
+> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Status: design/analysis reference; confirm behavior against current implementation before adopting conclusions.
+> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
 # C++ Design for a Three-Phase Hybrid AC/DC Transient Simulation Module
 
 You should design the new transient module as a **DAE-based, device-stamped, sparse-matrix simulation engine** that reuses your existing `hacdcpf` static modeling pipeline.

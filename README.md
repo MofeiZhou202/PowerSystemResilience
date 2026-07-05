@@ -2,6 +2,77 @@
 
 本文档面向工程使用者和开发者，说明本项目从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。更底层的公式、接口和实现审计见 `docs/technical_notebook/`。
 
+## 文档同步状态（2026-07-05）
+
+- 本仓库 `docs/` 下全部 Markdown 文档已同步添加实现对齐标注，明确区分“实现支撑文档”与“规划/评审类文档”。
+- 同步依据为当前仓库内 `CMakeLists.txt`、`CMakePresets.json`、`tests/CMakeLists.txt`、`src/` 与 `include/` 的已注册模块与测试目标。
+- 汇总索引见 `docs/generated/documentation_alignment_2026_07_05.md`，可快速查看每份文档的当前状态分类。
+- 如文档描述与代码行为冲突，以仓库实现为准：`src/`、`include/`、`tests/`、`CMake` 配置优先。
+
+## 快速构建与验证（基于当前实现）
+
+推荐使用 CMake preset（与 `docs/cross_platform_build.md` 保持一致）：
+
+```bash
+cmake --preset macos-release
+cmake --build --preset macos-release
+ctest --preset macos-release
+```
+
+```bash
+cmake --preset linux-release
+cmake --build --preset linux-release
+ctest --preset linux-release
+```
+
+```powershell
+cmake --preset windows-vcpkg-release
+cmake --build --preset windows-vcpkg-release
+ctest --preset windows-vcpkg-release
+```
+
+## 当前建模与仿真包状态快照（2026-07-05）
+
+本节用于快速回答“现在这个包到底做到哪一步了”。结论基于当前仓库源码组织、CMake 选项与已注册测试目标，而不是历史规划文档。
+
+### 1) 总体状态（按可用性分层）
+
+| 能力域 | 当前状态 | 说明 |
+|---|---|---|
+| 混合 AC/DC 潮流与聚合建模 | 已实现并持续回归 | 覆盖 canonical projection、AC/DC 潮流、换流器协调与图分析链路。 |
+| OPF 与约束优化 | 已实现并持续回归 | AC OPF / DC OPF / RPO 已集成，支持多后端路径。 |
+| 图建模、网络降阶、重构 | 已实现并持续回归 | 支持连通性、开关收缩、Kron/series/pendant reduction、ONR。 |
+| 可靠性与弹性评估 | 已实现并持续回归 | 包含 MC、FMEA、三阶段可靠性与配电弹性评估（含 MIP 路径）。 |
+| 三相与短路分析 | 已实现并持续回归 | 三相 NR 与 AC/DC 短路分析均有独立测试族。 |
+| 谐波分析 | 已实现（持续增强） | 已有混合 AC/DC 谐波潮流与解析/回归测试。 |
+| 暂态动力学 | 已实现基础框架（持续增强） | 已包含动态建模、事件、积分器、DAE 求解与相关测试，但仍在快速迭代。 |
+| EV-电力-交通耦合 | 已实现（持续扩展） | 已集成 CTM/LTM、联合优化与大规模场景测试。 |
+| Web GUI 服务 | 已集成可运行 | `run_gui_server` 为独立可执行服务，后端能力与核心库联动。 |
+
+### 2) 依赖与功能开关状态（当前默认）
+
+| 项 | 当前默认 | 影响 |
+|---|---|---|
+| 依赖模式 `HACDCPF_DEPENDENCY_PROFILE` | `portable` | 默认构建核心能力，避免强绑定开发型附加组件。 |
+| ETAP Excel IO `HACDCPF_ENABLE_ETAP` | `OFF` | 需显式开启并提供 OpenXLSX。 |
+| OpenDSS bridge `HACDCPF_ENABLE_OPENDSS` | `OFF` | 需显式开启并提供 DSS C-API。 |
+| OpenDSS compare `HACDCPF_ENABLE_OPENDSS_COMPARE` | `OFF` | 依赖 OpenDSS bridge。 |
+| IPOPT `HACDCPF_ENABLE_IPOPT` | macOS 默认 `ON`，其他平台默认 `OFF` | 当前嵌入式 IPOPT 路径按平台受限。 |
+
+### 3) 测试覆盖信号（如何判断“不是纸面功能”）
+
+- 当前 `tests/CMakeLists.txt` 已注册大规模测试目标集，覆盖 IO、PF/OPF、图分析、重构、可靠性、弹性、短路、谐波、三相、暂态、EV-交通耦合与跨模块一致性。
+- 这表示“代码路径已工程化并具备回归入口”，但不等同于“你当前机器/当前配置已全部跑通”。
+- 对外汇报建议使用两层口径：
+  - 能力存在性：以源码与测试目标注册为准。
+  - 可复现实测结论：以你本地 preset 构建与 ctest 结果为准。
+
+### 4) 当前边界与建议口径
+
+- 对可选 IO（ETAP/OpenDSS）和外部比较（GridLAB-D/OpenDSS）应明确“需启用对应编译开关和运行时依赖”。
+- 对暂态/谐波/跨引擎一致性类结论，建议标注“持续增强中”，避免描述为已完全定型。
+- 当文档、报告、UI 文案与实现不一致时，以本仓库 `src/`、`include/`、`tests/` 与 CMake 配置为最终依据。
+
 ## 1. 工程场景
 
 本项目是一个 C++20 静态库，核心目标是支撑混合 AC/DC 配电系统的稳态仿真、优化、可靠性和弹性分析。典型工程对象包括：

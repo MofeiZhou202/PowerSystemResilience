@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-05)
+> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Status: design/analysis reference; confirm behavior against current implementation before adopting conclusions.
+> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
 # Complete Mathematical Derivation for Extending Static Hybrid AC/DC Distribution Analysis to Three-Phase Transient Dynamics
 
 Below is a complete mathematical framework for enhancing your existing hybrid AC/DC static distribution-system module into a **three-phase unbalanced phasor-domain transient simulation module**.

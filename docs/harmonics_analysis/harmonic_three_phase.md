@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-05)
+> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Status: design/analysis reference; confirm behavior against current implementation before adopting conclusions.
+> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
 # 如何将混合 AC/DC 谐波潮流模型扩展到三相？
 
 要把前面的**混合 AC/DC 谐波潮流模型**扩展到三相，本质上是把 AC 子系统从“单相正序等值”扩展为：

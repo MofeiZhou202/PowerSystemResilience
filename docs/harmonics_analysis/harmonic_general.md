@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-05)
+> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Status: design/analysis reference; confirm behavior against current implementation before adopting conclusions.
+> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
 # 基于 Becker 等论文的混合 AC/DC 谐波潮流模型完善方案
 
 你上传的论文 **“Harmonic Power-Flow Study of Hybrid AC/DC Grids with Converter-Interfaced Distributed Energy Resources”** 对前面我们讨论的模型有一个非常重要的提升：

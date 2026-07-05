@@ -500,6 +500,14 @@
       <label class="sub-label">Gdc
         <input id="trDcLinkG" type="number" value="20" step="1" min="0" style="width:58px"/>
       </label>
+      <label class="sub-label" title="指定要在“本地观测点”中显示的 AC 母线 ID，逗号分隔；留空则自动选取扰动母线和关键动态设备">
+        观测AC
+        <input id="trObserverAcBuses" type="text" value="" placeholder="1,5" style="width:82px"/>
+      </label>
+      <label class="sub-label" title="指定要在“本地观测点”中显示的 DC 母线 ID，逗号分隔；留空则自动选取扰动母线和关键动态设备">
+        观测DC
+        <input id="trObserverDcBuses" type="text" value="" placeholder="1,2" style="width:82px"/>
+      </label>
       <button id="btnRunTransient" class="toolbar-btn run-btn" title="运行暂态仿真">运行暂态</button>
       <button id="btnTransientCompatibility" class="toolbar-btn" title="检查当前系统动态模型与 GridLAB-D / OpenDSS / 标准模型兼容性">模型兼容</button>
       <button id="btnExportTransient" class="toolbar-btn" title="导出暂态仿真结果 JSON">结果导出</button>
@@ -535,8 +543,17 @@
       <label class="sub-label">对象
         <input id="trEventTarget" type="number" value="1" step="1" min="0" style="width:58px"/>
       </label>
-      <label class="sub-label">强度/值
+      <label class="sub-label" id="trEventValueWrap" title="随扰动类型变化：故障为并联导纳 g，负荷为倍率，储能为 MW，跳闸/合闸不需要数值">
+        <span id="trEventValueLabel">事件值</span>
         <input id="trEventValue" type="number" value="0.5" step="0.1" style="width:72px"/>
+      </label>
+      <label class="sub-label tr-fault-param" title="母线故障等值阻抗的电阻 R(pu)；填写 R/X 时后端按 1/(R+jX) 计算故障导纳，优先于左侧 g 值">
+        故障R(pu)
+        <input id="trFaultRPu" type="number" value="" step="0.0001" min="0" placeholder="可空" style="width:76px"/>
+      </label>
+      <label class="sub-label tr-fault-param" title="母线故障等值阻抗的电抗 X(pu)；可为 0。填写 R/X 时优先于左侧 g 值">
+        故障X(pu)
+        <input id="trFaultXPu" type="number" value="" step="0.0001" placeholder="0" style="width:76px"/>
       </label>
       <label class="sub-label">持续(s)
         <input id="trEventDuration" type="number" value="0.08" step="0.01" min="0" style="width:64px"/>
@@ -1063,6 +1080,34 @@
     <label class="sub-label" title="DC 修复时长（小时），单值或逗号列表">DC修复时长
       <input id="resDcRepairDuration" type="text" value="8" placeholder="8,8"/>
     </label>
+    <label class="sub-label" title="弹性评估总时长；如果故障修复结束晚于该值，运行时会自动延长">
+      时长(h)
+      <input id="resHorizonHours" type="number" value="48" min="1" step="1"/>
+    </label>
+    <label class="sub-label" title="灾害期间负荷倍率，1.0 表示使用当前算例/导入场景负荷">
+      负荷倍率
+      <input id="resLoadScale" type="number" value="1.0" min="0" step="0.05"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="启用开关约束的故障隔离与故障后重构；默认按当前算例是否含开关/断路器自动勾选">
+      <input id="resConsiderSwitches" type="checkbox"/>
+      <span>开关隔离/重构</span>
+    </label>
+    <label class="sub-label" title="故障隔离后允许进行重构的时间窗口（小时）；会传给 post_fault_reconfig_window_hr / disaster_post_fault_reconfig_window_hr">
+      重构窗(h)
+      <input id="resPostFaultWindow" type="number" value="2.0" min="0" step="0.5"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="只允许远方/可遥控开关参与隔离与重构">
+      <input id="resUseRemoteSwitchOnly" type="checkbox"/>
+      <span>仅远方开关</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="允许没有显式开关的非故障支路被操作；用于对比理想化重构能力">
+      <input id="resAllowBranchWithoutSwitch" type="checkbox"/>
+      <span>允许无开关操作</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="启用内置演示负荷/储能/优先级补全；关闭后尽量使用当前算例数据">
+      <input id="resApplyDemoData" type="checkbox" checked/>
+      <span>演示数据</span>
+    </label>
     <label class="sub-label" title="是否考虑移动储能 MESS；关闭可显著加快弹性评估">考虑移储
       <input id="resAllowMess" type="checkbox"/>
     </label>
@@ -1083,7 +1128,6 @@
         <option value="Gurobi" selected>Gurobi</option>
       </select>
     </label>
-    <input id="resConsiderSwitches" type="checkbox" style="display:none"/>
     <button id="btnRunResilience" class="toolbar-btn run-btn" title="运行弹性评估">运行弹性评估</button>
     <button id="btnExportResilienceResults" class="toolbar-btn" title="将评估结果导出为 JSON">评估结果<br>导出</button>
   </div>

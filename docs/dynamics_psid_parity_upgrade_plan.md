@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-05)
+> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Status: analysis or planning note; verify decisions against current source before execution.
+> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
 # Transient Dynamics Submodule — PSID Parity & Efficiency Upgrade
 
 **Goal.** Bring the HACDCPF transient submodule (`src/dynamics`, `include/hacdcpf/dynamics`)

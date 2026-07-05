@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-05)
+> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Status: analysis or planning note; verify decisions against current source before execution.
+> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
 # IO Governance and Digital-Twin Readiness Review {#io_digital_twin_review}
 
 This page is the code-review guide for the `数据IO` governance layer.  It is

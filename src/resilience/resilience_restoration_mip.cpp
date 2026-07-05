@@ -623,8 +623,6 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
   out.idx.n_mess = static_cast<int>(out.mess.size());
 
   auto& milp = out.model;
-  milp.time_limit_sec = static_cast<double>(opts.mip.max_time_s);
-  milp.mip_gap = opts.mip.mip_gap;
   auto& lp = milp.linear_part;
   lp.sense = solver::Sense::Minimize;
 
