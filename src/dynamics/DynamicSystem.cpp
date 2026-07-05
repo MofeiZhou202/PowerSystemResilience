@@ -477,6 +477,67 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
     device->initializeFromPowerFlow(initial_power_flow, x, y);
   }
 
+  const bool has_dynamic_rl_line =
+      std::any_of(devices.begin(),
+                  devices.end(),
+                  [](const std::unique_ptr<DynamicDevice>& device) {
+                    return device->type() == "DynamicRLLine";
+                  });
+  if (options.solver_type == DynamicSolverType::MassMatrixDae &&
+      has_dynamic_rl_line) {
+    const int max_iters = options.trim_dynamic_initial_conditions
+                              ? std::max(1, options.max_dynamic_trim_iters)
+                              : 1;
+    bool trimmed = false;
+    double fast_norm = std::numeric_limits<double>::infinity();
+    for (int iter = 0; iter < max_iters; ++iter) {
+      bool changed = false;
+      if (options.trim_dynamic_initial_conditions) {
+        for (auto& device : devices) {
+          changed = device->trimToNetworkEquilibrium(x, y) || changed;
+        }
+        changed = reanchor_machine_controllers(devices, x, y) || changed;
+      }
+
+      Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(x.x.size());
+      for (const auto& device : devices) {
+        device->computeDerivatives(options.t_start_s, x, y, dxdt);
+      }
+      x.dxdt = dxdt;
+      initialization.dynamic_initial_dxdt_inf_norm =
+          dxdt.size() > 0 ? dxdt.lpNorm<Eigen::Infinity>() : 0.0;
+      mask_slow_residuals(devices, dxdt);
+      fast_norm = inf_norm(dxdt);
+      initialization.dynamic_fast_dxdt_inf_norm = fast_norm;
+      initialization.dynamic_residual_diagnostics =
+          collect_residual_diagnostics(devices,
+                                       options.t_start_s,
+                                       x,
+                                       y,
+                                       std::max(1e-12, options.dynamic_trim_tol * 0.1));
+      initialization.dynamic_trim_iterations = iter + 1;
+      if (!options.trim_dynamic_initial_conditions ||
+          fast_norm <= options.dynamic_trim_tol ||
+          !changed) {
+        trimmed = fast_norm <= options.dynamic_trim_tol;
+        break;
+      }
+    }
+
+    initialization.dynamic_fast_dxdt_inf_norm =
+        std::isfinite(fast_norm) ? fast_norm : 0.0;
+    initialization.dynamic_trim_converged =
+        trimmed || initialization.dynamic_fast_dxdt_inf_norm <= options.dynamic_trim_tol;
+    if (options.trim_dynamic_initial_conditions &&
+        !initialization.dynamic_trim_converged) {
+      initialization.warnings.push_back(
+          "Mass-matrix DAE initialization kept the power-flow algebraic state; "
+          "initial fast-state residual ||dx/dt||_inf=" +
+          std::to_string(initialization.dynamic_fast_dxdt_inf_norm));
+    }
+    return;
+  }
+
   if (!options.trim_dynamic_initial_conditions) {
     std::string error;
     Eigen::VectorXd dxdt;

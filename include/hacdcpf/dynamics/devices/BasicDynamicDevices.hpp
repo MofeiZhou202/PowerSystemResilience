@@ -31,7 +31,11 @@ enum class DynamicLoadModelKind {
 enum class SynchronousMachineModelKind {
   Classical,
   OneDOneQ,
+  SimpleAF,
+  AndersonFouad,
   SimpleMarconato,
+  Marconato,
+  SauerPai,
   GENROU,
   GENROE,
   GENSAL,

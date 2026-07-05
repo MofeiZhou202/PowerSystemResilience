@@ -99,33 +99,44 @@
       "psd_slot": "machine",
       "psd_model": "MarconatoMachine",
       "hacdcpf_slot": "machine",
-      "hacdcpf_model": "",
-      "status": "missing",
-      "comparison_level": "L0",
-      "trace_case": "",
-      "notes": "Full MarconatoMachine is not implemented; SimpleMarconatoMachine Test 03 now clears and can be used as the baseline."
+      "hacdcpf_model": "MarconatoMachine",
+      "status": "supported-subset",
+      "comparison_level": "L2",
+      "trace_case": "marconato:generator-102-1:psi_d",
+      "notes": "Runtime, profile parser, local smoke test, and PSD Test 04 ResidualModel/IDA vs MassMatrixDae manifest gate now pass for Marconato delta/omega/psi/eq/ed traces; generic internal DAE-object parity remains future work."
     },
     {
       "domain": "generator",
       "psd_slot": "machine",
       "psd_model": "SauerPaiMachine",
       "hacdcpf_slot": "machine",
-      "hacdcpf_model": "",
-      "status": "missing",
-      "comparison_level": "L0",
-      "trace_case": "",
-      "notes": "No named HACDCPF Sauer-Pai machine counterpart."
+      "hacdcpf_model": "SauerPaiMachine",
+      "status": "supported-subset",
+      "comparison_level": "L1",
+      "trace_case": "local:test45-style:sauerpai",
+      "notes": "Runtime equations, profile parser, catalog entry, and local Test 45-style MassMatrixDae smoke coverage are present. Full PSD Test 45 remains blocked by the companion VSM inverter model in that case."
     },
     {
       "domain": "generator",
       "psd_slot": "machine",
-      "psd_model": "AndersonFouadMachine / SimpleAFMachine",
+      "psd_model": "SimpleAFMachine",
       "hacdcpf_slot": "machine",
-      "hacdcpf_model": "",
-      "status": "missing",
-      "comparison_level": "L0",
-      "trace_case": "",
-      "notes": "No named HACDCPF Anderson-Fouad machine counterpart."
+      "hacdcpf_model": "SimpleAFMachine",
+      "status": "supported-subset",
+      "comparison_level": "L2",
+      "trace_case": "simple_af:generator-102-1:eq_p",
+      "notes": "Named Simple Anderson-Fouad runtime and PSD Test 05 ResidualModel/IDA vs MassMatrixDae manifest gate cover delta/omega/eq/ed traces; generic internal DAE-object parity remains future work."
+    },
+    {
+      "domain": "generator",
+      "psd_slot": "machine",
+      "psd_model": "AndersonFouadMachine",
+      "hacdcpf_slot": "machine",
+      "hacdcpf_model": "AndersonFouadMachine",
+      "status": "supported-subset",
+      "comparison_level": "L2",
+      "trace_case": "anderson_fouad:generator-102-1:psi_d",
+      "notes": "Named Anderson-Fouad runtime and PSD Test 06 ResidualModel/IDA vs MassMatrixDae manifest gate cover delta/omega/psi/eq/ed traces; generic internal DAE-object parity remains future work."
     },
     {
       "domain": "generator",
@@ -143,11 +154,11 @@
       "psd_slot": "shaft",
       "psd_model": "FiveMassShaft",
       "hacdcpf_slot": "shaft",
-      "hacdcpf_model": "",
-      "status": "missing",
-      "comparison_level": "L0",
-      "trace_case": "",
-      "notes": "Requires multi-mass turbine-generator shaft states."
+      "hacdcpf_model": "FiveMassShaft",
+      "status": "supported-subset",
+      "comparison_level": "L2",
+      "trace_case": "test07:generator-103-1:delta_hp_rad",
+      "notes": "Runtime, profile parser, local smoke test, and PSD Test 07 ResidualModel/IDA vs MassMatrixDae manifest gate now pass for rotor/electrical plus representative shaft traces; individual turbine damping terms remain a refinement."
     },
     {
       "domain": "generator",
@@ -156,20 +167,20 @@
       "hacdcpf_slot": "exciter",
       "hacdcpf_model": "SEXS",
       "status": "supported-subset",
-      "comparison_level": "L1",
-      "trace_case": "",
-      "notes": "Catalog keys are wired; add a focused PSD trace gate for field-voltage response."
+      "comparison_level": "L2",
+      "trace_case": "test26:generator-102-1:field_voltage_pu",
+      "notes": "SEXS is wired to GENROU and PSD Test 26 ResidualModel/IDA vs MassMatrixDae manifest gate now passes for field-voltage, speed, angle, and terminal-voltage traces."
     },
     {
       "domain": "generator",
       "psd_slot": "avr",
       "psd_model": "IEEET1 / AVRTypeI",
       "hacdcpf_slot": "exciter",
-      "hacdcpf_model": "IEEET1",
+      "hacdcpf_model": "AVRTypeI",
       "status": "supported-subset",
-      "comparison_level": "L1",
-      "trace_case": "",
-      "notes": "Equivalent profile exists, but PSD's full AVR state and limiter details still need trace validation."
+      "comparison_level": "L2",
+      "trace_case": "test17:generator-102-1:field_voltage_pu",
+      "notes": "AVRTypeI is wired to GENROU and PSD Test 17 ResidualModel/IDA vs MassMatrixDae manifest gate now passes for field-voltage and machine-state traces; generic internal DAE-object parity is still future work."
     },
     {
       "domain": "generator",
@@ -231,11 +242,11 @@
       "psd_slot": "governor",
       "psd_model": "TGSimple / TGTypeI / TGTypeII / DEGOV / DEGOV1 / PIDGOV / WPIDHY",
       "hacdcpf_slot": "governor",
-      "hacdcpf_model": "",
-      "status": "missing",
-      "comparison_level": "L0",
-      "trace_case": "",
-      "notes": "Use metadata preservation only until additional governor families are implemented."
+      "hacdcpf_model": "TGTypeI",
+      "status": "supported-subset",
+      "comparison_level": "L2",
+      "trace_case": "test12:generator-102-1:omega_pu/mechanical_torque_pu; test13:generator-102-1:mechanical_torque_pu; test25:bus102:voltage_mag",
+      "notes": "TGTypeI and TGTypeII are wired and covered by executable PSD Test 12/Test 13/Test 25 traces; Test 12 is an equilibrium trace because the source PSD case has no load transfer. TGSimple, DEGOV, DEGOV1, PIDGOV, and WPIDHY remain missing."
     },
     {
       "domain": "generator",
@@ -246,18 +257,18 @@
       "status": "supported-subset",
       "comparison_level": "L1",
       "trace_case": "",
-      "notes": "Basic stabilizer profile exists; requires signal-by-signal validation."
+      "notes": "PSS1A, IEEEST, and STAB1 runtime profiles exist; PSS1A has local damping tests, while IEEEST/STAB1 still need PSD trace gates."
     },
     {
       "domain": "generator",
       "psd_slot": "pss",
       "psd_model": "STAB1",
       "hacdcpf_slot": "pss",
-      "hacdcpf_model": "",
-      "status": "missing",
-      "comparison_level": "L0",
+      "hacdcpf_model": "STAB1",
+      "status": "supported-subset",
+      "comparison_level": "L1",
       "trace_case": "",
-      "notes": "PSD test 41 coverage has no HACDCPF runtime counterpart."
+      "notes": "Runtime and catalog profile exist; add PSD Test 41 trace gate after the OMIB STAB1 fixture is mirrored."
     },
     {
       "domain": "generator",
@@ -473,11 +484,11 @@
       "psd_slot": "branch",
       "psd_model": "DynamicBranch / dynamic line",
       "hacdcpf_slot": "branch",
-      "hacdcpf_model": "",
-      "status": "missing",
-      "comparison_level": "L0",
-      "trace_case": "",
-      "notes": "HACDCPF transient branch model is algebraic; no PSD-style dynamic line state model yet."
+      "hacdcpf_model": "DynamicRLLine",
+      "status": "supported-subset",
+      "comparison_level": "L3",
+      "trace_case": "test25:bus102:voltage_mag",
+      "notes": "PSD-style dynamic RL branch current states participate in MassMatrixDae; PSD Test 25 now passes an executable bus-102 voltage-magnitude trace gate for the Marconato dynamic-line benchmark."
     },
     {
       "domain": "dae",
@@ -488,7 +499,7 @@
       "status": "profile-only",
       "comparison_level": "L4",
       "trace_case": "",
-      "notes": "HACDCPF now has nine ResidualModel/IDA trace manifest gates against MassMatrixDae and exposes PSD-coordinate residual/mass/Jacobian/small-signal diagnostics for SimpleMarconato Test 03; the diagnostic object is not yet generic for all component stacks."
+      "notes": "HACDCPF now has eleven ResidualModel/IDA trace manifest gates against MassMatrixDae and exposes PSD-coordinate residual/mass/Jacobian/small-signal diagnostics for SimpleMarconato Test 03; the diagnostic object is not yet generic for all component stacks."
     },
     {
       "domain": "dae",

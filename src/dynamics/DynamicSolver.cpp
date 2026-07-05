@@ -65,6 +65,7 @@ std::string event_type_name(DynamicEventType type) {
   switch (type) {
     case DynamicEventType::ACBranchTrip: return "ACBranchTrip";
     case DynamicEventType::ACBranchClose: return "ACBranchClose";
+    case DynamicEventType::ACBranchImpedanceScale: return "ACBranchImpedanceScale";
     case DynamicEventType::DCBranchTrip: return "DCBranchTrip";
     case DynamicEventType::DCBranchClose: return "DCBranchClose";
     case DynamicEventType::ACLoadScale: return "ACLoadScale";
@@ -152,6 +153,23 @@ bool apply_event_to_network(DynamicSystem& sys, const DynamicEvent& event) {
         }
       }
       break;
+    case DynamicEventType::ACBranchImpedanceScale: {
+      const double scale = event_param(event, "scale", event.value > 0.0 ? event.value : 1.0);
+      const double r_scale = event_param(event, "r_scale", scale);
+      const double x_scale = event_param(event, "x_scale", scale);
+      const double y_scale =
+          1.0 / std::max(1e-9, std::max(std::abs(r_scale), std::abs(x_scale)));
+      for (auto& branch : sys.network.ac_branches) {
+        if (branch.index == event.component_index) {
+          branch.y_ff *= y_scale;
+          branch.y_ft *= y_scale;
+          branch.y_tf *= y_scale;
+          branch.y_tt *= y_scale;
+          rebuild = true;
+        }
+      }
+      break;
+    }
     case DynamicEventType::DCBranchTrip:
     case DynamicEventType::DCBranchClose:
       for (auto& branch : sys.network.dc_branches) {
@@ -699,6 +717,14 @@ DaeLayout make_dae_layout(const DynamicSystem& sys) {
   return L;
 }
 
+bool mass_matrix_needs_coupled_network_startup(const DynamicSystem& sys) {
+  return std::any_of(sys.devices.begin(),
+                     sys.devices.end(),
+                     [](const std::unique_ptr<DynamicDevice>& device) {
+                       return device->type() == "DynamicRLLine";
+                     });
+}
+
 void dae_pack(const DynamicSystem& sys, const DaeLayout& L, Eigen::VectorXd& u) {
   u.resize(L.n);
   for (int i = 0; i < L.n_x; ++i) u[i] = sys.x.x[i];
@@ -861,7 +887,12 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
   system.x.time_s = system.options.t_start_s;
   std::string error;
   apply_events(system, system.x.time_s, results);
-  if (!system.solveNetwork(system.x.time_s, error)) {
+  DaeLayout layout = make_dae_layout(system);
+  const bool coupled_network_startup =
+      mass_matrix_needs_coupled_network_startup(system);
+  if (coupled_network_startup) {
+    dae_finalize(system, layout, system.x.time_s);
+  } else if (!system.solveNetwork(system.x.time_s, error)) {
     results.success = false;
     results.message = error;
     results.failed_step = 0;
@@ -877,20 +908,21 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
 
   const double t_end = system.options.t_end_s;
   const double base_dt = system.options.dt_s;
-  DaeLayout layout = make_dae_layout(system);
   int step = 0;
 
   while (system.x.time_s < t_end - 1e-12) {
     const double t = system.x.time_s;
     if (apply_events(system, t, results)) {
-      if (!system.solveNetwork(t, error)) {
+      layout = make_dae_layout(system);
+      if (coupled_network_startup) {
+        dae_finalize(system, layout, t);
+      } else if (!system.solveNetwork(t, error)) {
         results.success = false;
         results.message = error;
         results.failed_step = step;
         results.steps = step;
         return results;
       }
-      layout = make_dae_layout(system);
     }
     const double next_discontinuity = next_discontinuity_time(system, t);
     double next_t = std::min(t + base_dt, t_end);
@@ -925,14 +957,23 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
     }
     dae_finalize(system, layout, system.x.time_s);
     if (apply_events(system, system.x.time_s, results)) {
-      if (!system.solveNetwork(system.x.time_s, error)) {
+      layout = make_dae_layout(system);
+      if (coupled_network_startup) {
+        dae_finalize(system, layout, system.x.time_s);
+      } else if (!system.solveNetwork(system.x.time_s, error)) {
         results.success = false;
         results.message = error;
         results.failed_step = step;
         results.steps = step;
         return results;
       }
-      layout = make_dae_layout(system);
+    }
+    if (!check_numerical_health(system, system.x.time_s, error)) {
+      results.success = false;
+      results.message = error;
+      results.failed_step = step;
+      results.steps = step;
+      return results;
     }
     record_snapshot_if_needed(system, results, step);
   }

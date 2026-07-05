@@ -8,6 +8,7 @@ namespace hacdcpf::dynamics {
 enum class DynamicEventType {
   ACBranchTrip,
   ACBranchClose,
+  ACBranchImpedanceScale,
   DCBranchTrip,
   DCBranchClose,
   ACLoadScale,

@@ -134,6 +134,68 @@ std::vector<DynamicModelDescriptor> build_catalog() {
        real("Tq0_pp", {"Tq0pp", "tq0_pp", "tq0pp"}, "q-axis subtransient time const", "s", 0.023, 0.001, 1.0, "Time constants"),
        real("T_AA", {"TAA", "t_aa", "taa"}, "d-axis additional leakage time const", "s", 0.0, 0.0, 2.0, "Time constants", true)}));
   c.push_back(model(
+      "MarconatoMachine", "PowerSystems", "Full Marconato machine", "machine",
+      {real("H", {"h"}, "Inertia constant", "s", 3.01, 0.1, 30.0, "Rotor"),
+       real("D", {"damping_d", "damping"}, "Damping", "pu", 0.0, 0.0, 10.0, "Rotor"),
+       real("R", {"Ra", "r"}, "Stator resistance", "pu", 0.0, 0.0, 1.0, "Reactances", true),
+       real("Xd", {"xd"}, "d-axis synchronous reactance", "pu", 1.3125, 0.1, 3.0, "Reactances"),
+       real("Xq", {"xq"}, "q-axis synchronous reactance", "pu", 1.2578, 0.1, 3.0, "Reactances"),
+       real("Xd_p", {"Xdp", "xd_p", "xdp"}, "d-axis transient reactance", "pu", 0.1813, 0.0, 2.0, "Reactances"),
+       real("Xq_p", {"Xqp", "xq_p", "xqp"}, "q-axis transient reactance", "pu", 0.25, 0.0, 2.0, "Reactances"),
+       real("Xd_pp", {"Xdpp", "xd_pp", "xdpp"}, "d-axis subtransient reactance", "pu", 0.14, 0.0, 2.0, "Reactances"),
+       real("Xq_pp", {"Xqpp", "xq_pp", "xqpp"}, "q-axis subtransient reactance", "pu", 0.18, 0.0, 2.0, "Reactances"),
+       real("Td0_p", {"Td0p", "td0_p", "td0p"}, "d-axis transient time const", "s", 5.89, 0.1, 20.0, "Time constants"),
+       real("Tq0_p", {"Tq0p", "tq0_p", "tq0p"}, "q-axis transient time const", "s", 0.6, 0.01, 10.0, "Time constants"),
+       real("Td0_pp", {"Td0pp", "td0_pp", "td0pp"}, "d-axis subtransient time const", "s", 0.5, 0.001, 2.0, "Time constants"),
+       real("Tq0_pp", {"Tq0pp", "tq0_pp", "tq0pp"}, "q-axis subtransient time const", "s", 0.023, 0.001, 1.0, "Time constants"),
+       real("T_AA", {"TAA", "t_aa", "taa"}, "d-axis additional leakage time const", "s", 0.0, 0.0, 2.0, "Time constants", true)}));
+  c.push_back(model(
+      "SauerPaiMachine", "PowerSystems", "Sauer-Pai sixth-order machine", "machine",
+      {real("H", {"h"}, "Inertia constant", "s", 3.01, 0.1, 30.0, "Rotor"),
+       real("D", {"damping_d", "damping"}, "Damping", "pu", 0.0, 0.0, 10.0, "Rotor"),
+       real("R", {"Ra", "r"}, "Stator resistance", "pu", 0.002, 0.0, 1.0, "Reactances", true),
+       real("Xd", {"xd"}, "d-axis synchronous reactance", "pu", 1.79, 0.1, 3.0, "Reactances"),
+       real("Xq", {"xq"}, "q-axis synchronous reactance", "pu", 1.71, 0.1, 3.0, "Reactances"),
+       real("Xd_p", {"Xdp", "xd_p", "xdp"}, "d-axis transient reactance", "pu", 0.169, 0.0, 2.0, "Reactances"),
+       real("Xq_p", {"Xqp", "xq_p", "xqp"}, "q-axis transient reactance", "pu", 0.228, 0.0, 2.0, "Reactances"),
+       real("Xd_pp", {"Xdpp", "xd_pp", "xdpp"}, "d-axis subtransient reactance", "pu", 0.135, 0.0, 2.0, "Reactances"),
+       real("Xq_pp", {"Xqpp", "xq_pp", "xqpp"}, "q-axis subtransient reactance", "pu", 0.2, 0.0, 2.0, "Reactances"),
+       real("Xl", {"xl"}, "Leakage reactance", "pu", 0.13, 0.0, 1.0, "Reactances"),
+       real("Td0_p", {"Td0p", "td0_p", "td0p"}, "d-axis transient time const", "s", 4.3, 0.1, 20.0, "Time constants"),
+       real("Tq0_p", {"Tq0p", "tq0_p", "tq0p"}, "q-axis transient time const", "s", 0.85, 0.01, 10.0, "Time constants"),
+       real("Td0_pp", {"Td0pp", "td0_pp", "td0pp"}, "d-axis subtransient time const", "s", 0.032, 0.001, 2.0, "Time constants"),
+       real("Tq0_pp", {"Tq0pp", "tq0_pp", "tq0pp"}, "q-axis subtransient time const", "s", 0.05, 0.001, 1.0, "Time constants")}));
+  c.push_back(model(
+      "SimpleAFMachine", "PowerSystems", "Simple Anderson-Fouad machine", "machine",
+      {real("H", {"h"}, "Inertia constant", "s", 3.01, 0.1, 30.0, "Rotor"),
+       real("D", {"damping_d", "damping"}, "Damping", "pu", 0.0, 0.0, 10.0, "Rotor"),
+       real("R", {"Ra", "r"}, "Stator resistance", "pu", 0.0, 0.0, 1.0, "Reactances", true),
+       real("Xd", {"xd"}, "d-axis synchronous reactance", "pu", 0.8979, 0.1, 3.0, "Reactances"),
+       real("Xq", {"xq"}, "q-axis synchronous reactance", "pu", 0.646, 0.1, 3.0, "Reactances"),
+       real("Xd_p", {"Xdp", "xd_p", "xdp"}, "d-axis transient reactance", "pu", 0.2995, 0.0, 2.0, "Reactances"),
+       real("Xq_p", {"Xqp", "xq_p", "xqp"}, "q-axis transient reactance", "pu", 0.646, 0.0, 2.0, "Reactances"),
+       real("Xd_pp", {"Xdpp", "xd_pp", "xdpp"}, "d-axis subtransient reactance", "pu", 0.23, 0.0, 2.0, "Reactances"),
+       real("Xq_pp", {"Xqpp", "xq_pp", "xqpp"}, "q-axis subtransient reactance", "pu", 0.4, 0.0, 2.0, "Reactances"),
+       real("Td0_p", {"Td0p", "td0_p", "td0p"}, "d-axis transient time const", "s", 3.0, 0.1, 20.0, "Time constants"),
+       real("Tq0_p", {"Tq0p", "tq0_p", "tq0p"}, "q-axis transient time const", "s", 0.1, 0.001, 10.0, "Time constants"),
+       real("Td0_pp", {"Td0pp", "td0_pp", "td0pp"}, "d-axis subtransient time const", "s", 0.01, 0.001, 2.0, "Time constants"),
+       real("Tq0_pp", {"Tq0pp", "tq0_pp", "tq0pp"}, "q-axis subtransient time const", "s", 0.033, 0.001, 1.0, "Time constants")}));
+  c.push_back(model(
+      "AndersonFouadMachine", "PowerSystems", "Anderson-Fouad machine", "machine",
+      {real("H", {"h"}, "Inertia constant", "s", 3.01, 0.1, 30.0, "Rotor"),
+       real("D", {"damping_d", "damping"}, "Damping", "pu", 0.0, 0.0, 10.0, "Rotor"),
+       real("R", {"Ra", "r"}, "Stator resistance", "pu", 0.0, 0.0, 1.0, "Reactances", true),
+       real("Xd", {"xd"}, "d-axis synchronous reactance", "pu", 0.8979, 0.1, 3.0, "Reactances"),
+       real("Xq", {"xq"}, "q-axis synchronous reactance", "pu", 0.646, 0.1, 3.0, "Reactances"),
+       real("Xd_p", {"Xdp", "xd_p", "xdp"}, "d-axis transient reactance", "pu", 0.2995, 0.0, 2.0, "Reactances"),
+       real("Xq_p", {"Xqp", "xq_p", "xqp"}, "q-axis transient reactance", "pu", 0.646, 0.0, 2.0, "Reactances"),
+       real("Xd_pp", {"Xdpp", "xd_pp", "xdpp"}, "d-axis subtransient reactance", "pu", 0.23, 0.0, 2.0, "Reactances"),
+       real("Xq_pp", {"Xqpp", "xq_pp", "xqpp"}, "q-axis subtransient reactance", "pu", 0.4, 0.0, 2.0, "Reactances"),
+       real("Td0_p", {"Td0p", "td0_p", "td0p"}, "d-axis transient time const", "s", 3.0, 0.1, 20.0, "Time constants"),
+       real("Tq0_p", {"Tq0p", "tq0_p", "tq0p"}, "q-axis transient time const", "s", 0.1, 0.001, 10.0, "Time constants"),
+       real("Td0_pp", {"Td0pp", "td0_pp", "td0pp"}, "d-axis subtransient time const", "s", 0.01, 0.001, 2.0, "Time constants"),
+       real("Tq0_pp", {"Tq0pp", "tq0_pp", "tq0pp"}, "q-axis subtransient time const", "s", 0.033, 0.001, 1.0, "Time constants")}));
+  c.push_back(model(
       "ClassicalMachine", "IEEE", "Classical (E' behind X') machine", "machine", {}));
   c.push_back(model(
       "SingleMass", "PowerSimulationsDynamics", "Single-mass shaft", "shaft", {}));
@@ -419,7 +481,8 @@ std::vector<DynamicComponentComposition> build_composition() {
       {"gen", "Synchronous generator", "AC",
        {slot("machine", "Machine model", false,
 	     {"GENROU", "GENROE", "GENSAL", "GENSAE", "OneDOneQMachine",
-	      "SimpleMarconatoMachine", "ClassicalMachine"},
+	      "SimpleMarconatoMachine", "MarconatoMachine", "SimpleAFMachine",
+	      "AndersonFouadMachine", "SauerPaiMachine", "ClassicalMachine"},
 	     "ClassicalMachine"),
         slot("shaft", "Shaft", true, {"SingleMass", "FiveMassShaft"}, "SingleMass"),
 	    slot("governor", "Governor", true,

@@ -176,7 +176,8 @@ TEST_CASE("Dynamic model catalog covers the wired models", "[dynamics][catalog]"
   REQUIRE(catalog.size() >= 15);
   for (const char* name :
        {"GENROU", "GENROE", "GENSAL", "GENSAE", "OneDOneQMachine",
-        "SimpleMarconatoMachine", "ClassicalMachine", "SingleMass",
+        "SimpleMarconatoMachine", "MarconatoMachine", "SimpleAFMachine",
+        "AndersonFouadMachine", "SauerPaiMachine", "ClassicalMachine", "SingleMass",
         "FiveMassShaft", "TGOV1", "IEEEG1", "TGTypeI", "TGTypeII", "SEXS", "IEEET1", "AVRSimple",
         "AVRTypeI", "AVRTypeII", "PSS1A", "IEEEST", "STAB1",
         "DynamicRLLine", "REGC_REEC_GFL_Subset",

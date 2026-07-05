@@ -6,11 +6,11 @@ This is a model-by-model and controller-by-controller comparison. It is not an e
 
 ## Summary
 
-- Rows: 44
+- Rows: 45
 - exact-or-close: 2
-- missing: 17
+- missing: 10
 - profile-only: 2
-- supported-subset: 23
+- supported-subset: 31
 
 ## Status Legend
 
@@ -39,21 +39,22 @@ This is a model-by-model and controller-by-controller comparison. It is not an e
 | generator | machine | SalientPoleExponential / GENSAE | machine | GENSAE | supported-subset | L2 | gensae:generator-102-1:psiq_pp | yes | Named salient-pole exponential runtime and PSD Test 19 ResidualModel/IDA vs MassMatrixDae manifest gate now passes for delta/omega/eq_p/psiq_pp; generic internal DAE-object parity remains future work. |
 | generator | machine | OneDOneQMachine | machine | OneDOneQMachine | supported-subset | L2 | onedoneq:generator-102-1:eq_p | yes | Named two-state OneDOneQ runtime path and PSD Test 02 ResidualModel/IDA vs MassMatrixDae manifest gate now pass for delta/omega/eq_p/ed_p; generic internal DAE-object parity remains future work. |
 | generator | machine | SimpleMarconatoMachine | machine | SimpleMarconatoMachine | supported-subset | L2 | simple_marconato:generator-103-1:delta_rad | yes | Runtime, profile parser, local smoke test, PSD Test 03 trace gate, and PSD-coordinate residual/mass/full-Jacobian/reduced-Jacobian/eigenvalue gate now pass for both SimpleMarconato machines. |
-| generator | machine | MarconatoMachine | machine |  | missing | L0 |  | n/a | Full MarconatoMachine is not implemented; SimpleMarconatoMachine Test 03 now clears and can be used as the baseline. |
-| generator | machine | SauerPaiMachine | machine |  | missing | L0 |  | n/a | No named HACDCPF Sauer-Pai machine counterpart. |
-| generator | machine | AndersonFouadMachine / SimpleAFMachine | machine |  | missing | L0 |  | n/a | No named HACDCPF Anderson-Fouad machine counterpart. |
+| generator | machine | MarconatoMachine | machine | MarconatoMachine | supported-subset | L2 | marconato:generator-102-1:psi_d | yes | Runtime, profile parser, local smoke test, and PSD Test 04 ResidualModel/IDA vs MassMatrixDae manifest gate now pass for Marconato delta/omega/psi/eq/ed traces; generic internal DAE-object parity remains future work. |
+| generator | machine | SauerPaiMachine | machine | SauerPaiMachine | supported-subset | L1 | local:test45-style:sauerpai | yes | Runtime equations, profile parser, catalog entry, and local Test 45-style MassMatrixDae smoke coverage are present. Full PSD Test 45 remains blocked by the companion VSM inverter model in that case. |
+| generator | machine | SimpleAFMachine | machine | SimpleAFMachine | supported-subset | L2 | simple_af:generator-102-1:eq_p | yes | Named Simple Anderson-Fouad runtime and PSD Test 05 ResidualModel/IDA vs MassMatrixDae manifest gate cover delta/omega/eq/ed traces; generic internal DAE-object parity remains future work. |
+| generator | machine | AndersonFouadMachine | machine | AndersonFouadMachine | supported-subset | L2 | anderson_fouad:generator-102-1:psi_d | yes | Named Anderson-Fouad runtime and PSD Test 06 ResidualModel/IDA vs MassMatrixDae manifest gate cover delta/omega/psi/eq/ed traces; generic internal DAE-object parity remains future work. |
 | generator | shaft | SingleMass | machine | ClassicalMachine | supported-subset | L1 | genrou:generator-102-1:omega_pu | yes | H and D are consumed by HACDCPF machine parameters; PSD models shaft as an explicit subcomponent. |
-| generator | shaft | FiveMassShaft | shaft |  | missing | L0 |  | n/a | Requires multi-mass turbine-generator shaft states. |
-| generator | avr | SEXS | exciter | SEXS | supported-subset | L1 |  | yes | Catalog keys are wired; add a focused PSD trace gate for field-voltage response. |
-| generator | avr | IEEET1 / AVRTypeI | exciter | IEEET1 | supported-subset | L1 |  | yes | Equivalent profile exists, but PSD's full AVR state and limiter details still need trace validation. |
+| generator | shaft | FiveMassShaft | shaft | FiveMassShaft | supported-subset | L2 | test07:generator-103-1:delta_hp_rad | yes | Runtime, profile parser, local smoke test, and PSD Test 07 ResidualModel/IDA vs MassMatrixDae manifest gate now pass for rotor/electrical plus representative shaft traces; individual turbine damping terms remain a refinement. |
+| generator | avr | SEXS | exciter | SEXS | supported-subset | L2 | test26:generator-102-1:field_voltage_pu | yes | SEXS is wired to GENROU and PSD Test 26 ResidualModel/IDA vs MassMatrixDae manifest gate now passes for field-voltage, speed, angle, and terminal-voltage traces. |
+| generator | avr | IEEET1 / AVRTypeI | exciter | AVRTypeI | supported-subset | L2 | test17:generator-102-1:field_voltage_pu | yes | AVRTypeI is wired to GENROU and PSD Test 17 ResidualModel/IDA vs MassMatrixDae manifest gate now passes for field-voltage and machine-state traces; generic internal DAE-object parity is still future work. |
 | generator | avr | ESAC1A / EXAC1 / EXST1 / SCRX / ESST1A / ST6B / ST8C / CSVGN1 | exciter |  | missing | L0 |  | n/a | Preserve imported names in metadata until the AVR library is expanded. |
 | generator | governor | SteamTurbineGov1 / TGOV1 | governor | TGOV1 | supported-subset | L1 |  | yes | Catalog keys are wired; compare mechanical-power response under a speed or branch-trip perturbation. |
 | generator | governor | IEEETurbineGov1 / IEEEG1 | governor | IEEEG1 | supported-subset | L1 |  | yes | HACDCPF has the named profile and simplified reheat parameters. |
 | generator | governor | GasTG / GAST | governor |  | missing | L0 |  | n/a | Gas turbine governor runtime model is not present. |
 | generator | governor | HydroTurbineGov / HYGOV | governor |  | missing | L0 |  | n/a | Hydro governor runtime model is not present. |
-| generator | governor | TGSimple / TGTypeI / TGTypeII / DEGOV / DEGOV1 / PIDGOV / WPIDHY | governor |  | missing | L0 |  | n/a | Use metadata preservation only until additional governor families are implemented. |
-| generator | pss | PSSSimple / PSS1A | pss | PSS1A | supported-subset | L1 |  | yes | Basic stabilizer profile exists; requires signal-by-signal validation. |
-| generator | pss | STAB1 | pss |  | missing | L0 |  | n/a | PSD test 41 coverage has no HACDCPF runtime counterpart. |
+| generator | governor | TGSimple / TGTypeI / TGTypeII / DEGOV / DEGOV1 / PIDGOV / WPIDHY | governor | TGTypeI | supported-subset | L2 | test12:generator-102-1:omega_pu/mechanical_torque_pu; test13:generator-102-1:mechanical_torque_pu; test25:bus102:voltage_mag | yes | TGTypeI and TGTypeII are wired and covered by executable PSD Test 12/Test 13/Test 25 traces; Test 12 is an equilibrium trace because the source PSD case has no load transfer. TGSimple, DEGOV, DEGOV1, PIDGOV, and WPIDHY remain missing. |
+| generator | pss | PSSSimple / PSS1A | pss | PSS1A | supported-subset | L1 |  | yes | PSS1A, IEEEST, and STAB1 runtime profiles exist; PSS1A has local damping tests, while IEEEST/STAB1 still need PSD trace gates. |
+| generator | pss | STAB1 | pss | STAB1 | supported-subset | L1 |  | yes | Runtime and catalog profile exist; add PSD Test 41 trace gate after the OMIB STAB1 fixture is mirrored. |
 | generator | pss | PSS2A / PSS2B / PSS2C | pss |  | missing | L0 |  | n/a | Multi-input PSS2 families are not implemented. |
 | inverter | dc_source | FixedDCSource | dc_source | REGC_REEC_GFL_Subset | supported-subset | L2 | test24:generator-102-1:p_oc | yes | HACDCPF GFL/GFM models can hold a fixed DC-side assumption but do not expose PSD's DC source as a separate block. |
 | inverter | dc_source | PeriodicVariableSource | dc_source |  | missing | L0 |  | n/a | Requires a dynamic DC source block or boundary trace injection. |
@@ -73,6 +74,6 @@ This is a model-by-model and controller-by-controller comparison. It is not an e
 | load | load | StandardLoad transformed to constant impedance | load | ConstantImpedance | exact-or-close | L1 |  | yes | Static admittance behavior is directly comparable after base and sign conventions are aligned. |
 | load | load | ZIPLoad | load | ZIP | supported-subset | L1 | zip_constant_power:bus103:voltage_mag | yes | HACDCPF has ZIP model selection; parameter-level ZIP coefficient import should be added for richer cases. |
 | load | load | ExponentialLoad / PowerLoad | load |  | missing | L0 |  | n/a | Needs explicit dynamic load families beyond ZIP/current/impedance/power. |
-| network | branch | DynamicBranch / dynamic line | branch |  | missing | L0 |  | n/a | HACDCPF transient branch model is algebraic; no PSD-style dynamic line state model yet. |
-| dae | simulation_formulation | ResidualModel | solver |  | profile-only | L4 |  | n/a | HACDCPF now has nine ResidualModel/IDA trace manifest gates against MassMatrixDae and exposes PSD-coordinate residual/mass/Jacobian/small-signal diagnostics for SimpleMarconato Test 03; the diagnostic object is not yet generic for all component stacks. |
+| network | branch | DynamicBranch / dynamic line | branch | DynamicRLLine | supported-subset | L3 | test25:bus102:voltage_mag | yes | PSD-style dynamic RL branch current states participate in MassMatrixDae; PSD Test 25 now passes an executable bus-102 voltage-magnitude trace gate for the Marconato dynamic-line benchmark. |
+| dae | simulation_formulation | ResidualModel | solver |  | profile-only | L4 |  | n/a | HACDCPF now has eleven ResidualModel/IDA trace manifest gates against MassMatrixDae and exposes PSD-coordinate residual/mass/Jacobian/small-signal diagnostics for SimpleMarconato Test 03; the diagnostic object is not yet generic for all component stacks. |
 | dae | simulation_formulation | MassMatrixModel | solver |  | missing | L4 |  | n/a | MassMatrixDae is the HACDCPF solver used by the executable manifest gates; a general PSD-equivalent MassMatrixModel object API remains future work. |

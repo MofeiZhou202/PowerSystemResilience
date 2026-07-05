@@ -71,6 +71,10 @@ function export_signal(results, signal::String)
             return get_state_series(results, (ref, :eq_pp))
         elseif quantity == "ed_pp"
             return get_state_series(results, (ref, :ed_pp))
+        elseif quantity == "psi_q"
+            return get_state_series(results, (ref, :ψq))
+        elseif quantity == "psi_d"
+            return get_state_series(results, (ref, :ψd))
         elseif quantity == "psi_kd"
             return get_state_series(results, (ref, :ψ_kd))
         elseif quantity == "psi_kq"
@@ -85,6 +89,24 @@ function export_signal(results, signal::String)
             return get_reactivepower_series(results, ref)
         elseif quantity == "p_oc"
             return get_state_series(results, (ref, :p_oc))
+        elseif quantity == "field_voltage_pu" || quantity == "vf_pu"
+            return get_field_voltage_series(results, ref)
+        elseif quantity == "mechanical_torque_pu" || quantity == "tau_m_pu"
+            return get_mechanical_torque_series(results, ref)
+        elseif quantity == "pss_output_pu" || quantity == "vs_pu"
+            return get_pss_output_series(results, ref)
+        elseif quantity == "delta_hp_rad"
+            return get_state_series(results, (ref, :δ_hp))
+        elseif quantity == "delta_ip_rad"
+            return get_state_series(results, (ref, :δ_ip))
+        elseif quantity == "delta_ex_rad"
+            return get_state_series(results, (ref, :δ_ex))
+        elseif quantity == "omega_hp_pu"
+            return get_state_series(results, (ref, :ω_hp))
+        elseif quantity == "omega_ip_pu"
+            return get_state_series(results, (ref, :ω_ip))
+        elseif quantity == "omega_ex_pu"
+            return get_state_series(results, (ref, :ω_ex))
         end
     end
     error("unsupported PSD export signal $(signal)")
@@ -134,6 +156,157 @@ function run_simple_marconato()
             work,
             (0.0, 2.0),
             ybus_change,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.005, saveat = 0.005)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
+function run_marconato()
+    sys = build_system(PSIDTestSystems, "psid_test_threebus_marconato")
+    pf = ACPowerFlow()
+    solve_powerflow!(pf, sys)
+    ybus_fault = one_done_q_fault_ybus(sys)
+    ybus_change = NetworkSwitch(1.0, ybus_fault)
+    work = mktempdir()
+    try
+        sim = Simulation(
+            ResidualModel,
+            sys,
+            work,
+            (0.0, 2.0),
+            ybus_change,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.005, saveat = 0.005)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
+function run_simple_af()
+    sys = build_system(PSIDTestSystems, "psid_test_threebus_simple_anderson")
+    pf = ACPowerFlow()
+    solve_powerflow!(pf, sys)
+    ybus_fault = one_done_q_fault_ybus(sys)
+    ybus_change = NetworkSwitch(1.0, ybus_fault)
+    work = mktempdir()
+    try
+        sim = Simulation(
+            ResidualModel,
+            sys,
+            work,
+            (0.0, 2.0),
+            ybus_change,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.005, saveat = 0.005)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
+function run_anderson_fouad()
+    sys = build_system(PSIDTestSystems, "psid_test_threebus_anderson")
+    pf = ACPowerFlow()
+    solve_powerflow!(pf, sys)
+    ybus_fault = one_done_q_fault_ybus(sys)
+    ybus_change = NetworkSwitch(1.0, ybus_fault)
+    work = mktempdir()
+    try
+        sim = Simulation(
+            ResidualModel,
+            sys,
+            work,
+            (0.0, 2.0),
+            ybus_change,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.005, saveat = 0.005)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
+function run_five_mass_shaft()
+    sys = build_system(PSIDTestSystems, "psid_test_threebus_5shaft")
+    pf = ACPowerFlow()
+    solve_powerflow!(pf, sys)
+    ybus_fault = one_done_q_fault_ybus(sys)
+    ybus_change = NetworkSwitch(1.0, ybus_fault)
+    work = mktempdir()
+    try
+        sim = Simulation!(
+            ResidualModel,
+            sys,
+            work,
+            (0.0, 2.0),
+            ybus_change,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.001, saveat = 0.005)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
+function run_test13_avrs()
+    include(joinpath(TEST_FILES_DIR, "data_tests", "test13.jl"))
+    ybus_change = NetworkSwitch(1.0, Ybus_fault)
+    work = mktempdir()
+    try
+        sim = Simulation(
+            ResidualModel,
+            threebus_sys,
+            work,
+            (0.0, 2.0),
+            ybus_change,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.005, saveat = 0.005)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
+function run_test12_multimachine()
+    include(joinpath(TEST_FILES_DIR, "data_tests", "test12.jl"))
+    ybus_change = NetworkSwitch(1.0, Ybus_fault)
+    work = mktempdir()
+    try
+        sim = Simulation(
+            ResidualModel,
+            threebus_sys,
+            work,
+            (0.0, 5.0),
+            ybus_change,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.005, saveat = 0.005)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
+function run_test17_avrtype1()
+    include(joinpath(TEST_FILES_DIR, "data_tests", "test17.jl"))
+    work = mktempdir()
+    try
+        sim = Simulation!(
+            ResidualModel,
+            sys,
+            work,
+            (0.0, 2.0),
+            BranchTrip(1.0, Line, "BUS 1-BUS 2-i_1"),
         )
         status = execute!(sim, IDA(); dtmax = 0.005, saveat = 0.005)
         status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
@@ -222,13 +395,52 @@ function run_gridfollowing(case_name::String)
     end
 end
 
+function run_test25_dynamic_lines()
+    include(joinpath(TEST_FILES_DIR, "data_tests", "test25.jl"))
+    gen2 = get_dynamic_injector(get_component(Generator, sys, "generator-102-1"))
+    pref_change = ControlReferenceChange(1.0, gen2, :P_ref, 0.9)
+    work = mktempdir()
+    try
+        sim = Simulation!(
+            ResidualModel,
+            sys,
+            work,
+            (0.0, 2.0),
+            pref_change,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.01, saveat = 0.01)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
 function run_case(case_name::String)
     if case_name == "onedoneq" || case_name == "test02"
         run_onedoneq()
     elseif case_name == "simple_marconato" || case_name == "test03"
         run_simple_marconato()
+    elseif case_name == "marconato" || case_name == "test04"
+        run_marconato()
+    elseif case_name == "simple_af" || case_name == "simple_anderson" || case_name == "test05"
+        run_simple_af()
+    elseif case_name == "anderson_fouad" || case_name == "anderson" || case_name == "test06"
+        run_anderson_fouad()
+    elseif case_name == "five_mass_shaft" || case_name == "test07"
+        run_five_mass_shaft()
+    elseif case_name == "test12" || case_name == "multimachine_tgtype2"
+        run_test12_multimachine()
+    elseif case_name == "test13" || case_name == "onedoneq_avr_tg"
+        run_test13_avrs()
+    elseif case_name == "test17" || case_name == "genrou_avrtype1"
+        run_test17_avrtype1()
     elseif case_name == "genrou"
         run_genrou()
+    elseif case_name == "sexs" || case_name == "test26"
+        run_psse_machine_case("SEXS", "ThreeBus_SEXS.dyr")
+    elseif case_name == "ieeest" || case_name == "test30"
+        run_psse_machine_case("IEEEST", "ThreeBus_IEEEST_with_filter.dyr")
     elseif case_name == "genroe" || case_name == "test16"
         run_psse_machine_case("GENROE", "ThreeBus_GENROE.dyr")
     elseif case_name == "genroe_high_sat" || case_name == "test16_high_sat"
@@ -241,6 +453,8 @@ function run_case(case_name::String)
         run_zip_constant_power()
     elseif case_name in ("test24", "gridfollowing_reduced", "test51", "gridfollowing_kaura")
         run_gridfollowing(case_name)
+    elseif case_name == "test25" || case_name == "dynamic_lines_test25"
+        run_test25_dynamic_lines()
     else
         error("unsupported PSD validation case: $(case_name)")
     end
