@@ -135,6 +135,95 @@ void add_balanced_admittance(DynamicStamp& stamp,
   }
 }
 
+bool valid_jacobian_index(const DynamicJacobianContext& context, int idx) {
+  return idx >= 0 && idx < context.total_size;
+}
+
+void add_jacobian_triplet(const DynamicJacobianContext& context,
+                          int row,
+                          int col,
+                          double value,
+                          std::vector<Eigen::Triplet<double>>& triplets) {
+  if (!valid_jacobian_index(context, row) ||
+      !valid_jacobian_index(context, col) ||
+      !std::isfinite(value) ||
+      std::abs(value) <= 1e-14) {
+    return;
+  }
+  triplets.emplace_back(row, col, value);
+}
+
+void add_ac_current_derivative(
+    const DynamicJacobianContext& context,
+    int ac_node,
+    int col,
+    Complex derivative,
+    std::vector<Eigen::Triplet<double>>& triplets) {
+  if (!context.validAcNode(ac_node) || !valid_jacobian_index(context, col)) return;
+  add_jacobian_triplet(context, context.acRealRow(ac_node), col, derivative.real(), triplets);
+  add_jacobian_triplet(context, context.acImagRow(ac_node), col, derivative.imag(), triplets);
+}
+
+void add_ac_current_voltage_derivative(
+    const DynamicJacobianContext& context,
+    int ac_node,
+    Complex d_current_d_vr,
+    Complex d_current_d_vi,
+    std::vector<Eigen::Triplet<double>>& triplets) {
+  if (!context.validAcNode(ac_node)) return;
+  add_ac_current_derivative(context, ac_node, context.acRealCol(ac_node),
+                            d_current_d_vr, triplets);
+  add_ac_current_derivative(context, ac_node, context.acImagCol(ac_node),
+                            d_current_d_vi, triplets);
+}
+
+void add_dc_current_derivative(
+    const DynamicJacobianContext& context,
+    int dc_node,
+    int col,
+    double derivative,
+    std::vector<Eigen::Triplet<double>>& triplets) {
+  if (!context.validDcNode(dc_node) || !valid_jacobian_index(context, col)) return;
+  add_jacobian_triplet(context, context.dcRow(dc_node), col, derivative, triplets);
+}
+
+void add_balanced_current_derivative(
+    const DynamicJacobianContext& context,
+    int bus_pos,
+    int col,
+    const Eigen::Vector3cd& derivative,
+    std::vector<Eigen::Triplet<double>>& triplets) {
+  if (bus_pos < 0) return;
+  for (int phase = 0; phase < 3; ++phase) {
+    add_ac_current_derivative(context, 3 * bus_pos + phase, col, derivative[phase], triplets);
+  }
+}
+
+template <typename CurrentFn>
+void add_local_ac_voltage_current_derivative(
+    const DynamicJacobianContext& context,
+    int ac_node,
+    Complex v,
+    const CurrentFn& current,
+    std::vector<Eigen::Triplet<double>>& triplets) {
+  constexpr double eps = 1e-6;
+  const double hr = eps * std::max(1.0, std::abs(v.real()));
+  const double hi = eps * std::max(1.0, std::abs(v.imag()));
+  const Complex d_vr =
+      (current(Complex(v.real() + hr, v.imag())) -
+       current(Complex(v.real() - hr, v.imag()))) /
+      (2.0 * hr);
+  const Complex d_vi =
+      (current(Complex(v.real(), v.imag() + hi)) -
+       current(Complex(v.real(), v.imag() - hi))) /
+      (2.0 * hi);
+  add_ac_current_voltage_derivative(context, ac_node, d_vr, d_vi, triplets);
+}
+
+double clamp_voltage_slope(double value) {
+  return std::abs(value) > kMinVoltage ? (value >= 0.0 ? 1.0 : -1.0) : 0.0;
+}
+
 Eigen::Matrix3cd diagonal_admittance(Complex y) {
   Eigen::Matrix3cd matrix = Eigen::Matrix3cd::Zero();
   matrix(0, 0) = y;
@@ -1658,6 +1747,41 @@ void DynamicLoad::stamp(double,
   }
 }
 
+void DynamicLoad::addJacobian(double,
+                              const DynamicState&,
+                              const NetworkState& y,
+                              const DynamicJacobianContext& context,
+                              std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service || params_.bus_pos < 0 || params_.base_mva <= 0.0 ||
+      params_.model_kind == DynamicLoadModelKind::ConstantImpedance) {
+    return;
+  }
+  const Complex s_pu(params_.p_mw / params_.base_mva * params_.scale,
+                     params_.q_mvar / params_.base_mva * params_.scale);
+  const double phase_power_scale =
+      std::max(0.0, std::abs(params_.phase_power_scale));
+  const double p_phase = s_pu.real() * phase_power_scale;
+  const double q_phase = s_pu.imag() * phase_power_scale;
+  const double v0 = params_.nominal_voltage_pu > 0.0 ? params_.nominal_voltage_pu : 1.0;
+  const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
+  for (int phase = 0; phase < 3; ++phase) {
+    const int node = 3 * params_.bus_pos + phase;
+    add_local_ac_voltage_current_derivative(
+        context,
+        node,
+        v[phase],
+        [&](Complex vv) {
+          return -load_consuming_current(vv,
+                                         p_phase,
+                                         q_phase,
+                                         v0,
+                                         params_.model_kind,
+                                         params_);
+        },
+        triplets);
+  }
+}
+
 void DynamicLoad::handleEvent(const DynamicEvent& event, DynamicState&, NetworkState&) {
   if (event.type != DynamicEventType::ACLoadScale) return;
   const bool bus_targeted = event.bus != 0;
@@ -1777,6 +1901,26 @@ void DynamicRLLine::stamp(double,
   add_balanced_current(stamp, params_.to_pos, current);
 }
 
+void DynamicRLLine::addJacobian(double,
+                                const DynamicState&,
+                                const NetworkState&,
+                                const DynamicJacobianContext& context,
+                                std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service || params_.from_pos < 0 || params_.to_pos < 0 ||
+      range_.empty()) {
+    return;
+  }
+  const int ir_col = state_index(range_, 0);
+  const int ii_col = state_index(range_, 1);
+  if (!context.validStateIndex(ir_col) || !context.validStateIndex(ii_col)) return;
+  const Eigen::Vector3cd d_ir = balanced_current_from_positive_sequence(Complex(1.0, 0.0));
+  const Eigen::Vector3cd d_ii = balanced_current_from_positive_sequence(Complex(0.0, 1.0));
+  add_balanced_current_derivative(context, params_.from_pos, ir_col, -d_ir, triplets);
+  add_balanced_current_derivative(context, params_.from_pos, ii_col, -d_ii, triplets);
+  add_balanced_current_derivative(context, params_.to_pos, ir_col, d_ir, triplets);
+  add_balanced_current_derivative(context, params_.to_pos, ii_col, d_ii, triplets);
+}
+
 void DynamicRLLine::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState& y) {
   if (event.type != DynamicEventType::ACBranchTrip &&
       event.type != DynamicEventType::ACBranchClose &&
@@ -1865,6 +2009,12 @@ void ThreePhaseDynamicLoad::stamp(double,
   }
 }
 
+void ThreePhaseDynamicLoad::addJacobian(double,
+                                        const DynamicState&,
+                                        const NetworkState&,
+                                        const DynamicJacobianContext&,
+                                        std::vector<Eigen::Triplet<double>>&) const {}
+
 void ThreePhaseDynamicLoad::handleEvent(const DynamicEvent& event,
                                         DynamicState&,
                                         NetworkState&) {
@@ -1940,6 +2090,12 @@ void DCDynamicLoad::stamp(double,
   stamp.addDcConductance(params_.bus_pos, params_.bus_pos, std::max(0.0, p_pu));
 }
 
+void DCDynamicLoad::addJacobian(double,
+                                const DynamicState&,
+                                const NetworkState&,
+                                const DynamicJacobianContext&,
+                                std::vector<Eigen::Triplet<double>>&) const {}
+
 void DCDynamicLoad::handleEvent(const DynamicEvent& event, DynamicState&, NetworkState&) {
   if (event.type != DynamicEventType::DCLoadScale) return;
   const bool bus_targeted = event.bus != 0;
@@ -1998,6 +2154,12 @@ void DCVoltageSourceDynamic::stamp(double,
   stamp.addDcConductance(params_.bus_pos, params_.bus_pos, g);
   stamp.addDcCurrent(params_.bus_pos, g * params_.v_ref_pu);
 }
+
+void DCVoltageSourceDynamic::addJacobian(double,
+                                         const DynamicState&,
+                                         const NetworkState&,
+                                         const DynamicJacobianContext&,
+                                         std::vector<Eigen::Triplet<double>>&) const {}
 
 void DCVoltageSourceDynamic::handleEvent(const DynamicEvent& event, DynamicState&, NetworkState&) {
   if (params_.trip_on_vsc_event &&
@@ -4454,6 +4616,55 @@ void GridFormingInverter::stamp(double,
   }
 }
 
+void GridFormingInverter::addJacobian(
+    double,
+    const DynamicState& x,
+    const NetworkState& y,
+    const DynamicJacobianContext& context,
+    std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  const int theta_col = state_index(range_, 0);
+  const int e_mag_col = state_index(range_, 1);
+  if (context.validStateIndex(theta_col) && context.validStateIndex(e_mag_col)) {
+    const Complex z(params_.virtual_r_pu, std::max(1e-5, params_.virtual_x_pu));
+    const Complex yv = Complex(1.0, 0.0) / z;
+    const double theta = x.x[theta_col];
+    const double e_mag = x.x[e_mag_col];
+    const Eigen::Vector3cd e = balanced_phasors(e_mag, theta);
+    const Eigen::Vector3cd d_i_dtheta = yv * Complex(0.0, 1.0) * e;
+    const Eigen::Vector3cd d_i_de = yv * balanced_phasors(1.0, theta);
+    add_balanced_current_derivative(context, params_.bus_pos, theta_col, d_i_dtheta, triplets);
+    add_balanced_current_derivative(context, params_.bus_pos, e_mag_col, d_i_de, triplets);
+  }
+
+  if (params_.dc_bus_pos < 0 || !context.validDcNode(params_.dc_bus_pos)) return;
+  if (params_.dc_link_mode == DCLinkMode::DynamicDCVoltage && range_.size > 6) {
+    const int vdc_col = state_index(range_, 6);
+    if (context.validStateIndex(vdc_col)) {
+      add_dc_current_derivative(context,
+                                params_.dc_bus_pos,
+                                vdc_col,
+                                std::max(0.0, params_.dc_link_conductance_pu),
+                                triplets);
+    }
+    return;
+  }
+  const int p_col = state_index(range_, 2);
+  if (!context.validStateIndex(p_col) ||
+      params_.dc_bus_pos >= y.Vdc.size()) {
+    return;
+  }
+  const double eta = std::max(1e-6, params_.eta);
+  const double raw_vdc = y.Vdc[params_.dc_bus_pos];
+  const double vdc = clamp_voltage(raw_vdc);
+  add_dc_current_derivative(context, params_.dc_bus_pos, p_col, -1.0 / (eta * vdc), triplets);
+  add_dc_current_derivative(context,
+                            params_.dc_bus_pos,
+                            context.dcCol(params_.dc_bus_pos),
+                            x.x[p_col] * clamp_voltage_slope(raw_vdc) / (eta * vdc * vdc),
+                            triplets);
+}
+
 void GridFormingInverter::handleEvent(const DynamicEvent& event, DynamicState&, NetworkState&) {
   if (event.type == DynamicEventType::VSCTrip &&
       (event.component_index == 0 || event.component_index == params_.component_index)) {
@@ -4842,6 +5053,64 @@ void GridFollowingInverter::stamp(double,
   }
 }
 
+void GridFollowingInverter::addJacobian(
+    double,
+    const DynamicState& x,
+    const NetworkState& y,
+    const DynamicJacobianContext& context,
+    std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  const int theta_col = state_index(range_, 0);
+  const int id_col = state_index(range_, 2);
+  const int iq_col = state_index(range_, 3);
+  if (context.validStateIndex(theta_col) &&
+      context.validStateIndex(id_col) &&
+      context.validStateIndex(iq_col)) {
+    const double theta = x.x[theta_col];
+    const double id = x.x[id_col];
+    const double iq = x.x[iq_col];
+    const Eigen::Vector3cd current = balanced_current_from_dq(id, iq, theta);
+    const Eigen::Vector3cd d_i_dtheta = Complex(0.0, 1.0) * current;
+    const Eigen::Vector3cd d_i_did = balanced_current_from_dq(1.0, 0.0, theta);
+    const Eigen::Vector3cd d_i_diq = balanced_current_from_dq(0.0, 1.0, theta);
+    add_balanced_current_derivative(context, params_.bus_pos, theta_col, d_i_dtheta, triplets);
+    add_balanced_current_derivative(context, params_.bus_pos, id_col, d_i_did, triplets);
+    add_balanced_current_derivative(context, params_.bus_pos, iq_col, d_i_diq, triplets);
+  }
+
+  if (!params_.stamp_dc_power ||
+      params_.dc_bus_pos < 0 ||
+      !context.validDcNode(params_.dc_bus_pos)) {
+    return;
+  }
+  const int vdc_local = gfl_vdc_local(params_);
+  if (vdc_local >= 0) {
+    const int vdc_col = state_index(range_, vdc_local);
+    if (context.validStateIndex(vdc_col)) {
+      add_dc_current_derivative(context,
+                                params_.dc_bus_pos,
+                                vdc_col,
+                                std::max(0.0, params_.dc_link_conductance_pu),
+                                triplets);
+    }
+    return;
+  }
+  const int p_col = state_index(range_, 4);
+  if (!context.validStateIndex(p_col) ||
+      params_.dc_bus_pos >= y.Vdc.size()) {
+    return;
+  }
+  const double eta = std::max(1e-6, params_.eta);
+  const double raw_vdc = y.Vdc[params_.dc_bus_pos];
+  const double vdc = clamp_voltage(raw_vdc);
+  add_dc_current_derivative(context, params_.dc_bus_pos, p_col, -1.0 / (eta * vdc), triplets);
+  add_dc_current_derivative(context,
+                            params_.dc_bus_pos,
+                            context.dcCol(params_.dc_bus_pos),
+                            x.x[p_col] * clamp_voltage_slope(raw_vdc) / (eta * vdc * vdc),
+                            triplets);
+}
+
 void GridFollowingInverter::handleEvent(const DynamicEvent& event,
                                         DynamicState& x,
                                         NetworkState&) {
@@ -5086,6 +5355,19 @@ void VSCConverterDynamic::stamp(double t,
   }
 }
 
+void VSCConverterDynamic::addJacobian(
+    double t,
+    const DynamicState& x,
+    const NetworkState& y,
+    const DynamicJacobianContext& context,
+    std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (params_.grid_forming) {
+    gfm_.addJacobian(t, x, y, context, triplets);
+  } else {
+    gfl_.addJacobian(t, x, y, context, triplets);
+  }
+}
+
 void VSCConverterDynamic::handleEvent(const DynamicEvent& event,
                                       DynamicState& x,
                                       NetworkState& y) {
@@ -5323,6 +5605,34 @@ void CSVGN1Dynamic::stamp(double,
   add_balanced_current(stamp, params_.bus_pos, current);
 }
 
+void CSVGN1Dynamic::addJacobian(double,
+                                const DynamicState& x,
+                                const NetworkState& y,
+                                const DynamicJacobianContext& context,
+                                std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  const int thy_col = state_index(range_, 0);
+  const double b = susceptancePu(x);
+  const double db_dthy = -params_.model_base_mva / safe_base(params_.base_mva);
+  const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
+  const Complex current_per_voltage(0.0, -b);
+  for (int phase = 0; phase < 3; ++phase) {
+    const int node = 3 * params_.bus_pos + phase;
+    if (context.validStateIndex(thy_col)) {
+      add_ac_current_derivative(context,
+                                node,
+                                thy_col,
+                                Complex(0.0, -db_dthy) * v[phase],
+                                triplets);
+    }
+    add_ac_current_voltage_derivative(context,
+                                      node,
+                                      current_per_voltage,
+                                      current_per_voltage * Complex(0.0, 1.0),
+                                      triplets);
+  }
+}
+
 std::string CSVGN1Dynamic::name() const {
   return params_.label.empty() ? "CSVGN1 " + std::to_string(params_.component_index)
                                : params_.label;
@@ -5484,6 +5794,33 @@ void DERAADynamic::stamp(double,
                        balanced_current_from_dq(ip, -iq, theta));
 }
 
+void DERAADynamic::addJacobian(double,
+                               const DynamicState& x,
+                               const NetworkState& y,
+                               const DynamicJacobianContext& context,
+                               std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const double theta = std::arg(v);
+  const double ratio = params_.model_base_mva / safe_base(params_.base_mva);
+  const int ip_col = state_index(range_, params_.freq_flag == 1 ? 9 : 6);
+  const int iq_col = state_index(range_, 3);
+  if (context.validStateIndex(ip_col)) {
+    add_balanced_current_derivative(context,
+                                    params_.bus_pos,
+                                    ip_col,
+                                    balanced_current_from_dq(ratio, 0.0, theta),
+                                    triplets);
+  }
+  if (context.validStateIndex(iq_col)) {
+    add_balanced_current_derivative(context,
+                                    params_.bus_pos,
+                                    iq_col,
+                                    balanced_current_from_dq(0.0, -ratio, theta),
+                                    triplets);
+  }
+}
+
 std::string DERAADynamic::name() const {
   return params_.label.empty() ? "AggregateDistributedGenerationA " +
                                      std::to_string(params_.component_index)
@@ -5564,6 +5901,40 @@ void DCDCConverterDynamic::stamp(double,
   const double v_out = clamp_voltage(y.Vdc[params_.bus_out_pos]);
   stamp.addDcCurrent(params_.bus_in_pos, -p_out / std::max(1e-6, params_.eta) / v_in);
   stamp.addDcCurrent(params_.bus_out_pos, p_out / v_out);
+}
+
+void DCDCConverterDynamic::addJacobian(
+    double,
+    const DynamicState& x,
+    const NetworkState& y,
+    const DynamicJacobianContext& context,
+    std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service || params_.bus_in_pos < 0 || params_.bus_out_pos < 0 ||
+      range_.empty() ||
+      params_.bus_in_pos >= y.Vdc.size() ||
+      params_.bus_out_pos >= y.Vdc.size()) {
+    return;
+  }
+  const int p_col = range_.offset;
+  if (!context.validStateIndex(p_col)) return;
+  const double eta = std::max(1e-6, params_.eta);
+  const double p_out = x.x[p_col];
+  const double raw_v_in = y.Vdc[params_.bus_in_pos];
+  const double raw_v_out = y.Vdc[params_.bus_out_pos];
+  const double v_in = clamp_voltage(raw_v_in);
+  const double v_out = clamp_voltage(raw_v_out);
+  add_dc_current_derivative(context, params_.bus_in_pos, p_col, -1.0 / (eta * v_in), triplets);
+  add_dc_current_derivative(context, params_.bus_out_pos, p_col, 1.0 / v_out, triplets);
+  add_dc_current_derivative(context,
+                            params_.bus_in_pos,
+                            context.dcCol(params_.bus_in_pos),
+                            p_out * clamp_voltage_slope(raw_v_in) / (eta * v_in * v_in),
+                            triplets);
+  add_dc_current_derivative(context,
+                            params_.bus_out_pos,
+                            context.dcCol(params_.bus_out_pos),
+                            -p_out * clamp_voltage_slope(raw_v_out) / (v_out * v_out),
+                            triplets);
 }
 
 void DCDCConverterDynamic::handleEvent(const DynamicEvent& event, DynamicState&, NetworkState&) {
@@ -5676,6 +6047,59 @@ void BatteryDynamic::stamp(double,
   }
 }
 
+void BatteryDynamic::addJacobian(double,
+                                 const DynamicState& x,
+                                 const NetworkState& y,
+                                 const DynamicJacobianContext& context,
+                                 std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.stamp_power || !params_.in_service || params_.bus_pos < 0 ||
+      range_.empty() || range_.offset + 1 >= x.x.size()) {
+    return;
+  }
+  const int p_col = range_.offset;
+  const double p = x.x[p_col];
+  const double soc = x.x[range_.offset + 1];
+  if (soc <= params_.soc_min + 1e-9 && p > 0.0) return;
+  if (soc >= params_.soc_max - 1e-9 && p < 0.0) return;
+
+  if (params_.is_ac) {
+    const double q = params_.q_ref_mvar / std::max(1.0, params_.base_mva);
+    const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
+    const Eigen::Vector3cd fallback = balanced_phasors(1.0, 0.0);
+    for (int phase = 0; phase < 3; ++phase) {
+      const int node = 3 * params_.bus_pos + phase;
+      const Complex vv = std::abs(v[phase]) > kMinVoltage ? v[phase] : fallback[phase];
+      if (context.validStateIndex(p_col)) {
+        add_ac_current_derivative(context,
+                                  node,
+                                  p_col,
+                                  std::conj(Complex(1.0 / 3.0, 0.0) / vv),
+                                  triplets);
+      }
+      add_local_ac_voltage_current_derivative(
+          context,
+          node,
+          v[phase],
+          [&](Complex trial_v) {
+            const Complex v_used = std::abs(trial_v) > kMinVoltage ? trial_v : fallback[phase];
+            return std::conj(Complex(p / 3.0, q / 3.0) / v_used);
+          },
+          triplets);
+    }
+    return;
+  }
+
+  if (params_.bus_pos >= y.Vdc.size()) return;
+  const double raw_vdc = y.Vdc[params_.bus_pos];
+  const double vdc = clamp_voltage(raw_vdc);
+  add_dc_current_derivative(context, params_.bus_pos, p_col, 1.0 / vdc, triplets);
+  add_dc_current_derivative(context,
+                            params_.bus_pos,
+                            context.dcCol(params_.bus_pos),
+                            -p * clamp_voltage_slope(raw_vdc) / (vdc * vdc),
+                            triplets);
+}
+
 void BatteryDynamic::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
   const bool matching = event.component_index == 0 ||
                         event.component_index == params_.component_index;
@@ -5786,6 +6210,55 @@ void PVDynamic::stamp(double,
                            : balanced_phasors(1.0, 0.0)[phase];
     stamp.addAcCurrent(3 * params_.bus_pos + phase,
                         std::conj((s_total / 3.0) / vv));
+  }
+}
+
+void PVDynamic::addJacobian(double,
+                            const DynamicState& x,
+                            const NetworkState& y,
+                            const DynamicJacobianContext& context,
+                            std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty() ||
+      range_.offset + 1 >= x.x.size()) {
+    return;
+  }
+  const int p_col = range_.offset;
+  const int q_col = range_.offset + 1;
+  const double p = x.x[p_col];
+  const double q = x.x[q_col];
+  const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
+  const double vavg = std::max(kMinVoltage, avg_voltage_mag(v));
+  if (params_.current_limit_pu > 0.0 &&
+      std::abs(Complex(p, q)) / vavg > params_.current_limit_pu) {
+    return;
+  }
+  const Eigen::Vector3cd fallback = balanced_phasors(1.0, 0.0);
+  for (int phase = 0; phase < 3; ++phase) {
+    const int node = 3 * params_.bus_pos + phase;
+    const Complex vv = std::abs(v[phase]) > kMinVoltage ? v[phase] : fallback[phase];
+    if (context.validStateIndex(p_col)) {
+      add_ac_current_derivative(context,
+                                node,
+                                p_col,
+                                std::conj(Complex(1.0 / 3.0, 0.0) / vv),
+                                triplets);
+    }
+    if (context.validStateIndex(q_col)) {
+      add_ac_current_derivative(context,
+                                node,
+                                q_col,
+                                std::conj(Complex(0.0, 1.0 / 3.0) / vv),
+                                triplets);
+    }
+    add_local_ac_voltage_current_derivative(
+        context,
+        node,
+        v[phase],
+        [&](Complex trial_v) {
+          const Complex v_used = std::abs(trial_v) > kMinVoltage ? trial_v : fallback[phase];
+          return std::conj((Complex(p, q) / 3.0) / v_used);
+        },
+        triplets);
   }
 }
 

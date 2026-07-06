@@ -15,6 +15,54 @@
 
 namespace hacdcpf::dynamics {
 
+struct DynamicJacobianContext {
+  int n_x{0};
+  int n_ac{0};
+  int n_dc{0};
+  int ac_real_offset{0};
+  int ac_imag_offset{0};
+  int dc_offset{0};
+  int total_size{0};
+  double dt{0.0};
+  double theta{1.0};
+
+  [[nodiscard]] bool validStateIndex(int idx) const noexcept {
+    return idx >= 0 && idx < n_x;
+  }
+
+  [[nodiscard]] bool validAcNode(int node) const noexcept {
+    return node >= 0 && node < n_ac;
+  }
+
+  [[nodiscard]] bool validDcNode(int node) const noexcept {
+    return node >= 0 && node < n_dc;
+  }
+
+  [[nodiscard]] int acRealRow(int node) const noexcept {
+    return ac_real_offset + node;
+  }
+
+  [[nodiscard]] int acImagRow(int node) const noexcept {
+    return ac_imag_offset + node;
+  }
+
+  [[nodiscard]] int acRealCol(int node) const noexcept {
+    return ac_real_offset + node;
+  }
+
+  [[nodiscard]] int acImagCol(int node) const noexcept {
+    return ac_imag_offset + node;
+  }
+
+  [[nodiscard]] int dcRow(int node) const noexcept {
+    return dc_offset + node;
+  }
+
+  [[nodiscard]] int dcCol(int node) const noexcept {
+    return dc_offset + node;
+  }
+};
+
 class DynamicDevice {
  public:
   virtual ~DynamicDevice() = default;
@@ -83,6 +131,15 @@ class DynamicDevice {
     (void)x;
     (void)y;
     (void)triplets;
+  }
+
+  virtual void addJacobian(double t,
+                           const DynamicState& x,
+                           const NetworkState& y,
+                           const DynamicJacobianContext& context,
+                           std::vector<Eigen::Triplet<double>>& triplets) const {
+    (void)context;
+    addJacobian(t, x, y, triplets);
   }
 
   [[nodiscard]] virtual std::string name() const = 0;

@@ -29,9 +29,15 @@ enum class DynamicLinearSolverType {
   PETSc
 };
 
+enum class DynamicDaeStepMethod {
+  BackwardEuler,
+  Trapezoidal
+};
+
 struct DynamicSolverOptions {
   DynamicSolverType solver_type{DynamicSolverType::PartitionedHeun};
   DynamicLinearSolverType linear_solver{DynamicLinearSolverType::EigenSparseLU};
+  DynamicDaeStepMethod dae_step_method{DynamicDaeStepMethod::BackwardEuler};
 
   double t_start_s{0.0};
   double t_end_s{1.0};
@@ -46,6 +52,12 @@ struct DynamicSolverOptions {
   bool use_adaptive_step{false};
   bool use_analytic_jacobian{false};
   bool use_numerical_jacobian{false};
+  bool dae_reuse_jacobian_factorization{true};
+  bool dae_use_analytic_network_jacobian{true};
+  bool dae_use_analytic_device_jacobian{true};
+  bool dae_use_fd_current_jacobian_corrections{true};
+  int dae_jacobian_max_reuse_steps{8};
+  double dae_jacobian_stale_residual_ratio{0.75};
 
   bool run_power_flow_initialization{true};
   bool trim_dynamic_initial_conditions{true};

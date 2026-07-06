@@ -89,6 +89,11 @@ class DynamicLoad : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
@@ -142,6 +147,11 @@ class DynamicRLLine : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
@@ -197,6 +207,11 @@ class ThreePhaseDynamicLoad : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
@@ -243,6 +258,11 @@ class DCDynamicLoad : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
@@ -288,6 +308,11 @@ class DCVoltageSourceDynamic : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
@@ -796,6 +821,11 @@ class GridFormingInverter : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
@@ -873,6 +903,11 @@ class GridFollowingInverter : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
@@ -939,6 +974,11 @@ class VSCConverterDynamic : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
@@ -1063,6 +1103,11 @@ class CSVGN1Dynamic : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return "CSVGN1"; }
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
@@ -1133,6 +1178,11 @@ class DERAADynamic : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return "AggregateDistributedGenerationA"; }
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
@@ -1185,6 +1235,11 @@ class DCDCConverterDynamic : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
@@ -1247,6 +1302,11 @@ class BatteryDynamic : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
@@ -1304,6 +1364,11 @@ class PVDynamic : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;

@@ -1835,6 +1835,107 @@ void set_balanced_voltage(NetworkState& y, int bus_pos, Complex v) {
   y.Vac_abc[base + 2] = std::polar(vm, va + 2.0 * pi / 3.0);
 }
 
+DynamicJacobianContext test_jacobian_context(int n_x, int n_ac, int n_dc) {
+  DynamicJacobianContext context;
+  context.n_x = n_x;
+  context.n_ac = n_ac;
+  context.n_dc = n_dc;
+  context.ac_real_offset = n_x;
+  context.ac_imag_offset = n_x + n_ac;
+  context.dc_offset = n_x + 2 * n_ac;
+  context.total_size = n_x + 2 * n_ac + n_dc;
+  context.dt = 0.01;
+  context.theta = 1.0;
+  return context;
+}
+
+Eigen::VectorXd stamped_current_vector(const DynamicDevice& device,
+                                       const DynamicState& x,
+                                       const NetworkState& y,
+                                       const DynamicJacobianContext& context) {
+  DynamicStamp stamp(context.n_ac, context.n_dc);
+  device.stamp(0.0, x, y, stamp);
+  Eigen::VectorXd out = Eigen::VectorXd::Zero(context.total_size);
+  for (int node = 0; node < context.n_ac; ++node) {
+    out[context.acRealRow(node)] = stamp.Iac[node].real();
+    out[context.acImagRow(node)] = stamp.Iac[node].imag();
+  }
+  for (int node = 0; node < context.n_dc; ++node) {
+    out[context.dcRow(node)] = stamp.Idc[node];
+  }
+  return out;
+}
+
+Eigen::VectorXd finite_difference_current_column(const DynamicDevice& device,
+                                                 const DynamicState& x,
+                                                 const NetworkState& y,
+                                                 const DynamicJacobianContext& context,
+                                                 int col) {
+  DynamicState xp = x;
+  DynamicState xm = x;
+  NetworkState yp = y;
+  NetworkState ym = y;
+  double base = 0.0;
+  if (col < context.n_x) {
+    base = x.x[col];
+  } else if (col < context.ac_imag_offset) {
+    base = y.Vac_abc[col - context.ac_real_offset].real();
+  } else if (col < context.dc_offset) {
+    base = y.Vac_abc[col - context.ac_imag_offset].imag();
+  } else {
+    base = y.Vdc[col - context.dc_offset];
+  }
+  const double h = 1e-6 * std::max(1.0, std::abs(base));
+  if (col < context.n_x) {
+    xp.x[col] += h;
+    xm.x[col] -= h;
+  } else if (col < context.ac_imag_offset) {
+    const int node = col - context.ac_real_offset;
+    yp.Vac_abc[node] += Complex(h, 0.0);
+    ym.Vac_abc[node] -= Complex(h, 0.0);
+  } else if (col < context.dc_offset) {
+    const int node = col - context.ac_imag_offset;
+    yp.Vac_abc[node] += Complex(0.0, h);
+    ym.Vac_abc[node] -= Complex(0.0, h);
+  } else {
+    const int node = col - context.dc_offset;
+    yp.Vdc[node] += h;
+    ym.Vdc[node] -= h;
+  }
+  return (stamped_current_vector(device, xp, yp, context) -
+          stamped_current_vector(device, xm, ym, context)) /
+         (2.0 * h);
+}
+
+Eigen::VectorXd analytic_current_column(const DynamicDevice& device,
+                                        const DynamicState& x,
+                                        const NetworkState& y,
+                                        const DynamicJacobianContext& context,
+                                        int col) {
+  std::vector<Eigen::Triplet<double>> triplets;
+  device.addJacobian(0.0, x, y, context, triplets);
+  Eigen::SparseMatrix<double> jac(context.total_size, context.total_size);
+  jac.setFromTriplets(triplets.begin(), triplets.end());
+  Eigen::VectorXd out = Eigen::VectorXd::Zero(context.total_size);
+  for (Eigen::SparseMatrix<double>::InnerIterator it(jac, col); it; ++it) {
+    out[it.row()] = it.value();
+  }
+  return out;
+}
+
+void check_device_current_jacobian_column(const DynamicDevice& device,
+                                          const DynamicState& x,
+                                          const NetworkState& y,
+                                          const DynamicJacobianContext& context,
+                                          int col,
+                                          double tolerance = 1e-7) {
+  const Eigen::VectorXd analytic =
+      analytic_current_column(device, x, y, context, col);
+  const Eigen::VectorXd finite_difference =
+      finite_difference_current_column(device, x, y, context, col);
+  CHECK((analytic - finite_difference).lpNorm<Eigen::Infinity>() < tolerance);
+}
+
 double vsc_p_mw(const DynamicSnapshot& snapshot) {
   const auto& outputs = snapshot.device_outputs;
   const auto it = std::find_if(outputs.begin(), outputs.end(), [](const DynamicDeviceOutput& out) {
@@ -5670,15 +5771,29 @@ TEST_CASE("Mass-matrix DAE core matches the partitioned backward-Euler oracle",
   // The simultaneous DAE (bus voltages as algebraic states, one sparse Newton
   // solve per step) must reproduce the nested-network backward-Euler result,
   // since both are backward Euler on the same system.
-  auto run_solver = [](DynamicSolverType type, bool event) {
+  auto run_solver = [](DynamicSolverType type,
+                       bool event,
+                       bool dae_reuse_jacobian_factorization = true,
+                       DynamicDaeStepMethod dae_step_method =
+                           DynamicDaeStepMethod::BackwardEuler,
+                       bool use_analytic_network_jacobian = true,
+                       bool use_adaptive_step = false,
+                       double dt_s = 0.005,
+                       double t_end_s = 3.0) {
     DynamicSolverOptions opt;
-	    opt.solver_type = type;
-	    opt.t_end_s = 3.0;
-	    opt.dt_s = 0.005;
-	    opt.algebraic_network_max_iters = 20;
-	    opt.algebraic_network_tol = 1e-10;
-	    opt.use_consistent_dynamic_initialization = true;
-	    auto sys = make_controlled_machine_case(false, false, false);
+    opt.solver_type = type;
+    opt.t_end_s = t_end_s;
+    opt.dt_s = dt_s;
+    opt.algebraic_network_max_iters = 20;
+    opt.algebraic_network_tol = 1e-10;
+    opt.use_consistent_dynamic_initialization = true;
+    opt.dae_reuse_jacobian_factorization = dae_reuse_jacobian_factorization;
+    opt.dae_step_method = dae_step_method;
+    opt.dae_use_analytic_network_jacobian = use_analytic_network_jacobian;
+    opt.use_adaptive_step = use_adaptive_step;
+    opt.abs_tol = 1e-9;
+    opt.rel_tol = 1e-7;
+    auto sys = make_controlled_machine_case(false, false, false);
     DynamicModelBuilder builder;
     DynamicSystem dyn = builder.build(sys, opt);
     if (event) {
@@ -5722,6 +5837,279 @@ TEST_CASE("Mass-matrix DAE core matches the partitioned backward-Euler oracle",
     CHECK(omega_maxdiff < 1e-6);
     CHECK(p_maxdiff < 1e-3);
   }
+
+  SECTION("reuses the MassMatrixDae Jacobian/factorization without changing the trace") {
+    const DynamicResults fresh =
+        run_solver(DynamicSolverType::MassMatrixDae, true, false);
+    const DynamicResults reused =
+        run_solver(DynamicSolverType::MassMatrixDae, true, true);
+    REQUIRE(fresh.success);
+    REQUIRE(reused.success);
+    CHECK(fresh.jacobian_evaluations == fresh.linear_factorizations);
+    CHECK(reused.jacobian_evaluations == reused.linear_factorizations);
+    REQUIRE(fresh.linear_factorizations > 0);
+    REQUIRE(reused.linear_factorizations > 0);
+    CHECK(reused.linear_factorizations * 2 < fresh.linear_factorizations);
+
+    const auto of = device_output_series(fresh, "SynchronousMachine", 2, "omega_pu");
+    const auto oru = device_output_series(reused, "SynchronousMachine", 2, "omega_pu");
+    const auto pf = device_output_series(fresh, "SynchronousMachine", 2, "p_mw");
+    const auto pru = device_output_series(reused, "SynchronousMachine", 2, "p_mw");
+    REQUIRE(of.y.size() == oru.y.size());
+    double omega_maxdiff = 0.0;
+    double p_maxdiff = 0.0;
+    for (std::size_t i = 0; i < of.y.size(); ++i) {
+      omega_maxdiff = std::max(omega_maxdiff, std::abs(of.y[i] - oru.y[i]));
+      p_maxdiff = std::max(p_maxdiff, std::abs(pf.y[i] - pru.y[i]));
+    }
+    CHECK(omega_maxdiff < 1e-7);
+    CHECK(p_maxdiff < 1e-4);
+  }
+
+  SECTION("analytic MassMatrixDae network block preserves the FD Jacobian contract") {
+    const DynamicResults fd =
+        run_solver(DynamicSolverType::MassMatrixDae, true, true,
+                   DynamicDaeStepMethod::BackwardEuler, false);
+    const DynamicResults analytic =
+        run_solver(DynamicSolverType::MassMatrixDae, true, true,
+                   DynamicDaeStepMethod::BackwardEuler, true);
+    REQUIRE(fd.success);
+    REQUIRE(analytic.success);
+    const auto of = device_output_series(fd, "SynchronousMachine", 2, "omega_pu");
+    const auto oa = device_output_series(analytic, "SynchronousMachine", 2, "omega_pu");
+    const auto pf = device_output_series(fd, "SynchronousMachine", 2, "p_mw");
+    const auto pa = device_output_series(analytic, "SynchronousMachine", 2, "p_mw");
+    REQUIRE(of.y.size() == oa.y.size());
+    double omega_maxdiff = 0.0;
+    double p_maxdiff = 0.0;
+    for (std::size_t i = 0; i < of.y.size(); ++i) {
+      omega_maxdiff = std::max(omega_maxdiff, std::abs(of.y[i] - oa.y[i]));
+      p_maxdiff = std::max(p_maxdiff, std::abs(pf.y[i] - pa.y[i]));
+    }
+    CHECK(omega_maxdiff < 1e-8);
+    CHECK(p_maxdiff < 1e-5);
+  }
+
+  SECTION("trapezoidal MassMatrixDae converges under step refinement") {
+    const DynamicResults coarse =
+        run_solver(DynamicSolverType::MassMatrixDae, true, true,
+                   DynamicDaeStepMethod::Trapezoidal, true, false, 0.02, 1.4);
+    const DynamicResults medium =
+        run_solver(DynamicSolverType::MassMatrixDae, true, true,
+                   DynamicDaeStepMethod::Trapezoidal, true, false, 0.01, 1.4);
+    const DynamicResults fine =
+        run_solver(DynamicSolverType::MassMatrixDae, true, true,
+                   DynamicDaeStepMethod::Trapezoidal, true, false, 0.005, 1.4);
+    REQUIRE(coarse.success);
+    REQUIRE(medium.success);
+    REQUIRE(fine.success);
+    const double oc =
+        device_output_series(coarse, "SynchronousMachine", 2, "omega_pu").y.back();
+    const double om =
+        device_output_series(medium, "SynchronousMachine", 2, "omega_pu").y.back();
+    const double of =
+        device_output_series(fine, "SynchronousMachine", 2, "omega_pu").y.back();
+    const double coarse_error = std::abs(oc - of);
+    const double medium_error = std::abs(om - of);
+    CHECK(coarse_error > medium_error);
+    CHECK(medium_error < 2e-6);
+  }
+
+  SECTION("embedded BE/TR DAE pair rejects oversized adaptive steps") {
+    DynamicResults adaptive =
+        run_solver(DynamicSolverType::MassMatrixDae, true, true,
+                   DynamicDaeStepMethod::Trapezoidal, true, true, 0.05, 1.25);
+    REQUIRE(adaptive.success);
+    CHECK(adaptive.rejected_steps > 0);
+    CHECK(adaptive.max_local_error_norm <= 1.0);
+    CHECK(adaptive.min_accepted_step_s < 0.05);
+    CHECK(adaptive.max_accepted_step_s <= 0.05 + 1e-12);
+  }
+}
+
+TEST_CASE("Analytic device current Jacobian blocks match finite-difference stamps",
+          "[dynamics][dae][jacobian]") {
+  SECTION("constant-power AC load voltage current derivatives") {
+    ACLoadDynamicParams params;
+    params.component_index = 1;
+    params.bus = 1;
+    params.bus_pos = 0;
+    params.p_mw = 30.0;
+    params.q_mvar = 10.0;
+    params.base_mva = 100.0;
+    params.model_kind = DynamicLoadModelKind::ConstantPower;
+    DynamicLoad load(params);
+
+    DynamicState x;
+    x.resize(0);
+    NetworkState y;
+    y.resize(3, 0);
+    set_balanced_voltage(y, 0, std::polar(1.03, 0.08));
+    const DynamicJacobianContext context = test_jacobian_context(0, 3, 0);
+
+    check_device_current_jacobian_column(load, x, y, context, context.acRealCol(0));
+    check_device_current_jacobian_column(load, x, y, context, context.acImagCol(0));
+  }
+
+  SECTION("dynamic RL line state current derivatives") {
+    DynamicRLLineParams params;
+    params.component_index = 2;
+    params.from_bus = 1;
+    params.to_bus = 2;
+    params.from_pos = 0;
+    params.to_pos = 1;
+    params.r_pu = 0.02;
+    params.x_pu = 0.08;
+    DynamicRLLine line(params);
+
+    int offset = 0;
+    line.assignStateIndices(offset);
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(offset));
+    x.x[0] = 0.18;
+    x.x[1] = -0.06;
+    NetworkState y;
+    y.resize(6, 0);
+    set_balanced_voltage(y, 0, std::polar(1.02, 0.04));
+    set_balanced_voltage(y, 1, std::polar(0.98, -0.03));
+    const DynamicJacobianContext context = test_jacobian_context(offset, 6, 0);
+
+    check_device_current_jacobian_column(line, x, y, context, 0);
+    check_device_current_jacobian_column(line, x, y, context, 1);
+  }
+
+  SECTION("grid-following inverter AC and DC current derivatives") {
+    GridFollowingInverterParams params;
+    params.component_index = 3;
+    params.bus = 1;
+    params.bus_pos = 0;
+    params.dc_bus_pos = 0;
+    params.stamp_dc_power = true;
+    params.base_mva = 100.0;
+    params.eta = 0.97;
+    GridFollowingInverter inverter(params);
+
+    int offset = 0;
+    inverter.assignStateIndices(offset);
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(offset));
+    x.x[0] = 0.12;
+    x.x[1] = 0.0;
+    x.x[2] = 0.11;
+    x.x[3] = -0.04;
+    x.x[4] = 0.08;
+    x.x[5] = 0.02;
+    NetworkState y;
+    y.resize(3, 1);
+    set_balanced_voltage(y, 0, std::polar(1.01, 0.02));
+    y.Vdc[0] = 1.04;
+    const DynamicJacobianContext context = test_jacobian_context(offset, 3, 1);
+
+    check_device_current_jacobian_column(inverter, x, y, context, 0);
+    check_device_current_jacobian_column(inverter, x, y, context, 2);
+    check_device_current_jacobian_column(inverter, x, y, context, 3);
+    check_device_current_jacobian_column(inverter, x, y, context, 4);
+    check_device_current_jacobian_column(inverter, x, y, context, context.dcCol(0));
+  }
+
+  SECTION("CSVGN1 current derivatives") {
+    CSVGN1DynamicParams params;
+    params.component_index = 4;
+    params.bus = 1;
+    params.bus_pos = 0;
+    params.base_mva = 100.0;
+    params.model_base_mva = 500.0;
+    CSVGN1Dynamic csvgn1(params);
+
+    int offset = 0;
+    csvgn1.assignStateIndices(offset);
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(offset));
+    x.x[0] = 0.07;
+    x.x[1] = 0.0;
+    x.x[2] = 0.07;
+    NetworkState y;
+    y.resize(3, 0);
+    set_balanced_voltage(y, 0, std::polar(0.99, -0.05));
+    const DynamicJacobianContext context = test_jacobian_context(offset, 3, 0);
+
+    check_device_current_jacobian_column(csvgn1, x, y, context, 0);
+    check_device_current_jacobian_column(csvgn1, x, y, context, context.acRealCol(0));
+    check_device_current_jacobian_column(csvgn1, x, y, context, context.acImagCol(0));
+  }
+
+  SECTION("DC/DC converter current derivatives") {
+    DCDCConverterDynamicParams params;
+    params.component_index = 5;
+    params.bus_in = 1;
+    params.bus_out = 2;
+    params.bus_in_pos = 0;
+    params.bus_out_pos = 1;
+    params.eta = 0.96;
+    DCDCConverterDynamic converter(params);
+
+    int offset = 0;
+    converter.assignStateIndices(offset);
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(offset));
+    x.x[0] = 0.06;
+    NetworkState y;
+    y.resize(0, 2);
+    y.Vdc[0] = 1.05;
+    y.Vdc[1] = 0.97;
+    const DynamicJacobianContext context = test_jacobian_context(offset, 0, 2);
+
+    check_device_current_jacobian_column(converter, x, y, context, 0);
+    check_device_current_jacobian_column(converter, x, y, context, context.dcCol(0));
+    check_device_current_jacobian_column(converter, x, y, context, context.dcCol(1));
+  }
+}
+
+TEST_CASE("MassMatrixDae analytic device current block preserves hybrid AC/DC trace",
+          "[dynamics][dae][jacobian][transient]") {
+  auto run = [](bool use_device_jacobian) {
+    DynamicSolverOptions opt = fast_options();
+    opt.solver_type = DynamicSolverType::MassMatrixDae;
+    opt.t_end_s = 0.03;
+    opt.dt_s = 0.01;
+    opt.newton_tol = 1e-8;
+    opt.max_newton_iters = 16;
+    opt.dae_use_analytic_device_jacobian = use_device_jacobian;
+    opt.dae_use_fd_current_jacobian_corrections = true;
+    return hacdcpf::run_transient_simulation(make_hybrid_dc_case(), opt);
+  };
+
+  const DynamicResults fd = run(false);
+  const DynamicResults analytic = run(true);
+  REQUIRE(fd.success);
+  REQUIRE(analytic.success);
+  REQUIRE(fd.final_snapshot() != nullptr);
+  REQUIRE(analytic.final_snapshot() != nullptr);
+  REQUIRE(fd.final_snapshot()->state.size() == analytic.final_snapshot()->state.size());
+  REQUIRE(fd.final_snapshot()->vac_abc.size() == analytic.final_snapshot()->vac_abc.size());
+  REQUIRE(fd.final_snapshot()->vdc.size() == analytic.final_snapshot()->vdc.size());
+
+  double max_state_diff = 0.0;
+  for (Eigen::Index i = 0; i < fd.final_snapshot()->state.size(); ++i) {
+    max_state_diff = std::max(max_state_diff,
+                              std::abs(fd.final_snapshot()->state[i] -
+                                       analytic.final_snapshot()->state[i]));
+  }
+  double max_ac_diff = 0.0;
+  for (Eigen::Index i = 0; i < fd.final_snapshot()->vac_abc.size(); ++i) {
+    max_ac_diff = std::max(max_ac_diff,
+                           std::abs(fd.final_snapshot()->vac_abc[i] -
+                                    analytic.final_snapshot()->vac_abc[i]));
+  }
+  double max_dc_diff = 0.0;
+  for (Eigen::Index i = 0; i < fd.final_snapshot()->vdc.size(); ++i) {
+    max_dc_diff = std::max(max_dc_diff,
+                           std::abs(fd.final_snapshot()->vdc[i] -
+                                    analytic.final_snapshot()->vdc[i]));
+  }
+  CHECK(max_state_diff < 1e-10);
+  CHECK(max_ac_diff < 1e-10);
+  CHECK(max_dc_diff < 1e-10);
 }
 
 TEST_CASE("Machine governor / AVR / PSS control blocks are wired and effective",
