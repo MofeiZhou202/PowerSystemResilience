@@ -70,6 +70,28 @@ bool iequals(std::string lhs, std::string rhs) {
   return lhs == rhs;
 }
 
+bool profile_model_is(const hacdcpf::DynamicModelProfile& profile,
+                      std::initializer_list<const char*> names) {
+  for (const char* name : names) {
+    if (iequals(profile.model_name, name)) return true;
+    for (const auto& component : profile.components) {
+      if (iequals(component.model, name)) return true;
+    }
+  }
+  return false;
+}
+
+std::map<std::string, double> merged_profile_parameters(
+    const hacdcpf::DynamicModelProfile& profile) {
+  std::map<std::string, double> params = profile.parameters;
+  for (const auto& component : profile.components) {
+    for (const auto& [key, value] : component.parameters) {
+      params[key] = value;
+    }
+  }
+  return params;
+}
+
 // Alias-tolerant numeric lookup over a parameter map.
 double param_or(const std::map<std::string, double>& m,
                 std::initializer_list<const char*> keys,
@@ -129,22 +151,180 @@ void apply_gfm_params(const std::map<std::string, double>& p, P& params) {
   params.p_droop_pu = param_or(p, {"p_droop_pu", "mp", "Dp"}, params.p_droop_pu);
   params.q_droop_pu = param_or(p, {"q_droop_pu", "mq", "Dq"}, params.q_droop_pu);
   params.power_filter_t_s = param_or(p, {"power_filter_t_s", "Tf", "Tpf"}, params.power_filter_t_s);
+  params.reactive_power_filter_t_s =
+      param_or(p, {"reactive_power_filter_t_s", "q_filter_t_s", "Tq"}, params.reactive_power_filter_t_s);
   params.voltage_control_t_s = param_or(p, {"voltage_control_t_s", "Tv"}, params.voltage_control_t_s);
   params.voltage_kp = param_or(p, {"voltage_kp", "Kpv"}, params.voltage_kp);
   params.voltage_ki = param_or(p, {"voltage_ki", "Kiv"}, params.voltage_ki);
   params.current_limit_pu = param_or(p, {"current_limit_pu", "Imax", "imax_pu"}, params.current_limit_pu);
+  params.vsm_ta_s = param_or(p, {"Ta", "vsm_ta_s"}, params.vsm_ta_s);
+  params.vsm_damping_kd = param_or(p, {"kd", "vsm_damping_kd"}, params.vsm_damping_kd);
+  params.vsm_frequency_droop_kw =
+      param_or(p, {"kω", "kw", "komega", "vsm_frequency_droop_kw"},
+               params.vsm_frequency_droop_kw);
+  params.voc_k1 = param_or(p, {"k1", "voc_k1"}, params.voc_k1);
+  params.voc_psi_rad = param_or(p, {"ψ", "psi", "voc_psi_rad"}, params.voc_psi_rad);
+  params.voc_k2 = param_or(p, {"k2", "voc_k2"}, params.voc_k2);
+  params.reference_frame_locked =
+      param_or(p, {"is_not_reference", "reference_frame_unlocked"}, params.reference_frame_locked ? 1.0 : 0.0) == 0.0;
 }
 
 void apply_gfm_profile(const hacdcpf::DynamicModelProfile& profile,
                        GridFormingInverterParams& params) {
   params.model_profiles = to_dynamic_profiles(profile);
-  if (!profile.empty()) apply_gfm_params(profile.parameters, params);
+  auto apply_name = [&](const std::string& name) {
+    if (iequals(name, "VirtualInertia") || iequals(name, "VSM") ||
+        iequals(name, "VSMGridForming")) {
+      params.control_kind = GridFormingControlKind::VirtualInertia;
+      params.model_name = "VSMGridForming";
+    } else if (iequals(name, "ActiveVirtualOscillator") ||
+               iequals(name, "ReactiveVirtualOscillator") ||
+               iequals(name, "VOC") || iequals(name, "VOCGridForming")) {
+      params.control_kind = GridFormingControlKind::VirtualOscillator;
+      params.model_name = "VOCGridForming";
+    } else if (iequals(name, "ActivePowerDroop") ||
+               iequals(name, "GFMDroopOuterControl") ||
+               iequals(name, "GridFormingNortonDroop")) {
+      params.control_kind = GridFormingControlKind::Droop;
+      params.model_name = "GridFormingNortonDroop";
+    }
+  };
+  if (!profile.empty()) {
+    apply_name(profile.model_name);
+    apply_gfm_params(profile.parameters, params);
+    for (const auto& component : profile.components) {
+      apply_name(component.model);
+      apply_gfm_params(component.parameters, params);
+    }
+  }
 }
 
 void apply_gfm_profile(const hacdcpf::DynamicModelProfile& profile,
                        VSCConverterDynamicParams& params) {
   params.model_profiles = to_dynamic_profiles(profile);
-  if (!profile.empty()) apply_gfm_params(profile.parameters, params);
+  auto apply_name = [&](const std::string& name) {
+    if (iequals(name, "VirtualInertia") || iequals(name, "VSM") ||
+        iequals(name, "VSMGridForming")) {
+      params.control_kind = GridFormingControlKind::VirtualInertia;
+      params.model_name = "VSMGridForming";
+    } else if (iequals(name, "ActiveVirtualOscillator") ||
+               iequals(name, "ReactiveVirtualOscillator") ||
+               iequals(name, "VOC") || iequals(name, "VOCGridForming")) {
+      params.control_kind = GridFormingControlKind::VirtualOscillator;
+      params.model_name = "VOCGridForming";
+    } else if (iequals(name, "ActivePowerDroop") ||
+               iequals(name, "GFMDroopOuterControl") ||
+               iequals(name, "GridFormingNortonDroop")) {
+      params.control_kind = GridFormingControlKind::Droop;
+      params.model_name = "GridFormingNortonDroop";
+    }
+  };
+  if (!profile.empty()) {
+    apply_name(profile.model_name);
+    apply_gfm_params(profile.parameters, params);
+    for (const auto& component : profile.components) {
+      apply_name(component.model);
+      apply_gfm_params(component.parameters, params);
+    }
+  }
+}
+
+PeriodicVariableSourceDynamicParams make_periodic_source_params(
+    const ExternalGrid& grid,
+    int bus_pos,
+    double base_mva) {
+  const auto pmap = merged_profile_parameters(grid.dynamic_model);
+  PeriodicVariableSourceDynamicParams p;
+  p.component_index = grid.index;
+  p.bus = grid.bus;
+  p.bus_pos = bus_pos;
+  p.label = label_or(grid.name, "Periodic source " + std::to_string(grid.index));
+  p.base_mva = base_mva;
+  p.r_th_pu = param_or(pmap, {"R_th", "r_th_pu", "R", "r"}, grid.r_pu);
+  p.x_th_pu = param_or(pmap, {"X_th", "x_th_pu", "X", "x"}, positive_or(grid.x_pu, 0.05));
+  p.voltage_bias_pu = param_or(pmap, {"internal_voltage_bias", "voltage_bias_pu", "V_bias"}, grid.vm_pu);
+  p.voltage_frequency_rad_s =
+      param_or(pmap, {"internal_voltage_frequency_rad_s", "voltage_frequency_rad_s", "omega_v"}, 2.0 * kPi);
+  p.voltage_sin_coeff_pu =
+      param_or(pmap, {"internal_voltage_sin_coeff", "voltage_sin_coeff_pu", "V_sin"}, 1.0);
+  p.voltage_cos_coeff_pu =
+      param_or(pmap, {"internal_voltage_cos_coeff", "voltage_cos_coeff_pu", "V_cos"}, 0.0);
+  p.angle_bias_rad = param_or(pmap, {"internal_angle_bias", "angle_bias_rad", "theta_bias"}, grid.va_deg * kDegToRad);
+  p.angle_frequency_rad_s =
+      param_or(pmap, {"internal_angle_frequency_rad_s", "angle_frequency_rad_s", "omega_theta"}, 2.0 * kPi);
+  p.angle_sin_coeff_rad =
+      param_or(pmap, {"internal_angle_sin_coeff", "angle_sin_coeff_rad", "theta_sin"}, 0.0);
+  p.angle_cos_coeff_rad =
+      param_or(pmap, {"internal_angle_cos_coeff", "angle_cos_coeff_rad", "theta_cos"}, 1.0);
+  p.model_profiles = to_dynamic_profiles(grid.dynamic_model);
+  return p;
+}
+
+CSVGN1DynamicParams make_csvgn1_params(const StaticGenerator& gen,
+                                       int bus_pos,
+                                       double base_mva) {
+  const auto pmap = merged_profile_parameters(gen.dynamic_model);
+  CSVGN1DynamicParams p;
+  p.component_index = gen.index;
+  p.bus = gen.bus;
+  p.bus_pos = bus_pos;
+  p.label = label_or(gen.name, "CSVGN1 " + std::to_string(gen.index));
+  p.base_mva = base_mva;
+  p.q_ref_mvar = gen.q_mvar * gen.scaling;
+  p.K = param_or(pmap, {"K"}, p.K);
+  p.T1 = param_or(pmap, {"T1"}, p.T1);
+  p.T2 = param_or(pmap, {"T2"}, p.T2);
+  p.T3 = param_or(pmap, {"T3"}, p.T3);
+  p.T4 = param_or(pmap, {"T4"}, p.T4);
+  p.T5 = param_or(pmap, {"T5"}, p.T5);
+  p.Rmin = param_or(pmap, {"Rmin"}, p.Rmin);
+  p.Vmax = param_or(pmap, {"Vmax"}, p.Vmax);
+  p.Vmin = param_or(pmap, {"Vmin"}, p.Vmin);
+  p.CBase = param_or(pmap, {"CBase", "Cbase"}, p.CBase);
+  p.model_base_mva = param_or(pmap, {"base_power", "Mbase", "model_base_mva"}, p.model_base_mva);
+  p.v_ref_pu = param_or(pmap, {"V_ref", "v_ref_pu"}, p.v_ref_pu);
+  p.model_profiles = to_dynamic_profiles(gen.dynamic_model);
+  return p;
+}
+
+DERAADynamicParams make_deraa_params(const StaticGenerator& gen,
+                                     int bus_pos,
+                                     double base_mva) {
+  const auto pmap = merged_profile_parameters(gen.dynamic_model);
+  DERAADynamicParams p;
+  p.component_index = gen.index;
+  p.bus = gen.bus;
+  p.bus_pos = bus_pos;
+  p.label = label_or(gen.name, "DERA " + std::to_string(gen.index));
+  p.base_mva = base_mva;
+  p.model_base_mva =
+      param_or(pmap, {"base_power", "Mbase", "model_base_mva"}, positive_or(gen.sn_mva, base_mva));
+  p.p_ref_mw = gen.p_mw * gen.scaling;
+  p.q_ref_mvar = gen.q_mvar * gen.scaling;
+  p.v_ref_pu = param_or(pmap, {"V_ref", "v_ref_pu"}, positive_or(gen.v_ref_pu, 1.0));
+  p.pf_angle_ref_rad = param_or(pmap, {"Pfa_ref", "pf_angle_ref_rad"}, p.pf_angle_ref_rad);
+  p.pf_flag = static_cast<int>(param_or(pmap, {"Pf_Flag"}, static_cast<double>(p.pf_flag)));
+  p.freq_flag = static_cast<int>(param_or(pmap, {"Freq_Flag"}, static_cast<double>(p.freq_flag)));
+  p.T_rv = param_or(pmap, {"T_rv", "Trv"}, p.T_rv);
+  p.Trf = param_or(pmap, {"Trf"}, p.Trf);
+  p.dbd1 = param_or(pmap, {"dbd1", "dbd_low"}, p.dbd1);
+  p.dbd2 = param_or(pmap, {"dbd2", "dbd_high"}, p.dbd2);
+  p.K_qv = param_or(pmap, {"K_qv", "Kqv"}, p.K_qv);
+  p.Tp = param_or(pmap, {"Tp"}, p.Tp);
+  p.T_iq = param_or(pmap, {"T_iq", "Tiq"}, p.T_iq);
+  p.Tg = param_or(pmap, {"Tg"}, p.Tg);
+  p.Tv = param_or(pmap, {"Tv"}, p.Tv);
+  p.Tpord = param_or(pmap, {"Tpord"}, p.Tpord);
+  p.Kpg = param_or(pmap, {"Kpg"}, p.Kpg);
+  p.Kig = param_or(pmap, {"Kig"}, p.Kig);
+  p.I_max = param_or(pmap, {"I_max", "Imax"}, p.I_max);
+  p.Iq_min = param_or(pmap, {"Iq_min"}, p.Iq_min);
+  p.Iq_max = param_or(pmap, {"Iq_max"}, p.Iq_max);
+  p.Ip_min = param_or(pmap, {"Ip_min", "P_min"}, p.Ip_min);
+  p.Ip_max = param_or(pmap, {"Ip_max", "P_max"}, p.Ip_max);
+  p.rr_pwr = param_or(pmap, {"rrpwr", "Rrpwr"}, p.rr_pwr);
+  p.model_profiles = to_dynamic_profiles(gen.dynamic_model);
+  return p;
 }
 
 void apply_voltage_source_profile(const hacdcpf::DynamicModelProfile& profile,
@@ -385,7 +565,9 @@ std::unique_ptr<Governor> make_governor(const hacdcpf::DynamicModelComponentProf
   const double base = std::max(1.0, mp.base_mva);
   g.droop_r = param_or(p, {"R", "droop_r", "droop"}, g.droop_r);
   g.t_s = param_or(p, {"T1", "t1", "Tg", "valve_t_s"}, g.t_s);
+  g.t2_s = param_or(p, {"T2", "t2"}, g.t2_s);
   g.turbine_t_s = param_or(p, {"T3", "t3", "Tt", "turbine_t_s"}, g.turbine_t_s);
+  g.damping_d_t = param_or(p, {"D_T", "Dt", "D_t", "d_t"}, g.damping_d_t);
   g.reheat_t_s = param_or(p, {"Tr", "T5", "reheat_t_s"}, g.reheat_t_s);
   g.reheat_k = param_or(p, {"K1", "Khp", "reheat_k"}, g.reheat_k);
   if (g.model == GovernorModel::TGTypeI) {
@@ -429,7 +611,29 @@ std::unique_ptr<Exciter> make_exciter(const hacdcpf::DynamicModelComponentProfil
   e.parameter_set = comp.parameter_set;
   const auto& p = comp.parameters;
   e.ka = param_or(p, {"Ka", "K", "ka"}, e.ka);
-  e.ta_s = param_or(p, {"Ta", "ta", "Tb"}, e.ta_s);
+  e.ta_s = param_or(p, {"Ta", "ta"}, e.ta_s);
+  e.ta_over_tb = param_or(p,
+                          {"Ta_Tb", "TaTb", "Ta_over_Tb", "TaOverTb", "ta_tb"},
+                          e.ta_over_tb);
+  e.tb_s = param_or(p, {"Tb", "tb"}, e.tb_s);
+  if (e.model == ExciterModel::SEXS) {
+    const bool has_legacy_ta = p.find("Ta") != p.end() || p.find("ta") != p.end();
+    const bool has_explicit_tb = p.find("Tb") != p.end() || p.find("tb") != p.end();
+    const bool has_explicit_ratio =
+        p.find("Ta_Tb") != p.end() || p.find("TaTb") != p.end() ||
+        p.find("Ta_over_Tb") != p.end() || p.find("TaOverTb") != p.end() ||
+        p.find("ta_tb") != p.end();
+    if (has_legacy_ta && !has_explicit_tb) {
+      e.tb_s = e.ta_s;
+    }
+    if (has_legacy_ta && has_explicit_tb && !has_explicit_ratio &&
+        std::abs(e.tb_s) > 1e-12) {
+      e.ta_over_tb = e.ta_s / e.tb_s;
+    }
+    if (has_legacy_ta && p.find("Te") == p.end() && p.find("te") == p.end()) {
+      e.te_s = e.ta_s;
+    }
+  }
   e.te_s = param_or(p, {"Te", "te"}, e.te_s);
   e.kv = param_or(p, {"Kv", "kv"}, e.kv);
   e.ke = param_or(p, {"Ke", "ke"}, e.ke);
@@ -1273,6 +1477,12 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     if (!grid.in_service) continue;
     const int bus_pos = network.acBusPosition(grid.bus);
     if (bus_pos < 0) continue;
+    if (profile_model_is(grid.dynamic_model, {"PeriodicVariableSource"})) {
+      dyn.devices.push_back(std::make_unique<PeriodicVariableSourceDynamic>(
+          make_periodic_source_params(grid, bus_pos, base_mva)));
+      voltage_source_buses.insert(grid.bus);
+      continue;
+    }
     VoltageSourceDynamicParams p;
     p.component_index = grid.index;
     p.bus = grid.bus;
@@ -1405,6 +1615,57 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     if (!gen.in_service) continue;
     const int bus_pos = network.acBusPosition(gen.bus);
     if (bus_pos < 0) continue;
+    if (profile_model_is(gen.dynamic_model, {"CSVGN1"})) {
+      dyn.devices.push_back(std::make_unique<CSVGN1Dynamic>(
+          make_csvgn1_params(gen, bus_pos, base_mva)));
+      continue;
+    }
+    if (profile_model_is(gen.dynamic_model,
+                         {"AggregateDistributedGenerationA", "DERA", "DERA_A"})) {
+      dyn.devices.push_back(std::make_unique<DERAADynamic>(
+          make_deraa_params(gen, bus_pos, base_mva)));
+      continue;
+    }
+    if (profile_model_is(gen.dynamic_model,
+                         {"GridFormingNortonDroop",
+                          "GFMDroopOuterControl",
+                          "VirtualInertia",
+                          "VSM",
+                          "VSMGridForming",
+                          "VSMOuterControl",
+                          "ActiveVirtualOscillator",
+                          "ReactiveVirtualOscillator",
+                          "VOC",
+                          "VOCGridForming",
+                          "VOCOuterControl"})) {
+      GridFormingInverterParams p;
+      p.component_index = gen.index;
+      p.bus = gen.bus;
+      p.bus_pos = bus_pos;
+      p.label = label_or(gen.name, "Grid-forming static generator " + std::to_string(gen.index));
+      p.device_type = "VSCGridForming";
+      p.canvas_type = "sgen";
+      p.source_type = "static_generator_grid_forming";
+      p.base_mva = base_mva;
+      p.p_ref_mw = gen.p_mw * gen.scaling;
+      p.q_ref_mvar = gen.q_mvar * gen.scaling;
+      p.v_ref_pu = positive_or(gen.v_ref_pu, 1.0);
+      p.virtual_x_pu = options.inverter_virtual_reactance_pu;
+      p.frequency_hz = positive_or(gen.f_ref_hz, network.frequency_hz);
+      p.current_limit_pu = gen.sn_mva > 0.0
+                               ? gen.sn_mva / base_mva
+                               : (gen.p_rated_mw > 0.0 ? gen.p_rated_mw / base_mva : 0.0);
+      p.pmax_mw = gen.pmax_mw > 0.0 ? gen.pmax_mw
+                                     : (gen.p_rated_mw > 0.0 ? gen.p_rated_mw : 0.0);
+      p.pmin_mw = gen.pmin_mw < 0.0 ? gen.pmin_mw
+                                     : (p.pmax_mw > 0.0 ? -p.pmax_mw : 0.0);
+      p.p_droop_pu = positive_or(gen.k_p, p.p_droop_pu);
+      p.q_droop_pu = positive_or(gen.k_q, p.q_droop_pu);
+      apply_gfm_profile(gen.dynamic_model, p);
+      dyn.devices.push_back(std::make_unique<GridFormingInverter>(p));
+      voltage_source_buses.insert(gen.bus);
+      continue;
+    }
     GridFollowingInverterParams p;
     p.component_index = gen.index;
     p.bus = gen.bus;

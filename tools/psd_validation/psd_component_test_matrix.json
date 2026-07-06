@@ -16,6 +16,92 @@
     "description": "Opt-in executable PSD comparison gates consumed by tests/test_transient_dynamics.cpp. Cases remain narrow while HACDCPF grows PSD-equivalent residual-vector, mass-matrix, Jacobian, and small-signal APIs.",
     "cases": [
       {
+        "id": "psd-test01-omib-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 01 OMIB",
+        "title": "Classical OMIB PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 01 OMIB",
+          "psd_components": "BaseMachine / GENCLS, SingleMass"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the classical OMIB generator angle, speed, and terminal-voltage traces.",
+        "psd_case": "test01",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "NetworkSwitch",
+            "time_s": 1.0,
+            "branch": "BUS 1-BUS 2 parallel-line equivalent"
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_test01_omib_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "ACBranchTrip",
+            "time_s": 1.0,
+            "component_type": "AC",
+            "component_index": 1,
+            "label": "PSD Test 01 OMIB BUS 1-BUS 2 parallel branch trip"
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 5.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 5.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "angle_rad",
+                "psd_quantity": "delta_rad",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.05,
+                  "max": 0.12
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.002,
+                  "max": 0.005
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "bus102",
+            "local_component_type": "ACBus",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.02,
+                  "max": 0.05
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
         "id": "psd-test02-onedoneq-residual-vs-mass-matrix",
         "enabled": true,
         "psd_test": "Test 02",
@@ -1201,6 +1287,74 @@
         ]
       },
       {
+        "id": "psd-test28-periodic-variable-source-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 28",
+        "title": "PeriodicVariableSource PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 28",
+          "psd_components": "PeriodicVariableSource"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for PeriodicVariableSource internal voltage and angle states.",
+        "psd_case": "test28",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "none"
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_periodic_variable_source_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "Custom",
+            "time_s": 2.0,
+            "component_type": "PeriodicVariableSource",
+            "component_index": 1,
+            "label": "PSD Test 28 no-op event"
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 1.0
+        },
+        "step_s": 0.01,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 1.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "InfBus",
+            "local_component_type": "PeriodicVariableSource",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "Vt",
+                "psd_quantity": "Vt",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.005,
+                  "max": 0.01
+                }
+              },
+              {
+                "local_key": "theta_rad",
+                "psd_quantity": "theta_rad",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.005,
+                  "max": 0.01
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
         "id": "psd-test15-genrou-residual-vs-mass-matrix",
         "enabled": true,
         "psd_test": "Test 15",
@@ -1523,6 +1677,97 @@
             "psd_ref": "bus102",
             "local_component_type": "ACBus",
             "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.03,
+                  "max": 0.08
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test41-stab1-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 41",
+        "title": "GENROU SEXS STAB1 PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 41",
+          "psd_components": "STAB1"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the OMIB GENROU + SEXS + STAB1 benchmark under a voltage-reference step.",
+        "psd_case": "test41",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "ControlReferenceChange",
+            "time_s": 1.0,
+            "component": "dynamic_injector",
+            "field": "V_ref",
+            "value": 1.0472
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_stab1_omib_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "Custom",
+            "time_s": 1.0,
+            "component_type": "Exciter",
+            "component_index": 1,
+            "label": "PSD Test 41 STAB1 voltage-reference step",
+            "params": {
+              "v_ref_pu": 1.0472
+            }
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 4.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 4.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-1-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.006,
+                  "max": 0.02
+                }
+              },
+              {
+                "local_key": "vf_pu",
+                "psd_quantity": "field_voltage_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.3,
+                  "max": 0.8
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "bus1",
+            "local_component_type": "ACBus",
+            "local_component_index": 0,
             "signals": [
               {
                 "local_key": "voltage_mag",
@@ -1890,6 +2135,228 @@
         ]
       },
       {
+        "id": "psd-test08-vsm-inverter-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 08",
+        "title": "VSM inverter PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "system",
+        "row_selector": {
+          "psd_tests": "Test 08",
+          "psd_components": "VSM inverter"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the VSM grid-forming inverter outer-control angle and frequency traces.",
+        "psd_case": "test08",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "ControlReferenceChange",
+            "time_s": 1.0,
+            "field": "P_ref",
+            "value": 0.7
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_vsm_inverter_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "Custom",
+            "time_s": 1.0,
+            "component_type": "VSC",
+            "component_index": 1,
+            "label": "PSD Test 08 VSM active-power reference step",
+            "params": {
+              "p_ref_mw": 70.0
+            }
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 4.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 4.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "VSCGridForming",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "theta_oc_rad",
+                "psd_quantity": "theta_oc_rad",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.25,
+                  "max": 0.6
+                }
+              },
+              {
+                "local_key": "omega_oc_pu",
+                "psd_quantity": "omega_oc_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.02,
+                  "max": 0.06
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test44-voc-inverter-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 44",
+        "title": "VOC inverter PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "system",
+        "row_selector": {
+          "psd_tests": "Test 44",
+          "psd_components": "VOC grid-forming inverter"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the VOC grid-forming inverter outer-control angle, voltage, and frequency traces.",
+        "psd_case": "test44",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "ControlReferenceChange",
+            "time_s": 1.0,
+            "field": "P_ref",
+            "value": 0.7
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_voc_inverter_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "Custom",
+            "time_s": 1.0,
+            "component_type": "VSC",
+            "component_index": 1,
+            "label": "PSD Test 44 VOC active-power reference step",
+            "params": {
+              "p_ref_mw": 70.0
+            }
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 4.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 4.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "VSCGridForming",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "theta_oc_rad",
+                "psd_quantity": "theta_oc_rad",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.35,
+                  "max": 0.8
+                }
+              },
+              {
+                "local_key": "E_oc_pu",
+                "psd_quantity": "E_oc_pu",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.1,
+                  "max": 0.25
+                }
+              },
+              {
+                "local_key": "omega_oc_pu",
+                "psd_quantity": "frequency_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.03,
+                  "max": 0.08
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test23-droop-inverter-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 23",
+        "title": "Droop grid-forming inverter PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "system",
+        "row_selector": {
+          "psd_tests": "Test 23",
+          "psd_components": "Droop grid-forming inverter"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the droop grid-forming inverter outer-control angle trace.",
+        "psd_case": "test23",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "ControlReferenceChange",
+            "time_s": 1.0,
+            "field": "P_ref",
+            "value": 0.7
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_droop_inverter_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "Custom",
+            "time_s": 1.0,
+            "component_type": "VSC",
+            "component_index": 1,
+            "label": "PSD Test 23 droop GFM active-power reference step",
+            "params": {
+              "p_ref_mw": 70.0
+            }
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 4.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 4.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "VSCGridForming",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "theta_oc_rad",
+                "psd_quantity": "theta_oc_rad",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.35,
+                  "max": 0.8
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
         "id": "psd-test24-gfl-reduced-pll-residual-vs-mass-matrix",
         "enabled": true,
         "psd_test": "Test 24",
@@ -2020,6 +2487,103 @@
             ]
           }
         ]
+      },
+      {
+        "id": "psd-test49-csvgn1-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 49",
+        "title": "CSVGN1 PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 49",
+          "psd_components": "CSVGN1"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the CSVGN1 three-bus bus-voltage traces under a load-impedance active-power step.",
+        "psd_case": "test49",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "LoadChange",
+            "time_s": 0.005,
+            "load": "load21",
+            "field": "P_ref_impedance",
+            "value_pu": 4.0
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_csvgn1_three_bus_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "ACLoadScale",
+            "time_s": 0.005,
+            "component_type": "AC",
+            "component_index": 1,
+            "bus": 2,
+            "value": 0.8791208791208791,
+            "label": "PSD Test 49 load21 active impedance power step"
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 0.07
+        },
+        "step_s": 0.0001,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 0.07
+        },
+        "comparisons": [
+          {
+            "psd_ref": "bus1",
+            "local_component_type": "BusVoltage",
+            "local_component_index": 0,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.03,
+                  "max": 0.05
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "bus2",
+            "local_component_type": "BusVoltage",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.03,
+                  "max": 0.05
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "bus3",
+            "local_component_type": "BusVoltage",
+            "local_component_index": 2,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.03,
+                  "max": 0.05
+                }
+              }
+            ]
+          }
+        ]
       }
     ]
   },
@@ -2029,9 +2593,10 @@
       "psd_tests": "Test 01 OMIB",
       "psd_components": "BaseMachine / GENCLS, SingleMass",
       "hacdcpf_candidate": "ClassicalMachine",
-      "status": "compare-limited",
-      "first_blocker": "No PSD-equivalent ResidualModel/MassMatrixModel/small-signal gate in HACDCPF.",
-      "next_action": "Use as the first machine smoke trace after defining accepted signals and tolerances."
+      "execution_case_id": "psd-test01-omib-residual-vs-mass-matrix",
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gate; classical OMIB angle, speed, and terminal-voltage traces are hard manifest checks.",
+      "next_action": "Extend this row with PSD-coordinate internal residual/mass/Jacobian/eigenvalue diagnostics after the generic diagnostic state mapper is broadened beyond Test 03."
     },
     {
       "group": "machine",
@@ -2047,10 +2612,10 @@
       "group": "machine-ibr",
       "psd_tests": "Test 10, Test 11",
       "psd_components": "OneDOneQMachine, VSM inverter, static/dynamic branches",
-      "hacdcpf_candidate": "OneDOneQMachine",
-      "status": "blocked-missing-model",
-      "first_blocker": "VSM inverter is not implemented; Test 11 also needs dynamic branch behavior.",
-      "next_action": "Do not attempt these tests until VSM and dynamic branch models exist."
+      "hacdcpf_candidate": "OneDOneQMachine + VSMGridForming + DynamicRLLine",
+      "status": "compare-limited",
+      "first_blocker": "Named runtime pieces now exist, but the combined PSD VSM-machine static/dynamic-branch fixtures are not mirrored as executable gates.",
+      "next_action": "Promote Test 10 after the single VSM inverter gate passes; then add Test 11 dynamic-line parity."
     },
     {
       "group": "machine-controller",
@@ -2200,7 +2765,7 @@
       "hacdcpf_candidate": "SauerPaiMachine",
       "status": "compare-limited",
       "first_blocker": "Sauer-Pai runtime equations, parser/catalog support, and a Test 45-style local MassMatrixDae smoke case are now present.",
-      "next_action": "Promote to a full PSD Test 45 gate after the companion VSM inverter model used by the PSD case is implemented."
+      "next_action": "Promote to a full PSD Test 45 gate after wiring the companion VSMGridForming PSD trace fixture."
     },
     {
       "group": "machine-controller",
@@ -2257,7 +2822,7 @@
       "execution_case_id": "psd-test30-genrou-sexs-ieeest-residual-vs-mass-matrix",
       "status": "full-gate",
       "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gate; GENROU + SEXS + IEEEST field-voltage, speed, and bus-voltage traces are hard manifest checks.",
-      "next_action": "Add the no-filter IEEEST variant and promote STAB1 Test 41 after its OMIB fixture is mirrored."
+      "next_action": "Add the no-filter IEEEST variant after the stabilizer-family gates are broadened."
     },
     {
       "group": "machine-controller",
@@ -2279,12 +2844,22 @@
     },
     {
       "group": "machine-controller",
-      "psd_tests": "Test 41, Test 52, Test 53, Test 54",
-      "psd_components": "STAB1, PSS2A, PSS2B, PSS2C",
-      "hacdcpf_candidate": "PSS1A only",
+      "psd_tests": "Test 41",
+      "psd_components": "STAB1",
+      "hacdcpf_candidate": "STAB1",
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gate; the OMIB voltage-reference-step benchmark checks speed, field-voltage, and terminal-voltage traces.",
+      "next_action": "Add direct STAB1 stabilizer-output trace parity after formalizing PSD PSS output extraction for this case.",
+      "execution_case_id": "psd-test41-stab1-residual-vs-mass-matrix"
+    },
+    {
+      "group": "machine-controller",
+      "psd_tests": "Test 52, Test 53, Test 54",
+      "psd_components": "PSS2A, PSS2B, PSS2C",
+      "hacdcpf_candidate": "",
       "status": "blocked-missing-controller",
-      "first_blocker": "PSD's stabilizer families are broader than HACDCPF's PSS1A subset.",
-      "next_action": "Pick PSS1A first or expand to STAB1/PSS2 families."
+      "first_blocker": "PSD's multi-input PSS2A/PSS2B/PSS2C stabilizer families are not implemented in the HACDCPF transient runtime.",
+      "next_action": "Implement the multi-input PSS2 signal path and add dedicated Test 52/53/54 residual/mass-matrix gates."
     },
     {
       "group": "machine-controller",
@@ -2299,19 +2874,20 @@
       "group": "ibr",
       "psd_tests": "Test 08",
       "psd_components": "VSM inverter",
-      "hacdcpf_candidate": "",
-      "status": "blocked-missing-model",
-      "first_blocker": "No VSM grid-forming inverter runtime model.",
-      "next_action": "Required before claiming PSD-level GFM IBR parity."
+      "hacdcpf_candidate": "VSMGridForming",
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae outer-control trace gate; the VSM static-generator composed inverter path now emits theta_oc and omega_oc traces.",
+      "next_action": "Tighten the VSM gate after replacing the compact virtual-impedance equivalent with PSD-equivalent filter and voltage/current inner-control states.",
+      "execution_case_id": "psd-test08-vsm-inverter-residual-vs-mass-matrix"
     },
     {
       "group": "ibr",
       "psd_tests": "Test 09, Test 10, Test 11, Test 27",
       "psd_components": "VSM plus OneDOneQ machine / source-bus perturbations / dynamic branches",
-      "hacdcpf_candidate": "",
-      "status": "blocked-missing-model",
-      "first_blocker": "VSM is missing; dynamic branch behavior is also missing for Test 11. OneDOneQ now exists as a named HACDCPF machine, but the combined VSM-machine tests are still blocked.",
-      "next_action": "Do not run as a first gate until VSM and dynamic branch models exist and the simpler OneDOneQ base trace passes."
+      "hacdcpf_candidate": "VSMGridForming + OneDOneQMachine + DynamicRLLine",
+      "status": "compare-limited",
+      "first_blocker": "Named runtime pieces now exist, but the combined PSD VSM-machine/source-perturbation/dynamic-line fixtures are not mirrored as executable gates.",
+      "next_action": "Build the Test 09 static-branch gate first, then add Test 11 dynamic-line validation once the VSM single-inverter gate passes."
     },
     {
       "group": "ibr",
@@ -2327,9 +2903,10 @@
       "psd_tests": "Test 23",
       "psd_components": "Droop grid-forming inverter",
       "hacdcpf_candidate": "GridFormingNortonDroop",
-      "status": "compare-limited",
-      "first_blocker": "HACDCPF droop is a compact Norton model, not PSD's full composed inverter/filter/controller stack.",
-      "next_action": "Candidate first GFM comparison if you accept subset parity."
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae outer-control trace gate; the droop static-generator composed inverter path now emits theta_oc traces.",
+      "next_action": "Tighten the droop GFM gate after replacing the compact virtual-impedance equivalent with PSD-equivalent LCL filter and voltage/current inner-control states.",
+      "execution_case_id": "psd-test23-droop-inverter-residual-vs-mass-matrix"
     },
     {
       "group": "ibr",
@@ -2345,10 +2922,11 @@
       "group": "ibr",
       "psd_tests": "Test 28",
       "psd_components": "PeriodicVariableSource",
-      "hacdcpf_candidate": "",
-      "status": "blocked-missing-model",
-      "first_blocker": "No periodic DC/source model.",
-      "next_action": "Defer unless source models are prioritized."
+      "hacdcpf_candidate": "PeriodicVariableSource",
+      "execution_case_id": "psd-test28-periodic-variable-source-residual-vs-mass-matrix",
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gate; internal voltage and angle states are hard manifest checks.",
+      "next_action": "Extend the gate to output-current traces after the PSD/HACDCPF current sign convention is formalized for source devices."
     },
     {
       "group": "ibr",
@@ -2363,10 +2941,10 @@
       "group": "ibr",
       "psd_tests": "Test 42",
       "psd_components": "DERA aggregate distributed generation",
-      "hacdcpf_candidate": "",
-      "status": "blocked-missing-model",
-      "first_blocker": "No AggregateDistributedGenerationA/DERA runtime model.",
-      "next_action": "Separate DERA from generic GFL inverter work; it is its own IBR family."
+      "hacdcpf_candidate": "AggregateDistributedGenerationA",
+      "status": "compare-limited",
+      "first_blocker": "AggregateDistributedGenerationA runtime equations, catalog parameters, and local numerical smoke coverage exist; PSD Test 42 residual/mass-matrix trace gate is not wired yet.",
+      "next_action": "Mirror PSD Test 42 freq-flag 0/1 fixtures and compare bus voltage/current traces before promoting to full-gate."
     },
     {
       "group": "ibr",
@@ -2381,10 +2959,11 @@
       "group": "ibr",
       "psd_tests": "Test 44",
       "psd_components": "VOC grid-forming inverter",
-      "hacdcpf_candidate": "",
-      "status": "blocked-missing-model",
-      "first_blocker": "No virtual oscillator control runtime model.",
-      "next_action": "Required only if VOC is in the first GFM target set."
+      "hacdcpf_candidate": "VOCGridForming",
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae outer-control trace gate; the VOC static-generator composed inverter path now emits theta_oc, E_oc, and omega_oc traces.",
+      "next_action": "Tighten the VOC gate after replacing the compact virtual-impedance equivalent with PSD-equivalent LCL filter and voltage/current inner-control states.",
+      "execution_case_id": "psd-test44-voc-inverter-residual-vs-mass-matrix"
     },
     {
       "group": "ibr",
@@ -2400,10 +2979,11 @@
       "group": "dynamic-injection",
       "psd_tests": "Test 49",
       "psd_components": "CSVGN1",
-      "hacdcpf_candidate": "",
-      "status": "blocked-missing-model",
-      "first_blocker": "No CSVGN1 dynamic injector model.",
-      "next_action": "Defer unless this device is explicitly in scope."
+      "hacdcpf_candidate": "CSVGN1",
+      "execution_case_id": "psd-test49-csvgn1-residual-vs-mass-matrix",
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae bus-voltage trace gate; CSVGN1 now uses the PSD second-order non-windup lead-lag and thyristor state convention.",
+      "next_action": "Tighten Test 49 bus-voltage tolerances after adding active-only ACLoadScale support for PSD LoadChange(:P_ref_impedance)."
     }
   ]
 }

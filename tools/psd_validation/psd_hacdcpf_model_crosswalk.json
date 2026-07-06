@@ -1,6 +1,6 @@
 {
   "format": "hacdcpf_psd_model_crosswalk.v1",
-  "updated": "2026-07-05",
+  "updated": "2026-07-06",
   "scope": "PowerSimulationsDynamics.jl / PowerSystems.jl dynamic-device model and controller crosswalk for HACDCPF transient validation.",
   "status_legend": {
     "exact-or-close": "The named HACDCPF model is intended to be directly comparable for focused traces, subject to parameter and initialization matching.",
@@ -114,7 +114,7 @@
       "status": "supported-subset",
       "comparison_level": "L1",
       "trace_case": "local:test45-style:sauerpai",
-      "notes": "Runtime equations, profile parser, catalog entry, and local Test 45-style MassMatrixDae smoke coverage are present. Full PSD Test 45 remains blocked by the companion VSM inverter model in that case."
+      "notes": "Runtime equations, profile parser, catalog entry, and local Test 45-style MassMatrixDae smoke coverage are present. Full PSD Test 45 still needs a combined SauerPai plus companion VSM executable fixture."
     },
     {
       "domain": "generator",
@@ -185,13 +185,35 @@
     {
       "domain": "generator",
       "psd_slot": "avr",
-      "psd_model": "ESAC1A / EXAC1 / EXST1 / SCRX / ESST1A / ST6B / ST8C / CSVGN1",
+      "psd_model": "ESAC1A / EXAC1 / EXST1 / SCRX / ESST1A / ST6B / ST8C",
       "hacdcpf_slot": "exciter",
       "hacdcpf_model": "",
       "status": "missing",
       "comparison_level": "L0",
       "trace_case": "",
       "notes": "Preserve imported names in metadata until the AVR library is expanded."
+    },
+    {
+      "domain": "dynamic-injection",
+      "psd_slot": "dynamic_injector",
+      "psd_model": "CSVGN1",
+      "hacdcpf_slot": "dynamic_injection",
+      "hacdcpf_model": "CSVGN1",
+      "status": "supported-subset",
+      "comparison_level": "L1",
+      "trace_case": "test49:bus1/bus2/bus3:voltage_mag",
+      "notes": "CSVGN1 runtime equations, catalog parameters, and PSD Test 49 ResidualModel/IDA vs MassMatrixDae bus-voltage trace gate now pass for the declared CSVGN1 shunt-compensator benchmark."
+    },
+    {
+      "domain": "inverter",
+      "psd_slot": "dynamic_injector",
+      "psd_model": "AggregateDistributedGenerationA / DERA",
+      "hacdcpf_slot": "dynamic_injection",
+      "hacdcpf_model": "AggregateDistributedGenerationA",
+      "status": "supported-subset",
+      "comparison_level": "L1",
+      "trace_case": "",
+      "notes": "DERA-A runtime equations, catalog parameters, and local numerical smoke coverage are present for Freq_Flag 0/1; PSD Test 42 trace parity remains pending."
     },
     {
       "domain": "generator",
@@ -255,9 +277,9 @@
       "hacdcpf_slot": "pss",
       "hacdcpf_model": "PSS1A",
       "status": "supported-subset",
-      "comparison_level": "L1",
-      "trace_case": "",
-      "notes": "PSS1A, IEEEST, and STAB1 runtime profiles exist; PSS1A has local damping tests, while IEEEST/STAB1 still need PSD trace gates."
+      "comparison_level": "L2",
+      "trace_case": "test30:generator-102-1:field_voltage_pu/omega_pu; test30:bus102:voltage_mag",
+      "notes": "PSS1A, IEEEST, and STAB1 runtime profiles exist; IEEEST and STAB1 are covered by executable PSD Test 30/Test 41 GENROU + SEXS trace gates. Dedicated PSS1A output trace extraction remains future work."
     },
     {
       "domain": "generator",
@@ -266,9 +288,9 @@
       "hacdcpf_slot": "pss",
       "hacdcpf_model": "STAB1",
       "status": "supported-subset",
-      "comparison_level": "L1",
-      "trace_case": "",
-      "notes": "Runtime and catalog profile exist; add PSD Test 41 trace gate after the OMIB STAB1 fixture is mirrored."
+      "comparison_level": "L2",
+      "trace_case": "test41:generator-102-1:field_voltage_pu/omega_pu; test41:bus102:voltage_mag",
+      "notes": "STAB1 runtime and catalog profile exist; PSD Test 41 ResidualModel/IDA vs MassMatrixDae manifest gate now passes for the OMIB GENROU + SEXS + STAB1 voltage-reference-step benchmark."
     },
     {
       "domain": "generator",
@@ -296,12 +318,12 @@
       "domain": "inverter",
       "psd_slot": "dc_source",
       "psd_model": "PeriodicVariableSource",
-      "hacdcpf_slot": "dc_source",
-      "hacdcpf_model": "",
-      "status": "missing",
-      "comparison_level": "L0",
-      "trace_case": "",
-      "notes": "Requires a dynamic DC source block or boundary trace injection."
+      "hacdcpf_slot": "source",
+      "hacdcpf_model": "PeriodicVariableSource",
+      "status": "exact-or-close",
+      "comparison_level": "L2",
+      "trace_case": "test28:InfBus:Vt/theta_rad",
+      "notes": "Boundary-source runtime support and PSD Test 28 ResidualModel/IDA vs MassMatrixDae manifest gate pass for internal voltage and angle states."
     },
     {
       "domain": "inverter",
@@ -410,30 +432,30 @@
       "hacdcpf_model": "GridFormingNortonDroop",
       "status": "supported-subset",
       "comparison_level": "L2",
-      "trace_case": "",
-      "notes": "Comparable at droop trend level; PSD has explicit block composition and filter/controller dynamics."
+      "trace_case": "test23:generator-102-1:theta_oc_rad",
+      "notes": "Droop GFM outer-control equations, catalog parameters, static-generator composed-model profile, and PSD Test 23 ResidualModel/IDA vs MassMatrixDae theta trace gate now pass; explicit PSD LCL filter and inner-control states remain future work."
     },
     {
       "domain": "inverter",
       "psd_slot": "outer_control",
       "psd_model": "VirtualInertia / VSM",
       "hacdcpf_slot": "converter",
-      "hacdcpf_model": "",
-      "status": "missing",
-      "comparison_level": "L0",
-      "trace_case": "",
-      "notes": "VSM is a priority gap for grid-forming comparison."
+      "hacdcpf_model": "VSMGridForming",
+      "status": "supported-subset",
+      "comparison_level": "L2",
+      "trace_case": "test08:generator-102-1:theta_oc_rad/omega_oc_pu",
+      "notes": "VSM outer-control equations, catalog parameters, static-generator composed-model profile, and PSD Test 08 ResidualModel/IDA vs MassMatrixDae theta/omega trace gate now pass; explicit PSD LCL filter and inner-control states remain future work."
     },
     {
       "domain": "inverter",
       "psd_slot": "outer_control",
       "psd_model": "ActiveVirtualOscillator + ReactiveVirtualOscillator / VOC",
       "hacdcpf_slot": "converter",
-      "hacdcpf_model": "",
-      "status": "missing",
-      "comparison_level": "L0",
-      "trace_case": "",
-      "notes": "VOC requires a separate oscillator-based GFM runtime model."
+      "hacdcpf_model": "VOCGridForming",
+      "status": "supported-subset",
+      "comparison_level": "L2",
+      "trace_case": "test44:generator-102-1:theta_oc_rad/E_oc_pu/frequency_pu",
+      "notes": "VOC outer-control equations, catalog parameters, static-generator composed-model profile, and PSD Test 44 ResidualModel/IDA vs MassMatrixDae theta/E/frequency trace gate now pass; explicit PSD LCL filter and inner-control states remain future work."
     },
     {
       "domain": "load",

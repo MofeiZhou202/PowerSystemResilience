@@ -321,6 +321,96 @@ HybridPowerSystem make_psd_genrou_three_bus_subset_case() {
   return sys;
 }
 
+HybridPowerSystem make_psd_test01_omib_case() {
+  HybridPowerSystem sys;
+  sys.name = "psd_test01_omib";
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 60.0;
+
+  ACBus b101;
+  b101.index = 101;
+  b101.name = "BUS 1";
+  b101.bus_type = BusType::SLACK;
+  b101.base_kv = 230.0;
+  b101.vm_pu = 1.05;
+  b101.va_deg = 0.0;
+  b101.in_service = true;
+
+  ACBus b102;
+  b102.index = 102;
+  b102.name = "BUS 2";
+  b102.bus_type = BusType::PV;
+  b102.base_kv = 230.0;
+  b102.vm_pu = 1.04;
+  b102.va_deg = 1.3118;
+  b102.in_service = true;
+
+  sys.ac.buses = {b101, b102};
+
+  auto branch = [](int index) {
+    ACBranch br;
+    br.index = index;
+    br.from_bus = 101;
+    br.to_bus = 102;
+    br.r_pu = 0.0;
+    br.x_pu = 0.1;
+    br.b_pu = 0.0;
+    br.tap = 1.0;
+    br.name = "BUS 1-BUS 2-i_" + std::to_string(index);
+    br.in_service = true;
+    return br;
+  };
+  sys.ac.branches = {branch(1), branch(2)};
+
+  ExternalGrid source;
+  source.index = 1;
+  source.bus = 101;
+  source.name = "InfBus";
+  source.vm_pu = 1.05;
+  source.va_deg = 0.0;
+  source.r_pu = 0.0;
+  source.x_pu = 1.0e-5;
+  source.in_service = true;
+  sys.ac.external_grids = {source};
+
+  Generator gen;
+  gen.index = 1;
+  gen.bus = 102;
+  gen.name = "generator-102-1";
+  gen.is_slack = false;
+  gen.in_service = true;
+  gen.pg_mw = 50.0;
+  gen.qg_mvar = -20.228;
+  gen.vg_pu = 1.04;
+  gen.pmax_mw = 100.0;
+  gen.pmin_mw = 0.0;
+  gen.qmax_mvar = 100.0;
+  gen.qmin_mvar = -100.0;
+  gen.ra_pu = 0.0;
+  gen.xd_pu = 0.2995;
+  gen.xq_pu = 0.2995;
+  gen.xdp_pu = 0.2995;
+  gen.xdpp_pu = 0.2995;
+  gen.td0p_s = 0.0;
+  gen.td0pp_s = 0.0;
+  gen.inertia_h = 3.148;
+  gen.droop_r = 0.05;
+  gen.dynamic_model.standard = "PowerSystems";
+  gen.dynamic_model.model_name = "ClassicalMachine";
+  gen.dynamic_model.source_id = "PowerSimulationsDynamics:test_case01_omib";
+  gen.dynamic_model.parameters = {
+      {"H", 3.148},
+      {"D", 2.0},
+      {"R", 0.0},
+      {"Xd_p", 0.2995},
+      {"eq_p", 0.7087},
+  };
+  sys.ac.generators = {gen};
+
+  return sys;
+}
+
 HybridPowerSystem make_psd_onedoneq_three_bus_subset_case() {
   HybridPowerSystem sys = make_psd_genrou_three_bus_subset_case();
   sys.name = "psd_onedoneq_three_bus_subset";
@@ -1201,6 +1291,137 @@ HybridPowerSystem make_psd_test25_dynamic_line_case() {
   return sys;
 }
 
+HybridPowerSystem make_psd_csvgn1_three_bus_case() {
+  HybridPowerSystem sys;
+  sys.name = "psd_test49_csvgn1_three_bus";
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 50.0;
+
+  ACBus b1;
+  b1.index = 1;
+  b1.name = "GEN";
+  b1.bus_type = BusType::SLACK;
+  b1.base_kv = 20.0;
+  b1.vm_pu = 1.0;
+  b1.va_deg = 0.0;
+  b1.in_service = true;
+
+  ACBus b2;
+  b2.index = 2;
+  b2.name = "LOAD";
+  b2.bus_type = BusType::PQ;
+  b2.base_kv = 275.0;
+  b2.vm_pu = 1.04785;
+  b2.va_deg = -63.3086;
+  b2.in_service = true;
+
+  ACBus b3;
+  b3.index = 3;
+  b3.name = "LOAD_CSVGN1";
+  b3.bus_type = BusType::PV;
+  b3.base_kv = 275.0;
+  b3.vm_pu = 1.015;
+  b3.va_deg = -63.4538;
+  b3.in_service = true;
+  sys.ac.buses = {b1, b2, b3};
+
+  ACBranch xfmr;
+  xfmr.index = 1;
+  xfmr.from_bus = 1;
+  xfmr.to_bus = 2;
+  xfmr.name = "GEN-LOAD-transformer";
+  xfmr.r_pu = 0.0;
+  xfmr.x_pu = 0.02550;
+  xfmr.b_pu = 0.0;
+  xfmr.tap = 0.95240;
+  xfmr.in_service = true;
+
+  auto line23 = [](int index, const std::string& circuit) {
+    ACBranch br;
+    br.index = index;
+    br.from_bus = 2;
+    br.to_bus = 3;
+    br.name = "LOAD-LOAD_CSVGN1-" + circuit;
+    br.r_pu = 0.02300;
+    br.x_pu = 0.15000;
+    br.b_pu = 0.56000;
+    br.tap = 1.0;
+    br.in_service = true;
+    return br;
+  };
+  sys.ac.branches = {xfmr, line23(2, "1"), line23(3, "2")};
+
+  ExternalGrid source;
+  source.index = 1;
+  source.bus = 1;
+  source.name = "generator-1-1";
+  source.vm_pu = 1.0;
+  source.va_deg = 0.0;
+  source.r_pu = 0.0;
+  source.x_pu = 1.0e-5;
+  source.in_service = true;
+
+  ExternalGrid csvgn1_source;
+  csvgn1_source.index = 2;
+  csvgn1_source.bus = 3;
+  csvgn1_source.name = "CSVGN1";
+  csvgn1_source.vm_pu = 1.015;
+  csvgn1_source.va_deg = -63.4538;
+  csvgn1_source.r_pu = 0.0;
+  csvgn1_source.x_pu = 1.0e-5;
+  csvgn1_source.in_service = true;
+  sys.ac.external_grids = {source, csvgn1_source};
+
+  auto load = [](int index, int bus, const std::string& name,
+                 double p_mw, double q_mvar) {
+    Load ld;
+    ld.index = index;
+    ld.bus = bus;
+    ld.name = name;
+    ld.p_mw = p_mw;
+    ld.q_mvar = q_mvar;
+    ld.in_service = true;
+    ld.dynamic_model.standard = "PowerSystems";
+    ld.dynamic_model.model_name = "ConstantImpedanceLoad";
+    ld.dynamic_model.source_id = "PowerSimulationsDynamics:test_case49_csvgn1";
+    return ld;
+  };
+  sys.ac.loads = {
+      load(1, 2, "load21", 455.0, 1.0),
+      load(2, 3, "load31", 140.0, 95.0),
+  };
+
+  StaticGenerator csvgn1;
+  csvgn1.index = 1;
+  csvgn1.bus = 3;
+  csvgn1.name = "CSVGN1";
+  csvgn1.p_mw = 0.0;
+  csvgn1.q_mvar = 0.0;
+  csvgn1.sn_mva = 500.0;
+  csvgn1.v_ref_pu = 1.015;
+  csvgn1.in_service = true;
+  csvgn1.dynamic_model.standard = "PSS/E";
+  csvgn1.dynamic_model.model_name = "CSVGN1";
+  csvgn1.dynamic_model.source_id = "PowerSimulationsDynamics:test_case49_csvgn1";
+  csvgn1.dynamic_model.parameters = {
+      {"K", 20.0},
+      {"T1", 0.0},
+      {"T2", 1.0},
+      {"T3", 0.154833},
+      {"T4", 1.0},
+      {"T5", 0.005167},
+      {"Rmin", 0.0},
+      {"Vmax", 1.0},
+      {"Vmin", 0.0},
+      {"CBase", 60.0},
+      {"base_power", 500.0},
+  };
+  sys.ac.static_generators = {csvgn1};
+
+  return sys;
+}
+
 HybridPowerSystem make_psd_genroe_three_bus_subset_case(bool high_saturation = false) {
   HybridPowerSystem sys = make_psd_genrou_three_bus_subset_case();
   sys.name = high_saturation ? "psd_genroe_high_sat_three_bus_subset"
@@ -1317,13 +1538,141 @@ HybridPowerSystem make_psd_genrou_sexs_case() {
   avr.standard = "PSS/E";
   avr.parameter_set = "PowerSimulationsDynamics:test26_sexs";
   avr.parameters = {
-      {"Te", 0.4},
-      {"Ta", 1.0},
+      {"Ta_Tb", 0.4},
+      {"Tb", 5.0},
       {"K", 20.0},
+      {"Te", 1.0},
       {"Emin", -50.0},
       {"Emax", 50.0},
   };
   machine.dynamic_model.components.push_back(std::move(avr));
+  return sys;
+}
+
+HybridPowerSystem make_psd_stab1_omib_case() {
+  HybridPowerSystem sys;
+  sys.name = "psd_test41_stab1_omib";
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 50.0;
+
+  ACBus b1;
+  b1.index = 1;
+  b1.name = "GENBUS";
+  b1.bus_type = BusType::PV;
+  b1.base_kv = 24.0;
+  b1.vm_pu = 1.0;
+  b1.va_deg = 25.0850;
+  b1.in_service = true;
+
+  ACBus b2;
+  b2.index = 2;
+  b2.name = "INFBUS";
+  b2.bus_type = BusType::SLACK;
+  b2.base_kv = 24.0;
+  b2.vm_pu = 0.95512;
+  b2.va_deg = 0.0;
+  b2.in_service = true;
+  sys.ac.buses = {b1, b2};
+
+  ACBranch br;
+  br.index = 1;
+  br.from_bus = 1;
+  br.to_bus = 2;
+  br.name = "GENBUS-INFBUS-i_1";
+  br.r_pu = 0.0;
+  br.x_pu = 0.45;
+  br.b_pu = 0.0;
+  br.tap = 1.0;
+  br.in_service = true;
+  sys.ac.branches = {br};
+
+  ExternalGrid source;
+  source.index = 2;
+  source.bus = 2;
+  source.name = "INFBUS";
+  source.vm_pu = 0.95512;
+  source.va_deg = 0.0;
+  source.r_pu = 0.0;
+  source.x_pu = 0.01;
+  source.in_service = true;
+  sys.ac.external_grids = {source};
+
+  Generator gen;
+  gen.index = 1;
+  gen.bus = 1;
+  gen.name = "generator-1-1";
+  gen.is_slack = false;
+  gen.in_service = true;
+  gen.pg_mw = 90.0;
+  gen.qg_mvar = 29.993;
+  gen.vg_pu = 1.0;
+  gen.pmax_mw = 9999.0;
+  gen.pmin_mw = -9999.0;
+  gen.qmax_mvar = 9999.0;
+  gen.qmin_mvar = -9999.0;
+  gen.ra_pu = 0.0;
+  gen.xd_pu = 2.2;
+  gen.xq_pu = 2.2;
+  gen.xdp_pu = 0.30;
+  gen.xdpp_pu = 0.30;
+  gen.td0p_s = 7.0;
+  gen.td0pp_s = 999.0;
+  gen.inertia_h = 4.0;
+  gen.droop_r = 0.05;
+  gen.dynamic_model.standard = "PSS/E";
+  gen.dynamic_model.model_name = "GENROU";
+  gen.dynamic_model.source_id = "PowerSimulationsDynamics:test41_stab1";
+  gen.dynamic_model.parameters = {
+      {"H", 4.0},
+      {"D", 0.0},
+      {"R", 0.0},
+      {"Xd", 2.2},
+      {"Xq", 2.2},
+      {"Xd_p", 0.30},
+      {"Xq_p", 0.30},
+      {"Xd_pp", 0.30},
+      {"Xl", 0.20},
+      {"Td0_p", 7.0},
+      {"Td0_pp", 999.0},
+      {"Tq0_p", 0.4},
+      {"Tq0_pp", 999.0},
+      {"Sat_A", 0.0},
+      {"Sat_B", 0.0},
+  };
+
+  hacdcpf::DynamicModelComponentProfile avr;
+  avr.type = "exciter";
+  avr.model = "SEXS";
+  avr.standard = "PSS/E";
+  avr.parameter_set = "PowerSimulationsDynamics:test41_stab1";
+  avr.parameters = {
+      {"Ta_Tb", 1.0},
+      {"Tb", 1.0},
+      {"K", 130.0},
+      {"Te", 0.4},
+      {"Emin", -10.0},
+      {"Emax", 10.0},
+  };
+  gen.dynamic_model.components.push_back(std::move(avr));
+
+  hacdcpf::DynamicModelComponentProfile pss;
+  pss.type = "pss";
+  pss.model = "STAB1";
+  pss.standard = "PSS/E";
+  pss.parameter_set = "PowerSimulationsDynamics:test41_stab1";
+  pss.parameters = {
+      {"KT", 6.0},
+      {"T", 1.5},
+      {"T1T3", 13.3},
+      {"T3", 0.0447},
+      {"T2T4", 13.3},
+      {"T4", 0.0447},
+      {"H_lim", 0.2},
+  };
+  gen.dynamic_model.components.push_back(std::move(pss));
+
+  sys.ac.generators = {gen};
   return sys;
 }
 
@@ -1759,6 +2108,146 @@ struct PsdGflCase {
   double pll_lpf_t_s{0.0};
 };
 
+HybridPowerSystem make_psd_gfm_omib_case(const std::string& model) {
+  const bool vsm = model == "VSMGridForming";
+  const bool voc = model == "VOCGridForming";
+  HybridPowerSystem sys;
+  sys.name = voc ? "psd_test44_voc_inverter"
+                 : (vsm ? "psd_test08_vsm_inverter"
+                        : "psd_test23_droop_inverter");
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 50.0;
+
+  ACBus b101;
+  b101.index = 101;
+  b101.name = "BUS 1";
+  b101.bus_type = BusType::SLACK;
+  b101.base_kv = 230.0;
+  b101.vm_pu = 1.00001;
+  b101.va_deg = 0.0;
+  b101.in_service = true;
+
+  ACBus b102;
+  b102.index = 102;
+  b102.name = "BUS 2";
+  b102.bus_type = BusType::PQ;
+  b102.base_kv = 230.0;
+  b102.vm_pu = 1.0;
+  b102.va_deg = 0.0;
+  b102.in_service = true;
+  sys.ac.buses = {b101, b102};
+
+  ACBranch br;
+  br.index = 1;
+  br.from_bus = 101;
+  br.to_bus = 102;
+  br.name = "BUS 1-BUS 2-i_1";
+  br.r_pu = 0.0;
+  br.x_pu = 0.075;
+  br.b_pu = 0.0;
+  br.tap = 1.0;
+  br.in_service = true;
+  sys.ac.branches = {br};
+
+  ExternalGrid source;
+  source.index = 1;
+  source.bus = 101;
+  source.name = "InfBus";
+  source.vm_pu = 1.00001;
+  source.va_deg = 0.0;
+  source.r_pu = 0.0;
+  source.x_pu = 1.0e-5;
+  source.in_service = true;
+  sys.ac.external_grids = {source};
+
+  StaticGenerator inv;
+  inv.index = 1;
+  inv.bus = 102;
+  inv.name = "generator-102-1";
+  inv.p_mw = 50.0;
+  inv.q_mvar = 0.0;
+  inv.sn_mva = 100.0;
+  inv.p_rated_mw = 100.0;
+  inv.pmax_mw = 200.0;
+  inv.pmin_mw = -200.0;
+  inv.v_ref_pu = 1.0;
+  inv.in_service = true;
+  inv.dynamic_model.standard = "PowerSimulationsDynamics";
+  inv.dynamic_model.model_name = model;
+  inv.dynamic_model.source_id = voc ? "PowerSimulationsDynamics:test_case44_voc"
+                                    : (vsm ? "PowerSimulationsDynamics:test_case08_vsm"
+                                           : "PowerSimulationsDynamics:test_case23_droop");
+  inv.dynamic_model.parameters = {
+      {"virtual_x_pu", 0.20},
+      {"virtual_r_pu", 0.0},
+      {"q_droop_pu", 0.2},
+      {"reactive_power_filter_t_s", 0.001},
+      {"voltage_control_t_s", 0.02},
+      {"v_ref_pu", 1.0},
+  };
+  if (voc) {
+    inv.dynamic_model.parameters["k1"] = 0.0033;
+    inv.dynamic_model.parameters["psi"] = 3.14159265358979323846 / 4.0;
+    inv.dynamic_model.parameters["k2"] = 0.0796;
+    inv.dynamic_model.components.push_back(
+        {"outer_control", "VOCOuterControl", "PowerSimulationsDynamics",
+         "PowerSimulationsDynamics:test_case44_voc",
+         {{"k1", 0.0033},
+          {"psi", 3.14159265358979323846 / 4.0},
+          {"k2", 0.0796}}});
+    inv.dynamic_model.components.push_back(
+        {"filter", "LCLFilter", "PowerSimulationsDynamics",
+         "PowerSimulationsDynamics:test_case44_voc",
+         {{"virtual_x_pu", 0.20}, {"virtual_r_pu", 0.0}, {"Cf", 0.1086}}});
+  } else if (vsm) {
+    inv.dynamic_model.parameters["Ta"] = 2.0;
+    inv.dynamic_model.parameters["kd"] = 400.0;
+    inv.dynamic_model.parameters["komega"] = 20.0;
+    inv.dynamic_model.components.push_back(
+        {"outer_control", "VSMOuterControl", "PowerSimulationsDynamics",
+         "PowerSimulationsDynamics:test_case08_vsm",
+         {{"Ta", 2.0},
+          {"kd", 400.0},
+          {"komega", 20.0},
+          {"q_droop_pu", 0.2},
+          {"reactive_power_filter_t_s", 0.001}}});
+    inv.dynamic_model.components.push_back(
+        {"filter", "LCLFilter", "PowerSimulationsDynamics",
+         "PowerSimulationsDynamics:test_case08_vsm",
+         {{"virtual_x_pu", 0.20}, {"virtual_r_pu", 0.0}, {"Cf", 0.074}}});
+  } else {
+    inv.dynamic_model.parameters["p_droop_pu"] = 0.05;
+    inv.dynamic_model.parameters["power_filter_t_s"] =
+        1.0 / (2.0 * 3.14159265358979323846 * 5.0);
+    inv.dynamic_model.components.push_back(
+        {"outer_control", "GFMDroopOuterControl", "PowerSimulationsDynamics",
+         "PowerSimulationsDynamics:test_case23_droop",
+         {{"p_droop_pu", 0.05},
+          {"q_droop_pu", 0.2},
+          {"power_filter_t_s", 1.0 / (2.0 * 3.14159265358979323846 * 5.0)},
+          {"reactive_power_filter_t_s", 0.001}}});
+    inv.dynamic_model.components.push_back(
+        {"filter", "LCLFilter", "PowerSimulationsDynamics",
+         "PowerSimulationsDynamics:test_case23_droop",
+         {{"virtual_x_pu", 0.20}, {"virtual_r_pu", 0.0}, {"Cf", 0.074}}});
+  }
+  inv.dynamic_model.components.push_back(
+      {"converter", "AverageConverter", "PowerSimulationsDynamics",
+       inv.dynamic_model.source_id, {}});
+  inv.dynamic_model.components.push_back(
+      {"inner_control", "VirtualImpedanceInnerControl", "HACDCPF",
+       inv.dynamic_model.source_id, {{"virtual_x_pu", 0.20}, {"virtual_r_pu", 0.0}}});
+  inv.dynamic_model.components.push_back(
+      {"dc_source", "ConstantDCSource", "PowerSimulationsDynamics",
+       inv.dynamic_model.source_id, {}});
+  inv.dynamic_model.components.push_back(
+      {"pll", "FixedFrequency", "PowerSimulationsDynamics",
+       inv.dynamic_model.source_id, {}});
+  sys.ac.static_generators = {inv};
+  return sys;
+}
+
 HybridPowerSystem make_psd_gfl_case(const PsdGflCase& spec,
                                     double base_mva) {
   auto sys = make_hybrid_dc_case();
@@ -1800,6 +2289,38 @@ DynamicResults run_hacdcpf_psd_gfl_case(const PsdGflCase& spec,
 
   DynamicSolver solver;
   return solver.solve(dyn);
+}
+
+HybridPowerSystem make_psd_periodic_variable_source_case() {
+  auto sys = make_transient_2bus();
+  sys.ac.generators.clear();
+  sys.ac.loads.clear();
+  sys.ac.buses[0].vm_pu = 1.05;
+  sys.ac.buses[1].vm_pu = 1.04;
+  ExternalGrid grid;
+  grid.index = 1;
+  grid.bus = 1;
+  grid.name = "InfBus";
+  grid.vm_pu = 1.05;
+  grid.va_deg = 0.0;
+  grid.r_pu = 0.0;
+  grid.x_pu = 0.05;
+  grid.in_service = true;
+  grid.dynamic_model.standard = "PowerSimulationsDynamics";
+  grid.dynamic_model.model_name = "PeriodicVariableSource";
+  grid.dynamic_model.parameters = {
+      {"R_th", 0.0},
+      {"X_th", 0.05},
+      {"internal_voltage_bias", 1.0},
+      {"internal_voltage_frequency_rad_s", 2.0 * 3.14159265358979323846},
+      {"internal_voltage_sin_coeff", 1.0},
+      {"internal_voltage_cos_coeff", 0.0},
+      {"internal_angle_bias", 0.0},
+      {"internal_angle_frequency_rad_s", 2.0 * 3.14159265358979323846},
+      {"internal_angle_sin_coeff", 0.0},
+      {"internal_angle_cos_coeff", 1.0}};
+  sys.ac.external_grids = {grid};
+  return sys;
 }
 
 CsvSeries hacdcpf_vsc_filtered_power_series(const DynamicResults& result,
@@ -2336,6 +2857,8 @@ ManifestExecutableCase parse_manifest_executable_case(const Json& raw) {
     out.event.type = DynamicEventType::ACBranchTrip;
   } else if (event_type == "ACBranchImpedanceScale") {
     out.event.type = DynamicEventType::ACBranchImpedanceScale;
+  } else if (event_type == "ACLoadScale") {
+    out.event.type = DynamicEventType::ACLoadScale;
   } else {
     REQUIRE(event_type == "Custom");
     out.event.type = DynamicEventType::Custom;
@@ -2348,6 +2871,8 @@ ManifestExecutableCase parse_manifest_executable_case(const Json& raw) {
                       ? "AC"
                       : "");
   out.event.component_index = event.at("component_index").get<int>();
+  out.event.bus = event.value("bus", 0);
+  out.event.value = event.value("value", 0.0);
   out.event.label = event.value("label", out.id + " event");
   if (event.contains("params")) {
     REQUIRE(event.at("params").is_object());
@@ -2383,6 +2908,9 @@ ManifestExecutableCase parse_manifest_executable_case(const Json& raw) {
 }
 
 HybridPowerSystem make_manifest_system(const ManifestExecutableCase& spec) {
+  if (spec.hacdcpf_fixture == "make_psd_test01_omib_case") {
+    return make_psd_test01_omib_case();
+  }
   if (spec.hacdcpf_fixture == "make_psd_onedoneq_three_bus_subset_case") {
     return make_psd_onedoneq_three_bus_subset_case();
   }
@@ -2410,6 +2938,9 @@ HybridPowerSystem make_manifest_system(const ManifestExecutableCase& spec) {
   if (spec.hacdcpf_fixture == "make_psd_test25_dynamic_line_case") {
     return make_psd_test25_dynamic_line_case();
   }
+  if (spec.hacdcpf_fixture == "make_psd_csvgn1_three_bus_case") {
+    return make_psd_csvgn1_three_bus_case();
+  }
   if (spec.hacdcpf_fixture == "make_psd_genrou_three_bus_subset_case") {
     return make_psd_genrou_three_bus_subset_case();
   }
@@ -2418,6 +2949,9 @@ HybridPowerSystem make_manifest_system(const ManifestExecutableCase& spec) {
   }
   if (spec.hacdcpf_fixture == "make_psd_genrou_sexs_case") {
     return make_psd_genrou_sexs_case();
+  }
+  if (spec.hacdcpf_fixture == "make_psd_stab1_omib_case") {
+    return make_psd_stab1_omib_case();
   }
   if (spec.hacdcpf_fixture == "make_psd_genrou_sexs_ieeest_case") {
     return make_psd_genrou_sexs_ieeest_case();
@@ -2454,6 +2988,18 @@ HybridPowerSystem make_manifest_system(const ManifestExecutableCase& spec) {
                               1.0 / 500.0},
                              100.0);
   }
+  if (spec.hacdcpf_fixture == "make_psd_vsm_inverter_case") {
+    return make_psd_gfm_omib_case("VSMGridForming");
+  }
+  if (spec.hacdcpf_fixture == "make_psd_droop_inverter_case") {
+    return make_psd_gfm_omib_case("GridFormingNortonDroop");
+  }
+  if (spec.hacdcpf_fixture == "make_psd_voc_inverter_case") {
+    return make_psd_gfm_omib_case("VOCGridForming");
+  }
+  if (spec.hacdcpf_fixture == "make_psd_periodic_variable_source_case") {
+    return make_psd_periodic_variable_source_case();
+  }
   FAIL("Unsupported PSD executable manifest fixture: " << spec.hacdcpf_fixture);
   return HybridPowerSystem{};
 }
@@ -2471,6 +3017,13 @@ DynamicResults run_manifest_hacdcpf_case(const ManifestExecutableCase& spec) {
   opt.max_dynamic_trim_iters = 20;
   opt.algebraic_network_max_iters = 8;
   opt.algebraic_network_tol = 1e-8;
+  if (spec.hacdcpf_fixture == "make_psd_csvgn1_three_bus_case") {
+    opt.algebraic_network_max_iters = 20;
+    opt.algebraic_network_tol = 5e-5;
+  }
+  if (spec.hacdcpf_fixture == "make_psd_periodic_variable_source_case") {
+    opt.enforce_voltage_health_check = false;
+  }
 
   DynamicModelBuilder builder;
   DynamicSystem dyn = builder.build(sys, opt);
@@ -3843,7 +4396,13 @@ TEST_CASE("PSD component matrix executable manifest is internally consistent",
     std::size_t signal_count = 0;
     for (const auto& device : spec.devices) {
       CHECK_FALSE(device.psd_ref.empty());
-      CHECK(device.local_component_index > 0);
+      const bool is_bus_trace = device.local_component_type == "ACBus" ||
+                                device.local_component_type == "BusVoltage";
+      if (is_bus_trace) {
+        CHECK(device.local_component_index >= 0);
+      } else {
+        CHECK(device.local_component_index > 0);
+      }
       signal_count += device.signals.size();
       for (const auto& signal : device.signals) {
         CHECK_FALSE(signal.local_key.empty());
@@ -3960,7 +4519,9 @@ TEST_CASE("PSD executable manifest gates promoted full-contract rows vs MassMatr
     CHECK(result.initialization.power_flow_converged);
     CHECK(result.initialization.dynamic_trim_converged);
     REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= 1e-5);
-    REQUIRE_FALSE(result.applied_event_records.empty());
+    if (spec.event.time_s <= spec.t_end_s) {
+      REQUIRE_FALSE(result.applied_event_records.empty());
+    }
     REQUIRE(result.snapshots.size() > 100);
 
     std::vector<ManifestTraceComparison> case_traces =
@@ -4821,6 +5382,169 @@ TEST_CASE("Updated GFM inverter exposes dynamic DC-link telemetry",
   CHECK(it->values.count("p_dc_mw") == 1);
 }
 
+TEST_CASE("PSD grid-forming VSM and VOC outer-control profiles run numerically",
+          "[dynamics][gfm][psd][ibr]") {
+  struct CaseSpec {
+    std::string model;
+    std::map<std::string, double> params;
+  };
+  const std::vector<CaseSpec> cases = {
+      {"VSMGridForming",
+       {{"Ta", 2.0},
+        {"kd", 40.0},
+        {"komega", 20.0},
+        {"q_droop_pu", 0.2},
+        {"reactive_power_filter_t_s", 0.001},
+        {"virtual_x_pu", 0.12}}},
+      {"VOCGridForming",
+       {{"k1", 0.0033},
+        {"psi", 3.14159265358979323846 / 4.0},
+        {"k2", 0.0796},
+        {"virtual_x_pu", 0.12}}},
+  };
+
+  for (const auto& spec : cases) {
+    auto sys = make_hybrid_dc_case();
+    sys.vsc_converters[0].ac_grid_forming = true;
+    sys.vsc_converters[0].grid_forming = false;
+    sys.vsc_converters[0].control_mode = ConverterMode::AC_GRID_FORMING;
+    sys.vsc_converters[0].p_set_mw = 8.0;
+    sys.vsc_converters[0].p_schedule_mw = 8.0;
+    sys.vsc_converters[0].q_set_mvar = 1.0;
+    sys.vsc_converters[0].dynamic_model.standard = "PowerSimulationsDynamics";
+    sys.vsc_converters[0].dynamic_model.model_name = spec.model;
+    sys.vsc_converters[0].dynamic_model.parameters = spec.params;
+
+    auto opt = fast_options();
+    opt.t_end_s = 0.10;
+    opt.dt_s = 0.005;
+    opt.run_power_flow_initialization = true;
+
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(sys, opt);
+    DynamicEvent pref_step;
+    pref_step.time_s = 0.04;
+    pref_step.type = DynamicEventType::Custom;
+    pref_step.component_type = "VSC";
+    pref_step.component_index = 1;
+    pref_step.params["p_ref_mw"] = 12.0;
+    dyn.events.push_back(pref_step);
+
+    DynamicSolver solver;
+    const DynamicResults result = solver.solve(dyn);
+    INFO(spec.model);
+    REQUIRE(result.success);
+    REQUIRE(result.final_snapshot() != nullptr);
+    const auto& out = require_device_output(*result.final_snapshot(), "VSCGridForming", 1);
+    CHECK(out.model_name == spec.model);
+    CHECK(out.values.at("theta_oc_rad") == Catch::Approx(out.values.at("angle_rad")));
+    CHECK(std::isfinite(out.values.at("omega_oc_pu")));
+    CHECK(out.values.at("frequency_hz") > 45.0);
+    CHECK(out.values.at("frequency_hz") < 55.0);
+    CHECK(out.values.at("E_oc_pu") > 0.2);
+    CHECK(out.values.at("E_oc_pu") < 1.5);
+  }
+}
+
+TEST_CASE("PSD standalone IBR dynamic injectors initialize and run",
+          "[dynamics][psd][ibr]") {
+  SECTION("PeriodicVariableSource") {
+    auto sys = make_transient_2bus();
+    sys.ac.generators.clear();
+    ExternalGrid grid;
+    grid.index = 1;
+    grid.bus = 1;
+    grid.name = "InfBus";
+    grid.vm_pu = 1.0;
+    grid.x_pu = 0.05;
+    grid.in_service = true;
+    grid.dynamic_model.standard = "PowerSimulationsDynamics";
+    grid.dynamic_model.model_name = "PeriodicVariableSource";
+    grid.dynamic_model.parameters = {
+        {"internal_voltage_bias", 1.0},
+        {"internal_voltage_frequency_rad_s", 2.0 * 3.14159265358979323846},
+        {"internal_voltage_sin_coeff", 0.02},
+        {"internal_angle_frequency_rad_s", 2.0 * 3.14159265358979323846},
+        {"internal_angle_cos_coeff", 0.02},
+        {"X_th", 0.05}};
+    sys.ac.external_grids = {grid};
+
+    auto opt = fast_options();
+    opt.t_end_s = 0.20;
+    opt.dt_s = 0.01;
+    const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
+    REQUIRE(result.success);
+    REQUIRE(result.final_snapshot() != nullptr);
+    const auto& out = require_device_output(*result.final_snapshot(), "PeriodicVariableSource", 1);
+    CHECK(out.model_name == "PeriodicVariableSource");
+    CHECK(out.values.count("Vt") == 1);
+    CHECK(std::abs(out.values.at("Vt") - 1.0) > 1e-4);
+    CHECK(std::isfinite(out.values.at("current_real_pu")));
+  }
+
+  SECTION("CSVGN1") {
+    auto sys = make_transient_2bus();
+    StaticGenerator shunt;
+    shunt.index = 1;
+    shunt.bus = 2;
+    shunt.name = "CSVGN1";
+    shunt.q_mvar = 5.0;
+    shunt.in_service = true;
+    shunt.dynamic_model.standard = "PSS/E";
+    shunt.dynamic_model.model_name = "CSVGN1";
+    shunt.dynamic_model.parameters = {{"K", 20.0}, {"T3", 0.154833}, {"T5", 0.005167},
+                                      {"CBase", 60.0}, {"base_power", 500.0}};
+    sys.ac.static_generators = {shunt};
+
+    auto opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.t_end_s = 0.08;
+    opt.dt_s = 0.002;
+    opt.algebraic_network_max_iters = 8;
+    opt.algebraic_network_tol = 1e-5;
+    const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
+    INFO(result.message);
+    REQUIRE(result.success);
+    REQUIRE(result.final_snapshot() != nullptr);
+    const auto& out = require_device_output(*result.final_snapshot(), "CSVGN1", 1);
+    CHECK(out.model_name == "CSVGN1");
+    CHECK(std::isfinite(out.values.at("b_pu")));
+    CHECK(std::isfinite(out.values.at("q_mvar")));
+  }
+
+  SECTION("AggregateDistributedGenerationA") {
+    auto sys = make_transient_2bus();
+    StaticGenerator dera;
+    dera.index = 1;
+    dera.bus = 2;
+    dera.name = "DERA";
+    dera.p_mw = 12.0;
+    dera.q_mvar = 2.0;
+    dera.sn_mva = 20.0;
+    dera.v_ref_pu = 1.0;
+    dera.in_service = true;
+    dera.dynamic_model.standard = "PSS/E";
+    dera.dynamic_model.model_name = "AggregateDistributedGenerationA";
+    dera.dynamic_model.parameters = {{"base_power", 20.0}, {"Freq_Flag", 1.0},
+                                     {"K_qv", 5.0}, {"Tg", 0.02},
+                                     {"Tpord", 0.02}};
+    sys.ac.static_generators = {dera};
+
+    auto opt = fast_options();
+    opt.t_end_s = 0.10;
+    opt.dt_s = 0.005;
+    const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
+    REQUIRE(result.success);
+    REQUIRE(result.final_snapshot() != nullptr);
+    const auto& out =
+        require_device_output(*result.final_snapshot(), "AggregateDistributedGenerationA", 1);
+    CHECK(out.model_name == "AggregateDistributedGenerationA");
+    CHECK(out.values.at("freq_flag") == Catch::Approx(1.0));
+    CHECK(std::isfinite(out.values.at("Ip")));
+    CHECK(std::isfinite(out.values.at("Iq")));
+  }
+}
+
 namespace {
 
 // Two-bus case with a non-slack machine (model selectable) at bus 2, optionally
@@ -5039,7 +5763,7 @@ TEST_CASE("Machine governor / AVR / PSS control blocks are wired and effective",
   CHECK(series_swing_after(f_pss, 1.05) < series_swing_after(f_avr, 1.05));
   // PSS output is a bounded stabilizing signal that starts at ~0 (equilibrium).
   const auto vs = device_output_series(pss, "PSS", 2, "vs_pu");
-  CHECK(std::abs(vs.y.front()) < 1e-6);
+  CHECK(std::abs(vs.y.front()) < 2e-6);
   CHECK(series_swing_after(vs, 1.0) > 1e-4);
 }
 

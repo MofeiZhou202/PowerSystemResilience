@@ -28,6 +28,12 @@ enum class DynamicLoadModelKind {
   ZIP
 };
 
+enum class GridFormingControlKind {
+  Droop,
+  VirtualInertia,
+  VirtualOscillator
+};
+
 enum class SynchronousMachineModelKind {
   Classical,
   OneDOneQ,
@@ -478,7 +484,9 @@ struct GovernorDynamicParams {
   double p_ref_mw{0.0};
   double droop_r{0.05};
   double t_s{0.50};       // T1: governor/valve time constant (s)
+  double t2_s{0.0};       // TGOV1 lead-lag numerator T2 (s)
   double turbine_t_s{0.50};  // T3: turbine time constant (s)
+  double damping_d_t{0.0};    // TGOV1 turbine damping D_T
   double reheat_t_s{6.0};    // IEEEG1 reheat time constant (s)
   double reheat_k{0.30};     // IEEEG1 HP fraction (0..1)
   double tc_s{0.50};         // TGTypeI servo time constant Tc (s)
@@ -557,6 +565,8 @@ struct ExciterDynamicParams {
   double v_ref_pu{1.0};
   double ka{20.0};
   double ta_s{0.05};
+  double ta_over_tb{1.0};   // SEXS lead-lag ratio Ta/Tb
+  double tb_s{0.05};        // SEXS lead-lag denominator Tb (s)
   double te_s{0.40};       // IEEET1 exciter time constant (s)
   double kv{20.0};         // AVRSimple integrator gain
   double ke{1.0};          // AVRTypeI exciter gain denominator
@@ -726,7 +736,9 @@ struct GridFormingInverterParams {
   std::string canvas_type{"vsc"};
   std::string component_domain{"AC"};
   std::string source_type{"grid_forming_inverter"};
+  std::string model_name{"GridFormingNortonDroop"};
   std::vector<DynamicModelProfile> model_profiles;
+  GridFormingControlKind control_kind{GridFormingControlKind::Droop};
   double base_mva{100.0};
   double p_ref_mw{0.0};
   double q_ref_mvar{0.0};
@@ -738,6 +750,7 @@ struct GridFormingInverterParams {
   double p_droop_pu{0.01};
   double q_droop_pu{0.05};
   double power_filter_t_s{0.05};
+  double reactive_power_filter_t_s{0.05};
   double voltage_control_t_s{0.02};
   double voltage_kp{0.1};
   double voltage_ki{10.0};
@@ -754,6 +767,13 @@ struct GridFormingInverterParams {
   double vdc_ref_pu{1.0};
   double vdc_min_pu{0.20};
   double vdc_max_pu{2.00};
+  double vsm_ta_s{2.0};
+  double vsm_damping_kd{0.0};
+  double vsm_frequency_droop_kw{20.0};
+  double voc_k1{0.0033};
+  double voc_psi_rad{0.7853981633974483};
+  double voc_k2{0.0796};
+  bool reference_frame_locked{false};
   DCLinkMode dc_link_mode{DCLinkMode::ConstantDCVoltage};
   bool in_service{true};
 };
@@ -784,7 +804,7 @@ class GridFormingInverter : public DynamicDevice {
   [[nodiscard]] std::string type() const override { return params_.device_type; }
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
   [[nodiscard]] std::string modelStandard() const override { return "NERC"; }
-  [[nodiscard]] std::string modelName() const override { return "GridFormingNortonDroop"; }
+  [[nodiscard]] std::string modelName() const override { return params_.model_name; }
   [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
@@ -874,11 +894,14 @@ class GridFollowingInverter : public DynamicDevice {
 
 struct VSCConverterDynamicParams : public GridFollowingInverterParams {
   bool grid_forming{false};
+  std::string model_name{"GridFormingNortonDroop"};
+  GridFormingControlKind control_kind{GridFormingControlKind::Droop};
   double angle_ref_rad{0.0};
   double virtual_r_pu{0.0};
   double virtual_x_pu{0.10};
   double p_droop_pu{0.01};
   double q_droop_pu{0.05};
+  double reactive_power_filter_t_s{0.05};
   double voltage_control_t_s{0.02};
   double voltage_kp{0.1};
   double voltage_ki{10.0};
@@ -888,6 +911,13 @@ struct VSCConverterDynamicParams : public GridFollowingInverterParams {
   double pmin_mw{0.0};
   double vmax_internal_pu{1.30};
   double vmin_internal_pu{0.20};
+  double vsm_ta_s{2.0};
+  double vsm_damping_kd{0.0};
+  double vsm_frequency_droop_kw{20.0};
+  double voc_k1{0.0033};
+  double voc_psi_rad{0.7853981633974483};
+  double voc_k2{0.0796};
+  bool reference_frame_locked{false};
 };
 
 class VSCConverterDynamic : public DynamicDevice {
@@ -922,7 +952,7 @@ class VSCConverterDynamic : public DynamicDevice {
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
   [[nodiscard]] std::string modelStandard() const override { return "NERC"; }
   [[nodiscard]] std::string modelName() const override {
-    return params_.grid_forming ? "GridFormingNortonDroop" : "REGC_REEC_GFL_Subset";
+    return params_.grid_forming ? gfm_.modelName() : gfl_.modelName();
   }
   [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override {
     return params_.grid_forming ? gfm_.modelProfiles() : gfl_.modelProfiles();
@@ -932,6 +962,191 @@ class VSCConverterDynamic : public DynamicDevice {
   VSCConverterDynamicParams params_;
   GridFormingInverter gfm_;
   GridFollowingInverter gfl_;
+};
+
+struct PeriodicVariableSourceDynamicParams {
+  int component_index{0};
+  int bus{0};
+  int bus_pos{-1};
+  std::string label;
+  std::string canvas_type{"extGrid"};
+  std::string component_domain{"AC"};
+  std::string source_type{"periodic_variable_source"};
+  std::vector<DynamicModelProfile> model_profiles;
+  double base_mva{100.0};
+  double r_th_pu{0.0};
+  double x_th_pu{0.05};
+  double voltage_bias_pu{1.0};
+  double voltage_frequency_rad_s{0.0};
+  double voltage_sin_coeff_pu{0.0};
+  double voltage_cos_coeff_pu{0.0};
+  double angle_bias_rad{0.0};
+  double angle_frequency_rad_s{0.0};
+  double angle_sin_coeff_rad{0.0};
+  double angle_cos_coeff_rad{0.0};
+  double initial_voltage_pu{1.0};
+  double initial_angle_rad{0.0};
+  bool in_service{true};
+};
+
+class PeriodicVariableSourceDynamic : public DynamicDevice {
+ public:
+  explicit PeriodicVariableSourceDynamic(PeriodicVariableSourceDynamicParams params);
+
+  void assignStateIndices(int& offset) override;
+  void initializeFromPowerFlow(const PowerFlowResult& pf,
+                               DynamicState& x,
+                               NetworkState& y) override;
+  void computeDerivatives(double t,
+                          const DynamicState& x,
+                          const NetworkState& y,
+                          Eigen::Ref<Eigen::VectorXd> dxdt) const override;
+  void stamp(double t,
+             const DynamicState& x,
+             const NetworkState& y,
+             DynamicStamp& stamp) const override;
+  [[nodiscard]] std::string name() const override;
+  [[nodiscard]] std::string type() const override { return "PeriodicVariableSource"; }
+  [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] std::string modelStandard() const override { return "PowerSimulationsDynamics"; }
+  [[nodiscard]] std::string modelName() const override { return "PeriodicVariableSource"; }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
+
+ private:
+  PeriodicVariableSourceDynamicParams params_;
+  StateIndexRange range_;
+};
+
+struct CSVGN1DynamicParams {
+  int component_index{0};
+  int bus{0};
+  int bus_pos{-1};
+  std::string label;
+  std::string canvas_type{"sgen"};
+  std::string component_domain{"AC"};
+  std::string source_type{"csvgn1"};
+  std::vector<DynamicModelProfile> model_profiles;
+  double base_mva{100.0};
+  double q_ref_mvar{0.0};
+  double K{20.0};
+  double T1{0.0};
+  double T2{1.0};
+  double T3{0.154833};
+  double T4{1.0};
+  double T5{0.005167};
+  double Rmin{0.0};
+  double Vmax{1.0};
+  double Vmin{0.0};
+  double CBase{60.0};
+  double model_base_mva{500.0};
+  double v_ref_pu{0.0};
+  bool in_service{true};
+};
+
+class CSVGN1Dynamic : public DynamicDevice {
+ public:
+  explicit CSVGN1Dynamic(CSVGN1DynamicParams params);
+
+  void assignStateIndices(int& offset) override;
+  void initializeFromPowerFlow(const PowerFlowResult& pf,
+                               DynamicState& x,
+                               NetworkState& y) override;
+  bool trimToNetworkEquilibrium(DynamicState& x,
+                                NetworkState& y) override;
+  void computeDerivatives(double t,
+                          const DynamicState& x,
+                          const NetworkState& y,
+                          Eigen::Ref<Eigen::VectorXd> dxdt) const override;
+  void stamp(double t,
+             const DynamicState& x,
+             const NetworkState& y,
+             DynamicStamp& stamp) const override;
+  [[nodiscard]] std::string name() const override;
+  [[nodiscard]] std::string type() const override { return "CSVGN1"; }
+  [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] std::string modelStandard() const override { return "PSS/E"; }
+  [[nodiscard]] std::string modelName() const override { return "CSVGN1"; }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
+
+ private:
+  [[nodiscard]] double susceptancePu(const DynamicState& x) const;
+
+  CSVGN1DynamicParams params_;
+  StateIndexRange range_;
+};
+
+struct DERAADynamicParams {
+  int component_index{0};
+  int bus{0};
+  int bus_pos{-1};
+  std::string label;
+  std::string canvas_type{"sgen"};
+  std::string component_domain{"AC"};
+  std::string source_type{"dera_a"};
+  std::vector<DynamicModelProfile> model_profiles;
+  double base_mva{100.0};
+  double model_base_mva{100.0};
+  double p_ref_mw{0.0};
+  double q_ref_mvar{0.0};
+  double v_ref_pu{1.0};
+  double pf_angle_ref_rad{0.0};
+  int pf_flag{1};
+  int freq_flag{0};
+  double T_rv{0.02};
+  double Trf{0.02};
+  double dbd1{-99.0};
+  double dbd2{99.0};
+  double K_qv{5.0};
+  double Tp{0.02};
+  double T_iq{0.02};
+  double Tg{0.02};
+  double Tv{0.02};
+  double Tpord{0.02};
+  double Kpg{0.1};
+  double Kig{10.0};
+  double I_max{1.2};
+  double Iq_min{-1.0};
+  double Iq_max{1.0};
+  double Ip_min{0.0};
+  double Ip_max{1.1};
+  double rr_pwr{99.0};
+  bool in_service{true};
+};
+
+class DERAADynamic : public DynamicDevice {
+ public:
+  explicit DERAADynamic(DERAADynamicParams params);
+
+  void assignStateIndices(int& offset) override;
+  void initializeFromPowerFlow(const PowerFlowResult& pf,
+                               DynamicState& x,
+                               NetworkState& y) override;
+  void computeDerivatives(double t,
+                          const DynamicState& x,
+                          const NetworkState& y,
+                          Eigen::Ref<Eigen::VectorXd> dxdt) const override;
+  void stamp(double t,
+             const DynamicState& x,
+             const NetworkState& y,
+             DynamicStamp& stamp) const override;
+  [[nodiscard]] std::string name() const override;
+  [[nodiscard]] std::string type() const override { return "AggregateDistributedGenerationA"; }
+  [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] std::string modelStandard() const override { return "PSS/E"; }
+  [[nodiscard]] std::string modelName() const override { return "AggregateDistributedGenerationA"; }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
+
+ private:
+  [[nodiscard]] std::pair<double, double> currentDq(const DynamicState& x) const;
+
+  DERAADynamicParams params_;
+  StateIndexRange range_;
 };
 
 struct DCDCConverterDynamicParams {

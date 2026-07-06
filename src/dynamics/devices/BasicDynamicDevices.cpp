@@ -440,6 +440,47 @@ std::pair<double, double> lead_lag_block(double u,
   return {x + k * ratio * u, (k * (1.0 - ratio) * u - x) / denom};
 }
 
+struct SecondOrderLeadLagNonWindup {
+  double output{0.0};
+  double dx1{0.0};
+  double dx2{0.0};
+};
+
+SecondOrderLeadLagNonWindup lead_lag_2nd_nonwindup(double u,
+                                                   double x1,
+                                                   double x2,
+                                                   double t1,
+                                                   double t2,
+                                                   double t3,
+                                                   double t4,
+                                                   double y_min,
+                                                   double y_max) {
+  const double denom = control_time(t2);
+  const double t4_over_t2 = std::abs(t2) < kMinTimeConstant ? 0.0 : t4 / t2;
+  const double y = t4_over_t2 * u +
+                   (t3 - t1 * t4_over_t2) * x1 +
+                   (1.0 - t4_over_t2) * x2;
+  const double y_sat = std::clamp(y, y_min, y_max);
+  const double active = (y_min < y && y < y_max) ? 1.0 : 0.0;
+  return {y_sat, active * (u - t1 * x1 - x2) / denom, active * x1};
+}
+
+std::pair<double, double> low_pass_nonwindup(double u,
+                                             double y,
+                                             double k,
+                                             double t,
+                                             double y_min,
+                                             double y_max) {
+  const double dydt_scaled = k * u - y;
+  const double active =
+      ((y >= y_max && dydt_scaled > 0.0) ||
+       (y <= y_min && dydt_scaled < 0.0))
+          ? 0.0
+          : 1.0;
+  return {std::clamp(y, y_min, y_max),
+          active * dydt_scaled / control_time(t)};
+}
+
 double avr_saturation(double ae, double be, double vf) {
   if (ae == 0.0 && be == 0.0) return 0.0;
   return ae * std::exp(be * std::abs(vf));
@@ -3381,7 +3422,8 @@ static double pss_vs_output(const PSSOutputLink& L, const DynamicState& x) {
 Governor::Governor(GovernorDynamicParams params) : params_(std::move(params)) {}
 
 void Governor::assignStateIndices(int& offset) {
-  const int count = params_.model == GovernorModel::TGTypeI ? 3 : 1;
+  const int count = params_.model == GovernorModel::TGTypeI ? 3
+                    : (params_.model == GovernorModel::TGOV1 ? 2 : 1);
   range_ = {offset, count};  // machine owns the published tau_m/pm slot
   offset += range_.size;
 }
@@ -3395,7 +3437,9 @@ void Governor::initializeFromPowerFlow(const PowerFlowResult&, DynamicState& x, 
     const int pm_idx = machine_->pmIndex();
     if (pm_idx >= 0 && pm_idx < x.x.size()) {
       p0 = x.x[pm_idx];
-      params_.p_ref_mw = p0 * safe_base(params_.base_mva);
+      params_.p_ref_mw =
+          (params_.model == GovernorModel::TGOV1 ? params_.droop_r * p0 : p0) *
+          safe_base(params_.base_mva);
     }
   }
   if (params_.model == GovernorModel::TGTypeI && range_.size >= 3) {
@@ -3406,6 +3450,10 @@ void Governor::initializeFromPowerFlow(const PowerFlowResult&, DynamicState& x, 
     x.x[state_index(range_, 0)] = p0;
     x.x[state_index(range_, 1)] = (1.0 - t3 / tc) * p0;
     x.x[state_index(range_, 2)] = (1.0 - t4 / t5) * p0;
+  } else if (params_.model == GovernorModel::TGOV1 && range_.size >= 2) {
+    const double t3 = control_time(params_.turbine_t_s);
+    x.x[state_index(range_, 0)] = p0;
+    x.x[state_index(range_, 1)] = (1.0 - params_.t2_s / t3) * p0;
   } else {
     x.x[range_.offset] =
         params_.model == GovernorModel::TGTypeII ? 0.0 : p0;
@@ -3419,7 +3467,9 @@ bool Governor::trimToNetworkEquilibrium(DynamicState& x, NetworkState&) {
     const int pm_idx = machine_->pmIndex();
     if (pm_idx >= 0 && pm_idx < x.x.size()) {
       p0 = x.x[pm_idx];
-      params_.p_ref_mw = p0 * safe_base(params_.base_mva);
+      params_.p_ref_mw =
+          (params_.model == GovernorModel::TGOV1 ? params_.droop_r * p0 : p0) *
+          safe_base(params_.base_mva);
     }
   }
   bool changed = false;
@@ -3433,6 +3483,13 @@ bool Governor::trimToNetworkEquilibrium(DynamicState& x, NetworkState&) {
                              (1.0 - t3 / tc) * p0) || changed;
     changed = set_if_changed(x.x, state_index(range_, 2),
                              (1.0 - t4 / t5) * p0) || changed;
+    return changed;
+  }
+  if (params_.model == GovernorModel::TGOV1 && range_.size >= 2) {
+    const double t3 = control_time(params_.turbine_t_s);
+    changed = set_if_changed(x.x, state_index(range_, 0), p0) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 1),
+                             (1.0 - params_.t2_s / t3) * p0) || changed;
     return changed;
   }
   return set_if_changed(x.x, range_.offset,
@@ -3460,6 +3517,30 @@ void Governor::computeDerivatives(double,
     const int pm_idx = machine_->pmIndex();
     const double omega = (omega_idx >= 0 && omega_idx < x.x.size()) ? x.x[omega_idx] : 1.0;
     const double droop = params_.droop_r > 1e-9 ? params_.droop_r : 0.05;
+    if (params_.model == GovernorModel::TGOV1 && range_.size >= 2) {
+      const double xg1 = x.x[state_index(range_, 0)];
+      const double xg2 = x.x[state_index(range_, 1)];
+      const double ts = control_time(params_.t_s);
+      const double t3 = control_time(params_.turbine_t_s);
+      const double t2_over_t3 = params_.t2_s / t3;
+      const double ref_in = (pref - (omega - 1.0)) / droop;
+      const double xg1_sat = std::clamp(xg1, pmin, pmax);
+      double dxg1 = (ref_in - xg1) / ts;
+      if ((xg1 >= pmax && dxg1 > 0.0) || (xg1 <= pmin && dxg1 < 0.0)) {
+        dxg1 = 0.0;
+      }
+      const double dxg2 = ((1.0 - t2_over_t3) * xg1_sat - xg2) / t3;
+      const double tau_m =
+          (xg2 + t2_over_t3 * xg1_sat - params_.damping_d_t * (omega - 1.0)) /
+          std::max(kMinVoltage, std::abs(omega));
+      dxdt[state_index(range_, 0)] = dxg1;
+      dxdt[state_index(range_, 1)] = dxg2;
+      if (pm_idx >= 0 && pm_idx < x.x.size()) {
+        const double dtau_est = dxg2 + t2_over_t3 * dxg1;
+        dxdt[pm_idx] = dtau_est + (tau_m - x.x[pm_idx]) / t3;
+      }
+      return;
+    }
     const double valve_cmd = std::clamp(pref - (omega - 1.0) / droop, pmin, pmax);
     if (params_.model == GovernorModel::TGTypeI && range_.size >= 3) {
       const double xg1 = x.x[state_index(range_, 0)];
@@ -3543,6 +3624,11 @@ DynamicDeviceOutput Governor::output(const DynamicState& x, const NetworkState&)
   out.values["attached"] = machine_ != nullptr ? 1.0 : 0.0;
   if (!range_.empty() && range_.offset < x.x.size()) {
     out.values["valve_pu"] = x.x[range_.offset];
+    if (params_.model == GovernorModel::TGOV1 && range_.size >= 2) {
+      out.values["lead_lag_state_pu"] = x.x[state_index(range_, 1)];
+      out.values["t2_s"] = params_.t2_s;
+      out.values["d_t"] = params_.damping_d_t;
+    }
     if (params_.model == GovernorModel::TGTypeI && range_.size >= 3) {
       out.values["servo_state_pu"] = x.x[state_index(range_, 1)];
       out.values["reheat_state_pu"] = x.x[state_index(range_, 2)];
@@ -3564,10 +3650,12 @@ Exciter::Exciter(ExciterDynamicParams params) : params_(std::move(params)) {}
 void Exciter::assignStateIndices(int& offset) {
   int count = 1;
   if (machine_ != nullptr) {
-    count = (params_.model == ExciterModel::AVRTypeI ||
+    count = params_.model == ExciterModel::SEXS
+                ? 1
+                : (params_.model == ExciterModel::AVRTypeI ||
              params_.model == ExciterModel::AVRTypeII)
-                ? 3
-                : 0;
+                      ? 3
+                      : 0;
   } else if (params_.model == ExciterModel::AVRTypeI ||
              params_.model == ExciterModel::AVRTypeII) {
     count = 4;
@@ -3594,7 +3682,13 @@ void Exciter::captureReference(const DynamicState& x, const NetworkState& y) {
     field0 = x.x[range_.offset];
   }
   field0_ = field0;
-  v_ref_captured_ = vt;  // hold the equilibrium terminal voltage as the AVR setpoint
+  if (params_.model == ExciterModel::SEXS) {
+    const double k = std::max(1e-9, std::abs(params_.ka));
+    v_ref_captured_ = vt + field0 / k;
+  } else {
+    // Hold the equilibrium terminal voltage as the AVR setpoint for compact AVRs.
+    v_ref_captured_ = vt;
+  }
   captured_ = true;
 }
 
@@ -3617,6 +3711,14 @@ void Exciter::initializeFromPowerFlow(const PowerFlowResult& pf, DynamicState& x
   }
   field0_ = field0;
   v_ref_captured_ = vt;
+  if (params_.model == ExciterModel::SEXS) {
+    const double k = std::max(1e-9, std::abs(params_.ka));
+    const double vin0 = field0 / k;
+    v_ref_captured_ = vt + vin0;
+    if (machine_ != nullptr && machine_->valid && !range_.empty()) {
+      x.x[range_.offset] = (1.0 - params_.ta_over_tb) * vin0;
+    }
+  }
   if (params_.model == ExciterModel::AVRTypeI ||
       params_.model == ExciterModel::AVRTypeII) {
     const int base = range_.offset;
@@ -3661,6 +3763,17 @@ void Exciter::initializeFromPowerFlow(const PowerFlowResult& pf, DynamicState& x
 bool Exciter::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
   if (!params_.in_service) return false;
   captureReference(x, y);  // re-anchor to the network-solved equilibrium
+  if (params_.model == ExciterModel::SEXS && machine_ != nullptr &&
+      machine_->valid && !range_.empty()) {
+    const int f = machine_->fieldIndex();
+    const double vf = (f >= 0 && f < x.x.size()) ? x.x[f] : field0_;
+    const double k = std::max(1e-9, std::abs(params_.ka));
+    const double vin0 = vf / k;
+    v_ref_captured_ = terminalVoltage(y) + vin0;
+    captured_ = true;
+    return set_if_changed(x.x, range_.offset,
+                          (1.0 - params_.ta_over_tb) * vin0);
+  }
   if (params_.model == ExciterModel::AVRTypeI ||
       params_.model == ExciterModel::AVRTypeII) {
     const bool attached = machine_ != nullptr && machine_->valid;
@@ -3731,6 +3844,19 @@ void Exciter::computeDerivatives(double,
     // Ka*(Vref - Vt + Vs). Drives the machine-owned field state through a lag.
     const int f = machine_->fieldIndex();
     if (f < 0 || f >= x.x.size()) return;
+    if (params_.model == ExciterModel::SEXS && !range_.empty()) {
+      const double vf = x.x[f];
+      const double vr = x.x[range_.offset];
+      const double tb = control_time(params_.tb_s);
+      const double ta = params_.ta_over_tb * tb;
+      const auto [v_ll, dvr] = lead_lag_block(vref + vs - vt, vr, 1.0, ta, tb);
+      const double efd_cmd = std::clamp(params_.ka * v_ll,
+                                        params_.efd_min_pu,
+                                        params_.efd_max_pu);
+      dxdt[range_.offset] = dvr;
+      dxdt[f] = (efd_cmd - vf) / control_time(params_.te_s);
+      return;
+    }
     if (params_.model == ExciterModel::AVRSimple) {
       dxdt[f] = params_.kv * (vref - vt);
       return;
@@ -3861,6 +3987,13 @@ DynamicDeviceOutput Exciter::output(const DynamicState& x, const NetworkState& y
     efd = x.x[range_.offset];
   }
   out.values["efd_pu"] = efd;
+  if (params_.model == ExciterModel::SEXS && !range_.empty() &&
+      range_.offset < x.x.size()) {
+    out.values["vr_pu"] = x.x[range_.offset];
+    out.values["ta_over_tb"] = params_.ta_over_tb;
+    out.values["tb_s"] = params_.tb_s;
+    out.values["te_s"] = params_.te_s;
+  }
   add_voltage_metrics(out, y, machine_ != nullptr && machine_->valid
                                   ? machine_->generatorBus().bus_pos
                                   : params_.bus_pos);
@@ -4080,7 +4213,10 @@ void GridFormingInverter::initializeFromPowerFlow(const PowerFlowResult& pf,
   x.x[state_index(range_, 1)] = std::clamp(params_.v_ref_pu,
                                            params_.vmin_internal_pu,
                                            params_.vmax_internal_pu);
-  x.x[state_index(range_, 2)] = params_.p_ref_mw / safe_base(params_.base_mva);
+  x.x[state_index(range_, 2)] =
+      params_.control_kind == GridFormingControlKind::VirtualInertia
+          ? 1.0
+          : params_.p_ref_mw / safe_base(params_.base_mva);
   x.x[state_index(range_, 3)] = params_.q_ref_mvar / safe_base(params_.base_mva);
   x.x[state_index(range_, 4)] = 0.0;
   x.x[state_index(range_, 5)] = 0.0;
@@ -4134,7 +4270,11 @@ bool GridFormingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkState
   bool changed = false;
   changed = set_if_changed(x.x, state_index(range_, 0), theta) || changed;
   changed = set_if_changed(x.x, state_index(range_, 1), e_mag) || changed;
-  changed = set_if_changed(x.x, state_index(range_, 2), p_ref) || changed;
+  changed = set_if_changed(x.x,
+                           state_index(range_, 2),
+                           params_.control_kind == GridFormingControlKind::VirtualInertia
+                               ? 1.0
+                               : p_ref) || changed;
   changed = set_if_changed(x.x, state_index(range_, 3), q_ref) || changed;
   changed = set_if_changed(x.x, state_index(range_, 4), finite_value(xi_v)) || changed;
   changed = set_if_changed(x.x, state_index(range_, 5), finite_value(xi_ol)) || changed;
@@ -4175,11 +4315,17 @@ void GridFormingInverter::computeDerivatives(double,
   const Complex s = average_complex_power(v, i);
   const double p = finite_value(s.real());
   const double q = finite_value(s.imag());
-  const double pf = x.x[state_index(range_, 2)];
+  const double state2 = x.x[state_index(range_, 2)];
+  const double pf =
+      params_.control_kind == GridFormingControlKind::VirtualInertia ? p : state2;
   const double qf = x.x[state_index(range_, 3)];
   const double xi_v = x.x[state_index(range_, 4)];
   const double xi_ol = x.x[state_index(range_, 5)];
   const double t_filter = std::max(kMinTimeConstant, params_.power_filter_t_s);
+  const double tq_filter =
+      std::max(kMinTimeConstant,
+               params_.reactive_power_filter_t_s > 0.0 ? params_.reactive_power_filter_t_s
+                                                        : params_.power_filter_t_s);
   const double t_voltage = std::max(kMinTimeConstant, params_.voltage_control_t_s);
   const double p_ref = params_.p_ref_mw / safe_base(params_.base_mva);
   const double q_ref = params_.q_ref_mvar / safe_base(params_.base_mva);
@@ -4194,9 +4340,6 @@ void GridFormingInverter::computeDerivatives(double,
   const double overload = e_pmax - e_pmin;
   const double overload_correction =
       params_.overload_kp * overload + params_.overload_ki * xi_ol;
-  const double angle_rate =
-      -kTwoPi * params_.frequency_hz * params_.p_droop_pu * (pf - p_ref) -
-      overload_correction;
 
   const double vt = avg_voltage_mag(v);
   const double e_droop = params_.v_ref_pu - params_.q_droop_pu * (qf - q_ref);
@@ -4212,12 +4355,58 @@ void GridFormingInverter::computeDerivatives(double,
   }
   e_cmd = std::clamp(e_cmd, params_.vmin_internal_pu, params_.vmax_internal_pu);
 
-  dxdt[state_index(range_, 0)] = angle_rate;
-  dxdt[state_index(range_, 1)] = (e_cmd - e_mag) / t_voltage;
-  dxdt[state_index(range_, 2)] = (p - pf) / t_filter;
-  dxdt[state_index(range_, 3)] = (q - qf) / t_filter;
-  dxdt[state_index(range_, 4)] = voltage_error;
-  dxdt[state_index(range_, 5)] = overload;
+  if (params_.control_kind == GridFormingControlKind::VirtualInertia) {
+    const double omega = state2;
+    const double ta = std::max(kMinTimeConstant, params_.vsm_ta_s);
+    const double omega_ref = 1.0;
+    const double omega_pll = 1.0;
+    dxdt[state_index(range_, 0)] =
+        params_.reference_frame_locked
+            ? 0.0
+            : kTwoPi * params_.frequency_hz * (omega - 1.0);
+    dxdt[state_index(range_, 1)] = (e_cmd - e_mag) / t_voltage;
+    dxdt[state_index(range_, 2)] =
+        (p_ref - p -
+         params_.vsm_damping_kd * (omega - omega_pll) -
+         params_.vsm_frequency_droop_kw * (omega - omega_ref)) / ta;
+    dxdt[state_index(range_, 3)] = (q - qf) / tq_filter;
+    dxdt[state_index(range_, 4)] = voltage_error;
+    dxdt[state_index(range_, 5)] = overload;
+  } else if (params_.control_kind == GridFormingControlKind::VirtualOscillator) {
+    const double e_safe = std::max(kMinVoltage, std::abs(e_mag));
+    const double gamma = params_.voc_psi_rad - kPi / 2.0;
+    const double p_error = p_ref - p;
+    const double q_error = q_ref - q;
+    const double omega_oc =
+        1.0 +
+        params_.voc_k1 / (e_safe * e_safe) *
+            (std::cos(gamma) * p_error + std::sin(gamma) * q_error);
+    dxdt[state_index(range_, 0)] =
+        params_.reference_frame_locked
+            ? 0.0
+            : kTwoPi * params_.frequency_hz * (omega_oc - 1.0);
+    dxdt[state_index(range_, 1)] =
+        kTwoPi * params_.frequency_hz *
+        (params_.voc_k1 / e_safe *
+             (-std::sin(gamma) * p_error + std::cos(gamma) * q_error) +
+         params_.voc_k2 * (params_.v_ref_pu * params_.v_ref_pu - e_safe * e_safe) *
+             e_safe);
+    dxdt[state_index(range_, 2)] = (p - state2) / t_filter;
+    dxdt[state_index(range_, 3)] = (q - qf) / tq_filter;
+    dxdt[state_index(range_, 4)] = 0.0;
+    dxdt[state_index(range_, 5)] = 0.0;
+  } else {
+    const double angle_rate =
+        kTwoPi * params_.frequency_hz * params_.p_droop_pu * (p_ref - pf) -
+        overload_correction;
+    dxdt[state_index(range_, 0)] =
+        params_.reference_frame_locked ? 0.0 : angle_rate;
+    dxdt[state_index(range_, 1)] = (e_cmd - e_mag) / t_voltage;
+    dxdt[state_index(range_, 2)] = (p - pf) / t_filter;
+    dxdt[state_index(range_, 3)] = (q - qf) / tq_filter;
+    dxdt[state_index(range_, 4)] = voltage_error;
+    dxdt[state_index(range_, 5)] = overload;
+  }
   if (range_.size > 6) {
     const double vdc_link = x.x[state_index(range_, 6)];
     const double pdc_net = dc_link_network_power_pu(y,
@@ -4303,7 +4492,10 @@ DynamicDeviceOutput GridFormingInverter::output(const DynamicState& x,
   if (!range_.empty() && state_index(range_, 5) < x.x.size()) {
     const double theta = x.x[state_index(range_, 0)];
     const double e_mag = x.x[state_index(range_, 1)];
-    const double pf = x.x[state_index(range_, 2)];
+    const double state2 = x.x[state_index(range_, 2)];
+    const bool is_vsm = params_.control_kind == GridFormingControlKind::VirtualInertia;
+    const bool is_voc = params_.control_kind == GridFormingControlKind::VirtualOscillator;
+    const double pf = is_vsm ? 0.0 : state2;
     const double qf = x.x[state_index(range_, 3)];
     const Complex z(params_.virtual_r_pu, std::max(1e-5, params_.virtual_x_pu));
     const Complex yv = Complex(1.0, 0.0) / z;
@@ -4322,15 +4514,35 @@ DynamicDeviceOutput GridFormingInverter::output(const DynamicState& x,
         (std::isfinite(pmax) ? std::max(0.0, pf - pmax) : 0.0) -
         (std::isfinite(pmin) ? std::max(0.0, pmin - pf) : 0.0);
     out.values["angle_rad"] = theta;
+    out.values["theta_oc_rad"] = theta;
     out.values["e_internal_pu"] = e_mag;
+    out.values["E_oc_pu"] = e_mag;
     out.values["p_mw"] = s.real() * safe_base(params_.base_mva);
     out.values["q_mvar"] = s.imag() * safe_base(params_.base_mva);
-    out.values["p_filtered_mw"] = pf * safe_base(params_.base_mva);
+    out.values["p_filtered_mw"] =
+        (is_vsm ? s.real() : pf) * safe_base(params_.base_mva);
     out.values["q_filtered_mvar"] = qf * safe_base(params_.base_mva);
+    out.values["pm_pu"] = is_vsm ? s.real() : pf;
+    out.values["qm_pu"] = qf;
     out.values["p_ref_mw"] = params_.p_ref_mw;
     out.values["q_ref_mvar"] = params_.q_ref_mvar;
-    out.values["frequency_hz"] =
-        params_.frequency_hz * (1.0 - params_.p_droop_pu * (pf - p_ref));
+    double omega_oc = 1.0 - params_.p_droop_pu * (pf - p_ref);
+    if (is_vsm) {
+      omega_oc = state2;
+    } else if (is_voc) {
+      const double e_safe = std::max(kMinVoltage, std::abs(e_mag));
+      const double gamma = params_.voc_psi_rad - kPi / 2.0;
+      omega_oc =
+          1.0 +
+          params_.voc_k1 / (e_safe * e_safe) *
+              (std::cos(gamma) * (p_ref - s.real()) +
+               std::sin(gamma) *
+                   (params_.q_ref_mvar / safe_base(params_.base_mva) - s.imag()));
+    }
+    out.values["omega_oc_pu"] = omega_oc;
+    out.values["frequency_hz"] = params_.frequency_hz * omega_oc;
+    out.values["control_mode_id"] =
+        is_vsm ? 2.0 : (is_voc ? 3.0 : 1.0);
     out.values["i_rms_pu"] =
         std::sqrt((std::norm(i[0]) + std::norm(i[1]) + std::norm(i[2])) / 3.0);
     out.values["current_limit_active"] =
@@ -4347,7 +4559,7 @@ DynamicDeviceOutput GridFormingInverter::output(const DynamicState& x,
     inner.set(InverterInnerVar::ConverterVoltageImag, e_pos.imag());
     inner.set(InverterInnerVar::FilterVoltageReal, v_pos.real());
     inner.set(InverterInnerVar::FilterVoltageImag, v_pos.imag());
-    inner.set(InverterInnerVar::FilteredActivePower, pf);
+    inner.set(InverterInnerVar::FilteredActivePower, is_vsm ? s.real() : pf);
     inner.set(InverterInnerVar::FilteredReactivePower, qf);
     inner.set(InverterInnerVar::FilterCurrentReal, i_pos.real());
     inner.set(InverterInnerVar::FilterCurrentImag, i_pos.imag());
@@ -4775,7 +4987,9 @@ GridFormingInverterParams make_gfm_params(const VSCConverterDynamicParams& param
   gfm.canvas_type = params.canvas_type;
   gfm.component_domain = params.component_domain;
   gfm.source_type = "vsc_grid_forming";
+  gfm.model_name = params.model_name;
   gfm.model_profiles = params.model_profiles;
+  gfm.control_kind = params.control_kind;
   gfm.base_mva = params.base_mva;
   gfm.p_ref_mw = params.p_ref_mw;
   gfm.q_ref_mvar = params.q_ref_mvar;
@@ -4787,6 +5001,7 @@ GridFormingInverterParams make_gfm_params(const VSCConverterDynamicParams& param
   gfm.p_droop_pu = params.p_droop_pu;
   gfm.q_droop_pu = params.q_droop_pu;
   gfm.power_filter_t_s = params.power_filter_t_s;
+  gfm.reactive_power_filter_t_s = params.reactive_power_filter_t_s;
   gfm.voltage_control_t_s = params.voltage_control_t_s;
   gfm.voltage_kp = params.voltage_kp;
   gfm.voltage_ki = params.voltage_ki;
@@ -4803,6 +5018,13 @@ GridFormingInverterParams make_gfm_params(const VSCConverterDynamicParams& param
   gfm.vdc_ref_pu = params.vdc_ref_pu;
   gfm.vdc_min_pu = params.vdc_min_pu;
   gfm.vdc_max_pu = params.vdc_max_pu;
+  gfm.vsm_ta_s = params.vsm_ta_s;
+  gfm.vsm_damping_kd = params.vsm_damping_kd;
+  gfm.vsm_frequency_droop_kw = params.vsm_frequency_droop_kw;
+  gfm.voc_k1 = params.voc_k1;
+  gfm.voc_psi_rad = params.voc_psi_rad;
+  gfm.voc_k2 = params.voc_k2;
+  gfm.reference_frame_locked = params.reference_frame_locked;
   gfm.dc_link_mode = params.dc_link_mode;
   gfm.in_service = params.in_service;
   return gfm;
@@ -4887,6 +5109,415 @@ DynamicDeviceOutput VSCConverterDynamic::output(const DynamicState& x,
 std::string VSCConverterDynamic::name() const {
   return params_.label.empty() ? type() + " " + std::to_string(params_.component_index)
                                : params_.label;
+}
+
+PeriodicVariableSourceDynamic::PeriodicVariableSourceDynamic(
+    PeriodicVariableSourceDynamicParams params)
+    : params_(std::move(params)) {}
+
+void PeriodicVariableSourceDynamic::assignStateIndices(int& offset) {
+  range_ = {offset, 2};
+  offset += range_.size;
+}
+
+void PeriodicVariableSourceDynamic::initializeFromPowerFlow(const PowerFlowResult&,
+                                                           DynamicState& x,
+                                                           NetworkState& y) {
+  double angle = params_.angle_bias_rad + params_.angle_cos_coeff_rad;
+  double voltage = params_.voltage_bias_pu + params_.voltage_cos_coeff_pu;
+  if (params_.bus_pos >= 0 && 3 * params_.bus_pos < y.Vac_abc.size()) {
+    const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+    voltage = std::abs(v);
+    angle = std::arg(v);
+  }
+  params_.initial_voltage_pu = voltage;
+  params_.initial_angle_rad = angle;
+  x.x[state_index(range_, 0)] = std::max(kMinVoltage, voltage);
+  x.x[state_index(range_, 1)] = angle;
+}
+
+namespace {
+
+double periodic_prescribed_value(double initial,
+                                 double t,
+                                 double frequency,
+                                 double sin_coeff,
+                                 double cos_coeff) {
+  return initial + sin_coeff * std::sin(frequency * t) +
+         cos_coeff * (std::cos(frequency * t) - 1.0);
+}
+
+}  // namespace
+
+void PeriodicVariableSourceDynamic::computeDerivatives(double t,
+                                                       const DynamicState&,
+                                                       const NetworkState&,
+                                                       Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (!params_.in_service || range_.empty()) return;
+  const double wv = params_.voltage_frequency_rad_s;
+  const double wa = params_.angle_frequency_rad_s;
+  dxdt[state_index(range_, 0)] =
+      t <= 0.0
+          ? 0.0
+          : wv * (params_.voltage_sin_coeff_pu * std::cos(wv * t) -
+                  params_.voltage_cos_coeff_pu * std::sin(wv * t));
+  dxdt[state_index(range_, 1)] =
+      t <= 0.0
+          ? 0.0
+          : wa * (params_.angle_sin_coeff_rad * std::cos(wa * t) -
+                  params_.angle_cos_coeff_rad * std::sin(wa * t));
+}
+
+void PeriodicVariableSourceDynamic::stamp(double,
+                                          const DynamicState& x,
+                                          const NetworkState&,
+                                          DynamicStamp& stamp) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  const Complex z(params_.r_th_pu, std::max(1e-5, params_.x_th_pu));
+  const Complex yv = Complex(1.0, 0.0) / z;
+  const double vt = periodic_prescribed_value(params_.initial_voltage_pu,
+                                              x.time_s,
+                                              params_.voltage_frequency_rad_s,
+                                              params_.voltage_sin_coeff_pu,
+                                              params_.voltage_cos_coeff_pu);
+  const double theta =
+      periodic_prescribed_value(params_.initial_angle_rad,
+                                x.time_s,
+                                params_.angle_frequency_rad_s,
+                                params_.angle_sin_coeff_rad,
+                                params_.angle_cos_coeff_rad) +
+      (vt < 0.0 ? kPi : 0.0);
+  const Eigen::Vector3cd e =
+      balanced_phasors(std::abs(vt), theta);
+  add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(yv));
+  add_balanced_current(stamp, params_.bus_pos, yv * e);
+}
+
+std::string PeriodicVariableSourceDynamic::name() const {
+  return params_.label.empty() ? "PeriodicVariableSource " +
+                                     std::to_string(params_.component_index)
+                               : params_.label;
+}
+
+std::vector<DynamicModelProfile> PeriodicVariableSourceDynamic::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
+}
+
+DynamicDeviceOutput PeriodicVariableSourceDynamic::output(const DynamicState& x,
+                                                          const NetworkState& y) const {
+  DynamicDeviceOutput out = make_output_base(*this,
+                                             params_.bus,
+                                             params_.canvas_type,
+                                             params_.component_domain,
+                                             params_.source_type);
+  if (!range_.empty()) {
+    const double vt = periodic_prescribed_value(params_.initial_voltage_pu,
+                                                x.time_s,
+                                                params_.voltage_frequency_rad_s,
+                                                params_.voltage_sin_coeff_pu,
+                                                params_.voltage_cos_coeff_pu);
+    const double theta = periodic_prescribed_value(params_.initial_angle_rad,
+                                                   x.time_s,
+                                                   params_.angle_frequency_rad_s,
+                                                   params_.angle_sin_coeff_rad,
+                                                   params_.angle_cos_coeff_rad);
+    const Complex z(params_.r_th_pu, std::max(1e-5, params_.x_th_pu));
+    const Complex yv = Complex(1.0, 0.0) / z;
+    const Complex e = std::polar(std::abs(vt), theta + (vt < 0.0 ? kPi : 0.0));
+    const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+    const Complex i = yv * (e - v);
+    out.values["Vt"] = vt;
+    out.values["theta_rad"] = theta;
+    out.values["p_mw"] = (v * std::conj(i)).real() * safe_base(params_.base_mva);
+    out.values["q_mvar"] = (v * std::conj(i)).imag() * safe_base(params_.base_mva);
+    out.values["current_real_pu"] = i.real();
+    out.values["current_imag_pu"] = i.imag();
+  }
+  add_voltage_metrics(out, y, params_.bus_pos, -1);
+  return out;
+}
+
+CSVGN1Dynamic::CSVGN1Dynamic(CSVGN1DynamicParams params)
+    : params_(std::move(params)) {}
+
+void CSVGN1Dynamic::assignStateIndices(int& offset) {
+  range_ = {offset, 3};
+  offset += range_.size;
+}
+
+void CSVGN1Dynamic::initializeFromPowerFlow(const PowerFlowResult&,
+                                            DynamicState& x,
+                                            NetworkState& y) {
+  if (range_.empty()) return;
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const double vm = std::max(kMinVoltage, std::abs(v));
+  const double q_pu = params_.q_ref_mvar / safe_base(params_.base_mva);
+  const double yq = q_pu / (vm * vm);
+  if (params_.v_ref_pu <= 0.0 && params_.K > 1e-9) {
+    params_.v_ref_pu =
+        vm - (params_.CBase / safe_base(params_.base_mva) - yq) *
+                 safe_base(params_.base_mva) /
+                 std::max(1e-9, params_.K * params_.model_base_mva);
+  }
+  const double thy =
+      params_.K * (vm - params_.v_ref_pu);
+  x.x[state_index(range_, 0)] = thy;
+  x.x[state_index(range_, 1)] = 0.0;
+  x.x[state_index(range_, 2)] = thy;
+}
+
+bool CSVGN1Dynamic::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
+  params_.v_ref_pu = 0.0;
+  initializeFromPowerFlow(PowerFlowResult{}, x, y);
+  return true;
+}
+
+void CSVGN1Dynamic::computeDerivatives(double,
+                                       const DynamicState& x,
+                                       const NetworkState& y,
+                                       Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (!params_.in_service || range_.empty()) return;
+  const double vm =
+      std::max(kMinVoltage, std::abs(positive_sequence_voltage(bus_voltage(y, params_.bus_pos))));
+  const double input = params_.K * (vm - params_.v_ref_pu);
+  const double vr1 = x.x[state_index(range_, 1)];
+  const double vr2 = x.x[state_index(range_, 2)];
+  const SecondOrderLeadLagNonWindup regulator =
+      lead_lag_2nd_nonwindup(input,
+                             vr1,
+                             vr2,
+                             params_.T3 + params_.T4,
+                             params_.T3 * params_.T4,
+                             params_.T1 + params_.T2,
+                             params_.T1 * params_.T2,
+                             params_.Vmin,
+                             params_.Vmax);
+  const auto [thy_sat, dthy] =
+      low_pass_nonwindup(regulator.output,
+                         x.x[state_index(range_, 0)],
+                         1.0,
+                         params_.T5,
+                         params_.Rmin / std::max(1e-9, params_.model_base_mva),
+                         1.0);
+  (void)thy_sat;
+  dxdt[state_index(range_, 0)] = dthy;
+  dxdt[state_index(range_, 1)] = regulator.dx1;
+  dxdt[state_index(range_, 2)] = regulator.dx2;
+}
+
+double CSVGN1Dynamic::susceptancePu(const DynamicState& x) const {
+  const double thy = range_.empty() ? 0.0 : x.x[state_index(range_, 0)];
+  return params_.CBase / safe_base(params_.base_mva) -
+         thy * params_.model_base_mva / safe_base(params_.base_mva);
+}
+
+void CSVGN1Dynamic::stamp(double,
+                          const DynamicState& x,
+                          const NetworkState& y,
+                          DynamicStamp& stamp) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  const double b = susceptancePu(x);
+  const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
+  Eigen::Vector3cd current;
+  for (int phase = 0; phase < 3; ++phase) current[phase] = Complex(0.0, -b) * v[phase];
+  add_balanced_current(stamp, params_.bus_pos, current);
+}
+
+std::string CSVGN1Dynamic::name() const {
+  return params_.label.empty() ? "CSVGN1 " + std::to_string(params_.component_index)
+                               : params_.label;
+}
+
+std::vector<DynamicModelProfile> CSVGN1Dynamic::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
+}
+
+DynamicDeviceOutput CSVGN1Dynamic::output(const DynamicState& x,
+                                          const NetworkState& y) const {
+  DynamicDeviceOutput out = make_output_base(*this,
+                                             params_.bus,
+                                             params_.canvas_type,
+                                             params_.component_domain,
+                                             params_.source_type);
+  const double b = susceptancePu(x);
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const Complex i = Complex(0.0, -b) * v;
+  out.values["thyristor_state"] = range_.empty() ? 0.0 : x.x[state_index(range_, 0)];
+  out.values["vr1"] = range_.empty() ? 0.0 : x.x[state_index(range_, 1)];
+  out.values["vr2"] = range_.empty() ? 0.0 : x.x[state_index(range_, 2)];
+  out.values["b_pu"] = b;
+  out.values["q_mvar"] = (v * std::conj(i)).imag() * safe_base(params_.base_mva);
+  out.values["v_ref_pu"] = params_.v_ref_pu;
+  add_voltage_metrics(out, y, params_.bus_pos, -1);
+  return out;
+}
+
+DERAADynamic::DERAADynamic(DERAADynamicParams params)
+    : params_(std::move(params)) {}
+
+void DERAADynamic::assignStateIndices(int& offset) {
+  range_ = {offset, params_.freq_flag == 1 ? 10 : 7};
+  offset += range_.size;
+}
+
+void DERAADynamic::initializeFromPowerFlow(const PowerFlowResult&,
+                                           DynamicState& x,
+                                           NetworkState& y) {
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const double vm = std::max(kMinVoltage, std::abs(v));
+  const double theta = std::arg(v);
+  const Complex s(params_.p_ref_mw / safe_base(params_.base_mva),
+                  params_.q_ref_mvar / safe_base(params_.base_mva));
+  const Complex i = std::conj(s / std::max(kMinVoltage, vm)) *
+                    std::polar(1.0, theta);
+  const Complex idq = i * std::polar(1.0, -theta);
+  const double ip = idq.real() * safe_base(params_.base_mva) /
+                    std::max(1e-9, params_.model_base_mva);
+  const double iq = -idq.imag() * safe_base(params_.base_mva) /
+                    std::max(1e-9, params_.model_base_mva);
+  x.x[state_index(range_, 0)] = vm;
+  x.x[state_index(range_, 1)] = params_.p_ref_mw / std::max(1e-9, params_.model_base_mva);
+  x.x[state_index(range_, 2)] =
+      params_.pf_flag == 1
+          ? std::tan(params_.pf_angle_ref_rad) * x.x[state_index(range_, 1)] / vm
+          : params_.q_ref_mvar / std::max(1e-9, params_.model_base_mva) / vm;
+  x.x[state_index(range_, 3)] = iq;
+  x.x[state_index(range_, 4)] = 1.0;
+  x.x[state_index(range_, 5)] = 1.0;
+  if (params_.freq_flag == 1) {
+    x.x[state_index(range_, 6)] = 0.0;
+    x.x[state_index(range_, 7)] = 0.0;
+    x.x[state_index(range_, 8)] = x.x[state_index(range_, 1)];
+    x.x[state_index(range_, 9)] = ip;
+  } else {
+    x.x[state_index(range_, 6)] = ip;
+  }
+}
+
+namespace {
+
+double dera_deadband(double value, double low, double high) {
+  if (value > high) return value - high;
+  if (value < low) return value - low;
+  return 0.0;
+}
+
+}  // namespace
+
+void DERAADynamic::computeDerivatives(double,
+                                      const DynamicState& x,
+                                      const NetworkState& y,
+                                      Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (!params_.in_service || range_.empty()) return;
+  const double vm =
+      std::max(kMinVoltage, std::abs(positive_sequence_voltage(bus_voltage(y, params_.bus_pos))));
+  const double vmeas = x.x[state_index(range_, 0)];
+  const double pmeas = x.x[state_index(range_, 1)];
+  const double qv = x.x[state_index(range_, 2)];
+  const double iq = x.x[state_index(range_, 3)];
+  const double mult = x.x[state_index(range_, 4)];
+  const double fmeas = x.x[state_index(range_, 5)];
+  const double ip_index = params_.freq_flag == 1 ? 9 : 6;
+  const double ip = x.x[state_index(range_, ip_index)];
+  const double p_ref = params_.p_ref_mw / std::max(1e-9, params_.model_base_mva);
+  const double q_ref = params_.q_ref_mvar / std::max(1e-9, params_.model_base_mva);
+  dxdt[state_index(range_, 0)] = (vm - vmeas) / std::max(kMinTimeConstant, params_.T_rv);
+  dxdt[state_index(range_, 1)] = (p_ref - pmeas) / std::max(kMinTimeConstant, params_.Tp);
+  const double qv_ref =
+      params_.pf_flag == 1
+          ? std::tan(params_.pf_angle_ref_rad) * pmeas / std::max(kMinVoltage, vmeas)
+          : q_ref / std::max(kMinVoltage, vmeas);
+  dxdt[state_index(range_, 2)] = (qv_ref - qv) / std::max(kMinTimeConstant, params_.T_iq);
+  const double iq_cmd =
+      std::clamp(dera_deadband(params_.v_ref_pu - vmeas, params_.dbd1, params_.dbd2) *
+                         params_.K_qv +
+                     qv,
+                 params_.Iq_min,
+                 params_.Iq_max) *
+      mult;
+  dxdt[state_index(range_, 3)] = (iq_cmd - iq) / std::max(kMinTimeConstant, params_.Tg);
+  dxdt[state_index(range_, 4)] = (1.0 - mult) / std::max(kMinTimeConstant, params_.Tv);
+  dxdt[state_index(range_, 5)] = (1.0 - fmeas) / std::max(kMinTimeConstant, params_.Trf);
+  double ip_ref = std::clamp(p_ref / std::max(kMinVoltage, vmeas),
+                             params_.Ip_min,
+                             params_.Ip_max) *
+                  mult;
+  if (params_.freq_flag == 1) {
+    const double power_pi = x.x[state_index(range_, 6)];
+    const double dpord = x.x[state_index(range_, 7)];
+    const double pord = x.x[state_index(range_, 8)];
+    const double freq_error = 1.0 - fmeas;
+    dxdt[state_index(range_, 6)] = params_.Kig * freq_error;
+    const double pord_cmd =
+        std::clamp(p_ref + params_.Kpg * freq_error + power_pi,
+                   params_.Ip_min,
+                   params_.Ip_max);
+    dxdt[state_index(range_, 7)] = (pord_cmd - dpord) / std::max(kMinTimeConstant, params_.Tpord);
+    dxdt[state_index(range_, 8)] = dpord;
+    ip_ref = std::clamp(pord / std::max(kMinVoltage, vmeas),
+                        params_.Ip_min,
+                        params_.Ip_max) *
+             mult;
+  }
+  dxdt[state_index(range_, ip_index)] =
+      (ip_ref - ip) / std::max(kMinTimeConstant, params_.Tg);
+}
+
+std::pair<double, double> DERAADynamic::currentDq(const DynamicState& x) const {
+  if (range_.empty()) return {0.0, 0.0};
+  const double ip = x.x[state_index(range_, params_.freq_flag == 1 ? 9 : 6)];
+  const double iq = x.x[state_index(range_, 3)];
+  const double ratio = params_.model_base_mva / safe_base(params_.base_mva);
+  return {ip * ratio, iq * ratio};
+}
+
+void DERAADynamic::stamp(double,
+                         const DynamicState& x,
+                         const NetworkState& y,
+                         DynamicStamp& stamp) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const double theta = std::arg(v);
+  const auto [ip, iq] = currentDq(x);
+  add_balanced_current(stamp,
+                       params_.bus_pos,
+                       balanced_current_from_dq(ip, -iq, theta));
+}
+
+std::string DERAADynamic::name() const {
+  return params_.label.empty() ? "AggregateDistributedGenerationA " +
+                                     std::to_string(params_.component_index)
+                               : params_.label;
+}
+
+std::vector<DynamicModelProfile> DERAADynamic::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
+}
+
+DynamicDeviceOutput DERAADynamic::output(const DynamicState& x,
+                                         const NetworkState& y) const {
+  DynamicDeviceOutput out = make_output_base(*this,
+                                             params_.bus,
+                                             params_.canvas_type,
+                                             params_.component_domain,
+                                             params_.source_type);
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const double theta = std::arg(v);
+  const auto [ip, iq] = currentDq(x);
+  const Complex i = phasor_from_dq(ip, -iq, theta);
+  const Complex s = v * std::conj(i);
+  out.values["Vmeas"] = range_.empty() ? 0.0 : x.x[state_index(range_, 0)];
+  out.values["Pmeas"] = range_.empty() ? 0.0 : x.x[state_index(range_, 1)];
+  out.values["Q_V"] = range_.empty() ? 0.0 : x.x[state_index(range_, 2)];
+  out.values["Iq"] = range_.empty() ? 0.0 : x.x[state_index(range_, 3)];
+  out.values["Mult"] = range_.empty() ? 0.0 : x.x[state_index(range_, 4)];
+  out.values["Fmeas"] = range_.empty() ? 0.0 : x.x[state_index(range_, 5)];
+  out.values["Ip"] = range_.empty() ? 0.0 : x.x[state_index(range_, params_.freq_flag == 1 ? 9 : 6)];
+  out.values["p_mw"] = s.real() * safe_base(params_.base_mva);
+  out.values["q_mvar"] = s.imag() * safe_base(params_.base_mva);
+  out.values["freq_flag"] = static_cast<double>(params_.freq_flag);
+  add_voltage_metrics(out, y, params_.bus_pos, -1);
+  return out;
 }
 
 DCDCConverterDynamic::DCDCConverterDynamic(DCDCConverterDynamicParams params)

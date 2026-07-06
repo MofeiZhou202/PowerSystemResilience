@@ -83,12 +83,22 @@ function export_signal(results, signal::String)
             return get_state_series(results, (ref, :ψq_pp))
         elseif quantity == "frequency_pu"
             return get_frequency_series(results, ref)
+        elseif quantity == "omega_oc_pu"
+            return get_state_series(results, (ref, :ω_oc))
+        elseif quantity == "theta_oc_rad"
+            return get_state_series(results, (ref, :θ_oc))
+        elseif quantity == "E_oc" || quantity == "E_oc_pu"
+            return get_state_series(results, (ref, :E_oc))
         elseif quantity == "p_pu"
             return get_activepower_series(results, ref)
         elseif quantity == "q_pu"
             return get_reactivepower_series(results, ref)
         elseif quantity == "p_oc"
             return get_state_series(results, (ref, :p_oc))
+        elseif quantity == "Vt" || quantity == "internal_voltage_pu"
+            return get_state_series(results, (ref, :Vt))
+        elseif quantity == "theta_rad" || quantity == "theta_t_rad"
+            return get_state_series(results, (ref, :θt))
         elseif quantity == "field_voltage_pu" || quantity == "vf_pu"
             return get_field_voltage_series(results, ref)
         elseif quantity == "mechanical_torque_pu" || quantity == "tau_m_pu"
@@ -110,6 +120,81 @@ function export_signal(results, signal::String)
         end
     end
     error("unsupported PSD export signal $(signal)")
+end
+
+function run_periodic_variable_source()
+    include(joinpath(TEST_FILES_DIR, "data_tests", "test28.jl"))
+    work = mktempdir()
+    try
+        sim = Simulation!(
+            ResidualModel,
+            sys,
+            work,
+            (0.0, 1.0),
+        )
+        status = execute!(sim, IDA(); dtmax = 0.01, saveat = 0.01)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
+function run_test01_omib()
+    sys = build_system(PSIDTestSystems, "psid_test_omib")
+    fault_branch = deepcopy(collect(get_components(Branch, sys))[1])
+    fault_branch.r = 0.0
+    fault_branch.x = 0.1
+    ybus_fault = PNM.Ybus([fault_branch], collect(get_components(ACBus, sys)))[:, :]
+    ybus_change = NetworkSwitch(1.0, ybus_fault)
+    work = mktempdir()
+    try
+        sim = Simulation(
+            ResidualModel,
+            sys,
+            work,
+            (0.0, 20.0),
+            ybus_change,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.005, saveat = 0.005)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
+function run_test41_stab1()
+    raw_file = joinpath(TEST_FILES_DIR, "benchmarks", "psse", "STAB1", "OMIB_SSS.raw")
+    dyr_file = joinpath(TEST_FILES_DIR, "benchmarks", "psse", "STAB1", "OMIB_SSS.dyr")
+    sys = System(raw_file, dyr_file)
+    for l in get_components(PSY.StandardLoad, sys)
+        transform_load_to_constant_impedance(l)
+    end
+    gen = first(get_components(Generator, sys))
+    dynamic_injector = get_dynamic_injector(gen)
+    for g in get_components(Generator, sys)
+        if get_number(get_bus(g)) == 1
+            gen = g
+            dynamic_injector = get_dynamic_injector(g)
+        end
+    end
+    perturbation = ControlReferenceChange(1.0, dynamic_injector, :V_ref, 1.0472)
+    work = mktempdir()
+    try
+        sim = Simulation(
+            ResidualModel,
+            sys,
+            work,
+            (0.0, 20.0),
+            perturbation,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.005, saveat = 0.005)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
 end
 
 function one_done_q_fault_ybus(sys)
@@ -395,6 +480,68 @@ function run_gridfollowing(case_name::String)
     end
 end
 
+function run_vsm_inverter()
+    sys = build_system(PSIDTestSystems, "psid_test_vsm_inverter")
+    case_inv = collect(PSY.get_components(PSY.DynamicInjection, sys))[1]
+    pref_change = ControlReferenceChange(1.0, case_inv, :P_ref, 0.7)
+    work = mktempdir()
+    try
+        sim = Simulation(
+            ResidualModel,
+            sys,
+            work,
+            (0.0, 4.0),
+            pref_change,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.005, saveat = 0.005)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
+function run_droop_inverter()
+    sys = build_system(PSIDTestSystems, "psid_test_droop_inverter")
+    case_inv = collect(PSY.get_components(PSY.DynamicInjection, sys))[1]
+    pref_change = ControlReferenceChange(1.0, case_inv, :P_ref, 0.7)
+    work = mktempdir()
+    try
+        sim = Simulation!(
+            ResidualModel,
+            sys,
+            work,
+            (0.0, 4.0),
+            pref_change,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.005, saveat = 0.005)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
+function run_voc_inverter()
+    include(joinpath(TEST_FILES_DIR, "data_tests", "test44.jl"))
+    pref_change = ControlReferenceChange(1.0, case_inv, :P_ref, 0.7)
+    work = mktempdir()
+    try
+        sim = Simulation(
+            ResidualModel,
+            omib_sys,
+            work,
+            (0.0, 4.0),
+            pref_change,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.005, saveat = 0.005)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
 function run_test25_dynamic_lines()
     include(joinpath(TEST_FILES_DIR, "data_tests", "test25.jl"))
     gen2 = get_dynamic_injector(get_component(Generator, sys, "generator-102-1"))
@@ -416,8 +563,70 @@ function run_test25_dynamic_lines()
     end
 end
 
+function run_test49_csvgn1()
+    raw_file = joinpath(TEST_FILES_DIR, "benchmarks", "psse", "CSVGN1", "3_BUS_System.raw")
+    dyr_file = joinpath(TEST_FILES_DIR, "benchmarks", "psse", "CSVGN1", "3_BUS_System.dyr")
+    sys = System(raw_file, dyr_file)
+    for l in get_components(PSY.StandardLoad, sys)
+        transform_load_to_constant_impedance(l)
+    end
+
+    bus_3 = first(b for b in get_components(ACBus, sys) if get_number(b) == 3)
+    csvgn1_source = Source(;
+        name = "CSVGN1",
+        available = true,
+        active_power = 0.0,
+        reactive_power = 0.0,
+        bus = bus_3,
+        R_th = 0.0,
+        X_th = 0.0,
+    )
+    add_component!(sys, csvgn1_source)
+    set_bustype!(bus_3, 2)
+    for source in get_components(Source, sys)
+        if get_number(get_bus(source)) != 3
+            continue
+        end
+        dynamic_injector = PSY.CSVGN1(;
+            name = get_name(source),
+            K = 20.0,
+            T1 = 0.0,
+            T2 = 1.0,
+            T3 = 0.154833,
+            T4 = 1.0,
+            T5 = 0.005167,
+            Rmin = 0.0,
+            Vmax = 1.0,
+            Vmin = 0.0,
+            CBase = 60.0,
+            base_power = 500.0,
+        )
+        set_dynamic_injector!(source, dynamic_injector)
+    end
+
+    load21 = first(l for l in get_components(PSY.StandardLoad, sys) if get_name(l) == "load21")
+    load_change = LoadChange(0.005, load21, :P_ref_impedance, 400 / get_base_power(sys))
+    work = mktempdir()
+    try
+        sim = Simulation(
+            ResidualModel,
+            sys,
+            work,
+            (0.0, 0.07),
+            load_change,
+        )
+        status = execute!(sim, IDA(); dtmax = 0.0001, saveat = 0.0001)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
 function run_case(case_name::String)
-    if case_name == "onedoneq" || case_name == "test02"
+    if case_name == "omib" || case_name == "test01"
+        run_test01_omib()
+    elseif case_name == "onedoneq" || case_name == "test02"
         run_onedoneq()
     elseif case_name == "simple_marconato" || case_name == "test03"
         run_simple_marconato()
@@ -441,6 +650,8 @@ function run_case(case_name::String)
         run_psse_machine_case("SEXS", "ThreeBus_SEXS.dyr")
     elseif case_name == "ieeest" || case_name == "test30"
         run_psse_machine_case("IEEEST", "ThreeBus_IEEEST_with_filter.dyr")
+    elseif case_name == "stab1" || case_name == "test41"
+        run_test41_stab1()
     elseif case_name == "genroe" || case_name == "test16"
         run_psse_machine_case("GENROE", "ThreeBus_GENROE.dyr")
     elseif case_name == "genroe_high_sat" || case_name == "test16_high_sat"
@@ -453,8 +664,18 @@ function run_case(case_name::String)
         run_zip_constant_power()
     elseif case_name in ("test24", "gridfollowing_reduced", "test51", "gridfollowing_kaura")
         run_gridfollowing(case_name)
+    elseif case_name == "test08" || case_name == "vsm_inverter"
+        run_vsm_inverter()
+    elseif case_name == "test23" || case_name == "droop_inverter"
+        run_droop_inverter()
+    elseif case_name == "test44" || case_name == "voc_inverter"
+        run_voc_inverter()
     elseif case_name == "test25" || case_name == "dynamic_lines_test25"
         run_test25_dynamic_lines()
+    elseif case_name == "test28" || case_name == "periodic_variable_source"
+        run_periodic_variable_source()
+    elseif case_name == "test49" || case_name == "csvgn1"
+        run_test49_csvgn1()
     else
         error("unsupported PSD validation case: $(case_name)")
     end
