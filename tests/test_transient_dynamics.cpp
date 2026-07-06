@@ -7101,3 +7101,295 @@ TEST_CASE("Dynamic sparse linear solver accepts optional backend requests",
     CHECK(x[1] == Catch::Approx(4.0));
   }
 }
+
+TEST_CASE("Frequency observability: single-machine COI tracks the rotor speed",
+          "[dynamics][frequency][coi]") {
+  auto sys = make_psd_test01_omib_case();  // one classical machine + infinite bus
+  DynamicSolverOptions opt = fast_options();
+  opt.run_power_flow_initialization = true;
+  opt.t_end_s = 2.0;
+  opt.dt_s = 0.005;
+  opt.record_every_step = true;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+  DynamicEvent trip;  // trip one of the two parallel lines to excite the rotor
+  trip.time_s = 1.0;
+  trip.type = DynamicEventType::ACBranchTrip;
+  trip.component_index = 1;
+  trip.component_type = "AC";
+  trip.label = "OMIB line trip";
+  dyn.events.push_back(trip);
+
+  DynamicSolver solver;
+  const DynamicResults result = solver.solve(dyn);
+  REQUIRE(result.success);
+  REQUIRE(result.snapshots.size() > 100);
+
+  // The only inertial device is the machine, so the system center-of-inertia
+  // frequency must equal that machine's reported electrical frequency at every
+  // recorded instant, and frequency_hz mirrors the COI (no longer the constant
+  // nominal value).
+  const auto machine_f =
+      device_output_series(result, "SynchronousMachine", 1, "frequency_hz");
+  REQUIRE(machine_f.y.size() == result.snapshots.size());
+  std::vector<double> coi;
+  coi.reserve(result.snapshots.size());
+  for (std::size_t i = 0; i < result.snapshots.size(); ++i) {
+    const auto& snap = result.snapshots[i];
+    coi.push_back(snap.coi_frequency_hz);
+    CHECK(snap.frequency_hz == Catch::Approx(snap.coi_frequency_hz).margin(1e-12));
+    CHECK(snap.coi_frequency_hz ==
+          Catch::Approx(machine_f.y[i]).margin(1e-9));
+    REQUIRE(snap.island_frequencies.size() == 1);
+    CHECK(snap.island_frequencies.front().has_source);
+    CHECK(snap.island_frequencies.front().has_anchor);
+  }
+  const auto [lo, hi] = std::minmax_element(coi.begin(), coi.end());
+  CHECK((*hi - *lo) > 1e-4);  // the disturbance actually moved the frequency
+
+  CHECK(std::none_of(result.warnings.begin(), result.warnings.end(),
+                     [](const std::string& w) {
+                       return w.find("no frequency anchor") != std::string::npos;
+                     }));
+}
+
+TEST_CASE("Frequency observability: two-machine COI is inertia-weighted",
+          "[dynamics][frequency][coi]") {
+  // Two machines with distinct inertia on a tie line carrying real power, so a
+  // load step drives a differential inter-machine swing (the low-inertia unit
+  // moves more). The center-of-inertia frequency must be the inertia-weighted
+  // average of the two rotor frequencies.
+  const double kH0 = 8.0;
+  const double kH1 = 2.0;
+
+  HybridPowerSystem sys;
+  sys.name = "two_machine_coi";
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 50.0;
+
+  auto make_bus = [](int index, BusType type) {
+    ACBus b;
+    b.index = index;
+    b.bus_type = type;
+    b.base_kv = 138.0;
+    b.vm_pu = 1.0;
+    b.va_deg = 0.0;
+    b.in_service = true;
+    return b;
+  };
+  sys.ac.buses = {make_bus(1, BusType::SLACK), make_bus(2, BusType::PV)};
+
+  ACBranch tie;
+  tie.index = 1;
+  tie.from_bus = 1;
+  tie.to_bus = 2;
+  tie.r_pu = 0.005;
+  tie.x_pu = 0.05;
+  tie.b_pu = 0.0;
+  tie.tap = 1.0;
+  tie.in_service = true;
+  sys.ac.branches = {tie};
+
+  auto make_machine = [](int index, int bus, double H, double pg, bool slack) {
+    Generator g;
+    g.index = index;
+    g.bus = bus;
+    g.is_slack = slack;
+    g.in_service = true;
+    g.pg_mw = pg;
+    g.qg_mvar = 0.0;
+    g.vg_pu = 1.0;
+    g.pmax_mw = 300.0;
+    g.pmin_mw = 0.0;
+    g.qmax_mvar = 150.0;
+    g.qmin_mvar = -150.0;
+    g.ra_pu = 0.0;
+    g.xd_pu = 0.2;
+    g.xq_pu = 0.2;
+    g.xdp_pu = 0.2;
+    g.xdpp_pu = 0.2;
+    g.td0p_s = 0.0;
+    g.td0pp_s = 0.0;
+    g.inertia_h = H;
+    g.droop_r = 0.05;
+    g.dynamic_model.standard = "PowerSystems";
+    g.dynamic_model.model_name = "ClassicalMachine";
+    g.dynamic_model.parameters = {{"H", H}, {"D", 2.0}, {"R", 0.0}, {"Xd_p", 0.2}};
+    return g;
+  };
+  // Bus 1 exports across the tie to a load at bus 2.
+  sys.ac.generators = {make_machine(1, 1, kH0, 40.0, true),
+                       make_machine(2, 2, kH1, 20.0, false)};
+
+  Load ld;
+  ld.index = 1;
+  ld.bus = 2;
+  ld.p_mw = 60.0;
+  ld.q_mvar = 10.0;
+  ld.in_service = true;
+  sys.ac.loads = {ld};
+
+  DynamicSolverOptions opt = fast_options();
+  opt.run_power_flow_initialization = true;
+  opt.t_end_s = 3.0;
+  opt.dt_s = 0.005;
+  opt.record_every_step = true;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+  DynamicEvent load_step;  // +50% load at bus 2 -> sustained imbalance & swing
+  load_step.time_s = 1.0;
+  load_step.type = DynamicEventType::ACLoadScale;
+  load_step.bus = 2;
+  load_step.value = 1.5;
+  load_step.component_type = "AC";
+  load_step.label = "bus-2 load step";
+  dyn.events.push_back(load_step);
+
+  DynamicSolver solver;
+  const DynamicResults result = solver.solve(dyn);
+  REQUIRE(result.success);
+  REQUIRE(result.snapshots.size() > 100);
+
+  const auto f0 = device_output_series(result, "SynchronousMachine", 1, "frequency_hz");
+  const auto f1 = device_output_series(result, "SynchronousMachine", 2, "frequency_hz");
+  REQUIRE(f0.y.size() == result.snapshots.size());
+  REQUIRE(f1.y.size() == result.snapshots.size());
+
+  double max_diff = 0.0;
+  double max_spread = 0.0;
+  for (std::size_t i = 0; i < result.snapshots.size(); ++i) {
+    const double expected = (kH0 * f0.y[i] + kH1 * f1.y[i]) / (kH0 + kH1);
+    max_diff = std::max(
+        max_diff, std::abs(result.snapshots[i].coi_frequency_hz - expected));
+    max_spread = std::max(max_spread, std::abs(f0.y[i] - f1.y[i]));
+    // Both machines remain in one connected island (the tie stays in service).
+    REQUIRE(result.snapshots[i].island_frequencies.size() == 1);
+    CHECK(result.snapshots[i].island_frequencies.front().total_inertia_mws ==
+          Catch::Approx((kH0 + kH1) * 100.0).epsilon(1e-6));
+  }
+  CHECK(max_diff < 1e-4);    // COI equals the inertia-weighted average
+  CHECK(max_spread > 1e-4);  // the machines diverged, so weighting mattered
+}
+
+TEST_CASE("Frequency observability: island detection reacts to a tie-line trip",
+          "[dynamics][frequency][island]") {
+  // Two self-balanced buses (generation == local load on each) joined by a
+  // single tie line. Tripping the tie must split the system into two separately
+  // anchored frequency islands.
+  HybridPowerSystem sys;
+  sys.name = "two_machine_tie";
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 50.0;
+
+  auto make_bus = [](int index, BusType type) {
+    ACBus b;
+    b.index = index;
+    b.bus_type = type;
+    b.base_kv = 138.0;
+    b.vm_pu = 1.0;
+    b.va_deg = 0.0;
+    b.in_service = true;
+    return b;
+  };
+  sys.ac.buses = {make_bus(1, BusType::SLACK), make_bus(2, BusType::PV)};
+
+  ACBranch tie;
+  tie.index = 1;
+  tie.from_bus = 1;
+  tie.to_bus = 2;
+  tie.r_pu = 0.01;
+  tie.x_pu = 0.05;
+  tie.b_pu = 0.0;
+  tie.tap = 1.0;
+  tie.in_service = true;
+  sys.ac.branches = {tie};
+
+  auto make_machine = [](int index, int bus, double H, bool slack) {
+    Generator g;
+    g.index = index;
+    g.bus = bus;
+    g.is_slack = slack;
+    g.in_service = true;
+    g.pg_mw = 30.0;
+    g.qg_mvar = 0.0;
+    g.vg_pu = 1.0;
+    g.pmax_mw = 200.0;
+    g.pmin_mw = 0.0;
+    g.qmax_mvar = 100.0;
+    g.qmin_mvar = -100.0;
+    g.ra_pu = 0.0;
+    g.xd_pu = 0.2;
+    g.xq_pu = 0.2;
+    g.xdp_pu = 0.2;
+    g.xdpp_pu = 0.2;
+    g.td0p_s = 0.0;
+    g.td0pp_s = 0.0;
+    g.inertia_h = H;
+    g.droop_r = 0.05;
+    g.dynamic_model.standard = "PowerSystems";
+    g.dynamic_model.model_name = "ClassicalMachine";
+    g.dynamic_model.parameters = {{"H", H}, {"D", 2.0}, {"R", 0.0}, {"Xd_p", 0.2}};
+    return g;
+  };
+  sys.ac.generators = {make_machine(1, 1, 5.0, true),
+                       make_machine(2, 2, 3.0, false)};
+
+  auto make_load = [](int index, int bus) {
+    Load l;
+    l.index = index;
+    l.bus = bus;
+    l.p_mw = 30.0;
+    l.q_mvar = 5.0;
+    l.in_service = true;
+    return l;
+  };
+  sys.ac.loads = {make_load(1, 1), make_load(2, 2)};
+
+  DynamicSolverOptions opt = fast_options();
+  opt.run_power_flow_initialization = true;
+  opt.t_end_s = 2.0;
+  opt.dt_s = 0.005;
+  opt.record_every_step = true;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+  DynamicEvent trip;
+  trip.time_s = 1.0;
+  trip.type = DynamicEventType::ACBranchTrip;
+  trip.component_index = 1;
+  trip.component_type = "AC";
+  trip.label = "tie-line trip";
+  dyn.events.push_back(trip);
+
+  DynamicSolver solver;
+  const DynamicResults result = solver.solve(dyn);
+  REQUIRE(result.success);
+  REQUIRE(result.snapshots.size() > 100);
+
+  // Before the trip: a single energized island spanning both buses.
+  const auto& first = result.snapshots.front();
+  REQUIRE(first.island_frequencies.size() == 1);
+  CHECK(first.island_frequencies.front().n_ac_buses == 2);
+  CHECK(first.island_frequencies.front().has_anchor);
+
+  // After the trip: two separately anchored single-bus islands.
+  const auto& last = result.snapshots.back();
+  REQUIRE(last.island_frequencies.size() == 2);
+  for (const auto& island : last.island_frequencies) {
+    CHECK(island.n_ac_buses == 1);
+    CHECK(island.has_source);
+    CHECK(island.has_anchor);
+    CHECK(island.coi_frequency_hz > 45.0);
+    CHECK(island.coi_frequency_hz < 55.0);
+  }
+
+  // Both islands keep an anchor, so no anchorless-island warning is raised.
+  CHECK(std::none_of(result.warnings.begin(), result.warnings.end(),
+                     [](const std::string& w) {
+                       return w.find("no frequency anchor") != std::string::npos;
+                     }));
+}

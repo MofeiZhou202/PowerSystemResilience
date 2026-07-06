@@ -720,6 +720,21 @@ bool DynamicSystem::solveNetwork(double t, std::string& error) {
   double final_ac_delta = 0.0;
   double final_dc_delta = 0.0;
   bool converged = false;
+  // Anderson(1) acceleration state for the Picard fixed-point iteration below.
+  // The plain Gauss/Picard map converges only linearly and can stall badly when
+  // the device mix presents negative incremental resistance (constant-power
+  // loads / current-source IBRs), leaving the tightest tolerances unreachable in
+  // a bounded iteration budget. Anderson(1) extrapolates from the two most
+  // recent residuals; it converges to the *same* network fixed point (the loop
+  // only ever returns a clean Picard image taken at convergence, never an
+  // extrapolated vector), so it accelerates without changing the solution.
+  constexpr double kAndersonGammaMax = 4.0;
+  Eigen::VectorXcd ac_picard_prev;
+  Eigen::VectorXcd ac_resid_prev;
+  bool ac_anderson_ready = false;
+  Eigen::VectorXd dc_picard_prev;
+  Eigen::VectorXd dc_resid_prev;
+  bool dc_anderson_ready = false;
   for (int iter = 0; iter < max_iters; ++iter) {
     const Eigen::VectorXcd vac_prev = y.Vac_abc;
     const Eigen::VectorXd vdc_prev = y.Vdc;
@@ -822,6 +837,51 @@ bool DynamicSystem::solveNetwork(double t, std::string& error) {
     if (delta <= tol) {
       converged = true;
       break;
+    }
+
+    // Not yet converged: extrapolate the next iterate with Anderson(1). The
+    // current network voltages are the Picard image G(y_prev); the change from
+    // the previous iterate is the residual r_k. Overwriting the voltages with
+    // the accelerated estimate only affects the *next* iteration's device
+    // stamps; the convergence test above always measures the true Picard
+    // residual, so the returned solution is unchanged (only reached faster).
+    if (network.acPhaseNodeCount() > 0 &&
+        vac_prev.size() == y.Vac_abc.size() && y.Vac_abc.size() > 0) {
+      const Eigen::VectorXcd picard = y.Vac_abc;
+      const Eigen::VectorXcd resid = picard - vac_prev;
+      if (ac_anderson_ready && ac_resid_prev.size() == resid.size()) {
+        const Eigen::VectorXcd dr = resid - ac_resid_prev;
+        const double denom = dr.squaredNorm();
+        if (denom > 1e-30) {
+          double gamma = (dr.dot(resid)).real() / denom;
+          gamma = std::clamp(gamma, -kAndersonGammaMax, kAndersonGammaMax);
+          const Eigen::VectorXcd accel =
+              picard - gamma * (picard - ac_picard_prev);
+          if (accel.allFinite()) y.Vac_abc = accel;
+        }
+      }
+      ac_picard_prev = picard;
+      ac_resid_prev = resid;
+      ac_anderson_ready = true;
+    }
+    if (network.dcBusCount() > 0 && vdc_prev.size() == y.Vdc.size() &&
+        y.Vdc.size() > 0) {
+      const Eigen::VectorXd picard = y.Vdc;
+      const Eigen::VectorXd resid = picard - vdc_prev;
+      if (dc_anderson_ready && dc_resid_prev.size() == resid.size()) {
+        const Eigen::VectorXd dr = resid - dc_resid_prev;
+        const double denom = dr.squaredNorm();
+        if (denom > 1e-30) {
+          double gamma = dr.dot(resid) / denom;
+          gamma = std::clamp(gamma, -kAndersonGammaMax, kAndersonGammaMax);
+          const Eigen::VectorXd accel =
+              picard - gamma * (picard - dc_picard_prev);
+          if (accel.allFinite()) y.Vdc = accel;
+        }
+      }
+      dc_picard_prev = picard;
+      dc_resid_prev = resid;
+      dc_anderson_ready = true;
     }
   }
 

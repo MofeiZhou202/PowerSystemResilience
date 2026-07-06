@@ -321,6 +321,7 @@ set(HACDCPF_SOURCES
   src/dynamics/DynamicModelBuilder.cpp
   src/dynamics/DynamicModelCatalog.cpp
   src/dynamics/DynamicSolver.cpp
+  src/dynamics/DynamicFrequency.cpp
   src/dynamics/DynamicDaeDiagnostics.cpp
   src/dynamics/SmallSignal.cpp
   src/dynamics/DynamicResults.cpp

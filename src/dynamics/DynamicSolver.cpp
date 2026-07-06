@@ -11,6 +11,7 @@
 #include <Eigen/SparseLU>
 
 #include "hacdcpf/dynamics/DynamicModelBuilder.hpp"
+#include "hacdcpf/dynamics/DynamicFrequency.hpp"
 
 namespace hacdcpf::dynamics {
 namespace {
@@ -21,7 +22,11 @@ DynamicSnapshot make_snapshot(const DynamicSystem& sys, bool include_device_outp
   s.state = sys.x.x;
   s.vac_abc = sys.y.Vac_abc;
   s.vdc = sys.y.Vdc;
-  s.frequency_hz = sys.network.frequency_hz;
+
+  const DynamicFrequencyReport freq = computeFrequencyReport(sys);
+  s.coi_frequency_hz = freq.system_coi_frequency_hz;
+  s.frequency_hz = freq.system_coi_frequency_hz;
+  s.island_frequencies = freq.islands;
 
   s.max_ac_voltage_pu = 0.0;
   s.min_ac_voltage_pu = sys.y.Vac_abc.size() > 0
@@ -298,6 +303,38 @@ void record_snapshot_if_needed(DynamicSystem& system,
   if (should_record_snapshot(system, results, step, system.x.time_s)) {
     results.snapshots.push_back(
         make_snapshot(system, system.options.record_device_outputs));
+    // Detect (once) an energized AC island that has lost its frequency anchor:
+    // sources present but no synchronous machine / grid-forming inverter / slack.
+    // This is the islanding case that makes the network algebraic block singular
+    // (design doc §6.2), so it is surfaced as a diagnostic rather than failing
+    // silently.
+    const DynamicSnapshot& snap = results.snapshots.back();
+    bool anchorless = false;
+    for (const auto& island : snap.island_frequencies) {
+      if (island.has_source && !island.has_anchor) {
+        anchorless = true;
+        break;
+      }
+    }
+    if (anchorless) {
+      static constexpr const char* kMarker =
+          "Frequency: an energized AC island has no frequency anchor";
+      const bool already =
+          std::any_of(results.warnings.begin(), results.warnings.end(),
+                      [&](const std::string& w) {
+                        return w.rfind(kMarker, 0) == 0;
+                      });
+      if (!already) {
+        std::ostringstream os;
+        os << kMarker
+           << " (source devices present but no synchronous machine / "
+              "grid-forming inverter / slack) first seen at t="
+           << system.x.time_s
+           << "s; its center-of-inertia frequency is undefined and the network "
+              "algebraic block may be ill-conditioned.";
+        results.warnings.push_back(os.str());
+      }
+    }
   }
 }
 

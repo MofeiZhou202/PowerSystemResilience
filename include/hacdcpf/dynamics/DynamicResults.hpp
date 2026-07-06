@@ -57,6 +57,19 @@ struct DynamicResidualDiagnostic {
   double residual{0.0};
 };
 
+// Per-island frequency observability (design doc §7). An "island" is a connected
+// component of the live (in-service) AC network; its center-of-inertia (COI)
+// frequency is the inertia-weighted average of the rotor/virtual speeds of the
+// generation in that island.
+struct DynamicIslandFrequency {
+  int island_id{0};
+  int n_ac_buses{0};
+  bool has_anchor{false};          // island contains a machine/GFM/slack
+  bool has_source{false};          // island contains any generation-capable device
+  double coi_frequency_hz{0.0};    // inertia-weighted center-of-inertia frequency
+  double total_inertia_mws{0.0};   // Sum of H*S over the island [MW*s]
+};
+
 struct DynamicInitializationSummary {
   bool power_flow_requested{true};
   bool power_flow_converged{false};
@@ -85,6 +98,8 @@ struct DynamicSnapshot {
   double max_dc_voltage_pu{0.0};
   double min_dc_voltage_pu{0.0};
   double frequency_hz{0.0};
+  double coi_frequency_hz{0.0};
+  std::vector<DynamicIslandFrequency> island_frequencies;
   std::vector<DynamicDeviceOutput> device_outputs;
 };
 

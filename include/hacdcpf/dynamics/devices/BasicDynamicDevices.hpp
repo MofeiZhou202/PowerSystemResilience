@@ -419,6 +419,8 @@ class SynchronousMachine : public DynamicDevice {
   [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
+  [[nodiscard]] FrequencyParticipation frequencyParticipation(
+      const DynamicState& x, const NetworkState& y) const override;
 
   // Control coupling: a governor/exciter attaches to this machine and drives the
   // derivative of the machine-owned mechanical-power / field state. The link's
@@ -938,6 +940,8 @@ class GridFormingInverter : public DynamicDevice {
   [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
+  [[nodiscard]] FrequencyParticipation frequencyParticipation(
+      const DynamicState& x, const NetworkState& y) const override;
 
  private:
   GridFormingInverterParams params_;
@@ -1025,6 +1029,8 @@ class GridFollowingInverter : public DynamicDevice {
   [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
+  [[nodiscard]] FrequencyParticipation frequencyParticipation(
+      const DynamicState& x, const NetworkState& y) const override;
 
  private:
   GridFollowingInverterParams params_;
@@ -1089,6 +1095,8 @@ class VSCConverterDynamic : public DynamicDevice {
                    NetworkState& y) override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
+  [[nodiscard]] FrequencyParticipation frequencyParticipation(
+      const DynamicState& x, const NetworkState& y) const override;
 
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override {

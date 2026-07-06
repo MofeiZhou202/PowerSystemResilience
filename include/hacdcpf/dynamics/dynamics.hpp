@@ -2,6 +2,7 @@
 
 #include "hacdcpf/dynamics/DynamicEvent.hpp"
 #include "hacdcpf/dynamics/DynamicDaeDiagnostics.hpp"
+#include "hacdcpf/dynamics/DynamicFrequency.hpp"
 #include "hacdcpf/dynamics/DynamicModelBuilder.hpp"
 #include "hacdcpf/dynamics/DynamicModelCatalog.hpp"
 #include "hacdcpf/dynamics/DynamicResults.hpp"

@@ -3398,6 +3398,24 @@ std::vector<DynamicModelProfile> SynchronousMachine::modelProfiles() const {
   return profiles_or_default(params_.model_profiles, *this);
 }
 
+FrequencyParticipation SynchronousMachine::frequencyParticipation(
+    const DynamicState& x, const NetworkState& y) const {
+  (void)y;
+  FrequencyParticipation fp;
+  if (!params_.in_service) return fp;
+  fp.is_source = true;
+  fp.is_anchor = true;  // a synchronous machine sets the frequency of its island
+  fp.ac_bus_pos = params_.bus_pos;
+  fp.base_mva = safe_base(params_.base_mva);
+  fp.inertia_h = std::max(0.0, params_.inertia_h);
+  const int omega_idx = link_.omegaIndex();
+  if (omega_idx >= 0 && omega_idx < x.x.size()) {
+    fp.speed_pu = x.x[omega_idx];
+    fp.contributes_coi = fp.inertia_h > 0.0;
+  }
+  return fp;
+}
+
 DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
                                                const NetworkState& y) const {
   DynamicDeviceOutput out = make_output_base(*this,
@@ -5651,6 +5669,29 @@ std::vector<DynamicModelProfile> GridFormingInverter::modelProfiles() const {
   return profiles_or_default(params_.model_profiles, *this);
 }
 
+FrequencyParticipation GridFormingInverter::frequencyParticipation(
+    const DynamicState& x, const NetworkState& y) const {
+  (void)y;
+  FrequencyParticipation fp;
+  if (!params_.in_service) return fp;
+  fp.is_source = true;
+  fp.is_anchor = true;  // grid-forming: sets island frequency and voltage
+  fp.ac_bus_pos = params_.bus_pos;
+  fp.base_mva = safe_base(params_.base_mva);
+  // Only the virtual-synchronous-machine mode carries a true inertia/speed
+  // state; droop and virtual-oscillator anchors are inertia-less (they set
+  // frequency algebraically) and therefore do not weight the COI average.
+  if (params_.control_kind == GridFormingControlKind::VirtualInertia) {
+    fp.inertia_h = std::max(0.0, 0.5 * params_.vsm_ta_s);  // Ta = 2H
+    const int omega_idx = state_index(range_, 2);
+    if (omega_idx >= 0 && omega_idx < x.x.size()) {
+      fp.speed_pu = x.x[omega_idx];
+      fp.contributes_coi = fp.inertia_h > 0.0;
+    }
+  }
+  return fp;
+}
+
 DynamicDeviceOutput GridFormingInverter::output(const DynamicState& x,
                                                 const NetworkState& y) const {
   DynamicDeviceOutput out = make_output_base(*this,
@@ -6182,6 +6223,19 @@ std::vector<DynamicModelProfile> GridFollowingInverter::modelProfiles() const {
   return profiles_or_default(params_.model_profiles, *this);
 }
 
+FrequencyParticipation GridFollowingInverter::frequencyParticipation(
+    const DynamicState& x, const NetworkState& y) const {
+  (void)x;
+  (void)y;
+  FrequencyParticipation fp;
+  if (!params_.in_service) return fp;
+  fp.is_source = true;
+  fp.is_anchor = false;  // grid-following: follows the grid, cannot anchor it
+  fp.ac_bus_pos = params_.bus_pos;
+  fp.base_mva = safe_base(params_.base_mva);
+  return fp;
+}
+
 DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
                                                   const NetworkState& y) const {
   DynamicDeviceOutput out = make_output_base(*this,
@@ -6447,6 +6501,12 @@ void VSCConverterDynamic::handleEvent(const DynamicEvent& event,
   } else {
     gfl_.handleEvent(event, x, y);
   }
+}
+
+FrequencyParticipation VSCConverterDynamic::frequencyParticipation(
+    const DynamicState& x, const NetworkState& y) const {
+  return params_.grid_forming ? gfm_.frequencyParticipation(x, y)
+                              : gfl_.frequencyParticipation(x, y);
 }
 
 DynamicDeviceOutput VSCConverterDynamic::output(const DynamicState& x,

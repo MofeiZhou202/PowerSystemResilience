@@ -64,6 +64,22 @@ struct DynamicJacobianContext {
   }
 };
 
+// Frequency observability contract (design doc §7, §23.3). Each device reports
+// how it participates in island frequency so the solver can compute a
+// center-of-inertia (COI) frequency, detect islands that have lost their
+// frequency anchor, and expose measured/aggregate frequency as an output rather
+// than copying the constant nominal value. Pure loads and passive elements leave
+// this at its default (no participation).
+struct FrequencyParticipation {
+  bool is_source{false};        // generation-capable device (not a pure load)
+  bool is_anchor{false};        // can set an island's frequency (machine/GFM/slack)
+  bool contributes_coi{false};  // carries a physical speed state for the COI average
+  int ac_bus_pos{-1};           // AC bus position for island assignment (-1 => none)
+  double inertia_h{0.0};        // inertia constant H on the device base [s]
+  double base_mva{0.0};         // device base S [MVA]
+  double speed_pu{1.0};         // rotor / virtual speed (pu of nominal frequency)
+};
+
 class DynamicDevice {
  public:
   virtual ~DynamicDevice() = default;
@@ -99,6 +115,17 @@ class DynamicDevice {
                                       const NetworkState& y) {
     (void)x;
     (void)y;
+  }
+
+  // Reports this device's contribution to island frequency (see
+  // FrequencyParticipation). Default: no participation (pure loads, passive
+  // network elements). Synchronous machines and grid-forming inverters override
+  // this to anchor and weight the center-of-inertia average.
+  [[nodiscard]] virtual FrequencyParticipation frequencyParticipation(
+      const DynamicState& x, const NetworkState& y) const {
+    (void)x;
+    (void)y;
+    return {};
   }
 
   [[nodiscard]] virtual DynamicDeviceOutput output(const DynamicState& x,
