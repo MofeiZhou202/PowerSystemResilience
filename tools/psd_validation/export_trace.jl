@@ -401,7 +401,13 @@ function run_test17_avrtype1()
     end
 end
 
-function run_psse_machine_case(folder::String, dyr_name::String)
+function run_psse_machine_case(
+    folder::String,
+    dyr_name::String;
+    t_end::Float64 = 2.0,
+    dtmax::Float64 = 0.005,
+    saveat::Float64 = 0.005,
+)
     raw_file = joinpath(TEST_FILES_DIR, "benchmarks", "psse", folder, "ThreeBusMulti.raw")
     dyr_file = joinpath(TEST_FILES_DIR, "benchmarks", "psse", folder, dyr_name)
     sys = System(raw_file, dyr_file)
@@ -414,8 +420,150 @@ function run_psse_machine_case(folder::String, dyr_name::String)
             ResidualModel,
             sys,
             work,
-            (0.0, 2.0),
+            (0.0, t_end),
             BranchTrip(1.0, Line, "BUS 1-BUS 2-i_1"),
+        )
+        status = execute!(sim, IDA(); dtmax = dtmax, saveat = saveat)
+        status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
+        return read_results(sim)
+    finally
+        rm(work; force = true, recursive = true)
+    end
+end
+
+function genrou_machine_pss2()
+    return PSY.RoundRotorQuadratic(;
+        R = 0.0,
+        Td0_p = 7.0,
+        Td0_pp = 999.0,
+        Tq0_p = 0.4,
+        Tq0_pp = 999.0,
+        Xd = 2.20,
+        Xq = 2.20,
+        Xd_p = 0.30,
+        Xq_p = 0.30,
+        Xd_pp = 0.30,
+        Xl = 0.2,
+        Se = (0.0, 0.0),
+    )
+end
+
+function single_mass_shaft_pss2()
+    return PSY.SingleMass(; H = 4.00, D = 0.00)
+end
+
+function sexs_avr_pss2()
+    return PSY.SEXS(;
+        Ta_Tb = 1.0,
+        Tb = 1.0,
+        K = 120.0,
+        Te = 0.4,
+        V_lim = (min = -10.0, max = 10.0),
+    )
+end
+
+function pss2_model(kind::String)
+    common = (;
+        input_code_1 = 1,
+        remote_bus_control_1 = 0,
+        input_code_2 = 3,
+        remote_bus_control_2 = 0,
+        M_rtf = 5,
+        N_rtf = 1,
+        Tw1 = 1.5,
+        Tw2 = 1.5,
+        T6 = 0.0,
+        Tw3 = 1.5,
+        Tw4 = 0.0,
+        T7 = 1.5,
+        Ks2 = 0.1875,
+        Ks3 = 1.0,
+        T8 = 0.5,
+        T9 = 0.1,
+        Ks1 = 2.0,
+        T1 = 0.59451,
+        T2 = 0.0447,
+        T3 = 0.59451,
+        T4 = 0.0447,
+    )
+    if kind == "PSS2A"
+        return PSY.PSS2A(; common..., Vst_lim = (-0.1, 0.1))
+    elseif kind == "PSS2B"
+        return PSY.PSS2B(;
+            common...,
+            T10 = 1.0,
+            T11 = 1.0,
+            Vs1_lim = (-0.00055, 0.00035),
+            Vs2_lim = (0.895, 0.915),
+            Vst_lim = (-0.1, 0.1),
+        )
+    elseif kind == "PSS2C"
+        return PSY.PSS2C(;
+            common...,
+            T10 = 1.0,
+            T11 = 1.0,
+            Vs1_lim = (-0.00055, 0.00035),
+            Vs2_lim = (0.895, 0.915),
+            Vst_lim = (-0.1, 0.1),
+            T12 = 1.0,
+            T13 = 1.0,
+            PSS_Hysteresis_param = (0.885, 0.895),
+            Xcomp = 1.0,
+            Tcomp = 1.0,
+        )
+    end
+    error("unsupported PSS2 kind $(kind)")
+end
+
+function pss2_csv_folder(kind::String)
+    if kind == "PSS2A"
+        return "PSS2A"
+    elseif kind == "PSS2B"
+        return "PSS2B"
+    elseif kind == "PSS2C"
+        return "PSS2C"
+    end
+    error("unsupported PSS2 kind $(kind)")
+end
+
+function get_gen_by_bus_number(system, number)
+    for gen in get_components(Generator, system)
+        if get_number(get_bus(gen)) == number
+            return gen
+        end
+    end
+    error("no generator at bus $(number)")
+end
+
+function run_pss2_case(kind::String)
+    raw_file = joinpath(TEST_FILES_DIR, "benchmarks", "psse", "PSS2A", "OMIB.raw")
+    dyr_file = joinpath(TEST_FILES_DIR, "benchmarks", "psse", "PSS2A", "OMIB_GENCLS.dyr")
+    sys = System(raw_file, dyr_file)
+    for l in get_components(PSY.StandardLoad, sys)
+        transform_load_to_constant_impedance(l)
+    end
+    g = get_gen_by_bus_number(sys, 1)
+    dynamic_injector = get_dynamic_injector(g)
+    remove_component!(sys, dynamic_injector)
+    dyn_gen = DynamicGenerator(;
+        name = get_name(g),
+        machine = genrou_machine_pss2(),
+        shaft = single_mass_shaft_pss2(),
+        avr = sexs_avr_pss2(),
+        prime_mover = PSY.TGFixed(; efficiency = 1.0),
+        ω_ref = 1.0,
+        pss = pss2_model(kind),
+    )
+    add_component!(sys, dyn_gen, g)
+    perturbation = ControlReferenceChange(1.0, dyn_gen, :V_ref, 1.04691)
+    work = mktempdir()
+    try
+        sim = Simulation(
+            ResidualModel,
+            sys,
+            work,
+            (0.0, 2.0),
+            perturbation,
         )
         status = execute!(sim, IDA(); dtmax = 0.005, saveat = 0.005)
         status == PSID.SIMULATION_FINALIZED || error("PSD simulation did not finalize: $(status)")
@@ -644,6 +792,22 @@ function run_case(case_name::String)
         run_test13_avrs()
     elseif case_name == "test17" || case_name == "genrou_avrtype1"
         run_test17_avrtype1()
+    elseif case_name == "test20" || case_name == "esac1a" || case_name == "ac1a"
+        run_psse_machine_case("AC1A", "ThreeBus_ESAC1A.dyr")
+    elseif case_name == "test21" || case_name == "gast"
+        run_psse_machine_case("GAST", "ThreeBus_GAST.dyr")
+    elseif case_name == "test22" || case_name == "tgov1"
+        run_psse_machine_case("TGOV1", "ThreeBus_TGOV1.dyr")
+    elseif case_name == "test31" || case_name == "hygov"
+        run_psse_machine_case("HYGOV", "ThreeBus_HYGOV.dyr")
+    elseif case_name == "test47" || case_name == "scrx"
+        run_psse_machine_case("SCRX", "ThreeBus_SCRX.dyr")
+    elseif case_name == "test52" || case_name == "pss2a"
+        run_pss2_case("PSS2A")
+    elseif case_name == "test53" || case_name == "pss2b"
+        run_pss2_case("PSS2B")
+    elseif case_name == "test54" || case_name == "pss2c"
+        run_pss2_case("PSS2C")
     elseif case_name == "genrou"
         run_genrou()
     elseif case_name == "sexs" || case_name == "test26"

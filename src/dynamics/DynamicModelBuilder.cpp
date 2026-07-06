@@ -983,6 +983,10 @@ void apply_load_profile(const Load& load, ACLoadDynamicParams& params) {
         param_or(load.dynamic_model.parameters,
                  {"phase_power_scale", "PhasePowerScale", "phase_scale"},
                  params.phase_power_scale);
+    params.nominal_voltage_pu =
+        param_or(load.dynamic_model.parameters,
+                 {"nominal_voltage_pu", "V_nominal", "V0", "v0"},
+                 params.nominal_voltage_pu);
   }
   const double zp = normalized_percent(load.z_percent_p, 0.0);
   const double ip = normalized_percent(load.i_percent_p, 0.0);
@@ -1775,6 +1779,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.p_mw = load.p_mw * load.scaling;
     p.q_mvar = load.q_mvar * load.scaling;
     p.base_mva = base_mva;
+    p.phase_power_scale = ac_phase_power_scale;
     if (bus_pos >= 0 && bus_pos < static_cast<int>(dyn.initial_power_flow.vm.size())) {
       p.nominal_voltage_pu = positive_or(
           dyn.initial_power_flow.vm[static_cast<std::size_t>(bus_pos)],

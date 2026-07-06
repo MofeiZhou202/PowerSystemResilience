@@ -411,37 +411,21 @@ HybridPowerSystem make_psd_test01_omib_case() {
   return sys;
 }
 
+HybridPowerSystem make_psd_simple_marconato_three_bus_case();
+void apply_psd_onedoneq_profile(Generator& machine,
+                                std::string source_id,
+                                bool avr_type1);
+
 HybridPowerSystem make_psd_onedoneq_three_bus_subset_case() {
-  HybridPowerSystem sys = make_psd_genrou_three_bus_subset_case();
+  HybridPowerSystem sys = make_psd_simple_marconato_three_bus_case();
   sys.name = "psd_onedoneq_three_bus_subset";
-  REQUIRE(sys.ac.generators.size() >= 2);
-  auto& machine = sys.ac.generators[1];
-  machine.dynamic_model.standard = "PowerSystems";
-  machine.dynamic_model.model_name = "OneDOneQMachine";
-  machine.dynamic_model.source_id = "PowerSimulationsDynamics:test_case02_onedoneq";
-  machine.ra_pu = 0.0;
-  machine.xd_pu = 1.3125;
-  machine.xq_pu = 1.2578;
-  machine.xdp_pu = 0.1813;
-  machine.xdpp_pu = 0.0;
-  machine.td0p_s = 5.89;
-  machine.td0pp_s = 0.0;
-  machine.inertia_h = 3.01;
-  machine.dynamic_model.parameters = {
-      {"H", 3.01},
-      {"D", 0.0},
-      {"R", 0.0},
-      {"Xd", 1.3125},
-      {"Xq", 1.2578},
-      {"Xd_p", 0.1813},
-      {"Xq_p", 0.25},
-      {"Td0_p", 5.89},
-      {"Tq0_p", 0.6},
-  };
+  REQUIRE(sys.ac.generators.size() == 2);
+  for (auto& machine : sys.ac.generators) {
+    apply_psd_onedoneq_profile(
+        machine, "PowerSimulationsDynamics:test_case02_onedoneq", true);
+  }
   return sys;
 }
-
-HybridPowerSystem make_psd_simple_marconato_three_bus_case();
 
 void apply_psd_onedoneq_profile(Generator& machine,
                                 std::string source_id,
@@ -1712,6 +1696,393 @@ HybridPowerSystem make_psd_genrou_sexs_ieeest_case() {
       {"Vcl", 0.0},
   };
   machine.dynamic_model.components.push_back(std::move(pss));
+  return sys;
+}
+
+std::pair<double, double> psd_quadratic_saturation_coeffs(double se1,
+                                                          double se12) {
+  if (se1 == 0.0 || se12 == 0.0) return {0.0, 0.0};
+  const double e1 = 1.0;
+  const double e2 = 1.2;
+  const double denom = se12 * e2 - se1 * e1;
+  if (std::abs(denom) < 1e-12 || se12 <= se1) return {0.0, 0.0};
+  const double radicand = e1 * e2 * se1 * se12 * (e1 - e2) * (e1 - e2);
+  const double sat_a =
+      (e1 * e2 * (se12 - se1) - std::sqrt(std::max(0.0, radicand))) / denom;
+  const double sat_b = se12 * e2 / ((e2 - sat_a) * (e2 - sat_a));
+  return {sat_a, sat_b};
+}
+
+void set_machine_saturation_from_psse_points(Generator& machine,
+                                             double se1,
+                                             double se12) {
+  const auto [sat_a, sat_b] = psd_quadratic_saturation_coeffs(se1, se12);
+  machine.dynamic_model.parameters["Sat_A"] = sat_a;
+  machine.dynamic_model.parameters["Sat_B"] = sat_b;
+}
+
+hacdcpf::DynamicModelComponentProfile make_controller_component(
+    std::string type,
+    std::string model,
+    std::string parameter_set,
+    std::map<std::string, double> params,
+    std::string standard = "PSS/E") {
+  hacdcpf::DynamicModelComponentProfile c;
+  c.type = std::move(type);
+  c.model = std::move(model);
+  c.standard = std::move(standard);
+  c.parameter_set = std::move(parameter_set);
+  c.parameters = std::move(params);
+  return c;
+}
+
+hacdcpf::DynamicModelComponentProfile psd_esac1a_component(
+    const std::string& parameter_set) {
+  return make_controller_component(
+      "exciter",
+      "ESAC1A",
+      parameter_set,
+      {{"Tr", 0.01},
+       {"Tc", 0.10},
+       {"Tb", 0.0},
+       {"Ka", 200.0},
+       {"Ta", 0.05},
+       {"Va_max", 7.0},
+       {"Va_min", -7.0},
+       {"Te", 1.333},
+       {"Kf", 0.02},
+       {"Tf", 0.8},
+       {"Kc", 0.0},
+       {"Kd", 0.0},
+       {"Ke", 1.0},
+       {"Emax", 10.0},
+       {"Emin", -10.0}});
+}
+
+hacdcpf::DynamicModelComponentProfile psd_sexs_component(
+    const std::string& parameter_set,
+    double gain = 20.0) {
+  return make_controller_component("exciter",
+                                   "SEXS",
+                                   parameter_set,
+                                   {{"Ta_Tb", 0.4},
+                                    {"Tb", 5.0},
+                                    {"K", gain},
+                                    {"Te", 1.0},
+                                    {"Emin", -50.0},
+                                    {"Emax", 50.0}});
+}
+
+HybridPowerSystem make_psd_genrou_esac1a_case() {
+  HybridPowerSystem sys = make_psd_genrou_three_bus_subset_case();
+  sys.name = "psd_genrou_esac1a";
+  REQUIRE(sys.ac.generators.size() >= 2);
+  auto& machine = sys.ac.generators[1];
+  machine.dynamic_model.source_id = "PowerSimulationsDynamics:test20_esac1a";
+  set_machine_saturation_from_psse_points(machine, 0.1, 0.8);
+  machine.dynamic_model.components.clear();
+  machine.dynamic_model.components.push_back(
+      psd_esac1a_component("PowerSimulationsDynamics:test20_esac1a"));
+  return sys;
+}
+
+HybridPowerSystem make_psd_genrou_tgov1_esac1a_case() {
+  HybridPowerSystem sys = make_psd_genrou_esac1a_case();
+  sys.name = "psd_genrou_tgov1_esac1a";
+  REQUIRE(sys.ac.generators.size() >= 2);
+  auto& machine = sys.ac.generators[1];
+  machine.dynamic_model.source_id = "PowerSimulationsDynamics:test22_tgov1";
+  set_machine_saturation_from_psse_points(machine, 0.0, 1.0);
+  machine.dynamic_model.components.insert(
+      machine.dynamic_model.components.begin(),
+      make_controller_component("governor",
+                                "TGOV1",
+                                "PowerSimulationsDynamics:test22_tgov1",
+                                {{"R", 0.05},
+                                 {"T1", 0.2},
+                                 {"Vmax", 1.2},
+                                 {"Vmin", 0.1},
+                                 {"T2", 0.3},
+                                 {"T3", 0.8},
+                                 {"D_T", 0.0}}));
+  return sys;
+}
+
+HybridPowerSystem make_psd_genrou_gast_case() {
+  HybridPowerSystem sys = make_psd_genrou_esac1a_case();
+  sys.name = "psd_genrou_gast";
+  REQUIRE(sys.ac.generators.size() >= 2);
+  auto& machine = sys.ac.generators[1];
+  machine.dynamic_model.source_id = "PowerSimulationsDynamics:test21_gast";
+  set_machine_saturation_from_psse_points(machine, 0.0, 1.0);
+  machine.dynamic_model.components.insert(
+      machine.dynamic_model.components.begin(),
+      make_controller_component("governor",
+                                "GAST",
+                                "PowerSimulationsDynamics:test21_gast",
+                                {{"R", 0.05},
+                                 {"T1", 0.2},
+                                 {"T2", 0.2},
+                                 {"T3", 2.0},
+                                 {"Vmax", 1.1},
+                                 {"Vmin", 0.01},
+                                 {"D_T", 0.0}}));
+  return sys;
+}
+
+HybridPowerSystem make_psd_genrou_hygov_case() {
+  HybridPowerSystem sys = make_psd_genrou_three_bus_subset_case();
+  sys.name = "psd_genrou_hygov";
+  REQUIRE(sys.ac.generators.size() >= 2);
+  auto& machine = sys.ac.generators[1];
+  machine.dynamic_model.source_id = "PowerSimulationsDynamics:test31_hygov";
+  set_machine_saturation_from_psse_points(machine, 0.0, 1.0);
+  machine.dynamic_model.components.clear();
+  machine.dynamic_model.components.push_back(
+      psd_sexs_component("PowerSimulationsDynamics:test31_hygov"));
+  machine.dynamic_model.components.push_back(
+      make_controller_component("governor",
+                                "HYGOV",
+                                "PowerSimulationsDynamics:test31_hygov",
+                                {{"R", 0.05},
+                                 {"Tr", 12.0},
+                                 {"Tf", 0.5},
+                                 {"Tg", 20.5},
+                                 {"Tw", 15.0},
+                                 {"Gmax", 1.0},
+                                 {"Gmin", 0.0},
+                                 {"D_T", 0.0}}));
+  return sys;
+}
+
+HybridPowerSystem make_psd_genrou_scrx_case() {
+  HybridPowerSystem sys = make_psd_genrou_three_bus_subset_case();
+  sys.name = "psd_genrou_scrx";
+  REQUIRE(sys.ac.generators.size() >= 2);
+  auto& machine = sys.ac.generators[1];
+  machine.dynamic_model.source_id = "PowerSimulationsDynamics:test47_scrx";
+  set_machine_saturation_from_psse_points(machine, 0.1, 0.8);
+  machine.dynamic_model.components.clear();
+  machine.dynamic_model.components.push_back(
+      make_controller_component("exciter",
+                                "SCRX",
+                                "PowerSimulationsDynamics:test47_scrx",
+                                {{"Ta", 0.4},
+                                 {"Tb", 5.0},
+                                 {"K", 20.0},
+                                 {"Te", 1.0},
+                                 {"Emin", -50.0},
+                                 {"Emax", 50.0}}));
+  return sys;
+}
+
+HybridPowerSystem make_psd_genrou_pidgov_case(const std::string& model) {
+  HybridPowerSystem sys = make_psd_genrou_three_bus_subset_case();
+  sys.name = "psd_genrou_" + model;
+  REQUIRE(sys.ac.generators.size() >= 2);
+  auto& machine = sys.ac.generators[1];
+  machine.dynamic_model.source_id = "PowerSimulationsDynamics:" + model;
+  set_machine_saturation_from_psse_points(machine, 0.0, 1.0);
+  machine.dynamic_model.components.clear();
+  machine.dynamic_model.components.push_back(
+      psd_sexs_component("PowerSimulationsDynamics:" + model));
+  machine.dynamic_model.components.push_back(
+      make_controller_component("governor",
+                                model,
+                                "PowerSimulationsDynamics:" + model,
+                                {{"R", 0.05},
+                                 {"T_reg", 0.01},
+                                 {"Ki", 5.0},
+                                 {"Kd", 1.0},
+                                 {"Ta", 0.1},
+                                 {"Tb", 0.5},
+                                 {"Tg", 0.02},
+                                 {"Tw", 3.25},
+                                 {"Gmax", 1.0},
+                                 {"Gmin", 0.0},
+                                 {"Vmax", 1.1},
+                                 {"Vmin", 0.0}}));
+  return sys;
+}
+
+HybridPowerSystem make_psd_gencls_degov_case(const std::string& model) {
+  HybridPowerSystem sys = make_psd_genrou_three_bus_subset_case();
+  sys.name = "psd_gencls_" + model;
+  REQUIRE(sys.ac.generators.size() >= 2);
+  auto& machine = sys.ac.generators[1];
+  machine.dynamic_model.standard = "PSS/E";
+  machine.dynamic_model.model_name = "ClassicalMachine";
+  machine.dynamic_model.source_id = "PowerSimulationsDynamics:" + model;
+  machine.inertia_h = 8.0;
+  machine.dynamic_model.parameters = {
+      {"H", 8.0},
+      {"D", 0.03},
+      {"R", 0.0},
+      {"Xd_p", 0.25},
+      {"eq_p", 1.0},
+  };
+  machine.dynamic_model.components.clear();
+  machine.dynamic_model.components.push_back(
+      make_controller_component("governor",
+                                model,
+                                "PowerSimulationsDynamics:" + model,
+                                {{"R", model == "DEGOV1" ? 0.070 : 0.0},
+                                 {"T1", model == "DEGOV1" ? 0.1905 : 0.0},
+                                 {"Ta", model == "DEGOV1" ? 0.0476 : 0.0},
+                                 {"Tb", model == "DEGOV1" ? 0.018 : 0.0},
+                                 {"Tf", model == "DEGOV1" ? 5.1 : 12.0},
+                                 {"Tg", model == "DEGOV1" ? 0.322 : 5.0},
+                                 {"T3", model == "DEGOV1" ? 1.0 : 0.2},
+                                 {"Vmax", 2.0},
+                                 {"Vmin", -0.1}}));
+  return sys;
+}
+
+HybridPowerSystem make_psd_tgsimple_case() {
+  HybridPowerSystem sys = make_psd_onedoneq_three_bus_subset_case();
+  sys.name = "psd_tgsimple";
+  REQUIRE(sys.ac.generators.size() >= 2);
+  auto& machine = sys.ac.generators[1];
+  machine.dynamic_model.source_id = "PowerSimulationsDynamics:test62_tgsimple";
+  machine.dynamic_model.components.clear();
+  machine.dynamic_model.components.push_back(
+      make_controller_component("governor",
+                                "TGSimple",
+                                "PowerSimulationsDynamics:test62_tgsimple",
+                                {{"T1", 0.5}, {"Vmax", 1.1}, {"Vmin", 0.0}},
+                                "PowerSystems"));
+  return sys;
+}
+
+HybridPowerSystem make_psd_pss2_omib_case(const std::string& pss_model) {
+  HybridPowerSystem sys;
+  sys.name = "psd_" + pss_model + "_omib";
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 60.0;
+
+  ACBus b1;
+  b1.index = 1;
+  b1.name = "GENBUS";
+  b1.bus_type = BusType::PV;
+  b1.base_kv = 24.0;
+  b1.vm_pu = 1.0;
+  b1.va_deg = 25.0850;
+  b1.in_service = true;
+
+  ACBus b2;
+  b2.index = 2;
+  b2.name = "INFBUS";
+  b2.bus_type = BusType::SLACK;
+  b2.base_kv = 24.0;
+  b2.vm_pu = 0.95512;
+  b2.va_deg = 0.0;
+  b2.in_service = true;
+  sys.ac.buses = {b1, b2};
+
+  ACBranch br;
+  br.index = 1;
+  br.from_bus = 1;
+  br.to_bus = 2;
+  br.name = "GENBUS-INFBUS-i_1";
+  br.r_pu = 0.0;
+  br.x_pu = 0.45;
+  br.tap = 1.0;
+  br.in_service = true;
+  sys.ac.branches = {br};
+
+  ExternalGrid source;
+  source.index = 2;
+  source.bus = 2;
+  source.name = "INFBUS";
+  source.vm_pu = 0.95512;
+  source.r_pu = 0.0;
+  source.x_pu = 0.01;
+  source.in_service = true;
+  sys.ac.external_grids = {source};
+
+  Generator gen;
+  gen.index = 1;
+  gen.bus = 1;
+  gen.name = "generator-1-1";
+  gen.is_slack = false;
+  gen.in_service = true;
+  gen.pg_mw = 90.0;
+  gen.qg_mvar = 29.993;
+  gen.vg_pu = 1.0;
+  gen.pmax_mw = 9999.0;
+  gen.pmin_mw = -9999.0;
+  gen.qmax_mvar = 9999.0;
+  gen.qmin_mvar = -9999.0;
+  gen.ra_pu = 0.0;
+  gen.xd_pu = 2.2;
+  gen.xq_pu = 2.2;
+  gen.xdp_pu = 0.30;
+  gen.xdpp_pu = 0.30;
+  gen.td0p_s = 7.0;
+  gen.td0pp_s = 999.0;
+  gen.inertia_h = 4.0;
+  gen.dynamic_model.standard = "PSS/E";
+  gen.dynamic_model.model_name = "GENROU";
+  gen.dynamic_model.source_id = "PowerSimulationsDynamics:test_" + pss_model;
+  gen.dynamic_model.parameters = {
+      {"H", 4.0},
+      {"D", 0.0},
+      {"R", 0.0},
+      {"Xd", 2.2},
+      {"Xq", 2.2},
+      {"Xd_p", 0.30},
+      {"Xq_p", 0.30},
+      {"Xd_pp", 0.30},
+      {"Xl", 0.20},
+      {"Td0_p", 7.0},
+      {"Td0_pp", 999.0},
+      {"Tq0_p", 0.4},
+      {"Tq0_pp", 999.0},
+      {"Sat_A", 0.0},
+      {"Sat_B", 0.0},
+  };
+  gen.dynamic_model.components.push_back(make_controller_component(
+      "exciter",
+      "SEXS",
+      "PowerSimulationsDynamics:test_" + pss_model,
+      {{"Ta_Tb", 1.0}, {"Tb", 1.0}, {"K", 120.0}, {"Te", 0.4},
+       {"Emin", -10.0}, {"Emax", 10.0}}));
+  std::map<std::string, double> pss_params = {
+      {"input_code_1", 1.0},
+      {"input_code_2", 3.0},
+      {"M_rtf", 5.0},
+      {"N_rtf", 1.0},
+      {"Tw1", 1.5},
+      {"Tw2", 1.5},
+      {"T6", 0.001},
+      {"Tw3", 1.5},
+      {"Tw4", 0.0},
+      {"T7", 1.5},
+      {"Ks2", 0.1875},
+      {"Ks3", 1.0},
+      {"T8", 0.5},
+      {"T9", 0.1},
+      {"Ks1", 2.0},
+      {"T1", 0.59451},
+      {"T2", 0.0447},
+      {"T3", 0.59451},
+      {"T4", 0.0447},
+      {"T10", 1.0},
+      {"T11", 1.0},
+      {"Vstmax", 0.1},
+      {"Vstmin", -0.1},
+  };
+  if (pss_model == "PSS2C") {
+    pss_params["T12"] = 1.0;
+    pss_params["T13"] = 1.0;
+  }
+  gen.dynamic_model.components.push_back(make_controller_component(
+      "pss",
+      pss_model,
+      "PowerSimulationsDynamics:test_" + pss_model,
+      std::move(pss_params)));
+  sys.ac.generators = {gen};
   return sys;
 }
 
@@ -3048,6 +3419,45 @@ HybridPowerSystem make_manifest_system(const ManifestExecutableCase& spec) {
   if (spec.hacdcpf_fixture == "make_psd_genrou_avrtype1_case") {
     return make_psd_genrou_avrtype1_case();
   }
+  if (spec.hacdcpf_fixture == "make_psd_genrou_esac1a_case") {
+    return make_psd_genrou_esac1a_case();
+  }
+  if (spec.hacdcpf_fixture == "make_psd_genrou_tgov1_esac1a_case") {
+    return make_psd_genrou_tgov1_esac1a_case();
+  }
+  if (spec.hacdcpf_fixture == "make_psd_genrou_gast_case") {
+    return make_psd_genrou_gast_case();
+  }
+  if (spec.hacdcpf_fixture == "make_psd_genrou_hygov_case") {
+    return make_psd_genrou_hygov_case();
+  }
+  if (spec.hacdcpf_fixture == "make_psd_genrou_scrx_case") {
+    return make_psd_genrou_scrx_case();
+  }
+  if (spec.hacdcpf_fixture == "make_psd_gencls_degov_case") {
+    return make_psd_gencls_degov_case("DEGOV");
+  }
+  if (spec.hacdcpf_fixture == "make_psd_genrou_pidgov_case") {
+    return make_psd_genrou_pidgov_case("PIDGOV");
+  }
+  if (spec.hacdcpf_fixture == "make_psd_genrou_wpidhy_case") {
+    return make_psd_genrou_pidgov_case("WPIDHY");
+  }
+  if (spec.hacdcpf_fixture == "make_psd_tgsimple_case") {
+    return make_psd_tgsimple_case();
+  }
+  if (spec.hacdcpf_fixture == "make_psd_gencls_degov1_case") {
+    return make_psd_gencls_degov_case("DEGOV1");
+  }
+  if (spec.hacdcpf_fixture == "make_psd_pss2a_omib_case") {
+    return make_psd_pss2_omib_case("PSS2A");
+  }
+  if (spec.hacdcpf_fixture == "make_psd_pss2b_omib_case") {
+    return make_psd_pss2_omib_case("PSS2B");
+  }
+  if (spec.hacdcpf_fixture == "make_psd_pss2c_omib_case") {
+    return make_psd_pss2_omib_case("PSS2C");
+  }
   if (spec.hacdcpf_fixture == "make_psd_genrou_sexs_case") {
     return make_psd_genrou_sexs_case();
   }
@@ -3110,6 +3520,15 @@ DynamicResults run_manifest_hacdcpf_case(const ManifestExecutableCase& spec) {
   DynamicSolverOptions opt = fast_options();
   opt.solver_type = manifest_solver_type(spec.hacdcpf_solver);
   opt.run_power_flow_initialization = true;
+  const bool psd_raw_voltage_fixture =
+      spec.hacdcpf_fixture.rfind("make_psd_genrou_", 0) == 0 ||
+      spec.hacdcpf_fixture == "make_psd_onedoneq_three_bus_subset_case" ||
+      spec.hacdcpf_fixture == "make_psd_test01_omib_case" ||
+      spec.hacdcpf_fixture == "make_psd_test12_multimachine_tgtype2_case" ||
+      spec.hacdcpf_fixture == "make_psd_test13_onedoneq_avr_tg_case";
+  if (psd_raw_voltage_fixture) {
+    opt.run_power_flow_initialization = false;
+  }
   opt.t_start_s = spec.t_start_s;
   opt.t_end_s = spec.t_end_s;
   opt.dt_s = spec.dt_s;
@@ -3124,6 +3543,15 @@ DynamicResults run_manifest_hacdcpf_case(const ManifestExecutableCase& spec) {
   }
   if (spec.hacdcpf_fixture == "make_psd_periodic_variable_source_case") {
     opt.enforce_voltage_health_check = false;
+  }
+  if (spec.hacdcpf_fixture == "make_psd_genrou_esac1a_case" ||
+      spec.hacdcpf_fixture == "make_psd_genrou_gast_case" ||
+      spec.hacdcpf_fixture == "make_psd_genrou_tgov1_esac1a_case") {
+    opt.use_adaptive_step = true;
+    opt.max_newton_iters = 30;
+    opt.max_step_halving = 18;
+    opt.min_accepted_step_s = 1e-9;
+    opt.newton_tol = 1e-6;
   }
 
   DynamicModelBuilder builder;
@@ -4616,6 +5044,23 @@ TEST_CASE("PSD executable manifest gates promoted full-contract rows vs MassMatr
 
     const DynamicResults result = run_manifest_hacdcpf_case(spec);
     INFO(spec.id << ": " << result.message);
+    INFO(spec.id << ": trim_converged="
+                 << result.initialization.dynamic_trim_converged
+                 << ", trim_iters="
+                 << result.initialization.dynamic_trim_iterations
+                 << ", fast_dxdt_inf_norm="
+                 << result.initialization.dynamic_fast_dxdt_inf_norm);
+    INFO(spec.id << ": steps=" << result.steps
+                 << ", failed_step=" << result.failed_step
+                 << ", rejected_steps=" << result.rejected_steps
+                 << ", min_dt=" << result.min_accepted_step_s
+                 << ", max_dt=" << result.max_accepted_step_s);
+    for (const auto& diag : result.initialization.dynamic_residual_diagnostics) {
+      INFO(spec.id << ": residual contributor "
+                   << diag.device_type << "#" << diag.component_index
+                   << " state[" << diag.state_index << "] = "
+                   << diag.residual << " (" << diag.device_name << ")");
+    }
     REQUIRE(result.success);
     CHECK(result.initialization.power_flow_converged);
     CHECK(result.initialization.dynamic_trim_converged);
@@ -5022,7 +5467,7 @@ TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system tra
     DynamicEvent trip;
     trip.time_s = 1.0;
     trip.type = DynamicEventType::ACBranchTrip;
-    trip.component_index = 2;
+    trip.component_index = 1;
     trip.component_type = "AC";
     trip.label = "PSD Test 02 OneDOneQ BUS 1-BUS 3 branch trip";
     dyn.events.push_back(trip);

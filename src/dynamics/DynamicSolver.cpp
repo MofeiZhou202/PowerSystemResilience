@@ -1140,6 +1140,103 @@ bool dae_build_and_factor_jacobian(DynamicSystem& sys,
   return true;
 }
 
+bool dae_try_line_search(DynamicSystem& sys,
+                         const DaeLayout& L,
+                         double t,
+                         double dt,
+                         const Eigen::VectorXd& x_prev,
+                         const DaeStepFormula& formula,
+                         const Eigen::VectorXd& u,
+                         const Eigen::VectorXd& du,
+                         double res_norm,
+                         Eigen::VectorXd& accepted_u,
+                         Eigen::VectorXd& accepted_R,
+                         std::string& error) {
+  if (!du.allFinite()) {
+    error = "DAE Newton produced a non-finite correction";
+    return false;
+  }
+  double alpha = 1.0;
+  const double min_alpha = std::max(1e-9, sys.options.newton_damping_min);
+  double best_norm = std::numeric_limits<double>::infinity();
+  while (alpha >= min_alpha) {
+    const Eigen::VectorXd trial = u + alpha * du;
+    Eigen::VectorXd r_trial;
+    if (!dae_residual(sys, L, t, dt, trial, x_prev, formula, r_trial, error)) {
+      return false;
+    }
+    const double trial_norm = r_trial.lpNorm<Eigen::Infinity>();
+    best_norm = std::min(best_norm, trial_norm);
+    if (trial_norm <=
+        (1.0 - 1e-4 * alpha) * std::max(res_norm, sys.options.newton_tol)) {
+      accepted_u = trial;
+      accepted_R = r_trial;
+      return true;
+    }
+    alpha *= 0.5;
+  }
+  std::ostringstream os;
+  os << "DAE Newton line search failed; residual_inf=" << res_norm
+     << ", best_trial_inf=" << best_norm;
+  error = os.str();
+  return false;
+}
+
+bool dae_try_damped_least_squares_direction(DynamicSystem& sys,
+                                            const DaeLayout& L,
+                                            double t,
+                                            double dt,
+                                            const Eigen::VectorXd& x_prev,
+                                            const DaeStepFormula& formula,
+                                            const Eigen::VectorXd& u,
+                                            const Eigen::VectorXd& R,
+                                            const Eigen::SparseMatrix<double>& jacobian,
+                                            StepOutcome& outcome,
+                                            Eigen::VectorXd& accepted_u,
+                                            Eigen::VectorXd& accepted_R,
+                                            std::string& error) {
+  if (jacobian.rows() != L.n || jacobian.cols() != L.n) return false;
+  const Eigen::SparseMatrix<double> jt = jacobian.transpose();
+  const Eigen::SparseMatrix<double> normal = jt * jacobian;
+  const Eigen::VectorXd rhs = -jt * R;
+  if (!rhs.allFinite()) return false;
+
+  double diag_scale = 1.0;
+  for (int i = 0; i < L.n; ++i) {
+    diag_scale = std::max(diag_scale, std::abs(normal.coeff(i, i)));
+  }
+  std::vector<Eigen::Triplet<double>> damping_triplets;
+  damping_triplets.reserve(static_cast<std::size_t>(L.n));
+  const double res_norm = R.lpNorm<Eigen::Infinity>();
+  double lambda = 1e-8;
+  for (int attempt = 0; attempt < 10; ++attempt) {
+    damping_triplets.clear();
+    for (int i = 0; i < L.n; ++i) {
+      damping_triplets.emplace_back(i, i, lambda * diag_scale);
+    }
+    Eigen::SparseMatrix<double> damping(L.n, L.n);
+    damping.setFromTriplets(damping_triplets.begin(), damping_triplets.end());
+    Eigen::SparseMatrix<double> damped = normal + damping;
+    damped.makeCompressed();
+
+    Eigen::SparseLU<Eigen::SparseMatrix<double>> lu;
+    lu.compute(damped);
+    ++outcome.linear_factorizations;
+    if (lu.info() != Eigen::Success) {
+      lambda *= 10.0;
+      continue;
+    }
+    const Eigen::VectorXd du = lu.solve(rhs);
+    if (lu.info() == Eigen::Success &&
+        dae_try_line_search(sys, L, t, dt, x_prev, formula, u, du, res_norm,
+                            accepted_u, accepted_R, error)) {
+      return true;
+    }
+    lambda *= 10.0;
+  }
+  return false;
+}
+
 // Refresh telemetry-facing algebraic outputs and stamped currents after a step.
 void dae_finalize(DynamicSystem& sys, const DaeLayout& L, double t) {
   Eigen::SparseMatrix<std::complex<double>> Yac;
@@ -1200,25 +1297,20 @@ StepOutcome dae_theta_step(DynamicSystem& sys,
         return outcome;
       }
 
-      double alpha = 1.0;
-      bool accepted = false;
       Eigen::VectorXd accepted_R;
-      const double min_alpha = std::max(1e-9, sys.options.newton_damping_min);
-      while (alpha >= min_alpha) {
-        const Eigen::VectorXd trial = u + alpha * du;
-        Eigen::VectorXd r_trial;
-        if (!dae_residual(sys, L, t + dt, dt, trial, x_prev, formula, r_trial, error)) {
-          return outcome;
-        }
-        if (r_trial.lpNorm<Eigen::Infinity>() <=
-            (1.0 - 1e-4 * alpha) * std::max(res_norm, sys.options.newton_tol)) {
-          u = trial;
-          accepted_R = r_trial;
-          accepted = true;
-          break;
-        }
-        alpha *= 0.5;
-      }
+      Eigen::VectorXd accepted_u;
+      bool accepted = dae_try_line_search(sys,
+                                          L,
+                                          t + dt,
+                                          dt,
+                                          x_prev,
+                                          formula,
+                                          u,
+                                          du,
+                                          res_norm,
+                                          accepted_u,
+                                          accepted_R,
+                                          error);
 
       if (!accepted) {
         if (sys.options.dae_reuse_jacobian_factorization &&
@@ -1227,10 +1319,27 @@ StepOutcome dae_theta_step(DynamicSystem& sys,
           retried_with_fresh_jacobian = true;
           continue;
         }
-        error = "DAE Newton line search failed";
+        accepted = dae_try_damped_least_squares_direction(sys,
+                                                          L,
+                                                          t + dt,
+                                                          dt,
+                                                          x_prev,
+                                                          formula,
+                                                          u,
+                                                          R,
+                                                          cache.jacobian,
+                                                          outcome,
+                                                          accepted_u,
+                                                          accepted_R,
+                                                          error);
+      }
+
+      if (!accepted) {
+        if (error.empty()) error = "DAE Newton line search failed";
         return outcome;
       }
 
+      u = std::move(accepted_u);
       R = std::move(accepted_R);
       const double next_norm = R.lpNorm<Eigen::Infinity>();
       const double stale_ratio =

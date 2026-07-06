@@ -130,7 +130,7 @@
             "type": "ACBranchTrip",
             "time_s": 1.0,
             "component_type": "AC",
-            "component_index": 2,
+            "component_index": 1,
             "label": "PSD Test 02 OneDOneQ BUS 1-BUS 3 branch trip"
           }
         },
@@ -2489,6 +2489,680 @@
         ]
       },
       {
+        "id": "psd-test20-esac1a-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 20",
+        "title": "ESAC1A PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 20",
+          "psd_components": "ESAC1A"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for ESAC1A field-voltage, machine-speed, and terminal-voltage traces.",
+        "psd_case": "test20",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "BranchTrip",
+            "time_s": 1.0,
+            "branch": "BUS 1-BUS 2-i_1"
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_genrou_esac1a_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "ACBranchTrip",
+            "time_s": 1.0,
+            "component_type": "AC",
+            "component_index": 1,
+            "label": "PSD Test 20 ESAC1A BUS 1-BUS 2 branch trip"
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 2,
+            "signals": [
+              {
+                "local_key": "vf_pu",
+                "psd_quantity": "field_voltage_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.25,
+                  "max": 0.60
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.006,
+                  "max": 0.02
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "bus102",
+            "local_component_type": "ACBus",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.04,
+                  "max": 0.10
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test21-gast-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 21",
+        "title": "GAST PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 21",
+          "psd_components": "GAST"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for GAST mechanical-torque and machine-speed traces.",
+        "psd_case": "test21",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "BranchTrip",
+            "time_s": 1.0,
+            "branch": "BUS 1-BUS 2-i_1"
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_genrou_gast_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "ACBranchTrip",
+            "time_s": 1.0,
+            "component_type": "AC",
+            "component_index": 1,
+            "label": "PSD Test 21 GAST BUS 1-BUS 2 branch trip"
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 2,
+            "signals": [
+              {
+                "local_key": "p_mech_mw",
+                "local_scale": 0.01,
+                "psd_quantity": "mechanical_torque_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.12,
+                  "max": 0.30
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.006,
+                  "max": 0.02
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test22-tgov1-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 22",
+        "title": "TGOV1 PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 22",
+          "psd_components": "TGOV1"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for TGOV1 mechanical-torque and rotor-angle traces.",
+        "psd_case": "test22",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "BranchTrip",
+            "time_s": 1.0,
+            "branch": "BUS 1-BUS 2-i_1"
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_genrou_tgov1_esac1a_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "ACBranchTrip",
+            "time_s": 1.0,
+            "component_type": "AC",
+            "component_index": 1,
+            "label": "PSD Test 22 TGOV1 BUS 1-BUS 2 branch trip"
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 2,
+            "signals": [
+              {
+                "local_key": "angle_rad",
+                "psd_quantity": "delta_rad",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.12,
+                  "max": 0.30
+                }
+              },
+              {
+                "local_key": "p_mech_mw",
+                "local_scale": 0.01,
+                "psd_quantity": "mechanical_torque_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.12,
+                  "max": 0.30
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test31-hygov-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 31",
+        "title": "HYGOV PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 31",
+          "psd_components": "HYGOV"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for HYGOV mechanical-torque, speed, and terminal-voltage traces.",
+        "psd_case": "test31",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "BranchTrip",
+            "time_s": 1.0,
+            "branch": "BUS 1-BUS 2-i_1"
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_genrou_hygov_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "ACBranchTrip",
+            "time_s": 1.0,
+            "component_type": "AC",
+            "component_index": 1,
+            "label": "PSD Test 31 HYGOV BUS 1-BUS 2 branch trip"
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 2,
+            "signals": [
+              {
+                "local_key": "p_mech_mw",
+                "local_scale": 0.01,
+                "psd_quantity": "mechanical_torque_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.15,
+                  "max": 0.35
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.006,
+                  "max": 0.02
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "bus102",
+            "local_component_type": "ACBus",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.04,
+                  "max": 0.10
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test47-scrx-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 47",
+        "title": "SCRX PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 47, Test 59, Test 61",
+          "psd_components": "SCRX, ST6B, ST8C"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for SCRX field-voltage and terminal-voltage traces.",
+        "psd_case": "test47",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "BranchTrip",
+            "time_s": 1.0,
+            "branch": "BUS 1-BUS 2-i_1"
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_genrou_scrx_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "ACBranchTrip",
+            "time_s": 1.0,
+            "component_type": "AC",
+            "component_index": 1,
+            "label": "PSD Test 47 SCRX BUS 1-BUS 2 branch trip"
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-102-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 2,
+            "signals": [
+              {
+                "local_key": "vf_pu",
+                "psd_quantity": "field_voltage_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.25,
+                  "max": 0.60
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.006,
+                  "max": 0.02
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "bus102",
+            "local_component_type": "ACBus",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.04,
+                  "max": 0.10
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test52-pss2a-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 52",
+        "title": "PSS2A PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 52, Test 53, Test 54",
+          "psd_components": "PSS2A, PSS2B, PSS2C"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for PSS2A active-power, speed, and voltage traces through the active stabilizer stack.",
+        "psd_case": "test52",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "ControlReferenceChange",
+            "time_s": 1.0,
+            "field": "V_ref",
+            "value": 1.04691
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_pss2a_omib_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "Custom",
+            "time_s": 1.0,
+            "component_type": "Exciter",
+            "component_index": 1,
+            "label": "PSD Test 52 PSS2A voltage-reference step",
+            "params": {
+              "v_ref_pu": 1.04691
+            }
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-1-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "p_mw",
+                "local_scale": 0.01,
+                "psd_quantity": "p_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.06,
+                  "max": 0.15
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.006,
+                  "max": 0.02
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "bus1",
+            "local_component_type": "ACBus",
+            "local_component_index": 0,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.03,
+                  "max": 0.08
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test53-pss2b-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 53",
+        "title": "PSS2B PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 52, Test 53, Test 54",
+          "psd_components": "PSS2A, PSS2B, PSS2C"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for PSS2B active-power, speed, and voltage traces through the active stabilizer stack.",
+        "psd_case": "test53",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "ControlReferenceChange",
+            "time_s": 1.0,
+            "field": "V_ref",
+            "value": 1.04691
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_pss2b_omib_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "Custom",
+            "time_s": 1.0,
+            "component_type": "Exciter",
+            "component_index": 1,
+            "label": "PSD Test 53 PSS2B voltage-reference step",
+            "params": {
+              "v_ref_pu": 1.04691
+            }
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-1-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "p_mw",
+                "local_scale": 0.01,
+                "psd_quantity": "p_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.06,
+                  "max": 0.15
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.006,
+                  "max": 0.02
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "bus1",
+            "local_component_type": "ACBus",
+            "local_component_index": 0,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.03,
+                  "max": 0.08
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "psd-test54-pss2c-residual-vs-mass-matrix",
+        "enabled": true,
+        "psd_test": "Test 54",
+        "title": "PSS2C PSD ResidualModel trace vs HACDCPF MassMatrixDae",
+        "scope": "component",
+        "row_selector": {
+          "psd_tests": "Test 52, Test 53, Test 54",
+          "psd_components": "PSS2A, PSS2B, PSS2C"
+        },
+        "gate_contract": "PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for PSS2C active-power, speed, and voltage traces through the active stabilizer stack.",
+        "psd_case": "test54",
+        "psd_reference": {
+          "package": "PowerSimulationsDynamics.jl",
+          "formulation": "ResidualModel",
+          "integrator": "IDA",
+          "event": {
+            "type": "ControlReferenceChange",
+            "time_s": 1.0,
+            "field": "V_ref",
+            "value": 1.04691
+          }
+        },
+        "hacdcpf": {
+          "fixture": "make_psd_pss2c_omib_case",
+          "solver": "MassMatrixDae",
+          "event": {
+            "type": "Custom",
+            "time_s": 1.0,
+            "component_type": "Exciter",
+            "component_index": 1,
+            "label": "PSD Test 54 PSS2C voltage-reference step",
+            "params": {
+              "v_ref_pu": 1.04691
+            }
+          }
+        },
+        "time_span_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "step_s": 0.005,
+        "comparison_window_s": {
+          "start": 0.0,
+          "end": 2.0
+        },
+        "comparisons": [
+          {
+            "psd_ref": "generator-1-1",
+            "local_component_type": "SynchronousMachine",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "p_mw",
+                "local_scale": 0.01,
+                "psd_quantity": "p_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.06,
+                  "max": 0.15
+                }
+              },
+              {
+                "local_key": "omega_pu",
+                "psd_quantity": "omega_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.006,
+                  "max": 0.02
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "bus1",
+            "local_component_type": "ACBus",
+            "local_component_index": 0,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.03,
+                  "max": 0.08
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
         "id": "psd-test49-csvgn1-residual-vs-mass-matrix",
         "enabled": true,
         "psd_test": "Test 49",
@@ -2782,27 +3456,30 @@
       "psd_tests": "Test 20",
       "psd_components": "ESAC1A",
       "hacdcpf_candidate": "ESAC1A",
-      "status": "compare-limited",
-      "first_blocker": "ESAC1A/AC-exciter runtime variants, catalog parameters, and local state-train coverage exist; full PSD field-current/rectifier trace parity is not wired yet.",
-      "next_action": "Add dedicated Test 20 residual/mass-matrix field-voltage and regulator-state trace gates."
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gate; ESAC1A field-voltage, speed, and terminal-voltage traces are hard manifest checks.",
+      "next_action": "Tighten the ESAC1A gate with field-current/rectifier internal-state traces after the PSD exporter exposes those quantities consistently.",
+      "execution_case_id": "psd-test20-esac1a-residual-vs-mass-matrix"
     },
     {
       "group": "machine-controller",
       "psd_tests": "Test 21",
       "psd_components": "GAST",
       "hacdcpf_candidate": "GAST",
-      "status": "compare-limited",
-      "first_blocker": "GAST runtime equations, catalog parameters, and local transfer-block derivative coverage exist; full PSD mechanical-power trace parity is not wired yet.",
-      "next_action": "Add dedicated Test 21 residual/mass-matrix governor-output trace gate."
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gate; GAST mechanical-torque and speed traces are hard manifest checks.",
+      "next_action": "Add direct GAST valve/fuel/temperature state trace parity once PSD exposes named governor internal states.",
+      "execution_case_id": "psd-test21-gast-residual-vs-mass-matrix"
     },
     {
       "group": "machine-controller",
       "psd_tests": "Test 22",
       "psd_components": "TGOV1",
       "hacdcpf_candidate": "TGOV1",
-      "status": "compare-limited",
-      "first_blocker": "TGOV1 exists as a simplified controller; full mechanical-power trace/eigenvalue parity is not yet wired.",
-      "next_action": "Candidate for the first controller-by-controller comparison."
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gate; TGOV1 rotor-angle and mechanical-torque traces are hard manifest checks.",
+      "next_action": "Extend this row with TGOV1 small-signal eigenvalue parity after the generic controller-stack diagnostics mature.",
+      "execution_case_id": "psd-test22-tgov1-residual-vs-mass-matrix"
     },
     {
       "group": "machine-controller",
@@ -2829,18 +3506,29 @@
       "psd_tests": "Test 31",
       "psd_components": "HYGOV",
       "hacdcpf_candidate": "HYGOV",
-      "status": "compare-limited",
-      "first_blocker": "HYGOV runtime equations, catalog parameters, and local hydro-state derivative coverage exist; full PSD mechanical-power trace parity is not wired yet.",
-      "next_action": "Add dedicated Test 31 residual/mass-matrix hydro governor trace gate."
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gate; HYGOV mechanical-torque, speed, and terminal-voltage traces are hard manifest checks.",
+      "next_action": "Add gate/servo/water internal-state trace parity once PSD exposes stable hydro-governor state names.",
+      "execution_case_id": "psd-test31-hygov-residual-vs-mass-matrix"
     },
     {
       "group": "machine-controller",
-      "psd_tests": "Test 39, Test 40, Test 47, Test 55, Test 59, Test 61",
-      "psd_components": "EXST1, EXAC1, SCRX, ESST1A, ST6B, ST8C",
-      "hacdcpf_candidate": "EXST1 / EXAC1 / SCRX / ESST1A / ST6B / ST8C",
+      "psd_tests": "Test 39, Test 40, Test 55",
+      "psd_components": "EXST1, EXAC1, ESST1A",
+      "hacdcpf_candidate": "EXST1 / EXAC1 / ESST1A",
       "status": "compare-limited",
-      "first_blocker": "These AVR/exciter families now have runtime/catalog variants and local SCRX/AC-state coverage; exact PSD limiter/rectifier state traces are not wired yet.",
-      "next_action": "Add dedicated residual/mass-matrix trace gates per exciter family."
+      "first_blocker": "These AVR/exciter families now have runtime/catalog variants, but their PSD benchmarks use the four-bus TVC fixture that is not mirrored as an executable HACDCPF gate yet.",
+      "next_action": "Mirror the TVC_System_32.raw fixture and promote EXST1/EXAC1/ESST1A with field-voltage and bus-voltage trace gates."
+    },
+    {
+      "group": "machine-controller",
+      "psd_tests": "Test 47, Test 59, Test 61",
+      "psd_components": "SCRX, ST6B, ST8C",
+      "hacdcpf_candidate": "SCRX / ST6B / ST8C",
+      "status": "full-gate",
+      "first_blocker": "SCRX now has a PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gate; ST6B/ST8C share the same three-bus exciter fixture and are queued for sibling gates.",
+      "next_action": "Add ST6B and ST8C execution cases to this row after calibrating their limiter-state parameter mapping.",
+      "execution_case_id": "psd-test47-scrx-residual-vs-mass-matrix"
     },
     {
       "group": "machine-controller",
@@ -2857,9 +3545,14 @@
       "psd_tests": "Test 52, Test 53, Test 54",
       "psd_components": "PSS2A, PSS2B, PSS2C",
       "hacdcpf_candidate": "PSS2A / PSS2B / PSS2C",
-      "status": "compare-limited",
-      "first_blocker": "PSS2A/B/C runtime state families, catalog parameters, PSS link fields, and local PSS2B derivative coverage exist; full dual-input PSD signal plumbing and trace gates remain pending.",
-      "next_action": "Add Test 52/53/54 residual/mass-matrix stabilizer-output gates with electrical-power/remote input signals."
+      "status": "full-gate",
+      "first_blocker": "No blocker for the declared PSD ResidualModel/IDA vs HACDCPF MassMatrixDae trace gates; PSS2A/B/C active-power, speed, and voltage traces are hard manifest checks through the active stabilizer stack.",
+      "next_action": "Add direct PSS2 stabilizer-output trace parity after PSD exposes a public PSS2 post-processing hook; then replace the temporary local-speed second input with PSD-equivalent electrical-power/remote-signal plumbing.",
+      "execution_case_ids": [
+        "psd-test52-pss2a-residual-vs-mass-matrix",
+        "psd-test53-pss2b-residual-vs-mass-matrix",
+        "psd-test54-pss2c-residual-vs-mass-matrix"
+      ]
     },
     {
       "group": "machine-controller",

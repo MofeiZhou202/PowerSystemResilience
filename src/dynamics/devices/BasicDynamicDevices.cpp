@@ -781,6 +781,19 @@ double avr_saturation(double ae, double be, double vf) {
   return ae * std::exp(be * std::abs(vf));
 }
 
+double ac_exciter_saturation(double ae, double be, double ve) {
+  if ((ae == 0.0 && be == 0.0) || std::abs(ve) < kMinVoltage) return 0.0;
+  return be * (ve - ae) * (ve - ae) / ve;
+}
+
+double exciter_rectifier(double in) {
+  if (in <= 0.0) return 1.0;
+  if (in <= 0.433) return 1.0 - 0.577 * in;
+  if (in < 0.75) return std::sqrt(std::max(0.0, 0.75 - in * in));
+  if (in <= 1.0) return 1.732 * (1.0 - in);
+  return 0.0;
+}
+
 double pss_output_limiter(double vss, double vct, double vcl, double vcu) {
   if (vcl == 0.0 || vcu == 0.0) return vss;
   return (vcl <= vct && vct <= vcu) ? vss : 0.0;
@@ -4323,6 +4336,84 @@ bool exciter_is_extended(ExciterModel model) {
          model == ExciterModel::ST8C;
 }
 
+bool exciter_has_terminal_compounding(ExciterModel model) {
+  return model == ExciterModel::ST6B ||
+         model == ExciterModel::ST8C ||
+         model == ExciterModel::ESST1A;
+}
+
+bool exciter_is_ac1a(ExciterModel model) {
+  return model == ExciterModel::ESAC1A ||
+         model == ExciterModel::EXAC1;
+}
+
+double nonzero_signed_gain(double gain) {
+  if (std::abs(gain) >= 1e-9) return gain;
+  return gain < 0.0 ? -1e-9 : 1e-9;
+}
+
+double lead_lag_equilibrium_state(double u,
+                                  double k,
+                                  double numerator,
+                                  double denominator) {
+  return k * (1.0 - numerator / control_time(denominator)) * u;
+}
+
+double high_pass_equilibrium_state(double u, double k, double denominator) {
+  return -(k / control_time(denominator)) * u;
+}
+
+struct ExtendedExciterEquilibrium {
+  double vm{1.0};
+  double x1{0.0};
+  double x2{0.0};
+  double x3{0.0};
+  double x4{0.0};
+  double vref{1.0};
+};
+
+ExtendedExciterEquilibrium extended_exciter_equilibrium(
+    const ExciterDynamicParams& params,
+    double vt,
+    double vf,
+    double vs) {
+  ExtendedExciterEquilibrium eq;
+  eq.vm = vt;
+  eq.x3 = vf;
+  const double ka = nonzero_signed_gain(params.ka);
+  double error = vf / ka;
+  if (params.model != ExciterModel::SCRX) {
+    if (exciter_is_ac1a(params.model)) {
+      const double ve = vf;
+      const double xad_ifd = vf;
+      const double se = ac_exciter_saturation(params.ae, params.be, ve);
+      const double vfe = params.kd * xad_ifd + params.ke * ve + se * ve;
+      const double tc_tb = std::abs(params.tb_s) <= kMinTimeConstant
+                               ? 0.0
+                               : params.tc_s / params.tb_s;
+      error = vfe / ka;
+      eq.x1 = (1.0 - tc_tb) * error;
+      eq.x2 = vfe;
+      eq.x3 = ve;
+      eq.x4 = high_pass_equilibrium_state(vfe, params.kf, params.tf_s);
+      eq.vref = vt + error - vs;
+      return eq;
+    }
+    const double terminal_compounding =
+        exciter_has_terminal_compounding(params.model) ? params.kg * vt : 0.0;
+    error = ((1.0 + params.kd) * vf - terminal_compounding) / ka;
+    const double tc = params.tc_s > 0.0 ? params.tc_s : params.ta_s;
+    eq.x1 = lead_lag_equilibrium_state(error, params.ka, tc, params.tb_s);
+    const double y1 = params.ka * error;
+    eq.x2 = lead_lag_equilibrium_state(y1, 1.0, params.t2_s, params.t1_s);
+    eq.x4 = high_pass_equilibrium_state(vf, params.kf, params.tf_s);
+  } else {
+    eq.x1 = vf;
+  }
+  eq.vref = vt + error - vs;
+  return eq;
+}
+
 }  // namespace
 
 void Exciter::assignStateIndices(int& offset) {
@@ -4425,13 +4516,14 @@ void Exciter::initializeFromPowerFlow(const PowerFlowResult& pf, DynamicState& x
   }
   if (exciter_is_extended(params_.model) && !range_.empty()) {
     const int base = range_.offset;
-    x.x[base + 0] = vt;
-    if (range_.size >= 2) x.x[base + 1] = field0;
-    if (range_.size >= 3) x.x[base + 2] = 0.0;
-    if (range_.size >= 4) x.x[base + 3] = field0;
-    if (range_.size >= 5) x.x[base + 4] = 0.0;
-    const double k = std::max(1e-9, std::abs(params_.ka));
-    v_ref_captured_ = vt + field0 / k;
+    const double vs = pss_ != nullptr ? pss_vs_output(*pss_, x) : 0.0;
+    const auto eq = extended_exciter_equilibrium(params_, vt, field0, vs);
+    x.x[base + 0] = eq.vm;
+    if (range_.size >= 2) x.x[base + 1] = eq.x1;
+    if (range_.size >= 3) x.x[base + 2] = eq.x2;
+    if (range_.size >= 4) x.x[base + 3] = eq.x3;
+    if (range_.size >= 5) x.x[base + 4] = eq.x4;
+    v_ref_captured_ = eq.vref;
   }
   captured_ = true;
 }
@@ -4508,15 +4600,16 @@ bool Exciter::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
     } else if (base < x.x.size()) {
       vf = x.x[base];
     }
-    const double k = std::max(1e-9, std::abs(params_.ka));
-    v_ref_captured_ = vt + vf / k;
+    const double vs = pss_ != nullptr ? pss_vs_output(*pss_, x) : 0.0;
+    const auto eq = extended_exciter_equilibrium(params_, vt, vf, vs);
+    v_ref_captured_ = eq.vref;
     captured_ = true;
     bool changed = false;
-    changed = set_if_changed(x.x, base + 0, vt) || changed;
-    if (range_.size >= 2) changed = set_if_changed(x.x, base + 1, vf) || changed;
-    if (range_.size >= 3) changed = set_if_changed(x.x, base + 2, 0.0) || changed;
-    if (range_.size >= 4) changed = set_if_changed(x.x, base + 3, vf) || changed;
-    if (range_.size >= 5) changed = set_if_changed(x.x, base + 4, 0.0) || changed;
+    changed = set_if_changed(x.x, base + 0, eq.vm) || changed;
+    if (range_.size >= 2) changed = set_if_changed(x.x, base + 1, eq.x1) || changed;
+    if (range_.size >= 3) changed = set_if_changed(x.x, base + 2, eq.x2) || changed;
+    if (range_.size >= 4) changed = set_if_changed(x.x, base + 3, eq.x3) || changed;
+    if (range_.size >= 5) changed = set_if_changed(x.x, base + 4, eq.x4) || changed;
     return changed;
   }
   if (machine_ != nullptr) return false;  // coupled exciter owns no state to trim
@@ -4603,6 +4696,42 @@ void Exciter::computeDerivatives(double,
       const auto vm_block = low_pass_block(vt, vm, 1.0, params_.tr_s);
       dxdt[base + 0] = vm_block.second;
       const double error = vref + vs - vm;
+      if (exciter_is_ac1a(params_.model) && range_.size >= 5) {
+        const double vr1 = x.x[base + 1];
+        const double vr2 = x.x[base + 2];
+        const double ve = x.x[base + 3];
+        const double vr3 = x.x[base + 4];
+        const double ve_den = std::abs(ve) < kMinVoltage
+                                  ? (ve < 0.0 ? -kMinVoltage : kMinVoltage)
+                                  : ve;
+        const double xad_ifd = vf;
+        const double in = params_.kc * xad_ifd / ve_den;
+        const double se = ac_exciter_saturation(params_.ae, params_.be, ve);
+        const double vfe = params_.kd * xad_ifd + params_.ke * ve + se * ve;
+        const auto fb = high_pass_block(vfe, vr3, params_.kf, params_.tf_s);
+        const double vin = error - fb.first;
+        const auto ll = std::abs(params_.tb_s) <= kMinTimeConstant
+                            ? std::pair<double, double>{vin, 0.0}
+                            : lead_lag_block(vin, vr1, 1.0, params_.tc_s, params_.tb_s);
+        const auto vr_block =
+            low_pass_nonwindup(ll.first,
+                               vr2,
+                               params_.ka,
+                               params_.ta_s,
+                               params_.va_min_pu,
+                               params_.va_max_pu);
+        const double vr = std::clamp(vr2, params_.efd_min_pu, params_.efd_max_pu);
+        const double dve = (vr - vfe) / control_time(params_.te_s);
+        const double vf_cmd = ve * exciter_rectifier(in);
+        dxdt[base + 1] = ll.second;
+        dxdt[base + 2] = vr_block.second;
+        dxdt[base + 3] = dve;
+        dxdt[base + 4] = fb.second;
+        dxdt[f] = std::abs(params_.kc) <= 1e-12
+                      ? dve
+                      : (vf_cmd - vf) / control_time(params_.te_s);
+        return;
+      }
       if (params_.model == ExciterModel::SCRX && range_.size >= 2) {
         const double vr = x.x[base + 1];
         const double dxvr = (params_.ka * error - vr) / control_time(params_.ta_s);
@@ -4695,6 +4824,37 @@ void Exciter::computeDerivatives(double,
     const double vm = x.x[base + 0];
     dxdt[base + 0] = low_pass_block(vt, vm, 1.0, params_.tr_s).second;
     const double error = vref + vs - vm;
+    if (exciter_is_ac1a(params_.model) && range_.size >= 5) {
+      const double vr1 = x.x[base + 1];
+      const double vr2 = x.x[base + 2];
+      const double ve = x.x[base + 3];
+      const double vr3 = x.x[base + 4];
+      const double ve_den = std::abs(ve) < kMinVoltage
+                                ? (ve < 0.0 ? -kMinVoltage : kMinVoltage)
+                                : ve;
+      const double xad_ifd = ve;
+      const double in = params_.kc * xad_ifd / ve_den;
+      const double se = ac_exciter_saturation(params_.ae, params_.be, ve);
+      const double vfe = params_.kd * xad_ifd + params_.ke * ve + se * ve;
+      const auto fb = high_pass_block(vfe, vr3, params_.kf, params_.tf_s);
+      const double vin = error - fb.first;
+      const auto ll = std::abs(params_.tb_s) <= kMinTimeConstant
+                          ? std::pair<double, double>{vin, 0.0}
+                          : lead_lag_block(vin, vr1, 1.0, params_.tc_s, params_.tb_s);
+      const auto vr_block =
+          low_pass_nonwindup(ll.first,
+                             vr2,
+                             params_.ka,
+                             params_.ta_s,
+                             params_.va_min_pu,
+                             params_.va_max_pu);
+      const double vr = std::clamp(vr2, params_.efd_min_pu, params_.efd_max_pu);
+      dxdt[base + 1] = ll.second;
+      dxdt[base + 2] = vr_block.second;
+      dxdt[base + 3] = (vr - vfe) / control_time(params_.te_s);
+      dxdt[base + 4] = fb.second;
+      return;
+    }
     if (params_.model == ExciterModel::SCRX) {
       const double vr = x.x[base + 1];
       dxdt[base + 1] = (params_.ka * error - vr) / control_time(params_.ta_s);
