@@ -95,6 +95,9 @@ struct DynamicResults {
   int failed_step{-1};
   int newton_iterations{0};
   int jacobian_evaluations{0};
+  int jacobian_residual_evaluations{0};
+  int jacobian_fd_columns{0};
+  int jacobian_colored_groups{0};
   int linear_factorizations{0};
   int rejected_steps{0};
   double max_local_error_norm{0.0};

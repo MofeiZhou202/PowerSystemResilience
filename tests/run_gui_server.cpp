@@ -2325,6 +2325,16 @@ const char* dynamic_linear_solver_type_name(hacdcpf::dynamics::DynamicLinearSolv
   return "EigenSparseLU";
 }
 
+const char* dynamic_dae_jacobian_mode_name(hacdcpf::dynamics::DynamicDaeJacobianMode mode) {
+  using hacdcpf::dynamics::DynamicDaeJacobianMode;
+  switch (mode) {
+    case DynamicDaeJacobianMode::FiniteDifference: return "FiniteDifference";
+    case DynamicDaeJacobianMode::HybridAnalytic: return "HybridAnalytic";
+    case DynamicDaeJacobianMode::HybridAnalyticColored: return "HybridAnalyticColored";
+  }
+  return "HybridAnalytic";
+}
+
 hacdcpf::dynamics::DynamicLinearSolverType dynamic_linear_solver_type_from_json(const json& root) {
   using hacdcpf::dynamics::DynamicLinearSolverType;
   const std::string solver =
@@ -2336,6 +2346,23 @@ hacdcpf::dynamics::DynamicLinearSolverType dynamic_linear_solver_type_from_json(
   if (solver == "pardiso" || solver == "Pardiso") return DynamicLinearSolverType::Pardiso;
   if (solver == "petsc" || solver == "PETSc") return DynamicLinearSolverType::PETSc;
   return DynamicLinearSolverType::EigenSparseLU;
+}
+
+hacdcpf::dynamics::DynamicDaeJacobianMode dynamic_dae_jacobian_mode_from_json(const json& root) {
+  using hacdcpf::dynamics::DynamicDaeJacobianMode;
+  const std::string mode =
+      root.value("dae_jacobian_mode",
+                 root.value("jacobian_mode", std::string("hybrid_analytic")));
+  if (mode == "fd" || mode == "finite_difference" || mode == "FiniteDifference") {
+    return DynamicDaeJacobianMode::FiniteDifference;
+  }
+  if (mode == "colored" ||
+      mode == "hybrid_colored" ||
+      mode == "hybrid_analytic_colored" ||
+      mode == "HybridAnalyticColored") {
+    return DynamicDaeJacobianMode::HybridAnalyticColored;
+  }
+  return DynamicDaeJacobianMode::HybridAnalytic;
 }
 
 hacdcpf::dynamics::DynamicSolverType dynamic_solver_type_from_json(const json& root) {
@@ -2367,6 +2394,7 @@ hacdcpf::dynamics::DynamicEventType dynamic_event_type_from_json(const std::stri
   using hacdcpf::dynamics::DynamicEventType;
   if (type == "ACBranchTrip") return DynamicEventType::ACBranchTrip;
   if (type == "ACBranchClose") return DynamicEventType::ACBranchClose;
+  if (type == "ACBranchImpedanceScale") return DynamicEventType::ACBranchImpedanceScale;
   if (type == "DCBranchTrip") return DynamicEventType::DCBranchTrip;
   if (type == "DCBranchClose") return DynamicEventType::DCBranchClose;
   if (type == "ACLoadScale") return DynamicEventType::ACLoadScale;
@@ -2386,6 +2414,7 @@ const char* dynamic_event_type_name(hacdcpf::dynamics::DynamicEventType type) {
   switch (type) {
     case DynamicEventType::ACBranchTrip: return "ACBranchTrip";
     case DynamicEventType::ACBranchClose: return "ACBranchClose";
+    case DynamicEventType::ACBranchImpedanceScale: return "ACBranchImpedanceScale";
     case DynamicEventType::DCBranchTrip: return "DCBranchTrip";
     case DynamicEventType::DCBranchClose: return "DCBranchClose";
     case DynamicEventType::ACLoadScale: return "ACLoadScale";
@@ -2762,6 +2791,7 @@ std::vector<std::string> validate_dynamic_event(
       break;
     case DynamicEventType::ACBranchTrip:
     case DynamicEventType::ACBranchClose:
+    case DynamicEventType::ACBranchImpedanceScale:
       if (!indexed_component_exists(dyn.network.ac_branches, event.component_index)) {
         warn("AC branch index " + std::to_string(event.component_index) + " was not found");
       }
@@ -2820,6 +2850,7 @@ std::vector<std::string> validate_dynamic_event(
 json dynamic_options_to_json(const hacdcpf::dynamics::DynamicSolverOptions& opt) {
   return json{{"solver_type", dynamic_solver_type_name(opt.solver_type)},
               {"linear_solver", dynamic_linear_solver_type_name(opt.linear_solver)},
+              {"dae_jacobian_mode", dynamic_dae_jacobian_mode_name(opt.dae_jacobian_mode)},
               {"t_start_s", opt.t_start_s},
               {"t_end_s", opt.t_end_s},
               {"dt_s", opt.dt_s},
@@ -2853,6 +2884,11 @@ json dynamic_options_to_json(const hacdcpf::dynamics::DynamicSolverOptions& opt)
               {"dc_link_coupling_conductance_pu", opt.dc_link_coupling_conductance_pu},
               {"dynamic_trim_tol", opt.dynamic_trim_tol},
               {"max_dynamic_trim_iters", opt.max_dynamic_trim_iters},
+              {"dae_reuse_jacobian_factorization", opt.dae_reuse_jacobian_factorization},
+              {"dae_use_analytic_network_jacobian", opt.dae_use_analytic_network_jacobian},
+              {"dae_use_analytic_device_jacobian", opt.dae_use_analytic_device_jacobian},
+              {"dae_use_fd_current_jacobian_corrections",
+               opt.dae_use_fd_current_jacobian_corrections},
               {"use_consistent_dynamic_initialization",
                opt.use_consistent_dynamic_initialization}};
 }
@@ -2865,6 +2901,11 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
   out["steps"] = result.steps;
   out["failed_step"] = result.failed_step;
   out["newton_iterations"] = result.newton_iterations;
+  out["jacobian_evaluations"] = result.jacobian_evaluations;
+  out["jacobian_residual_evaluations"] = result.jacobian_residual_evaluations;
+  out["jacobian_fd_columns"] = result.jacobian_fd_columns;
+  out["jacobian_colored_groups"] = result.jacobian_colored_groups;
+  out["linear_factorizations"] = result.linear_factorizations;
   out["rejected_steps"] = result.rejected_steps;
   out["max_local_error_norm"] = result.max_local_error_norm;
   out["min_accepted_step_s"] = result.min_accepted_step_s;
@@ -12510,6 +12551,7 @@ int main(int argc, char** argv) {
       hacdcpf::dynamics::DynamicSolverOptions opt;
       opt.solver_type = dynamic_solver_type_from_json(j);
       opt.linear_solver = dynamic_linear_solver_type_from_json(j);
+      opt.dae_jacobian_mode = dynamic_dae_jacobian_mode_from_json(j);
       opt.t_start_s = j.value("t_start_s", 0.0);
       opt.t_end_s = j.value("t_end_s", 1.0);
       opt.dt_s = j.value("dt_s", 0.01);
@@ -12552,6 +12594,18 @@ int main(int argc, char** argv) {
       opt.use_consistent_dynamic_initialization =
           j.value("use_consistent_dynamic_initialization",
                   opt.use_consistent_dynamic_initialization);
+      opt.dae_reuse_jacobian_factorization =
+          j.value("dae_reuse_jacobian_factorization",
+                  opt.dae_reuse_jacobian_factorization);
+      opt.dae_use_analytic_network_jacobian =
+          j.value("dae_use_analytic_network_jacobian",
+                  opt.dae_use_analytic_network_jacobian);
+      opt.dae_use_analytic_device_jacobian =
+          j.value("dae_use_analytic_device_jacobian",
+                  opt.dae_use_analytic_device_jacobian);
+      opt.dae_use_fd_current_jacobian_corrections =
+          j.value("dae_use_fd_current_jacobian_corrections",
+                  opt.dae_use_fd_current_jacobian_corrections);
       opt.algebraic_network_max_iters =
           j.value("algebraic_network_max_iters", opt.algebraic_network_max_iters);
       opt.algebraic_network_tol =

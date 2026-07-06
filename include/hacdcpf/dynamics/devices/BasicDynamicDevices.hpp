@@ -34,6 +34,20 @@ enum class GridFormingControlKind {
   VirtualOscillator
 };
 
+enum class InverterFilterKind {
+  RL,
+  LCL
+};
+
+enum class CurrentLimiterKind {
+  Magnitude,
+  ActivePriority,
+  ReactivePriority,
+  Instantaneous,
+  Saturation,
+  Hybrid
+};
+
 enum class SynchronousMachineModelKind {
   Classical,
   OneDOneQ,
@@ -388,6 +402,11 @@ class SynchronousMachine : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
@@ -460,6 +479,11 @@ class FiveMassShaft : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
@@ -490,7 +514,14 @@ enum class GovernorModel {
   TGOV1,
   IEEEG1,
   TGTypeI,
-  TGTypeII
+  TGTypeII,
+  GAST,
+  HYGOV,
+  DEGOV,
+  DEGOV1,
+  PIDGOV,
+  WPIDHY,
+  TGSimple
 };
 
 struct GovernorDynamicParams {
@@ -518,6 +549,16 @@ struct GovernorDynamicParams {
   double t3_s{0.10};         // TGTypeI transient gain time constant T3 (s)
   double t4_s{0.30};         // TGTypeI power fraction time constant T4 (s)
   double t5_s{5.00};         // TGTypeI reheat time constant T5 (s)
+  double ta_s{0.10};         // Diesel/hydro/PID actuator derivative time constant
+  double tb_s{0.30};         // Diesel/hydro/PID actuator denominator time constant
+  double ki{1.0};            // PID/integral governor gain
+  double kd{0.0};            // PID/derivative governor gain
+  double fuel_t_s{0.40};     // GAST/DEGOV fuel or actuator time constant
+  double temperature_t_s{3.0};  // GAST exhaust/load-limit temperature lag
+  double water_t_s{1.0};     // HYGOV/PID hydro water inertia time constant
+  double gate_t_s{0.25};     // Hydro gate servo time constant
+  double gate_max_pu{1.0};
+  double gate_min_pu{0.0};
   double pmax_mw{0.0};
   double pmin_mw{0.0};
   bool in_service{true};
@@ -541,6 +582,11 @@ class Governor : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
@@ -570,7 +616,14 @@ enum class ExciterModel {
   IEEET1,
   AVRSimple,
   AVRTypeI,
-  AVRTypeII
+  AVRTypeII,
+  ESAC1A,
+  EXAC1,
+  EXST1,
+  SCRX,
+  ESST1A,
+  ST6B,
+  ST8C
 };
 
 struct ExciterDynamicParams {
@@ -605,6 +658,14 @@ struct ExciterDynamicParams {
   double t2_s{0.01};       // AVRTypeII lead-lag denominator T2
   double t3_s{0.05};       // AVRTypeII lead-lag numerator T3
   double t4_s{0.01};       // AVRTypeII lead-lag denominator T4
+  double tc_s{0.05};       // AC/ST lead-lag numerator
+  double tb1_s{0.05};      // ST8C second lead-lag denominator
+  double tc1_s{0.05};      // ST8C second lead-lag numerator
+  double kg{1.0};          // Exciter/current-compounding gain
+  double kc{0.0};          // Rectifier/current-compounding coefficient
+  double kd{0.0};          // Demagnetizing coefficient
+  double kp{1.0};          // PI proportional gain
+  double ki{0.0};          // PI integral gain
   double va_min_pu{-5.0};
   double va_max_pu{5.0};
   double efd_min_pu{0.0};
@@ -630,6 +691,11 @@ class Exciter : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
@@ -666,7 +732,10 @@ class Exciter : public DynamicDevice {
 enum class PSSModel {
   PSS1A,
   IEEEST,
-  STAB1
+  STAB1,
+  PSS2A,
+  PSS2B,
+  PSS2C
 };
 
 struct PSSDynamicParams {
@@ -707,6 +776,26 @@ struct PSSDynamicParams {
   double t1_over_t3{1.0};
   double t2_over_t4{1.0};
   double h_lim{0.10};
+  double ks1{10.0};
+  double ks2{1.0};
+  double ks3{1.0};
+  double m_rtf{5.0};
+  double n_rtf{1.0};
+  double tw1_s{2.0};
+  double tw2_s{2.0};
+  double tw3_s{2.0};
+  double tw4_s{0.0};
+  double t7_s{2.0};
+  double t8_s{0.2};
+  double t9_s{0.1};
+  double t10_s{0.0};
+  double t11_s{0.0};
+  double t12_s{0.0};
+  double t13_s{0.0};
+  double vs1_max_pu{0.10};
+  double vs1_min_pu{-0.10};
+  double vs2_max_pu{0.10};
+  double vs2_min_pu{-0.10};
   bool in_service{true};
 };
 
@@ -728,6 +817,11 @@ class PowerSystemStabilizer : public DynamicDevice {
              const DynamicState& x,
              const NetworkState& y,
              DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
@@ -782,6 +876,12 @@ struct GridFormingInverterParams {
   double overload_kp{0.1};
   double overload_ki{10.0};
   double current_limit_pu{0.0};
+  CurrentLimiterKind limiter_kind{CurrentLimiterKind::Magnitude};
+  InverterFilterKind filter_kind{InverterFilterKind::RL};
+  double filter_c_pu{0.0};
+  double filter_grid_r_pu{0.0};
+  double filter_grid_x_pu{0.05};
+  bool reactive_current_priority{false};
   double pmax_mw{0.0};
   double pmin_mw{0.0};
   double vmax_internal_pu{1.30};
@@ -868,6 +968,11 @@ struct GridFollowingInverterParams {
   double power_filter_t_s{0.02};
   double v_min_current_pu{0.20};
   double current_limit_pu{0.0};
+  CurrentLimiterKind limiter_kind{CurrentLimiterKind::Magnitude};
+  InverterFilterKind filter_kind{InverterFilterKind::RL};
+  double filter_c_pu{0.0};
+  double filter_grid_r_pu{0.0};
+  double filter_grid_x_pu{0.05};
   double stabilizing_admittance_pu{0.0};
   double frequency_watt_droop_pu{0.0};
   double volt_var_droop_pu{0.0};
@@ -1159,6 +1264,11 @@ struct DERAADynamicParams {
   double Ip_min{0.0};
   double Ip_max{1.1};
   double rr_pwr{99.0};
+  double v_trip_low_pu{0.0};
+  double v_trip_high_pu{0.0};
+  double f_trip_low_pu{0.0};
+  double f_trip_high_pu{0.0};
+  double trip_delay_s{0.0};
   bool in_service{true};
 };
 
@@ -1196,6 +1306,81 @@ class DERAADynamic : public DynamicDevice {
   [[nodiscard]] std::pair<double, double> currentDq(const DynamicState& x) const;
 
   DERAADynamicParams params_;
+  StateIndexRange range_;
+};
+
+struct InductionMachineDynamicParams {
+  int component_index{0};
+  int bus{0};
+  int bus_pos{-1};
+  std::string label;
+  std::string canvas_type{"motors"};
+  std::string component_domain{"AC"};
+  std::string source_type{"asynchronous_motor"};
+  std::vector<DynamicModelProfile> model_profiles;
+  double base_mva{100.0};
+  double model_base_mva{1.0};
+  double p_mech_mw{0.0};
+  double q_nom_mvar{0.0};
+  double r_s_pu{0.02};
+  double x_s_pu{0.10};
+  double r_r_pu{0.02};
+  double x_r_pu{0.08};
+  double x_m_pu{3.0};
+  double inertia_h{0.5};
+  double damping_d{0.0};
+  double torque_exponent{2.0};
+  bool fifth_order{false};
+  bool in_service{true};
+};
+
+class InductionMachineDynamic : public DynamicDevice {
+ public:
+  explicit InductionMachineDynamic(InductionMachineDynamicParams params);
+
+  void assignStateIndices(int& offset) override;
+  void initializeFromPowerFlow(const PowerFlowResult& pf,
+                               DynamicState& x,
+                               NetworkState& y) override;
+  bool trimToNetworkEquilibrium(DynamicState& x,
+                                NetworkState& y) override;
+  void computeDerivatives(double t,
+                          const DynamicState& x,
+                          const NetworkState& y,
+                          Eigen::Ref<Eigen::VectorXd> dxdt) const override;
+  void stamp(double t,
+             const DynamicState& x,
+             const NetworkState& y,
+             DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
+  void handleEvent(const DynamicEvent& event,
+                   DynamicState& x,
+                   NetworkState& y) override;
+
+  [[nodiscard]] std::string name() const override;
+  [[nodiscard]] std::string type() const override { return "InductionMachine"; }
+  [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] std::string modelStandard() const override { return "PowerSystems"; }
+  [[nodiscard]] std::string modelName() const override {
+    return params_.fifth_order ? "SingleCageInductionMachine"
+                               : "SimplifiedSingleCageInductionMachine";
+  }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
+
+ private:
+  [[nodiscard]] std::complex<double> current(const DynamicState& x,
+                                             const NetworkState& y) const;
+  [[nodiscard]] double electricalTorque(const DynamicState& x,
+                                        const NetworkState& y) const;
+  [[nodiscard]] double mechanicalTorque(double omega_r) const;
+
+  InductionMachineDynamicParams params_;
   StateIndexRange range_;
 };
 

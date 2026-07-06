@@ -25,6 +25,7 @@ struct DynamicJacobianContext {
   int total_size{0};
   double dt{0.0};
   double theta{1.0};
+  bool include_differential_derivatives{false};
 
   [[nodiscard]] bool validStateIndex(int idx) const noexcept {
     return idx >= 0 && idx < n_x;

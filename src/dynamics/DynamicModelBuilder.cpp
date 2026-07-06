@@ -103,6 +103,65 @@ double param_or(const std::map<std::string, double>& m,
   return fallback;
 }
 
+InverterFilterKind filter_kind_from_name(const std::string& name,
+                                         InverterFilterKind fallback) {
+  if (iequals(name, "LCLFilter") || iequals(name, "LCFilter")) {
+    return InverterFilterKind::LCL;
+  }
+  if (iequals(name, "RLFilter")) return InverterFilterKind::RL;
+  return fallback;
+}
+
+CurrentLimiterKind limiter_kind_from_name(const std::string& name,
+                                          CurrentLimiterKind fallback) {
+  if (iequals(name, "PriorityOutputCurrentLimiter") ||
+      iequals(name, "ReactivePriorityCurrentLimiter")) {
+    return CurrentLimiterKind::ReactivePriority;
+  }
+  if (iequals(name, "ActivePriorityCurrentLimiter")) {
+    return CurrentLimiterKind::ActivePriority;
+  }
+  if (iequals(name, "InstantaneousOutputCurrentLimiter")) {
+    return CurrentLimiterKind::Instantaneous;
+  }
+  if (iequals(name, "SaturationOutputCurrentLimiter")) {
+    return CurrentLimiterKind::Saturation;
+  }
+  if (iequals(name, "HybridOutputCurrentLimiter")) {
+    return CurrentLimiterKind::Hybrid;
+  }
+  if (iequals(name, "MagnitudeOutputCurrentLimiter")) {
+    return CurrentLimiterKind::Magnitude;
+  }
+  return fallback;
+}
+
+template <typename P>
+void apply_inverter_filter_and_limiter_params(const std::map<std::string, double>& p,
+                                              P& params) {
+  params.current_limit_pu =
+      param_or(p, {"current_limit_pu", "Imax", "imax_pu"}, params.current_limit_pu);
+  params.filter_c_pu =
+      param_or(p, {"filter_c_pu", "Cf", "C_f", "cf"}, params.filter_c_pu);
+  params.filter_grid_r_pu =
+      param_or(p, {"filter_grid_r_pu", "Rg", "Rgrid"}, params.filter_grid_r_pu);
+  params.filter_grid_x_pu =
+      param_or(p, {"filter_grid_x_pu", "Xg", "Xgrid"}, params.filter_grid_x_pu);
+  if (param_or(p, {"reactive_current_priority", "iq_priority"}, 0.0) != 0.0) {
+    params.limiter_kind = CurrentLimiterKind::ReactivePriority;
+    params.reactive_current_priority = true;
+  }
+}
+
+void apply_gfl_params(const std::map<std::string, double>& p,
+                      GridFollowingInverterParams& params) {
+  params.response_t_s = param_or(p, {"response_t_s", "Tg", "Trv"}, params.response_t_s);
+  params.power_filter_t_s = param_or(p, {"power_filter_t_s", "Tp", "Tpf"}, params.power_filter_t_s);
+  apply_inverter_filter_and_limiter_params(p, params);
+  params.frequency_watt_droop_pu = param_or(p, {"frequency_watt_droop_pu", "Ddn", "kf"}, params.frequency_watt_droop_pu);
+  params.volt_var_droop_pu = param_or(p, {"volt_var_droop_pu", "Dvv", "kq"}, params.volt_var_droop_pu);
+}
+
 void apply_gfl_profile(const hacdcpf::DynamicModelProfile& profile,
                        GridFollowingInverterParams& params) {
   params.model_profiles = to_dynamic_profiles(profile);
@@ -118,6 +177,8 @@ void apply_gfl_profile(const hacdcpf::DynamicModelProfile& profile,
       params.frequency_estimator = FrequencyEstimatorKind::FixedFrequency;
       params.frequency_estimator_name = "FixedFrequency";
     }
+    params.filter_kind = filter_kind_from_name(name, params.filter_kind);
+    params.limiter_kind = limiter_kind_from_name(name, params.limiter_kind);
   };
   apply_name(profile.model_name);
   for (const auto& component : profile.components) {
@@ -130,18 +191,16 @@ void apply_gfl_profile(const hacdcpf::DynamicModelProfile& profile,
     it = component.parameters.find("pll_lpf_t_s");
     if (it != component.parameters.end()) params.pll_lpf_t_s = it->second;
   }
+  for (const auto& component : profile.components) {
+    apply_gfl_params(component.parameters, params);
+  }
   auto it = profile.parameters.find("pll_kp");
   if (it != profile.parameters.end()) params.pll_kp = it->second;
   it = profile.parameters.find("pll_ki");
   if (it != profile.parameters.end()) params.pll_ki = it->second;
   it = profile.parameters.find("pll_lpf_t_s");
   if (it != profile.parameters.end()) params.pll_lpf_t_s = it->second;
-  const auto& p = profile.parameters;
-  params.response_t_s = param_or(p, {"response_t_s", "Tg", "Trv"}, params.response_t_s);
-  params.power_filter_t_s = param_or(p, {"power_filter_t_s", "Tp", "Tpf"}, params.power_filter_t_s);
-  params.current_limit_pu = param_or(p, {"current_limit_pu", "Imax", "imax_pu"}, params.current_limit_pu);
-  params.frequency_watt_droop_pu = param_or(p, {"frequency_watt_droop_pu", "Ddn", "kf"}, params.frequency_watt_droop_pu);
-  params.volt_var_droop_pu = param_or(p, {"volt_var_droop_pu", "Dvv", "kq"}, params.volt_var_droop_pu);
+  apply_gfl_params(profile.parameters, params);
 }
 
 template <typename P>
@@ -156,7 +215,7 @@ void apply_gfm_params(const std::map<std::string, double>& p, P& params) {
   params.voltage_control_t_s = param_or(p, {"voltage_control_t_s", "Tv"}, params.voltage_control_t_s);
   params.voltage_kp = param_or(p, {"voltage_kp", "Kpv"}, params.voltage_kp);
   params.voltage_ki = param_or(p, {"voltage_ki", "Kiv"}, params.voltage_ki);
-  params.current_limit_pu = param_or(p, {"current_limit_pu", "Imax", "imax_pu"}, params.current_limit_pu);
+  apply_inverter_filter_and_limiter_params(p, params);
   params.vsm_ta_s = param_or(p, {"Ta", "vsm_ta_s"}, params.vsm_ta_s);
   params.vsm_damping_kd = param_or(p, {"kd", "vsm_damping_kd"}, params.vsm_damping_kd);
   params.vsm_frequency_droop_kw =
@@ -188,6 +247,8 @@ void apply_gfm_profile(const hacdcpf::DynamicModelProfile& profile,
       params.control_kind = GridFormingControlKind::Droop;
       params.model_name = "GridFormingNortonDroop";
     }
+    params.filter_kind = filter_kind_from_name(name, params.filter_kind);
+    params.limiter_kind = limiter_kind_from_name(name, params.limiter_kind);
   };
   if (!profile.empty()) {
     apply_name(profile.model_name);
@@ -218,6 +279,8 @@ void apply_gfm_profile(const hacdcpf::DynamicModelProfile& profile,
       params.control_kind = GridFormingControlKind::Droop;
       params.model_name = "GridFormingNortonDroop";
     }
+    params.filter_kind = filter_kind_from_name(name, params.filter_kind);
+    params.limiter_kind = limiter_kind_from_name(name, params.limiter_kind);
   };
   if (!profile.empty()) {
     apply_name(profile.model_name);
@@ -323,7 +386,47 @@ DERAADynamicParams make_deraa_params(const StaticGenerator& gen,
   p.Ip_min = param_or(pmap, {"Ip_min", "P_min"}, p.Ip_min);
   p.Ip_max = param_or(pmap, {"Ip_max", "P_max"}, p.Ip_max);
   p.rr_pwr = param_or(pmap, {"rrpwr", "Rrpwr"}, p.rr_pwr);
+  p.v_trip_low_pu = param_or(pmap, {"Vtrip_L", "v_trip_low_pu", "Vltrip"}, p.v_trip_low_pu);
+  p.v_trip_high_pu = param_or(pmap, {"Vtrip_H", "v_trip_high_pu", "Vhtrip"}, p.v_trip_high_pu);
+  p.f_trip_low_pu = param_or(pmap, {"Ftrip_L", "f_trip_low_pu", "Fltrip"}, p.f_trip_low_pu);
+  p.f_trip_high_pu = param_or(pmap, {"Ftrip_H", "f_trip_high_pu", "Fhtrip"}, p.f_trip_high_pu);
+  p.trip_delay_s = param_or(pmap, {"Ttrip", "trip_delay_s", "trip_delay"}, p.trip_delay_s);
   p.model_profiles = to_dynamic_profiles(gen.dynamic_model);
+  return p;
+}
+
+InductionMachineDynamicParams make_induction_machine_params(
+    const AsynchronousMotor& motor,
+    int bus_pos,
+    double base_mva) {
+  const auto pmap = merged_profile_parameters(motor.dynamic_model);
+  InductionMachineDynamicParams p;
+  p.component_index = motor.index;
+  p.bus = motor.bus;
+  p.bus_pos = bus_pos;
+  p.label = label_or(motor.name, "Induction machine " + std::to_string(motor.index));
+  p.base_mva = base_mva;
+  p.model_base_mva = positive_or(motor.sn_mva, base_mva);
+  const double pf = std::clamp(positive_or(motor.cos_phi, 0.85), 0.01, 1.0);
+  p.p_mech_mw =
+      param_or(pmap,
+               {"P_mech", "p_mech_mw", "P_load"},
+               p.model_base_mva * pf * positive_or(motor.efficiency, 0.95));
+  const double q_default =
+      p.model_base_mva * std::sqrt(std::max(0.0, 1.0 - pf * pf));
+  p.q_nom_mvar = param_or(pmap, {"Q_load", "q_nom_mvar"}, q_default);
+  p.r_s_pu = param_or(pmap, {"Rs", "R_s", "r_s_pu", "R_stator"}, positive_or(motor.r_pu, p.r_s_pu));
+  p.x_s_pu = param_or(pmap, {"Xs", "X_s", "x_s_pu", "X_stator"}, positive_or(motor.x_pu * 0.5, p.x_s_pu));
+  p.r_r_pu = param_or(pmap, {"Rr", "R_r", "r_r_pu", "R_rotor"}, positive_or(motor.r_pu, p.r_r_pu));
+  p.x_r_pu = param_or(pmap, {"Xr", "X_r", "x_r_pu", "X_rotor"}, positive_or(motor.x_pu * 0.5, p.x_r_pu));
+  p.x_m_pu = param_or(pmap, {"Xm", "X_m", "x_m_pu", "X_magnetizing"}, p.x_m_pu);
+  p.inertia_h = param_or(pmap, {"H", "h", "inertia_h"}, p.inertia_h);
+  p.damping_d = param_or(pmap, {"D", "damping_d"}, p.damping_d);
+  p.torque_exponent = param_or(pmap, {"torque_exponent", "N_exp"}, p.torque_exponent);
+  p.fifth_order = profile_model_is(motor.dynamic_model,
+                                   {"SingleCageInductionMachine"}) ||
+                  param_or(pmap, {"fifth_order"}, 0.0) != 0.0;
+  p.model_profiles = to_dynamic_profiles(motor.dynamic_model);
   return p;
 }
 
@@ -557,6 +660,20 @@ std::unique_ptr<Governor> make_governor(const hacdcpf::DynamicModelComponentProf
     g.model = GovernorModel::TGTypeI;
   } else if (iequals(comp.model, "TGTypeII")) {
     g.model = GovernorModel::TGTypeII;
+  } else if (iequals(comp.model, "GAST") || iequals(comp.model, "GasTG")) {
+    g.model = GovernorModel::GAST;
+  } else if (iequals(comp.model, "HYGOV") || iequals(comp.model, "HydroTurbineGov")) {
+    g.model = GovernorModel::HYGOV;
+  } else if (iequals(comp.model, "DEGOV")) {
+    g.model = GovernorModel::DEGOV;
+  } else if (iequals(comp.model, "DEGOV1")) {
+    g.model = GovernorModel::DEGOV1;
+  } else if (iequals(comp.model, "PIDGOV")) {
+    g.model = GovernorModel::PIDGOV;
+  } else if (iequals(comp.model, "WPIDHY")) {
+    g.model = GovernorModel::WPIDHY;
+  } else if (iequals(comp.model, "TGSimple")) {
+    g.model = GovernorModel::TGSimple;
   } else {
     g.model = GovernorModel::TGOV1;
   }
@@ -570,6 +687,17 @@ std::unique_ptr<Governor> make_governor(const hacdcpf::DynamicModelComponentProf
   g.damping_d_t = param_or(p, {"D_T", "Dt", "D_t", "d_t"}, g.damping_d_t);
   g.reheat_t_s = param_or(p, {"Tr", "T5", "reheat_t_s"}, g.reheat_t_s);
   g.reheat_k = param_or(p, {"K1", "Khp", "reheat_k"}, g.reheat_k);
+  g.ta_s = param_or(p, {"Ta", "ta"}, g.ta_s);
+  g.tb_s = param_or(p, {"Tb", "tb"}, g.tb_s);
+  g.ki = param_or(p, {"Ki", "ki"}, g.ki);
+  g.kd = param_or(p, {"Kd", "kd"}, g.kd);
+  g.fuel_t_s = param_or(p, {"Tf", "T_fuel", "fuel_t_s", "T2"}, g.fuel_t_s);
+  g.temperature_t_s =
+      param_or(p, {"Tt", "T_temp", "temperature_t_s", "T3"}, g.temperature_t_s);
+  g.water_t_s = param_or(p, {"Tw", "water_t_s"}, g.water_t_s);
+  g.gate_t_s = param_or(p, {"Tg", "gate_t_s", "T_gate"}, g.gate_t_s);
+  g.gate_max_pu = param_or(p, {"Gmax", "gate_max_pu"}, g.gate_max_pu);
+  g.gate_min_pu = param_or(p, {"Gmin", "gate_min_pu"}, g.gate_min_pu);
   if (g.model == GovernorModel::TGTypeI) {
     g.t_s = param_or(p, {"Ts", "T_s", "T1", "t1"}, g.t_s);
     g.tc_s = param_or(p, {"Tc", "T_c", "servo_t_s"}, g.tc_s);
@@ -579,6 +707,23 @@ std::unique_ptr<Governor> make_governor(const hacdcpf::DynamicModelComponentProf
   } else if (g.model == GovernorModel::TGTypeII) {
     g.t_s = param_or(p, {"T1", "t1"}, g.t_s);
     g.turbine_t_s = param_or(p, {"T2", "t2"}, g.turbine_t_s);
+  } else if (g.model == GovernorModel::GAST) {
+    g.t_s = param_or(p, {"T1", "t1", "Tg"}, g.t_s);
+    g.fuel_t_s = param_or(p, {"T2", "t2", "Tf"}, g.fuel_t_s);
+    g.temperature_t_s = param_or(p, {"T3", "t3", "Tt"}, g.temperature_t_s);
+  } else if (g.model == GovernorModel::HYGOV) {
+    g.gate_t_s = param_or(p, {"Tg", "gate_t_s"}, g.gate_t_s);
+    g.ta_s = param_or(p, {"Tr", "Ta", "ta"}, g.ta_s);
+    g.tb_s = param_or(p, {"Tf", "Tb", "tb"}, g.tb_s);
+    g.water_t_s = param_or(p, {"Tw", "water_t_s"}, g.water_t_s);
+  } else if (g.model == GovernorModel::PIDGOV ||
+             g.model == GovernorModel::WPIDHY) {
+    g.t_s = param_or(p, {"T_reg", "Treg", "t_reg"}, g.t_s);
+    g.ki = param_or(p, {"Ki", "ki"}, g.ki);
+    g.kd = param_or(p, {"Kd", "kd"}, g.kd);
+    g.ta_s = param_or(p, {"Ta", "ta"}, g.ta_s);
+    g.tb_s = param_or(p, {"Tb", "tb"}, g.tb_s);
+    g.water_t_s = param_or(p, {"Tw", "water_t_s"}, g.water_t_s);
   }
   const double vmax = param_or(p, {"Vmax", "pmax_pu", "tau_max"}, 0.0);
   const double vmin = param_or(p, {"Vmin", "pmin_pu", "tau_min"}, 0.0);
@@ -605,6 +750,20 @@ std::unique_ptr<Exciter> make_exciter(const hacdcpf::DynamicModelComponentProfil
     e.model = ExciterModel::AVRTypeI;
   } else if (iequals(comp.model, "AVRTypeII")) {
     e.model = ExciterModel::AVRTypeII;
+  } else if (iequals(comp.model, "ESAC1A") || iequals(comp.model, "EXAC1A")) {
+    e.model = ExciterModel::ESAC1A;
+  } else if (iequals(comp.model, "EXAC1")) {
+    e.model = ExciterModel::EXAC1;
+  } else if (iequals(comp.model, "EXST1")) {
+    e.model = ExciterModel::EXST1;
+  } else if (iequals(comp.model, "SCRX")) {
+    e.model = ExciterModel::SCRX;
+  } else if (iequals(comp.model, "ESST1A")) {
+    e.model = ExciterModel::ESST1A;
+  } else if (iequals(comp.model, "ST6B")) {
+    e.model = ExciterModel::ST6B;
+  } else if (iequals(comp.model, "ST8C")) {
+    e.model = ExciterModel::ST8C;
   } else {
     e.model = ExciterModel::SEXS;
   }
@@ -647,6 +806,14 @@ std::unique_ptr<Exciter> make_exciter(const hacdcpf::DynamicModelComponentProfil
   e.t2_s = param_or(p, {"T2", "t2"}, e.t2_s);
   e.t3_s = param_or(p, {"T3", "t3"}, e.t3_s);
   e.t4_s = param_or(p, {"T4", "t4"}, e.t4_s);
+  e.tc_s = param_or(p, {"Tc", "tc"}, e.tc_s);
+  e.tb1_s = param_or(p, {"Tb1", "tb1"}, e.tb1_s);
+  e.tc1_s = param_or(p, {"Tc1", "tc1"}, e.tc1_s);
+  e.kg = param_or(p, {"Kg", "kg"}, e.kg);
+  e.kc = param_or(p, {"Kc", "kc"}, e.kc);
+  e.kd = param_or(p, {"Kd", "kd"}, e.kd);
+  e.kp = param_or(p, {"Kp", "kp", "K_pr", "Kpa"}, e.kp);
+  e.ki = param_or(p, {"Ki", "ki", "K_ir", "Kia"}, e.ki);
   e.va_max_pu = param_or(p, {"Va_max", "VaMax", "Vrmax", "Emax"}, e.va_max_pu);
   e.va_min_pu = param_or(p, {"Va_min", "VaMin", "Vrmin", "Emin"}, e.va_min_pu);
   e.efd_max_pu = param_or(p, {"Emax", "Vrmax", "efd_max_pu"}, e.efd_max_pu);
@@ -670,6 +837,12 @@ std::unique_ptr<PowerSystemStabilizer> make_pss(
     s.model = PSSModel::IEEEST;
   } else if (iequals(comp.model, "STAB1")) {
     s.model = PSSModel::STAB1;
+  } else if (iequals(comp.model, "PSS2A")) {
+    s.model = PSSModel::PSS2A;
+  } else if (iequals(comp.model, "PSS2B")) {
+    s.model = PSSModel::PSS2B;
+  } else if (iequals(comp.model, "PSS2C")) {
+    s.model = PSSModel::PSS2C;
   } else {
     s.model = PSSModel::PSS1A;
   }
@@ -699,6 +872,26 @@ std::unique_ptr<PowerSystemStabilizer> make_pss(
   s.t1_over_t3 = param_or(p, {"T1T3", "t1_over_t3"}, s.t1_over_t3);
   s.t2_over_t4 = param_or(p, {"T2T4", "t2_over_t4"}, s.t2_over_t4);
   s.h_lim = param_or(p, {"H_lim", "Hlim", "h_lim"}, s.h_lim);
+  s.ks1 = param_or(p, {"Ks1", "ks1"}, s.ks1);
+  s.ks2 = param_or(p, {"Ks2", "ks2"}, s.ks2);
+  s.ks3 = param_or(p, {"Ks3", "ks3"}, s.ks3);
+  s.m_rtf = param_or(p, {"M", "M_rtf", "m_rtf"}, s.m_rtf);
+  s.n_rtf = param_or(p, {"N", "N_rtf", "n_rtf"}, s.n_rtf);
+  s.tw1_s = param_or(p, {"Tw1", "tw1"}, s.tw1_s);
+  s.tw2_s = param_or(p, {"Tw2", "tw2"}, s.tw2_s);
+  s.tw3_s = param_or(p, {"Tw3", "tw3"}, s.tw3_s);
+  s.tw4_s = param_or(p, {"Tw4", "tw4"}, s.tw4_s);
+  s.t7_s = param_or(p, {"T7", "t7"}, s.t7_s);
+  s.t8_s = param_or(p, {"T8", "t8"}, s.t8_s);
+  s.t9_s = param_or(p, {"T9", "t9"}, s.t9_s);
+  s.t10_s = param_or(p, {"T10", "t10"}, s.t10_s);
+  s.t11_s = param_or(p, {"T11", "t11"}, s.t11_s);
+  s.t12_s = param_or(p, {"T12", "t12"}, s.t12_s);
+  s.t13_s = param_or(p, {"T13", "t13"}, s.t13_s);
+  s.vs1_max_pu = param_or(p, {"Vs1max", "Vs1_max", "vs1_max_pu"}, s.vs1_max_pu);
+  s.vs1_min_pu = param_or(p, {"Vs1min", "Vs1_min", "vs1_min_pu"}, s.vs1_min_pu);
+  s.vs2_max_pu = param_or(p, {"Vs2max", "Vs2_max", "vs2_max_pu"}, s.vs2_max_pu);
+  s.vs2_min_pu = param_or(p, {"Vs2min", "Vs2_min", "vs2_min_pu"}, s.vs2_min_pu);
   return std::make_unique<PowerSystemStabilizer>(s);
 }
 
@@ -1609,6 +1802,15 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.base_mva = base_mva;
     p.model_profiles = to_dynamic_profiles(load.dynamic_model);
     dyn.devices.push_back(std::make_unique<ThreePhaseDynamicLoad>(p));
+  }
+
+  for (const auto& motor : dyn.canonical_system.ac.motors) {
+    if (using_explicit_three_phase) break;
+    if (!motor.in_service) continue;
+    const int bus_pos = network.acBusPosition(motor.bus);
+    if (bus_pos < 0) continue;
+    dyn.devices.push_back(std::make_unique<InductionMachineDynamic>(
+        make_induction_machine_params(motor, bus_pos, base_mva)));
   }
 
   for (const auto& gen : dyn.canonical_system.ac.static_generators) {

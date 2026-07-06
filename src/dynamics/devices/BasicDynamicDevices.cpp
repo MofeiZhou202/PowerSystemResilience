@@ -199,6 +199,174 @@ void add_balanced_current_derivative(
   }
 }
 
+void append_state_range_columns(const DynamicJacobianContext& context,
+                                const StateIndexRange& range,
+                                std::vector<int>& columns) {
+  if (range.empty()) return;
+  for (int local = 0; local < range.size; ++local) {
+    const int col = state_index(range, local);
+    if (context.validStateIndex(col)) columns.push_back(col);
+  }
+}
+
+void append_state_column(const DynamicJacobianContext& context,
+                         int col,
+                         std::vector<int>& columns) {
+  if (context.validStateIndex(col)) columns.push_back(col);
+}
+
+void append_ac_bus_voltage_columns(const DynamicJacobianContext& context,
+                                   int bus_pos,
+                                   std::vector<int>& columns) {
+  if (bus_pos < 0) return;
+  const int base = 3 * bus_pos;
+  for (int phase = 0; phase < 3; ++phase) {
+    const int node = base + phase;
+    if (!context.validAcNode(node)) continue;
+    columns.push_back(context.acRealCol(node));
+    columns.push_back(context.acImagCol(node));
+  }
+}
+
+void append_dc_bus_voltage_column(const DynamicJacobianContext& context,
+                                  int dc_bus_pos,
+                                  std::vector<int>& columns) {
+  if (context.validDcNode(dc_bus_pos)) columns.push_back(context.dcCol(dc_bus_pos));
+}
+
+void sort_unique_columns(std::vector<int>& columns) {
+  std::sort(columns.begin(), columns.end());
+  columns.erase(std::unique(columns.begin(), columns.end()), columns.end());
+}
+
+double jacobian_column_value(const DynamicState& x,
+                             const NetworkState& y,
+                             const DynamicJacobianContext& context,
+                             int col) {
+  if (col < context.n_x) return x.x[col];
+  if (col >= context.ac_real_offset && col < context.ac_imag_offset) {
+    return y.Vac_abc[col - context.ac_real_offset].real();
+  }
+  if (col >= context.ac_imag_offset && col < context.dc_offset) {
+    return y.Vac_abc[col - context.ac_imag_offset].imag();
+  }
+  if (col >= context.dc_offset && col < context.total_size) {
+    return y.Vdc[col - context.dc_offset];
+  }
+  return 0.0;
+}
+
+void perturb_jacobian_column(DynamicState& x,
+                             NetworkState& y,
+                             const DynamicJacobianContext& context,
+                             int col,
+                             double delta) {
+  if (col < context.n_x) {
+    x.x[col] += delta;
+    return;
+  }
+  if (col >= context.ac_real_offset && col < context.ac_imag_offset) {
+    y.Vac_abc[col - context.ac_real_offset] += Complex(delta, 0.0);
+    return;
+  }
+  if (col >= context.ac_imag_offset && col < context.dc_offset) {
+    y.Vac_abc[col - context.ac_imag_offset] += Complex(0.0, delta);
+    return;
+  }
+  if (col >= context.dc_offset && col < context.total_size) {
+    y.Vdc[col - context.dc_offset] += delta;
+  }
+}
+
+Eigen::VectorXd stamped_current_injection_vector(const DynamicDevice& device,
+                                                 double t,
+                                                 const DynamicState& x,
+                                                 const NetworkState& y,
+                                                 const DynamicJacobianContext& context) {
+  DynamicStamp stamp(context.n_ac, context.n_dc);
+  device.stamp(t, x, y, stamp);
+  Eigen::VectorXd current = Eigen::VectorXd::Zero(context.total_size);
+  for (int node = 0; node < context.n_ac; ++node) {
+    current[context.acRealRow(node)] = stamp.Iac[node].real();
+    current[context.acImagRow(node)] = stamp.Iac[node].imag();
+  }
+  for (int node = 0; node < context.n_dc; ++node) {
+    current[context.dcRow(node)] = stamp.Idc[node];
+  }
+  return current;
+}
+
+void add_device_current_jacobian_by_local_fd(
+    const DynamicDevice& device,
+    double t,
+    const DynamicState& x,
+    const NetworkState& y,
+    const DynamicJacobianContext& context,
+    std::vector<int> columns,
+    std::vector<Eigen::Triplet<double>>& triplets) {
+  if (context.total_size <= 0) return;
+  sort_unique_columns(columns);
+  for (int col : columns) {
+    if (!valid_jacobian_index(context, col)) continue;
+    const double base = jacobian_column_value(x, y, context, col);
+    const double h = 1e-6 * std::max(1.0, std::abs(base));
+    DynamicState xp = x;
+    DynamicState xm = x;
+    NetworkState yp = y;
+    NetworkState ym = y;
+    perturb_jacobian_column(xp, yp, context, col, h);
+    perturb_jacobian_column(xm, ym, context, col, -h);
+    const Eigen::VectorXd derivative =
+        (stamped_current_injection_vector(device, t, xp, yp, context) -
+         stamped_current_injection_vector(device, t, xm, ym, context)) /
+        (2.0 * h);
+    for (int row = context.ac_real_offset; row < context.total_size; ++row) {
+      add_jacobian_triplet(context, row, col, derivative[row], triplets);
+    }
+  }
+}
+
+void add_device_differential_jacobian_by_local_fd(
+    const DynamicDevice& device,
+    double t,
+    const DynamicState& x,
+    const NetworkState& y,
+    const DynamicJacobianContext& context,
+    std::vector<int> columns,
+    std::vector<Eigen::Triplet<double>>& triplets) {
+  if (!context.include_differential_derivatives ||
+      context.n_x <= 0 ||
+      context.dt == 0.0 ||
+      context.theta == 0.0) {
+    return;
+  }
+  sort_unique_columns(columns);
+  for (int col : columns) {
+    if (!valid_jacobian_index(context, col)) continue;
+    const double base = jacobian_column_value(x, y, context, col);
+    const double h = 1e-6 * std::max(1.0, std::abs(base));
+    DynamicState xp = x;
+    DynamicState xm = x;
+    NetworkState yp = y;
+    NetworkState ym = y;
+    perturb_jacobian_column(xp, yp, context, col, h);
+    perturb_jacobian_column(xm, ym, context, col, -h);
+    Eigen::VectorXd fp = Eigen::VectorXd::Zero(context.n_x);
+    Eigen::VectorXd fm = Eigen::VectorXd::Zero(context.n_x);
+    device.computeDerivatives(t, xp, yp, fp);
+    device.computeDerivatives(t, xm, ym, fm);
+    if (!fp.allFinite() || !fm.allFinite()) continue;
+    const Eigen::VectorXd df = (fp - fm) / (2.0 * h);
+    for (int row = 0; row < context.n_x; ++row) {
+      add_jacobian_triplet(context,
+                           row,
+                           col,
+                           -context.dt * context.theta * df[row],
+                           triplets);
+    }
+  }
+}
+
 template <typename CurrentFn>
 void add_local_ac_voltage_current_derivative(
     const DynamicJacobianContext& context,
@@ -378,10 +546,31 @@ int gfl_vdc_local(const GridFollowingInverterParams& params) {
              : -1;
 }
 
+bool gfl_uses_lcl_filter(const GridFollowingInverterParams& params) {
+  return params.filter_kind == InverterFilterKind::LCL &&
+         params.filter_c_pu > 0.0;
+}
+
+int gfl_lcl_base_local(const GridFollowingInverterParams& params) {
+  int local = 6;
+  if (uses_kaura_pll(params.frequency_estimator)) local += 2;
+  if (gfl_vdc_local(params) >= 0) local += 1;
+  return local;
+}
+
+int gfl_filter_vr_local(const GridFollowingInverterParams& params) {
+  return gfl_uses_lcl_filter(params) ? gfl_lcl_base_local(params) : -1;
+}
+
+int gfl_filter_vi_local(const GridFollowingInverterParams& params) {
+  return gfl_uses_lcl_filter(params) ? gfl_lcl_base_local(params) + 1 : -1;
+}
+
 int gfl_state_count(const GridFollowingInverterParams& params) {
   int count = 6;
   if (uses_kaura_pll(params.frequency_estimator)) count += 2;
   if (gfl_vdc_local(params) >= 0) count += 1;
+  if (gfl_uses_lcl_filter(params)) count += 2;
   return count;
 }
 
@@ -395,6 +584,23 @@ std::pair<double, double> pll_measurement(const GridFollowingInverterParams& par
             x.x[state_index(range, gfl_vqf_local(params))]};
   }
   return {vd_raw, vq_raw};
+}
+
+Complex gfl_lcl_grid_admittance(const GridFollowingInverterParams& params) {
+  const Complex z(params.filter_grid_r_pu,
+                  std::max(1e-5, params.filter_grid_x_pu));
+  return Complex(1.0, 0.0) / z;
+}
+
+Complex gfl_filter_voltage(const GridFollowingInverterParams& params,
+                           const DynamicState& x,
+                           const StateIndexRange& range,
+                           Complex fallback) {
+  const int vr_local = gfl_filter_vr_local(params);
+  const int vi_local = gfl_filter_vi_local(params);
+  if (vr_local < 0 || vi_local < 0) return fallback;
+  return Complex(x.x[state_index(range, vr_local)],
+                 x.x[state_index(range, vi_local)]);
 }
 
 void add_voltage_metrics(DynamicDeviceOutput& out,
@@ -595,6 +801,31 @@ std::pair<double, double> limited_current(double id_ref,
   const double id_abs = std::sqrt(std::max(0.0, limit * limit - iq * iq));
   const double id = id_ref < 0.0 ? -id_abs : id_abs;
   return {id, iq};
+}
+
+std::pair<double, double> limited_current(double id_ref,
+                                          double iq_ref,
+                                          double limit,
+                                          CurrentLimiterKind kind) {
+  if (limit <= 0.0) return {id_ref, iq_ref};
+  const double imag = std::hypot(id_ref, iq_ref);
+  if (imag <= limit || imag <= 1e-12) return {id_ref, iq_ref};
+  if (kind == CurrentLimiterKind::ReactivePriority ||
+      kind == CurrentLimiterKind::Hybrid) {
+    return limited_current(id_ref, iq_ref, limit, true);
+  }
+  if (kind == CurrentLimiterKind::ActivePriority) {
+    const double id = std::clamp(id_ref, -limit, limit);
+    const double iq_abs = std::sqrt(std::max(0.0, limit * limit - id * id));
+    const double iq = iq_ref < 0.0 ? -iq_abs : iq_abs;
+    return {id, iq};
+  }
+  if (kind == CurrentLimiterKind::Saturation) {
+    return {std::clamp(id_ref, -limit, limit),
+            std::clamp(iq_ref, -limit, limit)};
+  }
+  const double scale = limit / imag;
+  return {id_ref * scale, iq_ref * scale};
 }
 
 Complex load_power_pu(const ACLoadDynamicParams& params) {
@@ -1901,9 +2132,9 @@ void DynamicRLLine::stamp(double,
   add_balanced_current(stamp, params_.to_pos, current);
 }
 
-void DynamicRLLine::addJacobian(double,
-                                const DynamicState&,
-                                const NetworkState&,
+void DynamicRLLine::addJacobian(double t,
+                                const DynamicState& x,
+                                const NetworkState& y,
                                 const DynamicJacobianContext& context,
                                 std::vector<Eigen::Triplet<double>>& triplets) const {
   if (!params_.in_service || params_.from_pos < 0 || params_.to_pos < 0 ||
@@ -1919,6 +2150,12 @@ void DynamicRLLine::addJacobian(double,
   add_balanced_current_derivative(context, params_.from_pos, ii_col, -d_ii, triplets);
   add_balanced_current_derivative(context, params_.to_pos, ir_col, d_ir, triplets);
   add_balanced_current_derivative(context, params_.to_pos, ii_col, d_ii, triplets);
+
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  append_ac_bus_voltage_columns(context, params_.from_pos, columns);
+  append_ac_bus_voltage_columns(context, params_.to_pos, columns);
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
 }
 
 void DynamicRLLine::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState& y) {
@@ -3097,6 +3334,20 @@ void SynchronousMachine::stamp(double,
   add_balanced_current(stamp, params_.bus_pos, yv * e);
 }
 
+void SynchronousMachine::addJacobian(
+    double t,
+    const DynamicState& x,
+    const NetworkState& y,
+    const DynamicJacobianContext& context,
+    std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  append_ac_bus_voltage_columns(context, params_.bus_pos, columns);
+  add_device_current_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
+}
+
 void SynchronousMachine::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
   const bool matching =
       event.component_index == 0 || event.component_index == params_.component_index;
@@ -3491,6 +3742,12 @@ void FiveMassShaft::computeDerivatives(double,
 
 void FiveMassShaft::stamp(double, const DynamicState&, const NetworkState&, DynamicStamp&) const {}
 
+void FiveMassShaft::addJacobian(double,
+                                const DynamicState&,
+                                const NetworkState&,
+                                const DynamicJacobianContext&,
+                                std::vector<Eigen::Triplet<double>>&) const {}
+
 void FiveMassShaft::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
   const bool matching = event.component_index == 0 ||
                         event.component_index == params_.component_index ||
@@ -3573,6 +3830,11 @@ static double pss_vs_output(const PSSOutputLink& L, const DynamicState& x) {
     const double y2 = x.x[o + 2] + L.t2_over_t4 * y1;
     return std::clamp(y2, -L.h_lim, L.h_lim);
   }
+  if (L.model >= 3 && L.model <= 5) {
+    const int count = L.model == 3 ? 16 : (L.model == 4 ? 17 : 19);
+    if (o + count - 1 >= x.x.size()) return 0.0;
+    return std::clamp(x.x[o + count - 1], L.vs_min_pu, L.vs_max_pu);
+  }
   const double t2 = std::max(kMinTimeConstant, L.t2_s);
   const double t4 = std::max(kMinTimeConstant, L.t4_s);
   const double y_w = L.ks * u - x.x[o + 0];
@@ -3583,10 +3845,40 @@ static double pss_vs_output(const PSSOutputLink& L, const DynamicState& x) {
 
 Governor::Governor(GovernorDynamicParams params) : params_(std::move(params)) {}
 
+namespace {
+
+int governor_state_count(GovernorModel model) {
+  switch (model) {
+    case GovernorModel::TGTypeI:
+      return 3;
+    case GovernorModel::TGOV1:
+      return 2;
+    case GovernorModel::GAST:
+      return 3;
+    case GovernorModel::HYGOV:
+      return 4;
+    case GovernorModel::DEGOV:
+    case GovernorModel::DEGOV1:
+      return 5;
+    case GovernorModel::PIDGOV:
+    case GovernorModel::WPIDHY:
+      return 7;
+    case GovernorModel::TGSimple:
+    case GovernorModel::IEEEG1:
+    case GovernorModel::TGTypeII:
+      return 1;
+  }
+  return 1;
+}
+
+bool governor_is_pid_hydro(GovernorModel model) {
+  return model == GovernorModel::PIDGOV || model == GovernorModel::WPIDHY;
+}
+
+}  // namespace
+
 void Governor::assignStateIndices(int& offset) {
-  const int count = params_.model == GovernorModel::TGTypeI ? 3
-                    : (params_.model == GovernorModel::TGOV1 ? 2 : 1);
-  range_ = {offset, count};  // machine owns the published tau_m/pm slot
+  range_ = {offset, governor_state_count(params_.model)};
   offset += range_.size;
 }
 
@@ -3616,6 +3908,27 @@ void Governor::initializeFromPowerFlow(const PowerFlowResult&, DynamicState& x, 
     const double t3 = control_time(params_.turbine_t_s);
     x.x[state_index(range_, 0)] = p0;
     x.x[state_index(range_, 1)] = (1.0 - params_.t2_s / t3) * p0;
+  } else if (params_.model == GovernorModel::GAST && range_.size >= 3) {
+    x.x[state_index(range_, 0)] = p0;
+    x.x[state_index(range_, 1)] = p0;
+    x.x[state_index(range_, 2)] = p0;
+  } else if (params_.model == GovernorModel::HYGOV && range_.size >= 4) {
+    x.x[state_index(range_, 0)] = p0;
+    x.x[state_index(range_, 1)] = (1.0 - params_.ta_s / control_time(params_.tb_s)) * p0;
+    x.x[state_index(range_, 2)] = p0;
+    x.x[state_index(range_, 3)] = p0;
+  } else if ((params_.model == GovernorModel::DEGOV ||
+              params_.model == GovernorModel::DEGOV1) &&
+             range_.size >= 5) {
+    for (int k = 0; k < 5; ++k) x.x[state_index(range_, k)] = p0;
+  } else if (governor_is_pid_hydro(params_.model) && range_.size >= 7) {
+    x.x[state_index(range_, 0)] = 0.0;
+    x.x[state_index(range_, 1)] = 0.0;
+    x.x[state_index(range_, 2)] = p0;
+    x.x[state_index(range_, 3)] = 0.0;
+    x.x[state_index(range_, 4)] = p0;
+    x.x[state_index(range_, 5)] = p0;
+    x.x[state_index(range_, 6)] = p0;
   } else {
     x.x[range_.offset] =
         params_.model == GovernorModel::TGTypeII ? 0.0 : p0;
@@ -3652,6 +3965,39 @@ bool Governor::trimToNetworkEquilibrium(DynamicState& x, NetworkState&) {
     changed = set_if_changed(x.x, state_index(range_, 0), p0) || changed;
     changed = set_if_changed(x.x, state_index(range_, 1),
                              (1.0 - params_.t2_s / t3) * p0) || changed;
+    return changed;
+  }
+  if (params_.model == GovernorModel::GAST && range_.size >= 3) {
+    for (int k = 0; k < 3; ++k) {
+      changed = set_if_changed(x.x, state_index(range_, k), p0) || changed;
+    }
+    return changed;
+  }
+  if (params_.model == GovernorModel::HYGOV && range_.size >= 4) {
+    changed = set_if_changed(x.x, state_index(range_, 0), p0) || changed;
+    changed = set_if_changed(x.x,
+                             state_index(range_, 1),
+                             (1.0 - params_.ta_s / control_time(params_.tb_s)) * p0) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 2), p0) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 3), p0) || changed;
+    return changed;
+  }
+  if ((params_.model == GovernorModel::DEGOV ||
+       params_.model == GovernorModel::DEGOV1) &&
+      range_.size >= 5) {
+    for (int k = 0; k < 5; ++k) {
+      changed = set_if_changed(x.x, state_index(range_, k), p0) || changed;
+    }
+    return changed;
+  }
+  if (governor_is_pid_hydro(params_.model) && range_.size >= 7) {
+    changed = set_if_changed(x.x, state_index(range_, 0), 0.0) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 1), 0.0) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 2), p0) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 3), 0.0) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 4), p0) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 5), p0) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 6), p0) || changed;
     return changed;
   }
   return set_if_changed(x.x, range_.offset,
@@ -3741,6 +4087,116 @@ void Governor::computeDerivatives(double,
       }
       return;
     }
+    if (params_.model == GovernorModel::TGSimple) {
+      const double tau = x.x[range_.offset];
+      const double dx = (valve_cmd - tau) / t1;
+      dxdt[range_.offset] = dx;
+      if (pm_idx >= 0 && pm_idx < x.x.size()) {
+        dxdt[pm_idx] = dx + (tau - x.x[pm_idx]) / t1;
+      }
+      return;
+    }
+    if (params_.model == GovernorModel::GAST && range_.size >= 3) {
+      const double xg1 = x.x[state_index(range_, 0)];
+      const double xg2 = x.x[state_index(range_, 1)];
+      const double xg3 = x.x[state_index(range_, 2)];
+      const double dxg1 = (valve_cmd - xg1) / control_time(params_.t_s);
+      const double dxg2 = (xg1 - xg2) / control_time(params_.fuel_t_s);
+      const double dxg3 = (xg2 - xg3) / control_time(params_.temperature_t_s);
+      const double tau_m = std::clamp(xg2 - params_.damping_d_t * (omega - 1.0), pmin, pmax);
+      dxdt[state_index(range_, 0)] = dxg1;
+      dxdt[state_index(range_, 1)] = dxg2;
+      dxdt[state_index(range_, 2)] = dxg3;
+      if (pm_idx >= 0 && pm_idx < x.x.size()) {
+        dxdt[pm_idx] =
+            dxg2 + (tau_m - x.x[pm_idx]) / control_time(params_.turbine_t_s);
+      }
+      return;
+    }
+    if (params_.model == GovernorModel::HYGOV && range_.size >= 4) {
+      const double gate = x.x[state_index(range_, 0)];
+      const double servo = x.x[state_index(range_, 1)];
+      const double water = x.x[state_index(range_, 2)];
+      const double turbine = x.x[state_index(range_, 3)];
+      const double gate_cmd = std::clamp(valve_cmd, params_.gate_min_pu, params_.gate_max_pu);
+      const double tb = control_time(params_.tb_s);
+      const double y_servo = servo + (params_.ta_s / tb) * gate;
+      const double dx_gate = (gate_cmd - gate) / control_time(params_.gate_t_s);
+      const double dx_servo = ((1.0 - params_.ta_s / tb) * gate - servo) / tb;
+      const double dx_water = (y_servo - water) / control_time(params_.water_t_s);
+      const double dx_turbine = (water - turbine) / control_time(params_.turbine_t_s);
+      const double tau_m = std::clamp(turbine - params_.damping_d_t * (omega - 1.0), pmin, pmax);
+      dxdt[state_index(range_, 0)] = dx_gate;
+      dxdt[state_index(range_, 1)] = dx_servo;
+      dxdt[state_index(range_, 2)] = dx_water;
+      dxdt[state_index(range_, 3)] = dx_turbine;
+      if (pm_idx >= 0 && pm_idx < x.x.size()) {
+        dxdt[pm_idx] =
+            dx_turbine + (tau_m - x.x[pm_idx]) / control_time(params_.turbine_t_s);
+      }
+      return;
+    }
+    if ((params_.model == GovernorModel::DEGOV ||
+         params_.model == GovernorModel::DEGOV1) &&
+        range_.size >= 5) {
+      const double x0 = x.x[state_index(range_, 0)];
+      const double x1 = x.x[state_index(range_, 1)];
+      const double x2 = x.x[state_index(range_, 2)];
+      const double x3 = x.x[state_index(range_, 3)];
+      const double x4 = x.x[state_index(range_, 4)];
+      const double dx0 = (valve_cmd - x0) / control_time(params_.t_s);
+      const auto [act1, dx1] = lead_lag_block(x0, x1, 1.0, params_.ta_s, params_.tb_s);
+      const double dx2 = (act1 - x2) / control_time(params_.fuel_t_s);
+      const double dx3 = (x2 - x3) / control_time(params_.gate_t_s);
+      const double dx4 = (x3 - x4) / control_time(params_.turbine_t_s);
+      const double tau_m = std::clamp(x4 - params_.damping_d_t * (omega - 1.0), pmin, pmax);
+      dxdt[state_index(range_, 0)] = dx0;
+      dxdt[state_index(range_, 1)] = dx1;
+      dxdt[state_index(range_, 2)] = dx2;
+      dxdt[state_index(range_, 3)] = dx3;
+      dxdt[state_index(range_, 4)] = dx4;
+      if (pm_idx >= 0 && pm_idx < x.x.size()) {
+        dxdt[pm_idx] = dx4 + (tau_m - x.x[pm_idx]) / control_time(params_.turbine_t_s);
+      }
+      return;
+    }
+    if (governor_is_pid_hydro(params_.model) && range_.size >= 7) {
+      const double x0 = x.x[state_index(range_, 0)];
+      const double xi = x.x[state_index(range_, 1)];
+      const double xreg = x.x[state_index(range_, 2)];
+      const double xd = x.x[state_index(range_, 3)];
+      const double xact = x.x[state_index(range_, 4)];
+      const double gate = x.x[state_index(range_, 5)];
+      const double water = x.x[state_index(range_, 6)];
+      const double speed_error = 1.0 - omega;
+      const double dx0 = (speed_error - x0) / control_time(params_.t_s);
+      const double error = pref + x0 / droop - water;
+      const double dxi = params_.ki * error;
+      const double dxd = (error - xd) / control_time(params_.ta_s);
+      const double command =
+          std::clamp(pref + params_.ki * xi + params_.kd * dxd +
+                         (1.0 / droop) * x0,
+                     pmin,
+                     pmax);
+      const double dxreg = (command - xreg) / control_time(params_.tb_s);
+      const double dxact = (xreg - xact) / control_time(params_.gate_t_s);
+      const double dxgate =
+          (std::clamp(xact, params_.gate_min_pu, params_.gate_max_pu) - gate) /
+          control_time(params_.fuel_t_s);
+      const double dxwater = (gate - water) / control_time(params_.water_t_s);
+      const double tau_m = std::clamp(water - params_.damping_d_t * (omega - 1.0), pmin, pmax);
+      dxdt[state_index(range_, 0)] = dx0;
+      dxdt[state_index(range_, 1)] = dxi;
+      dxdt[state_index(range_, 2)] = dxreg;
+      dxdt[state_index(range_, 3)] = dxd;
+      dxdt[state_index(range_, 4)] = dxact;
+      dxdt[state_index(range_, 5)] = dxgate;
+      dxdt[state_index(range_, 6)] = dxwater;
+      if (pm_idx >= 0 && pm_idx < x.x.size()) {
+        dxdt[pm_idx] = dxwater + (tau_m - x.x[pm_idx]) / control_time(params_.water_t_s);
+      }
+      return;
+    }
     const double valve = x.x[range_.offset];
     dxdt[range_.offset] = (valve_cmd - valve) / t1;
     if (pm_idx >= 0 && pm_idx < x.x.size()) {
@@ -3755,6 +4211,21 @@ void Governor::computeDerivatives(double,
 }
 
 void Governor::stamp(double, const DynamicState&, const NetworkState&, DynamicStamp&) const {}
+
+void Governor::addJacobian(double t,
+                           const DynamicState& x,
+                           const NetworkState& y,
+                           const DynamicJacobianContext& context,
+                           std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service || range_.empty()) return;
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  if (machine_ != nullptr && machine_->valid) {
+    append_state_column(context, machine_->omegaIndex(), columns);
+    append_state_column(context, machine_->pmIndex(), columns);
+  }
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
+}
 
 void Governor::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
   const bool matching = event.component_index == 0 ||
@@ -3784,6 +4255,9 @@ DynamicDeviceOutput Governor::output(const DynamicState& x, const NetworkState&)
   out.values["droop_r"] = params_.droop_r;
   out.values["p_ref_mw"] = params_.p_ref_mw;
   out.values["attached"] = machine_ != nullptr ? 1.0 : 0.0;
+  out.values["state_count"] = static_cast<double>(range_.size);
+  out.values["gate_max_pu"] = params_.gate_max_pu;
+  out.values["gate_min_pu"] = params_.gate_min_pu;
   if (!range_.empty() && range_.offset < x.x.size()) {
     out.values["valve_pu"] = x.x[range_.offset];
     if (params_.model == GovernorModel::TGOV1 && range_.size >= 2) {
@@ -3794,6 +4268,10 @@ DynamicDeviceOutput Governor::output(const DynamicState& x, const NetworkState&)
     if (params_.model == GovernorModel::TGTypeI && range_.size >= 3) {
       out.values["servo_state_pu"] = x.x[state_index(range_, 1)];
       out.values["reheat_state_pu"] = x.x[state_index(range_, 2)];
+    }
+    for (int k = 0; k < range_.size && state_index(range_, k) < x.x.size(); ++k) {
+      out.values["state_" + std::to_string(k + 1) + "_pu"] =
+          x.x[state_index(range_, k)];
     }
   }
   if (machine_ != nullptr && machine_->valid) {
@@ -3809,20 +4287,46 @@ DynamicDeviceOutput Governor::output(const DynamicState& x, const NetworkState&)
 
 Exciter::Exciter(ExciterDynamicParams params) : params_(std::move(params)) {}
 
-void Exciter::assignStateIndices(int& offset) {
-  int count = 1;
-  if (machine_ != nullptr) {
-    count = params_.model == ExciterModel::SEXS
-                ? 1
-                : (params_.model == ExciterModel::AVRTypeI ||
-             params_.model == ExciterModel::AVRTypeII)
-                      ? 3
-                      : 0;
-  } else if (params_.model == ExciterModel::AVRTypeI ||
-             params_.model == ExciterModel::AVRTypeII) {
-    count = 4;
+namespace {
+
+int exciter_state_count(ExciterModel model, bool attached) {
+  switch (model) {
+    case ExciterModel::SEXS:
+      return attached ? 1 : 1;
+    case ExciterModel::AVRSimple:
+    case ExciterModel::IEEET1:
+      return attached ? 0 : 1;
+    case ExciterModel::AVRTypeI:
+    case ExciterModel::AVRTypeII:
+      return attached ? 3 : 4;
+    case ExciterModel::SCRX:
+      return 2;
+    case ExciterModel::EXST1:
+    case ExciterModel::ESST1A:
+    case ExciterModel::ST6B:
+      return 4;
+    case ExciterModel::ESAC1A:
+    case ExciterModel::EXAC1:
+    case ExciterModel::ST8C:
+      return 5;
   }
-  range_ = {offset, count};
+  return attached ? 0 : 1;
+}
+
+bool exciter_is_extended(ExciterModel model) {
+  return model == ExciterModel::ESAC1A ||
+         model == ExciterModel::EXAC1 ||
+         model == ExciterModel::EXST1 ||
+         model == ExciterModel::SCRX ||
+         model == ExciterModel::ESST1A ||
+         model == ExciterModel::ST6B ||
+         model == ExciterModel::ST8C;
+}
+
+}  // namespace
+
+void Exciter::assignStateIndices(int& offset) {
+  range_ = {offset, exciter_state_count(params_.model, machine_ != nullptr)};
   offset += range_.size;
 }
 
@@ -3919,6 +4423,16 @@ void Exciter::initializeFromPowerFlow(const PowerFlowResult& pf, DynamicState& x
       v_ref_captured_ = vt + u;
     }
   }
+  if (exciter_is_extended(params_.model) && !range_.empty()) {
+    const int base = range_.offset;
+    x.x[base + 0] = vt;
+    if (range_.size >= 2) x.x[base + 1] = field0;
+    if (range_.size >= 3) x.x[base + 2] = 0.0;
+    if (range_.size >= 4) x.x[base + 3] = field0;
+    if (range_.size >= 5) x.x[base + 4] = 0.0;
+    const double k = std::max(1e-9, std::abs(params_.ka));
+    v_ref_captured_ = vt + field0 / k;
+  }
   captured_ = true;
 }
 
@@ -3982,6 +4496,27 @@ bool Exciter::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
       changed = set_if_changed(x.x, base + vm_local, vt) || changed;
     }
     captured_ = true;
+    return changed;
+  }
+  if (exciter_is_extended(params_.model) && !range_.empty()) {
+    const int base = range_.offset;
+    const double vt = terminalVoltage(y);
+    double vf = field0_;
+    if (machine_ != nullptr && machine_->valid) {
+      const int f = machine_->fieldIndex();
+      if (f >= 0 && f < x.x.size()) vf = x.x[f];
+    } else if (base < x.x.size()) {
+      vf = x.x[base];
+    }
+    const double k = std::max(1e-9, std::abs(params_.ka));
+    v_ref_captured_ = vt + vf / k;
+    captured_ = true;
+    bool changed = false;
+    changed = set_if_changed(x.x, base + 0, vt) || changed;
+    if (range_.size >= 2) changed = set_if_changed(x.x, base + 1, vf) || changed;
+    if (range_.size >= 3) changed = set_if_changed(x.x, base + 2, 0.0) || changed;
+    if (range_.size >= 4) changed = set_if_changed(x.x, base + 3, vf) || changed;
+    if (range_.size >= 5) changed = set_if_changed(x.x, base + 4, 0.0) || changed;
     return changed;
   }
   if (machine_ != nullptr) return false;  // coupled exciter owns no state to trim
@@ -4061,6 +4596,56 @@ void Exciter::computeDerivatives(double,
       }
       return;
     }
+    if (exciter_is_extended(params_.model) && !range_.empty()) {
+      const int base = range_.offset;
+      const double vf = x.x[f];
+      const double vm = x.x[base + 0];
+      const auto vm_block = low_pass_block(vt, vm, 1.0, params_.tr_s);
+      dxdt[base + 0] = vm_block.second;
+      const double error = vref + vs - vm;
+      if (params_.model == ExciterModel::SCRX && range_.size >= 2) {
+        const double vr = x.x[base + 1];
+        const double dxvr = (params_.ka * error - vr) / control_time(params_.ta_s);
+        const double efd_cmd = std::clamp(vr, params_.efd_min_pu, params_.efd_max_pu);
+        dxdt[base + 1] = dxvr;
+        dxdt[f] = (efd_cmd - vf) / control_time(params_.te_s);
+        return;
+      }
+      const double x1 = range_.size >= 2 ? x.x[base + 1] : 0.0;
+      const double x2 = range_.size >= 3 ? x.x[base + 2] : 0.0;
+      const double x3 = range_.size >= 4 ? x.x[base + 3] : vf;
+      const double x4 = range_.size >= 5 ? x.x[base + 4] : 0.0;
+      const double tb = control_time(params_.tb_s);
+      const double tc = params_.tc_s > 0.0 ? params_.tc_s : params_.ta_s;
+      const auto [y1, dx1] = lead_lag_block(error, x1, params_.ka, tc, tb);
+      double y = y1;
+      if (range_.size >= 3) {
+        const auto [y2, dx2] =
+            lead_lag_block(y1, x2, 1.0, params_.t2_s, params_.t1_s);
+        y = y2;
+        dxdt[base + 2] = dx2;
+      }
+      if (range_.size >= 5) {
+        const auto fb = high_pass_block(vf, x4, params_.kf, params_.tf_s);
+        dxdt[base + 4] = fb.second;
+        y -= fb.first;
+      }
+      if (params_.model == ExciterModel::ST6B ||
+          params_.model == ExciterModel::ST8C ||
+          params_.model == ExciterModel::ESST1A) {
+        y += params_.kg * vt;
+      }
+      y -= params_.kd * vf;
+      const double efd_cmd = std::clamp(y, params_.efd_min_pu, params_.efd_max_pu);
+      dxdt[base + 1] = dx1;
+      if (range_.size >= 4) {
+        dxdt[base + 3] = (efd_cmd - x3) / control_time(params_.te_s);
+        dxdt[f] = (x3 - vf) / control_time(params_.te_s);
+      } else {
+        dxdt[f] = (efd_cmd - vf) / control_time(params_.te_s);
+      }
+      return;
+    }
     const double efd_cmd = std::clamp(field0_ + params_.ka * (vref - vt + vs),
                                       params_.efd_min_pu, params_.efd_max_pu);
     dxdt[f] = (efd_cmd - x.x[f]) / t;
@@ -4105,12 +4690,74 @@ void Exciter::computeDerivatives(double,
     }
     return;
   }
+  if (exciter_is_extended(params_.model) && range_.size >= 2) {
+    const int base = range_.offset;
+    const double vm = x.x[base + 0];
+    dxdt[base + 0] = low_pass_block(vt, vm, 1.0, params_.tr_s).second;
+    const double error = vref + vs - vm;
+    if (params_.model == ExciterModel::SCRX) {
+      const double vr = x.x[base + 1];
+      dxdt[base + 1] = (params_.ka * error - vr) / control_time(params_.ta_s);
+      return;
+    }
+    const double x1 = x.x[base + 1];
+    const double x2 = range_.size >= 3 ? x.x[base + 2] : 0.0;
+    const double x3 = range_.size >= 4 ? x.x[base + 3] : x1;
+    const double x4 = range_.size >= 5 ? x.x[base + 4] : 0.0;
+    const auto [y1, dx1] =
+        lead_lag_block(error,
+                       x1,
+                       params_.ka,
+                       params_.tc_s > 0.0 ? params_.tc_s : params_.ta_s,
+                       params_.tb_s);
+    double y = y1;
+    if (range_.size >= 3) {
+      const auto [y2, dx2] = lead_lag_block(y1, x2, 1.0, params_.t2_s, params_.t1_s);
+      y = y2;
+      dxdt[base + 2] = dx2;
+    }
+    if (range_.size >= 5) {
+      const auto fb = high_pass_block(x3, x4, params_.kf, params_.tf_s);
+      dxdt[base + 4] = fb.second;
+      y -= fb.first;
+    }
+    dxdt[base + 1] = dx1;
+    if (range_.size >= 4) {
+      dxdt[base + 3] =
+          (std::clamp(y, params_.efd_min_pu, params_.efd_max_pu) - x3) /
+          control_time(params_.te_s);
+    }
+    return;
+  }
   const double efd_cmd = std::clamp(params_.ka * (vref - vt + vs) + vref,
                                     params_.efd_min_pu, params_.efd_max_pu);
   dxdt[range_.offset] = (efd_cmd - x.x[range_.offset]) / t;
 }
 
 void Exciter::stamp(double, const DynamicState&, const NetworkState&, DynamicStamp&) const {}
+
+void Exciter::addJacobian(double t,
+                          const DynamicState& x,
+                          const NetworkState& y,
+                          const DynamicJacobianContext& context,
+                          std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service) return;
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  if (machine_ != nullptr && machine_->valid) {
+    append_state_column(context, machine_->fieldIndex(), columns);
+    append_ac_bus_voltage_columns(context, machine_->generatorBus().bus_pos, columns);
+  } else {
+    append_ac_bus_voltage_columns(context, params_.bus_pos, columns);
+  }
+  if (pss_ != nullptr && pss_->valid && pss_->range != nullptr) {
+    append_state_range_columns(context, *pss_->range, columns);
+    if (pss_->machine != nullptr && pss_->machine->valid) {
+      append_state_column(context, pss_->machine->omegaIndex(), columns);
+    }
+  }
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
+}
 
 void Exciter::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
   const bool matching = event.component_index == 0 ||
@@ -4141,6 +4788,7 @@ DynamicDeviceOutput Exciter::output(const DynamicState& x, const NetworkState& y
   out.values["v_ref_pu"] = captured_ ? v_ref_captured_ : params_.v_ref_pu;
   out.values["ka"] = params_.ka;
   out.values["attached"] = machine_ != nullptr ? 1.0 : 0.0;
+  out.values["state_count"] = static_cast<double>(range_.size);
   double efd = field0_;
   if (machine_ != nullptr && machine_->valid) {
     const int f = machine_->fieldIndex();
@@ -4156,6 +4804,15 @@ DynamicDeviceOutput Exciter::output(const DynamicState& x, const NetworkState& y
     out.values["tb_s"] = params_.tb_s;
     out.values["te_s"] = params_.te_s;
   }
+  if (exciter_is_extended(params_.model) && !range_.empty()) {
+    for (int k = 0; k < range_.size && state_index(range_, k) < x.x.size(); ++k) {
+      out.values["state_" + std::to_string(k + 1) + "_pu"] =
+          x.x[state_index(range_, k)];
+    }
+    out.values["extended_avr"] = 1.0;
+    out.values["tb_s"] = params_.tb_s;
+    out.values["tc_s"] = params_.tc_s;
+  }
   add_voltage_metrics(out, y, machine_ != nullptr && machine_->valid
                                   ? machine_->generatorBus().bus_pos
                                   : params_.bus_pos);
@@ -4166,19 +4823,63 @@ DynamicDeviceOutput Exciter::output(const DynamicState& x, const NetworkState& y
 PowerSystemStabilizer::PowerSystemStabilizer(PSSDynamicParams params)
     : params_(std::move(params)) {}
 
+namespace {
+
+int pss_state_count(PSSModel model) {
+  switch (model) {
+    case PSSModel::IEEEST:
+      return 7;
+    case PSSModel::PSS2A:
+      return 16;
+    case PSSModel::PSS2B:
+      return 17;
+    case PSSModel::PSS2C:
+      return 19;
+    case PSSModel::PSS1A:
+    case PSSModel::STAB1:
+      return 3;
+  }
+  return 3;
+}
+
+int pss_model_code(PSSModel model) {
+  switch (model) {
+    case PSSModel::IEEEST:
+      return 1;
+    case PSSModel::STAB1:
+      return 2;
+    case PSSModel::PSS2A:
+      return 3;
+    case PSSModel::PSS2B:
+      return 4;
+    case PSSModel::PSS2C:
+      return 5;
+    case PSSModel::PSS1A:
+      return 0;
+  }
+  return 0;
+}
+
+bool pss_is_pss2(PSSModel model) {
+  return model == PSSModel::PSS2A ||
+         model == PSSModel::PSS2B ||
+         model == PSSModel::PSS2C;
+}
+
+}  // namespace
+
 void PowerSystemStabilizer::attachMachine(const MachineControlLink* link) {
   machine_ = link;
   link_.machine = link;
 }
 
 void PowerSystemStabilizer::assignStateIndices(int& offset) {
-  range_ = {offset, params_.model == PSSModel::IEEEST ? 7 : 3};
+  range_ = {offset, pss_state_count(params_.model)};
   offset += range_.size;
   link_.range = &range_;
   link_.machine = machine_;
   link_.valid = machine_ != nullptr && machine_->valid;
-  link_.model = params_.model == PSSModel::IEEEST ? 1
-                 : (params_.model == PSSModel::STAB1 ? 2 : 0);
+  link_.model = pss_model_code(params_.model);
   link_.ks = params_.ks;
   link_.tw_s = params_.tw_s;
   link_.t1_s = params_.t1_s;
@@ -4203,6 +4904,26 @@ void PowerSystemStabilizer::assignStateIndices(int& offset) {
   link_.t1_over_t3 = params_.t1_over_t3;
   link_.t2_over_t4 = params_.t2_over_t4;
   link_.h_lim = params_.h_lim;
+  link_.ks1 = params_.ks1;
+  link_.ks2 = params_.ks2;
+  link_.ks3 = params_.ks3;
+  link_.m_rtf = params_.m_rtf;
+  link_.n_rtf = params_.n_rtf;
+  link_.tw1_s = params_.tw1_s;
+  link_.tw2_s = params_.tw2_s;
+  link_.tw3_s = params_.tw3_s;
+  link_.tw4_s = params_.tw4_s;
+  link_.t7_s = params_.t7_s;
+  link_.t8_s = params_.t8_s;
+  link_.t9_s = params_.t9_s;
+  link_.t10_s = params_.t10_s;
+  link_.t11_s = params_.t11_s;
+  link_.t12_s = params_.t12_s;
+  link_.t13_s = params_.t13_s;
+  link_.vs1_max_pu = params_.vs1_max_pu;
+  link_.vs1_min_pu = params_.vs1_min_pu;
+  link_.vs2_max_pu = params_.vs2_max_pu;
+  link_.vs2_min_pu = params_.vs2_min_pu;
 }
 
 void PowerSystemStabilizer::initializeFromPowerFlow(const PowerFlowResult&,
@@ -4285,6 +5006,57 @@ void PowerSystemStabilizer::computeDerivatives(double,
         ((1.0 - params_.t2_over_t4) * y1 - x3) / t4;
     return;
   }
+  if (pss_is_pss2(params_.model) && range_.size >= 16) {
+    const double x0 = x.x[state_index(range_, 0)];
+    const double x1 = x.x[state_index(range_, 1)];
+    const double x2 = x.x[state_index(range_, 2)];
+    const double x3 = x.x[state_index(range_, 3)];
+    const double x4 = x.x[state_index(range_, 4)];
+    const double x5 = x.x[state_index(range_, 5)];
+    const double u1 = u;
+    const double u2 = u;  // Remote/electrical-power input hook: local speed until wired.
+    dxdt[state_index(range_, 0)] = (u1 - x0) / control_time(params_.tw1_s);
+    dxdt[state_index(range_, 1)] = (u2 - x1) / control_time(params_.tw2_s);
+    const double mixed = params_.ks2 * x0 + params_.ks3 * x1;
+    dxdt[state_index(range_, 2)] = (mixed - x2) / control_time(params_.t6_s);
+    const auto [rtf, dx3] =
+        lead_lag_block(x2, x3, 1.0, params_.m_rtf, params_.n_rtf);
+    dxdt[state_index(range_, 3)] = dx3;
+    const auto [wash, dx4] =
+        lead_lag_block(rtf, x4, 1.0, params_.tw3_s, params_.t7_s);
+    dxdt[state_index(range_, 4)] = dx4;
+    const auto [lead1, dx5] =
+        lead_lag_block(wash, x5, params_.ks1, params_.t1_s, params_.t2_s);
+    dxdt[state_index(range_, 5)] = dx5;
+    double signal = lead1;
+    int prev = 5;
+    int next = 6;
+    auto lag = [&](double input, double tau) {
+      const double state = x.x[state_index(range_, next)];
+      dxdt[state_index(range_, next)] = (input - state) / control_time(tau);
+      signal = state;
+      prev = next;
+      ++next;
+    };
+    if (next < range_.size - 1) lag(signal, params_.t3_s);
+    if (next < range_.size - 1) lag(signal, params_.t4_s);
+    if (params_.model != PSSModel::PSS2A && next < range_.size - 1) {
+      lag(signal, params_.t8_s);
+    }
+    if (params_.model == PSSModel::PSS2C && next < range_.size - 1) {
+      lag(signal, params_.t9_s);
+    }
+    while (next < range_.size - 1) {
+      lag(signal, params_.t10_s > 0.0 ? params_.t10_s : 0.05);
+    }
+    const double y = std::clamp(params_.ks1 * x.x[state_index(range_, prev)],
+                                params_.vs_min_pu,
+                                params_.vs_max_pu);
+    dxdt[state_index(range_, range_.size - 1)] =
+        (y - x.x[state_index(range_, range_.size - 1)]) /
+        control_time(params_.t11_s > 0.0 ? params_.t11_s : 0.05);
+    return;
+  }
   const double tw = control_time(params_.tw_s);
   const double t2 = control_time(params_.t2_s);
   const double t4 = control_time(params_.t4_s);
@@ -4300,6 +5072,21 @@ void PowerSystemStabilizer::computeDerivatives(double,
 
 void PowerSystemStabilizer::stamp(double, const DynamicState&, const NetworkState&,
                                   DynamicStamp&) const {}
+
+void PowerSystemStabilizer::addJacobian(
+    double t,
+    const DynamicState& x,
+    const NetworkState& y,
+    const DynamicJacobianContext& context,
+    std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service || range_.empty()) return;
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  if (machine_ != nullptr && machine_->valid) {
+    append_state_column(context, machine_->omegaIndex(), columns);
+  }
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
+}
 
 void PowerSystemStabilizer::handleEvent(const DynamicEvent& event, DynamicState& x,
                                         NetworkState&) {
@@ -4331,7 +5118,15 @@ DynamicDeviceOutput PowerSystemStabilizer::output(const DynamicState& x,
   out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
   out.values["ks"] = params_.ks;
   out.values["attached"] = machine_ != nullptr ? 1.0 : 0.0;
+  out.values["state_count"] = static_cast<double>(range_.size);
+  out.values["pss2_family"] = pss_is_pss2(params_.model) ? 1.0 : 0.0;
   out.values["vs_pu"] = pss_vs_output(link_, x);
+  if (!range_.empty()) {
+    for (int k = 0; k < range_.size && state_index(range_, k) < x.x.size(); ++k) {
+      out.values["state_" + std::to_string(k + 1) + "_pu"] =
+          x.x[state_index(range_, k)];
+    }
+  }
   return out;
 }
 
@@ -4617,7 +5412,7 @@ void GridFormingInverter::stamp(double,
 }
 
 void GridFormingInverter::addJacobian(
-    double,
+    double t,
     const DynamicState& x,
     const NetworkState& y,
     const DynamicJacobianContext& context,
@@ -4636,6 +5431,12 @@ void GridFormingInverter::addJacobian(
     add_balanced_current_derivative(context, params_.bus_pos, theta_col, d_i_dtheta, triplets);
     add_balanced_current_derivative(context, params_.bus_pos, e_mag_col, d_i_de, triplets);
   }
+
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  append_ac_bus_voltage_columns(context, params_.bus_pos, columns);
+  append_dc_bus_voltage_column(context, params_.dc_bus_pos, columns);
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
 
   if (params_.dc_bus_pos < 0 || !context.validDcNode(params_.dc_bus_pos)) return;
   if (params_.dc_link_mode == DCLinkMode::DynamicDCVoltage && range_.size > 6) {
@@ -4838,6 +5639,14 @@ void GridFollowingInverter::assignStateIndices(int& offset) {
     inner_vars_.state_local[static_cast<std::size_t>(
         static_cast<int>(InverterInnerVar::DCVoltage))] = vdc_local;
   }
+  if (gfl_uses_lcl_filter(params_)) {
+    inner_vars_.state_local[static_cast<std::size_t>(
+        static_cast<int>(InverterInnerVar::FilterVoltageReal))] =
+        gfl_filter_vr_local(params_);
+    inner_vars_.state_local[static_cast<std::size_t>(
+        static_cast<int>(InverterInnerVar::FilterVoltageImag))] =
+        gfl_filter_vi_local(params_);
+  }
 }
 
 void GridFollowingInverter::initializeFromPowerFlow(const PowerFlowResult& pf,
@@ -4857,16 +5666,28 @@ void GridFollowingInverter::initializeFromPowerFlow(const PowerFlowResult& pf,
                                 params_.v_min_current_pu * params_.v_min_current_pu);
   const double id_ref = (vd * p + vq * q) / denom;
   const double iq_ref = (vq * p - vd * q) / denom;
+  const CurrentLimiterKind limiter =
+      params_.reactive_current_priority ? CurrentLimiterKind::ReactivePriority
+                                        : params_.limiter_kind;
   const auto [id, iq] = limited_current(id_ref,
                                         iq_ref,
                                         params_.current_limit_pu,
-                                        params_.reactive_current_priority);
+                                        limiter);
   x.x[state_index(range_, 0)] = angle;
   x.x[state_index(range_, 1)] = 0.0;
   x.x[state_index(range_, 2)] = id;
   x.x[state_index(range_, 3)] = iq;
   x.x[state_index(range_, 4)] = p;
   x.x[state_index(range_, 5)] = q;
+  if (gfl_uses_lcl_filter(params_)) {
+    const Complex vpos = positive_sequence_voltage(v);
+    const Complex iconv = phasor_from_dq(id, iq, angle);
+    const Complex z_grid(params_.filter_grid_r_pu,
+                         std::max(1e-5, params_.filter_grid_x_pu));
+    const Complex vf = vpos + z_grid * iconv;
+    x.x[state_index(range_, gfl_filter_vr_local(params_))] = vf.real();
+    x.x[state_index(range_, gfl_filter_vi_local(params_))] = vf.imag();
+  }
   if (uses_kaura_pll(params_.frequency_estimator)) {
     x.x[state_index(range_, gfl_vdf_local(params_))] = vd;
     x.x[state_index(range_, gfl_vqf_local(params_))] = vq;
@@ -4910,16 +5731,31 @@ bool GridFollowingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkSta
                                 params_.v_min_current_pu * params_.v_min_current_pu);
   const double id_ref = (vd * p_ref + vq * q_ref) / denom;
   const double iq_ref = (vq * p_ref - vd * q_ref) / denom;
+  const CurrentLimiterKind limiter =
+      params_.reactive_current_priority ? CurrentLimiterKind::ReactivePriority
+                                        : params_.limiter_kind;
   const auto [id, iq] = limited_current(id_ref,
                                         iq_ref,
                                         params_.current_limit_pu,
-                                        params_.reactive_current_priority);
+                                        limiter);
   changed = set_if_changed(x.x, state_index(range_, 0), theta) || changed;
   changed = set_if_changed(x.x, state_index(range_, 1), finite_value(xi_pll)) || changed;
   changed = set_if_changed(x.x, state_index(range_, 2), id) || changed;
   changed = set_if_changed(x.x, state_index(range_, 3), iq) || changed;
   changed = set_if_changed(x.x, state_index(range_, 4), p_ref) || changed;
   changed = set_if_changed(x.x, state_index(range_, 5), q_ref) || changed;
+  if (gfl_uses_lcl_filter(params_)) {
+    const Complex iconv = phasor_from_dq(id, iq, theta);
+    const Complex z_grid(params_.filter_grid_r_pu,
+                         std::max(1e-5, params_.filter_grid_x_pu));
+    const Complex vf = vpos + z_grid * iconv;
+    changed = set_if_changed(x.x,
+                             state_index(range_, gfl_filter_vr_local(params_)),
+                             vf.real()) || changed;
+    changed = set_if_changed(x.x,
+                             state_index(range_, gfl_filter_vi_local(params_)),
+                             vf.imag()) || changed;
+  }
   const int vdc_local = gfl_vdc_local(params_);
   if (vdc_local >= 0) {
     double vdc = params_.vdc_ref_pu;
@@ -4978,10 +5814,13 @@ void GridFollowingInverter::computeDerivatives(double,
                                 params_.v_min_current_pu * params_.v_min_current_pu);
   const double id_ref = (vd * p_ref + vq * q_ref) / denom;
   const double iq_ref = (vq * p_ref - vd * q_ref) / denom;
+  const CurrentLimiterKind limiter =
+      params_.reactive_current_priority ? CurrentLimiterKind::ReactivePriority
+                                        : params_.limiter_kind;
   const auto [id_cmd, iq_cmd] = limited_current(id_ref,
                                                 iq_ref,
                                                 params_.current_limit_pu,
-                                                params_.reactive_current_priority);
+                                                limiter);
 
   dxdt[state_index(range_, 0)] = kTwoPi * params_.f_ref_hz * freq_error_pu;
   dxdt[state_index(range_, 1)] =
@@ -4996,6 +5835,18 @@ void GridFollowingInverter::computeDerivatives(double,
         (vd_raw - x.x[state_index(range_, gfl_vdf_local(params_))]) / tau_pll_filter;
     dxdt[state_index(range_, gfl_vqf_local(params_))] =
         (vq_raw - x.x[state_index(range_, gfl_vqf_local(params_))]) / tau_pll_filter;
+  }
+  if (gfl_uses_lcl_filter(params_)) {
+    const Complex iconv = phasor_from_dq(id, iq, theta);
+    const Complex z_grid(params_.filter_grid_r_pu,
+                         std::max(1e-5, params_.filter_grid_x_pu));
+    const Complex vf_target = vpos + z_grid * iconv;
+    const Complex vf = gfl_filter_voltage(params_, x, range_, vpos);
+    const double tau_filter = std::max(kMinTimeConstant, params_.filter_c_pu);
+    dxdt[state_index(range_, gfl_filter_vr_local(params_))] =
+        (vf_target.real() - vf.real()) / tau_filter;
+    dxdt[state_index(range_, gfl_filter_vi_local(params_))] =
+        (vf_target.imag() - vf.imag()) / tau_filter;
   }
   const int vdc_local = gfl_vdc_local(params_);
   if (vdc_local >= 0) {
@@ -5026,8 +5877,18 @@ void GridFollowingInverter::stamp(double,
   const double theta = x.x[state_index(range_, 0)];
   const double id = x.x[state_index(range_, 2)];
   const double iq = x.x[state_index(range_, 3)];
-  Eigen::Vector3cd current = balanced_current_from_dq(id, iq, theta);
-  add_balanced_current(stamp, params_.bus_pos, current);
+  if (gfl_uses_lcl_filter(params_)) {
+    const Complex vf = gfl_filter_voltage(params_,
+                                          x,
+                                          range_,
+                                          positive_sequence_voltage(bus_voltage(y, params_.bus_pos)));
+    const Complex y_grid = gfl_lcl_grid_admittance(params_);
+    add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(y_grid));
+    add_balanced_current(stamp, params_.bus_pos, y_grid * balanced_current_from_positive_sequence(vf));
+  } else {
+    Eigen::Vector3cd current = balanced_current_from_dq(id, iq, theta);
+    add_balanced_current(stamp, params_.bus_pos, current);
+  }
   if (params_.stabilizing_admittance_pu > 0.0) {
     add_balanced_admittance(stamp,
                             params_.bus_pos,
@@ -5054,7 +5915,7 @@ void GridFollowingInverter::stamp(double,
 }
 
 void GridFollowingInverter::addJacobian(
-    double,
+    double t,
     const DynamicState& x,
     const NetworkState& y,
     const DynamicJacobianContext& context,
@@ -5063,9 +5924,23 @@ void GridFollowingInverter::addJacobian(
   const int theta_col = state_index(range_, 0);
   const int id_col = state_index(range_, 2);
   const int iq_col = state_index(range_, 3);
-  if (context.validStateIndex(theta_col) &&
-      context.validStateIndex(id_col) &&
-      context.validStateIndex(iq_col)) {
+  if (gfl_uses_lcl_filter(params_)) {
+    const int vf_re_col = state_index(range_, gfl_filter_vr_local(params_));
+    const int vf_im_col = state_index(range_, gfl_filter_vi_local(params_));
+    const Complex y_grid = gfl_lcl_grid_admittance(params_);
+    const Eigen::Vector3cd d_i_d_vfr =
+        y_grid * balanced_current_from_positive_sequence(Complex(1.0, 0.0));
+    const Eigen::Vector3cd d_i_d_vfi =
+        y_grid * balanced_current_from_positive_sequence(Complex(0.0, 1.0));
+    if (context.validStateIndex(vf_re_col)) {
+      add_balanced_current_derivative(context, params_.bus_pos, vf_re_col, d_i_d_vfr, triplets);
+    }
+    if (context.validStateIndex(vf_im_col)) {
+      add_balanced_current_derivative(context, params_.bus_pos, vf_im_col, d_i_d_vfi, triplets);
+    }
+  } else if (context.validStateIndex(theta_col) &&
+             context.validStateIndex(id_col) &&
+             context.validStateIndex(iq_col)) {
     const double theta = x.x[theta_col];
     const double id = x.x[id_col];
     const double iq = x.x[iq_col];
@@ -5077,6 +5952,12 @@ void GridFollowingInverter::addJacobian(
     add_balanced_current_derivative(context, params_.bus_pos, id_col, d_i_did, triplets);
     add_balanced_current_derivative(context, params_.bus_pos, iq_col, d_i_diq, triplets);
   }
+
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  append_ac_bus_voltage_columns(context, params_.bus_pos, columns);
+  append_dc_bus_voltage_column(context, params_.dc_bus_pos, columns);
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
 
   if (!params_.stamp_dc_power ||
       params_.dc_bus_pos < 0 ||
@@ -5172,10 +6053,13 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
     const double q_nom = params_.q_ref_mvar / safe_base(params_.base_mva);
     const double id_ref = (vd * p_nom + vq * q_nom) / denom;
     const double iq_ref = (vq * p_nom - vd * q_nom) / denom;
+    const CurrentLimiterKind limiter =
+        params_.reactive_current_priority ? CurrentLimiterKind::ReactivePriority
+                                          : params_.limiter_kind;
     const auto [id_cmd, iq_cmd] = limited_current(id_ref,
                                                   iq_ref,
                                                   params_.current_limit_pu,
-                                                  params_.reactive_current_priority);
+                                                  limiter);
     const double i_ref_mag = std::hypot(id_ref, iq_ref);
     out.values["pll_angle_rad"] = theta;
     out.values["pll_frequency_hz"] = params_.f_ref_hz * (1.0 + freq_error_pu);
@@ -5194,6 +6078,12 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
     out.values["i_ref_mag_pu"] = i_ref_mag;
     out.values["current_limit_active"] =
         (params_.current_limit_pu > 0.0 && i_ref_mag > params_.current_limit_pu) ? 1.0 : 0.0;
+    out.values["current_limiter_model"] =
+        static_cast<double>(static_cast<int>(limiter));
+    out.values["lcl_filter"] = gfl_uses_lcl_filter(params_) ? 1.0 : 0.0;
+    out.values["filter_c_pu"] = params_.filter_c_pu;
+    out.values["filter_grid_r_pu"] = params_.filter_grid_r_pu;
+    out.values["filter_grid_x_pu"] = params_.filter_grid_x_pu;
     out.values["p_mw"] = s.real() * safe_base(params_.base_mva);
     out.values["q_mvar"] = s.imag() * safe_base(params_.base_mva);
     out.values["p_ref_mw"] = params_.p_ref_mw;
@@ -5203,8 +6093,23 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
     const Complex i_pos = phasor_from_dq(id, iq, theta);
     inner.set(InverterInnerVar::PllAngle, theta);
     inner.set(InverterInnerVar::PllOmega, 1.0 + freq_error_pu);
-    inner.set(InverterInnerVar::FilterVoltageReal, vpos.real());
-    inner.set(InverterInnerVar::FilterVoltageImag, vpos.imag());
+    Complex vf = vpos;
+    Complex i_filter = i_pos;
+    if (gfl_uses_lcl_filter(params_)) {
+      vf = gfl_filter_voltage(params_, x, range_, vpos);
+      i_filter = gfl_lcl_grid_admittance(params_) * (vf - vpos);
+      out.values["filter_voltage_re_pu"] = vf.real();
+      out.values["filter_voltage_im_pu"] = vf.imag();
+      out.values["filter_current_re_pu"] = i_filter.real();
+      out.values["filter_current_im_pu"] = i_filter.imag();
+      const Complex s_grid =
+          average_complex_power(vabc,
+                                balanced_current_from_positive_sequence(i_filter));
+      out.values["p_mw"] = s_grid.real() * safe_base(params_.base_mva);
+      out.values["q_mvar"] = s_grid.imag() * safe_base(params_.base_mva);
+    }
+    inner.set(InverterInnerVar::FilterVoltageReal, vf.real());
+    inner.set(InverterInnerVar::FilterVoltageImag, vf.imag());
     inner.set(InverterInnerVar::PllVoltageD, vd);
     inner.set(InverterInnerVar::PllVoltageQ, vq);
     inner.set(InverterInnerVar::CurrentReferenceD, id_ref);
@@ -5215,8 +6120,8 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
     inner.set(InverterInnerVar::InnerCurrentQ, iq);
     inner.set(InverterInnerVar::ConverterCurrentReal, i_pos.real());
     inner.set(InverterInnerVar::ConverterCurrentImag, i_pos.imag());
-    inner.set(InverterInnerVar::FilterCurrentReal, i_pos.real());
-    inner.set(InverterInnerVar::FilterCurrentImag, i_pos.imag());
+    inner.set(InverterInnerVar::FilterCurrentReal, i_filter.real());
+    inner.set(InverterInnerVar::FilterCurrentImag, i_filter.imag());
     inner.set(InverterInnerVar::FilteredActivePower, x.x[state_index(range_, 4)]);
     inner.set(InverterInnerVar::FilteredReactivePower, x.x[state_index(range_, 5)]);
     inner.set(InverterInnerVar::VoltageReference, params_.v_ref_pu);
@@ -5277,6 +6182,12 @@ GridFormingInverterParams make_gfm_params(const VSCConverterDynamicParams& param
   gfm.overload_kp = params.overload_kp;
   gfm.overload_ki = params.overload_ki;
   gfm.current_limit_pu = params.current_limit_pu;
+  gfm.limiter_kind = params.limiter_kind;
+  gfm.filter_kind = params.filter_kind;
+  gfm.filter_c_pu = params.filter_c_pu;
+  gfm.filter_grid_r_pu = params.filter_grid_r_pu;
+  gfm.filter_grid_x_pu = params.filter_grid_x_pu;
+  gfm.reactive_current_priority = params.reactive_current_priority;
   gfm.pmax_mw = params.pmax_mw;
   gfm.pmin_mw = params.pmin_mw;
   gfm.vmax_internal_pu = params.vmax_internal_pu;
@@ -5605,7 +6516,7 @@ void CSVGN1Dynamic::stamp(double,
   add_balanced_current(stamp, params_.bus_pos, current);
 }
 
-void CSVGN1Dynamic::addJacobian(double,
+void CSVGN1Dynamic::addJacobian(double t,
                                 const DynamicState& x,
                                 const NetworkState& y,
                                 const DynamicJacobianContext& context,
@@ -5631,6 +6542,10 @@ void CSVGN1Dynamic::addJacobian(double,
                                       current_per_voltage * Complex(0.0, 1.0),
                                       triplets);
   }
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  append_ac_bus_voltage_columns(context, params_.bus_pos, columns);
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
 }
 
 std::string CSVGN1Dynamic::name() const {
@@ -5665,8 +6580,39 @@ DynamicDeviceOutput CSVGN1Dynamic::output(const DynamicState& x,
 DERAADynamic::DERAADynamic(DERAADynamicParams params)
     : params_(std::move(params)) {}
 
+namespace {
+
+bool deraa_trip_enabled(const DERAADynamicParams& params) {
+  return params.trip_delay_s > 0.0 &&
+         (params.v_trip_low_pu > 0.0 ||
+          params.v_trip_high_pu > 0.0 ||
+          params.f_trip_low_pu > 0.0 ||
+          params.f_trip_high_pu > 0.0);
+}
+
+int deraa_base_state_count(const DERAADynamicParams& params) {
+  return params.freq_flag == 1 ? 10 : 7;
+}
+
+int deraa_trip_timer_local(const DERAADynamicParams& params) {
+  return deraa_trip_enabled(params) ? deraa_base_state_count(params) : -1;
+}
+
+bool deraa_trip_violation(const DERAADynamicParams& params,
+                          double voltage_pu,
+                          double frequency_pu) {
+  if (params.v_trip_low_pu > 0.0 && voltage_pu < params.v_trip_low_pu) return true;
+  if (params.v_trip_high_pu > 0.0 && voltage_pu > params.v_trip_high_pu) return true;
+  if (params.f_trip_low_pu > 0.0 && frequency_pu < params.f_trip_low_pu) return true;
+  if (params.f_trip_high_pu > 0.0 && frequency_pu > params.f_trip_high_pu) return true;
+  return false;
+}
+
+}  // namespace
+
 void DERAADynamic::assignStateIndices(int& offset) {
-  range_ = {offset, params_.freq_flag == 1 ? 10 : 7};
+  range_ = {offset, deraa_base_state_count(params_) +
+                        (deraa_trip_enabled(params_) ? 1 : 0)};
   offset += range_.size;
 }
 
@@ -5702,6 +6648,10 @@ void DERAADynamic::initializeFromPowerFlow(const PowerFlowResult&,
   } else {
     x.x[state_index(range_, 6)] = ip;
   }
+  const int trip_timer_local = deraa_trip_timer_local(params_);
+  if (trip_timer_local >= 0) {
+    x.x[state_index(range_, trip_timer_local)] = 0.0;
+  }
 }
 
 namespace {
@@ -5727,6 +6677,16 @@ void DERAADynamic::computeDerivatives(double,
   const double iq = x.x[state_index(range_, 3)];
   const double mult = x.x[state_index(range_, 4)];
   const double fmeas = x.x[state_index(range_, 5)];
+  const int trip_timer_local = deraa_trip_timer_local(params_);
+  const double trip_timer =
+      trip_timer_local >= 0 ? x.x[state_index(range_, trip_timer_local)] : 0.0;
+  const bool trip_violation =
+      trip_timer_local >= 0 && deraa_trip_violation(params_, vmeas, fmeas);
+  const double mult_target =
+      (trip_timer_local >= 0 &&
+       (trip_timer >= params_.trip_delay_s || trip_violation && params_.trip_delay_s <= kMinTimeConstant))
+          ? 0.0
+          : 1.0;
   const double ip_index = params_.freq_flag == 1 ? 9 : 6;
   const double ip = x.x[state_index(range_, ip_index)];
   const double p_ref = params_.p_ref_mw / std::max(1e-9, params_.model_base_mva);
@@ -5746,8 +6706,13 @@ void DERAADynamic::computeDerivatives(double,
                  params_.Iq_max) *
       mult;
   dxdt[state_index(range_, 3)] = (iq_cmd - iq) / std::max(kMinTimeConstant, params_.Tg);
-  dxdt[state_index(range_, 4)] = (1.0 - mult) / std::max(kMinTimeConstant, params_.Tv);
+  dxdt[state_index(range_, 4)] = (mult_target - mult) / std::max(kMinTimeConstant, params_.Tv);
   dxdt[state_index(range_, 5)] = (1.0 - fmeas) / std::max(kMinTimeConstant, params_.Trf);
+  if (trip_timer_local >= 0) {
+    dxdt[state_index(range_, trip_timer_local)] =
+        trip_violation ? 1.0
+                       : -trip_timer / std::max(kMinTimeConstant, params_.trip_delay_s);
+  }
   double ip_ref = std::clamp(p_ref / std::max(kMinVoltage, vmeas),
                              params_.Ip_min,
                              params_.Ip_max) *
@@ -5794,7 +6759,7 @@ void DERAADynamic::stamp(double,
                        balanced_current_from_dq(ip, -iq, theta));
 }
 
-void DERAADynamic::addJacobian(double,
+void DERAADynamic::addJacobian(double t,
                                const DynamicState& x,
                                const NetworkState& y,
                                const DynamicJacobianContext& context,
@@ -5819,6 +6784,10 @@ void DERAADynamic::addJacobian(double,
                                     balanced_current_from_dq(0.0, -ratio, theta),
                                     triplets);
   }
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  append_ac_bus_voltage_columns(context, params_.bus_pos, columns);
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
 }
 
 std::string DERAADynamic::name() const {
@@ -5853,6 +6822,210 @@ DynamicDeviceOutput DERAADynamic::output(const DynamicState& x,
   out.values["p_mw"] = s.real() * safe_base(params_.base_mva);
   out.values["q_mvar"] = s.imag() * safe_base(params_.base_mva);
   out.values["freq_flag"] = static_cast<double>(params_.freq_flag);
+  const int trip_timer_local = deraa_trip_timer_local(params_);
+  out.values["trip_enabled"] = trip_timer_local >= 0 ? 1.0 : 0.0;
+  if (!range_.empty() && trip_timer_local >= 0) {
+    const double timer = x.x[state_index(range_, trip_timer_local)];
+    out.values["trip_timer_s"] = timer;
+    out.values["trip_active"] = timer >= params_.trip_delay_s ? 1.0 : 0.0;
+  }
+  add_voltage_metrics(out, y, params_.bus_pos, -1);
+  return out;
+}
+
+InductionMachineDynamic::InductionMachineDynamic(InductionMachineDynamicParams params)
+    : params_(std::move(params)) {}
+
+void InductionMachineDynamic::assignStateIndices(int& offset) {
+  range_ = {offset, params_.fifth_order ? 5 : 3};
+  offset += range_.size;
+}
+
+void InductionMachineDynamic::initializeFromPowerFlow(const PowerFlowResult&,
+                                                      DynamicState& x,
+                                                      NetworkState& y) {
+  if (range_.empty()) return;
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const double vm = std::max(kMinVoltage, std::abs(v));
+  const Complex s(params_.p_mech_mw / safe_base(params_.base_mva),
+                  params_.q_nom_mvar / safe_base(params_.base_mva));
+  const Complex i_load = std::conj(s / (std::abs(v) > kMinVoltage ? v : Complex(vm, 0.0)));
+  x.x[state_index(range_, 0)] = i_load.real();
+  x.x[state_index(range_, 1)] = i_load.imag();
+  x.x[state_index(range_, 2)] = 0.98;
+  if (params_.fifth_order) {
+    x.x[state_index(range_, 3)] = v.real();
+    x.x[state_index(range_, 4)] = v.imag();
+  }
+}
+
+bool InductionMachineDynamic::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
+  if (!params_.in_service || range_.empty()) return false;
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const double omega = std::clamp(x.x[state_index(range_, 2)], 0.05, 1.20);
+  const double p = params_.p_mech_mw / safe_base(params_.base_mva) *
+                   std::pow(std::max(0.05, omega), params_.torque_exponent);
+  const Complex s(p, params_.q_nom_mvar / safe_base(params_.base_mva));
+  const Complex i_load =
+      std::conj(s / (std::abs(v) > kMinVoltage ? v : Complex(kMinVoltage, 0.0)));
+  bool changed = false;
+  changed = set_if_changed(x.x, state_index(range_, 0), i_load.real()) || changed;
+  changed = set_if_changed(x.x, state_index(range_, 1), i_load.imag()) || changed;
+  if (params_.fifth_order) {
+    changed = set_if_changed(x.x, state_index(range_, 3), v.real()) || changed;
+    changed = set_if_changed(x.x, state_index(range_, 4), v.imag()) || changed;
+  }
+  return changed;
+}
+
+double InductionMachineDynamic::mechanicalTorque(double omega_r) const {
+  const double omega = std::max(0.05, omega_r);
+  const double p_mech = params_.p_mech_mw / safe_base(params_.base_mva) *
+                        std::pow(omega, params_.torque_exponent);
+  return p_mech / omega;
+}
+
+Complex InductionMachineDynamic::current(const DynamicState& x,
+                                         const NetworkState&) const {
+  if (range_.empty()) return {};
+  return Complex(x.x[state_index(range_, 0)], x.x[state_index(range_, 1)]);
+}
+
+double InductionMachineDynamic::electricalTorque(const DynamicState& x,
+                                                 const NetworkState& y) const {
+  if (range_.empty()) return 0.0;
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const Complex i_load = current(x, y);
+  const double p_e = finite_value((v * std::conj(i_load)).real());
+  const double omega = std::max(0.05, x.x[state_index(range_, 2)]);
+  return p_e / omega;
+}
+
+void InductionMachineDynamic::computeDerivatives(double,
+                                                 const DynamicState& x,
+                                                 const NetworkState& y,
+                                                 Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (!params_.in_service || range_.empty()) return;
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const double omega = std::clamp(x.x[state_index(range_, 2)], 0.05, 1.20);
+  const double p = params_.p_mech_mw / safe_base(params_.base_mva) *
+                   std::pow(std::max(0.05, omega), params_.torque_exponent);
+  const Complex s_cmd(p, params_.q_nom_mvar / safe_base(params_.base_mva));
+  const Complex i_target =
+      std::conj(s_cmd / (std::abs(v) > kMinVoltage ? v : Complex(kMinVoltage, 0.0)));
+  const Complex i = current(x, y);
+  const double tau_r =
+      std::max(kMinTimeConstant,
+               (std::abs(params_.x_r_pu) + std::abs(params_.x_m_pu)) /
+                   std::max(1e-4, kTwoPi * 50.0 * std::abs(params_.r_r_pu)));
+  dxdt[state_index(range_, 0)] = (i_target.real() - i.real()) / tau_r;
+  dxdt[state_index(range_, 1)] = (i_target.imag() - i.imag()) / tau_r;
+  const double te = electricalTorque(x, y);
+  const double tm = mechanicalTorque(omega);
+  dxdt[state_index(range_, 2)] =
+      (te - tm - params_.damping_d * (omega - 1.0)) /
+      std::max(kMinTimeConstant, 2.0 * params_.inertia_h);
+  if (params_.fifth_order) {
+    const double tau_s =
+        std::max(kMinTimeConstant,
+                 (std::abs(params_.x_s_pu) + std::abs(params_.x_m_pu)) /
+                     std::max(1e-4, kTwoPi * 50.0 * std::abs(params_.r_s_pu)));
+    dxdt[state_index(range_, 3)] = (v.real() - x.x[state_index(range_, 3)]) / tau_s;
+    dxdt[state_index(range_, 4)] = (v.imag() - x.x[state_index(range_, 4)]) / tau_s;
+  }
+}
+
+void InductionMachineDynamic::stamp(double,
+                                    const DynamicState& x,
+                                    const NetworkState& y,
+                                    DynamicStamp& stamp) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  add_balanced_current(stamp,
+                       params_.bus_pos,
+                       -balanced_current_from_positive_sequence(current(x, y)));
+}
+
+void InductionMachineDynamic::addJacobian(
+    double t,
+    const DynamicState& x,
+    const NetworkState& y,
+    const DynamicJacobianContext& context,
+    std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  const int ir_col = state_index(range_, 0);
+  const int ii_col = state_index(range_, 1);
+  if (context.validStateIndex(ir_col)) {
+    add_balanced_current_derivative(
+        context,
+        params_.bus_pos,
+        ir_col,
+        -balanced_current_from_positive_sequence(Complex(1.0, 0.0)),
+        triplets);
+  }
+  if (context.validStateIndex(ii_col)) {
+    add_balanced_current_derivative(
+        context,
+        params_.bus_pos,
+        ii_col,
+        -balanced_current_from_positive_sequence(Complex(0.0, 1.0)),
+        triplets);
+  }
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  append_ac_bus_voltage_columns(context, params_.bus_pos, columns);
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
+}
+
+void InductionMachineDynamic::handleEvent(const DynamicEvent& event,
+                                          DynamicState& x,
+                                          NetworkState&) {
+  const bool matching =
+      event.component_index == 0 || event.component_index == params_.component_index;
+  if (!matching) return;
+  if ((event.type == DynamicEventType::ACLoadScale && event.value <= 0.0) ||
+      (event.type == DynamicEventType::Custom && event.component_type == "Motor")) {
+    params_.in_service = false;
+    if (!range_.empty() && range_.offset + range_.size <= x.x.size()) {
+      x.x.segment(range_.offset, range_.size).setZero();
+    }
+  }
+}
+
+std::string InductionMachineDynamic::name() const {
+  return params_.label.empty() ? "InductionMachine " +
+                                     std::to_string(params_.component_index)
+                               : params_.label;
+}
+
+std::vector<DynamicModelProfile> InductionMachineDynamic::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
+}
+
+DynamicDeviceOutput InductionMachineDynamic::output(const DynamicState& x,
+                                                    const NetworkState& y) const {
+  DynamicDeviceOutput out = make_output_base(*this,
+                                             params_.bus,
+                                             params_.canvas_type,
+                                             params_.component_domain,
+                                             params_.source_type);
+  out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  out.values["state_count"] = static_cast<double>(range_.size);
+  if (!range_.empty()) {
+    const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+    const Complex i_load = current(x, y);
+    const Complex s = v * std::conj(i_load);
+    out.values["id_load_pu"] = i_load.real();
+    out.values["iq_load_pu"] = i_load.imag();
+    out.values["omega_r_pu"] = x.x[state_index(range_, 2)];
+    out.values["p_mw"] = s.real() * safe_base(params_.base_mva);
+    out.values["q_mvar"] = s.imag() * safe_base(params_.base_mva);
+    out.values["electrical_torque_pu"] = electricalTorque(x, y);
+    out.values["mechanical_torque_pu"] = mechanicalTorque(x.x[state_index(range_, 2)]);
+    if (params_.fifth_order) {
+      out.values["psi_ds_pu"] = x.x[state_index(range_, 3)];
+      out.values["psi_qs_pu"] = x.x[state_index(range_, 4)];
+    }
+  }
   add_voltage_metrics(out, y, params_.bus_pos, -1);
   return out;
 }
@@ -5904,13 +7077,16 @@ void DCDCConverterDynamic::stamp(double,
 }
 
 void DCDCConverterDynamic::addJacobian(
-    double,
+    double t,
     const DynamicState& x,
     const NetworkState& y,
     const DynamicJacobianContext& context,
     std::vector<Eigen::Triplet<double>>& triplets) const {
-  if (!params_.in_service || params_.bus_in_pos < 0 || params_.bus_out_pos < 0 ||
-      range_.empty() ||
+  if (!params_.in_service || range_.empty()) return;
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
+  if (params_.bus_in_pos < 0 || params_.bus_out_pos < 0 ||
       params_.bus_in_pos >= y.Vdc.size() ||
       params_.bus_out_pos >= y.Vdc.size()) {
     return;
@@ -6047,15 +7223,18 @@ void BatteryDynamic::stamp(double,
   }
 }
 
-void BatteryDynamic::addJacobian(double,
+void BatteryDynamic::addJacobian(double t,
                                  const DynamicState& x,
                                  const NetworkState& y,
                                  const DynamicJacobianContext& context,
                                  std::vector<Eigen::Triplet<double>>& triplets) const {
-  if (!params_.stamp_power || !params_.in_service || params_.bus_pos < 0 ||
-      range_.empty() || range_.offset + 1 >= x.x.size()) {
+  if (!params_.in_service || range_.empty() || range_.offset + 1 >= x.x.size()) {
     return;
   }
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
+  if (!params_.stamp_power || params_.bus_pos < 0) return;
   const int p_col = range_.offset;
   const double p = x.x[p_col];
   const double soc = x.x[range_.offset + 1];
@@ -6213,7 +7392,7 @@ void PVDynamic::stamp(double,
   }
 }
 
-void PVDynamic::addJacobian(double,
+void PVDynamic::addJacobian(double t,
                             const DynamicState& x,
                             const NetworkState& y,
                             const DynamicJacobianContext& context,
@@ -6222,6 +7401,9 @@ void PVDynamic::addJacobian(double,
       range_.offset + 1 >= x.x.size()) {
     return;
   }
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
   const int p_col = range_.offset;
   const int q_col = range_.offset + 1;
   const double p = x.x[p_col];

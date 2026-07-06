@@ -1342,24 +1342,29 @@ Loads have no frequency dependence.
 
 ### 23.4 Device composition and the controller ceiling
 
-Devices are monolithic. `MachineControlLink` is a 2½-port subset of the §19.3 inner-var bus
-(ω in; τ_m/V_f derivative override out; PSS→AVR algebraic link): it cannot carry `ψ_d, ψ_q,
-X_ad·I_fd` — which is precisely why the rectifier-loaded exciter family (ESAC1A, EXAC1, …) is
-blocked. `InverterInnerVariableBus` is telemetry-only, not a control interconnect; inverters are
-compact whole-device models, so LCL filter states, limiter families, and REGC/REEC/REPC flag
-structures have nowhere to mount. This is the parity plan's Phase 3, still the binding constraint
-on library growth ("do not expand the model library before Phase 3" remains correct).
+The Phase 3 composition refactor now has executable generator and inverter inner-variable buses:
+machine/controller blocks publish τ_m, V_f, V_pss, ψ_d/ψ_q-related telemetry, and GFL/GFM devices
+publish converter, filter, PLL, outer-control, inner-control, and DC-link slots. This unlocked the
+controller-family expansion and the first detailed GFL filter/limiter sockets. Remaining composition
+work is narrower: full PSD REGC/REEC/REPC flag graphs, exact rectifier field-current feedback for
+all AC/ST exciters, and promotion of these local block contracts into residual/mass-matrix trace
+fixtures.
 
 ### 23.5 Model-library gaps (from the live ledgers)
 
-- **AVR**: ESAC1A, EXAC1, EXST1, SCRX, ESST1A, ST6B, ST8C (blocked on §23.4).
-- **Governor**: GAST, HYGOV, DEGOV/DEGOV1 (needs the §10.3 delay line), PIDGOV, WPIDHY, TGSimple.
-- **PSS**: PSS2A/B/C (dual-input, ramp-tracking filter).
-- **IBR detail**: LCL/LC filters (`missing` — algebraic Norton/virtual-impedance only), current
-  limiter families (only a scalar `current_limit_pu` versus §11.5's three strategies),
-  REGC_A LVPL/ramps, REEC flag branches, REPCA plant controller, DER_A voltage/frequency tripping.
-- **Loads/motors**: exponential loads incomplete; **no induction machine** (§13) — the dominant
-  distribution dynamic load; no active-CPL model.
+- **AVR**: ESAC1A, EXAC1, EXST1, SCRX, ESST1A, ST6B, ST8C now have runtime/catalog variants and
+  local derivative checks; full PSD residual/mass-matrix trace gates remain pending.
+- **Governor**: GAST, HYGOV, DEGOV/DEGOV1, PIDGOV, WPIDHY, and TGSimple now have runtime/catalog
+  variants and local derivative checks; PSD controller-by-controller trace fixtures remain pending.
+- **PSS**: PSS2A/B/C now allocate the PSD-style state families and publish stabilizer outputs; the
+  remote/electrical-power signal path still needs PSD fixture parity.
+- **IBR detail**: GFL now has selectable LCL filter voltage states, current-limiter families, and
+  GUI/catalog child-block parsing. Remaining gaps are REGC_A LVPL/ramps, REEC flag branches, REPCA
+  plant controller, and exact PSD LCL mass-matrix coefficients.
+- **DER_A**: voltage/frequency trip thresholds and delay timer now drive the multiplier state; PSD
+  Test 42 trace gates are still pending.
+- **Loads/motors**: simplified and full single-cage induction-machine runtime targets now exist for
+  rich asynchronous motors. Exponential loads and active-CPL dynamics remain open.
 - **Protection/standards**: relay is a bare voltage-window timer; no IEEE 1547 ride-through
   category tables, volt-var/freq-watt deadband curves are inverter-internal simplifications
   (§11.7 is the target); no UFLS/UVLS.

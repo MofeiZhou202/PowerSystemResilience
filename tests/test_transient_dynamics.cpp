@@ -6112,6 +6112,75 @@ TEST_CASE("MassMatrixDae analytic device current block preserves hybrid AC/DC tr
   CHECK(max_dc_diff < 1e-10);
 }
 
+TEST_CASE("MassMatrixDae Jacobian modes preserve trace while colored FD reduces residual calls",
+          "[dynamics][dae][jacobian][performance]") {
+  auto run = [](DynamicDaeJacobianMode mode) {
+    DynamicSolverOptions opt;
+    opt.solver_type = DynamicSolverType::MassMatrixDae;
+    opt.t_end_s = 0.04;
+    opt.dt_s = 0.01;
+    opt.newton_tol = 1e-8;
+    opt.max_newton_iters = 16;
+    opt.algebraic_network_max_iters = 20;
+    opt.algebraic_network_tol = 1e-10;
+    opt.use_consistent_dynamic_initialization = true;
+    opt.dae_jacobian_mode = mode;
+    opt.dae_use_analytic_network_jacobian =
+        mode != DynamicDaeJacobianMode::FiniteDifference;
+    opt.dae_use_analytic_device_jacobian =
+        mode != DynamicDaeJacobianMode::FiniteDifference;
+    opt.dae_use_fd_current_jacobian_corrections = true;
+    auto sys = make_controlled_machine_case(false, false, false);
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(sys, opt);
+    DynamicEvent event;
+    event.time_s = 0.01;
+    event.type = DynamicEventType::ACLoadScale;
+    event.bus = 2;
+    event.value = 1.05;
+    dyn.events.push_back(event);
+    DynamicSolver solver;
+    return solver.solve(dyn);
+  };
+
+  const DynamicResults fd = run(DynamicDaeJacobianMode::FiniteDifference);
+  const DynamicResults hybrid = run(DynamicDaeJacobianMode::HybridAnalytic);
+  const DynamicResults colored = run(DynamicDaeJacobianMode::HybridAnalyticColored);
+  REQUIRE(fd.success);
+  REQUIRE(hybrid.success);
+  REQUIRE(colored.success);
+  REQUIRE(fd.final_snapshot() != nullptr);
+  REQUIRE(hybrid.final_snapshot() != nullptr);
+  REQUIRE(colored.final_snapshot() != nullptr);
+  REQUIRE(fd.final_snapshot()->state.size() == colored.final_snapshot()->state.size());
+
+  double max_state_diff = 0.0;
+  for (Eigen::Index i = 0; i < fd.final_snapshot()->state.size(); ++i) {
+    max_state_diff = std::max(max_state_diff,
+                              std::abs(fd.final_snapshot()->state[i] -
+                                       colored.final_snapshot()->state[i]));
+  }
+  double max_ac_diff = 0.0;
+  for (Eigen::Index i = 0; i < fd.final_snapshot()->vac_abc.size(); ++i) {
+    max_ac_diff = std::max(max_ac_diff,
+                           std::abs(fd.final_snapshot()->vac_abc[i] -
+                                    colored.final_snapshot()->vac_abc[i]));
+  }
+  double max_dc_diff = 0.0;
+  for (Eigen::Index i = 0; i < fd.final_snapshot()->vdc.size(); ++i) {
+    max_dc_diff = std::max(max_dc_diff,
+                           std::abs(fd.final_snapshot()->vdc[i] -
+                                    colored.final_snapshot()->vdc[i]));
+  }
+
+  CHECK(max_state_diff < 1e-7);
+  CHECK(max_ac_diff < 1e-7);
+  CHECK(max_dc_diff < 1e-7);
+  CHECK(hybrid.jacobian_residual_evaluations == hybrid.jacobian_fd_columns);
+  CHECK(colored.jacobian_colored_groups < colored.jacobian_fd_columns);
+  CHECK(colored.jacobian_residual_evaluations < hybrid.jacobian_residual_evaluations);
+}
+
 TEST_CASE("Machine governor / AVR / PSS control blocks are wired and effective",
           "[dynamics][controls]") {
   const DynamicResults base = run_controlled_case(false, false, false);

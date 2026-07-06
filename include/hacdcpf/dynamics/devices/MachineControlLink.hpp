@@ -51,7 +51,7 @@ struct PSSOutputLink {
   const StateIndexRange* range{nullptr};   // the PSS device's own state slice
   const MachineControlLink* machine{nullptr};
   bool valid{false};
-  int model{0};  // 0=PSS1A, 1=IEEEST, 2=STAB1
+  int model{0};  // 0=PSS1A, 1=IEEEST, 2=STAB1, 3/4/5=PSS2A/B/C
   double ks{0.0};
   double tw_s{10.0};
   double t1_s{0.0};
@@ -76,6 +76,26 @@ struct PSSOutputLink {
   double t1_over_t3{1.0};
   double t2_over_t4{1.0};
   double h_lim{0.1};
+  double ks1{10.0};
+  double ks2{1.0};
+  double ks3{1.0};
+  double m_rtf{5.0};
+  double n_rtf{1.0};
+  double tw1_s{2.0};
+  double tw2_s{2.0};
+  double tw3_s{2.0};
+  double tw4_s{0.0};
+  double t7_s{2.0};
+  double t8_s{0.2};
+  double t9_s{0.1};
+  double t10_s{0.0};
+  double t11_s{0.0};
+  double t12_s{0.0};
+  double t13_s{0.0};
+  double vs1_max_pu{0.1};
+  double vs1_min_pu{-0.1};
+  double vs2_max_pu{0.1};
+  double vs2_min_pu{-0.1};
 };
 
 }  // namespace hacdcpf::dynamics

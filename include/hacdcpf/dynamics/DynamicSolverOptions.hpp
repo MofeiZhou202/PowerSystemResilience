@@ -34,10 +34,17 @@ enum class DynamicDaeStepMethod {
   Trapezoidal
 };
 
+enum class DynamicDaeJacobianMode {
+  FiniteDifference,
+  HybridAnalytic,
+  HybridAnalyticColored
+};
+
 struct DynamicSolverOptions {
   DynamicSolverType solver_type{DynamicSolverType::PartitionedHeun};
   DynamicLinearSolverType linear_solver{DynamicLinearSolverType::EigenSparseLU};
   DynamicDaeStepMethod dae_step_method{DynamicDaeStepMethod::BackwardEuler};
+  DynamicDaeJacobianMode dae_jacobian_mode{DynamicDaeJacobianMode::HybridAnalytic};
 
   double t_start_s{0.0};
   double t_end_s{1.0};

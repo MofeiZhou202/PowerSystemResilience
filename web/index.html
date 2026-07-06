@@ -447,6 +447,7 @@
             <option value="rk4">RK4 显式四阶</option>
             <option value="backward_euler">后退欧拉 Newton</option>
             <option value="trapezoidal">梯形 Newton</option>
+            <option value="mass_matrix_dae">MassMatrix DAE</option>
             <option value="rosenbrock">Rosenbrock-Euler</option>
             <option value="euler">Euler 显式</option>
           </select>
@@ -459,6 +460,19 @@
         </label>
         <label class="sub-label sub-checkbox" title="失败时自动缩小步长重试">
           <input id="trAdaptive" type="checkbox" checked/><span>自适应</span>
+        </label>
+      </div>
+      <div class="control-param-group transient-param-group" title="MassMatrix DAE Newton 雅可比组装方式；FD 为基线，Analytic/Colored 用解析块加速剩余有限差分">
+        <span class="control-param-title">数值/Jacobian</span>
+        <label class="sub-label">Jacobian
+          <select id="trDaeJacobianMode" title="FD基线最保守；解析+FD保持完整有限差分修正；解析+着色减少剩余FD残差评估次数">
+            <option value="hybrid_analytic_colored" selected>解析+着色FD</option>
+            <option value="hybrid_analytic">解析+FD基线</option>
+            <option value="finite_difference">全FD基线</option>
+          </select>
+        </label>
+        <label class="sub-label sub-checkbox" title="复用 MassMatrix DAE 的稀疏 Jacobian/factorization，通常可明显减少重复分解">
+          <input id="trDaeReuseJacobian" type="checkbox" checked/><span>复用分解</span>
         </label>
       </div>
       <div class="control-param-group transient-param-group" title="积分误差和代数网络收敛设置">

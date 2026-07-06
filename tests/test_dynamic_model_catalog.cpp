@@ -58,7 +58,8 @@ DynamicResults run_with_blocks(std::map<std::string, std::map<std::string, doubl
   return hacdcpf::dynamics::run_transient_simulation(sys, opt);
 }
 
-DynamicResults run_with_vsc(ConverterMode mode) {
+DynamicResults run_with_vsc(ConverterMode mode,
+                            hacdcpf::DynamicModelProfile profile = {}) {
   HybridPowerSystem sys;
   sys.base_mva = 100.0;
   sys.ac.base_mva = 100.0;
@@ -105,6 +106,7 @@ DynamicResults run_with_vsc(ConverterMode mode) {
   vsc.q_set_mvar = 1.0;
   vsc.v_ac_set_pu = 1.0;
   vsc.eta = 0.98;
+  vsc.dynamic_model = profile;
   sys.vsc_converters = {vsc};
 
   DynamicSolverOptions opt;
@@ -169,6 +171,17 @@ NetworkState single_bus_voltage(double vm) {
   return y;
 }
 
+DynamicState initialized_state(DynamicDevice& device,
+                               NetworkState& y,
+                               const PowerFlowResult& pf = {}) {
+  int offset = 0;
+  device.assignStateIndices(offset);
+  DynamicState x;
+  x.resize(static_cast<std::size_t>(offset));
+  device.initializeFromPowerFlow(pf, x, y);
+  return x;
+}
+
 }  // namespace
 
 TEST_CASE("Dynamic model catalog covers the wired models", "[dynamics][catalog]") {
@@ -178,13 +191,20 @@ TEST_CASE("Dynamic model catalog covers the wired models", "[dynamics][catalog]"
        {"GENROU", "GENROE", "GENSAL", "GENSAE", "OneDOneQMachine",
         "SimpleMarconatoMachine", "MarconatoMachine", "SimpleAFMachine",
         "AndersonFouadMachine", "SauerPaiMachine", "ClassicalMachine", "SingleMass",
-        "FiveMassShaft", "TGOV1", "IEEEG1", "TGTypeI", "TGTypeII", "SEXS", "IEEET1", "AVRSimple",
-        "AVRTypeI", "AVRTypeII", "PSS1A", "IEEEST", "STAB1",
+        "FiveMassShaft", "TGOV1", "IEEEG1", "TGTypeI", "TGTypeII",
+        "GAST", "HYGOV", "DEGOV", "DEGOV1", "PIDGOV", "WPIDHY", "TGSimple",
+        "SEXS", "IEEET1", "AVRSimple", "AVRTypeI", "AVRTypeII",
+        "ESAC1A", "EXAC1", "EXAC1A", "EXST1", "SCRX", "ESST1A", "ST6B", "ST8C",
+        "PSS1A", "IEEEST", "STAB1", "PSS2A", "PSS2B", "PSS2C",
         "DynamicRLLine", "REGC_REEC_GFL_Subset",
         "GridFormingNortonDroop", "ReducedOrderPLL", "KauraPLL", "FixedFrequency",
         "AverageConverter", "ConstantDCSource", "DynamicDCLink", "RLFilter",
-        "LCLFilter", "GFLPQOuterControl", "GFMDroopOuterControl",
+        "LCLFilter", "MagnitudeOutputCurrentLimiter", "InstantaneousOutputCurrentLimiter",
+        "SaturationOutputCurrentLimiter", "PriorityOutputCurrentLimiter",
+        "ActivePriorityCurrentLimiter", "HybridOutputCurrentLimiter",
+        "GFLPQOuterControl", "GFMDroopOuterControl",
         "PIInnerCurrentControl", "VirtualImpedanceInnerControl",
+        "SimplifiedSingleCageInductionMachine", "SingleCageInductionMachine",
         "FirstOrderDCDCConverter", "BatterySOCFirstOrder", "ZIP"}) {
     INFO("model " << name);
     CHECK(find_dynamic_model(name).has_value());
@@ -282,6 +302,22 @@ TEST_CASE("Phase 3 inverter composition publishes compact block snapshots",
         Catch::Approx(1.0));
   CHECK(device_value(gfl, "VSCGridFollowing", "inner_id_ic_present") ==
         Catch::Approx(1.0));
+
+  hacdcpf::DynamicModelProfile detailed_gfl;
+  detailed_gfl.standard = "NERC";
+  detailed_gfl.model_name = "REGC_REEC_GFL_Subset";
+  detailed_gfl.components.push_back(
+      {"filter", "LCLFilter", "PSID", "", {{"filter_c_pu", 0.2},
+                                             {"filter_grid_x_pu", 0.1}}});
+  detailed_gfl.components.push_back(
+      {"limiter", "PriorityOutputCurrentLimiter", "PSID", "",
+       {{"current_limit_pu", 0.5}}});
+  const DynamicResults detailed = run_with_vsc(ConverterMode::PQ_MODE, detailed_gfl);
+  REQUIRE(detailed.success);
+  CHECK(device_value(detailed, "VSCGridFollowing", "lcl_filter") ==
+        Catch::Approx(1.0));
+  CHECK(device_value(detailed, "VSCGridFollowing", "current_limiter_model") ==
+        Catch::Approx(static_cast<int>(CurrentLimiterKind::ReactivePriority)));
 
   const DynamicResults gfm = run_with_vsc(ConverterMode::AC_GRID_FORMING);
   REQUIRE(gfm.success);
@@ -463,6 +499,118 @@ TEST_CASE("Phase 4 controller derivatives match PSID transfer blocks",
     CHECK(dxdt[6] == Catch::Approx(dxg + (0.75 + tau_delta - 0.82) / 0.6));
   }
 
+  SECTION("GAST") {
+    GovernorDynamicParams p;
+    p.model = GovernorModel::GAST;
+    p.model_name = "GAST";
+    p.base_mva = 100.0;
+    p.p_ref_mw = 80.0;
+    p.droop_r = 0.05;
+    p.t_s = 0.2;
+    p.fuel_t_s = 0.4;
+    p.temperature_t_s = 2.0;
+    p.turbine_t_s = 0.6;
+    p.damping_d_t = 0.1;
+    Governor gov(p);
+    gov.attachMachine(&link);
+    int offset = 8;
+    gov.assignStateIndices(offset);
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(offset));
+    x.x[1] = 0.99;
+    x.x[6] = 0.8;
+    x.x[8] = 0.8;
+    x.x[9] = 0.7;
+    x.x[10] = 0.6;
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+    gov.computeDerivatives(0.0, x, y, dxdt);
+    const DynamicDeviceOutput out = gov.output(x, y);
+
+    CHECK(offset == 11);
+    CHECK(out.values.at("state_count") == Catch::Approx(3.0));
+    CHECK(dxdt[8] == Catch::Approx(1.0));
+    CHECK(dxdt[9] == Catch::Approx(0.25));
+    CHECK(dxdt[10] == Catch::Approx(0.05));
+    CHECK(dxdt[6] == Catch::Approx(0.25 + (0.701 - 0.8) / 0.6));
+  }
+
+  SECTION("HYGOV") {
+    GovernorDynamicParams p;
+    p.model = GovernorModel::HYGOV;
+    p.model_name = "HYGOV";
+    p.base_mva = 100.0;
+    p.p_ref_mw = 80.0;
+    p.droop_r = 0.05;
+    p.gate_t_s = 0.25;
+    p.ta_s = 0.1;
+    p.tb_s = 0.5;
+    p.water_t_s = 1.0;
+    p.turbine_t_s = 0.8;
+    Governor gov(p);
+    gov.attachMachine(&link);
+    int offset = 8;
+    gov.assignStateIndices(offset);
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(offset));
+    x.x[1] = 1.0;
+    x.x[6] = 0.8;
+    x.x[8] = 0.7;
+    x.x[9] = 0.4;
+    x.x[10] = 0.6;
+    x.x[11] = 0.5;
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+    gov.computeDerivatives(0.0, x, y, dxdt);
+
+    CHECK(offset == 12);
+    CHECK(dxdt[8] == Catch::Approx((0.8 - 0.7) / 0.25));
+    CHECK(dxdt[9] == Catch::Approx(((1.0 - 0.1 / 0.5) * 0.7 - 0.4) / 0.5));
+    CHECK(dxdt[10] == Catch::Approx((0.4 + (0.1 / 0.5) * 0.7 - 0.6) / 1.0));
+    CHECK(dxdt[11] == Catch::Approx((0.6 - 0.5) / 0.8));
+  }
+
+  SECTION("SCRX") {
+    ExciterDynamicParams p;
+    p.model = ExciterModel::SCRX;
+    p.model_name = "SCRX";
+    p.bus_pos = 0;
+    p.v_ref_pu = 1.03;
+    p.ka = 20.0;
+    p.ta_s = 0.2;
+    p.tr_s = 0.1;
+    p.te_s = 0.5;
+    Exciter avr(p);
+    avr.attachMachine(&link);
+    int offset = 8;
+    avr.assignStateIndices(offset);
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(offset));
+    x.x[7] = 1.1;
+    x.x[8] = 0.97;
+    x.x[9] = 0.5;
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+    avr.computeDerivatives(0.0, x, y, dxdt);
+    const DynamicDeviceOutput out = avr.output(x, y);
+
+    CHECK(offset == 10);
+    CHECK(out.values.at("extended_avr") == Catch::Approx(1.0));
+    CHECK(dxdt[8] == Catch::Approx((0.98 - 0.97) / 0.1));
+    CHECK(dxdt[9] == Catch::Approx((20.0 * (1.03 - 0.97) - 0.5) / 0.2));
+    CHECK(dxdt[7] == Catch::Approx((0.5 - 1.1) / 0.5));
+  }
+
+  SECTION("ESAC1A state train") {
+    ExciterDynamicParams p;
+    p.model = ExciterModel::ESAC1A;
+    p.model_name = "ESAC1A";
+    p.bus_pos = 0;
+    Exciter avr(p);
+    avr.attachMachine(&link);
+    int offset = 8;
+    avr.assignStateIndices(offset);
+
+    CHECK(offset == 13);
+  }
+
   SECTION("STAB1") {
     PSSDynamicParams p;
     p.model = PSSModel::STAB1;
@@ -543,6 +691,132 @@ TEST_CASE("Phase 4 controller derivatives match PSID transfer blocks",
     CHECK(dxdt[12] == Catch::Approx(((1.0 - 0.2 / 0.4) * y_f - 0.05) / 0.4));
     CHECK(dxdt[13] == Catch::Approx(((1.0 - 0.3 / 0.6) * y_ll1 + 0.02) / 0.6));
     CHECK(dxdt[14] == Catch::Approx(-(((2.0 * 0.5) / 0.25) * y_ll2 + 0.01) / 0.25));
+  }
+
+  SECTION("PSS2B") {
+    PSSDynamicParams p;
+    p.model = PSSModel::PSS2B;
+    p.model_name = "PSS2B";
+    p.tw1_s = 2.0;
+    p.tw2_s = 4.0;
+    p.t6_s = 0.5;
+    PowerSystemStabilizer pss(p);
+    pss.attachMachine(&link);
+    int offset = 8;
+    pss.assignStateIndices(offset);
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(offset));
+    x.x[1] = 1.02;
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+    pss.computeDerivatives(0.0, x, y, dxdt);
+    const DynamicDeviceOutput out = pss.output(x, y);
+
+    CHECK(offset == 25);
+    CHECK(out.values.at("state_count") == Catch::Approx(17.0));
+    CHECK(out.values.at("pss2_family") == Catch::Approx(1.0));
+    CHECK(dxdt[8] == Catch::Approx(0.02 / 2.0));
+    CHECK(dxdt[9] == Catch::Approx(0.02 / 4.0));
+
+    x.x[24] = 0.2;
+    const DynamicDeviceOutput limited = pss.output(x, y);
+    CHECK(limited.values.at("vs_pu") == Catch::Approx(0.1));
+  }
+
+  SECTION("GFL LCL filter state derivative") {
+    GridFollowingInverterParams p;
+    p.component_index = 1;
+    p.bus = 1;
+    p.bus_pos = 0;
+    p.base_mva = 100.0;
+    p.p_ref_mw = 20.0;
+    p.q_ref_mvar = 5.0;
+    p.filter_kind = InverterFilterKind::LCL;
+    p.filter_c_pu = 0.20;
+    p.filter_grid_r_pu = 0.01;
+    p.filter_grid_x_pu = 0.10;
+    p.current_limit_pu = 0.50;
+    p.limiter_kind = CurrentLimiterKind::ReactivePriority;
+    GridFollowingInverter inv(p);
+    NetworkState y_inv = single_bus_voltage(1.0);
+    DynamicState x_inv = initialized_state(inv, y_inv);
+    REQUIRE(x_inv.x.size() == 8);
+    x_inv.x[6] = 1.05;
+    x_inv.x[7] = 0.02;
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(x_inv.x.size());
+    inv.computeDerivatives(0.0, x_inv, y_inv, dxdt);
+    const DynamicDeviceOutput out = inv.output(x_inv, y_inv);
+
+    CHECK(out.values.at("lcl_filter") == Catch::Approx(1.0));
+    CHECK(out.values.at("current_limiter_model") ==
+          Catch::Approx(static_cast<int>(CurrentLimiterKind::ReactivePriority)));
+    CHECK(dxdt[6] ==
+          Catch::Approx((1.0 + 0.01 * x_inv.x[2] - 0.10 * x_inv.x[3] - 1.05) / 0.20));
+    CHECK(dxdt[7] ==
+          Catch::Approx((0.10 * x_inv.x[2] + 0.01 * x_inv.x[3] - 0.02) / 0.20));
+  }
+
+  SECTION("DER_A trip timer drives multiplier") {
+    DERAADynamicParams p;
+    p.component_index = 1;
+    p.bus = 1;
+    p.bus_pos = 0;
+    p.base_mva = 100.0;
+    p.model_base_mva = 20.0;
+    p.p_ref_mw = 10.0;
+    p.q_ref_mvar = 1.0;
+    p.v_trip_low_pu = 0.95;
+    p.trip_delay_s = 0.10;
+    p.Tv = 0.05;
+    DERAADynamic dera(p);
+    NetworkState y_der = single_bus_voltage(0.90);
+    DynamicState x_der = initialized_state(dera, y_der);
+    REQUIRE(x_der.x.size() == 8);
+    x_der.x[0] = 0.90;
+    x_der.x[4] = 1.0;
+    x_der.x[5] = 1.0;
+    x_der.x[7] = 0.12;
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(x_der.x.size());
+    dera.computeDerivatives(0.0, x_der, y_der, dxdt);
+    const DynamicDeviceOutput out = dera.output(x_der, y_der);
+
+    CHECK(out.values.at("trip_enabled") == Catch::Approx(1.0));
+    CHECK(out.values.at("trip_active") == Catch::Approx(1.0));
+    CHECK(dxdt[4] == Catch::Approx(-20.0));
+    CHECK(dxdt[7] == Catch::Approx(1.0));
+  }
+
+  SECTION("Induction machine current and speed derivatives") {
+    InductionMachineDynamicParams p;
+    p.component_index = 1;
+    p.bus = 1;
+    p.bus_pos = 0;
+    p.base_mva = 100.0;
+    p.model_base_mva = 10.0;
+    p.p_mech_mw = 8.0;
+    p.q_nom_mvar = 2.0;
+    p.inertia_h = 0.5;
+    p.r_r_pu = 0.04;
+    p.x_r_pu = 0.08;
+    p.x_m_pu = 1.20;
+    InductionMachineDynamic motor(p);
+    NetworkState y_motor = single_bus_voltage(1.0);
+    DynamicState x_motor = initialized_state(motor, y_motor);
+    REQUIRE(x_motor.x.size() == 3);
+    x_motor.x[0] = 0.05;
+    x_motor.x[1] = -0.01;
+    x_motor.x[2] = 0.90;
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(x_motor.x.size());
+    motor.computeDerivatives(0.0, x_motor, y_motor, dxdt);
+    const DynamicDeviceOutput out = motor.output(x_motor, y_motor);
+
+    const double p_cmd = 8.0 / 100.0 * 0.90 * 0.90;
+    const double tau_r =
+        (0.08 + 1.20) / (2.0 * 3.14159265358979323846 * 50.0 * 0.04);
+    CHECK(out.values.at("state_count") == Catch::Approx(3.0));
+    CHECK(dxdt[0] == Catch::Approx((p_cmd - 0.05) / tau_r));
+    CHECK(dxdt[1] == Catch::Approx((-0.02 - (-0.01)) / tau_r));
+    CHECK(dxdt[2] == Catch::Approx(((0.05 / 0.90) - (p_cmd / 0.90)) /
+                                   (2.0 * 0.5)));
   }
 }
 

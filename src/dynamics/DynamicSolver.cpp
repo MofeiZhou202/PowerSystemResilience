@@ -305,9 +305,8 @@ DynamicSolverType effective_solver_type(const DynamicSolverOptions& options,
                                         DynamicResults& results) {
   if (options.use_analytic_jacobian) {
     results.warnings.push_back(
-        "Analytic dynamic-device Jacobians are not complete yet; MassMatrixDae "
-        "uses the analytic network/admittance block with finite-difference "
-        "corrections for remaining device couplings");
+        "MassMatrixDae uses the selected DAE Jacobian mode; finite-difference "
+        "fallback remains available for uncovered dynamic-device couplings");
   }
   return options.solver_type;
 }
@@ -316,6 +315,9 @@ struct StepOutcome {
   bool ok{false};
   int iterations{0};
   int jacobian_evaluations{0};
+  int jacobian_residual_evaluations{0};
+  int jacobian_fd_columns{0};
+  int jacobian_colored_groups{0};
   int linear_factorizations{0};
   double error_norm{0.0};
   bool error_estimated{false};
@@ -733,7 +735,28 @@ DynamicJacobianContext make_dae_jacobian_context(const DaeLayout& L,
   context.total_size = L.n;
   context.dt = dt;
   context.theta = theta;
+  context.include_differential_derivatives = true;
   return context;
+}
+
+struct DaeJacobianAssemblySettings {
+  bool use_analytic_network{false};
+  bool use_analytic_device{false};
+  bool use_colored_fd{false};
+};
+
+DaeJacobianAssemblySettings dae_jacobian_settings(const DynamicSolverOptions& options) {
+  DaeJacobianAssemblySettings settings;
+  if (options.dae_jacobian_mode == DynamicDaeJacobianMode::FiniteDifference) {
+    return settings;
+  }
+  settings.use_analytic_network = options.dae_use_analytic_network_jacobian;
+  settings.use_analytic_device = options.dae_use_analytic_device_jacobian;
+  settings.use_colored_fd =
+      options.dae_jacobian_mode == DynamicDaeJacobianMode::HybridAnalyticColored &&
+      settings.use_analytic_network &&
+      settings.use_analytic_device;
+  return settings;
 }
 
 bool mass_matrix_needs_coupled_network_startup(const DynamicSystem& sys) {
@@ -880,46 +903,8 @@ bool dae_cache_usable(const DaeNewtonCache& cache,
   return cache.accepted_steps_since_rebuild < max_reuse_steps;
 }
 
-bool dae_is_algebraic_voltage_derivative(const DaeLayout& L, int row, int col) {
-  const bool ac_row = row >= L.ac_off && row < L.dc_off;
-  const bool ac_col = col >= L.ac_off && col < L.dc_off;
-  const bool dc_row = row >= L.dc_off && row < L.n;
-  const bool dc_col = col >= L.dc_off && col < L.n;
-  return (ac_row && ac_col) || (dc_row && dc_col);
-}
-
 bool dae_is_algebraic_row(const DaeLayout& L, int row) {
   return row >= L.ac_off && row < L.n;
-}
-
-double dae_network_derivative(
-    const DaeLayout& L,
-    const Eigen::SparseMatrix<std::complex<double>>& Yac,
-    const Eigen::SparseMatrix<double>& Gdc,
-    int row,
-    int col) {
-  if (row >= L.ac_off && row < L.ac_off + L.n_ac) {
-    const int ac_row = row - L.ac_off;
-    if (col >= L.ac_off && col < L.ac_off + L.n_ac) {
-      return -Yac.coeff(ac_row, col - L.ac_off).real();
-    }
-    if (col >= L.ai_off && col < L.ai_off + L.n_ac) {
-      return Yac.coeff(ac_row, col - L.ai_off).imag();
-    }
-  }
-  if (row >= L.ai_off && row < L.ai_off + L.n_ac) {
-    const int ac_row = row - L.ai_off;
-    if (col >= L.ac_off && col < L.ac_off + L.n_ac) {
-      return -Yac.coeff(ac_row, col - L.ac_off).imag();
-    }
-    if (col >= L.ai_off && col < L.ai_off + L.n_ac) {
-      return -Yac.coeff(ac_row, col - L.ai_off).real();
-    }
-  }
-  if (row >= L.dc_off && row < L.n && col >= L.dc_off && col < L.n) {
-    return -Gdc.coeff(row - L.dc_off, col - L.dc_off);
-  }
-  return 0.0;
 }
 
 void dae_add_analytic_network_block(
@@ -952,6 +937,81 @@ void dae_add_analytic_network_block(
   }
 }
 
+void dae_add_mass_identity_block(const DaeLayout& L,
+                                 std::vector<Eigen::Triplet<double>>& triplets) {
+  for (int i = 0; i < L.n_x; ++i) triplets.emplace_back(i, i, 1.0);
+}
+
+std::vector<int> dae_dense_row_pattern(const DaeLayout& L) {
+  std::vector<int> rows;
+  rows.reserve(static_cast<std::size_t>(L.n));
+  for (int i = 0; i < L.n; ++i) rows.push_back(i);
+  return rows;
+}
+
+std::vector<int> dae_column_pattern_from_analytic(
+    const DaeLayout& L,
+    const Eigen::SparseMatrix<double>& analytic_jacobian,
+    int col) {
+  std::vector<int> rows;
+  if (analytic_jacobian.nonZeros() > 0) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(analytic_jacobian, col); it; ++it) {
+      rows.push_back(static_cast<int>(it.row()));
+    }
+  }
+  std::sort(rows.begin(), rows.end());
+  rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+
+  if (rows.empty()) return dae_dense_row_pattern(L);
+
+  if (col < L.n_x && rows.size() == 1 && rows.front() == col &&
+      std::abs(analytic_jacobian.coeff(col, col) - 1.0) <= 1e-12) {
+    return dae_dense_row_pattern(L);
+  }
+  return rows;
+}
+
+struct DaeFdColorGroup {
+  std::vector<int> columns;
+  std::vector<char> occupied_rows;
+};
+
+std::vector<DaeFdColorGroup> dae_color_fd_columns(
+    const DaeLayout& L,
+    const std::vector<std::vector<int>>& patterns) {
+  std::vector<DaeFdColorGroup> groups;
+  for (int col = 0; col < L.n; ++col) {
+    const auto& pattern = patterns[static_cast<std::size_t>(col)];
+    bool placed = false;
+    for (auto& group : groups) {
+      bool intersects = false;
+      for (int row : pattern) {
+        if (row >= 0 && row < L.n && group.occupied_rows[static_cast<std::size_t>(row)]) {
+          intersects = true;
+          break;
+        }
+      }
+      if (intersects) continue;
+      group.columns.push_back(col);
+      for (int row : pattern) {
+        if (row >= 0 && row < L.n) group.occupied_rows[static_cast<std::size_t>(row)] = 1;
+      }
+      placed = true;
+      break;
+    }
+    if (!placed) {
+      DaeFdColorGroup group;
+      group.columns.push_back(col);
+      group.occupied_rows.assign(static_cast<std::size_t>(L.n), 0);
+      for (int row : pattern) {
+        if (row >= 0 && row < L.n) group.occupied_rows[static_cast<std::size_t>(row)] = 1;
+      }
+      groups.push_back(std::move(group));
+    }
+  }
+  return groups;
+}
+
 bool dae_build_and_factor_jacobian(DynamicSystem& sys,
                                    const DaeLayout& L,
                                    double t,
@@ -972,11 +1032,18 @@ bool dae_build_and_factor_jacobian(DynamicSystem& sys,
   Eigen::VectorXd Idc;
   dae_unpack(sys, L, u);
   dae_assemble(sys, L, t, Yac, Iac, Gdc, Idc);
-  if (sys.options.dae_use_analytic_network_jacobian) {
-    dae_add_analytic_network_block(L, Yac, Gdc, triplets);
+  const DaeJacobianAssemblySettings settings = dae_jacobian_settings(sys.options);
+  const bool analytic_mode =
+      sys.options.dae_jacobian_mode != DynamicDaeJacobianMode::FiniteDifference;
+  std::vector<Eigen::Triplet<double>> analytic_triplets;
+  analytic_triplets.reserve(static_cast<std::size_t>(L.n) * 6);
+  if (analytic_mode) {
+    dae_add_mass_identity_block(L, analytic_triplets);
   }
-  Eigen::SparseMatrix<double> analytic_device_jacobian(L.n, L.n);
-  if (sys.options.dae_use_analytic_device_jacobian) {
+  if (settings.use_analytic_network) {
+    dae_add_analytic_network_block(L, Yac, Gdc, analytic_triplets);
+  }
+  if (settings.use_analytic_device) {
     std::vector<Eigen::Triplet<double>> device_triplets;
     device_triplets.reserve(static_cast<std::size_t>(sys.devices.size()) * 16);
     const DynamicJacobianContext context =
@@ -984,41 +1051,71 @@ bool dae_build_and_factor_jacobian(DynamicSystem& sys,
     for (const auto& device : sys.devices) {
       device->addJacobian(t, sys.x, sys.y, context, device_triplets);
     }
-    if (!device_triplets.empty()) {
-      analytic_device_jacobian.setFromTriplets(device_triplets.begin(),
-                                               device_triplets.end());
-      analytic_device_jacobian.makeCompressed();
-      triplets.insert(triplets.end(), device_triplets.begin(), device_triplets.end());
-    }
+    analytic_triplets.insert(analytic_triplets.end(),
+                             device_triplets.begin(),
+                             device_triplets.end());
   }
+
+  Eigen::SparseMatrix<double> analytic_jacobian(L.n, L.n);
+  if (!analytic_triplets.empty()) {
+    analytic_jacobian.setFromTriplets(analytic_triplets.begin(),
+                                      analytic_triplets.end());
+    analytic_jacobian.makeCompressed();
+    triplets.insert(triplets.end(), analytic_triplets.begin(), analytic_triplets.end());
+  }
+
+  const auto add_fd_remainder_value = [&](int row, int col, double d) {
+    const double analytic_d =
+        analytic_jacobian.nonZeros() > 0 ? analytic_jacobian.coeff(row, col) : 0.0;
+    d -= analytic_d;
+    if (!sys.options.dae_use_fd_current_jacobian_corrections &&
+        dae_is_algebraic_row(L, row) &&
+        std::abs(analytic_d) > 0.0) {
+      return;
+    }
+    if (std::abs(d) > 1e-14) triplets.emplace_back(row, col, d);
+  };
+
   Eigen::VectorXd rp;
+  std::vector<double> h(static_cast<std::size_t>(L.n), 0.0);
   for (int j = 0; j < L.n; ++j) {
-    const double h = eps * std::max(1.0, std::abs(u[j]));
-    Eigen::VectorXd up = u;
-    up[j] += h;
-    if (!dae_residual(sys, L, t, dt, up, x_prev, formula, rp, error)) return false;
-    for (int i = 0; i < L.n; ++i) {
-      double d = (rp[i] - R[i]) / h;
-      bool covered_by_analytic_current_block = false;
-      if (sys.options.dae_use_analytic_network_jacobian &&
-          dae_is_algebraic_voltage_derivative(L, i, j)) {
-        const double network_d = dae_network_derivative(L, Yac, Gdc, i, j);
-        d -= network_d;
-        covered_by_analytic_current_block = true;
+    h[static_cast<std::size_t>(j)] = eps * std::max(1.0, std::abs(u[j]));
+  }
+
+  if (!settings.use_colored_fd) {
+    outcome.jacobian_fd_columns += L.n;
+    outcome.jacobian_colored_groups += L.n;
+    for (int j = 0; j < L.n; ++j) {
+      Eigen::VectorXd up = u;
+      up[j] += h[static_cast<std::size_t>(j)];
+      if (!dae_residual(sys, L, t, dt, up, x_prev, formula, rp, error)) return false;
+      ++outcome.jacobian_residual_evaluations;
+      for (int i = 0; i < L.n; ++i) {
+        const double d = (rp[i] - R[i]) / h[static_cast<std::size_t>(j)];
+        add_fd_remainder_value(i, j, d);
       }
-      if (sys.options.dae_use_analytic_device_jacobian &&
-          analytic_device_jacobian.nonZeros() > 0) {
-        const double device_d = analytic_device_jacobian.coeff(i, j);
-        d -= device_d;
-        covered_by_analytic_current_block =
-            covered_by_analytic_current_block || std::abs(device_d) > 0.0;
+    }
+  } else {
+    std::vector<std::vector<int>> patterns(static_cast<std::size_t>(L.n));
+    for (int j = 0; j < L.n; ++j) {
+      patterns[static_cast<std::size_t>(j)] =
+          dae_column_pattern_from_analytic(L, analytic_jacobian, j);
+    }
+    const std::vector<DaeFdColorGroup> groups = dae_color_fd_columns(L, patterns);
+    outcome.jacobian_fd_columns += L.n;
+    outcome.jacobian_colored_groups += static_cast<int>(groups.size());
+    for (const auto& group : groups) {
+      Eigen::VectorXd up = u;
+      for (int col : group.columns) up[col] += h[static_cast<std::size_t>(col)];
+      if (!dae_residual(sys, L, t, dt, up, x_prev, formula, rp, error)) return false;
+      ++outcome.jacobian_residual_evaluations;
+      for (int col : group.columns) {
+        const double hj = h[static_cast<std::size_t>(col)];
+        for (int row : patterns[static_cast<std::size_t>(col)]) {
+          const double d = (rp[row] - R[row]) / hj;
+          add_fd_remainder_value(row, col, d);
+        }
       }
-      if (!sys.options.dae_use_fd_current_jacobian_corrections &&
-          dae_is_algebraic_row(L, i) &&
-          covered_by_analytic_current_block) {
-        continue;
-      }
-      if (std::abs(d) > 1e-14) triplets.emplace_back(i, j, d);
     }
   }
   dae_unpack(sys, L, u);
@@ -1152,6 +1249,9 @@ StepOutcome dae_theta_step(DynamicSystem& sys,
 void add_step_counters(StepOutcome& total, const StepOutcome& part) {
   total.iterations += part.iterations;
   total.jacobian_evaluations += part.jacobian_evaluations;
+  total.jacobian_residual_evaluations += part.jacobian_residual_evaluations;
+  total.jacobian_fd_columns += part.jacobian_fd_columns;
+  total.jacobian_colored_groups += part.jacobian_colored_groups;
   total.linear_factorizations += part.linear_factorizations;
 }
 
@@ -1324,6 +1424,9 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
     system.x.time_s = step_accepted ? accepted_next_t : t + dt;
     results.newton_iterations += outcome.iterations;
     results.jacobian_evaluations += outcome.jacobian_evaluations;
+    results.jacobian_residual_evaluations += outcome.jacobian_residual_evaluations;
+    results.jacobian_fd_columns += outcome.jacobian_fd_columns;
+    results.jacobian_colored_groups += outcome.jacobian_colored_groups;
     results.linear_factorizations += outcome.linear_factorizations;
     if (!step_accepted) {
       results.success = false;
