@@ -4021,6 +4021,13 @@ const App = (() => {
       html += '<tr><td colspan="7">无差分状态可分析。</td></tr>';
     }
     html += '</tbody></table></div>';
+    // Human-readable Markdown report (for docs / sharing), collapsible + copyable.
+    const md = modal.report_markdown || '';
+    if (md) {
+      html += '<details class="ss-report"><summary>Markdown 报表（可复制）</summary>';
+      html += '<button id="trCopyModalReport" class="toolbar-btn ss-report-copy">复制 Markdown</button>';
+      html += '<pre class="ss-report-md">' + escapeHtml(md) + '</pre></details>';
+    }
     return html;
   }
 
@@ -4823,6 +4830,17 @@ const App = (() => {
     if (tbl) {
       tbl.querySelectorAll('tr.ss-mode-row').forEach(tr => {
         tr.addEventListener('click', () => select(parseInt(tr.getAttribute('data-mode-index'), 10) || 0, true));
+      });
+    }
+    const copyBtn = document.getElementById('trCopyModalReport');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', () => {
+        const md = (data.modal && data.modal.report_markdown) || '';
+        if (md && navigator.clipboard) {
+          navigator.clipboard.writeText(md).then(
+            () => { copyBtn.textContent = '已复制'; setTimeout(() => { copyBtn.textContent = '复制 Markdown'; }, 1500); },
+            () => {});
+        }
       });
     }
     // Default: show the most critical (least-damped) mode's participation.

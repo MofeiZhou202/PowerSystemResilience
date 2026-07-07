@@ -4321,6 +4321,12 @@ TEST_CASE("PSD OneDOneQ machine profile initializes and responds as a named mode
           "[dynamics][benchmark][psd][machine][onedoneq]") {
   auto sys = make_psd_onedoneq_three_bus_subset_case();
   DynamicSolverOptions opt = fast_options();
+  // The AVR TypeI voltage transducer (Tr = 1 ms) makes this system stiff: its
+  // eigenvalue sits at -1/Tr = -1000, far outside the explicit RK2 (Heun)
+  // stability region for dt = 5 ms (which needs Re(lambda) > -2/dt = -400).
+  // Integrate with an A-stable implicit method so the fast transducer mode is
+  // resolved without a numerical blow-up.
+  opt.solver_type = DynamicSolverType::TrapezoidalNewton;
   opt.run_power_flow_initialization = true;
   opt.t_end_s = 2.0;
   opt.dt_s = 0.005;

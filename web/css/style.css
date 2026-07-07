@@ -1073,6 +1073,21 @@ tr.ss-row-unstable td {
 tr.ss-mode-row { cursor: pointer; }
 tr.ss-mode-row:hover td { background: rgba(97,175,239,0.10); }
 tr.ss-mode-selected td { background: rgba(97,175,239,0.22); }
+.ss-report { margin: 8px 0 12px; }
+.ss-report > summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+.ss-report-copy { margin: 8px 0; }
+.ss-report-md {
+  max-height: 360px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel2, rgba(255,255,255,0.03));
+  color: var(--ink2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre;
+}
 .transient-table-scroll {
   max-width: 100%;
   max-height: 420px;
