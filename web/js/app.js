@@ -3698,6 +3698,7 @@ const App = (() => {
       },
       record_every_step: true,
       record_device_outputs: document.getElementById('trRecordDeviceOutputs')?.checked !== false,
+      compute_small_signal: document.getElementById('trSmallSignal')?.checked === true,
       events,
     };
   }
@@ -3756,7 +3757,18 @@ const App = (() => {
     return (data?.device_series || []).filter(dev => {
       const type = String(dev.type || '');
       return type.includes('GridFollowing') || type.includes('GridForming') ||
-        type === 'DCDCConverter' || String(dev.canvas_type || '') === 'vsc';
+        type === 'DCDCConverter' || type === 'RenewableEnergyGeneratorA' ||
+        String(dev.canvas_type || '') === 'vsc';
+    });
+  }
+
+  // Dynamic loads whose transient telemetry is worth plotting (active CPL power /
+  // current, induction-machine slip) alongside the source devices.
+  function transientDynamicLoads(data) {
+    return (data?.device_series || []).filter(dev => {
+      const type = String(dev.type || '');
+      return type === 'ActiveConstantPowerLoad' ||
+        type === 'SingleCageInductionMachine';
     });
   }
 
@@ -3958,6 +3970,55 @@ const App = (() => {
       });
     } else {
       html += '<tr><td colspan="6">暂无动态模型配置。可在元件属性中填写 dynamic_model JSON。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+    return html;
+  }
+
+  // Small-signal (modal) screen about the initialized operating point. Rendered
+  // only when the transient run requested compute_small_signal (data.modal).
+  function transientRenderSmallSignal(data) {
+    const modal = data && data.modal;
+    if (!modal || !modal.computed) return '';
+    let html = '<div class="transient-section-head"><h5>小信号 (模态) 分析</h5><span>初始运行点 Schur 缩减状态雅可比特征值 / 阻尼 (设计文档 §18)</span></div>';
+    if (!modal.success) {
+      html += `<div class="transient-model-summary"><span><strong>失败</strong>${escapeHtml(modal.message || '未能求解')}</span></div>`;
+      return html;
+    }
+    const modes = Array.isArray(modal.modes) ? modal.modes : [];
+    const minZeta = Number(modal.min_damping_ratio);
+    const stableTxt = modal.stable ? '稳定' : '不稳定';
+    const stableCls = modal.stable ? 'ss-stable' : 'ss-unstable';
+    html += '<div class="transient-model-summary">';
+    html += `<span class="${stableCls}"><strong>${stableTxt}</strong>Re(λ) &lt; 0</span>`;
+    html += `<span><strong>状态数</strong>${modal.n_differential}</span>`;
+    html += `<span><strong>代数变量</strong>${modal.n_algebraic}</span>`;
+    html += `<span><strong>最小阻尼比</strong>${Number.isFinite(minZeta) ? minZeta.toFixed(4) : '—'}</span>`;
+    html += `<span><strong>模态数</strong>${modes.length}</span>`;
+    html += '</div>';
+    html += '<div class="transient-dashboard-grid">';
+    html += '<div id="trSmallSignalChart" class="transient-chart"></div>';
+    html += '<div id="trModeParticipationChart" class="transient-chart"></div>';
+    html += '</div>';
+    // Least-damped modes first (already sorted server-side).
+    html += '<div class="transient-hint-line">点击下表某行或 s 平面上的点，查看该模态的参与因子。</div>';
+    html += '<div class="transient-table-scroll"><table id="trModeTable"><thead><tr><th>#</th><th>Re(λ) 1/s</th><th>Im(λ) rad/s</th><th>f (Hz)</th><th>阻尼比 ζ</th><th>振荡</th><th>主导状态</th></tr></thead><tbody>';
+    if (modes.length) {
+      modes.slice(0, 16).forEach((m, i) => {
+        const unstable = Number(m.real) > 1e-6;
+        const cls = 'ss-mode-row' + (unstable ? ' ss-row-unstable' : '');
+        html += `<tr class="${cls}" data-mode-index="${i}">
+          <td>${i + 1}</td>
+          <td>${nf(m.real, 4)}</td>
+          <td>${nf(m.imag, 4)}</td>
+          <td>${nf(m.frequency_hz, 4)}</td>
+          <td>${nf(m.damping_ratio, 4)}</td>
+          <td>${m.oscillatory ? '是' : '—'}</td>
+          <td>${escapeHtml(m.dominant_state || '')}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="7">无差分状态可分析。</td></tr>';
     }
     html += '</tbody></table></div>';
     return html;
@@ -4632,6 +4693,29 @@ const App = (() => {
       if (dcLinkTraces.length) Plotly.react(dcLinkChart, dcLinkTraces, transientPlotLayout('动态 DC 链电压轨迹', 'p.u.'), cfg);
       else dcLinkChart.innerHTML = '<p class="empty-hint">未启用动态 DC 链</p>';
     }
+    // Renewable (REGC_A LVACM) and dynamic-load (CPL current / motor slip)
+    // telemetry from the new WECC / §13 models.
+    const newModelsChart = document.getElementById('trNewModelsChart');
+    if (newModelsChart) {
+      const nmTraces = [];
+      const nmPalette = ['#61afef', '#98c379', '#d19a66', '#e06c75', '#c678dd', '#56b6c2'];
+      let nmc = 0;
+      transientDeviceByType(data, ty => ty === 'RenewableEnergyGeneratorA')
+        .slice(0, 4)
+        .forEach(dev => {
+          const tr = transientMetricTrace(dev, 'lvacm_gain', `${dev.name} LVACM`, nmPalette[nmc++ % nmPalette.length]);
+          if (tr) nmTraces.push(tr);
+        });
+      transientDynamicLoads(data).slice(0, 6).forEach(dev => {
+        const ty = String(dev.type || '');
+        const metric = ty === 'SingleCageInductionMachine' ? 'slip' : 'i_draw_pu';
+        const label = ty === 'SingleCageInductionMachine' ? `${dev.name} slip` : `${dev.name} |I|`;
+        const tr = transientMetricTrace(dev, metric, label, nmPalette[nmc++ % nmPalette.length]);
+        if (tr) nmTraces.push(tr);
+      });
+      if (nmTraces.length) Plotly.react(newModelsChart, nmTraces, transientPlotLayout('可再生/动态负荷遥测 (LVACM/滑差/CPL)', ''), cfg);
+      else newModelsChart.innerHTML = '<p class="empty-hint">无可再生/动态负荷遥测</p>';
+    }
     const genFreqChart = document.getElementById('trGenFreqChart');
     if (genFreqChart) {
       const traces = gens.slice(0, 6).map((dev, i) =>
@@ -4672,11 +4756,144 @@ const App = (() => {
       if (traces.length) Plotly.react(observerChart, traces, transientPlotLayout('本地观测点电压', 'p.u.'), cfg);
       else observerChart.innerHTML = '<p class="empty-hint">暂无可用本地观测轨迹</p>';
     }
+    drawSmallSignalChart(data, cfg);
     requestAnimationFrame(() => {
       document.querySelectorAll('#transientResults .js-plotly-plot').forEach(el => {
         try { Plotly.Plots.resize(el); } catch (_) {}
       });
     });
+  }
+
+  // s-plane eigenvalue scatter for the small-signal screen. Stable modes (left
+  // half-plane) are green; right-half-plane modes are red. Clicking a point (or a
+  // mode-table row) shows that mode's participation factors.
+  function drawSmallSignalChart(data, cfg) {
+    const chart = document.getElementById('trSmallSignalChart');
+    if (!chart) return;
+    const modal = data && data.modal;
+    const modes = (modal && modal.computed && modal.success && Array.isArray(modal.modes))
+      ? modal.modes.map((m, i) => ({ ...m, _idx: i })) : [];
+    if (!modes.length) {
+      chart.innerHTML = '<p class="empty-hint">未启用小信号分析（勾选“小信号”后重新运行）</p>';
+      const pc = document.getElementById('trModeParticipationChart');
+      if (pc) pc.innerHTML = '<p class="empty-hint">无参与因子</p>';
+      return;
+    }
+    const split = (unstable) => modes.filter(m => (Number(m.real) > 1e-6) === unstable);
+    const mkTrace = (subset, name, color) => ({
+      x: subset.map(m => Number(m.real)),
+      y: subset.map(m => Number(m.imag)),
+      customdata: subset.map(m => [m.frequency_hz, m.damping_ratio, m.dominant_state || '', m._idx]),
+      mode: 'markers',
+      type: 'scattergl',
+      name,
+      marker: { color, size: 9, line: { color: 'rgba(0,0,0,0.4)', width: 1 }, symbol: 'circle' },
+      hovertemplate: 'σ=%{x:.4f} 1/s<br>ω=%{y:.4f} rad/s<br>f=%{customdata[0]:.4f} Hz<br>ζ=%{customdata[1]:.4f}<br>%{customdata[2]}<extra>' + name + '</extra>',
+    });
+    const traces = [];
+    const stable = split(false);
+    const unstable = split(true);
+    if (stable.length) traces.push(mkTrace(stable, '稳定', '#98c379'));
+    if (unstable.length) traces.push(mkTrace(unstable, '不稳定', '#e06c75'));
+    const ink = getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() || '#dcdfe4';
+    const layout = {
+      title: { text: '小信号特征值 (s 平面)', font: { size: 14 }, x: 0.02, xanchor: 'left' },
+      margin: { l: 64, r: 24, t: 44, b: 52 },
+      xaxis: { title: 'Re(λ)  1/s', zeroline: false, automargin: true },
+      yaxis: { title: 'Im(λ)  rad/s', zeroline: true, automargin: true },
+      shapes: [{ type: 'line', x0: 0, x1: 0, yref: 'paper', y0: 0, y1: 1,
+                 line: { color: 'rgba(224,108,117,0.6)', width: 1, dash: 'dash' } }],
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      showlegend: true,
+      legend: { orientation: 'h', x: 0, y: 1.02 },
+      font: { color: ink },
+    };
+    Plotly.react(chart, traces, layout, cfg);
+    // Wire click interactions: scatter points and table rows both select a mode.
+    // A user-initiated click also pans/highlights the dominant device on the
+    // canvas; the default (idx 0) selection does not, to avoid jumping the view.
+    const select = (idx, userInitiated) => selectSmallSignalMode(modes, idx, data, userInitiated);
+    chart.removeAllListeners && chart.removeAllListeners('plotly_click');
+    chart.on('plotly_click', (ev) => {
+      const pt = ev && ev.points && ev.points[0];
+      if (pt && Array.isArray(pt.customdata)) select(Number(pt.customdata[3]), true);
+    });
+    const tbl = document.getElementById('trModeTable');
+    if (tbl) {
+      tbl.querySelectorAll('tr.ss-mode-row').forEach(tr => {
+        tr.addEventListener('click', () => select(parseInt(tr.getAttribute('data-mode-index'), 10) || 0, true));
+      });
+    }
+    // Default: show the most critical (least-damped) mode's participation.
+    select(0, false);
+  }
+
+  // Parse a small-signal state label "type#component:sLocal" and pan/highlight the
+  // matching device on the network canvas via the existing component-id mapping.
+  function panToModeDominantDevice(mode, data) {
+    const label = (mode && (mode.dominant_state ||
+      (Array.isArray(mode.participation) && mode.participation[0] && mode.participation[0].label))) || '';
+    const parsed = /^(.+)#(\d+):/.exec(label);
+    if (!parsed) return;
+    const type = parsed[1];
+    const comp = Number(parsed[2]);
+    const dev = (data && Array.isArray(data.device_series) ? data.device_series : [])
+      .find(d => String(d.type) === type && Number(d.component_index) === comp);
+    if (!dev) return;
+    const maps = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
+    if (!maps) return;
+    const cid = rowCanvasCompId(dev, maps);
+    if (cid !== undefined && typeof Canvas !== 'undefined' && Canvas.panToComponent) {
+      Canvas.panToComponent(cid);
+    }
+  }
+
+  // Highlight the selected mode in the table and draw its participation bars.
+  function selectSmallSignalMode(modes, idx, data, userInitiated) {
+    if (!Array.isArray(modes) || idx < 0 || idx >= modes.length) return;
+    const tbl = document.getElementById('trModeTable');
+    if (tbl) {
+      tbl.querySelectorAll('tr.ss-mode-row').forEach(tr => {
+        const on = (parseInt(tr.getAttribute('data-mode-index'), 10) || 0) === idx;
+        tr.classList.toggle('ss-mode-selected', on);
+      });
+    }
+    drawModeParticipation(modes[idx], idx);
+    if (userInitiated) panToModeDominantDevice(modes[idx], data);
+  }
+
+  // Horizontal bar chart of a mode's normalized state participation factors.
+  function drawModeParticipation(mode, idx) {
+    const chart = document.getElementById('trModeParticipationChart');
+    if (!chart) return;
+    const parts = (mode && Array.isArray(mode.participation)) ? mode.participation.slice() : [];
+    if (!parts.length) {
+      chart.innerHTML = '<p class="empty-hint">该模态无显著参与因子</p>';
+      return;
+    }
+    // Ascending so the largest bar is at the top of the horizontal chart.
+    parts.sort((a, b) => Number(a.factor) - Number(b.factor));
+    const ink = getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() || '#dcdfe4';
+    const trace = {
+      type: 'bar',
+      orientation: 'h',
+      x: parts.map(p => Number(p.factor)),
+      y: parts.map(p => p.label || ('s' + p.state_index)),
+      marker: { color: '#61afef' },
+      hovertemplate: '%{y}<br>参与因子=%{x:.3f}<extra></extra>',
+    };
+    const fLabel = mode.oscillatory ? `${nf(mode.frequency_hz, 3)} Hz` : '实模态';
+    const layout = {
+      title: { text: `模态 #${(idx || 0) + 1} 参与因子 (ζ=${nf(mode.damping_ratio, 3)}, ${fLabel})`, font: { size: 13 }, x: 0.02, xanchor: 'left' },
+      margin: { l: 150, r: 24, t: 44, b: 44 },
+      xaxis: { title: '参与因子', range: [0, 1], automargin: true },
+      yaxis: { automargin: true },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      font: { color: ink },
+    };
+    Plotly.react(chart, [trace], layout, { displayModeBar: false, responsive: true });
   }
 
   function showTransientResults(data) {
@@ -4789,7 +5006,9 @@ const App = (() => {
     html += '<div id="trPowerChart" class="transient-chart"></div>';
     html += '<div id="trCurrentChart" class="transient-chart"></div>';
     html += '<div id="trDcLinkChart" class="transient-chart"></div>';
+    html += '<div id="trNewModelsChart" class="transient-chart"></div>';
     html += '</div>';
+    html += transientRenderSmallSignal(data);
     html += '<h5>动态设备</h5><table><thead><tr><th>设备</th><th>类型</th><th>母线</th><th>P(MW)</th><th>Q(Mvar)</th><th>频率/PLL(Hz)</th><th>|I|(pu)</th></tr></thead><tbody>';
     (data.device_series || []).slice(0, 80).forEach(dev => {
       const vals = dev.values || {};

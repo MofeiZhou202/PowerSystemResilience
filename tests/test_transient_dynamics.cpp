@@ -6211,6 +6211,295 @@ TEST_CASE("Small-signal analysis eigenvalues match time-domain and rank controls
   }
 }
 
+TEST_CASE("Small-signal screening of the new IBR and dynamic-load models",
+          "[dynamics][smallsignal][newmodels]") {
+  // Design doc §18: linearize about the initialized operating point and screen
+  // the WECC renewable stack, the flux induction machine, and the active CPL for
+  // small-signal stability. These are new device models (this session); the
+  // screen catches an unstable equilibrium (right-half-plane eigenvalue) before
+  // it shows up as a time-domain divergence.
+  auto analyze = [](const HybridPowerSystem& sys) {
+    DynamicSolverOptions opt;
+    opt.use_consistent_dynamic_initialization = true;
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(sys, opt);
+    return small_signal_analysis(dyn);
+  };
+  // Least-damped mode dominated by the named device type. The global least-
+  // damped mode is the reference machine's zero angle mode (Re~=0), which masks
+  // the new device's own dynamics, so screen the device-dominated modes instead.
+  auto device_worst = [](const SmallSignalResult& r, const std::string& type) {
+    SmallSignalMode worst;
+    worst.eigen_real = -1e30;
+    bool found = false;
+    for (const auto& m : r.modes) {
+      if (m.dominant_state.find(type) == std::string::npos) continue;
+      found = true;
+      if (m.eigen_real > worst.eigen_real) worst = m;
+    }
+    return std::make_pair(found, worst);
+  };
+
+  SECTION("WECC REGC_A + REEC_A + REPC_A renewable plant") {
+    HybridPowerSystem sys = make_transient_2bus();
+    StaticGenerator der;
+    der.index = 1;
+    der.bus = 2;
+    der.in_service = true;
+    der.p_mw = 12.0;
+    der.q_mvar = 0.0;
+    der.sn_mva = 30.0;
+    der.f_ref_hz = 50.0;
+    der.dynamic_model.standard = "WECC";
+    der.dynamic_model.model_name = "REGC_A";
+    der.dynamic_model.parameters = {{"reec_enabled", 1.0}, {"repc_enabled", 1.0}};
+    sys.ac.static_generators.push_back(der);
+    const SmallSignalResult ss = analyze(sys);
+    REQUIRE(ss.success);
+    CHECK(static_cast<int>(ss.modes.size()) == ss.n_differential);
+    const auto [found, worst] = device_worst(ss, "RenewableEnergyGeneratorA");
+    REQUIRE(found);
+    INFO("REGC_A device worst Re=" << worst.eigen_real << " f=" << worst.frequency_hz
+         << " zeta=" << worst.damping_ratio << " dom=" << worst.dominant_state
+         << " ndiff=" << ss.n_differential);
+    // The renewable plant's own modes must sit in the left half-plane.
+    CHECK(worst.eigen_real < 1e-6);
+    CHECK(worst.damping_ratio > 0.0);
+  }
+
+  SECTION("flux single-cage induction motor") {
+    HybridPowerSystem sys = make_transient_2bus();
+    AsynchronousMotor m;
+    m.index = 1;
+    m.bus = 2;
+    m.in_service = true;
+    m.sn_mva = 10.0;
+    m.cos_phi = 0.85;
+    m.efficiency = 0.95;
+    m.r_pu = 0.03;
+    m.x_pu = 0.20;
+    m.dynamic_model.model_name = "FluxInductionMachine";
+    sys.ac.motors = {m};
+    const SmallSignalResult ss = analyze(sys);
+    REQUIRE(ss.success);
+    CHECK(static_cast<int>(ss.modes.size()) == ss.n_differential);
+    const auto [found, worst] = device_worst(ss, "SingleCageInductionMachine");
+    REQUIRE(found);
+    INFO("FluxMotor device worst Re=" << worst.eigen_real << " f=" << worst.frequency_hz
+         << " zeta=" << worst.damping_ratio << " dom=" << worst.dominant_state
+         << " ndiff=" << ss.n_differential);
+    // A loaded induction motor at its stable slip is small-signal stable.
+    CHECK(worst.eigen_real < 1e-6);
+    CHECK(worst.damping_ratio > 0.0);
+  }
+
+  SECTION("active constant-power load") {
+    HybridPowerSystem sys = make_transient_2bus();
+    Load cpl;
+    cpl.index = 2;
+    cpl.bus = 2;
+    cpl.p_mw = 10.0;
+    cpl.q_mvar = 2.0;
+    cpl.in_service = true;
+    cpl.dynamic_model.model_name = "ActiveConstantPowerLoad";
+    sys.ac.loads.push_back(cpl);
+    const SmallSignalResult ss = analyze(sys);
+    REQUIRE(ss.success);
+    CHECK(static_cast<int>(ss.modes.size()) == ss.n_differential);
+    const auto [found, worst] = device_worst(ss, "ActiveConstantPowerLoad");
+    REQUIRE(found);
+    INFO("CPL device worst Re=" << worst.eigen_real << " f=" << worst.frequency_hz
+         << " zeta=" << worst.damping_ratio << " dom=" << worst.dominant_state
+         << " ndiff=" << ss.n_differential);
+    // The LC-filtered CPL settles (R damping dominates the negative-resistance
+    // term at this loading), so its own mode is stable though lightly damped.
+    CHECK(worst.eigen_real < 1e-6);
+    CHECK(worst.damping_ratio > 0.0);
+  }
+}
+
+TEST_CASE("compute_small_signal attaches a modal summary to the transient result",
+          "[dynamics][smallsignal][transient]") {
+  // Design doc §18: a transient run can optionally carry a small-signal screen
+  // about its initialized operating point, so the GUI can plot eigenvalues /
+  // damping alongside the time-domain trajectory without a second request.
+  HybridPowerSystem sys = make_transient_2bus();
+  StaticGenerator der;
+  der.index = 1;
+  der.bus = 2;
+  der.in_service = true;
+  der.p_mw = 12.0;
+  der.q_mvar = 0.0;
+  der.sn_mva = 30.0;
+  der.f_ref_hz = 50.0;
+  der.dynamic_model.standard = "WECC";
+  der.dynamic_model.model_name = "REGC_A";
+  der.dynamic_model.parameters = {{"reec_enabled", 1.0}, {"repc_enabled", 1.0}};
+  sys.ac.static_generators.push_back(der);
+
+  SECTION("off by default: no modal summary is computed") {
+    auto opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.t_end_s = 0.2;
+    const auto result = hacdcpf::run_transient_simulation(sys, opt);
+    REQUIRE(result.success);
+    CHECK_FALSE(result.modal.computed);
+    CHECK(result.modal.modes.empty());
+  }
+
+  SECTION("opt-in: eigenvalues attached, trajectory unaffected") {
+    auto opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.t_end_s = 0.2;
+    // Baseline trajectory without the modal screen.
+    const auto base = hacdcpf::run_transient_simulation(sys, opt);
+    REQUIRE(base.success);
+    opt.compute_small_signal = true;
+    const auto result = hacdcpf::run_transient_simulation(sys, opt);
+    REQUIRE(result.success);
+    REQUIRE(result.modal.computed);
+    REQUIRE(result.modal.success);
+    CHECK(result.modal.n_differential > 0);
+    CHECK(static_cast<int>(result.modal.modes.size()) == result.modal.n_differential);
+    // Modes are least-damped first; min_damping_ratio matches the leading mode.
+    CHECK(result.modal.min_damping_ratio ==
+          Catch::Approx(result.modal.modes.front().damping_ratio));
+    // The renewable device contributes at least one mode.
+    bool has_regca = false;
+    for (const auto& m : result.modal.modes)
+      if (m.dominant_state.find("RenewableEnergyGeneratorA") != std::string::npos)
+        has_regca = true;
+    CHECK(has_regca);
+    // Each mode carries its significant participation factors (descending, in
+    // (0,1]) so the GUI can show which states drive the eigenvalue.
+    const auto& lead = result.modal.modes.front();
+    REQUIRE_FALSE(lead.participation.empty());
+    double prev = 2.0;
+    for (const auto& p : lead.participation) {
+      CHECK(p.factor > 0.0);
+      CHECK(p.factor <= 1.0 + 1e-9);
+      CHECK(p.factor <= prev + 1e-9);  // sorted descending
+      prev = p.factor;
+    }
+    // The leading contributor's label matches the mode's dominant state.
+    CHECK(lead.participation.front().state_label == lead.dominant_state);
+    // A human-readable Markdown report renders the screen for docs / sharing.
+    const std::string report = hacdcpf::dynamics::to_modal_report(result.modal);
+    CHECK(report.find("### Small-signal (modal) screen") != std::string::npos);
+    CHECK((report.find("**Stable**") != std::string::npos ||
+           report.find("**UNSTABLE**") != std::string::npos));
+    CHECK(report.find("| # | Re(λ) [1/s]") != std::string::npos);
+    CHECK(report.find("Dominant state") != std::string::npos);
+    CHECK(report.find("participation") != std::string::npos);
+    CHECK(report.find(":s") != std::string::npos);  // a device state label
+    CHECK(report.find('%') != std::string::npos);   // participation percentages
+    // An uncomputed screen produces no report.
+    CHECK(hacdcpf::dynamics::to_modal_report(base.modal).empty());
+    // The screen must not perturb the time-domain result: same final voltage.
+    REQUIRE(result.final_snapshot() != nullptr);
+    REQUIRE(base.final_snapshot() != nullptr);
+    CHECK(result.final_snapshot()->min_ac_voltage_pu ==
+          Catch::Approx(base.final_snapshot()->min_ac_voltage_pu).epsilon(1e-9));
+  }
+}
+
+TEST_CASE("CPL small-signal stability boundary: filter damping vs loading",
+          "[dynamics][smallsignal][cpl]") {
+  // Design doc §13/§18: characterize the active constant-power load's small-signal
+  // mode with the modal screen. In this RMS-phasor formulation the constant-power
+  // stage current i_load = conj(S/Vc) is TRACE-FREE (d i_r/d a + d i_i/d b = 0), so
+  // the negative-resistance term rotates the mode without shifting its real part.
+  // The damping is therefore governed by the filter conductance
+  // Re(Y_f) = R_f/(R_f^2 + X_f^2) and capacitance C, and is essentially
+  // independent of the constant-power loading P. Lowering R_f or raising X_f
+  // reduces Re(Y_f) and walks the mode toward the imaginary axis; loading does
+  // not (the classic load-driven CPL instability needs a full dq/EMT model).
+  auto cpl_mode_real = [](double filter_r_pu, double filter_x_pu, double p_mw,
+                          double filter_c_s) -> double {
+    HybridPowerSystem sys = make_transient_2bus();
+    Load cpl;
+    cpl.index = 2;
+    cpl.bus = 2;
+    cpl.p_mw = p_mw;
+    cpl.q_mvar = 0.0;
+    cpl.in_service = true;
+    cpl.dynamic_model.model_name = "ActiveConstantPowerLoad";
+    cpl.dynamic_model.parameters = {{"filter_r_pu", filter_r_pu},
+                                    {"filter_x_pu", filter_x_pu},
+                                    {"filter_c_s", filter_c_s}};
+    sys.ac.loads.push_back(cpl);
+    DynamicSolverOptions opt;
+    opt.use_consistent_dynamic_initialization = true;
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(sys, opt);
+    const SmallSignalResult ss = small_signal_analysis(dyn);
+    if (!ss.success) return std::numeric_limits<double>::quiet_NaN();
+    double worst = -1e30;
+    for (const auto& m : ss.modes)
+      if (m.dominant_state.find("ActiveConstantPowerLoad") != std::string::npos)
+        worst = std::max(worst, m.eigen_real);
+    return worst;
+  };
+
+  SECTION("raising filter reactance walks the mode toward the boundary") {
+    const double r = 0.005, p = 30.0, c = 0.02;
+    const std::vector<double> xs = {0.05, 0.10, 0.20, 0.30, 0.50, 0.70};
+    double prev = -1e30;
+    for (double x : xs) {
+      const double re = cpl_mode_real(r, x, p, c);
+      INFO("X=" << x << " Re=" << re);
+      REQUIRE(std::isfinite(re));
+      CHECK(re < 0.0);               // stable across the physical range
+      CHECK(re > prev - 1e-6);       // higher X_f => lower Re(Y_f) => less damped
+      prev = re;
+    }
+    // The mode approaches (but does not cross) the imaginary axis.
+    CHECK(cpl_mode_real(r, 0.70, p, c) > -3.0);
+    CHECK(cpl_mode_real(r, 0.05, p, c) < -8.0);
+  }
+
+  SECTION("lowering filter resistance reduces damping monotonically") {
+    const double x = 0.30, p = 30.0, c = 0.02;
+    const std::vector<double> rs = {0.12, 0.08, 0.05, 0.03, 0.02, 0.01, 0.005, 0.002};
+    double prev = -1e30;
+    for (double r : rs) {
+      const double re = cpl_mode_real(r, x, p, c);
+      INFO("R=" << r << " Re=" << re);
+      REQUIRE(std::isfinite(re));
+      CHECK(re < 0.0);
+      CHECK(re > prev - 1e-6);       // decreasing R_f => less damped
+      prev = re;
+    }
+  }
+
+  SECTION("constant-power loading barely moves the mode (trace-free stage)") {
+    const double r = 0.005, x = 0.30, c = 0.02;
+    const double base = cpl_mode_real(r, x, 2.0, c);
+    REQUIRE(std::isfinite(base));
+    for (double p : {2.0, 20.0, 40.0, 60.0}) {
+      const double re = cpl_mode_real(r, x, p, c);
+      INFO("P=" << p << " Re=" << re);
+      CHECK(re < 0.0);
+      // The trace-free power stage leaves the real part set by the filter: a
+      // 30x loading change shifts it by < 1% of the filter-established damping.
+      CHECK(std::abs(re - base) < 0.05);
+    }
+  }
+
+  SECTION("capacitance scales the mode rate but not its stability") {
+    // C only scales the eigenvalue magnitude (1/C), never its sign.
+    const double r = 0.01, x = 0.20, p = 20.0;
+    const double slow = cpl_mode_real(r, x, p, 0.05);
+    const double fast = cpl_mode_real(r, x, p, 0.005);
+    INFO("C=0.05 Re=" << slow << "  C=0.005 Re=" << fast);
+    REQUIRE(std::isfinite(slow));
+    REQUIRE(std::isfinite(fast));
+    CHECK(slow < 0.0);
+    CHECK(fast < 0.0);
+    CHECK(fast < slow);              // smaller C => faster (more negative) mode
+  }
+}
+
 TEST_CASE("Mass-matrix DAE core matches the partitioned backward-Euler oracle",
           "[dynamics][dae]") {
   // The simultaneous DAE (bus voltages as algebraic states, one sparse Newton
@@ -6960,6 +7249,7 @@ TEST_CASE("Transient results support sampled recording and CSV export",
   opt.dt_s = 0.01;
   opt.record_every_step = true;
   opt.output_every_steps = 2;
+  opt.compute_small_signal = true;  // attach the modal screen for export
 
   const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
 
@@ -6972,6 +7262,23 @@ TEST_CASE("Transient results support sampled recording and CSV export",
   CHECK(csv.find("time_s") != std::string::npos);
   CHECK(csv.find("vac_0_mag_pu") != std::string::npos);
   CHECK(csv.find("VSCGridFollowing_1_p_mw") != std::string::npos);
+
+  // The small-signal screen is exported as a leading '#'-commented block, and the
+  // time-series header still follows it as plain CSV.
+  REQUIRE(result.modal.computed);
+  CHECK(csv.find("# small_signal") != std::string::npos);
+  CHECK(csv.find("# mode,eigen_real_1_s") != std::string::npos);
+  CHECK(csv.find("\ntime_s") != std::string::npos);
+  if (result.modal.success && !result.modal.modes.empty()) {
+    // At least one participation entry (label=factor) is present in the block.
+    CHECK(csv.find(":s0=") != std::string::npos);
+  }
+  // Disabling the modal export drops the block but keeps the table.
+  DynamicResultExportOptions no_modal;
+  no_modal.include_modal = false;
+  const std::string csv_plain = to_csv(result, no_modal);
+  CHECK(csv_plain.find("# small_signal") == std::string::npos);
+  CHECK(csv_plain.find("time_s") != std::string::npos);
 }
 
 TEST_CASE("Transient contingencies carry named parameters and structured records",
@@ -7544,3 +7851,863 @@ TEST_CASE("Unbalanced machine sequence interface: SLG fault braking torque",
   }
   CHECK(max_dw > 1e-4);
 }
+
+TEST_CASE("IEEE 1547 DER protection: undervoltage trip and ramped reconnect",
+          "[dynamics][protection][ieee1547]") {
+  // Design doc §11.7: a DER carries an IEEE 1547 ride-through protection block
+  // evaluated on measured (filtered) terminal quantities (§7 role 4). A
+  // sustained deep voltage sag past the must-trip clearing time trips the
+  // inverter; once the terminal recovers into the continuous band for the
+  // reconnect delay the inverter re-enters service and ramps its power back over
+  // the soft-start window.
+  GridFollowingInverterParams params;
+  params.component_index = 7;
+  params.bus = 1;
+  params.bus_pos = 0;
+  params.base_mva = 100.0;
+  params.p_ref_mw = 50.0;
+  params.protection = make_default_ieee1547(IEEE1547Category::CategoryII, 60.0);
+  params.protection.enabled = true;
+  params.protection.reconnect_delay_s = 0.1;
+  params.protection.power_ramp_s = 0.1;
+  GridFollowingInverter inverter(params);
+
+  int offset = 0;
+  inverter.assignStateIndices(offset);
+  DynamicState x;
+  x.resize(static_cast<std::size_t>(offset));
+  NetworkState y;
+  y.resize(3, 1);
+
+  const double dt = 0.01;
+  double t = 0.0;
+  std::vector<DynamicEvent> events;
+  auto step_at = [&](double vmag) {
+    set_balanced_voltage(y, 0, std::polar(vmag, 0.0));
+    const bool rebuild = inverter.updateProtection(t, dt, x, y, events);
+    t += dt;
+    return rebuild;
+  };
+
+  // Healthy operation stays in service and never asks for a network rebuild.
+  for (int i = 0; i < 10; ++i) CHECK_FALSE(step_at(1.0));
+  {
+    const auto out = inverter.output(x, y);
+    CHECK(out.values.at("in_service") > 0.5);
+    CHECK(out.values.at("protection_tripped") < 0.5);
+    CHECK(out.values.at("protection_restore_scale") == Catch::Approx(1.0));
+  }
+
+  // A deep sag (0.40 pu, below the 0.50 pu / 0.16 s must-trip band) rides
+  // through until the clearing time (~16 steps at dt = 0.01 s), then trips.
+  bool tripped = false;
+  int trip_steps = 0;
+  for (; trip_steps < 40 && !tripped; ++trip_steps) tripped = step_at(0.4);
+  REQUIRE(tripped);
+  CHECK(trip_steps >= 14);  // rode through, did not trip instantly
+  CHECK(trip_steps <= 20);
+  {
+    const auto out = inverter.output(x, y);
+    CHECK(out.values.at("in_service") < 0.5);
+    CHECK(out.values.at("protection_tripped") > 0.5);
+    CHECK(out.values.at("protection_restore_scale") == Catch::Approx(0.0));
+  }
+  REQUIRE_FALSE(events.empty());
+  CHECK(events.back().type == DynamicEventType::VSCTrip);
+  CHECK(events.back().label.find("undervoltage") != std::string::npos);
+  const std::size_t events_after_trip = events.size();
+
+  // Recovery into the continuous band reconnects after the reconnect delay.
+  bool reconnected = false;
+  for (int i = 0; i < 40 && !reconnected; ++i) reconnected = step_at(1.0);
+  REQUIRE(reconnected);
+  {
+    const auto out = inverter.output(x, y);
+    CHECK(out.values.at("in_service") > 0.5);
+    CHECK(out.values.at("protection_tripped") < 0.5);
+    CHECK(out.values.at("protection_restore_scale") < 0.5);  // ramp just started
+  }
+  REQUIRE(events.size() > events_after_trip);
+  CHECK(events.back().label.find("reconnect") != std::string::npos);
+
+  // The soft-start ramp restores the injection scale to full over the window.
+  for (int i = 0; i < 20; ++i) step_at(1.0);
+  CHECK(inverter.output(x, y).values.at("protection_restore_scale") ==
+        Catch::Approx(1.0));
+}
+
+TEST_CASE("IEEE 1547 protection hook is a live no-op without opted-in devices",
+          "[dynamics][protection][ieee1547]") {
+  // The solver-level enable flag alone must not change results: a device acts
+  // only when its own per-device protection is enabled. Running with the hook on
+  // exercises the per-step protection evaluation live across a full multi-device
+  // transient and must reproduce the baseline exactly.
+  const auto sys = make_hybrid_dc_case();
+  auto opt = fast_options();
+  opt.t_end_s = 0.05;
+  opt.dt_s = 0.01;
+
+  const auto baseline = hacdcpf::run_transient_simulation(sys, opt);
+  opt.enable_der_protection = true;
+  const auto with_hook = hacdcpf::run_transient_simulation(sys, opt);
+
+  REQUIRE(baseline.success);
+  REQUIRE(with_hook.success);
+  REQUIRE(baseline.final_snapshot() != nullptr);
+  REQUIRE(with_hook.final_snapshot() != nullptr);
+  CHECK(with_hook.final_snapshot()->min_ac_voltage_pu ==
+        Catch::Approx(baseline.final_snapshot()->min_ac_voltage_pu));
+  CHECK(with_hook.final_snapshot()->max_ac_voltage_pu ==
+        Catch::Approx(baseline.final_snapshot()->max_ac_voltage_pu));
+  for (const auto& label : with_hook.applied_events) {
+    CHECK(label.find("IEEE1547") == std::string::npos);
+  }
+}
+
+TEST_CASE("IEEE 1547 protection trips grid-forming, VSC, and synchronous DERs",
+          "[dynamics][protection][ieee1547]") {
+  // Design doc §11.7 extended beyond the grid-following reference: the same
+  // ride-through block trips a grid-forming inverter, a VSC converter, and a
+  // synchronous DER on a sustained deep undervoltage, each emitting the correct
+  // trip event type through the shared protection helper.
+  IEEE1547Settings prot = make_default_ieee1547(IEEE1547Category::CategoryII, 60.0);
+  prot.enabled = true;
+
+  auto drive_trip = [](DynamicDevice& dev, int n_states,
+                       std::vector<DynamicEvent>& events) {
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(std::max(1, n_states)));
+    NetworkState y;
+    y.resize(3, 1);
+    double t = 0.0;
+    const double dt = 0.01;
+    bool tripped = false;
+    for (int i = 0; i < 60 && !tripped; ++i) {
+      set_balanced_voltage(y, 0, std::polar(0.30, 0.0));  // deep sag
+      tripped = dev.updateProtection(t, dt, x, y, events);
+      t += dt;
+    }
+    return tripped;
+  };
+
+  SECTION("grid-forming inverter") {
+    GridFormingInverterParams params;
+    params.component_index = 11;
+    params.bus = 1;
+    params.bus_pos = 0;
+    params.base_mva = 100.0;
+    params.protection = prot;
+    GridFormingInverter gfm(params);
+    int offset = 0;
+    gfm.assignStateIndices(offset);
+    std::vector<DynamicEvent> events;
+    REQUIRE(drive_trip(gfm, offset, events));
+    REQUIRE_FALSE(events.empty());
+    CHECK(events.back().type == DynamicEventType::VSCTrip);
+    CHECK(events.back().label.find("trip") != std::string::npos);
+  }
+
+  SECTION("VSC converter (grid-following)") {
+    VSCConverterDynamicParams params;
+    params.component_index = 12;
+    params.bus = 1;
+    params.bus_pos = 0;
+    params.base_mva = 100.0;
+    params.grid_forming = false;
+    params.protection = prot;
+    VSCConverterDynamic vsc(params);
+    int offset = 0;
+    vsc.assignStateIndices(offset);
+    std::vector<DynamicEvent> events;
+    REQUIRE(drive_trip(vsc, offset, events));
+    REQUIRE_FALSE(events.empty());
+    CHECK(events.back().type == DynamicEventType::VSCTrip);
+  }
+
+  SECTION("synchronous machine") {
+    VoltageSourceDynamicParams params;
+    params.component_index = 13;
+    params.bus = 1;
+    params.bus_pos = 0;
+    params.base_mva = 100.0;
+    params.protection = prot;
+    SynchronousMachine machine(params);
+    int offset = 0;
+    machine.assignStateIndices(offset);
+    std::vector<DynamicEvent> events;
+    REQUIRE(drive_trip(machine, offset, events));
+    REQUIRE_FALSE(events.empty());
+    CHECK(events.back().type == DynamicEventType::GeneratorTrip);
+  }
+}
+
+TEST_CASE("IEEE 1547 volt-var and frequency-watt smart-inverter curves",
+          "[dynamics][protection][ieee1547]") {
+  // Design doc §11.7: piecewise-linear volt-var Q(V) and frequency-watt P(f)
+  // characteristics with deadbands, superseding the simple linear droop.
+  SECTION("volt-var Q(V) piecewise curve with deadband") {
+    VoltVarSettings vv;  // defaults: V1=0.92 Q1=+0.44, deadband [0.98,1.02],
+    vv.enabled = true;   //           V4=1.08 Q4=-0.44
+    CHECK(volt_var_q_pu(vv, 1.00) == Catch::Approx(0.0));    // inside deadband
+    CHECK(volt_var_q_pu(vv, 0.98) == Catch::Approx(0.0));    // lower edge
+    CHECK(volt_var_q_pu(vv, 1.02) == Catch::Approx(0.0));    // upper edge
+    CHECK(volt_var_q_pu(vv, 0.90) == Catch::Approx(0.44));   // clamp: full inject
+    CHECK(volt_var_q_pu(vv, 1.10) == Catch::Approx(-0.44));  // clamp: full absorb
+    CHECK(volt_var_q_pu(vv, 0.95) == Catch::Approx(0.22));   // linear midpoint
+    CHECK(volt_var_q_pu(vv, 1.05) < 0.0);                    // partial absorb
+    VoltVarSettings off;                                     // disabled
+    CHECK(volt_var_q_pu(off, 0.90) == Catch::Approx(0.0));
+  }
+
+  SECTION("frequency-watt P(f) droop with deadband") {
+    FreqWattSettings fw;
+    fw.enabled = true;
+    fw.nominal_frequency_hz = 60.0;  // deadband +/-0.036 Hz, droop 0.05
+    CHECK(freq_watt_delta_pu(fw, 60.00) == Catch::Approx(0.0));  // nominal
+    CHECK(freq_watt_delta_pu(fw, 60.03) == Catch::Approx(0.0));  // within deadband
+    CHECK(freq_watt_delta_pu(fw, 60.50) < 0.0);                  // over-freq: curtail
+    CHECK(freq_watt_delta_pu(fw, 59.50) > 0.0);                  // under-freq: raise
+    CHECK(freq_watt_delta_pu(fw, 60.50) ==
+          Catch::Approx(-(0.50 - 0.036) / 60.0 / 0.05));
+    FreqWattSettings off;
+    CHECK(freq_watt_delta_pu(off, 60.50) == Catch::Approx(0.0));
+  }
+
+  SECTION("grid-following inverter reports volt-var injection and absorption") {
+    GridFollowingInverterParams params;
+    params.component_index = 21;
+    params.bus = 1;
+    params.bus_pos = 0;
+    params.base_mva = 100.0;
+    params.p_ref_mw = 40.0;
+    params.volt_var.enabled = true;
+    GridFollowingInverter gfl(params);
+    int offset = 0;
+    gfl.assignStateIndices(offset);
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(offset));
+    NetworkState y;
+    y.resize(3, 1);
+
+    set_balanced_voltage(y, 0, std::polar(0.90, 0.0));  // below deadband: inject
+    CHECK(gfl.output(x, y).values.at("volt_var_q_pu") > 0.0);
+    set_balanced_voltage(y, 0, std::polar(1.05, 0.0));  // above deadband: absorb
+    CHECK(gfl.output(x, y).values.at("volt_var_q_pu") < 0.0);
+    set_balanced_voltage(y, 0, std::polar(1.00, 0.0));  // deadband: no vars
+    CHECK(gfl.output(x, y).values.at("volt_var_q_pu") == Catch::Approx(0.0));
+  }
+}
+
+TEST_CASE("IEEE 1547 protection trips and reconnects a DER through the solver",
+          "[dynamics][protection][ieee1547][fault]") {
+  // End-to-end (design doc §11.7 + §17): a grid-following DER with IEEE 1547
+  // protection sits at a bus that suffers a deep, sustained voltage sag. The
+  // solver's per-step protection hook trips the DER once the clearing time is
+  // exceeded, then reconnects it after the terminal recovers into the continuous
+  // band for the reconnect delay.
+  HybridPowerSystem sys = make_transient_2bus();  // slack machine @bus1, load @bus2
+  StaticGenerator der;
+  der.index = 1;
+  der.bus = 2;
+  der.in_service = true;
+  der.p_mw = 15.0;
+  der.q_mvar = 0.0;
+  der.sn_mva = 40.0;
+  der.v_ref_pu = 1.0;
+  der.f_ref_hz = 50.0;
+  der.dynamic_model.standard = "IEEE";
+  der.dynamic_model.model_name = "GridFollowingInverter";
+  der.dynamic_model.parameters = {
+      {"ieee1547_enabled", 1.0},
+      {"ieee1547_category", 2.0},
+      {"ieee1547_reconnect_delay_s", 0.2},
+      {"ieee1547_power_ramp_s", 0.1},
+  };
+  sys.ac.static_generators.push_back(der);
+
+  auto opt = fast_options();
+  opt.run_power_flow_initialization = true;
+  opt.enable_der_protection = true;
+  opt.t_end_s = 2.0;
+  opt.dt_s = 0.01;
+  opt.record_every_step = true;
+  opt.enforce_voltage_health_check = false;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+
+  DynamicEvent fault;
+  fault.time_s = 0.20;
+  fault.type = DynamicEventType::FaultShunt;
+  fault.bus = 2;
+  fault.component_type = "AC";
+  fault.label = "deep AC fault at DER bus";
+  fault.params["r_pu"] = 0.01;
+  fault.params["x_pu"] = 0.01;
+  fault.params["duration_s"] = 0.30;
+  dyn.events.push_back(fault);
+
+  DynamicSolver solver;
+  const DynamicResults result = solver.solve(dyn);
+
+  INFO(result.message);
+  REQUIRE(result.success);
+
+  bool tripped = false;
+  bool reconnected = false;
+  for (const auto& label : result.applied_events) {
+    if (label.find("IEEE1547") != std::string::npos &&
+        label.find("trip") != std::string::npos) {
+      tripped = true;
+    }
+    if (label.find("IEEE1547 reconnect") != std::string::npos) {
+      reconnected = true;
+    }
+  }
+  CHECK(tripped);
+  CHECK(reconnected);
+}
+
+TEST_CASE("IEEE 1547 smart-inverter filter and slew-rate limiter",
+          "[dynamics][protection][ieee1547]") {
+  // Design doc §11.7: the volt-var / frequency-watt references pass through a
+  // T_qf/T_pf low-pass and a slew-rate limiter (a stateful smart-inverter block).
+  SECTION("volt-var low-pass tracks toward the curve target") {
+    VoltVarSettings vv;
+    vv.enabled = true;
+    vv.filter_t_s = 0.5;
+    vv.ramp_rate_pu_per_s = 0.0;  // unlimited slew: pure low-pass
+    FreqWattSettings fw;          // disabled
+    SmartInverterState st;
+    const double dt = 0.01;
+
+    step_smart_inverter(vv, fw, st, 1.00, 0.0, dt);  // seed in deadband -> 0
+    REQUIRE(st.initialized);
+    CHECK(st.q_pu == Catch::Approx(0.0));
+
+    const double target = volt_var_q_pu(vv, 0.90);  // 0.44 (clamped)
+    for (int i = 0; i < 5; ++i) step_smart_inverter(vv, fw, st, 0.90, 0.0, dt);
+    CHECK(st.q_pu > 0.0);     // rising
+    CHECK(st.q_pu < target);  // but not yet at target (T_qf = 0.5 s)
+    for (int i = 0; i < 1000; ++i) step_smart_inverter(vv, fw, st, 0.90, 0.0, dt);
+    CHECK(st.q_pu == Catch::Approx(target).margin(1e-3));  // converged
+  }
+
+  SECTION("slew-rate limit caps the reference rate of change") {
+    VoltVarSettings vv;
+    vv.enabled = true;
+    vv.filter_t_s = 0.0;           // no low-pass: isolate the slew limiter
+    vv.ramp_rate_pu_per_s = 0.10;  // 0.10 pu/s
+    FreqWattSettings fw;
+    SmartInverterState st;
+    const double dt = 0.01;  // max change per step = 0.001 pu
+
+    step_smart_inverter(vv, fw, st, 1.00, 0.0, dt);  // seed at 0
+    step_smart_inverter(vv, fw, st, 0.90, 0.0, dt);
+    CHECK(st.q_pu == Catch::Approx(0.001).margin(1e-9));
+    step_smart_inverter(vv, fw, st, 0.90, 0.0, dt);
+    CHECK(st.q_pu == Catch::Approx(0.002).margin(1e-9));
+  }
+
+  SECTION("grid-following inverter smart controls update through the hook") {
+    GridFollowingInverterParams params;
+    params.component_index = 31;
+    params.bus = 1;
+    params.bus_pos = 0;
+    params.base_mva = 100.0;
+    params.volt_var.enabled = true;
+    params.volt_var.filter_t_s = 0.2;
+    GridFollowingInverter gfl(params);
+    int offset = 0;
+    gfl.assignStateIndices(offset);
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(offset));
+    NetworkState y;
+    y.resize(3, 1);
+
+    set_balanced_voltage(y, 0, std::polar(0.90, 0.0));  // below deadband
+    const double dt = 0.01;
+    for (int i = 0; i < 200; ++i) gfl.updateSmartControls(dt, y);
+    // The filtered reactive command converges to the volt-var curve target.
+    CHECK(gfl.output(x, y).values.at("smart_var_q_pu") > 0.0);
+    CHECK(gfl.output(x, y).values.at("smart_var_q_pu") ==
+          Catch::Approx(volt_var_q_pu(params.volt_var, 0.90)).margin(1e-2));
+  }
+}
+
+TEST_CASE("WECC REGC_A renewable converter: LVACM, HVRCM, current limiting",
+          "[dynamics][renewable][regca]") {
+  // Design doc §11.6: the WECC generic renewable converter presents current-
+  // command lags, a terminal-voltage filter, low-voltage active-current
+  // management (LVACM) and high-voltage reactive-current management (HVRCM).
+  REGCADynamicParams params;
+  params.component_index = 41;
+  params.bus = 1;
+  params.bus_pos = 0;
+  params.base_mva = 100.0;
+  params.model_base_mva = 100.0;
+  params.p_ref_mw = 80.0;
+  params.q_ref_mvar = 0.0;
+  params.i_max_pu = 1.2;
+  REGCADynamic regca(params);
+  int offset = 0;
+  regca.assignStateIndices(offset);
+  REQUIRE(offset == 3);
+  DynamicState x;
+  x.resize(static_cast<std::size_t>(offset));
+  NetworkState y;
+  y.resize(3, 1);
+
+  SECTION("nominal voltage injects the scheduled active power") {
+    set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+    regca.initializeFromPowerFlow(PowerFlowResult{}, x, y);
+    const auto out = regca.output(x, y);
+    CHECK(out.values.at("lvacm_gain") == Catch::Approx(1.0));
+    CHECK(out.values.at("hvrcm_active") == Catch::Approx(0.0));
+    CHECK(out.values.at("p_mw") == Catch::Approx(80.0).margin(1.0));
+  }
+
+  SECTION("LVACM ramps active current down under a sag") {
+    set_balanced_voltage(y, 0, std::polar(0.5, 0.0));
+    // Gain is linear between v_lvacm0=0.4 and v_lvacm1=0.8: (0.5-0.4)/0.4 = 0.25.
+    CHECK(regca.output(x, y).values.at("lvacm_gain") ==
+          Catch::Approx(0.25).margin(1e-6));
+    set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+    regca.initializeFromPowerFlow(PowerFlowResult{}, x, y);  // Ip at full command
+    set_balanced_voltage(y, 0, std::polar(0.5, 0.0));
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+    regca.computeDerivatives(0.0, x, y, dxdt);
+    CHECK(dxdt[0] < 0.0);  // active-current command pulled down by LVACM
+  }
+
+  SECTION("HVRCM absorbs reactive current under a swell") {
+    set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+    regca.initializeFromPowerFlow(PowerFlowResult{}, x, y);  // Iq ~ 0
+    set_balanced_voltage(y, 0, std::polar(1.30, 0.0));  // above v_hvrcm = 1.2
+    CHECK(regca.output(x, y).values.at("hvrcm_active") == Catch::Approx(1.0));
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+    regca.computeDerivatives(0.0, x, y, dxdt);
+    CHECK(dxdt[1] < 0.0);  // reactive current driven negative (absorb)
+  }
+
+  SECTION("current-magnitude limit caps the injection") {
+    REGCADynamicParams p2 = params;
+    p2.p_ref_mw = 150.0;  // 1.5 pu at V = 1
+    p2.q_ref_mvar = 80.0;  // 0.8 pu -> |I| = 1.7 > i_max
+    REGCADynamic r2(p2);
+    int off2 = 0;
+    r2.assignStateIndices(off2);
+    DynamicState x2;
+    x2.resize(static_cast<std::size_t>(off2));
+    set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+    r2.initializeFromPowerFlow(PowerFlowResult{}, x2, y);
+    const double ip0 = x2.x[0];
+    const double iq0 = x2.x[1];
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(off2);
+    r2.computeDerivatives(0.0, x2, y, dxdt);
+    const double ip_lim = ip0 + dxdt[0] * p2.t_g_s;
+    const double iq_lim = iq0 + dxdt[1] * p2.t_g_s;
+    CHECK(std::hypot(ip_lim, iq_lim) <= p2.i_max_pu + 1e-6);
+  }
+}
+
+TEST_CASE("WECC REEC_A electrical control: Q-V droop and active-power order",
+          "[dynamics][renewable][reeca]") {
+  // Design doc §11.6: REEC_A is the inner electrical control feeding REGC_A. It
+  // adds a ramp-limited active-power order and a reactive command that combines a
+  // deadband Q-V droop (dynamic voltage support) with the reactive schedule.
+  REGCADynamicParams params;
+  params.component_index = 42;
+  params.bus = 1;
+  params.bus_pos = 0;
+  params.base_mva = 100.0;
+  params.model_base_mva = 100.0;
+  params.p_ref_mw = 60.0;
+  params.q_ref_mvar = 0.0;
+  params.v_ref_pu = 1.0;
+  params.reec.enabled = true;
+  params.reec.dbd1 = -0.05;
+  params.reec.dbd2 = 0.05;
+  params.reec.kqv = 2.0;
+  params.reec.tpord_s = 0.05;
+  REGCADynamic regca(params);
+  int offset = 0;
+  regca.assignStateIndices(offset);
+  REQUIRE(offset == 4);  // Ip, Iq, Vflt, Pord
+  DynamicState x;
+  x.resize(static_cast<std::size_t>(offset));
+  NetworkState y;
+  y.resize(3, 1);
+
+  SECTION("Q-V droop injects reactive current under a voltage dip") {
+    set_balanced_voltage(y, 0, std::polar(0.80, 0.0));  // 0.20 pu error > deadband
+    regca.initializeFromPowerFlow(PowerFlowResult{}, x, y);
+    CHECK(regca.output(x, y).values.at("reec_enabled") == Catch::Approx(1.0));
+    // Iqinj = Kqv * ((Vref - Vt) - dbd2) = 2.0 * (0.20 - 0.05) = 0.30.
+    CHECK(regca.output(x, y).values.at("Iqinj") ==
+          Catch::Approx(0.30).margin(1e-3));
+  }
+
+  SECTION("no reactive injection inside the deadband") {
+    set_balanced_voltage(y, 0, std::polar(0.98, 0.0));  // 0.02 pu error < deadband
+    regca.initializeFromPowerFlow(PowerFlowResult{}, x, y);
+    CHECK(regca.output(x, y).values.at("Iqinj") == Catch::Approx(0.0));
+  }
+
+  SECTION("active-power order ramps toward the schedule") {
+    set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+    regca.initializeFromPowerFlow(PowerFlowResult{}, x, y);  // Pord init = 0.6
+    x.x[3] = 0.3;  // perturb below the schedule
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+    regca.computeDerivatives(0.0, x, y, dxdt);
+    CHECK(dxdt[3] > 0.0);  // dPord/dt drives toward Pref = 0.6
+  }
+}
+
+TEST_CASE("WECC REPC_A plant controller: deadband voltage-reactive PI",
+          "[dynamics][renewable][repca]") {
+  // Design doc §11.6: REPC_A is the outer plant loop. This single-unit plant
+  // regulates the filtered terminal voltage with a deadband PI, producing the
+  // reactive command Qext that feeds the REEC_A reference.
+  REGCADynamicParams params;
+  params.component_index = 43;
+  params.bus = 1;
+  params.bus_pos = 0;
+  params.base_mva = 100.0;
+  params.model_base_mva = 100.0;
+  params.p_ref_mw = 50.0;
+  params.q_ref_mvar = 0.0;
+  params.v_ref_pu = 1.0;
+  params.reec.enabled = true;
+  params.repc.enabled = true;
+  params.repc.vref_pu = 1.0;
+  params.repc.dbd1 = -0.01;
+  params.repc.dbd2 = 0.01;
+  params.repc.kp = 1.0;
+  params.repc.ki = 5.0;
+  REGCADynamic regca(params);
+  int offset = 0;
+  regca.assignStateIndices(offset);
+  REQUIRE(offset == 5);  // Ip, Iq, Vflt, Pord, Qpi
+  DynamicState x;
+  x.resize(static_cast<std::size_t>(offset));
+  NetworkState y;
+  y.resize(3, 1);
+
+  SECTION("plant PI integrates up to inject vars under a low voltage") {
+    set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+    regca.initializeFromPowerFlow(PowerFlowResult{}, x, y);  // Qpi init = 0
+    x.x[2] = 0.95;  // hold the filtered terminal voltage below Vref
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+    regca.computeDerivatives(0.0, x, y, dxdt);
+    CHECK(dxdt[4] > 0.0);  // dQpi/dt > 0 (raise reactive output)
+    CHECK(regca.output(x, y).values.at("repc_enabled") == Catch::Approx(1.0));
+    CHECK(regca.output(x, y).values.at("Qext") > 0.0);
+  }
+
+  SECTION("no plant action inside the voltage deadband") {
+    set_balanced_voltage(y, 0, std::polar(1.005, 0.0));
+    regca.initializeFromPowerFlow(PowerFlowResult{}, x, y);
+    x.x[2] = 1.005;  // within +/- 0.01 pu deadband of Vref = 1.0
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+    regca.computeDerivatives(0.0, x, y, dxdt);
+    CHECK(dxdt[4] == Catch::Approx(0.0));  // integrator frozen (no error)
+  }
+}
+
+TEST_CASE("Active constant-power load: dynamic negative incremental resistance",
+          "[dynamics][loads][cpl]") {
+  // Design doc §13: a rectifier-behind-controls CPL. The constant-power stage
+  // draws more current as the voltage falls (negative incremental resistance),
+  // captured dynamically through the input filter rather than as a static
+  // injection.
+  ActiveConstantPowerLoadParams params;
+  params.component_index = 51;
+  params.bus = 1;
+  params.bus_pos = 0;
+  params.base_mva = 100.0;
+  params.p_mw = 40.0;
+  params.q_mvar = 10.0;
+  params.filter_r_pu = 0.02;
+  params.filter_x_pu = 0.05;
+  params.filter_c_s = 0.02;
+  params.v_min_pu = 0.30;
+  ActiveConstantPowerLoadDynamic cpl(params);
+  int offset = 0;
+  cpl.assignStateIndices(offset);
+  REQUIRE(offset == 2);
+  DynamicState x;
+  x.resize(static_cast<std::size_t>(offset));
+  NetworkState y;
+  y.resize(3, 1);
+
+  auto settle = [&](double vmag) {
+    set_balanced_voltage(y, 0, std::polar(vmag, 0.0));
+    cpl.initializeFromPowerFlow(PowerFlowResult{}, x, y);
+    const double dt = 0.0005;
+    for (int i = 0; i < 2000; ++i) {
+      Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+      cpl.computeDerivatives(0.0, x, y, dxdt);
+      x.x += dt * dxdt;
+    }
+    return cpl.output(x, y);
+  };
+
+  SECTION("holds constant power and draws more current at lower voltage") {
+    const auto hi = settle(1.0);
+    const auto lo = settle(0.8);
+    CHECK(hi.values.at("p_mw") == Catch::Approx(40.0).margin(1.5));
+    CHECK(lo.values.at("p_mw") == Catch::Approx(40.0).margin(1.5));
+    // Negative incremental resistance: lower voltage => higher current draw.
+    CHECK(lo.values.at("i_draw_pu") > hi.values.at("i_draw_pu"));
+  }
+
+  SECTION("low-voltage floor rolls off to constant current") {
+    set_balanced_voltage(y, 0, std::polar(0.20, 0.0));  // below v_min = 0.30
+    cpl.initializeFromPowerFlow(PowerFlowResult{}, x, y);
+    CHECK(cpl.output(x, y).values.at("current_limited") == Catch::Approx(1.0));
+  }
+}
+
+TEST_CASE("Flux-based single-cage induction machine: equilibrium and FIDVR stall",
+          "[dynamics][loads][induction]") {
+  // Design doc §13: the transient-EMF single-cage induction machine reaches a
+  // torque-balanced operating point and, under a deep sustained voltage sag,
+  // loses air-gap torque and decelerates (rising slip) -- the fault-induced
+  // delayed voltage recovery (FIDVR) mechanism.
+  InductionMachineDynamicParams params;
+  params.component_index = 71;
+  params.bus = 1;
+  params.bus_pos = 0;
+  params.base_mva = 100.0;
+  params.model_base_mva = 10.0;
+  params.p_mech_mw = 8.0;  // 0.8 pu load on the machine base
+  params.r_s_pu = 0.03;
+  params.x_s_pu = 0.10;
+  params.r_r_pu = 0.03;
+  params.x_r_pu = 0.10;
+  params.x_m_pu = 3.0;
+  params.inertia_h = 1.0;
+  params.torque_exponent = 2.0;
+  params.flux_model = true;
+  FluxInductionMachineDynamic motor(params);
+  int offset = 0;
+  motor.assignStateIndices(offset);
+  REQUIRE(offset == 3);
+  DynamicState x;
+  x.resize(static_cast<std::size_t>(offset));
+  NetworkState y;
+  y.resize(3, 1);
+
+  SECTION("torque-balanced equilibrium at nominal voltage") {
+    set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+    motor.initializeFromPowerFlow(PowerFlowResult{}, x, y);
+    const auto out = motor.output(x, y);
+    CHECK(out.values.at("slip") > 0.0);    // motoring: positive slip
+    CHECK(out.values.at("slip") < 0.10);   // stable low-slip point
+    CHECK(out.values.at("p_mw") > 0.0);    // draws real power
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+    motor.computeDerivatives(0.0, x, y, dxdt);
+    CHECK(std::abs(dxdt[2]) < 1e-3);       // ds/dt ~ 0 at equilibrium
+  }
+
+  SECTION("stalls under a deep sustained voltage sag (FIDVR)") {
+    set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+    motor.initializeFromPowerFlow(PowerFlowResult{}, x, y);
+    set_balanced_voltage(y, 0, std::polar(0.5, 0.0));  // deep sag
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+    motor.computeDerivatives(0.0, x, y, dxdt);
+    CHECK(dxdt[2] > 0.0);  // ds/dt > 0: rotor decelerating toward stall
+  }
+}
+
+TEST_CASE("End-to-end transients with the new WECC, CPL, and flux-motor models",
+          "[dynamics][transient][newmodels]") {
+  // Exercise the new device models through the full builder + solver pipeline
+  // (run_transient_simulation), not just as isolated unit tests.
+  SECTION("WECC REGC_A + REEC_A + REPC_A renewable generator") {
+    HybridPowerSystem sys = make_transient_2bus();
+    StaticGenerator der;
+    der.index = 1;
+    der.bus = 2;
+    der.in_service = true;
+    der.p_mw = 12.0;
+    der.q_mvar = 0.0;
+    der.sn_mva = 30.0;
+    der.f_ref_hz = 50.0;
+    der.dynamic_model.standard = "WECC";
+    der.dynamic_model.model_name = "REGC_A";
+    der.dynamic_model.parameters = {{"reec_enabled", 1.0}, {"repc_enabled", 1.0}};
+    sys.ac.static_generators.push_back(der);
+    auto opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.t_end_s = 0.5;
+    opt.dt_s = 0.01;
+    opt.record_device_outputs = true;
+    const auto result = hacdcpf::run_transient_simulation(sys, opt);
+    INFO(result.message);
+    REQUIRE(result.success);
+    REQUIRE(result.final_snapshot() != nullptr);
+    CHECK(result.final_snapshot()->min_ac_voltage_pu > 0.5);
+    // Telemetry the GUI transient endpoint exposes for the renewable device.
+    const auto lvacm =
+        device_output_series(result, "RenewableEnergyGeneratorA", 0, "lvacm_gain");
+    CHECK_FALSE(lvacm.y.empty());
+    CHECK_FALSE(
+        device_output_series(result, "RenewableEnergyGeneratorA", 0, "p_mw").y.empty());
+  }
+
+  SECTION("active constant-power load") {
+    HybridPowerSystem sys = make_transient_2bus();
+    Load cpl;
+    cpl.index = 2;
+    cpl.bus = 2;
+    cpl.p_mw = 10.0;
+    cpl.q_mvar = 2.0;
+    cpl.in_service = true;
+    cpl.dynamic_model.model_name = "ActiveConstantPowerLoad";
+    sys.ac.loads.push_back(cpl);
+    auto opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.t_end_s = 0.5;
+    opt.dt_s = 0.01;
+    opt.record_device_outputs = true;
+    const auto result = hacdcpf::run_transient_simulation(sys, opt);
+    INFO(result.message);
+    REQUIRE(result.success);
+    CHECK_FALSE(
+        device_output_series(result, "ActiveConstantPowerLoad", 0, "i_draw_pu").y.empty());
+  }
+
+  SECTION("flux-based single-cage induction motor") {
+    HybridPowerSystem sys = make_transient_2bus();
+    AsynchronousMotor m;
+    m.index = 1;
+    m.bus = 2;
+    m.in_service = true;
+    m.sn_mva = 10.0;
+    m.cos_phi = 0.85;
+    m.efficiency = 0.95;
+    m.r_pu = 0.03;
+    m.x_pu = 0.20;
+    m.dynamic_model.model_name = "FluxInductionMachine";
+    sys.ac.motors = {m};
+    auto opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.t_end_s = 0.5;
+    opt.dt_s = 0.01;
+    opt.record_device_outputs = true;
+    const auto result = hacdcpf::run_transient_simulation(sys, opt);
+    INFO(result.message);
+    REQUIRE(result.success);
+    CHECK_FALSE(
+        device_output_series(result, "SingleCageInductionMachine", 0, "slip").y.empty());
+  }
+}
+
+
+
+TEST_CASE("WECC REPC_A plant frequency droop curtails active power",
+          "[dynamics][renewable][repca]") {
+  // Design doc §11.6: REPC_A's second axis is a plant active-power / frequency
+  // droop. The plant measures frequency from the terminal angle derivative and
+  // curtails the active-power order under over-frequency.
+  REGCADynamicParams params;
+  params.component_index = 44;
+  params.bus = 1;
+  params.bus_pos = 0;
+  params.base_mva = 100.0;
+  params.model_base_mva = 100.0;
+  params.p_ref_mw = 60.0;
+  params.q_ref_mvar = 0.0;
+  params.v_ref_pu = 1.0;
+  params.reec.enabled = true;
+  params.repc.enabled = true;
+  params.repc.freq_control = true;
+  params.repc.f_nominal_hz = 60.0;
+  params.repc.f_dbd_hz = 0.017;
+  params.repc.f_droop = 0.05;
+  REGCADynamic regca(params);
+  int offset = 0;
+  regca.assignStateIndices(offset);
+  REQUIRE(offset == 5);
+  DynamicState x;
+  x.resize(static_cast<std::size_t>(offset));
+  NetworkState y;
+  y.resize(3, 1);
+  set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+  regca.initializeFromPowerFlow(PowerFlowResult{}, x, y);
+
+  // Advance the terminal angle each step to emulate a +0.5 Hz over-frequency
+  // (f = f_nominal + dtheta/dt / 2pi).
+  const double dt = 0.01;
+  const double kTwoPiLocal = 2.0 * 3.14159265358979323846;
+  const double dtheta = kTwoPiLocal * 0.5 * dt;
+  double angle = 0.0;
+  for (int i = 0; i < 100; ++i) {
+    angle += dtheta;
+    set_balanced_voltage(y, 0, std::polar(1.0, angle));
+    regca.updateSmartControls(dt, y);
+  }
+  CHECK(regca.output(x, y).values.at("f_meas_hz") > 60.2);  // measured over-freq
+
+  Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+  regca.computeDerivatives(0.0, x, y, dxdt);
+  CHECK(dxdt[3] < 0.0);  // dPord/dt < 0: plant curtails under over-frequency
+}
+
+TEST_CASE("Unbalanced sequence braking torque extends to all machine models",
+          "[dynamics][unbalanced][sequence]") {
+  // Design doc §8.8 extended beyond OneDOneQ: any machine with sequence
+  // parameters feels a negative-sequence braking torque under an unbalanced
+  // terminal voltage. Comparing the same (classical) machine with and without
+  // the sequence path at an identical unbalanced terminal isolates the torque.
+  auto rotor_accel = [](bool sequence_modeled) {
+    VoltageSourceDynamicParams p;
+    p.component_index = 61;
+    p.bus = 1;
+    p.bus_pos = 0;
+    p.base_mva = 100.0;
+    p.inertia_h = 4.0;
+    p.dynamic_angle = true;
+    p.r_pu = 0.0;
+    p.x_pu = 0.3;
+    if (sequence_modeled) {
+      p.x2_pu = 0.2;
+      p.r2_pu = 0.02;
+    }
+    SynchronousMachine m(p);
+    int off = 0;
+    m.assignStateIndices(off);
+    REQUIRE(off >= 4);
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(off));
+    x.x[0] = 0.0;  // delta
+    x.x[1] = 1.0;  // omega
+    x.x[2] = 1.0;  // e_mag
+    x.x[3] = 0.5;  // pm
+    NetworkState y;
+    y.resize(3, 1);
+    constexpr double pi = 3.14159265358979323846;
+    y.Vac_abc[0] = std::polar(0.5, 0.0);            // phase-A sag (unbalanced)
+    y.Vac_abc[1] = std::polar(1.0, -2.0 * pi / 3.0);
+    y.Vac_abc[2] = std::polar(1.0, 2.0 * pi / 3.0);
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(off);
+    m.computeDerivatives(0.0, x, y, dxdt);
+    return dxdt[1];  // rotor-speed derivative
+  };
+  // The sequence-modeled machine brakes: a lower (more negative) rotor accel.
+  CHECK(rotor_accel(true) < rotor_accel(false));
+}
+
+
+
+
+
+
+
+
+
+
+
+

@@ -153,6 +153,70 @@ void apply_inverter_filter_and_limiter_params(const std::map<std::string, double
   }
 }
 
+// Reads IEEE 1547 ride-through / trip / reconnect settings (design doc §11.7)
+// from a device parameter map. Opt-in: does nothing unless an enable flag is
+// present. `nominal_hz` scales the default 60 Hz frequency bands to the system
+// nominal, and the reconnect timing is optionally overridable.
+void apply_ieee1547_params(const std::map<std::string, double>& p,
+                           IEEE1547Settings& s,
+                           double nominal_hz) {
+  const bool enable =
+      param_or(p, {"ieee1547_enabled", "der_ridethrough", "ieee1547"},
+               s.enabled ? 1.0 : 0.0) != 0.0;
+  if (!enable) return;
+  const int cat = static_cast<int>(
+      param_or(p, {"ieee1547_category", "der_category"}, 2.0));
+  const IEEE1547Category category =
+      cat <= 1 ? IEEE1547Category::CategoryI
+               : (cat >= 3 ? IEEE1547Category::CategoryIII
+                           : IEEE1547Category::CategoryII);
+  s = make_default_ieee1547(category, nominal_hz > 0.0 ? nominal_hz : 60.0);
+  s.enabled = true;
+  s.allow_reconnect =
+      param_or(p, {"ieee1547_allow_reconnect", "der_reconnect"},
+               s.allow_reconnect ? 1.0 : 0.0) != 0.0;
+  s.reconnect_delay_s = param_or(
+      p, {"ieee1547_reconnect_delay_s", "reconnect_delay_s"}, s.reconnect_delay_s);
+  s.power_ramp_s =
+      param_or(p, {"ieee1547_power_ramp_s", "power_ramp_s"}, s.power_ramp_s);
+}
+
+// Reads IEEE 1547 volt-var and frequency-watt smart-inverter settings (design
+// doc §11.7) from a device parameter map into the given curve settings. Opt-in
+// per function; the enabled curve supersedes the simple linear droop. Includes
+// the T_qf/T_pf low-pass and slew-rate limits. `nominal_hz` sets the
+// frequency-watt base.
+void apply_smart_inverter_params(const std::map<std::string, double>& p,
+                                 VoltVarSettings& vv,
+                                 FreqWattSettings& fw,
+                                 double nominal_hz) {
+  if (param_or(p, {"volt_var_enabled", "voltvar", "vv_enabled"}, 0.0) != 0.0) {
+    vv.enabled = true;
+    vv.v1_pu = param_or(p, {"vv_v1_pu", "volt_var_v1"}, vv.v1_pu);
+    vv.q1_pu = param_or(p, {"vv_q1_pu", "volt_var_q1"}, vv.q1_pu);
+    vv.v2_pu = param_or(p, {"vv_v2_pu", "volt_var_v2"}, vv.v2_pu);
+    vv.v3_pu = param_or(p, {"vv_v3_pu", "volt_var_v3"}, vv.v3_pu);
+    vv.v4_pu = param_or(p, {"vv_v4_pu", "volt_var_v4"}, vv.v4_pu);
+    vv.q4_pu = param_or(p, {"vv_q4_pu", "volt_var_q4"}, vv.q4_pu);
+    vv.filter_t_s = param_or(p, {"vv_filter_t_s", "T_qf"}, vv.filter_t_s);
+    vv.ramp_rate_pu_per_s =
+        param_or(p, {"vv_ramp_pu_per_s", "volt_var_ramp"}, vv.ramp_rate_pu_per_s);
+  }
+  if (param_or(p, {"freq_watt_enabled", "freqwatt", "fw_enabled"}, 0.0) != 0.0) {
+    fw.enabled = true;
+    fw.nominal_frequency_hz = nominal_hz > 0.0 ? nominal_hz : 60.0;
+    fw.db_over_hz = param_or(p, {"fw_db_over_hz", "freq_watt_db_over"}, fw.db_over_hz);
+    fw.db_under_hz = param_or(p, {"fw_db_under_hz", "freq_watt_db_under"}, fw.db_under_hz);
+    fw.droop_over = param_or(p, {"fw_droop_over", "freq_watt_droop"}, fw.droop_over);
+    fw.droop_under = param_or(p, {"fw_droop_under"}, fw.droop_under);
+    fw.p_min_pu = param_or(p, {"fw_p_min_pu"}, fw.p_min_pu);
+    fw.p_max_pu = param_or(p, {"fw_p_max_pu"}, fw.p_max_pu);
+    fw.filter_t_s = param_or(p, {"fw_filter_t_s", "T_pf"}, fw.filter_t_s);
+    fw.ramp_rate_pu_per_s =
+        param_or(p, {"fw_ramp_pu_per_s", "freq_watt_ramp"}, fw.ramp_rate_pu_per_s);
+  }
+}
+
 void apply_gfl_params(const std::map<std::string, double>& p,
                       GridFollowingInverterParams& params) {
   params.response_t_s = param_or(p, {"response_t_s", "Tg", "Trv"}, params.response_t_s);
@@ -160,6 +224,8 @@ void apply_gfl_params(const std::map<std::string, double>& p,
   apply_inverter_filter_and_limiter_params(p, params);
   params.frequency_watt_droop_pu = param_or(p, {"frequency_watt_droop_pu", "Ddn", "kf"}, params.frequency_watt_droop_pu);
   params.volt_var_droop_pu = param_or(p, {"volt_var_droop_pu", "Dvv", "kq"}, params.volt_var_droop_pu);
+  apply_ieee1547_params(p, params.protection, params.f_ref_hz);
+  apply_smart_inverter_params(p, params.volt_var, params.freq_watt, params.f_ref_hz);
 }
 
 void apply_gfl_profile(const hacdcpf::DynamicModelProfile& profile,
@@ -226,6 +292,10 @@ void apply_gfm_params(const std::map<std::string, double>& p, P& params) {
   params.voc_k2 = param_or(p, {"k2", "voc_k2"}, params.voc_k2);
   params.reference_frame_locked =
       param_or(p, {"is_not_reference", "reference_frame_unlocked"}, params.reference_frame_locked ? 1.0 : 0.0) == 0.0;
+  apply_ieee1547_params(p, params.protection,
+                        param_or(p, {"f_ref_hz", "frequency_hz", "fn"}, 60.0));
+  apply_smart_inverter_params(p, params.volt_var, params.freq_watt,
+                              param_or(p, {"f_ref_hz", "frequency_hz", "fn"}, 60.0));
 }
 
 void apply_gfm_profile(const hacdcpf::DynamicModelProfile& profile,
@@ -395,6 +465,74 @@ DERAADynamicParams make_deraa_params(const StaticGenerator& gen,
   return p;
 }
 
+// WECC generic renewable converter REGC_A (design doc §11.6) from a static
+// generator's dynamic model.
+REGCADynamicParams make_regca_params(const StaticGenerator& gen,
+                                     int bus_pos,
+                                     double base_mva) {
+  const auto pmap = merged_profile_parameters(gen.dynamic_model);
+  REGCADynamicParams p;
+  p.component_index = gen.index;
+  p.bus = gen.bus;
+  p.bus_pos = bus_pos;
+  p.label = label_or(gen.name, "REGC_A " + std::to_string(gen.index));
+  p.base_mva = base_mva;
+  p.model_base_mva = param_or(pmap, {"base_power", "Mbase", "model_base_mva"},
+                              positive_or(gen.sn_mva, base_mva));
+  p.p_ref_mw = gen.p_mw * gen.scaling;
+  p.q_ref_mvar = gen.q_mvar * gen.scaling;
+  p.v_ref_pu = param_or(pmap, {"V_ref", "v_ref_pu"}, positive_or(gen.v_ref_pu, 1.0));
+  p.t_g_s = param_or(pmap, {"Tg", "t_g_s"}, p.t_g_s);
+  p.t_fltr_s = param_or(pmap, {"Tfltr", "T_fltr", "t_fltr_s"}, p.t_fltr_s);
+  p.v_lvacm0_pu = param_or(pmap, {"Volim", "Lvpl0", "v_lvacm0_pu"}, p.v_lvacm0_pu);
+  p.v_lvacm1_pu = param_or(pmap, {"Lvpl1", "Brkpt", "v_lvacm1_pu"}, p.v_lvacm1_pu);
+  p.v_hvrcm_pu = param_or(pmap, {"Volim_hi", "Vhvrcm", "v_hvrcm_pu"}, p.v_hvrcm_pu);
+  p.k_hvrcm = param_or(pmap, {"Khv", "Iqrmax", "k_hvrcm"}, p.k_hvrcm);
+  p.i_max_pu = param_or(pmap, {"Imax", "I_max", "i_max_pu"}, p.i_max_pu);
+  if (param_or(pmap, {"reactive_current_priority", "iq_priority", "Qtrip"}, 0.0) != 0.0) {
+    p.reactive_priority = true;
+  }
+  if (param_or(pmap, {"reec_enabled", "REECA", "reeca", "REEC_A"}, 0.0) != 0.0) {
+    auto& r = p.reec;
+    r.enabled = true;
+    r.vref0_pu = param_or(pmap, {"Vref0", "vref0_pu"}, r.vref0_pu);
+    r.dbd1 = param_or(pmap, {"dbd1", "reec_dbd1"}, r.dbd1);
+    r.dbd2 = param_or(pmap, {"dbd2", "reec_dbd2"}, r.dbd2);
+    r.kqv = param_or(pmap, {"Kqv", "kqv"}, r.kqv);
+    r.iqh1 = param_or(pmap, {"Iqh1", "iqh1"}, r.iqh1);
+    r.iql1 = param_or(pmap, {"Iql1", "iql1"}, r.iql1);
+    r.tpord_s = param_or(pmap, {"Tpord", "tpord_s"}, r.tpord_s);
+    r.p_rate_pu_per_s = param_or(pmap, {"rrpwr", "p_rate_pu_per_s"}, r.p_rate_pu_per_s);
+    r.ip_min = param_or(pmap, {"Ipmin", "Ip_min", "ip_min"}, r.ip_min);
+    r.ip_max = param_or(pmap, {"Ipmax", "Ip_max", "ip_max"}, r.ip_max);
+    r.iq_min = param_or(pmap, {"Iqmin", "Iq_min", "iq_min"}, r.iq_min);
+    r.iq_max = param_or(pmap, {"Iqmax", "Iq_max", "iq_max"}, r.iq_max);
+  }
+  if (param_or(pmap, {"repc_enabled", "REPCA", "repca", "REPC_A"}, 0.0) != 0.0) {
+    p.reec.enabled = true;  // the plant controller feeds the REEC_A reference
+    auto& pc = p.repc;
+    pc.enabled = true;
+    pc.vref_pu = param_or(pmap, {"Vref_plant", "repc_vref_pu"}, pc.vref_pu);
+    pc.dbd1 = param_or(pmap, {"repc_dbd1", "dbd1_plant"}, pc.dbd1);
+    pc.dbd2 = param_or(pmap, {"repc_dbd2", "dbd2_plant"}, pc.dbd2);
+    pc.kp = param_or(pmap, {"Kp_plant", "Kpv_plant", "repc_kp"}, pc.kp);
+    pc.ki = param_or(pmap, {"Ki_plant", "Kiv_plant", "repc_ki"}, pc.ki);
+    pc.q_min = param_or(pmap, {"Qmin_plant", "repc_q_min"}, pc.q_min);
+    pc.q_max = param_or(pmap, {"Qmax_plant", "repc_q_max"}, pc.q_max);
+    if (param_or(pmap, {"repc_freq_control", "Freq_Flag_plant", "Pf_control"}, 0.0) != 0.0) {
+      pc.freq_control = true;
+      pc.f_nominal_hz = param_or(pmap, {"f_nominal_hz", "Fbase", "f_ref_hz"},
+                                 positive_or(gen.f_ref_hz, 60.0));
+      pc.f_dbd_hz = param_or(pmap, {"f_dbd_hz", "fdbd", "repc_fdbd"}, pc.f_dbd_hz);
+      pc.f_droop = param_or(pmap, {"f_droop", "Ddn", "repc_droop"}, pc.f_droop);
+      pc.p_min_pu = param_or(pmap, {"Pmin_plant", "repc_p_min"}, pc.p_min_pu);
+      pc.p_max_pu = param_or(pmap, {"Pmax_plant", "repc_p_max"}, pc.p_max_pu);
+    }
+  }
+  p.model_profiles = to_dynamic_profiles(gen.dynamic_model);
+  return p;
+}
+
 InductionMachineDynamicParams make_induction_machine_params(
     const AsynchronousMotor& motor,
     int bus_pos,
@@ -426,6 +564,11 @@ InductionMachineDynamicParams make_induction_machine_params(
   p.fifth_order = profile_model_is(motor.dynamic_model,
                                    {"SingleCageInductionMachine"}) ||
                   param_or(pmap, {"fifth_order"}, 0.0) != 0.0;
+  p.flux_model = profile_model_is(motor.dynamic_model,
+                                  {"FluxInductionMachine",
+                                   "FluxSingleCageInductionMachine",
+                                   "SingleCageInductionMachineFlux"}) ||
+                 param_or(pmap, {"flux_model"}, 0.0) != 0.0;
   p.model_profiles = to_dynamic_profiles(motor.dynamic_model);
   return p;
 }
@@ -448,6 +591,9 @@ void apply_voltage_source_profile(const hacdcpf::DynamicModelProfile& profile,
   params.r2_pu = find_param({"R2", "Rnegative", "r2"}, params.r2_pu);
   params.x0_pu = find_param({"X0", "Xzero", "x0"}, params.x0_pu);
   params.r0_pu = find_param({"R0", "Rzero", "r0"}, params.r0_pu);
+  // IEEE 1547 ride-through / trip / reconnect protection (design doc §11.7) for a
+  // synchronous DER; opt-in via the dynamic-model parameters.
+  apply_ieee1547_params(profile.parameters, params.protection, params.frequency_hz);
   if (iequals(profile.model_name, "OneDOneQMachine") ||
       iequals(profile.model_name, "OneDOneQ")) {
     params.machine_model = SynchronousMachineModelKind::OneDOneQ;
@@ -1773,8 +1919,32 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
             dyn.canonical_system.ac.asymmetric_loads)) {
       continue;
     }
+    // Asynchronous motors are projected into canonical loads for the power-flow
+    // network, but their electromechanical dynamics are rebuilt from the
+    // original sys.ac.motors below. Skip the static-load stand-in here so the
+    // motor demand is not counted twice.
+    if (load.sc_source_type == "AsynchronousMotor") continue;
     const int bus_pos = network.acBusPosition(load.bus);
     if (bus_pos < 0) continue;
+    if (profile_model_is(load.dynamic_model,
+                         {"ActiveConstantPowerLoad", "ActiveCPL", "CPL"})) {
+      ActiveConstantPowerLoadParams cp;
+      cp.component_index = load.index;
+      cp.bus = load.bus;
+      cp.bus_pos = bus_pos;
+      cp.label = label_or(load.name, "ActiveCPL " + std::to_string(load.index));
+      cp.base_mva = base_mva;
+      cp.p_mw = load.p_mw * load.scaling;
+      cp.q_mvar = load.q_mvar * load.scaling;
+      const auto cpmap = merged_profile_parameters(load.dynamic_model);
+      cp.filter_r_pu = param_or(cpmap, {"filter_r_pu", "Rf", "rf"}, cp.filter_r_pu);
+      cp.filter_x_pu = param_or(cpmap, {"filter_x_pu", "Xf", "xf"}, cp.filter_x_pu);
+      cp.filter_c_s = param_or(cpmap, {"filter_c_s", "Cf", "cf", "Tc"}, cp.filter_c_s);
+      cp.v_min_pu = param_or(cpmap, {"v_min_pu", "Vmin", "vmin"}, cp.v_min_pu);
+      cp.model_profiles = to_dynamic_profiles(load.dynamic_model);
+      dyn.devices.push_back(std::make_unique<ActiveConstantPowerLoadDynamic>(cp));
+      continue;
+    }
     ACLoadDynamicParams p;
     p.component_index = load.index;
     p.bus = load.bus;
@@ -1815,13 +1985,22 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     dyn.devices.push_back(std::make_unique<ThreePhaseDynamicLoad>(p));
   }
 
-  for (const auto& motor : dyn.canonical_system.ac.motors) {
+  // Iterate the ORIGINAL motors: project_to_canonical_models() moves motors
+  // into equivalent loads and clears ac.motors, so the canonical system never
+  // carries them. The equivalent loads are skipped in the load loop above.
+  for (const auto& motor : sys.ac.motors) {
     if (using_explicit_three_phase) break;
     if (!motor.in_service) continue;
     const int bus_pos = network.acBusPosition(motor.bus);
     if (bus_pos < 0) continue;
-    dyn.devices.push_back(std::make_unique<InductionMachineDynamic>(
-        make_induction_machine_params(motor, bus_pos, base_mva)));
+    auto motor_params = make_induction_machine_params(motor, bus_pos, base_mva);
+    if (motor_params.flux_model) {
+      dyn.devices.push_back(std::make_unique<FluxInductionMachineDynamic>(
+          std::move(motor_params)));
+    } else {
+      dyn.devices.push_back(std::make_unique<InductionMachineDynamic>(
+          std::move(motor_params)));
+    }
   }
 
   for (const auto& gen : dyn.canonical_system.ac.static_generators) {
@@ -1837,6 +2016,12 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
                          {"AggregateDistributedGenerationA", "DERA", "DERA_A"})) {
       dyn.devices.push_back(std::make_unique<DERAADynamic>(
           make_deraa_params(gen, bus_pos, base_mva)));
+      continue;
+    }
+    if (profile_model_is(gen.dynamic_model,
+                         {"RenewableEnergyGeneratorA", "REGCA", "REGC_A"})) {
+      dyn.devices.push_back(std::make_unique<REGCADynamic>(
+          make_regca_params(gen, bus_pos, base_mva)));
       continue;
     }
     if (profile_model_is(gen.dynamic_model,

@@ -542,6 +542,9 @@
         <label class="sub-label sub-checkbox" title="记录动态设备输出，用于传统机组、GFL/GFM、逆变器和 DC 链轨迹">
           <input id="trRecordDeviceOutputs" type="checkbox" checked/><span>动态设备</span>
         </label>
+        <label class="sub-label sub-checkbox" title="在初始运行点做小信号（模态）分析：Schur 缩减状态雅可比的特征值、阻尼比与主导状态，绘制 s 平面">
+          <input id="trSmallSignal" type="checkbox"/><span>小信号</span>
+        </label>
         <button id="btnRunTransient" class="toolbar-btn run-btn" title="运行暂态仿真">运行暂态</button>
         <button id="btnTransientCompatibility" class="toolbar-btn" title="检查当前系统动态模型与 GridLAB-D / OpenDSS / 标准模型兼容性">模型兼容</button>
         <button id="btnExportTransient" class="toolbar-btn" title="导出暂态仿真结果 JSON">结果导出</button>

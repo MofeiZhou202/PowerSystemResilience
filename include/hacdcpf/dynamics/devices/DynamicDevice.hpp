@@ -151,6 +151,37 @@ class DynamicDevice {
     (void)y;
   }
 
+  // Device-level protection hook (IEEE 1547 ride-through, design doc §11.7).
+  // Called once per accepted step of length `dt` ending at time `t`, after the
+  // network is consistent. A device with protection evaluates its ride-through
+  // state machine on measured (filtered) terminal quantities (§7 role 4) and may
+  // change its own in-service status: a trip zeroes/freezes its states, a
+  // reconnect re-seeds them and ramps power back. Returns true when the status
+  // change requires the network matrices to be rebuilt; any trip/reconnect is
+  // appended to `events` for the results log (§17). Default: no protection.
+  virtual bool updateProtection(double t,
+                                double dt,
+                                DynamicState& x,
+                                NetworkState& y,
+                                std::vector<DynamicEvent>& events) {
+    (void)t;
+    (void)dt;
+    (void)x;
+    (void)y;
+    (void)events;
+    return false;
+  }
+
+  // Smart-inverter control hook (IEEE 1547 volt-var / frequency-watt, design doc
+  // §11.7). Called once per accepted step of length `dt` after the network is
+  // consistent, always (not gated). A device with these functions advances its
+  // filtered + slew-limited volt-var / frequency-watt references on the measured
+  // terminal, which its residual then reads. Default: no smart-inverter control.
+  virtual void updateSmartControls(double dt, const NetworkState& y) {
+    (void)dt;
+    (void)y;
+  }
+
   virtual void addJacobian(double t,
                            const DynamicState& x,
                            const NetworkState& y,

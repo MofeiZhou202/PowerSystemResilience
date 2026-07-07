@@ -454,6 +454,82 @@ double negative_sequence_braking_torque(const VoltageSourceDynamicParams& p,
   return std::max(0.0, z2.real() - p.r_pu) * std::norm(i2);
 }
 
+// Shared IEEE 1547 protection evaluation (design doc §11.7) for any AC device
+// with a terminal at `bus_pos`. Advances the ride-through state machine on the
+// measured terminal (positive-sequence magnitude + angle) and, on a status
+// change, toggles `in_service` and appends a trip/reconnect event. Device states
+// are simply frozen while out of service (computeDerivatives / stamp gate on
+// `in_service`), so no per-model state surgery is required. Returns the action.
+IEEE1547Action evaluate_der_protection(const IEEE1547Settings& settings,
+                                       IEEE1547RuntimeState& state,
+                                       const NetworkState& y,
+                                       int bus_pos,
+                                       double t,
+                                       double dt,
+                                       int component_index,
+                                       int bus,
+                                       const std::string& device_name,
+                                       const char* component_type,
+                                       DynamicEventType trip_type,
+                                       bool& in_service,
+                                       std::vector<DynamicEvent>& events) {
+  if (!settings.enabled || bus_pos < 0) return IEEE1547Action::None;
+  const Eigen::Vector3cd vabc = bus_voltage(y, bus_pos);
+  const Complex vpos = positive_sequence_voltage(vabc);
+  const IEEE1547Action action =
+      step_ieee1547(settings, state, std::abs(vpos), std::arg(vpos), dt);
+  if (action == IEEE1547Action::None) return action;
+  DynamicEvent ev;
+  ev.time_s = t;
+  ev.component_index = component_index;
+  ev.bus = bus;
+  ev.component_type = component_type;
+  ev.applied = true;
+  if (action == IEEE1547Action::Tripped) {
+    state.trip_time_s = t;
+    in_service = false;
+    ev.type = trip_type;
+    ev.label = "IEEE1547 " + state.last_reason + " trip: " + device_name;
+  } else {
+    in_service = true;
+    ev.type = DynamicEventType::Custom;
+    ev.label = "IEEE1547 reconnect: " + device_name;
+  }
+  events.push_back(ev);
+  return action;
+}
+
+// IEEE 1547 volt-var / frequency-watt smart-inverter references for a
+// grid-following DER (design doc §11.7). The volt-var reactive delta `vv_q_delta`
+// and frequency-watt active delta `fw_p_delta` (already filtered + slew-limited
+// by the smart-inverter block) supersede the simple linear droop when the curves
+// are enabled; otherwise the legacy linear droop (or the plain schedule) applies.
+void gfl_compose_refs(const GridFollowingInverterParams& p,
+                      double v_mag_pu,
+                      double freq_error_pu,
+                      double p_nom,
+                      double q_nom,
+                      double vv_q_delta,
+                      double fw_p_delta,
+                      double& p_ref,
+                      double& q_ref) {
+  if (p.volt_var.enabled) {
+    q_ref = q_nom + vv_q_delta;
+  } else if (p.volt_var_droop_pu > 0.0) {
+    q_ref = q_nom + p.volt_var_droop_pu * (p.v_ref_pu - v_mag_pu);
+  } else {
+    q_ref = q_nom;
+  }
+  if (p.freq_watt.enabled) {
+    p_ref = std::clamp(p_nom + fw_p_delta, p.freq_watt.p_min_pu,
+                       p.freq_watt.p_max_pu);
+  } else if (p.frequency_watt_droop_pu > 0.0) {
+    p_ref = p_nom - p.frequency_watt_droop_pu * freq_error_pu;
+  } else {
+    p_ref = p_nom;
+  }
+}
+
 double clamp_voltage(double v) {
   if (!std::isfinite(v)) return 1.0;
   return std::max(kMinVoltage, std::abs(v));
@@ -3046,10 +3122,12 @@ void SynchronousMachine::computeDerivatives(double,
         evaluate_sauerpai(mp, v, delta, psi_q, psi_d, eq_p, ed_p, psi_d_pp, psi_q_pp);
     const double h = std::max(0.01, params_.inertia_h);
     const double wb = kTwoPi * params_.frequency_hz;
+    const double tau_brake =
+        negative_sequence_braking_torque(params_, bus_voltage(y, params_.bus_pos));
     dxdt[state_index(range_, 0)] = params_.dynamic_angle ? wb * (omega - 1.0) : 0.0;
     if (params_.dynamic_angle) {
       const double swing_power =
-          tau_m - e.tau_e - params_.damping_d * (omega - 1.0) /
+          tau_m - e.tau_e - tau_brake - params_.damping_d * (omega - 1.0) /
                                 std::max(kMinVoltage, std::abs(omega));
       dxdt[state_index(range_, 1)] =
           (std::abs(swing_power) <= kMachinePowerBalanceTolPu &&
@@ -3101,10 +3179,12 @@ void SynchronousMachine::computeDerivatives(double,
         evaluate_marconato(mp, v, delta, psi_q, psi_d, eq_p, ed_p, eq_pp, ed_pp);
     const double h = std::max(0.01, params_.inertia_h);
     const double wb = kTwoPi * params_.frequency_hz;
+    const double tau_brake =
+        negative_sequence_braking_torque(params_, bus_voltage(y, params_.bus_pos));
     dxdt[state_index(range_, 0)] = params_.dynamic_angle ? wb * (omega - 1.0) : 0.0;
     if (params_.dynamic_angle) {
       const double swing_power =
-          tau_m - e.tau_e - params_.damping_d * (omega - 1.0) /
+          tau_m - e.tau_e - tau_brake - params_.damping_d * (omega - 1.0) /
                                 std::max(kMinVoltage, std::abs(omega));
       dxdt[state_index(range_, 1)] =
           (std::abs(swing_power) <= kMachinePowerBalanceTolPu &&
@@ -3147,10 +3227,12 @@ void SynchronousMachine::computeDerivatives(double,
         evaluate_simple_marconato(mp, v, delta, eq_p, ed_p, eq_pp, ed_pp);
     const double h = std::max(0.01, params_.inertia_h);
     const double wb = kTwoPi * params_.frequency_hz;
+    const double tau_brake =
+        negative_sequence_braking_torque(params_, bus_voltage(y, params_.bus_pos));
     dxdt[state_index(range_, 0)] = params_.dynamic_angle ? wb * (omega - 1.0) : 0.0;
     if (params_.dynamic_angle) {
       const double swing_power =
-          tau_m - e.tau_e - params_.damping_d * (omega - 1.0) /
+          tau_m - e.tau_e - tau_brake - params_.damping_d * (omega - 1.0) /
                                 std::max(kMinVoltage, std::abs(omega));
       dxdt[state_index(range_, 1)] =
           (std::abs(swing_power) <= kMachinePowerBalanceTolPu &&
@@ -3188,10 +3270,12 @@ void SynchronousMachine::computeDerivatives(double,
     const GenrouEval e = evaluate_genrou(gp, v, delta, eq_p, ed_p, psi_kd, psi_kq, vf);
     const double h = std::max(0.01, params_.inertia_h);
     const double wb = kTwoPi * params_.frequency_hz;
+    const double tau_brake =
+        negative_sequence_braking_torque(params_, bus_voltage(y, params_.bus_pos));
     dxdt[state_index(range_, 0)] = params_.dynamic_angle ? wb * (omega - 1.0) : 0.0;
     if (params_.dynamic_angle) {
       const double swing_power =
-          tau_m - e.tau_e - params_.damping_d * (omega - 1.0) /
+          tau_m - e.tau_e - tau_brake - params_.damping_d * (omega - 1.0) /
                                 std::max(kMinVoltage, std::abs(omega));
       dxdt[state_index(range_, 1)] =
           (std::abs(swing_power) <= kMachinePowerBalanceTolPu &&
@@ -3226,10 +3310,12 @@ void SynchronousMachine::computeDerivatives(double,
     const SalientEval e = evaluate_salient(sp, v, delta, eq_p, psi_kd, psiq_pp);
     const double h = std::max(0.01, params_.inertia_h);
     const double wb = kTwoPi * params_.frequency_hz;
+    const double tau_brake =
+        negative_sequence_braking_torque(params_, bus_voltage(y, params_.bus_pos));
     dxdt[state_index(range_, 0)] = params_.dynamic_angle ? wb * (omega - 1.0) : 0.0;
     if (params_.dynamic_angle) {
       const double swing_power =
-          tau_m - e.tau_e - params_.damping_d * (omega - 1.0) /
+          tau_m - e.tau_e - tau_brake - params_.damping_d * (omega - 1.0) /
                                 std::max(kMinVoltage, std::abs(omega));
       dxdt[state_index(range_, 1)] =
           (std::abs(swing_power) <= kMachinePowerBalanceTolPu &&
@@ -3265,10 +3351,11 @@ void SynchronousMachine::computeDerivatives(double,
                     phase_sum_to_total_power_scale(params_.phase_power_scale);
   const double h = std::max(0.01, params_.inertia_h);
   const double wb = kTwoPi * params_.frequency_hz;
+  const double tau_brake = negative_sequence_braking_torque(params_, v);
 
   dxdt[range_.offset + 0] = params_.dynamic_angle ? wb * (omega - 1.0) : 0.0;
   if (params_.dynamic_angle) {
-    const double swing_power = pm - pe - params_.damping_d * (omega - 1.0);
+    const double swing_power = pm - pe - tau_brake - params_.damping_d * (omega - 1.0);
     dxdt[range_.offset + 1] =
         (std::abs(swing_power) <= kMachinePowerBalanceTolPu &&
          std::abs(omega - 1.0) <= kMachinePowerBalanceTolPu)
@@ -3354,7 +3441,7 @@ void SynchronousMachine::stamp(double,
     const Complex yv = Complex(1.0, 0.0) / z;
     const Complex e_ri = v + z * eval.current;
     const Eigen::Vector3cd e_src = balanced_phasors(std::abs(e_ri), std::arg(e_ri));
-    add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(yv));
+    add_balanced_admittance(stamp, params_.bus_pos, machine_sequence_norton(params_, yv));
     add_balanced_current(stamp, params_.bus_pos, yv * e_src);
     return;
   }
@@ -3374,7 +3461,7 @@ void SynchronousMachine::stamp(double,
     const Complex z(gp.r, gp.xdpp);
     const Complex yv = Complex(1.0, 0.0) / z;
     const Eigen::Vector3cd e = balanced_phasors(std::abs(e_ri), std::arg(e_ri));
-    add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(yv));
+    add_balanced_admittance(stamp, params_.bus_pos, machine_sequence_norton(params_, yv));
     add_balanced_current(stamp, params_.bus_pos, yv * e);
     return;
   }
@@ -3392,7 +3479,7 @@ void SynchronousMachine::stamp(double,
     const Complex z(sp.r, sp.xdpp);
     const Complex yv = Complex(1.0, 0.0) / z;
     const Eigen::Vector3cd e = balanced_phasors(std::abs(e_ri), std::arg(e_ri));
-    add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(yv));
+    add_balanced_admittance(stamp, params_.bus_pos, machine_sequence_norton(params_, yv));
     add_balanced_current(stamp, params_.bus_pos, yv * e);
     return;
   }
@@ -3401,7 +3488,7 @@ void SynchronousMachine::stamp(double,
   const Complex z(params_.r_pu, source_series_reactance_pu(params_.x_pu));
   const Complex yv = Complex(1.0, 0.0) / z;
   const Eigen::Vector3cd e = balanced_phasors(e_mag, theta);
-  add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(yv));
+  add_balanced_admittance(stamp, params_.bus_pos, machine_sequence_norton(params_, yv));
   add_balanced_current(stamp, params_.bus_pos, yv * e);
 }
 
@@ -3441,6 +3528,20 @@ void SynchronousMachine::handleEvent(const DynamicEvent& event, DynamicState& x,
       x.x[pm_idx] = p_mw / safe_base(params_.base_mva);
     }
   }
+}
+
+bool SynchronousMachine::updateProtection(double t,
+                                          double dt,
+                                          DynamicState& x,
+                                          NetworkState& y,
+                                          std::vector<DynamicEvent>& events) {
+  (void)x;  // machine states freeze while out of service (stamp gates on in_service)
+  if (range_.empty()) return false;
+  const IEEE1547Action action = evaluate_der_protection(
+      params_.protection, protection_state_, y, params_.bus_pos, t, dt,
+      params_.component_index, params_.bus, name(), "Generator",
+      DynamicEventType::GeneratorTrip, params_.in_service, events);
+  return action != IEEE1547Action::None;
 }
 
 std::string SynchronousMachine::name() const {
@@ -5524,8 +5625,14 @@ void GridFormingInverter::computeDerivatives(double,
                params_.reactive_power_filter_t_s > 0.0 ? params_.reactive_power_filter_t_s
                                                         : params_.power_filter_t_s);
   const double t_voltage = std::max(kMinTimeConstant, params_.voltage_control_t_s);
-  const double p_ref = params_.p_ref_mw / safe_base(params_.base_mva);
-  const double q_ref = params_.q_ref_mvar / safe_base(params_.base_mva);
+  // IEEE 1547 smart-inverter functions (design doc §11.7): the filtered +
+  // slew-limited volt-var / frequency-watt references (updated by
+  // updateSmartControls) adjust the reactive / active setpoints. Zero when the
+  // functions are disabled, preserving the base grid-forming behavior.
+  const double p_ref = params_.p_ref_mw / safe_base(params_.base_mva) +
+                       (params_.freq_watt.enabled ? smart_state_.p_delta_pu : 0.0);
+  const double q_ref = params_.q_ref_mvar / safe_base(params_.base_mva) +
+                       (params_.volt_var.enabled ? smart_state_.q_pu : 0.0);
   const double pmax = params_.pmax_mw > 0.0
                           ? params_.pmax_mw / safe_base(params_.base_mva)
                           : std::numeric_limits<double>::infinity();
@@ -5720,6 +5827,31 @@ void GridFormingInverter::handleEvent(const DynamicEvent& event, DynamicState&, 
     const auto v_it = event.params.find("v_ref_pu");
     if (v_it != event.params.end()) params_.v_ref_pu = v_it->second;
   }
+}
+
+bool GridFormingInverter::updateProtection(double t,
+                                           double dt,
+                                           DynamicState& x,
+                                           NetworkState& y,
+                                           std::vector<DynamicEvent>& events) {
+  (void)x;  // grid-forming states freeze while out of service (stamp gates on in_service)
+  if (range_.empty()) return false;
+  const IEEE1547Action action = evaluate_der_protection(
+      params_.protection, protection_state_, y, params_.bus_pos, t, dt,
+      params_.component_index, params_.bus, name(), "VSC",
+      DynamicEventType::VSCTrip, params_.in_service, events);
+  return action != IEEE1547Action::None;
+}
+
+void GridFormingInverter::updateSmartControls(double dt, const NetworkState& y) {
+  if ((!params_.volt_var.enabled && !params_.freq_watt.enabled) ||
+      params_.bus_pos < 0 || range_.empty()) {
+    return;
+  }
+  const Eigen::Vector3cd vabc = bus_voltage(y, params_.bus_pos);
+  const Complex vpos = positive_sequence_voltage(vabc);
+  step_smart_inverter(params_.volt_var, params_.freq_watt, smart_state_,
+                      std::abs(vpos), std::arg(vpos), dt);
 }
 
 std::string GridFormingInverter::name() const {
@@ -5982,14 +6114,17 @@ bool GridFollowingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkSta
                             ? -params_.pll_kp * vq / params_.pll_ki
                             : 0.0;
   const double freq_error_pu = params_.pll_kp * vq + params_.pll_ki * xi_pll;
-  double p_ref = params_.p_ref_mw / safe_base(params_.base_mva);
-  double q_ref = params_.q_ref_mvar / safe_base(params_.base_mva);
-  if (params_.frequency_watt_droop_pu > 0.0) {
-    p_ref -= params_.frequency_watt_droop_pu * freq_error_pu;
-  }
-  if (params_.volt_var_droop_pu > 0.0) {
-    q_ref += params_.volt_var_droop_pu * (params_.v_ref_pu - std::abs(vpos));
-  }
+  const double p_nom_trim = params_.p_ref_mw / safe_base(params_.base_mva);
+  const double q_nom_trim = params_.q_ref_mvar / safe_base(params_.base_mva);
+  const double v_mag_trim = std::abs(vpos);
+  double p_ref = p_nom_trim;
+  double q_ref = q_nom_trim;
+  // Equilibrium uses the steady-state (unfiltered) curve values.
+  gfl_compose_refs(params_, v_mag_trim, freq_error_pu, p_nom_trim, q_nom_trim,
+                   volt_var_q_pu(params_.volt_var, v_mag_trim),
+                   freq_watt_delta_pu(params_.freq_watt,
+                                      params_.f_ref_hz * (1.0 + freq_error_pu)),
+                   p_ref, q_ref);
   const double denom = std::max(vd * vd + vq * vq,
                                 params_.v_min_current_pu * params_.v_min_current_pu);
   const double id_ref = (vd * p_ref + vq * q_ref) / denom;
@@ -6067,12 +6202,19 @@ void GridFollowingInverter::computeDerivatives(double,
           : params_.pll_kp * vq + params_.pll_ki * xi_pll;
   double p_ref = p_nom;
   double q_ref = q_nom;
-  if (params_.frequency_watt_droop_pu > 0.0) {
-    p_ref -= params_.frequency_watt_droop_pu * freq_error_pu;
-  }
-  if (params_.volt_var_droop_pu > 0.0) {
-    q_ref += params_.volt_var_droop_pu * (params_.v_ref_pu - std::abs(vpos));
-  }
+  const double v_mag = std::abs(vpos);
+  const double f_meas_hz = params_.f_ref_hz * (1.0 + freq_error_pu);
+  // Use the filtered + slew-limited smart-inverter references (updated each step
+  // by updateSmartControls); before the first update fall back to the raw curve
+  // so the initial equilibrium is preserved.
+  const double vv_q_delta = smart_state_.initialized
+                                ? smart_state_.q_pu
+                                : volt_var_q_pu(params_.volt_var, v_mag);
+  const double fw_p_delta = smart_state_.initialized
+                                ? smart_state_.p_delta_pu
+                                : freq_watt_delta_pu(params_.freq_watt, f_meas_hz);
+  gfl_compose_refs(params_, v_mag, freq_error_pu, p_nom, q_nom, vv_q_delta,
+                   fw_p_delta, p_ref, q_ref);
   const double denom = std::max(vd * vd + vq * vq,
                                 params_.v_min_current_pu * params_.v_min_current_pu);
   const double id_ref = (vd * p_ref + vq * q_ref) / denom;
@@ -6140,6 +6282,12 @@ void GridFollowingInverter::stamp(double,
   const double theta = x.x[state_index(range_, 0)];
   const double id = x.x[state_index(range_, 2)];
   const double iq = x.x[state_index(range_, 3)];
+  // IEEE 1547 soft-start ramp (design doc §11.7): after a protective trip and
+  // reconnect the injected current is ramped from zero back to full over the
+  // configured restore time. Unity (no scaling) when protection is disabled or
+  // no reconnect is in progress.
+  const double der_scale =
+      params_.protection.enabled ? protection_state_.restore_scale : 1.0;
   if (gfl_uses_lcl_filter(params_)) {
     const Complex vf = gfl_filter_voltage(params_,
                                           x,
@@ -6147,9 +6295,11 @@ void GridFollowingInverter::stamp(double,
                                           positive_sequence_voltage(bus_voltage(y, params_.bus_pos)));
     const Complex y_grid = gfl_lcl_grid_admittance(params_);
     add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(y_grid));
-    add_balanced_current(stamp, params_.bus_pos, y_grid * balanced_current_from_positive_sequence(vf));
+    add_balanced_current(
+        stamp, params_.bus_pos,
+        der_scale * (y_grid * balanced_current_from_positive_sequence(vf)));
   } else {
-    Eigen::Vector3cd current = balanced_current_from_dq(id, iq, theta);
+    Eigen::Vector3cd current = der_scale * balanced_current_from_dq(id, iq, theta);
     add_balanced_current(stamp, params_.bus_pos, current);
   }
   if (params_.stabilizing_admittance_pu > 0.0) {
@@ -6276,6 +6426,33 @@ void GridFollowingInverter::handleEvent(const DynamicEvent& event,
   }
 }
 
+bool GridFollowingInverter::updateProtection(double t,
+                                             double dt,
+                                             DynamicState& x,
+                                             NetworkState& y,
+                                             std::vector<DynamicEvent>& events) {
+  (void)x;  // states are frozen while out of service; no re-seeding needed
+  if (range_.empty()) return false;
+  const IEEE1547Action action = evaluate_der_protection(
+      params_.protection, protection_state_, y, params_.bus_pos, t, dt,
+      params_.component_index, params_.bus, name(), "VSC",
+      DynamicEventType::VSCTrip, params_.in_service, events);
+  // On reconnect the soft-start ramp in stamp() (restore_scale) eases the
+  // injected current back to full over the configured window.
+  return action != IEEE1547Action::None;
+}
+
+void GridFollowingInverter::updateSmartControls(double dt, const NetworkState& y) {
+  if ((!params_.volt_var.enabled && !params_.freq_watt.enabled) ||
+      params_.bus_pos < 0 || range_.empty()) {
+    return;
+  }
+  const Eigen::Vector3cd vabc = bus_voltage(y, params_.bus_pos);
+  const Complex vpos = positive_sequence_voltage(vabc);
+  step_smart_inverter(params_.volt_var, params_.freq_watt, smart_state_,
+                      std::abs(vpos), std::arg(vpos), dt);
+}
+
 std::string GridFollowingInverter::name() const {
   return params_.label.empty() ? params_.device_type + " " + std::to_string(params_.component_index)
                                : params_.label;
@@ -6307,6 +6484,11 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
                                              params_.source_type);
   out.values["control_mode"] = 0.0;
   out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  out.values["protection_enabled"] = params_.protection.enabled ? 1.0 : 0.0;
+  out.values["protection_tripped"] = protection_state_.tripped ? 1.0 : 0.0;
+  out.values["protection_v_meas_pu"] = protection_state_.v_meas_pu;
+  out.values["protection_f_meas_hz"] = protection_state_.f_meas_hz;
+  out.values["protection_restore_scale"] = protection_state_.restore_scale;
   InverterInnerVariableSnapshot inner;
   if (!range_.empty() && state_index(range_, 5) < x.x.size()) {
     const double theta = x.x[state_index(range_, 0)];
@@ -6352,6 +6534,18 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
     out.values["iq_pu"] = iq;
     out.values["i_mag_pu"] = std::hypot(id, iq);
     out.values["i_ref_mag_pu"] = i_ref_mag;
+    out.values["volt_var_enabled"] = params_.volt_var.enabled ? 1.0 : 0.0;
+    out.values["freq_watt_enabled"] = params_.freq_watt.enabled ? 1.0 : 0.0;
+    if (params_.volt_var.enabled) {
+      out.values["volt_var_q_pu"] =
+          volt_var_q_pu(params_.volt_var, std::abs(vpos));
+    }
+    if (params_.freq_watt.enabled) {
+      out.values["freq_watt_delta_pu"] = freq_watt_delta_pu(
+          params_.freq_watt, params_.f_ref_hz * (1.0 + freq_error_pu));
+    }
+    out.values["smart_var_q_pu"] = smart_state_.q_pu;
+    out.values["smart_watt_delta_pu"] = smart_state_.p_delta_pu;
     out.values["current_limit_active"] =
         (params_.current_limit_pu > 0.0 && i_ref_mag > params_.current_limit_pu) ? 1.0 : 0.0;
     out.values["current_limiter_model"] =
@@ -6483,6 +6677,9 @@ GridFormingInverterParams make_gfm_params(const VSCConverterDynamicParams& param
   gfm.reference_frame_locked = params.reference_frame_locked;
   gfm.dc_link_mode = params.dc_link_mode;
   gfm.in_service = params.in_service;
+  gfm.protection = params.protection;
+  gfm.volt_var = params.volt_var;
+  gfm.freq_watt = params.freq_watt;
   return gfm;
 }
 
@@ -6562,6 +6759,25 @@ void VSCConverterDynamic::handleEvent(const DynamicEvent& event,
     gfm_.handleEvent(event, x, y);
   } else {
     gfl_.handleEvent(event, x, y);
+  }
+}
+
+bool VSCConverterDynamic::updateProtection(double t,
+                                           double dt,
+                                           DynamicState& x,
+                                           NetworkState& y,
+                                           std::vector<DynamicEvent>& events) {
+  // Delegates to the active sub-inverter; its protection settings are propagated
+  // from this converter's params at construction (design doc §11.7).
+  return params_.grid_forming ? gfm_.updateProtection(t, dt, x, y, events)
+                              : gfl_.updateProtection(t, dt, x, y, events);
+}
+
+void VSCConverterDynamic::updateSmartControls(double dt, const NetworkState& y) {
+  if (params_.grid_forming) {
+    gfm_.updateSmartControls(dt, y);
+  } else {
+    gfl_.updateSmartControls(dt, y);
   }
 }
 
@@ -7115,6 +7331,281 @@ DynamicDeviceOutput DERAADynamic::output(const DynamicState& x,
   return out;
 }
 
+REGCADynamic::REGCADynamic(REGCADynamicParams params) : params_(std::move(params)) {}
+
+void REGCADynamic::assignStateIndices(int& offset) {
+  int n = 3;  // Ip, Iq, Vflt
+  if (params_.reec.enabled) n = 4;  // + Pord
+  if (params_.reec.enabled && params_.repc.enabled) n = 5;  // + Qpi
+  range_ = {offset, n};
+  offset += range_.size;
+}
+
+void REGCADynamic::initializeFromPowerFlow(const PowerFlowResult&,
+                                           DynamicState& x,
+                                           NetworkState& y) {
+  if (range_.empty()) return;
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const double vm = std::max(kMinVoltage, std::abs(v));
+  const double p = params_.p_ref_mw / std::max(1e-9, params_.model_base_mva);
+  const double q = params_.q_ref_mvar / std::max(1e-9, params_.model_base_mva);
+  x.x[state_index(range_, 0)] = p / vm;  // Ip
+  x.x[state_index(range_, 1)] = q / vm;  // Iq
+  x.x[state_index(range_, 2)] = vm;      // Vflt
+  if (params_.reec.enabled) {
+    x.x[state_index(range_, 3)] = p;     // Pord (active-power order)
+  }
+  if (params_.reec.enabled && params_.repc.enabled) {
+    x.x[state_index(range_, 4)] = q;     // Qpi (plant reactive PI holds schedule)
+  }
+}
+
+void REGCADynamic::computeDerivatives(double,
+                                      const DynamicState& x,
+                                      const NetworkState& y,
+                                      Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (!params_.in_service || range_.empty()) return;
+  const double vm = std::max(
+      kMinVoltage,
+      std::abs(positive_sequence_voltage(bus_voltage(y, params_.bus_pos))));
+  const double ip = x.x[state_index(range_, 0)];
+  const double iq = x.x[state_index(range_, 1)];
+  const double vflt = x.x[state_index(range_, 2)];
+  dxdt[state_index(range_, 2)] =
+      (vm - vflt) / std::max(kMinTimeConstant, params_.t_fltr_s);
+  const double vctl = std::max(kMinVoltage, vflt);
+  const double p_ref = params_.p_ref_mw / std::max(1e-9, params_.model_base_mva);
+  const double q_ref = params_.q_ref_mvar / std::max(1e-9, params_.model_base_mva);
+  double ip_cmd;
+  double iq_cmd;
+  if (params_.reec.enabled) {
+    // REEC_A electrical control (design doc §11.6).
+    const REECASettings& r = params_.reec;
+    const double pord = x.x[state_index(range_, 3)];
+    // Active-power order: ramp-rate-limited lag toward the P schedule, adjusted
+    // by the REPC_A plant frequency droop when that axis is enabled.
+    double p_target = p_ref;
+    if (params_.repc.enabled && params_.repc.freq_control) {
+      const REPCASettings& pc = params_.repc;
+      const double fn = pc.f_nominal_hz > 0.0 ? pc.f_nominal_hz : 60.0;
+      const double f_meas = freq_state_.initialized ? freq_state_.f_meas_hz : fn;
+      const double ferr = dera_deadband(f_meas - fn, -pc.f_dbd_hz, pc.f_dbd_hz);
+      const double pfd = -(ferr / fn) / std::max(1e-3, pc.f_droop);  // over-f curtails
+      p_target = std::clamp(p_ref + pfd, pc.p_min_pu, pc.p_max_pu);
+    }
+    double dpord = (p_target - pord) / std::max(kMinTimeConstant, r.tpord_s);
+    dpord = std::clamp(dpord, -r.p_rate_pu_per_s, r.p_rate_pu_per_s);
+    dxdt[state_index(range_, 3)] = dpord;
+    ip_cmd = std::clamp(pord / vctl, r.ip_min, r.ip_max);
+    // Reactive command: Q-V droop with a deadband (fast dynamic voltage support
+    // during faults) added to the reactive-power schedule (or the REPC_A plant
+    // reactive command when the plant controller is enabled).
+    const double vref = r.vref0_pu > 0.0 ? r.vref0_pu : params_.v_ref_pu;
+    const double iqv =
+        std::clamp(r.kqv * dera_deadband(vref - vflt, r.dbd1, r.dbd2), r.iql1,
+                   r.iqh1);
+    double q_command = q_ref;
+    if (params_.repc.enabled) {
+      // REPC_A plant controller: deadband PI on the (filtered) terminal voltage
+      // produces the plant reactive command Qext feeding the REEC_A reference.
+      const REPCASettings& pc = params_.repc;
+      const double qpi = x.x[state_index(range_, 4)];
+      const double vset = pc.vref_pu > 0.0 ? pc.vref_pu : params_.v_ref_pu;
+      const double verr = dera_deadband(vset - vflt, pc.dbd1, pc.dbd2);
+      const double qext = std::clamp(pc.kp * verr + qpi, pc.q_min, pc.q_max);
+      const bool sat_hi = qext >= pc.q_max && verr > 0.0;
+      const bool sat_lo = qext <= pc.q_min && verr < 0.0;
+      dxdt[state_index(range_, 4)] = (sat_hi || sat_lo) ? 0.0 : pc.ki * verr;
+      q_command = qext;
+    }
+    iq_cmd = std::clamp(iqv + q_command / vctl, r.iq_min, r.iq_max);
+  } else {
+    ip_cmd = p_ref / vctl;
+    iq_cmd = q_ref / vctl;
+  }
+  // LVACM: linearly ramp the active-current command down as the terminal
+  // voltage sags (fault current management on the real terminal voltage).
+  const double lvacm = std::clamp(
+      (vm - params_.v_lvacm0_pu) /
+          std::max(1e-6, params_.v_lvacm1_pu - params_.v_lvacm0_pu),
+      0.0, 1.0);
+  ip_cmd *= lvacm;
+  // HVRCM: absorb reactive current above the high-voltage threshold.
+  if (vm > params_.v_hvrcm_pu) {
+    iq_cmd -= params_.k_hvrcm * (vm - params_.v_hvrcm_pu);
+  }
+  const CurrentLimiterKind limiter = params_.reactive_priority
+                                         ? CurrentLimiterKind::ReactivePriority
+                                         : CurrentLimiterKind::Magnitude;
+  const auto [ip_lim, iq_lim] =
+      limited_current(ip_cmd, iq_cmd, params_.i_max_pu, limiter);
+  dxdt[state_index(range_, 0)] =
+      (ip_lim - ip) / std::max(kMinTimeConstant, params_.t_g_s);
+  dxdt[state_index(range_, 1)] =
+      (iq_lim - iq) / std::max(kMinTimeConstant, params_.t_g_s);
+}
+
+std::pair<double, double> REGCADynamic::currentDq(const DynamicState& x) const {
+  if (range_.empty()) return {0.0, 0.0};
+  const double ratio = params_.model_base_mva / safe_base(params_.base_mva);
+  return {x.x[state_index(range_, 0)] * ratio,
+          x.x[state_index(range_, 1)] * ratio};
+}
+
+void REGCADynamic::updateSmartControls(double dt, const NetworkState& y) {
+  // Measured plant frequency from the terminal voltage-angle derivative (§7
+  // role 4), for the REPC_A active-power / frequency droop. Only tracked when
+  // that control axis is active.
+  if (!(params_.reec.enabled && params_.repc.enabled &&
+        params_.repc.freq_control) ||
+      params_.bus_pos < 0 || range_.empty()) {
+    return;
+  }
+  constexpr double kPiLocal = 3.14159265358979323846;
+  const double angle =
+      std::arg(positive_sequence_voltage(bus_voltage(y, params_.bus_pos)));
+  const double fn =
+      params_.repc.f_nominal_hz > 0.0 ? params_.repc.f_nominal_hz : 60.0;
+  double f_inst = fn;
+  if (freq_state_.have_prev_angle && dt > 0.0) {
+    double dtheta = angle - freq_state_.prev_angle_rad;
+    while (dtheta > kPiLocal) dtheta -= 2.0 * kPiLocal;
+    while (dtheta <= -kPiLocal) dtheta += 2.0 * kPiLocal;
+    f_inst = fn + (dtheta / dt) / (2.0 * kPiLocal);
+  }
+  freq_state_.prev_angle_rad = angle;
+  freq_state_.have_prev_angle = true;
+  if (!freq_state_.initialized) {
+    freq_state_.f_meas_hz = fn;
+    freq_state_.initialized = true;
+  } else if (dt > 0.0) {
+    const double af = std::clamp(dt / 0.05, 0.0, 1.0);  // 50 ms measurement filter
+    freq_state_.f_meas_hz += af * (f_inst - freq_state_.f_meas_hz);
+  }
+}
+
+void REGCADynamic::stamp(double,
+                         const DynamicState& x,
+                         const NetworkState& y,
+                         DynamicStamp& stamp) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const double theta = std::arg(v);
+  const auto [ip, iq] = currentDq(x);
+  add_balanced_current(stamp, params_.bus_pos,
+                       balanced_current_from_dq(ip, -iq, theta));
+}
+
+void REGCADynamic::addJacobian(double t,
+                               const DynamicState& x,
+                               const NetworkState& y,
+                               const DynamicJacobianContext& context,
+                               std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const double theta = std::arg(v);
+  const double ratio = params_.model_base_mva / safe_base(params_.base_mva);
+  const int ip_col = state_index(range_, 0);
+  const int iq_col = state_index(range_, 1);
+  if (context.validStateIndex(ip_col)) {
+    add_balanced_current_derivative(context, params_.bus_pos, ip_col,
+                                    balanced_current_from_dq(ratio, 0.0, theta),
+                                    triplets);
+  }
+  if (context.validStateIndex(iq_col)) {
+    add_balanced_current_derivative(context, params_.bus_pos, iq_col,
+                                    balanced_current_from_dq(0.0, -ratio, theta),
+                                    triplets);
+  }
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  append_ac_bus_voltage_columns(context, params_.bus_pos, columns);
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns,
+                                               triplets);
+}
+
+std::string REGCADynamic::name() const {
+  return params_.label.empty()
+             ? "REGC_A " + std::to_string(params_.component_index)
+             : params_.label;
+}
+
+std::vector<DynamicModelProfile> REGCADynamic::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
+}
+
+FrequencyParticipation REGCADynamic::frequencyParticipation(
+    const DynamicState& x, const NetworkState& y) const {
+  (void)x;
+  (void)y;
+  FrequencyParticipation fp;
+  if (!params_.in_service) return fp;
+  fp.is_source = true;  // grid-following renewable: follows, cannot anchor
+  fp.ac_bus_pos = params_.bus_pos;
+  fp.base_mva = safe_base(params_.base_mva);
+  return fp;
+}
+
+DynamicDeviceOutput REGCADynamic::output(const DynamicState& x,
+                                         const NetworkState& y) const {
+  DynamicDeviceOutput out = make_output_base(*this,
+                                             params_.bus,
+                                             params_.canvas_type,
+                                             params_.component_domain,
+                                             params_.source_type);
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const double vm = std::abs(v);
+  const double theta = std::arg(v);
+  const auto [ip, iq] = currentDq(x);
+  const Complex i = phasor_from_dq(ip, -iq, theta);
+  const Complex s = v * std::conj(i);
+  const double lvacm = std::clamp(
+      (vm - params_.v_lvacm0_pu) /
+          std::max(1e-6, params_.v_lvacm1_pu - params_.v_lvacm0_pu),
+      0.0, 1.0);
+  out.values["Ip"] = range_.empty() ? 0.0 : x.x[state_index(range_, 0)];
+  out.values["Iq"] = range_.empty() ? 0.0 : x.x[state_index(range_, 1)];
+  out.values["Vflt"] = range_.empty() ? 0.0 : x.x[state_index(range_, 2)];
+  out.values["lvacm_gain"] = lvacm;
+  out.values["hvrcm_active"] = vm > params_.v_hvrcm_pu ? 1.0 : 0.0;
+  out.values["i_mag_pu"] = std::hypot(ip, iq);
+  out.values["p_mw"] = s.real() * safe_base(params_.base_mva);
+  out.values["q_mvar"] = s.imag() * safe_base(params_.base_mva);
+  out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  out.values["reec_enabled"] = params_.reec.enabled ? 1.0 : 0.0;
+  if (params_.reec.enabled && !range_.empty()) {
+    const double vflt = x.x[state_index(range_, 2)];
+    const double vref =
+        params_.reec.vref0_pu > 0.0 ? params_.reec.vref0_pu : params_.v_ref_pu;
+    out.values["Pord"] = x.x[state_index(range_, 3)];
+    out.values["Iqinj"] = std::clamp(
+        params_.reec.kqv * dera_deadband(vref - vflt, params_.reec.dbd1,
+                                         params_.reec.dbd2),
+        params_.reec.iql1, params_.reec.iqh1);
+  }
+  out.values["repc_enabled"] =
+      (params_.reec.enabled && params_.repc.enabled) ? 1.0 : 0.0;
+  if (params_.reec.enabled && params_.repc.enabled && !range_.empty()) {
+    const double vflt = x.x[state_index(range_, 2)];
+    const double qpi = x.x[state_index(range_, 4)];
+    const double vset =
+        params_.repc.vref_pu > 0.0 ? params_.repc.vref_pu : params_.v_ref_pu;
+    const double verr =
+        dera_deadband(vset - vflt, params_.repc.dbd1, params_.repc.dbd2);
+    out.values["Qext"] = std::clamp(params_.repc.kp * verr + qpi,
+                                    params_.repc.q_min, params_.repc.q_max);
+    if (params_.repc.freq_control) {
+      const double fn = params_.repc.f_nominal_hz > 0.0
+                            ? params_.repc.f_nominal_hz
+                            : 60.0;
+      out.values["f_meas_hz"] =
+          freq_state_.initialized ? freq_state_.f_meas_hz : fn;
+    }
+  }
+  add_voltage_metrics(out, y, params_.bus_pos, -1);
+  return out;
+}
+
 InductionMachineDynamic::InductionMachineDynamic(InductionMachineDynamicParams params)
     : params_(std::move(params)) {}
 
@@ -7308,6 +7799,366 @@ DynamicDeviceOutput InductionMachineDynamic::output(const DynamicState& x,
       out.values["psi_qs_pu"] = x.x[state_index(range_, 4)];
     }
   }
+  add_voltage_metrics(out, y, params_.bus_pos, -1);
+  return out;
+}
+
+ActiveConstantPowerLoadDynamic::ActiveConstantPowerLoadDynamic(
+    ActiveConstantPowerLoadParams params)
+    : params_(std::move(params)) {}
+
+void ActiveConstantPowerLoadDynamic::assignStateIndices(int& offset) {
+  range_ = {offset, 2};  // filter-capacitor voltage (real, imag)
+  offset += range_.size;
+}
+
+std::complex<double> ActiveConstantPowerLoadDynamic::loadCurrent(
+    const std::complex<double>& vc) const {
+  const Complex s(params_.p_mw / safe_base(params_.base_mva),
+                  params_.q_mvar / safe_base(params_.base_mva));
+  const double vmag = std::abs(vc);
+  // Floor the voltage used for the power division so the stage rolls off to
+  // constant current below v_min (bounds the negative-resistance runaway).
+  const Complex vdiv =
+      vmag >= params_.v_min_pu
+          ? vc
+          : (vmag > kMinVoltage ? vc * (params_.v_min_pu / vmag)
+                                : Complex(params_.v_min_pu, 0.0));
+  return std::conj(s / vdiv);
+}
+
+void ActiveConstantPowerLoadDynamic::initializeFromPowerFlow(const PowerFlowResult&,
+                                                             DynamicState& x,
+                                                             NetworkState& y) {
+  if (range_.empty()) return;
+  const Complex vgrid = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const Complex vg =
+      std::abs(vgrid) > kMinVoltage ? vgrid : Complex(kMinVoltage, 0.0);
+  const Complex zf(params_.filter_r_pu, std::max(1e-5, params_.filter_x_pu));
+  Complex vc = vg;
+  for (int it = 0; it < 8; ++it) vc = vg - zf * loadCurrent(vc);
+  x.x[state_index(range_, 0)] = vc.real();
+  x.x[state_index(range_, 1)] = vc.imag();
+}
+
+bool ActiveConstantPowerLoadDynamic::trimToNetworkEquilibrium(DynamicState& x,
+                                                              NetworkState& y) {
+  if (!params_.in_service || range_.empty()) return false;
+  const Complex vgrid = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const Complex zf(params_.filter_r_pu, std::max(1e-5, params_.filter_x_pu));
+  Complex vc(x.x[state_index(range_, 0)], x.x[state_index(range_, 1)]);
+  for (int it = 0; it < 8; ++it) vc = vgrid - zf * loadCurrent(vc);
+  bool changed = false;
+  changed = set_if_changed(x.x, state_index(range_, 0), vc.real()) || changed;
+  changed = set_if_changed(x.x, state_index(range_, 1), vc.imag()) || changed;
+  return changed;
+}
+
+void ActiveConstantPowerLoadDynamic::computeDerivatives(
+    double, const DynamicState& x, const NetworkState& y,
+    Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (!params_.in_service || range_.empty()) return;
+  const Complex vgrid = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const Complex vc(x.x[state_index(range_, 0)], x.x[state_index(range_, 1)]);
+  const Complex zf(params_.filter_r_pu, std::max(1e-5, params_.filter_x_pu));
+  const Complex yf = Complex(1.0, 0.0) / zf;
+  const Complex i_l = (vgrid - vc) * yf;   // current from the grid into the cap
+  const Complex i_load = loadCurrent(vc);  // constant-power draw (neg. resistance)
+  const double c = std::max(kMinTimeConstant, params_.filter_c_s);
+  const Complex dvc = (i_l - i_load) / c;
+  dxdt[state_index(range_, 0)] = dvc.real();
+  dxdt[state_index(range_, 1)] = dvc.imag();
+}
+
+void ActiveConstantPowerLoadDynamic::stamp(double,
+                                           const DynamicState& x,
+                                           const NetworkState& y,
+                                           DynamicStamp& stamp) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  const Complex vc(x.x[state_index(range_, 0)], x.x[state_index(range_, 1)]);
+  const Complex zf(params_.filter_r_pu, std::max(1e-5, params_.filter_x_pu));
+  const Complex yf = Complex(1.0, 0.0) / zf;
+  // Net injection Y_f*(V_c - V_bus) = -i_l: the load draws i_l through the input
+  // filter (mirrors the grid-following LCL stamp).
+  add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(yf));
+  add_balanced_current(stamp, params_.bus_pos,
+                       yf * balanced_current_from_positive_sequence(vc));
+}
+
+void ActiveConstantPowerLoadDynamic::addJacobian(
+    double t, const DynamicState& x, const NetworkState& y,
+    const DynamicJacobianContext& context,
+    std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  const Complex zf(params_.filter_r_pu, std::max(1e-5, params_.filter_x_pu));
+  const Complex yf = Complex(1.0, 0.0) / zf;
+  const int vcr_col = state_index(range_, 0);
+  const int vci_col = state_index(range_, 1);
+  if (context.validStateIndex(vcr_col)) {
+    add_balanced_current_derivative(
+        context, params_.bus_pos, vcr_col,
+        yf * balanced_current_from_positive_sequence(Complex(1.0, 0.0)),
+        triplets);
+  }
+  if (context.validStateIndex(vci_col)) {
+    add_balanced_current_derivative(
+        context, params_.bus_pos, vci_col,
+        yf * balanced_current_from_positive_sequence(Complex(0.0, 1.0)),
+        triplets);
+  }
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  append_ac_bus_voltage_columns(context, params_.bus_pos, columns);
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns,
+                                               triplets);
+}
+
+void ActiveConstantPowerLoadDynamic::handleEvent(const DynamicEvent& event,
+                                                 DynamicState&, NetworkState&) {
+  if (event.type == DynamicEventType::ACLoadScale &&
+      (event.component_index == 0 ||
+       event.component_index == params_.component_index)) {
+    params_.p_mw *= event.value;
+    params_.q_mvar *= event.value;
+  }
+}
+
+std::string ActiveConstantPowerLoadDynamic::name() const {
+  return params_.label.empty()
+             ? "ActiveConstantPowerLoad " + std::to_string(params_.component_index)
+             : params_.label;
+}
+
+std::vector<DynamicModelProfile> ActiveConstantPowerLoadDynamic::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
+}
+
+DynamicDeviceOutput ActiveConstantPowerLoadDynamic::output(
+    const DynamicState& x, const NetworkState& y) const {
+  DynamicDeviceOutput out = make_output_base(*this,
+                                             params_.bus,
+                                             params_.canvas_type,
+                                             params_.component_domain,
+                                             params_.source_type);
+  const Complex vgrid = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const Complex vc = range_.empty()
+                         ? vgrid
+                         : Complex(x.x[state_index(range_, 0)],
+                                   x.x[state_index(range_, 1)]);
+  const Complex zf(params_.filter_r_pu, std::max(1e-5, params_.filter_x_pu));
+  const Complex yf = Complex(1.0, 0.0) / zf;
+  const Complex i_l = (vgrid - vc) * yf;
+  const Complex s_grid = vgrid * std::conj(i_l);
+  out.values["p_mw"] = s_grid.real() * safe_base(params_.base_mva);
+  out.values["q_mvar"] = s_grid.imag() * safe_base(params_.base_mva);
+  out.values["p_ref_mw"] = params_.p_mw;
+  out.values["vc_mag_pu"] = std::abs(vc);
+  out.values["i_draw_pu"] = std::abs(i_l);
+  out.values["current_limited"] =
+      std::abs(vc) < params_.v_min_pu ? 1.0 : 0.0;
+  out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  add_voltage_metrics(out, y, params_.bus_pos, -1);
+  return out;
+}
+
+FluxInductionMachineDynamic::FluxInductionMachineDynamic(
+    InductionMachineDynamicParams params)
+    : params_(std::move(params)) {}
+
+FluxInductionMachineDynamic::Reactances FluxInductionMachineDynamic::reactances() const {
+  Reactances r;
+  r.wb = kTwoPi * 50.0;
+  r.x0 = params_.x_s_pu + params_.x_m_pu;
+  const double xr_xm = params_.x_r_pu + params_.x_m_pu;
+  r.xp = params_.x_s_pu + params_.x_r_pu * params_.x_m_pu / std::max(1e-6, xr_xm);
+  r.tp0 = std::max(kMinTimeConstant,
+                   xr_xm / (r.wb * std::max(1e-4, params_.r_r_pu)));
+  return r;
+}
+
+std::complex<double> FluxInductionMachineDynamic::statorCurrent(
+    const std::complex<double>& v, double ed, double eq) const {
+  const Reactances r = reactances();
+  const Complex zp(params_.r_s_pu, std::max(1e-5, r.xp));
+  return (v - Complex(ed, eq)) / zp;  // motor draws this current from the bus
+}
+
+double FluxInductionMachineDynamic::loadTorque(double omega_r) const {
+  const double tl0 = params_.p_mech_mw / std::max(1e-9, params_.model_base_mva);
+  return tl0 * std::pow(std::max(0.05, omega_r), params_.torque_exponent);
+}
+
+void FluxInductionMachineDynamic::assignStateIndices(int& offset) {
+  range_ = {offset, 3};  // e'_d, e'_q, slip
+  offset += range_.size;
+}
+
+bool FluxInductionMachineDynamic::trimToNetworkEquilibrium(DynamicState& x,
+                                                           NetworkState& y) {
+  if (!params_.in_service || range_.empty()) return false;
+  const Reactances r = reactances();
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const Complex zp(params_.r_s_pu, std::max(1e-5, r.xp));
+  const Complex a = Complex(1.0, 0.0) / zp;
+  const Complex av = a * v;
+  const double ga = a.real();
+  const double bs = a.imag();
+  const double dx = r.x0 - r.xp;
+  // Direct steady-state EMF (solves de'/dt = 0 as a 2x2 linear system).
+  auto steady_emf = [&](double s) -> std::pair<double, double> {
+    const double k = r.wb * s * r.tp0;
+    const double A = 1.0 - dx * bs;
+    const double B = k + dx * ga;
+    const double eq = dx * (B * av.imag() + A * av.real()) / (A * A + B * B);
+    const double ed = (B * eq - dx * av.imag()) / A;
+    return {ed, eq};
+  };
+  // Torque mismatch f(s) = T_e(s) - T_load(s); root = the operating slip.
+  auto torque_gap = [&](double s) {
+    const auto [ed, eq] = steady_emf(s);
+    const Complex i = (v - Complex(ed, eq)) / zp;
+    return (ed * i.real() + eq * i.imag()) - loadTorque(1.0 - s);
+  };
+  double s0 = 5e-4;
+  double s1 = 0.05;
+  double f0 = torque_gap(s0);
+  double f1 = torque_gap(s1);
+  for (int it = 0; it < 60; ++it) {
+    if (std::abs(f1) < 1e-10 || std::abs(f1 - f0) < 1e-14) break;
+    double s2 = s1 - f1 * (s1 - s0) / (f1 - f0);
+    s2 = std::clamp(s2, 5e-4, 0.6);
+    s0 = s1;
+    f0 = f1;
+    s1 = s2;
+    f1 = torque_gap(s1);
+  }
+  const auto [ed, eq] = steady_emf(s1);
+  bool changed = false;
+  changed = set_if_changed(x.x, state_index(range_, 0), ed) || changed;
+  changed = set_if_changed(x.x, state_index(range_, 1), eq) || changed;
+  changed = set_if_changed(x.x, state_index(range_, 2), s1) || changed;
+  return changed;
+}
+
+void FluxInductionMachineDynamic::initializeFromPowerFlow(const PowerFlowResult&,
+                                                          DynamicState& x,
+                                                          NetworkState& y) {
+  if (range_.empty()) return;
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  // Rough magnetizing EMF and a small starting slip; trim refines to the
+  // torque-balanced operating point.
+  const Complex e0 =
+      v * (params_.x_m_pu / std::max(1e-6, params_.x_s_pu + params_.x_m_pu));
+  x.x[state_index(range_, 0)] = e0.real();
+  x.x[state_index(range_, 1)] = e0.imag();
+  x.x[state_index(range_, 2)] = 0.02;
+  trimToNetworkEquilibrium(x, y);
+}
+
+void FluxInductionMachineDynamic::computeDerivatives(
+    double, const DynamicState& x, const NetworkState& y,
+    Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (!params_.in_service || range_.empty()) return;
+  const Reactances r = reactances();
+  const double ed = x.x[state_index(range_, 0)];
+  const double eq = x.x[state_index(range_, 1)];
+  const double s = x.x[state_index(range_, 2)];
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const Complex i = statorCurrent(v, ed, eq);
+  const double id = i.real();
+  const double iq = i.imag();
+  const double te = ed * id + eq * iq;
+  const double dx = r.x0 - r.xp;
+  // Rotor transient-EMF dynamics (single-cage, synchronous frame).
+  dxdt[state_index(range_, 0)] = r.wb * s * eq - (ed + dx * iq) / r.tp0;
+  dxdt[state_index(range_, 1)] = -r.wb * s * ed - (eq - dx * id) / r.tp0;
+  // Slip: 2H ds/dt = T_load - T_electrical (decelerates / stalls when T_e drops).
+  dxdt[state_index(range_, 2)] =
+      (loadTorque(1.0 - s) - te - params_.damping_d * s) /
+      (2.0 * std::max(0.01, params_.inertia_h));
+}
+
+void FluxInductionMachineDynamic::stamp(double,
+                                        const DynamicState& x,
+                                        const NetworkState& y,
+                                        DynamicStamp& stamp) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  const Reactances r = reactances();
+  const double ed = x.x[state_index(range_, 0)];
+  const double eq = x.x[state_index(range_, 1)];
+  const Complex zp(params_.r_s_pu, std::max(1e-5, r.xp));
+  const double ratio = params_.model_base_mva / safe_base(params_.base_mva);
+  const Complex yp = ratio / zp;  // machine transient admittance (system pu)
+  // Injection Y_p*(e' - V_bus) = -ratio*i: the motor draws ratio*i.
+  add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(yp));
+  add_balanced_current(stamp, params_.bus_pos,
+                       yp * balanced_current_from_positive_sequence(Complex(ed, eq)));
+}
+
+void FluxInductionMachineDynamic::addJacobian(
+    double t, const DynamicState& x, const NetworkState& y,
+    const DynamicJacobianContext& context,
+    std::vector<Eigen::Triplet<double>>& triplets) const {
+  if (!params_.in_service || params_.bus_pos < 0 || range_.empty()) return;
+  const Reactances r = reactances();
+  const Complex zp(params_.r_s_pu, std::max(1e-5, r.xp));
+  const double ratio = params_.model_base_mva / safe_base(params_.base_mva);
+  const Complex yp = ratio / zp;
+  const int ed_col = state_index(range_, 0);
+  const int eq_col = state_index(range_, 1);
+  if (context.validStateIndex(ed_col)) {
+    add_balanced_current_derivative(
+        context, params_.bus_pos, ed_col,
+        yp * balanced_current_from_positive_sequence(Complex(1.0, 0.0)),
+        triplets);
+  }
+  if (context.validStateIndex(eq_col)) {
+    add_balanced_current_derivative(
+        context, params_.bus_pos, eq_col,
+        yp * balanced_current_from_positive_sequence(Complex(0.0, 1.0)),
+        triplets);
+  }
+  std::vector<int> columns;
+  append_state_range_columns(context, range_, columns);
+  append_ac_bus_voltage_columns(context, params_.bus_pos, columns);
+  add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns,
+                                               triplets);
+}
+
+std::string FluxInductionMachineDynamic::name() const {
+  return params_.label.empty()
+             ? "SingleCageInductionMachine " +
+                   std::to_string(params_.component_index)
+             : params_.label;
+}
+
+std::vector<DynamicModelProfile> FluxInductionMachineDynamic::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
+}
+
+DynamicDeviceOutput FluxInductionMachineDynamic::output(
+    const DynamicState& x, const NetworkState& y) const {
+  DynamicDeviceOutput out = make_output_base(*this,
+                                             params_.bus,
+                                             params_.canvas_type,
+                                             params_.component_domain,
+                                             params_.source_type);
+  const double ed = range_.empty() ? 0.0 : x.x[state_index(range_, 0)];
+  const double eq = range_.empty() ? 0.0 : x.x[state_index(range_, 1)];
+  const double s = range_.empty() ? 0.0 : x.x[state_index(range_, 2)];
+  const Complex v = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const Complex i = statorCurrent(v, ed, eq);
+  const double ratio = params_.model_base_mva / safe_base(params_.base_mva);
+  const Complex s_grid = v * std::conj(i * ratio);
+  out.values["slip"] = s;
+  out.values["omega_r_pu"] = 1.0 - s;
+  out.values["te_pu"] = ed * i.real() + eq * i.imag();
+  out.values["e_mag_pu"] = std::hypot(ed, eq);
+  out.values["p_mw"] = s_grid.real() * safe_base(params_.base_mva);
+  out.values["q_mvar"] = s_grid.imag() * safe_base(params_.base_mva);
+  out.values["i_mag_pu"] = std::abs(i);
+  out.values["stalled"] = s > 0.10 ? 1.0 : 0.0;
+  out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
   add_voltage_metrics(out, y, params_.bus_pos, -1);
   return out;
 }

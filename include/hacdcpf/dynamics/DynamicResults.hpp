@@ -107,6 +107,42 @@ struct DynamicSnapshot {
   std::vector<DynamicDeviceOutput> device_outputs;
 };
 
+// Normalized participation of one differential state in a mode (design doc §18).
+struct DynamicModalParticipation {
+  int state_index{0};       // global differential-state index
+  std::string state_label;  // "type#component:sLocal"
+  double factor{0.0};       // |participation|, normalized per mode (0..1)
+};
+
+// One eigenvalue of the Schur-reduced state matrix, in the compact form attached
+// to a transient result (design doc §18).
+struct DynamicModalMode {
+  double eigen_real{0.0};    // Re(lambda), 1/s
+  double eigen_imag{0.0};    // Im(lambda), rad/s
+  double frequency_hz{0.0};  // |Im| / (2*pi)
+  double damping_ratio{0.0}; // -Re / |lambda|
+  bool oscillatory{false};
+  std::string dominant_state; // label of the highest-participation state
+  // Significant state participations for this mode (normalized, descending),
+  // truncated to the leading contributors. Empty unless the screen was computed.
+  std::vector<DynamicModalParticipation> participation;
+};
+
+// Compact small-signal (modal) screen about the initialized operating point,
+// populated when DynamicSolverOptions::compute_small_signal is set. The heavy
+// artifacts (reduced Jacobian, full participation matrix) are omitted here; call
+// small_signal_analysis() directly for those. Modes are least-damped first.
+struct DynamicModalSummary {
+  bool computed{false};   // analysis was requested
+  bool success{false};    // analysis produced eigenvalues
+  std::string message;
+  int n_differential{0};
+  int n_algebraic{0};
+  bool stable{false};             // all Re(lambda) < margin
+  double min_damping_ratio{0.0};  // damping of the most critical mode
+  std::vector<DynamicModalMode> modes;
+};
+
 struct DynamicResults {
   bool success{false};
   std::string message;
@@ -128,6 +164,7 @@ struct DynamicResults {
   std::vector<std::string> applied_events;
   std::vector<DynamicAppliedEventRecord> applied_event_records;
   DynamicInitializationSummary initialization;
+  DynamicModalSummary modal;
 
   [[nodiscard]] const DynamicSnapshot* final_snapshot() const noexcept {
     return snapshots.empty() ? nullptr : &snapshots.back();
@@ -138,10 +175,22 @@ struct DynamicResultExportOptions {
   bool include_ac_voltage_magnitudes{true};
   bool include_dc_voltages{true};
   bool include_device_outputs{true};
+  // Prepend the small-signal (modal) screen as a '#'-commented metadata block
+  // (eigenvalues, damping, dominant state, participation) when the result carries
+  // one. The comment prefix keeps the time-series table parseable as plain CSV.
+  bool include_modal{true};
   char delimiter{','};
 };
 
 std::string to_csv(const DynamicResults& results,
                    const DynamicResultExportOptions& options = {});
+
+// Render the small-signal (modal) screen as a human-readable Markdown report:
+// a stability headline, state/variable counts, a table of the least-damped
+// modes, and per-mode participation for the most critical ones (design doc §18).
+// Returns an empty string when the screen was not computed.
+std::string to_modal_report(const DynamicModalSummary& modal,
+                            int max_modes = 12,
+                            int max_participation_modes = 3);
 
 }  // namespace hacdcpf::dynamics

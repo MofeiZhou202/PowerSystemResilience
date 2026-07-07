@@ -1050,6 +1050,29 @@ body[data-active-result-group="modelIO"] #rightPanel {
   color: var(--ink);
   font-weight: 700;
 }
+/* Small-signal (modal) screen stability badges */
+.transient-model-summary span.ss-stable {
+  background: rgba(152,195,121,0.14);
+  border-color: rgba(152,195,121,0.55);
+}
+.transient-model-summary span.ss-stable strong { color: #98c379; }
+.transient-model-summary span.ss-unstable {
+  background: rgba(224,108,117,0.16);
+  border-color: rgba(224,108,117,0.6);
+}
+.transient-model-summary span.ss-unstable strong { color: #e06c75; }
+tr.ss-row-unstable td {
+  background: rgba(224,108,117,0.12);
+  color: #e06c75;
+}
+.transient-hint-line {
+  color: var(--ink2);
+  font-size: 12px;
+  margin: 6px 0 4px;
+}
+tr.ss-mode-row { cursor: pointer; }
+tr.ss-mode-row:hover td { background: rgba(97,175,239,0.10); }
+tr.ss-mode-selected td { background: rgba(97,175,239,0.22); }
 .transient-table-scroll {
   max-width: 100%;
   max-height: 420px;

@@ -2956,6 +2956,39 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
            {"dynamic_residual_diagnostics", residual_diagnostics},
            {"warnings", result.initialization.warnings}};
 
+  // Small-signal (modal) screen about the initialized operating point, present
+  // only when the run requested compute_small_signal.
+  {
+    json modal;
+    modal["computed"] = result.modal.computed;
+    modal["success"] = result.modal.success;
+    modal["message"] = result.modal.message;
+    modal["n_differential"] = result.modal.n_differential;
+    modal["n_algebraic"] = result.modal.n_algebraic;
+    modal["stable"] = result.modal.stable;
+    modal["min_damping_ratio"] = result.modal.min_damping_ratio;
+    json modes = json::array();
+    for (const auto& m : result.modal.modes) {
+      json part = json::array();
+      for (const auto& p : m.participation) {
+        part.push_back(json{{"state_index", p.state_index},
+                            {"label", p.state_label},
+                            {"factor", p.factor}});
+      }
+      modes.push_back(json{{"real", m.eigen_real},
+                           {"imag", m.eigen_imag},
+                           {"frequency_hz", m.frequency_hz},
+                           {"damping_ratio", m.damping_ratio},
+                           {"oscillatory", m.oscillatory},
+                           {"dominant_state", m.dominant_state},
+                           {"participation", part}});
+    }
+    modal["modes"] = modes;
+    modal["report_markdown"] =
+        hacdcpf::dynamics::to_modal_report(result.modal);
+    out["modal"] = modal;
+  }
+
   json times = json::array();
   json min_ac = json::array();
   json max_ac = json::array();
@@ -12662,6 +12695,8 @@ int main(int argc, char** argv) {
           j.value("voltage_blowup_max_ac_pu", opt.voltage_blowup_max_ac_pu);
       opt.voltage_blowup_max_dc_pu =
           j.value("voltage_blowup_max_dc_pu", opt.voltage_blowup_max_dc_pu);
+      opt.compute_small_signal =
+          j.value("compute_small_signal", opt.compute_small_signal);
 
       bool used_cached_power_flow_initialization = false;
       if (requested_power_flow_initialization &&
@@ -12720,9 +12755,16 @@ int main(int argc, char** argv) {
       }
 
       hacdcpf::dynamics::DynamicSolver solver;
+      // Optional small-signal (modal) screen about the initialized equilibrium,
+      // evaluated before time-stepping (state is saved/restored).
+      hacdcpf::dynamics::DynamicModalSummary modal_summary;
+      if (opt.compute_small_signal) {
+        modal_summary = hacdcpf::dynamics::summarize_small_signal(dyn);
+      }
       const auto solve_start = std::chrono::steady_clock::now();
-      const auto result = solver.solve(dyn);
+      auto result = solver.solve(dyn);
       const auto solve_end = std::chrono::steady_clock::now();
+      result.modal = std::move(modal_summary);
       json out = dynamic_results_to_json(result, opt);
       const auto elapsed_ms = [](auto a, auto b) {
         return std::chrono::duration<double, std::milli>(b - a).count();

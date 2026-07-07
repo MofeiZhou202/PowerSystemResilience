@@ -326,6 +326,7 @@ set(HACDCPF_SOURCES
   src/dynamics/SmallSignal.cpp
   src/dynamics/DynamicResults.cpp
   src/dynamics/devices/BasicDynamicDevices.cpp
+  src/dynamics/devices/IEEE1547Protection.cpp
   src/dynamics/integration/ExplicitEuler.cpp
   src/dynamics/integration/RK4.cpp
   src/dynamics/integration/BackwardEuler.cpp

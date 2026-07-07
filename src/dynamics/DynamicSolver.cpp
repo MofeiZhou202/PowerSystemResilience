@@ -13,6 +13,7 @@
 
 #include "hacdcpf/dynamics/DynamicModelBuilder.hpp"
 #include "hacdcpf/dynamics/DynamicFrequency.hpp"
+#include "hacdcpf/dynamics/SmallSignal.hpp"
 
 namespace hacdcpf::dynamics {
 namespace {
@@ -276,6 +277,43 @@ bool apply_events(DynamicSystem& sys, double t, DynamicResults& results) {
     sys.network_cache.reset();
   }
   return changed;
+}
+
+// Evaluates device-level DER protection (IEEE 1547 ride-through / trip /
+// reconnect, design doc §11.7) after an accepted step of length `dt` ending at
+// `t`. Each device advances its protection state machine on measured (filtered)
+// terminal quantities (§7 role 4) and may trip or reconnect itself; a status
+// change rebuilds the network admittance and is logged into the results event
+// record (§17). Returns true when the network was rebuilt. No-op unless the
+// `enable_der_protection` option is set.
+bool apply_protection(DynamicSystem& sys, double t, double dt,
+                      DynamicResults& results) {
+  if (!sys.options.enable_der_protection) return false;
+  bool rebuild = false;
+  std::vector<DynamicEvent> emitted;
+  for (auto& device : sys.devices) {
+    if (device->updateProtection(t, dt, sys.x, sys.y, emitted)) rebuild = true;
+  }
+  for (const auto& ev : emitted) {
+    results.applied_events.push_back(event_label(ev));
+    results.applied_event_records.push_back(event_record(ev, t));
+  }
+  if (rebuild) {
+    sys.network.rebuildBaseMatrices(sys.options.singular_regularization_pu);
+    sys.network_cache.reset();
+    sys.dae_admittance_valid = false;
+  }
+  return rebuild;
+}
+
+// Advances device smart-inverter controls (IEEE 1547 volt-var / frequency-watt,
+// design doc §11.7) after an accepted step of length `dt`. Always runs; devices
+// without these functions are a cheap no-op. The updated references are read by
+// the device residual on the following step, so no network rebuild is needed.
+void apply_smart_controls(DynamicSystem& sys, double dt) {
+  for (auto& device : sys.devices) {
+    device->updateSmartControls(dt, sys.y);
+  }
 }
 
 bool should_record_snapshot(const DynamicSystem& system,
@@ -1692,6 +1730,20 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
         return results;
       }
     }
+    if (apply_protection(system, system.x.time_s, attempted_dt, results)) {
+      dae_cache.invalidate();
+      dae_predictor_cache.invalidate();
+      if (coupled_network_startup) {
+        dae_finalize(system, layout, system.x.time_s);
+      } else if (!system.solveNetwork(system.x.time_s, error)) {
+        results.success = false;
+        results.message = error;
+        results.failed_step = step;
+        results.steps = step;
+        return results;
+      }
+    }
+    apply_smart_controls(system, attempted_dt);
     if (!check_numerical_health(system, system.x.time_s, error)) {
       results.success = false;
       results.message = error;
@@ -1886,6 +1938,15 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
       results.steps = step;
       return results;
     }
+    if (apply_protection(system, system.x.time_s, attempted_dt, results) &&
+        !system.solveNetwork(system.x.time_s, error)) {
+      results.success = false;
+      results.message = error;
+      results.failed_step = step;
+      results.steps = step;
+      return results;
+    }
+    apply_smart_controls(system, attempted_dt);
     if (!check_numerical_health(system, system.x.time_s, error)) {
       results.success = false;
       results.message = error;
@@ -1907,12 +1968,70 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
   return results;
 }
 
+DynamicModalSummary summarize_small_signal(DynamicSystem& system) {
+  DynamicModalSummary modal;
+  modal.computed = true;
+  const SmallSignalResult ss = small_signal_analysis(system);
+  modal.success = ss.success;
+  modal.message = ss.message;
+  modal.n_differential = ss.n_differential;
+  modal.n_algebraic = ss.n_algebraic;
+  modal.stable = ss.stable;
+  modal.min_damping_ratio =
+      ss.modes.empty() ? 0.0 : ss.modes.front().damping_ratio;
+  modal.modes.reserve(ss.modes.size());
+  for (std::size_t i = 0; i < ss.modes.size(); ++i) {
+    const auto& m = ss.modes[i];
+    DynamicModalMode dm;
+    dm.eigen_real = m.eigen_real;
+    dm.eigen_imag = m.eigen_imag;
+    dm.frequency_hz = m.frequency_hz;
+    dm.damping_ratio = m.damping_ratio;
+    dm.oscillatory = m.oscillatory;
+    dm.dominant_state = m.dominant_state;
+    // Significant state participations for this mode (rows of ss.participation
+    // are aligned with the sorted modes). Keep the leading contributors so the
+    // GUI can show which states drive each eigenvalue.
+    const int nd = ss.n_differential;
+    if (ss.participation.rows() == nd &&
+        static_cast<int>(ss.states.size()) == nd) {
+      std::vector<DynamicModalParticipation> contribs;
+      contribs.reserve(static_cast<std::size_t>(nd));
+      for (int k = 0; k < nd; ++k) {
+        const double f = ss.participation(static_cast<int>(i), k);
+        if (f >= 0.02) {  // drop negligible contributions
+          contribs.push_back({ss.states[static_cast<std::size_t>(k)].index,
+                              ss.states[static_cast<std::size_t>(k)].label, f});
+        }
+      }
+      std::sort(contribs.begin(), contribs.end(),
+                [](const DynamicModalParticipation& a,
+                   const DynamicModalParticipation& b) { return a.factor > b.factor; });
+      if (contribs.size() > 8) contribs.resize(8);
+      dm.participation = std::move(contribs);
+    }
+    modal.modes.push_back(std::move(dm));
+  }
+  return modal;
+}
+
 DynamicResults run_transient_simulation(const HybridPowerSystem& sys,
                                         const DynamicSolverOptions& options) {
   DynamicModelBuilder builder;
   DynamicSystem dynamic_system = builder.build(sys, options);
+
+  // Optional small-signal (modal) screen about the initialized equilibrium.
+  // Runs BEFORE time-stepping; small_signal_analysis() saves and restores the
+  // system state, so the trajectory that follows is unaffected.
+  DynamicModalSummary modal;
+  if (options.compute_small_signal) {
+    modal = summarize_small_signal(dynamic_system);
+  }
+
   DynamicSolver solver;
-  return solver.solve(dynamic_system);
+  DynamicResults results = solver.solve(dynamic_system);
+  results.modal = std::move(modal);
+  return results;
 }
 
 }  // namespace hacdcpf::dynamics

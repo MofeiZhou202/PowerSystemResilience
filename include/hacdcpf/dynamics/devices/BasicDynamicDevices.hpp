@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "hacdcpf/dynamics/devices/DynamicDevice.hpp"
+#include "hacdcpf/dynamics/devices/IEEE1547Protection.hpp"
 #include "hacdcpf/dynamics/devices/MachineControlLink.hpp"
 
 namespace hacdcpf::dynamics {
@@ -390,6 +391,9 @@ struct VoltageSourceDynamicParams {
   std::string machine_model_name{"ClassicalMachine"};
   bool psd_genrou_model{false};
   bool dynamic_angle{false};
+  // IEEE 1547 ride-through / trip / reconnect protection (design doc §11.7) for a
+  // synchronous DER. Disabled by default; opt-in per device.
+  IEEE1547Settings protection{};
   bool in_service{true};
 };
 
@@ -419,6 +423,11 @@ class SynchronousMachine : public DynamicDevice {
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
+  bool updateProtection(double t,
+                        double dt,
+                        DynamicState& x,
+                        NetworkState& y,
+                        std::vector<DynamicEvent>& events) override;
 
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return params_.device_type; }
@@ -451,6 +460,7 @@ class SynchronousMachine : public DynamicDevice {
   MachineControlLink link_;
   bool governor_attached_{false};
   bool exciter_attached_{false};
+  IEEE1547RuntimeState protection_state_;
 };
 
 struct FiveMassShaftParams {
@@ -911,6 +921,14 @@ struct GridFormingInverterParams {
   double voc_k2{0.0796};
   bool reference_frame_locked{false};
   DCLinkMode dc_link_mode{DCLinkMode::ConstantDCVoltage};
+  // IEEE 1547 ride-through / trip / reconnect protection (design doc §11.7).
+  // Disabled by default; opt-in per device. A grid-forming DER re-energizes on
+  // reconnect (no soft-start current ramp — that is a grid-following behavior).
+  IEEE1547Settings protection{};
+  // IEEE 1547 volt-var / frequency-watt smart-inverter functions (design doc
+  // §11.7): the filtered references adjust the reactive/active setpoints.
+  VoltVarSettings volt_var{};
+  FreqWattSettings freq_watt{};
   bool in_service{true};
 };
 
@@ -940,6 +958,12 @@ class GridFormingInverter : public DynamicDevice {
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
+  bool updateProtection(double t,
+                        double dt,
+                        DynamicState& x,
+                        NetworkState& y,
+                        std::vector<DynamicEvent>& events) override;
+  void updateSmartControls(double dt, const NetworkState& y) override;
 
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return params_.device_type; }
@@ -956,6 +980,8 @@ class GridFormingInverter : public DynamicDevice {
   GridFormingInverterParams params_;
   StateIndexRange range_;
   InverterInnerVariableBus inner_vars_;
+  IEEE1547RuntimeState protection_state_;
+  SmartInverterState smart_state_;
 };
 
 struct GridFollowingInverterParams {
@@ -989,6 +1015,11 @@ struct GridFollowingInverterParams {
   double stabilizing_admittance_pu{0.0};
   double frequency_watt_droop_pu{0.0};
   double volt_var_droop_pu{0.0};
+  // IEEE 1547 smart-inverter functions (design doc §11.7): piecewise-linear
+  // volt-var and frequency-watt with deadbands. When enabled they supersede the
+  // simple linear droop above. Disabled by default (opt-in).
+  VoltVarSettings volt_var{};
+  FreqWattSettings freq_watt{};
   double v_ref_pu{1.0};
   double f_ref_hz{50.0};
   double eta{0.98};
@@ -1000,6 +1031,9 @@ struct GridFollowingInverterParams {
   DCLinkMode dc_link_mode{DCLinkMode::ConstantDCVoltage};
   bool stamp_dc_power{false};
   bool reactive_current_priority{false};
+  // IEEE 1547 ride-through / trip / reconnect protection (design doc §11.7).
+  // Disabled by default; opt-in per device.
+  IEEE1547Settings protection{};
   bool in_service{true};
 };
 
@@ -1029,6 +1063,12 @@ class GridFollowingInverter : public DynamicDevice {
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
+  bool updateProtection(double t,
+                        double dt,
+                        DynamicState& x,
+                        NetworkState& y,
+                        std::vector<DynamicEvent>& events) override;
+  void updateSmartControls(double dt, const NetworkState& y) override;
 
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return params_.device_type; }
@@ -1045,6 +1085,8 @@ class GridFollowingInverter : public DynamicDevice {
   GridFollowingInverterParams params_;
   StateIndexRange range_;
   InverterInnerVariableBus inner_vars_;
+  IEEE1547RuntimeState protection_state_;
+  SmartInverterState smart_state_;
 };
 
 struct VSCConverterDynamicParams : public GridFollowingInverterParams {
@@ -1102,6 +1144,12 @@ class VSCConverterDynamic : public DynamicDevice {
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
+  bool updateProtection(double t,
+                        double dt,
+                        DynamicState& x,
+                        NetworkState& y,
+                        std::vector<DynamicEvent>& events) override;
+  void updateSmartControls(double dt, const NetworkState& y) override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
   [[nodiscard]] FrequencyParticipation frequencyParticipation(
@@ -1326,6 +1374,127 @@ class DERAADynamic : public DynamicDevice {
   StateIndexRange range_;
 };
 
+// WECC generic renewable-energy converter model REGC_A (design doc §11.6). The
+// network-interface block of the utility-scale PV / wind / BESS plant: current-
+// command lags (T_g) on the active and reactive currents, a terminal-voltage
+// filter (T_fltr), low-voltage active-current management (LVACM, ramps I_p down
+// under sags) and high-voltage reactive-current management (HVRCM, absorbs vars
+// under swells). Active/reactive current commands come from a simplified
+// electrical control on the P/Q references so the model is usable standalone.
+//
+// REEC_A electrical control (design doc §11.6): optional inner control that,
+// when enabled, replaces the trivial P/Q command with a ramp-limited active-
+// power order and a reactive command combining a Q-V droop with a deadband (fast
+// dynamic voltage support during faults) and the reactive-power schedule, with
+// the REEC current limits. It couples to the REGC_A current lags in the same
+// device (this codebase uses monolithic devices rather than a composed bus).
+struct REECASettings {
+  bool enabled{false};
+  double vref0_pu{0.0};     // Q-V droop reference; <= 0 => use the initial Vt
+  double dbd1{-0.05};       // Q-V droop deadband on (Vref - Vt), lower edge
+  double dbd2{0.05};        // upper edge
+  double kqv{2.0};          // reactive-current gain per pu voltage error
+  double iqh1{1.0};         // dynamic reactive-current injection max
+  double iql1{-1.0};        // min
+  double tpord_s{0.05};     // active-power-order lag T_pord
+  double p_rate_pu_per_s{99.0};  // active-power-order slew limit
+  double ip_min{0.0};
+  double ip_max{1.1};
+  double iq_min{-1.0};
+  double iq_max{1.0};
+};
+
+// WECC generic renewable plant controller REPC_A (design doc §11.6): the outer
+// plant-level loop. This single-unit-plant realization regulates the device's
+// own (filtered) terminal voltage with a deadband PI, producing the reactive-
+// power command Qext that feeds the REEC_A reactive reference. Requires REEC_A.
+// (Plant-level active-power / frequency control is a documented follow-up.)
+struct REPCASettings {
+  bool enabled{false};
+  double vref_pu{0.0};   // plant voltage setpoint; <= 0 => use the initial Vt
+  double dbd1{-0.01};    // voltage-error deadband lower edge
+  double dbd2{0.01};     // upper edge
+  double kp{1.0};        // plant reactive PI proportional gain
+  double ki{5.0};        // plant reactive PI integral gain
+  double q_min{-0.44};   // plant reactive command limits (pu of base)
+  double q_max{0.44};
+  // Plant active-power / frequency droop (design doc §11.6, REPC_A second axis).
+  bool freq_control{false};
+  double f_nominal_hz{60.0};
+  double f_dbd_hz{0.017};   // frequency deadband (Hz)
+  double f_droop{0.05};     // droop: per-unit frequency deviation per pu power
+  double p_min_pu{0.0};     // plant active-power command limits (pu of base)
+  double p_max_pu{1.20};
+};
+
+struct REGCADynamicParams {
+  int component_index{0};
+  int bus{0};
+  int bus_pos{-1};
+  std::string label;
+  std::string canvas_type{"sgen"};
+  std::string component_domain{"AC"};
+  std::string source_type{"regc_a"};
+  std::vector<DynamicModelProfile> model_profiles;
+  double base_mva{100.0};
+  double model_base_mva{100.0};
+  double p_ref_mw{0.0};
+  double q_ref_mvar{0.0};
+  double v_ref_pu{1.0};
+  double t_g_s{0.02};      // current-command lag T_g
+  double t_fltr_s{0.02};   // terminal-voltage filter T_fltr
+  double v_lvacm0_pu{0.4};  // LVACM: I_p ramped from 0 here...
+  double v_lvacm1_pu{0.8};  //        ...to full at this voltage
+  double v_hvrcm_pu{1.2};   // HVRCM: absorb vars above this voltage
+  double k_hvrcm{10.0};     // HVRCM gain
+  double i_max_pu{1.2};
+  bool reactive_priority{false};
+  REECASettings reec{};  // optional REEC_A electrical control (design doc §11.6)
+  REPCASettings repc{};  // optional REPC_A plant controller (design doc §11.6)
+  bool in_service{true};
+};
+
+class REGCADynamic : public DynamicDevice {
+ public:
+  explicit REGCADynamic(REGCADynamicParams params);
+
+  void assignStateIndices(int& offset) override;
+  void initializeFromPowerFlow(const PowerFlowResult& pf,
+                               DynamicState& x,
+                               NetworkState& y) override;
+  void computeDerivatives(double t,
+                          const DynamicState& x,
+                          const NetworkState& y,
+                          Eigen::Ref<Eigen::VectorXd> dxdt) const override;
+  void stamp(double t,
+             const DynamicState& x,
+             const NetworkState& y,
+             DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
+  void updateSmartControls(double dt, const NetworkState& y) override;
+  [[nodiscard]] std::string name() const override;
+  [[nodiscard]] std::string type() const override { return "RenewableEnergyGeneratorA"; }
+  [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] std::string modelStandard() const override { return "WECC"; }
+  [[nodiscard]] std::string modelName() const override { return "REGC_A"; }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
+  [[nodiscard]] FrequencyParticipation frequencyParticipation(
+      const DynamicState& x, const NetworkState& y) const override;
+
+ private:
+  [[nodiscard]] std::pair<double, double> currentDq(const DynamicState& x) const;
+
+  REGCADynamicParams params_;
+  StateIndexRange range_;
+  SmartInverterState freq_state_;  // plant-frequency measurement (REPC_A P-f axis)
+};
+
 struct InductionMachineDynamicParams {
   int component_index{0};
   int bus{0};
@@ -1348,6 +1517,9 @@ struct InductionMachineDynamicParams {
   double damping_d{0.0};
   double torque_exponent{2.0};
   bool fifth_order{false};
+  // Use the full flux-based (transient-EMF) single-cage model rather than the
+  // simplified current-lag model. Routed to FluxInductionMachineDynamic.
+  bool flux_model{false};
   bool in_service{true};
 };
 
@@ -1398,6 +1570,128 @@ class InductionMachineDynamic : public DynamicDevice {
   [[nodiscard]] double mechanicalTorque(double omega_r) const;
 
   InductionMachineDynamicParams params_;
+  StateIndexRange range_;
+};
+
+// Flux-based single-cage induction machine (design doc §13): the transient-EMF
+// (voltage-behind-transient-reactance) form with rotor transient EMFs e'_d, e'_q
+// and slip s. It captures the torque-slip characteristic and the stall /
+// fault-induced delayed voltage recovery (FIDVR) behavior that the simplified
+// current-lag model omits. Motor (load) convention: draws current from the bus.
+// Three states [e'_d, e'_q, s]; reuses InductionMachineDynamicParams.
+class FluxInductionMachineDynamic : public DynamicDevice {
+ public:
+  explicit FluxInductionMachineDynamic(InductionMachineDynamicParams params);
+
+  void assignStateIndices(int& offset) override;
+  void initializeFromPowerFlow(const PowerFlowResult& pf,
+                               DynamicState& x,
+                               NetworkState& y) override;
+  bool trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) override;
+  void computeDerivatives(double t,
+                          const DynamicState& x,
+                          const NetworkState& y,
+                          Eigen::Ref<Eigen::VectorXd> dxdt) const override;
+  void stamp(double t,
+             const DynamicState& x,
+             const NetworkState& y,
+             DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
+  [[nodiscard]] std::string name() const override;
+  [[nodiscard]] std::string type() const override { return "SingleCageInductionMachine"; }
+  [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] std::string modelStandard() const override { return "PowerSystems"; }
+  [[nodiscard]] std::string modelName() const override { return "SingleCageInductionMachine"; }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
+
+ private:
+  struct Reactances {
+    double x0;   // stator open-circuit reactance
+    double xp;   // stator transient reactance
+    double tp0;  // rotor open-circuit transient time constant
+    double wb;   // base angular speed
+  };
+  [[nodiscard]] Reactances reactances() const;
+  [[nodiscard]] std::complex<double> statorCurrent(const std::complex<double>& v,
+                                                   double ed, double eq) const;
+  [[nodiscard]] double loadTorque(double omega_r) const;
+
+  InductionMachineDynamicParams params_;
+  StateIndexRange range_;
+};
+
+// Active constant-power load (design doc §13): a rectifier-behind-controls CPL
+// for electronics-rich feeders. An input filter (series R+jX to a shunt
+// capacitor) feeds an idealized constant-power stage that draws
+// I = conj(S_ref / V_c) from the filter capacitor. The constant-power stage has
+// negative incremental resistance (as the capacitor voltage falls the drawn
+// current rises), which interacts with the filter to reproduce the classic CPL
+// instability dynamically rather than as a static injection. Two states: the
+// filter-capacitor voltage phasor (real, imag). A low-voltage floor turns the
+// stage into constant current below v_min_pu to bound the runaway.
+struct ActiveConstantPowerLoadParams {
+  int component_index{0};
+  int bus{0};
+  int bus_pos{-1};
+  std::string label;
+  std::string canvas_type{"loads"};
+  std::string component_domain{"AC"};
+  std::string source_type{"active_cpl"};
+  std::vector<DynamicModelProfile> model_profiles;
+  double base_mva{100.0};
+  double p_mw{0.0};          // constant-power setpoint (load convention, > 0 = load)
+  double q_mvar{0.0};
+  double filter_r_pu{0.01};  // input filter series resistance
+  double filter_x_pu{0.05};  // input filter series reactance
+  double filter_c_s{0.02};   // filter-capacitor time constant (seconds)
+  double v_min_pu{0.20};     // capacitor-voltage floor for the power stage
+  bool in_service{true};
+};
+
+class ActiveConstantPowerLoadDynamic : public DynamicDevice {
+ public:
+  explicit ActiveConstantPowerLoadDynamic(ActiveConstantPowerLoadParams params);
+
+  void assignStateIndices(int& offset) override;
+  void initializeFromPowerFlow(const PowerFlowResult& pf,
+                               DynamicState& x,
+                               NetworkState& y) override;
+  bool trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) override;
+  void computeDerivatives(double t,
+                          const DynamicState& x,
+                          const NetworkState& y,
+                          Eigen::Ref<Eigen::VectorXd> dxdt) const override;
+  void stamp(double t,
+             const DynamicState& x,
+             const NetworkState& y,
+             DynamicStamp& stamp) const override;
+  void addJacobian(double t,
+                   const DynamicState& x,
+                   const NetworkState& y,
+                   const DynamicJacobianContext& context,
+                   std::vector<Eigen::Triplet<double>>& triplets) const override;
+  void handleEvent(const DynamicEvent& event,
+                   DynamicState& x,
+                   NetworkState& y) override;
+  [[nodiscard]] std::string name() const override;
+  [[nodiscard]] std::string type() const override { return "ActiveConstantPowerLoad"; }
+  [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] std::string modelStandard() const override { return "PowerSystems"; }
+  [[nodiscard]] std::string modelName() const override { return "ActiveConstantPowerLoad"; }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
+
+ private:
+  [[nodiscard]] std::complex<double> loadCurrent(const std::complex<double>& vc) const;
+
+  ActiveConstantPowerLoadParams params_;
   StateIndexRange range_;
 };
 

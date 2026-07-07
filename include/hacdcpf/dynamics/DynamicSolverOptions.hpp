@@ -118,6 +118,20 @@ struct DynamicSolverOptions {
   // smooth the signal more.
   double measured_frequency_filter_t_s{0.02};
 
+  // Enable device-level DER protection (IEEE 1547 ride-through / trip / reconnect,
+  // design doc §11.7). Opt-in: when true the solver evaluates each device's
+  // protection state machine on measured quantities after every accepted step and
+  // applies trips/reconnects through the network. Devices additionally gate on
+  // their own per-device enable flag, so this defaults off and is fully
+  // backward-compatible.
+  bool enable_der_protection{false};
+
+  // Compute a small-signal (modal) screen about the initialized operating point
+  // and attach a compact summary to DynamicResults::modal (design doc §18).
+  // Opt-in: linearizes the DAE once (Schur-reduced state Jacobian, eigenvalues,
+  // damping) before time-stepping; does not affect the time-domain trajectory.
+  bool compute_small_signal{false};
+
   PowerFlowOptions power_flow_options{};
 };
 

@@ -205,6 +205,7 @@ TEST_CASE("Dynamic model catalog covers the wired models", "[dynamics][catalog]"
         "GFLPQOuterControl", "GFMDroopOuterControl",
         "PIInnerCurrentControl", "VirtualImpedanceInnerControl",
         "SimplifiedSingleCageInductionMachine", "SingleCageInductionMachine",
+        "FluxInductionMachine", "REGC_A", "ActiveConstantPowerLoad",
         "FirstOrderDCDCConverter", "BatterySOCFirstOrder", "ZIP"}) {
     INFO("model " << name);
     CHECK(find_dynamic_model(name).has_value());
