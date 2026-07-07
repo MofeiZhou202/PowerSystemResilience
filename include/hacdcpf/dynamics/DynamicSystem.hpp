@@ -48,6 +48,10 @@ struct DynamicFaultShunt {
   int bus_pos{-1};
   bool is_ac{true};
   bool active{true};
+  // Faulted phase for unbalanced (SLG/LL) faults: -1 applies the shunt to all
+  // three phases (balanced), 0/1/2 applies it to a single phase (design doc
+  // §17 unbalanced fault stamps).
+  int phase{-1};
   double g_pu{0.0};
   double b_pu{0.0};
   double clear_time_s{0.0};
@@ -147,6 +151,15 @@ struct DynamicSystem {
   std::vector<std::string> warnings;
   std::unique_ptr<NetworkSolveCache> network_cache;
 
+  // MassMatrixDae effective-admittance cache. The effective Yac/Gdc are
+  // state-independent between topology events, so they are assembled once and
+  // reused across the many residual evaluations of each Newton/adaptive step
+  // instead of rebuilding the sparse matrices (setFromTriplets) on every call.
+  // Invalidated whenever an event is applied.
+  bool dae_admittance_valid{false};
+  Eigen::SparseMatrix<std::complex<double>> dae_yac_cache;
+  Eigen::SparseMatrix<double> dae_gdc_cache;
+
   void assignStateIndices();
   void initializeStatesFromPowerFlow();
   [[nodiscard]] bool solveNetwork(double t, std::string& error);
@@ -165,6 +178,12 @@ struct DynamicSystem {
                      std::string& error);
   bool dcSolveCached(const Eigen::SparseMatrix<double>& a, const Eigen::VectorXd& b,
                      Eigen::VectorXd& x, std::string& error);
+
+  // Finite-difference Newton solve of the algebraic network residual
+  // g(V) = I_inj(V) - Y_eff*V = 0 with device differential states frozen. Used as
+  // a robustness fallback when the Gauss/Picard fixed-point in solveNetwork()
+  // stalls short of tolerance.
+  bool solveNetworkNewton(double t, std::string& error);
 };
 
 }  // namespace hacdcpf::dynamics

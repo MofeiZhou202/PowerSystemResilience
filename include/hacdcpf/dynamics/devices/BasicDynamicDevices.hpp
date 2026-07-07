@@ -370,6 +370,15 @@ struct VoltageSourceDynamicParams {
   double xdpp_pu{0.0};
   double xqpp_pu{0.0};
   double xl_pu{0.0};
+  // Sequence-network interface (design doc §8.8). When x2_pu/x0_pu are set the
+  // machine presents a sequence-coupled Norton admittance to the unbalanced
+  // network (negative/zero-sequence impedances) and, if r2_pu is set, feels the
+  // negative-sequence braking torque. All default to 0, which reproduces the
+  // balanced positive-sequence-only behavior.
+  double x2_pu{0.0};
+  double r2_pu{0.0};
+  double x0_pu{0.0};
+  double r0_pu{0.0};
   double td0p_s{0.0};
   double td0pp_s{0.0};
   double tq0p_s{0.0};

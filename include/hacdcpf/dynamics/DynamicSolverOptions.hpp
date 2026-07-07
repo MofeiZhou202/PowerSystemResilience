@@ -63,6 +63,14 @@ struct DynamicSolverOptions {
   bool dae_use_analytic_network_jacobian{true};
   bool dae_use_analytic_device_jacobian{true};
   bool dae_use_fd_current_jacobian_corrections{true};
+  // Skip the O(n) global finite-difference Jacobian sweep when the analytic
+  // network block and per-device (local finite-difference) Jacobian blocks are
+  // active. Those local blocks already cover every device that implements
+  // addJacobian, so the global sweep is redundant for them; skipping it makes
+  // each Jacobian rebuild cost O(devices) instead of O(system size). Opt-in
+  // because device types without an addJacobian override still need the global
+  // sweep for a complete Jacobian.
+  bool dae_skip_global_fd_when_analytic{false};
   int dae_jacobian_max_reuse_steps{8};
   double dae_jacobian_stale_residual_ratio{0.75};
 
@@ -85,6 +93,11 @@ struct DynamicSolverOptions {
   bool use_consistent_dynamic_initialization{true};
   int algebraic_network_max_iters{6};
   double algebraic_network_tol{1e-6};
+  // When the partitioned Gauss/Picard network fixed-point stalls (linear
+  // convergence on stiff constant-power / IBR mixes), fall back to a
+  // finite-difference Newton solve of the algebraic network residual
+  // g(V) = I_inj(V) - Y_eff*V = 0 before declaring non-convergence.
+  bool network_newton_fallback{true};
 
   double min_accepted_step_s{1e-7};
   double voltage_collapse_min_ac_pu{0.05};
@@ -100,6 +113,10 @@ struct DynamicSolverOptions {
   double dc_link_coupling_conductance_pu{20.0};
   double min_branch_impedance_pu{1e-6};
   double singular_regularization_pu{1e-8};
+  // Time constant of the per-bus measured-frequency low-pass filter (design doc
+  // §7 role 4). The filter tracks the bus voltage-angle derivative; larger values
+  // smooth the signal more.
+  double measured_frequency_filter_t_s{0.02};
 
   PowerFlowOptions power_flow_options{};
 };

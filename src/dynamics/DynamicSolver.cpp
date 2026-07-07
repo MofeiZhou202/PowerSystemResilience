@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <limits>
 #include <sstream>
 #include <vector>
@@ -192,6 +193,7 @@ bool apply_event_to_network(DynamicSystem& sys, const DynamicEvent& event) {
                                                                        : event.component_index);
       fault.bus_pos = is_dc ? sys.network.dcBusPosition(fault.bus)
                             : sys.network.acBusPosition(fault.bus);
+      fault.phase = event.phase;
       const double r_pu = event_param(event, "r_pu", 0.0);
       const double x_pu = event_param(event, "x_pu", 0.0);
       if (r_pu > 0.0 || x_pu != 0.0) {
@@ -296,21 +298,77 @@ bool should_record_snapshot(const DynamicSystem& system,
   }
   return false;
 }
+// Fills the per-bus measured (low-pass filtered) frequency of `snap` from the
+// positive-sequence bus-voltage-angle derivative between `prev` and `snap`
+// (design doc §7 role 4: f_meas is an output filter, never fed back into the
+// frame). The first sample (or any shape change) initializes to nominal; buses
+// whose voltage is too low to define an angle hold their previous value.
+void fill_measured_bus_frequency(DynamicSnapshot& snap,
+                                 const DynamicSnapshot* prev,
+                                 double nominal_hz,
+                                 double filter_t_s) {
+  constexpr double kPi = 3.14159265358979323846;
+  constexpr double kTwoPi = 2.0 * kPi;
+  const Eigen::Index n_nodes = snap.vac_abc.size();
+  const int n_bus = static_cast<int>(n_nodes / 3);
+  if (n_bus <= 0) return;
+  snap.bus_frequency_hz.assign(static_cast<std::size_t>(n_bus), nominal_hz);
+  if (prev == nullptr || prev->vac_abc.size() != n_nodes ||
+      prev->bus_frequency_hz.size() != static_cast<std::size_t>(n_bus)) {
+    return;  // first sample: seed the filter at nominal
+  }
+  const double dt = snap.time_s - prev->time_s;
+  if (!(dt > 0.0)) {
+    snap.bus_frequency_hz = prev->bus_frequency_hz;
+    return;
+  }
+  const double tf = filter_t_s > 1e-9 ? filter_t_s : 1e-9;
+  const double alpha = std::clamp(dt / tf, 0.0, 1.0);
+  const std::complex<double> a = std::polar(1.0, kTwoPi / 3.0);
+  for (int b = 0; b < n_bus; ++b) {
+    const int base = 3 * b;
+    const std::complex<double> v_now =
+        (snap.vac_abc[base] + a * snap.vac_abc[base + 1] +
+         a * a * snap.vac_abc[base + 2]) /
+        3.0;
+    const std::complex<double> v_prev =
+        (prev->vac_abc[base] + a * prev->vac_abc[base + 1] +
+         a * a * prev->vac_abc[base + 2]) /
+        3.0;
+    if (std::abs(v_now) < 1e-6 || std::abs(v_prev) < 1e-6) {
+      snap.bus_frequency_hz[static_cast<std::size_t>(b)] =
+          prev->bus_frequency_hz[static_cast<std::size_t>(b)];
+      continue;
+    }
+    double dtheta = std::arg(v_now) - std::arg(v_prev);
+    while (dtheta > kPi) dtheta -= kTwoPi;
+    while (dtheta <= -kPi) dtheta += kTwoPi;
+    const double f_inst = nominal_hz + (dtheta / dt) / kTwoPi;
+    const double f_prev = prev->bus_frequency_hz[static_cast<std::size_t>(b)];
+    snap.bus_frequency_hz[static_cast<std::size_t>(b)] =
+        f_prev + alpha * (f_inst - f_prev);
+  }
+}
 
 void record_snapshot_if_needed(DynamicSystem& system,
                                DynamicResults& results,
                                int step) {
   if (should_record_snapshot(system, results, step, system.x.time_s)) {
-    results.snapshots.push_back(
-        make_snapshot(system, system.options.record_device_outputs));
+    const DynamicSnapshot* prev =
+        results.snapshots.empty() ? nullptr : &results.snapshots.back();
+    DynamicSnapshot snap =
+        make_snapshot(system, system.options.record_device_outputs);
+    fill_measured_bus_frequency(snap, prev, system.network.frequency_hz,
+                                system.options.measured_frequency_filter_t_s);
+    results.snapshots.push_back(std::move(snap));
     // Detect (once) an energized AC island that has lost its frequency anchor:
     // sources present but no synchronous machine / grid-forming inverter / slack.
     // This is the islanding case that makes the network algebraic block singular
     // (design doc §6.2), so it is surfaced as a diagnostic rather than failing
     // silently.
-    const DynamicSnapshot& snap = results.snapshots.back();
+    const DynamicSnapshot& recorded = results.snapshots.back();
     bool anchorless = false;
-    for (const auto& island : snap.island_frequencies) {
+    for (const auto& island : recorded.island_frequencies) {
       if (island.has_source && !island.has_anchor) {
         anchorless = true;
         break;
@@ -828,8 +886,25 @@ void dae_assemble(DynamicSystem& sys, const DaeLayout& L, double t,
                   Eigen::SparseMatrix<double>& Gdc, Eigen::VectorXd& Idc) {
   DynamicStamp stamp(L.n_ac, L.n_dc);
   for (const auto& device : sys.devices) device->stamp(t, sys.x, sys.y, stamp);
-  sys.network.assembleEffectiveMatrices(stamp, sys.options.singular_regularization_pu,
-                                        Yac, Iac, Gdc, Idc);
+  // The effective admittance is state-independent between topology events, so
+  // reuse the cached sparse matrices (a cheap copy) and only refresh the
+  // state-dependent injection currents. The cache is invalidated on every event.
+  const bool reuse =
+      sys.dae_admittance_valid &&
+      sys.dae_yac_cache.rows() == L.n_ac && sys.dae_yac_cache.cols() == L.n_ac &&
+      sys.dae_gdc_cache.rows() == L.n_dc && sys.dae_gdc_cache.cols() == L.n_dc;
+  if (reuse) {
+    Yac = sys.dae_yac_cache;
+    Gdc = sys.dae_gdc_cache;
+    Iac = stamp.Iac;
+    Idc = stamp.Idc;
+  } else {
+    sys.network.assembleEffectiveMatrices(stamp, sys.options.singular_regularization_pu,
+                                          Yac, Iac, Gdc, Idc);
+    sys.dae_yac_cache = Yac;
+    sys.dae_gdc_cache = Gdc;
+    sys.dae_admittance_valid = true;
+  }
 }
 
 bool dae_compute_derivatives(DynamicSystem& sys,
@@ -1119,7 +1194,16 @@ bool dae_build_and_factor_jacobian(DynamicSystem& sys,
     h[static_cast<std::size_t>(j)] = eps * std::max(1.0, std::abs(u[j]));
   }
 
-  if (!settings.use_colored_fd) {
+  // The per-device analytic blocks (local finite-difference over each device's
+  // own state range plus its terminal bus) already provide the complete device
+  // Jacobian, so the global sweep below is redundant when they are active. It is
+  // kept as a fallback for device types that do not implement addJacobian.
+  const bool skip_global_fd =
+      sys.options.dae_skip_global_fd_when_analytic &&
+      settings.use_analytic_network && settings.use_analytic_device;
+  if (skip_global_fd) {
+    // analytic_triplets already loaded into `triplets` above.
+  } else if (!settings.use_colored_fd) {
     outcome.jacobian_fd_columns += L.n;
     outcome.jacobian_colored_groups += L.n;
     for (int j = 0; j < L.n; ++j) {
@@ -1496,6 +1580,7 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
       layout = make_dae_layout(system);
       dae_cache.invalidate();
       dae_predictor_cache.invalidate();
+      system.dae_admittance_valid = false;
       if (coupled_network_startup) {
         dae_finalize(system, layout, t);
       } else if (!system.solveNetwork(t, error)) {
@@ -1596,6 +1681,7 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
       layout = make_dae_layout(system);
       dae_cache.invalidate();
       dae_predictor_cache.invalidate();
+      system.dae_admittance_valid = false;
       if (coupled_network_startup) {
         dae_finalize(system, layout, system.x.time_s);
       } else if (!system.solveNetwork(system.x.time_s, error)) {

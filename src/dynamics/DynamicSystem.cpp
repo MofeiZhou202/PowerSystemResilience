@@ -388,6 +388,7 @@ void DynamicNetwork::rebuildBaseMatrices(double singular_regularization_pu) {
     if (!fault.active || !fault.is_ac || fault.bus_pos < 0) continue;
     const Complex y_fault(fault.g_pu, fault.b_pu);
     for (int phase = 0; phase < 3; ++phase) {
+      if (fault.phase >= 0 && fault.phase < 3 && phase != fault.phase) continue;
       const int node = acPhaseNode(fault.bus_pos, phase);
       y_triplets.emplace_back(node, node, y_fault);
     }
@@ -886,17 +887,190 @@ bool DynamicSystem::solveNetwork(double t, std::string& error) {
   }
 
   if (!converged && final_delta > tol) {
-    std::ostringstream os;
-    os << "Transient algebraic network solve did not converge at t=" << t
-       << "s; voltage fixed-point residual=" << std::scientific << final_delta
-       << " > " << tol << " (AC=" << final_ac_delta
-       << ", DC=" << final_dc_delta << ")";
-    error = os.str();
-    return false;
+    // The Gauss/Picard fixed-point stalled short of tolerance. Before declaring
+    // failure, try a finite-difference Newton solve of the same algebraic
+    // network residual, which converges quadratically where Picard is only
+    // linear (design doc §15.2, §20 item 1).
+    std::string newton_error;
+    if (options.network_newton_fallback && solveNetworkNewton(t, newton_error)) {
+      converged = true;
+    } else {
+      std::ostringstream os;
+      os << "Transient algebraic network solve did not converge at t=" << t
+         << "s; voltage fixed-point residual=" << std::scientific << final_delta
+         << " > " << tol << " (AC=" << final_ac_delta
+         << ", DC=" << final_dc_delta << ")";
+      if (!newton_error.empty()) os << "; Newton fallback: " << newton_error;
+      error = os.str();
+      return false;
+    }
   }
 
   for (auto& device : devices) {
     device->updateAlgebraicOutputs(x, y);
+  }
+  error.clear();
+  return true;
+}
+
+bool DynamicSystem::solveNetworkNewton(double t, std::string& error) {
+  const int n_ac = network.acPhaseNodeCount();
+  const int n_dc = network.dcBusCount();
+  const int m = 2 * n_ac + n_dc;
+  if (m == 0) {
+    error.clear();
+    return true;
+  }
+  const int lac = 0;
+  const int lai = n_ac;
+  const int ldc = 2 * n_ac;
+
+  // Evaluate the algebraic network residual g(V) = I_inj(V) - Y_eff*V at the
+  // current voltages (device differential states are held fixed).
+  const auto eval_residual = [&](Eigen::VectorXd& R) -> bool {
+    DynamicStamp stamp(n_ac, n_dc);
+    for (const auto& device : devices) device->stamp(t, x, y, stamp);
+    Eigen::SparseMatrix<Complex> Yac;
+    Eigen::VectorXcd Iac;
+    Eigen::SparseMatrix<double> Gdc;
+    Eigen::VectorXd Idc;
+    network.assembleEffectiveMatrices(stamp, options.singular_regularization_pu,
+                                      Yac, Iac, Gdc, Idc);
+    R.resize(m);
+    if (n_ac > 0) {
+      const Eigen::VectorXcd g = Iac - Yac * y.Vac_abc;
+      for (int i = 0; i < n_ac; ++i) {
+        R[lac + i] = g[i].real();
+        R[lai + i] = g[i].imag();
+      }
+    }
+    if (n_dc > 0) {
+      const Eigen::VectorXd g = Idc - Gdc * y.Vdc;
+      for (int i = 0; i < n_dc; ++i) R[ldc + i] = g[i];
+    }
+    return R.allFinite();
+  };
+
+  const auto perturb = [&](int j, double h) {
+    if (j < n_ac) {
+      y.Vac_abc[j] += Complex(h, 0.0);
+    } else if (j < 2 * n_ac) {
+      y.Vac_abc[j - n_ac] += Complex(0.0, h);
+    } else {
+      y.Vdc[j - 2 * n_ac] += h;
+    }
+  };
+  const auto value_of = [&](int j) -> double {
+    if (j < n_ac) return y.Vac_abc[j].real();
+    if (j < 2 * n_ac) return y.Vac_abc[j - n_ac].imag();
+    return y.Vdc[j - 2 * n_ac];
+  };
+
+  const double tol = std::max(1e-12, options.algebraic_network_tol);
+  const double fd_eps = std::sqrt(std::numeric_limits<double>::epsilon());
+  const int max_iters = 25;
+  Eigen::VectorXd R0;
+  Eigen::VectorXd Rp;
+  bool converged = false;
+  for (int iter = 0; iter < max_iters; ++iter) {
+    if (!eval_residual(R0)) {
+      error = "network Newton residual is non-finite";
+      return false;
+    }
+    if (R0.cwiseAbs().maxCoeff() <= tol) {
+      converged = true;
+      break;
+    }
+
+    // Finite-difference Jacobian of the network residual, one column per network
+    // unknown, restoring the voltages exactly after each perturbation.
+    const Eigen::VectorXcd vac0 = y.Vac_abc;
+    const Eigen::VectorXd vdc0 = y.Vdc;
+    std::vector<Eigen::Triplet<double>> triplets;
+    triplets.reserve(static_cast<std::size_t>(m) * 8);
+    for (int j = 0; j < m; ++j) {
+      const double h = fd_eps * std::max(1.0, std::abs(value_of(j)));
+      perturb(j, h);
+      const bool ok = eval_residual(Rp);
+      y.Vac_abc = vac0;
+      y.Vdc = vdc0;
+      if (!ok) {
+        error = "network Newton finite-difference produced a non-finite residual";
+        return false;
+      }
+      const Eigen::VectorXd col = (Rp - R0) / h;
+      for (int i = 0; i < m; ++i) {
+        if (std::abs(col[i]) > 1e-14) triplets.emplace_back(i, j, col[i]);
+      }
+    }
+
+    Eigen::SparseMatrix<double> J(m, m);
+    J.setFromTriplets(triplets.begin(), triplets.end());
+    J.makeCompressed();
+    Eigen::SparseLU<Eigen::SparseMatrix<double>> lu;
+    lu.compute(J);
+    if (lu.info() != Eigen::Success) {
+      error = "network Newton Jacobian factorization failed";
+      return false;
+    }
+    const Eigen::VectorXd dv = lu.solve(-R0);
+    if (lu.info() != Eigen::Success || !dv.allFinite()) {
+      error = "network Newton linear solve failed";
+      return false;
+    }
+    // Trust region: cap the raw step so Newton stays near the current iterate,
+    // preventing a jump to a non-physical (e.g. low-voltage) solution branch on
+    // networks with constant-power devices (which admit multiple roots).
+    Eigen::VectorXd step = dv;
+    const double step_inf = step.size() > 0 ? step.cwiseAbs().maxCoeff() : 0.0;
+    constexpr double kTrustRadius = 0.25;
+    if (step_inf > kTrustRadius) step *= kTrustRadius / step_inf;
+    // Backtracking line search: accept the largest step length (<= 1) that
+    // strictly reduces the residual. This globalizes Newton so it converges to
+    // the physical solution near the stalled Picard iterate instead of
+    // overshooting into a non-physical region on stiff machine networks.
+    const double rnorm0 = R0.cwiseAbs().maxCoeff();
+    double lambda = 1.0;
+    bool accepted = false;
+    for (int bt = 0; bt < 24; ++bt) {
+      for (int i = 0; i < n_ac; ++i) {
+        y.Vac_abc[i] = vac0[i] + lambda * Complex(step[lac + i], step[lai + i]);
+      }
+      for (int i = 0; i < n_dc; ++i) {
+        y.Vdc[i] = vdc0[i] + lambda * step[ldc + i];
+      }
+      if (eval_residual(Rp) && Rp.cwiseAbs().maxCoeff() < rnorm0) {
+        accepted = true;
+        break;
+      }
+      lambda *= 0.5;
+    }
+    if (!accepted) {
+      y.Vac_abc = vac0;
+      y.Vdc = vdc0;
+      error = "network Newton line search failed to reduce the residual";
+      return false;
+    }
+  }
+
+  if (!converged) {
+    error = "network Newton did not converge within the iteration budget";
+    return false;
+  }
+
+  // Refresh the injected-current vectors so downstream consumers see values
+  // consistent with the Newton-converged voltages.
+  {
+    DynamicStamp stamp(n_ac, n_dc);
+    for (const auto& device : devices) device->stamp(t, x, y, stamp);
+    Eigen::SparseMatrix<Complex> Yac;
+    Eigen::VectorXcd Iac;
+    Eigen::SparseMatrix<double> Gdc;
+    Eigen::VectorXd Idc;
+    network.assembleEffectiveMatrices(stamp, options.singular_regularization_pu,
+                                      Yac, Iac, Gdc, Idc);
+    if (n_ac > 0) y.Iac_abc = Iac;
+    if (n_dc > 0) y.Idc = Idc;
   }
   error.clear();
   return true;

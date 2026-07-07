@@ -400,6 +400,60 @@ Eigen::Matrix3cd diagonal_admittance(Complex y) {
   return matrix;
 }
 
+// Negative- and zero-sequence extraction, matching the positive-sequence
+// convention in positive_sequence_voltage() (a = e^{j2pi/3}).
+Complex negative_sequence_voltage(const Eigen::Vector3cd& v) {
+  const Complex a(-0.5, std::sqrt(3.0) / 2.0);
+  return (v[0] + a * a * v[1] + a * v[2]) / 3.0;
+}
+
+Complex zero_sequence_voltage(const Eigen::Vector3cd& v) {
+  return (v[0] + v[1] + v[2]) / 3.0;
+}
+
+// Phase-domain admittance of a device defined by its sequence admittances
+// (design doc §8.8): Y_abc = T * diag(Y0, Y1, Y2) * T^-1 with the symmetrical
+// component transform T. Reduces to Y1 * I when Y0 = Y1 = Y2 (balanced).
+Eigen::Matrix3cd sequence_admittance_block(Complex y0, Complex y1, Complex y2) {
+  const Complex a = std::polar(1.0, kTwoPi / 3.0);
+  Eigen::Matrix3cd t;
+  t << Complex(1.0, 0.0), Complex(1.0, 0.0), Complex(1.0, 0.0),
+       Complex(1.0, 0.0), a * a, a,
+       Complex(1.0, 0.0), a, a * a;
+  Eigen::Matrix3cd d = Eigen::Matrix3cd::Zero();
+  d(0, 0) = y0;
+  d(1, 1) = y1;
+  d(2, 2) = y2;
+  return t * d * t.inverse();
+}
+
+// Machine Norton admittance as a phase-domain block. With the sequence
+// parameters unset (x2_pu = x0_pu = 0) this returns the balanced diagonal
+// y1 * I (previous behavior); otherwise it stamps the sequence-coupled block so
+// negative/zero-sequence load currents flow through the machine's X2/X0 paths.
+Eigen::Matrix3cd machine_sequence_norton(const VoltageSourceDynamicParams& p,
+                                         Complex y1) {
+  if (p.x2_pu <= 0.0 && p.x0_pu <= 0.0) return diagonal_admittance(y1);
+  const Complex y2 =
+      p.x2_pu > 0.0 ? Complex(1.0, 0.0) / Complex(p.r2_pu, p.x2_pu) : y1;
+  const Complex y0 =
+      p.x0_pu > 0.0 ? Complex(1.0, 0.0) / Complex(p.r0_pu, p.x0_pu) : y1;
+  return sequence_admittance_block(y0, y1, y2);
+}
+
+// Negative-sequence braking torque (design doc §8.8): the 2*omega rotor currents
+// induced by the terminal negative-sequence voltage dissipate in rotor
+// resistance, producing an average torque opposing rotation. Returns 0 when the
+// negative-sequence path is not modeled. tau_brake = (Re(Z2) - Ra) * |I2|^2 with
+// I2 = V2 / Z2 the negative-sequence machine current.
+double negative_sequence_braking_torque(const VoltageSourceDynamicParams& p,
+                                         const Eigen::Vector3cd& v_abc) {
+  if (p.x2_pu <= 0.0 || p.r2_pu <= 0.0) return 0.0;
+  const Complex z2(p.r2_pu, p.x2_pu);
+  const Complex i2 = negative_sequence_voltage(v_abc) / z2;
+  return std::max(0.0, z2.real() - p.r_pu) * std::norm(i2);
+}
+
 double clamp_voltage(double v) {
   if (!std::isfinite(v)) return 1.0;
   return std::max(kMinVoltage, std::abs(v));
@@ -2951,11 +3005,14 @@ void SynchronousMachine::computeDerivatives(double,
     const OneDOneQEval e = evaluate_onedoneq(mp, v, delta, eq_p, ed_p);
     const double h = std::max(0.01, params_.inertia_h);
     const double wb = kTwoPi * params_.frequency_hz;
+    const double tau_brake =
+        negative_sequence_braking_torque(params_, bus_voltage(y, params_.bus_pos));
     dxdt[state_index(range_, 0)] = params_.dynamic_angle ? wb * (omega - 1.0) : 0.0;
     if (params_.dynamic_angle) {
       const double swing_power =
-          tau_m - e.tau_e - params_.damping_d * (omega - 1.0) /
-                                std::max(kMinVoltage, std::abs(omega));
+          tau_m - e.tau_e - tau_brake -
+          params_.damping_d * (omega - 1.0) /
+              std::max(kMinVoltage, std::abs(omega));
       dxdt[state_index(range_, 1)] =
           (std::abs(swing_power) <= kMachinePowerBalanceTolPu &&
            std::abs(omega - 1.0) <= kMachinePowerBalanceTolPu)
@@ -3243,7 +3300,8 @@ void SynchronousMachine::stamp(double,
     const Complex yv = Complex(1.0, 0.0) / z;
     const Complex e_ri = v + z * e.current;
     const Eigen::Vector3cd e_src = balanced_phasors(std::abs(e_ri), std::arg(e_ri));
-    add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(yv));
+    add_balanced_admittance(stamp, params_.bus_pos,
+                            machine_sequence_norton(params_, yv));
     add_balanced_current(stamp, params_.bus_pos, yv * e_src);
     return;
   }
@@ -3448,6 +3506,10 @@ DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
     out.values["q_mvar"] = e.qe * safe_base(params_.base_mva);
     out.values["i_rms_pu"] = std::abs(e.current);
     out.values["torque_e_pu"] = e.tau_e;
+    out.values["v_neg_seq_pu"] =
+        std::abs(negative_sequence_voltage(bus_voltage(y, params_.bus_pos)));
+    out.values["tau_brake_pu"] =
+        negative_sequence_braking_torque(params_, bus_voltage(y, params_.bus_pos));
     out.values["psd_onedoneq"] = 1.0;
     inner.set(GeneratorInnerVar::ElectricalTorque, e.tau_e);
     inner.set(GeneratorInnerVar::PsiD, eq_p);

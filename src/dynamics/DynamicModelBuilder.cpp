@@ -442,6 +442,12 @@ void apply_voltage_source_profile(const hacdcpf::DynamicModelProfile& profile,
     }
     return fallback;
   };
+  // Sequence-network interface parameters (design doc §8.8), common to every
+  // machine model; unset (0) reproduces balanced positive-sequence behavior.
+  params.x2_pu = find_param({"X2", "Xnegative", "x2"}, params.x2_pu);
+  params.r2_pu = find_param({"R2", "Rnegative", "r2"}, params.r2_pu);
+  params.x0_pu = find_param({"X0", "Xzero", "x0"}, params.x0_pu);
+  params.r0_pu = find_param({"R0", "Rzero", "r0"}, params.r0_pu);
   if (iequals(profile.model_name, "OneDOneQMachine") ||
       iequals(profile.model_name, "OneDOneQ")) {
     params.machine_model = SynchronousMachineModelKind::OneDOneQ;

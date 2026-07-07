@@ -2964,8 +2964,10 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
   json frequency = json::array();
   json ac_voltage_matrix = json::array();
   json dc_voltage_matrix = json::array();
+  json bus_frequency_matrix = json::array();
   std::vector<json> ac_rows;
   std::vector<json> dc_rows;
+  std::vector<json> bus_freq_rows;
   std::map<std::string, json> device_series;
 
   for (const auto& snap : result.snapshots) {
@@ -2989,6 +2991,14 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
     }
     for (Eigen::Index i = 0; i < snap.vdc.size(); ++i) {
       dc_rows[static_cast<std::size_t>(i)].push_back(snap.vdc[i]);
+    }
+
+    if (bus_freq_rows.empty()) {
+      bus_freq_rows.resize(snap.bus_frequency_hz.size());
+      for (auto& row : bus_freq_rows) row = json::array();
+    }
+    for (std::size_t i = 0; i < snap.bus_frequency_hz.size(); ++i) {
+      bus_freq_rows[i].push_back(snap.bus_frequency_hz[i]);
     }
 
     for (const auto& dev : snap.device_outputs) {
@@ -3029,6 +3039,7 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
 
   for (const auto& row : ac_rows) ac_voltage_matrix.push_back(row);
   for (const auto& row : dc_rows) dc_voltage_matrix.push_back(row);
+  for (const auto& row : bus_freq_rows) bus_frequency_matrix.push_back(row);
 
   json devices = json::array();
   for (auto& [_, dev] : device_series) {
@@ -3043,6 +3054,7 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
   out["frequency_hz"] = frequency;
   out["ac_voltage_matrix"] = ac_voltage_matrix;
   out["dc_voltage_matrix"] = dc_voltage_matrix;
+  out["bus_frequency_matrix"] = bus_frequency_matrix;
   out["device_series"] = devices;
   if (const auto* final = result.final_snapshot()) {
     out["final"] = json{{"time_s", final->time_s},

@@ -100,6 +100,10 @@ struct DynamicSnapshot {
   double frequency_hz{0.0};
   double coi_frequency_hz{0.0};
   std::vector<DynamicIslandFrequency> island_frequencies;
+  // Measured (low-pass filtered) frequency per AC bus, derived from the bus
+  // voltage-angle derivative (design doc §7 role 4). This is an output signal for
+  // relays / ride-through logic / plotting; it is never fed back into the frame.
+  std::vector<double> bus_frequency_hz;
   std::vector<DynamicDeviceOutput> device_outputs;
 };
 

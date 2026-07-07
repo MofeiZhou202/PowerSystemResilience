@@ -7272,6 +7272,22 @@ TEST_CASE("Frequency observability: two-machine COI is inertia-weighted",
   }
   CHECK(max_diff < 1e-4);    // COI equals the inertia-weighted average
   CHECK(max_spread > 1e-4);  // the machines diverged, so weighting mattered
+
+  // Measured per-bus frequency (design doc §7 role 4) is populated, stays within
+  // a sane band, and actually responds to the disturbance.
+  double meas_min = std::numeric_limits<double>::infinity();
+  double meas_max = -std::numeric_limits<double>::infinity();
+  for (const auto& snap : result.snapshots) {
+    REQUIRE(snap.bus_frequency_hz.size() == sys.ac.buses.size());
+    for (const double f : snap.bus_frequency_hz) {
+      REQUIRE(std::isfinite(f));
+      meas_min = std::min(meas_min, f);
+      meas_max = std::max(meas_max, f);
+    }
+  }
+  CHECK(meas_min > 45.0);
+  CHECK(meas_max < 55.0);
+  CHECK((meas_max - meas_min) > 1e-3);  // the measured signal tracked the event
 }
 
 TEST_CASE("Frequency observability: island detection reacts to a tie-line trip",
@@ -7392,4 +7408,139 @@ TEST_CASE("Frequency observability: island detection reacts to a tie-line trip",
                      [](const std::string& w) {
                        return w.find("no frequency anchor") != std::string::npos;
                      }));
+}
+
+TEST_CASE("Unbalanced machine sequence interface: SLG fault braking torque",
+          "[dynamics][unbalanced][sequence]") {
+  // Design doc §8.8: a machine with sequence parameters presents Y0/Y1/Y2 to the
+  // unbalanced network and feels a negative-sequence braking torque. A
+  // single-line-to-ground (SLG) fault creates negative-sequence voltage; the
+  // braking torque then appears only when the sequence path is modeled.
+  auto make_case = [](bool sequence_enabled) {
+    HybridPowerSystem sys;
+    sys.name = "onedoneq_seq_omib";
+    sys.base_mva = 100.0;
+    sys.ac.base_mva = 100.0;
+    sys.ac.freq_hz = 60.0;
+
+    auto make_bus = [](int index, BusType type, double vm) {
+      ACBus b;
+      b.index = index;
+      b.bus_type = type;
+      b.base_kv = 230.0;
+      b.vm_pu = vm;
+      b.in_service = true;
+      return b;
+    };
+    sys.ac.buses = {make_bus(101, BusType::SLACK, 1.05),
+                    make_bus(102, BusType::PV, 1.02)};
+
+    auto branch = [](int index) {
+      ACBranch br;
+      br.index = index;
+      br.from_bus = 101;
+      br.to_bus = 102;
+      br.r_pu = 0.0;
+      br.x_pu = 0.1;
+      br.tap = 1.0;
+      br.in_service = true;
+      return br;
+    };
+    sys.ac.branches = {branch(1), branch(2)};
+
+    ExternalGrid src;
+    src.index = 1;
+    src.bus = 101;
+    src.vm_pu = 1.05;
+    src.x_pu = 1.0e-5;
+    src.in_service = true;
+    sys.ac.external_grids = {src};
+
+    Generator gen;
+    gen.index = 1;
+    gen.bus = 102;
+    gen.is_slack = false;
+    gen.in_service = true;
+    gen.pg_mw = 40.0;
+    gen.vg_pu = 1.02;
+    gen.pmax_mw = 100.0;
+    gen.qmax_mvar = 100.0;
+    gen.qmin_mvar = -100.0;
+    gen.ra_pu = 0.0;
+    gen.xd_pu = 1.3;
+    gen.xq_pu = 1.25;
+    gen.xdp_pu = 0.18;
+    gen.inertia_h = 4.0;
+    gen.dynamic_model.standard = "PowerSystems";
+    gen.dynamic_model.model_name = "OneDOneQMachine";
+    gen.dynamic_model.parameters = {
+        {"H", 4.0}, {"D", 2.0},    {"R", 0.0},      {"Xd", 1.3},
+        {"Xq", 1.25}, {"Xd_p", 0.18}, {"Xq_p", 0.25}, {"Td0_p", 5.9},
+        {"Tq0_p", 0.6}};
+    if (sequence_enabled) {
+      gen.dynamic_model.parameters["X2"] = 0.20;
+      gen.dynamic_model.parameters["R2"] = 0.05;
+      gen.dynamic_model.parameters["X0"] = 0.10;
+    }
+    sys.ac.generators = {gen};
+    return sys;
+  };
+
+  auto run = [&](bool sequence_enabled) {
+    auto sys = make_case(sequence_enabled);
+    DynamicSolverOptions opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    // Exercise the machine models directly: the canonical projection currently
+    // re-synthesizes the network in a way that suppresses the terminal
+    // negative-sequence voltage for this fixture, so the sequence interface is
+    // validated on the un-projected system (device behavior is identical).
+    opt.project_to_canonical = false;
+    opt.t_end_s = 2.0;
+    opt.dt_s = 0.005;
+    opt.record_every_step = true;
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(sys, opt);
+    DynamicEvent fault;
+    fault.time_s = 1.0;
+    fault.type = DynamicEventType::FaultShunt;
+    fault.bus = 102;
+    fault.phase = 0;  // single-line-to-ground on phase A
+    fault.component_type = "AC";
+    fault.params["x_pu"] = 0.02;
+    fault.params["duration_s"] = 0.1;
+    dyn.events.push_back(fault);
+    DynamicSolver solver;
+    return solver.solve(dyn);
+  };
+
+  const DynamicResults with_seq = run(true);
+  const DynamicResults no_seq = run(false);
+  INFO(with_seq.message);
+  REQUIRE(with_seq.success);
+  REQUIRE(no_seq.success);
+
+  const auto vneg =
+      device_output_series(with_seq, "SynchronousMachine", 1, "v_neg_seq_pu");
+  const auto brake =
+      device_output_series(with_seq, "SynchronousMachine", 1, "tau_brake_pu");
+  const auto brake_off =
+      device_output_series(no_seq, "SynchronousMachine", 1, "tau_brake_pu");
+
+  // The single-phase fault creates negative-sequence voltage at the terminal.
+  CHECK(*std::max_element(vneg.y.begin(), vneg.y.end()) > 0.01);
+  // Braking torque is active only when the sequence path is modeled.
+  CHECK(*std::max_element(brake.y.begin(), brake.y.end()) > 1e-3);
+  CHECK(*std::max_element(brake_off.y.begin(), brake_off.y.end()) < 1e-9);
+
+  // The braking torque perturbs the rotor speed relative to the sequence-free run.
+  const auto w_seq =
+      device_output_series(with_seq, "SynchronousMachine", 1, "omega_pu");
+  const auto w_off =
+      device_output_series(no_seq, "SynchronousMachine", 1, "omega_pu");
+  REQUIRE(w_seq.y.size() == w_off.y.size());
+  double max_dw = 0.0;
+  for (std::size_t i = 0; i < w_seq.y.size(); ++i) {
+    max_dw = std::max(max_dw, std::abs(w_seq.y[i] - w_off.y[i]));
+  }
+  CHECK(max_dw > 1e-4);
 }
