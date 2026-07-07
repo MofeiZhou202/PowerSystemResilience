@@ -2015,22 +2015,117 @@ DynamicModalSummary summarize_small_signal(DynamicSystem& system) {
   return modal;
 }
 
+namespace {
+
+bool is_explicit_partitioned_solver(DynamicSolverType t) {
+  return t == DynamicSolverType::PartitionedEuler ||
+         t == DynamicSolverType::PartitionedHeun ||
+         t == DynamicSolverType::PartitionedRK4;
+}
+
+// Real-axis extent L of the explicit method's absolute-stability region: the
+// integration is stable for a real eigenvalue lambda while dt*lambda >= -L.
+double explicit_stability_real_extent(DynamicSolverType t) {
+  switch (t) {
+    case DynamicSolverType::PartitionedEuler: return 2.0;    // forward Euler: [-2, 0]
+    case DynamicSolverType::PartitionedHeun: return 2.0;     // RK2: [-2, 0]
+    case DynamicSolverType::PartitionedRK4: return 2.785;    // RK4: ~[-2.785, 0]
+    default: return 2.0;
+  }
+}
+
+const char* solver_type_display_name(DynamicSolverType t) {
+  switch (t) {
+    case DynamicSolverType::PartitionedEuler: return "PartitionedEuler";
+    case DynamicSolverType::PartitionedHeun: return "PartitionedHeun";
+    case DynamicSolverType::PartitionedRK4: return "PartitionedRK4";
+    case DynamicSolverType::BackwardEulerNewton: return "BackwardEulerNewton";
+    case DynamicSolverType::TrapezoidalNewton: return "TrapezoidalNewton";
+    case DynamicSolverType::RosenbrockEuler: return "RosenbrockEuler";
+    case DynamicSolverType::MassMatrixDae: return "MassMatrixDae";
+  }
+  return "unknown";
+}
+
+}  // namespace
+
+std::string maybe_auto_select_stiff_solver(DynamicSystem& system) {
+  auto& opt = system.options;
+  if (!opt.auto_select_stiff_solver) return {};
+  // Only manage explicit solvers: a deliberate implicit choice is respected (it
+  // is A-stable and may also be guarding against post-event stiffness that a
+  // pre-event linearization cannot see).
+  if (!is_explicit_partitioned_solver(opt.solver_type)) return {};
+  if (opt.dt_s <= 0.0) return {};
+  const SmallSignalResult ss = small_signal_analysis(system);
+  if (!ss.success || ss.modes.empty()) return {};
+  double fastest = 0.0;
+  std::string dom;
+  for (const auto& m : ss.modes) {
+    if (m.eigen_real < fastest) {
+      fastest = m.eigen_real;
+      dom = m.dominant_state;
+    }
+  }
+
+  // Pick the cheapest stable solver from a cost-ordered ladder, evaluated with a
+  // safety margin on each explicit stability region so a marginal eigenvalue is
+  // not selected. The ladder deliberately excludes first-order forward Euler as
+  // a target, so auto-selection never drops below second-order accuracy:
+  //   PartitionedHeun (2 evals, region ~[-2,0])
+  //   PartitionedRK4  (4 evals, region ~[-2.785,0])
+  //   TrapezoidalNewton (implicit, A-stable)
+  // This downshifts (e.g. RK4 -> Heun) when the operating point is non-stiff and
+  // upshifts (Heun -> RK4 -> implicit) when it is stiff.
+  constexpr double margin = 0.9;
+  DynamicSolverType chosen;
+  const char* reason;
+  if (fastest >= -margin * explicit_stability_real_extent(
+                              DynamicSolverType::PartitionedHeun) / opt.dt_s) {
+    chosen = DynamicSolverType::PartitionedHeun;
+    reason = "non-stiff: within the RK2 stability region";
+  } else if (fastest >= -margin * explicit_stability_real_extent(
+                                     DynamicSolverType::PartitionedRK4) / opt.dt_s) {
+    chosen = DynamicSolverType::PartitionedRK4;
+    reason = "mildly stiff: within the RK4 stability region";
+  } else {
+    chosen = DynamicSolverType::TrapezoidalNewton;
+    reason = "stiff: outside every explicit stability region";
+  }
+  if (chosen == opt.solver_type) return {};  // already the cheapest stable choice
+  const DynamicSolverType from = opt.solver_type;
+  opt.solver_type = chosen;
+  std::ostringstream note;
+  note << "auto_select_stiff_solver: " << solver_type_display_name(from) << " -> "
+       << solver_type_display_name(chosen) << " (fastest eigenvalue Re=" << fastest;
+  if (!dom.empty()) note << " [" << dom << "]";
+  note << " at dt=" << opt.dt_s << ", " << reason << ")";
+  return note.str();
+}
+
 DynamicResults run_transient_simulation(const HybridPowerSystem& sys,
                                         const DynamicSolverOptions& options) {
   DynamicModelBuilder builder;
   DynamicSystem dynamic_system = builder.build(sys, options);
 
+  // Optionally auto-switch an explicit solver to an implicit one when the
+  // operating point is too stiff for the explicit stability region at this dt.
+  const std::string stiff_note = maybe_auto_select_stiff_solver(dynamic_system);
+
   // Optional small-signal (modal) screen about the initialized equilibrium.
   // Runs BEFORE time-stepping; small_signal_analysis() saves and restores the
   // system state, so the trajectory that follows is unaffected.
   DynamicModalSummary modal;
-  if (options.compute_small_signal) {
+  if (dynamic_system.options.compute_small_signal) {
     modal = summarize_small_signal(dynamic_system);
   }
 
   DynamicSolver solver;
   DynamicResults results = solver.solve(dynamic_system);
   results.modal = std::move(modal);
+  if (!stiff_note.empty()) {
+    results.warnings.insert(results.warnings.begin(), stiff_note);
+  }
   return results;
 }
 

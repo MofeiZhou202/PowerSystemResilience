@@ -12697,6 +12697,8 @@ int main(int argc, char** argv) {
           j.value("voltage_blowup_max_dc_pu", opt.voltage_blowup_max_dc_pu);
       opt.compute_small_signal =
           j.value("compute_small_signal", opt.compute_small_signal);
+      opt.auto_select_stiff_solver =
+          j.value("auto_select_stiff_solver", opt.auto_select_stiff_solver);
 
       bool used_cached_power_flow_initialization = false;
       if (requested_power_flow_initialization &&
@@ -12722,6 +12724,11 @@ int main(int argc, char** argv) {
       hacdcpf::dynamics::DynamicModelBuilder builder;
       hacdcpf::dynamics::DynamicSystem dyn = builder.build(sys, opt);
       const auto build_end = std::chrono::steady_clock::now();
+      // Optionally auto-switch an explicit solver to implicit when the operating
+      // point is too stiff for the explicit stability region at this dt.
+      const std::string stiff_solver_note =
+          hacdcpf::dynamics::maybe_auto_select_stiff_solver(dyn);
+      opt.solver_type = dyn.options.solver_type;  // reflect any switch in the report
       if (j.contains("events") && j["events"].is_array()) {
         for (const auto& ej : j["events"]) {
           hacdcpf::dynamics::DynamicEvent event;
@@ -12765,6 +12772,9 @@ int main(int argc, char** argv) {
       auto result = solver.solve(dyn);
       const auto solve_end = std::chrono::steady_clock::now();
       result.modal = std::move(modal_summary);
+      if (!stiff_solver_note.empty()) {
+        result.warnings.insert(result.warnings.begin(), stiff_solver_note);
+      }
       json out = dynamic_results_to_json(result, opt);
       const auto elapsed_ms = [](auto a, auto b) {
         return std::chrono::duration<double, std::milli>(b - a).count();

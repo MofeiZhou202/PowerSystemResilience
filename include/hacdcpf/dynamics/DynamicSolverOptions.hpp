@@ -132,6 +132,14 @@ struct DynamicSolverOptions {
   // damping) before time-stepping; does not affect the time-domain trajectory.
   bool compute_small_signal{false};
 
+  // Auto-select the cheapest numerically-stable integrator when solver_type is an
+  // explicit method. Opt-in: linearizes once about the initial equilibrium and
+  // picks the cheapest solver from a ladder (PartitionedHeun -> PartitionedRK4 ->
+  // TrapezoidalNewton) whose stability region contains the fastest eigenvalue at
+  // dt_s, recording a warning. Downshifts when non-stiff, upshifts (to the
+  // A-stable implicit method) when stiff. Deliberate implicit choices are kept.
+  bool auto_select_stiff_solver{false};
+
   PowerFlowOptions power_flow_options{};
 };
 

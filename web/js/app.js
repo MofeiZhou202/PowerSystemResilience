@@ -3699,6 +3699,7 @@ const App = (() => {
       record_every_step: true,
       record_device_outputs: document.getElementById('trRecordDeviceOutputs')?.checked !== false,
       compute_small_signal: document.getElementById('trSmallSignal')?.checked === true,
+      auto_select_stiff_solver: document.getElementById('trAutoStiff')?.checked === true,
       events,
     };
   }
@@ -9135,6 +9136,226 @@ const App = (() => {
     return JSON.stringify(value, null, 2);
   }
 
+  // ========== Catalog-driven dynamic-model editor ==========
+  // Renders a structured governor/AVR/PSS/converter parameter form from the
+  // transient model catalog (/api/dynamics/model_schema), writing the composed
+  // dynamic_model JSON back into the raw textarea that the property save reads.
+  let _dynSchema = null;
+  let _dynSchemaPromise = null;
+  function ensureDynSchema() {
+    if (_dynSchema) return Promise.resolve(_dynSchema);
+    if (!_dynSchemaPromise) {
+      _dynSchemaPromise = apiGet('/api/dynamics/model_schema')
+        .then(d => { _dynSchema = d && d.models ? d : { models: [], components: [] }; return _dynSchema; })
+        .catch(() => { _dynSchema = { models: [], components: [] }; return _dynSchema; });
+    }
+    return _dynSchemaPromise;
+  }
+  const DYN_CANVAS_TYPE = {
+    generator: 'gen', external_grid: 'gen', static_generator: 'sgen',
+    pv_system: 'pv', renewable_generator: 'renGen', vsc_converter: 'vsc',
+    storage: 'storage', dc_storage: 'storage', load: 'load', asymmetric_load: 'load',
+    dc_load: 'load', dcdc_converter: 'dcdcConverter', motor: 'motors',
+    asynchronous_motor: 'motors',
+  };
+  function dynModelDesc(name) {
+    if (!_dynSchema || !name || name === 'None') return null;
+    return (_dynSchema.models || []).find(m => m.model_name === name) || null;
+  }
+  function dynComposition(canvasType) {
+    if (!_dynSchema || !canvasType) return null;
+    return (_dynSchema.components || []).find(c => c.canvas_type === canvasType) || null;
+  }
+  function dynDefaultParams(name) {
+    const md = dynModelDesc(name);
+    const out = {};
+    if (md) (md.parameters || []).forEach(p => {
+      out[p.key] = p.kind === 'Boolean' ? !!p.default : p.default;
+    });
+    return out;
+  }
+
+  // Build the structured editor element. `onChange(dm)` fires on every user edit
+  // with the composed dynamic_model object. Returns null when the component type
+  // has no catalog composition (caller then falls back to the raw JSON only).
+  function buildDynamicModelEditor(comp, initialDm, onChange) {
+    const compo = dynComposition(DYN_CANVAS_TYPE[comp.type]);
+    if (!compo || !compo.slots || !compo.slots.length) return null;
+    const container = document.createElement('div');
+    container.className = 'dyn-editor';
+
+    let dm = (initialDm && typeof initialDm === 'object' && !Array.isArray(initialDm))
+      ? JSON.parse(JSON.stringify(initialDm)) : {};
+    if (!dm.parameters || typeof dm.parameters !== 'object' || Array.isArray(dm.parameters)) dm.parameters = {};
+    if (!Array.isArray(dm.components)) dm.components = [];
+    // Whether the component already carried a dynamic model (so we can sync the
+    // normalized/canonical form back without auto-populating empty components).
+    const hadContent = !!(initialDm && typeof initialDm === 'object' && !Array.isArray(initialDm) &&
+      (initialDm.model_name || (initialDm.parameters && Object.keys(initialDm.parameters).length) ||
+       (Array.isArray(initialDm.components) && initialDm.components.length)));
+
+    const isNone = (v) => !v || v === 'None';
+    const rootSlot = compo.slots[0].slot;  // slot[0] is always the device's primary model
+
+    // The builder reads the primary model from the root (model_name + parameters)
+    // and only governor/exciter/pss/shaft/pll from components[]. Some saved
+    // profiles instead carry the primary model as a components[] entry; adopt it
+    // into the root so the editor shows the real values and the output stays
+    // canonical (primary at root, control blocks in components).
+    const rootComp = dm.components.find(x => x.type === rootSlot);
+    if (rootComp) {
+      if (!dm.model_name && (rootComp.model || rootComp.model_name)) dm.model_name = rootComp.model || rootComp.model_name;
+      if ((!dm.parameters || !Object.keys(dm.parameters).length) && rootComp.parameters) {
+        dm.parameters = Object.assign({}, rootComp.parameters);
+      }
+      if (rootComp.standard && !dm.standard) dm.standard = rootComp.standard;
+      dm.components = dm.components.filter(x => x.type !== rootSlot);
+    }
+
+    const selectedModel = (slot, isRoot) => {
+      if (isRoot) return dm.model_name || (isNone(slot.default_model) ? '' : slot.default_model);
+      const c = dm.components.find(x => x.type === slot.slot);
+      if (c) return c.model || c.model_name || '';
+      return slot.optional ? '' : (isNone(slot.default_model) ? '' : slot.default_model);
+    };
+    const slotParams = (slot, isRoot) => {
+      if (isRoot) return dm.parameters;
+      const c = dm.components.find(x => x.type === slot.slot);
+      return c && c.parameters ? c.parameters : null;
+    };
+    const setModel = (slot, isRoot, name) => {
+      if (isRoot) {
+        dm.model_name = name;
+        const md = dynModelDesc(name);
+        if (md && md.standard) dm.standard = md.standard;
+        dm.parameters = dynDefaultParams(name);
+        dm.components = dm.components.filter(x => x.type !== slot.slot);  // primary lives at root only
+      } else {
+        dm.components = dm.components.filter(x => x.type !== slot.slot);
+        if (!isNone(name)) {
+          const md = dynModelDesc(name);
+          dm.components.push({ type: slot.slot, model: name, standard: md ? md.standard : '', parameters: dynDefaultParams(name) });
+        }
+      }
+    };
+    const setParam = (slot, isRoot, key, value) => {
+      if (isRoot) { dm.parameters[key] = value; }
+      else { const c = dm.components.find(x => x.type === slot.slot); if (c) { c.parameters = c.parameters || {}; c.parameters[key] = value; } }
+    };
+
+    function paramField(slot, isRoot, p) {
+      const params = slotParams(slot, isRoot);
+      const cur = params && params[p.key] !== undefined ? params[p.key] : p.default;
+      const f = document.createElement('div');
+      f.className = 'dyn-param';
+      const pl = document.createElement('label');
+      pl.textContent = p.label || p.key;
+      pl.title = `${p.key}${p.unit ? ' [' + p.unit + ']' : ''}` +
+        (p.min != null || p.max != null ? ` (${p.min != null ? p.min : '−∞'}…${p.max != null ? p.max : '∞'})` : '') +
+        (p.notes ? ' — ' + p.notes : '');
+      f.appendChild(pl);
+      let input;
+      if (p.kind === 'Boolean') {
+        input = document.createElement('select');
+        input.innerHTML = `<option value="true"${cur ? ' selected' : ''}>是</option><option value="false"${!cur ? ' selected' : ''}>否</option>`;
+        input.addEventListener('change', () => { setParam(slot, isRoot, p.key, input.value === 'true'); onChange(dm); });
+      } else if (p.kind === 'Enum') {
+        input = document.createElement('select');
+        (p.enum_options || []).forEach(o => {
+          const op = document.createElement('option'); op.value = o.value;
+          op.textContent = o.label || o.value; op.selected = String(cur) === o.value;
+          input.appendChild(op);
+        });
+        input.addEventListener('change', () => { setParam(slot, isRoot, p.key, input.value); onChange(dm); });
+      } else {
+        input = document.createElement('input');
+        input.type = 'number';
+        input.value = cur;
+        if (p.min != null) input.min = p.min;
+        if (p.max != null) input.max = p.max;
+        input.addEventListener('change', () => {
+          const v = parseFloat(input.value);
+          setParam(slot, isRoot, p.key, Number.isFinite(v) ? v : p.default);
+          onChange(dm);
+        });
+      }
+      f.appendChild(input);
+      if (p.unit) { const u = document.createElement('span'); u.className = 'dyn-param-unit'; u.textContent = p.unit; f.appendChild(u); }
+      return f;
+    }
+
+    function paramGrid(slot, isRoot, md) {
+      const grid = document.createElement('div');
+      grid.className = 'dyn-param-grid';
+      const groups = {};
+      const order = [];
+      (md.parameters || []).forEach(p => {
+        const g = p.group || '';
+        if (!(g in groups)) { groups[g] = []; order.push(g); }
+        groups[g].push(p);
+      });
+      order.forEach(g => {
+        if (g) { const gh = document.createElement('div'); gh.className = 'dyn-param-group'; gh.textContent = g; grid.appendChild(gh); }
+        groups[g].forEach(p => grid.appendChild(paramField(slot, isRoot, p)));
+      });
+      return grid;
+    }
+
+    function render() {
+      container.innerHTML = '';
+      compo.slots.forEach(slot => {
+        const isRoot = slot.slot === rootSlot;
+        const selected = selectedModel(slot, isRoot);
+        const block = document.createElement(isRoot ? 'div' : 'details');
+        block.className = 'dyn-slot' + (isRoot ? ' dyn-slot-root' : '');
+        if (isRoot) {
+          const head = document.createElement('div');
+          head.className = 'dyn-slot-head';
+          head.textContent = slot.label || slot.slot;
+          block.appendChild(head);
+        } else {
+          const sm = document.createElement('summary');
+          sm.textContent = `${slot.label || slot.slot}${selected ? ' — ' + selected : ' — 无'}`;
+          block.appendChild(sm);
+        }
+        const selRow = document.createElement('div');
+        selRow.className = 'dyn-slot-model';
+        const modLbl = document.createElement('label'); modLbl.textContent = '模型';
+        const sel = document.createElement('select');
+        if (slot.optional && !isRoot) {
+          const o = document.createElement('option'); o.value = ''; o.textContent = '无 (None)'; o.selected = !selected; sel.appendChild(o);
+        }
+        (slot.model_names || []).filter(n => !isNone(n)).forEach(n => {
+          const o = document.createElement('option'); o.value = n; o.textContent = n; o.selected = n === selected; sel.appendChild(o);
+        });
+        sel.addEventListener('change', () => { setModel(slot, isRoot, sel.value); render(); onChange(dm); });
+        selRow.appendChild(modLbl); selRow.appendChild(sel);
+        block.appendChild(selRow);
+        const md = dynModelDesc(selected);
+        if (md && (md.parameters || []).length) block.appendChild(paramGrid(slot, isRoot, md));
+        container.appendChild(block);
+      });
+    }
+    render();
+    // Sync the normalized/canonical form for components that already had a
+    // profile, so a save persists the real (root) machine params. Leave a
+    // component with no dynamic model untouched until the user edits.
+    if (hadContent) onChange(dm);
+    return container;
+  }
+
+  // Mount the structured editor into `host`, syncing composed JSON into `txt`.
+  function mountDynamicModelEditor(host, txt, comp, val) {
+    const build = () => {
+      const el = buildDynamicModelEditor(comp, val, (dm) => { txt.value = JSON.stringify(dm, null, 2); });
+      host.innerHTML = '';
+      if (el) host.appendChild(el);
+      else host.innerHTML = '<div class="dyn-editor-none">该元件类型暂无结构化动态模型目录，请使用下方原始 JSON。</div>';
+    };
+    if (_dynSchema) build();
+    else { host.innerHTML = '<div class="dyn-editor-none">加载动态模型目录…</div>'; ensureDynSchema().then(build); }
+  }
+
   // ========== Property Editor ==========
   function onSelectionChanged(compId) {
     const propEmpty = document.getElementById('propEmpty');
@@ -9212,7 +9433,24 @@ const App = (() => {
           ? '统一动态模型 JSON：standard/model_name/parameter_set/parameters/components。会随系统 JSON 同步并用于暂态模型构建。'
           : '导入或手工编辑的时序数组，长度应与园区综合能源仿真步数一致。';
         div.classList.add('prop-field-wide');
-        div.appendChild(txt);
+        if (key === 'dynamic_model') {
+          // Structured catalog-driven editor on top; raw JSON collapsed below as
+          // an advanced override. The editor writes composed JSON into `txt`,
+          // which the property-save reads back.
+          const editorHost = document.createElement('div');
+          editorHost.className = 'dyn-editor-host';
+          div.appendChild(editorHost);
+          const rawDetails = document.createElement('details');
+          rawDetails.className = 'dyn-raw';
+          const rawSummary = document.createElement('summary');
+          rawSummary.textContent = '原始 JSON（高级）';
+          rawDetails.appendChild(rawSummary);
+          rawDetails.appendChild(txt);
+          div.appendChild(rawDetails);
+          mountDynamicModelEditor(editorHost, txt, comp, val);
+        } else {
+          div.appendChild(txt);
+        }
       } else if (typeof val === 'boolean') {
         const sel = document.createElement('select');
         sel.dataset.field = key;
@@ -10599,6 +10837,9 @@ const App = (() => {
     // Load case list
     loadCaseList();
     loadMatpowerFileList();
+    // Warm the transient model catalog so the per-component dynamic-model editor
+    // is ready as soon as a component is selected.
+    ensureDynSchema();
 
     // ---- Toolbar Events ----
     // Bar 1: 加载算例 -> open case-load modal
@@ -10804,6 +11045,16 @@ const App = (() => {
     // Bar 3: transient phasor dynamics
     document.getElementById('btnRunTransient')?.addEventListener('click', runTransientSimulation);
     document.getElementById('btnTransientCompatibility')?.addEventListener('click', runTransientCompatibility);
+    document.getElementById('btnTrAdvanced')?.addEventListener('click', () => {
+      const panel = document.getElementById('trAdvancedPanel');
+      const btn = document.getElementById('btnTrAdvanced');
+      if (!panel || !btn) return;
+      const show = panel.hasAttribute('hidden');
+      if (show) panel.removeAttribute('hidden'); else panel.setAttribute('hidden', '');
+      btn.setAttribute('aria-expanded', show ? 'true' : 'false');
+      btn.classList.toggle('is-open', show);
+      btn.textContent = show ? '高级设置 ▾' : '高级设置 ▸';
+    });
     document.getElementById('trPowerFlowInit')?.addEventListener('change', updateTransientPfControls);
     document.getElementById('trEventType')?.addEventListener('change', updateTransientEventControls);
     document.getElementById('trObserverAcBuses')?.addEventListener('change', refreshTransientObserverSelection);

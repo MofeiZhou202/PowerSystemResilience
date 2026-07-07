@@ -6506,6 +6506,100 @@ TEST_CASE("CPL small-signal stability boundary: filter damping vs loading",
   }
 }
 
+TEST_CASE("Explicit-solver stiffness audit: fast AVR transducers need implicit integration",
+          "[dynamics][smallsignal][stiffness]") {
+  // Audit companion to the OneDOneQ fix. The PSD machine fixtures carry an AVR
+  // TypeI with a 1 ms voltage transducer (Tr = 0.001 s); its eigenvalue at
+  // -1/Tr = -1000 lies far outside the explicit RK2 (Heun) stability region for
+  // the usual dt = 5 ms (which needs Re > -2/dt = -400). So explicit integration
+  // over a non-trivial horizon diverges, while an A-stable implicit method does
+  // not. This documents the stiffness and guards the solver-choice contract:
+  // stiff fast-transducer models MUST be integrated implicitly.
+  auto fastest_eigen_real = [](const HybridPowerSystem& sys) {
+    DynamicSolverOptions opt;
+    opt.run_power_flow_initialization = true;
+    opt.use_consistent_dynamic_initialization = true;
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(sys, opt);
+    const auto ss = small_signal_analysis(dyn);
+    double fastest = 0.0;
+    for (const auto& m : ss.modes) fastest = std::min(fastest, m.eigen_real);
+    return fastest;
+  };
+
+  SECTION("PSD machine fixtures are stiff (fast AVR transducer mode)") {
+    // -1/Tr = -1000 for the 1 ms transducer; require a decade of margin so this
+    // flags any future fixture change that reintroduces an ultra-fast lag.
+    CHECK(fastest_eigen_real(make_psd_onedoneq_three_bus_subset_case()) <= -900.0);
+    CHECK(fastest_eigen_real(make_psd_simple_marconato_three_bus_case()) <= -900.0);
+  }
+
+  SECTION("explicit Heun diverges where implicit integrators stay stable") {
+    const auto sys = make_psd_simple_marconato_three_bus_case();
+    auto run = [&](DynamicSolverType type) {
+      DynamicSolverOptions opt = fast_options();
+      opt.run_power_flow_initialization = true;
+      opt.solver_type = type;
+      opt.dt_s = 0.005;
+      opt.t_end_s = 0.20;  // beyond the ~0.085 s explicit blow-up horizon
+      return hacdcpf::run_transient_simulation(sys, opt);
+    };
+    // dt*lambda = -5 for the -1000 transducer mode: outside RK2's [-2, 0] region.
+    CHECK_FALSE(run(DynamicSolverType::PartitionedHeun).success);
+    // A-stable implicit integrators resolve the fast transducer cleanly.
+    CHECK(run(DynamicSolverType::TrapezoidalNewton).success);
+    CHECK(run(DynamicSolverType::MassMatrixDae).success);
+  }
+
+  SECTION("auto_select_stiff_solver rescues an explicit run on a stiff system") {
+    const auto sys = make_psd_simple_marconato_three_bus_case();
+    DynamicSolverOptions opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.solver_type = DynamicSolverType::PartitionedHeun;  // would diverge alone
+    opt.dt_s = 0.005;
+    opt.t_end_s = 0.20;
+    opt.auto_select_stiff_solver = true;
+    const auto result = hacdcpf::run_transient_simulation(sys, opt);
+    CHECK(result.success);  // auto-switched to an implicit method => stable
+    bool warned = false;
+    for (const auto& w : result.warnings)
+      if (w.find("auto_select_stiff_solver") != std::string::npos) warned = true;
+    CHECK(warned);  // the switch is reported
+  }
+
+  SECTION("auto_select_stiff_solver leaves a non-stiff explicit run untouched") {
+    const auto sys = make_transient_2bus();  // no fast transducer mode
+    DynamicSolverOptions opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.solver_type = DynamicSolverType::PartitionedHeun;
+    opt.dt_s = 0.005;
+    opt.t_end_s = 0.05;
+    opt.auto_select_stiff_solver = true;
+    const auto result = hacdcpf::run_transient_simulation(sys, opt);
+    CHECK(result.success);
+    bool warned = false;
+    for (const auto& w : result.warnings)
+      if (w.find("auto_select_stiff_solver") != std::string::npos) warned = true;
+    CHECK_FALSE(warned);  // Heun is already the cheapest stable choice: no change
+  }
+
+  SECTION("auto_select_stiff_solver downshifts a needlessly expensive explicit run") {
+    const auto sys = make_transient_2bus();  // non-stiff: Heun suffices
+    DynamicSolverOptions opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.solver_type = DynamicSolverType::PartitionedRK4;  // 4 evals/step, overkill here
+    opt.dt_s = 0.005;
+    opt.t_end_s = 0.05;
+    opt.auto_select_stiff_solver = true;
+    const auto result = hacdcpf::run_transient_simulation(sys, opt);
+    CHECK(result.success);
+    bool downshift = false;
+    for (const auto& w : result.warnings)
+      if (w.find("PartitionedRK4 -> PartitionedHeun") != std::string::npos) downshift = true;
+    CHECK(downshift);  // cheaper 2nd-order explicit is stable => downshift
+  }
+}
+
 TEST_CASE("Mass-matrix DAE core matches the partitioned backward-Euler oracle",
           "[dynamics][dae]") {
   // The simultaneous DAE (bus voltages as algebraic states, one sparse Newton

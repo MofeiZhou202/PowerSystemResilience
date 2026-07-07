@@ -462,6 +462,25 @@
           <input id="trAdaptive" type="checkbox" checked/><span>自适应</span>
         </label>
       </div>
+      <div class="control-param-group transient-param-group transient-param-group-actions" title="运行暂态、检查模型兼容性、导出结果、控制动态设备轨迹输出，以及展开高级数值参数">
+        <span class="control-param-title">运行/输出</span>
+        <label class="sub-label sub-checkbox" title="记录动态设备输出，用于传统机组、GFL/GFM、逆变器和 DC 链轨迹">
+          <input id="trRecordDeviceOutputs" type="checkbox" checked/><span>动态设备</span>
+        </label>
+        <label class="sub-label sub-checkbox" title="在初始运行点做小信号（模态）分析：Schur 缩减状态雅可比的特征值、阻尼比与主导状态，绘制 s 平面">
+          <input id="trSmallSignal" type="checkbox"/><span>小信号</span>
+        </label>
+        <label class="sub-label sub-checkbox" title="当显式积分器对当前运行点过刚时，自动从求解器阶梯（Heun→RK4→隐式）中选取最省的稳定积分器并给出提示">
+          <input id="trAutoStiff" type="checkbox"/><span>自动刚性</span>
+        </label>
+        <button id="btnRunTransient" class="toolbar-btn run-btn" title="运行暂态仿真">运行暂态</button>
+        <button id="btnTransientCompatibility" class="toolbar-btn" title="检查当前系统动态模型与 GridLAB-D / OpenDSS / 标准模型兼容性">模型兼容</button>
+        <button id="btnExportTransient" class="toolbar-btn" title="导出暂态仿真结果 JSON">结果导出</button>
+        <button id="btnTrAdvanced" class="toolbar-btn transient-advanced-toggle" title="展开/收起高级数值、初始化、DC链与观测参数" aria-expanded="false">高级设置 ▸</button>
+      </div>
+    </div>
+    <div id="trAdvancedPanel" class="transient-advanced-panel" hidden>
+      <div class="transient-toolbar-row">
       <div class="control-param-group transient-param-group" title="MassMatrix DAE Newton 雅可比组装方式；FD 为基线，Analytic/Colored 用解析块加速剩余有限差分">
         <span class="control-param-title">数值/Jacobian</span>
         <label class="sub-label">Jacobian
@@ -537,17 +556,6 @@
           <input id="trObserverDcBuses" type="text" value="" placeholder="1,2" style="width:82px"/>
         </label>
       </div>
-      <div class="control-param-group transient-param-group transient-param-group-actions" title="运行暂态、检查模型兼容性、导出结果以及控制动态设备轨迹输出">
-        <span class="control-param-title">运行/输出</span>
-        <label class="sub-label sub-checkbox" title="记录动态设备输出，用于传统机组、GFL/GFM、逆变器和 DC 链轨迹">
-          <input id="trRecordDeviceOutputs" type="checkbox" checked/><span>动态设备</span>
-        </label>
-        <label class="sub-label sub-checkbox" title="在初始运行点做小信号（模态）分析：Schur 缩减状态雅可比的特征值、阻尼比与主导状态，绘制 s 平面">
-          <input id="trSmallSignal" type="checkbox"/><span>小信号</span>
-        </label>
-        <button id="btnRunTransient" class="toolbar-btn run-btn" title="运行暂态仿真">运行暂态</button>
-        <button id="btnTransientCompatibility" class="toolbar-btn" title="检查当前系统动态模型与 GridLAB-D / OpenDSS / 标准模型兼容性">模型兼容</button>
-        <button id="btnExportTransient" class="toolbar-btn" title="导出暂态仿真结果 JSON">结果导出</button>
       </div>
     </div>
     <div class="transient-toolbar-row transient-event-row control-param-group transient-param-group transient-event-group">

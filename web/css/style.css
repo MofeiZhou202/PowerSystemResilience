@@ -530,6 +530,49 @@ body[data-active-result-group="modelIO"] #rightPanel {
   color: var(--accent);
   letter-spacing: 0.02em;
 }
+/* ===== Catalog-driven dynamic-model editor ===== */
+.dyn-editor-host { width: 100%; }
+.dyn-editor-none { color: var(--ink2); font-size: 12px; padding: 6px 0; }
+.dyn-editor { display: flex; flex-direction: column; gap: 8px; }
+.dyn-slot {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: rgba(255,255,255,0.015);
+}
+.dyn-slot-root { border-color: rgba(97,175,239,0.4); background: rgba(97,175,239,0.05); }
+.dyn-slot > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--ink); }
+.dyn-slot-head { font-size: 12px; font-weight: 700; color: var(--accent); margin-bottom: 6px; }
+.dyn-slot-model { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; }
+.dyn-slot-model label { font-size: 12px; color: var(--ink2); }
+.dyn-slot-model select { flex: 1 1 auto; min-width: 0; }
+.dyn-param-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 6px 10px;
+  align-items: end;
+}
+.dyn-param-group {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-top: 4px;
+  opacity: 0.9;
+}
+.dyn-param { display: flex; flex-direction: column; gap: 2px; position: relative; }
+.dyn-param > label {
+  font-size: 11px;
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dyn-param input, .dyn-param select { width: 100%; box-sizing: border-box; }
+.dyn-param-unit { position: absolute; right: 6px; bottom: 6px; font-size: 10px; color: var(--ink2); pointer-events: none; }
+.dyn-param select + .dyn-param-unit { display: none; }
+.dyn-raw { margin-top: 6px; }
+.dyn-raw > summary { cursor: pointer; font-size: 11px; color: var(--ink2); }
 .empty-hint {
   padding: 20px;
   text-align: center;
@@ -1818,6 +1861,15 @@ body[data-active-result-group="modelIO"] .result-group[data-result-group="modelI
 }
 .transient-param-group-actions {
   flex: 0 1 430px;
+}
+.transient-advanced-panel {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.transient-advanced-toggle.is-open {
+  background: rgba(97,175,239,0.14);
+  border-color: rgba(97,175,239,0.5);
 }
 .transient-event-row {
   margin-top: 2px;
