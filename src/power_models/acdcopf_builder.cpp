@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#include "hacdcpf/model/device_control_role.hpp"
 #include "hacdcpf/model/enums/converter_enums.hpp"
 
 namespace hacdcpf::power_models {
@@ -101,10 +102,13 @@ ACDCOPFData to_acdcopf_data(const HybridPowerSystem& sys) {
     ac_idx_to_id[b.index] = id;
   }
 
-  // Mark VDC_Q DC buses
+  // Mark DC-voltage-forming converters' DC buses as the Vdc slack. Route through
+  // the shared control-role resolver so VDC_Q, VDC_VAC and DC_V_DROOP_AC_V are
+  // all recognized (consistent with the power-flow coordination, short-circuit
+  // and transient builders) instead of only VDC_Q.
   for (const auto& conv : sys.vsc_converters) {
     if (!conv.in_service) continue;
-    if (conv.control_mode == ConverterMode::VDC_Q) {
+    if (resolve_device_control_role(conv).provides_dc_v_reference) {
       auto it = dc_idx_to_id.find(conv.bus_dc);
       if (it == dc_idx_to_id.end()) continue;
       for (auto& bd : d.dc_buses) {
@@ -147,7 +151,7 @@ ACDCOPFData to_acdcopf_data(const HybridPowerSystem& sys) {
     cd.a_pu   = conv.loss_mw / Sb;
     cd.b_loss = conv.loss_percent / 100.0;
     cd.c_loss = 1.0 - std::clamp(conv.eta, 0.0, 1.0);
-    cd.is_vdc_slack = (conv.control_mode == ConverterMode::VDC_Q);
+    cd.is_vdc_slack = resolve_device_control_role(conv).provides_dc_v_reference;
     d.converters.push_back(std::move(cd));
   }
 

@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "hacdcpf/model/device_control_role.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
 
 namespace hacdcpf::powerflow {
@@ -244,11 +245,9 @@ bool dc_island_has_support(const HybridPowerSystem& sys,
   for (const auto& c : sys.vsc_converters) {
     if (!c.in_service || c.index == exclude_conv_index) continue;
     if (island_of(c.bus_dc) != dc_island) continue;
-    const bool forms = ((c.control_mode == ConverterMode::VDC_Q ||
-                         c.control_mode == ConverterMode::VDC_VAC ||
-                         c.control_mode == ConverterMode::DC_V_DROOP_AC_V) &&
-                        std::abs(c.k_vdc) > 1e-9) ||
-                       c.grid_forming;
+    // Shared control-role resolver: a converter anchors the DC island when it
+    // actively regulates Vdc (droop mode with k_vdc) or is explicitly grid-forming.
+    const bool forms = resolve_device_control_role(c).is_dc_grid_forming;
     if (forms) return true;
   }
   for (const auto& s : sys.dc.storage)

@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdlib>
@@ -20,8 +21,8 @@
 
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/dynamics/dynamics.hpp"
+#include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
-
 using namespace hacdcpf;
 using namespace hacdcpf::dynamics;
 
@@ -3783,6 +3784,113 @@ TEST_CASE("Transient events preserve branch type and apply topology changes", "[
   CHECK_FALSE(dyn.network.ac_branches.front().in_service);
 }
 
+TEST_CASE("Hybrid AC/DC microgrid holds up through islanding and reconnection",
+          "[dynamics][transient][microgrid][islanding]") {
+  auto sys = io::build_hybrid_acdc_microgrid_island();
+
+  DynamicSolverOptions opt;
+  opt.t_end_s = 4.0;
+  opt.dt_s = 0.005;
+  opt.solver_type = DynamicSolverType::TrapezoidalNewton;
+  opt.run_power_flow_initialization = true;
+  opt.use_consistent_dynamic_initialization = true;
+  opt.record_every_step = true;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+
+  // Island the microgrid by tripping the utility interconnection line (AC branch
+  // 1), then reconnect it. The synchronous genset (bus 5, TGOV1 governor + SEXS
+  // exciter) must hold the island's voltage and frequency in between.
+  DynamicEvent island;
+  island.time_s = 1.0;
+  island.type = DynamicEventType::ACBranchTrip;
+  island.component_index = 1;
+  island.component_type = "AC";
+  island.label = "island: trip utility line";
+  dyn.events.push_back(island);
+
+  DynamicEvent reconnect;
+  reconnect.time_s = 2.5;
+  reconnect.type = DynamicEventType::ACBranchClose;
+  reconnect.component_index = 1;
+  reconnect.component_type = "AC";
+  reconnect.label = "reconnect: close utility line";
+  dyn.events.push_back(reconnect);
+
+  DynamicSolver solver;
+  const DynamicResults result = solver.solve(dyn);
+
+  INFO(result.message);
+  REQUIRE(result.success);
+  REQUIRE(result.applied_events.size() == 2);
+  REQUIRE(result.final_snapshot() != nullptr);
+
+  // Voltage and (center-of-inertia) frequency stay physical across the whole
+  // islanding / reconnection transient — i.e. the microgrid never collapses.
+  for (const auto& snap : result.snapshots) {
+    CHECK(snap.min_ac_voltage_pu > 0.5);
+    CHECK(snap.max_ac_voltage_pu < 1.5);
+    if (snap.coi_frequency_hz > 1.0) {  // skip un-populated readings
+      CHECK(snap.coi_frequency_hz > 45.0);
+      CHECK(snap.coi_frequency_hz < 55.0);
+    }
+  }
+}
+
+TEST_CASE("Networked microgrids ride through a utility outage on distributed gensets",
+          "[dynamics][transient][microgrid][networked][islanding]") {
+  auto sys = io::build_networked_microgrids_islanding();
+
+  DynamicSolverOptions opt;
+  opt.t_end_s = 4.0;
+  opt.dt_s = 0.005;
+  opt.solver_type = DynamicSolverType::TrapezoidalNewton;
+  opt.run_power_flow_initialization = true;
+  opt.use_consistent_dynamic_initialization = true;
+  opt.record_every_step = true;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+
+  // Utility outage: trip the interconnection line (AC branch 1) at t=1 s so the
+  // whole networked cluster islands, then restore it at t=2.5 s. The three
+  // distributed gensets (each with a TGOV1 governor) must share the combined
+  // island load and keep voltage/frequency physical through both transitions.
+  DynamicEvent outage;
+  outage.time_s = 1.0;
+  outage.type = DynamicEventType::ACBranchTrip;
+  outage.component_index = 1;
+  outage.component_type = "AC";
+  outage.label = "utility outage";
+  dyn.events.push_back(outage);
+
+  DynamicEvent restore;
+  restore.time_s = 2.5;
+  restore.type = DynamicEventType::ACBranchClose;
+  restore.component_index = 1;
+  restore.component_type = "AC";
+  restore.label = "utility restored";
+  dyn.events.push_back(restore);
+
+  DynamicSolver solver;
+  const DynamicResults result = solver.solve(dyn);
+
+  INFO(result.message);
+  REQUIRE(result.success);
+  REQUIRE(result.applied_events.size() == 2);
+  REQUIRE(result.final_snapshot() != nullptr);
+
+  for (const auto& snap : result.snapshots) {
+    CHECK(snap.min_ac_voltage_pu > 0.5);
+    CHECK(snap.max_ac_voltage_pu < 1.5);
+    if (snap.coi_frequency_hz > 1.0) {
+      CHECK(snap.coi_frequency_hz > 45.0);
+      CHECK(snap.coi_frequency_hz < 55.0);
+    }
+  }
+}
+
 TEST_CASE("Transient solver lands on off-grid event times", "[dynamics][events]") {
   const auto sys = make_transient_2bus();
   auto opt = fast_options();
@@ -6214,6 +6322,63 @@ TEST_CASE("Small-signal analysis eigenvalues match time-domain and rank controls
     REQUIRE(em1.frequency_hz > 0.0);
     CHECK(em0.damping_ratio > 0.0);                     // stable without PSS
     CHECK(em1.damping_ratio > em0.damping_ratio + 0.05);  // PSS materially improves damping
+  }
+}
+
+TEST_CASE("Small-signal analytic Jacobian reproduces the finite-difference assembly",
+          "[dynamics][smallsignal][analytic]") {
+  // The default analytic assembly (device addJacobian + network -Y_eff for the
+  // algebraic block, a large-step computeDerivatives-only FD for the differential
+  // block) must reproduce the eigenvalues of the reference full finite-difference
+  // Jacobian, which it replaces to avoid the O(n) per-column network assembly.
+  DynamicSolverOptions opt;
+  opt.use_consistent_dynamic_initialization = true;
+  DynamicModelBuilder builder;
+  auto sorted_eigs = [](const SmallSignalResult& r) {
+    std::vector<std::pair<double, double>> e;
+    e.reserve(r.modes.size());
+    for (const auto& m : r.modes) e.emplace_back(m.eigen_real, m.eigen_imag);
+    std::sort(e.begin(), e.end());
+    return e;
+  };
+  for (const char* model : {"ClassicalMachine", "GENROU"}) {
+    auto sys = make_small_signal_case(model, /*avr=*/true, /*pss=*/true);
+    DynamicSystem dyn_analytic = builder.build(sys, opt);
+    DynamicSystem dyn_fd = builder.build(sys, opt);
+    const SmallSignalResult a = small_signal_analysis(dyn_analytic, /*analytic=*/true);
+    const SmallSignalResult f = small_signal_analysis(dyn_fd, /*analytic=*/false);
+    INFO("model=" << model);
+    REQUIRE(a.success);
+    REQUIRE(f.success);
+    REQUIRE(a.modes.size() == f.modes.size());
+    const auto ea = sorted_eigs(a);
+    const auto ef = sorted_eigs(f);
+    for (std::size_t i = 0; i < ea.size(); ++i) {
+      CHECK(ea[i].first == Catch::Approx(ef[i].first).margin(1e-3).epsilon(0.02));
+      CHECK(ea[i].second == Catch::Approx(ef[i].second).margin(1e-3).epsilon(0.02));
+    }
+    // The two assemblies agree on the stability verdict.
+    CHECK(a.stable == f.stable);
+  }
+
+  // Speed: the analytic assembly avoids the O(n) per-column network (Y_eff)
+  // re-assembly of the full finite-difference sweep. Reported as a WARN (timing
+  // is not asserted to avoid CI flakiness).
+  {
+    auto sys = hacdcpf::io::build_case300_acdc();
+    DynamicSystem dyn_a = builder.build(sys, opt);
+    DynamicSystem dyn_f = builder.build(sys, opt);
+    auto time_ms = [](DynamicSystem& d, bool analytic) {
+      const auto t0 = std::chrono::steady_clock::now();
+      const SmallSignalResult r = small_signal_analysis(d, analytic);
+      const auto t1 = std::chrono::steady_clock::now();
+      REQUIRE(r.success);
+      return std::chrono::duration<double, std::milli>(t1 - t0).count();
+    };
+    const double t_fd = time_ms(dyn_f, false);
+    const double t_an = time_ms(dyn_a, true);
+    WARN("small-signal case300_acdc: FD=" << t_fd << " ms  analytic=" << t_an
+         << " ms  speedup=" << (t_fd / std::max(t_an, 1e-9)) << "x");
   }
 }
 

@@ -10,6 +10,7 @@
 /// re-deriving behaviour from the raw enum at every call site.
 
 #include "hacdcpf/model/converter_components.hpp"
+#include "hacdcpf/model/enum_strings.hpp"
 #include "hacdcpf/model/enums/converter_enums.hpp"
 
 namespace hacdcpf {

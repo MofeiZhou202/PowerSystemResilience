@@ -13,6 +13,7 @@
 #include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
 #include "hacdcpf/power_flow/converter_coordination.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
+#include "hacdcpf/power_models/hybrid_opf_model_builder.hpp"
 
 #ifndef HACDCPF_TEST_DATA_DIR
 #define HACDCPF_TEST_DATA_DIR "../../data"
@@ -1365,6 +1366,48 @@ TEST_CASE("resolve_device_control_role maps the seven VSC control modes",
   CHECK(dcdc_control_from_str("dc-v") == DCDCControlMode::Voltage);
   CHECK(dcdc_topology_from_str("buck-boost") == DCDCTopology::BuckBoost);
   CHECK(dcdc_topology_from_str("DAB") == DCDCTopology::Isolated);
+}
+
+// ── PF/OPF/transient consistency: the OPF DC-slack selection must agree with the
+// shared control-role resolver (which the PF coordination, short-circuit and
+// transient builders use). Previously the OPF builder only recognized VDC_Q as
+// DC-voltage-forming, diverging from PF/transient for VDC_VAC / DC_V_DROOP_AC_V.
+TEST_CASE("OPF DC-slack selection is consistent with the control-role resolver",
+          "[converter][opf][role][consistency]") {
+  using namespace hacdcpf;
+  const std::vector<ConverterMode> modes = {
+      ConverterMode::PQ_MODE,          ConverterMode::AC_PV,
+      ConverterMode::VDC_Q,            ConverterMode::VDC_VAC,
+      ConverterMode::DC_V_DROOP_AC_V,  ConverterMode::AC_GRID_FORMING};
+  for (ConverterMode m : modes) {
+    HybridPowerSystem sys = build_hybrid_opf_case();
+    sys.vsc_converters[0].control_mode = m;
+    sys.vsc_converters[0].v_dc_set_pu = 1.0;
+    sys.vsc_converters[0].k_vdc = 0.1;  // active droop
+    const bool expected =
+        resolve_device_control_role(sys.vsc_converters[0]).provides_dc_v_reference;
+    const auto data = power_models::to_acdcopf_data(sys);
+    REQUIRE(data.converters.size() == 1);
+    INFO("mode=" << converter_mode_str(m));
+    // The converter and its DC bus carry the Vdc-slack flag iff the resolver says
+    // the converter provides a DC voltage reference.
+    CHECK(data.converters[0].is_vdc_slack == expected);
+    bool bus_slack = false;
+    for (const auto& bd : data.dc_buses)
+      if (bd.id == data.converters[0].dc_bus_id) bus_slack = bd.is_vdc_slack;
+    CHECK(bus_slack == expected);
+  }
+
+  // Regression guard for the specific fix: VDC_VAC and DC_V_DROOP_AC_V are now
+  // recognized as DC-voltage-forming by the OPF builder (were previously missed).
+  for (ConverterMode m : {ConverterMode::VDC_VAC, ConverterMode::DC_V_DROOP_AC_V}) {
+    HybridPowerSystem sys = build_hybrid_opf_case();
+    sys.vsc_converters[0].control_mode = m;
+    const auto data = power_models::to_acdcopf_data(sys);
+    INFO("mode=" << converter_mode_str(m));
+    REQUIRE(data.converters.size() == 1);
+    CHECK(data.converters[0].is_vdc_slack);
+  }
 }
 
 // ── Mode 6: droop Udc + AC voltage hold (genuine power flow) ──────────────────

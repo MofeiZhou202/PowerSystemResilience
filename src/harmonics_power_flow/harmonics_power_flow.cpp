@@ -17,6 +17,8 @@
 
 #include "hacdcpf/analysis/harmonics_power_flow.hpp"
 
+#include "hacdcpf/model/device_control_role.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -415,10 +417,11 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& sys,
       nic.name = v.name.empty() ? ("VSC" + std::to_string(v.index)) : v.name;
       // Typical NIC: AC port grid-following, DC port grid-forming when the
       // converter regulates the DC-link voltage (VDC modes / grid-forming flag).
-      // A pure PQ converter does not anchor the DC ripple network.
+      // A pure PQ converter does not anchor the DC ripple network. Uses the
+      // shared control-role resolver so all DC-voltage-forming modes (VDC_Q,
+      // VDC_VAC, DC_V_DROOP_AC_V) are treated consistently with PF/OPF/transient.
       const bool dc_forms_voltage =
-          v.grid_forming || v.control_mode == ConverterMode::VDC_Q ||
-          v.control_mode == ConverterMode::VDC_VAC;
+          resolve_device_control_role(v).provides_dc_v_reference;
       nic.ac_port = PortBehavior::GridFollowing;
       nic.dc_port = dc_forms_voltage ? PortBehavior::GridForming
                                      : PortBehavior::GridFollowing;

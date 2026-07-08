@@ -12,6 +12,7 @@
 
 #include "hacdcpf/dynamics/DynamicStamp.hpp"
 #include "hacdcpf/dynamics/DynamicSystem.hpp"
+#include "hacdcpf/dynamics/devices/DynamicDevice.hpp"
 
 namespace hacdcpf::dynamics {
 namespace {
@@ -142,9 +143,135 @@ Eigen::SparseMatrix<double> dense_to_sparse(const Eigen::MatrixXd& dense) {
   return sparse;
 }
 
+// Assemble the raw DAE Jacobian J = dF/du = [f_x f_y; g_x g_y] ANALYTICALLY,
+// reusing the same model the mass-matrix DAE stepper uses: each device's
+// addJacobian is called with a dt=1, theta=-1 context so its differential block
+// (-dt*theta*df) stamps +f directly and its current-injection block stamps
+// d(I_inj)/d(.); the network contributes the -Y_eff block of dg/dV. This avoids
+// the O(n) full-system finite-difference sweep (one assembly instead of ~2n RHS
+// evaluations). Returns false if the result is non-finite (caller falls back to
+// finite differences). Does not modify the system state.
+bool assemble_analytic_jacobian(DynamicSystem& sys, const DaeLayout& L, double t,
+                                Eigen::MatrixXd& J, std::vector<int>& diff_fd_columns) {
+  if (L.n <= 0) return false;
+  DynamicStamp stamp(L.n_ac, L.n_dc);
+  for (const auto& device : sys.devices) device->stamp(t, sys.x, sys.y, stamp);
+  Eigen::SparseMatrix<std::complex<double>> Yac;
+  Eigen::VectorXcd Iac;
+  Eigen::SparseMatrix<double> Gdc;
+  Eigen::VectorXd Idc;
+  sys.network.assembleEffectiveMatrices(stamp, sys.options.singular_regularization_pu,
+                                        Yac, Iac, Gdc, Idc);
+
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(L.n) * 8);
+
+  // Algebraic network block: g = I_inj - Y_eff*V, so dg/dV carries -Y_eff. The
+  // real/imag split mirrors dae_add_analytic_network_block in the DAE stepper.
+  for (int col = 0; col < Yac.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<std::complex<double>>::InnerIterator it(Yac, col); it; ++it) {
+      const int row = static_cast<int>(it.row());
+      const auto y = it.value();
+      if (y.real() != 0.0) {
+        triplets.emplace_back(L.ac_off + row, L.ac_off + col, -y.real());
+        triplets.emplace_back(L.ai_off + row, L.ai_off + col, -y.real());
+      }
+      if (y.imag() != 0.0) {
+        triplets.emplace_back(L.ac_off + row, L.ai_off + col, y.imag());
+        triplets.emplace_back(L.ai_off + row, L.ac_off + col, -y.imag());
+      }
+    }
+  }
+  for (int col = 0; col < Gdc.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(Gdc, col); it; ++it) {
+      if (it.value() != 0.0) {
+        triplets.emplace_back(L.dc_off + static_cast<int>(it.row()), L.dc_off + col,
+                              -it.value());
+      }
+    }
+  }
+
+  // Per-device blocks: differential (+f, because -dt*theta = -1*-1 = +1) and the
+  // analytic/local current-injection derivatives. Stamped into a separate vector
+  // so we can record which columns any device couples to (its own states + its
+  // terminal bus). setFromTriplets sums the device d(I_inj)/dV with the -Y_eff
+  // network entries to form the full dg/dV.
+  DynamicJacobianContext context;
+  context.n_x = L.n_x;
+  context.n_ac = L.n_ac;
+  context.n_dc = L.n_dc;
+  context.ac_real_offset = L.ac_off;
+  context.ac_imag_offset = L.ai_off;
+  context.dc_offset = L.dc_off;
+  context.total_size = L.n;
+  context.dt = 1.0;
+  context.theta = -1.0;
+  context.include_differential_derivatives = true;
+  std::vector<Eigen::Triplet<double>> device_triplets;
+  device_triplets.reserve(static_cast<std::size_t>(sys.devices.size()) * 16);
+  for (const auto& device : sys.devices) {
+    device->addJacobian(t, sys.x, sys.y, context, device_triplets);
+  }
+
+  // Differential-FD column set: the differential RHS f depends only on states
+  // (all n_x — cross-device coupling flows through controller states) and on the
+  // terminal-bus voltage columns that some device couples to. Non-device voltage
+  // columns leave f unchanged, so they are skipped in the differential refinement.
+  std::vector<char> col_touched(static_cast<std::size_t>(L.n), 0);
+  for (const auto& tr : device_triplets) {
+    if (tr.col() >= 0 && tr.col() < L.n) col_touched[static_cast<std::size_t>(tr.col())] = 1;
+  }
+  diff_fd_columns.clear();
+  for (int j = 0; j < L.n_x; ++j) diff_fd_columns.push_back(j);
+  for (int j = L.n_x; j < L.n; ++j) {
+    if (col_touched[static_cast<std::size_t>(j)]) diff_fd_columns.push_back(j);
+  }
+
+  triplets.insert(triplets.end(), device_triplets.begin(), device_triplets.end());
+  Eigen::SparseMatrix<double> Jsp(L.n, L.n);
+  Jsp.setFromTriplets(triplets.begin(), triplets.end());
+  J = Eigen::MatrixXd(Jsp);
+  return J.allFinite();
+}
+
+// Read/write a single packed unknown (state, AC voltage real/imag, or DC voltage)
+// directly in the system, so the differential finite difference can perturb one
+// component at a time instead of re-unpacking the whole vector each column.
+double get_packed_unknown(const DynamicSystem& sys, const DaeLayout& L, int j) {
+  if (j < L.n_x) return sys.x.x[j];
+  if (j < L.ai_off) return sys.y.Vac_abc[j - L.ac_off].real();
+  if (j < L.dc_off) return sys.y.Vac_abc[j - L.ai_off].imag();
+  return sys.y.Vdc[j - L.dc_off];
+}
+
+void set_packed_unknown(DynamicSystem& sys, const DaeLayout& L, int j, double v) {
+  if (j < L.n_x) {
+    sys.x.x[j] = v;
+  } else if (j < L.ai_off) {
+    auto& z = sys.y.Vac_abc[j - L.ac_off];
+    z = std::complex<double>(v, z.imag());
+  } else if (j < L.dc_off) {
+    auto& z = sys.y.Vac_abc[j - L.ai_off];
+    z = std::complex<double>(z.real(), v);
+  } else {
+    sys.y.Vdc[j - L.dc_off] = v;
+  }
+}
+
+// Differential RHS f(x, V) via device computeDerivatives only (no network
+// assembly), reading the current system state. See the differential-block note
+// in small_signal_analysis for why a large FD step is used by the caller.
+Eigen::VectorXd compute_differential_rhs(DynamicSystem& sys, const DaeLayout& L,
+                                         double t) {
+  Eigen::VectorXd f = Eigen::VectorXd::Zero(L.n_x);
+  for (const auto& device : sys.devices) device->computeDerivatives(t, sys.x, sys.y, f);
+  return f;
+}
+
 }  // namespace
 
-SmallSignalResult small_signal_analysis(DynamicSystem& system) {
+SmallSignalResult small_signal_analysis(DynamicSystem& system,
+                                        bool use_analytic_jacobian) {
   SmallSignalResult result;
   const DaeLayout L = make_layout(system);
   result.n_differential = L.n_x;
@@ -171,28 +298,76 @@ SmallSignalResult small_signal_analysis(DynamicSystem& system) {
     return result;
   }
 
-  // Full Jacobian J = dF/du by CENTRAL finite differences with a deliberately
-  // large step. Machine swing equations carry a small equilibrium dead-band
-  // (|power imbalance| <= 1e-4 -> derivative forced to 0), so a tiny sqrt(eps)
-  // step never escapes it and would linearize to zero. A central step of ~1e-3
-  // straddles the dead-band and recovers the smooth-model slope, while the
-  // network block (linear in V) is captured exactly at any step.
+  // Preferred path: assemble the raw Jacobian J = dF/du analytically from the
+  // device addJacobian model + the network block (one assembly, no O(n) sweep).
+  // Falls back to central finite differences if the analytic assembly is
+  // unavailable/non-finite. eval_F above left the system state at u0.
   Eigen::MatrixXd J(L.n, L.n);
-  const double fd_step = 1e-3;
-  Eigen::VectorXd Fp;
-  Eigen::VectorXd Fm;
-  bool ok = true;
-  for (int j = 0; j < L.n && ok; ++j) {
-    const double h = fd_step * std::max(1.0, std::abs(u0[j]));
-    Eigen::VectorXd up = u0;
-    Eigen::VectorXd um = u0;
-    up[j] += h;
-    um[j] -= h;
-    if (!eval_F(system, L, t, up, Fp) || !eval_F(system, L, t, um, Fm)) {
-      ok = false;
-      break;
+  bool built = false;
+  if (use_analytic_jacobian) {
+    std::vector<int> diff_fd_columns;
+    built = assemble_analytic_jacobian(system, L, t, J, diff_fd_columns);
+    if (built && L.n_x > 0) {
+      // The analytic algebraic block (currents + network -Y_eff) is exact, but
+      // the per-device addJacobian DIFFERENTIAL block reads as zero for machine
+      // swing equations: their equilibrium dead-band (|imbalance| <= 1e-4) traps
+      // the tiny (1e-6) local-FD step. Recompute the differential rows f = [f_x
+      // f_y] with a large-step computeDerivatives-only FD (no network re-assembly),
+      // which straddles the dead-band and captures the synchronizing/network
+      // coupling as well as cross-device (machine <-> AVR/PSS/governor) coupling.
+      // Only the columns f actually depends on are swept: every state column (the
+      // controller coupling flows through states) plus the terminal-bus voltage
+      // columns any device couples to (diff_fd_columns from the assembly). The
+      // remaining (device-free) voltage columns leave f unchanged, so their
+      // differential rows stay zero from the analytic assembly. The algebraic rows
+      // are kept analytic. The system is at u0 here (eval_F above); perturb one
+      // packed unknown at a time in place (no full re-unpack) and restore it.
+      Eigen::VectorXd f0 = compute_differential_rhs(system, L, t);
+      if (!f0.allFinite()) {
+        built = false;
+      } else {
+        const double fd_step = 1e-3;
+        for (int j : diff_fd_columns) {
+          const double base = get_packed_unknown(system, L, j);
+          const double h = fd_step * std::max(1.0, std::abs(base));
+          set_packed_unknown(system, L, j, base + h);
+          const Eigen::VectorXd fp = compute_differential_rhs(system, L, t);
+          set_packed_unknown(system, L, j, base - h);
+          const Eigen::VectorXd fm = compute_differential_rhs(system, L, t);
+          set_packed_unknown(system, L, j, base);  // restore
+          if (!fp.allFinite() || !fm.allFinite()) {
+            built = false;
+            break;
+          }
+          J.block(0, j, L.n_x, 1) = (fp - fm) / (2.0 * h);
+        }
+      }
     }
-    J.col(j) = (Fp - Fm) / (2.0 * h);
+  }
+
+  // Fallback: full Jacobian J = dF/du by CENTRAL finite differences with a
+  // deliberately large step. Machine swing equations carry a small equilibrium
+  // dead-band (|power imbalance| <= 1e-4 -> derivative forced to 0), so a tiny
+  // sqrt(eps) step never escapes it and would linearize to zero. A central step
+  // of ~1e-3 straddles the dead-band and recovers the smooth-model slope, while
+  // the network block (linear in V) is captured exactly at any step.
+  bool ok = true;
+  if (!built) {
+    const double fd_step = 1e-3;
+    Eigen::VectorXd Fp;
+    Eigen::VectorXd Fm;
+    for (int j = 0; j < L.n && ok; ++j) {
+      const double h = fd_step * std::max(1.0, std::abs(u0[j]));
+      Eigen::VectorXd up = u0;
+      Eigen::VectorXd um = u0;
+      up[j] += h;
+      um[j] -= h;
+      if (!eval_F(system, L, t, up, Fp) || !eval_F(system, L, t, um, Fm)) {
+        ok = false;
+        break;
+      }
+      J.col(j) = (Fp - Fm) / (2.0 * h);
+    }
   }
   system.x.x = x_save;
   system.y = y_save;

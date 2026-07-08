@@ -21,6 +21,8 @@ HybridPowerSystem build_demo_multizone_acdc();
 HybridPowerSystem build_case2000_acdc();
 HybridPowerSystem build_dist33_microgrid_der();
 HybridPowerSystem build_comprehensive_hybrid_acdc();
+HybridPowerSystem build_hybrid_acdc_microgrid_island();
+HybridPowerSystem build_networked_microgrids_islanding();
 HybridPowerSystem build_market_3bus_toy();
 HybridPowerSystem build_market_5bus_acdc_toy();
 

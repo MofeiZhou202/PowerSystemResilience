@@ -78,6 +78,26 @@ Generator make_generator(int index,
   return g;
 }
 
+// Attach a minimal grid-forming synchronous-machine control stack (classical
+// machine + TGOV1 governor + SEXS exciter) so a genset can hold voltage and
+// frequency when its microgrid islands.  Read only by the transient builder;
+// PF/OPF consume the steady-state generator fields and ignore dynamic_model.
+void attach_grid_forming_genset_dynamics(Generator& g) {
+  g.dynamic_model.model_name = "ClassicalMachine";
+  g.dynamic_model.standard = "IEEE";
+  auto add_block = [&](const std::string& type, const std::string& model,
+                       std::map<std::string, double> params) {
+    hacdcpf::DynamicModelComponentProfile c;
+    c.type = type;
+    c.model = model;
+    c.standard = "IEEE";
+    c.parameters = std::move(params);
+    g.dynamic_model.components.push_back(std::move(c));
+  };
+  add_block("governor", "TGOV1", {{"R", 0.05}, {"T1", 0.5}, {"T3", 0.5}});
+  add_block("exciter", "SEXS", {{"Ka", 50.0}, {"Ta", 0.1}});
+}
+
 void apply_ieee24_reference_coordinates(HybridPowerSystem& sys) {
   static const std::unordered_map<int, std::pair<double, double>> kCoords = {
       {1, {4.0, 0.0}},   {2, {10.0, 0.0}},  {3, {4.0, 6.0}},   {4, {6.0, 3.0}},
@@ -3932,6 +3952,518 @@ HybridPowerSystem build_actual_value_demo_acdc() {
   dl.r_ohm_per_km = 0.05; dl.length_km = 1.0; dl.base_kv = 5.0;
   dl.n_parallel = 1; dl.rate_a_mva = 2.0; dl.in_service = true; dl.name = "DCLink1";
   sys.dc.branches = {dl};
+
+  return sys;
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Hybrid AC/DC Microgrid — Islanding + Reconnection
+// ════════════════════════════════════════════════════════════════════════════════
+// A compact, self-contained hybrid AC/DC microgrid built to exercise the full
+// islanding / reconnection lifecycle end to end (power flow, OPF, transient):
+//   • Utility interconnection (bus 1, slack) tied to the microgrid through a
+//     point-of-common-coupling breaker SW-PCC (bus 2 ↔ 3).  Opening it islands
+//     the whole microgrid; re-closing reconnects it.
+//   • A synchronous genset (bus 5) that carries the most in-island generation,
+//     so the island detector promotes its bus to the swing reference when the
+//     PCC opens, and it forms voltage/frequency in transient studies.
+//   • A grid-forming BESS (bus 5) that anchors / black-starts the island.
+//   • Rooftop AC PV (bus 4).
+//   • A VSC (bus 6) feeding a small DC subgrid (DC-main + DC-load bus) with an
+//     EV fast charger, a DC data-center load, DC solar, and a DC battery.
+// Numbers are chosen so the island is generation-feasible: in-island load
+// (~3.85 MW) is covered by the genset (≤ 4 MW) + PV (1 MW) + BESS (± 1 MW).
+// ════════════════════════════════════════════════════════════════════════════════
+HybridPowerSystem build_hybrid_acdc_microgrid_island() {
+  HybridPowerSystem sys;
+  sys.name = "Hybrid AC/DC Microgrid (Islanding + Reconnection)";
+  sys.base_mva = 100.0;
+
+  const double kv = 20.0;  // MV microgrid voltage
+
+  // ── AC buses (20 kV; loads carried on the bus) ───────────────────────────
+  auto ac_bus = [&](int idx, BusType type, double pd, double qd, double vm,
+                    const std::string& name) {
+    ACBus b = make_ac_bus(idx, type, pd, qd, vm, 0.0, 1);
+    b.base_kv = kv;
+    b.name = name;
+    return b;
+  };
+  sys.ac.buses = {
+      ac_bus(1, BusType::SLACK, 0.0, 0.00, 1.02, "Utility-Grid"),
+      ac_bus(2, BusType::PQ, 0.0, 0.00, 1.02, "PCC-Utility"),
+      ac_bus(3, BusType::PQ, 1.2, 0.30, 1.00, "MG-Busbar"),
+      ac_bus(4, BusType::PQ, 0.8, 0.20, 1.00, "MG-PV-Feeder"),
+      ac_bus(5, BusType::PQ, 1.0, 0.25, 1.00, "MG-GFM-Feeder"),
+      ac_bus(6, BusType::PQ, 0.6, 0.15, 1.00, "MG-DC-Coupling"),
+  };
+
+  // ── AC branches (MV cable; pu on 100 MVA / 20 kV, Zbase = 4 Ω) ────────────
+  auto ac_line = [&](int idx, int f, int t, double r, double x,
+                     const std::string& name) {
+    ACBranch br = make_ac_branch(idx, f, t, r, x, 0.0, 1.0);
+    br.rate_a_mva = 10.0;
+    br.name = name;
+    return br;
+  };
+  sys.ac.branches = {
+      ac_line(1, 1, 2, 0.010, 0.030, "Utility-Line"),
+      ac_line(2, 3, 4, 0.040, 0.080, "MG-Feeder-PV"),
+      ac_line(3, 3, 5, 0.030, 0.060, "MG-Feeder-GFM"),
+      ac_line(4, 3, 6, 0.040, 0.080, "MG-Feeder-DC"),
+  };
+
+  // ── PCC breaker (islanding point, bus 2 ↔ bus 3) ─────────────────────────
+  {
+    Switch pcc;
+    pcc.index = 1;
+    pcc.name = "SW-PCC";
+    pcc.bus_from = 2;
+    pcc.bus_to = 3;
+    pcc.in_service = true;
+    pcc.closed = true;  // grid-connected by default
+    pcc.switch_type = SwitchType::CircuitBreaker;
+    pcc.i_rated_ka = 1.0;
+    pcc.is_automated = true;
+    pcc.is_remote = true;
+    pcc.t_operation_s = 0.08;
+    sys.ac.switches = {pcc};
+  }
+
+  // ── Utility slack generator (bus 1) ──────────────────────────────────────
+  {
+    Generator g = make_generator(1, 1, /*is_slack=*/true, 0.0, 0.0, 1.02, 100.0,
+                                 -100.0, 100.0, -100.0);
+    g.name = "Utility-Grid";
+    g.emission_factor_tco2_mwh = 0.40;
+    g.cost_c2 = 0.010;
+    g.cost_c1 = 45.0;
+    sys.ac.generators.push_back(g);
+  }
+
+  // ── Microgrid synchronous genset (bus 5) — island swing + GFM in transient ─
+  {
+    Generator g =
+        make_generator(2, 5, /*is_slack=*/false, 2.0, 0.0, 1.0, 4.0, 0.5, 3.0, -3.0);
+    g.name = "MG-Genset";
+    g.fuel_type = FuelType::Gas;
+    g.emission_factor_tco2_mwh = 0.45;
+    g.cost_c2 = 0.020;
+    g.cost_c1 = 85.0;
+    g.mbase_mva = 5.0;
+    g.inertia_h = 3.0;
+    g.droop_r = 0.05;
+    g.xd_pu = 1.80;
+    g.xdp_pu = 0.30;
+    g.xdpp_pu = 0.22;
+    g.td0p_s = 6.0;
+    g.td0pp_s = 0.04;
+    g.xq_pu = 1.70;
+    g.ra_pu = 0.003;
+    g.vn_kv = kv;
+    attach_grid_forming_genset_dynamics(g);
+    sys.ac.generators.push_back(g);
+  }
+
+  // ── Rooftop AC PV (bus 4) ────────────────────────────────────────────────
+  {
+    PVSystem pv;
+    pv.index = 1;
+    pv.bus = 4;
+    pv.in_service = true;
+    pv.name = "MG-Rooftop-PV";
+    pv.p_mw = 1.0;
+    pv.pmax_mw = 1.5;
+    pv.pmin_mw = 0.0;
+    pv.sn_mva = 1.6;
+    pv.qmax_mvar = 0.6;
+    pv.qmin_mvar = -0.6;
+    pv.controllable = true;
+    pv.profile_id = 2;  // solar
+    sys.ac.pv_systems.push_back(pv);
+  }
+
+  // ── Grid-forming BESS (bus 5) — island anchor / black-start ───────────────
+  {
+    Storage b;
+    b.index = 1;
+    b.bus = 5;
+    b.in_service = true;
+    b.name = "MG-BESS-GFM";
+    b.p_mw = 0.0;
+    b.p_rated_mw = 1.0;
+    b.pmax_mw = 1.0;
+    b.pmin_mw = -1.0;
+    b.qmax_mvar = 0.8;
+    b.qmin_mvar = -0.8;
+    b.e_rated_mwh = 3.0;
+    b.soc_init = 0.6;
+    b.soc_min = 0.1;
+    b.soc_max = 0.95;
+    b.grid_forming = true;
+    b.control_mode = "grid_forming";
+    b.type = "Li-ion";
+    sys.ac.storage.push_back(b);
+  }
+
+  // ── DC subgrid via VSC (AC bus 6 ↔ DC bus 1, VSC forms the DC voltage) ────
+  {
+    VSCConverter c;
+    c.index = 1;
+    c.bus_ac = 6;
+    c.bus_dc = 1;
+    c.in_service = true;
+    c.control_mode = ConverterMode::VDC_Q;
+    c.v_dc_set_pu = 1.0;
+    c.q_set_mvar = 0.0;
+    c.v_ac_set_pu = 1.0;
+    c.eta = 0.98;
+    c.k_vdc = 0.1;
+    c.pmax_mw = 5.0;
+    c.pmin_mw = -5.0;
+    c.qmax_mvar = 3.0;
+    c.qmin_mvar = -3.0;
+    c.p_rated_mw = 5.0;
+    c.vn_ac_kv = kv;
+    c.vn_dc_kv = 0.8;
+    c.x_sc_pu = 0.10;
+    c.name = "VSC-DC-Link";
+    sys.vsc_converters.push_back(c);
+  }
+
+  sys.dc.base_mva = sys.base_mva;
+  sys.dc.name = sys.name + " DC";
+  {
+    DCBus b1;
+    b1.index = 1;
+    b1.bus_type = DCBusType::DC_V;
+    b1.vm_pu = 1.0;
+    b1.base_kv = 0.8;
+    b1.in_service = true;
+    b1.name = "DC-Main";
+    DCBus b2;
+    b2.index = 2;
+    b2.bus_type = DCBusType::DC_P;
+    b2.vm_pu = 1.0;
+    b2.base_kv = 0.8;
+    b2.in_service = true;
+    b2.name = "DC-Load-Bus";
+    sys.dc.buses = {b1, b2};
+
+    DCBranch d;
+    d.index = 1;
+    d.from_bus = 1;
+    d.to_bus = 2;
+    d.r_pu = 0.02;
+    d.in_service = true;
+    d.name = "DC-Link-1-2";
+    sys.dc.branches = {d};
+  }
+
+  // DC loads: EV fast charger + DC data center
+  {
+    DCLoad ev;
+    ev.index = 1;
+    ev.bus = 2;
+    ev.in_service = true;
+    ev.name = "EV-Fast-Charger";
+    ev.p_mw = 0.5;
+    ev.p_rated_mw = 0.5;
+    DCLoad dc;
+    dc.index = 2;
+    dc.bus = 1;
+    dc.in_service = true;
+    dc.name = "DC-DataCenter";
+    dc.p_mw = 0.35;
+    dc.p_rated_mw = 0.35;
+    sys.dc.loads = {ev, dc};
+  }
+
+  // DC solar (injection) + DC battery
+  {
+    StaticGeneratorDC pv;
+    pv.index = 1;
+    pv.bus = 2;
+    pv.in_service = true;
+    pv.name = "DC-Solar";
+    pv.p_set_mw = 0.6;
+    pv.pmax_mw = 0.8;
+    pv.pmin_mw = 0.0;
+    pv.controllable = true;
+    pv.profile_id = 2;
+    sys.dc.dc_static_generators.push_back(pv);
+
+    DCStorage bess;
+    bess.index = 1;
+    bess.bus = 1;
+    bess.in_service = true;
+    bess.name = "DC-BESS";
+    bess.p_mw = 0.0;
+    bess.p_rated_mw = 0.3;
+    bess.pmax_mw = 0.3;
+    bess.pmin_mw = -0.3;
+    bess.e_rated_mwh = 1.0;
+    bess.soc_init = 0.5;
+    sys.dc.dc_storage.push_back(bess);
+  }
+
+  return sys;
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Networked Microgrids — Islanding + Reconnection
+// ════════════════════════════════════════════════════════════════════════════════
+// Three hybrid AC/DC microgrids hanging off a common utility feeder, each with
+// its own point-of-common-coupling breaker, plus two normally-open inter-MG tie
+// breakers.  This exercises the networked-microgrid lifecycle:
+//   • Grid-connected: all PCCs closed, ties open → one connected system.
+//   • Selective islanding: open any PCC to island that microgrid alone.
+//   • Inter-MG support: with a microgrid islanded, close a tie so a neighbor
+//     backs it up (the two islands merge into one).
+//   • Coordinated reconnection: re-close the PCCs and re-open the ties.
+// Each microgrid carries its own synchronous genset (in sys.ac.generators) so
+// the island detector always finds a swing reference when it is cut from the
+// utility; MG-B additionally hosts a grid-forming BESS and a VSC-fed DC subgrid.
+//   Bus 1  Utility (slack)         Bus 2  Main feeder
+//   MG-A: bus 3 (busbar) – bus 4 (genset + PV)     PCC-A: 2↔3
+//   MG-B: bus 5 (busbar + GFM BESS) – bus 6 (DC coupling)   PCC-B: 2↔5
+//   MG-C: bus 7 (busbar) – bus 8 (genset + PV)     PCC-C: 2↔7
+//   Ties (normally open): TIE-AB 4↔5, TIE-BC 6↔7
+// ════════════════════════════════════════════════════════════════════════════════
+HybridPowerSystem build_networked_microgrids_islanding() {
+  HybridPowerSystem sys;
+  sys.name = "Networked Microgrids (Islanding + Reconnection)";
+  sys.base_mva = 100.0;
+
+  const double kv = 20.0;
+
+  auto ac_bus = [&](int idx, BusType type, double pd, double qd,
+                    const std::string& name) {
+    const double vm = (type == BusType::SLACK) ? 1.02 : 1.0;
+    ACBus b = make_ac_bus(idx, type, pd, qd, vm, 0.0, 1);
+    b.base_kv = kv;
+    b.name = name;
+    return b;
+  };
+  sys.ac.buses = {
+      ac_bus(1, BusType::SLACK, 0.0, 0.00, "Utility-Grid"),
+      ac_bus(2, BusType::PQ, 0.0, 0.00, "Main-Feeder"),
+      ac_bus(3, BusType::PQ, 0.8, 0.20, "MG-A-Busbar"),
+      ac_bus(4, BusType::PQ, 0.5, 0.12, "MG-A-DER"),
+      ac_bus(5, BusType::PQ, 1.0, 0.25, "MG-B-Busbar"),
+      ac_bus(6, BusType::PQ, 0.6, 0.15, "MG-B-DC-Coupling"),
+      ac_bus(7, BusType::PQ, 0.8, 0.20, "MG-C-Busbar"),
+      ac_bus(8, BusType::PQ, 0.6, 0.15, "MG-C-DER"),
+  };
+
+  auto ac_line = [&](int idx, int f, int t, double r, double x,
+                     const std::string& name) {
+    ACBranch br = make_ac_branch(idx, f, t, r, x, 0.0, 1.0);
+    br.rate_a_mva = 10.0;
+    br.name = name;
+    return br;
+  };
+  sys.ac.branches = {
+      ac_line(1, 1, 2, 0.008, 0.024, "Utility-Line"),
+      ac_line(2, 3, 4, 0.030, 0.060, "MG-A-Feeder"),
+      ac_line(3, 5, 6, 0.030, 0.060, "MG-B-Feeder"),
+      ac_line(4, 7, 8, 0.030, 0.060, "MG-C-Feeder"),
+  };
+
+  // Three PCC breakers (closed) + two inter-MG tie breakers (normally open).
+  auto mk_switch = [](int idx, const std::string& name, int f, int t, bool closed,
+                      SwitchType type) {
+    Switch s;
+    s.index = idx;
+    s.name = name;
+    s.bus_from = f;
+    s.bus_to = t;
+    s.in_service = true;
+    s.closed = closed;
+    s.switch_type = type;
+    s.i_rated_ka = 1.0;
+    s.is_automated = true;
+    s.is_remote = true;
+    s.t_operation_s = 0.08;
+    return s;
+  };
+  sys.ac.switches = {
+      mk_switch(1, "SW-PCC-A", 2, 3, true, SwitchType::CircuitBreaker),
+      mk_switch(2, "SW-PCC-B", 2, 5, true, SwitchType::CircuitBreaker),
+      mk_switch(3, "SW-PCC-C", 2, 7, true, SwitchType::CircuitBreaker),
+      mk_switch(4, "SW-TIE-AB", 4, 5, false, SwitchType::LoadBreakSwitch),
+      mk_switch(5, "SW-TIE-BC", 6, 7, false, SwitchType::LoadBreakSwitch),
+  };
+
+  // Utility slack.
+  {
+    Generator g = make_generator(1, 1, /*is_slack=*/true, 0.0, 0.0, 1.02, 100.0,
+                                 -100.0, 100.0, -100.0);
+    g.name = "Utility-Grid";
+    g.emission_factor_tco2_mwh = 0.40;
+    g.cost_c2 = 0.010;
+    g.cost_c1 = 45.0;
+    sys.ac.generators.push_back(g);
+  }
+
+  // Per-microgrid synchronous genset (island swing + grid-forming in transient).
+  auto add_genset = [&](int idx, int bus, double pg, double pmax,
+                        const std::string& name) {
+    Generator g = make_generator(idx, bus, /*is_slack=*/false, pg, 0.0, 1.0, pmax,
+                                 0.3, pmax * 0.6, -pmax * 0.6);
+    g.name = name;
+    g.fuel_type = FuelType::Gas;
+    g.emission_factor_tco2_mwh = 0.45;
+    g.cost_c2 = 0.020;
+    g.cost_c1 = 85.0;
+    g.mbase_mva = pmax * 1.5;
+    g.inertia_h = 3.0;
+    g.droop_r = 0.05;
+    g.xd_pu = 1.80;
+    g.xdp_pu = 0.30;
+    g.xdpp_pu = 0.22;
+    g.td0p_s = 6.0;
+    g.td0pp_s = 0.04;
+    g.xq_pu = 1.70;
+    g.ra_pu = 0.003;
+    g.vn_kv = kv;
+    attach_grid_forming_genset_dynamics(g);
+    sys.ac.generators.push_back(g);
+  };
+  add_genset(2, 4, 0.8, 2.0, "MG-A-Genset");
+  add_genset(3, 5, 1.5, 3.0, "MG-B-Genset");
+  add_genset(4, 8, 0.8, 2.0, "MG-C-Genset");
+
+  // Rooftop PV in MG-A and MG-C.
+  auto add_pv = [&](int idx, int bus, double p, const std::string& name) {
+    PVSystem pv;
+    pv.index = idx;
+    pv.bus = bus;
+    pv.in_service = true;
+    pv.name = name;
+    pv.p_mw = p;
+    pv.pmax_mw = p * 1.5;
+    pv.pmin_mw = 0.0;
+    pv.sn_mva = p * 1.6;
+    pv.qmax_mvar = p * 0.6;
+    pv.qmin_mvar = -p * 0.6;
+    pv.controllable = true;
+    pv.profile_id = 2;
+    sys.ac.pv_systems.push_back(pv);
+  };
+  add_pv(1, 4, 0.5, "MG-A-PV");
+  add_pv(2, 8, 0.6, "MG-C-PV");
+
+  // Grid-forming BESS in MG-B (bus 5).
+  {
+    Storage b;
+    b.index = 1;
+    b.bus = 5;
+    b.in_service = true;
+    b.name = "MG-B-BESS-GFM";
+    b.p_mw = 0.0;
+    b.p_rated_mw = 1.0;
+    b.pmax_mw = 1.0;
+    b.pmin_mw = -1.0;
+    b.qmax_mvar = 0.8;
+    b.qmin_mvar = -0.8;
+    b.e_rated_mwh = 3.0;
+    b.soc_init = 0.6;
+    b.soc_min = 0.1;
+    b.soc_max = 0.95;
+    b.grid_forming = true;
+    b.control_mode = "grid_forming";
+    b.type = "Li-ion";
+    sys.ac.storage.push_back(b);
+  }
+
+  // MG-B DC subgrid via VSC (AC bus 6 ↔ DC bus 1).
+  {
+    VSCConverter c;
+    c.index = 1;
+    c.bus_ac = 6;
+    c.bus_dc = 1;
+    c.in_service = true;
+    c.control_mode = ConverterMode::VDC_Q;
+    c.v_dc_set_pu = 1.0;
+    c.q_set_mvar = 0.0;
+    c.v_ac_set_pu = 1.0;
+    c.eta = 0.98;
+    c.k_vdc = 0.1;
+    c.pmax_mw = 5.0;
+    c.pmin_mw = -5.0;
+    c.qmax_mvar = 3.0;
+    c.qmin_mvar = -3.0;
+    c.p_rated_mw = 5.0;
+    c.vn_ac_kv = kv;
+    c.vn_dc_kv = 0.8;
+    c.x_sc_pu = 0.10;
+    c.name = "MG-B-VSC";
+    sys.vsc_converters.push_back(c);
+  }
+
+  sys.dc.base_mva = sys.base_mva;
+  sys.dc.name = sys.name + " DC";
+  {
+    DCBus d1;
+    d1.index = 1;
+    d1.bus_type = DCBusType::DC_V;
+    d1.vm_pu = 1.0;
+    d1.base_kv = 0.8;
+    d1.in_service = true;
+    d1.name = "MG-B-DC-Main";
+    DCBus d2;
+    d2.index = 2;
+    d2.bus_type = DCBusType::DC_P;
+    d2.vm_pu = 1.0;
+    d2.base_kv = 0.8;
+    d2.in_service = true;
+    d2.name = "MG-B-DC-Load";
+    sys.dc.buses = {d1, d2};
+
+    DCBranch db;
+    db.index = 1;
+    db.from_bus = 1;
+    db.to_bus = 2;
+    db.r_pu = 0.02;
+    db.in_service = true;
+    db.name = "MG-B-DC-Link";
+    sys.dc.branches = {db};
+
+    DCLoad ev;
+    ev.index = 1;
+    ev.bus = 2;
+    ev.in_service = true;
+    ev.name = "MG-B-EV-Charger";
+    ev.p_mw = 0.4;
+    ev.p_rated_mw = 0.4;
+    sys.dc.loads = {ev};
+
+    StaticGeneratorDC dpv;
+    dpv.index = 1;
+    dpv.bus = 2;
+    dpv.in_service = true;
+    dpv.name = "MG-B-DC-Solar";
+    dpv.p_set_mw = 0.5;
+    dpv.pmax_mw = 0.7;
+    dpv.pmin_mw = 0.0;
+    dpv.controllable = true;
+    dpv.profile_id = 2;
+    sys.dc.dc_static_generators.push_back(dpv);
+
+    DCStorage dbess;
+    dbess.index = 1;
+    dbess.bus = 1;
+    dbess.in_service = true;
+    dbess.name = "MG-B-DC-BESS";
+    dbess.p_mw = 0.0;
+    dbess.p_rated_mw = 0.3;
+    dbess.pmax_mw = 0.3;
+    dbess.pmin_mw = -0.3;
+    dbess.e_rated_mwh = 1.0;
+    dbess.soc_init = 0.5;
+    sys.dc.dc_storage.push_back(dbess);
+  }
 
   return sys;
 }

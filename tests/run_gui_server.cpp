@@ -4916,6 +4916,8 @@ std::vector<std::string> case_names() {
       "demo_multizone_acdc",
       "dist33_microgrid_der",
       "comprehensive_hybrid_acdc",
+      "hybrid_acdc_microgrid_island",
+      "networked_microgrids_islanding",
       "market_3bus_toy",
       "market_5bus_acdc_toy",
       "dist33_tie_demo",
@@ -4936,6 +4938,8 @@ hacdcpf::HybridPowerSystem build_case(const std::string& name) {
   if (name == "demo_multizone_acdc") return build_demo_multizone_acdc();
   if (name == "dist33_microgrid_der") return build_dist33_microgrid_der();
   if (name == "comprehensive_hybrid_acdc") return build_comprehensive_hybrid_acdc();
+  if (name == "hybrid_acdc_microgrid_island") return build_hybrid_acdc_microgrid_island();
+  if (name == "networked_microgrids_islanding") return build_networked_microgrids_islanding();
   if (name == "market_3bus_toy") return build_market_3bus_toy();
   if (name == "market_5bus_acdc_toy") return build_market_5bus_acdc_toy();
   if (name == "dist33_tie_demo") {

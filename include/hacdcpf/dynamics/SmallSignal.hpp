@@ -51,6 +51,12 @@ struct SmallSignalResult {
 // should be the initialized/trimmed equilibrium). Reuses the same device stamp /
 // derivative model as the mass-matrix DAE core: the algebraic network variables
 // (bus voltages) are eliminated by a Schur complement.
-SmallSignalResult small_signal_analysis(DynamicSystem& system);
+//
+// By default the raw Jacobian J = dF/du is assembled ANALYTICALLY from each
+// device's addJacobian model plus the network block (one assembly, no O(n)
+// finite-difference sweep). Set use_analytic_jacobian = false to force the
+// central finite-difference assembly (used to validate the analytic path).
+SmallSignalResult small_signal_analysis(DynamicSystem& system,
+                                        bool use_analytic_jacobian = true);
 
 }  // namespace hacdcpf::dynamics

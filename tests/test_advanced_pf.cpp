@@ -364,6 +364,146 @@ TEST_CASE("Islanded solver: 3-island scenario — all islands converge",
     REQUIRE(result.vm.size() == 9);
 }
 
+TEST_CASE("Hybrid AC/DC microgrid: islanding + reconnection lifecycle",
+          "[advanced_pf][island][microgrid][hybrid]") {
+    auto sys = io::build_hybrid_acdc_microgrid_island();
+    PowerFlowOptions opt;
+    opt.tol = 1e-8;
+    opt.max_iter = 100;
+
+    // The PCC breaker is the single switch and is closed (grid-connected).
+    REQUIRE(sys.ac.switches.size() == 1);
+    REQUIRE(sys.ac.switches[0].name == "SW-PCC");
+    REQUIRE(sys.ac.switches[0].closed);
+
+    // Microgrid buses (index 3..6) map to result positions 2..5.
+    const std::vector<int> mg_bus_pos = {2, 3, 4, 5};
+
+    // ── 1) Grid-connected: one island, every bus energized in band ──────────
+    {
+        const auto r = solve_power_flow_islanded(sys, opt);
+        REQUIRE(r.converged);
+        REQUIRE(r.islands.size() == 1);
+        REQUIRE(r.vm.size() == 6);
+        for (double v : r.vm) {
+            REQUIRE(v > 0.9);
+            REQUIRE(v < 1.1);
+        }
+
+        // The GUI default (ac_newton) runs the monolithic hybrid AC/DC solver
+        // when there is a single solvable island — validate that path too.
+        const auto mono = solve_power_flow(sys, opt);
+        REQUIRE(mono.converged);
+        REQUIRE(mono.vdc.size() == 2);
+    }
+
+    // ── 2) Island the microgrid by opening the PCC breaker (bus 2 ↔ 3) ──────
+    sys.ac.switches[0].closed = false;
+    {
+        const auto r = solve_power_flow_islanded(sys, opt);
+        REQUIRE(r.converged);
+        REQUIRE(r.islands.size() == 2);
+
+        // Utility stub {1,2} keeps the SLACK; the microgrid island {3..6}+DC has
+        // no external slack but stays live on the genset (auto-promoted swing).
+        bool utility_slack = false;
+        bool mg_dg_island = false;
+        for (const auto& isl : r.islands) {
+            if (isl.has_ac_slack) utility_slack = true;
+            if (!isl.has_ac_slack && isl.has_generators) mg_dg_island = true;
+        }
+        REQUIRE(utility_slack);
+        REQUIRE(mg_dg_island);
+
+        // Every microgrid bus must remain energized within a physical band.
+        for (int pos : mg_bus_pos) {
+            REQUIRE(r.vm[static_cast<size_t>(pos)] > 0.85);
+            REQUIRE(r.vm[static_cast<size_t>(pos)] < 1.15);
+        }
+    }
+
+    // ── 3) Reconnect: re-close the PCC → back to a single connected island ──
+    sys.ac.switches[0].closed = true;
+    {
+        const auto r = solve_power_flow_islanded(sys, opt);
+        REQUIRE(r.converged);
+        REQUIRE(r.islands.size() == 1);
+        for (double v : r.vm) {
+            REQUIRE(v > 0.9);
+            REQUIRE(v < 1.1);
+        }
+    }
+}
+
+TEST_CASE("Networked microgrids: selective islanding, inter-MG support, reconnection",
+          "[advanced_pf][island][microgrid][networked]") {
+    const auto base = io::build_networked_microgrids_islanding();
+    PowerFlowOptions opt;
+    opt.tol = 1e-8;
+    opt.max_iter = 100;
+
+    // Switch order: 0=SW-PCC-A, 1=SW-PCC-B, 2=SW-PCC-C, 3=SW-TIE-AB, 4=SW-TIE-BC.
+    REQUIRE(base.ac.switches.size() == 5);
+    REQUIRE(base.ac.switches[0].name == "SW-PCC-A");
+    REQUIRE(base.ac.switches[3].name == "SW-TIE-AB");
+    REQUIRE(base.ac.switches[3].closed == false);  // ties normally open
+
+    // ── 1) Grid-connected: one connected island ─────────────────────────────
+    {
+        const auto r = solve_power_flow_islanded(base, opt);
+        REQUIRE(r.converged);
+        REQUIRE(r.islands.size() == 1);
+    }
+
+    // ── 2) Selective islanding: open PCC-A → MG-A islands alone ─────────────
+    {
+        auto s = base;
+        s.ac.switches[0].closed = false;
+        const auto r = solve_power_flow_islanded(s, opt);
+        REQUIRE(r.converged);
+        REQUIRE(r.islands.size() == 2);
+    }
+
+    // ── 3) Island all three microgrids (open every PCC, ties open) ──────────
+    {
+        auto s = base;
+        s.ac.switches[0].closed = false;
+        s.ac.switches[1].closed = false;
+        s.ac.switches[2].closed = false;
+        const auto r = solve_power_flow_islanded(s, opt);
+        REQUIRE(r.converged);
+        REQUIRE(r.islands.size() == 4);  // {utility}, MG-A, MG-B(+DC), MG-C
+
+        int slack_islands = 0;
+        int dg_islands = 0;
+        for (const auto& isl : r.islands) {
+            if (isl.has_ac_slack) ++slack_islands;
+            else if (isl.has_generators) ++dg_islands;
+        }
+        REQUIRE(slack_islands == 1);  // the utility stub
+        REQUIRE(dg_islands == 3);     // each MG held by its own genset
+    }
+
+    // ── 4) Inter-MG support: MGs islanded, close TIE-AB → MG-A + MG-B merge ──
+    {
+        auto s = base;
+        s.ac.switches[0].closed = false;
+        s.ac.switches[1].closed = false;
+        s.ac.switches[2].closed = false;
+        s.ac.switches[3].closed = true;  // SW-TIE-AB (bus 4 ↔ 5)
+        const auto r = solve_power_flow_islanded(s, opt);
+        REQUIRE(r.converged);
+        REQUIRE(r.islands.size() == 3);  // {utility}, MG-A+MG-B(+DC), MG-C
+    }
+
+    // ── 5) Coordinated reconnection: all PCCs closed, ties open → one island ─
+    {
+        const auto r = solve_power_flow_islanded(base, opt);
+        REQUIRE(r.converged);
+        REQUIRE(r.islands.size() == 1);
+    }
+}
+
 TEST_CASE("Adaptive solver: 2-island system — result sizes and dead-bus voltage",
           "[advanced_pf][island][adaptive]") {
     auto sys = io::build_ieee14_acdc();
