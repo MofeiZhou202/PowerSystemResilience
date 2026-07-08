@@ -63,9 +63,30 @@ const Canvas = (() => {
     baseMva: 100,          // system base MVA (preserved from loaded system)
     connectionStyle: 'avoid', // 'straight' | 'orthogonal' | 'avoid' (doc §10.2/§10.3)
     alignSnap: true,       // snap to neighbour x/y while dragging (doc §18 Phase 4)
+    // ===== Large-system headless mode =====
+    // For very large networks the SVG single-line diagram cannot be drawn
+    // responsively (tens of thousands of glyphs freeze the browser). In that
+    // case we skip glyph creation entirely and keep the loaded system JSON in
+    // `headlessSystem`; buildSystemJson() returns it so every calculation path
+    // (power flow, OPF, carbon, …) keeps working against the backend session.
+    headless: false,       // true when the current system is loaded without a canvas diagram
+    headlessSystem: null,  // deep copy of the loaded system JSON (source for buildSystemJson)
+    headlessMeta: null,    // { counts, totalElements, name } summary for the overlay
   };
 
   let _preservedModelBlocks = {};
+
+  // Above these limits a freshly loaded system enters headless (no-canvas) mode.
+  // Either a large bus count or a large total-element count triggers it; users
+  // can still force a full render from the overview overlay.
+  const HEADLESS_BUS_THRESHOLD = 600;      // AC + DC buses
+  const HEADLESS_ELEMENT_THRESHOLD = 2500; // buses + branches + devices
+  // User/session override: 'auto' (default), 'force-headless', or 'force-canvas'.
+  let _headlessPolicy = 'auto';
+  try {
+    const saved = localStorage.getItem('canvasHeadlessPolicy');
+    if (['auto', 'force-headless', 'force-canvas'].includes(saved)) _headlessPolicy = saved;
+  } catch (_) { /* ignore */ }
 
   function cloneJsonBlock(value) {
     if (!value || typeof value !== 'object') return undefined;
@@ -74,6 +95,65 @@ const Canvas = (() => {
     } catch (_) {
       return undefined;
     }
+  }
+
+  // ========== Large-system size estimation & headless policy ==========
+  // Count buses / branches / devices in a loaded system JSON to decide whether a
+  // canvas single-line diagram can be drawn responsively.
+  function summarizeSystemJson(jsonSys) {
+    const ac = jsonSys?.ac || {};
+    const dc = jsonSys?.dc || {};
+    const len = (a) => (Array.isArray(a) ? a.length : 0);
+    const acBuses = len(ac.buses);
+    const dcBuses = len(dc.buses);
+    const acBranches = len(ac.branches) + len(ac.transformers_2w) + len(ac.transformers_3w);
+    const dcBranches = len(dc.branches);
+    const converters = len(jsonSys?.vsc_converters) + len(jsonSys?.dcdc_converters);
+    // Every non-bus device becomes a glyph + a connection on the canvas.
+    const acDevices = len(ac.generators) + len(ac.loads) + len(ac.static_generators) +
+      len(ac.storage) + len(ac.renewable_gens) + len(ac.pv_systems) + len(ac.external_grids) +
+      len(ac.switches) + len(ac.circuit_breakers) + len(ac.motors) + len(ac.flexible_loads) +
+      len(ac.asymmetric_loads) + len(ac.shunts) + len(ac.chargers) + len(ac.charging_stations);
+    const dcDevices = len(dc.loads) + len(dc.dc_storage) + len(dc.static_generators) +
+      len(dc.pv_arrays) + len(dc.dc_circuit_breakers);
+    const buses = acBuses + dcBuses;
+    const branches = acBranches + dcBranches;
+    const devices = acDevices + dcDevices + converters;
+    const counts = {
+      ac_buses: acBuses, dc_buses: dcBuses,
+      ac_branches: acBranches, dc_branches: dcBranches,
+      converters, ac_devices: acDevices, dc_devices: dcDevices,
+    };
+    return {
+      counts,
+      buses,
+      branches,
+      devices,
+      // Glyphs + wires roughly equal buses + branches + devices*2.
+      totalElements: buses + branches + devices,
+      name: jsonSys?.name || '',
+    };
+  }
+
+  // Decide headless vs. canvas for a given system summary, honoring the policy.
+  function shouldGoHeadless(summary, opts = {}) {
+    if (opts.forceRender || _headlessPolicy === 'force-canvas') return false;
+    if (opts.forceHeadless || _headlessPolicy === 'force-headless') return true;
+    return summary.buses > HEADLESS_BUS_THRESHOLD ||
+           summary.totalElements > HEADLESS_ELEMENT_THRESHOLD;
+  }
+
+  function getHeadlessPolicy() { return _headlessPolicy; }
+  function setHeadlessPolicy(policy) {
+    if (!['auto', 'force-headless', 'force-canvas'].includes(policy)) return;
+    _headlessPolicy = policy;
+    try { localStorage.setItem('canvasHeadlessPolicy', policy); } catch (_) { /* ignore */ }
+  }
+  function isHeadless() { return state.headless === true; }
+  function getSystemSummary() {
+    if (state.headless && state.headlessMeta) return state.headlessMeta;
+    // Rendered mode: derive a live summary from the canvas.
+    return summarizeSystemJson(buildSystemJson());
   }
 
   function isIntegratedEnergyCanvasType(type) {
@@ -1351,6 +1431,15 @@ const Canvas = (() => {
 
   // ========== Mode ==========
   function setMode(mode, placeType = null) {
+    // Editing (placing/connecting) is unavailable while a large system is loaded
+    // headless — there is no diagram to attach to. Keep select mode and hint.
+    if (state.headless && (mode === 'place' || mode === 'connect')) {
+      if (typeof App !== 'undefined' && App.log) {
+        App.log('大规模系统处于无画布模式，暂不支持画布编辑；如需绘制请点击“仍然绘制单线图”。', 'warn');
+      }
+      mode = 'select';
+      placeType = null;
+    }
     state.mode = mode;
     state.placeType = placeType;
 
@@ -2252,6 +2341,38 @@ const Canvas = (() => {
   }
 
 	  function buildSystemJson() {
+	    // Headless mode: the canvas holds no glyphs, so return the system JSON we
+	    // stored at load time, normalized onto the full skeleton so every
+	    // calculation path and labeling/table helper sees the same complete shape
+	    // it would get from a drawn diagram (missing arrays default to []).
+	    if (state.headless && state.headlessSystem) {
+	      const stored = cloneJsonBlock(state.headlessSystem) || {};
+	      const acSkel = { buses: [], branches: [], generators: [], loads: [],
+	        static_generators: [], storage: [], renewable_gens: [],
+	        pv_systems: [], external_grids: [], transformers_2w: [],
+	        switches: [], circuit_breakers: [], motors: [],
+	        flexible_loads: [], asymmetric_loads: [], shunts: [],
+	        transformers_3w: [], chargers: [], charging_stations: [] };
+	      const dcSkel = { buses: [], branches: [], loads: [], dc_storage: [],
+	        static_generators: [], pv_arrays: [], dc_circuit_breakers: [] };
+	      const out = {
+	        ...stored,
+	        name: stored.name || 'Canvas System',
+	        base_mva: state.baseMva || stored.base_mva || 100,
+	        ac: { ...acSkel, ...(stored.ac || {}) },
+	        dc: { ...dcSkel, ...(stored.dc || {}) },
+	        vsc_converters: stored.vsc_converters || [],
+	        dcdc_converters: stored.dcdc_converters || [],
+	        energy_routers: stored.energy_routers || [],
+	        mobile_storage: stored.mobile_storage || [],
+	        vpps: stored.vpps || [],
+	        microgrids: stored.microgrids || [],
+	      };
+	      if (_preservedModelBlocks.three_phase_ac && !out.three_phase_ac) {
+	        out.three_phase_ac = cloneJsonBlock(_preservedModelBlocks.three_phase_ac);
+	      }
+	      return out;
+	    }
 	    const sys = {
       name: 'Canvas System',
       base_mva: state.baseMva || 100,
@@ -3336,7 +3457,7 @@ const Canvas = (() => {
   }
 
   // ========== Load from JSON System ==========
-	  function loadFromSystemJson(jsonSys) {
+	  function loadFromSystemJson(jsonSys, opts = {}) {
 	    // Clear canvas
 	    clearAll();
 	    _preservedModelBlocks = {};
@@ -3346,6 +3467,28 @@ const Canvas = (() => {
 
     // Preserve system base MVA (critical for per-unit calculations)
     state.baseMva = jsonSys.base_mva || 100;
+
+    // ===== Large-system headless mode =====
+    // When the network is too large to draw as an SVG single-line diagram, keep
+    // the full system JSON in memory (so buildSystemJson / all calculations work)
+    // and skip glyph creation. An HTML overlay summarizes the system instead.
+    const summary = summarizeSystemJson(jsonSys);
+    if (shouldGoHeadless(summary, opts)) {
+      state.headless = true;
+      state.headlessSystem = cloneJsonBlock(jsonSys) || jsonSys;
+      state.headlessMeta = summary;
+      renderHeadlessOverview(summary);
+      updateInfo();
+      // Populate the (row-capped) topology tables from the stored system so the
+      // "拓扑" tab still works. onSystemLoaded refreshes tables while keeping the
+      // canvas clean, so the backend session stays authoritative (no resync).
+      if (typeof App !== 'undefined' && App.onSystemLoaded) App.onSystemLoaded();
+      return;
+    }
+    state.headless = false;
+    state.headlessSystem = null;
+    state.headlessMeta = null;
+    hideHeadlessOverview();
 
     const busCompMap = {}; // busIndex -> compId (for AC)
     const dcBusCompMap = {};  // for DC
@@ -4259,7 +4402,7 @@ const Canvas = (() => {
     } else {
       autoLayout();
     }
-    if (typeof App !== 'undefined') App.onTopologyChanged();
+    if (typeof App !== 'undefined' && App.onSystemLoaded) App.onSystemLoaded();
   }
 
   // ========== Results Overlay ==========
@@ -5976,6 +6119,11 @@ const Canvas = (() => {
     state.connections = [];
     state.selectedId = null;
     state.nextId = 1;
+    // Leaving headless mode: drop the stored system and hide the overview.
+    state.headless = false;
+    state.headlessSystem = null;
+    state.headlessMeta = null;
+    hideHeadlessOverview();
     // Note: baseMva is NOT reset here; loadFromSystemJson sets it before clearAll returns
     resultsLayer.innerHTML = '';
     updateInfo();
@@ -5984,10 +6132,78 @@ const Canvas = (() => {
   function updateInfo() {
     const el = document.getElementById('canvasInfo');
     if (el) {
-      const selCount = state.selectedIds.size;
-      const selText = selCount > 1 ? ` | 已选 ${selCount}` : '';
-      el.textContent = `${state.components.length} 元件 | ${state.connections.length} 连接${selText}`;
+      if (state.headless && state.headlessMeta) {
+        const c = state.headlessMeta.counts || {};
+        el.textContent = `无画布模式 · ${state.headlessMeta.buses} 母线 | ` +
+          `${state.headlessMeta.branches} 支路 | ${state.headlessMeta.devices} 设备`;
+      } else {
+        const selCount = state.selectedIds.size;
+        const selText = selCount > 1 ? ` | 已选 ${selCount}` : '';
+        el.textContent = `${state.components.length} 元件 | ${state.connections.length} 连接${selText}`;
+      }
     }
+  }
+
+  // ========== Headless (no-canvas) overview overlay ==========
+  // Rendered over #canvasContainer for very large systems in place of the SVG
+  // single-line diagram. Summarizes the loaded network and offers a manual
+  // "render anyway" escape hatch.
+  function renderHeadlessOverview(summary) {
+    const host = document.getElementById('canvasContainer');
+    if (!host) return;
+    let ov = document.getElementById('canvasHeadlessOverlay');
+    if (!ov) {
+      ov = document.createElement('div');
+      ov.id = 'canvasHeadlessOverlay';
+      host.appendChild(ov);
+    }
+    const c = summary.counts || {};
+    const nm = summary.name ? `<div class="hl-name">${escapeHtmlLocal(summary.name)}</div>` : '';
+    ov.innerHTML = `
+      <div class="hl-card">
+        <div class="hl-icon">🗄️</div>
+        <div class="hl-title">大规模系统 · 无画布计算模式</div>
+        ${nm}
+        <div class="hl-desc">系统规模较大（${summary.buses} 母线 / ${summary.branches} 支路 / ${summary.devices} 设备），
+        为保证界面流畅，已跳过单线图绘制。<b>所有计算功能（潮流、最优潮流、短路、时序、可靠性等）均可正常使用</b>，
+        计算直接在后端会话上执行。</div>
+        <div class="hl-stats">
+          <div class="hl-stat"><span class="hl-k">${c.ac_buses || 0}</span><span class="hl-l">AC 母线</span></div>
+          <div class="hl-stat"><span class="hl-k">${c.dc_buses || 0}</span><span class="hl-l">DC 母线</span></div>
+          <div class="hl-stat"><span class="hl-k">${(c.ac_branches || 0) + (c.dc_branches || 0)}</span><span class="hl-l">支路</span></div>
+          <div class="hl-stat"><span class="hl-k">${c.converters || 0}</span><span class="hl-l">换流器</span></div>
+          <div class="hl-stat"><span class="hl-k">${(c.ac_devices || 0) + (c.dc_devices || 0)}</span><span class="hl-l">设备</span></div>
+        </div>
+        <div class="hl-actions">
+          <button id="btnHeadlessRenderAnyway" class="btn btn-sm" title="强制在画布上绘制单线图（大系统可能非常缓慢或卡顿）">仍然绘制单线图</button>
+          <span class="hl-hint">建议在“拓扑”标签页查看/编辑表格数据，或使用“模型IO”导出后离线编辑。</span>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const btn = document.getElementById('btnHeadlessRenderAnyway');
+    if (btn) btn.onclick = () => forceRenderCurrentSystem();
+  }
+
+  function hideHeadlessOverview() {
+    const ov = document.getElementById('canvasHeadlessOverlay');
+    if (ov) ov.style.display = 'none';
+  }
+
+  function escapeHtmlLocal(str) {
+    const d = document.createElement('div');
+    d.textContent = String(str == null ? '' : str);
+    return d.innerHTML;
+  }
+
+  // Force a full canvas render of the current headless system (user opt-in).
+  function forceRenderCurrentSystem() {
+    if (!state.headless || !state.headlessSystem) return;
+    const sys = state.headlessSystem;
+    if (typeof App !== 'undefined' && App.log) {
+      App.log('正在强制绘制大规模系统单线图，可能需要一些时间…', 'warn');
+    }
+    // Defer so the log/status paint before the (potentially heavy) render.
+    setTimeout(() => loadFromSystemJson(sys, { forceRender: true }), 30);
   }
 
   // ========== Pan-to-Component & Highlight ==========
@@ -6336,6 +6552,11 @@ const Canvas = (() => {
     buildSystemJson,
     syncConnectivity,
     loadFromSystemJson,
+    isHeadless,
+    getSystemSummary,
+    getHeadlessPolicy,
+    setHeadlessPolicy,
+    forceRenderCurrentSystem,
 	    showPowerFlowResults,
 	    showCarbonPotentialResults,
 	    showReliabilityImpactResults,

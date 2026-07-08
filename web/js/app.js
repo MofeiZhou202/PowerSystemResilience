@@ -467,6 +467,12 @@ const App = (() => {
       : (context === 'resilience' ? 'resilienceComponentCurveTargets' : 'tspfComponentCurveTargets');
     const div = document.getElementById(divId);
     if (!div) return;
+    // Per-component curve editing needs canvas glyphs to anchor to; a headless
+    // large system has none. Skip (and avoid deep-cloning the big system JSON).
+    if (typeof Canvas !== 'undefined' && Canvas.isHeadless && Canvas.isHeadless()) {
+      div.innerHTML = '<p class="empty-hint">大规模系统处于无画布模式，逐元件曲线编辑不可用；请使用整体缩放/曲线参数。</p>';
+      return;
+    }
     const rows = componentCurveTargets();
     if (!rows.length) {
       div.innerHTML = '<p class="empty-hint">当前拓扑中没有可展示曲线的负荷/新能源元件。</p>';
@@ -1168,6 +1174,7 @@ const App = (() => {
             updateResilienceSwitchDefault();
             invalidateAnalysisResults();
             log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
+            noteHeadlessAfterLoad();
           } catch (e) {
             log(`JSON解析失败: ${e.message}`, 'error');
           }
@@ -1182,7 +1189,7 @@ const App = (() => {
           ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
           ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
           ['发电机', data.counts?.generators ?? data.generators ?? ''],
-        ], { subtitle: '已同步到画布并自动运行潮流' });
+        ], { subtitle: `已同步到后端并自动运行潮流${Canvas.isHeadless && Canvas.isHeadless() ? '（大规模系统：无画布模式）' : '（已同步到画布）'}` });
       } else {
         setStatus('加载失败', 'error');
       }
@@ -1216,7 +1223,7 @@ const App = (() => {
         ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
         ['DC母线', data.counts?.dc_buses ?? data.dc_buses ?? ''],
         ['VSC', data.counts?.vsc_converters ?? data.vsc_converters ?? ''],
-      ], { subtitle: '当前后端会话与画布已更新' });
+      ], { subtitle: `当前后端会话与画布已更新${noteHeadlessAfterLoad()}` });
     } else {
       setStatus('加载失败', 'error');
     }
@@ -1236,6 +1243,7 @@ const App = (() => {
 	        updateResilienceSwitchDefault();
 	        invalidateAnalysisResults('系统已变更，旧潮流和碳流结果已失效');
         log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
+        noteHeadlessAfterLoad();
       } catch (e) {
         log(`JSON解析失败: ${e.message}`, 'error');
       }
@@ -1337,6 +1345,17 @@ const App = (() => {
     if (!cb) return;
     if (!force && cb.dataset.userTouched === '1') return;
     cb.checked = currentCaseHasSwitches();
+  }
+
+  // After loading a system, tell the user when the canvas entered headless mode
+  // (large-system, no single-line diagram). Calculations are unaffected. Returns
+  // a short subtitle suffix that callers can append to their model-IO status.
+  function noteHeadlessAfterLoad() {
+    if (typeof Canvas === 'undefined' || !Canvas.isHeadless || !Canvas.isHeadless()) return '';
+    const s = (Canvas.getSystemSummary && Canvas.getSystemSummary()) || {};
+    log(`系统规模较大（${s.buses ?? '?'} 母线 / ${s.branches ?? '?'} 支路），已启用无画布计算模式；` +
+        `所有计算功能可正常使用。`, 'info');
+    return '（大规模系统：已启用无画布计算模式，计算功能不受影响）';
   }
 
   // Import an ETAP-schema .xlsx workbook (raw binary upload -> load_etap).
@@ -1632,7 +1651,7 @@ const App = (() => {
           showModelIoStatus('JSON 导入完成', [
             ['文件', file.name],
             ['系统名', loadedName],
-          ], { subtitle: 'JSON 已同步到后端并恢复画布' });
+          ], { subtitle: `JSON 已同步到后端${noteHeadlessAfterLoad() || '并恢复画布'}` });
         }
       } catch (err) {
         log(`导入失败: ${err.message}`, 'error');
@@ -9098,6 +9117,17 @@ const App = (() => {
     if (selectedGotDisabled) sel.value = 'ac_newton';
   }
 
+  function onSystemLoaded() {
+    // A full (re)load makes the canvas match the backend session exactly, so the
+    // canvas is NOT dirty — this preserves the "backend already has it" fast path
+    // (no forced resync) for both freshly loaded and force-rendered systems.
+    _canvasDirty = false;
+    if (Canvas.syncConnectivity) Canvas.syncConnectivity();
+    updateTopologyTables();
+    const sel = Canvas.state.selectedId;
+    if (sel !== null && sel !== undefined) onSelectionChanged(sel);
+  }
+
   function onTopologyChanged() {
     _canvasDirty = true;
     // Rewiring changes which buses a device connects to — re-derive those
@@ -9118,7 +9148,11 @@ const App = (() => {
     renderComponentCurveTargets('scenario');
     renderComponentCurveTargets('resilience');
 
-    // Helper: populate a table and toggle its section visibility
+    // Helper: populate a table and toggle its section visibility.
+    // For very large systems the topology tables are capped so the DOM stays
+    // responsive; a trailing note row reports how many rows were omitted. Use
+    // the "模型IO" export to obtain the complete dataset.
+    const TOPO_ROW_CAP = 500;
     function fillTable(bodyId, sectionId, items, mapObj, rowFn) {
       const body = document.querySelector(bodyId + ' tbody');
       if (!body) return;
@@ -9127,7 +9161,11 @@ const App = (() => {
         const sec = document.getElementById(sectionId);
         if (sec) sec.style.display = items.length ? '' : 'none';
       }
-      items.forEach(item => {
+      const total = items.length;
+      const shown = Math.min(total, TOPO_ROW_CAP);
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < shown; i += 1) {
+        const item = items[i];
         const tr = document.createElement('tr');
         const compId = mapObj ? mapObj[item.index] : undefined;
         if (compId !== undefined) {
@@ -9135,8 +9173,18 @@ const App = (() => {
           tr.addEventListener('click', () => Canvas.panToComponent(compId));
         }
         tr.innerHTML = rowFn(item);
-        body.appendChild(tr);
-      });
+        frag.appendChild(tr);
+      }
+      if (total > shown) {
+        const note = document.createElement('tr');
+        note.className = 'topo-truncated-note';
+        const td = document.createElement('td');
+        td.colSpan = 12;
+        td.textContent = `仅显示前 ${shown} / ${total} 行（大规模系统已截断，完整数据请使用“模型IO”导出）`;
+        note.appendChild(td);
+        frag.appendChild(note);
+      }
+      body.appendChild(frag);
     }
 
     // Aggregate load per bus from load components
@@ -14187,6 +14235,7 @@ const App = (() => {
     setStatus,
     onSelectionChanged,
     onTopologyChanged,
+    onSystemLoaded,
     switchTab,
     setActiveModule,
     setActiveCanvasTool,

@@ -239,6 +239,7 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   flex-direction: column;
   overflow: hidden;
   background: var(--bg);
+  position: relative;
 }
 #canvasToolbar {
   display: flex;
@@ -417,6 +418,48 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   background: linear-gradient(to right, #4caf50, #8bc34a, #ffeb3b, #ff9800, #f44336);
   border-radius: 3px; vertical-align: middle; margin: 0 6px;
 }
+
+/* ===== Large-system headless (no-canvas) overlay ===== */
+#canvasHeadlessOverlay {
+  position: absolute; inset: 0; z-index: 25;
+  display: none; align-items: center; justify-content: center;
+  padding: 24px; overflow: auto;
+  background:
+    radial-gradient(circle at 30% 20%, rgba(97,175,239,0.10), transparent 60%),
+    var(--canvas-bg);
+}
+#canvasHeadlessOverlay .hl-card {
+  max-width: 620px; width: 100%;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 12px; padding: 28px 32px; text-align: center;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.25);
+}
+#canvasHeadlessOverlay .hl-icon { font-size: 40px; line-height: 1; margin-bottom: 8px; }
+#canvasHeadlessOverlay .hl-title {
+  font-size: 18px; font-weight: 700; color: var(--ink); margin-bottom: 4px;
+}
+#canvasHeadlessOverlay .hl-name {
+  font-size: 13px; color: var(--accent); margin-bottom: 10px; word-break: break-all;
+}
+#canvasHeadlessOverlay .hl-desc {
+  font-size: 13px; line-height: 1.7; color: var(--ink2);
+  margin: 10px auto 18px; max-width: 520px; text-align: left;
+}
+#canvasHeadlessOverlay .hl-desc b { color: var(--ink); }
+#canvasHeadlessOverlay .hl-stats {
+  display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-bottom: 20px;
+}
+#canvasHeadlessOverlay .hl-stat {
+  min-width: 78px; padding: 10px 12px;
+  background: var(--paper); border: 1px solid var(--border); border-radius: 8px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+#canvasHeadlessOverlay .hl-stat .hl-k { font-size: 20px; font-weight: 700; color: var(--accent); }
+#canvasHeadlessOverlay .hl-stat .hl-l { font-size: 11px; color: var(--ink2); }
+#canvasHeadlessOverlay .hl-actions {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+}
+#canvasHeadlessOverlay .hl-hint { font-size: 11px; color: var(--ink2); }
 
 /* ===== Right Panel ===== */
 #rightPanelResizer {
@@ -629,6 +672,10 @@ body[data-active-result-group="modelIO"] #rightPanel {
 .topo-table-wrap tr:hover td { background: rgba(97,175,239,0.08); }
 .topo-table-wrap tr[data-comp-id] { cursor: pointer; }
 .topo-table-wrap tr[data-comp-id]:hover td { background: rgba(97,175,239,0.18); }
+.topo-table-wrap tr.topo-truncated-note td {
+  color: var(--ink2); font-style: italic; text-align: center;
+  background: var(--bg2); cursor: default;
+}
 
 /* Results tables - clickable rows */
 #pfBusResults tr[data-comp-id],
