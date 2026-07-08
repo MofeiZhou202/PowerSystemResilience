@@ -62,9 +62,9 @@ The IO layer has three nested responsibilities:
 - `ComponentIOMapping` describes one component collection and target-format
   policy tuple.
 - `PowerSimulationsDynamicsExportOptions` /
-  `to_powersimulationsdynamics_json` export the single Julia dynamic IO surface:
-  the neutral `hacdcpf_psd_snapshot.v1` manifest used by the PSD validation
-  tools.
+  `to_powersimulationsdynamics_julia` export the direct Julia dynamic IO
+  surface: a `hacdcpf_psd_julia.v1` wrapper carrying the neutral
+  `hacdcpf_psd_snapshot.v1` manifest plus embedded rich JSON for GUI import.
 - `ComponentStandardProfile` links a component to standards such as CIM,
   IEC 61850, IEC 60909, IEEE 1547, IEEE 421.5, NERC, GridLAB-D, OpenDSS, and
   PowerSimulationsDynamics.jl.
@@ -167,10 +167,10 @@ curl http://127.0.0.1:8097/api/io/model_compatibility
 - **CIM / CGMES 3.0 (EQ+SSH)** bounded import/export, XXE-hardened (§5).
 - **MATPOWER export** (`to_matpower`), closing import/export symmetry.
 - **Uniform ImportReport** contract with a bridge for legacy per-format reports.
-- **PowerSimulationsDynamics.jl Julia IO** (`to_powersimulationsdynamics_json`):
+- **PowerSimulationsDynamics.jl Julia IO** (`to_powersimulationsdynamics_julia`):
   exports AC/static/dynamic profile identity in the same snapshot envelope as
-  the Julia validation helper, while retaining DC/three-phase/hybrid-only
-  details as explicit diagnostic metadata.
+  the Julia validation helper and embeds rich JSON so the GUI can import the
+  `.jl` wrapper without losing DC/three-phase/hybrid-only details.
 
 ## Future Review Areas
 

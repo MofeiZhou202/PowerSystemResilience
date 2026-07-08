@@ -49,6 +49,7 @@
     <input type="file" id="fileImportJson" accept=".json" style="display:none"/>
     <input type="file" id="fileImportGridlabd" accept=".glm,.txt" style="display:none"/>
     <input type="file" id="fileImportOpendss" accept=".dss,.txt" style="display:none"/>
+    <input type="file" id="fileImportPsdJulia" accept=".jl,text/x-julia,text/plain" style="display:none"/>
     <button id="btnToggleTheme" class="btn btn-sm" title="切换浅色 / 深色背景主题">🌓 主题</button>
     <span id="canvasInfo" class="canvas-info">0 元件 | 0 连接</span>
     <span id="statusBadge" class="badge">就绪</span>
@@ -97,6 +98,7 @@
       <button id="btnIoImportEtapXml" class="toolbar-btn" title="导入 ETAP 工程 XML (.xml)">导入ETAP XML</button>
       <button id="btnIoImportGridlabd" class="toolbar-btn" title="导入 GridLAB-D GLM 文本">导入GLM</button>
       <button id="btnIoImportOpendss" class="toolbar-btn" title="导入 OpenDSS DSS 文本">导入DSS</button>
+      <button id="btnIoImportPsdJulia" class="toolbar-btn" title="导入 PowerSimulationsDynamics.jl Julia 文件 (.jl)">导入PSD.jl</button>
       <button id="btnIoNewSystem" class="toolbar-btn" title="新建空白系统">新建</button>
     </div>
     <div class="io-toolbar-group">
@@ -107,7 +109,7 @@
       <button id="btnIoExportEtapXml" class="toolbar-btn" title="导出 ETAP 工程 XML (.xml)">导出ETAP XML</button>
       <button id="btnIoExportGridlabd" class="toolbar-btn" title="导出 GridLAB-D GLM">导出GLM</button>
       <button id="btnIoExportOpendss" class="toolbar-btn" title="导出 OpenDSS DSS">导出DSS</button>
-      <button id="btnIoExportPsd" class="toolbar-btn" title="导出 PowerSimulationsDynamics.jl / PowerSystems.jl 动态模型快照 JSON">导出PSD.jl</button>
+      <button id="btnIoExportPsd" class="toolbar-btn" title="导出 PowerSimulationsDynamics.jl / PowerSystems.jl Julia 文件 (.jl)">导出PSD.jl</button>
     </div>
     <div class="io-toolbar-group">
       <div class="io-toolbar-group-title">模型兼容</div>

@@ -9404,9 +9404,7 @@ int main(int argc, char** argv) {
   });
 
   // ---- Session: export the current system as a PSD/PowerSystems manifest ----
-  // This is the single Julia IO surface for PowerSimulationsDynamics.jl: a
-  // hacdcpf_psd_snapshot.v1 JSON manifest preserving dynamic-profile identity
-  // without requiring Julia in the GUI runtime.
+  // This is the neutral PSD snapshot JSON surface for PowerSimulationsDynamics.jl.
   svr.Post("/api/session/export_powersimulationsdynamics",
            [](const httplib::Request&, httplib::Response& res) {
     try {
@@ -9446,6 +9444,87 @@ int main(int argc, char** argv) {
                         PowerSimulationsDynamicsJulia)}}
               .dump(),
           "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: export/import a direct PSD Julia wrapper file (.jl) ----
+  svr.Post("/api/session/export_powersimulationsdynamics_julia",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system) throw std::runtime_error("No system loaded");
+      hacdcpf::io::PowerSimulationsDynamicsExportOptions options;
+      options.model_name = g_session.current_name.empty()
+                               ? "hacdcpf_psd_snapshot"
+                               : g_session.current_name;
+      const std::string julia =
+          hacdcpf::io::to_powersimulationsdynamics_julia(
+              *g_session.current_system, options, 2);
+      const auto coverage =
+          hacdcpf::io::analyze_component_io_coverage(*g_session.current_system);
+      std::string safe;
+      for (char ch : g_session.current_name) {
+        safe += (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')
+                    ? ch : '_';
+      }
+      if (safe.empty()) safe = "system";
+      res.set_content(
+          json{{"julia_string", julia},
+               {"name", safe},
+               {"format", "hacdcpf_psd_julia.v1"},
+               {"snapshot_format", "hacdcpf_psd_snapshot.v1"},
+               {"represented",
+                coverage.represented_instances(
+                    hacdcpf::io::ComponentIOFormat::
+                        PowerSimulationsDynamicsJulia)},
+               {"unrepresented",
+                coverage.unrepresented_instances(
+                    hacdcpf::io::ComponentIOFormat::
+                        PowerSimulationsDynamicsJulia)},
+               {"warnings",
+                hacdcpf::io::external_io_diagnostics(
+                    coverage,
+                    hacdcpf::io::ComponentIOFormat::
+                        PowerSimulationsDynamicsJulia)}}
+              .dump(),
+          "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/load_powersimulationsdynamics_julia",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      const std::string julia = j.value("julia_string", "");
+      if (julia.empty()) throw std::runtime_error("Empty PSD Julia file string");
+      auto sys = hacdcpf::io::from_powersimulationsdynamics_julia(julia);
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!sys.three_phase_ac.has_value() &&
+          g_session.preserved_three_phase_ac.has_value()) {
+        sys.three_phase_ac = g_session.preserved_three_phase_ac;
+      } else if (sys.three_phase_ac.has_value()) {
+        g_session.preserved_three_phase_ac = sys.three_phase_ac;
+      } else {
+        clear_preserved_three_phase(g_session);
+      }
+      g_session.current_system = std::move(sys);
+      g_session.current_name = g_session.current_system->name.empty()
+                                   ? "PSD Julia import"
+                                   : g_session.current_system->name;
+      g_session.external_grid_carbon_profiles.clear();
+      clear_cached_analysis(g_session);
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_io_warnings"] = json::array(
+          {"PSD.jl 文件通过嵌入的 HACDCPF_RICH_MODEL_JSON 恢复 rich model；"
+           "HACDCPF_PSD_SNAPSHOT_JSON 保留为 Julia/PSD 动态验证 manifest。"});
+      res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");

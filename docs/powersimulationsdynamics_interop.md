@@ -28,6 +28,12 @@ HACDCPF validation harness through two neutral artifacts:
    `tools/psd_validation/export_trace.jl`. This is the common time-series shape
    used by the current external comparison tests.
 
+The GUI can also export/import a direct Julia wrapper, `hacdcpf_psd_julia.v1`
+(`*_psd.jl`). That file embeds both `HACDCPF_PSD_SNAPSHOT_JSON` for Julia/PSD
+validation and `HACDCPF_RICH_MODEL_JSON` for exact HACDCPF rich-model round-trip
+import. Importing arbitrary PSD scripts is intentionally not inferred; the
+direct importer consumes the generated wrapper contract.
+
 The snapshot is intentionally a comparison manifest, not a claim that every PSD
 network feature can already be imported into HACDCPF. The model identity is
 preserved even when the runtime implementation is still missing.

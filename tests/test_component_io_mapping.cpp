@@ -551,6 +551,16 @@ TEST_CASE("PowerSimulationsDynamics Julia IO exports a neutral snapshot",
   const auto notes = doc.at("conversion_notes").dump();
   CHECK(notes.find("PowerSimulationsDynamics.jl") != std::string::npos);
 
+  const auto julia = hacdcpf::io::to_powersimulationsdynamics_julia(sys);
+  CHECK_THAT(julia, ContainsSubstring("HACDCPF_PSD_SNAPSHOT_JSON"));
+  CHECK_THAT(julia, ContainsSubstring("HACDCPF_RICH_MODEL_JSON"));
+  CHECK_THAT(julia, ContainsSubstring("hacdcpf_psd_julia.v1"));
+  const auto restored =
+      hacdcpf::io::from_powersimulationsdynamics_julia(julia);
+  CHECK(restored.name == sys.name);
+  CHECK(restored.ac.generators.size() == sys.ac.generators.size());
+  CHECK(restored.vsc_converters.size() == sys.vsc_converters.size());
+
   REQUIRE(doc.at("components").contains("diagnostic_components"));
   const auto& diagnostic = doc.at("components").at("diagnostic_components");
   const auto has_dc_bus = std::any_of(

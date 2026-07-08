@@ -1293,6 +1293,32 @@ const App = (() => {
     }
   }
 
+  async function loadPowerSimulationsDynamicsJulia(file) {
+    if (!file) return;
+    setStatus('导入PSD.jl...', 'busy');
+    try {
+      const julia = await file.text();
+      const data = await apiPost('/api/session/load_powersimulationsdynamics_julia', {
+        julia_string: julia,
+        filename: file.name,
+      });
+      if (!data) { setStatus('加载失败', 'error'); return; }
+      log(`已导入PSD.jl: ${file.name}`, 'success');
+      applyLoadedSystem(data, 'PowerSimulationsDynamics.jl');
+      showModelIoStatus('PowerSimulationsDynamics.jl 导入完成', [
+        ['文件', file.name],
+        ['导入路径', 'HACDCPF_RICH_MODEL_JSON'],
+        ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+        ['动态注入', Number(data.counts?.generators ?? data.generators ?? 0) + Number(data.counts?.vsc_converters ?? data.vsc_converters ?? 0)],
+      ], { subtitle: 'Julia 文件直接恢复 rich model，并保留 PSD snapshot manifest', warnings: data._io_warnings || [] });
+      setStatus('就绪');
+    } catch (e) {
+      log(`导入PSD.jl失败: ${e.message}`, 'error');
+      setStatus('加载失败', 'error');
+    }
+  }
+
   function currentCaseHasSwitches() {
     try {
       const sys = Canvas.buildSystemJson ? Canvas.buildSystemJson() : null;
@@ -1547,24 +1573,25 @@ const App = (() => {
   }
 
   async function exportPowerSimulationsDynamics() {
-    setStatus('导出PSD.jl快照中...', 'busy');
+    setStatus('导出PSD.jl文件中...', 'busy');
     try {
       const ok = await syncToBackend();
       if (!ok) { setStatus('导出失败', 'error'); return; }
-      const data = await apiPost('/api/session/export_powersimulationsdynamics', {});
+      const data = await apiPost('/api/session/export_powersimulationsdynamics_julia', {});
       if (!data || data.error) throw new Error((data && data.error) || '导出失败');
-      const text = data.psd_snapshot_json || '';
-      const filename = `${data.name || 'system'}_psd_snapshot.json`;
-      downloadTextFile(filename, text, 'application/json;charset=utf-8');
+      const text = data.julia_string || '';
+      const filename = `${data.name || 'system'}_psd.jl`;
+      downloadTextFile(filename, text, 'text/x-julia;charset=utf-8');
       const represented = Number(data.represented || 0);
       const unrepresented = Number(data.unrepresented || 0);
-      log(`已导出PSD.jl快照: ${filename}`, 'success');
+      log(`已导出PSD.jl文件: ${filename}`, 'success');
       showModelIoStatus('PowerSimulationsDynamics.jl 导出完成', [
         ['文件', filename],
-        ['格式', data.format || 'hacdcpf_psd_snapshot.v1'],
+        ['格式', data.format || 'hacdcpf_psd_julia.v1'],
+        ['快照', data.snapshot_format || 'hacdcpf_psd_snapshot.v1'],
         ['PSD覆盖', `${represented}/${represented + unrepresented}`],
         ['大小', `${text.length} bytes`],
-      ], { subtitle: 'Julia 动态模型 IO / PowerSystems manifest', warnings: data.warnings || [] });
+      ], { subtitle: 'Julia 文件直接携带 PSD manifest 和 HACDCPF rich JSON', warnings: data.warnings || [] });
       setStatus('就绪');
     } catch (err) {
       log(`导出PSD.jl失败: ${err.message}`, 'error');
@@ -11074,6 +11101,14 @@ const App = (() => {
       const f = e.target.files[0];
       e.target.value = '';
       if (f) loadOpendss(f);
+    });
+    document.getElementById('btnIoImportPsdJulia')?.addEventListener('click', () => {
+      document.getElementById('fileImportPsdJulia')?.click();
+    });
+    document.getElementById('fileImportPsdJulia')?.addEventListener('change', (e) => {
+      const f = e.target.files[0];
+      e.target.value = '';
+      if (f) loadPowerSimulationsDynamicsJulia(f);
     });
     document.getElementById('btnIoNewSystem')?.addEventListener('click', createNewSystem);
     document.getElementById('btnIoExportJson')?.addEventListener('click', exportJson);
