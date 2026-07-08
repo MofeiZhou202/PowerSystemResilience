@@ -33,6 +33,7 @@
 #include "hacdcpf/model/enums.hpp"
 #include "hacdcpf/model/network_utils.hpp"
 #include "hacdcpf/graph/graph.hpp"
+#include "hacdcpf/network_reconfiguration/topology_reconfiguration.hpp"
 #include "hacdcpf/solver/branch_and_cut.hpp"
 #include "hacdcpf/solver/problem_types.hpp"
 
@@ -159,6 +160,109 @@ ONRResult solve_optimal_reconfiguration(const ACSystem& ac_sys,
 
   ONRResult result;
   if (n == 0 || m == 0) return result;
+
+  // Compatibility wrapper: route the historical AC-only ONR API through the
+  // maintained hybrid-aware reconfiguration solver, then project the result
+  // back into the legacy ONRResult shape.  The old inline MILP below is kept
+  // as reference documentation, but the newer solver has the richer source,
+  // switch, load-shed, and solver-backend handling used by the rest of the
+  // platform.
+  {
+    HybridPowerSystem wrap;
+    wrap.base_mva = base_mva;
+    wrap.ac = ac_sys;
+
+    TopoReconfOptions reconf_opt;
+    reconf_opt.v_min_pu = opt.v_min_pu;
+    reconf_opt.v_max_pu = opt.v_max_pu;
+    reconf_opt.default_rate_mva = opt.default_rate_mva;
+    reconf_opt.big_m_v = opt.big_m;
+    reconf_opt.max_time_s = opt.max_time_s;
+    reconf_opt.mip_gap = opt.mip_gap;
+    reconf_opt.verbose = opt.verbose;
+    reconf_opt.enable_pf = true;
+    reconf_opt.enable_voltage = true;
+    reconf_opt.enable_thermal = true;
+    reconf_opt.loss_aware = true;
+    reconf_opt.lambda_switch = 0.0;
+    reconf_opt.lambda_loss = 1.0;
+    reconf_opt.lambda_shed = 1e4;
+    reconf_opt.lambda_island = 1e5;
+    reconf_opt.solver = "highs";
+
+    if (opt.switchable_branch_ids.empty()) {
+      reconf_opt.switchable_branch_ids.reserve(branches.size());
+      for (const auto& br : branches) reconf_opt.switchable_branch_ids.push_back(br.index);
+    } else {
+      reconf_opt.switchable_branch_ids = opt.switchable_branch_ids;
+    }
+
+    const TopoReconfResult topo = run_topology_reconfiguration(wrap, reconf_opt);
+
+    result.feasible = topo.feasible;
+    result.optimal = topo.optimal || topo.proven_optimal;
+    result.milp_objective = topo.milp_objective;
+    result.estimated_loss_mw = topo.reconf_loss_mw;
+    result.bc_stats = topo.bc_stats;
+
+    for (const auto& ref : topo.open_branches) {
+      if (ref.category == hacdcpf::graph::EdgeCategory::AC_Line)
+        result.open_branch_ids.push_back(ref.index);
+    }
+    for (const auto& ref : topo.closed_branches) {
+      if (ref.category == hacdcpf::graph::EdgeCategory::AC_Line)
+        result.closed_branch_ids.push_back(ref.index);
+    }
+
+    if (result.feasible) {
+      std::unordered_map<int, bool> closed_by_id;
+      closed_by_id.reserve(result.closed_branch_ids.size());
+      for (int id : result.closed_branch_ids) closed_by_id[id] = true;
+
+      ACSystem ac_opt = ac_sys;
+      for (auto& br : ac_opt.branches)
+        br.in_service = closed_by_id.find(br.index) != closed_by_id.end();
+
+      HybridPowerSystem sys_opt;
+      sys_opt.base_mva = base_mva;
+      sys_opt.ac = ac_opt;
+
+      PowerFlowOptions pf_opt;
+      pf_opt.max_iter = 200;
+      pf_opt.tol = 1e-6;
+      result.verification_pf = solve_power_flow(sys_opt, pf_opt);
+    }
+
+    if (!result.feasible && is_connected(ac_sys)) {
+      HybridPowerSystem sys_base;
+      sys_base.base_mva = base_mva;
+      sys_base.ac = ac_sys;
+
+      PowerFlowOptions pf_opt;
+      pf_opt.max_iter = 200;
+      pf_opt.tol = 1e-6;
+      PowerFlowResult pf = solve_power_flow(sys_base, pf_opt);
+      if (pf.converged) {
+        result.feasible = true;
+        result.optimal = false;
+        result.verification_pf = pf;
+        result.open_branch_ids.clear();
+        result.closed_branch_ids.clear();
+        result.estimated_loss_mw = 0.0;
+        for (const auto& br : branches) {
+          if (br.in_service) {
+            result.closed_branch_ids.push_back(br.index);
+            result.estimated_loss_mw += br.r_pu * base_mva;
+          } else {
+            result.open_branch_ids.push_back(br.index);
+          }
+        }
+        result.milp_objective = 0.0;
+      }
+    }
+
+    return result;
+  }
 
   // ── Graph-based topology pre-analysis ─────────────────────────────────
   // Identify bridge edges so their alpha lower bound is fixed to 1 in the

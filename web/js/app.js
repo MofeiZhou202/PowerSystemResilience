@@ -4118,6 +4118,7 @@ const App = (() => {
     const total = Number(summary.total_instances || 0);
     const gridRepresented = Number(summary.gridlabd_represented || 0);
     const dssRepresented = Number(summary.opendss_represented || 0);
+    const psdRepresented = Number(summary.psd_represented || 0);
     const audit = data?.parameter_audit || {};
     const auditSummary = audit.summary || {};
     const rules = Array.isArray(data?.parameter_rules) ? data.parameter_rules : [];
@@ -4189,14 +4190,18 @@ const App = (() => {
     const coverageChart = document.getElementById('modelIoCoverageChart');
     if (coverageChart) {
       Plotly.react(coverageChart, [{
-        x: ['GridLAB-D', 'OpenDSS'],
-        y: [gridRepresented, dssRepresented],
+        x: ['GridLAB-D', 'OpenDSS', 'PSD.jl'],
+        y: [gridRepresented, dssRepresented, psdRepresented],
         name: '可表示',
         type: 'bar',
         marker: { color: '#56b6c2' },
       }, {
-        x: ['GridLAB-D', 'OpenDSS'],
-        y: [Math.max(total - gridRepresented, 0), Math.max(total - dssRepresented, 0)],
+        x: ['GridLAB-D', 'OpenDSS', 'PSD.jl'],
+        y: [
+          Math.max(total - gridRepresented, 0),
+          Math.max(total - dssRepresented, 0),
+          Math.max(total - psdRepresented, 0),
+        ],
         name: '需投影/暂不支持',
         type: 'bar',
         marker: { color: '#d19a66' },
@@ -4289,8 +4294,10 @@ const App = (() => {
     const total = Number(summary.total_instances || 0);
     const gridRepresented = Number(summary.gridlabd_represented || 0);
     const openDssRepresented = Number(summary.opendss_represented || 0);
+    const psdRepresented = Number(summary.psd_represented || 0);
     const gridUnrepresented = Number(summary.gridlabd_unrepresented || 0);
     const openDssUnrepresented = Number(summary.opendss_unrepresented || 0);
+    const psdUnrepresented = Number(summary.psd_unrepresented || 0);
     const errors = Number(auditSummary.errors || 0);
     const warnings = Number(auditSummary.warnings || 0);
     const infos = Number(auditSummary.info || 0);
@@ -4308,6 +4315,7 @@ const App = (() => {
       ['当前元件实例', total, '个'],
       ['GridLAB-D覆盖', transientCompatibilityRatio(gridRepresented, total), `${gridRepresented}/${total}`],
       ['OpenDSS覆盖', transientCompatibilityRatio(openDssRepresented, total), `${openDssRepresented}/${total}`],
+      ['PSD.jl覆盖', transientCompatibilityRatio(psdRepresented, total), `${psdRepresented}/${total}`],
       ['注册元件类型', mappings.length, '类'],
       ['当前覆盖类型', coverage.length, '类'],
       ['参数规则', parameterRules.length, '条'],
@@ -4373,6 +4381,7 @@ const App = (() => {
       ['Canonical Model', 'canonical_policy', `${mappings.length} registered`, 'canonical projection'],
       ['GridLAB-D', 'gridlabd_policy', `${gridRepresented}/${gridRepresented + gridUnrepresented || total}`, 'external snapshot'],
       ['OpenDSS', 'opendss_policy', `${openDssRepresented}/${openDssRepresented + openDssUnrepresented || total}`, 'external snapshot'],
+      ['PowerSimulationsDynamics.jl', 'psd_policy', `${psdRepresented}/${psdRepresented + psdUnrepresented || total}`, 'Julia dynamic IO'],
     ];
     html += '<div class="transient-section-head"><h5>适配器能力矩阵</h5><span>registry policy / 当前实例覆盖</span></div>';
     html += '<div class="transient-table-scroll"><table><thead><tr><th>格式</th><th>绑定</th><th>Registry策略分布</th><th>当前覆盖</th></tr></thead><tbody>';
@@ -4416,6 +4425,7 @@ const App = (() => {
     const diagSummaryRows = [
       ['GridLAB-D', Array.isArray(diagnostics.gridlabd) ? diagnostics.gridlabd.length : 0],
       ['OpenDSS', Array.isArray(diagnostics.opendss) ? diagnostics.opendss.length : 0],
+      ['PSD.jl', Array.isArray(diagnostics.psd) ? diagnostics.psd.length : 0],
     ];
     html += '<div class="transient-section-head"><h5>导入诊断契约</h5><span>records / summary / binding level / unit assertion</span></div>';
     html += '<div class="model-io-contract-grid">';
@@ -4447,8 +4457,8 @@ const App = (() => {
     }
     html += '</tbody></table></div>';
 
-    html += '<div class="transient-section-head"><h5>当前系统元件覆盖</h5><span>JSON / Canonical / GridLAB-D / OpenDSS</span></div>';
-    html += '<div class="transient-table-scroll"><table><thead><tr><th>元件</th><th>路径</th><th>数量</th><th>JSON</th><th>Canonical</th><th>GridLAB-D</th><th>OpenDSS</th><th>验证范围</th><th>标准模型</th></tr></thead><tbody>';
+    html += '<div class="transient-section-head"><h5>当前系统元件覆盖</h5><span>JSON / Canonical / GridLAB-D / OpenDSS / PSD.jl</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>元件</th><th>路径</th><th>数量</th><th>JSON</th><th>Canonical</th><th>GridLAB-D</th><th>OpenDSS</th><th>PSD.jl</th><th>验证范围</th><th>标准模型</th></tr></thead><tbody>';
     if (coverage.length) {
       coverage.forEach(row => {
         const profiles = Array.isArray(row.standard_profiles) ? row.standard_profiles : [];
@@ -4461,18 +4471,20 @@ const App = (() => {
           <td>${escapeHtml(row.canonical_policy || '')}</td>
           <td>${escapeHtml(row.gridlabd_policy || '')}</td>
           <td>${escapeHtml(row.opendss_policy || '')}</td>
+          <td>${escapeHtml(row.psd_policy || '')}</td>
           <td>${escapeHtml(row.verification_scope || '')}</td>
           <td>${escapeHtml(profileText || '—')}</td>
         </tr>`;
       });
     } else {
-      html += '<tr><td colspan="9">当前后端尚未加载系统；请先加载算例或同步画布。</td></tr>';
+      html += '<tr><td colspan="10">当前后端尚未加载系统；请先加载算例或同步画布。</td></tr>';
     }
     html += '</tbody></table></div>';
 
     const diagGroups = [
       ['GridLAB-D', Array.isArray(diagnostics.gridlabd) ? diagnostics.gridlabd : []],
       ['OpenDSS', Array.isArray(diagnostics.opendss) ? diagnostics.opendss : []],
+      ['PSD.jl', Array.isArray(diagnostics.psd) ? diagnostics.psd : []],
     ];
     html += '<div class="transient-section-head"><h5>外部工具诊断</h5><span>Unsupported / Internal-only / Diagnostic-only 会列出</span></div>';
     html += '<div class="transient-mini-grid">';

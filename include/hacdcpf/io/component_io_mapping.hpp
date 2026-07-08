@@ -26,6 +26,7 @@ enum class ComponentIOFormat {
   CanonicalModel,
   GridLABD,
   OpenDSS,
+  PowerSimulationsDynamicsJulia,
 };
 
 /// Semantic preservation policy for one component type and one target format.
@@ -63,6 +64,7 @@ enum class ComponentStandardFamily {
   NERC,
   GridLABD,
   OpenDSS,
+  PowerSimulationsDynamics,
 };
 
 /// Parameter domain used by the standard-aware model-quality audit.
@@ -251,11 +253,13 @@ struct ComponentIOMapping {
   ComponentIOPolicy canonical_policy{ComponentIOPolicy::Exact};
   ComponentIOPolicy gridlabd_policy{ComponentIOPolicy::Unsupported};
   ComponentIOPolicy opendss_policy{ComponentIOPolicy::Unsupported};
+  ComponentIOPolicy psd_policy{ComponentIOPolicy::Unsupported};
   NumericalVerificationScope verification_scope{
       NumericalVerificationScope::StructuralOnly};
   std::string canonical_target;
   std::string gridlabd_target;
   std::string opendss_target;
+  std::string psd_target;
   std::vector<ComponentStandardProfile> standard_profiles;
   std::string notes;
 };

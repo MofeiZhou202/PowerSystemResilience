@@ -5,9 +5,11 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include <nlohmann/json.hpp>
 
 #include "hacdcpf/io/component_io_mapping.hpp"
 #include "hacdcpf/io/json_io.hpp"
+#include "hacdcpf/io/powersimulationsdynamics_io.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/projection/project_to_canonical.hpp"
 
@@ -366,6 +368,10 @@ TEST_CASE("Component IO registry covers every rich component collection",
   CHECK(hacdcpf::io::to_string(
             hacdcpf::io::ComponentStandardFamily::IEC61970CIM) ==
         "IEC61970CIM");
+  CHECK(hacdcpf::io::to_string(
+            hacdcpf::io::ComponentStandardFamily::
+                PowerSimulationsDynamics) ==
+        "PowerSimulationsDynamics.jl");
 }
 
 TEST_CASE("Component IO coverage report classifies populated systems",
@@ -382,14 +388,21 @@ TEST_CASE("Component IO coverage report classifies populated systems",
             hacdcpf::io::ComponentIOFormat::GridLABD) > 0);
   CHECK(report.unrepresented_instances(
             hacdcpf::io::ComponentIOFormat::OpenDSS) > 0);
+  CHECK(report.unrepresented_instances(
+            hacdcpf::io::ComponentIOFormat::
+                PowerSimulationsDynamicsJulia) > 0);
 
   const auto gridlabd_diagnostics = hacdcpf::io::external_io_diagnostics(
       report, hacdcpf::io::ComponentIOFormat::GridLABD);
   const auto opendss_diagnostics = hacdcpf::io::external_io_diagnostics(
       report, hacdcpf::io::ComponentIOFormat::OpenDSS);
+  const auto psd_diagnostics = hacdcpf::io::external_io_diagnostics(
+      report,
+      hacdcpf::io::ComponentIOFormat::PowerSimulationsDynamicsJulia);
 
   REQUIRE_FALSE(gridlabd_diagnostics.empty());
   REQUIRE_FALSE(opendss_diagnostics.empty());
+  REQUIRE_FALSE(psd_diagnostics.empty());
   CHECK_THAT(gridlabd_diagnostics.front(), ContainsSubstring("policy is"));
   CHECK(std::any_of(gridlabd_diagnostics.begin(), gridlabd_diagnostics.end(),
                     [](const std::string& line) {
@@ -399,6 +412,72 @@ TEST_CASE("Component IO coverage report classifies populated systems",
                     [](const std::string& line) {
                       return line.find("vsc_converters") != std::string::npos;
                     }));
+  CHECK(std::any_of(psd_diagnostics.begin(), psd_diagnostics.end(),
+                    [](const std::string& line) {
+                      return line.find("dc.buses") != std::string::npos;
+                    }));
+}
+
+TEST_CASE("PowerSimulationsDynamics Julia IO exports a neutral snapshot",
+          "[io][mapping][psd][export]") {
+  auto sys = make_system_with_all_io_component_tables();
+  REQUIRE_FALSE(sys.ac.generators.empty());
+  sys.ac.generators.front().dynamic_model.standard =
+      "PowerSimulationsDynamics";
+  sys.ac.generators.front().dynamic_model.model_name = "GENROU";
+  sys.ac.generators.front().dynamic_model.parameter_set = "unit-test";
+  sys.ac.generators.front().dynamic_model.parameters["H"] = 3.2;
+  sys.ac.generators.front().dynamic_model.components.push_back(
+      {"machine", "RoundRotorQuadratic", "PowerSimulationsDynamics", "",
+       {{"Td0_p", 8.0}}});
+
+  REQUIRE_FALSE(sys.vsc_converters.empty());
+  sys.vsc_converters.front().dynamic_model.standard =
+      "PowerSimulationsDynamics";
+  sys.vsc_converters.front().dynamic_model.model_name =
+      "REGC_REEC_GFL_Subset";
+  sys.vsc_converters.front().dynamic_model.components.push_back(
+      {"frequency_estimator", "ReducedOrderPLL", "PowerSimulationsDynamics",
+       "", {{"kp_pll", 0.1}}});
+
+  const auto text = hacdcpf::io::to_powersimulationsdynamics_json(sys);
+  const auto doc = nlohmann::json::parse(text);
+
+  CHECK(doc.at("format") == "hacdcpf_psd_snapshot.v1");
+  CHECK(doc.at("source").at("kind") == "hacdcpf_rich_model");
+  REQUIRE(doc.at("components").contains("dynamic_injections"));
+  const auto& dynamic = doc.at("components").at("dynamic_injections");
+  REQUIRE(dynamic.size() >= 2);
+  CHECK(doc.at("system")
+            .at("component_counts")
+            .at("dynamic_injections")
+            .get<std::size_t>() == dynamic.size());
+
+  const auto has_genrou = std::any_of(
+      dynamic.begin(), dynamic.end(), [](const nlohmann::json& row) {
+        return row.value("type", "") == "Generator" &&
+               row.at("fields")
+                       .at("dynamic_model")
+                       .value("model_name", "") == "GENROU" &&
+               row.contains("slots") && !row.at("slots").empty();
+      });
+  CHECK(has_genrou);
+
+  const auto notes = doc.at("conversion_notes").dump();
+  CHECK(notes.find("PowerSimulationsDynamics.jl") != std::string::npos);
+
+  REQUIRE(doc.at("components").contains("diagnostic_components"));
+  const auto& diagnostic = doc.at("components").at("diagnostic_components");
+  const auto has_dc_bus = std::any_of(
+      diagnostic.begin(), diagnostic.end(), [](const nlohmann::json& row) {
+        return row.value("type", "") == "DCBus";
+      });
+  const auto has_three_phase_bus = std::any_of(
+      diagnostic.begin(), diagnostic.end(), [](const nlohmann::json& row) {
+        return row.value("type", "") == "ThreePhaseACBus";
+      });
+  CHECK(has_dc_bus);
+  CHECK(has_three_phase_bus);
 }
 
 TEST_CASE("Regulator controls are preserved by internal JSON",

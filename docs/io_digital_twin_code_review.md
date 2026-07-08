@@ -23,6 +23,9 @@ generated into the Doxygen notebook together with the public C++ API.
 - CIM / CGMES 3.0 bounded adapter (§5):
   `include/hacdcpf/io/cim_io.hpp`, `src/io/cim_io.cpp`,
   crosswalk `docs/cim_cgmes3_crosswalk.md`
+- PowerSimulationsDynamics.jl dynamic-profile manifest:
+  `include/hacdcpf/io/powersimulationsdynamics_io.hpp`,
+  `src/io/powersimulationsdynamics_io.cpp`
 - Unit discipline + MATPOWER export (§6.3, §13):
   `src/io/matpower_parser.cpp`
 - Schema versioning (§3.3):
@@ -43,7 +46,8 @@ The IO layer has three nested responsibilities:
 
 1. Component compatibility:
    each rich component collection declares its preservation policy for native
-   JSON, canonical projection, GridLAB-D, and OpenDSS.
+   JSON, canonical projection, GridLAB-D, OpenDSS, and the
+   PowerSimulationsDynamics.jl Julia dynamic-profile IO.
 2. Parameter governance:
    static, dynamic, transient, failure, and reliability parameters are checked
    against a standards-aware rule catalog.
@@ -57,8 +61,13 @@ The IO layer has three nested responsibilities:
 
 - `ComponentIOMapping` describes one component collection and target-format
   policy tuple.
+- `PowerSimulationsDynamicsExportOptions` /
+  `to_powersimulationsdynamics_json` export the single Julia dynamic IO surface:
+  the neutral `hacdcpf_psd_snapshot.v1` manifest used by the PSD validation
+  tools.
 - `ComponentStandardProfile` links a component to standards such as CIM,
-  IEC 61850, IEC 60909, IEEE 1547, IEEE 421.5, NERC, GridLAB-D, and OpenDSS.
+  IEC 61850, IEC 60909, IEEE 1547, IEEE 421.5, NERC, GridLAB-D, OpenDSS, and
+  PowerSimulationsDynamics.jl.
 - `ComponentParameterRule` is a GUI-visible rule for one parameter path.
 - `ComponentParameterAuditReport` is the result of applying those rules to a
   `HybridPowerSystem`.
@@ -151,6 +160,10 @@ curl http://127.0.0.1:8097/api/io/model_compatibility
 - **CIM / CGMES 3.0 (EQ+SSH)** bounded import/export, XXE-hardened (§5).
 - **MATPOWER export** (`to_matpower`), closing import/export symmetry.
 - **Uniform ImportReport** contract with a bridge for legacy per-format reports.
+- **PowerSimulationsDynamics.jl Julia IO** (`to_powersimulationsdynamics_json`):
+  exports AC/static/dynamic profile identity in the same snapshot envelope as
+  the Julia validation helper, while retaining DC/three-phase/hybrid-only
+  details as explicit diagnostic metadata.
 
 ## Future Review Areas
 

@@ -2473,11 +2473,14 @@ json component_io_mapping_to_json(
                hacdcpf::io::to_string(mapping.gridlabd_policy)},
               {"opendss_policy",
                hacdcpf::io::to_string(mapping.opendss_policy)},
+              {"psd_policy",
+               hacdcpf::io::to_string(mapping.psd_policy)},
               {"verification_scope",
                hacdcpf::io::to_string(mapping.verification_scope)},
               {"canonical_target", mapping.canonical_target},
               {"gridlabd_target", mapping.gridlabd_target},
               {"opendss_target", mapping.opendss_target},
+              {"psd_target", mapping.psd_target},
               {"standard_profiles", profiles},
               {"notes", mapping.notes}};
 }
@@ -8983,6 +8986,8 @@ int main(int argc, char** argv) {
                     hacdcpf::io::to_string(item.mapping.gridlabd_policy)},
                    {"opendss_policy",
                     hacdcpf::io::to_string(item.mapping.opendss_policy)},
+                   {"psd_policy",
+                    hacdcpf::io::to_string(item.mapping.psd_policy)},
                    {"verification_scope",
                     hacdcpf::io::to_string(item.mapping.verification_scope)},
                    {"standard_profiles",
@@ -9003,14 +9008,27 @@ int main(int argc, char** argv) {
                       hacdcpf::io::ComponentIOFormat::OpenDSS)},
                  {"opendss_unrepresented",
                   report.unrepresented_instances(
-                      hacdcpf::io::ComponentIOFormat::OpenDSS)}};
+                      hacdcpf::io::ComponentIOFormat::OpenDSS)},
+                 {"psd_represented",
+                  report.represented_instances(
+                      hacdcpf::io::ComponentIOFormat::
+                          PowerSimulationsDynamicsJulia)},
+                 {"psd_unrepresented",
+                  report.unrepresented_instances(
+                      hacdcpf::io::ComponentIOFormat::
+                          PowerSimulationsDynamicsJulia)}};
         out["diagnostics"] =
             json{{"gridlabd",
                   hacdcpf::io::external_io_diagnostics(
                       report, hacdcpf::io::ComponentIOFormat::GridLABD)},
                  {"opendss",
                   hacdcpf::io::external_io_diagnostics(
-                      report, hacdcpf::io::ComponentIOFormat::OpenDSS)}};
+                      report, hacdcpf::io::ComponentIOFormat::OpenDSS)},
+                 {"psd",
+                  hacdcpf::io::external_io_diagnostics(
+                      report,
+                      hacdcpf::io::ComponentIOFormat::
+                          PowerSimulationsDynamicsJulia)}};
         out["parameter_audit"] =
             component_parameter_audit_to_json(
                 hacdcpf::io::analyze_component_parameter_quality(sys));

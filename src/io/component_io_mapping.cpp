@@ -127,6 +127,17 @@ void add_standard_profiles(std::vector<ComponentIOMapping>& mappings) {
                       "profile fields."));
   add_profile(mappings,
               "Generator",
+              profile(S::PowerSimulationsDynamics,
+                      "PowerSimulationsDynamics.jl dynamic injection",
+                      "DynamicGenerator / machine-controller slots",
+                      P::Projected,
+                      V::NativeSolver,
+                      "HACDCPF exports machine/controller identity and "
+                      "parameters through the hacdcpf_psd_snapshot.v1 Julia "
+                      "manifest; numerical equivalence still depends on the "
+                      "declared trace gate."));
+  add_profile(mappings,
+              "Generator",
               profile(S::IEEE4215,
                       "IEEE 421.5 excitation systems",
                       "EXAC*/ESAC*/ST* profile placeholder",
@@ -152,6 +163,16 @@ void add_standard_profiles(std::vector<ComponentIOMapping>& mappings) {
                       V::NativeSolver,
                       "Short-circuit contribution fields are already native; "
                       "dynamic motor startup models remain future work."));
+  add_profile(mappings,
+              "PVSystem",
+              profile(S::PowerSimulationsDynamics,
+                      "PowerSimulationsDynamics.jl inverter model",
+                      "DynamicInverter / REGC-REEC-GFL subset",
+                      P::Projected,
+                      V::BoundaryInjectionSnapshot,
+                      "PV dynamic profiles are exported as PSD inverter "
+                      "metadata and compared through selected traces where a "
+                      "model gate exists."));
   add_profile(mappings,
               "PVSystem",
               profile(S::IEEE1547,
@@ -181,6 +202,16 @@ void add_standard_profiles(std::vector<ComponentIOMapping>& mappings) {
                       "and grid-support profile fields are future work."));
   add_profile(mappings,
               "VSCConverter",
+              profile(S::PowerSimulationsDynamics,
+                      "PowerSimulationsDynamics.jl inverter model",
+                      "DynamicInverter / GFL-GFM subset",
+                      P::Projected,
+                      V::NativeSolver,
+                      "The Julia IO preserves the VSC dynamic-profile and "
+                      "controller slots; the DC network remains diagnostic "
+                      "metadata outside PSD's positive-sequence scope."));
+  add_profile(mappings,
+              "VSCConverter",
               profile(S::NERC,
                       "NERC inverter-based resource generic models",
                       "REGC_A/REEC_A/REPC_A or GFM profile",
@@ -205,7 +236,103 @@ void add_standard_profiles(std::vector<ComponentIOMapping>& mappings) {
                       P::Projected,
                       V::ExternalPowerFlow,
                       "Exact phase-domain exchange requires matrix impedance "
-              "and phase connectivity export/import."));
+                      "and phase connectivity export/import."));
+}
+
+void set_psd(std::vector<ComponentIOMapping>& mappings,
+             const std::string& collection_path,
+             P policy,
+             std::string target) {
+  const auto it = std::find_if(
+      mappings.begin(), mappings.end(), [&](const ComponentIOMapping& mapping) {
+        return mapping.collection_path == collection_path;
+      });
+  if (it != mappings.end()) {
+    it->psd_policy = policy;
+    it->psd_target = std::move(target);
+  }
+}
+
+void add_powersimulationsdynamics_policies(
+    std::vector<ComponentIOMapping>& mappings) {
+  set_psd(mappings, "ac.buses", P::Equivalent,
+          "PowerSystems.ACBus");
+  set_psd(mappings, "ac.branches", P::Equivalent,
+          "PowerSystems.Line / Transformer equivalent");
+  set_psd(mappings, "ac.generators", P::Projected,
+          "PowerSystems.DynamicGenerator");
+  set_psd(mappings, "ac.static_generators", P::Projected,
+          "PowerSystems.StaticInjection / DynamicInverter profile");
+  set_psd(mappings, "ac.loads", P::Exact,
+          "PowerSystems.StandardLoad");
+  set_psd(mappings, "ac.asymmetric_loads", P::Aggregated,
+          "PowerSystems.StandardLoad aggregate");
+  set_psd(mappings, "ac.shunts", P::Equivalent,
+          "PowerSystems.FixedAdmittance / shunt equivalent");
+  set_psd(mappings, "ac.storage", P::Projected,
+          "PowerSystems.DynamicInverter / storage metadata");
+  set_psd(mappings, "ac.renewable_gens", P::Projected,
+          "PowerSystems.RenewableDispatch / DynamicInverter profile");
+  set_psd(mappings, "ac.pv_systems", P::Projected,
+          "PowerSystems.RenewableDispatch / DynamicInverter profile");
+  set_psd(mappings, "ac.external_grids", P::Equivalent,
+          "PowerSystems.Source equivalent");
+  set_psd(mappings, "ac.transformers_2w", P::Equivalent,
+          "PowerSystems.Transformer2W");
+  set_psd(mappings, "ac.transformers_3w", P::Projected,
+          "PowerSystems branch/transformer equivalents");
+  set_psd(mappings, "ac.regulator_controls", P::DiagnosticOnly,
+          "PSD metadata only");
+  set_psd(mappings, "ac.switches", P::Projected,
+          "PowerSystems branch status equivalent");
+  set_psd(mappings, "ac.circuit_breakers", P::Projected,
+          "PowerSystems branch status equivalent");
+  set_psd(mappings, "ac.charging_stations", P::Aggregated,
+          "PowerSystems.StandardLoad aggregate");
+  set_psd(mappings, "ac.chargers", P::Aggregated,
+          "PowerSystems.StandardLoad aggregate");
+  set_psd(mappings, "ac.motors", P::Projected,
+          "PowerSystems.Load / motor dynamic metadata");
+  set_psd(mappings, "vsc_converters", P::BoundaryInjection,
+          "PowerSystems.DynamicInverter boundary equivalent");
+  set_psd(mappings, "energy_routers", P::Projected,
+          "VSC/DCDC dynamic-profile expansion metadata");
+  set_psd(mappings, "mobile_storage", P::Projected,
+          "PowerSystems.DynamicInverter storage equivalent");
+  set_psd(mappings, "vpps", P::BoundaryInjection,
+          "PowerSystems.StaticInjection aggregate");
+  set_psd(mappings, "microgrids", P::BoundaryInjection,
+          "PowerSystems.StaticInjection aggregate");
+
+  set_psd(mappings, "dc.buses", P::DiagnosticOnly, "PSD metadata only");
+  set_psd(mappings, "dc.branches", P::DiagnosticOnly, "PSD metadata only");
+  set_psd(mappings, "dc.loads", P::DiagnosticOnly, "PSD metadata only");
+  set_psd(mappings, "dc.storage", P::DiagnosticOnly, "PSD metadata only");
+  set_psd(mappings, "dc.dc_storage", P::DiagnosticOnly, "PSD metadata only");
+  set_psd(mappings, "dc.static_generators", P::DiagnosticOnly,
+          "PSD metadata only");
+  set_psd(mappings, "dc.dc_static_generators", P::DiagnosticOnly,
+          "PSD metadata only");
+  set_psd(mappings, "dc.pv_arrays", P::DiagnosticOnly, "PSD metadata only");
+  set_psd(mappings, "dc.dcdc_converters", P::DiagnosticOnly,
+          "PSD metadata only");
+  set_psd(mappings, "dc.dc_circuit_breakers", P::DiagnosticOnly,
+          "PSD metadata only");
+
+  set_psd(mappings, "three_phase_ac.buses", P::Aggregated,
+          "PowerSystems.ACBus positive-sequence projection");
+  set_psd(mappings, "three_phase_ac.lines", P::Aggregated,
+          "PowerSystems.Line positive-sequence projection");
+  set_psd(mappings, "three_phase_ac.transformers", P::Aggregated,
+          "PowerSystems.Transformer positive-sequence projection");
+  set_psd(mappings, "three_phase_ac.loads", P::Aggregated,
+          "PowerSystems.StandardLoad aggregate");
+  set_psd(mappings, "three_phase_ac.generators", P::Aggregated,
+          "PowerSystems.DynamicGenerator aggregate");
+  set_psd(mappings, "three_phase_ac.external_grids", P::Aggregated,
+          "PowerSystems.Source equivalent");
+  set_psd(mappings, "three_phase_ac.regulator_controls", P::DiagnosticOnly,
+          "PSD metadata only");
 }
 
 ComponentParameterRule parameter_rule(std::string component_type,
@@ -2486,6 +2613,7 @@ const std::vector<ComponentIOMapping>& registry() {
           "support is planned."),
     };
     add_standard_profiles(mappings);
+    add_powersimulationsdynamics_policies(mappings);
     return mappings;
   }();
   return mappings;
@@ -3605,11 +3733,15 @@ DigitalTwinReadinessReport analyze_digital_twin_readiness(
         static_cast<double>(coverage.represented_instances(
             ComponentIOFormat::OpenDSS)) /
         total;
+    const double psd =
+        static_cast<double>(coverage.represented_instances(
+            ComponentIOFormat::PowerSimulationsDynamicsJulia)) /
+        total;
     const double score =
         total_instances == 0U
             ? 0.0
-            : bounded(0.30 * json + 0.25 * canonical + 0.225 * gridlabd +
-                      0.225 * opendss);
+            : bounded(0.25 * json + 0.20 * canonical + 0.175 * gridlabd +
+                      0.175 * opendss + 0.20 * psd);
     std::ostringstream evidence;
     evidence << "represented instances: JSON "
              << coverage.represented_instances(ComponentIOFormat::InternalJSON)
@@ -3620,10 +3752,13 @@ DigitalTwinReadinessReport analyze_digital_twin_readiness(
              << coverage.represented_instances(ComponentIOFormat::GridLABD)
              << ", OpenDSS "
              << coverage.represented_instances(ComponentIOFormat::OpenDSS)
+             << ", PowerSimulationsDynamics.jl "
+             << coverage.represented_instances(
+                    ComponentIOFormat::PowerSimulationsDynamicsJulia)
              << " of " << total_instances << ".";
     add_finding("DT-IO-01",
                 score,
-                "IO层应保留本模块rich语义，同时声明向Canonical、GridLAB-D、OpenDSS等外部格式投影时的信息损失。",
+                "IO层应保留本模块rich语义，同时声明向Canonical、GridLAB-D、OpenDSS、PowerSimulationsDynamics.jl等外部格式投影时的信息损失。",
                 evidence.str());
   }
 
@@ -3741,6 +3876,8 @@ ComponentIOPolicy policy_for_format(const ComponentIOMapping& mapping,
       return mapping.gridlabd_policy;
     case ComponentIOFormat::OpenDSS:
       return mapping.opendss_policy;
+    case ComponentIOFormat::PowerSimulationsDynamicsJulia:
+      return mapping.psd_policy;
   }
   return ComponentIOPolicy::Unsupported;
 }
@@ -3824,6 +3961,8 @@ std::string to_string(ComponentIOFormat format) {
       return "GridLABD";
     case ComponentIOFormat::OpenDSS:
       return "OpenDSS";
+    case ComponentIOFormat::PowerSimulationsDynamicsJulia:
+      return "PowerSimulationsDynamics.jl";
   }
   return "Unknown";
 }
@@ -3892,6 +4031,8 @@ std::string to_string(ComponentStandardFamily family) {
       return "GridLABD";
     case ComponentStandardFamily::OpenDSS:
       return "OpenDSS";
+    case ComponentStandardFamily::PowerSimulationsDynamics:
+      return "PowerSimulationsDynamics.jl";
   }
   return "Unknown";
 }

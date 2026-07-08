@@ -45,6 +45,7 @@ richer, and more asymmetric, than earlier drafts of this document acknowledged.
 | MATPOWER `.m` | Full (AC only) | **None** | N/A | Bus/gen/branch/gencost; transformer detected from tap; **no exporter**. |
 | GridLAB-D `.glm` | Balanced-AC subset | Full canonical | **Asymmetric** | Export projects the full canonical model; import handles balanced AC only. |
 | OpenDSS `.dss` | Balanced-AC subset | Full canonical | **Asymmetric** | Text import + C-API snapshot solve; export projects canonical model. |
+| PowerSimulationsDynamics.jl snapshot | Diagnostic/profile manifest | Full profile manifest | Manifest-level | Single Julia dynamic IO surface: `hacdcpf_psd_snapshot.v1` preserves model/controller identity for PSD trace validation; it is not a full hybrid AC/DC runtime import. |
 | ETAP `.xlsx` / native XML | Full | Full | Fidelity-checked | Conditional on `-DHACDCPF_ENABLE_ETAP=ON`; otherwise stubbed. |
 | CIM (IEC 61970) | None | None | N/A | Standards profile referenced in registry only; no parser. |
 | CSV / telemetry / event catalog | None | None | N/A | Roadmap. |
@@ -181,6 +182,7 @@ that MUST be filled from the controlled vocabulary below.
 | IEEE 1547 | DER interconnection profile | Ride-through, V/f support, trip curves, inverter functions. | [ROADMAP] validator. |
 | IEEE 421.5 | Exciter/governor/machine families | Dynamics + parameter naming. | [ROADMAP] validator. |
 | NERC generic IBR | REGC_A, REEC_A, REPC_A, DER_A | Plant controls + validation traces. | [ROADMAP] validator. |
+| PowerSimulationsDynamics.jl | `hacdcpf_psd_snapshot.v1` | Dynamic injection, machine/controller, and inverter slot identity for Julia trace validation. | Built manifest export; Julia runtime remains optional validation tooling. |
 | OpenDSS / GridLAB-D | AC distribution snapshot | Unbalanced PF, ZIP loads, regulators, transformers, DER. | Export full; import balanced-AC subset (§2). |
 | ETAP | Excel + native XML PDE | AC/DC network + machines + protection. | Built (conditional). |
 | Native HACDCPF | JSON / canonical | Lossless internal contract + solver projection. | Built. |
