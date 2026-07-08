@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "hacdcpf/projection/project_to_canonical.hpp"
+#include "hacdcpf/model/device_control_role.hpp"
 #include "hacdcpf/model/enums/grid_enums.hpp"
 #include "hacdcpf/model/enums/storage_enums.hpp"
 #include "hacdcpf/power_flow/admittance_builder.hpp"
@@ -228,13 +229,16 @@ void rebuild_matrices(SolverData& data) {
 //     converter both fixes the angle reference and balances the AC island's
 //     active and reactive power.
 // A bus that is already SLACK is left untouched (an existing rigid reference
-// wins); a grid-forming converter promotes a PQ/PV bus to SLACK.
+// wins); a grid-forming converter promotes a PQ/PV bus to SLACK. Roles are read
+// through resolve_device_control_role so the AC-side treatment matches the
+// converter-coordination checks and honors the ac_grid_forming opt-in flag (not
+// just the raw control_mode enum).
 static void apply_acpv_voltage_control(SolverData& data) {
   for (const auto& conv : data.converters) {
     if (!conv.in_service) continue;
-    const bool holds_vmag = (conv.control_mode == ConverterMode::AC_PV ||
-                             conv.control_mode == ConverterMode::DC_V_DROOP_AC_V);
-    const bool forms_ac = (conv.control_mode == ConverterMode::AC_GRID_FORMING);
+    const DeviceControlRole role = resolve_device_control_role(conv);
+    const bool forms_ac = role.is_ac_grid_forming;
+    const bool holds_vmag = !forms_ac && role.controls_ac_v;
     if (!holds_vmag && !forms_ac) continue;
     const int idx = conv.bus_ac - 1;
     if (idx < 0 || idx >= static_cast<int>(data.ac_buses.size())) continue;

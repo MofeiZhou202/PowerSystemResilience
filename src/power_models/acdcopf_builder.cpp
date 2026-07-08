@@ -154,6 +154,69 @@ ACDCOPFData to_acdcopf_data(const HybridPowerSystem& sys) {
     cd.is_vdc_slack = resolve_device_control_role(conv).provides_dc_v_reference;
     d.converters.push_back(std::move(cd));
   }
+  // ── DC/DC converters ──────────────────────────────────────────────────────
+  // Each in-service DC/DC couples two DC buses. In the OPF it draws Pout/eta from
+  // its input bus and injects Pout into its output bus; the control mode fixes
+  // Pout (Power), the output-bus voltage (Voltage), or a Vdc droop (Droop). The
+  // I²R (r_eq) term is intentionally dropped here — a second-order effect that
+  // would couple the loss to Vdc and stiffen the OPF; eta captures the first-order
+  // conversion loss (consistent with the power flow's dominant loss term).
+  for (const auto& dc : sys.dc.dcdc_converters) {
+    if (!dc.in_service) continue;
+    auto fi = dc_idx_to_id.find(dc.bus_in);
+    auto ti = dc_idx_to_id.find(dc.bus_out);
+    if (fi == dc_idx_to_id.end() || ti == dc_idx_to_id.end()) continue;
+
+    ACDCOPFDCDCData dd;
+    dd.id = dc.name.empty() ? ("DCDC" + std::to_string(dc.index)) : dc.name;
+    dd.in_bus_id = fi->second;
+    dd.out_bus_id = ti->second;
+    dd.control_mode = dc.control_mode;
+    dd.eta = std::clamp(dc.eta, 0.01, 1.0);
+    dd.p_ref_pu = dc.p_ref_mw / Sb;
+    dd.v_ref_pu = (dc.v_ref_pu > 0.0) ? dc.v_ref_pu : 1.0;
+    dd.k_droop = dc.k_droop;
+    const double cap = (dc.sn_mva > 0.0)
+        ? dc.sn_mva
+        : std::max({std::abs(dc.pmax_mw), std::abs(dc.pmin_mw), std::abs(dc.p_ref_mw)});
+    dd.pout_max_pu = (dc.pmax_mw != 0.0) ? dc.pmax_mw / Sb
+                                         : (cap > 0.0 ? cap / Sb : kHuge);
+    dd.pout_min_pu = (dc.pmin_mw != 0.0) ? dc.pmin_mw / Sb
+                                         : (cap > 0.0 ? -cap / Sb : -kHuge);
+    if (dd.pout_min_pu > dd.pout_max_pu) std::swap(dd.pout_min_pu, dd.pout_max_pu);
+    dd.pout0_pu = std::clamp(dd.p_ref_pu, dd.pout_min_pu, dd.pout_max_pu);
+    dd.forms_out_voltage =
+        (dc.control_mode == DCDCControlMode::Voltage) ||
+        (dc.control_mode == DCDCControlMode::Droop && std::abs(dc.k_droop) >= 1e-12);
+    d.dcdc_converters.push_back(std::move(dd));
+  }
+  // AC reference from a grid-forming converter (multi-converter model r1 §2, VSC
+  // Mode 1). An AC_GRID_FORMING converter forms the AC angle + magnitude
+  // reference at its terminal — in the power flow this promotes its AC bus to
+  // SLACK (apply_acpv_voltage_control). Mirror that here so the OPF and PF agree
+  // on the AC reference, but only when the model has no reference bus yet (an
+  // existing slack generator's bus wins, exactly as in the power flow), to avoid
+  // pinning two angles in one connected network.
+  const bool opf_has_ac_ref = std::any_of(
+      d.ac.buses.begin(), d.ac.buses.end(),
+      [](const ACOPFBusData& b) { return b.is_ref; });
+  if (!opf_has_ac_ref) {
+    for (const auto& conv : sys.vsc_converters) {
+      if (!conv.in_service) continue;
+      if (!resolve_device_control_role(conv).is_ac_grid_forming) continue;
+      auto it = ac_idx_to_id.find(conv.bus_ac);
+      if (it == ac_idx_to_id.end()) continue;
+      for (auto& bd : d.ac.buses) {
+        if (bd.id == it->second) {
+          bd.is_ref = true;
+          if (conv.v_ac_set_pu > 0.0) bd.vm0 = conv.v_ac_set_pu;
+          bd.va0_rad = conv.v_ac_angle_set_deg * kDegToRad;
+          break;
+        }
+      }
+      break;  // a single AC reference is sufficient
+    }
+  }
 
   return d;
 }
@@ -196,6 +259,8 @@ ACDCOPFBuilderResult solve_acdcopf(const ACDCOPFData& data,
   for (const auto& bd : data.dc_buses) dc_bus_set.add_element(Key::scalar(bd.id));
   auto& conv_set = m.add_set("converters");
   for (const auto& cd : data.converters) conv_set.add_element(Key::scalar(cd.id));
+  auto& dcdc_set = m.add_set("dcdc");
+  for (const auto& dd : data.dcdc_converters) dcdc_set.add_element(Key::scalar(dd.id));
 
   // ── AC variables ──────────────────────────────────────────────────────
   auto& Vm = m.add_var("Vm", ac_bus_set, VarType::Continuous, 0.9, 1.1);
@@ -240,6 +305,16 @@ ACDCOPFBuilderResult solve_acdcopf(const ACDCOPFData& data,
     Qac.set_ub(ck, cd.qac_max_pu);
   }
 
+  // ── DC/DC converter output-power variables ────────────────────────────
+  // Pout is the active power injected INTO the output DC bus; the input bus is
+  // drawn Pout/eta below.
+  auto& Pdcdc = m.add_var("Pdcdc", dcdc_set, VarType::Continuous, -kHuge, kHuge);
+  for (const auto& dd : data.dcdc_converters) {
+    Key dk = Key::scalar(dd.id);
+    Pdcdc.set_lb(dk, dd.pout_min_pu);
+    Pdcdc.set_ub(dk, dd.pout_max_pu);
+  }
+
   // ── Objective ─────────────────────────────────────────────────────────
   NonlinearExpr obj = m.nl_const(0.0);
   for (const auto& gd : ac.generators) {
@@ -269,6 +344,7 @@ ACDCOPFBuilderResult solve_acdcopf(const ACDCOPFData& data,
     for (const auto& bd : data.dc_buses)  x0.push_back(bd.vdc0);
     for (const auto& cd : data.converters) x0.push_back(cd.pac0_pu);
     for (const auto& cd : data.converters) x0.push_back(cd.qac0_pu);
+    for (const auto& dd : data.dcdc_converters) x0.push_back(dd.pout0_pu);
     m.set_nlp_x0(x0);
   }
 
@@ -486,6 +562,38 @@ ACDCOPFBuilderResult solve_acdcopf(const ACDCOPFData& data,
     Pdc_acc[d_idx] = m.nl_add(Pdc_acc[d_idx], Pdc_c);
   }
 
+  // ── DC/DC converter coupling ──────────────────────────────────────────
+  // Pout is injected into the output bus; Pout/eta is drawn from the input bus
+  // (first-order conversion loss). The control mode adds one equality:
+  //   Power   : Pout = p_ref
+  //   Voltage : Vdc_out = v_ref   (skipped if the bus is already a VSC Vdc slack)
+  //   Droop   : Pout = p_ref + k_droop·(Vdc_out − v_ref)
+  for (const auto& dd : data.dcdc_converters) {
+    auto ii = dc_bus_pos.find(dd.in_bus_id);
+    auto oi = dc_bus_pos.find(dd.out_bus_id);
+    if (ii == dc_bus_pos.end() || oi == dc_bus_pos.end()) continue;
+    const std::size_t in_idx = ii->second, out_idx = oi->second;
+    Key dk = Key::scalar(dd.id);
+    NonlinearExpr nl_Pout = m.nl_var(Pdcdc(dk));
+
+    Pdc_acc[out_idx] = m.nl_add(Pdc_acc[out_idx], nl_Pout);
+    Pdc_acc[in_idx] =
+        m.nl_sub(Pdc_acc[in_idx], m.nl_mul(m.nl_const(1.0 / dd.eta), nl_Pout));
+
+    if (dd.control_mode == DCDCControlMode::Power) {
+      m.add_nl_constraint("dcdc_p_" + dd.id, nl_Pout, CompareOp::Equal, dd.p_ref_pu);
+    } else if (dd.control_mode == DCDCControlMode::Droop) {
+      NonlinearExpr droop = m.nl_sub(
+          nl_Pout,
+          m.nl_mul(m.nl_const(dd.k_droop),
+                   m.nl_sub(nl_Vdc[out_idx], m.nl_const(dd.v_ref_pu))));
+      m.add_nl_constraint("dcdc_droop_" + dd.id, droop, CompareOp::Equal, dd.p_ref_pu);
+    } else if (!data.dc_buses[out_idx].is_vdc_slack) {
+      m.add_nl_constraint("dcdc_vset_" + dd.id, nl_Vdc[out_idx], CompareOp::Equal,
+                          dd.v_ref_pu);
+    }
+  }
+
   // ── DC bus balance equality constraints ───────────────────────────────
   for (std::size_t i = 0; i < nb_dc; ++i) {
     const std::string& did = data.dc_buses[i].id;
@@ -550,6 +658,11 @@ ACDCOPFBuilderResult solve_acdcopf(const ACDCOPFData& data,
                        / std::max(vm_ac, 1e-6);
     const double ploss = cd.a_pu + cd.b_loss * iac + cd.c_loss * iac * iac;
     res.pdc_mw[cd.id] = -(pac_pu + ploss) * Sb;
+  }
+
+  // DC/DC converter results (output power into the output DC bus).
+  for (const auto& dd : data.dcdc_converters) {
+    res.pdcdc_mw[dd.id] = sr.var_value(Pdcdc, Key::scalar(dd.id)) * Sb;
   }
 
   // ── AC constraint violation metrics ────────────────────────────────────

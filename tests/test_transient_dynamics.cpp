@@ -3891,6 +3891,106 @@ TEST_CASE("Networked microgrids ride through a utility outage on distributed gen
   }
 }
 
+TEST_CASE("Transient FD/Jacobian cost benchmark across solvers",
+          "[dynamics][bench][.]") {
+  using Clock = std::chrono::high_resolution_clock;
+  struct Cfg {
+    std::string name;
+    DynamicSolverType solver;
+    DynamicDaeJacobianMode jac;
+    bool skip_fd;
+  };
+  const std::vector<Cfg> cfgs = {
+      {"PartitionedEuler", DynamicSolverType::PartitionedEuler,
+       DynamicDaeJacobianMode::HybridAnalytic, false},
+      {"PartitionedHeun", DynamicSolverType::PartitionedHeun,
+       DynamicDaeJacobianMode::HybridAnalytic, false},
+      {"PartitionedRK4", DynamicSolverType::PartitionedRK4,
+       DynamicDaeJacobianMode::HybridAnalytic, false},
+      {"RosenbrockEuler", DynamicSolverType::RosenbrockEuler,
+       DynamicDaeJacobianMode::HybridAnalytic, false},
+      {"BE / FiniteDifference", DynamicSolverType::BackwardEulerNewton,
+       DynamicDaeJacobianMode::FiniteDifference, false},
+      {"BE / HybridAnalytic", DynamicSolverType::BackwardEulerNewton,
+       DynamicDaeJacobianMode::HybridAnalytic, false},
+      {"BE / HybridColored", DynamicSolverType::BackwardEulerNewton,
+       DynamicDaeJacobianMode::HybridAnalyticColored, false},
+      {"BE / SkipGlobalFD", DynamicSolverType::BackwardEulerNewton,
+       DynamicDaeJacobianMode::HybridAnalytic, true},
+      {"Trap / FiniteDifference", DynamicSolverType::TrapezoidalNewton,
+       DynamicDaeJacobianMode::FiniteDifference, false},
+      {"Trap / HybridAnalytic", DynamicSolverType::TrapezoidalNewton,
+       DynamicDaeJacobianMode::HybridAnalytic, false},
+      {"Trap / HybridColored", DynamicSolverType::TrapezoidalNewton,
+       DynamicDaeJacobianMode::HybridAnalyticColored, false},
+      {"Trap / SkipGlobalFD", DynamicSolverType::TrapezoidalNewton,
+       DynamicDaeJacobianMode::HybridAnalytic, true},
+      {"MMDae / FiniteDifference", DynamicSolverType::MassMatrixDae,
+       DynamicDaeJacobianMode::FiniteDifference, false},
+      {"MMDae / HybridAnalytic", DynamicSolverType::MassMatrixDae,
+       DynamicDaeJacobianMode::HybridAnalytic, false},
+      {"MMDae / HybridColored", DynamicSolverType::MassMatrixDae,
+       DynamicDaeJacobianMode::HybridAnalyticColored, false},
+      {"MMDae / SkipGlobalFD", DynamicSolverType::MassMatrixDae,
+       DynamicDaeJacobianMode::HybridAnalytic, true},
+  };
+
+  std::ostringstream out;
+  out << "\n";
+  for (int ci = 0; ci < 3; ++ci) {
+    const std::string cname = (ci == 0)   ? "ieee14_acdc"
+                              : (ci == 1) ? "ieee24_3area_acdc"
+                                          : "ieee118_acdc";
+    out << "=== case " << cname << " ===\n";
+    char hdr[176];
+    std::snprintf(hdr, sizeof(hdr), "%-26s %6s %9s %3s %6s %8s %9s %10s\n",
+                  "config", "n_x", "wall_ms", "ok", "steps", "newton", "fd_cols",
+                  "resid_ev");
+    out << hdr;
+    for (const auto& cfg : cfgs) {
+      HybridPowerSystem sys = (ci == 0)   ? io::build_ieee14_acdc()
+                              : (ci == 1) ? io::build_ieee24_3area_acdc()
+                                          : io::build_ieee118_acdc();
+      DynamicSolverOptions opt;
+      opt.t_end_s = 0.25;
+      opt.dt_s = 0.005;
+      opt.solver_type = cfg.solver;
+      opt.dae_jacobian_mode = cfg.jac;
+      opt.dae_skip_global_fd_when_analytic = cfg.skip_fd;
+      opt.run_power_flow_initialization = true;
+      opt.use_consistent_dynamic_initialization = true;
+      opt.record_every_step = false;
+      opt.enforce_voltage_health_check = false;
+
+      DynamicModelBuilder builder;
+      DynamicSystem dyn = builder.build(sys, opt);
+      const int n_x = dyn.stateCount();
+      DynamicEvent ev;
+      ev.time_s = 0.1;
+      ev.type = DynamicEventType::ACLoadScale;
+      ev.component_index = 1;
+      ev.value = 1.3;
+      ev.label = "load step";
+      dyn.events.push_back(ev);
+
+      DynamicSolver solver;
+      const auto t0 = Clock::now();
+      const DynamicResults r = solver.solve(dyn);
+      const auto t1 = Clock::now();
+      const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+      char row[208];
+      std::snprintf(row, sizeof(row), "%-26s %6d %9.1f %3d %6d %8d %9d %10d\n",
+                    cfg.name.c_str(), n_x, ms, r.success ? 1 : 0, r.steps,
+                    r.newton_iterations, r.jacobian_fd_columns,
+                    r.jacobian_residual_evaluations);
+      out << row;
+    }
+    out << "\n";
+  }
+  WARN(out.str());
+  CHECK(true);
+}
+
 TEST_CASE("Transient solver lands on off-grid event times", "[dynamics][events]") {
   const auto sys = make_transient_2bus();
   auto opt = fast_options();

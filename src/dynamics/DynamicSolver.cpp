@@ -1680,7 +1680,12 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
       if (last_rejection.empty()) last_rejection = error;
       dae_cache.invalidate();
       dae_predictor_cache.invalidate();
-      if (!system.options.use_adaptive_step ||
+      // Halve the step to recover from a hard Newton/assembly failure even when
+      // adaptive stepping is off (a fixed-step run should ride through transient
+      // stiffness by locally reducing dt rather than aborting). Adaptive *error*
+      // rejections above still require use_adaptive_step.
+      const bool may_halve = system.options.use_adaptive_step || !outcome.ok;
+      if (!may_halve ||
           retry == system.options.max_step_halving ||
           attempted_dt <= system.options.min_accepted_step_s * (1.0 + 1e-12)) {
         break;
@@ -1902,7 +1907,10 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
         break;
       }
       if (last_rejection.empty()) last_rejection = error;
-      if (!system.options.use_adaptive_step ||
+      // Halve on a hard stepper failure (Newton/assembly) even in fixed-step
+      // mode; adaptive error/health rejections above stay gated on use_adaptive_step.
+      const bool may_halve = system.options.use_adaptive_step || !outcome.ok;
+      if (!may_halve ||
           retry == system.options.max_step_halving ||
           attempted_dt <= system.options.min_accepted_step_s * (1.0 + 1e-12)) {
         break;
@@ -2074,9 +2082,13 @@ std::string maybe_auto_select_stiff_solver(DynamicSystem& system) {
   // a target, so auto-selection never drops below second-order accuracy:
   //   PartitionedHeun (2 evals, region ~[-2,0])
   //   PartitionedRK4  (4 evals, region ~[-2.785,0])
-  //   TrapezoidalNewton (implicit, A-stable)
+  //   MassMatrixDae   (implicit, A-stable; analytic colored Jacobian + reuse)
   // This downshifts (e.g. RK4 -> Heun) when the operating point is non-stiff and
-  // upshifts (Heun -> RK4 -> implicit) when it is stiff.
+  // upshifts (Heun -> RK4 -> implicit) when it is stiff. The implicit target is
+  // the simultaneous mass-matrix DAE with a colored analytic Jacobian: it reuses
+  // its factorization across steps and colors the analytic sparsity, so it is
+  // markedly cheaper than the partitioned Newton steppers (which rebuild a dense
+  // state Jacobian every iteration) while remaining A-stable.
   constexpr double margin = 0.9;
   DynamicSolverType chosen;
   const char* reason;
@@ -2089,12 +2101,19 @@ std::string maybe_auto_select_stiff_solver(DynamicSystem& system) {
     chosen = DynamicSolverType::PartitionedRK4;
     reason = "mildly stiff: within the RK4 stability region";
   } else {
-    chosen = DynamicSolverType::TrapezoidalNewton;
+    chosen = DynamicSolverType::MassMatrixDae;
     reason = "stiff: outside every explicit stability region";
   }
   if (chosen == opt.solver_type) return {};  // already the cheapest stable choice
   const DynamicSolverType from = opt.solver_type;
   opt.solver_type = chosen;
+  // The mass-matrix DAE is only cheap with its analytic colored Jacobian (the
+  // plain finite-difference mode re-sweeps every column); enable it here unless
+  // the caller deliberately forced the pure finite-difference Jacobian.
+  if (chosen == DynamicSolverType::MassMatrixDae &&
+      opt.dae_jacobian_mode != DynamicDaeJacobianMode::FiniteDifference) {
+    opt.dae_jacobian_mode = DynamicDaeJacobianMode::HybridAnalyticColored;
+  }
   std::ostringstream note;
   note << "auto_select_stiff_solver: " << solver_type_display_name(from) << " -> "
        << solver_type_display_name(chosen) << " (fastest eigenvalue Re=" << fastest;

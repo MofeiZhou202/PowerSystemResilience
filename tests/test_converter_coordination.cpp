@@ -4,6 +4,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/json_io.hpp"
@@ -1407,6 +1408,168 @@ TEST_CASE("OPF DC-slack selection is consistent with the control-role resolver",
     INFO("mode=" << converter_mode_str(m));
     REQUIRE(data.converters.size() == 1);
     CHECK(data.converters[0].is_vdc_slack);
+  }
+}
+
+TEST_CASE("OPF AC reference matches the resolver for a grid-forming converter",
+          "[converter][opf][role][consistency][acref]") {
+  using namespace hacdcpf;
+
+  // A DC-fed AC island: two PQ buses, NEITHER a slack, so the only possible AC
+  // angle reference is the grid-forming converter at bus 1.
+  auto build_conv_fed_island = []() {
+    HybridPowerSystem sys;
+    sys.base_mva = 10.0;
+    sys.ac.base_mva = 10.0;
+    ACBus b1; b1.index = 1; b1.bus_type = BusType::PQ; b1.vm_pu = 1.0;
+    b1.vmin_pu = 0.9; b1.vmax_pu = 1.1; b1.in_service = true;
+    ACBus b2; b2.index = 2; b2.bus_type = BusType::PQ; b2.vm_pu = 1.0;
+    b2.vmin_pu = 0.9; b2.vmax_pu = 1.1; b2.pd_mw = 1.0; b2.in_service = true;
+    sys.ac.buses = {b1, b2};
+    ACBranch br; br.index = 1; br.from_bus = 1; br.to_bus = 2; br.r_pu = 0.01;
+    br.x_pu = 0.05; br.in_service = true;
+    sys.ac.branches = {br};
+    DCBus d; d.index = 1; d.bus_type = DCBusType::DC_V; d.vm_pu = 1.0;
+    d.vmin_pu = 0.9; d.vmax_pu = 1.1; d.in_service = true;
+    sys.dc.buses = {d};
+    StaticGeneratorDC dg; dg.index = 1; dg.bus = 1; dg.p_set_mw = 1.5;
+    dg.pmax_mw = 3.0; dg.in_service = true;
+    sys.dc.dc_static_generators = {dg};
+    VSCConverter v; v.index = 1; v.bus_ac = 1; v.bus_dc = 1;
+    v.control_mode = ConverterMode::AC_GRID_FORMING; v.v_ac_set_pu = 1.02;
+    v.v_ac_angle_set_deg = 0.0; v.pmax_mw = 10; v.pmin_mw = -10;
+    v.qmax_mvar = 10; v.qmin_mvar = -10; v.p_rated_mw = 10; v.eta = 0.98;
+    v.in_service = true;
+    sys.vsc_converters = {v};
+    return sys;
+  };
+  auto is_ref = [](const power_models::ACDCOPFData& data, const std::string& id) {
+    for (const auto& b : data.ac.buses)
+      if (b.id == id) return b.is_ref;
+    return false;
+  };
+  auto count_ref = [](const power_models::ACDCOPFData& data) {
+    int n = 0;
+    for (const auto& b : data.ac.buses)
+      if (b.is_ref) ++n;
+    return n;
+  };
+
+  // 1) AC_GRID_FORMING mode: the resolver forms the AC reference, and (with no
+  //    slack generator present) the OPF must anchor the converter's AC bus —
+  //    matching what the power flow's apply_acpv_voltage_control does.
+  {
+    HybridPowerSystem sys = build_conv_fed_island();
+    REQUIRE(resolve_device_control_role(sys.vsc_converters[0]).is_ac_grid_forming);
+    const auto data = power_models::to_acdcopf_data(sys);
+    CHECK(is_ref(data, "B1"));
+    CHECK(count_ref(data) == 1);
+  }
+
+  // 2) The ac_grid_forming opt-in flag alone (control_mode left at PQ) also makes
+  //    the converter form the AC reference — PF and OPF both honor the flag now.
+  {
+    HybridPowerSystem sys = build_conv_fed_island();
+    sys.vsc_converters[0].control_mode = ConverterMode::PQ_MODE;
+    sys.vsc_converters[0].ac_grid_forming = true;
+    REQUIRE(resolve_device_control_role(sys.vsc_converters[0]).is_ac_grid_forming);
+    const auto data = power_models::to_acdcopf_data(sys);
+    CHECK(is_ref(data, "B1"));
+    CHECK(count_ref(data) == 1);
+  }
+
+  // 3) An existing slack bus wins: the converter never pins a second AC angle
+  //    reference in the same network (mirrors the power flow's "SLACK wins").
+  {
+    HybridPowerSystem sys = build_conv_fed_island();
+    sys.ac.buses[1].bus_type = BusType::SLACK;  // bus 2 is now the slack
+    const auto data = power_models::to_acdcopf_data(sys);
+    CHECK(count_ref(data) == 1);
+    CHECK(is_ref(data, "B2"));
+    CHECK_FALSE(is_ref(data, "B1"));
+  }
+}
+
+TEST_CASE("Hybrid AC/DC OPF models DC/DC converters in all three control modes",
+          "[converter][opf][dcdc]") {
+  using namespace hacdcpf;
+  // AC slack -> VSC(VDC_Q) forms DC bus 1; DC bus 2 (load) is reached by BOTH a
+  // DC line and the DC/DC converter, so Vdc2 is always well-determined.
+  auto build_case = [](DCDCControlMode mode, double p_ref_mw, double v_ref_pu,
+                       double k_droop, double load_mw) {
+    HybridPowerSystem sys;
+    sys.base_mva = 10.0;
+    sys.ac.base_mva = 10.0;
+    ACBus b; b.index = 1; b.bus_type = BusType::SLACK; b.vm_pu = 1.0;
+    b.vmin_pu = 0.9; b.vmax_pu = 1.1; b.in_service = true;
+    sys.ac.buses = {b};
+    Generator g; g.index = 1; g.bus = 1; g.in_service = true; g.is_slack = true;
+    g.vg_pu = 1.0; g.pmax_mw = 100; g.pmin_mw = 0; g.qmax_mvar = 100;
+    g.qmin_mvar = -100; g.cost_c1 = 10.0;
+    sys.ac.generators = {g};
+    DCBus d1; d1.index = 1; d1.bus_type = DCBusType::DC_V; d1.vm_pu = 1.0;
+    d1.vmin_pu = 0.9; d1.vmax_pu = 1.1; d1.in_service = true;
+    DCBus d2; d2.index = 2; d2.bus_type = DCBusType::DC_P; d2.vm_pu = 1.0;
+    d2.vmin_pu = 0.9; d2.vmax_pu = 1.1; d2.in_service = true;
+    sys.dc.buses = {d1, d2};
+    DCBranch br; br.index = 1; br.from_bus = 1; br.to_bus = 2; br.r_pu = 0.05;
+    br.in_service = true;
+    sys.dc.branches = {br};
+    DCLoad l; l.index = 1; l.bus = 2; l.p_mw = load_mw; l.in_service = true;
+    sys.dc.loads = {l};
+    VSCConverter v; v.index = 1; v.bus_ac = 1; v.bus_dc = 1;
+    v.control_mode = ConverterMode::VDC_Q; v.v_dc_set_pu = 1.0; v.k_vdc = 0.1;
+    v.pmax_mw = 50; v.pmin_mw = -50; v.qmax_mvar = 50; v.qmin_mvar = -50;
+    v.p_rated_mw = 50; v.eta = 0.99; v.in_service = true;
+    sys.vsc_converters = {v};
+    DCDCConverter dc; dc.index = 1; dc.bus_in = 1; dc.bus_out = 2;
+    dc.control_mode = mode; dc.p_ref_mw = p_ref_mw; dc.v_ref_pu = v_ref_pu;
+    dc.k_droop = k_droop; dc.eta = 0.97; dc.pmax_mw = 20; dc.pmin_mw = -20;
+    dc.in_service = true;
+    sys.dc.dcdc_converters = {dc};
+    return sys;
+  };
+
+  // The data builder captures the DC/DC converter (previously ignored entirely).
+  {
+    auto sys = build_case(DCDCControlMode::Voltage, 0.0, 1.03, 0.0, 1.5);
+    const auto data = power_models::to_acdcopf_data(sys);
+    REQUIRE(data.dcdc_converters.size() == 1);
+    CHECK(data.dcdc_converters[0].in_bus_id == "DC1");
+    CHECK(data.dcdc_converters[0].out_bus_id == "DC2");
+    CHECK(data.dcdc_converters[0].forms_out_voltage);
+  }
+
+  // Voltage mode: the DC/DC holds its output-bus voltage at v_ref.
+  {
+    auto sys = build_case(DCDCControlMode::Voltage, 0.0, 1.03, 0.0, 1.5);
+    const auto res = power_models::solve_acdcopf(power_models::to_acdcopf_data(sys));
+    REQUIRE(res.ac_result.solve_result.has_primal());
+    REQUIRE(res.vdc_pu.count("DC2") == 1);
+    CHECK(res.vdc_pu.at("DC2") == Catch::Approx(1.03).margin(1e-3));
+  }
+
+  // Power mode: the DC/DC output power equals its setpoint.
+  {
+    const double p_ref = 1.2;
+    auto sys = build_case(DCDCControlMode::Power, p_ref, 1.0, 0.0, 1.5);
+    const auto res = power_models::solve_acdcopf(power_models::to_acdcopf_data(sys));
+    REQUIRE(res.ac_result.solve_result.has_primal());
+    REQUIRE(res.pdcdc_mw.count("DCDC1") == 1);
+    CHECK(res.pdcdc_mw.at("DCDC1") == Catch::Approx(p_ref).margin(1e-2));
+  }
+
+  // Droop mode: Pout = p_ref + k_droop·(Vdc_out − v_ref)  (all per-unit; MW = pu·Sb).
+  {
+    const double p_ref = 1.0, k = 2.0, v_ref = 1.0, Sb = 10.0;
+    auto sys = build_case(DCDCControlMode::Droop, p_ref, v_ref, k, 1.5);
+    const auto res = power_models::solve_acdcopf(power_models::to_acdcopf_data(sys));
+    REQUIRE(res.ac_result.solve_result.has_primal());
+    REQUIRE(res.pdcdc_mw.count("DCDC1") == 1);
+    REQUIRE(res.vdc_pu.count("DC2") == 1);
+    const double vdc2 = res.vdc_pu.at("DC2");
+    const double expected_mw = p_ref + k * (vdc2 - v_ref) * Sb;
+    CHECK(res.pdcdc_mw.at("DCDC1") == Catch::Approx(expected_mw).margin(2e-2));
   }
 }
 

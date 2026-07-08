@@ -50,11 +50,31 @@ struct ACDCOPFConverterData {
   bool is_vdc_slack{false};
 };
 
+/// DC/DC converter coupling two DC buses (multi-converter model §3.2). Modeled in
+/// the OPF as a single output-power variable Pout drawn from the input bus at
+/// Pout/eta; the control mode fixes Pout (Power), the output-bus voltage
+/// (Voltage), or a Vdc droop (Droop).
+struct ACDCOPFDCDCData {
+  std::string id;
+  std::string in_bus_id;
+  std::string out_bus_id;
+  DCDCControlMode control_mode{DCDCControlMode::Voltage};
+  double eta{0.98};
+  double p_ref_pu{0.0};
+  double v_ref_pu{1.0};
+  double k_droop{0.0};
+  double pout_min_pu{-1.0};
+  double pout_max_pu{1.0};
+  double pout0_pu{0.0};
+  bool forms_out_voltage{false};  ///< Voltage mode (or Droop w/ gain) pins Vdc_out
+};
+
 struct ACDCOPFData {
   ACOPFData ac;
   std::vector<ACDCOPFDCBusData>       dc_buses;
   std::vector<ACDCOPFDCBranchData>    dc_branches;
   std::vector<ACDCOPFConverterData>   converters;
+  std::vector<ACDCOPFDCDCData>        dcdc_converters;
 };
 
 /// Hybrid AC/DC OPF result (AML model builder output).
@@ -64,6 +84,7 @@ struct ACDCOPFBuilderResult {
   std::map<std::string, double> pac_mw;
   std::map<std::string, double> qac_mvar;
   std::map<std::string, double> pdc_mw;
+  std::map<std::string, double> pdcdc_mw;  ///< DC/DC output power (into out bus)
   double max_dc_p_viol_pu{0.0};
 };
 
