@@ -46,6 +46,7 @@
 #include "hacdcpf/io/scenario_bundle_io.hpp"
 #include "hacdcpf/io/external_grid_io.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
+#include "hacdcpf/io/powersimulationsdynamics_io.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
 #include "hacdcpf/power_flow/three_phase.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
@@ -2697,6 +2698,74 @@ json digital_twin_readiness_to_json(
       {"round_trip", round_trip},
       {"dimensions", dimensions},
       {"findings", findings}};
+}
+
+json digital_twin_conversion_capability_to_json(
+    const hacdcpf::io::DigitalTwinConversionCapability& cap) {
+  return json{{"format", hacdcpf::io::to_string(cap.format)},
+              {"role", cap.role},
+              {"binding_level", cap.binding_level},
+              {"recommended_use", cap.recommended_use},
+              {"represented_instances", cap.represented_instances},
+              {"unrepresented_instances", cap.unrepresented_instances},
+              {"exact_or_equivalent_instances",
+               cap.exact_or_equivalent_instances},
+              {"projected_instances", cap.projected_instances},
+              {"diagnostic_only_instances", cap.diagnostic_only_instances},
+              {"unsupported_instances", cap.unsupported_instances},
+              {"coverage_ratio", cap.coverage_ratio},
+              {"fidelity_score", cap.fidelity_score},
+              {"validation_score", cap.validation_score},
+              {"risk_score", cap.risk_score},
+              {"risk_level", cap.risk_level},
+              {"round_trip_available", cap.round_trip_available},
+              {"twin_path_safe", cap.twin_path_safe},
+              {"blocking_collections", cap.blocking_collections},
+              {"risks", cap.risks},
+              {"next_actions", cap.next_actions}};
+}
+
+json digital_twin_evidence_entry_to_json(
+    const hacdcpf::io::DigitalTwinEvidenceLedgerEntry& entry) {
+  return json{{"model_name", entry.model_name},
+              {"conversion_target",
+               hacdcpf::io::to_string(entry.conversion_target)},
+              {"adapter", entry.adapter},
+              {"fidelity_level", entry.fidelity_level},
+              {"validation_method", entry.validation_method},
+              {"passed", entry.passed},
+              {"residual", entry.residual},
+              {"tolerance", entry.tolerance},
+              {"timestamp_utc", entry.timestamp_utc},
+              {"blocking_collections", entry.blocking_collections},
+              {"confidence_score", entry.confidence_score},
+              {"risk_score", entry.risk_score},
+              {"risk_level", entry.risk_level},
+              {"evidence_summary", entry.evidence_summary}};
+}
+
+json digital_twin_evidence_ledger_to_json(
+    const hacdcpf::io::DigitalTwinEvidenceLedger& ledger) {
+  json entries = json::array();
+  std::size_t passed = 0;
+  for (const auto& entry : ledger.entries) {
+    if (entry.passed) ++passed;
+    entries.push_back(digital_twin_evidence_entry_to_json(entry));
+  }
+  return json{
+      {"model_name", ledger.model_name},
+      {"generated_at_utc", ledger.generated_at_utc},
+      {"summary",
+       json{{"entries", ledger.entries.size()},
+            {"passed", passed},
+            {"failed", ledger.entries.size() - passed},
+            {"fidelity_level", ledger.fidelity_level},
+            {"fidelity_label", ledger.fidelity_label},
+            {"integration_level", ledger.integration_level},
+            {"integration_label", ledger.integration_label},
+            {"maturity_level", ledger.maturity_level},
+            {"maturity_label", ledger.maturity_label}}},
+      {"entries", entries}};
 }
 
 template <typename T>
@@ -9035,6 +9104,17 @@ int main(int argc, char** argv) {
         out["digital_twin_readiness"] =
             digital_twin_readiness_to_json(
                 hacdcpf::io::analyze_digital_twin_readiness(sys));
+        json conversion_capabilities = json::array();
+        for (const auto& cap :
+             hacdcpf::io::analyze_digital_twin_conversion_capabilities(sys)) {
+          conversion_capabilities.push_back(
+              digital_twin_conversion_capability_to_json(cap));
+        }
+        out["digital_twin_conversion_capabilities"] =
+            conversion_capabilities;
+        out["digital_twin_evidence_ledger"] =
+            digital_twin_evidence_ledger_to_json(
+                hacdcpf::io::analyze_digital_twin_evidence_ledger(sys));
       } else {
         out["coverage"] = json::array();
         out["summary"] = json{{"total_instances", 0}};
@@ -9045,6 +9125,10 @@ int main(int argc, char** argv) {
         out["digital_twin_readiness"] =
             digital_twin_readiness_to_json(
                 hacdcpf::io::DigitalTwinReadinessReport{});
+        out["digital_twin_conversion_capabilities"] = json::array();
+        out["digital_twin_evidence_ledger"] =
+            digital_twin_evidence_ledger_to_json(
+                hacdcpf::io::DigitalTwinEvidenceLedger{});
       }
       res.set_content(out.dump(), "application/json");
     } catch (const std::exception& e) {
@@ -9314,6 +9398,55 @@ int main(int argc, char** argv) {
                       "application/json");
     } catch (const std::exception& e) {
       if (!tmp.empty()) { std::error_code ec; std::filesystem::remove(tmp, ec); }
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: export the current system as a PSD/PowerSystems manifest ----
+  // This is the single Julia IO surface for PowerSimulationsDynamics.jl: a
+  // hacdcpf_psd_snapshot.v1 JSON manifest preserving dynamic-profile identity
+  // without requiring Julia in the GUI runtime.
+  svr.Post("/api/session/export_powersimulationsdynamics",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system) throw std::runtime_error("No system loaded");
+      hacdcpf::io::PowerSimulationsDynamicsExportOptions options;
+      options.model_name = g_session.current_name.empty()
+                               ? "hacdcpf_psd_snapshot"
+                               : g_session.current_name;
+      const std::string snapshot =
+          hacdcpf::io::to_powersimulationsdynamics_json(
+              *g_session.current_system, options, 2);
+      const auto coverage =
+          hacdcpf::io::analyze_component_io_coverage(*g_session.current_system);
+      std::string safe;
+      for (char ch : g_session.current_name) {
+        safe += (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')
+                    ? ch : '_';
+      }
+      if (safe.empty()) safe = "system";
+      res.set_content(
+          json{{"psd_snapshot_json", snapshot},
+               {"name", safe},
+               {"format", "hacdcpf_psd_snapshot.v1"},
+               {"represented",
+                coverage.represented_instances(
+                    hacdcpf::io::ComponentIOFormat::
+                        PowerSimulationsDynamicsJulia)},
+               {"unrepresented",
+                coverage.unrepresented_instances(
+                    hacdcpf::io::ComponentIOFormat::
+                        PowerSimulationsDynamicsJulia)},
+               {"warnings",
+                hacdcpf::io::external_io_diagnostics(
+                    coverage,
+                    hacdcpf::io::ComponentIOFormat::
+                        PowerSimulationsDynamicsJulia)}}
+              .dump(),
+          "application/json");
+    } catch (const std::exception& e) {
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }

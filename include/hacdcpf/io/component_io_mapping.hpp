@@ -244,6 +244,65 @@ struct DigitalTwinReadinessReport {
       ComponentParameterSeverity severity) const;
 };
 
+/// Digital-twin suitability of one conversion target for the current system.
+///
+/// This turns the component-level IO registry into an operational decision:
+/// which format can be the authoritative twin contract, which one is useful for
+/// solver validation, and which one is only a diagnostic or projected view.
+struct DigitalTwinConversionCapability {
+  ComponentIOFormat format{ComponentIOFormat::InternalJSON};
+  std::string role;
+  std::string binding_level;
+  std::string recommended_use;
+  std::size_t represented_instances{0};
+  std::size_t unrepresented_instances{0};
+  std::size_t exact_or_equivalent_instances{0};
+  std::size_t projected_instances{0};
+  std::size_t diagnostic_only_instances{0};
+  std::size_t unsupported_instances{0};
+  double coverage_ratio{0.0};
+  double fidelity_score{0.0};
+  double validation_score{0.0};
+  double risk_score{1.0};
+  std::string risk_level;
+  bool round_trip_available{false};
+  bool twin_path_safe{false};
+  std::vector<std::string> blocking_collections;
+  std::vector<std::string> risks;
+  std::vector<std::string> next_actions;
+};
+
+/// Stored validation evidence for one model/adapter twin pathway.
+struct DigitalTwinEvidenceLedgerEntry {
+  std::string model_name;
+  ComponentIOFormat conversion_target{ComponentIOFormat::InternalJSON};
+  std::string adapter;
+  std::string fidelity_level;
+  std::string validation_method;
+  bool passed{false};
+  double residual{1.0};
+  double tolerance{0.0};
+  std::string timestamp_utc;
+  std::vector<std::string> blocking_collections;
+  double confidence_score{0.0};
+  double risk_score{1.0};
+  std::string risk_level;
+  std::string evidence_summary;
+};
+
+/// Timestamped digital-twin evidence ledger for one loaded model.
+struct DigitalTwinEvidenceLedger {
+  std::string model_name;
+  std::string generated_at_utc;
+  int fidelity_level{0};
+  std::string fidelity_label;
+  int integration_level{0};
+  std::string integration_label;
+  int maturity_level{0};
+  std::string maturity_label;
+  std::vector<DigitalTwinEvidenceLedgerEntry> entries;
+};
+
 /// Compatibility row for one rich component collection.
 struct ComponentIOMapping {
   std::string component_type;
@@ -306,6 +365,14 @@ ComponentParameterAuditReport analyze_component_parameter_quality(
 
 /// Computes the L0--L5 digital-twin readiness report for the current model.
 DigitalTwinReadinessReport analyze_digital_twin_readiness(
+    const HybridPowerSystem& sys);
+
+/// Computes per-format conversion suitability for digital-twin workflows.
+std::vector<DigitalTwinConversionCapability>
+analyze_digital_twin_conversion_capabilities(const HybridPowerSystem& sys);
+
+/// Builds timestamped model/adapter evidence entries for the GUI and API.
+DigitalTwinEvidenceLedger analyze_digital_twin_evidence_ledger(
     const HybridPowerSystem& sys);
 
 /// True when a policy preserves some executable/diagnostic target semantics.

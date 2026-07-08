@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cctype>
+#include <ctime>
 #include <iomanip>
 #include <map>
 #include <sstream>
@@ -1163,12 +1165,13 @@ const std::vector<DigitalTwinReadinessCriterion>& twin_criteria_registry() {
                      DT::StandardsInteroperability,
                      "Standards and external IO interoperability",
                      "The twin should preserve rich JSON semantics while "
-                     "projecting to canonical, GridLAB-D, OpenDSS, and future "
-                     "CIM/IEC exchange contracts with declared loss of detail.",
+                     "projecting to canonical, GridLAB-D, OpenDSS, "
+                     "PowerSimulationsDynamics.jl, and future CIM/IEC "
+                     "exchange contracts with declared loss of detail.",
                      1.1,
                      Sev::Warning,
                      S::IEC61970CIM,
-                     "CIM/OpenDSS/GridLAB-D interoperability"),
+                     "CIM/OpenDSS/GridLAB-D/PSD interoperability"),
       twin_criterion("DT-VALID-01",
                      DT::NumericalValidation,
                      "Numerical validation readiness",
@@ -2409,6 +2412,193 @@ MaturityAxes evaluate_maturity_gates(
 bool is_unsupported_external_policy(ComponentIOPolicy policy) {
   return policy == P::Unsupported || policy == P::InternalOnly ||
          policy == P::DiagnosticOnly;
+}
+
+const std::array<ComponentIOFormat, 5>& digital_twin_conversion_formats() {
+  static const std::array<ComponentIOFormat, 5> formats = {
+      ComponentIOFormat::InternalJSON,
+      ComponentIOFormat::CanonicalModel,
+      ComponentIOFormat::GridLABD,
+      ComponentIOFormat::OpenDSS,
+      ComponentIOFormat::PowerSimulationsDynamicsJulia};
+  return formats;
+}
+
+double policy_fidelity_weight(ComponentIOPolicy policy) {
+  switch (policy) {
+    case P::Exact:
+      return 1.0;
+    case P::Equivalent:
+      return 0.92;
+    case P::BoundaryInjection:
+      return 0.72;
+    case P::Projected:
+      return 0.65;
+    case P::Aggregated:
+      return 0.55;
+    case P::DiagnosticOnly:
+      return 0.25;
+    case P::InternalOnly:
+      return 0.15;
+    case P::Unsupported:
+      return 0.0;
+  }
+  return 0.0;
+}
+
+double verification_scope_weight(NumericalVerificationScope scope) {
+  switch (scope) {
+    case V::ExactRoundTrip:
+      return 1.0;
+    case V::EquivalentRoundTrip:
+      return 0.9;
+    case V::ExternalPowerFlow:
+      return 0.85;
+    case V::NativeSolver:
+      return 0.78;
+    case V::BoundaryInjectionSnapshot:
+      return 0.65;
+    case V::StructuralOnly:
+      return 0.35;
+    case V::NotApplicable:
+      return 0.20;
+  }
+  return 0.0;
+}
+
+std::string conversion_role(ComponentIOFormat format) {
+  switch (format) {
+    case ComponentIOFormat::InternalJSON:
+      return "Authoritative rich-model twin";
+    case ComponentIOFormat::CanonicalModel:
+      return "Canonical analytics interchange";
+    case ComponentIOFormat::GridLABD:
+      return "Distribution feeder solver snapshot";
+    case ComponentIOFormat::OpenDSS:
+      return "Power-flow and protection solver snapshot";
+    case ComponentIOFormat::PowerSimulationsDynamicsJulia:
+      return "Julia dynamic-profile manifest";
+  }
+  return "Unknown conversion target";
+}
+
+std::string conversion_binding_level(ComponentIOFormat format) {
+  switch (format) {
+    case ComponentIOFormat::InternalJSON:
+      return "rich-authoritative";
+    case ComponentIOFormat::CanonicalModel:
+      return "canonical-projection";
+    case ComponentIOFormat::GridLABD:
+      return "static-solver";
+    case ComponentIOFormat::OpenDSS:
+      return "static-solver";
+    case ComponentIOFormat::PowerSimulationsDynamicsJulia:
+      return "dynamic-profile";
+  }
+  return "diagnostic";
+}
+
+std::string conversion_recommended_use(ComponentIOFormat format) {
+  switch (format) {
+    case ComponentIOFormat::InternalJSON:
+      return "Use as the source-of-truth model contract for GUI sessions, "
+             "round-trip conformance, and rich hybrid AC/DC state.";
+    case ComponentIOFormat::CanonicalModel:
+      return "Use as a normalized exchange layer for analytics, audits, and "
+             "future standards adapters; keep rich JSON as the authority.";
+    case ComponentIOFormat::GridLABD:
+      return "Use for feeder-level static or time-series solver checks after "
+             "reviewing unsupported hybrid/DC projections.";
+    case ComponentIOFormat::OpenDSS:
+      return "Use for static power-flow, protection-oriented, and phase-domain "
+             "checks where unsupported converter/DC semantics are acceptable.";
+    case ComponentIOFormat::PowerSimulationsDynamicsJulia:
+      return "Use for dynamic injection identity, controller-slot review, and "
+             "PowerSimulationsDynamics.jl trace-validation manifests.";
+  }
+  return "Use for diagnostics only until a binding contract is registered.";
+}
+
+std::string conversion_risk_level(double risk_score) {
+  if (risk_score <= 0.20) return "low";
+  if (risk_score <= 0.45) return "medium";
+  return "high";
+}
+
+void add_unique_text(std::vector<std::string>& rows, std::string value) {
+  if (value.empty()) return;
+  if (std::find(rows.begin(), rows.end(), value) == rows.end()) {
+    rows.push_back(std::move(value));
+  }
+}
+
+std::string utc_timestamp_now() {
+  const auto now = std::chrono::system_clock::now();
+  const std::time_t t = std::chrono::system_clock::to_time_t(now);
+  std::tm utc{};
+#if defined(_WIN32)
+  gmtime_s(&utc, &t);
+#else
+  gmtime_r(&t, &utc);
+#endif
+  std::ostringstream os;
+  os << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+  return os.str();
+}
+
+std::string ledger_validation_method(ComponentIOFormat format) {
+  switch (format) {
+    case ComponentIOFormat::InternalJSON:
+      return "JSON round-trip conformance";
+    case ComponentIOFormat::CanonicalModel:
+      return "Canonical projection coverage and registry audit";
+    case ComponentIOFormat::GridLABD:
+      return "GridLAB-D adapter coverage and solver-readiness audit";
+    case ComponentIOFormat::OpenDSS:
+      return "OpenDSS adapter coverage and solver-readiness audit";
+    case ComponentIOFormat::PowerSimulationsDynamicsJulia:
+      return "PowerSimulationsDynamics.jl manifest coverage and trace-readiness audit";
+  }
+  return "Registry coverage audit";
+}
+
+double ledger_residual(
+    const DigitalTwinConversionCapability& cap,
+    const RoundTripEvidence& json_rt) {
+  if (cap.format == ComponentIOFormat::InternalJSON) {
+    if (json_rt.fields_checked == 0U) return 1.0;
+    return static_cast<double>(json_rt.fields_mismatched) /
+           static_cast<double>(json_rt.fields_checked);
+  }
+  return cap.risk_score;
+}
+
+double ledger_tolerance(ComponentIOFormat format,
+                        const RoundTripEvidence& json_rt) {
+  if (format == ComponentIOFormat::InternalJSON) return json_rt.epsilon;
+  // For projected adapters the ledger residual is the conversion risk score.
+  // A target must stay in the low-risk band before it is promoted as governed
+  // twin evidence; external solver traces can later replace this risk proxy.
+  return 0.20;
+}
+
+std::string ledger_evidence_summary(
+    const DigitalTwinConversionCapability& cap,
+    const RoundTripEvidence& json_rt) {
+  std::ostringstream os;
+  os << "coverage " << cap.represented_instances << "/"
+     << (cap.represented_instances + cap.unrepresented_instances)
+     << ", fidelity " << format_double(cap.fidelity_score)
+     << ", validation " << format_double(cap.validation_score)
+     << ", risk " << format_double(cap.risk_score) << " ("
+     << cap.risk_level << ")";
+  if (cap.format == ComponentIOFormat::InternalJSON) {
+    os << ", JSON round-trip fields " << json_rt.fields_checked -
+              json_rt.fields_mismatched
+       << "/" << json_rt.fields_checked << " matched";
+  }
+  if (!cap.risks.empty()) os << "; " << cap.risks.front();
+  return os.str();
 }
 
 const std::vector<ComponentIOMapping>& registry() {
@@ -3859,6 +4049,203 @@ DigitalTwinReadinessReport analyze_digital_twin_readiness(
       project_maturity_level(axes.fidelity, axes.integration);
   report.maturity_label = maturity_label(report.maturity_level);
   return report;
+}
+
+std::vector<DigitalTwinConversionCapability>
+analyze_digital_twin_conversion_capabilities(const HybridPowerSystem& sys) {
+  const auto coverage = analyze_component_io_coverage(sys);
+  const std::size_t total_instances = coverage.total_instances();
+  const double total =
+      static_cast<double>(std::max<std::size_t>(total_instances, 1U));
+  const RoundTripEvidence json_rt = json_roundtrip(sys);
+  std::vector<DigitalTwinConversionCapability> capabilities;
+
+  for (const auto format : digital_twin_conversion_formats()) {
+    DigitalTwinConversionCapability cap;
+    cap.format = format;
+    cap.role = conversion_role(format);
+    cap.binding_level = conversion_binding_level(format);
+    cap.recommended_use = conversion_recommended_use(format);
+    cap.represented_instances = coverage.represented_instances(format);
+    cap.unrepresented_instances = coverage.unrepresented_instances(format);
+    cap.coverage_ratio =
+        total_instances == 0U
+            ? 0.0
+            : static_cast<double>(cap.represented_instances) / total;
+    cap.round_trip_available =
+        format == ComponentIOFormat::InternalJSON && json_rt.passed &&
+        json_rt.fields_checked > 0U;
+
+    double fidelity_accumulator = 0.0;
+    double validation_accumulator = 0.0;
+    for (const auto& item : coverage.items) {
+      if (item.count == 0U) continue;
+      const auto policy = policy_for_format(item.mapping, format);
+      switch (policy) {
+        case P::Exact:
+        case P::Equivalent:
+          cap.exact_or_equivalent_instances += item.count;
+          break;
+        case P::Projected:
+        case P::Aggregated:
+        case P::BoundaryInjection:
+          cap.projected_instances += item.count;
+          break;
+        case P::DiagnosticOnly:
+          cap.diagnostic_only_instances += item.count;
+          add_unique_text(cap.blocking_collections, item.mapping.collection_path);
+          break;
+        case P::InternalOnly:
+        case P::Unsupported:
+          cap.unsupported_instances += item.count;
+          add_unique_text(cap.blocking_collections, item.mapping.collection_path);
+          break;
+      }
+      fidelity_accumulator +=
+          static_cast<double>(item.count) * policy_fidelity_weight(policy);
+      const double policy_gate = is_represented_policy(policy) ? 1.0 : 0.25;
+      validation_accumulator +=
+          static_cast<double>(item.count) *
+          verification_scope_weight(item.mapping.verification_scope) *
+          policy_gate;
+    }
+
+    cap.fidelity_score =
+        total_instances == 0U
+            ? 0.0
+            : std::clamp(fidelity_accumulator / total, 0.0, 1.0);
+    cap.validation_score =
+        total_instances == 0U
+            ? 0.0
+            : std::clamp(validation_accumulator / total, 0.0, 1.0);
+    const double round_trip_bonus = cap.round_trip_available ? 1.0 : 0.0;
+    cap.risk_score = std::clamp(
+        1.0 - (0.62 * cap.fidelity_score + 0.28 * cap.validation_score +
+               0.10 * round_trip_bonus),
+        0.0,
+        1.0);
+    cap.risk_level = conversion_risk_level(cap.risk_score);
+    cap.twin_path_safe =
+        total_instances > 0U && cap.coverage_ratio >= 0.98 &&
+        cap.fidelity_score >= 0.80 && cap.unsupported_instances == 0U &&
+        (format != ComponentIOFormat::InternalJSON || cap.round_trip_available);
+
+    if (total_instances == 0U) {
+      cap.risks.push_back(
+          "No system is loaded, so conversion suitability cannot be assessed.");
+      cap.next_actions.push_back(
+          "Load a built-in case, import a model, or synchronize the canvas.");
+    } else {
+      if (cap.unrepresented_instances > 0U) {
+        std::ostringstream os;
+        os << cap.unrepresented_instances
+           << " populated component instance(s) are not executable in "
+           << to_string(format) << ".";
+        cap.risks.push_back(os.str());
+      }
+      if (cap.projected_instances > 0U) {
+        std::ostringstream os;
+        os << cap.projected_instances
+           << " instance(s) require projected, aggregated, or boundary "
+              "semantics.";
+        cap.risks.push_back(os.str());
+      }
+      if (cap.diagnostic_only_instances > 0U) {
+        std::ostringstream os;
+        os << cap.diagnostic_only_instances
+           << " instance(s) are exported as diagnostic metadata only.";
+        cap.risks.push_back(os.str());
+      }
+      if (format == ComponentIOFormat::InternalJSON &&
+          !cap.round_trip_available) {
+        cap.risks.push_back(
+            "No lossless JSON round-trip evidence is stored for this system.");
+      }
+
+      if (cap.blocking_collections.empty()) {
+        cap.next_actions.push_back(
+            cap.twin_path_safe
+                ? "Use this target as a governed twin path for the stated role."
+                : "Store solver or trace evidence before promoting this target "
+                  "to a governed twin path.");
+      } else {
+        std::ostringstream os;
+        const std::size_t limit =
+            std::min<std::size_t>(cap.blocking_collections.size(), 4U);
+        os << "Add adapters or explicit projections for ";
+        for (std::size_t i = 0; i < limit; ++i) {
+          if (i != 0U) os << ", ";
+          os << cap.blocking_collections[i];
+        }
+        if (cap.blocking_collections.size() > limit) os << ", ...";
+        os << ".";
+        cap.next_actions.push_back(os.str());
+      }
+      if (cap.projected_instances > 0U) {
+        cap.next_actions.push_back(
+            "Review projection notes and attach validation evidence before "
+            "using this conversion for automated twin decisions.");
+      }
+    }
+    capabilities.push_back(std::move(cap));
+  }
+
+  std::stable_sort(capabilities.begin(),
+                   capabilities.end(),
+                   [](const DigitalTwinConversionCapability& a,
+                      const DigitalTwinConversionCapability& b) {
+                     if (a.twin_path_safe != b.twin_path_safe) {
+                       return a.twin_path_safe && !b.twin_path_safe;
+                     }
+                     if (a.risk_score != b.risk_score) {
+                       return a.risk_score < b.risk_score;
+                     }
+                     return to_string(a.format) < to_string(b.format);
+                   });
+  return capabilities;
+}
+
+DigitalTwinEvidenceLedger analyze_digital_twin_evidence_ledger(
+    const HybridPowerSystem& sys) {
+  const auto readiness = analyze_digital_twin_readiness(sys);
+  const auto capabilities =
+      analyze_digital_twin_conversion_capabilities(sys);
+  const RoundTripEvidence json_rt =
+      readiness.round_trip_evidence.empty() ? json_roundtrip(sys)
+                                            : readiness.round_trip_evidence.front();
+  const std::string timestamp = utc_timestamp_now();
+
+  DigitalTwinEvidenceLedger ledger;
+  ledger.model_name = sys.name.empty() ? "unnamed_system" : sys.name;
+  ledger.generated_at_utc = timestamp;
+  ledger.fidelity_level = readiness.fidelity_level;
+  ledger.fidelity_label = readiness.fidelity_label;
+  ledger.integration_level = readiness.integration_level;
+  ledger.integration_label = readiness.integration_label;
+  ledger.maturity_level = readiness.maturity_level;
+  ledger.maturity_label = readiness.maturity_label;
+
+  for (const auto& cap : capabilities) {
+    DigitalTwinEvidenceLedgerEntry entry;
+    entry.model_name = ledger.model_name;
+    entry.conversion_target = cap.format;
+    entry.adapter = to_string(cap.format);
+    entry.fidelity_level =
+        "F" + std::to_string(readiness.fidelity_level) + " " +
+        readiness.fidelity_label + " / " + cap.binding_level;
+    entry.validation_method = ledger_validation_method(cap.format);
+    entry.residual = ledger_residual(cap, json_rt);
+    entry.tolerance = ledger_tolerance(cap.format, json_rt);
+    entry.passed = cap.twin_path_safe && entry.residual <= entry.tolerance;
+    entry.timestamp_utc = timestamp;
+    entry.blocking_collections = cap.blocking_collections;
+    entry.confidence_score = std::clamp(1.0 - cap.risk_score, 0.0, 1.0);
+    entry.risk_score = cap.risk_score;
+    entry.risk_level = cap.risk_level;
+    entry.evidence_summary = ledger_evidence_summary(cap, json_rt);
+    ledger.entries.push_back(std::move(entry));
+  }
+  return ledger;
 }
 
 bool is_represented_policy(ComponentIOPolicy policy) {

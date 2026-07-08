@@ -424,7 +424,8 @@ Additional committed items:
 `数据IO` stays the single user-facing place for: model compatibility; input and
 output format conversion; standards profile registry; parameter rule browsing;
 parameter health diagnostics; digital-twin readiness and maturity visualization;
-and future telemetry-binding and calibration dashboards.
+per-target conversion-path suitability; and future telemetry-binding and
+calibration dashboards.
 
 Checks launched from transient-simulation or reliability modules MUST route
 results **back** to the unified IO dashboard rather than scattering
@@ -433,3 +434,18 @@ the API contract: GUI code consumes `/api/io/model_compatibility` and MUST NOT
 duplicate C++ scoring logic in JavaScript. As telemetry/calibration/validation
 history are added, the endpoint payload is segmented/paginated so it does not
 become a monolith.
+
+`digital_twin_conversion_capabilities` is the bridge between plain conversion
+coverage and operational twin use: for each registered target (rich JSON,
+canonical, GridLAB-D, OpenDSS, PowerSimulationsDynamics.jl), the C++ IO layer
+reports role, binding level, coverage, fidelity score, validation score, risk,
+blocking collections, and recommended next actions. The GUI may render these
+rows, but it must not recompute the risk policy.
+
+`digital_twin_evidence_ledger` stores the timestamped claim record that backs
+those rows. Each entry is keyed by model and adapter and records the conversion
+target, fidelity level, validation method, pass/fail result, residual,
+tolerance, UTC timestamp, blocking collections, confidence score, risk score,
+and evidence summary. Rich JSON uses actual round-trip mismatch residuals;
+projected adapters use conversion-risk residuals until external solver or trace
+evidence is attached.

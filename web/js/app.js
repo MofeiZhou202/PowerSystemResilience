@@ -1546,6 +1546,32 @@ const App = (() => {
     }
   }
 
+  async function exportPowerSimulationsDynamics() {
+    setStatus('导出PSD.jl快照中...', 'busy');
+    try {
+      const ok = await syncToBackend();
+      if (!ok) { setStatus('导出失败', 'error'); return; }
+      const data = await apiPost('/api/session/export_powersimulationsdynamics', {});
+      if (!data || data.error) throw new Error((data && data.error) || '导出失败');
+      const text = data.psd_snapshot_json || '';
+      const filename = `${data.name || 'system'}_psd_snapshot.json`;
+      downloadTextFile(filename, text, 'application/json;charset=utf-8');
+      const represented = Number(data.represented || 0);
+      const unrepresented = Number(data.unrepresented || 0);
+      log(`已导出PSD.jl快照: ${filename}`, 'success');
+      showModelIoStatus('PowerSimulationsDynamics.jl 导出完成', [
+        ['文件', filename],
+        ['格式', data.format || 'hacdcpf_psd_snapshot.v1'],
+        ['PSD覆盖', `${represented}/${represented + unrepresented}`],
+        ['大小', `${text.length} bytes`],
+      ], { subtitle: 'Julia 动态模型 IO / PowerSystems manifest', warnings: data.warnings || [] });
+      setStatus('就绪');
+    } catch (err) {
+      log(`导出PSD.jl失败: ${err.message}`, 'error');
+      setStatus('导出失败', 'error');
+    }
+  }
+
   function importJson(file) {
     const reader = new FileReader();
     reader.onload = async (e) => {
@@ -4084,6 +4110,17 @@ const App = (() => {
     return labels[dimension] || dimension || '未分类';
   }
 
+  function modelIoFormatLabel(format) {
+    const labels = {
+      InternalJSON: 'Rich JSON',
+      CanonicalModel: 'Canonical',
+      GridLABD: 'GridLAB-D',
+      OpenDSS: 'OpenDSS',
+      'PowerSimulationsDynamics.jl': 'PSD.jl',
+    };
+    return labels[format] || format || '未分类';
+  }
+
   function modelIoRatioPercent(value, digits = 0) {
     const pct = Math.max(0, Math.min(1, Number(value || 0))) * 100;
     return `${pct.toFixed(digits)}%`;
@@ -4093,6 +4130,13 @@ const App = (() => {
     const ok = value === true || value === 'true' || value === 'pass' || value === 'passed';
     const cls = ok ? 'model-io-badge-pass' : 'model-io-badge-fail';
     return `<span class="model-io-badge ${cls}">${escapeHtml(ok ? passText : failText)}</span>`;
+  }
+
+  function modelIoRiskBadge(level, score) {
+    const s = String(level || '').toLowerCase();
+    const severity = s === 'low' ? 'Info' : (s === 'medium' ? 'Warning' : 'Error');
+    const text = `${level || 'unknown'} ${modelIoRatioPercent(score, 0)}`;
+    return `<span class="model-io-severity ${modelIoSeverityClass(severity)}">${escapeHtml(text)}</span>`;
   }
 
   function modelIoPolicyCounts(mappings, field) {
@@ -4126,6 +4170,7 @@ const App = (() => {
     const twin = data?.digital_twin_readiness || {};
     const twinSummary = twin.summary || {};
     const twinDimensions = Array.isArray(twin.dimensions) ? twin.dimensions : [];
+    const conversionCapabilities = Array.isArray(data?.digital_twin_conversion_capabilities) ? data.digital_twin_conversion_capabilities : [];
     const cfg = { responsive: true, displaylogo: false, modeBarButtonsToRemove: ['select2d', 'lasso2d'] };
 
     const twinGaugeChart = document.getElementById('modelIoTwinGaugeChart');
@@ -4189,24 +4234,30 @@ const App = (() => {
 
     const coverageChart = document.getElementById('modelIoCoverageChart');
     if (coverageChart) {
+      const capabilityRows = conversionCapabilities.length ? conversionCapabilities : null;
+      const labels = capabilityRows ? capabilityRows.map(row => modelIoFormatLabel(row.format)) : ['GridLAB-D', 'OpenDSS', 'PSD.jl'];
+      const represented = capabilityRows ? capabilityRows.map(row => Number(row.represented_instances || 0)) : [gridRepresented, dssRepresented, psdRepresented];
+      const unrepresented = capabilityRows
+        ? capabilityRows.map(row => Number(row.unrepresented_instances || 0))
+        : [
+            Math.max(total - gridRepresented, 0),
+            Math.max(total - dssRepresented, 0),
+            Math.max(total - psdRepresented, 0),
+          ];
       Plotly.react(coverageChart, [{
-        x: ['GridLAB-D', 'OpenDSS', 'PSD.jl'],
-        y: [gridRepresented, dssRepresented, psdRepresented],
+        x: labels,
+        y: represented,
         name: '可表示',
         type: 'bar',
         marker: { color: '#56b6c2' },
       }, {
-        x: ['GridLAB-D', 'OpenDSS', 'PSD.jl'],
-        y: [
-          Math.max(total - gridRepresented, 0),
-          Math.max(total - dssRepresented, 0),
-          Math.max(total - psdRepresented, 0),
-        ],
+        x: labels,
+        y: unrepresented,
         name: '需投影/暂不支持',
         type: 'bar',
         marker: { color: '#d19a66' },
       }], {
-        ...transientPlotLayout('外部格式覆盖', '元件数'),
+        ...transientPlotLayout('转换目标覆盖', '元件数'),
         xaxis: { title: '', automargin: true },
         barmode: 'stack',
       }, cfg);
@@ -4291,6 +4342,11 @@ const App = (() => {
     const twinGates = Array.isArray(twin.gates) ? twin.gates : [];
     const roundTripRows = Array.isArray(twin.round_trip) ? twin.round_trip : [];
     const twinDimensions = Array.isArray(twin.dimensions) ? twin.dimensions : [];
+    const conversionCapabilities = Array.isArray(data?.digital_twin_conversion_capabilities) ? data.digital_twin_conversion_capabilities : [];
+    const safeTwinCapabilities = conversionCapabilities.filter(row => row && row.twin_path_safe);
+    const evidenceLedger = data?.digital_twin_evidence_ledger || {};
+    const ledgerSummary = evidenceLedger.summary || {};
+    const evidenceEntries = Array.isArray(evidenceLedger.entries) ? evidenceLedger.entries : [];
     const total = Number(summary.total_instances || 0);
     const gridRepresented = Number(summary.gridlabd_represented || 0);
     const openDssRepresented = Number(summary.opendss_represented || 0);
@@ -4323,6 +4379,8 @@ const App = (() => {
       ['已检查参数', auditSummary.checked_parameters || 0, `元件 ${auditSummary.component_instances_checked || 0}`],
       ['孪生就绪度', modelIoRatioPercent(twinReadiness), twinSummary.maturity_label || '未评估'],
       ['孪生成熟度', `L${twinSummary.maturity_level ?? 0}`, `缺口 ${twinErrors}/${twinWarnings}`],
+      ['孪生主路径', safeTwinCapabilities.length ? modelIoFormatLabel(safeTwinCapabilities[0].format) : '待加固', safeTwinCapabilities.length ? safeTwinCapabilities[0].binding_level : '需补证据'],
+      ['证据账本', `${ledgerSummary.passed || 0}/${ledgerSummary.entries || evidenceEntries.length}`, evidenceLedger.generated_at_utc || '未生成'],
     ].forEach(([label, value, unit]) => {
       html += `<div class="transient-kpi"><div class="transient-kpi-label">${escapeHtml(label)}</div><div class="transient-kpi-value">${escapeHtml(String(value))}</div><div class="transient-kpi-label">${escapeHtml(String(unit || ''))}</div></div>`;
     });
@@ -4375,6 +4433,62 @@ const App = (() => {
     }
     html += '</tbody></table></div></div>';
     html += '</div>';
+
+    html += '<div class="transient-section-head"><h5>数字孪生证据账本</h5><span>adapter / method / residual / tolerance / timestamp / confidence</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>目标</th><th>保真层级</th><th>验证方法</th><th>结论</th><th>残差 / 容差</th><th>时间戳</th><th>置信 / 风险</th><th>阻塞集合</th><th>证据摘要</th></tr></thead><tbody>';
+    if (evidenceEntries.length) {
+      evidenceEntries.forEach(row => {
+        const residual = Number(row.residual || 0);
+        const tolerance = Number(row.tolerance || 0);
+        const residualText = tolerance > 0 && tolerance <= 1e-4
+          ? `${residual.toExponential(2)} / ${tolerance.toExponential(1)}`
+          : `${modelIoRatioPercent(residual, 0)} / ${modelIoRatioPercent(tolerance, 0)}`;
+        const confidenceRisk = `${modelIoRatioPercent(row.confidence_score, 0)} / ${row.risk_level || 'unknown'}`;
+        const blockers = Array.isArray(row.blocking_collections) && row.blocking_collections.length
+          ? row.blocking_collections.slice(0, 5).join(', ')
+          : '—';
+        html += `<tr>
+          <td>${escapeHtml(modelIoFormatLabel(row.conversion_target || row.adapter))}</td>
+          <td>${escapeHtml(row.fidelity_level || '')}</td>
+          <td>${escapeHtml(row.validation_method || '')}</td>
+          <td>${modelIoStatusBadge(row.passed, '通过', '未通过')}</td>
+          <td>${escapeHtml(residualText)}</td>
+          <td>${escapeHtml(row.timestamp_utc || '')}</td>
+          <td>${escapeHtml(confidenceRisk)} ${modelIoRiskBadge(row.risk_level, row.risk_score)}</td>
+          <td>${escapeHtml(blockers)}</td>
+          <td>${escapeHtml(row.evidence_summary || '')}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="9">暂无证据账本；请先加载算例或同步画布。</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
+    html += '<div class="transient-section-head"><h5>数字孪生转换路径</h5><span>source-of-truth / solver check / dynamic manifest / projection risk</span></div>';
+    html += '<div class="transient-table-scroll"><table><thead><tr><th>格式</th><th>孪生角色</th><th>绑定层级</th><th>覆盖</th><th>保真</th><th>验证</th><th>风险</th><th>主路径</th><th>建议动作</th></tr></thead><tbody>';
+    if (conversionCapabilities.length) {
+      conversionCapabilities.forEach(row => {
+        const represented = Number(row.represented_instances || 0);
+        const unrepresented = Number(row.unrepresented_instances || 0);
+        const denom = represented + unrepresented;
+        const actionText = Array.isArray(row.next_actions) && row.next_actions.length ? row.next_actions.slice(0, 2).join(' ') : (row.recommended_use || '—');
+        const riskText = Array.isArray(row.risks) && row.risks.length ? row.risks.slice(0, 2).join(' ') : row.recommended_use;
+        html += `<tr title="${escapeHtml(riskText || '')}">
+          <td>${escapeHtml(modelIoFormatLabel(row.format))}</td>
+          <td>${escapeHtml(row.role || '')}</td>
+          <td>${escapeHtml(row.binding_level || '')}</td>
+          <td>${escapeHtml(`${represented}/${denom || total} (${modelIoRatioPercent(row.coverage_ratio, 0)})`)}</td>
+          <td>${escapeHtml(modelIoRatioPercent(row.fidelity_score, 0))}</td>
+          <td>${escapeHtml(modelIoRatioPercent(row.validation_score, 0))}</td>
+          <td>${modelIoRiskBadge(row.risk_level, row.risk_score)}</td>
+          <td>${modelIoStatusBadge(row.twin_path_safe, '可用', '需加固')}</td>
+          <td>${escapeHtml(actionText)}</td>
+        </tr>`;
+      });
+    } else {
+      html += '<tr><td colspan="9">暂无转换路径评估；请先加载算例或同步画布。</td></tr>';
+    }
+    html += '</tbody></table></div>';
 
     const adapterRows = [
       ['Internal JSON', 'json_policy', `${total}/${total}`, 'rich binding'],
@@ -10968,11 +11082,12 @@ const App = (() => {
     document.getElementById('btnIoExportEtapXml')?.addEventListener('click', exportEtapXml);
     document.getElementById('btnIoExportGridlabd')?.addEventListener('click', () => exportExternalGrid('gridlabd'));
     document.getElementById('btnIoExportOpendss')?.addEventListener('click', () => exportExternalGrid('opendss'));
+    document.getElementById('btnIoExportPsd')?.addEventListener('click', exportPowerSimulationsDynamics);
     document.getElementById('btnIoModelCompatibility')?.addEventListener('click', () => runModelCompatibility({
       targetId: 'modelIoResults',
       resultGroup: 'modelIO',
       title: '模型兼容性检查',
-      subtitle: 'JSON / Canonical / GridLAB-D / OpenDSS / 标准模型映射',
+      subtitle: 'JSON / Canonical / GridLAB-D / OpenDSS / PSD.jl / 标准模型映射',
     }));
     document.getElementById('btnIoSyncBackend')?.addEventListener('click', async () => {
       setStatus('同步画布中...', 'busy');

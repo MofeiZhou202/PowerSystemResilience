@@ -418,6 +418,91 @@ TEST_CASE("Component IO coverage report classifies populated systems",
                     }));
 }
 
+TEST_CASE("Digital twin conversion capabilities summarize conversion risk",
+          "[io][mapping][digital_twin][conversion]") {
+  const auto sys = make_system_with_all_io_component_tables();
+  const auto capabilities =
+      hacdcpf::io::analyze_digital_twin_conversion_capabilities(sys);
+  REQUIRE(capabilities.size() == 5);
+
+  auto find_capability =
+      [&](hacdcpf::io::ComponentIOFormat format)
+          -> const hacdcpf::io::DigitalTwinConversionCapability* {
+    for (const auto& cap : capabilities) {
+      if (cap.format == format) return &cap;
+    }
+    return nullptr;
+  };
+
+  const auto* json = find_capability(
+      hacdcpf::io::ComponentIOFormat::InternalJSON);
+  const auto* psd = find_capability(
+      hacdcpf::io::ComponentIOFormat::PowerSimulationsDynamicsJulia);
+  const auto* gridlabd = find_capability(
+      hacdcpf::io::ComponentIOFormat::GridLABD);
+
+  REQUIRE(json != nullptr);
+  REQUIRE(psd != nullptr);
+  REQUIRE(gridlabd != nullptr);
+
+  CHECK(json->coverage_ratio > 0.99);
+  CHECK(json->round_trip_available);
+  CHECK(json->twin_path_safe);
+  CHECK(json->risk_level == "low");
+
+  CHECK(psd->binding_level == "dynamic-profile");
+  CHECK(psd->represented_instances > 0);
+  CHECK(psd->unrepresented_instances > 0);
+  CHECK_FALSE(psd->risks.empty());
+  CHECK(psd->risk_score > json->risk_score);
+
+  CHECK(gridlabd->unsupported_instances > 0);
+  CHECK_FALSE(gridlabd->blocking_collections.empty());
+  CHECK_FALSE(gridlabd->next_actions.empty());
+}
+
+TEST_CASE("Digital twin evidence ledger stores adapter validation evidence",
+          "[io][mapping][digital_twin][ledger]") {
+  const auto sys = make_system_with_all_io_component_tables();
+  const auto ledger = hacdcpf::io::analyze_digital_twin_evidence_ledger(sys);
+
+  REQUIRE(ledger.model_name == sys.name);
+  REQUIRE_FALSE(ledger.generated_at_utc.empty());
+  REQUIRE(ledger.entries.size() == 5);
+
+  auto find_entry =
+      [&](hacdcpf::io::ComponentIOFormat format)
+          -> const hacdcpf::io::DigitalTwinEvidenceLedgerEntry* {
+    for (const auto& entry : ledger.entries) {
+      if (entry.conversion_target == format) return &entry;
+    }
+    return nullptr;
+  };
+
+  const auto* json = find_entry(
+      hacdcpf::io::ComponentIOFormat::InternalJSON);
+  const auto* psd = find_entry(
+      hacdcpf::io::ComponentIOFormat::PowerSimulationsDynamicsJulia);
+
+  REQUIRE(json != nullptr);
+  REQUIRE(psd != nullptr);
+
+  CHECK(json->model_name == sys.name);
+  CHECK(json->validation_method.find("round-trip") != std::string::npos);
+  CHECK(json->passed);
+  CHECK(json->residual == 0.0);
+  CHECK(json->tolerance > 0.0);
+  CHECK(json->confidence_score > 0.80);
+  CHECK(json->timestamp_utc == ledger.generated_at_utc);
+
+  CHECK(psd->adapter == "PowerSimulationsDynamics.jl");
+  CHECK_FALSE(psd->passed);
+  CHECK(psd->residual > psd->tolerance);
+  CHECK_FALSE(psd->blocking_collections.empty());
+  CHECK((psd->risk_level == "medium" || psd->risk_level == "high"));
+  CHECK_THAT(psd->evidence_summary, ContainsSubstring("coverage"));
+}
+
 TEST_CASE("PowerSimulationsDynamics Julia IO exports a neutral snapshot",
           "[io][mapping][psd][export]") {
   auto sys = make_system_with_all_io_component_tables();

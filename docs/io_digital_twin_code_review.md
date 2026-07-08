@@ -116,9 +116,16 @@ The IO layer has three nested responsibilities:
 - `parameter_audit`
 - `digital_twin_criteria`
 - `digital_twin_readiness`
+- `digital_twin_conversion_capabilities`
+- `digital_twin_evidence_ledger`
 
 For a loaded built-in system, the readiness object should include a summary,
-eleven dimension scores, and one finding per readiness criterion.
+eleven dimension scores, and one finding per readiness criterion. The
+conversion-capability array should contain the registered IO targets with their
+coverage, twin binding level, risk score, blocking collections, and next
+actions. The evidence ledger should contain one timestamped entry per adapter
+with validation method, pass/fail, residual/tolerance, confidence/risk, and
+blocking collections.
 
 ## Validation Commands
 
