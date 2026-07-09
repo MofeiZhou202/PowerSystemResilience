@@ -210,11 +210,19 @@ cases are unchanged.
 
 ---
 
-## 5. Phase 2 — Information architecture & workflow guidance
+## 5. Phase 2 — Information architecture & workflow guidance  *(implemented)*
 
 **Regroup the 15 modules into five task-oriented ribbon groups** (progressive
 disclosure). The module set stays identical; only the top-level grouping and
 default visibility change.
+
+> Status: shipped in commit `update the GUi org`. `#workflowBar` (5 groups) +
+> per-button `data-group`, `#dependencyStrip` chips, and `#globalElementSearch`
+> are wired in `web/js/app.js` (`setActiveWorkflow`, `updateDependencyChips`,
+> `ensurePowerFlowForCarbonFlow`) and styled in `web/css/style.css`. Validated
+> live: all 15 modules map to exactly one group (3/4/2/3/3); chips track
+> backend/canvas/PF/TSPF/carbon freshness; clicking `静态碳流分析` with no PF
+> auto-runs PF first, then carbon.
 
 ```mermaid
 flowchart LR
@@ -273,10 +281,16 @@ instead of the current ~5.5 s blocking build.
 Make large systems *inspectable and editable* without a full diagram — this is
 what turns headless mode from "compute-only" into a real workflow.
 
-1. **Element index / command palette.** A search box ("bus 1487", "Gen 12",
-   name substrings) that pans-and-selects in canvas mode, or scrolls-and-selects
-   the corresponding table row in headless mode. Back it with `getCompBusMap()`
-   (canvas) and the stored `headlessSystem` (headless).
+1. **Element index / command palette.** *(implemented)* A search box
+   (`#globalElementSearch`: "bus 1487", "dc bus 3", "gen 12", name substrings)
+   that pans-and-selects in canvas mode (`Canvas.panToComponent` via
+   `getCompBusMap()`), or switches to the `拓扑` tab, shows a summary banner
+   (`#topologySearchResult`), and scroll-highlights the row in headless mode
+   (backed by `Canvas.buildSystemJson()` over the stored `headlessSystem`).
+   `SYSTEM_SEARCH_SOURCES` covers every AC/DC/hybrid element class with aliases.
+   Known limit: an element **beyond the `TOPO_ROW_CAP` (500)** table cut-off is
+   still found (banner carries the full record, status names it) but cannot be
+   row-highlighted until item 2 (virtualized tables) lands.
 2. **Spreadsheet-grade `拓扑` tab.** Promote the read-only tables to editable,
    virtualized grids (windowed rendering so 50k rows stay smooth) with
    type-aware inputs, multi-row edit, and filter/sort. Writes go through
@@ -338,9 +352,9 @@ contract.
 | Phase | Theme | Effort | Risk | Status |
 |-------|-------|--------|------|--------|
 | 1 | Headless large-system mode | S | Low | **Done** |
-| 2 | Module grouping + dependency chips + guided run | S–M | Low | Proposed |
+| 2 | Module grouping + dependency chips + guided run | S–M | Low | **Done** |
 | 3 | Async/LOD rendering for 600–5k | M | Medium | Proposed |
-| 4 | Search + virtualized editable tables + sub-diagram | M–L | Medium | Proposed |
+| 4 | Search + virtualized editable tables + sub-diagram | M–L | Medium | **Partial** — element search done; virtualized tables + sub-diagram pending |
 | 5 | Results dock + JS modularization + FE tests | L | Medium | Proposed |
 
 Sequencing rationale: Phase 1 removes the hard ceiling immediately; Phase 2 is

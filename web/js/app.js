@@ -449,7 +449,10 @@ const App = (() => {
     switchTab('topology');
     showTopologySearchResult(row);
     const visible = highlightVisibleTopologyRow(row);
-    setStatus(visible ? `已定位 ${row.title}` : `已定位拓扑记录`);
+    // When the row is beyond the displayed table cap (common in headless large
+    // systems) the banner still carries the full record, so name the element and
+    // point the user at the summary instead of a vague "已定位拓扑记录".
+    setStatus(visible ? `已定位 ${row.title}` : `已定位 ${row.title}（超出显示行，详见上方摘要）`);
     log(`${headless ? '无画布模式' : '拓扑表'}定位：${row.title} (${summarizeSearchItem(row)})`, 'info');
   }
 
