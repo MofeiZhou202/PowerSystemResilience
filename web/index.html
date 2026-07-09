@@ -56,23 +56,47 @@
   </div>
 </div>
 
-<!-- ===== Bar 2: Function Modules ===== -->
+<!-- ===== Bar 2a: Workflow Groups ===== -->
+<div id="workflowBar" class="workflow-bar" aria-label="功能流程分组">
+  <button class="workflow-btn" data-workflow="modeling" title="模型导入、拓扑检查、综合能源建模">建模</button>
+  <button class="workflow-btn" data-workflow="steady" title="潮流、最优潮流、谐波和承载力分析">稳态分析</button>
+  <button class="workflow-btn" data-workflow="security" title="短路与暂态动态安全分析">安全与动态</button>
+  <button class="workflow-btn" data-workflow="planning" title="拓扑重构、时序仿真和场景生成">规划与运行</button>
+  <button class="workflow-btn" data-workflow="sustainability" title="低碳、可靠性与弹性评估">低碳与弹性</button>
+</div>
+
+<!-- ===== Bar 2b: Function Modules ===== -->
 <div id="moduleBar" class="module-bar">
-  <button id="moduleModelIO"      class="module-btn" data-module="modelIO">模型IO</button>
-  <button id="modulePowerFlow"    class="module-btn" data-module="powerFlow">潮流计算</button>
-  <button id="moduleOpf"          class="module-btn" data-module="opf">最优潮流</button>
-  <button id="moduleShortCircuit" class="module-btn" data-module="shortCircuit">短路计算</button>
-  <button id="moduleHarmonics"    class="module-btn" data-module="harmonics">谐波潮流</button>
-  <button id="moduleTransient"    class="module-btn" data-module="transient">暂态仿真</button>
-  <button id="moduleTopology"     class="module-btn" data-module="topology">拓扑重构</button>
-  <button id="moduleTopologyAnalysis" class="module-btn" data-module="topologyAnalysis">拓扑分析</button>
-  <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries">时序生产模拟</button>
-  <button id="moduleIntegratedEnergy" class="module-btn" data-module="integratedEnergy">园区综合能源</button>
-  <button id="moduleHosting"      class="module-btn" data-module="hosting">承载力分析</button>
-  <button id="moduleReliability"  class="module-btn" data-module="reliability">可靠性分析</button>
-  <button id="moduleScenarioGeneration" class="module-btn" data-module="scenarioGeneration">场景生成</button>
-  <button id="moduleResilience"   class="module-btn" data-module="resilience">弹性评估</button>
-  <button id="moduleCarbonFlow"   class="module-btn" data-module="carbonFlow">碳流分析</button>
+  <button id="moduleModelIO"      class="module-btn" data-module="modelIO" data-group="modeling">模型IO</button>
+  <button id="modulePowerFlow"    class="module-btn" data-module="powerFlow" data-group="steady">潮流计算</button>
+  <button id="moduleOpf"          class="module-btn" data-module="opf" data-group="steady">最优潮流</button>
+  <button id="moduleShortCircuit" class="module-btn" data-module="shortCircuit" data-group="security">短路计算</button>
+  <button id="moduleHarmonics"    class="module-btn" data-module="harmonics" data-group="steady">谐波潮流</button>
+  <button id="moduleTransient"    class="module-btn" data-module="transient" data-group="security">暂态仿真</button>
+  <button id="moduleTopology"     class="module-btn" data-module="topology" data-group="planning">拓扑重构</button>
+  <button id="moduleTopologyAnalysis" class="module-btn" data-module="topologyAnalysis" data-group="modeling">拓扑分析</button>
+  <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries" data-group="planning">时序生产模拟</button>
+  <button id="moduleIntegratedEnergy" class="module-btn" data-module="integratedEnergy" data-group="modeling">园区综合能源</button>
+  <button id="moduleHosting"      class="module-btn" data-module="hosting" data-group="steady">承载力分析</button>
+  <button id="moduleReliability"  class="module-btn" data-module="reliability" data-group="sustainability">可靠性分析</button>
+  <button id="moduleScenarioGeneration" class="module-btn" data-module="scenarioGeneration" data-group="planning">场景生成</button>
+  <button id="moduleResilience"   class="module-btn" data-module="resilience" data-group="sustainability">弹性评估</button>
+  <button id="moduleCarbonFlow"   class="module-btn" data-module="carbonFlow" data-group="sustainability">碳流分析</button>
+</div>
+
+<!-- ===== Bar 2c: Dependency Guidance & Global Navigation ===== -->
+<div id="dependencyStrip" class="dependency-strip" aria-label="模型依赖与全局定位">
+  <div class="dependency-chips">
+    <span id="depChipBackend" class="dep-chip" title="后端会话与画布同步状态">后端: 就绪</span>
+    <span id="depChipCanvas" class="dep-chip" title="当前画布模式与规模">Canvas: 单线图</span>
+    <span id="depChipPf" class="dep-chip" title="潮流结果新鲜度，碳流等模块依赖它">PF: 未运行</span>
+    <span id="depChipTspf" class="dep-chip" title="时序潮流结果新鲜度，动态碳流依赖它">TSPF: 未运行</span>
+    <span id="depChipCarbon" class="dep-chip" title="碳流分析前置状态">碳流: 等待潮流</span>
+  </div>
+  <div class="global-search">
+    <input id="globalElementSearch" type="search" placeholder="定位: bus 1487 / dc bus 3 / gen 12 / 名称" aria-label="定位母线或元件"/>
+    <button id="btnGlobalElementSearch" class="toolbar-btn" title="在画布或无画布拓扑中定位">定位</button>
+  </div>
 </div>
 
 <!-- ===== Bar 3: Sub-Toolbar (contextual) ===== -->
@@ -1316,6 +1340,7 @@
 
     <!-- Topology Tab -->
     <div id="tabTopology" class="tab-content">
+      <div id="topologySearchResult" class="topology-search-result" hidden></div>
       <div class="topo-section">
         <h4>节点表 (Bus)</h4>
         <div id="busTable" class="topo-table-wrap">

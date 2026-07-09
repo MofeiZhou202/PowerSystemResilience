@@ -74,8 +74,38 @@ const App = (() => {
   let _transientEvents = [];
   let _analysisQueue = Promise.resolve();
   let _activeLoadPromise = null;
+  let _lastStatusText = '就绪';
+  let _lastStatusType = '';
+  let _pfInvalidated = false;
+  let _tspfInvalidated = false;
+  let _lastInvalidationReason = '';
+  let _activeWorkflow = 'steady';
 
   const ANALYSIS_BUSY_ERROR = 'Another analysis is already running';
+  const MODULE_WORKFLOWS = {
+    modelIO: 'modeling',
+    topologyAnalysis: 'modeling',
+    integratedEnergy: 'modeling',
+    powerFlow: 'steady',
+    opf: 'steady',
+    harmonics: 'steady',
+    hosting: 'steady',
+    shortCircuit: 'security',
+    transient: 'security',
+    topology: 'planning',
+    timeSeries: 'planning',
+    scenarioGeneration: 'planning',
+    carbonFlow: 'sustainability',
+    reliability: 'sustainability',
+    resilience: 'sustainability',
+  };
+  const WORKFLOW_DEFAULT_MODULE = {
+    modeling: 'modelIO',
+    steady: 'powerFlow',
+    security: 'shortCircuit',
+    planning: 'topology',
+    sustainability: 'carbonFlow',
+  };
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -113,6 +143,8 @@ const App = (() => {
   }
 
   function invalidateAnalysisResults(reason = '') {
+    const hadPf = !!_lastPfData;
+    const hadTspf = !!_lastTspfData;
     _lastPfData = null;
     _lastOpfData = null;
     _lastTspfData = null;
@@ -120,8 +152,326 @@ const App = (() => {
     _lastCarbonData = null;
     _lastDynamicCarbonData = null;
     _lastTransientData = null;
+    _pfInvalidated = hadPf;
+    _tspfInvalidated = hadTspf;
+    _lastInvalidationReason = reason || (hadPf || hadTspf ? '网络或参数已变更，旧分析结果已失效' : '');
     if (typeof Canvas !== 'undefined' && Canvas.clearResults) Canvas.clearResults();
     if (reason) log(reason, 'info');
+    updateDependencyChips();
+  }
+
+  function workflowForModule(moduleName) {
+    return MODULE_WORKFLOWS[moduleName] || 'steady';
+  }
+
+  function setActiveWorkflow(workflowName, options = {}) {
+    const workflow = workflowName || _activeWorkflow || 'steady';
+    _activeWorkflow = workflow;
+    document.querySelectorAll('.workflow-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.workflow === workflow);
+    });
+    document.querySelectorAll('.module-btn').forEach(btn => {
+      const visible = (btn.dataset.group || workflowForModule(btn.dataset.module)) === workflow;
+      btn.classList.toggle('workflow-hidden', !visible);
+      btn.setAttribute('aria-hidden', visible ? 'false' : 'true');
+    });
+    if (!options.preserveModule) {
+      const active = document.querySelector('.module-btn.active');
+      const activeVisible = active && !active.classList.contains('workflow-hidden');
+      if (!activeVisible) {
+        const preferred = WORKFLOW_DEFAULT_MODULE[workflow];
+        const target = document.querySelector(`.module-btn[data-module="${preferred}"]:not(.workflow-hidden)`) ||
+          document.querySelector(`.module-btn[data-group="${workflow}"]:not(.workflow-hidden)`);
+        if (target?.dataset.module) setActiveModule(target.dataset.module);
+      }
+    }
+    updateDependencyChips();
+  }
+
+  function setDependencyChip(id, text, state = '', title = '') {
+    const chip = document.getElementById(id);
+    if (!chip) return;
+    chip.textContent = text;
+    chip.className = `dep-chip${state ? ' ' + state : ''}`;
+    if (title) chip.title = title;
+  }
+
+  function systemBusCount(summary) {
+    const s = summary || {};
+    if (Number.isFinite(Number(s.buses))) return Number(s.buses);
+    const c = s.counts || {};
+    return Number(c.ac_buses ?? s.ac_buses ?? 0) + Number(c.dc_buses ?? s.dc_buses ?? 0);
+  }
+
+  function updateDependencyChips() {
+    if (typeof document === 'undefined') return;
+    const busy = _lastStatusType === 'busy';
+    const statusText = _lastStatusText || '';
+    let backendText = '后端: 就绪';
+    let backendState = 'ok';
+    if (busy) {
+      backendText = statusText.includes('同步') ? '后端: 同步中' : '后端: 运行中';
+      backendState = 'busy';
+    } else if (_lastStatusType === 'error') {
+      backendText = '后端: 需检查';
+      backendState = 'error';
+    } else if (_canvasDirty) {
+      backendText = '后端: 待同步';
+      backendState = 'warn';
+    }
+    setDependencyChip('depChipBackend', backendText, backendState, statusText || '后端会话状态');
+
+    const summary = (typeof Canvas !== 'undefined' && Canvas.getSystemSummary) ? Canvas.getSystemSummary() : null;
+    const busCount = summary ? systemBusCount(summary) : 0;
+    const headless = !!(typeof Canvas !== 'undefined' && Canvas.isHeadless && Canvas.isHeadless());
+    if (headless) {
+      setDependencyChip('depChipCanvas', `Canvas: 无画布 · ${busCount || '?'}母线`, 'warn', '大规模系统使用无画布模式，计算仍直接使用后端模型');
+    } else if (_canvasDirty) {
+      setDependencyChip('depChipCanvas', 'Canvas: 已修改', 'warn', '画布有未同步编辑，运行分析前会同步到后端');
+    } else {
+      setDependencyChip('depChipCanvas', busCount ? `Canvas: 单线图 · ${busCount}母线` : 'Canvas: 单线图', 'ok', '画布与后端会话一致');
+    }
+
+    if (_lastPfData) {
+      const iterations = Number(_lastPfData.iterations);
+      if (_canvasDirty) {
+        setDependencyChip('depChipPf', 'PF: 已失效', 'stale', '网络已修改，最近一次潮流结果不能作为下游前置');
+      } else if (_lastPfData.converged) {
+        setDependencyChip('depChipPf', `PF: 已收敛${Number.isFinite(iterations) ? ` @${iterations}it` : ''}`, 'ok', '碳流、部分动态初始化可复用该潮流结果');
+      } else {
+        setDependencyChip('depChipPf', 'PF: 未收敛', 'error', '最近一次潮流未收敛，下游模块需要重新求解');
+      }
+    } else if (_pfInvalidated || _canvasDirty) {
+      setDependencyChip('depChipPf', 'PF: 需运行', 'stale', _lastInvalidationReason || '当前系统尚无可复用潮流结果');
+    } else {
+      setDependencyChip('depChipPf', 'PF: 未运行', 'warn', '运行潮流后，碳流等模块会显示为可继续');
+    }
+
+    if (_lastTspfData) {
+      const ok = Number(_lastTspfData.num_converged || 0);
+      const total = Number(_lastTspfData.num_steps || 0);
+      const stale = _canvasDirty || _tspfInvalidated;
+      setDependencyChip('depChipTspf',
+        stale ? 'TSPF: 已失效' : `TSPF: ${ok}/${total || '?'}收敛`,
+        stale ? 'stale' : (ok > 0 ? 'ok' : 'error'),
+        stale ? '网络已修改，时序结果需要重跑' : '动态碳流可复用最近一次时序潮流结果');
+    } else if (_tspfInvalidated) {
+      setDependencyChip('depChipTspf', 'TSPF: 需运行', 'stale', _lastInvalidationReason || '时序潮流结果已失效');
+    } else {
+      setDependencyChip('depChipTspf', 'TSPF: 未运行', 'warn', '运行时序潮流后可继续动态碳流');
+    }
+
+    const pfReady = !!(_lastPfData && _lastPfData.converged && !_canvasDirty);
+    if (_lastCarbonData && pfReady) {
+      setDependencyChip('depChipCarbon', '碳流: 已完成', 'ok', '静态碳流结果与当前潮流结果一致');
+    } else if (pfReady) {
+      setDependencyChip('depChipCarbon', '碳流: 可运行', 'ok', '潮流已收敛，可以运行静态碳流');
+    } else {
+      setDependencyChip('depChipCarbon', '碳流: 等待潮流', 'warn', '碳流会引导先运行潮流前置');
+    }
+  }
+
+  const SYSTEM_SEARCH_SOURCES = [
+    { bucket: 'ac', tableId: 'busTableInner', label: 'AC母线', domain: 'ac', path: sys => sys.ac?.buses, aliases: ['bus', 'acbus', 'ac_bus', 'node', '母线', '节点'], idKeys: ['index'] },
+    { bucket: 'dc', tableId: 'dcBusTableInner', label: 'DC母线', domain: 'dc', path: sys => sys.dc?.buses, aliases: ['bus', 'dcbus', 'dc_bus', 'node', '母线', '节点'], idKeys: ['index'] },
+    { bucket: 'branch', tableId: 'branchTableInner', label: 'AC支路', domain: 'ac', path: sys => sys.ac?.branches, aliases: ['branch', 'line', 'acbranch', 'ac_branch', '线路', '支路'], idKeys: ['index', 'id'] },
+    { bucket: 'gen', tableId: 'genTableInner', label: '发电机', domain: 'ac', path: sys => sys.ac?.generators, aliases: ['gen', 'generator', 'generators', '发电机', '机组'], idKeys: ['index', 'id'] },
+    { bucket: 'load', tableId: 'loadTableInner', label: 'AC负荷', domain: 'ac', path: sys => sys.ac?.loads, aliases: ['load', 'acload', 'ac_load', '负荷'], idKeys: ['index', 'id'] },
+    { bucket: 'trafo', tableId: 'trafoTableInner', label: '变压器', domain: 'ac', path: sys => sys.ac?.transformers_2w, aliases: ['trafo', 'transformer', 'transformer_2w', '变压器'], idKeys: ['index', 'id'] },
+    { bucket: 'extGrid', tableId: 'extGridTableInner', label: '外部电网', domain: 'ac', path: sys => sys.ac?.external_grids, aliases: ['externalgrid', 'external_grid', 'extgrid', 'ext_grid', 'slack', '外部电网'], idKeys: ['index', 'id'] },
+    { bucket: 'storage', tableId: 'storageTableInner', label: 'AC储能', domain: 'ac', path: sys => sys.ac?.storage, aliases: ['storage', 'battery', 'acstorage', 'ac_storage', '储能'], idKeys: ['index', 'id'] },
+    { bucket: 'pv', tableId: 'pvTableInner', label: 'AC光伏', domain: 'ac', path: sys => sys.ac?.pv_systems, aliases: ['pv', 'pvsystem', 'pv_system', 'solar', '光伏'], idKeys: ['index', 'id'] },
+    { bucket: 'renGen', tableId: 'renGenTableInner', label: '新能源', domain: 'ac', path: sys => sys.ac?.renewable_gens, aliases: ['renewable', 'renewablegen', 'renewable_gen', 'wind', '新能源', '风电'], idKeys: ['index', 'id'] },
+    { bucket: 'sgen', tableId: 'sgenTableInner', label: '静态电源', domain: 'ac', path: sys => sys.ac?.static_generators, aliases: ['sgen', 'staticgen', 'static_generator', '静态电源'], idKeys: ['index', 'id'] },
+    { bucket: 'shunt', tableId: 'shuntTableInner', label: '并联补偿', domain: 'ac', path: sys => sys.ac?.shunts, aliases: ['shunt', '并联', '补偿'], idKeys: ['index', 'id'] },
+    { bucket: 'sw', tableId: 'switchTableInner', label: '开关', domain: 'ac', path: sys => sys.ac?.switches, aliases: ['switch', 'sw', '开关'], idKeys: ['index', 'id'] },
+    { bucket: 'cb', tableId: 'cbTableInner', label: '断路器', domain: 'ac', path: sys => sys.ac?.circuit_breakers, aliases: ['breaker', 'circuitbreaker', 'circuit_breaker', 'cb', '断路器'], idKeys: ['index', 'id'] },
+    { bucket: 'motor', tableId: 'motorTableInner', label: '电动机', domain: 'ac', path: sys => sys.ac?.motors, aliases: ['motor', '电动机', '电机'], idKeys: ['index', 'id'] },
+    { bucket: 'trafo3w', tableId: 'trafo3wTableInner', label: '三绕组变压器', domain: 'ac', path: sys => sys.ac?.transformers_3w, aliases: ['trafo3w', 'transformer3w', 'transformer_3w', '三绕组'], idKeys: ['index', 'id'] },
+    { bucket: 'flexLoad', tableId: 'flexLoadTableInner', label: '柔性负荷', domain: 'ac', path: sys => sys.ac?.flexible_loads, aliases: ['flexload', 'flexible_load', '柔性负荷'], idKeys: ['index', 'id'] },
+    { bucket: 'asymLoad', tableId: 'asymLoadTableInner', label: '不平衡负荷', domain: 'ac', path: sys => sys.ac?.asymmetric_loads, aliases: ['asymload', 'asymmetric_load', '不平衡负荷'], idKeys: ['index', 'id'] },
+    { bucket: 'dcBranch', tableId: 'dcBranchTableInner', label: 'DC支路', domain: 'dc', path: sys => sys.dc?.branches, aliases: ['dcbranch', 'dc_branch', 'dcline', 'dc_line', '直流线路', '直流支路'], idKeys: ['index', 'id'] },
+    { bucket: 'dcLoad', tableId: 'dcLoadTableInner', label: 'DC负荷', domain: 'dc', path: sys => sys.dc?.loads, aliases: ['dcload', 'dc_load', '直流负荷'], idKeys: ['index', 'id'] },
+    { bucket: 'dcStorage', tableId: 'dcStorageTableInner', label: 'DC储能', domain: 'dc', path: sys => sys.dc?.dc_storage, aliases: ['dcstorage', 'dc_storage', '直流储能'], idKeys: ['index', 'id'] },
+    { bucket: 'dcPv', tableId: 'dcPvTableInner', label: 'DC光伏', domain: 'dc', path: sys => sys.dc?.pv_arrays, aliases: ['dcpv', 'dc_pv', 'dc_pv_array', '直流光伏'], idKeys: ['index', 'id'] },
+    { bucket: 'vsc', tableId: 'vscTableInner', label: 'VSC', domain: 'hybrid', path: sys => sys.vsc_converters, aliases: ['vsc', 'converter', 'vsc_converter', '换流器'], idKeys: ['index', 'id'] },
+    { bucket: 'charger', tableId: 'chargerTableInner', label: '充电机', domain: 'ac', path: sys => sys.ac?.chargers, aliases: ['charger', '充电机'], idKeys: ['index', 'id'] },
+    { bucket: 'chargingStation', tableId: 'csTableInner', label: '充电站', domain: 'ac', path: sys => sys.ac?.charging_stations, aliases: ['chargingstation', 'charging_station', '充电站'], idKeys: ['index', 'id'] },
+    { bucket: 'mobileStorage', tableId: 'msTableInner', label: '移动储能', domain: 'hybrid', path: sys => sys.mobile_storage, aliases: ['mobilestorage', 'mobile_storage', 'mess', '移动储能'], idKeys: ['index', 'id'] },
+    { bucket: 'dcdcConverter', tableId: 'dcdcTableInner', label: 'DC/DC', domain: 'dc', path: sys => sys.dcdc_converters, aliases: ['dcdc', 'dc_dc', 'dcdc_converter', 'dc/dc', '直流变换器'], idKeys: ['index', 'id'] },
+    { bucket: 'energyRouter', tableId: 'erTableInner', label: '能量路由器', domain: 'hybrid', path: sys => sys.energy_routers, aliases: ['energyrouter', 'energy_router', 'er', '能量路由器'], idKeys: ['index', 'id'] },
+    { bucket: 'vpp', tableId: 'vppTableInner', label: '虚拟电厂', domain: 'hybrid', path: sys => sys.vpps, aliases: ['vpp', 'virtualpowerplant', 'virtual_power_plant', '虚拟电厂'], idKeys: ['index', 'id'] },
+    { bucket: 'microgrid', tableId: 'mgTableInner', label: '微网', domain: 'hybrid', path: sys => sys.microgrids, aliases: ['microgrid', '微网'], idKeys: ['index', 'id'] },
+  ];
+
+  function searchKey(raw) {
+    return String(raw || '')
+      .toLowerCase()
+      .replace(/[：:;,，、|\\(){}<>\[\]#_\-\s]/g, '')
+      .replace(/\//g, '');
+  }
+
+  function parseGlobalSearchQuery(raw) {
+    const text = String(raw || '').trim();
+    const key = searchKey(text);
+    const numberMatch = text.match(/-?\d+/);
+    const n = numberMatch ? Number(numberMatch[0]) : NaN;
+    const hasDc = /\bdc\b/i.test(text) || /直流/.test(text);
+    const hasAc = /\bac\b/i.test(text) || /交流/.test(text);
+    return {
+      text,
+      key,
+      number: Number.isFinite(n) ? n : null,
+      domain: hasDc && !hasAc ? 'dc' : (hasAc && !hasDc ? 'ac' : ''),
+    };
+  }
+
+  function sourceMatchesParsedQuery(source, parsed) {
+    if (!parsed.key) return false;
+    if (parsed.domain && source.domain !== parsed.domain && source.domain !== 'hybrid') return false;
+    const aliasKeys = (source.aliases || []).map(searchKey).filter(Boolean);
+    if (aliasKeys.some(alias => parsed.key.includes(alias))) return true;
+    return !parsed.number && source.label && searchKey(source.label).includes(parsed.key);
+  }
+
+  function rowSearchIds(item, position, source) {
+    const ids = [];
+    (source.idKeys || []).forEach(key => {
+      const v = Number(item?.[key]);
+      if (Number.isFinite(v)) ids.push(v);
+    });
+    if (source.bucket !== 'ac' && source.bucket !== 'dc') {
+      ids.push(position, position + 1);
+    }
+    return Array.from(new Set(ids));
+  }
+
+  function rowSearchText(item, source, position) {
+    const fields = [
+      source.label, source.domain, position + 1,
+      item?.index, item?.id, item?.name, item?.display_name, item?.type,
+      item?.bus, item?.from_bus, item?.to_bus, item?.hv_bus, item?.lv_bus, item?.mv_bus,
+      item?.bus_ac, item?.bus_dc, item?.pcc_bus, item?.target_bus,
+    ];
+    return searchKey(fields.filter(v => v !== undefined && v !== null && v !== '').join(' '));
+  }
+
+  function searchItemTitle(item, source, position) {
+    const idx = item?.index ?? item?.id ?? (position + 1);
+    const name = item?.name || item?.display_name || '';
+    return `${source.label} ${idx}${name ? ` · ${name}` : ''}`;
+  }
+
+  function buildSystemSearchRows() {
+    const sys = (typeof Canvas !== 'undefined' && Canvas.buildSystemJson) ? Canvas.buildSystemJson() : { ac: {}, dc: {} };
+    const maps = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : {};
+    const rows = [];
+    SYSTEM_SEARCH_SOURCES.forEach(source => {
+      const items = source.path ? source.path(sys) : [];
+      const arr = Array.isArray(items) ? items : [];
+      const mapObj = maps[source.bucket] || {};
+      arr.forEach((item, position) => {
+        const compId = mappedCompId(mapObj, item, position);
+        rows.push({
+          source,
+          item: item || {},
+          position,
+          compId,
+          ids: rowSearchIds(item || {}, position, source),
+          title: searchItemTitle(item || {}, source, position),
+          text: rowSearchText(item || {}, source, position),
+        });
+      });
+    });
+    return rows;
+  }
+
+  function findSystemElement(raw) {
+    const parsed = parseGlobalSearchQuery(raw);
+    if (!parsed.text) return null;
+    const rows = buildSystemSearchRows();
+    const typedSources = new Set(SYSTEM_SEARCH_SOURCES.filter(source => sourceMatchesParsedQuery(source, parsed)));
+    const typedRows = rows.filter(row => typedSources.has(row.source));
+    if (parsed.number !== null) {
+      const exactTyped = typedRows.find(row => row.ids.includes(parsed.number));
+      if (exactTyped) return exactTyped;
+      if (!typedRows.length) {
+        const busHit = rows.find(row => (row.source.bucket === 'ac' || row.source.bucket === 'dc') && row.ids.includes(parsed.number));
+        if (busHit) return busHit;
+        return rows.find(row => row.ids.includes(parsed.number)) || null;
+      }
+    }
+    const pool = typedRows.length ? typedRows : rows;
+    return pool.find(row => row.text.includes(parsed.key)) || null;
+  }
+
+  function summarizeSearchItem(row) {
+    const item = row?.item || {};
+    const keys = ['index', 'name', 'bus', 'from_bus', 'to_bus', 'hv_bus', 'lv_bus', 'bus_ac', 'bus_dc', 'pcc_bus', 'target_bus', 'pg_mw', 'p_mw', 'rate_a_mva'];
+    const parts = [];
+    keys.forEach(key => {
+      const value = item[key];
+      if (value !== undefined && value !== null && value !== '') parts.push(`${key}=${value}`);
+    });
+    return parts.length ? parts.join(' · ') : `row=${row.position + 1}`;
+  }
+
+  function showTopologySearchResult(row) {
+    const banner = document.getElementById('topologySearchResult');
+    if (!banner || !row) return;
+    banner.hidden = false;
+    const sourceBadge = `${String(row.source.domain || '').toUpperCase()} · ${row.source.bucket}`;
+    banner.innerHTML = `<strong>${escapeHtml(row.title)}</strong> <code>${escapeHtml(sourceBadge)}</code> ${escapeHtml(summarizeSearchItem(row))}`;
+  }
+
+  function highlightVisibleTopologyRow(row) {
+    document.querySelectorAll('.topo-search-highlight').forEach(el => el.classList.remove('topo-search-highlight'));
+    if (!row?.source?.tableId) return false;
+    const body = document.querySelector(`#${row.source.tableId} tbody`);
+    const tr = body?.children?.[row.position];
+    if (!tr || tr.classList.contains('topo-truncated-note')) return false;
+    tr.classList.add('topo-search-highlight');
+    try { tr.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { tr.scrollIntoView(); }
+    return true;
+  }
+
+  function navigateToSearchResult(row) {
+    if (!row) return;
+    const headless = !!(typeof Canvas !== 'undefined' && Canvas.isHeadless && Canvas.isHeadless());
+    const canPan = row.compId !== undefined && row.compId !== null && !headless &&
+      typeof Canvas !== 'undefined' && Canvas.panToComponent;
+    if (canPan) {
+      Canvas.panToComponent(row.compId);
+      setStatus(`已定位 ${row.title}`);
+      log(`定位到 ${row.title}`, 'info');
+      return;
+    }
+    switchTab('topology');
+    showTopologySearchResult(row);
+    const visible = highlightVisibleTopologyRow(row);
+    setStatus(visible ? `已定位 ${row.title}` : `已定位拓扑记录`);
+    log(`${headless ? '无画布模式' : '拓扑表'}定位：${row.title} (${summarizeSearchItem(row)})`, 'info');
+  }
+
+  function handleGlobalElementSearch() {
+    const input = document.getElementById('globalElementSearch');
+    const raw = input?.value || '';
+    if (!String(raw).trim()) {
+      setStatus('请输入定位对象', 'warn');
+      return;
+    }
+    try {
+      const row = findSystemElement(raw);
+      if (!row) {
+        setStatus('未找到定位对象', 'error');
+        log(`未找到定位对象：${raw}`, 'warn');
+        return;
+      }
+      navigateToSearchResult(row);
+    } catch (err) {
+      setStatus('定位失败', 'error');
+      log(`定位失败：${err.message || err}`, 'error');
+    }
   }
 
   // ========== Per-module result group switching ==========
@@ -1112,11 +1462,14 @@ const App = (() => {
 
   // ========== Status ==========
   function setStatus(text, type = '') {
+    _lastStatusText = text || '';
+    _lastStatusType = type || '';
     const badge = document.getElementById('statusBadge');
     if (badge) {
       badge.textContent = text;
       badge.className = 'badge' + (type ? ' ' + type : '');
     }
+    updateDependencyChips();
   }
 
   function nextPaint() {
@@ -1666,6 +2019,7 @@ const App = (() => {
     // skip the roundtrip — the backend already has the correct system.
     if (!force && !_canvasDirty) {
       console.log('[syncToBackend] skipped — canvas not dirty');
+      updateDependencyChips();
       return true;
     }
     const sys = Canvas.buildSystemJson();
@@ -2269,28 +2623,26 @@ const App = (() => {
     }, { responsive: true, displaylogo: false });
   }
 
+  async function ensurePowerFlowForCarbonFlow() {
+    if (_lastPfData && _lastPfData.converged && !_canvasDirty) return true;
+    const reason = !_lastPfData
+      ? '当前没有可复用的潮流结果'
+      : (_canvasDirty ? '网络已修改，潮流结果已失效' : '最近一次潮流未收敛');
+    const msg = `${reason}；将先自动运行潮流计算，收敛后继续静态碳流分析。`;
+    setCarbonHint(msg, 'warn');
+    log(msg, 'info');
+    setStatus('碳流前置潮流中...', 'busy');
+    await runPowerFlow();
+    if (_lastPfData && _lastPfData.converged && !_canvasDirty) return true;
+    const failMsg = '潮流前置未收敛，已停止静态碳流分析。';
+    setCarbonHint(failMsg, 'warn');
+    log(failMsg, 'warn');
+    setStatus('潮流前置失败', 'error');
+    return false;
+  }
+
   async function runCarbonFlow() {
-    if (!_lastPfData) {
-      const msg = '请先运行潮流计算，并确保潮流收敛后再进行静态碳流分析。';
-      setCarbonHint(msg, 'warn');
-      log(msg, 'warn');
-      setStatus('需先运行潮流', 'error');
-      return;
-    }
-    if (!_lastPfData.converged) {
-      const msg = '最近一次潮流计算未收敛，无法进行静态碳流分析。';
-      setCarbonHint(msg, 'warn');
-      log(msg, 'warn');
-      setStatus('潮流未收敛', 'error');
-      return;
-    }
-    if (_canvasDirty) {
-      const msg = '当前网络已修改，最近一次潮流结果已失效。请重新运行潮流计算。';
-      setCarbonHint(msg, 'warn');
-      log(msg, 'warn');
-      setStatus('需重跑潮流', 'error');
-      return;
-    }
+    if (!await ensurePowerFlowForCarbonFlow()) return;
     setStatus('碳流分析中...', 'busy');
     await syncCarbonFactorsOnly();
     const data = await apiPost('/api/session/run_carbon', {});
@@ -2299,6 +2651,7 @@ const App = (() => {
       return;
     }
     _lastCarbonData = data;
+    updateDependencyChips();
     showCarbonResults(data);
     const summary = data.matrix_summary || data.tracing_summary || {};
     log(`碳流分析完成：负荷 ${Number(summary.total_load_emissions_tco2 || 0).toFixed(4)} tCO2，损耗 ${Number(summary.total_loss_emissions_tco2 || 0).toFixed(4)} tCO2`, 'success');
@@ -2775,6 +3128,9 @@ const App = (() => {
         // Display results.  Always replace the previous GUI cache, including after
         // a failed run, so a later successful run is never masked by stale arrays.
         _lastPfData = pfData;
+        _pfInvalidated = false;
+        _lastInvalidationReason = '';
+        updateDependencyChips();
         try {
           showPowerFlowResultsTables(pfData);
         } catch (err) {
@@ -6045,6 +6401,8 @@ const App = (() => {
       log(`时序潮流完成: ${data.num_converged}/${data.num_steps}步收敛, 总发电成本=$${(data.total_generation_cost || 0).toFixed(0)}`, 'success');
       setStatus('时序潮流完成');
       _lastTspfData = data;
+      _tspfInvalidated = false;
+      updateDependencyChips();
       showTimeSeriesResults(data);
       switchTab('results');
     } else {
@@ -6189,6 +6547,8 @@ const App = (() => {
       log(`第 ${day} 日详情完成: ${data.num_converged}/${data.num_steps} 步收敛`, 'success');
       setStatus(`第 ${day} 日详情完成`);
       _lastTspfData = data;
+      _tspfInvalidated = false;
+      updateDependencyChips();
       showTimeSeriesResults(data, { keepAnnual: true });
       const tspfSec = document.getElementById('tspfResultsSection');
       if (tspfSec && tspfSec.scrollIntoView) { try { tspfSec.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) {} }
@@ -9124,16 +9484,21 @@ const App = (() => {
     _canvasDirty = false;
     if (Canvas.syncConnectivity) Canvas.syncConnectivity();
     updateTopologyTables();
+    updateDependencyChips();
     const sel = Canvas.state.selectedId;
     if (sel !== null && sel !== undefined) onSelectionChanged(sel);
   }
 
   function onTopologyChanged() {
     _canvasDirty = true;
+    _pfInvalidated = _pfInvalidated || !!_lastPfData;
+    _tspfInvalidated = _tspfInvalidated || !!_lastTspfData;
+    if (_lastPfData || _lastTspfData) _lastInvalidationReason = '拓扑已修改，旧分析结果已失效';
     // Rewiring changes which buses a device connects to — re-derive those
     // connection params so the property panel and exports stay in sync.
     if (Canvas.syncConnectivity) Canvas.syncConnectivity();
     updateTopologyTables();
+    updateDependencyChips();
     // Reflect the updated connection info in the open property panel immediately.
     const sel = Canvas.state.selectedId;
     if (sel !== null && sel !== undefined) onSelectionChanged(sel);
@@ -9142,6 +9507,8 @@ const App = (() => {
   function updateTopologyTables() {
     const sys = Canvas.buildSystemJson();
     const m = Canvas.getCompBusMap();
+    const searchBanner = document.getElementById('topologySearchResult');
+    if (searchBanner) searchBanner.hidden = true;
     updatePfMethodAvailability(sys);
     markResilienceFaultBranches();
     renderComponentCurveTargets('timeSeries');
@@ -9996,6 +10363,7 @@ const App = (() => {
   function setActiveModule(moduleName) {
     const prev = document.querySelector('.module-btn.active');
     const changed = !prev || prev.dataset.module !== moduleName;
+    setActiveWorkflow(workflowForModule(moduleName), { preserveModule: true });
     document.querySelectorAll('.module-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.module === moduleName);
     });
@@ -14053,9 +14421,19 @@ const App = (() => {
       });
     });
 
-    // Bar 2: module switching
+    // Bar 2: workflow grouping and module switching
+    document.querySelectorAll('.workflow-btn').forEach(btn => {
+      btn.addEventListener('click', () => setActiveWorkflow(btn.dataset.workflow));
+    });
     document.querySelectorAll('.module-btn').forEach(btn => {
       btn.addEventListener('click', () => setActiveModule(btn.dataset.module));
+    });
+    document.getElementById('btnGlobalElementSearch')?.addEventListener('click', handleGlobalElementSearch);
+    document.getElementById('globalElementSearch')?.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        handleGlobalElementSearch();
+      }
     });
 
     // Display unit selector — re-render cached PF results on change
@@ -14226,6 +14604,7 @@ const App = (() => {
     Canvas.setMode('select');
     setActiveCanvasTool('btnSelect');
     setActiveModule('powerFlow');  // default-activate Power Flow module
+    updateDependencyChips();
   }
 
   // ========== Public API ==========
