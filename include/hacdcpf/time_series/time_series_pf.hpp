@@ -141,6 +141,11 @@ struct TimeSeriesPFOptions {
   // scheduled 0/1 value (overrides fix_commitment).  Lets dynamic SCED reuse a
   // representative SCUC day's commitment instead of forcing every unit ON.
   const std::vector<std::vector<int>>* fixed_commitment_schedule{nullptr};
+  // Optional full UC schedule to replay instead of solving UC in this call.
+  // Non-owning; must outlive solve_time_series_pf().  This is distinct from
+  // fixed_commitment_schedule: it carries dispatch/SOC trajectories, not just
+  // binary commitment, and is used by annual L3 replay of a weekly UC result.
+  const UCSchedule* precomputed_uc_schedule{nullptr};
   // Unit-commitment objective selection + weights for the Weighted mode.
   UCObjective objective_mode{UCObjective::Cost};
   double w_cost{1.0};

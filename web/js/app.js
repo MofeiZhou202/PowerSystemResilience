@@ -6567,16 +6567,29 @@ const App = (() => {
       return;
     }
 
+    // Capture the user-requested horizon FIRST. Binding scenario time series
+    // below rewrites the 仿真时间(小时) field to the imported profile length, so
+    // reading it afterwards would silently discard a horizon the user just typed
+    // (e.g. 8760 -> 168). 仿真时间(小时) = num_steps × step_duration_hr (=1 here).
+    const simHoursInput = document.getElementById('simulationHours');
+    const simHours = parseInt(simHoursInput?.value, 10);
+    const numSteps = (Number.isFinite(simHours) && simHours > 0) ? simHours : 24;
+
     // If "使用场景时序" is enabled, bind imported regular-scenario profiles first.
+    // If it is disabled but a generated scenario was previously bound, revert the
+    // backend to default profiles so that unchecking the box actually takes
+    // effect (otherwise the session silently keeps the scenario profiles).
     if (document.getElementById('regUseScenarioTimeSeries')?.checked && hasUsableGeneratedScenarioTimeSeries('regular')) {
       try { await applyGeneratedScenarioTimeSeries(getImportedGeneratedScenarioCase('regular')); }
       catch (e) { log(`应用生成场景时序失败：${e.message || e}`, 'warn'); }
+    } else {
+      try { await resetGeneratedScenarioTimeSeriesIfActive(numSteps); }
+      catch (e) { log(`重置场景时序失败：${e.message || e}`, 'warn'); }
     }
+    // Restore the requested horizon after any scenario binding overwrote the
+    // field; the backend fits the bound profiles (tile/truncate) to num_steps.
+    if (simHoursInput) simHoursInput.value = String(numSteps);
 
-    // Read parameters from the inline time-series sub-toolbar.
-    // 仿真时间(小时) = num_steps × step_duration_hr (here step_duration_hr = 1).
-    const simHours = parseInt(document.getElementById('simulationHours')?.value, 10);
-    const numSteps = (Number.isFinite(simHours) && simHours > 0) ? simHours : 24;
     const skipUC = document.getElementById('tspfSkipUC')?.checked ?? true;
     const runOPF = document.getElementById('tspfRunOPF')?.checked ?? false;
     // Constraint set + MILP solver selection (时序生产模拟 controls).

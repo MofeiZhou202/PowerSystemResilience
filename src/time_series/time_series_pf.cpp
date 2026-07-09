@@ -47,6 +47,28 @@ double profile_value(const std::vector<double>* pv, int t, double fallback) {
   return (*pv)[static_cast<size_t>(t)];
 }
 
+void validate_time_series_data_for_solve(const TimeSeriesData& ts_data,
+                                         bool require_steps) {
+  if (ts_data.num_steps < 0) {
+    throw std::invalid_argument("TimeSeriesData.num_steps must be non-negative");
+  }
+  if (require_steps && ts_data.num_steps <= 0) {
+    throw std::invalid_argument("TimeSeriesData must have at least one time step");
+  }
+  if (ts_data.num_steps > 0 &&
+      (!std::isfinite(ts_data.step_duration_hr) ||
+       ts_data.step_duration_hr <= 0.0)) {
+    throw std::invalid_argument(
+        "TimeSeriesData.step_duration_hr must be positive and finite");
+  }
+}
+
+bool should_apply_uc_schedule(const TimeSeriesPFOptions& opts,
+                              const UCSchedule& schedule) {
+  return schedule.feasible &&
+         (!opts.skip_uc || opts.precomputed_uc_schedule != nullptr);
+}
+
 void accumulate_signed_power(double p_mw, double& total_supply_mw,
                              double& total_demand_mw) {
   if (p_mw >= 0.0) total_supply_mw += p_mw;
@@ -2912,7 +2934,9 @@ HybridPowerSystem build_time_series_system_snapshot(
     ac_bus_type_by_index[bus.index] = bus.bus_type;
   }
 
-  if (!opts.skip_uc && schedule.feasible) {
+  const bool apply_uc_schedule = should_apply_uc_schedule(opts, schedule);
+
+  if (apply_uc_schedule) {
     for (int gi = 0; gi < static_cast<int>(gen_active_idx.size()); ++gi) {
       const int idx = gen_active_idx[static_cast<size_t>(gi)];
       auto& gen = sys_t.ac.generators[static_cast<size_t>(idx)];
@@ -2989,7 +3013,7 @@ HybridPowerSystem build_time_series_system_snapshot(
     }
   }
 
-  if (!opts.skip_uc && schedule.feasible) {
+  if (apply_uc_schedule) {
     for (int ri = 0; ri < static_cast<int>(ren_active_idx.size()); ++ri) {
       const int idx = ren_active_idx[static_cast<size_t>(ri)];
       auto& ren = sys_t.ac.renewable_gens[static_cast<size_t>(idx)];
@@ -3076,9 +3100,7 @@ UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
                                  const TimeSeriesData& ts_data,
                                  const TimeSeriesPFOptions& opts) {
   ScopedUCSolverThreadOverride thread_override(opts.uc_solver_threads);
-  if (ts_data.num_steps <= 0) {
-    throw std::invalid_argument("TimeSeriesData must have at least one time step");
-  }
+  validate_time_series_data_for_solve(ts_data, true);
 
   auto net = build_dc_network(sys);
   auto dcg = build_dc_grid(sys);
@@ -3264,14 +3286,15 @@ static TimeSeriesPFResult concat_ts_results(std::vector<TimeSeriesPFResult>& par
 TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
                                          const TimeSeriesData& ts_data,
                                          const TimeSeriesPFOptions& opts) {
+  validate_time_series_data_for_solve(ts_data, false);
   const int T = ts_data.num_steps;
 
   // ── Optional per-day parallel decomposition ──────────────────────────────
   // Split a multi-day horizon into independent scheduling days (cyclic SOC per
   // day), solve them concurrently, and stitch the per-step results back. The
   // single-day coupled solve below runs when this is disabled or T fits one day.
-  if (opts.parallel_daily && T > 0) {
-    const double dt = ts_data.step_duration_hr > 0.0 ? ts_data.step_duration_hr : 1.0;
+  if (opts.parallel_daily && opts.precomputed_uc_schedule == nullptr && T > 0) {
+    const double dt = ts_data.step_duration_hr;
     const int day_len = std::max(1, static_cast<int>(std::lround(24.0 / dt)));
     const int num_days = (T + day_len - 1) / day_len;
     if (num_days > 1) {
@@ -3311,7 +3334,7 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
         TimeSeriesData sub = slice_ts_window(ts_data, g0, g1);
         day_results[static_cast<size_t>(d)] = solve_time_series_pf(sys_in, sub, day_opts);
       };
-      if (parallel_safe) {
+      if (parallel_info.effective) {
         util::ThreadPool pool(workers);
         std::vector<std::future<void>> futs;
         futs.reserve(static_cast<size_t>(num_days));
@@ -3345,7 +3368,10 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
       opts.parallel_daily, opts.parallel_threads,
       T > 0 ? 1 : 0, result.parallel_mode);
   if (opts.parallel_daily && T > 0) {
-    result.parallel_execution.guard_reason = "horizon fits within one scheduling day";
+    result.parallel_execution.guard_reason =
+        opts.precomputed_uc_schedule != nullptr
+            ? "precomputed UC schedule replay uses the coupled timeline"
+            : "horizon fits within one scheduling day";
     result.parallel_execution.mode = result.parallel_mode;
   }
 
@@ -3363,7 +3389,10 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
 
   // Phase II: solve UC first (unless skipped)
   UCSchedule schedule;
-  if (!opts.skip_uc) {
+  if (opts.precomputed_uc_schedule != nullptr) {
+    schedule = *opts.precomputed_uc_schedule;
+    if (schedule.solver_name.empty()) schedule.solver_name = "precomputed";
+  } else if (!opts.skip_uc) {
     auto t_uc0 = std::chrono::steady_clock::now();
     schedule = solve_unit_commitment(sys, ts_data, opts);
     auto t_uc1 = std::chrono::steady_clock::now();
@@ -3865,7 +3894,7 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
       refresh_topo_if_needed(sys_t);
 
       // Accumulate gen cost from UC dispatch
-      if (!opts.skip_uc && schedule.feasible) {
+      if (should_apply_uc_schedule(opts, schedule)) {
         for (int gi = 0; gi < static_cast<int>(gen_active_idx.size()); ++gi) {
           int idx = gen_active_idx[static_cast<size_t>(gi)];
           const auto& gen = sys_t.ac.generators[static_cast<size_t>(idx)];

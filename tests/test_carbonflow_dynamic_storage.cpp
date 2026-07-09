@@ -5,6 +5,8 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <stdexcept>
+
 namespace {
 
 using Approx = Catch::Approx;
@@ -102,6 +104,59 @@ TEST_CASE("time-series snapshot helper stores terminal storage SOC",
   CHECK(step1.ac.storage[0].p_mw == Approx(5.0));
   CHECK(step1.ac.storage[0].soc_init == Approx(0.55));
   CHECK(step1.ac.storage[0].e_mwh == Approx(55.0));
+}
+
+TEST_CASE("time-series PF replays a precomputed UC schedule without resolving UC",
+          "[time_series][replay][storage]") {
+  using namespace hacdcpf;
+
+  HybridPowerSystem base = build_single_bus_storage_case();
+
+  TimeSeriesData ts;
+  ts.num_steps = 2;
+  ts.step_duration_hr = 1.0;
+  ts.profiles = {{0, "load", {1.0, 1.0}}};
+
+  UCSchedule schedule;
+  schedule.feasible = true;
+  schedule.gen_dispatch = {{20.0, 5.0}};
+  schedule.gen_commit = {{1, 1}};
+  schedule.ess_dispatch = {{-10.0, 5.0}};
+  schedule.ess_soc = {{0.60, 0.55}};
+
+  TimeSeriesPFOptions opts;
+  opts.skip_uc = true;
+  opts.run_opf = false;
+  opts.keep_system_snapshots = true;
+  opts.precomputed_uc_schedule = &schedule;
+
+  const TimeSeriesPFResult result = solve_time_series_pf(base, ts, opts);
+
+  REQUIRE(result.uc_solve_sec == Approx(0.0));
+  REQUIRE(result.pf_system_snapshots.size() == 2);
+  CHECK(result.pf_system_snapshots[0].ac.generators[0].pg_mw == Approx(20.0));
+  CHECK(result.pf_system_snapshots[1].ac.generators[0].pg_mw == Approx(5.0));
+  CHECK(result.pf_system_snapshots[0].ac.storage[0].p_mw == Approx(-10.0));
+  CHECK(result.pf_system_snapshots[1].ac.storage[0].p_mw == Approx(5.0));
+  CHECK(result.pf_system_snapshots[0].ac.storage[0].soc_init == Approx(0.60));
+  CHECK(result.pf_system_snapshots[1].ac.storage[0].soc_init == Approx(0.55));
+}
+
+TEST_CASE("time-series solvers reject non-positive step durations",
+          "[time_series][robustness]") {
+  using namespace hacdcpf;
+
+  HybridPowerSystem base = build_single_bus_storage_case();
+  TimeSeriesData ts;
+  ts.num_steps = 1;
+  ts.step_duration_hr = 0.0;
+
+  TimeSeriesPFOptions opts;
+  opts.skip_uc = true;
+
+  CHECK_THROWS_AS(solve_time_series_pf(base, ts, opts), std::invalid_argument);
+  CHECK_THROWS_AS(solve_unit_commitment(base, ts, TimeSeriesPFOptions{}),
+                  std::invalid_argument);
 }
 
 TEST_CASE("TimeSeriesPFResult annual carbon uses storage snapshots dynamically",

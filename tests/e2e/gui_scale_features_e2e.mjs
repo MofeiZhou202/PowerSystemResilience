@@ -22,7 +22,8 @@
 
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 
@@ -259,6 +260,61 @@ async function main() {
     });
     check(cmp.hidden === false && cmp.cols === 3 && cmp.rows >= 1,
       `results comparison pins 2 snapshots (${cmp.cols} cols, ${cmp.rows} metric rows)`);
+
+    // ---- 8) Frontend↔backend wiring: edited TSPF horizon must win over an
+    //         imported scenario's length (regression for the 8760->N bug) ----
+    const scenarioStr = await page.evaluate(() => {
+      const sel = document.getElementById('ioCaseSelect');
+      sel.value = 'ieee14_acdc'; sel.dispatchEvent(new Event('change', { bubbles: true }));
+      document.getElementById('btnIoLoadBuiltin').click();
+      return new Promise((resolve) => {
+        const t0 = Date.now();
+        const wait = () => {
+          if (Canvas.state.components.length > 0 || Date.now() - t0 > 15000) {
+            const sys = Canvas.buildSystemJson();
+            const N = 240;
+            resolve(JSON.stringify({
+              ...sys, name: 'e2e_scenario_240',
+              _generated_scenario: { family: 'regular', representative_id: 'rep_e2e' },
+              _time_series: {
+                num_steps: N, step_duration_hr: 1.0,
+                profiles: [
+                  { id: 0, name: 'load', values: Array.from({ length: N }, () => 0.9) },
+                  { id: 1, name: 'wind', values: Array.from({ length: N }, () => 0.5) },
+                  { id: 2, name: 'solar', values: Array.from({ length: N }, (_, i) => (i % 24 >= 6 && i % 24 <= 18) ? 0.7 : 0) },
+                ],
+                binding: { assign_all_loads_to: 0, load_profile_map: [] },
+              },
+            }));
+          } else { setTimeout(wait, 150); }
+        };
+        wait();
+      });
+    });
+    const scenarioPath = path.join(tmpdir(), `hacdcpf_e2e_scenario_${process.pid}.json`);
+    writeFileSync(scenarioPath, scenarioStr);
+    await page.setInputFiles('#fileImportGeneratedRegularScenario', scenarioPath);
+    await page.waitForTimeout(1500);
+    const horizon = await page.evaluate(async () => {
+      const simHr = document.getElementById('simulationHours');
+      const importedLen = simHr.value;                 // scenario length (240)
+      const checkbox = document.getElementById('regUseScenarioTimeSeries')?.checked;
+      App.setActiveModule('tspf');
+      simHr.value = '48';                              // user shortens the horizon
+      document.getElementById('tspfSkipUC').checked = true;
+      document.getElementById('btnRunTimeSeriesPF').click();
+      const t0 = Date.now();
+      while (Date.now() - t0 < 40000) {
+        const c = document.getElementById('depChipTspf')?.textContent || '';
+        if (/收敛|失效/.test(c)) break;
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      return { importedLen, checkbox, ranSteps: _lastTspfStepsForTest(), chip: document.getElementById('depChipTspf')?.textContent, simHrAfter: simHr.value };
+      function _lastTspfStepsForTest() { return document.getElementById('depChipTspf')?.textContent || ''; }
+    });
+    check(horizon.importedLen === '240' && horizon.checkbox === true, 'scenario import set horizon=240 and checked 使用场景时序');
+    check(/TSPF: 48\/48/.test(horizon.chip) && horizon.simHrAfter === '48',
+      `edited horizon (48) wins over imported scenario length: "${horizon.chip}"`);
   } finally {
     await browser.close();
     if (proc) proc.kill();

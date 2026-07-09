@@ -20,6 +20,26 @@ namespace hacdcpf::analysis {
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════
 
+static double checked_step_duration_hr(const TimeSeriesData& ts_data) {
+  if (ts_data.num_steps < 0) {
+    throw std::invalid_argument("TimeSeriesData.num_steps must be non-negative");
+  }
+  if (ts_data.num_steps > 0 &&
+      (!std::isfinite(ts_data.step_duration_hr) ||
+       ts_data.step_duration_hr <= 0.0)) {
+    throw std::invalid_argument(
+        "TimeSeriesData.step_duration_hr must be positive and finite");
+  }
+  return ts_data.step_duration_hr;
+}
+
+static int steps_for_duration(double duration_hr, double step_hr) {
+  if (!std::isfinite(duration_hr) || duration_hr <= 0.0) {
+    throw std::invalid_argument("duration window must be positive and finite");
+  }
+  return std::max(1, static_cast<int>(std::round(duration_hr / step_hr)));
+}
+
 /// Build block boundaries for the year (monthly or weekly).
 static std::vector<std::pair<int, int>> build_block_ranges(
     int total_steps, double step_hr, AnnualBlockType btype) {
@@ -27,8 +47,7 @@ static std::vector<std::pair<int, int>> build_block_ranges(
 
   if (btype == AnnualBlockType::Weekly) {
     // 52 weekly blocks (last block absorbs remainder)
-    const int steps_per_week =
-        static_cast<int>(std::round(168.0 / step_hr));
+    const int steps_per_week = steps_for_duration(168.0, step_hr);
     for (int w = 0; w < 52; ++w) {
       int s = w * steps_per_week;
       int e = (w == 51) ? total_steps
@@ -40,7 +59,7 @@ static std::vector<std::pair<int, int>> build_block_ranges(
     // Monthly blocks: approximate days-per-month
     static constexpr int days_per_month[] = {31, 28, 31, 30, 31, 30,
                                               31, 31, 30, 31, 30, 31};
-    const int steps_per_day = static_cast<int>(std::round(24.0 / step_hr));
+    const int steps_per_day = steps_for_duration(24.0, step_hr);
     int cursor = 0;
     for (int m = 0; m < 12; ++m) {
       int s = cursor;
@@ -716,6 +735,25 @@ static AnnualPlanResult solve_annual_plan(
   return plan;
 }
 
+static HybridPowerSystem apply_annual_block_controls(
+    const HybridPowerSystem& sys,
+    const AnnualPlanBlock& block) {
+  HybridPowerSystem out = sys;
+  for (size_t g = 0; g < out.ac.generators.size() &&
+                      g < block.gen_maintenance.size();
+       ++g) {
+    if (block.gen_maintenance[g]) {
+      out.ac.generators[g].in_service = false;
+    }
+  }
+  for (size_t s = 0; s < out.ac.storage.size() &&
+                      s < block.storage_init_soc.size();
+       ++s) {
+    out.ac.storage[s].soc_init = block.storage_init_soc[s];
+  }
+  return out;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // L2: Weekly Rolling UC
 // ═══════════════════════════════════════════════════════════════════════
@@ -739,23 +777,7 @@ static WeeklySchedule solve_weekly_uc(
   // Slice profiles for the sub-horizon
   auto sub_ts = slice_ts_data(ts_data, start_step, t_end);
 
-  // Apply maintenance masks from L0 plan
-  HybridPowerSystem sub_sys = sys;
-  for (size_t g = 0; g < sub_sys.ac.generators.size() &&
-                      g < block.gen_maintenance.size();
-       ++g) {
-    if (block.gen_maintenance[g]) {
-      sub_sys.ac.generators[g].in_service = false;
-    }
-  }
-
-  // Set initial SOC from L0/L1 boundary
-  for (size_t s = 0; s < sub_sys.ac.storage.size() &&
-                      s < block.storage_init_soc.size();
-       ++s) {
-    sub_sys.ac.storage[s].soc_init =
-        block.storage_init_soc[s];
-  }
+  HybridPowerSystem sub_sys = apply_annual_block_controls(sys, block);
 
   // Solve UC for the sub-horizon
   ws.uc = solve_unit_commitment(sub_sys, sub_ts, opts.ts_pf_options);
@@ -822,28 +844,23 @@ static TimeSeriesPFResult solve_daily_replay(
   day_uc.renewable_dispatch = slice_2d_double(weekly_uc.renewable_dispatch);
   day_uc.dc_pv_dispatch = slice_2d_double(weekly_uc.dc_pv_dispatch);
   day_uc.dc_ess_dispatch = slice_2d_double(weekly_uc.dc_ess_dispatch);
+  day_uc.dc_ess_soc = slice_2d_double(weekly_uc.dc_ess_soc);
   day_uc.dc_sgen_dispatch = slice_2d_double(weekly_uc.dc_sgen_dispatch);
   day_uc.dc_load_demand = slice_2d_double(weekly_uc.dc_load_demand);
+  day_uc.vsc_dispatch = slice_2d_double(weekly_uc.vsc_dispatch);
+  day_uc.dcdc_dispatch = slice_2d_double(weekly_uc.dcdc_dispatch);
 
-  // Apply maintenance from L0
-  HybridPowerSystem sub_sys = sys;
-  for (size_t g = 0; g < sub_sys.ac.generators.size() &&
-                      g < block.gen_maintenance.size();
-       ++g) {
-    if (block.gen_maintenance[g]) {
-      sub_sys.ac.generators[g].in_service = false;
-    }
-  }
+  HybridPowerSystem sub_sys = apply_annual_block_controls(sys, block);
 
-  // Run the full UC→OPF→PF pipeline with skip_uc=true (UC already done)
+  // Run the full UC->OPF->PF pipeline using the already solved weekly UC
+  // dispatch.  The time-series solver still does profile replay, OPF/PF, and
+  // schedule fallback completion, but skips the expensive UC MILP.
   TimeSeriesPFOptions pf_opts = opts.ts_pf_options;
-  pf_opts.skip_uc = true;  // we inject the pre-solved UC schedule
+  pf_opts.skip_uc = false;
+  pf_opts.parallel_daily = false;
+  pf_opts.precomputed_uc_schedule = &day_uc;
 
-  TimeSeriesPFResult result = solve_time_series_pf(sys, sub_ts, pf_opts);
-  // Overwrite the schedule with our pre-sliced one
-  result.uc_schedule = day_uc;
-
-  return result;
+  return solve_time_series_pf(sub_sys, sub_ts, pf_opts);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -859,6 +876,8 @@ static TimeSeriesPFOptions make_daily_pf_options(
     const AnnualProductionSimOptions& opts) {
   TimeSeriesPFOptions p = opts.ts_pf_options;
   p.keep_system_snapshots = false;
+  p.parallel_daily = false;
+  p.precomputed_uc_schedule = nullptr;
   // Per-day cyclic SOC makes the horizons independent (the key to parallelism).
   p.enforce_terminal_soc_cyclic = opts.enforce_daily_cyclic_soc;
   switch (opts.daily_mode) {
@@ -889,15 +908,14 @@ static AnnualProductionSimResult solve_parallel_daily(
     const AnnualProductionSimOptions& opts) {
   AnnualProductionSimResult result;
   const int T_yr = ts_data.num_steps;
-  const double dt = ts_data.step_duration_hr;
+  const double dt = checked_step_duration_hr(ts_data);
   result.num_steps = T_yr;
   result.step_duration_hr = dt;
   if (T_yr <= 0) return result;
   result.step_results.resize(static_cast<size_t>(T_yr));
 
   const int steps_per_day =
-      std::max(1, static_cast<int>(std::round(
-                      static_cast<double>(opts.daily_window_hours) / dt)));
+      steps_for_duration(static_cast<double>(opts.daily_window_hours), dt);
   const int num_days = (T_yr + steps_per_day - 1) / steps_per_day;
   TimeSeriesPFOptions day_opts = make_daily_pf_options(opts);
   day_opts.uc_solver =
@@ -1016,7 +1034,7 @@ static AnnualProductionSimResult solve_parallel_daily(
     }
   };
 
-  if (parallel_safe && num_days > 1) {
+  if (parallel_info.effective) {
     util::ThreadPool pool(workers);
     std::vector<std::future<void>> futs;
     futs.reserve(static_cast<size_t>(num_days));
@@ -1091,7 +1109,7 @@ AnnualProductionSimResult solve_annual_production_simulation(
   AnnualProductionSimResult result;
 
   const int T_yr = ts_data.num_steps;
-  const double dt = ts_data.step_duration_hr;
+  const double dt = checked_step_duration_hr(ts_data);
   result.num_steps = T_yr;
   result.step_duration_hr = dt;
   result.parallel_workers = 1;
@@ -1117,14 +1135,14 @@ AnnualProductionSimResult solve_annual_production_simulation(
   result.annual_plan = solve_annual_plan(sys, ts_data, block_ranges, opts);
 
   // ─── L1/L2: Monthly → Weekly Rolling UC ───
-  const int steps_per_week =
-      static_cast<int>(std::round(168.0 / dt));
+  const int steps_per_week = steps_for_duration(168.0, dt);
   const int steps_per_day =
-      std::max(1, static_cast<int>(std::round(
-                      static_cast<double>(opts.daily_window_hours) / dt)));
+      steps_for_duration(static_cast<double>(opts.daily_window_hours), dt);
   const int la_steps =
-      static_cast<int>(std::round(
-          static_cast<double>(opts.weekly_lookahead_hours) / dt));
+      opts.weekly_lookahead_hours <= 0
+          ? 0
+          : steps_for_duration(static_cast<double>(opts.weekly_lookahead_hours),
+                               dt);
 
   int week_counter = 0;
 
@@ -1132,6 +1150,7 @@ AnnualProductionSimResult solve_annual_production_simulation(
     const auto& block = result.annual_plan.blocks[b];
     int block_start = block.start_step;
     int block_end = block.end_step;
+    const HybridPowerSystem block_sys = apply_annual_block_controls(sys, block);
 
     // Partition block into weekly windows
     int cursor = block_start;
@@ -1159,7 +1178,7 @@ AnnualProductionSimResult solve_annual_production_simulation(
           auto sub_ts_slice = slice_ts_data(ts_data, global_day_start,
                                              global_day_start + day_steps);
           fill_step_results(result.step_results, global_day_start,
-                            day_result, sys, sub_ts_slice, day_steps);
+                            day_result, block_sys, sub_ts_slice, day_steps);
 
           // Store PF snapshots at configured interval
           if (opts.pf_snapshot_interval > 0) {
