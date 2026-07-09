@@ -369,6 +369,22 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
       set_tests_properties(gui_api_e2e PROPERTIES LABELS "gui;e2e" TIMEOUT 120)
     endif()
   endif()
+
+  # Browser end-to-end smoke test for the large-system / scalability GUI features
+  # (headless no-canvas mode, virtualized editable topology tables, global
+  # element search, neighborhood sub-diagram, minimap, and the time-series
+  # 时序潮流/时序生产模拟 split). Standalone Node + Playwright driver; opt-in via
+  # the "browser" label since it needs `npm i -D playwright && npx playwright
+  # install chromium`. Skipped automatically when Node.js is absent.
+  find_program(HACDCPF_NODE_EXECUTABLE NAMES node)
+  if(HACDCPF_NODE_EXECUTABLE)
+    add_test(NAME gui_scale_features_e2e
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/gui_scale_features_e2e.mjs"
+              --server "$<TARGET_FILE:run_gui_server>"
+              --data-dir "${CMAKE_SOURCE_DIR}/data")
+    set_tests_properties(gui_scale_features_e2e PROPERTIES LABELS "gui;e2e;browser" TIMEOUT 300)
+  endif()
 endif()
 
 # Harmonic power-flow external cross-validation driver.  Emits the C++ solver's

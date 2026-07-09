@@ -92,6 +92,7 @@ const App = (() => {
     hosting: 'steady',
     shortCircuit: 'security',
     transient: 'security',
+    tspf: 'security',
     topology: 'planning',
     timeSeries: 'planning',
     scenarioGeneration: 'planning',
@@ -106,6 +107,14 @@ const App = (() => {
     planning: 'topology',
     sustainability: 'carbonFlow',
   };
+  // 时序潮流 (tspf) and 时序生产模拟 (timeSeries=annual) share ONE sub-section and
+  // result group (identical modeling controls). These maps route both modules to
+  // the shared DOM while renderSubToolbar/setActiveModule show only the relevant
+  // action group. Any module not listed uses its own name for both.
+  const SUBSECTION_FOR_MODULE = { tspf: 'timeSeries' };
+  const RESULT_GROUP_FOR_MODULE = { tspf: 'timeSeries' };
+  const subsectionForModule = (m) => SUBSECTION_FOR_MODULE[m] || m;
+  const resultGroupForModule = (m) => RESULT_GROUP_FOR_MODULE[m] || m;
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -271,96 +280,18 @@ const App = (() => {
     }
   }
 
-  const SYSTEM_SEARCH_SOURCES = [
-    { bucket: 'ac', tableId: 'busTableInner', label: 'AC母线', domain: 'ac', path: sys => sys.ac?.buses, aliases: ['bus', 'acbus', 'ac_bus', 'node', '母线', '节点'], idKeys: ['index'] },
-    { bucket: 'dc', tableId: 'dcBusTableInner', label: 'DC母线', domain: 'dc', path: sys => sys.dc?.buses, aliases: ['bus', 'dcbus', 'dc_bus', 'node', '母线', '节点'], idKeys: ['index'] },
-    { bucket: 'branch', tableId: 'branchTableInner', label: 'AC支路', domain: 'ac', path: sys => sys.ac?.branches, aliases: ['branch', 'line', 'acbranch', 'ac_branch', '线路', '支路'], idKeys: ['index', 'id'] },
-    { bucket: 'gen', tableId: 'genTableInner', label: '发电机', domain: 'ac', path: sys => sys.ac?.generators, aliases: ['gen', 'generator', 'generators', '发电机', '机组'], idKeys: ['index', 'id'] },
-    { bucket: 'load', tableId: 'loadTableInner', label: 'AC负荷', domain: 'ac', path: sys => sys.ac?.loads, aliases: ['load', 'acload', 'ac_load', '负荷'], idKeys: ['index', 'id'] },
-    { bucket: 'trafo', tableId: 'trafoTableInner', label: '变压器', domain: 'ac', path: sys => sys.ac?.transformers_2w, aliases: ['trafo', 'transformer', 'transformer_2w', '变压器'], idKeys: ['index', 'id'] },
-    { bucket: 'extGrid', tableId: 'extGridTableInner', label: '外部电网', domain: 'ac', path: sys => sys.ac?.external_grids, aliases: ['externalgrid', 'external_grid', 'extgrid', 'ext_grid', 'slack', '外部电网'], idKeys: ['index', 'id'] },
-    { bucket: 'storage', tableId: 'storageTableInner', label: 'AC储能', domain: 'ac', path: sys => sys.ac?.storage, aliases: ['storage', 'battery', 'acstorage', 'ac_storage', '储能'], idKeys: ['index', 'id'] },
-    { bucket: 'pv', tableId: 'pvTableInner', label: 'AC光伏', domain: 'ac', path: sys => sys.ac?.pv_systems, aliases: ['pv', 'pvsystem', 'pv_system', 'solar', '光伏'], idKeys: ['index', 'id'] },
-    { bucket: 'renGen', tableId: 'renGenTableInner', label: '新能源', domain: 'ac', path: sys => sys.ac?.renewable_gens, aliases: ['renewable', 'renewablegen', 'renewable_gen', 'wind', '新能源', '风电'], idKeys: ['index', 'id'] },
-    { bucket: 'sgen', tableId: 'sgenTableInner', label: '静态电源', domain: 'ac', path: sys => sys.ac?.static_generators, aliases: ['sgen', 'staticgen', 'static_generator', '静态电源'], idKeys: ['index', 'id'] },
-    { bucket: 'shunt', tableId: 'shuntTableInner', label: '并联补偿', domain: 'ac', path: sys => sys.ac?.shunts, aliases: ['shunt', '并联', '补偿'], idKeys: ['index', 'id'] },
-    { bucket: 'sw', tableId: 'switchTableInner', label: '开关', domain: 'ac', path: sys => sys.ac?.switches, aliases: ['switch', 'sw', '开关'], idKeys: ['index', 'id'] },
-    { bucket: 'cb', tableId: 'cbTableInner', label: '断路器', domain: 'ac', path: sys => sys.ac?.circuit_breakers, aliases: ['breaker', 'circuitbreaker', 'circuit_breaker', 'cb', '断路器'], idKeys: ['index', 'id'] },
-    { bucket: 'motor', tableId: 'motorTableInner', label: '电动机', domain: 'ac', path: sys => sys.ac?.motors, aliases: ['motor', '电动机', '电机'], idKeys: ['index', 'id'] },
-    { bucket: 'trafo3w', tableId: 'trafo3wTableInner', label: '三绕组变压器', domain: 'ac', path: sys => sys.ac?.transformers_3w, aliases: ['trafo3w', 'transformer3w', 'transformer_3w', '三绕组'], idKeys: ['index', 'id'] },
-    { bucket: 'flexLoad', tableId: 'flexLoadTableInner', label: '柔性负荷', domain: 'ac', path: sys => sys.ac?.flexible_loads, aliases: ['flexload', 'flexible_load', '柔性负荷'], idKeys: ['index', 'id'] },
-    { bucket: 'asymLoad', tableId: 'asymLoadTableInner', label: '不平衡负荷', domain: 'ac', path: sys => sys.ac?.asymmetric_loads, aliases: ['asymload', 'asymmetric_load', '不平衡负荷'], idKeys: ['index', 'id'] },
-    { bucket: 'dcBranch', tableId: 'dcBranchTableInner', label: 'DC支路', domain: 'dc', path: sys => sys.dc?.branches, aliases: ['dcbranch', 'dc_branch', 'dcline', 'dc_line', '直流线路', '直流支路'], idKeys: ['index', 'id'] },
-    { bucket: 'dcLoad', tableId: 'dcLoadTableInner', label: 'DC负荷', domain: 'dc', path: sys => sys.dc?.loads, aliases: ['dcload', 'dc_load', '直流负荷'], idKeys: ['index', 'id'] },
-    { bucket: 'dcStorage', tableId: 'dcStorageTableInner', label: 'DC储能', domain: 'dc', path: sys => sys.dc?.dc_storage, aliases: ['dcstorage', 'dc_storage', '直流储能'], idKeys: ['index', 'id'] },
-    { bucket: 'dcPv', tableId: 'dcPvTableInner', label: 'DC光伏', domain: 'dc', path: sys => sys.dc?.pv_arrays, aliases: ['dcpv', 'dc_pv', 'dc_pv_array', '直流光伏'], idKeys: ['index', 'id'] },
-    { bucket: 'vsc', tableId: 'vscTableInner', label: 'VSC', domain: 'hybrid', path: sys => sys.vsc_converters, aliases: ['vsc', 'converter', 'vsc_converter', '换流器'], idKeys: ['index', 'id'] },
-    { bucket: 'charger', tableId: 'chargerTableInner', label: '充电机', domain: 'ac', path: sys => sys.ac?.chargers, aliases: ['charger', '充电机'], idKeys: ['index', 'id'] },
-    { bucket: 'chargingStation', tableId: 'csTableInner', label: '充电站', domain: 'ac', path: sys => sys.ac?.charging_stations, aliases: ['chargingstation', 'charging_station', '充电站'], idKeys: ['index', 'id'] },
-    { bucket: 'mobileStorage', tableId: 'msTableInner', label: '移动储能', domain: 'hybrid', path: sys => sys.mobile_storage, aliases: ['mobilestorage', 'mobile_storage', 'mess', '移动储能'], idKeys: ['index', 'id'] },
-    { bucket: 'dcdcConverter', tableId: 'dcdcTableInner', label: 'DC/DC', domain: 'dc', path: sys => sys.dcdc_converters, aliases: ['dcdc', 'dc_dc', 'dcdc_converter', 'dc/dc', '直流变换器'], idKeys: ['index', 'id'] },
-    { bucket: 'energyRouter', tableId: 'erTableInner', label: '能量路由器', domain: 'hybrid', path: sys => sys.energy_routers, aliases: ['energyrouter', 'energy_router', 'er', '能量路由器'], idKeys: ['index', 'id'] },
-    { bucket: 'vpp', tableId: 'vppTableInner', label: '虚拟电厂', domain: 'hybrid', path: sys => sys.vpps, aliases: ['vpp', 'virtualpowerplant', 'virtual_power_plant', '虚拟电厂'], idKeys: ['index', 'id'] },
-    { bucket: 'microgrid', tableId: 'mgTableInner', label: '微网', domain: 'hybrid', path: sys => sys.microgrids, aliases: ['microgrid', '微网'], idKeys: ['index', 'id'] },
-  ];
-
-  function searchKey(raw) {
-    return String(raw || '')
-      .toLowerCase()
-      .replace(/[：:;,，、|\\(){}<>\[\]#_\-\s]/g, '')
-      .replace(/\//g, '');
-  }
-
-  function parseGlobalSearchQuery(raw) {
-    const text = String(raw || '').trim();
-    const key = searchKey(text);
-    const numberMatch = text.match(/-?\d+/);
-    const n = numberMatch ? Number(numberMatch[0]) : NaN;
-    const hasDc = /\bdc\b/i.test(text) || /直流/.test(text);
-    const hasAc = /\bac\b/i.test(text) || /交流/.test(text);
-    return {
-      text,
-      key,
-      number: Number.isFinite(n) ? n : null,
-      domain: hasDc && !hasAc ? 'dc' : (hasAc && !hasDc ? 'ac' : ''),
-    };
-  }
-
-  function sourceMatchesParsedQuery(source, parsed) {
-    if (!parsed.key) return false;
-    if (parsed.domain && source.domain !== parsed.domain && source.domain !== 'hybrid') return false;
-    const aliasKeys = (source.aliases || []).map(searchKey).filter(Boolean);
-    if (aliasKeys.some(alias => parsed.key.includes(alias))) return true;
-    return !parsed.number && source.label && searchKey(source.label).includes(parsed.key);
-  }
-
-  function rowSearchIds(item, position, source) {
-    const ids = [];
-    (source.idKeys || []).forEach(key => {
-      const v = Number(item?.[key]);
-      if (Number.isFinite(v)) ids.push(v);
-    });
-    if (source.bucket !== 'ac' && source.bucket !== 'dc') {
-      ids.push(position, position + 1);
-    }
-    return Array.from(new Set(ids));
-  }
-
-  function rowSearchText(item, source, position) {
-    const fields = [
-      source.label, source.domain, position + 1,
-      item?.index, item?.id, item?.name, item?.display_name, item?.type,
-      item?.bus, item?.from_bus, item?.to_bus, item?.hv_bus, item?.lv_bus, item?.mv_bus,
-      item?.bus_ac, item?.bus_dc, item?.pcc_bus, item?.target_bus,
-    ];
-    return searchKey(fields.filter(v => v !== undefined && v !== null && v !== '').join(' '));
-  }
-
-  function searchItemTitle(item, source, position) {
-    const idx = item?.index ?? item?.id ?? (position + 1);
-    const name = item?.name || item?.display_name || '';
-    return `${source.label} ${idx}${name ? ` · ${name}` : ''}`;
-  }
+  // Element-search registry + pure query parsers now live in search_registry.js
+  // (Phase 5 modularization). Bind them to the local names used across app.js so
+  // every existing call site is unchanged.
+  const SYSTEM_SEARCH_SOURCES = HACDCSearch.SOURCES;
+  const searchKey = HACDCSearch.searchKey;
+  const parseGlobalSearchQuery = HACDCSearch.parseQuery;
+  const sourceMatchesParsedQuery = HACDCSearch.sourceMatches;
+  const rowSearchIds = HACDCSearch.rowIds;
+  const rowSearchText = HACDCSearch.rowText;
+  const searchItemTitle = HACDCSearch.itemTitle;
+  const summarizeSearchItem = HACDCSearch.summarizeItem;
+  const sourceByTableId = HACDCSearch.sourceByTableId;
 
   function buildSystemSearchRows() {
     const sys = (typeof Canvas !== 'undefined' && Canvas.buildSystemJson) ? Canvas.buildSystemJson() : { ac: {}, dc: {} };
@@ -405,17 +336,6 @@ const App = (() => {
     return pool.find(row => row.text.includes(parsed.key)) || null;
   }
 
-  function summarizeSearchItem(row) {
-    const item = row?.item || {};
-    const keys = ['index', 'name', 'bus', 'from_bus', 'to_bus', 'hv_bus', 'lv_bus', 'bus_ac', 'bus_dc', 'pcc_bus', 'target_bus', 'pg_mw', 'p_mw', 'rate_a_mva'];
-    const parts = [];
-    keys.forEach(key => {
-      const value = item[key];
-      if (value !== undefined && value !== null && value !== '') parts.push(`${key}=${value}`);
-    });
-    return parts.length ? parts.join(' · ') : `row=${row.position + 1}`;
-  }
-
   function showTopologySearchResult(row) {
     const banner = document.getElementById('topologySearchResult');
     if (!banner || !row) return;
@@ -425,13 +345,20 @@ const App = (() => {
   }
 
   function highlightVisibleTopologyRow(row) {
+    // Clear any previous highlight (both DOM and the virtualizer's sticky pos).
+    document.querySelectorAll('.topo-table-wrap table').forEach(t => { if (t.__vctx) t.__vctx.highlightPos = null; });
     document.querySelectorAll('.topo-search-highlight').forEach(el => el.classList.remove('topo-search-highlight'));
     if (!row?.source?.tableId) return false;
-    const body = document.querySelector(`#${row.source.tableId} tbody`);
-    const tr = body?.children?.[row.position];
-    if (!tr || tr.classList.contains('topo-truncated-note')) return false;
-    tr.classList.add('topo-search-highlight');
-    try { tr.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { tr.scrollIntoView(); }
+    const table = document.getElementById(row.source.tableId);
+    const wrap = table ? table.closest('.topo-table-wrap') : null;
+    if (!table || !table.__vctx || !wrap) return false;
+    if (row.position < 0 || row.position >= table.__vctx.items.length) return false;
+    // Virtualized: mark the target row and scroll it into the window; the
+    // scroll handler (and the explicit repaint) render + highlight it even if
+    // it was far outside the previously materialized slice.
+    table.__vctx.highlightPos = row.position;
+    wrap.scrollTop = Math.max(0, row.position * TOPO_ROW_H - wrap.clientHeight / 2);
+    paintVirtualTable(wrap);
     return true;
   }
 
@@ -449,10 +376,10 @@ const App = (() => {
     switchTab('topology');
     showTopologySearchResult(row);
     const visible = highlightVisibleTopologyRow(row);
-    // When the row is beyond the displayed table cap (common in headless large
-    // systems) the banner still carries the full record, so name the element and
-    // point the user at the summary instead of a vague "已定位拓扑记录".
-    setStatus(visible ? `已定位 ${row.title}` : `已定位 ${row.title}（超出显示行，详见上方摘要）`);
+    // Virtualized tables can scroll-highlight any row regardless of size. If the
+    // element's table simply isn't present in the DOM, the banner still carries
+    // the full record, so name the element and point at the summary.
+    setStatus(visible ? `已定位 ${row.title}` : `已定位 ${row.title}（详见上方摘要）`);
     log(`${headless ? '无画布模式' : '拓扑表'}定位：${row.title} (${summarizeSearchItem(row)})`, 'info');
   }
 
@@ -474,6 +401,205 @@ const App = (() => {
     } catch (err) {
       setStatus('定位失败', 'error');
       log(`定位失败：${err.message || err}`, 'error');
+    }
+  }
+
+  // ========== On-demand neighborhood sub-diagram (Phase 4) ==========
+  // A self-contained, read-only viewer: extracts a k-hop neighborhood of a bus
+  // from the full system JSON (headless-aware) and draws it in a modal. The main
+  // canvas, headless state, and backend session are never touched, so this is
+  // safe for very large systems where the full single-line diagram is skipped.
+  let _subDiagramFocus = null;  // { domain, index } of the last-drawn center bus
+
+  // Resolve the bus a search row refers to (buses map to themselves; devices to
+  // their connected bus). Returns { domain:'ac'|'dc', index } or null.
+  function resolveBusFromRow(row) {
+    if (!row) return null;
+    const item = row.item || {};
+    const bucket = row.source.bucket;
+    if (bucket === 'ac') return { domain: 'ac', index: Number(item.index) };
+    if (bucket === 'dc') return { domain: 'dc', index: Number(item.index) };
+    const dcDomain = row.source.domain === 'dc';
+    const bus = item.bus ?? item.from_bus ?? item.bus_ac ?? item.pcc_bus ?? item.hv_bus ?? item.port1_bus;
+    if (bus === undefined || bus === null || bus === '') return null;
+    return { domain: dcDomain ? 'dc' : 'ac', index: Number(bus) };
+  }
+
+  const nodeKey = (domain, index) => `${domain}:${index}`;
+
+  // Build undirected adjacency over AC/DC buses (branches, transformers, VSC,
+  // DC/DC), plus a per-bus device summary for annotation.
+  function buildSystemGraph(sys) {
+    const adj = new Map();     // key -> Set(keys)
+    const edges = [];          // { a, b, kind }
+    const link = (aDomain, aIdx, bDomain, bIdx, kind) => {
+      if (![aIdx, bIdx].every(Number.isFinite)) return;
+      const a = nodeKey(aDomain, aIdx), b = nodeKey(bDomain, bIdx);
+      if (a === b) return;
+      if (!adj.has(a)) adj.set(a, new Set());
+      if (!adj.has(b)) adj.set(b, new Set());
+      adj.get(a).add(b); adj.get(b).add(a);
+      edges.push({ a, b, kind });
+    };
+    (sys.ac?.branches || []).forEach(br => link('ac', Number(br.from_bus), 'ac', Number(br.to_bus), 'line'));
+    (sys.ac?.transformers_2w || []).forEach(t => link('ac', Number(t.hv_bus), 'ac', Number(t.lv_bus), 'trafo'));
+    (sys.dc?.branches || []).forEach(br => link('dc', Number(br.from_bus), 'dc', Number(br.to_bus), 'dcline'));
+    (sys.vsc_converters || []).forEach(v => link('ac', Number(v.bus_ac), 'dc', Number(v.bus_dc), 'vsc'));
+    (sys.dcdc_converters || []).forEach(d => {
+      const a = Number(d.bus_in ?? d.from_bus ?? d.port1_bus);
+      const b = Number(d.bus_out ?? d.to_bus ?? d.port2_bus);
+      link('dc', a, 'dc', b, 'dcdc');
+    });
+    // Per-bus device summary
+    const devices = new Map();  // key -> { gen, load, storage, pv, other }
+    const bump = (domain, idx, kind) => {
+      if (!Number.isFinite(Number(idx))) return;
+      const k = nodeKey(domain, Number(idx));
+      if (!devices.has(k)) devices.set(k, {});
+      devices.get(k)[kind] = (devices.get(k)[kind] || 0) + 1;
+    };
+    (sys.ac?.generators || []).forEach(g => bump('ac', g.bus, 'gen'));
+    (sys.ac?.loads || []).forEach(l => bump('ac', l.bus, 'load'));
+    (sys.ac?.storage || []).forEach(s => bump('ac', s.bus, 'storage'));
+    (sys.ac?.pv_systems || []).forEach(p => bump('ac', p.bus, 'pv'));
+    (sys.ac?.renewable_gens || []).forEach(r => bump('ac', r.bus, 'ren'));
+    (sys.ac?.external_grids || []).forEach(e => bump('ac', e.bus, 'grid'));
+    (sys.dc?.loads || []).forEach(l => bump('dc', l.bus, 'load'));
+    (sys.dc?.dc_storage || []).forEach(s => bump('dc', s.bus, 'storage'));
+    (sys.dc?.pv_arrays || []).forEach(p => bump('dc', p.bus, 'pv'));
+    return { adj, edges, devices };
+  }
+
+  const SUBDIAGRAM_MAX_NODES = 80;
+
+  // BFS the graph from a center bus out to `hops`, capped at SUBDIAGRAM_MAX_NODES.
+  function neighborhoodNodes(graph, centerKey, hops) {
+    const hopOf = new Map([[centerKey, 0]]);
+    let frontier = [centerKey];
+    let truncated = false;
+    for (let h = 1; h <= hops && frontier.length; h += 1) {
+      const next = [];
+      for (const key of frontier) {
+        for (const nb of (graph.adj.get(key) || [])) {
+          if (hopOf.has(nb)) continue;
+          if (hopOf.size >= SUBDIAGRAM_MAX_NODES) { truncated = true; break; }
+          hopOf.set(nb, h);
+          next.push(nb);
+        }
+        if (truncated) break;
+      }
+      frontier = next;
+      if (truncated) break;
+    }
+    return { hopOf, truncated };
+  }
+
+  function openSubDiagramFor(domain, index, hops) {
+    const sys = Canvas.buildSystemJson();
+    const graph = buildSystemGraph(sys);
+    const centerKey = nodeKey(domain, index);
+    if (!graph.adj.has(centerKey) && !graph.devices.has(centerKey)) {
+      // Isolated bus (no branches) — still show it alone.
+      graph.adj.set(centerKey, new Set());
+    }
+    const { hopOf, truncated } = neighborhoodNodes(graph, centerKey, hops);
+    const nodes = [...hopOf.keys()];
+    const nodeSet = new Set(nodes);
+    const edges = graph.edges.filter(e => nodeSet.has(e.a) && nodeSet.has(e.b));
+    _subDiagramFocus = { domain, index };
+    renderSubDiagram({ centerKey, hopOf, edges, devices: graph.devices, truncated, hops }, sys);
+    const modal = document.getElementById('subDiagramModal');
+    if (modal) modal.style.display = 'flex';
+    document.getElementById('subDiagramTitle').textContent =
+      `${domain.toUpperCase()} 母线 ${index} 邻域子图 · ${hops} 跳 · ${nodes.length} 节点${truncated ? '（已截断）' : ''}`;
+    log(`绘制 ${domain.toUpperCase()} 母线 ${index} 的 ${hops} 跳邻域子图（${nodes.length} 节点，${edges.length} 支路）`, 'info');
+  }
+
+  const SUBDIAGRAM_EDGE_COLORS = { line: '#61afef', trafo: '#e5c07b', dcline: '#56b6c2', vsc: '#c678dd', dcdc: '#98c379' };
+
+  function renderSubDiagram(model, sys) {
+    const svg = document.getElementById('subDiagramSvg');
+    if (!svg) return;
+    const W = 720, H = 520, cx = W / 2, cy = H / 2, R = Math.min(cx, cy) / (model.hops + 0.5);
+    // Group nodes by hop and lay them on concentric rings.
+    const byHop = new Map();
+    model.hopOf.forEach((h, key) => { if (!byHop.has(h)) byHop.set(h, []); byHop.get(h).push(key); });
+    const pos = new Map();
+    byHop.forEach((keys, h) => {
+      if (h === 0) { pos.set(keys[0], { x: cx, y: cy }); return; }
+      const n = keys.length, offset = (h % 2) * (Math.PI / n);
+      keys.forEach((key, i) => {
+        const a = (2 * Math.PI * i) / n + offset;
+        pos.set(key, { x: cx + h * R * Math.cos(a), y: cy + h * R * Math.sin(a) });
+      });
+    });
+    const parseKey = (key) => { const [d, i] = key.split(':'); return { domain: d, index: i }; };
+    let svgParts = [`<rect x="0" y="0" width="${W}" height="${H}" fill="transparent"/>`];
+    // Edges
+    model.edges.forEach(e => {
+      const p1 = pos.get(e.a), p2 = pos.get(e.b);
+      if (!p1 || !p2) return;
+      const color = SUBDIAGRAM_EDGE_COLORS[e.kind] || '#8a8a8a';
+      const dash = (e.kind === 'vsc' || e.kind === 'dcdc') ? ' stroke-dasharray="4 3"' : '';
+      svgParts.push(`<line x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}" stroke="${color}" stroke-width="1.6"${dash} opacity="0.85"/>`);
+    });
+    // Nodes
+    model.hopOf.forEach((h, key) => {
+      const p = pos.get(key); if (!p) return;
+      const { domain, index } = parseKey(key);
+      const isCenter = key === model.centerKey;
+      const isDc = domain === 'dc';
+      const r = isCenter ? 13 : 9;
+      const fill = isCenter ? '#ffcc00' : (isDc ? '#56b6c2' : '#61afef');
+      const dev = model.devices.get(key) || {};
+      const badges = [];
+      if (dev.gen || dev.ren || dev.pv) badges.push('G');
+      if (dev.load) badges.push('L');
+      if (dev.storage) badges.push('S');
+      if (dev.grid) badges.push('⚡');
+      svgParts.push(`<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r}" fill="${fill}" stroke="${isCenter ? '#d19a66' : '#26324a'}" stroke-width="${isCenter ? 3 : 1.5}"/>`);
+      svgParts.push(`<text x="${p.x.toFixed(1)}" y="${(p.y + 3).toFixed(1)}" text-anchor="middle" font-size="9" font-weight="700" fill="#0b1522">${index}</text>`);
+      svgParts.push(`<text x="${p.x.toFixed(1)}" y="${(p.y - r - 3).toFixed(1)}" text-anchor="middle" font-size="8" fill="var(--ink2,#8a94a6)">${domain.toUpperCase()}${badges.length ? ' ' + badges.join('') : ''}</text>`);
+    });
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    svg.innerHTML = svgParts.join('');
+    // Info summary
+    const info = document.getElementById('subDiagramInfo');
+    if (info) {
+      const counts = {};
+      model.edges.forEach(e => { counts[e.kind] = (counts[e.kind] || 0) + 1; });
+      const legend = [['line', '交流线路'], ['trafo', '变压器'], ['dcline', '直流线路'], ['vsc', 'VSC换流'], ['dcdc', 'DC/DC']]
+        .filter(([k]) => counts[k])
+        .map(([k, label]) => `<span class="subdiag-legend"><i style="background:${SUBDIAGRAM_EDGE_COLORS[k]}"></i>${label} ${counts[k]}</span>`)
+        .join('');
+      info.innerHTML = `中心母线 <b>${_subDiagramFocus.domain.toUpperCase()} ${_subDiagramFocus.index}</b> · ` +
+        `${model.hopOf.size} 节点 · ${model.edges.length} 支路 ${legend}` +
+        (model.truncated ? ` · <span class="subdiag-trunc">已截断至 ${SUBDIAGRAM_MAX_NODES} 节点</span>` : '');
+    }
+  }
+
+  function closeSubDiagram() {
+    const modal = document.getElementById('subDiagramModal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  // Draw the neighborhood of whatever the search box currently resolves to.
+  function handleNeighborhoodDiagram() {
+    const raw = document.getElementById('globalElementSearch')?.value || '';
+    const hops = Number(document.getElementById('subDiagramHops')?.value) || 2;
+    if (!String(raw).trim()) { setStatus('请输入母线/元件后再绘制邻域', 'warn'); return; }
+    try {
+      const row = findSystemElement(raw);
+      const bus = resolveBusFromRow(row);
+      if (!bus || !Number.isFinite(bus.index)) {
+        setStatus('未找到可绘制邻域的母线', 'error');
+        log(`邻域子图：未能从“${raw}”解析出母线`, 'warn');
+        return;
+      }
+      openSubDiagramFor(bus.domain, bus.index, hops);
+    } catch (err) {
+      setStatus('邻域子图失败', 'error');
+      log(`邻域子图失败：${err.message || err}`, 'error');
     }
   }
 
@@ -1341,6 +1467,94 @@ const App = (() => {
       return false;
     }
     return downloadJsonFile(`gui_results_bundle_${tsTagForFilename()}.json`, bundle);
+  }
+
+  // ========== Result-snapshot comparison (Phase 5 results dock) ==========
+  // Generalizes the resilience run-comparison idea: pin the current key metrics
+  // from any module's cached result into a side-by-side table so different cases
+  // / settings can be compared without leaving the results panel.
+  let _resultSnapshots = [];
+
+  function pfTotalLossMw(pf) {
+    if (!pf) return null;
+    for (const k of ['total_loss_mw', 'total_losses_mw', 'loss_total_mw', 'p_loss_mw']) {
+      if (Number.isFinite(Number(pf[k]))) return Number(pf[k]);
+    }
+    for (const a of [pf.geo_ac_branches, pf.ac_branches, pf.branch_flows, pf.branches]) {
+      if (Array.isArray(a) && a.length) {
+        const s = a.reduce((acc, b) => acc + Math.abs(Number(b.loss_mw ?? b.p_loss_mw ?? 0)), 0);
+        if (s > 0) return s;
+      }
+    }
+    return null;
+  }
+
+  function currentResultMetrics() {
+    const m = {};
+    if (_lastPfData) {
+      m['潮流收敛'] = _lastPfData.converged ? '是' : '否';
+      if (Number.isFinite(Number(_lastPfData.iterations))) m['潮流迭代'] = _lastPfData.iterations;
+      const loss = pfTotalLossMw(_lastPfData);
+      if (loss != null) m['网损(MW)'] = loss.toFixed(3);
+    }
+    if (_lastOpfData) {
+      const obj = _lastOpfData.objective ?? _lastOpfData.total_cost ?? _lastOpfData.f;
+      if (Number.isFinite(Number(obj))) m['OPF目标'] = Number(obj).toFixed(2);
+    }
+    if (_lastTspfData) {
+      m['时序收敛步'] = `${_lastTspfData.num_converged || 0}/${_lastTspfData.num_steps || 0}`;
+      const cost = _lastTspfData.total_generation_cost;
+      if (Number.isFinite(Number(cost))) m['时序成本($)'] = Number(cost).toFixed(0);
+    }
+    if (_lastCarbonData) {
+      const s = _lastCarbonData.matrix_summary || _lastCarbonData.tracing_summary || {};
+      if (s.total_load_emissions_tco2 != null) m['负荷碳排(tCO2)'] = Number(s.total_load_emissions_tco2).toFixed(3);
+    }
+    return m;
+  }
+
+  function captureResultSnapshot() {
+    const metrics = currentResultMetrics();
+    if (!Object.keys(metrics).length) {
+      log('暂无可对比的结果，请先运行至少一个计算', 'warn');
+      setStatus('无可对比结果', 'warn');
+      return;
+    }
+    const sys = (Canvas.getSystemSummary && Canvas.getSystemSummary()) || {};
+    const label = `${sys.name || '系统'} #${_resultSnapshots.length + 1}`;
+    _resultSnapshots.push({ label, time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), metrics });
+    renderResultComparison();
+    log(`已记录对比快照：${label}（${Object.keys(metrics).length} 项指标）`, 'success');
+  }
+
+  function clearResultSnapshots() {
+    _resultSnapshots = [];
+    renderResultComparison();
+  }
+
+  function renderResultComparison() {
+    const div = document.getElementById('resultComparison');
+    const clearBtn = document.getElementById('btnClearResultSnapshots');
+    if (!div) return;
+    if (!_resultSnapshots.length) {
+      div.hidden = true; div.innerHTML = '';
+      if (clearBtn) clearBtn.hidden = true;
+      return;
+    }
+    div.hidden = false;
+    if (clearBtn) clearBtn.hidden = false;
+    const keys = [];
+    _resultSnapshots.forEach(s => Object.keys(s.metrics).forEach(k => { if (!keys.includes(k)) keys.push(k); }));
+    let html = '<div class="result-comparison-title">结果快照对比</div><table><thead><tr><th>指标</th>' +
+      _resultSnapshots.map(s => `<th title="${escapeHtml(s.time)}">${escapeHtml(s.label)}</th>`).join('') +
+      '</tr></thead><tbody>';
+    keys.forEach(k => {
+      html += `<tr><td>${escapeHtml(k)}</td>` +
+        _resultSnapshots.map(s => `<td>${s.metrics[k] != null ? escapeHtml(String(s.metrics[k])) : '—'}</td>`).join('') +
+        '</tr>';
+    });
+    html += '</tbody></table>';
+    div.innerHTML = html;
   }
 
   // ========== API Client ==========
@@ -9507,6 +9721,148 @@ const App = (() => {
     if (sel !== null && sel !== undefined) onSelectionChanged(sel);
   }
 
+  // ========== Virtualized + editable topology tables (Phase 4) ==========
+  // Fixed-height windowed rendering so tables of any size (50k+ rows) stay
+  // responsive without truncation. Each `.topo-table-wrap` scrolls; only the
+  // visible slice of <tr> is materialized, padded by spacer rows so the scroll
+  // bar reflects the full row count. Editable numeric cells commit straight to
+  // the backend session (works in both canvas and headless modes).
+  const TOPO_ROW_H = 22;          // must match CSS .topo-table-wrap tbody tr height
+  const TOPO_VIRTUAL_BUFFER = 6;  // extra rows rendered above/below the viewport
+
+  function paintVirtualTable(wrap) {
+    if (!wrap) return;
+    const table = wrap.querySelector('table');
+    const ctx = table && table.__vctx;
+    if (!ctx) return;
+    const body = table.querySelector('tbody');
+    if (!body) return;
+    const total = ctx.items.length;
+    const vh = wrap.clientHeight || 200;
+    const scrollTop = wrap.scrollTop;
+    const start = Math.max(0, Math.floor(scrollTop / TOPO_ROW_H) - TOPO_VIRTUAL_BUFFER);
+    const visible = Math.ceil(vh / TOPO_ROW_H) + 2 * TOPO_VIRTUAL_BUFFER;
+    const end = Math.min(total, start + visible);
+    const cols = ctx.colspan;
+    let html = '';
+    const topPad = start * TOPO_ROW_H;
+    const botPad = Math.max(0, (total - end) * TOPO_ROW_H);
+    if (topPad > 0) html += `<tr class="topo-vspacer"><td colspan="${cols}" style="height:${topPad}px;padding:0;border:0"></td></tr>`;
+    for (let i = start; i < end; i += 1) {
+      const item = ctx.items[i];
+      const compId = ctx.mapObj ? ctx.mapObj[item.index] : undefined;
+      const attrs = compId !== undefined ? ` data-comp-id="${compId}"` : '';
+      const hl = ctx.highlightPos === i ? ' class="topo-search-highlight"' : '';
+      html += `<tr data-row="${i}"${attrs}${hl}>${ctx.rowFn(item, i)}</tr>`;
+    }
+    if (botPad > 0) html += `<tr class="topo-vspacer"><td colspan="${cols}" style="height:${botPad}px;padding:0;border:0"></td></tr>`;
+    body.innerHTML = html;
+  }
+
+  function bindVirtualTable(wrap) {
+    if (wrap.__vbound) return;
+    wrap.__vbound = true;
+    let raf = null;
+    wrap.addEventListener('scroll', () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => { raf = null; paintVirtualTable(wrap); });
+    });
+    // Delegated single-click → pan to the canvas glyph (canvas mode only).
+    wrap.addEventListener('click', (ev) => {
+      if (ev.target.tagName === 'INPUT') return;
+      const tr = ev.target.closest('tr[data-comp-id]');
+      if (!tr) return;
+      const cid = Number(tr.dataset.compId);
+      if (Number.isFinite(cid) && !(Canvas.isHeadless && Canvas.isHeadless())) Canvas.panToComponent(cid);
+    });
+    // Delegated double-click on an editable cell → inline editor.
+    wrap.addEventListener('dblclick', (ev) => {
+      const td = ev.target.closest('td[data-edit-field]');
+      if (td) startCellEdit(wrap, td);
+    });
+  }
+
+  function renderVirtualTable(bodyId, items, mapObj, rowFn, colspan, source) {
+    const body = document.querySelector(bodyId + ' tbody');
+    if (!body) return;
+    const table = body.closest('table');
+    const wrap = table ? table.closest('.topo-table-wrap') : null;
+    if (table) table.__vctx = { items, mapObj, rowFn, colspan, source: source || null, highlightPos: null };
+    if (wrap) {
+      bindVirtualTable(wrap);
+      wrap.scrollTop = 0;
+      paintVirtualTable(wrap);
+    } else {
+      // No scroll container (should not happen for topology tables): render all.
+      let html = '';
+      items.forEach((item, i) => { html += `<tr data-row="${i}">${rowFn(item, i)}</tr>`; });
+      body.innerHTML = html;
+    }
+  }
+
+  let _editingCell = null;
+  function startCellEdit(wrap, td) {
+    if (_editingCell) return;
+    const table = wrap.querySelector('table');
+    const ctx = table && table.__vctx;
+    if (!ctx || !ctx.source) return;
+    const tr = td.closest('tr[data-row]');
+    if (!tr) return;
+    const position = Number(tr.dataset.row);
+    const field = td.dataset.editField;
+    const type = td.dataset.editType || 'text';
+    const original = td.textContent.trim();
+    _editingCell = { td, original };
+    const input = document.createElement('input');
+    input.className = 'topo-cell-input';
+    if (type === 'number') { input.type = 'number'; input.step = 'any'; }
+    input.value = original;
+    td.textContent = '';
+    td.appendChild(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = async (commit) => {
+      if (done) return; done = true;
+      _editingCell = null;
+      const raw = input.value;
+      if (!commit) { td.textContent = original; return; }
+      const value = type === 'number' ? Number(raw) : raw;
+      if (type === 'number' && !Number.isFinite(value)) { td.textContent = original; return; }
+      await commitTopologyEdit(ctx, position, field, value);
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener('blur', () => finish(true));
+  }
+
+  async function commitTopologyEdit(ctx, position, field, value) {
+    const source = ctx.source;
+    if (!source) return;
+    const headless = !!(Canvas.isHeadless && Canvas.isHeadless());
+    if (headless && Canvas.updateHeadlessSystem) {
+      Canvas.updateHeadlessSystem(sys => {
+        const arr = source.path(sys);
+        if (arr && arr[position]) arr[position][field] = value;
+      });
+    } else {
+      const item = ctx.items[position];
+      const compId = mappedCompId(ctx.mapObj, item, position);
+      if (compId != null && Canvas.getComponent) {
+        const comp = Canvas.getComponent(compId);
+        if (comp && comp.params) { comp.params[field] = value; Canvas.rerenderComponent?.(comp); }
+      }
+    }
+    _canvasDirty = true;
+    setStatus('数据已编辑，正在同步...', 'busy');
+    const ok = await syncToBackend(true);   // syncToBackend also invalidates cached results
+    updateTopologyTables();
+    setStatus(ok ? '已应用表格编辑' : '同步失败', ok ? '' : 'error');
+    log(`表格编辑：${source.label} #${position + 1} ${field} = ${value}`, ok ? 'success' : 'error');
+  }
+
   function updateTopologyTables() {
     const sys = Canvas.buildSystemJson();
     const m = Canvas.getCompBusMap();
@@ -9519,42 +9875,21 @@ const App = (() => {
     renderComponentCurveTargets('resilience');
 
     // Helper: populate a table and toggle its section visibility.
-    // For very large systems the topology tables are capped so the DOM stays
-    // responsive; a trailing note row reports how many rows were omitted. Use
-    // the "模型IO" export to obtain the complete dataset.
-    const TOPO_ROW_CAP = 500;
-    function fillTable(bodyId, sectionId, items, mapObj, rowFn) {
+    // Rows are rendered through the windowed virtualizer, so there is no row
+    // cap — tables of any size stay responsive. `editTableId` (when given)
+    // enables inline editing by looking up the matching SYSTEM_SEARCH_SOURCES
+    // entry as the commit target.
+    function fillTable(bodyId, sectionId, items, mapObj, rowFn, editTableId) {
       const body = document.querySelector(bodyId + ' tbody');
       if (!body) return;
-      body.innerHTML = '';
       if (sectionId) {
         const sec = document.getElementById(sectionId);
         if (sec) sec.style.display = items.length ? '' : 'none';
       }
-      const total = items.length;
-      const shown = Math.min(total, TOPO_ROW_CAP);
-      const frag = document.createDocumentFragment();
-      for (let i = 0; i < shown; i += 1) {
-        const item = items[i];
-        const tr = document.createElement('tr');
-        const compId = mapObj ? mapObj[item.index] : undefined;
-        if (compId !== undefined) {
-          tr.dataset.compId = compId;
-          tr.addEventListener('click', () => Canvas.panToComponent(compId));
-        }
-        tr.innerHTML = rowFn(item);
-        frag.appendChild(tr);
-      }
-      if (total > shown) {
-        const note = document.createElement('tr');
-        note.className = 'topo-truncated-note';
-        const td = document.createElement('td');
-        td.colSpan = 12;
-        td.textContent = `仅显示前 ${shown} / ${total} 行（大规模系统已截断，完整数据请使用“模型IO”导出）`;
-        note.appendChild(td);
-        frag.appendChild(note);
-      }
-      body.appendChild(frag);
+      const table = body.closest('table');
+      const colspan = table?.querySelector('thead tr')?.children.length || 12;
+      const source = editTableId ? sourceByTableId(editTableId) : null;
+      renderVirtualTable(bodyId, items, mapObj, rowFn, colspan, source);
     }
 
     // Aggregate load per bus from load components
@@ -9581,17 +9916,18 @@ const App = (() => {
         <td>${Number(br.b_pu || 0).toFixed(6)}</td><td>${br.rate_a_mva}</td>
         <td>${(br.tap || 1).toFixed(4)}</td><td>${(br.shift_deg || 0).toFixed(2)}</td>`);
 
-    // Generator table (always shown)
+    // Generator table (always shown). Pg/Qg/Vg/Pmax/Pmin cells are editable
+    // (double-click) and commit straight to the backend session.
     fillTable('#genTableInner', null, sys.ac.generators, m.gen, gen =>
-      `<td>${gen.bus}</td><td>${gen.pg_mw}</td>
-        <td>${gen.qg_mvar}</td><td>${gen.vg_pu}</td>
-        <td>${gen.pmax_mw}</td><td>${gen.pmin_mw}</td>
+      `<td>${gen.bus}</td><td data-edit-field="pg_mw" data-edit-type="number">${gen.pg_mw}</td>
+        <td data-edit-field="qg_mvar" data-edit-type="number">${gen.qg_mvar}</td><td data-edit-field="vg_pu" data-edit-type="number">${gen.vg_pu}</td>
+        <td data-edit-field="pmax_mw" data-edit-type="number">${gen.pmax_mw}</td><td data-edit-field="pmin_mw" data-edit-type="number">${gen.pmin_mw}</td>
         <td>${carbonFactorDisplay(gen.emission_factor_tco2_mwh || gen.co2_emission_rate || 0).toFixed(1)}</td>
-        <td>${gen.is_slack ? '✓' : ''}</td>`);
+        <td>${gen.is_slack ? '✓' : ''}</td>`, 'genTableInner');
 
-    // Load table
+    // Load table. P/Q/Scaling cells are editable (double-click).
     fillTable('#loadTableInner', 'loadSection', sys.ac.loads, m.load, ld =>
-      `<td>${ld.bus}</td><td>${ld.p_mw}</td><td>${ld.q_mvar}</td><td>${ld.scaling}</td>`);
+      `<td>${ld.bus}</td><td data-edit-field="p_mw" data-edit-type="number">${ld.p_mw}</td><td data-edit-field="q_mvar" data-edit-type="number">${ld.q_mvar}</td><td data-edit-field="scaling" data-edit-type="number">${ld.scaling}</td>`, 'loadTableInner');
 
     // Transformer table (non-from_branch only)
     fillTable('#trafoTableInner', 'trafoSection', sys.ac.transformers_2w, m.trafo, t =>
@@ -10301,6 +10637,17 @@ const App = (() => {
     if (tabName === 'results' && document.getElementById('resultsContent')?.dataset.activeGroup === 'transient' && _lastTransientData) {
       requestAnimationFrame(() => drawTransientDashboard(_lastTransientData));
     }
+    if (tabName === 'topology') {
+      // Virtualized tables measure the viewport height; repaint now that the
+      // topology tab (and its scroll containers) are actually visible.
+      requestAnimationFrame(repaintAllVirtualTables);
+    }
+  }
+
+  function repaintAllVirtualTables() {
+    document.querySelectorAll('#tabTopology .topo-table-wrap').forEach(wrap => {
+      if (wrap.querySelector('table')?.__vctx) paintVirtualTable(wrap);
+    });
   }
 
   // ========== Component Library ==========
@@ -10374,7 +10721,7 @@ const App = (() => {
     // Also switch the right-panel result view to the matching module's
     // results group (if any), so the 结果 tab only shows the active
     // module's outputs / placeholder. CSS in style.css drives visibility.
-    setActiveResultGroup(moduleName);
+    setActiveResultGroup(resultGroupForModule(moduleName));
     // The shared summary banner is written by power-flow / short-circuit /
     // harmonics. Clear it when actually switching modules so a previous
     // module's summary does not linger over the new module's result view (each
@@ -10387,13 +10734,26 @@ const App = (() => {
   function renderSubToolbar(moduleName) {
     const bar = document.getElementById('subToolbar');
     if (!bar) return;
+    const subKey = subsectionForModule(moduleName);
     let anyVisible = false;
     bar.querySelectorAll('.sub-section').forEach(sec => {
-      const match = sec.dataset.sub === moduleName;
+      const match = sec.dataset.sub === subKey;
       sec.hidden = !match;
       if (match) anyVisible = true;
     });
     bar.classList.toggle('hidden', !anyVisible);
+    // 时序潮流 (tspf) and 时序生产模拟 (timeSeries) share one sub-section: show only
+    // the action group for the active module. When neither is active (other
+    // modules) both are irrelevant because the section itself is hidden.
+    if (subKey === 'timeSeries') {
+      const isTspf = moduleName === 'tspf';
+      bar.querySelectorAll('.ts-tspf-actions').forEach(el => { el.hidden = !isTspf; });
+      bar.querySelectorAll('.ts-annual-group').forEach(el => { el.hidden = isTspf; });
+      // The annual module is dedicated to annual production simulation, so
+      // reveal its controls directly instead of behind the collapse toggle.
+      const annCtl = document.getElementById('annualSimControls');
+      if (annCtl && !isTspf) annCtl.hidden = false;
+    }
     if (moduleName === 'resilience') markResilienceFaultBranches();
   }
 
@@ -11559,6 +11919,8 @@ const App = (() => {
 
     // Calculation buttons (Bar 3 "运行..." buttons reuse original IDs where possible)
     document.getElementById('btnExportAllResults')?.addEventListener('click', exportAllCachedResults);
+    document.getElementById('btnPinResultSnapshot')?.addEventListener('click', captureResultSnapshot);
+    document.getElementById('btnClearResultSnapshots')?.addEventListener('click', clearResultSnapshots);
     document.getElementById('btnPowerFlow').addEventListener('click', runPowerFlow);
     document.getElementById('btnPfAdvanced')?.addEventListener('click', () => {
       const panel = document.getElementById('pfAdvancedPanel');
@@ -14438,6 +14800,22 @@ const App = (() => {
         handleGlobalElementSearch();
       }
     });
+    // On-demand neighborhood sub-diagram
+    document.getElementById('btnNeighborhoodDiagram')?.addEventListener('click', handleNeighborhoodDiagram);
+    document.getElementById('btnSubDiagramRefresh')?.addEventListener('click', () => {
+      if (_subDiagramFocus) {
+        const hops = Number(document.getElementById('subDiagramHops')?.value) || 2;
+        openSubDiagramFor(_subDiagramFocus.domain, _subDiagramFocus.index, hops);
+      }
+    });
+    document.getElementById('subDiagramHops')?.addEventListener('change', () => {
+      if (_subDiagramFocus) {
+        const hops = Number(document.getElementById('subDiagramHops')?.value) || 2;
+        openSubDiagramFor(_subDiagramFocus.domain, _subDiagramFocus.index, hops);
+      }
+    });
+    document.querySelectorAll('[data-close-subdiagram]').forEach(el =>
+      el.addEventListener('click', closeSubDiagram));
 
     // Display unit selector — re-render cached PF results on change
     const pfDisplayUnit = document.getElementById('pfDisplayUnit');

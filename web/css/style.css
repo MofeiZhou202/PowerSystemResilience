@@ -419,6 +419,17 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   border-radius: 3px; vertical-align: middle; margin: 0 6px;
 }
 
+/* ===== Minimap (Phase 4) ===== */
+.minimap {
+  position: absolute; right: 10px; bottom: 10px; z-index: 22;
+  width: 168px; height: 120px;
+  background: rgba(20,26,38,0.86); border: 1px solid var(--border);
+  border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,0.35);
+  overflow: hidden; cursor: crosshair;
+}
+.minimap svg { width: 100%; height: 100%; display: block; }
+#minimapViewport { pointer-events: none; }
+
 /* ===== Large-system headless (no-canvas) overlay ===== */
 #canvasHeadlessOverlay {
   position: absolute; inset: 0; z-index: 25;
@@ -677,6 +688,26 @@ body[data-active-result-group="modelIO"] #rightPanel {
   outline: 1px solid rgba(97,175,239,0.55);
   outline-offset: -1px;
 }
+/* Virtualized rows require a fixed height so the spacer math is exact. */
+.topo-table-wrap tbody tr { height: 22px; }
+.topo-table-wrap tbody td {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px;
+}
+.topo-table-wrap tr.topo-vspacer,
+.topo-table-wrap tr.topo-vspacer:hover td { height: auto; background: transparent; }
+.topo-table-wrap tr.topo-vspacer td { padding: 0; border: 0; }
+/* Editable cells: hint on hover, inline editor on double-click. */
+.topo-table-wrap td[data-edit-field] { cursor: text; }
+.topo-table-wrap td[data-edit-field]:hover {
+  background: rgba(152,195,121,0.16);
+  box-shadow: inset 0 0 0 1px rgba(152,195,121,0.5);
+}
+.topo-cell-input {
+  width: 100%; box-sizing: border-box; height: 20px;
+  border: 1px solid var(--accent); border-radius: 2px;
+  background: var(--bg); color: var(--ink);
+  font: inherit; font-size: 11px; padding: 0 3px;
+}
 .topo-table-wrap tr.topo-truncated-note td {
   color: var(--ink2); font-style: italic; text-align: center;
   background: var(--bg2); cursor: default;
@@ -803,6 +834,19 @@ body[data-active-result-group="modelIO"] #rightPanel {
   gap: 6px;
   margin-bottom: 8px;
 }
+.result-comparison {
+  margin-bottom: 10px; padding: 8px 10px;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow-x: auto;
+}
+.result-comparison-title { font-size: 12px; font-weight: 700; color: var(--accent); margin-bottom: 6px; }
+.result-comparison table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.result-comparison th, .result-comparison td {
+  padding: 3px 8px; border-bottom: 1px solid var(--border); text-align: right;
+  white-space: nowrap;
+}
+.result-comparison th:first-child, .result-comparison td:first-child { text-align: left; color: var(--ink2); }
+.result-comparison thead th { color: var(--accent); position: sticky; top: 0; background: var(--bg3); }
 .results-summary {
   padding: 10px;
   background: var(--bg3);
@@ -1587,6 +1631,30 @@ body[data-active-result-group="modelIO"] .result-group[data-result-group="modelI
   justify-content: flex-end;
   margin-top: 16px;
 }
+
+/* ===== On-demand neighborhood sub-diagram (Phase 4) ===== */
+.sub-diagram-modal {
+  width: min(780px, 94vw);
+  padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.sub-diagram-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  flex-wrap: wrap;
+}
+.sub-diagram-title { font-size: 14px; font-weight: 700; color: var(--accent); }
+.sub-diagram-controls { display: flex; align-items: center; gap: 8px; }
+.sub-diagram-controls .sub-label { flex-direction: row; align-items: center; gap: 4px; margin: 0; }
+.sub-diagram-body {
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--canvas-bg); overflow: hidden;
+}
+#subDiagramSvg { width: 100%; height: 520px; display: block; }
+.sub-diagram-info { font-size: 12px; color: var(--ink2); display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.sub-diagram-info b { color: var(--ink); }
+.subdiag-legend { display: inline-flex; align-items: center; gap: 4px; }
+.subdiag-legend i { display: inline-block; width: 12px; height: 3px; border-radius: 2px; }
+.subdiag-trunc { color: var(--orange); }
 
 /* ===== Scrollbar ===== */
 ::-webkit-scrollbar { width: 6px; height: 6px; }

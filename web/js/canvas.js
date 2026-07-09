@@ -287,12 +287,96 @@ const Canvas = (() => {
       const cs = localStorage.getItem('connectionStyle');
       if (['straight', 'orthogonal', 'avoid'].includes(cs)) state.connectionStyle = cs;
     } catch (e) { /* ignore */ }
+
+    initMinimap();
   }
 
   // ========== View ==========
   function updateViewBox() {
     svg.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
     scheduleViewportCulling();
+    updateMinimapViewport();
+  }
+
+  // ========== Minimap (Phase 4) ==========
+  // A scaled overview of the whole diagram with a viewport rectangle. Dots are
+  // re-rendered only on topology change (coalesced); the viewport rect follows
+  // pan/zoom cheaply. Hidden for small diagrams and headless systems.
+  const MINIMAP_MIN_COMPONENTS = 25;
+  let _minimapPending = false;
+  let _minimapBox = null;   // { minX, minY, scale, offX, offY }
+
+  function scheduleMinimapRender() {
+    if (_minimapPending) return;
+    _minimapPending = true;
+    requestAnimationFrame(() => { _minimapPending = false; renderMinimapDots(); });
+  }
+
+  function renderMinimapDots() {
+    const mm = document.getElementById('minimap');
+    const dotsG = document.getElementById('minimapDots');
+    const mmSvg = document.getElementById('minimapSvg');
+    if (!mm || !dotsG || !mmSvg) return;
+    const comps = state.components;
+    if (comps.length < MINIMAP_MIN_COMPONENTS) { mm.hidden = true; _minimapBox = null; return; }
+    mm.hidden = false;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const c of comps) {
+      if (c.x < minX) minX = c.x; if (c.y < minY) minY = c.y;
+      if (c.x > maxX) maxX = c.x; if (c.y > maxY) maxY = c.y;
+    }
+    const pad = 60;
+    minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+    const w = Math.max(1, maxX - minX), h = Math.max(1, maxY - minY);
+    const W = 168, H = 120;
+    mmSvg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    const scale = Math.min(W / w, H / h);
+    const offX = (W - w * scale) / 2, offY = (H - h * scale) / 2;
+    _minimapBox = { minX, minY, scale, offX, offY };
+    let parts = '';
+    for (const c of comps) {
+      const x = offX + (c.x - minX) * scale, y = offY + (c.y - minY) * scale;
+      const color = c.type === 'ac_bus' ? '#61afef' : c.type === 'dc_bus' ? '#56b6c2'
+        : (c.type && c.type.endsWith('_bus') ? '#98c379' : '#8a94a6');
+      parts += `<rect x="${(x - 1).toFixed(1)}" y="${(y - 1).toFixed(1)}" width="2.2" height="2.2" fill="${color}"/>`;
+    }
+    dotsG.innerHTML = parts;
+    updateMinimapViewport();
+  }
+
+  function updateMinimapViewport() {
+    const rect = document.getElementById('minimapViewport');
+    if (!rect || !_minimapBox) return;
+    const b = _minimapBox;
+    rect.setAttribute('x', (b.offX + (viewBox.x - b.minX) * b.scale).toFixed(1));
+    rect.setAttribute('y', (b.offY + (viewBox.y - b.minY) * b.scale).toFixed(1));
+    rect.setAttribute('width', Math.max(2, viewBox.w * b.scale).toFixed(1));
+    rect.setAttribute('height', Math.max(2, viewBox.h * b.scale).toFixed(1));
+  }
+
+  function minimapRecenter(clientX, clientY) {
+    const mmSvg = document.getElementById('minimapSvg');
+    if (!mmSvg || !_minimapBox) return;
+    const pt = mmSvg.createSVGPoint();
+    pt.x = clientX; pt.y = clientY;
+    const ctm = mmSvg.getScreenCTM();
+    if (!ctm) return;
+    const p = pt.matrixTransform(ctm.inverse());
+    const b = _minimapBox;
+    const worldX = b.minX + (p.x - b.offX) / b.scale;
+    const worldY = b.minY + (p.y - b.offY) / b.scale;
+    viewBox.x = worldX - viewBox.w / 2;
+    viewBox.y = worldY - viewBox.h / 2;
+    updateViewBox();
+  }
+
+  function initMinimap() {
+    const mmSvg = document.getElementById('minimapSvg');
+    if (!mmSvg) return;
+    let dragging = false;
+    mmSvg.addEventListener('mousedown', (e) => { dragging = true; minimapRecenter(e.clientX, e.clientY); e.preventDefault(); e.stopPropagation(); });
+    window.addEventListener('mousemove', (e) => { if (dragging) minimapRecenter(e.clientX, e.clientY); });
+    window.addEventListener('mouseup', () => { dragging = false; });
   }
 
   // Hide component glyphs outside the visible viewBox (+margin) for large
@@ -6142,6 +6226,7 @@ const Canvas = (() => {
         el.textContent = `${state.components.length} 元件 | ${state.connections.length} 连接${selText}`;
       }
     }
+    scheduleMinimapRender();
   }
 
   // ========== Headless (no-canvas) overview overlay ==========
@@ -6204,6 +6289,14 @@ const Canvas = (() => {
     }
     // Defer so the log/status paint before the (potentially heavy) render.
     setTimeout(() => loadFromSystemJson(sys, { forceRender: true }), 30);
+  }
+
+  // Mutate the stored headless system in place (used by the editable topology
+  // tables when there is no canvas glyph to edit). buildSystemJson() clones this
+  // object, so the mutation is picked up by the next syncToBackend().
+  function updateHeadlessSystem(fn) {
+    if (!state.headless || !state.headlessSystem || typeof fn !== 'function') return false;
+    try { fn(state.headlessSystem); return true; } catch (_) { return false; }
   }
 
   // ========== Pan-to-Component & Highlight ==========
@@ -6557,6 +6650,7 @@ const Canvas = (() => {
     getHeadlessPolicy,
     setHeadlessPolicy,
     forceRenderCurrentSystem,
+    updateHeadlessSystem,
 	    showPowerFlowResults,
 	    showCarbonPotentialResults,
 	    showReliabilityImpactResults,

@@ -1,7 +1,8 @@
 > Documentation Sync (2026-07-09)
 > Scope: the live single-page GUI in `web/` served by `tests/run_gui_server.cpp`.
-> Status: design / planning note. Phase 1 (large-system headless mode) is implemented;
->   later phases are proposals to be verified against source before execution.
+> Status: design note tracking implementation. Phases 1, 2, 4, and 5 are
+>   implemented and covered by `tests/e2e/gui_scale_features_e2e.mjs`; Phase 3
+>   (async/LOD mid-band rendering) and the follow-ups noted inline remain open.
 > Source of truth: when text and implementation diverge, treat `web/`, `src/`,
 >   `include/`, and `tests/run_gui_server.cpp` as authoritative.
 
@@ -276,7 +277,7 @@ instead of the current ~5.5 s blocking build.
 
 ---
 
-## 7. Phase 4 — Navigation, search & bulk editing at scale
+## 7. Phase 4 — Navigation, search & bulk editing at scale  *(implemented)*
 
 Make large systems *inspectable and editable* without a full diagram — this is
 what turns headless mode from "compute-only" into a real workflow.
@@ -287,63 +288,76 @@ what turns headless mode from "compute-only" into a real workflow.
    `getCompBusMap()`), or switches to the `拓扑` tab, shows a summary banner
    (`#topologySearchResult`), and scroll-highlights the row in headless mode
    (backed by `Canvas.buildSystemJson()` over the stored `headlessSystem`).
-   `SYSTEM_SEARCH_SOURCES` covers every AC/DC/hybrid element class with aliases.
-   Known limit: an element **beyond the `TOPO_ROW_CAP` (500)** table cut-off is
-   still found (banner carries the full record, status names it) but cannot be
-   row-highlighted until item 2 (virtualized tables) lands.
-2. **Spreadsheet-grade `拓扑` tab.** Promote the read-only tables to editable,
-   virtualized grids (windowed rendering so 50k rows stay smooth) with
-   type-aware inputs, multi-row edit, and filter/sort. Writes go through
-   `syncToBackend(force=true)` in batches. This becomes the primary editor for
-   headless systems and removes the `TOPO_ROW_CAP` limitation via virtualization
-   rather than truncation.
-3. **On-demand sub-diagram.** "Draw neighborhood of bus N (k hops)" renders only
-   a local subgraph on the canvas — full interactivity where it matters, without
-   drawing the whole grid.
-4. **Minimap** for canvas-mode medium systems to keep orientation.
+   The registry moved to `web/js/search_registry.js` (`window.HACDCSearch`) as
+   the first modularization seam.
+2. **Virtualized, editable `拓扑` tables.** *(implemented)* `fillTable` now
+   renders through a fixed-height windowed virtualizer (`TOPO_ROW_H`, spacer
+   rows) — only ~20 `<tr>` are materialized regardless of size, so the
+   `TOPO_ROW_CAP` truncation is gone (verified: all 2,869 rows of
+   `case2869pegase` reachable; search highlights row 2,499). Generator (Pg/Qg/
+   Vg/Pmax/Pmin) and load (P/Q/Scaling) cells are inline-editable on double-click
+   and commit to the backend session — headless via
+   `Canvas.updateHeadlessSystem()` mutating the stored system, canvas via the
+   glyph's `params` — then `syncToBackend(force=true)`. (Multi-row edit / sort /
+   filter remain a follow-up.)
+3. **On-demand sub-diagram.** *(implemented)* `邻域图` extracts the k-hop
+   neighborhood of a bus (`buildSystemGraph` BFS over branches/transformers/VSC/
+   DC-DC, capped at `SUBDIAGRAM_MAX_NODES`) and draws it with a ring layout in a
+   read-only modal (`#subDiagramModal`) — the main canvas, headless state, and
+   backend are never touched.
+4. **Minimap** *(implemented)* — a scaled overview with a viewport rectangle in
+   `#canvasContainer` (`renderMinimapDots`/`updateMinimapViewport`); click/drag
+   recenters. Shown only for canvas-mode diagrams (≥ `MINIMAP_MIN_COMPONENTS`);
+   hidden in headless mode.
 
 ---
 
-## 8. Phase 5 — Results & front-end code architecture
+## 8. Phase 5 — Results & front-end code architecture  *(implemented)*
 
-### 8.1 Results UX
+### 8.1 Results UX  *(implemented)*
 
-- Unify per-module `.result-group` blocks under a consistent results dock with a
-  single **导出全部结果** action and a scenario/run **comparison** slot (the
-  resilience module already accumulates `_resilienceComparisonRuns`; generalize
-  it).
-- Keep results table rendering independent of the canvas (already true) so
+- A unified results dock action bar carries **全部结果导出**
+  (`exportAllCachedResults`) and a generalized run **comparison** slot
+  (`对比快照` → `captureResultSnapshot`/`renderResultComparison`): each pin
+  snapshots the current PF/OPF/time-series/carbon key metrics into a side-by-side
+  `#resultComparison` table, so different cases or settings compare without
+  leaving the panel (verified: two cases pinned, 3 columns).
+- Result tables render from API responses, independent of the canvas, so
   headless systems show full result tables.
 
-### 8.2 Modularization (behind stable seams)
+### 8.2 Modularization (behind stable seams)  *(started)*
 
-Split the two monoliths into ES modules **without** changing the public
-`Canvas.*` and `App.*` surfaces already relied on across files:
+The first extraction landed: the pure element-search registry + query parsers
+moved to `web/js/search_registry.js` (`window.HACDCSearch`), loaded before
+`app.js`, which binds them to unchanged local names — demonstrating the seam with
+zero call-site churn and no behavior change (the e2e suite still passes). The
+remaining monolith is split incrementally along the same pattern:
 
 ```
 web/js/
+  search_registry.js  (done: SOURCES + pure parsers)
   core/       api.js  state.js (tiny store)  bus.js (events)  units.js  log.js
   canvas/     engine.js  render.js  layout.js  headless.js  overlays.js
-  modelio/    load.js  export.js  compatibility.js
-  analysis/   powerflow.js  opf.js  shortcircuit.js  harmonics.js  transient.js
-              timeseries.js  reliability.js  resilience.js  carbon.js  hosting.js
-              topology.js  scenario.js  integrated_energy.js
+  analysis/   powerflow.js  opf.js  …  timeseries.js  carbon.js  …
   panels/     properties.js  topology_tables.js  results.js
   app.js      (thin bootstrap that wires the above)
 ```
 
-Migration is mechanical and incremental: move one module's functions into its
-file, re-export through `App` for compatibility, delete the old copy. Each move
-is independently testable against the running server. Prefer sequential
+Migration stays mechanical: move one module's functions into its file, re-export
+for compatibility, delete the old copy, re-run the e2e suite. Prefer sequential
 single-file edits over multi-file batch edits (repository memory: batch edits on
 large JS files have silently corrupted paired read/write logic before).
 
-### 8.3 Front-end smoke tests
+### 8.3 Front-end smoke tests  *(implemented)*
 
-Add a lightweight Playwright script under `tests/` that loads a small and a large
-case, asserts `Canvas.isHeadless()` transitions, PF convergence, and table
-population — codifying the Phase 1 manual validation so future refactors keep the
-contract.
+`tests/e2e/gui_scale_features_e2e.mjs` is a standalone Node + Playwright driver
+(registered in `tests/CMakeLists.txt` as `gui_scale_features_e2e`, gated on
+`node`, label `browser`). It starts the server and asserts the whole scalability
+contract in one run: headless transitions, headless PF/OPF, windowed tables +
+beyond-cap search highlight, inline editing, sub-diagram isolation, canvas-mode
+minimap, the time-series 时序潮流/时序生产模拟 split, and the results comparison
+— 21 checks, all passing. This codifies the manual validation so future
+refactors keep the contract.
 
 ---
 
@@ -354,8 +368,15 @@ contract.
 | 1 | Headless large-system mode | S | Low | **Done** |
 | 2 | Module grouping + dependency chips + guided run | S–M | Low | **Done** |
 | 3 | Async/LOD rendering for 600–5k | M | Medium | Proposed |
-| 4 | Search + virtualized editable tables + sub-diagram | M–L | Medium | **Partial** — element search done; virtualized tables + sub-diagram pending |
-| 5 | Results dock + JS modularization + FE tests | L | Medium | Proposed |
+| 4 | Search + virtualized editable tables + sub-diagram + minimap | M–L | Medium | **Done** (multi-row edit/sort/filter follow-up) |
+| 5 | Results dock + comparison + FE tests + modularization | L | Medium | **Done** (modularization ongoing, incremental) |
+
+> Domain refinement (shipped): the old `时序生产模拟` module was split so that
+> **时序潮流 (TSPF)** lives under `安全与动态` (a time-stepped feasibility/security
+> study) while **时序生产模拟 (annual production simulation)** stays under
+> `规划与运行`. Both share one sub-section + modeling controls; the active module
+> only toggles which action group (`.ts-tspf-actions` vs `.ts-annual-group`) is
+> shown, avoiding any duplicated control IDs.
 
 Sequencing rationale: Phase 1 removes the hard ceiling immediately; Phase 2 is
 pure UX with no engine risk; Phases 3–4 restore visual/editing capability in the

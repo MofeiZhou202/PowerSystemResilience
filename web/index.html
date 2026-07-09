@@ -73,6 +73,7 @@
   <button id="moduleShortCircuit" class="module-btn" data-module="shortCircuit" data-group="security">短路计算</button>
   <button id="moduleHarmonics"    class="module-btn" data-module="harmonics" data-group="steady">谐波潮流</button>
   <button id="moduleTransient"    class="module-btn" data-module="transient" data-group="security">暂态仿真</button>
+  <button id="moduleTspf"         class="module-btn" data-module="tspf" data-group="security" data-subsection="timeSeries">时序潮流</button>
   <button id="moduleTopology"     class="module-btn" data-module="topology" data-group="planning">拓扑重构</button>
   <button id="moduleTopologyAnalysis" class="module-btn" data-module="topologyAnalysis" data-group="modeling">拓扑分析</button>
   <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries" data-group="planning">时序生产模拟</button>
@@ -96,6 +97,7 @@
   <div class="global-search">
     <input id="globalElementSearch" type="search" placeholder="定位: bus 1487 / dc bus 3 / gen 12 / 名称" aria-label="定位母线或元件"/>
     <button id="btnGlobalElementSearch" class="toolbar-btn" title="在画布或无画布拓扑中定位">定位</button>
+    <button id="btnNeighborhoodDiagram" class="toolbar-btn" title="绘制该母线的局部邻域子图（适用于无画布/大规模系统）">邻域图</button>
   </div>
 </div>
 
@@ -800,7 +802,7 @@
         <span>协同选址</span>
       </label>
     </div>
-    <div class="control-param-group ts-param-group ts-param-group-actions" title="时序潮流：在单一连续时段上按上面的公共设置求解 UC→OPF→PF（可选按日并行 / 日周期SOC）">
+    <div class="control-param-group ts-param-group ts-param-group-actions ts-tspf-actions" title="时序潮流：在单一连续时段上按上面的公共设置求解 UC→OPF→PF（可选按日并行 / 日周期SOC）">
       <span class="control-param-title">时序潮流</span>
       <label class="sub-label" title="时序潮流仿真时长（小时）；>24h 时保留并铺展导入的时序数据，可配合「按日并行」加速">仿真时间(小时)
         <input id="simulationHours" type="number" value="24" min="1" step="1"/>
@@ -1313,6 +1315,12 @@
       <g id="tempLayer"></g>
     </svg>
     <div id="vizLegend"><span class="legend-min">0%</span> <span class="legend-bar"></span> <span class="legend-max">100% 负载率</span></div>
+    <div id="minimap" class="minimap" hidden title="缩略图导航：点击/拖动可平移主视图">
+      <svg id="minimapSvg" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
+        <g id="minimapDots"></g>
+        <rect id="minimapViewport" fill="rgba(97,175,239,0.18)" stroke="#61afef" stroke-width="1"/>
+      </svg>
+    </div>
   </div>
 
   <!-- Right: Property Editor + Topology Tables -->
@@ -1592,7 +1600,10 @@
       <div id="resultsContent" style="display:none">
         <div class="results-actions">
           <button id="btnExportAllResults" class="toolbar-btn" title="将当前会话中已产生的分析结果合并导出为一个 JSON 文件">全部结果导出</button>
+          <button id="btnPinResultSnapshot" class="toolbar-btn" title="将当前潮流/最优潮流/时序/碳流关键指标记录为一个快照，用于跨方案对比">对比快照 +</button>
+          <button id="btnClearResultSnapshots" class="toolbar-btn" title="清空所有对比快照" hidden>清空对比</button>
         </div>
+        <div id="resultComparison" class="result-comparison" hidden></div>
         <div id="resultsSummary" class="results-summary"></div>
         <div class="result-group" data-result-group="powerFlow">
         <div class="topo-section" id="pfBalanceSection" style="display:none">
@@ -2051,7 +2062,34 @@
   </div>
 </div>
 
+<!-- ===== On-demand neighborhood sub-diagram (Phase 4) ===== -->
+<div id="subDiagramModal" class="modal" style="display:none">
+  <div class="modal-backdrop" data-close-subdiagram></div>
+  <div class="modal-content sub-diagram-modal">
+    <div class="sub-diagram-header">
+      <span id="subDiagramTitle" class="sub-diagram-title">邻域子图</span>
+      <span class="sub-diagram-controls">
+        <label class="sub-label">跳数
+          <select id="subDiagramHops">
+            <option value="1">1 跳</option>
+            <option value="2" selected>2 跳</option>
+            <option value="3">3 跳</option>
+            <option value="4">4 跳</option>
+          </select>
+        </label>
+        <button id="btnSubDiagramRefresh" class="toolbar-btn" title="按当前跳数重绘">重绘</button>
+        <button id="btnSubDiagramClose" class="toolbar-btn" title="关闭" data-close-subdiagram>关闭 ×</button>
+      </span>
+    </div>
+    <div class="sub-diagram-body">
+      <svg id="subDiagramSvg" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
+    <div id="subDiagramInfo" class="sub-diagram-info"></div>
+  </div>
+</div>
+
   <script src="js/components.js?v=20260703-model-io"></script>
+  <script src="js/search_registry.js?v=20260709-phase5"></script>
   <script src="js/canvas.js?v=20260703-pf-options"></script>
   <script src="js/app.js?v=20260703-pf-options"></script>
 </body>
