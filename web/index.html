@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Hybrid AC/DC Power System Simulator — ETAP-Style</title>
-<link rel="stylesheet" href="css/style.css?v=20260703-pf-options"/>
+<link rel="stylesheet" href="css/style.css?v=20260710-parameter-library"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -51,6 +51,7 @@
     <input type="file" id="fileImportOpendss" accept=".dss,.txt,.csv,.dat" multiple style="display:none"/>
     <input type="file" id="fileImportOpendssProject" webkitdirectory directory multiple style="display:none"/>
     <input type="file" id="fileImportPsdJulia" accept=".jl,text/x-julia,text/plain" style="display:none"/>
+    <input type="file" id="fileImportParameterLibrary" accept=".json,application/json" style="display:none"/>
     <button id="btnToggleTheme" class="btn btn-sm" title="切换浅色 / 深色背景主题">🌓 主题</button>
     <span id="canvasInfo" class="canvas-info">0 元件 | 0 连接</span>
     <span id="statusBadge" class="badge">就绪</span>
@@ -69,6 +70,7 @@
 <!-- ===== Bar 2b: Function Modules ===== -->
 <div id="moduleBar" class="module-bar">
   <button id="moduleModelIO"      class="module-btn" data-module="modelIO" data-group="modeling">模型IO</button>
+  <button id="moduleParameterLibrary" class="module-btn" data-module="parameterLibrary" data-group="modeling">模型参数</button>
   <button id="modulePowerFlow"    class="module-btn" data-module="powerFlow" data-group="steady">潮流计算</button>
   <button id="moduleOpf"          class="module-btn" data-module="opf" data-group="steady">最优潮流</button>
   <button id="moduleShortCircuit" class="module-btn" data-module="shortCircuit" data-group="security">短路计算</button>
@@ -146,6 +148,32 @@
       <span class="sub-hint">统一入口：输入、输出、模型标准兼容性集中在这里。</span>
     </div>
   </div>
+  <!-- Standard component parameter profiles and model diagnostics -->
+  <div class="sub-section parameter-library-sub-section" data-sub="parameterLibrary" hidden>
+    <div class="io-toolbar-group">
+      <div class="io-toolbar-group-title">参数配置</div>
+      <label class="sub-label">配置
+        <select id="parameterLibraryProfile" title="选择标准元件参数配置"></select>
+      </label>
+      <button id="btnParameterLibrarySelect" class="toolbar-btn" title="载入所选内置参数配置并放弃未保存编辑">载入配置</button>
+      <label class="sub-label">元件
+        <select id="parameterLibraryComponentFilter" title="按元件类型筛选参数">
+          <option value="">全部元件</option>
+        </select>
+      </label>
+      <button id="btnParameterLibrarySave" class="toolbar-btn run-btn" title="保存表格中的参数、范围和来源到当前会话">保存编辑</button>
+    </div>
+    <div class="io-toolbar-group">
+      <div class="io-toolbar-group-title">模型检查</div>
+      <button id="btnParameterLibraryValidate" class="toolbar-btn run-btn" title="使用当前参数库检查当前模型">校验当前模型</button>
+      <button id="btnParameterLibraryApply" class="toolbar-btn" title="只为缺失或无效的参数应用当前配置默认值">补全缺失参数</button>
+    </div>
+    <div class="io-toolbar-group">
+      <div class="io-toolbar-group-title">交换</div>
+      <button id="btnParameterLibraryImport" class="toolbar-btn" title="导入参数库 JSON">导入参数库</button>
+      <button id="btnParameterLibraryExport" class="toolbar-btn" title="导出当前参数库 JSON">导出参数库</button>
+    </div>
+  </div>
   <!-- Power flow -->
   <div class="sub-section power-flow-sub-section" data-sub="powerFlow" hidden>
     <div class="pf-toolbar-row">
@@ -162,7 +190,7 @@
           <option value="three_phase">三相不对称</option>
         </select>
       </label>
-      <label class="sub-label">损耗模型
+      <label id="pfLossModelControl" class="sub-label">损耗模型
         <select id="pfLossModel" title="VSC / DC-DC 损耗模型">
           <option value="linear">线性</option>
           <option value="current_based">电流相关</option>
@@ -192,13 +220,34 @@
       <button id="btnPowerFlow" class="toolbar-btn run-btn" title="运行潮流计算">运行潮流计算</button>
       <button id="btnExportPfResults" class="toolbar-btn" title="将潮流计算结果导出为 JSON 文件">结果导出</button>
       <button id="btnPfAdvanced" class="toolbar-btn" type="button" aria-expanded="false" aria-controls="pfAdvancedPanel" title="展开高级潮流参数">高级潮流</button>
-      <label class="sub-label sub-checkbox" title="混合 AC/DC 潮流必须校核 DC 岛电压形成与变换器协调可行性">
+      <label id="pfCoordCheckControl" class="sub-label sub-checkbox" title="混合 AC/DC 潮流必须校核 DC 岛电压形成与变换器协调可行性">
         <input id="pfCoordCheck" type="checkbox" checked/>
         <span>多变换器校核</span>
       </label>
     </div>
     <div id="pfAdvancedPanel" class="pf-advanced-panel" hidden>
-      <div class="pf-option-group">
+      <div id="pfThreePhaseOptions" class="pf-option-group pf-three-phase-options" hidden>
+        <div class="pf-option-title">三相abc</div>
+        <label class="sub-label">求解器
+          <select id="pfThreePhaseAlgorithm" title="abc相域潮流求解器">
+            <option value="compact">紧凑不动点</option>
+            <option value="newton">牛顿-拉夫逊</option>
+            <option value="fixed_point">固定点</option>
+          </select>
+        </label>
+        <label class="sub-label">分析范围
+          <select id="pfThreePhaseScope" title="三相交流或分阶段三相交直流分析">
+            <option value="auto">自动</option>
+            <option value="ac_only">仅三相交流</option>
+            <option value="staged_hybrid">分阶段三相交直流</option>
+          </select>
+        </label>
+        <label class="sub-label">调压迭代<input id="pfThreePhaseControlIter" type="number" min="1" step="1" value="100"/></label>
+        <label class="sub-label">最低V(pu)<input id="pfThreePhaseVmin" type="number" min="0.01" step="0.01" value="0.95"/></label>
+        <label class="sub-label sub-checkbox"><input id="pfThreePhaseShunts" type="checkbox" checked/><span>并联支路</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfThreePhaseOpenDss" type="checkbox" checked/><span>OpenDSS对比</span></label>
+      </div>
+      <div class="pf-option-group" data-pf-model="balanced">
         <div class="pf-option-title">收敛</div>
         <label class="sub-label">FDPF迭代<input id="pfFdpfMaxIter" type="number" min="1" step="1" value="1000"/></label>
         <label class="sub-label">Δθ(rad)<input id="pfMaxDeltaVa" type="number" step="0.01" value="1.5"/></label>
@@ -209,7 +258,7 @@
         <label class="sub-label">λ0<input id="pfRegularizationLambda0" type="number" step="1e-7" value="1e-6"/></label>
         <label class="sub-label">λ增长<input id="pfRegularizationGrowth" type="number" step="0.1" value="10"/></label>
       </div>
-      <div class="pf-option-group">
+      <div class="pf-option-group" data-pf-model="balanced">
         <div class="pf-option-title">开关</div>
         <label class="sub-label sub-checkbox"><input id="pfPvPqConversion" type="checkbox" checked/><span>PV/PQ</span></label>
         <label class="sub-label sub-checkbox"><input id="pfAutoSwing" type="checkbox" checked/><span>自动平衡</span></label>
@@ -219,7 +268,7 @@
         <label class="sub-label sub-checkbox"><input id="pfAugmentedEquations" type="checkbox"/><span>增广方程</span></label>
         <label class="sub-label sub-checkbox"><input id="pfSemiSmoothNewton" type="checkbox"/><span>半光滑NR</span></label>
       </div>
-      <div class="pf-option-group">
+      <div class="pf-option-group" data-pf-model="balanced">
         <div class="pf-option-title">换流器</div>
         <label class="sub-label">Q滞环<input id="pfPvQHysteresis" type="number" step="0.001" value="0.01"/></label>
         <label class="sub-label">恢复V差<input id="pfPvRecoverVmTol" type="number" step="0.001" value="0.01"/></label>
@@ -227,7 +276,7 @@
         <label class="sub-label">Vdc低阈<input id="pfVdcSwitchLow" type="number" step="0.001" value="0.01"/></label>
         <label class="sub-label">模式滞后<input id="pfModeHysteresis" type="number" min="0" step="1" value="2"/></label>
       </div>
-      <div class="pf-option-group">
+      <div class="pf-option-group" data-pf-model="balanced">
         <div class="pf-option-title">全局化</div>
         <label class="sub-label">策略
           <select id="pfGlobalization">
@@ -241,7 +290,7 @@
         <label class="sub-label">PTC初值<input id="pfPtcDelta0" type="number" step="0.1" value="1"/></label>
         <label class="sub-label">PTC增长<input id="pfPtcGrowth" type="number" step="0.1" value="2"/></label>
       </div>
-      <div class="pf-option-group">
+      <div class="pf-option-group" data-pf-model="balanced">
         <div class="pf-option-title">ZIP</div>
         <label class="sub-label">P-Z<input id="pfZipPwZ" type="number" step="0.05" value="0"/></label>
         <label class="sub-label">P-I<input id="pfZipPwI" type="number" step="0.05" value="0"/></label>
@@ -250,7 +299,7 @@
         <label class="sub-label">Q-I<input id="pfZipQwI" type="number" step="0.05" value="0"/></label>
         <label class="sub-label">Q-P<input id="pfZipQwP" type="number" step="0.05" value="1"/></label>
       </div>
-      <div class="pf-option-group">
+      <div class="pf-option-group" data-pf-model="balanced">
         <div class="pf-option-title">鲁棒</div>
         <label class="sub-label sub-checkbox"><input id="pfRobustScaling" type="checkbox" checked/><span>缩放</span></label>
         <label class="sub-label sub-checkbox"><input id="pfRobustEquilibration" type="checkbox" checked/><span>行列均衡</span></label>
@@ -271,33 +320,76 @@
     </div>
   </div>
   <!-- Optimal power flow -->
-  <div class="sub-section" data-sub="opf" hidden>
-    <label class="sub-label">求解器
-      <select id="opfSolver" title="最优潮流求解器">
-        <option value="parity">混合AC/DC · 原生IPM (Parity)</option>
-        <option value="ipopt">混合AC/DC · Ipopt</option>
-        <option value="auto">自动 (Parity→Ipopt)</option>
-        <option value="dispatch">经济调度 (交流)</option>
-        <option value="dc">直流OPF</option>
-      </select>
-    </label>
-    <label class="sub-label sub-checkbox" title="支路热稳定限值 (rate_a)">
-      <input id="opfBranchLimits" type="checkbox" checked/><span>支路限值</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="换流器容量圆约束 P²+Q²≤S²">
-      <input id="opfConvCapacity" type="checkbox" checked/><span>换流器容量</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="换流器交/直流电流限值 (i_ac_max_pu / i_dc_max_pu)">
-      <input id="opfConvCurrent" type="checkbox" checked/><span>换流器电流</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="AC/DC、DC/DC换流器调制比限值 m_min ≤ m ≤ m_max">
-      <input id="opfConvModulation" type="checkbox" checked/><span>换流器调制</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="OPF 收敛后，在 OPF 调度点固定发电出力与电压设定，独立再求解一次潮流，校验 OPF 与潮流的建模/参数一致性">
-      <input id="opfCheckConsistency" type="checkbox"/><span>潮流一致性校验</span>
-    </label>
-    <button id="btnRunOpf" class="toolbar-btn run-btn" title="运行最优潮流">运行最优潮流</button>
-    <span id="opfHint" class="sub-hint">勾选需要施加的约束族；调制/电流/容量限值取自各换流器参数。</span>
+  <div class="sub-section opf-sub-section" data-sub="opf" hidden>
+    <div class="opf-toolbar-row">
+      <label class="sub-label">求解器
+        <select id="opfSolver" title="最优潮流求解器">
+          <option value="parity">混合AC/DC · 原生IPM (Parity)</option>
+          <option value="ipopt">混合AC/DC · Ipopt</option>
+          <option value="auto">自动 (Parity→Ipopt)</option>
+          <option value="dispatch">经济调度 (交流)</option>
+          <option value="dc">直流OPF</option>
+        </select>
+      </label>
+      <label class="sub-label">网络模型
+        <select id="opfNetworkModel" title="OPF网络模型及三相可行性校验范围">
+          <option value="balanced_aggregate">平衡聚合模型</option>
+          <option value="balanced_with_three_phase_validation">平衡OPF + 三相校验</option>
+        </select>
+      </label>
+      <label class="sub-label sub-checkbox" title="支路热稳定限值 (rate_a)">
+        <input id="opfBranchLimits" type="checkbox" checked/><span>支路限值</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="换流器容量圆约束 P²+Q²≤S²">
+        <input id="opfConvCapacity" type="checkbox" checked/><span>换流器容量</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="换流器交/直流电流限值 (i_ac_max_pu / i_dc_max_pu)">
+        <input id="opfConvCurrent" type="checkbox" checked/><span>换流器电流</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="AC/DC、DC/DC换流器调制比限值 m_min ≤ m ≤ m_max">
+        <input id="opfConvModulation" type="checkbox" checked/><span>换流器调制</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="OPF 收敛后，在 OPF 调度点固定发电出力与电压设定，独立再求解一次潮流，校验 OPF 与潮流的建模/参数一致性">
+        <input id="opfCheckConsistency" type="checkbox"/><span>潮流一致性校验</span>
+      </label>
+      <button id="btnRunOpf" class="toolbar-btn run-btn" title="运行最优潮流">运行最优潮流</button>
+      <button id="btnOpfAdvanced" class="toolbar-btn" type="button" aria-expanded="false" aria-controls="opfAdvancedPanel" title="展开高级最优潮流参数">高级OPF</button>
+    </div>
+    <div id="opfAdvancedPanel" class="pf-advanced-panel" hidden>
+      <div class="pf-option-group">
+        <div class="pf-option-title">收敛</div>
+        <label class="sub-label">内层迭代<input id="opfMaxIterations" type="number" min="1" step="1" value="400"/></label>
+        <label class="sub-label">外层迭代<input id="opfMaxOuterIterations" type="number" min="1" step="1" value="8"/></label>
+        <label class="sub-label">线搜索<input id="opfMaxLineSearch" type="number" min="1" step="1" value="20"/></label>
+        <label class="sub-label">可行性容差<input id="opfFeasibilityTol" type="number" min="1e-12" step="1e-7" value="1e-6"/></label>
+        <label class="sub-label">驻点容差<input id="opfStationarityTol" type="number" min="1e-12" step="1e-7" value="1e-6"/></label>
+      </div>
+      <div class="pf-option-group">
+        <div class="pf-option-title">障碍法</div>
+        <label class="sub-label">μ0<input id="opfBarrierMu0" type="number" min="1e-12" step="0.001" value="0.01"/></label>
+        <label class="sub-label">μ缩减<input id="opfBarrierReduction" type="number" min="0.01" max="0.99" step="0.05" value="0.2"/></label>
+        <label class="sub-label">正则化<input id="opfRegularization" type="number" min="0" step="1e-7" value="1e-6"/></label>
+        <label class="sub-label">AC线程<input id="opfAcEvalThreads" type="number" min="1" step="1" value="1"/></label>
+        <label class="sub-label sub-checkbox"><input id="opfAllowFallback" type="checkbox" checked/><span>允许回退</span></label>
+        <label class="sub-label sub-checkbox"><input id="opfVerbose" type="checkbox"/><span>Verbose</span></label>
+      </div>
+      <div id="opfThreePhaseOptions" class="pf-option-group" hidden>
+        <div class="pf-option-title">三相校验</div>
+        <label class="sub-label">求解器
+          <select id="opfThreePhaseAlgorithm">
+            <option value="compact">紧凑不动点</option>
+            <option value="newton">牛顿-拉夫逊</option>
+            <option value="fixed_point">固定点</option>
+          </select>
+        </label>
+        <label class="sub-label">最大迭代<input id="opfThreePhaseMaxIter" type="number" min="1" step="1" value="100"/></label>
+        <label class="sub-label">容差<input id="opfThreePhaseTol" type="number" min="1e-12" step="1e-7" value="1e-6"/></label>
+        <label class="sub-label">调压迭代<input id="opfThreePhaseControlIter" type="number" min="1" step="1" value="100"/></label>
+        <label class="sub-label">最低V(pu)<input id="opfThreePhaseVmin" type="number" min="0.01" step="0.01" value="0.95"/></label>
+        <label class="sub-label sub-checkbox"><input id="opfThreePhaseShunts" type="checkbox" checked/><span>并联支路</span></label>
+        <label class="sub-label sub-checkbox"><input id="opfThreePhaseOpenDss" type="checkbox" checked/><span>OpenDSS对比</span></label>
+      </div>
+    </div>
   </div>
   <!-- Carbon flow -->
   <div class="sub-section" data-sub="carbonFlow" hidden>
@@ -1686,6 +1778,10 @@
           <h4>最优潮流 — AC节点电压/电价</h4>
           <div id="opfBusResults" class="topo-table-wrap"></div>
         </div>
+        <div class="topo-section" id="opfThreePhaseSection" style="display:none">
+          <h4>最优潮流 — 三相不平衡可行性校验</h4>
+          <div id="opfThreePhaseResults" class="topo-table-wrap"></div>
+        </div>
         <div class="topo-section" id="opfConsistencySection" style="display:none">
           <h4>最优潮流 — 潮流一致性校验 (OPF↔潮流 建模/参数)</h4>
           <div id="opfConsistencyResults" class="topo-table-wrap"></div>
@@ -1805,6 +1901,30 @@
             </div>
           </div>
         </div><!-- /result-group modelIO -->
+        <div class="result-group" data-result-group="parameterLibrary">
+          <div class="topo-section parameter-library-section">
+            <div class="parameter-library-heading">
+              <div>
+                <h4>模型参数补全与校验</h4>
+                <p id="parameterLibraryDescription" class="parameter-library-description"></p>
+              </div>
+              <div id="parameterLibrarySummary" class="parameter-library-summary"></div>
+            </div>
+            <div id="parameterLibraryTableWrap" class="parameter-library-table-wrap">
+              <table id="parameterLibraryTable">
+                <thead><tr>
+                  <th>元件</th><th>参数</th><th>默认值</th><th>单位</th>
+                  <th>下限</th><th>上限</th><th>级别</th><th>来源 / 依据</th>
+                </tr></thead>
+                <tbody><tr><td colspan="8">正在载入参数库...</td></tr></tbody>
+              </table>
+            </div>
+            <h5>模型参数诊断</h5>
+            <div id="parameterLibraryDiagnostics" class="parameter-library-diagnostics">
+              <p class="empty-hint">运行模型校验后显示参数错误与告警。</p>
+            </div>
+          </div>
+        </div><!-- /result-group parameterLibrary -->
         <div class="result-group" data-result-group="topology">
         <div class="topo-section">
           <h4>拓扑重构结果</h4>
@@ -2092,7 +2212,7 @@
 
   <script src="js/components.js?v=20260703-model-io"></script>
   <script src="js/search_registry.js?v=20260709-phase5"></script>
-  <script src="js/canvas.js?v=20260703-pf-options"></script>
-  <script src="js/app.js?v=20260703-pf-options"></script>
+  <script src="js/canvas.js?v=20260710-unbalanced-analysis"></script>
+  <script src="js/app.js?v=20260710-parameter-library"></script>
 </body>
 </html>

@@ -458,14 +458,15 @@ class BusBuilder {
              double base_kv = 0.0,
              BusType type = BusType::PQ,
              double vm_pu = 1.0,
-             double va_deg = 0.0) {
+             double va_deg = 0.0,
+             bool update_existing_base_kv = true) {
     name = strip_bus_phases(strip_quotes(trim(std::move(name))));
     if (name.empty()) name = "bus_" + std::to_string(sys_.ac.buses.size() + 1U);
     const std::string key = ascii_lower(name);
     auto it = by_name_.find(key);
     if (it != by_name_.end()) {
       auto& bus = sys_.ac.buses[static_cast<std::size_t>(it->second - 1)];
-      if (base_kv > kTiny) bus.base_kv = base_kv;
+      if (update_existing_base_kv && base_kv > kTiny) bus.base_kv = base_kv;
       if (type == BusType::SLACK) bus.bus_type = BusType::SLACK;
       if (vm_pu > kTiny) bus.vm_pu = vm_pu;
       bus.va_deg = va_deg;
@@ -1379,6 +1380,11 @@ bool glm_has_power_injection(const GlmObject& obj) {
       return true;
     }
   }
+  for (const auto& phases : {"AB", "BC", "CA"}) {
+    if (!glm_prop(obj, "constant_power_" + std::string(phases)).empty()) {
+      return true;
+    }
+  }
   for (const auto& key : {"power_1", "power_2", "power_12"}) {
     if (!glm_prop(obj, key).empty()) return true;
   }
@@ -1647,12 +1653,26 @@ ExternalGridImportReport import_gridlabd_text(
                                    positive_or(options.default_base_mva, 100.0));
       cfg.primary_kv = glm_number(obj, "primary_voltage", 0.0) / 1000.0;
       cfg.secondary_kv = glm_number(obj, "secondary_voltage", 0.0) / 1000.0;
-      cfg.r_pu_on_rating = glm_number(obj, "resistance", 0.0);
-      cfg.x_pu_on_rating = glm_number(obj, "reactance", 0.0);
+      const std::string resistance = glm_prop(obj, "resistance");
+      const std::string reactance = glm_prop(obj, "reactance");
+      const std::complex<double> impedance =
+          parse_complex_rect(glm_prop(obj, "impedance", "0+0j"));
+      cfg.r_pu_on_rating = resistance.empty()
+                                ? impedance.real()
+                                : parse_number(resistance, 0.0);
+      cfg.x_pu_on_rating = reactance.empty()
+                                ? impedance.imag()
+                                : parse_number(reactance, 0.0);
+      if (std::hypot(cfg.r_pu_on_rating, cfg.x_pu_on_rating) <= kTiny) {
+        report.warnings.push_back(
+            "GridLAB-D transformer configuration " + name +
+            " has zero series impedance after parsing resistance/reactance/impedance.");
+      }
       transformer_configs[ascii_lower(name)] = cfg;
     }
   }
 
+  bool projected_line_to_line_load = false;
   for (const auto& obj : objects) {
     if (obj.cls != "meter" && obj.cls != "load" && obj.cls != "node" &&
         obj.cls != "triplex_meter" && obj.cls != "triplex_node") {
@@ -1692,6 +1712,15 @@ ExternalGridImportReport import_gridlabd_text(
       if (std::abs(zip_power) > 1e-6) {
         power_va += zip_power;
         has_power = true;
+      }
+    }
+    for (const auto& phases : {"AB", "BC", "CA"}) {
+      const std::string value =
+          glm_prop(obj, "constant_power_" + std::string(phases));
+      if (!value.empty()) {
+        power_va += parse_complex_rect(value);
+        has_power = true;
+        projected_line_to_line_load = true;
       }
     }
     for (const auto& key : {"power_1", "power_2", "power_12"}) {
@@ -1819,8 +1848,14 @@ ExternalGridImportReport import_gridlabd_text(
         continue;
       }
       const auto& cfg = cfg_it->second;
-      const int from = buses.ensure(from_name, positive_or(cfg.primary_kv, options.default_base_kv_ll));
-      const int to = buses.ensure(to_name, positive_or(cfg.secondary_kv, buses.base_kv(from)));
+      // Transformer nameplate voltages describe the winding, not necessarily the
+      // declared node's nominal-voltage base. Preserve explicit node metadata.
+      const int from = buses.ensure(
+          from_name, positive_or(cfg.primary_kv, options.default_base_kv_ll),
+          BusType::PQ, 1.0, 0.0, false);
+      const int to = buses.ensure(
+          to_name, positive_or(cfg.secondary_kv, buses.base_kv(from)),
+          BusType::PQ, 1.0, 0.0, false);
       const double z_scale = positive_or(report.system.ac.base_mva, 100.0) /
                              positive_or(cfg.rating_mva, report.system.ac.base_mva);
 
@@ -1853,6 +1888,13 @@ ExternalGridImportReport import_gridlabd_text(
                obj.cls != "capacitor") {
       report.skipped.push_back("Unsupported GridLAB-D object skipped: " + obj.cls);
     }
+  }
+
+  if (projected_line_to_line_load) {
+    report.warnings.push_back(
+        "GridLAB-D constant_power_AB/BC/CA loads were included in the balanced "
+        "snapshot by total complex-power aggregation; phase connection and "
+        "unbalance are not preserved.");
   }
 
   return finalise_import(std::move(report), options);

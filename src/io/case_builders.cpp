@@ -4468,4 +4468,520 @@ HybridPowerSystem build_networked_microgrids_islanding() {
   return sys;
 }
 
+HybridPowerSystem build_urban_lvn_primary_secondary() {
+  constexpr double kBaseMva = 10.0;
+  constexpr double kHvKv = 230.0;
+  constexpr double kPrimaryKv = 13.8;
+  constexpr double kSecondaryKv = 0.48;
+  constexpr int kFeederCount = 4;
+  constexpr int kDistrictsPerFeeder = 6;
+  constexpr int kDistrictCount = kFeederCount * kDistrictsPerFeeder;
+  constexpr int kStreetBusesPerDistrict = 12;
+
+  HybridPowerSystem sys;
+  sys.name = "Urban LVNTS Primary-Secondary AC/DC Benchmark";
+  sys.base_mva = kBaseMva;
+  sys.ac.base_mva = kBaseMva;
+  sys.ac.freq_hz = 50.0;
+  sys.ac.name = "Urban primary and secondary distribution";
+  sys.dc.base_mva = kBaseMva;
+  sys.dc.name = "Urban fast-charging DC corridor";
+
+  ThreePhaseACSystem phase;
+  phase.name = "Urban LVNTS phase-domain network";
+  phase.base_mva = kBaseMva;
+  phase.base_freq_hz = 50.0;
+
+  auto add_bus = [&](const std::string& name, double base_kv, BusType type,
+                     int area, double longitude, double latitude) {
+    ACBus bus;
+    bus.index = static_cast<int>(sys.ac.buses.size()) + 1;
+    bus.name = name;
+    bus.bus_type = type;
+    bus.base_kv = base_kv;
+    bus.vm_pu = 1.0;
+    bus.vmin_pu = base_kv < 1.0 ? 0.85 : 0.90;
+    bus.vmax_pu = 1.10;
+    bus.area = area;
+    bus.zone = area;
+    bus.longitude = longitude;
+    bus.latitude = latitude;
+    bus.in_service = true;
+    sys.ac.buses.push_back(bus);
+
+    ThreePhaseACBus phase_bus;
+    phase_bus.index = bus.index;
+    phase_bus.name = name;
+    phase_bus.bus_type = type;
+    phase_bus.base_kv = base_kv;
+    phase_bus.phase_mask = PhaseMask::abc();
+    phase_bus.vmin_pu = bus.vmin_pu;
+    phase_bus.vmax_pu = bus.vmax_pu;
+    phase_bus.area = area;
+    phase_bus.zone = area;
+    phase_bus.in_service = true;
+    phase.buses.push_back(phase_bus);
+    return bus.index;
+  };
+
+  auto add_line = [&](const std::string& name, int from_bus, int to_bus,
+                      double r_pu, double x_pu, double length_km,
+                      double rating_mva) {
+    ACBranch branch;
+    branch.index = static_cast<int>(sys.ac.branches.size()) + 1;
+    branch.name = name;
+    branch.from_bus = from_bus;
+    branch.to_bus = to_bus;
+    branch.r_pu = r_pu;
+    branch.x_pu = x_pu;
+    branch.r0_pu = 3.0 * r_pu;
+    branch.x0_pu = 3.0 * x_pu;
+    branch.tap = 1.0;
+    branch.length_km = length_km;
+    branch.rate_a_mva = rating_mva;
+    branch.rate_b_mva = rating_mva;
+    branch.rate_c_mva = rating_mva;
+    branch.n_parallel = 1;
+    branch.in_service = true;
+    sys.ac.branches.push_back(branch);
+
+    ThreePhaseACLine phase_line;
+    phase_line.index = static_cast<int>(phase.lines.size()) + 1;
+    phase_line.name = name;
+    phase_line.from_bus = from_bus;
+    phase_line.to_bus = to_bus;
+    phase_line.phase_mask = PhaseMask::abc();
+    phase_line.r1_pu = r_pu;
+    phase_line.x1_pu = x_pu;
+    phase_line.r0_pu = 3.0 * r_pu;
+    phase_line.x0_pu = 3.0 * x_pu;
+    phase_line.length_km = length_km;
+    phase_line.rate_a_mva = rating_mva;
+    phase_line.parallel = 1;
+    phase_line.in_service = true;
+    phase.lines.push_back(phase_line);
+  };
+
+  auto add_transformer = [&](const std::string& name, int hv_bus, int lv_bus,
+                             double sn_mva, double vn_hv_kv,
+                             double vn_lv_kv, double r_on_rating,
+                             double x_on_rating, const std::string& vector_group,
+                             const std::string& hv_topology,
+                             const std::string& lv_topology) {
+    const double scale = kBaseMva / sn_mva;
+    ACBranch branch;
+    branch.index = static_cast<int>(sys.ac.branches.size()) + 1;
+    branch.name = name;
+    branch.from_bus = hv_bus;
+    branch.to_bus = lv_bus;
+    branch.r_pu = r_on_rating * scale;
+    branch.x_pu = x_on_rating * scale;
+    branch.tap = 1.0;
+    branch.rate_a_mva = sn_mva;
+    branch.rate_b_mva = sn_mva;
+    branch.rate_c_mva = sn_mva;
+    branch.vn_hv_kv = vn_hv_kv;
+    branch.vn_lv_kv = vn_lv_kv;
+    branch.sn_mva = sn_mva;
+    branch.in_service = true;
+    sys.ac.branches.push_back(branch);
+
+    ThreePhaseTransformer transformer;
+    transformer.index = static_cast<int>(phase.transformers.size()) + 1;
+    transformer.name = name;
+    transformer.hv_bus = hv_bus;
+    transformer.lv_bus = lv_bus;
+    transformer.hv_phase_mask = PhaseMask::abc();
+    transformer.lv_phase_mask = PhaseMask::abc();
+    transformer.sn_mva = sn_mva;
+    transformer.vn_hv_kv = vn_hv_kv;
+    transformer.vn_lv_kv = vn_lv_kv;
+    transformer.vk_percent = 100.0 * std::hypot(r_on_rating, x_on_rating);
+    transformer.vkr_percent = 100.0 * r_on_rating;
+    transformer.vector_group = vector_group;
+    transformer.hv_winding_topology = hv_topology;
+    transformer.lv_winding_topology = lv_topology;
+    transformer.in_service = true;
+    phase.transformers.push_back(transformer);
+  };
+
+  auto phase_shares = [](int seed) {
+    switch (seed % 4) {
+      case 0: return std::vector<double>{0.42, 0.31, 0.27};
+      case 1: return std::vector<double>{0.27, 0.43, 0.30};
+      case 2: return std::vector<double>{0.31, 0.28, 0.41};
+      default: return std::vector<double>{0.34, 0.33, 0.33};
+    }
+  };
+
+  auto add_load = [&](const std::string& name, int bus, double p_mw,
+                      double q_mvar, int seed, bool delta,
+                      bool single_phase, int profile_id = -1) {
+    Load load;
+    load.index = static_cast<int>(sys.ac.loads.size()) + 1;
+    load.name = name;
+    load.bus = bus;
+    load.p_mw = p_mw;
+    load.q_mvar = q_mvar;
+    load.scaling = 1.0;
+    load.profile_id = profile_id;
+    load.in_service = true;
+    sys.ac.loads.push_back(load);
+
+    ThreePhaseLoad phase_load;
+    phase_load.index = static_cast<int>(phase.loads.size()) + 1;
+    phase_load.name = name;
+    phase_load.bus = bus;
+    phase_load.connection = delta ? "delta" : "wye";
+    phase_load.grounded = !delta;
+    phase_load.vmin_pu = 0.80;
+    phase_load.vmax_pu = 1.10;
+    phase_load.zipv_cutoff_pu = 0.65;
+    if (seed % 3 == 0) {
+      phase_load.const_z_percent = 20.0;
+      phase_load.const_i_percent = 10.0;
+      phase_load.const_p_percent = 70.0;
+    }
+    if (single_phase) {
+      const int selected = seed % 3;
+      phase_load.phase_mask = selected == 0
+                                  ? PhaseMask::a()
+                                  : (selected == 1 ? PhaseMask::b()
+                                                   : PhaseMask::c());
+      if (selected == 0) {
+        phase_load.p_a_mw = p_mw;
+        phase_load.q_a_mvar = q_mvar;
+      } else if (selected == 1) {
+        phase_load.p_b_mw = p_mw;
+        phase_load.q_b_mvar = q_mvar;
+      } else {
+        phase_load.p_c_mw = p_mw;
+        phase_load.q_c_mvar = q_mvar;
+      }
+    } else {
+      phase_load.phase_mask = PhaseMask::abc();
+      const auto shares = phase_shares(seed);
+      phase_load.p_a_mw = p_mw * shares[0];
+      phase_load.p_b_mw = p_mw * shares[1];
+      phase_load.p_c_mw = p_mw * shares[2];
+      phase_load.q_a_mvar = q_mvar * shares[0];
+      phase_load.q_b_mvar = q_mvar * shares[1];
+      phase_load.q_c_mvar = q_mvar * shares[2];
+    }
+    phase.loads.push_back(phase_load);
+  };
+
+  const int hv_bus = add_bus("Grid-230kV", kHvKv, BusType::SLACK, 0, -4.0, 0.0);
+  const int primary_source =
+      add_bus("Primary-13k8-Substation", kPrimaryKv, BusType::PQ, 0, 0.0, 0.0);
+  add_transformer("T-HV-Primary", hv_bus, primary_source, 50.0, kHvKv,
+                  kPrimaryKv, 0.0075, 0.075, "Dd0", "AB,BC,CA",
+                  "AB,BC,CA");
+
+  Generator source;
+  source.index = 1;
+  source.name = "Urban-Grid-Source";
+  source.bus = hv_bus;
+  source.is_slack = true;
+  source.vg_pu = 1.0;
+  source.pmax_mw = 50.0;
+  source.pmin_mw = -10.0;
+  source.qmax_mvar = 30.0;
+  source.qmin_mvar = -30.0;
+  source.mbase_mva = 50.0;
+  source.in_service = true;
+  sys.ac.generators.push_back(source);
+
+  ThreePhaseExternalGrid phase_source;
+  phase_source.index = 1;
+  phase_source.name = "Urban-Grid-Source";
+  phase_source.bus = hv_bus;
+  phase_source.vm_pu = 1.0;
+  phase_source.va_deg = 0.0;
+  phase_source.s_sc_max_mva = 2500.0;
+  phase_source.s_sc_min_mva = 1500.0;
+  phase_source.rx_max = 0.1;
+  phase_source.rx_min = 0.1;
+  phase_source.r1_pu = 0.0004;
+  phase_source.x1_pu = 0.004;
+  phase_source.r2_pu = phase_source.r1_pu;
+  phase_source.x2_pu = phase_source.x1_pu;
+  phase_source.r0_pu = 0.0012;
+  phase_source.x0_pu = 0.012;
+  phase_source.source_topology = "A,B,C";
+  phase.external_grids.push_back(phase_source);
+
+  std::vector<int> primary_buses(kDistrictCount);
+  std::vector<int> secondary_heads(kDistrictCount);
+  std::vector<std::vector<int>> street_buses(
+      kDistrictCount, std::vector<int>(kStreetBusesPerDistrict));
+
+  const double primary_zbase = kPrimaryKv * kPrimaryKv / kBaseMva;
+  const double secondary_zbase =
+      kSecondaryKv * kSecondaryKv / kBaseMva;
+
+  for (int district = 0; district < kDistrictCount; ++district) {
+    const int feeder = district / kDistrictsPerFeeder;
+    const int position = district % kDistrictsPerFeeder;
+    const int area = feeder + 1;
+    const double x = 10.0 * feeder;
+    const double y = 5.0 * (position + 1);
+    primary_buses[district] = add_bus(
+        "F" + std::to_string(feeder + 1) + "-Primary-D" +
+            std::to_string(position + 1),
+        kPrimaryKv, BusType::PQ, area, x, y);
+    secondary_heads[district] = add_bus(
+        "F" + std::to_string(feeder + 1) + "-Secondary-D" +
+            std::to_string(position + 1),
+        kSecondaryKv, BusType::PQ, area, x + 2.2, y);
+
+    const int primary_from =
+        position == 0 ? primary_source : primary_buses[district - 1];
+    const double primary_length_km =
+        0.45 + 0.08 * static_cast<double>((district * 5) % 6);
+    const double primary_r = 0.18 * primary_length_km / primary_zbase;
+    const double primary_x = 0.30 * primary_length_km / primary_zbase;
+    add_line("F" + std::to_string(feeder + 1) + "-MV-" +
+                 std::to_string(position + 1),
+             primary_from, primary_buses[district], primary_r, primary_x,
+             primary_length_km, 8.0);
+
+    const double transformer_rating =
+        district % 3 == 0 ? 1.5 : (district % 3 == 1 ? 2.0 : 2.5);
+    add_transformer(
+        "F" + std::to_string(feeder + 1) + "-TX-D" +
+            std::to_string(position + 1),
+        primary_buses[district], secondary_heads[district],
+        transformer_rating, kPrimaryKv, kSecondaryKv, 0.007, 0.07,
+        "Dyn11", "AB,BC,CA", "A,B,C");
+
+    const double commercial_p = 0.055 + 0.005 * (district % 5);
+    add_load("District-Commercial-" + std::to_string(district + 1),
+             secondary_heads[district], commercial_p, 0.28 * commercial_p,
+             district + 1000, district % 4 == 0, false, 1);
+
+    int previous = secondary_heads[district];
+    for (int street = 0; street < kStreetBusesPerDistrict; ++street) {
+      const double street_x = x + 3.5 + 0.8 * (street % 4);
+      const double street_y = y + 0.65 * (street / 4);
+      street_buses[district][street] = add_bus(
+          "F" + std::to_string(feeder + 1) + "-D" +
+              std::to_string(position + 1) + "-LV" +
+              std::to_string(street + 1),
+          kSecondaryKv, BusType::PQ, area, street_x, street_y);
+      const double length_km =
+          0.040 + 0.005 * static_cast<double>((district + street) % 7);
+      const double secondary_r = 0.12 * length_km / secondary_zbase;
+      const double secondary_x = 0.08 * length_km / secondary_zbase;
+      add_line("F" + std::to_string(feeder + 1) + "-D" +
+                   std::to_string(position + 1) + "-Service-" +
+                   std::to_string(street + 1),
+               previous, street_buses[district][street], secondary_r,
+               secondary_x, length_km, 0.75);
+      previous = street_buses[district][street];
+
+      const int seed = district * kStreetBusesPerDistrict + street;
+      const double p_mw = 0.018 + 0.002 * static_cast<double>((seed * 7) % 9);
+      const double q_mvar = p_mw * (0.27 + 0.01 * (seed % 6));
+      const bool single_phase = seed % 11 == 0;
+      const bool delta = !single_phase && seed % 5 == 0;
+      add_load("Urban-Service-" + std::to_string(seed + 1),
+               street_buses[district][street], p_mw, q_mvar, seed, delta,
+               single_phase, 1);
+    }
+
+    if (district % 2 == 0) {
+      const int pv_bus = street_buses[district].back();
+      const double pv_power = 0.075 + 0.01 * (district % 4);
+      StaticGenerator pv;
+      pv.index = static_cast<int>(sys.ac.static_generators.size()) + 1;
+      pv.name = "Rooftop-PV-D" + std::to_string(district + 1);
+      pv.bus = pv_bus;
+      pv.sgen_type = SgenType::PV;
+      pv.p_mw = pv_power;
+      pv.p_rated_mw = 1.2 * pv_power;
+      pv.sn_mva = 1.25 * pv_power;
+      pv.pmax_mw = pv.p_rated_mw;
+      pv.pmin_mw = 0.0;
+      pv.qmax_mvar = 0.3 * pv.sn_mva;
+      pv.qmin_mvar = -pv.qmax_mvar;
+      pv.scaling = 1.0;
+      pv.controllable = true;
+      pv.in_service = true;
+      sys.ac.static_generators.push_back(pv);
+
+      ThreePhaseGenerator phase_pv;
+      phase_pv.index = static_cast<int>(phase.generators.size()) + 1;
+      phase_pv.name = pv.name;
+      phase_pv.bus = pv_bus;
+      phase_pv.phase_mask = PhaseMask::abc();
+      const auto shares = phase_shares(district + 2);
+      phase_pv.p_a_mw = pv_power * shares[0];
+      phase_pv.p_b_mw = pv_power * shares[1];
+      phase_pv.p_c_mw = pv_power * shares[2];
+      phase_pv.pmax_mw = pv.pmax_mw;
+      phase_pv.pmin_mw = 0.0;
+      phase_pv.qmax_mvar = pv.qmax_mvar;
+      phase_pv.qmin_mvar = pv.qmin_mvar;
+      phase_pv.mbase_mva = pv.sn_mva;
+      phase_pv.in_service = true;
+      phase.generators.push_back(phase_pv);
+    }
+
+    if (district % 6 == 2) {
+      Storage battery;
+      battery.index = static_cast<int>(sys.ac.storage.size()) + 1;
+      battery.name = "Community-BESS-D" + std::to_string(district + 1);
+      battery.bus = secondary_heads[district];
+      battery.p_rated_mw = 0.25;
+      battery.pmax_mw = 0.25;
+      battery.pmin_mw = -0.25;
+      battery.qmax_mvar = 0.15;
+      battery.qmin_mvar = -0.15;
+      battery.e_rated_mwh = 0.75;
+      battery.e_mwh = 0.45;
+      battery.soc_init = 0.60;
+      battery.soc_min = 0.10;
+      battery.soc_max = 0.90;
+      battery.eta_charge = 0.95;
+      battery.eta_discharge = 0.95;
+      battery.controllable = true;
+      battery.type = "Li-ion";
+      battery.in_service = true;
+      sys.ac.storage.push_back(battery);
+    }
+  }
+
+  for (int feeder = 0; feeder < kFeederCount; ++feeder) {
+    Switch tie;
+    tie.index = static_cast<int>(sys.ac.switches.size()) + 1;
+    tie.name = "Primary-Tie-F" + std::to_string(feeder + 1) + "-F" +
+               std::to_string((feeder + 1) % kFeederCount + 1);
+    tie.bus_from = primary_buses[feeder * kDistrictsPerFeeder +
+                                 kDistrictsPerFeeder - 1];
+    tie.bus_to = primary_buses[((feeder + 1) % kFeederCount) *
+                               kDistrictsPerFeeder + kDistrictsPerFeeder - 1];
+    tie.switch_type = SwitchType::LoadBreakSwitch;
+    tie.closed = false;
+    tie.is_remote = true;
+    tie.is_automated = true;
+    tie.i_rated_ka = 0.63;
+    tie.in_service = true;
+    sys.ac.switches.push_back(tie);
+  }
+
+  sys.dc.buses = {
+      DCBus{.index = 1, .bus_type = DCBusType::DC_P, .vm_pu = 1.0,
+            .vmax_pu = 1.10, .vmin_pu = 0.90, .pd_mw = 0.0,
+            .in_service = true, .name = "DC-Charging-Hub", .base_kv = 0.8},
+      DCBus{.index = 2, .bus_type = DCBusType::DC_P, .vm_pu = 1.0,
+            .vmax_pu = 1.10, .vmin_pu = 0.90, .pd_mw = 0.0,
+            .in_service = true, .name = "DC-Bus-Depot", .base_kv = 0.8},
+      DCBus{.index = 3, .bus_type = DCBusType::DC_P, .vm_pu = 1.0,
+            .vmax_pu = 1.10, .vmin_pu = 0.90, .pd_mw = 0.0,
+            .in_service = true, .name = "DC-Bus-Commercial", .base_kv = 0.8},
+  };
+  sys.dc.branches = {
+      DCBranch{.index = 1, .from_bus = 1, .to_bus = 2, .r_pu = 0.012,
+               .in_service = true, .name = "DC-Corridor-1",
+               .rate_a_mva = 1.5, .length_km = 0.8, .base_kv = 0.8,
+               .s_max_mva = 1.5},
+      DCBranch{.index = 2, .from_bus = 2, .to_bus = 3, .r_pu = 0.015,
+               .in_service = true, .name = "DC-Corridor-2",
+               .rate_a_mva = 1.0, .length_km = 1.1, .base_kv = 0.8,
+               .s_max_mva = 1.0},
+  };
+  sys.dc.loads = {
+      DCLoad{.index = 1, .bus = 2, .in_service = true,
+             .name = "Electric-Bus-Depot", .type = "EV charging",
+             .p_mw = 0.32, .p_rated_mw = 0.50, .scaling = 1.0},
+      DCLoad{.index = 2, .bus = 3, .in_service = true,
+             .name = "Commercial-Fast-Chargers", .type = "EV charging",
+             .p_mw = 0.18, .p_rated_mw = 0.30, .scaling = 1.0},
+  };
+  StaticGeneratorDC dc_pv;
+  dc_pv.index = 1;
+  dc_pv.bus = 3;
+  dc_pv.name = "Charging-Hub-Solar";
+  dc_pv.type = "PV";
+  dc_pv.p_set_mw = 0.12;
+  dc_pv.pmax_mw = 0.18;
+  dc_pv.pmin_mw = 0.0;
+  dc_pv.controllable = true;
+  dc_pv.in_service = true;
+  sys.dc.dc_static_generators.push_back(dc_pv);
+
+  DCStorage dc_battery;
+  dc_battery.index = 1;
+  dc_battery.bus = 1;
+  dc_battery.name = "Charging-Hub-BESS";
+  dc_battery.type = "Li-ion";
+  dc_battery.p_rated_mw = 0.25;
+  dc_battery.pmax_mw = 0.25;
+  dc_battery.pmin_mw = -0.25;
+  dc_battery.e_rated_mwh = 0.8;
+  dc_battery.e_mwh = 0.48;
+  dc_battery.soc_init = 0.60;
+  dc_battery.soc_min = 0.10;
+  dc_battery.soc_max = 0.90;
+  dc_battery.eta_charge = 0.95;
+  dc_battery.eta_discharge = 0.95;
+  dc_battery.in_service = true;
+  sys.dc.dc_storage.push_back(dc_battery);
+
+  VSCConverter converter;
+  converter.index = 1;
+  converter.name = "District-LV-to-Charging-Hub-VSC";
+  converter.bus_ac = secondary_heads[4];
+  converter.bus_dc = 1;
+  converter.control_mode = ConverterMode::VDC_Q;
+  converter.v_dc_set_pu = 1.0;
+  converter.v_ac_set_pu = 1.0;
+  converter.q_set_mvar = 0.0;
+  converter.k_vdc = 25.0;
+  converter.eta = 0.985;
+  converter.p_rated_mw = 2.0;
+  converter.pmax_mw = 2.0;
+  converter.pmin_mw = -2.0;
+  converter.qmax_mvar = 1.0;
+  converter.qmin_mvar = -1.0;
+  converter.vn_ac_kv = kSecondaryKv;
+  converter.vn_dc_kv = 0.8;
+  converter.r_sc_pu = 0.01;
+  converter.x_sc_pu = 0.12;
+  converter.i_max_pu = 1.2;
+  converter.i_ac_max_pu = 1.1;
+  converter.i_dc_max_pu = 1.1;
+  converter.k_m_modulation = 1.0;
+  converter.m_min = 0.05;
+  converter.m_max = 1.0;
+  converter.in_service = true;
+  sys.vsc_converters.push_back(converter);
+
+  Microgrid district_microgrid;
+  district_microgrid.index = 1;
+  district_microgrid.name = "Urban-District-Microgrid";
+  district_microgrid.description =
+      "Community PV, BESS, and DC charging district on feeder 1";
+  district_microgrid.pcc_bus = primary_buses[4];
+  district_microgrid.operating_mode = MicrogridMode::GridConnected;
+  district_microgrid.islanding_capability = true;
+  district_microgrid.auto_reconnection = true;
+  district_microgrid.p_import_max_mw = 2.0;
+  district_microgrid.p_export_max_mw = 0.5;
+  district_microgrid.capacity_mw = 2.0;
+  district_microgrid.in_service = true;
+  for (int district = 0; district < kDistrictsPerFeeder; ++district) {
+    district_microgrid.internal_buses.push_back(primary_buses[district]);
+    district_microgrid.internal_buses.push_back(secondary_heads[district]);
+    district_microgrid.internal_buses.insert(
+        district_microgrid.internal_buses.end(), street_buses[district].begin(),
+        street_buses[district].end());
+  }
+  sys.microgrids.push_back(district_microgrid);
+
+  sys.three_phase_ac = std::move(phase);
+  return sys;
+}
+
 }  // namespace hacdcpf::io

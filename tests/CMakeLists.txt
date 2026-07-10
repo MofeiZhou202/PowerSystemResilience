@@ -78,6 +78,10 @@ hacdcpf_add_test(test_unit_conversion     test_unit_conversion.cpp)
 # Typical parameters: opt-in sparse hybrid AC/DC parameter completion.
 hacdcpf_add_test(test_typical_parameters  test_typical_parameters.cpp)
 
+# Internal LVNT-inspired urban primary/secondary performance benchmark.
+hacdcpf_add_test(test_urban_lvn_primary_secondary
+                 test_urban_lvn_primary_secondary.cpp)
+
 # Rich components: Transformer2W/3W, PVSystem, Storage, VSCConverter, etc.
 hacdcpf_add_test(test_rich_components     test_rich_components.cpp)
 

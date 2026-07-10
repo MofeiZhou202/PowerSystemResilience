@@ -495,7 +495,8 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   overflow: hidden;
 }
 body[data-active-result-group="transient"] #rightPanel,
-body[data-active-result-group="modelIO"] #rightPanel {
+body[data-active-result-group="modelIO"] #rightPanel,
+body[data-active-result-group="parameterLibrary"] #rightPanel {
   width: clamp(760px, 66vw, 1180px);
   min-width: min(760px, calc(100vw - var(--lib-w) - 220px));
   max-width: 82vw;
@@ -999,6 +1000,7 @@ body[data-active-result-group="modelIO"] #rightPanel {
 #resultsContent[data-active-group="harmonics"]    .result-group[data-result-group="harmonics"],
 #resultsContent[data-active-group="transient"]    .result-group[data-result-group="transient"],
 #resultsContent[data-active-group="modelIO"]      .result-group[data-result-group="modelIO"],
+#resultsContent[data-active-group="parameterLibrary"] .result-group[data-result-group="parameterLibrary"],
 #resultsContent[data-active-group="topology"]     .result-group[data-result-group="topology"],
 #resultsContent[data-active-group="topologyAnalysis"] .result-group[data-result-group="topologyAnalysis"],
 #resultsContent[data-active-group="hosting"]      .result-group[data-result-group="hosting"],
@@ -1401,30 +1403,161 @@ tr.ss-mode-selected td { background: rgba(97,175,239,0.22); }
   padding: 1px 4px;
 }
 body[data-active-result-group="transient"] #tabResults,
-body[data-active-result-group="modelIO"] #tabResults {
+body[data-active-result-group="modelIO"] #tabResults,
+body[data-active-result-group="parameterLibrary"] #tabResults {
   padding: 12px;
 }
 body[data-active-result-group="transient"] .result-group[data-result-group="transient"] .topo-section,
-body[data-active-result-group="modelIO"] .result-group[data-result-group="modelIO"] .topo-section {
+body[data-active-result-group="modelIO"] .result-group[data-result-group="modelIO"] .topo-section,
+body[data-active-result-group="parameterLibrary"] .result-group[data-result-group="parameterLibrary"] .topo-section {
   margin-bottom: 0;
 }
 body[data-active-result-group="transient"] .result-group[data-result-group="transient"] .topo-section h4,
-body[data-active-result-group="modelIO"] .result-group[data-result-group="modelIO"] .topo-section h4 {
+body[data-active-result-group="modelIO"] .result-group[data-result-group="modelIO"] .topo-section h4,
+body[data-active-result-group="parameterLibrary"] .result-group[data-result-group="parameterLibrary"] .topo-section h4 {
   font-size: 14px;
   padding: 2px 0 8px;
   margin-bottom: 8px;
 }
 #transientResults table,
-#modelIoResults table {
+#modelIoResults table,
+#parameterLibraryTable {
   margin-top: 6px;
 }
 #transientResults th,
 #transientResults td,
 #modelIoResults th,
-#modelIoResults td {
+#modelIoResults td,
+#parameterLibraryTable th,
+#parameterLibraryTable td {
   font-size: 12px;
   padding: 5px 7px;
 }
+
+/* ===== Standard component parameter library ===== */
+.parameter-library-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+.parameter-library-description {
+  max-width: 760px;
+  margin: 0;
+  color: var(--ink2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.parameter-library-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(82px, 1fr));
+  min-width: 300px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.parameter-library-summary span {
+  min-height: 42px;
+  padding: 6px 9px;
+  border-right: 1px solid var(--border);
+  color: var(--ink2);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.parameter-library-summary span:last-child { border-right: 0; }
+.parameter-library-summary strong {
+  display: block;
+  color: var(--ink);
+  font-size: 14px;
+}
+.parameter-library-table-wrap {
+  max-width: 100%;
+  max-height: min(56vh, 620px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 6px 0 14px;
+}
+#parameterLibraryTable {
+  width: 100%;
+  min-width: 1120px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+#parameterLibraryTable th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 32px;
+  background: var(--bg3);
+  color: var(--ink2);
+  text-align: left;
+  font-weight: 600;
+}
+#parameterLibraryTable th:nth-child(1) { width: 130px; }
+#parameterLibraryTable th:nth-child(2) { width: 185px; }
+#parameterLibraryTable th:nth-child(3),
+#parameterLibraryTable th:nth-child(5),
+#parameterLibraryTable th:nth-child(6) { width: 100px; }
+#parameterLibraryTable th:nth-child(4) { width: 80px; }
+#parameterLibraryTable th:nth-child(7) { width: 100px; }
+#parameterLibraryTable th:nth-child(8) { width: 320px; }
+#parameterLibraryTable td {
+  height: 34px;
+  border-bottom: 1px solid var(--border);
+  color: var(--ink);
+  vertical-align: middle;
+}
+#parameterLibraryTable tr:hover td { background: rgba(97,175,239,0.08); }
+.parameter-rule-label,
+.parameter-rule-key {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.parameter-rule-key {
+  color: var(--ink2);
+  font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+  font-size: 10px;
+}
+.parameter-library-input,
+.parameter-library-select {
+  width: 100%;
+  height: 25px;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 5px;
+}
+.parameter-library-input:focus,
+.parameter-library-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.parameter-library-diagnostics {
+  max-height: 280px;
+  overflow: auto;
+  border-top: 1px solid var(--border);
+}
+.parameter-diagnostic-row {
+  display: grid;
+  grid-template-columns: 72px 170px minmax(280px, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 7px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+.parameter-diagnostic-row strong { color: var(--red); }
+.parameter-diagnostic-row.warning strong { color: var(--orange); }
+.parameter-diagnostic-row code { color: var(--ink2); }
+
 @media (max-width: 1150px) {
   .transient-dashboard-grid { grid-template-columns: 1fr; }
   .model-io-dashboard-grid { grid-template-columns: 1fr; }
@@ -1453,20 +1586,31 @@ body[data-active-result-group="modelIO"] .result-group[data-result-group="modelI
     min-width: 0;
   }
   body[data-active-result-group="transient"] #rightPanel,
-  body[data-active-result-group="modelIO"] #rightPanel {
+  body[data-active-result-group="modelIO"] #rightPanel,
+  body[data-active-result-group="parameterLibrary"] #rightPanel {
     width: 100vw;
     min-width: 0;
     max-width: none;
   }
   body[data-active-result-group="transient"] #componentLib,
   body[data-active-result-group="modelIO"] #componentLib,
+  body[data-active-result-group="parameterLibrary"] #componentLib,
   body[data-active-result-group="transient"] #canvasContainer,
   body[data-active-result-group="modelIO"] #canvasContainer,
+  body[data-active-result-group="parameterLibrary"] #canvasContainer,
   body[data-active-result-group="transient"] #rightPanelResizer {
     display: none;
   }
   body[data-active-result-group="modelIO"] #rightPanelResizer {
     display: none;
+  }
+  body[data-active-result-group="parameterLibrary"] #rightPanelResizer {
+    display: none;
+  }
+  .parameter-library-heading { flex-direction: column; }
+  .parameter-library-summary { width: 100%; min-width: 0; }
+  .parameter-diagnostic-row {
+    grid-template-columns: 64px 120px minmax(180px, 1fr);
   }
   .model-io-contract-grid { grid-template-columns: 1fr; }
 }
@@ -2047,7 +2191,8 @@ body[data-active-result-group="modelIO"] .result-group[data-result-group="modelI
 .sub-section[data-sub="reliability"],
 .sub-section[data-sub="timeSeries"],
 .sub-section[data-sub="integratedEnergy"],
-.sub-section[data-sub="modelIO"] {
+.sub-section[data-sub="modelIO"],
+.sub-section[data-sub="parameterLibrary"] {
   align-items: stretch;
   gap: 10px;
   flex-wrap: wrap;
@@ -2057,7 +2202,13 @@ body[data-active-result-group="modelIO"] .result-group[data-result-group="modelI
   align-items: stretch;
   gap: 7px;
 }
-.pf-toolbar-row {
+.opf-sub-section {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 7px;
+}
+.pf-toolbar-row,
+.opf-toolbar-row {
   display: flex;
   align-items: center;
   gap: 8px;

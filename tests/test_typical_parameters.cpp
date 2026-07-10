@@ -1,6 +1,7 @@
 /// @file test_typical_parameters.cpp
 /// @brief Tests for the opt-in typical parameter library.
 
+#include <algorithm>
 #include <string>
 
 #include <catch2/catch_test_macros.hpp>
@@ -206,4 +207,112 @@ TEST_CASE("JSON import stays raw until typical parameters are requested",
   auto filled = with_typical_parameters(sys);
   CHECK(filled.ac.branches[0].r_pu > 0.0);
   CHECK(filled.ac.branches[0].x_pu > 0.0);
+}
+
+TEST_CASE("standard parameter profiles expose editable validated metadata",
+          "[model][parameter_library]") {
+  const auto profiles = standard_parameter_profiles();
+  REQUIRE(profiles.size() >= 2);
+
+  auto library = make_standard_parameter_library("distribution_50hz");
+  CHECK(library.profile_id == "distribution_50hz");
+  CHECK(library.rules.size() >= 20);
+  REQUIRE(library.find("transformer.x_pu") != nullptr);
+  CHECK(library.find("transformer.x_pu")->unit == "pu");
+  CHECK_FALSE(library.find("transformer.x_pu")->source.empty());
+  CHECK(validate_standard_parameter_library(library).ok());
+
+  auto* rule = library.find("ac_branch.r_pu");
+  REQUIRE(rule != nullptr);
+  rule->default_value = rule->max_value + 1.0;
+  const auto invalid = validate_standard_parameter_library(library);
+  CHECK_FALSE(invalid.ok());
+  CHECK(invalid.error_count() == 1);
+}
+
+TEST_CASE("standard parameter library applies edited defaults only when requested",
+          "[model][parameter_library][apply]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 10.0;
+  sys.ac.base_mva = 10.0;
+  ACBus b1;
+  b1.index = 1;
+  b1.bus_type = BusType::SLACK;
+  ACBus b2;
+  b2.index = 2;
+  sys.ac.buses = {b1, b2};
+  ACBranch branch;
+  branch.index = 1;
+  branch.from_bus = 1;
+  branch.to_bus = 2;
+  sys.ac.branches = {branch};
+
+  auto library = make_standard_parameter_library();
+  REQUIRE(library.find("ac_branch.r_pu") != nullptr);
+  REQUIRE(library.find("ac_branch.x_pu") != nullptr);
+  library.find("ac_branch.r_pu")->default_value = 0.025;
+  library.find("ac_branch.x_pu")->default_value = 0.055;
+
+  CHECK_THAT(sys.ac.branches.front().r_pu, WithinAbs(0.0, 1e-12));
+  const auto applied = apply_standard_parameter_library(sys, library);
+  CHECK(applied.fields_changed > 0);
+  CHECK_THAT(sys.ac.branches.front().r_pu, WithinAbs(0.025, 1e-12));
+  CHECK_THAT(sys.ac.branches.front().x_pu, WithinAbs(0.055, 1e-12));
+}
+
+TEST_CASE("parameter validation rejects zero-impedance transformer imports",
+          "[model][parameter_library][validation][lvnt]") {
+  HybridPowerSystem sys;
+  sys.name = "old LVNT import";
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 50.0;
+  ACBus source;
+  source.index = 1;
+  source.bus_type = BusType::SLACK;
+  source.base_kv = 11.0;
+  ACBus load;
+  load.index = 2;
+  load.base_kv = 0.4;
+  sys.ac.buses = {source, load};
+  ACBranch transformer;
+  transformer.index = 1;
+  transformer.name = "LVNT transformer";
+  transformer.from_bus = 1;
+  transformer.to_bus = 2;
+  transformer.sn_mva = 0.5;
+  transformer.vn_hv_kv = 11.0;
+  transformer.vn_lv_kv = 0.4;
+  sys.ac.branches = {transformer};
+
+  ThreePhaseACSystem phase;
+  phase.base_mva = 100.0;
+  phase.base_freq_hz = 50.0;
+  ThreePhaseACBus phase_source;
+  phase_source.index = 1;
+  phase_source.bus_type = BusType::SLACK;
+  phase_source.base_kv = 11.0;
+  ThreePhaseACBus phase_load;
+  phase_load.index = 2;
+  phase_load.base_kv = 0.4;
+  phase.buses = {phase_source, phase_load};
+  ThreePhaseACLine phase_line;
+  phase_line.index = 1;
+  phase_line.from_bus = 1;
+  phase_line.to_bus = 2;
+  phase.lines = {phase_line};
+  sys.three_phase_ac = phase;
+
+  const auto report = validate_component_parameters(sys);
+  CHECK_FALSE(report.ok());
+  const auto found = std::find_if(
+      report.diagnostics.begin(), report.diagnostics.end(), [](const auto& item) {
+        return item.code == "transformer_zero_series_impedance";
+      });
+  CHECK(found != report.diagnostics.end());
+  const auto phase_found = std::find_if(
+      report.diagnostics.begin(), report.diagnostics.end(), [](const auto& item) {
+        return item.code == "three_phase_line_zero_series_impedance";
+      });
+  CHECK(phase_found != report.diagnostics.end());
 }

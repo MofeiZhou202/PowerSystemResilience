@@ -26,6 +26,13 @@ HybridPowerSystem build_networked_microgrids_islanding();
 HybridPowerSystem build_market_3bus_toy();
 HybridPowerSystem build_market_5bus_acdc_toy();
 
+/// LVNT-inspired urban benchmark with a 230/13.8 kV primary substation,
+/// four 13.8 kV feeders, 24 distribution transformers, detailed 0.48 kV
+/// secondary streets, unbalanced wye/delta services, DER, storage, and a
+/// converter-fed DC charging corridor. Both balanced and phase-domain models
+/// are authored from the same deterministic component data.
+HybridPowerSystem build_urban_lvn_primary_secondary();
+
 /// ETAP/OpenDSS-style example specified entirely in *actual* engineering values
 /// (cable ohm/km + length, DC link ohm/km, per-bus base kV).  No per-unit
 /// impedance is supplied; convert_actual_to_per_unit fills it in during
@@ -33,4 +40,3 @@ HybridPowerSystem build_market_5bus_acdc_toy();
 HybridPowerSystem build_actual_value_demo_acdc();
 
 }  // namespace hacdcpf::io
-

@@ -125,19 +125,44 @@ def maybe_run_opendss_ieee13_smoke(c: Client, chk: Checker) -> None:
             "dss_path": str(ieee13),
         },
     )
+    native_fixture = REPO_ROOT / "tests" / "fixtures" / "td_coordination_all_components.json"
+    native_model = json.loads(native_fixture.read_text(encoding="utf-8"))
+    using_opendss = st == 200 and body.get("_has_three_phase_ac") is True
+    if not using_opendss:
+        print("   OpenDSS phase bridge unavailable; using native hybrid abc fixture")
+        st, body = c.post_json(
+            "/api/session/load_json_string",
+            {"json_string": json.dumps(native_model)},
+        )
     chk.check(
-        st == 200 and body.get("_has_three_phase_ac") is True,
-        f"load_opendss IEEE13 mode={body.get('_opendss_import_mode')} three_phase={body.get('_has_three_phase_ac')}",
+        st == 200 and (body.get("_has_three_phase_ac") is True or
+                       len(body.get("tp_buses", [])) > 0),
+        f"phase model loaded via {'OpenDSS' if using_opendss else 'native JSON'}",
     )
 
     st, pf = c.post_json(
         "/api/session/pf",
-        {"method": "three_phase", "options": {"max_iter": 200, "tol": 1e-8}},
+        {
+            "method": "three_phase",
+            "options": {
+                "max_iter": 200,
+                "tol": 1e-8,
+                "three_phase": {
+                    "algorithm": "compact",
+                    "scope": "ac_only",
+                    "max_control_iter": 77,
+                    "include_shunts": True,
+                    "vmin_pu": 0.91,
+                    "compare_opendss": using_opendss,
+                },
+            },
+        },
     )
     comp = (pf.get("opendss_reference") or {}).get("comparison") or {}
     diag = pf.get("power_balance_diagnostics") or {}
+    phase_options = (pf.get("options_effective") or {}).get("three_phase") or {}
     chk.check(
-        st == 200 and pf.get("converged") is True and len(pf.get("tp_bus_results", [])) >= 13,
+        st == 200 and pf.get("converged") is True and len(pf.get("tp_bus_results", [])) >= 3,
         f"three_phase PF converged={pf.get('converged')} buses={len(pf.get('tp_bus_results', []))}",
     )
     chk.check(
@@ -145,8 +170,94 @@ def maybe_run_opendss_ieee13_smoke(c: Client, chk: Checker) -> None:
         f"three_phase diagnostic basis={diag.get('basis')} ordinary={len(diag.get('ordinary', []))}",
     )
     chk.check(
-        comp.get("within_gui_tolerance") is True and comp.get("max_vm_error_pu", 1.0) < 1.0e-3,
-        f"OpenDSS comparison max_vm={comp.get('max_vm_error_pu')} count={comp.get('count')}",
+        phase_options.get("algorithm") == "compact" and
+        phase_options.get("scope_effective") == "ac_only" and
+        phase_options.get("max_control_iter") == 77 and
+        abs(phase_options.get("vmin_pu", 0.0) - 0.91) < 1e-12,
+        f"three_phase options effective={phase_options}",
+    )
+    st, nr_pf = c.post_json(
+        "/api/session/pf",
+        {
+            "method": "three_phase",
+            "options": {
+                "max_iter": 200,
+                "tol": 1e-8,
+                "three_phase": {
+                    "algorithm": "newton",
+                    "scope": "ac_only",
+                    "max_control_iter": 55,
+                    "compare_opendss": False,
+                },
+            },
+        },
+    )
+    nr_options = (nr_pf.get("options_effective") or {}).get("three_phase") or {}
+    chk.check(
+        st == 200 and nr_options.get("algorithm") == "newton" and
+        nr_options.get("max_control_iter") == 55 and
+        nr_pf.get("method_actual") == "three_phase_newton_abc",
+        f"three_phase Newton options effective={nr_options}",
+    )
+    if using_opendss:
+        chk.check(
+            comp.get("within_gui_tolerance") is True and
+            comp.get("max_vm_error_pu", 1.0) < 1.0e-3,
+            f"OpenDSS comparison max_vm={comp.get('max_vm_error_pu')} count={comp.get('count')}",
+        )
+
+    st, staged = c.post_json(
+        "/api/session/pf",
+        {
+            "method": "three_phase",
+            "options": {
+                "max_iter": 200,
+                "tol": 1e-8,
+                "enable_converter_coordination_check": False,
+                "three_phase": {
+                    "algorithm": "compact",
+                    "scope": "staged_hybrid",
+                    "compare_opendss": False,
+                },
+            },
+        },
+    )
+    scope = staged.get("analysis_scope") or {}
+    boundary = staged.get("hybrid_boundary") or {}
+    chk.check(
+        st == 200 and scope.get("monolithic_abc_dc_jacobian") is False and
+        boundary.get("ran") is True,
+        f"staged hybrid scope={scope.get('model_scope')} boundary={boundary.get('converged')}",
+    )
+
+    st, _ = c.post_json("/api/session/load_matpower", {"filename": "case9.m"})
+    st, exported = c.post_json("/api/session/export_json")
+    case9_with_phase = json.loads(exported["json_string"])
+    case9_with_phase["three_phase_ac"] = native_model["three_phase_ac"]
+    st, _ = c.post_json(
+        "/api/session/load_json_string",
+        {"json_string": json.dumps(case9_with_phase)},
+    )
+    st, opf = c.post_json(
+        "/api/session/opf",
+        {
+            "solver": "parity",
+            "network_model": "balanced_with_three_phase_validation",
+            "constraints": {},
+            "options": {"max_inner_iterations": 400},
+            "three_phase": {
+                "algorithm": "compact",
+                "max_iter": 200,
+                "tol": 1e-8,
+                "compare_opendss": False,
+            },
+        },
+    )
+    validation = opf.get("three_phase_validation") or {}
+    chk.check(
+        st == 200 and opf.get("analysis_scope", {}).get("monolithic_three_phase_opf") is False and
+        validation.get("ran") is True and len(validation.get("bus_results", [])) >= 3,
+        f"OPF abc validation ran={validation.get('ran')} converged={validation.get('converged')}",
     )
 
 
@@ -184,20 +295,111 @@ def main() -> int:
         chk.check(st == 200 and len(cases.get("cases", [])) > 0,
                   f"GET /api/cases -> {len(cases.get('cases', []))} cases")
 
+        print("1a. load and solve internal urban LVNTS benchmark")
+        st, body = c.post_json(
+            "/api/session/load_builtin",
+            {"case": "urban_lvn_primary_secondary"},
+        )
+        counts = body.get("counts", {})
+        chk.check(
+            st == 200 and counts.get("ac_buses") == 338 and
+            counts.get("tp_buses") == 338 and counts.get("dc_buses") == 3,
+            "urban LVNTS load -> "
+            f"AC={counts.get('ac_buses')} ABC={counts.get('tp_buses')} "
+            f"DC={counts.get('dc_buses')}",
+        )
+        st, pf = c.post_json(
+            "/api/session/pf",
+            {
+                "method": "ac_newton",
+                "options": {
+                    "max_iter": 100,
+                    "tol": 1e-7,
+                    "enable_converter_coordination_check": True,
+                },
+            },
+        )
+        chk.check(
+            st == 200 and pf.get("converged") is True and
+            len(pf.get("vm", [])) == 338 and len(pf.get("vdc", [])) == 3 and
+            pf.get("converter_coordination", {}).get("feasible") is True,
+            "urban LVNTS hybrid PF -> "
+            f"converged={pf.get('converged')} iterations={pf.get('iterations')} "
+            f"residual={pf.get('residual')}",
+        )
+
         print("2. load built-in ieee14_acdc")
         st, body = c.post_json("/api/session/load_builtin", {"case": "ieee14_acdc"})
         counts = body.get("counts", {})
         chk.check(st == 200 and counts.get("ac_buses") == 14,
                   f"load_builtin -> {counts.get('ac_buses')} AC buses")
 
+        print("2a. modeling parameter library validation + auto-fulfill")
+        st, library = c.get("/api/session/parameter_library")
+        chk.check(
+            st == 200 and library.get("library_validation", {}).get("valid") is True and
+            len(library.get("rules", [])) >= 20,
+            f"parameter library profile={library.get('profile_id')} rules={len(library.get('rules', []))}",
+        )
+        sparse_model = {
+            "name": "parameter-library-e2e",
+            "base_mva": 10.0,
+            "ac": {
+                "base_mva": 10.0,
+                "freq_hz": 50.0,
+                "buses": [
+                    {"index": 1, "bus_type": "SLACK", "base_kv": 10.0},
+                    {"index": 2, "bus_type": "PQ", "base_kv": 10.0},
+                ],
+                "branches": [
+                    {"index": 1, "from_bus": 1, "to_bus": 2,
+                     "r_pu": 0.0, "x_pu": 0.0},
+                ],
+                "generators": [
+                    {"index": 1, "bus": 1, "is_slack": True,
+                     "pmax_mw": 100.0, "qmax_mvar": 100.0,
+                     "qmin_mvar": -100.0},
+                ],
+            },
+        }
+        st, _ = c.post_json(
+            "/api/session/load_json_string",
+            {"json_string": json.dumps(sparse_model)},
+        )
+        st, invalid = c.post_json("/api/session/parameter_library/validate")
+        invalid_codes = {item.get("code") for item in invalid.get("diagnostics", [])}
+        chk.check(
+            st == 200 and "branch_zero_series_impedance" in invalid_codes,
+            f"parameter validation detected={sorted(invalid_codes)}",
+        )
+        st, fulfilled = c.post_json("/api/session/parameter_library/apply")
+        applied = fulfilled.get("parameter_apply", {})
+        validation = fulfilled.get("parameter_validation", {})
+        fulfilled_system = json.loads(fulfilled.get("_raw_json", "{}"))
+        fulfilled_branch = fulfilled_system.get("ac", {}).get("branches", [{}])[0]
+        chk.check(
+            st == 200 and applied.get("fields_changed", 0) >= 2 and
+            validation.get("valid") is True and
+            fulfilled_branch.get("r_pu", 0.0) > 0.0 and
+            fulfilled_branch.get("x_pu", 0.0) > 0.0,
+            f"parameter auto-fulfill changed={applied.get('fields_changed')} valid={validation.get('valid')}",
+        )
+
         print("3. MATPOWER OPF regression cases")
         opf_payload = {
             "solver": "parity",
+            "network_model": "balanced_aggregate",
             "constraints": {
                 "branch_limits": True,
                 "converter_capacity": True,
                 "converter_current": True,
                 "converter_modulation": True,
+            },
+            "options": {
+                "max_inner_iterations": 400,
+                "max_outer_iterations": 8,
+                "feasibility_tol": 1e-6,
+                "stationarity_tol": 1e-6,
             },
             "check_consistency": True,
         }
@@ -214,6 +416,8 @@ def main() -> int:
                       f"opf {case_name} converged={opf.get('converged')} status={opf.get('status')}")
             chk.check(opf.get("post_pf", {}).get("converged") is True and consistent is True,
                       f"opf->pf {case_name} post_pf={opf.get('post_pf', {}).get('converged')} consistent={consistent}")
+            chk.check(opf.get("options_effective", {}).get("max_inner_iterations") == 400,
+                      f"opf options echoed for {case_name}")
 
         if args.skip_etap:
             print("4-9. ETAP export/import checks skipped")

@@ -24,6 +24,7 @@
 #include "hacdcpf/time_series/time_series_pf.hpp"
 #include "hacdcpf/validation/validate_system.hpp"
 #include "hacdcpf/model/typical_parameters.hpp"
+#include "hacdcpf/model/standard_parameter_library.hpp"
 
 namespace hacdcpf {
 

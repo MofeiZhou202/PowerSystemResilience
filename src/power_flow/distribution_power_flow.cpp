@@ -4417,7 +4417,7 @@ ThreePhaseJPCPhase runpf_phase(
   if (opt.algorithm == PhaseDomainSolverAlgorithm::Newton) {
     ThreePhaseNROptions nr_opt;
     nr_opt.max_iter = opt.max_iter;
-    nr_opt.max_control_iter = 100;
+    nr_opt.max_control_iter = opt.max_control_iter;
     nr_opt.tol = opt.tol;
     nr_opt.verbose = opt.verbose;
     nr_opt.include_shunts = opt.include_shunts;

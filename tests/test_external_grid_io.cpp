@@ -4,6 +4,7 @@
 #include <fstream>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -458,6 +459,117 @@ object transformer {
   CHECK_THAT(sys.ac.branches.front().x_pu, WithinAbs(0.05, 1e-12));
   CHECK_THAT(sys.ac.branches.front().vn_hv_kv, WithinAbs(35.0, 1e-12));
   CHECK_THAT(sys.ac.branches.front().vn_lv_kv, WithinAbs(10.0, 1e-12));
+}
+
+TEST_CASE("GridLAB-D transformer complex impedance preserves declared bus bases",
+          "[io][external][gridlabd][transformer][regression]") {
+  const std::string glm = R"(
+object meter {
+  name source;
+  nominal_voltage 7200;
+  bustype SWING;
+};
+object node {
+  name loadbus;
+  nominal_voltage 240;
+};
+object transformer_configuration {
+  name cfg_t1;
+  power_rating 500;
+  primary_voltage 13200;
+  secondary_voltage 480;
+  impedance 0.0075+.075j;
+};
+object transformer {
+  name t1;
+  from source;
+  to loadbus;
+  configuration cfg_t1;
+};
+)";
+
+  hacdcpf::io::GridLABDImportOptions options;
+  options.default_base_mva = 10.0;
+  const auto report = hacdcpf::io::from_gridlabd_with_report(glm, options);
+
+  REQUIRE(report.system.ac.buses.size() == 2);
+  REQUIRE(report.system.ac.branches.size() == 1);
+  const auto& branch = report.system.ac.branches.front();
+  CHECK_THAT(branch.r_pu, WithinAbs(0.15, 1e-12));
+  CHECK_THAT(branch.x_pu, WithinAbs(1.5, 1e-12));
+  CHECK_THAT(report.system.ac.buses[0].base_kv,
+             WithinAbs(7200.0 * std::sqrt(3.0) / 1000.0, 1e-12));
+  CHECK_THAT(report.system.ac.buses[1].base_kv,
+             WithinAbs(240.0 * std::sqrt(3.0) / 1000.0, 1e-12));
+}
+
+TEST_CASE("GridLAB-D line-to-line constant powers enter balanced load aggregate",
+          "[io][external][gridlabd][load][delta][regression]") {
+  const std::string glm = R"(
+object meter {
+  name source;
+  nominal_voltage 7200;
+  bustype SWING;
+};
+object load {
+  name delta_load;
+  parent source;
+  nominal_voltage 7200;
+  constant_power_A 100000+10000j;
+  constant_power_AB 200000+20000j;
+  constant_power_BC 300000+30000j;
+  constant_power_CA 400000+40000j;
+};
+)";
+
+  const auto report = hacdcpf::io::from_gridlabd_with_report(glm);
+  REQUIRE(report.system.ac.loads.size() == 1);
+  CHECK_THAT(report.system.ac.loads.front().p_mw, WithinAbs(1.0, 1e-12));
+  CHECK_THAT(report.system.ac.loads.front().q_mvar, WithinAbs(0.1, 1e-12));
+  REQUIRE_FALSE(report.warnings.empty());
+  CHECK_THAT(report.warnings.back(), ContainsSubstring("constant_power_AB/BC/CA"));
+}
+
+TEST_CASE("LVNT GridLAB-D cases import nonzero transformers and converge",
+          "[io][external][gridlabd][lvnt][regression]") {
+  const auto root = std::filesystem::path(HACDCPF_PROJECT_ROOT) /
+                    "data/test_cases/LVNT Model/LVNT Model";
+  const std::vector<std::string> cases = {
+      "Network_Model.glm", "Network_Model_Case1.glm", "Network_Model_Case2.glm"};
+
+  for (const auto& filename : cases) {
+    DYNAMIC_SECTION(filename) {
+      const auto path = root / filename;
+      if (!std::filesystem::exists(path)) SKIP("LVNT fixture is not available");
+
+      hacdcpf::io::GridLABDImportOptions import_options;
+      import_options.default_base_mva = 100.0;
+      const auto report =
+          hacdcpf::io::load_gridlabd_with_report(path, import_options);
+      REQUIRE(report.system.ac.buses.size() == 1420);
+
+      std::size_t transformer_count = 0;
+      std::size_t zero_impedance_transformers = 0;
+      for (const auto& branch : report.system.ac.branches) {
+        if (branch.sn_mva <= 0.0 && branch.vn_hv_kv <= 0.0 &&
+            branch.vn_lv_kv <= 0.0) {
+          continue;
+        }
+        ++transformer_count;
+        if (std::hypot(branch.r_pu, branch.x_pu) <= 1e-12) {
+          ++zero_impedance_transformers;
+        }
+      }
+      CHECK(transformer_count == 70);
+      CHECK(zero_impedance_transformers == 0);
+
+      hacdcpf::PowerFlowOptions pf_options;
+      pf_options.max_iter = 100;
+      pf_options.tol = 1e-7;
+      const auto pf = hacdcpf::solve_power_flow(report.system, pf_options);
+      CHECK(pf.converged);
+    }
+  }
 }
 
 TEST_CASE("GridLAB-D topology links import as rich switches for projection",

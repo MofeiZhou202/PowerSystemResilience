@@ -82,10 +82,12 @@ const App = (() => {
   let _tspfInvalidated = false;
   let _lastInvalidationReason = '';
   let _activeWorkflow = 'steady';
+  let _parameterLibraryData = null;
 
   const ANALYSIS_BUSY_ERROR = 'Another analysis is already running';
   const MODULE_WORKFLOWS = {
     modelIO: 'modeling',
+    parameterLibrary: 'modeling',
     topologyAnalysis: 'modeling',
     integratedEnergy: 'modeling',
     powerFlow: 'steady',
@@ -617,7 +619,7 @@ const App = (() => {
     document.body?.setAttribute('data-active-result-group', active);
     const panel = document.getElementById('rightPanel');
     if (panel) {
-      if (active === 'transient' || active === 'modelIO') {
+      if (active === 'transient' || active === 'modelIO' || active === 'parameterLibrary') {
         const target = window.innerWidth <= 900 ? window.innerWidth : Math.round(Math.min(window.innerWidth * 0.66, 1180));
         const minUseful = window.innerWidth <= 900 ? window.innerWidth : Math.min(target, Math.max(560, window.innerWidth - 420));
         if (!panel.style.width || panel.offsetWidth < minUseful) {
@@ -652,6 +654,208 @@ const App = (() => {
       </div>
       ${warnings}`;
     switchTab('results');
+  }
+
+  function parameterLibraryNumber(value, fallback = 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  function parameterLibraryAttr(value) {
+    return String(value ?? '').replace(/[&<>"']/g, character => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[character]));
+  }
+
+  function renderParameterLibraryDiagnostics(validation) {
+    const target = document.getElementById('parameterLibraryDiagnostics');
+    if (!target) return;
+    const diagnostics = Array.isArray(validation?.diagnostics)
+      ? validation.diagnostics : [];
+    if (!diagnostics.length) {
+      target.innerHTML = `<p class="empty-hint">${validation ? '未发现参数错误或告警。' : '运行模型校验后显示参数错误与告警。'}</p>`;
+      return;
+    }
+    target.innerHTML = diagnostics.map(item => {
+      const severity = item.severity === 'error' ? 'error' : 'warning';
+      const component = `${item.component_type || ''}${item.component_index ? ` #${item.component_index}` : ''}`;
+      return `<div class="parameter-diagnostic-row ${severity}">
+        <strong>${severity === 'error' ? '错误' : '告警'}</strong>
+        <code>${escapeHtml(component)}<br>${escapeHtml(item.parameter || item.code || '')}</code>
+        <span>${escapeHtml(item.message || '')}</span>
+      </div>`;
+    }).join('');
+  }
+
+  function renderParameterLibrary(data, validation = null) {
+    if (!data) return;
+    _parameterLibraryData = data;
+    const profiles = Array.isArray(data.profiles) ? data.profiles : [];
+    const profileSelect = document.getElementById('parameterLibraryProfile');
+    if (profileSelect) {
+      profileSelect.innerHTML = profiles.map(profile =>
+        `<option value="${parameterLibraryAttr(profile.id)}"${profile.id === data.profile_id ? ' selected' : ''}>${escapeHtml(profile.name)}</option>`
+      ).join('');
+    }
+
+    const rules = Array.isArray(data.rules) ? data.rules : [];
+    const componentFilter = document.getElementById('parameterLibraryComponentFilter');
+    const selectedComponent = componentFilter?.value || '';
+    const components = [...new Set(rules.map(item => item.component_type).filter(Boolean))];
+    if (componentFilter) {
+      componentFilter.innerHTML = '<option value="">全部元件</option>' +
+        components.map(component => `<option value="${parameterLibraryAttr(component)}">${escapeHtml(component)}</option>`).join('');
+      componentFilter.value = components.includes(selectedComponent) ? selectedComponent : '';
+    }
+    const activeComponent = componentFilter?.value || '';
+    const visibleRules = activeComponent
+      ? rules.filter(item => item.component_type === activeComponent) : rules;
+
+    const body = document.querySelector('#parameterLibraryTable tbody');
+    if (body) {
+      body.innerHTML = visibleRules.map(item => `<tr data-rule-id="${parameterLibraryAttr(item.id)}" title="${parameterLibraryAttr(item.description || '')}">
+        <td>${escapeHtml(item.component_type || '')}</td>
+        <td><span class="parameter-rule-label">${escapeHtml(item.label || item.parameter || '')}</span><span class="parameter-rule-key">${escapeHtml(item.id || '')}</span></td>
+        <td><input class="parameter-library-input" data-field="default_value" type="number" step="any" value="${parameterLibraryAttr(item.default_value)}" ${item.editable === false ? 'disabled' : ''}></td>
+        <td><input class="parameter-library-input" data-field="unit" type="text" value="${parameterLibraryAttr(item.unit)}" ${item.editable === false ? 'disabled' : ''}></td>
+        <td><input class="parameter-library-input" data-field="min_value" type="number" step="any" value="${parameterLibraryAttr(item.min_value)}" ${item.editable === false ? 'disabled' : ''}></td>
+        <td><input class="parameter-library-input" data-field="max_value" type="number" step="any" value="${parameterLibraryAttr(item.max_value)}" ${item.editable === false ? 'disabled' : ''}></td>
+        <td><select class="parameter-library-select" data-field="severity" ${item.editable === false ? 'disabled' : ''}>
+          <option value="warning"${item.severity === 'warning' ? ' selected' : ''}>告警</option>
+          <option value="error"${item.severity === 'error' ? ' selected' : ''}>错误</option>
+        </select></td>
+        <td><input class="parameter-library-input parameter-library-source" data-field="source" type="text" value="${parameterLibraryAttr(item.source)}" ${item.editable === false ? 'disabled' : ''}></td>
+      </tr>`).join('') || '<tr><td colspan="8">当前筛选没有参数。</td></tr>';
+    }
+
+    const description = document.getElementById('parameterLibraryDescription');
+    if (description) description.textContent = `${data.name || ''} · ${data.description || ''}`;
+    const libraryValidation = data.library_validation || {};
+    const summary = document.getElementById('parameterLibrarySummary');
+    if (summary) {
+      summary.innerHTML = `<span>版本<strong>${escapeHtml(data.version || '-')}</strong></span>
+        <span>规则<strong>${rules.length}</strong></span>
+        <span>库状态<strong>${libraryValidation.valid === false ? '无效' : '有效'}</strong></span>`;
+    }
+    if (validation) renderParameterLibraryDiagnostics(validation);
+  }
+
+  async function loadParameterLibrary(force = false) {
+    if (_parameterLibraryData && !force) {
+      renderParameterLibrary(_parameterLibraryData);
+      return _parameterLibraryData;
+    }
+    const data = await apiGet('/api/session/parameter_library');
+    if (data) renderParameterLibrary(data);
+    return data;
+  }
+
+  function parameterLibraryFromEditor() {
+    if (!_parameterLibraryData) return null;
+    const library = JSON.parse(JSON.stringify(_parameterLibraryData));
+    const byId = new Map((library.rules || []).map(item => [item.id, item]));
+    document.querySelectorAll('#parameterLibraryTable tbody tr[data-rule-id]').forEach(row => {
+      const item = byId.get(row.dataset.ruleId);
+      if (!item) return;
+      row.querySelectorAll('[data-field]').forEach(input => {
+        const field = input.dataset.field;
+        if (field === 'default_value' || field === 'min_value' || field === 'max_value') {
+          item[field] = parameterLibraryNumber(input.value, item[field]);
+        } else {
+          item[field] = input.value;
+        }
+      });
+    });
+    return library;
+  }
+
+  async function saveParameterLibrary(options = {}) {
+    const library = parameterLibraryFromEditor();
+    if (!library) return false;
+    const result = await apiPostResult('/api/session/parameter_library/update', { library }, { quiet: !!options.quiet });
+    if (!result.ok) {
+      setStatus('参数库保存失败', 'error');
+      if (!options.quiet) log(`参数库保存失败：${result.error}`, 'error');
+      return false;
+    }
+    renderParameterLibrary(result.data);
+    if (!options.quiet) {
+      setStatus('参数库已保存');
+      log('当前会话参数库已更新', 'success');
+    }
+    return true;
+  }
+
+  async function selectParameterLibraryProfile() {
+    const profileId = document.getElementById('parameterLibraryProfile')?.value;
+    if (!profileId) return;
+    setStatus('载入参数配置...', 'busy');
+    const data = await apiPost('/api/session/parameter_library/select', { profile_id: profileId });
+    if (data) {
+      renderParameterLibrary(data);
+      setStatus('参数配置已载入');
+    } else {
+      setStatus('参数配置载入失败', 'error');
+    }
+  }
+
+  async function validateCurrentParameters() {
+    if (!await saveParameterLibrary({ quiet: true })) return;
+    if (!await syncToBackend()) {
+      setStatus('模型同步失败', 'error');
+      return;
+    }
+    setStatus('校验模型参数...', 'busy');
+    const data = await apiPost('/api/session/parameter_library/validate', {});
+    if (!data) {
+      setStatus('参数校验失败', 'error');
+      return;
+    }
+    renderParameterLibraryDiagnostics(data);
+    setActiveResultGroup('parameterLibrary');
+    switchTab('results');
+    setStatus(data.valid ? '参数校验通过' : `参数错误 ${data.error_count || 0}`, data.valid ? '' : 'error');
+  }
+
+  async function applyParameterLibraryDefaults() {
+    if (!await saveParameterLibrary({ quiet: true })) return;
+    if (!await syncToBackend()) {
+      setStatus('模型同步失败', 'error');
+      return;
+    }
+    if (!window.confirm('仅为缺失或无效字段应用当前参数库默认值，并使已有分析结果失效。继续？')) return;
+    setStatus('补全模型参数...', 'busy');
+    const data = await apiPost('/api/session/parameter_library/apply', {});
+    if (!data) {
+      setStatus('参数补全失败', 'error');
+      return;
+    }
+    applyLoadedSystem(data, '参数库');
+    renderParameterLibraryDiagnostics(data.parameter_validation);
+    setActiveResultGroup('parameterLibrary');
+    switchTab('results');
+    const changed = data.parameter_apply?.fields_changed || 0;
+    setStatus(`已补全 ${changed} 个字段`);
+    log(`参数库已补全 ${changed} 个缺失字段`, 'success');
+  }
+
+  async function importParameterLibrary(file) {
+    try {
+      const parsed = JSON.parse(await file.text());
+      if (parsed.profile_id && parsed.profile_id !== _parameterLibraryData?.profile_id) {
+        const selected = await apiPost('/api/session/parameter_library/select', { profile_id: parsed.profile_id });
+        if (!selected) throw new Error('无法载入导入文件对应的内置配置');
+        _parameterLibraryData = selected;
+      }
+      const result = await apiPostResult('/api/session/parameter_library/update', { library: parsed });
+      if (!result.ok) throw new Error(result.error || '参数库格式无效');
+      renderParameterLibrary(result.data);
+      setStatus('参数库导入完成');
+      log(`已导入参数库：${file.name}`, 'success');
+    } catch (error) {
+      setStatus('参数库导入失败', 'error');
+      log(`参数库导入失败：${error.message || error}`, 'error');
+    }
   }
 
   // Build an inline attribute that makes a result row pan the canvas to a bus
@@ -3387,6 +3591,14 @@ const App = (() => {
         enable_newton_krylov_fallback: pfBool('pfRobustKrylov', false),
         min_vm_pu: pfNumber('pfRobustMinVm', 1e-8),
       },
+      three_phase: {
+        algorithm: document.getElementById('pfThreePhaseAlgorithm')?.value || 'compact',
+        scope: document.getElementById('pfThreePhaseScope')?.value || 'auto',
+        max_control_iter: pfInteger('pfThreePhaseControlIter', 100),
+        include_shunts: pfBool('pfThreePhaseShunts', true),
+        vmin_pu: pfNumber('pfThreePhaseVmin', 0.95),
+        compare_opendss: pfBool('pfThreePhaseOpenDss', true),
+      },
     };
   }
 
@@ -3465,12 +3677,36 @@ const App = (() => {
     return withAnalysisQueue(async () => {
       setStatus('最优潮流计算中...', 'busy');
       const solver = document.getElementById('opfSolver')?.value || 'parity';
+      const networkModel = document.getElementById('opfNetworkModel')?.value || 'balanced_aggregate';
       const checkConsistency = !!(document.getElementById('opfCheckConsistency')?.checked);
       const constraints = {
         branch_limits:        !!(document.getElementById('opfBranchLimits')?.checked),
         converter_capacity:   !!(document.getElementById('opfConvCapacity')?.checked),
         converter_current:    !!(document.getElementById('opfConvCurrent')?.checked),
         converter_modulation: !!(document.getElementById('opfConvModulation')?.checked),
+      };
+      const options = {
+        max_inner_iterations: pfInteger('opfMaxIterations', 400),
+        max_iterations: pfInteger('opfMaxIterations', 400),
+        max_outer_iterations: pfInteger('opfMaxOuterIterations', 8),
+        max_line_search_steps: pfInteger('opfMaxLineSearch', 20),
+        feasibility_tol: pfNumber('opfFeasibilityTol', 1e-6),
+        stationarity_tol: pfNumber('opfStationarityTol', 1e-6),
+        barrier_mu0: pfNumber('opfBarrierMu0', 1e-2),
+        barrier_mu_reduction: pfNumber('opfBarrierReduction', 0.2),
+        regularization: pfNumber('opfRegularization', 1e-6),
+        ac_eval_threads: pfInteger('opfAcEvalThreads', 1),
+        allow_fallback: pfBool('opfAllowFallback', true),
+        verbose: pfBool('opfVerbose', false),
+      };
+      const threePhase = {
+        algorithm: document.getElementById('opfThreePhaseAlgorithm')?.value || 'compact',
+        max_iter: pfInteger('opfThreePhaseMaxIter', 100),
+        tol: pfNumber('opfThreePhaseTol', 1e-6),
+        max_control_iter: pfInteger('opfThreePhaseControlIter', 100),
+        include_shunts: pfBool('opfThreePhaseShunts', true),
+        vmin_pu: pfNumber('opfThreePhaseVmin', 0.95),
+        compare_opendss: pfBool('opfThreePhaseOpenDss', true),
       };
 
       // Sync canvas to backend first so the OPF runs against the current edits.
@@ -3484,18 +3720,22 @@ const App = (() => {
         return null;
       }
       let resp = await apiPostResult('/api/session/opf',
-        { solver, constraints, check_consistency: checkConsistency });
+        { solver, network_model: networkModel, constraints, options,
+          three_phase: threePhase, check_consistency: checkConsistency });
       if (!resp.ok && resp.error === ANALYSIS_BUSY_ERROR) {
         setStatus('等待当前分析完成...', 'busy');
         if (await waitForBackendIdle()) {
           resp = await apiPostResult('/api/session/opf',
-            { solver, constraints, check_consistency: checkConsistency },
+            { solver, network_model: networkModel, constraints, options,
+              three_phase: threePhase, check_consistency: checkConsistency },
             { quiet: true });
         }
       }
       const data = resp.ok ? resp.data : null;
       if (data) {
         data._constraints = constraints;
+        data._options = options;
+        data._networkModel = networkModel;
         const backendTag = data.solver_backend ? ` · ${data.solver_backend}` : '';
         if (data.converged) {
           log(`最优潮流收敛 [${solver}${backendTag}]: 迭代${data.iterations || 0}次, 目标=${Number(data.objective || 0).toFixed(4)}`, 'success');
@@ -3635,6 +3875,8 @@ const App = (() => {
           <span class="result-value">${fmt(data.objective)}</span></div>
         <div class="result-item"><span class="result-label">状态</span>
           <span class="result-value">${escapeHtml(data.status || '')}</span></div>
+        <div class="result-item"><span class="result-label">网络模型</span>
+          <span class="result-value">${escapeHtml(data.analysis_scope?.optimization_model || data._networkModel || 'balanced_aggregate')}</span></div>
       `;
     }
 
@@ -3644,9 +3886,19 @@ const App = (() => {
     if (scopeDiv) {
       const yn = (v) => v ? '<span style="color:#15803d">启用</span>' : '<span style="color:#94a3b8">关闭</span>';
       const branchOn = scope.branch_limits != null ? scope.branch_limits : req.branch_limits;
+      const tpValidation = data.three_phase_validation;
+      const tpValidationStatus = !data.analysis_scope?.three_phase_validation_requested
+        ? '<span style="color:#94a3b8">关闭</span>'
+        : !tpValidation?.ran
+          ? '<span style="color:#d19a66">未运行</span>'
+          : tpValidation.converged
+            ? '<span style="color:#15803d">通过</span>'
+            : '<span style="color:#e06c75">未通过</span>';
       scopeDiv.innerHTML = `
         <table><thead><tr><th>约束族</th><th>状态</th></tr></thead><tbody>
           <tr><td>换流器模型范围</td><td>${escapeHtml(scope.model_scope || '-')}</td></tr>
+          <tr><td>优化网络模型</td><td>${escapeHtml(data.analysis_scope?.optimization_model || 'balanced_aggregate')}</td></tr>
+          <tr><td>三相可行性校验</td><td>${tpValidationStatus}</td></tr>
           <tr><td>支路热稳定限值</td><td>${yn(branchOn)}</td></tr>
           <tr><td>换流器容量圆 (P²+Q²≤S²)</td><td>${yn(scope.capacity)}</td></tr>
           <tr><td>换流器电流限值 (i_ac/i_dc)</td><td>${yn(scope.current)}</td></tr>
@@ -3789,6 +4041,48 @@ const App = (() => {
 	      busDiv.innerHTML = html;
     } else if (busDiv) {
       busDiv.innerHTML = '<p class="empty-hint">无AC节点电压数据</p>';
+    }
+
+    const tpSec = document.getElementById('opfThreePhaseSection');
+    const tpDiv = document.getElementById('opfThreePhaseResults');
+    const tp = data.three_phase_validation;
+    if (tpSec && tpDiv && tp) {
+      tpSec.style.display = '';
+      const rows = Array.isArray(tp.bus_results) ? tp.bus_results : [];
+      const metrics = tp.metrics || {};
+      const verdict = !tp.ran
+        ? '<span style="color:#d19a66">未运行</span>'
+        : tp.converged
+        ? '<span style="color:#15803d">收敛</span>'
+        : '<span style="color:#e06c75">未收敛</span>';
+      let html = `<div class="result-item"><span class="result-label">校验结论</span><span class="result-value">${verdict}</span></div>`;
+      if (tp.ran) {
+        html += `<div class="result-item"><span class="result-label">abc求解器</span><span class="result-value">${escapeHtml(tp.algorithm || tp.solver_used || '-')}</span></div>`;
+        html += `<div class="result-item"><span class="result-label">迭代/残差</span><span class="result-value">${tp.iterations || 0} / ${Number(tp.residual || 0).toExponential(3)}</span></div>`;
+      } else {
+        html += `<p class="empty-hint">${escapeHtml(tp.reason || tp.error || '三相可行性校验未运行。')}</p>`;
+      }
+      if (metrics.active_phase_nodes != null) {
+        html += `<div class="result-item"><span class="result-label">相节点/电压范围</span><span class="result-value">${metrics.active_phase_nodes} / ${fmt(metrics.min_vm_pu, 6)}-${fmt(metrics.max_vm_pu, 6)} pu</span></div>`;
+        html += `<div class="result-item"><span class="result-label">最大VUF</span><span class="result-value">${fmt(metrics.max_vuf_percent, 4)}%</span></div>`;
+      }
+      const comp = tp.opendss_reference?.comparison;
+      if (tp.opendss_reference?.ran && comp) {
+        html += `<p class="empty-hint">OpenDSS: max|ΔVm|=${Number(comp.max_vm_error_pu || 0).toExponential(3)} pu，max|Δθ|=${fmt(comp.max_angle_error_deg, 4)}°。</p>`;
+      }
+      if (rows.length) {
+        html += '<table><thead><tr><th>Bus</th><th>相</th><th>Va(pu)</th><th>∠A(°)</th><th>Vb(pu)</th><th>∠B(°)</th><th>Vc(pu)</th><th>∠C(°)</th></tr></thead><tbody>';
+        rows.forEach(row => {
+          const busId = Number(row.bus_id ?? row.bus);
+          const compId = Number.isFinite(busId) ? busMap.ac?.[busId] : undefined;
+          html += `<tr${panAttr(compId)}><td>${Number.isFinite(busId) ? busId : ''}</td><td>${escapeHtml(row.phases || '')}</td><td>${fmt(row.vm_a_pu, 6)}</td><td>${fmt(row.va_a_deg, 3)}</td><td>${fmt(row.vm_b_pu, 6)}</td><td>${fmt(row.va_b_deg, 3)}</td><td>${fmt(row.vm_c_pu, 6)}</td><td>${fmt(row.va_c_deg, 3)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+      }
+      tpDiv.innerHTML = html;
+    } else if (tpSec) {
+      tpSec.style.display = 'none';
+      if (tpDiv) tpDiv.innerHTML = '';
     }
 
     // ── OPF ↔ PF consistency audit (建模/参数一致性) ──
@@ -8184,11 +8478,29 @@ const App = (() => {
     const afmt = v => Number.isFinite(Number(v)) ? Number(v).toFixed(3) : '-';
     const comp = data.opendss_reference?.comparison || null;
     let html = '';
+    const scope = data.analysis_scope || {};
+    const metrics = data.phase_metrics || {};
+    if (scope.model_scope || data.hybrid_boundary) {
+      const boundary = data.hybrid_boundary;
+      const boundaryStatus = boundary
+        ? `${boundary.converged ? '收敛' : '未收敛'}，${boundary.iterations || 0}次，残差=${Number(boundary.residual || 0).toExponential(2)}`
+        : '未运行';
+      html += `<div class="result-item"><span class="result-label">分析范围</span><span class="result-value">${escapeHtml(scope.model_scope || 'three_phase_abc')}</span></div>`;
+      if (boundary) html += `<div class="result-item"><span class="result-label">AC/DC边界</span><span class="result-value">${boundaryStatus}</span></div>`;
+    }
+    if (metrics.active_phase_nodes != null) {
+      html += `<div class="result-item"><span class="result-label">相节点/电压范围</span><span class="result-value">${metrics.active_phase_nodes} / ${fmt(metrics.min_vm_pu)}-${fmt(metrics.max_vm_pu)} pu</span></div>`;
+      html += `<div class="result-item"><span class="result-label">最大VUF</span><span class="result-value">${fmt(metrics.max_vuf_percent)}%</span></div>`;
+    }
     if (data.opendss_reference?.ran && comp) {
       const ok = !!comp.within_gui_tolerance;
       html += `<p class="empty-hint" style="color:${ok ? '#15803d' : '#b45309'}">OpenDSS对比：${ok ? '通过' : '存在偏差'}；点数 ${comp.count || 0}，max|ΔVm|=${Number(comp.max_vm_error_pu || 0).toExponential(3)} pu，max|Δθ|=${Number(comp.max_angle_error_deg || 0).toFixed(4)}°。</p>`;
     } else if (data.opendss_reference && data.opendss_reference.error) {
       html += `<p class="empty-hint" style="color:#b45309">OpenDSS参考未运行：${escapeHtml(data.opendss_reference.error)}</p>`;
+    } else if (data.opendss_reference?.reason === 'disabled_by_request') {
+      html += '<p class="empty-hint">OpenDSS对比已关闭。</p>';
+    } else if (data.opendss_reference?.reason) {
+      html += `<p class="empty-hint">OpenDSS对比未运行：${escapeHtml(data.opendss_reference.reason)}</p>`;
     } else {
       html += '<p class="empty-hint">当前会话没有可解析的 OpenDSS master 路径，仅显示本模块三相结果。</p>';
     }
@@ -8715,6 +9027,19 @@ const App = (() => {
     const zipText = (arr) => Array.isArray(arr)
       ? arr.map(v => optNumber(v, 0).toFixed(2)).join('/')
       : '';
+    const phaseOpt = opt.three_phase || {};
+    const isThreePhase = !!(data.three_phase || data.method === 'three_phase');
+    const solverCards = isThreePhase
+      ? `<div class="result-item"><span class="result-label">abc求解器/范围</span>
+          <span class="result-value">${escapeHtml(phaseOpt.algorithm || data.solver_used || '-')} / ${escapeHtml(phaseOpt.scope_effective || phaseOpt.scope || 'ac_only')}</span></div>
+        <div class="result-item"><span class="result-label">相域开关</span>
+          <span class="result-value">并联=${boolLabel(phaseOpt.include_shunts !== false)}, 调压迭代=${phaseOpt.max_control_iter ?? '-'}</span></div>`
+      : `<div class="result-item"><span class="result-label">损耗/全局化</span>
+          <span class="result-value">${lossLabel} / ${globLabel}</span></div>
+        <div class="result-item"><span class="result-label">模型开关</span>
+          <span class="result-value">PV/PQ=${boolLabel(opt.enable_pv_pq_conversion !== false)}, VSC=${boolLabel(opt.enable_converter_mode_switching !== false)}, 校核=${boolLabel(opt.enable_converter_coordination_check === true)}</span></div>
+        <div class="result-item"><span class="result-label">ZIP(P/Q)</span>
+          <span class="result-value">${zipText(opt.zip_pw) || '-'} / ${zipText(opt.zip_qw) || '-'}</span></div>`;
     summary.innerHTML = `
       <div class="result-item"><span class="result-label">方法</span>
         <span class="result-value">${data.method_actual || data.method || ''}</span></div>
@@ -8727,12 +9052,7 @@ const App = (() => {
         <span class="result-value">${Number(data.residual || 0).toExponential(4)}</span></div>
       <div class="result-item"><span class="result-label">求解参数</span>
         <span class="result-value">tol=${optNumber(opt.tol, 0).toExponential(1)}, max=${opt.max_iter ?? '-'}</span></div>
-      <div class="result-item"><span class="result-label">损耗/全局化</span>
-        <span class="result-value">${lossLabel} / ${globLabel}</span></div>
-      <div class="result-item"><span class="result-label">模型开关</span>
-        <span class="result-value">PV/PQ=${boolLabel(opt.enable_pv_pq_conversion !== false)}, VSC=${boolLabel(opt.enable_converter_mode_switching !== false)}, 校核=${boolLabel(opt.enable_converter_coordination_check === true)}</span></div>
-      <div class="result-item"><span class="result-label">ZIP(P/Q)</span>
-        <span class="result-value">${zipText(opt.zip_pw) || '-'} / ${zipText(opt.zip_qw) || '-'}</span></div>
+      ${solverCards}
     `;
 
     let busMap = {};
@@ -9769,11 +10089,39 @@ const App = (() => {
   }
 
   // ========== Topology Tables ==========
-  // Only these solvers can be selected directly on hybrid AC/DC cases.
-  // The others are AC-only (pure_ac/fdpf/three_phase), DC-only (dc), or a
-  // one-shot linearization (hybrid_linearized), so their hybrid answers are not
-  // directly comparable with the coupled Newton family.
+  // The phase-domain method remains available on hybrid cases when the model
+  // carries an abc subsystem; the backend labels that path as staged coupling.
   const HYBRID_PF_METHODS = new Set(['ac_newton', 'adaptive', 'islanded', 'distributed_slack']);
+  function updateAnalysisParameterVisibility() {
+    const isThreePhase = document.getElementById('pfMethod')?.value === 'three_phase';
+    const phaseScopeControl = document.getElementById('pfThreePhaseScope');
+    const phaseScope = phaseScopeControl?.value || 'auto';
+    const phaseHasDc = phaseScopeControl?.dataset.hasDc === 'true';
+    document.getElementById('pfThreePhaseOptions')?.toggleAttribute('hidden', !isThreePhase);
+    document.querySelectorAll('#pfAdvancedPanel [data-pf-model="balanced"]').forEach(group => {
+      group.toggleAttribute('hidden', isThreePhase);
+    });
+    const boundaryControlsVisible = !isThreePhase ||
+      (phaseHasDc && (phaseScope === 'auto' || phaseScope === 'staged_hybrid'));
+    document.getElementById('pfLossModelControl')?.toggleAttribute('hidden', !boundaryControlsVisible);
+    document.getElementById('pfCoordCheckControl')?.toggleAttribute('hidden', !boundaryControlsVisible);
+
+    const opfNetwork = document.getElementById('opfNetworkModel');
+    const phaseChoice = opfNetwork
+      ? Array.from(opfNetwork.options).find(opt => opt.value === 'balanced_with_three_phase_validation')
+      : null;
+    const phaseModelAvailable = phaseChoice?.dataset.phaseAvailable === 'true';
+    const dcOnlyOpf = document.getElementById('opfSolver')?.value === 'dc';
+    if (phaseChoice) phaseChoice.disabled = !phaseModelAvailable || dcOnlyOpf;
+    if (opfNetwork && phaseChoice?.disabled &&
+        opfNetwork.value === 'balanced_with_three_phase_validation') {
+      opfNetwork.value = 'balanced_aggregate';
+    }
+    const phaseOpf = opfNetwork?.value ===
+      'balanced_with_three_phase_validation';
+    document.getElementById('opfThreePhaseOptions')?.toggleAttribute('hidden', !phaseOpf);
+  }
+
   function updatePfMethodAvailability(sys) {
     const sel = document.getElementById('pfMethod');
     if (!sel) return;
@@ -9781,14 +10129,47 @@ const App = (() => {
     const hasDc = (Array.isArray(dc.buses) && dc.buses.length > 0) ||
       (sys && Array.isArray(sys.vsc_converters) && sys.vsc_converters.length > 0) ||
       (sys && Array.isArray(sys.dcdc_converters) && sys.dcdc_converters.length > 0);
+    const hasThreePhase = !!(sys && sys.three_phase_ac &&
+      Array.isArray(sys.three_phase_ac.buses) && sys.three_phase_ac.buses.length > 0);
+    const phaseScopeControl = document.getElementById('pfThreePhaseScope');
+    if (phaseScopeControl) {
+      phaseScopeControl.dataset.hasDc = hasDc ? 'true' : 'false';
+      const stagedChoice = Array.from(phaseScopeControl.options)
+        .find(opt => opt.value === 'staged_hybrid');
+      if (stagedChoice) {
+        stagedChoice.disabled = !hasDc;
+        stagedChoice.title = hasDc ? '' : '当前算例没有直流网络或换流器';
+      }
+      if (!hasDc && phaseScopeControl.value === 'staged_hybrid') {
+        phaseScopeControl.value = 'auto';
+      }
+    }
     let selectedGotDisabled = false;
     Array.from(sel.options).forEach(opt => {
-      const restrict = hasDc && !HYBRID_PF_METHODS.has(opt.value);
+      const missingPhaseModel = opt.value === 'three_phase' && !hasThreePhase;
+      const restrictHybrid = hasDc && opt.value !== 'three_phase' && !HYBRID_PF_METHODS.has(opt.value);
+      const restrict = missingPhaseModel || restrictHybrid;
       opt.disabled = restrict;
-      opt.title = restrict ? '该算法不适合作为混合交直流算例的直接GUI潮流方法' : '';
+      opt.title = missingPhaseModel
+        ? '当前算例没有 three_phase_ac 相域模型'
+        : (restrictHybrid ? '该算法不适合作为混合交直流算例的直接GUI潮流方法' : '');
       if (restrict && opt.selected) selectedGotDisabled = true;
     });
     if (selectedGotDisabled) sel.value = 'ac_newton';
+    const opfNetwork = document.getElementById('opfNetworkModel');
+    if (opfNetwork) {
+      const phaseChoice = Array.from(opfNetwork.options)
+        .find(opt => opt.value === 'balanced_with_three_phase_validation');
+      if (phaseChoice) {
+        phaseChoice.dataset.phaseAvailable = hasThreePhase ? 'true' : 'false';
+        phaseChoice.disabled = !hasThreePhase;
+        phaseChoice.title = hasThreePhase ? '' : '当前算例没有 three_phase_ac 相域模型';
+      }
+      if (!hasThreePhase && opfNetwork.value === 'balanced_with_three_phase_validation') {
+        opfNetwork.value = 'balanced_aggregate';
+      }
+    }
+    updateAnalysisParameterVisibility();
   }
 
   function onSystemLoaded() {
@@ -10827,6 +11208,7 @@ const App = (() => {
       const shared = document.getElementById('resultsSummary');
       if (shared) shared.innerHTML = '';
     }
+    if (moduleName === 'parameterLibrary') loadParameterLibrary();
   }
   function renderSubToolbar(moduleName) {
     const bar = document.getElementById('subToolbar');
@@ -12022,11 +12404,37 @@ const App = (() => {
       }
     });
 
+    // Modeling / Model Parameters submodule
+    document.getElementById('btnParameterLibrarySelect')?.addEventListener('click', selectParameterLibraryProfile);
+    document.getElementById('btnParameterLibrarySave')?.addEventListener('click', () => saveParameterLibrary());
+    document.getElementById('btnParameterLibraryValidate')?.addEventListener('click', validateCurrentParameters);
+    document.getElementById('btnParameterLibraryApply')?.addEventListener('click', applyParameterLibraryDefaults);
+    document.getElementById('parameterLibraryComponentFilter')?.addEventListener('change', () => {
+      _parameterLibraryData = parameterLibraryFromEditor() || _parameterLibraryData;
+      renderParameterLibrary(_parameterLibraryData);
+    });
+    document.getElementById('btnParameterLibraryImport')?.addEventListener('click', () => {
+      document.getElementById('fileImportParameterLibrary')?.click();
+    });
+    document.getElementById('fileImportParameterLibrary')?.addEventListener('change', (event) => {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (file) importParameterLibrary(file);
+    });
+    document.getElementById('btnParameterLibraryExport')?.addEventListener('click', async () => {
+      const library = parameterLibraryFromEditor() || await loadParameterLibrary(true);
+      if (library) {
+        downloadJsonFile(`model_parameter_library_${library.profile_id || 'custom'}.json`, library);
+      }
+    });
+
     // Calculation buttons (Bar 3 "运行..." buttons reuse original IDs where possible)
     document.getElementById('btnExportAllResults')?.addEventListener('click', exportAllCachedResults);
     document.getElementById('btnPinResultSnapshot')?.addEventListener('click', captureResultSnapshot);
     document.getElementById('btnClearResultSnapshots')?.addEventListener('click', clearResultSnapshots);
     document.getElementById('btnPowerFlow').addEventListener('click', runPowerFlow);
+    document.getElementById('pfMethod')?.addEventListener('change', updateAnalysisParameterVisibility);
+    document.getElementById('pfThreePhaseScope')?.addEventListener('change', updateAnalysisParameterVisibility);
     document.getElementById('btnPfAdvanced')?.addEventListener('click', () => {
       const panel = document.getElementById('pfAdvancedPanel');
       const btn = document.getElementById('btnPfAdvanced');
@@ -12037,6 +12445,17 @@ const App = (() => {
       btn.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
     });
     document.getElementById('btnRunOpf')?.addEventListener('click', runOpf);
+    document.getElementById('opfNetworkModel')?.addEventListener('change', updateAnalysisParameterVisibility);
+    document.getElementById('opfSolver')?.addEventListener('change', updateAnalysisParameterVisibility);
+    document.getElementById('btnOpfAdvanced')?.addEventListener('click', () => {
+      const panel = document.getElementById('opfAdvancedPanel');
+      const btn = document.getElementById('btnOpfAdvanced');
+      if (!panel || !btn) return;
+      const nextOpen = panel.hasAttribute('hidden');
+      panel.toggleAttribute('hidden', !nextOpen);
+      btn.classList.toggle('active', nextOpen);
+      btn.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+    });
     document.getElementById('btnCarbonFlow')?.addEventListener('click', runCarbonFlow);
     document.getElementById('carbonSankeyMetric')?.addEventListener('change', () => {
       if (_lastCarbonData) renderCarbonSankey(_lastCarbonData);

@@ -14,6 +14,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -49,6 +50,7 @@
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/io/powersimulationsdynamics_io.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
+#include "hacdcpf/model/standard_parameter_library.hpp"
 #include "hacdcpf/power_flow/three_phase.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
 #include "hacdcpf/network_reconfiguration/topology_analysis.hpp"
@@ -1559,6 +1561,114 @@ bool parse_args(int argc, char** argv, Args& args) {
 }
 
 // ---- global session state ----
+json parameter_rule_to_json(const hacdcpf::StandardParameterRule& rule) {
+  return json{{"id", rule.id},
+              {"component_type", rule.component_type},
+              {"parameter", rule.parameter},
+              {"label", rule.label},
+              {"default_value", rule.default_value},
+              {"unit", rule.unit},
+              {"has_min", rule.has_min},
+              {"min_value", rule.min_value},
+              {"has_max", rule.has_max},
+              {"max_value", rule.max_value},
+              {"severity", hacdcpf::to_string(rule.severity)},
+              {"source", rule.source},
+              {"description", rule.description},
+              {"editable", rule.editable}};
+}
+
+json parameter_diagnostic_to_json(const hacdcpf::ParameterDiagnostic& item) {
+  return json{{"code", item.code},
+              {"severity", hacdcpf::to_string(item.severity)},
+              {"component_type", item.component_type},
+              {"component_index", item.component_index},
+              {"component_name", item.component_name},
+              {"parameter", item.parameter},
+              {"value", std::isfinite(item.value) ? json(item.value) : json(nullptr)},
+              {"message", item.message}};
+}
+
+json parameter_validation_to_json(
+    const hacdcpf::ParameterValidationReport& report) {
+  json diagnostics = json::array();
+  for (const auto& item : report.diagnostics) {
+    diagnostics.push_back(parameter_diagnostic_to_json(item));
+  }
+  return json{{"valid", report.ok()},
+              {"error_count", report.error_count()},
+              {"warning_count", report.warning_count()},
+              {"diagnostics", std::move(diagnostics)}};
+}
+
+json parameter_library_to_json(
+    const hacdcpf::StandardParameterLibrary& library,
+    bool include_profiles = true) {
+  json rules = json::array();
+  for (const auto& rule : library.rules) {
+    rules.push_back(parameter_rule_to_json(rule));
+  }
+  json out{{"profile_id", library.profile_id},
+           {"name", library.name},
+           {"version", library.version},
+           {"description", library.description},
+           {"rules", std::move(rules)}};
+  if (include_profiles) {
+    out["profiles"] = json::array();
+    for (const auto& profile : hacdcpf::standard_parameter_profiles()) {
+      out["profiles"].push_back(json{{"id", profile.id},
+                                      {"name", profile.name},
+                                      {"description", profile.description}});
+    }
+  }
+  out["library_validation"] = parameter_validation_to_json(
+      hacdcpf::validate_standard_parameter_library(library));
+  return out;
+}
+
+hacdcpf::StandardParameterLibrary parameter_library_from_json(
+    const json& input,
+    const hacdcpf::StandardParameterLibrary& current) {
+  const json& body = input.contains("library") ? input.at("library") : input;
+  hacdcpf::StandardParameterLibrary library = current;
+  library.name = body.value("name", library.name);
+  library.version = body.value("version", library.version);
+  library.description = body.value("description", library.description);
+  if (!body.contains("rules") || !body.at("rules").is_array()) {
+    throw std::runtime_error("Parameter library update requires a rules array");
+  }
+  std::unordered_set<std::string> updated;
+  for (const auto& source : body.at("rules")) {
+    const std::string id = source.value("id", "");
+    auto* target = library.find(id);
+    if (target == nullptr) {
+      throw std::runtime_error("Unknown parameter rule ID: " + id);
+    }
+    if (!target->editable) continue;
+    target->default_value = source.value("default_value", target->default_value);
+    target->has_min = source.value("has_min", target->has_min);
+    target->min_value = source.value("min_value", target->min_value);
+    target->has_max = source.value("has_max", target->has_max);
+    target->max_value = source.value("max_value", target->max_value);
+    target->severity = hacdcpf::parameter_issue_severity_from_string(
+        source.value("severity", std::string(hacdcpf::to_string(target->severity))));
+    target->unit = source.value("unit", target->unit);
+    target->source = source.value("source", target->source);
+    target->description = source.value("description", target->description);
+    updated.insert(id);
+  }
+  if (updated.size() != library.rules.size()) {
+    throw std::runtime_error(
+        "Parameter library update must include every rule in the active profile");
+  }
+  const auto validation = hacdcpf::validate_standard_parameter_library(library);
+  if (!validation.ok()) {
+    throw std::runtime_error(
+        "Parameter library contains defaults or bounds outside its valid ranges");
+  }
+  return library;
+}
+
 struct Session {
   std::mutex mu;
   std::optional<hacdcpf::HybridPowerSystem> current_system;
@@ -1600,6 +1710,8 @@ struct Session {
     std::vector<double> values_tco2_mwh;
   };
   std::vector<ExternalGridCarbonProfile> external_grid_carbon_profiles;
+  hacdcpf::StandardParameterLibrary parameter_library{
+      hacdcpf::make_standard_parameter_library()};
 };
 Session g_session;
 
@@ -1957,6 +2069,223 @@ json compare_phase_voltage_results(
               {"within_gui_tolerance",
                count > 0 && max_vm_error < 1.0e-3 && max_angle_error < 0.1},
               {"worst", worst}};
+}
+
+struct GuiPhaseDomainSettings {
+  hacdcpf::analysis::RunPFPhaseOptions solver;
+  std::string algorithm{"compact"};
+  std::string scope{"ac_only"};
+  bool compare_opendss{true};
+};
+
+GuiPhaseDomainSettings phase_domain_settings_from_request(
+    const json& root,
+    int default_max_iter,
+    double default_tol,
+    bool default_verbose,
+    std::string default_scope = "ac_only") {
+  const json* o = nullptr;
+  if (root.contains("three_phase") && root["three_phase"].is_object()) {
+    o = &root["three_phase"];
+  } else if (root.contains("options") && root["options"].is_object() &&
+             root["options"].contains("three_phase") &&
+             root["options"]["three_phase"].is_object()) {
+    o = &root["options"]["three_phase"];
+  }
+
+  GuiPhaseDomainSettings settings;
+  settings.solver.max_iter = default_max_iter;
+  settings.solver.tol = default_tol;
+  settings.solver.verbose = default_verbose;
+  settings.scope = std::move(default_scope);
+  settings.solver.algorithm = hacdcpf::analysis::PhaseDomainSolverAlgorithm::Compact;
+  if (o == nullptr) return settings;
+
+  settings.algorithm = o->value("algorithm", settings.algorithm);
+  if (settings.algorithm == "newton") {
+    settings.solver.algorithm = hacdcpf::analysis::PhaseDomainSolverAlgorithm::Newton;
+  } else if (settings.algorithm == "fixed_point") {
+    settings.solver.algorithm = hacdcpf::analysis::PhaseDomainSolverAlgorithm::FixedPoint;
+  } else if (settings.algorithm == "compact") {
+    settings.solver.algorithm = hacdcpf::analysis::PhaseDomainSolverAlgorithm::Compact;
+  } else {
+    throw std::invalid_argument("Unsupported three-phase solver algorithm: " +
+                                settings.algorithm);
+  }
+
+  settings.scope = o->value("scope", settings.scope);
+  if (settings.scope != "auto" && settings.scope != "ac_only" &&
+      settings.scope != "staged_hybrid") {
+    throw std::invalid_argument("Unsupported three-phase analysis scope: " +
+                                settings.scope);
+  }
+  settings.solver.max_iter = std::clamp(
+      o->value("max_iter", settings.solver.max_iter), 1, 100000);
+  settings.solver.max_control_iter = std::clamp(
+      o->value("max_control_iter", settings.solver.max_control_iter), 1, 100000);
+  settings.solver.tol = std::clamp(
+      o->value("tol", settings.solver.tol), 1.0e-14, 1.0);
+  settings.solver.verbose = o->value("verbose", settings.solver.verbose);
+  settings.solver.include_shunts =
+      o->value("include_shunts", settings.solver.include_shunts);
+  settings.solver.vmin_pu = std::clamp(
+      o->value("vmin_pu", settings.solver.vmin_pu), 1.0e-3, 2.0);
+  settings.compare_opendss =
+      o->value("compare_opendss", settings.compare_opendss);
+  return settings;
+}
+
+json phase_domain_settings_to_json(const GuiPhaseDomainSettings& settings,
+                                   const std::string& effective_scope) {
+  return json{{"algorithm", settings.algorithm},
+              {"scope", settings.scope},
+              {"scope_effective", effective_scope},
+              {"max_iter", settings.solver.max_iter},
+              {"max_control_iter", settings.solver.max_control_iter},
+              {"tol", settings.solver.tol},
+              {"verbose", settings.solver.verbose},
+              {"include_shunts", settings.solver.include_shunts},
+              {"vmin_pu", settings.solver.vmin_pu},
+              {"compare_opendss", settings.compare_opendss}};
+}
+
+json phase_solution_metrics(
+    const hacdcpf::analysis::ThreePhaseJPCPhase& solution) {
+  constexpr double kTwoPiOverThree = 2.0943951023931954923;
+  const std::complex<double> a = std::polar(1.0, kTwoPiOverThree);
+  const std::complex<double> a2 = a * a;
+  double min_vm = std::numeric_limits<double>::infinity();
+  double max_vm = 0.0;
+  double max_vuf = 0.0;
+  int active_nodes = 0;
+  for (std::size_t row_index = 0; row_index < solution.bus_abc.size(); ++row_index) {
+    const auto& row = solution.bus_abc[row_index];
+    std::array<std::complex<double>, 3> voltage{};
+    bool complete = true;
+    for (int phase = 0; phase < 3; ++phase) {
+      const std::size_t slot = static_cast<std::size_t>(phase);
+      if (!row.has_phase[slot]) {
+        complete = false;
+        continue;
+      }
+      const std::size_t flat = row_index * 3 + slot;
+      voltage[slot] = flat < solution.v_abc.size()
+                          ? solution.v_abc[flat]
+                          : std::polar(row.vm_pu[slot],
+                                       row.va_deg[slot] * M_PI / 180.0);
+      const double vm = std::abs(voltage[slot]);
+      min_vm = std::min(min_vm, vm);
+      max_vm = std::max(max_vm, vm);
+      ++active_nodes;
+    }
+    if (!complete) continue;
+    const auto v1 = (voltage[0] + a * voltage[1] + a2 * voltage[2]) / 3.0;
+    const auto v2 = (voltage[0] + a2 * voltage[1] + a * voltage[2]) / 3.0;
+    if (std::abs(v1) > 1.0e-12) {
+      max_vuf = std::max(max_vuf, 100.0 * std::abs(v2) / std::abs(v1));
+    }
+  }
+  if (!std::isfinite(min_vm)) min_vm = 0.0;
+  return json{{"active_phase_nodes", active_nodes},
+              {"min_vm_pu", min_vm},
+              {"max_vm_pu", max_vm},
+              {"max_vuf_percent", max_vuf}};
+}
+
+json phase_solution_to_json(
+    const hacdcpf::analysis::ThreePhaseJPCPhase& solution,
+    const GuiPhaseDomainSettings& settings) {
+  return json{{"ran", true},
+              {"converged", solution.success},
+              {"iterations", solution.iterations},
+              {"residual", solution.residual},
+              {"algorithm", settings.algorithm},
+              {"solver_used", solution.solver_used},
+              {"primary_solver", solution.primary_solver},
+              {"result_source", solution.result_source},
+              {"fallback_used", solution.fallback_used},
+              {"primary_solver_failed_reason", solution.primary_solver_failed_reason},
+              {"metrics", phase_solution_metrics(solution)},
+              {"bus_results", phase_jpc_bus_results_to_json(solution)}};
+}
+
+void attach_phase_opendss_reference(
+    json& destination,
+    const hacdcpf::ThreePhaseACSystem& phase_system,
+    const GuiPhaseDomainSettings& settings,
+    const std::string& dss_source_path,
+    const hacdcpf::analysis::ThreePhaseJPCPhase& solution) {
+  if (!settings.compare_opendss) {
+    destination["opendss_reference"] =
+        json{{"ran", false}, {"reason", "disabled_by_request"}};
+    return;
+  }
+  if (dss_source_path.empty()) {
+    destination["opendss_reference"] =
+        json{{"ran", false},
+             {"reason", "OpenDSS master path is not available for this session"}};
+    return;
+  }
+  try {
+    auto reference_options = settings.solver;
+    reference_options.algorithm = hacdcpf::analysis::PhaseDomainSolverAlgorithm::OpenDSS;
+    reference_options.dss_file_path = dss_source_path;
+    const auto reference =
+        hacdcpf::analysis::runpf_phase(phase_system, reference_options);
+    destination["opendss_reference"] =
+        json{{"ran", true},
+             {"converged", reference.success},
+             {"iterations", reference.iterations},
+             {"residual", reference.residual},
+             {"source_path", dss_source_path},
+             {"comparison", compare_phase_voltage_results(solution, reference)}};
+  } catch (const std::exception& ex) {
+    destination["opendss_reference"] =
+        json{{"ran", false},
+             {"source_path", dss_source_path},
+             {"error", ex.what()}};
+  }
+}
+
+int append_balanced_vsc_injection(
+    hacdcpf::ThreePhaseACSystem& phase_system,
+    int bus_id,
+    double p_ac_injection_mw,
+    double q_ac_injection_mvar,
+    const std::string& name) {
+  const auto bus_it = std::find_if(
+      phase_system.buses.begin(), phase_system.buses.end(),
+      [&](const auto& bus) { return bus.index == bus_id && bus.in_service; });
+  if (bus_it == phase_system.buses.end() || bus_it->phase_mask.count() == 0) return 0;
+
+  int next_index = 1;
+  for (const auto& load : phase_system.loads) {
+    next_index = std::max(next_index, load.index + 1);
+  }
+  hacdcpf::ThreePhaseLoad load;
+  load.index = next_index;
+  load.bus = bus_id;
+  load.name = name;
+  load.phase_mask = bus_it->phase_mask;
+  load.connection = "wye";
+  load.const_p_percent = 100.0;
+  const double count = static_cast<double>(bus_it->phase_mask.count());
+  const double p_per_phase = -p_ac_injection_mw / count;
+  const double q_per_phase = -q_ac_injection_mvar / count;
+  if (bus_it->phase_mask.has(0)) {
+    load.p_a_mw = p_per_phase;
+    load.q_a_mvar = q_per_phase;
+  }
+  if (bus_it->phase_mask.has(1)) {
+    load.p_b_mw = p_per_phase;
+    load.q_b_mvar = q_per_phase;
+  }
+  if (bus_it->phase_mask.has(2)) {
+    load.p_c_mw = p_per_phase;
+    load.q_c_mvar = q_per_phase;
+  }
+  phase_system.loads.push_back(std::move(load));
+  return 1;
 }
 
 void apply_current_carbon_factors_to_snapshot(
@@ -4129,6 +4458,82 @@ std::vector<size_t> opf_active_vsc_positions(const hacdcpf::HybridPowerSystem& s
   return positions;
 }
 
+json apply_opf_dispatch_to_phase_system(
+    hacdcpf::ThreePhaseACSystem& phase_system,
+    const hacdcpf::HybridPowerSystem& opf_system,
+    const std::vector<double>& pg_mw,
+    const std::vector<double>& qg_mvar,
+    const std::vector<double>& pac_mw,
+    const std::vector<double>& qac_mvar) {
+  std::unordered_set<std::size_t> used_generators;
+  int mapped_generators = 0;
+  for (auto& phase_gen : phase_system.generators) {
+    std::optional<std::size_t> match;
+    for (std::size_t i = 0; i < opf_system.ac.generators.size(); ++i) {
+      if (used_generators.count(i) != 0 || i >= pg_mw.size()) continue;
+      if (opf_system.ac.generators[i].bus != phase_gen.bus) continue;
+      match = i;
+      if (!phase_gen.name.empty() &&
+          opf_system.ac.generators[i].name.find(phase_gen.name) != std::string::npos) {
+        break;
+      }
+    }
+    if (!match.has_value()) continue;
+    used_generators.insert(*match);
+
+    const bool per_phase =
+        std::abs(phase_gen.p_a_mw) > 1.0e-12 ||
+        std::abs(phase_gen.q_a_mvar) > 1.0e-12 ||
+        std::abs(phase_gen.p_b_mw) > 1.0e-12 ||
+        std::abs(phase_gen.q_b_mvar) > 1.0e-12 ||
+        std::abs(phase_gen.p_c_mw) > 1.0e-12 ||
+        std::abs(phase_gen.q_c_mvar) > 1.0e-12;
+    const double target_p = pg_mw[*match];
+    const double target_q = *match < qg_mvar.size() ? qg_mvar[*match] : phase_gen.q_mvar;
+    if (per_phase) {
+      auto redistribute = [&](double target, double& a, double& b, double& c) {
+        const double old_total = a + b + c;
+        if (std::abs(old_total) > 1.0e-12) {
+          const double scale = target / old_total;
+          a *= scale;
+          b *= scale;
+          c *= scale;
+          return;
+        }
+        const double per = target / static_cast<double>(
+            std::max(1, phase_gen.phase_mask.count()));
+        a = phase_gen.phase_mask.has(0) ? per : 0.0;
+        b = phase_gen.phase_mask.has(1) ? per : 0.0;
+        c = phase_gen.phase_mask.has(2) ? per : 0.0;
+      };
+      redistribute(target_p, phase_gen.p_a_mw, phase_gen.p_b_mw,
+                   phase_gen.p_c_mw);
+      redistribute(target_q, phase_gen.q_a_mvar, phase_gen.q_b_mvar,
+                   phase_gen.q_c_mvar);
+      phase_gen.p_mw = 0.0;
+      phase_gen.q_mvar = 0.0;
+    } else {
+      phase_gen.p_mw = target_p;
+      phase_gen.q_mvar = target_q;
+    }
+    ++mapped_generators;
+  }
+
+  int mapped_vsc = 0;
+  const auto active_vsc = opf_active_vsc_positions(opf_system);
+  for (std::size_t k = 0; k < active_vsc.size() && k < pac_mw.size(); ++k) {
+    const auto& converter = opf_system.vsc_converters[active_vsc[k]];
+    mapped_vsc += append_balanced_vsc_injection(
+        phase_system, converter.bus_ac, pac_mw[k],
+        k < qac_mvar.size() ? qac_mvar[k] : 0.0,
+        "GUI OPF VSC boundary #" + std::to_string(converter.index));
+  }
+  return json{{"mapped_generators", mapped_generators},
+              {"total_phase_generators", phase_system.generators.size()},
+              {"mapped_vsc_injections", mapped_vsc},
+              {"total_opf_vsc_injections", pac_mw.size()}};
+}
+
 std::vector<size_t> opf_active_dcdc_positions(const hacdcpf::HybridPowerSystem& sys) {
   std::vector<size_t> positions;
   positions.reserve(sys.dc.dcdc_converters.size());
@@ -5187,6 +5592,7 @@ std::vector<std::string> case_names() {
       "case2000_acdc",
       "demo_multizone_acdc",
       "dist33_microgrid_der",
+      "urban_lvn_primary_secondary",
       "comprehensive_hybrid_acdc",
       "hybrid_acdc_microgrid_island",
       "networked_microgrids_islanding",
@@ -5209,6 +5615,9 @@ hacdcpf::HybridPowerSystem build_case(const std::string& name) {
   if (name == "case2000_acdc") return build_case2000_acdc();
   if (name == "demo_multizone_acdc") return build_demo_multizone_acdc();
   if (name == "dist33_microgrid_der") return build_dist33_microgrid_der();
+  if (name == "urban_lvn_primary_secondary") {
+    return build_urban_lvn_primary_secondary();
+  }
   if (name == "comprehensive_hybrid_acdc") return build_comprehensive_hybrid_acdc();
   if (name == "hybrid_acdc_microgrid_island") return build_hybrid_acdc_microgrid_island();
   if (name == "networked_microgrids_islanding") return build_networked_microgrids_islanding();
@@ -9364,6 +9773,97 @@ int main(int argc, char** argv) {
     }
   });
 
+  // ---- Modeling: editable standard component parameter library ----
+  svr.Get("/api/session/parameter_library",
+          [](const httplib::Request&, httplib::Response& res) {
+    try {
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      res.set_content(parameter_library_to_json(g_session.parameter_library).dump(),
+                      "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/parameter_library/select",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto body = json::parse(req.body.empty() ? "{}" : req.body);
+      const std::string profile_id =
+          body.value("profile_id", std::string("distribution_50hz"));
+      auto library = hacdcpf::make_standard_parameter_library(profile_id);
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      g_session.parameter_library = std::move(library);
+      res.set_content(parameter_library_to_json(g_session.parameter_library).dump(),
+                      "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/parameter_library/update",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto body = json::parse(req.body.empty() ? "{}" : req.body);
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      g_session.parameter_library =
+          parameter_library_from_json(body, g_session.parameter_library);
+      res.set_content(parameter_library_to_json(g_session.parameter_library).dump(),
+                      "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/parameter_library/validate",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system) {
+        throw std::runtime_error("No system loaded");
+      }
+      json out = parameter_validation_to_json(
+          hacdcpf::validate_component_parameters(*g_session.current_system,
+                                                  g_session.parameter_library));
+      out["profile_id"] = g_session.parameter_library.profile_id;
+      out["profile_name"] = g_session.parameter_library.name;
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/parameter_library/apply",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system) {
+        throw std::runtime_error("No system loaded");
+      }
+      const auto applied = hacdcpf::apply_standard_parameter_library(
+          *g_session.current_system, g_session.parameter_library);
+      clear_cached_analysis(g_session);
+      auto out = system_summary(*g_session.current_system);
+      out["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      out["parameter_apply"] =
+          json{{"fields_changed", applied.fields_changed},
+               {"applied_rule_ids", applied.applied_rule_ids}};
+      out["parameter_validation"] = parameter_validation_to_json(
+          hacdcpf::validate_component_parameters(*g_session.current_system,
+                                                  g_session.parameter_library));
+      out["profile_id"] = g_session.parameter_library.profile_id;
+      out["profile_name"] = g_session.parameter_library.name;
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
   // ---- Session: load system ----
   svr.Post("/api/session/load_builtin",
            [](const httplib::Request& req, httplib::Response& res) {
@@ -13180,18 +13680,68 @@ int main(int argc, char** argv) {
 	          std::lock_guard<std::mutex> lk(g_session.mu);
 	          dss_source_path = g_session.preserved_three_phase_source_path;
 	        }
-	        hacdcpf::analysis::RunPFPhaseOptions tp_opt;
-	        tp_opt.algorithm = hacdcpf::analysis::PhaseDomainSolverAlgorithm::Compact;
-	        tp_opt.max_iter = opt.max_iter;
-	        tp_opt.tol = opt.tol;
-	        tp_opt.verbose = opt.verbose;
-	        tp_opt.vmin_pu = 0.95;
-	        if (!dss_source_path.empty()) tp_opt.dss_file_path = dss_source_path;
-	        auto pf = hacdcpf::analysis::runpf_phase(*sys.three_phase_ac, tp_opt);
-	        out["converged"] = pf.success;
-	        out["iterations"] = pf.iterations;
-	        out["residual"] = pf.residual;
-	        out["method_actual"] = "three_phase_compact_abc";
+	        auto phase_settings = phase_domain_settings_from_request(
+	            j, opt.max_iter, opt.tol, opt.verbose, "ac_only");
+	        const bool has_dc = !sys.dc.buses.empty() || !sys.vsc_converters.empty() ||
+	                            !sys.dc.dcdc_converters.empty();
+	        const std::string effective_scope =
+	            (phase_settings.scope == "staged_hybrid" ||
+	             (phase_settings.scope == "auto" && has_dc)) && has_dc
+	                ? "staged_hybrid"
+	                : "ac_only";
+	        if (!dss_source_path.empty()) {
+	          phase_settings.solver.dss_file_path = dss_source_path;
+	        }
+	        out["options_effective"]["three_phase"] =
+	            phase_domain_settings_to_json(phase_settings, effective_scope);
+
+	        hacdcpf::ThreePhaseACSystem phase_system = *sys.three_phase_ac;
+	        hacdcpf::PowerFlowResult boundary_pf;
+	        bool boundary_ran = false;
+	        int boundary_injections = 0;
+	        if (effective_scope == "staged_hybrid") {
+	          boundary_ran = true;
+	          boundary_pf = hacdcpf::solve_power_flow(sys, opt);
+	          out["hybrid_boundary"] =
+	              json{{"ran", true},
+	                   {"converged", boundary_pf.converged},
+	                   {"iterations", boundary_pf.iterations},
+	                   {"residual", boundary_pf.residual},
+	                   {"model", "aggregate_ac_dc_vsc"},
+	                   {"vsc_transfer_count", boundary_pf.vsc_transfers.size()}};
+	          out["vdc"] = boundary_pf.vdc;
+	          if (boundary_pf.converged) {
+	            for (const auto& transfer : boundary_pf.vsc_transfers) {
+	              boundary_injections += append_balanced_vsc_injection(
+	                  phase_system, transfer.bus_ac, transfer.p_ac_mw,
+	                  transfer.q_ac_mvar,
+	                  "GUI staged VSC boundary #" + std::to_string(transfer.index));
+	            }
+	          }
+	          out["hybrid_boundary"]["abc_injections_applied"] = boundary_injections;
+	          add_converter_coordination(boundary_pf);
+	          if (boundary_pf.converged) {
+	            add_transfers(boundary_pf);
+	            add_geo_data(boundary_pf);
+	            for (const auto& flow : boundary_pf.branch_flows) {
+	              out["branch_abs"].push_back(std::abs(flow.pf_mw));
+	            }
+	            store_last_pf(&boundary_pf);
+	          } else {
+	            add_solver_diagnostics(boundary_pf.diagnostics);
+	          }
+	        }
+
+	        const auto pf =
+	            hacdcpf::analysis::runpf_phase(phase_system, phase_settings.solver);
+	        out["converged"] = pf.success && (!boundary_ran || boundary_pf.converged);
+	        out["iterations"] =
+	            pf.iterations + (boundary_ran ? boundary_pf.iterations : 0);
+	        out["residual"] =
+	            boundary_ran ? std::max(pf.residual, boundary_pf.residual) : pf.residual;
+	        out["method_actual"] = effective_scope == "staged_hybrid"
+	                                   ? "three_phase_abc_staged_hybrid_ac_dc"
+	                                   : ("three_phase_" + phase_settings.algorithm + "_abc");
 	        out["solver_used"] = pf.solver_used;
 	        out["primary_solver"] = pf.primary_solver;
 	        out["result_source"] = pf.result_source;
@@ -13199,6 +13749,15 @@ int main(int argc, char** argv) {
 	        out["primary_solver_failed_reason"] = pf.primary_solver_failed_reason;
 	        out["three_phase"] = true;
 	        out["tp_bus_results"] = phase_jpc_bus_results_to_json(pf);
+	        out["phase_metrics"] = phase_solution_metrics(pf);
+	        out["analysis_scope"] =
+	            json{{"model_scope", effective_scope == "staged_hybrid"
+	                                      ? "staged_three_phase_abc_plus_aggregate_ac_dc"
+	                                      : "three_phase_abc_ac_only"},
+	                 {"coupling", effective_scope == "staged_hybrid"
+	                                  ? "one_way_vsc_boundary_injection"
+	                                  : "none"},
+	                 {"monolithic_abc_dc_jacobian", false}};
 	        json vm = json::array();
 	        json va = json::array();
 	        json vm_a = json::array();
@@ -13249,31 +13808,16 @@ int main(int argc, char** argv) {
 	                 {"ordinary", json::array()},
 	                 {"sources", json::array()},
 	                 {"message",
-	                  "三相不对称潮流采用 abc 域节点方程；平衡诊断请查看三相节点电压和 OpenDSS 对比，不使用单相等值KCL表。"}};
-	        if (!dss_source_path.empty()) {
-	          try {
-	            hacdcpf::analysis::RunPFPhaseOptions ref_opt = tp_opt;
-	            ref_opt.algorithm = hacdcpf::analysis::PhaseDomainSolverAlgorithm::OpenDSS;
-	            ref_opt.dss_file_path = dss_source_path;
-	            auto ref = hacdcpf::analysis::runpf_phase(*sys.three_phase_ac, ref_opt);
-	            out["opendss_reference"] =
-	                json{{"ran", true},
-	                     {"converged", ref.success},
-	                     {"iterations", ref.iterations},
-	                     {"residual", ref.residual},
-	                     {"source_path", dss_source_path}};
-	            out["opendss_reference"]["comparison"] =
-	                compare_phase_voltage_results(pf, ref);
-	          } catch (const std::exception& ex) {
-	            out["opendss_reference"] =
-	                json{{"ran", false},
-	                     {"source_path", dss_source_path},
-	                     {"error", ex.what()}};
-	          }
-	        } else {
+	                  effective_scope == "staged_hybrid"
+	                      ? "abc 域潮流使用聚合 AC/DC 边界解得到的 VSC 功率注入；该流程为分阶段耦合，不是单体 abc-DC 雅可比。"
+	                      : "三相不对称潮流采用 abc 域节点方程；不使用单相等值KCL表。"}};
+	        if (boundary_injections > 0 && phase_settings.compare_opendss) {
 	          out["opendss_reference"] =
 	              json{{"ran", false},
-	                   {"reason", "OpenDSS master path is not available for this session"}};
+	                   {"reason", "staged_boundary_injections_not_present_in_source_model"}};
+	        } else {
+	          attach_phase_opendss_reference(out, phase_system, phase_settings,
+	                                         dss_source_path, pf);
 	        }
 	      } else {
 	        throw std::runtime_error("Unsupported power flow method: " + method);
@@ -14104,10 +14648,12 @@ int main(int argc, char** argv) {
            [](const httplib::Request& req, httplib::Response& res) {
     try {
       hacdcpf::HybridPowerSystem sys;
+      std::string dss_source_path;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
         sys = *g_session.current_system;
+        dss_source_path = g_session.preserved_three_phase_source_path;
       }
       if (g_session.busy.exchange(true)) {
         res.status = 409;
@@ -14117,6 +14663,12 @@ int main(int argc, char** argv) {
       g_session.cancel.store(false);
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       const std::string solver = j.value("solver", std::string("parity"));
+      const std::string network_model =
+          j.value("network_model", std::string("balanced_aggregate"));
+      if (network_model != "balanced_aggregate" &&
+          network_model != "balanced_with_three_phase_validation") {
+        throw std::invalid_argument("Unsupported OPF network model: " + network_model);
+      }
       // Optional post-OPF power-flow consistency audit (OPF ↔ PF model/parameters).
       const bool want_consistency = j.value("check_consistency", false);
       const json cons = j.contains("constraints") ? j["constraints"] : json::object();
@@ -14124,6 +14676,10 @@ int main(int argc, char** argv) {
       const bool en_cap    = cons.value("converter_capacity", true);
       const bool en_iac    = cons.value("converter_current", true);
       const bool en_mod    = cons.value("converter_modulation", true);
+      const json opf_request_options =
+          j.contains("options") && j["options"].is_object()
+              ? j["options"]
+              : json::object();
 
 	      for (auto& conv : sys.vsc_converters) {
 	        if (!conv.in_service || !conv.ac_grid_forming) continue;
@@ -14142,6 +14698,12 @@ int main(int argc, char** argv) {
 
 	      json out;
       out["solver"] = solver;
+      out["network_model"] = network_model;
+      out["analysis_scope"] =
+          json{{"optimization_model", "balanced_aggregate_ac_dc"},
+               {"three_phase_validation_requested",
+                network_model == "balanced_with_three_phase_validation"},
+               {"monolithic_three_phase_opf", false}};
       out["constraints"] = {{"branch_limits", en_branch},
                             {"converter_capacity", en_cap},
                             {"converter_current", en_iac},
@@ -14150,6 +14712,28 @@ int main(int argc, char** argv) {
 	      if (solver == "dc") {
 	        hacdcpf::opf::DCOPFOptions opt;
 	        opt.include_branch_limits = en_branch;
+	        set_if_double(opf_request_options, "feasibility_tol", opt.feasibility_tol);
+	        set_if_int(opf_request_options, "max_iterations", opt.max_iterations);
+	        set_if_int(opf_request_options, "pwl_segments", opt.pwl_segments);
+	        set_if_double(opf_request_options, "branch_limit_margin", opt.branch_limit_margin);
+	        set_if_bool(opf_request_options, "load_shedding", opt.load_shedding);
+	        set_if_double(opf_request_options, "voll", opt.voll);
+	        set_if_bool(opf_request_options, "compute_lmp", opt.compute_lmp);
+	        set_if_bool(opf_request_options, "verbose", opt.verbose);
+	        opt.feasibility_tol = std::clamp(opt.feasibility_tol, 1.0e-12, 1.0);
+	        opt.max_iterations = std::clamp(opt.max_iterations, 1, 1000000);
+	        opt.pwl_segments = std::clamp(opt.pwl_segments, 1, 1000);
+	        opt.branch_limit_margin = std::clamp(opt.branch_limit_margin, 1.0e-6, 10.0);
+	        opt.voll = std::max(0.0, opt.voll);
+	        out["options_effective"] =
+	            json{{"max_iterations", opt.max_iterations},
+	                 {"feasibility_tol", opt.feasibility_tol},
+	                 {"pwl_segments", opt.pwl_segments},
+	                 {"branch_limit_margin", opt.branch_limit_margin},
+	                 {"load_shedding", opt.load_shedding},
+	                 {"voll", opt.voll},
+	                 {"compute_lmp", opt.compute_lmp},
+	                 {"verbose", opt.verbose}};
 	        auto r = hacdcpf::solve_dc_opf(sys, opt);
 	        out["converged"]=r.converged; out["iterations"]=r.iterations;
 	        out["objective"]=r.objective; out["status"]=r.status;
@@ -14158,6 +14742,11 @@ int main(int argc, char** argv) {
 	        out["ac_bus_results"] = opf_ac_bus_results_json(sys, {}, r.va, r.lmp);
 	        out["dc_opf_branch_dispatch"] = opf_dc_branch_dispatch_json(sys, r.pf_mw);
 	        out["total_load_shedding_mw"]=r.total_load_shedding_mw;
+	        if (network_model == "balanced_with_three_phase_validation") {
+	          out["three_phase_validation"] =
+	              json{{"ran", false},
+	                   {"reason", "three_phase_validation_requires_ac_or_hybrid_ac_dc_opf"}};
+	        }
 	      } else {
         hacdcpf::opf::ACOPFOptions opt;
         // Map the GUI solver selector onto the modern backend enum.  The parity
@@ -14182,10 +14771,54 @@ int main(int argc, char** argv) {
         }
         const bool nonlinear = (opt.ac_solver_backend != SB::EconomicDispatch);
         opt.max_inner_iterations = nonlinear ? 400 : 120;
+	        set_if_int(opf_request_options, "max_inner_iterations", opt.max_inner_iterations);
+	        set_if_int(opf_request_options, "max_outer_iterations", opt.max_outer_iterations);
+	        set_if_int(opf_request_options, "max_line_search_steps", opt.max_line_search_steps);
+	        set_if_double(opf_request_options, "feasibility_tol", opt.feasibility_tol);
+	        set_if_double(opf_request_options, "stationarity_tol", opt.stationarity_tol);
+	        set_if_double(opf_request_options, "barrier_mu0", opt.barrier_mu0);
+	        set_if_double(opf_request_options, "barrier_mu_reduction", opt.barrier_mu_reduction);
+	        set_if_double(opf_request_options, "barrier_mu_min", opt.barrier_mu_min);
+	        set_if_double(opf_request_options, "merit_penalty", opt.merit_penalty);
+	        set_if_double(opf_request_options, "regularization", opt.regularization);
+	        set_if_double(opf_request_options, "step_backoff", opt.step_backoff);
+	        set_if_double(opf_request_options, "interior_fraction", opt.interior_fraction);
+	        set_if_int(opf_request_options, "ac_eval_threads", opt.ac_eval_threads);
+	        set_if_bool(opf_request_options, "allow_fallback", opt.allow_fallback);
+	        set_if_bool(opf_request_options, "verbose", opt.verbose);
+	        opt.max_inner_iterations = std::clamp(opt.max_inner_iterations, 1, 100000);
+	        opt.max_outer_iterations = std::clamp(opt.max_outer_iterations, 1, 10000);
+	        opt.max_line_search_steps = std::clamp(opt.max_line_search_steps, 1, 10000);
+	        opt.feasibility_tol = std::clamp(opt.feasibility_tol, 1.0e-12, 1.0);
+	        opt.stationarity_tol = std::clamp(opt.stationarity_tol, 1.0e-12, 1.0);
+	        opt.barrier_mu0 = std::clamp(opt.barrier_mu0, 1.0e-12, 1.0e6);
+	        opt.barrier_mu_reduction = std::clamp(opt.barrier_mu_reduction, 1.0e-6, 0.999999);
+	        opt.barrier_mu_min = std::clamp(opt.barrier_mu_min, 1.0e-16, opt.barrier_mu0);
+	        opt.merit_penalty = std::clamp(opt.merit_penalty, 1.0e-12, 1.0e12);
+	        opt.regularization = std::clamp(opt.regularization, 0.0, 1.0e6);
+	        opt.step_backoff = std::clamp(opt.step_backoff, 1.0e-6, 0.999999);
+	        opt.interior_fraction = std::clamp(opt.interior_fraction, 1.0e-6, 0.999999);
+	        opt.ac_eval_threads = std::clamp(opt.ac_eval_threads, 1, 1024);
         opt.enforce_branch_limits = en_branch;
         opt.enforce_converter_capacity = en_cap;
         opt.enforce_converter_current_limits = en_iac;
         opt.enforce_converter_modulation_limits = en_mod;
+	        out["options_effective"] =
+	            json{{"max_inner_iterations", opt.max_inner_iterations},
+	                 {"max_outer_iterations", opt.max_outer_iterations},
+	                 {"max_line_search_steps", opt.max_line_search_steps},
+	                 {"feasibility_tol", opt.feasibility_tol},
+	                 {"stationarity_tol", opt.stationarity_tol},
+	                 {"barrier_mu0", opt.barrier_mu0},
+	                 {"barrier_mu_reduction", opt.barrier_mu_reduction},
+	                 {"barrier_mu_min", opt.barrier_mu_min},
+	                 {"merit_penalty", opt.merit_penalty},
+	                 {"regularization", opt.regularization},
+	                 {"step_backoff", opt.step_backoff},
+	                 {"interior_fraction", opt.interior_fraction},
+	                 {"ac_eval_threads", opt.ac_eval_threads},
+	                 {"allow_fallback", opt.allow_fallback},
+	                 {"verbose", opt.verbose}};
         auto r = hacdcpf::solve_ac_opf(sys, opt);
         out["converged"]=r.converged; out["iterations"]=r.iterations;
         out["objective"]=r.objective; out["status"]=r.status;
@@ -14214,6 +14847,50 @@ int main(int argc, char** argv) {
                         {"modulation", v.vsc_modulation_limits_enforced},
                         {"dcdc_duty", v.dcdc_duty_ratio_enforced},
                         {"vdc_control", v.vsc_vdc_control_modelled}};
+	        if (network_model == "balanced_with_three_phase_validation") {
+	          if (!sys.three_phase_ac.has_value()) {
+	            out["three_phase_validation"] =
+	                json{{"ran", false}, {"reason", "three_phase_subsystem_not_available"}};
+	          } else if (!r.converged) {
+	            out["three_phase_validation"] =
+	                json{{"ran", false}, {"reason", "opf_not_converged"}};
+	          } else {
+	            try {
+	              auto phase_settings = phase_domain_settings_from_request(
+	                  j, 100, 1.0e-6, false, "ac_only");
+	              if (!dss_source_path.empty()) {
+	                phase_settings.solver.dss_file_path = dss_source_path;
+	              }
+	              auto phase_system = *sys.three_phase_ac;
+	              const json dispatch_mapping = apply_opf_dispatch_to_phase_system(
+	                  phase_system, presentation_sys, r.pg_mw, r.qg_mvar,
+	                  r.pac_mw, r.qac_mvar);
+	              const auto phase_solution = hacdcpf::analysis::runpf_phase(
+	                  phase_system, phase_settings.solver);
+	              json validation = phase_solution_to_json(phase_solution, phase_settings);
+	              validation["dispatch_mapping"] = dispatch_mapping;
+	              validation["options_effective"] =
+	                  phase_domain_settings_to_json(phase_settings, "opf_dispatch_validation");
+	              if (dispatch_mapping.value("mapped_vsc_injections", 0) > 0 &&
+	                  phase_settings.compare_opendss) {
+	                validation["opendss_reference"] =
+	                    json{{"ran", false},
+	                         {"reason", "opf_vsc_injections_not_present_in_source_model"}};
+	              } else {
+	                attach_phase_opendss_reference(
+	                    validation, phase_system, phase_settings,
+	                    dss_source_path, phase_solution);
+	              }
+	              out["three_phase_validation"] = std::move(validation);
+	              out["analysis_scope"]["three_phase_validation_effective"] = true;
+	              out["analysis_scope"]["three_phase_validation_model"] =
+	                  "post_dispatch_abc_feasibility";
+	            } catch (const std::exception& ex) {
+	              out["three_phase_validation"] =
+	                  json{{"ran", false}, {"error", ex.what()}};
+	            }
+	          }
+	        }
         if (r.converged) {
           // Replay against the same canonical model that the OPF formulation
           // sees.  This preserves projected external grids and energy-router

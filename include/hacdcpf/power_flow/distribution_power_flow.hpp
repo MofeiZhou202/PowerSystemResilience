@@ -409,6 +409,7 @@ struct ThreePhaseFixedPointOptions {
 struct RunPFPhaseOptions {
   PhaseDomainSolverAlgorithm algorithm{PhaseDomainSolverAlgorithm::Newton};
   int max_iter{100};
+  int max_control_iter{100};
   double tol{1e-6};
   bool verbose{false};
   bool include_shunts{true};
