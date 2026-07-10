@@ -143,6 +143,48 @@ Solve
   CHECK(pf.converged);
 }
 
+TEST_CASE("OpenDSS file loader expands Redirect libraries and richer devices",
+          "[io][external][opendss][include]") {
+  const auto dir = temp_file("opendss_redirect_case_dir");
+  std::filesystem::create_directories(dir);
+  const auto master = dir / "Master.dss";
+  {
+    std::ofstream(dir / "LineCodes.dss")
+        << "New LineCode.LC1 nphases=3 r1=0.4 x1=0.8 r0=1.2 x0=2.4 "
+           "c1=10 c0=4 units=mi normamps=300\n";
+    std::ofstream(dir / "Network.dss")
+        << "New Line.L12 bus1=source.1.2.3 bus2=loadbus.1.2.3 phases=3 "
+           "linecode=LC1 length=5280 units=ft\n"
+        << "New Capacitor.C1 bus1=loadbus.1.2.3 kv=12.47 kvar=600\n"
+        << "New Load.L1 bus1=loadbus.1.2.3 kv=12.47 kw=1000 pf=0.8\n";
+    std::ofstream(master)
+        << "Clear\n"
+        << "New Circuit.Include bus1=source.1.2.3 basekv=12.47 pu=1.0\n"
+        << "Redirect LineCodes.dss\n"
+        << "Redirect Network.dss\n";
+  }
+
+  hacdcpf::io::OpenDSSImportOptions options;
+  options.default_base_mva = 10.0;
+  const auto report = hacdcpf::io::load_opendss_with_report(master, options);
+
+  REQUIRE(report.system.ac.buses.size() == 2);
+  REQUIRE(report.system.ac.branches.size() == 1);
+  REQUIRE(report.system.ac.shunts.size() == 1);
+  REQUIRE(report.system.ac.loads.size() == 1);
+  const double zbase = 12.47 * 12.47 / 10.0;
+  CHECK_THAT(report.system.ac.branches.front().r_pu,
+             WithinAbs(0.4 / zbase, 1e-10));
+  CHECK_THAT(report.system.ac.branches.front().x_pu,
+             WithinAbs(0.8 / zbase, 1e-10));
+  CHECK_THAT(report.system.ac.shunts.front().bs_mvar,
+             WithinAbs(0.6, 1e-12));
+  CHECK_THAT(report.system.ac.loads.front().p_mw, WithinAbs(1.0, 1e-12));
+  CHECK_THAT(report.system.ac.loads.front().q_mvar, WithinAbs(0.75, 1e-12));
+
+  std::filesystem::remove_all(dir);
+}
+
 TEST_CASE("OpenDSS text export round-trips through the text importer",
           "[io][external][opendss][roundtrip]") {
   const auto sys = make_external_io_case();
@@ -235,6 +277,35 @@ object overhead_line {
              WithinAbs(1.609344, 1e-12));
   CHECK_THAT(report.system.ac.branches.front().r_ohm_per_km,
              WithinAbs((0.4 - 0.1) / 1.609344, 1e-12));
+}
+
+TEST_CASE("GridLAB-D capacitor objects import as shunt susceptance",
+          "[io][external][gridlabd][capacitor]") {
+  const std::string glm = R"(
+object meter {
+  name source;
+  nominal_voltage 7200;
+  bustype SWING;
+};
+object capacitor {
+  name cap1;
+  parent source;
+  nominal_voltage 7200;
+  capacitor_A 0.15 MVAr;
+  capacitor_B 0.15 MVAr;
+  capacitor_C 0.15 MVAr;
+  switchA CLOSED;
+  switchB CLOSED;
+  switchC CLOSED;
+};
+)";
+
+  hacdcpf::io::GridLABDImportOptions options;
+  options.default_base_mva = 10.0;
+  const auto sys = hacdcpf::io::from_gridlabd(glm, options);
+  REQUIRE(sys.ac.shunts.size() == 1);
+  CHECK(sys.ac.shunts.front().bus == 1);
+  CHECK_THAT(sys.ac.shunts.front().bs_mvar, WithinAbs(0.45, 1e-12));
 }
 
 TEST_CASE("GridLAB-D text export round-trips through the GLM importer",

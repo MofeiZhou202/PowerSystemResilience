@@ -9669,8 +9669,8 @@ int main(int argc, char** argv) {
 		            warnings.push_back(
 		                "Phase-domain OpenDSS import produced no buses for " +
 		                master_path->string() +
-		                "; using simplified text conversion. The text converter does not "
-		                "resolve Redirect/LineCode libraries.");
+		                "; using OpenDSS text conversion with local Redirect/LineCode "
+		                "expansion where the files are resolvable.");
 		          }
 		        } catch (const std::exception& ex) {
 		          warnings.push_back(
@@ -9679,8 +9679,8 @@ int main(int argc, char** argv) {
 		        }
 #else
 		        warnings.push_back(
-		            "Phase-domain OpenDSS bridge is disabled in this build; using simplified "
-		            "text conversion for " +
+		            "Phase-domain OpenDSS bridge is disabled in this build; using OpenDSS "
+		            "text conversion with local Redirect expansion for " +
 		            master_path->string() +
 		            ". Reconfigure with HACDCPF_ENABLE_OPENDSS=ON for C-API-backed "
 		            "three-phase OpenDSS import and reference comparison.");
@@ -9694,7 +9694,9 @@ int main(int argc, char** argv) {
 	      if (!used_phase_loader) {
 	        hacdcpf::io::OpenDSSImportOptions options;
 	        options.mode = hacdcpf::io::ImportMode::Permissive;
-	        auto report = hacdcpf::io::from_opendss_with_report(dss, options);
+	        auto report = master_path.has_value()
+	                          ? hacdcpf::io::load_opendss_with_report(*master_path, options)
+	                          : hacdcpf::io::from_opendss_with_report(dss, options);
 	        imported = std::move(report.system);
 	        for (const auto& w : report.warnings) warnings.push_back(w);
 	        for (const auto& s : report.skipped) skipped.push_back(s);

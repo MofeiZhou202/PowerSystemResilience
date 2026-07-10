@@ -637,14 +637,19 @@ def run_opendss_epri_io_study(outdir: Path) -> dict:
     solved = sum(1 for row in rows if row["opendss_run"] == "solved")
     phase_imported = sum(1 for row in rows if str(row["h_import"]).startswith("phase_domain"))
     text_imported = sum(1 for row in rows if str(row["h_import"]).startswith("text_converter"))
+    pf_converged = sum(1 for row in rows if str(row["pf"]).startswith("conv."))
     return {
         "status": "available" if masters else "unavailable",
         "case_count": len(masters),
         "opendss_solved_count": solved,
         "phase_imported_count": phase_imported,
         "text_imported_count": text_imported,
+        "pf_converged_count": pf_converged,
         "max_native_buses": max((row["native_buses"] for row in rows), default=0),
         "max_native_nodes": max((row["native_nodes"] for row in rows), default=0),
+        "max_ac_buses": max((row["ac_buses"] for row in rows), default=0),
+        "max_ac_branches": max((row["ac_branches"] for row in rows), default=0),
+        "max_loads": max((row["loads"] for row in rows), default=0),
         "max_opendss_ms": max((row["opendss_ms"] for row in rows), default=0.0),
     }
 
@@ -1298,8 +1303,8 @@ def write_model_io_scope(outdir: Path) -> None:
             "interface": "OpenDSS text",
             "direction": "import/export",
             "code": "from_opendss_with_report, load_opendss, to_opendss, save_opendss",
-            "semantics": "balanced AC Circuit/Bus/Line/Transformer/Load/Generator/PV-equivalent snapshots",
-            "gate": "warnings/skips are reported; external Redirect libraries are not silently expanded by text-only upload",
+            "semantics": "balanced AC Circuit/Vsource/Line/LineCode/LineGeometry/WireData/Reactor/Transformer/Capacitor/Load/Generator/PV-equivalent snapshots",
+            "gate": "load_opendss expands local Redirect/Compile files; lone text uploads cannot resolve missing relative files; warnings/skips are reported",
         },
         {
             "interface": "OpenDSS C-API phase bridge",
@@ -1312,7 +1317,7 @@ def write_model_io_scope(outdir: Path) -> None:
             "interface": "GridLAB-D text",
             "direction": "import",
             "code": "from_gridlabd_with_report, load_gridlabd",
-            "semantics": "node/meter/load/triplex objects, overhead/underground/triplex lines, conductor configs, transformers, topology links, parent semantics",
+            "semantics": "node/meter/load/triplex objects, constant-power and ZIP/base-power loads, capacitors, overhead/underground/triplex lines, conductor configs, transformers, topology links, parent semantics",
             "gate": "strict/permissive modes; unsupported object-library features remain warnings/skips",
         },
         {
@@ -1349,7 +1354,134 @@ def write_model_io_scope(outdir: Path) -> None:
         f.write(r"\end{tabularx}" + "\n")
 
 
+def write_cross_solver_comparison(
+    outdir: Path,
+    opendss: dict,
+    gridlabd: dict,
+    taxonomy: dict,
+    epri: dict,
+) -> None:
+    """Write a scope-aware cross-solver comparison table.
+
+    The table is intentionally not a leaderboard: each external engine is used
+    only where it owns the physics being compared.
+    """
+    worst = taxonomy.get("worst_vm_error_pu")
+    mean_err = taxonomy.get("mean_case_vm_error_pu")
+    if worst is None:
+        taxonomy_accuracy = "not available"
+    else:
+        taxonomy_accuracy = (
+            f"{taxonomy.get('accuracy_case_count', 0)} solved-reference cases, "
+            f"{taxonomy.get('total_comparable_buses', 0)} common buses, "
+            f"max |dV|={float(worst):.5f} pu, mean-case={float(mean_err):.5f} pu"
+        )
+
+    rows = [
+        {
+            "benchmark": "Native HACDCPF hybrid AC/DC PF",
+            "external": "none",
+            "external_result": "not applicable",
+            "hacdcpf_result": "7/7 base converged; 37/42 stressed points",
+            "metric": "worst reported native residual 8.86e-9",
+            "scope": "full AC/DC buses, DC branches, VSCs, DC/DC controls, and SPPT projection",
+        },
+        {
+            "benchmark": "OpenDSS IEEE13/EPRI circuits",
+            "external": "OpenDSSDirect",
+            "external_result": (
+                f"IEEE13 {opendss.get('status', 'unknown')}; EPRI "
+                f"{epri.get('opendss_solved_count', 0)}/{epri.get('case_count', 0)} solved; "
+                f"largest native {epri.get('max_native_buses', 0)} buses/"
+                f"{epri.get('max_native_nodes', 0)} nodes"
+            ),
+            "hacdcpf_result": (
+                f"{epri.get('text_imported_count', 0)}/{epri.get('case_count', 0)} text imports, "
+                f"{epri.get('phase_imported_count', 0)} phase imports; "
+                f"{epri.get('pf_converged_count', 0)}/{epri.get('case_count', 0)} projected PF converged"
+            ),
+            "metric": (
+                f"native OpenDSS up to {epri.get('max_opendss_ms', 0.0):.1f} ms; "
+                f"largest HACDCPF import {epri.get('max_ac_buses', 0)} buses/"
+                f"{epri.get('max_ac_branches', 0)} branches/{epri.get('max_loads', 0)} loads"
+            ),
+            "scope": "OpenDSS is ground truth for solved AC distribution semantics only; current C++ phase bridge may be disabled",
+        },
+        {
+            "benchmark": "GridLAB-D component matrix",
+            "external": "GridLAB-D",
+            "external_result": (
+                f"{gridlabd.get('scenario_solved_count', 0)}/"
+                f"{gridlabd.get('scenario_count', 0)} component solves"
+            ),
+            "hacdcpf_result": (
+                f"{gridlabd.get('exact_gate_passed_count', 0)}/"
+                f"{gridlabd.get('exact_gate_count', 0)} exact gates; long "
+                f"{gridlabd.get('long_exact_gate_passed_count', 0)}/"
+                f"{gridlabd.get('long_exact_gate_count', 0)}"
+            ),
+            "metric": f"component validation wall time {gridlabd.get('elapsed_ms', 0.0):.0f} ms",
+            "scope": "AC distribution export/run/compare harness and balanced projected subset",
+        },
+        {
+            "benchmark": "GridLAB-D r5643 taxonomy feeders",
+            "external": "GridLAB-D",
+            "external_result": (
+                f"{taxonomy.get('gridlabd_solved_count', 0)}/"
+                f"{taxonomy.get('case_count', 0)} legacy feeders solved natively"
+            ),
+            "hacdcpf_result": (
+                f"{taxonomy.get('imported_count', 0)}/"
+                f"{taxonomy.get('case_count', 0)} imported; "
+                f"{taxonomy.get('pf_converged_count', 0)}/"
+                f"{taxonomy.get('case_count', 0)} projected PF converged"
+            ),
+            "metric": (
+                f"{taxonomy_accuracy}; GridLAB-D up to {taxonomy.get('max_gridlabd_ms', 0.0):.1f} ms, "
+                f"import up to {taxonomy.get('max_import_ms', 0.0):.1f} ms, "
+                f"PF up to {taxonomy.get('max_pf_ms', 0.0):.1f} ms"
+            ),
+            "scope": "GridLAB-D is the reference only for overlapping solved steady-state AC voltage magnitudes",
+        },
+        {
+            "benchmark": "MATPOWER/pandapower corpus",
+            "external": "MATPOWER/pandapower",
+            "external_result": "AC power-flow references",
+            "hacdcpf_result": "kept as regression sanity checks",
+            "metric": "not used for DC/VSC claims",
+            "scope": "positive-sequence AC only; no native hybrid AC/DC distribution semantics",
+        },
+    ]
+
+    with (outdir / "sppt_cross_solver_comparison.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    with (outdir / "sppt_cross_solver_comparison.tex").open("w") as f:
+        f.write("% Auto-generated cross-solver comparison.\n")
+        f.write(r"\begin{tabularx}{\linewidth}{@{}l l X X X X@{}}" + "\n")
+        f.write(r"\toprule" + "\n")
+        f.write(
+            r"Benchmark & External solver & External result & HACDCPF result & Metric & Ground-truth scope \\"
+            + "\n"
+        )
+        f.write(r"\midrule" + "\n")
+        for row in rows:
+            f.write(
+                f"{latex_escape(row['benchmark'])} & "
+                f"{latex_escape(row['external'])} & "
+                f"{latex_escape(row['external_result'])} & "
+                f"{latex_escape(row['hacdcpf_result'])} & "
+                f"{latex_escape(row['metric'])} & "
+                f"{latex_escape(row['scope'])} \\\\\n"
+            )
+        f.write(r"\bottomrule" + "\n")
+        f.write(r"\end{tabularx}" + "\n")
+
+
 def write_outputs(outdir: Path, opendss: dict, gridlabd: dict, taxonomy: dict, epri: dict) -> None:
+    write_cross_solver_comparison(outdir, opendss, gridlabd, taxonomy, epri)
     rows = [
         {
             "engine": "HACDCPF native",
@@ -1387,7 +1519,7 @@ def write_outputs(outdir: Path, opendss: dict, gridlabd: dict, taxonomy: dict, e
                 f"{gridlabd.get('exact_gate_passed_count', 0)}/"
                 f"{gridlabd.get('exact_gate_count', 0)} exact gates; "
                 f"{gridlabd.get('scenario_solved_count', 0)}/"
-                f"{gridlabd.get('scenario_count', 0)} GridLAB-D solves; "
+                f"{gridlabd.get('scenario_count', 0)} component GridLAB-D solves; "
                 f"taxonomy import/PF "
                 f"{taxonomy.get('imported_count', 0)}/"
                 f"{taxonomy.get('case_count', 0)} and "
@@ -1469,8 +1601,16 @@ def write_outputs(outdir: Path, opendss: dict, gridlabd: dict, taxonomy: dict, e
         f.write(r"\end{tikzpicture}" + "\n")
 
 
-def main() -> int:
-    outdir = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "docs" / "latex"
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in {"-h", "--help"}:
+        print(
+            "Usage: hybrid_acdc_external_baselines.py [OUTDIR]\n"
+            "Generate OpenDSS/GridLAB-D external-engine evidence tables. "
+            "Default OUTDIR is docs/latex."
+        )
+        return 0
+    outdir = Path(argv[0]) if argv else ROOT / "docs" / "latex"
     outdir.mkdir(parents=True, exist_ok=True)
     opendss = run_opendss_ieee13()
     if opendss.get("status") == "failed":

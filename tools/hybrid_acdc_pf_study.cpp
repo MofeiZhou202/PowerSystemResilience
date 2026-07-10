@@ -449,6 +449,89 @@ void write_modeling_scope_table(const fs::path& outdir) {
   tex << "\\bottomrule\n\\end{tabularx}\n";
 }
 
+void write_feature_maturity_table(const fs::path& outdir) {
+  std::ofstream tex(outdir / "sppt_feature_maturity_scope.tex");
+  tex << "% Auto-generated feature maturity/scope table.\n";
+  tex << "\\begin{tabularx}{\\linewidth}{@{}lXXX@{}}\n";
+  tex << "\\toprule\n";
+  tex << "Feature & Theory contract & Implementation status & Evaluation in this paper \\\\\n";
+  tex << "\\midrule\n";
+  tex << "AC power flow & canonical $\\Ybus$ balance with PQ/PV/slack rows & implemented balanced AC PF and external AC I/O paths & native PF cases, MATPOWER/pandapower sanity checks, OpenDSS/GridLAB-D AC-side checks \\\\\n";
+  tex << "DC conductance power flow & canonical $\\Gdc$ balance with physical voltage reference or droop & implemented DC buses, DC branches, loads, storage references & native hybrid AC/DC PF cases and stress sweep \\\\\n";
+  tex << "VSC role typing & fixed/released quantities and island-reference count & seven-mode role resolver, AC PV/slack promotion, DC reference planning & hybrid cases, typed rejection, LLM-error benchmark \\\\\n";
+  tex << "DC/DC and energy-router projection & terminal-equivalent converter/router stamps with provenance & DC/DC and energy-router expansion hooks in projection/diagnostics & native case coverage where present; not claimed as external-engine parity \\\\\n";
+  tex << "OPF and DAE hooks & analysis must factor through the canonical substrate & OPF certificate rows and DAE algebraic-rank diagnostics & MR3 certificate and MR8 tests; not the main solver-speed claim \\\\\n";
+  tex << "Three-phase hybrid distribution & staged abc-domain AC solve plus aggregate AC/DC boundary solve & implemented staged workflow, not monolithic abc--DC--VSC Newton & three-phase scope, base cases, and stress table \\\\\n";
+  tex << "OpenDSS/GridLAB-D I/O & typed external file conversion with declared preserved semantics & expanded text import/export and reference-run harnesses & EPRI OpenDSS and r5643 GridLAB-D taxonomy benchmarks \\\\\n";
+  tex << "Live LLM prompting & typed action interface and guard, not generated physics & scripted LLM-style error benchmark and API guard endpoints & guard confusion counts; prompt-level benchmark left as future work \\\\\n";
+  tex << "\\bottomrule\n\\end{tabularx}\n";
+}
+
+void write_case_study_trace(const fs::path& outdir,
+                            const std::vector<CaseSummary>& summaries,
+                            const std::vector<LlmEditRow>& llm_rows) {
+  const CaseSummary* selected = nullptr;
+  for (const auto& s : summaries) {
+    if (s.spec.label == "hybrid-microgrid") {
+      selected = &s;
+      break;
+    }
+  }
+  if (!selected && !summaries.empty()) selected = &summaries.front();
+  if (!selected) return;
+
+  int guard_accept = 0;
+  int guard_reject = 0;
+  int guard_fp = 0;
+  int guard_fn = 0;
+  for (const auto& row : llm_rows) {
+    if (row.accepted) ++guard_accept;
+    else ++guard_reject;
+    if (!row.expected_admissible && row.accepted) ++guard_fp;
+    if (row.expected_admissible && !row.accepted) ++guard_fn;
+  }
+
+  const auto& sys = selected->spec.system;
+  std::ofstream tex(outdir / "sppt_complete_case_study_trace.tex");
+  tex << "% Auto-generated complete hybrid AC/DC case-study trace.\n";
+  tex << "\\begin{tabularx}{\\linewidth}{@{}l l X@{}}\n";
+  tex << "\\toprule\n";
+  tex << "Stage & Numerical fact & Interpretation \\\\\n";
+  tex << "\\midrule\n";
+  tex << "Rich model & \\texttt{" << latex_escape(selected->spec.label) << "}: "
+      << sys.ac.buses.size() << " AC buses, " << sys.dc.buses.size()
+      << " DC buses, " << sys.ac.branches.size() << " AC branches, "
+      << sys.dc.branches.size() << " DC branch"
+      << (sys.dc.branches.size() == 1 ? "" : "es") << ", "
+      << sys.vsc_converters.size()
+      << " VSC" << (sys.vsc_converters.size() == 1 ? "" : "s")
+      << " & authored model keeps AC feeder, DC island, converter, and load identities before projection \\\\\n";
+  const int engineering_branches = count_actual_value_branches(sys);
+  tex << "Projection & " << engineering_branches
+      << " engineering-value branches in this case; provenance maps retained & ";
+  if (engineering_branches > 0) {
+    tex << "actual units are normalized and rich devices are reduced only through declared terminal-equivalent stamps";
+  } else {
+    tex << "this case stresses topology/converter provenance; actual-unit projection is exercised by the separate \\texttt{actual-value} case";
+  }
+  tex << " \\\\\n";
+  tex << "Role typing & " << sys.vsc_converters.size()
+      << " VSC record" << (sys.vsc_converters.size() == 1 ? "" : "s")
+      << " resolved before solve & converter modes determine which AC/DC references are physical and which powers are recovered as outputs \\\\\n";
+  tex << "Base PF & " << (selected->base.converged ? "converged" : "not converged")
+      << ", " << selected->base.iterations << " iterations, "
+      << f2(selected->base.best_ms) << " ms, residual "
+      << sci(selected->base.residual) << " & native HACDCPF verifies the coupled AC/DC equations, not an external AC-only surrogate \\\\\n";
+  tex << "Stress sweep & " << selected->stress_success << "/"
+      << selected->stress_total << " load points, max converged scale "
+      << f2(selected->max_success_scale) << "$\\times$ & robustness is reported as a loadability envelope, with failed points kept visible \\\\\n";
+  tex << "LLM guard & " << guard_accept << " accepted, " << guard_reject
+      << " rejected, FP=" << guard_fp << ", FN=" << guard_fn
+      << " & the LLM layer is evaluated as typed input/repair handling; accepted edits are then solved numerically \\\\\n";
+  tex << "Attribution & voltage and converter results remain tied to original AC/DC devices & the delivered result is a device-level report rather than anonymous solver-vector entries \\\\\n";
+  tex << "\\bottomrule\n\\end{tabularx}\n";
+}
+
 std::vector<LlmEditRow> run_llm_error_benchmark(const HybridPowerSystem& seed) {
   struct Edit {
     std::string name;
@@ -587,8 +670,8 @@ void write_evidence_summary(const fs::path& outdir,
   tex << "External engine boundary & GridLAB-D passes 21/21 exact AC-side gates and 18/18 "
          "long-duration gates; the r5643 taxonomy benchmark imports and solves 24/24 "
          "projected feeders, with 3222 comparable GridLAB-D voltage records and worst "
-         "filtered error 0.025 p.u.; OpenDSSDirect solves IEEE13. MATPOWER remains AC-only. & "
-         "\\Cref{tab:external-engines,tab:gridlabd-taxonomy-summary,tab:gridlabd-io,tab:modeling-scope} \\\\\n";
+         "filtered error 0.03694 p.u.; OpenDSSDirect solves IEEE13 and 6/6 supplied EPRI masters. MATPOWER remains AC-only. & "
+         "\\Cref{tab:external-engines,tab:cross-solver,tab:gridlabd-taxonomy-summary,tab:opendss-epri-io,tab:modeling-scope} \\\\\n";
   tex << "LLM-assisted modeling guard & Typed hybrid edit benchmark: TP=" << tp
       << ", TN=" << tn << ", FP=" << fp << ", FN=" << fn
       << "; invalid references and impossible converter parameters are rejected before solve. & "
@@ -648,10 +731,12 @@ int main(int argc, char** argv) {
     write_stress_table(outdir, stress_rows);
     write_stress_figure(outdir, summaries);
     write_modeling_scope_table(outdir);
+    write_feature_maturity_table(outdir);
 
     HybridPowerSystem llm_seed = hacdcpf::io::build_hybrid_acdc_microgrid_island();
     const auto llm_rows = run_llm_error_benchmark(llm_seed);
     write_llm_table(outdir, llm_rows);
+    write_case_study_trace(outdir, summaries, llm_rows);
     write_evidence_summary(outdir, summaries, llm_rows);
 
     std::cerr << "Wrote hybrid AC/DC PF study tables to " << outdir << "\n";
