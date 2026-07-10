@@ -33,7 +33,7 @@ struct GuardVerdict {
 /// Evaluate the three admissibility gates on \p sys (Alg. 2, lines 2-7).
 GuardVerdict guard_system(const HybridPowerSystem& sys);
 
-// ── LLM-in-the-loop evaluation (Pillar 5) ────────────────────────────────────
+// ── Scripted agent-edit evaluation for the LLM-ready interface (Pillar 5) ────
 
 /// A labeled candidate model / edit with its ground-truth admissibility.
 struct LabeledEdit {

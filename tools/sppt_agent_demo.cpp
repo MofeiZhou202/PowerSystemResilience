@@ -2,15 +2,20 @@
 /// =========================
 /// Verified Intelligent Modeling demonstration (Alg. 2 / Thm. 8.9 of
 /// docs/latex/sppt_theory.tex).  Runs a scripted sequence of model edits (a
-/// stand-in for an LLM/agent) through the SPPT admissibility guard on a seed
-/// case, printing each Accept/Reject verdict with attribution and the final
-/// LLM-in-the-loop metrics.
+/// stand-in for a future LLM/tool-call proposal) through the SPPT admissibility
+/// guard on a seed case, printing each Accept/Reject verdict with attribution and the final
+/// scripted agent-edit metrics for the LLM-ready interface.
 ///
-/// Usage:  sppt_agent_demo [case.m|case.json]   (default: data/case9.m)
+/// Usage:
+///   sppt_agent_demo [case.m|case.json]
+///   sppt_agent_demo --actions id1,id2 [case.m|case.json]
+///   sppt_agent_demo --list-actions
 
 #include <filesystem>
 #include <iostream>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
@@ -23,10 +28,53 @@
 namespace fs = std::filesystem;
 using namespace hacdcpf;
 
+namespace {
+
+std::vector<std::string> split_csv(const std::string& csv) {
+  std::vector<std::string> out;
+  std::stringstream ss(csv);
+  std::string item;
+  while (std::getline(ss, item, ',')) {
+    if (!item.empty()) out.push_back(item);
+  }
+  return out;
+}
+
+void print_usage(const char* argv0) {
+  std::cerr << "Usage:\n"
+            << "  " << argv0 << " [case.m|case.json]\n"
+            << "  " << argv0 << " --actions id1,id2 [case.m|case.json]\n"
+            << "  " << argv0 << " --list-actions\n";
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
   const fs::path root = HACDCPF_PROJECT_ROOT;
-  const std::string path =
-      (argc > 1) ? argv[1] : (root / "data" / "case9.m").string();
+  std::string path = (root / "data" / "case9.m").string();
+  std::vector<std::string> action_ids;
+
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--help" || arg == "-h") {
+      print_usage(argv[0]);
+      return 0;
+    }
+    if (arg == "--list-actions") {
+      for (const auto& id : sppt::agent_action_ids()) std::cout << id << "\n";
+      return 0;
+    }
+    if (arg == "--actions") {
+      if (i + 1 >= argc) {
+        std::cerr << "sppt_agent_demo: --actions requires a comma-separated list\n";
+        print_usage(argv[0]);
+        return 2;
+      }
+      action_ids = split_csv(argv[++i]);
+      continue;
+    }
+    path = arg;
+  }
 
   HybridPowerSystem sys;
   try {
@@ -40,8 +88,16 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  const sppt::AgentTrajectory traj =
-      sppt::run_agent_loop(sys, sppt::default_agent_script());
+  std::vector<sppt::AgentEdit> script;
+  try {
+    script = action_ids.empty() ? sppt::default_agent_script()
+                                : sppt::agent_script_from_action_ids(action_ids);
+  } catch (const std::exception& e) {
+    std::cerr << "sppt_agent_demo: " << e.what() << "\n";
+    return 2;
+  }
+
+  const sppt::AgentTrajectory traj = sppt::run_agent_loop(sys, script);
 
   std::cout << "SPPT guarded agent loop on " << path << "\n"
             << "------------------------------------------------------------\n";

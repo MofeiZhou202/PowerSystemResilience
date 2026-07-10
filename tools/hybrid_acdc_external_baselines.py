@@ -1273,10 +1273,10 @@ def write_llm_io_workflow(outdir: Path) -> None:
         },
     ]
     with (outdir / "sppt_llm_io_workflow.tex").open("w") as f:
-        f.write("% Auto-generated LLM-assisted I/O workflow table.\n")
+        f.write("% Auto-generated LLM-ready I/O workflow table.\n")
         f.write(r"\begin{tabularx}{\linewidth}{@{}l X X X@{}}" + "\n")
         f.write(r"\toprule" + "\n")
-        f.write(r"Modeling task & LLM/tool action & Numerical check & Output \\"
+        f.write(r"Modeling task & LLM/tool-slot action & Numerical check & Output \\"
                 + "\n")
         f.write(r"\midrule" + "\n")
         for row in rows:

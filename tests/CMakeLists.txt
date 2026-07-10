@@ -100,7 +100,7 @@ hacdcpf_add_test(test_advanced_pf         test_advanced_pf.cpp)
 hacdcpf_add_test(test_dc_island_reference test_dc_island_reference.cpp)
 
 # SPPT executable theory: metamorphic relations (MR1-MR7), MR3 certificate
-# corpus, admissibility guard (Alg. 2 + LLM-in-the-loop metrics), and DAE
+# corpus, admissibility guard (Alg. 2 + scripted agent-edit metrics), and DAE
 # index-1 well-posedness (MR8).  Operationalizes docs/latex/sppt_theory.tex.
 hacdcpf_add_test(test_sppt_metamorphic     test_sppt_metamorphic.cpp)
 hacdcpf_add_test(test_sppt_certificate     test_sppt_certificate.cpp)

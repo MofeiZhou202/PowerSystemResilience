@@ -458,12 +458,12 @@ void write_feature_maturity_table(const fs::path& outdir) {
   tex << "\\midrule\n";
   tex << "AC power flow & canonical $\\Ybus$ balance with PQ/PV/slack rows & implemented balanced AC PF and external AC I/O paths & native PF cases, MATPOWER/pandapower sanity checks, OpenDSS/GridLAB-D AC-side checks \\\\\n";
   tex << "DC conductance power flow & canonical $\\Gdc$ balance with physical voltage reference or droop & implemented DC buses, DC branches, loads, storage references & native hybrid AC/DC PF cases and stress sweep \\\\\n";
-  tex << "VSC role typing & fixed/released quantities and island-reference count & seven-mode role resolver, AC PV/slack promotion, DC reference planning & hybrid cases, typed rejection, LLM-error benchmark \\\\\n";
+  tex << "VSC role typing & fixed/released quantities and island-reference count & seven-mode role resolver, AC PV/slack promotion, DC reference planning & hybrid cases, typed rejection, scripted agent-edit benchmark \\\\\n";
   tex << "DC/DC and energy-router projection & terminal-equivalent converter/router stamps with provenance & DC/DC and energy-router expansion hooks in projection/diagnostics & native case coverage where present; not claimed as external-engine parity \\\\\n";
   tex << "OPF and DAE hooks & analysis must factor through the canonical substrate & OPF certificate rows and DAE algebraic-rank diagnostics & MR3 certificate and MR8 tests; not the main solver-speed claim \\\\\n";
   tex << "Three-phase hybrid distribution & staged abc-domain AC solve plus aggregate AC/DC boundary solve & implemented staged workflow, not monolithic abc--DC--VSC Newton & three-phase scope, base cases, and stress table \\\\\n";
   tex << "OpenDSS/GridLAB-D I/O & typed external file conversion with declared preserved semantics & expanded text import/export and reference-run harnesses & EPRI OpenDSS and r5643 GridLAB-D taxonomy benchmarks \\\\\n";
-  tex << "Live LLM prompting & typed action interface and guard, not generated physics & scripted LLM-style error benchmark and API guard endpoints & guard confusion counts; prompt-level benchmark left as future work \\\\\n";
+  tex << "Prompt-level LLM integration & typed action interface and guard prepared, not generated physics & optional local Ollama prompt-to-action adapter plus scripted agent-edit baseline & guard confusion counts; live Ollama smoke table when available; broader prompt benchmark left as future work \\\\\n";
   tex << "\\bottomrule\n\\end{tabularx}\n";
 }
 
@@ -607,10 +607,10 @@ void write_llm_table(const fs::path& outdir, const std::vector<LlmEditRow>& rows
     }
   }
   std::ofstream tex(outdir / "sppt_llm_hybrid_edit_eval.tex");
-  tex << "% Auto-generated typed LLM-error benchmark for hybrid AC/DC PF.\n";
+  tex << "% Auto-generated scripted typed agent-edit benchmark for hybrid AC/DC PF.\n";
   tex << "\\begin{tabularx}{\\linewidth}{@{}Xcccc@{}}\n";
   tex << "\\toprule\n";
-  tex << "Typed LLM-style edit & expected & guard & PF after accept & residual \\\\\n";
+  tex << "Typed scripted agent edit & expected & guard & PF after accept & residual \\\\\n";
   tex << "\\midrule\n";
   for (const auto& row : rows) {
     const std::string guard_text =
@@ -650,7 +650,7 @@ void write_evidence_summary(const fs::path& outdir,
   }
 
   std::ofstream tex(outdir / "sppt_verification_summary.tex");
-  tex << "% Compact evidence summary for the verified LLM-assisted hybrid AC/DC framework.\n";
+  tex << "% Compact evidence summary for the verified LLM-ready hybrid AC/DC framework.\n";
   tex << "\\begin{tabularx}{\\linewidth}{@{}l X l@{}}\n";
   tex << "\\toprule\n";
   tex << "Claim verified & Numerical evidence & Artifact \\\\\n";
@@ -672,10 +672,10 @@ void write_evidence_summary(const fs::path& outdir,
          "projected feeders, with 3222 comparable GridLAB-D voltage records and worst "
          "filtered error 0.03694 p.u.; OpenDSSDirect solves IEEE13 and 6/6 supplied EPRI masters. MATPOWER remains AC-only. & "
          "\\Cref{tab:external-engines,tab:cross-solver,tab:gridlabd-taxonomy-summary,tab:opendss-epri-io,tab:modeling-scope} \\\\\n";
-  tex << "LLM-assisted modeling guard & Typed hybrid edit benchmark: TP=" << tp
+  tex << "LLM-ready modeling guard & Scripted typed hybrid edit benchmark: TP=" << tp
       << ", TN=" << tn << ", FP=" << fp << ", FN=" << fn
-      << "; invalid references and impossible converter parameters are rejected before solve. & "
-         "\\Cref{tab:llm-hybrid-edits,tab:llm-io-workflow} \\\\\n";
+      << "; invalid references and impossible converter parameters are rejected before solve; optional local Ollama prompt-to-action smoke test exercises the same interface when available. & "
+         "\\Cref{tab:llm-hybrid-edits,tab:llm-io-workflow,tab:ollama-live} \\\\\n";
   tex << "\\bottomrule\n\\end{tabularx}\n";
 }
 

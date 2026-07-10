@@ -1468,7 +1468,10 @@ void strip_dead_islands(HybridPowerSystem& sys) {
 }
 
 // merge_zero_impedance_buses
-void merge_zero_impedance_buses(HybridPowerSystem& sys, bool allow_merge) {
+static void merge_zero_impedance_buses_impl(
+    HybridPowerSystem& sys,
+    bool allow_merge,
+    const std::unordered_set<int>* merge_branch_indices) {
   auto& buses = sys.ac.buses;
   auto& branches = sys.ac.branches;
   const int n = static_cast<int>(buses.size());
@@ -1490,6 +1493,10 @@ void merge_zero_impedance_buses(HybridPowerSystem& sys, bool allow_merge) {
   if (allow_merge) {
     for (const auto& br : branches) {
       if (!br.in_service) continue;
+      if (merge_branch_indices != nullptr &&
+          merge_branch_indices->count(br.index) == 0) {
+        continue;
+      }
       // A true zero-impedance element (CB/switch) has both R and X tiny
       // AND negligible charging susceptance.  Short lines may have small
       // R and X but non-zero B 鈥?these must NOT be merged because merging
@@ -1687,6 +1694,10 @@ void merge_zero_impedance_buses(HybridPowerSystem& sys, bool allow_merge) {
   }
 
   sys.bus_merge_map = std::move(merge_map);
+}
+
+void merge_zero_impedance_buses(HybridPowerSystem& sys, bool allow_merge) {
+  merge_zero_impedance_buses_impl(sys, allow_merge, nullptr);
 }
 
 // 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -2050,6 +2061,7 @@ static void project_in_place(HybridPowerSystem& out, bool strip_dead = true) {
   // Track branch expansion provenance for Transformer2W/3W and Switch.
   // This lets callers map solver branch-flow indices back to original elements.
   BranchExpandMap bmap;
+  std::unordered_set<int> switch_merge_branch_indices;
   int next_br = next_index_of(out.ac.branches);
 
   for (const auto& tr : out.ac.transformers_2w) {
@@ -2089,6 +2101,7 @@ static void project_in_place(HybridPowerSystem& out, bool strip_dead = true) {
       e.bus_to = sw.bus_to;
       e.closed = sw.closed;
       bmap.entries.push_back(e);
+      if (sw.closed) switch_merge_branch_indices.insert(e.branch_index);
     }
   }
   for (const auto& cb : out.ac.circuit_breakers) {
@@ -2103,6 +2116,7 @@ static void project_in_place(HybridPowerSystem& out, bool strip_dead = true) {
       e.bus_to = cb.bus_to;
       e.closed = cb.closed;
       bmap.entries.push_back(e);
+      if (cb.closed) switch_merge_branch_indices.insert(e.branch_index);
     }
   }
   if (!bmap.empty()) out.branch_expand_map = std::move(bmap);
@@ -2116,18 +2130,15 @@ static void project_in_place(HybridPowerSystem& out, bool strip_dead = true) {
   out.microgrids.clear();
   out.mobile_storage.clear();
 
-  // Merge buses connected by zero-impedance branches created from switch
-  // or circuit breaker expansion.  Only perform merging when the system
-  // actually contains switches or circuit breakers; for pure MATPOWER
-  // imports the near-zero-Z branches are real short lines and must not
-  // be merged.  In either case the bus list is canonicalized to 1-based
-  // contiguous indices, which every positional PF/OPF builder (index-1)
-  // relies on — without this, a switch-free sub-network arriving with
-  // non-canonical IDs (e.g. a graph-contracted island) would have its
-  // branches dropped from the Y-bus and solve as a singular system.
-  const bool has_switch_elements =
-      !out.ac.switches.empty() || !out.ac.circuit_breakers.empty();
-  merge_zero_impedance_buses(out, has_switch_elements);
+  // Merge buses connected by zero-impedance branches created from closed
+  // switch/circuit-breaker expansion.  Use provenance as a whitelist: practical
+  // GridLAB-D feeders can contain real very-short lines whose per-unit R/X are
+  // below kBusMergeZThreshold, and those physical lines must remain branches.
+  // In either case the bus list is canonicalized to 1-based contiguous indices,
+  // which every positional PF/OPF builder (index-1) relies on.
+  merge_zero_impedance_buses_impl(out,
+                                  !switch_merge_branch_indices.empty(),
+                                  &switch_merge_branch_indices);
 
   // Strip dead islands: remove buses with no path to any generation
   // source.  This ensures all downstream algorithms (PF, OPF, DPF,

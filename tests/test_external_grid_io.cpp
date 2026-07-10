@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <unordered_set>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -467,6 +468,93 @@ object fuse {
   CHECK(projected.ac.branches.empty());
   REQUIRE(projected.ac.loads.size() == 1);
   CHECK(projected.ac.loads.front().bus == 1);
+}
+
+TEST_CASE("Canonical projection keeps physical short lines when GridLAB-D switches exist",
+          "[io][external][gridlabd][projection][regression]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.name = "short_line_with_switch";
+  sys.base_mva = 10.0;
+  sys.ac.base_mva = 10.0;
+  sys.ac.buses = {
+      make_bus(1, hacdcpf::BusType::SLACK, 12.47),
+      make_bus(2, hacdcpf::BusType::PQ, 12.47),
+      make_bus(3, hacdcpf::BusType::PQ, 12.47),
+  };
+
+  hacdcpf::ACBranch short_line;
+  short_line.index = 1;
+  short_line.name = "real_short_line";
+  short_line.from_bus = 1;
+  short_line.to_bus = 2;
+  short_line.r_pu = hacdcpf::kBusMergeZThreshold * 0.5;
+  short_line.x_pu = hacdcpf::kBusMergeZThreshold * 0.5;
+  short_line.b_pu = 0.0;
+  short_line.tap = 1.0;
+  short_line.in_service = true;
+  sys.ac.branches = {short_line};
+
+  hacdcpf::Switch sw;
+  sw.index = 1;
+  sw.name = "closed_switch";
+  sw.bus_from = 2;
+  sw.bus_to = 3;
+  sw.in_service = true;
+  sw.closed = true;
+  sys.ac.switches = {sw};
+
+  const auto projected =
+      hacdcpf::project_to_canonical_models(sys, /*strip_dead=*/false);
+
+  REQUIRE(projected.ac.buses.size() == 2);
+  REQUIRE(projected.ac.branches.size() == 1);
+  const auto& kept = projected.ac.branches.front();
+  CHECK(kept.name == "real_short_line");
+  CHECK(kept.from_bus != kept.to_bus);
+  CHECK_THAT(kept.r_pu, WithinAbs(short_line.r_pu, 1e-15));
+  CHECK_THAT(kept.x_pu, WithinAbs(short_line.x_pu, 1e-15));
+
+  REQUIRE(projected.bus_merge_map.has_value());
+  bool merged_switch_endpoints = false;
+  bool kept_short_line_endpoint = false;
+  for (const auto& group : projected.bus_merge_map->groups) {
+    const std::unordered_set<int> members(group.begin(), group.end());
+    if (members.count(2) && members.count(3)) merged_switch_endpoints = true;
+    if (members.count(1) && !members.count(2) && !members.count(3)) {
+      kept_short_line_endpoint = true;
+    }
+  }
+  CHECK(merged_switch_endpoints);
+  CHECK(kept_short_line_endpoint);
+}
+
+TEST_CASE("GridLAB-D GC taxonomy feeder projection preserves imported line objects",
+          "[io][external][gridlabd][projection][taxonomy]") {
+  const auto path = std::filesystem::path(HACDCPF_TEST_DATA_DIR) /
+                    "test_cases/gridlab-d-code-r5643-Taxonomy_Feeders/GC-12.47-1.glm";
+  if (!std::filesystem::exists(path)) {
+    SKIP("GridLAB-D taxonomy feeder fixture is not available");
+  }
+
+  hacdcpf::io::GridLABDImportOptions options;
+  options.mode = hacdcpf::io::ImportMode::Permissive;
+  options.default_base_mva = 10.0;
+  const auto sys = hacdcpf::io::load_gridlabd(path, options);
+
+  REQUIRE(sys.ac.branches.size() >= 18);
+  REQUIRE(sys.ac.switches.size() >= 5);
+
+  const auto projected =
+      hacdcpf::project_to_canonical_models(sys, /*strip_dead=*/false);
+
+  std::unordered_set<std::string> projected_branch_names;
+  for (const auto& br : projected.ac.branches) {
+    projected_branch_names.insert(br.name);
+  }
+
+  CHECK(projected_branch_names.count("GC-12-47-1_ul_13") == 1);
+  CHECK(projected_branch_names.count("GC-12-47-1_ul_14") == 1);
+  CHECK(projected_branch_names.count("GC-12-47-1_ul_18") == 1);
 }
 
 TEST_CASE("External grid IO safe load variants report missing files",

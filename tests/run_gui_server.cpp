@@ -976,15 +976,62 @@ json post_power_flow_terminal_flows_json(
     ac_terminal_buses.insert(e.from);
     ac_terminal_buses.insert(e.to);
   }
+  auto ac_terminal_root_rank = [&](int bus) {
+    for (const auto& b : sys.ac.buses) {
+      if (b.index == bus && b.in_service && b.bus_type == hacdcpf::BusType::SLACK) {
+        return 4;
+      }
+    }
+    for (const auto& eg : sys.ac.external_grids) {
+      if (eg.in_service && eg.bus == bus) return 4;
+    }
+    for (const auto& g : sys.ac.generators) {
+      if (!g.in_service || g.bus != bus) continue;
+      if (g.is_slack) return 4;
+    }
+    for (const auto& g : sys.ac.generators) {
+      if (g.in_service && g.bus == bus) return 2;
+    }
+    return 0;
+  };
   std::unordered_set<int> ac_terminal_seen;
-  for (int start : ac_terminal_buses) {
-    if (ac_terminal_seen.count(start)) continue;
+  for (int seed : ac_terminal_buses) {
+    if (ac_terminal_seen.count(seed)) continue;
+    std::vector<int> component;
+    std::vector<int> component_stack{seed};
+    ac_terminal_seen.insert(seed);
+    while (!component_stack.empty()) {
+      const int u = component_stack.back();
+      component_stack.pop_back();
+      component.push_back(u);
+      auto ait = ac_terminal_adj.find(u);
+      if (ait == ac_terminal_adj.end()) continue;
+      for (const auto& [v, edge_pos] : ait->second) {
+        (void)edge_pos;
+        if (!ac_terminal_seen.count(v)) {
+          ac_terminal_seen.insert(v);
+          component_stack.push_back(v);
+        }
+      }
+    }
+    if (component.empty()) continue;
+    int start = component.front();
+    int best_rank = ac_terminal_root_rank(start);
+    for (int bus : component) {
+      const int rank = ac_terminal_root_rank(bus);
+      if (rank > best_rank || (rank == best_rank && bus < start)) {
+        start = bus;
+        best_rank = rank;
+      }
+    }
+
     std::vector<int> order;
     std::unordered_map<int, int> parent;
     std::unordered_map<int, size_t> parent_edge;
+    std::unordered_set<int> tree_seen;
     std::vector<int> stack{start};
     parent[start] = start;
-    ac_terminal_seen.insert(start);
+    tree_seen.insert(start);
     while (!stack.empty()) {
       const int u = stack.back();
       stack.pop_back();
@@ -992,10 +1039,10 @@ json post_power_flow_terminal_flows_json(
       auto ait = ac_terminal_adj.find(u);
       if (ait == ac_terminal_adj.end()) continue;
       for (const auto& [v, edge_pos] : ait->second) {
-        if (parent.count(v)) continue;
+        if (tree_seen.count(v)) continue;
         parent[v] = u;
         parent_edge[v] = edge_pos;
-        ac_terminal_seen.insert(v);
+        tree_seen.insert(v);
         stack.push_back(v);
       }
     }
@@ -11565,15 +11612,63 @@ int main(int argc, char** argv) {
           ac_terminal_buses.insert(e.from);
           ac_terminal_buses.insert(e.to);
         }
+        auto ac_terminal_root_rank = [&](int bus) {
+          for (const auto& b : sys.ac.buses) {
+            if (b.index == bus && b.in_service &&
+                b.bus_type == hacdcpf::BusType::SLACK) {
+              return 4;
+            }
+          }
+          for (const auto& eg : sys.ac.external_grids) {
+            if (eg.in_service && eg.bus == bus) return 4;
+          }
+          for (const auto& g : sys.ac.generators) {
+            if (!g.in_service || g.bus != bus) continue;
+            if (g.is_slack) return 4;
+          }
+          for (const auto& g : sys.ac.generators) {
+            if (g.in_service && g.bus == bus) return 2;
+          }
+          return 0;
+        };
         std::unordered_set<int> ac_terminal_seen;
-        for (int start : ac_terminal_buses) {
-          if (ac_terminal_seen.count(start)) continue;
+        for (int seed : ac_terminal_buses) {
+          if (ac_terminal_seen.count(seed)) continue;
+          std::vector<int> component;
+          std::vector<int> component_stack{seed};
+          ac_terminal_seen.insert(seed);
+          while (!component_stack.empty()) {
+            const int u = component_stack.back();
+            component_stack.pop_back();
+            component.push_back(u);
+            auto ait = ac_terminal_adj.find(u);
+            if (ait == ac_terminal_adj.end()) continue;
+            for (const auto& [v, edge_pos] : ait->second) {
+              (void)edge_pos;
+              if (!ac_terminal_seen.count(v)) {
+                ac_terminal_seen.insert(v);
+                component_stack.push_back(v);
+              }
+            }
+          }
+          if (component.empty()) continue;
+          int start = component.front();
+          int best_rank = ac_terminal_root_rank(start);
+          for (int bus : component) {
+            const int rank = ac_terminal_root_rank(bus);
+            if (rank > best_rank || (rank == best_rank && bus < start)) {
+              start = bus;
+              best_rank = rank;
+            }
+          }
+
           std::vector<int> order;
           std::unordered_map<int, int> parent;
           std::unordered_map<int, size_t> parent_edge;
+          std::unordered_set<int> tree_seen;
           std::vector<int> stack{start};
           parent[start] = start;
-          ac_terminal_seen.insert(start);
+          tree_seen.insert(start);
           while (!stack.empty()) {
             const int u = stack.back();
             stack.pop_back();
@@ -11581,10 +11676,10 @@ int main(int argc, char** argv) {
             auto ait = ac_terminal_adj.find(u);
             if (ait == ac_terminal_adj.end()) continue;
             for (const auto& [v, edge_pos] : ait->second) {
-              if (parent.count(v)) continue;
+              if (tree_seen.count(v)) continue;
               parent[v] = u;
               parent_edge[v] = edge_pos;
-              ac_terminal_seen.insert(v);
+              tree_seen.insert(v);
               stack.push_back(v);
             }
           }
@@ -11651,6 +11746,143 @@ int main(int argc, char** argv) {
         };
         for (const auto& fl : ac_switch_flows) add_unmatched_ac_terminal_export(fl);
         for (const auto& fl : ac_cb_flows) add_unmatched_ac_terminal_export(fl);
+
+        auto refresh_ac_bus_net = [&](int bus) {
+          ac_net_export_p[bus] =
+              ac_non_grid_p[bus] + ac_grid_inj_p[bus] + vsc_inj_ac_p[bus];
+          ac_net_export_q[bus] =
+              ac_non_grid_q[bus] + ac_grid_inj_q[bus] + vsc_inj_ac_q[bus];
+        };
+        auto refresh_ac_generation_display = [&]() {
+          bus_pg.clear();
+          bus_qg.clear();
+          for (size_t gi = 0; gi < sys.ac.generators.size(); ++gi) {
+            if (!sys.ac.generators[gi].in_service) continue;
+            bus_pg[sys.ac.generators[gi].bus] += gen_pg_solved[gi];
+            bus_qg[sys.ac.generators[gi].bus] += gen_qg_solved[gi];
+          }
+          for (const auto& sg : sys.ac.static_generators) {
+            if (!sg.in_service) continue;
+            bus_pg[sg.bus] += sg.p_mw * sg.scaling;
+            bus_qg[sg.bus] += sg.q_mvar * sg.scaling;
+          }
+          for (auto& item : geo_buses) {
+            if (!item.is_object() || item.value("type", std::string{}) != "AC") continue;
+            const int bus = item.value("id", 0);
+            item["pg_mw"] = bus_pg[bus];
+            item["qg_mvar"] = bus_qg[bus];
+          }
+          geo_gen = power_flow_geo_generator_json(sys, gen_pg_solved, gen_qg_solved);
+          out["geo_buses"] = geo_buses;
+          out["geo_gen"] = geo_gen;
+        };
+        auto ac_bus_is_slack_source = [&](int bus) {
+          for (const auto& b : sys.ac.buses) {
+            if (b.index == bus && b.in_service &&
+                b.bus_type == hacdcpf::BusType::SLACK) {
+              return true;
+            }
+          }
+          for (const auto& eg : sys.ac.external_grids) {
+            if (eg.in_service && eg.bus == bus) return true;
+          }
+          for (const auto& g : sys.ac.generators) {
+            if (g.in_service && g.bus == bus && g.is_slack) return true;
+          }
+          return false;
+        };
+        auto ac_bus_type_is_slack = [&](int bus) {
+          for (const auto& b : sys.ac.buses) {
+            if (b.index == bus && b.in_service) {
+              return b.bus_type == hacdcpf::BusType::SLACK;
+            }
+          }
+          return false;
+        };
+        auto set_gen_solved = [&](size_t gi, double p, double q) {
+          if (gi >= sys.ac.generators.size()) return false;
+          const int bus = sys.ac.generators[gi].bus;
+          const double dp = p - gen_pg_solved[gi];
+          const double dq = q - gen_qg_solved[gi];
+          if (std::abs(dp) <= 1e-9 && std::abs(dq) <= 1e-9) return false;
+          gen_pg_solved[gi] = p;
+          gen_qg_solved[gi] = q;
+          ac_non_grid_p[bus] += dp;
+          ac_non_grid_q[bus] += dq;
+          refresh_ac_bus_net(bus);
+          return true;
+        };
+        bool source_display_changed = false;
+        for (const auto& [bus, gen_list] : gens_at_bus) {
+          if (!ac_bus_is_slack_source(bus) || gen_list.empty()) continue;
+          double current_gen_p = 0.0;
+          double current_gen_q = 0.0;
+          double fixed_gen_p = 0.0;
+          double fixed_gen_q = 0.0;
+          std::vector<size_t> slack_gens;
+          const bool has_designated_slack_gen = std::any_of(
+              gen_list.begin(), gen_list.end(), [&](size_t gi) {
+                return gi < sys.ac.generators.size() &&
+                       sys.ac.generators[gi].is_slack;
+              });
+          for (size_t gi : gen_list) {
+            current_gen_p += gen_pg_solved[gi];
+            current_gen_q += gen_qg_solved[gi];
+            if (sys.ac.generators[gi].is_slack ||
+                (!has_designated_slack_gen && ac_bus_type_is_slack(bus))) {
+              slack_gens.push_back(gi);
+            } else {
+              fixed_gen_p += gen_pg_solved[gi];
+              fixed_gen_q += gen_qg_solved[gi];
+            }
+          }
+          if (slack_gens.empty()) continue;
+          const double non_gen_p = ac_non_grid_p[bus] - current_gen_p;
+          const double non_gen_q = ac_non_grid_q[bus] - current_gen_q;
+          const double target_total_gen_p =
+              ac_terminal_export_p[bus] - non_gen_p - ac_grid_inj_p[bus] -
+              vsc_inj_ac_p[bus];
+          const double target_total_gen_q =
+              ac_terminal_export_q[bus] - non_gen_q - ac_grid_inj_q[bus] -
+              vsc_inj_ac_q[bus];
+          const double target_slack_p = target_total_gen_p - fixed_gen_p;
+          const double target_slack_q = target_total_gen_q - fixed_gen_q;
+          double pmax_sum = 0.0;
+          double qrange_sum = 0.0;
+          for (size_t gi : slack_gens) {
+            pmax_sum += std::max(sys.ac.generators[gi].pmax_mw, 0.0);
+            qrange_sum += std::max(sys.ac.generators[gi].qmax_mvar -
+                                   sys.ac.generators[gi].qmin_mvar, 0.0);
+          }
+          const double n = static_cast<double>(slack_gens.size());
+          for (size_t gi : slack_gens) {
+            const double p_w = pmax_sum > 1e-9
+                ? std::max(sys.ac.generators[gi].pmax_mw, 0.0) / pmax_sum
+                : 1.0 / n;
+            const double q_w = qrange_sum > 1e-9
+                ? std::max(sys.ac.generators[gi].qmax_mvar -
+                           sys.ac.generators[gi].qmin_mvar, 0.0) / qrange_sum
+                : 1.0 / n;
+            source_display_changed =
+                set_gen_solved(gi, target_slack_p * p_w, target_slack_q * q_w) ||
+                source_display_changed;
+          }
+        }
+        for (const auto& [bus, count] : ext_count_by_bus) {
+          if (count <= 0 || gens_at_bus.count(bus) > 0) continue;
+          const double target_grid_p =
+              ac_terminal_export_p[bus] - ac_non_grid_p[bus] - vsc_inj_ac_p[bus];
+          const double target_grid_q =
+              ac_terminal_export_q[bus] - ac_non_grid_q[bus] - vsc_inj_ac_q[bus];
+          if (std::abs(target_grid_p - ac_grid_inj_p[bus]) > 1e-9 ||
+              std::abs(target_grid_q - ac_grid_inj_q[bus]) > 1e-9) {
+            ac_grid_inj_p[bus] = target_grid_p;
+            ac_grid_inj_q[bus] = target_grid_q;
+            refresh_ac_bus_net(bus);
+            source_display_changed = true;
+          }
+        }
+        if (source_display_changed) refresh_ac_generation_display();
 
         std::unordered_map<int, double> dc_terminal_export_p = dc_visible_branch_p;
         for (const auto& fl : dc_cb_flows) {

@@ -1,7 +1,7 @@
 /// test_sppt_guard.cpp
 /// ===================
-/// The SPPT admissibility guard (Def. 8.7, Alg. 2) and its LLM-in-the-loop
-/// evaluation metrics (Pillar 5).
+/// The SPPT admissibility guard (Def. 8.7, Alg. 2) and scripted agent-edit
+/// evaluation metrics for the LLM-ready interface (Pillar 5).
 
 #include <string>
 #include <vector>

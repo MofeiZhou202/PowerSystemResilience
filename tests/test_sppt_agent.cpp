@@ -2,7 +2,7 @@
 /// ===================
 /// Verified Intelligent Modeling agent loop (Alg. 2 / Thm. 8.9): the guard admits
 /// good edits and rejects hallucinated ones, the trajectory stays sound, and the
-/// LLM-in-the-loop metrics are perfect on the labeled script.
+/// scripted agent-edit metrics are perfect on the labeled script.
 
 #include <string>
 
@@ -48,7 +48,7 @@ TEST_CASE("Agent loop admits good edits, rejects hallucinated ones, stays sound"
   // Loop soundness (Thm. 8.9).
   CHECK(traj.sound);
 
-  // LLM-in-the-loop metrics on the labeled script.
+  // Scripted agent-edit metrics on the labeled script.
   CHECK(traj.metrics.tp == 3);
   CHECK(traj.metrics.tn == 1);
   CHECK(traj.metrics.fp == 0);
