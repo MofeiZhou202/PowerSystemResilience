@@ -18,9 +18,23 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     return islands;
   }
 
+  std::vector<char> active(static_cast<size_t>(n_total), 0);
+  for (int i = 0; i < nac; ++i) {
+    const auto& bus = sys.ac.buses[static_cast<size_t>(i)];
+    active[static_cast<size_t>(i)] =
+        bus.in_service && bus.bus_type != BusType::ISOLATED;
+  }
+  for (int i = 0; i < ndc; ++i) {
+    const auto& bus = sys.dc.buses[static_cast<size_t>(i)];
+    active[static_cast<size_t>(nac + i)] =
+        bus.in_service && bus.bus_type != DCBusType::DC_ISOLATED;
+  }
+
   std::vector<std::vector<int>> adj(static_cast<size_t>(n_total));
   auto add_edge = [&](int u, int v) {
-    if (u < 0 || v < 0 || u >= n_total || v >= n_total || u == v) {
+    if (u < 0 || v < 0 || u >= n_total || v >= n_total || u == v ||
+        active[static_cast<size_t>(u)] == 0 ||
+        active[static_cast<size_t>(v)] == 0) {
       return;
     }
     adj[static_cast<size_t>(u)].push_back(v);
@@ -145,6 +159,9 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
   std::vector<char> visited(static_cast<size_t>(n_total), 0);
   std::vector<int> stack;
   for (int start = 0; start < n_total; ++start) {
+    if (active[static_cast<size_t>(start)] == 0) {
+      continue;
+    }
     if (visited[static_cast<size_t>(start)] != 0) {
       continue;
     }

@@ -68,6 +68,8 @@ const App = (() => {
   let _lastScenarioBaseSystemJson = null;
   let _resilienceComparisonRuns = [];
   let _scenarioCurveEntries = [];
+  const SCENARIO_CURVE_SELECTOR_LIMIT = 500;
+  const SCENARIO_CHART_POINT_LIMIT = 2500;
   let _importedGeneratedScenario = null;
   let _lastImportedGeneratedScenarioKey = '';
   let _generatedScenarioTimeSeriesActive = false;
@@ -976,9 +978,15 @@ const App = (() => {
 
   function scenarioCurveEntryOptions(data) {
     const entries = [];
-    (data?.regular?.clusters || []).forEach((c, i) => entries.push({ family: 'regular', label: `常规 #${c.cluster_id ?? i + 1} ${c.representative_id || ''}`, cluster: c, representative: c.representative }));
-    (data?.reliability?.contingencies || []).forEach((g, gi) => (g.clusters || []).forEach((c, ci) => entries.push({ family: 'reliability', label: `可靠性 ${g.contingency?.display_name || g.contingency?.id || gi + 1} / 簇${c.cluster_id ?? ci + 1}`, cluster: c, representative: c.representative })));
-    (data?.resilience?.intensities || []).forEach((g, gi) => (g.clusters || []).forEach((c, ci) => entries.push({ family: 'resilience', label: `弹性 ${g.intensity || gi + 1} / 簇${c.cluster_id ?? ci + 1} ${c.representative_id || ''}`, cluster: c, representative: c.representative })));
+    const familyCounts = { regular: 0, reliability: 0, resilience: 0 };
+    const add = entry => {
+      if (!entry?.representative || familyCounts[entry.family] >= SCENARIO_CURVE_SELECTOR_LIMIT) return;
+      familyCounts[entry.family] += 1;
+      entries.push(entry);
+    };
+    (data?.regular?.clusters || []).forEach((c, i) => add({ family: 'regular', label: `常规 #${c.cluster_id ?? i + 1} ${c.representative_id || ''}`, cluster: c, representative: c.representative }));
+    (data?.reliability?.contingencies || []).forEach((g, gi) => (g.clusters || []).forEach((c, ci) => add({ family: 'reliability', label: `可靠性 ${g.contingency?.display_name || g.contingency?.id || gi + 1} / 簇${c.cluster_id ?? ci + 1}`, cluster: c, representative: c.representative })));
+    (data?.resilience?.intensities || []).forEach((g, gi) => (g.clusters || []).forEach((c, ci) => add({ family: 'resilience', label: `弹性 ${g.intensity || gi + 1} / 簇${c.cluster_id ?? ci + 1} ${c.representative_id || ''}`, cluster: c, representative: c.representative })));
     return entries.filter(e => e.representative);
   }
 
@@ -1807,8 +1815,21 @@ const App = (() => {
         const sys = JSON.parse(data._raw_json);
 	        Canvas.loadFromSystemJson(sys);
 	        _canvasDirty = false;  // backend already has the correct system
-	        if ((data._has_three_phase_ac || sys.three_phase_ac) && document.getElementById('pfMethod')) {
-	          document.getElementById('pfMethod').value = 'three_phase';
+	        const methodInput = document.getElementById('pfMethod');
+	        const recommendedMethod = data._recommended_pf_method ||
+	          ((data._has_three_phase_ac || sys.three_phase_ac) ? 'three_phase' : '');
+	        if (methodInput && recommendedMethod &&
+	            Array.from(methodInput.options || []).some(option => option.value === recommendedMethod)) {
+	          methodInput.value = recommendedMethod;
+	        }
+	        const toleranceInput = document.getElementById('pfTol');
+	        const recommendedTolerance = Number(data._recommended_pf_tolerance);
+	        const currentTolerance = Number(toleranceInput?.value);
+	        if (toleranceInput && Number.isFinite(recommendedTolerance) &&
+	            recommendedTolerance > 0 &&
+	            (!Number.isFinite(currentTolerance) || currentTolerance < recommendedTolerance)) {
+	          toleranceInput.value = String(recommendedTolerance);
+	          log(`${label}潮流预设：${recommendedMethod || methodInput?.value || '默认算法'}，容差${recommendedTolerance}`, 'info');
 	        }
 	        updateResilienceSwitchDefault();
 	        invalidateAnalysisResults('系统已变更，旧潮流和碳流结果已失效');
@@ -1846,23 +1867,86 @@ const App = (() => {
     }
   }
 
-  async function loadOpendss(file) {
-    if (!file) return;
+  function openDssUploadPath(file) {
+    return file.webkitRelativePath || file.name;
+  }
+
+  function openDssUploadExtension(path) {
+    const idx = path.lastIndexOf('.');
+    return idx >= 0 ? path.slice(idx).toLowerCase() : '';
+  }
+
+  function isOpenDssProjectTextFile(file) {
+    const path = openDssUploadPath(file).toLowerCase();
+    const ext = openDssUploadExtension(path);
+    if (['.dss', '.txt', '.csv', '.dat', '.dbl', '.shape', '.loadshape', '.xy'].includes(ext)) return true;
+    return !ext && file.size < 5 * 1024 * 1024;
+  }
+
+  function chooseOpenDssMaster(files) {
+    let best = null;
+    let bestScore = -1;
+    files.forEach((f, idx) => {
+      const path = String(f.path || f.name || '').toLowerCase();
+      const name = path.split('/').pop();
+      const isDss = name.endsWith('.dss');
+      let score = -1;
+      if (name === 'master.dss') score = 1000;
+      else if (isDss && name.includes('master')) score = 900;
+      else if (isDss && name.includes('main')) score = 850;
+      else if (isDss && path.includes('ieee')) score = 800;
+      else if (isDss && String(f.content || '').toLowerCase().includes('new circuit.')) score = 700;
+      else if (isDss) score = 500;
+      score -= idx * 0.001;
+      if (score > bestScore) {
+        best = f;
+        bestScore = score;
+      }
+    });
+    return best || files[0] || null;
+  }
+
+  async function loadOpendss(fileOrFiles) {
+    const selected = Array.from(fileOrFiles instanceof FileList ? fileOrFiles : (Array.isArray(fileOrFiles) ? fileOrFiles : (fileOrFiles ? [fileOrFiles] : [])));
+    if (!selected.length) return;
     setStatus('导入OpenDSS...', 'busy');
     try {
-      const dss = await file.text();
-	      const data = await apiPost('/api/session/load_opendss', { dss_string: dss, filename: file.name });
+      const accepted = selected.filter(isOpenDssProjectTextFile);
+      if (!accepted.length) throw new Error('No readable OpenDSS project files were selected.');
+      const projectFiles = [];
+      for (const file of accepted) {
+        projectFiles.push({
+          path: openDssUploadPath(file),
+          name: file.name,
+          size: file.size,
+          content: await file.text(),
+        });
+      }
+      const master = chooseOpenDssMaster(projectFiles);
+      const payload = {
+        dss_string: master?.content || '',
+        filename: master?.name || selected[0].name,
+        master_path: master?.path || selected[0].name,
+      };
+      if (projectFiles.length > 1 || selected[0].webkitRelativePath) {
+        payload.project_files = projectFiles;
+      }
+	      const data = await apiPost('/api/session/load_opendss', payload);
       if (!data) { setStatus('加载失败', 'error'); return; }
-      log(`已导入OpenDSS DSS: ${file.name}`, 'success');
+      const label = projectFiles.length > 1 ? `${master?.path || master?.name} (+${projectFiles.length - 1})` : selected[0].name;
+      log(`已导入OpenDSS DSS: ${label}`, 'success');
       applyLoadedSystem(data, 'OpenDSS DSS');
 	      showModelIoStatus('OpenDSS 导入完成', [
-	        ['文件', file.name],
+	        ['文件', label],
 	        ['导入路径', data._opendss_import_mode || ''],
+	        ['工程文件', data._opendss_project_file_count || projectFiles.length],
 	        ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
 	        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
 	        ['三相母线', data.counts?.tp_buses ?? data.tp_buses ?? ''],
 	        ['三相线路', data.counts?.tp_lines ?? data.tp_lines ?? ''],
 	        ['负荷', data.counts?.loads ?? data.loads ?? ''],
+	        ['建议算法', data._recommended_pf_method || ''],
+	        ['建议容差', data._recommended_pf_tolerance || ''],
 	      ], { subtitle: data._has_three_phase_ac ? 'DSS 已作为三相 abc 模型导入，并生成等值单线图' : 'DSS 文本转换到当前系统', warnings: data._io_warnings || data._opendss_warnings || [] });
       setStatus('就绪');
     } catch (e) {
@@ -11889,10 +11973,18 @@ const App = (() => {
     document.getElementById('btnIoImportOpendss')?.addEventListener('click', () => {
       document.getElementById('fileImportOpendss')?.click();
     });
+    document.getElementById('btnIoImportOpendssProject')?.addEventListener('click', () => {
+      document.getElementById('fileImportOpendssProject')?.click();
+    });
     document.getElementById('fileImportOpendss')?.addEventListener('change', (e) => {
-      const f = e.target.files[0];
+      const files = Array.from(e.target.files || []);
       e.target.value = '';
-      if (f) loadOpendss(f);
+      if (files.length) loadOpendss(files);
+    });
+    document.getElementById('fileImportOpendssProject')?.addEventListener('change', (e) => {
+      const files = Array.from(e.target.files || []);
+      e.target.value = '';
+      if (files.length) loadOpendss(files);
     });
     document.getElementById('btnIoImportPsdJulia')?.addEventListener('click', () => {
       document.getElementById('fileImportPsdJulia')?.click();
@@ -14181,9 +14273,16 @@ const App = (() => {
           || Math.abs(featureNumber(p.features, 'wind_sum')) > 1e-6
           || Math.abs(featureNumber(p.features, 'other_renewable_sum')) > 1e-6);
       };
+      const boundedChartPoints = points => {
+        const source = Array.isArray(points) ? points : [];
+        if (source.length <= SCENARIO_CHART_POINT_LIMIT) return source;
+        const last = source.length - 1;
+        return Array.from({ length: SCENARIO_CHART_POINT_LIMIT }, (_, i) =>
+          source[Math.round((i * last) / (SCENARIO_CHART_POINT_LIMIT - 1))]);
+      };
       const plotCoverage = (divId, allPoints, selectedPoints, labels) => {
-        const all = allPoints || [];
-        const selected = selectedPoints || [];
+        const all = boundedChartPoints(allPoints);
+        const selected = boundedChartPoints(selectedPoints);
         const hasRen = hasRenewableFeature(all.concat(selected));
         const xKey = 'load';
         const yKey = hasRen ? 'renewable' : 'peakLoad';
@@ -14415,9 +14514,6 @@ const App = (() => {
       const div = document.getElementById('scenarioGenerationResults');
       const summaryDiv = document.getElementById('resultsSummary');
       if (!div || !summaryDiv) return;
-      renderScenarioGenerationCharts(data);
-      renderScenarioCurveSelectors(data);
-      renderComponentCurveTargets('scenario');
       const summary = data.summary || {};
       const regularAudit = data.regular?.audit || {};
       const regularPerGroup = regularAudit.requested_cluster_count_per_ssp_year ?? '-';
@@ -14465,10 +14561,20 @@ const App = (() => {
         <h4>弹性台风代表场景（48h，一次扰动+台风二次扰动）</h4>
         <table><thead><tr><th>划分后强度集合</th><th>候选</th><th>聚类</th><th>代表场景</th><th>分类强度</th><th>最大风速(m/s，不含t0)</th><th>月份/sample</th><th>故障数</th><th>首故障(h)</th><th>故障时刻(h)</th></tr></thead><tbody>${resRows || '<tr><td colspan="10" style="color:#888">未生成弹性场景</td></tr>'}</tbody></table>
       `;
+      renderScenarioCurveSelectors(data);
+      renderComponentCurveTargets('scenario');
+      const renderCharts = () => renderScenarioGenerationCharts(data);
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(renderCharts);
+      } else {
+        setTimeout(renderCharts, 0);
+      }
     }
 
 
-    document.getElementById('btnGenerateScenarios')?.addEventListener('click', async () => {
+    document.getElementById('btnGenerateScenarios')?.addEventListener('click', async event => {
+      const button = event.currentTarget;
+      if (button?.disabled) return;
       let payload;
       try {
         payload = collectScenarioGenerationOptions();
@@ -14477,26 +14583,42 @@ const App = (() => {
         setStatus('场景参数错误', 'error');
         return;
       }
-      setStatus('场景生成中...', 'busy');
-      _lastScenarioBaseSystemJson = Canvas.buildSystemJson();
-      if (!await syncToBackend()) { setStatus('同步失败', 'error'); return; }
-      const data = await apiPost('/api/session/generate_scenarios', payload);
-      if (!data) { setStatus('场景生成失败', 'error'); return; }
-      _lastScenarioGenerationData = data;
-      renderComponentCurveTargets('scenario');
-      setActiveResultGroup('scenarioGeneration');
-      document.getElementById('resultsEmpty').style.display = 'none';
-      document.getElementById('resultsContent').style.display = 'block';
-      switchTab('results');
-      renderScenarioGenerationResults(data);
-      setTimeout(() => {
-        ['scenarioChartRegular', 'scenarioChartReliability', 'scenarioChartResilience', 'scenarioChartRegularCurves', 'scenarioChartReliabilityBars', 'scenarioChartResilienceCurves', 'scenarioChartFaultSequence'].forEach(id => {
-          const el = document.getElementById(id);
-          if (el && window.Plotly) Plotly.Plots.resize(el);
-        });
-      }, 50);
-      log(`场景生成完成：常规${data.summary?.regular_cluster_count ?? 0}簇，可靠性${data.summary?.reliability_contingency_count ?? 0}个N-1，弹性${data.summary?.resilience_cluster_total ?? 0}簇`, 'success');
-      setStatus('场景生成完成');
+      if (button) button.disabled = true;
+      const startedAt = performance.now();
+      try {
+        setStatus('场景生成中...', 'busy');
+        await new Promise(resolve =>
+          typeof requestAnimationFrame === 'function'
+            ? requestAnimationFrame(() => resolve())
+            : setTimeout(resolve, 0));
+        _lastScenarioBaseSystemJson = Canvas.buildSystemJson();
+        if (!await syncToBackend()) { setStatus('同步失败', 'error'); return; }
+        const requestStartedAt = performance.now();
+        const data = await apiPost('/api/session/generate_scenarios', payload);
+        const requestElapsedMs = performance.now() - requestStartedAt;
+        if (!data) { setStatus('场景生成失败', 'error'); return; }
+        _lastScenarioGenerationData = data;
+        setActiveResultGroup('scenarioGeneration');
+        document.getElementById('resultsEmpty').style.display = 'none';
+        document.getElementById('resultsContent').style.display = 'block';
+        switchTab('results');
+        renderScenarioGenerationResults(data);
+        setTimeout(() => {
+          ['scenarioChartRegular', 'scenarioChartReliability', 'scenarioChartResilience', 'scenarioChartRegularCurves', 'scenarioChartReliabilityBars', 'scenarioChartResilienceCurves', 'scenarioChartFaultSequence'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el && window.Plotly) Plotly.Plots.resize(el);
+          });
+        }, 200);
+        const totalElapsedMs = performance.now() - startedAt;
+        const backendMs = Number(data._performance?.generation_ms);
+        log(`场景生成完成：常规${data.summary?.regular_cluster_count ?? 0}簇，可靠性${data.summary?.reliability_contingency_count ?? 0}个N-1，弹性${data.summary?.resilience_cluster_total ?? 0}簇；请求${requestElapsedMs.toFixed(0)}ms${Number.isFinite(backendMs) ? `，后端${backendMs.toFixed(0)}ms` : ''}，总计${totalElapsedMs.toFixed(0)}ms`, 'success');
+        setStatus('场景生成完成');
+      } catch (err) {
+        log(`场景生成失败：${err.message || err}`, 'error');
+        setStatus('场景生成失败', 'error');
+      } finally {
+        if (button) button.disabled = false;
+      }
     });
 
     function exportGeneratedScenarioFamily(family, label) {

@@ -197,6 +197,8 @@ struct TyphoonFaultSequenceResult {
   bool used_synthetic_segments{false};
   bool used_catalog_sample{false};
   bool used_category_fallback{false};
+  bool used_approximate_repair_order{false};
+  std::size_t repair_fault_count{0};
   TyphoonIntensityCategory requested_category{TyphoonIntensityCategory::Unknown};
   TyphoonIntensityCategory selected_category{TyphoonIntensityCategory::Unknown};
   double selected_track_max_vmax_ms{0.0};
@@ -209,11 +211,18 @@ struct TyphoonFaultSequenceResult {
 
 std::vector<TyphoonLineSegment> generate_typhoon_line_segments(
     const HybridPowerSystem& sys,
-    const TyphoonScenarioOptions& opts = {});
+    const TyphoonScenarioOptions& opts = {},
+    bool* used_fallback_coordinates = nullptr);
 
 TyphoonFaultSequenceResult generate_typhoon_fault_sequence(
     const HybridPowerSystem& sys,
     const TyphoonScenarioOptions& opts = {});
+
+TyphoonFaultSequenceResult generate_typhoon_fault_sequence(
+    const HybridPowerSystem& sys,
+    const TyphoonScenarioOptions& opts,
+    const std::vector<TyphoonLineSegment>& precomputed_segments,
+    bool used_fallback_coordinates);
 
 TyphoonIntensityCategory classify_typhoon_intensity(double max_vmax_ms);
 double holland_wind_ms(const TyphoonTrackPoint& storm, double site_lat, double site_lon);

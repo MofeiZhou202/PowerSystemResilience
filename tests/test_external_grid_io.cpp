@@ -13,6 +13,7 @@
 #include "hacdcpf/io/external_grid_io.hpp"
 #include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/power_flow/island_detector.hpp"
 #include "hacdcpf/projection/project_to_canonical.hpp"
 
 using Catch::Matchers::ContainsSubstring;
@@ -226,6 +227,51 @@ New Load.LoadLV bus1=loadbus.1.2.3 phases=3 kv=10 kw=1000 kvar=300
   CHECK_THAT(br.vn_hv_kv, WithinAbs(35.0, 1e-12));
   CHECK_THAT(br.vn_lv_kv, WithinAbs(10.0, 1e-12));
   CHECK_THAT(br.sn_mva, WithinAbs(10.0, 1e-12));
+}
+
+TEST_CASE("OpenDSS ckt5 parenthesized transformer keeps the active feeder connected",
+          "[io][external][opendss][ckt5][regression]") {
+  const auto master =
+      std::filesystem::path(HACDCPF_PROJECT_ROOT) /
+      "data/test_cases/electricdss-code-r4166-trunk-Distrib-EPRITestCircuits/"
+      "ckt5/Master_ckt5.dss";
+
+  hacdcpf::io::OpenDSSImportOptions options;
+  options.mode = hacdcpf::io::ImportMode::Permissive;
+  const auto report = hacdcpf::io::load_opendss_with_report(master, options);
+  const auto& sys = report.system;
+
+  REQUIRE(sys.ac.buses.size() == 3010);
+  REQUIRE(sys.ac.branches.size() == 2949);
+  REQUIRE(sys.ac.switches.size() == 73);
+  REQUIRE(sys.ac.loads.size() == 1379);
+
+  const auto active_bus_count = std::count_if(
+      sys.ac.buses.begin(), sys.ac.buses.end(),
+      [](const hacdcpf::ACBus& bus) { return bus.in_service; });
+  CHECK(active_bus_count == 2998);
+  CHECK(std::none_of(sys.ac.buses.begin(), sys.ac.buses.end(),
+                     [](const hacdcpf::ACBus& bus) {
+                       return !bus.name.empty() &&
+                              (bus.name.front() == '(' || bus.name.back() == ')');
+                     }));
+
+  const auto islands = hacdcpf::powerflow::detect_islands(sys);
+  REQUIRE(islands.size() == 1);
+  CHECK(islands.front().has_ac_slack);
+  CHECK(islands.front().has_generators);
+  CHECK(islands.front().ac_buses.size() == active_bus_count);
+
+  const auto projected = hacdcpf::project_to_canonical_models(sys);
+  REQUIRE(projected.bus_merge_map.has_value());
+  const std::vector<double> projected_voltage(projected.ac.buses.size(), 1.0);
+  const auto restored_voltage = hacdcpf::unproject_bus_vector(
+      projected_voltage, *projected.bus_merge_map);
+  REQUIRE(restored_voltage.size() == sys.ac.buses.size());
+  for (std::size_t i = 0; i < sys.ac.buses.size(); ++i) {
+    CHECK_THAT(restored_voltage[i],
+               WithinAbs(sys.ac.buses[i].in_service ? 1.0 : 0.0, 1e-12));
+  }
 }
 
 TEST_CASE("GridLAB-D text import parses generated load and line objects",

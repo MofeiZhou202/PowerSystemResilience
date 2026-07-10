@@ -1625,6 +1625,158 @@ std::string gui_lower_ascii(std::string text) {
   return text;
 }
 
+struct GuiOpenDSSUploadProject {
+  std::filesystem::path root;
+  std::filesystem::path master_path;
+  int file_count{0};
+  std::vector<std::string> warnings;
+};
+
+std::optional<std::filesystem::path> safe_gui_upload_relative_path(
+    std::string raw) {
+  std::replace(raw.begin(), raw.end(), '\\', '/');
+  while (!raw.empty() && raw.front() == '/') raw.erase(raw.begin());
+  if (raw.empty()) return std::nullopt;
+
+  std::filesystem::path in(raw);
+  if (in.is_absolute()) return std::nullopt;
+
+  std::filesystem::path out;
+  for (const auto& part : in) {
+    const std::string token = part.string();
+    if (token.empty() || token == ".") continue;
+    if (token == "..") return std::nullopt;
+    out /= token;
+  }
+  if (out.empty()) return std::nullopt;
+  return out;
+}
+
+std::string gui_json_string_field(const json& j,
+                                  std::initializer_list<const char*> keys) {
+  for (const char* key : keys) {
+    auto it = j.find(key);
+    if (it != j.end() && it->is_string()) return it->get<std::string>();
+  }
+  return {};
+}
+
+std::optional<GuiOpenDSSUploadProject> materialize_gui_opendss_upload_project(
+    const json& request) {
+  const json* files_json = nullptr;
+  for (const char* key : {"project_files", "opendss_files", "files"}) {
+    auto it = request.find(key);
+    if (it != request.end() && it->is_array() && !it->empty()) {
+      files_json = &*it;
+      break;
+    }
+  }
+  if (files_json == nullptr) return std::nullopt;
+
+  struct UploadedFile {
+    std::filesystem::path rel;
+    std::string name;
+    std::string content;
+  };
+  std::vector<UploadedFile> files;
+  files.reserve(files_json->size());
+  std::vector<std::string> warnings;
+
+  for (const auto& item : *files_json) {
+    if (!item.is_object()) continue;
+    std::string raw_path =
+        gui_json_string_field(item, {"path", "relative_path", "webkitRelativePath", "name"});
+    std::string content =
+        gui_json_string_field(item, {"content", "text", "dss_string"});
+    if (raw_path.empty()) {
+      warnings.push_back("OpenDSS upload entry skipped because it has no path/name.");
+      continue;
+    }
+    auto rel = safe_gui_upload_relative_path(raw_path);
+    if (!rel.has_value()) {
+      warnings.push_back("OpenDSS upload entry skipped because its path is unsafe: " +
+                         raw_path);
+      continue;
+    }
+    UploadedFile file;
+    file.rel = *rel;
+    file.name = file.rel.filename().string();
+    file.content = std::move(content);
+    files.push_back(std::move(file));
+  }
+  if (files.empty()) return std::nullopt;
+
+  static std::atomic<unsigned long long> upload_counter{0};
+  const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+  const auto root = std::filesystem::temp_directory_path() /
+                    ("hacdcpf_opendss_gui_" + std::to_string(stamp) + "_" +
+                     std::to_string(upload_counter.fetch_add(1)));
+  std::error_code ec;
+  std::filesystem::create_directories(root, ec);
+  if (ec) {
+    throw std::runtime_error("Unable to create temporary OpenDSS project directory: " +
+                             root.string() + " (" + ec.message() + ")");
+  }
+
+  std::unordered_map<std::string, std::filesystem::path> lower_rel_to_path;
+  lower_rel_to_path.reserve(files.size());
+  for (const auto& file : files) {
+    const auto target = (root / file.rel).lexically_normal();
+    const auto parent = target.parent_path();
+    std::filesystem::create_directories(parent, ec);
+    if (ec) {
+      throw std::runtime_error("Unable to create OpenDSS upload subdirectory: " +
+                               parent.string() + " (" + ec.message() + ")");
+    }
+    std::ofstream out(target, std::ios::binary);
+    if (!out) {
+      throw std::runtime_error("Unable to write uploaded OpenDSS file: " +
+                               target.string());
+    }
+    out << file.content;
+    lower_rel_to_path[gui_lower_ascii(file.rel.generic_string())] = target;
+  }
+
+  auto requested_master =
+      safe_gui_upload_relative_path(gui_json_string_field(
+          request, {"master_path", "master", "filename", "name"}));
+  std::filesystem::path master;
+  if (requested_master.has_value()) {
+    const std::string key = gui_lower_ascii(requested_master->generic_string());
+    auto it = lower_rel_to_path.find(key);
+    if (it != lower_rel_to_path.end()) master = it->second;
+  }
+
+  if (master.empty()) {
+    int best_score = -1;
+    for (const auto& file : files) {
+      const std::string lower_rel = gui_lower_ascii(file.rel.generic_string());
+      const std::string lower_name = gui_lower_ascii(file.name);
+      const bool is_dss = file.rel.extension() == ".dss" ||
+                          gui_lower_ascii(file.rel.extension().string()) == ".dss";
+      int score = -1;
+      if (lower_name == "master.dss") score = 1000;
+      else if (lower_name.find("master") != std::string::npos && is_dss) score = 900;
+      else if (lower_name.find("main") != std::string::npos && is_dss) score = 850;
+      else if (lower_rel.find("ieee") != std::string::npos && is_dss) score = 800;
+      else if (is_dss && gui_lower_ascii(file.content).find("new circuit.") != std::string::npos) score = 700;
+      else if (is_dss) score = 500;
+      if (score > best_score) {
+        best_score = score;
+        master = root / file.rel;
+      }
+    }
+  }
+  if (master.empty()) master = root / files.front().rel;
+
+  GuiOpenDSSUploadProject project;
+  project.root = root;
+  project.master_path = master.lexically_normal();
+  project.file_count = static_cast<int>(files.size());
+  project.warnings = std::move(warnings);
+  return project;
+}
+
 std::filesystem::path project_root_path() {
 #ifdef HACDCPF_PROJECT_ROOT
   return std::filesystem::path(HACDCPF_PROJECT_ROOT);
@@ -9681,10 +9833,24 @@ int main(int argc, char** argv) {
 	           [](const httplib::Request& req, httplib::Response& res) {
 	    try {
 	      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
-	      const std::string dss = j.value("dss_string", "");
-	      if (dss.empty()) throw std::runtime_error("Empty OpenDSS DSS string");
+	      std::string dss = j.value("dss_string", "");
 	      json warnings = json::array();
 	      json skipped = json::array();
+	      const auto uploaded_project = materialize_gui_opendss_upload_project(j);
+	      if (uploaded_project.has_value()) {
+	        for (const auto& w : uploaded_project->warnings) warnings.push_back(w);
+	        if (dss.empty()) {
+	          std::ifstream in(uploaded_project->master_path, std::ios::binary);
+	          if (in) {
+	            std::ostringstream ss;
+	            ss << in.rdbuf();
+	            dss = ss.str();
+	          }
+	        }
+	      }
+	      if (dss.empty() && !uploaded_project.has_value()) {
+	        throw std::runtime_error("Empty OpenDSS DSS string");
+	      }
 		      hacdcpf::HybridPowerSystem imported;
 		      bool used_phase_loader = false;
 		      bool phase_bridge_available =
@@ -9694,8 +9860,19 @@ int main(int argc, char** argv) {
 		          false;
 #endif
 		      std::string source_path;
+		      std::string project_root;
+		      int uploaded_file_count = 0;
 
-		      const auto master_path = resolve_gui_opendss_master_path(j, dss);
+		      std::optional<std::filesystem::path> master_path;
+		      if (uploaded_project.has_value()) {
+		        master_path = uploaded_project->master_path;
+		        source_path = uploaded_project->master_path.string();
+		        project_root = uploaded_project->root.string();
+		        uploaded_file_count = uploaded_project->file_count;
+		      } else {
+		        master_path = resolve_gui_opendss_master_path(j, dss);
+		        if (master_path.has_value()) source_path = master_path->string();
+		      }
 		      if (master_path.has_value()) {
 #ifdef HACDCPF_HAVE_OPENDSS
 		        try {
@@ -9710,7 +9887,6 @@ int main(int argc, char** argv) {
 	            imported = hacdcpf::project_to_canonical_models(phase_sys, false);
 	            imported.three_phase_ac = std::move(tp);
 		            used_phase_loader = true;
-		            source_path = master_path->string();
 		          }
 		          if (!used_phase_loader) {
 		            warnings.push_back(
@@ -9769,8 +9945,17 @@ int main(int argc, char** argv) {
 		          used_phase_loader ? "phase_domain_opendss_capi" : "text_converter";
 		      summary["_opendss_phase_bridge_available"] = phase_bridge_available;
 		      summary["_opendss_source_path"] = source_path;
+		      summary["_opendss_project_root"] = project_root;
+		      summary["_opendss_project_file_count"] = uploaded_file_count;
 	      summary["_has_three_phase_ac"] =
 	          g_session.current_system->three_phase_ac.has_value();
+	      summary["_recommended_pf_method"] =
+	          used_phase_loader ? "three_phase" : "ac_newton";
+	      summary["_recommended_pf_tolerance"] = 1e-7;
+	      summary["_recommended_pf_reason"] =
+	          used_phase_loader
+	              ? "OpenDSS phase-domain import"
+	              : "OpenDSS text projection numerical residual floor";
 	      res.set_content(summary.dump(), "application/json");
 	    } catch (const std::exception& e) {
 	      res.status = 400;
@@ -17918,8 +18103,29 @@ int main(int argc, char** argv) {
           count = std::clamp(count, 1, options.resilience.candidates_per_intensity);
         }
 
+        const auto generation_started = std::chrono::steady_clock::now();
         const auto result = hacdcpf::analysis::generate_scenarios(sys, options);
-        res.set_content(hacdcpf::analysis::scenario_generation_result_to_json(result).dump(), "application/json");
+        const double generation_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - generation_started)
+                .count();
+        auto response =
+            hacdcpf::analysis::scenario_generation_result_to_json(result);
+        response["_performance"] = {
+            {"generation_ms", generation_ms},
+            {"regular_load_granularity",
+             result.regular.audit.value("load_processing_granularity", "")},
+            {"reliability_load_granularity",
+             result.reliability.audit.value("load_processing_granularity", "")},
+            {"resilience_load_granularity",
+             result.resilience.audit.value("load_processing_granularity", "")}};
+        const std::string body = response.dump();
+        res.set_header("Server-Timing",
+                       "scenario-generation;dur=" +
+                           std::to_string(generation_ms));
+        res.set_header("X-Scenario-Response-Bytes",
+                       std::to_string(body.size()));
+        res.set_content(body, "application/json");
         g_session.busy.store(false);
       } catch (const std::exception& e) {
         g_session.busy.store(false);

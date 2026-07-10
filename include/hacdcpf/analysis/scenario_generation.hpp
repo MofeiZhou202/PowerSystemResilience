@@ -168,6 +168,8 @@ struct ResilienceEventDefinition {
   std::string selected_sample_id;
   bool used_catalog_sample{false};
   bool used_category_fallback{false};
+  bool used_approximate_repair_order{false};
+  std::size_t repair_fault_count{0};
   int month{0};
   std::vector<DistributionResilienceFault> faults;
   std::vector<TyphoonTrackPoint> track;

@@ -242,3 +242,188 @@ TEST_CASE("Regular climate morphing falls back safely for unknown SSP/year", "[s
   CHECK(feature(representative, "climate_annual_delta_T") == Approx(0.0));
   CHECK(feature(representative, "climate_annual_delta_GHI") == Approx(0.0));
 }
+
+TEST_CASE("Large annual scenario generation uses bounded aggregate load profiles",
+          "[scenario_generation][performance][large]") {
+  auto sys = make_regular_scenario_test_system();
+  sys.ac.loads.clear();
+  for (int i = 0; i < 64; ++i) {
+    Load load;
+    load.index = i + 1;
+    load.bus = 2;
+    load.in_service = true;
+    load.p_mw = 10.0 / 64.0;
+    load.scaling = 1.0;
+    sys.ac.loads.push_back(load);
+  }
+
+  RegularScenarioOptions regular;
+  regular.enabled = true;
+  regular.ssp_levels = {"ssp245"};
+  regular.years = {2050};
+  regular.num_steps = 8760;
+  regular.candidate_count = 2;
+  regular.cluster_count = 1;
+
+  ClusteringOptions clustering;
+  clustering.compare_baseline = false;
+  clustering.include_tail_anchors = false;
+  clustering.method = "weighted_k_medoids";
+
+  std::vector<std::string> warnings;
+  const auto result = generate_regular_scenarios(
+      sys, regular, deterministic_perturbation(), clustering, &warnings);
+  REQUIRE(result.cluster_count == 1);
+  CHECK(result.audit.value("load_processing_granularity", "") ==
+        "aggregate_system");
+  CHECK(result.audit.value("component_profile_fallback", false));
+  CHECK(result.audit.value("projected_component_points_per_candidate", 0ULL) ==
+        64ULL * 8760ULL);
+  const auto& representative = result.clusters.front().representative;
+  CHECK(representative.component_load_profiles.empty());
+  REQUIRE(profile_values(representative.time_series, "total_load_mw").size() ==
+          8760);
+  CHECK(std::any_of(warnings.begin(), warnings.end(), [](const std::string& w) {
+    return w.find("aggregate load profiles") != std::string::npos;
+  }));
+}
+
+TEST_CASE("Large reliability catalog bounds audit samples without dropping contingencies",
+          "[scenario_generation][performance][coverage]") {
+  auto sys = make_regular_scenario_test_system();
+  sys.ac.branches.clear();
+  for (int i = 0; i < 700; ++i) {
+    ACBranch branch;
+    branch.index = i + 1;
+    branch.from_bus = 1;
+    branch.to_bus = 2;
+    branch.in_service = true;
+    branch.r_pu = 0.01;
+    branch.x_pu = 0.01;
+    sys.ac.branches.push_back(branch);
+  }
+
+  ReliabilityScenarioOptions reliability;
+  reliability.enabled = true;
+  reliability.candidates_per_contingency = 8;
+  reliability.cluster_count_per_contingency = 1;
+  reliability.max_contingencies = 700;
+
+  ClusteringOptions clustering;
+  clustering.compare_baseline = false;
+  clustering.include_tail_anchors = false;
+  clustering.method = "weighted_k_medoids";
+
+  const auto result = generate_reliability_scenarios(
+      sys, reliability, deterministic_perturbation(), clustering, nullptr);
+  REQUIRE(result.contingency_count == 700);
+  REQUIRE(result.cluster_total == 700);
+  CHECK(result.audit.value("coverage_candidate_count", 0ULL) == 5600ULL);
+  CHECK(result.audit.value("coverage_samples_truncated", false));
+  const auto samples =
+      result.audit.value("coverage_samples", nlohmann::json::array());
+  CHECK(samples.size() <= 5000);
+  CHECK(samples.size() == 2800);
+}
+
+TEST_CASE("Very large reliability catalogs preserve N-1 coverage within work budgets",
+          "[scenario_generation][performance][reliability-budget]") {
+  auto sys = make_regular_scenario_test_system();
+  sys.ac.branches.clear();
+  for (int i = 0; i < 1300; ++i) {
+    ACBranch branch;
+    branch.index = i + 1;
+    branch.from_bus = 1;
+    branch.to_bus = 2;
+    branch.in_service = true;
+    branch.r_pu = 0.01;
+    branch.x_pu = 0.01;
+    sys.ac.branches.push_back(branch);
+  }
+
+  ReliabilityScenarioOptions reliability;
+  reliability.enabled = true;
+  reliability.candidates_per_contingency = 40;
+  reliability.cluster_count_per_contingency = 4;
+  reliability.max_contingencies = 1300;
+
+  ClusteringOptions clustering;
+  clustering.compare_baseline = false;
+  clustering.include_tail_anchors = false;
+  clustering.method = "weighted_k_medoids";
+
+  std::vector<std::string> warnings;
+  const auto result = generate_reliability_scenarios(
+      sys, reliability, deterministic_perturbation(), clustering, &warnings);
+  REQUIRE(result.contingency_count == 1300);
+  CHECK(result.audit.value("candidate_budget_applied", false));
+  CHECK(result.audit.value("representative_budget_applied", false));
+  CHECK(result.audit.value("candidates_per_contingency", 0) == 9);
+  CHECK(result.audit.value("clusters_per_contingency", 0) == 3);
+  CHECK(result.audit.value("effective_candidate_total", 0ULL) == 11700ULL);
+  CHECK(result.audit.value("effective_representative_total", 0ULL) == 3900ULL);
+  CHECK(result.cluster_total == 3900);
+  CHECK(std::any_of(warnings.begin(), warnings.end(), [](const std::string& w) {
+    return w.find("complete N-1 catalog") != std::string::npos;
+  }));
+}
+
+TEST_CASE("Typhoon fault generation reuses precomputed topology segments",
+          "[scenario_generation][performance][typhoon-geometry]") {
+  const auto sys = make_regular_scenario_test_system();
+  TyphoonScenarioOptions options;
+  options.horizon_hours = 4;
+  options.stochastic = false;
+  options.max_segments_per_branch = 1;
+  options.staged_post_disaster_repair = false;
+
+  bool used_fallback_coordinates = false;
+  const auto segments = generate_typhoon_line_segments(
+      sys, options, &used_fallback_coordinates);
+  REQUIRE(segments.size() == 1);
+
+  const auto result = generate_typhoon_fault_sequence(
+      sys, options, segments, used_fallback_coordinates);
+  CHECK(result.generated_segments.size() == segments.size());
+  CHECK(result.used_fallback_coordinates == used_fallback_coordinates);
+  CHECK(result.track.size() == 4);
+}
+
+TEST_CASE("Large typhoon fault sets use bounded upstream-first repair ordering",
+          "[scenario_generation][performance][typhoon-repair]") {
+  HybridPowerSystem sys;
+  for (int i = 0; i <= 65; ++i) {
+    ACBus bus;
+    bus.index = i + 1;
+    bus.bus_type = i == 0 ? BusType::SLACK : BusType::PQ;
+    bus.in_service = true;
+    sys.ac.buses.push_back(bus);
+  }
+  for (int i = 0; i < 65; ++i) {
+    ACBranch branch;
+    branch.index = i + 1;
+    branch.from_bus = i + 1;
+    branch.to_bus = i + 2;
+    branch.in_service = true;
+    branch.length_km = 1.0;
+    branch.r_pu = 0.01;
+    branch.x_pu = 0.01;
+    sys.ac.branches.push_back(branch);
+  }
+
+  TyphoonScenarioOptions options;
+  options.horizon_hours = 2;
+  options.stochastic = false;
+  options.max_segments_per_branch = 1;
+  options.default_overhead_fragility.design_wind_ms = 0.1;
+  options.default_overhead_fragility.seg_c_bias = 100.0;
+
+  const auto result = generate_typhoon_fault_sequence(sys, options);
+  REQUIRE(result.faults.size() == 65);
+  CHECK(result.used_approximate_repair_order);
+  CHECK(result.repair_fault_count == 65);
+  CHECK(std::all_of(result.faults.begin(), result.faults.end(),
+                    [](const auto& fault) {
+    return fault.repair_duration_hr > 0.0;
+  }));
+}

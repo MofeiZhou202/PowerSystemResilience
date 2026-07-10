@@ -1310,17 +1310,14 @@ void strip_dead_islands(HybridPowerSystem& sys) {
     sys.bus_merge_map = std::move(m);
   }
 
-  // Mark dead bus entries in the merge map with int_pos = -1
-  // so that unproject_bus_vector outputs 0.0 for them.
-  for (int dead_ext : dead_buses) {
-    auto it = sys.bus_merge_map->ext_to_int.find(dead_ext);
-    if (it != sys.bus_merge_map->ext_to_int.end()) {
-      it->second = -1;
+  auto& merge_map = *sys.bus_merge_map;
+  const std::vector<int> old_int_to_ext = merge_map.int_to_ext;
+  std::vector<char> dead_positions(static_cast<size_t>(n), 0);
+  for (int pos = 0; pos < n; ++pos) {
+    if (dead_buses.count(buses[static_cast<size_t>(pos)].index) != 0U) {
+      dead_positions[static_cast<size_t>(pos)] = 1;
     }
   }
-
-  // Record dead bus indices in the merge map for downstream use.
-  sys.bus_merge_map->dead_bus_indices = dead_buses;
 
   // Record original branch count and build branch position mapping.
   const int n_branches_orig = static_cast<int>(branches.size());
@@ -1329,8 +1326,13 @@ void strip_dead_islands(HybridPowerSystem& sys) {
   // 鈹€鈹€ Remove dead buses 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
   std::vector<ACBus> live_buses;
   live_buses.reserve(buses.size() - dead_buses.size());
-  for (auto& b : buses) {
-    if (dead_buses.count(b.index) == 0) live_buses.push_back(std::move(b));
+  std::vector<int> old_pos_to_new(static_cast<size_t>(n), -1);
+  for (int pos = 0; pos < n; ++pos) {
+    auto& bus = buses[static_cast<size_t>(pos)];
+    if (dead_positions[static_cast<size_t>(pos)] != 0) continue;
+    old_pos_to_new[static_cast<size_t>(pos)] =
+        static_cast<int>(live_buses.size());
+    live_buses.push_back(std::move(bus));
   }
 
   // Build renumber map: old bus index 鈫?new bus index (1-based contiguous)
@@ -1343,28 +1345,41 @@ void strip_dead_islands(HybridPowerSystem& sys) {
   }
   buses = std::move(live_buses);
 
-  // Update merge map int_pos for surviving buses
-  for (auto& [ext, int_pos] : sys.bus_merge_map->ext_to_int) {
-    if (int_pos < 0) continue;  // dead 鈫?keep at -1
-    // Find the old internal bus index this mapped to, then renumber
-    auto old_ext = sys.bus_merge_map->int_to_ext[static_cast<size_t>(int_pos)];
-    auto rit = renum.find(old_ext);
-    if (rit != renum.end()) {
-      int_pos = rit->second - 1;  // new 0-based position
-    } else {
-      int_pos = -1;  // shouldn't happen, but safety
+  // Compose the original-to-projected mapping with dead-bus removal by
+  // projected position. The map keys are original bus IDs, whereas buses[]
+  // has already been renumbered by zero-impedance merging.
+  std::unordered_set<int> newly_dead_original_buses;
+  for (auto& [original_bus, int_pos] : merge_map.ext_to_int) {
+    if (int_pos < 0) continue;
+    if (int_pos >= n || dead_positions[static_cast<size_t>(int_pos)] != 0) {
+      int_pos = -1;
+      newly_dead_original_buses.insert(original_bus);
+      continue;
     }
+    int_pos = old_pos_to_new[static_cast<size_t>(int_pos)];
   }
-  // Rebuild int_to_ext and groups for the new numbering
-  sys.bus_merge_map->int_to_ext.clear();
-  sys.bus_merge_map->int_to_ext.resize(static_cast<size_t>(n_live));
-  // Build new int_to_ext from ext_to_int
-  for (const auto& [ext, int_pos] : sys.bus_merge_map->ext_to_int) {
+  merge_map.dead_bus_indices.insert(newly_dead_original_buses.begin(),
+                                    newly_dead_original_buses.end());
+
+  merge_map.int_to_ext.assign(static_cast<size_t>(n_live), 0);
+  for (int old_pos = 0; old_pos < n; ++old_pos) {
+    const int new_pos = old_pos_to_new[static_cast<size_t>(old_pos)];
+    if (new_pos < 0 || old_pos >= static_cast<int>(old_int_to_ext.size())) {
+      continue;
+    }
+    merge_map.int_to_ext[static_cast<size_t>(new_pos)] =
+        old_int_to_ext[static_cast<size_t>(old_pos)];
+  }
+  merge_map.groups.assign(static_cast<size_t>(n_live), {});
+  for (const auto& [original_bus, int_pos] : merge_map.ext_to_int) {
     if (int_pos >= 0 && int_pos < n_live) {
-      sys.bus_merge_map->int_to_ext[static_cast<size_t>(int_pos)] = ext;
+      merge_map.groups[static_cast<size_t>(int_pos)].push_back(original_bus);
     }
   }
-  sys.bus_merge_map->n_merged = n_live;
+  for (auto& group : merge_map.groups) {
+    std::sort(group.begin(), group.end());
+  }
+  merge_map.n_merged = n_live;
 
   // 鈹€鈹€ Remap bus references in surviving components, remove dead 鈹€鈹€
   auto remap = [&](int old_bus) -> int {

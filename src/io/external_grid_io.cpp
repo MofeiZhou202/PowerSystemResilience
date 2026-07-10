@@ -70,8 +70,14 @@ std::string strip_quotes(std::string value) {
 
 std::string strip_brackets(std::string value) {
   value = strip_quotes(std::move(value));
-  if (value.size() >= 2U && value.front() == '[' && value.back() == ']') {
-    value = value.substr(1, value.size() - 2U);
+  if (value.size() >= 2U) {
+    const char open = value.front();
+    const char close = value.back();
+    if ((open == '[' && close == ']') ||
+        (open == '(' && close == ')') ||
+        (open == '{' && close == '}')) {
+      value = value.substr(1, value.size() - 2U);
+    }
   }
   return trim(std::move(value));
 }
@@ -1017,6 +1023,55 @@ void import_opendss_capacitor(
   report.system.ac.shunts.push_back(sh);
 }
 
+std::size_t mark_dormant_opendss_buses_out_of_service(
+    HybridPowerSystem& sys) {
+  std::unordered_set<int> active_buses;
+  active_buses.reserve(sys.ac.buses.size());
+  const auto mark = [&](int bus) {
+    if (bus != 0) active_buses.insert(bus);
+  };
+
+  for (const auto& bus : sys.ac.buses) {
+    if (!bus.in_service) continue;
+    if (bus.bus_type == BusType::SLACK || std::abs(bus.pd_mw) > kTiny ||
+        std::abs(bus.qd_mvar) > kTiny || std::abs(bus.gs_mw) > kTiny ||
+        std::abs(bus.bs_mvar) > kTiny) {
+      mark(bus.index);
+    }
+  }
+  for (const auto& branch : sys.ac.branches) {
+    if (!branch.in_service) continue;
+    mark(branch.from_bus);
+    mark(branch.to_bus);
+  }
+  for (const auto& sw : sys.ac.switches) {
+    if (!sw.in_service || !sw.closed) continue;
+    mark(sw.bus_from);
+    mark(sw.bus_to);
+  }
+  for (const auto& generator : sys.ac.generators) {
+    if (generator.in_service) mark(generator.bus);
+  }
+  for (const auto& load : sys.ac.loads) {
+    if (load.in_service) mark(load.bus);
+  }
+  for (const auto& generator : sys.ac.static_generators) {
+    if (generator.in_service) mark(generator.bus);
+  }
+  for (const auto& shunt : sys.ac.shunts) {
+    if (shunt.in_service) mark(shunt.bus);
+  }
+
+  std::size_t dormant_count = 0;
+  for (auto& bus : sys.ac.buses) {
+    if (active_buses.count(bus.index) != 0U) continue;
+    bus.in_service = false;
+    bus.bus_type = BusType::ISOLATED;
+    ++dormant_count;
+  }
+  return dormant_count;
+}
+
 ExternalGridImportReport import_opendss_text(
     const std::string& dss_text,
     const OpenDSSImportOptions& options) {
@@ -1161,6 +1216,14 @@ ExternalGridImportReport import_opendss_text(
     report.warnings.push_back(
         std::to_string(libs.switch_line_count) +
         " OpenDSS switch=yes Line objects were imported as rich switches.");
+  }
+  const std::size_t dormant_bus_count =
+      mark_dormant_opendss_buses_out_of_service(report.system);
+  if (dormant_bus_count > 0U) {
+    report.warnings.push_back(
+        std::to_string(dormant_bus_count) +
+        " OpenDSS buses referenced only by disabled or open elements were "
+        "marked out of service.");
   }
 
   return finalise_import(std::move(report), options);

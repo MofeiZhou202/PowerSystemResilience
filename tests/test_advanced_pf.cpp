@@ -173,6 +173,24 @@ TEST_CASE("Island detection: fully-connected 9-bus returns single island",
     REQUIRE(islands[0].has_generators);
 }
 
+TEST_CASE("Island detection excludes buses declared out of service",
+          "[advanced_pf][island][detection][inactive]") {
+    auto sys = build_9bus_island_network();
+    ACBus dormant;
+    dormant.index = 99;
+    dormant.name = "Dormant disabled-element endpoint";
+    dormant.bus_type = BusType::ISOLATED;
+    dormant.in_service = false;
+    sys.ac.buses.push_back(dormant);
+
+    const auto islands = pf::detect_islands(sys);
+    REQUIRE(islands.size() == 1);
+    REQUIRE(islands.front().ac_buses.size() == 9);
+    REQUIRE(std::find(islands.front().ac_buses.begin(),
+                      islands.front().ac_buses.end(), 99) ==
+            islands.front().ac_buses.end());
+}
+
 TEST_CASE("Island detection: branch 4-5 out → 2 islands",
           "[advanced_pf][island][detection]") {
     auto sys = build_9bus_island_network();

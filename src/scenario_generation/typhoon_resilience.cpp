@@ -11,6 +11,7 @@
 #include <map>
 #include <mutex>
 #include <numeric>
+#include <queue>
 #include <random>
 #include <regex>
 #include <sstream>
@@ -33,6 +34,7 @@ constexpr double kPowerLawExponent = 1.0 / 7.0;
 constexpr double kGustFactor = 1.75;
 constexpr double kRainRadiusFloorKm = 1.0;
 constexpr double kRainRatioMax = 1.1;
+constexpr std::size_t kMaxExactStagedRepairFaults = 64;
 
 struct BusGeo {
   double lat{0.0};
@@ -972,10 +974,14 @@ const TyphoonTrackSample* sample_typhoon_catalog(
 
 std::vector<TyphoonLineSegment> generate_typhoon_line_segments(
     const HybridPowerSystem& sys,
-    const TyphoonScenarioOptions& opts) {
+    const TyphoonScenarioOptions& opts,
+    bool* used_fallback_coordinates) {
   bool unused_fallback = false;
   const auto bus_geo = build_bus_geo(sys, opts, &unused_fallback);
   const auto dc_bus_geo = build_dc_bus_geo(sys, opts, &unused_fallback);
+  if (used_fallback_coordinates) {
+    *used_fallback_coordinates = unused_fallback;
+  }
   std::vector<TyphoonLineSegment> segments;
   segments.reserve((sys.ac.branches.size() + sys.dc.branches.size()) * 2);
 
@@ -1219,6 +1225,109 @@ double served_load_mw_for_repair_state(const HybridPowerSystem& sys,
   return served;
 }
 
+std::map<BranchKey, int> branch_source_depths(const HybridPowerSystem& sys) {
+  const int ac_n = static_cast<int>(sys.ac.buses.size());
+  const int dc_n = static_cast<int>(sys.dc.buses.size());
+  const int n = ac_n + dc_n;
+  std::map<BranchKey, int> depths;
+  if (n <= 0) return depths;
+
+  const auto ac_bus = make_ac_bus_map_for_repair(sys);
+  const auto dc_bus = make_dc_bus_map_for_repair(sys, ac_n);
+  std::vector<std::vector<int>> adj(static_cast<std::size_t>(n));
+  auto add_edge = [&](int u, int v) {
+    if (u < 0 || v < 0 || u >= n || v >= n) return;
+    adj[static_cast<std::size_t>(u)].push_back(v);
+    adj[static_cast<std::size_t>(v)].push_back(u);
+  };
+
+  for (const auto& br : sys.ac.branches) {
+    if (!br.in_service) continue;
+    const auto f = ac_bus.find(br.from_bus);
+    const auto t = ac_bus.find(br.to_bus);
+    if (f != ac_bus.end() && t != ac_bus.end()) add_edge(f->second, t->second);
+  }
+  for (const auto& br : sys.dc.branches) {
+    if (!br.in_service) continue;
+    const auto f = dc_bus.find(br.from_bus);
+    const auto t = dc_bus.find(br.to_bus);
+    if (f != dc_bus.end() && t != dc_bus.end()) add_edge(f->second, t->second);
+  }
+  for (const auto& t : sys.ac.transformers_2w) {
+    if (!t.in_service) continue;
+    const auto f = ac_bus.find(t.hv_bus);
+    const auto l = ac_bus.find(t.lv_bus);
+    if (f != ac_bus.end() && l != ac_bus.end()) add_edge(f->second, l->second);
+  }
+  for (const auto& c : sys.vsc_converters) {
+    if (!c.in_service) continue;
+    const auto a = ac_bus.find(c.bus_ac);
+    const auto d = dc_bus.find(c.bus_dc);
+    if (a != ac_bus.end() && d != dc_bus.end()) add_edge(a->second, d->second);
+  }
+  for (const auto& c : sys.dc.dcdc_converters) {
+    if (!c.in_service) continue;
+    const auto i = dc_bus.find(c.bus_in);
+    const auto o = dc_bus.find(c.bus_out);
+    if (i != dc_bus.end() && o != dc_bus.end()) add_edge(i->second, o->second);
+  }
+
+  constexpr int kUnreachable = std::numeric_limits<int>::max() / 4;
+  std::vector<int> distance(static_cast<std::size_t>(n), kUnreachable);
+  std::queue<int> pending;
+  auto add_source = [&](int node) {
+    if (node < 0 || node >= n || distance[static_cast<std::size_t>(node)] == 0) return;
+    distance[static_cast<std::size_t>(node)] = 0;
+    pending.push(node);
+  };
+  for (std::size_t i = 0; i < sys.ac.buses.size(); ++i) {
+    if (sys.ac.buses[i].in_service && sys.ac.buses[i].bus_type == BusType::SLACK) {
+      add_source(static_cast<int>(i));
+    }
+  }
+  for (const auto& eg : sys.ac.external_grids) {
+    if (!eg.in_service) continue;
+    const auto it = ac_bus.find(eg.bus);
+    if (it != ac_bus.end()) add_source(it->second);
+  }
+  for (const auto& g : sys.ac.generators) {
+    if (!g.in_service || !g.is_slack) continue;
+    const auto it = ac_bus.find(g.bus);
+    if (it != ac_bus.end()) add_source(it->second);
+  }
+  while (!pending.empty()) {
+    const int u = pending.front();
+    pending.pop();
+    for (const int v : adj[static_cast<std::size_t>(u)]) {
+      if (distance[static_cast<std::size_t>(v)] <=
+          distance[static_cast<std::size_t>(u)] + 1) {
+        continue;
+      }
+      distance[static_cast<std::size_t>(v)] =
+          distance[static_cast<std::size_t>(u)] + 1;
+      pending.push(v);
+    }
+  }
+
+  for (const auto& br : sys.ac.branches) {
+    const auto f = ac_bus.find(br.from_bus);
+    const auto t = ac_bus.find(br.to_bus);
+    if (f == ac_bus.end() || t == ac_bus.end()) continue;
+    depths[{ResilienceBranchKind::AC, br.index}] =
+        std::min(distance[static_cast<std::size_t>(f->second)],
+                 distance[static_cast<std::size_t>(t->second)]);
+  }
+  for (const auto& br : sys.dc.branches) {
+    const auto f = dc_bus.find(br.from_bus);
+    const auto t = dc_bus.find(br.to_bus);
+    if (f == dc_bus.end() || t == dc_bus.end()) continue;
+    depths[{ResilienceBranchKind::DC, br.index}] =
+        std::min(distance[static_cast<std::size_t>(f->second)],
+                 distance[static_cast<std::size_t>(t->second)]);
+  }
+  return depths;
+}
+
 void apply_staged_post_disaster_repairs(const HybridPowerSystem& sys,
                                         const TyphoonScenarioOptions& opts,
                                         const std::vector<BranchRisk>& risks,
@@ -1248,8 +1357,49 @@ void apply_staged_post_disaster_repairs(const HybridPowerSystem& sys,
     outaged.insert({f.branch_kind, f.branch_index});
   }
 
+  result.repair_fault_count = remaining.size();
+
   const double repair_ready_hr = last_fault_hr + std::max(0.0, opts.post_disaster_repair_delay_hr);
   const double crew_time_hr = std::max(opts.time_step_hr, opts.repair_crew_time_per_branch_hr);
+  if (remaining.size() > kMaxExactStagedRepairFaults) {
+    result.used_approximate_repair_order = true;
+    const auto source_depth = branch_source_depths(sys);
+    constexpr int kUnreachable = std::numeric_limits<int>::max() / 4;
+    auto depth_of = [&](const RepairCandidate& candidate) {
+      const auto it = source_depth.find(
+          BranchKey{candidate.branch_kind, candidate.branch_index});
+      return it == source_depth.end() ? kUnreachable : it->second;
+    };
+    std::stable_sort(remaining.begin(), remaining.end(),
+                     [&](const RepairCandidate& a, const RepairCandidate& b) {
+      const int ad = depth_of(a);
+      const int bd = depth_of(b);
+      if (ad != bd) return ad < bd;
+      if (std::abs(a.fault_start_hr - b.fault_start_hr) > 1e-9) {
+        return a.fault_start_hr < b.fault_start_hr;
+      }
+      if (std::abs(a.peak_probability - b.peak_probability) > 1e-12) {
+        return a.peak_probability > b.peak_probability;
+      }
+      if (a.branch_kind != b.branch_kind) return a.branch_kind < b.branch_kind;
+      return a.branch_index < b.branch_index;
+    });
+    for (std::size_t slot = 0; slot < remaining.size(); ++slot) {
+      const auto& chosen = remaining[slot];
+      const double completion_hr =
+          repair_ready_hr + static_cast<double>(slot + 1) * crew_time_hr;
+      for (auto& f : result.faults) {
+        if (f.branch_kind == chosen.branch_kind &&
+            f.branch_index == chosen.branch_index) {
+          f.repair_duration_hr =
+              std::max(opts.time_step_hr, completion_hr - f.outage_start_hr);
+          break;
+        }
+      }
+    }
+    return;
+  }
+
   for (std::size_t slot = 0; !remaining.empty(); ++slot) {
     const double base_served = served_load_mw_for_repair_state(sys, outaged);
     std::size_t best = 0;
@@ -1287,10 +1437,20 @@ void apply_staged_post_disaster_repairs(const HybridPowerSystem& sys,
 TyphoonFaultSequenceResult generate_typhoon_fault_sequence(
     const HybridPowerSystem& sys,
     const TyphoonScenarioOptions& opts) {
+  bool used_fallback_coordinates = false;
+  const auto segments = generate_typhoon_line_segments(
+      sys, opts, &used_fallback_coordinates);
+  return generate_typhoon_fault_sequence(
+      sys, opts, segments, used_fallback_coordinates);
+}
+
+TyphoonFaultSequenceResult generate_typhoon_fault_sequence(
+    const HybridPowerSystem& sys,
+    const TyphoonScenarioOptions& opts,
+    const std::vector<TyphoonLineSegment>& precomputed_segments,
+    bool used_fallback_coordinates) {
   TyphoonFaultSequenceResult result;
-  bool used_fallback = false;
-  (void)build_bus_geo(sys, opts, &used_fallback);
-  result.used_fallback_coordinates = used_fallback;
+  result.used_fallback_coordinates = used_fallback_coordinates;
   result.used_synthetic_segments = opts.auto_segment_lines;
   result.seed = opts.seed;
   result.requested_category = opts.requested_category;
@@ -1308,7 +1468,7 @@ TyphoonFaultSequenceResult generate_typhoon_fault_sequence(
     result.selected_track_max_vmax_ms = max_track_vmax_ms(result.track, true);
     result.selected_category = classify_typhoon_intensity(result.selected_track_max_vmax_ms);
   }
-  result.generated_segments = generate_typhoon_line_segments(sys, opts);
+  result.generated_segments = precomputed_segments;
 
   if (sys.ac.branches.empty() && sys.dc.branches.empty()) {
     result.status = "No AC/DC branches available for typhoon fault generation";
