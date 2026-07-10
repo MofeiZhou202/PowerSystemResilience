@@ -75,6 +75,9 @@ endif()
 # Unit conversion: actual (ohm/km, kV) → per-unit branch impedance bridge.
 hacdcpf_add_test(test_unit_conversion     test_unit_conversion.cpp)
 
+# Typical parameters: opt-in sparse hybrid AC/DC parameter completion.
+hacdcpf_add_test(test_typical_parameters  test_typical_parameters.cpp)
+
 # Rich components: Transformer2W/3W, PVSystem, Storage, VSCConverter, etc.
 hacdcpf_add_test(test_rich_components     test_rich_components.cpp)
 
@@ -95,6 +98,17 @@ hacdcpf_add_test(test_advanced_pf         test_advanced_pf.cpp)
 # DC island voltage-reference planning: a PQ VSC converter feeding a
 # reference-less DC island is auto-promoted to regulate Vdc (regulate + warn).
 hacdcpf_add_test(test_dc_island_reference test_dc_island_reference.cpp)
+
+# SPPT executable theory: metamorphic relations (MR1-MR7), MR3 certificate
+# corpus, admissibility guard (Alg. 2 + LLM-in-the-loop metrics), and DAE
+# index-1 well-posedness (MR8).  Operationalizes docs/latex/sppt_theory.tex.
+hacdcpf_add_test(test_sppt_metamorphic     test_sppt_metamorphic.cpp)
+hacdcpf_add_test(test_sppt_certificate     test_sppt_certificate.cpp)
+hacdcpf_add_test(test_sppt_guard           test_sppt_guard.cpp)
+hacdcpf_add_test(test_sppt_dae_wellposedness test_sppt_dae_wellposedness.cpp)
+hacdcpf_add_test(test_sppt_ablation        test_sppt_ablation.cpp)
+hacdcpf_add_test(test_sppt_benchmark       test_sppt_benchmark.cpp)
+hacdcpf_add_test(test_sppt_agent           test_sppt_agent.cpp)
 
 # Multi-converter control-mode feasibility checks based on the coordination
 # theory document.

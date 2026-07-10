@@ -826,6 +826,22 @@ std::vector<GlmObject> parse_glm_objects(const std::string& glm_text) {
       ++cls_end;
     }
     const std::string cls = ascii_lower(text.substr(cursor, cls_end - cursor));
+    std::string object_id;
+    std::size_t after_cls = cls_end;
+    if (after_cls < text.size() && text[after_cls] == ':') {
+      ++after_cls;
+      while (after_cls < text.size() &&
+             std::isspace(static_cast<unsigned char>(text[after_cls]))) {
+        ++after_cls;
+      }
+      std::size_t id_end = after_cls;
+      while (id_end < text.size() &&
+             !std::isspace(static_cast<unsigned char>(text[id_end])) &&
+             text[id_end] != '{') {
+        ++id_end;
+      }
+      object_id = trim(text.substr(after_cls, id_end - after_cls));
+    }
     const auto open = text.find('{', cls_end);
     if (open == std::string::npos) break;
     int depth = 1;
@@ -863,6 +879,12 @@ std::vector<GlmObject> parse_glm_objects(const std::string& glm_text) {
       }
       statement.push_back(ch);
     }
+    if (!object_id.empty()) {
+      object.props["_object_id"] = object_id;
+      if (object.props.find("name") == object.props.end()) {
+        object.props["name"] = cls + ":" + object_id;
+      }
+    }
     objects.push_back(std::move(object));
     pos = close + 1U;
   }
@@ -876,6 +898,21 @@ std::string glm_prop(const GlmObject& obj,
   return it == obj.props.end() ? fallback : it->second;
 }
 
+std::string glm_name_or_id(const GlmObject& obj,
+                           const std::string& fallback_prefix = "obj") {
+  std::string name = glm_prop(obj, "name");
+  if (!name.empty()) return name;
+  const std::string id = glm_prop(obj, "_object_id");
+  if (!id.empty()) return obj.cls + ":" + id;
+  return fallback_prefix;
+}
+
+std::string glm_electrical_bus_name(const GlmObject& obj) {
+  const std::string parent = glm_prop(obj, "parent");
+  if (!parent.empty()) return parent;
+  return glm_name_or_id(obj);
+}
+
 double glm_number(const GlmObject& obj,
                   const std::string& key,
                   double fallback = 0.0) {
@@ -887,6 +924,7 @@ struct GlmLineConfiguration {
   std::complex<double> z_self_ohm_per_unit{0.0, 0.0};
   std::complex<double> z_mutual_ohm_per_unit{0.0, 0.0};
   double config_unit_km{kMileToKm};
+  bool approximated{false};
 };
 
 struct GlmTransformerConfiguration {
@@ -896,6 +934,79 @@ struct GlmTransformerConfiguration {
   double r_pu_on_rating{0.0};
   double x_pu_on_rating{0.0};
 };
+
+struct GlmConductor {
+  double r_ohm_per_unit{0.0};
+  double x_ohm_per_unit{0.0};
+  double unit_km{kMileToKm};
+};
+
+std::optional<GlmConductor> conductor_from_object(const GlmObject& obj) {
+  if (obj.cls == "overhead_line_conductor") {
+    const std::string raw_r = glm_prop(obj, "resistance");
+    const double r = glm_number(obj, "resistance", 0.0);
+    if (r <= kTiny) return std::nullopt;
+    GlmConductor c;
+    c.r_ohm_per_unit = r;
+    c.x_ohm_per_unit = 0.40;
+    c.unit_km = unit_to_km(unit_word_from_value(raw_r), kMileToKm);
+    return c;
+  }
+  if (obj.cls == "underground_line_conductor") {
+    const std::string raw_r = glm_prop(obj, "conductor_resistance",
+                                       glm_prop(obj, "resistance"));
+    const double r = parse_number(raw_r, 0.0);
+    if (r <= kTiny) return std::nullopt;
+    GlmConductor c;
+    c.r_ohm_per_unit = r;
+    c.x_ohm_per_unit = 0.12;
+    c.unit_km = unit_to_km(unit_word_from_value(raw_r), kMileToKm);
+    return c;
+  }
+  if (obj.cls == "triplex_line_conductor") {
+    const std::string raw_r = glm_prop(obj, "resistance");
+    const double r = glm_number(obj, "resistance", 0.0);
+    if (r <= kTiny) return std::nullopt;
+    GlmConductor c;
+    c.r_ohm_per_unit = r;
+    c.x_ohm_per_unit = 0.08;
+    c.unit_km = unit_to_km(unit_word_from_value(raw_r), kMileToKm);
+    return c;
+  }
+  return std::nullopt;
+}
+
+bool is_closed_gridlabd_link(const GlmObject& obj) {
+  const std::string status = ascii_lower(glm_prop(obj, "status", "closed"));
+  return status.empty() || status == "closed";
+}
+
+void add_low_impedance_link(ExternalGridImportReport& report,
+                            BusBuilder& buses,
+                            const GridLABDImportOptions& options,
+                            const GlmObject& obj,
+                            double r_pu,
+                            double x_pu) {
+  const std::string from_name = glm_prop(obj, "from");
+  const std::string to_name = glm_prop(obj, "to");
+  if (from_name.empty() || to_name.empty()) {
+    add_warning_or_throw(report, options,
+                         "GridLAB-D link object is missing from/to.");
+    return;
+  }
+  const int from = buses.ensure(from_name);
+  const int to = buses.ensure(to_name, buses.base_kv(from));
+  ACBranch br;
+  br.index = static_cast<int>(report.system.ac.branches.size()) + 1;
+  br.name = glm_prop(obj, "name", obj.cls + "_" + std::to_string(br.index));
+  br.from_bus = from;
+  br.to_bus = to;
+  br.r_pu = r_pu;
+  br.x_pu = x_pu;
+  br.tap = 1.0;
+  br.in_service = true;
+  report.system.ac.branches.push_back(br);
+}
 
 ExternalGridImportReport import_gridlabd_text(
     const std::string& glm_text,
@@ -907,16 +1018,56 @@ ExternalGridImportReport import_gridlabd_text(
   const auto objects = parse_glm_objects(glm_text);
   std::unordered_map<std::string, GlmLineConfiguration> line_configs;
   std::unordered_map<std::string, GlmTransformerConfiguration> transformer_configs;
+  std::unordered_map<std::string, GlmConductor> conductors;
 
   for (const auto& obj : objects) {
     const std::string name = glm_prop(obj, "name");
-    if (obj.cls == "line_configuration") {
+    if (auto conductor = conductor_from_object(obj)) {
+      if (!name.empty()) conductors[ascii_lower(name)] = *conductor;
+    }
+  }
+
+  for (const auto& obj : objects) {
+    const std::string name = glm_prop(obj, "name");
+    if (obj.cls == "line_configuration" || obj.cls == "triplex_line_configuration") {
       if (name.empty()) continue;
       GlmLineConfiguration cfg;
-      cfg.z_self_ohm_per_unit = parse_complex_rect(glm_prop(obj, "z11", "0+0j"));
-      cfg.z_mutual_ohm_per_unit = parse_complex_rect(glm_prop(obj, "z12", "0+0j"));
-      cfg.config_unit_km = unit_to_km(unit_word_from_value(glm_prop(obj, "z11")),
-                                      kMileToKm);
+      const std::string z11 = glm_prop(obj, "z11");
+      if (!z11.empty()) {
+        cfg.z_self_ohm_per_unit = parse_complex_rect(z11);
+        cfg.z_mutual_ohm_per_unit = parse_complex_rect(glm_prop(obj, "z12", "0+0j"));
+        cfg.config_unit_km = unit_to_km(unit_word_from_value(z11), kMileToKm);
+      } else {
+        double r_sum = 0.0;
+        double x_sum = 0.0;
+        double unit_sum = 0.0;
+        int count = 0;
+        for (const auto& key : {"conductor_A", "conductor_B", "conductor_C",
+                                "conductor_1", "conductor_2"}) {
+          const std::string ref = ascii_lower(glm_prop(obj, key));
+          const auto it = conductors.find(ref);
+          if (it == conductors.end()) continue;
+          r_sum += it->second.r_ohm_per_unit;
+          x_sum += it->second.x_ohm_per_unit;
+          unit_sum += it->second.unit_km;
+          ++count;
+        }
+        if (count > 0) {
+          cfg.z_self_ohm_per_unit = {r_sum / count, x_sum / count};
+          cfg.config_unit_km = positive_or(unit_sum / count, kMileToKm);
+          cfg.approximated = true;
+          report.warnings.push_back(
+              "GridLAB-D line configuration " + name +
+              " projected from conductor resistance with approximate reactance.");
+        } else {
+          cfg.z_self_ohm_per_unit = {0.5, 0.4};
+          cfg.config_unit_km = kMileToKm;
+          cfg.approximated = true;
+          report.warnings.push_back(
+              "GridLAB-D line configuration " + name +
+              " lacks z-matrix/conductor data; using a conservative generic impedance.");
+        }
+      }
       line_configs[ascii_lower(name)] = cfg;
     } else if (obj.cls == "transformer_configuration") {
       if (name.empty()) continue;
@@ -932,13 +1083,19 @@ ExternalGridImportReport import_gridlabd_text(
   }
 
   for (const auto& obj : objects) {
-    if (obj.cls != "meter" && obj.cls != "load" && obj.cls != "node") continue;
-    std::string name = glm_prop(obj, "name");
+    if (obj.cls != "meter" && obj.cls != "load" && obj.cls != "node" &&
+        obj.cls != "triplex_meter" && obj.cls != "triplex_node") {
+      continue;
+    }
+    std::string name = glm_electrical_bus_name(obj);
     if (name.empty()) name = "bus_" + std::to_string(report.system.ac.buses.size() + 1U);
     const double nominal_ln_v = glm_number(obj, "nominal_voltage",
                                            options.default_base_kv_ll * 1000.0 / kSqrt3);
-    const double base_kv = positive_or(nominal_ln_v * kSqrt3 / 1000.0,
-                                       options.default_base_kv_ll);
+    const bool is_triplex =
+        obj.cls == "triplex_meter" || obj.cls == "triplex_node";
+    const double base_kv = positive_or(
+        nominal_ln_v * (is_triplex ? 2.0 : kSqrt3) / 1000.0,
+        options.default_base_kv_ll);
     const bool is_swing = ascii_lower(glm_prop(obj, "bustype")) == "swing";
     const int bus = buses.ensure(name, base_kv,
                                  is_swing ? BusType::SLACK : BusType::PQ);
@@ -951,6 +1108,13 @@ ExternalGridImportReport import_gridlabd_text(
     bool has_power = false;
     for (const auto& phase : {"A", "B", "C"}) {
       const std::string value = glm_prop(obj, "constant_power_" + std::string(phase));
+      if (!value.empty()) {
+        power_va += parse_complex_rect(value);
+        has_power = true;
+      }
+    }
+    for (const auto& key : {"power_1", "power_2", "power_12"}) {
+      const std::string value = glm_prop(obj, key);
       if (!value.empty()) {
         power_va += parse_complex_rect(value);
         has_power = true;
@@ -986,7 +1150,7 @@ ExternalGridImportReport import_gridlabd_text(
 
   for (const auto& obj : objects) {
     if (obj.cls == "overhead_line" || obj.cls == "underground_line" ||
-        obj.cls == "line") {
+        obj.cls == "line" || obj.cls == "triplex_line") {
       const std::string from_name = glm_prop(obj, "from");
       const std::string to_name = glm_prop(obj, "to");
       const std::string cfg_name = glm_prop(obj, "configuration");
@@ -1035,6 +1199,13 @@ ExternalGridImportReport import_gridlabd_text(
       br.tap = 1.0;
       br.in_service = true;
       report.system.ac.branches.push_back(br);
+    } else if (obj.cls == "switch" || obj.cls == "fuse" ||
+               obj.cls == "recloser" || obj.cls == "sectionalizer") {
+      if (is_closed_gridlabd_link(obj)) {
+        add_low_impedance_link(report, buses, options, obj, 1e-6, 1e-6);
+      }
+    } else if (obj.cls == "regulator") {
+      add_low_impedance_link(report, buses, options, obj, 1e-5, 1e-5);
     } else if (obj.cls == "transformer") {
       const std::string from_name = glm_prop(obj, "from");
       const std::string to_name = glm_prop(obj, "to");
@@ -1074,8 +1245,15 @@ ExternalGridImportReport import_gridlabd_text(
     } else if (obj.cls == "recorder" || obj.cls == "collector") {
       continue;
     } else if (obj.cls != "meter" && obj.cls != "load" && obj.cls != "node" &&
+               obj.cls != "triplex_meter" && obj.cls != "triplex_node" &&
                obj.cls != "line_configuration" &&
-               obj.cls != "transformer_configuration") {
+               obj.cls != "triplex_line_configuration" &&
+               obj.cls != "overhead_line_conductor" &&
+               obj.cls != "underground_line_conductor" &&
+               obj.cls != "triplex_line_conductor" &&
+               obj.cls != "line_spacing" &&
+               obj.cls != "transformer_configuration" &&
+               obj.cls != "regulator_configuration") {
       report.skipped.push_back("Unsupported GridLAB-D object skipped: " + obj.cls);
     }
   }

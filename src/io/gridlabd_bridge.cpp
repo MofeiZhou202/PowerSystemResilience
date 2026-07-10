@@ -1175,8 +1175,13 @@ GridLABDExecutable discover_gridlabd() {
 
   const auto root = project_root_path();
   const auto sibling = root.parent_path() / "gridlab-d";
+  add_candidate(sibling);
   add_candidate(sibling / "gridlabd");
   add_candidate(sibling / "bin" / "gridlabd");
+  add_candidate(sibling / "cmake-build");
+  add_candidate(sibling / "cmake-build" / "gridlabd");
+  add_candidate(sibling / "cmake-build" / "bin" / "gridlabd");
+  add_candidate(sibling / "cmake-build" / "source" / "gridlabd");
   add_candidate(sibling / "build" / "gridlabd");
   add_candidate(sibling / "build" / "bin" / "gridlabd");
   add_candidate(sibling / "build" / "source" / "gridlabd");

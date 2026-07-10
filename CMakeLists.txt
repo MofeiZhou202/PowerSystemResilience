@@ -413,7 +413,15 @@ set(HACDCPF_SOURCES
   src/power_models/acdcopf_builder.cpp
   src/power_models/dc_opf_builder.cpp
   src/power_models/lindistflow_builder.cpp
-  src/power_models/scuc_builder.cpp)
+  src/power_models/scuc_builder.cpp
+  # ── SPPT executable-theory layer (metamorphic relations, MR3 certificate,
+  #    admissibility guard); operationalizes docs/latex/sppt_theory.tex ──────
+  src/sppt/metamorphic.cpp
+  src/sppt/certificate.cpp
+  src/sppt/guard.cpp
+  src/sppt/ablation.cpp
+  src/sppt/benchmark.cpp
+  src/sppt/agent.cpp)
 
 if(HACDCPF_ENABLE_ETAP)
   list(APPEND HACDCPF_SOURCES src/io/etap_io.cpp)
@@ -611,6 +619,68 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/gridlabd_validation_matrix.cpp")
   add_executable(gridlabd_validation_matrix tools/gridlabd_validation_matrix.cpp)
   target_link_libraries(gridlabd_validation_matrix PRIVATE hacdcpf::hacdcpf)
   hacdcpf_copy_opendss_runtime(gridlabd_validation_matrix)
+endif()
+
+# ── SPPT MR3 certificate corpus emitter (LaTeX + CSV) ─────────────────────────
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/sppt_certify.cpp")
+  add_executable(sppt_certify tools/sppt_certify.cpp)
+  target_link_libraries(sppt_certify PRIVATE hacdcpf::hacdcpf)
+  target_compile_definitions(sppt_certify PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  hacdcpf_copy_opendss_runtime(sppt_certify)
+endif()
+
+# ── SPPT Pillar-4 ablation study emitter (LaTeX + CSV) ────────────────────────
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/sppt_ablation.cpp")
+  add_executable(sppt_ablation tools/sppt_ablation.cpp)
+  target_link_libraries(sppt_ablation PRIVATE hacdcpf::hacdcpf)
+  target_compile_definitions(sppt_ablation PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  hacdcpf_copy_opendss_runtime(sppt_ablation)
+endif()
+
+# ── SPPT Pillar-4 scale/accuracy benchmark emitter (LaTeX + CSV) ──────────────
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/sppt_benchmark.cpp")
+  add_executable(sppt_benchmark tools/sppt_benchmark.cpp)
+  target_link_libraries(sppt_benchmark PRIVATE hacdcpf::hacdcpf)
+  target_compile_definitions(sppt_benchmark PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  target_compile_options(sppt_benchmark PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -DNDEBUG>
+    $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>)
+  hacdcpf_copy_opendss_runtime(sppt_benchmark)
+endif()
+
+# ── Native hybrid AC/DC PF evidence generator for SPPT paper ─────────────────
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/hybrid_acdc_pf_study.cpp")
+  add_executable(hybrid_acdc_pf_study tools/hybrid_acdc_pf_study.cpp)
+  target_link_libraries(hybrid_acdc_pf_study PRIVATE hacdcpf::hacdcpf)
+  target_compile_definitions(hybrid_acdc_pf_study PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  target_compile_options(hybrid_acdc_pf_study PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -DNDEBUG>
+    $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>)
+  hacdcpf_copy_opendss_runtime(hybrid_acdc_pf_study)
+endif()
+
+# ── Three-phase hybrid AC/DC distribution PF evidence generator ───────────────
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/three_phase_hybrid_acdc_pf_study.cpp")
+  add_executable(three_phase_hybrid_acdc_pf_study
+    tools/three_phase_hybrid_acdc_pf_study.cpp)
+  target_link_libraries(three_phase_hybrid_acdc_pf_study PRIVATE hacdcpf::hacdcpf)
+  target_compile_options(three_phase_hybrid_acdc_pf_study PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -DNDEBUG>
+    $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>)
+  hacdcpf_copy_opendss_runtime(three_phase_hybrid_acdc_pf_study)
+endif()
+
+# ── SPPT Verified-Intelligent-Modeling agent-loop demo (Alg. 2 / Thm. 8.9) ───
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/sppt_agent_demo.cpp")
+  add_executable(sppt_agent_demo tools/sppt_agent_demo.cpp)
+  target_link_libraries(sppt_agent_demo PRIVATE hacdcpf::hacdcpf)
+  target_compile_definitions(sppt_agent_demo PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  hacdcpf_copy_opendss_runtime(sppt_agent_demo)
 endif()
 
 # ── Tests ─────────────────────────────────────────────────────────────────────

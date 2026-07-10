@@ -39,6 +39,7 @@
 #include "hacdcpf/power_flow/assembly/branch_flow.hpp"
 #include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/api/hacdcpf.hpp"
+#include "hacdcpf/sppt/sppt.hpp"
 #include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/io/component_io_mapping.hpp"
 #include "hacdcpf/io/json_io.hpp"
@@ -5339,7 +5340,9 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
         <div class="btn-group">
           <button class="btn btn-primary" id="runPfBtn">Run Selected Method</button>
           <button class="btn btn-accent" id="runPfCompareBtn">Compare All Methods</button>
+          <button class="btn" id="runSpptAgentBtn" style="background:#1f6f5f;color:#fff;">Run SPPT Agent Loop</button>
         </div>
+        <div id="spptAgentOut" class="status mono" style="margin-top:8px;max-height:140px;overflow:auto;display:none;"></div>
         <div class="kpis">
           <div class="kpi"><div id="pfConv" class="v">-</div><div class="l">Converged</div></div>
           <div class="kpi"><div id="pfIter" class="v">-</div><div class="l">Iterations</div></div>
@@ -6741,6 +6744,31 @@ document.getElementById('runPfCompareBtn').onclick=async()=>{
   renderPfCompare(rows);
   const ok=rows.filter(r=>r.converged).length;
   setStatus(`PF comparison complete: ${ok}/${rows.length} methods converged.`);
+};
+
+document.getElementById('runSpptAgentBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  const outBox=document.getElementById('spptAgentOut');
+  try{
+    setStatus('Running SPPT guarded agent loop...');
+    const body=await api('/api/session/sppt_agent',{},'POST');
+    const m=body.metrics||{};
+    const steps=(body.steps||[]).map((s,i)=>
+      `${i+1}. ${s.edit}: ${s.accepted?'ACCEPT':'REJECT'}${s.reason?` (${s.reason})`:''}`+
+      `${s.analysis_ran?` | analysis ${s.analysis_converged?'ok':'fail'} | attributed ${s.attributed_buses}`:''}`
+    ).join('\n');
+    outBox.style.display='block';
+    outBox.textContent=
+      `sound=${body.sound?'true':'false'}\n`+
+      `tp=${m.tp??0} tn=${m.tn??0} fp=${m.fp??0} fn=${m.fn??0}\n`+
+      `precision=${fmt(m.precision??0,3)} recall=${fmt(m.recall??0,3)} catch=${fmt(m.catch_rate??0,3)}\n\n`+
+      steps;
+    setStatus(`SPPT agent loop complete: sound=${body.sound?'true':'false'}, catch=${fmt(m.catch_rate??0,3)}.`);
+  }catch(e){
+    outBox.style.display='block';
+    outBox.textContent=`SPPT agent loop failed: ${e.message}`;
+    setStatus(e.message,true);
+  }
 };
 
 /* Re-render on display unit change */
@@ -10041,6 +10069,81 @@ int main(int argc, char** argv) {
   });
 
   // ---- Session: run analyses ----
+  // SPPT admissibility guard (Alg. 2 of docs/latex/sppt_theory.tex).  Evaluates
+  // the three gates — validation, well-posedness, attribution totality — on the
+  // current session model and returns an Accept/Reject verdict with per-gate
+  // diagnostics, so an agent editing the model gets a live guard verdict before
+  // any analysis is trusted.
+  svr.Post("/api/session/sppt_guard",
+           [](const httplib::Request& req, httplib::Response& res) {
+    (void)req;
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      const hacdcpf::sppt::GuardVerdict v = hacdcpf::sppt::guard_system(sys);
+      json out;
+      out["accepted"] = v.accepted;
+      out["reason"] = v.reason;
+      out["validation_ok"] = v.validation_ok;
+      out["well_posed"] = v.well_posed;
+      out["attribution_total"] = v.attribution_total;
+      out["details"] = v.details;
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // SPPT Verified-Intelligent-Modeling agent loop (Alg. 2 / Thm. 8.9).  Runs the
+  // canned edit script through the admissibility guard on the current session
+  // model and returns per-step verdicts, attribution, metrics, and soundness.
+  svr.Post("/api/session/sppt_agent",
+           [](const httplib::Request& req, httplib::Response& res) {
+    (void)req;
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      const hacdcpf::sppt::AgentTrajectory traj =
+          hacdcpf::sppt::run_agent_loop(sys, hacdcpf::sppt::default_agent_script());
+      json steps = json::array();
+      for (const auto& s : traj.steps) {
+        steps.push_back(json{
+          {"edit", s.edit_name},
+          {"accepted", s.accepted},
+          {"reason", s.reason},
+          {"applied", s.applied},
+          {"analysis_ran", s.analysis_ran},
+          {"analysis_converged", s.analysis_converged},
+          {"attributed_buses", s.attributed_buses}
+        });
+      }
+      json out;
+      out["steps"] = steps;
+      out["sound"] = traj.sound;
+      out["metrics"] = json{
+        {"tp", traj.metrics.tp}, {"tn", traj.metrics.tn},
+        {"fp", traj.metrics.fp}, {"fn", traj.metrics.fn},
+        {"precision", traj.metrics.precision()},
+        {"recall", traj.metrics.recall()},
+        {"catch_rate", traj.metrics.catch_rate()},
+        {"accuracy", traj.metrics.accuracy()}
+      };
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
   svr.Post("/api/session/pf",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
