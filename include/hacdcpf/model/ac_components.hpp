@@ -143,6 +143,14 @@ struct Transformer2W {
 
   int n_parallel{1};
   int source_branch_idx{0};
+
+  // Hosting-capacity assessment (DL/T 2041-2025, equipment-level)
+  double cap_power_factor{0.95};             // cosθ used in β·S·cosθ
+  double cap_max_reverse_load_rate{0.0};     // β; 0 = auto N-1 from n_parallel, >0 = manual
+  double cap_dr_max_output_coeff{1.0};       // τ_max, max output coefficient of distributed resources
+  double cap_registered_dr_mw{0.0};          // registered-but-not-connected DR under this transformer (S_d,reg)
+  double cap_expected_new_storage_min_mw{0.0}; // ΔP_ESS lower bound (expected new storage charging)
+  double cap_expected_new_storage_max_mw{0.0}; // ΔP_ESS upper bound
 };
 
 struct Transformer3W {
@@ -595,6 +603,12 @@ struct Storage {
   double mttr_pcs_hr{0.0};
   double mtbf_bms_hr{0.0};
   double mttr_bms_hr{0.0};
+
+  // Hosting-capacity assessment (DL/T 2041-2025): charging strategy.
+  // "opf"    = optimized in OPF/UC (default, as today);
+  // "static" = fixed injection, excluded from optimization, held at cap_static_charging_mw.
+  std::string cap_charging_strategy{"opf"};
+  double cap_static_charging_mw{0.0};        // charging power (positive) used when strategy=="static" (P_ESS)
 
   DynamicModelProfile dynamic_model;
 };

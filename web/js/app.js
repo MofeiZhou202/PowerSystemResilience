@@ -6760,35 +6760,35 @@ const App = (() => {
     });
   }
 
-  // ========== Bearing Capability Assessment (DL/T 2041-2019) ==========
-  function showBcDialog() {
-    document.getElementById('bcDialog').style.display = 'flex';
-  }
-
-  function hideBcDialog() {
-    document.getElementById('bcDialog').style.display = 'none';
-  }
-
+  // ========== Hosting-Capacity Assessment (DL/T 2041-2025) ==========
+  // Settings live inline in the data-sub="hosting" toolbar (no modal dialog).
   async function runBearingCapacity() {
-    hideBcDialog();
-    setStatus('承载力评估中 (潮流+短路+校核)...', 'busy');
+    setStatus('分布式资源承载力评估中 (DL/T 2041-2025)...', 'busy');
 
     if (!await syncToBackend(true)) {
       setStatus('同步失败', 'error');
       return;
     }
 
-    const kr = parseFloat(document.getElementById('bcKr').value) || 0.8;
-    const delta_UH = parseFloat(document.getElementById('bcDeltaUH').value) || 7.0;
-    const delta_UL = parseFloat(document.getElementById('bcDeltaUL').value) || 7.0;
-    const thd_limit = parseFloat(document.getElementById('bcThdLimit').value) || 5.0;
+    const el = id => document.getElementById(id);
+    const enableVerify = el('bcEnableVerify')?.checked || false;
+    const payload = {
+      default_power_factor: parseFloat(el('bcPowerFactor')?.value) || 0.95,
+      default_dr_max_output_coeff: parseFloat(el('bcTauMax')?.value) || 1.0,
+      single_transformer_beta: parseFloat(el('bcSingleBeta')?.value) || 0.8,
+      n1_loading_limit: parseFloat(el('bcN1Limit')?.value) || 1.0,
+      enable_verification: enableVerify,
+      kr: parseFloat(el('bcKr')?.value) || 0.8,
+      delta_UH_pct: parseFloat(el('bcDeltaUH')?.value) || 7.0,
+      delta_UL_pct: parseFloat(el('bcDeltaUL')?.value) || 7.0,
+      thd_limit_pct: parseFloat(el('bcThdLimit')?.value) || 5.0,
+      enable_harmonic: el('bcEnableHarmonic')?.checked || false,
+    };
 
-    const data = await apiPost('/api/session/run_bearing_capacity', {
-      kr, delta_UH_pct: delta_UH, delta_UL_pct: delta_UL, thd_limit_pct: thd_limit
-    });
+    const data = await apiPost('/api/session/run_hosting_capacity', payload);
 
     if (data && data.converged) {
-      log(`承载力评估完成: ${data.bus_results?.length || 0} 母线, ${data.branch_results?.length || 0} 支路`, 'success');
+      log(`承载力评估完成: ${data.transformers?.length || 0} 台变压器, ${data.areas?.length || 0} 个区域`, 'success');
       setStatus('承载力评估完成');
       showBearingCapResults(data);
       switchTab('results');
@@ -6811,142 +6811,133 @@ const App = (() => {
     document.getElementById('bearingCapSection').style.display = 'block';
     setActiveResultGroup('hosting');
 
-    // Summary
-    const summary = document.getElementById('bearingCapSummary');
-    const worstGrade = data.area_results?.reduce((w, a) => {
+    const fmt = (x, d = 2) => (x === undefined || x === null || isNaN(x)) ? '—' : Number(x).toFixed(d);
+    const iv = (a, b) => `[${fmt(a, 1)}, ${fmt(b, 1)}]`;
+    const areas = data.areas || [];
+    const txs = data.transformers || [];
+    const warnings = data.warnings || [];
+    const v = data.verification || {};
+
+    const worstGrade = areas.reduce((w, a) => {
       if (a.grade === 'red') return 'red';
       if (a.grade === 'yellow' && w !== 'red') return 'yellow';
       return w;
-    }, 'green') || 'green';
+    }, 'green');
+
+    // Summary
+    const summary = document.getElementById('bearingCapSummary');
     summary.innerHTML = `
-      <div class="result-item"><span class="result-label">潮流收敛</span>
-        <span class="result-value result-converged">✓ 收敛 (${data.pf_iterations} 次迭代)</span></div>
-      <div class="result-item"><span class="result-label">裕度系数 k<sub>r</sub></span>
-        <span class="result-value">${data.kr}</span></div>
-      <div class="result-item"><span class="result-label">电压偏差限值 (GB/T 12325)</span>
-        <span class="result-value">+${data.delta_UH_limit}% / -${data.delta_UL_limit}%</span></div>
-      <div class="result-item"><span class="result-label">谐波限值 THD (GB/T 14549)</span>
-        <span class="result-value">${data.thd_limit_pct || 5.0}%</span></div>
-      <div class="result-item"><span class="result-label">向220kV+反送电</span>
-        <span class="result-value ${data.any_reverse_220kv ? 'result-failed' : 'result-converged'}">
-          ${data.any_reverse_220kv ? '✗ 存在 → 直接判红' : '✓ 无'}</span></div>
+      <div class="result-item"><span class="result-label">评估标准</span>
+        <span class="result-value">${data.standard || 'DL/T 2041-2025'}</span></div>
+      <div class="result-item"><span class="result-label">变压器 / 区域数</span>
+        <span class="result-value">${txs.length} 台 / ${areas.length} 个</span></div>
       <div class="result-item"><span class="result-label">综合评估等级</span>
         <span class="result-value">${gradeHtml(worstGrade)}</span></div>
+      <div class="result-item"><span class="result-label">预警数</span>
+        <span class="result-value ${warnings.length ? 'result-failed' : 'result-converged'}">${warnings.length}</span></div>
+      ${v.run ? `<div class="result-item"><span class="result-label">工程校验建议</span>
+        <span class="result-value">${verdictLabel(v.recommendation)}</span></div>` : ''}
     `;
     document.getElementById('resultsSummary').innerHTML = summary.innerHTML;
 
-    // Area results
+    // Area (county) results
     const areaDiv = document.getElementById('bearingAreaResults');
-    if (data.area_results && data.area_results.length > 0) {
-      let html = '<table><thead><tr><th>区域</th><th>评估等级</th></tr></thead><tbody>';
-      data.area_results.forEach(a => {
-        html += `<tr><td>Area ${a.area}</td><td>${gradeHtml(a.grade)}</td></tr>`;
+    if (areas.length > 0) {
+      let html = '<table><thead><tr>' +
+        '<th>区域</th><th>变压器数</th><th>承载力 S<sub>D</sub>(MW)</th>' +
+        '<th>可并网 C<sub>s1</sub>(MW)</th><th>可备案 C<sub>s2</sub>(MW)</th><th>等级</th>' +
+        '</tr></thead><tbody>';
+      areas.forEach(a => {
+        html += `<tr>
+          <td>Area ${a.area}</td><td>${a.transformer_count}</td>
+          <td>${iv(a.hosting_min_mw, a.hosting_max_mw)}</td>
+          <td>${iv(a.accessible_grid_min_mw, a.accessible_grid_max_mw)}</td>
+          <td>${iv(a.accessible_reg_min_mw, a.accessible_reg_max_mw)}</td>
+          <td>${gradeHtml(a.grade)}</td></tr>`;
       });
       html += '</tbody></table>';
       areaDiv.innerHTML = html;
+    } else {
+      areaDiv.innerHTML = '<p style="color:#888">无区域数据</p>';
     }
 
-    // Branch/Transformer thermal stability table (DL/T 2041 §5.1)
+    // Transformer equipment-level hosting capacity
     const brDiv = document.getElementById('bearingBranchResults');
-    if (data.branch_results && data.branch_results.length > 0) {
+    if (txs.length > 0) {
       const busMap = Canvas.getCompBusMap();
       let html = '<table><thead><tr>' +
-        '<th>评估线路/变压器</th><th>类型</th><th>From</th><th>To</th>' +
-        '<th>S<sub>e</sub>(MVA)</th><th>P(MW)</th><th>负载率(%)</th>' +
-        '<th>反向</th><th>λ(%)</th><th>P<sub>m</sub>(MW)</th><th>等级</th>' +
+        '<th>变压器</th><th>电压</th><th>区域</th><th>S(MVA)</th>' +
+        '<th>β</th><th>τ</th><th>P(MW)</th><th>P<sub>G</sub></th><th>已接DR</th>' +
+        '<th>承载力 S<sub>d</sub>(MW)</th><th>可并网 C<sub>d1</sub></th><th>可备案 C<sub>d2</sub></th><th>等级</th>' +
         '</tr></thead><tbody>';
-      data.branch_results.forEach(br => {
-        const tg = br.thermal_grade || 'green';
-        const cls = tg === 'red' ? 'grade-red' : (tg === 'yellow' ? 'grade-yellow' :
-                    (tg === 'no_rating' ? '' : 'grade-green'));
-        const compId = Number.isFinite(Number(br.index)) ? busMap.branch?.[Number(br.index)] : undefined;
+      txs.forEach(t => {
+        const compId = Number.isFinite(Number(t.index)) ? busMap.transformer_2w?.[Number(t.index)] : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
-        const typeLabel = br.equip_type === 'transformer' ? '变压器' : '线路';
-        const seStr = br.has_rating ? br.se_mva.toFixed(1) : '<span style="color:#999">未设</span>';
-        const lamStr = br.has_rating ? br.lambda_pct.toFixed(1) : '—';
-        const pmStr = br.has_rating ? br.pm_mw.toFixed(1) : '—';
-        const loadStr = br.has_rating ? br.loading_pct.toFixed(1) : '—';
-        const gradeStr = tg === 'no_rating' ? '<span style="color:#999">未设额定</span>' : gradeHtml(tg);
+        const betaStr = fmt(t.beta, 2) + (t.beta_auto ? '<span style="color:#888">*</span>' : '');
         html += `<tr${attr}>
-          <td>${br.name}</td><td>${typeLabel}</td>
-          <td>${br.from_bus}</td><td>${br.to_bus}</td>
-          <td>${seStr}</td><td>${br.pf_mw.toFixed(2)}</td>
-          <td>${loadStr}</td>
-          <td>${br.reverse_flow ? '⚠️ 反向' : '—'}</td>
-          <td class="${cls}">${lamStr}</td>
-          <td>${pmStr}</td>
-          <td>${gradeStr}</td></tr>`;
+          <td>${t.name}</td><td>${t.voltage_level}</td><td>${t.area}</td>
+          <td>${fmt(t.sn_mva, 1)}</td><td>${betaStr}</td><td>${fmt(t.tau_max, 2)}</td>
+          <td>${fmt(t.supply_load_mw, 1)}</td><td>${fmt(t.supply_nondr_gen_mw, 1)}</td>
+          <td>${fmt(t.supply_existing_dr_mw, 1)}</td>
+          <td>${iv(t.hosting_min_mw, t.hosting_max_mw)}</td>
+          <td>${iv(t.accessible_grid_min_mw, t.accessible_grid_max_mw)}</td>
+          <td>${iv(t.accessible_reg_min_mw, t.accessible_reg_max_mw)}</td>
+          <td>${gradeHtml(t.grade)}</td></tr>`;
       });
       html += '</tbody></table>';
+      html += '<p style="color:#888;font-size:0.85em;margin-top:4px">β 后带 * 表示由 N-1 规则自动计算；负的可接入能力表示已过载/超备案。</p>';
       brDiv.innerHTML = html;
     } else {
-      brDiv.innerHTML = '<p style="color:#888">无支路数据</p>';
+      brDiv.innerHTML = '<p style="color:#888">无变压器数据（请确认已建模两绕组变压器）</p>';
     }
 
-    // Bus results — SC check, voltage deviation check, harmonic check
+    // Engineering verification
     const busDiv = document.getElementById('bearingBusResults');
-    if (data.bus_results && data.bus_results.length > 0) {
-      const busMap = Canvas.getCompBusMap();
-      let html = '<table><thead><tr>' +
-        '<th>Bus</th><th>kV</th><th>V<sub>m</sub>(pu)</th>' +
-        '<th>Ik"(kA)</th><th>I<sub>m</sub>(kA)</th><th>短路校核</th>' +
-        '<th>δU<sub>H</sub>(%)</th><th>δU<sub>L</sub>(%)</th><th>电压校核</th>' +
-        '<th>谐波校核</th><th>DG(MW)</th><th>等级</th>' +
-        '</tr></thead><tbody>';
-      data.bus_results.forEach(br => {
-        const compId = busMap.ac?.[br.bus_id];
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
-        const scCls = br.sc_pass ? 'grade-green' : 'grade-red';
-        const vCls = br.voltage_pass ? 'grade-green' : 'grade-red';
-        const harmStatus = br.harmonic_status || 'no_data';
-        const harmCls = harmStatus === 'no_data' ? '' : (br.harmonic_pass ? 'grade-green' : 'grade-red');
-        const harmLabel = harmStatus === 'no_data' ? '<span style="color:#999">无数据</span>' :
-                          (br.harmonic_pass ? '✓' : '✗');
-        html += `<tr${attr}>
-          <td>${br.bus_id}</td><td>${br.base_kv}</td>
-          <td>${br.vm_pu.toFixed(4)}</td>
-          <td>${br.ikss_ka.toFixed(3)}</td>
-          <td>${br.i_breaker_ka > 0 ? br.i_breaker_ka.toFixed(2) : '<span style="color:#999">未设</span>'}</td>
-          <td class="${scCls}">${br.sc_pass ? '✓ 通过' : '✗ 超限'}</td>
-          <td>${br.delta_u_h_pct.toFixed(2)}</td>
-          <td>${br.delta_u_l_pct.toFixed(2)}</td>
-          <td class="${vCls}">${br.voltage_pass ? '✓ 通过' : '✗ 超限'}</td>
-          <td class="${harmCls}">${harmLabel}</td>
-          <td>${(br.dg_mw || 0).toFixed(2)}</td>
-          <td>${gradeHtml(br.grade)}</td></tr>`;
-      });
-      html += '</tbody></table>';
+    if (v.run) {
+      const chk = (ok) => ok ? '<span class="grade-green">✓ 通过</span>' : '<span class="grade-red">✗ 未通过</span>';
+      let html = '<div class="results-summary">' +
+        `<div class="result-item"><span class="result-label">潮流</span><span class="result-value">${v.power_flow_converged ? '收敛 ' + v.pf_iterations + ' 次' : '未收敛'} · ${chk(v.power_flow_passed)}</span></div>` +
+        `<div class="result-item"><span class="result-label">短路电流校核</span><span class="result-value">${chk(v.short_circuit_passed)}</span></div>` +
+        `<div class="result-item"><span class="result-label">电压偏差校核</span><span class="result-value">${chk(v.voltage_deviation_passed)}</span></div>` +
+        `<div class="result-item"><span class="result-label">谐波校核</span><span class="result-value">${v.harmonic_evaluated ? chk(v.harmonic_passed) + ' (THD ' + fmt(v.max_thd_pct, 2) + '%)' : '<span style="color:#999">未评估</span>'}</span></div>` +
+        '</div>';
+      const vios = v.violations || [];
+      if (vios.length > 0) {
+        html += '<table><thead><tr><th>类型</th><th>设备/母线</th><th>数值</th><th>限值</th><th>单位</th><th>严重度</th><th>说明</th></tr></thead><tbody>';
+        vios.forEach(x => {
+          html += `<tr><td>${x.type}</td><td>${x.equipment || x.bus_id}</td>
+            <td>${fmt(x.value, 2)}</td><td>${fmt(x.limit, 2)}</td><td>${x.unit}</td>
+            <td>${x.severity}</td><td>${x.message}</td></tr>`;
+        });
+        html += '</tbody></table>';
+      } else {
+        html += '<p style="color:#3a3">未发现违规项。</p>';
+      }
       busDiv.innerHTML = html;
+    } else {
+      busDiv.innerHTML = '<p style="color:#888">未启用工程校验（可在评估设置中勾选）。</p>';
     }
 
-    // Comprehensive summary table (DL/T 2041 Appendix C)
+    // Warnings
     const sumDiv = document.getElementById('bearingSummaryTable');
-    if (data.summary_table && data.summary_table.length > 0) {
-      let html = '<table><thead><tr>' +
-        '<th>评估对象</th><th>类型</th><th>热稳定 λ(%)</th>' +
-        '<th>短路校核</th><th>电压校核</th><th>谐波校核</th>' +
-        '<th>评估等级</th><th>P<sub>m</sub>(MW)</th>' +
-        '</tr></thead><tbody>';
-      data.summary_table.forEach(row => {
-        const typeLabel = row.type === 'transformer' ? '变压器' :
-                          (row.type === 'line' ? '线路' : (row.type === 'bus' ? '母线' : row.type));
-        const lamStr = row.has_rating ? row.lambda_pct.toFixed(1) : '—';
-        const scStr = row.sc_pass ? '✓' : '✗';
-        const vStr = row.voltage_pass ? '✓' : '✗';
-        const harmStr = (row.harmonic_status === 'no_data') ? '无数据' :
-                        (row.harmonic_pass ? '✓' : '✗');
-        const pmStr = row.pm_mw > 0 ? row.pm_mw.toFixed(1) : '—';
-        html += `<tr>
-          <td>${row.name}</td><td>${typeLabel}</td>
-          <td>${lamStr}</td>
-          <td>${scStr}</td><td>${vStr}</td><td>${harmStr}</td>
-          <td>${gradeHtml(row.grade)}</td>
-          <td>${pmStr}</td></tr>`;
-      });
-      html += '</tbody></table>';
-      html += '<p style="color:#888;font-size:0.85em;margin-top:4px">注：下级电网评估等级应不高于上级电网的评估等级。</p>';
+    if (warnings.length > 0) {
+      let html = '<ul style="margin:4px 0 0 18px">';
+      warnings.forEach(w => { html += `<li style="color:#e0a800">${w}</li>`; });
+      html += '</ul>';
       sumDiv.innerHTML = html;
+    } else {
+      sumDiv.innerHTML = '<p style="color:#3a3">无预警。</p>';
     }
+  }
+
+  function verdictLabel(rec) {
+    const m = {
+      allow_connection: '🟢 允许接入',
+      allow_with_mitigation: '🟡 有条件接入',
+      suspend_connection: '🔴 暂停接入',
+      require_further_study: '⚪ 需进一步研究',
+    };
+    return m[rec] || rec || '—';
   }
 
   // ========== Time-Series Power Flow ==========
@@ -13657,10 +13648,10 @@ const App = (() => {
       downloadJsonFile('network_reduction.json', _lastNetReductionData);
     });
 
-    // Bar 3: hosting capacity
-    document.getElementById('btnRunBearingCap')?.addEventListener('click', showBcDialog);
+    // Bar 3: hosting capacity — run directly with inline sub-toolbar params.
+    document.getElementById('btnRunBearingCap')?.addEventListener('click', runBearingCapacity);
     // Legacy bearing-capacity launcher (header button removed)
-    document.getElementById('btnBearingCap')?.addEventListener('click', showBcDialog);
+    document.getElementById('btnBearingCap')?.addEventListener('click', runBearingCapacity);
 
     // Bar 3: time-series — run directly with inline params (skip UC / OPF).
     document.getElementById('btnRunTimeSeriesPF')?.addEventListener('click', runTimeSeriesPF);
@@ -16610,10 +16601,8 @@ const App = (() => {
       });
     }
 
-    // Bearing Capacity Dialog
-    document.getElementById('btnBearingCap')?.addEventListener('click', showBcDialog);
-    document.getElementById('btnBcRun').addEventListener('click', runBearingCapacity);
-    document.getElementById('btnBcCancel').addEventListener('click', hideBcDialog);
+    // Hosting-capacity: run directly with inline sub-toolbar params (no dialog).
+    document.getElementById('btnBearingCap')?.addEventListener('click', runBearingCapacity);
 
     // SC Dialog
     document.getElementById('btnScRun').addEventListener('click', runShortCircuit);

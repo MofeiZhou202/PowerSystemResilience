@@ -1244,7 +1244,38 @@
   </div>
   <!-- Hosting capacity -->
   <div class="sub-section" data-sub="hosting" hidden>
+    <label class="sub-label" title="默认功率因数 cosθ（变压器自身 cap_power_factor 优先）">cosθ
+      <input id="bcPowerFactor" type="number" value="0.95" step="0.01" min="0.5" max="1" style="width:64px"/>
+    </label>
+    <label class="sub-label" title="默认最大出力系数 τ_max（变压器自身 cap_dr_max_output_coeff 优先）">τ<sub>max</sub>
+      <input id="bcTauMax" type="number" value="1.0" step="0.05" min="0.1" max="1.2" style="width:64px"/>
+    </label>
+    <label class="sub-label" title="单台变压器反向负载率 β（β=0 时按 N-1 自动计算）">单台β
+      <input id="bcSingleBeta" type="number" value="0.8" step="0.05" min="0" max="1.5" style="width:64px"/>
+    </label>
+    <label class="sub-label" title="N-1 负载能力上限，用于 β_N-1=(n-1)/n×上限">N-1上限
+      <input id="bcN1Limit" type="number" value="1.0" step="0.05" min="0" max="1.5" style="width:64px"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="启用工程校验：潮流/短路/电压偏差/谐波 (§12)">
+      <input id="bcEnableVerify" type="checkbox"/><span>工程校验</span>
+    </label>
+    <label class="sub-label" title="设备运行裕度系数 k_r">k<sub>r</sub>
+      <input id="bcKr" type="number" value="0.8" step="0.05" min="0" max="1" style="width:56px"/>
+    </label>
+    <label class="sub-label" title="正电压偏差限值 (%)">ΔU<sub>H</sub>%
+      <input id="bcDeltaUH" type="number" value="7" step="0.5" min="0" style="width:52px"/>
+    </label>
+    <label class="sub-label" title="负电压偏差限值 (%)">ΔU<sub>L</sub>%
+      <input id="bcDeltaUL" type="number" value="7" step="0.5" min="0" style="width:52px"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="工程校验时运行谐波潮流校核">
+      <input id="bcEnableHarmonic" type="checkbox"/><span>谐波校核</span>
+    </label>
+    <label class="sub-label" title="谐波电压总畸变率限值 (%)">THD%
+      <input id="bcThdLimit" type="number" value="5" step="0.5" min="0" style="width:52px"/>
+    </label>
     <button id="btnRunBearingCap" class="toolbar-btn run-btn" title="运行DG承载力评估">运行承载力评估</button>
+    <span class="sub-hint">全局缺省参数；构件自身 cap_* 属性优先。工程校验为可选。</span>
   </div>
   <!-- Reliability -->
   <div class="sub-section" data-sub="reliability" hidden>
@@ -2153,15 +2184,15 @@
         </div><!-- /result-group topologyAnalysis -->
         <div class="result-group" data-result-group="hosting">
         <div class="topo-section" id="bearingCapSection" style="display:none">
-          <h4>承载力评估结果 (DL/T 2041-2019)</h4>
+          <h4>分布式资源承载力评估结果 (DL/T 2041-2025)</h4>
           <div id="bearingCapSummary" class="results-summary"></div>
-          <h5>区域评估等级</h5>
+          <h5>区域（县级）承载力与接入能力等级</h5>
           <div id="bearingAreaResults" class="topo-table-wrap"></div>
-          <h5>支路/变压器热稳定评估 (DL/T 2041 §5.1)</h5>
+          <h5>设备级（变压器）承载力 S_d 与可接入能力 (§7, §10)</h5>
           <div id="bearingBranchResults" class="topo-table-wrap"></div>
-          <h5>母线短路电流校核 / 电压偏差校核 / 谐波校核 (§5.2-5.4)</h5>
+          <h5>工程校验：潮流 / 短路 / 电压偏差 / 谐波 (§12)</h5>
           <div id="bearingBusResults" class="topo-table-wrap"></div>
-          <h5>承载力综合评估等级汇总 (附录C)</h5>
+          <h5>预警清单</h5>
           <div id="bearingSummaryTable" class="topo-table-wrap"></div>
         </div>
         </div><!-- /result-group hosting -->
@@ -2356,20 +2387,7 @@
   </div>
 </div>
 
-<!-- Bearing Capacity Assessment Dialog -->
-<div id="bcDialog" class="modal" style="display:none">
-  <div class="modal-content">
-    <h3>承载力评估设置 (DL/T 2041-2019)</h3>
-    <label>设备运行裕度系数 k<sub>r</sub>: <input type="number" id="bcKr" value="0.8" step="0.05" min="0" max="1"/></label>
-    <label>正电压偏差限值 ΔU<sub>H</sub> (%): <input type="number" id="bcDeltaUH" value="7" step="0.5" min="0"/></label>
-    <label>负电压偏差限值 ΔU<sub>L</sub> (%): <input type="number" id="bcDeltaUL" value="7" step="0.5" min="0"/></label>
-    <label>谐波电压总畸变率限值 THD (%): <input type="number" id="bcThdLimit" value="5" step="0.5" min="0"/></label>
-    <div class="modal-actions">
-      <button id="btnBcRun" class="btn btn-accent">运行评估</button>
-      <button id="btnBcCancel" class="btn">取消</button>
-    </div>
-  </div>
-</div>
+<!-- Hosting-capacity settings are now inline in the data-sub="hosting" toolbar (see above). -->
 
 <!-- Time-Series PF Dialog -->
 <div id="tspfDialog" class="modal" style="display:none">

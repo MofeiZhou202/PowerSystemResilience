@@ -238,6 +238,8 @@ inline void materialize_dc_storage(HybridPowerSystem& sys) {
     st.forced_outage_rate = d.forced_outage_rate;
     st.mttr_hr = d.mttr_hr;
     st.t_scheduled_hr = d.t_scheduled_hr;
+    st.cap_charging_strategy = d.cap_charging_strategy;
+    st.cap_static_charging_mw = d.cap_static_charging_mw;
     st.dynamic_model = d.dynamic_model;
     sys.dc.storage.push_back(std::move(st));
   }

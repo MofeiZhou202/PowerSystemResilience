@@ -639,8 +639,18 @@ void build_variable_bounds(const Problem& prob, Eigen::VectorXd& xmin, Eigen::Ve
   // so the IPM can converge.
   for (int k = 0; k < idx.n_pstor; ++k) {
     const auto& st = prob.data.storage_units[static_cast<size_t>(prob.stor_var_to_data[static_cast<size_t>(k)])];
-    const double p_sched = st.p_mw / prob.data.base_mva;
     const double eps = 1e-4 / prob.data.base_mva;  // small tolerance
+    if (st.cap_charging_strategy == "static") {
+      // Hosting-capacity static ESS: fixed injection, excluded from optimization.
+      // Charging is negative active power (P = −cap_static_charging_mw).
+      const double fixed = -std::max(0.0, st.cap_static_charging_mw) / prob.data.base_mva;
+      xmin[idx.i_pstor + k] = fixed - eps;
+      xmax[idx.i_pstor + k] = fixed + eps;
+      xmin[idx.i_qstor + k] = -eps;
+      xmax[idx.i_qstor + k] =  eps;
+      continue;
+    }
+    const double p_sched = st.p_mw / prob.data.base_mva;
     xmin[idx.i_pstor + k] = std::max(st.pmin_mw / prob.data.base_mva, p_sched - eps);
     xmax[idx.i_pstor + k] = std::min(st.pmax_mw / prob.data.base_mva, p_sched + eps);
     xmin[idx.i_qstor + k] = st.qmin_mvar / prob.data.base_mva;
@@ -651,6 +661,13 @@ void build_variable_bounds(const Problem& prob, Eigen::VectorXd& xmin, Eigen::Ve
   for (int k = 0; k < idx.n_pstordc; ++k) {
     const auto& st = prob.data.dc_storage[static_cast<size_t>(
         prob.stor_dc_var_to_data[static_cast<size_t>(k)])];
+    if (st.cap_charging_strategy == "static") {
+      const double eps = 1e-4 / prob.data.base_mva;
+      const double fixed = -std::max(0.0, st.cap_static_charging_mw) / prob.data.base_mva;
+      xmin[idx.i_pstordc + k] = fixed - eps;
+      xmax[idx.i_pstordc + k] = fixed + eps;
+      continue;
+    }
     xmin[idx.i_pstordc + k] = st.pmin_mw / prob.data.base_mva;
     xmax[idx.i_pstordc + k] = st.pmax_mw / prob.data.base_mva;
   }

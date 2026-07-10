@@ -490,7 +490,11 @@ const COMP = (() => {
       shift_deg: 0, tap_side: 0,
       tap_pos: 0, tap_min: -8, tap_max: 8,
       tap_neutral: 0, tap_step_percent: 1.25,
-      vector_group: '',
+      vector_group: '', n_parallel: 1,
+      // Hosting-capacity assessment (DL/T 2041-2025)
+      cap_power_factor: 0.95, cap_max_reverse_load_rate: 0,
+      cap_dr_max_output_coeff: 1.0, cap_registered_dr_mw: 0,
+      cap_expected_new_storage_min_mw: 0, cap_expected_new_storage_max_mw: 0,
       in_service: true
     },
     ac_branch: {
@@ -521,6 +525,8 @@ const COMP = (() => {
       self_discharge_pct: 0, profile_id: -1,
       charge_bid_price: 0, discharge_bid_price: 0, daily_cycle_limit: 0,
       forced_outage_rate: 0.02, mttr_hr: 24, t_scheduled_hr: 0,
+      // Hosting-capacity assessment (DL/T 2041-2025): charging strategy
+      cap_charging_strategy: 'opf', cap_static_charging_mw: 0,
       dynamic_model: {
         standard: 'IEEE1547',
         model_name: 'BatteryDynamic',
@@ -649,6 +655,8 @@ const COMP = (() => {
       self_discharge_pct: 0, profile_id: -1,
       charge_bid_price: 0, discharge_bid_price: 0, daily_cycle_limit: 0,
       forced_outage_rate: 0.02, mttr_hr: 24, t_scheduled_hr: 0,
+      // Hosting-capacity assessment (DL/T 2041-2025): charging strategy
+      cap_charging_strategy: 'opf', cap_static_charging_mw: 0,
       dynamic_model: { standard: 'IEEE1547', model_name: 'BatteryDynamic', parameter_set: 'dc_default' },
       in_service: true
     },
@@ -967,6 +975,11 @@ const COMP = (() => {
     pfe_kw: '空载损耗(kW)', i0_percent: '空载电流(%)',
     shift_deg: '移相角(°)', tap_pos: '档位', tap_min: '最小档位',
     tap_max: '最大档位', tap_step_percent: '档位步长(%)',
+    cap_power_factor: '承载力:功率因数cosθ', cap_max_reverse_load_rate: '承载力:反向负载率β(0=N-1自动)',
+    cap_dr_max_output_coeff: '承载力:最大出力系数τ', cap_registered_dr_mw: '承载力:已备案DR(MW)',
+    cap_expected_new_storage_min_mw: '承载力:新增储能充电下限(MW)',
+    cap_expected_new_storage_max_mw: '承载力:新增储能充电上限(MW)',
+    cap_charging_strategy: '承载力:充电策略(opf/static)', cap_static_charging_mw: '承载力:静态充电功率(MW)',
     from_bus: '起始母线', to_bus: '终止母线',
     r_pu: '电阻(pu)', x_pu: '电抗(pu)', b_pu: '电纳(pu)',
     r_ohm_per_km: '电阻(Ω/km)', x_ohm_per_km: '电抗(Ω/km)',

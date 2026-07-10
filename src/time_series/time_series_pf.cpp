@@ -580,17 +580,21 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   }
   res.G = static_cast<int>(res.gen_indices.size());
 
-  // Collect in-service storage
+  // Collect in-service storage. A hosting-capacity "static" ESS is excluded from
+  // the UC/OPF optimized set — it is held at its fixed charging power (honored by
+  // the per-step OPF bound pin in parity_formulation.cpp), not dispatched.
   for (int i = 0; i < static_cast<int>(sys.ac.storage.size()); ++i) {
-    if (sys.ac.storage[static_cast<size_t>(i)].in_service) {
+    const auto& st = sys.ac.storage[static_cast<size_t>(i)];
+    if (st.in_service && st.cap_charging_strategy != "static") {
       res.storage_indices.push_back(i);
     }
   }
   res.S = static_cast<int>(res.storage_indices.size());
 
-  // Collect in-service DC storage
+  // Collect in-service DC storage (same static-ESS exclusion)
   for (int i = 0; i < static_cast<int>(sys.dc.storage.size()); ++i) {
-    if (sys.dc.storage[static_cast<size_t>(i)].in_service) {
+    const auto& st = sys.dc.storage[static_cast<size_t>(i)];
+    if (st.in_service && st.cap_charging_strategy != "static") {
       res.dc_storage_indices.push_back(i);
     }
   }

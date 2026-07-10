@@ -784,6 +784,8 @@ static json storage_to_json(const Storage& st) {
   j["forced_outage_rate"] = st.forced_outage_rate;
   j["mttr_hr"] = st.mttr_hr;
   j["t_scheduled_hr"] = st.t_scheduled_hr;
+  j["cap_charging_strategy"] = st.cap_charging_strategy;
+  j["cap_static_charging_mw"] = st.cap_static_charging_mw;
   add_dynamic_model_if_present(j, st.dynamic_model);
   return j;
 }
@@ -820,6 +822,8 @@ static Storage storage_from_json(const json& j) {
   st.forced_outage_rate = jget(j, "forced_outage_rate", 0.0);
   st.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   st.t_scheduled_hr = jget(j, "t_scheduled_hr", 0.0);
+  st.cap_charging_strategy = jget<std::string>(j, "cap_charging_strategy", "opf");
+  st.cap_static_charging_mw = jget(j, "cap_static_charging_mw", 0.0);
   read_dynamic_model_if_present(j, st.dynamic_model);
   return st;
 }
@@ -856,6 +860,8 @@ static json dc_storage_to_json(const DCStorage& st) {
   j["forced_outage_rate"] = st.forced_outage_rate;
   j["mttr_hr"] = st.mttr_hr;
   j["t_scheduled_hr"] = st.t_scheduled_hr;
+  j["cap_charging_strategy"] = st.cap_charging_strategy;
+  j["cap_static_charging_mw"] = st.cap_static_charging_mw;
   add_dynamic_model_if_present(j, st.dynamic_model);
   return j;
 }
@@ -891,6 +897,8 @@ static DCStorage dc_storage_from_json(const json& j) {
   st.forced_outage_rate = jget(j, "forced_outage_rate", 0.0);
   st.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   st.t_scheduled_hr = jget(j, "t_scheduled_hr", 0.0);
+  st.cap_charging_strategy = jget<std::string>(j, "cap_charging_strategy", "opf");
+  st.cap_static_charging_mw = jget(j, "cap_static_charging_mw", 0.0);
   read_dynamic_model_if_present(j, st.dynamic_model);
   return st;
 }
@@ -1358,7 +1366,14 @@ static json transformer2w_to_json(const Transformer2W& t) {
   j["x0_r0"] = t.x0_r0;
   j["mtbf_hours"] = t.mtbf_hours;
   j["mttr_hours"] = t.mttr_hours;
+  j["n_parallel"] = t.n_parallel;
   j["source_branch_idx"] = t.source_branch_idx;
+  j["cap_power_factor"] = t.cap_power_factor;
+  j["cap_max_reverse_load_rate"] = t.cap_max_reverse_load_rate;
+  j["cap_dr_max_output_coeff"] = t.cap_dr_max_output_coeff;
+  j["cap_registered_dr_mw"] = t.cap_registered_dr_mw;
+  j["cap_expected_new_storage_min_mw"] = t.cap_expected_new_storage_min_mw;
+  j["cap_expected_new_storage_max_mw"] = t.cap_expected_new_storage_max_mw;
   return j;
 }
 
@@ -1390,7 +1405,14 @@ static Transformer2W transformer2w_from_json(const json& j) {
   t.x0_r0 = jget(j, "x0_r0", 0.0);
   t.mtbf_hours = jget_alias(j, "mtbf_hours", "mtbf_hours", 0.0);
   t.mttr_hours = jget_alias(j, "mttr_hours", "mttr_hours", 0.0);
+  t.n_parallel = jget(j, "n_parallel", 1);
   t.source_branch_idx = jget(j, "source_branch_idx", 0);
+  t.cap_power_factor = jget(j, "cap_power_factor", 0.95);
+  t.cap_max_reverse_load_rate = jget(j, "cap_max_reverse_load_rate", 0.0);
+  t.cap_dr_max_output_coeff = jget(j, "cap_dr_max_output_coeff", 1.0);
+  t.cap_registered_dr_mw = jget(j, "cap_registered_dr_mw", 0.0);
+  t.cap_expected_new_storage_min_mw = jget(j, "cap_expected_new_storage_min_mw", 0.0);
+  t.cap_expected_new_storage_max_mw = jget(j, "cap_expected_new_storage_max_mw", 0.0);
   return t;
 }
 

@@ -2733,6 +2733,13 @@ const Canvas = (() => {
               tap_neutral: numOr(p.tap_neutral, 0),
               tap_step_percent: numOr(p.tap_step_percent, 1.25),
               vector_group: p.vector_group || '',
+              n_parallel: numOr(p.n_parallel, 1),
+              cap_power_factor: numOr(p.cap_power_factor, 0.95),
+              cap_max_reverse_load_rate: numOr(p.cap_max_reverse_load_rate, 0),
+              cap_dr_max_output_coeff: numOr(p.cap_dr_max_output_coeff, 1.0),
+              cap_registered_dr_mw: numOr(p.cap_registered_dr_mw, 0),
+              cap_expected_new_storage_min_mw: numOr(p.cap_expected_new_storage_min_mw, 0),
+              cap_expected_new_storage_max_mw: numOr(p.cap_expected_new_storage_max_mw, 0),
               in_service: p.in_service !== false,
             };
             if (Number(p.source_branch_idx) > 0) {
@@ -2806,6 +2813,8 @@ const Canvas = (() => {
             forced_outage_rate: numOr(p.forced_outage_rate, 0),
             mttr_hr: numOr(p.mttr_hr ?? p.mttr_hours, 0),
             t_scheduled_hr: numOr(p.t_scheduled_hr, 0),
+            cap_charging_strategy: p.cap_charging_strategy || 'opf',
+            cap_static_charging_mw: numOr(p.cap_static_charging_mw, 0),
             in_service: p.in_service !== false,
           }, p));
           storIdx++;
@@ -2835,6 +2844,8 @@ const Canvas = (() => {
             forced_outage_rate: numOr(p.forced_outage_rate, 0),
             mttr_hr: numOr(p.mttr_hr ?? p.mttr_hours, 0),
             t_scheduled_hr: numOr(p.t_scheduled_hr, 0),
+            cap_charging_strategy: p.cap_charging_strategy || 'opf',
+            cap_static_charging_mw: numOr(p.cap_static_charging_mw, 0),
             in_service: p.in_service !== false,
           }, p));
           dcStorIdx++;
@@ -3814,6 +3825,8 @@ const Canvas = (() => {
         forced_outage_rate: s.forced_outage_rate,
         mttr_hr: s.mttr_hr ?? s.mttr_hours,
         t_scheduled_hr: s.t_scheduled_hr,
+        cap_charging_strategy: s.cap_charging_strategy ?? 'opf',
+        cap_static_charging_mw: s.cap_static_charging_mw ?? 0,
         dynamic_model: cloneDynamicModel(s.dynamic_model) || COMP.defaults.storage.dynamic_model,
         in_service: s.in_service !== false,
       }, busCompMap);
@@ -3958,6 +3971,13 @@ const Canvas = (() => {
         tap_neutral: tr.tap_neutral,
         tap_step_percent: tr.tap_step_percent,
         vector_group: tr.vector_group || '',
+        n_parallel: tr.n_parallel ?? 1,
+        cap_power_factor: tr.cap_power_factor ?? 0.95,
+        cap_max_reverse_load_rate: tr.cap_max_reverse_load_rate ?? 0,
+        cap_dr_max_output_coeff: tr.cap_dr_max_output_coeff ?? 1.0,
+        cap_registered_dr_mw: tr.cap_registered_dr_mw ?? 0,
+        cap_expected_new_storage_min_mw: tr.cap_expected_new_storage_min_mw ?? 0,
+        cap_expected_new_storage_max_mw: tr.cap_expected_new_storage_max_mw ?? 0,
         source_branch_idx: tr.source_branch_idx,
         in_service: tr.in_service !== false,
       });
@@ -4113,6 +4133,8 @@ const Canvas = (() => {
         forced_outage_rate: s.forced_outage_rate,
         mttr_hr: s.mttr_hr ?? s.mttr_hours,
         t_scheduled_hr: s.t_scheduled_hr,
+        cap_charging_strategy: s.cap_charging_strategy ?? 'opf',
+        cap_static_charging_mw: s.cap_static_charging_mw ?? 0,
         dynamic_model: cloneDynamicModel(s.dynamic_model) || COMP.defaults.dc_storage.dynamic_model,
         in_service: s.in_service !== false,
       }, dcBusCompMap);

@@ -210,6 +210,12 @@ struct DCStorage {
   double mttr_hr{0.0};
   double t_scheduled_hr{0.0};
 
+  // Hosting-capacity assessment (DL/T 2041-2025): charging strategy.
+  // "opf"    = optimized in OPF/UC (default, as today);
+  // "static" = fixed injection, excluded from optimization, held at cap_static_charging_mw.
+  std::string cap_charging_strategy{"opf"};
+  double cap_static_charging_mw{0.0};        // charging power (positive) used when strategy=="static" (P_ESS)
+
   DynamicModelProfile dynamic_model;
 };
 
