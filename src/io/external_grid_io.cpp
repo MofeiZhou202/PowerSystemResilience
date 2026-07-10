@@ -913,6 +913,18 @@ std::string glm_electrical_bus_name(const GlmObject& obj) {
   return glm_name_or_id(obj);
 }
 
+bool glm_has_power_injection(const GlmObject& obj) {
+  for (const auto& phase : {"A", "B", "C"}) {
+    if (!glm_prop(obj, "constant_power_" + std::string(phase)).empty()) {
+      return true;
+    }
+  }
+  for (const auto& key : {"power_1", "power_2", "power_12"}) {
+    if (!glm_prop(obj, key).empty()) return true;
+  }
+  return false;
+}
+
 double glm_number(const GlmObject& obj,
                   const std::string& key,
                   double fallback = 0.0) {
@@ -978,15 +990,32 @@ std::optional<GlmConductor> conductor_from_object(const GlmObject& obj) {
 
 bool is_closed_gridlabd_link(const GlmObject& obj) {
   const std::string status = ascii_lower(glm_prop(obj, "status", "closed"));
-  return status.empty() || status == "closed";
+  if (status == "open" || status == "blown" || status == "tripped" ||
+      status == "false") {
+    return false;
+  }
+  for (const auto& key : {"phase_A_state", "phase_B_state", "phase_C_state"}) {
+    const std::string state = ascii_lower(glm_prop(obj, key));
+    if (!state.empty() && state != "closed") return false;
+  }
+  return status.empty() || status == "closed" || status == "good" ||
+         status == "true";
 }
 
-void add_low_impedance_link(ExternalGridImportReport& report,
-                            BusBuilder& buses,
-                            const GridLABDImportOptions& options,
-                            const GlmObject& obj,
-                            double r_pu,
-                            double x_pu) {
+SwitchType gridlabd_switch_type(const std::string& cls) {
+  if (cls == "fuse") return SwitchType::Fuse;
+  if (cls == "recloser") return SwitchType::Recloser;
+  if (cls == "sectionalizer") return SwitchType::Sectionalizer;
+  if (cls == "switch") return SwitchType::LoadBreakSwitch;
+  return SwitchType::Disconnector;
+}
+
+void add_gridlabd_switch_link(ExternalGridImportReport& report,
+                              BusBuilder& buses,
+                              const GridLABDImportOptions& options,
+                              const GlmObject& obj,
+                              SwitchType type,
+                              bool closed) {
   const std::string from_name = glm_prop(obj, "from");
   const std::string to_name = glm_prop(obj, "to");
   if (from_name.empty() || to_name.empty()) {
@@ -996,16 +1025,36 @@ void add_low_impedance_link(ExternalGridImportReport& report,
   }
   const int from = buses.ensure(from_name);
   const int to = buses.ensure(to_name, buses.base_kv(from));
-  ACBranch br;
-  br.index = static_cast<int>(report.system.ac.branches.size()) + 1;
-  br.name = glm_prop(obj, "name", obj.cls + "_" + std::to_string(br.index));
-  br.from_bus = from;
-  br.to_bus = to;
-  br.r_pu = r_pu;
-  br.x_pu = x_pu;
-  br.tap = 1.0;
-  br.in_service = true;
-  report.system.ac.branches.push_back(br);
+  Switch sw;
+  sw.index = static_cast<int>(report.system.ac.switches.size()) + 1;
+  sw.name = glm_prop(obj, "name", obj.cls + "_" + std::to_string(sw.index));
+  sw.bus_from = from;
+  sw.bus_to = to;
+  sw.in_service = true;
+  sw.switch_type = type;
+  sw.closed = closed;
+  report.system.ac.switches.push_back(sw);
+}
+
+void add_parent_child_link(ExternalGridImportReport& report,
+                           BusBuilder& buses,
+                           const GridLABDImportOptions& options,
+                           const GlmObject& obj) {
+  const std::string parent = glm_prop(obj, "parent");
+  const std::string child = glm_name_or_id(obj);
+  if (parent.empty() || child.empty() || parent == child) return;
+  const int parent_bus = buses.ensure(parent);
+  const int child_bus = buses.ensure(child, buses.base_kv(parent_bus));
+  Switch sw;
+  sw.index = static_cast<int>(report.system.ac.switches.size()) + 1;
+  sw.name = "parent_link_" + child;
+  sw.bus_from = parent_bus;
+  sw.bus_to = child_bus;
+  sw.in_service = true;
+  sw.switch_type = SwitchType::Disconnector;
+  sw.closed = true;
+  report.system.ac.switches.push_back(sw);
+  (void)options;
 }
 
 ExternalGridImportReport import_gridlabd_text(
@@ -1087,7 +1136,11 @@ ExternalGridImportReport import_gridlabd_text(
         obj.cls != "triplex_meter" && obj.cls != "triplex_node") {
       continue;
     }
-    std::string name = glm_electrical_bus_name(obj);
+    const bool is_bus_object =
+        obj.cls == "meter" || obj.cls == "node" ||
+        obj.cls == "triplex_meter" || obj.cls == "triplex_node";
+    std::string name =
+        is_bus_object ? glm_name_or_id(obj) : glm_electrical_bus_name(obj);
     if (name.empty()) name = "bus_" + std::to_string(report.system.ac.buses.size() + 1U);
     const double nominal_ln_v = glm_number(obj, "nominal_voltage",
                                            options.default_base_kv_ll * 1000.0 / kSqrt3);
@@ -1121,13 +1174,21 @@ ExternalGridImportReport import_gridlabd_text(
       }
     }
     if (has_power && std::abs(power_va) > 1e-6) {
+      int injection_bus = bus;
+      std::string injection_name = name;
+      const std::string parent = glm_prop(obj, "parent");
+      if (!parent.empty() && (obj.cls == "load" ||
+                              (is_triplex && glm_has_power_injection(obj)))) {
+        injection_bus = buses.ensure(parent, base_kv);
+        injection_name = parent;
+      }
       const double p_mw = power_va.real() / 1.0e6;
       const double q_mvar = power_va.imag() / 1.0e6;
       if (p_mw < -kTiny || q_mvar < -kTiny) {
         StaticGenerator gen;
         gen.index = static_cast<int>(report.system.ac.static_generators.size()) + 1;
-        gen.name = "negative_load_at_" + name;
-        gen.bus = bus;
+        gen.name = "negative_load_at_" + injection_name;
+        gen.bus = injection_bus;
         gen.in_service = true;
         gen.p_mw = -p_mw;
         gen.q_mvar = -q_mvar;
@@ -1137,8 +1198,8 @@ ExternalGridImportReport import_gridlabd_text(
       } else {
         Load load;
         load.index = static_cast<int>(report.system.ac.loads.size()) + 1;
-        load.name = "load_at_" + name;
-        load.bus = bus;
+        load.name = "load_at_" + injection_name;
+        load.bus = injection_bus;
         load.in_service = true;
         load.p_mw = p_mw;
         load.q_mvar = q_mvar;
@@ -1149,7 +1210,11 @@ ExternalGridImportReport import_gridlabd_text(
   }
 
   for (const auto& obj : objects) {
-    if (obj.cls == "overhead_line" || obj.cls == "underground_line" ||
+    if ((obj.cls == "meter" || obj.cls == "node" ||
+         obj.cls == "triplex_meter" || obj.cls == "triplex_node") &&
+        !glm_prop(obj, "parent").empty()) {
+      add_parent_child_link(report, buses, options, obj);
+    } else if (obj.cls == "overhead_line" || obj.cls == "underground_line" ||
         obj.cls == "line" || obj.cls == "triplex_line") {
       const std::string from_name = glm_prop(obj, "from");
       const std::string to_name = glm_prop(obj, "to");
@@ -1171,7 +1236,7 @@ ExternalGridImportReport import_gridlabd_text(
       const auto& cfg = cfg_it->second;
       const double length = positive_or(glm_number(obj, "length", 1.0), 1.0);
       const double length_unit_km = unit_to_km(unit_word_from_value(glm_prop(obj, "length")),
-                                              kMileToKm);
+                                              kFootToKm);
       const double length_km = length * length_unit_km;
       const double length_in_cfg_units = length_km / positive_or(cfg.config_unit_km, kMileToKm);
       const std::complex<double> z1_per_unit =
@@ -1201,11 +1266,12 @@ ExternalGridImportReport import_gridlabd_text(
       report.system.ac.branches.push_back(br);
     } else if (obj.cls == "switch" || obj.cls == "fuse" ||
                obj.cls == "recloser" || obj.cls == "sectionalizer") {
-      if (is_closed_gridlabd_link(obj)) {
-        add_low_impedance_link(report, buses, options, obj, 1e-6, 1e-6);
-      }
+      add_gridlabd_switch_link(report, buses, options, obj,
+                               gridlabd_switch_type(obj.cls),
+                               is_closed_gridlabd_link(obj));
     } else if (obj.cls == "regulator") {
-      add_low_impedance_link(report, buses, options, obj, 1e-5, 1e-5);
+      add_gridlabd_switch_link(report, buses, options, obj,
+                               SwitchType::Disconnector, true);
     } else if (obj.cls == "transformer") {
       const std::string from_name = glm_prop(obj, "from");
       const std::string to_name = glm_prop(obj, "to");

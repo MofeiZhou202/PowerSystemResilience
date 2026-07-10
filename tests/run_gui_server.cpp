@@ -9610,6 +9610,7 @@ int main(int argc, char** argv) {
       if (glm.empty()) throw std::runtime_error("Empty GridLAB-D GLM string");
       hacdcpf::io::GridLABDImportOptions options;
       options.mode = hacdcpf::io::ImportMode::Permissive;
+      options.default_base_mva = 10.0;
       auto report = hacdcpf::io::from_gridlabd_with_report(glm, options);
 	      std::lock_guard<std::mutex> lk(g_session.mu);
 	      g_session.current_system = std::move(report.system);
@@ -9637,16 +9638,23 @@ int main(int argc, char** argv) {
 	      if (dss.empty()) throw std::runtime_error("Empty OpenDSS DSS string");
 	      json warnings = json::array();
 	      json skipped = json::array();
-	      hacdcpf::HybridPowerSystem imported;
-	      bool used_phase_loader = false;
-	      std::string source_path;
+		      hacdcpf::HybridPowerSystem imported;
+		      bool used_phase_loader = false;
+		      bool phase_bridge_available =
+#ifdef HACDCPF_HAVE_OPENDSS
+		          true;
+#else
+		          false;
+#endif
+		      std::string source_path;
 
-	      const auto master_path = resolve_gui_opendss_master_path(j, dss);
-	      if (master_path.has_value()) {
-	        try {
-	          auto tp = hacdcpf::analysis::load_three_phase_system_from_opendss(*master_path);
-	          if (!tp.buses.empty()) {
-	            hacdcpf::HybridPowerSystem phase_sys;
+		      const auto master_path = resolve_gui_opendss_master_path(j, dss);
+		      if (master_path.has_value()) {
+#ifdef HACDCPF_HAVE_OPENDSS
+		        try {
+		          auto tp = hacdcpf::analysis::load_three_phase_system_from_opendss(*master_path);
+		          if (!tp.buses.empty()) {
+		            hacdcpf::HybridPowerSystem phase_sys;
 	            phase_sys.name = master_path->filename().string();
 	            phase_sys.base_mva = tp.base_mva;
 	            phase_sys.ac.base_mva = tp.base_mva;
@@ -9654,18 +9662,33 @@ int main(int argc, char** argv) {
 	            phase_sys.three_phase_ac = tp;
 	            imported = hacdcpf::project_to_canonical_models(phase_sys, false);
 	            imported.three_phase_ac = std::move(tp);
-	            used_phase_loader = true;
-	            source_path = master_path->string();
-	          }
-	        } catch (const std::exception& ex) {
-	          warnings.push_back(
-	              std::string("Phase-domain OpenDSS import failed, falling back to text converter: ") +
-	              ex.what());
-	        }
-	      } else {
-	        warnings.push_back(
-	            "No resolvable OpenDSS master path was supplied. Relative Redirect/LineCode files "
-	            "cannot be loaded from a lone browser text upload; using simplified text conversion.");
+		            used_phase_loader = true;
+		            source_path = master_path->string();
+		          }
+		          if (!used_phase_loader) {
+		            warnings.push_back(
+		                "Phase-domain OpenDSS import produced no buses for " +
+		                master_path->string() +
+		                "; using simplified text conversion. The text converter does not "
+		                "resolve Redirect/LineCode libraries.");
+		          }
+		        } catch (const std::exception& ex) {
+		          warnings.push_back(
+		              std::string("Phase-domain OpenDSS import failed, falling back to text converter: ") +
+		              ex.what());
+		        }
+#else
+		        warnings.push_back(
+		            "Phase-domain OpenDSS bridge is disabled in this build; using simplified "
+		            "text conversion for " +
+		            master_path->string() +
+		            ". Reconfigure with HACDCPF_ENABLE_OPENDSS=ON for C-API-backed "
+		            "three-phase OpenDSS import and reference comparison.");
+#endif
+		      } else {
+		        warnings.push_back(
+		            "No resolvable OpenDSS master path was supplied. Relative Redirect/LineCode files "
+		            "cannot be loaded from a lone browser text upload; using simplified text conversion.");
 	      }
 
 	      if (!used_phase_loader) {
@@ -9693,9 +9716,10 @@ int main(int argc, char** argv) {
 	      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
 	      summary["_io_warnings"] = warnings;
 	      summary["_io_skipped"] = skipped;
-	      summary["_opendss_import_mode"] =
-	          used_phase_loader ? "phase_domain_opendss_capi" : "text_converter";
-	      summary["_opendss_source_path"] = source_path;
+		      summary["_opendss_import_mode"] =
+		          used_phase_loader ? "phase_domain_opendss_capi" : "text_converter";
+		      summary["_opendss_phase_bridge_available"] = phase_bridge_available;
+		      summary["_opendss_source_path"] = source_path;
 	      summary["_has_three_phase_ac"] =
 	          g_session.current_system->three_phase_ac.has_value();
 	      res.set_content(summary.dump(), "application/json");

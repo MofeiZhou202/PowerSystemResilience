@@ -12,6 +12,7 @@
 #include "hacdcpf/io/external_grid_io.hpp"
 #include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/projection/project_to_canonical.hpp"
 
 using Catch::Matchers::ContainsSubstring;
 using Catch::Matchers::WithinAbs;
@@ -259,6 +260,45 @@ TEST_CASE("GridLAB-D text export round-trips through the GLM importer",
   CHECK_THAT(restored.ac.loads.front().p_mw, WithinAbs(1.2, 1e-9));
 }
 
+TEST_CASE("GridLAB-D no-unit line lengths default to feet",
+          "[io][external][gridlabd][units]") {
+  const std::string glm = R"(
+object meter {
+  name source;
+  nominal_voltage 7200;
+  bustype SWING;
+};
+object load {
+  name loadbus;
+  nominal_voltage 7200;
+  constant_power_A 100000+30000j;
+};
+object line_configuration {
+  name cfg_l12;
+  z11 0.4+0.8j Ohm/mile;
+  z12 0.1+0.2j Ohm/mile;
+};
+object overhead_line {
+  name l12;
+  from source;
+  to loadbus;
+  length 5280;
+  configuration cfg_l12;
+};
+)";
+
+  hacdcpf::io::GridLABDImportOptions options;
+  options.default_base_mva = 10.0;
+  const auto sys = hacdcpf::io::from_gridlabd(glm, options);
+
+  REQUIRE(sys.ac.branches.size() == 1);
+  CHECK_THAT(sys.ac.branches.front().length_km,
+             WithinAbs(1.609344, 1e-9));
+  CHECK_THAT(sys.ac.branches.front().r_pu,
+             WithinAbs(0.30 / (12.470765814495916 * 12.470765814495916 / 10.0),
+                       1e-10));
+}
+
 TEST_CASE("GridLAB-D transformer text maps to branch nameplate metadata",
           "[io][external][gridlabd][transformer]") {
   const std::string glm = R"(
@@ -300,6 +340,62 @@ object transformer {
   CHECK_THAT(sys.ac.branches.front().x_pu, WithinAbs(0.05, 1e-12));
   CHECK_THAT(sys.ac.branches.front().vn_hv_kv, WithinAbs(35.0, 1e-12));
   CHECK_THAT(sys.ac.branches.front().vn_lv_kv, WithinAbs(10.0, 1e-12));
+}
+
+TEST_CASE("GridLAB-D topology links import as rich switches for projection",
+          "[io][external][gridlabd][switch]") {
+  const std::string glm = R"(
+object meter {
+  name source;
+  nominal_voltage 7200;
+  bustype SWING;
+};
+object node {
+  name tap;
+  parent source;
+  nominal_voltage 7200;
+};
+object load {
+  name loadbus;
+  nominal_voltage 7200;
+  constant_power_A 100000+30000j;
+  constant_power_B 100000+30000j;
+  constant_power_C 100000+30000j;
+};
+object switch {
+  name sw_tap_load;
+  from tap;
+  to loadbus;
+  status CLOSED;
+};
+object fuse {
+  name open_tie;
+  from source;
+  to loadbus;
+  status OPEN;
+};
+)";
+
+  hacdcpf::io::GridLABDImportOptions options;
+  options.default_base_mva = 10.0;
+  const auto sys = hacdcpf::io::from_gridlabd(glm, options);
+
+  REQUIRE(sys.ac.buses.size() == 3);
+  CHECK(sys.ac.branches.empty());
+  REQUIRE(sys.ac.switches.size() == 3);
+  CHECK(sys.ac.switches[0].name == "parent_link_tap");
+  CHECK(sys.ac.switches[0].closed);
+  CHECK(sys.ac.switches[1].name == "sw_tap_load");
+  CHECK(sys.ac.switches[1].closed);
+  CHECK(sys.ac.switches[2].name == "open_tie");
+  CHECK_FALSE(sys.ac.switches[2].closed);
+
+  const auto projected =
+      hacdcpf::project_to_canonical_models(sys, /*strip_dead=*/false);
+  REQUIRE(projected.ac.buses.size() == 1);
+  CHECK(projected.ac.branches.empty());
+  REQUIRE(projected.ac.loads.size() == 1);
+  CHECK(projected.ac.loads.front().bus == 1);
 }
 
 TEST_CASE("External grid IO safe load variants report missing files",

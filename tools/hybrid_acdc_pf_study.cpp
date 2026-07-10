@@ -585,8 +585,10 @@ void write_evidence_summary(const fs::path& outdir,
          "energy routers, microgrid storage, and actual ohm/km-to-pu projection. & "
          "\\Cref{tab:modeling-scope,tab:hybrid-pf} \\\\\n";
   tex << "External engine boundary & GridLAB-D passes 21/21 exact AC-side gates and 18/18 "
-         "long-duration gates; OpenDSSDirect solves IEEE13. MATPOWER remains AC-only. & "
-         "\\Cref{tab:external-engines,tab:gridlabd-io,tab:modeling-scope} \\\\\n";
+         "long-duration gates; the r5643 taxonomy benchmark imports and solves 24/24 "
+         "projected feeders, with 3222 comparable GridLAB-D voltage records and worst "
+         "filtered error 0.025 p.u.; OpenDSSDirect solves IEEE13. MATPOWER remains AC-only. & "
+         "\\Cref{tab:external-engines,tab:gridlabd-taxonomy-summary,tab:gridlabd-io,tab:modeling-scope} \\\\\n";
   tex << "LLM-assisted modeling guard & Typed hybrid edit benchmark: TP=" << tp
       << ", TN=" << tn << ", FP=" << fp << ", FN=" << fn
       << "; invalid references and impossible converter parameters are rejected before solve. & "
