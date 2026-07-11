@@ -299,6 +299,7 @@ SolverData make_solver_data(const HybridPowerSystem& sys, LossModelType loss_mod
     sg.scaling = sgdc.scaling;
     sg.pmax_mw = sgdc.pmax_mw;
     sg.pmin_mw = sgdc.pmin_mw;
+    sg.co2_emission_rate = sgdc.emission_factor_tco2_mwh;
     sg.controllable = sgdc.controllable;
     data.dc_static_generators.push_back(std::move(sg));
   }
@@ -378,6 +379,7 @@ SolverData make_solver_data_projected(HybridPowerSystem&& projected, LossModelTy
     sg.scaling = sgdc.scaling;
     sg.pmax_mw = sgdc.pmax_mw;
     sg.pmin_mw = sgdc.pmin_mw;
+    sg.co2_emission_rate = sgdc.emission_factor_tco2_mwh;
     sg.controllable = sgdc.controllable;
     data.dc_static_generators.push_back(std::move(sg));
   }

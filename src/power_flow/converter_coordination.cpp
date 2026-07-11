@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "hacdcpf/model/device_control_role.hpp"
+#include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
 
 namespace hacdcpf::powerflow {
@@ -856,7 +857,7 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
                       "otherwise the island is reported as having no reference.");
       }
     }
-    if (std::abs(bus.pd_mw) > kTol) {
+    if (sys.dc.loads.empty() && std::abs(bus.pd_mw) > kTol) {
       summary.fixed_power_devices += 1;
       summary.fixed_power_mw -= bus.pd_mw;
     }
@@ -1002,8 +1003,8 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
   };
 
   for (const auto& ld : sys.dc.loads) {
-    if (!ld.in_service) continue;
-    add_fixed_dc_injection(ld.bus, -ld.p_mw * ld.scaling, "dc_load", ld.index);
+    const double p_mw = model::effective_load_p_mw(ld);
+    add_fixed_dc_injection(ld.bus, -p_mw, "dc_load", ld.index);
   }
   for (const auto& sg : sys.dc.static_generators) {
     if (!sg.in_service) continue;

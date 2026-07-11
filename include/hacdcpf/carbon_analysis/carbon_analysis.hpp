@@ -36,12 +36,17 @@ struct CarbonAnalysisOptions {
   /// Maximum BFS tracing depth (0 = unlimited).
   int max_tracing_depth{0};
 
-  /// Fraction of branch loss charged to the sending/from-bus side for the
-  /// matrix method. 0.5 = equal split, 1.0 = all on from-side.
+  /// Branch/converter loss allocation factor in the carbon matrix. alpha=1
+  /// assigns loss carbon to the sending-side intensity, alpha=0 assigns it to
+  /// the receiving-side intensity, and alpha=0.5 splits it evenly.
   double loss_allocation_alpha{0.5};
 
   /// Regularisation for near-singular system matrix (matrix method).
   double regularization_eps{1e-8};
+
+  /// Maximum accepted row-scaled QR pivot condition estimate. Set <= 0 to
+  /// disable this gate while retaining rank and residual checks.
+  double max_matrix_condition_estimate{1e12};
 
   /// Print progress to stdout.
   bool verbose{false};
@@ -65,7 +70,7 @@ struct LoadCarbonResult {
   double demand_mw{0.0};
   double carbon_intensity_tco2_mwh{0.0};
   double total_emissions_tco2{0.0};
-  /// Generator index → MW supplied to this load.
+  /// Carbon source ID -> MW supplied to this load.
   std::unordered_map<int, double> generator_supply_mw;
 };
 
@@ -76,13 +81,36 @@ struct BranchCarbonResult {
   double loss_mw{0.0};
   double carbon_intensity_tco2_mwh{0.0};
   double total_emissions_tco2{0.0};
-  /// Generator index → MW loss attributable to this generator.
+  /// Carbon source ID -> MW of loss attributable to this source.
   std::unordered_map<int, double> generator_loss_mw;
 };
 
 struct BusCarbonResult {
   int bus_index{0};
   double carbon_intensity_tco2_mwh{0.0};
+};
+
+struct CarbonSourceResult {
+  int source_id{0};
+  std::string source_type;
+  int component_index{0};
+  std::string label;
+  int bus{0};
+  bool is_dc{false};
+  double scheduled_power_mw{0.0};
+  double power_mw{0.0};
+  double emission_factor_tco2_mwh{0.0};
+  bool is_balancing{false};
+};
+
+struct NodePowerBalanceError {
+  int bus_index{0};
+  bool is_dc{false};
+  /// Explicit source power minus the power required by solved terminal flows
+  /// and sinks. Negative means missing source; positive means missing sink.
+  double mismatch_mw{0.0};
+  double source_mw{0.0};
+  double required_mw{0.0};
 };
 
 struct VSCCarbonResult {
@@ -137,6 +165,8 @@ struct EnergyRouterCarbonResult {
 };
 
 struct CarbonAnalysisResult {
+  /// Sources in the exact ID order used by all proportional allocations.
+  std::vector<CarbonSourceResult>       carbon_sources;
   /// Per-load results (AC loads), indexed same order as ACSystem::loads.
   std::vector<LoadCarbonResult>         load_carbon;
   /// Per-load results for DC loads.
@@ -170,10 +200,27 @@ struct CarbonAnalysisResult {
   double total_storage_charge_emissions_tco2{0.0};
   /// Storage discharge emissions (storage acts as a carbon source), in tCO2.
   double total_storage_discharge_emissions_tco2{0.0};
+  /// Active power exported through an explicit AC/DC boundary, in MW.
+  double total_external_export_mw{0.0};
+  /// Carbon carried out through explicit AC/DC boundaries, in tCO2.
+  double total_external_export_emissions_tco2{0.0};
 
   bool tracing_verified{false};
   bool matrix_solved{false};
   double matrix_residual{0.0};
+  double matrix_relative_residual{0.0};
+  double matrix_condition_estimate{0.0};
+  int matrix_rank{0};
+
+  /// Whether every canonical node closes its active-power balance using
+  /// explicitly modelled sources, sinks and solved terminal flows.
+  bool power_balance_verified{false};
+  /// Largest absolute nodal active-power mismatch after source reconstruction.
+  double max_node_power_balance_error_mw{0.0};
+  /// Sum of absolute nodal active-power mismatches.
+  double total_power_balance_error_mw{0.0};
+  /// Nodes whose active-power mismatch exceeds the verification tolerance.
+  std::vector<NodePowerBalanceError> node_power_balance_errors;
 };
 
 // ---------------------------------------------------------------------------

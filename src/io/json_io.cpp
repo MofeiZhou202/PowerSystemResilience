@@ -379,6 +379,7 @@ static json dc_bus_to_json(const DCBus& b) {
   j["vmin_pu"] = b.vmin_pu;
   j["base_kv"] = b.base_kv;
   j["pd_mw"] = b.pd_mw;
+  j["emission_factor_tco2_mwh"] = b.emission_factor_tco2_mwh;
   j["in_service"] = b.in_service;
   j["name"] = b.name;
   j["latitude"] = b.latitude;
@@ -395,6 +396,8 @@ static DCBus dc_bus_from_json(const json& j) {
   b.vmin_pu = jget(j, "vmin_pu", 0.9);
   b.base_kv = jget(j, "base_kv", 0.0);
   b.pd_mw = jget(j, "pd_mw", 0.0);
+  b.emission_factor_tco2_mwh =
+      jget(j, "emission_factor_tco2_mwh", 0.0);
   b.in_service = jget(j, "in_service", true);
   b.name = jget<std::string>(j, "name", "");
   b.latitude = jget_alias(j, "latitude", "lat", 0.0);
@@ -480,6 +483,8 @@ static json dc_static_generator_to_json(const StaticGeneratorDC& g) {
   j["profile_id"] = g.profile_id;
   j["pmax_mw"] = g.pmax_mw;
   j["pmin_mw"] = g.pmin_mw;
+  j["emission_factor_tco2_mwh"] = g.emission_factor_tco2_mwh;
+  j["co2_emission_rate"] = g.emission_factor_tco2_mwh;
   j["controllable"] = g.controllable;
   j["cost_c1"] = g.cost_c1;
   j["emission_factor_tco2_mwh"] = g.emission_factor_tco2_mwh;
@@ -502,6 +507,8 @@ static StaticGeneratorDC dc_static_generator_from_json(const json& j) {
   g.profile_id = jget(j, "profile_id", -1);
   g.pmax_mw = jget(j, "pmax_mw", 0.0);
   g.pmin_mw = jget(j, "pmin_mw", 0.0);
+  g.emission_factor_tco2_mwh = jget_alias(
+      j, "emission_factor_tco2_mwh", "co2_emission_rate", 0.0);
   g.controllable = jget(j, "controllable", false);
   g.cost_c1 = jget(j, "cost_c1", 0.0);
   g.emission_factor_tco2_mwh =
@@ -3501,6 +3508,23 @@ std::string carbon_result_to_json(const analysis::CarbonAnalysisResult& result,
   j["tracing_verified"] = result.tracing_verified;
   j["matrix_solved"]    = result.matrix_solved;
   j["matrix_residual"]  = result.matrix_residual;
+  j["power_balance_verified"] = result.power_balance_verified;
+  j["max_node_power_balance_error_mw"] =
+      result.max_node_power_balance_error_mw;
+  j["total_power_balance_error_mw"] =
+      result.total_power_balance_error_mw;
+  j["total_external_export_mw"] = result.total_external_export_mw;
+  j["total_external_export_emissions_tco2"] =
+      result.total_external_export_emissions_tco2;
+  j["node_power_balance_errors"] = json::array();
+  for (const auto& error : result.node_power_balance_errors) {
+    j["node_power_balance_errors"].push_back(
+        {{"bus_index", error.bus_index},
+         {"is_dc", error.is_dc},
+         {"mismatch_mw", error.mismatch_mw},
+         {"source_mw", error.source_mw},
+         {"required_mw", error.required_mw}});
+  }
 
   auto load_results_to_json = [](const std::vector<analysis::LoadCarbonResult>& items) {
     json loads = json::array();
@@ -3664,6 +3688,24 @@ analysis::CarbonAnalysisResult carbon_result_from_json(const std::string& json_s
   r.tracing_verified = jget(j, "tracing_verified", false);
   r.matrix_solved    = jget(j, "matrix_solved", false);
   r.matrix_residual  = jget(j, "matrix_residual", 0.0);
+  r.power_balance_verified = jget(j, "power_balance_verified", false);
+  r.max_node_power_balance_error_mw =
+      jget(j, "max_node_power_balance_error_mw", 0.0);
+  r.total_power_balance_error_mw =
+      jget(j, "total_power_balance_error_mw", 0.0);
+  r.total_external_export_mw = jget(j, "total_external_export_mw", 0.0);
+  r.total_external_export_emissions_tco2 =
+      jget(j, "total_external_export_emissions_tco2", 0.0);
+  if (j.contains("node_power_balance_errors")) {
+    for (const auto& item : j["node_power_balance_errors"]) {
+      r.node_power_balance_errors.push_back(
+          {jget(item, "bus_index", 0),
+           jget(item, "is_dc", false),
+           jget(item, "mismatch_mw", 0.0),
+           jget(item, "source_mw", 0.0),
+           jget(item, "required_mw", 0.0)});
+    }
+  }
 
   auto parse_load_results = [](const json& arr, std::vector<analysis::LoadCarbonResult>& out) {
     for (const auto& lj : arr) {

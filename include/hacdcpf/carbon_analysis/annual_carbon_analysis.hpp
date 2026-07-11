@@ -27,11 +27,29 @@ struct AnnualCarbonAnalysisOptions {
 
 struct AnnualCarbonStepResult {
   bool pf_converged{false};
+  bool carbon_power_balance_verified{false};
+  bool carbon_matrix_solved{false};
+  bool carbon_verified{false};
+  double max_node_power_balance_error_mw{0.0};
+  double matrix_relative_residual{0.0};
+  double matrix_condition_estimate{0.0};
+  int matrix_rank{0};
   double total_generation_emissions_tco2{0.0};
   double total_load_emissions_tco2{0.0};
   double total_loss_emissions_tco2{0.0};
   double total_storage_charge_emissions_tco2{0.0};
   double total_storage_discharge_emissions_tco2{0.0};
+  double initial_storage_carbon_inventory_tco2{0.0};
+  double terminal_storage_carbon_inventory_tco2{0.0};
+  double storage_carbon_inventory_delta_tco2{0.0};
+  double storage_charge_loss_emissions_tco2{0.0};
+  double storage_discharge_loss_emissions_tco2{0.0};
+  double storage_self_discharge_loss_emissions_tco2{0.0};
+  double storage_internal_loss_emissions_tco2{0.0};
+  double storage_energy_balance_error_mwh{0.0};
+  double storage_energy_balance_abs_error_mwh{0.0};
+  double storage_inventory_balance_error_tco2{0.0};
+  double balance_error_storage_adjusted_tco2{0.0};
 };
 
 struct AnnualBusCarbonStats {
@@ -68,12 +86,33 @@ struct AnnualCarbonAnalysisResult {
   int num_steps{0};
   double step_duration_hr{1.0};
   int num_pf_converged{0};
+  int num_carbon_power_balance_verified{0};
+  int num_carbon_matrix_solved{0};
+  int num_carbon_verified{0};
+  double max_node_power_balance_error_mw{0.0};
+  double max_matrix_relative_residual{0.0};
+  double max_matrix_condition_estimate{0.0};
 
   double total_generation_emissions_tco2{0.0};
   double total_load_emissions_tco2{0.0};
   double total_loss_emissions_tco2{0.0};
   double total_storage_charge_emissions_tco2{0.0};
   double total_storage_discharge_emissions_tco2{0.0};
+  double initial_storage_carbon_inventory_tco2{0.0};
+  double terminal_storage_carbon_inventory_tco2{0.0};
+  double storage_carbon_inventory_delta_tco2{0.0};
+  double storage_charge_loss_emissions_tco2{0.0};
+  double storage_discharge_loss_emissions_tco2{0.0};
+  double storage_self_discharge_loss_emissions_tco2{0.0};
+  double storage_internal_loss_emissions_tco2{0.0};
+  double storage_energy_balance_error_mwh{0.0};
+  double storage_energy_balance_abs_error_mwh{0.0};
+  double max_storage_step_energy_balance_error_mwh{0.0};
+  double storage_inventory_balance_error_tco2{0.0};
+  double storage_inventory_balance_abs_error_tco2{0.0};
+  double storage_inventory_balance_error_pct{0.0};
+  double balance_error_storage_adjusted_tco2{0.0};
+  double balance_error_storage_adjusted_pct{0.0};
 
   std::vector<AnnualCarbonStepResult> step_results;
   std::vector<AnnualBusCarbonStats> bus_stats;

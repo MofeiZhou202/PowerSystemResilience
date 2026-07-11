@@ -12,6 +12,7 @@
 #include <Eigen/SparseLU>
 
 #include "hacdcpf/assembly/solver_data.hpp"
+#include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
 
 namespace hacdcpf::opf::parity {
@@ -26,8 +27,22 @@ constexpr double kDegToRad = kPi / 180.0;
 constexpr double kDcVoltAnchor = 1.0;
 
 double clamp_interior(double x, double lo, double hi) {
+  if (!std::isfinite(x)) {
+    x = 0.0;
+  }
+  if (!std::isfinite(lo) || !std::isfinite(hi)) {
+    if (std::isfinite(lo) && x < lo) return lo;
+    if (std::isfinite(hi) && x > hi) return hi;
+    return x;
+  }
+  if (lo > hi) {
+    std::swap(lo, hi);
+  }
   const double w = hi - lo;
-  const double eps = std::max(1e-9, 0.01 * std::max(w, 1e-9));  // 1% margin
+  if (!(w > 0.0)) {
+    return 0.5 * (lo + hi);
+  }
+  const double eps = std::min(std::max(1e-9, 0.01 * w), 0.49 * w);
   return std::clamp(x, lo + eps, hi - eps);
 }
 
@@ -1228,8 +1243,11 @@ void equality_constraints(const Problem& prob,
       }
       pflow += gkm * (vdc[k] * vdc[k] - vdc[k] * vdc[m]);
     }
-    g[cidx.i_pbal_dc + k] = prob.data.dc_buses[static_cast<size_t>(k)].pd_mw / prob.data.base_mva + pflow -
-                            ws.p_conv_dc[k];
+    const double bus_demand = prob.data.dc_loads.empty()
+                                  ? prob.data.dc_buses[static_cast<size_t>(k)].pd_mw /
+                                        prob.data.base_mva
+                                  : 0.0;
+    g[cidx.i_pbal_dc + k] = bus_demand + pflow - ws.p_conv_dc[k];
   }
 
   // Add DC-side component injections to DC power balance
@@ -1239,7 +1257,8 @@ void equality_constraints(const Problem& prob,
       if (!ld.in_service) continue;
       const int dc_bus = ld.bus - 1;
       if (dc_bus >= 0 && dc_bus < ndc) {
-        g[cidx.i_pbal_dc + dc_bus] += ld.p_mw / prob.data.base_mva;
+        g[cidx.i_pbal_dc + dc_bus] +=
+            model::effective_load_p_mw(ld) / prob.data.base_mva;
       }
     }
   }

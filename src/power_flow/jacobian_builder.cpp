@@ -5,6 +5,7 @@
 #include <cmath>
 #include <vector>
 
+#include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
 #include "hacdcpf/power_flow/ncp_functions.hpp"
 #include "hacdcpf/power_flow/pf_utils.hpp"
@@ -60,8 +61,11 @@ void build_power_spec(const SolverData& data,
   // pdc_spec is the net DC injection (generation positive, load negative),
   // mirroring the AC convention p_spec = pg - pd above. Bus-level DC demand is
   // therefore a negative injection.
-  for (int i = 0; i < ndc; ++i) {
-    pdc_spec[i] = -data.dc_buses[static_cast<size_t>(i)].pd_mw / data.base_mva;
+  if (data.dc_loads.empty()) {
+    for (int i = 0; i < ndc; ++i) {
+      pdc_spec[i] =
+          -data.dc_buses[static_cast<size_t>(i)].pd_mw / data.base_mva;
+    }
   }
   // DC-side storage: positive p_mw = discharge = generation.
   for (const auto& st : data.dc_storage) {
@@ -84,7 +88,7 @@ void build_power_spec(const SolverData& data,
     if (!ld.in_service) continue;
     const int dc_bus = ld.bus - 1;
     if (dc_bus >= 0 && dc_bus < ndc) {
-      pdc_spec[dc_bus] -= ld.p_mw / data.base_mva;
+      pdc_spec[dc_bus] -= model::effective_load_p_mw(ld) / data.base_mva;
     }
   }
   // DC-side PV arrays: generation is a positive net injection.

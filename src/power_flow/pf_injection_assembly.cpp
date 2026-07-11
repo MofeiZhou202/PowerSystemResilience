@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
 #include "hacdcpf/power_flow/pf_utils.hpp"
 
@@ -30,7 +31,7 @@ void assemble_dc_injections(const SolverData& data,
       if (!ld.in_service) continue;
       const int dc_bus = ld.bus - 1;
       if (dc_bus >= 0 && dc_bus < ndc) {
-        pdc_spec[dc_bus] -= ld.p_mw / data.base_mva;
+        pdc_spec[dc_bus] -= model::effective_load_p_mw(ld) / data.base_mva;
       }
     }
   }

@@ -107,6 +107,7 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
     h = hash_combine(h, static_cast<std::uint64_t>(ld.bus));
     h = hash_combine(h, static_cast<std::uint64_t>(ld.in_service));
     h = hash_combine(h, hash_double(ld.p_mw));
+    h = hash_combine(h, hash_double(ld.scaling));
   }
   for (const auto& c : sys.vsc_converters) {
     h = hash_combine(h, static_cast<std::uint64_t>(c.bus_ac));

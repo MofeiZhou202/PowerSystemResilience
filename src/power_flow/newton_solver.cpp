@@ -12,6 +12,7 @@
 
 #include <Eigen/Sparse>
 
+#include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
 #include "hacdcpf/power_flow/jacobian_builder.hpp"
 #include "hacdcpf/power_flow/nonlinear_scaling.hpp"
@@ -201,7 +202,7 @@ double net_fixed_dc_injection_mw(const SolverData& data, int bus_idx) {
     net -= bus.pd_mw;
   } else {
     for (const auto& ld : data.dc_loads) {
-      if (ld.in_service && ld.bus - 1 == bus_idx) net -= ld.p_mw;
+      if (ld.bus - 1 == bus_idx) net -= model::effective_load_p_mw(ld);
     }
   }
   for (const auto& st : data.dc_storage) {

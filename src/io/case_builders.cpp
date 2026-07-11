@@ -1994,6 +1994,7 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   ext_grid.rx_min = 0.1;
   ext_grid.vn_kv = base_kv_hv;
   ext_grid.controllable = true;
+  ext_grid.emission_factor_tco2_mwh = 0.50;
   sys.ac.external_grids.push_back(ext_grid);
 
   // Generator at slack bus
@@ -2563,6 +2564,7 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   dcbus1.bus_type = DCBusType::DC_V; dcbus1.vm_pu = 1.0;
   dcbus1.vmin_pu = 0.95; dcbus1.vmax_pu = 1.05;
   dcbus1.base_kv = base_kv_dc;
+  dcbus1.emission_factor_tco2_mwh = 0.50;
   dcbus1.latitude = center_lat + 0.002; dcbus1.longitude = center_lon - 0.003;  // Near MV busbar, slight NW offset
   sys.dc.buses.push_back(dcbus1);
 
@@ -2889,6 +2891,7 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   dc_sgen1.p_set_mw = 0.3;
   dc_sgen1.pmax_mw = 0.5;
   dc_sgen1.pmin_mw = 0.0;
+  dc_sgen1.emission_factor_tco2_mwh = 0.0;
   dc_sgen1.scaling = 1.0;
   dc_sgen1.profile_id = 1;  // Wind profile
   dc_sgen1.controllable = true;
@@ -2903,6 +2906,7 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   dc_sgen2.p_set_mw = -0.1;  // Charging
   dc_sgen2.pmax_mw = 0.3;
   dc_sgen2.pmin_mw = -0.3;
+  dc_sgen2.emission_factor_tco2_mwh = 0.0;
   dc_sgen2.scaling = 1.0;
   dc_sgen2.controllable = true;
   sys.dc.dc_static_generators.push_back(dc_sgen2);
@@ -3190,7 +3194,7 @@ HybridPowerSystem build_market_5bus_acdc_toy() {
     make_bus(0, BusType::SLACK, 1.05, 230.0, 1, "Bus0_Slack"),
     make_bus(1, BusType::PV,    1.03, 230.0, 1, "Bus1_Gen"),
     make_bus(2, BusType::PQ,    1.00, 230.0, 1, "Bus2_Link"),
-    make_bus(3, BusType::PV,    1.02, 230.0, 2, "Bus3_DC"),
+    make_bus(3, BusType::SLACK, 1.02, 230.0, 2, "Bus3_DC"),
     make_bus(4, BusType::PV,    1.00, 230.0, 2, "Bus4_Load"),
   };
 
@@ -3239,7 +3243,7 @@ HybridPowerSystem build_market_5bus_acdc_toy() {
     make_gen(2, 2, false, 20.0, 1.00, 60.0, 5.0, 25.0, -10.0,
              0.10, 55.0, 60.0, 250.0, 80.0, 1.0, 1.0, 10.0, 10.0,
              FuelType::Gas, "G2_Peaker_A1"),
-    make_gen(3, 3, false, 30.0, 1.02, 50.0, 5.0, 20.0, -10.0,
+    make_gen(3, 3, true, 30.0, 1.02, 50.0, 5.0, 20.0, -10.0,
              0.09, 52.0, 55.0, 280.0, 90.0, 1.0, 1.0, 9.0, 9.0,
              FuelType::Gas, "G3_Peaker_A2"),
     make_gen(4, 4, false, 15.0, 1.00, 40.0, 5.0, 15.0, -8.0,

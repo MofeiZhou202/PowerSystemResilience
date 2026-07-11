@@ -18,6 +18,7 @@
 #include "hacdcpf/engine/native_adapters.hpp"
 #include "hacdcpf/engine/external_adapters.hpp"
 #include "hacdcpf/api/hacdcpf.hpp"
+#include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
 #include "hacdcpf/power_flow/branch_flow.hpp"
@@ -118,7 +119,7 @@ double estimate_boundary_loss_mw(const HybridPowerSystem& sys) {
   if (!sys.ac.loads.empty() || !sys.ac.charging_stations.empty()) {
     for (const auto& ld : sys.ac.loads) {
       if (!ld.in_service) continue;
-      total_demand_mw += std::max(0.0, ld.p_mw);
+      total_demand_mw += std::max(0.0, model::effective_load_p_mw(ld));
     }
     for (const auto& cs : sys.ac.charging_stations) {
       if (!cs.in_service) continue;
@@ -905,6 +906,8 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   //   soc_d[d,t]    DC ESS SOC at end of period t          (continuous): Sd*T
   //   p_ren[r,t]    renewable dispatch at time t           (continuous): R*T
   //   p_ext[x,t]    external-grid net exchange (+imp/−exp) (continuous): X*T  (if enable_external_grid)
+  //   p_ch[k,t]     storage charging power at the grid terminal (continuous): (S+Sd)*T
+  //   z_dis[k,t]    storage discharge-mode selector              (binary): (S+Sd)*T
   //   theta[b,t]    AC bus voltage angle (non-slack)       (continuous): nTheta
   //   p_vsc[c,t]    VSC AC-side injection (pos=into AC)    (continuous): C*T  (if use_dc_network)
   //   p_dcdc[dd,t]  DC-DC input power (pos=in→out)         (continuous): Cd*T (if use_dc_network)
@@ -938,13 +941,16 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const int nMsW  = use_coreloc ? M * T : 0;      // in transit (binary)
   const int nMsQ0 = use_coreloc ? M * T : 0;      // injection at origin bus
   const int nMsQ1 = use_coreloc ? M * T : 0;      // injection at target bus
+  const int nStorCharge = (S + Sd) * T;            // non-negative charging power
+  const int nStorMode = (S + Sd) * T;              // discharge-mode selector
   const int nTheta = use_network_constraints ? static_cast<int>(net.non_slack.size()) * T : 0;
   const int nVsc = use_dc_network ? C * T : 0;
   const int nDcdc = use_dc_network ? Cd * T : 0;
   const int n = nPg + nUg + nSg + nEss + nSoc + nDcEss + nDcSoc + nRen + nExt
               + nDrUp + nDrDn + nCurt + nSgen + nMgEx + nMgO + nDcFlow + nGdeg
               + nVpp + nVppE + nErIn + nErOut + nMsP + nMsE
-              + nMsZ0 + nMsZ1 + nMsW + nMsQ0 + nMsQ1 + nTheta + nVsc + nDcdc;
+              + nMsZ0 + nMsZ1 + nMsW + nMsQ0 + nMsQ1
+              + nStorCharge + nStorMode + nTheta + nVsc + nDcdc;
 
   auto pg_idx  = [&](int g, int t) { return g * T + t; };
   auto ug_idx  = [&](int g, int t) { return nPg + g * T + t; };
@@ -1000,7 +1006,15 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   auto msq0_idx = [&](int b, int t) { return msq0_offset + b * T + t; };
   const int msq1_offset = msq0_offset + nMsQ0;
   auto msq1_idx = [&](int b, int t) { return msq1_offset + b * T + t; };
-  const int theta_offset = msq1_offset + nMsQ1;
+  const int stor_charge_offset = msq1_offset + nMsQ1;
+  auto stor_charge_idx = [&](int k, int t) {
+    return stor_charge_offset + k * T + t;
+  };
+  const int stor_mode_offset = stor_charge_offset + nStorCharge;
+  auto stor_mode_idx = [&](int k, int t) {
+    return stor_mode_offset + k * T + t;
+  };
+  const int theta_offset = stor_mode_offset + nStorMode;
   auto theta_idx = [&](int b_pos, int t) {
     return theta_offset + b_pos * T + t;
   };
@@ -1131,6 +1145,36 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       m.linear_part.vars[static_cast<size_t>(dcsoc_idx(si, t))] = {
         VarType::Continuous, soc_lo, soc_hi,
         "soc_d" + std::to_string(si) + "_t" + std::to_string(t)};
+    }
+  }
+
+  // Exact split of signed net storage dispatch p = p_discharge - p_charge.
+  // A binary mode is needed only for bidirectional, lossy storage. Unity-
+  // efficiency or one-directional units have an exact continuous formulation.
+  for (int k = 0; k < S + Sd; ++k) {
+    const Storage& st = (k < S)
+                            ? sys.ac.storage[static_cast<size_t>(
+                                  res.storage_indices[static_cast<size_t>(k)])]
+                            : sys.dc.storage[static_cast<size_t>(
+                                  res.dc_storage_indices[static_cast<size_t>(k - S)])];
+    const double charge_cap = std::max(-st.pmin_mw, 0.0);
+    const double discharge_cap = std::max(st.pmax_mw, 0.0);
+    const double eta_charge = std::clamp(st.eta_charge, 1e-6, 1.0);
+    const double eta_discharge = std::clamp(st.eta_discharge, 1e-6, 1.0);
+    const bool needs_binary =
+        charge_cap > 1e-9 && discharge_cap > 1e-9 &&
+        (std::abs(eta_charge - 1.0) > 1e-12 ||
+         std::abs(eta_discharge - 1.0) > 1e-12);
+    for (int t = 0; t < T; ++t) {
+      m.linear_part.vars[static_cast<size_t>(stor_charge_idx(k, t))] = {
+          VarType::Continuous, 0.0, charge_cap,
+          "p_ch" + std::to_string(k) + "_t" + std::to_string(t)};
+      m.linear_part.vars[static_cast<size_t>(stor_mode_idx(k, t))] = {
+          needs_binary ? VarType::Binary : VarType::Continuous, 0.0, 1.0,
+          "z_dis" + std::to_string(k) + "_t" + std::to_string(t)};
+      if (needs_binary) {
+        m.binary_idx.push_back(stor_mode_idx(k, t));
+      }
     }
   }
 
@@ -1441,15 +1485,10 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   //                              p_g ≥ Pmin * u_g  (G*T ineq)
   // 3. Ramp up/down: ±(p_{g,t} - p_{g,t-1}) ≤ RR * dt (2*G*(T-1) ineq)
   // 4. Startup cost: s_{g,t} ≥ startup * (u_{g,t} - u_{g,t-1}) (G*T ineq)
-  // 5. ESS SOC dynamics: AC + DC storage ( (S+Sd)*T eq )
-  //    (discharge: p_ess>0 → SOC decreases; charge: p_ess<0 → SOC increases)
-  //    Accounting for efficiency:
-  //      soc[s,t] = soc[s,t-1] * (1 - self_discharge_pct/100)
-  //                 - (p_ess_dis[s,t]*dt)/(eta_dis*E) + (p_ess_chg[s,t]*dt*eta_chg)/E
-  //    We linearize using single variable p_ess (positive=dis, negative=chg):
-  //      soc[s,t] = soc[s,t-1] - p_ess[s,t]*dt/E_rated * (1/eta if dis, eta if chg)
-  //    For a linear formulation, we approximate: efficiency ≈ sqrt(eta_c * eta_d)
-  //      soc[s,t] ≈ soc[s,t-1] - p_ess[s,t]*dt / (sqrt(eta_c*eta_d) * E_rated)
+  // 5. ESS SOC dynamics: AC + DC storage ((S+Sd)*T eq).
+  //    Signed net dispatch is p = p_discharge - p_charge. The auxiliary
+  //    p_charge and mode constraints below preserve the distinct charging and
+  //    discharging efficiencies exactly in a MILP.
   const int n_eq_balance = use_network_constraints ? (net.n_bus * T) : T;
   const int n_eq_dc_balance = use_dc_network ? (dcg.n_dc_bus * T) : 0;
   const int n_eq_soc_ac = S * T;      // AC SOC dynamics
@@ -1475,6 +1514,7 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const int n_ineq_ramp_up = G * (T > 0 ? T - 1 : 0);
   const int n_ineq_ramp_dn = G * (T > 0 ? T - 1 : 0);
   const int n_ineq_startup = G * T;
+  const int n_ineq_storage_mode = 3 * (S + Sd) * T;
 
   // Min-up/min-down time constraints (count depends on per-generator parameters).
   // Guard must match the assembly loop below (>= 2, not >= 3): a 2-period
@@ -1544,7 +1584,8 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const int n_ineq_ms_minstay = use_coreloc ? (2 * M * T) : 0;
 
   const int m_ineq = n_ineq_pmax + n_ineq_pmin + n_ineq_ramp_up + n_ineq_ramp_dn
-                   + n_ineq_startup + n_ineq_min_updn + n_ineq_line + n_ineq_dc_line
+                   + n_ineq_startup + n_ineq_storage_mode
+                   + n_ineq_min_updn + n_ineq_line + n_ineq_dc_line
                    + n_ineq_reserve + n_ineq_mg + n_ineq_degr_abs + n_ineq_degr_cap
                    + n_ineq_vpp_ramp
                    + n_ineq_ms_q + n_ineq_ms_transit + n_ineq_ms_minstay;
@@ -2118,17 +2159,21 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
     }
   }
 
-  // SOC dynamics: soc[s,t] - soc[s,t-1]*(1-sd) + p_ess[s,t]*dt/(eta*E) = 0
-  // For t=0: soc[s,0] + p_ess[s,0]*dt/(eta*E) = soc_init*(1-sd)
+  // SOC dynamics with p = p_discharge - p_charge:
+  //   soc_t = retention*soc_prev + eta_c*p_charge*dt/E
+  //           - (p + p_charge)*dt/(eta_d*E)
   const int soc_eq_offset = n_eq_balance + n_eq_dc_balance;
   for (int si = 0; si < S; ++si) {
     const auto& ess = sys.ac.storage[static_cast<size_t>(res.storage_indices[static_cast<size_t>(si)])];
     double E = ess.e_rated_mwh;
     if (E < 1e-12) E = 1.0;  // fallback
-    double eta = std::sqrt(ess.eta_charge * ess.eta_discharge);
-    if (eta < 1e-6) eta = 1.0;
-    double sd = 1.0 - ess.self_discharge_pct / 100.0;
-    double coeff_p = dt / (eta * E);
+    const double eta_charge = std::clamp(ess.eta_charge, 1e-6, 1.0);
+    const double eta_discharge = std::clamp(ess.eta_discharge, 1e-6, 1.0);
+    const double retention =
+        std::clamp(1.0 - ess.self_discharge_pct / 100.0, 0.0, 1.0);
+    const double coeff_p = dt / (eta_discharge * E);
+    const double coeff_charge =
+        dt * (1.0 / eta_discharge - eta_charge) / E;
 
     for (int t = 0; t < T; ++t) {
       int row = soc_eq_offset + si * T + t;
@@ -2136,12 +2181,11 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       eq_trips.emplace_back(row, soc_idx(si, t), 1.0);
       // + p_ess[s,t] * coeff_p
       eq_trips.emplace_back(row, ess_idx(si, t), coeff_p);
+      eq_trips.emplace_back(row, stor_charge_idx(si, t), coeff_charge);
       if (t == 0) {
-        // = soc_init * sd
-        beq[row] = ess.soc_init * sd;
+        beq[row] = ess.soc_init * retention;
       } else {
-        // - soc[s,t-1] * sd
-        eq_trips.emplace_back(row, soc_idx(si, t - 1), -sd);
+        eq_trips.emplace_back(row, soc_idx(si, t - 1), -retention);
         beq[row] = 0.0;
       }
     }
@@ -2153,19 +2197,23 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
         res.dc_storage_indices[static_cast<size_t>(si)])];
     double E = ess.e_rated_mwh;
     if (E < 1e-12) E = 1.0;
-    double eta = std::sqrt(ess.eta_charge * ess.eta_discharge);
-    if (eta < 1e-6) eta = 1.0;
-    double sd = 1.0 - ess.self_discharge_pct / 100.0;
-    double coeff_p = dt / (eta * E);
+    const double eta_charge = std::clamp(ess.eta_charge, 1e-6, 1.0);
+    const double eta_discharge = std::clamp(ess.eta_discharge, 1e-6, 1.0);
+    const double retention =
+        std::clamp(1.0 - ess.self_discharge_pct / 100.0, 0.0, 1.0);
+    const double coeff_p = dt / (eta_discharge * E);
+    const double coeff_charge =
+        dt * (1.0 / eta_discharge - eta_charge) / E;
 
     for (int t = 0; t < T; ++t) {
       int row_dc = soc_eq_offset + n_eq_soc_ac + si * T + t;
       eq_trips.emplace_back(row_dc, dcsoc_idx(si, t), 1.0);
       eq_trips.emplace_back(row_dc, dcess_idx(si, t), coeff_p);
+      eq_trips.emplace_back(row_dc, stor_charge_idx(S + si, t), coeff_charge);
       if (t == 0) {
-        beq[row_dc] = ess.soc_init * sd;
+        beq[row_dc] = ess.soc_init * retention;
       } else {
-        eq_trips.emplace_back(row_dc, dcsoc_idx(si, t - 1), -sd);
+        eq_trips.emplace_back(row_dc, dcsoc_idx(si, t - 1), -retention);
         beq[row_dc] = 0.0;
       }
     }
@@ -2355,7 +2403,36 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
     }
   }
 
-  // (6) Min-up time: if generator starts at t, it must stay on for min_up periods.
+  // (6) Exact storage charge/discharge split. With p = p_dis - p_ch:
+  //   p_dis >= 0, p_dis <= Pdis_max*z, p_ch <= Pch_max*(1-z).
+  for (int k = 0; k < S + Sd; ++k) {
+    const auto& st = stor_ref(k);
+    const double charge_cap = std::max(-st.pmin_mw, 0.0);
+    const double discharge_cap = std::max(st.pmax_mw, 0.0);
+    for (int t = 0; t < T; ++t) {
+      const int p_idx = stor_power_idx(k, t);
+      const int c_idx = stor_charge_idx(k, t);
+      const int z_idx = stor_mode_idx(k, t);
+
+      ineq_trips.emplace_back(row, p_idx, -1.0);
+      ineq_trips.emplace_back(row, c_idx, -1.0);
+      b_ineq[row] = 0.0;
+      ++row;
+
+      ineq_trips.emplace_back(row, p_idx, 1.0);
+      ineq_trips.emplace_back(row, c_idx, 1.0);
+      ineq_trips.emplace_back(row, z_idx, -discharge_cap);
+      b_ineq[row] = 0.0;
+      ++row;
+
+      ineq_trips.emplace_back(row, c_idx, 1.0);
+      ineq_trips.emplace_back(row, z_idx, charge_cap);
+      b_ineq[row] = charge_cap;
+      ++row;
+    }
+  }
+
+  // (7) Min-up time: if generator starts at t, it must stay on for min_up periods.
   //     u[g,t] - u[g,t-1] ≤ u[g,t+k]  for k=1..min(up_periods-1, T-1-t)
   //     Rearranged: u[g,t] - u[g,t-1] - u[g,t+k] ≤ 0
   //     Added for up_periods >= 2: the k=1 case (2-period min-up) is a real
@@ -2377,7 +2454,7 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
     }
   }
 
-  // (7) Min-down time: if generator shuts down at t, it must stay off for min_dn periods.
+  // (8) Min-down time: if generator shuts down at t, it must stay off for min_dn periods.
   //     u[g,t-1] - u[g,t] ≤ 1 - u[g,t+k]  for k=1..min(dn_periods-1, T-1-t)
   //     Rearranged: u[g,t-1] - u[g,t] + u[g,t+k] ≤ 1
   //     Added for dn_periods >= 2: the k=1 case is binding and must be included.

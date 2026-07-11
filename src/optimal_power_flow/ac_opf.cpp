@@ -177,8 +177,22 @@ std::pair<double, double> sanitize_bounds(double lo, double hi, double default_l
 }
 
 double clamp_interior(double x, double lo, double hi) {
+  if (!std::isfinite(x)) {
+    x = 0.0;
+  }
+  if (!std::isfinite(lo) || !std::isfinite(hi)) {
+    if (std::isfinite(lo) && x < lo) return lo;
+    if (std::isfinite(hi) && x > hi) return hi;
+    return x;
+  }
+  if (lo > hi) {
+    std::swap(lo, hi);
+  }
   const double width = hi - lo;
-  const double eps = std::max(1e-8, 1e-3 * width);
+  if (!(width > 0.0)) {
+    return 0.5 * (lo + hi);
+  }
+  const double eps = std::min(std::max(1e-8, 1e-3 * width), 0.49 * width);
   return std::clamp(x, lo + eps, hi - eps);
 }
 
@@ -2948,9 +2962,16 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
       x = x_trial;
       for (int i = 0; i < idx.nvar; ++i) {
         const double width = upper[i] - lower[i];
-        const double frac = constrained_var_col[static_cast<size_t>(i)] ? 1e-3 : 1e-8;
-        const double eps = std::max(1e-10, frac * width);
-        x[i] = std::clamp(x[i], lower[i] + eps, upper[i] - eps);
+        if (!std::isfinite(width)) {
+          if (std::isfinite(lower[i]) && x[i] < lower[i]) x[i] = lower[i];
+          if (std::isfinite(upper[i]) && x[i] > upper[i]) x[i] = upper[i];
+        } else if (!(width > 0.0)) {
+          x[i] = 0.5 * (lower[i] + upper[i]);
+        } else {
+          const double frac = constrained_var_col[static_cast<size_t>(i)] ? 1e-3 : 1e-8;
+          const double eps = std::min(std::max(1e-10, frac * width), 0.49 * width);
+          x[i] = std::clamp(x[i], lower[i] + eps, upper[i] - eps);
+        }
       }
       (void)accepted_alpha;
       lambda.setZero();

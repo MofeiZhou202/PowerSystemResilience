@@ -450,6 +450,114 @@ double stored_energy_mwh(const Storage& storage) {
   return stored_energy_from_soc(storage);
 }
 
+double storage_carbon_inventory_tco2(const HybridPowerSystem& sys) {
+  auto one = [](const Storage& st) {
+    return stored_energy_mwh(st) *
+           std::max(0.0, finite_or_zero(st.soc_carbon_intensity_tco2_mwh));
+  };
+
+  double total = 0.0;
+  for (const auto& st : sys.ac.storage) {
+    if (st.in_service) total += one(st);
+  }
+  for (const auto& st : sys.dc.storage) {
+    if (st.in_service) total += one(st);
+  }
+  return total;
+}
+
+double initial_storage_energy_from_terminal_snapshot(const Storage& st,
+                                                     double step_duration_hr) {
+  const double e_terminal = stored_energy_mwh(st);
+  const double eta_charge =
+      std::clamp(st.eta_charge > 0.0 ? st.eta_charge : 1.0, 1e-6, 1.0);
+  const double eta_discharge =
+      std::clamp(st.eta_discharge > 0.0 ? st.eta_discharge : 1.0, 1e-6, 1.0);
+  const double retention = std::clamp(
+      1.0 - std::max(st.self_discharge_pct, 0.0) / 100.0, 1e-9, 1.0);
+  const double charge_input_mwh =
+      std::max(-st.p_mw, 0.0) * step_duration_hr;
+  const double discharge_output_mwh =
+      std::max(st.p_mw, 0.0) * step_duration_hr;
+  return std::max(
+      0.0,
+      (e_terminal - eta_charge * charge_input_mwh +
+       discharge_output_mwh / eta_discharge) /
+          retention);
+}
+
+void finalize_storage_adjusted_balance(AnnualCarbonAnalysisResult& result) {
+  result.storage_carbon_inventory_delta_tco2 =
+      result.terminal_storage_carbon_inventory_tco2 -
+      result.initial_storage_carbon_inventory_tco2;
+  result.storage_internal_loss_emissions_tco2 =
+      result.storage_charge_loss_emissions_tco2 +
+      result.storage_discharge_loss_emissions_tco2 +
+      result.storage_self_discharge_loss_emissions_tco2;
+  if (std::abs(result.storage_internal_loss_emissions_tco2) < 1e-10) {
+    result.storage_internal_loss_emissions_tco2 = 0.0;
+  }
+
+  result.storage_inventory_balance_error_tco2 =
+      result.initial_storage_carbon_inventory_tco2 +
+      result.total_storage_charge_emissions_tco2 -
+      result.total_storage_discharge_emissions_tco2 -
+      result.storage_internal_loss_emissions_tco2 -
+      result.terminal_storage_carbon_inventory_tco2;
+  const double storage_denom =
+      std::max(std::abs(result.initial_storage_carbon_inventory_tco2) +
+                   std::abs(result.total_storage_charge_emissions_tco2),
+               1e-12);
+  result.storage_inventory_balance_error_pct =
+      std::abs(result.storage_inventory_balance_error_tco2) /
+      storage_denom * 100.0;
+
+  const double external_generation =
+      result.total_generation_emissions_tco2 -
+      result.total_storage_discharge_emissions_tco2;
+  const double terminal_load =
+      result.total_load_emissions_tco2 -
+      result.total_storage_charge_emissions_tco2;
+
+  result.balance_error_storage_adjusted_tco2 =
+      external_generation + result.initial_storage_carbon_inventory_tco2 -
+      terminal_load - result.total_loss_emissions_tco2 -
+      result.storage_internal_loss_emissions_tco2 -
+      result.terminal_storage_carbon_inventory_tco2;
+
+  const double denom =
+      std::max(std::abs(external_generation) +
+                   std::abs(result.initial_storage_carbon_inventory_tco2),
+               1e-12);
+  result.balance_error_storage_adjusted_pct =
+      std::abs(result.balance_error_storage_adjusted_tco2) / denom * 100.0;
+}
+
+void finalize_storage_step_balance(AnnualCarbonStepResult& step) {
+  step.storage_carbon_inventory_delta_tco2 =
+      step.terminal_storage_carbon_inventory_tco2 -
+      step.initial_storage_carbon_inventory_tco2;
+  step.storage_internal_loss_emissions_tco2 =
+      step.storage_charge_loss_emissions_tco2 +
+      step.storage_discharge_loss_emissions_tco2 +
+      step.storage_self_discharge_loss_emissions_tco2;
+  step.storage_inventory_balance_error_tco2 =
+      step.initial_storage_carbon_inventory_tco2 +
+      step.total_storage_charge_emissions_tco2 -
+      step.total_storage_discharge_emissions_tco2 -
+      step.storage_internal_loss_emissions_tco2 -
+      step.terminal_storage_carbon_inventory_tco2;
+  step.balance_error_storage_adjusted_tco2 =
+      (step.total_generation_emissions_tco2 -
+       step.total_storage_discharge_emissions_tco2) +
+      step.initial_storage_carbon_inventory_tco2 -
+      (step.total_load_emissions_tco2 -
+       step.total_storage_charge_emissions_tco2) -
+      step.total_loss_emissions_tco2 -
+      step.storage_internal_loss_emissions_tco2 -
+      step.terminal_storage_carbon_inventory_tco2;
+}
+
 std::unordered_map<LoadRefKey, size_t, LoadRefKeyHash> build_load_position_map(
     const std::vector<AnnualLoadCarbonStats>& load_stats) {
   std::unordered_map<LoadRefKey, size_t, LoadRefKeyHash> pos;
@@ -539,33 +647,83 @@ void carry_storage_carbon_state(const StorageCarbonResult& carbon,
 
 void carry_storage_carbon_state_from_terminal_snapshot(
     const StorageCarbonResult& carbon,
-    const Storage& current,
+    Storage& current,
     Storage& next,
     double step_duration_hr,
-    const Storage* previous_terminal) {
-  double next_intensity = current.soc_carbon_intensity_tco2_mwh;
-  if (current.p_mw < -kTol) {
-    const double e_end = stored_energy_mwh(current);
-    double e_start = 0.0;
-    if (previous_terminal != nullptr) {
-      e_start = stored_energy_mwh(*previous_terminal);
-    } else {
-      const double eta_charge = (current.eta_charge > 0.0) ? current.eta_charge : 1.0;
-      const double charged_energy =
-          std::max(0.0, -current.p_mw * step_duration_hr * eta_charge);
-      e_start = std::max(0.0, e_end - charged_energy);
-    }
-    const double d_e_stored = std::max(e_end - e_start, 0.0);
-    const double bus_intensity =
-        std::max(0.0, finite_or_zero(carbon.carbon_intensity_tco2_mwh));
-    const double c_next =
-        e_start * std::max(0.0, finite_or_zero(current.soc_carbon_intensity_tco2_mwh)) +
-        d_e_stored * bus_intensity;
-    next_intensity = (e_end > kTol) ? (c_next / e_end) : 0.0;
-  }
+    const Storage* previous_terminal,
+    bool first_step,
+    AnnualCarbonAnalysisResult& annual,
+    AnnualCarbonStepResult& step) {
+  const double e_start = previous_terminal != nullptr
+                             ? stored_energy_mwh(*previous_terminal)
+                             : initial_storage_energy_from_terminal_snapshot(
+                                   current, step_duration_hr);
+  const double e_end = stored_energy_mwh(current);
+  const double start_intensity = std::max(
+      0.0,
+      finite_or_zero(previous_terminal != nullptr
+                         ? previous_terminal->soc_carbon_intensity_tco2_mwh
+                         : current.soc_carbon_intensity_tco2_mwh));
+  const double bus_intensity =
+      std::max(0.0, finite_or_zero(carbon.carbon_intensity_tco2_mwh));
+  const double eta_charge = std::clamp(
+      current.eta_charge > 0.0 ? current.eta_charge : 1.0, 1e-6, 1.0);
+  const double eta_discharge = std::clamp(
+      current.eta_discharge > 0.0 ? current.eta_discharge : 1.0, 1e-6, 1.0);
+  const double retention = std::clamp(
+      1.0 - std::max(current.self_discharge_pct, 0.0) / 100.0, 0.0, 1.0);
 
-  next.soc_carbon_intensity_tco2_mwh =
-      std::max(0.0, finite_or_zero(next_intensity));
+  const double charge_input_mwh =
+      std::max(-current.p_mw, 0.0) * step_duration_hr;
+  const double charge_stored_mwh = charge_input_mwh * eta_charge;
+  const double discharge_output_mwh =
+      std::max(current.p_mw, 0.0) * step_duration_hr;
+  const double discharge_withdrawn_mwh =
+      discharge_output_mwh / eta_discharge;
+  const double self_discharge_mwh = e_start * (1.0 - retention);
+  const double expected_end_mwh =
+      e_start * retention + charge_stored_mwh - discharge_withdrawn_mwh;
+  const double energy_error_mwh = expected_end_mwh - e_end;
+
+  const double charge_loss_carbon =
+      (charge_input_mwh - charge_stored_mwh) * bus_intensity;
+  const double discharge_loss_carbon =
+      (discharge_withdrawn_mwh - discharge_output_mwh) * start_intensity;
+  const double self_discharge_loss_carbon =
+      self_discharge_mwh * start_intensity;
+  const double c_start = e_start * start_intensity;
+  const double c_end =
+      c_start + charge_input_mwh * bus_intensity -
+      discharge_output_mwh * start_intensity - charge_loss_carbon -
+      discharge_loss_carbon - self_discharge_loss_carbon;
+  const double next_intensity =
+      (e_end > kTol) ? std::max(c_end, 0.0) / e_end : 0.0;
+  const double terminal_inventory = e_end * next_intensity;
+
+  if (first_step) {
+    annual.initial_storage_carbon_inventory_tco2 += c_start;
+  }
+  step.initial_storage_carbon_inventory_tco2 += c_start;
+  step.terminal_storage_carbon_inventory_tco2 += terminal_inventory;
+  step.storage_charge_loss_emissions_tco2 += charge_loss_carbon;
+  step.storage_discharge_loss_emissions_tco2 += discharge_loss_carbon;
+  step.storage_self_discharge_loss_emissions_tco2 +=
+      self_discharge_loss_carbon;
+  step.storage_energy_balance_error_mwh += energy_error_mwh;
+  step.storage_energy_balance_abs_error_mwh += std::abs(energy_error_mwh);
+
+  annual.storage_charge_loss_emissions_tco2 += charge_loss_carbon;
+  annual.storage_discharge_loss_emissions_tco2 += discharge_loss_carbon;
+  annual.storage_self_discharge_loss_emissions_tco2 +=
+      self_discharge_loss_carbon;
+  annual.storage_energy_balance_error_mwh += energy_error_mwh;
+  annual.storage_energy_balance_abs_error_mwh += std::abs(energy_error_mwh);
+  annual.max_storage_step_energy_balance_error_mwh = std::max(
+      annual.max_storage_step_energy_balance_error_mwh,
+      std::abs(energy_error_mwh));
+
+  current.soc_carbon_intensity_tco2_mwh = next_intensity;
+  next.soc_carbon_intensity_tco2_mwh = next_intensity;
 }
 
 void update_storage_carbon_state(const HybridPowerSystem& current,
@@ -591,14 +749,17 @@ void update_storage_carbon_state(const HybridPowerSystem& current,
 }
 
 void update_storage_carbon_state_from_terminal_snapshot(
-    const HybridPowerSystem& current,
+    HybridPowerSystem& current,
     const HybridPowerSystem* previous_terminal,
     HybridPowerSystem& next,
     const CarbonAnalysisResult& ca,
-    double step_duration_hr) {
+    double step_duration_hr,
+    bool first_step,
+    AnnualCarbonAnalysisResult& annual,
+    AnnualCarbonStepResult& step) {
   for (const auto& carbon : ca.storage_carbon) {
     if (carbon.is_dc) {
-      const Storage* current_storage =
+      Storage* current_storage =
           find_storage_by_index(current.dc.storage, carbon.storage_index);
       const Storage* previous_storage =
           (previous_terminal != nullptr)
@@ -607,10 +768,11 @@ void update_storage_carbon_state_from_terminal_snapshot(
       Storage* next_storage = find_storage_by_index(next.dc.storage, carbon.storage_index);
       if (current_storage != nullptr && next_storage != nullptr) {
         carry_storage_carbon_state_from_terminal_snapshot(
-            carbon, *current_storage, *next_storage, step_duration_hr, previous_storage);
+            carbon, *current_storage, *next_storage, step_duration_hr,
+            previous_storage, first_step, annual, step);
       }
     } else {
-      const Storage* current_storage =
+      Storage* current_storage =
           find_storage_by_index(current.ac.storage, carbon.storage_index);
       const Storage* previous_storage =
           (previous_terminal != nullptr)
@@ -619,10 +781,15 @@ void update_storage_carbon_state_from_terminal_snapshot(
       Storage* next_storage = find_storage_by_index(next.ac.storage, carbon.storage_index);
       if (current_storage != nullptr && next_storage != nullptr) {
         carry_storage_carbon_state_from_terminal_snapshot(
-            carbon, *current_storage, *next_storage, step_duration_hr, previous_storage);
+            carbon, *current_storage, *next_storage, step_duration_hr,
+            previous_storage, first_step, annual, step);
       }
     }
   }
+
+  finalize_storage_step_balance(step);
+  annual.storage_inventory_balance_abs_error_tco2 +=
+      std::abs(step.storage_inventory_balance_error_tco2);
 }
 
 void set_terminal_storage_states(const HybridPowerSystem& sys,
@@ -650,7 +817,9 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis_impl(
     const std::vector<PowerFlowResult>& pf_results,
     double step_duration_hr,
     const AnnualCarbonAnalysisOptions& options,
-    const std::function<void(size_t, const CarbonAnalysisResult&)>& after_step = {}) {
+    const std::function<void(size_t,
+                             const CarbonAnalysisResult&,
+                             AnnualCarbonAnalysisResult&)>& after_step = {}) {
   if (!(step_duration_hr > 0.0) || !std::isfinite(step_duration_hr)) {
     throw std::invalid_argument("step_duration_hr must be positive and finite");
   }
@@ -685,6 +854,39 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis_impl(
     ++result.num_pf_converged;
     const CarbonAnalysisResult ca =
         compute_carbon_analysis(system_at(t), pf_results[t], options.carbon_options);
+
+    step.carbon_power_balance_verified = ca.power_balance_verified;
+    step.carbon_matrix_solved = ca.matrix_solved;
+    step.carbon_verified = ca.tracing_verified;
+    step.max_node_power_balance_error_mw =
+        ca.max_node_power_balance_error_mw;
+    step.matrix_relative_residual = ca.matrix_relative_residual;
+    step.matrix_condition_estimate = ca.matrix_condition_estimate;
+    step.matrix_rank = ca.matrix_rank;
+    if (ca.power_balance_verified) {
+      ++result.num_carbon_power_balance_verified;
+    }
+    if (ca.matrix_solved) {
+      ++result.num_carbon_matrix_solved;
+    }
+    if (ca.tracing_verified) {
+      ++result.num_carbon_verified;
+    }
+    result.max_node_power_balance_error_mw = std::max(
+        result.max_node_power_balance_error_mw,
+        ca.max_node_power_balance_error_mw);
+    result.max_matrix_relative_residual = std::max(
+        result.max_matrix_relative_residual,
+        ca.matrix_relative_residual);
+    result.max_matrix_condition_estimate = std::max(
+        result.max_matrix_condition_estimate,
+        ca.matrix_condition_estimate);
+
+    // Unverified carbon snapshots must not silently contaminate annual totals
+    // or storage inventory recursion. Their diagnostics remain in step_results.
+    if (!ca.tracing_verified) {
+      continue;
+    }
 
     step.total_generation_emissions_tco2 =
         std::max(0.0, finite_or_zero(step_generation_emissions(ca))) * step_duration_hr;
@@ -765,7 +967,7 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis_impl(
     }
 
     if (after_step) {
-      after_step(t, ca);
+      after_step(t, ca, result);
     }
   }
 
@@ -799,6 +1001,11 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
       pf_results,
       step_duration_hr,
       options);
+  result.initial_storage_carbon_inventory_tco2 =
+      storage_carbon_inventory_tco2(sys);
+  result.terminal_storage_carbon_inventory_tco2 =
+      storage_carbon_inventory_tco2(sys);
+  finalize_storage_adjusted_balance(result);
   set_terminal_storage_states(sys, result);
   return result;
 }
@@ -817,7 +1024,9 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
       pf_results,
       step_duration_hr,
       options,
-      [&](size_t t, const CarbonAnalysisResult& ca) {
+      [&](size_t t,
+          const CarbonAnalysisResult& ca,
+          AnnualCarbonAnalysisResult&) {
         if (t + 1 < mutable_systems.size()) {
           update_storage_carbon_state(mutable_systems[t],
                                       mutable_systems[t + 1],
@@ -825,7 +1034,14 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
         }
       });
   if (!mutable_systems.empty()) {
+    result.initial_storage_carbon_inventory_tco2 =
+        storage_carbon_inventory_tco2(systems.front());
+    result.terminal_storage_carbon_inventory_tco2 =
+        storage_carbon_inventory_tco2(mutable_systems.back());
+    finalize_storage_adjusted_balance(result);
     set_terminal_storage_states(mutable_systems.back(), result);
+  } else {
+    finalize_storage_adjusted_balance(result);
   }
   return result;
 }
@@ -855,7 +1071,9 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
       ts_result.pf_results,
       step_duration_hr,
       options,
-      [&](size_t t, const CarbonAnalysisResult& ca) {
+      [&](size_t t,
+          const CarbonAnalysisResult& ca,
+          AnnualCarbonAnalysisResult& annual) {
         if (t + 1 < mutable_systems.size()) {
           const HybridPowerSystem* previous_terminal =
               (t > 0) ? &mutable_systems[t - 1] : nullptr;
@@ -864,11 +1082,31 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
               previous_terminal,
               mutable_systems[t + 1],
               ca,
-              step_duration_hr);
+              step_duration_hr,
+              t == 0,
+              annual,
+              annual.step_results[t]);
+        } else if (t < mutable_systems.size()) {
+          const HybridPowerSystem* previous_terminal =
+              (t > 0) ? &mutable_systems[t - 1] : nullptr;
+          update_storage_carbon_state_from_terminal_snapshot(
+              mutable_systems[t],
+              previous_terminal,
+              mutable_systems[t],
+              ca,
+              step_duration_hr,
+              t == 0,
+              annual,
+              annual.step_results[t]);
         }
       });
   if (!mutable_systems.empty()) {
+    result.terminal_storage_carbon_inventory_tco2 =
+        storage_carbon_inventory_tco2(mutable_systems.back());
+    finalize_storage_adjusted_balance(result);
     set_terminal_storage_states(mutable_systems.back(), result);
+  } else {
+    finalize_storage_adjusted_balance(result);
   }
   return result;
 }

@@ -132,8 +132,8 @@ struct TimeSeriesPFOptions {
   // on the last SOC variable (no extra constraint rows).
   bool enforce_terminal_soc_cyclic{false};
   // Fix unit commitment: force every in-service generator committed (u_{g,t}=1)
-  // for the whole horizon, turning the SCUC MILP into a pure (security-constrained)
-  // economic-dispatch problem.  Used by the "dynamic SCED" daily mode.
+  // for the whole horizon. Storage charge/discharge mode binaries may remain
+  // when lossy bidirectional storage is present. Used by dynamic SCED mode.
   bool fix_commitment{false};
   // Optional explicit commitment to pin (non-owning; must outlive the solve).
   // Indexed [g_active][t] over in-service generators in their natural order,
