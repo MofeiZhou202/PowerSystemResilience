@@ -168,10 +168,22 @@ void add_equivalent_branch_from_transformer2w(const Transformer2W& tr,
   const double raw_tap =
       tap_from_step(tr.tap_pos, tr.tap_neutral, tr.tap_step_percent);
   const double clamped_tap = std::max(1e-6, raw_tap);
-  const double canonical_tap =
+  const double tap_position =
       (tr.tap_side == 1) ? (1.0 / clamped_tap) : clamped_tap;
   const double impedance_scale =
       (tr.tap_side == 1) ? (clamped_tap * clamped_tap) : 1.0;
+
+  // Include the nameplate-to-bus-base ratio when voltage bases do not match.
+  const double base_kv_hv = bus_base_kv_or_default(ac, tr.hv_bus);
+  const double base_kv_lv = bus_base_kv_or_default(ac, tr.lv_bus);
+  double nominal_ratio_pu = 1.0;
+  if (tr.vn_hv_kv > 1e-9 && tr.vn_lv_kv > 1e-9 &&
+      base_kv_hv > 1e-9 && base_kv_lv > 1e-9) {
+    nominal_ratio_pu =
+        (tr.vn_hv_kv / tr.vn_lv_kv) / (base_kv_hv / base_kv_lv);
+  }
+  const double canonical_tap =
+      std::max(1e-6, nominal_ratio_pu * tap_position);
 
   ACBranch br;
   br.index = next_idx++;

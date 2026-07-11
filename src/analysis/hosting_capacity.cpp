@@ -68,6 +68,15 @@ HostingCapacityOptions hosting_capacity_options_from_json(const nlohmann::json& 
   o.delta_UL_pct               = j.value("delta_UL_pct", o.delta_UL_pct);
   o.thd_limit_pct              = j.value("thd_limit_pct", o.thd_limit_pct);
   o.enable_harmonic            = j.value("enable_harmonic", o.enable_harmonic);
+  o.default_power_factor = std::clamp(o.default_power_factor, 0.0, 1.0);
+  o.default_dr_max_output_coeff =
+      std::max(o.default_dr_max_output_coeff, 1e-9);
+  o.single_transformer_beta = std::max(o.single_transformer_beta, 0.0);
+  o.n1_loading_limit = std::max(o.n1_loading_limit, 0.0);
+  o.kr = std::clamp(o.kr, 0.0, 1.0);
+  o.delta_UH_pct = std::max(o.delta_UH_pct, 0.0);
+  o.delta_UL_pct = std::max(o.delta_UL_pct, 0.0);
+  o.thd_limit_pct = std::max(o.thd_limit_pct, 0.0);
   return o;
 }
 
@@ -88,8 +97,10 @@ HostingCapacityResult assess_hosting_capacity(const HybridPowerSystem& sys,
 
   // ── Per-bus aggregation of load / non-DR gen / existing DR / ESS charging ─
   std::unordered_map<int, double> bus_load, bus_nondr_gen, bus_existing_dr, bus_ess_charge;
+  for (const auto& b : ac.buses)
+    if (b.in_service) bus_load[b.index] += std::max(0.0, b.pd_mw);
   for (const auto& ld : ac.loads)
-    if (ld.in_service) bus_load[ld.bus] += ld.p_mw;
+    if (ld.in_service) bus_load[ld.bus] += std::max(0.0, ld.p_mw * ld.scaling);
   for (const auto& g : ac.generators)            // synchronous units = non-DR generation
     if (g.in_service) bus_nondr_gen[g.bus] += g.pg_mw;
   for (const auto& pv : ac.pv_systems)
@@ -97,7 +108,7 @@ HostingCapacityResult assess_hosting_capacity(const HybridPowerSystem& sys,
   for (const auto& rg : ac.renewable_gens)
     if (rg.in_service) bus_existing_dr[rg.bus] += rg.p_mw;
   for (const auto& sg : ac.static_generators)
-    if (sg.in_service) bus_existing_dr[sg.bus] += sg.p_mw;
+    if (sg.in_service) bus_existing_dr[sg.bus] += std::max(0.0, sg.p_mw * sg.scaling);
   for (const auto& st : ac.storage) {
     if (!st.in_service) continue;
     double charge = (st.cap_charging_strategy == "static")
