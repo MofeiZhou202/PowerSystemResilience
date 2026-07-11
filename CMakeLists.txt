@@ -276,6 +276,7 @@ endif()
 set(HACDCPF_SOURCES
   # ── model ────────────────────────────────────────────────────────────────
   src/model/network_utils.cpp
+  src/model/result_attribution.cpp
   src/model/standard_parameter_library.cpp
   src/model/unit_conversion.cpp
   # ── power_models ─────────────────────────────────────────────────────────

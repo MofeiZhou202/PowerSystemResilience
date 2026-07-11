@@ -10,6 +10,7 @@
 #include "hacdcpf/optimal_power_flow/opf_result.hpp"
 #include "hacdcpf/power_flow/power_flow_options.hpp"
 #include "hacdcpf/power_flow/power_flow_result.hpp"
+#include "hacdcpf/projection/result_attribution.hpp"
 #include "hacdcpf/util/parallel_execution.hpp"
 
 // Time-series data types used by io and analysis modules.
@@ -263,6 +264,10 @@ struct TimeSeriesPFResult {
 
   // Actual system states used for PF validation when keep_system_snapshots is true.
   std::vector<HybridPowerSystem> pf_system_snapshots;
+
+  // Canonical solver observables reconstructed onto the rich component model,
+  // one total identity-keyed result set per timestep.
+  std::vector<projection::RichResultAttribution> rich_results;
 
   // Cross-validation metrics (OPF vs PF, one per timestep)
   std::vector<CrossValStep> crossval;

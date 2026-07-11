@@ -6,7 +6,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "hacdcpf/projection/project_to_canonical.hpp"
+#include "hacdcpf/projection/result_attribution.hpp"
 #include "hacdcpf/power_flow/newton_solver.hpp"
 #include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/power_flow/island_detector.hpp"
@@ -212,7 +212,8 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
     NewtonSolver solver;
     HybridPowerSystem sub = extract_island_subsystem(sys, island, task.slack_override);
     SolverData sub_data = make_solver_data_projected(
-        project_to_canonical_models(std::move(sub)), pf_opt.loss_model);
+        projection::RichToCanonicalOperator::apply(std::move(sub)).canonical,
+        pf_opt.loss_model);
 
     PowerFlowResult r = solver.solve(sub_data, pf_opt, nullptr);
     if (!r.converged) {

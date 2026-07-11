@@ -3,7 +3,7 @@
 #include <atomic>
 #include <cmath>
 
-#include "hacdcpf/projection/project_to_canonical.hpp"
+#include "hacdcpf/projection/result_attribution.hpp"
 #include "hacdcpf/model/device_control_role.hpp"
 #include "hacdcpf/model/enums/grid_enums.hpp"
 #include "hacdcpf/model/enums/storage_enums.hpp"
@@ -265,7 +265,8 @@ static void apply_acpv_voltage_control(SolverData& data) {
 SolverData make_solver_data(const HybridPowerSystem& sys, LossModelType loss_model) {
   static std::atomic<std::uint64_t> next_build_id{1};
 
-  HybridPowerSystem projected = project_to_canonical_models(sys);
+  HybridPowerSystem projected =
+      projection::RichToCanonicalOperator::apply(sys).canonical;
 
   // Fold DC-side `DCStorage` (active-power-only) into the engine's existing
   // `Storage`-typed dc.storage path so it injects into the DC power flow.
@@ -341,7 +342,8 @@ SolverData make_solver_data(const HybridPowerSystem& sys, LossModelType loss_mod
 }
 
 SolverData make_solver_data(HybridPowerSystem&& sys, LossModelType loss_model) {
-  HybridPowerSystem projected = project_to_canonical_models(std::move(sys));
+  HybridPowerSystem projected =
+      projection::RichToCanonicalOperator::apply(std::move(sys)).canonical;
   return make_solver_data_projected(std::move(projected), loss_model);
 }
 

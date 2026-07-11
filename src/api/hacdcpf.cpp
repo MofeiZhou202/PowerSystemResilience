@@ -471,7 +471,8 @@ std::unordered_map<int, int> build_original_vsc_ac_bus_map(
   if (sys.energy_routers.empty()) return bus_by_index;
 
   try {
-    const HybridPowerSystem projected = project_to_canonical_models(sys);
+    const HybridPowerSystem projected =
+        projection::RichToCanonicalOperator::apply(sys).canonical;
     std::unordered_map<std::string, int> vsc_index_by_name;
     vsc_index_by_name.reserve(projected.vsc_converters.size());
     for (const auto& conv : projected.vsc_converters) {
@@ -836,6 +837,17 @@ Result<PowerFlowResult> safe_solve_power_flow(
 }
 
 PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOptions& opt) {
+  const auto reference_validation =
+      validation::validate_reference_bus_eligibility(sys);
+  if (reference_validation.has_errors()) {
+    PowerFlowResult result;
+    result.converged = false;
+    result.diagnostics.termination_reason =
+        "Reference-bus eligibility check failed";
+    for (const auto& issue : reference_validation.issues)
+      result.diagnostics.warnings.push_back(issue.message);
+    return result;
+  }
   const powerflow::ConverterCoordinationReport coordination =
       powerflow::evaluate_converter_coordination(sys, opt.enable_converter_coordination_check);
   if (coordination.enabled && coordination.has_blocking_issue()) {
@@ -930,6 +942,9 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
 
 DCPowerFlowResult solve_dc_power_flow(const HybridPowerSystem& sys,
                                       const PowerFlowOptions& opt) {
+  const auto reference_validation =
+      validation::validate_reference_bus_eligibility(sys);
+  if (reference_validation.has_errors()) return {};
   powerflow::SolverData& data = get_cached_solver_data(sys, opt.loss_model);
   static thread_local powerflow::DCSolver solver;
   return solver.solve(data, opt, nullptr);

@@ -10,6 +10,7 @@
 // IEEE Trans. Power Systems, 1995.
 
 #include "hacdcpf/analysis/distribution_power_flow.hpp"
+#include "hacdcpf/projection/result_attribution.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1059,7 +1060,8 @@ DPFResult solve_distribution_pf(const HybridPowerSystem& sys,
   };
 
   if (!has_enabled_regulator) {
-    const HybridPowerSystem projected = project_to_canonical_models(sys);
+    const HybridPowerSystem projected =
+        projection::RichToCanonicalOperator::apply(sys).canonical;
     const auto local_triangle_trial =
         try_solve_transformer3w_isolated_triangle_snapshot(projected, opt);
     DPFResult result;
@@ -1098,7 +1100,8 @@ DPFResult solve_distribution_pf(const HybridPowerSystem& sys,
   bool finalized = false;
 
   for (int control_iter = 1; control_iter <= opt.max_control_iter; ++control_iter) {
-    const HybridPowerSystem projected = project_to_canonical_models(working);
+    const HybridPowerSystem projected =
+        projection::RichToCanonicalOperator::apply(working).canonical;
     auto snapshot = solve_distribution_pf_ac_snapshot(projected.ac, opt);
     DPFResult current_result = snapshot.result;
     std::vector<RegulatorControlState> regulator_states;

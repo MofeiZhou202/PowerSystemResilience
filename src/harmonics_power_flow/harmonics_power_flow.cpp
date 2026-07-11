@@ -18,6 +18,7 @@
 #include "hacdcpf/analysis/harmonics_power_flow.hpp"
 
 #include "hacdcpf/model/device_control_role.hpp"
+#include "hacdcpf/projection/result_attribution.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -373,9 +374,27 @@ std::string HPFResult::summary() const {
 // ───────────────────────────────────────────────────────────────────────────
 // Main solver
 // ───────────────────────────────────────────────────────────────────────────
-HPFResult solve_harmonic_power_flow(const HybridPowerSystem& sys,
-                                    const HarmonicStudyInputs& inputs,
+HPFResult solve_harmonic_power_flow(const HybridPowerSystem& rich_sys,
+                                    const HarmonicStudyInputs& rich_inputs,
                                     const HPFOptions& opt) {
+  const auto projection_bundle =
+      projection::RichToCanonicalOperator::apply(rich_sys);
+  const auto& sys = projection_bundle.canonical;
+  HarmonicStudyInputs canonical_inputs = rich_inputs;
+  if (sys.bus_merge_map) {
+    const auto& bus_map = *sys.bus_merge_map;
+    const auto canonical_ac_bus = [&](int rich_bus) {
+      const auto it = bus_map.ext_to_int.find(rich_bus);
+      return it == bus_map.ext_to_int.end() ? rich_bus : it->second + 1;
+    };
+    for (auto& source : canonical_inputs.sources) {
+      if (!source.is_dc) source.bus = canonical_ac_bus(source.bus);
+    }
+    for (auto& nic : canonical_inputs.nics) {
+      nic.bus_ac = canonical_ac_bus(nic.bus_ac);
+    }
+  }
+  const auto& inputs = canonical_inputs;
   HPFResult res;
   const double base = sys.base_mva > 0 ? sys.base_mva : 100.0;
   const auto ac_id2pos = build_id_map(sys.ac.buses);
@@ -682,7 +701,35 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& sys,
     }
   }
 
-  res.ac_bus_results = std::move(ac_res);
+  if (sys.bus_merge_map) {
+    const auto positions =
+        projection::CanonicalToRichOperator::ac_bus_reprojection_positions(
+            rich_sys, projection_bundle);
+    res.ac_bus_results.reserve(rich_sys.ac.buses.size());
+    for (size_t i = 0; i < rich_sys.ac.buses.size(); ++i) {
+      const auto& rich_bus = rich_sys.ac.buses[i];
+      HarmonicBusResult attributed;
+      attributed.bus = rich_bus.index;
+      attributed.is_dc = false;
+      attributed.v_fund_pu = 0.0;
+      const int position = positions[i];
+      if (position >= 0 && position < static_cast<int>(ac_res.size())) {
+        attributed = ac_res[static_cast<size_t>(position)];
+        attributed.bus = rich_bus.index;
+      }
+      res.ac_bus_results.push_back(std::move(attributed));
+    }
+    res.max_ac_thd_pct = 0.0;
+    res.max_ac_thd_bus = -1;
+    for (const auto& result : res.ac_bus_results) {
+      if (result.thd_pct > res.max_ac_thd_pct) {
+        res.max_ac_thd_pct = result.thd_pct;
+        res.max_ac_thd_bus = result.bus;
+      }
+    }
+  } else {
+    res.ac_bus_results = std::move(ac_res);
+  }
   res.dc_bus_results = std::move(dc_res);
   res.ok = true;
   if (!res.base_pf_converged && opt.run_base_power_flow)

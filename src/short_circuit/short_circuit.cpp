@@ -33,6 +33,7 @@
 
 #include "hacdcpf/model/components.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
+#include "hacdcpf/projection/result_attribution.hpp"
 #include "hacdcpf/model/device_control_role.hpp"
 #include "hacdcpf/model/enums.hpp"
 #include "hacdcpf/model/network_utils.hpp"
@@ -854,7 +855,9 @@ std::string SCResult::summary() const {
 // =========================================================================
 SCResult compute_short_circuit(const HybridPowerSystem& sys,
                                const SCOptions& opt) {
-  const HybridPowerSystem projected = project_to_canonical_models(sys);
+  const auto projection_bundle =
+      projection::RichToCanonicalOperator::apply(sys);
+  const auto& projected = projection_bundle.canonical;
   const auto& ac = projected.ac;
   const int n = static_cast<int>(ac.buses.size());
   SCResult result;
@@ -872,7 +875,8 @@ SCResult compute_short_circuit(const HybridPowerSystem& sys,
   if (lu.info() != Eigen::Success)
     throw std::runtime_error("compute_short_circuit: Y_fault factorisation failed");
 
-  result.bus_results.reserve(n);
+  std::vector<BusFaultResult> canonical_bus_results;
+  canonical_bus_results.reserve(n);
   for (int k = 0; k < n; ++k) {
     // Canonical projection reindexes buses to a 1..n_merged sequence (and may
     // merge zero-impedance buses).  Whenever a BusMergeMap is present it records
@@ -888,8 +892,26 @@ SCResult compute_short_circuit(const HybridPowerSystem& sys,
       }
     }
     double base_kv = ac.buses[k].base_kv;
-    result.bus_results.push_back(
+    canonical_bus_results.push_back(
         fault_at_bus(lu, k, bus_id, n, projected.base_mva, base_kv, opt));
+  }
+  if (projected.bus_merge_map) {
+    const auto positions =
+        projection::CanonicalToRichOperator::ac_bus_reprojection_positions(
+            sys, projection_bundle);
+    result.bus_results.reserve(sys.ac.buses.size());
+    for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+      const int position = positions[i];
+      if (position < 0 ||
+          position >= static_cast<int>(canonical_bus_results.size())) {
+        continue;
+      }
+      auto attributed = canonical_bus_results[static_cast<size_t>(position)];
+      attributed.bus_id = sys.ac.buses[i].index;
+      result.bus_results.push_back(std::move(attributed));
+    }
+  } else {
+    result.bus_results = std::move(canonical_bus_results);
   }
   return result;
 }
@@ -900,7 +922,9 @@ SCResult compute_short_circuit(const HybridPowerSystem& sys,
 BusFaultResult compute_fault_at_bus(const HybridPowerSystem& sys,
                                     int bus_id,
                                     const SCOptions& opt) {
-  const HybridPowerSystem projected = project_to_canonical_models(sys);
+  const auto projection_bundle =
+      projection::RichToCanonicalOperator::apply(sys);
+  const auto& projected = projection_bundle.canonical;
   const auto& ac = projected.ac;
   const int n = static_cast<int>(ac.buses.size());
 
@@ -993,7 +1017,9 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   out.fault_bus_id = fault_bus_id;
   out.solved = false;
 
-  const HybridPowerSystem projected = project_to_canonical_models(sys);
+  const auto projection_bundle =
+      projection::RichToCanonicalOperator::apply(sys);
+  const auto& projected = projection_bundle.canonical;
   const auto& ac = projected.ac;
   const int n = static_cast<int>(ac.buses.size());
   if (n == 0) return out;
@@ -1745,6 +1771,24 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
 
       out.branch_results.push_back(br_res);
     }
+  }
+
+  if (projected.bus_merge_map) {
+    const auto positions =
+        projection::CanonicalToRichOperator::ac_bus_reprojection_positions(
+            sys, projection_bundle);
+    std::vector<SCDetailedBusResult> attributed_results;
+    attributed_results.reserve(sys.ac.buses.size());
+    for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+      const int position = positions[i];
+      if (position < 0 || position >= static_cast<int>(out.bus_results.size())) {
+        continue;
+      }
+      auto attributed = out.bus_results[static_cast<size_t>(position)];
+      attributed.bus_id = sys.ac.buses[i].index;
+      attributed_results.push_back(std::move(attributed));
+    }
+    out.bus_results = std::move(attributed_results);
   }
 
   out.solved = true;

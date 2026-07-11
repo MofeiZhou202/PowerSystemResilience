@@ -34,6 +34,7 @@
 #include "hacdcpf/model/network_utils.hpp"
 #include "hacdcpf/graph/graph.hpp"
 #include "hacdcpf/network_reconfiguration/topology_reconfiguration.hpp"
+#include "hacdcpf/projection/result_attribution.hpp"
 #include "hacdcpf/solver/branch_and_cut.hpp"
 #include "hacdcpf/solver/problem_types.hpp"
 
@@ -898,7 +899,8 @@ ONRResult solve_optimal_reconfiguration(const HybridPowerSystem& sys,
                                         const ONROptions& opt) {
   // Project through canonical layer so Transformer2W/3W, Switches,
   // FlexibleLoads, AsymmetricLoads, and Chargers are expanded.
-  const HybridPowerSystem projected = project_to_canonical_models(sys);
+  const HybridPowerSystem projected =
+      projection::RichToCanonicalOperator::apply(sys).canonical;
   return solve_optimal_reconfiguration(projected.ac, opt);
 }
 

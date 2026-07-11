@@ -98,10 +98,12 @@ struct VarIndex {
 struct ConstraintIndex {
   int n_pbal_ac{0}, n_qbal_ac{0}, n_pbal_dc{0};
   int n_conv_bal{0}, n_dcdc_bal{0}, n_er_bal{0};
+  int n_dc_ref{0};
   int n_eq_total{0};
 
   int i_pbal_ac{0}, i_qbal_ac{0}, i_pbal_dc{0};
   int i_conv_bal{0}, i_dcdc_bal{0}, i_er_bal{0};
+  int i_dc_ref{0};
 
   int n_sf{0}, n_st{0}, n_sconv{0}, n_sdc{0};
   // Converter physical limits (multi-converter model §3.1.5/3.1.4), appended
@@ -144,6 +146,8 @@ struct Problem {
   std::vector<int> gen_bus;
   std::vector<int> conv_ac_bus;
   std::vector<int> conv_dc_bus;
+  // Every in-service DC_V bus contributes a voltage-reference equality.
+  std::vector<int> dc_voltage_reference_buses;
 
   std::vector<int> ren_var_to_data;
   std::vector<int> ren_source;

@@ -2191,6 +2191,39 @@ TEST_CASE("HPF THD scales inversely with a depressed fundamental voltage",
   CHECK(std::isfinite(thd_at(rhalf, 2)));
 }
 
+TEST_CASE("HPF projects rich topology and broadcasts merged-bus observables",
+          "[harmonics][projection][attribution]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(10, BusType::SLACK), ac_bus(20, BusType::PQ),
+                  ac_bus(30, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 10, 20, 0.01, 0.1)};
+  CircuitBreaker breaker;
+  breaker.index = 34;
+  breaker.bus_from = 20;
+  breaker.bus_to = 30;
+  breaker.closed = true;
+  breaker.z_ohm = 0.0;
+  sys.ac.circuit_breakers.push_back(breaker);
+
+  HarmonicCurrentSource source;
+  source.bus = 30;
+  source.i_base_pu = 1.0;
+  source.spectrum = {{5, 100.0, 0.0}};
+  HarmonicStudyInputs inputs{.sources = {source}, .nics = {}};
+  HPFOptions options;
+  options.run_base_power_flow = false;
+  options.include_load_impedance = false;
+  options.ac_orders = {5};
+  options.dc_orders = {};
+
+  const auto result = solve_harmonic_power_flow(sys, inputs, options);
+  REQUIRE(result.ok);
+  REQUIRE(result.ac_bus_results.size() == 3);
+  CHECK_THAT(std::abs(vbus(result, 20, 5)), WithinAbs(std::abs(vbus(result, 30, 5)), 1e-12));
+  CHECK(std::abs(vbus(result, 30, 5)) > 0.0);
+}
 
 
 

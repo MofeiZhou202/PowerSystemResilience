@@ -142,6 +142,17 @@ TEST_CASE("Power flow: actual-value branch matches equivalent per-unit branch",
         b2.vmin_pu = 0.9; b2.vmax_pu = 1.1; b2.in_service = true;
         sys.ac.buses = {b1, b2};
 
+        Generator gen;
+        gen.index = 1;
+        gen.bus = 1;
+        gen.in_service = true;
+        gen.is_slack = true;
+        gen.pmin_mw = -100.0;
+        gen.pmax_mw = 100.0;
+        gen.qmin_mvar = -100.0;
+        gen.qmax_mvar = 100.0;
+        sys.ac.generators = {gen};
+
         ACBranch br; br.index = 1; br.from_bus = 1; br.to_bus = 2; br.in_service = true;
         if (actual) {
             // z_base = 121 ohm; choose actual values equal to the pu twin below.

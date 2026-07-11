@@ -173,13 +173,13 @@ void attach_two_terminal_dc(HybridPowerSystem& sys,
   sys.dc.name = sys.name + " DC";
   sys.dc.buses = {
       DCBus{.index = 1,
-            .bus_type = DCBusType::DC_V,
+            .bus_type = DCBusType::DC_P,
             .vm_pu = 1.0,
             .pd_mw = 0.0,
             .in_service = true,
             .name = "DCBus1"},
       DCBus{.index = 2,
-            .bus_type = DCBusType::DC_P,
+            .bus_type = DCBusType::DC_V,
             .vm_pu = 1.0,
             .pd_mw = 0.0,
             .in_service = true,
@@ -862,8 +862,8 @@ HybridPowerSystem build_ieee24_3area_acdc() {
   sys.dc.base_mva = 100.0;
   sys.dc.name = "IEEE24 MTDC";
   sys.dc.buses = {
-      DCBus{.index = 1, .bus_type = DCBusType::DC_V, .vm_pu = 1.0, .pd_mw = 0.0, .in_service = true, .name = "DCBus1"},
-      DCBus{.index = 2, .bus_type = DCBusType::DC_P, .vm_pu = 1.0, .pd_mw = 0.0, .in_service = true, .name = "DCBus2"},
+      DCBus{.index = 1, .bus_type = DCBusType::DC_P, .vm_pu = 1.0, .pd_mw = 0.0, .in_service = true, .name = "DCBus1"},
+      DCBus{.index = 2, .bus_type = DCBusType::DC_V, .vm_pu = 1.0, .pd_mw = 0.0, .in_service = true, .name = "DCBus2"},
       DCBus{.index = 3, .bus_type = DCBusType::DC_P, .vm_pu = 1.0, .pd_mw = 0.0, .in_service = true, .name = "DCBus3"},
       DCBus{.index = 4, .bus_type = DCBusType::DC_P, .vm_pu = 1.0, .pd_mw = 0.0, .in_service = true, .name = "DCBus4"},
   };
@@ -1161,8 +1161,8 @@ HybridPowerSystem build_ieee118_acdc() {
   sys.dc.name = sys.name + " MTDC";
 
   sys.dc.buses = {
-      DCBus{.index = 1, .bus_type = DCBusType::DC_V, .vm_pu = 1.0, .pd_mw = 0.0, .in_service = true, .name = "DCBus1"},
-      DCBus{.index = 2, .bus_type = DCBusType::DC_P, .vm_pu = 1.0, .pd_mw = 0.0, .in_service = true, .name = "DCBus2"},
+      DCBus{.index = 1, .bus_type = DCBusType::DC_P, .vm_pu = 1.0, .pd_mw = 0.0, .in_service = true, .name = "DCBus1"},
+      DCBus{.index = 2, .bus_type = DCBusType::DC_V, .vm_pu = 1.0, .pd_mw = 0.0, .in_service = true, .name = "DCBus2"},
       DCBus{.index = 3, .bus_type = DCBusType::DC_P, .vm_pu = 1.0, .pd_mw = 0.0, .in_service = true, .name = "DCBus3"},
       DCBus{.index = 4, .bus_type = DCBusType::DC_P, .vm_pu = 1.0, .pd_mw = 0.0, .in_service = true, .name = "DCBus4"},
       DCBus{.index = 5, .bus_type = DCBusType::DC_P, .vm_pu = 1.0, .pd_mw = 0.0, .in_service = true, .name = "DCBus5"},
@@ -3956,6 +3956,23 @@ HybridPowerSystem build_actual_value_demo_acdc() {
   dl.r_ohm_per_km = 0.05; dl.length_km = 1.0; dl.base_kv = 5.0;
   dl.n_parallel = 1; dl.rate_a_mva = 2.0; dl.in_service = true; dl.name = "DCLink1";
   sys.dc.branches = {dl};
+
+  DCStorage dc_source;
+  dc_source.index = 1;
+  dc_source.bus = 1;
+  dc_source.in_service = true;
+  dc_source.name = "DC-Grid-Forming-BESS";
+  dc_source.type = "BESS";
+  dc_source.p_mw = 0.0;
+  dc_source.p_rated_mw = 2.0;
+  dc_source.pmin_mw = -2.0;
+  dc_source.pmax_mw = 2.0;
+  dc_source.e_rated_mwh = 4.0;
+  dc_source.soc_init = 0.5;
+  dc_source.soc_min = 0.1;
+  dc_source.soc_max = 0.9;
+  dc_source.controllable = true;
+  sys.dc.dc_storage = {dc_source};
 
   return sys;
 }

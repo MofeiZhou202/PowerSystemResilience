@@ -4,11 +4,13 @@
 
 #include "hacdcpf/validation/validate_system.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 #include <unordered_set>
 
 #include "hacdcpf/graph/graph.hpp"
+#include "hacdcpf/model/device_control_role.hpp"
 
 namespace hacdcpf::validation {
 
@@ -27,6 +29,101 @@ std::unordered_set<int> collect_ids(const Container& c, IdFn id_fn) {
 }  // namespace
 
 // ── public API ───────────────────────────────────────────────────────────────
+
+ValidationReport validate_reference_bus_eligibility(
+    const HybridPowerSystem& sys) {
+    ValidationReport r;
+    using S = Severity;
+
+    const auto has_ac_support = [&](int bus) {
+        const bool external_grid = std::any_of(
+            sys.ac.external_grids.begin(), sys.ac.external_grids.end(),
+            [&](const ExternalGrid& grid) {
+                return grid.in_service && grid.bus == bus;
+            });
+        const bool generator = std::any_of(
+            sys.ac.generators.begin(), sys.ac.generators.end(),
+            [&](const Generator& gen) {
+                return gen.in_service && gen.bus == bus;
+            });
+        const bool storage = std::any_of(
+            sys.ac.storage.begin(), sys.ac.storage.end(),
+            [&](const Storage& item) {
+                return item.in_service && item.bus == bus &&
+                       item.grid_forming && item.controllable &&
+                       item.pmax_mw > item.pmin_mw;
+            });
+        const bool converter = std::any_of(
+            sys.vsc_converters.begin(), sys.vsc_converters.end(),
+            [&](const VSCConverter& item) {
+                return item.in_service && item.bus_ac == bus &&
+                       resolve_device_control_role(item)
+                           .provides_ac_angle_reference;
+            });
+        return external_grid || generator || storage || converter;
+    };
+
+    const auto has_dc_support = [&](int bus) {
+        const auto usable_storage = [&](const auto& item) {
+            return item.in_service && item.bus == bus && item.controllable &&
+                   item.pmax_mw > item.pmin_mw;
+        };
+        const bool storage =
+            std::any_of(sys.dc.storage.begin(), sys.dc.storage.end(),
+                        usable_storage) ||
+            std::any_of(sys.dc.dc_storage.begin(), sys.dc.dc_storage.end(),
+                        usable_storage);
+        const bool vsc = std::any_of(
+            sys.vsc_converters.begin(), sys.vsc_converters.end(),
+            [&](const VSCConverter& item) {
+                return item.in_service && item.bus_dc == bus &&
+                       resolve_device_control_role(item).provides_dc_v_reference;
+            });
+        const bool dcdc = std::any_of(
+            sys.dc.dcdc_converters.begin(), sys.dc.dcdc_converters.end(),
+            [&](const DCDCConverter& item) {
+                const bool voltage_mode =
+                    item.control_mode == DCDCControlMode::Voltage ||
+                    (item.control_mode == DCDCControlMode::Droop &&
+                     item.k_droop != 0.0);
+                return item.in_service && item.controllable &&
+                       item.bus_out == bus && voltage_mode &&
+                       item.pmax_mw > item.pmin_mw;
+            });
+        return storage || vsc || dcdc;
+    };
+
+    std::unordered_set<int> ac_reference_buses;
+    for (const auto& bus : sys.ac.buses) {
+        if (bus.in_service && bus.bus_type == BusType::SLACK)
+            ac_reference_buses.insert(bus.index);
+    }
+    for (const auto& gen : sys.ac.generators) {
+        if (gen.in_service && gen.is_slack)
+            ac_reference_buses.insert(gen.bus);
+    }
+    for (int bus : ac_reference_buses) {
+        if (!has_ac_support(bus)) {
+            r.add(S::Error, "ACBus", std::to_string(bus), "bus_type",
+                  "AC slack bus " + std::to_string(bus) +
+                  " has no in-service balancing device. Add an external grid, "
+                  "generator, grid-forming controllable storage, or an AC "
+                  "grid-forming VSC before assigning SLACK.");
+        }
+    }
+
+    for (const auto& bus : sys.dc.buses) {
+        if (!bus.in_service || bus.bus_type != DCBusType::DC_V) continue;
+        if (!has_dc_support(bus.index)) {
+            r.add(S::Error, "DCBus", std::to_string(bus.index), "bus_type",
+                  "DC voltage-reference bus " + std::to_string(bus.index) +
+                  " has no in-service balancing device. Add controllable DC "
+                  "storage, a DC-voltage-forming VSC, or a voltage-forming "
+                  "DC/DC converter before assigning DC_V.");
+        }
+    }
+    return r;
+}
 
 ValidationReport validate(const HybridPowerSystem& sys) {
     ValidationReport r;
@@ -312,18 +409,24 @@ ValidationReport validate(const HybridPowerSystem& sys) {
 
     // ── 8. Slack bus ──────────────────────────────────────────────────────────
     {
-        int slack_count = 0;
+        std::unordered_set<int> slack_buses;
         for (const auto& b : sys.ac.buses)
-            if (b.bus_type == BusType::SLACK) ++slack_count;
+            if (b.in_service && b.bus_type == BusType::SLACK)
+                slack_buses.insert(b.index);
         for (const auto& g : sys.ac.generators)
-            if (g.is_slack) ++slack_count;
-        if (!sys.ac.buses.empty() && slack_count == 0)
+            if (g.in_service && g.is_slack) slack_buses.insert(g.bus);
+        if (!sys.ac.buses.empty() && slack_buses.empty())
             r.add(S::Error, "ACSystem", "", "",
                   "No slack bus found (BusType::SLACK or Generator::is_slack)");
-        if (slack_count > 1)
+        if (slack_buses.size() > 1)
             r.add(S::Warning, "ACSystem", "", "",
-                  std::to_string(slack_count) +
+                  std::to_string(slack_buses.size()) +
                   " slack buses found; distributed-slack is recommended");
+    }
+    {
+        const auto reference_report = validate_reference_bus_eligibility(sys);
+        r.issues.insert(r.issues.end(), reference_report.issues.begin(),
+                        reference_report.issues.end());
     }
 
     // ── 9. Negative AC branch resistance ─────────────────────────────────────

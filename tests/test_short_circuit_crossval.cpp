@@ -367,6 +367,44 @@ TEST_CASE("SC: non-contiguous bus IDs resolve to the correct bus",
   CHECK_THROWS_AS(compute_fault_at_bus(sys, 999, opt), std::invalid_argument);
 }
 
+TEST_CASE("SC broadcasts ideal-merge results to every rich bus",
+          "[short_circuit][projection][attribution]") {
+  auto sys = make_sys(
+      {make_bus(10, BusType::SLACK), make_bus(20, BusType::PQ),
+       make_bus(30, BusType::PQ)},
+      {make_branch(1, 10, 20, 0.02, 0.20)}, 100.0, 0.001);
+  CircuitBreaker breaker;
+  breaker.index = 34;
+  breaker.bus_from = 20;
+  breaker.bus_to = 30;
+  breaker.closed = true;
+  breaker.z_ohm = 0.0;
+  sys.ac.circuit_breakers.push_back(breaker);
+
+  SCOptions options;
+  options.fault_type = FaultType::ThreePhase;
+  options.c_factor = 1.0;
+  const auto result = compute_short_circuit(sys, options);
+  REQUIRE(result.bus_results.size() == 3);
+  CHECK(result.bus_results[0].bus_id == 10);
+  CHECK(result.bus_results[1].bus_id == 20);
+  CHECK(result.bus_results[2].bus_id == 30);
+  CHECK(std::abs(result.bus_results[1].z_thevenin -
+                 result.bus_results[2].z_thevenin) < 1e-12);
+
+  SCDetailedOptions detailed_options;
+  detailed_options.fault_type = FaultType::ThreePhase;
+  detailed_options.compute_branch_flows = false;
+  const auto detailed =
+      run_short_circuit_detailed(sys, 30, detailed_options);
+  REQUIRE(detailed.solved);
+  REQUIRE(detailed.bus_results.size() == 3);
+  CHECK(detailed.bus_results[1].bus_id == 20);
+  CHECK(detailed.bus_results[2].bus_id == 30);
+  CHECK(std::abs(detailed.bus_results[1].ikss_ka -
+                 detailed.bus_results[2].ikss_ka) < 1e-12);
+}
+
 TEST_CASE("SC detailed: downstream fault reports upstream source contribution and voltages",
           "[short_circuit][detailed][regression]") {
   auto sys = make_sys(

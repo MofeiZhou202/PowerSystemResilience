@@ -90,6 +90,90 @@ TEST_CASE("AC OPF converges on internal hybrid case300_acdc", "[opf][acdc]") {
   CHECK_FALSE(r.vm.empty());
 }
 
+TEST_CASE("Hybrid microgrid OPF fixes DC reference voltage and balances DC generation",
+          "[opf][acdc][slack][regression]") {
+  HybridPowerSystem sys = io::build_hybrid_acdc_microgrid_island();
+  REQUIRE(sys.ac.buses.front().bus_type == BusType::SLACK);
+  REQUIRE(sys.dc.buses.front().bus_type == DCBusType::DC_V);
+
+  opf::ACOPFOptions opt;
+  opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  opt.max_inner_iterations = 400;
+  opt.allow_fallback = false;
+  const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+
+  REQUIRE(r.converged);
+  REQUIRE(r.vm.size() == sys.ac.buses.size());
+  REQUIRE(r.vdc.size() == sys.dc.buses.size());
+  REQUIRE(r.pac_mw.size() == 1);
+  CHECK(std::abs(r.vdc[0] - sys.dc.buses[0].vm_pu) < 2e-6);
+
+  // DC demand is 0.85 MW and DC solar injects 0.60 MW, so the AC-side VSC
+  // exchange is around 0.25 MW plus converter/DC losses, not 1.45 MW as when
+  // the static-generator sign was incorrectly treated as additional demand.
+  CHECK(std::abs(r.pac_mw[0]) < 0.5);
+  CHECK(r.max_constraint_violation < 1e-5);
+}
+
+TEST_CASE("Bare DC_V bus is rejected before OPF formulation",
+          "[opf][acdc][slack][regression]") {
+  HybridPowerSystem sys = io::build_actual_value_demo_acdc();
+  REQUIRE(sys.dc.buses.front().bus_type == DCBusType::DC_V);
+  REQUIRE(sys.vsc_converters.empty());
+  REQUIRE_FALSE(sys.dc.dc_storage.empty());
+  sys.dc.dc_storage.clear();
+
+  opf::ACOPFOptions opt;
+  opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  opt.max_inner_iterations = 400;
+  opt.allow_fallback = false;
+  const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+
+  CHECK_FALSE(r.converged);
+  CHECK(r.iterations == 0);
+  CHECK(r.status.find("reference-bus eligibility check failed") !=
+        std::string::npos);
+  REQUIRE_FALSE(r.infeasibility_hints.empty());
+  CHECK(r.infeasibility_hints.front().find("DC voltage-reference bus 1") !=
+        std::string::npos);
+}
+
+TEST_CASE("DC slack KCL Jacobian matches finite differences",
+          "[opf][acdc][slack][jacobian][regression]") {
+  const HybridPowerSystem sys = io::build_hybrid_acdc_microgrid_island();
+  opf::parity::ParityOptions parity_opt;
+  const opf::parity::Problem prob =
+      opf::parity::build_problem(sys, parity_opt);
+
+  Eigen::VectorXd xmin, xmax, x;
+  opf::parity::build_variable_bounds(prob, xmin, xmax);
+  opf::parity::build_initial_point(prob, xmin, xmax, x);
+
+  opf::parity::EvalWorkspace ws;
+  Eigen::VectorXd g;
+  Eigen::SparseMatrix<double> jacobian;
+  opf::parity::equality_constraints(prob, x, ws, g);
+  opf::parity::equality_jacobian(prob, x, ws, jacobian);
+
+  constexpr double eps = 1e-7;
+  std::vector<int> columns;
+  for (int k = 0; k < prob.vidx.n_vdc; ++k)
+    columns.push_back(prob.vidx.i_vdc + k);
+  for (const int col : columns) {
+    Eigen::VectorXd xp = x;
+    Eigen::VectorXd xm = x;
+    xp[col] += eps;
+    xm[col] -= eps;
+    opf::parity::EvalWorkspace wsp, wsm;
+    Eigen::VectorXd gp, gm;
+    opf::parity::equality_constraints(prob, xp, wsp, gp);
+    opf::parity::equality_constraints(prob, xm, wsm, gm);
+    const Eigen::VectorXd finite_difference = (gp - gm) / (2.0 * eps);
+    const Eigen::VectorXd analytic = Eigen::VectorXd(jacobian.col(col));
+    CHECK((analytic - finite_difference).lpNorm<Eigen::Infinity>() < 1e-6);
+  }
+}
+
 TEST_CASE("AC OPF converges on internal hybrid case2000_acdc", "[opf][acdc]") {
   HybridPowerSystem sys = io::build_case2000_acdc();
   REQUIRE(sys.ac.buses.size() > 1000);

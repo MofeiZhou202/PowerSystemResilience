@@ -207,6 +207,57 @@ TEST_CASE("validate: no slack bus produces Error", "[validation][fault][slack]")
     CHECK(r.has_errors());
 }
 
+TEST_CASE("validate: AC slack bus requires a physical balancing device",
+          "[validation][fault][slack][reference]") {
+    auto sys = make_valid_2bus();
+    sys.ac.generators.clear();
+    const auto r = val::validate_reference_bus_eligibility(sys);
+    REQUIRE(r.has_errors());
+    CHECK(has_issue(r, "ACBus", "bus_type"));
+    const auto pf = solve_power_flow(sys);
+    CHECK_FALSE(pf.converged);
+    CHECK(pf.iterations == 0);
+    CHECK(pf.diagnostics.termination_reason ==
+          "Reference-bus eligibility check failed");
+}
+
+TEST_CASE("validate: bare DC_V bus is not an implicit source",
+          "[validation][fault][slack][reference][dc]") {
+    auto sys = make_valid_2bus();
+    DCBus dc1;
+    dc1.index = 1;
+    dc1.bus_type = DCBusType::DC_V;
+    dc1.in_service = true;
+    sys.dc.buses = {dc1};
+    const auto r = val::validate_reference_bus_eligibility(sys);
+    REQUIRE(r.has_errors());
+    CHECK(has_issue(r, "DCBus", "bus_type"));
+    const auto pf = solve_power_flow(sys);
+    CHECK_FALSE(pf.converged);
+    CHECK(pf.iterations == 0);
+    CHECK(pf.diagnostics.termination_reason ==
+          "Reference-bus eligibility check failed");
+}
+
+TEST_CASE("validate: controllable DC storage can back a DC_V bus",
+          "[validation][slack][reference][dc][storage]") {
+    auto sys = make_valid_2bus();
+    DCBus dc1;
+    dc1.index = 1;
+    dc1.bus_type = DCBusType::DC_V;
+    dc1.in_service = true;
+    sys.dc.buses = {dc1};
+    DCStorage storage;
+    storage.index = 1;
+    storage.bus = 1;
+    storage.in_service = true;
+    storage.controllable = true;
+    storage.pmin_mw = -1.0;
+    storage.pmax_mw = 1.0;
+    sys.dc.dc_storage = {storage};
+    CHECK(val::validate_reference_bus_eligibility(sys).ok());
+}
+
 TEST_CASE("validate: duplicate bus IDs produce Error", "[validation][fault][topology]") {
     auto sys = make_duplicate_bus_ids();
     auto r = val::validate(sys);
@@ -501,5 +552,7 @@ TEST_CASE("Validation regression: IEEE14 builder always validates clean", "[vali
 }
 
 TEST_CASE("Validation regression: IEEE118 builder always validates clean", "[validation][regression][case_builder]") {
-    CHECK(val::validate(io::build_ieee118_acdc()).ok());
+    const auto report = val::validate(io::build_ieee118_acdc());
+    INFO(report.summary());
+    CHECK(report.ok());
 }

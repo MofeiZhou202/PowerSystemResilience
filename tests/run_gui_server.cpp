@@ -39,6 +39,7 @@
 #include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/power_flow/assembly/branch_flow.hpp"
 #include "hacdcpf/projection/project_to_canonical.hpp"
+#include "hacdcpf/projection/result_attribution.hpp"
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/sppt/sppt.hpp"
 #include "hacdcpf/io/case_builders.hpp"
@@ -78,6 +79,170 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 namespace {
+
+std::string attribution_metric_label(const std::string& name) {
+  static const std::unordered_map<std::string, std::string> labels{
+      {"vm_pu", "Vm"}, {"va_rad", "Va"}, {"vdc_pu", "Vdc"},
+      {"p_mw", "P"}, {"q_mvar", "Q"}, {"soc", "SOC"},
+      {"loss_mw", "Loss"}, {"p_schedule_mw", "P schedule"},
+      {"p_initial_mw", "P initial"}, {"p_rated_kw", "P rated"}};
+  if (const auto it = labels.find(name); it != labels.end()) return it->second;
+  return name;
+}
+
+std::string attribution_quantity(const std::string& name,
+                                 const std::string& unit) {
+  if (unit == "MW" || name.find("p_") != std::string::npos ||
+      name.find("_pf_") != std::string::npos ||
+      name.find("_pt_") != std::string::npos)
+    return "p";
+  if (unit == "MVar" || name.find("q_") != std::string::npos) return "q";
+  return "scalar";
+}
+
+json rich_attribution_to_component_results(
+    const hacdcpf::projection::RichResultAttribution& attribution) {
+  json rows = json::array();
+  for (const auto& component : attribution.components) {
+    json metrics = json::array();
+    for (const auto& value : component.values) {
+      double displayed = value.value;
+      std::string unit = value.unit;
+      std::string label = attribution_metric_label(value.name);
+      if (value.name == "va_rad") {
+        displayed *= 180.0 / M_PI;
+        unit = "deg";
+      }
+      metrics.push_back(json{{"label", label}, {"name", value.name},
+                             {"value", displayed}, {"unit", unit},
+                             {"quantity", attribution_quantity(value.name, unit)},
+                             {"precision", 4}});
+    }
+    json terminals = json::array();
+    for (const auto& terminal : component.terminals) {
+      const std::string prefix =
+          component.component_type == "vsc_converter"
+              ? (terminal.is_dc ? "dc" : "ac")
+          : component.component_type == "dcdc_converter"
+              ? terminal.name
+          : terminal.name == "from" ? "f"
+          : terminal.name == "to" ? "t"
+                                    : terminal.name;
+      if (terminal.has_p)
+        metrics.push_back(json{{"label", "P" + prefix},
+                               {"name", "terminal." + terminal.name + ".p_mw"},
+                               {"value", terminal.p_mw}, {"unit", "MW"},
+                               {"quantity", "p"}, {"precision", 4}});
+      if (terminal.has_q)
+        metrics.push_back(json{{"label", "Q" + prefix},
+                               {"name", "terminal." + terminal.name + ".q_mvar"},
+                               {"value", terminal.q_mvar}, {"unit", "MVar"},
+                               {"quantity", "q"}, {"precision", 4}});
+      terminals.push_back(
+          json{{"name", terminal.name}, {"bus", terminal.bus},
+               {"domain", terminal.is_dc ? "DC" : "AC"},
+               {"sign_convention", "positive_injection_into_network"},
+               {"p_mw", terminal.has_p ? json(terminal.p_mw) : json(nullptr)},
+               {"q_mvar", terminal.has_q ? json(terminal.q_mvar) : json(nullptr)},
+               {"v_pu", terminal.has_v ? json(terminal.v_pu) : json(nullptr)}});
+    }
+    json sources = json::array();
+    for (const auto& source : component.canonical_sources)
+      sources.push_back(json{{"component_type", source.component_type},
+                             {"component_index", source.component_index},
+                             {"participation_factor", source.participation_factor}});
+    rows.push_back(
+        json{{"canvas_type", component.component_type},
+             {"canvas_index", component.component_index},
+             {"index", component.component_index},
+             {"position", component.position}, {"domain", component.domain},
+             {"name", component.name},
+             {"status", component.in_service ? "已求解" : "停运"},
+             {"in_service", component.in_service},
+             {"recovery_class",
+              hacdcpf::projection::recovery_class_name(component.recovery)},
+             {"recovery_reason", component.recovery_reason},
+             {"canonical_sources", std::move(sources)},
+             {"terminals", std::move(terminals)},
+             {"metrics", std::move(metrics)}});
+  }
+  return rows;
+}
+
+json rich_attribution_coverage_json(
+    const hacdcpf::projection::AttributionCoverage& coverage) {
+  return json{{"rich_components", coverage.rich_components},
+              {"attributed_components", coverage.attributed_components},
+              {"total", coverage.total()},
+              {"strong", coverage.strong_components},
+              {"approximate", coverage.approximate_components},
+              {"audit_only", coverage.audit_only_components},
+              {"unsupported", coverage.unsupported_components}};
+}
+
+std::optional<double> attributed_active_power_mw(
+    const hacdcpf::projection::RichComponentResult& row) {
+  const auto value = std::find_if(
+      row.values.begin(), row.values.end(), [](const auto& item) {
+        return item.name == "p_mw";
+      });
+  if (value != row.values.end()) return value->value;
+  const auto terminal = std::find_if(
+      row.terminals.begin(), row.terminals.end(), [](const auto& item) {
+        return item.has_p &&
+               (item.name == "ac" || item.name == "dc" ||
+                item.name == "from");
+      });
+  if (terminal != row.terminals.end()) return terminal->p_mw;
+  return std::nullopt;
+}
+
+json rich_component_power_series_json(
+    const std::vector<hacdcpf::projection::RichResultAttribution>& steps,
+    const std::unordered_set<std::string>& component_types) {
+  struct Series {
+    std::string component_type;
+    std::string domain;
+    int component_index{0};
+    std::string name;
+    std::string recovery_class;
+    std::vector<double> values;
+  };
+  std::map<std::string, Series> series;
+  for (size_t t = 0; t < steps.size(); ++t) {
+    for (const auto& row : steps[t].components) {
+      if (!component_types.count(row.component_type)) continue;
+      const auto p_mw = attributed_active_power_mw(row);
+      if (!p_mw) continue;
+      const std::string key = row.component_type + "\n" + row.domain + "\n" +
+                              std::to_string(row.component_index);
+      auto& target = series[key];
+      if (target.values.empty()) {
+        target.component_type = row.component_type;
+        target.domain = row.domain;
+        target.component_index = row.component_index;
+        target.name = row.name;
+        target.recovery_class =
+            hacdcpf::projection::recovery_class_name(row.recovery);
+        target.values.assign(steps.size(), 0.0);
+      }
+      target.values[t] = *p_mw;
+    }
+  }
+  json out = json::array();
+  for (auto& [key, item] : series) {
+    (void)key;
+    out.push_back(json{{"canvas_type", item.component_type},
+                       {"domain", item.domain},
+                       {"canvas_index", item.component_index},
+                       {"name", item.name},
+                       {"recovery_class", item.recovery_class},
+                       {"quantity", "p_mw"},
+                       {"sign_convention", "positive_injection_into_network"},
+                       {"values", std::move(item.values)}});
+  }
+  return out;
+}
 
 struct VoltageQualificationMetrics {
   std::size_t ac_samples{0};
@@ -1755,6 +1920,8 @@ struct Session {
     std::vector<TsLoadBindingRow> load_profile_map;
     int assign_all_loads_to = -1;
     int assign_all_pv_to = -1;
+    int assign_all_renewables_to = -1;
+    int assign_all_prices_to = -1;
   };
   TsBindingSpec ts_binding;
   struct ExternalGridCarbonProfile {
@@ -5585,6 +5752,35 @@ void fit_ts_data_to_steps(hacdcpf::TimeSeriesData& ts, int steps) {
     for (int t = 0; t < steps; ++t)
       v[static_cast<size_t>(t)] = p.values[static_cast<size_t>(t) % orig];
     p.values = std::move(v);
+  }
+}
+
+void assign_available_default_profiles(hacdcpf::HybridPowerSystem& sys,
+                                       const hacdcpf::TimeSeriesData& ts) {
+  const auto has_profile = [&](int id) {
+    return std::any_of(ts.profiles.begin(), ts.profiles.end(),
+                       [&](const auto& profile) { return profile.id == id; });
+  };
+  if (has_profile(0)) {
+    for (auto& load : sys.ac.loads)
+      if (load.profile_id < 0) load.profile_id = 0;
+    for (auto& load : sys.dc.loads)
+      if (load.profile_id < 0) load.profile_id = 0;
+  }
+  for (auto& renewable : sys.ac.renewable_gens) {
+    if (renewable.profile_id >= 0) continue;
+    const int candidate =
+        renewable.type == hacdcpf::RenewableType::SolarPV ||
+                renewable.type == hacdcpf::RenewableType::SolarCSP
+            ? 2
+            : 1;
+    if (has_profile(candidate)) renewable.profile_id = candidate;
+  }
+  if (has_profile(2)) {
+    for (auto& pv : sys.ac.pv_systems)
+      if (pv.profile_id < 0) pv.profile_id = 2;
+    for (auto& pv : sys.dc.pv_arrays)
+      if (pv.profile_id < 0) pv.profile_id = 2;
   }
 }
 
@@ -13534,8 +13730,40 @@ int main(int argc, char** argv) {
           component_results.push_back(std::move(row));
         }
 
-        out["component_results"] = component_results;
-      };
+	        const auto projection =
+	            hacdcpf::projection::RichToCanonicalOperator::apply(sys);
+	        const auto attribution =
+	            hacdcpf::projection::CanonicalToRichOperator::apply(
+	                sys, projection, nullptr, nullptr, &pf);
+	        const json attributed_rows =
+	            rich_attribution_to_component_results(attribution);
+	        for (const auto& attributed : attributed_rows) {
+	          const auto existing = std::find_if(
+	              component_results.begin(), component_results.end(),
+	              [&](const json& row) {
+	                return row.value("canvas_type", std::string{}) ==
+	                           attributed.value("canvas_type", std::string{}) &&
+	                       row.value("domain", std::string{}) ==
+	                           attributed.value("domain", std::string{}) &&
+	                       row.value("canvas_index", row.value("index", -1)) ==
+	                           attributed.value("canvas_index", -2);
+	              });
+	          if (existing == component_results.end()) {
+	            component_results.push_back(attributed);
+	            continue;
+	          }
+	          (*existing)["canvas_index"] = attributed["canvas_index"];
+	          (*existing)["in_service"] = attributed["in_service"];
+	          (*existing)["recovery_class"] = attributed["recovery_class"];
+	          (*existing)["recovery_reason"] = attributed["recovery_reason"];
+	          (*existing)["canonical_sources"] = attributed["canonical_sources"];
+	          (*existing)["terminals"] = attributed["terminals"];
+	        }
+	        out["component_results"] = std::move(component_results);
+	        out["attribution_coverage"] =
+	            rich_attribution_coverage_json(attribution.coverage);
+	        out["attribution_diagnostics"] = attribution.diagnostics;
+	      };
 
       if (method == "ac_newton") {
         // Island detection: dead islands (no generation source) are
@@ -14789,8 +15017,9 @@ int main(int argc, char** argv) {
 	      }
 		      const hacdcpf::HybridPowerSystem original_sys = sys;
 		      const auto er_snapshot = original_sys.energy_routers;
-		      hacdcpf::HybridPowerSystem presentation_sys =
-		          hacdcpf::project_to_canonical_models(original_sys);
+		      auto projection_bundle =
+		          hacdcpf::projection::RichToCanonicalOperator::apply(original_sys);
+		      auto& presentation_sys = projection_bundle.canonical;
 	      for (auto& conv : presentation_sys.vsc_converters) {
 	        if (!conv.in_service || !conv.ac_grid_forming) continue;
 	        conv.control_mode = hacdcpf::ConverterMode::AC_GRID_FORMING;
@@ -14924,6 +15153,8 @@ int main(int argc, char** argv) {
         auto r = hacdcpf::solve_ac_opf(sys, opt);
         out["converged"]=r.converged; out["iterations"]=r.iterations;
         out["objective"]=r.objective; out["status"]=r.status;
+        out["max_constraint_violation_pu"] = r.max_constraint_violation;
+        out["max_stationarity"] = r.max_stationarity;
         // Report the engine that actually ran (e.g. parity_ipm:sparse_umfpack
         // or ipopt_filter_linesearch) so the GUI can show the realized backend.
         out["solver_backend"]=r.profiling.linear_solver_backend;
@@ -15000,6 +15231,9 @@ int main(int argc, char** argv) {
           // sees.  This preserves projected external grids and energy-router
           // internal VSC/DC-DC devices for the OPF -> PF consistency audit.
           hacdcpf::HybridPowerSystem replay_sys = presentation_sys;
+          // OPF maps DC storage against the solver's materialized dc.storage
+          // table. Replay must use that identical identity space.
+          hacdcpf::materialize_dc_storage(replay_sys);
           const auto projected_opf_vm = project_replay_ac_bus_vector(r.vm, replay_sys);
           const auto projected_opf_va = project_replay_ac_bus_vector(r.va, replay_sys);
           for (size_t i = 0; i < r.pg_mw.size() && i < replay_sys.ac.generators.size(); ++i) {
@@ -15041,7 +15275,9 @@ int main(int argc, char** argv) {
               }
             }
           }
-          for (size_t k = 0; k < r.pstor_mw.size() && k < r.stor_map.size(); ++k) {
+	            hacdcpf::HybridPowerSystem canonical_storage = projection_bundle.canonical;
+	            hacdcpf::materialize_dc_storage(canonical_storage);
+	            for (size_t k = 0; k < r.pstor_mw.size() && k < r.stor_map.size(); ++k) {
             const int orig = r.stor_map[k].original_index;
             const int src = r.stor_map[k].source_type;
             if (src == 0 && orig >= 0 &&
@@ -15235,10 +15471,25 @@ int main(int argc, char** argv) {
                 carbon_sys.ac.storage[static_cast<size_t>(orig)].p_mw = r.pstor_mw[k];
                 if (k < r.qstor_mvar.size())
                   carbon_sys.ac.storage[static_cast<size_t>(orig)].q_mvar = r.qstor_mvar[k];
-              } else if (src == 1 && orig >= 0 &&
-                         orig < static_cast<int>(carbon_sys.dc.dc_storage.size())) {
-                carbon_sys.dc.dc_storage[static_cast<size_t>(orig)].p_mw = r.pstor_mw[k];
-              }
+	              } else if (src == 1 && orig >= 0) {
+	                if (orig >= static_cast<int>(canonical_storage.dc.storage.size()))
+	                  continue;
+	                const int storage_index =
+	                    canonical_storage.dc.storage[static_cast<size_t>(orig)].index;
+	                auto compat = std::find_if(
+	                    carbon_sys.dc.storage.begin(), carbon_sys.dc.storage.end(),
+	                    [&](const auto& storage) { return storage.index == storage_index; });
+	                if (compat != carbon_sys.dc.storage.end()) {
+	                  compat->p_mw = r.pstor_mw[k];
+	                  continue;
+	                }
+	                auto native = std::find_if(
+	                    carbon_sys.dc.dc_storage.begin(),
+	                    carbon_sys.dc.dc_storage.end(),
+	                    [&](const auto& storage) { return storage.index == storage_index; });
+	                if (native != carbon_sys.dc.dc_storage.end())
+	                  native->p_mw = r.pstor_mw[k];
+	              }
             }
             for (size_t k = 0; k < r.pflex_mw.size() && k < r.flex_map.size(); ++k) {
               const int orig = r.flex_map[k].original_index;
@@ -15353,162 +15604,15 @@ int main(int argc, char** argv) {
 	                {"pd_mw", bus.pd_mw}});
 	            }
 	            post_pf["geo_buses"] = std::move(geo_buses);
-	            json post_component_results = json::array();
-	            for (size_t i = 0; i < original_sys.ac.external_grids.size(); ++i) {
-	              const auto& grid = original_sys.ac.external_grids[i];
-	              const double p = i < r.external_grid_p_mw.size()
-	                                   ? r.external_grid_p_mw[i]
-	                                   : 0.0;
-	              const double q = i < r.external_grid_q_mvar.size()
-	                                   ? r.external_grid_q_mvar[i]
-	                                   : 0.0;
-	              post_component_results.push_back(
-	                  json{{"canvas_type", "external_grid"},
-	                       {"canvas_index", grid.index},
-	                       {"index", grid.index},
-	                       {"position", i},
-	                       {"domain", "AC"},
-	                       {"type_label", "外部电网"},
-	                       {"name", grid.name.empty()
-	                                    ? "External Grid " + std::to_string(i + 1)
-	                                    : grid.name},
-	                       {"connection", "AC Bus " + std::to_string(grid.bus)},
-	                       {"status", "已求解"},
-	                       {"metrics",
-	                        json::array({
-	                            json{{"label", "P平衡"}, {"value", p},
-	                                 {"unit", "MW"}, {"quantity", "p"},
-	                                 {"precision", 4}},
-	                            json{{"label", "Q平衡"}, {"value", q},
-	                                 {"unit", "MVar"}, {"quantity", "q"},
-	                                 {"precision", 4}}})}});
-	            }
-	            for (const auto& row : brf) {
-	              post_component_results.push_back(json{
-	                  {"canvas_type", "ac_branch"}, {"canvas_index", row.value("index", 0)},
-	                  {"index", row.value("index", 0)}, {"domain", "AC"},
-	                  {"type_label", "交流线路"}, {"name", row.value("name", std::string{})},
-	                  {"status", "已求解"},
-	                  {"connection", "AC Bus " + std::to_string(row.value("from_bus", 0)) +
-	                                     " -> AC Bus " + std::to_string(row.value("to_bus", 0))},
-	                  {"metrics", json::array({
-	                      json{{"label", "Pf"}, {"value", row.value("pf_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
-	                      json{{"label", "Pt"}, {"value", row.value("pt_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
-	                      json{{"label", "Qf"}, {"value", row.value("qf_mvar", 0.0)}, {"unit", "MVar"}, {"quantity", "q"}},
-	                      json{{"label", "Qt"}, {"value", row.value("qt_mvar", 0.0)}, {"unit", "MVar"}, {"quantity", "q"}}})}});
-	            }
-	            for (size_t i = 0; i < vtr.size(); ++i) {
-	              const auto& row = vtr[i];
-	              const int canvas_index = row.value("index", static_cast<int>(i));
-	              post_component_results.push_back(json{
-	                  {"canvas_type", "vsc_converter"}, {"canvas_index", canvas_index},
-	                  {"index", canvas_index}, {"position", i}, {"domain", "ACDC"},
-	                  {"type_label", "AC/DC变换器"}, {"status", "已求解"},
-	                  {"metrics", json::array({
-	                      json{{"label", "Pac"}, {"value", row.value("p_ac_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
-	                      json{{"label", "Qac"}, {"value", row.value("q_ac_mvar", 0.0)}, {"unit", "MVar"}, {"quantity", "q"}},
-	                      json{{"label", "Pdc"}, {"value", row.value("p_dc_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
-	                      json{{"label", "Loss"}, {"value", row.value("loss_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}}})}});
-	            }
-	            for (const auto& flow : post_pf["ac_circuit_breaker_flows"]) {
-	              post_component_results.push_back(json{
-	                  {"canvas_type", "circuit_breaker"}, {"canvas_index", flow.value("index", 0)},
-	                  {"index", flow.value("index", 0)}, {"domain", "AC"},
-	                  {"type_label", "断路器"}, {"status", "已求解"},
-	                  {"metrics", json::array({
-	                      json{{"label", "Pf"}, {"value", flow.value("pf_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
-	                      json{{"label", "Pt"}, {"value", flow.value("pt_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
-	                      json{{"label", "Qf"}, {"value", flow.value("qf_mvar", 0.0)}, {"unit", "MVar"}, {"quantity", "q"}},
-	                      json{{"label", "Qt"}, {"value", flow.value("qt_mvar", 0.0)}, {"unit", "MVar"}, {"quantity", "q"}}})}});
-	            }
-	            for (size_t i = 0; i < original_sys.ac.buses.size(); ++i) {
-	              const auto& bus = original_sys.ac.buses[i];
-	              post_component_results.push_back(json{
-	                  {"canvas_type", "ac_bus"}, {"canvas_index", bus.index},
-	                  {"index", bus.index}, {"position", i}, {"domain", "AC"},
-	                  {"type_label", "交流母线"}, {"name", bus.name}, {"status", "已求解"},
-	                  {"metrics", json::array({
-	                      json{{"label", "Vm"}, {"value", i < ac_pf.vm.size() ? ac_pf.vm[i] : bus.vm_pu}, {"unit", "pu"}, {"quantity", "scalar"}},
-	                      json{{"label", "Va"}, {"value", (i < ac_pf.va.size() ? ac_pf.va[i] : 0.0) * 180.0 / M_PI}, {"unit", "deg"}, {"quantity", "scalar"}}})}});
-	            }
-	            for (size_t i = 0; i < original_sys.dc.buses.size(); ++i) {
-	              const auto& bus = original_sys.dc.buses[i];
-	              post_component_results.push_back(json{
-	                  {"canvas_type", "dc_bus"}, {"canvas_index", bus.index},
-	                  {"index", bus.index}, {"position", i}, {"domain", "DC"},
-	                  {"type_label", "直流母线"}, {"name", bus.name}, {"status", "已求解"},
-	                  {"metrics", json::array({
-	                      json{{"label", "Vdc"}, {"value", i < ac_pf.vdc.size() ? ac_pf.vdc[i] : bus.vm_pu}, {"unit", "pu"}, {"quantity", "scalar"}}})}});
-	            }
-	            for (size_t i = 0; i < original_sys.ac.transformers_2w.size(); ++i) {
-	              const auto& tr = original_sys.ac.transformers_2w[i];
-	              post_component_results.push_back(json{
-	                  {"canvas_type", "transformer_2w"}, {"canvas_index", tr.index},
-	                  {"index", tr.index}, {"position", i}, {"domain", "AC"},
-	                  {"type_label", "双绕组变压器"}, {"name", tr.name}, {"status", "已求解"},
-	                  {"connection", "AC Bus " + std::to_string(tr.hv_bus) +
-	                                     " -> AC Bus " + std::to_string(tr.lv_bus)},
-	                  {"metrics", json::array({
-	                      json{{"label", "Sn"}, {"value", tr.sn_mva}, {"unit", "MVA"}, {"quantity", "scalar"}},
-	                      json{{"label", "Tap"}, {"value", tr.tap_pos}, {"unit", ""}, {"quantity", "scalar"}}})}});
-	            }
-	            for (size_t i = 0; i < original_sys.ac.loads.size(); ++i) {
-	              const auto& ld = original_sys.ac.loads[i];
-	              post_component_results.push_back(json{
-	                  {"canvas_type", "load"}, {"canvas_index", ld.index},
-	                  {"index", ld.index}, {"position", i}, {"domain", "AC"},
-	                  {"type_label", "交流负荷"}, {"name", ld.name}, {"status", "已求解"},
-	                  {"metrics", json::array({
-	                      json{{"label", "P"}, {"value", ld.p_mw * ld.scaling}, {"unit", "MW"}, {"quantity", "p"}},
-	                      json{{"label", "Q"}, {"value", ld.q_mvar * ld.scaling}, {"unit", "MVar"}, {"quantity", "q"}}})}});
-	            }
-	            for (size_t i = 0; i < original_sys.dc.loads.size(); ++i) {
-	              const auto& ld = original_sys.dc.loads[i];
-	              post_component_results.push_back(json{
-	                  {"canvas_type", "dc_load"}, {"canvas_index", ld.index},
-	                  {"index", ld.index}, {"position", i}, {"domain", "DC"},
-	                  {"type_label", "直流负荷"}, {"name", ld.name}, {"status", "已求解"},
-	                  {"metrics", json::array({json{{"label", "P"}, {"value", ld.p_mw * ld.scaling}, {"unit", "MW"}, {"quantity", "p"}}})}});
-	            }
-	            for (size_t i = 0; i < original_sys.dc.pv_arrays.size(); ++i) {
-	              const auto& pv = original_sys.dc.pv_arrays[i];
-	              post_component_results.push_back(json{
-	                  {"canvas_type", "dc_pv_array"}, {"canvas_index", pv.index},
-	                  {"index", pv.index}, {"position", i}, {"domain", "DC"},
-	                  {"type_label", "直流光伏"}, {"status", "已求解"},
-	                  {"metrics", json::array({json{{"label", "P"}, {"value", pv.p_set_mw}, {"unit", "MW"}, {"quantity", "p"}}})}});
-	            }
-	            for (size_t i = 0; i < carbon_sys.dc.dc_storage.size(); ++i) {
-	              const auto& st = carbon_sys.dc.dc_storage[i];
-	              post_component_results.push_back(json{
-	                  {"canvas_type", "dc_storage"}, {"canvas_index", st.index},
-	                  {"index", st.index}, {"position", i}, {"domain", "DC"},
-	                  {"type_label", "直流储能"}, {"name", st.name}, {"status", "已求解"},
-	                  {"metrics", json::array({
-	                      json{{"label", "P"}, {"value", st.p_mw}, {"unit", "MW"}, {"quantity", "p"}},
-	                      json{{"label", "SOC"}, {"value", st.soc_init}, {"unit", ""}, {"quantity", "scalar"}}})}});
-	            }
-	            for (const auto& row : dcbr) {
-	              post_component_results.push_back(json{
-	                  {"canvas_type", "dc_branch"}, {"canvas_index", row.value("index", 0)},
-	                  {"index", row.value("index", 0)}, {"domain", "DC"},
-	                  {"type_label", "直流线路"}, {"status", "已求解"},
-	                  {"metrics", json::array({
-	                      json{{"label", "Pf"}, {"value", row.value("pf_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
-	                      json{{"label", "Pt"}, {"value", row.value("pt_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}}})}});
-	            }
-	            for (size_t i = 0; i < dtr.size(); ++i) {
-	              const auto& row = dtr[i];
-	              post_component_results.push_back(json{
-	                  {"canvas_type", "dcdc_converter"}, {"canvas_index", row.value("index", static_cast<int>(i))},
-	                  {"index", row.value("index", static_cast<int>(i))}, {"position", i}, {"domain", "DC"},
-	                  {"type_label", "DC/DC变换器"}, {"status", "已求解"},
-	                  {"metrics", json::array({
-	                      json{{"label", "Pin"}, {"value", row.value("p_in_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
-	                      json{{"label", "Pout"}, {"value", row.value("p_out_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
-	                      json{{"label", "Loss"}, {"value", row.value("loss_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}}})}});
-	            }
-	            post_pf["component_results"] = std::move(post_component_results);
+		            const auto attribution =
+		                hacdcpf::projection::CanonicalToRichOperator::apply(
+		                    original_sys, projection_bundle, &r,
+		                    &projected_ac_pf, &ac_pf);
+		            post_pf["component_results"] =
+		                rich_attribution_to_component_results(attribution);
+		            post_pf["attribution_coverage"] =
+		                rich_attribution_coverage_json(attribution.coverage);
+		            post_pf["attribution_diagnostics"] = attribution.diagnostics;
 	            post_pf["vm"] = ac_pf.vm; post_pf["va"] = ac_pf.va; post_pf["vdc"] = ac_pf.vdc;
 	            out["post_pf"] = post_pf;
             // Post-OPF carbon flow: static carbon-emission-flow analysis on the OPF
@@ -16535,6 +16639,14 @@ int main(int argc, char** argv) {
         for (auto& pv : sys.ac.pv_systems) pv.profile_id = spec.assign_all_pv_to;
         for (auto& pv : sys.dc.pv_arrays) pv.profile_id = spec.assign_all_pv_to;
       }
+      if (spec.assign_all_renewables_to >= 0) {
+        for (auto& renewable : sys.ac.renewable_gens)
+          renewable.profile_id = spec.assign_all_renewables_to;
+      }
+      if (spec.assign_all_prices_to >= 0) {
+        for (auto& grid : sys.ac.external_grids)
+          grid.price_profile_id = spec.assign_all_prices_to;
+      }
       return n_materialized;
     };
 
@@ -16590,6 +16702,11 @@ int main(int argc, char** argv) {
           spec.assign_all_loads_to = j.value("assign_all_loads_to", -1);
         if (j.contains("assign_all_pv_to"))
           spec.assign_all_pv_to = j.value("assign_all_pv_to", -1);
+        if (j.contains("assign_all_renewables_to"))
+          spec.assign_all_renewables_to =
+              j.value("assign_all_renewables_to", -1);
+        if (j.contains("assign_all_prices_to"))
+          spec.assign_all_prices_to = j.value("assign_all_prices_to", -1);
         g_session.ts_binding = spec;
 
         if (g_session.current_system) {
@@ -16610,6 +16727,10 @@ int main(int argc, char** argv) {
         json pnames = json::array();
         for (const auto& p : g_session.ts_data.profiles) pnames.push_back(p.name);
         out["profile_names"] = pnames;
+        out["assign_all_loads_to"] = spec.assign_all_loads_to;
+        out["assign_all_pv_to"] = spec.assign_all_pv_to;
+        out["assign_all_renewables_to"] = spec.assign_all_renewables_to;
+        out["assign_all_prices_to"] = spec.assign_all_prices_to;
         res.set_content(out.dump(), "application/json");
       } catch (const std::exception& e) {
         res.status = 400;
@@ -16657,11 +16778,8 @@ int main(int argc, char** argv) {
         // loads + profile_id assignments and silently fall back to a
         // constant-load solve.
         int n_remat = materialize_loads_and_apply_binding(sys_ts, spec);
-        // Fold DC-side storage into the engine's Storage-typed dc.storage path
-        // so it participates in the time-series solve AND appears in the
-        // dc_ess_* name/dispatch result arrays built below. solve_time_series_pf
-        // also materializes internally; this is idempotent.
-        hacdcpf::materialize_dc_storage(sys_ts);
+        // Native DCStorage identity remains in the rich model. The solver
+        // materializes it only inside its canonical working copy.
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -16678,18 +16796,7 @@ int main(int argc, char** argv) {
         const bool enable_net = j.value("enable_network_constraints", false);
         const bool enable_dc_net = j.value("enable_dc_network_constraints", false);
         const double reserve_frac = j.value("reserve_fraction", 0.0);
-        // Auto-assign profiles to components without explicit ids
-        for (auto& ld : sys_ts.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
-        for (auto& ren : sys_ts.ac.renewable_gens) {
-          if (ren.profile_id < 0)
-            ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
-                              ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
-        }
-        // Auto-assign solar profile to PV systems and DC PV arrays
-        for (auto& pv : sys_ts.ac.pv_systems) if (pv.profile_id < 0) pv.profile_id = 2;
-        for (auto& pv : sys_ts.dc.pv_arrays) if (pv.profile_id < 0) pv.profile_id = 2;
-        // Auto-assign load profile to DC loads
-        for (auto& ld : sys_ts.dc.loads) if (ld.profile_id < 0) ld.profile_id = 0;
+        assign_available_default_profiles(sys_ts, ts_data);
         hacdcpf::TimeSeriesPFOptions opts;
         opts.skip_uc = skip_uc;
         opts.run_opf = run_opf;
@@ -16748,6 +16855,7 @@ int main(int argc, char** argv) {
         }
         json out;
         out["num_steps"] = result.num_steps;
+        out["step_duration_hr"] = ts_data.step_duration_hr;
         out["num_converged"] = result.num_converged;
         out["num_opf_converged"] = result.num_opf_converged;
         out["total_generation_cost"] = result.total_generation_cost;
@@ -16775,12 +16883,64 @@ int main(int argc, char** argv) {
         // many ended up bound to a profile id. Helps catch silent mapping
         // failures from the GUI side.
         {
+          const auto has_profile = [&](int id) {
+            return std::any_of(ts_data.profiles.begin(), ts_data.profiles.end(),
+                               [&](const auto& profile) {
+                                 return profile.id == id;
+                               });
+          };
           int n_bound = 0;
-          for (const auto& ld : sys_ts.ac.loads) if (ld.profile_id >= 0) ++n_bound;
+          for (const auto& ld : sys_ts.ac.loads)
+            if (has_profile(ld.profile_id)) ++n_bound;
           out["num_loads"] = (int)sys_ts.ac.loads.size();
           out["num_loads_materialized"] = n_remat;
           out["num_loads_bound_to_profile"] = n_bound;
           out["ts_binding_active"] = spec.valid;
+        }
+        {
+          json profiles = json::array();
+          for (const auto& profile : ts_data.profiles) {
+            const auto [min_it, max_it] = std::minmax_element(
+                profile.values.begin(), profile.values.end());
+            const double min_value =
+                min_it == profile.values.end() ? 0.0 : *min_it;
+            const double max_value =
+                max_it == profile.values.end() ? 0.0 : *max_it;
+            profiles.push_back(
+                json{{"id", profile.id}, {"name", profile.name},
+                     {"samples", profile.values.size()},
+                     {"min", min_value}, {"max", max_value},
+                     {"time_varying", max_value - min_value > 1e-12}});
+          }
+          const auto has_profile = [&](int id) {
+            return std::any_of(ts_data.profiles.begin(), ts_data.profiles.end(),
+                               [&](const auto& profile) {
+                                 return profile.id == id;
+                               });
+          };
+          int ac_loads = 0, dc_loads = 0, renewables = 0, ac_pv = 0,
+              dc_pv = 0, prices = 0, generators = 0;
+          for (const auto& item : sys_ts.ac.loads)
+            if (has_profile(item.profile_id)) ++ac_loads;
+          for (const auto& item : sys_ts.dc.loads)
+            if (has_profile(item.profile_id)) ++dc_loads;
+          for (const auto& item : sys_ts.ac.renewable_gens)
+            if (has_profile(item.profile_id)) ++renewables;
+          for (const auto& item : sys_ts.ac.pv_systems)
+            if (has_profile(item.profile_id)) ++ac_pv;
+          for (const auto& item : sys_ts.dc.pv_arrays)
+            if (has_profile(item.profile_id)) ++dc_pv;
+          for (const auto& item : sys_ts.ac.external_grids)
+            if (has_profile(item.price_profile_id)) ++prices;
+          for (const auto& item : sys_ts.ac.generators)
+            if (has_profile(item.profile_id)) ++generators;
+          out["profile_audit"] =
+              json{{"profiles", std::move(profiles)},
+                   {"bindings",
+                    json{{"ac_loads", ac_loads}, {"dc_loads", dc_loads},
+                         {"renewables", renewables}, {"ac_pv", ac_pv},
+                         {"dc_pv", dc_pv}, {"external_grid_prices", prices},
+                         {"generators", generators}}}};
         }
         // Per-step metrics
         json vm_mean = json::array(), vm_min_arr = json::array(), vm_max_arr = json::array(), losses_mw = json::array();
@@ -16805,6 +16965,24 @@ int main(int argc, char** argv) {
         out["vm_min"] = vm_min_arr;
         out["vm_max"] = vm_max_arr;
         out["losses_mw"] = losses_mw;
+        out["generation_component_series"] = rich_component_power_series_json(
+            result.rich_results,
+            {"generator", "external_grid", "renewable_generator",
+             "pv_system", "static_generator", "dc_static_generator",
+             "dc_pv_array"});
+        out["storage_component_series"] = rich_component_power_series_json(
+            result.rich_results,
+            {"storage", "dc_storage", "mobile_storage"});
+        out["load_component_series"] = rich_component_power_series_json(
+            result.rich_results,
+            {"load", "dc_load", "flexible_load", "asymmetric_load",
+             "motor", "charging_station"});
+        json attribution_coverage = json::array();
+        for (const auto& rich_result : result.rich_results) {
+          attribution_coverage.push_back(
+              rich_attribution_coverage_json(rich_result.coverage));
+        }
+        out["attribution_coverage"] = std::move(attribution_coverage);
         // UC schedule
         const auto& uc = result.uc_schedule;
         out["gen_dispatch"] = uc.gen_dispatch;
@@ -16910,8 +17088,30 @@ int main(int argc, char** argv) {
         // DC-side dispatch
         out["dc_pv_dispatch"] = uc.dc_pv_dispatch;
         out["dc_ess_dispatch"] = uc.dc_ess_dispatch;
+        out["dc_ess_soc"] = uc.dc_ess_soc;
         out["dc_sgen_dispatch"] = uc.dc_sgen_dispatch;
         out["dc_load_demand"] = uc.dc_load_demand;
+        {
+          double ac_charge = 0.0, ac_discharge = 0.0;
+          double dc_charge = 0.0, dc_discharge = 0.0;
+          const auto accumulate = [&](const auto& rows, double& charge,
+                                      double& discharge) {
+            for (const auto& row : rows) {
+              for (double p : row) {
+                charge += std::max(-p, 0.0) * ts_data.step_duration_hr;
+                discharge += std::max(p, 0.0) * ts_data.step_duration_hr;
+              }
+            }
+          };
+          accumulate(uc.ess_dispatch, ac_charge, ac_discharge);
+          accumulate(uc.dc_ess_dispatch, dc_charge, dc_discharge);
+          out["ac_storage_charge_mwh"] = ac_charge;
+          out["ac_storage_discharge_mwh"] = ac_discharge;
+          out["dc_storage_charge_mwh"] = dc_charge;
+          out["dc_storage_discharge_mwh"] = dc_discharge;
+          out["storage_charge_mwh"] = ac_charge + dc_charge;
+          out["storage_discharge_mwh"] = ac_discharge + dc_discharge;
+        }
         // AC PV dispatch — extract from OPF results when available,
         // otherwise compute from solar profile for each timestep
         {
@@ -16995,6 +17195,10 @@ int main(int argc, char** argv) {
           dcpv.push_back(sys_ts.dc.pv_arrays[i].name.empty() ? "DC_PV"+std::to_string(i) : sys_ts.dc.pv_arrays[i].name);
         for (size_t i = 0; i < sys_ts.dc.storage.size(); ++i)
           dcess.push_back(sys_ts.dc.storage[i].name.empty() ? "DC_ESS"+std::to_string(i) : sys_ts.dc.storage[i].name);
+        for (size_t i = 0; i < sys_ts.dc.dc_storage.size(); ++i)
+          dcess.push_back(sys_ts.dc.dc_storage[i].name.empty()
+                              ? "DC_ESS" + std::to_string(sys_ts.dc.storage.size() + i)
+                              : sys_ts.dc.dc_storage[i].name);
         for (size_t i = 0; i < sys_ts.dc.dc_static_generators.size(); ++i)
           dcsg.push_back(sys_ts.dc.dc_static_generators[i].name.empty() ? "DC_SGen"+std::to_string(i) : sys_ts.dc.dc_static_generators[i].name);
         out["dc_pv_names"] = dcpv; out["dc_ess_names"] = dcess;
@@ -17233,15 +17437,7 @@ int main(int argc, char** argv) {
         g_session.cancel.store(false);
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         const int num_steps = j.value("num_steps", 24);
-        for (auto& ld : sys_ts.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
-        for (auto& ren : sys_ts.ac.renewable_gens) {
-          if (ren.profile_id < 0)
-            ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
-                              ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
-        }
-        for (auto& pv : sys_ts.ac.pv_systems) if (pv.profile_id < 0) pv.profile_id = 2;
-        for (auto& pv : sys_ts.dc.pv_arrays) if (pv.profile_id < 0) pv.profile_id = 2;
-        for (auto& ld : sys_ts.dc.loads) if (ld.profile_id < 0) ld.profile_id = 0;
+        assign_available_default_profiles(sys_ts, ts_data);
         hacdcpf::TimeSeriesPFOptions opts; opts.verbose = false;
         auto uc = hacdcpf::solve_unit_commitment(sys_ts, ts_data, opts);
         json out;
@@ -17306,13 +17502,7 @@ int main(int argc, char** argv) {
             g_session.ts_data = make_default_ts_data(num_periods);
           ts_data = g_session.ts_data;
         }
-        for (auto& ld : sys.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
-        for (auto& ren : sys.ac.renewable_gens) {
-          if (ren.profile_id < 0)
-            ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
-                              ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
-        }
-        for (auto& pv : sys.ac.pv_systems) if (pv.profile_id < 0) pv.profile_id = 2;
+        assign_available_default_profiles(sys, ts_data);
 
         hacdcpf::TimeSeriesPFOptions opts; opts.verbose = false;
         auto uc = hacdcpf::solve_unit_commitment(sys, ts_data, opts);
@@ -17454,15 +17644,7 @@ int main(int argc, char** argv) {
           skip_uc = j.value("skip_uc", false);
           run_opf = j.value("run_opf", false);
 
-          for (auto& ld : sys_ts.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
-          for (auto& ren : sys_ts.ac.renewable_gens) {
-            if (ren.profile_id < 0)
-              ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
-                                ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
-          }
-          for (auto& pv : sys_ts.ac.pv_systems) if (pv.profile_id < 0) pv.profile_id = 2;
-          for (auto& pv : sys_ts.dc.pv_arrays) if (pv.profile_id < 0) pv.profile_id = 2;
-          for (auto& ld : sys_ts.dc.loads) if (ld.profile_id < 0) ld.profile_id = 0;
+          assign_available_default_profiles(sys_ts, ts_data);
 
           hacdcpf::TimeSeriesPFOptions ts_opts;
           ts_opts.skip_uc = skip_uc;
@@ -17678,12 +17860,7 @@ int main(int argc, char** argv) {
         g_session.cancel.store(false);
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         int num_steps = j.value("num_steps", 4);
-        for (auto& ld : sys_tr.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
-        for (auto& ren : sys_tr.ac.renewable_gens) {
-          if (ren.profile_id < 0)
-            ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
-                              ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
-        }
+        assign_available_default_profiles(sys_tr, ts_data);
 
         // ========== Step 1: Baseline loss (original topology) ==========
         double base_loss_mw = 0.0;
@@ -18213,15 +18390,7 @@ int main(int argc, char** argv) {
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         const double step_hr = (j.value("resolution", std::string("6h")) == "1h") ? 1.0 : 6.0;
         auto ts_data = make_annual_ts_data(step_hr);
-        // Auto-assign profiles
-        for (auto& ld : sys_ann.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
-        for (auto& ren : sys_ann.ac.renewable_gens) {
-          if (ren.profile_id < 0)
-            ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
-                              ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
-        }
-        for (auto& pv : sys_ann.dc.pv_arrays)
-          if (pv.profile_id < 0) pv.profile_id = 2;
+        assign_available_default_profiles(sys_ann, ts_data);
         hacdcpf::analysis::AnnualProductionSimOptions opts;
         opts.block_type = (j.value("block_type", std::string("monthly")) == "weekly")
             ? hacdcpf::analysis::AnnualBlockType::Weekly
@@ -18444,7 +18613,9 @@ int main(int argc, char** argv) {
         // Storage stats
         json ss = json::array();
         for (const auto& s : result.storage_stats) {
-          ss.push_back({{"name", s.name}, {"total_charge_mwh", s.total_charge_mwh},
+          ss.push_back({{"name", s.name}, {"storage_index", s.storage_index},
+                        {"is_dc", s.is_dc},
+                        {"total_charge_mwh", s.total_charge_mwh},
                         {"total_discharge_mwh", s.total_discharge_mwh},
                         {"cycles", s.cycles}});
         }
@@ -18529,13 +18700,7 @@ int main(int argc, char** argv) {
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         const double step_hr = (j.value("resolution", std::string("6h")) == "1h") ? 1.0 : 6.0;
         auto ts_data = make_annual_ts_data(step_hr);
-        // Auto-assign profiles
-        for (auto& ld : sys_lc.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
-        for (auto& ren : sys_lc.ac.renewable_gens) {
-          if (ren.profile_id < 0)
-            ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
-                              ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
-        }
+        assign_available_default_profiles(sys_lc, ts_data);
 
         hacdcpf::analysis::LifecycleSimOptions opts;
         opts.num_years = j.value("num_years", 20);
@@ -18676,13 +18841,7 @@ int main(int argc, char** argv) {
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         const double step_hr = (j.value("resolution", std::string("6h")) == "1h") ? 1.0 : 6.0;
         auto ts_data = make_annual_ts_data(step_hr);
-        // Auto-assign profiles
-        for (auto& ld : sys_base.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
-        for (auto& ren : sys_base.ac.renewable_gens) {
-          if (ren.profile_id < 0)
-            ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
-                              ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
-        }
+        assign_available_default_profiles(sys_base, ts_data);
 
         hacdcpf::analysis::LifecycleSimOptions opts;
         opts.num_years = j.value("num_years", 20);

@@ -20,7 +20,7 @@
 #include "hacdcpf/engine/kernel/ipm/lcqp_solver.hpp"
 #include "hacdcpf/engine/engine.hpp"
 #include "hacdcpf/engine/problem_types.hpp"
-#include "hacdcpf/projection/project_to_canonical.hpp"
+#include "hacdcpf/projection/result_attribution.hpp"
 
 namespace hacdcpf::opf {
 
@@ -735,7 +735,11 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
   DCOPFResult result;
   // DC OPF must consume the same canonical topology as AC OPF/PF. In
   // particular, closed rich switches and circuit breakers merge their buses.
-  HybridPowerSystem sys = project_to_canonical_models(sys_in, /*strip_dead=*/false);
+  ProjectionOptions projection_options;
+  projection_options.strip_dead_islands = false;
+  HybridPowerSystem sys =
+      projection::RichToCanonicalOperator::apply(sys_in, projection_options)
+          .canonical;
   const size_t original_generator_count = sys_in.ac.generators.size();
   const size_t external_source_offset = sys.ac.generators.size();
   std::vector<size_t> promoted_external_grid_indices;

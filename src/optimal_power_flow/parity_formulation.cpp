@@ -12,6 +12,7 @@
 #include <Eigen/SparseLU>
 
 #include "hacdcpf/assembly/solver_data.hpp"
+#include "hacdcpf/model/device_control_role.hpp"
 #include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
 
@@ -324,6 +325,16 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
     }
   }
 
+  // Every eligible DC_V bus defines voltage. Eligibility is checked before
+  // formulation assembly; its physical storage/converter variable balances
+  // KCL, so this model never creates an implicit source.
+  prob.dc_voltage_reference_buses.clear();
+  for (int k = 0; k < ndc; ++k) {
+    const auto& dc_bus = prob.data.dc_buses[static_cast<size_t>(k)];
+    if (!dc_bus.in_service || dc_bus.bus_type != DCBusType::DC_V) continue;
+    prob.dc_voltage_reference_buses.push_back(k);
+  }
+
   VarIndex vidx;
   vidx.n_va = nb;
   vidx.n_vm = nb;
@@ -405,13 +416,15 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   cidx.n_dcdc_bal = 0;
   // One active-power conservation row per in-service energy router.
   cidx.n_er_bal = static_cast<int>(prob.er_router_to_data.size());
+  cidx.n_dc_ref = static_cast<int>(prob.dc_voltage_reference_buses.size());
   cidx.i_pbal_ac = 0;
   cidx.i_qbal_ac = cidx.i_pbal_ac + cidx.n_pbal_ac;
   cidx.i_pbal_dc = cidx.i_qbal_ac + cidx.n_qbal_ac;
   cidx.i_conv_bal = cidx.i_pbal_dc + cidx.n_pbal_dc;
   cidx.i_dcdc_bal = cidx.i_conv_bal + cidx.n_conv_bal;
   cidx.i_er_bal = cidx.i_dcdc_bal + cidx.n_dcdc_bal;
-  cidx.n_eq_total = cidx.i_er_bal + cidx.n_er_bal;
+  cidx.i_dc_ref = cidx.i_er_bal + cidx.n_er_bal;
+  cidx.n_eq_total = cidx.i_dc_ref + cidx.n_dc_ref;
   cidx.n_sf = static_cast<int>(prob.branch_limited.size());
   cidx.n_st = cidx.n_sf;
   cidx.n_sconv = vidx.n_pac;
@@ -1324,17 +1337,15 @@ void equality_constraints(const Problem& prob,
   }
 
   for (int k = 0; k < ndc; ++k) {
-    double pflow = 0.0;
+    // Match the PF definition exactly: Pcalc_k = Vk * (Gdc * V)_k.
+    // Gdc has positive diagonal and negative off-diagonal entries, so a
+    // sending bus at higher voltage has positive network injection.
+    double current_pu = 0.0;
     for (int m = 0; m < ndc; ++m) {
-      if (m == k) {
-        continue;
-      }
       const double gkm = prob.gdc_dense(k, m);
-      if (std::abs(gkm) <= 0.0) {
-        continue;
-      }
-      pflow += gkm * (vdc[k] * vdc[k] - vdc[k] * vdc[m]);
+      if (gkm != 0.0) current_pu += gkm * vdc[m];
     }
+    const double pflow = vdc[k] * current_pu;
     const double bus_demand = prob.data.dc_loads.empty()
                                   ? prob.data.dc_buses[static_cast<size_t>(k)].pd_mw /
                                         prob.data.base_mva
@@ -1358,7 +1369,7 @@ void equality_constraints(const Problem& prob,
     if (!sg.in_service) continue;
     const int dc_bus = sg.bus - 1;
     if (dc_bus >= 0 && dc_bus < ndc) {
-      g[cidx.i_pbal_dc + dc_bus] += sg.p_mw * sg.scaling / prob.data.base_mva;
+      g[cidx.i_pbal_dc + dc_bus] -= sg.p_mw * sg.scaling / prob.data.base_mva;
     }
   }
   for (const auto& pv : prob.data.dc_pv_arrays) {
@@ -1448,6 +1459,11 @@ void equality_constraints(const Problem& prob,
     // Lossless real-power conservation: Σ_ports P_port = 0.  (loss_percent
     // refinement deferred; PF replays the written-back per-port p_mw regardless.)
     g[cidx.i_er_bal + static_cast<int>(r)] = sum_p;
+  }
+  for (size_t r = 0; r < prob.dc_voltage_reference_buses.size(); ++r) {
+    const int bus = prob.dc_voltage_reference_buses[r];
+    g[cidx.i_dc_ref + static_cast<int>(r)] =
+        vdc[bus] - prob.data.dc_buses[static_cast<size_t>(bus)].vm_pu;
   }
 }
 
@@ -1542,25 +1558,8 @@ void equality_jacobian(const Problem& prob,
   for (int k = 0; k < ndc; ++k) {
     const int row = cidx.i_pbal_dc + k;
     for (int m = 0; m < ndc; ++m) {
-      double v = 0.0;
-      if (m == k) {
-        for (int mm = 0; mm < ndc; ++mm) {
-          if (mm == k) {
-            continue;
-          }
-          const double gkmm = prob.gdc_dense(k, mm);
-          if (std::abs(gkmm) <= 0.0) {
-            continue;
-          }
-          v += gkmm * (2.0 * vdc[k] - vdc[mm]);
-        }
-      } else {
-        const double gkm = prob.gdc_dense(k, m);
-        if (std::abs(gkm) <= 0.0) {
-          continue;
-        }
-        v = -gkm * vdc[k];
-      }
+      double v = vdc[k] * prob.gdc_dense(k, m);
+      if (m == k) v += prob.gdc_dense.row(k).dot(vdc);
       if (v != 0.0) {
         t.emplace_back(row, idx.i_vdc + m, v);
       }
@@ -1664,6 +1663,11 @@ void equality_jacobian(const Problem& prob,
       if (port.router_idx == ri)
         t.emplace_back(cidx.i_er_bal + static_cast<int>(r), idx.i_erp + port.pvar, 1.0);
     }
+  }
+  for (size_t r = 0; r < prob.dc_voltage_reference_buses.size(); ++r) {
+    const int bus = prob.dc_voltage_reference_buses[r];
+    t.emplace_back(cidx.i_dc_ref + static_cast<int>(r),
+                   idx.i_vdc + bus, 1.0);
   }
 
   jg.resize(cidx.n_eq_total, idx.n_total);
@@ -2142,7 +2146,7 @@ void lagrangian_hessian(const Problem& prob,
       continue;
     }
     const int row = idx.i_vdc + k;
-    double d2 = 0.0;
+    add(row, row, lambda_k * 2.0 * prob.gdc_dense(k, k));
     for (int m = 0; m < ndc; ++m) {
       if (m == k) {
         continue;
@@ -2151,10 +2155,8 @@ void lagrangian_hessian(const Problem& prob,
       if (gkm == 0.0) {
         continue;
       }
-      d2 += 2.0 * gkm;
-      add_sym_trip(row, idx.i_vdc + m, lambda_k * (-gkm));
+      add_sym_trip(row, idx.i_vdc + m, lambda_k * gkm);
     }
-    add(row, row, lambda_k * d2);
   }
 
   // ── Converter Loss Hessian ──

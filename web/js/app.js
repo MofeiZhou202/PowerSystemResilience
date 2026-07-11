@@ -7086,6 +7086,8 @@ const App = (() => {
       load_profile_map: ts.binding?.load_profile_map || [],
       assign_all_loads_to: Number.isInteger(ts.binding?.assign_all_loads_to) ? ts.binding.assign_all_loads_to : -1,
       assign_all_pv_to: Number.isInteger(ts.binding?.assign_all_pv_to) ? ts.binding.assign_all_pv_to : -1,
+      assign_all_renewables_to: Number.isInteger(ts.binding?.assign_all_renewables_to) ? ts.binding.assign_all_renewables_to : -1,
+      assign_all_prices_to: Number.isInteger(ts.binding?.assign_all_prices_to) ? ts.binding.assign_all_prices_to : -1,
     };
     const r = await fetch('/api/session/set_ts_config', {
       method: 'POST',
@@ -7554,7 +7556,7 @@ const App = (() => {
       if (sss.length) {
         let html = '<table class="tbl"><thead><tr><th>储能</th><th>充电(MWh)</th><th>放电(MWh)</th><th>等效循环</th></tr></thead><tbody>';
         sss.forEach(s => {
-          html += `<tr><td>${s.name || '—'}</td><td>${fmt(s.total_charge_mwh)}</td><td>${fmt(s.total_discharge_mwh)}</td><td>${Number(s.cycles || 0).toFixed(1)}</td></tr>`;
+          html += `<tr><td>${s.is_dc ? 'DC · ' : 'AC · '}${s.name || '—'}</td><td>${fmt(s.total_charge_mwh)}</td><td>${fmt(s.total_discharge_mwh)}</td><td>${Number(s.cycles || 0).toFixed(1)}</td></tr>`;
         });
         html += '</tbody></table>';
         st.innerHTML = html;
@@ -7641,6 +7643,8 @@ const App = (() => {
         <span class="result-value" style="font-size:0.82em;">${constraintSummary}</span></div>
       <div class="result-item"><span class="result-label">总网损</span>
         <span class="result-value">${((data.losses_mw || []).reduce((a, b) => a + b, 0) * (data.step_duration_hr || 1)).toFixed(2)} MWh</span></div>
+      <div class="result-item"><span class="result-label">储能放电 / 充电</span>
+        <span class="result-value">${Number(data.storage_discharge_mwh || 0).toFixed(3)} / ${Number(data.storage_charge_mwh || 0).toFixed(3)} MWh</span></div>
       <div class="result-item"><span class="result-label">电压合格率</span>
         <span class="result-value">${data.voltage_qualification?.rate_pct != null && Number.isFinite(Number(data.voltage_qualification.rate_pct)) ? Number(data.voltage_qualification.rate_pct).toFixed(2) + '% (' + data.voltage_qualification.qualified_samples + '/' + data.voltage_qualification.total_samples + ')' : '—'}</span></div>
       <div class="result-item"><span class="result-label">计算时间</span>
@@ -7659,32 +7663,41 @@ const App = (() => {
       legend: { orientation: 'h', y: -0.25 },
     };
 
-    // 1. All source and storage dispatch. Storage remains signed so charging
-    // appears below zero and cannot be mistaken for generation.
+    // 1. Identity-keyed rich-component generation. Each trace is one physical
+    // component and is intentionally not stacked.
     const genDiv = document.getElementById('tspfGenChart');
     const dtraces = [];
     let dispatchColor = 0;
     const addDispatch = (rows, names, fallback, prefix = '') => {
       (rows || []).forEach((values, i) => dtraces.push({
-        x: hrs, y: values, type: 'bar',
+        x: hrs, y: values, mode: 'lines+markers',
         name: prefix + ((names || [])[i] || `${fallback} ${i}`),
-        marker: { color: pal[(dispatchColor++) % pal.length] },
+        line: { color: pal[(dispatchColor++) % pal.length], width: 2 },
       }));
     };
-    addDispatch(data.gen_dispatch, data.gen_names, 'Gen', 'AC Gen · ');
-    addDispatch(data.external_grid_dispatch, data.external_grid_names,
-      'External Grid', 'AC Grid · ');
-    addDispatch(data.renewable_dispatch, data.ren_names, 'Ren', 'AC Ren · ');
-    addDispatch(data.ac_sgen_dispatch, data.ac_sgen_names, 'SGen', 'AC SGen · ');
-    addDispatch(data.ac_pv_dispatch, data.pv_names, 'PV', 'AC PV · ');
-    addDispatch(data.dc_pv_dispatch, data.dc_pv_names, 'DC PV', 'DC PV · ');
-    addDispatch(data.dc_sgen_dispatch, data.dc_sgen_names, 'DC SGen', 'DC SGen · ');
-    addDispatch(data.dc_legacy_sgen_dispatch, data.dc_legacy_sgen_names, 'DC SGen', 'DC SGen · ');
-    addDispatch(data.ess_dispatch, data.ess_names, 'ESS', 'AC ESS · ');
-    addDispatch(data.dc_ess_dispatch, data.dc_ess_names, 'DC ESS', 'DC ESS · ');
+    const richGeneration = Array.isArray(data.generation_component_series)
+      ? data.generation_component_series : [];
+    richGeneration.forEach(row => dtraces.push({
+      x: hrs, y: row.values || [], mode: 'lines+markers',
+      name: `${row.domain || ''} · ${row.name || row.canvas_type + ' ' + row.canvas_index}`,
+      line: { color: pal[(dispatchColor++) % pal.length], width: 2 },
+      customdata: (row.values || []).map(() => row.recovery_class || ''),
+      hovertemplate: '%{fullData.name}<br>t=%{x}<br>P=%{y:.4f} MW<br>恢复=%{customdata}<extra></extra>',
+    }));
+    if (!richGeneration.length) {
+      addDispatch(data.gen_dispatch, data.gen_names, 'Gen', 'AC Gen · ');
+      addDispatch(data.external_grid_dispatch, data.external_grid_names,
+        'External Grid', 'AC Grid · ');
+      addDispatch(data.renewable_dispatch, data.ren_names, 'Ren', 'AC Ren · ');
+      addDispatch(data.ac_sgen_dispatch, data.ac_sgen_names, 'SGen', 'AC SGen · ');
+      addDispatch(data.ac_pv_dispatch, data.pv_names, 'PV', 'AC PV · ');
+      addDispatch(data.dc_pv_dispatch, data.dc_pv_names, 'DC PV', 'DC PV · ');
+      addDispatch(data.dc_sgen_dispatch, data.dc_sgen_names, 'DC SGen', 'DC SGen · ');
+      addDispatch(data.dc_legacy_sgen_dispatch, data.dc_legacy_sgen_names, 'DC SGen', 'DC SGen · ');
+    }
     if (dtraces.length > 0) {
       Plotly.newPlot(genDiv, dtraces, {
-        ...plotTheme, title: '发电出力与储能充放电 (MW, 储能正=放电 负=充电)', barmode: 'relative',
+        ...plotTheme, title: '单设备发电与外部电网出力（不堆叠）',
         yaxis: { ...plotTheme.yaxis, title: 'MW' },
       }, { responsive: true });
     } else {
@@ -7743,11 +7756,17 @@ const App = (() => {
 
     // 4. ESS SOC
     const essDiv = document.getElementById('tspfESSChart');
-    if (data.ess_soc && data.ess_soc.length > 0) {
-      const essTraces = data.ess_soc.map((soc, si) => ({
+    if ((data.ess_soc && data.ess_soc.length > 0) ||
+        (data.dc_ess_soc && data.dc_ess_soc.length > 0)) {
+      const essTraces = (data.ess_soc || []).map((soc, si) => ({
         x: hrs, y: soc, mode: 'lines+markers',
-        name: (data.ess_names || [])[si] || 'ESS ' + si,
+        name: 'AC · ' + ((data.ess_names || [])[si] || 'ESS ' + si),
         line: { width: 2 },
+      }));
+      (data.dc_ess_soc || []).forEach((soc, si) => essTraces.push({
+        x: hrs, y: soc, mode: 'lines+markers',
+        name: 'DC · ' + ((data.dc_ess_names || [])[si] || 'ESS ' + si),
+        line: { width: 2, dash: 'dot' },
       }));
       Plotly.newPlot(essDiv, essTraces, {
         ...plotTheme, title: '储能SOC',
@@ -7757,18 +7776,34 @@ const App = (() => {
       essDiv.innerHTML = '';
     }
 
-    // 4b. AC ESS dispatch (charge/discharge)
+    // 4b. Identity-keyed AC/DC ESS dispatch. Positive means injection into the
+    // network (discharge); negative means charging.
     const essDispDiv = document.getElementById('tspfESSDispatchChart');
-    if (data.ess_dispatch && data.ess_dispatch.length > 0) {
-      const essDispTraces = data.ess_dispatch.map((d, si) => ({
-        x: hrs, y: d, type: 'bar',
-        name: (data.ess_names || [])[si] || 'ESS ' + si,
+    const richStorage = Array.isArray(data.storage_component_series)
+      ? data.storage_component_series : [];
+    const essDispTraces = richStorage.map((row, si) => ({
+      x: hrs, y: row.values || [], mode: 'lines+markers',
+      name: `${row.domain || ''} · ${row.name || 'ESS ' + row.canvas_index}`,
+      line: { color: pal[si % pal.length], width: 2 },
+      customdata: (row.values || []).map(() => row.recovery_class || ''),
+      hovertemplate: '%{fullData.name}<br>t=%{x}<br>P=%{y:.4f} MW<br>恢复=%{customdata}<extra></extra>',
+    }));
+    if (!essDispTraces.length) {
+      (data.ess_dispatch || []).forEach((d, si) => essDispTraces.push({
+        x: hrs, y: d, mode: 'lines+markers',
+        name: 'AC · ' + ((data.ess_names || [])[si] || 'ESS ' + si),
       }));
-      const allVals = data.ess_dispatch.flat();
+      (data.dc_ess_dispatch || []).forEach((d, si) => essDispTraces.push({
+        x: hrs, y: d, mode: 'lines+markers',
+        name: 'DC · ' + ((data.dc_ess_names || [])[si] || 'ESS ' + si),
+      }));
+    }
+    if (essDispTraces.length) {
+      const allVals = essDispTraces.flatMap(trace => trace.y || []);
       const eMin = Math.min(...allVals, 0), eMax = Math.max(...allVals, 0);
       const ePad = Math.max((eMax - eMin) * 0.15, 0.1);
       Plotly.newPlot(essDispDiv, essDispTraces, {
-        ...plotTheme, title: '储能充放电调度 (MW, 正=放电 负=充电)', barmode: 'relative',
+        ...plotTheme, title: '单设备储能充放电（正=放电，负=充电，不堆叠）',
         yaxis: { ...plotTheme.yaxis, title: 'MW', range: [eMin - ePad, eMax + ePad] },
       }, { responsive: true });
     } else {
@@ -16100,6 +16135,7 @@ const App = (() => {
         binding: {
           assign_all_loads_to: componentLoadProfiles.map.length ? -1 : (load.length ? 0 : -1),
           assign_all_pv_to: pv.length && hasPvCapacity ? 2 : -1,
+          assign_all_renewables_to: pv.length && hasPvCapacity ? 2 : (wind.length && hasWindCapacity ? 1 : -1),
           load_profile_map: componentLoadProfiles.map,
           resilience_load_profile_id: load.length ? 0 : -1,
           resilience_wind_profile_id: wind.length && hasWindCapacity ? 1 : -1,
@@ -16299,6 +16335,8 @@ const App = (() => {
         load_profile_map: ts.binding?.load_profile_map || [],
         assign_all_loads_to: Number.isInteger(ts.binding?.assign_all_loads_to) ? ts.binding.assign_all_loads_to : -1,
         assign_all_pv_to: Number.isInteger(ts.binding?.assign_all_pv_to) ? ts.binding.assign_all_pv_to : -1,
+        assign_all_renewables_to: Number.isInteger(ts.binding?.assign_all_renewables_to) ? ts.binding.assign_all_renewables_to : -1,
+        assign_all_prices_to: Number.isInteger(ts.binding?.assign_all_prices_to) ? ts.binding.assign_all_prices_to : -1,
       };
       const r = await fetch('/api/session/set_ts_config', {
         method: 'POST',
@@ -17039,11 +17077,12 @@ const App = (() => {
             id: pid, name: lp.name || `load_${lp.bus ?? i}`,
             values: scaled,
           });
-          if (Number.isInteger(lp.load_index)) {
-            load_profile_map.push({ load_index: lp.load_index, profile_id: pid });
-          } else if (Number.isInteger(lp.bus)) {
-            load_profile_map.push({ bus: lp.bus, profile_id: pid });
-          }
+          const binding = { profile_id: pid, kind: lp.kind || lp.domain || 'AC_LOAD' };
+          if (Number.isInteger(lp.load_index)) binding.load_index = lp.load_index;
+          if (Number.isInteger(lp.bus)) binding.bus = lp.bus;
+          if (Number.isInteger(lp.load_position)) binding.load_position = lp.load_position;
+          if (binding.load_index != null || binding.bus != null || binding.load_position != null)
+            load_profile_map.push(binding);
         });
       }
       const body = {
@@ -17053,6 +17092,9 @@ const App = (() => {
         load_profile_map,
         // bind solar PV to irradiance profile when present
         assign_all_pv_to: c.irradiance ? TS_PROFILE_ID.irradiance : -1,
+        assign_all_renewables_to: c.irradiance ? TS_PROFILE_ID.irradiance : -1,
+        // Imported price values are absolute currency/MWh, not multipliers.
+        assign_all_prices_to: c.price ? TS_PROFILE_ID.price : -1,
       };
       try {
         const r = await fetch('/api/session/set_ts_config', {

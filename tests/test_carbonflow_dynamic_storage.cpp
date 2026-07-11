@@ -5,6 +5,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace {
@@ -48,6 +49,9 @@ hacdcpf::HybridPowerSystem build_single_bus_storage_case() {
   storage.index = 1;
   storage.bus = 1;
   storage.in_service = true;
+  storage.p_rated_mw = 20.0;
+  storage.pmin_mw = -20.0;
+  storage.pmax_mw = 20.0;
   storage.e_rated_mwh = 100.0;
   storage.eta_charge = 1.0;
   storage.eta_discharge = 1.0;
@@ -115,7 +119,8 @@ TEST_CASE("time-series PF replays a precomputed UC schedule without resolving UC
   TimeSeriesData ts;
   ts.num_steps = 2;
   ts.step_duration_hr = 1.0;
-  ts.profiles = {{0, "load", {1.0, 1.0}}};
+  base.ac.loads[0].profile_id = 0;
+  ts.profiles = {{0, "load", {0.5, 1.5}}};
 
   UCSchedule schedule;
   schedule.feasible = true;
@@ -140,6 +145,217 @@ TEST_CASE("time-series PF replays a precomputed UC schedule without resolving UC
   CHECK(result.pf_system_snapshots[1].ac.storage[0].p_mw == Approx(5.0));
   CHECK(result.pf_system_snapshots[0].ac.storage[0].soc_init == Approx(0.60));
   CHECK(result.pf_system_snapshots[1].ac.storage[0].soc_init == Approx(0.55));
+  CHECK(result.pf_system_snapshots[0].ac.loads[0].p_mw == Approx(5.0));
+  CHECK(result.pf_system_snapshots[1].ac.loads[0].p_mw == Approx(15.0));
+  REQUIRE(result.rich_results.size() == 2);
+  for (const auto& rich_result : result.rich_results) {
+    CHECK(rich_result.coverage.total());
+  }
+}
+
+TEST_CASE("external-grid price profile is an absolute time series",
+          "[time_series][profiles][price]") {
+  using namespace hacdcpf;
+
+  HybridPowerSystem base = build_single_bus_storage_case();
+  ExternalGrid grid;
+  grid.index = 7;
+  grid.bus = 1;
+  grid.in_service = true;
+  grid.cost_c1 = 5.0;
+  grid.price_profile_id = 9;
+  base.ac.external_grids.push_back(grid);
+
+  TimeSeriesData ts;
+  ts.num_steps = 2;
+  ts.step_duration_hr = 1.0;
+  ts.profiles = {{9, "price", {100.0, 250.0}}};
+  UCSchedule schedule;
+  schedule.feasible = false;
+  TimeSeriesPFOptions opts;
+  opts.skip_uc = true;
+
+  const auto step0 = build_time_series_system_snapshot(base, ts, schedule, 0, opts);
+  const auto step1 = build_time_series_system_snapshot(base, ts, schedule, 1, opts);
+  REQUIRE(step0.ac.external_grids.size() == 1);
+  REQUIRE(step1.ac.external_grids.size() == 1);
+  CHECK(step0.ac.external_grids[0].cost_c1 == Approx(100.0));
+  CHECK(step1.ac.external_grids[0].cost_c1 == Approx(250.0));
+}
+
+TEST_CASE("time-series attribution preserves native DCStorage identity and dispatch",
+          "[time_series][projection][storage][dc]") {
+  using namespace hacdcpf;
+
+  HybridPowerSystem base = build_single_bus_storage_case();
+  DCBus dc_bus;
+  dc_bus.index = 1;
+  dc_bus.bus_type = DCBusType::DC_V;
+  base.dc.buses.push_back(dc_bus);
+
+  DCStorage storage;
+  storage.index = 91;
+  storage.bus = 1;
+  storage.name = "Native DC BESS";
+  storage.p_rated_mw = 2.0;
+  storage.pmin_mw = -2.0;
+  storage.pmax_mw = 2.0;
+  storage.e_rated_mwh = 10.0;
+  storage.soc_init = 0.5;
+  storage.e_mwh = 5.0;
+  base.dc.dc_storage.push_back(storage);
+
+  TimeSeriesData ts;
+  ts.num_steps = 2;
+  ts.step_duration_hr = 1.0;
+  UCSchedule schedule;
+  schedule.feasible = true;
+  schedule.gen_dispatch = {{10.0, 10.0}};
+  schedule.gen_commit = {{1, 1}};
+  schedule.dc_ess_dispatch = {{-1.0, 1.0}};
+  schedule.dc_ess_soc = {{0.6, 0.5}};
+
+  TimeSeriesPFOptions opts;
+  opts.skip_uc = true;
+  opts.run_opf = false;
+  opts.keep_system_snapshots = true;
+  opts.precomputed_uc_schedule = &schedule;
+  const auto result = solve_time_series_pf(base, ts, opts);
+
+  REQUIRE(result.rich_results.size() == 2);
+  for (size_t t = 0; t < result.rich_results.size(); ++t) {
+    const auto& components = result.rich_results[t].components;
+    const auto it = std::find_if(
+        components.begin(), components.end(), [](const auto& component) {
+          return component.component_type == "dc_storage" &&
+                 component.domain == "DC" && component.component_index == 91;
+        });
+    REQUIRE(it != components.end());
+    const auto p = std::find_if(it->values.begin(), it->values.end(),
+                                [](const auto& value) {
+                                  return value.name == "p_mw";
+                                });
+    REQUIRE(p != it->values.end());
+    CHECK(p->value == Approx(t == 0 ? -1.0 : 1.0));
+    CHECK(std::none_of(components.begin(), components.end(),
+                       [](const auto& component) {
+                         return component.component_type == "storage" &&
+                                component.domain == "DC" &&
+                                component.component_index == 91;
+                       }));
+  }
+}
+
+TEST_CASE("skip-UC fallback schedules DC storage with SOC transitions",
+          "[time_series][storage][dc]") {
+  using namespace hacdcpf;
+
+  HybridPowerSystem base = build_single_bus_storage_case();
+  DCBus dc_bus;
+  dc_bus.index = 1;
+  dc_bus.bus_type = DCBusType::DC_V;
+  base.dc.buses.push_back(dc_bus);
+
+  Storage dc_storage;
+  dc_storage.index = 7;
+  dc_storage.bus = 1;
+  dc_storage.in_service = true;
+  dc_storage.p_rated_mw = 1.0;
+  dc_storage.pmin_mw = -1.0;
+  dc_storage.pmax_mw = 1.0;
+  dc_storage.e_rated_mwh = 10.0;
+  dc_storage.soc_init = 0.5;
+  dc_storage.soc_min = 0.1;
+  dc_storage.soc_max = 0.9;
+  dc_storage.eta_charge = 0.95;
+  dc_storage.eta_discharge = 0.95;
+  base.dc.storage.push_back(dc_storage);
+
+  base.ac.loads[0].profile_id = 0;
+  TimeSeriesData ts;
+  ts.num_steps = 4;
+  ts.step_duration_hr = 1.0;
+  ts.profiles = {{0, "load", {0.5, 1.5, 1.5, 0.5}}};
+
+  TimeSeriesPFOptions opts;
+  opts.skip_uc = true;
+  opts.run_opf = false;
+  opts.keep_system_snapshots = true;
+  opts.enforce_terminal_soc_cyclic = true;
+  const TimeSeriesPFResult result = solve_time_series_pf(base, ts, opts);
+
+  REQUIRE(result.uc_schedule.dc_ess_dispatch.size() == 1);
+  REQUIRE(result.uc_schedule.dc_ess_soc.size() == 1);
+  const auto& dispatch = result.uc_schedule.dc_ess_dispatch[0];
+  const auto& soc = result.uc_schedule.dc_ess_soc[0];
+  REQUIRE(dispatch.size() == 4);
+  REQUIRE(soc.size() == 4);
+  CHECK(*std::min_element(dispatch.begin(), dispatch.end()) < 0.0);
+  CHECK(*std::max_element(dispatch.begin(), dispatch.end()) > 0.0);
+  CHECK(soc.back() == Approx(dc_storage.soc_init).margin(1e-9));
+
+  double previous_soc = dc_storage.soc_init;
+  for (size_t t = 0; t < dispatch.size(); ++t) {
+    const double expected = dispatch[t] >= 0.0
+        ? previous_soc - dispatch[t] /
+              (dc_storage.eta_discharge * dc_storage.e_rated_mwh)
+        : previous_soc - dispatch[t] * dc_storage.eta_charge /
+              dc_storage.e_rated_mwh;
+    CHECK(soc[t] == Approx(expected).margin(1e-10));
+    previous_soc = soc[t];
+  }
+}
+
+TEST_CASE("carbon flow repairs radial DC transfer hidden by equal boundary voltages",
+          "[carbonflow][dc][kcl]") {
+  using namespace hacdcpf;
+  using namespace hacdcpf::analysis;
+
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  ACBus ac_bus;
+  ac_bus.index = 1;
+  ac_bus.bus_type = BusType::SLACK;
+  sys.ac.buses.push_back(ac_bus);
+  Load ac_load;
+  ac_load.index = 1;
+  ac_load.bus = 1;
+  ac_load.p_mw = 0.392;
+  sys.ac.loads.push_back(ac_load);
+  ExternalGrid grid;
+  grid.index = 1;
+  grid.bus = 1;
+  grid.in_service = true;
+  sys.ac.external_grids.push_back(grid);
+
+  DCBus dc_p;
+  dc_p.index = 1;
+  dc_p.bus_type = DCBusType::DC_P;
+  DCBus dc_v;
+  dc_v.index = 2;
+  dc_v.bus_type = DCBusType::DC_V;
+  dc_v.emission_factor_tco2_mwh = 0.5;
+  sys.dc.buses = {dc_p, dc_v};
+  DCBranch branch;
+  branch.index = 1;
+  branch.from_bus = 1;
+  branch.to_bus = 2;
+  branch.r_pu = 0.01;
+  branch.in_service = true;
+  sys.dc.branches.push_back(branch);
+
+  PowerFlowResult pf;
+  pf.converged = true;
+  pf.vm = {1.0};
+  pf.va = {0.0};
+  pf.vdc = {1.0, 1.0};
+  pf.vsc_transfers.push_back(
+      VSCTransfer{1, 1, 1, 0.392, 0.0, -0.4, 0.008});
+
+  const CarbonAnalysisResult carbon = compute_carbon_analysis(sys, pf, {});
+  CHECK(carbon.power_balance_verified);
+  CHECK(carbon.matrix_solved);
+  CHECK(carbon.max_node_power_balance_error_mw == Approx(0.0).margin(1e-10));
 }
 
 TEST_CASE("time-series solvers reject non-positive step durations",

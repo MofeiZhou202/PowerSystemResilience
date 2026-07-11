@@ -17,6 +17,7 @@
 // =====================================================================
 
 #include "hacdcpf/network_reconfiguration/topology_reconfiguration.hpp"
+#include "hacdcpf/projection/result_attribution.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -186,7 +187,11 @@ TopoReconfResult run_topology_reconfiguration(
   // Project system to canonical form. Keep dead islands so open tie switches
   // into currently de-energised sections survive as reconnection candidates;
   // the MILP's connectivity + slack-shed terms decide which stay energised.
-  const HybridPowerSystem proj = project_to_canonical_models(sys, /*strip_dead=*/false);
+  ProjectionOptions projection_options;
+  projection_options.strip_dead_islands = false;
+  const HybridPowerSystem proj =
+      projection::RichToCanonicalOperator::apply(sys, projection_options)
+          .canonical;
   const auto& ac = proj.ac;
   const auto& dc = proj.dc;
   const auto& vscs = proj.vsc_converters;

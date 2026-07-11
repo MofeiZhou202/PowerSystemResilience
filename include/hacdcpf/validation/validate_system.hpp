@@ -43,6 +43,12 @@ enum class ValidationLevel {
 ///   - ACSystem / DCSystem base_mva mismatch vs HybridPowerSystem base_mva
 ValidationReport validate(const HybridPowerSystem& sys);
 
+/// Validate that every authored AC SLACK / DC_V bus is backed by a physical
+/// device capable of establishing the corresponding voltage reference and
+/// balancing power. This focused preflight is used by PF and OPF entry points.
+ValidationReport validate_reference_bus_eligibility(
+    const HybridPowerSystem& sys);
+
 /// Run checks appropriate for \p level.
 ///
 /// - Basic      : only Error-severity field/reference/limit checks.

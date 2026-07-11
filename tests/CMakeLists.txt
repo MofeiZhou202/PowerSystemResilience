@@ -254,6 +254,7 @@ hacdcpf_add_test(test_graph_kron test_graph_kron.cpp)
 # the physical solution is preserved.  Covers islands, CB/switch types, meshed
 # and hybrid AC/DC topologies, and real distribution feeders.
 hacdcpf_add_test(test_graph_roundtrip test_graph_roundtrip.cpp)
+hacdcpf_add_test(test_result_attribution test_result_attribution.cpp)
 
 # Distribution CB/switch/VSC pipeline: rich model → graph analysis →
 # canonical projection → PF → DC OPF → short circuit → ONR → JSON export.

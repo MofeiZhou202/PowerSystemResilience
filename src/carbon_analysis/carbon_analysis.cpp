@@ -23,6 +23,7 @@
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/power_flow/assembly/branch_flow.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
+#include "hacdcpf/projection/result_attribution.hpp"
 
 namespace hacdcpf::analysis {
 
@@ -259,7 +260,8 @@ CanonicalCarbonInput build_canonical_carbon_input(
     const HybridPowerSystem& original,
     const PowerFlowResult& original_pf) {
   CanonicalCarbonInput input;
-  input.system = project_to_canonical_models(original);
+  input.system =
+      projection::RichToCanonicalOperator::apply(original).canonical;
   input.ac_bus_map = input.system.bus_merge_map;
   input.power_flow = original_pf;
   input.power_flow.vm = project_ac_bus_values(
@@ -664,8 +666,14 @@ std::vector<FlowEdge> build_directed_flows(const HybridPowerSystem& sys,
     add_ac_terminal_flow(EdgeKind::ACCircuitBreaker, flow);
   }
 
+  struct DCTerminalFlow {
+    double pf_mw{0.0};
+    double pt_mw{0.0};
+  };
   const double base_mva = (sys.base_mva > 0.0) ? sys.base_mva : 100.0;
-  for (const auto& br : sys.dc.branches) {
+  std::vector<DCTerminalFlow> dc_terminal(sys.dc.branches.size());
+  for (size_t bi = 0; bi < sys.dc.branches.size(); ++bi) {
+    const auto& br = sys.dc.branches[bi];
     if (!br.in_service || br.r_pu <= kTol) continue;
     const auto itf = id.dc_loc.find(br.from_bus);
     const auto itt = id.dc_loc.find(br.to_bus);
@@ -682,6 +690,110 @@ std::vector<FlowEdge> build_directed_flows(const HybridPowerSystem& sys,
     const double i_pu = (v_from - v_to) / br.r_pu;
     const double p_from_mw = base_mva * v_from * i_pu;
     const double p_to_mw = -base_mva * v_to * i_pu;
+    dc_terminal[bi] = {p_from_mw, p_to_mw};
+  }
+
+  // Some hybrid solves hold a DC voltage-boundary pair at the same reported
+  // voltage while converter coupling still establishes a non-zero feeder
+  // transfer. Recover radial DC terminal flows from solved nodal injections so
+  // carbon tracing uses the same KCL-consistent operating point as PF output.
+  std::unordered_map<int, double> dc_net_export;
+  for (const auto& bus : sys.dc.buses)
+    if (bus.in_service) dc_net_export[bus.index] -= bus.pd_mw;
+  for (const auto& ld : sys.dc.loads)
+    if (ld.in_service) dc_net_export[ld.bus] -= ld.p_mw * ld.scaling;
+  for (const auto& pv : sys.dc.pv_arrays)
+    if (pv.in_service) dc_net_export[pv.bus] += pv.p_set_mw;
+  for (const auto& sg : sys.dc.static_generators)
+    if (sg.in_service) dc_net_export[sg.bus] += sg.p_mw * sg.scaling;
+  for (const auto& sg : sys.dc.dc_static_generators)
+    if (sg.in_service) dc_net_export[sg.bus] += sg.p_set_mw * sg.scaling;
+  for (const auto& st : sys.dc.storage)
+    if (st.in_service) dc_net_export[st.bus] += st.p_mw;
+  for (const auto& tr : pf.vsc_transfers)
+    dc_net_export[tr.bus_dc] += tr.p_dc_mw;
+  for (const auto& tr : pf.dcdc_transfers) {
+    dc_net_export[tr.bus_in] -= tr.p_in_mw;
+    dc_net_export[tr.bus_out] += tr.p_out_mw;
+  }
+
+  std::unordered_map<int, std::vector<std::pair<int, size_t>>> dc_adj;
+  std::unordered_set<int> dc_bus_ids;
+  for (const auto& bus : sys.dc.buses) {
+    if (bus.in_service && bus.bus_type != DCBusType::DC_ISOLATED)
+      dc_bus_ids.insert(bus.index);
+  }
+  for (size_t bi = 0; bi < sys.dc.branches.size(); ++bi) {
+    const auto& br = sys.dc.branches[bi];
+    if (!br.in_service || !dc_bus_ids.count(br.from_bus) ||
+        !dc_bus_ids.count(br.to_bus)) continue;
+    dc_adj[br.from_bus].push_back({br.to_bus, bi});
+    dc_adj[br.to_bus].push_back({br.from_bus, bi});
+  }
+  const auto is_dc_reference = [&](int bus_index) {
+    const auto it = id.dc_loc.find(bus_index);
+    return it != id.dc_loc.end() && it->second >= 0 &&
+           it->second < static_cast<int>(sys.dc.buses.size()) &&
+           sys.dc.buses[static_cast<size_t>(it->second)].bus_type ==
+               DCBusType::DC_V;
+  };
+  const auto set_dc_terminal_from_bus = [&](size_t branch_pos, int bus,
+                                            double outflow_mw) {
+    const auto& br = sys.dc.branches[branch_pos];
+    double vm = 1.0;
+    const auto vit = id.dc_loc.find(bus);
+    if (vit != id.dc_loc.end() && vit->second >= 0 &&
+        vit->second < static_cast<int>(pf.vdc.size())) {
+      vm = std::max(std::abs(pf.vdc[static_cast<size_t>(vit->second)]), 1e-3);
+    }
+    const double i_pu = std::abs(outflow_mw) / (base_mva * vm);
+    const double loss = std::max(br.r_pu, 0.0) * i_pu * i_pu * base_mva;
+    if (bus == br.from_bus) {
+      dc_terminal[branch_pos] = {outflow_mw, loss - outflow_mw};
+    } else {
+      dc_terminal[branch_pos] = {loss - outflow_mw, outflow_mw};
+    }
+  };
+
+  std::unordered_set<int> visited_dc;
+  for (int start : dc_bus_ids) {
+    if (visited_dc.count(start)) continue;
+    std::vector<int> component;
+    std::vector<int> roots;
+    std::vector<int> stack{start};
+    visited_dc.insert(start);
+    size_t degree_sum = 0;
+    while (!stack.empty()) {
+      const int u = stack.back();
+      stack.pop_back();
+      component.push_back(u);
+      if (is_dc_reference(u)) roots.push_back(u);
+      degree_sum += dc_adj[u].size();
+      for (const auto& [v, edge_pos] : dc_adj[u]) {
+        (void)edge_pos;
+        if (visited_dc.insert(v).second) stack.push_back(v);
+      }
+    }
+    if (roots.size() != 1 || degree_sum / 2 + 1 != component.size()) continue;
+    const std::unordered_set<int> component_set(component.begin(), component.end());
+    std::function<double(int, int)> repair_tree = [&](int u, int parent) {
+      double subtree_export = dc_net_export[u];
+      for (const auto& [v, edge_pos] : dc_adj[u]) {
+        if (v == parent || !component_set.count(v)) continue;
+        const double child_export = repair_tree(v, u);
+        set_dc_terminal_from_bus(edge_pos, v, child_export);
+        subtree_export += child_export;
+      }
+      return subtree_export;
+    };
+    (void)repair_tree(roots.front(), -1);
+  }
+
+  for (size_t bi = 0; bi < sys.dc.branches.size(); ++bi) {
+    const auto& br = sys.dc.branches[bi];
+    if (!br.in_service) continue;
+    const double p_from_mw = dc_terminal[bi].pf_mw;
+    const double p_to_mw = dc_terminal[bi].pt_mw;
     const double loss = std::max(p_from_mw + p_to_mw, 0.0);
 
     const int from_loc = global_bus_loc(id, true, br.from_bus);

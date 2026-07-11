@@ -14,7 +14,7 @@
 #include "hacdcpf/dynamics/devices/BasicDynamicDevices.hpp"
 #include "hacdcpf/model/device_control_role.hpp"
 #include "hacdcpf/model/enums.hpp"
-#include "hacdcpf/projection/project_to_canonical.hpp"
+#include "hacdcpf/projection/result_attribution.hpp"
 
 namespace hacdcpf::dynamics {
 namespace {
@@ -1571,7 +1571,10 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
                                          const DynamicSolverOptions& options) const {
   DynamicSystem dyn;
   dyn.options = options;
-  dyn.canonical_system = options.project_to_canonical ? project_to_canonical_models(sys) : sys;
+  dyn.canonical_system =
+      options.project_to_canonical
+          ? projection::RichToCanonicalOperator::apply(sys).canonical
+          : sys;
   dyn.initial_power_flow = nominal_power_flow(
       options.project_to_canonical ? sys : dyn.canonical_system,
       options);

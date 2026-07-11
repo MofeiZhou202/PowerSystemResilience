@@ -55,6 +55,8 @@ struct AnnualStepResult {
   double total_renewable_mw{0.0};
   double total_curtailment_mw{0.0};
   double total_ess_mw{0.0};        // net: positive=discharge
+  double storage_discharge_mw{0.0};
+  double storage_charge_mw{0.0};
   double external_grid_net_mw{0.0}; // positive=import, negative=export
   double total_loss_mw{0.0};
   double total_supply_mw{0.0};
@@ -105,6 +107,7 @@ struct GenAnnualStats {
 struct StorageAnnualStats {
   std::string name;
   int storage_index{0};
+  bool is_dc{false};
   double total_charge_mwh{0.0};
   double total_discharge_mwh{0.0};
   double cycles{0.0};

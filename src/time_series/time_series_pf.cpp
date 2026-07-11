@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <future>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <Eigen/Core>
@@ -48,6 +50,11 @@ double profile_value(const std::vector<double>* pv, int t, double fallback) {
   return (*pv)[static_cast<size_t>(t)];
 }
 
+double absolute_profile_value(const std::vector<double>* profile, int t,
+                              double fallback) {
+  return profile ? profile_value(profile, t, fallback) : fallback;
+}
+
 void validate_time_series_data_for_solve(const TimeSeriesData& ts_data,
                                          bool require_steps) {
   if (ts_data.num_steps < 0) {
@@ -61,6 +68,20 @@ void validate_time_series_data_for_solve(const TimeSeriesData& ts_data,
        ts_data.step_duration_hr <= 0.0)) {
     throw std::invalid_argument(
         "TimeSeriesData.step_duration_hr must be positive and finite");
+  }
+  std::unordered_set<int> profile_ids;
+  for (const auto& profile : ts_data.profiles) {
+    if (!profile_ids.insert(profile.id).second) {
+      throw std::invalid_argument("TimeSeriesData contains duplicate profile id " +
+                                  std::to_string(profile.id));
+    }
+    for (double value : profile.values) {
+      if (!std::isfinite(value)) {
+        throw std::invalid_argument(
+            "TimeSeriesData profile " + std::to_string(profile.id) +
+            " contains a non-finite value");
+      }
+    }
   }
 }
 
@@ -178,6 +199,30 @@ double estimate_boundary_loss_mw(const HybridPowerSystem& sys) {
   }
 
   return std::abs(total_supply_mw - total_demand_mw);
+}
+
+HybridPowerSystem restore_rich_dc_storage_identity(
+    const HybridPowerSystem& solver_state,
+    const HybridPowerSystem& rich_template) {
+  if (rich_template.dc.dc_storage.empty()) return solver_state;
+  if (!solver_state.dc.dc_storage.empty()) return solver_state;
+  HybridPowerSystem rich_state = solver_state;
+  const size_t legacy_count = rich_template.dc.storage.size();
+  rich_state.dc.storage.assign(
+      solver_state.dc.storage.begin(),
+      solver_state.dc.storage.begin() +
+          std::min(legacy_count, solver_state.dc.storage.size()));
+  rich_state.dc.dc_storage = rich_template.dc.dc_storage;
+  for (size_t i = 0; i < rich_state.dc.dc_storage.size(); ++i) {
+    const size_t solver_position = legacy_count + i;
+    if (solver_position >= solver_state.dc.storage.size()) break;
+    const auto& source = solver_state.dc.storage[solver_position];
+    auto& target = rich_state.dc.dc_storage[i];
+    target.p_mw = source.p_mw;
+    target.soc_init = source.soc_init;
+    target.e_mwh = source.e_mwh;
+  }
+  return rich_state;
 }
 
 double estimate_opf_physical_loss_mw(const HybridPowerSystem& sys,
@@ -1260,8 +1305,8 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
     }
   }
 
-  // External-grid net exchange (+import / −export), priced by a time-varying
-  // tariff (price_profile_id × cost_c1, else static cost_c1).  Carbon objective
+  // External-grid net exchange (+import / −export). A bound price profile is
+  // an absolute currency/MWh series; otherwise the static cost_c1 applies.
   // charges the import emission factor (applied to the net variable; export is
   // typically small).  Bounds are a symmetric big-M when no explicit limit.
   for (int xi = 0; xi < X; ++xi) {
@@ -1272,7 +1317,7 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       m.linear_part.vars[static_cast<size_t>(ext_idx(xi, t))] = {
         VarType::Continuous, -cap, cap,
         "p_ext" + std::to_string(xi) + "_t" + std::to_string(t)};
-      const double price = xg.cost_c1 * profile_value(price_pv, t, 1.0);
+      const double price = absolute_profile_value(price_pv, t, xg.cost_c1);
       m.linear_part.c[ext_idx(xi, t)] =
           (w_cost * price + w_carbon * xg.emission_factor_tco2_mwh) * dt;
     }
@@ -3185,6 +3230,19 @@ HybridPowerSystem build_time_series_system_snapshot(
 
   const bool apply_uc_schedule = should_apply_uc_schedule(opts, schedule);
 
+  if (!apply_uc_schedule) {
+    for (auto& gen : sys_t.ac.generators) {
+      if (!gen.in_service) continue;
+      const auto* profile = find_profile(profile_map, gen.profile_id);
+      if (!profile) continue;
+      const double availability =
+          std::max(0.0, profile_value(profile, step, 1.0));
+      gen.pg_mw *= availability;
+      gen.pmax_mw *= availability;
+      gen.pmin_mw *= availability;
+    }
+  }
+
   if (apply_uc_schedule) {
     for (int gi = 0; gi < static_cast<int>(gen_active_idx.size()); ++gi) {
       const int idx = gen_active_idx[static_cast<size_t>(gi)];
@@ -3563,6 +3621,7 @@ static TimeSeriesPFResult concat_ts_results(std::vector<TimeSeriesPFResult>& par
     for (auto& x : p.opf_results) out.opf_results.push_back(std::move(x));
     for (auto& x : p.pf_results) out.pf_results.push_back(std::move(x));
     for (auto& x : p.pf_system_snapshots) out.pf_system_snapshots.push_back(std::move(x));
+    for (auto& x : p.rich_results) out.rich_results.push_back(std::move(x));
     for (auto& x : p.crossval) out.crossval.push_back(std::move(x));
     out.num_converged += p.num_converged;
     out.num_opf_converged += p.num_opf_converged;
@@ -3691,10 +3750,14 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
     schedule.solver_name = "skipped";
   }
 
+  bool need_dc_ess_fallback = false;
+
   // Populate DC-side profile-driven arrays; keep UC-optimized DC ESS when available.
   {
     const int ndc_pv = static_cast<int>(sys.dc.pv_arrays.size());
-    const int ndc_ess = static_cast<int>(sys.dc.storage.size());
+    const int ndc_ess = static_cast<int>(std::count_if(
+        sys.dc.storage.begin(), sys.dc.storage.end(),
+        [](const Storage& st) { return st.in_service; }));
     const int ndc_sgen = static_cast<int>(sys.dc.dc_static_generators.size());
     const int ndc_load = static_cast<int>(sys.dc.loads.size());
 
@@ -3731,7 +3794,7 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
       }
     }
     bool has_uc_dc_ess =
-        !opts.skip_uc && schedule.feasible &&
+        should_apply_uc_schedule(opts, schedule) &&
         static_cast<int>(schedule.dc_ess_dispatch.size()) == ndc_ess;
     if (has_uc_dc_ess) {
       for (int k = 0; k < ndc_ess; ++k) {
@@ -3742,15 +3805,15 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
       }
     }
     if (!has_uc_dc_ess) {
-      schedule.dc_ess_dispatch.resize(static_cast<size_t>(ndc_ess),
-                                      std::vector<double>(static_cast<size_t>(T)));
-      for (int k = 0; k < ndc_ess; ++k) {
-        const auto& ess = sys.dc.storage[static_cast<size_t>(k)];
-        for (int t = 0; t < T; ++t) {
-          schedule.dc_ess_dispatch[static_cast<size_t>(k)][static_cast<size_t>(t)] =
-              ess.in_service ? ess.p_mw : 0.0;
-        }
-      }
+      // A static p_mw is a single operating-point setpoint, not a horizon
+      // schedule. Repeating it would violate the storage energy constraint.
+      need_dc_ess_fallback = ndc_ess > 0;
+      schedule.dc_ess_dispatch.assign(
+          static_cast<size_t>(ndc_ess),
+          std::vector<double>(static_cast<size_t>(T), 0.0));
+      schedule.dc_ess_soc.assign(
+          static_cast<size_t>(ndc_ess),
+          std::vector<double>(static_cast<size_t>(T), 0.0));
     }
     for (int k = 0; k < ndc_sgen; ++k) {
       const auto& sg = sys.dc.dc_static_generators[static_cast<size_t>(k)];
@@ -3775,7 +3838,8 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
     }
   }
 
-  // AC ESS fallback: peak-shaving heuristic when UC didn't produce ESS dispatch
+  // SOC-aware AC/DC ESS fallback when UC did not produce an inter-temporal
+  // schedule (notably dynamic OPF / PF with skip_uc=true).
   {
     int nACEssActive = 0;
     for (const auto& e : sys.ac.storage)
@@ -3792,7 +3856,7 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
       }
     }
 
-    if (need_ess_fallback) {
+    if (need_ess_fallback || need_dc_ess_fallback) {
       // Compute simplified net load from profiles for peak-shaving reference
       std::vector<double> net_load(static_cast<size_t>(T), 0.0);
       const bool has_comp = !sys.ac.loads.empty() || !sys.ac.charging_stations.empty();
@@ -3846,26 +3910,50 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
         avg_load += net_load[static_cast<size_t>(t)];
       avg_load /= std::max(T, 1);
 
-      // Sum of all ESS pmax for proportional sharing
+      // Share the system-level peak-shaving request across every storage unit
+      // that needs a fallback. This keeps AC and DC behavior symmetric.
       double total_pmax = 0.0;
-      for (const auto& e : sys.ac.storage)
-        if (e.in_service) total_pmax += std::max(e.pmax_mw, 0.01);
+      const auto effective_pmax = [](const Storage& e) {
+        const double bound = std::max(e.pmax_mw, 0.0);
+        return e.p_rated_mw > 0.0 ? std::min(bound, e.p_rated_mw) : bound;
+      };
+      if (need_ess_fallback) {
+        for (const auto& e : sys.ac.storage)
+          if (e.in_service) total_pmax += std::max(effective_pmax(e), 0.01);
+      }
+      if (need_dc_ess_fallback) {
+        for (const auto& e : sys.dc.storage)
+          if (e.in_service) total_pmax += std::max(effective_pmax(e), 0.01);
+      }
+      total_pmax = std::max(total_pmax, 0.01);
 
-      schedule.ess_dispatch.resize(static_cast<size_t>(nACEssActive),
-                                   std::vector<double>(static_cast<size_t>(T), 0.0));
-      schedule.ess_soc.resize(static_cast<size_t>(nACEssActive),
-                              std::vector<double>(static_cast<size_t>(T), 0.0));
+      auto schedule_group = [&](const std::vector<Storage>& storage,
+                                std::vector<std::vector<double>>& dispatch,
+                                std::vector<std::vector<double>>& soc_rows) {
+        const int active = static_cast<int>(std::count_if(
+            storage.begin(), storage.end(),
+            [](const Storage& st) { return st.in_service; }));
+        dispatch.assign(static_cast<size_t>(active),
+                        std::vector<double>(static_cast<size_t>(T), 0.0));
+        soc_rows.assign(static_cast<size_t>(active),
+                        std::vector<double>(static_cast<size_t>(T), 0.0));
 
-      int sidx = 0;
-      for (const auto& ess : sys.ac.storage) {
-        if (!ess.in_service) continue;
-        const double E = std::max(ess.e_rated_mwh, 1e-12);
-        const double dt = ts_data.step_duration_hr;
-        const double sd = 1.0 - ess.self_discharge_pct / 100.0;
-        const double share = ess.pmax_mw / total_pmax;
-        const double eta_c = std::max(ess.eta_charge, 0.01);
-        const double eta_d = std::max(ess.eta_discharge, 0.01);
-        double soc = ess.soc_init;
+        int sidx = 0;
+        for (const auto& ess : storage) {
+          if (!ess.in_service) continue;
+          const double E = std::max(ess.e_rated_mwh, 1e-12);
+          const double dt = ts_data.step_duration_hr;
+          const double sd = std::clamp(
+              1.0 - ess.self_discharge_pct / 100.0, 0.0, 1.0);
+          const double pmax = effective_pmax(ess);
+          const double raw_charge_cap = std::max(-ess.pmin_mw, 0.0);
+          const double charge_cap = ess.p_rated_mw > 0.0
+              ? std::min(raw_charge_cap, ess.p_rated_mw) : raw_charge_cap;
+          const double pmin = -charge_cap;
+          const double share = std::max(pmax, 0.01) / total_pmax;
+          const double eta_c = std::max(ess.eta_charge, 0.01);
+          const double eta_d = std::max(ess.eta_discharge, 0.01);
+          double soc = ess.soc_init;
 
         // SOC update helper with correct charge/discharge efficiency:
         //   Discharge (p>0): battery delivers p, drains p/(eta_d) from stored energy
@@ -3878,7 +3966,7 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
 
         for (int t = 0; t < T; ++t) {
           double surplus = net_load[static_cast<size_t>(t)] - avg_load;
-          double p = std::clamp(surplus * share, ess.pmin_mw, ess.pmax_mw);
+          double p = std::clamp(surplus * share, pmin, pmax);
 
           // Check SOC limits
           double delta_soc = calc_delta_soc(p);
@@ -3887,23 +3975,95 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
             // SOC would go below min → reduce discharge
             delta_soc = std::max(soc * sd - ess.soc_min, 0.0);
             p = std::max(delta_soc * eta_d * E / dt, 0.0);
-            p = std::clamp(p, ess.pmin_mw, ess.pmax_mw);
+            p = std::clamp(p, pmin, pmax);
           }
           if (new_soc > ess.soc_max) {
             // SOC would exceed max → reduce charging
             delta_soc = std::min(soc * sd - ess.soc_max, 0.0);
             p = std::min(delta_soc * E / (eta_c * dt), 0.0);
-            p = std::clamp(p, ess.pmin_mw, ess.pmax_mw);
+            p = std::clamp(p, pmin, pmax);
           }
 
           delta_soc = calc_delta_soc(p);
           soc = std::clamp(soc * sd - delta_soc, ess.soc_min, ess.soc_max);
 
-          schedule.ess_dispatch[static_cast<size_t>(sidx)][static_cast<size_t>(t)] = p;
-          schedule.ess_soc[static_cast<size_t>(sidx)][static_cast<size_t>(t)] = soc;
+          dispatch[static_cast<size_t>(sidx)][static_cast<size_t>(t)] = p;
+          soc_rows[static_cast<size_t>(sidx)][static_cast<size_t>(t)] = soc;
         }
-        ++sidx;
-      }
+
+        if (opts.enforce_terminal_soc_cyclic && T > 0) {
+          auto& row = dispatch[static_cast<size_t>(sidx)];
+          auto& row_soc = soc_rows[static_cast<size_t>(sidx)];
+          const double target_soc =
+              std::clamp(ess.soc_init, ess.soc_min, ess.soc_max);
+          const auto simulate = [&](bool write_soc) {
+            double state = ess.soc_init;
+            bool valid = true;
+            for (int t = 0; t < T; ++t) {
+              state = state * sd - calc_delta_soc(row[static_cast<size_t>(t)]);
+              valid = valid && state >= ess.soc_min - 1e-10 &&
+                      state <= ess.soc_max + 1e-10;
+              if (write_soc) {
+                row_soc[static_cast<size_t>(t)] =
+                    std::clamp(state, ess.soc_min, ess.soc_max);
+              }
+            }
+            return std::pair<double, bool>{state, valid};
+          };
+
+          std::vector<int> order(static_cast<size_t>(T));
+          std::iota(order.begin(), order.end(), 0);
+          double terminal_soc = simulate(false).first;
+          const bool need_charge = terminal_soc < target_soc;
+          std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+            return need_charge
+                ? net_load[static_cast<size_t>(a)] < net_load[static_cast<size_t>(b)]
+                : net_load[static_cast<size_t>(a)] > net_load[static_cast<size_t>(b)];
+          });
+
+          for (int t : order) {
+            terminal_soc = simulate(false).first;
+            if (std::abs(terminal_soc - target_soc) <= 1e-10) break;
+            if ((terminal_soc < target_soc) != need_charge) break;
+
+            const size_t ti = static_cast<size_t>(t);
+            const double original = row[ti];
+            const double available = need_charge ? original - pmin
+                                                 : pmax - original;
+            if (available <= 1e-12) continue;
+
+            row[ti] = need_charge ? original - available
+                                  : original + available;
+            const auto [max_terminal, max_valid] = simulate(false);
+            const bool reaches_target = need_charge
+                ? max_terminal >= target_soc
+                : max_terminal <= target_soc;
+            if (!max_valid || reaches_target) {
+              double lo = 0.0, hi = available;
+              for (int iter = 0; iter < 60; ++iter) {
+                const double mid = 0.5 * (lo + hi);
+                row[ti] = need_charge ? original - mid : original + mid;
+                const auto [candidate_terminal, candidate_valid] = simulate(false);
+                const bool feasible_side = candidate_valid &&
+                    (need_charge ? candidate_terminal <= target_soc
+                                 : candidate_terminal >= target_soc);
+                if (feasible_side) lo = mid;
+                else hi = mid;
+              }
+              row[ti] = need_charge ? original - lo : original + lo;
+            }
+          }
+          (void)simulate(true);
+        }
+          ++sidx;
+        }
+      };
+
+      if (need_ess_fallback)
+        schedule_group(sys.ac.storage, schedule.ess_dispatch, schedule.ess_soc);
+      if (need_dc_ess_fallback)
+        schedule_group(sys.dc.storage, schedule.dc_ess_dispatch,
+                       schedule.dc_ess_soc);
     }
   }
 
@@ -4003,7 +4163,8 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
       if (!opf_res.converged) {
         // OPF failed — fall back to PF with UC dispatch directly
         if (opts.keep_system_snapshots) {
-          result.pf_system_snapshots[static_cast<size_t>(t)] = sys_t;
+          result.pf_system_snapshots[static_cast<size_t>(t)] =
+              restore_rich_dc_storage_identity(sys_t, sys_in);
         }
         reset_solver_handle(handle, sys_t, opts.pf_options.loss_model);
         result.pf_results[static_cast<size_t>(t)] = solve_handle(handle, opts.pf_options);
@@ -4052,19 +4213,10 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
         }
       }
 
-      // Set storage dispatch from OPF using ComponentRef map
-      for (size_t k = 0; k < opf_res.pstor_mw.size() &&
-                          k < opf_res.stor_map.size(); ++k) {
-        const int orig = opf_res.stor_map[k].original_index;
-        const int src = opf_res.stor_map[k].source_type;
-        if (src == 0 && orig >= 0 &&
-            orig < static_cast<int>(sys_pf.ac.storage.size())) {
-          sys_pf.ac.storage[static_cast<size_t>(orig)].p_mw = opf_res.pstor_mw[k];
-        } else if (src == 1 && orig >= 0 &&
-                   orig < static_cast<int>(sys_pf.dc.storage.size())) {
-          sys_pf.dc.storage[static_cast<size_t>(orig)].p_mw = opf_res.pstor_mw[k];
-        }
-      }
+      // Storage remains at the inter-temporal schedule already present in
+      // sys_pf. The single-period OPF only validates that dispatch inside a
+      // tiny numerical band; replaying its band-level deviation would make P
+      // inconsistent with the schedule-derived terminal SOC.
 
       // Set DCDC transfer dispatch from OPF using ComponentRef map
       for (size_t k = 0; k < opf_res.pdcdc_mw.size() &&
@@ -4108,7 +4260,8 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
 
       // ── Run PF validation ──
       if (opts.keep_system_snapshots) {
-        result.pf_system_snapshots[static_cast<size_t>(t)] = sys_pf;
+        result.pf_system_snapshots[static_cast<size_t>(t)] =
+            restore_rich_dc_storage_identity(sys_pf, sys_in);
       }
       reset_solver_handle(handle, sys_pf, opts.pf_options.loss_model);
       auto& pf_res = result.pf_results[static_cast<size_t>(t)];
@@ -4211,7 +4364,8 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
       }
 
       if (opts.keep_system_snapshots) {
-        result.pf_system_snapshots[static_cast<size_t>(t)] = sys_t;
+        result.pf_system_snapshots[static_cast<size_t>(t)] =
+            restore_rich_dc_storage_identity(sys_t, sys_in);
       }
       reset_solver_handle(handle, sys_t, opts.pf_options.loss_model);
       result.pf_results[static_cast<size_t>(t)] = solve_handle(handle, opts.pf_options);
@@ -4255,7 +4409,7 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
         p = result.opf_results[static_cast<size_t>(t)].external_grid_p_mw[k];
       }
       const double price =
-          grid.cost_c1 * profile_value(price_profile, t, 1.0);
+          absolute_profile_value(price_profile, t, grid.cost_c1);
       result.total_generation_cost +=
           p * price * ts_data.step_duration_hr;
     }
@@ -4309,6 +4463,33 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
     if (active_row < schedule.dc_ess_dispatch.size())
       add_storage_bid_cost(st, schedule.dc_ess_dispatch[active_row]);
     ++active_row;
+  }
+
+  result.rich_results.resize(static_cast<size_t>(T));
+  for (int t = 0; t < T; ++t) {
+    HybridPowerSystem rich_state;
+    if (t < static_cast<int>(result.pf_system_snapshots.size())) {
+      rich_state = result.pf_system_snapshots[static_cast<size_t>(t)];
+    } else {
+      rich_state = prepare_system(t);
+    }
+    rich_state = restore_rich_dc_storage_identity(rich_state, sys_in);
+    const auto projection_bundle =
+        projection::RichToCanonicalOperator::apply(rich_state);
+    const opf::ACOPFResult* opf_result =
+        t < static_cast<int>(result.opf_results.size())
+            ? &result.opf_results[static_cast<size_t>(t)]
+            : nullptr;
+    const PowerFlowResult* rich_pf =
+        t < static_cast<int>(result.pf_results.size())
+            ? &result.pf_results[static_cast<size_t>(t)]
+            : nullptr;
+    projection::AttributionOptions attribution_options;
+    attribution_options.prefer_rich_storage_dispatch = true;
+    result.rich_results[static_cast<size_t>(t)] =
+        projection::CanonicalToRichOperator::apply(
+            rich_state, projection_bundle, opf_result, nullptr, rich_pf,
+            attribution_options);
   }
 
   return result;

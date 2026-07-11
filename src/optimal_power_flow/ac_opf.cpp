@@ -25,6 +25,7 @@
 #include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/optimal_power_flow/formulation.hpp"
 #include "hacdcpf/optimal_power_flow/native_ipm_solver.hpp"
+#include "hacdcpf/validation/validate_system.hpp"
 
 #ifdef HACDCPF_HAVE_IPOPT
 #include "hacdcpf/engine/engine.hpp"  // hacdcpf::engine::NLPModel, IpoptAdapter
@@ -2293,6 +2294,16 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
 
   if (sys.ac.buses.empty()) {
     out.status = "AC OPF failed: empty AC bus set.";
+    return out;
+  }
+
+  const auto reference_validation =
+      validation::validate_reference_bus_eligibility(sys);
+  if (reference_validation.has_errors()) {
+    out.status = "AC OPF failed: reference-bus eligibility check failed: " +
+                 reference_validation.summary();
+    for (const auto& issue : reference_validation.issues)
+      out.infeasibility_hints.push_back(issue.message);
     return out;
   }
 

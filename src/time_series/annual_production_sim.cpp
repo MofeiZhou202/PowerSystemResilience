@@ -180,12 +180,23 @@ static double storage_bid_cost_rate(const HybridPowerSystem& sys,
   return cost;
 }
 
-static double scheduled_storage_net_mw(const UCSchedule& schedule, int t) {
-  double total = 0.0;
+struct ScheduledStoragePower {
+  double net_mw{0.0};
+  double discharge_mw{0.0};
+  double charge_mw{0.0};
+};
+
+static ScheduledStoragePower scheduled_storage_power(
+    const UCSchedule& schedule, int t) {
+  ScheduledStoragePower total;
   const auto add_rows = [&](const std::vector<std::vector<double>>& rows) {
     for (const auto& row : rows) {
-      if (t >= 0 && t < static_cast<int>(row.size()))
-        total += row[static_cast<size_t>(t)];
+      if (t >= 0 && t < static_cast<int>(row.size())) {
+        const double p = row[static_cast<size_t>(t)];
+        total.net_mw += p;
+        total.discharge_mw += std::max(p, 0.0);
+        total.charge_mw += std::max(-p, 0.0);
+      }
     }
   };
   add_rows(schedule.ess_dispatch);
@@ -198,10 +209,10 @@ static void finalize_step_power_accounting(
   step.external_grid_net_mw = external_grid_net_mw;
   step.total_supply_mw =
       step.total_gen_mw + step.total_renewable_mw +
-      std::max(0.0, step.total_ess_mw);
+      step.storage_discharge_mw;
   step.total_demand_mw =
       step.total_load_mw + std::max(0.0, step.total_loss_mw) +
-      std::max(0.0, -step.total_ess_mw) +
+      step.storage_charge_mw +
       std::max(0.0, -external_grid_net_mw);
   step.power_balance_error_mw =
       step.total_supply_mw - step.total_demand_mw;
@@ -547,8 +558,11 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
     sr.total_renewable_mw = ren + reported.renewable_generation_mw;
 
     // ESS net dispatch
-    const double ess = scheduled_storage_net_mw(sub_result.uc_schedule, t);
+    const auto ess_power = scheduled_storage_power(sub_result.uc_schedule, t);
+    const double ess = ess_power.net_mw;
     sr.total_ess_mw = ess;
+    sr.storage_discharge_mw = ess_power.discharge_mw;
+    sr.storage_charge_mw = ess_power.charge_mw;
 
     // Loss from PF result
     if (t < static_cast<int>(sub_result.pf_results.size()) &&
@@ -610,8 +624,8 @@ static BlockSummary aggregate_block(int block_id, int start, int end,
     bs.total_load_mwh += s.total_load_mw * dt;
     bs.total_renewable_mwh += s.total_renewable_mw * dt;
     bs.total_curtailment_mwh += s.total_curtailment_mw * dt;
-    bs.storage_discharge_mwh += std::max(0.0, s.total_ess_mw) * dt;
-    bs.storage_charge_mwh += std::max(0.0, -s.total_ess_mw) * dt;
+    bs.storage_discharge_mwh += s.storage_discharge_mw * dt;
+    bs.storage_charge_mwh += s.storage_charge_mw * dt;
     bs.external_grid_import_mwh += std::max(0.0, s.external_grid_net_mw) * dt;
     bs.external_grid_export_mwh += std::max(0.0, -s.external_grid_net_mw) * dt;
     bs.total_supply_mwh += s.total_supply_mw * dt;
@@ -693,46 +707,49 @@ static std::vector<StorageAnnualStats> compute_storage_stats(
     const HybridPowerSystem& sys,
     const std::vector<WeeklySchedule>& weekly,
     double dt) {
-  const auto& storage = sys.ac.storage;
-  std::vector<StorageAnnualStats> stats(storage.size());
+  std::vector<StorageAnnualStats> stats;
+  stats.reserve(sys.ac.storage.size() + sys.dc.storage.size() +
+                sys.dc.dc_storage.size());
 
-  std::vector<int> ess_uc_pos(storage.size(), -1);
-  {
-    int pos = 0;
+  const auto append_group = [&](const auto& storage, bool is_dc,
+                                int& active_pos) {
+    std::vector<int> schedule_pos(storage.size(), -1);
     for (size_t s = 0; s < storage.size(); ++s) {
-      if (!storage[s].in_service) continue;
-      ess_uc_pos[s] = pos++;
+      if (storage[s].in_service) schedule_pos[s] = active_pos++;
     }
-  }
 
-  for (size_t s = 0; s < storage.size(); ++s) {
-    stats[s].name = storage[s].name;
-    stats[s].storage_index = static_cast<int>(s);
-  }
-
-  for (const auto& ws : weekly) {
-    const auto& uc = ws.uc;
     for (size_t s = 0; s < storage.size(); ++s) {
-      int pos = ess_uc_pos[s];
-      if (pos < 0) continue;
-      if (static_cast<size_t>(pos) >= uc.ess_dispatch.size()) continue;
-      const auto& disp = uc.ess_dispatch[static_cast<size_t>(pos)];
-      for (int t = 0; t < static_cast<int>(disp.size()) && t < ws.num_steps;
-           ++t) {
-        double p = disp[static_cast<size_t>(t)];
-        if (p > 0.0)
-          stats[s].total_discharge_mwh += p * dt;
-        else
-          stats[s].total_charge_mwh += (-p) * dt;
+      StorageAnnualStats stat;
+      stat.name = storage[s].name;
+      stat.storage_index = storage[s].index;
+      stat.is_dc = is_dc;
+      const int pos = schedule_pos[s];
+      if (pos >= 0) {
+        for (const auto& ws : weekly) {
+          const auto& rows = is_dc ? ws.uc.dc_ess_dispatch
+                                   : ws.uc.ess_dispatch;
+          if (static_cast<size_t>(pos) >= rows.size()) continue;
+          const auto& dispatch = rows[static_cast<size_t>(pos)];
+          for (int t = 0; t < static_cast<int>(dispatch.size()) &&
+                          t < ws.num_steps; ++t) {
+            const double p = dispatch[static_cast<size_t>(t)];
+            stat.total_discharge_mwh += std::max(p, 0.0) * dt;
+            stat.total_charge_mwh += std::max(-p, 0.0) * dt;
+          }
+        }
       }
+      if (storage[s].e_rated_mwh > 0.0) {
+        stat.cycles = stat.total_discharge_mwh / storage[s].e_rated_mwh;
+      }
+      stats.push_back(std::move(stat));
     }
-  }
+  };
 
-  for (size_t s = 0; s < storage.size(); ++s) {
-    double cap = storage[s].e_rated_mwh;
-    if (cap > 0.0)
-      stats[s].cycles = stats[s].total_discharge_mwh / cap;
-  }
+  int ac_active_pos = 0;
+  append_group(sys.ac.storage, false, ac_active_pos);
+  int dc_active_pos = 0;
+  append_group(sys.dc.storage, true, dc_active_pos);
+  append_group(sys.dc.dc_storage, true, dc_active_pos);
   return stats;
 }
 
@@ -1416,8 +1433,11 @@ AnnualProductionSimResult solve_annual_production_simulation(
         sr.total_renewable_mw = ren + reported.renewable_generation_mw;
 
         // ESS net dispatch
-        const double ess = scheduled_storage_net_mw(ws.uc, t);
+        const auto ess_power = scheduled_storage_power(ws.uc, t);
+        const double ess = ess_power.net_mw;
         sr.total_ess_mw = ess;
+        sr.storage_discharge_mw = ess_power.discharge_mw;
+        sr.storage_charge_mw = ess_power.charge_mw;
 
         const double supply_mw =
             gen + ren + reported.dispatchable_generation_mw +
