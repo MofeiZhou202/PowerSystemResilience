@@ -112,6 +112,27 @@ TEST_CASE("Dispatchable PV: no curtailment when supply and load balance",
   CHECK_THAT(sched.total_cost, Catch::Matchers::WithinAbs(0.0, 1e-6));
 }
 
+TEST_CASE("Dispatchable PV: operating cost changes economic dispatch",
+          "[time_series][dispatchable_pv][cost]") {
+  auto sys = make_oversupply_system(/*load*/ 30.0, /*pv*/ 20.0);
+  sys.ac.generators.front().cost_c1 = 10.0;
+  sys.ac.pv_systems.front().cost_c1 = 100.0;
+  auto ts = one_step();
+
+  TimeSeriesPFOptions opts;
+  opts.uc_solver = UCSolverChoice::SCIP;
+  opts.enable_dispatchable_pv = true;
+  opts.pv_curtail_penalty = 0.0;
+
+  const UCSchedule sched = solve_unit_commitment(sys, ts, opts);
+  REQUIRE(sched.feasible);
+  REQUIRE(sched.gen_dispatch.size() == 1);
+  REQUIRE(sched.ac_pv_dispatch.size() == 1);
+  CHECK_THAT(sched.gen_dispatch[0][0], Catch::Matchers::WithinAbs(30.0, 1e-2));
+  CHECK_THAT(sched.ac_pv_dispatch[0][0], Catch::Matchers::WithinAbs(0.0, 1e-2));
+  CHECK_THAT(sched.total_cost, Catch::Matchers::WithinRel(300.0, 1e-2));
+}
+
 TEST_CASE("Dispatchable PV: AC static generators supply as dispatchable sources",
           "[time_series][dispatchable_pv]") {
   // Expensive generator (100 $/MWh), 50 MW load, plus a 30 MW AC static gen.
@@ -142,7 +163,9 @@ TEST_CASE("Dispatchable PV: AC static generators supply as dispatchable sources"
     opts.pv_curtail_penalty = 50.0;
     const UCSchedule sched = solve_unit_commitment(sys, ts, opts);
     REQUIRE(sched.feasible);
+    REQUIRE(sched.ac_sgen_dispatch.size() == 1);
     CHECK_THAT(sched.gen_dispatch[0][0], Catch::Matchers::WithinAbs(20.0, 1e-2));
+    CHECK_THAT(sched.ac_sgen_dispatch[0][0], Catch::Matchers::WithinAbs(30.0, 1e-2));
     // Reported cost is clean (obj_offset cancels the utilisation reward): 100*20.
     CHECK_THAT(sched.total_cost, Catch::Matchers::WithinRel(2000.0, 1e-2));
   }

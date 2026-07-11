@@ -19,12 +19,18 @@ namespace hacdcpf::opf::parity {
 
 namespace {
 
+// Reactive dispatch has no direct production cost in the public component
+// model.  A very small setpoint-deviation term removes the resulting flat
+// direction without materially competing with active-power production costs.
+// It prevents an unconstrained VSC from absorbing arbitrary MVAr that the
+// external grid must then supply back through the network.
+constexpr double kReactiveSetpointRegularization = 1.0e-3;
+
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kDegToRad = kPi / 180.0;
 // Stiffness (pu power per pu volt) of the soft anchor that holds an unobservable
 // DC bus at its setpoint — large enough to pin V_dc≈vm_pu, small enough to stay
 // well conditioned in the KKT.
-constexpr double kDcVoltAnchor = 1.0;
 
 double clamp_interior(double x, double lo, double hi) {
   if (!std::isfinite(x)) {
@@ -58,8 +64,13 @@ double resolve_voll_auto(const Problem& prob) {
   if (prob.options.voll > 0.0) {
     return prob.options.voll;
   }
+  double configured_load_cost = 0.0;
+  for (const auto& load : prob.data.loads) {
+    if (load.in_service)
+      configured_load_cost = std::max(configured_load_cost, load.cost_mw);
+  }
   if (prob.gen_var_to_data.empty()) {
-    return 100.0;
+    return std::max(100.0, configured_load_cost);
   }
   double max_marginal = 0.0;
   for (size_t k = 0; k < prob.gen_var_to_data.size(); ++k) {
@@ -67,7 +78,7 @@ double resolve_voll_auto(const Problem& prob) {
     const double slope_hi = gen.cost_c1 + 2.0 * gen.cost_c2 * std::max(gen.pmax_mw, gen.pmin_mw);
     max_marginal = std::max(max_marginal, std::abs(slope_hi));
   }
-  return std::max(100.0, 1.1 * max_marginal);
+  return std::max({100.0, configured_load_cost, 1.1 * max_marginal});
 }
 
 double converter_smax_pu(const Problem& prob, int conv_data_idx) {
@@ -586,6 +597,21 @@ void build_variable_bounds(const Problem& prob, Eigen::VectorXd& xmin, Eigen::Ve
     xmin[idx.i_vdc + k] = lo;
     xmax[idx.i_vdc + k] = hi;
   }
+  // A DC bus without a conductive branch has no voltage state equation. Pin
+  // that unobservable voltage tightly to its authored setpoint through bounds;
+  // never add a voltage-deviation term to active-power balance, because that
+  // term behaves as a fictitious source/sink on the system MVA base.
+  for (const int k : prob.dc_volt_anchor) {
+    if (k < 0 || k >= idx.n_vdc) continue;
+    const auto& dcb = prob.data.dc_buses[static_cast<size_t>(k)];
+    const int col = idx.i_vdc + k;
+    const double lo = xmin[col];
+    const double hi = xmax[col];
+    const double center = std::clamp(dcb.vm_pu, lo, hi);
+    const double eps = std::min(1.0e-6, std::max((hi - lo) * 0.25, 1.0e-8));
+    xmin[col] = std::max(lo, center - eps);
+    xmax[col] = std::min(hi, center + eps);
+  }
 
   for (int k = 0; k < idx.n_pac; ++k) {
     const auto& conv = prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
@@ -657,19 +683,24 @@ void build_variable_bounds(const Problem& prob, Eigen::VectorXd& xmin, Eigen::Ve
     xmax[idx.i_qstor + k] = st.qmax_mvar / prob.data.base_mva;
   }
 
-  // DC storage (active power only)
+  // DC storage (active power only).  Like AC storage, the single-period OPF
+  // has no SOC state transition, so hold it at the scheduled p_mw value.
+  // Positive p_mw is discharge/injection by the public DCStorage convention.
   for (int k = 0; k < idx.n_pstordc; ++k) {
     const auto& st = prob.data.dc_storage[static_cast<size_t>(
         prob.stor_dc_var_to_data[static_cast<size_t>(k)])];
+    const double eps = 1e-4 / prob.data.base_mva;
     if (st.cap_charging_strategy == "static") {
-      const double eps = 1e-4 / prob.data.base_mva;
       const double fixed = -std::max(0.0, st.cap_static_charging_mw) / prob.data.base_mva;
       xmin[idx.i_pstordc + k] = fixed - eps;
       xmax[idx.i_pstordc + k] = fixed + eps;
       continue;
     }
-    xmin[idx.i_pstordc + k] = st.pmin_mw / prob.data.base_mva;
-    xmax[idx.i_pstordc + k] = st.pmax_mw / prob.data.base_mva;
+    const double p_sched = st.p_mw / prob.data.base_mva;
+    xmin[idx.i_pstordc + k] =
+        std::max(st.pmin_mw / prob.data.base_mva, p_sched - eps);
+    xmax[idx.i_pstordc + k] =
+        std::min(st.pmax_mw / prob.data.base_mva, p_sched + eps);
   }
 
   // DCDC converters
@@ -1082,6 +1113,31 @@ double objective(const Problem& prob, const Eigen::VectorXd& x) {
     const double pg_mw = x[idx.i_pg + k] * prob.data.base_mva;
     f += gen.cost_c2 * pg_mw * pg_mw + gen.cost_c1 * pg_mw + gen.cost_c0;
   }
+  for (int k = 0; k < idx.n_qac; ++k) {
+    const auto& conv = prob.data.converters[
+        static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    const double q_deviation_mvar =
+        x[idx.i_qac + k] * prob.data.base_mva - conv.q_set_mvar;
+    f += kReactiveSetpointRegularization *
+         q_deviation_mvar * q_deviation_mvar;
+  }
+  for (const auto& sg : prob.data.static_generators) {
+    if (sg.in_service) f += sg.cost_c1 * std::max(0.0, sg.p_mw * sg.scaling);
+  }
+  for (const auto& sg : prob.data.dc_static_generators) {
+    if (sg.in_service) f += sg.cost_c1 * std::max(0.0, sg.p_mw * sg.scaling);
+  }
+  for (const auto& rg : prob.data.renewable_gens) {
+    if (rg.in_service && !rg.curtailable)
+      f += rg.cost_c1 * std::max(0.0, rg.p_mw);
+  }
+  for (const auto& pv : prob.data.pv_systems) {
+    if (pv.in_service && !pv.controllable)
+      f += pv.cost_c1 * std::max(0.0, pv.p_mw);
+  }
+  for (const auto& pv : prob.data.dc_pv_arrays) {
+    if (pv.in_service) f += pv.cost_c1 * std::max(0.0, pv.p_set_mw);
+  }
   if (idx.n_dpd > 0) {
     for (int i = 0; i < idx.n_dpd; ++i) {
       f += prob.voll_effective * x[idx.i_dpd + i] * prob.data.base_mva;
@@ -1094,9 +1150,14 @@ double objective(const Problem& prob, const Eigen::VectorXd& x) {
   for (int k = 0; k < idx.n_pren; ++k) {
     if (prob.ren_source[static_cast<size_t>(k)] == 0) {
       const auto& rg = prob.data.renewable_gens[static_cast<size_t>(prob.ren_var_to_data[static_cast<size_t>(k)])];
+      const double p_mw = x[idx.i_pren + k] * prob.data.base_mva;
+      f += rg.cost_c1 * p_mw;
       const double p_curtailed_mw = rg.p_rated_mw - x[idx.i_pren + k] * prob.data.base_mva;
       if (rg.cost_curtail_mwh > 0.0 && p_curtailed_mw > 0.0)
         f += rg.cost_curtail_mwh * p_curtailed_mw;
+    } else {
+      const auto& pv = prob.data.pv_systems[static_cast<size_t>(prob.ren_var_to_data[static_cast<size_t>(k)])];
+      f += pv.cost_c1 * x[idx.i_pren + k] * prob.data.base_mva;
     }
   }
   return f;
@@ -1117,6 +1178,17 @@ void objective_gradient_hessian_diag(const Problem& prob,
     grad[col] = quad * x[col] + lin;
     hdiag[col] = quad;
   }
+  for (int k = 0; k < idx.n_qac; ++k) {
+    const auto& conv = prob.data.converters[
+        static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    const int col = idx.i_qac + k;
+    const double q_deviation_mvar =
+        x[col] * prob.data.base_mva - conv.q_set_mvar;
+    grad[col] = 2.0 * kReactiveSetpointRegularization *
+                q_deviation_mvar * prob.data.base_mva;
+    hdiag[col] = 2.0 * kReactiveSetpointRegularization *
+                 prob.data.base_mva * prob.data.base_mva;
+  }
   if (idx.n_dpd > 0) {
     const double grad_shed = prob.voll_effective * prob.data.base_mva;
     for (int i = 0; i < idx.n_dpd; ++i) {
@@ -1130,8 +1202,11 @@ void objective_gradient_hessian_diag(const Problem& prob,
   for (int k = 0; k < idx.n_pren; ++k) {
     if (prob.ren_source[static_cast<size_t>(k)] == 0) {
       const auto& rg = prob.data.renewable_gens[static_cast<size_t>(prob.ren_var_to_data[static_cast<size_t>(k)])];
-      if (rg.cost_curtail_mwh > 0.0)
-        grad[idx.i_pren + k] = -rg.cost_curtail_mwh * prob.data.base_mva;
+      grad[idx.i_pren + k] =
+          (rg.cost_c1 - std::max(0.0, rg.cost_curtail_mwh)) * prob.data.base_mva;
+    } else {
+      const auto& pv = prob.data.pv_systems[static_cast<size_t>(prob.ren_var_to_data[static_cast<size_t>(k)])];
+      grad[idx.i_pren + k] = pv.cost_c1 * prob.data.base_mva;
     }
   }
 }
@@ -1294,7 +1369,7 @@ void equality_constraints(const Problem& prob,
     }
   }
   for (int k = 0; k < ndc; ++k) {
-    g[cidx.i_pbal_dc + k] += ws.p_stor_dc[k];
+    g[cidx.i_pbal_dc + k] -= ws.p_stor_dc[k];
   }
 
   // DC-DC converter contributions to DC power balance.
@@ -1346,14 +1421,6 @@ void equality_constraints(const Problem& prob,
   // and both are folded into the DC bus power-balance rows above:
   //   bus_in:  += p_in   (power withdrawn from bus_in)
   //   bus_out: -= p_out  (power injected into bus_out)
-
-  // Soft voltage anchor for unobservable DC buses: a stiff "shunt to setpoint"
-  // K·(V_dc[k] − vm_pu) added to the bus mismatch makes the otherwise all-zero
-  // V_dc column nonzero (KKT nonsingular) and drives V_dc → nominal, matching the
-  // PF default for such buses (preserves OPF↔PF zero-diff).
-  for (int k : prob.dc_volt_anchor) {
-    g[cidx.i_pbal_dc + k] += kDcVoltAnchor * (vdc[k] - prob.data.dc_buses[static_cast<size_t>(k)].vm_pu);
-  }
 
   // Energy-router ports: each port's active (and AC reactive) power is a decision
   // variable injected at its bus (positive = into the bus, matching the PF
@@ -1548,7 +1615,7 @@ void equality_jacobian(const Problem& prob,
   }
   for (int k = 0; k < idx.n_pstordc; ++k) {
     const int bus = prob.stor_dc_bus[static_cast<size_t>(k)];
-    t.emplace_back(cidx.i_pbal_dc + bus, idx.i_pstordc + k, 1.0);
+    t.emplace_back(cidx.i_pbal_dc + bus, idx.i_pstordc + k, -1.0);
   }
   for (int k = 0; k < idx.n_pdcdc; ++k) {
     const auto& dc = prob.data.dcdc_converters[static_cast<size_t>(prob.dcdc_var_to_data[static_cast<size_t>(k)])];
@@ -1580,9 +1647,6 @@ void equality_jacobian(const Problem& prob,
     t.emplace_back(cidx.i_pbal_ac + bus, idx.i_pflex + k, prob.scale_p);
   }
   // Soft DC voltage anchor: ∂/∂V_dc[k] = K for unobservable buses.
-  for (int k : prob.dc_volt_anchor) {
-    t.emplace_back(cidx.i_pbal_dc + k, idx.i_vdc + k, kDcVoltAnchor);
-  }
   // Energy-router port injections (AC rows scaled like other injections; DC
   // unscaled) and per-router active-power conservation rows.
   for (const auto& port : prob.er_ports) {
@@ -1953,11 +2017,16 @@ void lagrangian_hessian(const Problem& prob,
     }
   };
 
-  // ── Objective Hessian (diagonal: Pg cost) ──
+  // ── Objective Hessian (diagonal: Pg cost + VSC Q setpoint regularization) ──
   for (int k = 0; k < idx.n_pg; ++k) {
     const auto& gen = prob.data.generators[static_cast<size_t>(prob.gen_var_to_data[static_cast<size_t>(k)])];
     const int col = idx.i_pg + k;
     add(col, col, 2.0 * gen.cost_c2 * prob.data.base_mva * prob.data.base_mva);
+  }
+  for (int k = 0; k < idx.n_qac; ++k) {
+    add(idx.i_qac + k, idx.i_qac + k,
+        2.0 * kReactiveSetpointRegularization *
+            prob.data.base_mva * prob.data.base_mva);
   }
 
   const Eigen::Map<const Eigen::VectorXd> va(x.data() + idx.i_va, idx.n_va);

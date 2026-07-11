@@ -45,6 +45,9 @@ struct UCSchedule {
   std::vector<std::vector<double>> ess_dispatch;       // [s][t] MW (+discharge)
   std::vector<std::vector<double>> ess_soc;            // [s][t] SOC [0,1]
   std::vector<std::vector<double>> renewable_dispatch; // [r][t] MW
+  std::vector<std::vector<double>> ac_pv_dispatch;     // [k][t] MW
+  std::vector<std::vector<double>> ac_sgen_dispatch;   // [k][t] MW
+  std::vector<std::vector<double>> external_grid_dispatch; // [k][t] MW (+import)
 
   // DC-side component dispatch
   // - pv/static-gen/load: profile-driven exogenous series
@@ -155,8 +158,9 @@ struct TimeSeriesPFOptions {
   // Model external grids (substation ties) as price-aware exchange sources in
   // the UC: each in-service ExternalGrid gets a net-exchange variable
   // (+import / −export) priced by price_profile_id × cost_c1 (or static cost_c1).
-  // Opt-in so existing cases (where generators cover all load) are unaffected.
-  bool enable_external_grid{false};
+  // Enabled by default because an ExternalGrid is a physical source, matching
+  // its treatment in power flow and dynamic simulation.
+  bool enable_external_grid{true};
   // Big-M cap on |external-grid exchange| (MW) when no explicit limit exists.
   double external_grid_cap_mw{1.0e5};
   // Demand response on FlexibleLoad: served demand may deviate from baseline by

@@ -619,9 +619,11 @@ const Canvas = (() => {
 
   function clearSolvedGeneratorDisplays() {
     state.components.forEach(comp => {
-      if (comp.type !== 'generator' || !comp.params) return;
+      if (!comp.params || !['generator', 'external_grid', 'circuit_breaker'].includes(comp.type)) return;
       delete comp.params._result_pg_mw;
       delete comp.params._result_qg_mvar;
+      delete comp.params._result_p_mw;
+      delete comp.params._result_q_mvar;
       delete comp.params._result_p_unit;
     });
   }
@@ -673,9 +675,63 @@ const Canvas = (() => {
     });
   }
 
+  function applySolvedGridAndBreakerDisplays(result) {
+    if (!result) return;
+    const metric = (row, label) => {
+      const item = Array.isArray(row?.metrics)
+        ? row.metrics.find(value => value?.label === label)
+        : null;
+      const value = Number(item?.value);
+      return Number.isFinite(value) ? value : null;
+    };
+    const apply = (comp, p, q) => {
+      const pText = formatSolvedPowerForComponent(p);
+      if (pText == null || !comp?.params) return;
+      comp.params._result_p_mw = pText;
+      const qValue = q == null ? Number.NaN : Number(q);
+      if (Number.isFinite(qValue)) {
+        comp.params._result_q_mvar = formatSolvedPowerForComponent(qValue);
+      }
+      comp.params._result_p_unit = pUnit();
+    };
+
+    const gridComps = state.components.filter(comp => comp.type === 'external_grid');
+    const gridRows = (result.component_results || [])
+      .filter(row => row?.canvas_type === 'external_grid');
+    resultRowsByIndexOrOrder(gridRows, gridComps).forEach((row, i) => {
+      if (row) apply(gridComps[i], metric(row, 'P平衡'), metric(row, 'Q平衡'));
+    });
+
+    const breakerComps = state.components.filter(comp => comp.type === 'circuit_breaker');
+    const acComps = [], dcComps = [];
+    breakerComps.forEach(comp => {
+      const busTypes = [];
+      state.connections.forEach(conn => {
+        let otherId = null;
+        if (conn.from.compId === comp.id) otherId = conn.to.compId;
+        else if (conn.to.compId === comp.id) otherId = conn.from.compId;
+        const other = otherId == null ? null : getComponent(otherId);
+        if (other?.type === 'ac_bus' || other?.type === 'dc_bus') busTypes.push(other.type);
+      });
+      (busTypes.length && busTypes.every(type => type === 'dc_bus') ? dcComps : acComps).push(comp);
+    });
+    resultRowsByIndexOrOrder(result.ac_circuit_breaker_flows, acComps).forEach((row, i) => {
+      if (row) apply(acComps[i], row.pf_mw, row.qf_mvar);
+    });
+    resultRowsByIndexOrOrder(result.dc_circuit_breaker_flows, dcComps).forEach((row, i) => {
+      if (row) apply(dcComps[i], row.pf_mw, null);
+    });
+  }
+
   function refreshSolvedGeneratorComponents() {
     state.components
       .filter(comp => comp.type === 'generator')
+      .forEach(comp => rerenderComponent(comp));
+  }
+
+  function refreshSolvedGridAndBreakerComponents() {
+    state.components
+      .filter(comp => comp.type === 'external_grid' || comp.type === 'circuit_breaker')
       .forEach(comp => rerenderComponent(comp));
   }
 
@@ -2692,7 +2748,12 @@ const Canvas = (() => {
           break;
         }
         case 'transformer_2w': {
-          const [hv, lv] = findTwoBusIndices(comp.id);
+          // Transformer winding roles come from named ports, not connection
+          // insertion order.  This keeps hv_bus/lv_bus stable after layout,
+          // rewiring, and JSON round-trips.
+          const connected = findTwoBusIndices(comp.id);
+          const hv = findBusIndexByPort(comp.id, 'hv') || connected[0];
+          const lv = findBusIndexByPort(comp.id, 'lv') || connected[1];
           // If this transformer was created from a MATPOWER branch (tap≠1),
           // export it back as an ac.branches entry so the solver sees it
           // with the correct branch-model parameters.
@@ -2884,6 +2945,7 @@ const Canvas = (() => {
             irradiance: numOr(p.irradiance, 1000),
             temperature: numOr(p.temperature, 25),
             profile_id: numOr(p.profile_id, -1),
+            cost_c1: numOr(p.cost_c1, 0),
             mtbf_hours: numOr(p.mtbf_hours ?? p.mtbf_hr, 0),
             mttr_hours: numOr(p.mttr_hours ?? p.mttr_hr, 0),
             t_scheduled_hr: numOr(p.t_scheduled_hr, 0),
@@ -2904,6 +2966,7 @@ const Canvas = (() => {
             qmax_mvar: numOr(p.qmax_mvar, 0),
             qmin_mvar: numOr(p.qmin_mvar, 0),
             curtailable: p.curtailable !== false,
+            cost_c1: numOr(p.cost_c1, 0),
             cost_curtail_mwh: numOr(p.cost_curtail_mwh, 0),
             capacity_factor: numOr(p.capacity_factor, 0.3),
             profile_id: numOr(p.profile_id, -1),
@@ -3070,6 +3133,7 @@ const Canvas = (() => {
             alpha_isc: numOr(p.alpha_isc, 0),
             beta_voc: numOr(p.beta_voc, 0),
             profile_id: numOr(p.profile_id, -1),
+            cost_c1: numOr(p.cost_c1, 0),
             mtbf_hours: numOr(p.mtbf_hours ?? p.mtbf_hr, 0),
             mttr_hours: numOr(p.mttr_hours ?? p.mttr_hr, 0),
             t_scheduled_hr: numOr(p.t_scheduled_hr, 0),
@@ -3852,6 +3916,7 @@ const Canvas = (() => {
         alpha_isc: pv.alpha_isc, beta_voc: pv.beta_voc,
         irradiance: pv.irradiance, temperature: pv.temperature,
         profile_id: pv.profile_id,
+        cost_c1: pv.cost_c1 ?? 0,
         mtbf_hours: pv.mtbf_hours ?? pv.mtbf_hr,
         mttr_hours: pv.mttr_hours ?? pv.mttr_hr,
         t_scheduled_hr: pv.t_scheduled_hr,
@@ -3871,6 +3936,7 @@ const Canvas = (() => {
         p_rated_mw: rg.p_rated_mw,
         qmax_mvar: rg.qmax_mvar, qmin_mvar: rg.qmin_mvar,
         curtailable: rg.curtailable,
+        cost_c1: rg.cost_c1 ?? 0,
         cost_curtail_mwh: rg.cost_curtail_mwh,
         capacity_factor: rg.capacity_factor,
         profile_id: rg.profile_id,
@@ -4155,6 +4221,7 @@ const Canvas = (() => {
         vmpp: pv.vmpp, impp: pv.impp, voc: pv.voc, isc: pv.isc,
         alpha_isc: pv.alpha_isc, beta_voc: pv.beta_voc,
         profile_id: pv.profile_id,
+        cost_c1: pv.cost_c1 ?? 0,
         mtbf_hours: pv.mtbf_hours ?? pv.mtbf_hr,
         mttr_hours: pv.mttr_hours ?? pv.mttr_hr,
         t_scheduled_hr: pv.t_scheduled_hr,
@@ -4606,7 +4673,9 @@ const Canvas = (() => {
     // Store last PF result for visualization mode changes
     _lastPfResult = result;
     applySolvedGeneratorDisplays(result);
+    applySolvedGridAndBreakerDisplays(result);
     refreshSolvedGeneratorComponents();
+    refreshSolvedGridAndBreakerComponents();
 
     // Overlay voltage values on buses (tagged with data-comp-id for drag tracking)
     let dcIdx = 0;
@@ -5471,13 +5540,26 @@ const Canvas = (() => {
 
         let powerMW = 0;
         if (comp.type === 'external_grid') {
-          // Estimate slack power from bus net injection
-          const busIdx = compToBus[busCompId];
-          if (busIdx !== undefined && busInject[busIdx] !== undefined) {
-            powerMW = busInject[busIdx]; // net injection at bus (gen positive)
-            // Add back loads at this bus
-            const loadAtBus = (_lastPfResult.geo_buses || []).find(gb => gb.id === busIdx);
-            if (loadAtBus) powerMW += numOr(loadAtBus.pd_mw, 0);
+          // Prefer the backend's solved slack-balance row.  The former local KCL
+          // estimate omitted transformer and breaker terminal flows.
+          const compIndex = Number(comp.params?.index);
+          const rows = (_lastPfResult.component_results || [])
+            .filter(row => row?.canvas_type === 'external_grid');
+          const solved = rows.find(row => Number(row.index) === compIndex)
+            || rows.find(row => Number(row.position) === state.components.filter(c => c.type === 'external_grid').indexOf(comp));
+          const pMetric = Array.isArray(solved?.metrics)
+            ? solved.metrics.find(item => item?.label === 'P平衡')
+            : null;
+          const solvedP = Number(pMetric?.value);
+          if (Number.isFinite(solvedP)) {
+            powerMW = solvedP;
+          } else {
+            const busIdx = compToBus[busCompId];
+            if (busIdx !== undefined && busInject[busIdx] !== undefined) {
+              powerMW = busInject[busIdx];
+              const loadAtBus = (_lastPfResult.geo_buses || []).find(gb => gb.id === busIdx);
+              if (loadAtBus) powerMW += numOr(loadAtBus.pd_mw, 0);
+            }
           }
         }
         else {
@@ -6021,6 +6103,7 @@ const Canvas = (() => {
     _lastPfResult = null;
     clearSolvedGeneratorDisplays();
     refreshSolvedGeneratorComponents();
+    refreshSolvedGridAndBreakerComponents();
     // Remove heatmap gradient defs
     const svgEl = resultsLayer.ownerSVGElement || document.querySelector('#canvas');
     const defsEl = svgEl.querySelector('defs#vizGradDefs');

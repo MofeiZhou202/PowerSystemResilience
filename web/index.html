@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Hybrid AC/DC Power System Simulator — ETAP-Style</title>
-<link rel="stylesheet" href="css/style.css?v=20260711-seq-profile-editor"/>
+<link rel="stylesheet" href="css/style.css?v=20260711-cost-editor"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -39,6 +39,7 @@
   <label class="toolbar-check" title="拖动时对齐相邻元件"><input type="checkbox" id="chkAlignSnap" checked/>吸附</label>
   <button id="btnRotateCW" class="toolbar-btn" title="顺时针旋转90° (R)">顺时针<br>旋转</button>
   <button id="btnRotateCCW" class="toolbar-btn" title="逆时针旋转90° (Shift+R)">逆时针<br>旋转</button>
+  <button id="btnOpenCostEditor" class="toolbar-btn" title="集中编辑 OPF、时序潮流和年度生产模拟使用的成本参数">成本<br>参数</button>
   <span class="toolbar-spacer"></span>
   <div class="toolbar-aux">
     <button id="btnNewSystem" class="btn btn-sm legacy-io-shortcut" title="新建空白系统">新建</button>
@@ -836,9 +837,9 @@
       <label class="sub-label" title="旋转备用需求，占每步总负荷的百分比；0 表示不约束备用">旋转备用(%)
         <input id="tspfReservePct" type="number" value="0" min="0" max="100" step="1"/>
       </label>
-      <label class="sub-label sub-checkbox" title="将外部电网(变电站联络线)建模为可调电源：按 电价曲线×cost_c1(或静态cost_c1) 计价的净交换(进口/出口)。默认关闭以保持现有算例不变">
-        <input id="tspfExternalGrid" type="checkbox"/>
-        <span>外部电网交易</span>
+      <label class="sub-label sub-checkbox" title="将外部电网(变电站联络线)作为可调电源参与生产模拟，并按分时电价或静态成本计价">
+        <input id="tspfExternalGrid" type="checkbox" checked/>
+        <span>外部电网电源</span>
       </label>
       <label class="sub-label" title="优化目标：成本(燃料+启停)；碳排放(发电CO2)；最小弃电(最大化新能源消纳)；最小网损(发电量最小化代理)；加权(多目标)">优化目标
         <select id="tspfObjective">
@@ -2414,11 +2415,11 @@
       </label>
     </div>
     <label style="flex-direction:row;align-items:center;gap:8px">
-      <input type="checkbox" id="tspfSkipUC" style="width:auto;min-width:auto"/>
+      <input type="checkbox" id="tspfDialogSkipUC" style="width:auto;min-width:auto"/>
       跳过机组组合 (仅潮流)
     </label>
     <label style="flex-direction:row;align-items:center;gap:8px">
-      <input type="checkbox" id="tspfRunOPF" style="width:auto;min-width:auto"/>
+      <input type="checkbox" id="tspfDialogRunOPF" style="width:auto;min-width:auto"/>
       启用OPF优化调度 (含光伏自适应出力调整)
     </label>
     <div class="modal-actions">
@@ -2470,6 +2471,35 @@
       <button id="btnEvptDesignerValidate" class="btn">校验</button>
       <button id="btnEvptDesignerApply" class="btn btn-accent">应用到电力-交通</button>
       <button class="btn" data-close-evpt-designer>取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- Cost parameter editor -->
+<div id="costEditorModal" class="modal" style="display:none">
+  <div class="modal-backdrop" data-close-cost-editor></div>
+  <div class="modal-content evpt-designer-modal cost-editor-modal">
+    <div class="evpt-designer-header">
+      <h3>成本参数</h3>
+      <div class="evpt-designer-header-actions">
+        <button class="toolbar-btn" type="button" title="关闭" data-close-cost-editor>关闭 ×</button>
+      </div>
+    </div>
+    <div class="cost-editor-body">
+      <div id="costEditorTabs" class="evpt-designer-tabs" role="tablist">
+        <button class="active" type="button" data-cost-tab="sources">电源成本</button>
+        <button type="button" data-cost-tab="storage">储能报价</button>
+        <button type="button" data-cost-tab="loads">负荷价值</button>
+      </div>
+      <div class="evpt-designer-table-actions">
+        <span id="costEditorCount" class="sub-hint"></span>
+        <span id="costEditorValidation" class="cost-editor-validation"></span>
+      </div>
+      <div id="costEditorTable" class="topo-table-wrap evpt-designer-table cost-editor-table"></div>
+    </div>
+    <div class="modal-actions evpt-designer-footer">
+      <button id="btnCostEditorApply" class="btn btn-accent" type="button">应用并同步</button>
+      <button class="btn" type="button" data-close-cost-editor>取消</button>
     </div>
   </div>
 </div>
@@ -2539,9 +2569,9 @@
   </div>
 </div>
 
-  <script src="js/components.js?v=20260703-model-io"></script>
+  <script src="js/components.js?v=20260711-pf-terminal-power"></script>
   <script src="js/search_registry.js?v=20260709-phase5"></script>
-  <script src="js/canvas.js?v=20260710-unbalanced-analysis"></script>
-  <script src="js/app.js?v=20260711-seq-profile-editor"></script>
+  <script src="js/canvas.js?v=20260711-pf-terminal-power"></script>
+  <script src="js/app.js?v=20260711-opf-timeseries-fix"></script>
 </body>
 </html>

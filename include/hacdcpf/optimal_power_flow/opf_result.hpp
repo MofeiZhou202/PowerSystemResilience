@@ -64,6 +64,8 @@ struct ACOPFResult {
   std::vector<double> vdc;
   std::vector<double> pg_mw;
   std::vector<double> qg_mvar;
+  std::vector<double> external_grid_p_mw;
+  std::vector<double> external_grid_q_mvar;
 
   std::vector<double> dpd_mw;
   std::vector<double> dqd_mvar;
@@ -137,6 +139,7 @@ struct ACOPFJacobianDiagnostics {
 struct DCOPFResult {
   std::vector<double> va;
   std::vector<double> pg_mw;
+  std::vector<double> external_grid_p_mw;
   std::vector<double> pf_mw;
 
   bool converged{false};

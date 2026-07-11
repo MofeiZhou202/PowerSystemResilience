@@ -1234,14 +1234,22 @@ void verify_opf_result(const HybridPowerSystem& sys, opf::ACOPFResult& result) {
     }
   }
 
-  // ── Recompute objective (linear generation cost) ──────────────────────────
+  // ── Recompute objective from local generators and external-grid sources ───
   double obj_recomputed = 0.0;
   for (int i = 0; i < static_cast<int>(sys.ac.generators.size()); ++i) {
     if (i >= static_cast<int>(result.pg_mw.size())) break;
     const auto& gen = sys.ac.generators[i];
     if (!gen.in_service) continue;
-    // Linear cost term c1 * pg (MW)
-    obj_recomputed += gen.cost_c1 * result.pg_mw[i];
+    const double pg = result.pg_mw[i];
+    obj_recomputed += gen.cost_c2 * pg * pg + gen.cost_c1 * pg + gen.cost_c0;
+  }
+  for (int i = 0; i < static_cast<int>(sys.ac.external_grids.size()); ++i) {
+    if (i >= static_cast<int>(result.external_grid_p_mw.size())) break;
+    const auto& grid = sys.ac.external_grids[i];
+    if (!grid.in_service) continue;
+    const double pg = result.external_grid_p_mw[i];
+    obj_recomputed +=
+        grid.cost_c2 * pg * pg + grid.cost_c1 * pg + grid.cost_c0;
   }
   audit.objective_recomputed = obj_recomputed;
   if (std::fabs(audit.objective_reported) > 1e-10) {

@@ -96,6 +96,9 @@ const App = (() => {
   let _seqProfileEditorState = null;
   let _seqProfileEditorTab = 'temporal';
   let _seqProfileEditorJsonTimer = null;
+  let _costEditorSystem = null;
+  let _costEditorRows = null;
+  let _costEditorTab = 'sources';
 
   const ANALYSIS_BUSY_ERROR = 'Another analysis is already running';
   const MODULE_WORKFLOWS = {
@@ -1938,6 +1941,31 @@ const App = (() => {
     }
     data.geo_trafo3w = Array.isArray(data.geo_trafo3w) ? data.geo_trafo3w : [];
     data.component_results = Array.isArray(data.component_results) ? data.component_results : [];
+    // OPF exposes external-grid dispatch at the top level, while its post-PF
+    // replay historically omitted the PF endpoint's component_results rows.
+    // Normalize both paths to the same row shape consumed by the canvas.
+    const hasGridRows = data.component_results.some(row => row?.canvas_type === 'external_grid');
+    if (!hasGridRows && Array.isArray(data.external_grid_p_mw)) {
+      const system = (typeof Canvas !== 'undefined' && Canvas.buildSystemJson)
+        ? Canvas.buildSystemJson()
+        : null;
+      const grids = system?.ac?.external_grids || [];
+      data.external_grid_p_mw.forEach((p, i) => {
+        const grid = grids[i] || {};
+        data.component_results.push({
+          canvas_type: 'external_grid',
+          canvas_index: grid.index ?? i,
+          index: grid.index ?? i,
+          position: i,
+          name: grid.name || `Grid ${i + 1}`,
+          connection: `AC Bus ${grid.bus ?? '-'}`,
+          metrics: [
+            { label: 'P平衡', quantity: 'p', unit: 'MW', value: p },
+            { label: 'Q平衡', quantity: 'q', unit: 'MVar', value: data.external_grid_q_mvar?.[i] ?? 0 },
+          ],
+        });
+      });
+    }
     data.dc_storage_results = Array.isArray(data.dc_storage_results) ? data.dc_storage_results : [];
     return data;
   }
@@ -4029,6 +4057,10 @@ const App = (() => {
         </tbody></table>`;
     }
 
+	    const opfSystem = (typeof Canvas !== 'undefined' && Canvas.buildSystemJson)
+	      ? Canvas.buildSystemJson()
+	      : { ac: {}, dc: {} };
+
     // Generator dispatch
 	    const genDiv = document.getElementById('opfGenResults');
 	    if (genDiv) {
@@ -4039,13 +4071,20 @@ const App = (() => {
 	        : Array.isArray(data.generator_dispatch) && data.generator_dispatch.length
 	        ? data.generator_dispatch
 	        : pg.map((p, i) => {
-	            const item = SYS?.ac?.generators?.[i] || {};
+	            const item = opfSystem.ac?.generators?.[i] || {};
 	            return { position: i, index: item.index ?? i, name: item.name, bus: item.bus,
 	              pg_mw: p, qg_mvar: qg[i], canvas_type: 'gen', canvas_index: item.index ?? i };
 	          });
-	      if (genRows.length) {
-	        let html = '<table><thead><tr><th>发电机</th><th>Bus</th><th>Pg(MW)</th><th>Qg(MVar)</th></tr></thead><tbody>';
-	        genRows.forEach((g, i) => {
+	      const extRows = (data.external_grid_p_mw || []).map((p, i) => {
+	        const item = opfSystem.ac?.external_grids?.[i] || {};
+	        return { position: i, index: item.index ?? i, name: item.name,
+	          bus: item.bus, pg_mw: p, qg_mvar: data.external_grid_q_mvar?.[i],
+	          canvas_type: 'external_grid', canvas_index: item.index ?? i };
+	      });
+	      const sourceRows = [...genRows, ...extRows];
+	      if (sourceRows.length) {
+	        let html = '<table><thead><tr><th>电源</th><th>Bus</th><th>Pg(MW)</th><th>Qg(MVar)</th></tr></thead><tbody>';
+	        sourceRows.forEach((g, i) => {
 	          const p = g.pg_mw ?? pg[i];
 	          const q = g.qg_mvar ?? qg[i];
 	          const label = g.name || (g.index != null ? `#${g.index}` : `pos ${g.position ?? i}`);
@@ -4111,7 +4150,7 @@ const App = (() => {
 	    const dcRows = Array.isArray(data.dc_bus_results) && data.dc_bus_results.length
 	      ? data.dc_bus_results
 	      : vdc.map((v, i) => {
-	          const busId = SYS?.dc?.buses?.[i]?.index;
+	          const busId = opfSystem.dc?.buses?.[i]?.index;
 	          return { position: i, index: busId ?? i, vdc_pu: v, canvas_type: 'dc', canvas_index: busId ?? i };
 	        });
 	    if (dcSec && dcDiv && dcRows.length) {
@@ -4138,7 +4177,7 @@ const App = (() => {
 	    const acRows = Array.isArray(data.ac_bus_results) && data.ac_bus_results.length
 	      ? data.ac_bus_results
 	      : vm.map((v, i) => {
-	          const busId = SYS?.ac?.buses?.[i]?.index;
+	          const busId = opfSystem.ac?.buses?.[i]?.index;
 	          return { position: i, index: busId ?? i, vm_pu: v, va_rad: data.va?.[i],
 	            lmp_p: data.lmp_p?.[i] ?? data.lmp?.[i], lmp_q: data.lmp_q?.[i],
 	            canvas_type: 'ac', canvas_index: busId ?? i };
@@ -4395,7 +4434,12 @@ const App = (() => {
     const faultBusRaw = (document.getElementById('scFaultBus').value || '').trim();
     const domain = (document.getElementById('scDomain')?.value || 'AC').toUpperCase();
     if (domain === 'DC') {
-      const dcBusIds = Array.isArray(SYS?.dc?.buses) ? SYS.dc.buses.map(b => b.index) : [];
+      const currentSystem = (typeof Canvas !== 'undefined' && Canvas.buildSystemJson)
+        ? Canvas.buildSystemJson()
+        : null;
+      const dcBusIds = Array.isArray(currentSystem?.dc?.buses)
+        ? currentSystem.dc.buses.map(b => b.index)
+        : [];
       const faultBusIds = faultBusRaw === ''
         ? dcBusIds
         : faultBusRaw.split(/[,\s]+/).map(x => parseInt(x, 10)).filter(Number.isInteger);
@@ -6956,11 +7000,34 @@ const App = (() => {
 
   // ========== Time-Series Power Flow ==========
   function showTspfDialog() {
+    const mainSkip = document.getElementById('tspfSkipUC');
+    const mainOpf = document.getElementById('tspfRunOPF');
+    const dialogSkip = document.getElementById('tspfDialogSkipUC');
+    const dialogOpf = document.getElementById('tspfDialogRunOPF');
+    const dialogSteps = document.getElementById('tspfNumSteps');
+    const hours = Number(document.getElementById('simulationHours')?.value);
+    if (dialogSkip && mainSkip) dialogSkip.checked = mainSkip.checked;
+    if (dialogOpf && mainOpf) dialogOpf.checked = mainOpf.checked;
+    if (dialogSteps && Number.isFinite(hours)) dialogSteps.value = String(hours);
     document.getElementById('tspfDialog').style.display = 'flex';
   }
 
   function hideTspfDialog() {
     document.getElementById('tspfDialog').style.display = 'none';
+  }
+
+  function runTimeSeriesFromDialog() {
+    const mainSkip = document.getElementById('tspfSkipUC');
+    const mainOpf = document.getElementById('tspfRunOPF');
+    const hours = document.getElementById('simulationHours');
+    const dialogSkip = document.getElementById('tspfDialogSkipUC');
+    const dialogOpf = document.getElementById('tspfDialogRunOPF');
+    const dialogSteps = document.getElementById('tspfNumSteps');
+    if (mainSkip && dialogSkip) mainSkip.checked = dialogSkip.checked;
+    if (mainOpf && dialogOpf) mainOpf.checked = dialogOpf.checked;
+    if (hours && dialogSteps) hours.value = dialogSteps.value;
+    hideTspfDialog();
+    return runTimeSeriesPF();
   }
 
   function parseCsvProfiles(text) {
@@ -7100,7 +7167,7 @@ const App = (() => {
       enable_dc_network_constraints: enableDcNet,
       reserve_fraction: reserveFraction,
       objective: document.getElementById('tspfObjective')?.value || 'cost',
-      enable_external_grid: document.getElementById('tspfExternalGrid')?.checked ?? false,
+      enable_external_grid: document.getElementById('tspfExternalGrid')?.checked ?? true,
       enable_demand_response: document.getElementById('tspfDemandResponse')?.checked ?? false,
       dr_shiftable: document.getElementById('tspfDrShiftable')?.checked ?? false,
       dr_penalty: parseFloat(document.getElementById('tspfDrPenalty')?.value) || 0,
@@ -7176,7 +7243,7 @@ const App = (() => {
         enable_dc_network_constraints: enableDcNet,
         reserve_fraction: reserveFraction,
         objective: document.getElementById('tspfObjective')?.value || 'cost',
-        enable_external_grid: document.getElementById('tspfExternalGrid')?.checked ?? false,
+        enable_external_grid: document.getElementById('tspfExternalGrid')?.checked ?? true,
         enable_demand_response: document.getElementById('tspfDemandResponse')?.checked ?? false,
         dr_shiftable: document.getElementById('tspfDrShiftable')?.checked ?? false,
         dr_penalty: parseFloat(document.getElementById('tspfDrPenalty')?.value) || 0,
@@ -7219,7 +7286,7 @@ const App = (() => {
       enable_dc_network_constraints: document.getElementById('tspfDcNetworkConstraints')?.checked ?? false,
       reserve_fraction: (Number.isFinite(reservePct) && reservePct > 0) ? reservePct / 100.0 : 0.0,
       objective: document.getElementById('tspfObjective')?.value || 'cost',
-      enable_external_grid: document.getElementById('tspfExternalGrid')?.checked ?? false,
+      enable_external_grid: document.getElementById('tspfExternalGrid')?.checked ?? true,
       enable_demand_response: document.getElementById('tspfDemandResponse')?.checked ?? false,
       dr_shiftable: document.getElementById('tspfDrShiftable')?.checked ?? false,
       dr_penalty: parseFloat(document.getElementById('tspfDrPenalty')?.value) || 0,
@@ -7595,6 +7662,8 @@ const App = (() => {
       }));
     };
     addDispatch(data.gen_dispatch, data.gen_names, 'Gen', 'AC Gen · ');
+    addDispatch(data.external_grid_dispatch, data.external_grid_names,
+      'External Grid', 'AC Grid · ');
     addDispatch(data.renewable_dispatch, data.ren_names, 'Ren', 'AC Ren · ');
     addDispatch(data.ac_sgen_dispatch, data.ac_sgen_names, 'SGen', 'AC SGen · ');
     addDispatch(data.ac_pv_dispatch, data.pv_names, 'PV', 'AC PV · ');
@@ -10898,6 +10967,151 @@ const App = (() => {
     else { host.innerHTML = '<div class="dyn-editor-none">加载动态模型目录…</div>'; ensureDynSchema().then(build); }
   }
 
+  // ========== Cost Parameter Editor ==========
+  function buildCostEditorRows(system) {
+    const rows = { sources: [], storage: [], loads: [] };
+    const add = (tab, domain, type, item, fields) => {
+      fields.forEach(field => {
+        if (!Number.isFinite(Number(item?.[field]))) {
+          item[field] = field === 'price_profile_id' ? -1 : 0;
+        } else {
+          item[field] = Number(item[field]);
+        }
+      });
+      rows[tab].push({
+        domain,
+        type,
+        index: item?.index,
+        name: item?.name || `${type} ${item?.index ?? ''}`,
+        bus: item?.bus ?? item?.pcc_bus ?? '',
+        item,
+        fields: new Set(fields),
+      });
+    };
+    (system.ac?.generators || []).forEach(item => add('sources', 'AC', '同步发电机', item,
+      ['cost_c2', 'cost_c1', 'cost_c0', 'startup_cost', 'shutdown_cost']));
+    (system.ac?.external_grids || []).forEach(item => add('sources', 'AC', '外部电网', item,
+      ['cost_c2', 'cost_c1', 'cost_c0', 'price_profile_id']));
+    (system.ac?.static_generators || []).forEach(item => add('sources', 'AC', '静态电源', item,
+      ['cost_c1']));
+    (system.ac?.renewable_gens || []).forEach(item => add('sources', 'AC', '可再生电源', item,
+      ['cost_c1', 'cost_curtail_mwh']));
+    (system.ac?.pv_systems || []).forEach(item => add('sources', 'AC', '光伏系统', item,
+      ['cost_c1']));
+    (system.dc?.static_generators || []).forEach(item => add('sources', 'DC', '静态电源', item,
+      ['cost_c1']));
+    (system.dc?.dc_static_generators || []).forEach(item => add('sources', 'DC', 'DC电源', item,
+      ['cost_c1']));
+    (system.dc?.pv_arrays || []).forEach(item => add('sources', 'DC', 'DC光伏', item,
+      ['cost_c1']));
+
+    (system.ac?.storage || []).forEach(item => add('storage', 'AC', '储能', item,
+      ['charge_bid_price', 'discharge_bid_price']));
+    (system.dc?.storage || []).forEach(item => add('storage', 'DC', '储能', item,
+      ['charge_bid_price', 'discharge_bid_price']));
+    (system.dc?.dc_storage || []).forEach(item => add('storage', 'DC', 'DC储能', item,
+      ['charge_bid_price', 'discharge_bid_price']));
+
+    (system.ac?.loads || []).forEach(item => add('loads', 'AC', '负荷', item, ['cost_mw']));
+    (system.dc?.loads || []).forEach(item => add('loads', 'DC', '负荷', item, ['cost_mw']));
+    return rows;
+  }
+
+  function costEditorInput(row, rowIndex, field) {
+    if (!row.fields.has(field)) return '<span class="cost-editor-na">—</span>';
+    const value = Number(row.item[field] ?? (field === 'price_profile_id' ? -1 : 0));
+    return `<input type="number" step="any" data-cost-row="${rowIndex}" data-cost-field="${field}" value="${Number.isFinite(value) ? value : 0}"/>`;
+  }
+
+  function validateCostEditor() {
+    const errors = [];
+    Object.values(_costEditorRows || {}).flat().forEach(row => {
+      row.fields.forEach(field => {
+        const value = row.item[field];
+        if (typeof value !== 'number' || !Number.isFinite(value)) {
+          errors.push(`${row.domain} ${row.name}: ${field} 无效`);
+        }
+        if (field === 'cost_c2' && Number(value) < 0) {
+          errors.push(`${row.domain} ${row.name}: c2 必须非负以保持凸优化`);
+        }
+        if (field === 'price_profile_id' && !Number.isInteger(Number(value))) {
+          errors.push(`${row.domain} ${row.name}: 电价曲线ID必须为整数`);
+        }
+      });
+    });
+    const el = document.getElementById('costEditorValidation');
+    if (el) {
+      el.textContent = errors.length ? `${errors.length} 个无效参数` : '参数有效';
+      el.className = `cost-editor-validation${errors.length ? ' invalid' : ''}`;
+      el.title = errors.slice(0, 10).join('\n');
+    }
+    return errors;
+  }
+
+  function renderCostEditorTable() {
+    const container = document.getElementById('costEditorTable');
+    const count = document.getElementById('costEditorCount');
+    if (!container || !_costEditorRows) return;
+    const rows = _costEditorRows[_costEditorTab] || [];
+    let headers;
+    let fields;
+    if (_costEditorTab === 'sources') {
+      headers = ['域', '类型', 'Index', '名称', '母线', 'c2 ($/MW²h)', 'c1 ($/MWh)', 'c0 ($/h)', '启动 ($/次)', '停机 ($/次)', '弃电 ($/MWh)', '电价曲线ID'];
+      fields = ['cost_c2', 'cost_c1', 'cost_c0', 'startup_cost', 'shutdown_cost', 'cost_curtail_mwh', 'price_profile_id'];
+    } else if (_costEditorTab === 'storage') {
+      headers = ['域', '类型', 'Index', '名称', '母线', '充电报价 ($/MWh)', '放电报价 ($/MWh)'];
+      fields = ['charge_bid_price', 'discharge_bid_price'];
+    } else {
+      headers = ['域', '类型', 'Index', '名称', '母线', '削减成本/VOLL ($/MWh)'];
+      fields = ['cost_mw'];
+    }
+    const body = rows.map((row, rowIndex) => `<tr><td>${row.domain}</td><td>${escapeHtml(row.type)}</td><td>${escapeHtml(String(row.index ?? ''))}</td><td class="cost-name">${escapeHtml(row.name)}</td><td>${escapeHtml(String(row.bus ?? ''))}</td>${fields.map(field => `<td>${costEditorInput(row, rowIndex, field)}</td>`).join('')}</tr>`).join('');
+    container.innerHTML = `<table><thead><tr>${headers.map(header => `<th>${header}</th>`).join('')}</tr></thead><tbody>${body || `<tr><td colspan="${headers.length}" class="empty-hint">当前系统没有此类成本元件</td></tr>`}</tbody></table>`;
+    if (count) count.textContent = `${rows.length} 个元件`;
+    validateCostEditor();
+  }
+
+  function setCostEditorTab(tab) {
+    _costEditorTab = tab;
+    document.querySelectorAll('#costEditorTabs [data-cost-tab]').forEach(button => {
+      button.classList.toggle('active', button.dataset.costTab === tab);
+    });
+    renderCostEditorTable();
+  }
+
+  function openCostEditor() {
+    _costEditorSystem = Canvas.buildSystemJson();
+    _costEditorRows = buildCostEditorRows(_costEditorSystem);
+    _costEditorTab = 'sources';
+    const modal = document.getElementById('costEditorModal');
+    if (modal) modal.style.display = 'flex';
+    document.querySelectorAll('#costEditorTabs [data-cost-tab]').forEach(button => {
+      button.classList.toggle('active', button.dataset.costTab === 'sources');
+    });
+    renderCostEditorTable();
+  }
+
+  function closeCostEditor() {
+    const modal = document.getElementById('costEditorModal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  async function applyCostEditor() {
+    const errors = validateCostEditor();
+    if (errors.length || !_costEditorSystem) {
+      setStatus('成本参数存在无效值', 'warn');
+      return;
+    }
+    closeCostEditor();
+    Canvas.loadFromSystemJson(_costEditorSystem);
+    _canvasDirty = true;
+    updateTopologyTables();
+    setStatus('成本参数同步中...', 'busy');
+    const ok = await syncToBackend(true);
+    setStatus(ok ? '成本参数已应用' : '成本参数同步失败', ok ? 'success' : 'error');
+    log(ok ? '成本参数已应用到 OPF、时序潮流和年度生产模拟' : '成本参数后端同步失败', ok ? 'success' : 'error');
+  }
+
   // ========== Property Editor ==========
   function onSelectionChanged(compId) {
     const propEmpty = document.getElementById('propEmpty');
@@ -10925,17 +11139,17 @@ const App = (() => {
     // Optional section dividers: when a field key matches, a header row is
     // inserted before it to group the OPF constraint-limit fields visually.
     const sectionHeaders = {
-      generator:      { forced_outage_rate: '可靠性参数', dynamic_model: '暂态模型参数' },
-      load:           { dynamic_model: '暂态模型参数' },
-      external_grid:  { dynamic_model: '暂态模型参数' },
+      generator:      { cost_c2: '运行成本', forced_outage_rate: '可靠性参数', dynamic_model: '暂态模型参数' },
+      load:           { cost_mw: '负荷削减成本', dynamic_model: '暂态模型参数' },
+      external_grid:  { cost_c2: '购售电成本', dynamic_model: '暂态模型参数' },
       storage:        { charge_bid_price: '时序运行成本', forced_outage_rate: '可靠性参数', dynamic_model: '暂态模型参数' },
-      pv_system:      { mtbf_hours: '可靠性参数', dynamic_model: '暂态模型参数' },
-      renewable_gen:  { mtbf_hours: '可靠性参数' },
+      pv_system:      { cost_c1: '运行成本', mtbf_hours: '可靠性参数', dynamic_model: '暂态模型参数' },
+      renewable_gen:  { cost_c1: '运行成本', mtbf_hours: '可靠性参数' },
       static_generator: { cost_c1: '时序运行成本', mtbf_hours: '可靠性参数', dynamic_model: '暂态模型参数' },
       vsc_converter:  { r_conv_ac_pu: '约束限值 (OPF)', grid_forming: '构网与协调', dynamic_model: '暂态模型参数' },
-      dc_load:        { dynamic_model: '暂态模型参数' },
+      dc_load:        { cost_mw: '负荷削减成本', dynamic_model: '暂态模型参数' },
       dc_storage:     { charge_bid_price: '时序运行成本', forced_outage_rate: '可靠性参数', dynamic_model: '暂态模型参数' },
-      dc_pv_array:    { mtbf_hours: '可靠性参数', dynamic_model: '暂态模型参数' },
+      dc_pv_array:    { cost_c1: '运行成本', mtbf_hours: '可靠性参数', dynamic_model: '暂态模型参数' },
       asymmetric_load: { dynamic_model: '暂态模型参数' },
       dcdc_converter: { topology: '占空比约束 (OPF)' },
     };
@@ -14878,7 +15092,8 @@ const App = (() => {
     // currently loaded system (synced from the canvas below).
     async function runCarbonAnalysis() {
       setStatus('碳排放分析中...', 'busy');
-      if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+      if (!await ensurePowerFlowForCarbonFlow()) return;
+      if (!await syncCarbonFactorsOnly()) { setStatus('碳因子同步失败', 'error'); return; }
       const data = await apiPost('/api/session/run_carbon', {});
       if (data && !data.error) {
         _lastCarbonData = data;
@@ -16985,7 +17200,7 @@ const App = (() => {
     document.getElementById('btnScCancel').addEventListener('click', hideScDialog);
 
     // TSPF Dialog
-    document.getElementById('btnTspfRun').addEventListener('click', runTimeSeriesPF);
+    document.getElementById('btnTspfRun').addEventListener('click', runTimeSeriesFromDialog);
     document.getElementById('btnTspfCancel').addEventListener('click', hideTspfDialog);
     document.getElementById('tspfProfileSource').addEventListener('change', (e) => {
       document.getElementById('tspfImportRow').style.display =
@@ -17036,6 +17251,24 @@ const App = (() => {
     document.getElementById('chkAlignSnap')?.addEventListener('change', (e) => Canvas.setAlignSnap?.(e.target.checked));
     document.getElementById('btnRotateCW').addEventListener('click', () => Canvas.rotateSelected(90));
     document.getElementById('btnRotateCCW').addEventListener('click', () => Canvas.rotateSelected(-90));
+    document.getElementById('btnOpenCostEditor')?.addEventListener('click', openCostEditor);
+    document.querySelectorAll('[data-close-cost-editor]').forEach(button => {
+      button.addEventListener('click', closeCostEditor);
+    });
+    document.getElementById('costEditorTabs')?.addEventListener('click', event => {
+      const button = event.target.closest('[data-cost-tab]');
+      if (button) setCostEditorTab(button.dataset.costTab);
+    });
+    document.getElementById('costEditorTable')?.addEventListener('input', event => {
+      const rowIndex = event.target.dataset.costRow;
+      const field = event.target.dataset.costField;
+      if (rowIndex === undefined || !field || !_costEditorRows) return;
+      const row = _costEditorRows[_costEditorTab]?.[Number(rowIndex)];
+      if (!row) return;
+      row.item[field] = event.target.value === '' ? Number.NaN : Number(event.target.value);
+      validateCostEditor();
+    });
+    document.getElementById('btnCostEditorApply')?.addEventListener('click', applyCostEditor);
 
     // Visualization mode toggle
     document.getElementById('vizMode')?.addEventListener('change', (e) => {

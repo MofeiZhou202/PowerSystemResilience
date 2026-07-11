@@ -2296,33 +2296,58 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
     return out;
   }
 
-  // Working copy: promote external grids with OPF cost into generator variables.
-  // Allows nighttime timesteps (no PV → sys.ac.generators is empty) to be
-  // dispatched through the grid-tie connection rather than falling back to PF.
+  // Working copy: every in-service external grid is an independent dispatchable
+  // source. Cost-free grids and grids sharing a bus with a local generator must
+  // still participate; both are physical sources in PF/dynamic simulation.
   HybridPowerSystem sys_work = sys;
-  for (const auto& eg : sys.ac.external_grids) {
+  const size_t original_generator_count = sys.ac.generators.size();
+  std::vector<size_t> promoted_external_grid_indices;
+  for (size_t i = 0; i < sys.ac.external_grids.size(); ++i) {
+    const auto& eg = sys.ac.external_grids[i];
     if (!eg.in_service) continue;
-    if (eg.cost_c2 == 0.0 && eg.cost_c1 == 0.0) continue;
-    bool already_on_bus = false;
-    for (const auto& g : sys_work.ac.generators)
-      if (g.bus == eg.bus) { already_on_bus = true; break; }
-    if (already_on_bus) continue;
-    const double pmax = (eg.s_sc_max_mva > 0.0) ? eg.s_sc_max_mva : 1000.0;
+    // Keep the promoted variable on the physical scale of the case.  A huge
+    // synthetic bound makes the parity KKT system ill-conditioned for small
+    // distribution cases (for example a 1.5 MVA feeder supplied by a grid with
+    // s_sc_max_mva=100).  The short-circuit rating is not an import limit, but
+    // it is a useful finite scale; fall back to one system-base unit when it is
+    // unavailable.
+    const double external_grid_scale_mw =
+        std::max({1.0, eg.s_sc_max_mva, sys.base_mva});
     Generator eg_gen;
     eg_gen.index      = static_cast<int>(sys_work.ac.generators.size());
     eg_gen.bus        = eg.bus;
     eg_gen.in_service = true;
     eg_gen.name       = eg.name.empty() ? ("EG_opf_" + std::to_string(eg.index)) : eg.name;
     eg_gen.vg_pu      = eg.vm_pu;
-    eg_gen.pmax_mw    =  pmax;
-    eg_gen.pmin_mw    = -pmax;
-    eg_gen.qmax_mvar  =  pmax;
-    eg_gen.qmin_mvar  = -pmax;
+    eg_gen.pmax_mw    =  external_grid_scale_mw;
+    eg_gen.pmin_mw    = -external_grid_scale_mw;
+    eg_gen.qmax_mvar  =  external_grid_scale_mw;
+    eg_gen.qmin_mvar  = -external_grid_scale_mw;
     eg_gen.cost_c2    = eg.cost_c2;
     eg_gen.cost_c1    = eg.cost_c1;
     eg_gen.cost_c0    = eg.cost_c0;
     sys_work.ac.generators.push_back(std::move(eg_gen));
+    promoted_external_grid_indices.push_back(i);
   }
+
+  auto separate_external_grid_dispatch =
+      [&](ACOPFResult result) -> ACOPFResult {
+    result.external_grid_p_mw.assign(sys.ac.external_grids.size(), 0.0);
+    result.external_grid_q_mvar.assign(sys.ac.external_grids.size(), 0.0);
+    for (size_t k = 0; k < promoted_external_grid_indices.size(); ++k) {
+      const size_t source_row = original_generator_count + k;
+      const size_t grid_row = promoted_external_grid_indices[k];
+      if (source_row < result.pg_mw.size())
+        result.external_grid_p_mw[grid_row] = result.pg_mw[source_row];
+      if (source_row < result.qg_mvar.size())
+        result.external_grid_q_mvar[grid_row] = result.qg_mvar[source_row];
+    }
+    if (result.pg_mw.size() > original_generator_count)
+      result.pg_mw.resize(original_generator_count);
+    if (result.qg_mvar.size() > original_generator_count)
+      result.qg_mvar.resize(original_generator_count);
+    return result;
+  };
 
   const bool has_hybrid_acdc = contains_hybrid_acdc_components(sys);
   const bool dropped_dc = has_hybrid_acdc;
@@ -2408,7 +2433,8 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
     // The parity path internally applies the Ipopt fallback when inner == Auto
     // and opt.allow_fallback is set, so no separate recursive economic-dispatch
     // fallback is needed here.
-    return solve_with_parity_ipm(sys, opt, inner);
+    return separate_external_grid_dispatch(
+        solve_with_parity_ipm(sys_work, opt, inner));
   }
 
   HybridPowerSystem ac_only = sys_work;
@@ -2437,7 +2463,7 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
     }
     if (try_dispatch_pf_fallback(ac_only, fallback_data, fallback_idx, out)) {
       out.status = "converged (fast economic-dispatch + AC PF path)";
-      return out;
+      return separate_external_grid_dispatch(std::move(out));
     }
     out.status = "AC OPF failed: fast fallback path did not converge.";
     return out;
@@ -3101,7 +3127,7 @@ finalize:
       fallback.profiling = out.profiling;
       fallback.status = "converged (economic-dispatch + AC PF fallback; primal-dual path did not converge: " +
                         failure_reason + ")";
-      return fallback;
+      return separate_external_grid_dispatch(std::move(fallback));
     }
   } else if (!out.converged && opt.allow_fallback && dropped_dc) {
     append_hybrid_fallback_suppression();
@@ -3121,7 +3147,7 @@ finalize:
     unproject_per_bus_ac_opf_result(out, *data.bus_merge_map);
   }
 
-  return out;
+  return separate_external_grid_dispatch(std::move(out));
 }
 
 ACOPFJacobianDiagnostics check_ac_opf_jacobian_fd(const HybridPowerSystem& sys,

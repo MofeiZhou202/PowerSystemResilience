@@ -46,10 +46,17 @@ const COMP = (() => {
               <text class="comp-value" x="0" y="20">${(p.length_km||0).toFixed(1)}km</text>`;
     },
     external_grid(p) {
+      const solvedP = p._result_p_mw;
+      const solvedQ = p._result_q_mvar;
+      const unit = p._result_p_unit || 'MW';
+      const resultText = solvedP == null ? ''
+        : `<text class="comp-value" x="0" y="56">P ${solvedP}${unit}</text>` +
+          (solvedQ == null ? '' : `<text class="comp-value" x="0" y="68">Q ${solvedQ}MVar</text>`);
       return `<line x1="0" y1="18" x2="0" y2="30" stroke="#e06c75" stroke-width="2"/>
               <path d="M-14,-14 L14,-14 L14,14 L-14,14 Z" fill="none" stroke="#e06c75" stroke-width="2"/>
               <path d="M-8,0 Q-4,-8 0,0 Q4,8 8,0" fill="none" stroke="#e06c75" stroke-width="2"/>
-              <text class="comp-label" x="0" y="44">${p.name||'Grid'}</text>`;
+              <text class="comp-label" x="0" y="44">${p.name||'Grid'}</text>
+              ${resultText}`;
     },
     storage(p) {
       return `<line x1="0" y1="-30" x2="0" y2="-14" stroke="#e5c07b" stroke-width="2"/>
@@ -115,12 +122,19 @@ const COMP = (() => {
               <text class="comp-label" x="0" y="16">${p.name||'SW'}</text>`;
     },
     circuit_breaker(p) {
+      const solvedP = p._result_p_mw;
+      const solvedQ = p._result_q_mvar;
+      const unit = p._result_p_unit || 'MW';
+      const resultText = solvedP == null ? ''
+        : `<text class="comp-value" x="0" y="32">P ${solvedP}${unit}</text>` +
+          (solvedQ == null ? '' : `<text class="comp-value" x="0" y="44">Q ${solvedQ}MVar</text>`);
       return `<line x1="-20" y1="0" x2="-8" y2="0" stroke="#abb2bf" stroke-width="2"/>
               <line x1="8" y1="0" x2="20" y2="0" stroke="#abb2bf" stroke-width="2"/>
               <rect x="-8" y="-8" width="16" height="16" fill="none" stroke="#e06c75" stroke-width="2" rx="2"/>
               <line x1="-5" y1="-5" x2="5" y2="5" stroke="#e06c75" stroke-width="2"/>
               <line x1="5" y1="-5" x2="-5" y2="5" stroke="#e06c75" stroke-width="2"/>
-              <text class="comp-label" x="0" y="20">${p.name||'CB'}</text>`;
+              <text class="comp-label" x="0" y="20">${p.name||'CB'}</text>
+              ${resultText}`;
     },
     dc_load(p) {
       return `<line x1="0" y1="-30" x2="0" y2="-8" stroke="#d19a66" stroke-width="2" stroke-dasharray="4 2"/>
@@ -512,6 +526,7 @@ const COMP = (() => {
       rx_max: 0.1, rx_min: 0.1,
       r_pu: 0, x_pu: 0, r0_pu: 0, x0_pu: 0,
       vn_kv: 0, emission_factor_tco2_mwh: 0,
+      cost_c2: 0, cost_c1: 0, cost_c0: 0, price_profile_id: -1,
       dynamic_model: { standard: 'PSS/E', model_name: 'ExternalGrid', parameter_set: 'default' },
       controllable: false, in_service: true
     },
@@ -549,6 +564,7 @@ const COMP = (() => {
       vmpp: 0, impp: 0, voc: 0, isc: 0,
       alpha_isc: 0, beta_voc: 0,
       irradiance: 1000, temperature: 25, profile_id: -1,
+      cost_c1: 0,
       mtbf_hours: 0, mttr_hours: 0, t_scheduled_hr: 0,
       dynamic_model: {
         standard: 'IEEE1547',
@@ -566,7 +582,7 @@ const COMP = (() => {
       name: 'Wind', bus: 0, type: 'Wind',
       p_mw: 20, q_mvar: 0, p_rated_mw: 30,
       qmax_mvar: 0, qmin_mvar: 0,
-      curtailable: true, cost_curtail_mwh: 0,
+      curtailable: true, cost_c1: 0, cost_curtail_mwh: 0,
       capacity_factor: 0.3, profile_id: -1,
       mtbf_hours: 0, mttr_hours: 0, t_scheduled_hr: 0,
       emission_offset_tco2_mwh: 0, in_service: true
@@ -666,7 +682,7 @@ const COMP = (() => {
       num_series: 0, num_parallel: 0,
       vmpp: 0, impp: 0, voc: 0, isc: 0,
       alpha_isc: 0, beta_voc: 0,
-      profile_id: -1,
+      profile_id: -1, cost_c1: 0,
       mtbf_hours: 0, mttr_hours: 0, t_scheduled_hr: 0,
       dynamic_model: { standard: 'IEEE1547', model_name: 'PVDynamic', parameter_set: 'dc_default' },
       in_service: true
@@ -965,7 +981,10 @@ const COMP = (() => {
     qg_mvar: '无功出力(MVar)', vg_pu: '端电压(pu)', pmax_mw: '最大有功(MW)',
     pmin_mw: '最小有功(MW)', qmax_mvar: '最大无功(MVar)', qmin_mvar: '最小无功(MVar)',
     mbase_mva: '容量基准(MVA)', is_slack: '平衡节点', cost_c2: '成本系数c2',
-    cost_c1: '成本系数c1', cost_c0: '成本系数c0', fuel_type: '燃料类型',
+    cost_c1: '单位发电成本c1($/MWh)', cost_c0: '固定成本c0($/h)', fuel_type: '燃料类型',
+    startup_cost: '启动成本($/次)', shutdown_cost: '停机成本($/次)',
+    price_profile_id: '分时电价曲线ID', cost_curtail_mwh: '弃电惩罚($/MWh)',
+    cost_mw: '负荷削减成本($/MWh)',
     emission_factor_tco2_mwh: '碳排放因子(kg/MWh)', dynamic_model: '动态模型(JSON)',
     p_mw: '有功(MW)', q_mvar: '无功(MVar)', scaling: '缩放因子',
     model: '负荷模型', priority: '优先级',

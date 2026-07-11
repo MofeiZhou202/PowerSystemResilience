@@ -1,10 +1,8 @@
 // Unit tests for the optional external-grid model in the time-series unit
 // commitment (docs/sequential_production_simulation_rich_models.md §4.1).
 //
-// The external grid is opt-in (TimeSeriesPFOptions::enable_external_grid).  When
-// off, the UC must be byte-identical to the generator-only formulation; when on,
-// a cheaper grid tie must be dispatched in place of an expensive generator, and a
-// grid tie must be able to supply load that the local generation cannot.
+// External grids participate by default, matching power-flow and dynamic-source
+// semantics. They may still be explicitly disabled for isolated-system studies.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -69,7 +67,7 @@ TimeSeriesData make_single_step() {
 
 }  // namespace
 
-TEST_CASE("External grid: disabled by default leaves dispatch to generators",
+TEST_CASE("External grid: explicit disable leaves dispatch to generators",
           "[time_series][external_grid]") {
   // Expensive generator (100 $/MWh), cheap grid (10 $/MWh), 50 MW load.
   auto sys = make_grid_test_system(/*gen*/ 100.0, /*ext*/ 10.0,
@@ -78,10 +76,11 @@ TEST_CASE("External grid: disabled by default leaves dispatch to generators",
 
   TimeSeriesPFOptions opts;
   opts.uc_solver = UCSolverChoice::SCIP;
-  opts.enable_external_grid = false;  // default
+  opts.enable_external_grid = false;
 
   const UCSchedule sched = solve_unit_commitment(sys, ts, opts);
   REQUIRE(sched.feasible);
+  CHECK(sched.external_grid_dispatch.empty());
   // Generator must serve the whole load (no grid available).
   REQUIRE(sched.gen_dispatch.size() == 1);
   CHECK_THAT(sched.gen_dispatch[0][0],
@@ -102,6 +101,9 @@ TEST_CASE("External grid: enabling a cheaper tie displaces the generator",
 
   const UCSchedule sched = solve_unit_commitment(sys, ts, opts);
   REQUIRE(sched.feasible);
+  REQUIRE(sched.external_grid_dispatch.size() == 1);
+  CHECK_THAT(sched.external_grid_dispatch[0][0],
+             Catch::Matchers::WithinAbs(50.0, 1e-2));
   // The cheap grid should supply the load; the generator backs off to ~0.
   CHECK_THAT(sched.gen_dispatch[0][0],
              Catch::Matchers::WithinAbs(0.0, 1e-2));
@@ -119,6 +121,14 @@ TEST_CASE("External grid: supplies load that local generation cannot",
 
   TimeSeriesPFOptions opts;
   opts.uc_solver = UCSolverChoice::SCIP;
+
+  SECTION("grid enabled by default -> feasible, grid covers the load") {
+    const UCSchedule sched = solve_unit_commitment(sys, ts, opts);
+    REQUIRE(sched.feasible);
+    REQUIRE(sched.external_grid_dispatch.size() == 1);
+    CHECK_THAT(sched.external_grid_dispatch[0][0],
+               Catch::Matchers::WithinAbs(50.0, 1e-2));
+  }
 
   SECTION("grid disabled -> infeasible") {
     opts.enable_external_grid = false;

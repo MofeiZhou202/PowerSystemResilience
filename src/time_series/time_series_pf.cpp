@@ -547,6 +547,19 @@ struct UCBuildResult {
   std::vector<int> flex_indices;      // original indices into sys.ac.flexible_loads
   std::vector<int> mg_indices;        // original indices into sys.microgrids
   std::vector<int> vpp_indices;       // original indices into sys.vpps
+  int ac_pv_count{0};
+  int dc_pv_count{0};
+  int dc_sgen_count{0};
+  int ac_sgen_count{0};
+  int external_grid_count{0};
+  int pv_curt_offset{0};
+  int ac_sgen_offset{0};
+  int external_grid_offset{0};
+  // kind: 0 = AC PV, 1 = DC PV, 2 = DC static generator.
+  std::vector<int> pv_curt_kind;
+  std::vector<int> pv_curt_indices;
+  std::vector<std::vector<double>> pv_curt_available;
+  std::vector<int> ac_sgen_indices;
   // Constant objective offset to add back to the solver objective so the
   // reported cost reflects the true penalty form (e.g. islanding cost
   // pen·(1−o), encoded in c as −pen·o with the constant pen dropped).
@@ -563,6 +576,11 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const int T = ts_data.num_steps;
   const double dt = ts_data.step_duration_hr;
   res.T = T;
+  res.ac_pv_count = static_cast<int>(sys.ac.pv_systems.size());
+  res.dc_pv_count = static_cast<int>(sys.dc.pv_arrays.size());
+  res.dc_sgen_count = static_cast<int>(sys.dc.dc_static_generators.size());
+  res.ac_sgen_count = static_cast<int>(sys.ac.static_generators.size());
+  res.external_grid_count = static_cast<int>(sys.ac.external_grids.size());
 
   auto profile_map = build_profile_map(ts_data);
 
@@ -704,10 +722,12 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   std::vector<PVCurtSource> pvcurt;
   if (opts.enable_dispatchable_pv) {
     if (!use_dc_network) {
-      for (const auto& pvsys : sys.ac.pv_systems) {
+      for (int i = 0; i < static_cast<int>(sys.ac.pv_systems.size()); ++i) {
+        const auto& pvsys = sys.ac.pv_systems[static_cast<size_t>(i)];
         if (!pvsys.in_service) continue;
         const auto* pvprof = find_profile(profile_map, pvsys.profile_id);
         PVCurtSource d; d.ac_bus = pvsys.bus; d.dc_bus = -1;
+        d.cost_c1 = pvsys.cost_c1;
         d.avail.resize(static_cast<size_t>(T));
         for (int t = 0; t < T; ++t) {
           const double scale = profile_value(pvprof, t, 1.0);
@@ -720,19 +740,28 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
           }
           d.avail[static_cast<size_t>(t)] = std::max(0.0, pv_mw);
         }
+        res.pv_curt_kind.push_back(0);
+        res.pv_curt_indices.push_back(i);
+        res.pv_curt_available.push_back(d.avail);
         pvcurt.push_back(std::move(d));
       }
     }
-    for (const auto& pvarr : sys.dc.pv_arrays) {
+    for (int i = 0; i < static_cast<int>(sys.dc.pv_arrays.size()); ++i) {
+      const auto& pvarr = sys.dc.pv_arrays[static_cast<size_t>(i)];
       if (!pvarr.in_service) continue;
       const auto* pv = find_profile(profile_map, pvarr.profile_id);
       PVCurtSource d; d.ac_bus = -1; d.dc_bus = pvarr.bus;
+      d.cost_c1 = pvarr.cost_c1;
       d.avail.resize(static_cast<size_t>(T));
       for (int t = 0; t < T; ++t)
         d.avail[static_cast<size_t>(t)] = std::max(0.0, pvarr.p_set_mw * profile_value(pv, t, 1.0));
+      res.pv_curt_kind.push_back(1);
+      res.pv_curt_indices.push_back(i);
+      res.pv_curt_available.push_back(d.avail);
       pvcurt.push_back(std::move(d));
     }
-    for (const auto& sg : sys.dc.dc_static_generators) {
+    for (int i = 0; i < static_cast<int>(sys.dc.dc_static_generators.size()); ++i) {
+      const auto& sg = sys.dc.dc_static_generators[static_cast<size_t>(i)];
       if (!sg.in_service) continue;
       const auto* pv = find_profile(profile_map, sg.profile_id);
       PVCurtSource d; d.ac_bus = -1; d.dc_bus = sg.bus;
@@ -741,6 +770,9 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       d.avail.resize(static_cast<size_t>(T));
       for (int t = 0; t < T; ++t)
         d.avail[static_cast<size_t>(t)] = std::max(0.0, sg.p_set_mw * sg.scaling * profile_value(pv, t, 1.0));
+      res.pv_curt_kind.push_back(2);
+      res.pv_curt_indices.push_back(i);
+      res.pv_curt_available.push_back(d.avail);
       pvcurt.push_back(std::move(d));
     }
   }
@@ -752,15 +784,17 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   // the AC balance.  Curtailment is rewarded (like renewables): the objective
   // gets −pv_curtail_penalty·p_sgen with the constant penalty·available tracked
   // in obj_offset, so the reported cost equals fuel cost + penalty·curtailment.
-  struct SgenSupply { std::vector<double> avail; int ac_bus; };
+  struct SgenSupply { std::vector<double> avail; int ac_bus; double cost_c1; };
   std::vector<SgenSupply> sgsup;
   if (opts.enable_dispatchable_pv) {
-    for (const auto& sg : sys.ac.static_generators) {
+    for (int i = 0; i < static_cast<int>(sys.ac.static_generators.size()); ++i) {
+      const auto& sg = sys.ac.static_generators[static_cast<size_t>(i)];
       if (!sg.in_service) continue;
       double a = std::max(0.0, sg.p_mw * sg.scaling);
       if (a <= 0.0) continue;
-      SgenSupply d; d.ac_bus = sg.bus;
+      SgenSupply d; d.ac_bus = sg.bus; d.cost_c1 = sg.cost_c1;
       d.avail.assign(static_cast<size_t>(T), a);
+      res.ac_sgen_indices.push_back(i);
       sgsup.push_back(std::move(d));
     }
   }
@@ -971,6 +1005,7 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
     return nPg + nUg + nSg + nEss + nSoc + nDcEss + nDcSoc + r * T + t;
   };
   const int ext_offset = nPg + nUg + nSg + nEss + nSoc + nDcEss + nDcSoc + nRen;
+  res.external_grid_offset = ext_offset;
   auto ext_idx = [&](int x, int t) { return ext_offset + x * T + t; };
   const int drup_offset = ext_offset + nExt;
   auto drup_idx = [&](int f, int t) { return drup_offset + f * T + t; };
@@ -979,6 +1014,8 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const int curt_offset = drdn_offset + nDrDn;
   auto curt_idx = [&](int k, int t) { return curt_offset + k * T + t; };
   const int sgen_offset = curt_offset + nCurt;
+  res.pv_curt_offset = curt_offset;
+  res.ac_sgen_offset = sgen_offset;
   auto sgen_idx = [&](int k, int t) { return sgen_offset + k * T + t; };
   const int mgex_offset = sgen_offset + nSgen;
   auto mgex_idx = [&](int u, int t) { return mgex_offset + u * T + t; };
@@ -1069,6 +1106,29 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       res.obj_offset +=
           (w_cost * sg.cost_c1 +
            w_carbon * sg.emission_factor_tco2_mwh + w_loss) * p * dt;
+    }
+  }
+  for (const auto& pv : sys.ac.pv_systems) {
+    if (!pv.in_service || std::abs(pv.cost_c1) <= 1e-12) continue;
+    const auto* profile = find_profile(profile_map, pv.profile_id);
+    for (int t = 0; t < T; ++t) {
+      const double p = std::max(0.0, pv.p_mw * profile_value(profile, t, 1.0));
+      res.obj_offset += w_cost * pv.cost_c1 * p * dt;
+    }
+  }
+  for (const auto& pv : sys.dc.pv_arrays) {
+    if (!pv.in_service || std::abs(pv.cost_c1) <= 1e-12) continue;
+    const auto* profile = find_profile(profile_map, pv.profile_id);
+    for (int t = 0; t < T; ++t) {
+      const double p = std::max(0.0, pv.p_set_mw * profile_value(profile, t, 1.0));
+      res.obj_offset += w_cost * pv.cost_c1 * p * dt;
+    }
+  }
+  if (!opts.enable_dispatchable_pv) {
+    for (const auto& sg : sys.ac.static_generators) {
+      if (!sg.in_service) continue;
+      const double p = std::max(0.0, sg.p_mw * sg.scaling);
+      res.obj_offset += w_cost * sg.cost_c1 * p * dt * T;
     }
   }
   for (int gi = 0; gi < G; ++gi) {
@@ -1195,9 +1255,8 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       // the curtailment / clean-dispatch objectives add a unit utilisation
       // reward so the optimiser maximises renewable output.
       const double ren_reward = w_cost * ren.cost_curtail_mwh + w_curt;
-      if (ren_reward != 0.0) {
-        m.linear_part.c[ren_idx(ri, t)] = -ren_reward * dt;
-      }
+      m.linear_part.c[ren_idx(ri, t)] =
+          (w_cost * ren.cost_c1 - ren_reward) * dt;
     }
   }
 
@@ -1271,7 +1330,8 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
         m.linear_part.vars[static_cast<size_t>(sgen_idx(k, t))] = {
           VarType::Continuous, 0.0, a,
           "p_sgen" + std::to_string(k) + "_t" + std::to_string(t)};
-        m.linear_part.c[sgen_idx(k, t)] = -pen;
+        m.linear_part.c[sgen_idx(k, t)] =
+            (w_cost * sgsup[static_cast<size_t>(k)].cost_c1 - pen) * dt;
         res.obj_offset += pen * a;
       }
     }
@@ -2812,6 +2872,24 @@ UCSchedule extract_schedule(const Eigen::VectorXd& x,
   sched.dc_ess_dispatch.resize(static_cast<size_t>(Sd), std::vector<double>(static_cast<size_t>(T)));
   sched.dc_ess_soc.resize(static_cast<size_t>(Sd), std::vector<double>(static_cast<size_t>(T)));
   sched.renewable_dispatch.resize(static_cast<size_t>(R), std::vector<double>(static_cast<size_t>(T)));
+  if (std::find(build.pv_curt_kind.begin(), build.pv_curt_kind.end(), 0) !=
+      build.pv_curt_kind.end()) {
+    sched.ac_pv_dispatch.resize(static_cast<size_t>(build.ac_pv_count),
+                                std::vector<double>(static_cast<size_t>(T)));
+  }
+  if (!build.ac_sgen_indices.empty()) {
+    sched.ac_sgen_dispatch.resize(static_cast<size_t>(build.ac_sgen_count),
+                                  std::vector<double>(static_cast<size_t>(T)));
+  }
+  if (!build.ext_indices.empty()) {
+    sched.external_grid_dispatch.resize(
+        static_cast<size_t>(build.external_grid_count),
+        std::vector<double>(static_cast<size_t>(T)));
+  }
+  sched.dc_pv_dispatch.resize(static_cast<size_t>(build.dc_pv_count),
+                              std::vector<double>(static_cast<size_t>(T)));
+  sched.dc_sgen_dispatch.resize(static_cast<size_t>(build.dc_sgen_count),
+                                std::vector<double>(static_cast<size_t>(T)));
 
   for (int gi = 0; gi < G; ++gi) {
     for (int t = 0; t < T; ++t) {
@@ -2834,6 +2912,33 @@ UCSchedule extract_schedule(const Eigen::VectorXd& x,
   for (int ri = 0; ri < R; ++ri) {
     for (int t = 0; t < T; ++t) {
       sched.renewable_dispatch[static_cast<size_t>(ri)][static_cast<size_t>(t)] = x[ren_idx(ri, t)];
+    }
+  }
+  for (size_t k = 0; k < build.pv_curt_kind.size(); ++k) {
+    const int component = build.pv_curt_indices[k];
+    for (int t = 0; t < T; ++t) {
+      const double dispatched = std::max(
+          0.0, build.pv_curt_available[k][static_cast<size_t>(t)] -
+                   x[build.pv_curt_offset + static_cast<int>(k) * T + t]);
+      auto* rows = build.pv_curt_kind[k] == 0
+                       ? &sched.ac_pv_dispatch
+                       : (build.pv_curt_kind[k] == 1 ? &sched.dc_pv_dispatch
+                                                     : &sched.dc_sgen_dispatch);
+      (*rows)[static_cast<size_t>(component)][static_cast<size_t>(t)] = dispatched;
+    }
+  }
+  for (size_t k = 0; k < build.ac_sgen_indices.size(); ++k) {
+    const int component = build.ac_sgen_indices[k];
+    for (int t = 0; t < T; ++t) {
+      sched.ac_sgen_dispatch[static_cast<size_t>(component)][static_cast<size_t>(t)] =
+          x[build.ac_sgen_offset + static_cast<int>(k) * T + t];
+    }
+  }
+  for (size_t k = 0; k < build.ext_indices.size(); ++k) {
+    const int component = build.ext_indices[k];
+    for (int t = 0; t < T; ++t) {
+      sched.external_grid_dispatch[static_cast<size_t>(component)][static_cast<size_t>(t)] =
+          x[build.external_grid_offset + static_cast<int>(k) * T + t];
     }
   }
 
@@ -3204,20 +3309,57 @@ HybridPowerSystem build_time_series_system_snapshot(
     }
   }
 
-  for (auto& pv : sys_t.dc.pv_arrays) {
+  if (apply_uc_schedule && opts.enable_dispatchable_pv) {
+    for (size_t k = 0; k < sys_t.ac.pv_systems.size() &&
+                       k < schedule.ac_pv_dispatch.size(); ++k) {
+      auto& pv = sys_t.ac.pv_systems[k];
+      if (!pv.in_service ||
+          step >= static_cast<int>(schedule.ac_pv_dispatch[k].size())) continue;
+      pv.p_mw = std::max(0.0, schedule.ac_pv_dispatch[k][static_cast<size_t>(step)]);
+      // Force the PF snapshot to use the scheduled MW value even for PVs that
+      // normally derive output from their electrical curve and irradiance.
+      pv.voc = 0.0;
+      pv.isc = 0.0;
+      pv.vmpp = 0.0;
+    }
+    for (size_t k = 0; k < sys_t.ac.static_generators.size() &&
+                       k < schedule.ac_sgen_dispatch.size(); ++k) {
+      auto& sg = sys_t.ac.static_generators[k];
+      if (!sg.in_service ||
+          step >= static_cast<int>(schedule.ac_sgen_dispatch[k].size())) continue;
+      sg.p_mw = std::max(0.0, schedule.ac_sgen_dispatch[k][static_cast<size_t>(step)]);
+      sg.scaling = 1.0;
+    }
+  }
+
+  for (size_t k = 0; k < sys_t.dc.pv_arrays.size(); ++k) {
+    auto& pv = sys_t.dc.pv_arrays[k];
     if (!pv.in_service) continue;
     const auto* prof = find_profile(profile_map, pv.profile_id);
     const double scale = profile_value(prof, step, 1.0);
     pv.p_set_mw *= scale;
     pv.irradiance = 1000.0 * scale;
+    if (apply_uc_schedule && opts.enable_dispatchable_pv &&
+        k < schedule.dc_pv_dispatch.size() &&
+        step < static_cast<int>(schedule.dc_pv_dispatch[k].size())) {
+      pv.p_set_mw = std::max(
+          0.0, schedule.dc_pv_dispatch[k][static_cast<size_t>(step)]);
+    }
   }
 
-  for (auto& sg : sys_t.dc.dc_static_generators) {
+  for (size_t k = 0; k < sys_t.dc.dc_static_generators.size(); ++k) {
+    auto& sg = sys_t.dc.dc_static_generators[k];
     if (!sg.in_service) continue;
     const auto* prof = find_profile(profile_map, sg.profile_id);
     const double scale = profile_value(prof, step, 1.0);
     sg.p_set_mw *= sg.scaling * scale;
     sg.scaling = 1.0;
+    if (apply_uc_schedule && opts.enable_dispatchable_pv &&
+        k < schedule.dc_sgen_dispatch.size() &&
+        step < static_cast<int>(schedule.dc_sgen_dispatch[k].size())) {
+      sg.p_set_mw = std::max(
+          0.0, schedule.dc_sgen_dispatch[k][static_cast<size_t>(step)]);
+    }
   }
 
   for (auto& load : sys_t.dc.loads) {
@@ -3405,6 +3547,9 @@ static TimeSeriesPFResult concat_ts_results(std::vector<TimeSeriesPFResult>& par
     cat_d(out.uc_schedule.ess_dispatch, u.ess_dispatch);
     cat_d(out.uc_schedule.ess_soc, u.ess_soc);
     cat_d(out.uc_schedule.renewable_dispatch, u.renewable_dispatch);
+    cat_d(out.uc_schedule.ac_pv_dispatch, u.ac_pv_dispatch);
+    cat_d(out.uc_schedule.ac_sgen_dispatch, u.ac_sgen_dispatch);
+    cat_d(out.uc_schedule.external_grid_dispatch, u.external_grid_dispatch);
     cat_d(out.uc_schedule.dc_pv_dispatch, u.dc_pv_dispatch);
     cat_d(out.uc_schedule.dc_ess_dispatch, u.dc_ess_dispatch);
     cat_d(out.uc_schedule.dc_ess_soc, u.dc_ess_soc);
@@ -3553,10 +3698,24 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
     const int ndc_sgen = static_cast<int>(sys.dc.dc_static_generators.size());
     const int ndc_load = static_cast<int>(sys.dc.loads.size());
 
-    schedule.dc_pv_dispatch.resize(static_cast<size_t>(ndc_pv),
-                                   std::vector<double>(static_cast<size_t>(T)));
-    schedule.dc_sgen_dispatch.resize(static_cast<size_t>(ndc_sgen),
+    const auto complete_series = [T](const auto& rows, int count) {
+      if (static_cast<int>(rows.size()) != count) return false;
+      return std::all_of(rows.begin(), rows.end(), [T](const auto& row) {
+        return static_cast<int>(row.size()) == T;
+      });
+    };
+    const bool keep_uc_dc_pv = opts.enable_dispatchable_pv && schedule.feasible &&
+                               complete_series(schedule.dc_pv_dispatch, ndc_pv);
+    const bool keep_uc_dc_sgen = opts.enable_dispatchable_pv && schedule.feasible &&
+                                 complete_series(schedule.dc_sgen_dispatch, ndc_sgen);
+    if (!keep_uc_dc_pv) {
+      schedule.dc_pv_dispatch.assign(static_cast<size_t>(ndc_pv),
                                      std::vector<double>(static_cast<size_t>(T)));
+    }
+    if (!keep_uc_dc_sgen) {
+      schedule.dc_sgen_dispatch.assign(static_cast<size_t>(ndc_sgen),
+                                       std::vector<double>(static_cast<size_t>(T)));
+    }
     schedule.dc_load_demand.resize(static_cast<size_t>(ndc_load),
                                    std::vector<double>(static_cast<size_t>(T)));
 
@@ -3565,8 +3724,10 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
       const auto* prof = find_profile(profile_map, pv.profile_id);
       for (int t = 0; t < T; ++t) {
         const double scale = profile_value(prof, t, 1.0);
-        schedule.dc_pv_dispatch[static_cast<size_t>(k)][static_cast<size_t>(t)] =
-            pv.in_service ? pv.p_set_mw * scale : 0.0;
+        if (!keep_uc_dc_pv) {
+          schedule.dc_pv_dispatch[static_cast<size_t>(k)][static_cast<size_t>(t)] =
+              pv.in_service ? pv.p_set_mw * scale : 0.0;
+        }
       }
     }
     bool has_uc_dc_ess =
@@ -3596,8 +3757,10 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
       const auto* prof = find_profile(profile_map, sg.profile_id);
       for (int t = 0; t < T; ++t) {
         const double scale = profile_value(prof, t, 1.0);
-        schedule.dc_sgen_dispatch[static_cast<size_t>(k)][static_cast<size_t>(t)] =
-            sg.in_service ? sg.p_set_mw * sg.scaling * scale : 0.0;
+        if (!keep_uc_dc_sgen) {
+          schedule.dc_sgen_dispatch[static_cast<size_t>(k)][static_cast<size_t>(t)] =
+              sg.in_service ? sg.p_set_mw * sg.scaling * scale : 0.0;
+        }
       }
     }
     for (int k = 0; k < ndc_load; ++k) {
@@ -4076,6 +4239,52 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
     for (double p : schedule.dc_sgen_dispatch[k]) {
       result.total_generation_cost +=
           std::max(0.0, p) * std::max(0.0, sg.cost_c1) * ts_data.step_duration_hr;
+    }
+  }
+  for (size_t k = 0; k < sys.ac.external_grids.size() &&
+                     k < schedule.external_grid_dispatch.size(); ++k) {
+    const auto& grid = sys.ac.external_grids[k];
+    if (!grid.in_service) continue;
+    const auto* price_profile = find_profile(profile_map, grid.price_profile_id);
+    const auto& dispatch = schedule.external_grid_dispatch[k];
+    for (int t = 0; t < T && t < static_cast<int>(dispatch.size()); ++t) {
+      double p = dispatch[static_cast<size_t>(t)];
+      if (t < static_cast<int>(result.opf_results.size()) &&
+          result.opf_results[static_cast<size_t>(t)].converged &&
+          k < result.opf_results[static_cast<size_t>(t)].external_grid_p_mw.size()) {
+        p = result.opf_results[static_cast<size_t>(t)].external_grid_p_mw[k];
+      }
+      const double price =
+          grid.cost_c1 * profile_value(price_profile, t, 1.0);
+      result.total_generation_cost +=
+          p * price * ts_data.step_duration_hr;
+    }
+  }
+  for (int t = 0; t < T; ++t) {
+    const HybridPowerSystem sys_t = prepare_system(t);
+    for (const auto& sg : sys_t.ac.static_generators) {
+      if (sg.in_service)
+        result.total_generation_cost +=
+            std::max(0.0, sg.p_mw * sg.scaling) * std::max(0.0, sg.cost_c1) *
+            ts_data.step_duration_hr;
+    }
+    for (const auto& ren : sys_t.ac.renewable_gens) {
+      if (ren.in_service)
+        result.total_generation_cost +=
+            std::max(0.0, ren.p_mw) * std::max(0.0, ren.cost_c1) *
+            ts_data.step_duration_hr;
+    }
+    for (const auto& pv : sys_t.ac.pv_systems) {
+      if (pv.in_service)
+        result.total_generation_cost +=
+            std::max(0.0, pv.p_mw) * std::max(0.0, pv.cost_c1) *
+            ts_data.step_duration_hr;
+    }
+    for (const auto& pv : sys_t.dc.pv_arrays) {
+      if (pv.in_service)
+        result.total_generation_cost +=
+            std::max(0.0, pv.p_set_mw) * std::max(0.0, pv.cost_c1) *
+            ts_data.step_duration_hr;
     }
   }
   auto add_storage_bid_cost = [&](const Storage& st,

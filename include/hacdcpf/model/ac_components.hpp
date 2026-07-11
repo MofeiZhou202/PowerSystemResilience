@@ -377,6 +377,7 @@ struct RenewableGen {
   double qmin_mvar{0.0};
 
   bool curtailable{true};
+  double cost_c1{0.0};
   double cost_curtail_mwh{0.0};
   double capacity_factor{0.3};
 
@@ -429,6 +430,8 @@ struct PVSystem {
   double temperature{25.0};
 
   int profile_id{-1};
+
+  double cost_c1{0.0};
 
   double mtbf_hours{0.0};
   double mttr_hours{0.0};

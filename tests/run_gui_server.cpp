@@ -2504,6 +2504,12 @@ json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
   };
 
   json out;
+  out["converged"] = carbon.tracing_verified;
+  out["status"] = carbon.tracing_verified
+                      ? "converged"
+                      : (carbon.power_balance_verified
+                             ? "carbon matrix or tracing verification failed"
+                             : "power balance verification failed");
   out["matrix_solved"] = carbon.matrix_solved;
   out["tracing_verified"] = carbon.tracing_verified;
   out["matrix_residual"] = carbon.matrix_residual;
@@ -14831,7 +14837,8 @@ int main(int argc, char** argv) {
 	        auto r = hacdcpf::solve_dc_opf(sys, opt);
 	        out["converged"]=r.converged; out["iterations"]=r.iterations;
 	        out["objective"]=r.objective; out["status"]=r.status;
-	        out["pg_mw"]=r.pg_mw; out["pf_mw"]=r.pf_mw; out["lmp"]=r.lmp;
+	        out["pg_mw"]=r.pg_mw; out["external_grid_p_mw"]=r.external_grid_p_mw;
+	        out["pf_mw"]=r.pf_mw; out["lmp"]=r.lmp;
 	        out["generator_dispatch"] = opf_generator_dispatch_json(sys, r.pg_mw);
 	        out["ac_bus_results"] = opf_ac_bus_results_json(sys, {}, r.va, r.lmp);
 	        out["dc_opf_branch_dispatch"] = opf_dc_branch_dispatch_json(sys, r.pf_mw);
@@ -14922,6 +14929,8 @@ int main(int argc, char** argv) {
         out["solver_path"]=(r.solver_path==hacdcpf::opf::OPFSolverPath::ParityIPM)?"parity":
                            (r.solver_path==hacdcpf::opf::OPFSolverPath::NativeAC)?"native_ac":"other";
 	        out["vm"]=r.vm; out["va"]=r.va; out["pg_mw"]=r.pg_mw; out["qg_mvar"]=r.qg_mvar;
+	        out["external_grid_p_mw"]=r.external_grid_p_mw;
+	        out["external_grid_q_mvar"]=r.external_grid_q_mvar;
 	        out["vdc"]=r.vdc; out["pac_mw"]=r.pac_mw; out["qac_mvar"]=r.qac_mvar;
 	        out["dpd_mw"]=r.dpd_mw; out["pren_mw"]=r.pren_mw; out["pstor_mw"]=r.pstor_mw;
 	        out["pdcdc_mw"]=r.pdcdc_mw; out["pflex_mw"]=r.pflex_mw;
@@ -15009,7 +15018,6 @@ int main(int argc, char** argv) {
             replay_sys.ac.buses[i].va_deg = projected_opf_va[i] * kRad2Deg;
 	          for (size_t i = 0; i < r.vdc.size() && i < replay_sys.dc.buses.size(); ++i) {
 	            replay_sys.dc.buses[i].vm_pu = r.vdc[i];
-	            replay_sys.dc.buses[i].bus_type = hacdcpf::DCBusType::DC_V;
 	          }
           for (size_t k = 0; k < r.pren_mw.size() && k < r.ren_map.size(); ++k) {
             const int orig = r.ren_map[k].original_index;
@@ -15113,6 +15121,13 @@ int main(int argc, char** argv) {
 	            if (result_pos && *result_pos < r.pac_mw.size()) { c.p_set_mw = r.pac_mw[*result_pos];
 	                                                               c.p_is_hard_constraint = true; }
 	            c.control_mode = hacdcpf::ConverterMode::PQ_MODE;
+	            // The authored ac_grid_forming flag independently promotes the AC
+	            // terminal to SLACK in PF, even after changing control_mode to PQ.
+	            // A post-OPF replay must keep Pac/Qac fixed and leave Grid1 as the
+	            // sole balancing source; otherwise the VSC silently becomes a
+	            // second slack and the displayed branch flows no longer match the
+	            // OPF dispatch.
+	            c.ac_grid_forming = false;
 	            if (const auto pos = ac_result_pos(c.bus_ac))
 	              c.v_ac_set_pu = r.vm[*pos];
 	            if (const auto pos = dc_result_pos(c.bus_dc))
@@ -15140,6 +15155,7 @@ int main(int argc, char** argv) {
 		                  c.p_is_hard_constraint = true;
 		                  if (k < r.er_port_q_mvar.size()) c.q_set_mvar = r.er_port_q_mvar[k];
 		                  c.control_mode = hacdcpf::ConverterMode::PQ_MODE;
+		                  c.ac_grid_forming = false;
 		                }
 		              }
 		            }
@@ -15183,9 +15199,56 @@ int main(int argc, char** argv) {
           auto ac_pf = solve_projected_replay_power_flow(
               replay_sys, replay_opt, &projected_ac_pf);
           if (ac_pf.converged) {
+            // Carbon analysis performs its own canonical projection. Cache an
+            // original-topology system carrying the OPF dispatch, rather than
+            // replay_sys (which is already canonical); projecting replay_sys a
+            // second time would expand standalone transformers twice and break
+            // external-grid power reconstruction at the slack bus.
+            hacdcpf::HybridPowerSystem carbon_sys = original_sys;
+            for (size_t i = 0; i < r.pg_mw.size() &&
+                               i < carbon_sys.ac.generators.size(); ++i) {
+              carbon_sys.ac.generators[i].pg_mw = r.pg_mw[i];
+              if (i < r.qg_mvar.size())
+                carbon_sys.ac.generators[i].qg_mvar = r.qg_mvar[i];
+            }
+            for (size_t k = 0; k < r.pren_mw.size() && k < r.ren_map.size(); ++k) {
+              const int orig = r.ren_map[k].original_index;
+              const int src = r.ren_map[k].source_type;
+              if (src == 0 && orig >= 0 &&
+                  orig < static_cast<int>(carbon_sys.ac.renewable_gens.size())) {
+                carbon_sys.ac.renewable_gens[static_cast<size_t>(orig)].p_mw = r.pren_mw[k];
+                if (k < r.qren_mvar.size())
+                  carbon_sys.ac.renewable_gens[static_cast<size_t>(orig)].q_mvar = r.qren_mvar[k];
+              } else if (src == 1 && orig >= 0 &&
+                         orig < static_cast<int>(carbon_sys.ac.pv_systems.size())) {
+                carbon_sys.ac.pv_systems[static_cast<size_t>(orig)].p_mw = r.pren_mw[k];
+                if (k < r.qren_mvar.size())
+                  carbon_sys.ac.pv_systems[static_cast<size_t>(orig)].q_mvar = r.qren_mvar[k];
+              }
+            }
+            for (size_t k = 0; k < r.pstor_mw.size() && k < r.stor_map.size(); ++k) {
+              const int orig = r.stor_map[k].original_index;
+              const int src = r.stor_map[k].source_type;
+              if (src == 0 && orig >= 0 &&
+                  orig < static_cast<int>(carbon_sys.ac.storage.size())) {
+                carbon_sys.ac.storage[static_cast<size_t>(orig)].p_mw = r.pstor_mw[k];
+                if (k < r.qstor_mvar.size())
+                  carbon_sys.ac.storage[static_cast<size_t>(orig)].q_mvar = r.qstor_mvar[k];
+              } else if (src == 1 && orig >= 0 &&
+                         orig < static_cast<int>(carbon_sys.dc.dc_storage.size())) {
+                carbon_sys.dc.dc_storage[static_cast<size_t>(orig)].p_mw = r.pstor_mw[k];
+              }
+            }
+            for (size_t k = 0; k < r.pflex_mw.size() && k < r.flex_map.size(); ++k) {
+              const int orig = r.flex_map[k].original_index;
+              if (orig >= 0 &&
+                  orig < static_cast<int>(carbon_sys.ac.flexible_loads.size())) {
+                carbon_sys.ac.flexible_loads[static_cast<size_t>(orig)].p_mw = r.pflex_mw[k];
+              }
+            }
             {
               std::lock_guard<std::mutex> lk(g_session.mu);
-              cache_last_power_flow(g_session, ac_pf, "opf", replay_sys);
+              cache_last_power_flow(g_session, ac_pf, "opf", carbon_sys);
             }
             // Post-OPF power-flow view: the actual branch flows + converter
             // transfers at the OPF dispatch, so the GUI can show 潮流 (and drive a
@@ -15254,14 +15317,45 @@ int main(int argc, char** argv) {
 	                power_flow_geo_energy_router_json(original_sys, er_snapshot, ac_pf);
 	            post_pf["geo_gen"] =
 	                power_flow_geo_generator_json(original_sys, r.pg_mw, r.qg_mvar);
+	            json post_component_results = json::array();
+	            for (size_t i = 0; i < original_sys.ac.external_grids.size(); ++i) {
+	              const auto& grid = original_sys.ac.external_grids[i];
+	              const double p = i < r.external_grid_p_mw.size()
+	                                   ? r.external_grid_p_mw[i]
+	                                   : 0.0;
+	              const double q = i < r.external_grid_q_mvar.size()
+	                                   ? r.external_grid_q_mvar[i]
+	                                   : 0.0;
+	              post_component_results.push_back(
+	                  json{{"canvas_type", "external_grid"},
+	                       {"canvas_index", grid.index},
+	                       {"index", grid.index},
+	                       {"position", i},
+	                       {"domain", "AC"},
+	                       {"type_label", "外部电网"},
+	                       {"name", grid.name.empty()
+	                                    ? "External Grid " + std::to_string(i + 1)
+	                                    : grid.name},
+	                       {"connection", "AC Bus " + std::to_string(grid.bus)},
+	                       {"status", "已求解"},
+	                       {"metrics",
+	                        json::array({
+	                            json{{"label", "P平衡"}, {"value", p},
+	                                 {"unit", "MW"}, {"quantity", "p"},
+	                                 {"precision", 4}},
+	                            json{{"label", "Q平衡"}, {"value", q},
+	                                 {"unit", "MVar"}, {"quantity", "q"},
+	                                 {"precision", 4}}})}});
+	            }
+	            post_pf["component_results"] = std::move(post_component_results);
 	            post_pf["vm"] = ac_pf.vm; post_pf["va"] = ac_pf.va; post_pf["vdc"] = ac_pf.vdc;
 	            out["post_pf"] = post_pf;
             // Post-OPF carbon flow: static carbon-emission-flow analysis on the OPF
             // dispatch (same engine as /api/session/run_carbon, fed the OPF PF).
             try {
               hacdcpf::analysis::CarbonAnalysisOptions ca_opt; ca_opt.verbose = false;
-              auto carbon = hacdcpf::analysis::compute_carbon_analysis(replay_sys, ac_pf, ca_opt);
-              out["post_carbon"] = carbon_analysis_to_json(replay_sys, carbon);
+              auto carbon = hacdcpf::analysis::compute_carbon_analysis(carbon_sys, ac_pf, ca_opt);
+              out["post_carbon"] = carbon_analysis_to_json(carbon_sys, carbon);
             } catch (const std::exception&) { /* carbon view is best-effort */ }
           }
           // ── OPF ↔ PF consistency audit ──────────────────────────────────
@@ -15477,6 +15571,8 @@ int main(int argc, char** argv) {
       out["converged"]=r.converged; out["iterations"]=r.iterations;
       out["objective"]=r.objective; out["status"]=r.status;
       out["vm"]=r.vm; out["va"]=r.va; out["pg_mw"]=r.pg_mw; out["qg_mvar"]=r.qg_mvar;
+      out["external_grid_p_mw"]=r.external_grid_p_mw;
+      out["external_grid_q_mvar"]=r.external_grid_q_mvar;
       out["vdc"]=r.vdc; out["pac_mw"]=r.pac_mw; out["qac_mvar"]=r.qac_mvar;
       out["dpd_mw"]=r.dpd_mw; out["dqd_mvar"]=r.dqd_mvar;
       out["pren_mw"]=r.pren_mw; out["pstor_mw"]=r.pstor_mw;
@@ -15525,7 +15621,9 @@ int main(int argc, char** argv) {
       json out;
       out["converged"]=r.converged; out["iterations"]=r.iterations;
       out["objective"]=r.objective; out["status"]=r.status;
-      out["pg_mw"]=r.pg_mw; out["pf_mw"]=r.pf_mw; out["lmp"]=r.lmp;
+      out["pg_mw"]=r.pg_mw;
+      out["external_grid_p_mw"]=r.external_grid_p_mw;
+      out["pf_mw"]=r.pf_mw; out["lmp"]=r.lmp;
       out["total_load_shedding_mw"]=r.total_load_shedding_mw;
       // Apply DC OPF dispatch and run AC PF for carbon analysis
       if (r.converged) {
@@ -16440,7 +16538,7 @@ int main(int argc, char** argv) {
         opts.enable_dc_network_constraints = enable_dc_net && enable_net;
         opts.reserve_requirement_fraction = std::max(0.0, reserve_frac);
         apply_uc_objective(opts, j);
-        opts.enable_external_grid = j.value("enable_external_grid", false);
+        opts.enable_external_grid = j.value("enable_external_grid", true);
         opts.enable_demand_response = j.value("enable_demand_response", false);
         opts.dr_shiftable = j.value("dr_shiftable", false);
         opts.w_demand_response = j.value("dr_penalty", 20.0);
@@ -16552,6 +16650,33 @@ int main(int argc, char** argv) {
         out["gen_commit"] = uc.gen_commit;
         out["ess_dispatch"] = uc.ess_dispatch;
         out["ess_soc"] = uc.ess_soc;
+        json external_grid_dispatch = uc.external_grid_dispatch;
+        if (!external_grid_dispatch.is_array()) external_grid_dispatch = json::array();
+        while (external_grid_dispatch.size() < sys_ts.ac.external_grids.size())
+          external_grid_dispatch.push_back(json::array());
+        for (int t = 0; t < result.num_steps &&
+                        t < static_cast<int>(result.opf_results.size()); ++t) {
+          const auto& opf = result.opf_results[static_cast<size_t>(t)];
+          if (!opf.converged) continue;
+          for (size_t k = 0; k < opf.external_grid_p_mw.size() &&
+                             k < sys_ts.ac.external_grids.size(); ++k) {
+            auto& row = external_grid_dispatch[k];
+            if (!row.is_array()) row = json::array();
+            while (row.size() < static_cast<size_t>(result.num_steps))
+              row.push_back(0.0);
+            row[static_cast<size_t>(t)] = opf.external_grid_p_mw[k];
+          }
+        }
+        out["external_grid_dispatch"] = std::move(external_grid_dispatch);
+        {
+          json names = json::array();
+          for (size_t i = 0; i < sys_ts.ac.external_grids.size(); ++i) {
+            const auto& grid = sys_ts.ac.external_grids[i];
+            names.push_back(grid.name.empty() ? "ExternalGrid" + std::to_string(i)
+                                              : grid.name);
+          }
+          out["external_grid_names"] = std::move(names);
+        }
         json renewable_dispatch = uc.renewable_dispatch;
         int n_ren_active = 0;
         for (const auto& ren : sys_ts.ac.renewable_gens)
@@ -16658,6 +16783,12 @@ int main(int argc, char** argv) {
                 pv_mw = hacdcpf::powerflow::compute_pv_power_mw(pv_copy);
               } else {
                 pv_mw = pvsys.p_mw * scale;
+              }
+
+              // UC dispatchable-PV output is authoritative when present.
+              if (pi < uc.ac_pv_dispatch.size() &&
+                  t < static_cast<int>(uc.ac_pv_dispatch[pi].size())) {
+                pv_mw = uc.ac_pv_dispatch[pi][static_cast<size_t>(t)];
               }
 
               // 2) If OPF ran and converged, override with OPF dispatch
@@ -17945,7 +18076,7 @@ int main(int argc, char** argv) {
         opts.ts_pf_options.enable_dc_network_constraints = enable_dc_net && enable_net;
         opts.ts_pf_options.reserve_requirement_fraction = std::max(0.0, reserve_frac);
         apply_uc_objective(opts.ts_pf_options, j);
-        opts.ts_pf_options.enable_external_grid = j.value("enable_external_grid", false);
+        opts.ts_pf_options.enable_external_grid = j.value("enable_external_grid", true);
         opts.ts_pf_options.enable_demand_response = j.value("enable_demand_response", false);
         opts.ts_pf_options.dr_shiftable = j.value("dr_shiftable", false);
         opts.ts_pf_options.w_demand_response = j.value("dr_penalty", 20.0);

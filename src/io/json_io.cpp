@@ -528,6 +528,7 @@ static json pv_array_dc_to_json(const PVArrayDC& p) {
   j["name"] = p.name;
   j["p_set_mw"] = p.p_set_mw;
   j["profile_id"] = p.profile_id;
+  j["cost_c1"] = p.cost_c1;
   j["num_series"] = p.num_series;
   j["num_parallel"] = p.num_parallel;
   j["vmpp"] = p.vmpp;
@@ -553,6 +554,7 @@ static PVArrayDC pv_array_dc_from_json(const json& j) {
   p.name = jget<std::string>(j, "name", "");
   p.p_set_mw = jget(j, "p_set_mw", 0.0);
   p.profile_id = jget(j, "profile_id", -1);
+  p.cost_c1 = jget(j, "cost_c1", 0.0);
   p.num_series = jget(j, "num_series", 0);
   p.num_parallel = jget(j, "num_parallel", 0);
   p.vmpp = jget(j, "vmpp", 0.0);
@@ -916,6 +918,7 @@ static json renewable_gen_to_json(const RenewableGen& r) {
   j["qmax_mvar"] = r.qmax_mvar;
   j["qmin_mvar"] = r.qmin_mvar;
   j["curtailable"] = r.curtailable;
+  j["cost_c1"] = r.cost_c1;
   j["cost_curtail_mwh"] = r.cost_curtail_mwh;
   j["capacity_factor"] = r.capacity_factor;
   j["profile_id"] = r.profile_id;
@@ -937,6 +940,7 @@ static RenewableGen renewable_gen_from_json(const json& j) {
   r.qmax_mvar = jget(j, "qmax_mvar", 0.0);
   r.qmin_mvar = jget(j, "qmin_mvar", 0.0);
   r.curtailable = jget(j, "curtailable", true);
+  r.cost_c1 = jget(j, "cost_c1", 0.0);
   r.cost_curtail_mwh = jget(j, "cost_curtail_mwh", 0.0);
   r.capacity_factor = jget(j, "capacity_factor", 0.3);
   r.profile_id = jget(j, "profile_id", -1);
@@ -1236,6 +1240,7 @@ static json pv_system_to_json(const PVSystem& p) {
   j["irradiance"] = p.irradiance;
   j["temperature"] = p.temperature;
   j["profile_id"] = p.profile_id;
+  j["cost_c1"] = p.cost_c1;
   j["mtbf_panel_hours"] = p.mtbf_panel_hours;
   j["mttr_panel_hours"] = p.mttr_panel_hours;
   j["mtbf_inverter_hours"] = p.mtbf_inverter_hours;
@@ -1274,6 +1279,7 @@ static PVSystem pv_system_from_json(const json& j) {
   p.irradiance = jget(j, "irradiance", 1000.0);
   p.temperature = jget(j, "temperature", 25.0);
   p.profile_id = jget(j, "profile_id", -1);
+  p.cost_c1 = jget(j, "cost_c1", 0.0);
   p.mtbf_panel_hours = jget(j, "mtbf_panel_hours", 0.0);
   p.mttr_panel_hours = jget(j, "mttr_panel_hours", 0.0);
   p.mtbf_inverter_hours = jget(j, "mtbf_inverter_hours", 0.0);

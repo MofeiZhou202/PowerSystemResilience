@@ -108,6 +108,46 @@ TEST_CASE("JSON round-trip: 2-bus system serialises and deserialises", "[io][jso
     CHECK_THAT(restored.ac.branches[0].b0_pu, WithinAbs(0.001, 1e-9));
 }
 
+TEST_CASE("JSON round-trip: renewable operating costs are preserved",
+          "[io][json][roundtrip][cost]") {
+    auto orig = make_2bus();
+
+    RenewableGen renewable;
+    renewable.index = 1;
+    renewable.bus = 2;
+    renewable.p_mw = 8.0;
+    renewable.p_rated_mw = 10.0;
+    renewable.cost_c1 = 3.25;
+    renewable.cost_curtail_mwh = 42.0;
+    orig.ac.renewable_gens.push_back(renewable);
+
+    PVSystem pv;
+    pv.index = 1;
+    pv.bus = 2;
+    pv.p_mw = 5.0;
+    pv.cost_c1 = 2.5;
+    orig.ac.pv_systems.push_back(pv);
+
+    DCBus dc_bus;
+    dc_bus.index = 1;
+    orig.dc.buses.push_back(dc_bus);
+    PVArrayDC dc_pv;
+    dc_pv.index = 1;
+    dc_pv.bus = 1;
+    dc_pv.p_set_mw = 4.0;
+    dc_pv.cost_c1 = 1.75;
+    orig.dc.pv_arrays.push_back(dc_pv);
+
+    const auto restored = from_json(to_json(orig));
+    REQUIRE(restored.ac.renewable_gens.size() == 1);
+    REQUIRE(restored.ac.pv_systems.size() == 1);
+    REQUIRE(restored.dc.pv_arrays.size() == 1);
+    CHECK_THAT(restored.ac.renewable_gens.front().cost_c1, WithinAbs(3.25, 1e-12));
+    CHECK_THAT(restored.ac.renewable_gens.front().cost_curtail_mwh, WithinAbs(42.0, 1e-12));
+    CHECK_THAT(restored.ac.pv_systems.front().cost_c1, WithinAbs(2.5, 1e-12));
+    CHECK_THAT(restored.dc.pv_arrays.front().cost_c1, WithinAbs(1.75, 1e-12));
+}
+
 TEST_CASE("JSON round-trip: Load short-circuit motor fields are preserved",
           "[io][json][roundtrip][short_circuit]") {
     auto orig = make_2bus();

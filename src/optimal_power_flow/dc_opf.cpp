@@ -20,6 +20,7 @@
 #include "hacdcpf/engine/kernel/ipm/lcqp_solver.hpp"
 #include "hacdcpf/engine/engine.hpp"
 #include "hacdcpf/engine/problem_types.hpp"
+#include "hacdcpf/projection/project_to_canonical.hpp"
 
 namespace hacdcpf::opf {
 
@@ -727,11 +728,70 @@ DCOPFResult extract_dc_opf_result(const DCOPFFormulation& form,
 // --------------------------------------------------------------------------
 // Public API: solve_dc_opf
 // --------------------------------------------------------------------------
-DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
+DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
                          const DCOPFOptions& opt) {
   auto start_time = std::chrono::high_resolution_clock::now();
 
   DCOPFResult result;
+  // DC OPF must consume the same canonical topology as AC OPF/PF. In
+  // particular, closed rich switches and circuit breakers merge their buses.
+  HybridPowerSystem sys = project_to_canonical_models(sys_in, /*strip_dead=*/false);
+  const size_t original_generator_count = sys_in.ac.generators.size();
+  const size_t external_source_offset = sys.ac.generators.size();
+  std::vector<size_t> promoted_external_grid_indices;
+  for (size_t i = 0; i < sys.ac.external_grids.size(); ++i) {
+    const auto& grid = sys.ac.external_grids[i];
+    if (!grid.in_service) continue;
+    Generator source;
+    source.index = static_cast<int>(sys.ac.generators.size());
+    source.name = grid.name.empty() ? "ExternalGrid" + std::to_string(grid.index)
+                                    : grid.name;
+    source.bus = grid.bus;
+    source.in_service = true;
+    source.is_slack = true;
+    source.pmin_mw = -1.0e5;
+    source.pmax_mw = 1.0e5;
+    source.qmin_mvar = -1.0e5;
+    source.qmax_mvar = 1.0e5;
+    source.cost_c2 = grid.cost_c2;
+    source.cost_c1 = grid.cost_c1;
+    source.cost_c0 = grid.cost_c0;
+    sys.ac.generators.push_back(std::move(source));
+    promoted_external_grid_indices.push_back(i);
+  }
+  auto separate_external_grid_dispatch = [&](DCOPFResult value) {
+    value.external_grid_p_mw.assign(sys_in.ac.external_grids.size(), 0.0);
+    for (size_t k = 0; k < promoted_external_grid_indices.size(); ++k) {
+      const size_t source_row = external_source_offset + k;
+      if (source_row < value.pg_mw.size()) {
+        value.external_grid_p_mw[promoted_external_grid_indices[k]] =
+            value.pg_mw[source_row];
+      }
+    }
+    if (value.pg_mw.size() > original_generator_count)
+      value.pg_mw.resize(original_generator_count);
+    if (sys.bus_merge_map) {
+      const auto& map = *sys.bus_merge_map;
+      value.va = unproject_bus_vector(value.va, map);
+      if (!value.lmp.empty()) value.lmp = unproject_bus_vector(value.lmp, map);
+      if (!value.load_shedding_mw.empty()) {
+        value.load_shedding_mw =
+            unproject_bus_vector(value.load_shedding_mw, map);
+      }
+      std::vector<double> original_flows(sys_in.ac.branches.size(), 0.0);
+      for (size_t i = 0; i < original_flows.size(); ++i) {
+        auto it = map.branch_orig_to_proj.find(static_cast<int>(i));
+        if (it != map.branch_orig_to_proj.end() && it->second >= 0 &&
+            it->second < static_cast<int>(value.pf_mw.size())) {
+          original_flows[i] = value.pf_mw[static_cast<size_t>(it->second)];
+        }
+      }
+      value.pf_mw = std::move(original_flows);
+    } else if (value.pf_mw.size() > sys_in.ac.branches.size()) {
+      value.pf_mw.resize(sys_in.ac.branches.size());
+    }
+    return value;
+  };
 
   // ── Graph topology pre-check ─────────────────────────────────────────────
   // Detect isolated load islands before the expensive LP build; pre-shed their
@@ -794,7 +854,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
         result.status = "Infeasible: no island with slack bus";
         result.converged = false;
         apply_direct_shed_to_result();
-        return result;
+        return separate_external_grid_dispatch(std::move(result));
       }
       // Prune dead-bus loads from a local copy before building the formulation.
       sys_pruned = sys;
@@ -843,14 +903,14 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
     result.status = std::string("Invalid topology: ") + e.what();
     result.converged = false;
     apply_direct_shed_to_result();
-    return result;
+    return separate_external_grid_dispatch(std::move(result));
   }
   
   if (form.nb == 0 || form.ng == 0) {
     result.status = "Empty system or no generators";
     result.converged = false;
     apply_direct_shed_to_result();
-    return result;
+    return separate_external_grid_dispatch(std::move(result));
   }
   
   // Build QP model with true quadratic costs
@@ -987,7 +1047,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
         result.status = "Gurobi not available";
         result.converged = false;
         apply_direct_shed_to_result();
-        return result;
+        return separate_external_grid_dispatch(std::move(result));
       }
       break;
       
@@ -997,7 +1057,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
         result.status = "HiGHS not available";
         result.converged = false;
         apply_direct_shed_to_result();
-        return result;
+        return separate_external_grid_dispatch(std::move(result));
       }
       break;
       
@@ -1053,7 +1113,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
   }
   
   apply_direct_shed_to_result();
-  return result;
+  return separate_external_grid_dispatch(std::move(result));
 }
 
 // --------------------------------------------------------------------------
@@ -1150,6 +1210,14 @@ check_dc_opf_feasibility(const HybridPowerSystem& sys,
     auto it = bus_map.find(gens[gi].bus);
     if (it == bus_map.end()) continue;
     p_net[it->second] += result.pg_mw[gi];
+  }
+  for (size_t i = 0; i < sys.ac.external_grids.size() &&
+                     i < result.external_grid_p_mw.size(); ++i) {
+    const auto& grid = sys.ac.external_grids[i];
+    if (!grid.in_service) continue;
+    auto it = bus_map.find(grid.bus);
+    if (it == bus_map.end()) continue;
+    p_net[it->second] += result.external_grid_p_mw[i];
   }
   for (const auto& sg : sys.ac.static_generators) {
     if (!sg.in_service) continue;

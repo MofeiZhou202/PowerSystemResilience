@@ -2015,6 +2015,31 @@ body[data-active-result-group="parameterLibrary"] .result-group[data-result-grou
 }
 .evpt-designer-json[hidden] { display: none; }
 .seq-profile-editor-modal .evpt-designer-header-actions { margin-left: auto; }
+.cost-editor-modal {
+  width: min(1380px, 97vw);
+  height: min(780px, 92vh);
+}
+.cost-editor-modal .evpt-designer-header-actions { margin-left: auto; }
+.cost-editor-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  padding-top: 10px;
+}
+.cost-editor-table { flex: 1; max-height: none; }
+.cost-editor-table th,
+.cost-editor-table td { white-space: nowrap; }
+.cost-editor-table input {
+  width: 100%;
+  min-width: 88px;
+  height: 25px;
+  box-sizing: border-box;
+}
+.cost-editor-table .cost-name { min-width: 150px; white-space: normal; }
+.cost-editor-na { color: var(--ink3); text-align: center; }
+.cost-editor-validation { margin-left: auto; font-size: 11px; color: var(--green); }
+.cost-editor-validation.invalid { color: var(--orange); }
 .seq-profile-editor-table td:first-child,
 .seq-profile-editor-table th:first-child { width: 64px; }
 .seq-profile-editor-table .seq-spatial-kind {

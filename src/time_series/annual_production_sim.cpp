@@ -188,9 +188,14 @@ static ReportedProfileDispatch reported_profile_dispatch(
     int profile_t) {
   ReportedProfileDispatch out;
 
-  for (const auto& sg : sys.ac.static_generators) {
+  for (size_t k = 0; k < sys.ac.static_generators.size(); ++k) {
+    const auto& sg = sys.ac.static_generators[k];
     if (!sg.in_service) continue;
-    const double p = std::max(0.0, sg.p_mw * sg.scaling);
+    double p = 0.0;
+    if (!scheduled_value(schedule.ac_sgen_dispatch, k, schedule_t, p)) {
+      p = sg.p_mw * sg.scaling;
+    }
+    p = std::max(0.0, p);
     if (p <= 0.0) continue;
     if (is_renewable_sgen_type(sg.sgen_type)) {
       out.renewable_generation_mw += p;
@@ -200,11 +205,27 @@ static ReportedProfileDispatch reported_profile_dispatch(
     out.cost_rate_per_hr += p * static_generator_report_price(sg);
   }
 
-  for (const auto& pv : sys.ac.pv_systems) {
+  for (size_t k = 0; k < sys.ac.pv_systems.size(); ++k) {
+    const auto& pv = sys.ac.pv_systems[k];
     if (!pv.in_service) continue;
-    const double p =
-        std::max(0.0, pv.p_mw * profile_scale(pmap, pv.profile_id, profile_t));
+    double p = 0.0;
+    if (!scheduled_value(schedule.ac_pv_dispatch, k, schedule_t, p)) {
+      p = pv.p_mw * profile_scale(pmap, pv.profile_id, profile_t);
+    }
+    p = std::max(0.0, p);
     out.renewable_generation_mw += p;
+    out.cost_rate_per_hr += p * pv.cost_c1;
+  }
+
+  size_t renewable_row = 0;
+  for (const auto& ren : sys.ac.renewable_gens) {
+    if (!ren.in_service) continue;
+    double p = 0.0;
+    if (!scheduled_value(schedule.renewable_dispatch, renewable_row++, schedule_t, p)) {
+      const double base = ren.p_rated_mw > 0.0 ? ren.p_rated_mw : ren.p_mw;
+      p = base * profile_scale(pmap, ren.profile_id, profile_t);
+    }
+    out.cost_rate_per_hr += std::max(0.0, p) * ren.cost_c1;
   }
 
   for (size_t k = 0; k < sys.dc.pv_arrays.size(); ++k) {
@@ -214,7 +235,9 @@ static ReportedProfileDispatch reported_profile_dispatch(
     if (!scheduled_value(schedule.dc_pv_dispatch, k, schedule_t, p)) {
       p = pv.p_set_mw * profile_scale(pmap, pv.profile_id, profile_t);
     }
-    out.renewable_generation_mw += std::max(0.0, p);
+    p = std::max(0.0, p);
+    out.renewable_generation_mw += p;
+    out.cost_rate_per_hr += p * pv.cost_c1;
   }
 
   for (const auto& sg : sys.dc.static_generators) {
@@ -305,6 +328,32 @@ static double reported_external_grid_price(
     ++count;
   }
   return count > 0 ? sum / static_cast<double>(count) : 0.0;
+}
+
+struct ReportedExternalGridDispatch {
+  bool scheduled{false};
+  double net_import_mw{0.0};
+  double cost_rate_per_hr{0.0};
+};
+
+static ReportedExternalGridDispatch reported_external_grid_dispatch(
+    const HybridPowerSystem& sys,
+    const UCSchedule& schedule,
+    const std::unordered_map<int, const TimeSeriesProfile*>& pmap,
+    int schedule_t,
+    int profile_t) {
+  ReportedExternalGridDispatch out;
+  for (size_t k = 0; k < sys.ac.external_grids.size(); ++k) {
+    const auto& grid = sys.ac.external_grids[k];
+    if (!grid.in_service) continue;
+    double p = 0.0;
+    if (!scheduled_value(schedule.external_grid_dispatch, k, schedule_t, p)) continue;
+    out.scheduled = true;
+    out.net_import_mw += p;
+    out.cost_rate_per_hr +=
+        p * grid.cost_c1 * profile_scale(pmap, grid.price_profile_id, profile_t);
+  }
+  return out;
 }
 
 /// Conventional generator operating cost rate ($/h) from dispatch in MW.
@@ -423,6 +472,24 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
 
     const ReportedProfileDispatch reported =
         reported_profile_dispatch(sys, sub_result.uc_schedule, pmap, t, t);
+    ReportedExternalGridDispatch grid = reported_external_grid_dispatch(
+        sys, sub_result.uc_schedule, pmap, t, t);
+    if (t < static_cast<int>(sub_result.opf_results.size()) &&
+        sub_result.opf_results[static_cast<size_t>(t)].converged) {
+      const auto& opf = sub_result.opf_results[static_cast<size_t>(t)];
+      grid = {};
+      grid.scheduled = !opf.external_grid_p_mw.empty();
+      for (size_t k = 0; k < sys.ac.external_grids.size() &&
+                         k < opf.external_grid_p_mw.size(); ++k) {
+        const auto& external = sys.ac.external_grids[k];
+        if (!external.in_service) continue;
+        const double p = opf.external_grid_p_mw[k];
+        grid.net_import_mw += p;
+        grid.cost_rate_per_hr +=
+            p * external.cost_c1 *
+            profile_scale(pmap, external.price_profile_id, t);
+      }
+    }
 
     // Aggregate generation from UC schedule
     double gen = 0.0;
@@ -430,7 +497,8 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
       const auto& disp = sub_result.uc_schedule.gen_dispatch[g];
       if (t < static_cast<int>(disp.size())) gen += disp[static_cast<size_t>(t)];
     }
-    sr.total_gen_mw = gen + reported.dispatchable_generation_mw;
+    sr.total_gen_mw = gen + reported.dispatchable_generation_mw +
+                      std::max(0.0, grid.net_import_mw);
 
     // Aggregate load from profiles (ac.loads or bus pd_mw fallback)
     double load = 0.0;
@@ -475,14 +543,16 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
 
     const double supply_mw =
         gen + ren + reported.dispatchable_generation_mw +
-        reported.renewable_generation_mw + std::max(0.0, ess);
+        reported.renewable_generation_mw + std::max(0.0, ess) +
+        std::max(0.0, grid.net_import_mw);
     const double need_mw =
         sr.total_load_mw + std::max(0.0, sr.total_loss_mw) +
-        std::max(0.0, -ess);
-    const double import_mw = std::max(0.0, need_mw - supply_mw);
+        std::max(0.0, -ess) + std::max(0.0, -grid.net_import_mw);
+    const double import_mw = grid.scheduled ? 0.0 : std::max(0.0, need_mw - supply_mw);
     sr.opf_cost =
         base_cost_rate + reported.cost_rate_per_hr +
         storage_bid_cost_rate(sys, sub_result.uc_schedule, t) +
+        grid.cost_rate_per_hr +
         import_mw * reported_external_grid_price(sys, pmap, t);
   }
 }
@@ -872,6 +942,10 @@ static TimeSeriesPFResult solve_daily_replay(
   day_uc.ess_dispatch = slice_2d_double(weekly_uc.ess_dispatch);
   day_uc.ess_soc = slice_2d_double(weekly_uc.ess_soc);
   day_uc.renewable_dispatch = slice_2d_double(weekly_uc.renewable_dispatch);
+  day_uc.ac_pv_dispatch = slice_2d_double(weekly_uc.ac_pv_dispatch);
+  day_uc.ac_sgen_dispatch = slice_2d_double(weekly_uc.ac_sgen_dispatch);
+  day_uc.external_grid_dispatch =
+      slice_2d_double(weekly_uc.external_grid_dispatch);
   day_uc.dc_pv_dispatch = slice_2d_double(weekly_uc.dc_pv_dispatch);
   day_uc.dc_ess_dispatch = slice_2d_double(weekly_uc.dc_ess_dispatch);
   day_uc.dc_ess_soc = slice_2d_double(weekly_uc.dc_ess_soc);
@@ -1259,6 +1333,8 @@ AnnualProductionSimResult solve_annual_production_simulation(
         auto& sr = result.step_results[static_cast<size_t>(g_idx)];
         const ReportedProfileDispatch reported =
             reported_profile_dispatch(sys, ws.uc, pmap, t, g_idx);
+        const ReportedExternalGridDispatch grid =
+            reported_external_grid_dispatch(sys, ws.uc, pmap, t, g_idx);
 
         // Generation from UC schedule
         double gen = 0.0;
@@ -1266,7 +1342,8 @@ AnnualProductionSimResult solve_annual_production_simulation(
           const auto& disp = ws.uc.gen_dispatch[g];
           if (t < static_cast<int>(disp.size())) gen += disp[static_cast<size_t>(t)];
         }
-        sr.total_gen_mw = gen + reported.dispatchable_generation_mw;
+        sr.total_gen_mw = gen + reported.dispatchable_generation_mw +
+                          std::max(0.0, grid.net_import_mw);
 
         // Load from profiles (ac.loads + bus pd_mw fallback)
         double load = 0.0;
@@ -1296,15 +1373,18 @@ AnnualProductionSimResult solve_annual_production_simulation(
 
         const double supply_mw =
             gen + ren + reported.dispatchable_generation_mw +
-            reported.renewable_generation_mw + std::max(0.0, ess);
+            reported.renewable_generation_mw + std::max(0.0, ess) +
+            std::max(0.0, grid.net_import_mw);
         const double need_mw =
             sr.total_load_mw + std::max(0.0, sr.total_loss_mw) +
-            std::max(0.0, -ess);
-        const double import_mw = std::max(0.0, need_mw - supply_mw);
+            std::max(0.0, -ess) + std::max(0.0, -grid.net_import_mw);
+        const double import_mw =
+            grid.scheduled ? 0.0 : std::max(0.0, need_mw - supply_mw);
         sr.opf_cost =
             generator_operating_cost_rate_from_uc(sys, ws.uc, t) +
             reported.cost_rate_per_hr +
             storage_bid_cost_rate(sys, ws.uc, t) +
+            grid.cost_rate_per_hr +
             import_mw * reported_external_grid_price(sys, pmap, g_idx);
         sr.opf_converged = true;
         sr.pf_converged = true;

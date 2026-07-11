@@ -108,6 +108,7 @@ struct PVArrayDC {
 
   double p_set_mw{0.0};
   int profile_id{-1};
+  double cost_c1{0.0};
 
   int num_series{0};
   int num_parallel{0};

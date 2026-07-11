@@ -150,8 +150,8 @@
     "transformers_2w": [
       {
         "index": 0,
-        "hv_bus": 2,
-        "lv_bus": 1,
+        "hv_bus": 1,
+        "lv_bus": 2,
         "sn_mva": 1.5,
         "vn_hv_kv": 10,
         "vn_lv_kv": 0.4,
