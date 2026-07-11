@@ -180,6 +180,33 @@ static double storage_bid_cost_rate(const HybridPowerSystem& sys,
   return cost;
 }
 
+static double scheduled_storage_net_mw(const UCSchedule& schedule, int t) {
+  double total = 0.0;
+  const auto add_rows = [&](const std::vector<std::vector<double>>& rows) {
+    for (const auto& row : rows) {
+      if (t >= 0 && t < static_cast<int>(row.size()))
+        total += row[static_cast<size_t>(t)];
+    }
+  };
+  add_rows(schedule.ess_dispatch);
+  add_rows(schedule.dc_ess_dispatch);
+  return total;
+}
+
+static void finalize_step_power_accounting(
+    AnnualStepResult& step, double external_grid_net_mw) {
+  step.external_grid_net_mw = external_grid_net_mw;
+  step.total_supply_mw =
+      step.total_gen_mw + step.total_renewable_mw +
+      std::max(0.0, step.total_ess_mw);
+  step.total_demand_mw =
+      step.total_load_mw + std::max(0.0, step.total_loss_mw) +
+      std::max(0.0, -step.total_ess_mw) +
+      std::max(0.0, -external_grid_net_mw);
+  step.power_balance_error_mw =
+      step.total_supply_mw - step.total_demand_mw;
+}
+
 static ReportedProfileDispatch reported_profile_dispatch(
     const HybridPowerSystem& sys,
     const UCSchedule& schedule,
@@ -520,11 +547,7 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
     sr.total_renewable_mw = ren + reported.renewable_generation_mw;
 
     // ESS net dispatch
-    double ess = 0.0;
-    for (size_t s = 0; s < sub_result.uc_schedule.ess_dispatch.size(); ++s) {
-      const auto& ed = sub_result.uc_schedule.ess_dispatch[s];
-      if (t < static_cast<int>(ed.size())) ess += ed[static_cast<size_t>(t)];
-    }
+    const double ess = scheduled_storage_net_mw(sub_result.uc_schedule, t);
     sr.total_ess_mw = ess;
 
     // Loss from PF result
@@ -539,6 +562,20 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
       for (const auto& dt_ : pfr.dcdc_transfers)
         loss += dt_.loss_mw;
       sr.total_loss_mw = loss;
+
+      // Energy reporting must use the exchange realized by the converged PF,
+      // not the OPF/UC scheduled grid value paired with PF losses. The latter
+      // mixes two operating points and creates a visible annual balance gap.
+      const double non_grid_supply_mw =
+          gen + ren + reported.dispatchable_generation_mw +
+          reported.renewable_generation_mw + std::max(0.0, ess);
+      const double non_grid_demand_mw =
+          sr.total_load_mw + std::max(0.0, sr.total_loss_mw) +
+          std::max(0.0, -ess);
+      grid.net_import_mw = non_grid_demand_mw - non_grid_supply_mw;
+      grid.scheduled = true;
+      sr.total_gen_mw = gen + reported.dispatchable_generation_mw +
+                        std::max(0.0, grid.net_import_mw);
     }
 
     const double supply_mw =
@@ -548,6 +585,7 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
     const double need_mw =
         sr.total_load_mw + std::max(0.0, sr.total_loss_mw) +
         std::max(0.0, -ess) + std::max(0.0, -grid.net_import_mw);
+    finalize_step_power_accounting(sr, grid.net_import_mw);
     const double import_mw = grid.scheduled ? 0.0 : std::max(0.0, need_mw - supply_mw);
     sr.opf_cost =
         base_cost_rate + reported.cost_rate_per_hr +
@@ -572,6 +610,13 @@ static BlockSummary aggregate_block(int block_id, int start, int end,
     bs.total_load_mwh += s.total_load_mw * dt;
     bs.total_renewable_mwh += s.total_renewable_mw * dt;
     bs.total_curtailment_mwh += s.total_curtailment_mw * dt;
+    bs.storage_discharge_mwh += std::max(0.0, s.total_ess_mw) * dt;
+    bs.storage_charge_mwh += std::max(0.0, -s.total_ess_mw) * dt;
+    bs.external_grid_import_mwh += std::max(0.0, s.external_grid_net_mw) * dt;
+    bs.external_grid_export_mwh += std::max(0.0, -s.external_grid_net_mw) * dt;
+    bs.total_supply_mwh += s.total_supply_mw * dt;
+    bs.total_demand_mwh += s.total_demand_mw * dt;
+    bs.power_balance_error_mwh += s.power_balance_error_mw * dt;
     bs.total_loss_mwh += s.total_loss_mw * dt;
     bs.total_ens_mwh += s.load_shed_mw * dt;
     bs.total_cost += s.opf_cost * dt;
@@ -1174,6 +1219,13 @@ static AnnualProductionSimResult solve_parallel_daily(
     result.total_load_mwh += ms.total_load_mwh;
     result.total_renewable_mwh += ms.total_renewable_mwh;
     result.total_curtailment_mwh += ms.total_curtailment_mwh;
+    result.storage_discharge_mwh += ms.storage_discharge_mwh;
+    result.storage_charge_mwh += ms.storage_charge_mwh;
+    result.external_grid_import_mwh += ms.external_grid_import_mwh;
+    result.external_grid_export_mwh += ms.external_grid_export_mwh;
+    result.total_supply_mwh += ms.total_supply_mwh;
+    result.total_demand_mwh += ms.total_demand_mwh;
+    result.power_balance_error_mwh += ms.power_balance_error_mwh;
     result.total_ens_mwh += ms.total_ens_mwh;
     result.total_loss_mwh += ms.total_loss_mwh;
     result.total_cost += ms.total_cost;
@@ -1364,11 +1416,7 @@ AnnualProductionSimResult solve_annual_production_simulation(
         sr.total_renewable_mw = ren + reported.renewable_generation_mw;
 
         // ESS net dispatch
-        double ess = 0.0;
-        for (size_t s = 0; s < ws.uc.ess_dispatch.size(); ++s) {
-          const auto& ed = ws.uc.ess_dispatch[s];
-          if (t < static_cast<int>(ed.size())) ess += ed[static_cast<size_t>(t)];
-        }
+        const double ess = scheduled_storage_net_mw(ws.uc, t);
         sr.total_ess_mw = ess;
 
         const double supply_mw =
@@ -1378,6 +1426,7 @@ AnnualProductionSimResult solve_annual_production_simulation(
         const double need_mw =
             sr.total_load_mw + std::max(0.0, sr.total_loss_mw) +
             std::max(0.0, -ess) + std::max(0.0, -grid.net_import_mw);
+        finalize_step_power_accounting(sr, grid.net_import_mw);
         const double import_mw =
             grid.scheduled ? 0.0 : std::max(0.0, need_mw - supply_mw);
         sr.opf_cost =
@@ -1414,6 +1463,13 @@ AnnualProductionSimResult solve_annual_production_simulation(
     result.total_load_mwh += ms.total_load_mwh;
     result.total_renewable_mwh += ms.total_renewable_mwh;
     result.total_curtailment_mwh += ms.total_curtailment_mwh;
+    result.storage_discharge_mwh += ms.storage_discharge_mwh;
+    result.storage_charge_mwh += ms.storage_charge_mwh;
+    result.external_grid_import_mwh += ms.external_grid_import_mwh;
+    result.external_grid_export_mwh += ms.external_grid_export_mwh;
+    result.total_supply_mwh += ms.total_supply_mwh;
+    result.total_demand_mwh += ms.total_demand_mwh;
+    result.power_balance_error_mwh += ms.power_balance_error_mwh;
     result.total_ens_mwh += ms.total_ens_mwh;
     result.total_loss_mwh += ms.total_loss_mwh;
     result.total_cost += ms.total_cost;

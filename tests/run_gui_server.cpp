@@ -11016,6 +11016,7 @@ int main(int argc, char** argv) {
 	        conv.p_is_hard_constraint = false;
 	      }
       json out;
+      out["schema"] = "power_flow_result_v1";
       out["method"] = method;
       out["vm"] = json::array();
       out["va"] = json::array();
@@ -15263,8 +15264,9 @@ int main(int argc, char** argv) {
               const double s_from = std::hypot(f.pf_mw, f.qf_mvar);
               const double s_to = std::hypot(f.pt_mw, f.qt_mvar);
               const double loading = (rate > 1e-9) ? (std::max(s_from, s_to) / rate * 100.0) : 0.0;
-	              brf.push_back(json{{"index", br.index}, {"name", br.name}, {"canvas_type", "branch"},
-	                {"canvas_index", br.index}, {"from_bus", br.from_bus}, {"to_bus", br.to_bus},
+	              brf.push_back(json{{"index", br.index}, {"name", br.name}, {"canvas_type", "ac_branch"},
+	                {"canvas_index", br.index}, {"from", br.from_bus}, {"to", br.to_bus},
+	                {"from_bus", br.from_bus}, {"to_bus", br.to_bus},
 	                {"pf_mw", f.pf_mw}, {"qf_mvar", f.qf_mvar}, {"pt_mw", f.pt_mw}, {"qt_mvar", f.qt_mvar},
 	                {"loss_mw", f.pf_mw + f.pt_mw}, {"loading_pct", loading}, {"rate_mva", rate}});
             }
@@ -15300,7 +15302,8 @@ int main(int argc, char** argv) {
                 if (br.rate_a_mva > 0.0)
                   loading = 100.0 * std::max(std::abs(pf_mw), std::abs(pt_mw)) / br.rate_a_mva;
               }
-              dcbr.push_back(json{{"index",br.index},{"from_bus",br.from_bus},{"to_bus",br.to_bus},
+              dcbr.push_back(json{{"index",br.index},{"from",br.from_bus},{"to",br.to_bus},
+                {"from_bus",br.from_bus},{"to_bus",br.to_bus},
                 {"pf_mw",pf_mw},{"pt_mw",pt_mw},{"loss_mw",loss_mw},{"loading_pct",loading},
                 {"rate_mva",br.rate_a_mva}});
             }
@@ -15317,6 +15320,39 @@ int main(int argc, char** argv) {
 	                power_flow_geo_energy_router_json(original_sys, er_snapshot, ac_pf);
 	            post_pf["geo_gen"] =
 	                power_flow_geo_generator_json(original_sys, r.pg_mw, r.qg_mvar);
+	            // PF and OPF-post-PF share one Canvas payload contract. Keep the
+	            // canonical flow names as aliases instead of requiring the
+	            // frontend to understand an OPF-specific response shape.
+	            post_pf["schema"] = "power_flow_result_v1";
+	            post_pf["method"] = "opf_post_pf";
+	            post_pf["method_actual"] = "opf_dispatch_replay";
+	            post_pf["iterations"] = ac_pf.iterations;
+	            post_pf["residual"] = ac_pf.residual;
+	            post_pf["geo_ac_branches"] = brf;
+	            post_pf["geo_dc_branches"] = dcbr;
+	            post_pf["geo_vsc"] = vtr;
+	            post_pf["geo_dcdc"] = dtr;
+	            json branch_abs = json::array();
+	            for (const auto& f : ac_pf.branch_flows)
+	              branch_abs.push_back(std::abs(f.pf_mw));
+	            post_pf["branch_abs"] = std::move(branch_abs);
+	            json geo_buses = json::array();
+	            for (size_t i = 0; i < original_sys.ac.buses.size(); ++i) {
+	              const auto& bus = original_sys.ac.buses[i];
+	              geo_buses.push_back(json{{"id", bus.index}, {"name", bus.name},
+	                {"type", "AC"}, {"base_kv", bus.base_kv},
+	                {"vm_pu", i < ac_pf.vm.size() ? ac_pf.vm[i] : bus.vm_pu},
+	                {"va_rad", i < ac_pf.va.size() ? ac_pf.va[i] : bus.va_deg * M_PI / 180.0},
+	                {"pd_mw", bus.pd_mw}, {"qd_mvar", bus.qd_mvar}});
+	            }
+	            for (size_t i = 0; i < original_sys.dc.buses.size(); ++i) {
+	              const auto& bus = original_sys.dc.buses[i];
+	              geo_buses.push_back(json{{"id", bus.index}, {"name", bus.name},
+	                {"type", "DC"}, {"base_kv", bus.base_kv},
+	                {"vm_pu", i < ac_pf.vdc.size() ? ac_pf.vdc[i] : bus.vm_pu},
+	                {"pd_mw", bus.pd_mw}});
+	            }
+	            post_pf["geo_buses"] = std::move(geo_buses);
 	            json post_component_results = json::array();
 	            for (size_t i = 0; i < original_sys.ac.external_grids.size(); ++i) {
 	              const auto& grid = original_sys.ac.external_grids[i];
@@ -15346,6 +15382,131 @@ int main(int argc, char** argv) {
 	                            json{{"label", "Q平衡"}, {"value", q},
 	                                 {"unit", "MVar"}, {"quantity", "q"},
 	                                 {"precision", 4}}})}});
+	            }
+	            for (const auto& row : brf) {
+	              post_component_results.push_back(json{
+	                  {"canvas_type", "ac_branch"}, {"canvas_index", row.value("index", 0)},
+	                  {"index", row.value("index", 0)}, {"domain", "AC"},
+	                  {"type_label", "交流线路"}, {"name", row.value("name", std::string{})},
+	                  {"status", "已求解"},
+	                  {"connection", "AC Bus " + std::to_string(row.value("from_bus", 0)) +
+	                                     " -> AC Bus " + std::to_string(row.value("to_bus", 0))},
+	                  {"metrics", json::array({
+	                      json{{"label", "Pf"}, {"value", row.value("pf_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
+	                      json{{"label", "Pt"}, {"value", row.value("pt_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
+	                      json{{"label", "Qf"}, {"value", row.value("qf_mvar", 0.0)}, {"unit", "MVar"}, {"quantity", "q"}},
+	                      json{{"label", "Qt"}, {"value", row.value("qt_mvar", 0.0)}, {"unit", "MVar"}, {"quantity", "q"}}})}});
+	            }
+	            for (size_t i = 0; i < vtr.size(); ++i) {
+	              const auto& row = vtr[i];
+	              const int canvas_index = row.value("index", static_cast<int>(i));
+	              post_component_results.push_back(json{
+	                  {"canvas_type", "vsc_converter"}, {"canvas_index", canvas_index},
+	                  {"index", canvas_index}, {"position", i}, {"domain", "ACDC"},
+	                  {"type_label", "AC/DC变换器"}, {"status", "已求解"},
+	                  {"metrics", json::array({
+	                      json{{"label", "Pac"}, {"value", row.value("p_ac_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
+	                      json{{"label", "Qac"}, {"value", row.value("q_ac_mvar", 0.0)}, {"unit", "MVar"}, {"quantity", "q"}},
+	                      json{{"label", "Pdc"}, {"value", row.value("p_dc_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
+	                      json{{"label", "Loss"}, {"value", row.value("loss_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}}})}});
+	            }
+	            for (const auto& flow : post_pf["ac_circuit_breaker_flows"]) {
+	              post_component_results.push_back(json{
+	                  {"canvas_type", "circuit_breaker"}, {"canvas_index", flow.value("index", 0)},
+	                  {"index", flow.value("index", 0)}, {"domain", "AC"},
+	                  {"type_label", "断路器"}, {"status", "已求解"},
+	                  {"metrics", json::array({
+	                      json{{"label", "Pf"}, {"value", flow.value("pf_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
+	                      json{{"label", "Pt"}, {"value", flow.value("pt_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
+	                      json{{"label", "Qf"}, {"value", flow.value("qf_mvar", 0.0)}, {"unit", "MVar"}, {"quantity", "q"}},
+	                      json{{"label", "Qt"}, {"value", flow.value("qt_mvar", 0.0)}, {"unit", "MVar"}, {"quantity", "q"}}})}});
+	            }
+	            for (size_t i = 0; i < original_sys.ac.buses.size(); ++i) {
+	              const auto& bus = original_sys.ac.buses[i];
+	              post_component_results.push_back(json{
+	                  {"canvas_type", "ac_bus"}, {"canvas_index", bus.index},
+	                  {"index", bus.index}, {"position", i}, {"domain", "AC"},
+	                  {"type_label", "交流母线"}, {"name", bus.name}, {"status", "已求解"},
+	                  {"metrics", json::array({
+	                      json{{"label", "Vm"}, {"value", i < ac_pf.vm.size() ? ac_pf.vm[i] : bus.vm_pu}, {"unit", "pu"}, {"quantity", "scalar"}},
+	                      json{{"label", "Va"}, {"value", (i < ac_pf.va.size() ? ac_pf.va[i] : 0.0) * 180.0 / M_PI}, {"unit", "deg"}, {"quantity", "scalar"}}})}});
+	            }
+	            for (size_t i = 0; i < original_sys.dc.buses.size(); ++i) {
+	              const auto& bus = original_sys.dc.buses[i];
+	              post_component_results.push_back(json{
+	                  {"canvas_type", "dc_bus"}, {"canvas_index", bus.index},
+	                  {"index", bus.index}, {"position", i}, {"domain", "DC"},
+	                  {"type_label", "直流母线"}, {"name", bus.name}, {"status", "已求解"},
+	                  {"metrics", json::array({
+	                      json{{"label", "Vdc"}, {"value", i < ac_pf.vdc.size() ? ac_pf.vdc[i] : bus.vm_pu}, {"unit", "pu"}, {"quantity", "scalar"}}})}});
+	            }
+	            for (size_t i = 0; i < original_sys.ac.transformers_2w.size(); ++i) {
+	              const auto& tr = original_sys.ac.transformers_2w[i];
+	              post_component_results.push_back(json{
+	                  {"canvas_type", "transformer_2w"}, {"canvas_index", tr.index},
+	                  {"index", tr.index}, {"position", i}, {"domain", "AC"},
+	                  {"type_label", "双绕组变压器"}, {"name", tr.name}, {"status", "已求解"},
+	                  {"connection", "AC Bus " + std::to_string(tr.hv_bus) +
+	                                     " -> AC Bus " + std::to_string(tr.lv_bus)},
+	                  {"metrics", json::array({
+	                      json{{"label", "Sn"}, {"value", tr.sn_mva}, {"unit", "MVA"}, {"quantity", "scalar"}},
+	                      json{{"label", "Tap"}, {"value", tr.tap_pos}, {"unit", ""}, {"quantity", "scalar"}}})}});
+	            }
+	            for (size_t i = 0; i < original_sys.ac.loads.size(); ++i) {
+	              const auto& ld = original_sys.ac.loads[i];
+	              post_component_results.push_back(json{
+	                  {"canvas_type", "load"}, {"canvas_index", ld.index},
+	                  {"index", ld.index}, {"position", i}, {"domain", "AC"},
+	                  {"type_label", "交流负荷"}, {"name", ld.name}, {"status", "已求解"},
+	                  {"metrics", json::array({
+	                      json{{"label", "P"}, {"value", ld.p_mw * ld.scaling}, {"unit", "MW"}, {"quantity", "p"}},
+	                      json{{"label", "Q"}, {"value", ld.q_mvar * ld.scaling}, {"unit", "MVar"}, {"quantity", "q"}}})}});
+	            }
+	            for (size_t i = 0; i < original_sys.dc.loads.size(); ++i) {
+	              const auto& ld = original_sys.dc.loads[i];
+	              post_component_results.push_back(json{
+	                  {"canvas_type", "dc_load"}, {"canvas_index", ld.index},
+	                  {"index", ld.index}, {"position", i}, {"domain", "DC"},
+	                  {"type_label", "直流负荷"}, {"name", ld.name}, {"status", "已求解"},
+	                  {"metrics", json::array({json{{"label", "P"}, {"value", ld.p_mw * ld.scaling}, {"unit", "MW"}, {"quantity", "p"}}})}});
+	            }
+	            for (size_t i = 0; i < original_sys.dc.pv_arrays.size(); ++i) {
+	              const auto& pv = original_sys.dc.pv_arrays[i];
+	              post_component_results.push_back(json{
+	                  {"canvas_type", "dc_pv_array"}, {"canvas_index", pv.index},
+	                  {"index", pv.index}, {"position", i}, {"domain", "DC"},
+	                  {"type_label", "直流光伏"}, {"status", "已求解"},
+	                  {"metrics", json::array({json{{"label", "P"}, {"value", pv.p_set_mw}, {"unit", "MW"}, {"quantity", "p"}}})}});
+	            }
+	            for (size_t i = 0; i < carbon_sys.dc.dc_storage.size(); ++i) {
+	              const auto& st = carbon_sys.dc.dc_storage[i];
+	              post_component_results.push_back(json{
+	                  {"canvas_type", "dc_storage"}, {"canvas_index", st.index},
+	                  {"index", st.index}, {"position", i}, {"domain", "DC"},
+	                  {"type_label", "直流储能"}, {"name", st.name}, {"status", "已求解"},
+	                  {"metrics", json::array({
+	                      json{{"label", "P"}, {"value", st.p_mw}, {"unit", "MW"}, {"quantity", "p"}},
+	                      json{{"label", "SOC"}, {"value", st.soc_init}, {"unit", ""}, {"quantity", "scalar"}}})}});
+	            }
+	            for (const auto& row : dcbr) {
+	              post_component_results.push_back(json{
+	                  {"canvas_type", "dc_branch"}, {"canvas_index", row.value("index", 0)},
+	                  {"index", row.value("index", 0)}, {"domain", "DC"},
+	                  {"type_label", "直流线路"}, {"status", "已求解"},
+	                  {"metrics", json::array({
+	                      json{{"label", "Pf"}, {"value", row.value("pf_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
+	                      json{{"label", "Pt"}, {"value", row.value("pt_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}}})}});
+	            }
+	            for (size_t i = 0; i < dtr.size(); ++i) {
+	              const auto& row = dtr[i];
+	              post_component_results.push_back(json{
+	                  {"canvas_type", "dcdc_converter"}, {"canvas_index", row.value("index", static_cast<int>(i))},
+	                  {"index", row.value("index", static_cast<int>(i))}, {"position", i}, {"domain", "DC"},
+	                  {"type_label", "DC/DC变换器"}, {"status", "已求解"},
+	                  {"metrics", json::array({
+	                      json{{"label", "Pin"}, {"value", row.value("p_in_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
+	                      json{{"label", "Pout"}, {"value", row.value("p_out_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}},
+	                      json{{"label", "Loss"}, {"value", row.value("loss_mw", 0.0)}, {"unit", "MW"}, {"quantity", "p"}}})}});
 	            }
 	            post_pf["component_results"] = std::move(post_component_results);
 	            post_pf["vm"] = ac_pf.vm; post_pf["va"] = ac_pf.va; post_pf["vdc"] = ac_pf.vdc;
@@ -18059,6 +18220,8 @@ int main(int argc, char** argv) {
             ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
                               ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
         }
+        for (auto& pv : sys_ann.dc.pv_arrays)
+          if (pv.profile_id < 0) pv.profile_id = 2;
         hacdcpf::analysis::AnnualProductionSimOptions opts;
         opts.block_type = (j.value("block_type", std::string("monthly")) == "weekly")
             ? hacdcpf::analysis::AnnualBlockType::Weekly
@@ -18153,6 +18316,13 @@ int main(int argc, char** argv) {
         out["total_load_mwh"] = result.total_load_mwh;
         out["total_renewable_mwh"] = result.total_renewable_mwh;
         out["total_curtailment_mwh"] = result.total_curtailment_mwh;
+        out["storage_discharge_mwh"] = result.storage_discharge_mwh;
+        out["storage_charge_mwh"] = result.storage_charge_mwh;
+        out["external_grid_import_mwh"] = result.external_grid_import_mwh;
+        out["external_grid_export_mwh"] = result.external_grid_export_mwh;
+        out["total_supply_mwh"] = result.total_supply_mwh;
+        out["total_demand_mwh"] = result.total_demand_mwh;
+        out["power_balance_error_mwh"] = result.power_balance_error_mwh;
         out["total_ens_mwh"] = result.total_ens_mwh;
         out["total_loss_mwh"] = result.total_loss_mwh;
         out["num_pf_converged"] = result.num_pf_converged;
@@ -18162,7 +18332,8 @@ int main(int argc, char** argv) {
         const int stride = std::max(1, (int)result.step_results.size() / max_timeline);
         json tl_gen = json::array(), tl_load = json::array(), tl_ren = json::array(),
              tl_curt = json::array(), tl_ess = json::array(), tl_loss = json::array(),
-             tl_hours = json::array();
+             tl_supply = json::array(), tl_demand = json::array(),
+             tl_balance = json::array(), tl_hours = json::array();
         for (size_t i = 0; i < result.step_results.size(); i += static_cast<size_t>(stride)) {
           const auto& s = result.step_results[i];
           tl_hours.push_back(static_cast<double>(i) * result.step_duration_hr);
@@ -18172,6 +18343,9 @@ int main(int argc, char** argv) {
           tl_curt.push_back(s.total_curtailment_mw);
           tl_ess.push_back(s.total_ess_mw);
           tl_loss.push_back(s.total_loss_mw);
+          tl_supply.push_back(s.total_supply_mw);
+          tl_demand.push_back(s.total_demand_mw);
+          tl_balance.push_back(s.power_balance_error_mw);
         }
         out["timeline_hours"] = tl_hours;
         out["timeline_gen"] = tl_gen;
@@ -18180,6 +18354,9 @@ int main(int argc, char** argv) {
         out["timeline_curt"] = tl_curt;
         out["timeline_ess"] = tl_ess;
         out["timeline_loss"] = tl_loss;
+        out["timeline_supply"] = tl_supply;
+        out["timeline_demand"] = tl_demand;
+        out["timeline_balance_error"] = tl_balance;
         // Representative days (1-based) for quick drill-down presets: global
         // peak-load / min-load / peak-net-load, plus the peak-net-load day in
         // each season.  Computed from the full per-step results (not the
@@ -18238,6 +18415,13 @@ int main(int argc, char** argv) {
                         {"total_load_mwh", m.total_load_mwh},
                         {"total_renewable_mwh", m.total_renewable_mwh},
                         {"total_curtailment_mwh", m.total_curtailment_mwh},
+                        {"storage_discharge_mwh", m.storage_discharge_mwh},
+                        {"storage_charge_mwh", m.storage_charge_mwh},
+                        {"external_grid_import_mwh", m.external_grid_import_mwh},
+                        {"external_grid_export_mwh", m.external_grid_export_mwh},
+                        {"total_supply_mwh", m.total_supply_mwh},
+                        {"total_demand_mwh", m.total_demand_mwh},
+                        {"power_balance_error_mwh", m.power_balance_error_mwh},
                         {"total_loss_mwh", m.total_loss_mwh},
                         {"total_ens_mwh", m.total_ens_mwh},
                         {"total_cost", m.total_cost},

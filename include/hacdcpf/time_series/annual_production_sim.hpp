@@ -55,7 +55,11 @@ struct AnnualStepResult {
   double total_renewable_mw{0.0};
   double total_curtailment_mw{0.0};
   double total_ess_mw{0.0};        // net: positive=discharge
+  double external_grid_net_mw{0.0}; // positive=import, negative=export
   double total_loss_mw{0.0};
+  double total_supply_mw{0.0};
+  double total_demand_mw{0.0};
+  double power_balance_error_mw{0.0};
   double load_shed_mw{0.0};
   bool pf_converged{false};
   bool opf_converged{false};
@@ -71,6 +75,13 @@ struct BlockSummary {
   double total_load_mwh{0.0};
   double total_renewable_mwh{0.0};
   double total_curtailment_mwh{0.0};
+  double storage_discharge_mwh{0.0};
+  double storage_charge_mwh{0.0};
+  double external_grid_import_mwh{0.0};
+  double external_grid_export_mwh{0.0};
+  double total_supply_mwh{0.0};
+  double total_demand_mwh{0.0};
+  double power_balance_error_mwh{0.0};
   double total_loss_mwh{0.0};
   double total_ens_mwh{0.0};        // energy not served
   double total_cost{0.0};
@@ -148,6 +159,13 @@ struct AnnualProductionSimResult {
   double total_load_mwh{0.0};
   double total_renewable_mwh{0.0};
   double total_curtailment_mwh{0.0};
+  double storage_discharge_mwh{0.0};
+  double storage_charge_mwh{0.0};
+  double external_grid_import_mwh{0.0};
+  double external_grid_export_mwh{0.0};
+  double total_supply_mwh{0.0};
+  double total_demand_mwh{0.0};
+  double power_balance_error_mwh{0.0};
   double total_ens_mwh{0.0};          // energy not served
   double total_loss_mwh{0.0};
   int num_pf_converged{0};

@@ -346,7 +346,7 @@
       "loss_percent": 1,
       "loss_mw": 0,
       "v_dc_set_pu": 1,
-      "v_ac_set_pu": 1,
+      "v_ac_set_pu": 1.05,
       "v_ac_angle_set_deg": 0,
       "k_vdc": 0.1,
       "p_rated_mw": 0,

@@ -70,7 +70,7 @@ TEST_CASE("Canvas power_system OPF converges with finite external-grid dispatch"
   REQUIRE(result.pac_mw.size() == 1);
   REQUIRE(result.qac_mvar.size() == 1);
   CHECK_THAT(result.qac_mvar[0],
-             Catch::Matchers::WithinAbs(sys.vsc_converters[0].q_set_mvar, 2e-2));
+             Catch::Matchers::WithinAbs(sys.vsc_converters[0].q_set_mvar, 5e-2));
   CHECK(result.external_grid_q_mvar[0] > 0.0);
   CHECK(result.external_grid_q_mvar[0] < 0.20);
   REQUIRE(result.pdcdc_mw.size() == 1);

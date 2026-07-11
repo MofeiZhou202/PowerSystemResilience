@@ -7427,12 +7427,20 @@ const App = (() => {
           <span class="result-value">${escapeHtml(costFormulaSource || '—')}</span></div>
         <div class="result-item"><span class="result-label">计算时间</span>
           <span class="result-value">${Number(data.execution_time_sec ?? data._wallSeconds ?? 0).toFixed(3)} s</span></div>
-        <div class="result-item"><span class="result-label">总发电量</span>
+        <div class="result-item"><span class="result-label">常规发电及外部电网购电</span>
           <span class="result-value">${fmt(data.total_gen_mwh)} MWh</span></div>
         <div class="result-item"><span class="result-label">总负荷</span>
           <span class="result-value">${fmt(data.total_load_mwh)} MWh</span></div>
         <div class="result-item"><span class="result-label">新能源发电</span>
           <span class="result-value">${fmt(data.total_renewable_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">储能放电 / 充电</span>
+          <span class="result-value">${fmt(data.storage_discharge_mwh)} / ${fmt(data.storage_charge_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">外部电网购电 / 上网</span>
+          <span class="result-value">${fmt(data.external_grid_import_mwh)} / ${fmt(data.external_grid_export_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">总供给 / 总需求</span>
+          <span class="result-value">${fmt(data.total_supply_mwh)} / ${fmt(data.total_demand_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">能量平衡误差</span>
+          <span class="result-value">${fmt(data.power_balance_error_mwh, 3)} MWh</span></div>
         <div class="result-item"><span class="result-label">弃电量</span>
           <span class="result-value">${fmt(data.total_curtailment_mwh)} MWh</span></div>
         <div class="result-item"><span class="result-label">网损</span>
@@ -7463,6 +7471,8 @@ const App = (() => {
         { x: h, y: data.timeline_ren || [], name: '新能源', type: 'scatter', mode: 'lines', line: { color: '#2980b9' } },
         { x: h, y: data.timeline_curt || [], name: '弃电', type: 'scatter', mode: 'lines', line: { color: '#f39c12' } },
         { x: h, y: data.timeline_ess || [], name: '储能(+放/−充)', type: 'scatter', mode: 'lines', line: { color: '#8e44ad', dash: 'dot' } },
+        { x: h, y: data.timeline_supply || [], name: '总供给', type: 'scatter', mode: 'lines', line: { color: '#16a085', dash: 'dash' } },
+        { x: h, y: data.timeline_demand || [], name: '总需求', type: 'scatter', mode: 'lines', line: { color: '#c0392b', dash: 'dash' } },
         { x: h, y: data.timeline_loss || [], name: '网损', type: 'scatter', mode: 'lines', line: { color: '#7f8c8d', dash: 'dot' }, yaxis: 'y2' },
       ], Object.assign({
         title: '全年逐时段功率 (MW)',
