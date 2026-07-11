@@ -10607,33 +10607,25 @@ int main(int argc, char** argv) {
 
   svr.Post("/api/session/export_scenario_workbook",
            [](const httplib::Request& req, httplib::Response& res) {
-    std::string tmp_json, tmp_xlsx;
+    std::string tmp_xlsx;
     try {
       static std::atomic<int> export_counter{0};
       const auto id = std::to_string(export_counter.fetch_add(1));
-      tmp_json = (std::filesystem::temp_directory_path() / ("hacdcpf_scenario_export_" + id + ".json")).string();
       tmp_xlsx = (std::filesystem::temp_directory_path() / ("hacdcpf_scenario_export_" + id + ".xlsx")).string();
-      { std::ofstream ofs(tmp_json, std::ios::binary); ofs << (req.body.empty() ? "{}" : req.body); }
-#ifdef HACDCPF_PROJECT_ROOT
-      const auto script = (std::filesystem::path(HACDCPF_PROJECT_ROOT) / "tools" / "scenario_excel_convert.py").string();
-#else
-      const auto script = (std::filesystem::current_path() / "tools" / "scenario_excel_convert.py").string();
-#endif
-      const std::string cmd = "python \"" + script + "\" json-to-xlsx \"" + tmp_json + "\" \"" + tmp_xlsx + "\"";
-      const int rc = std::system(cmd.c_str());
-      if (rc != 0) throw std::runtime_error("Scenario JSON to Excel converter failed (python/openpyxl)");
+      auto bundle = json::parse(req.body.empty() ? "{}" : req.body);
+      hacdcpf::io::ScenarioBundleIoReport report;
+      hacdcpf::io::save_scenario_workbook(bundle, tmp_xlsx, report);
       std::ifstream ifs(tmp_xlsx, std::ios::binary);
       if (!ifs) throw std::runtime_error("Failed to read generated scenario workbook");
       std::string bytes((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
       ifs.close();
       std::error_code ec;
-      std::filesystem::remove(tmp_json, ec);
       std::filesystem::remove(tmp_xlsx, ec);
       res.set_header("Content-Disposition", "attachment; filename=\"scenario_bundle.xlsx\"");
+      res.set_header("X-HACDCPF-Scenario-Warnings", std::to_string(report.warnings.size()));
       res.set_content(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     } catch (const std::exception& e) {
       std::error_code ec;
-      if (!tmp_json.empty()) std::filesystem::remove(tmp_json, ec);
       if (!tmp_xlsx.empty()) std::filesystem::remove(tmp_xlsx, ec);
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
@@ -10642,40 +10634,27 @@ int main(int argc, char** argv) {
 
   svr.Post("/api/session/import_scenario_workbook",
            [](const httplib::Request& req, httplib::Response& res) {
-    std::string tmp_xlsx, tmp_json;
+    std::string tmp_xlsx;
     try {
       if (req.body.empty()) throw std::runtime_error("Empty scenario workbook upload");
       static std::atomic<int> import_counter{0};
       const auto id = std::to_string(import_counter.fetch_add(1));
       tmp_xlsx = (std::filesystem::temp_directory_path() / ("hacdcpf_scenario_import_" + id + ".xlsx")).string();
-      tmp_json = (std::filesystem::temp_directory_path() / ("hacdcpf_scenario_import_" + id + ".json")).string();
       { std::ofstream ofs(tmp_xlsx, std::ios::binary); ofs.write(req.body.data(), static_cast<std::streamsize>(req.body.size())); }
-#ifdef HACDCPF_PROJECT_ROOT
-      const auto script = (std::filesystem::path(HACDCPF_PROJECT_ROOT) / "tools" / "scenario_excel_convert.py").string();
-#else
-      const auto script = (std::filesystem::current_path() / "tools" / "scenario_excel_convert.py").string();
-#endif
-      const std::string cmd = "python \"" + script + "\" xlsx-to-json \"" + tmp_xlsx + "\" \"" + tmp_json + "\"";
-      const int rc = std::system(cmd.c_str());
-      if (rc != 0) throw std::runtime_error("Scenario Excel to JSON converter failed (python/openpyxl)");
-      std::ifstream ifs(tmp_json, std::ios::binary);
-      if (!ifs) throw std::runtime_error("Failed to read converted scenario JSON");
-      std::string text((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-      ifs.close();
-      auto bundle = json::parse(text);
+      hacdcpf::io::ScenarioBundleIoReport report;
+      auto bundle = hacdcpf::io::load_scenario_workbook(
+          tmp_xlsx, hacdcpf::io::ScenarioBundleImportMode::Permissive, report);
       std::error_code ec;
       std::filesystem::remove(tmp_xlsx, ec);
-      std::filesystem::remove(tmp_json, ec);
       res.set_content(json{{"bundle", bundle},
-                           {"warnings", json::array()},
-                           {"errors", json::array()},
+                           {"warnings", report.warnings},
+                           {"errors", report.errors},
                            {"summary", {{"case_count", bundle.value("case_count", 0)},
                                          {"unit_space", bundle.value("unit_space", "dimensionless_multiplier")}}}}.dump(),
                       "application/json");
     } catch (const std::exception& e) {
       std::error_code ec;
       if (!tmp_xlsx.empty()) std::filesystem::remove(tmp_xlsx, ec);
-      if (!tmp_json.empty()) std::filesystem::remove(tmp_json, ec);
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -16911,6 +16890,52 @@ int main(int argc, char** argv) {
           }
         }
         out["renewable_dispatch"] = renewable_dispatch;
+        // Static-generator output used by the PF snapshots. AC static generators
+        // are fixed injections in the current time-series model; legacy DC
+        // static generators follow the same fixed-injection semantics.
+        {
+          json ac_sgen_dispatch = json::array();
+          json ac_sgen_names = json::array();
+          for (size_t i = 0; i < sys_ts.ac.static_generators.size(); ++i) {
+            const auto& sg = sys_ts.ac.static_generators[i];
+            if (!sg.in_service) continue;
+            json row = json::array();
+            for (int t = 0; t < result.num_steps; ++t) {
+              double p = sg.p_mw * sg.scaling;
+              if (t < static_cast<int>(result.pf_system_snapshots.size()) &&
+                  i < result.pf_system_snapshots[static_cast<size_t>(t)].ac.static_generators.size()) {
+                const auto& actual = result.pf_system_snapshots[static_cast<size_t>(t)].ac.static_generators[i];
+                p = actual.in_service ? actual.p_mw * actual.scaling : 0.0;
+              }
+              row.push_back(p);
+            }
+            ac_sgen_dispatch.push_back(std::move(row));
+            ac_sgen_names.push_back(sg.name.empty() ? "SGen" + std::to_string(i) : sg.name);
+          }
+          out["ac_sgen_dispatch"] = std::move(ac_sgen_dispatch);
+          out["ac_sgen_names"] = std::move(ac_sgen_names);
+
+          json dc_legacy_dispatch = json::array();
+          json dc_legacy_names = json::array();
+          for (size_t i = 0; i < sys_ts.dc.static_generators.size(); ++i) {
+            const auto& sg = sys_ts.dc.static_generators[i];
+            if (!sg.in_service) continue;
+            json row = json::array();
+            for (int t = 0; t < result.num_steps; ++t) {
+              double p = sg.p_mw * sg.scaling;
+              if (t < static_cast<int>(result.pf_system_snapshots.size()) &&
+                  i < result.pf_system_snapshots[static_cast<size_t>(t)].dc.static_generators.size()) {
+                const auto& actual = result.pf_system_snapshots[static_cast<size_t>(t)].dc.static_generators[i];
+                p = actual.in_service ? actual.p_mw * actual.scaling : 0.0;
+              }
+              row.push_back(p);
+            }
+            dc_legacy_dispatch.push_back(std::move(row));
+            dc_legacy_names.push_back(sg.name.empty() ? "DC_SGen" + std::to_string(i) : sg.name);
+          }
+          out["dc_legacy_sgen_dispatch"] = std::move(dc_legacy_dispatch);
+          out["dc_legacy_sgen_names"] = std::move(dc_legacy_names);
+        }
         // DC-side dispatch
         out["dc_pv_dispatch"] = uc.dc_pv_dispatch;
         out["dc_ess_dispatch"] = uc.dc_ess_dispatch;
@@ -16984,15 +17009,19 @@ int main(int argc, char** argv) {
         // PV system names
         json pvn = json::array();
         for (size_t i = 0; i < sys_ts.ac.pv_systems.size(); ++i)
-          pvn.push_back(sys_ts.ac.pv_systems[i].name.empty() ? "PV"+std::to_string(i) : sys_ts.ac.pv_systems[i].name);
+          if (sys_ts.ac.pv_systems[i].in_service)
+            pvn.push_back(sys_ts.ac.pv_systems[i].name.empty() ? "PV"+std::to_string(i) : sys_ts.ac.pv_systems[i].name);
         out["pv_names"] = pvn;
         // DC component names
-        json dcpv = json::array(), dcess = json::array();
+        json dcpv = json::array(), dcess = json::array(), dcsg = json::array();
         for (size_t i = 0; i < sys_ts.dc.pv_arrays.size(); ++i)
           dcpv.push_back(sys_ts.dc.pv_arrays[i].name.empty() ? "DC_PV"+std::to_string(i) : sys_ts.dc.pv_arrays[i].name);
         for (size_t i = 0; i < sys_ts.dc.storage.size(); ++i)
           dcess.push_back(sys_ts.dc.storage[i].name.empty() ? "DC_ESS"+std::to_string(i) : sys_ts.dc.storage[i].name);
+        for (size_t i = 0; i < sys_ts.dc.dc_static_generators.size(); ++i)
+          dcsg.push_back(sys_ts.dc.dc_static_generators[i].name.empty() ? "DC_SGen"+std::to_string(i) : sys_ts.dc.dc_static_generators[i].name);
         out["dc_pv_names"] = dcpv; out["dc_ess_names"] = dcess;
+        out["dc_sgen_names"] = dcsg;
         // Per-step per-bus voltage matrix (vm) and angle matrix (va, radians)
         {
           json vm_matrix = json::array();
@@ -20117,6 +20146,53 @@ int main(int argc, char** argv) {
               out["load_profile_source"] = "ieee_rts24";
               out["load_profile_period_steps"] = lp.factors.size();
             }
+            const json spatial_values = load.value("spatial_factors", json::array());
+            if (!spatial_values.is_array())
+              throw std::runtime_error("load.spatial_factors must be an array");
+            lp.ac_bus_factors.assign(sys.ac.buses.size(), 1.0);
+            lp.ac_load_factors.assign(sys.ac.loads.size(), 1.0);
+            lp.dc_bus_factors.assign(sys.dc.buses.size(), 1.0);
+            lp.dc_load_factors.assign(sys.dc.loads.size(), 1.0);
+            json applied_spatial = json::array();
+            auto apply_spatial = [&](const std::string& kind, int index,
+                                     double factor) {
+              auto apply = [&](const auto& components, auto& factors) {
+                for (size_t pos = 0; pos < components.size(); ++pos) {
+                  if (components[pos].index != index) continue;
+                  factors[pos] = factor;
+                  return true;
+                }
+                return false;
+              };
+              bool found = false;
+              if (kind == "ac_load") found = apply(sys.ac.loads, lp.ac_load_factors);
+              else if (kind == "dc_load") found = apply(sys.dc.loads, lp.dc_load_factors);
+              else if (kind == "ac_bus") found = apply(sys.ac.buses, lp.ac_bus_factors);
+              else if (kind == "dc_bus") found = apply(sys.dc.buses, lp.dc_bus_factors);
+              else throw std::runtime_error("load.spatial_factors kind must be ac_load, dc_load, ac_bus, or dc_bus");
+              if (!found)
+                throw std::runtime_error("load.spatial_factors references missing " +
+                                         kind + " index " + std::to_string(index));
+            };
+            for (const auto& row : spatial_values) {
+              if (!row.is_object())
+                throw std::runtime_error("load.spatial_factors entries must be objects");
+              std::string kind = row.value("kind", std::string());
+              std::transform(kind.begin(), kind.end(), kind.begin(),
+                             [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+              if (!row.contains("index") || !row["index"].is_number_integer())
+                throw std::runtime_error("load.spatial_factors index must be an integer");
+              if (!row.contains("factor") || !row["factor"].is_number())
+                throw std::runtime_error("load.spatial_factors factor must be a number");
+              const int index = row["index"].get<int>();
+              const double factor = row["factor"].get<double>();
+              if (!std::isfinite(factor) || factor < 0.0)
+                throw std::runtime_error("load.spatial_factors factor must be finite and non-negative");
+              apply_spatial(kind, index, factor);
+              applied_spatial.push_back({{"kind", kind}, {"index", index}, {"factor", factor}});
+            }
+            out["load_spatial_factors"] = std::move(applied_spatial);
+            out["load_spatial_factor_count"] = spatial_values.size();
             r = hacdcpf::analysis::run_sequential_mc(sys, lp, opts);
           } else {
             opts.max_iterations = mc.value("max_iterations", 5000);

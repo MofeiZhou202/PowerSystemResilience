@@ -7515,21 +7515,30 @@ const App = (() => {
       legend: { orientation: 'h', y: -0.25 },
     };
 
-    // 1. Generation dispatch stacked bar chart
+    // 1. All source and storage dispatch. Storage remains signed so charging
+    // appears below zero and cannot be mistaken for generation.
     const genDiv = document.getElementById('tspfGenChart');
-    const dtraces = (data.gen_dispatch || []).map((d, gi) => ({
-      x: hrs, y: d, type: 'bar',
-      name: (data.gen_names || [])[gi] || 'Gen ' + gi,
-      marker: { color: pal[gi % pal.length] },
-    }));
-    (data.renewable_dispatch || []).forEach((rd, ri) => dtraces.push({
-      x: hrs, y: rd, type: 'bar',
-      name: (data.ren_names || [])[ri] || 'Ren ' + ri,
-      marker: { color: '#27ae60' },
-    }));
+    const dtraces = [];
+    let dispatchColor = 0;
+    const addDispatch = (rows, names, fallback, prefix = '') => {
+      (rows || []).forEach((values, i) => dtraces.push({
+        x: hrs, y: values, type: 'bar',
+        name: prefix + ((names || [])[i] || `${fallback} ${i}`),
+        marker: { color: pal[(dispatchColor++) % pal.length] },
+      }));
+    };
+    addDispatch(data.gen_dispatch, data.gen_names, 'Gen', 'AC Gen · ');
+    addDispatch(data.renewable_dispatch, data.ren_names, 'Ren', 'AC Ren · ');
+    addDispatch(data.ac_sgen_dispatch, data.ac_sgen_names, 'SGen', 'AC SGen · ');
+    addDispatch(data.ac_pv_dispatch, data.pv_names, 'PV', 'AC PV · ');
+    addDispatch(data.dc_pv_dispatch, data.dc_pv_names, 'DC PV', 'DC PV · ');
+    addDispatch(data.dc_sgen_dispatch, data.dc_sgen_names, 'DC SGen', 'DC SGen · ');
+    addDispatch(data.dc_legacy_sgen_dispatch, data.dc_legacy_sgen_names, 'DC SGen', 'DC SGen · ');
+    addDispatch(data.ess_dispatch, data.ess_names, 'ESS', 'AC ESS · ');
+    addDispatch(data.dc_ess_dispatch, data.dc_ess_names, 'DC ESS', 'DC ESS · ');
     if (dtraces.length > 0) {
       Plotly.newPlot(genDiv, dtraces, {
-        ...plotTheme, title: '发电出力 (MW)', barmode: 'stack',
+        ...plotTheme, title: '发电出力与储能充放电 (MW, 储能正=放电 负=充电)', barmode: 'relative',
         yaxis: { ...plotTheme.yaxis, title: 'MW' },
       }, { responsive: true });
     } else {
@@ -13808,11 +13817,31 @@ const App = (() => {
 	      const relParallelThreads = parseInt(document.getElementById('relParallelThreads')?.value, 10);
 	      const seqProfileText = document.getElementById('relSeqLoadProfile')?.value || '';
 	      const seqProfile = seqProfileText.split(/[\s,;]+/).filter(Boolean).map(Number);
+	      const seqSpatialText = document.getElementById('relSeqSpatialFactors')?.value?.trim() || '';
+	      let seqSpatialFactors = [];
 	      if (method === 'seq' && seqProfileText.trim() &&
 	          (!seqProfile.length || seqProfile.some(v => !Number.isFinite(v) || v < 0))) {
 	        setStatus('SEQ负荷曲线包含无效倍率', 'error');
 	        log('SEQ负荷曲线必须是由逗号或空格分隔的非负数', 'error');
 	        return;
+	      }
+	      if (method === 'seq' && seqSpatialText) {
+	        try {
+	          seqSpatialFactors = JSON.parse(seqSpatialText);
+	        } catch (err) {
+	          setStatus('SEQ空间倍率 JSON 无效', 'error');
+	          log(`SEQ空间倍率必须是有效 JSON：${err.message || err}`, 'error');
+	          return;
+	        }
+	        const validKinds = new Set(['ac_load', 'dc_load', 'ac_bus', 'dc_bus']);
+	        if (!Array.isArray(seqSpatialFactors) || seqSpatialFactors.some(row =>
+	          !row || !validKinds.has(String(row.kind || '').toLowerCase()) ||
+	          !Number.isInteger(Number(row.index)) ||
+	          !Number.isFinite(Number(row.factor)) || Number(row.factor) < 0)) {
+	          setStatus('SEQ空间倍率格式无效', 'error');
+	          log('SEQ空间倍率必须是 [{kind,index,factor}]；factor 为非负数', 'error');
+	          return;
+	        }
 	      }
 	      const opts = {
 	        method,
@@ -13823,6 +13852,7 @@ const App = (() => {
 	          scale_factor: 1.0,
 	          hours_per_year: 8736,
 	          profile_factors: method === 'seq' && seqProfileText.trim() ? seqProfile : [],
+	          spatial_factors: method === 'seq' ? seqSpatialFactors : [],
 	        },
 	        execution: {
 	          parallel: relParallel,

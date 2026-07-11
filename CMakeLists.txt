@@ -77,7 +77,7 @@ endif()
 option(HACDCPF_ENABLE_OPENDSS "Build OpenDSS bridge (requires dss_capi)"   OFF)
 option(HACDCPF_ENABLE_OPENDSS_COMPARE
        "Build OpenDSS comparison tools and tests (requires dss_capi)"       OFF)
-option(HACDCPF_ENABLE_ETAP    "Build ETAP Excel import/export (requires OpenXLSX)" OFF)
+option(HACDCPF_ENABLE_ETAP    "Build Excel import/export (ETAP and scenario workbooks; requires OpenXLSX)" ON)
 set(_hacdcpf_default_dss_capi_root
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dss_capi/dss_capi")
 if(APPLE AND EXISTS

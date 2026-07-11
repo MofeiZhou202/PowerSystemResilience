@@ -18,6 +18,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "hacdcpf/io/etap_io.hpp"
+#include "hacdcpf/io/scenario_bundle_io.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/analysis/short_circuit.hpp"
@@ -32,6 +33,49 @@ namespace fs = std::filesystem;
 using namespace hacdcpf;
 using namespace hacdcpf::io;
 using Catch::Matchers::WithinAbs;
+
+TEST_CASE("Scenario workbook round-trip does not require Python",
+          "[io][scenario][excel][roundtrip]") {
+  const nlohmann::json bundle = {
+      {"format", "generated_scenario_case_bundle_v3"},
+      {"schema_version", 3},
+      {"unit_space", "dimensionless_multiplier"},
+      {"family", "regular"},
+      {"cases", nlohmann::json::array({
+          {{"case_id", "regular_1"},
+           {"system", {{"name", "Scenario case"},
+                       {"ac", {{"buses", nlohmann::json::array()}}},
+                       {"dc", {{"buses", nlohmann::json::array()}}}}},
+           {"generated_scenario", {{"scenario_id", "regular_1"},
+                                    {"family", "regular"},
+                                    {"probability", 1.0}}},
+           {"standard_time_series",
+            {{"num_steps", 3},
+             {"step_duration_hr", 1.0},
+             {"profiles", nlohmann::json::array({
+                 {{"id", 0}, {"name", "load"}, {"unit", "multiplier"},
+                  {"values", {0.8, 1.0, 0.9}}}})}}}}})}};
+
+  const auto path =
+      (fs::temp_directory_path() / "hacdcpf_scenario_native_roundtrip.xlsx").string();
+  ScenarioBundleIoReport save_report;
+  REQUIRE_NOTHROW(save_scenario_workbook(bundle, path, save_report));
+  CHECK(fs::exists(path));
+
+  ScenarioBundleIoReport load_report;
+  nlohmann::json loaded;
+  REQUIRE_NOTHROW(loaded = load_scenario_workbook(
+      path, ScenarioBundleImportMode::Permissive, load_report));
+  std::error_code ec;
+  fs::remove(path, ec);
+
+  REQUIRE(loaded["cases"].size() == 1);
+  const auto& values = loaded["cases"][0]["standard_time_series"]["profiles"][0]["values"];
+  REQUIRE(values.size() == 3);
+  CHECK_THAT(values[0].get<double>(), WithinAbs(0.8, 1e-12));
+  CHECK_THAT(values[1].get<double>(), WithinAbs(1.0, 1e-12));
+  CHECK_THAT(values[2].get<double>(), WithinAbs(0.9, 1e-12));
+}
 
 namespace {
 

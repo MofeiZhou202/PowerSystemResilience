@@ -1349,6 +1349,9 @@
       <label class="sub-label rel-seq-profile" title="序贯蒙特卡洛逐时负荷倍率；输入任意周期，后端自动重复到全年。留空使用 IEEE RTS 曲线。">SEQ负荷曲线(pu)
         <textarea id="relSeqLoadProfile" rows="2">0.72,0.68,0.65,0.64,0.66,0.72,0.80,0.88,0.94,0.98,1.00,0.99,0.97,0.95,0.96,0.99,1.00,0.98,0.94,0.90,0.86,0.82,0.78,0.75</textarea>
       </label>
+      <label class="sub-label rel-seq-profile" title='可选空间倍率 JSON；按元件 index 指定，例如 [{"kind":"ac_load","index":1,"factor":0.9}]。kind 支持 ac_load、dc_load、ac_bus、dc_bus。'>SEQ空间倍率
+        <textarea id="relSeqSpatialFactors" rows="2" placeholder='[{"kind":"ac_load","index":1,"factor":0.9}]'></textarea>
+      </label>
       <label class="sub-label sub-checkbox" title="并行评估独立样本、年份或故障枚举项">
         <input id="relParallel" type="checkbox" checked/>
         <span>并行</span>

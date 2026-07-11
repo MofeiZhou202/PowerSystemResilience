@@ -969,6 +969,37 @@ TEST_CASE("Sequential MC: N-0 baseline curtailment is counted every hour",
   CHECK(r.annual_eens.front() == Approx(4.0).margin(1e-6));
 }
 
+TEST_CASE("Sequential MC: per-load spatial factors preserve distinct load points",
+          "[reliability][sequential][load-profile]") {
+  auto sys = make_single_bus_shortage();
+  sys.ac.buses.front().pd_mw = 0.0;
+  Load first;
+  first.index = 11;
+  first.bus = 1;
+  first.name = "Residential";
+  first.p_mw = 1.0;
+  Load second = first;
+  second.index = 12;
+  second.name = "Industrial";
+  sys.ac.loads = {first, second};
+
+  LoadProfile profile;
+  profile.factors = {1.0, 1.0, 1.0, 1.0};
+  profile.ac_load_factors = {0.5, 1.0};
+
+  ReliabilityOptions opts;
+  opts.max_iterations = 1;
+  opts.hours_per_year = 4;
+  opts.seed = 1234;
+  opts.compute_tail_risk = false;
+
+  const auto r = run_sequential_mc(sys, profile, opts);
+
+  // Effective demand is 0.5 + 1.0 MW against 1.0 MW capacity.
+  CHECK(r.eens_mwh_yr == Approx(2.0).margin(1e-6));
+  CHECK(r.lole_hr_yr == Approx(4.0).margin(1e-6));
+}
+
 TEST_CASE("Sequential MC: inactive baseline components are not sampled as failures",
           "[reliability][sequential]") {
   auto sys = make_single_bus_shortage();

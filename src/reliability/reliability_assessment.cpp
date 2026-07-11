@@ -655,6 +655,37 @@ static double hourly_load_scale(
   return load_scale;
 }
 
+static HybridPowerSystem apply_load_profile_spatial_factors(
+    const HybridPowerSystem& source,
+    const LoadProfile& load_profile) {
+  HybridPowerSystem sys = source;
+  auto factor_at = [](const std::vector<double>& factors, size_t i) {
+    const double factor = i < factors.size() ? factors[i] : 1.0;
+    if (!std::isfinite(factor) || factor < 0.0) {
+      throw std::invalid_argument(
+          "Sequential load-profile spatial factors must be finite and non-negative");
+    }
+    return factor;
+  };
+  for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+    const double factor = factor_at(load_profile.ac_bus_factors, i);
+    sys.ac.buses[i].pd_mw *= factor;
+    sys.ac.buses[i].qd_mvar *= factor;
+  }
+  for (size_t i = 0; i < sys.ac.loads.size(); ++i) {
+    const double factor = factor_at(load_profile.ac_load_factors, i);
+    sys.ac.loads[i].p_mw *= factor;
+    sys.ac.loads[i].q_mvar *= factor;
+  }
+  for (size_t i = 0; i < sys.dc.buses.size(); ++i) {
+    sys.dc.buses[i].pd_mw *= factor_at(load_profile.dc_bus_factors, i);
+  }
+  for (size_t i = 0; i < sys.dc.loads.size(); ++i) {
+    sys.dc.loads[i].p_mw *= factor_at(load_profile.dc_load_factors, i);
+  }
+  return sys;
+}
+
 // Evaluate a single system state using DC-OPF
 // The state vector layout follows ComponentOffsets.
 //
@@ -1481,6 +1512,9 @@ ReliabilityResult run_sequential_mc(
     return {};
   }
 
+  const HybridPowerSystem spatial_sys =
+      apply_load_profile_spatial_factors(sys, load_profile);
+
   ReliabilityResult result;
   result.model_scope = "ac-only-dcopf";
   result.validity = ReliabilityResult::ValidityFlags{};
@@ -1592,7 +1626,7 @@ ReliabilityResult run_sequential_mc(
     const long long key = load_scale_cache_key(load_scale);
     auto [it, inserted] = n0_cache.emplace(key, StateEvalResult{});
     if (inserted) {
-      it->second = evaluate_state(sys, std::vector<bool>(nc, false), opf_opt, load_scale,
+      it->second = evaluate_state(spatial_sys, std::vector<bool>(nc, false), opf_opt, load_scale,
                                    options.curtail_threshold_mw);
       if (it->second.curtailment_mw > 1e-6) {
         spdlog::warn("SEQ MC: N-0 baseline at load_scale={:.6f} has {:.3f} MW curtailment",
@@ -1688,7 +1722,7 @@ ReliabilityResult run_sequential_mc(
     auto eval_down_hours = [&](size_t begin, size_t end) {
       for (size_t pos = begin; pos < end; ++pos) {
         auto& hw = hour_work[down_hours[pos]];
-        hw.eval = evaluate_state(sys, hw.state, opf_opt, hw.load_scale,
+        hw.eval = evaluate_state(spatial_sys, hw.state, opf_opt, hw.load_scale,
                                  options.curtail_threshold_mw);
       }
     };
@@ -1698,7 +1732,7 @@ ReliabilityResult run_sequential_mc(
           down_hours.size(),
           [&](size_t pos) {
             auto& hw = hour_work[down_hours[pos]];
-            hw.eval = evaluate_state(sys, hw.state, opf_opt, hw.load_scale,
+            hw.eval = evaluate_state(spatial_sys, hw.state, opf_opt, hw.load_scale,
                                      options.curtail_threshold_mw);
           },
           seq_workers);

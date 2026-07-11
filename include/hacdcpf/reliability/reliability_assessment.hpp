@@ -122,6 +122,15 @@ ReliabilityParams resolve_reliability_params(
 // ═══════════════════════════════════════════════════════════════════════
 struct LoadProfile {
   std::vector<double> factors;  // hourly load scaling factors [0, 1]
+
+  // Optional, time-invariant spatial multipliers. Entries are positional and
+  // align with the corresponding component vectors in HybridPowerSystem.
+  // Missing entries default to 1.0, so the common temporal curve remains
+  // backward compatible while individual load points can be weighted.
+  std::vector<double> ac_bus_factors;
+  std::vector<double> ac_load_factors;
+  std::vector<double> dc_bus_factors;
+  std::vector<double> dc_load_factors;
 };
 
 /// Build IEEE RTS-24 8736-hour annual load profile.
