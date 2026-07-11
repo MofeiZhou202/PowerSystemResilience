@@ -16,14 +16,19 @@
 #include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
+#include "hacdcpf/optimal_power_flow/formulation.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
 #include "hacdcpf/optimal_power_flow/opf_result.hpp"
+
+#ifndef HACDCPF_MATPOWER_DATA_DIR
+#define HACDCPF_MATPOWER_DATA_DIR "../../external_data/matpower"
+#endif
 
 using namespace hacdcpf;
 
 namespace {
 std::string data_path(const std::string& f) {
-  return std::string(HACDCPF_TEST_DATA_DIR) + "/" + f;
+  return std::string(HACDCPF_MATPOWER_DATA_DIR) + "/" + f;
 }
 
 void set_env_var(const char* key, const char* value) {
@@ -101,6 +106,36 @@ TEST_CASE("AC OPF converges on internal hybrid case2000_acdc", "[opf][acdc]") {
 }
 
 // ── Objective-scaling regression guard ───────────────────────────────────────
+
+TEST_CASE("Parity OPF warm start accepts fixed renewable reactive bounds",
+          "[opf][acdc][regression]") {
+  HybridPowerSystem sys = io::build_dist33_microgrid_der();
+  REQUIRE_FALSE(sys.ac.renewable_gens.empty());
+  REQUIRE_FALSE(sys.ac.pv_systems.empty());
+
+  for (auto& rg : sys.ac.renewable_gens) {
+    rg.qmin_mvar = 0.0;
+    rg.qmax_mvar = 0.0;
+  }
+  for (auto& pv : sys.ac.pv_systems) {
+    pv.qmin_mvar = 0.0;
+    pv.qmax_mvar = 0.0;
+  }
+
+  const opf::parity::Problem prob = opf::parity::build_problem(sys);
+  Eigen::VectorXd xmin;
+  Eigen::VectorXd xmax;
+  Eigen::VectorXd x0;
+  opf::parity::build_variable_bounds(prob, xmin, xmax);
+
+  REQUIRE_NOTHROW(opf::parity::build_initial_point(prob, xmin, xmax, x0));
+  REQUIRE(x0.size() == prob.vidx.n_total);
+  CHECK(x0.allFinite());
+  for (int i = 0; i < x0.size(); ++i) {
+    CHECK(x0[i] >= std::min(xmin[i], xmax[i]) - 1e-10);
+    CHECK(x0[i] <= std::max(xmin[i], xmax[i]) + 1e-10);
+  }
+}
 
 TEST_CASE("Objective scaling lets the parity IPM converge on case2383wp", "[opf][scaling]") {
   // case2383wp (Polish winter peak) diverged badly before gradient-based

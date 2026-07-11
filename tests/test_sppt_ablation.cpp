@@ -12,8 +12,8 @@
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/sppt/ablation.hpp"
 
-#ifndef HACDCPF_TEST_DATA_DIR
-#define HACDCPF_TEST_DATA_DIR "../../data"
+#ifndef HACDCPF_MATPOWER_DATA_DIR
+#define HACDCPF_MATPOWER_DATA_DIR "../../external_data/matpower"
 #endif
 
 using namespace hacdcpf;
@@ -21,7 +21,7 @@ using namespace hacdcpf;
 namespace {
 
 std::string data_path(const std::string& name) {
-  return std::string(HACDCPF_TEST_DATA_DIR) + "/" + name;
+  return std::string(HACDCPF_MATPOWER_DATA_DIR) + "/" + name;
 }
 
 HybridPowerSystem make_switch_demo() {

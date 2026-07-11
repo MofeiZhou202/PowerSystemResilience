@@ -207,6 +207,7 @@ TEST_CASE("TimeSeriesPFResult annual carbon uses storage snapshots dynamically",
 
   REQUIRE(annual.num_steps == 2);
   REQUIRE(annual.num_pf_converged == 2);
+  REQUIRE(annual.num_carbon_verified == 2);
   REQUIRE(annual.step_results.size() == 2);
   CHECK(annual.step_results[1].total_generation_emissions_tco2 ==
         Approx(expected_ca1.matrix_summary.total_generation_emissions_tco2));
@@ -233,4 +234,117 @@ TEST_CASE("TimeSeriesPFResult dynamic annual carbon requires complete snapshots"
   CHECK_THROWS_AS(
       compute_annual_carbon_analysis(ts_result, 1.0, AnnualCarbonAnalysisOptions{}),
       std::invalid_argument);
+}
+
+TEST_CASE("Dynamic storage ledger computes efficiency and self-discharge losses forward",
+          "[carbonflow][storage][ledger][regression]") {
+  using namespace hacdcpf;
+  using namespace hacdcpf::analysis;
+
+  HybridPowerSystem charge = build_single_bus_storage_case();
+  charge.ac.storage[0].eta_charge = 0.8;
+  charge.ac.storage[0].eta_discharge = 0.9;
+  charge.ac.storage[0].self_discharge_pct = 10.0;
+  charge.ac.storage[0].p_mw = -10.0;
+  charge.ac.storage[0].soc_init = 0.53;
+  charge.ac.storage[0].e_mwh = 53.0;
+  charge.ac.storage[0].soc_carbon_intensity_tco2_mwh = 0.2;
+
+  HybridPowerSystem discharge = charge;
+  discharge.ac.storage[0].p_mw = 9.0;
+  discharge.ac.storage[0].soc_init = 0.377;
+  discharge.ac.storage[0].e_mwh = 37.7;
+
+  TimeSeriesPFResult ts;
+  ts.num_steps = 2;
+  ts.pf_results = {converged_pf(), converged_pf()};
+  ts.pf_system_snapshots = {charge, discharge};
+
+  const AnnualCarbonAnalysisResult annual =
+      compute_annual_carbon_analysis(ts, 1.0);
+
+  const double initial_inventory = 50.0 * 0.2;
+  const double charge_bus_intensity = 0.8;
+  const double inventory_after_charge =
+      initial_inventory - 5.0 * 0.2 + 8.0 * charge_bus_intensity;
+  const double stored_intensity = inventory_after_charge / 53.0;
+  const double expected_terminal_inventory =
+      inventory_after_charge - 5.3 * stored_intensity -
+      10.0 * stored_intensity;
+
+  CHECK(annual.initial_storage_carbon_inventory_tco2 ==
+        Approx(initial_inventory).margin(1e-10));
+  CHECK(annual.storage_charge_loss_emissions_tco2 ==
+        Approx(2.0 * charge_bus_intensity).margin(1e-10));
+  CHECK(annual.storage_self_discharge_loss_emissions_tco2 ==
+        Approx(5.0 * 0.2 + 5.3 * stored_intensity).margin(1e-10));
+  CHECK(annual.storage_discharge_loss_emissions_tco2 ==
+        Approx(1.0 * stored_intensity).margin(1e-10));
+  CHECK(annual.storage_internal_loss_emissions_tco2 ==
+        Approx(annual.storage_charge_loss_emissions_tco2 +
+               annual.storage_self_discharge_loss_emissions_tco2 +
+               annual.storage_discharge_loss_emissions_tco2)
+            .margin(1e-10));
+  CHECK(annual.terminal_storage_carbon_inventory_tco2 ==
+        Approx(expected_terminal_inventory).margin(1e-10));
+  CHECK(annual.storage_energy_balance_error_mwh == Approx(0.0).margin(1e-10));
+  CHECK(annual.max_storage_step_energy_balance_error_mwh ==
+        Approx(0.0).margin(1e-10));
+  CHECK(annual.storage_inventory_balance_error_tco2 ==
+        Approx(0.0).margin(1e-10));
+  CHECK(annual.storage_inventory_balance_error_pct ==
+        Approx(0.0).margin(1e-10));
+  CHECK(annual.balance_error_storage_adjusted_tco2 ==
+        Approx(0.0).margin(1e-10));
+  REQUIRE(annual.step_results.size() == 2);
+  CHECK(annual.step_results[0].storage_carbon_inventory_delta_tco2 ==
+        Approx(inventory_after_charge - initial_inventory).margin(1e-10));
+  CHECK(annual.step_results[0].storage_inventory_balance_error_tco2 ==
+        Approx(0.0).margin(1e-10));
+  CHECK(annual.step_results[1].storage_carbon_inventory_delta_tco2 ==
+        Approx(expected_terminal_inventory - inventory_after_charge).margin(1e-10));
+  CHECK(annual.step_results[1].storage_inventory_balance_error_tco2 ==
+        Approx(0.0).margin(1e-10));
+  CHECK(annual.storage_inventory_balance_abs_error_tco2 ==
+        Approx(0.0).margin(1e-10));
+}
+
+TEST_CASE("Dynamic storage ledger exposes inconsistent SOC snapshots",
+          "[carbonflow][storage][energy-balance][regression]") {
+  using namespace hacdcpf;
+  using namespace hacdcpf::analysis;
+
+  HybridPowerSystem step = build_single_bus_storage_case();
+  step.ac.storage[0].eta_charge = 0.8;
+  step.ac.storage[0].self_discharge_pct = 0.0;
+  step.ac.storage[0].p_mw = -10.0;
+  step.ac.storage[0].soc_init = 0.59;
+  step.ac.storage[0].e_mwh = 59.0;
+
+  TimeSeriesPFResult ts;
+  ts.num_steps = 1;
+  ts.pf_results = {converged_pf()};
+  ts.pf_system_snapshots = {step};
+
+  const AnnualCarbonAnalysisResult annual =
+      compute_annual_carbon_analysis(ts, 1.0);
+  // Inverting the first terminal snapshot yields a consistent inferred start,
+  // so a one-step series alone cannot audit an externally supplied initial SOC.
+  CHECK(annual.storage_energy_balance_error_mwh == Approx(0.0).margin(1e-10));
+
+  HybridPowerSystem next = step;
+  next.ac.storage[0].p_mw = 0.0;
+  next.ac.storage[0].soc_init = 0.60;
+  next.ac.storage[0].e_mwh = 60.0;
+  ts.num_steps = 2;
+  ts.pf_results.push_back(converged_pf());
+  ts.pf_system_snapshots.push_back(next);
+  const AnnualCarbonAnalysisResult inconsistent =
+      compute_annual_carbon_analysis(ts, 1.0);
+  CHECK(inconsistent.storage_energy_balance_error_mwh ==
+        Approx(-1.0).margin(1e-10));
+  CHECK(inconsistent.storage_energy_balance_abs_error_mwh ==
+        Approx(1.0).margin(1e-10));
+  CHECK(inconsistent.max_storage_step_energy_balance_error_mwh ==
+        Approx(1.0).margin(1e-10));
 }

@@ -28,6 +28,9 @@
 #ifndef HACDCPF_TEST_DATA_DIR
 #define HACDCPF_TEST_DATA_DIR "../../data"
 #endif
+#ifndef HACDCPF_MATPOWER_DATA_DIR
+#define HACDCPF_MATPOWER_DATA_DIR "../../external_data/matpower"
+#endif
 
 namespace fs = std::filesystem;
 using namespace hacdcpf;
@@ -748,7 +751,8 @@ TEST_CASE("ETAP real-export ingestion (etap-main toolkit schema)",
 
 TEST_CASE("ETAP I/O preserves power-flow solvability (case14)",
           "[io][etap][excel][pf][roundtrip]") {
-  const std::string mp = std::string(HACDCPF_TEST_DATA_DIR) + "/case14.m";
+  const std::string mp =
+      std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case14.m";
   if (!fs::exists(mp)) {
     WARN("case14.m not found at " << mp << "; skipping");
     return;
@@ -1463,7 +1467,8 @@ TEST_CASE("ETAP native XML imports ETAP load-flow result voltages",
 
 TEST_CASE("ETAP operating-point round-trip cross-validates with our power flow",
           "[io][etap][excel][crossval][pf]") {
-  const std::string mp = std::string(HACDCPF_TEST_DATA_DIR) + "/case14.m";
+  const std::string mp =
+      std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case14.m";
   if (!fs::exists(mp)) {
     WARN("case14.m not found at " << mp << "; skipping");
     return;

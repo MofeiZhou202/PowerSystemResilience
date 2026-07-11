@@ -28,6 +28,9 @@
 #ifndef HACDCPF_TEST_DATA_DIR
 #define HACDCPF_TEST_DATA_DIR "../../data"
 #endif
+#ifndef HACDCPF_MATPOWER_DATA_DIR
+#define HACDCPF_MATPOWER_DATA_DIR "../../external_data/matpower"
+#endif
 
 namespace fs = std::filesystem;
 using namespace hacdcpf;
@@ -44,7 +47,7 @@ static std::string data_path(const std::string& name) {
 }
 
 static HybridPowerSystem load_mp(const std::string& name) {
-    return parse_matpower(data_path(name));
+    return parse_matpower(std::string(HACDCPF_MATPOWER_DATA_DIR) + "/" + name);
 }
 
 /// Build a minimal 2-bus AC system for JSON tests.

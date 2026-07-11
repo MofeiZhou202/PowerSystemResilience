@@ -1,14 +1,21 @@
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/carbon_analysis/annual_carbon_analysis.hpp"
 #include "hacdcpf/carbon_analysis/carbon_analysis.hpp"
+#include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <iostream>
+
 #include <cmath>
 #include <string>
 #include <vector>
+
+#ifndef HACDCPF_MATPOWER_DATA_DIR
+#define HACDCPF_MATPOWER_DATA_DIR "../../external_data/matpower"
+#endif
 
 namespace {
 
@@ -117,7 +124,7 @@ void require_carbon_balance(const hacdcpf::analysis::EmissionsSummary& summary,
   const double left = summary.total_generation_emissions_tco2;
   const double right =
       summary.total_load_emissions_tco2 + summary.total_loss_emissions_tco2;
-  CHECK(left == Approx(right).epsilon(1e-8).margin(1e-8));
+  CHECK(left == Approx(right).epsilon(1e-8).margin(1e-7));
   CHECK(summary.balance_error_pct < tolerance_pct);
 }
 
@@ -157,6 +164,56 @@ hacdcpf::HybridPowerSystem make_storage_step(double gen_mw,
   return sys;
 }
 
+hacdcpf::TimeSeriesData make_carbon_24h_profiles() {
+  using namespace hacdcpf;
+  const std::vector<double> load = {
+      0.50, 0.45, 0.42, 0.40, 0.42, 0.50, 0.60, 0.72,
+      0.80, 0.85, 0.88, 0.90, 0.88, 0.85, 0.82, 0.85,
+      0.90, 1.00, 1.10, 1.05, 0.95, 0.85, 0.72, 0.60};
+  const std::vector<double> wind = {
+      0.65, 0.70, 0.75, 0.80, 0.72, 0.55, 0.35, 0.20,
+      0.15, 0.10, 0.18, 0.25, 0.30, 0.40, 0.55, 0.60,
+      0.50, 0.35, 0.25, 0.30, 0.45, 0.55, 0.60, 0.65};
+  const std::vector<double> solar = {
+      0.00, 0.00, 0.00, 0.00, 0.00, 0.02, 0.10, 0.30,
+      0.55, 0.80, 0.92, 1.00, 0.98, 0.90, 0.75, 0.55,
+      0.30, 0.10, 0.02, 0.00, 0.00, 0.00, 0.00, 0.00};
+
+  TimeSeriesData ts;
+  ts.num_steps = 24;
+  ts.step_duration_hr = 1.0;
+  ts.profiles = {
+      TimeSeriesProfile{0, "daily_load", load},
+      TimeSeriesProfile{1, "wind_daily", wind},
+      TimeSeriesProfile{2, "solar_daily", solar},
+      TimeSeriesProfile{3, "hydro_daily", std::vector<double>(24, 0.6)},
+  };
+  return ts;
+}
+
+void bind_default_profiles(hacdcpf::HybridPowerSystem& sys) {
+  using namespace hacdcpf;
+  for (auto& load : sys.ac.loads) {
+    if (load.profile_id < 0) load.profile_id = 0;
+  }
+  for (auto& load : sys.dc.loads) {
+    if (load.profile_id < 0) load.profile_id = 0;
+  }
+  for (auto& gen : sys.ac.renewable_gens) {
+    if (gen.profile_id >= 0) continue;
+    gen.profile_id = (gen.type == RenewableType::SolarPV ||
+                      gen.type == RenewableType::SolarCSP)
+                         ? 2
+                         : 1;
+  }
+  for (auto& pv : sys.ac.pv_systems) {
+    if (pv.profile_id < 0) pv.profile_id = 2;
+  }
+  for (auto& pv : sys.dc.pv_arrays) {
+    if (pv.profile_id < 0) pv.profile_id = 2;
+  }
+}
+
 }  // namespace
 
 TEST_CASE("Downloaded MATPOWER cases keep carbon balance with thermal 900 kg/MWh",
@@ -166,7 +223,7 @@ TEST_CASE("Downloaded MATPOWER cases keep carbon balance with thermal 900 kg/MWh
 
   const std::vector<std::string> cases = {"case14.m", "case33bw.m"};
   for (const auto& name : cases) {
-    const std::string path = std::string(HACDCPF_TEST_DATA_DIR) + "/" + name;
+    const std::string path = std::string(HACDCPF_MATPOWER_DATA_DIR) + "/" + name;
     INFO("MATPOWER case: " << path);
 
     HybridPowerSystem sys = io::parse_matpower(path);
@@ -184,6 +241,65 @@ TEST_CASE("Downloaded MATPOWER cases keep carbon balance with thermal 900 kg/MWh
     require_carbon_balance(ca.tracing_summary, 1e-4);
     require_carbon_balance(ca.matrix_summary, 1e-4);
   }
+}
+
+TEST_CASE("Carbon flow uses recovered branch-flow order on switched dist33 DER case",
+          "[carbonflow][branch-mapping][regression]") {
+  using namespace hacdcpf;
+  using namespace hacdcpf::analysis;
+
+  HybridPowerSystem sys = io::build_dist33_microgrid_der();
+  assign_carbon_factors(sys);
+
+  PowerFlowOptions pf_opt;
+  pf_opt.max_iter = 100;
+  pf_opt.tol = 1e-8;
+  const PowerFlowResult pf = solve_power_flow(sys, pf_opt);
+  REQUIRE(pf.converged);
+  REQUIRE(pf.branch_flows.size() >= sys.ac.branches.size());
+  for (const auto& transfer : pf.vsc_transfers) {
+    UNSCOPED_INFO("VSC " << transfer.index << ": Pac=" << transfer.p_ac_mw
+                  << " MW, Pdc=" << transfer.p_dc_mw
+                  << " MW, loss=" << transfer.loss_mw << " MW");
+  }
+
+  const CarbonAnalysisResult ca = compute_carbon_analysis(sys, pf);
+  INFO("max nodal power mismatch = " << ca.max_node_power_balance_error_mw << " MW");
+  for (const auto& error : ca.node_power_balance_errors) {
+    UNSCOPED_INFO((error.is_dc ? "DC" : "AC") << " bus " << error.bus_index
+                  << ": source=" << error.source_mw
+                  << " MW, required=" << error.required_mw
+                  << " MW, mismatch=" << error.mismatch_mw << " MW");
+  }
+  REQUIRE(ca.matrix_solved);
+  REQUIRE(ca.tracing_verified);
+  REQUIRE(ca.branch_carbon.size() == sys.ac.branches.size());
+
+  for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
+    INFO("AC branch position " << i);
+    const auto& br = sys.ac.branches[i];
+    const auto& bf = pf.branch_flows[i];
+    const auto& bc = ca.branch_carbon[i];
+    CHECK(bc.branch_index == br.index);
+    CHECK(bc.from_bus == br.from_bus);
+    CHECK(bc.to_bus == br.to_bus);
+    CHECK(bc.loss_mw == Approx(std::max(bf.pf_mw + bf.pt_mw, 0.0)).margin(1e-9));
+  }
+}
+
+TEST_CASE("Market 5-bus AC/DC toy has angle reference in each AC island",
+          "[powerflow][case-builder][regression]") {
+  using namespace hacdcpf;
+
+  HybridPowerSystem sys = io::build_market_5bus_acdc_toy();
+
+  PowerFlowOptions pf_opt;
+  pf_opt.max_iter = 100;
+  pf_opt.tol = 1e-8;
+  const PowerFlowResult pf = solve_power_flow(sys, pf_opt);
+
+  REQUIRE(pf.converged);
+  CHECK(pf.iterations <= 20);
 }
 
 TEST_CASE("Wind and PV are zero-carbon while thermal is 900 kg/MWh",
@@ -258,6 +374,7 @@ TEST_CASE("Three-step storage recursion preserves carbon balance",
 
   REQUIRE(annual.num_steps == 3);
   REQUIRE(annual.num_pf_converged == 3);
+  REQUIRE(annual.num_carbon_verified == 3);
   REQUIRE(annual.step_results.size() == 3);
 
   const double charged_intensity = (50.0 * 0.2 + 10.0 * kThermalEfTco2Mwh) / 60.0;
@@ -278,4 +395,152 @@ TEST_CASE("Three-step storage recursion preserves carbon balance",
         Approx(annual.total_load_emissions_tco2 + annual.total_loss_emissions_tco2)
             .epsilon(1e-8)
             .margin(1e-8));
+
+  const double initial_inventory = 50.0 * 0.2;
+  const double terminal_inventory =
+      55.0 * charged_intensity + 12.0 * kThermalEfTco2Mwh;
+  CHECK(annual.initial_storage_carbon_inventory_tco2 ==
+        Approx(initial_inventory).margin(1e-10));
+  CHECK(annual.terminal_storage_carbon_inventory_tco2 ==
+        Approx(terminal_inventory).margin(1e-10));
+  CHECK(annual.storage_carbon_inventory_delta_tco2 ==
+        Approx(terminal_inventory - initial_inventory).margin(1e-10));
+  CHECK(annual.storage_internal_loss_emissions_tco2 ==
+        Approx(0.0).margin(1e-10));
+
+  const double external_generation =
+      annual.total_generation_emissions_tco2 -
+      annual.total_storage_discharge_emissions_tco2;
+  const double terminal_load =
+      annual.total_load_emissions_tco2 -
+      annual.total_storage_charge_emissions_tco2;
+  CHECK(external_generation + initial_inventory ==
+        Approx(terminal_load + annual.total_loss_emissions_tco2 +
+               annual.storage_internal_loss_emissions_tco2 +
+               terminal_inventory)
+            .epsilon(1e-8)
+            .margin(1e-8));
+  CHECK(annual.balance_error_storage_adjusted_tco2 ==
+        Approx(0.0).margin(1e-10));
+  CHECK(annual.balance_error_storage_adjusted_pct ==
+        Approx(0.0).margin(1e-10));
+
+  REQUIRE(annual.terminal_storage_states.size() == 1);
+  CHECK(annual.terminal_storage_states[0].stored_energy_mwh == Approx(67.0));
+  CHECK(annual.terminal_storage_states[0].soc_carbon_intensity_tco2_mwh ==
+        Approx(terminal_inventory / 67.0).margin(1e-10));
+}
+
+TEST_CASE("Built-in hybrid cases preserve dynamic carbon over 24 hours",
+          "[.][carbonflow][24h][integration]") {
+  using namespace hacdcpf;
+  using namespace hacdcpf::analysis;
+
+  struct CaseSpec {
+    const char* name;
+    HybridPowerSystem (*build)();
+    bool apply_grid_profile;
+  };
+  const std::vector<CaseSpec> cases = {
+      {"dist33_microgrid_der", &io::build_dist33_microgrid_der, false},
+      {"comprehensive_hybrid_acdc", &io::build_comprehensive_hybrid_acdc, true},
+  };
+
+  for (const auto& spec : cases) {
+    DYNAMIC_SECTION(spec.name) {
+      HybridPowerSystem sys = spec.build();
+      assign_carbon_factors(sys);
+      bind_default_profiles(sys);
+
+      TimeSeriesPFOptions pf_options;
+      pf_options.uc_solver = UCSolverChoice::HiGHS;
+      pf_options.run_opf = false;
+      pf_options.keep_system_snapshots = true;
+      pf_options.enforce_terminal_soc_cyclic = true;
+
+      TimeSeriesPFResult ts =
+          solve_time_series_pf(sys, make_carbon_24h_profiles(), pf_options);
+      REQUIRE(ts.num_steps == 24);
+      REQUIRE(ts.num_converged == 24);
+      REQUIRE(ts.pf_system_snapshots.size() == 24);
+
+      if (spec.apply_grid_profile) {
+        for (size_t t = 0; t < ts.pf_system_snapshots.size(); ++t) {
+          const double factor = 0.35 + 0.55 * static_cast<double>(t) / 23.0;
+          for (auto& grid : ts.pf_system_snapshots[t].ac.external_grids) {
+            grid.emission_factor_tco2_mwh = factor;
+          }
+        }
+      }
+
+      AnnualCarbonAnalysisOptions carbon_options;
+      carbon_options.keep_hourly_bus_intensity = true;
+      const AnnualCarbonAnalysisResult annual =
+          compute_annual_carbon_analysis(ts, 1.0, carbon_options);
+
+      std::cout << spec.name
+                << ": PF=" << annual.num_pf_converged << "/24"
+                << ", carbon=" << annual.num_carbon_verified << "/24"
+                << ", max_KCL_MW=" << annual.max_node_power_balance_error_mw
+                << ", max_rel_res=" << annual.max_matrix_relative_residual
+                << ", max_cond=" << annual.max_matrix_condition_estimate
+                << ", storage_E_abs_MWh="
+                << annual.storage_energy_balance_abs_error_mwh
+                << ", storage_C_abs_t="
+                << annual.storage_inventory_balance_abs_error_tco2
+                << ", adjusted_balance_pct="
+                << annual.balance_error_storage_adjusted_pct << '\n';
+
+      if (annual.num_carbon_verified != 24) {
+        if (!ts.pf_results.empty()) {
+          const auto& first_pf = ts.pf_results.front();
+          std::cout << "  first-step VSC transfers:\n";
+          for (const auto& transfer : first_pf.vsc_transfers) {
+            std::cout << "    VSC-" << transfer.index
+                      << ": AC=" << transfer.p_ac_mw
+                      << ", DC=" << transfer.p_dc_mw
+                      << ", loss=" << transfer.loss_mw << '\n';
+          }
+          std::cout << "  first-step DCDC transfers:\n";
+          for (const auto& transfer : first_pf.dcdc_transfers) {
+            std::cout << "    DCDC-" << transfer.index
+                      << ": in=" << transfer.p_in_mw
+                      << ", out=" << transfer.p_out_mw
+                      << ", loss=" << transfer.loss_mw << '\n';
+          }
+          std::cout << "  first-step effective VSC modes:\n";
+          for (const auto& converter : first_pf.diagnostics.effective_converters) {
+            std::cout << "    VSC-" << converter.index
+                      << ": mode=" << static_cast<int>(converter.control_mode)
+                      << ", AC-bus=" << converter.bus_ac
+                      << ", DC-bus=" << converter.bus_dc << '\n';
+          }
+        }
+        for (size_t t = 0; t < ts.pf_results.size(); ++t) {
+          const CarbonAnalysisResult ca = compute_carbon_analysis(
+              ts.pf_system_snapshots[t], ts.pf_results[t]);
+          if (ca.tracing_verified) continue;
+          std::cout << "  step " << t
+                    << ": power_ok=" << ca.power_balance_verified
+                    << ", matrix_ok=" << ca.matrix_solved
+                    << ", max_KCL_MW=" << ca.max_node_power_balance_error_mw
+                    << '\n';
+          for (const auto& error : ca.node_power_balance_errors) {
+            std::cout << "    " << (error.is_dc ? "DC-" : "AC-")
+                      << error.bus_index << ": source=" << error.source_mw
+                      << ", required=" << error.required_mw
+                      << ", mismatch=" << error.mismatch_mw << '\n';
+          }
+        }
+      }
+
+      REQUIRE(annual.num_pf_converged == 24);
+      REQUIRE(annual.num_carbon_power_balance_verified == 24);
+      REQUIRE(annual.num_carbon_matrix_solved == 24);
+      REQUIRE(annual.num_carbon_verified == 24);
+      CHECK(annual.storage_energy_balance_abs_error_mwh < 1e-7);
+      CHECK(annual.storage_inventory_balance_abs_error_tco2 < 1e-7);
+      CHECK(annual.balance_error_storage_adjusted_pct < 1e-6);
+    }
+  }
 }

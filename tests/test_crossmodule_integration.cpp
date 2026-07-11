@@ -143,7 +143,7 @@ TEST_CASE("Pipeline 1: OPF → PF → Carbon (IEEE 14-bus)",
           "[integration][crossval][crossmodule][pipeline]") {
   // Load case14.m (has generator cost coefficients for meaningful OPF).
   const std::string case14_path =
-      std::string(HACDCPF_TEST_DATA_DIR) + "/case14.m";
+      std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case14.m";
   HybridPowerSystem sys_base;
   try {
     sys_base = io::parse_matpower(case14_path);

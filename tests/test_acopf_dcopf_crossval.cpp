@@ -24,16 +24,14 @@
 
 namespace fs = std::filesystem;
 
+#ifndef HACDCPF_MATPOWER_DATA_DIR
+#define HACDCPF_MATPOWER_DATA_DIR "../../external_data/matpower"
+#endif
+
 namespace {
 
-// Get the project root directory
-std::string get_project_root() {
-#ifdef HACDCPF_PROJECT_ROOT
-  return HACDCPF_PROJECT_ROOT;
-#else
-  // Fallback: assume we're in build directory
-  return fs::current_path().parent_path().string();
-#endif
+std::string get_matpower_data_dir() {
+  return HACDCPF_MATPOWER_DATA_DIR;
 }
 
 // List available MATPOWER cases
@@ -252,7 +250,7 @@ CrossValidationResult run_crossval(const std::string& case_path,
 TEST_CASE("ACOPF/DCOPF/PF cross-validation on small cases", "[integration][opf][crossval]") {
   INFO("\n=== ACOPF/DCOPF/PF Cross-Validation ===\n");
   
-  std::string data_dir = get_project_root() + "/data";
+  std::string data_dir = get_matpower_data_dir();
   
   std::vector<CrossValidationResult> results;
   
@@ -312,7 +310,7 @@ TEST_CASE("DC OPF solution feasibility", "[integration][opf][dcopf]") {
   
   using namespace hacdcpf;
   
-  std::string data_dir = get_project_root() + "/data";
+  std::string data_dir = get_matpower_data_dir();
   std::string case_path = data_dir + "/case14.m";
   
   if (!fs::exists(case_path)) {
@@ -494,7 +492,7 @@ TEST_CASE("DC OPF dispatch quality", "[integration][opf][dcopf]") {
   
   using namespace hacdcpf;
   
-  std::string data_dir = get_project_root() + "/data";
+  std::string data_dir = get_matpower_data_dir();
   std::string case_path = data_dir + "/case30.m";
   
   if (!fs::exists(case_path)) {
@@ -560,7 +558,7 @@ TEST_CASE("ACOPF vs DCOPF comprehensive comparison", "[slow][opf][benchmark]") {
   
   using namespace hacdcpf;
   
-  std::string data_dir = get_project_root() + "/data";
+  std::string data_dir = get_matpower_data_dir();
   
   // Get ALL cases in data folder
   std::vector<std::string> all_cases = list_matpower_cases(data_dir);
@@ -705,7 +703,7 @@ TEST_CASE("ACOPF vs DCOPF comprehensive comparison", "[slow][opf][benchmark]") {
 TEST_CASE("DC OPF LMP: sign and scale", "[integration][opf][dcopf][lmp]") {
   using namespace hacdcpf;
 
-  std::string data_dir = get_project_root() + "/data";
+  std::string data_dir = get_matpower_data_dir();
   std::string case_path = data_dir + "/case14.m";
   if (!fs::exists(case_path)) {
     SKIP("case14.m not found");
@@ -750,7 +748,7 @@ TEST_CASE("DC OPF LMP: sign and scale", "[integration][opf][dcopf][lmp]") {
 TEST_CASE("DC OPF LMP: uncongested uniformity", "[integration][opf][dcopf][lmp]") {
   using namespace hacdcpf;
 
-  std::string data_dir = get_project_root() + "/data";
+  std::string data_dir = get_matpower_data_dir();
   std::string case_path = data_dir + "/case9.m";
   if (!fs::exists(case_path)) {
     SKIP("case9.m not found");
@@ -803,7 +801,7 @@ TEST_CASE("DC OPF LMP: congestion re-dispatch and feasibility",
           "[integration][opf][dcopf][lmp]") {
   using namespace hacdcpf;
 
-  std::string data_dir = get_project_root() + "/data";
+  std::string data_dir = get_matpower_data_dir();
   std::string case_path = data_dir + "/case14.m";
   if (!fs::exists(case_path)) {
     SKIP("case14.m not found");

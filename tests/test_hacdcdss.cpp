@@ -23,8 +23,8 @@
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/validation/validate_system.hpp"
 
-#ifndef HACDCPF_TEST_DATA_DIR
-#define HACDCPF_TEST_DATA_DIR "../../data"
+#ifndef HACDCPF_MATPOWER_DATA_DIR
+#define HACDCPF_MATPOWER_DATA_DIR "../../external_data/matpower"
 #endif
 
 using namespace hacdcpf;
@@ -372,7 +372,8 @@ TEST_CASE("DC OPF: single generator covers load within limits",
 TEST_CASE("DC OPF: case9 economic dispatch is feasible",
           "[opf][dc][matpower]")
 {
-    auto sys = io::parse_matpower(std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+    auto sys = io::parse_matpower(
+        std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case9.m");
     auto r = solve_dc_opf(sys);
     REQUIRE(r.converged);
     CHECK(std::isfinite(r.objective));

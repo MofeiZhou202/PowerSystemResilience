@@ -14,8 +14,8 @@
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 
-#ifndef HACDCPF_TEST_DATA_DIR
-#define HACDCPF_TEST_DATA_DIR "../../data"
+#ifndef HACDCPF_MATPOWER_DATA_DIR
+#define HACDCPF_MATPOWER_DATA_DIR "../../external_data/matpower"
 #endif
 
 using namespace hacdcpf;
@@ -138,7 +138,8 @@ TEST_CASE("SolverCapabilities: AC OPF available flag matches actual solve", "[ca
     // AC OPF is always declared available (native IPM is built-in).
     REQUIRE(caps.supports_ac_opf);
 
-    auto sys = io::parse_matpower(std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+    auto sys = io::parse_matpower(
+        std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case9.m");
     auto r   = solve_ac_opf(sys);
     // If the flag says available, the solve must not throw.
     CHECK(r.converged);  // or at worst not throw — already covered by not-throwing
@@ -148,7 +149,8 @@ TEST_CASE("SolverCapabilities: DC OPF available flag matches actual solve", "[ca
     const auto caps = get_solver_capabilities();
     REQUIRE(caps.supports_dc_opf);
 
-    auto sys = io::parse_matpower(std::string(HACDCPF_TEST_DATA_DIR) + "/case14.m");
+    auto sys = io::parse_matpower(
+        std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case14.m");
     auto r   = solve_dc_opf(sys);
     CHECK(r.converged);
 }
@@ -157,7 +159,8 @@ TEST_CASE("SolverCapabilities: power flow available (always)", "[capabilities][i
     const auto caps = get_solver_capabilities();
     CHECK(caps.has_native_ipm);  // Newton solver counts as native IPM path
 
-    auto sys = io::parse_matpower(std::string(HACDCPF_TEST_DATA_DIR) + "/case30.m");
+    auto sys = io::parse_matpower(
+        std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case30.m");
     auto r   = solve_power_flow(sys);
     CHECK(r.converged);
 }
@@ -189,7 +192,8 @@ TEST_CASE("SolverCapabilities: KLU flag true at compile time", "[capabilities][k
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("verify_opf_result: case9 converged result passes audit", "[capabilities][audit]") {
-    auto sys = io::parse_matpower(std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+    auto sys = io::parse_matpower(
+        std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case9.m");
     auto r   = solve_ac_opf(sys);
     REQUIRE(r.converged);
     REQUIRE_FALSE(r.audit.audited);  // not yet audited

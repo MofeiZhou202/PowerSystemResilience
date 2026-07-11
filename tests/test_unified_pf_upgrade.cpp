@@ -47,12 +47,16 @@ namespace fs = std::filesystem;
 // ═══════════════════════════════════════════════════════════════════════
 
 static fs::path detect_data_dir() {
+#ifdef HACDCPF_MATPOWER_DATA_DIR
+  if (fs::exists(HACDCPF_MATPOWER_DATA_DIR) &&
+      fs::is_directory(HACDCPF_MATPOWER_DATA_DIR)) {
+    return fs::path(HACDCPF_MATPOWER_DATA_DIR);
+  }
+#endif
   for (const auto& p :
-       {fs::path("data"), fs::path("../data"), fs::path("../../data"),
-        fs::path("matpower/data"),
-        fs::path("../matpower/data"), fs::path("../../matpower/data"),
-        fs::path("HybridACDCPowerFlow/data"),
-        fs::path("../HybridACDCPowerFlow/data")}) {
+       {fs::path("external_data/matpower"),
+        fs::path("../external_data/matpower"),
+        fs::path("../../external_data/matpower")}) {
     if (fs::exists(p) && fs::is_directory(p)) return p;
   }
   return {};

@@ -25,8 +25,8 @@
 #include "hacdcpf/power_flow/island_detector.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 
-#ifndef HACDCPF_TEST_DATA_DIR
-#define HACDCPF_TEST_DATA_DIR "../../data"
+#ifndef HACDCPF_MATPOWER_DATA_DIR
+#define HACDCPF_MATPOWER_DATA_DIR "../../external_data/matpower"
 #endif
 
 using namespace hacdcpf;
@@ -36,7 +36,7 @@ namespace pf = hacdcpf::powerflow;
 // Helper: load a MATPOWER case by file name
 // ─────────────────────────────────────────────────────────────────────────────
 static HybridPowerSystem load_case(const std::string& fname) {
-    const std::string path = std::string(HACDCPF_TEST_DATA_DIR) + "/" + fname;
+    const std::string path = std::string(HACDCPF_MATPOWER_DATA_DIR) + "/" + fname;
     return hacdcpf::io::parse_matpower(path);
 }
 
@@ -236,7 +236,8 @@ TEST_CASE("Island detection: non-contiguous bus IDs (case_2_1_backup) → 3 isla
     // service) each carry their own SLACK substation, so the detector must
     // report exactly three islands — not one-per-bus.
     const std::string path =
-        std::string(HACDCPF_PROJECT_ROOT) + "/tests/data/case_2_1_backup.json";
+        std::string(HACDCPF_PROJECT_ROOT) +
+        "/external_data/typical_cable_networks/case_2_1_backup.json";
     const HybridPowerSystem sys = hacdcpf::io::load_json(path);
     REQUIRE(sys.ac.buses.size() == 12);
 

@@ -40,8 +40,8 @@
 #include "hacdcpf/ev_power_traffic/ev_power_traffic_simulation.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 
-#ifndef HACDCPF_TEST_DATA_DIR
-#define HACDCPF_TEST_DATA_DIR "../../data"
+#ifndef HACDCPF_MATPOWER_DATA_DIR
+#define HACDCPF_MATPOWER_DATA_DIR "../../external_data/matpower"
 #endif
 
 using namespace hacdcpf;
@@ -72,7 +72,7 @@ static EVPowerTrafficProblem make_largescale_problem() {
   // ----------------------------------------------------------
   {
     const std::string path =
-        std::string(HACDCPF_TEST_DATA_DIR) + "/case118.m";
+        std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case118.m";
     prob.system = io::parse_matpower(path);
   }
 

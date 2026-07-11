@@ -865,7 +865,8 @@ void split_branch_through_passive_bus(HybridPowerSystem& sys, int pos,
 
 TEST_CASE("Round-trip: case33bw series reduction reproduces the feeder PF",
           "[graph][roundtrip][series][case33bw]") {
-  const std::string path = std::string(HACDCPF_TEST_DATA_DIR) + "/case33bw.m";
+  const std::string path =
+      std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case33bw.m";
   HybridPowerSystem base = io::parse_matpower(path);
   REQUIRE(!base.ac.buses.empty());
 

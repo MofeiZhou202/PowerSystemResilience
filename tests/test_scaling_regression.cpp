@@ -13,8 +13,8 @@
 #include "hacdcpf/power_flow/hybrid.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 
-#ifndef HACDCPF_TEST_DATA_DIR
-#define HACDCPF_TEST_DATA_DIR "../../data"
+#ifndef HACDCPF_MATPOWER_DATA_DIR
+#define HACDCPF_MATPOWER_DATA_DIR "../../external_data/matpower"
 #endif
 
 using Catch::Matchers::WithinAbs;
@@ -24,7 +24,7 @@ namespace {
 
 /// Load a small test case from the matpower data directory.
 hacdcpf::HybridPowerSystem load_case(const std::string& name) {
-  const std::string path = std::string(HACDCPF_TEST_DATA_DIR) + "/" + name;
+  const std::string path = std::string(HACDCPF_MATPOWER_DATA_DIR) + "/" + name;
   return hacdcpf::io::parse_matpower(path);
 }
 

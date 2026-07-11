@@ -5,6 +5,7 @@ function(hacdcpf_add_test target)
   target_link_libraries(${target} PRIVATE hacdcpf::hacdcpf Catch2::Catch2WithMain)
   target_compile_definitions(${target} PRIVATE
     HACDCPF_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+    HACDCPF_MATPOWER_DATA_DIR="${CMAKE_SOURCE_DIR}/external_data/matpower"
     HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
   )
   hacdcpf_copy_opendss_runtime(${target})
@@ -16,6 +17,7 @@ function(hacdcpf_add_plain_test target)
   target_link_libraries(${target} PRIVATE hacdcpf::hacdcpf)
   target_compile_definitions(${target} PRIVATE
     HACDCPF_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+    HACDCPF_MATPOWER_DATA_DIR="${CMAKE_SOURCE_DIR}/external_data/matpower"
     HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
   )
   hacdcpf_copy_opendss_runtime(${target})
@@ -34,6 +36,7 @@ hacdcpf_add_test(test_uc_dispatchable_pv   test_uc_dispatchable_pv.cpp)
 hacdcpf_add_test(test_uc_microgrid         test_uc_microgrid.cpp)
 hacdcpf_add_test(test_uc_dc_branch_flows   test_uc_dc_branch_flows.cpp)
 hacdcpf_add_test(test_uc_storage_degradation test_uc_storage_degradation.cpp)
+hacdcpf_add_test(test_uc_storage_efficiency test_uc_storage_efficiency.cpp)
 hacdcpf_add_test(test_uc_vpp               test_uc_vpp.cpp)
 hacdcpf_add_test(test_uc_energy_router     test_uc_energy_router.cpp)
 hacdcpf_add_test(test_uc_mobile_storage    test_uc_mobile_storage.cpp)
@@ -127,17 +130,18 @@ hacdcpf_add_test(test_three_phase_pf      test_three_phase_pf.cpp)
 # generation, demand-response, and reactive-support modes simultaneously.
 hacdcpf_add_test(test_multiport_vpp_er    test_multiport_vpp_er.cpp)
 
-# Performance test: MATPOWER cases — built with release-level optimisation
-# regardless of overall build type, so timing numbers are meaningful.
+# Performance test: MATPOWER cases. MSVC Debug keeps its runtime checks;
+# collect meaningful timing numbers from an optimized configuration.
 add_executable(test_powerflow_performance test_powerflow_performance.cpp)
 target_link_libraries(test_powerflow_performance PRIVATE hacdcpf::hacdcpf Catch2::Catch2WithMain)
 target_compile_definitions(test_powerflow_performance PRIVATE
   HACDCPF_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+  HACDCPF_MATPOWER_DATA_DIR="${CMAKE_SOURCE_DIR}/external_data/matpower"
   HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
 )
 target_compile_options(test_powerflow_performance PRIVATE
   $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -DNDEBUG>
-  $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>
+  $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<NOT:$<CONFIG:Debug>>>:/O2 /DNDEBUG>
 )
 hacdcpf_copy_opendss_runtime(test_powerflow_performance)
 

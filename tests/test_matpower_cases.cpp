@@ -33,8 +33,8 @@
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 
-#ifndef HACDCPF_TEST_DATA_DIR
-#define HACDCPF_TEST_DATA_DIR "../../data"
+#ifndef HACDCPF_MATPOWER_DATA_DIR
+#define HACDCPF_MATPOWER_DATA_DIR "../../external_data/matpower"
 #endif
 
 namespace fs = std::filesystem;
@@ -47,7 +47,7 @@ using Catch::Matchers::WithinAbs;
 // ─────────────────────────────────────────────────────────────────────────────
 
 static std::string data_path(const std::string& name) {
-    return std::string(HACDCPF_TEST_DATA_DIR) + "/" + name;
+    return std::string(HACDCPF_MATPOWER_DATA_DIR) + "/" + name;
 }
 
 static HybridPowerSystem load_case(const std::string& name) {

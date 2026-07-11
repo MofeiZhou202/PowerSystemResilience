@@ -21,8 +21,8 @@
 #include "hacdcpf/validation/validate_system.hpp"
 #include "hacdcpf/validation/validation_report.hpp"
 
-#ifndef HACDCPF_TEST_DATA_DIR
-#define HACDCPF_TEST_DATA_DIR "../../data"
+#ifndef HACDCPF_MATPOWER_DATA_DIR
+#define HACDCPF_MATPOWER_DATA_DIR "../../external_data/matpower"
 #endif
 
 using namespace hacdcpf;
@@ -183,13 +183,15 @@ TEST_CASE("validate: IEEE-14 AC/DC builder reports no errors", "[validation][val
 }
 
 TEST_CASE("validate: case9 MATPOWER parses and validates clean", "[validation][valid][matpower]") {
-    auto sys = io::parse_matpower(std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+    auto sys = io::parse_matpower(
+        std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case9.m");
     auto r = val::validate(sys);
     CHECK(r.ok());
 }
 
 TEST_CASE("validate: case118 validates clean", "[validation][valid][matpower]") {
-    auto sys = io::parse_matpower(std::string(HACDCPF_TEST_DATA_DIR) + "/case118.m");
+    auto sys = io::parse_matpower(
+        std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case118.m");
     auto r = val::validate(sys);
     CHECK(r.ok());
 }
@@ -340,7 +342,8 @@ TEST_CASE("ValidationLevel::Strict: valid system with no warnings stays valid", 
 // ═════════════════════════════════════════════════════════════════════════════
 
 TEST_CASE("Validate-then-solve pattern: case14 passes validation before PF", "[validation][workflow]") {
-    auto sys = io::parse_matpower(std::string(HACDCPF_TEST_DATA_DIR) + "/case14.m");
+    auto sys = io::parse_matpower(
+        std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case14.m");
     auto report = val::validate(sys);
 
     // If validation passes, power flow must converge.
@@ -476,17 +479,20 @@ TEST_CASE("validate: rich DC component references and converter bounds are safet
 // ═════════════════════════════════════════════════════════════════════════════
 
 TEST_CASE("Validation regression: case5 always validates clean", "[validation][regression][matpower]") {
-    auto sys = io::parse_matpower(std::string(HACDCPF_TEST_DATA_DIR) + "/case5.m");
+    auto sys = io::parse_matpower(
+        std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case5.m");
     CHECK(val::validate(sys).ok());
 }
 
 TEST_CASE("Validation regression: case30 always validates clean", "[validation][regression][matpower]") {
-    auto sys = io::parse_matpower(std::string(HACDCPF_TEST_DATA_DIR) + "/case30.m");
+    auto sys = io::parse_matpower(
+        std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case30.m");
     CHECK(val::validate(sys).ok());
 }
 
 TEST_CASE("Validation regression: case57 always validates clean", "[validation][regression][matpower]") {
-    auto sys = io::parse_matpower(std::string(HACDCPF_TEST_DATA_DIR) + "/case57.m");
+    auto sys = io::parse_matpower(
+        std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case57.m");
     CHECK(val::validate(sys).ok());
 }
 

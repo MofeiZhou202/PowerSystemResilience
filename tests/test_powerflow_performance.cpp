@@ -37,13 +37,15 @@ namespace fs = std::filesystem;
 // ---------------------------------------------------------------------------
 
 static fs::path detect_data_dir() {
-#ifdef HACDCPF_TEST_DATA_DIR
-  if (fs::exists(HACDCPF_TEST_DATA_DIR) && fs::is_directory(HACDCPF_TEST_DATA_DIR))
-    return fs::path(HACDCPF_TEST_DATA_DIR);
+#ifdef HACDCPF_MATPOWER_DATA_DIR
+  if (fs::exists(HACDCPF_MATPOWER_DATA_DIR) &&
+      fs::is_directory(HACDCPF_MATPOWER_DATA_DIR))
+    return fs::path(HACDCPF_MATPOWER_DATA_DIR);
 #endif
   for (const auto& p :
-       {fs::path("data"), fs::path("../data"), fs::path("HybridACDCPowerFlow/data"),
-        fs::path("../HybridACDCPowerFlow/data"), fs::path("../../HybridACDCPowerFlow/data")}) {
+       {fs::path("external_data/matpower"),
+        fs::path("../external_data/matpower"),
+        fs::path("../../external_data/matpower")}) {
     if (fs::exists(p) && fs::is_directory(p)) {
       return p;
     }
@@ -210,7 +212,7 @@ TEST_CASE("Power Flow Performance", "[slow][performance]") {
 
   const fs::path data_dir = detect_data_dir();
   REQUIRE(!data_dir.empty());
-  printf("Data directory: %s\n\n", data_dir.c_str());
+  printf("Data directory: %s\n\n", data_dir.string().c_str());
 
   // Collect case files
   std::vector<fs::path> files;
