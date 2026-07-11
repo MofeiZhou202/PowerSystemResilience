@@ -9,12 +9,13 @@ namespace hacdcpf::io {
 using namespace hacdcpf::evpt;
 
 std::vector<std::string> evpt_demo_case_names() {
-  return {"evpt_demo_small", "evpt_demo_grid"};
+  return {"evpt_demo_small", "evpt_demo_grid", "evpt_demo_comprehensive"};
 }
 
 EVPowerTrafficProblem build_evpt_demo_case(const std::string& name) {
   if (name == "evpt_demo_small") return build_evpt_demo_small();
   if (name == "evpt_demo_grid") return build_evpt_demo_grid();
+  if (name == "evpt_demo_comprehensive") return build_evpt_demo_comprehensive();
   throw std::runtime_error("Unsupported EV-traffic demo case: " + name);
 }
 
@@ -320,6 +321,118 @@ EVPowerTrafficProblem build_evpt_demo_grid() {
     d.willingness_to_pay_per_vehicle = 60.0;
     d.energy_max_kwh = 24.0;
     prob.demands.push_back(d);
+  }
+
+  return prob;
+}
+
+// ── evpt_demo_comprehensive ───────────────────────────────────────────────
+
+EVPowerTrafficProblem build_evpt_demo_comprehensive() {
+  EVPowerTrafficProblem prob = build_evpt_demo_grid();
+  prob.system.name = "EVPT comprehensive verification: 33-bus + urban grid";
+
+  // A pair of time-varying central bottlenecks creates departure-dependent
+  // congestion and makes the DUE route split observable in the GUI.
+  for (auto& link : prob.traffic.links) {
+    if (link.index == grid_hlink(2, 2) || link.index == grid_vlink(2, 2)) {
+      link.capacity_veh_per_hr = 18.0;
+      link.jam_vehicles = 12.0;
+      link.capacity_profile_veh_per_hr =
+          {18.0, 12.0, 7.0, 7.0, 10.0, 16.0, 18.0, 18.0};
+    }
+  }
+
+  auto add_stop = [](RouteAlternative& route, int station_id, bool v2g) {
+    RouteChargingStop stop;
+    stop.station_id = station_id;
+    stop.requested_energy_kwh_per_vehicle = 12.0;
+    stop.dwell_steps = 2;
+    stop.max_charge_kw_per_vehicle = 22.0;
+    stop.v2g_capable = v2g;
+    stop.max_discharge_kw_per_vehicle = v2g ? 11.0 : 0.0;
+    route.charging_stops.push_back(stop);
+  };
+
+  // A third OD pair (node 6 → 25) has north/east and south/east alternatives
+  // connected to different feeder buses and tariffs.
+  {
+    RouteAlternative route;
+    route.index = 6;
+    route.origin_node = 6;
+    route.destination_node = 25;
+    route.link_indices = {grid_hlink(1, 0), grid_hlink(1, 1),
+                          grid_hlink(1, 2), grid_hlink(1, 3),
+                          grid_vlink(1, 4), grid_vlink(2, 4),
+                          grid_vlink(3, 4)};
+    add_stop(route, 203, true);
+    prob.routes.push_back(route);
+  }
+  {
+    RouteAlternative route;
+    route.index = 7;
+    route.origin_node = 6;
+    route.destination_node = 25;
+    route.link_indices = {grid_vlink(1, 0), grid_vlink(2, 0),
+                          grid_vlink(3, 0), grid_hlink(4, 0),
+                          grid_hlink(4, 1), grid_hlink(4, 2),
+                          grid_hlink(4, 3)};
+    add_stop(route, 202, false);
+    prob.routes.push_back(route);
+  }
+
+  // Increase the original cohorts enough to expose capacity and price
+  // feedback, then add later departures to exercise dynamic propagation.
+  prob.demands[0].vehicles = 24.0;
+  prob.demands[0].energy_max_kwh = 40.0;
+  prob.demands[1].vehicles = 16.0;
+  prob.demands[1].energy_max_kwh = 40.0;
+  {
+    EVDemand demand;
+    demand.index = 3;
+    demand.origin_node = 6;
+    demand.destination_node = 25;
+    demand.departure_step = 2;
+    demand.vehicles = 18.0;
+    demand.candidate_route_indices = {6, 7};
+    demand.initial_energy_kwh = 18.0;
+    demand.energy_min_kwh = 5.0;
+    demand.energy_max_kwh = 45.0;
+    demand.reserve_energy_kwh = 5.0;
+    demand.willingness_to_pay_per_vehicle = 75.0;
+    prob.demands.push_back(demand);
+  }
+  {
+    EVDemand demand;
+    demand.index = 4;
+    demand.origin_node = 1;
+    demand.destination_node = 25;
+    demand.departure_step = 3;
+    demand.departure_window_steps = {2, 3, 4};
+    demand.vehicles = 10.0;
+    demand.candidate_route_indices = {1, 2, 3};
+    demand.initial_energy_kwh = 20.0;
+    demand.energy_min_kwh = 5.0;
+    demand.energy_max_kwh = 45.0;
+    demand.reserve_energy_kwh = 5.0;
+    demand.willingness_to_pay_per_vehicle = 80.0;
+    prob.demands.push_back(demand);
+  }
+
+  prob.station_prices.clear();
+  const struct {
+    int station_id;
+    std::vector<double> prices;
+  } price_profiles[] = {
+      {201, {0.11, 0.12, 0.32, 0.48, 0.40, 0.20, 0.13, 0.11}},
+      {202, {0.18, 0.18, 0.22, 0.26, 0.24, 0.20, 0.18, 0.18}},
+      {203, {0.25, 0.18, 0.09, 0.07, 0.08, 0.15, 0.24, 0.27}},
+  };
+  for (const auto& source : price_profiles) {
+    StationPriceProfile profile;
+    profile.station_id = source.station_id;
+    profile.price_per_kwh = source.prices;
+    prob.station_prices.push_back(std::move(profile));
   }
 
   return prob;

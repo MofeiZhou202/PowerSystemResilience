@@ -454,6 +454,7 @@ const COMP = (() => {
       ramp_up_mw_min: 0, ramp_dn_mw_min: 0,
       fuel_type: 'Thermal',
       emission_factor_tco2_mwh: 0,
+      forced_outage_rate: 0.02, mttr_hr: 40, t_scheduled_hr: 0,
       dynamic_model: {
         standard: 'PSS/E',
         model_name: 'GENROU',
@@ -518,6 +519,8 @@ const COMP = (() => {
       pmax_mw: 10, pmin_mw: -10,
       qmax_mvar: 0, qmin_mvar: 0,
       self_discharge_pct: 0, profile_id: -1,
+      charge_bid_price: 0, discharge_bid_price: 0, daily_cycle_limit: 0,
+      forced_outage_rate: 0.02, mttr_hr: 24, t_scheduled_hr: 0,
       dynamic_model: {
         standard: 'IEEE1547',
         model_name: 'BatteryDynamic',
@@ -540,6 +543,7 @@ const COMP = (() => {
       vmpp: 0, impp: 0, voc: 0, isc: 0,
       alpha_isc: 0, beta_voc: 0,
       irradiance: 1000, temperature: 25, profile_id: -1,
+      mtbf_hours: 0, mttr_hours: 0, t_scheduled_hr: 0,
       dynamic_model: {
         standard: 'IEEE1547',
         model_name: 'PVDynamic',
@@ -558,6 +562,7 @@ const COMP = (() => {
       qmax_mvar: 0, qmin_mvar: 0,
       curtailable: true, cost_curtail_mwh: 0,
       capacity_factor: 0.3, profile_id: -1,
+      mtbf_hours: 0, mttr_hours: 0, t_scheduled_hr: 0,
       emission_offset_tco2_mwh: 0, in_service: true
     },
     static_generator: {
@@ -565,7 +570,9 @@ const COMP = (() => {
       sgen_type: 'PV', p_rated_mw: 0, sn_mva: 0,
       pmax_mw: 0, pmin_mw: 0, qmax_mvar: 0, qmin_mvar: 0,
       scaling: 1.0, controllable: false, v_ref_pu: 0,
-      emission_factor_tco2_mwh: 0,
+      profile_id: -1,
+      cost_c1: 0, emission_factor_tco2_mwh: 0,
+      mtbf_hours: 0, mttr_hours: 0, t_scheduled_hr: 0,
       dynamic_model: { standard: 'HACDCPF', model_name: 'StaticGeneratorInjection', parameter_set: 'default' },
       in_service: true
     },
@@ -639,6 +646,8 @@ const COMP = (() => {
       eta_charge: 0.95, eta_discharge: 0.95,
       pmax_mw: 10, pmin_mw: -10,
       self_discharge_pct: 0, profile_id: -1,
+      charge_bid_price: 0, discharge_bid_price: 0, daily_cycle_limit: 0,
+      forced_outage_rate: 0.02, mttr_hr: 24, t_scheduled_hr: 0,
       dynamic_model: { standard: 'IEEE1547', model_name: 'BatteryDynamic', parameter_set: 'dc_default' },
       in_service: true
     },
@@ -649,6 +658,7 @@ const COMP = (() => {
       vmpp: 0, impp: 0, voc: 0, isc: 0,
       alpha_isc: 0, beta_voc: 0,
       profile_id: -1,
+      mtbf_hours: 0, mttr_hours: 0, t_scheduled_hr: 0,
       dynamic_model: { standard: 'IEEE1547', model_name: 'PVDynamic', parameter_set: 'dc_default' },
       in_service: true
     },
@@ -961,13 +971,17 @@ const COMP = (() => {
     r_ohm_per_km: '电阻(Ω/km)', x_ohm_per_km: '电抗(Ω/km)',
     b_us_per_km: '电纳(μS/km)', c_nf_per_km: '电容(nF/km)',
     rate_a_mva: '额定容量(MVA)', length_km: '长度(km)',
-    failure_rate: '故障率(次/年)', mttr_hr: '平均修复时间(h)',
-    mtbf_hr: '平均无故障时间(h)', t_scheduled_hr: '计划检修时间(h)',
+    failure_rate: '故障率(次/年)', forced_outage_rate: '强迫停运率',
+    mttr_hr: '平均修复时间(h)', mttr_hours: '平均修复时间(h)',
+    mtbf_hr: '平均无故障时间(h)', mtbf_hours: '平均无故障时间(h)',
+    t_scheduled_hr: '计划检修时间(h)',
     tap: '变比', n_parallel: '并联数', s_sc_max_mva: '最大短路容量(MVA)',
     s_sc_min_mva: '最小短路容量(MVA)', rx_max: 'R/X(max)', rx_min: 'R/X(min)',
     p_rated_mw: '额定功率(MW)', e_rated_mwh: '额定能量(MWh)',
     soc_init: '初始SOC', soc_min: '最小SOC', soc_max: '最大SOC',
     eta_charge: '充电效率', eta_discharge: '放电效率',
+    charge_bid_price: '充电成本($/MWh)', discharge_bid_price: '放电成本($/MWh)',
+    daily_cycle_limit: '日循环上限',
     type: '类型', curtailable: '可削减', capacity_factor: '容量因子',
     sgen_type: '类型', controllable: '可控',
     bus_ac: 'AC侧母线', bus_dc: 'DC侧母线', control_mode: '控制模式',

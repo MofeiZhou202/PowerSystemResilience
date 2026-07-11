@@ -134,12 +134,14 @@ static bool looks_renewable_type(std::string text) {
 }
 
 static double static_generator_report_price(const StaticGenerator& sg) {
+  if (std::abs(sg.cost_c1) > kCostEpsilon) return sg.cost_c1;
   return is_renewable_sgen_type(sg.sgen_type)
              ? 0.0
              : kDefaultReportedEnergyCostPerMWh;
 }
 
 static double dc_static_generator_report_price(const StaticGeneratorDC& sg) {
+  if (std::abs(sg.cost_c1) > kCostEpsilon) return sg.cost_c1;
   return looks_renewable_type(sg.type) ? 0.0
                                        : kDefaultReportedEnergyCostPerMWh;
 }
@@ -150,6 +152,33 @@ struct ReportedProfileDispatch {
   double dc_load_mw{0.0};
   double cost_rate_per_hr{0.0};
 };
+
+static double storage_bid_cost_rate(const HybridPowerSystem& sys,
+                                    const UCSchedule& schedule,
+                                    int t) {
+  double cost = 0.0;
+  size_t row = 0;
+  for (const auto& st : sys.ac.storage) {
+    if (!st.in_service) continue;
+    double p = 0.0;
+    if (scheduled_value(schedule.ess_dispatch, row++, t, p)) {
+      cost += p >= 0.0 ? p * std::max(0.0, st.discharge_bid_price)
+                       : -p * std::max(0.0, st.charge_bid_price);
+    }
+  }
+  row = 0;
+  auto add_dc = [&](const auto& st) {
+    if (!st.in_service) return;
+    double p = 0.0;
+    if (scheduled_value(schedule.dc_ess_dispatch, row++, t, p)) {
+      cost += p >= 0.0 ? p * std::max(0.0, st.discharge_bid_price)
+                       : -p * std::max(0.0, st.charge_bid_price);
+    }
+  };
+  for (const auto& st : sys.dc.storage) add_dc(st);
+  for (const auto& st : sys.dc.dc_storage) add_dc(st);
+  return cost;
+}
 
 static ReportedProfileDispatch reported_profile_dispatch(
     const HybridPowerSystem& sys,
@@ -453,6 +482,7 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
     const double import_mw = std::max(0.0, need_mw - supply_mw);
     sr.opf_cost =
         base_cost_rate + reported.cost_rate_per_hr +
+        storage_bid_cost_rate(sys, sub_result.uc_schedule, t) +
         import_mw * reported_external_grid_price(sys, pmap, t);
   }
 }
@@ -1274,6 +1304,7 @@ AnnualProductionSimResult solve_annual_production_simulation(
         sr.opf_cost =
             generator_operating_cost_rate_from_uc(sys, ws.uc, t) +
             reported.cost_rate_per_hr +
+            storage_bid_cost_rate(sys, ws.uc, t) +
             import_mw * reported_external_grid_price(sys, pmap, g_idx);
         sr.opf_converged = true;
         sr.pf_converged = true;

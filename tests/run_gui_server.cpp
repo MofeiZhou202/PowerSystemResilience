@@ -47,6 +47,8 @@
 #include "hacdcpf/io/etap_io.hpp"
 #include "hacdcpf/io/scenario_bundle_io.hpp"
 #include "hacdcpf/io/external_grid_io.hpp"
+#include "hacdcpf/io/evpt_demo_cases.hpp"
+#include "hacdcpf/io/evpt_json.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/io/powersimulationsdynamics_io.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
@@ -75,6 +77,56 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 namespace {
+
+struct VoltageQualificationMetrics {
+  std::size_t ac_samples{0};
+  std::size_t ac_qualified{0};
+  std::size_t dc_samples{0};
+  std::size_t dc_qualified{0};
+
+  std::size_t samples() const { return ac_samples + dc_samples; }
+  std::size_t qualified() const { return ac_qualified + dc_qualified; }
+};
+
+void accumulate_voltage_qualification(
+    VoltageQualificationMetrics& metrics,
+    const hacdcpf::HybridPowerSystem& sys,
+    const std::vector<double>& vm,
+    const std::vector<double>& vdc) {
+  for (std::size_t i = 0; i < sys.ac.buses.size() && i < vm.size(); ++i) {
+    const auto& bus = sys.ac.buses[i];
+    if (!bus.in_service || !std::isfinite(vm[i])) continue;
+    ++metrics.ac_samples;
+    if (vm[i] >= bus.vmin_pu && vm[i] <= bus.vmax_pu) ++metrics.ac_qualified;
+  }
+  for (std::size_t i = 0; i < sys.dc.buses.size() && i < vdc.size(); ++i) {
+    const auto& bus = sys.dc.buses[i];
+    if (!bus.in_service || !std::isfinite(vdc[i])) continue;
+    ++metrics.dc_samples;
+    if (vdc[i] >= bus.vmin_pu && vdc[i] <= bus.vmax_pu) ++metrics.dc_qualified;
+  }
+}
+
+json voltage_qualification_json(const VoltageQualificationMetrics& metrics) {
+  const auto rate = [](std::size_t qualified, std::size_t samples) -> json {
+    return samples ? json(100.0 * static_cast<double>(qualified) /
+                          static_cast<double>(samples))
+                   : json(nullptr);
+  };
+  return json{{"qualified_samples", metrics.qualified()},
+              {"total_samples", metrics.samples()},
+              {"rate_pct", rate(metrics.qualified(), metrics.samples())},
+              {"ac_qualified_samples", metrics.ac_qualified},
+              {"ac_total_samples", metrics.ac_samples},
+              {"ac_rate_pct", rate(metrics.ac_qualified, metrics.ac_samples)},
+              {"dc_qualified_samples", metrics.dc_qualified},
+              {"dc_total_samples", metrics.dc_samples},
+              {"dc_rate_pct", rate(metrics.dc_qualified, metrics.dc_samples)}};
+}
+
+double elapsed_seconds(std::chrono::steady_clock::time_point started) {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+}
 
 std::string sc_fault_type_name(hacdcpf::analysis::FaultType ft) {
   switch (ft) {
@@ -10905,6 +10957,7 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/pf",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
+      const auto request_started = std::chrono::steady_clock::now();
       // Copy system under short lock, then release
       hacdcpf::HybridPowerSystem sys;
       {
@@ -13883,6 +13936,16 @@ int main(int argc, char** argv) {
           }
         }
       }
+      VoltageQualificationMetrics voltage_metrics;
+      if (out.value("converged", false)) {
+        accumulate_voltage_qualification(
+            voltage_metrics, sys,
+            out["vm"].get<std::vector<double>>(),
+            out["vdc"].get<std::vector<double>>());
+      }
+      out["voltage_qualification"] = voltage_qualification_json(voltage_metrics);
+      out["voltage_qualification"]["basis"] = "converged_snapshot";
+      out["execution_time_sec"] = elapsed_seconds(request_started);
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
     } catch (const std::exception& e) {
@@ -14647,6 +14710,7 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/opf",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
+      const auto request_started = std::chrono::steady_clock::now();
       hacdcpf::HybridPowerSystem sys;
       std::string dss_source_path;
       {
@@ -15233,6 +15297,7 @@ int main(int argc, char** argv) {
           }
         }
       }
+      out["execution_time_sec"] = elapsed_seconds(request_started);
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
     } catch (const std::exception& e) {
@@ -16634,6 +16699,7 @@ int main(int argc, char** argv) {
              [materialize_loads_and_apply_binding]
              (const httplib::Request& req, httplib::Response& res) {
       try {
+        const auto request_started = std::chrono::steady_clock::now();
         hacdcpf::HybridPowerSystem sys_ts;
         hacdcpf::TimeSeriesData ts_data;
         Session::TsBindingSpec spec;
@@ -17054,6 +17120,14 @@ int main(int argc, char** argv) {
           out["load_bus_indices"] = load_bus_indices;
           out["total_load"] = total_load;
         }
+        VoltageQualificationMetrics voltage_metrics;
+        for (const auto& pf : result.pf_results) {
+          if (!pf.converged) continue;
+          accumulate_voltage_qualification(voltage_metrics, sys_ts, pf.vm, pf.vdc);
+        }
+        out["voltage_qualification"] = voltage_qualification_json(voltage_metrics);
+        out["voltage_qualification"]["basis"] = "converged_time_steps";
+        out["execution_time_sec"] = elapsed_seconds(request_started);
         res.set_content(out.dump(), "application/json");
         g_session.busy.store(false);
       } catch (const std::exception& e) {
@@ -17908,10 +17982,197 @@ int main(int argc, char** argv) {
       }
     });
 
+    // ---- EV power-traffic coupling ----
+    svr.Post("/api/session/run_ev_traffic",
+             [](const httplib::Request& req, httplib::Response& res) {
+      bool owns_busy = false;
+      try {
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        const std::string scenario_source =
+            j.value("scenario_source", std::string("evpt_demo_small"));
+
+        hacdcpf::evpt::EVPowerTrafficProblem problem;
+        if (scenario_source == "custom") {
+          {
+            std::lock_guard<std::mutex> lk(g_session.mu);
+            if (!g_session.current_system) {
+              throw std::runtime_error(
+                  "Custom EV-traffic scenarios require a power system in the GUI session");
+            }
+            problem.system = *g_session.current_system;
+          }
+          if (!j.contains("scenario") || !j.at("scenario").is_object()) {
+            throw std::runtime_error("Custom EV-traffic scenario JSON is missing");
+          }
+          json scenario = j.at("scenario");
+          // Exported GUI scenarios keep nodes/links at the root, while the
+          // public parser uses {traffic:{nodes,links}}. Accept both shapes.
+          if (!scenario.contains("traffic") && scenario.contains("nodes") &&
+              scenario.contains("links")) {
+            scenario["traffic"] = {
+                {"nodes", scenario.at("nodes")},
+                {"links", scenario.at("links")}};
+          }
+          hacdcpf::io::evpt_problem_from_json(scenario, problem);
+        } else {
+          problem = hacdcpf::io::build_evpt_demo_case(scenario_source);
+        }
+
+        if (problem.traffic.nodes.empty() || problem.traffic.links.empty()) {
+          throw std::runtime_error("EV-traffic scenario must contain traffic nodes and links");
+        }
+        if (problem.routes.empty() || problem.demands.empty()) {
+          throw std::runtime_error("EV-traffic scenario must contain routes and EV demands");
+        }
+        if (problem.system.ac.charging_stations.empty()) {
+          throw std::runtime_error(
+              "The selected power system has no AC charging stations for route stops");
+        }
+
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(
+              json{{"error", "Another analysis is already running"}}.dump(),
+              "application/json");
+          return;
+        }
+        owns_busy = true;
+        g_session.cancel.store(false);
+
+        const std::string formulation =
+            j.value("formulation", std::string("ctm_due"));
+        const json model_j =
+            j.contains("model_options") && j.at("model_options").is_object()
+                ? j.at("model_options")
+                : json::object();
+        const json ctm_j =
+            j.contains("ctm_options") && j.at("ctm_options").is_object()
+                ? j.at("ctm_options")
+                : json::object();
+        const json due_j =
+            j.contains("due_options") && j.at("due_options").is_object()
+                ? j.at("due_options")
+                : json::object();
+
+        const auto ev_opts = hacdcpf::io::evpt_options_from_json(model_j);
+        const auto ctm_opts = hacdcpf::io::evpt_ctm_options_from_json(ctm_j);
+        const auto due_opts = hacdcpf::io::evpt_due_options_from_json(due_j);
+        if (ev_opts.num_steps <= 0 || ev_opts.num_steps > 8760 ||
+            !(ev_opts.time_step_hr > 0.0)) {
+          throw std::runtime_error(
+              "EV-traffic horizon must use 1..8760 steps and a positive time step");
+        }
+        if (ctm_opts.dt_ctm_hr < 0.0 || ctm_opts.n_cells_per_link < 0 ||
+            due_opts.max_iterations <= 0 || due_opts.convergence_tol <= 0.0) {
+          throw std::runtime_error("Invalid CTM/DUE algorithm parameters");
+        }
+
+        json result;
+        if (formulation == "assignment") {
+          result = hacdcpf::io::evpt_result_to_json(
+              hacdcpf::evpt::simulate_ev_power_traffic(problem, ev_opts));
+        } else if (formulation == "ctm_due") {
+          result = hacdcpf::io::evpt_ctm_due_result_to_json(
+              hacdcpf::evpt::simulate_ev_power_traffic_ctm_due(
+                  problem, ev_opts, ctm_opts, due_opts));
+        } else if (formulation == "ctm_joint") {
+          json coordination_j =
+              j.contains("coordination_options") &&
+                      j.at("coordination_options").is_object()
+                  ? j.at("coordination_options")
+                  : json::object();
+          coordination_j["evpt_options"] = model_j;
+          coordination_j["ctm_options"] = ctm_j;
+          coordination_j["due_options"] = due_j;
+          auto opts =
+              hacdcpf::io::evpt_ctm_joint_options_from_json(coordination_j);
+          if (opts.max_iterations <= 0 ||
+              opts.price_convergence_tol <= 0.0 ||
+              !(opts.price_update_step > 0.0 && opts.price_update_step <= 1.0)) {
+            throw std::runtime_error("Invalid CTM-DUE/DC-OPF coordination parameters");
+          }
+          opts.dcopf_opts.compute_lmp = true;
+          opts.dcopf_opts.load_shedding = true;
+          result = hacdcpf::io::evpt_ctm_joint_result_to_json(
+              hacdcpf::evpt::simulate_ev_power_traffic_ctm_joint(problem, opts));
+        } else if (formulation == "joint_optimizer") {
+          json optimizer_j =
+              j.contains("optimizer_options") &&
+                      j.at("optimizer_options").is_object()
+                  ? j.at("optimizer_options")
+                  : json::object();
+          // Core model controls are shared in the GUI and override optimizer
+          // defaults unless an optimizer-specific value was explicitly sent.
+          for (const char* key : {"num_steps", "time_step_hr", "allow_v2g",
+                                  "enforce_road_capacity",
+                                  "enforce_generation_capacity",
+                                  "value_of_time_per_hr",
+                                  "station_energy_cost_weight",
+                                  "default_station_price_per_kwh",
+                                  "default_charging_efficiency",
+                                  "default_route_stop_power_kw_per_vehicle",
+                                  "default_station_power_kw"}) {
+            if (!optimizer_j.contains(key) && model_j.contains(key)) {
+              optimizer_j[key] = model_j.at(key);
+            }
+          }
+          optimizer_j["ctm_options"] = ctm_j;
+          const auto opts =
+              hacdcpf::io::evpt_joint_optimizer_options_from_json(optimizer_j);
+          if (opts.num_steps <= 0 || opts.num_steps > 8760 ||
+              !(opts.time_step_hr > 0.0) || opts.mip_gap < 0.0 ||
+              opts.time_limit_sec <= 0.0 || opts.max_nodes <= 0) {
+            throw std::runtime_error("Invalid joint-optimizer parameters");
+          }
+          result = hacdcpf::io::evpt_joint_optimizer_result_to_json(
+              hacdcpf::evpt::solve_joint_optimizer(problem, opts));
+        } else {
+          throw std::runtime_error("Unsupported EV-traffic formulation: " +
+                                   formulation);
+        }
+
+        json out;
+        out["module"] = "ev_power_traffic";
+        out["formulation"] = formulation;
+        out["scenario_source"] = scenario_source;
+        if (scenario_source == "evpt_demo_comprehensive") {
+          out["verification_profile"] = "comprehensive_joint_v1";
+          out["expected_signals"] = {
+              {"traffic_nodes", 25}, {"traffic_links", 40},
+              {"routes", 7}, {"demands", 4}, {"charging_stations", 3},
+              {"dynamic_capacity_links", 2}, {"num_steps", 8}};
+        }
+        auto scenario_out = hacdcpf::io::evpt_scenario_to_json(problem);
+        if (scenario_source == "custom" && j.contains("scenario") &&
+            j.at("scenario").is_object()) {
+          scenario_out["name"] =
+              j.at("scenario").value("name", scenario_out.value("name", ""));
+        }
+        out["scenario"] = std::move(scenario_out);
+        out["parameters"] = j;
+        out["result"] = std::move(result);
+        g_session.busy.store(false);
+        owns_busy = false;
+        res.set_content(out.dump(), "application/json");
+      } catch (const std::exception& e) {
+        if (owns_busy) g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      } catch (...) {
+        if (owns_busy) g_session.busy.store(false);
+        res.status = 500;
+        res.set_content(
+            json{{"error", "Unknown internal error in EV power-traffic analysis"}}
+                .dump(),
+            "application/json");
+      }
+    });
+
     // ---- Annual Production Simulation ----
     svr.Post("/api/session/run_annual_sim",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
+        const auto request_started = std::chrono::steady_clock::now();
         hacdcpf::HybridPowerSystem sys_ann;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
@@ -18158,6 +18419,15 @@ int main(int argc, char** argv) {
         }
         out["snapshot_hours"] = snap_hours;
         out["snapshot_vm"] = snap_vm;
+        VoltageQualificationMetrics voltage_metrics;
+        for (const auto& snap : result.pf_snapshots) {
+          if (!snap.converged) continue;
+          accumulate_voltage_qualification(
+              voltage_metrics, sys_ann, snap.vm, snap.vdc);
+        }
+        out["voltage_qualification"] = voltage_qualification_json(voltage_metrics);
+        out["voltage_qualification"]["basis"] = "converged_sampled_pf_snapshots";
+        out["execution_time_sec"] = elapsed_seconds(request_started);
         // Geo data for animation map
         json geo_buses = json::array();
         for (const auto& bus : sys_ann.ac.buses) {
@@ -19769,6 +20039,7 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_reliability",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
+        const auto request_started = std::chrono::steady_clock::now();
         hacdcpf::HybridPowerSystem sys;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
@@ -19819,6 +20090,33 @@ int main(int argc, char** argv) {
           if (method == "seq") {
             opts.max_iterations = mc.value("max_iterations", j.value("max_years", 500));
             auto lp = hacdcpf::analysis::build_ieee_rts24_load_profile(opts.hours_per_year);
+            const json profile_values = load.value("profile_factors", json::array());
+            if (!profile_values.empty()) {
+              if (!profile_values.is_array())
+                throw std::runtime_error("load.profile_factors must be an array");
+              std::vector<double> period;
+              period.reserve(profile_values.size());
+              for (const auto& value : profile_values) {
+                if (!value.is_number())
+                  throw std::runtime_error("load.profile_factors must contain only numbers");
+                const double factor = value.get<double>();
+                if (!std::isfinite(factor) || factor < 0.0)
+                  throw std::runtime_error("load.profile_factors must be finite and non-negative");
+                period.push_back(factor);
+              }
+              if (period.empty())
+                throw std::runtime_error("load.profile_factors cannot be empty");
+              lp.factors.resize(static_cast<size_t>(opts.hours_per_year));
+              for (int hour = 0; hour < opts.hours_per_year; ++hour) {
+                lp.factors[static_cast<size_t>(hour)] =
+                    period[static_cast<size_t>(hour) % period.size()];
+              }
+              out["load_profile_source"] = "gui";
+              out["load_profile_period_steps"] = period.size();
+            } else {
+              out["load_profile_source"] = "ieee_rts24";
+              out["load_profile_period_steps"] = lp.factors.size();
+            }
             r = hacdcpf::analysis::run_sequential_mc(sys, lp, opts);
           } else {
             opts.max_iterations = mc.value("max_iterations", 5000);
@@ -20004,6 +20302,7 @@ int main(int argc, char** argv) {
           throw std::runtime_error("Unknown reliability method: " + method);
         }
 
+        out["execution_time_sec"] = elapsed_seconds(request_started);
         res.set_content(out.dump(), "application/json");
         g_session.busy.store(false);
       } catch (const std::exception& e) {

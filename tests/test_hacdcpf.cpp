@@ -395,6 +395,44 @@ TEST_CASE("JSON I/O: 2-bus AC system round-trip", "[io][json]") {
   REQUIRE_THAT(loaded.base_mva, WithinAbs(orig.base_mva, 1e-9));
 }
 
+TEST_CASE("JSON I/O preserves reliability and DC operating-cost parameters",
+          "[io][json][reliability][time_series]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  ACBus ac_bus; ac_bus.index = 1; ac_bus.bus_type = BusType::SLACK;
+  sys.ac.buses.push_back(ac_bus);
+  DCBus dc_bus; dc_bus.index = 1;
+  sys.dc.buses.push_back(dc_bus);
+
+  Generator gen; gen.index = 1; gen.bus = 1;
+  gen.forced_outage_rate = 0.031; gen.mttr_hr = 17.0; gen.t_scheduled_hr = 9.0;
+  sys.ac.generators.push_back(gen);
+  StaticGeneratorDC dc_gen; dc_gen.index = 2; dc_gen.bus = 1;
+  dc_gen.cost_c1 = 23.0; dc_gen.emission_factor_tco2_mwh = 0.41;
+  dc_gen.mtbf_hours = 1200.0; dc_gen.mttr_hours = 11.0;
+  sys.dc.dc_static_generators.push_back(dc_gen);
+  DCStorage storage; storage.index = 3; storage.bus = 1;
+  storage.charge_bid_price = 4.0; storage.discharge_bid_price = 8.0;
+  storage.daily_cycle_limit = 1.25; storage.forced_outage_rate = 0.02;
+  storage.mttr_hr = 13.0; storage.t_scheduled_hr = 7.0;
+  sys.dc.dc_storage.push_back(storage);
+
+  const auto roundtrip = hacdcpf::io::from_json(hacdcpf::io::to_json(sys));
+  REQUIRE(roundtrip.ac.generators.size() == 1);
+  CHECK_THAT(roundtrip.ac.generators[0].forced_outage_rate, WithinAbs(0.031, 1e-12));
+  CHECK_THAT(roundtrip.ac.generators[0].mttr_hr, WithinAbs(17.0, 1e-12));
+  CHECK_THAT(roundtrip.ac.generators[0].t_scheduled_hr, WithinAbs(9.0, 1e-12));
+  REQUIRE(roundtrip.dc.dc_static_generators.size() == 1);
+  CHECK_THAT(roundtrip.dc.dc_static_generators[0].cost_c1, WithinAbs(23.0, 1e-12));
+  CHECK_THAT(roundtrip.dc.dc_static_generators[0].emission_factor_tco2_mwh, WithinAbs(0.41, 1e-12));
+  REQUIRE(roundtrip.dc.dc_storage.size() == 1);
+  CHECK_THAT(roundtrip.dc.dc_storage[0].charge_bid_price, WithinAbs(4.0, 1e-12));
+  CHECK_THAT(roundtrip.dc.dc_storage[0].discharge_bid_price, WithinAbs(8.0, 1e-12));
+  CHECK_THAT(roundtrip.dc.dc_storage[0].daily_cycle_limit, WithinAbs(1.25, 1e-12));
+  CHECK_THAT(roundtrip.dc.dc_storage[0].t_scheduled_hr, WithinAbs(7.0, 1e-12));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Tests: Carbon analysis (full implementation)
 // ═══════════════════════════════════════════════════════════════════════════════

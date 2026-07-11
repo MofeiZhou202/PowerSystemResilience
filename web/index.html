@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Hybrid AC/DC Power System Simulator — ETAP-Style</title>
-<link rel="stylesheet" href="css/style.css?v=20260710-parameter-library"/>
+<link rel="stylesheet" href="css/style.css?v=20260711-evpt-comprehensive-v3"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -1063,6 +1063,185 @@
     </div>
     <input type="file" id="fileImportIntegratedEnergyProfiles" accept=".json,.csv,.txt" style="display:none"/>
   </div>
+  <!-- EV power-traffic coupling -->
+  <div class="sub-section ev-traffic-sub-section" data-sub="evTraffic" hidden>
+    <div class="control-param-group evpt-param-group" title="选择内置算例或导入交通网络、路径、需求和充电站映射">
+      <span class="control-param-title">场景</span>
+      <label class="sub-label">数据源
+        <select id="evptScenarioSource">
+          <option value="evpt_demo_comprehensive" selected>综合验证：33节点-城市路网</option>
+          <option value="evpt_demo_small">双母线-菱形路网</option>
+          <option value="evpt_demo_grid">33节点-5×5路网</option>
+          <option value="custom">当前电网+导入交通</option>
+        </select>
+      </label>
+      <button id="btnOpenEvTrafficDesigner" class="toolbar-btn" title="用结构化表格和路网预览创建交通场景">交通网络<br>设计</button>
+      <button id="btnImportEvTrafficScenario" class="toolbar-btn" title="导入交通节点、路段、候选路径、出行需求和电价 JSON">交通场景<br>导入</button>
+      <button id="btnDownloadEvTrafficTemplate" class="toolbar-btn" title="下载标准 EV 电力-交通场景 JSON 模板">标准模板<br>下载</button>
+      <button id="btnExportEvTrafficScenario" class="toolbar-btn" title="导出当前计算使用的电力-交通场景 JSON">场景<br>导出</button>
+      <span id="evptScenarioStatus" class="sub-hint">综合联合仿真验证算例</span>
+    </div>
+    <input type="file" id="fileImportEvTrafficScenario" accept=".json,application/json" style="display:none"/>
+    <div class="control-param-group evpt-param-group" title="耦合仿真范围、交通分配和充放电经济参数">
+      <span class="control-param-title">公共建模</span>
+      <label class="sub-label">模型
+        <select id="evptFormulation">
+          <option value="assignment">静态分配+充电</option>
+          <option value="ctm_due">CTM动态用户均衡</option>
+          <option value="ctm_joint" selected>CTM-DUE/DC-OPF协调</option>
+          <option value="joint_optimizer">电力-交通联合优化</option>
+        </select>
+      </label>
+      <label class="sub-label">时段数
+        <input id="evptNumSteps" type="number" value="8" min="1" max="8760" step="1"/>
+      </label>
+      <label class="sub-label">步长(h)
+        <input id="evptTimeStep" type="number" value="1" min="0.001" step="0.1"/>
+      </label>
+      <label class="sub-label">路径分配
+        <select id="evptAssignmentModel">
+          <option value="deterministic_shortest_path">最短广义成本</option>
+          <option value="logit">Logit随机分配</option>
+          <option value="capacity_aware_greedy">容量感知贪心</option>
+          <option value="system_optimal_lp" selected>系统最优LP</option>
+          <option value="system_optimal_milp">系统最优MILP</option>
+        </select>
+      </label>
+      <label class="sub-label">时间价值($/veh·h)
+        <input id="evptValueOfTime" type="number" value="1" min="0" step="0.1"/>
+      </label>
+      <label class="sub-label">电能权重
+        <input id="evptEnergyWeight" type="number" value="1" min="0" step="0.1"/>
+      </label>
+      <label class="sub-label">缺省电价($/kWh)
+        <input id="evptDefaultPrice" type="number" value="0.30" min="0" step="0.01"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="允许具备双向充放电能力的路径停车点向电网回馈能量">
+        <input id="evptAllowV2g" type="checkbox" checked/>
+        <span>V2G</span>
+      </label>
+      <label class="sub-label sub-checkbox">
+        <input id="evptRoadCapacity" type="checkbox" checked/>
+        <span>道路容量</span>
+      </label>
+    </div>
+    <div class="control-param-group evpt-param-group evpt-formulation-group" data-evpt-for="ctm_due ctm_joint" title="CTM离散化与DUE迭代参数">
+      <span class="control-param-title">CTM / DUE</span>
+      <label class="sub-label">CTM步长(h)
+        <input id="evptCtmDt" type="number" value="0" min="0" step="0.01" title="0为按CFL条件自动选择"/>
+      </label>
+      <label class="sub-label">每路段单元
+        <input id="evptCtmCells" type="number" value="0" min="0" step="1" title="0为按路段长度自动划分"/>
+      </label>
+      <label class="sub-label">后向波速(km/h)
+        <input id="evptBackwardWave" type="number" value="20" min="0.01" step="1"/>
+      </label>
+      <label class="sub-label sub-checkbox">
+        <input id="evptRouteSpecific" type="checkbox" checked/>
+        <span>路径分商品流</span>
+      </label>
+      <label class="sub-label">DUE迭代
+        <input id="evptDueMaxIter" type="number" value="50" min="1" step="5"/>
+      </label>
+      <label class="sub-label">收敛容差
+        <input id="evptDueTol" type="number" value="0.001" min="0.0000001" step="0.001"/>
+      </label>
+      <label class="sub-label">MSA固定步长
+        <input id="evptMsaStep" type="number" value="0" min="0" max="1" step="0.05" title="0使用1/k递减步长"/>
+      </label>
+      <label class="sub-label">Logit θ
+        <input id="evptDueLogitTheta" type="number" value="0" min="0" step="0.1"/>
+      </label>
+      <label class="sub-label sub-checkbox">
+        <input id="evptSoBenchmark" type="checkbox"/>
+        <span>系统最优基准</span>
+      </label>
+    </div>
+    <div class="control-param-group evpt-param-group evpt-formulation-group" data-evpt-for="ctm_joint" title="交通均衡与DC-OPF节点电价反馈参数">
+      <span class="control-param-title">价格协调</span>
+      <label class="sub-label">外层迭代
+        <input id="evptCoordMaxIter" type="number" value="30" min="1" step="5"/>
+      </label>
+      <label class="sub-label">电价容差($/kWh)
+        <input id="evptPriceTol" type="number" value="0.0001" min="0.0000001" step="0.0001"/>
+      </label>
+      <label class="sub-label">更新步长
+        <input id="evptPriceStep" type="number" value="0.6" min="0.01" max="1" step="0.05"/>
+      </label>
+      <label class="sub-label sub-checkbox">
+        <input id="evptUseDcopfPrices" type="checkbox" checked/>
+        <span>DC-OPF节点电价</span>
+      </label>
+    </div>
+    <div class="control-param-group evpt-param-group evpt-formulation-group" data-evpt-for="joint_optimizer" title="单体联合LP/MILP/MPEC/NLP模型与求解参数">
+      <span class="control-param-title">联合优化</span>
+      <label class="sub-label">目标/算法
+        <select id="evptJointMode">
+          <option value="social_welfare" selected>社会福利LP</option>
+          <option value="user_benefit">用户效益LP</option>
+          <option value="integer_route_milp">整数路径MILP</option>
+          <option value="certified_dynamic_mpec_milp">动态MPEC-MILP</option>
+          <option value="certified_dynamic_user_benefit_mpec_milp">用户动态MPEC-MILP</option>
+          <option value="certified_ltm_pwl_milp">LTM-PWL MILP</option>
+          <option value="certified_ltm_user_benefit_pwl_milp">用户LTM-PWL MILP</option>
+          <option value="full_joint_nlp">全联合NLP</option>
+          <option value="full_joint_user_benefit_nlp">用户全联合NLP</option>
+        </select>
+      </label>
+      <label class="sub-label sub-checkbox">
+        <input id="evptIncludeDcopf" type="checkbox" checked/>
+        <span>联合DC-OPF</span>
+      </label>
+      <label class="sub-label sub-checkbox">
+        <input id="evptUseCtmTimes" type="checkbox"/>
+        <span>CTM动态行程时间</span>
+      </label>
+      <label class="sub-label">MIP Gap
+        <input id="evptMipGap" type="number" value="0.000001" min="0" max="1" step="0.0001"/>
+      </label>
+      <label class="sub-label">时限(s)
+        <input id="evptTimeLimit" type="number" value="30" min="0.1" step="5"/>
+      </label>
+      <label class="sub-label">最大节点
+        <input id="evptMaxNodes" type="number" value="4096" min="1" step="256"/>
+      </label>
+    </div>
+    <div class="control-param-group evpt-param-group evpt-param-group-actions" title="高级物理参数、惩罚项和求解模型精度">
+      <span class="control-param-title">运行</span>
+      <button id="btnToggleEvTrafficAdvanced" class="toolbar-btn" title="展开/收起充电、容量与求解器高级参数" aria-expanded="false">展开<br>高级设置 ▸</button>
+      <span id="evptAdvancedControls" class="evpt-advanced-controls" hidden>
+        <label class="sub-label">充电效率
+          <input id="evptChargeEfficiency" type="number" value="0.95" min="0.01" max="1" step="0.01"/>
+        </label>
+        <label class="sub-label">单车充电(kW)
+          <input id="evptStopPower" type="number" value="7" min="0" step="1"/>
+        </label>
+        <label class="sub-label">站容量(kW)
+          <input id="evptStationPower" type="number" value="1000000000" min="0" step="100"/>
+        </label>
+        <label class="sub-label sub-checkbox"><input id="evptAllowUnservedTrips" type="checkbox"/><span>允许未服务出行</span></label>
+        <label class="sub-label sub-checkbox"><input id="evptAllowUnservedEnergy" type="checkbox"/><span>允许未充电量</span></label>
+        <label class="sub-label sub-checkbox"><input id="evptGenerationCapacity" type="checkbox" checked/><span>发电容量约束</span></label>
+        <label class="sub-label">未服务惩罚
+          <input id="evptUnservedPenalty" type="number" value="1000000" min="0" step="1000"/>
+        </label>
+        <label class="sub-label">功率松弛惩罚
+          <input id="evptPowerSlackPenalty" type="number" value="10000" min="0" step="100"/>
+        </label>
+        <label class="sub-label">外部选项成本
+          <input id="evptOutsideOptionCost" type="number" value="0" min="0" step="1"/>
+        </label>
+        <label class="sub-label">LTM分段数
+          <input id="evptPwlSegments" type="number" value="6" min="2" step="1"/>
+        </label>
+        <label class="sub-label">NCP惩罚
+          <input id="evptNcpPenalty" type="number" value="10" min="0" step="1"/>
+        </label>
+      </span>
+      <button id="btnRunEvTraffic" class="toolbar-btn run-btn" title="运行电力-交通耦合分析">运行<br>电力-交通</button>
+      <button id="btnExportEvTrafficResults" class="toolbar-btn" title="导出完整参数、场景和计算结果 JSON">结果<br>导出</button>
+    </div>
+  </div>
   <!-- Hosting capacity -->
   <div class="sub-section" data-sub="hosting" hidden>
     <button id="btnRunBearingCap" class="toolbar-btn run-btn" title="运行DG承载力评估">运行承载力评估</button>
@@ -1166,6 +1345,9 @@
       </label>
       <label class="sub-label" title="蒙特卡洛最大抽样次数 (NSQ) / 年数×10 (SEQ)">抽样次数
         <input id="relMaxIter" type="number" value="2000" min="100" step="500"/>
+      </label>
+      <label class="sub-label rel-seq-profile" title="序贯蒙特卡洛逐时负荷倍率；输入任意周期，后端自动重复到全年。留空使用 IEEE RTS 曲线。">SEQ负荷曲线(pu)
+        <textarea id="relSeqLoadProfile" rows="2">0.72,0.68,0.65,0.64,0.66,0.72,0.80,0.88,0.94,0.98,1.00,0.99,0.97,0.95,0.96,0.99,1.00,0.98,0.94,0.90,0.86,0.82,0.78,0.75</textarea>
       </label>
       <label class="sub-label sub-checkbox" title="并行评估独立样本、年份或故障枚举项">
         <input id="relParallel" type="checkbox" checked/>
@@ -1695,6 +1877,7 @@
       <div id="resultsEmpty" class="empty-hint">运行计算后在此查看结果</div>
       <div id="resultsContent" style="display:none">
         <div class="results-actions">
+          <span id="resultExecutionTime" class="result-execution-time" hidden></span>
           <button id="btnExportAllResults" class="toolbar-btn" title="将当前会话中已产生的分析结果合并导出为一个 JSON 文件">全部结果导出</button>
           <button id="btnPinResultSnapshot" class="toolbar-btn" title="将当前潮流/最优潮流/时序/碳流关键指标记录为一个快照，用于跨方案对比">对比快照 +</button>
           <button id="btnClearResultSnapshots" class="toolbar-btn" title="清空所有对比快照" hidden>清空对比</button>
@@ -1702,6 +1885,10 @@
         <div id="resultComparison" class="result-comparison" hidden></div>
         <div id="resultsSummary" class="results-summary"></div>
         <div class="result-group" data-result-group="powerFlow">
+        <div class="topo-section pf-warning-section" id="pfWarningSection" style="display:none">
+          <h4>潮流警告与终止信息</h4>
+          <div id="pfWarningResults" class="pf-warning-results"></div>
+        </div>
         <div class="topo-section" id="pfBalanceSection" style="display:none">
           <h4>潮流结果 — 节点功率平衡诊断</h4>
           <div id="pfBalanceResults" class="topo-table-wrap"></div>
@@ -2046,6 +2233,39 @@
             <div id="iesResultsTable" class="topo-table-wrap"></div>
           </div>
         </div><!-- /result-group integratedEnergy -->
+        <div class="result-group" data-result-group="evTraffic">
+          <div class="topo-section" id="evptResultsSection">
+            <h4>电力-交通耦合结果 — 概览</h4>
+            <div id="evptSummary" class="results-summary"></div>
+          </div>
+          <div class="topo-section" id="evptTopologySection">
+            <div class="carbon-sankey-header">
+              <h4>电力-交通耦合拓扑</h4>
+              <button id="btnEvptTopologyFullscreen" class="toolbar-btn" aria-expanded="false" title="展开或收起电力-交通耦合拓扑">全屏</button>
+            </div>
+            <div id="evptCoupledTopology" class="evpt-coupled-topology"></div>
+          </div>
+          <div class="topo-section">
+            <h4>综合验证判据</h4>
+            <div id="evptVerification" class="evpt-verification-grid"></div>
+          </div>
+          <div class="topo-section">
+            <h4>均衡与价格协调收敛</h4>
+            <div id="evptConvergenceChart" class="tspf-chart"></div>
+          </div>
+          <div class="topo-section">
+            <h4>充电站负荷与节点电价</h4>
+            <div id="evptStationChart" class="tspf-chart"></div>
+          </div>
+          <div class="topo-section">
+            <h4>路径分配</h4>
+            <div id="evptRouteResults" class="topo-table-wrap"></div>
+          </div>
+          <div class="topo-section">
+            <h4>场景规模与充电站映射</h4>
+            <div id="evptScenarioResults" class="topo-table-wrap"></div>
+          </div>
+        </div><!-- /result-group evTraffic -->
         <div class="result-group" data-result-group="reliability">
           <div class="topo-section">
             <h4>可靠性分析结果</h4>
@@ -2186,6 +2406,52 @@
   </div>
 </div>
 
+<!-- EV power-traffic scenario designer -->
+<div id="evptDesignerModal" class="modal" style="display:none">
+  <div class="modal-backdrop" data-close-evpt-designer></div>
+  <div class="modal-content evpt-designer-modal">
+    <div class="evpt-designer-header">
+      <h3>交通网络设计</h3>
+      <label class="sub-label">场景名称
+        <input id="evptDesignerName" type="text" value="EV traffic scenario"/>
+      </label>
+      <div class="evpt-designer-header-actions">
+        <button id="btnEvptDesignerNew" class="toolbar-btn" title="创建三节点起步场景">新建</button>
+        <button id="btnEvptDesignerImport" class="toolbar-btn" title="从 JSON 文件载入设计器">导入</button>
+        <button id="btnEvptDesignerExport" class="toolbar-btn" title="下载设计器中的标准 JSON">下载</button>
+        <button id="btnEvptDesignerClose" class="toolbar-btn" title="关闭" data-close-evpt-designer>关闭 ×</button>
+      </div>
+    </div>
+    <div class="evpt-designer-body">
+      <section class="evpt-designer-preview-pane">
+        <svg id="evptDesignerPreview" xmlns="http://www.w3.org/2000/svg" aria-label="交通网络预览"></svg>
+        <div id="evptDesignerValidation" class="evpt-designer-validation"></div>
+      </section>
+      <section class="evpt-designer-editor-pane">
+        <div id="evptDesignerTabs" class="evpt-designer-tabs" role="tablist">
+          <button class="active" data-evpt-designer-tab="nodes">节点</button>
+          <button data-evpt-designer-tab="links">路段</button>
+          <button data-evpt-designer-tab="routes">路径/充电</button>
+          <button data-evpt-designer-tab="demands">出行需求</button>
+          <button data-evpt-designer-tab="prices">分时电价</button>
+          <button data-evpt-designer-tab="json">JSON</button>
+        </div>
+        <div class="evpt-designer-table-actions">
+          <button id="btnEvptDesignerAddRow" class="toolbar-btn">新增</button>
+          <span id="evptDesignerTableCount" class="sub-hint"></span>
+        </div>
+        <div id="evptDesignerTable" class="topo-table-wrap evpt-designer-table"></div>
+        <textarea id="evptDesignerJson" class="evpt-designer-json" spellcheck="false" hidden></textarea>
+      </section>
+    </div>
+    <div class="modal-actions evpt-designer-footer">
+      <button id="btnEvptDesignerValidate" class="btn">校验</button>
+      <button id="btnEvptDesignerApply" class="btn btn-accent">应用到电力-交通</button>
+      <button class="btn" data-close-evpt-designer>取消</button>
+    </div>
+  </div>
+</div>
+
 <!-- ===== On-demand neighborhood sub-diagram (Phase 4) ===== -->
 <div id="subDiagramModal" class="modal" style="display:none">
   <div class="modal-backdrop" data-close-subdiagram></div>
@@ -2215,6 +2481,6 @@
   <script src="js/components.js?v=20260703-model-io"></script>
   <script src="js/search_registry.js?v=20260709-phase5"></script>
   <script src="js/canvas.js?v=20260710-unbalanced-analysis"></script>
-  <script src="js/app.js?v=20260710-parameter-library"></script>
+  <script src="js/app.js?v=20260711-evpt-comprehensive-v3"></script>
 </body>
 </html>

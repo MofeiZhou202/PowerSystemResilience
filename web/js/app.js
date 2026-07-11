@@ -56,6 +56,7 @@ const App = (() => {
   let _lastOpfData = null;
   let _lastTspfData = null;
   let _lastIntegratedEnergyData = null;
+  let _lastEvTrafficData = null;
   let _lastAnnualData = null;
   let _lastCarbonData = null;
   let _lastDynamicCarbonData = null;
@@ -83,6 +84,10 @@ const App = (() => {
   let _lastInvalidationReason = '';
   let _activeWorkflow = 'steady';
   let _parameterLibraryData = null;
+  let _importedEvTrafficScenario = null;
+  let _evptDesignerScenario = null;
+  let _evptDesignerTab = 'nodes';
+  let _evptDesignerJsonTimer = null;
 
   const ANALYSIS_BUSY_ERROR = 'Another analysis is already running';
   const MODULE_WORKFLOWS = {
@@ -164,6 +169,7 @@ const App = (() => {
     _lastOpfData = null;
     _lastTspfData = null;
     _lastIntegratedEnergyData = null;
+    _lastEvTrafficData = null;
     _lastCarbonData = null;
     _lastDynamicCarbonData = null;
     _lastTransientData = null;
@@ -1654,6 +1660,7 @@ const App = (() => {
     add('optimal_power_flow', _lastOpfData);
     add('time_series_power_flow', _lastTspfData);
     add('campus_integrated_energy', _lastIntegratedEnergyData);
+    add('ev_power_traffic', _lastEvTrafficData);
     add('annual_production_simulation', _lastAnnualData);
     add('carbon_flow', _lastCarbonData);
     add('dynamic_carbon_flow', _lastDynamicCarbonData);
@@ -1710,6 +1717,9 @@ const App = (() => {
       if (Number.isFinite(Number(_lastPfData.iterations))) m['潮流迭代'] = _lastPfData.iterations;
       const loss = pfTotalLossMw(_lastPfData);
       if (loss != null) m['网损(MW)'] = loss.toFixed(3);
+      const rawVq = _lastPfData.voltage_qualification?.rate_pct;
+      const vq = Number(rawVq);
+      if (rawVq != null && Number.isFinite(vq)) m['潮流电压合格率(%)'] = vq.toFixed(2);
     }
     if (_lastOpfData) {
       const obj = _lastOpfData.objective ?? _lastOpfData.total_cost ?? _lastOpfData.f;
@@ -1719,6 +1729,14 @@ const App = (() => {
       m['时序收敛步'] = `${_lastTspfData.num_converged || 0}/${_lastTspfData.num_steps || 0}`;
       const cost = _lastTspfData.total_generation_cost;
       if (Number.isFinite(Number(cost))) m['时序成本($)'] = Number(cost).toFixed(0);
+      const rawVq = _lastTspfData.voltage_qualification?.rate_pct;
+      const vq = Number(rawVq);
+      if (rawVq != null && Number.isFinite(vq)) m['时序电压合格率(%)'] = vq.toFixed(2);
+    }
+    if (_lastAnnualData) {
+      const rawVq = _lastAnnualData.voltage_qualification?.rate_pct;
+      const vq = Number(rawVq);
+      if (rawVq != null && Number.isFinite(vq)) m['生产模拟电压合格率(%)'] = vq.toFixed(2);
     }
     if (_lastCarbonData) {
       const s = _lastCarbonData.matrix_summary || _lastCarbonData.tracing_summary || {};
@@ -1782,8 +1800,30 @@ const App = (() => {
     }
   }
 
+  function isAnalysisApiPath(path) {
+    return /^\/api\/session\/(?:pf|opf|run_|small_signal|short_circuit|dc_short_circuit|harmonic|carbon|bearing|reconfig|resilience|scenario)/.test(path);
+  }
+
+  function recordAnalysisExecutionTime(path, data, requestSeconds) {
+    if (!isAnalysisApiPath(path) || !data || typeof data !== 'object') return;
+    const serverSeconds = Number(data.execution_time_sec ?? data.solve_time_sec ??
+      (Number(data.timing?.total_ms) / 1000));
+    const seconds = Number.isFinite(serverSeconds) ? serverSeconds : requestSeconds;
+    if (!Number.isFinite(Number(data.execution_time_sec))) {
+      data.execution_time_sec = seconds;
+      data.execution_time_source = 'client_request';
+    }
+    const el = document.getElementById('resultExecutionTime');
+    if (el) {
+      el.hidden = false;
+      el.textContent = `本次计算 ${seconds.toFixed(3)} s`;
+      el.title = Number.isFinite(serverSeconds) ? '后端计算墙钟时间' : '浏览器请求往返时间';
+    }
+  }
+
   async function apiPost(path, body = {}, options = {}) {
     const url = `${API_BASE}${path}`;
+    const started = performance.now();
     if (!options.quiet) log(`POST ${path}`, 'info');
     try {
       const res = await fetch(url, {
@@ -1792,6 +1832,7 @@ const App = (() => {
         body: JSON.stringify(body),
       });
       const data = await parseJsonResponse(res);
+      recordAnalysisExecutionTime(path, data, (performance.now() - started) / 1000);
       if (!res.ok) {
         if (!options.quiet) log(`Error: ${data.error || res.statusText}`, 'error');
         return null;
@@ -1808,6 +1849,7 @@ const App = (() => {
   // (e.g. an unknown fault bus id rejected by the server).
   async function apiPostResult(path, body = {}, options = {}) {
     const url = `${API_BASE}${path}`;
+    const started = performance.now();
     if (!options.quiet) log(`POST ${path}`, 'info');
     try {
       const res = await fetch(url, {
@@ -1816,6 +1858,7 @@ const App = (() => {
         body: JSON.stringify(body),
       });
       const data = await parseJsonResponse(res);
+      recordAnalysisExecutionTime(path, data, (performance.now() - started) / 1000);
       if (!res.ok) {
         const error = (data && (data.error || data.message)) || res.statusText;
         if (!options.quiet) log(`Error: ${error}`, 'error');
@@ -3877,6 +3920,8 @@ const App = (() => {
           <span class="result-value">${fmt(data.objective)}</span></div>
         <div class="result-item"><span class="result-label">状态</span>
           <span class="result-value">${escapeHtml(data.status || '')}</span></div>
+        <div class="result-item"><span class="result-label">计算时间</span>
+          <span class="result-value">${Number.isFinite(Number(data.execution_time_sec)) ? Number(data.execution_time_sec).toFixed(3) + ' s' : '—'}</span></div>
         <div class="result-item"><span class="result-label">网络模型</span>
           <span class="result-value">${escapeHtml(data.analysis_scope?.optimization_model || data._networkModel || 'balanced_aggregate')}</span></div>
       `;
@@ -7246,8 +7291,8 @@ const App = (() => {
           <span class="result-value" title="${escapeHtml(costFormulaText)}">${escapeHtml(costFormulaTitle)}</span></div>
         <div class="result-item"><span class="result-label">成本来源</span>
           <span class="result-value">${escapeHtml(costFormulaSource || '—')}</span></div>
-        <div class="result-item"><span class="result-label">墙钟用时</span>
-          <span class="result-value">${(data._wallSeconds || 0).toFixed(1)} s</span></div>
+        <div class="result-item"><span class="result-label">计算时间</span>
+          <span class="result-value">${Number(data.execution_time_sec ?? data._wallSeconds ?? 0).toFixed(3)} s</span></div>
         <div class="result-item"><span class="result-label">总发电量</span>
           <span class="result-value">${fmt(data.total_gen_mwh)} MWh</span></div>
         <div class="result-item"><span class="result-label">总负荷</span>
@@ -7262,6 +7307,8 @@ const App = (() => {
           <span class="result-value">${fmt(data.total_ens_mwh)} MWh</span></div>
         <div class="result-item"><span class="result-label">潮流收敛</span>
           <span class="result-value">${data.num_pf_converged}/${data.num_steps}</span></div>
+        <div class="result-item"><span class="result-label">电压合格率</span>
+          <span class="result-value">${data.voltage_qualification?.rate_pct != null && Number.isFinite(Number(data.voltage_qualification.rate_pct)) ? Number(data.voltage_qualification.rate_pct).toFixed(2) + '% (' + data.voltage_qualification.qualified_samples + '/' + data.voltage_qualification.total_samples + ')' : '—'}</span></div>
       `;
     }
 
@@ -7450,6 +7497,10 @@ const App = (() => {
         <span class="result-value" style="font-size:0.82em;">${constraintSummary}</span></div>
       <div class="result-item"><span class="result-label">总网损</span>
         <span class="result-value">${((data.losses_mw || []).reduce((a, b) => a + b, 0) * (data.step_duration_hr || 1)).toFixed(2)} MWh</span></div>
+      <div class="result-item"><span class="result-label">电压合格率</span>
+        <span class="result-value">${data.voltage_qualification?.rate_pct != null && Number.isFinite(Number(data.voltage_qualification.rate_pct)) ? Number(data.voltage_qualification.rate_pct).toFixed(2) + '% (' + data.voltage_qualification.qualified_samples + '/' + data.voltage_qualification.total_samples + ')' : '—'}</span></div>
+      <div class="result-item"><span class="result-label">计算时间</span>
+        <span class="result-value">${Number.isFinite(Number(data.execution_time_sec)) ? Number(data.execution_time_sec).toFixed(3) + ' s' : '—'}</span></div>
     `;
 
     const hrs = Array.from({ length: data.num_steps }, (_, i) => i);
@@ -9030,6 +9081,12 @@ const App = (() => {
       ? arr.map(v => optNumber(v, 0).toFixed(2)).join('/')
       : '';
     const phaseOpt = opt.three_phase || {};
+    const voltageQuality = data.voltage_qualification || {};
+    const voltageQualityText = voltageQuality.rate_pct != null && Number.isFinite(Number(voltageQuality.rate_pct))
+      ? `${Number(voltageQuality.rate_pct).toFixed(2)}% (${voltageQuality.qualified_samples}/${voltageQuality.total_samples})`
+      : '—';
+    const executionTimeText = Number.isFinite(Number(data.execution_time_sec))
+      ? `${Number(data.execution_time_sec).toFixed(3)} s` : '—';
     const isThreePhase = !!(data.three_phase || data.method === 'three_phase');
     const solverCards = isThreePhase
       ? `<div class="result-item"><span class="result-label">abc求解器/范围</span>
@@ -9054,8 +9111,30 @@ const App = (() => {
         <span class="result-value">${Number(data.residual || 0).toExponential(4)}</span></div>
       <div class="result-item"><span class="result-label">求解参数</span>
         <span class="result-value">tol=${optNumber(opt.tol, 0).toExponential(1)}, max=${opt.max_iter ?? '-'}</span></div>
+      <div class="result-item"><span class="result-label">电压合格率</span>
+        <span class="result-value">${voltageQualityText}</span></div>
+      <div class="result-item"><span class="result-label">计算时间</span>
+        <span class="result-value">${executionTimeText}</span></div>
       ${solverCards}
     `;
+
+    const warningSection = document.getElementById('pfWarningSection');
+    const warningResults = document.getElementById('pfWarningResults');
+    if (warningSection && warningResults) {
+      const warnings = Array.isArray(data.warnings) ? data.warnings.filter(Boolean) : [];
+      const termination = String(data.termination_reason || '').trim();
+      if (warnings.length || termination) {
+        warningSection.style.display = '';
+        const terminationHtml = termination
+          ? `<div><strong>终止原因：</strong>${escapeHtml(termination)}</div>` : '';
+        const warningHtml = warnings.length
+          ? `<ol>${warnings.map(w => `<li>${escapeHtml(String(w))}</li>`).join('')}</ol>` : '';
+        warningResults.innerHTML = terminationHtml + warningHtml;
+      } else {
+        warningSection.style.display = 'none';
+        warningResults.innerHTML = '';
+      }
+    }
 
     let busMap = {};
     try {
@@ -10770,16 +10849,17 @@ const App = (() => {
     // Optional section dividers: when a field key matches, a header row is
     // inserted before it to group the OPF constraint-limit fields visually.
     const sectionHeaders = {
-      generator:      { dynamic_model: '暂态模型参数' },
+      generator:      { forced_outage_rate: '可靠性参数', dynamic_model: '暂态模型参数' },
       load:           { dynamic_model: '暂态模型参数' },
       external_grid:  { dynamic_model: '暂态模型参数' },
-      storage:        { dynamic_model: '暂态模型参数' },
-      pv_system:      { dynamic_model: '暂态模型参数' },
-      static_generator: { dynamic_model: '暂态模型参数' },
+      storage:        { charge_bid_price: '时序运行成本', forced_outage_rate: '可靠性参数', dynamic_model: '暂态模型参数' },
+      pv_system:      { mtbf_hours: '可靠性参数', dynamic_model: '暂态模型参数' },
+      renewable_gen:  { mtbf_hours: '可靠性参数' },
+      static_generator: { cost_c1: '时序运行成本', mtbf_hours: '可靠性参数', dynamic_model: '暂态模型参数' },
       vsc_converter:  { r_conv_ac_pu: '约束限值 (OPF)', grid_forming: '构网与协调', dynamic_model: '暂态模型参数' },
       dc_load:        { dynamic_model: '暂态模型参数' },
-      dc_storage:     { dynamic_model: '暂态模型参数' },
-      dc_pv_array:    { dynamic_model: '暂态模型参数' },
+      dc_storage:     { charge_bid_price: '时序运行成本', forced_outage_rate: '可靠性参数', dynamic_model: '暂态模型参数' },
+      dc_pv_array:    { mtbf_hours: '可靠性参数', dynamic_model: '暂态模型参数' },
       asymmetric_load: { dynamic_model: '暂态模型参数' },
       dcdc_converter: { topology: '占空比约束 (OPF)' },
     };
@@ -12208,6 +12288,943 @@ const App = (() => {
     }
   }
 
+  function evptNumber(id, fallback) {
+    const value = Number(document.getElementById(id)?.value);
+    return Number.isFinite(value) ? value : fallback;
+  }
+
+  function evptChecked(id, fallback = false) {
+    const el = document.getElementById(id);
+    return el ? !!el.checked : fallback;
+  }
+
+  function evptScenarioNodes(scenario) {
+    return scenario?.traffic?.nodes || scenario?.nodes || [];
+  }
+
+  function evptScenarioLinks(scenario) {
+    return scenario?.traffic?.links || scenario?.links || [];
+  }
+
+  function normalizeEvTrafficScenario(source) {
+    const input = source?.scenario || source || {};
+    const scenario = JSON.parse(JSON.stringify(input));
+    if (!scenario.traffic) {
+      scenario.traffic = {
+        nodes: Array.isArray(scenario.nodes) ? scenario.nodes : [],
+        links: Array.isArray(scenario.links) ? scenario.links : [],
+      };
+    }
+    delete scenario.nodes;
+    delete scenario.links;
+    scenario.$schema = scenario.$schema || '/xjtu/schemas/ev_traffic_scenario.schema.json';
+    scenario.schema_version = '1.0';
+    scenario.name = scenario.name || 'EV traffic scenario';
+    scenario.traffic.nodes = Array.isArray(scenario.traffic.nodes) ? scenario.traffic.nodes : [];
+    scenario.traffic.links = Array.isArray(scenario.traffic.links) ? scenario.traffic.links : [];
+    scenario.routes = Array.isArray(scenario.routes) ? scenario.routes : [];
+    scenario.demands = Array.isArray(scenario.demands) ? scenario.demands : [];
+    scenario.station_prices = Array.isArray(scenario.station_prices) ? scenario.station_prices : [];
+    return scenario;
+  }
+
+  function createEvTrafficStarterScenario() {
+    return normalizeEvTrafficScenario({
+      name: 'EV traffic scenario',
+      traffic: {
+        nodes: [
+          { index: 1, name: 'Origin', x: 0, y: 0 },
+          { index: 2, name: 'Station', x: 1, y: 0 },
+          { index: 3, name: 'Destination', x: 2, y: 0 },
+        ],
+        links: [
+          { index: 1, from_node: 1, to_node: 2, length_km: 5, free_flow_time_hr: 0.1, capacity_veh_per_hr: 1000, jam_vehicles: 100, available: true, alpha: 0.15, beta: 4, drive_energy_kwh_per_veh_km: 0.18 },
+          { index: 2, from_node: 2, to_node: 3, length_km: 5, free_flow_time_hr: 0.1, capacity_veh_per_hr: 1000, jam_vehicles: 100, available: true, alpha: 0.15, beta: 4, drive_energy_kwh_per_veh_km: 0.18 },
+        ],
+      },
+      routes: [{
+        index: 1, origin_node: 1, destination_node: 3, link_indices: [1, 2], toll_cost: 0,
+        charging_stops: [{ station_id: 1, requested_energy_kwh_per_vehicle: 20, requested_discharge_energy_kwh_per_vehicle: 0, dwell_steps: 2, max_charge_kw_per_vehicle: 7, v2g_capable: false, max_discharge_kw_per_vehicle: 0 }],
+      }],
+      demands: [{ index: 1, origin_node: 1, destination_node: 3, departure_step: 0, vehicles: 100, candidate_route_indices: [1], initial_energy_kwh: 30, energy_min_kwh: 5, energy_max_kwh: 60, reserve_energy_kwh: 5, willingness_to_pay_per_vehicle: 50 }],
+      station_prices: [{ station_id: 1, price_per_kwh: [0.20, 0.20, 0.35, 0.35, 0.20, 0.20] }],
+    });
+  }
+
+  function currentEvptStationIds() {
+    const system = typeof Canvas !== 'undefined' && Canvas.buildSystemJson
+      ? Canvas.buildSystemJson() : {};
+    return new Set((system?.ac?.charging_stations || []).map(item => Number(item.index))
+      .filter(Number.isFinite));
+  }
+
+  function validateEvTrafficScenario(source) {
+    const scenario = normalizeEvTrafficScenario(source);
+    const nodes = evptScenarioNodes(scenario);
+    const links = evptScenarioLinks(scenario);
+    const routes = scenario.routes;
+    const demands = scenario.demands;
+    const errors = [];
+    const warnings = [];
+    const indexMap = (items, label) => {
+      const map = new Map();
+      items.forEach((item, pos) => {
+        const id = Number(item?.index);
+        if (!Number.isInteger(id) || id <= 0) errors.push(`${label}[${pos}] 的 index 必须为正整数`);
+        else if (map.has(id)) errors.push(`${label} index ${id} 重复`);
+        else map.set(id, item);
+      });
+      return map;
+    };
+    if (!nodes.length) errors.push('至少需要一个交通节点');
+    if (!links.length) errors.push('至少需要一个有向路段');
+    if (!routes.length) errors.push('至少需要一条候选路径');
+    if (!demands.length) errors.push('至少需要一条 EV 出行需求');
+    const nodeMap = indexMap(nodes, '节点');
+    const linkMap = indexMap(links, '路段');
+    const routeMap = indexMap(routes, '路径');
+    indexMap(demands, '需求');
+    links.forEach(link => {
+      const id = Number(link.index);
+      if (!nodeMap.has(Number(link.from_node)) || !nodeMap.has(Number(link.to_node))) {
+        errors.push(`路段 ${id} 的起点或终点不存在`);
+      }
+      if (!(Number(link.length_km) > 0) || !(Number(link.free_flow_time_hr) > 0)) {
+        errors.push(`路段 ${id} 的长度和自由流时间必须大于 0`);
+      }
+      if (!(Number(link.capacity_veh_per_hr) >= 0)) errors.push(`路段 ${id} 的容量无效`);
+    });
+    routes.forEach(route => {
+      const rid = Number(route.index);
+      const routeLinks = Array.isArray(route.link_indices) ? route.link_indices.map(Number) : [];
+      if (!nodeMap.has(Number(route.origin_node)) || !nodeMap.has(Number(route.destination_node))) {
+        errors.push(`路径 ${rid} 的 OD 节点不存在`);
+      }
+      if (!routeLinks.length) errors.push(`路径 ${rid} 未设置路段序列`);
+      let cursor = Number(route.origin_node);
+      routeLinks.forEach(linkId => {
+        const link = linkMap.get(linkId);
+        if (!link) errors.push(`路径 ${rid} 引用了不存在的路段 ${linkId}`);
+        else if (Number(link.from_node) !== cursor) errors.push(`路径 ${rid} 在路段 ${linkId} 处不连续`);
+        if (link) cursor = Number(link.to_node);
+      });
+      if (routeLinks.length && cursor !== Number(route.destination_node)) {
+        errors.push(`路径 ${rid} 未到达终点 ${route.destination_node}`);
+      }
+      (route.charging_stops || []).forEach((stop, pos) => {
+        if (!(Number(stop.station_id) > 0)) errors.push(`路径 ${rid} 充电点 ${pos + 1} 的 station_id 无效`);
+        if (!(Number(stop.requested_energy_kwh_per_vehicle) >= 0)) errors.push(`路径 ${rid} 的需求电量无效`);
+      });
+    });
+    demands.forEach(demand => {
+      const did = Number(demand.index);
+      if (!nodeMap.has(Number(demand.origin_node)) || !nodeMap.has(Number(demand.destination_node))) {
+        errors.push(`需求 ${did} 的 OD 节点不存在`);
+      }
+      if (!(Number(demand.vehicles) >= 0) || !Number.isInteger(Number(demand.departure_step)) || Number(demand.departure_step) < 0) {
+        errors.push(`需求 ${did} 的车辆数或出发时段无效`);
+      }
+      (demand.candidate_route_indices || []).map(Number).forEach(routeId => {
+        const route = routeMap.get(routeId);
+        if (!route) errors.push(`需求 ${did} 引用了不存在的路径 ${routeId}`);
+        else if (Number(route.origin_node) !== Number(demand.origin_node) || Number(route.destination_node) !== Number(demand.destination_node)) {
+          errors.push(`需求 ${did} 与候选路径 ${routeId} 的 OD 不一致`);
+        }
+      });
+    });
+    scenario.station_prices.forEach((profile, pos) => {
+      if (!(Number(profile.station_id) > 0) || !Array.isArray(profile.price_per_kwh) ||
+          !profile.price_per_kwh.length || profile.price_per_kwh.some(value => !(Number(value) >= 0))) {
+        errors.push(`分时电价[${pos}] 无效`);
+      }
+    });
+    const stationIds = currentEvptStationIds();
+    const stopIds = new Set(routes.flatMap(route => route.charging_stops || []).map(stop => Number(stop.station_id)));
+    if (!stationIds.size && stopIds.size) {
+      warnings.push('当前电力模型没有 AC 充电站；应用后需在画布中添加并匹配 station_id');
+    } else {
+      stopIds.forEach(id => {
+        if (!stationIds.has(id)) warnings.push(`station_id ${id} 未在当前电力模型中找到`);
+      });
+    }
+    return { scenario, errors, warnings };
+  }
+
+  function parseEvptNumberList(value) {
+    return String(value ?? '').split(/[\s,;]+/).filter(Boolean).map(Number).filter(Number.isFinite);
+  }
+
+  function nextEvptIndex(items) {
+    return Math.max(0, ...items.map(item => Number(item.index) || 0)) + 1;
+  }
+
+  function evptDesignerInput(row, field, value, kind = 'number', extraClass = '') {
+    if (kind === 'checkbox') {
+      return `<input type="checkbox" data-evpt-field="${field}" data-row="${row}" data-kind="checkbox" ${value ? 'checked' : ''}/>`;
+    }
+    const type = kind === 'text' || kind === 'list' ? 'text' : 'number';
+    const step = type === 'number' ? ' step="any"' : '';
+    return `<input class="${extraClass}" type="${type}"${step} data-evpt-field="${field}" data-row="${row}" data-kind="${kind}" value="${escapeHtml(String(value ?? ''))}"/>`;
+  }
+
+  function evptDesignerRows() {
+    if (!_evptDesignerScenario) return [];
+    if (_evptDesignerTab === 'nodes') return evptScenarioNodes(_evptDesignerScenario);
+    if (_evptDesignerTab === 'links') return evptScenarioLinks(_evptDesignerScenario);
+    if (_evptDesignerTab === 'routes') return _evptDesignerScenario.routes;
+    if (_evptDesignerTab === 'demands') return _evptDesignerScenario.demands;
+    if (_evptDesignerTab === 'prices') return _evptDesignerScenario.station_prices;
+    return [];
+  }
+
+  function renderEvptDesignerTable() {
+    const table = document.getElementById('evptDesignerTable');
+    const jsonEditor = document.getElementById('evptDesignerJson');
+    const add = document.getElementById('btnEvptDesignerAddRow');
+    const count = document.getElementById('evptDesignerTableCount');
+    if (!table || !jsonEditor || !_evptDesignerScenario) return;
+    const isJson = _evptDesignerTab === 'json';
+    table.hidden = isJson;
+    jsonEditor.hidden = !isJson;
+    if (add) add.hidden = isJson;
+    if (isJson) {
+      jsonEditor.value = JSON.stringify(_evptDesignerScenario, null, 2);
+      if (count) count.textContent = 'schema v1.0';
+      return;
+    }
+    const rows = evptDesignerRows();
+    if (count) count.textContent = `${rows.length} 项`;
+    let headers = [];
+    let body = '';
+    if (_evptDesignerTab === 'nodes') {
+      headers = ['ID', '名称', 'X', 'Y', ''];
+      body = rows.map((item, i) => `<tr><td>${evptDesignerInput(i, 'index', item.index)}</td><td>${evptDesignerInput(i, 'name', item.name, 'text')}</td><td>${evptDesignerInput(i, 'x', item.x)}</td><td>${evptDesignerInput(i, 'y', item.y)}</td><td><button class="evpt-delete-row" data-delete-row="${i}" title="删除">×</button></td></tr>`).join('');
+    } else if (_evptDesignerTab === 'links') {
+      headers = ['ID', '起点', '终点', '长度 km', '自由流 h', '容量 veh/h', '拥挤车辆', '可用', ''];
+      body = rows.map((item, i) => `<tr><td>${evptDesignerInput(i, 'index', item.index)}</td><td>${evptDesignerInput(i, 'from_node', item.from_node)}</td><td>${evptDesignerInput(i, 'to_node', item.to_node)}</td><td>${evptDesignerInput(i, 'length_km', item.length_km)}</td><td>${evptDesignerInput(i, 'free_flow_time_hr', item.free_flow_time_hr)}</td><td>${evptDesignerInput(i, 'capacity_veh_per_hr', item.capacity_veh_per_hr)}</td><td>${evptDesignerInput(i, 'jam_vehicles', item.jam_vehicles)}</td><td>${evptDesignerInput(i, 'available', item.available !== false, 'checkbox')}</td><td><button class="evpt-delete-row" data-delete-row="${i}" title="删除">×</button></td></tr>`).join('');
+    } else if (_evptDesignerTab === 'routes') {
+      headers = ['ID', '起点', '终点', '路段序列', '站ID', '充电 kWh/veh', '停留步', '充电 kW/veh', 'V2G', '放电 kW/veh', ''];
+      body = rows.map((item, i) => {
+        const stop = (item.charging_stops || [])[0] || {};
+        return `<tr><td>${evptDesignerInput(i, 'index', item.index)}</td><td>${evptDesignerInput(i, 'origin_node', item.origin_node)}</td><td>${evptDesignerInput(i, 'destination_node', item.destination_node)}</td><td>${evptDesignerInput(i, 'link_indices', (item.link_indices || []).join(','), 'list', 'evpt-list-input')}</td><td>${evptDesignerInput(i, 'stop.station_id', stop.station_id)}</td><td>${evptDesignerInput(i, 'stop.requested_energy_kwh_per_vehicle', stop.requested_energy_kwh_per_vehicle)}</td><td>${evptDesignerInput(i, 'stop.dwell_steps', stop.dwell_steps)}</td><td>${evptDesignerInput(i, 'stop.max_charge_kw_per_vehicle', stop.max_charge_kw_per_vehicle)}</td><td>${evptDesignerInput(i, 'stop.v2g_capable', stop.v2g_capable, 'checkbox')}</td><td>${evptDesignerInput(i, 'stop.max_discharge_kw_per_vehicle', stop.max_discharge_kw_per_vehicle)}</td><td><button class="evpt-delete-row" data-delete-row="${i}" title="删除">×</button></td></tr>`;
+      }).join('');
+    } else if (_evptDesignerTab === 'demands') {
+      headers = ['ID', '起点', '终点', '出发步', '车辆', '候选路径', '初始 kWh', '最小 kWh', '最大 kWh', 'WTP $/veh', ''];
+      body = rows.map((item, i) => `<tr><td>${evptDesignerInput(i, 'index', item.index)}</td><td>${evptDesignerInput(i, 'origin_node', item.origin_node)}</td><td>${evptDesignerInput(i, 'destination_node', item.destination_node)}</td><td>${evptDesignerInput(i, 'departure_step', item.departure_step)}</td><td>${evptDesignerInput(i, 'vehicles', item.vehicles)}</td><td>${evptDesignerInput(i, 'candidate_route_indices', (item.candidate_route_indices || []).join(','), 'list', 'evpt-list-input')}</td><td>${evptDesignerInput(i, 'initial_energy_kwh', item.initial_energy_kwh)}</td><td>${evptDesignerInput(i, 'energy_min_kwh', item.energy_min_kwh)}</td><td>${evptDesignerInput(i, 'energy_max_kwh', item.energy_max_kwh)}</td><td>${evptDesignerInput(i, 'willingness_to_pay_per_vehicle', item.willingness_to_pay_per_vehicle)}</td><td><button class="evpt-delete-row" data-delete-row="${i}" title="删除">×</button></td></tr>`).join('');
+    } else if (_evptDesignerTab === 'prices') {
+      headers = ['充电站 ID', '分时电价 $/kWh', ''];
+      body = rows.map((item, i) => `<tr><td>${evptDesignerInput(i, 'station_id', item.station_id)}</td><td>${evptDesignerInput(i, 'price_per_kwh', (item.price_per_kwh || []).join(','), 'list', 'evpt-list-input')}</td><td><button class="evpt-delete-row" data-delete-row="${i}" title="删除">×</button></td></tr>`).join('');
+    }
+    table.innerHTML = `<table><thead><tr>${headers.map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`;
+  }
+
+  function updateEvptDesignerField(input) {
+    const rows = evptDesignerRows();
+    const row = rows[Number(input.dataset.row)];
+    const field = input.dataset.evptField;
+    if (!row || !field) return;
+    let value = input.dataset.kind === 'checkbox' ? input.checked : input.value;
+    if (input.dataset.kind === 'number') value = Number(value);
+    if (input.dataset.kind === 'list') value = parseEvptNumberList(value);
+    if (field.startsWith('stop.')) {
+      row.charging_stops = Array.isArray(row.charging_stops) ? row.charging_stops : [];
+      if (!row.charging_stops.length) row.charging_stops.push({});
+      row.charging_stops[0][field.slice(5)] = value;
+    } else {
+      row[field] = value;
+    }
+    renderEvptDesignerPreview();
+    renderEvptDesignerValidation();
+  }
+
+  function addEvptDesignerRow() {
+    const scenario = _evptDesignerScenario;
+    if (!scenario) return;
+    const nodes = evptScenarioNodes(scenario);
+    const links = evptScenarioLinks(scenario);
+    const routes = scenario.routes;
+    const origin = Number(nodes[0]?.index || 1);
+    const destination = Number(nodes[nodes.length - 1]?.index || origin);
+    const stationId = [...currentEvptStationIds()][0] || 1;
+    if (_evptDesignerTab === 'nodes') nodes.push({ index: nextEvptIndex(nodes), name: `N${nextEvptIndex(nodes)}`, x: nodes.length, y: 0 });
+    else if (_evptDesignerTab === 'links') links.push({ index: nextEvptIndex(links), from_node: origin, to_node: destination, length_km: 1, free_flow_time_hr: 0.05, capacity_veh_per_hr: 1000, jam_vehicles: 100, available: true, alpha: 0.15, beta: 4, drive_energy_kwh_per_veh_km: 0.18 });
+    else if (_evptDesignerTab === 'routes') routes.push({ index: nextEvptIndex(routes), origin_node: origin, destination_node: destination, link_indices: links.length ? [Number(links[0].index)] : [], toll_cost: 0, charging_stops: [{ station_id: stationId, requested_energy_kwh_per_vehicle: 20, dwell_steps: 1, max_charge_kw_per_vehicle: 7, v2g_capable: false, max_discharge_kw_per_vehicle: 0 }] });
+    else if (_evptDesignerTab === 'demands') scenario.demands.push({ index: nextEvptIndex(scenario.demands), origin_node: origin, destination_node: destination, departure_step: 0, vehicles: 100, candidate_route_indices: routes.length ? [Number(routes[0].index)] : [], initial_energy_kwh: 30, energy_min_kwh: 5, energy_max_kwh: 60, reserve_energy_kwh: 5, willingness_to_pay_per_vehicle: 50 });
+    else if (_evptDesignerTab === 'prices') scenario.station_prices.push({ station_id: stationId, price_per_kwh: [0.2] });
+    renderEvptDesigner();
+  }
+
+  function deleteEvptDesignerRow(index) {
+    const rows = evptDesignerRows();
+    if (index >= 0 && index < rows.length) rows.splice(index, 1);
+    renderEvptDesigner();
+  }
+
+  function renderEvptDesignerPreview() {
+    const svg = document.getElementById('evptDesignerPreview');
+    if (!svg || !_evptDesignerScenario) return;
+    const nodes = evptScenarioNodes(_evptDesignerScenario);
+    const links = evptScenarioLinks(_evptDesignerScenario);
+    if (!nodes.length) {
+      svg.innerHTML = '';
+      return;
+    }
+    const width = 640, height = 440, pad = 48;
+    const positioned = nodes.map((node, i) => ({
+      node,
+      x: Number.isFinite(Number(node.x)) ? Number(node.x) : Math.cos(2 * Math.PI * i / nodes.length),
+      y: Number.isFinite(Number(node.y)) ? Number(node.y) : Math.sin(2 * Math.PI * i / nodes.length),
+    }));
+    const xs = positioned.map(item => item.x), ys = positioned.map(item => item.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+    const sx = value => pad + (value - minX) / Math.max(1e-9, maxX - minX) * (width - 2 * pad);
+    const sy = value => pad + (value - minY) / Math.max(1e-9, maxY - minY) * (height - 2 * pad);
+    const coords = new Map(positioned.map(item => [Number(item.node.index), { x: sx(item.x), y: sy(item.y), node: item.node }]));
+    const routeLinkIds = new Set(_evptDesignerScenario.routes.flatMap(route => route.link_indices || []).map(Number));
+    const linkSvg = links.map(link => {
+      const from = coords.get(Number(link.from_node)), to = coords.get(Number(link.to_node));
+      if (!from || !to) return '';
+      const dx = to.x - from.x, dy = to.y - from.y, len = Math.max(1, Math.hypot(dx, dy));
+      const x1 = from.x + dx / len * 17, y1 = from.y + dy / len * 17;
+      const x2 = to.x - dx / len * 22, y2 = to.y - dy / len * 22;
+      const color = routeLinkIds.has(Number(link.index)) ? '#2563eb' : '#94a3b8';
+      return `<g><line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2" marker-end="url(#evptArrow)"/><text x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 5}" text-anchor="middle" fill="#475569" font-size="11">L${escapeHtml(String(link.index))}</text></g>`;
+    }).join('');
+    const nodeSvg = positioned.map(item => {
+      const p = coords.get(Number(item.node.index));
+      return `<g><circle cx="${p.x}" cy="${p.y}" r="16" fill="#ffffff" stroke="#0f766e" stroke-width="2"/><text x="${p.x}" y="${p.y + 4}" text-anchor="middle" fill="#0f172a" font-size="11" font-weight="700">${escapeHtml(String(item.node.index))}</text><text x="${p.x}" y="${p.y + 31}" text-anchor="middle" fill="#334155" font-size="11">${escapeHtml(item.node.name || '')}</text></g>`;
+    }).join('');
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.innerHTML = `<defs><marker id="evptArrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#64748b"/></marker></defs>${linkSvg}${nodeSvg}`;
+  }
+
+  function renderEvptDesignerValidation(force = false) {
+    const el = document.getElementById('evptDesignerValidation');
+    if (!el || !_evptDesignerScenario) return null;
+    const validation = validateEvTrafficScenario(_evptDesignerScenario);
+    el.className = `evpt-designer-validation ${validation.errors.length ? 'invalid' : 'valid'}`;
+    const stats = `${evptScenarioNodes(validation.scenario).length} 节点 · ${evptScenarioLinks(validation.scenario).length} 路段 · ${validation.scenario.routes.length} 路径 · ${validation.scenario.demands.length} 需求`;
+    if (validation.errors.length) {
+      el.innerHTML = `<strong>${validation.errors.length} 个错误</strong> · ${escapeHtml(stats)}<br>${validation.errors.slice(0, 8).map(error => `• ${escapeHtml(error)}`).join('<br>')}`;
+    } else {
+      el.innerHTML = `<strong>结构校验通过</strong> · ${escapeHtml(stats)}${validation.warnings.length ? `<br>${validation.warnings.map(warning => `• ${escapeHtml(warning)}`).join('<br>')}` : ''}`;
+      if (force) log('交通场景结构校验通过', 'success');
+    }
+    return validation;
+  }
+
+  function commitEvptDesignerJson() {
+    const editor = document.getElementById('evptDesignerJson');
+    if (!editor || _evptDesignerTab !== 'json') return true;
+    try {
+      _evptDesignerScenario = normalizeEvTrafficScenario(JSON.parse(editor.value));
+      const name = document.getElementById('evptDesignerName');
+      if (name) name.value = _evptDesignerScenario.name;
+      renderEvptDesignerPreview();
+      renderEvptDesignerValidation();
+      return true;
+    } catch (e) {
+      const validation = document.getElementById('evptDesignerValidation');
+      if (validation) {
+        validation.className = 'evpt-designer-validation invalid';
+        validation.textContent = `JSON 解析失败: ${e.message || e}`;
+      }
+      return false;
+    }
+  }
+
+  function setEvptDesignerTab(tab) {
+    if (_evptDesignerTab === 'json' && tab !== 'json' && !commitEvptDesignerJson()) return;
+    _evptDesignerTab = tab;
+    document.querySelectorAll('#evptDesignerTabs [data-evpt-designer-tab]').forEach(button => {
+      button.classList.toggle('active', button.dataset.evptDesignerTab === tab);
+    });
+    renderEvptDesignerTable();
+  }
+
+  function renderEvptDesigner() {
+    if (!_evptDesignerScenario) return;
+    const name = document.getElementById('evptDesignerName');
+    if (name) name.value = _evptDesignerScenario.name || '';
+    renderEvptDesignerTable();
+    renderEvptDesignerPreview();
+    renderEvptDesignerValidation();
+  }
+
+  function openEvptDesigner() {
+    _evptDesignerScenario = normalizeEvTrafficScenario(
+      _importedEvTrafficScenario || _lastEvTrafficData?.scenario || createEvTrafficStarterScenario());
+    _evptDesignerTab = 'nodes';
+    const modal = document.getElementById('evptDesignerModal');
+    if (modal) modal.style.display = 'flex';
+    document.querySelectorAll('#evptDesignerTabs [data-evpt-designer-tab]').forEach(button => {
+      button.classList.toggle('active', button.dataset.evptDesignerTab === 'nodes');
+    });
+    renderEvptDesigner();
+  }
+
+  function closeEvptDesigner() {
+    const modal = document.getElementById('evptDesignerModal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  function applyEvptDesignerScenario() {
+    if (!commitEvptDesignerJson()) return;
+    _evptDesignerScenario.name = document.getElementById('evptDesignerName')?.value.trim() || 'EV traffic scenario';
+    const validation = renderEvptDesignerValidation(true);
+    if (!validation || validation.errors.length) {
+      setStatus('交通场景存在结构错误', 'warn');
+      return;
+    }
+    _importedEvTrafficScenario = normalizeEvTrafficScenario(_evptDesignerScenario);
+    const source = document.getElementById('evptScenarioSource');
+    if (source) source.value = 'custom';
+    updateEvTrafficControls();
+    closeEvptDesigner();
+    setStatus('交通场景已应用', 'success');
+  }
+
+  function updateEvTrafficControls() {
+    const formulation = document.getElementById('evptFormulation')?.value || 'ctm_due';
+    document.querySelectorAll('.evpt-formulation-group').forEach(group => {
+      const modes = String(group.dataset.evptFor || '').split(/\s+/).filter(Boolean);
+      group.hidden = !modes.includes(formulation);
+    });
+    const source = document.getElementById('evptScenarioSource')?.value;
+    const status = document.getElementById('evptScenarioStatus');
+    if (status) {
+      if (source === 'custom') {
+        status.textContent = _importedEvTrafficScenario
+          ? `${_importedEvTrafficScenario.name || '自定义交通场景'}；电力侧使用当前画布`
+          : '等待导入交通场景';
+        status.className = `sub-hint ${_importedEvTrafficScenario ? 'sub-hint-ok' : 'sub-hint-warn'}`;
+      } else {
+        status.textContent = source === 'evpt_demo_comprehensive'
+          ? '4批次 · 7路径 · 3充电站 · CTM-DUE/DC-OPF'
+          : (source === 'evpt_demo_grid' ? '33节点耦合算例' : '内置快速算例');
+        status.className = 'sub-hint';
+      }
+    }
+  }
+
+  function applyEvTrafficScenarioPreset() {
+    const source = document.getElementById('evptScenarioSource')?.value;
+    if (source === 'evpt_demo_comprehensive') {
+      const setValue = (id, value) => {
+        const el = document.getElementById(id);
+        if (el) el.value = String(value);
+      };
+      setValue('evptFormulation', 'ctm_joint');
+      setValue('evptNumSteps', 8);
+      setValue('evptDueMaxIter', 30);
+      setValue('evptDueTol', 0.005);
+      setValue('evptCoordMaxIter', 12);
+      setValue('evptPriceTol', 0.001);
+      setValue('evptPriceStep', 0.6);
+      const dcopf = document.getElementById('evptUseDcopfPrices');
+      if (dcopf) dcopf.checked = true;
+    }
+    updateEvTrafficControls();
+  }
+
+  function collectEvTrafficPayload() {
+    const modelOptions = {
+      num_steps: Math.trunc(evptNumber('evptNumSteps', 6)),
+      time_step_hr: evptNumber('evptTimeStep', 1),
+      assignment_model: document.getElementById('evptAssignmentModel')?.value || 'system_optimal_lp',
+      logit_theta: evptNumber('evptDueLogitTheta', 0),
+      enforce_road_capacity: evptChecked('evptRoadCapacity', true),
+      allow_unserved_travel_demand: evptChecked('evptAllowUnservedTrips'),
+      allow_unserved_charging_energy: evptChecked('evptAllowUnservedEnergy'),
+      allow_v2g: evptChecked('evptAllowV2g', true),
+      value_of_time_per_hr: evptNumber('evptValueOfTime', 1),
+      station_energy_cost_weight: evptNumber('evptEnergyWeight', 1),
+      default_station_price_per_kwh: evptNumber('evptDefaultPrice', 0.30),
+      default_charging_efficiency: evptNumber('evptChargeEfficiency', 0.95),
+      default_route_stop_power_kw_per_vehicle: evptNumber('evptStopPower', 7),
+      default_station_power_kw: evptNumber('evptStationPower', 1e9),
+      system_optimal_unserved_trip_penalty: evptNumber('evptUnservedPenalty', 1e6),
+      enforce_generation_capacity: evptChecked('evptGenerationCapacity', true),
+    };
+    const ctmOptions = {
+      dt_ctm_hr: evptNumber('evptCtmDt', 0),
+      n_cells_per_link: Math.trunc(evptNumber('evptCtmCells', 0)),
+      backward_wave_speed_fallback_km_hr: evptNumber('evptBackwardWave', 20),
+      route_specific_cells: evptChecked('evptRouteSpecific', true),
+    };
+    const dueOptions = {
+      max_iterations: Math.trunc(evptNumber('evptDueMaxIter', 50)),
+      convergence_tol: evptNumber('evptDueTol', 1e-3),
+      msa_fixed_step: evptNumber('evptMsaStep', 0),
+      logit_theta: evptNumber('evptDueLogitTheta', 0),
+      compute_system_optimal_benchmark: evptChecked('evptSoBenchmark'),
+    };
+    return {
+      scenario_source: document.getElementById('evptScenarioSource')?.value || 'evpt_demo_comprehensive',
+      scenario: _importedEvTrafficScenario,
+      formulation: document.getElementById('evptFormulation')?.value || 'ctm_due',
+      model_options: modelOptions,
+      ctm_options: ctmOptions,
+      due_options: dueOptions,
+      coordination_options: {
+        max_iterations: Math.trunc(evptNumber('evptCoordMaxIter', 30)),
+        price_convergence_tol: evptNumber('evptPriceTol', 1e-4),
+        price_update_step: evptNumber('evptPriceStep', 0.6),
+        use_dcopf_prices: evptChecked('evptUseDcopfPrices', true),
+      },
+      optimizer_options: {
+        mode: document.getElementById('evptJointMode')?.value || 'social_welfare',
+        include_dcopf: evptChecked('evptIncludeDcopf', true),
+        use_ctm_travel_times: evptChecked('evptUseCtmTimes'),
+        mip_gap: evptNumber('evptMipGap', 1e-6),
+        time_limit_sec: evptNumber('evptTimeLimit', 30),
+        max_nodes: Math.trunc(evptNumber('evptMaxNodes', 4096)),
+        unserved_trip_penalty: evptNumber('evptUnservedPenalty', 1e6),
+        power_slack_penalty: evptNumber('evptPowerSlackPenalty', 1e4),
+        outside_option_cost: evptNumber('evptOutsideOptionCost', 0),
+        full_joint_ltm_pwl_segments: Math.trunc(evptNumber('evptPwlSegments', 6)),
+        full_joint_equilibrium_penalty: evptNumber('evptNcpPenalty', 10),
+      },
+    };
+  }
+
+  async function importEvTrafficScenario(file) {
+    try {
+      const parsed = JSON.parse(await file.text());
+      const scenario = normalizeEvTrafficScenario(parsed);
+      const validation = validateEvTrafficScenario(scenario);
+      if (validation.errors.length) throw new Error(validation.errors.slice(0, 4).join('；'));
+      _importedEvTrafficScenario = scenario;
+      const source = document.getElementById('evptScenarioSource');
+      if (source) source.value = 'custom';
+      updateEvTrafficControls();
+      log(`已导入电力-交通场景: ${file.name}`, 'success');
+      return scenario;
+    } catch (e) {
+      log(`交通场景导入失败: ${e.message || e}`, 'error');
+      setStatus('交通场景导入失败', 'error');
+      return null;
+    }
+  }
+
+  function evptFmt(value, digits = 2) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n.toFixed(digits) : '—';
+  }
+
+  function evptSeriesMapToTraces(seriesMap, prefix, yaxis) {
+    if (!seriesMap || typeof seriesMap !== 'object') return [];
+    return Object.entries(seriesMap).filter(([, values]) => Array.isArray(values)).map(([id, values]) => ({
+      x: values.map((_, i) => i),
+      y: values,
+      mode: 'lines+markers',
+      name: `${prefix}${id}`,
+      yaxis,
+    }));
+  }
+
+  function renderEvTrafficSummary(data) {
+    const el = document.getElementById('evptSummary');
+    if (!el) return;
+    const r = data.result || {};
+    const due = r.ctm_due || r;
+    const scenario = data.scenario || {};
+    const demand = Number(r.total_demand_vehicles ??
+      (scenario.demands || []).reduce((sum, item) => sum + Number(item.vehicles || 0), 0));
+    const flowMap = r.route_flow || due.flow_by_demand_route || {};
+    const hasFlow = Object.keys(flowMap).length > 0;
+    const servedFromFlow = Object.values(flowMap).reduce((total, routeFlow) =>
+      total + Object.values(routeFlow || {}).reduce((sum, value) => sum + Number(value || 0), 0), 0);
+    const served = Number(r.total_served_vehicles ?? r.served_demand_vehicles ??
+      (hasFlow ? servedFromFlow : demand - Number(r.unmet_demand_vehicles || 0)));
+    const cards = [
+      ['模型', data.formulation || '—'],
+      ['交通规模', `${evptScenarioNodes(scenario).length}点 / ${evptScenarioLinks(scenario).length}路段`],
+      ['服务车辆', evptFmt(served, 2)],
+      ['充电量', `${evptFmt(r.total_delivered_energy_kwh ?? due.total_delivered_energy_kwh, 2)} kWh`],
+      ['V2G电量', `${evptFmt(r.total_v2g_energy_kwh ?? due.total_v2g_energy_kwh, 2)} kWh`],
+      ['总行程时间', `${evptFmt(r.total_travel_time_hr ?? due.due_tstt_hr, 2)} veh·h`],
+      ['社会福利', evptFmt(r.social_welfare ?? r.objective, 2)],
+      ['迭代/Gap', `${Number(r.iterations ?? due.iterations ?? 0)} / ${evptFmt(r.relative_gap ?? due.relative_gap ?? r.mip_gap, 6)}`],
+    ];
+    const status = r.status || r.solver_status ||
+      (r.converged ? 'converged' : (r.feasible ? 'feasible' : 'completed'));
+    const verified = r.mathematical_model_verified === true;
+    el.innerHTML = `
+      <div class="ies-kpi-grid">
+        ${cards.map(([label, value]) => `<div class="ies-kpi-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join('')}
+      </div>
+      <div class="sub-hint">状态：${escapeHtml(status)}；求解器：${escapeHtml(r.solver_backend || '内置')}；数学模型证书：${verified ? '已验证' : escapeHtml(r.mathematical_model_verification_status || '未声明')}</div>`;
+  }
+
+  function evptRouteFlowTotals(data) {
+    const r = data.result || {};
+    const due = r.ctm_due || r;
+    const totals = {};
+    if (Array.isArray(r.assignments)) {
+      r.assignments.forEach(item => {
+        const route = String(item.route_index);
+        totals[route] = (totals[route] || 0) + Number(item.vehicles || 0);
+      });
+    } else {
+      const flow = r.route_flow || due.flow_by_demand_route || {};
+      Object.values(flow).forEach(routeFlow => {
+        Object.entries(routeFlow || {}).forEach(([route, vehicles]) => {
+          totals[route] = (totals[route] || 0) + Number(vehicles || 0);
+        });
+      });
+    }
+    return totals;
+  }
+
+  function evptPowerLayout(power, compact = false) {
+    const buses = (power?.buses || []).filter(bus => bus.in_service !== false);
+    const branches = (power?.branches || []).filter(branch => branch.in_service !== false);
+    const busIds = new Set(buses.map(bus => Number(bus.index)));
+    const adjacency = new Map(buses.map(bus => [Number(bus.index), []]));
+    branches.forEach(branch => {
+      const a = Number(branch.from_bus), b = Number(branch.to_bus);
+      if (!busIds.has(a) || !busIds.has(b)) return;
+      adjacency.get(a).push(b);
+      adjacency.get(b).push(a);
+    });
+    const slackGen = (power?.generators || []).find(gen => gen.is_slack && gen.in_service !== false);
+    const root = Number(slackGen?.bus ?? buses[0]?.index ?? 0);
+    const depth = new Map(root ? [[root, 0]] : []);
+    const queue = root ? [root] : [];
+    while (queue.length) {
+      const current = queue.shift();
+      (adjacency.get(current) || []).forEach(next => {
+        if (!depth.has(next)) {
+          depth.set(next, depth.get(current) + 1);
+          queue.push(next);
+        }
+      });
+    }
+    buses.forEach(bus => { if (!depth.has(Number(bus.index))) depth.set(Number(bus.index), 0); });
+    const levels = new Map();
+    buses.forEach(bus => {
+      const d = depth.get(Number(bus.index)) || 0;
+      if (!levels.has(d)) levels.set(d, []);
+      levels.get(d).push(Number(bus.index));
+    });
+    levels.forEach(ids => ids.sort((a, b) => a - b));
+    const maxDepth = Math.max(1, ...depth.values());
+    const positions = new Map();
+    levels.forEach((ids, d) => {
+      ids.forEach((id, i) => positions.set(id, {
+        x: compact ? 8 + 84 * d / maxDepth : 59 + 37 * d / maxDepth,
+        y: compact ? 55 + 38 * (i + 1) / (ids.length + 1)
+                   : 8 + 84 * (i + 1) / (ids.length + 1),
+      }));
+    });
+    return { buses, branches, positions };
+  }
+
+  function renderEvTrafficCoupledTopology(data) {
+    const div = document.getElementById('evptCoupledTopology');
+    if (!div) return;
+    if (typeof Plotly === 'undefined') {
+      div.innerHTML = '<p class="empty-hint">Plotly 未加载，无法展示耦合拓扑。</p>';
+      return;
+    }
+    const scenario = data.scenario || {};
+    const nodes = evptScenarioNodes(scenario);
+    const links = evptScenarioLinks(scenario);
+    const routes = scenario.routes || [];
+    const power = scenario.power_network || {};
+    if (!nodes.length || !(power.buses || []).length) {
+      div.innerHTML = '<p class="empty-hint">当前结果缺少交通或电力拓扑回显。</p>';
+      return;
+    }
+    const compact = div.clientWidth < 600;
+    const raw = nodes.map((node, i) => ({
+      id: Number(node.index),
+      name: node.name || `N${node.index}`,
+      x: Number.isFinite(Number(node.x)) ? Number(node.x) : i,
+      y: Number.isFinite(Number(node.y)) ? Number(node.y) : 0,
+    }));
+    const minX = Math.min(...raw.map(item => item.x));
+    const maxX = Math.max(...raw.map(item => item.x));
+    const minY = Math.min(...raw.map(item => item.y));
+    const maxY = Math.max(...raw.map(item => item.y));
+    const trafficPos = new Map(raw.map(item => [item.id, {
+      x: (compact ? 8 : 4) + (compact ? 84 : 43) * (item.x - minX) / Math.max(1e-9, maxX - minX),
+      y: 7 + (compact ? 38 : 84) * (item.y - minY) / Math.max(1e-9, maxY - minY),
+      name: item.name,
+    }]));
+    const routeFlow = evptRouteFlowTotals(data);
+    const linkFlow = new Map();
+    routes.forEach(route => {
+      const flow = Number(routeFlow[String(route.index)] || 0);
+      (route.link_indices || []).forEach(id => linkFlow.set(Number(id), (linkFlow.get(Number(id)) || 0) + flow));
+    });
+    const traces = [];
+    links.forEach(link => {
+      const from = trafficPos.get(Number(link.from_node));
+      const to = trafficPos.get(Number(link.to_node));
+      if (!from || !to) return;
+      const flow = linkFlow.get(Number(link.index)) || 0;
+      traces.push({
+        x: [from.x, to.x], y: [from.y, to.y], mode: 'lines',
+        line: { color: flow > 0 ? '#e5a43b' : '#607080', width: 1 + Math.min(7, Math.sqrt(flow) * 0.8) },
+        name: `道路 ${link.index}`, text: [`流量 ${evptFmt(flow, 2)} veh`, `流量 ${evptFmt(flow, 2)} veh`],
+        hovertemplate: '%{text}<extra>%{fullData.name}</extra>', showlegend: false,
+      });
+    });
+    traces.push({
+      x: raw.map(item => trafficPos.get(item.id).x),
+      y: raw.map(item => trafficPos.get(item.id).y),
+      mode: 'markers+text', text: raw.map(item => String(item.id)), textposition: 'top center',
+      marker: { size: 9, color: '#61afef', line: { width: 1, color: '#dbeafe' } },
+      customdata: raw.map(item => item.name),
+      hovertemplate: '交通节点 %{text}<br>%{customdata}<extra></extra>',
+      name: '交通节点',
+    });
+
+    const powerLayout = evptPowerLayout(power, compact);
+    const branchX = [], branchY = [];
+    powerLayout.branches.forEach(branch => {
+      const from = powerLayout.positions.get(Number(branch.from_bus));
+      const to = powerLayout.positions.get(Number(branch.to_bus));
+      if (!from || !to) return;
+      branchX.push(from.x, to.x, null);
+      branchY.push(from.y, to.y, null);
+    });
+    traces.push({
+      x: branchX, y: branchY, mode: 'lines', line: { color: '#4f8065', width: 1.5 },
+      hoverinfo: 'skip', name: '配电线路',
+    });
+    traces.push({
+      x: powerLayout.buses.map(bus => powerLayout.positions.get(Number(bus.index)).x),
+      y: powerLayout.buses.map(bus => powerLayout.positions.get(Number(bus.index)).y),
+      mode: 'markers',
+      marker: { size: powerLayout.buses.map(bus => Number(bus.bus_type) === 3 ? 13 : 7), color: '#98c379', line: { width: 1, color: '#dcfce7' } },
+      text: powerLayout.buses.map(bus => `Bus ${bus.index}`),
+      customdata: powerLayout.buses.map(bus => [bus.pd_mw, bus.base_kv]),
+      hovertemplate: '%{text}<br>负荷 %{customdata[0]:.3f} MW<br>%{customdata[1]:.1f} kV<extra></extra>',
+      name: '电力母线',
+    });
+
+    const linkMap = new Map(links.map(link => [Number(link.index), link]));
+    const stationTrafficPos = new Map();
+    routes.forEach(route => {
+      const stationIds = (route.charging_stops || []).map(stop => Number(stop.station_id));
+      if (!stationIds.length) return;
+      const pathNodes = [Number(route.origin_node)];
+      (route.link_indices || []).forEach(id => {
+        const link = linkMap.get(Number(id));
+        if (link) pathNodes.push(Number(link.to_node));
+      });
+      const positions = pathNodes.map(id => trafficPos.get(id)).filter(Boolean);
+      if (!positions.length) return;
+      const pos = {
+        x: positions.reduce((sum, item) => sum + item.x, 0) / positions.length,
+        y: positions.reduce((sum, item) => sum + item.y, 0) / positions.length,
+      };
+      stationIds.forEach(id => { if (!stationTrafficPos.has(id)) stationTrafficPos.set(id, pos); });
+    });
+    const stations = scenario.charging_stations || [];
+    const couplingX = [], couplingY = [];
+    stations.forEach(station => {
+      const road = stationTrafficPos.get(Number(station.station_id));
+      const bus = powerLayout.positions.get(Number(station.bus));
+      if (!road || !bus) return;
+      couplingX.push(road.x, bus.x, null);
+      couplingY.push(road.y, bus.y, null);
+    });
+    traces.push({
+      x: couplingX, y: couplingY, mode: 'lines',
+      line: { color: '#c678dd', width: 2, dash: 'dot' },
+      hoverinfo: 'skip', name: '充电站-母线耦合',
+    });
+    traces.push({
+      x: stations.map(station => stationTrafficPos.get(Number(station.station_id))?.x).filter(Number.isFinite),
+      y: stations.map(station => stationTrafficPos.get(Number(station.station_id))?.y).filter(Number.isFinite),
+      mode: 'markers', marker: { size: 13, symbol: 'diamond', color: '#c678dd' },
+      text: stations.filter(station => stationTrafficPos.has(Number(station.station_id))).map(station => `CS ${station.station_id} → Bus ${station.bus}`),
+      hovertemplate: '%{text}<extra></extra>', name: '充电站',
+    });
+    Plotly.newPlot(div, traces, {
+      margin: { l: 20, r: 20, t: 34, b: 18 },
+      xaxis: { range: [0, 100], visible: false, fixedrange: true },
+      yaxis: { range: [0, 100], visible: false, fixedrange: true },
+      paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+      font: { color: '#dcdfe4', size: 10 },
+      legend: { orientation: 'h', y: -0.02 },
+      annotations: [
+        { x: compact ? 50 : 24, y: compact ? 48 : 99, text: '交通网络 / 路段流量', showarrow: false, font: { size: compact ? 11 : 13, color: '#61afef' } },
+        { x: compact ? 50 : 78, y: 99, text: '33节点配电网', showarrow: false, font: { size: compact ? 11 : 13, color: '#98c379' } },
+      ],
+    }, { responsive: true, displaylogo: false });
+  }
+
+  function renderEvTrafficVerification(data) {
+    const el = document.getElementById('evptVerification');
+    if (!el) return;
+    const r = data.result || {};
+    const due = r.ctm_due || r;
+    const scenario = data.scenario || {};
+    const flows = evptRouteFlowTotals(data);
+    const assigned = Object.values(flows).reduce((sum, value) => sum + Number(value || 0), 0);
+    const requestedTrips = (scenario.demands || []).reduce((sum, demand) => sum + Number(demand.vehicles || 0), 0);
+    const flowBalanced = requestedTrips > 0 && Math.abs(assigned - requestedTrips) <= Math.max(1e-6, requestedTrips * 1e-6);
+    const opf = Array.isArray(r.opf_by_step) ? r.opf_by_step : [];
+    const stationSeries = due.station_ev_load_kw || {};
+    const hasV2gRoutes = (scenario.routes || []).some(route => (route.charging_stops || []).some(stop => stop.v2g_capable));
+    const checks = [
+      { label: '场景覆盖', pass: evptScenarioNodes(scenario).length >= 10 && (scenario.routes || []).length >= 3 && (scenario.charging_stations || []).length >= 2, value: `${evptScenarioNodes(scenario).length}点 / ${(scenario.routes || []).length}路径 / ${(scenario.charging_stations || []).length}站` },
+      { label: 'DUE均衡', pass: due.converged === true, value: `${Number(due.iterations || 0)} iter · gap ${evptFmt(due.relative_gap ?? due.gap, 6)}` },
+      { label: 'DC-OPF耦合', pass: opf.length > 0 && opf.every(item => item.converged), value: `${opf.filter(item => item.converged).length}/${opf.length || 0} 收敛` },
+      { label: '交通流守恒', pass: flowBalanced, value: `${evptFmt(assigned, 2)} / ${evptFmt(requestedTrips, 2)} veh` },
+      { label: '充电调度', pass: Number(due.total_delivered_energy_kwh || r.total_delivered_energy_kwh || 0) > 0 && Object.keys(stationSeries).length > 0, value: `${evptFmt(due.total_delivered_energy_kwh ?? r.total_delivered_energy_kwh, 2)} kWh` },
+      { label: '节点电价反馈', pass: Object.keys(r.station_prices_per_step || {}).length > 0 && (r.lmp_by_step || []).length > 0, value: `${Object.keys(r.station_prices_per_step || {}).length} 站 · ${(r.lmp_by_step || []).length} 时段` },
+      { label: 'V2G模型通道', pass: hasV2gRoutes && Object.prototype.hasOwnProperty.call(due, 'total_v2g_energy_kwh'), value: `${evptFmt(due.total_v2g_energy_kwh, 2)} kWh 回馈` },
+      { label: '动态道路瓶颈', pass: evptScenarioLinks(scenario).some(link => Array.isArray(link.capacity_profile_veh_per_hr) && link.capacity_profile_veh_per_hr.length > 0), value: `${evptScenarioLinks(scenario).filter(link => (link.capacity_profile_veh_per_hr || []).length).length} 条时变路段` },
+    ];
+    el.innerHTML = checks.map(check => `<div class="evpt-verification-item ${check.pass ? 'pass' : 'fail'}"><span>${escapeHtml(check.label)}</span><strong>${check.pass ? '通过' : '未通过'}</strong><small>${escapeHtml(check.value)}</small></div>`).join('');
+  }
+
+  function renderEvTrafficCharts(data) {
+    const r = data.result || {};
+    const due = r.ctm_due || r;
+    const commonLayout = {
+      margin: { l: 55, r: 55, t: 20, b: 42 },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      font: { color: '#dcdfe4' },
+      legend: { orientation: 'h', y: -0.24 },
+    };
+    const convergence = document.getElementById('evptConvergenceChart');
+    if (convergence && typeof Plotly !== 'undefined') {
+      const history = Array.isArray(r.history) ? r.history : (Array.isArray(due.history) ? due.history : []);
+      if (history.length) {
+        const x = history.map((h, i) => Number(h.iteration ?? i + 1));
+        const traces = [];
+        if (history.some(h => Number.isFinite(Number(h.relative_gap ?? h.gap)))) {
+          traces.push({ x, y: history.map(h => Number(h.relative_gap ?? h.gap)), mode: 'lines+markers', name: 'DUE Gap', line: { color: '#61afef' } });
+        }
+        if (history.some(h => Number.isFinite(Number(h.price_change)))) {
+          traces.push({ x, y: history.map(h => Number(h.price_change)), mode: 'lines+markers', name: '电价变化', line: { color: '#e5c07b' } });
+        }
+        if (history.some(h => Number.isFinite(Number(h.social_welfare)))) {
+          traces.push({ x, y: history.map(h => Number(h.social_welfare)), mode: 'lines', name: '社会福利', yaxis: 'y2', line: { color: '#98c379' } });
+        }
+        Plotly.newPlot(convergence, traces, {
+          ...commonLayout,
+          xaxis: { title: 'Iteration' },
+          yaxis: { title: 'Gap / Price change', type: 'log' },
+          yaxis2: { title: 'Social welfare', overlaying: 'y', side: 'right' },
+        }, { responsive: true });
+      } else {
+        convergence.innerHTML = '<p class="empty-hint">该模型为单次求解，无迭代收敛轨迹。</p>';
+      }
+    }
+    const station = document.getElementById('evptStationChart');
+    if (station && typeof Plotly !== 'undefined') {
+      const loadMap = due.station_ev_load_kw || {};
+      const priceMap = r.station_prices_per_step || {};
+      const traces = [
+        ...evptSeriesMapToTraces(loadMap, '站负荷 ', 'y'),
+        ...evptSeriesMapToTraces(priceMap, '站电价 ', 'y2'),
+      ];
+      if (traces.length) {
+        Plotly.newPlot(station, traces, {
+          ...commonLayout,
+          xaxis: { title: 'Step' },
+          yaxis: { title: 'Charging power (kW)' },
+          yaxis2: { title: 'Price ($/kWh)', overlaying: 'y', side: 'right' },
+        }, { responsive: true });
+      } else {
+        station.innerHTML = '<p class="empty-hint">该结果未返回逐站时序；完整充电会话见导出结果。</p>';
+      }
+    }
+  }
+
+  function renderEvTrafficTables(data) {
+    const r = data.result || {};
+    const due = r.ctm_due || r;
+    const routes = data.scenario?.routes || [];
+    const routeMeta = new Map(routes.map(route => [String(route.index), route]));
+    const rows = [];
+    if (Array.isArray(r.assignments)) {
+      r.assignments.forEach(a => rows.push({ demand: a.demand_index, route: a.route_index, vehicles: a.vehicles, cost: a.generalized_cost, time: a.travel_time_hr, status: a.status }));
+    } else {
+      const flow = r.route_flow || due.flow_by_demand_route || {};
+      Object.entries(flow).forEach(([demand, routeFlow]) => {
+        Object.entries(routeFlow || {}).forEach(([route, vehicles]) => rows.push({ demand, route, vehicles }));
+      });
+    }
+    const routeEl = document.getElementById('evptRouteResults');
+    if (routeEl) {
+      routeEl.innerHTML = rows.length
+        ? `<table><thead><tr><th>需求</th><th>路径</th><th>O-D</th><th>车辆</th><th>广义成本</th><th>行程(h)</th><th>状态</th></tr></thead><tbody>${rows.map(row => {
+            const meta = routeMeta.get(String(row.route)) || {};
+            return `<tr><td>${escapeHtml(String(row.demand))}</td><td>${escapeHtml(String(row.route))}</td><td>${escapeHtml(`${meta.origin_node ?? '—'}→${meta.destination_node ?? '—'}`)}</td><td>${evptFmt(row.vehicles, 3)}</td><td>${evptFmt(row.cost, 3)}</td><td>${evptFmt(row.time, 3)}</td><td>${escapeHtml(row.status || '')}</td></tr>`;
+          }).join('')}</tbody></table>`
+        : '<p class="empty-hint">没有可显示的路径流。</p>';
+    }
+    const scenarioEl = document.getElementById('evptScenarioResults');
+    if (scenarioEl) {
+      const stations = data.scenario?.charging_stations || [];
+      scenarioEl.innerHTML = `<div class="sub-hint">节点 ${evptScenarioNodes(data.scenario).length}；路段 ${evptScenarioLinks(data.scenario).length}；路径 ${routes.length}；需求 ${(data.scenario?.demands || []).length}；充电站 ${stations.length}</div>` +
+        (stations.length ? `<table><thead><tr><th>充电站</th><th>名称</th><th>电网母线</th><th>容量(kW)</th><th>投运</th></tr></thead><tbody>${stations.map(s => `<tr><td>${escapeHtml(String(s.station_id))}</td><td>${escapeHtml(s.name || '')}</td><td>${escapeHtml(String(s.bus))}</td><td>${evptFmt(s.max_power_kw, 1)}</td><td>${s.in_service ? '是' : '否'}</td></tr>`).join('')}</tbody></table>` : '');
+    }
+  }
+
+  function renderEvTrafficResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('evTraffic');
+    renderEvTrafficSummary(data);
+    renderEvTrafficCoupledTopology(data);
+    renderEvTrafficVerification(data);
+    renderEvTrafficCharts(data);
+    renderEvTrafficTables(data);
+    switchTab('results');
+  }
+
+  function toggleEvptTopologyFullscreen() {
+    const section = document.getElementById('evptTopologySection');
+    const button = document.getElementById('btnEvptTopologyFullscreen');
+    const chart = document.getElementById('evptCoupledTopology');
+    if (!section || !button) return;
+    const expanded = !section.classList.contains('evpt-topology-expanded');
+    section.classList.toggle('evpt-topology-expanded', expanded);
+    button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    button.textContent = expanded ? '退出全屏' : '全屏';
+    setTimeout(() => {
+      if (_lastEvTrafficData) renderEvTrafficCoupledTopology(_lastEvTrafficData);
+      else if (chart && typeof Plotly !== 'undefined' && Plotly.Plots?.resize) Plotly.Plots.resize(chart);
+    }, 0);
+  }
+
+  async function runEvTraffic() {
+    const payload = collectEvTrafficPayload();
+    if (payload.scenario_source === 'custom' && !_importedEvTrafficScenario) {
+      setStatus('请先导入交通场景', 'warn');
+      return;
+    }
+    if (payload.scenario_source === 'custom') {
+      setStatus('同步当前电网...', 'busy');
+      if (!await syncToBackend(true)) {
+        setStatus('当前电网同步失败', 'error');
+        return;
+      }
+    }
+    setStatus('电力-交通耦合计算中...', 'busy');
+    const response = await apiPostResult('/api/session/run_ev_traffic', payload);
+    if (!response.ok) {
+      setStatus(`电力-交通计算失败: ${response.error || '未知错误'}`, 'error');
+      return;
+    }
+    _lastEvTrafficData = response.data;
+    renderEvTrafficResults(response.data);
+    const r = response.data.result || {};
+    const completed = r.feasible !== false && r.infeasible !== true;
+    setStatus(completed ? '电力-交通耦合计算完成' : '电力-交通模型未找到可行解', completed ? 'success' : 'warn');
+  }
+
   // ========== Init ==========
   // ---- Theme (light / dark background) ----
   // Keeps the dark palette as the default so existing users see no change until
@@ -12593,6 +13610,102 @@ const App = (() => {
       }
       downloadJsonFile(`campus_integrated_energy_${tsTagForFilename()}.json`, _lastIntegratedEnergyData);
     });
+    document.getElementById('evptFormulation')?.addEventListener('change', updateEvTrafficControls);
+    document.getElementById('evptScenarioSource')?.addEventListener('change', applyEvTrafficScenarioPreset);
+    document.getElementById('btnOpenEvTrafficDesigner')?.addEventListener('click', openEvptDesigner);
+    document.getElementById('btnImportEvTrafficScenario')?.addEventListener('click', () => {
+      document.getElementById('fileImportEvTrafficScenario')?.click();
+    });
+    document.getElementById('fileImportEvTrafficScenario')?.addEventListener('change', async event => {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (file) {
+        const scenario = await importEvTrafficScenario(file);
+        if (scenario && document.getElementById('evptDesignerModal')?.style.display !== 'none') {
+          _evptDesignerScenario = normalizeEvTrafficScenario(scenario);
+          renderEvptDesigner();
+        }
+      }
+    });
+    document.getElementById('btnDownloadEvTrafficTemplate')?.addEventListener('click', () => {
+      downloadJsonFile('ev_traffic_scenario_template.json', createEvTrafficStarterScenario());
+    });
+    document.getElementById('btnExportEvTrafficScenario')?.addEventListener('click', () => {
+      const customSelected = document.getElementById('evptScenarioSource')?.value === 'custom';
+      const scenario = customSelected
+        ? _importedEvTrafficScenario
+        : (_lastEvTrafficData?.scenario || _importedEvTrafficScenario);
+      if (!scenario) {
+        log('请先运行内置算例或导入交通场景', 'warn');
+        return;
+      }
+      downloadJsonFile(`ev_traffic_scenario_${tsTagForFilename()}.json`, normalizeEvTrafficScenario(scenario));
+    });
+    document.querySelectorAll('[data-close-evpt-designer]').forEach(button => {
+      button.addEventListener('click', closeEvptDesigner);
+    });
+    document.getElementById('btnEvptDesignerNew')?.addEventListener('click', () => {
+      _evptDesignerScenario = createEvTrafficStarterScenario();
+      _evptDesignerTab = 'nodes';
+      document.querySelectorAll('#evptDesignerTabs [data-evpt-designer-tab]').forEach(button => {
+        button.classList.toggle('active', button.dataset.evptDesignerTab === 'nodes');
+      });
+      renderEvptDesigner();
+    });
+    document.getElementById('btnEvptDesignerImport')?.addEventListener('click', () => {
+      document.getElementById('fileImportEvTrafficScenario')?.click();
+    });
+    document.getElementById('btnEvptDesignerExport')?.addEventListener('click', () => {
+      if (!commitEvptDesignerJson() || !_evptDesignerScenario) return;
+      _evptDesignerScenario.name = document.getElementById('evptDesignerName')?.value.trim() || 'EV traffic scenario';
+      downloadJsonFile(`ev_traffic_scenario_${tsTagForFilename()}.json`, normalizeEvTrafficScenario(_evptDesignerScenario));
+    });
+    document.getElementById('evptDesignerName')?.addEventListener('input', event => {
+      if (_evptDesignerScenario) _evptDesignerScenario.name = event.target.value;
+    });
+    document.getElementById('evptDesignerTabs')?.addEventListener('click', event => {
+      const button = event.target.closest('[data-evpt-designer-tab]');
+      if (button) setEvptDesignerTab(button.dataset.evptDesignerTab);
+    });
+    document.getElementById('btnEvptDesignerAddRow')?.addEventListener('click', addEvptDesignerRow);
+    document.getElementById('evptDesignerTable')?.addEventListener('input', event => {
+      if (event.target.matches('[data-evpt-field]')) updateEvptDesignerField(event.target);
+    });
+    document.getElementById('evptDesignerTable')?.addEventListener('change', event => {
+      if (event.target.matches('[data-evpt-field]')) updateEvptDesignerField(event.target);
+    });
+    document.getElementById('evptDesignerTable')?.addEventListener('click', event => {
+      const button = event.target.closest('[data-delete-row]');
+      if (button) deleteEvptDesignerRow(Number(button.dataset.deleteRow));
+    });
+    document.getElementById('evptDesignerJson')?.addEventListener('input', () => {
+      clearTimeout(_evptDesignerJsonTimer);
+      _evptDesignerJsonTimer = setTimeout(commitEvptDesignerJson, 300);
+    });
+    document.getElementById('btnEvptDesignerValidate')?.addEventListener('click', () => {
+      if (commitEvptDesignerJson()) renderEvptDesignerValidation(true);
+    });
+    document.getElementById('btnEvptDesignerApply')?.addEventListener('click', applyEvptDesignerScenario);
+    document.getElementById('btnToggleEvTrafficAdvanced')?.addEventListener('click', () => {
+      const panel = document.getElementById('evptAdvancedControls');
+      const btn = document.getElementById('btnToggleEvTrafficAdvanced');
+      if (!panel || !btn) return;
+      const show = panel.hasAttribute('hidden');
+      panel.toggleAttribute('hidden', !show);
+      panel.closest('.evpt-param-group')?.classList.toggle('evpt-advanced-expanded', show);
+      btn.setAttribute('aria-expanded', show ? 'true' : 'false');
+      btn.innerHTML = show ? '收起<br>高级设置 ▾' : '展开<br>高级设置 ▸';
+    });
+    document.getElementById('btnRunEvTraffic')?.addEventListener('click', runEvTraffic);
+    document.getElementById('btnExportEvTrafficResults')?.addEventListener('click', () => {
+      if (!_lastEvTrafficData) {
+        log('请先运行电力-交通耦合计算', 'warn');
+        return;
+      }
+      downloadJsonFile(`ev_power_traffic_${tsTagForFilename()}.json`, _lastEvTrafficData);
+    });
+    document.getElementById('btnEvptTopologyFullscreen')?.addEventListener('click', toggleEvptTopologyFullscreen);
+    applyEvTrafficScenarioPreset();
     document.getElementById('btnToggleAnnualPanel')?.addEventListener('click', () => {
       const panel = document.getElementById('annualSimControls');
       const btn = document.getElementById('btnToggleAnnualPanel');
@@ -12693,12 +13806,24 @@ const App = (() => {
 	      const weakBasis = (document.getElementById('relWeakBasis')?.value) || 'auto';
 	      const relParallel = document.getElementById('relParallel')?.checked ?? true;
 	      const relParallelThreads = parseInt(document.getElementById('relParallelThreads')?.value, 10);
+	      const seqProfileText = document.getElementById('relSeqLoadProfile')?.value || '';
+	      const seqProfile = seqProfileText.split(/[\s,;]+/).filter(Boolean).map(Number);
+	      if (method === 'seq' && seqProfileText.trim() &&
+	          (!seqProfile.length || seqProfile.some(v => !Number.isFinite(v) || v < 0))) {
+	        setStatus('SEQ负荷曲线包含无效倍率', 'error');
+	        log('SEQ负荷曲线必须是由逗号或空格分隔的非负数', 'error');
+	        return;
+	      }
 	      const opts = {
 	        method,
 	        physical_model: physicalModel,
 	        data_policy: (document.getElementById('relDataPolicy')?.value) || 'missing_only',
 	        reliability_template: (document.getElementById('relTemplate')?.value) || 'none',
-	        load: { scale_factor: 1.0, hours_per_year: 8736 },
+	        load: {
+	          scale_factor: 1.0,
+	          hours_per_year: 8736,
+	          profile_factors: method === 'seq' && seqProfileText.trim() ? seqProfile : [],
+	        },
 	        execution: {
 	          parallel: relParallel,
 	          parallel_threads: Number.isFinite(relParallelThreads) ? relParallelThreads : 0,
@@ -13193,7 +14318,9 @@ const App = (() => {
 		      const weakBasis = relSelectedWeakBasis(data, method);
 		      const weakMeta = relWeakBasisMeta(weakBasis);
 		      const weakRows = relRankRows(relCandidateRows(data), weakBasis);
-		      let html = `<div style="margin-bottom:8px;"><b>方法：</b>${escapeHtml(methodLabel)}</div>`;
+		      const relTime = Number.isFinite(Number(data.execution_time_sec))
+		        ? `${Number(data.execution_time_sec).toFixed(3)} s` : '—';
+		      let html = `<div style="margin-bottom:8px;"><b>方法：</b>${escapeHtml(methodLabel)} · <b>计算时间：</b>${relTime}</div>`;
 		      html += renderReliabilityKpiTiles(data, method);
 		      html += renderReliabilityDashboardShell(data, method);
 		      html += renderReliabilityComponentModelHtml(data);

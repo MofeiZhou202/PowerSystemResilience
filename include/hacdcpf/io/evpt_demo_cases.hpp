@@ -13,6 +13,10 @@
 //     IEEE 33-bus AC/DC feeder (case33bw_acdc).  Three charging stations map
 //     onto feeder buses; a costlier local DG plus a tightened feeder-head
 //     rating make EV charging visibly congest the feeder and split LMPs.
+//
+//   evpt_demo_comprehensive — verification profile derived from the grid case:
+//     four departure cohorts, seven routes over three station choices,
+//     time-varying road bottlenecks, V2G, station tariffs, and feeder congestion.
 
 #include <string>
 #include <vector>
@@ -28,5 +32,6 @@ evpt::EVPowerTrafficProblem build_evpt_demo_case(const std::string& name);
 
 evpt::EVPowerTrafficProblem build_evpt_demo_small();
 evpt::EVPowerTrafficProblem build_evpt_demo_grid();
+evpt::EVPowerTrafficProblem build_evpt_demo_comprehensive();
 
 }  // namespace hacdcpf::io

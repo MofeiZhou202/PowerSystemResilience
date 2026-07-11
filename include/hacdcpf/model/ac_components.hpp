@@ -340,6 +340,7 @@ struct StaticGenerator {
   double rx{0.0};
 
   double co2_emission_rate{0.0};
+  double cost_c1{0.0};
 
   double mtbf_hours{0.0};
   double mttr_hours{0.0};

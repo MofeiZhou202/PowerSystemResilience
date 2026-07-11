@@ -674,6 +674,14 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const bool use_dr_shift = use_dr && opts.dr_shiftable;
   const bool use_mg = opts.enable_microgrid && U > 0;
   const bool use_degr = opts.enable_storage_degradation && (S + Sd) > 0;
+  const auto has_storage_bid = [](const Storage& st) {
+    return st.charge_bid_price > 0.0 || st.discharge_bid_price > 0.0;
+  };
+  bool use_storage_abs = use_degr;
+  for (int i : res.storage_indices)
+    use_storage_abs = use_storage_abs || has_storage_bid(sys.ac.storage[static_cast<size_t>(i)]);
+  for (int i : res.dc_storage_indices)
+    use_storage_abs = use_storage_abs || has_storage_bid(sys.dc.storage[static_cast<size_t>(i)]);
   const bool use_vpp = opts.enable_vpp && V > 0;
 
   // Dispatchable-PV curtailment descriptors: one per must-take source that may
@@ -681,7 +689,13 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   // curtailment variable lives in [0, avail] and adds back to the bus balance
   // (reducing net injection).  AC PV is only must-take when the DC network is
   // not modelled explicitly, so it is only clawed back in that case.
-  struct PVCurtSource { std::vector<double> avail; int ac_bus; int dc_bus; };
+  struct PVCurtSource {
+    std::vector<double> avail;
+    int ac_bus;
+    int dc_bus;
+    double cost_c1{0.0};
+    double emission_factor{0.0};
+  };
   std::vector<PVCurtSource> pvcurt;
   if (opts.enable_dispatchable_pv) {
     if (!use_dc_network) {
@@ -717,6 +731,8 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       if (!sg.in_service) continue;
       const auto* pv = find_profile(profile_map, sg.profile_id);
       PVCurtSource d; d.ac_bus = -1; d.dc_bus = sg.bus;
+      d.cost_c1 = sg.cost_c1;
+      d.emission_factor = sg.emission_factor_tco2_mwh;
       d.avail.resize(static_cast<size_t>(T));
       for (int t = 0; t < T; ++t)
         d.avail[static_cast<size_t>(t)] = std::max(0.0, sg.p_set_mw * sg.scaling * profile_value(pv, t, 1.0));
@@ -910,7 +926,7 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const int nMgEx = use_mg ? U * T : 0;   // microgrid PCC net exchange (+export)
   const int nMgO  = use_mg ? U * T : 0;   // microgrid connection indicator (binary)
   const int nDcFlow = Nf * T;             // explicit DC branch transport flows
-  const int nGdeg = use_degr ? (S + Sd) * T : 0;  // storage throughput |p| aux
+  const int nGdeg = use_storage_abs ? (S + Sd) * T : 0;  // storage throughput |p| aux
   const int nVpp  = use_vpp ? V * T : 0;          // VPP aggregate net output
   const int nVppE = use_vpp ? V * T : 0;          // VPP aggregate energy state
   const int nErIn  = use_router ? Per * T : 0;    // router port inflow (bus→router)
@@ -1015,6 +1031,27 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       w_cost = opts.w_cost; w_carbon = opts.w_carbon;
       w_loss = opts.w_loss; w_curt = opts.w_curtailment;
       break;
+  }
+
+  // DC generators are profile-driven fixed injections rather than UC decision
+  // variables. Their production cost/emissions are therefore objective
+  // constants, but still belong in the reported objective value.
+  for (const auto& sg : sys.dc.static_generators) {
+    if (!sg.in_service) continue;
+    const double p = std::max(0.0, sg.p_mw * sg.scaling);
+    res.obj_offset +=
+        (w_cost * sg.cost_c1 + w_carbon * sg.co2_emission_rate + w_loss) * p * dt * T;
+  }
+  for (const auto& sg : sys.dc.dc_static_generators) {
+    if (!sg.in_service) continue;
+    const auto* pv = find_profile(profile_map, sg.profile_id);
+    for (int t = 0; t < T; ++t) {
+      const double p = std::max(
+          0.0, sg.p_set_mw * sg.scaling * profile_value(pv, t, 1.0));
+      res.obj_offset +=
+          (w_cost * sg.cost_c1 +
+           w_carbon * sg.emission_factor_tco2_mwh + w_loss) * p * dt;
+    }
   }
   for (int gi = 0; gi < G; ++gi) {
     const auto& gen = sys.ac.generators[static_cast<size_t>(res.gen_indices[static_cast<size_t>(gi)])];
@@ -1167,7 +1204,10 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
         m.linear_part.vars[static_cast<size_t>(curt_idx(k, t))] = {
           VarType::Continuous, 0.0, pvcurt[static_cast<size_t>(k)].avail[static_cast<size_t>(t)],
           "pv_curt" + std::to_string(k) + "_t" + std::to_string(t)};
-        m.linear_part.c[curt_idx(k, t)] = pen;
+        const auto& src = pvcurt[static_cast<size_t>(k)];
+        const double avoided_objective =
+            (w_cost * src.cost_c1 + w_carbon * src.emission_factor + w_loss) * dt;
+        m.linear_part.c[curt_idx(k, t)] = pen - avoided_objective;
       }
     }
   }
@@ -1240,7 +1280,7 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   auto stor_power_idx = [&](int k, int t) {
     return (k < S) ? ess_idx(k, t) : dcess_idx(k - S, t);
   };
-  if (use_degr) {
+  if (use_storage_abs) {
     for (int k = 0; k < S + Sd; ++k) {
       const auto& st = stor_ref(k);
       const double E = (st.e_rated_mwh > 1e-9) ? st.e_rated_mwh : 1.0;
@@ -1248,12 +1288,17 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       const double degr = (st.replacement_cost > 0.0)
                               ? st.replacement_cost / (2.0 * ncyc * E)
                               : 0.0;
+      const double charge_bid = std::max(0.0, st.charge_bid_price);
+      const double discharge_bid = std::max(0.0, st.discharge_bid_price);
+      const double throughput_bid = 0.5 * w_cost * (charge_bid + discharge_bid);
+      const double signed_bid = 0.5 * w_cost * (discharge_bid - charge_bid);
       const double g_hi = std::max(std::abs(st.pmin_mw), st.pmax_mw);
       for (int t = 0; t < T; ++t) {
         m.linear_part.vars[static_cast<size_t>(gdeg_idx(k, t))] = {
           VarType::Continuous, 0.0, (g_hi > 0.0 ? g_hi : 1.0e9),
           "g_deg" + std::to_string(k) + "_t" + std::to_string(t)};
-        m.linear_part.c[gdeg_idx(k, t)] = degr * dt;
+        m.linear_part.c[gdeg_idx(k, t)] = (degr + throughput_bid) * dt;
+        m.linear_part.c[stor_power_idx(k, t)] += signed_bid * dt;
       }
     }
   }
@@ -1475,7 +1520,7 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const int n_ineq_mg = use_mg ? (2 * U * T) : 0;
   // Storage degradation: two |p| rows per storage-step, plus one daily cycle
   // cap row per storage whose daily_cycle_limit > 0.
-  const int n_ineq_degr_abs = use_degr ? (2 * (S + Sd) * T) : 0;
+  const int n_ineq_degr_abs = use_storage_abs ? (2 * (S + Sd) * T) : 0;
   int n_ineq_degr_cap = 0;
   if (use_degr) {
     for (int k = 0; k < S + Sd; ++k) {
@@ -1606,6 +1651,13 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
         total_load[static_cast<size_t>(t)] -= pvarr.p_set_mw * scale;
       }
     }
+    for (const auto& sg : sys.dc.static_generators) {
+      if (!sg.in_service) continue;
+      const double p = sg.p_mw * sg.scaling;
+      for (int t = 0; t < T; ++t) {
+        total_load[static_cast<size_t>(t)] -= p;
+      }
+    }
     for (const auto& sg : sys.dc.dc_static_generators) {
       if (!sg.in_service) continue;
       const auto* pv = find_profile(profile_map, sg.profile_id);
@@ -1642,6 +1694,15 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       }
     }
     // DC static generators (negative load)
+    for (const auto& sg : sys.dc.static_generators) {
+      if (!sg.in_service) continue;
+      auto bit = dc_bus_idx.find(sg.bus);
+      if (bit == dc_bus_idx.end()) continue;
+      const double p = sg.p_mw * sg.scaling;
+      for (int t = 0; t < T; ++t) {
+        dc_bus_load[static_cast<size_t>(dc_bus_load_idx(bit->second, t))] -= p;
+      }
+    }
     for (const auto& sg : sys.dc.dc_static_generators) {
       if (!sg.in_service) continue;
       const auto* pv = find_profile(profile_map, sg.profile_id);
@@ -2426,7 +2487,7 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
 
   // Storage degradation: throughput auxiliary g ≥ |p_ess|, plus optional daily
   // cycle cap.
-  if (use_degr) {
+  if (use_storage_abs) {
     for (int k = 0; k < S + Sd; ++k) {
       for (int t = 0; t < T; ++t) {
         // p_ess − g ≤ 0
@@ -2441,16 +2502,18 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
         ++row;
       }
     }
-    // Daily cycle cap: Σ_t g·dt ≤ 2·daily_cycle_limit·E.
-    for (int k = 0; k < S + Sd; ++k) {
-      const auto& st = stor_ref(k);
-      if (st.daily_cycle_limit <= 0.0) continue;
-      const double E = (st.e_rated_mwh > 1e-9) ? st.e_rated_mwh : 1.0;
-      for (int t = 0; t < T; ++t) {
-        ineq_trips.emplace_back(row, gdeg_idx(k, t), dt);
+    if (use_degr) {
+      // Daily cycle cap: Σ_t g·dt ≤ 2·daily_cycle_limit·E.
+      for (int k = 0; k < S + Sd; ++k) {
+        const auto& st = stor_ref(k);
+        if (st.daily_cycle_limit <= 0.0) continue;
+        const double E = (st.e_rated_mwh > 1e-9) ? st.e_rated_mwh : 1.0;
+        for (int t = 0; t < T; ++t) {
+          ineq_trips.emplace_back(row, gdeg_idx(k, t), dt);
+        }
+        b_ineq[row] = 2.0 * st.daily_cycle_limit * E;
+        ++row;
       }
-      b_ineq[row] = 2.0 * st.daily_cycle_limit * E;
-      ++row;
     }
   }
 
@@ -3915,6 +3978,47 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
     }
 
     destroy_solver_handle(handle);
+  }
+
+  // Add non-AC-generator operating costs to the reported production cost. The
+  // selected UC objective may be carbon/loss/curtailment, but this result field
+  // remains a monetary accounting metric for the GUI.
+  for (const auto& sg : sys.dc.static_generators) {
+    if (!sg.in_service) continue;
+    result.total_generation_cost +=
+        std::max(0.0, sg.p_mw * sg.scaling) * std::max(0.0, sg.cost_c1) *
+        ts_data.step_duration_hr * T;
+  }
+  for (size_t k = 0; k < sys.dc.dc_static_generators.size(); ++k) {
+    const auto& sg = sys.dc.dc_static_generators[k];
+    if (!sg.in_service || k >= schedule.dc_sgen_dispatch.size()) continue;
+    for (double p : schedule.dc_sgen_dispatch[k]) {
+      result.total_generation_cost +=
+          std::max(0.0, p) * std::max(0.0, sg.cost_c1) * ts_data.step_duration_hr;
+    }
+  }
+  auto add_storage_bid_cost = [&](const Storage& st,
+                                  const std::vector<double>& dispatch) {
+    for (double p : dispatch) {
+      result.total_generation_cost +=
+          (p >= 0.0 ? p * std::max(0.0, st.discharge_bid_price)
+                    : -p * std::max(0.0, st.charge_bid_price)) *
+          ts_data.step_duration_hr;
+    }
+  };
+  size_t active_row = 0;
+  for (const auto& st : sys.ac.storage) {
+    if (!st.in_service) continue;
+    if (active_row < schedule.ess_dispatch.size())
+      add_storage_bid_cost(st, schedule.ess_dispatch[active_row]);
+    ++active_row;
+  }
+  active_row = 0;
+  for (const auto& st : sys.dc.storage) {
+    if (!st.in_service) continue;
+    if (active_row < schedule.dc_ess_dispatch.size())
+      add_storage_bid_cost(st, schedule.dc_ess_dispatch[active_row]);
+    ++active_row;
   }
 
   return result;

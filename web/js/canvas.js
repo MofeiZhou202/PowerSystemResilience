@@ -2438,7 +2438,7 @@ const Canvas = (() => {
 	        flexible_loads: [], asymmetric_loads: [], shunts: [],
 	        transformers_3w: [], chargers: [], charging_stations: [] };
 	      const dcSkel = { buses: [], branches: [], loads: [], dc_storage: [],
-	        static_generators: [], pv_arrays: [], dc_circuit_breakers: [] };
+	        static_generators: [], dc_static_generators: [], pv_arrays: [], dc_circuit_breakers: [] };
 	      const out = {
 	        ...stored,
 	        name: stored.name || 'Canvas System',
@@ -2466,7 +2466,7 @@ const Canvas = (() => {
             switches: [], circuit_breakers: [], motors: [],
             flexible_loads: [], asymmetric_loads: [], shunts: [],
             transformers_3w: [], chargers: [], charging_stations: [] },
-      dc: { buses: [], branches: [], loads: [], dc_storage: [], static_generators: [], pv_arrays: [], dc_circuit_breakers: [] },
+      dc: { buses: [], branches: [], loads: [], dc_storage: [], static_generators: [], dc_static_generators: [], pv_arrays: [], dc_circuit_breakers: [] },
       vsc_converters: [],
       dcdc_converters: [],
       energy_routers: [],
@@ -2627,6 +2627,9 @@ const Canvas = (() => {
             shutdown_cost: numOr(p.shutdown_cost, 0),
             ramp_up_mw_min: numOr(p.ramp_up_mw_min, 0),
             ramp_dn_mw_min: numOr(p.ramp_dn_mw_min, 0),
+            forced_outage_rate: numOr(p.forced_outage_rate, 0),
+            mttr_hr: numOr(p.mttr_hr ?? p.mttr_hours, 0),
+            t_scheduled_hr: numOr(p.t_scheduled_hr, 0),
           }, p));
           genIdx++;
           // Update bus type to PV or SLACK
@@ -2796,6 +2799,12 @@ const Canvas = (() => {
             qmin_mvar: numOr(p.qmin_mvar, 0),
             self_discharge_pct: numOr(p.self_discharge_pct, 0),
             profile_id: numOr(p.profile_id, -1),
+            charge_bid_price: numOr(p.charge_bid_price, 0),
+            discharge_bid_price: numOr(p.discharge_bid_price, 0),
+            daily_cycle_limit: numOr(p.daily_cycle_limit, 0),
+            forced_outage_rate: numOr(p.forced_outage_rate, 0),
+            mttr_hr: numOr(p.mttr_hr ?? p.mttr_hours, 0),
+            t_scheduled_hr: numOr(p.t_scheduled_hr, 0),
             in_service: p.in_service !== false,
           }, p));
           storIdx++;
@@ -2819,6 +2828,12 @@ const Canvas = (() => {
             pmin_mw: numOr(p.pmin_mw, -10),
             self_discharge_pct: numOr(p.self_discharge_pct, 0),
             profile_id: numOr(p.profile_id, -1),
+            charge_bid_price: numOr(p.charge_bid_price, 0),
+            discharge_bid_price: numOr(p.discharge_bid_price, 0),
+            daily_cycle_limit: numOr(p.daily_cycle_limit, 0),
+            forced_outage_rate: numOr(p.forced_outage_rate, 0),
+            mttr_hr: numOr(p.mttr_hr ?? p.mttr_hours, 0),
+            t_scheduled_hr: numOr(p.t_scheduled_hr, 0),
             in_service: p.in_service !== false,
           }, p));
           dcStorIdx++;
@@ -2857,6 +2872,9 @@ const Canvas = (() => {
             irradiance: numOr(p.irradiance, 1000),
             temperature: numOr(p.temperature, 25),
             profile_id: numOr(p.profile_id, -1),
+            mtbf_hours: numOr(p.mtbf_hours ?? p.mtbf_hr, 0),
+            mttr_hours: numOr(p.mttr_hours ?? p.mttr_hr, 0),
+            t_scheduled_hr: numOr(p.t_scheduled_hr, 0),
             in_service: p.in_service !== false,
           }, p));
           pvIdx++;
@@ -2878,6 +2896,9 @@ const Canvas = (() => {
             capacity_factor: numOr(p.capacity_factor, 0.3),
             profile_id: numOr(p.profile_id, -1),
             emission_offset_tco2_mwh: numOr(p.emission_offset_tco2_mwh, 0),
+            mtbf_hours: numOr(p.mtbf_hours ?? p.mtbf_hr, 0),
+            mttr_hours: numOr(p.mttr_hours ?? p.mttr_hr, 0),
+            t_scheduled_hr: numOr(p.t_scheduled_hr, 0),
             in_service: p.in_service !== false,
           });
           renIdx++;
@@ -2906,11 +2927,35 @@ const Canvas = (() => {
             scaling: numOr(p.scaling, 1.0),
             controllable: p.controllable === true || p.controllable === 'true',
             v_ref_pu: numOr(p.v_ref_pu, 0),
+            cost_c1: numOr(p.cost_c1, 0),
             co2_emission_rate: numOr(p.emission_factor_tco2_mwh ?? p.co2_emission_rate, 0),
+            mtbf_hours: numOr(p.mtbf_hours ?? p.mtbf_hr, 0),
+            mttr_hours: numOr(p.mttr_hours ?? p.mttr_hr, 0),
+            t_scheduled_hr: numOr(p.t_scheduled_hr, 0),
             in_service: p.in_service !== false,
           };
-          if (isDcStaticGen) sys.dc.static_generators.push(addDynamicModel(row, p));
-          else sys.ac.static_generators.push(addDynamicModel(row, p));
+          if (isDcStaticGen) {
+            sys.dc.dc_static_generators.push(addDynamicModel({
+              index: row.index,
+              name: row.name,
+              bus: row.bus,
+              type: p.sgen_type || p.type || 'PV',
+              p_set_mw: row.p_mw,
+              scaling: row.scaling,
+              profile_id: numOr(p.profile_id, -1),
+              pmax_mw: row.pmax_mw,
+              pmin_mw: row.pmin_mw,
+              controllable: row.controllable,
+              cost_c1: row.cost_c1,
+              emission_factor_tco2_mwh: row.co2_emission_rate,
+              mtbf_hours: row.mtbf_hours,
+              mttr_hours: row.mttr_hours,
+              t_scheduled_hr: row.t_scheduled_hr,
+              in_service: row.in_service,
+            }, p));
+          } else {
+            sys.ac.static_generators.push(addDynamicModel(row, p));
+          }
           sgenIdx++;
           break;
         }
@@ -3014,6 +3059,9 @@ const Canvas = (() => {
             alpha_isc: numOr(p.alpha_isc, 0),
             beta_voc: numOr(p.beta_voc, 0),
             profile_id: numOr(p.profile_id, -1),
+            mtbf_hours: numOr(p.mtbf_hours ?? p.mtbf_hr, 0),
+            mttr_hours: numOr(p.mttr_hours ?? p.mttr_hr, 0),
+            t_scheduled_hr: numOr(p.t_scheduled_hr, 0),
             in_service: p.in_service !== false,
           }, p));
           dcPvIdx++;
@@ -3668,6 +3716,9 @@ const Canvas = (() => {
         emission_factor_tco2_mwh: gen.emission_factor_tco2_mwh || gen.co2_emission_rate || 0,
         startup_cost: gen.startup_cost, shutdown_cost: gen.shutdown_cost,
         ramp_up_mw_min: gen.ramp_up_mw_min, ramp_dn_mw_min: gen.ramp_dn_mw_min,
+        forced_outage_rate: gen.forced_outage_rate,
+        mttr_hr: gen.mttr_hr ?? gen.mttr_hours,
+        t_scheduled_hr: gen.t_scheduled_hr,
         dynamic_model: cloneDynamicModel(gen.dynamic_model),
       }, busCompMap);
     });
@@ -3756,6 +3807,12 @@ const Canvas = (() => {
         qmax_mvar: s.qmax_mvar, qmin_mvar: s.qmin_mvar,
         self_discharge_pct: s.self_discharge_pct,
         profile_id: s.profile_id,
+        charge_bid_price: s.charge_bid_price,
+        discharge_bid_price: s.discharge_bid_price,
+        daily_cycle_limit: s.daily_cycle_limit,
+        forced_outage_rate: s.forced_outage_rate,
+        mttr_hr: s.mttr_hr ?? s.mttr_hours,
+        t_scheduled_hr: s.t_scheduled_hr,
         dynamic_model: cloneDynamicModel(s.dynamic_model) || COMP.defaults.storage.dynamic_model,
         in_service: s.in_service !== false,
       }, busCompMap);
@@ -3781,6 +3838,9 @@ const Canvas = (() => {
         alpha_isc: pv.alpha_isc, beta_voc: pv.beta_voc,
         irradiance: pv.irradiance, temperature: pv.temperature,
         profile_id: pv.profile_id,
+        mtbf_hours: pv.mtbf_hours ?? pv.mtbf_hr,
+        mttr_hours: pv.mttr_hours ?? pv.mttr_hr,
+        t_scheduled_hr: pv.t_scheduled_hr,
         dynamic_model: cloneDynamicModel(pv.dynamic_model) || COMP.defaults.pv_system.dynamic_model,
         in_service: pv.in_service !== false,
       }, busCompMap);
@@ -3801,6 +3861,9 @@ const Canvas = (() => {
         capacity_factor: rg.capacity_factor,
         profile_id: rg.profile_id,
         emission_offset_tco2_mwh: rg.emission_offset_tco2_mwh,
+        mtbf_hours: rg.mtbf_hours ?? rg.mtbf_hr,
+        mttr_hours: rg.mttr_hours ?? rg.mttr_hr,
+        t_scheduled_hr: rg.t_scheduled_hr,
         in_service: rg.in_service !== false,
       }, busCompMap);
     });
@@ -3999,24 +4062,33 @@ const Canvas = (() => {
       }, dcBusCompMap);
     });
 
-    // DC static generators
-    jsonSys.dc?.static_generators?.forEach(sg => {
+    // DC static generators. Both the legacy StaticGenerator collection and the
+    // canonical active-power-only collection render as the same canvas device.
+    const importDcStaticGenerator = (sg) => {
       addDeviceAtBus('static_generator', sg.bus, {
         ...COMP.defaults.static_generator,
         index: sg.index,
         name: sg.name || `DC SGen ${sg.index !== undefined ? sg.index : ''}`,
-        p_mw: sg.p_mw, q_mvar: sg.q_mvar,
-        sgen_type: sg.sgen_type || 'PV',
+        p_mw: sg.p_mw ?? sg.p_set_mw, q_mvar: sg.q_mvar || 0,
+        sgen_type: sg.sgen_type || sg.type || 'PV',
         controllable: sg.controllable || false,
         scaling: sg.scaling,
+        profile_id: sg.profile_id,
         p_rated_mw: sg.p_rated_mw, sn_mva: sg.sn_mva,
         pmax_mw: sg.pmax_mw, pmin_mw: sg.pmin_mw,
         qmax_mvar: sg.qmax_mvar, qmin_mvar: sg.qmin_mvar,
         v_ref_pu: sg.v_ref_pu,
+        cost_c1: sg.cost_c1,
+        emission_factor_tco2_mwh: sg.emission_factor_tco2_mwh || sg.co2_emission_rate || 0,
+        mtbf_hours: sg.mtbf_hours ?? sg.mtbf_hr,
+        mttr_hours: sg.mttr_hours ?? sg.mttr_hr,
+        t_scheduled_hr: sg.t_scheduled_hr,
         dynamic_model: cloneDynamicModel(sg.dynamic_model) || COMP.defaults.static_generator.dynamic_model,
         in_service: sg.in_service !== false,
       }, dcBusCompMap);
-    });
+    };
+    jsonSys.dc?.static_generators?.forEach(importDcStaticGenerator);
+    jsonSys.dc?.dc_static_generators?.forEach(importDcStaticGenerator);
 
     // DC storage — both the dedicated dc_storage vector and the legacy
     // dc.storage (AC Storage reused on DC) are imported as dc_storage components
@@ -4033,6 +4105,12 @@ const Canvas = (() => {
         pmax_mw: s.pmax_mw, pmin_mw: s.pmin_mw,
         self_discharge_pct: s.self_discharge_pct,
         profile_id: s.profile_id,
+        charge_bid_price: s.charge_bid_price,
+        discharge_bid_price: s.discharge_bid_price,
+        daily_cycle_limit: s.daily_cycle_limit,
+        forced_outage_rate: s.forced_outage_rate,
+        mttr_hr: s.mttr_hr ?? s.mttr_hours,
+        t_scheduled_hr: s.t_scheduled_hr,
         dynamic_model: cloneDynamicModel(s.dynamic_model) || COMP.defaults.dc_storage.dynamic_model,
         in_service: s.in_service !== false,
       }, dcBusCompMap);
@@ -4053,6 +4131,9 @@ const Canvas = (() => {
         vmpp: pv.vmpp, impp: pv.impp, voc: pv.voc, isc: pv.isc,
         alpha_isc: pv.alpha_isc, beta_voc: pv.beta_voc,
         profile_id: pv.profile_id,
+        mtbf_hours: pv.mtbf_hours ?? pv.mtbf_hr,
+        mttr_hours: pv.mttr_hours ?? pv.mttr_hr,
+        t_scheduled_hr: pv.t_scheduled_hr,
         dynamic_model: cloneDynamicModel(pv.dynamic_model) || COMP.defaults.dc_pv_array.dynamic_model,
         in_service: pv.in_service !== false,
       }, dcBusCompMap);
@@ -4073,6 +4154,10 @@ const Canvas = (() => {
         controllable: sg.controllable || false,
         v_ref_pu: sg.v_ref_pu,
         emission_factor_tco2_mwh: sg.emission_factor_tco2_mwh || sg.co2_emission_rate || 0,
+        cost_c1: sg.cost_c1,
+        mtbf_hours: sg.mtbf_hours ?? sg.mtbf_hr,
+        mttr_hours: sg.mttr_hours ?? sg.mttr_hr,
+        t_scheduled_hr: sg.t_scheduled_hr,
         dynamic_model: cloneDynamicModel(sg.dynamic_model) || COMP.defaults.static_generator.dynamic_model,
         in_service: sg.in_service !== false,
       }, busCompMap);

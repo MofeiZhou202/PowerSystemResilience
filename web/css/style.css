@@ -496,6 +496,7 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 }
 body[data-active-result-group="transient"] #rightPanel,
 body[data-active-result-group="modelIO"] #rightPanel,
+body[data-active-result-group="evTraffic"] #rightPanel,
 body[data-active-result-group="parameterLibrary"] #rightPanel {
   width: clamp(760px, 66vw, 1180px);
   min-width: min(760px, calc(100vw - var(--lib-w) - 220px));
@@ -832,8 +833,14 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
 .results-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 6px;
   margin-bottom: 8px;
+}
+.result-execution-time {
+  margin-right: auto;
+  color: var(--ink2);
+  font: 600 11px "IBM Plex Mono", monospace;
 }
 .result-comparison {
   margin-bottom: 10px; padding: 8px 10px;
@@ -863,6 +870,22 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
 .results-summary .result-value { font-weight: 600; font-family: "IBM Plex Mono", monospace; }
 .result-converged { color: var(--green); }
 .result-failed { color: var(--red); }
+.pf-warning-section {
+  border-left: 3px solid var(--orange);
+}
+.pf-warning-results {
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.pf-warning-results ol {
+  margin: 0;
+  padding-left: 24px;
+}
+.pf-warning-results li + li { margin-top: 6px; }
 .reliability-kpi-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
@@ -1006,6 +1029,7 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
 #resultsContent[data-active-group="hosting"]      .result-group[data-result-group="hosting"],
 #resultsContent[data-active-group="timeSeries"]   .result-group[data-result-group="timeSeries"],
 #resultsContent[data-active-group="integratedEnergy"] .result-group[data-result-group="integratedEnergy"],
+#resultsContent[data-active-group="evTraffic"]    .result-group[data-result-group="evTraffic"],
 #resultsContent[data-active-group="reliability"]  .result-group[data-result-group="reliability"],
 #resultsContent[data-active-group="scenarioGeneration"] .result-group[data-result-group="scenarioGeneration"],
 #resultsContent[data-active-group="resilience"]   .result-group[data-result-group="resilience"] {
@@ -1059,6 +1083,71 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
   color: var(--ink);
   font-size: 16px;
   line-height: 1.25;
+}
+.evpt-coupled-topology {
+  width: 100%;
+  height: 470px;
+  min-height: 360px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(24, 28, 36, 0.5);
+}
+#evptTopologySection.evpt-topology-expanded {
+  position: fixed;
+  inset: 16px;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg2);
+  box-shadow: 0 18px 48px rgba(0,0,0,0.65);
+}
+#evptTopologySection.evpt-topology-expanded .evpt-coupled-topology {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+}
+.evpt-verification-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 7px;
+  margin: 6px 0;
+}
+.evpt-verification-item {
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.025);
+}
+.evpt-verification-item span,
+.evpt-verification-item small {
+  display: block;
+  color: var(--ink2);
+  font-size: 10px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.evpt-verification-item strong {
+  display: block;
+  margin: 3px 0;
+  font-size: 14px;
+}
+.evpt-verification-item.pass {
+  border-color: rgba(152,195,121,0.45);
+  background: rgba(152,195,121,0.08);
+}
+.evpt-verification-item.pass strong { color: var(--green); }
+.evpt-verification-item.fail {
+  border-color: rgba(224,108,117,0.45);
+  background: rgba(224,108,117,0.08);
+}
+.evpt-verification-item.fail strong { color: var(--red); }
+@media (max-width: 700px) {
+  .evpt-coupled-topology { height: 390px; }
+  .evpt-verification-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .scenario-generation-charts {
   width: 100%;
@@ -1587,6 +1676,7 @@ body[data-active-result-group="parameterLibrary"] .result-group[data-result-grou
   }
   body[data-active-result-group="transient"] #rightPanel,
   body[data-active-result-group="modelIO"] #rightPanel,
+  body[data-active-result-group="evTraffic"] #rightPanel,
   body[data-active-result-group="parameterLibrary"] #rightPanel {
     width: 100vw;
     min-width: 0;
@@ -1594,11 +1684,14 @@ body[data-active-result-group="parameterLibrary"] .result-group[data-result-grou
   }
   body[data-active-result-group="transient"] #componentLib,
   body[data-active-result-group="modelIO"] #componentLib,
+  body[data-active-result-group="evTraffic"] #componentLib,
   body[data-active-result-group="parameterLibrary"] #componentLib,
   body[data-active-result-group="transient"] #canvasContainer,
   body[data-active-result-group="modelIO"] #canvasContainer,
+  body[data-active-result-group="evTraffic"] #canvasContainer,
   body[data-active-result-group="parameterLibrary"] #canvasContainer,
-  body[data-active-result-group="transient"] #rightPanelResizer {
+  body[data-active-result-group="transient"] #rightPanelResizer,
+  body[data-active-result-group="evTraffic"] #rightPanelResizer {
     display: none;
   }
   body[data-active-result-group="modelIO"] #rightPanelResizer {
@@ -1774,6 +1867,169 @@ body[data-active-result-group="parameterLibrary"] .result-group[data-result-grou
   gap: 8px;
   justify-content: flex-end;
   margin-top: 16px;
+}
+
+/* EV power-traffic scenario designer */
+.evpt-designer-modal {
+  width: min(1280px, 96vw);
+  height: min(820px, 92vh);
+  min-width: 0;
+  padding: 14px 16px;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.evpt-designer-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.evpt-designer-header h3 {
+  margin: 0;
+  white-space: nowrap;
+}
+.evpt-designer-header .sub-label {
+  flex: 1;
+  flex-direction: row;
+  align-items: center;
+  margin: 0;
+}
+.evpt-designer-header .sub-label input {
+  flex: 1;
+  min-width: 160px;
+}
+.evpt-designer-header-actions {
+  display: flex;
+  gap: 6px;
+}
+.evpt-designer-body {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.85fr) minmax(560px, 1.65fr);
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+  padding-top: 12px;
+}
+.evpt-designer-preview-pane,
+.evpt-designer-editor-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#evptDesignerPreview {
+  width: 100%;
+  flex: 1;
+  min-height: 320px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #f8fafc;
+}
+.evpt-designer-validation {
+  min-height: 62px;
+  max-height: 150px;
+  overflow: auto;
+  padding: 8px 4px 0;
+  color: var(--ink2);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.evpt-designer-validation.valid { color: var(--green); }
+.evpt-designer-validation.invalid { color: var(--orange); }
+.evpt-designer-tabs {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+}
+.evpt-designer-tabs button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 7px 10px;
+  background: transparent;
+  color: var(--ink2);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.evpt-designer-tabs button.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.evpt-designer-table-actions {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+}
+.evpt-designer-table {
+  flex: 1;
+  max-height: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.evpt-designer-table input {
+  width: 100%;
+  min-width: 64px;
+  height: 24px;
+  padding: 2px 5px;
+  border-radius: 3px;
+  box-sizing: border-box;
+  font-size: 11px;
+}
+.evpt-designer-table input[type="checkbox"] {
+  width: auto;
+  min-width: 0;
+  accent-color: var(--accent2);
+}
+.evpt-designer-table tbody tr { height: 32px; }
+.evpt-designer-table .evpt-list-input { min-width: 125px; }
+.evpt-designer-table .evpt-delete-row {
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--red);
+  cursor: pointer;
+  font-size: 18px;
+}
+.evpt-designer-json {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  resize: none;
+  box-sizing: border-box;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg3);
+  color: var(--ink);
+  font: 11px/1.5 "IBM Plex Mono", "Cascadia Code", monospace;
+  tab-size: 2;
+}
+.evpt-designer-json[hidden] { display: none; }
+.evpt-designer-footer {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  margin-top: 10px;
+}
+@media (max-width: 900px) {
+  .evpt-designer-modal { width: 98vw; height: 96vh; padding: 10px; }
+  .evpt-designer-header { flex-wrap: wrap; }
+  .evpt-designer-header .sub-label { order: 3; flex-basis: 100%; }
+  .evpt-designer-body {
+    display: flex;
+    flex-direction: column;
+    overflow: auto;
+  }
+  .evpt-designer-preview-pane { flex: 0 0 312px; }
+  #evptDesignerPreview { min-height: 240px; flex: 0 0 240px; }
+  .evpt-designer-editor-pane { flex: 0 0 430px; min-height: 430px; }
 }
 
 /* ===== On-demand neighborhood sub-diagram (Phase 4) ===== */
@@ -2376,7 +2632,8 @@ body[data-active-result-group="parameterLibrary"] .result-group[data-result-grou
   white-space: nowrap;
 }
 .sub-label select,
-.sub-label input {
+.sub-label input,
+.sub-label textarea {
   padding: 3px 6px;
   font: inherit;
   font-size: 12px;
@@ -2387,12 +2644,21 @@ body[data-active-result-group="parameterLibrary"] .result-group[data-result-grou
   cursor: pointer;
 }
 .sub-label select:focus,
-.sub-label input:focus {
+.sub-label input:focus,
+.sub-label textarea:focus {
   outline: none;
   border-color: var(--tb-border-hover);
   box-shadow: 0 0 0 2px rgba(86,182,194,0.18);
 }
 .sub-label input { width: 90px; }
+.sub-label textarea {
+  width: min(360px, 38vw);
+  min-height: 36px;
+  resize: vertical;
+  white-space: normal;
+  cursor: text;
+}
+.rel-seq-profile { align-items: flex-start; }
 .sub-label.sub-checkbox {
   gap: 4px;
   cursor: pointer;
@@ -2439,6 +2705,29 @@ body[data-active-result-group="parameterLibrary"] .result-group[data-result-grou
 .ts-param-group {
   flex: 1 1 460px;
   max-width: 100%;
+}
+.evpt-param-group {
+  flex: 1 1 420px;
+  max-width: 100%;
+}
+.evpt-formulation-group[hidden] {
+  display: none !important;
+}
+.evpt-advanced-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.evpt-advanced-controls[hidden] {
+  display: none !important;
+}
+.evpt-param-group.evpt-advanced-expanded {
+  flex-basis: 100%;
+}
+.evpt-param-group-actions {
+  border-color: color-mix(in srgb, var(--accent2) 40%, var(--tb-border));
 }
 .ts-annual-group {
   flex: 0 1 260px;

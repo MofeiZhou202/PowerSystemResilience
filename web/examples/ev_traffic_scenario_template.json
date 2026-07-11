@@ -1,0 +1,78 @@
+{
+  "$schema": "../schemas/ev_traffic_scenario.schema.json",
+  "schema_version": "1.0",
+  "name": "EV traffic scenario",
+  "traffic": {
+    "nodes": [
+      { "index": 1, "name": "Origin", "x": 0.0, "y": 0.0 },
+      { "index": 2, "name": "Station", "x": 1.0, "y": 0.0 },
+      { "index": 3, "name": "Destination", "x": 2.0, "y": 0.0 }
+    ],
+    "links": [
+      {
+        "index": 1,
+        "from_node": 1,
+        "to_node": 2,
+        "length_km": 5.0,
+        "free_flow_time_hr": 0.1,
+        "capacity_veh_per_hr": 1000.0,
+        "jam_vehicles": 100.0,
+        "available": true,
+        "alpha": 0.15,
+        "beta": 4.0,
+        "drive_energy_kwh_per_veh_km": 0.18
+      },
+      {
+        "index": 2,
+        "from_node": 2,
+        "to_node": 3,
+        "length_km": 5.0,
+        "free_flow_time_hr": 0.1,
+        "capacity_veh_per_hr": 1000.0,
+        "jam_vehicles": 100.0,
+        "available": true,
+        "alpha": 0.15,
+        "beta": 4.0,
+        "drive_energy_kwh_per_veh_km": 0.18
+      }
+    ]
+  },
+  "routes": [
+    {
+      "index": 1,
+      "origin_node": 1,
+      "destination_node": 3,
+      "link_indices": [1, 2],
+      "toll_cost": 0.0,
+      "charging_stops": [
+        {
+          "station_id": 1,
+          "requested_energy_kwh_per_vehicle": 20.0,
+          "requested_discharge_energy_kwh_per_vehicle": 0.0,
+          "dwell_steps": 2,
+          "max_charge_kw_per_vehicle": 7.0,
+          "v2g_capable": false,
+          "max_discharge_kw_per_vehicle": 0.0
+        }
+      ]
+    }
+  ],
+  "demands": [
+    {
+      "index": 1,
+      "origin_node": 1,
+      "destination_node": 3,
+      "departure_step": 0,
+      "vehicles": 100.0,
+      "candidate_route_indices": [1],
+      "initial_energy_kwh": 30.0,
+      "energy_min_kwh": 5.0,
+      "energy_max_kwh": 60.0,
+      "reserve_energy_kwh": 5.0,
+      "willingness_to_pay_per_vehicle": 50.0
+    }
+  ],
+  "station_prices": [
+    { "station_id": 1, "price_per_kwh": [0.20, 0.20, 0.35, 0.35, 0.20, 0.20] }
+  ]
+}

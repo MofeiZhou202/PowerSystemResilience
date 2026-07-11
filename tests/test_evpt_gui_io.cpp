@@ -5,6 +5,8 @@
 // /api/session/run_ev_traffic endpoint does: build a demo problem, parse
 // options from JSON, run a formulation, serialize the result.
 
+#include <algorithm>
+
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <nlohmann/json.hpp>
@@ -19,7 +21,7 @@ using Approx = Catch::Approx;
 
 TEST_CASE("EVPT demo cases: build and scenario echo", "[evpt][gui][demo]") {
   const auto names = io::evpt_demo_case_names();
-  REQUIRE(names.size() == 2);
+  REQUIRE(names.size() == 3);
 
   for (const auto& name : names) {
     const auto prob = io::build_evpt_demo_case(name);
@@ -64,12 +66,63 @@ TEST_CASE("EVPT demo cases: build and scenario echo", "[evpt][gui][demo]") {
 
     // Scenario echo contains nodes with coordinates and station→bus mapping.
     const json sc = io::evpt_scenario_to_json(prob);
-    REQUIRE(sc.contains("nodes"));
-    REQUIRE(!sc["nodes"].empty());
-    CHECK(sc["nodes"].front().contains("x"));
+    CHECK(sc.value("schema_version", "") == "1.0");
+    REQUIRE(sc.contains("traffic"));
+    REQUIRE(!sc["traffic"]["nodes"].empty());
+    CHECK(sc["traffic"]["nodes"].front().contains("x"));
     REQUIRE(sc.contains("charging_stations"));
     CHECK(sc["charging_stations"].front().contains("bus"));
   }
+}
+
+TEST_CASE("EVPT comprehensive demo exercises joint traffic-power workflow",
+          "[evpt][gui][comprehensive]") {
+  auto prob = io::build_evpt_demo_comprehensive();
+  REQUIRE(prob.traffic.nodes.size() == 25);
+  REQUIRE(prob.traffic.links.size() == 40);
+  REQUIRE(prob.routes.size() == 7);
+  REQUIRE(prob.demands.size() == 4);
+  REQUIRE(prob.system.ac.charging_stations.size() == 3);
+  REQUIRE(prob.station_prices.size() == 3);
+
+  int dynamic_links = 0;
+  for (const auto& link : prob.traffic.links) {
+    if (!link.capacity_profile_veh_per_hr.empty()) ++dynamic_links;
+  }
+  CHECK(dynamic_links == 2);
+  CHECK(std::any_of(prob.routes.begin(), prob.routes.end(), [](const auto& route) {
+    return std::any_of(route.charging_stops.begin(), route.charging_stops.end(),
+                       [](const auto& stop) { return stop.v2g_capable; });
+  }));
+
+  CTMJointWelfareOptions options;
+  options.max_iterations = 6;
+  options.price_convergence_tol = 5e-3;
+  options.price_update_step = 0.6;
+  options.use_dcopf_prices = true;
+  options.evpt_opts.num_steps = 8;
+  options.evpt_opts.time_step_hr = 1.0;
+  options.evpt_opts.allow_v2g = true;
+  options.due_opts.max_iterations = 20;
+  options.due_opts.convergence_tol = 5e-3;
+  options.dcopf_opts.compute_lmp = true;
+  options.dcopf_opts.load_shedding = true;
+
+  const auto result = simulate_ev_power_traffic_ctm_joint(prob, options);
+  CHECK(result.iterations >= 1);
+  CHECK(!result.history.empty());
+  CHECK(result.lmp_by_step.size() == 8);
+  CHECK(result.opf_by_step.size() == 8);
+  CHECK(result.final_ctm_due.flow_by_demand_route.size() == 4);
+  CHECK(result.final_ctm_due.station_ev_load_kw.size() == 3);
+  CHECK(result.final_ctm_due.total_delivered_energy_kwh > 0.0);
+
+  const json scenario = io::evpt_scenario_to_json(prob);
+  REQUIRE(scenario.contains("power_network"));
+  CHECK(scenario["power_network"]["buses"].size() ==
+        prob.system.ac.buses.size());
+  CHECK(scenario["power_network"]["branches"].size() ==
+        prob.system.ac.branches.size());
 }
 
 TEST_CASE("EVPT JSON: problem round trip", "[evpt][gui][json]") {
@@ -79,7 +132,7 @@ TEST_CASE("EVPT JSON: problem round trip", "[evpt][gui][json]") {
   // Re-parse the echoed scenario into a fresh problem: graph shape survives.
   EVPowerTrafficProblem back;
   json pj;
-  pj["traffic"] = {{"nodes", sc["nodes"]}, {"links", sc["links"]}};
+  pj["traffic"] = sc["traffic"];
   pj["routes"] = sc["routes"];
   pj["demands"] = sc["demands"];
   io::evpt_problem_from_json(pj, back);
@@ -91,6 +144,48 @@ TEST_CASE("EVPT JSON: problem round trip", "[evpt][gui][json]") {
   CHECK(back.traffic.links.front().capacity_veh_per_hr ==
         Approx(prob.traffic.links.front().capacity_veh_per_hr));
   CHECK(back.demands.front().vehicles == Approx(prob.demands.front().vehicles));
+  CHECK(back.demands.front().willingness_to_pay_per_vehicle ==
+        Approx(prob.demands.front().willingness_to_pay_per_vehicle));
+  CHECK(back.routes.back().charging_stops.front().max_discharge_kw_per_vehicle ==
+        Approx(prob.routes.back().charging_stops.front().max_discharge_kw_per_vehicle));
+
+  json full = sc;
+  EVPowerTrafficProblem with_prices;
+  io::evpt_problem_from_json(full, with_prices);
+  REQUIRE(with_prices.station_prices.size() == prob.station_prices.size());
+  CHECK(with_prices.station_prices.front().price_per_kwh ==
+        prob.station_prices.front().price_per_kwh);
+}
+
+TEST_CASE("EVPT JSON: GUI advanced options are mapped", "[evpt][gui][options]") {
+  const json model = {{"assignment_model", "system_optimal_milp"},
+                      {"allow_unserved_travel_demand", true},
+                      {"default_station_power_kw", 250.0},
+                      {"system_optimal_max_nodes", 99}};
+  const auto ev = io::evpt_options_from_json(model);
+  CHECK(ev.assignment_model == AssignmentModel::SystemOptimalMILP);
+  CHECK(ev.allow_unserved_travel_demand);
+  CHECK(ev.default_station_power_kw == Approx(250.0));
+  CHECK(ev.system_optimal_max_nodes == 99);
+
+  const auto due = io::evpt_due_options_from_json(
+      json{{"due_mode", "full_endogenous"},
+           {"max_departure_iterations", 12},
+           {"departure_convergence_tol", 2e-4}});
+  CHECK(due.due_mode == DUEMode::FullEndogenous);
+  CHECK(due.max_departure_iterations == 12);
+  CHECK(due.departure_convergence_tol == Approx(2e-4));
+
+  const auto joint = io::evpt_joint_optimizer_options_from_json(
+      json{{"mode", "certified_ltm_user_benefit_pwl_milp"},
+           {"max_nodes", 123},
+           {"unserved_trip_penalty", 456.0},
+           {"full_joint_ltm_pwl_segments", 9}});
+  CHECK(joint.mode ==
+        JointOptimizerMode::CertifiedFullJointLtmUserBenefitPwlMILP);
+  CHECK(joint.max_nodes == 123);
+  CHECK(joint.unserved_trip_penalty == Approx(456.0));
+  CHECK(joint.full_joint_ltm_pwl_segments == 9);
 }
 
 TEST_CASE("EVPT JSON: mode B (CTM-DUE) run and serialize", "[evpt][gui][ctm_due]") {

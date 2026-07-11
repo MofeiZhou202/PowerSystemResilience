@@ -84,6 +84,9 @@ struct StaticGeneratorDC {
 
   bool controllable{false};
 
+  double cost_c1{0.0};
+  double emission_factor_tco2_mwh{0.0};
+
   double mtbf_hours{0.0};
   double mttr_hours{0.0};
   double t_scheduled_hr{0.0};
@@ -194,6 +197,10 @@ struct DCStorage {
   int profile_id{-1};
 
   bool controllable{true};
+
+  double charge_bid_price{0.0};
+  double discharge_bid_price{0.0};
+  double daily_cycle_limit{0.0};
 
   double forced_outage_rate{0.0};
   double mttr_hr{0.0};

@@ -481,6 +481,8 @@ static json dc_static_generator_to_json(const StaticGeneratorDC& g) {
   j["pmax_mw"] = g.pmax_mw;
   j["pmin_mw"] = g.pmin_mw;
   j["controllable"] = g.controllable;
+  j["cost_c1"] = g.cost_c1;
+  j["emission_factor_tco2_mwh"] = g.emission_factor_tco2_mwh;
   j["mtbf_hours"] = g.mtbf_hours;
   j["mttr_hours"] = g.mttr_hours;
   j["t_scheduled_hr"] = g.t_scheduled_hr;
@@ -501,6 +503,9 @@ static StaticGeneratorDC dc_static_generator_from_json(const json& j) {
   g.pmax_mw = jget(j, "pmax_mw", 0.0);
   g.pmin_mw = jget(j, "pmin_mw", 0.0);
   g.controllable = jget(j, "controllable", false);
+  g.cost_c1 = jget(j, "cost_c1", 0.0);
+  g.emission_factor_tco2_mwh =
+      jget_alias(j, "emission_factor_tco2_mwh", "co2_emission_rate", 0.0);
   g.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
   g.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   g.t_scheduled_hr = jget(j, "t_scheduled_hr", 0.0);
@@ -596,6 +601,7 @@ static json generator_to_json(const Generator& g) {
   j["profile_id"] = g.profile_id;
   j["forced_outage_rate"] = g.forced_outage_rate;
   j["mttr_hr"] = g.mttr_hr;
+  j["t_scheduled_hr"] = g.t_scheduled_hr;
   add_dynamic_model_if_present(j, g.dynamic_model);
   return j;
 }
@@ -638,6 +644,7 @@ static Generator generator_from_json(const json& j) {
   g.profile_id = jget(j, "profile_id", -1);
   g.forced_outage_rate = jget(j, "forced_outage_rate", 0.0);
   g.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  g.t_scheduled_hr = jget(j, "t_scheduled_hr", 0.0);
   read_dynamic_model_if_present(j, g.dynamic_model);
   return g;
 }
@@ -764,8 +771,12 @@ static json storage_to_json(const Storage& st) {
   j["soh"] = st.soh;
   j["replacement_cost"] = st.replacement_cost;
   j["profile_id"] = st.profile_id;
+  j["charge_bid_price"] = st.charge_bid_price;
+  j["discharge_bid_price"] = st.discharge_bid_price;
+  j["daily_cycle_limit"] = st.daily_cycle_limit;
   j["forced_outage_rate"] = st.forced_outage_rate;
   j["mttr_hr"] = st.mttr_hr;
+  j["t_scheduled_hr"] = st.t_scheduled_hr;
   add_dynamic_model_if_present(j, st.dynamic_model);
   return j;
 }
@@ -796,8 +807,12 @@ static Storage storage_from_json(const json& j) {
   st.soh = jget(j, "soh", 1.0);
   st.replacement_cost = jget(j, "replacement_cost", 0.0);
   st.profile_id = jget(j, "profile_id", -1);
+  st.charge_bid_price = jget(j, "charge_bid_price", 0.0);
+  st.discharge_bid_price = jget(j, "discharge_bid_price", 0.0);
+  st.daily_cycle_limit = jget(j, "daily_cycle_limit", 0.0);
   st.forced_outage_rate = jget(j, "forced_outage_rate", 0.0);
   st.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  st.t_scheduled_hr = jget(j, "t_scheduled_hr", 0.0);
   read_dynamic_model_if_present(j, st.dynamic_model);
   return st;
 }
@@ -828,8 +843,12 @@ static json dc_storage_to_json(const DCStorage& st) {
   j["replacement_cost"] = st.replacement_cost;
   j["profile_id"] = st.profile_id;
   j["controllable"] = st.controllable;
+  j["charge_bid_price"] = st.charge_bid_price;
+  j["discharge_bid_price"] = st.discharge_bid_price;
+  j["daily_cycle_limit"] = st.daily_cycle_limit;
   j["forced_outage_rate"] = st.forced_outage_rate;
   j["mttr_hr"] = st.mttr_hr;
+  j["t_scheduled_hr"] = st.t_scheduled_hr;
   add_dynamic_model_if_present(j, st.dynamic_model);
   return j;
 }
@@ -859,8 +878,12 @@ static DCStorage dc_storage_from_json(const json& j) {
   st.replacement_cost = jget(j, "replacement_cost", 0.0);
   st.profile_id = jget(j, "profile_id", -1);
   st.controllable = jget(j, "controllable", true);
+  st.charge_bid_price = jget(j, "charge_bid_price", 0.0);
+  st.discharge_bid_price = jget(j, "discharge_bid_price", 0.0);
+  st.daily_cycle_limit = jget(j, "daily_cycle_limit", 0.0);
   st.forced_outage_rate = jget(j, "forced_outage_rate", 0.0);
   st.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  st.t_scheduled_hr = jget(j, "t_scheduled_hr", 0.0);
   read_dynamic_model_if_present(j, st.dynamic_model);
   return st;
 }
@@ -1029,8 +1052,10 @@ static json static_generator_to_json(const StaticGenerator& g) {
   j["k"] = g.k;
   j["rx"] = g.rx;
   j["co2_emission_rate"] = g.co2_emission_rate;
+  j["cost_c1"] = g.cost_c1;
   j["mtbf_hours"] = g.mtbf_hours;
   j["mttr_hours"] = g.mttr_hours;
+  j["t_scheduled_hr"] = g.t_scheduled_hr;
   add_dynamic_model_if_present(j, g.dynamic_model);
   return j;
 }
@@ -1058,8 +1083,10 @@ static StaticGenerator static_generator_from_json(const json& j) {
   g.k = jget(j, "k", 1.0);
   g.rx = jget(j, "rx", 0.0);
   g.co2_emission_rate = jget_alias(j, "emission_factor_tco2_mwh", "co2_emission_rate", 0.0);
+  g.cost_c1 = jget(j, "cost_c1", 0.0);
   g.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
   g.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  g.t_scheduled_hr = jget(j, "t_scheduled_hr", 0.0);
   read_dynamic_model_if_present(j, g.dynamic_model);
   return g;
 }

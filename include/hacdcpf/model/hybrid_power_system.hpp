@@ -232,6 +232,9 @@ inline void materialize_dc_storage(HybridPowerSystem& sys) {
     st.e_mwh = d.e_mwh;
     st.profile_id = d.profile_id;
     st.controllable = d.controllable;
+    st.charge_bid_price = d.charge_bid_price;
+    st.discharge_bid_price = d.discharge_bid_price;
+    st.daily_cycle_limit = d.daily_cycle_limit;
     st.forced_outage_rate = d.forced_outage_rate;
     st.mttr_hr = d.mttr_hr;
     st.t_scheduled_hr = d.t_scheduled_hr;

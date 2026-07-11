@@ -69,6 +69,16 @@ std::vector<int> ivec_or(const json& j, const char* key) {
   return out;
 }
 
+std::vector<bool> bvec_or(const json& j, const char* key) {
+  std::vector<bool> out;
+  if (j.contains(key) && j.at(key).is_array()) {
+    for (const auto& v : j.at(key)) {
+      if (v.is_boolean()) out.push_back(v.get<bool>());
+    }
+  }
+  return out;
+}
+
 // Per-link CTM occupancy/inflow/outflow time series, strided so that
 // links × emitted-steps stays within the cell budget.
 json ctm_link_series_to_json(const CTMSimulationResult& ctm,
@@ -179,6 +189,9 @@ void evpt_problem_from_json(const json& j, EVPowerTrafficProblem& problem) {
             num_or(lj, "capacity_veh_per_hr", l.capacity_veh_per_hr);
         l.jam_vehicles = num_or(lj, "jam_vehicles", l.jam_vehicles);
         l.available = bool_or(lj, "available", l.available);
+        l.capacity_profile_veh_per_hr =
+            vec_or(lj, "capacity_profile_veh_per_hr");
+        l.availability_profile = bvec_or(lj, "availability_profile");
         l.alpha = num_or(lj, "alpha", l.alpha);
         l.beta = num_or(lj, "beta", l.beta);
         l.drive_energy_kwh_per_veh_km =
@@ -257,6 +270,10 @@ void evpt_problem_from_json(const json& j, EVPowerTrafficProblem& problem) {
 
 json evpt_scenario_to_json(const EVPowerTrafficProblem& problem) {
   json out;
+  out["$schema"] = "/xjtu/schemas/ev_traffic_scenario.schema.json";
+  out["schema_version"] = "1.0";
+  out["name"] = problem.system.name.empty() ? "EV power-traffic scenario"
+                                             : problem.system.name;
 
   json nodes = json::array();
   for (const auto& n : problem.traffic.nodes) {
@@ -267,7 +284,8 @@ json evpt_scenario_to_json(const EVPowerTrafficProblem& problem) {
     if (std::isfinite(n.y)) nj["y"] = n.y;
     nodes.push_back(std::move(nj));
   }
-  out["nodes"] = std::move(nodes);
+  json traffic;
+  traffic["nodes"] = std::move(nodes);
 
   json links = json::array();
   for (const auto& l : problem.traffic.links) {
@@ -279,9 +297,16 @@ json evpt_scenario_to_json(const EVPowerTrafficProblem& problem) {
     lj["free_flow_time_hr"] = l.free_flow_time_hr;
     lj["capacity_veh_per_hr"] = l.capacity_veh_per_hr;
     lj["jam_vehicles"] = l.jam_vehicles;
+    lj["available"] = l.available;
+    lj["capacity_profile_veh_per_hr"] = l.capacity_profile_veh_per_hr;
+    lj["availability_profile"] = l.availability_profile;
+    lj["alpha"] = l.alpha;
+    lj["beta"] = l.beta;
+    lj["drive_energy_kwh_per_veh_km"] = l.drive_energy_kwh_per_veh_km;
     links.push_back(std::move(lj));
   }
-  out["links"] = std::move(links);
+  traffic["links"] = std::move(links);
+  out["traffic"] = std::move(traffic);
 
   json routes = json::array();
   for (const auto& r : problem.routes) {
@@ -290,13 +315,20 @@ json evpt_scenario_to_json(const EVPowerTrafficProblem& problem) {
     rj["origin_node"] = r.origin_node;
     rj["destination_node"] = r.destination_node;
     rj["link_indices"] = r.link_indices;
+    rj["toll_cost"] = r.toll_cost;
     json stops = json::array();
     for (const auto& s : r.charging_stops) {
       stops.push_back({{"station_id", s.station_id},
                        {"requested_energy_kwh_per_vehicle",
                         s.requested_energy_kwh_per_vehicle},
+                       {"requested_discharge_energy_kwh_per_vehicle",
+                        s.requested_discharge_energy_kwh_per_vehicle},
                        {"dwell_steps", s.dwell_steps},
-                       {"v2g_capable", s.v2g_capable}});
+                       {"max_charge_kw_per_vehicle",
+                        s.max_charge_kw_per_vehicle},
+                       {"v2g_capable", s.v2g_capable},
+                       {"max_discharge_kw_per_vehicle",
+                        s.max_discharge_kw_per_vehicle}});
     }
     rj["charging_stops"] = std::move(stops);
     routes.push_back(std::move(rj));
@@ -309,9 +341,24 @@ json evpt_scenario_to_json(const EVPowerTrafficProblem& problem) {
                        {"origin_node", d.origin_node},
                        {"destination_node", d.destination_node},
                        {"departure_step", d.departure_step},
-                       {"vehicles", d.vehicles}});
+                       {"vehicles", d.vehicles},
+                       {"candidate_route_indices", d.candidate_route_indices},
+                       {"initial_energy_kwh", d.initial_energy_kwh},
+                       {"energy_min_kwh", d.energy_min_kwh},
+                       {"energy_max_kwh", d.energy_max_kwh},
+                       {"reserve_energy_kwh", d.reserve_energy_kwh},
+                       {"willingness_to_pay_per_vehicle",
+                        d.willingness_to_pay_per_vehicle},
+                       {"departure_window_steps", d.departure_window_steps}});
   }
   out["demands"] = std::move(demands);
+
+  json prices = json::array();
+  for (const auto& p : problem.station_prices) {
+    prices.push_back({{"station_id", p.station_id},
+                      {"price_per_kwh", p.price_per_kwh}});
+  }
+  out["station_prices"] = std::move(prices);
 
   json stations = json::array();
   for (const auto& cs : problem.system.ac.charging_stations) {
@@ -325,6 +372,43 @@ json evpt_scenario_to_json(const EVPowerTrafficProblem& problem) {
   }
   out["charging_stations"] = std::move(stations);
 
+  // Compact power-network echo used by the GUI's coupled topology view. This
+  // is intentionally descriptive only; the imported traffic scenario never
+  // replaces the power system held by the GUI session.
+  json power;
+  json buses = json::array();
+  for (const auto& bus : problem.system.ac.buses) {
+    buses.push_back({{"index", bus.index},
+                     {"name", bus.name},
+                     {"bus_type", static_cast<int>(bus.bus_type)},
+                     {"pd_mw", bus.pd_mw},
+                     {"base_kv", bus.base_kv},
+                     {"in_service", bus.in_service}});
+  }
+  power["buses"] = std::move(buses);
+  json branches = json::array();
+  for (const auto& branch : problem.system.ac.branches) {
+    branches.push_back({{"index", branch.index},
+                        {"from_bus", branch.from_bus},
+                        {"to_bus", branch.to_bus},
+                        {"rate_a_mva", branch.rate_a_mva},
+                        {"in_service", branch.in_service}});
+  }
+  power["branches"] = std::move(branches);
+  json generators = json::array();
+  for (const auto& gen : problem.system.ac.generators) {
+    generators.push_back({{"index", gen.index},
+                          {"name", gen.name},
+                          {"bus", gen.bus},
+                          {"pmin_mw", gen.pmin_mw},
+                          {"pmax_mw", gen.pmax_mw},
+                          {"cost_c1", gen.cost_c1},
+                          {"is_slack", gen.is_slack},
+                          {"in_service", gen.in_service}});
+  }
+  power["generators"] = std::move(generators);
+  out["power_network"] = std::move(power);
+
   return out;
 }
 
@@ -336,7 +420,23 @@ EVPowerTrafficOptions evpt_options_from_json(const json& j) {
   o.time_step_hr = num_or(j, "time_step_hr", o.time_step_hr);
   o.auto_generate_routes = bool_or(j, "auto_generate_routes", o.auto_generate_routes);
   o.k_shortest_paths = int_or(j, "k_shortest_paths", o.k_shortest_paths);
+  const std::string assignment =
+      j.value("assignment_model", std::string{"deterministic_shortest_path"});
+  if (assignment == "logit") {
+    o.assignment_model = AssignmentModel::Logit;
+  } else if (assignment == "capacity_aware_greedy") {
+    o.assignment_model = AssignmentModel::CapacityAwareGreedy;
+  } else if (assignment == "system_optimal_lp") {
+    o.assignment_model = AssignmentModel::SystemOptimalLP;
+  } else if (assignment == "system_optimal_milp") {
+    o.assignment_model = AssignmentModel::SystemOptimalMILP;
+  }
+  o.logit_theta = num_or(j, "logit_theta", o.logit_theta);
   o.enforce_road_capacity = bool_or(j, "enforce_road_capacity", o.enforce_road_capacity);
+  o.allow_unserved_travel_demand =
+      bool_or(j, "allow_unserved_travel_demand", o.allow_unserved_travel_demand);
+  o.allow_unserved_charging_energy =
+      bool_or(j, "allow_unserved_charging_energy", o.allow_unserved_charging_energy);
   o.allow_v2g = bool_or(j, "allow_v2g", o.allow_v2g);
   o.value_of_time_per_hr = num_or(j, "value_of_time_per_hr", o.value_of_time_per_hr);
   o.queueing_weight = num_or(j, "queueing_weight", o.queueing_weight);
@@ -353,6 +453,25 @@ EVPowerTrafficOptions evpt_options_from_json(const json& j) {
   o.default_route_stop_power_kw_per_vehicle =
       num_or(j, "default_route_stop_power_kw_per_vehicle",
              o.default_route_stop_power_kw_per_vehicle);
+  o.default_station_power_kw =
+      num_or(j, "default_station_power_kw", o.default_station_power_kw);
+  o.system_optimal_unserved_trip_penalty =
+      num_or(j, "system_optimal_unserved_trip_penalty",
+             o.system_optimal_unserved_trip_penalty);
+  o.system_optimal_mip_gap =
+      num_or(j, "system_optimal_mip_gap", o.system_optimal_mip_gap);
+  o.system_optimal_time_limit_sec =
+      num_or(j, "system_optimal_time_limit_sec",
+             o.system_optimal_time_limit_sec);
+  o.system_optimal_max_nodes =
+      int_or(j, "system_optimal_max_nodes", o.system_optimal_max_nodes);
+  o.update_system_charging_stations =
+      bool_or(j, "update_system_charging_stations",
+              o.update_system_charging_stations);
+  o.enforce_generation_capacity =
+      bool_or(j, "enforce_generation_capacity", o.enforce_generation_capacity);
+  o.external_grid_capacity_mw =
+      num_or(j, "external_grid_capacity_mw", o.external_grid_capacity_mw);
   o.run_power_flow_validation =
       bool_or(j, "run_power_flow_validation", o.run_power_flow_validation);
   return o;
@@ -365,7 +484,14 @@ CTMOptions evpt_ctm_options_from_json(const json& j) {
   o.backward_wave_speed_fallback_km_hr =
       num_or(j, "backward_wave_speed_fallback_km_hr",
              o.backward_wave_speed_fallback_km_hr);
+  o.record_cell_history = bool_or(j, "record_cell_history", o.record_cell_history);
   o.route_specific_cells = bool_or(j, "route_specific_cells", o.route_specific_cells);
+  o.enable_multiclass = bool_or(j, "enable_multiclass", o.enable_multiclass);
+  o.ev_pce = num_or(j, "ev_pce", o.ev_pce);
+  o.icv_pce = num_or(j, "icv_pce", o.icv_pce);
+  o.phev_pce = num_or(j, "phev_pce", o.phev_pce);
+  o.use_aggregate_link_variables =
+      bool_or(j, "use_aggregate_link_variables", o.use_aggregate_link_variables);
   return o;
 }
 
@@ -378,6 +504,12 @@ DUEOptions evpt_due_options_from_json(const json& j) {
       bool_or(j, "compute_system_optimal_benchmark",
               o.compute_system_optimal_benchmark);
   o.logit_theta = num_or(j, "logit_theta", o.logit_theta);
+  const std::string due_mode = j.value("due_mode", std::string{"fixed_departure"});
+  if (due_mode == "full_endogenous") o.due_mode = DUEMode::FullEndogenous;
+  o.max_departure_iterations =
+      int_or(j, "max_departure_iterations", o.max_departure_iterations);
+  o.departure_convergence_tol =
+      num_or(j, "departure_convergence_tol", o.departure_convergence_tol);
   return o;
 }
 
@@ -411,10 +543,16 @@ JointOptimizerOptions evpt_joint_optimizer_options_from_json(const json& j) {
     o.mode = JointOptimizerMode::IntegerRouteMILP;
   } else if (mode == "certified_dynamic_mpec_milp") {
     o.mode = JointOptimizerMode::CertifiedDynamicMPECMILP;
+  } else if (mode == "certified_dynamic_user_benefit_mpec_milp") {
+    o.mode = JointOptimizerMode::CertifiedDynamicUserBenefitMPECMILP;
   } else if (mode == "certified_ltm_pwl_milp") {
     o.mode = JointOptimizerMode::CertifiedFullJointLtmPwlMILP;
+  } else if (mode == "certified_ltm_user_benefit_pwl_milp") {
+    o.mode = JointOptimizerMode::CertifiedFullJointLtmUserBenefitPwlMILP;
   } else if (mode == "full_joint_nlp") {
     o.mode = JointOptimizerMode::FullJointSocialWelfareNLP;
+  } else if (mode == "full_joint_user_benefit_nlp") {
+    o.mode = JointOptimizerMode::FullJointUserBenefitNLP;
   } else {
     o.mode = JointOptimizerMode::SocialWelfareMax;
   }
@@ -422,13 +560,40 @@ JointOptimizerOptions evpt_joint_optimizer_options_from_json(const json& j) {
   o.allow_v2g = bool_or(j, "allow_v2g", o.allow_v2g);
   o.enforce_road_capacity =
       bool_or(j, "enforce_road_capacity", o.enforce_road_capacity);
+  o.enforce_generation_capacity =
+      bool_or(j, "enforce_generation_capacity", o.enforce_generation_capacity);
+  o.unserved_trip_penalty =
+      num_or(j, "unserved_trip_penalty", o.unserved_trip_penalty);
+  o.power_slack_penalty =
+      num_or(j, "power_slack_penalty", o.power_slack_penalty);
+  o.outside_option_cost = num_or(j, "outside_option_cost", o.outside_option_cost);
   o.value_of_time_per_hr =
       num_or(j, "value_of_time_per_hr", o.value_of_time_per_hr);
+  o.station_energy_cost_weight =
+      num_or(j, "station_energy_cost_weight", o.station_energy_cost_weight);
+  o.default_charging_efficiency =
+      num_or(j, "default_charging_efficiency", o.default_charging_efficiency);
+  o.default_route_stop_power_kw_per_vehicle =
+      num_or(j, "default_route_stop_power_kw_per_vehicle",
+             o.default_route_stop_power_kw_per_vehicle);
+  o.default_station_power_kw =
+      num_or(j, "default_station_power_kw", o.default_station_power_kw);
   o.default_station_price_per_kwh =
       num_or(j, "default_station_price_per_kwh", o.default_station_price_per_kwh);
   o.mip_gap = num_or(j, "mip_gap", o.mip_gap);
   o.time_limit_sec = num_or(j, "time_limit_sec", o.time_limit_sec);
+  o.max_nodes = int_or(j, "max_nodes", o.max_nodes);
   o.use_ctm_travel_times = bool_or(j, "use_ctm_travel_times", o.use_ctm_travel_times);
+  o.full_joint_prefer_ipopt =
+      bool_or(j, "full_joint_prefer_ipopt", o.full_joint_prefer_ipopt);
+  o.full_joint_equilibrium_penalty =
+      num_or(j, "full_joint_equilibrium_penalty",
+             o.full_joint_equilibrium_penalty);
+  o.full_joint_ltm_pwl_segments =
+      int_or(j, "full_joint_ltm_pwl_segments", o.full_joint_ltm_pwl_segments);
+  o.full_joint_ltm_backward_wave_speed_fallback_km_hr =
+      num_or(j, "full_joint_ltm_backward_wave_speed_fallback_km_hr",
+             o.full_joint_ltm_backward_wave_speed_fallback_km_hr);
   if (j.contains("ctm_options") && j.at("ctm_options").is_object()) {
     o.ctm_opts = evpt_ctm_options_from_json(j.at("ctm_options"));
   }

@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hacdcpf.local/schemas/ev_traffic_scenario.schema.json",
+  "title": "HACDCPF EV power-traffic scenario",
+  "type": "object",
+  "required": ["schema_version", "traffic", "routes", "demands"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": "1.0" },
+    "name": { "type": "string" },
+    "traffic": {
+      "type": "object",
+      "required": ["nodes", "links"],
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/node" }
+        },
+        "links": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/link" }
+        }
+      }
+    },
+    "routes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/route" }
+    },
+    "demands": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/demand" }
+    },
+    "station_prices": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/station_price" }
+    },
+    "charging_stations": {
+      "type": "array",
+      "readOnly": true,
+      "description": "Echo of the power-system station-to-bus mapping. Route station_id values must match charging stations in the current power-system model.",
+      "items": { "$ref": "#/$defs/charging_station" }
+    },
+    "power_network": {
+      "type": "object",
+      "readOnly": true,
+      "description": "Compact AC network echo used only by coupled-result visualization.",
+      "properties": {
+        "buses": { "type": "array", "items": { "type": "object" } },
+        "branches": { "type": "array", "items": { "type": "object" } },
+        "generators": { "type": "array", "items": { "type": "object" } }
+      }
+    }
+  },
+  "$defs": {
+    "positive_id": { "type": "integer", "minimum": 1 },
+    "node": {
+      "type": "object",
+      "required": ["index"],
+      "properties": {
+        "index": { "$ref": "#/$defs/positive_id" },
+        "name": { "type": "string" },
+        "x": { "type": "number", "description": "Layout coordinate in km or arbitrary units." },
+        "y": { "type": "number", "description": "Layout coordinate in km or arbitrary units." }
+      }
+    },
+    "link": {
+      "type": "object",
+      "required": ["index", "from_node", "to_node", "length_km", "free_flow_time_hr", "capacity_veh_per_hr"],
+      "properties": {
+        "index": { "$ref": "#/$defs/positive_id" },
+        "from_node": { "$ref": "#/$defs/positive_id" },
+        "to_node": { "$ref": "#/$defs/positive_id" },
+        "length_km": { "type": "number", "exclusiveMinimum": 0 },
+        "free_flow_time_hr": { "type": "number", "exclusiveMinimum": 0 },
+        "capacity_veh_per_hr": { "type": "number", "minimum": 0 },
+        "jam_vehicles": { "type": "number", "minimum": 0 },
+        "available": { "type": "boolean", "default": true },
+        "capacity_profile_veh_per_hr": { "type": "array", "items": { "type": "number", "minimum": 0 } },
+        "availability_profile": { "type": "array", "items": { "type": "boolean" } },
+        "alpha": { "type": "number", "minimum": 0, "default": 0.15 },
+        "beta": { "type": "number", "minimum": 1, "default": 4 },
+        "drive_energy_kwh_per_veh_km": { "type": "number", "minimum": 0 }
+      }
+    },
+    "charging_stop": {
+      "type": "object",
+      "required": ["station_id", "requested_energy_kwh_per_vehicle"],
+      "properties": {
+        "station_id": { "$ref": "#/$defs/positive_id" },
+        "requested_energy_kwh_per_vehicle": { "type": "number", "minimum": 0 },
+        "requested_discharge_energy_kwh_per_vehicle": { "type": "number", "minimum": 0 },
+        "dwell_steps": { "type": "integer", "minimum": 1, "default": 1 },
+        "max_charge_kw_per_vehicle": { "type": "number", "minimum": 0 },
+        "v2g_capable": { "type": "boolean", "default": false },
+        "max_discharge_kw_per_vehicle": { "type": "number", "minimum": 0 }
+      }
+    },
+    "route": {
+      "type": "object",
+      "required": ["index", "origin_node", "destination_node", "link_indices"],
+      "properties": {
+        "index": { "$ref": "#/$defs/positive_id" },
+        "origin_node": { "$ref": "#/$defs/positive_id" },
+        "destination_node": { "$ref": "#/$defs/positive_id" },
+        "link_indices": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/positive_id" } },
+        "toll_cost": { "type": "number", "minimum": 0 },
+        "charging_stops": { "type": "array", "items": { "$ref": "#/$defs/charging_stop" } }
+      }
+    },
+    "demand": {
+      "type": "object",
+      "required": ["index", "origin_node", "destination_node", "departure_step", "vehicles"],
+      "properties": {
+        "index": { "$ref": "#/$defs/positive_id" },
+        "origin_node": { "$ref": "#/$defs/positive_id" },
+        "destination_node": { "$ref": "#/$defs/positive_id" },
+        "departure_step": { "type": "integer", "minimum": 0 },
+        "departure_window_steps": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "vehicles": { "type": "number", "minimum": 0 },
+        "candidate_route_indices": { "type": "array", "items": { "$ref": "#/$defs/positive_id" } },
+        "initial_energy_kwh": { "type": "number" },
+        "energy_min_kwh": { "type": "number", "minimum": 0 },
+        "energy_max_kwh": { "type": "number", "minimum": 0 },
+        "reserve_energy_kwh": { "type": "number", "minimum": 0 },
+        "willingness_to_pay_per_vehicle": { "type": "number", "minimum": 0 }
+      }
+    },
+    "station_price": {
+      "type": "object",
+      "required": ["station_id", "price_per_kwh"],
+      "properties": {
+        "station_id": { "$ref": "#/$defs/positive_id" },
+        "price_per_kwh": { "type": "array", "minItems": 1, "items": { "type": "number", "minimum": 0 } }
+      }
+    },
+    "charging_station": {
+      "type": "object",
+      "properties": {
+        "station_id": { "$ref": "#/$defs/positive_id" },
+        "name": { "type": "string" },
+        "bus": { "type": "integer" },
+        "max_power_kw": { "type": "number", "minimum": 0 },
+        "in_service": { "type": "boolean" }
+      }
+    }
+  }
+}
