@@ -4806,7 +4806,7 @@ const App = (() => {
       const editable = transientEditableDurationTypes.has(type);
       durationEl.disabled = !editable;
       durationEl.title = editable
-        ? '事件持续时间。母线故障会自动清除；负荷/储能阶跃会随事件一起记录，当前求解器中阶跃保持到后续事件修改。'
+        ? '事件持续时间。母线故障和负荷阶跃会自动恢复；储能目标保持到后续事件修改。'
         : '该事件为瞬时切换/跳闸，持续时间不参与求解。';
     }
     if (valueEl) {
@@ -4839,7 +4839,7 @@ const App = (() => {
         paramsEl.title = '可选高级参数：r_pu/x_pu 等值故障阻抗，或 g_pu/b_pu 等值故障导纳，也可写 duration_s';
       } else if (type.includes('LoadScale')) {
         paramsEl.placeholder = '{"scale":1.10,"duration_s":0.20}';
-        paramsEl.title = '可选：负荷倍率和持续时间。当前求解器保持阶跃，后续可用反向事件恢复。';
+        paramsEl.title = '可选：负荷倍率、持续时间和 restore_scale；持续时间结束后默认恢复到 1.0。';
       } else if (type.includes('StoragePowerStep')) {
         paramsEl.placeholder = '{"p_ref_mw":-2.0,"duration_s":0.20}';
         paramsEl.title = '可选：储能有功目标和持续时间。当前求解器保持阶跃，后续可用新目标恢复。';
@@ -5933,11 +5933,12 @@ const App = (() => {
       Plotly.react(acHeat, [{
         z: data.ac_voltage_matrix,
         x: t,
-        y: data.ac_voltage_matrix.map((_, i) => `n${i + 1}`),
+        y: data.ac_voltage_matrix.map((_, i) =>
+          `AC ${Array.isArray(data.ac_bus_ids) ? data.ac_bus_ids[i] : i + 1}`),
         type: 'heatmap',
         colorscale: 'Viridis',
         colorbar: { title: 'p.u.' },
-      }], transientPlotLayout('三相节点电压热图', ''), cfg);
+      }], transientPlotLayout('AC母线电压热图', ''), cfg);
     }
     const freqChart = document.getElementById('trFreqChart');
     const gfl = transientDeviceByType(data, type => type.includes('GridFollowing'));
@@ -5953,9 +5954,20 @@ const App = (() => {
       const tr = transientMetricTrace(dev, 'frequency_hz', `${dev.name} GFM`, ['#98c379', '#d19a66', '#e06c75', '#7c3aed'][i % 4]);
       if (tr) freqTraces.push(tr);
     });
+    (data.bus_frequency_series || []).slice(0, 4).forEach((row, i) => {
+      if (!Array.isArray(row.values) || !row.values.length) return;
+      freqTraces.push({
+        x: data.time_s || [],
+        y: row.values,
+        mode: 'lines',
+        name: `${row.name || `AC bus ${row.bus}`} f`,
+        line: { color: ['#e06c75', '#d19a66', '#98c379', '#61afef'][i % 4], dash: 'dot' },
+        hovertemplate: `${escapeHtml(row.name || `AC bus ${row.bus}`)}<br>t=%{x:.4f}s<br>f=%{y:.4f} Hz<extra></extra>`,
+      });
+    });
     if (freqChart) {
-      if (freqTraces.length) Plotly.react(freqChart, freqTraces, transientPlotLayout('GFL/GFM 频率轨迹', 'Hz'), cfg);
-      else freqChart.innerHTML = '<p class="empty-hint">无 GFL/GFM 频率轨迹</p>';
+      if (freqTraces.length) Plotly.react(freqChart, freqTraces, transientPlotLayout('设备与母线频率轨迹', 'Hz'), cfg);
+      else freqChart.innerHTML = '<p class="empty-hint">无频率轨迹</p>';
     }
     const powerChart = document.getElementById('trPowerChart');
     const pTraces = [];
@@ -7393,6 +7405,10 @@ const App = (() => {
 
     data.cost_formula = data.cost_formula || data.objective_formula || {};
     const fmt = (x, n = 0) => Number(x || 0).toLocaleString('en-US', { maximumFractionDigits: n });
+    const annualCanvasMaps = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap)
+      ? Canvas.getCompBusMap() : null;
+    const annualRowAttr = row => annualCanvasMaps
+      ? compClickAttr(rowCanvasCompId(row, annualCanvasMaps)) : '';
     const monthlyCostValue = (m) => firstFiniteNumber(
       m?.total_cost, m?.operating_cost, m?.total_operating_cost,
       m?.generation_cost, m?.total_generation_cost,
@@ -7542,7 +7558,7 @@ const App = (() => {
       if (gss.length) {
         let html = '<table class="tbl"><thead><tr><th>机组</th><th>发电量(MWh)</th><th>容量因子</th><th>启动次数</th><th>在线小时</th></tr></thead><tbody>';
         gss.forEach(g => {
-          html += `<tr><td>${g.name || '—'}</td><td>${fmt(g.total_energy_mwh)}</td><td>${(Number(g.capacity_factor || 0) * 100).toFixed(1)}%</td><td>${fmt(g.total_startups)}</td><td>${fmt(g.total_hours_online)}</td></tr>`;
+          html += `<tr${annualRowAttr(g)}><td>${g.name || '—'}</td><td>${fmt(g.total_energy_mwh)}</td><td>${(Number(g.capacity_factor || 0) * 100).toFixed(1)}%</td><td>${fmt(g.total_startups)}</td><td>${fmt(g.total_hours_online)}</td></tr>`;
         });
         html += '</tbody></table>';
         gt.innerHTML = html;
@@ -7556,7 +7572,7 @@ const App = (() => {
       if (sss.length) {
         let html = '<table class="tbl"><thead><tr><th>储能</th><th>充电(MWh)</th><th>放电(MWh)</th><th>等效循环</th></tr></thead><tbody>';
         sss.forEach(s => {
-          html += `<tr><td>${s.is_dc ? 'DC · ' : 'AC · '}${s.name || '—'}</td><td>${fmt(s.total_charge_mwh)}</td><td>${fmt(s.total_discharge_mwh)}</td><td>${Number(s.cycles || 0).toFixed(1)}</td></tr>`;
+          html += `<tr${annualRowAttr(s)}><td>${s.is_dc ? 'DC · ' : 'AC · '}${s.name || '—'}</td><td>${fmt(s.total_charge_mwh)}</td><td>${fmt(s.total_discharge_mwh)}</td><td>${Number(s.cycles || 0).toFixed(1)}</td></tr>`;
         });
         html += '</tbody></table>';
         st.innerHTML = html;
@@ -7570,7 +7586,7 @@ const App = (() => {
       if (rss.length) {
         let html = '<table class="tbl"><thead><tr><th>新能源</th><th>发电量(MWh)</th><th>弃电量(MWh)</th><th>容量因子</th><th>弃电率</th></tr></thead><tbody>';
         rss.forEach(r => {
-          html += `<tr><td>${r.name || '—'}</td><td>${fmt(r.total_energy_mwh)}</td><td>${fmt(r.total_curtailed_mwh)}</td><td>${(Number(r.capacity_factor || 0) * 100).toFixed(1)}%</td><td>${(Number(r.curtailment_rate || 0) * 100).toFixed(1)}%</td></tr>`;
+          html += `<tr${annualRowAttr(r)}><td>${r.name || '—'}</td><td>${fmt(r.total_energy_mwh)}</td><td>${fmt(r.total_curtailed_mwh)}</td><td>${(Number(r.capacity_factor || 0) * 100).toFixed(1)}%</td><td>${(Number(r.curtailment_rate || 0) * 100).toFixed(1)}%</td></tr>`;
         });
         html += '</tbody></table>';
         rt.innerHTML = html;
@@ -9956,6 +9972,8 @@ const App = (() => {
       .sort((a, b) => (b.thd_i_pct || 0) - (a.thd_i_pct || 0)).slice(0, 30);
     if (!rows.length) { div.innerHTML = '<p class="muted">无支路谐波电流数据</p>'; return; }
     const fmt = (x, d = 3) => (x == null || isNaN(x)) ? '—' : Number(x).toFixed(d);
+    const maps = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap)
+      ? Canvas.getCompBusMap() : null;
     const topSpec = (hs, fund) => (hs || [])
       .filter(h => h.order !== fund && (h.i_pu || 0) > 1e-9)
       .sort((a, b) => b.i_pu - a.i_pu).slice(0, 3)
@@ -9963,7 +9981,8 @@ const App = (() => {
     let html = '<table><thead><tr><th>支路</th><th>类型</th><th>THD<sub>I</sub>(%)</th>'
              + '<th>主要分量 (pu)</th></tr></thead><tbody>';
     rows.forEach(f => {
-      html += `<tr><td>${f.from_bus}→${f.to_bus}</td><td>${f.is_dc ? 'DC' : 'AC'}</td>`
+      const attr = maps ? compClickAttr(rowCanvasCompId(f, maps)) : '';
+      html += `<tr${attr}><td>${f.from_bus}→${f.to_bus}</td><td>${f.is_dc ? 'DC' : 'AC'}</td>`
             + `<td>${fmt(f.thd_i_pct, 2)}</td><td>${topSpec(f.harmonics, f.is_dc ? 0 : 1)}</td></tr>`;
     });
     div.innerHTML = html + '</tbody></table>';

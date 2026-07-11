@@ -1598,6 +1598,93 @@ inline json bus_json(const H::HarmonicBusResult& b) {
   return jb;
 }
 
+inline void add_bus_identity(json& row,
+                             const hacdcpf::HybridPowerSystem& rich,
+                             int bus,
+                             bool is_dc) {
+  row["canvas_type"] = is_dc ? "dc" : "ac";
+  row["canvas_index"] = bus;
+  row["component_type"] = is_dc ? "dc_bus" : "ac_bus";
+  row["component_domain"] = is_dc ? "DC" : "AC";
+  if (is_dc) {
+    const auto it = std::find_if(rich.dc.buses.begin(), rich.dc.buses.end(),
+                                 [&](const auto& item) { return item.index == bus; });
+    if (it != rich.dc.buses.end()) {
+      row["position"] = std::distance(rich.dc.buses.begin(), it);
+      row["name"] = it->name;
+    }
+  } else {
+    const auto it = std::find_if(rich.ac.buses.begin(), rich.ac.buses.end(),
+                                 [&](const auto& item) { return item.index == bus; });
+    if (it != rich.ac.buses.end()) {
+      row["position"] = std::distance(rich.ac.buses.begin(), it);
+      row["name"] = it->name;
+    }
+  }
+}
+
+inline json bus_json(const H::HarmonicBusResult& b,
+                     const hacdcpf::HybridPowerSystem& rich) {
+  json row = bus_json(b);
+  add_bus_identity(row, rich, b.bus, b.is_dc);
+  return row;
+}
+
+inline void add_ac_branch_identity(
+    json& row,
+    const hacdcpf::HybridPowerSystem& rich,
+    const hacdcpf::HybridPowerSystem& canonical,
+    int canonical_branch_index) {
+  if (canonical.branch_expand_map) {
+    const auto& entries = canonical.branch_expand_map->entries;
+    const auto expanded = std::find_if(
+        entries.begin(), entries.end(), [&](const auto& entry) {
+          return entry.branch_index == canonical_branch_index;
+        });
+    if (expanded != entries.end()) {
+      using OT = hacdcpf::BranchOriginType;
+      switch (expanded->origin_type) {
+        case OT::Transformer2W: row["canvas_type"] = "transformer_2w"; break;
+        case OT::Transformer3W: row["canvas_type"] = "transformer_3w"; break;
+        case OT::Switch: row["canvas_type"] = "ac_switch"; break;
+        case OT::CircuitBreaker: row["canvas_type"] = "ac_circuit_breaker"; break;
+      }
+      row["canvas_index"] = expanded->origin_index;
+      row["component_index"] = expanded->origin_index;
+      row["pair_number"] = expanded->pair_number;
+      row["component_domain"] = "AC";
+      return;
+    }
+  }
+  const auto it = std::find_if(
+      rich.ac.branches.begin(), rich.ac.branches.end(),
+      [&](const auto& branch) { return branch.index == canonical_branch_index; });
+  row["canvas_type"] = "branch";
+  row["canvas_index"] = canonical_branch_index;
+  row["component_index"] = canonical_branch_index;
+  row["component_domain"] = "AC";
+  if (it != rich.ac.branches.end()) {
+    row["position"] = std::distance(rich.ac.branches.begin(), it);
+    row["name"] = it->name;
+  }
+}
+
+inline void add_dc_branch_identity(json& row,
+                                   const hacdcpf::HybridPowerSystem& rich,
+                                   int branch_index) {
+  row["canvas_type"] = "dcBranch";
+  row["canvas_index"] = branch_index;
+  row["component_index"] = branch_index;
+  row["component_domain"] = "DC";
+  const auto it = std::find_if(
+      rich.dc.branches.begin(), rich.dc.branches.end(),
+      [&](const auto& branch) { return branch.index == branch_index; });
+  if (it != rich.dc.branches.end()) {
+    row["position"] = std::distance(rich.dc.branches.begin(), it);
+    row["name"] = it->name;
+  }
+}
+
 // Parse a {order: [re, im]} or {order: {re, im}} map of complex per-order values.
 inline std::map<int, H::Complex> parse_order_complex(const json& m) {
   std::map<int, H::Complex> out;
@@ -3745,8 +3832,12 @@ json dynamic_options_to_json(const hacdcpf::dynamics::DynamicSolverOptions& opt)
                opt.use_consistent_dynamic_initialization}};
 }
 
-json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
-                             const hacdcpf::dynamics::DynamicSolverOptions& opt) {
+json dynamic_results_to_json(
+    const hacdcpf::dynamics::DynamicResults& result,
+    const hacdcpf::dynamics::DynamicSolverOptions& opt,
+    const hacdcpf::HybridPowerSystem& rich_sys,
+    const std::vector<int>& canonical_ac_bus_ids,
+    const std::vector<int>& canonical_dc_bus_ids) {
   json out;
   out["success"] = result.success;
   out["message"] = result.message;
@@ -3850,9 +3941,9 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
   json ac_voltage_matrix = json::array();
   json dc_voltage_matrix = json::array();
   json bus_frequency_matrix = json::array();
-  std::vector<json> ac_rows;
-  std::vector<json> dc_rows;
-  std::vector<json> bus_freq_rows;
+  std::vector<json> ac_phase_rows;
+  std::vector<json> canonical_dc_rows;
+  std::vector<json> canonical_bus_freq_rows;
   std::map<std::string, json> device_series;
 
   for (const auto& snap : result.snapshots) {
@@ -3863,27 +3954,27 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
     max_dc.push_back(snap.max_dc_voltage_pu);
     frequency.push_back(snap.frequency_hz);
 
-    if (ac_rows.empty()) {
-      ac_rows.resize(static_cast<std::size_t>(snap.vac_abc.size()));
-      for (auto& row : ac_rows) row = json::array();
+    if (ac_phase_rows.empty()) {
+      ac_phase_rows.resize(static_cast<std::size_t>(snap.vac_abc.size()));
+      for (auto& row : ac_phase_rows) row = json::array();
     }
     for (Eigen::Index i = 0; i < snap.vac_abc.size(); ++i) {
-      ac_rows[static_cast<std::size_t>(i)].push_back(std::abs(snap.vac_abc[i]));
+      ac_phase_rows[static_cast<std::size_t>(i)].push_back(std::abs(snap.vac_abc[i]));
     }
-    if (dc_rows.empty()) {
-      dc_rows.resize(static_cast<std::size_t>(snap.vdc.size()));
-      for (auto& row : dc_rows) row = json::array();
+    if (canonical_dc_rows.empty()) {
+      canonical_dc_rows.resize(static_cast<std::size_t>(snap.vdc.size()));
+      for (auto& row : canonical_dc_rows) row = json::array();
     }
     for (Eigen::Index i = 0; i < snap.vdc.size(); ++i) {
-      dc_rows[static_cast<std::size_t>(i)].push_back(snap.vdc[i]);
+      canonical_dc_rows[static_cast<std::size_t>(i)].push_back(snap.vdc[i]);
     }
 
-    if (bus_freq_rows.empty()) {
-      bus_freq_rows.resize(snap.bus_frequency_hz.size());
-      for (auto& row : bus_freq_rows) row = json::array();
+    if (canonical_bus_freq_rows.empty()) {
+      canonical_bus_freq_rows.resize(snap.bus_frequency_hz.size());
+      for (auto& row : canonical_bus_freq_rows) row = json::array();
     }
     for (std::size_t i = 0; i < snap.bus_frequency_hz.size(); ++i) {
-      bus_freq_rows[i].push_back(snap.bus_frequency_hz[i]);
+      canonical_bus_freq_rows[i].push_back(snap.bus_frequency_hz[i]);
     }
 
     for (const auto& dev : snap.device_outputs) {
@@ -3922,9 +4013,99 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
     }
   }
 
-  for (const auto& row : ac_rows) ac_voltage_matrix.push_back(row);
-  for (const auto& row : dc_rows) dc_voltage_matrix.push_back(row);
-  for (const auto& row : bus_freq_rows) bus_frequency_matrix.push_back(row);
+  const auto ac_projection = opt.project_to_canonical
+      ? hacdcpf::projection::RichToCanonicalOperator::apply(rich_sys)
+      : hacdcpf::projection::ProjectionBundle{};
+  const auto ac_positions = opt.project_to_canonical
+      ? hacdcpf::projection::CanonicalToRichOperator::ac_bus_reprojection_positions(
+            rich_sys, ac_projection)
+      : std::vector<int>{};
+  json ac_bus_ids = json::array();
+  json dc_bus_ids = json::array();
+  json ac_bus_series = json::array();
+  json dc_bus_series = json::array();
+  json bus_frequency_series = json::array();
+
+  const auto canonical_ac_position = [&](int rich_position, int rich_bus) {
+    int projected_bus = rich_bus;
+    if (opt.project_to_canonical && rich_position >= 0 &&
+        rich_position < static_cast<int>(ac_positions.size())) {
+      const int projected_position = ac_positions[static_cast<size_t>(rich_position)];
+      if (projected_position < 0 ||
+          projected_position >= static_cast<int>(ac_projection.canonical.ac.buses.size())) {
+        return -1;
+      }
+      projected_bus =
+          ac_projection.canonical.ac.buses[static_cast<size_t>(projected_position)].index;
+    }
+    const auto it = std::find(canonical_ac_bus_ids.begin(), canonical_ac_bus_ids.end(),
+                              projected_bus);
+    return it == canonical_ac_bus_ids.end()
+               ? -1
+               : static_cast<int>(std::distance(canonical_ac_bus_ids.begin(), it));
+  };
+
+  for (size_t i = 0; i < rich_sys.ac.buses.size(); ++i) {
+    const auto& bus = rich_sys.ac.buses[i];
+    if (!bus.in_service || bus.bus_type == hacdcpf::BusType::ISOLATED) continue;
+    const int pos = canonical_ac_position(static_cast<int>(i), bus.index);
+    json values = json::array();
+    json frequency_values = json::array();
+    if (pos >= 0) {
+      const size_t phase0 = static_cast<size_t>(3 * pos);
+      if (phase0 + 2 < ac_phase_rows.size()) {
+        const size_t samples = ac_phase_rows[phase0].size();
+        for (size_t t = 0; t < samples; ++t) {
+          values.push_back((ac_phase_rows[phase0][t].get<double>() +
+                            ac_phase_rows[phase0 + 1][t].get<double>() +
+                            ac_phase_rows[phase0 + 2][t].get<double>()) / 3.0);
+        }
+      }
+      if (static_cast<size_t>(pos) < canonical_bus_freq_rows.size())
+        frequency_values = canonical_bus_freq_rows[static_cast<size_t>(pos)];
+    }
+    ac_bus_ids.push_back(bus.index);
+    ac_voltage_matrix.push_back(values);
+    bus_frequency_matrix.push_back(frequency_values);
+    ac_bus_series.push_back(json{{"canvas_type", "ac"},
+                                 {"canvas_index", bus.index},
+                                 {"component_type", "ac_bus"},
+                                 {"component_domain", "AC"},
+                                 {"position", i},
+                                 {"name", bus.name},
+                                 {"bus", bus.index},
+                                 {"values", values}});
+    bus_frequency_series.push_back(json{{"canvas_type", "ac"},
+                                        {"canvas_index", bus.index},
+                                        {"component_type", "ac_bus"},
+                                        {"component_domain", "AC"},
+                                        {"position", i},
+                                        {"name", bus.name},
+                                        {"bus", bus.index},
+                                        {"values", frequency_values}});
+  }
+  for (size_t i = 0; i < rich_sys.dc.buses.size(); ++i) {
+    const auto& bus = rich_sys.dc.buses[i];
+    if (!bus.in_service || bus.bus_type == hacdcpf::DCBusType::DC_ISOLATED) continue;
+    const auto it = std::find(canonical_dc_bus_ids.begin(), canonical_dc_bus_ids.end(),
+                              bus.index);
+    json values = json::array();
+    if (it != canonical_dc_bus_ids.end()) {
+      const size_t pos = static_cast<size_t>(
+          std::distance(canonical_dc_bus_ids.begin(), it));
+      if (pos < canonical_dc_rows.size()) values = canonical_dc_rows[pos];
+    }
+    dc_bus_ids.push_back(bus.index);
+    dc_voltage_matrix.push_back(values);
+    dc_bus_series.push_back(json{{"canvas_type", "dc"},
+                                 {"canvas_index", bus.index},
+                                 {"component_type", "dc_bus"},
+                                 {"component_domain", "DC"},
+                                 {"position", i},
+                                 {"name", bus.name},
+                                 {"bus", bus.index},
+                                 {"values", values}});
+  }
 
   json devices = json::array();
   for (auto& [_, dev] : device_series) {
@@ -3940,6 +4121,16 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
   out["ac_voltage_matrix"] = ac_voltage_matrix;
   out["dc_voltage_matrix"] = dc_voltage_matrix;
   out["bus_frequency_matrix"] = bus_frequency_matrix;
+  out["ac_bus_ids"] = ac_bus_ids;
+  out["dc_bus_ids"] = dc_bus_ids;
+  out["ac_bus_series"] = ac_bus_series;
+  out["dc_bus_series"] = dc_bus_series;
+  out["bus_frequency_series"] = bus_frequency_series;
+  out["canonical_ac_bus_ids"] = canonical_ac_bus_ids;
+  out["canonical_dc_bus_ids"] = canonical_dc_bus_ids;
+  out["ac_voltage_phase_matrix"] = ac_phase_rows;
+  out["canonical_dc_voltage_matrix"] = canonical_dc_rows;
+  out["canonical_bus_frequency_matrix"] = canonical_bus_freq_rows;
   out["device_series"] = devices;
   if (const auto* final = result.final_snapshot()) {
     out["final"] = json{{"time_s", final->time_s},
@@ -14427,7 +14618,9 @@ int main(int argc, char** argv) {
       if (!stiff_solver_note.empty()) {
         result.warnings.insert(result.warnings.begin(), stiff_solver_note);
       }
-      json out = dynamic_results_to_json(result, opt);
+      json out = dynamic_results_to_json(result, opt, sys,
+                                         dyn.network.ac_bus_ids,
+                                         dyn.network.dc_bus_ids);
       const auto elapsed_ms = [](auto a, auto b) {
         return std::chrono::duration<double, std::milli>(b - a).count();
       };
@@ -14444,8 +14637,8 @@ int main(int argc, char** argv) {
       out["initialization"]["cached_power_flow_method"] =
           used_cached_power_flow_initialization ? cached_pf_method : "";
       out["scheduled_events"] = scheduled_events;
-      out["ac_bus_ids"] = dyn.network.ac_bus_ids;
-      out["dc_bus_ids"] = dyn.network.dc_bus_ids;
+      out["canonical_ac_bus_ids"] = dyn.network.ac_bus_ids;
+      out["canonical_dc_bus_ids"] = dyn.network.dc_bus_ids;
       if (j.value("include_csv", false)) {
         hacdcpf::dynamics::DynamicResultExportOptions export_options;
         if (j.contains("csv") && j["csv"].is_object()) {
@@ -15994,6 +16187,8 @@ int main(int argc, char** argv) {
       hpf_api::parse_inputs(j, inputs);
 
       auto r = hacdcpf::harmonics::solve_harmonic_power_flow(sys, inputs, opt);
+      const auto harmonic_projection =
+          hacdcpf::projection::RichToCanonicalOperator::apply(sys);
 
       json out;
       out["ok"] = r.ok;
@@ -16006,39 +16201,58 @@ int main(int argc, char** argv) {
       out["max_dc_thd_pct"] = r.max_dc_thd_pct;
       out["max_dc_thd_bus"] = r.max_dc_thd_bus;
 
-      auto bus_json = [](const hacdcpf::harmonics::HarmonicBusResult& b) {
-        json jb;
-        jb["bus"] = b.bus;
-        jb["is_dc"] = b.is_dc;
-        jb["v_fund_pu"] = b.v_fund_pu;
-        jb["thd_pct"] = b.thd_pct;
-        json spec = json::array();
-        for (const auto& [ord, v] : b.v_by_order)
-          spec.push_back(json{{"order", ord}, {"mag_pu", std::abs(v)},
-                              {"phase_deg", std::arg(v) * 180.0 / M_PI}});
-        jb["harmonics"] = spec;
-        return jb;
-      };
       out["ac_bus_results"] = json::array();
-      for (const auto& b : r.ac_bus_results) out["ac_bus_results"].push_back(bus_json(b));
+      for (const auto& b : r.ac_bus_results)
+        out["ac_bus_results"].push_back(hpf_api::bus_json(b, sys));
       out["dc_bus_results"] = json::array();
-      for (const auto& b : r.dc_bus_results) out["dc_bus_results"].push_back(bus_json(b));
+      for (const auto& b : r.dc_bus_results)
+        out["dc_bus_results"].push_back(hpf_api::bus_json(b, sys));
 
       out["ac_branch_flows"] = json::array();
+      size_t ac_branch_cursor = 0;
       for (const auto& bf : r.ac_branch_flows) {
         json spec = json::array();
         for (const auto& [ord, m] : bf.i_by_order)
           spec.push_back(json{{"order", ord}, {"i_pu", m}});
-        out["ac_branch_flows"].push_back(json{{"from_bus", bf.from_bus},
-            {"to_bus", bf.to_bus}, {"thd_i_pct", bf.thd_i_pct}, {"harmonics", spec}});
+        json row{{"from_bus", bf.from_bus}, {"to_bus", bf.to_bus},
+                 {"is_dc", false}, {"thd_i_pct", bf.thd_i_pct},
+                 {"harmonics", spec}};
+        const auto& branches = harmonic_projection.canonical.ac.branches;
+        while (ac_branch_cursor < branches.size() &&
+               (!branches[ac_branch_cursor].in_service ||
+                branches[ac_branch_cursor].from_bus != bf.from_bus ||
+                branches[ac_branch_cursor].to_bus != bf.to_bus)) {
+          ++ac_branch_cursor;
+        }
+        if (ac_branch_cursor < branches.size()) {
+          hpf_api::add_ac_branch_identity(row, sys, harmonic_projection.canonical,
+                                          branches[ac_branch_cursor].index);
+          ++ac_branch_cursor;
+        }
+        out["ac_branch_flows"].push_back(std::move(row));
       }
       out["dc_branch_flows"] = json::array();
+      size_t dc_branch_cursor = 0;
       for (const auto& bf : r.dc_branch_flows) {
         json spec = json::array();
         for (const auto& [ord, m] : bf.i_by_order)
           spec.push_back(json{{"order", ord}, {"i_pu", m}});
-        out["dc_branch_flows"].push_back(json{{"from_bus", bf.from_bus},
-            {"to_bus", bf.to_bus}, {"thd_i_pct", bf.thd_i_pct}, {"harmonics", spec}});
+        json row{{"from_bus", bf.from_bus}, {"to_bus", bf.to_bus},
+                 {"is_dc", true}, {"thd_i_pct", bf.thd_i_pct},
+                 {"harmonics", spec}};
+        const auto& branches = harmonic_projection.canonical.dc.branches;
+        while (dc_branch_cursor < branches.size() &&
+               (!branches[dc_branch_cursor].in_service ||
+                branches[dc_branch_cursor].from_bus != bf.from_bus ||
+                branches[dc_branch_cursor].to_bus != bf.to_bus)) {
+          ++dc_branch_cursor;
+        }
+        if (dc_branch_cursor < branches.size()) {
+          hpf_api::add_dc_branch_identity(row, sys,
+                                          branches[dc_branch_cursor].index);
+          ++dc_branch_cursor;
+        }
+        out["dc_branch_flows"].push_back(std::move(row));
       }
 
       // Optional harmonic-distortion limit compliance (IEEE 519 / GB-T 14549).
@@ -16059,12 +16273,14 @@ int main(int argc, char** argv) {
         comp["worst_ratio"] = rep.worst_ratio;
         comp["checks"] = json::array();
         for (const auto& c : rep.checks) {
-          comp["checks"].push_back(json{
+          json check{
             {"bus", c.bus}, {"base_kv", c.base_kv}, {"thd_pct", c.thd_pct},
             {"thd_limit_pct", c.thd_limit_pct}, {"thd_ok", c.thd_ok},
             {"worst_ihd_order", c.worst_ihd_order}, {"worst_ihd_pct", c.worst_ihd_pct},
             {"ihd_limit_pct", c.ihd_limit_pct}, {"ihd_ok", c.ihd_ok},
-            {"compliant", c.compliant}});
+            {"compliant", c.compliant}};
+          hpf_api::add_bus_identity(check, sys, c.bus, false);
+          comp["checks"].push_back(std::move(check));
         }
         out["compliance"] = comp;
       }
@@ -16117,11 +16333,16 @@ int main(int argc, char** argv) {
         auto r = hacdcpf::harmonics::sequence_frequency_scan(*sys.three_phase_ac, bus, sopt, opt);
         out["ok"] = r.ok; out["message"] = r.message; out["sequence"] = true;
         out["bus"] = r.bus; out["freqs"] = r.freqs;
+        hpf_api::add_bus_identity(out, sys, r.bus, false);
         out["z1_mag"] = r.z1_mag; out["z2_mag"] = r.z2_mag; out["z0_mag"] = r.z0_mag;
         out["resonances"] = json::array();
-        for (const auto& rz : r.resonances)
-          out["resonances"].push_back(json{{"bus", rz.bus}, {"freq_order", rz.freq_order},
-              {"z_mag", rz.z_mag}, {"parallel", rz.parallel}, {"sequence", rz.sequence}});
+        for (const auto& rz : r.resonances) {
+          json row{{"bus", rz.bus}, {"freq_order", rz.freq_order},
+                   {"z_mag", rz.z_mag}, {"parallel", rz.parallel},
+                   {"sequence", rz.sequence}};
+          hpf_api::add_bus_identity(row, sys, rz.bus, false);
+          out["resonances"].push_back(std::move(row));
+        }
       } else {
         auto r = hacdcpf::harmonics::frequency_scan(sys, sopt, opt);
         out["ok"] = r.ok; out["message"] = r.message; out["sequence"] = false;
@@ -16129,14 +16350,18 @@ int main(int argc, char** argv) {
         out["buses"] = json::array();
         for (const auto& [bus, zm] : r.z_mag) {
           json jb; jb["bus"] = bus; jb["z_mag"] = zm;
+          hpf_api::add_bus_identity(jb, sys, bus, false);
           auto ait = r.z_ang_deg.find(bus);
           if (ait != r.z_ang_deg.end()) jb["z_ang_deg"] = ait->second;
           out["buses"].push_back(jb);
         }
         out["resonances"] = json::array();
-        for (const auto& rz : r.resonances)
-          out["resonances"].push_back(json{{"bus", rz.bus}, {"freq_order", rz.freq_order},
-              {"z_mag", rz.z_mag}, {"parallel", rz.parallel}});
+        for (const auto& rz : r.resonances) {
+          json row{{"bus", rz.bus}, {"freq_order", rz.freq_order},
+                   {"z_mag", rz.z_mag}, {"parallel", rz.parallel}};
+          hpf_api::add_bus_identity(row, sys, rz.bus, false);
+          out["resonances"].push_back(std::move(row));
+        }
       }
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
@@ -16204,14 +16429,16 @@ int main(int argc, char** argv) {
       };
       out["bus_results"] = json::array();
       for (const auto& b : r.bus_results) {
-        out["bus_results"].push_back(json{
+        json row{
           {"bus", b.bus},
           {"v_fund_pu_a", b.v_fund_pu_a}, {"v_fund_pu_b", b.v_fund_pu_b},
           {"v_fund_pu_c", b.v_fund_pu_c},
           {"thd_a_pct", b.thd_a_pct}, {"thd_b_pct", b.thd_b_pct}, {"thd_c_pct", b.thd_c_pct},
           {"harmonics_a", phase_spec(b.v_by_order_a)},
           {"harmonics_b", phase_spec(b.v_by_order_b)},
-          {"harmonics_c", phase_spec(b.v_by_order_c)}});
+          {"harmonics_c", phase_spec(b.v_by_order_c)}};
+        hpf_api::add_bus_identity(row, sys, b.bus, false);
+        out["bus_results"].push_back(std::move(row));
       }
       // Optional per-phase compliance.
       std::string std_name = j.contains("options")
@@ -16228,9 +16455,13 @@ int main(int argc, char** argv) {
         comp["n_violations"] = rep.n_violations;
         comp["checks"] = json::array();
         for (const auto& c : rep.checks)
-          comp["checks"].push_back(json{{"bus", c.bus}, {"phase", c.phase},
+          {
+            json row{{"bus", c.bus}, {"phase", c.phase},
             {"base_kv", c.base_kv}, {"thd_pct", c.thd_pct},
-            {"thd_limit_pct", c.thd_limit_pct}, {"compliant", c.compliant}});
+            {"thd_limit_pct", c.thd_limit_pct}, {"compliant", c.compliant}};
+            hpf_api::add_bus_identity(row, sys, c.bus, false);
+            comp["checks"].push_back(std::move(row));
+          }
         out["compliance"] = comp;
       }
       res.set_content(out.dump(), "application/json");
@@ -16269,6 +16500,8 @@ int main(int argc, char** argv) {
       hacdcpf::harmonics::HarmonicMetricsOptions mopt;
       mopt.i_demand_pu = j.value("i_demand_pu", 0.0);
       auto m = hacdcpf::harmonics::harmonic_metrics(sys, r, mopt, opt);
+      const auto harmonic_projection =
+          hacdcpf::projection::RichToCanonicalOperator::apply(sys);
 
       json out;
       out["ok"] = r.ok; out["message"] = r.message;
@@ -16280,13 +16513,28 @@ int main(int argc, char** argv) {
       out["max_thd_i_pct"] = m.max_thd_i_pct;
       out["max_tdd_pct"] = m.max_tdd_pct;
       out["branches"] = json::array();
-      for (const auto& b : m.ac_branches)
-        out["branches"].push_back(json{
+      size_t branch_cursor = 0;
+      for (const auto& b : m.ac_branches) {
+        json row{
           {"from_bus", b.from_bus}, {"to_bus", b.to_bus},
           {"i_fund_pu", b.i_fund_pu}, {"i_rms_pu", b.i_rms_pu},
           {"thd_i_pct", b.thd_i_pct}, {"tdd_pct", b.tdd_pct},
           {"k_factor", b.k_factor}, {"p_loss_pu", b.p_loss_pu},
-          {"p_loss_harmonic_pu", b.p_loss_harmonic_pu}});
+          {"p_loss_harmonic_pu", b.p_loss_harmonic_pu}};
+        const auto& branches = harmonic_projection.canonical.ac.branches;
+        while (branch_cursor < branches.size() &&
+               (!branches[branch_cursor].in_service ||
+                branches[branch_cursor].from_bus != b.from_bus ||
+                branches[branch_cursor].to_bus != b.to_bus)) {
+          ++branch_cursor;
+        }
+        if (branch_cursor < branches.size()) {
+          hpf_api::add_ac_branch_identity(row, sys, harmonic_projection.canonical,
+                                          branches[branch_cursor].index);
+          ++branch_cursor;
+        }
+        out["branches"].push_back(std::move(row));
+      }
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
     } catch (const std::exception& e) {
@@ -16357,7 +16605,8 @@ int main(int argc, char** argv) {
       out["final_residual"] = json::object();
       for (const auto& [ord, rr] : r.final_residual) out["final_residual"][std::to_string(ord)] = rr;
       out["ac_bus_results"] = json::array();
-      for (const auto& b : r.ac_bus_results) out["ac_bus_results"].push_back(hpf_api::bus_json(b));
+      for (const auto& b : r.ac_bus_results)
+        out["ac_bus_results"].push_back(hpf_api::bus_json(b, sys));
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
     } catch (const std::exception& e) {
@@ -18603,8 +18852,14 @@ int main(int argc, char** argv) {
         out["monthly_summaries"] = ms;
         // Generator stats
         json gs = json::array();
-        for (const auto& g : result.gen_stats) {
-          gs.push_back({{"name", g.name}, {"total_energy_mwh", g.total_energy_mwh},
+        for (size_t i = 0; i < result.gen_stats.size(); ++i) {
+          const auto& g = result.gen_stats[i];
+          gs.push_back({{"name", g.name}, {"gen_index", g.gen_index},
+                        {"component_index", g.gen_index},
+                        {"canvas_type", "gen"}, {"canvas_index", g.gen_index},
+                        {"component_type", "generator"},
+                        {"component_domain", "AC"}, {"position", i},
+                        {"total_energy_mwh", g.total_energy_mwh},
                         {"capacity_factor", g.capacity_factor},
                         {"total_startups", g.total_startups},
                         {"total_hours_online", g.total_hours_online}});
@@ -18612,9 +18867,16 @@ int main(int argc, char** argv) {
         out["gen_stats"] = gs;
         // Storage stats
         json ss = json::array();
-        for (const auto& s : result.storage_stats) {
+        for (size_t i = 0; i < result.storage_stats.size(); ++i) {
+          const auto& s = result.storage_stats[i];
           ss.push_back({{"name", s.name}, {"storage_index", s.storage_index},
                         {"is_dc", s.is_dc},
+                        {"component_index", s.storage_index},
+                        {"canvas_type", s.is_dc ? "dcStorage" : "storage"},
+                        {"canvas_index", s.storage_index},
+                        {"component_type", s.is_dc ? "dc_storage" : "storage"},
+                        {"component_domain", s.is_dc ? "DC" : "AC"},
+                        {"position", i},
                         {"total_charge_mwh", s.total_charge_mwh},
                         {"total_discharge_mwh", s.total_discharge_mwh},
                         {"cycles", s.cycles}});
@@ -18622,8 +18884,14 @@ int main(int argc, char** argv) {
         out["storage_stats"] = ss;
         // Renewable stats
         json rs = json::array();
-        for (const auto& r : result.renewable_stats) {
-          rs.push_back({{"name", r.name}, {"total_energy_mwh", r.total_energy_mwh},
+        for (size_t i = 0; i < result.renewable_stats.size(); ++i) {
+          const auto& r = result.renewable_stats[i];
+          rs.push_back({{"name", r.name}, {"ren_index", r.ren_index},
+                        {"component_index", r.ren_index},
+                        {"canvas_type", "renGen"}, {"canvas_index", r.ren_index},
+                        {"component_type", "renewable_gen"},
+                        {"component_domain", "AC"}, {"position", i},
+                        {"total_energy_mwh", r.total_energy_mwh},
                         {"total_curtailed_mwh", r.total_curtailed_mwh},
                         {"capacity_factor", r.capacity_factor},
                         {"curtailment_rate", r.curtailment_rate}});
@@ -18638,6 +18906,46 @@ int main(int argc, char** argv) {
         }
         out["snapshot_hours"] = snap_hours;
         out["snapshot_vm"] = snap_vm;
+        json snapshot_ac_bus_ids = json::array();
+        json snapshot_dc_bus_ids = json::array();
+        json snapshot_ac_bus_series = json::array();
+        json snapshot_dc_bus_series = json::array();
+        for (size_t i = 0; i < sys_ann.ac.buses.size(); ++i) {
+          const auto& bus = sys_ann.ac.buses[i];
+          json values = json::array();
+          for (const auto& snap : result.pf_snapshots) {
+            if (!snap.converged || snap.vm.empty()) continue;
+            values.push_back(i < snap.vm.size() ? json(snap.vm[i]) : json(nullptr));
+          }
+          snapshot_ac_bus_ids.push_back(bus.index);
+          snapshot_ac_bus_series.push_back(
+              json{{"canvas_type", "ac"}, {"canvas_index", bus.index},
+                   {"component_type", "ac_bus"}, {"component_domain", "AC"},
+                   {"position", i}, {"name", bus.name}, {"bus", bus.index},
+                   {"values", values}});
+        }
+        for (size_t i = 0; i < sys_ann.dc.buses.size(); ++i) {
+          const auto& bus = sys_ann.dc.buses[i];
+          json values = json::array();
+          for (const auto& snap : result.pf_snapshots) {
+            if (!snap.converged || snap.vm.empty()) continue;
+            values.push_back(i < snap.vdc.size() ? json(snap.vdc[i]) : json(nullptr));
+          }
+          snapshot_dc_bus_ids.push_back(bus.index);
+          snapshot_dc_bus_series.push_back(
+              json{{"canvas_type", "dc"}, {"canvas_index", bus.index},
+                   {"component_type", "dc_bus"}, {"component_domain", "DC"},
+                   {"position", i}, {"name", bus.name}, {"bus", bus.index},
+                   {"values", values}});
+        }
+        out["snapshot_ac_bus_ids"] = snapshot_ac_bus_ids;
+        out["snapshot_dc_bus_ids"] = snapshot_dc_bus_ids;
+        out["snapshot_ac_bus_series"] = snapshot_ac_bus_series;
+        out["snapshot_dc_bus_series"] = snapshot_dc_bus_series;
+        out["component_results"] = json::array();
+        for (const auto& row : gs) out["component_results"].push_back(row);
+        for (const auto& row : ss) out["component_results"].push_back(row);
+        for (const auto& row : rs) out["component_results"].push_back(row);
         VoltageQualificationMetrics voltage_metrics;
         for (const auto& snap : result.pf_snapshots) {
           if (!snap.converged) continue;

@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 
 #ifndef _WIN32
@@ -9,6 +11,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "hacdcpf/dynamics/DynamicModelBuilder.hpp"
+#include "hacdcpf/dynamics/DynamicSolver.hpp"
 #include "hacdcpf/io/gridlabd_bridge.hpp"
 #include "hacdcpf/io/gridlabd_validation.hpp"
 
@@ -182,4 +186,98 @@ TEST_CASE("GridLAB-D long-duration sequence compares pre/post-failure samples",
   CHECK(report.exact_gate_count >= 4);
   CHECK(report.exact_gate_passed);
   CHECK(report.exact_gate_passed_count == report.exact_gate_count);
+}
+
+TEST_CASE("Explicit AC load step remains stable for 15 seconds and matches GridLAB-D",
+          "[gridlabd][validation][long-duration][load]") {
+  using namespace hacdcpf;
+
+  auto sys = component_case_named("two_bus_component");
+  REQUIRE(sys.ac.buses.size() >= 2);
+  Load load;
+  load.index = 41;
+  load.bus = sys.ac.buses[1].index;
+  load.p_mw = sys.ac.buses[1].pd_mw;
+  load.q_mvar = sys.ac.buses[1].qd_mvar;
+  load.model = LoadModel::ConstantPower;
+  load.in_service = true;
+  sys.ac.buses[1].pd_mw = 0.0;
+  sys.ac.buses[1].qd_mvar = 0.0;
+  sys.ac.loads = {load};
+
+  io::GridLABDLongDurationEvent event;
+  event.time_s = 1.0;
+  event.duration_s = 2.0;
+  event.label = "explicit AC load increase";
+  event.scenario.kind = io::GridLABDFailureKind::ACLoadScale;
+  event.scenario.bus = load.bus;
+  event.scenario.component_index = load.index;
+  event.scenario.scale = 1.15;
+  event.scenario.value = 1.15;
+  event.scenario.expected_exact_ac_snapshot = true;
+
+  io::GridLABDStandardCase test_case{
+      .name = "explicit_ac_load_15s",
+      .category = "component",
+      .source = "explicit Load regression",
+      .system = sys,
+  };
+  io::GridLABDLongDurationOptions validation_options;
+  validation_options.require_gridlabd = true;
+  validation_options.t_end_s = 15.0;
+  validation_options.sample_interval_s = 1.0;
+  validation_options.dynamic_options.dt_s = 0.01;
+  validation_options.dynamic_options.use_adaptive_step = true;
+  validation_options.dynamic_options.max_step_halving = 12;
+  validation_options.comparison_options.compare_branch_flows = false;
+  validation_options.comparison_options.run_options.timeout_seconds = 120;
+
+  const auto report = io::run_gridlabd_long_duration_validation(
+      test_case, {event}, validation_options);
+  INFO(io::gridlabd_long_duration_report_to_json(report, 2));
+  REQUIRE(report.dynamic_success);
+  for (const auto& sample : report.samples) {
+    REQUIRE(sample.dynamic_snapshot_found);
+    CHECK(sample.dynamic_min_ac_voltage_pu > 0.8);
+    CHECK(sample.dynamic_max_ac_voltage_pu < 1.2);
+  }
+  if (report.gridlabd_available) {
+    for (const auto& sample : report.samples) {
+      CHECK(sample.gridlabd_solved);
+      REQUIRE_FALSE(sample.dynamic_voltage_items.empty());
+      for (const auto& item : sample.dynamic_voltage_items) CHECK(item.passed);
+    }
+  }
+
+  dynamics::DynamicSolverOptions dynamic_options;
+  dynamic_options.t_end_s = 15.0;
+  dynamic_options.dt_s = 0.01;
+  dynamic_options.use_adaptive_step = true;
+  dynamic_options.max_step_halving = 12;
+  dynamic_options.run_power_flow_initialization = true;
+  dynamic_options.record_every_step = true;
+  dynamics::DynamicModelBuilder builder;
+  auto dynamic_system = builder.build(sys, dynamic_options);
+  dynamics::DynamicEvent load_step;
+  load_step.time_s = 1.0;
+  load_step.type = dynamics::DynamicEventType::ACLoadScale;
+  load_step.bus = load.bus;
+  load_step.value = 1.15;
+  load_step.params["scale"] = 1.15;
+  dynamic_system.events.push_back(load_step);
+  dynamics::DynamicSolver solver;
+  const auto dynamic_result = solver.solve(dynamic_system);
+  REQUIRE(dynamic_result.success);
+  double measured_min = std::numeric_limits<double>::infinity();
+  double measured_max = -std::numeric_limits<double>::infinity();
+  for (const auto& snapshot : dynamic_result.snapshots) {
+    CHECK(std::abs(snapshot.frequency_hz - sys.ac.freq_hz) < 1e-8);
+    for (const double measured : snapshot.bus_frequency_hz) {
+      CHECK(measured > 45.0);
+      CHECK(measured < 55.0);
+      measured_min = std::min(measured_min, measured);
+      measured_max = std::max(measured_max, measured);
+    }
+  }
+  CHECK(measured_max - measured_min > 1e-4);
 }

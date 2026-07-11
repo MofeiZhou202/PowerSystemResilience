@@ -649,7 +649,7 @@ static std::vector<GenAnnualStats> compute_gen_stats(
   std::vector<GenAnnualStats> stats(gens.size());
   for (size_t g = 0; g < gens.size(); ++g) {
     stats[g].name = gens[g].name;
-    stats[g].gen_index = static_cast<int>(g);
+    stats[g].gen_index = gens[g].index;
   }
 
   // Map in-service generator indices to UC vector positions
@@ -777,7 +777,7 @@ static std::vector<RenewableAnnualStats> compute_renewable_stats(
 
   for (size_t r = 0; r < rens.size(); ++r) {
     stats[r].name = rens[r].name;
-    stats[r].ren_index = static_cast<int>(r);
+    stats[r].ren_index = rens[r].index;
   }
 
   for (const auto& ws : weekly) {

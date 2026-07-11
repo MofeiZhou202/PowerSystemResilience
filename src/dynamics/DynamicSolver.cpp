@@ -133,6 +133,51 @@ bool clear_expired_faults(DynamicSystem& sys, double t) {
   return changed;
 }
 
+void append_temporary_restoration_events(DynamicSystem& sys) {
+  const std::size_t authored_count = sys.events.size();
+  for (std::size_t i = 0; i < authored_count; ++i) {
+    const auto& event = sys.events[i];
+    if (!(event.duration_s > 0.0) ||
+        event.params.count("auto_restore_event") != 0U) {
+      continue;
+    }
+    DynamicEvent restore = event;
+    restore.time_s = event.time_s + event.duration_s;
+    restore.duration_s = 0.0;
+    restore.applied = false;
+    restore.label = "restore " + event_label(event);
+    restore.params["auto_restore_event"] = 1.0;
+    switch (event.type) {
+      case DynamicEventType::ACLoadScale:
+      case DynamicEventType::DCLoadScale: {
+        const double scale = event_param(event, "restore_scale", 1.0);
+        restore.value = scale;
+        restore.params["scale"] = scale;
+        sys.events.push_back(std::move(restore));
+        break;
+      }
+      case DynamicEventType::ACBranchTrip:
+        restore.type = DynamicEventType::ACBranchClose;
+        sys.events.push_back(std::move(restore));
+        break;
+      case DynamicEventType::ACBranchClose:
+        restore.type = DynamicEventType::ACBranchTrip;
+        sys.events.push_back(std::move(restore));
+        break;
+      case DynamicEventType::DCBranchTrip:
+        restore.type = DynamicEventType::DCBranchClose;
+        sys.events.push_back(std::move(restore));
+        break;
+      case DynamicEventType::DCBranchClose:
+        restore.type = DynamicEventType::DCBranchTrip;
+        sys.events.push_back(std::move(restore));
+        break;
+      default:
+        break;
+    }
+  }
+}
+
 double next_discontinuity_time(const DynamicSystem& sys, double t) {
   double next = std::numeric_limits<double>::infinity();
   for (const auto& event : sys.events) {
@@ -1789,6 +1834,8 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
     results.message = "DynamicSolverOptions::t_end_s is before t_start_s";
     return results;
   }
+
+  append_temporary_restoration_events(system);
 
   if (system.options.solver_type == DynamicSolverType::MassMatrixDae) {
     return solve_mass_matrix_dae(system);

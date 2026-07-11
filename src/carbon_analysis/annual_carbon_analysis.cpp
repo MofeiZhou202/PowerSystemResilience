@@ -1066,6 +1066,11 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
         "ts_result.pf_system_snapshots.size() must equal ts_result.pf_results.size()");
   }
   std::vector<HybridPowerSystem> mutable_systems = ts_result.pf_system_snapshots;
+  // TSPF snapshots restore native dc.dc_storage for rich-model/Canvas identity,
+  // while the carbon ledger operates on the unified Storage representation.
+  // Materialize only the private analysis copies so DC storage participates in
+  // the same SOC and carbon recurrence without changing the returned rich model.
+  for (auto& system : mutable_systems) materialize_dc_storage(system);
   auto result = compute_annual_carbon_analysis_impl(
       [&](size_t t) -> const HybridPowerSystem& { return mutable_systems[t]; },
       ts_result.pf_results,

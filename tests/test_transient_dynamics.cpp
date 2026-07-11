@@ -4022,6 +4022,51 @@ TEST_CASE("Transient solver lands on off-grid event times", "[dynamics][events]"
   CHECK(saw_event_time);
 }
 
+TEST_CASE("Temporary load-scale event restores at its declared duration",
+          "[dynamics][events][load]") {
+  const auto sys = make_transient_2bus();
+  auto opt = fast_options();
+  opt.t_end_s = 0.08;
+  opt.dt_s = 0.005;
+  opt.record_every_step = true;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+  DynamicEvent event;
+  event.time_s = 0.02;
+  event.duration_s = 0.02;
+  event.type = DynamicEventType::ACLoadScale;
+  event.bus = 2;
+  event.value = 1.5;
+  event.params["scale"] = 1.5;
+  event.label = "temporary load scale";
+  dyn.events.push_back(event);
+
+  DynamicSolver solver;
+  const DynamicResults result = solver.solve(dyn);
+  INFO(result.message);
+  REQUIRE(result.success);
+  REQUIRE(result.applied_event_records.size() == 2);
+  CHECK(result.applied_event_records[0].time_s == Catch::Approx(0.02));
+  CHECK(result.applied_event_records[1].time_s == Catch::Approx(0.04));
+  CHECK(result.applied_event_records[1].params.at("scale") == Catch::Approx(1.0));
+
+  const auto scale = device_output_series(result, "ACLoad", 1, "scale");
+  REQUIRE(scale.y.size() == scale.t.size());
+  bool saw_disturbed = false;
+  bool saw_restored = false;
+  for (std::size_t i = 0; i < scale.t.size(); ++i) {
+    if (scale.t[i] >= 0.02 && scale.t[i] < 0.04) {
+      saw_disturbed = saw_disturbed || std::abs(scale.y[i] - 1.5) < 1e-12;
+    }
+    if (scale.t[i] >= 0.04) {
+      saw_restored = saw_restored || std::abs(scale.y[i] - 1.0) < 1e-12;
+    }
+  }
+  CHECK(saw_disturbed);
+  CHECK(saw_restored);
+}
+
 TEST_CASE("Canonical transient builder keeps asymmetric loads per phase once", "[dynamics][three_phase]") {
   const auto sys = make_asymmetric_ac_case();
   auto opt = fast_options();
@@ -9064,8 +9109,6 @@ TEST_CASE("Unbalanced sequence braking torque extends to all machine models",
   // The sequence-modeled machine brakes: a lower (more negative) rotor accel.
   CHECK(rotor_accel(true) < rotor_accel(false));
 }
-
-
 
 
 

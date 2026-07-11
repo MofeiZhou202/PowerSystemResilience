@@ -306,6 +306,116 @@ TEST_CASE("skip-UC fallback schedules DC storage with SOC transitions",
   }
 }
 
+TEST_CASE("dynamic carbon materializes native DC storage for energy recurrence",
+          "[time_series][storage][dc][carbonflow][regression]") {
+  using namespace hacdcpf;
+
+  HybridPowerSystem base = build_single_bus_storage_case();
+  base.ac.storage.clear();
+  base.ac.loads[0].profile_id = 0;
+
+  DCBus dc_bus;
+  dc_bus.index = 1;
+  dc_bus.bus_type = DCBusType::DC_V;
+  base.dc.buses.push_back(dc_bus);
+
+  DCStorage storage;
+  storage.index = 17;
+  storage.bus = 1;
+  storage.in_service = true;
+  storage.p_rated_mw = 1.0;
+  storage.pmin_mw = -1.0;
+  storage.pmax_mw = 1.0;
+  storage.e_rated_mwh = 10.0;
+  storage.soc_init = 0.5;
+  storage.soc_min = 0.1;
+  storage.soc_max = 0.9;
+  storage.eta_charge = 0.9;
+  storage.eta_discharge = 0.8;
+  storage.self_discharge_pct = 1.0;
+  storage.soc_carbon_intensity_tco2_mwh = 0.2;
+  base.dc.dc_storage.push_back(storage);
+
+  TimeSeriesData ts;
+  ts.num_steps = 4;
+  ts.step_duration_hr = 1.0;
+  ts.profiles = {{0, "load", {0.5, 1.5, 1.5, 0.5}}};
+
+  TimeSeriesPFOptions opts;
+  opts.skip_uc = true;
+  opts.run_opf = false;
+  opts.keep_system_snapshots = true;
+  const TimeSeriesPFResult result = solve_time_series_pf(base, ts, opts);
+
+  REQUIRE(result.pf_system_snapshots.size() == 4);
+  REQUIRE(result.pf_system_snapshots.front().dc.storage.empty());
+  REQUIRE(result.pf_system_snapshots.front().dc.dc_storage.size() == 1);
+
+  analysis::AnnualCarbonAnalysisOptions carbon_opts;
+  const auto annual = analysis::compute_annual_carbon_analysis(
+      result, ts.step_duration_hr, carbon_opts);
+  REQUIRE(annual.terminal_storage_states.size() == 1);
+  CHECK(annual.terminal_storage_states[0].storage_index == 17);
+  CHECK(annual.terminal_storage_states[0].is_dc);
+  CHECK(std::abs(annual.storage_energy_balance_error_mwh) < 1e-8);
+  CHECK(annual.storage_energy_balance_abs_error_mwh < 1e-8);
+  CHECK(std::abs(annual.storage_inventory_balance_error_tco2) < 1e-8);
+}
+
+TEST_CASE("skip-UC fallback replaces inactive AC schedule and closes SOC",
+          "[time_series][storage][ac][carbonflow][regression]") {
+  using namespace hacdcpf;
+
+  HybridPowerSystem base = build_single_bus_storage_case();
+  base.ac.loads[0].profile_id = 0;
+  base.ac.storage[0].eta_charge = 0.9;
+  base.ac.storage[0].eta_discharge = 0.8;
+  base.ac.storage[0].self_discharge_pct = 1.0;
+
+  TimeSeriesData ts;
+  ts.num_steps = 4;
+  ts.step_duration_hr = 1.0;
+  ts.profiles = {{0, "load", {0.5, 1.5, 1.5, 0.5}}};
+
+  TimeSeriesPFOptions opts;
+  opts.skip_uc = true;
+  opts.run_opf = false;
+  opts.keep_system_snapshots = true;
+  const TimeSeriesPFResult result = solve_time_series_pf(base, ts, opts);
+
+  REQUIRE(result.uc_schedule.ess_dispatch.size() == 1);
+  REQUIRE(result.uc_schedule.ess_soc.size() == 1);
+  const auto& dispatch = result.uc_schedule.ess_dispatch[0];
+  const auto& soc = result.uc_schedule.ess_soc[0];
+  REQUIRE(dispatch.size() == 4);
+  REQUIRE(soc.size() == 4);
+  REQUIRE(result.pf_system_snapshots.size() == 4);
+
+  double previous_soc = base.ac.storage[0].soc_init;
+  for (size_t t = 0; t < dispatch.size(); ++t) {
+    const double expected = previous_soc * 0.99 +
+        (dispatch[t] < 0.0
+             ? -dispatch[t] * base.ac.storage[0].eta_charge /
+                   base.ac.storage[0].e_rated_mwh
+             : -dispatch[t] /
+                   (base.ac.storage[0].eta_discharge *
+                    base.ac.storage[0].e_rated_mwh));
+    CHECK(soc[t] == Approx(expected).margin(1e-10));
+    CHECK(result.pf_system_snapshots[t].ac.storage[0].soc_init ==
+          Approx(soc[t]).margin(1e-10));
+    CHECK(result.pf_system_snapshots[t].ac.storage[0].e_mwh ==
+          Approx(soc[t] * base.ac.storage[0].e_rated_mwh).margin(1e-10));
+    previous_soc = soc[t];
+  }
+
+  analysis::AnnualCarbonAnalysisOptions carbon_opts;
+  const auto annual = analysis::compute_annual_carbon_analysis(
+      result, ts.step_duration_hr, carbon_opts);
+  CHECK(std::abs(annual.storage_energy_balance_error_mwh) < 1e-8);
+  CHECK(annual.storage_energy_balance_abs_error_mwh < 1e-8);
+  CHECK(std::abs(annual.storage_inventory_balance_error_tco2) < 1e-8);
+}
+
 TEST_CASE("carbon flow repairs radial DC transfer hidden by equal boundary voltages",
           "[carbonflow][dc][kcl]") {
   using namespace hacdcpf;

@@ -3846,10 +3846,13 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
       if (e.in_service) ++nACEssActive;
 
     bool need_ess_fallback = (nACEssActive > 0) &&
-        (static_cast<int>(schedule.ess_dispatch.size()) != nACEssActive);
+        (!should_apply_uc_schedule(opts, schedule) ||
+         static_cast<int>(schedule.ess_dispatch.size()) != nACEssActive ||
+         static_cast<int>(schedule.ess_soc.size()) != nACEssActive);
     if (!need_ess_fallback && nACEssActive > 0) {
       for (int k = 0; k < nACEssActive; ++k) {
-        if (static_cast<int>(schedule.ess_dispatch[static_cast<size_t>(k)].size()) != T) {
+        if (static_cast<int>(schedule.ess_dispatch[static_cast<size_t>(k)].size()) != T ||
+            static_cast<int>(schedule.ess_soc[static_cast<size_t>(k)].size()) != T) {
           need_ess_fallback = true;
           break;
         }
