@@ -89,7 +89,8 @@ const App = (() => {
     modelIO: 'modeling',
     parameterLibrary: 'modeling',
     topologyAnalysis: 'modeling',
-    integratedEnergy: 'modeling',
+    integratedEnergy: 'ies',
+    evTraffic: 'ies',
     powerFlow: 'steady',
     opf: 'steady',
     harmonics: 'steady',
@@ -109,6 +110,7 @@ const App = (() => {
     steady: 'powerFlow',
     security: 'shortCircuit',
     planning: 'topology',
+    ies: 'integratedEnergy',
     sustainability: 'carbonFlow',
   };
   // 时序潮流 (tspf) and 时序生产模拟 (timeSeries=annual) share ONE sub-section and

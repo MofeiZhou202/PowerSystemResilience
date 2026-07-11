@@ -7,6 +7,55 @@
 
 namespace hacdcpf {
 
+/// Projection policy used when contracting switch/circuit-breaker terminals.
+/// ExactIdeal contracts only devices whose authored impedance is exactly zero.
+/// ThresholdApproximate also contracts non-zero devices below the configured
+/// numerical threshold and records them as approximate merge edges.
+enum class ProjectionMode {
+  ExactIdeal,
+  ThresholdApproximate,
+};
+
+enum class MergeSemantics {
+  ExactIdeal,
+  ThresholdApproximate,
+};
+
+struct MergeRecord {
+  int branch_index{0};
+  int bus_from{0};
+  int bus_to{0};
+  double r_pu{0.0};
+  double x_pu{0.0};
+  MergeSemantics semantics{MergeSemantics::ExactIdeal};
+};
+
+/// Machine-readable evidence emitted by one projection pass.
+struct ProjectionCertificate {
+  ProjectionMode mode{ProjectionMode::ThresholdApproximate};
+  double impedance_threshold{1e-4};
+  std::vector<MergeRecord> merge_records;
+  std::vector<std::string> diagnostics;
+
+  [[nodiscard]] int exact_merge_count() const noexcept {
+    int n = 0;
+    for (const auto& record : merge_records)
+      if (record.semantics == MergeSemantics::ExactIdeal) ++n;
+    return n;
+  }
+
+  [[nodiscard]] int approximate_merge_count() const noexcept {
+    int n = 0;
+    for (const auto& record : merge_records)
+      if (record.semantics == MergeSemantics::ThresholdApproximate) ++n;
+    return n;
+  }
+
+  [[nodiscard]] bool exact() const noexcept {
+    return approximate_merge_count() == 0;
+  }
+};
+
 // ─────────────────────────────────────────────────────────────────────
 // Branch expansion provenance map
 //
@@ -78,6 +127,11 @@ struct BusMergeMap {
   // (0-based).  Dead-island branches get -1.
   std::unordered_map<int, int> branch_orig_to_proj;
 
+  /// Projection policy and the physical edges that induced each contraction.
+  ProjectionMode projection_mode{ProjectionMode::ThresholdApproximate};
+  double impedance_threshold{1e-4};
+  std::vector<MergeRecord> merge_records;
+
   bool has_merges() const { return n_merged > 0 && n_merged < n_original; }
 
   // Returns true if any dead-island buses were stripped.
@@ -127,6 +181,37 @@ struct ProjectionReport {
     for (const auto& m : mappings)
       if (m.source_type == type) ++n;
     return n;
+  }
+};
+
+enum class ObservableKind {
+  ACBusVoltage,
+  DCBusVoltage,
+  ACBranchTerminalFlow,
+  SwitchTerminalFlow,
+  ConverterTransfer,
+  AggregatedDeviceInjection,
+  NodalDual,
+  ServiceLoss,
+};
+
+enum class RecoveryClass {
+  Strong,
+  Approximate,
+  AuditOnly,
+  Unsupported,
+};
+
+struct ObservableAttribution {
+  ObservableKind observable{ObservableKind::ACBusVoltage};
+  RecoveryClass recovery{RecoveryClass::Unsupported};
+  int canonical_entities{0};
+  int attributed_entities{0};
+  std::string reason;
+
+  [[nodiscard]] bool total() const noexcept {
+    return recovery != RecoveryClass::Unsupported &&
+           attributed_entities == canonical_entities;
   }
 };
 

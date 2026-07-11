@@ -77,6 +77,8 @@ struct SolverData {
   std::uint64_t build_id{0};
 
   std::optional<BusMergeMap> bus_merge_map;
+  std::optional<ProjectionCertificate> projection_certificate;
+  std::optional<ProjectionReport> projection_report;
 };
 
 SolverData make_solver_data(const HybridPowerSystem& sys,

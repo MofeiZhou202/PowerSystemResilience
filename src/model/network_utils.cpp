@@ -1486,7 +1486,9 @@ void strip_dead_islands(HybridPowerSystem& sys) {
 static void merge_zero_impedance_buses_impl(
     HybridPowerSystem& sys,
     bool allow_merge,
-    const std::unordered_set<int>* merge_branch_indices) {
+    const std::unordered_map<int, MergeSemantics>* merge_branch_semantics,
+    double impedance_threshold,
+    ProjectionCertificate* certificate) {
   auto& buses = sys.ac.buses;
   auto& branches = sys.ac.branches;
   const int n = static_cast<int>(buses.size());
@@ -1508,16 +1510,21 @@ static void merge_zero_impedance_buses_impl(
   if (allow_merge) {
     for (const auto& br : branches) {
       if (!br.in_service) continue;
-      if (merge_branch_indices != nullptr &&
-          merge_branch_indices->count(br.index) == 0) {
-        continue;
+      MergeSemantics semantics = MergeSemantics::ThresholdApproximate;
+      if (merge_branch_semantics != nullptr) {
+        const auto candidate = merge_branch_semantics->find(br.index);
+        if (candidate == merge_branch_semantics->end()) continue;
+        semantics = candidate->second;
+      } else if (br.r_pu == 0.0 && br.x_pu == 0.0) {
+        semantics = MergeSemantics::ExactIdeal;
       }
       // A true zero-impedance element (CB/switch) has both R and X tiny
       // AND negligible charging susceptance.  Short lines may have small
       // R and X but non-zero B 鈥?these must NOT be merged because merging
       // discards their charging and distorts the admittance model.
-      if (std::abs(br.r_pu) >= kBusMergeZThreshold ||
-          std::abs(br.x_pu) >= kBusMergeZThreshold) continue;
+      if (semantics == MergeSemantics::ThresholdApproximate &&
+          (std::abs(br.r_pu) >= impedance_threshold ||
+           std::abs(br.x_pu) >= impedance_threshold)) continue;
       if (std::abs(br.b_pu) > 1e-6) continue;  // non-trivial charging 鈫?real line
 
       auto it_f = idx_to_pos.find(br.from_bus);
@@ -1526,6 +1533,14 @@ static void merge_zero_impedance_buses_impl(
 
       if (uf.unite(it_f->second, it_t->second)) {
         any_merged = true;
+        MergeRecord record;
+        record.branch_index = br.index;
+        record.bus_from = br.from_bus;
+        record.bus_to = br.to_bus;
+        record.r_pu = br.r_pu;
+        record.x_pu = br.x_pu;
+        record.semantics = semantics;
+        if (certificate != nullptr) certificate->merge_records.push_back(record);
       }
     }
   }
@@ -1557,6 +1572,11 @@ static void merge_zero_impedance_buses_impl(
   // Build old-position 鈫?new-position mapping
   BusMergeMap merge_map;
   merge_map.n_original = n;
+  merge_map.projection_mode = certificate != nullptr
+                                  ? certificate->mode
+                                  : ProjectionMode::ThresholdApproximate;
+  merge_map.impedance_threshold = impedance_threshold;
+  if (certificate != nullptr) merge_map.merge_records = certificate->merge_records;
 
   // new_pos: representative position 鈫?new sequential position
   std::vector<int> old_pos_to_new(static_cast<size_t>(n), -1);
@@ -1712,7 +1732,8 @@ static void merge_zero_impedance_buses_impl(
 }
 
 void merge_zero_impedance_buses(HybridPowerSystem& sys, bool allow_merge) {
-  merge_zero_impedance_buses_impl(sys, allow_merge, nullptr);
+  merge_zero_impedance_buses_impl(sys, allow_merge, nullptr,
+                                  kBusMergeZThreshold, nullptr);
 }
 
 // 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -1991,7 +2012,22 @@ static void expand_energy_routers(HybridPowerSystem& sys) {
 }
 
 // Internal helper: project a mutable HybridPowerSystem in place.
-static void project_in_place(HybridPowerSystem& out, bool strip_dead = true) {
+static void project_in_place(HybridPowerSystem& out,
+                             const ProjectionOptions& options) {
+  ProjectionCertificate projection_certificate;
+  projection_certificate.mode = options.mode;
+  projection_certificate.impedance_threshold = options.impedance_threshold;
+  ProjectionReport projection_report;
+
+  auto record_mapping = [&](const std::string& source_type,
+                            int source_index,
+                            const std::string& canonical_type,
+                            int canonical_index,
+                            double participation = 1.0) {
+    projection_report.mappings.push_back(
+        {source_type, std::to_string(source_index), canonical_type,
+         std::to_string(canonical_index), participation});
+  };
   if (out.base_mva <= 1e-9) {
     out.base_mva = 100.0;
   }
@@ -2046,37 +2082,68 @@ static void project_in_place(HybridPowerSystem& out, bool strip_dead = true) {
   }
 
   for (const auto& fl : out.ac.flexible_loads) {
+    const int before = next_ld;
     add_equivalent_load_from_flexible(fl, out.ac, next_ld);
+    if (next_ld > before) record_mapping("FlexibleLoad", fl.index, "Load", before);
   }
   for (const auto& al : out.ac.asymmetric_loads) {
+    const int before = next_ld;
     add_equivalent_load_from_asymmetric(al, out.ac, next_ld);
+    if (next_ld > before) record_mapping("AsymmetricLoad", al.index, "Load", before);
   }
   for (const auto& m : out.ac.motors) {
+    const int before = next_ld;
     add_equivalent_load_from_motor(m, out.ac, next_ld);
+    if (next_ld > before) record_mapping("AsynchronousMotor", m.index, "Load", before);
   }
 
   // EnergyRouters 鈫?macro expansion into internal DC buses + VSCs + DCDC
+  const auto authored_energy_routers = out.energy_routers;
+  const std::size_t vsc_before_router = out.vsc_converters.size();
+  const std::size_t dcdc_before_router = out.dc.dcdc_converters.size();
   expand_energy_routers(out);
+  for (const auto& er : authored_energy_routers) {
+    const std::string prefix = er.name + "_";
+    for (std::size_t i = vsc_before_router; i < out.vsc_converters.size(); ++i) {
+      const auto& vsc = out.vsc_converters[i];
+      if (vsc.name.rfind(prefix, 0) == 0)
+        record_mapping("EnergyRouter", er.index, "VSCConverter", vsc.index);
+    }
+    for (std::size_t i = dcdc_before_router; i < out.dc.dcdc_converters.size(); ++i) {
+      const auto& dcdc = out.dc.dcdc_converters[i];
+      if (dcdc.name.rfind(prefix, 0) == 0)
+        record_mapping("EnergyRouter", er.index, "DCDCConverter", dcdc.index);
+    }
+  }
 
   // VirtualPowerPlants 鈫?StaticGenerator at aggregation bus
   int next_sg = next_index_of(out.ac.static_generators);
   for (const auto& vpp : out.vpps) {
+    const int before = next_sg;
     add_equivalent_static_gen_from_vpp(vpp, out.ac, next_sg);
+    if (next_sg > before)
+      record_mapping("VirtualPowerPlant", vpp.index, "StaticGenerator", before);
   }
   for (const auto& mg : out.microgrids) {
+    const int before = next_sg;
     add_equivalent_static_gen_from_microgrid(mg, out.ac, next_sg);
+    if (next_sg > before)
+      record_mapping("Microgrid", mg.index, "StaticGenerator", before);
   }
 
   // MobileStorage 鈫?canonical AC Storage at current bus
   int next_st = next_index_of(out.ac.storage);
   for (const auto& ms : out.mobile_storage) {
+    const int before = next_st;
     add_equivalent_storage_from_mobile_storage(ms, out.ac, next_st);
+    if (next_st > before)
+      record_mapping("MobileStorage", ms.index, "Storage", before);
   }
 
   // Track branch expansion provenance for Transformer2W/3W and Switch.
   // This lets callers map solver branch-flow indices back to original elements.
   BranchExpandMap bmap;
-  std::unordered_set<int> switch_merge_branch_indices;
+  std::unordered_map<int, MergeSemantics> switch_merge_branch_semantics;
   int next_br = next_index_of(out.ac.branches);
 
   for (const auto& tr : out.ac.transformers_2w) {
@@ -2086,6 +2153,7 @@ static void project_in_place(HybridPowerSystem& out, bool strip_dead = true) {
       // exact pi-model data (r, x, b, tap) 鈥?do NOT overwrite with
       // round-tripped values.  Just record the provenance mapping.
       bmap.entries.push_back({tr.source_branch_idx, BranchOriginType::Transformer2W, tr.index, 0});
+      record_mapping("Transformer2W", tr.index, "ACBranch", tr.source_branch_idx);
     } else {
       // Standalone Transformer2W (e.g. from Excel/JSON import) 鈥?create
       // equivalent branch as before.
@@ -2093,6 +2161,7 @@ static void project_in_place(HybridPowerSystem& out, bool strip_dead = true) {
       add_equivalent_branch_from_transformer2w(tr, out.ac, out.base_mva, next_br);
       if (next_br > br_before) {
         bmap.entries.push_back({br_before, BranchOriginType::Transformer2W, tr.index, 0});
+        record_mapping("Transformer2W", tr.index, "ACBranch", br_before);
       }
     }
   }
@@ -2102,6 +2171,8 @@ static void project_in_place(HybridPowerSystem& out, bool strip_dead = true) {
     // Record each pair branch in HV-MV / HV-LV / MV-LV order
     for (int pair = 0; br_before + pair < next_br; ++pair) {
       bmap.entries.push_back({br_before + pair, BranchOriginType::Transformer3W, tr.index, pair});
+      record_mapping("Transformer3W", tr.index, "ACBranch", br_before + pair,
+                     1.0 / 3.0);
     }
   }
   for (const auto& sw : out.ac.switches) {
@@ -2116,7 +2187,15 @@ static void project_in_place(HybridPowerSystem& out, bool strip_dead = true) {
       e.bus_to = sw.bus_to;
       e.closed = sw.closed;
       bmap.entries.push_back(e);
-      if (sw.closed) switch_merge_branch_indices.insert(e.branch_index);
+      record_mapping("Switch", sw.index, "ACBranch", e.branch_index);
+      if (sw.closed) {
+        const bool authored_ideal = sw.r_contact_ohm == 0.0 && sw.z_ohm == 0.0;
+        if (authored_ideal || options.mode == ProjectionMode::ThresholdApproximate) {
+          switch_merge_branch_semantics[e.branch_index] =
+              authored_ideal ? MergeSemantics::ExactIdeal
+                             : MergeSemantics::ThresholdApproximate;
+        }
+      }
     }
   }
   for (const auto& cb : out.ac.circuit_breakers) {
@@ -2131,7 +2210,15 @@ static void project_in_place(HybridPowerSystem& out, bool strip_dead = true) {
       e.bus_to = cb.bus_to;
       e.closed = cb.closed;
       bmap.entries.push_back(e);
-      if (cb.closed) switch_merge_branch_indices.insert(e.branch_index);
+      record_mapping("CircuitBreaker", cb.index, "ACBranch", e.branch_index);
+      if (cb.closed) {
+        const bool authored_ideal = cb.z_ohm == 0.0;
+        if (authored_ideal || options.mode == ProjectionMode::ThresholdApproximate) {
+          switch_merge_branch_semantics[e.branch_index] =
+              authored_ideal ? MergeSemantics::ExactIdeal
+                             : MergeSemantics::ThresholdApproximate;
+        }
+      }
     }
   }
   if (!bmap.empty()) out.branch_expand_map = std::move(bmap);
@@ -2152,8 +2239,10 @@ static void project_in_place(HybridPowerSystem& out, bool strip_dead = true) {
   // In either case the bus list is canonicalized to 1-based contiguous indices,
   // which every positional PF/OPF builder (index-1) relies on.
   merge_zero_impedance_buses_impl(out,
-                                  !switch_merge_branch_indices.empty(),
-                                  &switch_merge_branch_indices);
+                                  !switch_merge_branch_semantics.empty(),
+                                  &switch_merge_branch_semantics,
+                                  options.impedance_threshold,
+                                  &projection_certificate);
 
   // Strip dead islands: remove buses with no path to any generation
   // source.  This ensures all downstream algorithms (PF, OPF, DPF,
@@ -2161,7 +2250,14 @@ static void project_in_place(HybridPowerSystem& out, bool strip_dead = true) {
   // isolated dead nodes that would cause singular admittance matrices.
   // Reconfiguration skips this so open ties into de-energised sections
   // remain valid reconnection candidates.
-  if (strip_dead) strip_dead_islands(out);
+  if (options.strip_dead_islands) strip_dead_islands(out);
+  if (out.bus_merge_map) {
+    out.bus_merge_map->projection_mode = options.mode;
+    out.bus_merge_map->impedance_threshold = options.impedance_threshold;
+    out.bus_merge_map->merge_records = projection_certificate.merge_records;
+  }
+  out.projection_certificate = projection_certificate;
+  out.projection_report = projection_report;
 
   if (!out.ac.chargers.empty()) {
     if (out.ac.charging_stations.empty()) {
@@ -2273,20 +2369,144 @@ DeviceTerminalFlows compute_device_terminal_flows(const HybridPowerSystem& sys,
   return device_terminal_flows_from_net(sys, net_p, net_q);
 }
 
+ObservableAttribution evaluate_attribution(
+    const HybridPowerSystem& original,
+    const HybridPowerSystem& projected,
+    ObservableKind observable) {
+  ObservableAttribution out;
+  out.observable = observable;
+
+  const bool projection_exact =
+      !projected.projection_certificate || projected.projection_certificate->exact();
+  const RecoveryClass electrical_recovery =
+      projection_exact ? RecoveryClass::Strong : RecoveryClass::Approximate;
+
+  switch (observable) {
+    case ObservableKind::ACBusVoltage: {
+      out.canonical_entities = static_cast<int>(original.ac.buses.size());
+      if (!projected.bus_merge_map) {
+        out.attributed_entities =
+            projected.ac.buses.size() == original.ac.buses.size()
+                ? out.canonical_entities
+                : 0;
+      } else {
+        out.attributed_entities =
+            static_cast<int>(projected.bus_merge_map->ext_to_orig_pos.size());
+      }
+      out.recovery = out.attributed_entities == out.canonical_entities
+                         ? electrical_recovery
+                         : RecoveryClass::Unsupported;
+      out.reason = projection_exact
+                       ? "bus identity/broadcast map covers authored AC buses"
+                       : "bus broadcast is total with threshold-merge semantics";
+      return out;
+    }
+    case ObservableKind::DCBusVoltage:
+      out.canonical_entities = static_cast<int>(original.dc.buses.size());
+      out.attributed_entities =
+          projected.dc.buses.size() == original.dc.buses.size()
+              ? out.canonical_entities
+              : 0;
+      out.recovery = out.attributed_entities == out.canonical_entities
+                         ? RecoveryClass::Strong
+                         : RecoveryClass::Unsupported;
+      out.reason = "DC buses retain stable component identities";
+      return out;
+    case ObservableKind::ACBranchTerminalFlow:
+      out.canonical_entities = static_cast<int>(original.ac.branches.size());
+      out.attributed_entities = out.canonical_entities;
+      if (projected.bus_merge_map &&
+          projected.bus_merge_map->n_original_branches > 0) {
+        out.attributed_entities = 0;
+        for (const auto& [original_position, projected_position] :
+             projected.bus_merge_map->branch_orig_to_proj) {
+          (void)projected_position;
+          if (original_position >= 0 && original_position < out.canonical_entities)
+            ++out.attributed_entities;
+        }
+      }
+      out.recovery = out.attributed_entities == out.canonical_entities
+                         ? electrical_recovery
+                         : RecoveryClass::Unsupported;
+      out.reason = "original branch positions map to projected branch positions";
+      return out;
+    case ObservableKind::SwitchTerminalFlow: {
+      out.canonical_entities = static_cast<int>(original.ac.switches.size() +
+                                                original.ac.circuit_breakers.size());
+      int mapped = 0;
+      if (projected.projection_report) {
+        mapped += projected.projection_report->count_source("Switch");
+        mapped += projected.projection_report->count_source("CircuitBreaker");
+      }
+      out.attributed_entities = mapped;
+      out.recovery = mapped == out.canonical_entities
+                         ? electrical_recovery
+                         : RecoveryClass::Unsupported;
+      out.reason = "expanded device origins and terminal cuts are recorded";
+      return out;
+    }
+    case ObservableKind::ConverterTransfer:
+      out.canonical_entities = static_cast<int>(original.vsc_converters.size());
+      out.attributed_entities =
+          projected.vsc_converters.size() >= original.vsc_converters.size()
+              ? out.canonical_entities
+              : 0;
+      out.recovery = out.attributed_entities == out.canonical_entities
+                         ? RecoveryClass::Strong
+                         : RecoveryClass::Unsupported;
+      out.reason = "authored VSC identities survive canonical projection";
+      return out;
+    case ObservableKind::AggregatedDeviceInjection:
+      out.canonical_entities = projected.projection_report
+                                   ? static_cast<int>(projected.projection_report->mappings.size())
+                                   : 0;
+      out.attributed_entities = out.canonical_entities;
+      out.recovery = RecoveryClass::AuditOnly;
+      out.reason = "source-to-canonical mappings are auditable; physical splits require a declared participation law";
+      return out;
+    case ObservableKind::NodalDual: {
+      out = evaluate_attribution(original, projected, ObservableKind::ACBusVoltage);
+      out.observable = ObservableKind::NodalDual;
+      out.reason = "dual attribution follows surviving AC nodal constraints";
+      return out;
+    }
+    case ObservableKind::ServiceLoss:
+      out.recovery = RecoveryClass::Unsupported;
+      out.reason = "service-loss attribution requires a temporal curtailment contract";
+      return out;
+  }
+  return out;
+}
+
 HybridPowerSystem project_to_canonical_models(const HybridPowerSystem& sys) {
   HybridPowerSystem out = sys;
-  project_in_place(out);
+  project_in_place(out, ProjectionOptions{});
   return out;
 }
 
 HybridPowerSystem project_to_canonical_models(HybridPowerSystem&& sys) {
-  project_in_place(sys);
+  project_in_place(sys, ProjectionOptions{});
+  return std::move(sys);
+}
+
+HybridPowerSystem project_to_canonical_models(const HybridPowerSystem& sys,
+                                              const ProjectionOptions& options) {
+  HybridPowerSystem out = sys;
+  project_in_place(out, options);
+  return out;
+}
+
+HybridPowerSystem project_to_canonical_models(HybridPowerSystem&& sys,
+                                              const ProjectionOptions& options) {
+  project_in_place(sys, options);
   return std::move(sys);
 }
 
 HybridPowerSystem project_to_canonical_models(const HybridPowerSystem& sys, bool strip_dead) {
   HybridPowerSystem out = sys;
-  project_in_place(out, strip_dead);
+  ProjectionOptions options;
+  options.strip_dead_islands = strip_dead;
+  project_in_place(out, options);
   return out;
 }
 

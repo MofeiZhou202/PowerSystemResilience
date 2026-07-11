@@ -61,6 +61,10 @@ def latex_escape(text: str) -> str:
     return "".join(repl.get(ch, ch) for ch in text)
 
 
+def latex_code_list(text: str) -> str:
+    return ", ".join(r"\nolinkurl{" + item.strip() + "}" for item in text.split(","))
+
+
 def sci(value: float | None) -> str:
     if value is None:
         return "--"
@@ -620,11 +624,11 @@ def run_opendss_epri_io_study(outdir: Path) -> dict:
                 else str(row["opendss_run"])
             )
             f.write(
-                f"{latex_escape(row['file'])} & "
+                f"\\nolinkurl{{{row['file']}}} & "
                 f"{latex_escape(opendss_status)} & "
                 f"{latex_escape(native_bus_node)} & "
                 f"{latex_escape(native_devices)} & "
-                f"{latex_escape(str(row['h_import']))} & "
+                f"{latex_escape(str(row['h_import']).replace('_', ' '))} & "
                 f"{row['ac_buses']} & "
                 f"{row['ac_branches']} & "
                 f"{latex_escape(str(row['diagnostics']))} & "
@@ -1012,7 +1016,11 @@ def write_gridlabd_taxonomy_outputs(outdir: Path, rows: list[dict], summary: dic
 
     with (outdir / "sppt_gridlabd_taxonomy_summary.tex").open("w") as f:
         f.write("% Auto-generated GridLAB-D taxonomy benchmark summary.\n")
-        f.write(r"\begin{tabularx}{\linewidth}{@{}l l X@{}}" + "\n")
+        f.write(
+            r"\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{0.22\linewidth}"
+            "\n"
+        )
+        f.write(r"  >{\raggedright\arraybackslash}p{0.24\linewidth} X@{}}" + "\n")
         f.write(r"\toprule" + "\n")
         f.write(r"Benchmark question & Result & Interpretation \\" + "\n")
         f.write(r"\midrule" + "\n")
@@ -1224,7 +1232,7 @@ def run_gridlabd_io_study(outdir: Path) -> list[dict]:
         f.write(r"\midrule" + "\n")
         for row in rows:
             f.write(
-                f"{latex_escape(row['file'])} & "
+                f"\\nolinkurl{{{row['file']}}} & "
                 f"{latex_escape(str(row['gridlabd_run']))} & "
                 f"{row['raw_objects']} & "
                 f"{row['ac_buses']} & "
@@ -1294,21 +1302,21 @@ def write_model_io_scope(outdir: Path) -> None:
     rows = [
         {
             "interface": "Internal JSON + SPPT",
-            "direction": "import/export/project",
+            "direction": "import, export, project",
             "code": "from_json/to_json, project_to_canonical_models, component_io_mappings",
             "semantics": "rich AC/DC/three-phase devices, VSC/DC/DC controls, provenance, canonical stamps",
             "gate": "schema validation, well-posedness, attribution and component-I/O coverage report",
         },
         {
             "interface": "OpenDSS text",
-            "direction": "import/export",
+            "direction": "import, export",
             "code": "from_opendss_with_report, load_opendss, to_opendss, save_opendss",
-            "semantics": "balanced AC Circuit/Vsource/Line/LineCode/LineGeometry/WireData/Reactor/Transformer/Capacitor/Load/Generator/PV-equivalent snapshots",
+            "semantics": "balanced AC Circuit, Vsource, Line, LineCode, LineGeometry, WireData, Reactor, Transformer, Capacitor, Load, Generator, and PV-equivalent snapshots",
             "gate": "load_opendss expands local Redirect/Compile files; lone text uploads cannot resolve missing relative files; warnings/skips are reported",
         },
         {
             "interface": "OpenDSS C-API phase bridge",
-            "direction": "import/reference solve",
+            "direction": "import, reference solve",
             "code": "load_three_phase_system_from_opendss, runpf_phase(OpenDSS), solve_opendss_snapshot",
             "semantics": "phase buses/nodes, lines, loads, capacitors as shunts, two/three-winding transformers, Vsource, regulator/tap state",
             "gate": "requires HACDCPF_ENABLE_OPENDSS; trust only common solved AC phase voltages/PD-element quantities",
@@ -1322,7 +1330,7 @@ def write_model_io_scope(outdir: Path) -> None:
         },
         {
             "interface": "GridLAB-D snapshot bridge",
-            "direction": "export/run/compare",
+            "direction": "export, run, compare",
             "code": "to_gridlabd, export_gridlabd_snapshot, run_gridlabd_snapshot, compare_gridlabd_snapshot",
             "semantics": "canonical AC snapshot with sources, loads, shunts, recorders, branch/load mappings, line capacitance",
             "gate": "GridLAB-D is ground truth only for overlapping solved steady-state AC voltage records",
@@ -1338,7 +1346,13 @@ def write_model_io_scope(outdir: Path) -> None:
 
     with (outdir / "sppt_model_io_scope.tex").open("w") as f:
         f.write("% Auto-generated model I/O scope table.\n")
-        f.write(r"\begin{tabularx}{\linewidth}{@{}l l X X X@{}}" + "\n")
+        f.write(
+            r"\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{0.14\linewidth}"
+            "\n"
+        )
+        f.write(
+            r"  >{\raggedright\arraybackslash}p{0.10\linewidth} X X X@{}}" + "\n"
+        )
         f.write(r"\toprule" + "\n")
         f.write(r"Interface & Direction & Code surface & Preserved semantics & Gate \\" + "\n")
         f.write(r"\midrule" + "\n")
@@ -1346,7 +1360,7 @@ def write_model_io_scope(outdir: Path) -> None:
             f.write(
                 f"{latex_escape(row['interface'])} & "
                 f"{latex_escape(row['direction'])} & "
-                f"{latex_escape(row['code'])} & "
+                f"{latex_code_list(row['code'])} & "
                 f"{latex_escape(row['semantics'])} & "
                 f"{latex_escape(row['gate'])} \\\\\n"
             )

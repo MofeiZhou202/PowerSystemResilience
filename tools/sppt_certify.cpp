@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "hacdcpf/sppt/certificate.hpp"
+#include "hacdcpf/io/case_builders.hpp"
 
 #ifndef HACDCPF_PROJECT_ROOT
 #define HACDCPF_PROJECT_ROOT "."
@@ -48,7 +49,13 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  const sppt::Certificate cert = sppt::certify_corpus(cases, tol);
+  sppt::Certificate cert = sppt::certify_corpus(cases, tol);
+  sppt::certify_systems(
+      cert,
+      {{"ieee14-acdc-native", io::build_ieee14_acdc()},
+       {"ieee24-mtdc-native", io::build_ieee24_3area_acdc()},
+       {"case33bw-acdc-native", io::build_case33bw_acdc()}},
+      tol);
 
   std::error_code ec;
   fs::create_directories(outdir, ec);

@@ -3,9 +3,9 @@
 /// MR8: DAE index-1 well-posedness (Thm. 6.6, the dynamic extension of the
 /// steady-state reference well-posedness theorem).  A semi-explicit DAE
 ///   x' = f(x,y),   0 = g(x,y)
-/// is index-1 and locally well-posed iff the algebraic sub-Jacobian d g / d y is
-/// nonsingular.  We assemble the linearization via dynamic_dae_diagnostics and
-/// verify that the algebraic block has full rank.
+/// is locally index-1 at a consistent operating point when the algebraic
+/// sub-Jacobian d g / d y is nonsingular. We assemble the linearization via
+/// dynamic_dae_diagnostics and verify full rank on one declared test point.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -124,37 +124,6 @@ TEST_CASE("MR8: the DAE is index-1 (algebraic sub-Jacobian is nonsingular)",
   // which is only possible when d g / d y was invertible during elimination.
   CHECK(diag.reduced_jacobian.rows() == diag.n_differential);
   CHECK(diag.eigenvalues.size() == diag.n_differential);
-}
-
-TEST_CASE("MR8: removing the AC reference breaks index-1 well-posedness",
-          "[sppt][dae][mr8][dynamics]") {
-  // Contrapositive check (Thm. 6.6 / Cor. 6.5): with no angle reference the
-  // network algebraic block loses rank (a global-phase gauge null direction),
-  // so the DAE is no longer index-1.  We compare the algebraic-block rank of the
-  // well-posed system against a floating (reference-less) variant.
-  HybridPowerSystem sys = make_transient_case();
-
-  DynamicSolverOptions opt;
-  opt.t_end_s = 0.02;
-  opt.dt_s = 0.005;
-  opt.run_power_flow_initialization = true;
-  opt.use_consistent_dynamic_initialization = true;
-
-  DynamicModelBuilder builder;
-  DynamicSystem dyn = builder.build(sys, opt);
-
-  DynamicDaeDiagnosticOptions dopt;
-  dopt.positive_sequence_projection = true;
-  dopt.build_jacobian = true;
-
-  DynamicDaeDiagnostics diag = dynamic_dae_diagnostics(dyn, dopt);
-  REQUIRE(diag.success);
-
-  const Eigen::MatrixXd Jgy =
-      diag.jacobian.topLeftCorner(diag.n_algebraic, diag.n_algebraic);
-  // The well-posed reference system yields a full-rank algebraic block.
-  Eigen::FullPivLU<Eigen::MatrixXd> lu(Jgy);
-  CHECK(lu.rank() == diag.n_algebraic);
 }
 
 TEST_CASE("MR3t: transient trajectories are preserved through projection",

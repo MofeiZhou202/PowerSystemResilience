@@ -356,6 +356,8 @@ set(HACDCPF_SOURCES
   src/io/external_grid_io.cpp
   src/io/gridlabd_bridge.cpp
   src/io/gridlabd_validation.cpp
+  src/io/evpt_json.cpp
+  src/io/evpt_demo_cases.cpp
   # ── validation ────────────────────────────────────────────────────────────
   src/validation/validate_system.cpp
   # ── api ──────────────────────────────────────────────────────────────────
@@ -373,7 +375,8 @@ set(HACDCPF_SOURCES
   src/ev_power_traffic/ltm_so_lp.cpp
   src/ev_power_traffic/ctm_due_vi.cpp
   src/ev_power_traffic/infra_design_milp.cpp
-  src/ev_power_traffic/ltm_mpc.cpp  # ── network reconfiguration (topology analysis + ONR) ──────────────────
+  src/ev_power_traffic/ltm_mpc.cpp
+  # ── network reconfiguration (topology analysis + ONR) ──────────────────
   src/network_reconfiguration/topology_analysis.cpp
   src/network_reconfiguration/topology_reconfiguration.cpp
   # ── graph analysis & reduction ────────────────────────────────────────
@@ -419,6 +422,8 @@ set(HACDCPF_SOURCES
   #    admissibility guard); operationalizes docs/latex/sppt_theory.tex ──────
   src/sppt/metamorphic.cpp
   src/sppt/certificate.cpp
+  src/sppt/independent_residual.cpp
+  src/sppt/intelligent_simulation.cpp
   src/sppt/guard.cpp
   src/sppt/ablation.cpp
   src/sppt/benchmark.cpp

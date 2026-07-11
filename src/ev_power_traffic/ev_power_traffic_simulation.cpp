@@ -340,8 +340,11 @@ EVPowerTrafficResult simulate_ev_power_traffic(
           session.energy_min_kwh = 0.0;
           session.max_charge_kw = charging_power_limit(stop, options, vehicles);
           session.max_discharge_kw = discharge_power_limit(stop, vehicles);
-          session.energy_max_kwh = std::max(e_req,
-                                            e_req + session.max_discharge_kw * dt);
+          session.energy_max_kwh =
+              e_req + session_arbitrage_headroom_kwh(
+                          e_req, session.max_discharge_kw,
+                          (session.departure_step - session.arrival_step) * dt,
+                          vehicles, demand.energy_max_kwh);
           session.eta_charge = options.default_charging_efficiency;
           session.eta_discharge = options.default_charging_efficiency;
           session.v2g_capable = stop.v2g_capable;
@@ -420,18 +423,27 @@ EVPowerTrafficResult simulate_ev_power_traffic(
       const double station_ch_res =
           std::max(0.0, cap_ch - station_charge_used[session.station_id]
                                       [static_cast<std::size_t>(k)]);
+      const bool v2g_allowed =
+          options.allow_v2g && session.v2g_capable && session.max_discharge_kw > kTol;
       const double needed =
           std::max(0.0, session.energy_target_kwh - energy);
+      // Arbitrage pre-charge: at low-price steps a V2G session may fill its
+      // headroom above the trip target so that high-price discharge later in
+      // the dwell window is reachable (without this, energy never exceeds the
+      // target and the discharge branch below is dead).
+      double charge_room = needed;
+      if (v2g_allowed && price <= options.low_price_threshold_per_kwh) {
+        charge_room =
+            std::max(needed, session.energy_max_kwh - energy);
+      }
       double p_ch = 0.0;
-      if (needed > kTol) {
+      if (charge_room > kTol) {
         p_ch = std::min({session.max_charge_kw,
                          station_ch_res,
-                         needed / (std::max(session.eta_charge, kTol) * dt)});
+                         charge_room / (std::max(session.eta_charge, kTol) * dt)});
       }
 
       double p_dis = 0.0;
-      const bool v2g_allowed =
-          options.allow_v2g && session.v2g_capable && session.max_discharge_kw > kTol;
       if (v2g_allowed && price >= options.high_price_threshold_per_kwh) {
         const double dis_cap =
             dis_cap_kw.count(session.station_id)

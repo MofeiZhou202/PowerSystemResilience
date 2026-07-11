@@ -16,6 +16,12 @@
 
 namespace hacdcpf {
 
+struct ProjectionOptions {
+  ProjectionMode mode{ProjectionMode::ThresholdApproximate};
+  bool strip_dead_islands{true};
+  double impedance_threshold{1e-4};
+};
+
 // ═══════════════════════════════════════════════════════════════════════
 // Count queries
 // ═══════════════════════════════════════════════════════════════════════
@@ -77,6 +83,11 @@ std::vector<int> generators_per_bus(const HybridPowerSystem& sys);
 HybridPowerSystem project_to_canonical_models(const HybridPowerSystem& sys);
 HybridPowerSystem project_to_canonical_models(HybridPowerSystem&& sys);
 
+HybridPowerSystem project_to_canonical_models(const HybridPowerSystem& sys,
+                                              const ProjectionOptions& options);
+HybridPowerSystem project_to_canonical_models(HybridPowerSystem&& sys,
+                                              const ProjectionOptions& options);
+
 // Reconfiguration-friendly projection: expands rich devices and merges
 // zero-impedance buses but optionally KEEPS dead islands so open tie switches
 // into currently-unenergised sections remain valid reconnection candidates.
@@ -90,6 +101,13 @@ constexpr double kBusMergeZThreshold = 1e-4;
 
 void merge_zero_impedance_buses(HybridPowerSystem& sys, bool allow_merge = true);
 void strip_dead_islands(HybridPowerSystem& sys);
+
+/// Report attribution coverage for the requested result field. Coverage is
+/// computed from projection metadata rather than inferred from vector length.
+ObservableAttribution evaluate_attribution(
+    const HybridPowerSystem& original,
+    const HybridPowerSystem& projected,
+    ObservableKind observable);
 
 std::vector<double> unproject_bus_vector(
     const std::vector<double>& merged,

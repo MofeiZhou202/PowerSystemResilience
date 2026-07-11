@@ -76,3 +76,20 @@ TEST_CASE("guard metrics over a labeled edit set", "[sppt][guard][metrics]") {
   CHECK(m.precision() == 1.0);
   CHECK(m.recall() == 1.0);
 }
+
+TEST_CASE("guard evaluates attribution for the requested observable",
+          "[sppt][guard][attribution]") {
+  HybridPowerSystem sys = io::parse_matpower(data_path("case9.m"));
+  const auto accepted = sppt::guard_system(
+      sys, {ObservableKind::ACBusVoltage, ObservableKind::NodalDual});
+  CHECK(accepted.accepted);
+  REQUIRE(accepted.attribution.size() == 2);
+  CHECK(accepted.attribution_total);
+
+  const auto rejected =
+      sppt::guard_system(sys, {ObservableKind::ServiceLoss});
+  CHECK_FALSE(rejected.accepted);
+  CHECK_FALSE(rejected.attribution_total);
+  REQUIRE(rejected.attribution.size() == 1);
+  CHECK(rejected.attribution.front().recovery == RecoveryClass::Unsupported);
+}

@@ -262,6 +262,7 @@ CTMSimulationResult ctm_forward_pass(
 
   // ── Initialise result ─────────────────────────────────────────────────
   CTMSimulationResult res;
+  res.dt_ctm_hr = dt_ctm;
   for (const auto& lnk : problem.traffic.links) {
     (void)lnk;
     res.step_link_results.emplace_back(
@@ -1219,7 +1220,6 @@ std::vector<EVChargingSession> synthesize_ctm_sessions(
         sess.energy_initial_kwh = 0.0;
         sess.energy_target_kwh  = e_req;
         sess.energy_min_kwh     = 0.0;
-        sess.energy_max_kwh     = e_req;
         sess.max_charge_kw      =
             stop.max_charge_kw_per_vehicle > kTol
                 ? stop.max_charge_kw_per_vehicle * vehicles
@@ -1228,6 +1228,11 @@ std::vector<EVChargingSession> synthesize_ctm_sessions(
             stop.v2g_capable
                 ? stop.max_discharge_kw_per_vehicle * vehicles
                 : 0.0;
+        sess.energy_max_kwh =
+            e_req + session_arbitrage_headroom_kwh(
+                        e_req, sess.max_discharge_kw,
+                        (sess.departure_step - sess.arrival_step) * dt_sim,
+                        vehicles, demand.energy_max_kwh);
         const double eta      = ev_options.default_charging_efficiency;
         sess.eta_charge       = eta;
         sess.eta_discharge    = eta;
@@ -1294,7 +1299,6 @@ std::vector<EVChargingSession> synthesize_ctm_sessions_full_due(
           sess.energy_initial_kwh = 0.0;
           sess.energy_target_kwh  = e_req;
           sess.energy_min_kwh     = 0.0;
-          sess.energy_max_kwh     = e_req;
           sess.max_charge_kw      =
               stop.max_charge_kw_per_vehicle > kTol
                   ? stop.max_charge_kw_per_vehicle * vehicles
@@ -1303,6 +1307,11 @@ std::vector<EVChargingSession> synthesize_ctm_sessions_full_due(
               stop.v2g_capable
                   ? stop.max_discharge_kw_per_vehicle * vehicles
                   : 0.0;
+          sess.energy_max_kwh =
+              e_req + session_arbitrage_headroom_kwh(
+                          e_req, sess.max_discharge_kw,
+                          (sess.departure_step - sess.arrival_step) * dt_sim,
+                          vehicles, demand.energy_max_kwh);
           const double eta      = ev_options.default_charging_efficiency;
           sess.eta_charge       = eta;
           sess.eta_discharge    = eta;
@@ -1376,19 +1385,27 @@ void dispatch_ctm_sessions(
                                 : ev_options.default_station_power_kw;
       const double ch_rem =
           std::max(0.0, cap_ch - ch_used[sid][static_cast<std::size_t>(k)]);
+      const bool v2g_ok =
+          ev_options.allow_v2g && sess.v2g_capable && sess.max_discharge_kw > kTol;
       const double needed = std::max(0.0, sess.energy_target_kwh - energy);
+      // Arbitrage pre-charge: at low-price steps a V2G session may fill its
+      // headroom above the trip target so that high-price discharge later in
+      // the dwell window is reachable (without this, energy never exceeds the
+      // target and the discharge branch below is dead).
+      double charge_room = needed;
+      if (v2g_ok && price <= ev_options.low_price_threshold_per_kwh) {
+        charge_room = std::max(needed, sess.energy_max_kwh - energy);
+      }
 
       double p_ch = 0.0;
-      if (needed > kTol) {
+      if (charge_room > kTol) {
         p_ch = std::min({sess.max_charge_kw, ch_rem,
-                         needed / (std::max(sess.eta_charge, kTol) *
-                                   std::max(dt_sim, kTol))});
+                         charge_room / (std::max(sess.eta_charge, kTol) *
+                                        std::max(dt_sim, kTol))});
         p_ch = std::max(0.0, p_ch);
       }
 
       double p_dis = 0.0;
-      const bool v2g_ok =
-          ev_options.allow_v2g && sess.v2g_capable && sess.max_discharge_kw > kTol;
       if (v2g_ok && price >= ev_options.high_price_threshold_per_kwh) {
         const double cap_dis =
             dis_cap_map.count(sid) ? dis_cap_map.at(sid)
@@ -1422,6 +1439,8 @@ void dispatch_ctm_sessions(
       }
       result.total_delivered_energy_kwh +=
           dt_sim * sess.eta_charge * p_ch;
+      result.total_v2g_energy_kwh +=
+          dt_sim * p_dis / std::max(sess.eta_discharge, kTol);
     }
 
     sr.energy_kwh[static_cast<std::size_t>(T_sim)] = energy;
@@ -1963,6 +1982,7 @@ CTMDUEResult simulate_ev_power_traffic_ctm_due(
   // ── Final forward pass with converged flows ───────────────────────────
   result.final_ctm = ctm_forward_pass(problem, route_flow, link_pos, route_pos_map,
                                        ctm_opts, dt_ctm, T_ctm);
+  result.final_ctm.steps_per_sim_step = R;
   result.full_due_enabled = full_due;
 
   // ── Pack route flow result ────────────────────────────────────────────

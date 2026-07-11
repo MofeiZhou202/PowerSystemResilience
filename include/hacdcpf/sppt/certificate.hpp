@@ -12,8 +12,28 @@
 #include <vector>
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/power_flow/power_flow_result.hpp"
 
 namespace hacdcpf::sppt {
+
+struct IndependentResidualCertificate {
+  bool supported{false};
+  bool converged{false};
+  double ac_residual{0.0};
+  double dc_residual{0.0};
+  double converter_balance_residual{0.0};
+  double total_residual{0.0};
+  std::string scope;
+  std::string note;
+};
+
+/// Evaluate the converged state against authored primitive AC/DC/VSC equations.
+/// This path intentionally does not call project_to_canonical_models,
+/// make_solver_data, or the production residual evaluator.
+IndependentResidualCertificate certify_independent_hybrid_residual(
+    const HybridPowerSystem& authored,
+    const PowerFlowResult& result,
+    double tolerance = 1e-6);
 
 /// One row of the certificate corpus.
 struct CertificateRow {
@@ -24,6 +44,12 @@ struct CertificateRow {
   bool   pf_converged{false};
   double pf_residual{0.0};       ///< MR3 power-flow commuting residual
   bool   pf_pass{false};
+
+  bool   independent_supported{false};
+  double independent_residual{0.0};
+  bool   independent_pass{false};
+  int    approximate_merges{0};
+  bool   attribution_total{false};
 
   bool   opf_converged{false};
   double opf_dual_residual{0.0}; ///< MR3 OPF nodal-price commuting residual
@@ -58,5 +84,11 @@ CertificateRow certify_case(const HybridPowerSystem& sys,
 /// are recorded as a non-passing row with a note rather than aborting.
 Certificate certify_corpus(const std::vector<std::pair<std::string, std::string>>& cases,
                            double tol = 1e-6);
+
+/// Append already-constructed systems, including native hybrid AC/DC cases, to
+/// an existing certificate corpus.
+void certify_systems(Certificate& certificate,
+                     const std::vector<std::pair<std::string, HybridPowerSystem>>& systems,
+                     double tol = 1e-6);
 
 }  // namespace hacdcpf::sppt

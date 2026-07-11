@@ -287,6 +287,11 @@ hacdcpf_add_test(test_ev_power_traffic_ctm_due test_ev_power_traffic_ctm_due.cpp
 #   price-driven route choice (generalized cost), and analysis printout.
 hacdcpf_add_test(test_ev_power_traffic_ctm_joint test_ev_power_traffic_ctm_joint.cpp)
 
+# EV power-traffic GUI integration layer: built-in demo scenarios
+# (io/evpt_demo_cases) + JSON serialisation (io/evpt_json) exercised the same
+# way the /api/session/run_ev_traffic endpoint uses them (modes B, C, D).
+hacdcpf_add_test(test_evpt_gui_io test_evpt_gui_io.cpp)
+
 # Formulation D: single LP/QP/MILP/MCP joint optimizer.
 #   2-bus grid, 4-node 2-route traffic, 4 EV vehicles, WTP=50 $/veh.
 #   Route assignment + station capacity + DC-OPF power balance assembled into

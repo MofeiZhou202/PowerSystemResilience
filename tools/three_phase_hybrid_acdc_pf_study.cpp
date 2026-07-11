@@ -758,7 +758,8 @@ void write_analysis(const fs::path& outdir,
 
   std::ofstream tex(outdir / "sppt_three_phase_hybrid_analysis.tex");
   tex << "% Auto-generated three-phase hybrid performance interpretation.\n";
-  tex << "\\begin{tabularx}{\\linewidth}{@{}l l X@{}}\n";
+  tex << "\\begin{tabularx}{\\linewidth}{@{}>{\\raggedright\\arraybackslash}p{0.18\\linewidth}\n"
+         "  >{\\raggedright\\arraybackslash}p{0.28\\linewidth} X@{}}\n";
   tex << "\\toprule\n";
   tex << "Question & Numerical result & Interpretation \\\\\n";
   tex << "\\midrule\n";

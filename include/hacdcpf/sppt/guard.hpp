@@ -28,10 +28,17 @@ struct GuardVerdict {
   bool attribution_total{false}; ///< gate (iii)
 
   std::vector<std::string> details;  ///< human-readable gate diagnostics
+  std::vector<ObservableAttribution> attribution;
 };
 
 /// Evaluate the three admissibility gates on \p sys (Alg. 2, lines 2-7).
 GuardVerdict guard_system(const HybridPowerSystem& sys);
+
+/// Evaluate admissibility for an explicit observable request. Unsupported or
+/// partially attributed fields fail gate (iii), while audit-only fields remain
+/// attributable with their weaker recovery class exposed in the verdict.
+GuardVerdict guard_system(const HybridPowerSystem& sys,
+                          const std::vector<ObservableKind>& requested_observables);
 
 // ── Scripted agent-edit evaluation for the LLM-ready interface (Pillar 5) ────
 

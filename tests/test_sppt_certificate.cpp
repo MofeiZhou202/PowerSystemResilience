@@ -9,6 +9,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "hacdcpf/io/matpower_parser.hpp"
+#include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/sppt/certificate.hpp"
 
@@ -60,4 +61,18 @@ TEST_CASE("certify_corpus renders CSV and \\input-able LaTeX",
   CHECK(tex.find("\\bottomrule") != std::string::npos);
 
   CHECK(cert.all_pass());
+}
+
+TEST_CASE("native hybrid certificate uses an independent authored-equation residual",
+          "[sppt][certificate][hybrid][independent]") {
+  HybridPowerSystem sys = io::build_ieee14_acdc();
+  const auto row = sppt::certify_case(sys, "ieee14-acdc", 1e-6);
+  INFO("independent_residual=" << row.independent_residual
+       << " note=" << row.note);
+  CHECK(row.n_dc_bus > 0);
+  CHECK(row.pf_converged);
+  CHECK(row.independent_supported);
+  CHECK(row.independent_pass);
+  CHECK(row.independent_residual <= 1e-6);
+  CHECK(row.attribution_total);
 }

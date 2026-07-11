@@ -389,6 +389,7 @@ CTMDUEResult solve_ctm_due_vi(
   const auto final_combined = make_combined_flow(x, x_icv);
   result.final_ctm = ctm_forward_pass(problem, final_combined, link_pos, route_pos_map,
                                        ctm_opts, dt_ctm, T_ctm);
+  result.final_ctm.steps_per_sim_step = R;
   result.full_due_enabled = true;
 
   result.ev_relative_gap = wardrop_relative_gap(problem, x, result.final_ctm,

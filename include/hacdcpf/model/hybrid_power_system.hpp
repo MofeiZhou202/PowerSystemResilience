@@ -179,6 +179,8 @@ struct HybridPowerSystem {
 
   std::optional<BusMergeMap> bus_merge_map;
   std::optional<BranchExpandMap> branch_expand_map;
+  std::optional<ProjectionCertificate> projection_certificate;
+  std::optional<ProjectionReport> projection_report;
 
   /// Optional telemetry + timestamped state seeds for the digital-twin
   /// integration axis (§10).  Absent for offline models.

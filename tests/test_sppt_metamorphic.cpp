@@ -161,6 +161,42 @@ TEST_CASE("MR2 / MR4: attribution round-trip and merged-bus equipotential",
   CHECK(mr4.passed);
 }
 
+TEST_CASE("projection modes classify ideal and threshold contractions",
+          "[sppt][projection][provenance]") {
+  HybridPowerSystem ideal = make_zero_impedance_case();
+  ProjectionOptions exact_options;
+  exact_options.mode = ProjectionMode::ExactIdeal;
+  const HybridPowerSystem exact = project_to_canonical_models(ideal, exact_options);
+  REQUIRE(exact.projection_certificate.has_value());
+  CHECK(exact.projection_certificate->exact_merge_count() == 1);
+  CHECK(exact.projection_certificate->approximate_merge_count() == 0);
+  CHECK(n_ac_buses(exact) == 2);
+
+  HybridPowerSystem nonideal = ideal;
+  nonideal.ac.switches.front().r_contact_ohm = 1e-8;
+  nonideal.ac.switches.front().z_ohm = 1e-8;
+  const HybridPowerSystem exact_nonideal =
+      project_to_canonical_models(nonideal, exact_options);
+  CHECK(n_ac_buses(exact_nonideal) == 3);
+
+  ProjectionOptions approximate_options;
+  approximate_options.mode = ProjectionMode::ThresholdApproximate;
+  const HybridPowerSystem approximate =
+      project_to_canonical_models(nonideal, approximate_options);
+  REQUIRE(approximate.projection_certificate.has_value());
+  CHECK(approximate.projection_certificate->approximate_merge_count() == 1);
+  CHECK(n_ac_buses(approximate) == 2);
+
+  const auto voltage =
+      evaluate_attribution(nonideal, approximate, ObservableKind::ACBusVoltage);
+  CHECK(voltage.total());
+  CHECK(voltage.recovery == RecoveryClass::Approximate);
+  const auto switch_flow =
+      evaluate_attribution(nonideal, approximate, ObservableKind::SwitchTerminalFlow);
+  CHECK(switch_flow.total());
+  CHECK(switch_flow.recovery == RecoveryClass::Approximate);
+}
+
 TEST_CASE("MR5: solutions are invariant to bus relabeling",
           "[sppt][metamorphic][mr5]") {
   for (const char* c : {"case9.m", "case14.m"}) {

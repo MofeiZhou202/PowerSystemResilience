@@ -6,6 +6,7 @@
 // No dependency on the power-system model or solver headers; safe to include
 // from any translation unit.
 
+#include <limits>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -87,6 +88,10 @@ enum class AssignmentModel {
 struct TrafficNode {
   int index{0};
   std::string name;
+  /// Optional layout coordinates [km or arbitrary units] for visualization.
+  /// NaN (default) = not set; renderers fall back to automatic layout.
+  double x{std::numeric_limits<double>::quiet_NaN()};
+  double y{std::numeric_limits<double>::quiet_NaN()};
 };
 
 struct TrafficLink {
@@ -169,6 +174,13 @@ struct CTMLinkStepResult {
 
 // Full CTM simulation result for one forward pass.
 struct CTMSimulationResult {
+  // Time discretization actually used for this pass.  dt_ctm_hr is the CTM
+  // sub-step Δt_ctm; steps_per_sim_step is R = dt_sim / Δt_ctm (an exact
+  // integer), so step_link_results.size() = T_sim · R and
+  // T_ctm · Δt_ctm = T_sim · dt_sim (full horizon coverage).
+  double dt_ctm_hr{0.0};
+  int steps_per_sim_step{1};
+
   // n_steps × n_links × n_cells occupancy history (row-major: [k][a][m]).
   // Stored only when record_cell_history = true.
   std::vector<std::vector<CTMLinkState>> cell_history;
@@ -249,6 +261,8 @@ struct CTMDUEResult {
   double total_requested_energy_kwh{0.0};
   double total_delivered_energy_kwh{0.0};
   double total_unserved_energy_kwh{0.0};
+  /// Battery energy exported via V2G [kWh] across all dispatched sessions.
+  double total_v2g_energy_kwh{0.0};
 
   // Per-station per-simulation-step net EV load [kW] (charge minus V2G).
   // Indexed: station_ev_load_kw[station_id][sim_step].

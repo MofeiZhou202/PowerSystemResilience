@@ -318,6 +318,8 @@ SolverData make_solver_data(const HybridPowerSystem& sys, LossModelType loss_mod
 
   // Propagate bus merge map if present.
   data.bus_merge_map = std::move(projected.bus_merge_map);
+  data.projection_certificate = std::move(projected.projection_certificate);
+  data.projection_report = std::move(projected.projection_report);
 
   // Apply ExternalGrid settings: set bus voltage setpoints and bus type.
   for (const auto& eg : data.external_grids) {
@@ -393,6 +395,8 @@ SolverData make_solver_data_projected(HybridPowerSystem&& projected, LossModelTy
   data.loss_model = loss_model;
   data.build_id = next_build_id.fetch_add(1, std::memory_order_relaxed);
   data.bus_merge_map = std::move(projected.bus_merge_map);
+  data.projection_certificate = std::move(projected.projection_certificate);
+  data.projection_report = std::move(projected.projection_report);
 
   for (const auto& eg : data.external_grids) {
     if (!eg.in_service) continue;

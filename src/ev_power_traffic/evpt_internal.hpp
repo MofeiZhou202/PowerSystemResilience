@@ -48,6 +48,12 @@ inline double link_free_flow_speed(const TrafficLink& link) noexcept {
 }
 
 /// Choose CTM sub-step Δt_ctm satisfying the CFL stability condition.
+///
+/// The returned step is always an exact integer divisor of dt_sim, so that
+/// R = dt_sim / Δt_ctm is a whole number and T_ctm = T_sim · R covers the
+/// full simulation horizon (T_ctm · Δt_ctm = T_sim · dt_sim exactly).
+/// A raw CFL bound like 0.9·dt_sim would round to R = 1 and silently
+/// simulate only ~90% of the horizon on a compressed time grid.
 inline double choose_ctm_dt(const EVPowerTrafficProblem& problem,
                              const CTMOptions& ctm_opts,
                              double dt_sim) {
@@ -63,7 +69,38 @@ inline double choose_ctm_dt(const EVPowerTrafficProblem& problem,
         : vf * dt_sim;
     min_cfl = std::min(min_cfl, delta / vf);
   }
-  return std::max(kTol, 0.9 * min_cfl);
+  const double dt_max = std::max(kTol, 0.9 * min_cfl);
+  // Snap to the largest divisor of dt_sim not exceeding the CFL bound
+  // (the 1e-12 slack absorbs floating-point noise when the ratio is integral).
+  const double n_sub = std::ceil(dt_sim / dt_max - 1.0e-12);
+  return dt_sim / std::max(1.0, n_sub);
+}
+
+// ── Charging-session helpers ───────────────────────────────────────────────
+
+/// V2G arbitrage headroom above the session charge target [kWh].
+///
+/// A V2G-capable session may pre-charge above its trip target (during
+/// low-price steps) by up to the energy it can export over its dwell window,
+/// so that discharge at high-price steps is actually reachable.  When the
+/// demand specifies a per-vehicle battery cap (energy_max_kwh >= 0) the
+/// headroom is bounded by cap·vehicles − e_target (session energy accounting
+/// is stop-local, so this treats the arrival state as fully depleted — an
+/// upper-bound approximation consistent with the aggregate LP model).
+inline double session_arbitrage_headroom_kwh(
+    double e_target_kwh,
+    double max_discharge_kw,
+    double dwell_hr,
+    double vehicle_count,
+    double demand_energy_max_kwh_per_veh) {
+  if (max_discharge_kw <= 0.0 || dwell_hr <= 0.0) return 0.0;
+  double headroom = max_discharge_kw * dwell_hr;
+  if (demand_energy_max_kwh_per_veh >= 0.0) {
+    const double cap =
+        demand_energy_max_kwh_per_veh * std::max(0.0, vehicle_count);
+    headroom = std::min(headroom, std::max(0.0, cap - e_target_kwh));
+  }
+  return headroom;
 }
 
 // ── Assignment-model predicates ────────────────────────────────────────────

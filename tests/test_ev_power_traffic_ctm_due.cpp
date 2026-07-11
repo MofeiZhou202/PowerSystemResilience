@@ -556,6 +556,23 @@ TEST_CASE("CTM-DUE: auto CFL dt selection — finishes without error",
     tot += x;
   }
   CHECK(tot == Approx(5.0).epsilon(1e-4));
+
+  // Time-grid invariants for the auto-selected Δt_ctm.  These links have a
+  // CFL bound (≈0.05 h) that is a non-integer fraction of dt_sim = 0.1 h, so
+  // a raw 0.9·CFL step would round to R = 2 and cover only 0.54 h of the
+  // 0.6 h horizon.  The chosen step must divide dt_sim exactly so that
+  // T_ctm · Δt_ctm = T_sim · dt_sim (full-horizon coverage).
+  const auto& ctm = res.final_ctm;
+  REQUIRE(ctm.dt_ctm_hr > 0.0);
+  REQUIRE(ctm.steps_per_sim_step >= 1);
+  CHECK(ctm.dt_ctm_hr <= ev_opts.time_step_hr + 1e-12);
+  CHECK(ctm.dt_ctm_hr * ctm.steps_per_sim_step ==
+        Approx(ev_opts.time_step_hr).epsilon(1e-9));
+  CHECK(ctm.step_link_results.size() ==
+        static_cast<std::size_t>(ev_opts.num_steps) *
+            static_cast<std::size_t>(ctm.steps_per_sim_step));
+  CHECK(static_cast<double>(ctm.step_link_results.size()) * ctm.dt_ctm_hr ==
+        Approx(ev_opts.num_steps * ev_opts.time_step_hr).epsilon(1e-9));
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -629,6 +646,85 @@ TEST_CASE("CTM-DUE: session synthesis and dispatch — energy delivered",
   // (g) Honesty field: dispatch is a greedy per-session heuristic, not a
   // monolithic joint charging/V2G optimisation.  This must be advertised.
   CHECK(res.charging_dispatch_is_greedy == true);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Test case 8b: greedy V2G arbitrage regression
+// ──────────────────────────────────────────────────────────────────────────
+// Sessions historically could never discharge: charging stopped exactly at
+// the trip target while discharge required energy *above* the target.  With
+// arbitrage headroom, a V2G session facing cheap-then-expensive prices must
+// pre-charge above target during cheap steps and export during expensive
+// steps — without ever dropping below the trip target.
+TEST_CASE("CTM-DUE: greedy V2G arbitrage — discharge reachable with price spread",
+          "[ctm][due][sessions][v2g]") {
+  auto prob = make_symmetric_problem(4.0);
+
+  // Station-level discharge capacity (summed from charger p_dis_max_kw).
+  for (auto& ch : prob.system.ac.chargers) ch.p_dis_max_kw = 100.0;
+
+  // V2G-capable stops dwelling across the cheap→expensive price transition.
+  for (auto& r : prob.routes) {
+    for (auto& s : r.charging_stops) {
+      s.v2g_capable = true;
+      s.max_discharge_kw_per_vehicle = 20.0;
+      s.dwell_steps = 4;
+    }
+  }
+
+  // Cheap steps 0-1 (≤ low threshold 0.12), expensive steps 2-4 (≥ high 0.45).
+  for (int sid : {101, 102}) {
+    StationPriceProfile p;
+    p.station_id = sid;
+    p.price_per_kwh = {0.05, 0.05, 0.60, 0.60, 0.60};
+    prob.station_prices.push_back(p);
+  }
+
+  EVPowerTrafficOptions ev_opts;
+  ev_opts.num_steps    = 5;
+  ev_opts.time_step_hr = 1.0;
+  ev_opts.allow_v2g    = true;
+
+  CTMOptions ctm_opts;
+  ctm_opts.dt_ctm_hr        = 0.1;
+  ctm_opts.n_cells_per_link = 3;
+
+  DUEOptions due_opts;
+  due_opts.max_iterations  = 30;
+  due_opts.convergence_tol = 1e-3;
+
+  SECTION("unbounded battery: V2G energy is exported") {
+    CTMDUEResult res =
+        simulate_ev_power_traffic_ctm_due(prob, ev_opts, ctm_opts, due_opts);
+
+    REQUIRE(!res.sessions.empty());
+    CHECK(res.total_v2g_energy_kwh > 1e-6);
+    // Discharge only ever takes the surplus above the trip target, so the
+    // target itself must still be fully met.
+    CHECK(res.total_unserved_energy_kwh <= 1e-6);
+
+    // Net export shows up as a negative station EV load at some step.
+    bool has_reverse_flow = false;
+    for (const auto& [sid, load_vec] : res.station_ev_load_kw) {
+      for (double p : load_vec) {
+        if (p < -1e-6) { has_reverse_flow = true; break; }
+      }
+      if (has_reverse_flow) break;
+    }
+    CHECK(has_reverse_flow);
+  }
+
+  SECTION("battery cap at trip target: no headroom, no V2G") {
+    for (auto& dem : prob.demands) dem.energy_max_kwh = 10.0;  // = target/veh
+
+    CTMDUEResult res =
+        simulate_ev_power_traffic_ctm_due(prob, ev_opts, ctm_opts, due_opts);
+
+    REQUIRE(!res.sessions.empty());
+    CHECK(res.total_v2g_energy_kwh <= 1e-9);
+    CHECK(res.total_delivered_energy_kwh <=
+          res.total_requested_energy_kwh + 1e-6);
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
