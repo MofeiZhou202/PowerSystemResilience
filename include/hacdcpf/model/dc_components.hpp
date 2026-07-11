@@ -84,7 +84,6 @@ struct StaticGeneratorDC {
   int profile_id{-1};
   double pmax_mw{0.0};
   double pmin_mw{0.0};
-  double emission_factor_tco2_mwh{0.0};
 
   bool controllable{false};
 

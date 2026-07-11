@@ -88,6 +88,14 @@ const App = (() => {
   let _evptDesignerScenario = null;
   let _evptDesignerTab = 'nodes';
   let _evptDesignerJsonTimer = null;
+  const DEFAULT_SEQ_LOAD_PROFILE = [
+    0.72, 0.68, 0.65, 0.64, 0.66, 0.72, 0.80, 0.88,
+    0.94, 0.98, 1.00, 0.99, 0.97, 0.95, 0.96, 0.99,
+    1.00, 0.98, 0.94, 0.90, 0.86, 0.82, 0.78, 0.75,
+  ];
+  let _seqProfileEditorState = null;
+  let _seqProfileEditorTab = 'temporal';
+  let _seqProfileEditorJsonTimer = null;
 
   const ANALYSIS_BUSY_ERROR = 'Another analysis is already running';
   const MODULE_WORKFLOWS = {
@@ -3053,6 +3061,8 @@ const App = (() => {
         <span class="result-value">${Number(summary.total_loss_emissions_tco2 || 0).toFixed(4)}</span></div>
       <div class="result-item"><span class="result-label">守恒误差</span>
         <span class="result-value ${Math.abs(balance) < 1e-3 ? 'result-converged' : 'result-failed'}">${balanceTco2.toExponential(3)} tCO2 / ${balance.toExponential(3)}%</span></div>
+      <div class="result-item"><span class="result-label">计算时间</span>
+        <span class="result-value">${Number.isFinite(Number(data.execution_time_sec)) ? Number(data.execution_time_sec).toFixed(3) + ' s' : '—'}</span></div>
     `;
 
     const busRows = [
@@ -3583,6 +3593,8 @@ const App = (() => {
         <span class="result-value ${balance.storageInventoryAbsError < 1e-8 ? 'result-converged' : 'result-failed'}">${balance.storageInventoryError.toExponential(3)} t / 绝对累计 ${balance.storageInventoryAbsError.toExponential(3)} t</span></div>
       <div class="result-item"><span class="result-label">储能能量递推误差</span>
         <span class="result-value ${balance.storageEnergyAbsError < 1e-8 ? 'result-converged' : 'result-failed'}">${balance.storageEnergyError.toExponential(3)} MWh / 绝对累计 ${balance.storageEnergyAbsError.toExponential(3)} MWh</span></div>
+      <div class="result-item"><span class="result-label">计算时间</span>
+        <span class="result-value">${Number.isFinite(Number(data.execution_time_sec)) ? Number(data.execution_time_sec).toFixed(3) + ' s' : '—'}</span></div>
     `;
     document.getElementById('carbonBusResults').innerHTML = '';
     document.getElementById('carbonLoadResults').innerHTML = '';
@@ -6835,6 +6847,8 @@ const App = (() => {
         <span class="result-value">${gradeHtml(worstGrade)}</span></div>
       <div class="result-item"><span class="result-label">预警数</span>
         <span class="result-value ${warnings.length ? 'result-failed' : 'result-converged'}">${warnings.length}</span></div>
+      <div class="result-item"><span class="result-label">计算时间</span>
+        <span class="result-value">${Number.isFinite(Number(data.execution_time_sec)) ? Number(data.execution_time_sec).toFixed(3) + ' s' : '—'}</span></div>
       ${v.run ? `<div class="result-item"><span class="result-label">工程校验建议</span>
         <span class="result-value">${verdictLabel(v.recommendation)}</span></div>` : ''}
     `;
@@ -13841,14 +13855,328 @@ const App = (() => {
       log(`时序潮流结果已导出：${d.num_steps} 步 × ${nbus} 母线电压/相角 × ${nbr} 分支 Pf/Pt/Qf/Qt`, 'success');
     });
 
+    function seqSpatialKey(kind, index) {
+      return `${String(kind || '').toLowerCase()}:${Number(index)}`;
+    }
+
+    function seqSpatialKindLabel(kind) {
+      return ({ ac_load: 'AC 负荷', dc_load: 'DC 负荷', ac_bus: 'AC 母线', dc_bus: 'DC 母线' })[kind] || kind;
+    }
+
+    function discoverSeqSpatialRows(factorRows = []) {
+      const factors = new Map();
+      (Array.isArray(factorRows) ? factorRows : []).forEach(row => {
+        factors.set(seqSpatialKey(row?.kind, row?.index), row);
+      });
+      const system = typeof Canvas !== 'undefined' && Canvas.buildSystemJson
+        ? Canvas.buildSystemJson() : { ac: {}, dc: {} };
+      const rows = [];
+      const seen = new Set();
+      const add = (kind, item, baseMw, defaultName) => {
+        const index = Number(item?.index);
+        if (!Number.isInteger(index)) return;
+        const key = seqSpatialKey(kind, index);
+        const configured = factors.get(key);
+        rows.push({
+          kind,
+          index,
+          bus: kind.endsWith('_bus') ? index : Number(item?.bus),
+          name: item?.name || defaultName,
+          base_mw: Number(baseMw) || 0,
+          in_service: item?.in_service !== false,
+          factor: configured ? configured.factor : 1,
+          missing: false,
+        });
+        seen.add(key);
+      };
+      (system.ac?.loads || []).forEach(item => add(
+        'ac_load', item, Number(item.p_mw) * (Number.isFinite(Number(item.scaling)) ? Number(item.scaling) : 1),
+        `AC Load ${item.index}`));
+      (system.dc?.loads || []).forEach(item => add(
+        'dc_load', item, Number(item.p_mw) * (Number.isFinite(Number(item.scaling)) ? Number(item.scaling) : 1),
+        `DC Load ${item.index}`));
+      (system.ac?.buses || []).forEach(item => {
+        if (Number(item.pd_mw) > 0 || factors.has(seqSpatialKey('ac_bus', item.index))) {
+          add('ac_bus', item, Number(item.pd_mw), `AC Bus ${item.index}`);
+        }
+      });
+      (system.dc?.buses || []).forEach(item => {
+        if (Number(item.pd_mw) > 0 || factors.has(seqSpatialKey('dc_bus', item.index))) {
+          add('dc_bus', item, Number(item.pd_mw), `DC Bus ${item.index}`);
+        }
+      });
+      factors.forEach((row, key) => {
+        if (seen.has(key)) return;
+        rows.push({
+          kind: String(row?.kind || '').toLowerCase(),
+          index: Number(row?.index),
+          bus: null,
+          name: '当前画布中未找到',
+          base_mw: 0,
+          in_service: false,
+          factor: row?.factor,
+          missing: true,
+        });
+      });
+      return rows;
+    }
+
+    function readSeqProfileEditorState() {
+      const profileText = document.getElementById('relSeqLoadProfile')?.value || '';
+      const profile = profileText.trim()
+        ? profileText.split(/[\s,;]+/).filter(Boolean).map(Number)
+        : [...DEFAULT_SEQ_LOAD_PROFILE];
+      const spatialText = document.getElementById('relSeqSpatialFactors')?.value?.trim() || '';
+      let spatialFactors = [];
+      let parseError = '';
+      if (spatialText) {
+        try {
+          spatialFactors = JSON.parse(spatialText);
+          if (!Array.isArray(spatialFactors)) {
+            parseError = '现有空间倍率不是 JSON 数组';
+            spatialFactors = [];
+          }
+        } catch (error) {
+          parseError = `现有空间倍率 JSON 解析失败: ${error.message || error}`;
+        }
+      }
+      return { profile, spatial: discoverSeqSpatialRows(spatialFactors), parseError };
+    }
+
+    function validateSeqProfileEditorState(state = _seqProfileEditorState) {
+      const errors = [];
+      const warnings = [];
+      if (!state || !Array.isArray(state.profile) || !state.profile.length) {
+        errors.push('时序曲线至少需要一个时步');
+      } else if (state.profile.some(value =>
+        typeof value !== 'number' || !Number.isFinite(value) || value < 0)) {
+        errors.push('时序倍率必须是非负数');
+      }
+      const validKinds = new Set(['ac_load', 'dc_load', 'ac_bus', 'dc_bus']);
+      const keys = new Set();
+      (state?.spatial || []).forEach((row, pos) => {
+        const kind = String(row?.kind || '').toLowerCase();
+        const index = Number(row?.index);
+        const key = seqSpatialKey(kind, index);
+        if (!validKinds.has(kind) || !Number.isInteger(index)) {
+          errors.push(`空间倍率第 ${pos + 1} 行的类型或 index 无效`);
+        } else if (keys.has(key)) {
+          errors.push(`空间倍率 ${kind} #${index} 重复`);
+        }
+        keys.add(key);
+        if (typeof row?.factor !== 'number' || !Number.isFinite(row.factor) || row.factor < 0) {
+          errors.push(`空间倍率 ${kind} #${index} 的 factor 必须为非负数`);
+        }
+        if (row?.missing) errors.push(`当前画布中不存在 ${kind} #${index}`);
+      });
+      if (state?.parseError) errors.push(state.parseError);
+      if (!(state?.spatial || []).length) warnings.push('当前画布没有可分配空间倍率的负荷点');
+      return { errors, warnings };
+    }
+
+    function renderSeqProfilePreview() {
+      const svg = document.getElementById('seqProfilePreview');
+      const values = (_seqProfileEditorState?.profile || []).map(Number);
+      if (!svg) return;
+      const width = 640;
+      const height = 420;
+      const left = 56;
+      const right = 24;
+      const top = 42;
+      const bottom = 52;
+      svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+      if (!values.length || values.some(value => !Number.isFinite(value) || value < 0)) {
+        svg.innerHTML = '<text x="320" y="210" text-anchor="middle" fill="#b45309" font-size="13">曲线包含无效数据</text>';
+        return;
+      }
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
+      const yMin = Math.min(0, min);
+      const yMax = Math.max(1, max, yMin + 0.01);
+      const x = index => left + index / Math.max(1, values.length - 1) * (width - left - right);
+      const y = value => top + (yMax - value) / Math.max(1e-9, yMax - yMin) * (height - top - bottom);
+      const grid = [0, 0.25, 0.5, 0.75, 1].map(ratio => {
+        const value = yMin + ratio * (yMax - yMin);
+        const yy = y(value);
+        return `<line x1="${left}" y1="${yy}" x2="${width - right}" y2="${yy}" stroke="#dbe3ec" stroke-width="1"/><text x="${left - 9}" y="${yy + 4}" text-anchor="end" fill="#64748b" font-size="11">${value.toFixed(2)}</text>`;
+      }).join('');
+      const points = values.map((value, index) => `${x(index)},${y(value)}`).join(' ');
+      const circles = values.length <= 96 ? values.map((value, index) =>
+        `<circle cx="${x(index)}" cy="${y(value)}" r="3" fill="#0f766e"><title>t=${index + 1}, ${value.toFixed(4)} pu</title></circle>`).join('') : '';
+      svg.innerHTML = `${grid}<line x1="${left}" y1="${height - bottom}" x2="${width - right}" y2="${height - bottom}" stroke="#64748b"/><polyline points="${points}" fill="none" stroke="#0f766e" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>${circles}<text x="${left}" y="24" fill="#0f172a" font-size="13" font-weight="700">${values.length} 时步负荷曲线</text><text x="${width - right}" y="24" text-anchor="end" fill="#475569" font-size="11">最小 ${min.toFixed(3)} · 平均 ${avg.toFixed(3)} · 最大 ${max.toFixed(3)} pu</text><text x="${(left + width - right) / 2}" y="${height - 15}" text-anchor="middle" fill="#64748b" font-size="11">时步</text><text x="${left}" y="${height - bottom + 20}" fill="#64748b" font-size="11">1</text><text x="${width - right}" y="${height - bottom + 20}" text-anchor="end" fill="#64748b" font-size="11">${values.length}</text>`;
+    }
+
+    function renderSeqProfileValidation(force = false) {
+      const el = document.getElementById('seqProfileValidation');
+      if (!el) return null;
+      const validation = validateSeqProfileEditorState();
+      const spatial = _seqProfileEditorState?.spatial || [];
+      const modified = spatial.filter(row => Number(row.factor) !== 1).length;
+      const stats = `${_seqProfileEditorState?.profile?.length || 0} 时步 · ${spatial.length} 负荷点 · ${modified} 个非均匀倍率`;
+      el.className = `evpt-designer-validation ${validation.errors.length ? 'invalid' : 'valid'}`;
+      if (validation.errors.length) {
+        el.innerHTML = `<strong>${validation.errors.length} 个错误</strong> · ${escapeHtml(stats)}<br>${validation.errors.slice(0, 8).map(error => `• ${escapeHtml(error)}`).join('<br>')}`;
+      } else {
+        el.innerHTML = `<strong>数据校验通过</strong> · ${escapeHtml(stats)}${validation.warnings.length ? `<br>${validation.warnings.map(warning => `• ${escapeHtml(warning)}`).join('<br>')}` : ''}`;
+        if (force) log('SEQ 负荷模型校验通过', 'success');
+      }
+      return validation;
+    }
+
+    function seqProfileJsonValue() {
+      return {
+        profile_factors: (_seqProfileEditorState?.profile || []).map(Number),
+        spatial_factors: (_seqProfileEditorState?.spatial || []).map(row => ({
+          kind: String(row.kind || '').toLowerCase(),
+          index: Number(row.index),
+          factor: Number(row.factor),
+        })),
+      };
+    }
+
+    function renderSeqProfileEditorTable() {
+      const table = document.getElementById('seqProfileEditorTable');
+      const jsonEditor = document.getElementById('seqProfileEditorJson');
+      const addButton = document.getElementById('btnSeqProfileAddRow');
+      const count = document.getElementById('seqProfileTableCount');
+      if (!table || !jsonEditor || !_seqProfileEditorState) return;
+      const isJson = _seqProfileEditorTab === 'json';
+      table.hidden = isJson;
+      jsonEditor.hidden = !isJson;
+      if (addButton) addButton.hidden = _seqProfileEditorTab !== 'temporal';
+      if (isJson) {
+        jsonEditor.value = JSON.stringify(seqProfileJsonValue(), null, 2);
+        if (count) count.textContent = '请求数据结构';
+        return;
+      }
+      if (_seqProfileEditorTab === 'temporal') {
+        const rows = _seqProfileEditorState.profile.map((value, index) => `<tr><td>${index + 1}</td><td><input type="number" min="0" step="any" data-seq-temporal-index="${index}" value="${escapeHtml(String(value))}"/></td><td><button class="evpt-delete-row" type="button" title="删除时步" data-seq-delete-temporal="${index}">×</button></td></tr>`).join('');
+        table.innerHTML = `<table><thead><tr><th>时步</th><th>负荷倍率 (pu)</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+        if (count) count.textContent = `${_seqProfileEditorState.profile.length} 个时步`;
+      } else {
+        const rows = _seqProfileEditorState.spatial.map((row, index) => `<tr><td><span class="seq-spatial-kind">${escapeHtml(String(row.kind))}</span><br>${escapeHtml(seqSpatialKindLabel(row.kind))}</td><td>${escapeHtml(String(row.index))}</td><td>${Number.isFinite(Number(row.bus)) ? escapeHtml(String(row.bus)) : '—'}</td><td>${escapeHtml(row.name || '')}</td><td>${Number(row.base_mw).toFixed(4)}</td><td>${row.in_service ? '运行' : '停运'}</td><td><input type="number" min="0" step="any" data-seq-spatial-index="${index}" value="${escapeHtml(String(row.factor))}"/></td></tr>`).join('');
+        table.innerHTML = `<table><thead><tr><th>类型</th><th>Index</th><th>母线</th><th>名称</th><th>基准 MW</th><th>状态</th><th>倍率</th></tr></thead><tbody>${rows}</tbody></table>`;
+        if (count) count.textContent = `${_seqProfileEditorState.spatial.length} 个 AC/DC 负荷点`;
+      }
+    }
+
+    function commitSeqProfileEditorJson() {
+      const editor = document.getElementById('seqProfileEditorJson');
+      if (!editor || _seqProfileEditorTab !== 'json') return true;
+      try {
+        const parsed = JSON.parse(editor.value);
+        const profile = parsed?.profile_factors;
+        const spatialFactors = parsed?.spatial_factors;
+        _seqProfileEditorState = {
+          profile: Array.isArray(profile) ? profile : [],
+          spatial: discoverSeqSpatialRows(Array.isArray(spatialFactors) ? spatialFactors : []),
+          parseError: !Array.isArray(profile) || !Array.isArray(spatialFactors)
+            ? 'JSON 必须包含 profile_factors 和 spatial_factors 数组' : '',
+        };
+        renderSeqProfilePreview();
+        renderSeqProfileValidation();
+        return true;
+      } catch (error) {
+        const validation = document.getElementById('seqProfileValidation');
+        if (validation) {
+          validation.className = 'evpt-designer-validation invalid';
+          validation.textContent = `JSON 解析失败: ${error.message || error}`;
+        }
+        return false;
+      }
+    }
+
+    function setSeqProfileEditorTab(tab) {
+      if (_seqProfileEditorTab === 'json' && tab !== 'json' && !commitSeqProfileEditorJson()) return;
+      _seqProfileEditorTab = tab;
+      document.querySelectorAll('#seqProfileEditorTabs [data-seq-profile-tab]').forEach(button => {
+        button.classList.toggle('active', button.dataset.seqProfileTab === tab);
+      });
+      renderSeqProfileEditorTable();
+    }
+
+    function renderSeqProfileEditor() {
+      renderSeqProfileEditorTable();
+      renderSeqProfilePreview();
+      renderSeqProfileValidation();
+    }
+
+    function updateSeqProfileSummary(state = null) {
+      const current = state || readSeqProfileEditorState();
+      const spatial = current.spatial || [];
+      const modified = spatial.filter(row => Number(row.factor) !== 1).length;
+      const summary = document.getElementById('relSeqProfileSummary');
+      if (summary) {
+        summary.textContent = `${current.profile?.length || 0} 时步 · ${spatial.length} 负荷点 · ${modified} 个非均匀倍率`;
+        summary.className = `sub-hint ${current.parseError ? 'sub-hint-warn' : 'sub-hint-ok'}`;
+      }
+    }
+
+    function openSeqProfileEditor() {
+      _seqProfileEditorState = readSeqProfileEditorState();
+      _seqProfileEditorTab = 'temporal';
+      const modal = document.getElementById('seqProfileEditorModal');
+      if (modal) modal.style.display = 'flex';
+      document.querySelectorAll('#seqProfileEditorTabs [data-seq-profile-tab]').forEach(button => {
+        button.classList.toggle('active', button.dataset.seqProfileTab === 'temporal');
+      });
+      renderSeqProfileEditor();
+    }
+
+    function closeSeqProfileEditor() {
+      const modal = document.getElementById('seqProfileEditorModal');
+      if (modal) modal.style.display = 'none';
+    }
+
+    function refreshSeqSpatialRows() {
+      if (!_seqProfileEditorState) return;
+      const factors = _seqProfileEditorState.spatial.map(row => ({
+        kind: row.kind, index: row.index, factor: row.factor,
+      }));
+      _seqProfileEditorState.spatial = discoverSeqSpatialRows(factors);
+      _seqProfileEditorState.parseError = '';
+      renderSeqProfileEditor();
+    }
+
+    function resetSeqProfileEditor() {
+      _seqProfileEditorState = {
+        profile: [...DEFAULT_SEQ_LOAD_PROFILE],
+        spatial: discoverSeqSpatialRows([]),
+        parseError: '',
+      };
+      renderSeqProfileEditor();
+    }
+
+    function applySeqProfileEditor() {
+      if (!commitSeqProfileEditorJson()) return;
+      const validation = renderSeqProfileValidation(true);
+      if (!validation || validation.errors.length) {
+        setStatus('SEQ 负荷模型存在无效数据', 'warn');
+        return;
+      }
+      const payload = seqProfileJsonValue();
+      const profileField = document.getElementById('relSeqLoadProfile');
+      const spatialField = document.getElementById('relSeqSpatialFactors');
+      if (profileField) profileField.value = payload.profile_factors.join(',');
+      if (spatialField) spatialField.value = JSON.stringify(payload.spatial_factors);
+      updateSeqProfileSummary(_seqProfileEditorState);
+      closeSeqProfileEditor();
+      setStatus('SEQ 负荷曲线与空间倍率已应用', 'success');
+    }
+
 	    function updateReliabilityControlState() {
 	      const physicalModel = document.getElementById('relPhysicalModel')?.value || 'auto';
 	      const methodEl = document.getElementById('relMethod');
 	      const maxIterEl = document.getElementById('relMaxIter');
 	      const hintEl = document.getElementById('relAnalysisHint');
 	      const useThreeStage = physicalModel === 'restoration_milp';
+	      const useSequential = methodEl?.value === 'seq' && !useThreeStage;
 	      if (methodEl) methodEl.disabled = useThreeStage;
 	      if (maxIterEl) maxIterEl.disabled = useThreeStage;
+	      document.querySelectorAll('.rel-seq-profile').forEach(element => {
+	        element.hidden = !useSequential;
+	      });
 	      if (hintEl) {
 	        hintEl.textContent = useThreeStage
 	          ? '三阶段恢复 MILP 将作为独立可靠性评估运行'
@@ -14486,8 +14814,55 @@ const App = (() => {
 	      }
 	    }
 
+	    document.getElementById('btnOpenSeqProfileEditor')?.addEventListener('click', openSeqProfileEditor);
+	    document.querySelectorAll('[data-close-seq-profile-editor]').forEach(button => {
+	      button.addEventListener('click', closeSeqProfileEditor);
+	    });
+	    document.getElementById('seqProfileEditorTabs')?.addEventListener('click', event => {
+	      const button = event.target.closest('[data-seq-profile-tab]');
+	      if (button) setSeqProfileEditorTab(button.dataset.seqProfileTab);
+	    });
+	    document.getElementById('seqProfileEditorTable')?.addEventListener('input', event => {
+	      const temporalIndex = event.target.dataset.seqTemporalIndex;
+	      const spatialIndex = event.target.dataset.seqSpatialIndex;
+	      const value = event.target.value === '' ? Number.NaN : Number(event.target.value);
+	      if (temporalIndex !== undefined && _seqProfileEditorState?.profile) {
+	        _seqProfileEditorState.profile[Number(temporalIndex)] = value;
+	      } else if (spatialIndex !== undefined && _seqProfileEditorState?.spatial) {
+	        _seqProfileEditorState.spatial[Number(spatialIndex)].factor = value;
+	      } else {
+	        return;
+	      }
+	      _seqProfileEditorState.parseError = '';
+	      renderSeqProfilePreview();
+	      renderSeqProfileValidation();
+	    });
+	    document.getElementById('seqProfileEditorTable')?.addEventListener('click', event => {
+	      const button = event.target.closest('[data-seq-delete-temporal]');
+	      if (!button || !_seqProfileEditorState?.profile) return;
+	      _seqProfileEditorState.profile.splice(Number(button.dataset.seqDeleteTemporal), 1);
+	      renderSeqProfileEditor();
+	    });
+	    document.getElementById('btnSeqProfileAddRow')?.addEventListener('click', () => {
+	      if (!_seqProfileEditorState?.profile) return;
+	      const last = Number(_seqProfileEditorState.profile[_seqProfileEditorState.profile.length - 1]);
+	      _seqProfileEditorState.profile.push(Number.isFinite(last) ? last : 1);
+	      renderSeqProfileEditor();
+	    });
+	    document.getElementById('seqProfileEditorJson')?.addEventListener('input', () => {
+	      clearTimeout(_seqProfileEditorJsonTimer);
+	      _seqProfileEditorJsonTimer = setTimeout(commitSeqProfileEditorJson, 300);
+	    });
+	    document.getElementById('btnSeqProfileValidate')?.addEventListener('click', () => {
+	      if (commitSeqProfileEditorJson()) renderSeqProfileValidation(true);
+	    });
+	    document.getElementById('btnSeqProfileApply')?.addEventListener('click', applySeqProfileEditor);
+	    document.getElementById('btnSeqProfileReset')?.addEventListener('click', resetSeqProfileEditor);
+	    document.getElementById('btnSeqSpatialRefresh')?.addEventListener('click', refreshSeqSpatialRows);
 	    document.getElementById('relPhysicalModel')?.addEventListener('change', updateReliabilityControlState);
+	    document.getElementById('relMethod')?.addEventListener('change', updateReliabilityControlState);
 	    updateReliabilityControlState();
+	    updateSeqProfileSummary();
 	    document.getElementById('btnRunReliability')?.addEventListener('click', runReliability);
     document.getElementById('btnExportReliabilityResults')?.addEventListener('click', () => {
       if (!_lastReliabilityData) {
@@ -14530,7 +14905,8 @@ const App = (() => {
         + `<b>矩阵残差：</b>${nf(data.matrix_residual, 2)} &nbsp; `
         + `<b>相对残差：</b>${nf(data.matrix_relative_residual, 2)} &nbsp; `
         + `<b>秩：</b>${Number(data.matrix_rank || 0)} &nbsp; `
-        + `<b>条件估计：</b>${nf(data.matrix_condition_estimate, 2)}</div>`;
+        + `<b>条件估计：</b>${nf(data.matrix_condition_estimate, 2)} &nbsp; `
+        + `<b>计算时间：</b>${nf(data.execution_time_sec, 3)} s</div>`;
 
       // Emissions summary — proportional tracing vs matrix method
       const ts = data.tracing_summary || {}, ms = data.matrix_summary || {};

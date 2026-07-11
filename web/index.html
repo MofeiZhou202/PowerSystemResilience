@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Hybrid AC/DC Power System Simulator — ETAP-Style</title>
-<link rel="stylesheet" href="css/style.css?v=20260711-evpt-comprehensive-v3"/>
+<link rel="stylesheet" href="css/style.css?v=20260711-seq-profile-editor"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -1377,12 +1377,13 @@
       <label class="sub-label" title="蒙特卡洛最大抽样次数 (NSQ) / 年数×10 (SEQ)">抽样次数
         <input id="relMaxIter" type="number" value="2000" min="100" step="500"/>
       </label>
-      <label class="sub-label rel-seq-profile" title="序贯蒙特卡洛逐时负荷倍率；输入任意周期，后端自动重复到全年。留空使用 IEEE RTS 曲线。">SEQ负荷曲线(pu)
-        <textarea id="relSeqLoadProfile" rows="2">0.72,0.68,0.65,0.64,0.66,0.72,0.80,0.88,0.94,0.98,1.00,0.99,0.97,0.95,0.96,0.99,1.00,0.98,0.94,0.90,0.86,0.82,0.78,0.75</textarea>
-      </label>
-      <label class="sub-label rel-seq-profile" title='可选空间倍率 JSON；按元件 index 指定，例如 [{"kind":"ac_load","index":1,"factor":0.9}]。kind 支持 ac_load、dc_load、ac_bus、dc_bus。'>SEQ空间倍率
-        <textarea id="relSeqSpatialFactors" rows="2" placeholder='[{"kind":"ac_load","index":1,"factor":0.9}]'></textarea>
-      </label>
+      <div class="rel-seq-profile rel-seq-editor-launch" title="编辑序贯蒙特卡洛逐时负荷曲线和各 AC/DC 负荷点的空间倍率">
+        <span>SEQ负荷模型</span>
+        <button id="btnOpenSeqProfileEditor" class="toolbar-btn" type="button">编辑曲线</button>
+        <span id="relSeqProfileSummary" class="sub-hint">24 时步 · 空间倍率待同步</span>
+        <textarea id="relSeqLoadProfile" hidden>0.72,0.68,0.65,0.64,0.66,0.72,0.80,0.88,0.94,0.98,1.00,0.99,0.97,0.95,0.96,0.99,1.00,0.98,0.94,0.90,0.86,0.82,0.78,0.75</textarea>
+        <textarea id="relSeqSpatialFactors" hidden></textarea>
+      </div>
       <label class="sub-label sub-checkbox" title="并行评估独立样本、年份或故障枚举项">
         <input id="relParallel" type="checkbox" checked/>
         <span>并行</span>
@@ -2473,6 +2474,45 @@
   </div>
 </div>
 
+<!-- Sequential Monte Carlo load profile designer -->
+<div id="seqProfileEditorModal" class="modal" style="display:none">
+  <div class="modal-backdrop" data-close-seq-profile-editor></div>
+  <div class="modal-content evpt-designer-modal seq-profile-editor-modal">
+    <div class="evpt-designer-header">
+      <h3>SEQ 负荷模型</h3>
+      <div class="evpt-designer-header-actions">
+        <button id="btnSeqProfileReset" class="toolbar-btn" type="button" title="恢复 24 时步默认负荷曲线并将空间倍率重置为 1">重置</button>
+        <button id="btnSeqSpatialRefresh" class="toolbar-btn" type="button" title="从当前画布重新读取 AC/DC 负荷点">刷新负荷点</button>
+        <button class="toolbar-btn" type="button" title="关闭" data-close-seq-profile-editor>关闭 ×</button>
+      </div>
+    </div>
+    <div class="evpt-designer-body">
+      <section class="evpt-designer-preview-pane">
+        <svg id="seqProfilePreview" xmlns="http://www.w3.org/2000/svg" aria-label="SEQ 负荷曲线预览"></svg>
+        <div id="seqProfileValidation" class="evpt-designer-validation"></div>
+      </section>
+      <section class="evpt-designer-editor-pane">
+        <div id="seqProfileEditorTabs" class="evpt-designer-tabs" role="tablist">
+          <button class="active" type="button" data-seq-profile-tab="temporal">时序曲线</button>
+          <button type="button" data-seq-profile-tab="spatial">空间倍率</button>
+          <button type="button" data-seq-profile-tab="json">JSON</button>
+        </div>
+        <div class="evpt-designer-table-actions">
+          <button id="btnSeqProfileAddRow" class="toolbar-btn" type="button">新增时步</button>
+          <span id="seqProfileTableCount" class="sub-hint"></span>
+        </div>
+        <div id="seqProfileEditorTable" class="topo-table-wrap evpt-designer-table seq-profile-editor-table"></div>
+        <textarea id="seqProfileEditorJson" class="evpt-designer-json" spellcheck="false" hidden></textarea>
+      </section>
+    </div>
+    <div class="modal-actions evpt-designer-footer">
+      <button id="btnSeqProfileValidate" class="btn" type="button">校验</button>
+      <button id="btnSeqProfileApply" class="btn btn-accent" type="button">应用到 SEQ</button>
+      <button class="btn" type="button" data-close-seq-profile-editor>取消</button>
+    </div>
+  </div>
+</div>
+
 <!-- ===== On-demand neighborhood sub-diagram (Phase 4) ===== -->
 <div id="subDiagramModal" class="modal" style="display:none">
   <div class="modal-backdrop" data-close-subdiagram></div>
@@ -2502,6 +2542,6 @@
   <script src="js/components.js?v=20260703-model-io"></script>
   <script src="js/search_registry.js?v=20260709-phase5"></script>
   <script src="js/canvas.js?v=20260710-unbalanced-analysis"></script>
-  <script src="js/app.js?v=20260711-evpt-comprehensive-v3"></script>
+  <script src="js/app.js?v=20260711-seq-profile-editor"></script>
 </body>
 </html>

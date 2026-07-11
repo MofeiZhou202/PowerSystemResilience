@@ -16009,6 +16009,7 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/run_hosting_capacity",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
+      const auto request_started = std::chrono::steady_clock::now();
       hacdcpf::HybridPowerSystem sys;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
@@ -16027,6 +16028,7 @@ int main(int argc, char** argv) {
         auto result = hacdcpf::analysis::assess_hosting_capacity(sys, opt);
         auto out = hacdcpf::analysis::hosting_capacity_result_to_json(result);
         out["converged"] = true;
+        out["execution_time_sec"] = elapsed_seconds(request_started);
         res.set_content(out.dump(), "application/json");
       } catch (...) { g_session.busy.store(false); throw; }
       g_session.busy.store(false);
@@ -17050,6 +17052,7 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_carbon",
              [](const httplib::Request&, httplib::Response& res) {
       try {
+        const auto request_started = std::chrono::steady_clock::now();
         hacdcpf::HybridPowerSystem sys;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
@@ -17081,6 +17084,7 @@ int main(int argc, char** argv) {
           out["pf_source"] = g_session.last_pf_method;
           out["requires_pf"] = true;
         }
+        out["execution_time_sec"] = elapsed_seconds(request_started);
         res.set_content(out.dump(), "application/json");
         g_session.busy.store(false);
       } catch (const std::exception& e) {
@@ -17095,6 +17099,7 @@ int main(int argc, char** argv) {
              [materialize_loads_and_apply_binding]
              (const httplib::Request& req, httplib::Response& res) {
       try {
+        const auto request_started = std::chrono::steady_clock::now();
         hacdcpf::TimeSeriesData ts_data;
         hacdcpf::TimeSeriesPFResult ts_result;
         hacdcpf::HybridPowerSystem current_sys;
@@ -17233,6 +17238,7 @@ int main(int argc, char** argv) {
             static_cast<int>(grid_carbon_profiles.size());
         out["external_grid_carbon_profile_applications"] =
             applied_grid_carbon_profiles;
+        out["execution_time_sec"] = elapsed_seconds(request_started);
 
         res.set_content(out.dump(), "application/json");
         g_session.busy.store(false);
