@@ -5946,6 +5946,56 @@ void fit_ts_data_to_steps(hacdcpf::TimeSeriesData& ts, int steps) {
   }
 }
 
+// Expand an imported scenario periodically over a full-year horizon.  Each
+// target value is the mean of the source's piecewise-constant intervals that
+// overlap it, so changing resolution (for example 1 h -> 6 h) preserves the
+// profile's energy rather than merely sampling every sixth point.
+hacdcpf::TimeSeriesData make_periodic_annual_ts_data(
+    const hacdcpf::TimeSeriesData& source, double target_step_hr) {
+  const double source_step_hr =
+      source.step_duration_hr > 0.0 ? source.step_duration_hr : 1.0;
+  const double target_dt = target_step_hr > 0.0 ? target_step_hr : 1.0;
+  const int target_steps =
+      std::max(1, static_cast<int>(std::lround(8760.0 / target_dt)));
+  hacdcpf::TimeSeriesData target;
+  target.num_steps = target_steps;
+  target.step_duration_hr = target_dt;
+  target.profiles.reserve(source.profiles.size());
+
+  for (const auto& profile : source.profiles) {
+    if (profile.values.empty()) continue;
+    hacdcpf::TimeSeriesProfile expanded;
+    expanded.id = profile.id;
+    expanded.name = profile.name;
+    expanded.values.resize(static_cast<size_t>(target_steps));
+    const double period_hr =
+        source_step_hr * static_cast<double>(profile.values.size());
+    for (int t = 0; t < target_steps; ++t) {
+      const double interval_end = static_cast<double>(t + 1) * target_dt;
+      double cursor = static_cast<double>(t) * target_dt;
+      double integral = 0.0;
+      while (cursor < interval_end - 1e-10) {
+        double phase = std::fmod(cursor, period_hr);
+        if (phase < 0.0) phase += period_hr;
+        size_t source_index = static_cast<size_t>(
+            std::floor((phase + 1e-10) / source_step_hr));
+        if (source_index >= profile.values.size()) source_index = 0;
+        double remaining_source_interval =
+            source_step_hr - std::fmod(phase, source_step_hr);
+        if (remaining_source_interval < 1e-10)
+          remaining_source_interval = source_step_hr;
+        const double segment_end =
+            std::min(interval_end, cursor + remaining_source_interval);
+        integral += profile.values[source_index] * (segment_end - cursor);
+        cursor = segment_end;
+      }
+      expanded.values[static_cast<size_t>(t)] = integral / target_dt;
+    }
+    target.profiles.push_back(std::move(expanded));
+  }
+  return target;
+}
+
 void assign_available_default_profiles(hacdcpf::HybridPowerSystem& sys,
                                        const hacdcpf::TimeSeriesData& ts) {
   const auto has_profile = [&](int id) {
@@ -18621,14 +18671,26 @@ int main(int argc, char** argv) {
 
     // ---- Annual Production Simulation ----
     svr.Post("/api/session/run_annual_sim",
-             [](const httplib::Request& req, httplib::Response& res) {
+             [materialize_loads_and_apply_binding]
+             (const httplib::Request& req, httplib::Response& res) {
       try {
         const auto request_started = std::chrono::steady_clock::now();
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        const double step_hr =
+            (j.value("resolution", std::string("6h")) == "1h") ? 1.0 : 6.0;
+        const bool use_session_ts =
+            j.value("use_session_time_series", false);
         hacdcpf::HybridPowerSystem sys_ann;
+        hacdcpf::TimeSeriesData session_ts;
+        Session::TsBindingSpec session_binding;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
           sys_ann = *g_session.current_system;
+          if (use_session_ts) {
+            session_ts = g_session.ts_data;
+            session_binding = g_session.ts_binding;
+          }
         }
         if (g_session.busy.exchange(true)) {
           res.status = 409;
@@ -18636,9 +18698,18 @@ int main(int argc, char** argv) {
           return;
         }
         g_session.cancel.store(false);
-        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
-        const double step_hr = (j.value("resolution", std::string("6h")) == "1h") ? 1.0 : 6.0;
-        auto ts_data = make_annual_ts_data(step_hr);
+        const bool has_session_profiles =
+            use_session_ts &&
+            std::any_of(session_ts.profiles.begin(), session_ts.profiles.end(),
+                        [](const auto& profile) {
+                          return !profile.values.empty();
+                        });
+        auto ts_data = has_session_profiles
+                           ? make_periodic_annual_ts_data(session_ts, step_hr)
+                           : make_annual_ts_data(step_hr);
+        const int n_rematerialized = has_session_profiles
+            ? materialize_loads_and_apply_binding(sys_ann, session_binding)
+            : 0;
         assign_available_default_profiles(sys_ann, ts_data);
         hacdcpf::analysis::AnnualProductionSimOptions opts;
         opts.block_type = (j.value("block_type", std::string("monthly")) == "weekly")
@@ -18697,6 +18768,22 @@ int main(int argc, char** argv) {
         out["feasible"] = result.feasible;
         out["num_steps"] = result.num_steps;
         out["step_duration_hr"] = result.step_duration_hr;
+        out["profile_source"] =
+            has_session_profiles ? "imported_scenario" : "built_in_annual";
+        out["scenario_profile_binding_active"] =
+            has_session_profiles && session_binding.valid;
+        out["scenario_profiles_rematerialized"] = n_rematerialized;
+        out["imported_profile_period_steps"] =
+            has_session_profiles ? session_ts.num_steps : 0;
+        out["imported_profile_step_duration_hr"] =
+            has_session_profiles ? session_ts.step_duration_hr : 0.0;
+        out["imported_profile_period_hr"] =
+            has_session_profiles
+                ? session_ts.step_duration_hr * session_ts.num_steps
+                : 0.0;
+        out["profile_expansion_method"] = has_session_profiles
+            ? "periodic_interval_average_energy_preserving"
+            : "built_in_seasonal_profiles";
         out["total_cost"] = result.total_cost;
         // Echo back the requested solver + active constraint set + objective.
         out["uc_solver_requested"] = uc_solver_choice_label(uc_solver);

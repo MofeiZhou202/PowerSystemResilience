@@ -7222,6 +7222,21 @@ const App = (() => {
       return;
     }
 
+    const useScenarioTimeSeries =
+      !!document.getElementById('regUseScenarioTimeSeries')?.checked &&
+      hasUsableGeneratedScenarioTimeSeries('regular');
+    if (useScenarioTimeSeries) {
+      try { await applyGeneratedScenarioTimeSeries(getImportedGeneratedScenarioCase('regular')); }
+      catch (e) {
+        log(`应用生成场景时序失败：${e.message || e}`, 'warn');
+        setStatus('场景时序应用失败', 'error');
+        return;
+      }
+    } else {
+      try { await resetGeneratedScenarioTimeSeriesIfActive(); }
+      catch (e) { log(`重置场景时序失败：${e.message || e}`, 'warn'); }
+    }
+
     const resolution = document.getElementById('annResolution')?.value || '6h';
     const dailyMode = document.getElementById('annDailyMode')?.value || 'scuc';
     const parallel = document.getElementById('annParallel')?.checked ?? true;
@@ -7247,6 +7262,7 @@ const App = (() => {
     try {
       data = await apiPost('/api/session/run_annual_sim', {
         resolution,
+        use_session_time_series: useScenarioTimeSeries,
         daily_mode: dailyMode,
         parallel_daily: parallel,
         parallel_threads: Number.isFinite(threads) ? threads : 0,
