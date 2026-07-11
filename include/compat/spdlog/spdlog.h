@@ -10,6 +10,26 @@
 
 namespace spdlog {
 
+namespace detail {
+
+template <typename... Args>
+inline void print_log(const char* prefix,
+                      fmt::format_string<Args...> fmt_str,
+                      Args&&... args) {
+  // Avoid fmt::format() here. On Windows, a Debug consumer may link against a
+  // Release shared fmt library, and returning std::string across that boundary
+  // is not ABI-safe when iterator debugging is enabled.
+  fmt::print("{}", prefix);
+  fmt::print(fmt_str, std::forward<Args>(args)...);
+  fmt::print("\n");
+}
+
+inline void print_log(const char* prefix, const char* message) {
+  fmt::print("{}{}\n", prefix, message);
+}
+
+}  // namespace detail
+
 namespace level {
 enum level_enum : int {
   trace    = 0,
@@ -29,17 +49,17 @@ inline void set_level(level::level_enum /*lvl*/) {
 // Logger stub returned by default_logger()
 struct logger {
   template <typename... Args>
-  void trace(fmt::format_string<Args...> f, Args&&... a)    { fmt::print("[trace]    {}\n", fmt::format(f, std::forward<Args>(a)...)); }
+  void trace(fmt::format_string<Args...> f, Args&&... a)    { detail::print_log("[trace]    ", f, std::forward<Args>(a)...); }
   template <typename... Args>
-  void debug(fmt::format_string<Args...> f, Args&&... a)    { fmt::print("[debug]    {}\n", fmt::format(f, std::forward<Args>(a)...)); }
+  void debug(fmt::format_string<Args...> f, Args&&... a)    { detail::print_log("[debug]    ", f, std::forward<Args>(a)...); }
   template <typename... Args>
-  void info(fmt::format_string<Args...> f, Args&&... a)     { fmt::print("[info]     {}\n", fmt::format(f, std::forward<Args>(a)...)); }
+  void info(fmt::format_string<Args...> f, Args&&... a)     { detail::print_log("[info]     ", f, std::forward<Args>(a)...); }
   template <typename... Args>
-  void warn(fmt::format_string<Args...> f, Args&&... a)     { fmt::print("[warn]     {}\n", fmt::format(f, std::forward<Args>(a)...)); }
+  void warn(fmt::format_string<Args...> f, Args&&... a)     { detail::print_log("[warn]     ", f, std::forward<Args>(a)...); }
   template <typename... Args>
-  void error(fmt::format_string<Args...> f, Args&&... a)    { fmt::print("[error]    {}\n", fmt::format(f, std::forward<Args>(a)...)); }
+  void error(fmt::format_string<Args...> f, Args&&... a)    { detail::print_log("[error]    ", f, std::forward<Args>(a)...); }
   template <typename... Args>
-  void critical(fmt::format_string<Args...> f, Args&&... a) { fmt::print("[critical] {}\n", fmt::format(f, std::forward<Args>(a)...)); }
+  void critical(fmt::format_string<Args...> f, Args&&... a) { detail::print_log("[critical] ", f, std::forward<Args>(a)...); }
 };
 
 inline std::shared_ptr<spdlog::logger> default_logger() {
@@ -49,41 +69,41 @@ inline std::shared_ptr<spdlog::logger> default_logger() {
 
 template <typename... Args>
 inline void trace(fmt::format_string<Args...> fmt_str, Args&&... args) {
-  fmt::print("[trace]    {}\n", fmt::format(fmt_str, std::forward<Args>(args)...));
+  detail::print_log("[trace]    ", fmt_str, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
 inline void debug(fmt::format_string<Args...> fmt_str, Args&&... args) {
-  fmt::print("[debug]    {}\n", fmt::format(fmt_str, std::forward<Args>(args)...));
+  detail::print_log("[debug]    ", fmt_str, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
 inline void info(fmt::format_string<Args...> fmt_str, Args&&... args) {
-  fmt::print("[info]     {}\n", fmt::format(fmt_str, std::forward<Args>(args)...));
+  detail::print_log("[info]     ", fmt_str, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
 inline void warn(fmt::format_string<Args...> fmt_str, Args&&... args) {
-  fmt::print("[warn]     {}\n", fmt::format(fmt_str, std::forward<Args>(args)...));
+  detail::print_log("[warn]     ", fmt_str, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
 inline void error(fmt::format_string<Args...> fmt_str, Args&&... args) {
-  fmt::print("[error]    {}\n", fmt::format(fmt_str, std::forward<Args>(args)...));
+  detail::print_log("[error]    ", fmt_str, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
 inline void critical(fmt::format_string<Args...> fmt_str, Args&&... args) {
-  fmt::print("[critical] {}\n", fmt::format(fmt_str, std::forward<Args>(args)...));
+  detail::print_log("[critical] ", fmt_str, std::forward<Args>(args)...);
 }
 
 // Single-argument (message-only) overloads
-inline void trace(const char* msg)    { fmt::print("[trace]    {}\n", msg); }
-inline void debug(const char* msg)    { fmt::print("[debug]    {}\n", msg); }
-inline void info(const char* msg)     { fmt::print("[info]     {}\n", msg); }
-inline void warn(const char* msg)     { fmt::print("[warn]     {}\n", msg); }
-inline void error(const char* msg)    { fmt::print("[error]    {}\n", msg); }
-inline void critical(const char* msg) { fmt::print("[critical] {}\n", msg); }
+inline void trace(const char* msg)    { detail::print_log("[trace]    ", msg); }
+inline void debug(const char* msg)    { detail::print_log("[debug]    ", msg); }
+inline void info(const char* msg)     { detail::print_log("[info]     ", msg); }
+inline void warn(const char* msg)     { detail::print_log("[warn]     ", msg); }
+inline void error(const char* msg)    { detail::print_log("[error]    ", msg); }
+inline void critical(const char* msg) { detail::print_log("[critical] ", msg); }
 
 }  // namespace spdlog
 
@@ -98,4 +118,3 @@ inline void critical(const char* msg) { fmt::print("[critical] {}\n", msg); }
 #define SPDLOG_WARN(...)     do { if (3 <= SPDLOG_ACTIVE_LEVEL) spdlog::warn(__VA_ARGS__);     } while(0)
 #define SPDLOG_ERROR(...)    do { if (4 <= SPDLOG_ACTIVE_LEVEL) spdlog::error(__VA_ARGS__);    } while(0)
 #define SPDLOG_CRITICAL(...) do { if (5 <= SPDLOG_ACTIVE_LEVEL) spdlog::critical(__VA_ARGS__); } while(0)
-
