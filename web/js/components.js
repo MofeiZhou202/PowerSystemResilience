@@ -611,6 +611,7 @@ const COMP = (() => {
     dc_bus: {
       name: 'DC Bus', bus_type: 'DC_P', base_kv: 320,
       vm_pu: 1.0, vmax_pu: 1.1, vmin_pu: 0.9, pd_mw: 0,
+      emission_factor_tco2_mwh: 0,
       in_service: true
     },
     dc_branch: {

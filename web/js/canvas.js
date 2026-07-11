@@ -15,11 +15,11 @@ const Canvas = (() => {
 
   function cloneDynamicModel(profile) {
     if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return undefined;
-    try {
-      return JSON.parse(JSON.stringify(profile));
-    } catch (_) {
-      return undefined;
-    }
+      try {
+        return JSON.parse(JSON.stringify(profile));
+      } catch (_) {
+        return undefined;
+      }
   }
 
   function addDynamicModel(row, params) {
@@ -2523,6 +2523,7 @@ const Canvas = (() => {
           vmax_pu: numOr(p.vmax_pu, 1.1),
           vmin_pu: numOr(p.vmin_pu, 0.9),
           pd_mw: numOr(p.pd_mw, 0),
+          emission_factor_tco2_mwh: numOr(p.emission_factor_tco2_mwh, 0),
           in_service: p.in_service !== false,
         });
       }
@@ -2934,12 +2935,12 @@ const Canvas = (() => {
             t_scheduled_hr: numOr(p.t_scheduled_hr, 0),
             in_service: p.in_service !== false,
           };
-          if (isDcStaticGen) {
+          if (isDcStaticGen && p._native_dc_static_generator === true) {
             sys.dc.dc_static_generators.push(addDynamicModel({
               index: row.index,
               name: row.name,
               bus: row.bus,
-              type: p.sgen_type || p.type || 'PV',
+              type: p.sgen_type || p.type || 'Other',
               p_set_mw: row.p_mw,
               scaling: row.scaling,
               profile_id: numOr(p.profile_id, -1),
@@ -2953,9 +2954,8 @@ const Canvas = (() => {
               t_scheduled_hr: row.t_scheduled_hr,
               in_service: row.in_service,
             }, p));
-          } else {
-            sys.ac.static_generators.push(addDynamicModel(row, p));
-          }
+          } else if (isDcStaticGen) sys.dc.static_generators.push(addDynamicModel(row, p));
+          else sys.ac.static_generators.push(addDynamicModel(row, p));
           sgenIdx++;
           break;
         }
@@ -3672,6 +3672,7 @@ const Canvas = (() => {
             vmax_pu: bus.vmax_pu || 1.1,
             vmin_pu: bus.vmin_pu || 0.9,
             pd_mw: bus.pd_mw || 0,
+            emission_factor_tco2_mwh: bus.emission_factor_tco2_mwh || 0,
             in_service: bus.in_service !== false,
           }
         );
@@ -4064,9 +4065,10 @@ const Canvas = (() => {
 
     // DC static generators. Both the legacy StaticGenerator collection and the
     // canonical active-power-only collection render as the same canvas device.
-    const importDcStaticGenerator = (sg) => {
+    const importDcStaticGenerator = (sg, native = false) => {
       addDeviceAtBus('static_generator', sg.bus, {
         ...COMP.defaults.static_generator,
+        _native_dc_static_generator: native,
         index: sg.index,
         name: sg.name || `DC SGen ${sg.index !== undefined ? sg.index : ''}`,
         p_mw: sg.p_mw ?? sg.p_set_mw, q_mvar: sg.q_mvar || 0,
@@ -4087,8 +4089,8 @@ const Canvas = (() => {
         in_service: sg.in_service !== false,
       }, dcBusCompMap);
     };
-    jsonSys.dc?.static_generators?.forEach(importDcStaticGenerator);
-    jsonSys.dc?.dc_static_generators?.forEach(importDcStaticGenerator);
+    jsonSys.dc?.static_generators?.forEach(sg => importDcStaticGenerator(sg, false));
+    jsonSys.dc?.dc_static_generators?.forEach(sg => importDcStaticGenerator(sg, true));
 
     // DC storage — both the dedicated dc_storage vector and the legacy
     // dc.storage (AC Storage reused on DC) are imported as dc_storage components
@@ -6019,7 +6021,11 @@ const Canvas = (() => {
     const rows = [
       ...(data.bus_carbon || []).map(b => ({ ...b, is_dc: false })),
       ...(data.dc_bus_carbon || []).map(b => ({ ...b, is_dc: true })),
-    ];
+    ].filter(b =>
+      b.carbon_potential_valid !== false &&
+      Number(b.sink_power_mw || 0) > 1e-9 &&
+      Number.isFinite(Number(b.carbon_intensity_tco2_mwh)) &&
+      Number(b.carbon_intensity_tco2_mwh) >= 0);
     const maxIntensity = rows.reduce(
       (mx, b) => Math.max(mx, Number(b.carbon_intensity_tco2_mwh || 0)),
       0,

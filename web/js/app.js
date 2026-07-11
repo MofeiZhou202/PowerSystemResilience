@@ -2697,6 +2697,7 @@ const App = (() => {
       pv_system: '光伏',
       dc_static_generator: 'DC静态电源',
       dc_generator: 'DC电源',
+      dc_voltage_boundary: 'DC平衡电源',
       dc_pv_array: 'DC光伏',
       storage_discharge: '储能放电',
       dc_storage_discharge: 'DC储能放电',
@@ -3140,12 +3141,18 @@ const App = (() => {
     switchTab('results');
   }
 
+  function isEffectiveCarbonPotentialBus(b) {
+    return b &&
+      b.carbon_potential_valid !== false &&
+      Number(b.sink_power_mw || 0) > 1e-9 &&
+      Number.isFinite(Number(b.carbon_intensity_tco2_mwh)) &&
+      Number(b.carbon_intensity_tco2_mwh) >= 0;
+  }
+
   function renderCarbonPotentialChart(busRows) {
     const div = document.getElementById('carbonPotentialChart');
     if (!div) return;
-    const validRows = (busRows || []).filter(b =>
-      b.carbon_potential_valid !== false &&
-      Number.isFinite(Number(b.carbon_intensity_tco2_mwh)));
+    const validRows = (busRows || []).filter(isEffectiveCarbonPotentialBus);
     if (!validRows.length || typeof Plotly === 'undefined') {
       div.innerHTML = '<p class="empty-hint">暂无节点碳势图数据</p>';
       return;
@@ -3304,19 +3311,44 @@ const App = (() => {
     const loss = Number(data.total_loss_emissions_tco2 || 0);
     const charge = Number(data.total_storage_charge_emissions_tco2 || 0);
     const discharge = Number(data.total_storage_discharge_emissions_tco2 || 0);
-    const basic = gen - load - loss;
-    const storageAware = gen - load - loss - charge + discharge;
+    const initialInventory = Number(data.initial_storage_carbon_inventory_tco2 || 0);
+    const terminalInventory = Number(data.terminal_storage_carbon_inventory_tco2 || 0);
+    const storageDelta = Number.isFinite(Number(data.storage_carbon_inventory_delta_tco2))
+      ? Number(data.storage_carbon_inventory_delta_tco2)
+      : (terminalInventory - initialInventory);
+    const storageInternalLoss = Number.isFinite(Number(data.storage_internal_loss_emissions_tco2))
+      ? Number(data.storage_internal_loss_emissions_tco2)
+      : (charge - discharge - storageDelta);
+    const storageInventoryError = Number(data.storage_inventory_balance_error_tco2 || 0);
+    const storageInventoryAbsError = Number(data.storage_inventory_balance_abs_error_tco2 || 0);
+    const storageEnergyError = Number(data.storage_energy_balance_error_mwh || 0);
+    const storageEnergyAbsError = Number(data.storage_energy_balance_abs_error_mwh || 0);
+    const basic = Number.isFinite(Number(data.balance_error_tco2))
+      ? Number(data.balance_error_tco2)
+      : (gen - load - loss);
+    const storageAware = Number.isFinite(Number(data.balance_error_storage_adjusted_tco2))
+      ? Number(data.balance_error_storage_adjusted_tco2)
+      : ((gen - discharge) + initialInventory - (load - charge) - loss - storageInternalLoss - terminalInventory);
     return {
       gen,
       load,
       loss,
       charge,
       discharge,
+      initialInventory,
+      terminalInventory,
+      storageInternalLoss,
       basic,
-      storageDelta: charge - discharge,
+      storageDelta,
       storageAware,
+      storageInventoryError,
+      storageInventoryAbsError,
+      storageEnergyError,
+      storageEnergyAbsError,
       basicPct: Math.abs(basic) / Math.max(Math.abs(gen), 1e-12) * 100,
-      storageAwarePct: Math.abs(storageAware) / Math.max(Math.abs(gen), 1e-12) * 100,
+      storageAwarePct: Number.isFinite(Number(data.balance_error_storage_adjusted_pct))
+        ? Number(data.balance_error_storage_adjusted_pct)
+        : Math.abs(storageAware) / Math.max(Math.abs(gen - discharge) + Math.abs(initialInventory), 1e-12) * 100,
     };
   }
 
@@ -3414,7 +3446,12 @@ const App = (() => {
     if (!selector || !addBtn || !selectedDiv) return;
 
     const roleMap = buildDynamicBusRoleMap();
-    const rows = data.bus_stats || [];
+    const rows = (data.bus_stats || [])
+      .map((row, idx) => ({ ...row, _hourly_idx: idx }))
+      .filter(row =>
+        row.carbon_potential_valid !== false &&
+        Number(row.energy_mwh || 0) > 1e-9 &&
+        Number.isFinite(Number(row.average_intensity_tco2_mwh)));
     if (!rows.length || !(data.hourly_bus_intensity_tco2_mwh || []).length) {
       selector.innerHTML = '';
       selectedDiv.innerHTML = '<span class="empty-hint">暂无节点碳势时序数据。</span>';
@@ -3428,8 +3465,9 @@ const App = (() => {
     const redraw = () => {
       const traces = [...selected].map(idx => {
         const row = rows[idx];
+        const hourlyIdx = Number.isInteger(row?._hourly_idx) ? row._hourly_idx : idx;
         const y = (data.hourly_bus_intensity_tco2_mwh || []).map(hourRow =>
-          carbonIntensityDisplay(Array.isArray(hourRow) ? hourRow[idx] : NaN));
+          carbonIntensityDisplay(Array.isArray(hourRow) ? hourRow[hourlyIdx] : NaN));
         return {
           x: y.map((_, t) => t),
           y,
@@ -3506,6 +3544,17 @@ const App = (() => {
     const profileMsg = Number(data.external_grid_carbon_profiles || 0) > 0
       ? `${Number(data.external_grid_carbon_profile_applications || 0)} 次应用`
       : '未使用分时外部电网碳因子';
+    const carbonVerificationAvailable =
+      data.num_carbon_verified != null &&
+      Number.isFinite(Number(data.num_carbon_verified));
+    const carbonVerificationClass = carbonVerificationAvailable
+      ? (Number(data.num_carbon_verified) === Number(data.num_steps || 0)
+        ? 'result-converged'
+        : 'result-failed')
+      : '';
+    const carbonVerificationText = carbonVerificationAvailable
+      ? `${Number(data.num_carbon_verified)}/${Number(data.num_steps || 0)}`
+      : '后端未返回验证状态';
 
     document.getElementById('carbonSummary').innerHTML = `
       <div class="result-item"><span class="result-label">数据来源</span>
@@ -3514,6 +3563,8 @@ const App = (() => {
         <span class="result-value">${Number(data.num_steps || 0)} × ${Number(data.step_duration_hr || 1).toFixed(2)} h = ${totalHours.toFixed(2)} h</span></div>
       <div class="result-item"><span class="result-label">潮流收敛</span>
         <span class="result-value ${Number(data.num_pf_converged || 0) === Number(data.num_steps || 0) ? 'result-converged' : 'result-failed'}">${Number(data.num_pf_converged || 0)}/${Number(data.num_steps || 0)}</span></div>
+      <div class="result-item"><span class="result-label">碳流验证</span>
+        <span class="result-value ${carbonVerificationClass}">${carbonVerificationText}</span></div>
       <div class="result-item"><span class="result-label">OPF收敛</span>
         <span class="result-value">${Number(data.num_opf_converged || 0)}/${Number(data.num_steps || 0)}</span></div>
       <div class="result-item"><span class="result-label">储能调度来源</span>
@@ -3522,8 +3573,16 @@ const App = (() => {
         <span class="result-value">${escapeHtml(profileMsg)}</span></div>
       <div class="result-item"><span class="result-label">累计碳平衡残差</span>
         <span class="result-value ${Math.abs(balance.basicPct) < 1e-3 ? 'result-converged' : 'result-failed'}">${balance.basic.toExponential(3)} t / ${balance.basicPct.toExponential(3)}%</span></div>
+      <div class="result-item"><span class="result-label">储能修正残差</span>
+        <span class="result-value ${Math.abs(balance.storageAwarePct) < 1e-3 ? 'result-converged' : 'result-failed'}">${balance.storageAware.toExponential(3)} t / ${balance.storageAwarePct.toExponential(3)}%</span></div>
       <div class="result-item"><span class="result-label">储能库存净变化</span>
         <span class="result-value">${balance.storageDelta.toFixed(6)} t</span></div>
+      <div class="result-item"><span class="result-label">储能内部损耗</span>
+        <span class="result-value">${balance.storageInternalLoss.toFixed(6)} t</span></div>
+      <div class="result-item"><span class="result-label">储能库存账本残差</span>
+        <span class="result-value ${balance.storageInventoryAbsError < 1e-8 ? 'result-converged' : 'result-failed'}">${balance.storageInventoryError.toExponential(3)} t / 绝对累计 ${balance.storageInventoryAbsError.toExponential(3)} t</span></div>
+      <div class="result-item"><span class="result-label">储能能量递推误差</span>
+        <span class="result-value ${balance.storageEnergyAbsError < 1e-8 ? 'result-converged' : 'result-failed'}">${balance.storageEnergyError.toExponential(3)} MWh / 绝对累计 ${balance.storageEnergyAbsError.toExponential(3)} MWh</span></div>
     `;
     document.getElementById('carbonBusResults').innerHTML = '';
     document.getElementById('carbonLoadResults').innerHTML = '';
@@ -3548,14 +3607,17 @@ const App = (() => {
         <div id="dynamicCarbonBusTrendChart" class="dynamic-carbon-chart dynamic-carbon-wide"></div>
       `;
     }
-    let html = '<table><thead><tr><th>时段</th><th>潮流收敛</th><th>OPF收敛</th><th>源端(t)</th><th>负荷(t)</th><th>储能充电(t)</th><th>储能放电(t)</th><th>损耗(t)</th><th>碳平衡残差(t)</th></tr></thead><tbody>';
+    let html = '<table><thead><tr><th>时段</th><th>潮流收敛</th><th>碳流验证</th><th>OPF收敛</th><th>源端(t)</th><th>负荷(t)</th><th>储能充电(t)</th><th>储能放电(t)</th><th>损耗(t)</th><th>碳平衡残差(t)</th><th>库存变化(t)</th><th>内部损耗(t)</th><th>库存账本残差(t)</th><th>能量递推误差(MWh)</th></tr></thead><tbody>';
     (data.step_results || []).forEach(s => {
       const stepBalance = Number(s.balance_error_tco2 ?? (
         Number(s.total_generation_emissions_tco2 || 0) -
         Number(s.total_load_emissions_tco2 || 0) -
         Number(s.total_loss_emissions_tco2 || 0)
       ));
-      html += `<tr><td>${s.step}</td><td>${s.pf_converged ? '是' : '否'}</td><td>${s.opf_converged == null ? '—' : (s.opf_converged ? '是' : '否')}</td><td>${Number(s.total_generation_emissions_tco2 || 0).toFixed(6)}</td><td>${Number(s.total_load_emissions_tco2 || 0).toFixed(6)}</td><td>${Number(s.total_storage_charge_emissions_tco2 || 0).toFixed(6)}</td><td>${Number(s.total_storage_discharge_emissions_tco2 || 0).toFixed(6)}</td><td>${Number(s.total_loss_emissions_tco2 || 0).toFixed(6)}</td><td>${stepBalance.toExponential(3)}</td></tr>`;
+      const stepCarbonVerification = s.carbon_verified == null
+        ? '未返回'
+        : (s.carbon_verified ? '是' : '否');
+      html += `<tr><td>${s.step}</td><td>${s.pf_converged ? '是' : '否'}</td><td>${stepCarbonVerification}</td><td>${s.opf_converged == null ? '—' : (s.opf_converged ? '是' : '否')}</td><td>${Number(s.total_generation_emissions_tco2 || 0).toFixed(6)}</td><td>${Number(s.total_load_emissions_tco2 || 0).toFixed(6)}</td><td>${Number(s.total_storage_charge_emissions_tco2 || 0).toFixed(6)}</td><td>${Number(s.total_storage_discharge_emissions_tco2 || 0).toFixed(6)}</td><td>${Number(s.total_loss_emissions_tco2 || 0).toFixed(6)}</td><td>${stepBalance.toExponential(3)}</td><td>${Number(s.storage_carbon_inventory_delta_tco2 || 0).toFixed(6)}</td><td>${Number(s.storage_internal_loss_emissions_tco2 || 0).toFixed(6)}</td><td>${Number(s.storage_inventory_balance_error_tco2 || 0).toExponential(3)}</td><td>${Number(s.storage_energy_balance_error_mwh || 0).toExponential(3)}</td></tr>`;
     });
     html += '</tbody></table>';
     document.getElementById('dynamicCarbonResults').innerHTML = html;
@@ -4221,7 +4283,7 @@ const App = (() => {
       // (only guard against NaN/negative); some datasets use unrealistic emission
       // factors, which the table then surfaces transparently.
       const topNodes = buses
-        .filter(b => Number.isFinite(b.carbon_intensity_tco2_mwh) && b.carbon_intensity_tco2_mwh >= 0)
+        .filter(isEffectiveCarbonPotentialBus)
         .sort((a, b) => b.carbon_intensity_tco2_mwh - a.carbon_intensity_tco2_mwh)
         .slice(0, 10);
       let html = '<div class="result-summary-grid" style="margin-bottom:8px">';
@@ -14474,7 +14536,10 @@ const App = (() => {
         + `<b>潮流来源：</b>${data.pf_source || '—'} &nbsp; `
         + `<b>矩阵法：</b>${data.matrix_solved ? '✓ 求解' : '✗ 未解'} &nbsp; `
         + `<b>溯源校验：</b>${data.tracing_verified ? '✓ 通过' : '✗ 未通过'} &nbsp; `
-        + `<b>矩阵残差：</b>${nf(data.matrix_residual, 2)}</div>`;
+        + `<b>矩阵残差：</b>${nf(data.matrix_residual, 2)} &nbsp; `
+        + `<b>相对残差：</b>${nf(data.matrix_relative_residual, 2)} &nbsp; `
+        + `<b>秩：</b>${Number(data.matrix_rank || 0)} &nbsp; `
+        + `<b>条件估计：</b>${nf(data.matrix_condition_estimate, 2)}</div>`;
 
       // Emissions summary — proportional tracing vs matrix method
       const ts = data.tracing_summary || {}, ms = data.matrix_summary || {};
@@ -14504,7 +14569,9 @@ const App = (() => {
       }
 
       // Bus carbon intensity — AC, sorted by intensity, top 20
-      const buses = (data.bus_carbon || []).slice().sort((a, b) => (b.carbon_intensity_tco2_mwh || 0) - (a.carbon_intensity_tco2_mwh || 0));
+      const buses = (data.bus_carbon || [])
+        .filter(isEffectiveCarbonPotentialBus)
+        .sort((a, b) => (b.carbon_intensity_tco2_mwh || 0) - (a.carbon_intensity_tco2_mwh || 0));
       if (buses.length) {
         html += '<h4 style="margin:10px 0 4px;">母线碳强度 (AC, Top 20)</h4>';
         html += '<table><thead><tr><th>母线</th><th>碳强度(tCO₂/MWh)</th></tr></thead><tbody>';

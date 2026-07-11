@@ -1732,6 +1732,7 @@ struct Session {
   std::atomic<bool> cancel{false};     // set by cancel endpoint
   // Last power flow result for carbon analysis reuse
   std::optional<hacdcpf::PowerFlowResult> last_pf_result;
+  std::optional<hacdcpf::HybridPowerSystem> last_pf_system;
   std::string last_pf_method;
   std::optional<hacdcpf::TimeSeriesPFResult> last_tspf_result;
   hacdcpf::TimeSeriesData last_tspf_data;
@@ -1769,12 +1770,22 @@ Session g_session;
 
 void clear_cached_analysis(Session& s) {
   s.last_pf_result.reset();
+  s.last_pf_system.reset();
   s.last_pf_method.clear();
   s.last_tspf_result.reset();
   s.last_tspf_data = hacdcpf::TimeSeriesData{};
   s.last_tspf_skip_uc = true;
   s.last_tspf_run_opf = false;
   s.last_tspf_num_steps = 0;
+}
+
+void cache_last_power_flow(Session& s,
+                           const hacdcpf::PowerFlowResult& pf,
+                           const std::string& method,
+                           const hacdcpf::HybridPowerSystem& sys) {
+  s.last_pf_result = pf;
+  s.last_pf_system = sys;
+  s.last_pf_method = method;
 }
 
 void clear_preserved_three_phase(Session& s) {
@@ -2476,38 +2487,18 @@ json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
 
   auto ac_bus_sink_power = [&](int bus) {
     double p = 0.0;
-    for (const auto& l : sys.ac.loads) {
-      if (l.in_service && l.bus == bus)
-        p += std::max(0.0, l.p_mw * l.scaling);
-    }
-    for (const auto& l : sys.ac.flexible_loads) {
-      if (l.in_service && l.bus == bus)
-        p += std::max(0.0, l.p_mw);
-    }
-    for (const auto& l : sys.ac.asymmetric_loads) {
-      if (l.in_service && l.bus == bus)
-        p += std::max(0.0, (l.pa_mw + l.pb_mw + l.pc_mw) * l.scaling);
-    }
-    for (const auto& l : sys.ac.charging_stations) {
-      if (l.in_service && l.bus == bus)
-        p += std::max(0.0, l.p_total_kw / 1000.0);
-    }
-    for (const auto& st : sys.ac.storage) {
-      if (st.in_service && st.bus == bus && st.p_mw < 0.0)
-        p += -st.p_mw;
-    }
+    for (const auto& l : carbon.load_carbon)
+      if (l.bus == bus) p += std::max(0.0, l.demand_mw);
+    for (const auto& st : carbon.storage_carbon)
+      if (!st.is_dc && st.bus == bus && st.p_mw < 0.0) p += -st.p_mw;
     return p;
   };
   auto dc_bus_sink_power = [&](int bus) {
     double p = 0.0;
-    for (const auto& l : sys.dc.loads) {
-      if (l.in_service && l.bus == bus)
-        p += std::max(0.0, l.p_mw * l.scaling);
-    }
-    for (const auto& st : sys.dc.storage) {
-      if (st.in_service && st.bus == bus && st.p_mw < 0.0)
-        p += -st.p_mw;
-    }
+    for (const auto& l : carbon.dc_load_carbon)
+      if (l.bus == bus) p += std::max(0.0, l.demand_mw);
+    for (const auto& st : carbon.storage_carbon)
+      if (st.is_dc && st.bus == bus && st.p_mw < 0.0) p += -st.p_mw;
     return p;
   };
 
@@ -2515,6 +2506,26 @@ json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
   out["matrix_solved"] = carbon.matrix_solved;
   out["tracing_verified"] = carbon.tracing_verified;
   out["matrix_residual"] = carbon.matrix_residual;
+  out["matrix_relative_residual"] = carbon.matrix_relative_residual;
+  out["matrix_condition_estimate"] = carbon.matrix_condition_estimate;
+  out["matrix_rank"] = carbon.matrix_rank;
+  out["power_balance_verified"] = carbon.power_balance_verified;
+  out["max_node_power_balance_error_mw"] =
+      carbon.max_node_power_balance_error_mw;
+  out["total_power_balance_error_mw"] =
+      carbon.total_power_balance_error_mw;
+  out["total_external_export_mw"] = carbon.total_external_export_mw;
+  out["total_external_export_emissions_tco2"] =
+      carbon.total_external_export_emissions_tco2;
+  out["node_power_balance_errors"] = json::array();
+  for (const auto& error : carbon.node_power_balance_errors) {
+    out["node_power_balance_errors"].push_back(
+        {{"bus_index", error.bus_index},
+         {"is_dc", error.is_dc},
+         {"mismatch_mw", error.mismatch_mw},
+         {"source_mw", error.source_mw},
+         {"required_mw", error.required_mw}});
+  }
   out["tracing_summary"] = emissions_summary_to_json(carbon.tracing_summary);
   out["matrix_summary"] = emissions_summary_to_json(carbon.matrix_summary);
   out["total_storage_charge_emissions_tco2"] =
@@ -2666,97 +2677,47 @@ json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
 
   json sk_labels = json::array(), sk_src = json::array(), sk_tgt = json::array(), sk_val = json::array();
   json source_meta = json::array();
-  auto source_sys = hacdcpf::project_to_canonical_models(sys);
-  hacdcpf::materialize_dc_storage(source_sys);
-  auto push_source = [&](const std::string& label,
-                         const std::string& type,
-                         int component_index,
-                         int bus,
-                         bool is_dc,
-                         double p_mw,
-                         double ef) {
-    const int id = static_cast<int>(source_meta.size());
-    sk_labels.push_back(label);
-    source_meta.push_back(json{{"source_id", id},
-                               {"label", label},
-                               {"source_type", type},
-                               {"component_index", component_index},
-                               {"bus", bus},
-                               {"is_dc", is_dc},
-                               {"p_mw", p_mw},
-                               {"emission_factor_tco2_mwh", ef}});
+  for (const auto& source : carbon.carbon_sources) {
+    sk_labels.push_back(source.label);
+    source_meta.push_back(
+        json{{"source_id", source.source_id},
+             {"label", source.label},
+             {"source_type", source.source_type},
+             {"component_index", source.component_index},
+             {"bus", source.bus},
+             {"is_dc", source.is_dc},
+             {"scheduled_p_mw", source.scheduled_power_mw},
+             {"p_mw", source.power_mw},
+             {"traced_power_mw", 0.0},
+             {"emission_factor_tco2_mwh",
+              source.emission_factor_tco2_mwh},
+             {"is_balancing", source.is_balancing}});
+  }
+
+  const int n_sources = static_cast<int>(carbon.carbon_sources.size());
+  std::vector<double> source_traced_power(static_cast<size_t>(n_sources), 0.0);
+  auto add_source_usage = [&](const std::unordered_map<int, double>& values) {
+    for (const auto& [sid, mw] : values) {
+      if (sid < 0 || sid >= n_sources || mw <= 0.0) continue;
+      source_traced_power[static_cast<size_t>(sid)] += mw;
+    }
   };
-  int src_idx = 0;
-  for (const auto& g : source_sys.ac.generators) {
-    if (!g.in_service) continue;
-    push_source(g.name.empty() ? "Gen" + std::to_string(g.index) : g.name,
-                "generator", g.index, g.bus, false, std::max(g.pg_mw, 0.0),
-                g.emission_factor_tco2_mwh);
-    src_idx++;
+  for (const auto& l : carbon.load_carbon) add_source_usage(l.generator_supply_mw);
+  for (const auto& l : carbon.dc_load_carbon) add_source_usage(l.generator_supply_mw);
+  for (const auto& s : carbon.storage_carbon) {
+    if (s.p_mw < -1e-9) add_source_usage(s.source_supply_mw);
   }
-  for (const auto& eg : source_sys.ac.external_grids) {
-    if (!eg.in_service) continue;
-    push_source(eg.name.empty() ? "Grid" + std::to_string(eg.index) : eg.name,
-                "external_grid", eg.index, eg.bus, false, 0.0,
-                eg.emission_factor_tco2_mwh);
-    src_idx++;
-  }
-  for (const auto& sg : source_sys.ac.static_generators) {
-    if (!sg.in_service) continue;
-    push_source(sg.name.empty() ? "Sgen" + std::to_string(sg.index) : sg.name,
-                "static_generator", sg.index, sg.bus, false,
-                std::max(0.0, sg.p_mw * sg.scaling), sg.co2_emission_rate);
-    src_idx++;
-  }
-  for (const auto& rg : source_sys.ac.renewable_gens) {
-    if (!rg.in_service || rg.p_mw <= 1e-6) continue;
-    push_source(rg.name.empty() ? "Ren" + std::to_string(rg.index) : rg.name,
-                "renewable_generator", rg.index, rg.bus, false, rg.p_mw, 0.0);
-    src_idx++;
-  }
-  for (const auto& pv : source_sys.ac.pv_systems) {
-    if (!pv.in_service || pv.p_mw <= 1e-6) continue;
-    push_source(pv.name.empty() ? "PV" + std::to_string(pv.index) : pv.name,
-                "pv_system", pv.index, pv.bus, false, pv.p_mw, 0.0);
-    src_idx++;
-  }
-  for (const auto& sg : source_sys.dc.static_generators) {
-    if (!sg.in_service) continue;
-    push_source(sg.name.empty() ? "DCSgen" + std::to_string(sg.index) : sg.name,
-                "dc_static_generator", sg.index, sg.bus, true,
-                std::max(0.0, sg.p_mw * sg.scaling), sg.co2_emission_rate);
-    src_idx++;
-  }
-  for (const auto& sg : source_sys.dc.dc_static_generators) {
-    if (!sg.in_service) continue;
-    push_source(sg.name.empty() ? "DCGen" + std::to_string(sg.index) : sg.name,
-                "dc_generator", sg.index, sg.bus, true,
-                std::max(0.0, sg.p_set_mw * sg.scaling), 0.0);
-    src_idx++;
-  }
-  for (const auto& pv : source_sys.dc.pv_arrays) {
-    if (!pv.in_service || pv.p_set_mw <= 1e-6) continue;
-    push_source(pv.name.empty() ? "DCPV" + std::to_string(pv.index) : pv.name,
-                "dc_pv_array", pv.index, pv.bus, true, pv.p_set_mw, 0.0);
-    src_idx++;
-  }
-  for (const auto& st : source_sys.ac.storage) {
-    if (!st.in_service || st.p_mw <= 1e-6) continue;
-    push_source(st.name.empty() ? "BESS" + std::to_string(st.index) : st.name,
-                "storage_discharge", st.index, st.bus, false, st.p_mw,
-                st.soc_carbon_intensity_tco2_mwh);
-    src_idx++;
-  }
-  for (const auto& st : source_sys.dc.storage) {
-    if (!st.in_service || st.p_mw <= 1e-6) continue;
-    push_source(st.name.empty() ? "DCBESS" + std::to_string(st.index) : st.name,
-                "dc_storage_discharge", st.index, st.bus, true, st.p_mw,
-                st.soc_carbon_intensity_tco2_mwh);
-    src_idx++;
+  for (const auto& b : carbon.branch_carbon) add_source_usage(b.generator_loss_mw);
+  for (const auto& b : carbon.dc_branch_carbon) add_source_usage(b.generator_loss_mw);
+  for (const auto& v : carbon.vsc_carbon) add_source_usage(v.generator_loss_mw);
+  for (const auto& d : carbon.dcdc_carbon) add_source_usage(d.generator_loss_mw);
+  for (const auto& er : carbon.energy_router_carbon) add_source_usage(er.source_loss_mw);
+  for (int sid = 0; sid < n_sources; ++sid) {
+    const double traced = source_traced_power[static_cast<size_t>(sid)];
+    source_meta[static_cast<size_t>(sid)]["traced_power_mw"] = traced;
   }
   out["carbon_sources"] = source_meta;
 
-  const int n_sources = src_idx;
   for (const auto& l : carbon.load_carbon) sk_labels.push_back("Load@Bus" + std::to_string(l.bus));
   const int n_ac_loads = static_cast<int>(carbon.load_carbon.size());
   for (const auto& l : carbon.dc_load_carbon) sk_labels.push_back("DCLoad@Bus" + std::to_string(l.bus));
@@ -2785,6 +2746,18 @@ json annual_carbon_to_json(const hacdcpf::analysis::AnnualCarbonAnalysisResult& 
   out["num_steps"] = annual.num_steps;
   out["step_duration_hr"] = annual.step_duration_hr;
   out["num_pf_converged"] = annual.num_pf_converged;
+  out["num_carbon_power_balance_verified"] =
+      annual.num_carbon_power_balance_verified;
+  out["num_carbon_matrix_solved"] = annual.num_carbon_matrix_solved;
+  out["num_carbon_verified"] = annual.num_carbon_verified;
+  out["all_carbon_verified"] =
+      annual.num_steps > 0 && annual.num_carbon_verified == annual.num_steps;
+  out["max_node_power_balance_error_mw"] =
+      annual.max_node_power_balance_error_mw;
+  out["max_matrix_relative_residual"] =
+      annual.max_matrix_relative_residual;
+  out["max_matrix_condition_estimate"] =
+      annual.max_matrix_condition_estimate;
   out["total_generation_emissions_tco2"] = annual.total_generation_emissions_tco2;
   out["total_load_emissions_tco2"] = annual.total_load_emissions_tco2;
   out["total_loss_emissions_tco2"] = annual.total_loss_emissions_tco2;
@@ -2792,26 +2765,45 @@ json annual_carbon_to_json(const hacdcpf::analysis::AnnualCarbonAnalysisResult& 
       annual.total_storage_charge_emissions_tco2;
   out["total_storage_discharge_emissions_tco2"] =
       annual.total_storage_discharge_emissions_tco2;
+  out["initial_storage_carbon_inventory_tco2"] =
+      annual.initial_storage_carbon_inventory_tco2;
+  out["terminal_storage_carbon_inventory_tco2"] =
+      annual.terminal_storage_carbon_inventory_tco2;
+  out["storage_carbon_inventory_delta_tco2"] =
+      annual.storage_carbon_inventory_delta_tco2;
+  out["storage_internal_loss_emissions_tco2"] =
+      annual.storage_internal_loss_emissions_tco2;
+  out["storage_charge_loss_emissions_tco2"] =
+      annual.storage_charge_loss_emissions_tco2;
+  out["storage_discharge_loss_emissions_tco2"] =
+      annual.storage_discharge_loss_emissions_tco2;
+  out["storage_self_discharge_loss_emissions_tco2"] =
+      annual.storage_self_discharge_loss_emissions_tco2;
+  out["storage_energy_balance_error_mwh"] =
+      annual.storage_energy_balance_error_mwh;
+  out["storage_energy_balance_abs_error_mwh"] =
+      annual.storage_energy_balance_abs_error_mwh;
+  out["max_storage_step_energy_balance_error_mwh"] =
+      annual.max_storage_step_energy_balance_error_mwh;
+  out["storage_inventory_balance_error_tco2"] =
+      annual.storage_inventory_balance_error_tco2;
+  out["storage_inventory_balance_abs_error_tco2"] =
+      annual.storage_inventory_balance_abs_error_tco2;
+  out["storage_inventory_balance_error_pct"] =
+      annual.storage_inventory_balance_error_pct;
   const double balance_basic =
       annual.total_generation_emissions_tco2 -
       annual.total_load_emissions_tco2 -
       annual.total_loss_emissions_tco2;
   const double balance_storage_adjusted =
-      balance_basic -
-      annual.total_storage_charge_emissions_tco2 +
-      annual.total_storage_discharge_emissions_tco2;
-  const double storage_inventory_delta =
-      annual.total_storage_charge_emissions_tco2 -
-      annual.total_storage_discharge_emissions_tco2;
+      annual.balance_error_storage_adjusted_tco2;
   out["balance_error_tco2"] = balance_basic;
   out["balance_error_storage_adjusted_tco2"] = balance_storage_adjusted;
-  out["storage_carbon_inventory_delta_tco2"] = storage_inventory_delta;
   out["balance_error_pct"] =
       std::abs(balance_basic) /
       std::max(std::abs(annual.total_generation_emissions_tco2), 1e-12) * 100.0;
   out["balance_error_storage_adjusted_pct"] =
-      std::abs(balance_storage_adjusted) /
-      std::max(std::abs(annual.total_generation_emissions_tco2), 1e-12) * 100.0;
+      annual.balance_error_storage_adjusted_pct;
 
   json steps = json::array();
   for (size_t i = 0; i < annual.step_results.size(); ++i) {
@@ -2820,15 +2812,17 @@ json annual_carbon_to_json(const hacdcpf::analysis::AnnualCarbonAnalysisResult& 
         s.total_generation_emissions_tco2 -
         s.total_load_emissions_tco2 -
         s.total_loss_emissions_tco2;
-    const double step_storage_adjusted =
-        step_basic -
-        s.total_storage_charge_emissions_tco2 +
-        s.total_storage_discharge_emissions_tco2;
-    const double step_storage_inventory_delta =
-        s.total_storage_charge_emissions_tco2 -
-        s.total_storage_discharge_emissions_tco2;
     steps.push_back({{"step", static_cast<int>(i)},
                      {"pf_converged", s.pf_converged},
+                     {"carbon_power_balance_verified",
+                      s.carbon_power_balance_verified},
+                     {"carbon_matrix_solved", s.carbon_matrix_solved},
+                     {"carbon_verified", s.carbon_verified},
+                     {"max_node_power_balance_error_mw",
+                      s.max_node_power_balance_error_mw},
+                     {"matrix_relative_residual", s.matrix_relative_residual},
+                     {"matrix_condition_estimate", s.matrix_condition_estimate},
+                     {"matrix_rank", s.matrix_rank},
                      {"total_generation_emissions_tco2", s.total_generation_emissions_tco2},
                      {"total_load_emissions_tco2", s.total_load_emissions_tco2},
                      {"total_loss_emissions_tco2", s.total_loss_emissions_tco2},
@@ -2837,20 +2831,51 @@ json annual_carbon_to_json(const hacdcpf::analysis::AnnualCarbonAnalysisResult& 
                      {"total_storage_discharge_emissions_tco2",
                       s.total_storage_discharge_emissions_tco2},
                      {"balance_error_tco2", step_basic},
-                     {"balance_error_storage_adjusted_tco2", step_storage_adjusted},
-                     {"storage_carbon_inventory_delta_tco2", step_storage_inventory_delta}});
+                     {"balance_error_storage_adjusted_tco2",
+                      s.balance_error_storage_adjusted_tco2},
+                     {"initial_storage_carbon_inventory_tco2",
+                      s.initial_storage_carbon_inventory_tco2},
+                     {"terminal_storage_carbon_inventory_tco2",
+                      s.terminal_storage_carbon_inventory_tco2},
+                     {"storage_carbon_inventory_delta_tco2",
+                      s.storage_carbon_inventory_delta_tco2},
+                     {"storage_charge_loss_emissions_tco2",
+                      s.storage_charge_loss_emissions_tco2},
+                     {"storage_discharge_loss_emissions_tco2",
+                      s.storage_discharge_loss_emissions_tco2},
+                     {"storage_self_discharge_loss_emissions_tco2",
+                      s.storage_self_discharge_loss_emissions_tco2},
+                     {"storage_internal_loss_emissions_tco2",
+                      s.storage_internal_loss_emissions_tco2},
+                     {"storage_energy_balance_error_mwh",
+                      s.storage_energy_balance_error_mwh},
+                     {"storage_energy_balance_abs_error_mwh",
+                      s.storage_energy_balance_abs_error_mwh},
+                     {"storage_inventory_balance_error_tco2",
+                      s.storage_inventory_balance_error_tco2}});
   }
   out["step_results"] = steps;
 
   json buses = json::array();
-  for (const auto& b : annual.bus_stats)
+  for (const auto& b : annual.bus_stats) {
+    const bool has_sink = b.energy_mwh > 1e-9;
+    const bool sane_potential =
+        std::isfinite(b.average_intensity_tco2_mwh) &&
+        std::isfinite(b.min_intensity_tco2_mwh) &&
+        std::isfinite(b.max_intensity_tco2_mwh) &&
+        b.min_intensity_tco2_mwh >= 0.0 &&
+        b.max_intensity_tco2_mwh <= 10.0;
     buses.push_back({{"bus_index", b.bus_index},
                      {"is_dc", b.is_dc},
                      {"energy_mwh", b.energy_mwh},
                      {"emissions_tco2", b.emissions_tco2},
                      {"average_intensity_tco2_mwh", b.average_intensity_tco2_mwh},
                      {"min_intensity_tco2_mwh", b.min_intensity_tco2_mwh},
-                     {"max_intensity_tco2_mwh", b.max_intensity_tco2_mwh}});
+                     {"max_intensity_tco2_mwh", b.max_intensity_tco2_mwh},
+                     {"has_carbon_sink", has_sink},
+                     {"carbon_potential_valid", sane_potential},
+                     {"carbon_potential_outlier", !sane_potential}});
+  }
   out["bus_stats"] = buses;
 
   json loads = json::array();
@@ -8114,21 +8139,29 @@ document.getElementById('runCarbonBtn').onclick=async()=>{
     document.getElementById('carbonMatrix').textContent=body.matrix_solved?'Yes':'No';
     // Carbon intensity by bus
     if(body.bus_carbon&&body.bus_carbon.length){
-      const ci=body.bus_carbon.map(b=>b.carbon_intensity_tco2_mwh);
+      const acRows=body.bus_carbon.filter(b=>b.carbon_potential_valid!==false&&Number(b.sink_power_mw||0)>1e-9&&Number.isFinite(Number(b.carbon_intensity_tco2_mwh)));
+      if(!acRows.length){document.getElementById('carbonBusChart').innerHTML='';}
+      else{
+      const ci=acRows.map(b=>b.carbon_intensity_tco2_mwh);
       const mx=Math.max(...ci)||1;
-      Plotly.newPlot('carbonBusChart',[{x:body.bus_carbon.map(b=>'Bus '+b.bus_index),y:ci,type:'bar',
+      Plotly.newPlot('carbonBusChart',[{x:acRows.map(b=>'Bus '+b.bus_index),y:ci,type:'bar',
         marker:{color:ci,colorscale:'RdYlGn',reversescale:true,cmin:0,cmax:mx,showscale:true,colorbar:{title:'tCO\u2082/MWh',len:0.7}},
         text:ci.map(v=>v.toFixed(4)),textposition:'auto'}],
         {title:'AC Bus Carbon Intensity (tCO\u2082/MWh)',xaxis:{title:'Bus',tickangle:-45},yaxis:{title:'tCO\u2082/MWh'},margin:{l:55,r:80,t:45,b:60}},{responsive:true});
+      }
     }
     // DC bus carbon intensity
     if(body.dc_bus_carbon&&body.dc_bus_carbon.length){
-      const dci=body.dc_bus_carbon.map(b=>b.carbon_intensity_tco2_mwh);
+      const dcRows=body.dc_bus_carbon.filter(b=>b.carbon_potential_valid!==false&&Number(b.sink_power_mw||0)>1e-9&&Number.isFinite(Number(b.carbon_intensity_tco2_mwh)));
+      if(!dcRows.length){document.getElementById('carbonDcBusChart').innerHTML='';}
+      else{
+      const dci=dcRows.map(b=>b.carbon_intensity_tco2_mwh);
       const dmx=Math.max(...dci)||1;
-      Plotly.newPlot('carbonDcBusChart',[{x:body.dc_bus_carbon.map(b=>'DC Bus '+b.bus_index),y:dci,type:'bar',
+      Plotly.newPlot('carbonDcBusChart',[{x:dcRows.map(b=>'DC Bus '+b.bus_index),y:dci,type:'bar',
         marker:{color:dci,colorscale:'RdYlGn',reversescale:true,cmin:0,cmax:dmx,showscale:true,colorbar:{title:'tCO\u2082/MWh',len:0.7}},
         text:dci.map(v=>v.toFixed(4)),textposition:'auto'}],
         {title:'DC Bus Carbon Intensity (tCO\u2082/MWh)',xaxis:{title:'DC Bus',tickangle:-45},yaxis:{title:'tCO\u2082/MWh'},margin:{l:55,r:80,t:45,b:60}},{responsive:true});
+      }
     } else { document.getElementById('carbonDcBusChart').innerHTML=''; }
     // Per-load total emissions bar
     if(body.load_carbon&&body.load_carbon.length){
@@ -9481,11 +9514,15 @@ document.getElementById('runDashBtn').onclick=async()=>{
     Plotly.newPlot('dashLoadChart',[{x:hrs,y:lpVals.map(s=>s*totalLoad),mode:'lines',fill:'tozeroy',fillcolor:'rgba(44,140,153,0.1)',line:{color:'#2c8c99',width:2},name:'Load'}],{title:'Total Load Demand (MW)',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:M,height:300},{responsive:true});
   }
   if(results.carbon&&results.carbon.bus_carbon&&results.carbon.bus_carbon.length){
-    const ci=results.carbon.bus_carbon.map(b=>b.carbon_intensity_tco2_mwh);
+    const carbonBusRows=results.carbon.bus_carbon.filter(b=>b.carbon_potential_valid!==false&&Number(b.sink_power_mw||0)>1e-9&&Number.isFinite(Number(b.carbon_intensity_tco2_mwh)));
+    if(!carbonBusRows.length){document.getElementById('dashCarbonChart').innerHTML='<div style="padding:20px;color:var(--muted);">No valid carbon sink bus data.</div>';}
+    else{
+    const ci=carbonBusRows.map(b=>b.carbon_intensity_tco2_mwh);
     const mx=Math.max(...ci)||1;
-    Plotly.newPlot('dashCarbonChart',[{x:results.carbon.bus_carbon.map(b=>'B'+b.bus_index),y:ci,type:'bar',
+    Plotly.newPlot('dashCarbonChart',[{x:carbonBusRows.map(b=>'B'+b.bus_index),y:ci,type:'bar',
       marker:{color:ci,colorscale:'RdYlGn',reversescale:true,cmin:0,cmax:mx,showscale:true,colorbar:{len:0.8}}}],
       {title:'Carbon Intensity by Bus (tCO\u2082/MWh)',xaxis:{title:''},yaxis:{title:'tCO\u2082/MWh'},margin:{l:50,r:70,t:40,b:50},height:300},{responsive:true});
+    }
   } else {
     document.getElementById('dashCarbonChart').innerHTML='<div style="padding:20px;color:var(--muted);">Carbon data unavailable.</div>';
   }
@@ -11103,10 +11140,10 @@ int main(int argc, char** argv) {
       auto store_last_pf = [&](const hacdcpf::PowerFlowResult* pf) {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (pf != nullptr) {
-          g_session.last_pf_result = *pf;
-          g_session.last_pf_method = method;
+          cache_last_power_flow(g_session, *pf, method, sys);
         } else {
           g_session.last_pf_result.reset();
+          g_session.last_pf_system.reset();
           g_session.last_pf_method.clear();
         }
       };
@@ -13523,7 +13560,8 @@ int main(int argc, char** argv) {
           if (ac_pf.converged) {
             add_transfers(ac_pf);
             add_geo_data(ac_pf);
-            std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = method;
+            std::lock_guard<std::mutex> lk(g_session.mu);
+            cache_last_power_flow(g_session, ac_pf, method, sys);
           }
         } else {
           auto pf = hacdcpf::solve_power_flow(sys, opt);
@@ -13569,7 +13607,10 @@ int main(int argc, char** argv) {
         out["vdc"] = json::array();
         for (const auto& bf : pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
         add_geo_data(pf);
-        { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = pf; g_session.last_pf_method = method; }
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          cache_last_power_flow(g_session, pf, method, ac_sys);
+        }
       } else if (method == "dc") {
         auto pf = hacdcpf::solve_dc_power_flow(sys, opt);
         out["converged"] = pf.converged;
@@ -13584,7 +13625,8 @@ int main(int argc, char** argv) {
           for (const auto& bf : ac_pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
           out["vm"] = ac_pf.vm;
           out["va"] = ac_pf.va;
-          std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = method;
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          cache_last_power_flow(g_session, ac_pf, method, sys);
         }
       } else if (method == "hybrid_linearized") {
         auto pf = hacdcpf::solve_ac_dc_power_flow(sys, opt);
@@ -13600,7 +13642,8 @@ int main(int argc, char** argv) {
           add_geo_data(ac_pf);
           out["vm"] = ac_pf.vm;
           out["vdc"] = ac_pf.vdc;
-          std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = method;
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          cache_last_power_flow(g_session, ac_pf, method, sys);
         }
       } else if (method == "fdpf") {
         auto pf = hacdcpf::solve_power_flow_fdpf(sys, opt);
@@ -13613,7 +13656,10 @@ int main(int argc, char** argv) {
         for (const auto& bf : pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
         add_transfers(pf);
         add_geo_data(pf);
-        { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = pf; g_session.last_pf_method = method; }
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          cache_last_power_flow(g_session, pf, method, sys);
+        }
       } else if (method == "adaptive") {
         auto pf = hacdcpf::solve_power_flow_adaptive(sys, opt);
         out["converged"] = pf.converged;
@@ -13629,13 +13675,15 @@ int main(int argc, char** argv) {
           if (ac_pf.converged) {
             add_transfers(ac_pf);
             add_geo_data(ac_pf);
-            std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = method;
+            std::lock_guard<std::mutex> lk(g_session.mu);
+            cache_last_power_flow(g_session, ac_pf, method, sys);
           } else {
             hacdcpf::PowerFlowResult pfr; pfr.vm = pf.vm; pfr.va = pf.va; pfr.vdc = pf.vdc;
             pfr.converged = pf.converged; pfr.iterations = pf.iterations; pfr.residual = pf.residual;
             pfr.branch_flows = pf.branch_flows;
             add_geo_data(pfr);
-            std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = pfr; g_session.last_pf_method = method;
+            std::lock_guard<std::mutex> lk(g_session.mu);
+            cache_last_power_flow(g_session, pfr, method, sys);
           }
         }
       } else if (method == "islanded") {
@@ -13653,12 +13701,14 @@ int main(int argc, char** argv) {
             add_transfers(ac_pf);
             add_geo_data(ac_pf);
             for (const auto& bf : ac_pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
-            std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = method;
+            std::lock_guard<std::mutex> lk(g_session.mu);
+            cache_last_power_flow(g_session, ac_pf, method, sys);
           } else {
             hacdcpf::PowerFlowResult pfr; pfr.vm = pf.vm; pfr.va = pf.va; pfr.vdc = pf.vdc;
             pfr.converged = pf.converged; pfr.iterations = pf.iterations; pfr.residual = pf.residual;
             add_geo_data(pfr);
-            std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = pfr; g_session.last_pf_method = method;
+            std::lock_guard<std::mutex> lk(g_session.mu);
+            cache_last_power_flow(g_session, pfr, method, sys);
           }
         }
       } else if (method == "distributed_slack") {
@@ -14960,6 +15010,52 @@ int main(int argc, char** argv) {
 	            replay_sys.dc.buses[i].vm_pu = r.vdc[i];
 	            replay_sys.dc.buses[i].bus_type = hacdcpf::DCBusType::DC_V;
 	          }
+          for (size_t k = 0; k < r.pren_mw.size() && k < r.ren_map.size(); ++k) {
+            const int orig = r.ren_map[k].original_index;
+            const int src = r.ren_map[k].source_type;
+            if (src == 0 && orig >= 0 &&
+                orig < static_cast<int>(replay_sys.ac.renewable_gens.size())) {
+              replay_sys.ac.renewable_gens[static_cast<size_t>(orig)].p_mw =
+                  r.pren_mw[k];
+              if (k < r.qren_mvar.size()) {
+                replay_sys.ac.renewable_gens[static_cast<size_t>(orig)].q_mvar =
+                    r.qren_mvar[k];
+              }
+            } else if (src == 1 && orig >= 0 &&
+                       orig < static_cast<int>(replay_sys.ac.pv_systems.size())) {
+              replay_sys.ac.pv_systems[static_cast<size_t>(orig)].p_mw =
+                  r.pren_mw[k];
+              if (k < r.qren_mvar.size()) {
+                replay_sys.ac.pv_systems[static_cast<size_t>(orig)].q_mvar =
+                    r.qren_mvar[k];
+              }
+            }
+          }
+          for (size_t k = 0; k < r.pstor_mw.size() && k < r.stor_map.size(); ++k) {
+            const int orig = r.stor_map[k].original_index;
+            const int src = r.stor_map[k].source_type;
+            if (src == 0 && orig >= 0 &&
+                orig < static_cast<int>(replay_sys.ac.storage.size())) {
+              replay_sys.ac.storage[static_cast<size_t>(orig)].p_mw =
+                  r.pstor_mw[k];
+              if (k < r.qstor_mvar.size()) {
+                replay_sys.ac.storage[static_cast<size_t>(orig)].q_mvar =
+                    r.qstor_mvar[k];
+              }
+            } else if (src == 1 && orig >= 0 &&
+                       orig < static_cast<int>(replay_sys.dc.storage.size())) {
+              replay_sys.dc.storage[static_cast<size_t>(orig)].p_mw =
+                  r.pstor_mw[k];
+            }
+          }
+          for (size_t k = 0; k < r.pflex_mw.size() && k < r.flex_map.size(); ++k) {
+            const int orig = r.flex_map[k].original_index;
+            if (orig >= 0 &&
+                orig < static_cast<int>(replay_sys.ac.flexible_loads.size())) {
+              replay_sys.ac.flexible_loads[static_cast<size_t>(orig)].p_mw =
+                  r.pflex_mw[k];
+            }
+          }
           for (auto& eg : replay_sys.ac.external_grids) {
             if (const auto vm = replay_ac_value_for_bus(r.vm, replay_sys, eg.bus))
               eg.vm_pu = *vm;
@@ -15086,7 +15182,10 @@ int main(int argc, char** argv) {
           auto ac_pf = solve_projected_replay_power_flow(
               replay_sys, replay_opt, &projected_ac_pf);
           if (ac_pf.converged) {
-            { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = "opf"; }
+            {
+              std::lock_guard<std::mutex> lk(g_session.mu);
+              cache_last_power_flow(g_session, ac_pf, "opf", replay_sys);
+            }
             // Post-OPF power-flow view: the actual branch flows + converter
             // transfers at the OPF dispatch, so the GUI can show 潮流 (and drive a
             // branch-flow heat-map) for the optimized operating point.
@@ -15161,7 +15260,7 @@ int main(int argc, char** argv) {
             try {
               hacdcpf::analysis::CarbonAnalysisOptions ca_opt; ca_opt.verbose = false;
               auto carbon = hacdcpf::analysis::compute_carbon_analysis(replay_sys, ac_pf, ca_opt);
-              out["post_carbon"] = carbon_analysis_to_json(sys, carbon);
+              out["post_carbon"] = carbon_analysis_to_json(replay_sys, carbon);
             } catch (const std::exception&) { /* carbon view is best-effort */ }
           }
           // ── OPF ↔ PF consistency audit ──────────────────────────────────
@@ -15339,7 +15438,10 @@ int main(int argc, char** argv) {
         }
         if (!r.vm.empty()) { for (size_t i = 0; i < r.vm.size() && i < sys.ac.buses.size(); ++i) sys.ac.buses[i].vm_pu = r.vm[i]; }
         auto ac_pf = hacdcpf::solve_power_flow(sys);
-        if (ac_pf.converged) { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = "opf_ac"; }
+        if (ac_pf.converged) {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          cache_last_power_flow(g_session, ac_pf, "opf_ac", sys);
+        }
       }
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
@@ -15388,7 +15490,10 @@ int main(int argc, char** argv) {
         }
         if (!r.vm.empty()) { for (size_t i = 0; i < r.vm.size() && i < sys.ac.buses.size(); ++i) sys.ac.buses[i].vm_pu = r.vm[i]; }
         auto ac_pf = hacdcpf::solve_power_flow(sys);
-        if (ac_pf.converged) { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = "opf_parity"; }
+        if (ac_pf.converged) {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          cache_last_power_flow(g_session, ac_pf, "opf_parity", sys);
+        }
       }
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
@@ -15426,7 +15531,10 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < r.pg_mw.size() && i < sys.ac.generators.size(); ++i)
           sys.ac.generators[i].pg_mw = r.pg_mw[i];
         auto ac_pf = hacdcpf::solve_power_flow(sys);
-        if (ac_pf.converged) { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = "opf_dc"; }
+        if (ac_pf.converged) {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          cache_last_power_flow(g_session, ac_pf, "opf_dc", sys);
+        }
       }
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
@@ -17387,6 +17495,9 @@ int main(int argc, char** argv) {
             throw std::runtime_error(
                 "请先运行潮流计算，并确保潮流收敛后再进行静态碳流分析");
           }
+          if (g_session.last_pf_system) {
+            sys = *g_session.last_pf_system;
+          }
           carbon = hacdcpf::analysis::compute_carbon_analysis(
               sys, *g_session.last_pf_result, ca_opt);
         }
@@ -17419,6 +17530,10 @@ int main(int argc, char** argv) {
         std::vector<Session::ExternalGridCarbonProfile> grid_carbon_profiles;
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         const bool use_last_tspf = j.value("use_last_tspf", true);
+        const bool request_has_num_steps =
+            j.contains("num_steps") && j["num_steps"].is_number_integer();
+        const int requested_num_steps =
+            request_has_num_steps ? j["num_steps"].get<int>() : -1;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
@@ -17434,6 +17549,10 @@ int main(int argc, char** argv) {
             run_opf = g_session.last_tspf_run_opf;
             n_remat = -1;
             ts_binding_active = g_session.ts_binding.valid;
+            if (request_has_num_steps && requested_num_steps != ts_result.num_steps) {
+              throw std::runtime_error(
+                  "动态碳流请求步数与最近一次时序潮流结果不一致，请先重新运行时序潮流后再做动态碳流，或把 num_steps 设为最近一次时序潮流步数。");
+            }
           }
           grid_carbon_profiles = g_session.external_grid_carbon_profiles;
         }
@@ -17451,7 +17570,7 @@ int main(int argc, char** argv) {
           {
             std::lock_guard<std::mutex> lk(g_session.mu);
             if (!g_session.current_system) throw std::runtime_error("No system loaded");
-            const int ns = j.value("num_steps", 24);
+            const int ns = request_has_num_steps ? requested_num_steps : 24;
             if (g_session.ts_data.num_steps != ns || g_session.ts_data.profiles.empty())
               g_session.ts_data = make_default_ts_data(ns);
             sys_ts = *g_session.current_system;
@@ -17479,6 +17598,10 @@ int main(int argc, char** argv) {
           ts_opts.keep_system_snapshots = true;
           ts_opts.verbose = false;
           ts_result = hacdcpf::solve_time_series_pf(sys_ts, ts_data, ts_opts);
+        }
+        if (ts_result.num_steps != ts_data.num_steps) {
+          throw std::runtime_error(
+              "动态碳流缓存/结果步数与时序数据步数不一致，请重新运行时序潮流后再做动态碳流。");
         }
         apply_current_carbon_factors_to_tspf(current_sys, ts_result);
         int applied_grid_carbon_profiles = 0;
