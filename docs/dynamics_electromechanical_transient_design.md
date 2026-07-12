@@ -1,8 +1,8 @@
-> Documentation Sync (2026-07-06)
+> Documentation Sync (2026-07-12)
 > Scope: design and mathematical-derivation document for the electromechanical (RMS/phasor) transient
 > simulation module, written against the current repository, the local PowerSimulationsDynamics.jl
-> checkout (`/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl`, "PSID"), and the local GridLAB-D
-> checkout (`/Users/tianyangzhao/Codes/gridlab-d`, "GLD").
+> checkout (`$PSD_ROOT`, "PSID"), and a local GridLAB-D checkout
+> (`$GRIDLABD_ROOT`, "GLD").
 > Status: analysis and design reference; verify decisions against current source before execution.
 > Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files
 > as authoritative.
@@ -20,13 +20,12 @@ This document is the consolidated theory + design reference for the `hacdcpf` tr
    PSID (simultaneous DAE, composed devices, balanced positive-sequence) and GridLAB-D
    (partitioned predictor–corrector, unbalanced three-phase current-injection network,
    QSTS↔deltamode co-scheduling).
-3. **Assess the limits of the current module** as implemented today, consolidating and extending
-   `docs/dynamics_psid_parity_upgrade_plan.md` and `docs/powersimulationsdynamics_gap_analysis.md`.
+3. **Assess the limits of the current module** against the live source and
+   the runtime contract in `docs/transient_runtime.md`.
 
-Related documents: `docs/transient_simulation.md` (original C++ design note),
-`docs/dynamics_psid_parity_upgrade_plan.md` (PSID parity & efficiency plan; Phases 0–5),
-`docs/powersimulationsdynamics_gap_analysis.md` (capability crosswalk),
-`tools/psd_validation/psd_component_test_matrix.md` (live stop/go ledger).
+Related documents: `docs/transient_runtime.md` (current runtime and GUI
+contract) and `tools/psd_validation/psd_component_test_matrix.md` (live stop/go
+ledger). Superseded roadmap and gap-analysis snapshots were removed.
 
 ---
 
@@ -1226,11 +1225,9 @@ claim-grade case.
 
 # Part VI — Assessment of the current `dynamics` module
 
-*(Based on a full source investigation dated 2026-07-05. Note: the live code is **ahead of** the
-planning documents — `dynamics_psid_parity_upgrade_plan.md` describes Phases 1/2/5 as future work,
-but a mass-matrix DAE path, small-signal analysis, dynamic branches, and the five-mass shaft are
-already implemented. The gap-analysis header counts are stale versus the live ledgers. Treat this
-Part as the current statement of record; `src/` remains authoritative.)*
+*(Implementation alignment refreshed 2026-07-12. The live source and
+`docs/transient_runtime.md` define current behavior. This Part remains a
+theory/architecture assessment rather than an API guarantee.)*
 
 ## 22. What exists today
 
@@ -1297,7 +1294,7 @@ Part as the current statement of record; `src/` remains authoritative.)*
   17,880 assertions across the MassMatrixDae regression, device current-Jacobian finite-difference
   stamp contract, and hybrid AC/DC analytic-device trace preservation; full transient suite passed
   94,442 assertions in 53 cases; internal PSD manifest passed 1,295 assertions; external PSD
-  comparison against `/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl` passed 776,678
+  comparison against the referenced local PSD checkout passed 776,678
   assertions.
 
 ## 23. Limits, by category
@@ -1396,9 +1393,8 @@ step-response gates for the block library.
 
 ### 23.8 Documentation drift
 
-`dynamics_psid_parity_upgrade_plan.md` and `powersimulationsdynamics_gap_analysis.md` lag the
-code (phases marked future are implemented; headline counts stale). Per the repo convention the
-ledgers + source are authoritative; those two docs should be re-synced or superseded by this one.
+Earlier roadmap and gap-analysis snapshots lagged the code and were removed.
+Per the repository convention, live ledgers, tests, and source are authoritative.
 
 ## 24. Recommended sequencing
 

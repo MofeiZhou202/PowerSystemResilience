@@ -1,4 +1,4 @@
-> Documentation Sync (2026-07-05)
+> Documentation Sync (2026-07-12)
 > Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
 > Status: design/analysis reference; confirm behavior against current implementation before adopting conclusions.
 > Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
@@ -43,9 +43,9 @@ preserved even when the runtime implementation is still missing.
 Generate a PSD input snapshot:
 
 ```bash
-julia --project=/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl/test \
+julia --project="$PSD_ROOT/test" \
   tools/psd_validation/export_psd_snapshot.jl \
-  /Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl \
+  "$PSD_ROOT" \
   test24 \
   /tmp/hacdcpf_psd_test24_snapshot.json
 ```
@@ -72,9 +72,9 @@ python3 tools/psd_validation/compare_component_tests.py \
 Generate a PSD output trace for a signal:
 
 ```bash
-julia --project=/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl/test \
+julia --project="$PSD_ROOT/test" \
   tools/psd_validation/export_trace.jl \
-  /Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl \
+  "$PSD_ROOT" \
   test51 \
   /tmp/psd_test51_p_oc.csv \
   generator-102-1:p_oc

@@ -1,12 +1,12 @@
 # Hybrid AC/DC Distribution Systems Simulation 项目系统说明
 
-本文档面向工程使用者和开发者，说明本项目从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。更底层的公式、接口和实现审计见 `docs/technical_notebook/`。
+本文档面向工程使用者和开发者，说明本项目从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。文档入口见 `docs/README.md`，更底层的公式和接口见 `docs/technical_notebook/`。
 
-## 文档同步状态（2026-07-05）
+## 文档同步状态（2026-07-12）
 
-- 本仓库 `docs/` 下全部 Markdown 文档已同步添加实现对齐标注，明确区分“实现支撑文档”与“规划/评审类文档”。
-- 同步依据为当前仓库内 `CMakeLists.txt`、`CMakePresets.json`、`tests/CMakeLists.txt`、`src/` 与 `include/` 的已注册模块与测试目标。
-- 汇总索引见 `docs/generated/documentation_alignment_2026_07_05.md`，可快速查看每份文档的当前状态分类。
+- `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
+- 已删除被实现取代的阶段计划、一次性代码审查和重复暂态设计稿；不再用历史 roadmap 描述当前行为。
+- 同步依据为当前 `CMakeLists.txt`、`CMakePresets.json`、`tests/CMakeLists.txt`、`src/`、`include/`、GUI 路由和 E2E 验证。
 - 如文档描述与代码行为冲突，以仓库实现为准：`src/`、`include/`、`tests/`、`CMake` 配置优先。
 
 ## 快速构建与验证（基于当前实现）
@@ -31,7 +31,7 @@ cmake --build --preset windows-vcpkg-release
 ctest --preset windows-vcpkg-release
 ```
 
-## 当前建模与仿真包状态快照（2026-07-05）
+## 当前建模与仿真包状态快照（2026-07-12）
 
 本节用于快速回答“现在这个包到底做到哪一步了”。结论基于当前仓库源码组织、CMake 选项与已注册测试目标，而不是历史规划文档。
 
@@ -377,6 +377,8 @@ fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到
 | Converter control/scope | `include/hacdcpf/model/device_control_role.hpp`, `include/hacdcpf/model/converter_model_scope.hpp`, `include/hacdcpf/power_flow/converter_coordination.hpp`, `src/power_flow/converter_coordination.cpp` |
 | Canonical projection | `include/hacdcpf/projection/project_to_canonical.hpp`, `src/model/network_utils.cpp` |
 | Projection mapping | `include/hacdcpf/projection/canonical_network.hpp` |
+| Result attribution | `include/hacdcpf/projection/result_attribution.hpp`, `src/model/result_attribution.cpp` |
+| 参数注册库 | `include/hacdcpf/model/standard_parameter_library.hpp`, `src/model/standard_parameter_library.cpp` |
 | Solver data assembly | `include/hacdcpf/assembly/solver_data.hpp`, `src/power_flow/solver_data.cpp` |
 | Graph model | `include/hacdcpf/graph/power_system_graph.hpp`, `src/graph/power_system_graph.cpp` |
 | Graph reduction/recovery | `include/hacdcpf/graph/switch_contraction.hpp`, `include/hacdcpf/graph/result_recovery.hpp`, `src/graph/` |
@@ -387,6 +389,7 @@ fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到
 | 弹性恢复 | `include/hacdcpf/resilience/resilience_assessment.hpp`, `src/resilience/` |
 | I/O | `include/hacdcpf/io/`, `src/io/` |
 | Diagnostics/benchmarks | `tools/opendss_pf_compare.cpp` |
+| 文档索引 | `docs/README.md` |
 | 技术笔记 | `docs/technical_notebook/` |
 
 ## 10. 维护原则

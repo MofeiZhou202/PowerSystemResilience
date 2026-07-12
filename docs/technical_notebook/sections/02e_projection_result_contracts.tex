@@ -1,0 +1,50 @@
+% ============================================================
+\section{Projection, Attribution, Parameters, and Canvas Frames}
+\label{sec:projection_result_contracts}
+% ============================================================
+
+The runtime uses two explicit operators:
+\[
+  \Pi : \mathcal{M}_{\mathrm{rich}} \rightarrow
+        (\mathcal{M}_{\mathrm{canonical}},\mathcal{P}),
+  \qquad
+  \mathcal{R}_{\mathcal{P}} : \mathcal{Y}_{\mathrm{canonical}}
+        \rightarrow \mathcal{Y}_{\mathrm{rich}},
+\]
+where \(\mathcal{P}\) is the projection bundle containing provenance,
+certificates, merge maps, and expansion maps.  In code these roles are
+\texttt{RichToCanonicalOperator} and \texttt{CanonicalToRichOperator}.
+
+\subsection{Core Invariants}
+
+\begin{enumerate}
+  \item \(\Pi\) is idempotent on a certified canonical model.
+  \item Branch mappings compose expansion/merge with dead-island deletion.
+  \item Intensive bus quantities (voltage and angle) broadcast through a merge.
+  \item Extensive quantities (power, shedding, energy) require an explicit
+        split and are never broadcast without participation semantics.
+  \item Public solve and GUI payload identities are authored identities.
+  \item Recovery class (strong, approximate, audit-only, unsupported) is part
+        of the result contract.
+\end{enumerate}
+
+Terminal power is positive injection into the network for device attribution.
+Bus diagnostics compare device injection with network terminal export and
+report both active and reactive residuals.
+
+\subsection{Registered Parameter Path}
+
+The standard parameter path is compiled profile default \(\rightarrow\)
+external JSON override \(\rightarrow\) session API/GUI edit \(\rightarrow\)
+explicit validation/application \(\rightarrow\)
+\texttt{effective\_parameters} echo. Import does not implicitly apply defaults.
+
+\subsection{Canvas Frame Contract}
+
+TSPF and transient playback use \texttt{canvas\_frame\_v1}.  A frame declares
+analysis, index, time, convergence, capabilities, authored component results,
+and optional diagnostics.  \texttt{Canvas.renderFrame} updates only SVG result
+overlays. TSPF frames may display solved static branch/CB P/Q. Transient frames
+must leave branch-flow arrays empty unless the dynamic solver recorded genuine
+terminal telemetry.
+

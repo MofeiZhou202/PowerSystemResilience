@@ -1,4 +1,4 @@
-> Documentation Sync (2026-07-05)
+> Documentation Sync (2026-07-12)
 > Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
 > Status: implementation-backed reference.
 > Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
@@ -14,11 +14,10 @@ reliability method invokes, so the two documents describe one continuum —
 "what is the frequency-and-duration-weighted consequence of every contingency,
 restored as well as the topology allows?".
 
-It supersedes nothing in the design-oriented
-[`reliability_assessment_code_review.md`](reliability_assessment_code_review.md)
-(which proposes the unified failure-mode architecture); instead it states the
-**implemented** math model of each method, classifies each piece as rigorous or
-heuristic, and records concrete correctness findings with `file:line` anchors.
+It states the **implemented** math model of each method, classifies each piece
+as rigorous or heuristic, and records concrete correctness findings. Historical
+code-review roadmaps were removed; runtime validity fields and tests are the
+scope authority.
 
 Implementation:
 `src/reliability/reliability_assessment.cpp` (resolver, NSQ/SEQ Monte Carlo, F&D,
@@ -597,8 +596,8 @@ the numbers are never compared across methods as if commensurable.
 
 - Reconfiguration / restoration kernel and the canonical LinDistFlow ONR:
   [`network_reconfiguration_models.md`](network_reconfiguration_models.md).
-- Unified failure-mode architecture proposal and roadmap:
-  [`reliability_assessment_code_review.md`](reliability_assessment_code_review.md).
+- Failure-mode implementation: `src/reliability/failure_mode.cpp` and the
+  registered reliability tests.
 - Per-method capability declarations are emitted at runtime in
   `ReliabilityResult::validity` / `FMEAResult::validity` /
   `ThreeStageReliabilityResult::validity` — treat them as the authoritative scope

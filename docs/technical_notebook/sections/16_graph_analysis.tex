@@ -779,12 +779,11 @@ When \texttt{ONROptions::verbose = true}, the pre-analysis is logged:
 ONR: 33 buses, 32 branches, 32 bridge(s), 0 fundamental cycle(s)
 \end{verbatim}
 
-For comparison, the cross-module integration test (\#327) uses a mesh
-extension of \texttt{case33bw} with five normally-open tie switches added to
-form five additional loops.  There the pre-analysis identifies 32 bridges and
-5 loop edges, fixing 32 binary variables and leaving only 5 free.  The
-observed B\&C runtime for that instance is 6.36\,s with a 0\,\% optimality
-gap (see Table~\ref{tab:pipeline2_results}).
+For comparison, the cross-module integration fixture uses a mesh extension of
+\texttt{case33bw} with five normally-open tie switches.  Its pre-analysis
+separates bridge edges from loop decisions before optimization. Runtime and
+optimality observations belong in the current benchmark output rather than a
+fixed notebook table.
 
 \subsubsection{Reliability Island Pre-Screening --- Radial Feeder Contingency}
 

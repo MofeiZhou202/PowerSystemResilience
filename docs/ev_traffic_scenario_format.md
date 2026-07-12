@@ -1,3 +1,8 @@
+> Documentation Sync (2026-07-12)
+> Status: implementation-backed schema reference.
+> Source of truth: `web/schemas/ev_traffic_scenario.schema.json`, import code,
+> and registered tests.
+
 # EV Power-Traffic Scenario Format
 
 The GUI imports a versioned JSON document conforming to

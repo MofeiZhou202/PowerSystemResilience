@@ -1,7 +1,10 @@
-> Documentation Sync (2026-07-05)
+> Documentation Sync (2026-07-12)
 > Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
 > Status: implementation-backed reference.
 > Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+
+> Runtime companion: see `runtime_api.md`, `projection_and_results.md`, and
+> `gui_canvas_runtime.md` for the current cached-frame and Canvas contracts.
 
 # 时序生产模拟 — Rich-Model Mathematical Derivation (Review Draft)
 
@@ -430,6 +433,31 @@ The objective value, the requested solver, and the active constraint set are alr
 returned by `/api/session/run_ts_pf` and `/api/session/run_annual_sim`
 (`objective_value`, `uc_solver_requested`, `constraints{}`) and shown in the results panel.
 
+## Current profile and Canvas contract (2026-07-12)
+
+`run_ts_pf` materializes the active time-series binding before solving. Imported
+scenario profiles, explicit load-profile maps, and default assignments must be
+resolved into each `pf_system_snapshots[t]`; a consumer must not replace a
+missing snapshot with the static base system.
+
+With `keep_system_snapshots=true`, `TimeSeriesPFResult` retains, per step:
+
+- `pf_results[t]` in authored bus/branch space;
+- `opf_results[t]` when dynamic OPF is enabled;
+- `pf_system_snapshots[t]` carrying the actual time-varying device state;
+- `rich_results[t]` carrying identity-keyed component attribution.
+
+The GUI summary response contains curves and aggregates. Complete Canvas data
+is read lazily through `GET /api/session/tspf/frame?step=N`. The frame contains
+AC/DC voltage, branch and circuit-breaker P/Q, Grid/generator/storage output,
+VSC/DC-DC transfers, SOC, transformer terminals, and bus P/Q diagnostics. The
+renderer updates only the result layer and never writes the snapshot values
+back into the authored model.
+
+Annual totals must report the number of converged/dropped steps. Non-converged
+steps cannot be silently omitted and then presented as a complete annual total;
+the result must either rescale under a declared policy or expose incompleteness.
+
 ---
 
 ## 8. Validation (implemented — `tests/test_uc_*.cpp`)
@@ -459,4 +487,3 @@ baseline-regression check:
 > are all implemented, opt-in, and regression-clean. Mobile storage offers both an exogenous
 > schedule and a co-optimised relocation MILP (`mobile_storage_corelocate`). Remaining future
 > work is noted inline (e.g. §4.1 buy/sell binary, §5 co-optimised topology).
-
