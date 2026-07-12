@@ -8,6 +8,7 @@
 #include <queue>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -1331,10 +1332,6 @@ void strip_dead_islands(HybridPowerSystem& sys) {
     }
   }
 
-  // Record original branch count and build branch position mapping.
-  const int n_branches_orig = static_cast<int>(branches.size());
-  sys.bus_merge_map->n_original_branches = n_branches_orig;
-
   // 鈹€鈹€ Remove dead buses 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
   std::vector<ACBus> live_buses;
   live_buses.reserve(buses.size() - dead_buses.size());
@@ -1401,22 +1398,46 @@ void strip_dead_islands(HybridPowerSystem& sys) {
   auto is_dead = [&](int bus) -> bool { return dead_buses.count(bus) > 0; };
 
   // Branches: remap and remove branches connecting to dead buses.
-  // Build orig鈫抪roj position mapping so branch_flows can be unprojected.
+  //
+  // Index-space discipline: at this point `branches` is in POST-MERGE
+  // position space, while merge_map.branch_orig_to_proj (when the merge
+  // stage ran) is keyed by PRE-MERGE (original/expanded) positions.  The
+  // strip stage therefore builds its own post-merge→post-strip map and
+  // COMPOSES it with any carried map instead of overwriting it, so
+  // branch_orig_to_proj always maps original positions to final positions
+  // and n_original_branches always counts the original space.
+  const int n_branches_pre_strip = static_cast<int>(branches.size());
+  std::vector<int> strip_pos_map(static_cast<size_t>(n_branches_pre_strip), -1);
   std::vector<ACBranch> live_br;
   live_br.reserve(branches.size());
-  for (int orig_i = 0; orig_i < static_cast<int>(branches.size()); ++orig_i) {
-    auto& br = branches[static_cast<size_t>(orig_i)];
-    if (is_dead(br.from_bus) || is_dead(br.to_bus)) {
-      sys.bus_merge_map->branch_orig_to_proj[orig_i] = -1;  // dead
-      continue;
-    }
-    sys.bus_merge_map->branch_orig_to_proj[orig_i] = static_cast<int>(live_br.size());
+  for (int pre_i = 0; pre_i < n_branches_pre_strip; ++pre_i) {
+    auto& br = branches[static_cast<size_t>(pre_i)];
+    if (is_dead(br.from_bus) || is_dead(br.to_bus)) continue;
     br.from_bus = remap(br.from_bus);
     br.to_bus = remap(br.to_bus);
     if (br.from_bus == 0 || br.to_bus == 0) continue;
+    strip_pos_map[static_cast<size_t>(pre_i)] = static_cast<int>(live_br.size());
     live_br.push_back(std::move(br));
   }
   branches = std::move(live_br);
+
+  if (merge_map.n_original_branches > 0 &&
+      !merge_map.branch_orig_to_proj.empty()) {
+    // Merge stage already recorded original→post-merge; compose with strip.
+    for (auto& [orig_pos, proj_pos] : merge_map.branch_orig_to_proj) {
+      (void)orig_pos;
+      if (proj_pos < 0) continue;
+      proj_pos = (proj_pos < n_branches_pre_strip)
+                     ? strip_pos_map[static_cast<size_t>(proj_pos)]
+                     : -1;
+    }
+  } else {
+    merge_map.n_original_branches = n_branches_pre_strip;
+    for (int pre_i = 0; pre_i < n_branches_pre_strip; ++pre_i) {
+      merge_map.branch_orig_to_proj[pre_i] =
+          strip_pos_map[static_cast<size_t>(pre_i)];
+    }
+  }
 
   // Helper: filter + remap for single-bus components
   auto filter_remap = [&](auto& vec) {
@@ -1754,6 +1775,15 @@ void merge_zero_impedance_buses(HybridPowerSystem& sys, bool allow_merge) {
 std::vector<double> unproject_bus_vector(
     const std::vector<double>& merged,
     const BusMergeMap& map) {
+  // The input must live in the canonical (merged) bus space this map was
+  // built for.  A silent partial broadcast here turns an index-space mixup
+  // into plausible-looking zeros downstream, so reject it instead.
+  if (map.n_merged > 0 && static_cast<int>(merged.size()) != map.n_merged) {
+    throw std::invalid_argument(
+        "unproject_bus_vector: input size " + std::to_string(merged.size()) +
+        " does not match BusMergeMap.n_merged " + std::to_string(map.n_merged) +
+        " (canonical/original index-space mismatch)");
+  }
   std::vector<double> out(static_cast<size_t>(map.n_original), 0.0);
   for (const auto& [ext_bus, int_pos] : map.ext_to_int) {
     if (int_pos < 0 || int_pos >= static_cast<int>(merged.size())) continue;
@@ -2054,6 +2084,30 @@ static void project_in_place(HybridPowerSystem& out,
   // data so that the rest of projection and every downstream solver can start
   // from real physical values.  No-op for systems already given in per-unit.
   convert_actual_to_per_unit(out);
+
+  // Idempotence guard (sppt_theory.tex, Prop. "Idempotence of normalization
+  // and re-projection"): a system carrying a projection certificate is
+  // already a canonical model.  Expansion must not run again — kept rich
+  // components (flexible/asymmetric loads, standalone transformers,
+  // switches/CBs) would synthesise duplicate equivalent loads and branches,
+  // silently doubling demand and admittance.  Only the idempotent stages run:
+  // canonical reindexing, and dead-island stripping so a keep-dead-islands
+  // projection can still be stripped later (the strip stage composes with the
+  // carried provenance maps).  Carried provenance is preserved, not rebuilt.
+  if (out.projection_certificate.has_value()) {
+    const auto& carried = *out.projection_certificate;
+    if (carried.mode != options.mode ||
+        std::abs(carried.impedance_threshold - options.impedance_threshold) >
+            1e-15) {
+      throw std::invalid_argument(
+          "project_to_canonical_models: cannot re-project a canonical model "
+          "with different projection mode or impedance threshold");
+    }
+    merge_zero_impedance_buses_impl(out, /*allow_merge=*/false, nullptr,
+                                    options.impedance_threshold, nullptr);
+    if (options.strip_dead_islands) strip_dead_islands(out);
+    return;
+  }
 
   project_three_phase_if_needed(out);
 

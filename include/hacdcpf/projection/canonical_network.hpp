@@ -139,15 +139,6 @@ struct BusMergeMap {
 
   // Check if a bus (by external 1-based index) is a dead island bus.
   bool is_dead_bus(int ext_bus) const { return dead_bus_indices.count(ext_bus) > 0; }
-
-  // Build identity (no-op) mapping for n buses with external indices
-  // taken from a bus vector.  Used when no merging occurs.
-  static BusMergeMap identity(int n) {
-    BusMergeMap m;
-    m.n_original = n;
-    m.n_merged = n;
-    return m;
-  }
 };
 
 // ───────────────────────────────────────────────────────────────────

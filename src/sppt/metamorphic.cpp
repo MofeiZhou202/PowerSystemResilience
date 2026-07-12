@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -40,6 +41,19 @@ double max_abs_diff(const std::vector<double>& a, const std::vector<double>& b) 
   return m;
 }
 
+double ybus_max_abs_diff(const HybridPowerSystem& a,
+                         const HybridPowerSystem& b) {
+  auto da = powerflow::make_solver_data_projected(HybridPowerSystem(a));
+  auto db = powerflow::make_solver_data_projected(HybridPowerSystem(b));
+  if (da.ybus.rows() != db.ybus.rows() || da.ybus.cols() != db.ybus.cols()) {
+    return std::numeric_limits<double>::infinity();
+  }
+  if (da.ybus.rows() == 0) return 0.0;
+  const Eigen::MatrixXcd delta = Eigen::MatrixXcd(da.ybus) -
+                                 Eigen::MatrixXcd(db.ybus);
+  return delta.cwiseAbs().maxCoeff();
+}
+
 // Attribute a canonical (merged-space) bus vector back to original space using
 // the projection's BusMergeMap, when the lengths disagree.  Falls back to the
 // canonical vector unchanged when no non-trivial map is available.
@@ -66,12 +80,30 @@ MetamorphicResult mr1_projection_idempotence(const HybridPowerSystem& sys) {
                    std::abs(n_dc_buses(p1) - n_dc_buses(p2));
   const int dbranch = std::abs(n_ac_branches(p1) - n_ac_branches(p2)) +
                       std::abs(n_dc_branches(p1) - n_dc_branches(p2));
+  // Counts alone are blind to duplicated equivalent loads and injections, so
+  // also compare the aggregated device counts and total demand — the fields a
+  // non-idempotent expansion stage corrupts first.
+  const int dload = std::abs(n_loads(p1) - n_loads(p2));
+  const int dgen = std::abs(n_generators(p1) - n_generators(p2));
+  const int dconv = std::abs(n_converters(p1) - n_converters(p2));
+  const double dload_p = std::abs(total_load_p_mw(p1) - total_load_p_mw(p2));
+  const double dload_q = std::abs(total_load_q_mvar(p1) - total_load_q_mvar(p2));
+  const double dybus = ybus_max_abs_diff(p1, p2);
 
-  r.residual = static_cast<double>(dbus + dbranch);
-  r.tolerance = 0.0;
-  r.passed = (dbus == 0 && dbranch == 0);
+  r.residual = static_cast<double>(dbus + dbranch + dload + dgen + dconv) +
+               dload_p + dload_q + dybus;
+  r.tolerance = 1e-12;
+  r.passed = (dbus == 0 && dbranch == 0 && dload == 0 && dgen == 0 &&
+              dconv == 0 && dload_p == 0.0 && dload_q == 0.0 &&
+              dybus <= r.tolerance);
   r.detail = "Pi(Pi(S)) vs Pi(S): dbus=" + std::to_string(dbus) +
-             " dbranch=" + std::to_string(dbranch);
+             " dbranch=" + std::to_string(dbranch) +
+             " dload=" + std::to_string(dload) +
+             " dgen=" + std::to_string(dgen) +
+             " dconv=" + std::to_string(dconv) +
+             " dP=" + std::to_string(dload_p) +
+             " dQ=" + std::to_string(dload_q) +
+             " dY=" + std::to_string(dybus);
   return r;
 }
 

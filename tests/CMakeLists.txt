@@ -413,6 +413,13 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
               --server "$<TARGET_FILE:run_gui_server>"
               --data-dir "${CMAKE_SOURCE_DIR}/data")
     set_tests_properties(gui_scale_features_e2e PROPERTIES LABELS "gui;e2e;browser" TIMEOUT 300)
+
+    add_test(NAME parameter_contract_e2e
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/parameter_contract_e2e.mjs"
+              --server "$<TARGET_FILE:run_gui_server>")
+    set_tests_properties(parameter_contract_e2e PROPERTIES
+      LABELS "gui;e2e;browser;parameter_contract" TIMEOUT 120)
   endif()
 endif()
 

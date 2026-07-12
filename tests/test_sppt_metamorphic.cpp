@@ -4,6 +4,7 @@
 /// docs/latex/sppt_theory.tex (Pillars 1-2 of the verification program).
 
 #include <string>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -101,6 +102,87 @@ HybridPowerSystem make_zero_impedance_case() {
   return sys;
 }
 
+HybridPowerSystem make_merge_strip_case() {
+  HybridPowerSystem sys;
+  sys.name = "sppt_merge_strip";
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 50.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ),
+                  make_bus(3, BusType::PQ), make_bus(4, BusType::PQ),
+                  make_bus(5, BusType::PQ)};
+  // Positions 0 and 1 survive. Position 2 belongs to the dead island.
+  // Projection appends the switch branch at position 3, then contracts it.
+  sys.ac.branches = {make_branch(1, 2, 3, 0.01, 0.05),
+                     make_branch(2, 1, 3, 0.02, 0.08),
+                     make_branch(3, 4, 5, 0.01, 0.04)};
+  Switch sw;
+  sw.index = 1;
+  sw.bus_from = 1;
+  sw.bus_to = 2;
+  sw.closed = true;
+  sw.in_service = true;
+  sys.ac.switches = {sw};
+  sys.ac.generators = {make_slack_gen(1, 1)};
+  sys.ac.loads = {make_load(1, 3, 20.0, 5.0),
+                  make_load(2, 5, 4.0, 1.0)};
+  return sys;
+}
+
+HybridPowerSystem make_rich_idempotence_case() {
+  HybridPowerSystem sys;
+  sys.name = "sppt_rich_idempotence";
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 50.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ),
+                  make_bus(3, BusType::PQ)};
+  sys.ac.generators = {make_slack_gen(1, 1)};
+
+  Transformer2W tr;
+  tr.index = 1;
+  tr.hv_bus = 1;
+  tr.lv_bus = 2;
+  tr.sn_mva = 40.0;
+  tr.vn_hv_kv = 20.0;
+  tr.vn_lv_kv = 10.0;
+  tr.vk_percent = 6.0;
+  tr.vkr_percent = 0.6;
+  sys.ac.transformers_2w = {tr};
+
+  Switch sw;
+  sw.index = 1;
+  sw.bus_from = 2;
+  sw.bus_to = 3;
+  sw.closed = true;
+  sys.ac.switches = {sw};
+
+  FlexibleLoad fl;
+  fl.index = 1;
+  fl.bus = 3;
+  fl.p_mw = 5.0;
+  fl.q_mvar = 2.0;
+  sys.ac.flexible_loads = {fl};
+
+  EnergyRouter er;
+  er.index = 1;
+  er.name = "ER1";
+  er.num_ports = 2;
+  er.p_rated_mw = 2.0;
+  EnergyRouterPort p1;
+  p1.index = 1;
+  p1.bus = 1;
+  p1.port_type = ERPortType::AC;
+  p1.p_set_mw = -0.5;
+  EnergyRouterPort p2 = p1;
+  p2.index = 2;
+  p2.bus = 3;
+  p2.p_set_mw = 0.49;
+  er.ports = {p1, p2};
+  sys.energy_routers = {er};
+  return sys;
+}
+
 // One self-contained area on a disjoint bus-id range.
 HybridPowerSystem make_area(int base_id) {
   HybridPowerSystem sys;
@@ -125,6 +207,61 @@ TEST_CASE("MR1: projection is idempotent", "[sppt][metamorphic][mr1]") {
     CHECK(r.passed);
     CHECK(r.residual == 0.0);
   }
+}
+
+TEST_CASE("merge then dead-island strip composes branch provenance",
+          "[sppt][projection][provenance][regression]") {
+  const HybridPowerSystem projected =
+      project_to_canonical_models(make_merge_strip_case());
+  REQUIRE(projected.bus_merge_map.has_value());
+  const auto& map = *projected.bus_merge_map;
+
+  REQUIRE(map.n_original_branches == 4);
+  REQUIRE(map.branch_orig_to_proj.size() == 4);
+  CHECK(map.branch_orig_to_proj.at(0) == 0);
+  CHECK(map.branch_orig_to_proj.at(1) == 1);
+  CHECK(map.branch_orig_to_proj.at(2) == -1);
+  CHECK(map.branch_orig_to_proj.at(3) == -1);
+  CHECK(projected.ac.branches.size() == 2);
+}
+
+TEST_CASE("rich projection is idempotent for expansion-sensitive components",
+          "[sppt][metamorphic][mr1][regression]") {
+  const HybridPowerSystem authored = make_rich_idempotence_case();
+  const HybridPowerSystem once = project_to_canonical_models(authored);
+  const HybridPowerSystem twice = project_to_canonical_models(once);
+
+  REQUIRE(once.projection_certificate.has_value());
+  CHECK(once.ac.branches.size() == twice.ac.branches.size());
+  CHECK(once.ac.loads.size() == twice.ac.loads.size());
+  CHECK(once.vsc_converters.size() == twice.vsc_converters.size());
+  CHECK(once.dc.dcdc_converters.size() == twice.dc.dcdc_converters.size());
+  CHECK(std::abs(total_load_p_mw(once) - total_load_p_mw(twice)) < 1e-12);
+  CHECK(std::abs(total_load_q_mvar(once) - total_load_q_mvar(twice)) < 1e-12);
+
+  const auto mr1 = sppt::mr1_projection_idempotence(authored);
+  INFO(mr1.detail);
+  CHECK(mr1.passed);
+  CHECK(mr1.residual <= mr1.tolerance);
+}
+
+TEST_CASE("projection index-space mismatches fail loudly",
+          "[sppt][projection][contract][regression]") {
+  BusMergeMap map;
+  map.n_original = 3;
+  map.n_merged = 2;
+  map.ext_to_int = {{1, 0}, {2, 0}, {3, 1}};
+  map.ext_to_orig_pos = {{1, 0}, {2, 1}, {3, 2}};
+
+  CHECK_THROWS_AS(unproject_bus_vector({1.0}, map), std::invalid_argument);
+
+  ProjectionOptions exact;
+  const HybridPowerSystem canonical =
+      project_to_canonical_models(make_rich_idempotence_case(), exact);
+  ProjectionOptions incompatible = exact;
+  incompatible.impedance_threshold *= 2.0;
+  CHECK_THROWS_AS(project_to_canonical_models(canonical, incompatible),
+                  std::invalid_argument);
 }
 
 TEST_CASE("MR3: power-flow semantics are preserved through projection",

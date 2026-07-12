@@ -2,6 +2,7 @@
 /// @brief Tests for the opt-in typical parameter library.
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 
 #include <catch2/catch_test_macros.hpp>
@@ -14,6 +15,125 @@
 
 using namespace hacdcpf;
 using Catch::Matchers::WithinAbs;
+
+namespace {
+
+HybridPowerSystem make_parameter_contract_system() {
+  HybridPowerSystem sys;
+  sys.base_mva = 0.0;
+  sys.ac.base_mva = 0.0;
+  sys.dc.base_mva = 0.0;
+  sys.ac.freq_hz = 0.0;
+
+  ACBus ac1;
+  ac1.index = 1;
+  ac1.bus_type = BusType::SLACK;
+  ac1.base_kv = 0.0;
+  ac1.vm_pu = 0.0;
+  ac1.vmin_pu = 0.0;
+  ac1.vmax_pu = 0.0;
+  ACBus ac2 = ac1;
+  ac2.index = 2;
+  ac2.bus_type = BusType::PQ;
+  sys.ac.buses = {ac1, ac2};
+
+  ACBranch line;
+  line.index = 1;
+  line.from_bus = 1;
+  line.to_bus = 2;
+  ACBranch transformer_branch = line;
+  transformer_branch.index = 2;
+  transformer_branch.sn_mva = 1.0;
+  sys.ac.branches = {line, transformer_branch};
+
+  Transformer2W transformer;
+  transformer.index = 1;
+  transformer.hv_bus = 1;
+  transformer.lv_bus = 2;
+  sys.ac.transformers_2w = {transformer};
+
+  DCBus dc1;
+  dc1.index = 1;
+  dc1.base_kv = 0.0;
+  DCBus dc2 = dc1;
+  dc2.index = 2;
+  sys.dc.buses = {dc1, dc2};
+  DCBranch dc_line;
+  dc_line.index = 1;
+  dc_line.from_bus = 1;
+  dc_line.to_bus = 2;
+  sys.dc.branches = {dc_line};
+
+  VSCConverter vsc;
+  vsc.index = 1;
+  vsc.bus_ac = 1;
+  vsc.bus_dc = 1;
+  vsc.p_rated_mw = 0.0;
+  vsc.eta = 0.0;
+  vsc.r_sc_pu = 0.0;
+  vsc.x_sc_pu = 0.0;
+  vsc.i_max_pu = 0.0;
+  sys.vsc_converters = {vsc};
+
+  DCDCConverter dcdc;
+  dcdc.index = 1;
+  dcdc.bus_in = 1;
+  dcdc.bus_out = 2;
+  dcdc.eta = 0.0;
+  sys.dc.dcdc_converters = {dcdc};
+
+  Storage storage;
+  storage.index = 1;
+  storage.bus = 1;
+  storage.eta_charge = 0.0;
+  storage.eta_discharge = 0.0;
+  sys.ac.storage = {storage};
+  return sys;
+}
+
+double representative_parameter_value(const HybridPowerSystem& sys,
+                                      const std::string& id) {
+  if (id == "system.base_mva") return sys.base_mva;
+  if (id == "system.frequency_hz") return sys.ac.freq_hz;
+  if (id == "ac_bus.base_kv") return sys.ac.buses[0].base_kv;
+  if (id == "ac_bus.vm_pu") return sys.ac.buses[0].vm_pu;
+  if (id == "ac_bus.vmin_pu") return sys.ac.buses[0].vmin_pu;
+  if (id == "ac_bus.vmax_pu") return sys.ac.buses[0].vmax_pu;
+  if (id == "ac_branch.r_pu") return sys.ac.branches[0].r_pu;
+  if (id == "ac_branch.x_pu") return sys.ac.branches[0].x_pu;
+  if (id == "ac_branch.rate_a_mva") return sys.ac.branches[0].rate_a_mva;
+  if (id == "transformer.r_pu") return sys.ac.branches[1].r_pu;
+  if (id == "transformer.x_pu") return sys.ac.branches[1].x_pu;
+  if (id == "transformer.sn_mva") return sys.ac.transformers_2w[0].sn_mva;
+  if (id == "transformer.vk_percent") return sys.ac.transformers_2w[0].vk_percent;
+  if (id == "transformer.vkr_percent") return sys.ac.transformers_2w[0].vkr_percent;
+  if (id == "dc_bus.base_kv") return sys.dc.buses[0].base_kv;
+  if (id == "dc_branch.r_pu") return sys.dc.branches[0].r_pu;
+  if (id == "vsc.p_rated_mw") return sys.vsc_converters[0].p_rated_mw;
+  if (id == "vsc.eta") return sys.vsc_converters[0].eta;
+  if (id == "vsc.r_sc_pu") return sys.vsc_converters[0].r_sc_pu;
+  if (id == "vsc.x_sc_pu") return sys.vsc_converters[0].x_sc_pu;
+  if (id == "vsc.i_max_pu") return sys.vsc_converters[0].i_max_pu;
+  if (id == "dcdc.eta") return sys.dc.dcdc_converters[0].eta;
+  if (id == "storage.eta_charge") return sys.ac.storage[0].eta_charge;
+  if (id == "storage.eta_discharge") return sys.ac.storage[0].eta_discharge;
+  FAIL("No parameter-contract representative for " + id);
+  return 0.0;
+}
+
+double alternate_rule_value(const StandardParameterRule& rule) {
+  double candidate = rule.has_min && rule.has_max
+                         ? rule.min_value + 0.37 * (rule.max_value - rule.min_value)
+                         : rule.default_value * 1.17 + 0.01;
+  if (std::abs(candidate - rule.default_value) < 1e-10) {
+    candidate = rule.has_min && rule.has_max
+                    ? rule.min_value + 0.63 * (rule.max_value - rule.min_value)
+                    : rule.default_value + 0.1;
+  }
+  return candidate;
+}
+
+}  // namespace
 
 TEST_CASE("apply_typical_parameters fills sparse hybrid AC/DC model",
           "[model][typical_parameters]") {
@@ -258,6 +378,33 @@ TEST_CASE("standard parameter library applies edited defaults only when requeste
   CHECK(applied.fields_changed > 0);
   CHECK_THAT(sys.ac.branches.front().r_pu, WithinAbs(0.025, 1e-12));
   CHECK_THAT(sys.ac.branches.front().x_pu, WithinAbs(0.055, 1e-12));
+}
+
+TEST_CASE("every registered standard parameter has an effective numerical override",
+          "[model][parameter_library][contract][sensitivity]") {
+  const auto baseline = make_standard_parameter_library();
+  REQUIRE(baseline.rules.size() == 24);
+
+  for (const auto& baseline_rule : baseline.rules) {
+    DYNAMIC_SECTION(baseline_rule.id) {
+      auto library = baseline;
+      auto* rule = library.find(baseline_rule.id);
+      REQUIRE(rule != nullptr);
+      const double alternate = alternate_rule_value(*rule);
+      rule->default_value = alternate;
+      REQUIRE(validate_standard_parameter_library(library).ok());
+
+      auto sys = make_parameter_contract_system();
+      const auto applied = apply_standard_parameter_library(sys, library);
+      CAPTURE(baseline_rule.id, baseline_rule.default_value, alternate,
+              applied.applied_rule_ids);
+      CHECK(std::find(applied.applied_rule_ids.begin(),
+                      applied.applied_rule_ids.end(),
+                      baseline_rule.id) != applied.applied_rule_ids.end());
+      CHECK_THAT(representative_parameter_value(sys, baseline_rule.id),
+                 WithinAbs(alternate, 1e-12));
+    }
+  }
 }
 
 TEST_CASE("parameter validation rejects zero-impedance transformer imports",

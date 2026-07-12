@@ -1428,8 +1428,27 @@ json post_power_flow_terminal_flows_json(
 std::vector<double> project_replay_ac_bus_vector(
     const std::vector<double>& original_space,
     const hacdcpf::HybridPowerSystem& projected_sys) {
-  if (!projected_sys.bus_merge_map || original_space.empty()) return original_space;
+  if (original_space.empty()) return original_space;
+  if (!projected_sys.bus_merge_map) {
+    // Without a merge map original and canonical space coincide — but only
+    // when the sizes actually agree.  Returning the vector unchanged on a
+    // size mismatch would reuse original-space values at projected indices.
+    if (original_space.size() != projected_sys.ac.buses.size()) {
+      throw std::runtime_error(
+          "project_replay_ac_bus_vector: no bus merge map and vector size " +
+          std::to_string(original_space.size()) + " != projected bus count " +
+          std::to_string(projected_sys.ac.buses.size()));
+    }
+    return original_space;
+  }
   const auto& map = *projected_sys.bus_merge_map;
+  if (map.n_original > 0 &&
+      static_cast<int>(original_space.size()) != map.n_original) {
+    throw std::runtime_error(
+        "project_replay_ac_bus_vector: vector size " +
+        std::to_string(original_space.size()) +
+        " != BusMergeMap.n_original " + std::to_string(map.n_original));
+  }
   std::vector<double> projected(static_cast<size_t>(map.n_merged), 0.0);
   std::vector<char> assigned(static_cast<size_t>(map.n_merged), 0);
   for (const auto& [ext_bus, int_pos] : map.ext_to_int) {
@@ -1443,8 +1462,15 @@ std::vector<double> project_replay_ac_bus_vector(
       assigned[static_cast<size_t>(int_pos)] = 1;
     }
   }
-  for (size_t i = 0; i < projected.size() && i < original_space.size(); ++i) {
-    if (!assigned[i]) projected[i] = original_space[i];
+  // Every canonical bus has at least one original member, so an unassigned
+  // position means the merge map is inconsistent — not a case to paper over
+  // with positional identity.
+  for (size_t i = 0; i < projected.size(); ++i) {
+    if (!assigned[i]) {
+      throw std::runtime_error(
+          "project_replay_ac_bus_vector: canonical bus position " +
+          std::to_string(i) + " has no original member in BusMergeMap");
+    }
   }
   return projected;
 }
@@ -1455,6 +1481,9 @@ std::optional<double> replay_ac_value_for_bus(
     int projected_bus) {
   if (original_space.empty()) return std::nullopt;
   if (projected_sys.bus_merge_map) {
+    // With a merge map, a failed lookup means the bus has no recoverable
+    // original value; the positional interpretation below is only valid for
+    // the no-map (identity) case and must not act as its fallback.
     const auto& map = *projected_sys.bus_merge_map;
     const int int_pos = projected_bus - 1;
     if (int_pos >= 0 && int_pos < static_cast<int>(map.int_to_ext.size())) {
@@ -1465,6 +1494,7 @@ std::optional<double> replay_ac_value_for_bus(
         return original_space[static_cast<size_t>(op->second)];
       }
     }
+    return std::nullopt;
   }
   const int pos = projected_bus - 1;
   if (pos >= 0 && pos < static_cast<int>(original_space.size())) {
@@ -1477,6 +1507,8 @@ std::optional<size_t> replay_ac_original_pos_for_bus(
     const hacdcpf::HybridPowerSystem& projected_sys,
     int projected_bus) {
   if (projected_sys.bus_merge_map) {
+    // Same discipline as replay_ac_value_for_bus: never substitute the
+    // positional identity when a merge map exists but the lookup fails.
     const auto& map = *projected_sys.bus_merge_map;
     const int int_pos = projected_bus - 1;
     if (int_pos >= 0 && int_pos < static_cast<int>(map.int_to_ext.size())) {
@@ -1486,6 +1518,7 @@ std::optional<size_t> replay_ac_original_pos_for_bus(
         return static_cast<size_t>(op->second);
       }
     }
+    return std::nullopt;
   }
   const int pos = projected_bus - 1;
   return pos >= 0 ? std::optional<size_t>(static_cast<size_t>(pos)) : std::nullopt;
@@ -1880,7 +1913,37 @@ json parameter_rule_to_json(const hacdcpf::StandardParameterRule& rule) {
               {"severity", hacdcpf::to_string(rule.severity)},
               {"source", rule.source},
               {"description", rule.description},
-              {"editable", rule.editable}};
+              {"editable", rule.editable},
+              {"contract",
+               {{"default_config", true},
+                {"external_json_override", rule.editable},
+                {"api_effective", true},
+                {"gui_editable", rule.editable},
+                {"effective_parameters_echo", true},
+                {"sensitivity_kind", "missing_model_field_fill"}}}};
+}
+
+json effective_parameter_library_json(
+    const hacdcpf::StandardParameterLibrary& library,
+    const std::vector<std::string>& applied_rule_ids = {}) {
+  const std::unordered_set<std::string> applied(applied_rule_ids.begin(),
+                                                applied_rule_ids.end());
+  json values = json::object();
+  for (const auto& rule : library.rules) {
+    values[rule.id] = {
+        {"value", rule.default_value},
+        {"unit", rule.unit},
+        {"source", rule.source},
+        {"origin", "parameter_library"},
+        {"applied_to_model", applied.count(rule.id) != 0},
+        {"editable", rule.editable},
+        {"min_value", rule.has_min ? json(rule.min_value) : json(nullptr)},
+        {"max_value", rule.has_max ? json(rule.max_value) : json(nullptr)}};
+  }
+  return json{{"registry", "standard_parameter_library"},
+              {"profile_id", library.profile_id},
+              {"version", library.version},
+              {"values", std::move(values)}};
 }
 
 json parameter_diagnostic_to_json(const hacdcpf::ParameterDiagnostic& item) {
@@ -1918,6 +1981,15 @@ json parameter_library_to_json(
            {"version", library.version},
            {"description", library.description},
            {"rules", std::move(rules)}};
+  out["effective_parameters"] = effective_parameter_library_json(library);
+  out["parameter_contract"] = {
+      {"registered_count", library.rules.size()},
+      {"default_config", true},
+      {"external_json_override", true},
+      {"api_effective", true},
+      {"gui_editable", true},
+      {"effective_parameters_echo", true},
+      {"sensitivity_test", "per_rule_missing_field_fill"}};
   if (include_profiles) {
     out["profiles"] = json::array();
     for (const auto& profile : hacdcpf::standard_parameter_profiles()) {
@@ -5060,25 +5132,39 @@ void opf_apply_canonical_source(json& row,
   }
 }
 
+// OPF result vectors must be positionally aligned with the component list
+// they are serialized against: either absent (empty) or exactly one entry per
+// component.  Any other size is an index-space mismatch (canonical results
+// paired with original components, or vice versa) and must fail the request
+// instead of being padded with nulls / silently truncated.
+void opf_require_aligned(const char* helper, const char* field,
+                         size_t vector_size, size_t component_count) {
+  if (vector_size != 0 && vector_size != component_count) {
+    throw std::runtime_error(
+        std::string(helper) + ": result vector '" + field + "' has " +
+        std::to_string(vector_size) + " entries but the component list has " +
+        std::to_string(component_count) +
+        " (canonical/original index-space mismatch)");
+  }
+}
+
 json opf_ac_bus_results_json(const hacdcpf::HybridPowerSystem& sys,
                              const std::vector<double>& vm,
                              const std::vector<double>& va,
                              const std::vector<double>& lmp_p = {},
                              const std::vector<double>& lmp_q = {}) {
+  const size_t n = sys.ac.buses.size();
+  opf_require_aligned("opf_ac_bus_results_json", "vm", vm.size(), n);
+  opf_require_aligned("opf_ac_bus_results_json", "va", va.size(), n);
+  opf_require_aligned("opf_ac_bus_results_json", "lmp_p", lmp_p.size(), n);
+  opf_require_aligned("opf_ac_bus_results_json", "lmp_q", lmp_q.size(), n);
   json rows = json::array();
-  const size_t n = std::max({sys.ac.buses.size(), vm.size(), va.size(), lmp_p.size(), lmp_q.size()});
   for (size_t i = 0; i < n; ++i) {
+    const auto& b = sys.ac.buses[i];
     json row{{"position", i}, {"canvas_type", "ac"}};
-    if (i < sys.ac.buses.size()) {
-      const auto& b = sys.ac.buses[i];
-      row["index"] = b.index;
-      row["name"] = b.name.empty() ? opf_default_name("AC Bus", b.index) : b.name;
-      row["canvas_index"] = b.index;
-    } else {
-      row["index"] = nullptr;
-      row["name"] = "AC Bus pos " + std::to_string(i);
-      row["canvas_index"] = nullptr;
-    }
+    row["index"] = b.index;
+    row["name"] = b.name.empty() ? opf_default_name("AC Bus", b.index) : b.name;
+    row["canvas_index"] = b.index;
     if (i < vm.size()) row["vm_pu"] = vm[i];
     if (i < va.size()) row["va_rad"] = va[i];
     if (i < lmp_p.size()) row["lmp_p"] = lmp_p[i];
@@ -5090,20 +5176,15 @@ json opf_ac_bus_results_json(const hacdcpf::HybridPowerSystem& sys,
 
 json opf_dc_bus_results_json(const hacdcpf::HybridPowerSystem& sys,
                              const std::vector<double>& vdc) {
+  const size_t n = sys.dc.buses.size();
+  opf_require_aligned("opf_dc_bus_results_json", "vdc", vdc.size(), n);
   json rows = json::array();
-  const size_t n = std::max(sys.dc.buses.size(), vdc.size());
   for (size_t i = 0; i < n; ++i) {
+    const auto& b = sys.dc.buses[i];
     json row{{"position", i}, {"canvas_type", "dc"}};
-    if (i < sys.dc.buses.size()) {
-      const auto& b = sys.dc.buses[i];
-      row["index"] = b.index;
-      row["name"] = b.name.empty() ? opf_default_name("DC Bus", b.index) : b.name;
-      row["canvas_index"] = b.index;
-    } else {
-      row["index"] = nullptr;
-      row["name"] = "DC Bus pos " + std::to_string(i);
-      row["canvas_index"] = nullptr;
-    }
+    row["index"] = b.index;
+    row["name"] = b.name.empty() ? opf_default_name("DC Bus", b.index) : b.name;
+    row["canvas_index"] = b.index;
     if (i < vdc.size()) row["vdc_pu"] = vdc[i];
     rows.push_back(std::move(row));
   }
@@ -5113,21 +5194,17 @@ json opf_dc_bus_results_json(const hacdcpf::HybridPowerSystem& sys,
 json opf_generator_dispatch_json(const hacdcpf::HybridPowerSystem& sys,
                                  const std::vector<double>& pg,
                                  const std::vector<double>& qg = {}) {
+  const size_t n = sys.ac.generators.size();
+  opf_require_aligned("opf_generator_dispatch_json", "pg", pg.size(), n);
+  opf_require_aligned("opf_generator_dispatch_json", "qg", qg.size(), n);
   json rows = json::array();
-  const size_t n = std::max(sys.ac.generators.size(), pg.size());
   for (size_t i = 0; i < n; ++i) {
+    const auto& g = sys.ac.generators[i];
     json row{{"position", i}, {"display_type", "发电机"}, {"canvas_type", "gen"}};
-    if (i < sys.ac.generators.size()) {
-      const auto& g = sys.ac.generators[i];
-      row["index"] = g.index;
-      row["name"] = opf_component_name(g, "发电机");
-      row["bus"] = g.bus;
-      row["canvas_index"] = g.index;
-    } else {
-      row["index"] = nullptr;
-      row["name"] = "发电机 pos " + std::to_string(i);
-      row["canvas_index"] = nullptr;
-    }
+    row["index"] = g.index;
+    row["name"] = opf_component_name(g, "发电机");
+    row["bus"] = g.bus;
+    row["canvas_index"] = g.index;
     if (i < pg.size()) row["pg_mw"] = pg[i];
     if (i < qg.size()) row["qg_mvar"] = qg[i];
     rows.push_back(std::move(row));
@@ -5167,10 +5244,11 @@ json opf_vsc_dispatch_json(const hacdcpf::HybridPowerSystem& sys,
                            const std::vector<double>& qac) {
   json rows = json::array();
   const auto positions = opf_active_vsc_positions(sys);
-  const size_t n = std::max(pac.size(), std::max(qac.size(), positions.size()));
-  for (size_t k = 0; k < n; ++k) {
+  opf_require_aligned("opf_vsc_dispatch_json", "pac", pac.size(), positions.size());
+  opf_require_aligned("opf_vsc_dispatch_json", "qac", qac.size(), positions.size());
+  for (size_t k = 0; k < positions.size(); ++k) {
     json row{{"position", k}, {"display_type", "VSC换流器"}, {"canvas_type", "vsc"}};
-    const bool has_pos = k < positions.size() && positions[k] < sys.vsc_converters.size();
+    const bool has_pos = positions[k] < sys.vsc_converters.size();
     if (has_pos) {
       const size_t pos = positions[k];
       const auto& c = sys.vsc_converters[pos];
@@ -5417,23 +5495,18 @@ json power_flow_geo_energy_router_json(
 
 json opf_dc_branch_dispatch_json(const hacdcpf::HybridPowerSystem& sys,
                                  const std::vector<double>& pf) {
+  const size_t n = sys.ac.branches.size();
+  opf_require_aligned("opf_dc_branch_dispatch_json", "pf", pf.size(), n);
   json rows = json::array();
-  const size_t n = std::max(sys.ac.branches.size(), pf.size());
   for (size_t i = 0; i < n; ++i) {
+    const auto& br = sys.ac.branches[i];
     json row{{"position", i}, {"display_type", "AC线路"}, {"canvas_type", "branch"}};
-    if (i < sys.ac.branches.size()) {
-      const auto& br = sys.ac.branches[i];
-      row["index"] = br.index;
-      row["name"] = br.name.empty() ? opf_branch_name("AC线路", br.index, br.from_bus, br.to_bus) : br.name;
-      row["from_bus"] = br.from_bus;
-      row["to_bus"] = br.to_bus;
-      row["canvas_index"] = br.index;
-      row["rate_mva"] = br.rate_a_mva;
-    } else {
-      row["index"] = nullptr;
-      row["name"] = "AC线路 pos " + std::to_string(i);
-      row["canvas_index"] = nullptr;
-    }
+    row["index"] = br.index;
+    row["name"] = br.name.empty() ? opf_branch_name("AC线路", br.index, br.from_bus, br.to_bus) : br.name;
+    row["from_bus"] = br.from_bus;
+    row["to_bus"] = br.to_bus;
+    row["canvas_index"] = br.index;
+    row["rate_mva"] = br.rate_a_mva;
     if (i < pf.size()) row["pf_mw"] = pf[i];
     rows.push_back(std::move(row));
   }
@@ -10385,6 +10458,8 @@ int main(int argc, char** argv) {
       out["parameter_apply"] =
           json{{"fields_changed", applied.fields_changed},
                {"applied_rule_ids", applied.applied_rule_ids}};
+      out["effective_parameters"] = effective_parameter_library_json(
+          g_session.parameter_library, applied.applied_rule_ids);
       out["parameter_validation"] = parameter_validation_to_json(
           hacdcpf::validate_component_parameters(*g_session.current_system,
                                                   g_session.parameter_library));
