@@ -311,6 +311,7 @@ async function main() {
       App.setActiveModule('tspf');
       simHr.value = '48';                              // user shortens the horizon
       document.getElementById('tspfSkipUC').checked = true;
+      const roundTripped = Canvas.buildSystemJson();
       document.getElementById('btnRunTimeSeriesPF').click();
       const t0 = Date.now();
       while (Date.now() - t0 < 40000) {
@@ -318,10 +319,20 @@ async function main() {
         if (/收敛|失效/.test(c)) break;
         await new Promise((r) => setTimeout(r, 300));
       }
-      return { importedLen, checkbox, ranSteps: _lastTspfStepsForTest(), chip: document.getElementById('depChipTspf')?.textContent, simHrAfter: simHr.value };
+      return {
+        importedLen,
+        checkbox,
+        preservedSteps: roundTripped?._time_series?.num_steps,
+        preservedFamily: roundTripped?._generated_scenario?.family,
+        ranSteps: _lastTspfStepsForTest(),
+        chip: document.getElementById('depChipTspf')?.textContent,
+        simHrAfter: simHr.value,
+      };
       function _lastTspfStepsForTest() { return document.getElementById('depChipTspf')?.textContent || ''; }
     });
     check(horizon.importedLen === '240' && horizon.checkbox === true, 'scenario import set horizon=240 and checked 使用场景时序');
+    check(horizon.preservedSteps === 240 && horizon.preservedFamily === 'regular',
+      'Canvas round-trip preserves generated-scenario time series and metadata');
     check(/TSPF: 48\/48/.test(horizon.chip) && horizon.simHrAfter === '48',
       `edited horizon (48) wins over imported scenario length: "${horizon.chip}"`);
 

@@ -2537,6 +2537,12 @@ const Canvas = (() => {
 	      if (_preservedModelBlocks.three_phase_ac && !out.three_phase_ac) {
 	        out.three_phase_ac = cloneJsonBlock(_preservedModelBlocks.three_phase_ac);
 	      }
+	      if (_preservedModelBlocks._time_series && !out._time_series) {
+	        out._time_series = cloneJsonBlock(_preservedModelBlocks._time_series);
+	      }
+	      if (_preservedModelBlocks._generated_scenario && !out._generated_scenario) {
+	        out._generated_scenario = cloneJsonBlock(_preservedModelBlocks._generated_scenario);
+	      }
 	      return out;
 	    }
 	    const sys = {
@@ -2558,6 +2564,12 @@ const Canvas = (() => {
 	    };
 	    if (_preservedModelBlocks.three_phase_ac) {
 	      sys.three_phase_ac = cloneJsonBlock(_preservedModelBlocks.three_phase_ac);
+	    }
+	    if (_preservedModelBlocks._time_series) {
+	      sys._time_series = cloneJsonBlock(_preservedModelBlocks._time_series);
+	    }
+	    if (_preservedModelBlocks._generated_scenario) {
+	      sys._generated_scenario = cloneJsonBlock(_preservedModelBlocks._generated_scenario);
 	    }
 
     // Assign bus indices (1-based, matching MATPOWER/C++ convention).
@@ -3707,6 +3719,12 @@ const Canvas = (() => {
 	    _preservedModelBlocks = {};
 	    if (jsonSys?.three_phase_ac) {
 	      _preservedModelBlocks.three_phase_ac = cloneJsonBlock(jsonSys.three_phase_ac);
+	    }
+	    if (jsonSys?._time_series) {
+	      _preservedModelBlocks._time_series = cloneJsonBlock(jsonSys._time_series);
+	    }
+	    if (jsonSys?._generated_scenario) {
+	      _preservedModelBlocks._generated_scenario = cloneJsonBlock(jsonSys._generated_scenario);
 	    }
 
     // Preserve system base MVA (critical for per-unit calculations)
