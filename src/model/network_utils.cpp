@@ -1317,6 +1317,7 @@ void strip_dead_islands(HybridPowerSystem& sys) {
       const int ext = buses[static_cast<size_t>(i)].index;
       m.ext_to_int[ext] = i;
       m.ext_to_orig_pos[ext] = i;
+      m.extensive_participation[ext] = 1.0;
       m.int_to_ext[static_cast<size_t>(i)] = ext;
       m.groups[static_cast<size_t>(i)] = {ext};
     }
@@ -1611,6 +1612,25 @@ static void merge_zero_impedance_buses_impl(
   merge_map.impedance_threshold = impedance_threshold;
   if (certificate != nullptr) merge_map.merge_records = certificate->merge_records;
 
+  std::unordered_map<int, double> extensive_basis;
+  for (const auto& bus : buses) {
+    if (bus.in_service) {
+      extensive_basis[bus.index] += std::max(0.0, bus.pd_mw);
+    }
+  }
+  for (const auto& load : sys.ac.loads) {
+    if (load.in_service) {
+      extensive_basis[load.bus] +=
+          std::max(0.0, load.p_mw * load.scaling);
+    }
+  }
+  for (const auto& station : sys.ac.charging_stations) {
+    if (station.in_service) {
+      extensive_basis[station.bus] +=
+          std::max(0.0, station.p_total_kw / 1000.0);
+    }
+  }
+
   // new_pos: representative position 鈫?new sequential position
   std::vector<int> old_pos_to_new(static_cast<size_t>(n), -1);
   std::vector<ACBus> merged_buses;
@@ -1655,9 +1675,18 @@ static void merge_zero_impedance_buses_impl(
     // Record mapping for all members
     std::vector<int> group_ext;
     group_ext.reserve(members.size());
+    double group_basis = 0.0;
+    for (int m : members) {
+      group_basis += extensive_basis[buses[static_cast<size_t>(m)].index];
+    }
     for (int m : members) {
       old_pos_to_new[static_cast<size_t>(m)] = new_pos;
-      group_ext.push_back(buses[static_cast<size_t>(m)].index);
+      const int ext = buses[static_cast<size_t>(m)].index;
+      group_ext.push_back(ext);
+      merge_map.extensive_participation[ext] =
+          group_basis > 1e-12
+              ? extensive_basis[ext] / group_basis
+              : 1.0 / static_cast<double>(members.size());
     }
     merge_map.groups.push_back(std::move(group_ext));
     merge_map.int_to_ext.push_back(buses[static_cast<size_t>(rep)].index);
@@ -1774,7 +1803,8 @@ void merge_zero_impedance_buses(HybridPowerSystem& sys, bool allow_merge) {
 // 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 std::vector<double> unproject_bus_vector(
     const std::vector<double>& merged,
-    const BusMergeMap& map) {
+    const BusMergeMap& map,
+    BusVectorSemantics semantics) {
   // The input must live in the canonical (merged) bus space this map was
   // built for.  A silent partial broadcast here turns an index-space mixup
   // into plausible-looking zeros downstream, so reject it instead.
@@ -1793,7 +1823,17 @@ std::vector<double> unproject_bus_vector(
       orig_pos = it_pos->second;
     }
     if (orig_pos < 0 || orig_pos >= map.n_original) continue;
-    out[static_cast<size_t>(orig_pos)] = merged[static_cast<size_t>(int_pos)];
+    double value = merged[static_cast<size_t>(int_pos)];
+    if (semantics == BusVectorSemantics::Extensive) {
+      const auto weight = map.extensive_participation.find(ext_bus);
+      if (weight == map.extensive_participation.end()) {
+        throw std::invalid_argument(
+            "unproject_bus_vector: extensive quantity has no participation "
+            "factor for original bus " + std::to_string(ext_bus));
+      }
+      value *= weight->second;
+    }
+    out[static_cast<size_t>(orig_pos)] = value;
   }
   return out;
 }
@@ -2059,6 +2099,8 @@ static void project_in_place(HybridPowerSystem& out,
   ProjectionCertificate projection_certificate;
   projection_certificate.mode = options.mode;
   projection_certificate.impedance_threshold = options.impedance_threshold;
+  projection_certificate.n_authored_dc_buses =
+      static_cast<int>(out.dc.buses.size());
   ProjectionReport projection_report;
 
   auto record_mapping = [&](const std::string& source_type,
@@ -2357,32 +2399,21 @@ static DeviceTerminalFlows device_terminal_flows_from_net(
     const std::unordered_map<int, double>& net_p,
     const std::unordered_map<int, double>& net_q) {
   DeviceTerminalFlows out;
-  // Adjacency over in-service AC lines + closed switches/CBs; the device under
-  // test is excluded by stopping BFS at its far bus so we sum only one side.
-  std::unordered_map<int, std::vector<int>> adj;
-  for (const auto& br : sys.ac.branches)
-    if (br.in_service) { adj[br.from_bus].push_back(br.to_bus); adj[br.to_bus].push_back(br.from_bus); }
-  for (const auto& sw : sys.ac.switches)
-    if (sw.in_service && sw.closed) { adj[sw.bus_from].push_back(sw.bus_to); adj[sw.bus_to].push_back(sw.bus_from); }
-  for (const auto& cb : sys.ac.circuit_breakers)
-    if (cb.in_service && cb.closed) { adj[cb.bus_from].push_back(cb.bus_to); adj[cb.bus_to].push_back(cb.bus_from); }
-
-  auto side_injection = [&](int a, int b) {
-    double p = 0.0, q = 0.0; std::unordered_set<int> seen{a};
-    std::queue<int> bfs; bfs.push(a);
-    while (!bfs.empty()) {
-      int u = bfs.front(); bfs.pop();
-      auto pit = net_p.find(u); if (pit != net_p.end()) p += pit->second;
-      auto qit = net_q.find(u); if (qit != net_q.end()) q += qit->second;
-      auto ait = adj.find(u); if (ait == adj.end()) continue;
-      for (int v : ait->second) { if (v == b) continue; if (!seen.count(v)) { seen.insert(v); bfs.push(v); } }
-    }
-    return std::pair<double,double>{p, q};
+  auto terminal_residual = [&](int bus) {
+    const auto active = net_p.find(bus);
+    const auto reactive = net_q.find(bus);
+    return std::pair<double, double>{
+        active == net_p.end() ? 0.0 : active->second,
+        reactive == net_q.end() ? 0.0 : reactive->second};
   };
   auto fill = [&](DeviceTerminalFlow& f, int from, int to, bool closed, double rate) {
     f.bus_from = from; f.bus_to = to; f.closed = closed; f.rate_mva = rate;
     if (!closed || !from || !to || from == to) return;
-    auto [p, q] = side_injection(to, from);  // flow into to-side = its net demand
+    // After authored line flows have been subtracted, the residual at the
+    // receiving terminal is exactly the collapsed device's terminal injection.
+    // Unlike a topology-cut BFS, this remains valid when another path connects
+    // the two endpoint areas.
+    auto [p, q] = terminal_residual(to);
     f.pf_mw = -p; f.pt_mw = p; f.qf_mvar = -q; f.qt_mvar = q;
     if (rate > 0) f.loading_pct = 100.0 * std::hypot(p, q) / rate;
   };
@@ -2404,33 +2435,73 @@ static DeviceTerminalFlows device_terminal_flows_from_net(
 }
 
 DeviceTerminalFlows compute_device_terminal_flows(const HybridPowerSystem& sys,
-                                                  const std::vector<double>& /*vm*/,
-                                                  const std::vector<double>& /*va*/) {
-  // Per-bus net injection (gen − load), MW/MVAr, keyed by bus .index.
-  std::unordered_map<int, double> net_p, net_q;
-  auto add_p = [&](int b, double v) { if (b) net_p[b] += v; };
-  auto add_q = [&](int b, double v) { if (b) net_q[b] += v; };
-  for (const auto& b : sys.ac.buses) { add_p(b.index, -b.pd_mw); add_q(b.index, -b.qd_mvar); }
-  for (const auto& l : sys.ac.loads) if (l.in_service) { add_p(l.bus, -l.p_mw); add_q(l.bus, -l.q_mvar); }
-  for (const auto& g : sys.ac.generators) if (g.in_service) { add_p(g.bus, g.pg_mw); add_q(g.bus, g.qg_mvar); }
-  for (const auto& g : sys.ac.static_generators) if (g.in_service) { add_p(g.bus, g.p_mw); add_q(g.bus, g.q_mvar); }
-  for (const auto& g : sys.ac.renewable_gens) if (g.in_service) { add_p(g.bus, g.p_mw); }
-  for (const auto& g : sys.ac.pv_systems) if (g.in_service) { add_p(g.bus, g.p_mw); add_q(g.bus, g.q_mvar); }
-  for (const auto& s : sys.ac.storage) if (s.in_service) { add_p(s.bus, s.p_mw); add_q(s.bus, s.q_mvar); }
-  return device_terminal_flows_from_net(sys, net_p, net_q);
-}
-
-DeviceTerminalFlows compute_device_terminal_flows(const HybridPowerSystem& sys,
                                                   const std::vector<BranchFlow>& ac_branch_flows) {
-  // PF-aware: net injection at a bus = Σ outgoing solved AC line flows (KCL),
-  // so meshed/looped feeders use the actual converged state, not nominal loads.
+  // Residual KCL after subtracting authored line flows is the injection carried
+  // by collapsed switches/CBs. This retains solved meshed-network flows while
+  // preserving the actual rich-side load/generation distribution.
   std::unordered_map<int, double> net_p, net_q;
+  auto add_p = [&](int bus, double value) {
+    if (bus != 0) net_p[bus] += value;
+  };
+  auto add_q = [&](int bus, double value) {
+    if (bus != 0) net_q[bus] += value;
+  };
+  for (const auto& bus : sys.ac.buses) {
+    add_p(bus.index, -bus.pd_mw);
+    add_q(bus.index, -bus.qd_mvar);
+  }
+  for (const auto& load : sys.ac.loads) {
+    if (!load.in_service) continue;
+    add_p(load.bus, -load.p_mw * load.scaling);
+    add_q(load.bus, -load.q_mvar * load.scaling);
+  }
+  for (const auto& load : sys.ac.flexible_loads) {
+    if (!load.in_service) continue;
+    add_p(load.bus, -load.p_mw);
+    add_q(load.bus, -load.q_mvar);
+  }
+  for (const auto& load : sys.ac.asymmetric_loads) {
+    if (!load.in_service) continue;
+    add_p(load.bus, -(load.pa_mw + load.pb_mw + load.pc_mw) * load.scaling);
+    add_q(load.bus,
+          -(load.qa_mvar + load.qb_mvar + load.qc_mvar) * load.scaling);
+  }
+  for (const auto& station : sys.ac.charging_stations) {
+    if (!station.in_service) continue;
+    add_p(station.bus, -station.p_total_kw / 1000.0);
+    add_q(station.bus, -station.q_total_kvar / 1000.0);
+  }
+  for (const auto& gen : sys.ac.generators) {
+    if (!gen.in_service) continue;
+    add_p(gen.bus, gen.pg_mw);
+    add_q(gen.bus, gen.qg_mvar);
+  }
+  for (const auto& gen : sys.ac.static_generators) {
+    if (!gen.in_service) continue;
+    add_p(gen.bus, gen.p_mw * gen.scaling);
+    add_q(gen.bus, gen.q_mvar * gen.scaling);
+  }
+  for (const auto& gen : sys.ac.renewable_gens) {
+    if (gen.in_service) add_p(gen.bus, gen.p_mw);
+  }
+  for (const auto& pv : sys.ac.pv_systems) {
+    if (!pv.in_service) continue;
+    add_p(pv.bus, pv.p_mw);
+    add_q(pv.bus, pv.q_mvar);
+  }
+  for (const auto& storage : sys.ac.storage) {
+    if (!storage.in_service) continue;
+    add_p(storage.bus, storage.p_mw);
+    add_q(storage.bus, storage.q_mvar);
+  }
   const size_t n = std::min(ac_branch_flows.size(), sys.ac.branches.size());
   for (size_t i = 0; i < n; ++i) {
     const auto& br = sys.ac.branches[i];
     if (!br.in_service) continue;
-    net_p[br.from_bus] += ac_branch_flows[i].pf_mw; net_p[br.to_bus] += ac_branch_flows[i].pt_mw;
-    net_q[br.from_bus] += ac_branch_flows[i].qf_mvar; net_q[br.to_bus] += ac_branch_flows[i].qt_mvar;
+    net_p[br.from_bus] -= ac_branch_flows[i].pf_mw;
+    net_p[br.to_bus] -= ac_branch_flows[i].pt_mw;
+    net_q[br.from_bus] -= ac_branch_flows[i].qf_mvar;
+    net_q[br.to_bus] -= ac_branch_flows[i].qt_mvar;
   }
   return device_terminal_flows_from_net(sys, net_p, net_q);
 }

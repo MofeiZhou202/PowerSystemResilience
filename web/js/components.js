@@ -49,9 +49,10 @@ const COMP = (() => {
       const solvedP = p._result_p_mw;
       const solvedQ = p._result_q_mvar;
       const unit = p._result_p_unit || 'MW';
+      const qUnit = p._result_q_unit || 'MVar';
       const resultText = solvedP == null ? ''
         : `<text class="comp-value" x="0" y="56">P ${solvedP}${unit}</text>` +
-          (solvedQ == null ? '' : `<text class="comp-value" x="0" y="68">Q ${solvedQ}MVar</text>`);
+          (solvedQ == null ? '' : `<text class="comp-value" x="0" y="68">Q ${solvedQ}${qUnit}</text>`);
       return `<line x1="0" y1="18" x2="0" y2="30" stroke="#e06c75" stroke-width="2"/>
               <path d="M-14,-14 L14,-14 L14,14 L-14,14 Z" fill="none" stroke="#e06c75" stroke-width="2"/>
               <path d="M-8,0 Q-4,-8 0,0 Q4,8 8,0" fill="none" stroke="#e06c75" stroke-width="2"/>
@@ -125,9 +126,10 @@ const COMP = (() => {
       const solvedP = p._result_p_mw;
       const solvedQ = p._result_q_mvar;
       const unit = p._result_p_unit || 'MW';
+      const qUnit = p._result_q_unit || 'MVar';
       const resultText = solvedP == null ? ''
         : `<text class="comp-value" x="0" y="32">P ${solvedP}${unit}</text>` +
-          (solvedQ == null ? '' : `<text class="comp-value" x="0" y="44">Q ${solvedQ}MVar</text>`);
+          (solvedQ == null ? '' : `<text class="comp-value" x="0" y="44">Q ${solvedQ}${qUnit}</text>`);
       return `<line x1="-20" y1="0" x2="-8" y2="0" stroke="#abb2bf" stroke-width="2"/>
               <line x1="8" y1="0" x2="20" y2="0" stroke="#abb2bf" stroke-width="2"/>
               <rect x="-8" y="-8" width="16" height="16" fill="none" stroke="#e06c75" stroke-width="2" rx="2"/>

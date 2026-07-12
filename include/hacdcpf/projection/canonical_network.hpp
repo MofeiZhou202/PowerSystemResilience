@@ -34,6 +34,7 @@ struct MergeRecord {
 struct ProjectionCertificate {
   ProjectionMode mode{ProjectionMode::ThresholdApproximate};
   double impedance_threshold{1e-4};
+  int n_authored_dc_buses{0};
   std::vector<MergeRecord> merge_records;
   std::vector<std::string> diagnostics;
 
@@ -126,6 +127,10 @@ struct BusMergeMap {
   // Maps original branch position (0-based) → projected branch position
   // (0-based).  Dead-island branches get -1.
   std::unordered_map<int, int> branch_orig_to_proj;
+
+  // Original-bus participation used to recover extensive quantities. Values
+  // sum to one within each surviving merge group.
+  std::unordered_map<int, double> extensive_participation;
 
   /// Projection policy and the physical edges that induced each contraction.
   ProjectionMode projection_mode{ProjectionMode::ThresholdApproximate};

@@ -35,8 +35,10 @@ const Canvas = (() => {
   }
   function pScale() { const u = getPowerUnit(); return u === 'kW' ? 1e3 : u === 'W' ? 1e6 : 1; }
   function pUnit()  { const u = getPowerUnit(); return u === 'kW' ? 'kW' : u === 'W' ? 'W' : 'MW'; }
+  function qUnit()  { const u = getPowerUnit(); return u === 'kW' ? 'kVar' : u === 'W' ? 'Var' : 'MVar'; }
   function pConv(mw) { return mw * pScale(); }
   function pFmt(mw, d = 1) { return (mw * pScale()).toFixed(d); }
+  function qFmt(mvar, d = 1) { return (mvar * pScale()).toFixed(d); }
 
   // ========== State ==========
   const state = {
@@ -625,6 +627,7 @@ const Canvas = (() => {
       delete comp.params._result_p_mw;
       delete comp.params._result_q_mvar;
       delete comp.params._result_p_unit;
+      delete comp.params._result_q_unit;
     });
   }
 
@@ -677,10 +680,11 @@ const Canvas = (() => {
 
   function applySolvedGridAndBreakerDisplays(result) {
     if (!result) return;
-    const metric = (row, label) => {
-      const item = Array.isArray(row?.metrics)
-        ? row.metrics.find(value => value?.label === label)
-        : null;
+    const metric = (row, { labels = [], names = [], quantity } = {}) => {
+      const metrics = Array.isArray(row?.metrics) ? row.metrics : [];
+      const item = metrics.find(value => names.includes(value?.name))
+        || metrics.find(value => labels.includes(value?.label))
+        || metrics.find(value => quantity && value?.quantity === quantity);
       const value = Number(item?.value);
       return Number.isFinite(value) ? value : null;
     };
@@ -690,7 +694,8 @@ const Canvas = (() => {
       comp.params._result_p_mw = pText;
       const qValue = q == null ? Number.NaN : Number(q);
       if (Number.isFinite(qValue)) {
-        comp.params._result_q_mvar = formatSolvedPowerForComponent(qValue);
+        comp.params._result_q_mvar = qFmt(qValue, Math.abs(qValue * pScale()) >= 10 ? 1 : 2);
+        comp.params._result_q_unit = qUnit();
       }
       comp.params._result_p_unit = pUnit();
     };
@@ -699,7 +704,9 @@ const Canvas = (() => {
     const gridRows = (result.component_results || [])
       .filter(row => row?.canvas_type === 'external_grid');
     resultRowsByIndexOrOrder(gridRows, gridComps).forEach((row, i) => {
-      if (row) apply(gridComps[i], metric(row, 'P平衡'), metric(row, 'Q平衡'));
+      if (row) apply(gridComps[i],
+        metric(row, { labels: ['P平衡', 'P'], names: ['p_mw'], quantity: 'p' }),
+        metric(row, { labels: ['Q平衡', 'Q'], names: ['q_mvar'], quantity: 'q' }));
     });
 
     const breakerComps = state.components.filter(comp => comp.type === 'circuit_breaker');
@@ -715,11 +722,26 @@ const Canvas = (() => {
       });
       (busTypes.length && busTypes.every(type => type === 'dc_bus') ? dcComps : acComps).push(comp);
     });
-    resultRowsByIndexOrOrder(result.ac_circuit_breaker_flows, acComps).forEach((row, i) => {
-      if (row) apply(acComps[i], row.pf_mw, row.qf_mvar);
+    const breakerRows = (result.component_results || [])
+      .filter(row => row?.canvas_type === 'circuit_breaker');
+    const attributedAcRows = breakerRows.filter(row => String(row?.domain || 'AC').toUpperCase() !== 'DC');
+    const attributedDcRows = breakerRows.filter(row => String(row?.domain || '').toUpperCase() === 'DC');
+    const acFlows = resultRowsByIndexOrOrder(result.ac_circuit_breaker_flows, acComps);
+    const acAttribution = resultRowsByIndexOrOrder(attributedAcRows, acComps);
+    acFlows.forEach((row, i) => {
+      const attributed = acAttribution[i];
+      const p = Number.isFinite(Number(row?.pf_mw)) ? Number(row.pf_mw)
+        : metric(attributed, { labels: ['Pf'], names: ['terminal.from.p_mw'], quantity: 'p' });
+      const q = Number.isFinite(Number(row?.qf_mvar)) ? Number(row.qf_mvar)
+        : metric(attributed, { labels: ['Qf'], names: ['terminal.from.q_mvar'], quantity: 'q' });
+      if (p != null) apply(acComps[i], p, q);
     });
-    resultRowsByIndexOrOrder(result.dc_circuit_breaker_flows, dcComps).forEach((row, i) => {
-      if (row) apply(dcComps[i], row.pf_mw, null);
+    const dcFlows = resultRowsByIndexOrOrder(result.dc_circuit_breaker_flows, dcComps);
+    const dcAttribution = resultRowsByIndexOrOrder(attributedDcRows, dcComps);
+    dcFlows.forEach((row, i) => {
+      const p = Number.isFinite(Number(row?.pf_mw)) ? Number(row.pf_mw)
+        : metric(dcAttribution[i], { labels: ['Pf'], names: ['terminal.from.p_mw'], quantity: 'p' });
+      if (p != null) apply(dcComps[i], p, null);
     });
   }
 
@@ -965,6 +987,24 @@ const Canvas = (() => {
     const absPower = Math.abs(numOr(powerMW, 0));
     addFlowArrow(fa, absPower, color);
     addFlowLabel(fa.mx + fa.offX, fa.my + fa.offY, absPower, color);
+    return fa;
+  }
+
+  function addTerminalFlowMarker(g, headPt, powerMW, reactiveMvar, isDc, color) {
+    const fa = flowArrow(g, headPt);
+    const absPower = Math.abs(numOr(powerMW, 0));
+    addFlowArrow(fa, absPower, color);
+    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.classList.add('viz-overlay', 'flow-label');
+    label.setAttribute('x', fa.mx + fa.offX);
+    label.setAttribute('y', fa.my + fa.offY);
+    label.setAttribute('fill', color);
+    const pText = `P ${pFmt(powerMW)} ${pUnit()}`;
+    const q = Number(reactiveMvar);
+    label.textContent = !isDc && Number.isFinite(q)
+      ? `${pText} / Q ${qFmt(q)} ${qUnit()}`
+      : pText;
+    resultsLayer.appendChild(label);
     return fa;
   }
 
@@ -4712,6 +4752,38 @@ const Canvas = (() => {
       }
     });
 
+    // Keep breaker terminal power visible independently of glyph rotation and
+    // connection paths by drawing it in the unrotated result overlay layer.
+    const breakerComps = state.components.filter(comp => comp.type === 'circuit_breaker');
+    const acBreakerComps = [];
+    const dcBreakerComps = [];
+    breakerComps.forEach(comp => {
+      const buses = getComponentBusConnections(comp);
+      const isDc = buses.length > 0 && buses.every(item => item.busType === 'dc_bus');
+      (isDc ? dcBreakerComps : acBreakerComps).push(comp);
+    });
+    const addBreakerResultText = (comp, flow, isDc) => {
+      if (!comp || !flow) return;
+      const p = Number(flow.pf_mw);
+      const q = Number(flow.qf_mvar);
+      if (!Number.isFinite(p)) return;
+      const lines = [`P ${pFmt(p, 3)} ${pUnit()}`];
+      if (!isDc && Number.isFinite(q)) lines.push(`Q ${qFmt(q, 3)} ${qUnit()}`);
+      lines.forEach((label, line) => {
+        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.classList.add('result-terminal-power');
+        text.setAttribute('x', comp.x + 30);
+        text.setAttribute('y', comp.y - 6 + line * 13);
+        text.setAttribute('data-comp-id', comp.id);
+        text.textContent = label;
+        resultsLayer.appendChild(text);
+      });
+    };
+    resultRowsByIndexOrOrder(result.ac_circuit_breaker_flows, acBreakerComps)
+      .forEach((flow, i) => addBreakerResultText(acBreakerComps[i], flow, false));
+    resultRowsByIndexOrOrder(result.dc_circuit_breaker_flows, dcBreakerComps)
+      .forEach((flow, i) => addBreakerResultText(dcBreakerComps[i], flow, true));
+
     // Apply visualization overlay
     applyVisualizationOverlay();
   }
@@ -5327,9 +5399,10 @@ const Canvas = (() => {
       const comp = sw.comp;
       const isDc = getComponentBusConnections(comp).some(bc => bc.busType === 'dc_bus');
       const busConns = getComponentBusConnections(comp, new Set([isDc ? 'dc_bus' : 'ac_bus']));
-      if (busConns.length < 2) return;
       const pf_mw = numOr(sw.flow?.pf_mw, 0);
       const pt_mw = numOr(sw.flow?.pt_mw, 0);
+      const qf_mvar = numOr(sw.flow?.qf_mvar, 0);
+      const qt_mvar = numOr(sw.flow?.qt_mvar, 0);
       const absPower = Math.max(Math.abs(pf_mw), Math.abs(pt_mw));
       const rateMva = numOr(sw.flow?.rate_mva, 0);
       const loadingPct = numOr(sw.flow?.loading_pct, 0);
@@ -5337,6 +5410,45 @@ const Canvas = (() => {
         ? loadingPct
         : normalizedPowerPct(absPower, minPower, powerRange);
       const color = showHeat ? loadingColor(colorPct) : '#1976D2';
+
+      // Source-side inline breakers may retain one authored electrical bus id
+      // on both model terminals while the Canvas connects source -> CB -> bus.
+      // Draw both physical wires from the recovered source-cut flow.
+      if (busConns.length < 2) {
+        if (sw.flow?.source !== 'same_bus_external_grid_cut') return;
+        const inlineConnections = [];
+        state.connections.forEach(conn => {
+          let otherId = null;
+          if (conn.from.compId === comp.id) otherId = conn.to.compId;
+          else if (conn.to.compId === comp.id) otherId = conn.from.compId;
+          if (otherId == null) return;
+          const other = getComponent(otherId);
+          if (other?.type === 'ac_bus' || other?.type === 'external_grid' ||
+              other?.type === 'generator') {
+            inlineConnections.push({ conn, other });
+          }
+        });
+        if (showHeat && absPower > FLOW_ARROW_EPS_MW) {
+          heatItems.push({ comp, colorPct, absPower, maxPower,
+            bd: { rate_mva: rateMva }, hasLoading: rateMva > 0,
+            loading: loadingPct });
+        }
+        if (showFlow) {
+          inlineConnections.forEach(({ conn, other }) => {
+            if (!conn.el) return;
+            const g = getConnGeom(conn, { fromCompId: comp.id });
+            if (!g) return;
+            labeledFlowConnections.add(conn.id);
+            const sourceSide = other.type === 'external_grid' || other.type === 'generator';
+            addTerminalFlowMarker(
+              g, sourceSide ? g.compEnd : g.busEnd,
+              sourceSide ? pf_mw : -pt_mw,
+              sourceSide ? qf_mvar : -qt_mvar,
+              false, color);
+          });
+        }
+        return;
+      }
 
       if (showHeat && absPower > 0.01) {
         heatItems.push({
@@ -5368,7 +5480,10 @@ const Canvas = (() => {
           if (!g) return;
           labeledFlowConnections.add(bc.conn.id);
           const sidePower = isFromSide ? pf_mw : pt_mw;
-          addFlowMarker(g, sidePower >= 0 ? g.compEnd : g.busEnd, Math.abs(sidePower), color);
+          const sideReactive = isFromSide ? qf_mvar : qt_mvar;
+          addTerminalFlowMarker(
+            g, sidePower >= 0 ? g.compEnd : g.busEnd,
+            Math.abs(sidePower), Math.abs(sideReactive), isDc, color);
         });
       }
     });
@@ -5548,7 +5663,9 @@ const Canvas = (() => {
           const solved = rows.find(row => Number(row.index) === compIndex)
             || rows.find(row => Number(row.position) === state.components.filter(c => c.type === 'external_grid').indexOf(comp));
           const pMetric = Array.isArray(solved?.metrics)
-            ? solved.metrics.find(item => item?.label === 'P平衡')
+            ? solved.metrics.find(item => item?.name === 'p_mw')
+              || solved.metrics.find(item => item?.label === 'P平衡' || item?.label === 'P')
+              || solved.metrics.find(item => item?.quantity === 'p')
             : null;
           const solvedP = Number(pMetric?.value);
           if (Number.isFinite(solvedP)) {
@@ -6857,6 +6974,9 @@ const Canvas = (() => {
     clearResults,
     setVisualizationMode,
     refreshVisualization: applyVisualizationOverlay,
+    refreshPowerFlowResults() {
+      if (_lastPfResult) showPowerFlowResults(_lastPfResult);
+    },
     clearAll,
     panToComponent,
     panToBusId,

@@ -233,23 +233,51 @@ double estimate_opf_physical_loss_mw(const HybridPowerSystem& sys,
   // AC branch losses from OPF voltages.
   try {
     auto data = powerflow::make_solver_data(sys, loss_model);
-    if (opf_res.vm.size() == data.ac_buses.size() &&
-        opf_res.va.size() == data.ac_buses.size()) {
-      const auto branch_flows = powerflow::compute_branch_flows(data, opf_res.vm, opf_res.va);
+    auto project_intensive = [&](const std::vector<double>& authored) {
+      if (!data.bus_merge_map) return authored;
+      const auto& map = *data.bus_merge_map;
+      if (static_cast<int>(authored.size()) != map.n_original) {
+        throw std::invalid_argument(
+            "estimate_opf_physical_loss_mw: authored AC bus vector size "
+            "does not match projection map");
+      }
+      std::vector<double> canonical(static_cast<size_t>(map.n_merged), 0.0);
+      std::vector<char> assigned(static_cast<size_t>(map.n_merged), 0);
+      for (const auto& [ext_bus, int_pos] : map.ext_to_int) {
+        const auto original = map.ext_to_orig_pos.find(ext_bus);
+        if (original == map.ext_to_orig_pos.end() || int_pos < 0 ||
+            int_pos >= map.n_merged || original->second < 0 ||
+            original->second >= map.n_original) {
+          continue;
+        }
+        if (assigned[static_cast<size_t>(int_pos)] == 0) {
+          canonical[static_cast<size_t>(int_pos)] =
+              authored[static_cast<size_t>(original->second)];
+          assigned[static_cast<size_t>(int_pos)] = 1;
+        }
+      }
+      return canonical;
+    };
+    const auto canonical_vm = project_intensive(opf_res.vm);
+    const auto canonical_va = project_intensive(opf_res.va);
+    if (canonical_vm.size() == data.ac_buses.size() &&
+        canonical_va.size() == data.ac_buses.size()) {
+      const auto branch_flows =
+          powerflow::compute_branch_flows(data, canonical_vm, canonical_va);
       for (const auto& bf : branch_flows) {
         loss_mw += std::max(bf.pf_mw + bf.pt_mw, 0.0);
       }
     }
 
     // Converter losses from OPF voltages with the same converter model.
-    if (opf_res.vm.size() == data.ac_buses.size() &&
-        opf_res.va.size() == data.ac_buses.size() &&
+    if (canonical_vm.size() == data.ac_buses.size() &&
+        canonical_va.size() == data.ac_buses.size() &&
         opf_res.vdc.size() == data.dc_buses.size()) {
-      Eigen::VectorXd vm = Eigen::VectorXd::Ones(static_cast<Eigen::Index>(opf_res.vm.size()));
-      Eigen::VectorXd va = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(opf_res.va.size()));
+      Eigen::VectorXd vm = Eigen::VectorXd::Ones(static_cast<Eigen::Index>(canonical_vm.size()));
+      Eigen::VectorXd va = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(canonical_va.size()));
       Eigen::VectorXd vdc = Eigen::VectorXd::Ones(static_cast<Eigen::Index>(opf_res.vdc.size()));
-      for (Eigen::Index i = 0; i < vm.size(); ++i) vm[i] = opf_res.vm[static_cast<size_t>(i)];
-      for (Eigen::Index i = 0; i < va.size(); ++i) va[i] = opf_res.va[static_cast<size_t>(i)];
+      for (Eigen::Index i = 0; i < vm.size(); ++i) vm[i] = canonical_vm[static_cast<size_t>(i)];
+      for (Eigen::Index i = 0; i < va.size(); ++i) va[i] = canonical_va[static_cast<size_t>(i)];
       for (Eigen::Index i = 0; i < vdc.size(); ++i) vdc[i] = opf_res.vdc[static_cast<size_t>(i)];
 
       for (const auto& conv : data.converters) {

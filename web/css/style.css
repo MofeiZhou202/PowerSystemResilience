@@ -361,6 +361,18 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   text-anchor: middle;
   pointer-events: none;
 }
+.result-terminal-power {
+  fill: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-anchor: start;
+  paint-order: stroke;
+  stroke: var(--canvas-bg);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
 
 /* Visualization overlay select */
 .canvas-tool-select {

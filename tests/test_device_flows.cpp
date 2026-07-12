@@ -25,7 +25,12 @@ TEST_CASE("CB collapsed by merge still reports flow via cut", "[device_flows]") 
   ExternalGrid eg; eg.index = 1; eg.bus = 1; eg.in_service = true; s.ac.external_grids = {eg};
   Load ld; ld.index = 1; ld.bus = 3; ld.p_mw = 4.0; ld.q_mvar = 2.0; ld.in_service = true; s.ac.loads = {ld};
 
-  auto flows = compute_device_terminal_flows(s, {}, {});
+  std::vector<BranchFlow> solved(1);
+  solved[0].pf_mw = 4.0;
+  solved[0].pt_mw = -4.0;
+  solved[0].qf_mvar = 2.0;
+  solved[0].qt_mvar = -2.0;
+  auto flows = compute_device_terminal_flows(s, solved);
   REQUIRE(flows.ac_circuit_breakers.size() == 1);
   const auto& f = flows.ac_circuit_breakers[0];
   CHECK(f.closed);
@@ -58,12 +63,50 @@ TEST_CASE("PF-aware CB flow uses solved line flows", "[device_flows]") {
   CHECK(std::abs(std::abs(flows.ac_circuit_breakers[0].pf_mw) - 5.0) < 1e-6);
 }
 
+TEST_CASE("PF-aware switch flow remains correct with an alternate mesh path",
+          "[device_flows][mesh][regression]") {
+  HybridPowerSystem s;
+  s.base_mva = 100.0;
+  s.ac.buses = {mk_bus(1, BusType::SLACK), mk_bus(2), mk_bus(3)};
+  ACBranch l12;
+  l12.index = 1;
+  l12.from_bus = 1;
+  l12.to_bus = 2;
+  l12.r_pu = 0.01;
+  l12.x_pu = 0.05;
+  ACBranch l13 = l12;
+  l13.index = 2;
+  l13.to_bus = 3;
+  s.ac.branches = {l12, l13};
+  Switch sw;
+  sw.index = 1;
+  sw.bus_from = 2;
+  sw.bus_to = 3;
+  sw.closed = true;
+  s.ac.switches = {sw};
+  Load load;
+  load.index = 1;
+  load.bus = 3;
+  load.p_mw = 4.0;
+  s.ac.loads = {load};
+
+  std::vector<BranchFlow> solved(2);
+  solved[0].pf_mw = 1.0;
+  solved[0].pt_mw = -1.0;
+  solved[1].pf_mw = 3.0;
+  solved[1].pt_mw = -3.0;
+  const auto flows = compute_device_terminal_flows(s, solved);
+  REQUIRE(flows.ac_switches.size() == 1);
+  CHECK(std::abs(flows.ac_switches[0].pf_mw - 1.0) < 1e-12);
+  CHECK(std::abs(flows.ac_switches[0].pt_mw + 1.0) < 1e-12);
+}
+
 TEST_CASE("Open breaker reports zero flow", "[device_flows]") {
   HybridPowerSystem s; s.base_mva = 100.0;
   s.ac.buses = {mk_bus(1, BusType::SLACK), mk_bus(2)};
   CircuitBreaker cb; cb.index = 7; cb.bus_from = 1; cb.bus_to = 2; cb.closed = false; cb.in_service = true;
   s.ac.circuit_breakers = {cb};
-  auto flows = compute_device_terminal_flows(s, {}, {});
+  auto flows = compute_device_terminal_flows(s, std::vector<BranchFlow>{});
   REQUIRE(flows.ac_circuit_breakers.size() == 1);
   CHECK_FALSE(flows.ac_circuit_breakers[0].closed);
   CHECK(flows.ac_circuit_breakers[0].pf_mw == 0.0);
@@ -83,4 +126,3 @@ TEST_CASE("Reconfig keeps dead sections behind open ties", "[device_flows]") {
   CHECK(project_to_canonical_models(s, true).ac.buses.size() == 2);   // bus 3 stripped
   CHECK(project_to_canonical_models(s, false).ac.buses.size() == 3);  // bus 3 preserved
 }
-

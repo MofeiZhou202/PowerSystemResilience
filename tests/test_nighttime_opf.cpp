@@ -245,11 +245,68 @@ TEST_CASE("AC OPF dispatches external grid independently on a shared bus",
   INFO(result.status);
   REQUIRE(result.converged);
   REQUIRE(result.pg_mw.size() == 1);
+  REQUIRE(result.gen_map.size() == 1);
+  CHECK(result.gen_map[0].original_index == 0);
   REQUIRE(result.external_grid_p_mw.size() == 1);
   CHECK_THAT(result.pg_mw[0],
              Catch::Matchers::WithinAbs(0.0, 1e-2));
   CHECK_THAT(result.external_grid_p_mw[0],
              Catch::Matchers::WithinAbs(50.0, 1e-2));
+}
+
+TEST_CASE("AC OPF generator results remain in authored order after island stripping",
+          "[opf][projection][generator_map][regression]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  for (int i = 1; i <= 3; ++i) {
+    hacdcpf::ACBus bus;
+    bus.index = i;
+    bus.bus_type = i == 1 ? hacdcpf::BusType::SLACK
+                          : hacdcpf::BusType::PQ;
+    sys.ac.buses.push_back(bus);
+  }
+  hacdcpf::ACBranch branch;
+  branch.index = 1;
+  branch.from_bus = 1;
+  branch.to_bus = 2;
+  branch.r_pu = 0.01;
+  branch.x_pu = 0.05;
+  branch.rate_a_mva = 100.0;
+  sys.ac.branches.push_back(branch);
+  hacdcpf::Load load;
+  load.index = 1;
+  load.bus = 2;
+  load.p_mw = 10.0;
+  sys.ac.loads.push_back(load);
+  hacdcpf::Generator live;
+  live.index = 101;
+  live.bus = 1;
+  live.is_slack = true;
+  live.pmax_mw = 100.0;
+  live.qmin_mvar = -100.0;
+  live.qmax_mvar = 100.0;
+  hacdcpf::Generator stripped = live;
+  stripped.index = 202;
+  stripped.bus = 3;
+  stripped.is_slack = false;
+  stripped.pg_mw = 0.0;
+  sys.ac.generators = {live, stripped};
+
+  hacdcpf::opf::ACOPFOptions opts;
+  opts.allow_fallback = false;
+  opts.enable_primal_dual = true;
+  opts.use_parity_ipm = true;
+  const auto result = hacdcpf::solve_ac_opf(sys, opts);
+
+  INFO(result.status);
+  REQUIRE(result.converged);
+  REQUIRE(result.pg_mw.size() == 2);
+  REQUIRE(result.gen_map.size() == 2);
+  CHECK(result.gen_map[0].original_index == 0);
+  CHECK(result.gen_map[1].original_index == 1);
+  CHECK_THAT(result.pg_mw[0], Catch::Matchers::WithinAbs(10.0, 1e-2));
+  CHECK(result.pg_mw[1] == 0.0);
 }
 
 TEST_CASE("DC OPF dispatches external grid independently on a shared bus",

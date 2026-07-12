@@ -606,6 +606,53 @@ RichResultAttribution CanonicalToRichOperator::apply(
     }
   }
 
+  // A source-side breaker may be authored as an inline Canvas device while
+  // both electrical endpoints carry the same bus id (source terminal -> bus).
+  // Its physical cut flow is the external-grid injection, not zero merely
+  // because bus_from == bus_to after canonical contraction.
+  if (opf_result) {
+    std::unordered_map<int, int> breaker_count_by_bus;
+    for (const auto& breaker : rich.ac.circuit_breakers) {
+      if (!breaker.in_service || !breaker.closed ||
+          breaker.bus_from != breaker.bus_to) continue;
+      const bool has_grid = std::any_of(
+          rich.ac.external_grids.begin(), rich.ac.external_grids.end(),
+          [&](const auto& grid) {
+            return grid.in_service && grid.bus == breaker.bus_from;
+          });
+      if (has_grid) ++breaker_count_by_bus[breaker.bus_from];
+    }
+    for (const auto& breaker : rich.ac.circuit_breakers) {
+      const int count = breaker_count_by_bus[breaker.bus_from];
+      if (!breaker.in_service || !breaker.closed ||
+          breaker.bus_from != breaker.bus_to || count <= 0) continue;
+      double p = 0.0;
+      double q = 0.0;
+      for (const auto& grid : rich.ac.external_grids) {
+        if (!grid.in_service || grid.bus != breaker.bus_from) continue;
+        const auto pos = position_for_index(
+            projection.canonical.ac.external_grids, grid.index);
+        if (!pos) continue;
+        if (*pos < opf_result->external_grid_p_mw.size())
+          p += opf_result->external_grid_p_mw[*pos];
+        if (*pos < opf_result->external_grid_q_mvar.size())
+          q += opf_result->external_grid_q_mvar[*pos];
+      }
+      p /= static_cast<double>(count);
+      q /= static_cast<double>(count);
+      if (auto* row = find_row(out, "circuit_breaker", "AC", breaker.index)) {
+        const double vm = bus_voltage(rich, rich_pf, breaker.bus_from, false);
+        set_terminal(*row, "from", breaker.bus_from, false, p, q, vm,
+                     true, true, true);
+        set_terminal(*row, "to", breaker.bus_to, false, -p, -q, vm,
+                     true, true, true);
+        row->recovery = RecoveryClass::Strong;
+        row->recovery_reason =
+            "same-bus source-breaker cut attributed from external-grid dispatch";
+      }
+    }
+  }
+
   // OPF component maps contain canonical container positions. Translate those
   // positions to canonical component indices before matching rich identities.
   if (opf_result) {

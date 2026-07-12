@@ -253,7 +253,9 @@ TEST_CASE("projection index-space mismatches fail loudly",
   map.ext_to_int = {{1, 0}, {2, 0}, {3, 1}};
   map.ext_to_orig_pos = {{1, 0}, {2, 1}, {3, 2}};
 
-  CHECK_THROWS_AS(unproject_bus_vector({1.0}, map), std::invalid_argument);
+  CHECK_THROWS_AS(
+      unproject_bus_vector({1.0}, map, BusVectorSemantics::Intensive),
+      std::invalid_argument);
 
   ProjectionOptions exact;
   const HybridPowerSystem canonical =
@@ -262,6 +264,43 @@ TEST_CASE("projection index-space mismatches fail loudly",
   incompatible.impedance_threshold *= 2.0;
   CHECK_THROWS_AS(project_to_canonical_models(canonical, incompatible),
                   std::invalid_argument);
+}
+
+TEST_CASE("extensive bus reprojection conserves and splits quantities",
+          "[sppt][projection][reprojection][regression]") {
+  BusMergeMap map;
+  map.n_original = 3;
+  map.n_merged = 2;
+  map.ext_to_int = {{1, 0}, {2, 0}, {3, 1}};
+  map.ext_to_orig_pos = {{1, 0}, {2, 1}, {3, 2}};
+  map.extensive_participation = {{1, 0.25}, {2, 0.75}, {3, 1.0}};
+
+  const auto intensive = unproject_bus_vector(
+      {8.0, 5.0}, map, BusVectorSemantics::Intensive);
+  const auto extensive = unproject_bus_vector(
+      {8.0, 5.0}, map, BusVectorSemantics::Extensive);
+  CHECK(intensive == std::vector<double>{8.0, 8.0, 5.0});
+  CHECK(extensive == std::vector<double>{2.0, 6.0, 5.0});
+  CHECK(std::abs(extensive[0] + extensive[1] - 8.0) < 1e-12);
+}
+
+TEST_CASE("public linear AC flow returns authored bus and branch spaces",
+          "[sppt][projection][reprojection][api][regression]") {
+  const HybridPowerSystem authored = make_merge_strip_case();
+  const auto result = solve_ac_dc_power_flow(authored);
+  REQUIRE(result.success);
+  CHECK(result.va.size() == authored.ac.buses.size());
+  CHECK(result.pf_mw.size() == authored.ac.branches.size());
+  CHECK(result.pf_mw.back() == 0.0);
+}
+
+TEST_CASE("public PF hides energy-router internal DC buses",
+          "[sppt][projection][reprojection][api][regression]") {
+  const HybridPowerSystem authored = make_rich_idempotence_case();
+  const auto result = solve_power_flow(authored);
+  REQUIRE(result.converged);
+  CHECK(result.vdc.size() == authored.dc.buses.size());
+  CHECK(result.branch_flows.size() == authored.ac.branches.size());
 }
 
 TEST_CASE("MR3: power-flow semantics are preserved through projection",

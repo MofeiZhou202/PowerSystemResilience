@@ -89,6 +89,7 @@ struct ACOPFResult {
     int original_index{0};
     int source_type{0};
   };
+  std::vector<ComponentRef> gen_map;
   std::vector<ComponentRef> ren_map;
   std::vector<ComponentRef> stor_map;
   std::vector<ComponentRef> dcdc_map;

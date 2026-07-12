@@ -61,7 +61,8 @@ std::vector<double> attribute_bus_vector(const std::vector<double>& canonical,
                                          const HybridPowerSystem& sys) {
   powerflow::SolverData sd = powerflow::make_solver_data(sys);
   if (sd.bus_merge_map && !sd.bus_merge_map->ext_to_int.empty())
-    return unproject_bus_vector(canonical, *sd.bus_merge_map);
+    return unproject_bus_vector(canonical, *sd.bus_merge_map,
+                                BusVectorSemantics::Intensive);
   return canonical;
 }
 
@@ -128,7 +129,8 @@ MetamorphicResult mr2_attribution_roundtrip(const HybridPowerSystem& sys, double
   for (std::size_t i = 0; i < v_int.size(); ++i)
     v_int[i] = 1.0 + static_cast<double>(i);
 
-  const std::vector<double> v_ext = unproject_bus_vector(v_int, m);
+  const std::vector<double> v_ext =
+      unproject_bus_vector(v_int, m, BusVectorSemantics::Intensive);
 
   double res = 0.0;
   for (const auto& [ext, t] : m.ext_to_int) {

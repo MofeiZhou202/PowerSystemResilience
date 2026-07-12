@@ -44,19 +44,41 @@ void unproject_per_bus_ac_opf_result(ACOPFResult& out, const BusMergeMap& map) {
   if (map.ext_to_int.empty() || map.n_original <= 0) {
     return;
   }
-  out.vm = unproject_bus_vector(out.vm, map);
-  out.va = unproject_bus_vector(out.va, map);
+  out.vm = unproject_bus_vector(out.vm, map, BusVectorSemantics::Intensive);
+  out.va = unproject_bus_vector(out.va, map, BusVectorSemantics::Intensive);
   if (!out.dpd_mw.empty()) {
-    out.dpd_mw = unproject_bus_vector(out.dpd_mw, map);
+    out.dpd_mw = unproject_bus_vector(
+        out.dpd_mw, map, BusVectorSemantics::Extensive);
   }
   if (!out.dqd_mvar.empty()) {
-    out.dqd_mvar = unproject_bus_vector(out.dqd_mvar, map);
+    out.dqd_mvar = unproject_bus_vector(
+        out.dqd_mvar, map, BusVectorSemantics::Extensive);
   }
   if (!out.lmp_p.empty()) {
-    out.lmp_p = unproject_bus_vector(out.lmp_p, map);
+    out.lmp_p = unproject_bus_vector(
+        out.lmp_p, map, BusVectorSemantics::Intensive);
   }
   if (!out.lmp_q.empty()) {
-    out.lmp_q = unproject_bus_vector(out.lmp_q, map);
+    out.lmp_q = unproject_bus_vector(
+        out.lmp_q, map, BusVectorSemantics::Intensive);
+  }
+}
+
+void trim_internal_dc_bus_results(
+    ACOPFResult& out,
+    const std::optional<ProjectionCertificate>& certificate) {
+  if (!certificate || certificate->n_authored_dc_buses < 0) return;
+  const size_t authored =
+      static_cast<size_t>(certificate->n_authored_dc_buses);
+  if (out.vdc.size() > authored) out.vdc.resize(authored);
+}
+
+void set_generator_result_map(ACOPFResult& out,
+                              const powerflow::SolverData& data) {
+  out.gen_map.resize(data.generators.size());
+  for (size_t i = 0; i < data.generators.size(); ++i) {
+    out.gen_map[i].original_index = data.generators[i].index;
+    out.gen_map[i].source_type = 0;
   }
 }
 
@@ -1772,6 +1794,7 @@ bool try_dispatch_pf_fallback(const HybridPowerSystem& ac_only_sys,
     out.va = pf_result.va;
     out.pg_mw.assign(pf_data.generators.size(), 0.0);
     out.qg_mvar.assign(pf_data.generators.size(), 0.0);
+    set_generator_result_map(out, pf_data);
 
     std::vector<std::vector<int>> gens_by_bus(static_cast<size_t>(nb));
     for (size_t gi = 0; gi < pf_data.generators.size(); ++gi) {
@@ -1811,6 +1834,7 @@ bool try_dispatch_pf_fallback(const HybridPowerSystem& ac_only_sys,
     if (pf_data.bus_merge_map) {
       unproject_per_bus_ac_opf_result(out, *pf_data.bus_merge_map);
     }
+    trim_internal_dc_bus_results(out, pf_data.projection_certificate);
     return true;
   };
 
@@ -2034,6 +2058,7 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   out.va.assign(static_cast<size_t>(vidx.n_va), 0.0);
   out.pg_mw.assign(prob.data.generators.size(), 0.0);
   out.qg_mvar.assign(prob.data.generators.size(), 0.0);
+  set_generator_result_map(out, prob.data);
   for (size_t gi = 0; gi < prob.data.generators.size(); ++gi) {
     out.pg_mw[gi] = prob.data.generators[gi].pg_mw;
     out.qg_mvar[gi] = prob.data.generators[gi].qg_mvar;
@@ -2222,6 +2247,7 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   if (prob.data.bus_merge_map) {
     unproject_per_bus_ac_opf_result(out, *prob.data.bus_merge_map);
   }
+  trim_internal_dc_bus_results(out, prob.data.projection_certificate);
 
   return out;
 }
@@ -2312,7 +2338,7 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
   // still participate; both are physical sources in PF/dynamic simulation.
   HybridPowerSystem sys_work = sys;
   const size_t original_generator_count = sys.ac.generators.size();
-  std::vector<size_t> promoted_external_grid_indices;
+  std::unordered_map<int, size_t> external_grid_by_synthetic_id;
   for (size_t i = 0; i < sys.ac.external_grids.size(); ++i) {
     const auto& eg = sys.ac.external_grids[i];
     if (!eg.in_service) continue;
@@ -2325,7 +2351,7 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
     const double external_grid_scale_mw =
         std::max({1.0, eg.s_sc_max_mva, sys.base_mva});
     Generator eg_gen;
-    eg_gen.index      = static_cast<int>(sys_work.ac.generators.size());
+    eg_gen.index = std::numeric_limits<int>::min() + static_cast<int>(i);
     eg_gen.bus        = eg.bus;
     eg_gen.in_service = true;
     eg_gen.name       = eg.name.empty() ? ("EG_opf_" + std::to_string(eg.index)) : eg.name;
@@ -2338,25 +2364,52 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
     eg_gen.cost_c1    = eg.cost_c1;
     eg_gen.cost_c0    = eg.cost_c0;
     sys_work.ac.generators.push_back(std::move(eg_gen));
-    promoted_external_grid_indices.push_back(i);
+    external_grid_by_synthetic_id[std::numeric_limits<int>::min() +
+                                  static_cast<int>(i)] = i;
+  }
+
+  std::unordered_map<int, size_t> authored_generator_by_id;
+  for (size_t i = 0; i < sys.ac.generators.size(); ++i) {
+    authored_generator_by_id.emplace(sys.ac.generators[i].index, i);
   }
 
   auto separate_external_grid_dispatch =
       [&](ACOPFResult result) -> ACOPFResult {
     result.external_grid_p_mw.assign(sys.ac.external_grids.size(), 0.0);
     result.external_grid_q_mvar.assign(sys.ac.external_grids.size(), 0.0);
-    for (size_t k = 0; k < promoted_external_grid_indices.size(); ++k) {
-      const size_t source_row = original_generator_count + k;
-      const size_t grid_row = promoted_external_grid_indices[k];
-      if (source_row < result.pg_mw.size())
-        result.external_grid_p_mw[grid_row] = result.pg_mw[source_row];
-      if (source_row < result.qg_mvar.size())
-        result.external_grid_q_mvar[grid_row] = result.qg_mvar[source_row];
+    std::vector<double> authored_pg(original_generator_count, 0.0);
+    std::vector<double> authored_qg(original_generator_count, 0.0);
+    std::vector<ACOPFResult::ComponentRef> authored_map(original_generator_count);
+    for (size_t i = 0; i < original_generator_count; ++i) {
+      authored_map[i].original_index = static_cast<int>(i);
+      authored_map[i].source_type = 0;
     }
-    if (result.pg_mw.size() > original_generator_count)
-      result.pg_mw.resize(original_generator_count);
-    if (result.qg_mvar.size() > original_generator_count)
-      result.qg_mvar.resize(original_generator_count);
+    if ((!result.pg_mw.empty() || !result.qg_mvar.empty()) &&
+        result.gen_map.size() != result.pg_mw.size()) {
+      throw std::runtime_error(
+          "AC OPF generator result map is not aligned with dispatch rows");
+    }
+    for (size_t row = 0; row < result.gen_map.size(); ++row) {
+      const int component_id = result.gen_map[row].original_index;
+      if (const auto external =
+              external_grid_by_synthetic_id.find(component_id);
+          external != external_grid_by_synthetic_id.end()) {
+        if (row < result.pg_mw.size())
+          result.external_grid_p_mw[external->second] = result.pg_mw[row];
+        if (row < result.qg_mvar.size())
+          result.external_grid_q_mvar[external->second] = result.qg_mvar[row];
+        continue;
+      }
+      const auto authored = authored_generator_by_id.find(component_id);
+      if (authored == authored_generator_by_id.end()) continue;
+      if (row < result.pg_mw.size())
+        authored_pg[authored->second] = result.pg_mw[row];
+      if (row < result.qg_mvar.size())
+        authored_qg[authored->second] = result.qg_mvar[row];
+    }
+    result.pg_mw = std::move(authored_pg);
+    result.qg_mvar = std::move(authored_qg);
+    result.gen_map = std::move(authored_map);
     return result;
   };
 
@@ -3118,6 +3171,7 @@ finalize:
   }
   out.pg_mw.assign(data.generators.size(), 0.0);
   out.qg_mvar.assign(data.generators.size(), 0.0);
+  set_generator_result_map(out, data);
 
   for (size_t gi = 0; gi < data.generators.size(); ++gi) {
     const int k = idx.gen_index_to_var[gi];
@@ -3157,6 +3211,7 @@ finalize:
   if (data.bus_merge_map) {
     unproject_per_bus_ac_opf_result(out, *data.bus_merge_map);
   }
+  trim_internal_dc_bus_results(out, data.projection_certificate);
 
   return separate_external_grid_dispatch(std::move(out));
 }

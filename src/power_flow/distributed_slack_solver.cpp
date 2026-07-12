@@ -309,8 +309,10 @@ DistributedSlackResult DistributedSlackSolver::solve_simplified(const HybridPowe
   }
 
   if (data.bus_merge_map && data.bus_merge_map->has_merges()) {
-    out.vm = unproject_bus_vector(base.vm, *data.bus_merge_map);
-    out.va = unproject_bus_vector(base.va, *data.bus_merge_map);
+    out.vm = unproject_bus_vector(
+        base.vm, *data.bus_merge_map, BusVectorSemantics::Intensive);
+    out.va = unproject_bus_vector(
+        base.va, *data.bus_merge_map, BusVectorSemantics::Intensive);
   } else {
     out.vm = base.vm;
     out.va = base.va;

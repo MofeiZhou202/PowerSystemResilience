@@ -776,11 +776,16 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
       value.pg_mw.resize(original_generator_count);
     if (sys.bus_merge_map) {
       const auto& map = *sys.bus_merge_map;
-      value.va = unproject_bus_vector(value.va, map);
-      if (!value.lmp.empty()) value.lmp = unproject_bus_vector(value.lmp, map);
+      value.va = unproject_bus_vector(
+          value.va, map, BusVectorSemantics::Intensive);
+      if (!value.lmp.empty()) {
+        value.lmp = unproject_bus_vector(
+            value.lmp, map, BusVectorSemantics::Intensive);
+      }
       if (!value.load_shedding_mw.empty()) {
         value.load_shedding_mw =
-            unproject_bus_vector(value.load_shedding_mw, map);
+            unproject_bus_vector(value.load_shedding_mw, map,
+                                 BusVectorSemantics::Extensive);
       }
       std::vector<double> original_flows(sys_in.ac.branches.size(), 0.0);
       for (size_t i = 0; i < original_flows.size(); ++i) {

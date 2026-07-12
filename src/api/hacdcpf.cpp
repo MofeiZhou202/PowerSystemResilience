@@ -32,6 +32,7 @@ struct SolverHandle {
   powerflow::DCSolver dc_solver;
   LossModelType configured_loss_model{LossModelType::Linear};
   std::unordered_map<int, int> original_vsc_bus_ac;
+  size_t authored_ac_branch_count{0};
 };
 
 namespace {
@@ -457,6 +458,7 @@ void rebuild_handle_data(SolverHandle& handle,
                          const HybridPowerSystem& sys,
                          LossModelType loss_model) {
   handle.original_vsc_bus_ac = build_original_vsc_ac_bus_map(sys);
+  handle.authored_ac_branch_count = sys.ac.branches.size();
   handle.data = powerflow::make_solver_data(sys, loss_model);
   handle.configured_loss_model = loss_model;
 }
@@ -787,7 +789,8 @@ void restore_original_vsc_bus_ac(PowerFlowResult& result, const HybridPowerSyste
   restore_original_vsc_bus_ac(result, build_original_vsc_ac_bus_map(sys));
 }
 
-void unproject_branch_flows(PowerFlowResult& result, const BusMergeMap& map) {
+void unproject_branch_flows(PowerFlowResult& result, const BusMergeMap& map,
+                            size_t authored_branch_count) {
   if (map.n_original_branches <= 0 || map.branch_orig_to_proj.empty()) return;
 
   std::vector<BranchFlow> out(static_cast<size_t>(map.n_original_branches));
@@ -797,16 +800,54 @@ void unproject_branch_flows(PowerFlowResult& result, const BusMergeMap& map) {
     out[static_cast<size_t>(orig_pos)] = result.branch_flows[static_cast<size_t>(proj_pos)];
   }
   result.branch_flows = std::move(out);
+  if (result.branch_flows.size() > authored_branch_count) {
+    result.branch_flows.resize(authored_branch_count);
+  }
 }
 
 // Expand merged PF result vectors (vm, va) back to the original bus count
 // so that callers can index by original bus position.
-void unproject_pf_result(PowerFlowResult& result, const BusMergeMap& map) {
+void unproject_pf_result(PowerFlowResult& result, const BusMergeMap& map,
+                         size_t authored_branch_count) {
   if (!map.ext_to_int.empty() && map.n_original > 0) {
-    result.vm = unproject_bus_vector(result.vm, map);
-    result.va = unproject_bus_vector(result.va, map);
+    result.vm = unproject_bus_vector(result.vm, map, BusVectorSemantics::Intensive);
+    result.va = unproject_bus_vector(result.va, map, BusVectorSemantics::Intensive);
   }
-  unproject_branch_flows(result, map);
+  unproject_branch_flows(result, map, authored_branch_count);
+}
+
+void trim_internal_dc_bus_results(
+    PowerFlowResult& result,
+    const std::optional<ProjectionCertificate>& certificate) {
+  if (!certificate || certificate->n_authored_dc_buses < 0) return;
+  const size_t authored =
+      static_cast<size_t>(certificate->n_authored_dc_buses);
+  if (result.vdc.size() > authored) result.vdc.resize(authored);
+}
+
+std::vector<double> project_intensive_bus_vector(
+    const std::vector<double>& authored, const BusMergeMap& map) {
+  if (static_cast<int>(authored.size()) != map.n_original) {
+    throw std::invalid_argument(
+        "project_intensive_bus_vector: authored vector size does not match "
+        "BusMergeMap.n_original");
+  }
+  std::vector<double> canonical(static_cast<size_t>(map.n_merged), 0.0);
+  std::vector<char> assigned(static_cast<size_t>(map.n_merged), 0);
+  for (const auto& [ext_bus, int_pos] : map.ext_to_int) {
+    const auto orig = map.ext_to_orig_pos.find(ext_bus);
+    if (orig == map.ext_to_orig_pos.end() || int_pos < 0 ||
+        int_pos >= map.n_merged || orig->second < 0 ||
+        orig->second >= map.n_original) {
+      continue;
+    }
+    if (assigned[static_cast<size_t>(int_pos)] == 0) {
+      canonical[static_cast<size_t>(int_pos)] =
+          authored[static_cast<size_t>(orig->second)];
+      assigned[static_cast<size_t>(int_pos)] = 1;
+    }
+  }
+  return canonical;
 }
 
 }  // namespace
@@ -894,15 +935,6 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
     }
   }
   populate_derived_results(data, result, opt.loss_model);
-  // Recover switch / circuit-breaker terminal flows: PF-aware (from solved AC
-  // line flows) when available so merged-out devices still report flow.
-  if (result.converged && (!sys.ac.switches.empty() || !sys.ac.circuit_breakers.empty())) {
-    auto df = result.branch_flows.size() == sys.ac.branches.size()
-                  ? compute_device_terminal_flows(sys, result.branch_flows)
-                  : compute_device_terminal_flows(sys, result.vm, result.va);
-    result.ac_switch_flows = std::move(df.ac_switches);
-    result.ac_circuit_breaker_flows = std::move(df.ac_circuit_breakers);
-  }
   // Post-solve DC/DC duty-ratio feasibility (multi-converter §3.2): a converged
   // solution can still demand an infeasible voltage conversion for the declared
   // power-stage topology.
@@ -918,7 +950,25 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
     }
   }
   restore_original_vsc_bus_ac(result, sys);
-  if (data.bus_merge_map) unproject_pf_result(result, *data.bus_merge_map);
+  if (data.bus_merge_map) {
+    unproject_pf_result(result, *data.bus_merge_map, sys.ac.branches.size());
+  } else if (result.branch_flows.size() > sys.ac.branches.size()) {
+    result.branch_flows.resize(sys.ac.branches.size());
+  }
+  trim_internal_dc_bus_results(result, data.projection_certificate);
+
+  // Terminal recovery consumes authored-space branch flows only. Running this
+  // after bus/branch reprojection keeps meshed cuts in one declared index space.
+  if (result.converged &&
+      (!sys.ac.switches.empty() || !sys.ac.circuit_breakers.empty())) {
+    if (result.branch_flows.size() != sys.ac.branches.size()) {
+      throw std::runtime_error(
+          "solve_power_flow: authored branch-flow recovery size mismatch");
+    }
+    auto df = compute_device_terminal_flows(sys, result.branch_flows);
+    result.ac_switch_flows = std::move(df.ac_switches);
+    result.ac_circuit_breaker_flows = std::move(df.ac_circuit_breakers);
+  }
 
   // Declare which parts of the unified converter model this snapshot Newton
   // solve honored (multi-converter model, docs/multiple_converter.md).
@@ -947,7 +997,11 @@ DCPowerFlowResult solve_dc_power_flow(const HybridPowerSystem& sys,
   if (reference_validation.has_errors()) return {};
   powerflow::SolverData& data = get_cached_solver_data(sys, opt.loss_model);
   static thread_local powerflow::DCSolver solver;
-  return solver.solve(data, opt, nullptr);
+  auto result = solver.solve(data, opt, nullptr);
+  if (result.vdc.size() > sys.dc.buses.size()) {
+    result.vdc.resize(sys.dc.buses.size());
+  }
+  return result;
 }
 
 AdaptiveSolveResult solve_power_flow_adaptive(const HybridPowerSystem& sys,
@@ -957,7 +1011,27 @@ AdaptiveSolveResult solve_power_flow_adaptive(const HybridPowerSystem& sys,
   if (result.converged) {
     powerflow::SolverData& data = get_cached_solver_data(sys, opt.loss_model);
     apply_zip_weights(data, opt);
-    result.branch_flows = powerflow::compute_branch_flows(data, result.vm, result.va);
+    std::vector<double> canonical_vm = result.vm;
+    std::vector<double> canonical_va = result.va;
+    if (data.bus_merge_map) {
+      canonical_vm =
+          project_intensive_bus_vector(result.vm, *data.bus_merge_map);
+      canonical_va =
+          project_intensive_bus_vector(result.va, *data.bus_merge_map);
+    }
+    PowerFlowResult physical;
+    physical.branch_flows =
+        powerflow::compute_branch_flows(data, canonical_vm, canonical_va);
+    if (data.bus_merge_map) {
+      unproject_branch_flows(physical, *data.bus_merge_map,
+                             sys.ac.branches.size());
+    } else if (physical.branch_flows.size() > sys.ac.branches.size()) {
+      physical.branch_flows.resize(sys.ac.branches.size());
+    }
+    result.branch_flows = std::move(physical.branch_flows);
+  }
+  if (result.vdc.size() > sys.dc.buses.size()) {
+    result.vdc.resize(sys.dc.buses.size());
   }
   return result;
 }
@@ -970,6 +1044,9 @@ IslandedSolveResult solve_power_flow_islanded(const HybridPowerSystem& sys,
   result.vm = adaptive.vm;
   result.va = adaptive.va;
   result.vdc = adaptive.vdc;
+  if (result.vdc.size() > sys.dc.buses.size()) {
+    result.vdc.resize(sys.dc.buses.size());
+  }
   result.converged = adaptive.converged;
   result.iterations = adaptive.iterations;
   result.residual = adaptive.residual;
@@ -981,14 +1058,22 @@ DistributedSlackResult solve_power_flow_distributed_slack(const HybridPowerSyste
                                                           const DistributedSlack& slack_cfg,
                                                           const PowerFlowOptions& opt) {
   powerflow::DistributedSlackSolver solver;
-  return solver.solve_simplified(sys, slack_cfg, opt);
+  auto result = solver.solve_simplified(sys, slack_cfg, opt);
+  if (result.vdc.size() > sys.dc.buses.size()) {
+    result.vdc.resize(sys.dc.buses.size());
+  }
+  return result;
 }
 
 DistributedSlackResult solve_power_flow_distributed_slack_full(const HybridPowerSystem& sys,
                                                                const DistributedSlack& slack_cfg,
                                                                const PowerFlowOptions& opt) {
   powerflow::DistributedSlackSolver solver;
-  return solver.solve_full_jacobian(sys, slack_cfg, opt);
+  auto result = solver.solve_full_jacobian(sys, slack_cfg, opt);
+  if (result.vdc.size() > sys.dc.buses.size()) {
+    result.vdc.resize(sys.dc.buses.size());
+  }
+  return result;
 }
 
 SolverHandle* create_solver_handle(const HybridPowerSystem& sys, LossModelType loss_model) {
@@ -1016,7 +1101,13 @@ PowerFlowResult solve_handle(SolverHandle* handle, const PowerFlowOptions& opt) 
   PowerFlowResult result = handle->newton_solver.solve(handle->data, opt, nullptr);
   populate_derived_results(handle->data, result, opt.loss_model);
   restore_original_vsc_bus_ac(result, handle->original_vsc_bus_ac);
-  if (handle->data.bus_merge_map) unproject_pf_result(result, *handle->data.bus_merge_map);
+  if (handle->data.bus_merge_map) {
+    unproject_pf_result(result, *handle->data.bus_merge_map,
+                        handle->authored_ac_branch_count);
+  } else if (result.branch_flows.size() > handle->authored_ac_branch_count) {
+    result.branch_flows.resize(handle->authored_ac_branch_count);
+  }
+  trim_internal_dc_bus_results(result, handle->data.projection_certificate);
   return result;
 }
 
@@ -1026,7 +1117,13 @@ DCPowerFlowResult solve_dc_handle(SolverHandle* handle, const PowerFlowOptions& 
   }
   handle->data.loss_model = opt.loss_model;
   handle->configured_loss_model = opt.loss_model;
-  return handle->dc_solver.solve(handle->data, opt, nullptr);
+  auto result = handle->dc_solver.solve(handle->data, opt, nullptr);
+  if (handle->data.projection_certificate) {
+    const size_t authored = static_cast<size_t>(
+        handle->data.projection_certificate->n_authored_dc_buses);
+    if (result.vdc.size() > authored) result.vdc.resize(authored);
+  }
+  return result;
 }
 
 void destroy_solver_handle(SolverHandle* handle) {
@@ -1041,14 +1138,39 @@ PowerFlowResult solve_power_flow_fdpf(const HybridPowerSystem& sys,
   PowerFlowResult result = solver.solve(data, opt);
   populate_derived_results(data, result, opt.loss_model);
   restore_original_vsc_bus_ac(result, sys);
-  if (data.bus_merge_map) unproject_pf_result(result, *data.bus_merge_map);
+  if (data.bus_merge_map) {
+    unproject_pf_result(result, *data.bus_merge_map, sys.ac.branches.size());
+  } else if (result.branch_flows.size() > sys.ac.branches.size()) {
+    result.branch_flows.resize(sys.ac.branches.size());
+  }
+  trim_internal_dc_bus_results(result, data.projection_certificate);
   return result;
 }
 
 powerflow::ACLinearizedDCResult solve_ac_dc_power_flow(const HybridPowerSystem& sys,
                                                         const PowerFlowOptions& opt) {
   powerflow::SolverData& data = get_cached_solver_data(sys, opt.loss_model);
-  return powerflow::solve_ac_linearized_dc(data);
+  auto result = powerflow::solve_ac_linearized_dc(data);
+  if (data.bus_merge_map) {
+    const auto& map = *data.bus_merge_map;
+    result.va = unproject_bus_vector(
+        result.va, map, BusVectorSemantics::Intensive);
+    std::vector<double> authored(sys.ac.branches.size(), 0.0);
+    for (const auto& [orig_pos, projected_pos] : map.branch_orig_to_proj) {
+      if (orig_pos < 0 ||
+          orig_pos >= static_cast<int>(authored.size()) ||
+          projected_pos < 0 ||
+          projected_pos >= static_cast<int>(result.pf_mw.size())) {
+        continue;
+      }
+      authored[static_cast<size_t>(orig_pos)] =
+          result.pf_mw[static_cast<size_t>(projected_pos)];
+    }
+    result.pf_mw = std::move(authored);
+  } else if (result.pf_mw.size() > sys.ac.branches.size()) {
+    result.pf_mw.resize(sys.ac.branches.size());
+  }
+  return result;
 }
 
 dynamics::DynamicResults run_transient_simulation(
@@ -1061,7 +1183,23 @@ opf::ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const opf::ACOPFOpti
   opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
   // Surface switch / circuit-breaker terminal flows at the OPF dispatch point.
   if (r.converged && (!sys.ac.switches.empty() || !sys.ac.circuit_breakers.empty())) {
-    auto df = compute_device_terminal_flows(sys, r.vm, r.va);
+    auto data = powerflow::make_solver_data(sys, LossModelType::Linear);
+    std::vector<double> canonical_vm = r.vm;
+    std::vector<double> canonical_va = r.va;
+    if (data.bus_merge_map) {
+      canonical_vm = project_intensive_bus_vector(r.vm, *data.bus_merge_map);
+      canonical_va = project_intensive_bus_vector(r.va, *data.bus_merge_map);
+    }
+    PowerFlowResult physical;
+    physical.branch_flows =
+        powerflow::compute_branch_flows(data, canonical_vm, canonical_va);
+    if (data.bus_merge_map) {
+      unproject_branch_flows(physical, *data.bus_merge_map,
+                             sys.ac.branches.size());
+    } else if (physical.branch_flows.size() > sys.ac.branches.size()) {
+      physical.branch_flows.resize(sys.ac.branches.size());
+    }
+    auto df = compute_device_terminal_flows(sys, physical.branch_flows);
     r.ac_switch_flows = std::move(df.ac_switches);
     r.ac_circuit_breaker_flows = std::move(df.ac_circuit_breakers);
   }

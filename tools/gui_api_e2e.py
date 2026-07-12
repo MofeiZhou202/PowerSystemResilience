@@ -419,6 +419,135 @@ def main() -> int:
             chk.check(opf.get("options_effective", {}).get("max_inner_iterations") == 400,
                       f"opf options echoed for {case_name}")
 
+        print("3a. power_system Canvas reprojection contract")
+        power_system_path = (
+            REPO_ROOT / "external_data" / "classical_example" / "power_system.json"
+        )
+        power_system = power_system_path.read_text(encoding="utf-8")
+        st, _ = c.post_json(
+            "/api/session/load_json_string", {"json_string": power_system}
+        )
+        st, pf = c.post_json(
+            "/api/session/pf",
+            {
+                "method": "ac_newton",
+                "options": {"enable_converter_coordination_check": False},
+            },
+        )
+        pf_components = pf.get("component_results", [])
+        pf_grid = next(
+            (row for row in pf_components if row.get("canvas_type") == "external_grid"),
+            None,
+        )
+        pf_cb34 = next(
+            (
+                row
+                for row in pf.get("ac_circuit_breaker_flows", [])
+                if row.get("index") == 1 and row.get("position") == 1
+            ),
+            None,
+        )
+        pf_source_cb = next(
+            (
+                row
+                for row in pf.get("ac_circuit_breaker_flows", [])
+                if row.get("index") == 0 and row.get("position") == 0
+            ),
+            None,
+        )
+        chk.check(
+            st == 200 and pf.get("converged") is True and pf_grid is not None,
+            "PF Canvas payload contains Grid 1 attribution",
+        )
+        chk.check(
+            pf_cb34 is not None
+            and abs(float(pf_cb34.get("pf_mw", 0.0))) > 1.0e-6
+            and abs(float(pf_cb34.get("qf_mvar", 0.0))) > 1.0e-6,
+            f"PF CB34 terminal P/Q={pf_cb34}",
+        )
+        chk.check(
+            pf_source_cb is not None
+            and pf_source_cb.get("source") == "same_bus_external_grid_cut"
+            and abs(float(pf_source_cb.get("pf_mw", 0.0))) > 1.0e-6
+            and abs(float(pf_source_cb.get("qf_mvar", 0.0))) > 1.0e-6,
+            f"PF source-side CB terminal P/Q={pf_source_cb}",
+        )
+        pf_bus1 = next(
+            (
+                row
+                for row in (pf.get("power_balance_diagnostics", {}).get("all_buses", []))
+                if row.get("domain") == "AC" and row.get("bus") == 1
+            ),
+            None,
+        )
+        chk.check(
+            pf_bus1 is not None
+            and abs(float(pf_bus1.get("residual_kw", 1.0))) <= 1.0
+            and abs(float(pf_bus1.get("residual_kvar", 1.0))) <= 1.0,
+            f"PF Bus 1 P/Q ledger residual={pf_bus1}",
+        )
+
+        st, opf = c.post_json("/api/session/opf", opf_payload)
+        post_pf = opf.get("post_pf", {})
+        post_components = post_pf.get("component_results", [])
+        opf_grid = next(
+            (row for row in post_components if row.get("canvas_type") == "external_grid"),
+            None,
+        )
+        opf_cb34 = next(
+            (
+                row
+                for row in post_pf.get("ac_circuit_breaker_flows", [])
+                if row.get("index") == 1 and row.get("position") == 1
+            ),
+            None,
+        )
+        opf_source_cb = next(
+            (
+                row
+                for row in post_pf.get("ac_circuit_breaker_flows", [])
+                if row.get("index") == 0 and row.get("position") == 0
+            ),
+            None,
+        )
+        chk.check(
+            st == 200
+            and opf.get("converged") is True
+            and opf_grid is not None
+            and len(post_pf.get("external_grid_p_mw", [])) == 1
+            and len(post_pf.get("external_grid_q_mvar", [])) == 1,
+            "OPF post-PF Canvas payload contains Grid 1 P/Q",
+        )
+        chk.check(
+            opf_cb34 is not None
+            and abs(float(opf_cb34.get("pf_mw", 0.0))) > 1.0e-6
+            and abs(float(opf_cb34.get("qf_mvar", 0.0))) > 1.0e-6,
+            f"OPF CB34 terminal P/Q={opf_cb34}",
+        )
+        chk.check(
+            opf_source_cb is not None
+            and opf_source_cb.get("source") == "same_bus_external_grid_cut"
+            and abs(float(opf_source_cb.get("pf_mw", 0.0))) > 1.0e-6
+            and abs(float(opf_source_cb.get("qf_mvar", 0.0))) > 1.0e-6,
+            f"OPF source-side CB terminal P/Q={opf_source_cb}",
+        )
+        opf_bus1 = next(
+            (
+                row
+                for row in (post_pf.get("power_balance_diagnostics", {}).get("all_buses", []))
+                if row.get("domain") == "AC" and row.get("bus") == 1
+            ),
+            None,
+        )
+        chk.check(
+            opf_bus1 is not None
+            and abs(float(opf_bus1.get("residual_kw", 1.0))) <= 1.0
+            and abs(float(opf_bus1.get("residual_kvar", 1.0))) <= 1.0
+            and abs(float(opf_bus1.get("net_injection_mvar", 0.0))) > 1.0e-6
+            and abs(float(opf_bus1.get("terminal_export_mvar", 0.0))) > 1.0e-6,
+            f"OPF Bus 1 P/Q ledger residual={opf_bus1}",
+        )
+
         if args.skip_etap:
             print("4-9. ETAP export/import checks skipped")
         else:

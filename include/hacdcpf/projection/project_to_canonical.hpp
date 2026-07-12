@@ -109,36 +109,28 @@ ObservableAttribution evaluate_attribution(
     const HybridPowerSystem& projected,
     ObservableKind observable);
 
+enum class BusVectorSemantics {
+  Intensive,
+  Extensive,
+};
+
 std::vector<double> unproject_bus_vector(
     const std::vector<double>& merged,
-    const BusMergeMap& map);
+    const BusMergeMap& map,
+    BusVectorSemantics semantics);
 
 // ═══════════════════════════════════════════════════════════════════════
 // Device terminal flows (switches / circuit breakers)
 // ═══════════════════════════════════════════════════════════════════════
 // Closed switches/CBs collapse to zero-impedance branches and are merged out of
-// the canonical solve, so they carry no ACBranch flow. This recovers their flow
-// as the net real/reactive injection across the two-terminal cut, using the
-// original endpoint buses and per-bus net injection (gen − load). Open devices
-// report zero. base_mva scales the result to MW/MVAr.
-// ═══════════════════════════════════════════════════════════════════════
-// Device terminal flows (switches / circuit breakers)
-// ═══════════════════════════════════════════════════════════════════════
-// Closed switches/CBs collapse to zero-impedance branches and are merged out of
-// the canonical solve, so they carry no ACBranch flow. This recovers their flow
-// as the net real/reactive injection across the two-terminal cut. The base
-// overload uses rich component net injection (exact for radial feeders). The
-// PF-aware overload subtracts solved AC line flows at each bus so meshed/looped
-// networks are handled from the actual converged state. Open devices report 0.
+// the canonical solve. Recovery subtracts solved authored AC-line flows from
+// rich component injections; the residual KCL is the collapsed-device terminal
+// injection, including on meshed networks. Open devices report zero.
 struct DeviceTerminalFlows {
   std::vector<DeviceTerminalFlow> ac_switches;
   std::vector<DeviceTerminalFlow> ac_circuit_breakers;
 };
-DeviceTerminalFlows compute_device_terminal_flows(const HybridPowerSystem& sys,
-                                                  const std::vector<double>& vm,
-                                                  const std::vector<double>& va);
-// PF-aware: orig-space AC branch flows (same indexing as sys.ac.branches) make
-// the cut account for already-solved line flows.
+// ac_branch_flows must use the authored sys.ac.branches index space.
 DeviceTerminalFlows compute_device_terminal_flows(const HybridPowerSystem& sys,
                                                   const std::vector<BranchFlow>& ac_branch_flows);
 

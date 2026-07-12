@@ -267,7 +267,8 @@ TEST_CASE("OpenDSS ckt5 parenthesized transformer keeps the active feeder connec
   REQUIRE(projected.bus_merge_map.has_value());
   const std::vector<double> projected_voltage(projected.ac.buses.size(), 1.0);
   const auto restored_voltage = hacdcpf::unproject_bus_vector(
-      projected_voltage, *projected.bus_merge_map);
+      projected_voltage, *projected.bus_merge_map,
+      hacdcpf::BusVectorSemantics::Intensive);
   REQUIRE(restored_voltage.size() == sys.ac.buses.size());
   for (std::size_t i = 0; i < sys.ac.buses.size(); ++i) {
     CHECK_THAT(restored_voltage[i],

@@ -159,8 +159,10 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
       r = solver.solve(data, opt, &flat);
     }
     if (data.bus_merge_map && data.bus_merge_map->has_merges()) {
-      out.vm = unproject_bus_vector(r.vm, *data.bus_merge_map);
-      out.va = unproject_bus_vector(r.va, *data.bus_merge_map);
+      out.vm = unproject_bus_vector(
+          r.vm, *data.bus_merge_map, BusVectorSemantics::Intensive);
+      out.va = unproject_bus_vector(
+          r.va, *data.bus_merge_map, BusVectorSemantics::Intensive);
     } else {
       out.vm = r.vm;
       out.va = r.va;
@@ -224,8 +226,10 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
       r = solver.solve(sub_data, pf_opt, &flat);
     }
     if (sub_data.bus_merge_map && sub_data.bus_merge_map->has_merges()) {
-      r.vm = unproject_bus_vector(r.vm, *sub_data.bus_merge_map);
-      r.va = unproject_bus_vector(r.va, *sub_data.bus_merge_map);
+      r.vm = unproject_bus_vector(
+          r.vm, *sub_data.bus_merge_map, BusVectorSemantics::Intensive);
+      r.va = unproject_bus_vector(
+          r.va, *sub_data.bus_merge_map, BusVectorSemantics::Intensive);
     }
     return r;
   };

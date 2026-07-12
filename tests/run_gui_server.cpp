@@ -180,6 +180,235 @@ json rich_attribution_coverage_json(
               {"unsupported", coverage.unsupported_components}};
 }
 
+json attributed_power_balance_diagnostics(
+    const hacdcpf::HybridPowerSystem& sys,
+    const hacdcpf::projection::RichResultAttribution& attribution) {
+  struct Ledger {
+    double injection_p{0.0};
+    double injection_q{0.0};
+    double export_p{0.0};
+    double export_q{0.0};
+    json details = json::array();
+  };
+  std::unordered_map<int, Ledger> ac;
+  std::unordered_map<int, Ledger> dc;
+  const std::unordered_set<std::string> network_types{
+      "ac_branch", "dc_branch", "transformer_2w", "transformer_3w",
+      "switch", "circuit_breaker"};
+  auto add_detail = [](Ledger& ledger, const std::string& label, double p,
+                       double q, bool injection) {
+    ledger.details.push_back(json{{"label", label}, {"p_mw", p},
+                                  {"q_mvar", q},
+                                  {"role", injection ? "injection" : "export"}});
+  };
+  for (const auto& row : attribution.components) {
+    if (!row.in_service || row.terminals.empty()) continue;
+    const bool network = network_types.count(row.component_type) > 0;
+    for (const auto& terminal : row.terminals) {
+      if (!terminal.has_p && !terminal.has_q) continue;
+      auto& ledger = terminal.is_dc ? dc[terminal.bus] : ac[terminal.bus];
+      const double p = terminal.has_p ? terminal.p_mw : 0.0;
+      const double q = terminal.has_q ? terminal.q_mvar : 0.0;
+      const std::string label = row.name + " / " + terminal.name;
+      if (network) {
+        ledger.export_p += p;
+        ledger.export_q += q;
+      } else {
+        ledger.injection_p += p;
+        ledger.injection_q += q;
+      }
+      add_detail(ledger, label, p, q, !network);
+    }
+  }
+  auto value = [&](const std::string& type, const std::string& domain,
+                   int index, const std::string& name, double fallback) {
+    const auto row = std::find_if(
+        attribution.components.begin(), attribution.components.end(),
+        [&](const auto& item) {
+          return item.component_type == type && item.domain == domain &&
+                 item.component_index == index;
+        });
+    if (row == attribution.components.end()) return fallback;
+    const auto item = std::find_if(row->values.begin(), row->values.end(),
+                                   [&](const auto& v) { return v.name == name; });
+    return item == row->values.end() ? fallback : item->value;
+  };
+  auto inject_ac = [&](int bus, double p, double q, const std::string& label) {
+    auto& ledger = ac[bus];
+    ledger.injection_p += p;
+    ledger.injection_q += q;
+    add_detail(ledger, label, p, q, true);
+  };
+  auto inject_dc = [&](int bus, double p, const std::string& label) {
+    auto& ledger = dc[bus];
+    ledger.injection_p += p;
+    add_detail(ledger, label, p, 0.0, true);
+  };
+  std::unordered_map<int, double> ac_vm;
+  for (const auto& b : sys.ac.buses) {
+    if (!b.in_service) continue;
+    const double vm = [&]() {
+      const auto row = std::find_if(attribution.components.begin(), attribution.components.end(),
+          [&](const auto& item) { return item.component_type == "ac_bus" && item.component_index == b.index; });
+      if (row == attribution.components.end()) return b.vm_pu;
+      const auto item = std::find_if(row->values.begin(), row->values.end(),
+          [](const auto& v) { return v.name == "vm_pu"; });
+      return item == row->values.end() ? b.vm_pu : item->value;
+    }();
+    ac_vm[b.index] = vm;
+    inject_ac(b.index, -b.pd_mw - b.gs_mw * vm * vm,
+              -b.qd_mvar + b.bs_mvar * vm * vm, "母线固定注入");
+  }
+  for (const auto& load : sys.ac.loads)
+    if (load.in_service) inject_ac(load.bus, -load.p_mw * load.scaling,
+                                   -load.q_mvar * load.scaling,
+                                   load.name.empty() ? "负荷" : load.name);
+  for (const auto& load : sys.ac.flexible_loads)
+    if (load.in_service) inject_ac(load.bus,
+        -value("flexible_load", "AC", load.index, "p_mw", load.p_mw),
+        -value("flexible_load", "AC", load.index, "q_mvar", load.q_mvar),
+        load.name.empty() ? "柔性负荷" : load.name);
+  for (const auto& load : sys.ac.asymmetric_loads)
+    if (load.in_service) inject_ac(load.bus,
+        -value("asymmetric_load", "AC", load.index, "p_mw",
+               load.pa_mw + load.pb_mw + load.pc_mw),
+        -value("asymmetric_load", "AC", load.index, "q_mvar",
+               load.qa_mvar + load.qb_mvar + load.qc_mvar),
+        load.name.empty() ? "不对称负荷" : load.name);
+  for (const auto& source : sys.ac.static_generators)
+    if (source.in_service) inject_ac(source.bus,
+        value("static_generator", "AC", source.index, "p_mw", source.p_mw * source.scaling),
+        value("static_generator", "AC", source.index, "q_mvar", source.q_mvar * source.scaling),
+        source.name.empty() ? "静态电源" : source.name);
+  for (const auto& source : sys.ac.renewable_gens)
+    if (source.in_service) inject_ac(source.bus,
+        value("renewable_generator", "AC", source.index, "p_mw", source.p_mw),
+        value("renewable_generator", "AC", source.index, "q_mvar", source.q_mvar),
+        source.name.empty() ? "新能源" : source.name);
+  for (const auto& source : sys.ac.pv_systems)
+    if (source.in_service) inject_ac(source.bus,
+        value("pv_system", "AC", source.index, "p_mw", source.p_mw),
+        value("pv_system", "AC", source.index, "q_mvar", source.q_mvar),
+        source.name.empty() ? "光伏" : source.name);
+  for (const auto& shunt : sys.ac.shunts) {
+    if (!shunt.in_service) continue;
+    const double v2 = ac_vm.count(shunt.bus) ? ac_vm[shunt.bus] * ac_vm[shunt.bus] : 1.0;
+    const double bs = shunt.switchable && shunt.n_steps > 0
+        ? shunt.bs_per_step * shunt.current_step : shunt.bs_mvar;
+    inject_ac(shunt.bus, -shunt.gs_mw * v2, bs * v2,
+              shunt.name.empty() ? "并联元件" : shunt.name);
+  }
+  for (const auto& motor : sys.ac.motors) {
+    if (!motor.in_service) continue;
+    const double p = motor.efficiency > 1e-9
+        ? motor.sn_mva * motor.cos_phi / motor.efficiency
+        : motor.sn_mva * motor.cos_phi;
+    const double shaft_p = motor.sn_mva * motor.cos_phi;
+    const double q = std::sqrt(std::max(0.0, motor.sn_mva * motor.sn_mva - shaft_p * shaft_p));
+    inject_ac(motor.bus, -p, -q, motor.name.empty() ? "电动机" : motor.name);
+  }
+  for (const auto& station : sys.ac.charging_stations) {
+    if (!station.in_service) continue;
+    const double p = station.p_total_kw > 0.0
+        ? station.p_total_kw / 1000.0
+        : station.max_power_kw * station.utilization_rate *
+              station.simultaneity_factor / 1000.0;
+    inject_ac(station.bus, -p, -station.q_total_kvar / 1000.0,
+              station.name.empty() ? "充电站" : station.name);
+  }
+  for (const auto& storage : sys.mobile_storage)
+    if (storage.in_service) inject_ac(storage.bus,
+        value("mobile_storage", "AC", storage.index, "p_mw", storage.p_mw),
+        value("mobile_storage", "AC", storage.index, "q_mvar", storage.q_mvar),
+        storage.name.empty() ? "移动储能" : storage.name);
+  for (const auto& vpp : sys.vpps)
+    if (vpp.in_service) inject_ac(vpp.pcc_bus,
+        value("vpp", "AC", vpp.index, "p_mw", vpp.p_output_mw),
+        value("vpp", "AC", vpp.index, "q_mvar", vpp.q_output_mvar),
+        vpp.name.empty() ? "虚拟电厂" : vpp.name);
+  for (const auto& microgrid : sys.microgrids)
+    if (microgrid.in_service) inject_ac(microgrid.pcc_bus,
+        -value("microgrid", "AC", microgrid.index, "p_mw", microgrid.p_exchange_mw),
+        0.0, microgrid.name.empty() ? "微网" : microgrid.name);
+  for (const auto& b : sys.dc.buses)
+    if (b.in_service) inject_dc(b.index, -b.pd_mw, "DC母线固定负荷");
+  for (const auto& load : sys.dc.loads)
+    if (load.in_service) inject_dc(load.bus, -load.p_mw * load.scaling,
+                                   load.name.empty() ? "DC负荷" : load.name);
+  for (const auto& source : sys.dc.pv_arrays)
+    if (source.in_service) inject_dc(source.bus,
+        value("dc_pv_array", "DC", source.index, "p_mw", source.p_set_mw),
+        source.name.empty() ? "DC光伏" : source.name);
+  for (const auto& source : sys.dc.static_generators)
+    if (source.in_service) inject_dc(source.bus,
+        value("static_generator", "DC", source.index, "p_mw", source.p_mw * source.scaling),
+        source.name.empty() ? "DC静态电源" : source.name);
+  for (const auto& source : sys.dc.dc_static_generators)
+    if (source.in_service) inject_dc(source.bus,
+        value("dc_static_generator", "DC", source.index, "p_mw",
+              source.p_set_mw * source.scaling),
+        source.name.empty() ? "DC静态电源" : source.name);
+
+  json out{{"basis", "canonical_projection_with_rich_terminal_attribution"},
+           {"tolerance_kw", 1.0}, {"ordinary", json::array()},
+           {"sources", json::array()}, {"all_buses", json::array()}};
+  auto add_row = [&](const std::string& domain, int bus, const std::string& type,
+                     const std::string& name, Ledger ledger, bool slack) {
+    if (slack) {
+      const double correction_p = ledger.export_p - ledger.injection_p;
+      const double correction_q = ledger.export_q - ledger.injection_q;
+      if (std::abs(correction_p) > 1e-6 || std::abs(correction_q) > 1e-6) {
+        ledger.injection_p += correction_p;
+        ledger.injection_q += correction_q;
+        add_detail(ledger,
+                   domain == "DC" ? "DC_V平衡修正" : "Slack数值闭合修正",
+                   correction_p, correction_q, true);
+      }
+    }
+    const double rp = ledger.injection_p - ledger.export_p;
+    const double rq = ledger.injection_q - ledger.export_q;
+    json row{{"kind", domain}, {"domain", domain}, {"id", bus}, {"bus", bus},
+             {"type", type}, {"bus_type", type}, {"name", name},
+             {"residual_mw", rp}, {"residual_kw", rp * 1000.0},
+             {"residual_mvar", rq}, {"residual_kvar", rq * 1000.0},
+             {"net_injection_mw", ledger.injection_p},
+             {"net_injection_mvar", ledger.injection_q},
+             {"terminal_export_mw", ledger.export_p},
+             {"terminal_export_mvar", ledger.export_q}, {"details", ledger.details}};
+    out["all_buses"].push_back(row);
+    if (!slack && (std::abs(rp) > 1e-3 || std::abs(rq) > 1e-3))
+      out["ordinary"].push_back(row);
+    if (slack && (std::abs(ledger.injection_p) > 1e-3 ||
+                  std::abs(ledger.injection_q) > 1e-3)) {
+      json source = row;
+      source["source_mw"] = ledger.injection_p;
+      source["source_kw"] = ledger.injection_p * 1000.0;
+      source["source_mvar"] = ledger.injection_q;
+      source["source_kvar"] = ledger.injection_q * 1000.0;
+      out["sources"].push_back(std::move(source));
+    }
+  };
+  for (const auto& b : sys.ac.buses) {
+    if (!b.in_service) continue;
+    const bool slack = b.bus_type == hacdcpf::BusType::SLACK ||
+        std::any_of(sys.ac.external_grids.begin(), sys.ac.external_grids.end(),
+                    [&](const auto& grid) { return grid.in_service && grid.bus == b.index; });
+    add_row("AC", b.index, hacdcpf::bus_type_str(b.bus_type),
+            b.name.empty() ? "Bus " + std::to_string(b.index) : b.name,
+            ac[b.index], slack);
+  }
+  for (const auto& b : sys.dc.buses) {
+    if (!b.in_service) continue;
+    add_row("DC", b.index,
+            b.bus_type == hacdcpf::DCBusType::DC_V ? "DC_V" : "DC_P",
+            b.name.empty() ? "DC Bus " + std::to_string(b.index) : b.name,
+            dc[b.index], b.bus_type == hacdcpf::DCBusType::DC_V);
+  }
+  out["ordinary_bad_count"] = out["ordinary"].size();
+  out["source_count"] = out["sources"].size();
+  return out;
+}
+
 std::optional<double> attributed_active_power_mw(
     const hacdcpf::projection::RichComponentResult& row) {
   const auto value = std::find_if(
@@ -857,8 +1086,10 @@ void unproject_replay_branch_flows(hacdcpf::PowerFlowResult& result,
 void unproject_replay_result(hacdcpf::PowerFlowResult& result,
                              const hacdcpf::BusMergeMap& map) {
   if (!map.ext_to_int.empty() && map.n_original > 0) {
-    result.vm = hacdcpf::unproject_bus_vector(result.vm, map);
-    result.va = hacdcpf::unproject_bus_vector(result.va, map);
+    result.vm = hacdcpf::unproject_bus_vector(
+        result.vm, map, hacdcpf::BusVectorSemantics::Intensive);
+    result.va = hacdcpf::unproject_bus_vector(
+        result.va, map, hacdcpf::BusVectorSemantics::Intensive);
   }
   unproject_replay_branch_flows(result, map);
 }
@@ -895,7 +1126,9 @@ json post_power_flow_terminal_flows_json(
     const hacdcpf::HybridPowerSystem& sys,
     const hacdcpf::PowerFlowResult& pf,
     const std::vector<double>& solved_pg = {},
-    const std::vector<double>& solved_qg = {}) {
+    const std::vector<double>& solved_qg = {},
+    const std::vector<double>& solved_external_grid_p = {},
+    const std::vector<double>& solved_external_grid_q = {}) {
   struct TwoTerminalFlow {
     double pf_mw{0.0};
     double pt_mw{0.0};
@@ -1033,10 +1266,20 @@ json post_power_flow_terminal_flows_json(
     if (eg.in_service) ++ext_count_by_bus[eg.bus];
 
   std::unordered_map<int, double> ac_grid_inj_p, ac_grid_inj_q;
-  for (const auto& kv : ext_count_by_bus) {
-    const int bus = kv.first;
-    ac_grid_inj_p[bus] = ac_flow_p[bus] - ac_non_grid_p[bus];
-    ac_grid_inj_q[bus] = ac_flow_q[bus] - ac_non_grid_q[bus];
+  if (solved_external_grid_p.size() == sys.ac.external_grids.size() &&
+      solved_external_grid_q.size() == sys.ac.external_grids.size()) {
+    for (size_t i = 0; i < sys.ac.external_grids.size(); ++i) {
+      const auto& grid = sys.ac.external_grids[i];
+      if (!grid.in_service) continue;
+      ac_grid_inj_p[grid.bus] += solved_external_grid_p[i];
+      ac_grid_inj_q[grid.bus] += solved_external_grid_q[i];
+    }
+  } else {
+    for (const auto& kv : ext_count_by_bus) {
+      const int bus = kv.first;
+      ac_grid_inj_p[bus] = ac_flow_p[bus] - ac_non_grid_p[bus];
+      ac_grid_inj_q[bus] = ac_flow_q[bus] - ac_non_grid_q[bus];
+    }
   }
 
   std::unordered_map<int, double> ac_net_export_p, ac_net_export_q;
@@ -1185,6 +1428,25 @@ json post_power_flow_terminal_flows_json(
     register_ac_terminal(false, i, cb.bus_from, cb.bus_to,
                          cb.in_service && cb.closed,
                          ac_rate_mva(cb.bus_from, cb.i_rated_ka, cb.rated_voltage_kv));
+  }
+  std::unordered_map<int, int> same_bus_grid_breaker_count;
+  for (const auto& cb : sys.ac.circuit_breakers) {
+    if (cb.in_service && cb.closed && cb.bus_from == cb.bus_to &&
+        ext_count_by_bus[cb.bus_from] > 0) {
+      ++same_bus_grid_breaker_count[cb.bus_from];
+    }
+  }
+  for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
+    const auto& cb = sys.ac.circuit_breakers[i];
+    const int count = same_bus_grid_breaker_count[cb.bus_from];
+    if (!cb.in_service || !cb.closed || cb.bus_from != cb.bus_to || count <= 0)
+      continue;
+    auto& fl = ac_cb_flow_rows[i];
+    fl.pf_mw = ac_grid_inj_p[cb.bus_from] / static_cast<double>(count);
+    fl.qf_mvar = ac_grid_inj_q[cb.bus_from] / static_cast<double>(count);
+    fl.pt_mw = -fl.pf_mw;
+    fl.qt_mvar = -fl.qf_mvar;
+    fl.source = "same_bus_external_grid_cut";
   }
 
   std::unordered_map<int, std::vector<std::pair<int, size_t>>> ac_terminal_adj;
@@ -12877,6 +13139,25 @@ int main(int argc, char** argv) {
                                cb.in_service && cb.closed,
                                ac_rate_mva(cb.bus_from, cb.i_rated_ka, cb.rated_voltage_kv));
         }
+        std::unordered_map<int, int> same_bus_grid_breaker_count;
+        for (const auto& cb : sys.ac.circuit_breakers) {
+          if (cb.in_service && cb.closed && cb.bus_from == cb.bus_to &&
+              ext_count_by_bus[cb.bus_from] > 0) {
+            ++same_bus_grid_breaker_count[cb.bus_from];
+          }
+        }
+        for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
+          const auto& cb = sys.ac.circuit_breakers[i];
+          const int count = same_bus_grid_breaker_count[cb.bus_from];
+          if (!cb.in_service || !cb.closed || cb.bus_from != cb.bus_to || count <= 0)
+            continue;
+          auto& fl = ac_cb_flow_rows[i];
+          fl.pf_mw = ac_grid_inj_p[cb.bus_from] / static_cast<double>(count);
+          fl.qf_mvar = ac_grid_inj_q[cb.bus_from] / static_cast<double>(count);
+          fl.pt_mw = -fl.pf_mw;
+          fl.qt_mvar = -fl.qf_mvar;
+          fl.source = "same_bus_external_grid_cut";
+        }
         std::unordered_map<int, std::vector<std::pair<int, size_t>>> ac_terminal_adj;
         std::set<int> ac_terminal_buses;
         for (size_t ei = 0; ei < ac_terminal_edges.size(); ++ei) {
@@ -13328,10 +13609,14 @@ int main(int argc, char** argv) {
         balance_diag["tolerance_kw"] = 1.0;
         balance_diag["ordinary"] = json::array();
         balance_diag["sources"] = json::array();
+        balance_diag["all_buses"] = json::array();
         balance_diag["ac_terminal_export_p"] = json::object();
+        balance_diag["ac_terminal_export_q"] = json::object();
         balance_diag["dc_terminal_export_p"] = json::object();
         for (const auto& [bus, p] : ac_terminal_export_p)
           balance_diag["ac_terminal_export_p"][std::to_string(bus)] = p;
+        for (const auto& [bus, q] : ac_terminal_export_q)
+          balance_diag["ac_terminal_export_q"][std::to_string(bus)] = q;
         for (const auto& [bus, p] : dc_terminal_export_p)
           balance_diag["dc_terminal_export_p"][std::to_string(bus)] = p;
 
@@ -13341,11 +13626,16 @@ int main(int argc, char** argv) {
                                     double residual_mw,
                                     double net_mw,
                                     double terminal_mw,
+                                    double residual_mvar,
+                                    double net_mvar,
+                                    double terminal_mvar,
                                     bool is_implicit) {
           json details = json::array();
-          details.push_back(metric_detail("端口外送合计", terminal_mw));
-          details.push_back(metric_detail("求解净注入", -net_mw));
-          balance_diag["ordinary"].push_back(json{
+          details.push_back(json{{"label", "端口外送合计"}, {"p_mw", terminal_mw},
+                                 {"q_mvar", terminal_mvar}});
+          details.push_back(json{{"label", "求解净注入"}, {"p_mw", net_mw},
+                                 {"q_mvar", net_mvar}});
+          json row{
               {"kind", domain},
               {"domain", domain},
               {"id", bus},
@@ -13359,19 +13649,31 @@ int main(int argc, char** argv) {
               {"residual_kw", residual_mw * 1000.0},
               {"net_injection_mw", net_mw},
               {"terminal_export_mw", terminal_mw},
+              {"residual_mvar", residual_mvar},
+              {"residual_kvar", residual_mvar * 1000.0},
+              {"net_injection_mvar", net_mvar},
+              {"terminal_export_mvar", terminal_mvar},
               {"isImplicit", is_implicit},
               {"is_implicit", is_implicit},
-              {"details", details}});
+              {"details", details}};
+          balance_diag["all_buses"].push_back(row);
+          if (std::abs(residual_mw) * 1000.0 > 1.0 ||
+              std::abs(residual_mvar) * 1000.0 > 1.0) {
+            balance_diag["ordinary"].push_back(std::move(row));
+          }
         };
         auto push_source_row = [&](const std::string& domain, int bus,
                                    const std::string& type,
                                    const std::string& name,
                                    double source_mw,
+                                   double source_mvar,
                                    bool is_implicit,
                                    const std::string& label) {
-          if (std::abs(source_mw) * 1000.0 <= 1.0) return;
+          if (std::abs(source_mw) * 1000.0 <= 1.0 &&
+              std::abs(source_mvar) * 1000.0 <= 1.0) return;
           json details = json::array();
-          details.push_back(metric_detail(label, source_mw));
+          details.push_back(json{{"label", label}, {"p_mw", source_mw},
+                                 {"q_mvar", source_mvar}});
           balance_diag["sources"].push_back(json{
               {"kind", domain},
               {"domain", domain},
@@ -13384,6 +13686,8 @@ int main(int argc, char** argv) {
               {"kw", source_mw * 1000.0},
               {"source_mw", source_mw},
               {"source_kw", source_mw * 1000.0},
+              {"source_mvar", source_mvar},
+              {"source_kvar", source_mvar * 1000.0},
               {"isImplicit", is_implicit},
               {"is_implicit", is_implicit},
               {"details", details}});
@@ -13397,6 +13701,8 @@ int main(int argc, char** argv) {
         for (const auto& [root, members] : ac_balance_groups) {
           double net = 0.0;
           double terminal = 0.0;
+          double net_q = 0.0;
+          double terminal_q = 0.0;
           bool is_slack = false;
           std::string type = "PQ";
           std::string name;
@@ -13406,6 +13712,8 @@ int main(int argc, char** argv) {
             if (!b || !b->in_service) continue;
             net += ac_net_export_p[bus];
             terminal += ac_terminal_export_p[bus];
+            net_q += ac_net_export_q[bus];
+            terminal_q += ac_terminal_export_q[bus];
             if (ac_is_slack_bus(bus)) {
               is_slack = true;
               row_bus = bus;
@@ -13421,21 +13729,50 @@ int main(int argc, char** argv) {
             }
           }
           const double residual = terminal - net;
-          if (!is_slack && std::abs(residual) * 1000.0 > 1.0) {
+          const double residual_q = terminal_q - net_q;
+          if (!is_slack && (std::abs(residual) * 1000.0 > 1.0 ||
+                            std::abs(residual_q) * 1000.0 > 1.0)) {
             ++ordinary_bad_count;
-            push_balance_row("AC", row_bus, type, name,
-                             residual, net, terminal, false);
-            if (members.size() > 1) {
-              auto& row = balance_diag["ordinary"].back();
-              row["merged_buses"] = members;
-              row["basis_note"] =
-                  "closed AC switches/circuit breakers are checked as one canonical supernode";
+          }
+          push_balance_row("AC", row_bus, type, name, residual, net, terminal,
+                           residual_q, net_q, terminal_q, false);
+          if (members.size() > 1) {
+            auto& row = balance_diag["all_buses"].back();
+            row["merged_buses"] = members;
+            row["basis_note"] =
+                "closed AC switches/circuit breakers are checked as one canonical supernode";
+            if (!balance_diag["ordinary"].empty() &&
+                balance_diag["ordinary"].back().value("id", -1) == row_bus) {
+              balance_diag["ordinary"].back()["merged_buses"] = members;
+              balance_diag["ordinary"].back()["basis_note"] = row["basis_note"];
             }
           }
           if (is_slack) {
             double source = 0.0;
+            double source_q = 0.0;
             for (int bus : members) source += ac_source_power(bus);
-            push_source_row("AC", row_bus, type, name, source, false, "AC平衡源");
+            for (int bus : members) {
+              source_q += ac_grid_inj_q[bus];
+              for (size_t gi = 0; gi < sys.ac.generators.size(); ++gi) {
+                const auto& g = sys.ac.generators[gi];
+                if (g.in_service && g.bus == bus &&
+                    (g.is_slack || ac_is_slack_bus(bus))) {
+                  source_q += gen_qg_solved[gi];
+                }
+              }
+              for (const auto& v : pf.vsc_transfers) {
+                if (v.bus_ac != bus) continue;
+                auto cit = std::find_if(sys.vsc_converters.begin(), sys.vsc_converters.end(),
+                    [&](const hacdcpf::VSCConverter& c) { return c.index == v.index; });
+                if (cit != sys.vsc_converters.end() &&
+                    (cit->ac_grid_forming ||
+                     cit->control_mode == hacdcpf::ConverterMode::AC_GRID_FORMING)) {
+                  source_q += v.q_ac_mvar;
+                }
+              }
+            }
+            push_source_row("AC", row_bus, type, name, source, source_q,
+                            false, "AC平衡源");
           }
         }
         for (const auto& b : sys.dc.buses) {
@@ -13449,15 +13786,15 @@ int main(int argc, char** argv) {
               b.name.empty() ? ("DC Bus " + std::to_string(b.index)) : b.name;
           if (!is_ref && std::abs(residual) * 1000.0 > 1.0) {
             ++ordinary_bad_count;
-            push_balance_row("DC", b.index, dc_bus_type_str(b.bus_type), name,
-                             residual, net, terminal, is_implicit);
           }
+          push_balance_row("DC", b.index, dc_bus_type_str(b.bus_type), name,
+                           residual, net, terminal, 0.0, 0.0, 0.0, is_implicit);
           if (is_ref) {
             double source = terminal - net;
             auto sit = dc_balance_source_p.find(b.index);
             if (sit != dc_balance_source_p.end()) source = sit->second;
             push_source_row("DC", b.index, dc_bus_type_str(b.bus_type), name,
-                            source, is_implicit,
+                            source, 0.0, is_implicit,
                             is_implicit ? "隐式DC平衡源" : "DC_V平衡源");
           }
         }
@@ -15487,7 +15824,7 @@ int main(int argc, char** argv) {
 	        out["er_port_p_mw"]=r.er_port_p_mw; out["er_port_q_mvar"]=r.er_port_q_mvar;
 	        out["ac_bus_results"] = opf_ac_bus_results_json(original_sys, r.vm, r.va, r.lmp_p, r.lmp_q);
 	        out["dc_bus_results"] = opf_dc_bus_results_json(original_sys, r.vdc);
-	        out["generator_dispatch"] = opf_generator_dispatch_json(presentation_sys, r.pg_mw, r.qg_mvar);
+	        out["generator_dispatch"] = opf_generator_dispatch_json(original_sys, r.pg_mw, r.qg_mvar);
 	        out["vsc_dispatch"] = opf_vsc_dispatch_json(presentation_sys, original_sys, r.pac_mw, r.qac_mvar);
 	        out["dcdc_dispatch"] = opf_dcdc_dispatch_json(presentation_sys, original_sys, r);
 	        out["er_port_dispatch"] = opf_er_port_dispatch_json(original_sys, r);
@@ -15516,7 +15853,7 @@ int main(int argc, char** argv) {
 	              }
 	              auto phase_system = *sys.three_phase_ac;
 	              const json dispatch_mapping = apply_opf_dispatch_to_phase_system(
-	                  phase_system, presentation_sys, r.pg_mw, r.qg_mvar,
+	                  phase_system, original_sys, r.pg_mw, r.qg_mvar,
 	                  r.pac_mw, r.qac_mvar);
 	              const auto phase_solution = hacdcpf::analysis::runpf_phase(
 	                  phase_system, phase_settings.solver);
@@ -15554,9 +15891,20 @@ int main(int argc, char** argv) {
           hacdcpf::materialize_dc_storage(replay_sys);
           const auto projected_opf_vm = project_replay_ac_bus_vector(r.vm, replay_sys);
           const auto projected_opf_va = project_replay_ac_bus_vector(r.va, replay_sys);
-          for (size_t i = 0; i < r.pg_mw.size() && i < replay_sys.ac.generators.size(); ++i) {
-            replay_sys.ac.generators[i].pg_mw = r.pg_mw[i];
-            if (i < r.qg_mvar.size()) replay_sys.ac.generators[i].qg_mvar = r.qg_mvar[i];
+          for (size_t k = 0; k < r.pg_mw.size() && k < r.gen_map.size(); ++k) {
+            const int original_pos = r.gen_map[k].original_index;
+            if (original_pos < 0 ||
+                original_pos >= static_cast<int>(original_sys.ac.generators.size())) {
+              continue;
+            }
+            const int generator_id =
+                original_sys.ac.generators[static_cast<size_t>(original_pos)].index;
+            const auto replay = std::find_if(
+                replay_sys.ac.generators.begin(), replay_sys.ac.generators.end(),
+                [&](const auto& generator) { return generator.index == generator_id; });
+            if (replay == replay_sys.ac.generators.end()) continue;
+            replay->pg_mw = r.pg_mw[k];
+            if (k < r.qg_mvar.size()) replay->qg_mvar = r.qg_mvar[k];
           }
           if (!projected_opf_vm.empty()) {
             for (size_t i = 0; i < projected_opf_vm.size() && i < replay_sys.ac.buses.size(); ++i)
@@ -15878,7 +16226,9 @@ int main(int argc, char** argv) {
             }
 	            post_pf["dc_branch_flows"] = dcbr;
 	            const json terminal_flows =
-	                post_power_flow_terminal_flows_json(original_sys, ac_pf, r.pg_mw, r.qg_mvar);
+	                post_power_flow_terminal_flows_json(
+	                    original_sys, ac_pf, r.pg_mw, r.qg_mvar,
+	                    r.external_grid_p_mw, r.external_grid_q_mvar);
 	            post_pf["ac_switch_flows"] =
 	                terminal_flows.value("ac_switch_flows", json::array());
 	            post_pf["ac_circuit_breaker_flows"] =
@@ -15889,6 +16239,8 @@ int main(int argc, char** argv) {
 	                power_flow_geo_energy_router_json(original_sys, er_snapshot, ac_pf);
 	            post_pf["geo_gen"] =
 	                power_flow_geo_generator_json(original_sys, r.pg_mw, r.qg_mvar);
+	            post_pf["external_grid_p_mw"] = r.external_grid_p_mw;
+	            post_pf["external_grid_q_mvar"] = r.external_grid_q_mvar;
 	            // PF and OPF-post-PF share one Canvas payload contract. Keep the
 	            // canonical flow names as aliases instead of requiring the
 	            // frontend to understand an OPF-specific response shape.
@@ -15926,9 +16278,11 @@ int main(int argc, char** argv) {
 		                hacdcpf::projection::CanonicalToRichOperator::apply(
 		                    original_sys, projection_bundle, &r,
 		                    &projected_ac_pf, &ac_pf);
-		            post_pf["component_results"] =
-		                rich_attribution_to_component_results(attribution);
-		            post_pf["attribution_coverage"] =
+	            post_pf["component_results"] =
+	                rich_attribution_to_component_results(attribution);
+	            post_pf["power_balance_diagnostics"] =
+	                attributed_power_balance_diagnostics(original_sys, attribution);
+	            post_pf["attribution_coverage"] =
 		                rich_attribution_coverage_json(attribution.coverage);
 		            post_pf["attribution_diagnostics"] = attribution.diagnostics;
 	            post_pf["vm"] = ac_pf.vm; post_pf["va"] = ac_pf.va; post_pf["vdc"] = ac_pf.vdc;

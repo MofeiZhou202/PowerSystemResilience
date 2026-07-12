@@ -50,6 +50,10 @@ const App = (() => {
   function qUnit()  { const u = getPowerUnit(); return u === 'kW' ? 'kVar' : u === 'W' ? 'Var' : 'MVar'; }
   function pConv(mw) { return mw * pScale(); }
   function pFmt(mw, d = 2) { return (mw * pScale()).toFixed(d); }
+  function qFmt(mvar, d = 2) {
+    const value = Number(mvar);
+    return Number.isFinite(value) ? (value * pScale()).toFixed(d) : '-';
+  }
 
   // Cache for re-rendering on unit change without re-running solver
   let _lastPfData = null;
@@ -3909,6 +3913,11 @@ const App = (() => {
         // PF overlay/tables already consume.
         if (data.post_pf) {
           const pf = data.post_pf;
+          // OPF dispatch variables and its post-PF replay describe one authored
+          // system. Keep source-device dispatch on the shared Canvas payload so
+          // PF and OPF use the same projection/reprojection result contract.
+          if (!Array.isArray(pf.external_grid_p_mw)) pf.external_grid_p_mw = data.external_grid_p_mw;
+          if (!Array.isArray(pf.external_grid_q_mvar)) pf.external_grid_q_mvar = data.external_grid_q_mvar;
           if (Array.isArray(pf.vm) && pf.vm.length) data.vm = pf.vm;
           if (Array.isArray(pf.va) && pf.va.length) data.va = pf.va;
           if (Array.isArray(pf.vdc) && pf.vdc.length) data.vdc = pf.vdc;
@@ -3923,6 +3932,8 @@ const App = (() => {
             'geo_er',
             'component_results',
             'dc_storage_results',
+            'external_grid_p_mw',
+            'external_grid_q_mvar',
             'ac_switch_flows',
             'ac_circuit_breaker_flows',
             'dc_circuit_breaker_flows',
@@ -4083,12 +4094,12 @@ const App = (() => {
 	      });
 	      const sourceRows = [...genRows, ...extRows];
 	      if (sourceRows.length) {
-	        let html = '<table><thead><tr><th>电源</th><th>Bus</th><th>Pg(MW)</th><th>Qg(MVar)</th></tr></thead><tbody>';
+	        let html = `<table><thead><tr><th>电源</th><th>Bus</th><th>Pg(${pUnit()})</th><th>Qg(${qUnit()})</th></tr></thead><tbody>`;
 	        sourceRows.forEach((g, i) => {
 	          const p = g.pg_mw ?? pg[i];
 	          const q = g.qg_mvar ?? qg[i];
 	          const label = g.name || (g.index != null ? `#${g.index}` : `pos ${g.position ?? i}`);
-	          html += `<tr${attrForRow(g)}><td>${escapeHtml(label)}</td><td>${g.bus ?? '-'}</td><td>${fmt(p)}</td><td>${fmt(q)}</td></tr>`;
+	          html += `<tr${attrForRow(g)}><td>${escapeHtml(label)}</td><td>${g.bus ?? '-'}</td><td>${pFmt(p, 4)}</td><td>${qFmt(q, 4)}</td></tr>`;
 	        });
 	        html += '</tbody></table>';
 	        genDiv.innerHTML = html;
@@ -4113,15 +4124,15 @@ const App = (() => {
 	      let html = '';
 	      if (pac.length || postVsc.length || vscRows.length) {
 	        const n = Math.max(pac.length, postVsc.length, vscRows.length);
-	        html += '<table><thead><tr><th>VSC</th><th>AC Bus</th><th>DC Bus</th><th>Pac(MW)</th><th>Qac(MVar)</th><th>Pdc(MW)</th><th>Loss(MW)</th></tr></thead><tbody>';
+	        html += `<table><thead><tr><th>VSC</th><th>AC Bus</th><th>DC Bus</th><th>Pac(${pUnit()})</th><th>Qac(${qUnit()})</th><th>Pdc(${pUnit()})</th><th>Loss(${pUnit()})</th></tr></thead><tbody>`;
 	        for (let i = 0; i < n; i++) {
 	          const row = vscRows[i] || {};
 	          const v = postVsc[i] || {};
 	          const merged = { ...row, ...v, canvas_type: row.canvas_type || 'vsc', canvas_index: row.canvas_index ?? v.index ?? row.index };
 	          const label = row.name || (merged.index != null ? `#${merged.index}` : `pos ${i}`);
 	          html += `<tr${attrForRow(merged)}><td>${escapeHtml(label)}</td><td>${merged.bus_ac ?? '-'}</td><td>${merged.bus_dc ?? '-'}</td>` +
-	                  `<td>${fmt(v.p_ac_mw ?? row.pac_mw ?? pac[i])}</td><td>${fmt(v.q_ac_mvar ?? row.qac_mvar ?? qac[i])}</td>` +
-	                  `<td>${fmt(v.p_dc_mw)}</td><td>${fmt(v.loss_mw)}</td></tr>`;
+	                  `<td>${pFmt(v.p_ac_mw ?? row.pac_mw ?? pac[i], 4)}</td><td>${qFmt(v.q_ac_mvar ?? row.qac_mvar ?? qac[i], 4)}</td>` +
+	                  `<td>${pFmt(v.p_dc_mw ?? 0, 4)}</td><td>${pFmt(v.loss_mw ?? 0, 4)}</td></tr>`;
 	        }
 	        html += '</tbody></table>';
 	      }
@@ -4272,7 +4283,7 @@ const App = (() => {
         if (cc.max_dpf_mw != null) {
           const brTxt = (cc.max_dpf_branch != null && cc.max_dpf_branch >= 0) ? ('Branch ' + cc.max_dpf_branch) : '-';
           html += `<tr><td>|ΔPf| 支路有功流(最大)</td><td>${sci(cc.max_dpf_mw)} MW</td><td>-</td><td>${brTxt}</td></tr>`;
-          html += `<tr><td>|ΔQf| 支路无功流(最大)</td><td>${sci(cc.max_dqf_mvar)} MVar</td><td>-</td><td>-</td></tr>`;
+          html += `<tr><td>|ΔQf| 支路无功流(最大)</td><td>${qFmt(cc.max_dqf_mvar, 6)} ${qUnit()}</td><td>-</td><td>-</td></tr>`;
           html += `<tr><td>发电/损耗一致性</td><td>${sci(cc.branch_loss_mismatch_mw)} MW</td><td>-</td><td>OPF损耗 ${sci(cc.branch_loss_opf_mw)} / 潮流 ${sci(cc.branch_loss_pf_mw)} MW</td></tr>`;
           if (cc.converter_loss_pf_mw != null && Number(cc.converter_loss_pf_mw) !== 0)
             html += `<tr><td>换流器损耗 (潮流)</td><td>${sci(cc.converter_loss_pf_mw)} MW</td><td>-</td><td>-</td></tr>`;
@@ -4296,13 +4307,13 @@ const App = (() => {
 	    const dcOpfBranches = Array.isArray(data.dc_opf_branch_dispatch) ? data.dc_opf_branch_dispatch : [];
 	    if (postPfSec && postPfDiv && postPf && Array.isArray(postPf.branch_flows) && postPf.branch_flows.length) {
 	      postPfSec.style.display = '';
-	      let html = '<table><thead><tr><th>支路</th><th>P_from(MW)</th><th>Q_from(MVar)</th><th>P_to(MW)</th><th>负载率(%)</th></tr></thead><tbody>';
+	      let html = `<table><thead><tr><th>支路</th><th>P_from(${pUnit()})</th><th>Q_from(${qUnit()})</th><th>P_to(${pUnit()})</th><th>负载率(%)</th></tr></thead><tbody>`;
 	      postPf.branch_flows.forEach(b => {
 	        const ld = b.loading_pct || 0;
 	        const color = ld > 100 ? 'color:#e06c75' : ld > 80 ? 'color:#d19a66' : '';
 	        const row = { ...b, canvas_type: b.canvas_type || 'branch', canvas_index: b.canvas_index ?? b.index };
 	        const label = b.name || (b.index != null ? `#${b.index} ${b.from_bus}→${b.to_bus}` : `${b.from_bus}→${b.to_bus}`);
-	        html += `<tr${attrForRow(row)}><td>${escapeHtml(label)}</td><td>${fmt(b.pf_mw)}</td><td>${fmt(b.qf_mvar)}</td><td>${fmt(b.pt_mw)}</td><td style="${color}">${fmt(ld, 1)}</td></tr>`;
+	        html += `<tr${attrForRow(row)}><td>${escapeHtml(label)}</td><td>${pFmt(b.pf_mw, 4)}</td><td>${qFmt(b.qf_mvar, 4)}</td><td>${pFmt(b.pt_mw, 4)}</td><td style="${color}">${fmt(ld, 1)}</td></tr>`;
 	      });
 	      html += '</tbody></table>';
 	      html += '<p class="empty-hint" style="margin-top:6px">提示：使用画布上方的「可视化」下拉(潮流/热力图)可在 OPF 解上叠加支路潮流与负载率热力图。</p>';
@@ -8031,7 +8042,7 @@ const App = (() => {
     };
     const fmtQ = (v, d = 3) => {
       const n = toNum(v);
-      return n === null ? '-' : `${pFmt(n, d)} ${qUnit()}`;
+      return n === null ? '-' : `${qFmt(n, d)} ${qUnit()}`;
     };
     const pct = (v, d = 1) => {
       const n = toNum(v);
@@ -8136,7 +8147,7 @@ const App = (() => {
         const quantity = String(m.quantity || '').toLowerCase();
         const unit = String(m.unit || '');
         if (quantity === 'p') return `${label}=${pFmt(n, precision)} ${pUnit()}`;
-        if (quantity === 'q') return `${label}=${pFmt(n, precision)} ${qUnit()}`;
+        if (quantity === 'q') return `${label}=${qFmt(n, precision)} ${qUnit()}`;
         const suffix = unit ? ` ${unit}` : '';
         return `${label}=${n.toFixed(precision)}${suffix}`;
       };
@@ -8828,14 +8839,21 @@ const App = (() => {
       const tolKw = num(backendDiag.tolerance_kw, 1.0);
       const rowKw = r => num(r.residual_kw ?? r.source_kw ?? r.kw ?? (num(r.mw ?? r.residual_mw ?? r.source_mw, 0) * 1000), 0);
       const rowMw = r => num(r.mw ?? r.residual_mw ?? r.source_mw, rowKw(r) / 1000);
+      const rowKvar = r => num(r.residual_kvar ?? r.source_kvar ?? (num(r.residual_mvar ?? r.source_mvar, 0) * 1000), 0);
+      const rowMvar = r => num(r.residual_mvar ?? r.source_mvar, rowKvar(r) / 1000);
       const rowKind = r => String(r.kind || r.domain || '').toUpperCase() === 'DC' ? 'DC' : 'AC';
       const detailsHtml = r => {
         const details = Array.isArray(r.details) ? r.details : [];
         return details
-          .map(x => `${escapeHtml(x.label || '')}: ${pFmt(num(x.mw ?? x.value, 0), 3)} ${pUnit()}`)
+          .map(x => {
+            const p = num(x.p_mw ?? x.mw ?? x.value, 0);
+            const q = num(x.q_mvar, 0);
+            const qText = rowKind(r) === 'AC' ? `；Q=${qFmt(q, 4)} ${qUnit()}` : '';
+            return `${escapeHtml(x.label || '')}: P=${pFmt(p, 4)} ${pUnit()}${qText}`;
+          })
           .join('<br>');
       };
-      const makeRow = (r, source = false) => {
+      const makeRow = (r, source = false, ledger = false) => {
         const kind = rowKind(r);
         const id = Number(r.id ?? r.bus);
         const compId = kind === 'AC' ? busMap.ac?.[id] : busMap.dc?.[id];
@@ -8843,30 +8861,41 @@ const App = (() => {
         const type = source && (r.isImplicit || r.is_implicit)
           ? `${r.type || r.bus_type || ''} / 隐式DC平衡`
           : (r.type || r.bus_type || '');
-        return `<tr${attr}><td>${kind}</td><td>${Number.isFinite(id) ? id : ''}</td><td>${escapeHtml(type)}</td><td>${pFmt(rowMw(r), 3)}</td><td>${escapeHtml(r.name || '')}</td><td>${detailsHtml(r)}</td></tr>`;
+        const pValue = ledger ? num(r.residual_mw, 0) : rowMw(r);
+        const qValue = ledger ? num(r.residual_mvar, 0) : rowMvar(r);
+        return `<tr${attr}><td>${kind}</td><td>${Number.isFinite(id) ? id : ''}</td><td>${escapeHtml(type)}</td><td>${pFmt(pValue, 4)}</td><td>${kind === 'AC' ? qFmt(qValue, 4) : '-'}</td><td>${escapeHtml(r.name || '')}</td><td>${detailsHtml(r)}</td></tr>`;
       };
       const bad = backendDiag.ordinary
-        .filter(r => Math.abs(rowKw(r)) > tolKw)
-        .sort((a, b) => Math.abs(rowKw(b)) - Math.abs(rowKw(a)));
+        .filter(r => Math.abs(rowKw(r)) > tolKw || Math.abs(rowKvar(r)) > tolKw)
+        .sort((a, b) => Math.max(Math.abs(rowKw(b)), Math.abs(rowKvar(b))) -
+                        Math.max(Math.abs(rowKw(a)), Math.abs(rowKvar(a))));
       const sources = backendDiag.sources
-        .filter(r => Math.abs(rowKw(r)) > tolKw)
-        .sort((a, b) => Math.abs(rowKw(b)) - Math.abs(rowKw(a)));
+        .filter(r => Math.abs(rowKw(r)) > tolKw || Math.abs(rowKvar(r)) > tolKw)
+        .sort((a, b) => Math.max(Math.abs(rowKw(b)), Math.abs(rowKvar(b))) -
+                        Math.max(Math.abs(rowKw(a)), Math.abs(rowKvar(a))));
+      const allBuses = Array.isArray(backendDiag.all_buses)
+        ? backendDiag.all_buses.slice().sort((a, b) => rowKind(a).localeCompare(rowKind(b)) || num(a.id, 0) - num(b.id, 0))
+        : [];
       section.style.display = '';
       const status = bad.length
-        ? `<p class="empty-hint" style="color:#b45309">发现 ${bad.length} 个非平衡节点超过 ${tolKw} kW，请检查连接或设备功率。</p>`
-        : `<p class="empty-hint">普通节点有功平衡通过：未发现超过 ${tolKw} kW 的非平衡节点。</p>`;
+        ? `<p class="empty-hint" style="color:#b45309">发现 ${bad.length} 个节点的有功或无功残差超过 ${tolKw} kW/kVar，请检查连接或设备功率。</p>`
+        : `<p class="empty-hint">节点有功/无功平衡通过：未发现超过 ${tolKw} kW/kVar 的残差。</p>`;
       const sourceHint = sources.length
-        ? `<p class="empty-hint">Slack/平衡源承担的功率本来可以非零，它不是普通节点KCL残差；“隐式DC平衡”表示该DC岛没有DC_V节点，求解器自动选该母线作为参考。</p>`
+        ? `<p class="empty-hint">Slack/平衡源承担的 P/Q 可以非零，但对应母线仍必须满足 P/Q KCL；“隐式DC平衡”表示该DC岛没有DC_V节点，求解器自动选该母线作为参考。</p>`
         : '';
-      const imbalanceRows = bad.map(r => makeRow(r, false)).join('');
+      const allRows = allBuses.map(r => makeRow(r, false, true)).join('');
+      const imbalanceRows = bad.map(r => makeRow(r, false, true)).join('');
       const sourceRows = sources.map(r => makeRow(r, true)).join('');
+      const allTable = allRows
+        ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>P残差(${pUnit()})</th><th>Q残差(${qUnit()})</th><th>名称</th><th>P/Q收支</th></tr></thead><tbody>${allRows}</tbody></table>`
+        : '';
       const imbalanceTable = imbalanceRows
-        ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>普通节点KCL残差(${pUnit()})</th><th>名称</th><th>主要构成</th></tr></thead><tbody>${imbalanceRows}</tbody></table>`
+        ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>P残差(${pUnit()})</th><th>Q残差(${qUnit()})</th><th>名称</th><th>主要构成</th></tr></thead><tbody>${imbalanceRows}</tbody></table>`
         : '';
       const sourceTable = sourceRows
-        ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>平衡源承担功率(${pUnit()})</th><th>名称</th><th>主要构成</th></tr></thead><tbody>${sourceRows}</tbody></table>`
+        ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>平衡源P(${pUnit()})</th><th>平衡源Q(${qUnit()})</th><th>名称</th><th>主要构成</th></tr></thead><tbody>${sourceRows}</tbody></table>`
         : '';
-	      div.innerHTML = status + sourceHint + imbalanceTable + sourceTable;
+	      div.innerHTML = status + sourceHint + allTable + imbalanceTable + sourceTable;
 	      return;
 	    }
 
@@ -9500,7 +9529,7 @@ const App = (() => {
         const attr = resultRowAttr({ ...g, canvas_type: g.canvas_type || 'generator', canvas_index: g.canvas_index ?? g.index, position: g.position ?? i },
           busMap.gen ? (busMap.gen[g.index] ?? busMap.gen[i]) : undefined);
         html += `<tr${attr}><td>${g.index ?? i}</td><td>${g.bus}</td><td>${g.name || ''}</td>`;
-        html += `<td>${pFmt(g.pg_mw, 4)}</td><td>${pFmt(g.qg_mvar, 4)}</td>`;
+        html += `<td>${pFmt(g.pg_mw, 4)}</td><td>${qFmt(g.qg_mvar, 4)}</td>`;
         html += `<td>${(g.vg_pu || 1).toFixed(4)}</td><td>${g.is_slack ? '✓' : ''}</td></tr>`;
       });
       html += '</tbody></table>';
@@ -9524,7 +9553,7 @@ const App = (() => {
         const ldgStyle = (br.loading_pct || 0) > 100 ? ' style="color:#e06c75;font-weight:bold"' : '';
         html += `<tr${attr}><td>${i}</td><td>${br.from}</td><td>${br.to}</td>`;
         html += `<td>${pFmt(br.pf_mw || 0, 4)}</td><td>${pFmt(br.pt_mw || 0, 4)}</td>`;
-        html += `<td>${pFmt(br.qf_mvar || 0, 4)}</td><td>${pFmt(br.qt_mvar || 0, 4)}</td>`;
+        html += `<td>${qFmt(br.qf_mvar || 0, 4)}</td><td>${qFmt(br.qt_mvar || 0, 4)}</td>`;
         html += `<td>${pFmt(loss, 4)}</td><td${ldgStyle}>${ldg}</td></tr>`;
       });
       html += '</tbody></table>';
@@ -9619,7 +9648,7 @@ const App = (() => {
         const attr = resultRowAttr({ ...v, canvas_type: v.canvas_type || 'vsc_converter', canvas_index: v.canvas_index ?? v.index, position: v.position ?? i },
           busMap.vsc ? (busMap.vsc[v.index] ?? busMap.vsc[i]) : undefined);
         html += `<tr${attr}><td>${v.index ?? i}</td><td>${v.bus_ac}</td><td>${v.bus_dc}</td>
-                 <td>${v.p_ac_mw != null ? pFmt(v.p_ac_mw, 3) : '0'}</td><td>${v.q_ac_mvar != null ? pFmt(v.q_ac_mvar, 3) : '0'}</td>
+                 <td>${v.p_ac_mw != null ? pFmt(v.p_ac_mw, 3) : '0'}</td><td>${v.q_ac_mvar != null ? qFmt(v.q_ac_mvar, 3) : '0'}</td>
                  <td>${v.p_dc_mw != null ? pFmt(v.p_dc_mw, 3) : '0'}</td><td>${v.loss_mw != null ? pFmt(v.loss_mw, 3) : '0'}</td></tr>`;
       });
       html += '</tbody></table>';
@@ -17273,7 +17302,12 @@ const App = (() => {
         if (_lastPfData) {
           showPowerFlowResultsTables(_lastPfData);
         }
-        if (Canvas.refreshVisualization) {
+        if (_lastOpfData) {
+          showOpfResults(_lastOpfData);
+        }
+        if (Canvas.refreshPowerFlowResults) {
+          Canvas.refreshPowerFlowResults();
+        } else if (Canvas.refreshVisualization) {
           Canvas.refreshVisualization();
         }
       });
@@ -17358,9 +17392,13 @@ const App = (() => {
     document.getElementById('btnCostEditorApply')?.addEventListener('click', applyCostEditor);
 
     // Visualization mode toggle
-    document.getElementById('vizMode')?.addEventListener('change', (e) => {
-      Canvas.setVisualizationMode(e.target.value);
-    });
+    const vizMode = document.getElementById('vizMode');
+    if (vizMode) {
+      Canvas.setVisualizationMode(vizMode.value);
+      vizMode.addEventListener('change', (e) => {
+        Canvas.setVisualizationMode(e.target.value);
+      });
+    }
 
     // Property apply
     document.getElementById('btnApplyProp').addEventListener('click', applyProperties);

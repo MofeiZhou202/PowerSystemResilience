@@ -1047,8 +1047,12 @@ DPFResult solve_distribution_pf(const HybridPowerSystem& sys,
                                  const DPFOptions& opt) {
   auto unproject_if_needed = [](DPFResult& result, const HybridPowerSystem& projected) {
     if (projected.bus_merge_map && projected.bus_merge_map->has_merges()) {
-      result.vm_pu = unproject_bus_vector(result.vm_pu, *projected.bus_merge_map);
-      result.va_deg = unproject_bus_vector(result.va_deg, *projected.bus_merge_map);
+      result.vm_pu = unproject_bus_vector(
+          result.vm_pu, *projected.bus_merge_map,
+          BusVectorSemantics::Intensive);
+      result.va_deg = unproject_bus_vector(
+          result.va_deg, *projected.bus_merge_map,
+          BusVectorSemantics::Intensive);
     }
   };
   const bool has_enabled_regulator =
