@@ -3232,8 +3232,6 @@ const App = (() => {
     ];
     renderCarbonSankey(data);
     renderCarbonPotentialChart(busRows);
-    Canvas.clearCarbonPotentialResults?.();
-
     // Make result rows pan/select the related bus component on the canvas
     // (mirroring the power-flow tables). DC-aware: DC rows prefer the DC bus map.
     const cbMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;

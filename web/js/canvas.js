@@ -36,7 +36,6 @@ const Canvas = (() => {
   function pScale() { const u = getPowerUnit(); return u === 'kW' ? 1e3 : u === 'W' ? 1e6 : 1; }
   function pUnit()  { const u = getPowerUnit(); return u === 'kW' ? 'kW' : u === 'W' ? 'W' : 'MW'; }
   function qUnit()  { const u = getPowerUnit(); return u === 'kW' ? 'kVar' : u === 'W' ? 'Var' : 'MVar'; }
-  function pConv(mw) { return mw * pScale(); }
   function pFmt(mw, d = 1) { return (mw * pScale()).toFixed(d); }
   function qFmt(mvar, d = 1) { return (mvar * pScale()).toFixed(d); }
 
@@ -83,13 +82,6 @@ const Canvas = (() => {
   // can still force a full render from the overview overlay.
   const HEADLESS_BUS_THRESHOLD = 600;      // AC + DC buses
   const HEADLESS_ELEMENT_THRESHOLD = 2500; // buses + branches + devices
-  // User/session override: 'auto' (default), 'force-headless', or 'force-canvas'.
-  let _headlessPolicy = 'auto';
-  try {
-    const saved = localStorage.getItem('canvasHeadlessPolicy');
-    if (['auto', 'force-headless', 'force-canvas'].includes(saved)) _headlessPolicy = saved;
-  } catch (_) { /* ignore */ }
-
   function cloneJsonBlock(value) {
     if (!value || typeof value !== 'object') return undefined;
     try {
@@ -137,20 +129,14 @@ const Canvas = (() => {
     };
   }
 
-  // Decide headless vs. canvas for a given system summary, honoring the policy.
+  // Decide headless vs. canvas for a given system summary.
   function shouldGoHeadless(summary, opts = {}) {
-    if (opts.forceRender || _headlessPolicy === 'force-canvas') return false;
-    if (opts.forceHeadless || _headlessPolicy === 'force-headless') return true;
+    if (opts.forceRender) return false;
+    if (opts.forceHeadless) return true;
     return summary.buses > HEADLESS_BUS_THRESHOLD ||
            summary.totalElements > HEADLESS_ELEMENT_THRESHOLD;
   }
 
-  function getHeadlessPolicy() { return _headlessPolicy; }
-  function setHeadlessPolicy(policy) {
-    if (!['auto', 'force-headless', 'force-canvas'].includes(policy)) return;
-    _headlessPolicy = policy;
-    try { localStorage.setItem('canvasHeadlessPolicy', policy); } catch (_) { /* ignore */ }
-  }
   function isHeadless() { return state.headless === true; }
   function getSystemSummary() {
     if (state.headless && state.headlessMeta) return state.headlessMeta;
@@ -5046,9 +5032,6 @@ const Canvas = (() => {
     function cAdd(a, b) {
       return complex(a.re + b.re, a.im + b.im);
     }
-    function cSub(a, b) {
-      return complex(a.re - b.re, a.im - b.im);
-    }
     function cMul(a, b) {
       return complex(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re);
     }
@@ -6218,21 +6201,6 @@ const Canvas = (() => {
     });
   }
 
-  function clearFrame() {
-    _lastCanvasFrame = null;
-    resultsLayer.querySelectorAll('.frame-overlay, .viz-overlay').forEach(el => el.remove());
-    state.connections.forEach(conn => {
-      const line = conn.el?.querySelector('.conn-line');
-      if (!line) return;
-      line.setAttribute('stroke', '#666');
-      line.setAttribute('stroke-width', '2');
-      line.style.animation = '';
-    });
-    const defsEl = (resultsLayer.ownerSVGElement || document.querySelector('#canvas'))
-      ?.querySelector('defs#vizGradDefs');
-    if (defsEl) defsEl.remove();
-  }
-
   // Incremental playback renderer. It only owns .frame-overlay/.viz-overlay
   // elements and never writes component params or rebuilds topology glyphs.
   function renderFrame(frame, options = {}) {
@@ -6425,69 +6393,6 @@ const Canvas = (() => {
     const svgEl = resultsLayer.ownerSVGElement || document.querySelector('#canvas');
     const defsEl = svgEl.querySelector('defs#vizGradDefs');
     if (defsEl) defsEl.remove();
-  }
-
-  function carbonColor(value, maxValue) {
-    const t = Math.max(0, Math.min(1, value / Math.max(maxValue, 1e-9)));
-    const r = Math.round(46 + (224 - 46) * t);
-    const g = Math.round(204 + (78 - 204) * t);
-    const b = Math.round(113 + (71 - 113) * t);
-    return `rgb(${r},${g},${b})`;
-  }
-
-  function showCarbonPotentialResults(data) {
-    if (!resultsLayer || !data) return;
-    resultsLayer.querySelectorAll('.carbon-potential-overlay').forEach(el => el.remove());
-
-    const busMap = getCompBusMap();
-    const rows = [
-      ...(data.bus_carbon || []).map(b => ({ ...b, is_dc: false })),
-      ...(data.dc_bus_carbon || []).map(b => ({ ...b, is_dc: true })),
-    ].filter(b =>
-      b.carbon_potential_valid !== false &&
-      Number(b.sink_power_mw || 0) > 1e-9 &&
-      Number.isFinite(Number(b.carbon_intensity_tco2_mwh)) &&
-      Number(b.carbon_intensity_tco2_mwh) >= 0);
-    const maxIntensity = rows.reduce(
-      (mx, b) => Math.max(mx, Number(b.carbon_intensity_tco2_mwh || 0)),
-      0,
-    );
-
-    rows.forEach(row => {
-      const busIndex = Number(row.bus_index);
-      const compId = row.is_dc ? busMap.dc[busIndex] : busMap.ac[busIndex];
-      const comp = getComponent(compId);
-      if (!comp) return;
-      const intensity = Number(row.carbon_intensity_tco2_mwh || 0);
-      const color = carbonColor(intensity, maxIntensity);
-
-      const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      ring.classList.add('carbon-potential-overlay');
-      ring.setAttribute('cx', comp.x);
-      ring.setAttribute('cy', comp.y);
-      ring.setAttribute('r', row.is_dc ? '22' : '20');
-      ring.setAttribute('fill', 'none');
-      ring.setAttribute('stroke', color);
-      ring.setAttribute('stroke-width', '5');
-      ring.setAttribute('opacity', '0.9');
-      ring.setAttribute('data-comp-id', comp.id);
-      ring.style.pointerEvents = 'none';
-      resultsLayer.appendChild(ring);
-
-      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-      label.classList.add('carbon-potential-overlay', 'result-voltage');
-      label.setAttribute('x', comp.x);
-      label.setAttribute('y', comp.y + 34);
-      label.setAttribute('fill', color);
-      label.setAttribute('data-comp-id', comp.id);
-      label.textContent = `${(intensity * 1000).toFixed(1)} kg/MWh`;
-      resultsLayer.appendChild(label);
-    });
-  }
-
-  function clearCarbonPotentialResults() {
-    if (!resultsLayer) return;
-    resultsLayer.querySelectorAll('.carbon-potential-overlay').forEach(el => el.remove());
   }
 
   function showReliabilityImpactResults(data) {
@@ -7137,12 +7042,8 @@ const Canvas = (() => {
     addComponent,
     addConnection,
     removeComponent,
-    removeConnection,
     removeSelected,
     getComponent,
-    selectComponent,
-    selectMultiple,
-    clearMultiSelection,
     rerenderComponent,
     setMode,
     zoomIn,
@@ -7160,16 +7061,10 @@ const Canvas = (() => {
     loadFromSystemJson,
     isHeadless,
     getSystemSummary,
-    getHeadlessPolicy,
-    setHeadlessPolicy,
-    forceRenderCurrentSystem,
     updateHeadlessSystem,
 	    showPowerFlowResults,
 	    renderFrame,
-	    clearFrame,
-	    showCarbonPotentialResults,
 	    showReliabilityImpactResults,
-	    clearCarbonPotentialResults,
     showTopologyResults,
     showNetworkReduction,
     showTopologyReconfigResults,
