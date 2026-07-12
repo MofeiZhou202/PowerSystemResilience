@@ -630,6 +630,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/gridlabd_validation_matrix.cpp")
   hacdcpf_copy_opendss_runtime(gridlabd_validation_matrix)
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/short_circuit_validation_matrix.cpp")
+  add_executable(short_circuit_validation_matrix
+    tools/short_circuit_validation_matrix.cpp)
+  target_link_libraries(short_circuit_validation_matrix PRIVATE hacdcpf::hacdcpf)
+endif()
+
 # ── SPPT MR3 certificate corpus emitter (LaTeX + CSV) ─────────────────────────
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/sppt_certify.cpp")
   add_executable(sppt_certify tools/sppt_certify.cpp)

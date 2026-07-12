@@ -98,6 +98,7 @@ struct SCDetailedOptions {
   double breaking_time_s{0.05};
   double base_frequency_hz{50.0};
   double default_xdpp{0.2};
+  bool   apply_iec_transformer_correction{true}; ///< Apply IEC 60909 K_T to transformer impedance.
   bool   compute_branch_flows{true};   ///< Compute branch fault currents/power flows
   bool   compute_voltage_drops{true};  ///< Compute remaining voltage at non-fault buses
   bool   compute_ith{true};            ///< Compute thermal equivalent SC current

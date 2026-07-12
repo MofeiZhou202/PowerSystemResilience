@@ -201,11 +201,11 @@ void add_equivalent_branch_from_transformer2w(const Transformer2W& tr,
   if (tr.z0_percent > 0.0) {
     auto [r0_pu, x0_pu] =
         rx_from_z_percent_x_over_r(tr.z0_percent, tr.x0_r0, base_mva, tr.sn_mva);
-    br.r0_pu = r0_pu;
-    br.x0_pu = x0_pu;
+    br.r0_pu = r0_pu * impedance_scale;
+    br.x0_pu = x0_pu * impedance_scale;
   } else {
-    br.r0_pu = r_pu;
-    br.x0_pu = x_pu;
+    br.r0_pu = r_pu * impedance_scale;
+    br.x0_pu = x_pu * impedance_scale;
   }
   br.b0_pu = 0.0;
   br.vn_hv_kv = tr.vn_hv_kv;

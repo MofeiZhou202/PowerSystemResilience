@@ -1,0 +1,2522 @@
+{
+  "schema": "hacdcpf-short-circuit-cross-engine-v1",
+  "engines": {
+    "hacdcpf": {
+      "method": "HACDCPF IEC 60909 detailed solver; transformer correction disabled for engine parity"
+    },
+    "opendss": {
+      "version": "dss-python 0.15.7",
+      "mode": "faultstudy"
+    },
+    "gridlabd": {
+      "available": true,
+      "executable": "/tmp/gridlabd-5.3.0/GridLAB-D-5.3.0-MacOS/bin/gridlabd",
+      "version": "GridLAB-D 5.3.0-20095 (1b2e463:HEAD) 64-bit MACOSX RELEASE\nWARNING  [INIT] : unable to set thread policy: No such process",
+      "short_circuit_api": "balanced_shunt_emulation",
+      "status": "available",
+      "detail": "GridLAB-D has no FaultStudy/Zsc result interface. Three-phase RMS current is extrapolated from an explicit 100 ohm balanced shunt-probe powerflow; unbalanced faults and IEC peak remain unsupported."
+    }
+  },
+  "summary": {
+    "case_count": 34,
+    "metrics": {
+      "ikss_ka": {
+        "mean_relative_error": 5.4521227433789665e-08,
+        "max_relative_error": 1.4852797625119965e-07,
+        "worst_case": "transformer_vk_16"
+      },
+      "ip_ka": {
+        "mean_relative_error": 6.140416102457333e-08,
+        "max_relative_error": 1.6684401282342018e-07,
+        "worst_case": "transformer_vk_16"
+      }
+    },
+    "within_0_1_percent": 34,
+    "gridlabd_balanced_shunt": {
+      "case_count": 28,
+      "mean_relative_error": 5.329202537838999e-09,
+      "max_relative_error": 2.3136587993375906e-08,
+      "worst_case": "transformer_lv_tap_110"
+    },
+    "by_category": {
+      "distribution_feeder": {
+        "case_count": 3,
+        "opendss_ikss_max_relative_error": 4.285404119917555e-15,
+        "opendss_ip_max_relative_error": 1.846272110014497e-15,
+        "gridlabd_case_count": 3,
+        "gridlabd_ikss_max_relative_error": 2.0955775567411323e-09
+      },
+      "fault_type": {
+        "case_count": 1,
+        "opendss_ikss_max_relative_error": 1.283303969823327e-16,
+        "opendss_ip_max_relative_error": 2.1076917053651147e-16,
+        "gridlabd_case_count": 0
+      },
+      "line_sweep": {
+        "case_count": 4,
+        "opendss_ikss_max_relative_error": 9.480656907449555e-16,
+        "opendss_ip_max_relative_error": 4.388040915999215e-16,
+        "gridlabd_case_count": 4,
+        "gridlabd_ikss_max_relative_error": 9.532020779142014e-09
+      },
+      "source_sweep": {
+        "case_count": 4,
+        "opendss_ikss_max_relative_error": 9.245566376278442e-16,
+        "opendss_ip_max_relative_error": 7.488654777783386e-16,
+        "gridlabd_case_count": 4,
+        "gridlabd_ikss_max_relative_error": 1.9528238986557572e-08
+      },
+      "topology": {
+        "case_count": 3,
+        "opendss_ikss_max_relative_error": 1.1869809458832466e-15,
+        "opendss_ip_max_relative_error": 1.321725972300389e-15,
+        "gridlabd_case_count": 3,
+        "gridlabd_ikss_max_relative_error": 1.9916582329755567e-09
+      },
+      "transformer_impedance": {
+        "case_count": 4,
+        "opendss_ikss_max_relative_error": 1.4852797625119965e-07,
+        "opendss_ip_max_relative_error": 1.6684401282342018e-07,
+        "gridlabd_case_count": 4,
+        "gridlabd_ikss_max_relative_error": 1.453094611452476e-08
+      },
+      "transformer_tap": {
+        "case_count": 10,
+        "opendss_ikss_max_relative_error": 1.4527301838022654e-07,
+        "opendss_ip_max_relative_error": 1.6359908181713426e-07,
+        "gridlabd_case_count": 10,
+        "gridlabd_ikss_max_relative_error": 2.3136587993375906e-08
+      },
+      "zero_sequence": {
+        "case_count": 5,
+        "opendss_ikss_max_relative_error": 1.1467639784972079e-07,
+        "opendss_ip_max_relative_error": 1.2913940095401636e-07,
+        "gridlabd_case_count": 0
+      }
+    }
+  },
+  "cases": [
+    {
+      "category": "source_sweep",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 28.80459932494064,
+        "ip_ka": 73.42675689166029
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.005,
+            "r1_pu": 0.005,
+            "to_bus": 2,
+            "x0_pu": 0.05,
+            "x1_pu": 0.05
+          }
+        ],
+        "bus_count": 2,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00249688,
+          "r1_pu": 0.00249688,
+          "x0_pu": 0.04993762,
+          "x1_pu": 0.04993762
+        }
+      },
+      "name": "source_strong_xr20",
+      "opendss": {
+        "z1_ohm": [
+          0.02998751999999999,
+          0.39975047999999996
+        ],
+        "z0_ohm": [
+          0.02998751999999999,
+          0.3997504799999999
+        ],
+        "ikss_ka": 28.80459932494064,
+        "kappa_method_a": 1.8025092844694877,
+        "ip_ka": 73.42675689166028
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 0.0,
+        "ip_ka_relative_error": 1.935378234962745e-16,
+        "gridlabd_ikss_ka_relative_error": 3.977373712369513e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11543.35940855,
+          -46.1308009813148
+        ],
+        "fault_power_a_va": [
+          1332512.74485759,
+          9.09494701772928e-13
+        ],
+        "z_thevenin_ohm": [
+          0.029987519424522855,
+          0.3997504784442654
+        ],
+        "ikss_ka": 28.804599439507296,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "source_sweep",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 19.21306675119321,
+        "ip_ka": 47.44127996580039
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.005,
+            "r1_pu": 0.005,
+            "to_bus": 2,
+            "x0_pu": 0.05,
+            "x1_pu": 0.05
+          }
+        ],
+        "bus_count": 2,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "source_medium_xr10",
+      "opendss": {
+        "z1_ohm": [
+          0.05980148000000001,
+          0.5980148800000002
+        ],
+        "z0_ohm": [
+          0.05980148000000001,
+          0.5980148800000002
+        ],
+        "ikss_ka": 19.213066751193193,
+        "kappa_method_a": 1.7460018854045574,
+        "ip_ka": 47.441279965800355
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 9.245566376278442e-16,
+        "ip_ka_relative_error": 7.488654777783386e-16,
+        "gridlabd_ikss_ka_relative_error": 1.9528238986557572e-08
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11539.6920399401,
+          -68.9678304300676
+        ],
+        "fault_power_a_va": [
+          1331692.48938291,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.05980147431913962,
+          0.5980148687731264
+        ],
+        "ikss_ka": 19.213067126390577,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "source_sweep",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 11.544341401229767,
+        "ip_ka": 25.985282258460128
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.005,
+            "r1_pu": 0.005,
+            "to_bus": 2,
+            "x0_pu": 0.05,
+            "x1_pu": 0.05
+          }
+        ],
+        "bus_count": 2,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.03922323,
+          "r1_pu": 0.03922323,
+          "x0_pu": 0.19611614,
+          "x1_pu": 0.19611614
+        }
+      },
+      "name": "source_weak_xr5",
+      "opendss": {
+        "z1_ohm": [
+          0.1768929199999997,
+          0.9844645599999994
+        ],
+        "z0_ohm": [
+          0.1768929199999997,
+          0.9844645599999994
+        ],
+        "ikss_ka": 11.544341401229765,
+        "kappa_method_a": 1.5916342610975018,
+        "ip_ka": 25.98528225846012
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.5387251447804753e-16,
+        "ip_ka_relative_error": 2.73440453212228e-16,
+        "gridlabd_ikss_ka_relative_error": 2.388397173376565e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11525.5025407613,
+          -113.264131962866
+        ],
+        "fault_power_a_va": [
+          1328500.37580684,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.17689291827098166,
+          0.9844645627378839
+        ],
+        "ikss_ka": 11.544341373657295,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "source_sweep",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 11.658720792283988,
+        "ip_ka": 21.503613324291326
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.005,
+            "r1_pu": 0.005,
+            "to_bus": 2,
+            "x0_pu": 0.05,
+            "x1_pu": 0.05
+          }
+        ],
+        "bus_count": 2,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.08944272,
+          "r1_pu": 0.08944272,
+          "x0_pu": 0.17888544,
+          "x1_pu": 0.17888544
+        }
+      },
+      "name": "source_resistive_xr2",
+      "opendss": {
+        "z1_ohm": [
+          0.37777088,
+          0.9155417600000002
+        ],
+        "z0_ohm": [
+          0.37777088,
+          0.9155417600000005
+        ],
+        "ikss_ka": 11.658720792283988,
+        "kappa_method_a": 1.3042040436960332,
+        "ip_ka": 21.50361332429133
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 0.0,
+        "ip_ka_relative_error": 1.652147304372896e-16,
+        "gridlabd_ikss_ka_relative_error": 2.9498762649317104e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11502.5914049742,
+          -104.914690908108
+        ],
+        "fault_power_a_va": [
+          1323206.16122154,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.37777088204187653,
+          0.9155417623180303
+        ],
+        "ikss_ka": 11.658720757892205,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "line_sweep",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 26.23130020880977,
+        "ip_ka": 64.77083959444353
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.001,
+            "r1_pu": 0.001,
+            "to_bus": 2,
+            "x0_pu": 0.01,
+            "x1_pu": 0.01
+          }
+        ],
+        "bus_count": 2,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "line_short",
+      "opendss": {
+        "z1_ohm": [
+          0.04380148,
+          0.4380148800000005
+        ],
+        "z0_ohm": [
+          0.04380148,
+          0.4380148800000005
+        ],
+        "ikss_ka": 26.231300208809746,
+        "kappa_method_a": 1.746001896047657,
+        "ip_ka": 64.7708395944435
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 9.480656907449555e-16,
+        "ip_ka_relative_error": 4.388040915999215e-16,
+        "gridlabd_ikss_ka_relative_error": 5.598447193345424e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11541.7285967592,
+          -50.5323544726661
+        ],
+        "fault_power_a_va": [
+          1332140.52520099,
+          -9.09494701772928e-13
+        ],
+        "z_thevenin_ohm": [
+          0.0438014787847335,
+          0.43801487764480146
+        ],
+        "ikss_ka": 26.23130035566432,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "line_sweep",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 15.983432195659143,
+        "ip_ka": 38.92713898504076
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "line_nominal",
+      "opendss": {
+        "z1_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "z0_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "ikss_ka": 15.98343219565914,
+        "kappa_method_a": 1.722135997548079,
+        "ip_ka": 38.927138985040756
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 2.2227476772888394e-16,
+        "ip_ka_relative_error": 1.8253145601919356e-16,
+        "gridlabd_ikss_ka_relative_error": 3.089715961910083e-10
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11537.2042031886,
+          -82.7727890351831
+        ],
+        "fault_power_a_va": [
+          1331139.32160676,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.07980147962785887,
+          0.7180148802659468
+        ],
+        "ikss_ka": 15.983432190720716,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "line_sweep",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 8.412295251025082,
+        "ip_ka": 19.633063331416707
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.04,
+            "r1_pu": 0.04,
+            "to_bus": 2,
+            "x0_pu": 0.24,
+            "x1_pu": 0.24
+          }
+        ],
+        "bus_count": 2,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "line_long",
+      "opendss": {
+        "z1_ohm": [
+          0.19980148000000006,
+          1.35801488
+        ],
+        "z0_ohm": [
+          0.19980148000000006,
+          1.35801488
+        ],
+        "ikss_ka": 8.41229525102508,
+        "kappa_method_a": 1.6502835198774108,
+        "ip_ka": 19.6330633314167
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 2.1116197023443662e-16,
+        "ip_ka_relative_error": 3.619112941092052e-16,
+        "gridlabd_ikss_ka_relative_error": 9.532020779142014e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11521.8639007178,
+          -156.156624782166
+        ],
+        "fault_power_a_va": [
+          1327777.32638128,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.19980146483501732,
+          1.3580148954560194
+        ],
+        "ikss_ka": 8.41229517083891,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "line_sweep",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 13.026574518091948,
+        "ip_ka": 20.848394457939396
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.12,
+            "r1_pu": 0.12,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "line_high_r",
+      "opendss": {
+        "z1_ohm": [
+          0.5198014799999999,
+          0.7180148799999998
+        ],
+        "z0_ohm": [
+          0.5198014799999999,
+          0.7180148799999998
+        ],
+        "ikss_ka": 13.02657451809195,
+        "kappa_method_a": 1.1316897682953033,
+        "ip_ka": 20.848394457939396
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.3636407920847944e-16,
+        "ip_ka_relative_error": 0.0,
+        "gridlabd_ikss_ka_relative_error": 9.32412573568383e-11
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11486.7081749283,
+          -82.0497778574014
+        ],
+        "fault_power_a_va": [
+          1319511.9686201,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.5198014813437061,
+          0.7180148791292698
+        ],
+        "ikss_ka": 13.026574516877334,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "topology",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 17.95840291011692,
+        "ip_ka": 43.006962148042945
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.06,
+            "x1_pu": 0.06
+          },
+          {
+            "from_bus": 2,
+            "r0_pu": 0.015,
+            "r1_pu": 0.015,
+            "to_bus": 3,
+            "x0_pu": 0.09,
+            "x1_pu": 0.09
+          }
+        ],
+        "bus_count": 3,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "radial_3bus_near",
+      "opendss": {
+        "z1_ohm": [
+          0.07980148000000002,
+          0.63801488
+        ],
+        "z0_ohm": [
+          0.07980148000000002,
+          0.63801488
+        ],
+        "ikss_ka": 17.9584029101169,
+        "kappa_method_a": 1.6933863621014136,
+        "ip_ka": 43.00696214804289
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.1869809458832466e-15,
+        "ip_ka_relative_error": 1.321725972300389e-15,
+        "gridlabd_ikss_ka_relative_error": 1.948530116427424e-10
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11537.3291569079,
+          -73.5511818611472
+        ],
+        "fault_power_a_va": [
+          1331153.73851191,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.07980147982780465,
+          0.6380148801478011
+        ],
+        "ikss_ka": 17.95840290661767,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "topology",
+      "fault_bus": 3,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 11.458102238949754,
+        "ip_ka": 26.959779761235676
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.06,
+            "x1_pu": 0.06
+          },
+          {
+            "from_bus": 2,
+            "r0_pu": 0.015,
+            "r1_pu": 0.015,
+            "to_bus": 3,
+            "x0_pu": 0.09,
+            "x1_pu": 0.09
+          }
+        ],
+        "bus_count": 3,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "radial_3bus_far",
+      "opendss": {
+        "z1_ohm": [
+          0.13980148,
+          0.9980148799999999
+        ],
+        "z0_ohm": [
+          0.13980148,
+          0.9980148799999999
+        ],
+        "ikss_ka": 11.458102238949746,
+        "kappa_method_a": 1.6637522244881744,
+        "ip_ka": 26.95977976123565
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 7.751531633929076e-16,
+        "ip_ka_relative_error": 9.22448030801854e-16,
+        "gridlabd_ikss_ka_relative_error": 1.9916582329755567e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11529.7398394259,
+          -114.9078765861
+        ],
+        "fault_power_a_va": [
+          1329481.04584945,
+          -1.81898940354586e-12
+        ],
+        "z_thevenin_ohm": [
+          0.13980147758545736,
+          0.998014882364935
+        ],
+        "ikss_ka": 11.45810221612913,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "topology",
+      "fault_bus": 3,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 17.939616342746294,
+        "ip_ka": 42.58222401830215
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.06,
+            "x1_pu": 0.06
+          },
+          {
+            "from_bus": 2,
+            "r0_pu": 0.015,
+            "r1_pu": 0.015,
+            "to_bus": 3,
+            "x0_pu": 0.09,
+            "x1_pu": 0.09
+          },
+          {
+            "from_bus": 1,
+            "r0_pu": 0.02,
+            "r1_pu": 0.02,
+            "to_bus": 3,
+            "x0_pu": 0.1,
+            "x1_pu": 0.1
+          }
+        ],
+        "bus_count": 3,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "meshed_3bus",
+      "opendss": {
+        "z1_ohm": [
+          0.08459032153428904,
+          0.6380768714761723
+        ],
+        "z0_ohm": [
+          0.08459032153428904,
+          0.6380768714761723
+        ],
+        "ikss_ka": 17.939616342746287,
+        "kappa_method_a": 1.6784182440735904,
+        "ip_ka": 42.58222401830213
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 3.960746552126804e-16,
+        "ip_ka_relative_error": 5.005910932139459e-16,
+        "gridlabd_ikss_ka_relative_error": 2.0657610310341637e-10
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11536.7770732272,
+          -73.5512889643553
+        ],
+        "fault_power_a_va": [
+          1331026.35029448,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.08459032136707507,
+          0.6380768716324675
+        ],
+        "ikss_ka": 17.9396163390404,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "distribution_feeder",
+      "fault_bus": 3,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 36.477167028585875,
+        "ip_ka": 84.75735254716075
+      },
+      "model": {
+        "base_kv": 12.47,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.004,
+            "to_bus": 2,
+            "x0_pu": 0.03,
+            "x1_pu": 0.012
+          },
+          {
+            "from_bus": 2,
+            "r0_pu": 0.0125,
+            "r1_pu": 0.005,
+            "to_bus": 3,
+            "x0_pu": 0.035,
+            "x1_pu": 0.014
+          },
+          {
+            "from_bus": 3,
+            "r0_pu": 0.01,
+            "r1_pu": 0.004,
+            "to_bus": 4,
+            "x0_pu": 0.0325,
+            "x1_pu": 0.013
+          },
+          {
+            "from_bus": 4,
+            "r0_pu": 0.015,
+            "r1_pu": 0.006,
+            "to_bus": 5,
+            "x0_pu": 0.04,
+            "x1_pu": 0.016
+          },
+          {
+            "from_bus": 5,
+            "r0_pu": 0.0125,
+            "r1_pu": 0.005,
+            "to_bus": 6,
+            "x0_pu": 0.0375,
+            "x1_pu": 0.015
+          },
+          {
+            "from_bus": 6,
+            "r0_pu": 0.0175,
+            "r1_pu": 0.007,
+            "to_bus": 7,
+            "x0_pu": 0.045,
+            "x1_pu": 0.018
+          },
+          {
+            "from_bus": 7,
+            "r0_pu": 0.015,
+            "r1_pu": 0.006,
+            "to_bus": 8,
+            "x0_pu": 0.0425,
+            "x1_pu": 0.017
+          },
+          {
+            "from_bus": 8,
+            "r0_pu": 0.02,
+            "r1_pu": 0.008,
+            "to_bus": 9,
+            "x0_pu": 0.05,
+            "x1_pu": 0.02
+          },
+          {
+            "from_bus": 9,
+            "r0_pu": 0.0175,
+            "r1_pu": 0.007,
+            "to_bus": 10,
+            "x0_pu": 0.0475,
+            "x1_pu": 0.019
+          }
+        ],
+        "bus_count": 10,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.024875925,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.24875930000000002,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "feeder_10bus_near",
+      "opendss": {
+        "z1_ohm": [
+          0.02946799590332974,
+          0.1951594141334806
+        ],
+        "z0_ohm": [
+          0.07366998975832532,
+          0.4878985353337084
+        ],
+        "ikss_ka": 36.47716702858572,
+        "kappa_method_a": 1.6430140721879378,
+        "ip_ka": 84.75735254716066
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 4.285404119917555e-15,
+        "ip_ka_relative_error": 1.005990934459271e-15,
+        "gridlabd_ikss_ka_relative_error": 2.0360013406911824e-10
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          7197.40951961488,
+          -14.042284268947
+        ],
+        "fault_power_a_va": [
+          518029.009787482,
+          2.28087969844637e-07
+        ],
+        "z_thevenin_ohm": [
+          0.02946799587085676,
+          0.1951594140977426
+        ],
+        "ikss_ka": 36.47716703601263,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "distribution_feeder",
+      "fault_bus": 6,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 26.782588417839012,
+        "ip_ka": 58.987156210470005
+      },
+      "model": {
+        "base_kv": 12.47,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.004,
+            "to_bus": 2,
+            "x0_pu": 0.03,
+            "x1_pu": 0.012
+          },
+          {
+            "from_bus": 2,
+            "r0_pu": 0.0125,
+            "r1_pu": 0.005,
+            "to_bus": 3,
+            "x0_pu": 0.035,
+            "x1_pu": 0.014
+          },
+          {
+            "from_bus": 3,
+            "r0_pu": 0.01,
+            "r1_pu": 0.004,
+            "to_bus": 4,
+            "x0_pu": 0.0325,
+            "x1_pu": 0.013
+          },
+          {
+            "from_bus": 4,
+            "r0_pu": 0.015,
+            "r1_pu": 0.006,
+            "to_bus": 5,
+            "x0_pu": 0.04,
+            "x1_pu": 0.016
+          },
+          {
+            "from_bus": 5,
+            "r0_pu": 0.0125,
+            "r1_pu": 0.005,
+            "to_bus": 6,
+            "x0_pu": 0.0375,
+            "x1_pu": 0.015
+          },
+          {
+            "from_bus": 6,
+            "r0_pu": 0.0175,
+            "r1_pu": 0.007,
+            "to_bus": 7,
+            "x0_pu": 0.045,
+            "x1_pu": 0.018
+          },
+          {
+            "from_bus": 7,
+            "r0_pu": 0.015,
+            "r1_pu": 0.006,
+            "to_bus": 8,
+            "x0_pu": 0.0425,
+            "x1_pu": 0.017
+          },
+          {
+            "from_bus": 8,
+            "r0_pu": 0.02,
+            "r1_pu": 0.008,
+            "to_bus": 9,
+            "x0_pu": 0.05,
+            "x1_pu": 0.02
+          },
+          {
+            "from_bus": 9,
+            "r0_pu": 0.0175,
+            "r1_pu": 0.007,
+            "to_bus": 10,
+            "x0_pu": 0.0475,
+            "x1_pu": 0.019
+          }
+        ],
+        "bus_count": 10,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.024875925,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.24875930000000002,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "feeder_10bus_mid",
+      "opendss": {
+        "z1_ohm": [
+          0.052793130903329544,
+          0.26357981013348064
+        ],
+        "z0_ohm": [
+          0.1319828272583252,
+          0.6589495253337103
+        ],
+        "ikss_ka": 26.782588417838944,
+        "kappa_method_a": 1.5573632207838366,
+        "ip_ka": 58.98715621047005
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 2.5203523589321596e-15,
+        "ip_ka_relative_error": 7.227431679108283e-16,
+        "gridlabd_ikss_ka_relative_error": 5.955812819815603e-10
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          7195.70905139079,
+          -18.9564285542517
+        ],
+        "fault_power_a_va": [
+          517785.880984944,
+          -3.81642394131632e-07
+        ],
+        "z_thevenin_ohm": [
+          0.05279313071645956,
+          0.26357981000762776
+        ],
+        "ikss_ka": 26.78258843379022,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "distribution_feeder",
+      "fault_bus": 10,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 18.426737742330882,
+        "ip_ka": 38.48526616992117
+      },
+      "model": {
+        "base_kv": 12.47,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.004,
+            "to_bus": 2,
+            "x0_pu": 0.03,
+            "x1_pu": 0.012
+          },
+          {
+            "from_bus": 2,
+            "r0_pu": 0.0125,
+            "r1_pu": 0.005,
+            "to_bus": 3,
+            "x0_pu": 0.035,
+            "x1_pu": 0.014
+          },
+          {
+            "from_bus": 3,
+            "r0_pu": 0.01,
+            "r1_pu": 0.004,
+            "to_bus": 4,
+            "x0_pu": 0.0325,
+            "x1_pu": 0.013
+          },
+          {
+            "from_bus": 4,
+            "r0_pu": 0.015,
+            "r1_pu": 0.006,
+            "to_bus": 5,
+            "x0_pu": 0.04,
+            "x1_pu": 0.016
+          },
+          {
+            "from_bus": 5,
+            "r0_pu": 0.0125,
+            "r1_pu": 0.005,
+            "to_bus": 6,
+            "x0_pu": 0.0375,
+            "x1_pu": 0.015
+          },
+          {
+            "from_bus": 6,
+            "r0_pu": 0.0175,
+            "r1_pu": 0.007,
+            "to_bus": 7,
+            "x0_pu": 0.045,
+            "x1_pu": 0.018
+          },
+          {
+            "from_bus": 7,
+            "r0_pu": 0.015,
+            "r1_pu": 0.006,
+            "to_bus": 8,
+            "x0_pu": 0.0425,
+            "x1_pu": 0.017
+          },
+          {
+            "from_bus": 8,
+            "r0_pu": 0.02,
+            "r1_pu": 0.008,
+            "to_bus": 9,
+            "x0_pu": 0.05,
+            "x1_pu": 0.02
+          },
+          {
+            "from_bus": 9,
+            "r0_pu": 0.0175,
+            "r1_pu": 0.007,
+            "to_bus": 10,
+            "x0_pu": 0.0475,
+            "x1_pu": 0.019
+          }
+        ],
+        "bus_count": 10,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.024875925,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.24875930000000002,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "feeder_10bus_far",
+      "opendss": {
+        "z1_ohm": [
+          0.09633338290332924,
+          0.3786504761334808
+        ],
+        "z0_ohm": [
+          0.24083345725832456,
+          0.9466261903337112
+        ],
+        "ikss_ka": 18.426737742330857,
+        "kappa_method_a": 1.4768318225968442,
+        "ip_ka": 38.48526616992124
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.3496146794596831e-15,
+        "ip_ka_relative_error": 1.846272110014497e-15,
+        "gridlabd_ikss_ka_relative_error": 2.0955775567411323e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          7192.5260288084,
+          -27.2083233206649
+        ],
+        "fault_power_a_va": [
+          517331.709679442,
+          2.27373675443232e-13
+        ],
+        "z_thevenin_ohm": [
+          0.09633338152430303,
+          0.37865047563947096
+        ],
+        "ikss_ka": 18.42673778094554,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "transformer_tap",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 12.918611392973494,
+        "ip_ka": 31.889919559265397
+      },
+      "model": {
+        "base_mva": 100.0,
+        "hv_kv": 110.0,
+        "kind": "transformer_network",
+        "lv_kv": 20.0,
+        "source": {
+          "r0_pu": 0.009950371902099893,
+          "r1_pu": 0.009950371902099893,
+          "x0_pu": 0.09950371902099893,
+          "x1_pu": 0.09950371902099893
+        },
+        "transformer": {
+          "sn_mva": 100.0,
+          "tap_pu": 0.9,
+          "tap_side": "hv",
+          "vk_percent": 10.0,
+          "vkr_percent": 1.0,
+          "z0_multiplier": 1.0
+        }
+      },
+      "name": "transformer_hv_tap_90",
+      "opendss": {
+        "z1_ohm": [
+          0.08913761431422702,
+          0.8893712429879118
+        ],
+        "z0_ohm": [
+          0.08913761431422702,
+          0.8893712429879116
+        ],
+        "ikss_ka": 12.918613184258454,
+        "kappa_method_a": 1.745511036770264,
+        "ip_ka": 31.889924538766362
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.3865923027593706e-07,
+        "ip_ka_relative_error": 1.5614652704491104e-07,
+        "gridlabd_ikss_ka_relative_error": 1.8600866300747292e-08
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          12817.5677630319,
+          -113.894252721615
+        ],
+        "fault_power_a_va": [
+          1643030.15260718,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.0891376298438704,
+          0.8893713492805018
+        ],
+        "ikss_ka": 12.918611633270862,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "transformer_tap",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 13.694050830592992,
+        "ip_ka": 33.80354105554837
+      },
+      "model": {
+        "base_mva": 100.0,
+        "hv_kv": 110.0,
+        "kind": "transformer_network",
+        "lv_kv": 20.0,
+        "source": {
+          "r0_pu": 0.009950371902099893,
+          "r1_pu": 0.009950371902099893,
+          "x0_pu": 0.09950371902099893,
+          "x1_pu": 0.09950371902099893
+        },
+        "transformer": {
+          "sn_mva": 100.0,
+          "tap_pu": 0.95,
+          "tap_side": "hv",
+          "vk_percent": 10.0,
+          "vkr_percent": 1.0,
+          "z0_multiplier": 1.0
+        }
+      },
+      "name": "transformer_hv_tap_95",
+      "opendss": {
+        "z1_ohm": [
+          0.08410134928255476,
+          0.839008579125466
+        ],
+        "z0_ohm": [
+          0.08410134928255476,
+          0.8390085791254658
+        ],
+        "ikss_ka": 13.694052624890032,
+        "kappa_method_a": 1.745481581688424,
+        "ip_ka": 33.80354604336852
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.3102746783485415e-07,
+        "ip_ka_relative_error": 1.4755316325742115e-07,
+        "gridlabd_ikss_ka_relative_error": 7.0721177800186035e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          12143.6753940166,
+          -101.800874984811
+        ],
+        "fault_power_a_va": [
+          1474792.15493393,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.08410136739884749,
+          0.8390086823540956
+        ],
+        "ikss_ka": 13.694050927438933,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "transformer_tap",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 14.433757178576702,
+        "ip_ka": 35.628920617960425
+      },
+      "model": {
+        "base_mva": 100.0,
+        "hv_kv": 110.0,
+        "kind": "transformer_network",
+        "lv_kv": 20.0,
+        "source": {
+          "r0_pu": 0.009950371902099893,
+          "r1_pu": 0.009950371902099893,
+          "x0_pu": 0.09950371902099893,
+          "x1_pu": 0.09950371902099893
+        },
+        "transformer": {
+          "sn_mva": 100.0,
+          "tap_pu": 1.0,
+          "tap_side": "hv",
+          "vk_percent": 10.0,
+          "vkr_percent": 1.0,
+          "z0_multiplier": 1.0
+        }
+      },
+      "name": "transformer_hv_tap_100",
+      "opendss": {
+        "z1_ohm": [
+          0.07980146776731477,
+          0.7960097529147698
+        ],
+        "z0_ohm": [
+          0.07980146776731477,
+          0.7960097529147696
+        ],
+        "ikss_ka": 14.433758973815394,
+        "kappa_method_a": 1.7454534851079646,
+        "ip_ka": 35.62892560834875
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.2437776570767173e-07,
+        "ip_ka_relative_error": 1.400656416483757e-07,
+        "gridlabd_ikss_ka_relative_error": 4.5999518222939066e-10
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11537.0681895435,
+          -91.7629711324767
+        ],
+        "fault_power_a_va": [
+          1331123.62853049,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.07980148689107767,
+          0.7960098513683972
+        ],
+        "ikss_ka": 14.433757171937243,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "transformer_tap",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 15.137424293179283,
+        "ip_ka": 37.36531132716926
+      },
+      "model": {
+        "base_mva": 100.0,
+        "hv_kv": 110.0,
+        "kind": "transformer_network",
+        "lv_kv": 20.0,
+        "source": {
+          "r0_pu": 0.009950371902099893,
+          "r1_pu": 0.009950371902099893,
+          "x0_pu": 0.09950371902099893,
+          "x1_pu": 0.09950371902099893
+        },
+        "transformer": {
+          "sn_mva": 100.0,
+          "tap_pu": 1.05,
+          "tap_side": "hv",
+          "vk_percent": 10.0,
+          "vkr_percent": 1.0,
+          "z0_multiplier": 1.0
+        }
+      },
+      "name": "transformer_hv_tap_105",
+      "opendss": {
+        "z1_ohm": [
+          0.07610110451480256,
+          0.7590061112469214
+        ],
+        "z0_ohm": [
+          0.07610110451480256,
+          0.7590061112469213
+        ],
+        "ikss_ka": 15.137426087563275,
+        "kappa_method_a": 1.7454267584712446,
+        "ip_ka": 37.36531631513687
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.1853957087051354e-07,
+        "ip_ka_relative_error": 1.3349191458699462e-07,
+        "gridlabd_ikss_ka_relative_error": 5.486174165925553e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          10988.1533407681,
+          -83.3373449488919
+        ],
+        "fault_power_a_va": [
+          1207464.58953296,
+          -1.81898940354586e-12
+        ],
+        "z_thevenin_ohm": [
+          0.07610112380242466,
+          0.7590062043957168
+        ],
+        "ikss_ka": 15.137424210132737,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "transformer_tap",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 15.805290661695992,
+        "ip_ka": 39.01330982817614
+      },
+      "model": {
+        "base_mva": 100.0,
+        "hv_kv": 110.0,
+        "kind": "transformer_network",
+        "lv_kv": 20.0,
+        "source": {
+          "r0_pu": 0.009950371902099893,
+          "r1_pu": 0.009950371902099893,
+          "x0_pu": 0.09950371902099893,
+          "x1_pu": 0.09950371902099893
+        },
+        "transformer": {
+          "sn_mva": 100.0,
+          "tap_pu": 1.1,
+          "tap_side": "hv",
+          "vk_percent": 10.0,
+          "vkr_percent": 1.0,
+          "z0_multiplier": 1.0
+        }
+      },
+      "name": "transformer_hv_tap_110",
+      "opendss": {
+        "z1_ohm": [
+          0.07289377489162521,
+          0.726932807370302
+        ],
+        "z0_ohm": [
+          0.07289377489162521,
+          0.7269328073703019
+        ],
+        "ikss_ka": 15.805292453690031,
+        "kappa_method_a": 1.7454013925502632,
+        "ip_ka": 39.01331480946003
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.1337936609715822e-07,
+        "ip_ka_relative_error": 1.2768163666777327e-07,
+        "gridlabd_ikss_ka_relative_error": 8.904882749703974e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          10489.0778627227,
+          -76.1930174114752
+        ],
+        "fault_power_a_va": [
+          1100265.59786162,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.07289379390141279,
+          0.726932895250357
+        ],
+        "ikss_ka": 15.805290520951733,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "transformer_tap",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 17.81945330688482,
+        "ip_ka": 43.986321750568436
+      },
+      "model": {
+        "base_mva": 100.0,
+        "hv_kv": 110.0,
+        "kind": "transformer_network",
+        "lv_kv": 20.0,
+        "source": {
+          "r0_pu": 0.009950371902099893,
+          "r1_pu": 0.009950371902099893,
+          "x0_pu": 0.09950371902099893,
+          "x1_pu": 0.09950371902099893
+        },
+        "transformer": {
+          "sn_mva": 100.0,
+          "tap_pu": 0.9,
+          "tap_side": "lv",
+          "vk_percent": 10.0,
+          "vkr_percent": 1.0,
+          "z0_multiplier": 1.0
+        }
+      },
+      "name": "transformer_lv_tap_90",
+      "opendss": {
+        "z1_ohm": [
+          0.06463919133556278,
+          0.644767911927941
+        ],
+        "z0_ohm": [
+          0.06463919133556278,
+          0.6447679119279409
+        ],
+        "ikss_ka": 17.819455186347934,
+        "kappa_method_a": 1.745453480941685,
+        "ip_ka": 43.98632697497753
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.054725351301017e-07,
+        "ip_ka_relative_error": 1.1877347923950888e-07,
+        "gridlabd_ikss_ka_relative_error": 6.068850385355359e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          10385.1605010919,
+          -66.9169353226762
+        ],
+        "fault_power_a_va": [
+          1078560.36509673,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.06463920655308548,
+          0.6447679830434802
+        ],
+        "ikss_ka": 17.819453198741225,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "transformer_tap",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 15.993082746345367,
+        "ip_ka": 39.478028385551696
+      },
+      "model": {
+        "base_mva": 100.0,
+        "hv_kv": 110.0,
+        "kind": "transformer_network",
+        "lv_kv": 20.0,
+        "source": {
+          "r0_pu": 0.009950371902099893,
+          "r1_pu": 0.009950371902099893,
+          "x0_pu": 0.09950371902099893,
+          "x1_pu": 0.09950371902099893
+        },
+        "transformer": {
+          "sn_mva": 100.0,
+          "tap_pu": 0.95,
+          "tap_side": "lv",
+          "vk_percent": 10.0,
+          "vkr_percent": 1.0,
+          "z0_multiplier": 1.0
+        }
+      },
+      "name": "transformer_lv_tap_95",
+      "opendss": {
+        "z1_ohm": [
+          0.07202082605740283,
+          0.7183988089049858
+        ],
+        "z0_ohm": [
+          0.07202082605740283,
+          0.7183988089049856
+        ],
+        "ikss_ka": 15.993084580374703,
+        "kappa_method_a": 1.7454534829700055,
+        "ip_ka": 39.478033483721305
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.1467639818293172e-07,
+        "ip_ka_relative_error": 1.29139401313985e-07,
+        "gridlabd_ikss_ka_relative_error": 4.599468787275462e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          10961.1954723066,
+          -78.6884349338947
+        ],
+        "fault_power_a_va": [
+          1201539.98051907,
+          -1.81898940354586e-12
+        ],
+        "z_thevenin_ohm": [
+          0.07202084362245897,
+          0.718398893692905
+        ],
+        "ikss_ka": 15.993082672785683,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "transformer_tap",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 14.433757178576702,
+        "ip_ka": 35.628920617960425
+      },
+      "model": {
+        "base_mva": 100.0,
+        "hv_kv": 110.0,
+        "kind": "transformer_network",
+        "lv_kv": 20.0,
+        "source": {
+          "r0_pu": 0.009950371902099893,
+          "r1_pu": 0.009950371902099893,
+          "x0_pu": 0.09950371902099893,
+          "x1_pu": 0.09950371902099893
+        },
+        "transformer": {
+          "sn_mva": 100.0,
+          "tap_pu": 1.0,
+          "tap_side": "lv",
+          "vk_percent": 10.0,
+          "vkr_percent": 1.0,
+          "z0_multiplier": 1.0
+        }
+      },
+      "name": "transformer_lv_tap_100",
+      "opendss": {
+        "z1_ohm": [
+          0.07980146776731477,
+          0.7960097529147698
+        ],
+        "z0_ohm": [
+          0.07980146776731477,
+          0.7960097529147696
+        ],
+        "ikss_ka": 14.433758973815394,
+        "kappa_method_a": 1.7454534851079646,
+        "ip_ka": 35.62892560834875
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.2437776570767173e-07,
+        "ip_ka_relative_error": 1.400656416483757e-07,
+        "gridlabd_ikss_ka_relative_error": 4.5999518222939066e-10
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11537.0681895435,
+          -91.7629711324767
+        ],
+        "fault_power_a_va": [
+          1331123.62853049,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.07980148689107767,
+          0.7960098513683972
+        ],
+        "ikss_ka": 14.433757171937243,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "transformer_tap",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 13.091843245874555,
+        "ip_ka": 32.316481286131896
+      },
+      "model": {
+        "base_mva": 100.0,
+        "hv_kv": 110.0,
+        "kind": "transformer_network",
+        "lv_kv": 20.0,
+        "source": {
+          "r0_pu": 0.009950371902099893,
+          "r1_pu": 0.009950371902099893,
+          "x0_pu": 0.09950371902099893,
+          "x1_pu": 0.09950371902099893
+        },
+        "transformer": {
+          "sn_mva": 100.0,
+          "tap_pu": 1.05,
+          "tap_side": "lv",
+          "vk_percent": 10.0,
+          "vkr_percent": 1.0,
+          "z0_multiplier": 1.0
+        }
+      },
+      "name": "transformer_lv_tap_105",
+      "opendss": {
+        "z1_ohm": [
+          0.08798111641884776,
+          0.8776007437279509
+        ],
+        "z0_ohm": [
+          0.08798111641884776,
+          0.8776007437279507
+        ],
+        "ikss_ka": 13.091845007731052,
+        "kappa_method_a": 1.7454534873555627,
+        "ip_ka": 32.31648618376652
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.3457663882360223e-07,
+        "ip_ka_relative_error": 1.5155220147132253e-07,
+        "gridlabd_ikss_ka_relative_error": 8.00987213632323e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          12112.7666184441,
+          -106.208300021253
+        ],
+        "fault_power_a_va": [
+          1467303.95355888,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.0879811353236414,
+          0.8776008540241669
+        ],
+        "ikss_ka": 13.091843350738547,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "transformer_tap",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 11.92872494097248,
+        "ip_ka": 29.44538894046316
+      },
+      "model": {
+        "base_mva": 100.0,
+        "hv_kv": 110.0,
+        "kind": "transformer_network",
+        "lv_kv": 20.0,
+        "source": {
+          "r0_pu": 0.009950371902099893,
+          "r1_pu": 0.009950371902099893,
+          "x0_pu": 0.09950371902099893,
+          "x1_pu": 0.09950371902099893
+        },
+        "transformer": {
+          "sn_mva": 100.0,
+          "tap_pu": 1.1,
+          "tap_side": "lv",
+          "vk_percent": 10.0,
+          "vkr_percent": 1.0,
+          "z0_multiplier": 1.0
+        }
+      },
+      "name": "transformer_lv_tap_110",
+      "opendss": {
+        "z1_ohm": [
+          0.09655977196316852,
+          0.9631717811034233
+        ],
+        "z0_ohm": [
+          0.09655977196316852,
+          0.963171781103423
+        ],
+        "ikss_ka": 11.928726673894609,
+        "kappa_method_a": 1.7454534897127998,
+        "ip_ka": 29.445393757702544
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.4527301838022654e-07,
+        "ip_ka_relative_error": 1.6359908181713426e-07,
+        "gridlabd_ikss_ka_relative_error": 2.3136587993375906e-08
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          12688.2781915349,
+          -122.092038117465
+        ],
+        "fault_power_a_va": [
+          1610073.09931553,
+          -1.81898940354586e-12
+        ],
+        "z_thevenin_ohm": [
+          0.09655978731398374,
+          0.9631718983851725
+        ],
+        "ikss_ka": 11.92872521696248,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "transformer_impedance",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 20.621037824874428,
+        "ip_ka": 50.452417616728944
+      },
+      "model": {
+        "base_mva": 100.0,
+        "hv_kv": 110.0,
+        "kind": "transformer_network",
+        "lv_kv": 20.0,
+        "source": {
+          "r0_pu": 0.009950371902099893,
+          "r1_pu": 0.009950371902099893,
+          "x0_pu": 0.09950371902099893,
+          "x1_pu": 0.09950371902099893
+        },
+        "transformer": {
+          "sn_mva": 100.0,
+          "tap_pu": 1.0,
+          "tap_side": "hv",
+          "vk_percent": 4.0,
+          "vkr_percent": 0.5,
+          "z0_multiplier": 1.0
+        }
+      },
+      "name": "transformer_vk_4",
+      "opendss": {
+        "z1_ohm": [
+          0.059801475324237185,
+          0.5567598968432386
+        ],
+        "z0_ohm": [
+          0.059801475324237185,
+          0.5567598968432383
+        ],
+        "ikss_ka": 20.621039993372918,
+        "kappa_method_a": 1.730041300805825,
+        "ip_ka": 50.45242359893597
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.0515951139244389e-07,
+        "ip_ka_relative_error": 1.1857125191773871e-07,
+        "gridlabd_ikss_ka_relative_error": 1.453094611452476e-08
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11539.7469467691,
+          -64.2102902816391
+        ],
+        "fault_power_a_va": [
+          1331698.82556845,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.05980148331753332,
+          0.5567599470251674
+        ],
+        "ikss_ka": 20.62103812451762,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "transformer_impedance",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 18.04464938612641,
+        "ip_ka": 43.851937776459344
+      },
+      "model": {
+        "base_mva": 100.0,
+        "hv_kv": 110.0,
+        "kind": "transformer_network",
+        "lv_kv": 20.0,
+        "source": {
+          "r0_pu": 0.009950371902099893,
+          "r1_pu": 0.009950371902099893,
+          "x0_pu": 0.09950371902099893,
+          "x1_pu": 0.09950371902099893
+        },
+        "transformer": {
+          "sn_mva": 100.0,
+          "tap_pu": 1.0,
+          "tap_side": "hv",
+          "vk_percent": 6.0,
+          "vkr_percent": 0.8,
+          "z0_multiplier": 1.0
+        }
+      },
+      "name": "transformer_vk_6",
+      "opendss": {
+        "z1_ohm": [
+          0.07180147223386772,
+          0.635871906539925
+        ],
+        "z0_ohm": [
+          0.07180147223386772,
+          0.6358719065399248
+        ],
+        "ikss_ka": 18.04465138223134,
+        "kappa_method_a": 1.7184042955834786,
+        "ip_ka": 43.85194326025311
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.1062031007642682e-07,
+        "ip_ka_relative_error": 1.2505246874526165e-07,
+        "gridlabd_ikss_ka_relative_error": 1.7252997997642542e-10
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11538.254550233,
+          -73.3158853281612
+        ],
+        "fault_power_a_va": [
+          1331366.93285014,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.07180148743090516,
+          0.6358719761722399
+        ],
+        "ikss_ka": 18.044649383013166,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "transformer_impedance",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 14.433757178576702,
+        "ip_ka": 35.628920617960425
+      },
+      "model": {
+        "base_mva": 100.0,
+        "hv_kv": 110.0,
+        "kind": "transformer_network",
+        "lv_kv": 20.0,
+        "source": {
+          "r0_pu": 0.009950371902099893,
+          "r1_pu": 0.009950371902099893,
+          "x0_pu": 0.09950371902099893,
+          "x1_pu": 0.09950371902099893
+        },
+        "transformer": {
+          "sn_mva": 100.0,
+          "tap_pu": 1.0,
+          "tap_side": "hv",
+          "vk_percent": 10.0,
+          "vkr_percent": 1.0,
+          "z0_multiplier": 1.0
+        }
+      },
+      "name": "transformer_vk_10",
+      "opendss": {
+        "z1_ohm": [
+          0.07980146776731477,
+          0.7960097529147698
+        ],
+        "z0_ohm": [
+          0.07980146776731477,
+          0.7960097529147696
+        ],
+        "ikss_ka": 14.433758973815394,
+        "kappa_method_a": 1.7454534851079646,
+        "ip_ka": 35.62892560834875
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.2437776570767173e-07,
+        "ip_ka_relative_error": 1.400656416483757e-07,
+        "gridlabd_ikss_ka_relative_error": 4.5999518222939066e-10
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11537.0681895435,
+          -91.7629711324767
+        ],
+        "fault_power_a_va": [
+          1331123.62853049,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.07980148689107767,
+          0.7960098513683972
+        ],
+        "ikss_ka": 14.433757171937243,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "transformer_impedance",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ikss_ka": 11.102933701070851,
+        "ip_ka": 27.53907718717121
+      },
+      "model": {
+        "base_mva": 100.0,
+        "hv_kv": 110.0,
+        "kind": "transformer_network",
+        "lv_kv": 20.0,
+        "source": {
+          "r0_pu": 0.009950371902099893,
+          "r1_pu": 0.009950371902099893,
+          "x0_pu": 0.09950371902099893,
+          "x1_pu": 0.09950371902099893
+        },
+        "transformer": {
+          "sn_mva": 100.0,
+          "tap_pu": 1.0,
+          "tap_side": "hv",
+          "vk_percent": 16.0,
+          "vkr_percent": 1.5,
+          "z0_multiplier": 1.0
+        }
+      },
+      "name": "transformer_vk_16",
+      "opendss": {
+        "z1_ohm": [
+          0.09980145781948098,
+          1.0351960166541716
+        ],
+        "z0_ohm": [
+          0.09980145781948098,
+          1.0351960166541714
+        ],
+        "ikss_ka": 11.10293535016737,
+        "kappa_method_a": 1.7538669605367339,
+        "ip_ka": 27.539081781902123
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.4852797625119965e-07,
+        "ip_ka_relative_error": 1.6684401282342018e-07,
+        "gridlabd_ikss_ka_relative_error": 1.5909758357930577e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11534.259207189,
+          -119.283163295487
+        ],
+        "fault_power_a_va": [
+          1330533.6393167,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.0998014840631729,
+          1.0351961709710247
+        ],
+        "ikss_ka": 11.102933683406352,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "zero_sequence",
+      "fault_bus": 2,
+      "fault_type": "single_phase_ground",
+      "hacdcpf": {
+        "ikss_ka": 19.180118634790972,
+        "ip_ka": 46.71256678204892
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.005,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.04,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.004975185,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.04975186,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "slg_z0_5",
+      "opendss": {
+        "z1_ohm": [
+          0.07980147999999998,
+          0.7180148800000001
+        ],
+        "z0_ohm": [
+          0.039900739999999976,
+          0.35900744000000007
+        ],
+        "ikss_ka": 19.18011863479097,
+        "kappa_method_a": 1.722135997548079,
+        "ip_ka": 46.71256678204891
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.852289731074033e-16,
+        "ip_ka_relative_error": 1.521095466826613e-16
+      },
+      "gridlabd": {
+        "status": "unsupported_fault_type",
+        "ikss_ka": null,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "zero_sequence",
+      "fault_bus": 2,
+      "fault_type": "single_phase_ground",
+      "hacdcpf": {
+        "ikss_ka": 15.983432195659146,
+        "ip_ka": 38.92713898504077
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "slg_z0_10",
+      "opendss": {
+        "z1_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "z0_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "ikss_ka": 15.98343219565914,
+        "kappa_method_a": 1.722135997548079,
+        "ip_ka": 38.927138985040756
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 4.445495354577679e-16,
+        "ip_ka_relative_error": 3.650629120383871e-16
+      },
+      "gridlabd": {
+        "status": "unsupported_fault_type",
+        "ikss_ka": null,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "zero_sequence",
+      "fault_bus": 2,
+      "fault_type": "single_phase_ground",
+      "hacdcpf": {
+        "ikss_ka": 11.987574146744358,
+        "ip_ka": 29.195354238780574
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.02,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.16,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.01990074,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.19900744,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "slg_z0_20",
+      "opendss": {
+        "z1_ohm": [
+          0.07980148000000004,
+          0.7180148800000002
+        ],
+        "z0_ohm": [
+          0.1596029600000001,
+          1.4360297600000007
+        ],
+        "ikss_ka": 11.98757414674435,
+        "kappa_method_a": 1.722135997548079,
+        "ip_ka": 29.19535423878056
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 5.927327139436908e-16,
+        "ip_ka_relative_error": 4.867505493845163e-16
+      },
+      "gridlabd": {
+        "status": "unsupported_fault_type",
+        "ikss_ka": null,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "zero_sequence",
+      "fault_bus": 2,
+      "fault_type": "single_phase_ground",
+      "hacdcpf": {
+        "ikss_ka": 9.590059317395486,
+        "ip_ka": 23.35628339102446
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.03,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.24,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.02985111,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.29851116,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "slg_z0_30",
+      "opendss": {
+        "z1_ohm": [
+          0.07980147999999998,
+          0.7180148800000001
+        ],
+        "z0_ohm": [
+          0.23940443999999989,
+          2.1540446399999995
+        ],
+        "ikss_ka": 9.590059317395486,
+        "kappa_method_a": 1.722135997548079,
+        "ip_ka": 23.356283391024462
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 0.0,
+        "ip_ka_relative_error": 1.5210954668266124e-16
+      },
+      "gridlabd": {
+        "status": "unsupported_fault_type",
+        "ikss_ka": null,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "fault_type",
+      "fault_bus": 2,
+      "fault_type": "two_phase",
+      "hacdcpf": {
+        "ikss_ka": 13.842058321106904,
+        "ip_ka": 33.71189125769289
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "two_phase_radial",
+      "opendss": {
+        "z1_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "z0_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "ikss_ka": 13.842058321106903,
+        "kappa_method_a": 1.722135997548079,
+        "ip_ka": 33.71189125769288
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.283303969823327e-16,
+        "ip_ka_relative_error": 2.1076917053651147e-16
+      },
+      "gridlabd": {
+        "status": "unsupported_fault_type",
+        "ikss_ka": null,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "zero_sequence",
+      "fault_bus": 2,
+      "fault_type": "single_phase_ground",
+      "hacdcpf": {
+        "ikss_ka": 15.993082746345372,
+        "ip_ka": 39.47802838555171
+      },
+      "model": {
+        "base_mva": 100.0,
+        "hv_kv": 110.0,
+        "kind": "transformer_network",
+        "lv_kv": 20.0,
+        "source": {
+          "r0_pu": 0.009950371902099893,
+          "r1_pu": 0.009950371902099893,
+          "x0_pu": 0.09950371902099893,
+          "x1_pu": 0.09950371902099893
+        },
+        "transformer": {
+          "sn_mva": 100.0,
+          "tap_pu": 0.95,
+          "tap_side": "lv",
+          "vk_percent": 10.0,
+          "vkr_percent": 1.0,
+          "z0_multiplier": 1.0
+        }
+      },
+      "name": "transformer_slg_tap_lv_95",
+      "opendss": {
+        "z1_ohm": [
+          0.07202082605740283,
+          0.7183988089049858
+        ],
+        "z0_ohm": [
+          0.07202082605740283,
+          0.7183988089049856
+        ],
+        "ikss_ka": 15.993084580374703,
+        "kappa_method_a": 1.7454534829700055,
+        "ip_ka": 39.478033483721305
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.1467639784972079e-07,
+        "ip_ka_relative_error": 1.2913940095401636e-07
+      },
+      "gridlabd": {
+        "status": "unsupported_fault_type",
+        "ikss_ka": null,
+        "ip_ka": null
+      }
+    }
+  ]
+}

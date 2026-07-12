@@ -124,7 +124,7 @@ build_transformer_branch_corrections(const ACSystem& ac,
                                      double base_mva,
                                      const SCDetailedOptions& opt) {
   std::unordered_map<int, TransformerBranchCorrection> corrections;
-  if (!branch_map) return corrections;
+  if (!branch_map || !opt.apply_iec_transformer_correction) return corrections;
 
   auto bus_kv = [&](int bus_id, double fallback) {
     for (const auto& bus : ac.buses) {
@@ -247,7 +247,7 @@ ExternalGridScImpedance external_grid_impedance_sc(const ExternalGrid& eg,
 // Y_fault = Y_bus (from branches) + generator sub-transient shunts
 //
 // Tap-changer branches use the simplified π-model:
-//   Y_ff = y/|t|², Y_tt = y,  Y_ft = −y*/t,  Y_tf = −y/t*
+//   Y_ff = y/|t|², Y_tt = y,  Y_ft = -y/t*,  Y_tf = -y/t
 // Regular lines (tap == 1, shift == 0):
 //   standard π model with y_series and y_shunt/2 at each end.
 // -------------------------------------------------------------------------
@@ -289,7 +289,7 @@ SpMat build_fault_ybus(const ACSystem& ac_sys,
       double t2 = std::norm(t);  // |t|²
       trips.emplace_back(fi, fi,  y_series / t2 + y_shunt / t2);
       trips.emplace_back(ti, ti,  y_series + y_shunt);
-      trips.emplace_back(fi, ti, -std::conj(y_series / t));
+      trips.emplace_back(fi, ti, -y_series / std::conj(t));
       trips.emplace_back(ti, fi, -y_series / t);
     }
   }
@@ -435,11 +435,11 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
       double t2 = std::norm(t);
       Ybus(fi, fi) += y_series / t2 + y_shunt / t2;
       Ybus(ti, ti) += y_series + y_shunt;
-      Ybus(fi, ti) += -std::conj(y_series / t);
+      Ybus(fi, ti) += -y_series / std::conj(t);
       Ybus(ti, fi) += -y_series / t;
       Ybus2(fi, fi) += y_series / t2 + y_shunt / t2;
       Ybus2(ti, ti) += y_series + y_shunt;
-      Ybus2(fi, ti) += -std::conj(y_series / t);
+      Ybus2(fi, ti) += -y_series / std::conj(t);
       Ybus2(ti, fi) += -y_series / t;
     }
 
@@ -461,7 +461,7 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
         double t2 = std::norm(t);
         Ybus0(fi, fi) += y0 / t2 + y0_shunt / t2;
         Ybus0(ti, ti) += y0 + y0_shunt;
-        Ybus0(fi, ti) += -std::conj(y0 / t);
+        Ybus0(fi, ti) += -y0 / std::conj(t);
         Ybus0(ti, fi) += -y0 / t;
       }
     }
@@ -1458,25 +1458,28 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   }
 
   // ====== Step 5: Peak current (ip) ======
+  // The DC-offset factor is a property of the fault-point Thevenin impedance,
+  // not of the bus at which a contribution happens to be reported. IEC 60909
+  // current-source contributions have no decaying DC component, so add their
+  // instantaneous peak without multiplying them by kappa.
+  Cx Z_k_kappa = compute_Zk(opt.fault_type,
+                            Z1_fault, Z2_fault, Z0_fault, Zf);
+  double rx_ratio = (std::abs(std::imag(Z_k_kappa)) > 1e-15)
+                        ? std::abs(std::real(Z_k_kappa) / std::imag(Z_k_kappa))
+                        : 0.0;
+  double kappa = calculate_kappa_basic_sc(rx_ratio);
+  if (opt.kappa_method == SCKappaMethod::B && opt.topology == SCTopology::Meshed) {
+    kappa = std::min(1.8, 1.15 * kappa);
+  } else {
+    kappa = std::clamp(kappa, 1.0, 2.0);
+  }
+
   for (int k = 0; k < n; ++k) {
     auto& row = out.bus_results[k];
-
-    // Compute kappa from equivalent R/X ratio
-    Cx Z_k_kappa = compute_Zk(opt.fault_type,
-                               Zbus(k, k), Zbus2(k, k), Zbus0(k, k), Zf);
-    double rx_ratio = (std::abs(std::imag(Z_k_kappa)) > 1e-15)
-                          ? std::abs(std::real(Z_k_kappa) / std::imag(Z_k_kappa))
-                          : 0.0;
-
-    double kappa = calculate_kappa_basic_sc(rx_ratio);
-
-    // Method B correction
-    if (opt.kappa_method == SCKappaMethod::B && opt.topology == SCTopology::Meshed) {
-      kappa *= 1.15;
-    }
-    kappa = std::clamp(kappa, 1.0, 2.0);
-
-    row.ip_ka = kappa * std::sqrt(2.0) * row.ikss_1_ka;
+    const double current_source_ka =
+        std::max(0.0, row.ikss_ka - row.ikss_1_ka);
+    row.ip_ka = std::sqrt(2.0) *
+                (kappa * row.ikss_1_ka + current_source_ka);
   }
 
   // ====== Step 6: Breaking current (Ib) ======

@@ -27,6 +27,7 @@
 #include "hacdcpf/model/enums.hpp"
 #include "hacdcpf/model/system.hpp"
 #include "hacdcpf/model/network_utils.hpp"
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <nlohmann/json.hpp>
 
@@ -596,6 +597,8 @@ TEST_CASE("SC detailed: VSC AC grid-forming flag selects voltage-source model",
   const auto current_limited = dc_forming_only.bus_results.front().ikss_converter_contrib_ka;
   const double expected_current_limited = 1.2 * 20.0 / (std::sqrt(3.0) * 20.0);
   CHECK(std::abs(current_limited - expected_current_limited) < 1e-9);
+  CHECK(dc_forming_only.bus_results.front().ip_ka ==
+        Catch::Approx(std::sqrt(2.0) * current_limited).epsilon(1e-12));
 
   sys.vsc_converters.front().ac_grid_forming = true;
   const auto ac_forming = run_short_circuit_detailed(sys, 1, opt);
@@ -642,6 +645,34 @@ TEST_CASE("SC detailed: minimum external-grid data lowers fault current",
   CHECK(i_max > 0.0);
   CHECK(i_min > 0.0);
   CHECK(i_min < i_max * 0.2);
+}
+
+TEST_CASE("SC detailed: IEC method B peak factor is capped at 1.8",
+          "[short_circuit][iec60909][peak]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK, 20.0)};
+  ExternalGrid eg;
+  eg.index = 1;
+  eg.bus = 1;
+  eg.r_pu = 1e-9;
+  eg.x_pu = 0.1;
+  sys.ac.external_grids = {eg};
+  sys.ac.generators.clear();
+
+  SCDetailedOptions opt;
+  opt.fault_type = FaultType::ThreePhase;
+  opt.c_factor = 1.0;
+  opt.kappa_method = SCKappaMethod::B;
+  opt.topology = SCTopology::Meshed;
+  opt.compute_ith = false;
+
+  const auto result = run_short_circuit_detailed(sys, 1, opt);
+  REQUIRE(result.solved);
+  const auto& row = fault_row(result);
+  CHECK(row.ip_ka == Catch::Approx(1.8 * std::sqrt(2.0) * row.ikss_ka)
+                         .epsilon(1e-12));
 }
 
 TEST_CASE("SC detailed: transformer correction factor is applied in canonical space",
@@ -724,6 +755,79 @@ TEST_CASE("SC projection: transformer zero-sequence percent respects x0/r0 ratio
 
   CHECK(std::abs(br.r0_pu - expected_r0) < 1e-12);
   CHECK(std::abs(br.x0_pu - expected_x0) < 1e-12);
+}
+
+TEST_CASE("SC detailed: LV transformer taps cross-validate with OpenDSS fault study",
+          "[short_circuit][crossval][opendss][transformer][tap]") {
+#ifdef HACDCPF_PROJECT_ROOT
+  const std::string root = HACDCPF_PROJECT_ROOT;
+#else
+  const std::string root = ".";
+#endif
+  const json reference = json::parse(read_text_file(
+      root + "/external_data/short_circuit_validation/opendss_transformer_taps.json"));
+
+  for (const auto& expected : reference.at("cases")) {
+    const double tap = expected.at("lv_tap_pu").get<double>();
+    INFO("OpenDSS LV tap=" << tap);
+
+    HybridPowerSystem sys;
+    sys.base_mva = 100.0;
+    sys.ac.base_mva = 100.0;
+    sys.ac.buses = {
+        make_bus(1, BusType::SLACK, 110.0),
+        make_bus(2, BusType::PQ, 20.0),
+    };
+
+    ExternalGrid eg;
+    eg.index = 1;
+    eg.bus = 1;
+    eg.r_pu = 0.00995037190209989;
+    eg.x_pu = 0.0995037190209989;
+    eg.r0_pu = eg.r_pu;
+    eg.x0_pu = eg.x_pu;
+    sys.ac.external_grids = {eg};
+    sys.ac.generators.clear();
+
+    Transformer2W tr;
+    tr.index = 1;
+    tr.hv_bus = 1;
+    tr.lv_bus = 2;
+    tr.sn_mva = 100.0;
+    tr.vn_hv_kv = 110.0;
+    tr.vn_lv_kv = 20.0;
+    tr.vk_percent = 10.0;
+    tr.vkr_percent = 1.0;
+    tr.z0_percent = 10.0;
+    tr.x0_r0 = std::sqrt(99.0);
+    tr.tap_side = 1;
+    tr.tap_neutral = 0;
+    tr.tap_pos = static_cast<int>(std::lround((tap - 1.0) / 0.05));
+    tr.tap_step_percent = 5.0;
+    sys.ac.transformers_2w = {tr};
+
+    SCDetailedOptions opt;
+    opt.fault_type = FaultType::ThreePhase;
+    opt.c_factor = 1.0;
+    opt.kappa_method = SCKappaMethod::A;
+    opt.topology = SCTopology::Radial;
+    opt.apply_iec_transformer_correction = false;
+    opt.compute_branch_flows = false;
+    opt.compute_ith = false;
+
+    const auto three_phase = run_short_circuit_detailed(sys, 2, opt);
+    REQUIRE(three_phase.solved);
+    const auto& row3 = fault_row(three_phase);
+    CHECK(row3.ikss_ka == Catch::Approx(expected.at("ik3_ka").get<double>()).epsilon(2e-6));
+    CHECK(row3.ip_ka == Catch::Approx(expected.at("ip_iec60909_ka").get<double>()).epsilon(2e-6));
+
+    // Z0 = Z1 in this grounded OpenDSS fixture, so the SLG and 3-phase RMS
+    // currents must agree. This specifically exercises LV-tap Z0 referral.
+    opt.fault_type = FaultType::SinglePhaseGround;
+    const auto ground = run_short_circuit_detailed(sys, 2, opt);
+    REQUIRE(ground.solved);
+    CHECK(fault_row(ground).ikss_ka == Catch::Approx(row3.ikss_ka).epsilon(2e-6));
+  }
 }
 
 TEST_CASE("SC detailed: projected rich motors remain motor contributions and obey threshold",
