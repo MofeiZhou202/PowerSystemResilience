@@ -1,6 +1,9 @@
-# Hybrid AC/DC Distribution Systems Simulation 项目系统说明
+# HySim-XJTU-HRPES 项目系统说明
 
-本文档面向工程使用者和开发者，说明本项目从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。文档入口见 `docs/README.md`，更底层的公式和接口见 `docs/technical_notebook/`。
+**交直流混合高弹性能源电力系统仿真分析平台**<br>
+高弹性能源电力系统研究团队 · 西安交通大学
+
+本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。文档入口见 `docs/README.md`，更底层的公式和接口见 `docs/technical_notebook/`。
 
 ## 文档同步状态（2026-07-12）
 
@@ -42,7 +45,7 @@ ctest --preset windows-vcpkg-release
 | 混合 AC/DC 潮流与聚合建模 | 已实现并持续回归 | 覆盖 canonical projection、AC/DC 潮流、换流器协调与图分析链路。 |
 | OPF 与约束优化 | 已实现并持续回归 | AC OPF / DC OPF / RPO 已集成，支持多后端路径。 |
 | 图建模、网络降阶、重构 | 已实现并持续回归 | 支持连通性、开关收缩、Kron/series/pendant reduction、ONR。 |
-| 可靠性与弹性评估 | 已实现并持续回归 | 包含 MC、FMEA、三阶段可靠性与配电弹性评估（含 MIP 路径）。 |
+| 可靠性与弹性分析 | 已实现并持续回归 | 包含 MC、FMEA、三阶段可靠性与配电弹性分析（含 MIP 路径）。 |
 | 三相与短路分析 | 已实现并持续回归 | 三相 NR 与 AC/DC 短路分析均有独立测试族。 |
 | 谐波分析 | 已实现（持续增强） | 已有混合 AC/DC 谐波潮流与解析/回归测试。 |
 | 暂态动力学 | 已实现基础框架（持续增强） | 已包含动态建模、事件、积分器、DAE 求解与相关测试，但仍在快速迭代。 |
@@ -359,6 +362,20 @@ Python 侧 `etap-main/src/canonical_schema.py` 提供与 C++ 完全一致的列�
 | 导入原生 ETAP `.xml` | `POST /api/session/load_etap_xml`；「加载算例」对话框「导入ETAP工程 (.xml)」 |
 
 GUI 的 OPF 入口 `POST /api/session/opf` 支持 parity/native/dc 求解路径，并把实际约束范围以 `scope.model_scope` 与布尔 flags 返回。AC/parity OPF 收敛后，后端会在 OPF 调度点再跑一次 PF，并返回 `post_pf` 支路潮流/VSC 转移以及 best-effort `post_carbon` 碳流结果；前端将 `post_pf.branch_flows` 用于 OPF 解上的潮流/负载率热力图叠加。
+
+GUI 第一阶段统一契约包括：`hysim_task_status_v1`（任务状态、耗时与模型版本）、`hysim_result_v1`（分析、请求 ID、结果状态与陈旧性）和 `hysim_canvas_ref_v1`（结果行的元件类型、模型索引与 Canvas ID）。PF/OPF 在计算期间检测到模型版本变化时会丢弃过期结果；结果表统一通过 `data-result-ref` / `data-comp-id` 定位 Canvas，并支持鼠标和键盘操作。
+
+第二阶段任务执行层为所有主要分析请求分配 `X-HySim-Request-ID`，活动任务期间锁定运行按钮并提供“取消等待”。取消会中止浏览器请求、忽略该请求的后续结果，并轮询后端直到求解收尾；由于当前 C++ 求解器没有统一的取消令牌，这不是强制终止求解线程。模型版本在请求期间变化时，响应统一标记为 `stale` 且禁止进入 Dashboard 或 Canvas。
+
+第三阶段将共享前端基础设施从 `web/js/app.js` 拆分到 `web/js/core/`：`analysis_contracts.js` 维护分析端点和结果契约，`task_manager.js` 管理单活动任务、取消与后端收尾，`api_client.js` 统一请求 ID、错误和陈旧结果处理，`result_mapping.js` 维护 Dashboard 到 Canvas 的类型/索引映射。`app.js` 只保留 UI 状态回调和薄适配层，四个核心脚本必须在 `app.js` 之前加载。
+
+第四阶段针对中大型系统优化交互性能：Canvas 将连续鼠标移动合并到浏览器动画帧，并对视口外的元件和连接执行可逆裁剪。年度生产模拟按 7/30/90 天窗口浏览；选择全年时采用保留首尾及负荷极值的降采样，最多绘制 2000 点，同时保留完整原始序列供导出和后续分析使用。规模化 GUI E2E 对这些性能边界提供回归契约。
+
+第五阶段补齐工程界面的可访问性：工作流、模块和页签采用 roving-tabindex 键盘导航，支持方向键、Home/End，提供主工作区跳转、清晰焦点环、对话框语义、控制台播报、减少动画和高对比度偏好。`hysim_accessibility_audit_v1` 会检查关键地标、导航和控件名称。
+
+第六阶段增加本地运行时防护：`hysim_runtime_diagnostics_v1` 捕获全局脚本错误、未处理 Promise 拒绝、HTTP/网络失败及在线状态，在依赖栏显示“前端”健康芯片。诊断仅在内存中保留最近 25 条截断记录，不上传、不持久化，并可通过 `App.getRuntimeDiagnostics()` 检查或清空。
+
+无 GIS 自动布局采用 `hysim_layout_graph_v1` 语义投影：AC、DC 和耦合域分开，VSC/DC-DC/多端 Energy Router 保持星形超边，域内馈线从 Slack/外部电网开始识别，并保留锁定节点。30 母线或 180 元件以上的系统由本地 ELK.js 0.9.3 Worker 执行 layered 骨架布局，普通支路和设备再按电力语义回挂；失败时自动回退原 BFS 布局。Canvas 提供增量布局、位置锁定、馈线折叠/局部展开，以及 `hysim_layout_metrics_v1` 的交叉、重叠、折点、面积和耗时指标。四个代表算例的 PNG 与指标预算位于 `tests/e2e/baselines/layout/`，验证入口为 `tests/e2e/layout_baseline_e2e.mjs`。
 
 往返与摄入由 `tests/test_io_etap.cpp` 覆盖（Excel round-circle、真实导出摄入、
 case14 潮流一致性、逐字段保真度、原生 XML、3 绕组变压器分接头/潮流、短路数据），

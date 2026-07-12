@@ -141,6 +141,7 @@ struct TopoReconfResult {
   enum class DeviceKind { Switch, CircuitBreaker, Branch };
   struct SwitchOperation {
     DeviceKind  kind{DeviceKind::Branch}; ///< original device type
+    graph::EdgeCategory category{graph::EdgeCategory::AC_Line};
     int         index{-1};                ///< Switch/CB/branch .index
     int         bus_from{0};
     int         bus_to{0};
@@ -161,6 +162,8 @@ struct TopoReconfResult {
   double loss_reduction_mw{0.0};
   double loss_reduction_pct{0.0};
   double milp_objective{0.0};
+  double total_shed_mw{0.0};
+  double total_shed_mvar{0.0};
   double solve_time_s{0.0};
 
   /// Objective decomposition (term contributions to milp_objective).

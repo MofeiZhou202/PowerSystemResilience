@@ -1,0 +1,310 @@
+{
+  "schema": "hysim_layout_baselines_v1",
+  "generated_at": "2026-07-12T16:17:15.626Z",
+  "viewport": {
+    "width": 1600,
+    "height": 1000,
+    "device_scale_factor": 1
+  },
+  "cases": {
+    "ieee33": {
+      "case": "case33bw_acdc",
+      "screenshot": "ieee33.png",
+      "graph": {
+        "schema": "hysim_layout_graph_v1",
+        "domains": {
+          "ac": 103,
+          "dc": 3,
+          "coupling": 2
+        },
+        "feeders": 2,
+        "hyperedges": 0,
+        "fixed_nodes": 0,
+        "components": 108,
+        "connections": 113,
+        "layout_edges": 42,
+        "router_star_ok": true
+      },
+      "metrics": {
+        "schema": "hysim_layout_metrics_v1",
+        "engine": "elk-layered-worker",
+        "node_count": 108,
+        "connection_count": 113,
+        "crossings": 44,
+        "overlaps": 0,
+        "bends": 372,
+        "width": 4794,
+        "height": 1136,
+        "area": 5445984,
+        "total_edge_length": 38612.98,
+        "runtime_ms": 32.4
+      },
+      "layout_stats": {
+        "engine": "elk-layered-worker",
+        "buses": 106,
+        "domains": {
+          "ac": 103,
+          "dc": 3,
+          "coupling": 2
+        },
+        "feeders": 2,
+        "hyperedges": 0,
+        "fixedNodes": 0,
+        "refinedMoves": 0,
+        "refineSkipped": false,
+        "workerRuntimeMs": 21.399999976158142,
+        "metrics": {
+          "schema": "hysim_layout_metrics_v1",
+          "engine": "elk-layered-worker",
+          "node_count": 108,
+          "connection_count": 113,
+          "crossings": 44,
+          "overlaps": 0,
+          "bends": 372,
+          "width": 4794,
+          "height": 1136,
+          "area": 5445984,
+          "total_edge_length": 38612.98,
+          "runtime_ms": 32.4
+        }
+      },
+      "features": {
+        "locked": {
+          "changed": 1,
+          "fixed": true
+        },
+        "fixedPreserved": true,
+        "incremental": {
+          "schema": "hysim_layout_metrics_v1",
+          "engine": "elk-layered-worker",
+          "node_count": 108,
+          "connection_count": 113,
+          "crossings": 43,
+          "overlaps": 0,
+          "bends": 387,
+          "width": 4814,
+          "height": 1156,
+          "area": 5564984,
+          "total_edge_length": 42712.98,
+          "runtime_ms": 36.8
+        },
+        "folded": 1,
+        "hiddenBefore": 102,
+        "clustersBefore": 1,
+        "hiddenAfterLocalExpand": 0,
+        "hiddenAfterAllExpand": 0,
+        "modelComponents": 108,
+        "canvasComponents": 108
+      },
+      "budget": {
+        "max_overlaps": 2,
+        "max_crossings": 51,
+        "max_runtime_ms": 5000
+      }
+    },
+    "ieee118": {
+      "case": "ieee118_acdc",
+      "screenshot": "ieee118.png",
+      "graph": {
+        "schema": "hysim_layout_graph_v1",
+        "domains": {
+          "ac": 471,
+          "dc": 11,
+          "coupling": 6
+        },
+        "feeders": 3,
+        "hyperedges": 0,
+        "fixed_nodes": 0,
+        "components": 488,
+        "connections": 561,
+        "layout_edges": 203,
+        "router_star_ok": true
+      },
+      "metrics": {
+        "schema": "hysim_layout_metrics_v1",
+        "engine": "elk-layered-worker",
+        "node_count": 488,
+        "connection_count": 561,
+        "crossings": 751,
+        "overlaps": 4,
+        "bends": 2068,
+        "width": 10594,
+        "height": 3116,
+        "area": 33010904,
+        "total_edge_length": 298019.11,
+        "runtime_ms": 535.5
+      },
+      "layout_stats": {
+        "engine": "elk-layered-worker",
+        "buses": 482,
+        "domains": {
+          "ac": 471,
+          "dc": 11,
+          "coupling": 6
+        },
+        "feeders": 3,
+        "hyperedges": 0,
+        "fixedNodes": 0,
+        "refinedMoves": 1,
+        "refineSkipped": false,
+        "workerRuntimeMs": 73.30000001192093,
+        "metrics": {
+          "schema": "hysim_layout_metrics_v1",
+          "engine": "elk-layered-worker",
+          "node_count": 488,
+          "connection_count": 561,
+          "crossings": 751,
+          "overlaps": 4,
+          "bends": 2068,
+          "width": 10594,
+          "height": 3116,
+          "area": 33010904,
+          "total_edge_length": 298019.11,
+          "runtime_ms": 535.5
+        }
+      },
+      "features": null,
+      "budget": {
+        "max_overlaps": 4,
+        "max_crossings": 864,
+        "max_runtime_ms": 5000
+      }
+    },
+    "case300_acdc": {
+      "case": "case300_acdc",
+      "screenshot": "case300_acdc.png",
+      "graph": {
+        "schema": "hysim_layout_graph_v1",
+        "domains": {
+          "ac": 1010,
+          "dc": 12,
+          "coupling": 6
+        },
+        "feeders": 2,
+        "hyperedges": 0,
+        "fixed_nodes": 0,
+        "components": 1028,
+        "connections": 1145,
+        "layout_edges": 429,
+        "router_star_ok": true
+      },
+      "metrics": {
+        "schema": "hysim_layout_metrics_v1",
+        "engine": "elk-layered-worker",
+        "node_count": 1028,
+        "connection_count": 1145,
+        "crossings": 2076,
+        "overlaps": 2,
+        "bends": 2484,
+        "width": 8728,
+        "height": 12896,
+        "area": 112556288,
+        "total_edge_length": 790776,
+        "runtime_ms": 1651.3
+      },
+      "layout_stats": {
+        "engine": "elk-layered-worker",
+        "buses": 1022,
+        "domains": {
+          "ac": 1010,
+          "dc": 12,
+          "coupling": 6
+        },
+        "feeders": 2,
+        "hyperedges": 0,
+        "fixedNodes": 0,
+        "refinedMoves": 0,
+        "refineSkipped": false,
+        "workerRuntimeMs": 118.10000002384186,
+        "metrics": {
+          "schema": "hysim_layout_metrics_v1",
+          "engine": "elk-layered-worker",
+          "node_count": 1028,
+          "connection_count": 1145,
+          "crossings": 2076,
+          "overlaps": 2,
+          "bends": 2484,
+          "width": 8728,
+          "height": 12896,
+          "area": 112556288,
+          "total_edge_length": 790776,
+          "runtime_ms": 1651.3
+        }
+      },
+      "features": null,
+      "budget": {
+        "max_overlaps": 2,
+        "max_crossings": 2388,
+        "max_runtime_ms": 5000
+      }
+    },
+    "multiscale_comprehensive_acdc": {
+      "case": "multiscale_comprehensive_acdc",
+      "screenshot": "multiscale_comprehensive_acdc.png",
+      "graph": {
+        "schema": "hysim_layout_graph_v1",
+        "domains": {
+          "ac": 89,
+          "dc": 15,
+          "coupling": 8
+        },
+        "feeders": 3,
+        "hyperedges": 3,
+        "fixed_nodes": 0,
+        "components": 112,
+        "connections": 136,
+        "layout_edges": 56,
+        "router_star_ok": true
+      },
+      "metrics": {
+        "schema": "hysim_layout_metrics_v1",
+        "engine": "elk-layered-worker",
+        "node_count": 112,
+        "connection_count": 136,
+        "crossings": 199,
+        "overlaps": 0,
+        "bends": 499,
+        "width": 4228,
+        "height": 1636,
+        "area": 6917008,
+        "total_edge_length": 78024.29,
+        "runtime_ms": 46.6
+      },
+      "layout_stats": {
+        "engine": "elk-layered-worker",
+        "buses": 104,
+        "domains": {
+          "ac": 89,
+          "dc": 15,
+          "coupling": 8
+        },
+        "feeders": 3,
+        "hyperedges": 3,
+        "fixedNodes": 0,
+        "refinedMoves": 0,
+        "refineSkipped": false,
+        "workerRuntimeMs": 23,
+        "metrics": {
+          "schema": "hysim_layout_metrics_v1",
+          "engine": "elk-layered-worker",
+          "node_count": 112,
+          "connection_count": 136,
+          "crossings": 199,
+          "overlaps": 0,
+          "bends": 499,
+          "width": 4228,
+          "height": 1636,
+          "area": 6917008,
+          "total_edge_length": 78024.29,
+          "runtime_ms": 46.6
+        }
+      },
+      "features": null,
+      "budget": {
+        "max_overlaps": 2,
+        "max_crossings": 229,
+        "max_runtime_ms": 5000
+      }
+    }
+  }
+}

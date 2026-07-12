@@ -62,6 +62,7 @@ const App = (() => {
   let _lastIntegratedEnergyData = null;
   let _lastEvTrafficData = null;
   let _lastAnnualData = null;
+  const _annualTimelineWindowState = { data: null, theme: null, start: 0, last: null };
   let _lastCarbonData = null;
   let _lastDynamicCarbonData = null;
   let _lastTransientData = null;
@@ -83,6 +84,20 @@ const App = (() => {
   let _activeLoadPromise = null;
   let _lastStatusText = '就绪';
   let _lastStatusType = '';
+  let _modelRevision = 0;
+  let _taskTicker = null;
+  let _analysisTaskManager = null;
+  let _apiClient = null;
+  const _taskStatus = {
+    sequence: 0,
+    requestId: null,
+    state: 'idle',
+    label: '就绪',
+    startedAt: null,
+    finishedAt: null,
+    modelRevision: 0,
+    protectedUntil: 0,
+  };
   let _pfInvalidated = false;
   let _tspfInvalidated = false;
   let _lastInvalidationReason = '';
@@ -351,6 +366,7 @@ const App = (() => {
       }
     }
     updateDependencyChips();
+    HySimCore.Accessibility?.syncNavigation();
   }
 
   function setDependencyChip(id, text, state = '', title = '') {
@@ -377,6 +393,9 @@ const App = (() => {
     if (busy) {
       backendText = statusText.includes('同步') ? '后端: 同步中' : '后端: 运行中';
       backendState = 'busy';
+    } else if (analysisTaskManager().settling || _taskStatus.state === 'cancelled') {
+      backendText = '后端: 可能收尾';
+      backendState = 'warn';
     } else if (_lastStatusType === 'error') {
       backendText = '后端: 需检查';
       backendState = 'error';
@@ -1023,198 +1042,33 @@ const App = (() => {
     const compId = (m.ac && m.ac[id] != null) ? m.ac[id]
                  : (m.dc && m.dc[id] != null) ? m.dc[id] : undefined;
     return compId != null
-      ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+      ? ` class="topo-clickable" data-result-ref="hysim_canvas_ref_v1" data-canvas-type="bus" data-canvas-index="${id}" data-comp-id="${compId}" role="button" tabindex="0"` : '';
   }
 
   function compClickAttr(compId) {
     const id = parseInt(compId, 10);
     return Number.isInteger(id)
-      ? ` class="topo-clickable" data-comp-id="${id}" onclick="Canvas.panToComponent(${id})"` : '';
-  }
-
-  function resultTypeKey(type) {
-    return String(type || '')
-      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
-      .replace(/[-\s/]+/g, '_')
-      .replace(/__+/g, '_')
-      .toLowerCase();
-  }
-
-  function resultCanvasBucket(type, maps) {
-    if (!type || !maps) return undefined;
-    const raw = String(type);
-    if (maps[raw]) return raw;
-    const key = resultTypeKey(raw);
-    const aliases = {
-      ac: 'ac',
-      ac_bus: 'ac',
-      bus_ac: 'ac',
-      dc: 'dc',
-      dc_bus: 'dc',
-      bus_dc: 'dc',
-      branch: 'branch',
-      ac_branch: 'branch',
-      line: 'branch',
-      ac_line: 'branch',
-      transformer: 'trafo',
-      transformer_2w: 'trafo',
-      transformer2_w: 'trafo',
-      transformer2w: 'trafo',
-      trafo: 'trafo',
-      transformer_3w: 'trafo3w',
-      transformer3_w: 'trafo3w',
-      transformer3w: 'trafo3w',
-      trafo3w: 'trafo3w',
-      generator: 'gen',
-      synchronous_machine: 'gen',
-      three_phase_generator: 'gen',
-      gen: 'gen',
-      ac_load: 'load',
-      three_phase_load: 'load',
-      load: 'load',
-      external_grid: 'extGrid',
-      three_phase_external_grid: 'extGrid',
-      ext_grid: 'extGrid',
-      extgrid: 'extGrid',
-      storage: 'storage',
-      ac_storage: 'storage',
-      grid_forming_storage: 'storage',
-      pv_system: 'pv',
-      ac_pv_system: 'pv',
-      pv: 'pv',
-      renewable_gen: 'renGen',
-      renewable_generator: 'renGen',
-      ren_gen: 'renGen',
-      static_generator: 'sgen',
-      static_gen: 'sgen',
-      sgen: 'sgen',
-      dc_static_generator: 'dcSgen',
-      dc_static_gen: 'dcSgen',
-      dc_static_generator_ac: 'dcSgen',
-      dc_sgen: 'dcSgen',
-      switch: 'sw',
-      switch_comp: 'sw',
-      ac_switch: 'sw',
-      sw: 'sw',
-      circuit_breaker: 'cb',
-      ac_circuit_breaker: 'cb',
-      breaker: 'cb',
-      cb: 'cb',
-      dc_circuit_breaker: 'dcCb',
-      dc_breaker: 'dcCb',
-      dc_cb: 'dcCb',
-      motor: 'motor',
-      dc_branch: 'dcBranch',
-      dc_line: 'dcBranch',
-      dc_load: 'dcLoad',
-      dc_storage: 'dcStorage',
-      dc_pv_array: 'dcPv',
-      dc_pv: 'dcPv',
-      vsc: 'vsc',
-      vsc_converter: 'vsc',
-      vsc_grid_forming: 'vsc',
-      vsc_grid_following: 'vsc',
-      dcdc: 'dcdcConverter',
-      dc_dc: 'dcdcConverter',
-      dcdc_converter: 'dcdcConverter',
-      dc_dc_converter: 'dcdcConverter',
-      energy_router: 'energyRouter',
-      er: 'energyRouter',
-      shunt: 'shunt',
-      flexible_load: 'flexLoad',
-      flex_load: 'flexLoad',
-      asymmetric_load: 'asymLoad',
-      asym_load: 'asymLoad',
-      charger: 'charger',
-      charging_station: 'chargingStation',
-      mobile_storage: 'mobileStorage',
-      vpp: 'vpp',
-      virtual_power_plant: 'vpp',
-      microgrid: 'microgrid',
-    };
-    const bucket = aliases[key] || aliases[raw];
-    return bucket && maps[bucket] ? bucket : undefined;
-  }
-
-  function validCanvasCompId(compId) {
-    const id = Number(compId);
-    if (!Number.isInteger(id)) return undefined;
-    if (typeof Canvas !== 'undefined' && Canvas.getComponent && !Canvas.getComponent(id)) return undefined;
-    return id;
+      ? ` class="topo-clickable" data-result-ref="hysim_canvas_ref_v1" data-comp-id="${id}" role="button" tabindex="0"` : '';
   }
 
   function rowCanvasCompId(row, maps, options = {}) {
-    if (!row || !maps) return validCanvasCompId(options.fallbackCompId);
-    const directKeys = ['canvas_comp_id', 'comp_id', 'canvasComponentId', 'canvas_id'];
-    for (const key of directKeys) {
-      const hit = validCanvasCompId(row[key]);
-      if (hit !== undefined) return hit;
-    }
-
-    const typeCandidates = [
-      row.canvas_type,
-      row.component_type,
-      row.canonical_component_type,
-      row.type,
-      row.bucket,
-      options.canvasType,
-    ].filter(v => v !== undefined && v !== null && String(v) !== '');
-    let bucket = undefined;
-    for (const t of typeCandidates) {
-      bucket = resultCanvasBucket(t, maps);
-      if (bucket) break;
-    }
-
-    if (bucket) {
-      const indexKeys = ['canvas_index', 'index', 'id', 'router_index', 'component_index'];
-      for (const key of indexKeys) {
-        const idx = Number(row[key]);
-        if (Number.isFinite(idx) && maps[bucket] && maps[bucket][idx] != null) {
-          return validCanvasCompId(maps[bucket][idx]);
-        }
-      }
-      const positionKeys = ['position', 'component_position', 'canvas_position', 'row_position'];
-      for (const key of positionKeys) {
-        const pos = Number(row[key]);
-        if (Number.isFinite(pos) && maps.byPosition && maps.byPosition[bucket] &&
-            maps.byPosition[bucket][pos] != null) {
-          return validCanvasCompId(maps.byPosition[bucket][pos]);
-        }
-      }
-      for (const key of positionKeys) {
-        const pos = Number(row[key]);
-        if (Number.isFinite(pos) && maps[bucket] && maps[bucket][pos] != null) {
-          return validCanvasCompId(maps[bucket][pos]);
-        }
-      }
-    }
-
-    const domainText = `${row.domain || row.component_domain || ''} ${typeCandidates.join(' ')} ${bucket || ''}`.toLowerCase();
-    const preferDc = /\bdc\b/.test(domainText) || ['dc', 'dcBranch', 'dcLoad', 'dcStorage', 'dcPv', 'dcCb', 'dcSgen', 'dcdcConverter'].includes(bucket);
-    const preferAc = /\bac\b/.test(domainText) || ['ac', 'branch', 'load', 'gen', 'extGrid', 'storage', 'pv', 'renGen', 'sgen', 'sw', 'cb', 'motor', 'shunt', 'trafo', 'trafo3w', 'flexLoad', 'asymLoad', 'charger', 'chargingStation', 'mobileStorage', 'vpp', 'microgrid'].includes(bucket);
-    const busKeys = preferDc && !preferAc
-      ? ['bus_dc', 'dc_bus', 'bus_in', 'bus_out', 'from_bus', 'to_bus', 'from', 'to', 'primary_bus', 'bus', 'index']
-      : preferAc && !preferDc
-      ? ['bus_ac', 'ac_bus', 'bus', 'from_bus', 'to_bus', 'from', 'to', 'hv_bus', 'mv_bus', 'lv_bus', 'primary_bus', 'index']
-      : ['bus_ac', 'ac_bus', 'bus_dc', 'dc_bus', 'bus', 'from_bus', 'to_bus', 'from', 'to', 'bus_in', 'bus_out', 'hv_bus', 'mv_bus', 'lv_bus', 'primary_bus', 'index'];
-    const tryBusKeys = (mapObj, keys) => {
-      if (!mapObj) return undefined;
-      for (const key of keys) {
-        const bus = Number(row[key]);
-        if (Number.isFinite(bus) && mapObj[bus] != null) return validCanvasCompId(mapObj[bus]);
-      }
-      return undefined;
-    };
-    const primary = preferDc && !preferAc ? maps.dc : maps.ac;
-    const secondary = preferDc && !preferAc ? maps.ac : maps.dc;
-    return tryBusKeys(primary, busKeys) ?? tryBusKeys(secondary, busKeys) ?? validCanvasCompId(options.fallbackCompId);
+    return HySimCore.ResultMapping.resolve(row, maps, {
+      ...options,
+      getComponent: id => typeof Canvas === 'undefined' || !Canvas.getComponent || Canvas.getComponent(id),
+    });
   }
 
   function canvasRowAttr(row, maps, options = {}) {
     const compId = rowCanvasCompId(row, maps, options);
     if (compId === undefined) return '';
-    const cls = options.className ? ` class="${escapeHtml(options.className)}"` : '';
-    return `${cls} data-comp-id="${compId}"`;
+    const type = row?.canvas_type ?? row?.component_type ?? row?.type ?? options.canvasType ?? '';
+    const indexKeys = ['canvas_index', 'index', 'id', 'component_index', 'position'];
+    const indexKey = indexKeys.find(key => Number.isFinite(Number(row?.[key])));
+    const canvasIndex = indexKey ? Number(row[indexKey]) : '';
+    const classes = ['topo-clickable', options.className].filter(Boolean).join(' ');
+    const typeAttr = type !== '' ? ` data-canvas-type="${escapeHtml(String(type))}"` : '';
+    const indexAttr = canvasIndex !== '' ? ` data-canvas-index="${canvasIndex}"` : '';
+    return ` class="${escapeHtml(classes)}" data-result-ref="hysim_canvas_ref_v1"${typeAttr}${indexAttr} data-comp-id="${compId}" role="button" tabindex="0"`;
   }
 
   function positiveDemandMw(row) {
@@ -1496,7 +1350,7 @@ const App = (() => {
     if (context === 'resilience') {
       const d = _lastResilienceData || {};
       const hrs = Array.isArray(d.hours) ? d.hours : [];
-      const makeXY = (traces, title, note = '') => traces.length ? { title, note, traces } : { error: '当前弹性评估结果没有该元件可用曲线' };
+      const makeXY = (traces, title, note = '') => traces.length ? { title, note, traces } : { error: '当前弹性分析结果没有该元件可用曲线' };
       const priorityNames = ['关键', '高', '中', '低'];
       const findBusSeries = (kind, busId) => {
         const demand = [], served = [], shed = [];
@@ -1570,14 +1424,14 @@ const App = (() => {
         const isSolar = /solar|pv/i.test(String(row.item?.type || comp.params?.type || row.item?.name || ''));
         const sourceMult = isWind ? d.wind_multipliers : (isSolar ? d.pv_multipliers : d.res_multipliers);
         const mult = Array.isArray(sourceMult) ? sourceMult.map(Number) : (Array.isArray(d.res_multipliers) ? d.res_multipliers.map(Number) : hrs.map(() => 1));
-        return makeXY([{ x: hrs, y: mult.map(v => Math.max(0, Number(v || 0)) * cap), mode: 'lines+markers', name: isWind ? '风电出力' : (isSolar ? '光伏出力' : '新能源出力'), line: { color: isSolar ? '#f59e0b' : '#16a34a', width: 2 } }], `弹性${isWind ? '风电' : (isSolar ? '光伏' : '新能源')}曲线：${label}`, '按弹性评估对应类型可用率和该元件容量估算 48h 出力。');
+        return makeXY([{ x: hrs, y: mult.map(v => Math.max(0, Number(v || 0)) * cap), mode: 'lines+markers', name: isWind ? '风电出力' : (isSolar ? '光伏出力' : '新能源出力'), line: { color: isSolar ? '#f59e0b' : '#16a34a', width: 2 } }], `弹性${isWind ? '风电' : (isSolar ? '光伏' : '新能源')}曲线：${label}`, '按弹性分析对应类型可用率和该元件容量估算 48h 出力。');
       }
       if (type === 'pv_system' || type === 'dc_pv_array') {
         const isDc = type === 'dc_pv_array';
         const row = modelRowForComp(isDc ? (sys.dc?.pv_arrays || []) : (sys.ac?.pv_systems || []), isDc ? maps.dcPv : maps.pv, compId);
         const cap = isDc ? positivePower(row.item?.p_set_mw, comp.params?.p_set_mw) : positivePower(row.item?.p_mw, row.item?.p_rated_mw, comp.params?.p_mw, comp.params?.p_rated_mw);
         const mult = Array.isArray(d.pv_multipliers) ? d.pv_multipliers.map(Number) : (Array.isArray(d.res_multipliers) ? d.res_multipliers.map(Number) : hrs.map(() => 1));
-        return makeXY([{ x: hrs, y: mult.map(v => Math.max(0, Number(v || 0)) * cap), mode: 'lines+markers', name: '光伏出力', line: { color: '#f59e0b', width: 2 } }], `弹性光伏曲线：${label}`, '按弹性评估光伏可用率和该元件容量估算 48h 出力。');
+        return makeXY([{ x: hrs, y: mult.map(v => Math.max(0, Number(v || 0)) * cap), mode: 'lines+markers', name: '光伏出力', line: { color: '#f59e0b', width: 2 } }], `弹性光伏曲线：${label}`, '按弹性分析光伏可用率和该元件容量估算 48h 出力。');
       }
       return { error: '该元件暂不支持弹性曲线展示' };
     }
@@ -1638,7 +1492,7 @@ const App = (() => {
       const componentCurve = scenarioCandidateComponentLoadCurve(candidate, type, row, comp, isDc);
       if (componentCurve) {
         return make(componentCurve.y, `场景${isDc ? 'DC' : 'AC'}负荷曲线：${label}`,
-          `使用后端逐负荷场景 profile #${componentCurve.profileId}（${componentCurve.kind}），与导出 JSON 和弹性评估绑定一致。`);
+          `使用后端逐负荷场景 profile #${componentCurve.profileId}（${componentCurve.kind}），与导出 JSON 和弹性分析绑定一致。`);
       }
       const total = (sys.ac?.loads || []).reduce((a, x) => a + numberOr(x.p_mw, 0) * numberOr(x.scaling, 1), 0) + (sys.dc?.loads || []).reduce((a, x) => a + numberOr(x.p_mw, 0) * numberOr(x.scaling, 1), 0);
       const base = scaledCurve(load, numberOr(row.item?.p_mw ?? comp.params?.p_mw, 0) * numberOr(row.item?.scaling ?? comp.params?.scaling, 1), total);
@@ -1968,54 +1822,64 @@ const App = (() => {
     }
   }
 
+  function analysisTaskManager() {
+    if (_analysisTaskManager) return _analysisTaskManager;
+    _analysisTaskManager = new HySimCore.AnalysisTaskManager({
+      onChange: context => {
+        if (context && _taskStatus.state === 'running') _taskStatus.requestId = context.requestId;
+        renderTaskStatus();
+        updateDependencyChips();
+      },
+      onCancel: context => {
+        const label = HySimCore.AnalysisContracts.labelForAnalysis(context.analysis);
+        log(`${label}：已取消前端等待，本次返回结果将被忽略；后端可能仍在收尾`, 'warn');
+        setStatus(`${label}已取消等待`, 'cancelled');
+      },
+      waitForIdle: () => waitForBackendIdle(30000),
+    });
+    return _analysisTaskManager;
+  }
+
+  function apiClient() {
+    if (_apiClient) return _apiClient;
+    _apiClient = new HySimCore.ApiClient({
+      baseUrl: API_BASE,
+      contracts: HySimCore.AnalysisContracts,
+      tasks: analysisTaskManager(),
+      getModelRevision: () => _modelRevision,
+      onRequestStart: context => {
+        if (_taskStatus.state === 'running') _taskStatus.requestId = context.requestId;
+        renderTaskStatus();
+      },
+      onStale: context => {
+        const label = HySimCore.AnalysisContracts.labelForAnalysis(context.analysis);
+        log(`${label}期间模型已修改，已丢弃过期结果`, 'warn');
+        setStatus(`${label}结果已过期`, 'stale');
+      },
+      onUnexpectedCancel: () => setStatus('分析请求已取消', 'cancelled'),
+      onError: (type, error, context) => HySimCore.RuntimeDiagnostics?.capture(type, error, {
+        source: context?.path || '', quiet: true,
+      }),
+      log,
+      recordExecution: recordAnalysisExecutionTime,
+      busyError: ANALYSIS_BUSY_ERROR,
+    });
+    return _apiClient;
+  }
+
+  function cancelActiveTask() {
+    return analysisTaskManager().cancel();
+  }
+
   async function apiPost(path, body = {}, options = {}) {
-    const url = `${API_BASE}${path}`;
-    const started = performance.now();
-    if (!options.quiet) log(`POST ${path}`, 'info');
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await parseJsonResponse(res);
-      recordAnalysisExecutionTime(path, data, (performance.now() - started) / 1000);
-      if (!res.ok) {
-        if (!options.quiet) log(`Error: ${data.error || res.statusText}`, 'error');
-        return null;
-      }
-      return data;
-    } catch (e) {
-      if (!options.quiet) log(`Network error: ${e.message}`, 'error');
-      return null;
-    }
+    return apiClient().post(path, body, options);
   }
 
   // Like apiPost but surfaces the backend error message instead of swallowing
   // it.  Returns { ok, data, error } so callers can show a specific reason
   // (e.g. an unknown fault bus id rejected by the server).
   async function apiPostResult(path, body = {}, options = {}) {
-    const url = `${API_BASE}${path}`;
-    const started = performance.now();
-    if (!options.quiet) log(`POST ${path}`, 'info');
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await parseJsonResponse(res);
-      recordAnalysisExecutionTime(path, data, (performance.now() - started) / 1000);
-      if (!res.ok) {
-        const error = (data && (data.error || data.message)) || res.statusText;
-        if (!options.quiet) log(`Error: ${error}`, 'error');
-        return { ok: false, data, error };
-      }
-      return { ok: true, data, error: null };
-    } catch (e) {
-      if (!options.quiet) log(`Network error: ${e.message}`, 'error');
-      return { ok: false, data: null, error: e.message };
-    }
+    return apiClient().postResult(path, body, options);
   }
 
   async function apiGet(path, options = {}) {
@@ -2107,14 +1971,122 @@ const App = (() => {
   }
 
   // ========== Status ==========
+  function taskStateFromLegacy(text, type) {
+    const label = String(text || '');
+    if (type === 'busy') return 'running';
+    if (type === 'cancelled') return 'cancelled';
+    if (type === 'stale' || /失效|已过期|需重跑/.test(label)) return 'stale';
+    if (type === 'error') return /不可行|未收敛/.test(label) ? 'infeasible' : 'failed';
+    if (type === 'warn') return 'warning';
+    if (type === 'success') return 'completed';
+    if (!label || label === '就绪') return 'idle';
+    return 'completed';
+  }
+
+  function taskLegacyClass(state) {
+    return ({
+      running: 'busy', completed: 'success', warning: 'warn',
+      infeasible: 'infeasible', failed: 'error', stale: 'stale', cancelled: 'cancelled',
+    })[state] || '';
+  }
+
+  function taskElapsedSeconds() {
+    if (_taskStatus.startedAt == null) return 0;
+    const end = _taskStatus.finishedAt ?? performance.now();
+    return Math.max(0, (end - _taskStatus.startedAt) / 1000);
+  }
+
+  function renderTaskStatus() {
+    const badge = document.getElementById('statusBadge');
+    if (!badge) return;
+    const state = _taskStatus.state;
+    const legacyClass = taskLegacyClass(state);
+    badge.className = `badge task-status${legacyClass ? ` ${legacyClass}` : ''}`;
+    badge.dataset.state = state;
+    badge.dataset.requestId = _taskStatus.requestId || '';
+    badge.dataset.modelRevision = String(_taskStatus.modelRevision);
+    const label = document.getElementById('taskStatusLabel');
+    const meta = document.getElementById('taskStatusMeta');
+    const cancel = document.getElementById('btnCancelTask');
+    if (label) label.textContent = _taskStatus.label;
+    if (meta) {
+      const elapsed = taskElapsedSeconds();
+      const revisionChanged = _taskStatus.modelRevision !== _modelRevision;
+      const elapsedText = _taskStatus.startedAt != null ? ` · ${elapsed.toFixed(elapsed < 10 ? 1 : 0)}s` : '';
+      meta.textContent = `模型 v${_modelRevision}${revisionChanged ? ` · 输入 v${_taskStatus.modelRevision}` : ''}${elapsedText}`;
+    }
+    const tasks = analysisTaskManager();
+    const analysisRunning = state === 'running' && !!tasks.active;
+    const runControlsLocked = analysisRunning || tasks.settling;
+    if (cancel) cancel.hidden = !analysisRunning;
+    document.getElementById('resultsContent')?.setAttribute('aria-busy', analysisRunning ? 'true' : 'false');
+    document.querySelectorAll('.run-btn').forEach(button => {
+      if (runControlsLocked && !button.disabled) {
+        button.disabled = true;
+        button.dataset.taskDisabled = '1';
+      } else if (!runControlsLocked && button.dataset.taskDisabled === '1') {
+        button.disabled = false;
+        delete button.dataset.taskDisabled;
+      }
+    });
+  }
+
+  function taskStatusSnapshot() {
+    return {
+      schema: 'hysim_task_status_v1',
+      request_id: _taskStatus.requestId,
+      state: _taskStatus.state,
+      label: _taskStatus.label,
+      model_revision: _taskStatus.modelRevision,
+      current_model_revision: _modelRevision,
+      elapsed_sec: taskElapsedSeconds(),
+      cancellable: !!analysisTaskManager().active,
+      active_path: analysisTaskManager().active?.path || null,
+      backend_settling: analysisTaskManager().settling,
+    };
+  }
+
   function setStatus(text, type = '') {
+    const state = taskStateFromLegacy(text, type);
+    const now = performance.now();
+    const genericFailure = type === 'error' && /计算失败|请求失败|后端繁忙/.test(String(text || ''));
+    if (genericFailure &&
+        ((_taskStatus.protectedUntil > now && ['stale', 'cancelled'].includes(_taskStatus.state)) ||
+         (analysisTaskManager().active && _taskStatus.state === 'running'))) {
+      return;
+    }
     _lastStatusText = text || '';
     _lastStatusType = type || '';
-    const badge = document.getElementById('statusBadge');
-    if (badge) {
-      badge.textContent = text;
-      badge.className = 'badge' + (type ? ' ' + type : '');
+    const wasRunning = _taskStatus.state === 'running';
+    if (state === 'running' && !wasRunning) {
+      _taskStatus.sequence += 1;
+      _taskStatus.requestId = `task-${_taskStatus.sequence}`;
+      _taskStatus.startedAt = performance.now();
+      _taskStatus.finishedAt = null;
+      _taskStatus.modelRevision = _modelRevision;
+      _taskStatus.protectedUntil = 0;
+    } else if (state !== 'running' && wasRunning) {
+      _taskStatus.finishedAt = performance.now();
+    } else if (state !== 'running') {
+      _taskStatus.requestId = null;
+      _taskStatus.startedAt = null;
+      _taskStatus.finishedAt = null;
+      _taskStatus.modelRevision = _modelRevision;
     }
+    _taskStatus.state = state;
+    _taskStatus.label = text || '就绪';
+    if (state === 'stale' || state === 'cancelled') {
+      _taskStatus.protectedUntil = now + 1200;
+    }
+    if (state === 'idle') {
+      _taskStatus.requestId = null;
+      _taskStatus.startedAt = null;
+      _taskStatus.finishedAt = null;
+      _taskStatus.modelRevision = _modelRevision;
+    }
+    clearInterval(_taskTicker);
+    _taskTicker = state === 'running' ? setInterval(renderTaskStatus, 250) : null;
+    renderTaskStatus();
     updateDependencyChips();
   }
 
@@ -3904,6 +3876,12 @@ const App = (() => {
         options: pfOptions
       });
 
+      if (data?._result_contract?.stale) {
+        log('潮流计算期间模型已修改，已丢弃过期结果', 'warn');
+        setStatus('潮流结果已过期', 'stale');
+        return null;
+      }
+
       if (data) {
         data.options_requested = pfOptions;
         const pfData = normalizePowerFlowResult(data);
@@ -4011,6 +3989,11 @@ const App = (() => {
               three_phase: threePhase, check_consistency: checkConsistency },
             { quiet: true });
         }
+      }
+      if (resp.stale) {
+        log('最优潮流计算期间模型已修改，已丢弃过期结果', 'warn');
+        setStatus('最优潮流结果已过期', 'stale');
+        return null;
       }
       const data = resp.ok ? resp.data : null;
       if (data) {
@@ -4158,9 +4141,8 @@ const App = (() => {
     } catch (err) {
       log(`最优潮流元件定位映射不可用: ${err.message || err}`, 'warn');
     }
-	    const panAttr = (compId) => compId !== undefined
-	      ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
-	    const attrForRow = (row, fallbackCompId) => panAttr(rowCanvasCompId(row, busMap) ?? fallbackCompId);
+	    const panAttr = (compId) => compClickAttr(compId);
+	    const attrForRow = (row, fallbackCompId) => canvasRowAttr(row, busMap, { fallbackCompId });
 
     // Summary
     const sumDiv = document.getElementById('opfSummary');
@@ -6634,7 +6616,6 @@ const App = (() => {
         solver: (document.getElementById('rcSolver')||{}).value || 'auto',
         lambda_loss: parseFloat((document.getElementById('rcLambdaLoss')||{}).value) || ({loss:50,switch:5,restore:10})[(document.getElementById('rcObjective')||{}).value||'loss'],
         lambda_switch: parseFloat((document.getElementById('rcLambdaSwitch')||{}).value) || ({loss:1,switch:20,restore:1})[(document.getElementById('rcObjective')||{}).value||'loss'],
-        lambda_shed: parseFloat((document.getElementById('rcLambdaShed')||{}).value) || 1e4,
         max_switch_ops: parseInt((document.getElementById('rcMaxSwOps')||{}).value)||0,
         verbose: false,
       }
@@ -6659,7 +6640,7 @@ const App = (() => {
         }
         setStatus('拓扑重构完成');
       } else {
-        log('拓扑重构: 未找到可行解', 'warn');
+        log(`拓扑重构: 未找到可行解${data.solver_status ? ` (${data.solver_status})` : ''}`, 'warn');
         setStatus('不可行', 'error');
       }
       showTopologyResults(data);
@@ -7105,8 +7086,7 @@ const App = (() => {
         '<th>承载力 S<sub>d</sub>(MW)</th><th>可并网 C<sub>d1</sub></th><th>可备案 C<sub>d2</sub></th><th>等级</th>' +
         '</tr></thead><tbody>';
       txs.forEach(t => {
-        const compId = Number.isFinite(Number(t.index)) ? busMap.transformer_2w?.[Number(t.index)] : undefined;
-        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const attr = canvasRowAttr(t, busMap, { canvasType: 'transformer_2w' });
         const betaStr = fmt(t.beta, 2) + (t.beta_auto ? '<span style="color:#888">*</span>' : '');
         html += `<tr${attr}>
           <td>${t.name}</td><td>${t.voltage_level}</td><td>${t.area}</td>
@@ -7540,6 +7520,78 @@ const App = (() => {
     }
   }
 
+  function annualTimelineWindowSize(total) {
+    const raw = document.getElementById('annualTimelineWindow')?.value || '720';
+    return raw === 'all' ? Math.max(1, total) : Math.max(1, Number(raw) || 720);
+  }
+
+  function renderAnnualTimelineWindow() {
+    const state = _annualTimelineWindowState;
+    const data = state.data;
+    const chart = document.getElementById('annualSimTimelineChart');
+    if (!data || !chart || !window.Plotly || !Array.isArray(data.timeline_hours)) return;
+    const total = data.timeline_hours.length;
+    const size = annualTimelineWindowSize(total);
+    const series = {
+      load: data.timeline_load || [], gen: data.timeline_gen || [],
+      renewable: data.timeline_ren || [], curtailment: data.timeline_curt || [],
+      storage: data.timeline_ess || [], supply: data.timeline_supply || [],
+      demand: data.timeline_demand || [], loss: data.timeline_loss || [],
+    };
+    const view = HySimCore.TimeSeriesWindow.build({
+      x: data.timeline_hours,
+      series,
+      primary: series.load,
+      start: state.start,
+      size,
+      maxPoints: 2000,
+    });
+    state.start = view.start;
+    state.last = view;
+    const traces = [
+      ['load', '负荷', '#e74c3c'], ['gen', '发电', '#0b6e4f'],
+      ['renewable', '新能源', '#2980b9'], ['curtailment', '弃电', '#f39c12'],
+      ['storage', '储能(+放/−充)', '#8e44ad', 'dot'],
+      ['supply', '总供给', '#16a085', 'dash'], ['demand', '总需求', '#c0392b', 'dash'],
+      ['loss', '网损', '#7f8c8d', 'dot', 'y2'],
+    ].map(([key, name, color, dash, yaxis]) => ({
+      x: view.x, y: view.series[key], name, type: 'scatter', mode: 'lines',
+      line: { color, ...(dash ? { dash } : {}) }, ...(yaxis ? { yaxis } : {}),
+    }));
+    Plotly.react(chart, traces, Object.assign({
+      title: '年度功率时间窗口 (MW)',
+      xaxis: Object.assign({ title: '小时' }, state.theme.xaxis),
+      yaxis2: { title: '网损 (MW)', overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', titlefont: { color: '#7f8c8d' }, tickfont: { color: '#7f8c8d' } },
+    }, state.theme), { responsive: true, displayModeBar: false });
+    const previous = document.getElementById('btnAnnualWindowPrev');
+    const next = document.getElementById('btnAnnualWindowNext');
+    if (previous) previous.disabled = view.start === 0;
+    if (next) next.disabled = view.end >= view.total;
+    const status = document.getElementById('annualWindowStatus');
+    if (status) {
+      status.textContent = `${view.start + 1}–${view.end} / ${view.total} 时步 · 绘制 ${view.rendered} 点`;
+    }
+  }
+
+  function shiftAnnualTimelineWindow(direction) {
+    const state = _annualTimelineWindowState;
+    const total = state.data?.timeline_hours?.length || 0;
+    const size = annualTimelineWindowSize(total);
+    state.start = Math.max(0, Math.min(Math.max(0, total - size), state.start + direction * size));
+    renderAnnualTimelineWindow();
+  }
+
+  function annualTimelineWindowStatus() {
+    const view = _annualTimelineWindowState.last;
+    return view ? {
+      schema: view.schema,
+      start: view.start,
+      end: view.end,
+      total: view.total,
+      rendered: view.rendered,
+    } : null;
+  }
+
   function showAnnualSimResults(data) {
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
@@ -7659,25 +7711,12 @@ const App = (() => {
       margin: { l: 55, r: 15, t: 40, b: 40 }, legend: { orientation: 'h', y: -0.25 },
     };
 
-    // Annual timeline (gen / load / renewable / curtailment / storage / loss).
-    const tl = document.getElementById('annualSimTimelineChart');
-    if (tl && window.Plotly && Array.isArray(data.timeline_hours)) {
-      const h = data.timeline_hours;
-      Plotly.react(tl, [
-        { x: h, y: data.timeline_load || [], name: '负荷', type: 'scatter', mode: 'lines', line: { color: '#e74c3c' } },
-        { x: h, y: data.timeline_gen || [], name: '发电', type: 'scatter', mode: 'lines', line: { color: '#0b6e4f' } },
-        { x: h, y: data.timeline_ren || [], name: '新能源', type: 'scatter', mode: 'lines', line: { color: '#2980b9' } },
-        { x: h, y: data.timeline_curt || [], name: '弃电', type: 'scatter', mode: 'lines', line: { color: '#f39c12' } },
-        { x: h, y: data.timeline_ess || [], name: '储能(+放/−充)', type: 'scatter', mode: 'lines', line: { color: '#8e44ad', dash: 'dot' } },
-        { x: h, y: data.timeline_supply || [], name: '总供给', type: 'scatter', mode: 'lines', line: { color: '#16a085', dash: 'dash' } },
-        { x: h, y: data.timeline_demand || [], name: '总需求', type: 'scatter', mode: 'lines', line: { color: '#c0392b', dash: 'dash' } },
-        { x: h, y: data.timeline_loss || [], name: '网损', type: 'scatter', mode: 'lines', line: { color: '#7f8c8d', dash: 'dot' }, yaxis: 'y2' },
-      ], Object.assign({
-        title: '全年逐时段功率 (MW)',
-        xaxis: Object.assign({ title: '小时' }, theme.xaxis),
-        yaxis2: { title: '网损 (MW)', overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', titlefont: { color: '#7f8c8d' }, tickfont: { color: '#7f8c8d' } },
-      }, theme), { responsive: true, displayModeBar: false });
-    }
+    // Long annual series are windowed before they reach Plotly. The full data
+    // remains in _lastAnnualData for export and representative-day drill-down.
+    _annualTimelineWindowState.data = data;
+    _annualTimelineWindowState.theme = theme;
+    _annualTimelineWindowState.start = 0;
+    renderAnnualTimelineWindow();
 
     // Annual bus-voltage envelope (min / mean / max across buses per snapshot).
     const vc = document.getElementById('annualSimVoltChart');
@@ -10450,6 +10489,8 @@ const App = (() => {
         <span class="result-value">${data.num_steps || 'N/A'}</span></div>
       <div class="result-item"><span class="result-label">开关操作</span>
         <span class="result-value">闭合 ${totalSwOn} / 断开 ${totalSwOff}</span></div>
+      <div class="result-item"><span class="result-label">负荷削减(MW)</span>
+        <span class="result-value ${(data.total_shed_mw || 0) > 1e-6 ? 'result-failed' : 'result-converged'}">${Number(data.total_shed_mw || 0).toFixed(4)}</span></div>
       <div class="result-item"><span class="result-label">弃风弃光(MW)</span>
         <span class="result-value">${totalCurt.toFixed(2)}</span></div>
     `;
@@ -10472,14 +10513,16 @@ const App = (() => {
     // Topology verification section
     html += `<h4 style="margin:8px 0 6px;">拓扑验证</h4>`;
     html += `<table><thead><tr><th></th><th>重构前</th><th>重构后</th></tr></thead><tbody>`;
-    html += `<tr><td>辐射状</td>
+    html += `<tr><td>AC/DC分域辐射状</td>
       <td class="${data.base_is_radial ? 'grade-green' : 'grade-red'}">${data.base_is_radial ? '✓ 是' : '✗ 否'}</td>
       <td class="${data.reconfig_is_radial ? 'grade-green' : 'grade-red'}">${data.reconfig_is_radial ? '✓ 是' : '✗ 否'}</td></tr>`;
     html += `<tr><td>连通</td>
       <td class="${data.base_is_connected ? 'grade-green' : 'grade-red'}">${data.base_is_connected ? '✓ 是' : '✗ 否'}</td>
       <td class="${data.reconfig_is_connected ? 'grade-green' : 'grade-red'}">${data.reconfig_is_connected ? '✓ 是' : '✗ 否'}</td></tr>`;
     html += `<tr><td>孤岛数</td><td>${data.base_islands ?? '—'}</td><td>${data.reconfig_islands ?? '—'}</td></tr>`;
-    html += `<tr><td>闭合支路数</td><td>—</td><td>${data.reconfig_closed_count ?? '—'} / ${data.num_buses ? data.num_buses - 1 : '—'} (n-1)</td></tr>`;
+    html += `<tr><td>AC径向/分量</td><td>${data.base_ac_is_radial ? '✓' : '✗'} / ${data.base_ac_islands ?? '—'}</td><td>${data.reconfig_ac_is_radial ? '✓' : '✗'} / ${data.reconfig_ac_islands ?? '—'}</td></tr>`;
+    html += `<tr><td>DC径向/分量</td><td>${data.base_dc_is_radial ? '✓' : '✗'} / ${data.base_dc_islands ?? '—'}</td><td>${data.reconfig_dc_is_radial ? '✓' : '✗'} / ${data.reconfig_dc_islands ?? '—'}</td></tr>`;
+    html += `<tr><td>闭合 AC / DC / VSC</td><td>${data.base_ac_closed_count ?? '—'} / ${data.base_dc_closed_count ?? '—'} / —</td><td>${data.reconfig_closed_count ?? '—'} / ${data.reconfig_dc_closed_count ?? '—'} / ${data.reconfig_vsc_closed_count ?? '—'}</td></tr>`;
     html += `<tr><td>潮流收敛</td>
       <td>${data.base_pf_converged ? '✓ 收敛' : '✗'}</td>
       <td>${data.reconfig_pf_converged ? '✓ 收敛' : '✗'}</td></tr>`;
@@ -10532,6 +10575,24 @@ const App = (() => {
         }
         html += `</tbody></table></details>`;
       }
+    }
+    const renderDomainDetails = (title, rows, bucket, fromKey, toKey) => {
+      if (!Array.isArray(rows) || !rows.length) return '';
+      let section = `<h4 style="margin:12px 0 6px;">${title}</h4>`;
+      section += '<table class="result-table"><thead><tr><th>ID</th><th>起始端</th><th>终止端</th><th>状态</th></tr></thead><tbody>';
+      rows.forEach(row => {
+        const compId = busMap[bucket]?.[row.id];
+        const idCell = compId !== undefined
+          ? `<span class="clickable-branch" onclick="Canvas.panToComponent(${compId})">${row.id}</span>`
+          : `${row.id}`;
+        section += `<tr><td>${idCell}</td><td>${row[fromKey] ?? '—'}</td><td>${row[toKey] ?? '—'}</td><td class="${row.closed ? 'grade-green' : 'grade-red'}">${row.closed ? '闭合' : '断开'}</td></tr>`;
+      });
+      return section + '</tbody></table>';
+    };
+    html += renderDomainDetails('DC支路状态', data.dc_branch_details, 'dcBranch', 'from_bus', 'to_bus');
+    html += renderDomainDetails('VSC耦合状态', data.vsc_details, 'vsc', 'bus_ac', 'bus_dc');
+    if (data.solver_status) {
+      html += `<p><strong>求解状态:</strong> ${escapeHtml(data.solver_status)}</p>`;
     }
     if (data.verification_pf) {
       const pf = data.verification_pf;
@@ -10683,6 +10744,9 @@ const App = (() => {
     // canvas is NOT dirty — this preserves the "backend already has it" fast path
     // (no forced resync) for both freshly loaded and force-rendered systems.
     _canvasDirty = false;
+    _modelRevision += 1;
+    if (_taskStatus.state !== 'running') _taskStatus.modelRevision = _modelRevision;
+    renderTaskStatus();
     if (Canvas.syncConnectivity) Canvas.syncConnectivity();
     updateTopologyTables();
     updateDependencyChips();
@@ -10692,6 +10756,8 @@ const App = (() => {
 
   function onTopologyChanged() {
     _canvasDirty = true;
+    _modelRevision += 1;
+    renderTaskStatus();
     _pfInvalidated = _pfInvalidated || !!_lastPfData;
     _tspfInvalidated = _tspfInvalidated || !!_lastTspfData;
     if (_lastPfData || _lastTspfData) _lastInvalidationReason = '拓扑已修改，旧分析结果已失效';
@@ -11865,6 +11931,7 @@ const App = (() => {
       if (shared) shared.innerHTML = '';
     }
     if (moduleName === 'parameterLibrary') loadParameterLibrary();
+    HySimCore.Accessibility?.syncNavigation();
   }
   function renderSubToolbar(moduleName) {
     const bar = document.getElementById('subToolbar');
@@ -13828,9 +13895,30 @@ const App = (() => {
     return document.getElementById('layoutDirSelect')?.value || 'TB';
   }
 
+  function renderLayoutMetrics(metrics) {
+    const chip = document.getElementById('layoutMetricChip');
+    if (!chip || !metrics) return;
+    chip.textContent = `布局: 交叉${metrics.crossings} · 重叠${metrics.overlaps} · ${metrics.runtime_ms.toFixed(0)}ms`;
+    chip.title = `${metrics.engine}；折点 ${metrics.bends}；面积 ${metrics.area.toLocaleString()}`;
+  }
+
+  async function runCanvasAutoLayout(options = {}) {
+    setStatus(options.incremental ? '增量布局计算中...' : '自动布局计算中...', 'busy');
+    const metrics = await Canvas.autoLayout({ direction: layoutDirection(), ...options });
+    if (metrics) {
+      renderLayoutMetrics(metrics);
+      setStatus(`布局完成：交叉 ${metrics.crossings}，重叠 ${metrics.overlaps}`, 'success');
+    } else {
+      setStatus('布局已被新的请求替代', 'warn');
+    }
+    return metrics;
+  }
+
   function init() {
     // Apply the saved light/dark theme before anything renders.
     initThemeMode();
+    HySimCore.RuntimeDiagnostics?.init({ chipId: 'runtimeHealthChip', log });
+    HySimCore.Accessibility?.init();
 
     // Initialize canvas
     Canvas.init();
@@ -14161,7 +14249,14 @@ const App = (() => {
         setStatus('请先运行网络化简', 'warn');
         return;
       }
-      downloadJsonFile('network_reduction.json', _lastNetReductionData);
+      const simplified = _lastNetReductionData.reduced_system;
+      if (simplified && simplified.ac) {
+        downloadJsonFile('network_simplified.json', simplified);
+        setStatus('已导出可导入的简化网络');
+      } else {
+        downloadJsonFile('network_reduction.json', _lastNetReductionData);
+        setStatus('后端未返回简化网络，已导出化简报告', 'warn');
+      }
     });
 
     // Bar 3: hosting capacity — run directly with inline sub-toolbar params.
@@ -14300,6 +14395,12 @@ const App = (() => {
       downloadJsonFile(`annual_production_sim_${tsTagForFilename()}.json`, _lastAnnualData);
     });
     document.getElementById('btnAnnualDayDetail')?.addEventListener('click', runAnnualDayDetail);
+    document.getElementById('annualTimelineWindow')?.addEventListener('change', () => {
+      _annualTimelineWindowState.start = 0;
+      renderAnnualTimelineWindow();
+    });
+    document.getElementById('btnAnnualWindowPrev')?.addEventListener('click', () => shiftAnnualTimelineWindow(-1));
+    document.getElementById('btnAnnualWindowNext')?.addEventListener('click', () => shiftAnnualTimelineWindow(1));
     document.getElementById('btnDynamicCarbonFlow')?.addEventListener('click', runDynamicCarbonFlow);
 
     // Bar 3: PF result export — write _lastPfData to a JSON file.
@@ -15597,11 +15698,11 @@ const App = (() => {
       const vmax = Number(data.selected_track_max_vmax_ms);
       const vmaxText = Number.isFinite(vmax) ? `，轨迹最大风速 ${vmax.toFixed(2)} m/s` : '';
       const fallbackText = data.used_category_fallback ? `；请求等级 ${requestedLabel} 样本不足，已回退为 ${selectedLabel}` : '';
-      log(`${selectedLabel}台风场景已生成：AC 故障 ${acFaults.length} 个，DC 故障 ${dcFaults.length} 个，已填入弹性评估输入${vmaxText}${fallbackText}。${data.status || ''}`, 'success');
+      log(`${selectedLabel}台风场景已生成：AC 故障 ${acFaults.length} 个，DC 故障 ${dcFaults.length} 个，已填入弹性分析输入${vmaxText}${fallbackText}。${data.status || ''}`, 'success');
       setStatus('台风故障序列已填入');
     });
     async function runResilience() {
-      setStatus('弹性评估中...', 'busy');
+      setStatus('弹性分析中...', 'busy');
       if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
       // Resilience assessment always uses imported scenario 48h profiles when available.
       const resScenarioCase = getImportedGeneratedScenarioCase('resilience');
@@ -15670,7 +15771,7 @@ const App = (() => {
         renderComponentCurveTargets('resilience');
         showResilienceResults(data);
         switchTab('results');
-        setStatus('弹性评估完成');
+        setStatus('弹性分析完成');
       } else {
         setStatus('计算失败', 'error');
       }
@@ -15850,7 +15951,7 @@ const App = (() => {
 
     function renderResilienceComparisonTable(nf) {
       if (!_resilienceComparisonRuns.length) return '';
-      let html = '<h4 style="margin:8px 0 4px;">最近弹性评估对比</h4><table><thead><tr><th>时间</th><th>模型</th><th>求解器</th><th>可行</th><th>弹性指数</th><th>切负荷(MWh)</th><th>移储供能</th><th>移储行程</th><th>目标值</th><th>Gap</th><th>运行(s)</th></tr></thead><tbody>';
+      let html = '<h4 style="margin:8px 0 4px;">最近弹性分析对比</h4><table><thead><tr><th>时间</th><th>模型</th><th>求解器</th><th>可行</th><th>弹性指数</th><th>切负荷(MWh)</th><th>移储供能</th><th>移储行程</th><th>目标值</th><th>Gap</th><th>运行(s)</th></tr></thead><tbody>';
       _resilienceComparisonRuns.forEach(r => {
         html += `<tr><td>${r.time}</td><td>${resilienceModelLabel(r.model)}</td><td>${escapeHtml(String(r.solver || '—'))}</td><td>${r.feasible ? '✓' : '✗'}</td><td>${nf(r.resilience_index, 4)}</td><td>${nf(r.total_shed_mwh, 2)}</td><td>${nf(r.mess_energy_delivered_mwh, 2)}</td><td>${nf(r.mess_travel_distance_km, 1)}</td><td>${nf(r.objective_value, 2)}</td><td>${nf(r.mip_gap, 4)}</td><td>${nf(r.runtime_sec, 2)}</td></tr>`;
       });
@@ -16738,7 +16839,7 @@ const App = (() => {
           fillResilienceInputsFromScenario(caseJson);
           const cb = document.getElementById('resUseScenarioTimeSeries');
           if (cb) cb.checked = true;
-          if (!restoredTs) log('导入的弹性生成场景不含可用时序；弹性评估仍将按 48h 默认时域运行', 'warn');
+          if (!restoredTs) log('导入的弹性生成场景不含可用时序；弹性分析仍将按 48h 默认时域运行', 'warn');
         }
         if (family === 'reliability' || targetFamily === 'reliability') {
           const cont = caseJson?._generated_scenario?.contingency;
@@ -17012,7 +17113,7 @@ const App = (() => {
             hovertemplate: '%{text}<extra></extra>',
           }], {
             ...theme,
-            title: '弹性代表场景故障序列（只展示线路故障发生时刻；修复由弹性评估决策）',
+            title: '弹性代表场景故障序列（只展示线路故障发生时刻；修复由弹性分析决策）',
             xaxis: { title: '故障发生小时', range: [0, Math.max(48, ...faults.map(f => f.start))], rangemode: 'tozero' },
             yaxis: { title: '故障序号（按开始时间排序）', dtick: 1, rangemode: 'tozero' },
           }, { responsive: true });
@@ -17262,7 +17363,7 @@ const App = (() => {
 
     document.getElementById('btnExportResilienceResults')?.addEventListener('click', () => {
       if (!_lastResilienceData) {
-        log('暂无弹性评估结果可导出，请先运行弹性评估', 'warn');
+        log('暂无弹性分析结果可导出，请先运行弹性分析', 'warn');
         return;
       }
       downloadJsonFile(`resilience_results_${tsTagForFilename()}.json`, _lastResilienceData);
@@ -17537,8 +17638,21 @@ const App = (() => {
     document.getElementById('btnZoomIn').addEventListener('click', () => Canvas.zoomIn());
     document.getElementById('btnZoomOut').addEventListener('click', () => Canvas.zoomOut());
     document.getElementById('btnZoomFit').addEventListener('click', () => Canvas.zoomFit());
-    document.getElementById('btnAutoLayout').addEventListener('click', () => Canvas.autoLayout({ direction: layoutDirection() }));
-    document.getElementById('layoutDirSelect')?.addEventListener('change', () => Canvas.autoLayout({ direction: layoutDirection() }));
+    document.getElementById('btnAutoLayout').addEventListener('click', () => runCanvasAutoLayout());
+    document.getElementById('btnIncrementalLayout')?.addEventListener('click', () => runCanvasAutoLayout({ engine: 'elk', incremental: true }));
+    document.getElementById('btnPinLayout')?.addEventListener('click', () => {
+      const result = Canvas.toggleLayoutFixed?.();
+      setStatus(result?.changed ? `已${result.fixed ? '锁定' : '解锁'} ${result.changed} 个元件位置` : '请先选择需要锁定的元件', result?.changed ? 'success' : 'warn');
+    });
+    document.getElementById('btnFoldFeeders')?.addEventListener('click', () => {
+      const result = Canvas.foldFeeders?.();
+      setStatus(result?.folded ? `已折叠 ${result.folded} 条馈线，点击总览节点可局部展开` : '当前没有可折叠的大馈线', result?.folded ? 'success' : 'warn');
+    });
+    document.getElementById('btnExpandFeeders')?.addEventListener('click', () => {
+      Canvas.expandFeeders?.();
+      setStatus('已展开全部馈线');
+    });
+    document.getElementById('layoutDirSelect')?.addEventListener('change', () => runCanvasAutoLayout());
     // Local re-layout of the current selection (doc §18 Phase 4)
     document.getElementById('btnRelayoutSel')?.addEventListener('click', () => Canvas.autoLayoutSelection?.({ direction: layoutDirection() }));
     // Connection style (直线 / 正交 / 避让) — doc §10.2/§10.3
@@ -17552,6 +17666,7 @@ const App = (() => {
     document.getElementById('btnRotateCW').addEventListener('click', () => Canvas.rotateSelected(90));
     document.getElementById('btnRotateCCW').addEventListener('click', () => Canvas.rotateSelected(-90));
     document.getElementById('btnOpenCostEditor')?.addEventListener('click', openCostEditor);
+    document.getElementById('btnCancelTask')?.addEventListener('click', cancelActiveTask);
     document.querySelectorAll('[data-close-cost-editor]').forEach(button => {
       button.addEventListener('click', closeCostEditor);
     });
@@ -17614,6 +17729,13 @@ const App = (() => {
         if (Number.isInteger(bid) && Canvas.panToBusId) Canvas.panToBusId(bid);
       }
     });
+    document.getElementById('resultsContent')?.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter' && ev.key !== ' ') return;
+      const target = ev.target.closest('[data-comp-id], [data-bus]');
+      if (!target) return;
+      ev.preventDefault();
+      target.click();
+    });
 
     // Console clear
     document.getElementById('btnClearConsole').addEventListener('click', () => {
@@ -17660,7 +17782,7 @@ const App = (() => {
       });
     }
 
-    log('Hybrid AC/DC Power System Simulator 已启动', 'success');
+    log('HySim-XJTU-HRPES 已启动', 'success');
     log('使用左侧元件库拖放元件到画布，或加载内置算例', 'info');
 
     // ---- Toolbar default state ----
@@ -17683,9 +17805,16 @@ const App = (() => {
     setActiveCanvasTool,
     showCaseLoadModal,
     hideCaseLoadModal,
+    loadBuiltinCase,
     loadMatpowerCase,
     runPowerFlow,
     runOpf,
+    getTaskStatus: taskStatusSnapshot,
+    getAnnualTimelineWindowStatus: annualTimelineWindowStatus,
+    getAccessibilityAudit: () => HySimCore.Accessibility?.audit() || null,
+    getRuntimeDiagnostics: () => HySimCore.RuntimeDiagnostics?.snapshot() || null,
+    clearRuntimeDiagnostics: () => HySimCore.RuntimeDiagnostics?.clear() || null,
+    cancelActiveTask,
   };
 })();
 

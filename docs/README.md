@@ -16,6 +16,8 @@ When documentation and runtime behavior differ, `include/`, `src/`,
 | Rich/canonical projection and result attribution | [projection_and_results.md](projection_and_results.md) |
 | Canvas result rendering and time playback | [gui_canvas_runtime.md](gui_canvas_runtime.md) |
 | TSPF, annual simulation, storage, and profiles | [sequential_production_simulation_rich_models.md](sequential_production_simulation_rich_models.md) |
+| Time-series PF pipeline: math models + analysis | [time_series_power_flow_models.md](time_series_power_flow_models.md) |
+| Annual simulation + lifecycle: math models + analysis | [annual_simulation_models.md](annual_simulation_models.md) |
 | Transient runtime and validation boundary | [transient_runtime.md](transient_runtime.md) |
 | Reliability methods | [reliability_assessment_models.md](reliability_assessment_models.md) |
 | Short-circuit methods | [short_circuit_rich_acdc_derivation.md](short_circuit_rich_acdc_derivation.md) |

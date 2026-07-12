@@ -159,7 +159,8 @@ HostingCapacityResult assess_hosting_capacity(const HybridPowerSystem& sys,
   // ── Enumerate transformers: transformers_2w + transformer-typed branches ──
   struct Xf { int index; std::string name; int hv_bus; int lv_bus; double sn_mva; int n_parallel;
               double cap_pf; double cap_beta; double cap_tau; double cap_reg;
-              double cap_ess_min; double cap_ess_max; };
+              double cap_ess_min; double cap_ess_max;
+              std::string canvas_type; int canvas_index; };
   std::vector<Xf> xfs;
   std::unordered_set<int> used_branch;   // source branches already owned by a transformer2w
   std::unordered_set<long long> xf_bus_pairs;  // {min,max} bus pair covered by a transformer2w
@@ -175,7 +176,9 @@ HostingCapacityResult assess_hosting_capacity(const HybridPowerSystem& sys,
                      t.hv_bus, t.lv_bus, t.sn_mva, std::max(1, t.n_parallel),
                      t.cap_power_factor, t.cap_max_reverse_load_rate, t.cap_dr_max_output_coeff,
                      t.cap_registered_dr_mw, t.cap_expected_new_storage_min_mw,
-                     t.cap_expected_new_storage_max_mw});
+                     t.cap_expected_new_storage_max_mw,
+                     t.source_branch_idx > 0 ? "ac_branch" : "transformer_2w",
+                     t.source_branch_idx > 0 ? t.source_branch_idx : t.index});
   }
   for (const auto& br : ac.branches) {
     if (!br.in_service) continue;
@@ -189,7 +192,8 @@ HostingCapacityResult assess_hosting_capacity(const HybridPowerSystem& sys,
     double sn = br.sn_mva > 0 ? br.sn_mva : (br.rate_a_mva > 0 ? br.rate_a_mva : 0.0);
     xfs.push_back(Xf{br.index, br.name.empty() ? ("Br" + std::to_string(br.index)) : br.name,
                      hv, lv, sn, std::max(1, br.n_parallel),
-                     0.0, 0.0, 0.0, 0.0, 0.0, 0.0});   // branch-transformers use global defaults
+                     0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                     "ac_branch", br.index});   // branch-transformers use global defaults
   }
 
   // ── Equipment-level hosting capacity per transformer (DL/T 2041 §7) ───────
@@ -197,6 +201,10 @@ HostingCapacityResult assess_hosting_capacity(const HybridPowerSystem& sys,
     TransformerHostingResult r;
     r.index = x.index;
     r.name  = x.name;
+    r.canvas_type = x.canvas_type;
+    r.canvas_index = x.canvas_index;
+    r.hv_bus = x.hv_bus;
+    r.lv_bus = x.lv_bus;
     double hv_kv = bus_kv.count(x.hv_bus) ? bus_kv[x.hv_bus] : 0.0;
     r.voltage_level = voltage_level_str(hv_kv);
     r.area = bus_area.count(x.hv_bus) ? bus_area[x.hv_bus] : 1;
@@ -406,7 +414,10 @@ nlohmann::json hosting_capacity_result_to_json(const HostingCapacityResult& r) {
   json txs = json::array();
   for (const auto& t : r.transformers) {
     txs.push_back(json{
-        {"index", t.index}, {"name", t.name}, {"voltage_level", t.voltage_level}, {"area", t.area},
+        {"index", t.index}, {"name", t.name},
+        {"canvas_type", t.canvas_type}, {"canvas_index", t.canvas_index},
+        {"hv_bus", t.hv_bus}, {"lv_bus", t.lv_bus},
+        {"voltage_level", t.voltage_level}, {"area", t.area},
         {"sn_mva", t.sn_mva}, {"power_factor", t.power_factor},
         {"beta", t.beta}, {"beta_auto", t.beta_auto}, {"tau_max", t.tau_max},
         {"supply_load_mw", t.supply_load_mw}, {"supply_nondr_gen_mw", t.supply_nondr_gen_mw},

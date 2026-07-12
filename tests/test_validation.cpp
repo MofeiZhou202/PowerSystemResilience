@@ -239,6 +239,26 @@ TEST_CASE("validate: bare DC_V bus is not an implicit source",
           "Reference-bus eligibility check failed");
 }
 
+TEST_CASE("validate: PQ VSC can back a declared DC_V bus through auto-promotion",
+          "[validation][slack][reference][dc][vsc]") {
+    auto sys = make_valid_2bus();
+    DCBus dc1;
+    dc1.index = 1;
+    dc1.bus_type = DCBusType::DC_V;
+    dc1.in_service = true;
+    sys.dc.buses = {dc1};
+    VSCConverter vsc;
+    vsc.index = 1;
+    vsc.bus_ac = 2;
+    vsc.bus_dc = 1;
+    vsc.in_service = true;
+    vsc.control_mode = ConverterMode::PQ_MODE;
+    vsc.pmin_mw = -1.0;
+    vsc.pmax_mw = 1.0;
+    sys.vsc_converters = {vsc};
+    CHECK(val::validate_reference_bus_eligibility(sys).ok());
+}
+
 TEST_CASE("validate: controllable DC storage can back a DC_V bus",
           "[validation][slack][reference][dc][storage]") {
     auto sys = make_valid_2bus();

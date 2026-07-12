@@ -235,6 +235,14 @@ const Canvas = (() => {
 
   // Last auto-layout statistics ({buses, rings}) for the status bar.
   let _layoutStats = null;
+  let _layoutMetrics = null;
+  let _layoutGraph = null;
+  let _layoutGeneration = 0;
+  let _layoutPromise = Promise.resolve(null);
+  let _layoutOverlayLayer = null;
+  const _foldedFeeders = new Set();
+  const SMART_LAYOUT_BUS_THRESHOLD = 30;
+  const SMART_LAYOUT_COMPONENT_THRESHOLD = 180;
 
   let svg, componentsLayer, connectionsLayer, resultsLayer, tempLayer;
   let viewBox = { x: -200, y: -100, w: 1200, h: 700 };
@@ -242,12 +250,19 @@ const Canvas = (() => {
   // Viewport culling (virtualized rendering) for large systems: when the
   // component count exceeds this threshold, component glyphs whose anchor falls
   // outside the visible viewBox (plus a margin) are display:none'd so the
-  // browser skips their layout/paint while panning and zooming.  Connection
-  // wires are left intact (cheap single elements).  Below the threshold every
-  // component is rendered, so small cases are unaffected.
-  const CULL_THRESHOLD = 1500;
+  // browser skips their layout/paint while panning and zooming. Connections
+  // outside the expanded viewport are culled from cached routing bounds too.
+  // Below the threshold every component and connection is rendered.
+  const CULL_THRESHOLD = 350;
   let _cullActive = false;
   let _cullPending = false;
+  const _renderStats = {
+    pointer_events: 0,
+    pointer_frames: 0,
+    cull_runs: 0,
+    hidden_components: 0,
+    hidden_connections: 0,
+  };
 
   // ========== Init ==========
   function init() {
@@ -262,7 +277,7 @@ const Canvas = (() => {
 
     // Event listeners
     svg.addEventListener('mousedown', onMouseDown);
-    svg.addEventListener('mousemove', onMouseMove);
+    svg.addEventListener('mousemove', scheduleMouseMove);
     svg.addEventListener('mouseup', onMouseUp);
     svg.addEventListener('wheel', onWheel, { passive: false });
     svg.addEventListener('dblclick', onDblClick);
@@ -376,21 +391,43 @@ const Canvas = (() => {
     if (comps.length < CULL_THRESHOLD) {
       if (_cullActive) {
         comps.forEach(c => { if (c.el && c.el.style.display === 'none') c.el.style.display = ''; });
+        state.connections.forEach(c => { if (c.el && c.el.style.display === 'none') c.el.style.display = ''; });
         _cullActive = false;
       }
+      _renderStats.hidden_components = 0;
+      _renderStats.hidden_connections = 0;
       return;
     }
+    _renderStats.cull_runs += 1;
     _cullActive = true;
     const mx = viewBox.w * 0.2, my = viewBox.h * 0.2;
     const x0 = viewBox.x - mx, x1 = viewBox.x + viewBox.w + mx;
     const y0 = viewBox.y - my, y1 = viewBox.y + viewBox.h + my;
+    let hiddenComponents = 0;
     for (let i = 0; i < comps.length; i++) {
       const c = comps[i];
       if (!c.el) continue;
       const visible = c.x >= x0 && c.x <= x1 && c.y >= y0 && c.y <= y1;
       const want = visible ? '' : 'none';
       if (c.el.style.display !== want) c.el.style.display = want;
+      if (!visible) hiddenComponents += 1;
     }
+    let hiddenConnections = 0;
+    for (const connection of state.connections) {
+      if (!connection.el) continue;
+      const points = connection.geom?.points || [];
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const point of points) {
+        minX = Math.min(minX, point.x); maxX = Math.max(maxX, point.x);
+        minY = Math.min(minY, point.y); maxY = Math.max(maxY, point.y);
+      }
+      const visible = !points.length || (maxX >= x0 && minX <= x1 && maxY >= y0 && minY <= y1);
+      const want = visible ? '' : 'none';
+      if (connection.el.style.display !== want) connection.el.style.display = want;
+      if (!visible) hiddenConnections += 1;
+    }
+    _renderStats.hidden_components = hiddenComponents;
+    _renderStats.hidden_connections = hiddenConnections;
   }
 
   function scheduleViewportCulling() {
@@ -1387,6 +1424,36 @@ const Canvas = (() => {
     }
   }
 
+  let _pointerMoveRaf = 0;
+  let _pendingPointerMove = null;
+  function scheduleMouseMove(event) {
+    _renderStats.pointer_events += 1;
+    _pendingPointerMove = { clientX: event.clientX, clientY: event.clientY };
+    if (_pointerMoveRaf) return;
+    _pointerMoveRaf = requestAnimationFrame(() => {
+      _pointerMoveRaf = 0;
+      const pending = _pendingPointerMove;
+      _pendingPointerMove = null;
+      if (!pending) return;
+      _renderStats.pointer_frames += 1;
+      onMouseMove(pending);
+    });
+  }
+
+  function flushPointerMove(event) {
+    if (!_pendingPointerMove) return;
+    if (_pointerMoveRaf) cancelAnimationFrame(_pointerMoveRaf);
+    _pointerMoveRaf = 0;
+    const pending = event
+      ? { clientX: event.clientX, clientY: event.clientY }
+      : _pendingPointerMove;
+    _pendingPointerMove = null;
+    if (pending) {
+      _renderStats.pointer_frames += 1;
+      onMouseMove(pending);
+    }
+  }
+
   function onMouseMove(e) {
     const pt = screenToSvg(e.clientX, e.clientY);
 
@@ -1442,6 +1509,7 @@ const Canvas = (() => {
   }
 
   function onMouseUp(e) {
+    flushPointerMove(e);
     // Complete box selection
     if (state.isBoxSelecting && state.boxSelectRect && state.boxSelectStart) {
       const pt = screenToSvg(e.clientX, e.clientY);
@@ -1853,8 +1921,174 @@ const Canvas = (() => {
     return { first, second };
   }
 
+  function strictSegmentCross(a, b) {
+    const eps = 1e-6;
+    const samePoint = (p, q) => Math.abs(p.x - q.x) < eps && Math.abs(p.y - q.y) < eps;
+    if (samePoint(a.a, b.a) || samePoint(a.a, b.b) || samePoint(a.b, b.a) || samePoint(a.b, b.b)) return false;
+    const orient = (p, q, r) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+    const o1 = orient(a.a, a.b, b.a), o2 = orient(a.a, a.b, b.b);
+    const o3 = orient(b.a, b.b, a.a), o4 = orient(b.a, b.b, a.b);
+    return o1 * o2 < -eps && o3 * o4 < -eps;
+  }
+
+  function computeLayoutMetrics(engine, runtimeMs) {
+    const rects = state.components.map(component => layoutFootprint(component, 2));
+    let overlaps = 0;
+    for (let i = 0; i < rects.length; i += 1) {
+      for (let j = i + 1; j < rects.length; j += 1) {
+        if (layoutRectOverlap(rects[i], rects[j], 0)) overlaps += 1;
+      }
+    }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    rects.forEach(rect => {
+      minX = Math.min(minX, rect.x); minY = Math.min(minY, rect.y);
+      maxX = Math.max(maxX, rect.x + rect.w); maxY = Math.max(maxY, rect.y + rect.h);
+    });
+    const segments = [];
+    let bends = 0, totalEdgeLength = 0;
+    state.connections.forEach((connection, connectionIndex) => {
+      const points = connection.geom?.points || [];
+      bends += Math.max(0, points.length - 2);
+      for (let index = 1; index < points.length; index += 1) {
+        const a = points[index - 1], b = points[index];
+        totalEdgeLength += Math.hypot(b.x - a.x, b.y - a.y);
+        segments.push({
+          a, b, connectionIndex,
+          componentIds: [connection.from.compId, connection.to.compId],
+        });
+      }
+    });
+    let crossings = 0;
+    for (let i = 0; i < segments.length; i += 1) {
+      for (let j = i + 1; j < segments.length; j += 1) {
+        if (segments[i].connectionIndex === segments[j].connectionIndex) continue;
+        if (segments[i].componentIds.some(id => segments[j].componentIds.includes(id))) continue;
+        if (strictSegmentCross(segments[i], segments[j])) crossings += 1;
+      }
+    }
+    const width = Number.isFinite(minX) ? Math.max(0, maxX - minX) : 0;
+    const height = Number.isFinite(minY) ? Math.max(0, maxY - minY) : 0;
+    return {
+      schema: 'hysim_layout_metrics_v1',
+      engine,
+      node_count: state.components.length,
+      connection_count: state.connections.length,
+      crossings,
+      overlaps,
+      bends,
+      width: Number(width.toFixed(2)),
+      height: Number(height.toFixed(2)),
+      area: Number((width * height).toFixed(2)),
+      total_edge_length: Number(totalEdgeLength.toFixed(2)),
+      runtime_ms: Number((runtimeMs || 0).toFixed(2)),
+    };
+  }
+
+  function ensureLayoutOverlayLayer() {
+    if (_layoutOverlayLayer?.isConnected) return _layoutOverlayLayer;
+    _layoutOverlayLayer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    _layoutOverlayLayer.id = 'layoutOverlayLayer';
+    svg.insertBefore(_layoutOverlayLayer, resultsLayer);
+    return _layoutOverlayLayer;
+  }
+
+  function feederById(feederId) {
+    return _layoutGraph?.feeders?.find(feeder => feeder.id === feederId) || null;
+  }
+
+  function feederMemberIds(feeder) {
+    return new Set([...(feeder?.bus_ids || []), ...(feeder?.component_ids || [])]);
+  }
+
+  function updateFoldedVisibility() {
+    const hidden = new Set();
+    _foldedFeeders.forEach(feederId => feederMemberIds(feederById(feederId)).forEach(id => hidden.add(id)));
+    state.components.forEach(component => component.el?.classList.toggle('layout-folded', hidden.has(component.id)));
+    state.connections.forEach(connection => {
+      connection.el?.classList.toggle('layout-folded', hidden.has(connection.from.compId) || hidden.has(connection.to.compId));
+    });
+    scheduleViewportCulling();
+  }
+
+  function renderFeederClusters() {
+    const layer = ensureLayoutOverlayLayer();
+    layer.innerHTML = '';
+    _foldedFeeders.forEach(feederId => {
+      const feeder = feederById(feederId);
+      const members = [...feederMemberIds(feeder)].map(getComponent).filter(Boolean);
+      if (!feeder || !members.length) return;
+      const x = (Math.min(...members.map(component => component.x)) + Math.max(...members.map(component => component.x))) / 2;
+      const y = (Math.min(...members.map(component => component.y)) + Math.max(...members.map(component => component.y))) / 2;
+      const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      group.setAttribute('class', 'feeder-cluster');
+      group.dataset.feederId = feeder.id;
+      group.setAttribute('role', 'button');
+      group.setAttribute('tabindex', '0');
+      group.setAttribute('aria-label', `展开${feeder.domain.toUpperCase()}馈线，${feeder.bus_ids.length}个母线`);
+      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      rect.setAttribute('x', x - 86); rect.setAttribute('y', y - 36);
+      rect.setAttribute('width', 172); rect.setAttribute('height', 72);
+      const title = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      title.setAttribute('class', 'feeder-cluster-title');
+      title.setAttribute('x', x); title.setAttribute('y', y - 5);
+      title.textContent = `${feeder.domain.toUpperCase()} 馈线`;
+      const meta = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      meta.setAttribute('class', 'feeder-cluster-meta');
+      meta.setAttribute('x', x); meta.setAttribute('y', y + 16);
+      meta.textContent = `${feeder.bus_ids.length} 母线 · 点击展开`;
+      group.append(rect, title, meta);
+      const expand = () => expandFeeder(feeder.id);
+      group.addEventListener('click', expand);
+      group.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); expand(); }
+      });
+      layer.appendChild(group);
+    });
+  }
+
+  function foldFeeders(options = {}) {
+    if (!_layoutGraph && typeof HySimCore !== 'undefined' && HySimCore.LayoutGraph) {
+      _layoutGraph = HySimCore.LayoutGraph.build(state.components, state.connections, {});
+    }
+    const minBuses = Math.max(2, Number(options.minBuses) || 8);
+    (_layoutGraph?.feeders || []).forEach(feeder => {
+      if ((feeder.bus_ids || []).length >= minBuses) _foldedFeeders.add(feeder.id);
+    });
+    updateFoldedVisibility();
+    renderFeederClusters();
+    return { schema: 'hysim_feeder_lod_v1', folded: _foldedFeeders.size };
+  }
+
+  function expandFeeder(feederId) {
+    _foldedFeeders.delete(feederId);
+    updateFoldedVisibility();
+    renderFeederClusters();
+    return _foldedFeeders.size;
+  }
+
+  function expandFeeders() {
+    _foldedFeeders.clear();
+    updateFoldedVisibility();
+    if (_layoutOverlayLayer) _layoutOverlayLayer.innerHTML = '';
+  }
+
+  function toggleLayoutFixed() {
+    const selected = new Set(state.selectedIds?.size ? state.selectedIds :
+      (state.selectedId != null ? [state.selectedId] : []));
+    if (!selected.size) return { changed: 0, fixed: false };
+    const components = state.components.filter(component => selected.has(component.id));
+    const fixed = !components.every(component => component.layoutFixed === true);
+    components.forEach(component => {
+      component.layoutFixed = fixed;
+      component.el?.classList.toggle('layout-fixed', fixed);
+    });
+    return { changed: components.length, fixed };
+  }
+
   // ========== Auto Layout ==========
-  function autoLayout(options = {}) {
+  function autoLayoutLegacy(options = {}) {
+    const layoutStarted = performance.now();
+    expandFeeders();
     const buses = state.components.filter(c => c.type === 'ac_bus' || c.type === 'dc_bus');
     const branches = state.components.filter(c => isInlineLayoutType(c.type));
     const devices = state.components.filter(c => !isBusType(c.type) && !isInlineLayoutType(c.type));
@@ -2370,17 +2604,190 @@ const Canvas = (() => {
     _routeCtx = state.connectionStyle === 'avoid' ? buildRouteContext() : null;
     state.connections.forEach(rerenderConnection);
     zoomFit();
+    _layoutMetrics = computeLayoutMetrics('legacy-bfs', performance.now() - layoutStarted);
+    _layoutStats = { ...(_layoutStats || {}), metrics: _layoutMetrics };
+  }
+
+  function placeSemanticSecondaryNodes(contract, positions, direction) {
+    const positioned = new Set(Object.keys(positions).map(key => Number(key.replace('component-', ''))));
+    const busIds = new Set(state.components.filter(component => isBusType(component.type)).map(component => component.id));
+    const busNeighbors = new Map(state.components.map(component => [component.id, []]));
+    state.connections.forEach(connection => {
+      if (busIds.has(connection.from.compId)) busNeighbors.get(connection.to.compId)?.push(connection.from.compId);
+      if (busIds.has(connection.to.compId)) busNeighbors.get(connection.from.compId)?.push(connection.to.compId);
+    });
+    busNeighbors.forEach((values, key) => busNeighbors.set(key, [...new Set(values)]));
+    const fixed = component => component.layoutFixed === true || component.params?.layout_fixed === true ||
+      component.params?.position_locked === true;
+    const occupied = state.components.filter(component => positioned.has(component.id) || fixed(component))
+      .map(component => layoutFootprint(component, 12));
+    const secondary = state.components.filter(component => !positioned.has(component.id) && !fixed(component));
+    secondary.sort((a, b) => Number(!isInlineLayoutType(a.type)) - Number(!isInlineLayoutType(b.type)));
+    const pairSlots = new Map();
+    const directionSlots = new Map();
+    let orphan = 0;
+    secondary.forEach(component => {
+      const linked = (busNeighbors.get(component.id) || []).map(getComponent).filter(Boolean);
+      if (linked.length >= 2) {
+        const x = linked.reduce((sum, bus) => sum + bus.x, 0) / linked.length;
+        const y = linked.reduce((sum, bus) => sum + bus.y, 0) / linked.length;
+        const key = linked.map(bus => bus.id).sort((a, b) => a - b).join('_');
+        const lane = pairSlots.get(key) || 0;
+        pairSlots.set(key, lane + 1);
+        const a = linked[0], b = linked[1];
+        const dx = b.x - a.x, dy = b.y - a.y, length = Math.hypot(dx, dy) || 1;
+        const offset = lane ? Math.ceil(lane / 2) * 52 * (lane % 2 ? 1 : -1) : 0;
+        placeWithOccupancy(component, x - dy / length * offset, y + dx / length * offset, occupied, {
+          maxRing: 36, clearance: 10,
+        });
+        if (['ac_branch', 'dc_branch', 'switch_comp', 'circuit_breaker'].includes(component.type)) {
+          component.rotation = Math.abs(dy) > Math.abs(dx) ? 90 : 0;
+        }
+      } else if (linked.length === 1) {
+        const bus = linked[0];
+        const placement = {
+          external_grid: 'up', generator: 'left', static_generator: 'right',
+          pv_system: 'right', dc_pv_array: 'right', renewable_gen: 'right',
+          vpp: 'right', storage: 'dr', dc_storage: 'dr', mobile_storage: 'dr',
+          microgrid: 'dr', shunt: 'dl',
+        };
+        const zone = placement[component.type] || 'down';
+        const slotKey = `${bus.id}|${zone}`;
+        const slot = directionSlots.get(slotKey) || 0;
+        directionSlots.set(slotKey, slot + 1);
+        const target = layoutAttachedDevice(component, bus, { dir: zone, n: slot }, direction, 220, 240);
+        placeWithOccupancy(component, target.x, target.y, occupied, {
+          anchor: bus, minDist: 96, maxRing: 40, clearance: 10,
+        });
+      } else {
+        placeWithOccupancy(component, (orphan % 8) * 140, 600 + Math.floor(orphan / 8) * 130, occupied, {
+          maxRing: 12, clearance: 10,
+        });
+        orphan += 1;
+      }
+      applyComponentTransform(component);
+    });
+    return secondary;
+  }
+
+  async function autoLayoutSemantic(options = {}) {
+    const generation = ++_layoutGeneration;
+    const started = performance.now();
+    expandFeeders();
+    const contract = HySimCore.LayoutGraph.build(state.components, state.connections, {
+      direction: options.direction || 'TB',
+      incremental: options.incremental === true,
+    });
+    _layoutGraph = contract;
+    const original = new Map(state.components.map(component => [component.id, {
+      x: component.x, y: component.y, fixed: component.layoutFixed === true ||
+        component.params?.layout_fixed === true || component.params?.position_locked === true,
+    }]));
+    try {
+      const result = await HySimCore.LayoutEngine.layout(contract, { timeoutMs: options.timeoutMs });
+      if (generation !== _layoutGeneration) return null;
+      const positions = result.positions || {};
+      const fixed = state.components.filter(component => original.get(component.id)?.fixed && positions[`component-${component.id}`]);
+      let offsetX = 0, offsetY = 0;
+      if (fixed.length) {
+        fixed.forEach(component => {
+          const position = positions[`component-${component.id}`];
+          offsetX += original.get(component.id).x - position.x;
+          offsetY += original.get(component.id).y - position.y;
+        });
+        offsetX /= fixed.length; offsetY /= fixed.length;
+      } else {
+        const values = Object.values(positions);
+        if (values.length) {
+          const minX = Math.min(...values.map(position => position.x));
+          const maxX = Math.max(...values.map(position => position.x));
+          const minY = Math.min(...values.map(position => position.y));
+          const maxY = Math.max(...values.map(position => position.y));
+          offsetX = -(minX + maxX) / 2;
+          offsetY = -(minY + maxY) / 2;
+        }
+      }
+      state.components.forEach(component => {
+        const position = positions[`component-${component.id}`];
+        if (!position) return;
+        const saved = original.get(component.id);
+        component.x = saved?.fixed ? saved.x : snapToGrid(position.x + offsetX);
+        component.y = saved?.fixed ? saved.y : snapToGrid(position.y + offsetY);
+      });
+      const secondary = placeSemanticSecondaryNodes(contract, positions, options.direction || 'TB');
+      const refine = refineLayoutCollisions(secondary, state.components, {
+        maxComponents: 1500,
+        clearance: 8,
+        passes: 2,
+        maxRing: 36,
+      });
+      const neighbors = new Map(state.components.map(component => [component.id, []]));
+      state.connections.forEach(connection => {
+        neighbors.get(connection.from.compId)?.push(getComponent(connection.to.compId));
+        neighbors.get(connection.to.compId)?.push(getComponent(connection.from.compId));
+      });
+      state.components.forEach(component => {
+        if (['ac_branch', 'dc_branch', 'switch_comp', 'circuit_breaker'].includes(component.type)) {
+          const linked = (neighbors.get(component.id) || []).filter(Boolean);
+          if (linked.length >= 2) {
+            const dx = linked[1].x - linked[0].x, dy = linked[1].y - linked[0].y;
+            component.rotation = Math.abs(dy) > Math.abs(dx) ? 90 : 0;
+          }
+        }
+        applyComponentTransform(component);
+      });
+      _routeCtx = state.connectionStyle === 'avoid' ? buildRouteContext() : null;
+      state.connections.forEach(rerenderConnection);
+      zoomFit();
+      _layoutMetrics = computeLayoutMetrics('elk-layered-worker', performance.now() - started);
+      _layoutStats = {
+        engine: 'elk-layered-worker',
+        buses: contract.domains.ac + contract.domains.dc,
+        domains: contract.domains,
+        feeders: contract.feeders.length,
+        hyperedges: contract.hyperedges.length,
+        fixedNodes: contract.fixed_node_ids.length,
+        refinedMoves: refine.moved,
+        refineSkipped: refine.skipped,
+        workerRuntimeMs: Number(result.runtime_ms || 0),
+        metrics: _layoutMetrics,
+      };
+      if (typeof App !== 'undefined' && App.log) {
+        App.log(`ELK布局完成：${_layoutMetrics.node_count}元件，交叉${_layoutMetrics.crossings}，重叠${_layoutMetrics.overlaps}，${_layoutMetrics.runtime_ms.toFixed(0)} ms`, 'success');
+      }
+      return _layoutMetrics;
+    } catch (error) {
+      if (generation !== _layoutGeneration) return null;
+      if (typeof App !== 'undefined' && App.log) App.log(`ELK布局失败，已回退内置布局：${error.message || error}`, 'warn');
+      autoLayoutLegacy(options);
+      _layoutStats = { ...(_layoutStats || {}), fallbackError: String(error?.message || error) };
+      return _layoutMetrics;
+    }
+  }
+
+  function autoLayout(options = {}) {
+    const busCount = state.components.filter(component => isBusType(component.type)).length;
+    const useSemantic = options.engine === 'elk' || (options.engine !== 'legacy' &&
+      (busCount >= SMART_LAYOUT_BUS_THRESHOLD || state.components.length >= SMART_LAYOUT_COMPONENT_THRESHOLD));
+    if (useSemantic && typeof HySimCore !== 'undefined' && HySimCore.LayoutGraph && HySimCore.LayoutEngine) {
+      _layoutPromise = autoLayoutSemantic(options);
+      return _layoutPromise;
+    }
+    _layoutGeneration += 1;
+    autoLayoutLegacy(options);
+    _layoutPromise = Promise.resolve(_layoutMetrics);
+    return _layoutPromise;
   }
 
   // ---- Phase 4: local re-layout of the current selection (doc §18) -----------
   // Re-runs the full topology layout but writes positions only for the selected
   // buses (and their attached devices/branches), keeping the rest of the diagram
   // anchored.  Falls back to a full autoLayout when nothing useful is selected.
-  function autoLayoutSelection(options = {}) {
+  async function autoLayoutSelection(options = {}) {
     const sel = new Set(state.selectedIds && state.selectedIds.size
       ? state.selectedIds
       : (state.selectedId != null ? [state.selectedId] : []));
-    if (sel.size === 0) { autoLayout(options); return; }
+    if (sel.size === 0) { await autoLayout({ ...options, incremental: true }); return; }
 
     // Snapshot every component position, run a global layout, then revert all
     // non-selected components so only the selection is re-flowed.  Simple and
@@ -2391,7 +2798,7 @@ const Canvas = (() => {
       if (sel.has(cn.from.compId)) sel.add(cn.to.compId);
       if (sel.has(cn.to.compId)) sel.add(cn.from.compId);
     });
-    autoLayout(options);
+    await autoLayout({ ...options, incremental: true });
     state.components.forEach(c => {
       if (!sel.has(c.id)) {
         const s = saved.get(c.id);
@@ -3605,6 +4012,7 @@ const Canvas = (() => {
             x: c.x,
             y: c.y,
             rotation: c.rotation || 0,
+            layoutFixed: c.layoutFixed === true,
           };
           if (isIntegratedEnergyCanvasType(c.type)) {
             item.params = cloneJsonBlock(c.params) || {};
@@ -3674,6 +4082,8 @@ const Canvas = (() => {
       comp.x = numOr(item.x, comp.x);
       comp.y = numOr(item.y, comp.y);
       comp.rotation = numOr(item.rotation, 0);
+      comp.layoutFixed = item.layoutFixed === true;
+      comp.el?.classList.toggle('layout-fixed', comp.layoutFixed);
       comp.el.setAttribute(
         'transform',
         'translate(' + comp.x + ', ' + comp.y + ') rotate(' + comp.rotation + ')'
@@ -6184,27 +6594,33 @@ const Canvas = (() => {
   // path (doc §10.2) by drawing a <path> from the cached connection geometry.
   function showTopologyReconfigResults(data) {
     resultsLayer.querySelectorAll('.topo-reconfig-overlay').forEach(el => el.remove());
-    if (!data.branch_details || !Array.isArray(data.branch_details)) return;
+    const detailSets = {
+      ac_branch: Array.isArray(data.branch_details) ? data.branch_details : [],
+      transformer_2w: Array.isArray(data.branch_details) ? data.branch_details : [],
+      dc_branch: Array.isArray(data.dc_branch_details) ? data.dc_branch_details : [],
+      vsc_converter: Array.isArray(data.vsc_details) ? data.vsc_details : [],
+    };
 
     state.connections.forEach(conn => {
       const fromComp = getComponent(conn.from.compId);
       const toComp = getComponent(conn.to.compId);
       if (!fromComp || !toComp) return;
-      // Only consider ac_branch and transformer_2w for now
       let branchComp = null;
-      if (fromComp.type === 'ac_branch' || fromComp.type === 'transformer_2w') branchComp = fromComp;
-      else if (toComp.type === 'ac_branch' || toComp.type === 'transformer_2w') branchComp = toComp;
+      if (detailSets[fromComp.type]) branchComp = fromComp;
+      else if (detailSets[toComp.type]) branchComp = toComp;
       if (!branchComp) return;
 
       // Find branch status by matching name or params
       const branchName = branchComp.params?.name || '';
-      let branchIdx = null;
+      let branchIdx = Number(branchComp.params?.index);
+      if (!Number.isFinite(branchIdx)) branchIdx = null;
       const m = branchName.match(/(Line|Trafo)\s*(\d+)/);
-      if (m) branchIdx = parseInt(m[2]);
+      if (branchIdx === null && m) branchIdx = parseInt(m[2]);
+      const details = detailSets[branchComp.type] || [];
       let branchDetail = null;
-      if (branchIdx !== null) branchDetail = data.branch_details.find(b => b.id == branchIdx);
+      if (branchIdx !== null) branchDetail = details.find(b => b.id == branchIdx);
       if (!branchDetail && branchComp.params?.from_bus !== undefined && branchComp.params?.to_bus !== undefined) {
-        branchDetail = data.branch_details.find(b =>
+        branchDetail = details.find(b =>
           b.from_bus == branchComp.params.from_bus && b.to_bus == branchComp.params.to_bus);
       }
       if (!branchDetail) return;
@@ -6644,6 +7060,7 @@ const Canvas = (() => {
 
   // ========== Clear ==========
   function clearAll() {
+    expandFeeders();
     state.components.forEach(c => c.el?.remove());
     state.connections.forEach(c => c.el?.remove());
     state.components = [];
@@ -6654,6 +7071,9 @@ const Canvas = (() => {
     state.headless = false;
     state.headlessSystem = null;
     state.headlessMeta = null;
+    _layoutGraph = null;
+    _layoutMetrics = null;
+    _layoutStats = null;
     hideHeadlessOverview();
     // Note: baseMva is NOT reset here; loadFromSystemJson sets it before clearAll returns
     resultsLayer.innerHTML = '';
@@ -6674,6 +7094,7 @@ const Canvas = (() => {
       }
     }
     scheduleMinimapRender();
+    scheduleViewportCulling();
   }
 
   // ========== Headless (no-canvas) overview overlay ==========
@@ -7070,6 +7491,17 @@ const Canvas = (() => {
     if (compId != null) panToComponent(compId);
   }
 
+  function getPerformanceStats() {
+    return {
+      schema: 'hysim_canvas_performance_v1',
+      cull_threshold: CULL_THRESHOLD,
+      culling_active: _cullActive,
+      components: state.components.length,
+      connections: state.connections.length,
+      ..._renderStats,
+    };
+  }
+
   // ========== Public API ==========
   return {
     init,
@@ -7089,6 +7521,13 @@ const Canvas = (() => {
     rerouteConnections,
     setAlignSnap,
     get layoutStats() { return _layoutStats; },
+    getLayoutMetrics() { return _layoutMetrics ? { ..._layoutMetrics } : null; },
+    getLayoutGraph() { return _layoutGraph; },
+    waitForLayout() { return _layoutPromise; },
+    foldFeeders,
+    expandFeeder,
+    expandFeeders,
+    toggleLayoutFixed,
     rotateSelected,
     buildSystemJson,
     syncConnectivity,
@@ -7111,6 +7550,7 @@ const Canvas = (() => {
     clearAll,
     panToComponent,
     panToBusId,
+    getPerformanceStats,
     getCompBusMap,
     get state() { return state; },
   };

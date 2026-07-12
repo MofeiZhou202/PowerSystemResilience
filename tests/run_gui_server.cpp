@@ -12369,6 +12369,96 @@ int main(int argc, char** argv) {
                              {"related_buses", d.related_buses}, {"related_branches", d.related_branches}});
       out["diagnostics"] = diags;
 
+      // Reduction stages retain eliminated objects as out-of-service audit
+      // ghosts. Compact the final model and remove every dangling terminal so
+      // the exported JSON can be loaded as a normal hybrid system.
+      {
+        hacdcpf::HybridPowerSystem simplified = work_sys;
+        auto filter = [](auto& items, auto keep) {
+          items.erase(std::remove_if(items.begin(), items.end(),
+                                     [&](const auto& item) { return !keep(item); }),
+                      items.end());
+        };
+        std::unordered_set<int> ac_buses, dc_buses;
+        filter(simplified.ac.buses, [&](const auto& b) {
+          if (b.in_service) ac_buses.insert(b.index);
+          return b.in_service;
+        });
+        filter(simplified.dc.buses, [&](const auto& b) {
+          if (b.in_service) dc_buses.insert(b.index);
+          return b.in_service;
+        });
+        const auto has_ac = [&](int bus) { return ac_buses.count(bus) != 0; };
+        const auto has_dc = [&](int bus) { return dc_buses.count(bus) != 0; };
+
+        filter(simplified.ac.branches, [&](const auto& x) { return x.in_service && has_ac(x.from_bus) && has_ac(x.to_bus); });
+        filter(simplified.ac.transformers_2w, [&](const auto& x) { return x.in_service && has_ac(x.hv_bus) && has_ac(x.lv_bus); });
+        filter(simplified.ac.transformers_3w, [&](const auto& x) { return x.in_service && has_ac(x.hv_bus) && has_ac(x.mv_bus) && has_ac(x.lv_bus); });
+        filter(simplified.ac.switches, [&](const auto& x) { return x.in_service && has_ac(x.bus_from) && has_ac(x.bus_to); });
+        filter(simplified.ac.circuit_breakers, [&](const auto& x) { return x.in_service && has_ac(x.bus_from) && has_ac(x.bus_to); });
+        filter(simplified.ac.loads,             [&](const auto& x) { return has_ac(x.bus); });
+        filter(simplified.ac.generators,        [&](const auto& x) { return has_ac(x.bus); });
+        filter(simplified.ac.static_generators, [&](const auto& x) { return has_ac(x.bus); });
+        filter(simplified.ac.renewable_gens,    [&](const auto& x) { return has_ac(x.bus); });
+        filter(simplified.ac.pv_systems,        [&](const auto& x) { return has_ac(x.bus); });
+        filter(simplified.ac.storage,           [&](const auto& x) { return has_ac(x.bus); });
+        filter(simplified.ac.shunts,            [&](const auto& x) { return has_ac(x.bus); });
+        filter(simplified.ac.external_grids,    [&](const auto& x) { return has_ac(x.bus); });
+        filter(simplified.ac.flexible_loads,    [&](const auto& x) { return has_ac(x.bus); });
+        filter(simplified.ac.asymmetric_loads,  [&](const auto& x) { return has_ac(x.bus); });
+        filter(simplified.ac.motors,            [&](const auto& x) { return has_ac(x.bus); });
+        filter(simplified.ac.charging_stations, [&](const auto& x) { return has_ac(x.bus); });
+        filter(simplified.mobile_storage,       [&](const auto& x) { return has_ac(x.bus); });
+        filter(simplified.vpps,                 [&](const auto& x) { return has_ac(x.pcc_bus); });
+        filter(simplified.microgrids,            [&](const auto& x) { return has_ac(x.pcc_bus); });
+        for (auto& microgrid : simplified.microgrids) {
+          filter(microgrid.internal_buses,
+                 [&](int bus) { return has_ac(bus); });
+        }
+
+        std::unordered_set<int> station_ids;
+        for (const auto& station : simplified.ac.charging_stations) station_ids.insert(station.index);
+        filter(simplified.ac.chargers, [&](const auto& x) { return station_ids.count(x.station_id) != 0; });
+        std::unordered_set<int> transformer_ids;
+        for (const auto& x : simplified.ac.transformers_2w) transformer_ids.insert(x.index);
+        for (const auto& x : simplified.ac.transformers_3w) transformer_ids.insert(x.index);
+        filter(simplified.ac.regulator_controls, [&](const auto& x) {
+          return transformer_ids.count(x.transformer_index) != 0 &&
+                 (x.monitored_bus == 0 || has_ac(x.monitored_bus));
+        });
+
+        filter(simplified.dc.branches, [&](const auto& x) { return x.in_service && has_dc(x.from_bus) && has_dc(x.to_bus); });
+        filter(simplified.dc.dc_circuit_breakers, [&](const auto& x) { return x.in_service && has_dc(x.bus_from) && has_dc(x.bus_to); });
+        filter(simplified.dc.loads,                [&](const auto& x) { return has_dc(x.bus); });
+        filter(simplified.dc.storage,              [&](const auto& x) { return has_dc(x.bus); });
+        filter(simplified.dc.dc_storage,           [&](const auto& x) { return has_dc(x.bus); });
+        filter(simplified.dc.static_generators,    [&](const auto& x) { return has_dc(x.bus); });
+        filter(simplified.dc.dc_static_generators, [&](const auto& x) { return has_dc(x.bus); });
+        filter(simplified.dc.pv_arrays,             [&](const auto& x) { return has_dc(x.bus); });
+        filter(simplified.dc.dcdc_converters, [&](const auto& x) { return x.in_service && has_dc(x.bus_in) && has_dc(x.bus_out); });
+        filter(simplified.vsc_converters, [&](const auto& x) { return x.in_service && has_ac(x.bus_ac) && has_dc(x.bus_dc); });
+
+        for (auto& router : simplified.energy_routers) {
+          filter(router.ports, [&](const auto& port) {
+            return port.in_service && (port.port_type == hacdcpf::ERPortType::DC ? has_dc(port.bus) : has_ac(port.bus));
+          });
+          router.num_ports = static_cast<int>(router.ports.size());
+        }
+        filter(simplified.energy_routers, [](const auto& x) {
+          return x.in_service && x.ports.size() >= 2;
+        });
+
+        simplified.name = sys.name + " (simplified)";
+        simplified.three_phase_ac.reset();
+        simplified.bus_merge_map.reset();
+        simplified.branch_expand_map.reset();
+        simplified.projection_certificate.reset();
+        simplified.projection_report.reset();
+        simplified.telemetry.reset();
+        out["reduced_system"] = json::parse(hacdcpf::io::to_json(simplified, 0));
+        out["reduced_system_schema"] = "hacdcpf_system_json_v1";
+      }
+
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
     } catch (const std::exception& e) {
@@ -15348,9 +15438,65 @@ int main(int argc, char** argv) {
         double base_loss_mw = 0.0;
         bool base_pf_converged = false;
         int base_pf_iterations = 0;
-        bool base_is_radial = hacdcpf::analysis::is_radial(sys_tr.ac);
-        bool base_is_connected = hacdcpf::analysis::is_connected(sys_tr.ac);
-        int base_islands = hacdcpf::analysis::count_islands(sys_tr.ac);
+        auto ac_topology = [](const hacdcpf::ACSystem& ac) {
+          std::unordered_map<int, int> pos;
+          for (size_t i = 0; i < ac.buses.size(); ++i) pos[ac.buses[i].index] = static_cast<int>(i);
+          std::vector<std::vector<int>> adj(ac.buses.size());
+          int edges = 0;
+          for (const auto& br : ac.branches) {
+            if (!br.in_service || !pos.count(br.from_bus) || !pos.count(br.to_bus)) continue;
+            const int u = pos[br.from_bus], v = pos[br.to_bus];
+            adj[u].push_back(v); adj[v].push_back(u); ++edges;
+          }
+          int islands = 0;
+          std::vector<char> seen(ac.buses.size(), false);
+          for (size_t s = 0; s < ac.buses.size(); ++s) {
+            if (seen[s]) continue;
+            ++islands;
+            std::vector<int> stack{static_cast<int>(s)}; seen[s] = true;
+            while (!stack.empty()) {
+              const int u = stack.back(); stack.pop_back();
+              for (int v : adj[u]) if (!seen[v]) { seen[v] = true; stack.push_back(v); }
+            }
+          }
+          const bool connected = ac.buses.empty() || islands == 1;
+          const bool radial = ac.buses.empty() || edges == static_cast<int>(ac.buses.size()) - islands;
+          return std::tuple<bool, bool, int, int>{radial, connected, islands, edges};
+        };
+        auto dc_topology = [](const hacdcpf::DCSystem& dc) {
+          std::unordered_map<int, int> pos;
+          for (size_t i = 0; i < dc.buses.size(); ++i) pos[dc.buses[i].index] = static_cast<int>(i);
+          std::vector<std::vector<int>> adj(dc.buses.size());
+          int edges = 0;
+          for (const auto& br : dc.branches) {
+            if (!br.in_service || !pos.count(br.from_bus) || !pos.count(br.to_bus)) continue;
+            const int u = pos[br.from_bus], v = pos[br.to_bus];
+            adj[u].push_back(v); adj[v].push_back(u); ++edges;
+          }
+          int islands = 0;
+          std::vector<char> seen(dc.buses.size(), false);
+          for (size_t s = 0; s < dc.buses.size(); ++s) {
+            if (seen[s]) continue;
+            ++islands;
+            std::vector<int> stack{static_cast<int>(s)}; seen[s] = true;
+            while (!stack.empty()) {
+              const int u = stack.back(); stack.pop_back();
+              for (int v : adj[u]) if (!seen[v]) { seen[v] = true; stack.push_back(v); }
+            }
+          }
+          const bool connected = dc.buses.empty() || islands == 1;
+          const bool radial = dc.buses.empty() || edges == static_cast<int>(dc.buses.size()) - islands;
+          return std::tuple<bool, bool, int, int>{radial, connected, islands, edges};
+        };
+        auto hybrid_topology = [](const hacdcpf::HybridPowerSystem& sys) {
+          const auto graph = hacdcpf::graph::build_power_system_graph(sys);
+          return std::pair<bool, int>{hacdcpf::graph::is_connected(graph),
+                                      hacdcpf::graph::count_islands(graph)};
+        };
+        const auto [base_ac_radial, base_ac_connected, base_ac_islands, base_ac_closed] = ac_topology(sys_tr.ac);
+        const auto [base_dc_radial, base_dc_connected, base_dc_islands, base_dc_closed] = dc_topology(sys_tr.dc);
+        const auto [base_is_connected, base_islands] = hybrid_topology(sys_tr);
+        const bool base_is_radial = base_ac_radial && base_dc_radial;
         {
           hacdcpf::PowerFlowOptions pf_opt;
           pf_opt.max_iter = 200; pf_opt.tol = 1e-6;
@@ -15365,6 +15511,15 @@ int main(int argc, char** argv) {
             }
           }
         }
+
+        // Reconfiguration operates on the canonical electrical graph. Use the
+        // same projection for the MILP, status application, and PF/OPF
+        // validation so expanded switches/CBs/transformers keep identical IDs.
+        hacdcpf::ProjectionOptions reconfig_projection;
+        reconfig_projection.strip_dead_islands = false;
+        sys_tr = hacdcpf::projection::RichToCanonicalOperator::apply(
+                     sys_tr, reconfig_projection)
+                     .canonical;
 
         // ========== Step 2: Run topology reconfiguration (single snapshot) ==========
         // The SIM backend exposes a single-snapshot MILP reconfiguration
@@ -15404,24 +15559,18 @@ int main(int argc, char** argv) {
         tr_opts.solver = opts.value("solver", std::string("auto"));
         tr_opts.skip_heuristic = opts.value("skip_heuristic", false);
         tr_opts.verbose   = false;
-        // Every AC branch is a reconfiguration candidate so the MILP can both
-        // open in-service lines and close ties → reach the optimal radial tree.
-        for (const auto& br : sys_tr.ac.branches) tr_opts.switchable_branch_ids.push_back(br.index);
+        // Use structured identities so overlapping AC/DC/VSC indices cannot
+        // alias. All three edge families participate in hybrid reconfiguration.
+        for (const auto& br : sys_tr.ac.branches)
+          tr_opts.switchable_branches.push_back({hacdcpf::graph::EdgeCategory::AC_Line, br.index});
+        for (const auto& br : sys_tr.dc.branches)
+          tr_opts.switchable_branches.push_back({hacdcpf::graph::EdgeCategory::DC_Line, br.index});
+        for (const auto& vsc : sys_tr.vsc_converters)
+          tr_opts.switchable_branches.push_back({hacdcpf::graph::EdgeCategory::VSC_Coupling, vsc.index});
         // Auto-enable split-domain radiality when the case is hybrid (has DC
         // buses + converters) unless the caller overrode it.
         if (!opts.contains("split_domain_trees") && !sys_tr.dc.buses.empty() && !sys_tr.vsc_converters.empty())
           tr_opts.split_domain_trees = true;
-        // Drop a DC subnetwork that has no DC voltage source: keeping it (dead
-        // ties stay) would leave an unrooted DC island and force infeasibility.
-        {
-          bool dc_src = false;
-          for (const auto& b : sys_tr.dc.buses) if (b.bus_type == hacdcpf::DCBusType::DC_V) dc_src = true;
-          if (!dc_src && sys_tr.dc.static_generators.empty() && sys_tr.dc.dc_static_generators.empty() &&
-              sys_tr.dc.pv_arrays.empty() && sys_tr.dc.storage.empty() && sys_tr.dc.dc_storage.empty()) {
-            sys_tr.dc = hacdcpf::DCSystem{};
-            sys_tr.vsc_converters.clear();
-          }
-        }
         auto recon = hacdcpf::analysis::run_topology_reconfiguration(sys_tr, tr_opts);
 
         // Per-branch closed flag (1 = in service) derived from the open-branch set,
@@ -15432,7 +15581,6 @@ int main(int argc, char** argv) {
           std::set<int> open_ac;
           for (const auto& br : recon.open_branches)
             if (br.category == hacdcpf::graph::EdgeCategory::AC_Line) open_ac.insert(br.index);
-          for (int id : recon.open_branch_ids) open_ac.insert(id);
           for (size_t b = 0; b < sys_tr.ac.branches.size(); ++b)
             ac_branch_closed_ts[b][0] = open_ac.count(sys_tr.ac.branches[b].index) ? 0 : 1;
         }
@@ -15464,23 +15612,40 @@ int main(int argc, char** argv) {
         bool reconfig_is_radial = false;
         bool reconfig_is_connected = false;
         int reconfig_islands = 0;
+        bool reconfig_ac_radial = false, reconfig_ac_connected = false;
+        bool reconfig_dc_radial = false, reconfig_dc_connected = false;
+        int reconfig_ac_islands = 0, reconfig_dc_islands = 0;
+        int reconfig_dc_closed_count = 0, reconfig_vsc_closed_count = 0;
         int reconfig_closed_count = 0;
         int reconfig_open_count = 0;
         if (sched.feasible) {
           // Apply final-step topology to a copy
           auto sys_reconfig = sys_tr;
-          const int last_t = std::max(0, num_steps - 1);
-          for (size_t b = 0; b < sys_reconfig.ac.branches.size(); ++b) {
-            bool is_closed = true;
-            if (b < sched.ac_branch_closed.size() && last_t < (int)sched.ac_branch_closed[b].size())
-              is_closed = (sched.ac_branch_closed[b][(size_t)last_t] != 0);
-            sys_reconfig.ac.branches[b].in_service = is_closed;
-            if (is_closed) ++reconfig_closed_count;
-            else ++reconfig_open_count;
+          std::set<int> closed_ac, closed_dc, closed_vsc;
+          for (const auto& ref : recon.closed_branches) {
+            if (ref.category == hacdcpf::graph::EdgeCategory::AC_Line) closed_ac.insert(ref.index);
+            else if (ref.category == hacdcpf::graph::EdgeCategory::DC_Line) closed_dc.insert(ref.index);
+            else if (ref.category == hacdcpf::graph::EdgeCategory::VSC_Coupling) closed_vsc.insert(ref.index);
           }
-          reconfig_is_radial = hacdcpf::analysis::is_radial(sys_reconfig.ac);
-          reconfig_is_connected = hacdcpf::analysis::is_connected(sys_reconfig.ac);
-          reconfig_islands = hacdcpf::analysis::count_islands(sys_reconfig.ac);
+          for (auto& br : sys_reconfig.ac.branches) {
+            br.in_service = closed_ac.count(br.index) != 0;
+            if (br.in_service) ++reconfig_closed_count; else ++reconfig_open_count;
+          }
+          for (auto& br : sys_reconfig.dc.branches) {
+            br.in_service = closed_dc.count(br.index) != 0;
+            if (br.in_service) ++reconfig_dc_closed_count;
+          }
+          for (auto& vsc : sys_reconfig.vsc_converters) {
+            vsc.in_service = closed_vsc.count(vsc.index) != 0;
+            if (vsc.in_service) ++reconfig_vsc_closed_count;
+          }
+          int reconfig_ac_closed_unused = 0;
+          std::tie(reconfig_ac_radial, reconfig_ac_connected, reconfig_ac_islands,
+                   reconfig_ac_closed_unused) = ac_topology(sys_reconfig.ac);
+          std::tie(reconfig_dc_radial, reconfig_dc_connected, reconfig_dc_islands,
+                   reconfig_dc_closed_count) = dc_topology(sys_reconfig.dc);
+          std::tie(reconfig_is_connected, reconfig_islands) = hybrid_topology(sys_reconfig);
+          reconfig_is_radial = reconfig_ac_radial && (tr_opts.allow_dc_mesh || reconfig_dc_radial);
 
           // Run power flow on reconfigured topology
           hacdcpf::PowerFlowOptions pf_opt;
@@ -15501,6 +15666,8 @@ int main(int argc, char** argv) {
             auto opf_r = hacdcpf::solve_ac_opf(sys_reconfig, oo);
             opf_converged = opf_r.converged; opf_objective = opf_r.objective;
           } catch (...) {}
+          recon.validity.post_power_flow_validated = reconfig_pf_converged;
+          recon.validity.full_hybrid_opf_validated = opf_converged;
         }
 
         // ========== Build JSON response ==========
@@ -15511,10 +15678,21 @@ int main(int argc, char** argv) {
                                 {"shed", recon.obj_terms.shed}, {"island", recon.obj_terms.island}};
         out["opf_converged"] = opf_converged;
         out["opf_objective"] = opf_objective;
-        out["total_shed_mw"] = sched.total_shed_mw;
+        out["total_shed_mw"] = recon.total_shed_mw;
+        out["total_shed_mvar"] = recon.total_shed_mvar;
         out["milp_objective"] = sched.total_objective;
         out["estimated_loss_mw"] = sched.total_objective * sys_tr.base_mva;
         out["solver_name"] = sched.solver_name;
+        out["solver_status"] = recon.solver_status;
+        out["model_scope"] = recon.model_scope;
+        out["validity"] = json{{"radial_topology_enforced", recon.validity.radial_topology_enforced},
+                                {"ac_lindistflow_enforced", recon.validity.ac_lindistflow_enforced},
+                                {"dc_network_modelled", recon.validity.dc_network_modelled},
+                                {"dc_source_dispatch_modelled", recon.validity.dc_source_dispatch_modelled},
+                                {"vsc_active_transfer_modelled", recon.validity.vsc_active_transfer_modelled},
+                                {"vsc_reactive_power_approximated", recon.validity.vsc_reactive_power_approximated},
+                                {"post_power_flow_validated", recon.validity.post_power_flow_validated},
+                                {"full_hybrid_opf_validated", recon.validity.full_hybrid_opf_validated}};
         out["num_steps"] = num_steps;
 
         // Loss comparison (before vs after reconfiguration)
@@ -15534,12 +15712,30 @@ int main(int argc, char** argv) {
         out["base_is_radial"] = base_is_radial;
         out["base_is_connected"] = base_is_connected;
         out["base_islands"] = base_islands;
+        out["base_ac_is_radial"] = base_ac_radial;
+        out["base_ac_is_connected"] = base_ac_connected;
+        out["base_ac_islands"] = base_ac_islands;
+        out["base_ac_closed_count"] = base_ac_closed;
+        out["base_dc_is_radial"] = base_dc_radial;
+        out["base_dc_is_connected"] = base_dc_connected;
+        out["base_dc_islands"] = base_dc_islands;
+        out["base_dc_closed_count"] = base_dc_closed;
         out["reconfig_is_radial"] = reconfig_is_radial;
         out["reconfig_is_connected"] = reconfig_is_connected;
         out["reconfig_islands"] = reconfig_islands;
+        out["reconfig_ac_is_radial"] = reconfig_ac_radial;
+        out["reconfig_ac_is_connected"] = reconfig_ac_connected;
+        out["reconfig_ac_islands"] = reconfig_ac_islands;
+        out["reconfig_dc_is_radial"] = reconfig_dc_radial;
+        out["reconfig_dc_is_connected"] = reconfig_dc_connected;
+        out["reconfig_dc_islands"] = reconfig_dc_islands;
         out["reconfig_closed_count"] = reconfig_closed_count;
         out["reconfig_open_count"] = reconfig_open_count;
-        out["num_buses"] = (int)sys_tr.ac.buses.size();
+        out["reconfig_dc_closed_count"] = reconfig_dc_closed_count;
+        out["reconfig_vsc_closed_count"] = reconfig_vsc_closed_count;
+        out["num_buses"] = (int)(sys_tr.ac.buses.size() + sys_tr.dc.buses.size());
+        out["num_ac_buses"] = (int)sys_tr.ac.buses.size();
+        out["num_dc_buses"] = (int)sys_tr.dc.buses.size();
 
         // Verification PF
         json vf;
@@ -15583,18 +15779,43 @@ int main(int argc, char** argv) {
           out["closed_branch_ids"] = closed_ids;
           out["branch_details"] = branch_details;
         }
+        {
+          std::set<int> closed_dc, closed_vsc;
+          for (const auto& ref : recon.closed_branches) {
+            if (ref.category == hacdcpf::graph::EdgeCategory::DC_Line) closed_dc.insert(ref.index);
+            else if (ref.category == hacdcpf::graph::EdgeCategory::VSC_Coupling) closed_vsc.insert(ref.index);
+          }
+          json dc_details = json::array(), vsc_details = json::array();
+          for (const auto& br : sys_tr.dc.branches) {
+            dc_details.push_back(json{{"domain", "DC"}, {"id", br.index},
+                                      {"from_bus", br.from_bus}, {"to_bus", br.to_bus},
+                                      {"closed", closed_dc.count(br.index) != 0}, {"name", br.name}});
+          }
+          for (const auto& vsc : sys_tr.vsc_converters) {
+            vsc_details.push_back(json{{"domain", "VSC"}, {"id", vsc.index},
+                                       {"bus_ac", vsc.bus_ac}, {"bus_dc", vsc.bus_dc},
+                                       {"closed", closed_vsc.count(vsc.index) != 0}, {"name", vsc.name}});
+          }
+          out["dc_branch_details"] = dc_details;
+          out["vsc_details"] = vsc_details;
+        }
         // Tie-switch / circuit-breaker operations projected back to physical
         // devices from canonical branches (BranchExpandMap). This restores the
         // device-space actions lost when switches/CBs are flattened to ACBranches.
         {
           json sw_ops = json::array();
           int sw_close = 0, sw_open = 0, cb_close = 0, cb_open = 0;
+          auto category_name = [](hacdcpf::graph::EdgeCategory category) {
+            if (category == hacdcpf::graph::EdgeCategory::DC_Line) return "dc_branch";
+            if (category == hacdcpf::graph::EdgeCategory::VSC_Coupling) return "vsc";
+            return "ac_branch";
+          };
           for (const auto& op : recon.switch_operations) {
             const char* kind = op.kind == hacdcpf::analysis::TopoReconfResult::DeviceKind::CircuitBreaker
                                    ? "circuit_breaker"
                                    : (op.kind == hacdcpf::analysis::TopoReconfResult::DeviceKind::Switch
                                           ? "switch" : "branch");
-            sw_ops.push_back(json{{"kind", kind}, {"index", op.index},
+            sw_ops.push_back(json{{"kind", kind}, {"category", category_name(op.category)}, {"index", op.index},
                                   {"from_bus", op.bus_from}, {"to_bus", op.bus_to},
                                   {"close", op.close}});
             if (op.kind == hacdcpf::analysis::TopoReconfResult::DeviceKind::CircuitBreaker)
@@ -18350,7 +18571,7 @@ int main(int argc, char** argv) {
     }
   });
 
-  // Serve static files for the ETAP-style frontend from the web/ directory.
+  // Serve static files for the HySim-XJTU-HRPES frontend from web/.
   // The directory is located robustly so the canvas UI loads regardless of the
   // working directory the binary is launched from (repo root, build/,
   // build/tests/, an installed prefix, ...).  Previously only cwd/web and
@@ -18393,7 +18614,7 @@ int main(int argc, char** argv) {
   svr.set_default_headers({
     {"Access-Control-Allow-Origin", "*"},
     {"Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"},
-    {"Access-Control-Allow-Headers", "Content-Type, Authorization"}
+    {"Access-Control-Allow-Headers", "Content-Type, Authorization, X-HySim-Request-ID"}
   });
 
   // Handle OPTIONS preflight requests
@@ -18401,7 +18622,7 @@ int main(int argc, char** argv) {
     res.status = 204;
   });
 
-  std::cout << "Hybrid AC/DC Planning Studio running at http://"
+  std::cout << "HySim-XJTU-HRPES running at http://"
             << args.host << ":" << args.port << "/xjtu/\n";
   std::cout << "Press Ctrl+C to stop.\n";
   if (!svr.listen(args.host, args.port)) {

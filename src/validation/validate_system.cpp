@@ -76,8 +76,10 @@ ValidationReport validate_reference_bus_eligibility(
         const bool vsc = std::any_of(
             sys.vsc_converters.begin(), sys.vsc_converters.end(),
             [&](const VSCConverter& item) {
-                return item.in_service && item.bus_dc == bus &&
-                       resolve_device_control_role(item).provides_dc_v_reference;
+                if (!item.in_service || item.bus_dc != bus) return false;
+                const auto role = resolve_device_control_role(item);
+                return role.provides_dc_v_reference ||
+                       item.control_mode == ConverterMode::PQ_MODE;
             });
         const bool dcdc = std::any_of(
             sys.dc.dcdc_converters.begin(), sys.dc.dcdc_converters.end(),

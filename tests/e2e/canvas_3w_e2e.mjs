@@ -1,5 +1,5 @@
 // @ts-check
-// canvas_3w_e2e.mjs — browser end-to-end test for the ETAP-style canvas editor.
+// canvas_3w_e2e.mjs — browser end-to-end test for the HySim canvas editor.
 //
 // Builds a 3-winding-transformer feeder ON THE CANVAS (place components + wire
 // the hv/mv/lv windings to buses, attach a utility source and loads), syncs the

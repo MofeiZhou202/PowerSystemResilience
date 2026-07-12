@@ -118,6 +118,8 @@ Generator mk_slack_gen(int idx, int bus, double vg = 1.0) {
 
 struct SolvedPF {
   bool converged{false};
+  double residual{0.0};
+  std::string termination_reason;
   std::unordered_map<int, double> vm;   ///< bus_id -> |V| pu
   std::unordered_map<int, double> va;   ///< bus_id -> angle (raw result units)
   double total_loss_mw{0.0};            ///< Σ branch (pf + pt)
@@ -131,6 +133,8 @@ SolvedPF solve_pf(const HybridPowerSystem& sys) {
   PowerFlowResult pf = solve_power_flow(sys, opt);
   SolvedPF s;
   s.converged = pf.converged;
+  s.residual = pf.residual;
+  s.termination_reason = pf.diagnostics.termination_reason;
   for (size_t i = 0; i < sys.ac.buses.size() && i < pf.vm.size(); ++i) {
     if (!sys.ac.buses[i].in_service) continue;
     s.vm[sys.ac.buses[i].index] = pf.vm[i];
@@ -805,6 +809,8 @@ TEST_CASE("Round-trip: hybrid AC/DC with VSC and a closed DC breaker",
   //    AC voltages are unchanged by the DC-side contraction. ────────────────
   const SolvedPF full    = solve_pf(sys);
   const SolvedPF reduced = solve_pf(res.contracted_system);
+  INFO("full PF: residual=" << full.residual << " reason=" << full.termination_reason);
+  INFO("reduced PF: residual=" << reduced.residual << " reason=" << reduced.termination_reason);
   REQUIRE(full.converged);
   REQUIRE(reduced.converged);
   require_vm_match(full, reduced, {1, 2, 3}, 1e-6);

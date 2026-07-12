@@ -75,6 +75,33 @@ TEST_CASE("DC mesh: parallel DC links may both stay closed", "[reconfig_opts]") 
   CHECK(dc_open == 0);  // DC loop allowed, neither parallel link opened
 }
 
+TEST_CASE("Split-domain radiality opens a DC cycle independently of AC", "[reconfig_opts]") {
+  auto s = make_loop_case();
+  DCBranch dl2; dl2.index = 2; dl2.from_bus = 1; dl2.to_bus = 2;
+  dl2.r_pu = 0.02; dl2.rate_a_mva = 50; dl2.in_service = true;
+  s.dc.branches.push_back(dl2);
+
+  TopoReconfOptions opt;
+  opt.enable_pf = false;
+  opt.split_domain_trees = true;
+  opt.skip_heuristic = true;
+  opt.switchable_branches = {
+      {graph::EdgeCategory::DC_Line, 1},
+      {graph::EdgeCategory::DC_Line, 2},
+  };
+  const auto r = run_topology_reconfiguration(s, opt);
+
+  REQUIRE(r.feasible);
+  int dc_closed = 0;
+  int ac_closed = 0;
+  for (const auto& ref : r.closed_branches) {
+    if (ref.category == graph::EdgeCategory::DC_Line) ++dc_closed;
+    if (ref.category == graph::EdgeCategory::AC_Line) ++ac_closed;
+  }
+  CHECK(dc_closed == 1);
+  CHECK(ac_closed == 1);
+}
+
 TEST_CASE("Loss-aware objective keeps a needed tie closed", "[reconfig_opts]") {
   // Single feeder fed at bus 1, load at 3; the only path is via the CB-less
   // line+tie. With loss-aware on, the supplying branch must stay closed.

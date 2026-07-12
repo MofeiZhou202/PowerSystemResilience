@@ -598,6 +598,12 @@ TEST_CASE("Distribution CB/switch/VSC pipeline: rich model → graph → PF → 
 
         const PowerFlowResult pf = solve_power_flow(sys, opts);
 
+        INFO("PF residual=" << pf.residual
+             << " reason=" << pf.diagnostics.termination_reason
+             << " AC-P=" << pf.diagnostics.final_breakdown.ac_p_norm
+             << " AC-Q=" << pf.diagnostics.final_breakdown.ac_q_norm
+             << " DC-P=" << pf.diagnostics.final_breakdown.dc_p_norm
+             << " converter-P=" << pf.diagnostics.final_breakdown.converter_p_norm);
         REQUIRE(pf.converged);
         CHECK(pf.iterations > 0);
         CHECK(pf.iterations <= 50);

@@ -176,6 +176,20 @@ TEST_CASE("Scenario generation prepares standard multiplier time series internal
   CHECK(ts["binding"].value("assign_all_pv_to", -1) == 2);
   CHECK(ts["normalization"].value("base_load_mw", 0.0) == Approx(10.0));
   CHECK(ts["normalization"].value("base_pv_mw", 0.0) == Approx(5.0));
+
+  ScenarioGenerationResult aggregate_result;
+  aggregate_result.regular = result;
+  const auto serialized = scenario_generation_result_to_json(aggregate_result);
+  const auto& serialized_candidate =
+      serialized["regular"]["clusters"][0]["representative"];
+  REQUIRE(serialized_candidate.contains("standard_time_series"));
+  const auto serialized_load_scale = profile_values(
+      serialized_candidate["standard_time_series"], "scenario_load_scale");
+  REQUIRE(serialized_load_scale.size() == 24);
+  const auto [min_it, max_it] = std::minmax_element(
+      serialized_load_scale.begin(), serialized_load_scale.end());
+  REQUIRE(min_it != serialized_load_scale.end());
+  CHECK(*max_it - *min_it > 1e-3);
 }
 
 TEST_CASE("Regular climate perturbation creates reproducible candidate variation", "[scenario_generation]") {

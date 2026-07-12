@@ -365,7 +365,7 @@ hacdcpf_add_test(test_ltm_stress test_ltm_stress.cpp)
 #   4-link corridor, and free-flow travel-time accuracy.
 hacdcpf_add_test(test_ctm_ltm_comparison test_ctm_ltm_comparison.cpp)
 
-# ── Web GUI server (ETAP-style single-line-diagram editor + REST backend) ──────
+# ── HySim Web GUI server (single-line-diagram editor + REST backend) ──────────
 # Migrated from HybridACDCPowerSystemsPlanning. Header-only httplib is vendored
 # under third_party/; nlohmann_json arrives transitively via hacdcpf -> mipsolvers.
 # Not a Catch2 test — a standalone executable serving web/ at /xjtu/ (port 8088).

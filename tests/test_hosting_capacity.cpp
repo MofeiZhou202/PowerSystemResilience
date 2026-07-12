@@ -67,6 +67,10 @@ TEST_CASE("Hosting capacity aggregates bus and component demand",
   REQUIRE(result.areas.size() == 1);
   const auto& row = result.transformers.front();
   CHECK(row.area == 7);
+  CHECK(row.canvas_type == "transformer_2w");
+  CHECK(row.canvas_index == 1);
+  CHECK(row.hv_bus == 1);
+  CHECK(row.lv_bus == 2);
   CHECK(row.supply_bus_count == 2);
   CHECK(row.supply_load_mw == Approx(2.0));
   CHECK(row.supply_existing_dr_mw == Approx(1.0));
@@ -76,6 +80,44 @@ TEST_CASE("Hosting capacity aggregates bus and component demand",
   CHECK(row.accessible_grid_min_mw == Approx(9.5));
   CHECK(row.accessible_reg_min_mw == Approx(7.5));
   CHECK(row.grade == "green");
+
+  HostingCapacityResult export_result;
+  export_result.transformers = result.transformers;
+  const auto serialized = hosting_capacity_result_to_json(export_result);
+  CHECK(serialized["transformers"][0].value("canvas_type", "") ==
+        "transformer_2w");
+  CHECK(serialized["transformers"][0].value("canvas_index", -1) == 1);
+}
+
+TEST_CASE("Hosting capacity maps branch-represented transformers to Canvas branches",
+          "[hosting_capacity][canvas]") {
+  HybridPowerSystem sys;
+  ACBus hv;
+  hv.index = 10;
+  hv.base_kv = 110.0;
+  hv.bus_type = BusType::SLACK;
+  ACBus lv;
+  lv.index = 20;
+  lv.base_kv = 10.0;
+  lv.pd_mw = 2.0;
+  sys.ac.buses = {hv, lv};
+
+  ACBranch transformer_branch;
+  transformer_branch.index = 77;
+  transformer_branch.from_bus = 10;
+  transformer_branch.to_bus = 20;
+  transformer_branch.sn_mva = 25.0;
+  transformer_branch.rate_a_mva = 25.0;
+  transformer_branch.in_service = true;
+  sys.ac.branches = {transformer_branch};
+
+  const auto result = assess_hosting_capacity(sys);
+  REQUIRE(result.transformers.size() == 1);
+  const auto& row = result.transformers.front();
+  CHECK(row.canvas_type == "ac_branch");
+  CHECK(row.canvas_index == 77);
+  CHECK(row.hv_bus == 10);
+  CHECK(row.lv_bus == 20);
 }
 
 TEST_CASE("Hosting capacity options reject negative engineering limits",

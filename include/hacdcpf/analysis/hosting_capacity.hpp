@@ -56,6 +56,10 @@ HostingCapacityOptions hosting_capacity_options_from_json(const nlohmann::json& 
 struct TransformerHostingResult {
   int         index{0};
   std::string name;
+  std::string canvas_type{"transformer_2w"};
+  int         canvas_index{0};
+  int         hv_bus{0};
+  int         lv_bus{0};
   std::string voltage_level;          ///< bucketed HV level string (e.g. "110kV")
   int         area{1};                ///< administrative area (bus.area of HV terminal)
 

@@ -3,15 +3,18 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>Hybrid AC/DC Power System Simulator — ETAP-Style</title>
-<link rel="stylesheet" href="css/style.css?v=20260712-canvas-playback-v1"/>
+<title>HySim-XJTU-HRPES</title>
+<link rel="stylesheet" href="css/style.css?v=20260712-hysim-phase6-v1"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
+<a class="skip-link" href="#main">跳到主工作区</a>
 
 <!-- ===== Bar 1: Canvas Tools (Top Toolbar) ===== -->
 <div id="topToolbar" class="top-toolbar">
-  <div class="logo-mini" title="Hybrid AC/DC Power System Simulator">⚡</div>
+  <div class="logo-mini" title="交直流混合高弹性能源电力系统仿真分析平台" aria-label="HySim-XJTU-HRPES">
+    <span class="brand-name">HySim</span><span class="brand-affiliation">XJTU-HRPES</span>
+  </div>
   <button id="btnLoadCase" class="toolbar-btn legacy-io-shortcut" title="加载算例">加载算例</button>
   <button id="btnSelect" class="toolbar-btn canvas-tool active" title="选择 (V)">选择</button>
   <button id="btnConnect" class="toolbar-btn canvas-tool" title="连线 (C)">连线</button>
@@ -22,6 +25,10 @@
   <button id="btnZoomOut" class="toolbar-btn" title="缩小">缩小</button>
   <button id="btnZoomFit" class="toolbar-btn" title="适应画面">适应<br>画面</button>
   <button id="btnAutoLayout" class="toolbar-btn" title="自动布局">自动<br>布局</button>
+  <button id="btnIncrementalLayout" class="toolbar-btn" title="保留当前相对顺序并增量优化布局">增量<br>布局</button>
+  <button id="btnPinLayout" class="toolbar-btn" title="锁定或解锁选中元件的位置">锁定<br>位置</button>
+  <button id="btnFoldFeeders" class="toolbar-btn" title="将较大的馈线折叠为可展开的总览节点">折叠<br>馈线</button>
+  <button id="btnExpandFeeders" class="toolbar-btn" title="展开全部已折叠馈线">展开<br>馈线</button>
   <select id="layoutDirSelect" class="toolbar-select" title="自动布局方向">
     <option value="TB">↧ 上下</option>
     <option value="LR">↦ 左右</option>
@@ -55,7 +62,13 @@
     <input type="file" id="fileImportParameterLibrary" accept=".json,application/json" style="display:none"/>
     <button id="btnToggleTheme" class="btn btn-sm" title="切换浅色 / 深色背景主题">🌓 主题</button>
     <span id="canvasInfo" class="canvas-info">0 元件 | 0 连接</span>
-    <span id="statusBadge" class="badge">就绪</span>
+    <span id="layoutMetricChip" class="canvas-info" title="最近一次布局质量">布局: —</span>
+    <span id="statusBadge" class="badge task-status" data-state="idle" role="status" aria-live="polite">
+      <span class="task-status-dot" aria-hidden="true"></span>
+      <span id="taskStatusLabel">就绪</span>
+      <span id="taskStatusMeta" class="task-status-meta">模型 v0</span>
+      <button id="btnCancelTask" class="task-cancel" type="button" title="取消等待并忽略本次分析结果" aria-label="取消当前分析等待" hidden>×</button>
+    </span>
   </div>
 </div>
 
@@ -66,7 +79,7 @@
   <button class="workflow-btn" data-workflow="security" title="短路与暂态动态安全分析">安全与动态</button>
   <button class="workflow-btn" data-workflow="planning" title="拓扑重构、时序仿真和场景生成">规划与运行</button>
   <button class="workflow-btn" data-workflow="ies" title="园区综合能源与电力-交通耦合分析">综合能源</button>
-  <button class="workflow-btn" data-workflow="sustainability" title="低碳、可靠性与弹性评估">低碳与弹性</button>
+  <button class="workflow-btn" data-workflow="sustainability" title="低碳、可靠性与弹性分析">低碳与弹性</button>
 </div>
 
 <!-- ===== Bar 2b: Function Modules ===== -->
@@ -87,7 +100,7 @@
   <button id="moduleHosting"      class="module-btn" data-module="hosting" data-group="steady">承载力分析</button>
   <button id="moduleReliability"  class="module-btn" data-module="reliability" data-group="sustainability">可靠性分析</button>
   <button id="moduleScenarioGeneration" class="module-btn" data-module="scenarioGeneration" data-group="planning">场景生成</button>
-  <button id="moduleResilience"   class="module-btn" data-module="resilience" data-group="sustainability">弹性评估</button>
+  <button id="moduleResilience"   class="module-btn" data-module="resilience" data-group="sustainability">弹性分析</button>
   <button id="moduleCarbonFlow"   class="module-btn" data-module="carbonFlow" data-group="sustainability">碳流分析</button>
 </div>
 
@@ -95,6 +108,7 @@
 <div id="dependencyStrip" class="dependency-strip" aria-label="模型依赖与全局定位">
   <div class="dependency-chips">
     <span id="depChipBackend" class="dep-chip" title="后端会话与画布同步状态">后端: 就绪</span>
+    <span id="runtimeHealthChip" class="dep-chip ok" data-runtime-status="healthy" title="浏览器运行状态正常">前端: 正常</span>
     <span id="depChipCanvas" class="dep-chip" title="当前画布模式与规模">Canvas: 单线图</span>
     <span id="depChipPf" class="dep-chip" title="潮流结果新鲜度，碳流等模块依赖它">PF: 未运行</span>
     <span id="depChipTspf" class="dep-chip" title="时序潮流结果新鲜度，动态碳流依赖它">TSPF: 未运行</span>
@@ -752,7 +766,7 @@
     <label class="sub-label">λisl <input id="rcLambdaIsland" type="number" min="0" value="100000" style="width:70px"/></label>
     <label class="sub-label sub-checkbox"><input id="rcEnableVoltage" type="checkbox" checked/><span>G4电压</span></label>
     <label class="sub-label sub-checkbox"><input id="rcEnableThermal" type="checkbox" checked/><span>G5容量</span></label>
-    <label class="sub-label sub-checkbox"><input id="rcSplitTrees" type="checkbox"/><span>AC/DC分域</span></label>
+    <label class="sub-label sub-checkbox"><input id="rcSplitTrees" type="checkbox" checked/><span>AC/DC分域</span></label>
     <label class="sub-label sub-checkbox"><input id="rcDcMesh" type="checkbox"/><span>DC环网</span></label>
     <label class="sub-label sub-checkbox"><input id="rcLossAware" type="checkbox" checked/><span>I²R损耗</span></label>
     <label class="sub-label">开关上限 <input id="rcMaxSwOps" type="number" min="0" value="0" style="width:50px"/></label>
@@ -1470,7 +1484,7 @@
     <label class="sub-label" title="DC 修复时长（小时），单值或逗号列表">DC修复时长
       <input id="resDcRepairDuration" type="text" value="8" placeholder="8,8"/>
     </label>
-    <label class="sub-label" title="弹性评估总时长；如果故障修复结束晚于该值，运行时会自动延长">
+    <label class="sub-label" title="弹性分析总时长；如果故障修复结束晚于该值，运行时会自动延长">
       时长(h)
       <input id="resHorizonHours" type="number" value="48" min="1" step="1"/>
     </label>
@@ -1498,7 +1512,7 @@
       <input id="resApplyDemoData" type="checkbox" checked/>
       <span>演示数据</span>
     </label>
-    <label class="sub-label" title="是否考虑移动储能 MESS；关闭可显著加快弹性评估">考虑移储
+    <label class="sub-label" title="是否考虑移动储能 MESS；关闭可显著加快弹性分析">考虑移储
       <input id="resAllowMess" type="checkbox"/>
     </label>
     <label class="sub-label" title="移动储能行驶速度 (km/h)，仅在考虑移储时生效">移储速度
@@ -1518,7 +1532,7 @@
         <option value="Gurobi" selected>Gurobi</option>
       </select>
     </label>
-    <button id="btnRunResilience" class="toolbar-btn run-btn" title="运行弹性评估">运行弹性评估</button>
+    <button id="btnRunResilience" class="toolbar-btn run-btn" title="运行弹性分析">运行弹性分析</button>
     <button id="btnExportResilienceResults" class="toolbar-btn" title="将评估结果导出为 JSON">评估结果<br>导出</button>
   </div>
   <!-- Carbon Analysis -->
@@ -1564,7 +1578,7 @@
 </div>
 
 <!-- ===== Main Content ===== -->
-<div id="main">
+<div id="main" role="main" tabindex="-1">
 
   <!-- Left: Component Library -->
   <aside id="componentLib">
@@ -2245,6 +2259,17 @@
         <div class="topo-section" id="annualSimResultsSection" style="display:none">
           <h4>年度并行生产模拟结果</h4>
           <div id="annualSimSummary" class="results-summary"></div>
+          <div class="annual-window-controls" aria-label="年度曲线显示范围">
+            <button id="btnAnnualWindowPrev" class="toolbar-btn" type="button" title="上一时间窗口" aria-label="上一时间窗口">‹</button>
+            <select id="annualTimelineWindow" title="年度曲线单次显示范围">
+              <option value="168">7 日</option>
+              <option value="720" selected>30 日</option>
+              <option value="2160">90 日</option>
+              <option value="all">全年</option>
+            </select>
+            <button id="btnAnnualWindowNext" class="toolbar-btn" type="button" title="下一时间窗口" aria-label="下一时间窗口">›</button>
+            <span id="annualWindowStatus" class="sub-hint">—</span>
+          </div>
           <div id="annualSimTimelineChart" class="tspf-chart"></div>
           <div id="annualSimVoltChart" class="tspf-chart"></div>
           <div id="annualSimMonthlyChart" class="tspf-chart"></div>
@@ -2355,7 +2380,7 @@
         </div><!-- /result-group scenarioGeneration -->
         <div class="result-group" data-result-group="resilience">
           <div class="topo-section">
-            <h4>弹性评估结果</h4>
+            <h4>弹性分析结果</h4>
             <div id="resilienceComponentCurvePanel" class="selected-curve-panel">
               <h5>元件曲线</h5>
               <p class="empty-hint">点击负荷查看 48h 需求/实际供电，点击风电/光伏查看 48h 出力。</p>
@@ -2363,7 +2388,7 @@
               <div id="resilienceSelectedComponentCurve" class="tspf-chart selected-component-chart"></div>
             </div>
             <div id="resilienceResults" class="topo-table-wrap">
-              <p class="empty-hint">运行弹性评估后查看结果（后端接口 TODO）</p>
+              <p class="empty-hint">运行弹性分析后查看结果（后端接口 TODO）</p>
             </div>
           </div>
         </div><!-- /result-group resilience -->
@@ -2595,7 +2620,17 @@
 
   <script src="js/components.js?v=20260712-cb-source-flow-v2"></script>
   <script src="js/search_registry.js?v=20260709-phase5"></script>
-  <script src="js/canvas.js?v=20260712-scenario-roundtrip-v1"></script>
-  <script src="js/app.js?v=20260712-dashboard-link-v2"></script>
+  <script src="js/canvas.js?v=20260712-hysim-layout-v1"></script>
+  <script src="js/core/analysis_contracts.js?v=20260712-hysim-phase3-v1"></script>
+  <script src="js/core/task_manager.js?v=20260712-hysim-phase3-v1"></script>
+  <script src="js/core/api_client.js?v=20260712-hysim-phase3-v1"></script>
+  <script src="js/core/result_mapping.js?v=20260712-hysim-phase3-v1"></script>
+  <script src="js/core/timeseries_window.js?v=20260712-hysim-phase4-v1"></script>
+  <script src="js/core/layout_graph.js?v=20260712-hysim-layout-v1"></script>
+  <script src="vendor/elk.bundled.js?v=0.9.3"></script>
+  <script src="js/core/layout_engine.js?v=20260712-hysim-layout-v1"></script>
+  <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
+  <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
+  <script src="js/app.js?v=20260712-hysim-phase6-v1"></script>
 </body>
 </html>

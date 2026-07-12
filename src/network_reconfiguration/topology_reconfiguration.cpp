@@ -205,6 +205,7 @@ TopoReconfResult run_topology_reconfiguration(
   const int nl     = nl_ac + nl_dc;
   const int nl_vsc = static_cast<int>(vscs.size());
   const int n_ac_gen = static_cast<int>(ac.generators.size());
+  const bool split_topology = opt.split_domain_trees || opt.allow_dc_mesh;
 
   TopoReconfResult result;
   result.model_scope = opt.enable_pf ? "hybrid-acdc-topology-lindistflow"
@@ -369,18 +370,62 @@ TopoReconfResult run_topology_reconfiguration(
     mark_faulted_edge(ref.category, ref.index);
   }
 
+  struct DomainComponents {
+    std::vector<int> component_by_bus;
+    std::vector<int> roots;
+    std::vector<int> sizes;
+  };
+  auto build_domain_components = [&](int bus_begin, int bus_count,
+                                     int edge_begin, int edge_end) {
+    DomainComponents out;
+    out.component_by_bus.assign(static_cast<size_t>(bus_count), -1);
+    std::vector<std::vector<int>> adj(static_cast<size_t>(bus_count));
+    for (int e = edge_begin; e < edge_end; ++e) {
+      if (zeta[e] < 0.5 || (!edge_status[e] && !edge_switchable[e])) continue;
+      const int u = edge_from[e] - bus_begin;
+      const int v = edge_to[e] - bus_begin;
+      if (u < 0 || v < 0 || u >= bus_count || v >= bus_count) continue;
+      adj[u].push_back(v); adj[v].push_back(u);
+    }
+    for (int s = 0; s < bus_count; ++s) {
+      if (out.component_by_bus[s] >= 0) continue;
+      const int component = static_cast<int>(out.roots.size());
+      out.roots.push_back(s);
+      out.sizes.push_back(0);
+      std::vector<int> stack{s};
+      out.component_by_bus[s] = component;
+      while (!stack.empty()) {
+        const int u = stack.back(); stack.pop_back();
+        ++out.sizes[component];
+        for (int v : adj[u]) {
+          if (out.component_by_bus[v] < 0) {
+            out.component_by_bus[v] = component;
+            stack.push_back(v);
+          }
+        }
+      }
+    }
+    return out;
+  };
+  const DomainComponents ac_components =
+      build_domain_components(0, nb_ac, 0, nl_ac);
+  const DomainComponents dc_components =
+      build_domain_components(nb_ac, nb_dc, nl_ac, nl);
+
   // -------------------------------------------------------------------
   // Source buses (AC and DC controllable/fixed injections + voltage sources).
   // -------------------------------------------------------------------
   int root_bus = -1;
   std::vector<bool> source_at(static_cast<size_t>(nb), false);
+  std::vector<bool> root_at(static_cast<size_t>(nb), false);
   std::vector<double> source_pmin(static_cast<size_t>(nb), 0.0);
   std::vector<double> source_pmax(static_cast<size_t>(nb), 0.0);
   std::vector<double> source_qmin(static_cast<size_t>(nb), 0.0);
   std::vector<double> source_qmax(static_cast<size_t>(nb), 0.0);
   bool dc_source_present = false;
 
-  auto add_source_pos = [&](int pos, double pmin, double pmax, double qmin, double qmax) {
+  auto add_source_pos = [&](int pos, double pmin, double pmax, double qmin, double qmax,
+                            bool can_form_root) {
     if (pos < 0 || pos >= nb) return;
     const double p_cap = std::max({0.0, pmin, pmax});
     const double q_cap = std::max(std::abs(qmin), std::abs(qmax));
@@ -390,18 +435,21 @@ TopoReconfResult run_topology_reconfiguration(
     source_pmax[pos] += std::max(0.0, pmax) / base_mva;
     source_qmin[pos] += qmin / base_mva;
     source_qmax[pos] += std::max(0.0, qmax) / base_mva;
-    if (root_bus < 0) root_bus = pos;
+    root_at[pos] = root_at[pos] || can_form_root;
+    if (can_form_root && root_bus < 0) root_bus = pos;
   };
-  auto add_ac_source = [&](int bus, double pmin, double pmax, double qmin, double qmax) {
+  auto add_ac_source = [&](int bus, double pmin, double pmax, double qmin, double qmax,
+                           bool can_form_root = false) {
     auto it = ac_id_map.find(bus);
     if (it == ac_id_map.end()) return;
-    add_source_pos(it->second, pmin, pmax, qmin, qmax);
+    add_source_pos(it->second, pmin, pmax, qmin, qmax, can_form_root);
   };
-  auto add_dc_source = [&](int bus, double pmin, double pmax) {
+  auto add_dc_source = [&](int bus, double pmin, double pmax,
+                           bool can_form_root = true) {
     auto it = dc_id_map.find(bus);
     if (it == dc_id_map.end()) return;
     const bool was_source = source_at[static_cast<size_t>(it->second)];
-    add_source_pos(it->second, pmin, pmax, 0.0, 0.0);
+    add_source_pos(it->second, pmin, pmax, 0.0, 0.0, can_form_root);
     if (!was_source && source_at[static_cast<size_t>(it->second)]) {
       dc_source_present = true;
     }
@@ -409,8 +457,12 @@ TopoReconfResult run_topology_reconfiguration(
 
   for (const auto& g : ac.generators) {
     if (!g.in_service) continue;
+    const auto bus_it = ac_id_map.find(g.bus);
+    const bool slack_bus = bus_it != ac_id_map.end() &&
+                           ac.buses[bus_it->second].bus_type == BusType::SLACK;
     add_ac_source(g.bus, g.pmin_mw, g.pmax_mw > 0.0 ? g.pmax_mw : g.pg_mw,
-                  g.qmin_mvar, g.qmax_mvar > 0.0 ? g.qmax_mvar : std::abs(g.qg_mvar));
+                  g.qmin_mvar, g.qmax_mvar > 0.0 ? g.qmax_mvar : std::abs(g.qg_mvar),
+                  g.is_slack || slack_bus);
   }
   for (const auto& sg : ac.static_generators) {
     const double cap = hacdcpf::model::effective_capacity_mw(sg);
@@ -433,7 +485,7 @@ TopoReconfResult run_topology_reconfiguration(
   for (const auto& eg : ac.external_grids) {
     if (!eg.in_service) continue;
     const double cap = eg.s_sc_max_mva > 0.0 ? eg.s_sc_max_mva : opt.default_rate_mva;
-    add_ac_source(eg.bus, 0.0, cap, -cap, cap);
+    add_ac_source(eg.bus, 0.0, cap, -cap, cap, true);
   }
   for (const auto& sg : dc.dc_static_generators) {
     const double cap = hacdcpf::model::effective_capacity_mw(sg);
@@ -451,16 +503,23 @@ TopoReconfResult run_topology_reconfiguration(
     if (!pv.in_service) continue;
     if (pv.p_set_mw > 0.0) add_dc_source(pv.bus, 0.0, pv.p_set_mw);
   }
+  std::unordered_set<int> vsc_connected_dc_buses;
+  for (const auto& vsc : vscs) {
+    if (vsc.in_service) vsc_connected_dc_buses.insert(vsc.bus_dc);
+  }
   for (const auto& b : dc.buses) {
     if (!b.in_service || b.bus_type != DCBusType::DC_V) continue;
+    // A converter-controlled DC voltage bus is a voltage reference, not an
+    // independent energy source. Its active power must arrive through the VSC.
+    if (vsc_connected_dc_buses.count(b.index)) continue;
     const double cap = std::max(opt.default_rate_mva, base_mva);
-    add_dc_source(b.index, 0.0, cap);
+    add_dc_source(b.index, 0.0, cap, true);
   }
   if (root_bus < 0) {
     for (int i = 0; i < nb_ac; ++i) {
       if (ac.buses[i].bus_type == BusType::SLACK) {
         const double cap = std::max(opt.default_rate_mva, base_mva);
-        add_ac_source(ac.buses[i].index, 0.0, cap, -cap, cap);
+        add_ac_source(ac.buses[i].index, 0.0, cap, -cap, cap, true);
         break;
       }
     }
@@ -485,6 +544,13 @@ TopoReconfResult run_topology_reconfiguration(
     gen_Qmin.push_back(source_qmin[i]);
   }
   const int ng = static_cast<int>(gen_bus.size());
+  int primary_root_g = -1;
+  for (int g = 0; g < ng; ++g) {
+    if (gen_bus[g] == root_bus && root_at[gen_bus[g]]) {
+      primary_root_g = g;
+      break;
+    }
+  }
 
   // -------------------------------------------------------------------
   // Variable layout
@@ -538,9 +604,14 @@ TopoReconfResult run_topology_reconfiguration(
       std::count(beta_free.begin(), beta_free.end(), true));
 
   for (int g = 0; g < ng; ++g) {
-    lb[idx.gamma(g)] = 0.0; ub[idx.gamma(g)] = 1.0;
+    lb[idx.gamma(g)] = 0.0;
+    ub[idx.gamma(g)] = root_at[gen_bus[g]] &&
+                       (!split_topology || g == primary_root_g) ? 1.0 : 0.0;
   }
-  if (ng > 0) { lb[idx.gamma(0)] = 1.0; ub[idx.gamma(0)] = 1.0; }
+  if (primary_root_g >= 0) {
+    lb[idx.gamma(primary_root_g)] = 1.0;
+    ub[idx.gamma(primary_root_g)] = 1.0;
+  }
 
   if (opt.verbose) {
     spdlog::info("[拓扑重构] β固定={}, β自由(联络线)={}", n_beta_fixed, n_beta_free);
@@ -707,28 +778,34 @@ TopoReconfResult run_topology_reconfiguration(
     for (int i = 0; i < nb; ++i)   c[idx.sP(i)] = lambda_shed;
     for (int i = 0; i < nb_ac; ++i) c[idx.sQ(i)] = lambda_shed;
   }
-  for (int g = 1; g < ng; ++g)
-    c[idx.gamma(g)] = lambda_island;
+  for (int g = 0; g < ng; ++g)
+    if (g != primary_root_g) c[idx.gamma(g)] = lambda_island;
 
   // -------------------------------------------------------------------
   // Constraint dimensions
   // -------------------------------------------------------------------
-  const int n_eq_topo = nb + 1;
+  const bool split = split_topology;
+  const int n_tree_eq = split
+      ? static_cast<int>(ac_components.roots.size()) +
+            (opt.allow_dc_mesh ? 0 : static_cast<int>(dc_components.roots.size()))
+      : 1;
+  const int n_eq_topo = nb + n_tree_eq;
   const int n_eq_pf   = opt.enable_pf ? (nb + nb_ac) : 0;
   const int n_eq      = n_eq_topo + n_eq_pf;
 
   const int n_ineq_topo = 2 * n_beta_free + ng + 1;
   const bool g4_volt = opt.enable_pf && opt.enable_voltage;
   const bool g5_therm = opt.enable_pf && opt.enable_thermal;
-  const int n_ineq_volt = g4_volt ? 2*(nl+nl_vsc) : 0;
+  const int n_ineq_volt = g4_volt ? 2*nl : 0;
   const int n_ineq_therm = g5_therm ? (2*(nl+nl_vsc) + 2*(nl_ac+nl_vsc)) : 0;
   const int n_ineq_pf = n_ineq_volt + n_ineq_therm;
   const int n_ineq_budget = (opt.max_switch_ops > 0) ? 1 : 0;
   // Per-domain root: split-tree mode forces ≥1 root in the DC source set so a
   // meshed DC island is not assumed to be fed solely through an AC root.
   int n_dc_sources = 0;
-  for (int g = 0; g < ng; ++g) if (gen_bus[g] >= nb_ac) ++n_dc_sources;
-  const int n_ineq_root = ((opt.split_domain_trees || opt.allow_dc_mesh) && n_dc_sources > 0) ? 1 : 0;
+  for (int g = 0; g < ng; ++g)
+    if (gen_bus[g] >= nb_ac && root_at[gen_bus[g]]) ++n_dc_sources;
+  const int n_ineq_root = (!split && n_dc_sources > 0) ? 1 : 0;
   const int n_ineq_loss = idx.loss_aware ? 2 * nl : 0;  // t ≥ |P| both AC+DC
   const int n_ineq = n_ineq_topo + n_ineq_pf + n_ineq_budget + n_ineq_root + n_ineq_loss;
 
@@ -740,39 +817,76 @@ TopoReconfResult run_topology_reconfiguration(
   Eigen::VectorXd beq = Eigen::VectorXd::Zero(n_eq);
   int eq_row = 0;
 
-  // (T1) Fictitious flow conservation: Cft'·Fij + Cvsc'·Fvsc - Cg'·Fg = -1
+  // (T1) Fictitious flow conservation. Unified mode uses source-rooted
+  // connectivity across converter bridges. Split mode uses independent AC and
+  // DC commodities so a path through another electrical domain cannot hide a
+  // cycle or disconnected component.
   for (int i = 0; i < nl; ++i) {
     if (edge_from[i] < 0) continue;
     eq_trips.emplace_back(eq_row + edge_from[i], idx.Fij(i),  1.0);
     eq_trips.emplace_back(eq_row + edge_to[i],   idx.Fij(i), -1.0);
   }
-  for (int i = 0; i < nl_vsc; ++i) {
-    int e = nl + i;
-    if (edge_from[e] < 0) continue;
-    eq_trips.emplace_back(eq_row + edge_from[e], idx.Fij_vsc(i),  1.0);
-    eq_trips.emplace_back(eq_row + edge_to[e],   idx.Fij_vsc(i), -1.0);
+  if (!split) {
+    for (int i = 0; i < nl_vsc; ++i) {
+      int e = nl + i;
+      if (edge_from[e] < 0) continue;
+      eq_trips.emplace_back(eq_row + edge_from[e], idx.Fij_vsc(i),  1.0);
+      eq_trips.emplace_back(eq_row + edge_to[e],   idx.Fij_vsc(i), -1.0);
+    }
+    for (int g = 0; g < ng; ++g)
+      if (gen_bus[g] >= 0)
+        eq_trips.emplace_back(eq_row + gen_bus[g], idx.Fg(g), -1.0);
+    for (int i = 0; i < nb; ++i) beq[eq_row + i] = -1.0;
+  } else {
+    for (int i = 0; i < nl_vsc; ++i) {
+      lb[idx.Fij_vsc(i)] = 0.0;
+      ub[idx.Fij_vsc(i)] = 0.0;
+    }
+    for (int i = 0; i < nb_ac; ++i) beq[eq_row + i] = -1.0;
+    for (size_t cidx = 0; cidx < ac_components.roots.size(); ++cidx) {
+      beq[eq_row + ac_components.roots[cidx]] += ac_components.sizes[cidx];
+    }
+    for (int i = 0; i < nb_dc; ++i) beq[eq_row + nb_ac + i] = -1.0;
+    for (size_t cidx = 0; cidx < dc_components.roots.size(); ++cidx) {
+      beq[eq_row + nb_ac + dc_components.roots[cidx]] += dc_components.sizes[cidx];
+    }
   }
-  for (int g = 0; g < ng; ++g)
-    if (gen_bus[g] >= 0)
-      eq_trips.emplace_back(eq_row + gen_bus[g], idx.Fg(g), -1.0);
-  for (int i = 0; i < nb; ++i)
-    beq[eq_row + i] = -1.0;
   eq_row += nb;
 
-  // (T4) Forest property: Σβ + Σγ = nb.  In split-domain mode VSC bridges are
-  // excluded from the cardinality so meshed AC/DC converter links are not
-  // forced into a single radial tree; only AC+DC branches count.  In DC-mesh
-  // mode DC branches are excluded too, leaving only the AC side radial.
-  const bool split = opt.split_domain_trees || opt.allow_dc_mesh;
-  const int n_tree_edges = opt.allow_dc_mesh ? nl_ac : (split ? nl : (nl + nl_vsc));
-  const int tree_bus_total = opt.allow_dc_mesh ? nb_ac : (split ? (nb_ac + nb_dc) : nb);
-  for (int i = 0; i < n_tree_edges; ++i)
-    eq_trips.emplace_back(eq_row, idx.beta(i), 1.0);
-  for (int g = 0; g < ng; ++g)
-    if (!opt.allow_dc_mesh || gen_bus[g] < nb_ac)  // only AC roots count the AC tree
+  // (T4) Forest cardinality. Split mode requires a separate forest in each
+  // electrical domain; one aggregate AC+DC equation lets a DC cycle be offset
+  // by opening an unrelated AC line. VSC couplings are transfer bridges and do
+  // not count as AC or DC line edges.
+  if (!split) {
+    for (int i = 0; i < nl + nl_vsc; ++i)
+      eq_trips.emplace_back(eq_row, idx.beta(i), 1.0);
+    for (int g = 0; g < ng; ++g)
       eq_trips.emplace_back(eq_row, idx.gamma(g), 1.0);
-  beq[eq_row] = static_cast<double>(tree_bus_total);
-  eq_row += 1;
+    beq[eq_row] = static_cast<double>(nb);
+    ++eq_row;
+  } else {
+    for (size_t cidx = 0; cidx < ac_components.roots.size(); ++cidx) {
+      for (int i = 0; i < nl_ac; ++i) {
+        const int local_from = edge_from[i];
+        if (local_from >= 0 && ac_components.component_by_bus[local_from] == static_cast<int>(cidx))
+          eq_trips.emplace_back(eq_row, idx.beta(i), 1.0);
+      }
+      beq[eq_row] = static_cast<double>(std::max(0, ac_components.sizes[cidx] - 1));
+      ++eq_row;
+    }
+
+    if (!opt.allow_dc_mesh && nb_dc > 0) {
+      for (size_t cidx = 0; cidx < dc_components.roots.size(); ++cidx) {
+        for (int i = nl_ac; i < nl; ++i) {
+          const int local_from = edge_from[i] - nb_ac;
+          if (local_from >= 0 && dc_components.component_by_bus[local_from] == static_cast<int>(cidx))
+            eq_trips.emplace_back(eq_row, idx.beta(i), 1.0);
+        }
+        beq[eq_row] = static_cast<double>(std::max(0, dc_components.sizes[cidx] - 1));
+        ++eq_row;
+      }
+    }
+  }
 
   // (P1) Active power balance
   if (opt.enable_pf) {
@@ -870,7 +984,6 @@ TopoReconfResult run_topology_reconfiguration(
   ++ineq_row;
 
   // LinDistFlow inequalities
-  const double bigM_v = opt.big_m_v;
   if (g4_volt) {
     // (P3) Voltage drop big-M (per-branch, tightened): an open branch only needs
     // M ≥ max|v_j−v_i+2rP+2xQ| = (Vmax²−Vmin²)+2(r+x)·rate. Tighter M shrinks the
@@ -903,21 +1016,8 @@ TopoReconfResult run_topology_reconfiguration(
       b_ineq[ineq_row] = bM;
       ++ineq_row;
     }
-    for (int i = 0; i < nl_vsc; ++i) {
-      int e = nl + i;
-      int fi = edge_from[e], ti = edge_to[e];
-      if (fi < 0) { ineq_row += 2; continue; }
-      ineq_trips.emplace_back(ineq_row, idx.v(ti),  1.0);
-      ineq_trips.emplace_back(ineq_row, idx.v(fi), -1.0);
-      ineq_trips.emplace_back(ineq_row, idx.beta(nl+i), bigM_v);
-      b_ineq[ineq_row] = bigM_v;
-      ++ineq_row;
-      ineq_trips.emplace_back(ineq_row, idx.v(fi),  1.0);
-      ineq_trips.emplace_back(ineq_row, idx.v(ti), -1.0);
-      ineq_trips.emplace_back(ineq_row, idx.beta(nl+i), bigM_v);
-      b_ineq[ineq_row] = bigM_v;
-      ++ineq_row;
-    }
+    // VSCs regulate AC and DC terminal voltages independently. Equating their
+    // squared per-unit voltages is not a converter voltage-drop equation.
   }
 
   if (g5_therm) {
@@ -1046,7 +1146,7 @@ TopoReconfResult run_topology_reconfiguration(
   bool heuristic_solved = false;
   Eigen::VectorXd x_heur;
 
-  if (!opt.skip_heuristic) {
+  if (!opt.skip_heuristic && !split) {
     const auto t_heur = chr::steady_clock::now();
 
     // Active tree adjacency
@@ -1136,7 +1236,7 @@ TopoReconfResult run_topology_reconfiguration(
         int v = bfs_order[k];
         if (parent_edge[v] >= 0) x_heur[idx.beta(parent_edge[v])] = 1.0;
       }
-      x_heur[idx.gamma(0)] = 1.0;
+      if (primary_root_g >= 0) x_heur[idx.gamma(primary_root_g)] = 1.0;
 
       for (int k = 1; k < static_cast<int>(bfs_order.size()); ++k) {
         int v = bfs_order[k];
@@ -1148,7 +1248,8 @@ TopoReconfResult run_topology_reconfiguration(
         else
           x_heur[idx.Fij_vsc(e-nl)] = (edge_from[e] == parent_nd[v]) ? flow : -flow;
       }
-      x_heur[idx.Fg(0)] = static_cast<double>(subtree_sz[root_bus]);
+      if (primary_root_g >= 0)
+        x_heur[idx.Fg(primary_root_g)] = static_cast<double>(subtree_sz[root_bus]);
 
       Eigen::VectorXd eq_res = Aeq_mat * x_heur - beq;
       Eigen::VectorXd iq_res = A_ineq_mat * x_heur - b_ineq;
@@ -1216,10 +1317,6 @@ TopoReconfResult run_topology_reconfiguration(
     bc_opt.accept_verified_warm_start_incumbent = true;
     bc_opt.verbose = opt.verbose;
 
-    if (x_heur.size() == idx.n_vars) {
-      milp.initial_solution = x_heur;
-    }
-
     if (opt.verbose) {
       spdlog::info("[拓扑重构] 启发式未找到可行方案，调用 MILP fallback");
     }
@@ -1263,8 +1360,12 @@ TopoReconfResult run_topology_reconfiguration(
       return false;
     };
 
+    std::string external_failure;
     auto try_external = [&](auto& adapter, const char* label) -> bool {
-      if (!adapter.available()) return false;
+      if (!adapter.available()) {
+        external_failure = std::string(label) + " unavailable";
+        return false;
+      }
       auto r = adapter.solve_milp(milp);
       if (r.stats.success && r.x.size() >= idx.n_vars) {
         x_sol = r.x; solved_ok = true; result.milp_objective = r.stats.objective;
@@ -1274,6 +1375,7 @@ TopoReconfResult run_topology_reconfiguration(
             std::isfinite(r.stats.mip_gap) && r.stats.mip_gap <= opt.mip_gap + 1e-9;
         return true;
       }
+      external_failure = std::string(label) + " failed: " + r.stats.status;
       return false;
     };
 
@@ -1281,13 +1383,29 @@ TopoReconfResult run_topology_reconfiguration(
       solved_ok = try_native_bc("");
     } else if (opt.solver == "scip") {
       engine::ScipAdapter scip;
-      if (!try_external(scip, "SCIP")) solved_ok = try_native_bc("SCIP unavailable/failed");
+      solved_ok = try_external(scip, "SCIP");
     } else if (opt.solver == "highs") {
       engine::HighsAdapter highs;
-      if (!try_external(highs, "HiGHS")) solved_ok = try_native_bc("HiGHS unavailable/failed");
-    } else {  // auto: HiGHS → native
+      solved_ok = try_external(highs, "HiGHS");
+      const std::string highs_failure = external_failure;
+      if (!solved_ok) {
+        engine::ScipAdapter scip;
+        solved_ok = try_external(scip, "SCIP");
+        if (!solved_ok) external_failure = highs_failure + "; " + external_failure;
+      }
+    } else {  // auto: HiGHS -> SCIP
       engine::HighsAdapter highs;
-      if (!try_external(highs, "HiGHS")) solved_ok = try_native_bc("HiGHS unavailable/failed");
+      solved_ok = try_external(highs, "HiGHS");
+      const std::string highs_failure = external_failure;
+      if (!solved_ok) {
+        engine::ScipAdapter scip;
+        solved_ok = try_external(scip, "SCIP");
+        if (!solved_ok) external_failure = highs_failure + "; " + external_failure;
+      }
+    }
+    if (!solved_ok && opt.solver != "native") {
+      result.solver_backend = "external-milp";
+      result.solver_status = external_failure;
     }
   }
 
@@ -1401,8 +1519,16 @@ TopoReconfResult run_topology_reconfiguration(
       // Project the toggled branch back to its physical device, if any.
       TopoReconfResult::SwitchOperation sop;
       sop.close = now_on;
+      sop.category = ref.category;
       sop.bus_from = (edge_from[i] >= 0 && edge_from[i] < nb_ac) ? ac.buses[edge_from[i]].index : 0;
       sop.bus_to   = (edge_to[i] >= 0 && edge_to[i] < nb_ac) ? ac.buses[edge_to[i]].index : 0;
+      if (ref.category == graph::EdgeCategory::DC_Line) {
+        sop.bus_from = dc.buses[edge_from[i] - nb_ac].index;
+        sop.bus_to = dc.buses[edge_to[i] - nb_ac].index;
+      } else if (ref.category == graph::EdgeCategory::VSC_Coupling) {
+        sop.bus_from = ac.buses[edge_from[i]].index;
+        sop.bus_to = dc.buses[edge_to[i] - nb_ac].index;
+      }
       sop.index    = edge_orig_idx[i];
       sop.kind     = TopoReconfResult::DeviceKind::Branch;
       if (ref.category == graph::EdgeCategory::AC_Line) {
@@ -1453,10 +1579,17 @@ TopoReconfResult run_topology_reconfiguration(
   for (int i = 0; i < nl + nl_vsc; ++i)
     if (!edge_status[i] && x_sol[idx.beta(i)] > 0.5) result.obj_terms.switching += lambda_sw;
   if (opt.enable_pf) {
-    for (int i = 0; i < nb; ++i)   result.obj_terms.shed += lambda_shed * x_sol[idx.sP(i)];
-    for (int i = 0; i < nb_ac; ++i) result.obj_terms.shed += lambda_shed * x_sol[idx.sQ(i)];
+    for (int i = 0; i < nb; ++i) {
+      result.total_shed_mw += x_sol[idx.sP(i)] * base_mva;
+      result.obj_terms.shed += lambda_shed * x_sol[idx.sP(i)];
+    }
+    for (int i = 0; i < nb_ac; ++i) {
+      result.total_shed_mvar += x_sol[idx.sQ(i)] * base_mva;
+      result.obj_terms.shed += lambda_shed * x_sol[idx.sQ(i)];
+    }
   }
-  for (int g = 1; g < ng; ++g) result.obj_terms.island += lambda_island * x_sol[idx.gamma(g)];
+  for (int g = 0; g < ng; ++g)
+    if (g != primary_root_g) result.obj_terms.island += lambda_island * x_sol[idx.gamma(g)];
 
   result.solve_time_s = chr::duration<double>(
       chr::steady_clock::now() - t_start).count();

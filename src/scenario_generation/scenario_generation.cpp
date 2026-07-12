@@ -1808,6 +1808,9 @@ nlohmann::json candidate_coverage_point(const ScenarioCandidate& c,
 nlohmann::json candidate_to_json(const ScenarioCandidate& c) {
   nlohmann::json out = candidate_coverage_point(c);
   out["time_series"] = time_series_to_json(c.time_series);
+  if (!c.standard_time_series.is_null() && !c.standard_time_series.empty()) {
+    out["standard_time_series"] = c.standard_time_series;
+  }
   if (!c.component_load_profiles.is_null() && !c.component_load_profiles.empty()) out["component_load_profiles"] = c.component_load_profiles;
   return out;
 }
