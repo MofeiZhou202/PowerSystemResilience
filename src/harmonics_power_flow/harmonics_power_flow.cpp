@@ -659,7 +659,8 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& rich_sys,
         auto itt = ac_res[t].v_by_order.find(h);
         if (itf == ac_res[f].v_by_order.end() || itt == ac_res[t].v_by_order.end())
           continue;
-        Cx z(br.r_pu, static_cast<double>(h) * br.x_pu);
+        Cx z(skin_r(br.r_pu, static_cast<double>(h), opt),
+             static_cast<double>(h) * br.x_pu);
         Cx ys = (std::abs(z) > 1e-12) ? Cx(1.0, 0.0) / z : Cx(0.0, 0.0);
         double im = std::abs(ys * (itf->second - itt->second));
         bf.i_by_order[h] = im;

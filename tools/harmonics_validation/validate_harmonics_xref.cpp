@@ -20,6 +20,10 @@ using hacdcpf::DCBranch;
 using hacdcpf::DCBus;
 using hacdcpf::DCBusType;
 using hacdcpf::HybridPowerSystem;
+using hacdcpf::PhaseMask;
+using hacdcpf::ThreePhaseACBus;
+using hacdcpf::ThreePhaseACLine;
+using hacdcpf::ThreePhaseACSystem;
 using hacdcpf::VSCConverter;
 using hacdcpf::ConverterMode;
 using hacdcpf::harmonics::Complex;
@@ -30,8 +34,13 @@ using hacdcpf::harmonics::HarmonicNIC;
 using hacdcpf::harmonics::HarmonicSpectrum;
 using hacdcpf::harmonics::HarmonicSpectrumLine;
 using hacdcpf::harmonics::HarmonicStudyInputs;
+using hacdcpf::harmonics::HPF3phResult;
 using hacdcpf::harmonics::PortBehavior;
+using hacdcpf::harmonics::SkinEffectModel;
+using hacdcpf::harmonics::ThreePhaseHarmonicInputs;
+using hacdcpf::harmonics::ThreePhaseHarmonicSource;
 using hacdcpf::harmonics::solve_harmonic_power_flow;
+using hacdcpf::harmonics::solve_harmonic_power_flow_3ph;
 
 namespace {
 
@@ -127,6 +136,10 @@ json result_to_json(const HPFResult& res) {
   out["base_pf_converged"] = res.base_pf_converged;
   out["max_ac_thd_pct"] = res.max_ac_thd_pct;
   out["max_dc_thd_pct"] = res.max_dc_thd_pct;
+  out["max_ac_thd_bus"] = res.max_ac_thd_bus;
+  out["max_dc_thd_bus"] = res.max_dc_thd_bus;
+  out["ac_order_solved"] = res.ac_order_solved;
+  out["dc_order_solved"] = res.dc_order_solved;
 
   out["buses"] = json::array();
   for (const auto& b : res.ac_bus_results) {
@@ -191,6 +204,77 @@ json result_to_json(const HPFResult& res) {
   return out;
 }
 
+ThreePhaseACBus three_phase_bus(int id, BusType type, double base_kv) {
+  ThreePhaseACBus b;
+  b.index = id;
+  b.bus_type = type;
+  b.phase_mask = PhaseMask::abc();
+  b.vm_a_pu = 1.0;
+  b.va_a_deg = 0.0;
+  b.vm_b_pu = 1.0;
+  b.va_b_deg = -120.0;
+  b.vm_c_pu = 1.0;
+  b.va_c_deg = 120.0;
+  b.base_kv = base_kv;
+  b.in_service = true;
+  return b;
+}
+
+ThreePhaseACLine three_phase_line(int id, int from, int to, const json& line) {
+  ThreePhaseACLine br;
+  br.index = id;
+  br.from_bus = from;
+  br.to_bus = to;
+  br.phase_mask = PhaseMask::abc();
+  br.r1_pu = get_or(line, "r1_pu", 0.01);
+  br.x1_pu = get_or(line, "x1_pu", 0.1);
+  br.b1_pu = get_or(line, "b1_pu", 0.0);
+  br.r0_pu = get_or(line, "r0_pu", br.r1_pu);
+  br.x0_pu = get_or(line, "x0_pu", br.x1_pu);
+  br.b0_pu = get_or(line, "b0_pu", br.b1_pu);
+  br.in_service = true;
+  return br;
+}
+
+json result_3ph_to_json(const HPF3phResult& res) {
+  json out;
+  out["solver"] = "hacdcpf::harmonics::solve_harmonic_power_flow_3ph";
+  out["ok"] = res.ok;
+  out["message"] = res.message;
+  out["base_pf_converged"] = res.base_pf_converged;
+  out["max_ac_thd_pct"] = res.max_thd_pct;
+  out["max_ac_thd_bus"] = res.max_thd_bus;
+  out["ac_order_solved"] = res.ac_order_solved;
+  out["buses"] = json::array();
+  for (const auto& b : res.bus_results) {
+    json jb = {{"bus", b.bus},
+               {"v_fund_pu", {b.v_fund_pu_a, b.v_fund_pu_b, b.v_fund_pu_c}},
+               {"thd_pct", {b.thd_a_pct, b.thd_b_pct, b.thd_c_pct}},
+               {"orders", json::array()}};
+    for (const auto& [order, va] : b.v_by_order_a) {
+      json phases = json::array();
+      phases.push_back(phasor_json(va));
+      phases.push_back(phasor_json(b.v_by_order_b.at(order)));
+      phases.push_back(phasor_json(b.v_by_order_c.at(order)));
+      jb["orders"].push_back({{"order", order}, {"phases", phases}});
+    }
+    out["buses"].push_back(jb);
+  }
+  return out;
+}
+
+void configure_frequency_models(const json& cfg, HPFOptions& opt) {
+  const std::string skin = get_or<std::string>(cfg, "skin_effect", "none");
+  if (skin == "sqrt_order") opt.skin_effect = SkinEffectModel::SqrtOrder;
+  else if (skin == "proportional_sqrt") opt.skin_effect = SkinEffectModel::ProportionalSqrt;
+  else opt.skin_effect = SkinEffectModel::None;
+  opt.skin_coefficient = get_or(cfg, "skin_coefficient", 0.0);
+  if (cfg.contains("dc_branch_x_pu"))
+    opt.dc_ripple_model.branch_x_pu[1] = cfg["dc_branch_x_pu"].get<double>();
+  if (cfg.contains("dc_bus_b_pu"))
+    opt.dc_ripple_model.bus_b_pu[11] = cfg["dc_bus_b_pu"].get<double>();
+}
+
 json solve_canonical_case(const json& cfg) {
   const double base_mva = get_or(cfg, "base_mva", 100.0);
   const double base_kv = get_or(cfg, "base_kv", 10.0);
@@ -222,6 +306,7 @@ json solve_canonical_case(const json& cfg) {
   opt.ac_orders = int_vector_or(cfg, "ac_orders", {5, 7, 11, 13});
   opt.dc_orders.clear();
   opt.default_source_xpp_pu = get_or(cfg, "source_xpp_pu", 0.2);
+  configure_frequency_models(cfg, opt);
 
   HPFResult res = solve_harmonic_power_flow(sys, HarmonicStudyInputs{{src}, {}}, opt);
   json out = result_to_json(res);
@@ -234,6 +319,101 @@ json solve_canonical_case(const json& cfg) {
                     {"source_xpp_pu", opt.default_source_xpp_pu}};
   out["device"] = {{"type", "HarmonicCurrentSource"},
                    {"i_base_pu", src.i_base_pu},
+                   {"i_base_phase_deg", src.i_base_phase_deg},
+                   {"spectrum", spectrum_to_json(src.spectrum)}};
+  return out;
+}
+
+json solve_canonical_dc_case(const json& cfg) {
+  const double base_mva = get_or(cfg, "base_mva", 100.0);
+  const double base_kv = get_or(cfg, "dc_base_kv", 1.0);
+  const auto line = cfg.value("dc_line", json::object());
+  HybridPowerSystem sys;
+  sys.base_mva = base_mva;
+  sys.dc.base_mva = base_mva;
+  sys.dc.buses = {dc_bus(10, DCBusType::DC_V, base_kv),
+                  dc_bus(11, DCBusType::DC_P, base_kv)};
+  sys.dc.branches = {dc_line(1, 10, 11, get_or(line, "r_pu", 0.05))};
+
+  HarmonicCurrentSource src;
+  src.bus = 11;
+  src.is_dc = true;
+  src.i_base_pu = get_or(cfg, "i_base_pu", 0.5);
+  src.i_base_phase_deg = get_or(cfg, "i_base_phase_deg", 0.0);
+  src.spectrum = spectrum_from_json(cfg.at("spectrum"));
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.compute_branch_flows = true;
+  opt.ac_orders.clear();
+  opt.dc_orders = int_vector_or(cfg, "dc_orders", {6, 12, 18});
+  opt.dc_source_impedance_pu = get_or(cfg, "dc_source_impedance_pu", 0.01);
+  configure_frequency_models(cfg, opt);
+
+  HPFResult res = solve_harmonic_power_flow(sys, HarmonicStudyInputs{{src}, {}}, opt);
+  json out = result_to_json(res);
+  out["case_type"] = "canonical_dc_current_source";
+  out["network"] = {{"base_mva", base_mva},
+                    {"dc_base_kv", base_kv},
+                    {"source_bus", 10},
+                    {"load_bus", 11},
+                    {"dc_line", line},
+                    {"dc_source_impedance_pu", opt.dc_source_impedance_pu},
+                    {"dc_branch_x_pu", get_or(cfg, "dc_branch_x_pu", 0.0)},
+                    {"dc_bus_b_pu", get_or(cfg, "dc_bus_b_pu", 0.0)}};
+  out["device"] = {{"type", "DCRippleCurrentSource"},
+                   {"i_base_pu", src.i_base_pu},
+                   {"i_base_phase_deg", src.i_base_phase_deg},
+                   {"spectrum", spectrum_to_json(src.spectrum)}};
+  return out;
+}
+
+json solve_three_phase_case(const json& cfg) {
+  const double base_mva = get_or(cfg, "base_mva", 100.0);
+  const double base_kv = get_or(cfg, "base_kv", 10.0);
+  const auto line = cfg.value("line", json::object());
+  ThreePhaseACSystem sys;
+  sys.base_mva = base_mva;
+  sys.buses = {three_phase_bus(1, BusType::SLACK, base_kv),
+               three_phase_bus(2, BusType::PQ, base_kv)};
+  sys.lines = {three_phase_line(1, 1, 2, line)};
+
+  ThreePhaseHarmonicSource src;
+  src.bus = 2;
+  src.balanced = get_or(cfg, "balanced", true);
+  src.i_base_pu = get_or(cfg, "i_base_pu", 0.3);
+  src.i_base_phase_deg = get_or(cfg, "i_base_phase_deg", 0.0);
+  src.i_base_pu_a = get_or(cfg, "i_base_pu_a", src.i_base_pu);
+  src.i_base_pu_b = get_or(cfg, "i_base_pu_b", src.i_base_pu);
+  src.i_base_pu_c = get_or(cfg, "i_base_pu_c", src.i_base_pu);
+  if (cfg.contains("i_base_pu_abc")) {
+    const auto values = cfg["i_base_pu_abc"].get<std::vector<double>>();
+    if (values.size() != 3)
+      throw std::runtime_error("i_base_pu_abc must contain exactly three values");
+    src.i_base_pu_a = values[0];
+    src.i_base_pu_b = values[1];
+    src.i_base_pu_c = values[2];
+  }
+  src.spectrum = spectrum_from_json(cfg.at("spectrum"));
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = int_vector_or(cfg, "ac_orders", {3, 5, 7, 11, 13});
+  opt.default_source_xpp_pu = get_or(cfg, "source_xpp_pu", 0.2);
+  configure_frequency_models(cfg, opt);
+  HPF3phResult res = solve_harmonic_power_flow_3ph(
+      sys, ThreePhaseHarmonicInputs{{src}, {}}, opt);
+  json out = result_3ph_to_json(res);
+  out["case_type"] = "canonical_three_phase_current_source";
+  out["balanced"] = src.balanced;
+  out["network"] = {{"base_mva", base_mva}, {"base_kv", base_kv},
+                    {"source_bus", 1}, {"load_bus", 2}, {"line", line},
+                    {"source_xpp_pu", opt.default_source_xpp_pu}};
+  out["device"] = {{"type", "ThreePhaseHarmonicSource"},
+                   {"i_base_pu", src.i_base_pu},
+                   {"i_base_pu_abc", {src.i_base_pu_a, src.i_base_pu_b, src.i_base_pu_c}},
                    {"i_base_phase_deg", src.i_base_phase_deg},
                    {"spectrum", spectrum_to_json(src.spectrum)}};
   return out;
@@ -300,6 +480,7 @@ json solve_device_vsc_case(const json& cfg) {
   opt.dc_orders = int_vector_or(cfg, "dc_orders", {6, 12});
   opt.default_source_xpp_pu = get_or(cfg, "source_xpp_pu", 0.2);
   opt.dc_source_impedance_pu = get_or(cfg, "dc_source_impedance_pu", 0.01);
+  configure_frequency_models(cfg, opt);
 
   HPFResult res = solve_harmonic_power_flow(sys, HarmonicStudyInputs{{}, {nic}}, opt);
   json out = result_to_json(res);
@@ -325,11 +506,13 @@ json solve_device_vsc_case(const json& cfg) {
                    {"ac_spectrum", spectrum_to_json(nic.ac_spectrum)},
                    {"dc_spectrum", spectrum_to_json(nic.dc_spectrum)}};
   out["device"]["ac_current_by_order"] = json::array();
+  const double i_ac1_phase = std::atan2(-q_mvar, p_mw);
   for (const auto& row : nic.ac_spectrum) {
     out["device"]["ac_current_by_order"].push_back(
         {{"order", row.order},
          {"current", phasor_json(std::polar(i_ac1_mag * row.mag_percent / 100.0,
-                                            row.phase_deg * kPi / 180.0))}});
+                                            row.phase_deg * kPi / 180.0 +
+                                            i_ac1_phase))}});
   }
   out["device"]["dc_current_by_order"] = json::array();
   for (const auto& row : nic.dc_spectrum) {
@@ -344,6 +527,8 @@ json solve_device_vsc_case(const json& cfg) {
 json solve_case(const json& cfg) {
   const std::string type = get_or<std::string>(cfg, "case_type", "canonical_current_source");
   if (type == "canonical_current_source") return solve_canonical_case(cfg);
+  if (type == "canonical_dc_current_source") return solve_canonical_dc_case(cfg);
+  if (type == "canonical_three_phase_current_source") return solve_three_phase_case(cfg);
   if (type == "device_vsc_nic") return solve_device_vsc_case(cfg);
   throw std::runtime_error("unsupported harmonics validation case_type: " + type);
 }

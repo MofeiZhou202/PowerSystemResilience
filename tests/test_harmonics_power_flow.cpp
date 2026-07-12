@@ -1053,8 +1053,10 @@ TEST_CASE("HPF skin effect scales series resistance with sqrt(h)", "[harmonics][
 
   // V2(5) = I*(z_src + z_line) = (R_line) + j*(5*0.2 + 5*0.1) = R_line + j1.5
   // Re(V2) is exactly the line resistance at order 5; Im(V2) = 1.5 always.
-  const Cx v_none = vbus(run(SkinEffectModel::None, 0.0), 2, 5);
-  const Cx v_sqrt = vbus(run(SkinEffectModel::SqrtOrder, 0.0), 2, 5);
+  const HPFResult r_none = run(SkinEffectModel::None, 0.0);
+  const HPFResult r_sqrt = run(SkinEffectModel::SqrtOrder, 0.0);
+  const Cx v_none = vbus(r_none, 2, 5);
+  const Cx v_sqrt = vbus(r_sqrt, 2, 5);
   const Cx v_prop = vbus(run(SkinEffectModel::ProportionalSqrt, 1.0), 2, 5);
 
   CHECK_THAT(v_none.real(), WithinAbs(0.1, 1e-5));
@@ -1062,6 +1064,9 @@ TEST_CASE("HPF skin effect scales series resistance with sqrt(h)", "[harmonics][
   // SqrtOrder: R(5) = 0.1 * sqrt(5)
   CHECK_THAT(v_sqrt.real(), WithinAbs(0.1 * std::sqrt(5.0), 1e-5));
   CHECK_THAT(v_sqrt.imag(), WithinAbs(1.5, 1e-5));
+  REQUIRE(r_sqrt.ac_branch_flows.size() == 1);
+  REQUIRE(r_sqrt.ac_branch_flows[0].i_by_order.count(5) == 1);
+  CHECK_THAT(r_sqrt.ac_branch_flows[0].i_by_order.at(5), WithinAbs(1.0, 1e-9));
   // ProportionalSqrt (k=1): R(5) = 0.1 * (1 + sqrt(5))
   CHECK_THAT(v_prop.real(), WithinAbs(0.1 * (1.0 + std::sqrt(5.0)), 1e-5));
 }
@@ -2224,8 +2229,6 @@ TEST_CASE("HPF projects rich topology and broadcasts merged-bus observables",
   CHECK_THAT(std::abs(vbus(result, 20, 5)), WithinAbs(std::abs(vbus(result, 30, 5)), 1e-12));
   CHECK(std::abs(vbus(result, 30, 5)) > 0.0);
 }
-
-
 
 
 

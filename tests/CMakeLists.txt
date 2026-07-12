@@ -444,4 +444,22 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/validate_harmonics_xre
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
       COMMENT "Running harmonic AC/DC device validation against OpenDSS")
   endif()
+  if(EXISTS "${_HACDCPF_HARMONICS_VALIDATION_PY}" AND
+     EXISTS "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/run_cross_engine_matrix.py")
+    add_custom_target(validate_harmonics_cross_engine_matrix
+      COMMAND "${_HACDCPF_HARMONICS_VALIDATION_PY}"
+              "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/run_cross_engine_matrix.py"
+              --cpp-bin "$<TARGET_FILE:validate_harmonics_xref>"
+      DEPENDS validate_harmonics_xref
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      COMMENT "Running AC/DC harmonic cross-engine benchmark matrix")
+    add_test(NAME harmonics_cross_engine_matrix
+      COMMAND "${_HACDCPF_HARMONICS_VALIDATION_PY}"
+              "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/run_cross_engine_matrix.py"
+              --cpp-bin "$<TARGET_FILE:validate_harmonics_xref>"
+              --out "${CMAKE_CURRENT_BINARY_DIR}/harmonics_cross_engine_matrix.json")
+    set_tests_properties(harmonics_cross_engine_matrix PROPERTIES
+      LABELS "harmonics;validation;opendss" TIMEOUT 120
+      ENVIRONMENT "PYTHONPYCACHEPREFIX=/tmp/hacdcpf_pycache")
+  endif()
 endif()

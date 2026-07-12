@@ -35,3 +35,27 @@ The script also probes the native OpenDSS `VSConverter` class and records its
 availability in `device_opendss_report.json`. The DSS C-API build used here does
 not expose a native DC/DC converter class, so DC/DC validation is reported as
 not natively available rather than silently substituting another OpenDSS device.
+
+## Cross-Engine Benchmark Matrix
+
+The comprehensive matrix covers single/positive-sequence AC, balanced and
+unbalanced phase-domain AC, pure DC ripple, and hybrid AC/DC converter cases.
+It compares complex bus-voltage phasors, magnitudes, angles, IHD, THD, branch
+current magnitudes, symmetrical components, and sequence-unbalance indices where
+each metric applies.
+
+```bash
+cmake --build build/macos-release --target validate_harmonics_cross_engine_matrix
+```
+
+The generated reports are:
+
+- `external_data/harmonics_validation/cross_engine_matrix.json`
+- `external_data/harmonics_validation/cross_engine_matrix.md`
+
+OpenDSS is exercised numerically for directly representable AC networks. Pure
+DC and hybrid DC-port results are checked with an independently assembled dense
+complex nodal solve. GridLAB-D 5.3 is reported as unsupported for native
+frequency-domain harmonic power flow; ordinary fundamental power flow is never
+presented as harmonic validation. A future GridLAB-D numeric comparison must use
+a qualified deltamode waveform case and integer-cycle FFT pipeline.
