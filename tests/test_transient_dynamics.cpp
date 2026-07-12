@@ -2496,6 +2496,18 @@ CsvSeries bus_voltage_mag_series(const DynamicResults& result, int bus_position)
   return series;
 }
 
+CsvSeries bus_voltage_angle_series(const DynamicResults& result, int bus_position) {
+  CsvSeries series;
+  for (const auto& snapshot : result.snapshots) {
+    const int node = 3 * bus_position;
+    REQUIRE(node >= 0);
+    REQUIRE(node < snapshot.vac_abc.size());
+    series.t.push_back(snapshot.time_s);
+    series.y.push_back(std::arg(snapshot.vac_abc[node]));
+  }
+  return series;
+}
+
 double series_range(const CsvSeries& series) {
   REQUIRE_FALSE(series.y.empty());
   const auto [min_it, max_it] = std::minmax_element(series.y.begin(), series.y.end());
@@ -2723,19 +2735,82 @@ HybridPowerSystem make_psd_gfm_omib_case(const std::string& model) {
 
 HybridPowerSystem make_psd_gfl_case(const PsdGflCase& spec,
                                     double base_mva) {
-  auto sys = make_hybrid_dc_case();
+  HybridPowerSystem sys;
+  sys.name = "psd_" + spec.name;
   sys.base_mva = base_mva;
   sys.ac.base_mva = base_mva;
-  sys.vsc_converters[0].p_set_mw = 50.0;
-  sys.vsc_converters[0].p_schedule_mw = 50.0;
-  sys.vsc_converters[0].q_set_mvar = 0.0;
-  sys.vsc_converters[0].dynamic_model.standard = "NERC";
-  sys.vsc_converters[0].dynamic_model.model_name = "REGC_REEC_GFL_Subset";
-  sys.vsc_converters[0].dynamic_model.components.push_back(
+  sys.ac.freq_hz = 50.0;
+
+  ACBus source_bus;
+  source_bus.index = 101;
+  source_bus.name = "BUS 1";
+  source_bus.bus_type = BusType::SLACK;
+  source_bus.base_kv = 230.0;
+  source_bus.vm_pu = 1.00001;
+  source_bus.va_deg = 0.0;
+  source_bus.in_service = true;
+
+  ACBus inverter_bus;
+  inverter_bus.index = 102;
+  inverter_bus.name = "BUS 2";
+  inverter_bus.bus_type = BusType::PQ;
+  inverter_bus.base_kv = 230.0;
+  inverter_bus.vm_pu = 1.0;
+  inverter_bus.va_deg = 0.0;
+  inverter_bus.in_service = true;
+  sys.ac.buses = {source_bus, inverter_bus};
+
+  ACBranch branch;
+  branch.index = 1;
+  branch.from_bus = 101;
+  branch.to_bus = 102;
+  branch.name = "BUS 1-BUS 2-i_1";
+  branch.r_pu = 0.0;
+  branch.x_pu = 0.075;
+  branch.b_pu = 0.0;
+  branch.tap = 1.0;
+  branch.in_service = true;
+  sys.ac.branches = {branch};
+
+  ExternalGrid source;
+  source.index = 1;
+  source.bus = 101;
+  source.name = "InfBus";
+  source.vm_pu = 1.00001;
+  source.va_deg = 0.0;
+  source.r_pu = 0.0;
+  source.x_pu = 1.0e-5;
+  source.in_service = true;
+  sys.ac.external_grids = {source};
+
+  VSCConverter inverter;
+  inverter.index = 1;
+  inverter.name = "generator-102-1";
+  inverter.bus_ac = 102;
+  // PSD's FixedDCSource is internal to the inverter, not a network bus. Leaving
+  // bus_dc unset selects the native constant-DC-link model and keeps this an AC
+  // OMIB power-flow benchmark.
+  inverter.bus_dc = 0;
+  inverter.in_service = true;
+  inverter.control_mode = ConverterMode::PQ_MODE;
+  inverter.p_set_mw = 50.0;
+  inverter.p_schedule_mw = 50.0;
+  inverter.p_is_hard_constraint = true;
+  inverter.q_set_mvar = 0.0;
+  inverter.v_dc_set_pu = 1.0;
+  inverter.v_ac_set_pu = 1.0;
+  inverter.eta = 1.0;
+  inverter.p_rated_mw = base_mva;
+  inverter.pmax_mw = 2.0 * base_mva;
+  inverter.pmin_mw = -2.0 * base_mva;
+  inverter.dynamic_model.standard = "NERC";
+  inverter.dynamic_model.model_name = "REGC_REEC_GFL_Subset";
+  inverter.dynamic_model.components.push_back(
       {"pll", spec.pll_model, "PowerSimulationsDynamics", spec.psd_case,
        {{"kp_pll", spec.pll_kp},
         {"ki_pll", spec.pll_ki},
         {"pll_lpf_t_s", spec.pll_lpf_t_s}}});
+  sys.vsc_converters = {inverter};
   return sys;
 }
 
@@ -3581,8 +3656,11 @@ std::vector<ManifestTraceComparison> build_manifest_trace_comparisons(
     for (const auto& signal : device.signals) {
       CsvSeries local;
       if (is_ac_bus_trace) {
-        REQUIRE(signal.local_key == "voltage_mag");
-        local = bus_voltage_mag_series(result, device.local_component_index);
+        REQUIRE((signal.local_key == "voltage_mag" ||
+                 signal.local_key == "voltage_angle"));
+        local = signal.local_key == "voltage_mag"
+                    ? bus_voltage_mag_series(result, device.local_component_index)
+                    : bus_voltage_angle_series(result, device.local_component_index);
         for (double& value : local.y) value *= signal.local_scale;
       } else {
         local = device_output_series(result,
@@ -9109,9 +9187,6 @@ TEST_CASE("Unbalanced sequence braking torque extends to all machine models",
   // The sequence-modeled machine brakes: a lower (more negative) rotor accel.
   CHECK(rotor_accel(true) < rotor_accel(false));
 }
-
-
-
 
 
 

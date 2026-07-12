@@ -83,6 +83,10 @@ function export_signal(results, signal::String)
             return get_state_series(results, (ref, :ψq_pp))
         elseif quantity == "frequency_pu"
             return get_frequency_series(results, ref)
+        elseif quantity == "pll_frequency_pu"
+            return get_frequency_series(results, ref)
+        elseif quantity == "pll_angle_rad"
+            return get_state_series(results, (ref, :θ_pll))
         elseif quantity == "omega_oc_pu"
             return get_state_series(results, (ref, :ω_oc))
         elseif quantity == "theta_oc_rad"
@@ -93,6 +97,17 @@ function export_signal(results, signal::String)
             return get_activepower_series(results, ref)
         elseif quantity == "q_pu"
             return get_reactivepower_series(results, ref)
+        elseif quantity == "p_device_pu" || quantity == "q_device_pu"
+            t, y = quantity == "p_device_pu" ?
+                get_activepower_series(results, ref) :
+                get_reactivepower_series(results, ref)
+            sys = PSID.get_system(results)
+            dynamic_device = only(
+                filter(x -> get_name(x) == ref, collect(get_components(PSY.DynamicInjection, sys))),
+            )
+            device_base = PSY.get_base_power(dynamic_device)
+            system_base = PSY.get_base_power(sys)
+            return t, y .* system_base ./ device_base
         elseif quantity == "p_oc"
             return get_state_series(results, (ref, :p_oc))
         elseif quantity == "Vt" || quantity == "internal_voltage_pu"

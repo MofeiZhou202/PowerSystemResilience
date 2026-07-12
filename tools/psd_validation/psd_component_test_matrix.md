@@ -1,6 +1,6 @@
 # PSD Machine/IBR Component Test Matrix
 
-Generated from `psd_component_test_matrix.json`. Matrix updated: 2026-07-06.
+Generated from `psd_component_test_matrix.json`. Matrix updated: 2026-07-12.
 
 This is the first-pass gate for comparing PowerSimulationsDynamics.jl transmission-dynamics component tests against HACDCPF. It answers whether each PSD machine or IBR component test group can be compared now.
 
@@ -10,7 +10,7 @@ This is the first-pass gate for comparing PowerSimulationsDynamics.jl transmissi
 - Rows: 42
 - Blocked rows: 5
 - Executable manifest cases: 34 enabled / 34 declared
-- Executable comparison signals: 142
+- Executable comparison signals: 163
 - Executable internal diagnostic objects: 5
 - blocked-missing-formulation: 3
 - compare-limited: 6
@@ -51,11 +51,11 @@ This is the first-pass gate for comparing PowerSimulationsDynamics.jl transmissi
 | psd-test16-genroe-high-sat-residual-vs-mass-matrix | Test 16 | ResidualModel / IDA | make_psd_genroe_high_sat_three_bus_subset_case | MassMatrixDae | 4 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for GENROE high-saturation delta/omega/eq_p/ed_p state traces. |
 | psd-test18-gensal-residual-vs-mass-matrix | Test 18 | ResidualModel / IDA | make_psd_gensal_three_bus_subset_case | MassMatrixDae | 4 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for GENSAL delta/omega/eq_p/psiq_pp state traces. |
 | psd-test19-gensae-residual-vs-mass-matrix | Test 19 | ResidualModel / IDA | make_psd_gensae_three_bus_subset_case | MassMatrixDae | 4 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for GENSAE delta/omega/eq_p/psiq_pp state traces. |
-| psd-test08-vsm-inverter-residual-vs-mass-matrix | Test 08 | ResidualModel / IDA | make_psd_vsm_inverter_case | MassMatrixDae | 2 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the VSM grid-forming inverter outer-control angle and frequency traces. |
-| psd-test44-voc-inverter-residual-vs-mass-matrix | Test 44 | ResidualModel / IDA | make_psd_voc_inverter_case | MassMatrixDae | 3 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the VOC grid-forming inverter outer-control angle, voltage, and frequency traces. |
-| psd-test23-droop-inverter-residual-vs-mass-matrix | Test 23 | ResidualModel / IDA | make_psd_droop_inverter_case | MassMatrixDae | 1 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the droop grid-forming inverter outer-control angle trace. |
-| psd-test24-gfl-reduced-pll-residual-vs-mass-matrix | Test 24 | ResidualModel / IDA | make_psd_gfl_reduced_pll_case | MassMatrixDae | 1 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the GFL ReducedOrderPLL p_oc active-power state trace. |
-| psd-test51-gfl-kaura-pll-residual-vs-mass-matrix | Test 51 | ResidualModel / IDA | make_psd_gfl_kaura_pll_case | MassMatrixDae | 1 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the GFL KauraPLL p_oc active-power state trace. |
+| psd-test08-vsm-inverter-residual-vs-mass-matrix | Test 08 | ResidualModel / IDA | make_psd_vsm_inverter_case | MassMatrixDae | 5 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the VSM grid-forming inverter outer-control angle and frequency traces. |
+| psd-test44-voc-inverter-residual-vs-mass-matrix | Test 44 | ResidualModel / IDA | make_psd_voc_inverter_case | MassMatrixDae | 6 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the VOC grid-forming inverter outer-control angle, voltage, and frequency traces. |
+| psd-test23-droop-inverter-residual-vs-mass-matrix | Test 23 | ResidualModel / IDA | make_psd_droop_inverter_case | MassMatrixDae | 4 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the droop grid-forming inverter outer-control angle trace. |
+| psd-test24-gfl-reduced-pll-residual-vs-mass-matrix | Test 24 | ResidualModel / IDA | make_psd_gfl_reduced_pll_case | MassMatrixDae | 7 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the GFL ReducedOrderPLL p_oc active-power state trace. |
+| psd-test51-gfl-kaura-pll-residual-vs-mass-matrix | Test 51 | ResidualModel / IDA | make_psd_gfl_kaura_pll_case | MassMatrixDae | 7 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for the GFL KauraPLL p_oc active-power state trace. |
 | psd-test20-esac1a-residual-vs-mass-matrix | Test 20 | ResidualModel / IDA | make_psd_genrou_esac1a_case | MassMatrixDae | 3 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for ESAC1A field-voltage, machine-speed, and terminal-voltage traces. |
 | psd-test21-gast-residual-vs-mass-matrix | Test 21 | ResidualModel / IDA | make_psd_genrou_gast_case | MassMatrixDae | 2 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for GAST mechanical-torque and machine-speed traces. |
 | psd-test22-tgov1-residual-vs-mass-matrix | Test 22 | ResidualModel / IDA | make_psd_genrou_tgov1_esac1a_case | MassMatrixDae | 2 | 0 | True | PowerSimulationsDynamics.jl ResidualModel/IDA trajectory compared against HACDCPF MassMatrixDae for TGOV1 mechanical-torque and rotor-angle traces. |

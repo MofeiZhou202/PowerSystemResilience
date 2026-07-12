@@ -113,6 +113,14 @@ Complex average_complex_power(const Eigen::Vector3cd& v,
   return s;
 }
 
+Complex inverter_complex_power(const Eigen::Vector3cd& v,
+                               const Eigen::Vector3cd& i) {
+  // Inverter dq currents are expressed on the three-phase device base. The
+  // phase-domain network carries the same pu current in each balanced phase,
+  // so the phase sum must be averaged before converting back to device pu.
+  return average_complex_power(v, i) / 3.0;
+}
+
 double phase_sum_to_total_power_scale(double phase_power_scale) {
   return 1.0 / std::max(1e-9, 3.0 * std::abs(phase_power_scale));
 }
@@ -5582,7 +5590,7 @@ bool GridFormingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkState
       vdc = y.Vdc[params_.dc_bus_pos];
     }
     const Eigen::Vector3cd i = yv * (balanced_phasors(e_mag, theta) - vabc);
-    const double p_ac = finite_value(average_complex_power(vabc, i).real(), p_ref);
+    const double p_ac = finite_value(inverter_complex_power(vabc, i).real(), p_ref);
     vdc = dc_link_voltage_for_power_balance(y,
                                             params_.dc_bus_pos,
                                             p_ac,
@@ -5610,7 +5618,7 @@ void GridFormingInverter::computeDerivatives(double,
   const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
   const Eigen::Vector3cd e = balanced_phasors(e_mag, theta);
   const Eigen::Vector3cd i = yv * (e - v);
-  const Complex s = average_complex_power(v, i);
+  const Complex s = inverter_complex_power(v, i);
   const double p = finite_value(s.real());
   const double q = finite_value(s.imag());
   const double state2 = x.x[state_index(range_, 2)];
@@ -5909,7 +5917,7 @@ DynamicDeviceOutput GridFormingInverter::output(const DynamicState& x,
     const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
     const Eigen::Vector3cd e = balanced_phasors(e_mag, theta);
     const Eigen::Vector3cd i = yv * (e - v);
-    const Complex s = average_complex_power(v, i);
+    const Complex s = inverter_complex_power(v, i);
     const double p_ref = params_.p_ref_mw / safe_base(params_.base_mva);
     const double pmax = params_.pmax_mw > 0.0
                             ? params_.pmax_mw / safe_base(params_.base_mva)
@@ -6161,7 +6169,7 @@ bool GridFollowingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkSta
       vdc = y.Vdc[params_.dc_bus_pos];
     }
     const Eigen::Vector3cd current = balanced_current_from_dq(id, iq, theta);
-    const double p_ac = finite_value(average_complex_power(vabc, current).real(), p_ref);
+    const double p_ac = finite_value(inverter_complex_power(vabc, current).real(), p_ref);
     vdc = dc_link_voltage_for_power_balance(y,
                                             params_.dc_bus_pos,
                                             p_ac,
@@ -6256,7 +6264,7 @@ void GridFollowingInverter::computeDerivatives(double,
   const int vdc_local = gfl_vdc_local(params_);
   if (vdc_local >= 0) {
     const Eigen::Vector3cd current = balanced_current_from_dq(id, iq, theta);
-    const double p_ac = finite_value(average_complex_power(vabc, current).real());
+    const double p_ac = finite_value(inverter_complex_power(vabc, current).real());
     const double vdc_link = x.x[state_index(range_, vdc_local)];
     const double pdc_net =
         dc_link_network_power_pu(y,
@@ -6500,7 +6508,7 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
     const auto [vd_raw, vq_raw] = dq_from_phasor(vpos, theta);
     const auto [vd, vq] = pll_measurement(params_, x, range_, vd_raw, vq_raw);
     const Eigen::Vector3cd current = balanced_current_from_dq(id, iq, theta);
-    const Complex s = average_complex_power(vabc, current);
+    const Complex s = inverter_complex_power(vabc, current);
     const double freq_error_pu =
         params_.frequency_estimator == FrequencyEstimatorKind::FixedFrequency
             ? 0.0
@@ -6573,8 +6581,8 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
       out.values["filter_current_re_pu"] = i_filter.real();
       out.values["filter_current_im_pu"] = i_filter.imag();
       const Complex s_grid =
-          average_complex_power(vabc,
-                                balanced_current_from_positive_sequence(i_filter));
+          inverter_complex_power(vabc,
+                                 balanced_current_from_positive_sequence(i_filter));
       out.values["p_mw"] = s_grid.real() * safe_base(params_.base_mva);
       out.values["q_mvar"] = s_grid.imag() * safe_base(params_.base_mva);
     }

@@ -199,12 +199,12 @@ tolerance declaration:
   "[dynamics][benchmark][psd][manifest]"
 ```
 
-The first executable gate set covers PSD Test 02 OneDOneQ, Test 03
-SimpleMarconato, Test 15 GENROU, Test 16 GENROE normal/high-saturation,
-Test 18 GENSAL, Test 19 GENSAE, Test 24 ReducedOrderPLL GFL, and Test 51
-KauraPLL GFL. The external trace part compares PSD `ResidualModel`/`IDA`
-traces against HACDCPF `MassMatrixDae` trajectories for all declared machine
-state and inverter active-power traces:
+The executable gate set contains 34 enabled PSD cases. Its power-electronic
+coverage includes VSM, droop, and VOC grid-forming controls plus ReducedOrderPLL
+and KauraPLL grid-following controls. The external trace part compares PSD
+`ResidualModel`/`IDA` traces against HACDCPF `MassMatrixDae` trajectories,
+including device-base P/Q, bus voltage, GFM angle/frequency/internal voltage,
+and GFL filtered power/PLL angle/PLL frequency:
 
 ```bash
 HACDCPF_RUN_PSD_COMPARE=1 ./build/macos-release/tests/test_transient_dynamics \
@@ -219,6 +219,9 @@ ${TMPDIR}/hacdcpf_psd_manifest_validation
 
 The key files are `psd_manifest_validation_summary.csv`,
 `psd_manifest_pointwise_comparison.csv`, and `psd_manifest_batch.log`.
+A checked-in aggregate from the latest live run and its interpretation are in
+`external_data/psd_validation/psd_manifest_validation_summary.csv` and
+`external_data/psd_validation/power_electronic_dynamics.md`.
 
 The internal diagnostics part currently compares the initialized PSD-coordinate
 DAE objects for the SimpleMarconato Test 03 case: residual vector norm, mass

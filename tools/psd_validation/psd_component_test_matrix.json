@@ -1,6 +1,6 @@
 {
   "format": "hacdcpf_psd_component_test_matrix.v1",
-  "updated": "2026-07-06",
+  "updated": "2026-07-12",
   "scope": "First-pass PowerSimulationsDynamics.jl component-test comparison focused on transmission-dynamics machines and IBRs.",
   "status_legend": {
     "compare-limited": "HACDCPF has a current model and an existing or near-existing trace hook, but it does not cover PSD's full residual/mass-matrix/small-signal test contract.",
@@ -2203,6 +2203,42 @@
                   "rms": 0.02,
                   "max": 0.06
                 }
+              },
+              {
+                "local_key": "p_mw",
+                "local_scale": 0.01,
+                "psd_quantity": "p_device_pu",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.2,
+                  "max": 0.5
+                }
+              },
+              {
+                "local_key": "q_mvar",
+                "local_scale": 0.01,
+                "psd_quantity": "q_device_pu",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.2,
+                  "max": 0.5
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "bus102",
+            "local_component_type": "ACBus",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.12,
+                  "max": 0.3
+                }
               }
             ]
           }
@@ -2286,6 +2322,42 @@
                   "rms": 0.03,
                   "max": 0.08
                 }
+              },
+              {
+                "local_key": "p_mw",
+                "local_scale": 0.01,
+                "psd_quantity": "p_device_pu",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.2,
+                  "max": 0.5
+                }
+              },
+              {
+                "local_key": "q_mvar",
+                "local_scale": 0.01,
+                "psd_quantity": "q_device_pu",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.2,
+                  "max": 0.5
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "bus102",
+            "local_component_type": "ACBus",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.12,
+                  "max": 0.3
+                }
               }
             ]
           }
@@ -2350,6 +2422,42 @@
                 "tolerances": {
                   "rms": 0.35,
                   "max": 0.8
+                }
+              },
+              {
+                "local_key": "p_mw",
+                "local_scale": 0.01,
+                "psd_quantity": "p_device_pu",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.2,
+                  "max": 0.5
+                }
+              },
+              {
+                "local_key": "q_mvar",
+                "local_scale": 0.01,
+                "psd_quantity": "q_device_pu",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.2,
+                  "max": 0.5
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "bus102",
+            "local_component_type": "ACBus",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.12,
+                  "max": 0.3
                 }
               }
             ]
@@ -2417,6 +2525,70 @@
                   "rms": 0.05,
                   "max": 0.15
                 }
+              },
+              {
+                "local_key": "p_mw",
+                "local_scale": 0.01,
+                "psd_quantity": "p_device_pu",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.08,
+                  "max": 0.3
+                }
+              },
+              {
+                "local_key": "q_mvar",
+                "local_scale": 0.01,
+                "psd_quantity": "q_device_pu",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.08,
+                  "max": 0.45
+                }
+              },
+              {
+                "local_key": "pll_angle_rad",
+                "psd_quantity": "pll_angle_rad",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.08,
+                  "max": 0.2
+                }
+              },
+              {
+                "local_key": "pll_frequency_hz",
+                "local_scale": 0.02,
+                "psd_quantity": "pll_frequency_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.01,
+                  "max": 0.03
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "bus102",
+            "local_component_type": "ACBus",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.05,
+                  "max": 0.12
+                }
+              },
+              {
+                "local_key": "voltage_angle",
+                "psd_quantity": "voltage_angle",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.08,
+                  "max": 0.2
+                }
               }
             ]
           }
@@ -2482,6 +2654,70 @@
                 "tolerances": {
                   "rms": 0.05,
                   "max": 0.15
+                }
+              },
+              {
+                "local_key": "p_mw",
+                "local_scale": 0.01,
+                "psd_quantity": "p_device_pu",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.08,
+                  "max": 0.3
+                }
+              },
+              {
+                "local_key": "q_mvar",
+                "local_scale": 0.01,
+                "psd_quantity": "q_device_pu",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.08,
+                  "max": 0.45
+                }
+              },
+              {
+                "local_key": "pll_angle_rad",
+                "psd_quantity": "pll_angle_rad",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.08,
+                  "max": 0.2
+                }
+              },
+              {
+                "local_key": "pll_frequency_hz",
+                "local_scale": 0.02,
+                "psd_quantity": "pll_frequency_pu",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.01,
+                  "max": 0.03
+                }
+              }
+            ]
+          },
+          {
+            "psd_ref": "bus102",
+            "local_component_type": "ACBus",
+            "local_component_index": 1,
+            "signals": [
+              {
+                "local_key": "voltage_mag",
+                "psd_quantity": "voltage_mag",
+                "alignment": "absolute",
+                "tolerances": {
+                  "rms": 0.05,
+                  "max": 0.12
+                }
+              },
+              {
+                "local_key": "voltage_angle",
+                "psd_quantity": "voltage_angle",
+                "alignment": "relative_to_initial",
+                "tolerances": {
+                  "rms": 0.08,
+                  "max": 0.2
                 }
               }
             ]
