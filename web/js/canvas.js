@@ -4707,6 +4707,7 @@ const Canvas = (() => {
 
   // ========== Results Overlay ==========
   function showPowerFlowResults(result) {
+    _lastCanvasFrame = null;
     resultsLayer.innerHTML = '';
     if (!result) return;
 
@@ -4789,6 +4790,7 @@ const Canvas = (() => {
   }
 
   let _lastPfResult = null;
+  let _lastCanvasFrame = null;
   let _vizMode = 'off';
 
   // Color mapping for heatmap: loading_pct → color
@@ -4812,11 +4814,12 @@ const Canvas = (() => {
 
   function setVisualizationMode(mode) {
     _vizMode = mode;
-    applyVisualizationOverlay();
+    if (_lastCanvasFrame) renderFrame(_lastCanvasFrame, { mode: _lastCanvasFrame._displayMode });
+    else applyVisualizationOverlay();
   }
 
-  function applyVisualizationOverlay() {
-    if (_lastPfResult) {
+  function applyVisualizationOverlay(skipSolvedDisplays = false) {
+    if (_lastPfResult && !skipSolvedDisplays) {
       applySolvedGeneratorDisplays(_lastPfResult);
       refreshSolvedGeneratorComponents();
     }
@@ -6215,9 +6218,206 @@ const Canvas = (() => {
     });
   }
 
+  function clearFrame() {
+    _lastCanvasFrame = null;
+    resultsLayer.querySelectorAll('.frame-overlay, .viz-overlay').forEach(el => el.remove());
+    state.connections.forEach(conn => {
+      const line = conn.el?.querySelector('.conn-line');
+      if (!line) return;
+      line.setAttribute('stroke', '#666');
+      line.setAttribute('stroke-width', '2');
+      line.style.animation = '';
+    });
+    const defsEl = (resultsLayer.ownerSVGElement || document.querySelector('#canvas'))
+      ?.querySelector('defs#vizGradDefs');
+    if (defsEl) defsEl.remove();
+  }
+
+  // Incremental playback renderer. It only owns .frame-overlay/.viz-overlay
+  // elements and never writes component params or rebuilds topology glyphs.
+  function renderFrame(frame, options = {}) {
+    if (!frame || frame.schema !== 'canvas_frame_v1') return;
+    const mode = options.mode || frame._displayMode || 'voltage';
+    frame._displayMode = mode;
+    _lastCanvasFrame = frame;
+    resultsLayer.querySelectorAll('.frame-overlay, .viz-overlay').forEach(el => el.remove());
+    state.connections.forEach(conn => {
+      const line = conn.el?.querySelector('.conn-line');
+      if (!line) return;
+      line.setAttribute('stroke', '#666');
+      line.setAttribute('stroke-width', '2');
+      line.style.animation = '';
+    });
+    const staleDefs = (resultsLayer.ownerSVGElement || document.querySelector('#canvas'))
+      ?.querySelector('defs#vizGradDefs');
+    if (staleDefs) staleDefs.remove();
+
+    // Static time-series frames contain solved terminal powers. Reuse the
+    // existing geometry renderer with solved-display mutation explicitly off.
+    // Dynamic frames never enter this path, so no static PF flow is fabricated.
+    if (frame.analysis === 'tspf' && frame.capabilities?.branch_power &&
+        (mode === 'flow' || mode === 'pq')) {
+      const savedResult = _lastPfResult;
+      const savedMode = _vizMode;
+      _lastPfResult = frame;
+      _vizMode = mode === 'flow' ? 'both' : 'flow';
+      applyVisualizationOverlay(true);
+      _vizMode = savedMode;
+      _lastPfResult = savedResult;
+    }
+
+    const busMap = getCompBusMap();
+    const componentForBus = (domain, bus) => {
+      const id = (domain === 'DC' ? busMap.dc : busMap.ac)?.[bus];
+      return id == null ? null : getComponent(id);
+    };
+    const addText = (comp, text, color = '#dcdfe4', dy = -26) => {
+      if (!comp || !text) return;
+      const el = document.createElementNS(SVGNS, 'text');
+      el.classList.add('frame-overlay');
+      el.setAttribute('data-comp-id', comp.id);
+      el.setAttribute('x', comp.x);
+      el.setAttribute('y', comp.y + dy);
+      el.setAttribute('text-anchor', 'middle');
+      el.setAttribute('fill', color);
+      el.setAttribute('font-size', '11');
+      el.setAttribute('font-weight', '600');
+      el.setAttribute('paint-order', 'stroke');
+      el.setAttribute('stroke', '#171a1f');
+      el.setAttribute('stroke-width', '3');
+      el.setAttribute('pointer-events', 'none');
+      el.textContent = text;
+      resultsLayer.appendChild(el);
+    };
+    const addBusGlow = (comp, value, min, max, title) => {
+      if (!comp || !Number.isFinite(value)) return;
+      const span = Math.max(1e-9, max - min);
+      const t = Math.max(0, Math.min(1, (value - min) / span));
+      const hue = 210 - 210 * t;
+      const circle = document.createElementNS(SVGNS, 'circle');
+      circle.classList.add('frame-overlay');
+      circle.setAttribute('cx', comp.x);
+      circle.setAttribute('cy', comp.y);
+      circle.setAttribute('r', '24');
+      circle.setAttribute('fill', `hsla(${hue},80%,55%,0.25)`);
+      circle.setAttribute('stroke', `hsl(${hue},80%,60%)`);
+      circle.setAttribute('stroke-width', '2');
+      circle.setAttribute('pointer-events', 'none');
+      const tip = document.createElementNS(SVGNS, 'title');
+      tip.textContent = title;
+      circle.appendChild(tip);
+      resultsLayer.insertBefore(circle, resultsLayer.firstChild);
+    };
+
+    const rows = Array.isArray(frame.component_results) ? frame.component_results : [];
+    const metricValue = (row, names) => {
+      const metric = (row.metrics || []).find(m => names.includes(String(m.name || '').toLowerCase()));
+      const value = Number(metric?.value);
+      return Number.isFinite(value) ? value : null;
+    };
+    const acIds = Array.isArray(frame.ac_bus_ids) ? frame.ac_bus_ids : Object.keys(busMap.ac).map(Number).sort((a, b) => a - b);
+    const dcIds = Array.isArray(frame.dc_bus_ids) ? frame.dc_bus_ids : Object.keys(busMap.dc).map(Number).sort((a, b) => a - b);
+    const acVoltage = new Map();
+    const dcVoltage = new Map();
+    rows.forEach(row => {
+      const type = String(row.canvas_type || '');
+      const index = Number(row.canvas_index ?? row.index);
+      if (type === 'ac_bus') acVoltage.set(index, metricValue(row, ['vm_pu', 'vm']));
+      if (type === 'dc_bus') dcVoltage.set(index, metricValue(row, ['vdc_pu', 'vdc', 'vm_pu']));
+    });
+    acIds.forEach((id, i) => {
+      if (!Number.isFinite(acVoltage.get(id))) acVoltage.set(id, Number(frame.vm?.[i]));
+    });
+    dcIds.forEach((id, i) => {
+      if (!Number.isFinite(dcVoltage.get(id))) dcVoltage.set(id, Number(frame.vdc?.[i]));
+    });
+
+    if (mode === 'voltage') {
+      acVoltage.forEach((value, bus) => {
+        const comp = componentForBus('AC', bus);
+        addBusGlow(comp, value, 0.9, 1.1, `AC Bus ${bus}: ${Number(value).toFixed(4)} pu`);
+        addText(comp, `${Number(value).toFixed(4)} pu`, '#61afef');
+      });
+      dcVoltage.forEach((value, bus) => {
+        const comp = componentForBus('DC', bus);
+        addBusGlow(comp, value, 0.9, 1.1, `DC Bus ${bus}: ${Number(value).toFixed(4)} pu`);
+        addText(comp, `${Number(value).toFixed(4)} pu`, '#56b6c2');
+      });
+    }
+    if (mode === 'frequency' && Array.isArray(frame.frequency_hz)) {
+      acIds.forEach((bus, i) => {
+        const value = Number(frame.frequency_hz[i]);
+        const comp = componentForBus('AC', bus);
+        addBusGlow(comp, value, 49.5, 50.5, `AC Bus ${bus}: ${value.toFixed(4)} Hz`);
+        addText(comp, Number.isFinite(value) ? `${value.toFixed(3)} Hz` : '', '#e5c07b');
+      });
+    }
+
+    const typeAlias = { switch: 'switch_comp', renewable_generator: 'renewable_gen' };
+    const findFrameComponent = row => {
+      const type = typeAlias[row.canvas_type] || row.canvas_type;
+      const candidates = state.components.filter(c => c.type === type);
+      const index = Number(row.canvas_index ?? row.index);
+      return candidates.find(c => Number(c.params?.index) === index) ||
+        candidates.find((c, i) => i === Number(row.position)) ||
+        (Number.isInteger(index) ? candidates[index] : null) || null;
+    };
+    if (mode === 'pq' || mode === 'soc') {
+      rows.forEach(row => {
+        if (row.canvas_type === 'ac_bus' || row.canvas_type === 'dc_bus') return;
+        const comp = findFrameComponent(row);
+        if (!comp) return;
+        const metrics = Array.isArray(row.metrics) ? row.metrics : [];
+        const selected = metrics.filter(metric => {
+          const name = String(metric.name || '').toLowerCase();
+          return mode === 'soc' ? name.includes('soc')
+            : metric.quantity === 'p' || metric.quantity === 'q' || name.includes('current');
+        }).slice(0, 4);
+        if (!selected.length) return;
+        const label = selected.map(metric => {
+          const value = Number(metric.value);
+          const scaled = (metric.quantity === 'p' || metric.quantity === 'q') ? value * pScale() : value;
+          const unit = metric.quantity === 'p' ? pUnit() : metric.quantity === 'q' ? qUnit() : (metric.unit || '');
+          return `${metric.label || metric.name} ${Number.isFinite(scaled) ? scaled.toFixed(2) : '-'} ${unit}`;
+        }).join(' · ');
+        addText(comp, label, mode === 'soc' ? '#98c379' : '#d19a66');
+      });
+      if (mode === 'pq') {
+        const balances = frame.power_balance_diagnostics?.all_buses || [];
+        balances.forEach(row => {
+          const comp = componentForBus(String(row.domain || row.kind || 'AC').toUpperCase(), Number(row.bus ?? row.id));
+          const rp = Number(row.residual_mw), rq = Number(row.residual_mvar);
+          if (!comp || (!Number.isFinite(rp) && !Number.isFinite(rq))) return;
+          addText(comp,
+            `dP ${Number.isFinite(rp) ? (rp * pScale()).toFixed(2) : '-'} ${pUnit()} · dQ ${Number.isFinite(rq) ? (rq * pScale()).toFixed(2) : '-'} ${qUnit()}`,
+            Math.max(Math.abs(rp || 0), Math.abs(rq || 0)) > 1e-3 ? '#e06c75' : '#98c379', -42);
+        });
+      }
+    }
+
+    (frame.events || []).forEach(event => {
+      if (event.active === false) return;
+      const domainHint = [event.component_domain, event.domain, event.target_type, event.component_type]
+        .filter(Boolean).join(' ').toUpperCase();
+      const domain = domainHint.includes('DC') ? 'DC' : 'AC';
+      const bus = Number(event.bus || event.target_id);
+      const comp = componentForBus(domain, bus);
+      if (!comp) return;
+      const ring = document.createElementNS(SVGNS, 'circle');
+      ring.classList.add('frame-overlay');
+      ring.setAttribute('cx', comp.x); ring.setAttribute('cy', comp.y);
+      ring.setAttribute('r', '31'); ring.setAttribute('fill', 'none');
+      ring.setAttribute('stroke', '#e06c75'); ring.setAttribute('stroke-width', '4');
+      ring.setAttribute('stroke-dasharray', '7 4'); ring.setAttribute('pointer-events', 'none');
+      resultsLayer.appendChild(ring);
+      addText(comp, event.label || event.type || 'Event', '#e06c75', 42);
+    });
+  }
+
   function clearResults() {
     resultsLayer.innerHTML = '';
     _lastPfResult = null;
+    _lastCanvasFrame = null;
     clearSolvedGeneratorDisplays();
     refreshSolvedGeneratorComponents();
     refreshSolvedGridAndBreakerComponents();
@@ -6965,6 +7165,8 @@ const Canvas = (() => {
     forceRenderCurrentSystem,
     updateHeadlessSystem,
 	    showPowerFlowResults,
+	    renderFrame,
+	    clearFrame,
 	    showCarbonPotentialResults,
 	    showReliabilityImpactResults,
 	    clearCarbonPotentialResults,

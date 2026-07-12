@@ -548,6 +548,64 @@ def main() -> int:
             f"OPF Bus 1 P/Q ledger residual={opf_bus1}",
         )
 
+        print("3b. cached Canvas playback frame contracts")
+        st, tspf = c.post_json(
+            "/api/session/run_ts_pf",
+            {"num_steps": 3, "skip_uc": True, "run_opf": False,
+             "enable_external_grid": True},
+        )
+        st_frame, tspf_frame = c.get("/api/session/tspf/frame?step=0")
+        tspf_grid = next(
+            (row for row in tspf_frame.get("component_results", [])
+             if row.get("canvas_type") == "external_grid"),
+            None,
+        )
+        tspf_source_cb = next(
+            (row for row in tspf_frame.get("ac_circuit_breaker_flows", [])
+             if row.get("source") == "same_bus_external_grid_cut"),
+            None,
+        )
+        chk.check(
+            st == 200 and st_frame == 200
+            and tspf_frame.get("schema") == "canvas_frame_v1"
+            and tspf_frame.get("count") == 3
+            and tspf_frame.get("converged") is True,
+            "TSPF frame endpoint returns a converged canvas_frame_v1",
+        )
+        chk.check(
+            tspf_grid is not None and tspf_source_cb is not None
+            and abs(float(tspf_source_cb.get("pf_mw", 0.0))) > 1.0e-6
+            and abs(float(tspf_source_cb.get("qf_mvar", 0.0))) > 1.0e-6
+            and len(tspf_grid.get("metrics", [])) >= 2,
+            f"TSPF Grid/source-CB P/Q={tspf_source_cb}",
+        )
+        chk.check(
+            tspf_frame.get("capabilities", {}).get("power_balance") is True
+            and isinstance(tspf_frame.get("power_balance_diagnostics", {}).get("all_buses"), list),
+            "TSPF frame includes authored-space bus P/Q diagnostics",
+        )
+
+        st, transient = c.post_json(
+            "/api/session/run_transient",
+            {"t_start_s": 0.0, "t_end_s": 0.03, "dt_s": 0.01,
+             "record_every_step": True, "record_device_outputs": True,
+             "run_power_flow_initialization": True,
+             "enforce_voltage_health_check": False,
+             "snapshot_budget": 16},
+        )
+        st_frame, transient_frame = c.get("/api/session/transient/frame?index=1")
+        chk.check(
+            st == 200 and st_frame == 200
+            and transient_frame.get("schema") == "canvas_frame_v1"
+            and transient_frame.get("capabilities", {}).get("branch_power") is False
+            and transient_frame.get("geo_ac_branches") == []
+            and transient_frame.get("geo_dc_branches") == []
+            and transient_frame.get("ac_circuit_breaker_flows") == []
+            and len(transient_frame.get("frequency_hz", [])) > 0
+            and len(transient_frame.get("component_results", [])) > 0,
+            "Transient frame exposes real telemetry without fabricated static branch flow",
+        )
+
         if args.skip_etap:
             print("4-9. ETAP export/import checks skipped")
         else:

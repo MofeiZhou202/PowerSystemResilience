@@ -86,6 +86,7 @@ const App = (() => {
   let _pfInvalidated = false;
   let _tspfInvalidated = false;
   let _lastInvalidationReason = '';
+  const _canvasPlaybackControllers = new Map();
   let _activeWorkflow = 'steady';
   let _parameterLibraryData = null;
   let _importedEvTrafficScenario = null;
@@ -98,6 +99,134 @@ const App = (() => {
     1.00, 0.98, 0.94, 0.90, 0.86, 0.82, 0.78, 0.75,
   ];
   let _seqProfileEditorState = null;
+
+  class CanvasPlaybackController {
+    constructor(root) {
+      this.root = root;
+      this.analysis = root.dataset.canvasPlayback;
+      this.endpoint = this.analysis === 'tspf'
+        ? '/api/session/tspf/frame' : '/api/session/transient/frame';
+      this.param = this.analysis === 'tspf' ? 'step' : 'index';
+      this.slider = root.querySelector('[data-role="slider"]');
+      this.speed = root.querySelector('[data-role="speed"]');
+      this.mode = root.querySelector('[data-role="mode"]');
+      this.timeLabel = root.querySelector('[data-role="time"]');
+      this.statusLabel = root.querySelector('[data-role="status"]');
+      this.playButton = root.querySelector('[data-action="play"]');
+      this.count = 0;
+      this.index = 0;
+      this.times = [];
+      this.cache = new Map();
+      this.playing = false;
+      this.timer = null;
+      this.abort = null;
+      this.requestSerial = 0;
+      root.querySelector('[data-action="previous"]')?.addEventListener('click', () => this.show(this.index - 1));
+      root.querySelector('[data-action="next"]')?.addEventListener('click', () => this.show(this.index + 1));
+      this.playButton?.addEventListener('click', () => this.toggle());
+      this.slider?.addEventListener('input', () => this.show(Number(this.slider.value)));
+      this.mode?.addEventListener('change', () => {
+        const frame = this.cache.get(this.index);
+        if (frame) Canvas.renderFrame(frame, { mode: this.mode.value });
+      });
+    }
+
+    configure(count, times = [], token = null) {
+      if (token && this.token === token && this.count === Number(count)) return;
+      this.token = token;
+      this.pause();
+      this.abort?.abort();
+      this.cache.clear();
+      this.count = Math.max(0, Number(count) || 0);
+      this.times = Array.isArray(times) ? times : [];
+      this.index = 0;
+      this.slider.max = String(Math.max(0, this.count - 1));
+      this.slider.value = '0';
+      this.root.hidden = this.count === 0;
+      if (this.count) this.show(0);
+    }
+
+    async show(requested) {
+      if (!this.count) return;
+      const index = Math.max(0, Math.min(this.count - 1, Number(requested) || 0));
+      this.index = index;
+      this.slider.value = String(index);
+      const cached = this.cache.get(index);
+      if (cached) {
+        this.present(cached);
+        return;
+      }
+      const serial = ++this.requestSerial;
+      this.abort?.abort();
+      this.abort = new AbortController();
+      this.statusLabel.textContent = '加载中';
+      this.statusLabel.className = '';
+      try {
+        const response = await fetch(`${API_BASE}${this.endpoint}?${this.param}=${index}`, {
+          signal: this.abort.signal,
+          cache: 'no-store',
+        });
+        const frame = await response.json();
+        if (!response.ok) throw new Error(frame.error || `HTTP ${response.status}`);
+        if (serial !== this.requestSerial || this.index !== index) return;
+        this.cache.set(index, frame);
+        while (this.cache.size > 24) this.cache.delete(this.cache.keys().next().value);
+        this.present(frame);
+      } catch (error) {
+        if (error.name === 'AbortError') return;
+        this.statusLabel.textContent = error.message || '帧加载失败';
+        this.statusLabel.className = 'failed';
+        this.pause();
+      }
+    }
+
+    present(frame) {
+      const capabilities = frame.capabilities || {};
+      [...this.mode.options].forEach(option => {
+        const key = option.value === 'flow' ? 'branch_power'
+          : option.value === 'frequency' ? 'frequency'
+          : option.value === 'soc' ? 'soc' : null;
+        option.disabled = key ? capabilities[key] === false : false;
+      });
+      if (this.mode.selectedOptions[0]?.disabled) this.mode.value = 'voltage';
+      const value = Number(frame.time);
+      const time = Number.isFinite(value) ? value.toFixed(frame.time_unit === 's' ? 3 : 2) : String(frame.index);
+      this.timeLabel.textContent = `${frame.index + 1}/${frame.count} · ${time} ${frame.time_unit || ''}`;
+      this.statusLabel.textContent = frame.converged ? '收敛' : (frame.status || '未收敛');
+      this.statusLabel.className = frame.converged ? 'converged' : 'failed';
+      Canvas.renderFrame(frame, { mode: this.mode.value });
+    }
+
+    toggle() {
+      if (this.playing) this.pause();
+      else {
+        this.playing = true;
+        this.playButton.textContent = '||';
+        this.schedule();
+      }
+    }
+
+    schedule() {
+      clearTimeout(this.timer);
+      if (!this.playing) return;
+      const speed = Math.max(1, Number(this.speed.value) || 1);
+      this.timer = setTimeout(async () => {
+        if (this.index >= this.count - 1) this.index = -1;
+        await this.show(this.index + 1);
+        this.schedule();
+      }, Math.max(80, 500 / speed));
+    }
+
+    pause() {
+      this.playing = false;
+      clearTimeout(this.timer);
+      if (this.playButton) this.playButton.textContent = '\u25b6';
+    }
+  }
+
+  function canvasPlayback(analysis) {
+    return _canvasPlaybackControllers.get(analysis);
+  }
   let _seqProfileEditorTab = 'temporal';
   let _seqProfileEditorJsonTimer = null;
   let _costEditorSystem = null;
@@ -6231,6 +6360,8 @@ const App = (() => {
     document.getElementById('resultsContent').style.display = 'block';
     setActiveResultGroup('transient');
     const nf = (v, d = 3) => Number.isFinite(Number(v)) ? Number(v).toFixed(d) : '—';
+    canvasPlayback('transient')?.configure(
+      Array.isArray(data.time_s) ? data.time_s.length : 0, data.time_s || [], data);
     const final = data.final || {};
     const init = data.initialization || {};
     const gflCount = transientDeviceByType(data, type => type.includes('GridFollowing')).length;
@@ -7631,6 +7762,9 @@ const App = (() => {
     document.getElementById('resultsContent').style.display = 'block';
     setActiveResultGroup('timeSeries');
     renderComponentCurveTargets('timeSeries');
+    const tspfTimes = Array.from({ length: Number(data.num_steps) || 0 },
+      (_, i) => i * (Number(data.step_duration_hr) || 1));
+    canvasPlayback('tspf')?.configure(data.num_steps, tspfTimes, data);
 
     const section = document.getElementById('tspfResultsSection');
     section.style.display = 'block';
@@ -13659,6 +13793,10 @@ const App = (() => {
 
     // Initialize canvas
     Canvas.init();
+    document.querySelectorAll('[data-canvas-playback]').forEach(root => {
+      const controller = new CanvasPlaybackController(root);
+      _canvasPlaybackControllers.set(controller.analysis, controller);
+    });
 
     // Initialize component library
     initComponentLibrary();

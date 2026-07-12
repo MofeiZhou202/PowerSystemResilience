@@ -2131,6 +2131,36 @@ body[data-active-result-group="parameterLibrary"] .result-group[data-result-grou
   margin: 8px;
 }
 
+.canvas-playback {
+  display: grid;
+  grid-template-columns: 30px 34px 30px minmax(110px, 1fr) 58px 82px auto auto;
+  gap: 6px;
+  align-items: center;
+  margin: 6px 8px 10px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  background: #20252c;
+  font-size: 11px;
+}
+.canvas-playback button,
+.canvas-playback select {
+  min-height: 28px;
+  border: 1px solid var(--border);
+  background: #2c313a;
+  color: var(--ink);
+}
+.canvas-playback button { padding: 0; cursor: pointer; }
+.canvas-playback input[type="range"] { width: 100%; min-width: 0; }
+.canvas-playback [data-role="time"] { color: var(--ink); white-space: nowrap; }
+.canvas-playback [data-role="status"] { color: var(--muted); white-space: nowrap; }
+.canvas-playback [data-role="status"].failed { color: #e06c75; }
+.canvas-playback [data-role="status"].converged { color: #98c379; }
+@media (max-width: 760px) {
+  .canvas-playback { grid-template-columns: 30px 34px 30px 1fr; }
+  .canvas-playback select,
+  .canvas-playback span { min-width: 0; }
+}
+
 /* ============================================================
  * 3-Tier Top Toolbar — Dark theme cohesive palette
  * (overrides the older lime-green/orange ETAP-style colors so the

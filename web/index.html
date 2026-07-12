@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Hybrid AC/DC Power System Simulator — ETAP-Style</title>
-<link rel="stylesheet" href="css/style.css?v=20260712-cb-source-flow-v2"/>
+<link rel="stylesheet" href="css/style.css?v=20260712-canvas-playback-v1"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -2113,6 +2113,18 @@
         <div class="result-group" data-result-group="transient">
           <div class="topo-section">
             <h4>暂态仿真结果</h4>
+            <div class="canvas-playback" data-canvas-playback="transient">
+              <button type="button" data-action="previous" title="上一帧">&#9664;|</button>
+              <button type="button" data-action="play" title="播放/暂停">&#9654;</button>
+              <button type="button" data-action="next" title="下一帧">|&#9654;</button>
+              <input data-role="slider" type="range" min="0" max="0" value="0" aria-label="暂态帧"/>
+              <select data-role="speed" title="播放速度"><option value="1">1x</option><option value="2">2x</option><option value="5">5x</option></select>
+              <select data-role="mode" title="Canvas显示模式">
+                <option value="voltage">电压</option><option value="flow">潮流</option>
+                <option value="frequency">频率</option><option value="pq">P/Q</option><option value="soc">SOC</option>
+              </select>
+              <span data-role="time">0 / 0</span><span data-role="status">未加载</span>
+            </div>
             <div id="transientResults" class="topo-table-wrap">
               <p class="empty-hint">运行暂态仿真后查看 GFL/GFM 控制、三相电压和 DC 电压动态。</p>
             </div>
@@ -2201,6 +2213,18 @@
         <div class="result-group" data-result-group="timeSeries">
         <div class="topo-section" id="tspfResultsSection" style="display:none">
           <h4>时序潮流结果</h4>
+          <div class="canvas-playback" data-canvas-playback="tspf">
+            <button type="button" data-action="previous" title="上一帧">&#9664;|</button>
+            <button type="button" data-action="play" title="播放/暂停">&#9654;</button>
+            <button type="button" data-action="next" title="下一帧">|&#9654;</button>
+            <input data-role="slider" type="range" min="0" max="0" value="0" aria-label="时序帧"/>
+            <select data-role="speed" title="播放速度"><option value="1">1x</option><option value="2">2x</option><option value="5">5x</option></select>
+            <select data-role="mode" title="Canvas显示模式">
+              <option value="voltage">电压</option><option value="flow">潮流</option>
+              <option value="frequency">频率</option><option value="pq">P/Q</option><option value="soc">SOC</option>
+            </select>
+            <span data-role="time">0 / 0</span><span data-role="status">未加载</span>
+          </div>
           <div id="tspfSummary" class="results-summary"></div>
           <div id="tspfGenChart" class="tspf-chart"></div>
           <div id="tspfLoadChart" class="tspf-chart"></div>
@@ -2571,7 +2595,7 @@
 
   <script src="js/components.js?v=20260712-cb-source-flow-v2"></script>
   <script src="js/search_registry.js?v=20260709-phase5"></script>
-  <script src="js/canvas.js?v=20260712-cb-source-flow-v2"></script>
-  <script src="js/app.js?v=20260712-cb-source-flow-v2"></script>
+  <script src="js/canvas.js?v=20260712-canvas-playback-v1"></script>
+  <script src="js/app.js?v=20260712-canvas-playback-v1"></script>
 </body>
 </html>

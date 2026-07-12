@@ -2326,6 +2326,9 @@ struct Session {
   bool last_tspf_skip_uc{true};
   bool last_tspf_run_opf{false};
   int last_tspf_num_steps{0};
+  // Serialized rich-space dynamic result used by the lazy Canvas frame API.
+  // Keeping the JSON avoids retaining a second copy of large Eigen snapshots.
+  std::optional<json> last_transient_result;
   // Persistent time-series binding spec — re-applied at every run_ts_pf call.
   // Survives system replacement (e.g. canvas resync via load_json_string)
   // so per-load profile mappings are not lost between set_ts_config and run.
@@ -2366,6 +2369,7 @@ void clear_cached_analysis(Session& s) {
   s.last_tspf_skip_uc = true;
   s.last_tspf_run_opf = false;
   s.last_tspf_num_steps = 0;
+  s.last_transient_result.reset();
 }
 
 void cache_last_power_flow(Session& s,
@@ -4474,6 +4478,397 @@ json dynamic_results_to_json(
                         {"max_dc_voltage_pu", final->max_dc_voltage_pu}};
   }
   return out;
+}
+
+json time_series_canvas_frame(const hacdcpf::TimeSeriesPFResult& result,
+                              const hacdcpf::TimeSeriesData& data,
+                              int step) {
+  if (step < 0 || step >= result.num_steps ||
+      static_cast<size_t>(step) >= result.pf_results.size() ||
+      static_cast<size_t>(step) >= result.pf_system_snapshots.size() ||
+      static_cast<size_t>(step) >= result.rich_results.size()) {
+    throw std::out_of_range("TSPF frame step is outside the cached result range");
+  }
+  const auto& pf = result.pf_results[static_cast<size_t>(step)];
+  const auto& sys = result.pf_system_snapshots[static_cast<size_t>(step)];
+  const auto& attribution = result.rich_results[static_cast<size_t>(step)];
+  json frame{{"schema", "canvas_frame_v1"},
+             {"analysis", "tspf"},
+             {"index", step},
+             {"step", step},
+             {"count", result.num_steps},
+             {"time", step * data.step_duration_hr},
+             {"time_unit", "h"},
+             {"converged", pf.converged},
+             {"iterations", pf.iterations},
+             {"residual", pf.residual},
+             {"vm", pf.vm},
+             {"va", pf.va},
+             {"vdc", pf.vdc},
+             {"component_results", rich_attribution_to_component_results(attribution)},
+             {"power_balance_diagnostics",
+              attributed_power_balance_diagnostics(sys, attribution)},
+             {"attribution_coverage",
+              rich_attribution_coverage_json(attribution.coverage)},
+             {"attribution_diagnostics", attribution.diagnostics},
+             {"capabilities", json{{"voltage", true}, {"frequency", false},
+                                    {"device_power", true}, {"branch_power", true},
+                                    {"reactive_power", true}, {"soc", true},
+                                    {"power_balance", true}}}};
+
+  json ac_branches = json::array();
+  for (size_t i = 0; i < sys.ac.branches.size() && i < pf.branch_flows.size(); ++i) {
+    const auto& br = sys.ac.branches[i];
+    const auto& flow = pf.branch_flows[i];
+    const double rate = br.rate_a_mva;
+    const double loading = rate > 1e-9
+        ? 100.0 * std::max(std::hypot(flow.pf_mw, flow.qf_mvar),
+                           std::hypot(flow.pt_mw, flow.qt_mvar)) / rate
+        : 0.0;
+    ac_branches.push_back(json{{"index", br.index}, {"canvas_type", "ac_branch"},
+                               {"canvas_index", br.index}, {"name", br.name},
+                               {"from", br.from_bus}, {"to", br.to_bus},
+                               {"from_bus", br.from_bus}, {"to_bus", br.to_bus},
+                               {"pf_mw", flow.pf_mw}, {"qf_mvar", flow.qf_mvar},
+                               {"pt_mw", flow.pt_mw}, {"qt_mvar", flow.qt_mvar},
+                               {"loss_mw", flow.pf_mw + flow.pt_mw},
+                               {"loading_pct", loading}, {"rate_mva", rate}});
+  }
+  frame["geo_ac_branches"] = ac_branches;
+  frame["branch_flows"] = ac_branches;
+
+  json dc_branches = json::array();
+  std::unordered_map<int, size_t> dc_pos;
+  for (size_t i = 0; i < sys.dc.buses.size(); ++i) dc_pos[sys.dc.buses[i].index] = i;
+  for (const auto& br : sys.dc.branches) {
+    double p_from = 0.0, p_to = 0.0;
+    const auto fi = dc_pos.find(br.from_bus), ti = dc_pos.find(br.to_bus);
+    if (br.in_service && br.r_pu > 1e-12 && fi != dc_pos.end() && ti != dc_pos.end() &&
+        fi->second < pf.vdc.size() && ti->second < pf.vdc.size()) {
+      const double vf = pf.vdc[fi->second], vt = pf.vdc[ti->second];
+      const double current = (vf - vt) / br.r_pu;
+      p_from = vf * current * sys.base_mva;
+      p_to = -vt * current * sys.base_mva;
+    }
+    const double loading = br.rate_a_mva > 1e-9
+        ? 100.0 * std::max(std::abs(p_from), std::abs(p_to)) / br.rate_a_mva : 0.0;
+    dc_branches.push_back(json{{"index", br.index}, {"canvas_type", "dc_branch"},
+                               {"canvas_index", br.index}, {"name", br.name},
+                               {"from", br.from_bus}, {"to", br.to_bus},
+                               {"from_bus", br.from_bus}, {"to_bus", br.to_bus},
+                               {"pf_mw", p_from}, {"pt_mw", p_to},
+                               {"loss_mw", p_from + p_to},
+                               {"loading_pct", loading}, {"rate_mva", br.rate_a_mva}});
+  }
+  frame["geo_dc_branches"] = dc_branches;
+  frame["dc_branch_flows"] = dc_branches;
+
+  json vsc = json::array();
+  for (const auto& row : pf.vsc_transfers)
+    vsc.push_back(json{{"index", row.index}, {"canvas_index", row.index},
+                       {"bus_ac", row.bus_ac}, {"bus_dc", row.bus_dc},
+                       {"p_ac_mw", row.p_ac_mw}, {"q_ac_mvar", row.q_ac_mvar},
+                       {"p_dc_mw", row.p_dc_mw}, {"loss_mw", row.loss_mw}});
+  frame["geo_vsc"] = vsc;
+  frame["vsc_transfers"] = vsc;
+  json dcdc = json::array();
+  for (const auto& row : pf.dcdc_transfers)
+    dcdc.push_back(json{{"index", row.index}, {"canvas_index", row.index},
+                        {"bus_in", row.bus_in}, {"bus_out", row.bus_out},
+                        {"p_in_mw", row.p_in_mw}, {"p_out_mw", row.p_out_mw},
+                        {"loss_mw", row.loss_mw}});
+  frame["geo_dcdc"] = dcdc;
+  frame["dcdc_transfers"] = dcdc;
+
+  // Recover standalone transformer terminal flows from the solved AC phasors.
+  // They are authored rich components and therefore are not present in the
+  // authored ACBranch vector returned by the public PF result.
+  std::unordered_map<int, double> network_p, network_q, nongrid_p, nongrid_q;
+  for (size_t i = 0; i < sys.ac.branches.size() && i < pf.branch_flows.size(); ++i) {
+    const auto& br = sys.ac.branches[i];
+    const auto& flow = pf.branch_flows[i];
+    network_p[br.from_bus] += flow.pf_mw; network_q[br.from_bus] += flow.qf_mvar;
+    network_p[br.to_bus] += flow.pt_mw; network_q[br.to_bus] += flow.qt_mvar;
+  }
+  std::unordered_map<int, size_t> ac_pos;
+  for (size_t i = 0; i < sys.ac.buses.size(); ++i) ac_pos[sys.ac.buses[i].index] = i;
+  auto ac_voltage = [&](int bus) {
+    const size_t pos = ac_pos.count(bus) ? ac_pos[bus] : std::numeric_limits<size_t>::max();
+    const double vm = pos < pf.vm.size() ? pf.vm[pos] : 1.0;
+    const double va = pos < pf.va.size() ? pf.va[pos] : 0.0;
+    return std::polar(vm, va);
+  };
+  json trafo2w = json::array();
+  for (size_t i = 0; i < sys.ac.transformers_2w.size(); ++i) {
+    const auto& tr = sys.ac.transformers_2w[i];
+    if (!tr.in_service || tr.source_branch_idx > 0 || tr.sn_mva <= 1e-9 ||
+        sys.base_mva <= 1e-9) continue;
+    const double scale = sys.base_mva / tr.sn_mva;
+    const double zmag = std::max(0.0, tr.vk_percent / 100.0) * scale;
+    double r = std::max(0.0, tr.vkr_percent / 100.0) * scale;
+    double x = std::sqrt(std::max(0.0, zmag * zmag - r * r));
+    if (r == 0.0 && x == 0.0) x = 1e-4;
+    const double raw_tap = std::max(
+        1e-6, 1.0 + (static_cast<double>(tr.tap_pos) - tr.tap_neutral) *
+                         tr.tap_step_percent / 100.0);
+    if (tr.tap_side == 1) { r *= raw_tap * raw_tap; x *= raw_tap * raw_tap; }
+    const std::complex<double> ys = 1.0 / std::complex<double>(r, x);
+    const double tap_mag = tr.tap_side == 1 ? 1.0 / raw_tap : raw_tap;
+    const std::complex<double> tap =
+        std::polar(tap_mag, tr.shift_deg * M_PI / 180.0);
+    if (std::norm(tap) <= 1e-12) continue;
+    const auto vh = ac_voltage(tr.hv_bus), vl = ac_voltage(tr.lv_bus);
+    const auto ih = ys / std::norm(tap) * vh - ys / std::conj(tap) * vl;
+    const auto il = -ys / tap * vh + ys * vl;
+    const auto sh = vh * std::conj(ih) * sys.base_mva;
+    const auto sl = vl * std::conj(il) * sys.base_mva;
+    network_p[tr.hv_bus] += sh.real(); network_q[tr.hv_bus] += sh.imag();
+    network_p[tr.lv_bus] += sl.real(); network_q[tr.lv_bus] += sl.imag();
+    trafo2w.push_back(json{{"index", tr.index}, {"canvas_index", tr.index},
+                            {"hv_bus", tr.hv_bus}, {"lv_bus", tr.lv_bus},
+                            {"p_hv_mw", sh.real()}, {"q_hv_mvar", sh.imag()},
+                            {"p_lv_mw", sl.real()}, {"q_lv_mvar", sl.imag()},
+                            {"loss_mw", sh.real() + sl.real()}});
+  }
+  frame["geo_trafo2w"] = trafo2w;
+
+  auto add_injection = [&](int bus, double p, double q) {
+    nongrid_p[bus] += p; nongrid_q[bus] += q;
+  };
+  for (const auto& bus : sys.ac.buses) {
+    if (!bus.in_service) continue;
+    const double vm = std::abs(ac_voltage(bus.index));
+    add_injection(bus.index, -bus.pd_mw - bus.gs_mw * vm * vm,
+                  -bus.qd_mvar + bus.bs_mvar * vm * vm);
+  }
+  for (const auto& gen : sys.ac.generators)
+    if (gen.in_service) add_injection(gen.bus, gen.pg_mw, gen.qg_mvar);
+  for (const auto& gen : sys.ac.static_generators)
+    if (gen.in_service) add_injection(gen.bus, gen.p_mw * gen.scaling, gen.q_mvar * gen.scaling);
+  for (const auto& gen : sys.ac.renewable_gens)
+    if (gen.in_service) add_injection(gen.bus, gen.p_mw, gen.q_mvar);
+  for (const auto& gen : sys.ac.pv_systems)
+    if (gen.in_service) add_injection(gen.bus, gen.p_mw, gen.q_mvar);
+  for (const auto& storage : sys.ac.storage)
+    if (storage.in_service) add_injection(storage.bus, storage.p_mw, storage.q_mvar);
+  for (const auto& load : sys.ac.loads) {
+    if (!load.in_service) continue;
+    const double vm = std::abs(ac_voltage(load.bus));
+    double p = load.p_mw * load.scaling, q = load.q_mvar * load.scaling;
+    if (load.model == hacdcpf::LoadModel::ZIP) {
+      p *= load.p_percent_p / 100.0 + load.i_percent_p / 100.0 * vm +
+           load.z_percent_p / 100.0 * vm * vm;
+      q *= load.p_percent_q / 100.0 + load.i_percent_q / 100.0 * vm +
+           load.z_percent_q / 100.0 * vm * vm;
+    }
+    add_injection(load.bus, -p, -q);
+  }
+  for (const auto& load : sys.ac.flexible_loads)
+    if (load.in_service) add_injection(load.bus, -load.p_mw, -load.q_mvar);
+  for (const auto& converter : pf.vsc_transfers)
+    add_injection(converter.bus_ac, converter.p_ac_mw, converter.q_ac_mvar);
+
+  std::unordered_map<int, int> grids_at_bus;
+  for (const auto& grid : sys.ac.external_grids)
+    if (grid.in_service) ++grids_at_bus[grid.bus];
+  std::vector<double> grid_p(sys.ac.external_grids.size(), 0.0);
+  std::vector<double> grid_q(sys.ac.external_grids.size(), 0.0);
+  for (size_t i = 0; i < sys.ac.external_grids.size(); ++i) {
+    const auto& grid = sys.ac.external_grids[i];
+    const int count = grids_at_bus[grid.bus];
+    if (!grid.in_service || count <= 0) continue;
+    grid_p[i] = (network_p[grid.bus] - nongrid_p[grid.bus]) / count;
+    grid_q[i] = (network_q[grid.bus] - nongrid_q[grid.bus]) / count;
+  }
+  for (auto& row : frame["component_results"]) {
+    if (row.value("canvas_type", std::string()) != "external_grid") continue;
+    const int index = row.value("canvas_index", -1);
+    const auto it = std::find_if(sys.ac.external_grids.begin(), sys.ac.external_grids.end(),
+                                 [&](const auto& grid) { return grid.index == index; });
+    if (it == sys.ac.external_grids.end()) continue;
+    const size_t pos = static_cast<size_t>(std::distance(sys.ac.external_grids.begin(), it));
+    row["metrics"].push_back(json{{"label", "P"}, {"name", "p_mw"},
+                                    {"value", grid_p[pos]}, {"unit", "MW"},
+                                    {"quantity", "p"}, {"precision", 4}});
+    row["metrics"].push_back(json{{"label", "Q"}, {"name", "q_mvar"},
+                                    {"value", grid_q[pos]}, {"unit", "MVar"},
+                                    {"quantity", "q"}, {"precision", 4}});
+    row["terminals"] = json::array({json{{"name", "ac"}, {"bus", it->bus},
+                                           {"domain", "AC"}, {"p_mw", grid_p[pos]},
+                                           {"q_mvar", grid_q[pos]}}});
+  }
+  for (auto& row : frame["component_results"]) {
+    if (row.value("canvas_type", std::string()) != "transformer_2w") continue;
+    const int index = row.value("canvas_index", -1);
+    const auto tf = std::find_if(trafo2w.begin(), trafo2w.end(),
+                                 [&](const auto& item) {
+                                   return item.value("index", -1) == index;
+                                 });
+    if (tf == trafo2w.end()) continue;
+    row["metrics"].push_back(json{{"label", "P_HV"}, {"name", "terminal.hv.p_mw"},
+                                    {"value", tf->value("p_hv_mw", 0.0)}, {"unit", "MW"},
+                                    {"quantity", "p"}, {"precision", 4}});
+    row["metrics"].push_back(json{{"label", "Q_HV"}, {"name", "terminal.hv.q_mvar"},
+                                    {"value", tf->value("q_hv_mvar", 0.0)}, {"unit", "MVar"},
+                                    {"quantity", "q"}, {"precision", 4}});
+    row["metrics"].push_back(json{{"label", "P_LV"}, {"name", "terminal.lv.p_mw"},
+                                    {"value", tf->value("p_lv_mw", 0.0)}, {"unit", "MW"},
+                                    {"quantity", "p"}, {"precision", 4}});
+    row["metrics"].push_back(json{{"label", "Q_LV"}, {"name", "terminal.lv.q_mvar"},
+                                    {"value", tf->value("q_lv_mvar", 0.0)}, {"unit", "MVar"},
+                                    {"quantity", "q"}, {"precision", 4}});
+    row["terminals"] = json::array({
+        json{{"name", "hv"}, {"bus", tf->value("hv_bus", 0)}, {"domain", "AC"},
+             {"p_mw", tf->value("p_hv_mw", 0.0)}, {"q_mvar", tf->value("q_hv_mvar", 0.0)}},
+        json{{"name", "lv"}, {"bus", tf->value("lv_bus", 0)}, {"domain", "AC"},
+             {"p_mw", tf->value("p_lv_mw", 0.0)}, {"q_mvar", tf->value("q_lv_mvar", 0.0)}}});
+  }
+  auto& balance = frame["power_balance_diagnostics"];
+  auto balance_bus = [&](int bus) -> json* {
+    for (auto& row : balance["all_buses"])
+      if (row.value("domain", std::string()) == "AC" && row.value("bus", 0) == bus)
+        return &row;
+    return nullptr;
+  };
+  for (const auto& tf : trafo2w) {
+    for (const auto& side : {std::tuple<int, double, double>{
+                                 tf.value("hv_bus", 0), tf.value("p_hv_mw", 0.0),
+                                 tf.value("q_hv_mvar", 0.0)},
+                             std::tuple<int, double, double>{
+                                 tf.value("lv_bus", 0), tf.value("p_lv_mw", 0.0),
+                                 tf.value("q_lv_mvar", 0.0)}}) {
+      if (auto* row = balance_bus(std::get<0>(side))) {
+        (*row)["terminal_export_mw"] = row->value("terminal_export_mw", 0.0) + std::get<1>(side);
+        (*row)["terminal_export_mvar"] = row->value("terminal_export_mvar", 0.0) + std::get<2>(side);
+        (*row)["details"].push_back(json{{"label", "Transformer 2W terminal"},
+                                          {"p_mw", std::get<1>(side)},
+                                          {"q_mvar", std::get<2>(side)},
+                                          {"role", "export"}});
+      }
+    }
+  }
+  for (size_t i = 0; i < sys.ac.external_grids.size(); ++i) {
+    const auto& grid = sys.ac.external_grids[i];
+    if (!grid.in_service) continue;
+    if (auto* row = balance_bus(grid.bus)) {
+      (*row)["net_injection_mw"] = row->value("net_injection_mw", 0.0) + grid_p[i];
+      (*row)["net_injection_mvar"] = row->value("net_injection_mvar", 0.0) + grid_q[i];
+      (*row)["details"].push_back(json{{"label", grid.name.empty() ? "External Grid" : grid.name},
+                                        {"p_mw", grid_p[i]}, {"q_mvar", grid_q[i]},
+                                        {"role", "injection"}});
+    }
+  }
+  balance["ordinary"] = json::array();
+  balance["sources"] = json::array();
+  for (auto& row : balance["all_buses"]) {
+    const double rp = row.value("net_injection_mw", 0.0) -
+                      row.value("terminal_export_mw", 0.0);
+    const double rq = row.value("net_injection_mvar", 0.0) -
+                      row.value("terminal_export_mvar", 0.0);
+    row["residual_mw"] = rp; row["residual_kw"] = rp * 1000.0;
+    row["residual_mvar"] = rq; row["residual_kvar"] = rq * 1000.0;
+    const bool source = row.value("domain", std::string()) == "AC" &&
+        grids_at_bus.count(row.value("bus", 0)) > 0;
+    if (source) {
+      json source_row = row;
+      source_row["source_mw"] = row.value("net_injection_mw", 0.0);
+      source_row["source_mvar"] = row.value("net_injection_mvar", 0.0);
+      balance["sources"].push_back(std::move(source_row));
+    } else if (std::abs(rp) > 1e-3 || std::abs(rq) > 1e-3) {
+      balance["ordinary"].push_back(row);
+    }
+  }
+  balance["ordinary_bad_count"] = balance["ordinary"].size();
+  balance["source_count"] = balance["sources"].size();
+  const json terminals = post_power_flow_terminal_flows_json(
+      sys, pf, {}, {}, grid_p, grid_q);
+  frame["ac_switch_flows"] = terminals.value("ac_switch_flows", json::array());
+  frame["ac_circuit_breaker_flows"] =
+      terminals.value("ac_circuit_breaker_flows", json::array());
+  frame["dc_circuit_breaker_flows"] =
+      terminals.value("dc_circuit_breaker_flows", json::array());
+  return frame;
+}
+
+json transient_canvas_frame(const json& cached, int index) {
+  const auto& times = cached.value("time_s", json::array());
+  if (!times.is_array() || index < 0 || index >= static_cast<int>(times.size()))
+    throw std::out_of_range("Transient frame index is outside the cached result range");
+  const auto sample = [index](const json& row) -> json {
+    return row.is_array() && index < static_cast<int>(row.size()) ? row[index] : json(nullptr);
+  };
+  json frame{{"schema", "canvas_frame_v1"}, {"analysis", "transient"},
+             {"index", index}, {"count", times.size()}, {"time", times[index]},
+             {"time_unit", "s"}, {"converged", cached.value("success", false)},
+             {"status", cached.value("message", std::string())},
+             {"capabilities", json{{"voltage", true}, {"frequency", true},
+                                    {"device_power", true}, {"device_current", true},
+                                    {"branch_power", false}, {"reactive_power", true},
+                                    {"soc", false}, {"power_balance", false}}},
+             {"geo_ac_branches", json::array()},
+             {"geo_dc_branches", json::array()},
+             {"ac_switch_flows", json::array()},
+             {"ac_circuit_breaker_flows", json::array()},
+             {"dc_circuit_breaker_flows", json::array()}};
+  frame["vm"] = json::array();
+  for (const auto& row : cached.value("ac_voltage_matrix", json::array()))
+    frame["vm"].push_back(sample(row));
+  frame["vdc"] = json::array();
+  for (const auto& row : cached.value("dc_voltage_matrix", json::array()))
+    frame["vdc"].push_back(sample(row));
+  frame["frequency_hz"] = json::array();
+  for (const auto& row : cached.value("bus_frequency_matrix", json::array()))
+    frame["frequency_hz"].push_back(sample(row));
+  frame["ac_bus_ids"] = cached.value("ac_bus_ids", json::array());
+  frame["dc_bus_ids"] = cached.value("dc_bus_ids", json::array());
+
+  json components = json::array();
+  bool has_soc = false;
+  for (const auto& dev : cached.value("device_series", json::array())) {
+    json metrics = json::array();
+    if (dev.contains("values") && dev["values"].is_object()) {
+      for (const auto& [name, values] : dev["values"].items()) {
+        const json value = sample(values);
+        if (!value.is_number()) continue;
+        if (name.find("soc") != std::string::npos ||
+            name.find("state_of_charge") != std::string::npos) has_soc = true;
+        const bool q = name.find("q_") != std::string::npos || name == "q";
+        const bool p = name.find("p_") != std::string::npos || name == "p";
+        const bool current = name.find("current") != std::string::npos ||
+                             name.find("i_") != std::string::npos;
+        metrics.push_back(json{{"name", name}, {"label", name}, {"value", value},
+                               {"unit", q ? "MVar" : p ? "MW" : current ? "pu" : ""},
+                               {"quantity", q ? "q" : p ? "p" : "scalar"},
+                               {"precision", 4}});
+      }
+    }
+    components.push_back(json{{"canvas_type", dev.value("canvas_type", std::string())},
+                              {"canvas_index", dev.value("canvas_index", -1)},
+                              {"index", dev.value("canvas_index", -1)},
+                              {"name", dev.value("name", std::string())},
+                              {"domain", dev.value("component_domain", std::string())},
+                              {"bus", dev.value("bus", 0)},
+                              {"status", "动态采样"}, {"metrics", metrics}});
+  }
+  frame["component_results"] = components;
+  frame["capabilities"]["soc"] = has_soc;
+  json events = json::array();
+  const double now = times[index].get<double>();
+  const json applied = cached.value("applied_event_records", json::array());
+  const json event_source = applied.is_array() && !applied.empty()
+      ? applied : cached.value("scheduled_events", json::array());
+  for (const auto& event : event_source) {
+    const double start = event.value("time_s", 0.0);
+    const double duration = event.value("duration_s", 0.0);
+    if (now + 1e-9 >= start) {
+      json row = event;
+      row["active"] = duration <= 0.0 || now <= start + duration + 1e-9;
+      row["state"] = row["active"].get<bool>() ? "active" : "applied";
+      events.push_back(std::move(row));
+    }
+  }
+  frame["events"] = events;
+  return frame;
 }
 
 struct FMEAComponentPresentation {
@@ -15115,11 +15510,64 @@ int main(int argc, char** argv) {
         }
         out["csv"] = hacdcpf::dynamics::to_csv(result, export_options);
       }
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        g_session.last_transient_result = out;
+      }
       res.status = result.success ? 200 : 400;
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
     } catch (const std::exception& e) {
       g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Get("/api/session/transient/frame",
+          [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      if (!req.has_param("index"))
+        throw std::invalid_argument("Missing required query parameter: index");
+      const int index = std::stoi(req.get_param_value("index"));
+      json frame;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.last_transient_result)
+          throw std::runtime_error("No cached transient result; run transient simulation first");
+        frame = transient_canvas_frame(*g_session.last_transient_result, index);
+      }
+      res.set_header("Cache-Control", "no-store");
+      res.set_content(frame.dump(), "application/json");
+    } catch (const std::out_of_range& e) {
+      res.status = 416;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Get("/api/session/tspf/frame",
+          [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      if (!req.has_param("step"))
+        throw std::invalid_argument("Missing required query parameter: step");
+      const int step = std::stoi(req.get_param_value("step"));
+      json frame;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.last_tspf_result)
+          throw std::runtime_error("No cached TSPF result; run time-series power flow first");
+        frame = time_series_canvas_frame(*g_session.last_tspf_result,
+                                         g_session.last_tspf_data, step);
+      }
+      res.set_header("Cache-Control", "no-store");
+      res.set_content(frame.dump(), "application/json");
+    } catch (const std::out_of_range& e) {
+      res.status = 416;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    } catch (const std::exception& e) {
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
