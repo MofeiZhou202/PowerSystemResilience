@@ -5,7 +5,7 @@ short-circuit comparison artifacts.
 
 ## Coverage
 
-The matrix includes 34 cases across:
+The matrix includes 50 cases across:
 
 - source strength and X/R ratio;
 - line length and high-resistance distribution lines;
@@ -14,13 +14,19 @@ The matrix includes 34 cases across:
 - HV and LV taps from 0.90 through 1.10;
 - three-phase, two-phase, and single-line-to-ground faults;
 - zero-sequence impedance multipliers from 0.5 through 3.0.
+- grid-following IBR current limits from 1.05 through 1.50 pu;
+- grid-following ratings, local/remote location, and multiple converters;
+- grid-forming ratings and virtual/filter reactance from 0.10 through 0.30 pu;
+- mixed grid-forming and grid-following converter systems.
 
-HACDCPF and OpenDSS are compared for all 34 cases. GridLAB-D is compared for
-the 28 balanced three-phase cases. GridLAB-D does not expose an OpenDSS-style
+HACDCPF and OpenDSS are compared for all 50 cases. GridLAB-D is compared for
+35 balanced three-phase passive/GFM cases. GridLAB-D does not expose an OpenDSS-style
 `FaultStudy`, `Zsc1`, `Zsc0`, or IEC peak-current API, so its balanced current
 is obtained by solving a 100-ohm three-phase shunt probe and extrapolating the
-complex Thevenin impedance. GridLAB-D is not used for unbalanced faults or
-peak-current validation.
+complex Thevenin impedance. Its steady NR inverter does not enforce a declared
+GFL short-circuit current limit, so GridLAB-D is not used for GFL, unbalanced,
+or peak-current validation. OpenDSS GFL validation uses explicit `Isource`
+elements aligned with the utility fault-current phasor and an explicit fault.
 
 IEC transformer correction is disabled for cross-engine comparisons because
 OpenDSS and GridLAB-D model physical nameplate impedance rather than IEC 60909

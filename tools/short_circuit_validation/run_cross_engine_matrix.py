@@ -38,20 +38,28 @@ def configure_source(engine: Any, model: dict[str, Any], base_kv: float) -> None
         for key in ("r1_pu", "x1_pu", "r0_pu", "x0_pu")
     }
     engine.Text.Command = (
-        "Edit Vsource.source phases=3 pu=1 frequency=50 "
+        "Edit Vsource.source phases=3 pu=1 "
         f"basekv={base_kv} R1={props['r1_pu']} X1={props['x1_pu']} "
         f"R0={props['r0_pu']} X0={props['x0_pu']}"
     )
 
 
-def build_opendss_case(case: dict[str, Any]) -> tuple[complex, complex]:
+def fault_current_a(engine: Any) -> complex:
+    engine.ActiveCircuit.SetActiveElement("Fault.benchmark_fault")
+    currents = list(engine.ActiveCircuit.ActiveCktElement.Currents)
+    if len(currents) < 2:
+        raise RuntimeError("OpenDSS fault current result is missing")
+    return complex(float(currents[0]), float(currents[1]))
+
+
+def build_opendss_case(case: dict[str, Any]) -> dict[str, Any]:
     engine = dss.DSS
     engine.Text.Command = "Clear"
     model = case["model"]
     kind = model["kind"]
     source_kv = float(model.get("base_kv", model.get("hv_kv")))
     engine.Text.Command = (
-        f"New Circuit.{case['name']} phases=3 bus1=bus1 basekv={source_kv} pu=1"
+        f"New Circuit.{case['name']} phases=3 bus1=n1 basekv={source_kv} pu=1"
     )
     configure_source(engine, model, source_kv)
 
@@ -65,7 +73,7 @@ def build_opendss_case(case: dict[str, Any]) -> tuple[complex, complex]:
             }
             engine.Text.Command = (
                 f"New Line.line{index} phases=3 "
-                f"bus1=bus{branch['from_bus']} bus2=bus{branch['to_bus']} "
+                f"bus1=n{branch['from_bus']} bus2=n{branch['to_bus']} "
                 f"r1={values['r1_pu']} x1={values['x1_pu']} "
                 f"r0={values['r0_pu']} x0={values['x0_pu']} "
                 "c1=0 c0=0 length=1 units=none"
@@ -80,7 +88,7 @@ def build_opendss_case(case: dict[str, Any]) -> tuple[complex, complex]:
         taps = f"({tap},1)" if transformer["tap_side"] == "hv" else f"(1,{tap})"
         engine.Text.Command = (
             "New Transformer.transformer phases=3 windings=2 "
-            "buses=(bus1.1.2.3.0,bus2.1.2.3.0) conns=(wye,wye) "
+            "buses=(n1.1.2.3.0,n2.1.2.3.0) conns=(wye,wye) "
             f"kvs=({model['hv_kv']},{model['lv_kv']}) "
             f"kvas=({float(transformer['sn_mva']) * 1000},"
             f"{float(transformer['sn_mva']) * 1000}) "
@@ -90,12 +98,76 @@ def build_opendss_case(case: dict[str, Any]) -> tuple[complex, complex]:
     else:
         raise RuntimeError(f"Unsupported benchmark model kind: {kind}")
 
+    ibrs = model.get("ibrs", [])
+    for index, ibr in enumerate(ibrs, start=1):
+        if ibr["mode"] != "grid_forming":
+            continue
+        bus = int(ibr["bus"])
+        kv = float(model["lv_kv"] if kind == "transformer_network" else model["base_kv"])
+        zbase = kv * kv / float(ibr["rating_mva"])
+        r_ohm = float(ibr["r_sc_pu"]) * zbase
+        x_ohm = float(ibr["x_sc_pu"]) * zbase
+        engine.Text.Command = (
+            f"New Vsource.gfm{index} bus1=n{bus} phases=3 basekv={kv} pu=1 "
+            f"R1={r_ohm} X1={x_ohm} R0={r_ohm} X0={x_ohm}"
+        )
+
     engine.Text.Command = f"Set voltagebases={voltage_bases}"
     engine.Text.Command = "CalcVoltageBases"
     engine.Text.Command = "Solve mode=faultstudy"
-    engine.ActiveCircuit.SetActiveBus(f"bus{case['fault_bus']}")
-    active_bus = engine.ActiveCircuit.ActiveBus
-    return complex_pair(active_bus.Zsc1), complex_pair(active_bus.Zsc0)
+    engine.ActiveCircuit.SetActiveBus(f"n{case['fault_bus']}")
+    z1 = complex_pair(engine.ActiveCircuit.ActiveBus.Zsc1)
+    z0 = complex_pair(engine.ActiveCircuit.ActiveBus.Zsc0)
+
+    voltage_source_ikss_ka = fault_bus_kv(case) / math.sqrt(3.0) / abs(z1)
+    total_ikss_ka = voltage_source_ikss_ka
+    gfls = [ibr for ibr in ibrs if ibr["mode"] == "grid_following"]
+    if gfls:
+        # Reading Zsc leaves DSS C-API in its fault-study network state. Restore
+        # a solved snapshot before inserting explicit current sources and fault.
+        engine.Text.Command = "Set mode=snapshot"
+        engine.Text.Command = "Solve"
+        for index, ibr in enumerate(ibrs, start=1):
+            if ibr["mode"] != "grid_following":
+                continue
+            bus = int(ibr["bus"])
+            kv = float(model["lv_kv"] if kind == "transformer_network" else model["base_kv"])
+            amps = (
+                float(ibr["current_limit_pu"]) * float(ibr["rating_mva"]) * 1000.0
+                / (math.sqrt(3.0) * kv)
+            )
+            engine.Text.Command = (
+                f"New Isource.gfl{index} bus1=n{bus} phases=3 amps={amps} "
+                "angle=0 enabled=no"
+            )
+        engine.Text.Command = (
+            f"New Fault.benchmark_fault bus1=n{case['fault_bus']} phases=3 r=1e-6"
+        )
+        engine.Text.Command = "Solve"
+        baseline = fault_current_a(engine)
+        for index, ibr in enumerate(ibrs, start=1):
+            if ibr["mode"] != "grid_following":
+                continue
+            engine.Text.Command = f"Edit Isource.gfl{index} enabled=yes angle=0"
+            engine.Text.Command = "Solve"
+            response = fault_current_a(engine) - baseline
+            angle = math.degrees(math.atan2(baseline.imag, baseline.real)) - math.degrees(
+                math.atan2(response.imag, response.real)
+            )
+            ibr["external_alignment_angle_deg"] = angle
+            engine.Text.Command = f"Edit Isource.gfl{index} angle={angle} enabled=no"
+        for index, ibr in enumerate(ibrs, start=1):
+            if ibr["mode"] == "grid_following":
+                engine.Text.Command = f"Edit Isource.gfl{index} enabled=yes"
+        engine.Text.Command = "Solve"
+        total_ikss_ka = abs(fault_current_a(engine)) / 1000.0
+
+    return {
+        "z1": z1,
+        "z0": z0,
+        "voltage_source_ikss_ka": voltage_source_ikss_ka,
+        "total_ikss_ka": total_ikss_ka,
+    }
 
 
 def fault_impedance(fault_type: str, z1: complex, z0: complex) -> complex:
@@ -142,7 +214,8 @@ def gridlabd_capability() -> dict[str, Any]:
         "detail": (
             "GridLAB-D has no FaultStudy/Zsc result interface. Three-phase RMS "
             "current is extrapolated from an explicit 100 ohm balanced shunt-probe "
-            "powerflow; unbalanced faults and IEC peak remain unsupported."
+            "powerflow. GFM voltage-source equivalents are included; GFL current "
+            "limits, unbalanced faults, and IEC peak remain unsupported by steady NR."
         ),
     }
 
@@ -175,6 +248,17 @@ def run_gridlabd_case(
         }
 
     model = case["model"]
+    ibrs = model.get("ibrs", [])
+    if any(ibr["mode"] == "grid_following" for ibr in ibrs):
+        return {
+            "status": "unsupported_gfl_current_limit",
+            "ikss_ka": None,
+            "ip_ka": None,
+            "detail": (
+                "GridLAB-D steady NR inverter does not enforce the declared "
+                "short-circuit current limit; deltamode control/protection is required."
+            ),
+        }
     base_mva = float(model["base_mva"])
     source_kv = float(model.get("base_kv", model.get("hv_kv")))
     source = model["source"]
@@ -231,6 +315,30 @@ def run_gridlabd_case(
         "object overhead_line { name source_impedance; phases ABC; from swing; "
         "to bus1; length 1 mile; configuration cfg_source; };"
     )
+    for index, ibr in enumerate(ibrs, start=1):
+        if ibr["mode"] != "grid_forming":
+            continue
+        bus = int(ibr["bus"])
+        kv = bus_kv[bus]
+        zbase = kv * kv / float(ibr["rating_mva"])
+        z_ibr = complex(float(ibr["r_sc_pu"]) * zbase,
+                        float(ibr["x_sc_pu"]) * zbase)
+        voltage_ln = kv * 1000.0 / math.sqrt(3.0)
+        lines.extend(
+            [
+                "object meter {",
+                f"  name gfm_swing{index}; phases ABCN; bustype SWING;",
+                f"  nominal_voltage {voltage_ln};",
+                f"  voltage_A {voltage_ln}+0j;",
+                f"  voltage_B {voltage_ln}-120d;",
+                f"  voltage_C {voltage_ln}+120d;",
+                "};",
+                gridlabd_line_configuration(f"cfg_gfm{index}", z_ibr, z_ibr),
+                f"object overhead_line {{ name gfm_impedance{index}; phases ABC; "
+                f"from gfm_swing{index}; to bus{bus}; length 1 mile; "
+                f"configuration cfg_gfm{index}; }};",
+            ]
+        )
 
     if model["kind"] == "line_network":
         base_kv = float(model["base_kv"])
@@ -444,8 +552,8 @@ def markdown_report(report: dict[str, Any]) -> str:
             "",
             "## Per-Case Results",
             "",
-            "| Case | Category | Fault | HACDCPF Ikss kA | OpenDSS Ikss kA | Error | GridLAB-D Ikss kA | Error | HACDCPF ip kA | OpenDSS+IEC ip kA | Error |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| Case | Category | Fault | HACDCPF Ikss kA | HACDCPF IBR kA | OpenDSS Ikss kA | OpenDSS GFL kA | Error | GridLAB-D Ikss kA | Error | HACDCPF ip kA | OpenDSS+IEC ip kA | Error |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for case in report["cases"]:
@@ -463,7 +571,8 @@ def markdown_report(report: dict[str, Any]) -> str:
         )
         lines.append(
             f"| {case['name']} | {case['category']} | {case['fault_type']} | "
-            f"{native['ikss_ka']:.6f} | {reference['ikss_ka']:.6f} | "
+            f"{native['ikss_ka']:.6f} | {native.get('ibr_contribution_ka', 0.0):.6f} | "
+            f"{reference['ikss_ka']:.6f} | {reference.get('current_source_ikss_ka', 0.0):.6f} | "
             f"{compare['ikss_ka_relative_error']:.4%} | {gridlabd_ikss} | "
             f"{gridlabd_error} | {native['ip_ka']:.6f} | "
             f"{reference['ip_ka']:.6f} | {compare['ip_ka_relative_error']:.4%} |"
@@ -491,17 +600,28 @@ def main() -> None:
     gridlabd = gridlabd_capability()
     cases = []
     for case in native_report["cases"]:
-        z1, z0 = build_opendss_case(case)
+        dss_result = build_opendss_case(case)
+        z1, z0 = dss_result["z1"], dss_result["z0"]
         zeq = fault_impedance(case["fault_type"], z1, z0)
         voltage_phase_kv = fault_bus_kv(case) / math.sqrt(3.0)
-        ikss_ka = voltage_phase_kv / abs(zeq)
+        voltage_source_ikss_ka = voltage_phase_kv / abs(zeq)
+        has_gfl = any(
+            ibr["mode"] == "grid_following"
+            for ibr in case["model"].get("ibrs", [])
+        )
+        ikss_ka = dss_result["total_ikss_ka"] if has_gfl else voltage_source_ikss_ka
         rx = abs(zeq.real / zeq.imag) if abs(zeq.imag) > 1e-15 else 0.0
         kappa = 1.02 + 0.98 * math.exp(-3.0 * rx)
-        ip_ka = math.sqrt(2.0) * kappa * ikss_ka
+        current_source_ka = max(0.0, ikss_ka - voltage_source_ikss_ka)
+        ip_ka = math.sqrt(2.0) * (
+            kappa * voltage_source_ikss_ka + current_source_ka
+        )
         case["opendss"] = {
             "z1_ohm": [z1.real, z1.imag],
             "z0_ohm": [z0.real, z0.imag],
             "ikss_ka": ikss_ka,
+            "voltage_source_ikss_ka": voltage_source_ikss_ka,
+            "current_source_ikss_ka": current_source_ka,
             "kappa_method_a": kappa,
             "ip_ka": ip_ka,
         }

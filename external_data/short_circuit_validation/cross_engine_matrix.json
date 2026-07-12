@@ -14,35 +14,35 @@
       "version": "GridLAB-D 5.3.0-20095 (1b2e463:HEAD) 64-bit MACOSX RELEASE\nWARNING  [INIT] : unable to set thread policy: No such process",
       "short_circuit_api": "balanced_shunt_emulation",
       "status": "available",
-      "detail": "GridLAB-D has no FaultStudy/Zsc result interface. Three-phase RMS current is extrapolated from an explicit 100 ohm balanced shunt-probe powerflow; unbalanced faults and IEC peak remain unsupported."
+      "detail": "GridLAB-D has no FaultStudy/Zsc result interface. Three-phase RMS current is extrapolated from an explicit 100 ohm balanced shunt-probe powerflow. GFM voltage-source equivalents are included; GFL current limits, unbalanced faults, and IEC peak remain unsupported by steady NR."
     }
   },
   "summary": {
-    "case_count": 34,
+    "case_count": 50,
     "metrics": {
       "ikss_ka": {
-        "mean_relative_error": 5.4521227433789665e-08,
-        "max_relative_error": 1.4852797625119965e-07,
-        "worst_case": "transformer_vk_16"
+        "mean_relative_error": 6.514322665499516e-08,
+        "max_relative_error": 1.8055816397069185e-07,
+        "worst_case": "ibr_mixed_gfm_gfl"
       },
       "ip_ka": {
-        "mean_relative_error": 6.140416102457333e-08,
+        "mean_relative_error": 5.8387278797662925e-08,
         "max_relative_error": 1.6684401282342018e-07,
         "worst_case": "transformer_vk_16"
       }
     },
-    "within_0_1_percent": 34,
+    "within_0_1_percent": 50,
     "gridlabd_balanced_shunt": {
-      "case_count": 28,
-      "mean_relative_error": 5.329202537838999e-09,
-      "max_relative_error": 2.3136587993375906e-08,
-      "worst_case": "transformer_lv_tap_110"
+      "case_count": 35,
+      "mean_relative_error": 6.310028758787477e-09,
+      "max_relative_error": 2.3292252397255463e-08,
+      "worst_case": "gfm_x_30"
     },
     "by_category": {
       "distribution_feeder": {
         "case_count": 3,
         "opendss_ikss_max_relative_error": 4.285404119917555e-15,
-        "opendss_ip_max_relative_error": 1.846272110014497e-15,
+        "opendss_ip_max_relative_error": 2.030899321015946e-15,
         "gridlabd_case_count": 3,
         "gridlabd_ikss_max_relative_error": 2.0955775567411323e-09
       },
@@ -52,24 +52,43 @@
         "opendss_ip_max_relative_error": 2.1076917053651147e-16,
         "gridlabd_case_count": 0
       },
+      "ibr_grid_following": {
+        "case_count": 8,
+        "opendss_ikss_max_relative_error": 1.5290264014774438e-07,
+        "opendss_ip_max_relative_error": 9.26076614061902e-08,
+        "gridlabd_case_count": 0
+      },
+      "ibr_grid_forming": {
+        "case_count": 7,
+        "opendss_ikss_max_relative_error": 5.442840239050563e-16,
+        "opendss_ip_max_relative_error": 5.951590680710072e-16,
+        "gridlabd_case_count": 7,
+        "gridlabd_ikss_max_relative_error": 2.3292252397255463e-08
+      },
+      "ibr_mixed": {
+        "case_count": 1,
+        "opendss_ikss_max_relative_error": 1.8055816397069185e-07,
+        "opendss_ip_max_relative_error": 1.0496540245650648e-07,
+        "gridlabd_case_count": 0
+      },
       "line_sweep": {
         "case_count": 4,
         "opendss_ikss_max_relative_error": 9.480656907449555e-16,
-        "opendss_ip_max_relative_error": 4.388040915999215e-16,
+        "opendss_ip_max_relative_error": 6.582061373998824e-16,
         "gridlabd_case_count": 4,
         "gridlabd_ikss_max_relative_error": 9.532020779142014e-09
       },
       "source_sweep": {
         "case_count": 4,
         "opendss_ikss_max_relative_error": 9.245566376278442e-16,
-        "opendss_ip_max_relative_error": 7.488654777783386e-16,
+        "opendss_ip_max_relative_error": 8.986385733340066e-16,
         "gridlabd_case_count": 4,
         "gridlabd_ikss_max_relative_error": 1.9528238986557572e-08
       },
       "topology": {
         "case_count": 3,
         "opendss_ikss_max_relative_error": 1.1869809458832466e-15,
-        "opendss_ip_max_relative_error": 1.321725972300389e-15,
+        "opendss_ip_max_relative_error": 1.1565102257628402e-15,
         "gridlabd_case_count": 3,
         "gridlabd_ikss_max_relative_error": 1.9916582329755567e-09
       },
@@ -83,14 +102,14 @@
       "transformer_tap": {
         "case_count": 10,
         "opendss_ikss_max_relative_error": 1.4527301838022654e-07,
-        "opendss_ip_max_relative_error": 1.6359908181713426e-07,
+        "opendss_ip_max_relative_error": 1.6359908193778854e-07,
         "gridlabd_case_count": 10,
         "gridlabd_ikss_max_relative_error": 2.3136587993375906e-08
       },
       "zero_sequence": {
         "case_count": 5,
         "opendss_ikss_max_relative_error": 1.1467639784972079e-07,
-        "opendss_ip_max_relative_error": 1.2913940095401636e-07,
+        "opendss_ip_max_relative_error": 1.2913940077403205e-07,
         "gridlabd_case_count": 0
       }
     }
@@ -101,6 +120,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 28.80459932494064,
         "ip_ka": 73.42675689166029
       },
@@ -137,6 +157,8 @@
           0.3997504799999999
         ],
         "ikss_ka": 28.80459932494064,
+        "voltage_source_ikss_ka": 28.80459932494064,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.8025092844694877,
         "ip_ka": 73.42675689166028
       },
@@ -169,6 +191,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 19.21306675119321,
         "ip_ka": 47.44127996580039
       },
@@ -205,12 +228,14 @@
           0.5980148800000002
         ],
         "ikss_ka": 19.213066751193193,
+        "voltage_source_ikss_ka": 19.213066751193193,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.7460018854045574,
-        "ip_ka": 47.441279965800355
+        "ip_ka": 47.44127996580035
       },
       "comparison": {
         "ikss_ka_relative_error": 9.245566376278442e-16,
-        "ip_ka_relative_error": 7.488654777783386e-16,
+        "ip_ka_relative_error": 8.986385733340066e-16,
         "gridlabd_ikss_ka_relative_error": 1.9528238986557572e-08
       },
       "gridlabd": {
@@ -237,6 +262,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 11.544341401229767,
         "ip_ka": 25.985282258460128
       },
@@ -273,6 +299,8 @@
           0.9844645599999994
         ],
         "ikss_ka": 11.544341401229765,
+        "voltage_source_ikss_ka": 11.544341401229765,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.5916342610975018,
         "ip_ka": 25.98528225846012
       },
@@ -305,6 +333,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 11.658720792283988,
         "ip_ka": 21.503613324291326
       },
@@ -341,12 +370,14 @@
           0.9155417600000005
         ],
         "ikss_ka": 11.658720792283988,
+        "voltage_source_ikss_ka": 11.658720792283988,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.3042040436960332,
-        "ip_ka": 21.50361332429133
+        "ip_ka": 21.503613324291333
       },
       "comparison": {
         "ikss_ka_relative_error": 0.0,
-        "ip_ka_relative_error": 1.652147304372896e-16,
+        "ip_ka_relative_error": 3.3042946087457915e-16,
         "gridlabd_ikss_ka_relative_error": 2.9498762649317104e-09
       },
       "gridlabd": {
@@ -373,6 +404,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 26.23130020880977,
         "ip_ka": 64.77083959444353
       },
@@ -409,12 +441,14 @@
           0.4380148800000005
         ],
         "ikss_ka": 26.231300208809746,
+        "voltage_source_ikss_ka": 26.231300208809746,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.746001896047657,
-        "ip_ka": 64.7708395944435
+        "ip_ka": 64.77083959444349
       },
       "comparison": {
         "ikss_ka_relative_error": 9.480656907449555e-16,
-        "ip_ka_relative_error": 4.388040915999215e-16,
+        "ip_ka_relative_error": 6.582061373998824e-16,
         "gridlabd_ikss_ka_relative_error": 5.598447193345424e-09
       },
       "gridlabd": {
@@ -441,6 +475,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 15.983432195659143,
         "ip_ka": 38.92713898504076
       },
@@ -477,6 +512,8 @@
           0.7180148800000001
         ],
         "ikss_ka": 15.98343219565914,
+        "voltage_source_ikss_ka": 15.98343219565914,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.722135997548079,
         "ip_ka": 38.927138985040756
       },
@@ -509,6 +546,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 8.412295251025082,
         "ip_ka": 19.633063331416707
       },
@@ -545,6 +583,8 @@
           1.35801488
         ],
         "ikss_ka": 8.41229525102508,
+        "voltage_source_ikss_ka": 8.41229525102508,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.6502835198774108,
         "ip_ka": 19.6330633314167
       },
@@ -577,6 +617,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 13.026574518091948,
         "ip_ka": 20.848394457939396
       },
@@ -613,6 +654,8 @@
           0.7180148799999998
         ],
         "ikss_ka": 13.02657451809195,
+        "voltage_source_ikss_ka": 13.02657451809195,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.1316897682953033,
         "ip_ka": 20.848394457939396
       },
@@ -645,6 +688,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 17.95840291011692,
         "ip_ka": 43.006962148042945
       },
@@ -689,12 +733,14 @@
           0.63801488
         ],
         "ikss_ka": 17.9584029101169,
+        "voltage_source_ikss_ka": 17.9584029101169,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.6933863621014136,
-        "ip_ka": 43.00696214804289
+        "ip_ka": 43.006962148042895
       },
       "comparison": {
         "ikss_ka_relative_error": 1.1869809458832466e-15,
-        "ip_ka_relative_error": 1.321725972300389e-15,
+        "ip_ka_relative_error": 1.1565102257628402e-15,
         "gridlabd_ikss_ka_relative_error": 1.948530116427424e-10
       },
       "gridlabd": {
@@ -721,6 +767,7 @@
       "fault_bus": 3,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 11.458102238949754,
         "ip_ka": 26.959779761235676
       },
@@ -765,12 +812,14 @@
           0.9980148799999999
         ],
         "ikss_ka": 11.458102238949746,
+        "voltage_source_ikss_ka": 11.458102238949746,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.6637522244881744,
-        "ip_ka": 26.95977976123565
+        "ip_ka": 26.959779761235655
       },
       "comparison": {
         "ikss_ka_relative_error": 7.751531633929076e-16,
-        "ip_ka_relative_error": 9.22448030801854e-16,
+        "ip_ka_relative_error": 7.906697406873034e-16,
         "gridlabd_ikss_ka_relative_error": 1.9916582329755567e-09
       },
       "gridlabd": {
@@ -797,6 +846,7 @@
       "fault_bus": 3,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 17.939616342746294,
         "ip_ka": 42.58222401830215
       },
@@ -849,6 +899,8 @@
           0.6380768714761723
         ],
         "ikss_ka": 17.939616342746287,
+        "voltage_source_ikss_ka": 17.939616342746287,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.6784182440735904,
         "ip_ka": 42.58222401830213
       },
@@ -881,6 +933,7 @@
       "fault_bus": 3,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 36.477167028585875,
         "ip_ka": 84.75735254716075
       },
@@ -981,6 +1034,8 @@
           0.4878985353337084
         ],
         "ikss_ka": 36.47716702858572,
+        "voltage_source_ikss_ka": 36.47716702858572,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.6430140721879378,
         "ip_ka": 84.75735254716066
       },
@@ -1013,6 +1068,7 @@
       "fault_bus": 6,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 26.782588417839012,
         "ip_ka": 58.987156210470005
       },
@@ -1113,12 +1169,14 @@
           0.6589495253337103
         ],
         "ikss_ka": 26.782588417838944,
+        "voltage_source_ikss_ka": 26.782588417838944,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.5573632207838366,
-        "ip_ka": 58.98715621047005
+        "ip_ka": 58.98715621047004
       },
       "comparison": {
         "ikss_ka_relative_error": 2.5203523589321596e-15,
-        "ip_ka_relative_error": 7.227431679108283e-16,
+        "ip_ka_relative_error": 6.022859732590236e-16,
         "gridlabd_ikss_ka_relative_error": 5.955812819815603e-10
       },
       "gridlabd": {
@@ -1145,6 +1203,7 @@
       "fault_bus": 10,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 18.426737742330882,
         "ip_ka": 38.48526616992117
       },
@@ -1245,12 +1304,14 @@
           0.9466261903337112
         ],
         "ikss_ka": 18.426737742330857,
+        "voltage_source_ikss_ka": 18.426737742330857,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.4768318225968442,
-        "ip_ka": 38.48526616992124
+        "ip_ka": 38.485266169921246
       },
       "comparison": {
         "ikss_ka_relative_error": 1.3496146794596831e-15,
-        "ip_ka_relative_error": 1.846272110014497e-15,
+        "ip_ka_relative_error": 2.030899321015946e-15,
         "gridlabd_ikss_ka_relative_error": 2.0955775567411323e-09
       },
       "gridlabd": {
@@ -1277,6 +1338,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 12.918611392973494,
         "ip_ka": 31.889919559265397
       },
@@ -1311,6 +1373,8 @@
           0.8893712429879116
         ],
         "ikss_ka": 12.918613184258454,
+        "voltage_source_ikss_ka": 12.918613184258454,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.745511036770264,
         "ip_ka": 31.889924538766362
       },
@@ -1343,6 +1407,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 13.694050830592992,
         "ip_ka": 33.80354105554837
       },
@@ -1377,6 +1442,8 @@
           0.8390085791254658
         ],
         "ikss_ka": 13.694052624890032,
+        "voltage_source_ikss_ka": 13.694052624890032,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.745481581688424,
         "ip_ka": 33.80354604336852
       },
@@ -1409,6 +1476,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 14.433757178576702,
         "ip_ka": 35.628920617960425
       },
@@ -1443,6 +1511,8 @@
           0.7960097529147696
         ],
         "ikss_ka": 14.433758973815394,
+        "voltage_source_ikss_ka": 14.433758973815394,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.7454534851079646,
         "ip_ka": 35.62892560834875
       },
@@ -1475,6 +1545,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 15.137424293179283,
         "ip_ka": 37.36531132716926
       },
@@ -1509,6 +1580,8 @@
           0.7590061112469213
         ],
         "ikss_ka": 15.137426087563275,
+        "voltage_source_ikss_ka": 15.137426087563275,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.7454267584712446,
         "ip_ka": 37.36531631513687
       },
@@ -1541,6 +1614,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 15.805290661695992,
         "ip_ka": 39.01330982817614
       },
@@ -1575,12 +1649,14 @@
           0.7269328073703019
         ],
         "ikss_ka": 15.805292453690031,
+        "voltage_source_ikss_ka": 15.805292453690031,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.7454013925502632,
-        "ip_ka": 39.01331480946003
+        "ip_ka": 39.013314809460034
       },
       "comparison": {
         "ikss_ka_relative_error": 1.1337936609715822e-07,
-        "ip_ka_relative_error": 1.2768163666777327e-07,
+        "ip_ka_relative_error": 1.276816368499015e-07,
         "gridlabd_ikss_ka_relative_error": 8.904882749703974e-09
       },
       "gridlabd": {
@@ -1607,6 +1683,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 17.81945330688482,
         "ip_ka": 43.986321750568436
       },
@@ -1641,6 +1718,8 @@
           0.6447679119279409
         ],
         "ikss_ka": 17.819455186347934,
+        "voltage_source_ikss_ka": 17.819455186347934,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.745453480941685,
         "ip_ka": 43.98632697497753
       },
@@ -1673,6 +1752,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 15.993082746345367,
         "ip_ka": 39.478028385551696
       },
@@ -1707,12 +1787,14 @@
           0.7183988089049856
         ],
         "ikss_ka": 15.993084580374703,
+        "voltage_source_ikss_ka": 15.993084580374703,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.7454534829700055,
-        "ip_ka": 39.478033483721305
+        "ip_ka": 39.4780334837213
       },
       "comparison": {
         "ikss_ka_relative_error": 1.1467639818293172e-07,
-        "ip_ka_relative_error": 1.29139401313985e-07,
+        "ip_ka_relative_error": 1.291394011340007e-07,
         "gridlabd_ikss_ka_relative_error": 4.599468787275462e-09
       },
       "gridlabd": {
@@ -1739,6 +1821,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 14.433757178576702,
         "ip_ka": 35.628920617960425
       },
@@ -1773,6 +1856,8 @@
           0.7960097529147696
         ],
         "ikss_ka": 14.433758973815394,
+        "voltage_source_ikss_ka": 14.433758973815394,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.7454534851079646,
         "ip_ka": 35.62892560834875
       },
@@ -1805,6 +1890,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 13.091843245874555,
         "ip_ka": 32.316481286131896
       },
@@ -1839,6 +1925,8 @@
           0.8776007437279507
         ],
         "ikss_ka": 13.091845007731052,
+        "voltage_source_ikss_ka": 13.091845007731052,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.7454534873555627,
         "ip_ka": 32.31648618376652
       },
@@ -1871,6 +1959,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 11.92872494097248,
         "ip_ka": 29.44538894046316
       },
@@ -1905,12 +1994,14 @@
           0.963171781103423
         ],
         "ikss_ka": 11.928726673894609,
+        "voltage_source_ikss_ka": 11.928726673894609,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.7454534897127998,
-        "ip_ka": 29.445393757702544
+        "ip_ka": 29.445393757702547
       },
       "comparison": {
         "ikss_ka_relative_error": 1.4527301838022654e-07,
-        "ip_ka_relative_error": 1.6359908181713426e-07,
+        "ip_ka_relative_error": 1.6359908193778854e-07,
         "gridlabd_ikss_ka_relative_error": 2.3136587993375906e-08
       },
       "gridlabd": {
@@ -1937,6 +2028,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 20.621037824874428,
         "ip_ka": 50.452417616728944
       },
@@ -1971,6 +2063,8 @@
           0.5567598968432383
         ],
         "ikss_ka": 20.621039993372918,
+        "voltage_source_ikss_ka": 20.621039993372918,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.730041300805825,
         "ip_ka": 50.45242359893597
       },
@@ -2003,6 +2097,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 18.04464938612641,
         "ip_ka": 43.851937776459344
       },
@@ -2037,6 +2132,8 @@
           0.6358719065399248
         ],
         "ikss_ka": 18.04465138223134,
+        "voltage_source_ikss_ka": 18.04465138223134,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.7184042955834786,
         "ip_ka": 43.85194326025311
       },
@@ -2069,6 +2166,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 14.433757178576702,
         "ip_ka": 35.628920617960425
       },
@@ -2103,6 +2201,8 @@
           0.7960097529147696
         ],
         "ikss_ka": 14.433758973815394,
+        "voltage_source_ikss_ka": 14.433758973815394,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.7454534851079646,
         "ip_ka": 35.62892560834875
       },
@@ -2135,6 +2235,7 @@
       "fault_bus": 2,
       "fault_type": "three_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 11.102933701070851,
         "ip_ka": 27.53907718717121
       },
@@ -2169,6 +2270,8 @@
           1.0351960166541714
         ],
         "ikss_ka": 11.10293535016737,
+        "voltage_source_ikss_ka": 11.10293535016737,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.7538669605367339,
         "ip_ka": 27.539081781902123
       },
@@ -2201,6 +2304,7 @@
       "fault_bus": 2,
       "fault_type": "single_phase_ground",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 19.180118634790972,
         "ip_ka": 46.71256678204892
       },
@@ -2237,6 +2341,8 @@
           0.35900744000000007
         ],
         "ikss_ka": 19.18011863479097,
+        "voltage_source_ikss_ka": 19.18011863479097,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.722135997548079,
         "ip_ka": 46.71256678204891
       },
@@ -2255,6 +2361,7 @@
       "fault_bus": 2,
       "fault_type": "single_phase_ground",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 15.983432195659146,
         "ip_ka": 38.92713898504077
       },
@@ -2291,6 +2398,8 @@
           0.7180148800000001
         ],
         "ikss_ka": 15.98343219565914,
+        "voltage_source_ikss_ka": 15.98343219565914,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.722135997548079,
         "ip_ka": 38.927138985040756
       },
@@ -2309,6 +2418,7 @@
       "fault_bus": 2,
       "fault_type": "single_phase_ground",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 11.987574146744358,
         "ip_ka": 29.195354238780574
       },
@@ -2345,12 +2455,14 @@
           1.4360297600000007
         ],
         "ikss_ka": 11.98757414674435,
+        "voltage_source_ikss_ka": 11.98757414674435,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.722135997548079,
-        "ip_ka": 29.19535423878056
+        "ip_ka": 29.195354238780553
       },
       "comparison": {
         "ikss_ka_relative_error": 5.927327139436908e-16,
-        "ip_ka_relative_error": 4.867505493845163e-16
+        "ip_ka_relative_error": 7.301258240767746e-16
       },
       "gridlabd": {
         "status": "unsupported_fault_type",
@@ -2363,6 +2475,7 @@
       "fault_bus": 2,
       "fault_type": "single_phase_ground",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 9.590059317395486,
         "ip_ka": 23.35628339102446
       },
@@ -2399,12 +2512,14 @@
           2.1540446399999995
         ],
         "ikss_ka": 9.590059317395486,
+        "voltage_source_ikss_ka": 9.590059317395486,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.722135997548079,
-        "ip_ka": 23.356283391024462
+        "ip_ka": 23.35628339102446
       },
       "comparison": {
         "ikss_ka_relative_error": 0.0,
-        "ip_ka_relative_error": 1.5210954668266124e-16
+        "ip_ka_relative_error": 0.0
       },
       "gridlabd": {
         "status": "unsupported_fault_type",
@@ -2417,6 +2532,7 @@
       "fault_bus": 2,
       "fault_type": "two_phase",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 13.842058321106904,
         "ip_ka": 33.71189125769289
       },
@@ -2453,6 +2569,8 @@
           0.7180148800000001
         ],
         "ikss_ka": 13.842058321106903,
+        "voltage_source_ikss_ka": 13.842058321106903,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.722135997548079,
         "ip_ka": 33.71189125769288
       },
@@ -2471,6 +2589,7 @@
       "fault_bus": 2,
       "fault_type": "single_phase_ground",
       "hacdcpf": {
+        "ibr_contribution_ka": 0.0,
         "ikss_ka": 15.993082746345372,
         "ip_ka": 39.47802838555171
       },
@@ -2505,17 +2624,1258 @@
           0.7183988089049856
         ],
         "ikss_ka": 15.993084580374703,
+        "voltage_source_ikss_ka": 15.993084580374703,
+        "current_source_ikss_ka": 0.0,
         "kappa_method_a": 1.7454534829700055,
-        "ip_ka": 39.478033483721305
+        "ip_ka": 39.4780334837213
       },
       "comparison": {
         "ikss_ka_relative_error": 1.1467639784972079e-07,
-        "ip_ka_relative_error": 1.2913940095401636e-07
+        "ip_ka_relative_error": 1.2913940077403205e-07
       },
       "gridlabd": {
         "status": "unsupported_fault_type",
         "ikss_ka": null,
         "ip_ka": null
+      }
+    },
+    {
+      "category": "ibr_grid_following",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 0.6062177826491072,
+        "ikss_ka": 16.58964997830825,
+        "ip_ka": 39.784460395014875
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 1.05,
+            "mode": "grid_following",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 20.0,
+            "x_sc_pu": 0.15,
+            "external_alignment_angle_deg": -83.65807025142196
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "gfl_limit_105",
+      "opendss": {
+        "z1_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "z0_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "ikss_ka": 16.589647441707363,
+        "voltage_source_ikss_ka": 15.98343219565914,
+        "current_source_ikss_ka": 0.6062152460482242,
+        "kappa_method_a": 1.722135997548079,
+        "ip_ka": 39.784456807719494
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.529026396617482e-07,
+        "ip_ka_relative_error": 9.016826342440109e-08
+      },
+      "gridlabd": {
+        "status": "unsupported_gfl_current_limit",
+        "ikss_ka": null,
+        "ip_ka": null,
+        "detail": "GridLAB-D steady NR inverter does not enforce the declared short-circuit current limit; deltamode control/protection is required."
+      }
+    },
+    {
+      "category": "ibr_grid_following",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 0.692820323027551,
+        "ikss_ka": 16.676252518686695,
+        "ip_ka": 39.90693488215404
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 1.2,
+            "mode": "grid_following",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 20.0,
+            "x_sc_pu": 0.15,
+            "external_alignment_angle_deg": -83.65807025142175
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "gfl_limit_120",
+      "opendss": {
+        "z1_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "z0_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "ikss_ka": 16.67624996884405,
+        "voltage_source_ikss_ka": 15.98343219565914,
+        "current_source_ikss_ka": 0.6928177731849114,
+        "kappa_method_a": 1.722135997548079,
+        "ip_ka": 39.906931276131985
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.5290263994287712e-07,
+        "ip_ka_relative_error": 9.03607954775786e-08
+      },
+      "gridlabd": {
+        "status": "unsupported_gfl_current_limit",
+        "ikss_ka": null,
+        "ip_ka": null,
+        "detail": "GridLAB-D steady NR inverter does not enforce the declared short-circuit current limit; deltamode control/protection is required."
+      }
+    },
+    {
+      "category": "ibr_grid_following",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 0.8660254037844388,
+        "ikss_ka": 16.849457599443582,
+        "ip_ka": 40.151883856432356
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 1.5,
+            "mode": "grid_following",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 20.0,
+            "x_sc_pu": 0.15,
+            "external_alignment_angle_deg": -83.65807025142192
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "gfl_limit_150",
+      "opendss": {
+        "z1_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "z0_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "ikss_ka": 16.849455023117425,
+        "voltage_source_ikss_ka": 15.98343219565914,
+        "current_source_ikss_ka": 0.866022827458286,
+        "kappa_method_a": 1.722135997548079,
+        "ip_ka": 40.15188021295696
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.5290264007476455e-07,
+        "ip_ka_relative_error": 9.074233574719502e-08
+      },
+      "gridlabd": {
+        "status": "unsupported_gfl_current_limit",
+        "ikss_ka": null,
+        "ip_ka": null,
+        "detail": "GridLAB-D steady NR inverter does not enforce the declared short-circuit current limit; deltamode control/protection is required."
+      }
+    },
+    {
+      "category": "ibr_grid_following",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 0.17320508075688776,
+        "ikss_ka": 16.15663727641603,
+        "ip_ka": 39.172087959319086
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 1.2,
+            "mode": "grid_following",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 5.0,
+            "x_sc_pu": 0.15,
+            "external_alignment_angle_deg": -83.65807025142145
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "gfl_rating_5",
+      "opendss": {
+        "z1_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "z0_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "ikss_ka": 16.156634806023916,
+        "voltage_source_ikss_ka": 15.98343219565914,
+        "current_source_ikss_ka": 0.17320261036477724,
+        "kappa_method_a": 1.722135997548079,
+        "ip_ka": 39.17208446565704
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.529026399700322e-07,
+        "ip_ka_relative_error": 8.918754490570674e-08
+      },
+      "gridlabd": {
+        "status": "unsupported_gfl_current_limit",
+        "ikss_ka": null,
+        "ip_ka": null,
+        "detail": "GridLAB-D steady NR inverter does not enforce the declared short-circuit current limit; deltamode control/protection is required."
+      }
+    },
+    {
+      "category": "ibr_grid_following",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 0.692820323027551,
+        "ikss_ka": 16.676252518686695,
+        "ip_ka": 39.90693488215404
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 1.2,
+            "mode": "grid_following",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 20.0,
+            "x_sc_pu": 0.15,
+            "external_alignment_angle_deg": -83.65807025142175
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "gfl_rating_20",
+      "opendss": {
+        "z1_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "z0_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "ikss_ka": 16.67624996884405,
+        "voltage_source_ikss_ka": 15.98343219565914,
+        "current_source_ikss_ka": 0.6928177731849114,
+        "kappa_method_a": 1.722135997548079,
+        "ip_ka": 39.906931276131985
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.5290263994287712e-07,
+        "ip_ka_relative_error": 9.03607954775786e-08
+      },
+      "gridlabd": {
+        "status": "unsupported_gfl_current_limit",
+        "ikss_ka": null,
+        "ip_ka": null,
+        "detail": "GridLAB-D steady NR inverter does not enforce the declared short-circuit current limit; deltamode control/protection is required."
+      }
+    },
+    {
+      "category": "ibr_grid_following",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 1.7320508075688774,
+        "ikss_ka": 17.71548300322802,
+        "ip_ka": 41.37662872782394
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 1.2,
+            "mode": "grid_following",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 50.0,
+            "x_sc_pu": 0.15,
+            "external_alignment_angle_deg": -83.65807025142199
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "gfl_rating_50",
+      "opendss": {
+        "z1_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "z0_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "ikss_ka": 17.715480294484315,
+        "voltage_source_ikss_ka": 15.98343219565914,
+        "current_source_ikss_ka": 1.7320480988251763,
+        "kappa_method_a": 1.722135997548079,
+        "ip_ka": 41.37662489708185
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.5290263989334592e-07,
+        "ip_ka_relative_error": 9.258227573221455e-08
+      },
+      "gridlabd": {
+        "status": "unsupported_gfl_current_limit",
+        "ikss_ka": null,
+        "ip_ka": null,
+        "detail": "GridLAB-D steady NR inverter does not enforce the declared short-circuit current limit; deltamode control/protection is required."
+      }
+    },
+    {
+      "category": "ibr_grid_following",
+      "fault_bus": 3,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 0.47090489463581164,
+        "ikss_ka": 13.50143045500046,
+        "ip_ka": 31.455524157265298
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.008,
+            "r1_pu": 0.008,
+            "to_bus": 2,
+            "x0_pu": 0.05,
+            "x1_pu": 0.05
+          },
+          {
+            "from_bus": 2,
+            "r0_pu": 0.012,
+            "r1_pu": 0.012,
+            "to_bus": 3,
+            "x0_pu": 0.07,
+            "x1_pu": 0.07
+          }
+        ],
+        "bus_count": 3,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 1.2,
+            "mode": "grid_following",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 20.0,
+            "x_sc_pu": 0.15,
+            "external_alignment_angle_deg": -83.15347746620705
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "gfl_remote_bus",
+      "opendss": {
+        "z1_ohm": [
+          0.11980147999999986,
+          0.8780148800000002
+        ],
+        "z0_ohm": [
+          0.11980147999999986,
+          0.8780148800000002
+        ],
+        "ikss_ka": 13.501428395182657,
+        "voltage_source_ikss_ka": 13.030525560364655,
+        "current_source_ikss_ka": 0.470902834818002,
+        "kappa_method_a": 1.6708082449849004,
+        "ip_ka": 31.455521244243037
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.5256295424871876e-07,
+        "ip_ka_relative_error": 9.26076614061902e-08
+      },
+      "gridlabd": {
+        "status": "unsupported_gfl_current_limit",
+        "ikss_ka": null,
+        "ip_ka": null,
+        "detail": "GridLAB-D steady NR inverter does not enforce the declared short-circuit current limit; deltamode control/protection is required."
+      }
+    },
+    {
+      "category": "ibr_grid_following",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 0.8227241335952169,
+        "ikss_ka": 16.80615632925436,
+        "ip_ka": 40.09064661286278
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 1.2,
+            "mode": "grid_following",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 10.0,
+            "x_sc_pu": 0.15,
+            "external_alignment_angle_deg": -83.65807025142234
+          },
+          {
+            "bus": 2,
+            "current_limit_pu": 1.1,
+            "mode": "grid_following",
+            "name": "ibr2",
+            "r_sc_pu": 0.01,
+            "rating_mva": 15.0,
+            "x_sc_pu": 0.15,
+            "external_alignment_angle_deg": -83.65807025142166
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "gfl_dual_local",
+      "opendss": {
+        "z1_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "z0_ohm": [
+          0.07980148000000004,
+          0.7180148800000001
+        ],
+        "ikss_ka": 16.80615375954908,
+        "voltage_source_ikss_ka": 15.98343219565914,
+        "current_source_ikss_ka": 0.8227215638899406,
+        "kappa_method_a": 1.722135997548079,
+        "ip_ka": 40.090642978750715
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.5290264014774438e-07,
+        "ip_ka_relative_error": 9.064738781744179e-08
+      },
+      "gridlabd": {
+        "status": "unsupported_gfl_current_limit",
+        "ikss_ka": null,
+        "ip_ka": null,
+        "detail": "GridLAB-D steady NR inverter does not enforce the declared short-circuit current limit; deltamode control/protection is required."
+      }
+    },
+    {
+      "category": "ibr_grid_forming",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 1.9202384316064218,
+        "ikss_ka": 17.902002374213957,
+        "ip_ka": 43.85687294286081
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 2.0,
+            "mode": "grid_forming",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 10.0,
+            "x_sc_pu": 0.15
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "gfm_rating_10",
+      "opendss": {
+        "z1_ohm": [
+          0.06821550016330685,
+          0.6413946177412002
+        ],
+        "z0_ohm": [
+          0.06821550016330685,
+          0.6413946177412002
+        ],
+        "ikss_ka": 17.90200237421396,
+        "voltage_source_ikss_ka": 17.90200237421396,
+        "current_source_ikss_ka": 0.0,
+        "kappa_method_a": 1.7322918191655838,
+        "ip_ka": 43.856872942860825
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.9845342462460114e-16,
+        "ip_ka_relative_error": 3.2402799747525765e-16,
+        "gridlabd_ikss_ka_relative_error": 1.6924127900192712e-10
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11538.6598673312,
+          -73.9578926173223
+        ],
+        "fault_power_a_va": [
+          1331461.4130384,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.06821549997207008,
+          0.6413946178713175
+        ],
+        "ikss_ka": 17.9020023711842,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "ibr_grid_forming",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 4.800596079016055,
+        "ikss_ka": 20.780435486639217,
+        "ip_ka": 51.25787636840262
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 2.0,
+            "mode": "grid_forming",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 25.0,
+            "x_sc_pu": 0.15
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "gfm_rating_25",
+      "opendss": {
+        "z1_ohm": [
+          0.05574972389195589,
+          0.5528634108054297
+        ],
+        "z0_ohm": [
+          0.05574972389195589,
+          0.5528634108054297
+        ],
+        "ikss_ka": 20.780435486639213,
+        "voltage_source_ikss_ka": 20.780435486639213,
+        "current_source_ikss_ka": 0.0,
+        "kappa_method_a": 1.744178652686214,
+        "ip_ka": 51.25787636840262
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.7096435159333975e-16,
+        "ip_ka_relative_error": 0.0,
+        "gridlabd_ikss_ka_relative_error": 1.4236455920420243e-08
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11540.2192044717,
+          -63.7660992141689
+        ],
+        "fault_power_a_va": [
+          1331807.25402666,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.05574972000609733,
+          0.5528634032464237
+        ],
+        "ikss_ka": 20.780435782478975,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "ibr_grid_forming",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 9.60119215803211,
+        "ikss_ka": 25.57878688881167,
+        "ip_ka": 63.60372083091277
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 2.0,
+            "mode": "grid_forming",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 50.0,
+            "x_sc_pu": 0.15
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "gfm_rating_50",
+      "opendss": {
+        "z1_ohm": [
+          0.042431014150000584,
+          0.4494304426142257
+        ],
+        "z0_ohm": [
+          0.042431014150000584,
+          0.4494304426142257
+        ],
+        "ikss_ka": 25.57878688881168,
+        "voltage_source_ikss_ka": 25.57878688881168,
+        "current_source_ikss_ka": 0.0,
+        "kappa_method_a": 1.7582781585277871,
+        "ip_ka": 63.6037208309128
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 4.166789098611803e-16,
+        "ip_ka_relative_error": 4.468560810453472e-16,
+        "gridlabd_ikss_ka_relative_error": 6.2455733345588464e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11541.8750164973,
+          -51.8506988832468
+        ],
+        "fault_power_a_va": [
+          1332175.6739142,
+          9.09494701772928e-13
+        ],
+        "z_thevenin_ohm": [
+          0.042431012847822296,
+          0.44943043990519516
+        ],
+        "ikss_ka": 25.57878704856586,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "ibr_grid_forming",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 7.181062370267826,
+        "ikss_ka": 23.164193763731987,
+        "ip_ka": 56.65542690256551
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 2.0,
+            "mode": "grid_forming",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 25.0,
+            "x_sc_pu": 0.1
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "gfm_x_10",
+      "opendss": {
+        "z1_ohm": [
+          0.053370838142333,
+          0.49561975942767544
+        ],
+        "z0_ohm": [
+          0.053370838142333,
+          0.4956197594276755
+        ],
+        "ikss_ka": 23.164193763731983,
+        "voltage_source_ikss_ka": 23.164193763731983,
+        "current_source_ikss_ka": 0.0,
+        "kappa_method_a": 1.7294552516024424,
+        "ip_ka": 56.65542690256551
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.5337091871347406e-16,
+        "ip_ka_relative_error": 0.0,
+        "gridlabd_ikss_ka_relative_error": 9.106714159772827e-09
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11540.5627590539,
+          -57.1667984880272
+        ],
+        "fault_power_a_va": [
+          1331878.56838512,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.05337083572553583,
+          0.49561975512212236
+        ],
+        "ikss_ka": 23.16419397468168,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "ibr_grid_forming",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 3.6039370731555747,
+        "ikss_ka": 19.581947233969686,
+        "ip_ka": 48.361344423784224
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 2.0,
+            "mode": "grid_forming",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 25.0,
+            "x_sc_pu": 0.2
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "gfm_x_20",
+      "opendss": {
+        "z1_ohm": [
+          0.058586190512841384,
+          0.5867584745856153
+        ],
+        "z0_ohm": [
+          0.058586190512841384,
+          0.5867584745856153
+        ],
+        "ikss_ka": 19.581947233969675,
+        "voltage_source_ikss_ka": 19.581947233969675,
+        "current_source_ikss_ka": 0.0,
+        "kappa_method_a": 1.746334732739633,
+        "ip_ka": 48.361344423784196
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 5.442840239050563e-16,
+        "ip_ka_relative_error": 5.876947750117997e-16,
+        "gridlabd_ikss_ka_relative_error": 1.8096975564510033e-08
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11539.8475597253,
+          -67.67138624908
+        ],
+        "fault_power_a_va": [
+          1331726.61118215,
+          -9.09494701772928e-13
+        ],
+        "z_thevenin_ohm": [
+          0.05858618534990938,
+          0.5867584643767042
+        ],
+        "ikss_ka": 19.581947588343713,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "ibr_grid_forming",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 2.404290775352564,
+        "ikss_ka": 18.381470339201393,
+        "ip_ka": 45.33595440965079
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 2.0,
+            "mode": "grid_forming",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 25.0,
+            "x_sc_pu": 0.3
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "gfm_x_30",
+      "opendss": {
+        "z1_ohm": [
+          0.06307531776817125,
+          0.6250125845532837
+        ],
+        "z0_ohm": [
+          0.06307531776817125,
+          0.6250125845532837
+        ],
+        "ikss_ka": 18.38147033920139,
+        "voltage_source_ikss_ka": 18.38147033920139,
+        "current_source_ikss_ka": 0.0,
+        "kappa_method_a": 1.7440041630544016,
+        "ip_ka": 45.335954409650775
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.9327690403654914e-16,
+        "ip_ka_relative_error": 3.1345661297420277e-16,
+        "gridlabd_ikss_ka_relative_error": 2.3292252397255463e-08
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11539.276462346,
+          -72.076465987316
+        ],
+        "fault_power_a_va": [
+          1331600.96291402,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.06307531063514914,
+          0.6250125705669204
+        ],
+        "ikss_ka": 18.38147076734725,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "ibr_grid_forming",
+      "fault_bus": 3,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 3.0212473185727102,
+        "ikss_ka": 15.083228432279723,
+        "ip_ka": 35.81610903097219
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.008,
+            "r1_pu": 0.008,
+            "to_bus": 2,
+            "x0_pu": 0.05,
+            "x1_pu": 0.05
+          },
+          {
+            "from_bus": 2,
+            "r0_pu": 0.012,
+            "r1_pu": 0.012,
+            "to_bus": 3,
+            "x0_pu": 0.07,
+            "x1_pu": 0.07
+          }
+        ],
+        "bus_count": 3,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 2.0,
+            "mode": "grid_forming",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 25.0,
+            "x_sc_pu": 0.15
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "gfm_remote_bus",
+      "opendss": {
+        "z1_ohm": [
+          0.10036321150613751,
+          0.758945369719004
+        ],
+        "z0_ohm": [
+          0.10036321150613751,
+          0.758945369719004
+        ],
+        "ikss_ka": 15.08322843227973,
+        "voltage_source_ikss_ka": 15.08322843227973,
+        "current_source_ikss_ka": 0.0,
+        "kappa_method_a": 1.679071140851864,
+        "ip_ka": 35.816109030972214
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 4.710813331179566e-16,
+        "ip_ka_relative_error": 5.951590680710072e-16,
+        "gridlabd_ikss_ka_relative_error": 4.861228425503953e-10
+      },
+      "gridlabd": {
+        "status": "balanced_shunt_extrapolation",
+        "probe_impedance_ohm": 100.0,
+        "fault_voltage_a_v": [
+          11534.7649891668,
+          -87.4547924059727
+        ],
+        "fault_power_a_va": [
+          1330584.51696022,
+          0.0
+        ],
+        "z_thevenin_ohm": [
+          0.10036321102892955,
+          0.7589453701575029
+        ],
+        "ikss_ka": 15.083228424947421,
+        "ip_ka": null
+      }
+    },
+    {
+      "category": "ibr_mixed",
+      "fault_bus": 2,
+      "fault_type": "three_phase",
+      "hacdcpf": {
+        "ibr_contribution_ka": 5.493416402043605,
+        "ikss_ka": 21.473255809666767,
+        "ip_ka": 52.23767226551588
+      },
+      "model": {
+        "base_kv": 20.0,
+        "base_mva": 100.0,
+        "branches": [
+          {
+            "from_bus": 1,
+            "r0_pu": 0.01,
+            "r1_pu": 0.01,
+            "to_bus": 2,
+            "x0_pu": 0.08,
+            "x1_pu": 0.08
+          }
+        ],
+        "bus_count": 2,
+        "ibrs": [
+          {
+            "bus": 2,
+            "current_limit_pu": 2.0,
+            "mode": "grid_forming",
+            "name": "ibr1",
+            "r_sc_pu": 0.01,
+            "rating_mva": 25.0,
+            "x_sc_pu": 0.15
+          },
+          {
+            "bus": 2,
+            "current_limit_pu": 1.2,
+            "mode": "grid_following",
+            "name": "ibr2",
+            "r_sc_pu": 0.01,
+            "rating_mva": 20.0,
+            "x_sc_pu": 0.15,
+            "external_alignment_angle_deg": -84.2418637764347
+          }
+        ],
+        "kind": "line_network",
+        "source": {
+          "r0_pu": 0.00995037,
+          "r1_pu": 0.00995037,
+          "x0_pu": 0.09950372,
+          "x1_pu": 0.09950372
+        }
+      },
+      "name": "ibr_mixed_gfm_gfl",
+      "opendss": {
+        "z1_ohm": [
+          0.05574972389195589,
+          0.5528634108054297
+        ],
+        "z0_ohm": [
+          0.05574972389195589,
+          0.5528634108054297
+        ],
+        "ikss_ka": 21.473251932495824,
+        "voltage_source_ikss_ka": 20.780435486639213,
+        "current_source_ikss_ka": 0.6928164458566108,
+        "kappa_method_a": 1.744178652686214,
+        "ip_ka": 52.237666782368166
+      },
+      "comparison": {
+        "ikss_ka_relative_error": 1.8055816397069185e-07,
+        "ip_ka_relative_error": 1.0496540245650648e-07
+      },
+      "gridlabd": {
+        "status": "unsupported_gfl_current_limit",
+        "ikss_ka": null,
+        "ip_ka": null,
+        "detail": "GridLAB-D steady NR inverter does not enforce the declared short-circuit current limit; deltamode control/protection is required."
       }
     }
   ]

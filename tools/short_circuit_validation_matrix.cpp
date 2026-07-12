@@ -21,6 +21,7 @@ using hacdcpf::BusType;
 using hacdcpf::ExternalGrid;
 using hacdcpf::HybridPowerSystem;
 using hacdcpf::Transformer2W;
+using hacdcpf::VSCConverter;
 using hacdcpf::analysis::FaultType;
 using hacdcpf::analysis::SCCalcType;
 using hacdcpf::analysis::SCDetailedOptions;
@@ -203,6 +204,56 @@ BenchmarkCase transformer_case(std::string name, std::string category,
   return value;
 }
 
+struct IBRSpec {
+  std::string mode;
+  int bus{2};
+  double rating_mva{20.0};
+  double current_limit_pu{1.2};
+  double r_sc_pu{0.01};
+  double x_sc_pu{0.15};
+};
+
+BenchmarkCase ibr_case(std::string name, std::string category,
+                       std::vector<std::pair<double, double>> line_z1,
+                       int fault_bus, const std::vector<IBRSpec>& specs) {
+  BenchmarkCase value = line_case(
+      std::move(name), std::move(category), 20.0,
+      0.00995037, 0.09950372, std::move(line_z1), fault_bus,
+      FaultType::ThreePhase);
+  json devices = json::array();
+  int index = 1;
+  for (const auto& spec : specs) {
+    hacdcpf::DCBus dc_bus;
+    dc_bus.index = index;
+    dc_bus.base_kv = 20.0;
+    dc_bus.in_service = true;
+    value.system.dc.buses.push_back(dc_bus);
+
+    VSCConverter converter;
+    converter.index = index;
+    converter.name = "ibr" + std::to_string(index);
+    converter.bus_ac = spec.bus;
+    converter.bus_dc = index;
+    converter.in_service = true;
+    converter.p_rated_mw = spec.rating_mva;
+    converter.vn_ac_kv = 20.0;
+    converter.i_max_pu = spec.current_limit_pu;
+    converter.r_sc_pu = spec.r_sc_pu;
+    converter.x_sc_pu = spec.x_sc_pu;
+    converter.ac_grid_forming = spec.mode == "grid_forming";
+    value.system.vsc_converters.push_back(converter);
+
+    devices.push_back({
+        {"name", converter.name}, {"mode", spec.mode}, {"bus", spec.bus},
+        {"rating_mva", spec.rating_mva},
+        {"current_limit_pu", spec.current_limit_pu},
+        {"r_sc_pu", spec.r_sc_pu}, {"x_sc_pu", spec.x_sc_pu}});
+    ++index;
+  }
+  value.model["ibrs"] = std::move(devices);
+  return value;
+}
+
 std::vector<BenchmarkCase> build_cases() {
   std::vector<BenchmarkCase> cases;
   const std::vector<std::pair<std::string, std::pair<double, double>>> sources = {
@@ -280,6 +331,48 @@ std::vector<BenchmarkCase> build_cases() {
   cases.push_back(transformer_case("transformer_slg_tap_lv_95", "zero_sequence",
                                    1, 0.95, 10.0, 1.0,
                                    FaultType::SinglePhaseGround));
+
+  for (const double limit : {1.05, 1.20, 1.50}) {
+    cases.push_back(ibr_case(
+        "gfl_limit_" + std::to_string(static_cast<int>(limit * 100)),
+        "ibr_grid_following", {{0.01, 0.08}}, 2,
+        {{"grid_following", 2, 20.0, limit, 0.01, 0.15}}));
+  }
+  for (const double rating : {5.0, 20.0, 50.0}) {
+    cases.push_back(ibr_case(
+        "gfl_rating_" + std::to_string(static_cast<int>(rating)),
+        "ibr_grid_following", {{0.01, 0.08}}, 2,
+        {{"grid_following", 2, rating, 1.20, 0.01, 0.15}}));
+  }
+  cases.push_back(ibr_case(
+      "gfl_remote_bus", "ibr_grid_following",
+      {{0.008, 0.05}, {0.012, 0.07}}, 3,
+      {{"grid_following", 2, 20.0, 1.20, 0.01, 0.15}}));
+  cases.push_back(ibr_case(
+      "gfl_dual_local", "ibr_grid_following", {{0.01, 0.08}}, 2,
+      {{"grid_following", 2, 10.0, 1.20, 0.01, 0.15},
+       {"grid_following", 2, 15.0, 1.10, 0.01, 0.15}}));
+
+  for (const double rating : {10.0, 25.0, 50.0}) {
+    cases.push_back(ibr_case(
+        "gfm_rating_" + std::to_string(static_cast<int>(rating)),
+        "ibr_grid_forming", {{0.01, 0.08}}, 2,
+        {{"grid_forming", 2, rating, 2.0, 0.01, 0.15}}));
+  }
+  for (const double x_sc : {0.10, 0.20, 0.30}) {
+    cases.push_back(ibr_case(
+        "gfm_x_" + std::to_string(static_cast<int>(x_sc * 100)),
+        "ibr_grid_forming", {{0.01, 0.08}}, 2,
+        {{"grid_forming", 2, 25.0, 2.0, 0.01, x_sc}}));
+  }
+  cases.push_back(ibr_case(
+      "gfm_remote_bus", "ibr_grid_forming",
+      {{0.008, 0.05}, {0.012, 0.07}}, 3,
+      {{"grid_forming", 2, 25.0, 2.0, 0.01, 0.15}}));
+  cases.push_back(ibr_case(
+      "ibr_mixed_gfm_gfl", "ibr_mixed", {{0.01, 0.08}}, 2,
+      {{"grid_forming", 2, 25.0, 2.0, 0.01, 0.15},
+       {"grid_following", 2, 20.0, 1.20, 0.01, 0.15}}));
   return cases;
 }
 
@@ -317,7 +410,8 @@ int main(int argc, char** argv) {
           {"fault_bus", test_case.fault_bus},
           {"fault_type", fault_name(test_case.options.fault_type)},
           {"model", test_case.model},
-          {"hacdcpf", {{"ikss_ka", row.ikss_ka}, {"ip_ka", row.ip_ka}}}});
+          {"hacdcpf", {{"ikss_ka", row.ikss_ka}, {"ip_ka", row.ip_ka},
+                        {"ibr_contribution_ka", row.ikss_converter_contrib_ka}}}});
     }
     output["case_count"] = output["cases"].size();
 
