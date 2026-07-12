@@ -1323,12 +1323,78 @@ GridLABDLongDurationReport run_gridlabd_long_duration_validation(
   }
 
   dynamics::DynamicSolver solver;
+  const auto dynamic_start = std::chrono::steady_clock::now();
   const dynamics::DynamicResults dynamic_results = solver.solve(dynamic_system);
+  report.dynamic_elapsed_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - dynamic_start).count();
   report.dynamic_success = dynamic_results.success;
   report.dynamic_message = dynamic_results.message;
   report.dynamic_steps = dynamic_results.steps;
   report.dynamic_rejected_steps = dynamic_results.rejected_steps;
   report.dynamic_max_local_error_norm = dynamic_results.max_local_error_norm;
+  report.dynamic_snapshot_count = static_cast<int>(dynamic_results.snapshots.size());
+  report.dynamic_applied_event_count =
+      static_cast<int>(dynamic_results.applied_event_records.size());
+  report.dynamic_min_ac_voltage_pu = std::numeric_limits<double>::infinity();
+  report.dynamic_max_ac_voltage_pu = -std::numeric_limits<double>::infinity();
+  report.dynamic_min_dc_voltage_pu = std::numeric_limits<double>::infinity();
+  report.dynamic_max_dc_voltage_pu = -std::numeric_limits<double>::infinity();
+  report.dynamic_frequency_nadir_hz = std::numeric_limits<double>::infinity();
+  report.dynamic_frequency_zenith_hz = -std::numeric_limits<double>::infinity();
+  report.dynamic_bus_frequency_nadir_hz = std::numeric_limits<double>::infinity();
+  report.dynamic_bus_frequency_zenith_hz = -std::numeric_limits<double>::infinity();
+  const dynamics::DynamicSnapshot* previous_snapshot = nullptr;
+  for (const auto& snapshot : dynamic_results.snapshots) {
+    report.dynamic_min_ac_voltage_pu =
+        std::min(report.dynamic_min_ac_voltage_pu, snapshot.min_ac_voltage_pu);
+    report.dynamic_max_ac_voltage_pu =
+        std::max(report.dynamic_max_ac_voltage_pu, snapshot.max_ac_voltage_pu);
+    if (snapshot.vdc.size() > 0) {
+      report.dynamic_min_dc_voltage_pu =
+          std::min(report.dynamic_min_dc_voltage_pu, snapshot.min_dc_voltage_pu);
+      report.dynamic_max_dc_voltage_pu =
+          std::max(report.dynamic_max_dc_voltage_pu, snapshot.max_dc_voltage_pu);
+    }
+    report.dynamic_frequency_nadir_hz =
+        std::min(report.dynamic_frequency_nadir_hz, snapshot.frequency_hz);
+    report.dynamic_frequency_zenith_hz =
+        std::max(report.dynamic_frequency_zenith_hz, snapshot.frequency_hz);
+    if (!snapshot.bus_frequency_hz.empty()) {
+      const auto [fmin, fmax] = std::minmax_element(
+          snapshot.bus_frequency_hz.begin(), snapshot.bus_frequency_hz.end());
+      report.dynamic_max_bus_frequency_spread_hz = std::max(
+          report.dynamic_max_bus_frequency_spread_hz, *fmax - *fmin);
+      report.dynamic_bus_frequency_nadir_hz =
+          std::min(report.dynamic_bus_frequency_nadir_hz, *fmin);
+      report.dynamic_bus_frequency_zenith_hz =
+          std::max(report.dynamic_bus_frequency_zenith_hz, *fmax);
+    }
+    if (previous_snapshot != nullptr) {
+      const double dt = snapshot.time_s - previous_snapshot->time_s;
+      if (dt > 1e-12) {
+        report.dynamic_max_abs_rocof_hz_per_s = std::max(
+            report.dynamic_max_abs_rocof_hz_per_s,
+            std::abs(snapshot.frequency_hz - previous_snapshot->frequency_hz) / dt);
+      }
+    }
+    previous_snapshot = &snapshot;
+  }
+  if (!std::isfinite(report.dynamic_min_ac_voltage_pu)) report.dynamic_min_ac_voltage_pu = 0.0;
+  if (!std::isfinite(report.dynamic_max_ac_voltage_pu)) report.dynamic_max_ac_voltage_pu = 0.0;
+  if (!std::isfinite(report.dynamic_min_dc_voltage_pu)) report.dynamic_min_dc_voltage_pu = 0.0;
+  if (!std::isfinite(report.dynamic_max_dc_voltage_pu)) report.dynamic_max_dc_voltage_pu = 0.0;
+  if (!std::isfinite(report.dynamic_frequency_nadir_hz)) report.dynamic_frequency_nadir_hz = 0.0;
+  if (!std::isfinite(report.dynamic_frequency_zenith_hz)) report.dynamic_frequency_zenith_hz = 0.0;
+  if (!std::isfinite(report.dynamic_bus_frequency_nadir_hz))
+    report.dynamic_bus_frequency_nadir_hz = 0.0;
+  if (!std::isfinite(report.dynamic_bus_frequency_zenith_hz))
+    report.dynamic_bus_frequency_zenith_hz = 0.0;
+  if (const auto* final = dynamic_results.final_snapshot()) {
+    report.dynamic_final_frequency_hz = final->frequency_hz;
+    report.dynamic_final_min_ac_voltage_pu = final->min_ac_voltage_pu;
+    report.dynamic_final_min_dc_voltage_pu =
+        final->vdc.size() > 0 ? final->min_dc_voltage_pu : 0.0;
+  }
   report.warnings.insert(report.warnings.end(),
                          dynamic_results.warnings.begin(),
                          dynamic_results.warnings.end());
@@ -1336,6 +1402,7 @@ GridLABDLongDurationReport run_gridlabd_long_duration_validation(
                          dynamic_results.initialization.warnings.begin(),
                          dynamic_results.initialization.warnings.end());
 
+  std::map<std::string, GridLABDComparisonReport> stage_cache;
   const auto sample_times = long_duration_sample_times(events, options);
   for (const double t : sample_times) {
     GridLABDLongDurationSampleReport sample;
@@ -1352,6 +1419,18 @@ GridLABDLongDurationReport run_gridlabd_long_duration_validation(
     if (snapshot != nullptr) {
       sample.dynamic_min_ac_voltage_pu = snapshot->min_ac_voltage_pu;
       sample.dynamic_max_ac_voltage_pu = snapshot->max_ac_voltage_pu;
+      sample.dynamic_min_dc_voltage_pu =
+          snapshot->vdc.size() > 0 ? snapshot->min_dc_voltage_pu : 0.0;
+      sample.dynamic_max_dc_voltage_pu =
+          snapshot->vdc.size() > 0 ? snapshot->max_dc_voltage_pu : 0.0;
+      sample.dynamic_frequency_hz = snapshot->frequency_hz;
+      sample.dynamic_coi_frequency_hz = snapshot->coi_frequency_hz;
+      if (!snapshot->bus_frequency_hz.empty()) {
+        const auto [fmin, fmax] = std::minmax_element(
+            snapshot->bus_frequency_hz.begin(), snapshot->bus_frequency_hz.end());
+        sample.dynamic_min_bus_frequency_hz = *fmin;
+        sample.dynamic_max_bus_frequency_hz = *fmax;
+      }
     } else {
       sample.warnings.push_back("No dynamic snapshot was recorded near sample time.");
     }
@@ -1386,8 +1465,18 @@ GridLABDLongDurationReport run_gridlabd_long_duration_validation(
     comparison_options.require_gridlabd = options.require_gridlabd;
     comparison_options.export_options.model_name = sanitize_model_name(
         "gld_long_" + test_case.name + "_" + std::to_string(report.samples.size()));
-    sample.comparison =
-        compare_gridlabd_snapshot(sample.application.system, comparison_options);
+    std::string cache_key = sample.active_events.empty() ? "base" : "active";
+    for (const auto& label : sample.active_events) cache_key += "|" + label;
+    const auto cached = stage_cache.find(cache_key);
+    if (cached != stage_cache.end()) {
+      sample.comparison = cached->second;
+      ++report.gridlabd_stage_cache_hits;
+    } else {
+      sample.comparison =
+          compare_gridlabd_snapshot(sample.application.system, comparison_options);
+      stage_cache.emplace(cache_key, sample.comparison);
+      ++report.gridlabd_unique_stage_runs;
+    }
     sample.gridlabd_attempted = sample.comparison.gridlabd_run_attempted;
     sample.gridlabd_solved = sample.comparison.gridlabd_run_success;
 
@@ -1413,8 +1502,21 @@ GridLABDLongDurationReport run_gridlabd_long_duration_validation(
             options.dynamic_vm_tolerance_pu,
             "HACDCPF transient A-phase voltage vs GridLAB-D sampled AC snapshot");
         dynamic_voltage_passed = dynamic_voltage_passed && item.passed;
+        report.max_dynamic_voltage_error_pu = std::max(
+            report.max_dynamic_voltage_error_pu, std::abs(item.difference));
         sample.dynamic_voltage_items.push_back(std::move(item));
       }
+    }
+    for (const auto& item : sample.comparison.items) {
+      const double error = std::abs(item.difference);
+      if (item.kind == "bus_vm_pu")
+        report.max_snapshot_vm_error_pu = std::max(report.max_snapshot_vm_error_pu, error);
+      else if (item.kind == "bus_va_deg")
+        report.max_snapshot_va_error_deg = std::max(report.max_snapshot_va_error_deg, error);
+      else if (item.kind == "branch_pf_mw" || item.kind == "branch_loss_p_mw")
+        report.max_snapshot_branch_p_error_mw = std::max(report.max_snapshot_branch_p_error_mw, error);
+      else if (item.kind == "branch_qf_mvar" || item.kind == "branch_loss_q_mvar")
+        report.max_snapshot_branch_q_error_mvar = std::max(report.max_snapshot_branch_q_error_mvar, error);
     }
 
     sample.exact_gate_item =
@@ -1458,6 +1560,29 @@ std::string gridlabd_long_duration_report_to_json(
   root["dynamic_steps"] = report.dynamic_steps;
   root["dynamic_rejected_steps"] = report.dynamic_rejected_steps;
   root["dynamic_max_local_error_norm"] = report.dynamic_max_local_error_norm;
+  root["dynamic_elapsed_ms"] = report.dynamic_elapsed_ms;
+  root["dynamic_snapshot_count"] = report.dynamic_snapshot_count;
+  root["dynamic_applied_event_count"] = report.dynamic_applied_event_count;
+  root["dynamic_min_ac_voltage_pu"] = report.dynamic_min_ac_voltage_pu;
+  root["dynamic_max_ac_voltage_pu"] = report.dynamic_max_ac_voltage_pu;
+  root["dynamic_min_dc_voltage_pu"] = report.dynamic_min_dc_voltage_pu;
+  root["dynamic_max_dc_voltage_pu"] = report.dynamic_max_dc_voltage_pu;
+  root["dynamic_frequency_nadir_hz"] = report.dynamic_frequency_nadir_hz;
+  root["dynamic_frequency_zenith_hz"] = report.dynamic_frequency_zenith_hz;
+  root["dynamic_bus_frequency_nadir_hz"] = report.dynamic_bus_frequency_nadir_hz;
+  root["dynamic_bus_frequency_zenith_hz"] = report.dynamic_bus_frequency_zenith_hz;
+  root["dynamic_max_abs_rocof_hz_per_s"] = report.dynamic_max_abs_rocof_hz_per_s;
+  root["dynamic_max_bus_frequency_spread_hz"] = report.dynamic_max_bus_frequency_spread_hz;
+  root["dynamic_final_frequency_hz"] = report.dynamic_final_frequency_hz;
+  root["dynamic_final_min_ac_voltage_pu"] = report.dynamic_final_min_ac_voltage_pu;
+  root["dynamic_final_min_dc_voltage_pu"] = report.dynamic_final_min_dc_voltage_pu;
+  root["gridlabd_unique_stage_runs"] = report.gridlabd_unique_stage_runs;
+  root["gridlabd_stage_cache_hits"] = report.gridlabd_stage_cache_hits;
+  root["max_dynamic_voltage_error_pu"] = report.max_dynamic_voltage_error_pu;
+  root["max_snapshot_vm_error_pu"] = report.max_snapshot_vm_error_pu;
+  root["max_snapshot_va_error_deg"] = report.max_snapshot_va_error_deg;
+  root["max_snapshot_branch_p_error_mw"] = report.max_snapshot_branch_p_error_mw;
+  root["max_snapshot_branch_q_error_mvar"] = report.max_snapshot_branch_q_error_mvar;
   root["exact_gate_passed"] = report.exact_gate_passed;
   root["sample_count"] = report.sample_count;
   root["exact_gate_count"] = report.exact_gate_count;
@@ -1487,6 +1612,12 @@ std::string gridlabd_long_duration_report_to_json(
     j["dynamic_snapshot_found"] = sample.dynamic_snapshot_found;
     j["dynamic_min_ac_voltage_pu"] = sample.dynamic_min_ac_voltage_pu;
     j["dynamic_max_ac_voltage_pu"] = sample.dynamic_max_ac_voltage_pu;
+    j["dynamic_min_dc_voltage_pu"] = sample.dynamic_min_dc_voltage_pu;
+    j["dynamic_max_dc_voltage_pu"] = sample.dynamic_max_dc_voltage_pu;
+    j["dynamic_frequency_hz"] = sample.dynamic_frequency_hz;
+    j["dynamic_coi_frequency_hz"] = sample.dynamic_coi_frequency_hz;
+    j["dynamic_min_bus_frequency_hz"] = sample.dynamic_min_bus_frequency_hz;
+    j["dynamic_max_bus_frequency_hz"] = sample.dynamic_max_bus_frequency_hz;
     j["applied"] = sample.application.applied;
     j["comparable_with_gridlabd"] = sample.application.comparable_with_gridlabd;
     j["exact_ac_snapshot"] = sample.application.exact_ac_snapshot;

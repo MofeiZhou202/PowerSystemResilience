@@ -186,6 +186,12 @@ TEST_CASE("GridLAB-D long-duration sequence compares pre/post-failure samples",
   CHECK(report.exact_gate_count >= 4);
   CHECK(report.exact_gate_passed);
   CHECK(report.exact_gate_passed_count == report.exact_gate_count);
+  CHECK(report.dynamic_snapshot_count > 0);
+  CHECK(report.dynamic_applied_event_count >= 3);
+  CHECK(report.dynamic_min_ac_voltage_pu > 0.0);
+  CHECK(report.gridlabd_unique_stage_runs > 0);
+  CHECK(report.gridlabd_stage_cache_hits > 0);
+  CHECK(report.gridlabd_unique_stage_runs < report.exact_gate_count);
 }
 
 TEST_CASE("Explicit AC load step remains stable for 15 seconds and matches GridLAB-D",

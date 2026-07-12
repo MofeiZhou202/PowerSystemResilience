@@ -75,6 +75,14 @@ if(HACDCPF_ENABLE_ETAP)
   hacdcpf_add_test(test_io_etap           test_io_etap.cpp)
 endif()
 
+if(TARGET transient_validation_matrix)
+  add_test(NAME transient_native_disturbance_matrix
+    COMMAND "$<TARGET_FILE:transient_validation_matrix>"
+            "${CMAKE_CURRENT_BINARY_DIR}/transient_native_disturbance_matrix.json")
+  set_tests_properties(transient_native_disturbance_matrix PROPERTIES
+    LABELS "dynamics;transient;validation" TIMEOUT 120)
+endif()
+
 # Unit conversion: actual (ohm/km, kV) → per-unit branch impedance bridge.
 hacdcpf_add_test(test_unit_conversion     test_unit_conversion.cpp)
 

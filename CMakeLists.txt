@@ -630,6 +630,25 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/gridlabd_validation_matrix.cpp")
   hacdcpf_copy_opendss_runtime(gridlabd_validation_matrix)
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/transient_validation_matrix.cpp")
+  add_executable(transient_validation_matrix tools/transient_validation_matrix.cpp)
+  target_link_libraries(transient_validation_matrix PRIVATE hacdcpf::hacdcpf)
+  set(_HACDCPF_TRANSIENT_VALIDATION_PY
+      "${CMAKE_CURRENT_SOURCE_DIR}/tools/harmonics_validation/.venv/bin/python")
+  if(TARGET gridlabd_validation_matrix AND
+     EXISTS "${_HACDCPF_TRANSIENT_VALIDATION_PY}" AND
+     EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/transient_validation/run_cross_engine_matrix.py")
+    add_custom_target(validate_transient_cross_engine_matrix
+      COMMAND "${_HACDCPF_TRANSIENT_VALIDATION_PY}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/tools/transient_validation/run_cross_engine_matrix.py"
+              --native-bin "$<TARGET_FILE:transient_validation_matrix>"
+              --gridlabd-matrix-bin "$<TARGET_FILE:gridlabd_validation_matrix>"
+      DEPENDS transient_validation_matrix gridlabd_validation_matrix
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+      COMMENT "Running native/GridLAB-D transient disturbance matrix")
+  endif()
+endif()
+
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/short_circuit_validation_matrix.cpp")
   add_executable(short_circuit_validation_matrix
     tools/short_circuit_validation_matrix.cpp)
