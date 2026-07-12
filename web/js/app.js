@@ -1256,7 +1256,10 @@ const App = (() => {
   function mappedCompId(mapObj, item, rowIndex) {
     if (!mapObj) return undefined;
     const explicit = Number(item?.index);
-    if (Number.isFinite(explicit)) return mapObj[explicit];
+    if (Number.isFinite(explicit) && mapObj[explicit] != null) return mapObj[explicit];
+    if (mapObj.__byPosition && mapObj.__byPosition[rowIndex] != null) {
+      return mapObj.__byPosition[rowIndex];
+    }
     if (mapObj[rowIndex] != null) return mapObj[rowIndex];
     return undefined;
   }
@@ -4109,8 +4112,18 @@ const App = (() => {
           }
         }
         normalizePowerFlowResult(data);
-        if (Canvas.showPowerFlowResults) Canvas.showPowerFlowResults(data);
-        showOpfResults(data);
+        // Result tables are the authoritative OPF output and must not depend on
+        // the optional Canvas overlay succeeding for every rich component.
+        try {
+          showOpfResults(data);
+        } catch (err) {
+          log(`最优潮流结果表刷新失败: ${err.message || err}`, 'error');
+        }
+        try {
+          if (Canvas.showPowerFlowResults) Canvas.showPowerFlowResults(data);
+        } catch (err) {
+          log(`最优潮流画布叠加刷新失败，结果表已保留: ${err.message || err}`, 'warn');
+        }
         switchTab('results');
       } else {
         if (resp.error) log(`最优潮流计算失败: ${resp.error}`, 'error');
@@ -4137,8 +4150,14 @@ const App = (() => {
     const req = data._constraints || {};
     // Bus/component map so OPF result rows pan to the matching canvas component
     // when clicked, exactly like the power-flow and carbon-flow result tables.
-	    const busMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap)
-	      ? Canvas.getCompBusMap() : { ac: {}, dc: {}, gen: {}, vsc: {} };
+    let busMap = { ac: {}, dc: {}, gen: {}, vsc: {} };
+    try {
+      if (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) {
+        busMap = Canvas.getCompBusMap();
+      }
+    } catch (err) {
+      log(`最优潮流元件定位映射不可用: ${err.message || err}`, 'warn');
+    }
 	    const panAttr = (compId) => compId !== undefined
 	      ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
 	    const attrForRow = (row, fallbackCompId) => panAttr(rowCanvasCompId(row, busMap) ?? fallbackCompId);
@@ -4195,9 +4214,14 @@ const App = (() => {
         </tbody></table>`;
     }
 
-	    const opfSystem = (typeof Canvas !== 'undefined' && Canvas.buildSystemJson)
-	      ? Canvas.buildSystemJson()
-	      : { ac: {}, dc: {} };
+    let opfSystem = { ac: {}, dc: {} };
+    try {
+      if (typeof Canvas !== 'undefined' && Canvas.buildSystemJson) {
+        opfSystem = Canvas.buildSystemJson();
+      }
+    } catch (err) {
+      log(`最优潮流画布模型回读不可用: ${err.message || err}`, 'warn');
+    }
 
     // Generator dispatch
 	    const genDiv = document.getElementById('opfGenResults');
@@ -8302,6 +8326,21 @@ const App = (() => {
         html += `<td>${lineHtml(row ? notes : ['缺少潮流后元件行'])}</td>`;
         html += '</tr>';
       });
+      backendRows.forEach((row, rowIndex) => {
+        if (usedRows.has(rowIndex)) return;
+        const detail = Array.isArray(row.metrics) ? row.metrics.map(fmtMetric) : [];
+        const notes = Array.isArray(row.notes) ? row.notes : [];
+        const backendId = `${row.domain || '-'}:${row.canvas_type || 'component'}:${row.index ?? rowIndex}`;
+        html += `<tr data-backend-row="${rowIndex}">`;
+        html += `<td>${escapeHtml(backendId)}</td>`;
+        html += `<td>${escapeHtml(row.type_label || row.canvas_type || '-')}</td>`;
+        html += `<td>${escapeHtml(row.name || '-')}</td>`;
+        html += `<td>${escapeHtml(row.status || (data.converged ? '已求解' : '未收敛'))}</td>`;
+        html += `<td>${escapeHtml(row.connection || '-')}</td>`;
+        html += `<td>${lineHtml(detail.length ? detail : ['-'])}</td>`;
+        html += `<td>${lineHtml(notes)}</td>`;
+        html += '</tr>';
+      });
       html += '</tbody></table>';
       div.innerHTML = html;
       return;
@@ -10695,7 +10734,7 @@ const App = (() => {
     if (topPad > 0) html += `<tr class="topo-vspacer"><td colspan="${cols}" style="height:${topPad}px;padding:0;border:0"></td></tr>`;
     for (let i = start; i < end; i += 1) {
       const item = ctx.items[i];
-      const compId = ctx.mapObj ? ctx.mapObj[item.index] : undefined;
+      const compId = mappedCompId(ctx.mapObj, item, i);
       const attrs = compId !== undefined ? ` data-comp-id="${compId}"` : '';
       const hl = ctx.highlightPos === i ? ' class="topo-search-highlight"' : '';
       html += `<tr data-row="${i}"${attrs}${hl}>${ctx.rowFn(item, i)}</tr>`;
@@ -10740,7 +10779,11 @@ const App = (() => {
     } else {
       // No scroll container (should not happen for topology tables): render all.
       let html = '';
-      items.forEach((item, i) => { html += `<tr data-row="${i}">${rowFn(item, i)}</tr>`; });
+      items.forEach((item, i) => {
+        const compId = mappedCompId(mapObj, item, i);
+        const attrs = compId !== undefined ? ` data-comp-id="${compId}"` : '';
+        html += `<tr data-row="${i}"${attrs}>${rowFn(item, i)}</tr>`;
+      });
       body.innerHTML = html;
     }
   }

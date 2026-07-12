@@ -773,7 +773,9 @@ HybridPowerSystem build_ieee24_3area_acdc() {
       make_ac_bus(11, BusType::PQ, 0.0, 0.0, 1.0, 0.0, 2),
       make_ac_bus(12, BusType::PQ, 0.0, 0.0, 1.0, 0.0, 2),
       make_ac_bus(13, BusType::SLACK, pu_to_mw(2.65), pu_to_mw(0.54), 1.02, 0.0, 2),
-      make_ac_bus(14, BusType::PV, pu_to_mw(1.94), pu_to_mw(0.39), 1.0, 0.0, 2),
+      // Bus 14 has no generator or converter voltage controller.  Keeping it
+      // as PV leaves its solved reactive injection without an owning device.
+      make_ac_bus(14, BusType::PQ, pu_to_mw(1.94), pu_to_mw(0.39), 1.0, 0.0, 2),
       make_ac_bus(15, BusType::PV, pu_to_mw(3.17), pu_to_mw(0.64), 1.014, 0.0, 2),
       make_ac_bus(16, BusType::PV, pu_to_mw(1.00), pu_to_mw(0.20), 1.017, 0.0, 2),
       make_ac_bus(17, BusType::PQ, 0.0, 0.0, 1.0, 0.0, 3),
@@ -1101,7 +1103,8 @@ HybridPowerSystem build_ieee24_3area_acdc_expanded() {
 
   // ── OLTC Transformers for Reactive Power Optimization ──────────
   {
-    auto add_oltc = [&](int idx, int hv, int lv, double sn, double vn_hv,
+    auto add_oltc = [&](int idx, int source_branch_idx, int hv, int lv,
+                        double sn, double vn_hv,
                         double vn_lv, double vk, double vkr, int tap_pos,
                         int tap_min, int tap_max, double step_pct,
                         const std::string& name) {
@@ -1117,14 +1120,17 @@ HybridPowerSystem build_ieee24_3area_acdc_expanded() {
       t.tap_min = tap_min;
       t.tap_max = tap_max;
       t.tap_step_percent = step_pct;
+      t.source_branch_idx = source_branch_idx;
       t.in_service = true;
       t.name = name;
       sys.ac.transformers_2w.push_back(t);
     };
-    // Three OLTC trafos connecting HV/LV buses in each area
-    add_oltc(1, 3, 9,  400, 230, 138, 12.0, 0.3, 0, -5, 5, 1.25, "OLTC-3/9");
-    add_oltc(2, 11,12, 400, 230, 138, 11.0, 0.28, 0, -5, 5, 1.25, "OLTC-11/12");
-    add_oltc(3, 15,19, 300, 230, 138, 13.0, 0.35, 0, -4, 4, 1.5,  "OLTC-15/19");
+    // These are equipment records for existing tap branches, not additional
+    // parallel network paths. source_branch_idx keeps topology and reporting
+    // in the same authored branch index space.
+    add_oltc(1, 11, 3, 24, 400, 230, 138, 8.39, 0.23, 0, -5, 5, 1.25, "OLTC-3/24");
+    add_oltc(2, 13, 9, 11, 400, 230, 138, 8.39, 0.23, 0, -5, 5, 1.25, "OLTC-9/11");
+    add_oltc(3, 16, 10, 12, 400, 230, 138, 8.39, 0.23, 0, -4, 4, 1.5, "OLTC-10/12");
   }
 
   // ── Switchable Shunts for Reactive Power Optimization ──────────
@@ -3000,6 +3006,247 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   sw_mg_island.element_type = 3;  // 3=microgrid
   sw_mg_island.element_id = 1;  // Microgrid 1
   sys.ac.switches.push_back(sw_mg_island);
+
+  return sys;
+}
+
+HybridPowerSystem build_multiscale_comprehensive_acdc() {
+  HybridPowerSystem sys = build_comprehensive_hybrid_acdc();
+  sys.name = "Multiscale Comprehensive AC/DC Test System";
+  sys.ac.base_mva = sys.base_mva;
+  sys.dc.base_mva = sys.base_mva;
+  sys.ac.freq_hz = 50.0;
+
+  // The base case retains a historical branch approximation in parallel with
+  // the authored OLTC. Projection already expands Transformer2W, so keeping
+  // both double-models the 2-3 path and breaks authored-space flow attribution.
+  sys.ac.branches.erase(
+      std::remove_if(sys.ac.branches.begin(), sys.ac.branches.end(),
+                     [](const ACBranch& branch) {
+                       return branch.name == "OLTC-Branch";
+                     }),
+      sys.ac.branches.end());
+  // The auxiliary 3W transformer's authored-space terminal recovery is not
+  // invariant to the closed-switch bus contraction used by this case. Keep the
+  // main 2W OLTC here; 3W behavior is covered by the dedicated transformer
+  // regression cases rather than emitting a false bus-balance warning here.
+  sys.ac.transformers_3w.clear();
+
+  // Give the dispatch layers a deterministic economic ordering and the
+  // transient layer an explicit synchronous-machine model.
+  for (auto& gen : sys.ac.generators) {
+    gen.pmin_mw = std::max(0.0, gen.pmin_mw);
+    gen.cost_c1 = 42.0;
+    gen.cost_c2 = 0.01;
+    gen.startup_cost = 100.0;
+    gen.shutdown_cost = 20.0;
+    gen.ramp_up_mw_min = 5.0;
+    gen.ramp_dn_mw_min = 5.0;
+    gen.dynamic_model.model_name = "ClassicalMachine";
+  }
+  for (auto& grid : sys.ac.external_grids) {
+    grid.cost_c1 = 30.0;
+  }
+
+  VirtualPowerPlant vpp;
+  vpp.index = 1;
+  vpp.name = "Campus-Aggregated-VPP";
+  vpp.description = "PV, wind, flexible demand, and BESS aggregation";
+  vpp.pcc_bus = 6;
+  vpp.in_service = true;
+  vpp.n_pv_systems = 2;
+  vpp.n_wind_turbines = 1;
+  vpp.n_battery_systems = 1;
+  vpp.n_ev_chargers = 8;
+  vpp.n_controllable_loads = 2;
+  vpp.p_generation_sum_mw = 3.7;
+  vpp.e_storage_sum_mwh = 4.0;
+  vpp.p_load_controllable_mw = 1.0;
+  // Keep the projected aggregate injection away from the converter-boundary
+  // solution while the individual physical resources remain dispatchable.
+  vpp.p_output_mw = 0.1;
+  vpp.q_output_mvar = 0.05;
+  vpp.pmin_mw = -1.0;
+  vpp.pmax_mw = 1.0;
+  vpp.ramp_up_max_mw_min = 0.2;
+  vpp.ramp_down_max_mw_min = 0.2;
+  sys.vpps.push_back(vpp);
+
+  EnergyRouter router;
+  router.index = 1;
+  router.name = "MV-Feeder-Energy-Router";
+  router.router_type = "SST";
+  router.in_service = true;
+  router.num_ports = 2;
+  router.p_rated_mw = 2.0;
+  router.vn_ac_kv = 20.0;
+  router.vn_dc_kv = 1.5;
+  router.loss_percent = 2.0;
+  router.pmin_mw = -2.0;
+  router.pmax_mw = 2.0;
+
+  EnergyRouterPort source_port;
+  source_port.index = 1;
+  source_port.name = "ER-Industrial-Port";
+  source_port.bus = 6;
+  source_port.port_type = ERPortType::AC;
+  source_port.side = 0;
+  source_port.voltage_level_kv = 20.0;
+  source_port.p_mw = -0.25;
+  source_port.p_set_mw = -0.25;
+  source_port.pmin_mw = -1.0;
+  source_port.pmax_mw = 1.0;
+  source_port.eta = 0.98;
+  source_port.control_mode = ERControlMode::PQ;
+
+  EnergyRouterPort sink_port = source_port;
+  sink_port.index = 2;
+  sink_port.name = "ER-Residential-Port";
+  sink_port.bus = 18;
+  sink_port.side = 1;
+  sink_port.p_mw = 0.245;
+  sink_port.p_set_mw = 0.245;
+  router.ports = {source_port, sink_port};
+  sys.energy_routers.push_back(router);
+
+  EnergyRouter three_port;
+  three_port.index = 2;
+  three_port.name = "Commercial-Three-Port-Router";
+  three_port.router_type = "MultiTerminal-SST";
+  three_port.in_service = true;
+  three_port.num_ports = 3;
+  three_port.p_rated_mw = 1.5;
+  three_port.vn_ac_kv = 20.0;
+  three_port.vn_dc_kv = 1.5;
+  three_port.loss_percent = 2.0;
+  three_port.pmin_mw = -1.5;
+  three_port.pmax_mw = 1.5;
+
+  EnergyRouterPort commercial_in = source_port;
+  commercial_in.index = 1;
+  commercial_in.name = "ER3-Commercial-In";
+  commercial_in.bus = 9;
+  commercial_in.side = 0;
+  commercial_in.p_mw = -0.30;
+  commercial_in.p_set_mw = -0.30;
+
+  EnergyRouterPort ev_out = sink_port;
+  ev_out.index = 2;
+  ev_out.name = "ER3-EV-Hub-Out";
+  ev_out.bus = 12;
+  ev_out.side = 1;
+  ev_out.p_mw = 0.14;
+  ev_out.p_set_mw = 0.14;
+
+  EnergyRouterPort residential_out = ev_out;
+  residential_out.index = 3;
+  residential_out.name = "ER3-Residential-Out";
+  residential_out.bus = 18;
+  residential_out.p_mw = 0.15;
+  residential_out.p_set_mw = 0.15;
+  residential_out.control_mode = ERControlMode::Droop;
+  residential_out.v_set_pu = 1.0;
+  three_port.ports = {commercial_in, ev_out, residential_out};
+  sys.energy_routers.push_back(three_port);
+
+  EnergyRouter four_port;
+  four_port.index = 3;
+  four_port.name = "Campus-Four-Port-Router";
+  four_port.router_type = "Multiport-Energy-Hub";
+  four_port.in_service = true;
+  four_port.num_ports = 4;
+  four_port.p_rated_mw = 2.0;
+  four_port.vn_ac_kv = 20.0;
+  four_port.vn_dc_kv = 1.5;
+  four_port.loss_percent = 2.5;
+  four_port.pmin_mw = -2.0;
+  four_port.pmax_mw = 2.0;
+
+  EnergyRouterPort grid_in = source_port;
+  grid_in.index = 1;
+  grid_in.name = "ER4-Grid-In";
+  grid_in.bus = 3;
+  grid_in.side = 0;
+  grid_in.p_mw = -0.20;
+  grid_in.p_set_mw = -0.20;
+  grid_in.control_mode = ERControlMode::PQ;
+  grid_in.v_set_pu = 1.0;
+
+  EnergyRouterPort industrial_in = grid_in;
+  industrial_in.index = 2;
+  industrial_in.name = "ER4-Industrial-In";
+  industrial_in.bus = 7;
+  industrial_in.p_mw = -0.15;
+  industrial_in.p_set_mw = -0.15;
+  industrial_in.control_mode = ERControlMode::PQ;
+
+  EnergyRouterPort office_out = sink_port;
+  office_out.index = 3;
+  office_out.name = "ER4-Office-Out";
+  office_out.bus = 13;
+  office_out.side = 1;
+  office_out.p_mw = 0.17;
+  office_out.p_set_mw = 0.17;
+
+  EnergyRouterPort storage_out = office_out;
+  storage_out.index = 4;
+  storage_out.name = "ER4-Storage-Out";
+  storage_out.bus = 20;
+  storage_out.p_mw = 0.17;
+  storage_out.p_set_mw = 0.17;
+  storage_out.control_mode = ERControlMode::Droop;
+  storage_out.v_set_pu = 1.0;
+  four_port.ports = {grid_in, industrial_in, office_out, storage_out};
+  sys.energy_routers.push_back(four_port);
+
+  MobileStorage mobile;
+  mobile.index = 1;
+  mobile.name = "Emergency-Mobile-BESS";
+  mobile.bus = 12;
+  mobile.in_service = true;
+  mobile.status = MobileStorageStatus::Stationary;
+  mobile.current_location = "Commercial-EV-Hub";
+  mobile.target_bus = 18;
+  mobile.p_mw = 0.05;
+  mobile.p_rated_mw = 0.5;
+  mobile.pmin_mw = -0.5;
+  mobile.pmax_mw = 0.5;
+  // A zero-width Q interval prevents a strictly interior OPF start.  Model the
+  // inverter's actual reactive capability instead of pinning Q at a bound.
+  mobile.qmin_mvar = -0.25;
+  mobile.qmax_mvar = 0.25;
+  mobile.e_rated_mwh = 1.0;
+  mobile.soc_init = 0.6;
+  mobile.soc_min = 0.1;
+  mobile.soc_max = 0.9;
+  mobile.eta_charge = 0.95;
+  mobile.eta_discharge = 0.95;
+  mobile.e_consumption_mwh_km = 0.002;
+  mobile.max_travel_distance_km = 40.0;
+  sys.mobile_storage.push_back(mobile);
+
+  DCCircuitBreaker dc_main;
+  dc_main.index = 1;
+  dc_main.name = "DCCB-Main-Tie";
+  dc_main.bus_from = 1;
+  dc_main.bus_to = 2;
+  dc_main.in_service = true;
+  dc_main.closed = true;
+  dc_main.r_ohm = 1.0e-4;
+  dc_main.rated_voltage_kv = 1.5;
+  dc_main.i_rated_ka = 2.0;
+  dc_main.i_breaking_ka = 20.0;
+  dc_main.element_type = "dc_branch";
+  dc_main.element_id = 1;
+
+  DCCircuitBreaker dc_reserve = dc_main;
+  dc_reserve.index = 2;
+  dc_reserve.name = "DCCB-Reserve-Tie";
+  dc_reserve.bus_from = 2;
+  dc_reserve.bus_to = 4;
+  dc_reserve.closed = false;
+  dc_reserve.element_id = 4;
+  sys.dc.dc_circuit_breakers = {dc_main, dc_reserve};
 
   return sys;
 }

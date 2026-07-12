@@ -112,6 +112,29 @@ TEST_CASE("HybridPowerSystem: IEEE24 3-area AC/DC case builder", "[model][case_b
   CHECK_FALSE(sys.ac.generators.empty());
 }
 
+TEST_CASE("IEEE24 expanded OLTC metadata reuses authored tap branches",
+          "[model][case_builder][ieee24_expanded]") {
+  auto sys = hacdcpf::io::build_ieee24_3area_acdc_expanded();
+
+  const auto bus14 = std::find_if(sys.ac.buses.begin(), sys.ac.buses.end(),
+                                  [](const auto& bus) { return bus.index == 14; });
+  REQUIRE(bus14 != sys.ac.buses.end());
+  CHECK(bus14->bus_type == hacdcpf::BusType::PQ);
+
+  REQUIRE(sys.ac.transformers_2w.size() == 3);
+  for (const auto& transformer : sys.ac.transformers_2w) {
+    REQUIRE(transformer.source_branch_idx > 0);
+    const auto branch = std::find_if(
+        sys.ac.branches.begin(), sys.ac.branches.end(), [&](const auto& candidate) {
+          return candidate.index == transformer.source_branch_idx;
+        });
+    REQUIRE(branch != sys.ac.branches.end());
+    CHECK(branch->from_bus == transformer.hv_bus);
+    CHECK(branch->to_bus == transformer.lv_bus);
+    CHECK(branch->tap != 1.0);
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Tests: AC power flow
 // ═══════════════════════════════════════════════════════════════════════════════

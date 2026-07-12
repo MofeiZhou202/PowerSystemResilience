@@ -2222,12 +2222,18 @@ json parameter_diagnostic_to_json(const hacdcpf::ParameterDiagnostic& item) {
 json parameter_validation_to_json(
     const hacdcpf::ParameterValidationReport& report) {
   json diagnostics = json::array();
+  int opf_decision_bound_issue_count = 0;
   for (const auto& item : report.diagnostics) {
     diagnostics.push_back(parameter_diagnostic_to_json(item));
+    if (item.code.rfind("opf_", 0) == 0) {
+      ++opf_decision_bound_issue_count;
+    }
   }
   return json{{"valid", report.ok()},
               {"error_count", report.error_count()},
               {"warning_count", report.warning_count()},
+              {"opf_decision_bound_issue_count",
+               opf_decision_bound_issue_count},
               {"diagnostics", std::move(diagnostics)}};
 }
 
@@ -6845,6 +6851,7 @@ std::vector<std::string> case_names() {
       "dist33_microgrid_der",
       "urban_lvn_primary_secondary",
       "comprehensive_hybrid_acdc",
+      "multiscale_comprehensive_acdc",
       "hybrid_acdc_microgrid_island",
       "networked_microgrids_islanding",
       "market_3bus_toy",
@@ -6870,6 +6877,9 @@ hacdcpf::HybridPowerSystem build_case(const std::string& name) {
     return build_urban_lvn_primary_secondary();
   }
   if (name == "comprehensive_hybrid_acdc") return build_comprehensive_hybrid_acdc();
+  if (name == "multiscale_comprehensive_acdc") {
+    return build_multiscale_comprehensive_acdc();
+  }
   if (name == "hybrid_acdc_microgrid_island") return build_hybrid_acdc_microgrid_island();
   if (name == "networked_microgrids_islanding") return build_networked_microgrids_islanding();
   if (name == "market_3bus_toy") return build_market_3bus_toy();
@@ -8731,15 +8741,8 @@ int main(int argc, char** argv) {
                 hacdcpf::project_to_canonical_models(sys);
             if (projected.branch_expand_map.has_value()) {
               std::unordered_map<int, size_t> flow_pos_by_branch_index;
-              for (size_t bi = 0; bi < sys.ac.branches.size(); ++bi) {
-                flow_pos_by_branch_index[sys.ac.branches[bi].index] = bi;
-              }
-              size_t next_expanded_pos = sys.ac.branches.size();
-              for (const auto& entry : projected.branch_expand_map->entries) {
-                if (!flow_pos_by_branch_index.count(entry.branch_index)) {
-                  flow_pos_by_branch_index[entry.branch_index] =
-                      next_expanded_pos++;
-                }
+              for (size_t bi = 0; bi < projected.ac.branches.size(); ++bi) {
+                flow_pos_by_branch_index[projected.ac.branches[bi].index] = bi;
               }
               for (const auto& entry : projected.branch_expand_map->entries) {
                 if (entry.origin_type != hacdcpf::BranchOriginType::Transformer3W) {
@@ -8830,6 +8833,10 @@ int main(int argc, char** argv) {
           bool valid{false};
         };
         std::vector<TwoWindingTerminalFlow> trafo2w_flows(sys.ac.transformers_2w.size());
+        std::unordered_map<int, size_t> ac_branch_pos_by_index;
+        for (size_t bi = 0; bi < sys.ac.branches.size(); ++bi) {
+          ac_branch_pos_by_index[sys.ac.branches[bi].index] = bi;
+        }
         std::unordered_map<int, double> ac_tf_vm_by_bus, ac_tf_va_by_bus;
         for (size_t bi = 0; bi < sys.ac.buses.size(); ++bi) {
           const auto& bus = sys.ac.buses[bi];
@@ -8844,10 +8851,26 @@ int main(int argc, char** argv) {
         };
         for (size_t ti = 0; ti < sys.ac.transformers_2w.size(); ++ti) {
           const auto& tr = sys.ac.transformers_2w[ti];
-          if (!tr.in_service || tr.source_branch_idx > 0 ||
-              tr.sn_mva <= 1e-9 || sys.base_mva <= 1e-9) {
+          if (!tr.in_service) {
             continue;
           }
+          if (tr.source_branch_idx > 0) {
+            const auto pos_it = ac_branch_pos_by_index.find(tr.source_branch_idx);
+            if (pos_it == ac_branch_pos_by_index.end() ||
+                pos_it->second >= pf.branch_flows.size()) {
+              continue;
+            }
+            const auto& branch_flow = pf.branch_flows[pos_it->second];
+            auto& tf = trafo2w_flows[ti];
+            tf.p_hv_mw = branch_flow.pf_mw;
+            tf.q_hv_mvar = branch_flow.qf_mvar;
+            tf.p_lv_mw = branch_flow.pt_mw;
+            tf.q_lv_mvar = branch_flow.qt_mvar;
+            tf.loss_mw = tf.p_hv_mw + tf.p_lv_mw;
+            tf.valid = true;
+            continue;
+          }
+          if (tr.sn_mva <= 1e-9 || sys.base_mva <= 1e-9) continue;
           const auto vh = ac_voltage(tr.hv_bus);
           const auto vl = ac_voltage(tr.lv_bus);
           const double scale = sys.base_mva / tr.sn_mva;
@@ -9263,6 +9286,7 @@ int main(int argc, char** argv) {
           const auto& tf = trafo2w_flows[ti];
           if (!tf.valid || ti >= sys.ac.transformers_2w.size()) continue;
           const auto& tr = sys.ac.transformers_2w[ti];
+          if (tr.source_branch_idx > 0) continue;
           add_ac_flow(tr.hv_bus, tf.p_hv_mw, tf.q_hv_mvar);
           add_ac_flow(tr.lv_bus, tf.p_lv_mw, tf.q_lv_mvar);
         }
@@ -9428,6 +9452,7 @@ int main(int argc, char** argv) {
           const auto& tf = trafo2w_flows[ti];
           if (!tf.valid) continue;
           const auto& tr = sys.ac.transformers_2w[ti];
+          if (tr.source_branch_idx > 0) continue;
           ac_visible_branch_p[tr.hv_bus] += tf.p_hv_mw;
           ac_visible_branch_q[tr.hv_bus] += tf.q_hv_mvar;
           ac_visible_branch_p[tr.lv_bus] += tf.p_lv_mw;
@@ -10300,7 +10325,8 @@ int main(int argc, char** argv) {
                                     double residual_mvar,
                                     double net_mvar,
                                     double terminal_mvar,
-                                    bool is_implicit) {
+                                    bool is_implicit,
+                                    bool is_balance_source) {
           json details = json::array();
           details.push_back(json{{"label", "端口外送合计"}, {"p_mw", terminal_mw},
                                  {"q_mvar", terminal_mvar}});
@@ -10328,8 +10354,9 @@ int main(int argc, char** argv) {
               {"is_implicit", is_implicit},
               {"details", details}};
           balance_diag["all_buses"].push_back(row);
-          if (std::abs(residual_mw) * 1000.0 > 1.0 ||
-              std::abs(residual_mvar) * 1000.0 > 1.0) {
+          if (!is_balance_source &&
+              (std::abs(residual_mw) * 1000.0 > 1.0 ||
+               std::abs(residual_mvar) * 1000.0 > 1.0)) {
             balance_diag["ordinary"].push_back(std::move(row));
           }
         };
@@ -10406,7 +10433,7 @@ int main(int argc, char** argv) {
             ++ordinary_bad_count;
           }
           push_balance_row("AC", row_bus, type, name, residual, net, terminal,
-                           residual_q, net_q, terminal_q, false);
+                           residual_q, net_q, terminal_q, false, is_slack);
           if (members.size() > 1) {
             auto& row = balance_diag["all_buses"].back();
             row["merged_buses"] = members;
@@ -10459,7 +10486,8 @@ int main(int argc, char** argv) {
             ++ordinary_bad_count;
           }
           push_balance_row("DC", b.index, dc_bus_type_str(b.bus_type), name,
-                           residual, net, terminal, 0.0, 0.0, 0.0, is_implicit);
+                           residual, net, terminal, 0.0, 0.0, 0.0,
+                           is_implicit, is_ref);
           if (is_ref) {
             double source = terminal - net;
             auto sit = dc_balance_source_p.find(b.index);
@@ -10555,7 +10583,9 @@ int main(int argc, char** argv) {
             add_metric(row, "Q_HV", fl.q_hv_mvar, "MVar", "q", 4);
             add_metric(row, "Q_LV", fl.q_lv_mvar, "MVar", "q", 4);
             add_metric(row, "Loss", fl.loss_mw, "MW", "p", 4);
-            add_note(row, "双绕组变压器端口潮流由潮流后两端电压和变压器等值参数反算");
+            add_note(row, tr.source_branch_idx > 0
+                              ? "双绕组变压器端口潮流取自关联交流支路"
+                              : "双绕组变压器端口潮流由潮流后两端电压和变压器等值参数反算");
           } else {
             add_metric(row, "HV Vm", ac_vm_by_bus[tr.hv_bus], "pu", "scalar", 6);
             add_metric(row, "LV Vm", ac_vm_by_bus[tr.lv_bus], "pu", "scalar", 6);

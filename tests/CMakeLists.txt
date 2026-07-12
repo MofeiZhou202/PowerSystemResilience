@@ -26,6 +26,7 @@ endfunction()
 
 hacdcpf_add_test(test_hacdcpf             test_hacdcpf.cpp)
 hacdcpf_add_test(test_all_components_pf   test_all_components_pf.cpp)
+hacdcpf_add_test(test_multiscale_comprehensive test_multiscale_comprehensive.cpp)
 hacdcpf_add_test(test_unified_pf_upgrade  test_unified_pf_upgrade.cpp)
 hacdcpf_add_test(test_acopf_dcopf_crossval test_acopf_dcopf_crossval.cpp)
 hacdcpf_add_test(test_opf_solver_backends test_opf_solver_backends.cpp)

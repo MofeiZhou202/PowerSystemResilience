@@ -113,7 +113,16 @@ async function main() {
   try {
     const page = await browser.newPage();
     page.on('pageerror', (e) => { console.error('  [pageerror]', e.message); failures++; });
-    await page.goto(base + '/xjtu/', { waitUntil: 'networkidle' });
+    // The GUI's optional Plotly CDN dependency is unavailable in offline CI.
+    // These scalability checks do not inspect chart pixels, but some workflows
+    // still refresh charts and should remain free of page errors.
+    await page.route('https://cdn.plot.ly/**', (route) => route.fulfill({
+      contentType: 'text/javascript',
+      body: 'window.Plotly={newPlot:()=>Promise.resolve(),react:()=>Promise.resolve(),Plots:{resize:()=>{}}};',
+    }));
+    await page.goto(base + '/xjtu/', { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() =>
+      typeof App !== 'undefined' && typeof Canvas !== 'undefined');
     await page.waitForTimeout(400);
 
     // ---- 1) Large case -> headless mode, PF + OPF run against the backend ----
@@ -315,6 +324,51 @@ async function main() {
     check(horizon.importedLen === '240' && horizon.checkbox === true, 'scenario import set horizon=240 and checked 使用场景时序');
     check(/TSPF: 48\/48/.test(horizon.chip) && horizon.simHrAfter === '48',
       `edited horizon (48) wins over imported scenario length: "${horizon.chip}"`);
+
+    // ---- 9) Rich-component Dashboard mapping + OPF core panels ----
+    const richGui = await page.evaluate(async () => {
+      const sel = document.getElementById('ioCaseSelect');
+      sel.value = 'multiscale_comprehensive_acdc';
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      document.getElementById('btnIoLoadBuiltin').click();
+      const loadStarted = Date.now();
+      while (Date.now() - loadStarted < 15000 &&
+             !Canvas.state.components.some(c => c.type === 'mobile_storage')) {
+        await new Promise((r) => setTimeout(r, 150));
+      }
+
+      App.switchTab('topology');
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const mobileComp = Canvas.state.components.find(c => c.type === 'mobile_storage');
+      const mobileRow = document.querySelector('#msTableInner tbody tr[data-row="0"]');
+      mobileRow?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 100));
+
+      App.setActiveModule('opf');
+      const opf = await App.runOpf();
+      const text = (id) => (document.getElementById(id)?.textContent || '').trim();
+      return {
+        mobileCompId: mobileComp?.id,
+        mobileRowCompId: Number(mobileRow?.dataset.compId),
+        selectedId: Canvas.state.selectedId,
+        opfConverged: !!opf?.converged,
+        activeGroup: document.getElementById('resultsContent')?.dataset.activeGroup,
+        summary: text('opfSummary'),
+        scope: text('opfScope'),
+        generators: text('opfGenResults'),
+        acBuses: text('opfBusResults'),
+      };
+    });
+    check(Number.isInteger(richGui.mobileCompId) &&
+          richGui.mobileRowCompId === richGui.mobileCompId &&
+          richGui.selectedId === richGui.mobileCompId,
+      `mobile-storage Dashboard row maps to Canvas component ${richGui.mobileCompId}`);
+    check(richGui.opfConverged === true && richGui.activeGroup === 'opf',
+      'multiscale comprehensive OPF converges and activates the OPF result group');
+    check(richGui.summary.length > 0, 'OPF summary panel contains data');
+    check(richGui.scope.length > 0, 'OPF constraint panel contains data');
+    check(richGui.generators.length > 0, 'OPF generator dispatch panel contains data');
+    check(richGui.acBuses.length > 0, 'OPF AC voltage/LMP panel contains data');
   } finally {
     await browser.close();
     if (proc) proc.kill();

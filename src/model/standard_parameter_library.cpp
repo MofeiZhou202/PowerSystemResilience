@@ -141,6 +141,64 @@ void check_range(ParameterValidationReport& report,
   }
 }
 
+void check_opf_decision_bounds(ParameterValidationReport& report,
+                               const std::string& component_type,
+                               int index,
+                               const std::string& name,
+                               const std::string& variable,
+                               double lower,
+                               double upper,
+                               double initial) {
+  const std::string bounds = variable + "_min/" + variable + "_max";
+  if (!std::isfinite(lower) || !std::isfinite(upper) ||
+      !std::isfinite(initial)) {
+    add_issue(report, "opf_decision_bounds_nonfinite",
+              ParameterIssueSeverity::Error, component_type, index, name,
+              bounds, initial,
+              component_type + " " + std::to_string(index) + " has non-finite " +
+                  variable + " OPF bounds or initial value.");
+    return;
+  }
+  if (lower > upper) {
+    add_issue(report, "opf_decision_bounds_reversed",
+              ParameterIssueSeverity::Error, component_type, index, name,
+              bounds, initial,
+              component_type + " " + std::to_string(index) + " requires " +
+                  variable + "_min <= " + variable + "_max for OPF.");
+    return;
+  }
+
+  const double scale = std::max({1.0, std::abs(lower), std::abs(upper)});
+  const double width_tol = 1e-12 * scale;
+  if (upper - lower <= width_tol) {
+    add_issue(report, "opf_decision_bounds_zero_width",
+              ParameterIssueSeverity::Warning, component_type, index, name,
+              bounds, initial,
+              component_type + " " + std::to_string(index) + " has zero-width " +
+                  variable + " bounds; strict-interior OPF solvers may become "
+                             "numerically infeasible. Use a small physical capability "
+                             "interval or model the value as a fixed parameter.");
+  }
+
+  const double outside_tol = 1e-10 * scale;
+  if (initial < lower - outside_tol || initial > upper + outside_tol) {
+    add_issue(report, "opf_initial_value_outside_bounds",
+              ParameterIssueSeverity::Error, component_type, index, name,
+              variable, initial,
+              component_type + " " + std::to_string(index) + " initial " +
+                  variable + " is outside its OPF decision bounds.");
+  } else if (upper - lower > width_tol &&
+             (std::abs(initial - lower) <= outside_tol ||
+              std::abs(initial - upper) <= outside_tol)) {
+    add_issue(report, "opf_initial_value_on_bound",
+              ParameterIssueSeverity::Warning, component_type, index, name,
+              variable, initial,
+              component_type + " " + std::to_string(index) + " initial " +
+                  variable + " lies exactly on an OPF bound; an interior warm start "
+                             "is numerically safer.");
+  }
+}
+
 }  // namespace
 
 const char* to_string(ParameterIssueSeverity severity) {
@@ -421,11 +479,23 @@ ParameterValidationReport validate_component_parameters(
                 "VSC", converter.index, converter.name, "p_rated_mw/pmax_mw",
                 converter.p_rated_mw, "VSC has no positive active-power rating.");
     }
+    const double p_initial = std::abs(converter.p_initial_mw) > kMissing
+                                 ? converter.p_initial_mw
+                                 : converter.p_set_mw;
+    check_opf_decision_bounds(report, "VSC", converter.index, converter.name,
+                              "p_mw", converter.pmin_mw, converter.pmax_mw,
+                              p_initial);
+    check_opf_decision_bounds(report, "VSC", converter.index, converter.name,
+                              "q_mvar", converter.qmin_mvar,
+                              converter.qmax_mvar, converter.q_set_mvar);
   }
   for (const auto& converter : system.dc.dcdc_converters) {
     if (!converter.in_service) continue;
     check_range(report, library, "dcdc.eta", "DC-DC converter",
                 converter.index, converter.name, "eta", converter.eta);
+    check_opf_decision_bounds(report, "DC-DC converter", converter.index,
+                              converter.name, "p_mw", converter.pmin_mw,
+                              converter.pmax_mw, converter.p_ref_mw);
   }
   auto validate_storage = [&](const auto& storage) {
     if (!storage.in_service) return;
@@ -446,6 +516,91 @@ ParameterValidationReport validate_component_parameters(
   for (const auto& storage : system.ac.storage) validate_storage(storage);
   for (const auto& storage : system.dc.storage) validate_storage(storage);
   for (const auto& storage : system.dc.dc_storage) validate_storage(storage);
+
+  for (const auto& generator : system.ac.generators) {
+    if (!generator.in_service) continue;
+    check_opf_decision_bounds(report, "Generator", generator.index,
+                              generator.name, "p_mw", generator.pmin_mw,
+                              generator.pmax_mw, generator.pg_mw);
+    check_opf_decision_bounds(report, "Generator", generator.index,
+                              generator.name, "q_mvar", generator.qmin_mvar,
+                              generator.qmax_mvar, generator.qg_mvar);
+  }
+  for (const auto& storage : system.ac.storage) {
+    if (!storage.in_service) continue;
+    check_opf_decision_bounds(report, "Storage", storage.index, storage.name,
+                              "p_mw", storage.pmin_mw, storage.pmax_mw,
+                              storage.p_mw);
+    check_opf_decision_bounds(report, "Storage", storage.index, storage.name,
+                              "q_mvar", storage.qmin_mvar, storage.qmax_mvar,
+                              storage.q_mvar);
+  }
+  auto check_dc_storage_bounds = [&](const auto& storage) {
+    if (!storage.in_service) return;
+    check_opf_decision_bounds(report, "DC storage", storage.index,
+                              storage.name, "p_mw", storage.pmin_mw,
+                              storage.pmax_mw, storage.p_mw);
+  };
+  for (const auto& storage : system.dc.storage)
+    check_dc_storage_bounds(storage);
+  for (const auto& storage : system.dc.dc_storage)
+    check_dc_storage_bounds(storage);
+  for (const auto& storage : system.mobile_storage) {
+    if (!storage.in_service ||
+        storage.status == MobileStorageStatus::InTransit) {
+      continue;
+    }
+    check_opf_decision_bounds(report, "Mobile storage", storage.index,
+                              storage.name, "p_mw", storage.pmin_mw,
+                              storage.pmax_mw, storage.p_mw);
+    check_opf_decision_bounds(report, "Mobile storage", storage.index,
+                              storage.name, "q_mvar", storage.qmin_mvar,
+                              storage.qmax_mvar, storage.q_mvar);
+  }
+  for (const auto& renewable : system.ac.renewable_gens) {
+    if (!renewable.in_service || !renewable.curtailable) continue;
+    check_opf_decision_bounds(report, "Renewable generator", renewable.index,
+                              renewable.name, "p_mw", 0.0,
+                              renewable.p_rated_mw, renewable.p_mw);
+    check_opf_decision_bounds(report, "Renewable generator", renewable.index,
+                              renewable.name, "q_mvar", renewable.qmin_mvar,
+                              renewable.qmax_mvar, renewable.q_mvar);
+  }
+  for (const auto& pv : system.ac.pv_systems) {
+    if (!pv.in_service || !pv.controllable) continue;
+    check_opf_decision_bounds(report, "PV system", pv.index, pv.name, "p_mw",
+                              0.0, std::max(pv.pmax_mw, pv.sn_mva), pv.p_mw);
+    check_opf_decision_bounds(report, "PV system", pv.index, pv.name,
+                              "q_mvar", pv.qmin_mvar, pv.qmax_mvar,
+                              pv.q_mvar);
+  }
+  for (const auto& load : system.ac.flexible_loads) {
+    if (!load.in_service || !load.controllable) continue;
+    check_opf_decision_bounds(report, "Flexible load", load.index, load.name,
+                              "p_mw", load.p_mw - load.flex_down_mw,
+                              load.p_mw + load.flex_up_mw, load.p_mw);
+  }
+  for (const auto& router : system.energy_routers) {
+    if (!router.in_service) continue;
+    for (const auto& port : router.ports) {
+      if (!port.in_service) continue;
+      const std::string port_name = router.name + "/" + port.name;
+      check_opf_decision_bounds(report, "Energy router port", port.index,
+                                port_name, "p_mw", port.pmin_mw,
+                                port.pmax_mw, port.p_mw);
+      if (port.port_type == ERPortType::AC) {
+        check_opf_decision_bounds(report, "Energy router port", port.index,
+                                  port_name, "q_mvar", port.qmin_mvar,
+                                  port.qmax_mvar, port.q_mvar);
+      }
+    }
+  }
+  for (const auto& vpp : system.vpps) {
+    if (!vpp.in_service) continue;
+    check_opf_decision_bounds(report, "Virtual power plant", vpp.index,
+                              vpp.name, "p_mw", vpp.pmin_mw, vpp.pmax_mw,
+                              vpp.p_output_mw);
+  }
 
   if (system.three_phase_ac.has_value()) {
     const auto& phase = *system.three_phase_ac;

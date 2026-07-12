@@ -3232,7 +3232,9 @@ const Canvas = (() => {
         case 'motor': {
           const busIdx = findBusIndex(comp.id);
           sys.ac.motors.push({
-            index: motorIdx++, bus: busIdx,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : motorIdx,
+            name: p.name || `Motor ${Number.isFinite(Number(p.index)) ? Number(p.index) : motorIdx}`,
+            bus: busIdx,
             vn_kv: numOr(p.vn_kv, 6.3),
             sn_mva: numOr(p.sn_mva, 5),
             r_pu: numOr(p.r_pu, 0.02),
@@ -3246,12 +3248,14 @@ const Canvas = (() => {
             x0_pu: numOr(p.x0_pu, 0),
             in_service: p.in_service !== false,
           });
+          motorIdx++;
           break;
         }
         case 'flexible_load': {
           const busIdx = findBusIndex(comp.id);
           sys.ac.flexible_loads.push({
-            index: sys.ac.flexible_loads.length, bus: busIdx,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : sys.ac.flexible_loads.length,
+            name: p.name || '', bus: busIdx,
             p_mw: numOr(p.p_mw, 0),
             q_mvar: numOr(p.q_mvar, 0),
             flex_up_mw: numOr(p.flex_up_mw, 0),
@@ -3270,7 +3274,8 @@ const Canvas = (() => {
         case 'asymmetric_load': {
           const busIdx = findBusIndex(comp.id);
           sys.ac.asymmetric_loads.push(addDynamicModel({
-            index: sys.ac.asymmetric_loads.length, bus: busIdx,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : sys.ac.asymmetric_loads.length,
+            name: p.name || '', bus: busIdx,
             connection: p.connection || 'wye',
             grounded: p.grounded !== false,
             pa_mw: numOr(p.pa_mw, 0),
@@ -3292,7 +3297,8 @@ const Canvas = (() => {
         case 'shunt': {
           const busIdx = findBusIndex(comp.id);
           sys.ac.shunts.push({
-            index: sys.ac.shunts.length, bus: busIdx,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : sys.ac.shunts.length,
+            name: p.name || '', bus: busIdx,
             gs_mw: numOr(p.gs_mw, 0),
             bs_mvar: numOr(p.bs_mvar, 0),
             switchable: p.switchable === true,
@@ -3312,7 +3318,8 @@ const Canvas = (() => {
             if (busCompId !== null && compBusMap[busCompId] !== undefined) ports3w.push(compBusMap[busCompId]);
           }
           sys.ac.transformers_3w.push({
-            index: sys.ac.transformers_3w.length,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : sys.ac.transformers_3w.length,
+            name: p.name || '',
             hv_bus: ports3w[0] || 0, mv_bus: ports3w[1] || 0, lv_bus: ports3w[2] || 0,
             sn_hv_mva: numOr(p.sn_hv_mva, 100),
             sn_mv_mva: numOr(p.sn_mv_mva, 50),
@@ -3339,7 +3346,8 @@ const Canvas = (() => {
         }
         case 'charger': {
           sys.ac.chargers.push({
-            index: sys.ac.chargers.length,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : sys.ac.chargers.length,
+            name: p.name || '',
             station_id: parseInt(p.station_id) || 0,
             charger_type: p.charger_type || 'AC_L2',
             p_rated_kw: numOr(p.p_rated_kw, 0),
@@ -3355,7 +3363,8 @@ const Canvas = (() => {
         case 'charging_station': {
           const busIdx = findBusIndex(comp.id);
           sys.ac.charging_stations.push({
-            index: sys.ac.charging_stations.length, bus: busIdx,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : sys.ac.charging_stations.length,
+            name: p.name || '', bus: busIdx,
             location: p.location || '',
             n_fast: parseInt(p.n_fast) || 0,
             n_slow: parseInt(p.n_slow) || 0,
@@ -3375,7 +3384,8 @@ const Canvas = (() => {
         case 'mobile_storage': {
           const busIdx = findBusIndex(comp.id);
           sys.mobile_storage.push({
-            index: sys.mobile_storage.length, bus: busIdx,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : sys.mobile_storage.length,
+            name: p.name || '', bus: busIdx,
             p_mw: numOr(p.p_mw, 0),
             q_mvar: numOr(p.q_mvar, 0),
             p_rated_mw: numOr(p.p_rated_mw, 0),
@@ -3391,6 +3401,7 @@ const Canvas = (() => {
             eta_discharge: numOr(p.eta_discharge, 0.95),
             is_mobile: true,
             status: p.status || 'Stationary',
+            current_location: p.current_location || '',
             target_bus: parseInt(p.target_bus) || 0,
             in_service: p.in_service !== false,
           });
@@ -3485,7 +3496,7 @@ const Canvas = (() => {
             return [];
           };
           sys.vpps.push({
-            index: sys.vpps.length,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : sys.vpps.length,
             name: p.name || '',
             description: p.description || '',
             pcc_bus: busIdx || parseInt(p.pcc_bus) || parseInt(p.aggregation_bus) || 0,
@@ -6768,6 +6779,11 @@ const Canvas = (() => {
 	      bucket[Number.isFinite(idx) ? idx : fallback] = comp.id;
 	      if (!maps.byPosition[bucketName]) maps.byPosition[bucketName] = {};
 	      maps.byPosition[bucketName][fallback] = comp.id;
+	      if (!Object.prototype.hasOwnProperty.call(bucket, '__byPosition')) {
+	        Object.defineProperty(bucket, '__byPosition', {
+	          value: maps.byPosition[bucketName], enumerable: false,
+	        });
+	      }
 	    };
 
     // Must match buildSystemJson iteration order for index consistency

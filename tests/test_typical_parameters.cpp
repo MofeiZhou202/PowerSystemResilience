@@ -463,3 +463,43 @@ TEST_CASE("parameter validation rejects zero-impedance transformer imports",
       });
   CHECK(phase_found != report.diagnostics.end());
 }
+
+TEST_CASE("parameter validation reports OPF decision-bound risks",
+          "[model][parameter_library][validation][opf_bounds]") {
+  HybridPowerSystem sys;
+  sys.name = "invalid OPF bounds";
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 50.0;
+
+  MobileStorage mobile;
+  mobile.index = 4;
+  mobile.name = "Boundary BESS";
+  mobile.bus = 1;
+  mobile.pmin_mw = -0.5;
+  mobile.pmax_mw = 0.5;
+  mobile.p_mw = 0.8;
+  mobile.qmin_mvar = 0.0;
+  mobile.qmax_mvar = 0.0;
+  mobile.q_mvar = 0.0;
+  sys.mobile_storage.push_back(mobile);
+
+  Generator generator;
+  generator.index = 2;
+  generator.name = "Reversed generator";
+  generator.pmin_mw = 2.0;
+  generator.pmax_mw = 1.0;
+  generator.qmin_mvar = -1.0;
+  generator.qmax_mvar = 1.0;
+  sys.ac.generators.push_back(generator);
+
+  const auto report = validate_component_parameters(sys);
+  CHECK_FALSE(report.ok());
+  const auto has_code = [&](const std::string& code) {
+    return std::any_of(report.diagnostics.begin(), report.diagnostics.end(),
+                       [&](const auto& item) { return item.code == code; });
+  };
+  CHECK(has_code("opf_decision_bounds_reversed"));
+  CHECK(has_code("opf_decision_bounds_zero_width"));
+  CHECK(has_code("opf_initial_value_outside_bounds"));
+}
