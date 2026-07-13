@@ -46,6 +46,7 @@
 #include "hacdcpf/io/component_io_mapping.hpp"
 #include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/io/etap_io.hpp"
+#include "hacdcpf/io/cim_dist_io.hpp"
 #include "hacdcpf/io/scenario_bundle_io.hpp"
 #include "hacdcpf/io/external_grid_io.hpp"
 #include "hacdcpf/io/evpt_demo_cases.hpp"
@@ -8130,6 +8131,73 @@ int main(int argc, char** argv) {
       summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
       summary["_etap_warnings"] = rep.warnings;
       res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: import a China distribution-grid CIM/RDF (.xml) 台区 ----
+  // Text upload (xml_string) -> load_cim_dist. Optional demand/impedance
+  // heuristics can be tuned via the request body (load_factor, power_factor).
+  svr.Post("/api/session/load_cim_dist",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      const std::string xml = j.value("xml_string", "");
+      if (xml.empty()) throw std::runtime_error("Empty CIM XML string");
+      hacdcpf::io::CimDistImportOptions opts;
+      if (j.contains("load_factor")) opts.load_factor = j.value("load_factor", opts.load_factor);
+      if (j.contains("power_factor")) opts.power_factor = j.value("power_factor", opts.power_factor);
+      if (j.contains("base_mva")) opts.base_mva = j.value("base_mva", opts.base_mva);
+      auto imported = hacdcpf::io::from_cim_dist(
+          xml, hacdcpf::io::ImportMode::Permissive, opts);
+      if (imported.report.has_errors()) {
+        std::string msg = "CIM 导入失败";
+        for (const auto& r : imported.report.records)
+          if (r.severity == hacdcpf::io::ImportSeverity::Error) { msg = r.message; break; }
+        throw std::runtime_error(msg);
+      }
+
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      g_session.current_system = std::move(imported.system);
+      g_session.current_name = g_session.current_system->name.empty()
+                                   ? "配电台区 CIM"
+                                   : g_session.current_system->name;
+      clear_cached_analysis(g_session);
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_cim_warnings"] = imported.warnings;
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: export the current system as distribution-grid CIM/RDF XML ---
+  svr.Post("/api/session/export_cim_dist",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      std::string xml, name;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        name = g_session.current_name;
+        hacdcpf::io::CimDistExportOptions opts;
+        opts.model_name = name;
+        xml = hacdcpf::io::to_cim_dist(*g_session.current_system, opts);
+      }
+      std::string safe;
+      for (char ch : name) {
+        safe += (static_cast<unsigned char>(ch) >= 0x80 ||
+                 std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' ||
+                 ch == '_')
+                    ? ch : '_';
+      }
+      if (safe.empty()) safe = "system";
+      res.set_content(json{{"xml_string", xml}, {"name", safe}}.dump(),
+                      "application/json");
     } catch (const std::exception& e) {
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");

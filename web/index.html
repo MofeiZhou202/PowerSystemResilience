@@ -59,6 +59,7 @@
     <input type="file" id="fileImportOpendss" accept=".dss,.txt,.csv,.dat" multiple style="display:none"/>
     <input type="file" id="fileImportOpendssProject" webkitdirectory directory multiple style="display:none"/>
     <input type="file" id="fileImportPsdJulia" accept=".jl,text/x-julia,text/plain" style="display:none"/>
+    <input type="file" id="fileImportCimDist" accept=".xml" style="display:none"/>
     <input type="file" id="fileImportParameterLibrary" accept=".json,application/json" style="display:none"/>
     <button id="btnToggleTheme" class="btn btn-sm" title="切换浅色 / 深色背景主题">🌓 主题</button>
     <span id="canvasInfo" class="canvas-info">0 元件 | 0 连接</span>
@@ -142,6 +143,7 @@
       <button id="btnIoImportJson" class="toolbar-btn" title="导入系统 JSON">导入JSON</button>
       <button id="btnIoImportEtapXlsx" class="toolbar-btn" title="导入 ETAP 工作簿 (.xlsx)">导入ETAP</button>
       <button id="btnIoImportEtapXml" class="toolbar-btn" title="导入 ETAP 工程 XML (.xml)">导入ETAP XML</button>
+      <button id="btnIoImportCimDist" class="toolbar-btn" title="导入配电台区 CIM/RDF (国网/南网 .xml)">导入配电CIM</button>
       <button id="btnIoImportGridlabd" class="toolbar-btn" title="导入 GridLAB-D GLM 文本">导入GLM</button>
       <button id="btnIoImportOpendss" class="toolbar-btn" title="导入 OpenDSS DSS 文本或多文件选择">导入DSS</button>
       <button id="btnIoImportOpendssProject" class="toolbar-btn" title="导入 OpenDSS 工程目录">导入DSS工程</button>
@@ -154,6 +156,7 @@
       <button id="btnIoExportMatpower" class="toolbar-btn" title="导出当前系统的 MATPOWER AC 子集 (.m)">导出MATPOWER</button>
       <button id="btnIoExportEtap" class="toolbar-btn" title="导出 ETAP 工作簿 (.xlsx)">导出ETAP</button>
       <button id="btnIoExportEtapXml" class="toolbar-btn" title="导出 ETAP 工程 XML (.xml)">导出ETAP XML</button>
+      <button id="btnIoExportCimDist" class="toolbar-btn" title="导出配电台区 CIM/RDF (.xml)">导出配电CIM</button>
       <button id="btnIoExportGridlabd" class="toolbar-btn" title="导出 GridLAB-D GLM">导出GLM</button>
       <button id="btnIoExportOpendss" class="toolbar-btn" title="导出 OpenDSS DSS">导出DSS</button>
       <button id="btnIoExportPsd" class="toolbar-btn" title="导出 PowerSimulationsDynamics.jl / PowerSystems.jl Julia 文件 (.jl)">导出PSD.jl</button>
@@ -2648,6 +2651,6 @@
   <script src="js/core/layout_engine.js?v=20260712-hysim-layout-v1"></script>
   <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
-  <script src="js/app.js?v=20260714-cyber-reliability-l1"></script>
+  <script src="js/app.js?v=20260714-cyber-reliability-cim-dist-v1"></script>
 </body>
 </html>

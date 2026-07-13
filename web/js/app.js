@@ -2587,6 +2587,65 @@ const App = (() => {
     }
   }
 
+  // Import a China distribution-grid CIM/RDF (.xml) 台区 file (国网/南网 dialect:
+  // PowerTransformer / ConnectivityNode / ACLineSegment / Meter / LVBuilding).
+  // Text upload -> load_cim_dist. Loads and line/transformer impedances are
+  // ESTIMATED (surfaced as import warnings).
+  async function loadCimDist(file) {
+    if (!file) return;
+    setStatus('导入配电台区CIM...', 'busy');
+    try {
+      const xml = await file.text();
+      const data = await apiPost('/api/session/load_cim_dist', { xml_string: xml });
+      if (!data) { setStatus('加载失败', 'error'); return; }
+      if (data.error) throw new Error(data.error);
+      log(`已导入配电台区CIM: ${file.name}`, 'success');
+      applyLoadedSystem(data, '配电台区CIM');
+      showModelIoStatus('配电台区 CIM 导入完成', [
+        ['文件', file.name],
+        ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+        ['变压器', data.counts?.transformers_2w ?? data.transformers_2w ?? ''],
+        ['负荷', data.counts?.ac_loads ?? data.ac_loads ?? ''],
+      ], {
+        subtitle: 'CIM/RDF 台区转换到当前系统（负荷与阻抗为估算值）',
+        warnings: data._cim_warnings || [],
+      });
+      setStatus('就绪');
+    } catch (e) {
+      log(`导入配电台区CIM失败: ${e.message}`, 'error');
+      setStatus('加载失败', 'error');
+    }
+  }
+
+  // Export the current system as a distribution-grid CIM/RDF (.xml) document in
+  // the same dialect. Generated server-side by save_cim_dist().
+  async function exportCimDist() {
+    setStatus('导出配电台区CIM中...', 'busy');
+    try {
+      const ok = await syncToBackend();
+      if (!ok) { setStatus('导出失败', 'error'); return; }
+      const data = await apiPost('/api/session/export_cim_dist', {});
+      if (!data || data.error) throw new Error((data && data.error) || '导出失败');
+      const blob = new Blob([data.xml_string], { type: 'application/xml' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${data.name || 'system'}_TransArea.xml`;
+      a.click();
+      URL.revokeObjectURL(url);
+      log(`已导出配电台区CIM: ${a.download}`, 'success');
+      showModelIoStatus('配电台区 CIM 导出完成', [
+        ['文件', a.download],
+        ['大小', `${(data.xml_string || '').length} bytes`],
+      ], { subtitle: '从后端当前系统生成 (CIM10 / chinapower RDF)' });
+      setStatus('就绪');
+    } catch (err) {
+      log(`导出配电台区CIM失败: ${err.message}`, 'error');
+      setStatus('导出失败', 'error');
+    }
+  }
+
   async function exportMatpower() {
     setStatus('导出MATPOWER中...', 'busy');
     try {
@@ -14078,6 +14137,14 @@ const App = (() => {
     document.getElementById('btnIoImportEtapXml')?.addEventListener('click', () => {
       document.getElementById('fileImportEtapXml')?.click();
     });
+    document.getElementById('btnIoImportCimDist')?.addEventListener('click', () => {
+      document.getElementById('fileImportCimDist')?.click();
+    });
+    document.getElementById('fileImportCimDist')?.addEventListener('change', (e) => {
+      const f = e.target.files[0];
+      e.target.value = '';
+      if (f) loadCimDist(f);
+    });
     document.getElementById('btnIoImportGridlabd')?.addEventListener('click', () => {
       document.getElementById('fileImportGridlabd')?.click();
     });
@@ -14115,6 +14182,7 @@ const App = (() => {
     document.getElementById('btnIoExportMatpower')?.addEventListener('click', exportMatpower);
     document.getElementById('btnIoExportEtap')?.addEventListener('click', exportEtap);
     document.getElementById('btnIoExportEtapXml')?.addEventListener('click', exportEtapXml);
+    document.getElementById('btnIoExportCimDist')?.addEventListener('click', exportCimDist);
     document.getElementById('btnIoExportGridlabd')?.addEventListener('click', () => exportExternalGrid('gridlabd'));
     document.getElementById('btnIoExportOpendss')?.addEventListener('click', () => exportExternalGrid('opendss'));
     document.getElementById('btnIoExportPsd')?.addEventListener('click', exportPowerSimulationsDynamics);

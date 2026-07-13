@@ -349,6 +349,7 @@ set(HACDCPF_SOURCES
   src/io/json_io.cpp
   src/io/roundtrip.cpp
   src/io/cim_io.cpp
+  src/io/cim_dist_io.cpp
   src/io/matpower_parser.cpp
   src/io/case_builders.cpp
   src/io/scenario_bundle_io.cpp

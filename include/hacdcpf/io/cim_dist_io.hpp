@@ -1,0 +1,98 @@
+#pragma once
+
+#include <filesystem>
+#include <string>
+#include <vector>
+
+#include "hacdcpf/io/import_report.hpp"
+#include "hacdcpf/model/hybrid_power_system.hpp"
+
+/// @file cim_dist_io.hpp
+/// Import / export for the Chinese distribution-grid CIM/RDF dialect used by
+/// State Grid / CSG low-voltage 配变台区 (transformer-district) exports.
+///
+/// This is a DIFFERENT schema from the bounded CGMES 3.0 profile handled by
+/// cim_io.hpp: the namespace is `http://iec.ch/TC57/2003/CIM-schema-cim10#`
+/// (+ `http://www.chinapower.cn/Rfs/2006/Rdf-Cim#`), topology is expressed with
+/// `ConnectivityNode` + `Terminal`, and the core classes are `PowerTransformer`
+/// / `TransformerWinding` / `ACLineSegment` / `Breaker` / `Disconnector` /
+/// `BusbarSection` / `LVBuilding` / `Meter` — all of which cim_io explicitly
+/// puts out of scope.
+///
+/// Mapping (honest ceiling):
+///   - ConnectivityNode (referenced by ≥1 Terminal)  → ACBus
+///   - PowerTransformer + primary/secondary Winding   → Transformer2W (+ HV
+///     side becomes the SLACK bus fed by a synthetic ExternalGrid)
+///   - ACLineSegment                                  → ACBranch (impedance
+///     estimated from Conductor.length + crossSectionArea + a cable table)
+///   - Breaker / Disconnector                         → Switch (closed =
+///     !normalOpen; collapsed later by switch_contraction)
+///   - LVBuilding (+ aggregated Meters)               → Load (per-building
+///     demand estimated by splitting the transformer capacity across buildings
+///     by meter count; Meter count → n_customers)
+///
+/// Loads carry no nameplate kW in the source, so demand is ESTIMATED (recorded
+/// as Coerced/BestEffort in the ImportReport). The RDF/XML reader is the same
+/// self-contained, XXE-hardened parser used by cim_io.
+
+namespace hacdcpf::io {
+
+/// Tunables for the estimated-demand and estimated-impedance heuristics.
+struct CimDistImportOptions {
+  /// Fraction of the transformer's rated capacity assumed as coincident peak
+  /// apparent load, split across LVBuildings by meter count.
+  double load_factor{0.4};
+  /// Power factor used to split the estimated apparent load into P and Q.
+  double power_factor{0.9};
+  /// Short-circuit level (MVA) of the synthetic external grid at the HV bus.
+  double grid_s_sc_mva{100.0};
+  /// ACLineSegments shorter than this (metres) are cable heads / joints with
+  /// near-zero impedance; they are modelled as closed switches (merged by
+  /// switch contraction) instead of branches, so the Y-bus stays non-singular.
+  double min_segment_length_m{1.0};
+  /// Default two-winding transformer impedance when the source omits it.
+  double default_vk_percent{4.0};
+  double default_vkr_percent{1.0};
+  double default_i0_percent{0.5};
+  /// System power base (MVA). Kept near the transformer-district scale (≈1 MVA)
+  /// so 0.4 kV feeder per-unit impedances stay O(0.01–1) and Newton power flow
+  /// stays well conditioned (a 100 MVA base pushes them to 5–50 pu).
+  double base_mva{1.0};
+};
+
+/// Options for distribution-CIM export.
+struct CimDistExportOptions {
+  std::string model_name{"hacdcpf"};
+  /// Emit one generic <cim:Meter> per customer under each LVBuilding.
+  bool emit_meters{true};
+};
+
+/// Result of a distribution-CIM import: system + uniform report + a flat list of
+/// human-readable warning strings (mirrors the ETAP importer's rep.warnings, so
+/// the GUI can surface them in the import dialog).
+struct CimDistImportResult {
+  HybridPowerSystem system;
+  ImportReport report;
+  std::vector<std::string> warnings;
+};
+
+/// Import a distribution-CIM RDF/XML document.
+CimDistImportResult from_cim_dist(const std::string& xml,
+                                  ImportMode mode = ImportMode::Permissive,
+                                  const CimDistImportOptions& opts = {});
+
+/// Import a distribution-CIM RDF/XML file.
+CimDistImportResult load_cim_dist(const std::filesystem::path& path,
+                                  ImportMode mode = ImportMode::Permissive,
+                                  const CimDistImportOptions& opts = {});
+
+/// Export the current system to the distribution-CIM RDF/XML dialect.
+std::string to_cim_dist(const HybridPowerSystem& sys,
+                        const CimDistExportOptions& opts = {});
+
+/// Export to a distribution-CIM RDF/XML file.
+void save_cim_dist(const HybridPowerSystem& sys,
+                   const std::filesystem::path& path,
+                   const CimDistExportOptions& opts = {});
+
+}  // namespace hacdcpf::io
