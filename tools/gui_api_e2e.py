@@ -520,6 +520,43 @@ def main() -> int:
             "built-in demo separates restoration-delay and control-loss EENS",
         )
 
+        print("2e. Distribution CIM XML import/export round-trip")
+        cim_fixtures = sorted((REPO_ROOT / "external_data" / "xml").glob("*.xml"))
+        chk.check(len(cim_fixtures) == 3, "distribution CIM fixtures are available")
+        cim_source = cim_fixtures[0].read_text(encoding="utf-8")
+        st, cim_loaded = c.post_json(
+            "/api/session/load_cim_dist",
+            {"xml_string": cim_source},
+        )
+        cim_counts = cim_loaded.get("counts", {})
+        chk.check(
+            st == 200 and cim_counts.get("ac_buses", 0) > 0 and
+            cim_counts.get("ac_branches", 0) > 0 and
+            cim_counts.get("transformers_2w") == 1 and
+            cim_counts.get("loads", 0) > 0,
+            "distribution CIM fixture maps topology, transformer, and loads",
+        )
+        st, cim_exported = c.post_json("/api/session/export_cim_dist", {})
+        cim_xml = cim_exported.get("xml_string", "")
+        chk.check(
+            st == 200 and "<rdf:RDF" in cim_xml and
+            "<cim:PowerTransformer" in cim_xml and
+            "<cim:LVBuilding" in cim_xml,
+            "distribution CIM export emits the expected RDF classes",
+        )
+        st, cim_reloaded = c.post_json(
+            "/api/session/load_cim_dist",
+            {"xml_string": cim_xml},
+        )
+        reloaded_counts = cim_reloaded.get("counts", {})
+        chk.check(
+            st == 200 and
+            reloaded_counts.get("ac_buses") == cim_counts.get("ac_buses") and
+            reloaded_counts.get("ac_branches") == cim_counts.get("ac_branches") and
+            reloaded_counts.get("loads") == cim_counts.get("loads"),
+            "exported distribution CIM re-imports without topology loss",
+        )
+
         print("3. MATPOWER OPF regression cases")
         opf_payload = {
             "solver": "parity",

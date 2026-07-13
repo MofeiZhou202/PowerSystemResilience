@@ -1,9 +1,13 @@
 // Bounded CIM / CGMES 3.0 (EQ+SSH) import/export contract (§5).
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <string>
+#include <vector>
 
+#include "hacdcpf/io/cim_dist_io.hpp"
 #include "hacdcpf/io/cim_io.hpp"
 
 namespace {
@@ -103,4 +107,55 @@ TEST_CASE("CIM parser rejects DOCTYPE/ENTITY (XXE hardening, §12)",
       "<rdf:RDF></rdf:RDF>\n";
   const auto res = hacdcpf::io::from_cim(evil);
   CHECK(res.report.has_errors());
+}
+
+TEST_CASE("Distribution CIM fixtures import and round-trip",
+          "[io][cim][distribution][roundtrip]") {
+  namespace fs = std::filesystem;
+  const fs::path fixture_dir =
+      fs::path(__FILE__).parent_path().parent_path() / "external_data" / "xml";
+  REQUIRE(fs::is_directory(fixture_dir));
+
+  std::vector<fs::path> fixtures;
+  for (const auto& entry : fs::directory_iterator(fixture_dir)) {
+    if (entry.is_regular_file() && entry.path().extension() == ".xml") {
+      fixtures.push_back(entry.path());
+    }
+  }
+  std::sort(fixtures.begin(), fixtures.end());
+  REQUIRE(fixtures.size() == 3);
+
+  for (const auto& fixture : fixtures) {
+    CAPTURE(fixture.string());
+    const auto imported = hacdcpf::io::load_cim_dist(fixture);
+    CHECK_FALSE(imported.report.has_errors());
+    CHECK(imported.report.binding_level ==
+          hacdcpf::io::ImportBindingLevel::Canonical);
+    CHECK_FALSE(imported.system.ac.buses.empty());
+    CHECK_FALSE(imported.system.ac.branches.empty());
+    CHECK(imported.system.ac.transformers_2w.size() == 1);
+    CHECK(imported.system.ac.external_grids.size() == 1);
+    CHECK_FALSE(imported.system.ac.loads.empty());
+
+    const std::string exported = hacdcpf::io::to_cim_dist(imported.system);
+    CHECK(exported.find("<rdf:RDF") != std::string::npos);
+    CHECK(exported.find("<cim:PowerTransformer") != std::string::npos);
+    const auto round_trip = hacdcpf::io::from_cim_dist(exported);
+    CHECK_FALSE(round_trip.report.has_errors());
+    CHECK(round_trip.system.ac.buses.size() == imported.system.ac.buses.size());
+    CHECK(round_trip.system.ac.branches.size() ==
+          imported.system.ac.branches.size());
+    CHECK(round_trip.system.ac.loads.size() == imported.system.ac.loads.size());
+  }
+}
+
+TEST_CASE("Distribution CIM parser rejects DOCTYPE and ENTITY declarations",
+          "[io][cim][distribution][security]") {
+  const std::string evil =
+      "<?xml version=\"1.0\"?>\n"
+      "<!DOCTYPE foo [ <!ENTITY xxe SYSTEM \"file:///etc/passwd\"> ]>\n"
+      "<rdf:RDF></rdf:RDF>\n";
+  const auto result = hacdcpf::io::from_cim_dist(evil);
+  CHECK(result.report.has_errors());
+  CHECK(result.system.ac.buses.empty());
 }
