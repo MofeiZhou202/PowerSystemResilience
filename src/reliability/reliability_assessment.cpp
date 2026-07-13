@@ -3812,17 +3812,56 @@ StateEvalResult evaluate_prepared_fmea_system(
   return evaluate_state(sys, no_failures, opf_opt, 1.0);
 }
 
+void apply_fmea_cyber_control_freeze(HybridPowerSystem& sys) {
+  for (auto& source : sys.ac.static_generators) {
+    if (!source.in_service || !source.controllable) continue;
+    const double scheduled = std::max(0.0, source.p_mw * source.scaling);
+    source.controllable = false;
+    source.pmax_mw = scheduled;
+    source.p_rated_mw = scheduled;
+  }
+  for (auto& source : sys.ac.renewable_gens) {
+    if (!source.in_service || !source.curtailable) continue;
+    source.curtailable = false;
+    source.p_rated_mw = std::max(0.0, source.p_mw);
+  }
+  for (auto& source : sys.ac.pv_systems) {
+    if (!source.in_service || !source.controllable) continue;
+    source.controllable = false;
+    source.pmax_mw = std::max(0.0, source.p_mw);
+  }
+  for (auto& storage : sys.ac.storage) storage.controllable = false;
+  for (auto& storage : sys.dc.storage) storage.controllable = false;
+  for (auto& storage : sys.dc.dc_storage) storage.controllable = false;
+  for (auto& source : sys.dc.static_generators) {
+    if (!source.in_service || !source.controllable) continue;
+    const double scheduled = std::max(0.0, source.p_mw * source.scaling);
+    source.controllable = false;
+    source.pmax_mw = scheduled;
+    source.p_rated_mw = scheduled;
+  }
+  for (auto& source : sys.dc.dc_static_generators) {
+    if (!source.in_service || !source.controllable) continue;
+    source.controllable = false;
+    source.pmax_mw = std::max(0.0, source.p_set_mw * source.scaling);
+  }
+  for (auto& converter : sys.vsc_converters) converter.controllable = false;
+  for (auto& converter : sys.dc.dcdc_converters) converter.controllable = false;
+}
+
 FMEAStageEval evaluate_contingency_stage(
     const HybridPowerSystem& sys,
     const FMEAComponent& comp,
     const FMEAOptions& options,
     const opf::DCOPFOptions& opf_opt,
     double stage_duration_hr,
-    bool repair_stage) {
+    bool repair_stage,
+    bool cyber_control_frozen = false) {
   
   HybridPowerSystem sys_copy = sys;
   scale_fmea_loads(sys_copy, options.load_scale_factor);
   apply_fmea_component_outage(sys_copy, comp);
+  if (cyber_control_frozen) apply_fmea_cyber_control_freeze(sys_copy);
   add_external_grid_dispatch_sources(sys_copy, 1.0);
   apply_fmea_support_sources(sys_copy, options, stage_duration_hr, repair_stage);
 
@@ -3978,6 +4017,28 @@ FMEAResult run_distribution_fmea(
     result.model_limitations =
         "FMEA physical evaluation uses AC-only DC-OPF for AC distribution contingencies.";
   }
+  if (options.cyber_physical.enabled) {
+    auto& cyber = result.cyber_physical;
+    cyber.enabled = true;
+    cyber.level = 1;
+    cyber.model_scope = "level1-scalar-interface-matrix";
+    cyber.automation_availability =
+        std::clamp(options.cyber_physical.automation_availability, 0.0, 1.0);
+    cyber.automatic_switching_time_hr =
+        std::max(0.0, options.cyber_physical.automatic_switching_time_hr);
+    cyber.manual_switching_time_hr =
+        std::max(0.0, options.cyber_physical.manual_switching_time_hr);
+    result.validity.restoration_duration_cyber_conditioned = true;
+    result.validity.cyber_control_consequence_modelled =
+        options.cyber_physical.freeze_der_on_automation_loss;
+    result.model_limitations +=
+        " Cyber-physical conditioning is Level 1: scalar automation availability "
+        "with class-conditioned restoration duration and optional DER/control "
+        "freezing. Communication topology, shared cyber cut sets, cyber-node "
+        "power supply, weather common cause, and adversarial attacks are not modelled. "
+        "Cyber-conditioned class evaluations are serialized because concurrent "
+        "DC-OPF backend calls are not process-safe.";
+  }
   const size_t nb = sys.ac.buses.size() + (hybrid_fmea ? sys.dc.buses.size() : 0U);
   result.nodal_eens_mwh_yr.resize(nb, 0.0);
 
@@ -4002,13 +4063,22 @@ FMEAResult run_distribution_fmea(
   // Accumulators for SAIFI/SAIDI
   std::vector<double> nodal_cif(nb, 0.0);  // per-bus interruption frequency
   std::vector<double> nodal_cid(nb, 0.0);  // per-bus interruption duration
+  std::vector<double> nodal_cid_perfect_cyber(nb, 0.0);
+  std::vector<double> nodal_cid_no_automation(nb, 0.0);
 
   struct FMEAContingencyWorkResult {
     FMEAContingencyDetail detail;
     std::vector<double> nodal_eens;
     std::vector<double> nodal_cif;
     std::vector<double> nodal_cid;
+    std::vector<double> nodal_cid_perfect_cyber;
+    std::vector<double> nodal_cid_no_automation;
     bool causes_loss{false};
+    double loss_frequency{0.0};
+    double eens_perfect_cyber{0.0};
+    double eens_no_automation{0.0};
+    double eens_duration_increment{0.0};
+    double eens_control_increment{0.0};
   };
 
   auto evaluate_fmea_contingency = [&](const FMEAComponent& comp) {
@@ -4017,75 +4087,206 @@ FMEAResult run_distribution_fmea(
     detail.component_index = comp.idx;
     detail.component_name = comp.name;
     detail.failure_rate = comp.lambda;
-    detail.tau_sw_hr = comp.tau_sw_hr;
-    // F11: the fault event lasts MTTR in total, partitioned as
-    //   switching stage [0, tau_sw]  then  repair stage [tau_sw, MTTR].
-    // The repair-stage duration is therefore (MTTR - tau_sw), not the full MTTR;
-    // charging the full MTTR on top of tau_sw double-counts the switching window.
-    detail.tau_rep_hr = std::max(0.0, comp.tau_rep_hr - comp.tau_sw_hr);
     detail.component_type = fmea_component_type_name(comp.type);
 
-    // 鈹€鈹€ Switching stage 鈹€鈹€
-    auto eval_sw = evaluate_contingency_stage(
-        sys, comp, options, opf_opt, comp.tau_sw_hr, false);
-    detail.shed_sw_mw = eval_sw.eval.curtailment_mw;
-    detail.ens_sw_mwh = eval_sw.eval.curtailment_mw * comp.tau_sw_hr;
-    detail.causes_loss_sw = eval_sw.eval.is_loss_state;
-    detail.nodal_shed_sw_mw = eval_sw.eval.nodal_curtailment_mw;
+    double automation_availability = options.cyber_physical.enabled
+        ? options.cyber_physical.automation_availability
+        : 1.0;
+    for (const auto& override : options.cyber_physical.availability_overrides) {
+      if (override.component_type == detail.component_type &&
+          override.component_index == comp.idx) {
+        automation_availability = override.availability;
+        break;
+      }
+    }
+    automation_availability = std::clamp(automation_availability, 0.0, 1.0);
+    const double down_probability = 1.0 - automation_availability;
+    const double automatic_tau_sw = std::clamp(
+        options.cyber_physical.enabled
+            ? options.cyber_physical.automatic_switching_time_hr
+            : comp.tau_sw_hr,
+        0.0, std::max(0.0, comp.tau_rep_hr));
+    const double manual_tau_sw = std::clamp(
+        options.cyber_physical.enabled
+            ? options.cyber_physical.manual_switching_time_hr
+            : comp.tau_sw_hr,
+        0.0, std::max(0.0, comp.tau_rep_hr));
 
-    // 鈹€鈹€ Repair stage 鈹€鈹€
-    // Evaluate the post-reconfiguration network for the physical repair horizon
-    // (comp.tau_rep_hr) so storage energy limits use the true repair time, but
-    // weight the energy by the repair-STAGE duration detail.tau_rep_hr (F11).
-    auto eval_rep = evaluate_contingency_stage(
-        sys, comp, options, opf_opt, comp.tau_rep_hr, true);
-    detail.shed_rep_mw = eval_rep.eval.curtailment_mw;
-    detail.ens_rep_mwh = eval_rep.eval.curtailment_mw * detail.tau_rep_hr;
-    detail.causes_loss_rep = eval_rep.eval.is_loss_state;
-    detail.nodal_shed_rep_mw = eval_rep.eval.nodal_curtailment_mw;
-    detail.repair_switch_actions = std::move(eval_rep.switch_actions);
-    detail.repair_search_truncated = eval_rep.search_truncated;
+    FMEAOptions automatic_options = options;
+    automatic_options.cyber_physical.enabled = false;
+    FMEAOptions manual_options = automatic_options;
+    if (options.cyber_physical.enabled &&
+        options.cyber_physical.freeze_der_on_automation_loss) {
+      manual_options.enable_repair_reconfiguration = false;
+      manual_options.enable_switch_reconfiguration = false;
+      manual_options.enable_storage_dispatch = false;
+      manual_options.enable_grid_forming_vsc_support = false;
+      manual_options.enable_black_start_storage = false;
+      manual_options.enable_microgrid_islanding = false;
+    }
 
-    // 鈹€鈹€ Frequency-weighted contributions 鈹€鈹€
-    double total_ens = detail.ens_sw_mwh + detail.ens_rep_mwh;
-    detail.eens_contribution = comp.lambda * total_ens;
+    struct ClassEvaluation {
+      double tau_sw_hr{0.0};
+      double tau_rep_hr{0.0};
+      FMEAStageEval switching;
+      FMEAStageEval repair;
+      double ens_mwh{0.0};
+      double loss_duration_hr{0.0};
+      bool causes_loss{false};
+    };
+    auto evaluate_class = [&](const FMEAOptions& class_options,
+                              double tau_sw_hr,
+                              bool cyber_control_frozen) {
+      ClassEvaluation class_eval;
+      class_eval.tau_sw_hr = tau_sw_hr;
+      // F11: the event lasts MTTR in total. Switching and repair are disjoint
+      // windows, so a slower cyber class shortens the remaining repair window.
+      class_eval.tau_rep_hr =
+          std::max(0.0, comp.tau_rep_hr - class_eval.tau_sw_hr);
+      class_eval.switching = evaluate_contingency_stage(
+          sys, comp, class_options, opf_opt, class_eval.tau_sw_hr, false,
+          cyber_control_frozen);
+      // The physical repair horizon is retained for storage-energy feasibility;
+      // only the frequency-weighted stage duration uses tau_rep_hr.
+      class_eval.repair = evaluate_contingency_stage(
+          sys, comp, class_options, opf_opt, comp.tau_rep_hr, true,
+          cyber_control_frozen);
+      class_eval.ens_mwh =
+          class_eval.switching.eval.curtailment_mw * class_eval.tau_sw_hr +
+          class_eval.repair.eval.curtailment_mw * class_eval.tau_rep_hr;
+      if (class_eval.switching.eval.is_loss_state)
+        class_eval.loss_duration_hr += class_eval.tau_sw_hr;
+      if (class_eval.repair.eval.is_loss_state)
+        class_eval.loss_duration_hr += class_eval.tau_rep_hr;
+      class_eval.causes_loss = class_eval.switching.eval.is_loss_state ||
+                               class_eval.repair.eval.is_loss_state;
+      return class_eval;
+    };
 
-    double loss_duration = 0.0;
-    if (detail.causes_loss_sw) loss_duration += detail.tau_sw_hr;
-    if (detail.causes_loss_rep) loss_duration += detail.tau_rep_hr;
-    detail.lole_contribution = comp.lambda * loss_duration;
+    const ClassEvaluation automatic =
+        evaluate_class(automatic_options, automatic_tau_sw, false);
+    const ClassEvaluation duration_only = options.cyber_physical.enabled
+        ? evaluate_class(automatic_options, manual_tau_sw, false)
+        : automatic;
+    const ClassEvaluation manual = options.cyber_physical.enabled &&
+                                           options.cyber_physical.freeze_der_on_automation_loss
+        ? evaluate_class(manual_options, manual_tau_sw,
+                         options.cyber_physical.freeze_der_on_automation_loss)
+        : duration_only;
+
+    detail.automation_availability = automation_availability;
+    detail.tau_sw_automatic_hr = automatic.tau_sw_hr;
+    detail.tau_sw_manual_hr = manual.tau_sw_hr;
+    detail.tau_sw_hr = automation_availability * automatic.tau_sw_hr +
+                       down_probability * manual.tau_sw_hr;
+    detail.tau_rep_hr = automation_availability * automatic.tau_rep_hr +
+                        down_probability * manual.tau_rep_hr;
+    detail.shed_sw_automatic_mw = automatic.switching.eval.curtailment_mw;
+    detail.shed_sw_manual_mw = manual.switching.eval.curtailment_mw;
+    detail.shed_rep_automatic_mw = automatic.repair.eval.curtailment_mw;
+    detail.shed_rep_manual_mw = manual.repair.eval.curtailment_mw;
+    detail.shed_sw_mw =
+        automation_availability * detail.shed_sw_automatic_mw +
+        down_probability * detail.shed_sw_manual_mw;
+    detail.shed_rep_mw =
+        automation_availability * detail.shed_rep_automatic_mw +
+        down_probability * detail.shed_rep_manual_mw;
+    detail.ens_sw_mwh =
+        automation_availability * automatic.switching.eval.curtailment_mw *
+            automatic.tau_sw_hr +
+        down_probability * manual.switching.eval.curtailment_mw * manual.tau_sw_hr;
+    detail.ens_rep_mwh =
+        automation_availability * automatic.repair.eval.curtailment_mw *
+            automatic.tau_rep_hr +
+        down_probability * manual.repair.eval.curtailment_mw * manual.tau_rep_hr;
+    detail.causes_loss_sw =
+        (automation_availability > 0.0 && automatic.switching.eval.is_loss_state) ||
+        (down_probability > 0.0 && manual.switching.eval.is_loss_state);
+    detail.causes_loss_rep =
+        (automation_availability > 0.0 && automatic.repair.eval.is_loss_state) ||
+        (down_probability > 0.0 && manual.repair.eval.is_loss_state);
+    detail.repair_switch_actions = automation_availability > 0.0
+        ? automatic.repair.switch_actions
+        : manual.repair.switch_actions;
+    detail.repair_search_truncated = automatic.repair.search_truncated ||
+                                     manual.repair.search_truncated;
+
+    if (options.cyber_physical.enabled) {
+      detail.eens_perfect_cyber_contribution = comp.lambda * automatic.ens_mwh;
+      detail.eens_no_automation_contribution = comp.lambda * manual.ens_mwh;
+      detail.eens_cyber_duration_increment =
+          comp.lambda * down_probability *
+          (duration_only.ens_mwh - automatic.ens_mwh);
+      detail.eens_cyber_control_increment =
+          comp.lambda * down_probability *
+          (manual.ens_mwh - duration_only.ens_mwh);
+      detail.eens_contribution =
+          detail.eens_perfect_cyber_contribution +
+          detail.eens_cyber_duration_increment +
+          detail.eens_cyber_control_increment;
+    } else {
+      detail.eens_contribution = comp.lambda * automatic.ens_mwh;
+    }
+    detail.lole_contribution = comp.lambda *
+        (automation_availability * automatic.loss_duration_hr +
+         down_probability * manual.loss_duration_hr);
+    work.eens_perfect_cyber = detail.eens_perfect_cyber_contribution;
+    work.eens_no_automation = detail.eens_no_automation_contribution;
+    work.eens_duration_increment = detail.eens_cyber_duration_increment;
+    work.eens_control_increment = detail.eens_cyber_control_increment;
+    work.loss_frequency = comp.lambda *
+        (automation_availability * (automatic.causes_loss ? 1.0 : 0.0) +
+         down_probability * (manual.causes_loss ? 1.0 : 0.0));
+
+    detail.nodal_shed_sw_mw.assign(nb, 0.0);
+    detail.nodal_shed_rep_mw.assign(nb, 0.0);
+    auto nodal_value = [](const std::vector<double>& values, size_t index) {
+      return index < values.size() ? values[index] : 0.0;
+    };
 
     // 鈹€鈹€ Nodal EENS accumulation 鈹€鈹€
     work.nodal_eens.assign(nb, 0.0);
-    for (size_t b = 0; b < nb; ++b) {
-      double shed_sw = b < detail.nodal_shed_sw_mw.size()
-                           ? detail.nodal_shed_sw_mw[b]
-                           : 0.0;
-      double shed_rep = b < detail.nodal_shed_rep_mw.size()
-                            ? detail.nodal_shed_rep_mw[b]
-                            : 0.0;
-      double nodal_ens = shed_sw * detail.tau_sw_hr + shed_rep * detail.tau_rep_hr;
-      work.nodal_eens[b] += comp.lambda * nodal_ens;
-    }
-
-    // 鈹€鈹€ Nodal CIF / CID for SAIFI/SAIDI 鈹€鈹€
     work.nodal_cif.assign(nb, 0.0);
     work.nodal_cid.assign(nb, 0.0);
+    work.nodal_cid_perfect_cyber.assign(nb, 0.0);
+    work.nodal_cid_no_automation.assign(nb, 0.0);
     for (size_t b = 0; b < nb; ++b) {
-      bool bus_loss = false;
-      double duration = 0.0;
-      if (b < detail.nodal_shed_sw_mw.size() && detail.nodal_shed_sw_mw[b] > 0.01) {
-        bus_loss = true;
-        duration += detail.tau_sw_hr;
-      }
-      if (b < detail.nodal_shed_rep_mw.size() && detail.nodal_shed_rep_mw[b] > 0.01) {
-        bus_loss = true;
-        duration += detail.tau_rep_hr;
-      }
-      if (bus_loss) {
-        work.nodal_cif[b] += comp.lambda;
-        work.nodal_cid[b] += comp.lambda * duration;
-      }
+      const double auto_sw = nodal_value(
+          automatic.switching.eval.nodal_curtailment_mw, b);
+      const double auto_rep = nodal_value(
+          automatic.repair.eval.nodal_curtailment_mw, b);
+      const double manual_sw = nodal_value(
+          manual.switching.eval.nodal_curtailment_mw, b);
+      const double manual_rep = nodal_value(
+          manual.repair.eval.nodal_curtailment_mw, b);
+      detail.nodal_shed_sw_mw[b] =
+          automation_availability * auto_sw + down_probability * manual_sw;
+      detail.nodal_shed_rep_mw[b] =
+          automation_availability * auto_rep + down_probability * manual_rep;
+      const double auto_nodal_ens = auto_sw * automatic.tau_sw_hr +
+                                    auto_rep * automatic.tau_rep_hr;
+      const double manual_nodal_ens = manual_sw * manual.tau_sw_hr +
+                                      manual_rep * manual.tau_rep_hr;
+      work.nodal_eens[b] = comp.lambda *
+          (automation_availability * auto_nodal_ens +
+           down_probability * manual_nodal_ens);
+
+      const bool auto_loss = auto_sw > 0.01 || auto_rep > 0.01;
+      const bool manual_loss = manual_sw > 0.01 || manual_rep > 0.01;
+      const double auto_duration =
+          (auto_sw > 0.01 ? automatic.tau_sw_hr : 0.0) +
+          (auto_rep > 0.01 ? automatic.tau_rep_hr : 0.0);
+      const double manual_duration =
+          (manual_sw > 0.01 ? manual.tau_sw_hr : 0.0) +
+          (manual_rep > 0.01 ? manual.tau_rep_hr : 0.0);
+      work.nodal_cif[b] = comp.lambda *
+          (automation_availability * (auto_loss ? 1.0 : 0.0) +
+           down_probability * (manual_loss ? 1.0 : 0.0));
+      work.nodal_cid[b] = comp.lambda *
+          (automation_availability * auto_duration +
+           down_probability * manual_duration);
+      work.nodal_cid_perfect_cyber[b] = comp.lambda * auto_duration;
+      work.nodal_cid_no_automation[b] = comp.lambda * manual_duration;
     }
 
     if (options.verbose) {
@@ -4093,22 +4294,27 @@ FMEAResult run_distribution_fmea(
                    comp.name, detail.shed_rep_mw, detail.eens_contribution);
     }
 
-    work.causes_loss = detail.causes_loss_sw || detail.causes_loss_rep;
+    work.causes_loss = automatic.causes_loss || manual.causes_loss;
     work.detail = std::move(detail);
     return work;
   };
 
   std::vector<FMEAContingencyWorkResult> work_results(catalog.size());
-  const int fmea_workers = options.enable_parallel
+  const bool cyber_serial_guard =
+      options.enable_parallel && options.cyber_physical.enabled;
+  const int fmea_workers = options.enable_parallel && !cyber_serial_guard
       ? resolve_reliability_worker_count(options.parallel_threads,
                                          static_cast<int>(catalog.size()))
       : 1;
   result.parallel_workers = fmea_workers;
   result.parallel_effective = options.enable_parallel && fmea_workers > 1 &&
                               catalog.size() > 1U;
-  result.parallel_mode = result.parallel_effective
-      ? "parallel-fmea-contingencies"
-      : (options.enable_parallel ? "serial/insufficient-work" : "serial/disabled");
+  result.parallel_mode = cyber_serial_guard
+      ? "serial/cyber-conditioned-solver-safety"
+      : (result.parallel_effective
+             ? "parallel-fmea-contingencies"
+             : (options.enable_parallel ? "serial/insufficient-work"
+                                        : "serial/disabled"));
   result.parallel_execution = util::make_parallel_execution_info(
       options.enable_parallel, options.parallel_threads,
       static_cast<int>(catalog.size()), "parallel-fmea-contingencies",
@@ -4116,7 +4322,11 @@ FMEAResult run_distribution_fmea(
   result.parallel_execution.effective = result.parallel_effective;
   result.parallel_execution.resolved_workers = fmea_workers;
   result.parallel_execution.mode = result.parallel_mode;
-  if (!result.parallel_effective && options.enable_parallel) {
+  if (cyber_serial_guard) {
+    result.parallel_execution.guard_reason =
+        "Cyber-conditioned class evaluations are serialized because concurrent "
+        "DC-OPF backend calls are not process-safe.";
+  } else if (!result.parallel_effective && options.enable_parallel) {
     result.parallel_execution.guard_reason =
         util::insufficient_work_reason(result.parallel_execution);
   }
@@ -4145,14 +4355,24 @@ FMEAResult run_distribution_fmea(
     const auto& detail = work.detail;
     result.eens_mwh_yr += detail.eens_contribution;
     result.lole_hr_yr += detail.lole_contribution;
+    result.cyber_physical.eens_perfect_cyber_mwh_yr += work.eens_perfect_cyber;
+    result.cyber_physical.eens_no_automation_mwh_yr += work.eens_no_automation;
+    result.cyber_physical.delta_cyber_duration_mwh_yr +=
+        work.eens_duration_increment;
+    result.cyber_physical.delta_cyber_control_mwh_yr +=
+        work.eens_control_increment;
     if (work.causes_loss) {
-      result.lolf_occ_yr += detail.failure_rate;
+      result.lolf_occ_yr += work.loss_frequency;
       result.n_loss_contingencies++;
     }
     for (size_t b = 0; b < nb; ++b) {
       if (b < work.nodal_eens.size()) result.nodal_eens_mwh_yr[b] += work.nodal_eens[b];
       if (b < work.nodal_cif.size()) nodal_cif[b] += work.nodal_cif[b];
       if (b < work.nodal_cid.size()) nodal_cid[b] += work.nodal_cid[b];
+      if (b < work.nodal_cid_perfect_cyber.size())
+        nodal_cid_perfect_cyber[b] += work.nodal_cid_perfect_cyber[b];
+      if (b < work.nodal_cid_no_automation.size())
+        nodal_cid_no_automation[b] += work.nodal_cid_no_automation[b];
     }
     result.contingencies.push_back(std::move(work.detail));
   }
@@ -4167,6 +4387,32 @@ FMEAResult run_distribution_fmea(
 
   // Compute distribution indices from nodal CIF/CID
   result.distribution_idx = compute_distribution_indices(sys, nodal_cif, nodal_cid);
+  if (result.cyber_physical.enabled) {
+    auto& cyber = result.cyber_physical;
+    cyber.eens_adjusted_mwh_yr = result.eens_mwh_yr;
+    const double attainable = cyber.eens_no_automation_mwh_yr -
+                              cyber.eens_perfect_cyber_mwh_yr;
+    if (std::abs(attainable) > 1e-12) {
+      cyber.automation_efficacy = std::clamp(
+          (cyber.eens_no_automation_mwh_yr - cyber.eens_adjusted_mwh_yr) /
+              attainable,
+          0.0, 1.0);
+    } else {
+      cyber.automation_efficacy = 1.0;
+    }
+    const std::vector<double> zero_cif(nb, 0.0);
+    cyber.saidi_perfect_cyber_hr_cust_yr =
+        compute_distribution_indices(sys, zero_cif, nodal_cid_perfect_cyber).saidi;
+    cyber.saidi_no_automation_hr_cust_yr =
+        compute_distribution_indices(sys, zero_cif, nodal_cid_no_automation).saidi;
+    if (result.distribution_idx.saidi > 1e-12) {
+      cyber.cyber_caused_saidi_share = std::clamp(
+          (result.distribution_idx.saidi -
+           cyber.saidi_perfect_cyber_hr_cust_yr) /
+              result.distribution_idx.saidi,
+          0.0, 1.0);
+    }
+  }
 
   spdlog::info("FMEA: Complete. {} contingencies ({} with loss). "
                "EENS={:.2f} MWh/yr, LOLE={:.2f} hr/yr, LOLF={:.2f} occ/yr",

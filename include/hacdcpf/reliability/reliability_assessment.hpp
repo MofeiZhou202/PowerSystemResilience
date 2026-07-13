@@ -368,6 +368,27 @@ void apply_comprehensive_reliability_data(HybridPowerSystem& sys);
 // FMEA (Failure-Mode Enumeration Analysis) for Distribution Systems
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Optional Level-1 cyber-physical conditioning for staged FMEA.
+///
+/// The cyber state is reduced to two consequence-equivalent classes:
+/// automation available and automation unavailable.  This is the scalar
+/// interface-matrix model from docs/cyber_physical_reliability_extension.md;
+/// it does not claim to model a communication topology or cyber-node power.
+struct CyberPhysicalFMEAOptions {
+  bool enabled{false};
+  double automation_availability{0.97};
+  double automatic_switching_time_hr{0.05};  // 3 minutes
+  double manual_switching_time_hr{1.0};
+  bool freeze_der_on_automation_loss{true};
+
+  struct AvailabilityOverride {
+    std::string component_type;
+    int component_index{-1};
+    double availability{0.97};
+  };
+  std::vector<AvailabilityOverride> availability_overrides;
+};
+
 /// Options for FMEA distribution reliability assessment.
 struct FMEAOptions {
   double load_scale_factor{1.0};       // Load scaling (1.0 = no scaling)
@@ -424,6 +445,10 @@ struct FMEAOptions {
   // Parallel evaluation of independent contingencies.
   bool enable_parallel{true};
   int parallel_threads{0};            // 0 = hardware_concurrency()
+
+  // Level-1 cyber-physical interface-matrix conditioning. Disabled by default
+  // so existing physical-only studies retain their established semantics.
+  CyberPhysicalFMEAOptions cyber_physical{};
 };
 
 /// Per-contingency detail for FMEA.
@@ -469,6 +494,39 @@ struct FMEAContingencyDetail {
   // call budget (max_repair_opf_calls). Results remain valid but may not
   // reflect the globally optimal switching sequence.
   bool repair_search_truncated{false};
+
+  // Level-1 cyber class attribution.  These remain zero for physical-only runs.
+  double automation_availability{1.0};
+  double tau_sw_automatic_hr{0.0};
+  double tau_sw_manual_hr{0.0};
+  double shed_sw_automatic_mw{0.0};
+  double shed_sw_manual_mw{0.0};
+  double shed_rep_automatic_mw{0.0};
+  double shed_rep_manual_mw{0.0};
+  double eens_perfect_cyber_contribution{0.0};
+  double eens_no_automation_contribution{0.0};
+  double eens_cyber_duration_increment{0.0};
+  double eens_cyber_control_increment{0.0};
+};
+
+/// System-level Level-1 cyber-physical attribution and bounding pair.
+struct CyberPhysicalReliabilityMetrics {
+  bool enabled{false};
+  int level{0};
+  std::string model_scope{"physical-only"};
+  double automation_availability{1.0};
+  double automatic_switching_time_hr{0.0};
+  double manual_switching_time_hr{0.0};
+  double eens_perfect_cyber_mwh_yr{0.0};
+  double eens_no_automation_mwh_yr{0.0};
+  double eens_adjusted_mwh_yr{0.0};
+  double delta_cyber_duration_mwh_yr{0.0};
+  double delta_cyber_control_mwh_yr{0.0};
+  double delta_protection_misoperation_mwh_yr{0.0};
+  double automation_efficacy{1.0};
+  double saidi_perfect_cyber_hr_cust_yr{0.0};
+  double saidi_no_automation_hr_cust_yr{0.0};
+  double cyber_caused_saidi_share{0.0};
 };
 
 /// Comprehensive FMEA result for distribution systems.
@@ -500,6 +558,9 @@ struct FMEAResult {
   // Per-contingency details (sorted by EENS contribution descending)
   std::vector<FMEAContingencyDetail> contingencies;
 
+  // Populated when FMEAOptions::cyber_physical.enabled is true.
+  CyberPhysicalReliabilityMetrics cyber_physical;
+
   // Non-empty when evaluation uses simplified physics.
   std::string model_limitations;
 
@@ -517,6 +578,10 @@ struct FMEAResult {
     bool ac_voltage_reactive_feasibility_certified{false};
     bool repair_ac_switch_reconfiguration_modelled{false};
     bool repair_dc_side_reconfiguration_modelled{false};
+    bool cyber_topology_modelled{false};
+    bool restoration_duration_cyber_conditioned{false};
+    bool cyber_control_consequence_modelled{false};
+    bool cyber_power_coupling_modelled{false};
   };
   ValidityFlags validity{};
 };

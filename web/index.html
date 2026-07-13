@@ -1392,6 +1392,23 @@
       <label class="sub-label" title="蒙特卡洛最大抽样次数 (NSQ) / 年数×10 (SEQ)">抽样次数
         <input id="relMaxIter" type="number" value="2000" min="100" step="500"/>
       </label>
+      <label class="sub-label sub-checkbox rel-cyber-control" title="启用 Level 1 网络物理可靠性：按自动化可用/不可用两类修正恢复时长和控制能力">
+        <input id="relCyberEnabled" type="checkbox"/>
+        <span>网络物理 L1</span>
+      </label>
+      <label class="sub-label rel-cyber-control" title="故障发生时 FLISR、远方控制和通信链路可用的概率">自动化可用率
+        <input id="relCyberAvailability" type="number" value="0.97" min="0" max="1" step="0.01"/>
+      </label>
+      <label class="sub-label rel-cyber-control" title="自动故障定位、隔离和恢复所需时间（分钟）">自动恢复(min)
+        <input id="relCyberAutoMinutes" type="number" value="3" min="0" max="1440" step="1"/>
+      </label>
+      <label class="sub-label rel-cyber-control" title="自动化不可用时人工巡检和操作所需时间（分钟）">人工恢复(min)
+        <input id="relCyberManualMinutes" type="number" value="60" min="0" max="10080" step="5"/>
+      </label>
+      <label class="sub-label sub-checkbox rel-cyber-control" title="自动化不可用时不计远方 DER、储能、VSC 构网和微网孤岛控制能力">
+        <input id="relCyberFreezeDer" type="checkbox" checked/>
+        <span>失联冻结 DER</span>
+      </label>
       <div class="rel-seq-profile rel-seq-editor-launch" title="编辑序贯蒙特卡洛逐时负荷曲线和各 AC/DC 负荷点的空间倍率">
         <span>SEQ负荷模型</span>
         <button id="btnOpenSeqProfileEditor" class="toolbar-btn" type="button">编辑曲线</button>
@@ -2631,6 +2648,6 @@
   <script src="js/core/layout_engine.js?v=20260712-hysim-layout-v1"></script>
   <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
-  <script src="js/app.js?v=20260712-hysim-phase6-v1"></script>
+  <script src="js/app.js?v=20260714-cyber-reliability-l1"></script>
 </body>
 </html>

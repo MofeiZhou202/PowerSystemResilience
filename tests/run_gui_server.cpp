@@ -5182,7 +5182,90 @@ static json fmea_validity_json(
       {"repair_ac_switch_reconfiguration_modelled",
        v.repair_ac_switch_reconfiguration_modelled},
       {"repair_dc_side_reconfiguration_modelled",
-       v.repair_dc_side_reconfiguration_modelled}};
+       v.repair_dc_side_reconfiguration_modelled},
+      {"cyber_topology_modelled", v.cyber_topology_modelled},
+      {"restoration_duration_cyber_conditioned",
+       v.restoration_duration_cyber_conditioned},
+      {"cyber_control_consequence_modelled",
+       v.cyber_control_consequence_modelled},
+      {"cyber_power_coupling_modelled", v.cyber_power_coupling_modelled}};
+}
+
+static void parse_cyber_physical_fmea_options(
+    const json& request,
+    hacdcpf::analysis::FMEAOptions& options) {
+  if (!request.contains("cyber_physical")) return;
+  if (!request["cyber_physical"].is_object()) {
+    throw std::runtime_error("cyber_physical must be an object");
+  }
+  const auto& cyber = request["cyber_physical"];
+  auto finite_in_range = [](double value, double lo, double hi,
+                            const char* field) {
+    if (!std::isfinite(value) || value < lo || value > hi) {
+      throw std::runtime_error(std::string("cyber_physical.") + field +
+                               " is outside its valid range");
+    }
+    return value;
+  };
+  auto& target = options.cyber_physical;
+  target.enabled = cyber.value("enabled", false);
+  target.automation_availability = finite_in_range(
+      cyber.value("automation_availability", 0.97), 0.0, 1.0,
+      "automation_availability");
+  target.automatic_switching_time_hr = finite_in_range(
+      cyber.value("automatic_switching_time_hr", 0.05), 0.0, 8760.0,
+      "automatic_switching_time_hr");
+  target.manual_switching_time_hr = finite_in_range(
+      cyber.value("manual_switching_time_hr", 1.0), 0.0, 8760.0,
+      "manual_switching_time_hr");
+  target.freeze_der_on_automation_loss =
+      cyber.value("freeze_der_on_automation_loss", true);
+  target.availability_overrides.clear();
+  const json overrides = cyber.value("availability_overrides", json::array());
+  if (!overrides.is_array()) {
+    throw std::runtime_error(
+        "cyber_physical.availability_overrides must be an array");
+  }
+  for (const auto& row : overrides) {
+    if (!row.is_object() || !row.contains("component_type") ||
+        !row["component_type"].is_string() ||
+        !row.contains("component_index") ||
+        !row["component_index"].is_number_integer()) {
+      throw std::runtime_error(
+          "cyber_physical availability overrides require component_type and component_index");
+    }
+    hacdcpf::analysis::CyberPhysicalFMEAOptions::AvailabilityOverride value;
+    value.component_type = row["component_type"].get<std::string>();
+    value.component_index = row["component_index"].get<int>();
+    value.availability = finite_in_range(
+        row.value("availability", target.automation_availability), 0.0, 1.0,
+        "availability_overrides[].availability");
+    target.availability_overrides.push_back(std::move(value));
+  }
+}
+
+static json cyber_physical_reliability_json(
+    const hacdcpf::analysis::CyberPhysicalReliabilityMetrics& cyber) {
+  return json{
+      {"enabled", cyber.enabled},
+      {"level", cyber.level},
+      {"model_scope", cyber.model_scope},
+      {"automation_availability", cyber.automation_availability},
+      {"automatic_switching_time_hr", cyber.automatic_switching_time_hr},
+      {"manual_switching_time_hr", cyber.manual_switching_time_hr},
+      {"eens_perfect_cyber_mwh_yr", cyber.eens_perfect_cyber_mwh_yr},
+      {"eens_no_automation_mwh_yr", cyber.eens_no_automation_mwh_yr},
+      {"eens_adjusted_mwh_yr", cyber.eens_adjusted_mwh_yr},
+      {"delta_cyber_duration_mwh_yr", cyber.delta_cyber_duration_mwh_yr},
+      {"delta_cyber_control_mwh_yr", cyber.delta_cyber_control_mwh_yr},
+      {"delta_protection_misoperation_mwh_yr",
+       cyber.delta_protection_misoperation_mwh_yr},
+      {"automation_efficacy", cyber.automation_efficacy},
+      {"saidi_perfect_cyber_hr_cust_yr",
+       cyber.saidi_perfect_cyber_hr_cust_yr},
+      {"saidi_no_automation_hr_cust_yr",
+       cyber.saidi_no_automation_hr_cust_yr},
+      {"cyber_caused_saidi_share", cyber.cyber_caused_saidi_share}};
 }
 
 static json reliability_parallel_json(bool requested,
@@ -6859,6 +6942,7 @@ std::vector<std::string> case_names() {
       "multiscale_comprehensive_acdc",
       "hybrid_acdc_microgrid_island",
       "networked_microgrids_islanding",
+      "cyber_physical_reliability_demo",
       "market_3bus_toy",
       "market_5bus_acdc_toy",
       "dist33_tie_demo",
@@ -6887,6 +6971,9 @@ hacdcpf::HybridPowerSystem build_case(const std::string& name) {
   }
   if (name == "hybrid_acdc_microgrid_island") return build_hybrid_acdc_microgrid_island();
   if (name == "networked_microgrids_islanding") return build_networked_microgrids_islanding();
+  if (name == "cyber_physical_reliability_demo") {
+    return build_cyber_physical_reliability_demo();
+  }
   if (name == "market_3bus_toy") return build_market_3bus_toy();
   if (name == "market_5bus_acdc_toy") return build_market_5bus_acdc_toy();
   if (name == "dist33_tie_demo") {
@@ -17169,6 +17256,7 @@ int main(int argc, char** argv) {
         fmea_opts.verbose = j.value("verbose", false);
         fmea_opts.enable_parallel = j.value("parallel", j.value("enable_parallel", true));
         fmea_opts.parallel_threads = j.value("parallel_threads", 0);
+        parse_cyber_physical_fmea_options(j, fmea_opts);
         
         auto result = hacdcpf::analysis::run_distribution_fmea(sys, fmea_opts);
         
@@ -17177,6 +17265,8 @@ int main(int argc, char** argv) {
         out["model_scope"] = result.model_scope;
         out["model_limitations"] = result.model_limitations;
         out["validity"] = fmea_validity_json(result.validity);
+        out["cyber_physical"] =
+            cyber_physical_reliability_json(result.cyber_physical);
         out["data_quality"] = reliability_data_quality_json(result.data_quality);
         out["data_policy"] = reliability_policy_label(pol);
         add_reliability_parallel_json(out, fmea_opts.enable_parallel,
@@ -17247,7 +17337,22 @@ int main(int argc, char** argv) {
             {"causes_loss_sw", c.causes_loss_sw},
             {"causes_loss_rep", c.causes_loss_rep},
             {"repair_search_truncated", c.repair_search_truncated},
-            {"repair_switch_actions", switch_actions}
+            {"repair_switch_actions", switch_actions},
+            {"automation_availability", c.automation_availability},
+            {"tau_sw_automatic_hr", c.tau_sw_automatic_hr},
+            {"tau_sw_manual_hr", c.tau_sw_manual_hr},
+            {"shed_sw_automatic_mw", c.shed_sw_automatic_mw},
+            {"shed_sw_manual_mw", c.shed_sw_manual_mw},
+            {"shed_rep_automatic_mw", c.shed_rep_automatic_mw},
+            {"shed_rep_manual_mw", c.shed_rep_manual_mw},
+            {"eens_perfect_cyber_contribution",
+             c.eens_perfect_cyber_contribution},
+            {"eens_no_automation_contribution",
+             c.eens_no_automation_contribution},
+            {"eens_cyber_duration_increment",
+             c.eens_cyber_duration_increment},
+            {"eens_cyber_control_increment",
+             c.eens_cyber_control_increment}
           });
         }
         out["contingencies"] = cont_arr;
@@ -18470,12 +18575,15 @@ int main(int argc, char** argv) {
           fo.max_repair_opf_calls = rest.value("max_physical_evaluations", 200);
           fo.enable_parallel = rest.value("parallel", parallel_requested);
           fo.parallel_threads = rest.value("parallel_threads", parallel_threads);
+          parse_cyber_physical_fmea_options(j, fo);
           auto r = hacdcpf::analysis::run_distribution_fmea(sys, fo);
           out["physical_model"] =
               r.model_scope == "hybrid-acdc-network-lp" ? "hybrid_network_lp" : "ac_only_dcopf";
           out["model_scope"] = r.model_scope;
           out["model_limitations"] = r.model_limitations;
           out["validity"] = fmea_validity_json(r.validity);
+          out["cyber_physical"] =
+              cyber_physical_reliability_json(r.cyber_physical);
           out["data_quality"] = reliability_data_quality_json(r.data_quality);
           add_reliability_parallel_json(out, fo.enable_parallel,
                                         r.parallel_execution);
@@ -18513,7 +18621,22 @@ int main(int argc, char** argv) {
 	                {"eens_contribution", c.eens_contribution},
 	                {"lole_contribution", c.lole_contribution},
 	                {"causes_loss_sw", c.causes_loss_sw},
-	                {"causes_loss_rep", c.causes_loss_rep}});
+	                {"causes_loss_rep", c.causes_loss_rep},
+                {"automation_availability", c.automation_availability},
+                {"tau_sw_automatic_hr", c.tau_sw_automatic_hr},
+                {"tau_sw_manual_hr", c.tau_sw_manual_hr},
+                {"shed_sw_automatic_mw", c.shed_sw_automatic_mw},
+                {"shed_sw_manual_mw", c.shed_sw_manual_mw},
+                {"shed_rep_automatic_mw", c.shed_rep_automatic_mw},
+                {"shed_rep_manual_mw", c.shed_rep_manual_mw},
+                {"eens_perfect_cyber_contribution",
+                 c.eens_perfect_cyber_contribution},
+                {"eens_no_automation_contribution",
+                 c.eens_no_automation_contribution},
+                {"eens_cyber_duration_increment",
+                 c.eens_cyber_duration_increment},
+                {"eens_cyber_control_increment",
+                 c.eens_cyber_control_increment}});
 	          }
 	          out["contingencies"] = cont;
 	        } else if (method == "failure_mode_fmea") {

@@ -1548,6 +1548,78 @@ HybridPowerSystem build_case2000_acdc() {
   return sys;
 }
 
+// Three-bus FLISR benchmark for the Level-1 cyber-physical reliability model.
+// A feeder fault isolates both loads. With automation available, the open tie
+// is closed after the automatic switching delay. With automation unavailable,
+// restoration is manual and remote reconfiguration is not credited.
+HybridPowerSystem build_cyber_physical_reliability_demo() {
+  HybridPowerSystem sys;
+  sys.name = "Cyber-Physical Reliability Demo";
+  sys.base_mva = sys.ac.base_mva = 10.0;
+
+  ACBus source = make_ac_bus(1, BusType::SLACK, 0.0, 0.0, 1.0, 0.0);
+  source.name = "Primary Substation";
+  source.base_kv = 10.0;
+  source.longitude = 0.0;
+  source.latitude = 0.0;
+  ACBus load_a = make_ac_bus(2, BusType::PQ, 0.0, 0.0, 1.0, 0.0);
+  load_a.name = "Automated Feeder A";
+  load_a.base_kv = 10.0;
+  load_a.longitude = 1.0;
+  load_a.latitude = 0.0;
+  ACBus load_b = make_ac_bus(3, BusType::PQ, 0.0, 0.0, 1.0, 0.0);
+  load_b.name = "Automated Feeder B";
+  load_b.base_kv = 10.0;
+  load_b.longitude = 2.0;
+  load_b.latitude = 0.0;
+  sys.ac.buses = {source, load_a, load_b};
+
+  ExternalGrid grid;
+  grid.index = 1;
+  grid.bus = 1;
+  grid.in_service = true;
+  grid.name = "Utility Grid";
+  grid.vm_pu = 1.0;
+  grid.va_deg = 0.0;
+  grid.s_sc_max_mva = 10.0;
+  sys.ac.external_grids = {grid};
+
+  Load customer_a;
+  customer_a.index = 1;
+  customer_a.bus = 2;
+  customer_a.in_service = true;
+  customer_a.name = "Commercial Load";
+  customer_a.p_mw = 1.0;
+  customer_a.q_mvar = 0.2;
+  customer_a.n_customers = 100;
+  Load customer_b = customer_a;
+  customer_b.index = 2;
+  customer_b.bus = 3;
+  customer_b.name = "Residential Load";
+  customer_b.n_customers = 200;
+  sys.ac.loads = {customer_a, customer_b};
+
+  ACBranch feeder = make_ac_branch(1, 1, 2, 0.01, 0.10, 0.0, 1.0);
+  feeder.name = "Primary Feeder";
+  feeder.rate_a_mva = 10.0;
+  feeder.failure_rate = 1.0;
+  feeder.mttr_hr = 4.0;
+  ACBranch section = make_ac_branch(2, 2, 3, 0.01, 0.10, 0.0, 1.0);
+  section.name = "Feeder Section";
+  section.rate_a_mva = 10.0;
+  section.failure_rate = 1e-6;
+  section.mttr_hr = 4.0;
+  ACBranch tie = make_ac_branch(3, 1, 3, 0.01, 0.15, 0.0, 1.0);
+  tie.name = "Normally Open FLISR Tie";
+  tie.rate_a_mva = 10.0;
+  tie.in_service = false;
+  tie.failure_rate = 0.0;
+  tie.mttr_hr = 4.0;
+  sys.ac.branches = {feeder, section, tie};
+
+  return sys;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Distribution system with 3 microgrids and diverse DERs for lifecycle
 // simulation.  Based on case33bw + PV, wind, storage, diesel gens.

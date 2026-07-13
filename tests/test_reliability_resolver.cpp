@@ -15,12 +15,14 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <string>
 #include <vector>
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
 #include "hacdcpf/reliability/failure_mode.hpp"
 
@@ -1064,4 +1066,249 @@ TEST_CASE("FMEA: data-quality populated and strict policy flags missing data",
     auto result = run_distribution_fmea(sys, opts);
     CHECK_FALSE(result.data_quality.missing_required_data.empty());
   }
+}
+
+TEST_CASE("FMEA: Level-1 cyber conditioning preserves bounds and decomposition",
+          "[reliability][fmea][cyber_physical]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 10.0;
+
+  ACBus b1, b2;
+  b1.index = 1;
+  b1.bus_type = BusType::SLACK;
+  b1.in_service = true;
+  b2.index = 2;
+  b2.bus_type = BusType::PQ;
+  b2.in_service = true;
+  sys.ac.buses = {b1, b2};
+
+  Generator generator;
+  generator.index = 1;
+  generator.bus = 1;
+  generator.in_service = true;
+  generator.is_slack = true;
+  generator.pmax_mw = 10.0;
+  generator.forced_outage_rate = 0.01;
+  generator.mttr_hr = 2.0;
+  sys.ac.generators = {generator};
+
+  Load load;
+  load.index = 1;
+  load.bus = 2;
+  load.in_service = true;
+  load.p_mw = 1.0;
+  load.n_customers = 100;
+  sys.ac.loads = {load};
+
+  ACBranch feeder;
+  feeder.index = 1;
+  feeder.from_bus = 1;
+  feeder.to_bus = 2;
+  feeder.in_service = true;
+  feeder.r_pu = 0.01;
+  feeder.x_pu = 0.1;
+  feeder.rate_a_mva = 10.0;
+  feeder.failure_rate = 1.0;
+  feeder.mttr_hr = 4.0;
+  ACBranch tie = feeder;
+  tie.index = 2;
+  tie.in_service = false;
+  tie.failure_rate = 0.0;
+  sys.ac.branches = {feeder, tie};
+
+  FMEAOptions options;
+  options.enable_parallel = false;
+  options.enable_switch_reconfiguration = true;
+  options.max_repair_switch_actions = 1;
+  options.cyber_physical.enabled = true;
+  options.cyber_physical.automation_availability = 0.75;
+  options.cyber_physical.automatic_switching_time_hr = 0.05;
+  options.cyber_physical.manual_switching_time_hr = 1.0;
+  options.cyber_physical.freeze_der_on_automation_loss = false;
+
+  const auto result = run_distribution_fmea(sys, options);
+  REQUIRE(result.cyber_physical.enabled);
+  CHECK(result.validity.restoration_duration_cyber_conditioned);
+  CHECK_FALSE(result.validity.cyber_topology_modelled);
+  CHECK_FALSE(result.validity.cyber_power_coupling_modelled);
+  CHECK(result.cyber_physical.eens_perfect_cyber_mwh_yr <=
+        result.eens_mwh_yr + 1e-9);
+  CHECK(result.eens_mwh_yr <=
+        result.cyber_physical.eens_no_automation_mwh_yr + 1e-9);
+  CHECK(result.cyber_physical.automation_efficacy == Approx(0.75).margin(1e-8));
+
+  const auto branch = std::find_if(
+      result.contingencies.begin(), result.contingencies.end(),
+      [](const FMEAContingencyDetail& item) {
+        return item.component_type == "ac_branch" && item.component_index == 0;
+      });
+  REQUIRE(branch != result.contingencies.end());
+  CHECK(branch->eens_perfect_cyber_contribution == Approx(0.05).margin(1e-6));
+  CHECK(branch->eens_no_automation_contribution == Approx(1.0).margin(1e-6));
+  CHECK(branch->eens_cyber_duration_increment == Approx(0.2375).margin(1e-6));
+  CHECK(branch->eens_cyber_control_increment == Approx(0.0).margin(1e-8));
+  CHECK(branch->eens_contribution == Approx(0.2875).margin(1e-6));
+  CHECK(branch->tau_sw_hr == Approx(0.2875).margin(1e-8));
+
+  options.enable_parallel = true;
+  options.cyber_physical.automation_availability = 1.0;
+  const auto perfect_cyber = run_distribution_fmea(sys, options);
+  const auto perfect_branch = std::find_if(
+      perfect_cyber.contingencies.begin(), perfect_cyber.contingencies.end(),
+      [](const FMEAContingencyDetail& item) {
+        return item.component_type == "ac_branch" && item.component_index == 0;
+      });
+  REQUIRE(perfect_branch != perfect_cyber.contingencies.end());
+  CHECK(perfect_branch->eens_contribution == Approx(0.05).margin(1e-6));
+  CHECK(perfect_branch->eens_no_automation_contribution ==
+        Approx(1.0).margin(1e-6));
+  CHECK(perfect_cyber.cyber_physical.eens_no_automation_mwh_yr >=
+        perfect_cyber.cyber_physical.eens_perfect_cyber_mwh_yr);
+  CHECK_FALSE(perfect_cyber.parallel_effective);
+  CHECK(perfect_cyber.parallel_mode ==
+        "serial/cyber-conditioned-solver-safety");
+
+  options.cyber_physical.enabled = false;
+  options.enable_parallel = false;
+  options.switching_time_hr = 0.5;
+  const auto physical = run_distribution_fmea(sys, options);
+  const auto physical_branch = std::find_if(
+      physical.contingencies.begin(), physical.contingencies.end(),
+      [](const FMEAContingencyDetail& item) {
+        return item.component_type == "ac_branch" && item.component_index == 0;
+      });
+  REQUIRE(physical_branch != physical.contingencies.end());
+  CHECK_FALSE(physical.cyber_physical.enabled);
+  CHECK(physical_branch->eens_contribution == Approx(0.5).margin(1e-6));
+}
+
+TEST_CASE("FMEA: Level-1 cyber conditioning attributes DER control loss",
+          "[reliability][fmea][cyber_physical][control]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 10.0;
+
+  ACBus b1, b2;
+  b1.index = 1;
+  b1.bus_type = BusType::SLACK;
+  b1.in_service = true;
+  b2.index = 2;
+  b2.bus_type = BusType::PQ;
+  b2.in_service = true;
+  sys.ac.buses = {b1, b2};
+
+  Generator grid;
+  grid.index = 1;
+  grid.bus = 1;
+  grid.in_service = true;
+  grid.is_slack = true;
+  grid.pmax_mw = 10.0;
+  grid.forced_outage_rate = 0.0;
+  sys.ac.generators = {grid};
+
+  Storage backup;
+  backup.index = 1;
+  backup.bus = 2;
+  backup.in_service = true;
+  backup.controllable = true;
+  backup.grid_forming = true;
+  backup.pmax_mw = 1.0;
+  backup.p_rated_mw = 1.0;
+  backup.e_rated_mwh = 10.0;
+  backup.e_mwh = 10.0;
+  backup.soc_min = 0.0;
+  backup.eta_discharge = 1.0;
+  sys.ac.storage = {backup};
+
+  Microgrid microgrid;
+  microgrid.index = 1;
+  microgrid.pcc_bus = 2;
+  microgrid.internal_buses = {2};
+  microgrid.in_service = true;
+  microgrid.islanding_capability = true;
+  sys.microgrids = {microgrid};
+
+  Load load;
+  load.index = 1;
+  load.bus = 2;
+  load.in_service = true;
+  load.p_mw = 1.0;
+  load.n_customers = 100;
+  sys.ac.loads = {load};
+
+  ACBranch feeder;
+  feeder.index = 1;
+  feeder.from_bus = 1;
+  feeder.to_bus = 2;
+  feeder.in_service = true;
+  feeder.r_pu = 0.01;
+  feeder.x_pu = 0.1;
+  feeder.rate_a_mva = 10.0;
+  feeder.failure_rate = 1.0;
+  feeder.mttr_hr = 4.0;
+  sys.ac.branches = {feeder};
+
+  FMEAOptions options;
+  options.enable_parallel = false;
+  options.cyber_physical.enabled = true;
+  options.cyber_physical.automation_availability = 0.5;
+  options.cyber_physical.automatic_switching_time_hr = 0.1;
+  options.cyber_physical.manual_switching_time_hr = 0.1;
+  options.cyber_physical.freeze_der_on_automation_loss = true;
+
+  const auto result = run_distribution_fmea(sys, options);
+  const auto branch = std::find_if(
+      result.contingencies.begin(), result.contingencies.end(),
+      [](const FMEAContingencyDetail& item) {
+        return item.component_type == "ac_branch" && item.component_index == 0;
+      });
+  REQUIRE(branch != result.contingencies.end());
+
+  CHECK(result.validity.cyber_control_consequence_modelled);
+  CHECK(branch->shed_rep_automatic_mw == Approx(0.0).margin(1e-8));
+  CHECK(branch->shed_rep_manual_mw == Approx(1.0).margin(1e-8));
+  CHECK(branch->eens_perfect_cyber_contribution == Approx(0.0).margin(1e-8));
+  CHECK(branch->eens_no_automation_contribution == Approx(4.0).margin(1e-6));
+  CHECK(branch->eens_cyber_duration_increment == Approx(0.0).margin(1e-8));
+  CHECK(branch->eens_cyber_control_increment == Approx(2.0).margin(1e-6));
+  CHECK(branch->eens_contribution == Approx(2.0).margin(1e-6));
+}
+
+TEST_CASE("built-in cyber-physical demo exposes automation value",
+          "[reliability][fmea][cyber_physical][case_builder]") {
+  const HybridPowerSystem sys =
+      hacdcpf::io::build_cyber_physical_reliability_demo();
+
+  REQUIRE(sys.ac.buses.size() == 3);
+  REQUIRE(sys.ac.loads.size() == 2);
+  REQUIRE(sys.ac.branches.size() == 3);
+  CHECK_FALSE(sys.ac.branches[2].in_service);
+
+  FMEAOptions options;
+  options.enable_parallel = false;
+  options.enable_switch_reconfiguration = true;
+  options.max_repair_switch_actions = 1;
+  options.cyber_physical.enabled = true;
+  options.cyber_physical.automation_availability = 0.75;
+  options.cyber_physical.automatic_switching_time_hr = 0.05;
+  options.cyber_physical.manual_switching_time_hr = 1.0;
+  options.cyber_physical.freeze_der_on_automation_loss = true;
+
+  const auto result = run_distribution_fmea(sys, options);
+  const auto feeder = std::find_if(
+      result.contingencies.begin(), result.contingencies.end(),
+      [](const FMEAContingencyDetail& item) {
+        return item.component_type == "ac_branch" && item.component_index == 0;
+      });
+  REQUIRE(feeder != result.contingencies.end());
+
+  CHECK(feeder->eens_perfect_cyber_contribution == Approx(0.1).margin(1e-6));
+  CHECK(feeder->eens_no_automation_contribution == Approx(8.0).margin(1e-6));
+  CHECK(feeder->eens_cyber_duration_increment == Approx(0.475).margin(1e-6));
+  CHECK(feeder->eens_cyber_control_increment == Approx(1.5).margin(1e-6));
+  CHECK(feeder->eens_contribution == Approx(2.075).margin(1e-6));
+  CHECK(result.cyber_physical.delta_cyber_duration_mwh_yr > 0.0);
+  CHECK(result.cyber_physical.delta_cyber_control_mwh_yr > 0.0);
+  CHECK(result.cyber_physical.eens_perfect_cyber_mwh_yr < result.eens_mwh_yr);
+  CHECK(result.eens_mwh_yr <
+        result.cyber_physical.eens_no_automation_mwh_yr);
 }

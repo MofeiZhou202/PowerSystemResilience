@@ -407,6 +407,119 @@ def main() -> int:
             f"ordinary={comprehensive_balance.get('ordinary_bad_count')}",
         )
 
+        print("2c. Level-1 cyber-physical reliability interface matrix")
+        cyber_reliability_model = {
+            "name": "cyber-physical-reliability-e2e",
+            "base_mva": 10.0,
+            "ac": {
+                "base_mva": 10.0,
+                "buses": [
+                    {"index": 1, "bus_type": "SLACK", "base_kv": 10.0},
+                    {"index": 2, "bus_type": "PQ", "base_kv": 10.0},
+                ],
+                "generators": [
+                    {"index": 1, "bus": 1, "in_service": True,
+                     "is_slack": True, "pmax_mw": 10.0,
+                     "forced_outage_rate": 0.01, "mttr_hr": 2.0},
+                ],
+                "loads": [
+                    {"index": 1, "bus": 2, "in_service": True,
+                     "p_mw": 1.0, "n_customers": 100},
+                ],
+                "branches": [
+                    {"index": 1, "from_bus": 1, "to_bus": 2,
+                     "in_service": True, "r_pu": 0.01, "x_pu": 0.1,
+                     "rate_a_mva": 10.0, "failure_rate": 1.0, "mttr_hr": 4.0},
+                    {"index": 2, "from_bus": 1, "to_bus": 2,
+                     "in_service": False, "r_pu": 0.01, "x_pu": 0.1,
+                     "rate_a_mva": 10.0},
+                ],
+            },
+        }
+        st, _ = c.post_json(
+            "/api/session/load_json_string",
+            {"json_string": json.dumps(cyber_reliability_model)},
+        )
+        st, cyber_result = c.post_json(
+            "/api/session/run_reliability",
+            {
+                "method": "fmea",
+                "execution": {"parallel": False},
+                "restoration": {
+                    "enable_switch_reconfiguration": True,
+                    "max_switch_actions": 1,
+                },
+                "cyber_physical": {
+                    "enabled": True,
+                    "automation_availability": 0.75,
+                    "automatic_switching_time_hr": 0.05,
+                    "manual_switching_time_hr": 1.0,
+                    "freeze_der_on_automation_loss": False,
+                },
+            },
+        )
+        cyber = cyber_result.get("cyber_physical") or {}
+        validity = cyber_result.get("validity") or {}
+        adjusted = float(cyber.get("eens_adjusted_mwh_yr", -1.0))
+        lower = float(cyber.get("eens_perfect_cyber_mwh_yr", -1.0))
+        upper = float(cyber.get("eens_no_automation_mwh_yr", -1.0))
+        chk.check(
+            st == 200 and cyber.get("enabled") is True and
+            cyber.get("level") == 1 and lower <= adjusted <= upper and
+            abs(float(cyber.get("automation_efficacy", -1.0)) - 0.75) < 1e-8 and
+            validity.get("restoration_duration_cyber_conditioned") is True and
+            validity.get("cyber_topology_modelled") is False and
+            validity.get("cyber_power_coupling_modelled") is False,
+            f"cyber-physical FMEA bounds={lower:.4f}/{adjusted:.4f}/{upper:.4f}",
+        )
+
+        print("2d. Built-in cyber-physical reliability effectiveness case")
+        st, demo = c.post_json(
+            "/api/session/load_builtin",
+            {"case": "cyber_physical_reliability_demo"},
+        )
+        demo_counts = demo.get("counts", {})
+        chk.check(
+            st == 200 and demo_counts.get("ac_buses") == 3 and
+            demo_counts.get("ac_branches") == 3 and
+            demo_counts.get("loads") == 2,
+            "cyber reliability demo loads as a built-in case",
+        )
+        st, demo_result = c.post_json(
+            "/api/session/run_reliability",
+            {
+                "method": "fmea",
+                "execution": {"parallel": False},
+                "restoration": {
+                    "enable_switch_reconfiguration": True,
+                    "max_switch_actions": 1,
+                },
+                "cyber_physical": {
+                    "enabled": True,
+                    "automation_availability": 0.75,
+                    "automatic_switching_time_hr": 0.05,
+                    "manual_switching_time_hr": 1.0,
+                    "freeze_der_on_automation_loss": True,
+                },
+            },
+        )
+        demo_cyber = demo_result.get("cyber_physical") or {}
+        feeder_result = next(
+            (
+                row for row in demo_result.get("contingencies", [])
+                if row.get("component_type") == "ac_branch" and
+                row.get("component_index") == 0
+            ),
+            {},
+        )
+        chk.check(
+            st == 200 and
+            float(demo_cyber.get("delta_cyber_duration_mwh_yr", 0.0)) > 0.0 and
+            float(demo_cyber.get("delta_cyber_control_mwh_yr", 0.0)) > 0.0 and
+            abs(float(feeder_result.get("eens_contribution", 0.0)) - 2.075) < 1e-6,
+            "built-in demo separates restoration-delay and control-loss EENS",
+        )
+
         print("3. MATPOWER OPF regression cases")
         opf_payload = {
             "solver": "parity",

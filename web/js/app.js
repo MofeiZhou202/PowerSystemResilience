@@ -14824,10 +14824,19 @@ const App = (() => {
 	      const hintEl = document.getElementById('relAnalysisHint');
 	      const useThreeStage = physicalModel === 'restoration_milp';
 	      const useSequential = methodEl?.value === 'seq' && !useThreeStage;
+	      const useCyberPhysical = methodEl?.value === 'fmea' && !useThreeStage;
+	      const cyberEnabled = document.getElementById('relCyberEnabled')?.checked === true;
 	      if (methodEl) methodEl.disabled = useThreeStage;
 	      if (maxIterEl) maxIterEl.disabled = useThreeStage;
 	      document.querySelectorAll('.rel-seq-profile').forEach(element => {
 	        element.hidden = !useSequential;
+	      });
+	      document.querySelectorAll('.rel-cyber-control').forEach(element => {
+	        element.hidden = !useCyberPhysical;
+	        element.querySelectorAll('input').forEach(input => {
+	          input.disabled = !useCyberPhysical ||
+	            (input.id !== 'relCyberEnabled' && !cyberEnabled);
+	        });
 	      });
 	      if (hintEl) {
 	        hintEl.textContent = useThreeStage
@@ -14848,10 +14857,23 @@ const App = (() => {
 	      const weakBasis = (document.getElementById('relWeakBasis')?.value) || 'auto';
 	      const relParallel = document.getElementById('relParallel')?.checked ?? true;
 	      const relParallelThreads = parseInt(document.getElementById('relParallelThreads')?.value, 10);
+	      const cyberEnabled = method === 'fmea' &&
+	        document.getElementById('relCyberEnabled')?.checked === true;
+	      const cyberAvailability = Number(document.getElementById('relCyberAvailability')?.value);
+	      const cyberAutoMinutes = Number(document.getElementById('relCyberAutoMinutes')?.value);
+	      const cyberManualMinutes = Number(document.getElementById('relCyberManualMinutes')?.value);
 	      const seqProfileText = document.getElementById('relSeqLoadProfile')?.value || '';
 	      const seqProfile = seqProfileText.split(/[\s,;]+/).filter(Boolean).map(Number);
 	      const seqSpatialText = document.getElementById('relSeqSpatialFactors')?.value?.trim() || '';
 	      let seqSpatialFactors = [];
+	      if (cyberEnabled &&
+	          (!Number.isFinite(cyberAvailability) || cyberAvailability < 0 || cyberAvailability > 1 ||
+	           !Number.isFinite(cyberAutoMinutes) || cyberAutoMinutes < 0 ||
+	           !Number.isFinite(cyberManualMinutes) || cyberManualMinutes < 0)) {
+	        setStatus('网络物理可靠性参数无效', 'error');
+	        log('自动化可用率必须在 0-1 内，自动/人工恢复时间必须为非负分钟数', 'error');
+	        return;
+	      }
 	      if (method === 'seq' && seqProfileText.trim() &&
 	          (!seqProfile.length || seqProfile.some(v => !Number.isFinite(v) || v < 0))) {
 	        setStatus('SEQ负荷曲线包含无效倍率', 'error');
@@ -14922,6 +14944,15 @@ const App = (() => {
 	          only_in_service: true,
 	        },
 	        max_order: (document.getElementById('relFmN2')?.checked ? 2 : 1),
+	        cyber_physical: {
+	          enabled: cyberEnabled,
+	          automation_availability: cyberEnabled ? cyberAvailability : 0.97,
+	          automatic_switching_time_hr: cyberEnabled ? cyberAutoMinutes / 60 : 0.05,
+	          manual_switching_time_hr: cyberEnabled ? cyberManualMinutes / 60 : 1,
+	          freeze_der_on_automation_loss:
+	            document.getElementById('relCyberFreezeDer')?.checked !== false,
+	          availability_overrides: [],
+	        },
 	        reporting: { metric_focus: metricFocus, weak_basis: weakBasis },
 	      };
 	      const data = await apiPost('/api/session/run_reliability', opts);
@@ -15299,6 +15330,57 @@ const App = (() => {
 		      return renderReliabilityPanel('指标', html);
 		    }
 
+	    function renderCyberPhysicalReliabilityHtml(data) {
+	      const cyber = data?.cyber_physical;
+	      if (!cyber?.enabled) return '';
+	      const pct = value => Number.isFinite(Number(value))
+	        ? `${(Number(value) * 100).toFixed(2)}%` : '—';
+	      const rows = [
+	        ['自动化可用率', pct(cyber.automation_availability)],
+	        ['自动 / 人工恢复时间', `${relMetricHtml(cyber.automatic_switching_time_hr, 3)} / ${relMetricHtml(cyber.manual_switching_time_hr, 3)} h`],
+	        ['全自动化 EENS 下界', `${relMetricHtml(cyber.eens_perfect_cyber_mwh_yr, 3)} MWh/yr`],
+	        ['网络物理修正 EENS', `${relMetricHtml(cyber.eens_adjusted_mwh_yr, 3)} MWh/yr`],
+	        ['无自动化 EENS 上界', `${relMetricHtml(cyber.eens_no_automation_mwh_yr, 3)} MWh/yr`],
+	        ['慢恢复增量', `${relMetricHtml(cyber.delta_cyber_duration_mwh_yr, 3)} MWh/yr`],
+	        ['失联冻结控制增量', `${relMetricHtml(cyber.delta_cyber_control_mwh_yr, 3)} MWh/yr`],
+	        ['自动化效能', pct(cyber.automation_efficacy)],
+	        ['网络故障导致的 SAIDI 占比', pct(cyber.cyber_caused_saidi_share)],
+	      ];
+	      let html = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">' +
+	        relScopeBadge(`Level ${cyber.level || 1} 标量接口矩阵`, true) +
+	        relScopeBadge('通信拓扑未建模', false) +
+	        relScopeBadge('网络节点供电耦合未建模', false) + '</div>';
+	      html += '<table><tbody>';
+	      rows.forEach(([label, value]) => {
+	        html += `<tr><td>${escapeHtml(label)}</td><td>${value}</td></tr>`;
+	      });
+	      html += '</tbody></table>';
+
+	      const ranked = Array.isArray(data.contingencies)
+	        ? data.contingencies
+	          .map(row => ({
+	            ...row,
+	            cyber_increment: Number(row.eens_cyber_duration_increment || 0) +
+	              Number(row.eens_cyber_control_increment || 0),
+	          }))
+	          .filter(row => row.cyber_increment > 1e-9)
+	          .sort((a, b) => b.cyber_increment - a.cyber_increment)
+	          .slice(0, 8)
+	        : [];
+	      if (ranked.length) {
+	        html += '<h5 style="margin:8px 0 4px;">网络物理增量主导故障</h5>' +
+	          '<table><thead><tr><th>故障</th><th>可用率</th><th>时长增量</th><th>控制增量</th></tr></thead><tbody>';
+	        ranked.forEach(row => {
+	          html += `<tr><td>${escapeHtml(row.display_name || row.component_name || '')}</td>` +
+	            `<td>${pct(row.automation_availability)}</td>` +
+	            `<td>${relMetricHtml(row.eens_cyber_duration_increment, 3)}</td>` +
+	            `<td>${relMetricHtml(row.eens_cyber_control_increment, 3)}</td></tr>`;
+	        });
+	        html += '</tbody></table>';
+	      }
+	      return renderReliabilityPanel('网络物理可靠性', html);
+	    }
+
 	    function renderFailureModeCoverageHtml(data) {
 	      const cov = data.failure_mode_coverage;
 	      if (!cov) return '';
@@ -15391,6 +15473,7 @@ const App = (() => {
 		      html += renderFailureModeLegendHtml(data);
 		      html += renderReliabilitySelectionHtml(data, method);
 		      html += renderRelScopeHtml(data);
+		      html += renderCyberPhysicalReliabilityHtml(data);
 		      html += renderReliabilityMetricsHtml(data, method);
 		      if (weakRows.length) {
 		        html += `<h4 style="margin:10px 0 4px;">薄弱环节 (按 ${escapeHtml(weakMeta.label)})</h4>`;
@@ -15513,6 +15596,7 @@ const App = (() => {
 	    document.getElementById('btnSeqSpatialRefresh')?.addEventListener('click', refreshSeqSpatialRows);
 	    document.getElementById('relPhysicalModel')?.addEventListener('change', updateReliabilityControlState);
 	    document.getElementById('relMethod')?.addEventListener('change', updateReliabilityControlState);
+	    document.getElementById('relCyberEnabled')?.addEventListener('change', updateReliabilityControlState);
 	    updateReliabilityControlState();
 	    updateSeqProfileSummary();
 	    document.getElementById('btnRunReliability')?.addEventListener('click', runReliability);
