@@ -418,9 +418,104 @@ See `annual_simulation_models.md` §4.3 for the quantitative discussion.
 
 ---
 
-## 7. In-depth analysis
+## 7. Component coverage and stage propagation — what is actually used where
 
-### 7.1 Engineering value
+The UC MILP *models* many component types, but modelling a component in
+Stage 1 does **not** imply its optimised trajectory reaches Stages 2/3 or the
+annual accounting. There are three independent cut points, each verified
+against the code:
+
+1. **Opt-in gating** — most rich blocks default off
+   (`enable_dc_network_constraints`, `enable_vpp`, `enable_microgrid`,
+   `enable_energy_router`, `enable_mobile_storage`, `enable_demand_response`,
+   `enable_dispatchable_pv`, `enable_dc_branch_flows` are all `false` in
+   `TimeSeriesPFOptions`). With defaults, the UC sees none of them.
+2. **Schedule truncation** — `UCSchedule` has rows only for generators,
+   AC/DC storage, renewables, AC PV/sgen, external grids, DC PV/sgen/load,
+   VSC and DC-DC converters. `extract_schedule()` (`:2910`) therefore
+   **discards** the optimised trajectories of VPPs, microgrids (exchange and
+   islanding state), mobile storage (power, SOC, relocation), energy-router
+   port flows, DR up/down, and DC branch flows — they exist only transiently
+   in the MILP solution vector $x$.
+3. **Snapshot non-application** — `build_time_series_system_snapshot()`
+   (`:3212`) writes back generators, storage, renewables, loads, PV, DC-side
+   setpoints, and external-grid prices. It **never** writes
+   `vsc_converters[..].p_set_mw`, `dcdc_converters[..].p_ref_mw`,
+   `vpps[..].p_output_mw`, `microgrids[..].p_exchange_mw` /
+   `operating_mode`, or `mobile_storage[..].p_mw` — even for the VSC/DC-DC
+   series that the schedule *does* carry.
+
+### 7.1 Propagation matrix (verified)
+
+★ = opt-in flag, default off. "authored" = the static value from the input
+file, untouched by the UC.
+
+| Component | Stage 1 UC | In `UCSchedule` | Applied to snapshot | Stage 2 OPF | Stage 3 PF |
+|---|---|---|---|---|---|
+| Generators | decision $(p,u,s)$ | ✅ | ✅ dispatch + commit + band | ✅ variable in band | ✅ |
+| AC / DC storage | decision, exact $\eta$ split | ✅ $(p, e)$ | ✅ $p$, SOC→energy | pinned to schedule | ✅ |
+| Renewable gens | decision $\le \pi P^{rated}$ | ✅ | ✅ | ✅ variable | ✅ |
+| AC PV systems | must-take (★ dispatchable) | ✅ when ★ | ✅ | ✅ via `ren_map` | ✅ |
+| DC PV / sgen / loads | profile replay (★ curtailable) | ✅ | ✅ | fixed injection | ✅ |
+| External grids | ✅ (default on) | ✅ | price only (slack supplies power) | ✅ exchange variable | ✅ slack |
+| **VSC converters** | ★ DC-network flag | ✅ extracted | ❌ **never applied** | **re-optimised** ($p^{ac},q^{ac}$) | native converter model |
+| **DC-DC converters** | ★ DC-network flag | ✅ extracted | ❌ **never applied** | ✅ `pdcdc` → replayed to PF | native model |
+| DC branch flows | ★ | ❌ discarded | — | real DC network | real DC network |
+| **Flexible loads (DR)** | ★ decision | ❌ discarded | baseline `p_mw` (no profile scaling) | OPF's own flex variables | ✅ `pflex` replayed |
+| **VPPs** | ★ decision | ❌ discarded | ❌ authored `p_output_mw` | **fixed injection** (`parity_formulation.cpp:539`) | fixed injection (`solver_data.cpp:67`) |
+| **Microgrids** | ★ exchange + islanding | ❌ discarded | ❌ authored `p_exchange_mw`, mode | **fixed injection** (`:548`) | fixed injection (`:77`) |
+| **Mobile storage** | ★ (± co-relocation MILP) | ❌ discarded | ❌ authored `p_mw`/status | **fixed injection** (`:557`) | fixed injection (`:86`) |
+| **Energy routers** | ★ port decision | ❌ discarded | ❌ | ✅ native port model (`parity_formulation.cpp:303`) | ✅ native Newton port model (`jacobian_builder.cpp:114`) |
+
+Key readings of this table:
+
+- **Nothing disappears from the physics.** Every component type is present in
+  the Stage-3 PF: converters and energy routers through their native nonlinear
+  models, VPP/microgrid/mobile-storage as fixed authored injections
+  (`solver_data.cpp:66–93`). What is lost is *optimised scheduling*, not
+  presence.
+- **VSC/DC-DC schedules are advisory.** The UC's converter series are
+  extracted, concatenated, sliced by the annual layer, and serialised to JSON
+  — but no consumer applies them to a solver state (verified by grep: the
+  GUI's converter dispatch panels read *OPF* results). In the `run_opf=true`
+  path this is defensible: the OPF re-derives converter flows on the exact AC
+  model, and the UC series' real function is to shape commitment/storage
+  decisions consistently with converter capacity. In the `run_opf=false` path
+  (UC→PF direct, including the annual `DynamicSCED` mode) the PF's converter
+  coordination solves converters from their *authored control modes* — the
+  UC-optimal converter split is silently replaced by droop/setpoint logic.
+- **VPP / microgrid / mobile-storage / ER / DR scheduling is
+  fire-and-forget.** When enabled, their MILP blocks bend the generator and
+  storage schedule (correctly), but the components themselves then operate at
+  authored values in OPF/PF. The mismatch between "what UC assumed they do"
+  and "what they do in replay" lands in the slack generator / external grid —
+  and, if large, can push the per-step OPF against its tracking band and fail
+  it. A UC that islanded a microgrid or relocated a mobile unit produces a
+  replay in which neither event happens.
+- **DR is doubly cut**: the UC's up/down decisions are discarded *and* the
+  snapshot leaves flexible loads at unscaled baseline; only the OPF's own
+  per-step flexibility model (independent of the UC's) reaches the PF.
+
+### 7.2 Consequences and remediation path
+
+For default-configured runs (all flags off) the pipeline is fully consistent —
+the table's problem rows are exactly the opt-in blocks. The inconsistency is
+therefore *opt-in* too: enabling `enable_vpp` et al. today buys
+schedule-shaping, not trajectory replay. Closing the loop requires three
+mechanical steps: (i) extend `UCSchedule` with rows for
+VPP/MG/MS/ER/DR (and extract them — offsets are already recorded in
+`UCBuildResult`), (ii) apply them in `build_time_series_system_snapshot`
+(the storage pattern at `:3323` is the template, including the OPF
+pinning-vs-schedule consistency argument), and (iii) count them in the annual
+accounting perimeter (`annual_simulation_models.md` §7.2). Until then, results
+for these components should be read from the UC objective/constraint effects,
+not from the replay stages.
+
+---
+
+## 8. In-depth analysis
+
+### 8.1 Engineering value
 
 1. **A complete planning-grade operating study in one call.** The UC→OPF→PF
    cascade turns raw profiles into (a) a commitment/dispatch schedule with
@@ -428,11 +523,13 @@ See `annual_simulation_models.md` §4.3 for the quantitative discussion.
    For distribution utilities evaluating PV/BESS/EV-charging integration on
    hybrid AC/DC feeders this replaces three separate tools and the error-prone
    glue between them.
-2. **Converter-aware scheduling.** VSC/DC-DC coupling inside the UC MILP means
-   AC/DC exchange capacity and DC-side storage are *scheduled*, not
-   post-processed — essential for LVDC/MVDC distribution studies, multi-port
-   energy routers, and DC data-centre feeders, where the converter is the
-   binding asset.
+2. **Converter-aware scheduling — with a scoped claim.** VSC/DC-DC coupling
+   inside the UC MILP means DC-side storage and AC/DC exchange *capacity* are
+   respected when committing units — essential for LVDC/MVDC feeders where
+   the converter is the binding asset. DC storage schedules are replayed
+   end-to-end; the converter power series themselves are advisory (re-derived
+   by OPF/PF, §7.1), so the value is consistent commitment, not converter
+   setpoint control.
 3. **Objective plurality with accounting discipline.** Cost / carbon /
    curtailment / loss / weighted objectives share one constraint matrix, and
    the reported cost is always recomputed from physical dispatch. This lets a
@@ -449,7 +546,7 @@ See `annual_simulation_models.md` §4.3 for the quantitative discussion.
    tool (the web dashboard consumes `rich_results` per step) this robustness
    is what makes the feature usable by non-experts.
 
-### 7.2 Theoretical rigor — strengths
+### 8.2 Theoretical rigor — strengths
 
 - **Exact storage efficiency MILP** with a proof-backed minimal-binary policy
   (§2.4). The SOC recursion including self-discharge retention is the exact
@@ -470,7 +567,7 @@ See `annual_simulation_models.md` §4.3 for the quantitative discussion.
   actively defended (`row != m_ineq` throws, `:2820`); TSD validation rejects
   NaN profiles up front.
 
-### 7.3 Theoretical rigor — gaps and caveats (verified against code)
+### 8.3 Theoretical rigor — gaps and caveats (verified against code)
 
 1. **Direction-asymmetric converter coupling is one-sided.** The DC balance
    uses a single coefficient $-p^{vsc}/\eta$ (`:2254–2259`). For DC→AC flow
@@ -514,7 +611,7 @@ See `annual_simulation_models.md` §4.3 for the quantitative discussion.
    handles it (falls back to PF-on-UC), but the failure is reported as
    OPF non-convergence rather than attributed to the band.
 
-### 7.4 Computational performance
+### 8.4 Computational performance
 
 **Model size.** For the baseline network-constrained UC:
 rows $m \approx (N_b + N_{dc})T + (S{+}S^{dc})T$ equalities and
@@ -561,7 +658,7 @@ $O(T\cdot|\text{sys}|)$ item and is opt-in. `rich_results` reconstruction
 (`:4499`) re-projects each step through the rich→canonical→rich operators —
 $O(T\cdot|\text{components}|)$, done once after the solve.
 
-### 7.5 Validation surface
+### 8.5 Validation surface
 
 Behavioural tests pin each opt-in block: `tests/test_uc_storage_efficiency.cpp`
 (exact split), `test_uc_dc_branch_flows.cpp`, `test_uc_external_grid.cpp`,
@@ -573,7 +670,7 @@ annual chronology, energy-balance and ENS assertions).
 
 ---
 
-## 8. Summary judgement
+## 9. Summary judgement
 
 The TSPF engine is a production-costing pipeline with genuinely careful
 mathematics where it matters most — exact storage efficiency with minimal
@@ -582,7 +679,11 @@ separation, reference-aligned cross-validation — wrapped in defensive systems
 engineering (solver guards, topology caches, graceful degradation). Its main
 formal weaknesses are the one-sided linear converter-loss coupling (bias
 toward AC→DC transfers at schedule level), the flat-voltage DC transport
-relaxation on meshed DC grids, and the linear-vs-quadratic cost mismatch
-between optimisation and reporting. All three are visible in Stage-3
-cross-validation rather than hidden, which is the correct failure mode for an
-engineering tool.
+relaxation on meshed DC grids, the linear-vs-quadratic cost mismatch between
+optimisation and reporting, and — most consequential for users of the rich
+component set — the stage-propagation cuts of §7: VPP / microgrid / mobile
+storage / energy-router / DR schedules are optimised but discarded, and even
+the retained VSC/DC-DC series are advisory. The first three weaknesses are
+visible in Stage-3 cross-validation; the propagation cuts are structural and
+need the `UCSchedule` / snapshot / accounting extensions sketched in §7.2
+before the opt-in component models can be considered end-to-end usable.

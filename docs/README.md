@@ -18,6 +18,7 @@ When documentation and runtime behavior differ, `include/`, `src/`,
 | TSPF, annual simulation, storage, and profiles | [sequential_production_simulation_rich_models.md](sequential_production_simulation_rich_models.md) |
 | Time-series PF pipeline: math models + analysis | [time_series_power_flow_models.md](time_series_power_flow_models.md) |
 | Annual simulation + lifecycle: math models + analysis | [annual_simulation_models.md](annual_simulation_models.md) |
+| 中文 LaTeX：时序潮流/年度模拟数学模型 + 需求响应效应 | [latex/time_series_annual_simulation_zh.tex](latex/time_series_annual_simulation_zh.tex) |
 | Transient runtime and validation boundary | [transient_runtime.md](transient_runtime.md) |
 | Reliability methods | [reliability_assessment_models.md](reliability_assessment_models.md) |
 | Short-circuit methods | [short_circuit_rich_acdc_derivation.md](short_circuit_rich_acdc_derivation.md) |

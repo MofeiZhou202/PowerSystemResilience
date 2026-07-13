@@ -9,8 +9,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <algorithm>
 #include <numeric>
 
+#include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/time_series/time_series_pf.hpp"
 
 using namespace hacdcpf;
@@ -131,4 +133,88 @@ TEST_CASE("Demand response: shiftable mode conserves energy across the horizon",
   const double total_gen =
       sched.gen_dispatch[0][0] + sched.gen_dispatch[0][1];
   CHECK_THAT(total_gen, Catch::Matchers::WithinAbs(100.0, 1e-2));
+  REQUIRE(sched.flexible_load_up.size() == 1);
+  REQUIRE(sched.flexible_load_down.size() == 1);
+  const double shifted_up = std::accumulate(
+      sched.flexible_load_up[0].begin(), sched.flexible_load_up[0].end(), 0.0);
+  const double shifted_down = std::accumulate(
+      sched.flexible_load_down[0].begin(), sched.flexible_load_down[0].end(), 0.0);
+  CHECK_THAT(shifted_up, Catch::Matchers::WithinAbs(shifted_down, 1e-3));
+}
+
+TEST_CASE("dist33 DER converts selected demand into DR without changing base load",
+          "[time_series][demand_response][dist33]") {
+  const auto original = io::build_case33bw_acdc();
+  const auto with_dr = io::build_dist33_microgrid_der();
+  const auto ac_demand = [](const HybridPowerSystem& sys) {
+    double total = 0.0;
+    for (const auto& bus : sys.ac.buses)
+      if (bus.in_service) total += std::max(0.0, bus.pd_mw);
+    for (const auto& load : sys.ac.loads)
+      if (load.in_service) total += std::max(0.0, load.p_mw * load.scaling);
+    for (const auto& load : sys.ac.flexible_loads)
+      if (load.in_service) total += std::max(0.0, load.p_mw);
+    return total;
+  };
+
+  REQUIRE(with_dr.ac.flexible_loads.size() == 3);
+  CHECK_THAT(ac_demand(with_dr),
+             Catch::Matchers::WithinAbs(ac_demand(original), 1e-10));
+  for (const auto& load : with_dr.ac.flexible_loads) {
+    CHECK(load.controllable);
+    CHECK(load.p_mw > 0.0);
+    CHECK(load.flex_up_mw > 0.0);
+    CHECK(load.flex_down_mw > 0.0);
+    CHECK(load.availability_pct > 0.0);
+    CHECK_FALSE(load.control_area.empty());
+  }
+}
+
+TEST_CASE("Shiftable DR improves renewable utilization without power flow",
+          "[time_series][demand_response][renewable]") {
+  auto sys = make_dr_system(/*load*/ 50.0, /*down*/ 20.0, /*up*/ 20.0);
+  RenewableGen wind;
+  wind.index = 1;
+  wind.bus = 1;
+  wind.name = "Curtailment-sensitive wind";
+  wind.type = RenewableType::Wind;
+  wind.p_rated_mw = 80.0;
+  wind.profile_id = 1;
+  wind.curtailable = true;
+  wind.cost_curtail_mwh = 100.0;
+  sys.ac.renewable_gens.push_back(wind);
+
+  TimeSeriesData ts;
+  ts.num_steps = 2;
+  ts.step_duration_hr = 1.0;
+  ts.profiles = {{1, "wind", {0.0, 1.0}}};
+
+  TimeSeriesPFOptions fixed_opts;
+  fixed_opts.uc_solver = UCSolverChoice::SCIP;
+  fixed_opts.enable_demand_response = false;
+  const auto fixed = solve_unit_commitment(sys, ts, fixed_opts);
+  REQUIRE(fixed.feasible);
+
+  TimeSeriesPFOptions dr_opts = fixed_opts;
+  dr_opts.enable_demand_response = true;
+  dr_opts.dr_shiftable = true;
+  dr_opts.w_demand_response = 0.0;
+  const auto shifted = solve_unit_commitment(sys, ts, dr_opts);
+  REQUIRE(shifted.feasible);
+  REQUIRE(shifted.renewable_dispatch.size() == 1);
+  REQUIRE(shifted.flexible_load_up.size() == 1);
+  REQUIRE(shifted.flexible_load_down.size() == 1);
+
+  const double fixed_wind = std::accumulate(
+      fixed.renewable_dispatch[0].begin(), fixed.renewable_dispatch[0].end(), 0.0);
+  const double shifted_wind = std::accumulate(
+      shifted.renewable_dispatch[0].begin(), shifted.renewable_dispatch[0].end(), 0.0);
+  const double shifted_up = std::accumulate(
+      shifted.flexible_load_up[0].begin(), shifted.flexible_load_up[0].end(), 0.0);
+  const double shifted_down = std::accumulate(
+      shifted.flexible_load_down[0].begin(), shifted.flexible_load_down[0].end(), 0.0);
+
+  CHECK(shifted_wind > fixed_wind + 10.0);
+  CHECK_THAT(shifted_up, Catch::Matchers::WithinAbs(shifted_down, 1e-3));
+  CHECK(shifted_up > 10.0);
 }

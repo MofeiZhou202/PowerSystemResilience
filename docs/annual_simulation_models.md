@@ -185,6 +185,22 @@ priced by $c_1^{x}\cdot\pi_{price}(t)$, and — when no exchange was scheduled �
 an implicit import term $[\text{need}-\text{supply}]^+$ priced at the average
 external tariff (default 20 ¤/MWh when unpriced).
 
+**Accounting perimeter — which components are counted.** The supply/demand
+terms above are built from `UCSchedule` rows plus profile-driven fallbacks
+(`reported_profile_dispatch`, `:221`): generators, AC/DC storage, renewables,
+AC/DC PV and static generators, external grids, AC/DC loads and charging
+stations. **VPPs, microgrids, mobile storage, energy routers, and DR
+deviations are outside this perimeter** — `UCSchedule` carries no rows for
+them (see the propagation matrix in `time_series_power_flow_models.md` §7.1)
+and `fill_step_results` never reads the system's `vpps` / `microgrids` /
+`mobile_storage` / `energy_routers` tables. Their real injections *are* in
+the PF solution, so on PF-converged steps the closure rule below silently
+attributes their energy to the derived external-grid exchange; on
+non-converged / schedule-only steps it surfaces as
+`power_balance_error_mw`. An annual study whose fleet includes a large VPP
+or a routinely-exporting microgrid will therefore report distorted
+import/export series while still closing its energy balance.
+
 ### 4.2 Aggregation
 
 Block summaries integrate power → energy, $E = \sum_t P_t\,\Delta t$
@@ -257,6 +273,19 @@ $$
 Each year runs a **Tier-1** annual simulation in schedule-only mode
 (`skip_replay=true`, `run_opf=false`) — weekly UC only, no OPF/PF — the speed
 tier that makes $Y{=}20$ years × parameter sweeps tractable.
+
+Note that the lifecycle loop constructs its `AnnualProductionSimOptions`
+**fresh with defaults** (`lifecycle_simulation.cpp:517–521`): every opt-in UC
+block (`enable_network_constraints`, `enable_dc_network_constraints`,
+`enable_vpp`, `enable_microgrid`, `enable_energy_router`,
+`enable_mobile_storage`, `enable_demand_response`, …) is therefore **off** in
+lifecycle studies regardless of how the caller configured other layers. A
+lifecycle system containing VPPs, microgrids, mobile storage, or energy
+routers is evaluated with those assets frozen at authored setpoints — and
+since `skip_replay=true` also skips the PF stage, they contribute *nothing*
+to the yearly energy/cost/carbon figures. Only generators, storage,
+renewables, PV/sgens, external grids, and loads drive lifecycle economics
+today.
 
 ### 5.2 Tiered carbon estimation with a-priori error bounds
 
@@ -460,6 +489,14 @@ sequential results are directly comparable.
    by in-service order per group and `lifecycle` matches stats to units *by
    name* (`:536`) — name collisions between AC and DC storage would
    cross-credit cycles. Benign on curated cases, fragile on imported data.
+9. **Rich components are outside the annual perimeter.** VPPs, microgrids,
+   mobile storage, energy routers, and DR trajectories are neither carried by
+   `UCSchedule` nor read by the accounting pass (§4.1), and the lifecycle
+   layer hard-resets all opt-in UC blocks to defaults (§5.1). At the annual
+   and lifecycle levels these component classes are effectively **modelled in
+   the physics (PF), invisible in the economics and statistics**. The full
+   stage-by-stage propagation matrix is in
+   `time_series_power_flow_models.md` §7.1.
 
 ### 7.3 Computational performance — judgement
 
@@ -499,9 +536,14 @@ modes trade fidelity for speed along a clean axis, accounting identities close
 by construction, and the lifecycle layer is — unusually for this class of
 tool — explicit about its own error budget. Its weak points are concentrated
 and fixable: the L0 plan and feedback loop are scaffolding rather than
-optimisation, storage continuity beyond 24 h/168 h is structurally absent, and
+optimisation, storage continuity beyond 24 h/168 h is structurally absent,
 the carbon point estimator uses a fleet-average emission factor that its
-otherwise careful bounds do not cover. None of these are hidden by the
-implementation — feasibility flags, solver-name provenance, balance-error
-series, and per-year bound cross-validation all surface exactly where the
-approximations bite.
+otherwise careful bounds do not cover, and the accounting/lifecycle perimeter
+stops at the classical component set — VPPs, microgrids, mobile storage,
+energy routers, and DR are physically present in the PF but absent from the
+annual economics and statistics (§7.2 item 9). Most of these are surfaced by
+the implementation — feasibility flags, solver-name provenance, balance-error
+series, and per-year bound cross-validation appear exactly where the
+approximations bite — but the perimeter gap is silent (their energy is
+absorbed into the derived grid-exchange series) and must be kept in mind when
+studying systems built around those components.

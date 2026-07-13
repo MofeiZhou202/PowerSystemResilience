@@ -6740,12 +6740,12 @@ void assign_available_default_profiles(hacdcpf::HybridPowerSystem& sys,
   };
   if (has_profile(0)) {
     for (auto& load : sys.ac.loads)
-      if (load.profile_id < 0) load.profile_id = 0;
+      if (!has_profile(load.profile_id)) load.profile_id = 0;
     for (auto& load : sys.dc.loads)
-      if (load.profile_id < 0) load.profile_id = 0;
+      if (!has_profile(load.profile_id)) load.profile_id = 0;
   }
   for (auto& renewable : sys.ac.renewable_gens) {
-    if (renewable.profile_id >= 0) continue;
+    if (has_profile(renewable.profile_id)) continue;
     const int candidate =
         renewable.type == hacdcpf::RenewableType::SolarPV ||
                 renewable.type == hacdcpf::RenewableType::SolarCSP
@@ -6755,9 +6755,9 @@ void assign_available_default_profiles(hacdcpf::HybridPowerSystem& sys,
   }
   if (has_profile(2)) {
     for (auto& pv : sys.ac.pv_systems)
-      if (pv.profile_id < 0) pv.profile_id = 2;
+      if (!has_profile(pv.profile_id)) pv.profile_id = 2;
     for (auto& pv : sys.dc.pv_arrays)
-      if (pv.profile_id < 0) pv.profile_id = 2;
+      if (!has_profile(pv.profile_id)) pv.profile_id = 2;
   }
 }
 
@@ -6808,10 +6808,15 @@ hacdcpf::TimeSeriesData make_annual_ts_data(double step_hr = 6.0) {
 
 // Slice the annual profiles down to a single calendar day (1-based) at the given
 // resolution, so the rich per-step time-series solver can reproduce one day of
-// an annual run.  Mirrors make_annual_ts_data's sequential month/day/step index.
-hacdcpf::TimeSeriesData make_annual_day_slice(double step_hr, int day_index) {
+// either the imported scenario or the built-in annual profile.
+hacdcpf::TimeSeriesData make_annual_day_slice(
+    double step_hr, int day_index,
+    const hacdcpf::TimeSeriesData* imported_profiles = nullptr) {
   const int spd = std::max(1, static_cast<int>(24.0 / step_hr));
-  const hacdcpf::TimeSeriesData full = make_annual_ts_data(step_hr);
+  const hacdcpf::TimeSeriesData full =
+      imported_profiles != nullptr && !imported_profiles->profiles.empty()
+          ? make_periodic_annual_ts_data(*imported_profiles, step_hr)
+          : make_annual_ts_data(step_hr);
   const int total = full.num_steps;
   int day = day_index < 1 ? 1 : day_index;
   const int max_day = std::max(1, total / spd);
@@ -14319,6 +14324,8 @@ int main(int argc, char** argv) {
         hacdcpf::HybridPowerSystem sys_ts;
         hacdcpf::TimeSeriesData ts_data;
         Session::TsBindingSpec spec;
+        bool annual_day_drilldown = false;
+        bool annual_day_uses_session_ts = false;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
@@ -14329,7 +14336,13 @@ int main(int argc, char** argv) {
             // run using the annual-resolution profiles sliced to that day. Build
             // a local ts_data and do NOT mutate the persistent session config.
             const double dhr = j2.value("step_duration_hr", 6.0);
-            ts_data = make_annual_day_slice(dhr, day_index);
+            annual_day_drilldown = true;
+            annual_day_uses_session_ts =
+                j2.value("use_session_time_series", false) &&
+                !g_session.ts_data.profiles.empty();
+            ts_data = make_annual_day_slice(
+                dhr, day_index,
+                annual_day_uses_session_ts ? &g_session.ts_data : nullptr);
           } else {
             const int ns = j2.value("num_steps", 24);
             // Build defaults only when nothing is loaded; otherwise PRESERVE the
@@ -14341,7 +14354,8 @@ int main(int argc, char** argv) {
             fit_ts_data_to_steps(ts_data, ns);
           }
           sys_ts = *g_session.current_system;
-          spec = g_session.ts_binding;
+          if (!annual_day_drilldown || annual_day_uses_session_ts)
+            spec = g_session.ts_binding;
         }
         // Re-apply persistent binding to the per-call sys copy. This
         // protects against the common GUI flow where a canvas re-sync
@@ -14428,6 +14442,11 @@ int main(int argc, char** argv) {
         json out;
         out["num_steps"] = result.num_steps;
         out["step_duration_hr"] = ts_data.step_duration_hr;
+        if (annual_day_drilldown) {
+          out["annual_day_profile_source"] =
+              annual_day_uses_session_ts ? "imported_scenario"
+                                         : "built_in_annual";
+        }
         out["num_converged"] = result.num_converged;
         out["num_opf_converged"] = result.num_opf_converged;
         out["total_generation_cost"] = result.total_generation_cost;
@@ -14443,7 +14462,9 @@ int main(int argc, char** argv) {
             {"dc_network_constraints", enable_dc_net && enable_net},
             {"reserve_fraction", std::max(0.0, reserve_frac)},
             {"unit_commitment", !skip_uc},
-            {"economic_dispatch_opf", run_opf}};
+            {"economic_dispatch_opf", run_opf},
+            {"demand_response", opts.enable_demand_response},
+            {"demand_response_shiftable", opts.dr_shiftable}};
         out["uc_feasible"] = result.uc_schedule.feasible;
         out["uc_solver_name"] = result.uc_schedule.solver_name;
         out["parallel_daily_effective"] = result.parallel_daily_effective;
@@ -14611,6 +14632,139 @@ int main(int argc, char** argv) {
           }
         }
         out["renewable_dispatch"] = renewable_dispatch;
+        {
+          json names = json::array();
+          json baseline = json::array();
+          json served = json::array();
+          json up = json::array();
+          json down = json::array();
+          double up_mwh = 0.0;
+          double down_mwh = 0.0;
+          const double dt = ts_data.step_duration_hr;
+          for (size_t i = 0; i < sys_ts.ac.flexible_loads.size(); ++i) {
+            const auto& load = sys_ts.ac.flexible_loads[i];
+            names.push_back(load.name.empty()
+                                ? "FlexibleLoad" + std::to_string(load.index)
+                                : load.name);
+            json base_row = json::array();
+            json served_row = json::array();
+            json up_row = json::array();
+            json down_row = json::array();
+            for (int t = 0; t < result.num_steps; ++t) {
+              const double up_mw =
+                  i < uc.flexible_load_up.size() &&
+                          t < static_cast<int>(uc.flexible_load_up[i].size())
+                      ? std::max(0.0, uc.flexible_load_up[i][static_cast<size_t>(t)])
+                      : 0.0;
+              const double down_mw =
+                  i < uc.flexible_load_down.size() &&
+                          t < static_cast<int>(uc.flexible_load_down[i].size())
+                      ? std::max(0.0, uc.flexible_load_down[i][static_cast<size_t>(t)])
+                      : 0.0;
+              const double base_mw = load.in_service ? std::max(0.0, load.p_mw) : 0.0;
+              base_row.push_back(base_mw);
+              served_row.push_back(std::max(0.0, base_mw + up_mw - down_mw));
+              up_row.push_back(up_mw);
+              down_row.push_back(down_mw);
+              up_mwh += up_mw * dt;
+              down_mwh += down_mw * dt;
+            }
+            baseline.push_back(std::move(base_row));
+            served.push_back(std::move(served_row));
+            up.push_back(std::move(up_row));
+            down.push_back(std::move(down_row));
+          }
+          out["flexible_load_names"] = std::move(names);
+          out["flexible_load_baseline_mw"] = std::move(baseline);
+          out["flexible_load_served_mw"] = std::move(served);
+          out["flexible_load_up_mw"] = std::move(up);
+          out["flexible_load_down_mw"] = std::move(down);
+          out["demand_response_up_mwh"] = up_mwh;
+          out["demand_response_down_mwh"] = down_mwh;
+          out["demand_response_net_shift_mwh"] = up_mwh - down_mwh;
+          out["demand_response_resource_count"] =
+              static_cast<int>(sys_ts.ac.flexible_loads.size());
+          out["involuntary_load_shed_mwh"] = 0.0;
+        }
+        {
+          std::unordered_map<int, const hacdcpf::TimeSeriesProfile*> pmap;
+          for (const auto& profile : ts_data.profiles) pmap[profile.id] = &profile;
+          auto scale = [&](int profile_id, int t) {
+            const auto it = pmap.find(profile_id);
+            return it != pmap.end() && t < static_cast<int>(it->second->values.size())
+                       ? it->second->values[static_cast<size_t>(t)]
+                       : 1.0;
+          };
+          std::vector<double> available(static_cast<size_t>(result.num_steps), 0.0);
+          std::vector<double> dispatched(static_cast<size_t>(result.num_steps), 0.0);
+          int active_renewable = 0;
+          for (const auto& ren : sys_ts.ac.renewable_gens) {
+            if (!ren.in_service) continue;
+            const double cap = ren.p_rated_mw > 1e-9 ? ren.p_rated_mw : ren.p_mw;
+            for (int t = 0; t < result.num_steps; ++t) {
+              const double avail = std::max(0.0, cap * scale(ren.profile_id, t));
+              available[static_cast<size_t>(t)] += avail;
+              const double used =
+                  active_renewable < static_cast<int>(uc.renewable_dispatch.size()) &&
+                          t < static_cast<int>(uc.renewable_dispatch[static_cast<size_t>(active_renewable)].size())
+                      ? uc.renewable_dispatch[static_cast<size_t>(active_renewable)][static_cast<size_t>(t)]
+                      : avail;
+              dispatched[static_cast<size_t>(t)] += std::clamp(used, 0.0, avail);
+            }
+            ++active_renewable;
+          }
+          for (size_t i = 0; i < sys_ts.ac.pv_systems.size(); ++i) {
+            const auto& pv = sys_ts.ac.pv_systems[i];
+            if (!pv.in_service) continue;
+            for (int t = 0; t < result.num_steps; ++t) {
+              const double avail = std::max(0.0, pv.p_mw * scale(pv.profile_id, t));
+              available[static_cast<size_t>(t)] += avail;
+              const double used =
+                  i < uc.ac_pv_dispatch.size() &&
+                          t < static_cast<int>(uc.ac_pv_dispatch[i].size())
+                      ? uc.ac_pv_dispatch[i][static_cast<size_t>(t)]
+                      : avail;
+              dispatched[static_cast<size_t>(t)] += std::clamp(used, 0.0, avail);
+            }
+          }
+          for (size_t i = 0; i < sys_ts.dc.pv_arrays.size(); ++i) {
+            const auto& pv = sys_ts.dc.pv_arrays[i];
+            if (!pv.in_service) continue;
+            for (int t = 0; t < result.num_steps; ++t) {
+              const double avail = std::max(0.0, pv.p_set_mw * scale(pv.profile_id, t));
+              available[static_cast<size_t>(t)] += avail;
+              const double used =
+                  i < uc.dc_pv_dispatch.size() &&
+                          t < static_cast<int>(uc.dc_pv_dispatch[i].size())
+                      ? uc.dc_pv_dispatch[i][static_cast<size_t>(t)]
+                      : avail;
+              dispatched[static_cast<size_t>(t)] += std::clamp(used, 0.0, avail);
+            }
+          }
+          json available_json = json::array();
+          json dispatched_json = json::array();
+          json curtailed_json = json::array();
+          double available_mwh = 0.0;
+          double dispatched_mwh = 0.0;
+          for (int t = 0; t < result.num_steps; ++t) {
+            const double avail = available[static_cast<size_t>(t)];
+            const double used = dispatched[static_cast<size_t>(t)];
+            available_json.push_back(avail);
+            dispatched_json.push_back(used);
+            curtailed_json.push_back(std::max(0.0, avail - used));
+            available_mwh += avail * ts_data.step_duration_hr;
+            dispatched_mwh += used * ts_data.step_duration_hr;
+          }
+          out["renewable_available_mw"] = std::move(available_json);
+          out["renewable_used_mw"] = std::move(dispatched_json);
+          out["renewable_curtailment_mw"] = std::move(curtailed_json);
+          out["renewable_available_mwh"] = available_mwh;
+          out["renewable_used_mwh"] = dispatched_mwh;
+          out["renewable_curtailment_mwh"] =
+              std::max(0.0, available_mwh - dispatched_mwh);
+          out["renewable_utilization_pct"] =
+              available_mwh > 1e-9 ? 100.0 * dispatched_mwh / available_mwh : 0.0;
+        }
         // Static-generator output used by the PF snapshots. AC static generators
         // are fixed injections in the current time-series model; legacy DC
         // static generators follow the same fixed-injection semantics.
@@ -14855,6 +15009,19 @@ int main(int argc, char** argv) {
           json load_demand = json::array();
           json load_names = json::array();
           json load_bus_indices = json::array();
+          auto flexible_adjustment = [&](size_t i, int t) {
+            const double up =
+                i < uc.flexible_load_up.size() &&
+                        t < static_cast<int>(uc.flexible_load_up[i].size())
+                    ? uc.flexible_load_up[i][static_cast<size_t>(t)]
+                    : 0.0;
+            const double down =
+                i < uc.flexible_load_down.size() &&
+                        t < static_cast<int>(uc.flexible_load_down[i].size())
+                    ? uc.flexible_load_down[i][static_cast<size_t>(t)]
+                    : 0.0;
+            return up - down;
+          };
           if (!sys_ts.ac.loads.empty()) {
             for (size_t li = 0; li < sys_ts.ac.loads.size(); ++li) {
               const auto& ld = sys_ts.ac.loads[li];
@@ -14877,6 +15044,20 @@ int main(int argc, char** argv) {
               load_bus_indices.push_back(b.index);
             }
           }
+          for (size_t i = 0; i < sys_ts.ac.flexible_loads.size(); ++i) {
+            const auto& load = sys_ts.ac.flexible_loads[i];
+            json row = json::array();
+            for (int t = 0; t < result.num_steps; ++t) {
+              const double base = load.in_service ? std::max(0.0, load.p_mw) : 0.0;
+              row.push_back(std::max(0.0, base + flexible_adjustment(i, t)));
+            }
+            load_demand.push_back(std::move(row));
+            load_names.push_back(load.name.empty()
+                                     ? "FlexibleLoad" + std::to_string(load.index)
+                                     : load.name);
+            load_bus_indices.push_back(load.bus);
+          }
+          json total_load_baseline = json::array();
           for (int t = 0; t < result.num_steps; ++t) {
             double tl = 0.0;
             if (!sys_ts.ac.loads.empty()) {
@@ -14895,11 +15076,20 @@ int main(int argc, char** argv) {
               if (!dl.in_service) continue;
               tl += dl.p_mw * dl.scaling * get_scale(dl.profile_id, t);
             }
+            double baseline = tl;
+            for (size_t i = 0; i < sys_ts.ac.flexible_loads.size(); ++i) {
+              const auto& load = sys_ts.ac.flexible_loads[i];
+              if (!load.in_service) continue;
+              baseline += std::max(0.0, load.p_mw);
+              tl += std::max(0.0, load.p_mw + flexible_adjustment(i, t));
+            }
+            total_load_baseline.push_back(baseline);
             total_load.push_back(tl);
           }
           out["load_demand"] = load_demand;
           out["load_names"] = load_names;
           out["load_bus_indices"] = load_bus_indices;
+          out["total_load_baseline"] = total_load_baseline;
           out["total_load"] = total_load;
         }
         VoltageQualificationMetrics voltage_metrics;
@@ -16225,6 +16415,29 @@ int main(int argc, char** argv) {
         out["total_load_mwh"] = result.total_load_mwh;
         out["total_renewable_mwh"] = result.total_renewable_mwh;
         out["total_curtailment_mwh"] = result.total_curtailment_mwh;
+        {
+          double dr_up_mwh = 0.0;
+          double dr_down_mwh = 0.0;
+          for (const auto& window : result.weekly_schedules) {
+            for (const auto& row : window.uc.flexible_load_up)
+              for (double value : row)
+                dr_up_mwh += std::max(0.0, value) * result.step_duration_hr;
+            for (const auto& row : window.uc.flexible_load_down)
+              for (double value : row)
+                dr_down_mwh += std::max(0.0, value) * result.step_duration_hr;
+          }
+          out["demand_response_resource_count"] =
+              static_cast<int>(sys_ann.ac.flexible_loads.size());
+          out["demand_response_up_mwh"] = dr_up_mwh;
+          out["demand_response_down_mwh"] = dr_down_mwh;
+          out["demand_response_net_shift_mwh"] = dr_up_mwh - dr_down_mwh;
+          const double renewable_available_mwh =
+              result.total_renewable_mwh + result.total_curtailment_mwh;
+          out["renewable_utilization_pct"] =
+              renewable_available_mwh > 1e-9
+                  ? 100.0 * result.total_renewable_mwh / renewable_available_mwh
+                  : 0.0;
+        }
         out["storage_discharge_mwh"] = result.storage_discharge_mwh;
         out["storage_charge_mwh"] = result.storage_charge_mwh;
         out["external_grid_import_mwh"] = result.external_grid_import_mwh;

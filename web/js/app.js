@@ -7497,6 +7497,7 @@ const App = (() => {
       num_steps: stepsPerDay,
       step_duration_hr: stepHr,
       day_index: day,
+      use_session_time_series: meta.profile_source === 'imported_scenario',
       skip_uc: false,
       run_opf: true,
       // Faithful drill-down: re-solve the day with the SAME per-day mode and
@@ -7658,6 +7659,16 @@ const App = (() => {
       ? ` · ${annParExec.work_items}项 · HW ${annParExec.hardware_threads || '—'}`
         + (annParExec.guard_reason ? ` · ${escapeHtml(annParExec.guard_reason)}` : '')
       : '';
+    const annualDrCount = Number(data.demand_response_resource_count || 0);
+    const annualDrKpis = annualDrCount > 0 ? `
+        <div class="result-item"><span class="result-label">需求响应资源</span>
+          <span class="result-value">${annualDrCount}</span></div>
+        <div class="result-item"><span class="result-label">DR 上调 / 下调</span>
+          <span class="result-value">${fmt(data.demand_response_up_mwh, 3)} / ${fmt(data.demand_response_down_mwh, 3)} MWh</span></div>
+        <div class="result-item"><span class="result-label">DR 净能量迁移</span>
+          <span class="result-value">${fmt(data.demand_response_net_shift_mwh, 3)} MWh</span></div>
+        <div class="result-item"><span class="result-label">新能源利用率</span>
+          <span class="result-value">${Number(data.renewable_utilization_pct || 0).toFixed(2)}%</span></div>` : '';
     const summary = document.getElementById('annualSimSummary');
     if (summary) {
       summary.innerHTML = `
@@ -7701,6 +7712,7 @@ const App = (() => {
           <span class="result-value">${data.num_pf_converged}/${data.num_steps}</span></div>
         <div class="result-item"><span class="result-label">电压合格率</span>
           <span class="result-value">${data.voltage_qualification?.rate_pct != null && Number.isFinite(Number(data.voltage_qualification.rate_pct)) ? Number(data.voltage_qualification.rate_pct).toFixed(2) + '% (' + data.voltage_qualification.qualified_samples + '/' + data.voltage_qualification.total_samples + ')' : '—'}</span></div>
+        ${annualDrKpis}
       `;
     }
 
@@ -7845,6 +7857,7 @@ const App = (() => {
     const cParts = [];
     if (c.unit_commitment) cParts.push('机组组合');
     if (c.economic_dispatch_opf) cParts.push('经济调度OPF');
+    if (c.demand_response) cParts.push(c.demand_response_shiftable ? '需求响应(移峰)' : '需求响应(可调)');
     cParts.push(c.network_constraints ? '网络约束(DC潮流)' : '单母线平衡');
     if (c.dc_network_constraints) cParts.push('DC网络耦合');
     if (c.reserve_fraction > 0) cParts.push('旋转备用' + (c.reserve_fraction * 100).toFixed(0) + '%');
@@ -7861,6 +7874,20 @@ const App = (() => {
       ? ` · ${parExec.work_items}项 · HW ${parExec.hardware_threads || '—'}`
         + (parExec.guard_reason ? ` · ${escapeHtml(parExec.guard_reason)}` : '')
       : '';
+    const drResourceCount = Number(data.demand_response_resource_count || 0);
+    const drKpis = drResourceCount > 0 ? `
+      <div class="result-item"><span class="result-label">需求响应资源</span>
+        <span class="result-value">${drResourceCount}</span></div>
+      <div class="result-item"><span class="result-label">DR 上调 / 下调</span>
+        <span class="result-value">${Number(data.demand_response_up_mwh || 0).toFixed(3)} / ${Number(data.demand_response_down_mwh || 0).toFixed(3)} MWh</span></div>
+      <div class="result-item"><span class="result-label">DR 净能量迁移</span>
+        <span class="result-value">${Number(data.demand_response_net_shift_mwh || 0).toFixed(3)} MWh</span></div>
+      <div class="result-item"><span class="result-label">非自愿切负荷</span>
+        <span class="result-value">${Number(data.involuntary_load_shed_mwh || 0).toFixed(3)} MWh</span></div>
+      <div class="result-item"><span class="result-label">新能源利用率</span>
+        <span class="result-value">${Number(data.renewable_utilization_pct || 0).toFixed(2)}%</span></div>
+      <div class="result-item"><span class="result-label">新能源弃电</span>
+        <span class="result-value">${Number(data.renewable_curtailment_mwh || 0).toFixed(3)} MWh</span></div>` : '';
     summary.innerHTML = `
       <div class="result-item"><span class="result-label">时间步数</span>
         <span class="result-value">${data.num_steps}</span></div>
@@ -7887,6 +7914,7 @@ const App = (() => {
         <span class="result-value">${data.voltage_qualification?.rate_pct != null && Number.isFinite(Number(data.voltage_qualification.rate_pct)) ? Number(data.voltage_qualification.rate_pct).toFixed(2) + '% (' + data.voltage_qualification.qualified_samples + '/' + data.voltage_qualification.total_samples + ')' : '—'}</span></div>
       <div class="result-item"><span class="result-label">计算时间</span>
         <span class="result-value">${Number.isFinite(Number(data.execution_time_sec)) ? Number(data.execution_time_sec).toFixed(3) + ' s' : '—'}</span></div>
+      ${drKpis}
     `;
 
     const hrs = Array.from({ length: data.num_steps }, (_, i) => i);
@@ -8051,15 +8079,22 @@ const App = (() => {
     // 5. Total load demand
     const loadDiv = document.getElementById('tspfLoadChart');
     if (data.total_load && data.total_load.length > 0) {
-      const dMin = Math.min(...data.total_load), dMax = Math.max(...data.total_load);
+      const baselineLoad = Array.isArray(data.total_load_baseline) ? data.total_load_baseline : [];
+      const allLoadValues = data.total_load.concat(baselineLoad);
+      const dMin = Math.min(...allLoadValues), dMax = Math.max(...allLoadValues);
       const dPad = Math.max((dMax - dMin) * 0.15, dMax * 0.05 || 0.001);
-      Plotly.newPlot(loadDiv, [{
+      const loadTraces = [{
         x: hrs, y: data.total_load,
         mode: 'lines+markers',
         line: { color: '#2c8c99', width: 2 },
-        name: '总负荷',
-      }], {
-        ...plotTheme, title: '负荷需求曲线 (MW)',
+        name: drResourceCount > 0 ? '响应后负荷' : '总负荷',
+      }];
+      if (drResourceCount > 0 && baselineLoad.length) loadTraces.push({
+        x: hrs, y: baselineLoad, mode: 'lines',
+        line: { color: '#7f8c8d', width: 1.5, dash: 'dash' }, name: '基线负荷',
+      });
+      Plotly.newPlot(loadDiv, loadTraces, {
+        ...plotTheme, title: drResourceCount > 0 ? '需求响应前后负荷 (MW)' : '负荷需求曲线 (MW)',
         yaxis: { ...plotTheme.yaxis, title: 'MW', range: [dMin - dPad, dMax + dPad] },
       }, { responsive: true });
     } else {
@@ -8089,6 +8124,20 @@ const App = (() => {
     // 7. PV dispatch (AC PV systems + DC PV arrays)
     const pvDiv = document.getElementById('tspfPVChart');
     const pvTraces = [];
+    if (Array.isArray(data.renewable_available_mw) && data.renewable_available_mw.length) {
+      pvTraces.push({
+        x: hrs, y: data.renewable_available_mw, mode: 'lines', type: 'scatter',
+        name: '新能源可用', line: { color: '#7f8c8d', width: 1.5, dash: 'dash' },
+      });
+      pvTraces.push({
+        x: hrs, y: data.renewable_used_mw || [], mode: 'lines', type: 'scatter',
+        name: '新能源利用', line: { color: '#27ae60', width: 2 },
+      });
+      pvTraces.push({
+        x: hrs, y: data.renewable_curtailment_mw || [], mode: 'lines', type: 'scatter',
+        name: '新能源弃电', line: { color: '#e67e22', width: 2 },
+      });
+    }
     // AC PV dispatch from backend (computed from solar profile)
     (data.ac_pv_dispatch || []).forEach((d, ki) => pvTraces.push({
       x: hrs, y: d, type: 'bar',
@@ -8103,7 +8152,7 @@ const App = (() => {
     }));
     if (pvTraces.length > 0) {
       Plotly.newPlot(pvDiv, pvTraces, {
-        ...plotTheme, title: '光伏出力 (MW)', barmode: 'stack',
+        ...plotTheme, title: '新能源利用与弃电 (MW)', barmode: 'stack',
         yaxis: { ...plotTheme.yaxis, title: 'MW' },
       }, { responsive: true });
     } else {

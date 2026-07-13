@@ -49,6 +49,8 @@ struct UCSchedule {
   std::vector<std::vector<double>> ac_pv_dispatch;     // [k][t] MW
   std::vector<std::vector<double>> ac_sgen_dispatch;   // [k][t] MW
   std::vector<std::vector<double>> external_grid_dispatch; // [k][t] MW (+import)
+  std::vector<std::vector<double>> flexible_load_up;   // [f][t] MW demand increase
+  std::vector<std::vector<double>> flexible_load_down; // [f][t] MW demand reduction
 
   // DC-side component dispatch
   // - pv/static-gen/load: profile-driven exogenous series

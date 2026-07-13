@@ -204,6 +204,26 @@ static ScheduledStoragePower scheduled_storage_power(
   return total;
 }
 
+static double scheduled_flexible_load_mw(
+    const HybridPowerSystem& sys, const UCSchedule& schedule, int t) {
+  double total = 0.0;
+  for (size_t i = 0; i < sys.ac.flexible_loads.size(); ++i) {
+    const auto& load = sys.ac.flexible_loads[i];
+    if (!load.in_service) continue;
+    double served = std::max(0.0, load.p_mw);
+    if (i < schedule.flexible_load_up.size() &&
+        t >= 0 && t < static_cast<int>(schedule.flexible_load_up[i].size())) {
+      served += schedule.flexible_load_up[i][static_cast<size_t>(t)];
+    }
+    if (i < schedule.flexible_load_down.size() &&
+        t >= 0 && t < static_cast<int>(schedule.flexible_load_down[i].size())) {
+      served -= schedule.flexible_load_down[i][static_cast<size_t>(t)];
+    }
+    total += std::max(0.0, served);
+  }
+  return total;
+}
+
 static void finalize_step_power_accounting(
     AnnualStepResult& step, double external_grid_net_mw) {
   step.external_grid_net_mw = external_grid_net_mw;
@@ -551,7 +571,9 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
         if (bus.pd_mw > 0.0) load += bus.pd_mw * get_scale(0, t);
       }
     }
-    sr.total_load_mw = load + reported.dc_load_mw;
+    sr.total_load_mw = load + reported.dc_load_mw +
+                       scheduled_flexible_load_mw(
+                           sys, sub_result.uc_schedule, t);
 
     // Renewable dispatch
     double ren = reported_ac_renewable_mw(sys, sub_result.uc_schedule, pmap, t, t);
@@ -1426,7 +1448,8 @@ AnnualProductionSimResult solve_annual_production_simulation(
             if (b.pd_mw > 0.0) load += b.pd_mw * get_scale(0, g_idx);
           }
         }
-        sr.total_load_mw = load + reported.dc_load_mw;
+        sr.total_load_mw = load + reported.dc_load_mw +
+                           scheduled_flexible_load_mw(sys, ws.uc, t);
 
         // Renewable dispatch
         double ren = reported_ac_renewable_mw(sys, ws.uc, pmap, t, g_idx);

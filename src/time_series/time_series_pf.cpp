@@ -625,9 +625,12 @@ struct UCBuildResult {
   int dc_sgen_count{0};
   int ac_sgen_count{0};
   int external_grid_count{0};
+  int flexible_load_count{0};
   int pv_curt_offset{0};
   int ac_sgen_offset{0};
   int external_grid_offset{0};
+  int dr_up_offset{0};
+  int dr_down_offset{0};
   // kind: 0 = AC PV, 1 = DC PV, 2 = DC static generator.
   std::vector<int> pv_curt_kind;
   std::vector<int> pv_curt_indices;
@@ -654,6 +657,7 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   res.dc_sgen_count = static_cast<int>(sys.dc.dc_static_generators.size());
   res.ac_sgen_count = static_cast<int>(sys.ac.static_generators.size());
   res.external_grid_count = static_cast<int>(sys.ac.external_grids.size());
+  res.flexible_load_count = static_cast<int>(sys.ac.flexible_loads.size());
 
   auto profile_map = build_profile_map(ts_data);
 
@@ -1081,8 +1085,10 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   res.external_grid_offset = ext_offset;
   auto ext_idx = [&](int x, int t) { return ext_offset + x * T + t; };
   const int drup_offset = ext_offset + nExt;
+  res.dr_up_offset = drup_offset;
   auto drup_idx = [&](int f, int t) { return drup_offset + f * T + t; };
   const int drdn_offset = drup_offset + nDrUp;
+  res.dr_down_offset = drdn_offset;
   auto drdn_idx = [&](int f, int t) { return drdn_offset + f * T + t; };
   const int curt_offset = drdn_offset + nDrDn;
   auto curt_idx = [&](int k, int t) { return curt_offset + k * T + t; };
@@ -2959,6 +2965,14 @@ UCSchedule extract_schedule(const Eigen::VectorXd& x,
         static_cast<size_t>(build.external_grid_count),
         std::vector<double>(static_cast<size_t>(T)));
   }
+  if (!build.flex_indices.empty()) {
+    sched.flexible_load_up.resize(
+        static_cast<size_t>(build.flexible_load_count),
+        std::vector<double>(static_cast<size_t>(T)));
+    sched.flexible_load_down.resize(
+        static_cast<size_t>(build.flexible_load_count),
+        std::vector<double>(static_cast<size_t>(T)));
+  }
   sched.dc_pv_dispatch.resize(static_cast<size_t>(build.dc_pv_count),
                               std::vector<double>(static_cast<size_t>(T)));
   sched.dc_sgen_dispatch.resize(static_cast<size_t>(build.dc_sgen_count),
@@ -3012,6 +3026,15 @@ UCSchedule extract_schedule(const Eigen::VectorXd& x,
     for (int t = 0; t < T; ++t) {
       sched.external_grid_dispatch[static_cast<size_t>(component)][static_cast<size_t>(t)] =
           x[build.external_grid_offset + static_cast<int>(k) * T + t];
+    }
+  }
+  for (size_t k = 0; k < build.flex_indices.size(); ++k) {
+    const int component = build.flex_indices[k];
+    for (int t = 0; t < T; ++t) {
+      sched.flexible_load_up[static_cast<size_t>(component)][static_cast<size_t>(t)] =
+          x[build.dr_up_offset + static_cast<int>(k) * T + t];
+      sched.flexible_load_down[static_cast<size_t>(component)][static_cast<size_t>(t)] =
+          x[build.dr_down_offset + static_cast<int>(k) * T + t];
     }
   }
 
@@ -3636,6 +3659,8 @@ static TimeSeriesPFResult concat_ts_results(std::vector<TimeSeriesPFResult>& par
     cat_d(out.uc_schedule.ac_pv_dispatch, u.ac_pv_dispatch);
     cat_d(out.uc_schedule.ac_sgen_dispatch, u.ac_sgen_dispatch);
     cat_d(out.uc_schedule.external_grid_dispatch, u.external_grid_dispatch);
+    cat_d(out.uc_schedule.flexible_load_up, u.flexible_load_up);
+    cat_d(out.uc_schedule.flexible_load_down, u.flexible_load_down);
     cat_d(out.uc_schedule.dc_pv_dispatch, u.dc_pv_dispatch);
     cat_d(out.uc_schedule.dc_ess_dispatch, u.dc_ess_dispatch);
     cat_d(out.uc_schedule.dc_ess_soc, u.dc_ess_soc);

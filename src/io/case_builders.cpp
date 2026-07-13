@@ -1770,6 +1770,59 @@ HybridPowerSystem build_dist33_microgrid_der() {
     sys.ac.static_generators.push_back(gas1);
   }
 
+  // === Demand-response portfolio ===
+  // Convert part of three existing bus loads into explicit FlexibleLoad
+  // resources. Subtracting the same P/Q share from the source bus preserves
+  // the original case demand when demand response is disabled.
+  {
+    auto add_flexible_share = [&](int index, int bus_index, double share,
+                                  double up_fraction, double down_fraction,
+                                  double availability_pct,
+                                  const std::string& name,
+                                  const std::string& control_area,
+                                  LoadPriority priority) {
+      auto bus_it = std::find_if(
+          sys.ac.buses.begin(), sys.ac.buses.end(),
+          [&](const ACBus& bus) { return bus.index == bus_index; });
+      if (bus_it == sys.ac.buses.end() || !bus_it->in_service) return;
+      const double bounded_share = std::clamp(share, 0.0, 1.0);
+      const double p_flexible = std::max(0.0, bus_it->pd_mw) * bounded_share;
+      const double q_flexible = std::max(0.0, bus_it->qd_mvar) * bounded_share;
+      if (p_flexible <= 1e-9) return;
+
+      bus_it->pd_mw -= p_flexible;
+      bus_it->qd_mvar -= q_flexible;
+
+      FlexibleLoad load;
+      load.index = index;
+      load.bus = bus_index;
+      load.name = name;
+      load.in_service = true;
+      load.p_mw = p_flexible;
+      load.q_mvar = q_flexible;
+      load.flex_up_mw = p_flexible * std::max(0.0, up_fraction);
+      load.flex_down_mw = p_flexible * std::max(0.0, down_fraction);
+      load.flex_duration_h = 4.0;
+      load.response_time_s = control_area == "MG3" ? 300.0 : 60.0;
+      load.ramp_rate_mw_min = std::max(load.flex_up_mw, load.flex_down_mw) / 15.0;
+      load.availability_pct = std::clamp(availability_pct, 0.0, 100.0);
+      load.controllable = true;
+      load.priority = priority;
+      load.control_area = control_area;
+      sys.ac.flexible_loads.push_back(std::move(load));
+    };
+
+    add_flexible_share(501, 7, 0.45, 0.25, 0.30, 80.0,
+                       "MG1-Residential-Thermostatic-DR", "MG1",
+                       LoadPriority::Medium);
+    add_flexible_share(502, 15, 0.50, 0.30, 0.35, 90.0,
+                       "MG2-Commercial-HVAC-DR", "MG2",
+                       LoadPriority::Medium);
+    add_flexible_share(503, 30, 0.35, 0.20, 0.25, 85.0,
+                       "MG3-Industrial-Process-DR", "MG3",
+                       LoadPriority::High);
+  }
+
   // === Automated tie and islanding switches for fault restoration studies ===
   {
     int sw_idx = 0;

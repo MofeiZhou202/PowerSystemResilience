@@ -539,7 +539,7 @@ async function main() {
               _time_series: {
                 num_steps: N, step_duration_hr: 1.0,
                 profiles: [
-                  { id: 0, name: 'load', values: Array.from({ length: N }, (_, i) => 0.9 + 0.2 * Math.sin(2 * Math.PI * (i % 24) / 24)) },
+                  { id: 0, name: 'load', values: Array.from({ length: N }, (_, i) => 0.9 + 0.2 * Math.sin(2 * Math.PI * (i % 24) / 24) + 0.002 * i) },
                   { id: 1, name: 'wind', values: Array.from({ length: N }, () => 0.5) },
                   { id: 2, name: 'solar', values: Array.from({ length: N }, (_, i) => (i % 24 >= 6 && i % 24 <= 18) ? 0.7 : 0) },
                 ],
@@ -583,6 +583,24 @@ async function main() {
         }),
       });
       const annual = await annualResponse.json();
+      const dayResponse = await fetch('/api/session/run_ts_pf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          day_index: 2,
+          num_steps: 4,
+          step_duration_hr: 6,
+          use_session_time_series: true,
+          skip_uc: true,
+          run_opf: false,
+          enable_external_grid: true,
+        }),
+      });
+      const day = await dayResponse.json();
+      const expectedDayLoad = (annual.timeline_load || []).slice(4, 8);
+      const actualDayLoad = day.total_load || [];
+      const dayMatchesAnnual = expectedDayLoad.length === actualDayLoad.length &&
+        expectedDayLoad.every((value, i) => Math.abs(Number(value) - Number(actualDayLoad[i])) < 1e-6);
       return {
         importedLen,
         checkbox,
@@ -594,6 +612,8 @@ async function main() {
         annualProfileSource: annual.profile_source,
         annualBindingActive: annual.scenario_profile_binding_active,
         annualFirstDayUnique: new Set((annual.timeline_load || []).slice(0, 4).map(v => Number(v).toFixed(6))).size,
+        annualDayProfileSource: day.annual_day_profile_source,
+        annualDayMatches: dayMatchesAnnual,
       };
       function _lastTspfStepsForTest() { return document.getElementById('depChipTspf')?.textContent || ''; }
     });
@@ -605,6 +625,53 @@ async function main() {
     check(horizon.annualProfileSource === 'imported_scenario' &&
           horizon.annualBindingActive === true && horizon.annualFirstDayUnique > 1,
       'annual production simulation preserves imported intraday load variation');
+    check(horizon.annualDayProfileSource === 'imported_scenario' && horizon.annualDayMatches,
+      'annual day drill-down slices the imported scenario profile');
+
+    const dist33Dr = await page.evaluate(async () => {
+      await fetch('/api/session/load_builtin', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ case: 'dist33_microgrid_der' }),
+      });
+      await fetch('/api/session/set_ts_config', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          num_steps: 4, step_duration_hr: 1,
+          profiles: [
+            { id: 0, name: 'load', values: [0.7, 0.9, 1.1, 0.8] },
+            { id: 1, name: 'wind', values: [0.2, 0.5, 1.0, 0.4] },
+            { id: 2, name: 'solar', values: [0.0, 0.4, 1.0, 0.1] },
+          ],
+          assign_all_loads_to: 0,
+        }),
+      });
+      const response = await fetch('/api/session/run_ts_pf', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          num_steps: 4, skip_uc: false, run_opf: false,
+          uc_solver: 'scip', enable_demand_response: true,
+          dr_shiftable: true, dr_penalty: 0,
+          enable_external_grid: true,
+        }),
+      });
+      const data = await response.json();
+      return {
+        error: data.error || '',
+        resourceCount: data.demand_response_resource_count,
+        upRows: data.flexible_load_up_mw?.length || 0,
+        downRows: data.flexible_load_down_mw?.length || 0,
+        baselineSteps: data.total_load_baseline?.length || 0,
+        servedSteps: data.total_load?.length || 0,
+        renewableSteps: data.renewable_curtailment_mw?.length || 0,
+        utilization: data.renewable_utilization_pct,
+      };
+    });
+    check(!dist33Dr.error && dist33Dr.resourceCount === 3 &&
+          dist33Dr.upRows === 3 && dist33Dr.downRows === 3,
+      'dist33 DR portfolio exports three schedule resources');
+    check(dist33Dr.baselineSteps === 4 && dist33Dr.servedSteps === 4 &&
+          dist33Dr.renewableSteps === 4 && Number.isFinite(Number(dist33Dr.utilization)),
+      'dist33 DR API exports baseline/served demand and renewable utilization metrics');
 
     // ---- 10) Annual dashboard windows 8760 points and keeps paging responsive ----
     const syntheticHours = Array.from({ length: 8760 }, (_, index) => index);
