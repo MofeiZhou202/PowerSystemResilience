@@ -8742,52 +8742,96 @@ int main(int argc, char** argv) {
         }
         if (!sys.ac.transformers_3w.empty()) {
           try {
+            // PF results are reprojected to authored branches before returning,
+            // so their branch_flows array cannot be indexed by branches added
+            // during rich-component projection. Rebuild an unmerged projection
+            // and evaluate each 3W pair branch from its equivalent parameters and
+            // the converged authored-bus voltages instead.
+            hacdcpf::HybridPowerSystem attribution_sys = sys;
+            attribution_sys.ac.switches.clear();
+            attribution_sys.ac.circuit_breakers.clear();
             const hacdcpf::HybridPowerSystem projected =
-                hacdcpf::project_to_canonical_models(sys);
+                hacdcpf::project_to_canonical_models(std::move(attribution_sys));
             if (projected.branch_expand_map.has_value()) {
-              std::unordered_map<int, size_t> flow_pos_by_branch_index;
+              std::unordered_map<int, const hacdcpf::ACBranch*> branch_by_index;
               for (size_t bi = 0; bi < projected.ac.branches.size(); ++bi) {
-                flow_pos_by_branch_index[projected.ac.branches[bi].index] = bi;
+                branch_by_index[projected.ac.branches[bi].index] =
+                    &projected.ac.branches[bi];
               }
+              std::unordered_map<int, size_t> authored_bus_pos;
+              for (size_t bi = 0; bi < sys.ac.buses.size(); ++bi)
+                authored_bus_pos[sys.ac.buses[bi].index] = bi;
+              auto voltage = [&](int bus) {
+                const auto pos = authored_bus_pos.find(bus);
+                if (pos == authored_bus_pos.end())
+                  return std::complex<double>{1.0, 0.0};
+                const size_t i = pos->second;
+                const double vm = i < pf.vm.size() ? pf.vm[i] : sys.ac.buses[i].vm_pu;
+                const double va = i < pf.va.size()
+                    ? pf.va[i]
+                    : sys.ac.buses[i].va_deg * M_PI / 180.0;
+                return std::polar(vm, va);
+              };
+              auto branch_terminal_power = [&](const hacdcpf::ACBranch& br,
+                                               int from_bus, int to_bus) {
+                const std::complex<double> z{br.r_pu, br.x_pu};
+                if (std::norm(z) <= 1e-24) {
+                  return std::array<std::complex<double>, 2>{};
+                }
+                const std::complex<double> ys = 1.0 / z;
+                const std::complex<double> ysh{0.0, br.b_pu / 2.0};
+                const double tap_mag = std::abs(br.tap) > 1e-12 ? br.tap : 1.0;
+                const std::complex<double> tap =
+                    std::polar(tap_mag, br.shift_deg * M_PI / 180.0);
+                const auto vf = voltage(from_bus);
+                const auto vt = voltage(to_bus);
+                const auto iff = (ys + ysh) / std::norm(tap) * vf -
+                                 ys / std::conj(tap) * vt;
+                const auto itt = -ys / tap * vf + (ys + ysh) * vt;
+                return std::array<std::complex<double>, 2>{
+                    vf * std::conj(iff) * sys.base_mva,
+                    vt * std::conj(itt) * sys.base_mva};
+              };
               for (const auto& entry : projected.branch_expand_map->entries) {
                 if (entry.origin_type != hacdcpf::BranchOriginType::Transformer3W) {
                   continue;
                 }
                 auto tit = trafo3w_pos_by_index.find(entry.origin_index);
                 if (tit == trafo3w_pos_by_index.end()) continue;
-                auto fit = flow_pos_by_branch_index.find(entry.branch_index);
-                if (fit == flow_pos_by_branch_index.end() ||
-                    fit->second >= pf.branch_flows.size()) {
-                  continue;
-                }
+                auto fit = branch_by_index.find(entry.branch_index);
+                if (fit == branch_by_index.end()) continue;
                 auto& tf = trafo3w_flows[tit->second];
                 if (trafo3w_supplied_by_pf[tit->second]) continue;
-                const auto& br_flow = pf.branch_flows[fit->second];
                 const auto& tr = sys.ac.transformers_3w[tit->second];
+                const int from_bus = entry.pair_number < 2 ? tr.hv_bus : tr.mv_bus;
+                const int to_bus = entry.pair_number == 0 ? tr.mv_bus : tr.lv_bus;
+                const auto terminal_power =
+                    branch_terminal_power(*fit->second, from_bus, to_bus);
+                const auto& sf = terminal_power[0];
+                const auto& st = terminal_power[1];
                 double pair_rate = 0.0;
                 if (entry.pair_number == 0) {
-                  tf.p_hv_mw += br_flow.pf_mw;
-                  tf.q_hv_mvar += br_flow.qf_mvar;
-                  tf.p_mv_mw += br_flow.pt_mw;
-                  tf.q_mv_mvar += br_flow.qt_mvar;
+                  tf.p_hv_mw += sf.real();
+                  tf.q_hv_mvar += sf.imag();
+                  tf.p_mv_mw += st.real();
+                  tf.q_mv_mvar += st.imag();
                   pair_rate = std::min(tr.sn_hv_mva, tr.sn_mv_mva);
                 } else if (entry.pair_number == 1) {
-                  tf.p_hv_mw += br_flow.pf_mw;
-                  tf.q_hv_mvar += br_flow.qf_mvar;
-                  tf.p_lv_mw += br_flow.pt_mw;
-                  tf.q_lv_mvar += br_flow.qt_mvar;
+                  tf.p_hv_mw += sf.real();
+                  tf.q_hv_mvar += sf.imag();
+                  tf.p_lv_mw += st.real();
+                  tf.q_lv_mvar += st.imag();
                   pair_rate = std::min(tr.sn_hv_mva, tr.sn_lv_mva);
                 } else if (entry.pair_number == 2) {
-                  tf.p_mv_mw += br_flow.pf_mw;
-                  tf.q_mv_mvar += br_flow.qf_mvar;
-                  tf.p_lv_mw += br_flow.pt_mw;
-                  tf.q_lv_mvar += br_flow.qt_mvar;
+                  tf.p_mv_mw += sf.real();
+                  tf.q_mv_mvar += sf.imag();
+                  tf.p_lv_mw += st.real();
+                  tf.q_lv_mvar += st.imag();
                   pair_rate = std::min(tr.sn_mv_mva, tr.sn_lv_mva);
                 }
                 tf.valid = true;
                 const double pair_s = std::max(
-                    std::hypot(br_flow.pf_mw, br_flow.qf_mvar),
-                    std::hypot(br_flow.pt_mw, br_flow.qt_mvar));
+                    std::abs(sf), std::abs(st));
                 if (pair_rate > 1e-9) {
                   tf.loading_pct =
                       std::max(tf.loading_pct, 100.0 * pair_s / pair_rate);

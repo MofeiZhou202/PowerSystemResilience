@@ -385,6 +385,28 @@ def main() -> int:
             f"parameter auto-fulfill changed={applied.get('fields_changed')} valid={validation.get('valid')}",
         )
 
+        print("2b. comprehensive hybrid 3W transformer balance attribution")
+        st, _ = c.post_json(
+            "/api/session/load_builtin",
+            {"case": "comprehensive_hybrid_acdc"},
+        )
+        st, comprehensive_pf = c.post_json(
+            "/api/session/pf",
+            {
+                "method": "ac_newton",
+                "options": {"enable_converter_coordination_check": True},
+            },
+        )
+        comprehensive_balance = comprehensive_pf.get("power_balance_diagnostics", {})
+        chk.check(
+            st == 200 and comprehensive_pf.get("converged") is True and
+            comprehensive_balance.get("ordinary_bad_count") == 0 and
+            comprehensive_balance.get("ordinary") == [],
+            "comprehensive hybrid PF balance -> "
+            f"converged={comprehensive_pf.get('converged')} "
+            f"ordinary={comprehensive_balance.get('ordinary_bad_count')}",
+        )
+
         print("3. MATPOWER OPF regression cases")
         opf_payload = {
             "solver": "parity",

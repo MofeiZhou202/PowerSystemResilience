@@ -5131,6 +5131,36 @@ const Canvas = (() => {
   }
 
   // ========== Results Overlay ==========
+  function getComponentBusConnections(comp, allowedBusTypes) {
+    const busConns = [];
+    const allowed = allowedBusTypes || new Set(['ac_bus', 'dc_bus']);
+    const busMap = getCompBusMap();
+    const compToBus = {};
+    for (const [idx, cid] of Object.entries(busMap.ac)) compToBus[cid] = parseInt(idx);
+    for (const [idx, cid] of Object.entries(busMap.dc)) compToBus[cid] = parseInt(idx);
+    for (const conn of state.connections) {
+      let busCompId = null, portOfComp = null;
+      if (conn.from.compId === comp.id) {
+        busCompId = conn.to.compId;
+        portOfComp = conn.from.portId;
+      } else if (conn.to.compId === comp.id) {
+        busCompId = conn.from.compId;
+        portOfComp = conn.to.portId;
+      }
+      if (busCompId === null) continue;
+      const busComp = getComponent(busCompId);
+      if (!busComp || !allowed.has(busComp.type)) continue;
+      busConns.push({
+        conn,
+        busCompId,
+        busIdx: compToBus[busCompId],
+        busType: busComp.type,
+        portOfComp,
+      });
+    }
+    return busConns;
+  }
+
   function showPowerFlowResults(result) {
     _lastCanvasFrame = null;
     resultsLayer.innerHTML = '';
@@ -5306,32 +5336,6 @@ const Canvas = (() => {
     const supplyTypes = new Set(['generator', 'pv_system', 'renewable_gen', 'static_generator', 'external_grid', 'dc_pv_array', 'vpp', 'microgrid']);
     const demandTypes = new Set(['load', 'dc_load', 'flexible_load', 'asymmetric_load', 'motor', 'charging_station', 'charger']);
     const bidirTypes = new Set(['storage', 'dc_storage', 'mobile_storage']);
-
-    function getComponentBusConnections(comp, allowedBusTypes) {
-      const busConns = [];
-      const allowed = allowedBusTypes || new Set(['ac_bus', 'dc_bus']);
-      for (const conn of state.connections) {
-        let busCompId = null, portOfComp = null;
-        if (conn.from.compId === comp.id) {
-          busCompId = conn.to.compId;
-          portOfComp = conn.from.portId;
-        } else if (conn.to.compId === comp.id) {
-          busCompId = conn.from.compId;
-          portOfComp = conn.to.portId;
-        }
-        if (busCompId === null) continue;
-        const busComp = getComponent(busCompId);
-        if (!busComp || !allowed.has(busComp.type)) continue;
-        busConns.push({
-          conn,
-          busCompId,
-          busIdx: compToBus[busCompId],
-          busType: busComp.type,
-          portOfComp,
-        });
-      }
-      return busConns;
-    }
 
     function firstBusConnection(comp) {
       const conns = getComponentBusConnections(comp);
