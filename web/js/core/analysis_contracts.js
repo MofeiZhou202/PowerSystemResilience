@@ -51,6 +51,21 @@
     return labels[analysis] || analysis || '分析';
   }
 
+  function reliabilityControlState({ physicalModel = 'auto', method = 'nsq',
+                                     cyberEnabled = false } = {}) {
+    const useThreeStage = physicalModel === 'restoration_milp';
+    const useCyberPhysical = method === 'fmea' && !useThreeStage;
+    return {
+      useThreeStage,
+      useSequential: method === 'seq' && !useThreeStage,
+      useCyberPhysical,
+      cyberEffective: useCyberPhysical && cyberEnabled,
+      cyberToggleEnabled: true,
+      cyberParametersVisible: useCyberPhysical,
+      cyberParametersEnabled: useCyberPhysical,
+    };
+  }
+
   function attachResultContract({ path, data, requestId, modelRevision, currentModelRevision }) {
     const analysis = analysisForPath(path);
     if (!analysis || !data || typeof data !== 'object' || Array.isArray(data)) return false;
@@ -77,5 +92,6 @@
     analysisForPath,
     labelForAnalysis,
     attachResultContract,
+    reliabilityControlState,
   });
 })(window);

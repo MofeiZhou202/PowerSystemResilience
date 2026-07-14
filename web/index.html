@@ -1395,9 +1395,9 @@
       <label class="sub-label" title="蒙特卡洛最大抽样次数 (NSQ) / 年数×10 (SEQ)">抽样次数
         <input id="relMaxIter" type="number" value="2000" min="100" step="500"/>
       </label>
-      <label class="sub-label sub-checkbox rel-cyber-control" title="启用 Level 1 网络物理可靠性：按自动化可用/不可用两类修正恢复时长和控制能力">
-        <input id="relCyberEnabled" type="checkbox"/>
-        <span>网络物理 L1</span>
+      <label class="sub-label sub-checkbox rel-cyber-toggle" title="启用 Level 1 网络物理可靠性：按自动化可用/不可用两类修正恢复时长和控制能力">
+        <input id="relCyberEnabled" type="checkbox" aria-controls="relCyberAvailability relCyberAutoMinutes relCyberManualMinutes relCyberFreezeDer"/>
+        <span>网络物理化 L1</span>
       </label>
       <label class="sub-label rel-cyber-control" title="故障发生时 FLISR、远方控制和通信链路可用的概率">自动化可用率
         <input id="relCyberAvailability" type="number" value="0.97" min="0" max="1" step="0.01"/>
@@ -2641,7 +2641,7 @@
   <script src="js/components.js?v=20260712-cb-source-flow-v2"></script>
   <script src="js/search_registry.js?v=20260709-phase5"></script>
   <script src="js/canvas.js?v=20260714-pf-overlay-v1"></script>
-  <script src="js/core/analysis_contracts.js?v=20260712-hysim-phase3-v1"></script>
+  <script src="js/core/analysis_contracts.js?v=20260714-cps-controls-v1"></script>
   <script src="js/core/task_manager.js?v=20260712-hysim-phase3-v1"></script>
   <script src="js/core/api_client.js?v=20260712-hysim-phase3-v1"></script>
   <script src="js/core/result_mapping.js?v=20260712-hysim-phase3-v1"></script>
@@ -2651,6 +2651,6 @@
   <script src="js/core/layout_engine.js?v=20260712-hysim-layout-v1"></script>
   <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
-  <script src="js/app.js?v=20260714-cyber-reliability-cim-dist-v1"></script>
+  <script src="js/app.js?v=20260714-cps-controls-v1"></script>
 </body>
 </html>

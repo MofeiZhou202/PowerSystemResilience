@@ -416,6 +416,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
   # install chromium`. Skipped automatically when Node.js is absent.
   find_program(HACDCPF_NODE_EXECUTABLE NAMES node)
   if(HACDCPF_NODE_EXECUTABLE)
+    add_test(NAME reliability_control_state_test
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/reliability_control_state_test.mjs")
+    set_tests_properties(reliability_control_state_test PROPERTIES
+      LABELS "gui;unit;reliability")
+
     add_test(NAME gui_scale_features_e2e
       COMMAND "${HACDCPF_NODE_EXECUTABLE}"
               "${CMAKE_SOURCE_DIR}/tests/e2e/gui_scale_features_e2e.mjs"

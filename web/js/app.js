@@ -14890,27 +14890,58 @@ const App = (() => {
 	      const methodEl = document.getElementById('relMethod');
 	      const maxIterEl = document.getElementById('relMaxIter');
 	      const hintEl = document.getElementById('relAnalysisHint');
-	      const useThreeStage = physicalModel === 'restoration_milp';
-	      const useSequential = methodEl?.value === 'seq' && !useThreeStage;
-	      const useCyberPhysical = methodEl?.value === 'fmea' && !useThreeStage;
-	      const cyberEnabled = document.getElementById('relCyberEnabled')?.checked === true;
-	      if (methodEl) methodEl.disabled = useThreeStage;
-	      if (maxIterEl) maxIterEl.disabled = useThreeStage;
+	      const cyberToggle = document.getElementById('relCyberEnabled');
+	      const controlState = HySimCore.AnalysisContracts.reliabilityControlState({
+	        physicalModel,
+	        method: methodEl?.value || 'nsq',
+	        cyberEnabled: cyberToggle?.checked === true,
+	      });
+	      if (methodEl) methodEl.disabled = controlState.useThreeStage;
+	      if (maxIterEl) maxIterEl.disabled = controlState.useThreeStage;
+	      if (cyberToggle) cyberToggle.disabled = !controlState.cyberToggleEnabled;
 	      document.querySelectorAll('.rel-seq-profile').forEach(element => {
-	        element.hidden = !useSequential;
+	        element.hidden = !controlState.useSequential;
 	      });
 	      document.querySelectorAll('.rel-cyber-control').forEach(element => {
-	        element.hidden = !useCyberPhysical;
+	        element.hidden = !controlState.cyberParametersVisible;
 	        element.querySelectorAll('input').forEach(input => {
-	          input.disabled = !useCyberPhysical ||
-	            (input.id !== 'relCyberEnabled' && !cyberEnabled);
+	          input.disabled = !controlState.cyberParametersEnabled;
 	        });
 	      });
 	      if (hintEl) {
-	        hintEl.textContent = useThreeStage
+	        hintEl.textContent = controlState.useThreeStage
 	          ? '三阶段恢复 MILP 将作为独立可靠性评估运行'
 	          : '后果模型由所选统计方法自动匹配';
 	      }
+	    }
+
+	    function activateCyberPhysicalReliability() {
+	      const cyberToggle = document.getElementById('relCyberEnabled');
+	      const methodEl = document.getElementById('relMethod');
+	      const physicalModelEl = document.getElementById('relPhysicalModel');
+	      if (cyberToggle?.checked) {
+	        if (physicalModelEl?.value === 'restoration_milp') {
+	          physicalModelEl.value = 'auto';
+	        }
+	        if (methodEl) methodEl.value = 'fmea';
+	      }
+	      updateReliabilityControlState();
+	    }
+
+	    function changeReliabilityMethod() {
+	      const methodEl = document.getElementById('relMethod');
+	      const cyberToggle = document.getElementById('relCyberEnabled');
+	      if (methodEl?.value !== 'fmea' && cyberToggle) cyberToggle.checked = false;
+	      updateReliabilityControlState();
+	    }
+
+	    function changeReliabilityPhysicalModel() {
+	      const physicalModelEl = document.getElementById('relPhysicalModel');
+	      const cyberToggle = document.getElementById('relCyberEnabled');
+	      if (physicalModelEl?.value === 'restoration_milp' && cyberToggle) {
+	        cyberToggle.checked = false;
+	      }
+	      updateReliabilityControlState();
 	    }
 
 	    // Bar 3: Reliability — run + export. Backend live.
@@ -15667,9 +15698,9 @@ const App = (() => {
 	    document.getElementById('btnSeqProfileApply')?.addEventListener('click', applySeqProfileEditor);
 	    document.getElementById('btnSeqProfileReset')?.addEventListener('click', resetSeqProfileEditor);
 	    document.getElementById('btnSeqSpatialRefresh')?.addEventListener('click', refreshSeqSpatialRows);
-	    document.getElementById('relPhysicalModel')?.addEventListener('change', updateReliabilityControlState);
-	    document.getElementById('relMethod')?.addEventListener('change', updateReliabilityControlState);
-	    document.getElementById('relCyberEnabled')?.addEventListener('change', updateReliabilityControlState);
+	    document.getElementById('relPhysicalModel')?.addEventListener('change', changeReliabilityPhysicalModel);
+	    document.getElementById('relMethod')?.addEventListener('change', changeReliabilityMethod);
+	    document.getElementById('relCyberEnabled')?.addEventListener('change', activateCyberPhysicalReliability);
 	    updateReliabilityControlState();
 	    updateSeqProfileSummary();
 	    document.getElementById('btnRunReliability')?.addEventListener('click', runReliability);
