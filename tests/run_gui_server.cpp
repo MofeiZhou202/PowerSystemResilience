@@ -18873,6 +18873,7 @@ int main(int argc, char** argv) {
           throw std::runtime_error("duplicate entity evidence key: " + entity.key);
         entity.name = row.value("name", entity.key);
         entity.canvas_type = row.value("canvas_type", std::string());
+        entity.comparison_group = row.value("comparison_group", std::string());
         entity.canvas_index = row.value("canvas_index", -1);
         entity.domain = row.value("domain", std::string());
         entity.primary_bus = row.value("primary_bus", -1);
@@ -18948,11 +18949,19 @@ int main(int argc, char** argv) {
                         {"insufficient_count", result.insufficient_count},
                         {"input_entity_count", entities.size()},
                         {"input_period_count", periods.size()}};
+      out["summary"]["comparison_group_counts"] = json::object();
+      for (const auto& entity : entities) {
+        const std::string group = entity.comparison_group.empty()
+            ? "unclassified" : entity.comparison_group;
+        const int count = out["summary"]["comparison_group_counts"].value(group, 0);
+        out["summary"]["comparison_group_counts"][group] = count + 1;
+      }
       out["entities"] = json::array();
       for (const auto& row : result.entities) {
         out["entities"].push_back({
             {"key", row.key}, {"name", row.name},
             {"canvas_type", row.canvas_type}, {"canvas_index", row.canvas_index},
+            {"comparison_group", row.comparison_group},
             {"domain", row.domain}, {"primary_bus", row.primary_bus},
             {"secondary_bus", row.secondary_bus},
             {"dimensions", dimensions_json(row.dimensions)},

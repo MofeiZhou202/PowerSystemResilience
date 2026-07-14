@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>HySim-XJTU-HRPES</title>
-<link rel="stylesheet" href="css/style.css?v=20260714-weak-heatmap-v2"/>
+<link rel="stylesheet" href="css/style.css?v=20260714-weak-components-v4"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -1575,14 +1575,26 @@
     </div>
     <label class="sub-label" title="当前结果只使用已完成分析；自动补齐会依次运行缺失的 OPF、碳流、可靠性和弹性分析">证据
       <select id="weakEvidenceMode">
-        <option value="current" selected>当前结果</option>
-        <option value="complete">自动补齐</option>
+        <option value="current">当前结果</option>
+        <option value="complete" selected>自动补齐</option>
+      </select>
+    </label>
+    <label class="sub-label" title="按可优化元件类别进行组内辨识和 Pareto 比较">元件组
+      <select id="weakComponentGroup">
+        <option value="all" selected>全部可优化元件</option>
+        <option value="network">网架输配</option>
+        <option value="conversion">能量变换</option>
+        <option value="supply">供电电源</option>
+        <option value="flexibility">灵活调节</option>
+        <option value="demand">用户需求</option>
+        <option value="protection">保护自动化</option>
+        <option value="node">节点支撑</option>
       </select>
     </label>
     <label class="sub-label" title="进入主要排名至少需要多少类指标证据">最少维度
       <select id="weakMinimumDimensions">
-        <option value="1">1</option>
-        <option value="2" selected>2</option>
+        <option value="1" selected>1</option>
+        <option value="2">2</option>
         <option value="3">3</option>
         <option value="4">4</option>
       </select>
@@ -1600,7 +1612,7 @@
       <input id="weakResilienceThreshold" type="number" value="1" min="0.0001" step="0.5"/>
     </label>
     <label class="sub-label" title="空间对象和关键时段的最大显示数量">Top K
-      <input id="weakTopK" type="number" value="15" min="3" max="100" step="1"/>
+      <input id="weakTopK" type="number" value="30" min="3" max="100" step="1"/>
     </label>
     <button id="btnRunWeakLinks" class="toolbar-btn run-btn" title="运行时空多维薄弱环节辨识">运行辨识</button>
     <button id="btnExportWeakLinks" class="toolbar-btn" title="导出多维薄弱环节结果 JSON">结果导出</button>
@@ -2492,8 +2504,8 @@
             <div id="weakLinkSummary" class="weak-link-summary"></div>
           </div>
           <div class="topo-section weak-link-visuals">
-            <div id="weakLinkSpatialChart" class="weak-link-chart"></div>
-            <div id="weakLinkTemporalChart" class="weak-link-chart"></div>
+            <div id="weakLinkSpatialChart" class="weak-link-pressure-matrix"></div>
+            <div id="weakLinkTemporalChart" class="weak-link-pressure-matrix"></div>
           </div>
           <div class="topo-section">
             <h4>空间对象与指标关系</h4>
@@ -2763,6 +2775,6 @@
   <script src="js/core/layout_engine.js?v=20260712-hysim-layout-v1"></script>
   <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
-  <script src="js/app.js?v=20260714-weak-heatmap-v2"></script>
+  <script src="js/app.js?v=20260714-weak-components-v4"></script>
 </body>
 </html>

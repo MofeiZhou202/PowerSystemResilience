@@ -18,6 +18,7 @@ struct WeakLinkEntityEvidence {
   std::string key;
   std::string name;
   std::string canvas_type;
+  std::string comparison_group;
   int canvas_index{-1};
   std::string domain;
   int primary_bus{-1};
@@ -52,6 +53,7 @@ struct WeakLinkEntityResult {
   std::string key;
   std::string name;
   std::string canvas_type;
+  std::string comparison_group;
   int canvas_index{-1};
   std::string domain;
   int primary_bus{-1};

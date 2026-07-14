@@ -96,3 +96,29 @@ TEST_CASE("operation mode returns operational actions", "[weak-link][operation]"
   REQUIRE(result.entities.size() == 1);
   CHECK(result.entities[0].decision_hint == "emergency_reconfiguration");
 }
+
+TEST_CASE("Pareto comparison stays within optimizable component groups",
+          "[weak-link][pareto][component-group]") {
+  auto network = entity("line", {0.9, 0.8, 0.7, 0.6});
+  network.comparison_group = "network";
+  auto demand = entity("load", {0.2, 0.2, 0.2, 0.2});
+  demand.comparison_group = "demand";
+  auto weaker_network = entity("transformer", {0.3, 0.3, 0.3, 0.3});
+  weaker_network.comparison_group = "network";
+
+  MultidimensionalWeakLinkOptions options;
+  options.top_k = 10;
+  const auto result = run_multidimensional_weak_link_assessment(
+      {network, demand, weaker_network}, {}, options);
+  const auto find = [&](const std::string& key) -> const WeakLinkEntityResult& {
+    const auto it = std::find_if(result.entities.begin(), result.entities.end(),
+                                 [&](const auto& row) { return row.key == key; });
+    REQUIRE(it != result.entities.end());
+    return *it;
+  };
+  CHECK(find("line").pareto);
+  CHECK(find("line").decision_hint == "targeted_network_upgrade");
+  CHECK(find("load").pareto);
+  CHECK_FALSE(find("transformer").pareto);
+  CHECK(find("load").comparison_group == "demand");
+}

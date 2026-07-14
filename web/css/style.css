@@ -1228,6 +1228,69 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
   gap: 10px;
 }
 .weak-link-chart { min-height: 290px; }
+.weak-link-pressure-matrix {
+  min-width: 0;
+  min-height: 170px;
+  max-height: 540px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg2);
+}
+.weak-matrix-heading {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 620px;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+}
+.weak-matrix-heading h5 { margin: 0; color: var(--ink); font-size: 12px; }
+.weak-matrix-legend { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.weak-matrix-legend-item {
+  padding: 2px 5px;
+  border: 1px solid rgba(127,127,127,.18);
+  border-radius: 3px;
+  color: var(--ink);
+  font-size: 9px;
+  white-space: nowrap;
+}
+.weak-pressure-matrix-table { width: 100%; min-width: 700px; border-collapse: separate; border-spacing: 0; }
+.weak-pressure-matrix-table th,
+.weak-pressure-matrix-table td {
+  padding: 6px 7px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+  font-size: 11px;
+}
+.weak-pressure-matrix-table thead th {
+  position: sticky;
+  top: 42px;
+  z-index: 4;
+  background: var(--bg3);
+  color: var(--ink);
+}
+.weak-pressure-matrix-table th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  min-width: 150px;
+  max-width: 240px;
+  text-align: left;
+  background: var(--bg2);
+}
+.weak-pressure-matrix-table thead th:first-child { z-index: 6; background: var(--bg3); }
+.weak-pressure-matrix-table td strong { display: block; font-size: 12px; font-variant-numeric: tabular-nums; }
+.weak-pressure-matrix-table td small { display: block; margin-top: 1px; font-size: 9px; opacity: .82; }
+.weak-matrix-rank { display: inline-block; min-width: 20px; color: var(--ink2); font-weight: 400; }
+.weak-matrix-pareto { margin-right: 4px; color: #7c3aed; }
+.weak-matrix-derived { color: var(--ink); background: var(--bg3); font-variant-numeric: tabular-nums; }
 .weak-link-table { max-height: 360px; }
 .weak-link-pressure {
   display: inline-block;
@@ -1274,6 +1337,7 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
 @media (max-width: 900px) {
   .weak-link-visuals { grid-template-columns: 1fr; }
   .weak-link-chart { min-height: 250px; }
+  .weak-link-pressure-matrix { max-height: 420px; }
 }
 .cost-formula-box {
   display: flex;

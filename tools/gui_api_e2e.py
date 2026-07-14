@@ -566,6 +566,7 @@ def main() -> int:
             {
                 "key": "AC:ac_branch:1", "name": "Economic Carbon Corridor",
                 "canvas_type": "ac_branch", "canvas_index": 1, "domain": "AC",
+                "comparison_group": "network",
                 "dimensions": {
                     "economic": {"pressure": 0.95, "detail": "loading"},
                     "carbon": {"pressure": 0.85, "detail": "loss emissions"},
@@ -575,6 +576,7 @@ def main() -> int:
             {
                 "key": "AC:ac_branch:2", "name": "Reliability Resilience Feeder",
                 "canvas_type": "ac_branch", "canvas_index": 2, "domain": "AC",
+                "comparison_group": "network",
                 "dimensions": {
                     "economic": 0.10, "carbon": 0.10,
                     "reliability": 0.95, "resilience": 0.85,
@@ -583,6 +585,7 @@ def main() -> int:
             {
                 "key": "AC:ac_bus:3", "name": "Integrated Upgrade Location",
                 "canvas_type": "ac_bus", "canvas_index": 3, "domain": "AC",
+                "comparison_group": "node",
                 "dimensions": {
                     "economic": 0.80, "carbon": 0.75,
                     "reliability": 0.82, "resilience": 0.78,
@@ -591,6 +594,7 @@ def main() -> int:
             {
                 "key": "AC:ac_bus:4", "name": "Dominated Location",
                 "canvas_type": "ac_bus", "canvas_index": 4, "domain": "AC",
+                "comparison_group": "node",
                 "dimensions": {
                     "economic": 0.20, "carbon": 0.20,
                     "reliability": 0.20, "resilience": 0.20,
@@ -622,6 +626,7 @@ def main() -> int:
             weak_summary.get("compatible_count") == 1 and
             weak_summary.get("conflict_count") == 2 and
             weak_rows.get("AC:ac_bus:3", {}).get("relation") == "compatible" and
+            weak_rows.get("AC:ac_bus:3", {}).get("comparison_group") == "node" and
             weak_rows.get("AC:ac_bus:4", {}).get("pareto") is False and
             critical_periods and critical_periods[0].get("hour") == 20.0,
             "weak-link API separates Pareto, compatible, conflict, and critical periods",

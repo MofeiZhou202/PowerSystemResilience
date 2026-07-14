@@ -63,7 +63,8 @@ defaults `h=0.75`, `c=0.50`, and `g=0.60`:
 
 ### Pareto weak frontier
 
-Entities are Pareto-compared only when they have the same coverage set. Entity
+Entities are Pareto-compared only when they have the same optimizable component
+group and the same coverage set. Entity
 `j` weakly dominates entity `i` when
 
 `p_jk >= p_ik for every k in K_i`,
@@ -129,6 +130,23 @@ evidence is unavailable, not zero. The GUI currently derives pressure from:
 | Reliability | contingency/component and nodal EENS | reserved for chronological reliability traces |
 | Resilience | bus-level weighted unserved energy | disaster-step weighted unserved energy |
 
+Available evidence is also attributed to optimizable component families:
+
+- network: AC/DC lines and two-/three-winding transformers;
+- conversion: VSC, DC/DC converters, and energy routers;
+- supply: synchronous, static, renewable, PV, and external-grid sources;
+- flexibility: AC/DC storage, flexible load, VPP, microgrid, and mobile storage;
+- demand: AC/DC, asymmetric and charging demand;
+- protection: switches and AC/DC circuit breakers;
+- node support: AC/DC buses and switchable shunts.
+
+The attribution uses solved loading or capacity utilization, physical loss
+ratio, LMP-times-demand exposure, source/load/storage/converter carbon results,
+component FMEA contribution, per-load weighted disaster shedding, fault repair
+duration, and restoration switch dependence when those fields are available.
+Missing source fields remain unavailable rather than being inferred from a
+nearby bus.
+
 ## Ranking and relations
 
 For available dimension `k`, the backend computes
@@ -156,8 +174,8 @@ zero. The API returns the original evidence detail for auditability.
 
 ## Direct visual encoding
 
-The GUI presents the spatial and temporal results as annotated pressure
-heatmaps. Rows are ranked entities or critical periods, columns are the four
+The GUI presents the spatial and temporal results as native annotated pressure
+matrices that do not depend on an external chart runtime. Rows are ranked entities or critical periods, columns are the four
 dimensions, and every available cell displays its exact normalized pressure.
 The shared scale anchors `0.50`, `0.75`, and the engineering threshold `1.00`;
 values above `1.50` are color-clipped but retain their exact text and hover

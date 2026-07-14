@@ -16300,6 +16300,39 @@ const App = (() => {
     const WEAK_DIMENSION_LABELS = {
       economic: '经济', carbon: '碳排', reliability: '可靠', resilience: '韧性',
     };
+    const WEAK_GROUP_LABELS = {
+      network: '网架输配', conversion: '能量变换', supply: '供电电源',
+      flexibility: '灵活调节', demand: '用户需求', protection: '保护自动化',
+      node: '节点支撑', other: '其他元件',
+    };
+
+    function weakCanonicalCanvasType(canvasType, domain = '') {
+      const type = String(canvasType || '').toLowerCase();
+      const isDc = String(domain || '').toUpperCase() === 'DC';
+      const aliases = {
+        branch: isDc ? 'dc_branch' : 'ac_branch', acbranch: 'ac_branch', dcbranch: 'dc_branch',
+        trafo: 'transformer_2w', trafo3w: 'transformer_3w',
+        vsc: 'vsc_converter', dcdcconverter: 'dcdc_converter', energyrouter: 'energy_router',
+        gen: 'generator', extgrid: 'external_grid', sgen: 'static_generator',
+        rengen: 'renewable_gen', pv: 'pv_system',
+        sw: 'ac_switch', cb: 'ac_circuit_breaker', dccb: 'dc_circuit_breaker',
+        ac: 'ac_bus', dc: 'dc_bus', dcstorage: 'dc_storage',
+      };
+      return aliases[type] || type;
+    }
+
+    function weakComparisonGroup(canvasType, domain = '') {
+      const type = weakCanonicalCanvasType(canvasType, domain);
+      if (['ac_branch', 'dc_branch', 'transformer_2w', 'transformer_3w'].includes(type)) return 'network';
+      if (['vsc_converter', 'dcdc_converter', 'energy_router'].includes(type)) return 'conversion';
+      if (['generator', 'external_grid', 'static_generator', 'renewable_gen', 'pv_system',
+        'dc_static_generator', 'dc_pv_array'].includes(type)) return 'supply';
+      if (['storage', 'dc_storage', 'flexible_load', 'vpp', 'microgrid', 'mobile_storage'].includes(type)) return 'flexibility';
+      if (['load', 'dc_load', 'asymmetric_load', 'motor', 'charger', 'charging_station'].includes(type)) return 'demand';
+      if (['ac_switch', 'ac_circuit_breaker', 'dc_circuit_breaker'].includes(type)) return 'protection';
+      if (['ac_bus', 'dc_bus', 'shunt'].includes(type)) return 'node';
+      return 'other';
+    }
 
     function weakPositiveNumber(id, fallback) {
       const value = Number(document.getElementById(id)?.value);
@@ -16307,7 +16340,70 @@ const App = (() => {
     }
 
     function weakEntityKey(canvasType, index, domain = '') {
-      return `${String(domain || '').toUpperCase()}:${String(canvasType || 'component').toLowerCase()}:${index}`;
+      return `${String(domain || '').toUpperCase()}:${weakCanonicalCanvasType(canvasType || 'component', domain)}:${index}`;
+    }
+
+    function weakFirstFinite(...values) {
+      for (const value of values) {
+        const number = Number(value);
+        if (Number.isFinite(number)) return number;
+      }
+      return null;
+    }
+
+    function weakMetric(row, labels) {
+      const wanted = new Set(labels);
+      const metric = (Array.isArray(row?.metrics) ? row.metrics : [])
+        .find(item => wanted.has(String(item?.label || item?.name || '')));
+      const value = Number(metric?.value);
+      return Number.isFinite(value) ? value : null;
+    }
+
+    function weakComponentCatalog(system) {
+      const catalog = new Map();
+      const add = (canvasType, domain, rows, busKeys = ['bus'], capacityKeys = []) => {
+        (rows || []).forEach((item, position) => {
+          const index = Number(item?.index ?? position);
+          if (!Number.isFinite(index)) return;
+          const buses = busKeys.map(key => Number(item?.[key])).filter(Number.isFinite);
+          const capacity = weakFirstFinite(...capacityKeys.map(key => item?.[key]));
+          catalog.set(`${canvasType}:${index}`, {
+            item, canvas_type: canvasType, domain, index,
+            name: item?.name || `${canvasType} ${index}`,
+            primary_bus: buses[0] ?? -1, secondary_bus: buses[1] ?? -1,
+            capacity: capacity !== null && capacity > 0 ? capacity : null,
+          });
+        });
+      };
+      const ac = system.ac || {}, dc = system.dc || {};
+      add('ac_branch', 'AC', ac.branches, ['from_bus', 'to_bus'], ['rate_a_mva']);
+      add('transformer_2w', 'AC', ac.transformers_2w, ['hv_bus', 'lv_bus'], ['sn_mva']);
+      add('transformer_3w', 'AC', ac.transformers_3w, ['hv_bus', 'mv_bus', 'lv_bus'], ['sn_hv_mva', 'sn_mva']);
+      add('generator', 'AC', ac.generators, ['bus'], ['pmax_mw', 'sn_mva']);
+      add('external_grid', 'AC', ac.external_grids, ['bus']);
+      add('load', 'AC', ac.loads, ['bus'], ['p_mw', 'sn_mva']);
+      add('flexible_load', 'AC', ac.flexible_loads, ['bus'], ['p_mw']);
+      add('asymmetric_load', 'AC', ac.asymmetric_loads, ['bus'], ['sn_mva']);
+      add('storage', 'AC', ac.storage, ['bus'], ['p_rated_mw', 'pmax_mw']);
+      add('static_generator', 'AC', ac.static_generators, ['bus'], ['p_rated_mw', 'pmax_mw', 'sn_mva']);
+      add('renewable_gen', 'AC', ac.renewable_gens, ['bus'], ['p_rated_mw']);
+      add('pv_system', 'AC', ac.pv_systems, ['bus'], ['p_rated_mw', 'sn_mva']);
+      add('shunt', 'AC', ac.shunts, ['bus']);
+      add('ac_switch', 'AC', ac.switches, ['bus_from', 'bus_to']);
+      add('ac_circuit_breaker', 'AC', ac.circuit_breakers, ['bus_from', 'bus_to']);
+      add('dc_branch', 'DC', dc.branches, ['from_bus', 'to_bus'], ['rate_mw', 'rate_a_mw']);
+      add('dc_load', 'DC', dc.loads, ['bus'], ['p_mw']);
+      add('dc_storage', 'DC', [...(dc.storage || []), ...(dc.dc_storage || [])], ['bus'], ['p_rated_mw', 'pmax_mw']);
+      add('dc_static_generator', 'DC', [...(dc.static_generators || []), ...(dc.dc_static_generators || [])], ['bus'], ['p_rated_mw', 'pmax_mw']);
+      add('dc_pv_array', 'DC', dc.pv_arrays, ['bus'], ['p_rated_mw']);
+      add('dcdc_converter', 'DC', dc.dcdc_converters, ['bus_in', 'bus_out'], ['p_rated_mw', 'sn_mva']);
+      add('dc_circuit_breaker', 'DC', dc.dc_circuit_breakers, ['bus_from', 'bus_to']);
+      add('vsc_converter', 'ACDC', system.vsc_converters, ['bus_ac', 'bus_dc'], ['sn_mva', 'p_rated_mw']);
+      add('energy_router', 'ACDC', system.energy_routers, ['bus_ac', 'bus_dc'], ['rated_power_mw', 'sn_mva']);
+      add('vpp', 'AC', system.vpps, ['pcc_bus'], ['pmax_mw', 'capacity_mw']);
+      add('microgrid', 'AC', system.microgrids, ['pcc_bus'], ['pmax_mw', 'capacity_mw']);
+      add('mobile_storage', 'AC', system.mobile_storage, ['bus'], ['p_rated_mw']);
+      return catalog;
     }
 
     function collectWeakLinkEvidence() {
@@ -16318,6 +16414,7 @@ const App = (() => {
       const reliabilityThreshold = weakPositiveNumber('weakReliabilityThreshold', 1);
       const resilienceThreshold = weakPositiveNumber('weakResilienceThreshold', 1);
       const system = Canvas.buildSystemJson ? Canvas.buildSystemJson() : { ac: {}, dc: {} };
+      const componentCatalog = weakComponentCatalog(system);
 
       const mergeEntity = (meta, dimension, pressure, detail) => {
         const value = Number(pressure);
@@ -16329,6 +16426,7 @@ const App = (() => {
             key,
             name: meta.name || key,
             canvas_type: meta.canvas_type || '',
+            comparison_group: meta.comparison_group || weakComparisonGroup(meta.canvas_type),
             canvas_index: Number.isFinite(Number(meta.canvas_index)) ? Number(meta.canvas_index) : -1,
             domain: meta.domain || '',
             primary_bus: Number.isFinite(Number(meta.primary_bus)) ? Number(meta.primary_bus) : -1,
@@ -16336,6 +16434,8 @@ const App = (() => {
             dimensions: {},
           };
           entities.set(key, row);
+        } else if (!row.comparison_group && meta.comparison_group) {
+          row.comparison_group = meta.comparison_group;
         }
         const previous = row.dimensions[dimension];
         if (!previous || value > Number(previous.pressure || 0)) {
@@ -16360,6 +16460,7 @@ const App = (() => {
         key: weakEntityKey(domain === 'DC' ? 'dc_bus' : 'ac_bus', bus, domain),
         name: name || `${domain} Bus ${bus}`,
         canvas_type: domain === 'DC' ? 'dc_bus' : 'ac_bus',
+        comparison_group: 'node',
         canvas_index: Number(bus), domain, primary_bus: Number(bus), secondary_bus: -1,
       });
       const branchMeta = (domain, row, fallbackIndex = 0) => {
@@ -16368,9 +16469,26 @@ const App = (() => {
           key: weakEntityKey(domain === 'DC' ? 'dc_branch' : 'ac_branch', index, domain),
           name: row.display_name || row.name || `${domain} Branch ${index}`,
           canvas_type: domain === 'DC' ? 'dc_branch' : 'ac_branch',
+          comparison_group: 'network',
           canvas_index: index, domain,
           primary_bus: Number(row.from_bus ?? row.from ?? row.bus_in ?? -1),
           secondary_bus: Number(row.to_bus ?? row.to ?? row.bus_out ?? -1),
+        };
+      };
+      const componentMeta = (row, fallbackIndex = 0) => {
+        const rawType = row?.canvas_type || row?.component_type || 'component';
+        const index = Number(row?.canvas_index ?? row?.index ?? fallbackIndex);
+        const initialDomain = String(row?.domain || '').toUpperCase();
+        const canvasType = weakCanonicalCanvasType(rawType, initialDomain);
+        const info = componentCatalog.get(`${canvasType}:${index}`);
+        const domain = String(initialDomain || info?.domain || '').toUpperCase();
+        return {
+          key: weakEntityKey(canvasType, index, domain),
+          name: row?.name || info?.name || `${canvasType} ${index}`,
+          canvas_type: canvasType, canvas_index: index, domain,
+          comparison_group: weakComparisonGroup(canvasType),
+          primary_bus: info?.primary_bus ?? -1,
+          secondary_bus: info?.secondary_bus ?? -1,
         };
       };
 
@@ -16393,6 +16511,7 @@ const App = (() => {
 
       const acBusRows = Array.isArray(_lastOpfData?.ac_bus_results)
         ? _lastOpfData.ac_bus_results : [];
+      const lmpByBus = new Map();
       const lmpValues = acBusRows.map(row => Number(row.lmp_p)).filter(Number.isFinite);
       if (lmpValues.length) {
         const sorted = [...lmpValues].sort((a, b) => a - b);
@@ -16402,10 +16521,61 @@ const App = (() => {
           const lmp = Number(row.lmp_p);
           if (!Number.isFinite(lmp)) return;
           const bus = Number(row.index ?? row.bus ?? system.ac?.buses?.[position]?.index ?? position);
+          lmpByBus.set(bus, lmp);
           mergeEntity(busMeta('AC', bus), 'economic', Math.abs(lmp - median) / scale,
             `LMP ${lmp.toFixed(3)}，相对中位值偏差 ${Math.abs(lmp - median).toFixed(3)}`);
         });
       }
+
+      const componentRows = Array.isArray(pf.component_results) ? pf.component_results : [];
+      const relativeDispatch = [];
+      componentRows.forEach((row, position) => {
+        const meta = componentMeta(row, position);
+        const group = meta.comparison_group;
+        if (group === 'node' || group === 'other') return;
+        const info = componentCatalog.get(`${meta.canvas_type}:${meta.canvas_index}`);
+        const loading = weakMetric(row, ['Loading', '负载率']);
+        const powerValues = (Array.isArray(row.metrics) ? row.metrics : [])
+          .filter(metric => String(metric.quantity || '').toLowerCase() === 'p' &&
+            !/loss|损耗|净注入/i.test(String(metric.label || metric.name || '')))
+          .map(metric => Math.abs(Number(metric.value))).filter(Number.isFinite);
+        const throughput = powerValues.length ? Math.max(...powerValues) : null;
+        if (loading !== null) {
+          mergeEntity(meta, 'economic', Math.max(0, loading) / economicThreshold,
+            `设备负载率 ${loading.toFixed(1)}% / 阈值 ${economicThreshold.toFixed(1)}%`);
+        } else if (throughput !== null && info?.capacity &&
+                   !['demand', 'protection'].includes(group)) {
+          const utilization = throughput / info.capacity * 100;
+          mergeEntity(meta, 'economic', utilization / economicThreshold,
+            `容量利用率 ${utilization.toFixed(1)}%（${throughput.toFixed(3)} / ${info.capacity.toFixed(3)}）`);
+        } else if (throughput !== null && group === 'supply') {
+          relativeDispatch.push({ meta, throughput });
+        }
+        const loss = weakMetric(row, ['Loss', '损耗']);
+        if (loss !== null && throughput !== null && throughput > 1e-9 &&
+            ['network', 'conversion'].includes(group)) {
+          const ratio = Math.abs(loss) / throughput;
+          mergeEntity(meta, 'economic', ratio / 0.05,
+            `损耗率 ${(ratio * 100).toFixed(2)}% / 关注阈值 5.00%`);
+        }
+        if (group === 'demand' && throughput !== null) {
+          const lmp = lmpByBus.get(meta.primary_bus);
+          if (Number.isFinite(lmp)) {
+            relativeDispatch.push({ meta, throughput: Math.abs(lmp) * throughput,
+                                    bill: true, lmp });
+          }
+        }
+      });
+      const sourceScale = Math.max(...relativeDispatch.filter(row => !row.bill).map(row => row.throughput), 0);
+      const billScale = Math.max(...relativeDispatch.filter(row => row.bill).map(row => row.throughput), 0);
+      relativeDispatch.forEach(row => {
+        const scale = row.bill ? billScale : sourceScale;
+        if (!(scale > 0)) return;
+        mergeEntity(row.meta, 'economic', row.throughput / scale,
+          row.bill
+            ? `节点边际用电成本暴露 ${row.throughput.toFixed(3)}（LMP ${row.lmp.toFixed(3)} × 负荷）`
+            : `无显式容量设备的相对出力 ${(row.throughput / scale * 100).toFixed(1)}%`);
+      });
 
       const carbon = _lastCarbonData || {};
       (carbon.bus_carbon || []).forEach(row => {
@@ -16433,6 +16603,84 @@ const App = (() => {
         });
       });
 
+      const loadCarbonRows = [
+        ['AC', 'load', carbon.load_carbon || []],
+        ['DC', 'dc_load', carbon.dc_load_carbon || []],
+      ];
+      loadCarbonRows.forEach(([domain, canvasType, rows]) => rows.forEach((row, position) => {
+        const index = Number(row.load_index ?? row.canvas_index ?? row.index ?? position);
+        const intensity = Number(row.carbon_intensity_tco2_mwh);
+        if (!Number.isFinite(intensity)) return;
+        const info = componentCatalog.get(`${canvasType}:${index}`);
+        mergeEntity({
+          key: weakEntityKey(canvasType, index, domain),
+          name: info?.name || row.name || `${canvasType} ${index}`,
+          canvas_type: canvasType, canvas_index: index, domain,
+          comparison_group: 'demand', primary_bus: Number(row.bus ?? info?.primary_bus ?? -1),
+          secondary_bus: -1,
+        }, 'carbon', intensity / carbonThreshold,
+        `用户碳强度 ${intensity.toFixed(4)} tCO2/MWh / 阈值 ${carbonThreshold.toFixed(4)}`);
+      }));
+
+      (carbon.storage_carbon || []).forEach((row, position) => {
+        const canvasType = String(row.canvas_type || (row.is_dc ? 'dc_storage' : 'storage')).toLowerCase();
+        const index = Number(row.canvas_index ?? row.storage_index ?? position);
+        const intensity = weakFirstFinite(row.carbon_intensity_tco2_mwh,
+                                          row.soc_carbon_intensity_tco2_mwh);
+        if (intensity === null) return;
+        const info = componentCatalog.get(`${canvasType}:${index}`);
+        mergeEntity({
+          key: weakEntityKey(canvasType, index, row.is_dc ? 'DC' : 'AC'),
+          name: info?.name || `${canvasType} ${index}`,
+          canvas_type: canvasType, canvas_index: index,
+          domain: row.is_dc ? 'DC' : 'AC', comparison_group: 'flexibility',
+          primary_bus: Number(row.bus ?? info?.primary_bus ?? -1), secondary_bus: -1,
+        }, 'carbon', intensity / carbonThreshold,
+        `储能碳强度 ${intensity.toFixed(4)} tCO2/MWh / 阈值 ${carbonThreshold.toFixed(4)}`);
+      });
+
+      const converterCarbonRows = [
+        ['vsc_converter', 'ACDC', carbon.vsc_carbon || [], 'converter_index'],
+        ['dcdc_converter', 'DC', carbon.dcdc_carbon || [], 'converter_index'],
+      ];
+      converterCarbonRows.forEach(([canvasType, domain, rows, indexField]) => {
+        const maximum = Math.max(...rows.map(row => Number(row.total_emissions_tco2 || 0)), 0);
+        rows.forEach((row, position) => {
+          const emissions = Number(row.total_emissions_tco2);
+          if (!Number.isFinite(emissions) || !(maximum > 0)) return;
+          const index = Number(row[indexField] ?? position);
+          const info = componentCatalog.get(`${canvasType}:${index}`);
+          mergeEntity({
+            key: weakEntityKey(canvasType, index, domain),
+            name: info?.name || `${canvasType} ${index}`,
+            canvas_type: canvasType, canvas_index: index, domain,
+            comparison_group: 'conversion', primary_bus: info?.primary_bus ?? -1,
+            secondary_bus: info?.secondary_bus ?? -1,
+          }, 'carbon', emissions / maximum,
+          `变换损耗碳排 ${emissions.toFixed(6)} tCO2（同类最大值占比 ${(emissions / maximum * 100).toFixed(1)}%）`);
+        });
+      });
+
+      const sourceCarbonExposure = [];
+      componentRows.forEach((row, position) => {
+        const meta = componentMeta(row, position);
+        if (meta.comparison_group !== 'supply') return;
+        const info = componentCatalog.get(`${meta.canvas_type}:${meta.canvas_index}`);
+        const factor = weakFirstFinite(info?.item?.emission_factor_tco2_mwh,
+                                       info?.item?.co2_emission_rate);
+        if (factor === null || factor < 0) return;
+        const power = (Array.isArray(row.metrics) ? row.metrics : [])
+          .filter(metric => String(metric.quantity || '').toLowerCase() === 'p' &&
+            !/loss|损耗|净注入/i.test(String(metric.label || metric.name || '')))
+          .map(metric => Math.abs(Number(metric.value))).filter(Number.isFinite);
+        if (!power.length) return;
+        sourceCarbonExposure.push({ meta, factor, emissions: Math.max(...power) * factor });
+      });
+      const sourceEmissionScale = Math.max(...sourceCarbonExposure.map(row => row.emissions), 0);
+      sourceCarbonExposure.forEach(row => mergeEntity(
+        row.meta, 'carbon', sourceEmissionScale > 0 ? row.emissions / sourceEmissionScale : 0,
+        `电源运行碳排暴露 ${row.emissions.toFixed(6)} tCO2/h，排放因子 ${row.factor.toFixed(4)} tCO2/MWh`));
+
       const reliability = _lastReliabilityData || {};
       const reliabilityRows = Array.isArray(reliability.contingencies) && reliability.contingencies.length
         ? reliability.contingencies
@@ -16440,13 +16688,15 @@ const App = (() => {
       reliabilityRows.forEach((row, position) => {
         const eens = Number(row.eens_contribution ?? row.associated_eens_mwh_yr ?? row.eens_contribution_mwh_yr);
         if (!Number.isFinite(eens)) return;
-        const canvasType = row.canvas_type || row.component_type || 'component';
+        const rawCanvasType = row.canvas_type || row.component_type || 'component';
         const canvasIndex = Number(row.canvas_index ?? row.component_index ?? row.index ?? position);
-        const domain = row.component_domain || (String(canvasType).toLowerCase().includes('dc') ? 'DC' : 'AC');
+        const domain = row.component_domain || (String(rawCanvasType).toLowerCase().includes('dc') ? 'DC' : 'AC');
+        const canvasType = weakCanonicalCanvasType(rawCanvasType, domain);
         mergeEntity({
           key: weakEntityKey(canvasType, canvasIndex, domain),
           name: row.display_name || row.component_name || `${canvasType} ${canvasIndex}`,
           canvas_type: canvasType, canvas_index: canvasIndex, domain,
+          comparison_group: weakComparisonGroup(canvasType, domain),
           primary_bus: Number(row.primary_bus ?? row.from_bus ?? -1),
           secondary_bus: Number(row.secondary_bus ?? row.to_bus ?? -1),
         }, 'reliability', eens / reliabilityThreshold,
@@ -16492,6 +16742,79 @@ const App = (() => {
         const bus = Number(parts[2]);
         mergeEntity(busMeta(domain, bus), 'resilience', weightedMwh / resilienceThreshold,
           `灾害期加权未供 ${weightedMwh.toFixed(4)} MWh / 阈值 ${resilienceThreshold.toFixed(4)}`);
+      });
+
+      const richLoads = Array.isArray(resilience.rich_loads) ? resilience.rich_loads : [];
+      const richShed = Array.isArray(resilience.rich_load_shed_mw)
+        ? resilience.rich_load_shed_mw : [];
+      richLoads.forEach((load, position) => {
+        const domain = String(load.kind || '').startsWith('DC') ? 'DC' : 'AC';
+        const canvasType = domain === 'DC' ? 'dc_load' : 'load';
+        const index = Number(load.index ?? position);
+        if (!Number.isFinite(index) || load.virtual_bus_load) return;
+        let weightedMwh = 0;
+        let firstShedHour = null;
+        let restoredHour = null;
+        hours.forEach((hour, step) => {
+          const nextHour = Number(hours[step + 1]);
+          const dt = Number.isFinite(nextHour) && nextHour > hour ? nextHour - hour : 1;
+          const shed = Math.max(0, Number(richShed?.[step]?.[position] || 0));
+          weightedMwh += shed * Math.max(1, Number(load.importance || 1)) * dt;
+          if (shed > 1e-9 && firstShedHour === null) firstShedHour = Number(hour);
+          if (firstShedHour !== null && restoredHour === null && shed <= 1e-9 &&
+              Number(hour) > firstShedHour) restoredHour = Number(hour);
+        });
+        if (!(weightedMwh > 0) && firstShedHour === null) return;
+        const restorationTime = firstShedHour === null ? 0
+          : Math.max(0, (restoredHour ?? Number(hours[hours.length - 1] ?? firstShedHour)) - firstShedHour);
+        const info = componentCatalog.get(`${canvasType}:${index}`);
+        mergeEntity({
+          key: weakEntityKey(canvasType, index, domain),
+          name: load.name || info?.name || `${canvasType} ${index}`,
+          canvas_type: canvasType, canvas_index: index, domain,
+          comparison_group: 'demand', primary_bus: Number(load.bus ?? info?.primary_bus ?? -1),
+          secondary_bus: -1,
+        }, 'resilience', weightedMwh / resilienceThreshold,
+        `逐负荷加权未供 ${weightedMwh.toFixed(4)} MWh / 阈值 ${resilienceThreshold.toFixed(4)}；复电时间 ${restorationTime.toFixed(2)} h；优先级 ${load.priority || '—'}`);
+      });
+
+      const switchDependencies = new Map();
+      const countSwitches = series => (series || []).forEach(ids => (ids || []).forEach(id => {
+        const index = Number(id);
+        if (Number.isFinite(index)) switchDependencies.set(index, (switchDependencies.get(index) || 0) + 1);
+      }));
+      countSwitches(resilience.switched_open_ids);
+      countSwitches(resilience.switched_closed_ids);
+      const maxSwitchDependency = Math.max(...switchDependencies.values(), 0);
+      switchDependencies.forEach((count, index) => {
+        const info = componentCatalog.get(`ac_switch:${index}`);
+        mergeEntity({
+          key: weakEntityKey('ac_switch', index, 'AC'),
+          name: info?.name || `AC Switch ${index}`,
+          canvas_type: 'ac_switch', canvas_index: index, domain: 'AC',
+          comparison_group: 'protection', primary_bus: info?.primary_bus ?? -1,
+          secondary_bus: info?.secondary_bus ?? -1,
+        }, 'resilience', maxSwitchDependency > 0 ? count / maxSwitchDependency : 0,
+        `灾害恢复中执行 ${count} 次开合动作，表示对该自动化设备的重构依赖`);
+      });
+
+      const faultRows = Array.isArray(resilience.fault_sequence) ? resilience.fault_sequence : [];
+      const maxRepairDuration = Math.max(...faultRows.map(row =>
+        Math.max(0, Number(row.repair_hr || 0) - Number(row.start_hr || 0))), 0);
+      faultRows.forEach((fault, position) => {
+        const domain = String(fault.branch_kind || fault.branch_type || 'AC').toUpperCase() === 'DC' ? 'DC' : 'AC';
+        const canvasType = domain === 'DC' ? 'dc_branch' : 'ac_branch';
+        const index = Number(fault.branch_index ?? fault.branch_id ?? position);
+        const duration = Math.max(0, Number(fault.repair_hr || 0) - Number(fault.start_hr || 0));
+        const info = componentCatalog.get(`${canvasType}:${index}`);
+        mergeEntity({
+          key: weakEntityKey(canvasType, index, domain),
+          name: fault.name || info?.name || `${canvasType} ${index}`,
+          canvas_type: canvasType, canvas_index: index, domain,
+          comparison_group: 'network', primary_bus: info?.primary_bus ?? -1,
+          secondary_bus: info?.secondary_bus ?? -1,
+        }, 'resilience', maxRepairDuration > 0 ? duration / maxRepairDuration : 0,
+        `灾害故障持续 ${duration.toFixed(2)} h（同场景最长修复时间占比 ${maxRepairDuration > 0 ? (duration / maxRepairDuration * 100).toFixed(1) : '0.0'}%）`);
       });
 
       const crossval = Array.isArray(_lastTspfData?.crossval) ? _lastTspfData.crossval : [];
@@ -16551,62 +16874,78 @@ const App = (() => {
       return score?.available ? Number(score.normalized_pressure || 0) : null;
     }
 
+    function weakPressureLevel(value) {
+      if (!Number.isFinite(value)) return 'missing';
+      if (value >= 1) return 'critical';
+      if (value >= 0.75) return 'high';
+      if (value >= 0.5) return 'medium';
+      return 'low';
+    }
+
+    function weakPressureState(level) {
+      return { critical: '超阈', high: '高压', medium: '关注', low: '低压', missing: '缺失' }[level] || '';
+    }
+
+    function renderWeakPressureMatrix(containerId, title, rows, rowLabel, rowMeta) {
+      const container = document.getElementById(containerId);
+      if (!container) return;
+      const values = Array.isArray(rows) ? rows : [];
+      const legend = [
+        ['low', '<0.50 低压'], ['medium', '0.50–0.75 关注'],
+        ['high', '0.75–1.00 高压'], ['critical', '≥1.00 超阈'],
+        ['missing', '— 缺失'],
+      ].map(([level, label]) => `<span class="weak-matrix-legend-item weak-pressure-${level}">${label}</span>`).join('');
+      if (!values.length) {
+        container.innerHTML = `<div class="weak-matrix-heading"><h5>${escapeHtml(title)}</h5><div class="weak-matrix-legend">${legend}</div></div><p class="empty-hint">暂无可用证据</p>`;
+        return;
+      }
+      let html = `<div class="weak-matrix-heading"><h5>${escapeHtml(title)}</h5><div class="weak-matrix-legend">${legend}</div></div>`
+        + `<table class="weak-pressure-matrix-table"><thead><tr><th>${escapeHtml(rowLabel)}</th>`
+        + WEAK_DIMENSIONS.map(dimension => `<th>${escapeHtml(WEAK_DIMENSION_LABELS[dimension])}</th>`).join('')
+        + '<th>严重度</th><th>共识度</th><th>判定</th></tr></thead><tbody>';
+      values.forEach((row, index) => {
+        const meta = rowMeta(row, index) || {};
+        html += `<tr${meta.attr || ''}><th><span class="weak-matrix-rank">${index + 1}</span>${meta.pareto ? '<span class="weak-matrix-pareto" title="Pareto 薄弱前沿">◆</span>' : ''}${escapeHtml(meta.label || String(index + 1))}</th>`;
+        WEAK_DIMENSIONS.forEach(dimension => {
+          const value = weakDimensionScore(row, dimension);
+          const level = weakPressureLevel(value);
+          const detail = row?.dimensions?.[dimension]?.detail || '缺少该维度证据';
+          html += `<td class="weak-pressure-${level}" title="${escapeHtml(detail)}"><strong>${Number.isFinite(value) ? value.toFixed(2) : '—'}</strong><small>${weakPressureState(level)}</small></td>`;
+        });
+        const severity = Number(row.severity);
+        const consensus = Number(row.consensus);
+        html += `<td class="weak-matrix-derived">${Number.isFinite(severity) ? severity.toFixed(2) : '—'}</td>`
+          + `<td class="weak-matrix-derived">${Number.isFinite(consensus) ? consensus.toFixed(2) : '—'}</td>`
+          + `<td><span class="weak-link-relation ${escapeHtml(meta.relationClass || '')}">${escapeHtml(meta.relation || '—')}</span></td></tr>`;
+      });
+      html += '</tbody></table>';
+      container.innerHTML = html;
+    }
+
     function renderWeakLinkCharts(data) {
-      if (typeof Plotly === 'undefined') return;
       const relationLabels = {
-        compatible: '相融', conflict: '冲突', single_dimension: '单维',
+        compatible: '相融', conflict: '潜在冲突', single_dimension: '单维主导',
         watch: '观察', insufficient_evidence: '证据不足',
       };
-      const pressureColors = [
-        [0.00, '#e8f1f2'], [0.33, '#a7d8c5'], [0.50, '#f6d365'],
-        [0.67, '#ef8a62'], [1.00, '#b2182b'],
-      ];
-      const heatmapTrace = (rows, labels) => ({
-        type: 'heatmap',
-        x: WEAK_DIMENSIONS.map(dimension => WEAK_DIMENSION_LABELS[dimension]),
-        y: labels,
-        z: rows.map(row => WEAK_DIMENSIONS.map(dimension => {
-          const value = weakDimensionScore(row, dimension);
-          return Number.isFinite(value) ? Math.min(value, 1.5) : null;
-        })),
-        text: rows.map(row => WEAK_DIMENSIONS.map(dimension => {
-          const value = weakDimensionScore(row, dimension);
-          return Number.isFinite(value) ? value.toFixed(2) : '—';
-        })),
-        customdata: rows.map(row => WEAK_DIMENSIONS.map(dimension =>
-          row?.dimensions?.[dimension]?.detail || '缺少该维度证据')),
-        texttemplate: '%{text}', textfont: { size: 11 },
-        zmin: 0, zmax: 1.5, colorscale: pressureColors,
-        hoverongaps: false,
-        hovertemplate: '%{y}<br>%{x}压力 %{text}<br>%{customdata}<extra></extra>',
-        colorbar: {
-          title: '压力', thickness: 12, len: 0.78,
-          tickvals: [0, 0.5, 0.75, 1, 1.5],
-          ticktext: ['0', '0.5', '0.75', '1 阈值', '≥1.5'],
-        },
+      const maps = typeof Canvas !== 'undefined' && Canvas.getCompBusMap ? Canvas.getCompBusMap() : null;
+      renderWeakPressureMatrix('weakLinkSpatialChart', '空间对象四维压力', data.entities, '空间对象', row => {
+        let attr = canvasRowAttr({
+          canvas_type: row.canvas_type, canvas_index: row.canvas_index,
+          index: row.canvas_index, primary_bus: row.primary_bus,
+        }, maps);
+        if (!attr && Number(row.primary_bus) >= 0) attr = busClickAttr(row.primary_bus, maps);
+        return {
+          attr, label: row.name || row.key, pareto: row.pareto,
+          relation: `${WEAK_GROUP_LABELS[row.comparison_group] || row.comparison_group || '其他'} · ${relationLabels[row.relation] || row.relation}`,
+          relationClass: row.relation,
+        };
       });
-      const heatmapLayout = (title, rowCount, leftMargin) => ({
-        title, height: Math.max(290, Math.min(610, 105 + rowCount * 30)),
-        margin: { l: leftMargin, r: 64, t: 42, b: 42 },
-        xaxis: { side: 'top', fixedrange: true },
-        yaxis: { autorange: 'reversed', fixedrange: true, automargin: true },
-        paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
-        font: { color: '#111827', size: 10 },
-      });
-
-      const entities = (Array.isArray(data.entities) ? data.entities : []).slice(0, 20);
-      const entityLabels = entities.map(row =>
-        `${row.pareto ? '◆ ' : ''}${row.name || row.key} · ${relationLabels[row.relation] || row.relation || '—'}`);
-      Plotly.react('weakLinkSpatialChart', [heatmapTrace(entities, entityLabels)],
-        heatmapLayout('对象 × 指标压力（◆ Pareto）', entities.length, 150),
-        { responsive: true, displaylogo: false });
-
-      const periods = (Array.isArray(data.critical_periods) ? data.critical_periods : []).slice(0, 20);
-      const periodLabels = periods.map(row =>
-        `${Number(row.hour).toFixed(2)} h · ${WEAK_DIMENSION_LABELS[row.dominant_dimension] || '—'}`);
-      Plotly.react('weakLinkTemporalChart', [heatmapTrace(periods, periodLabels)],
-        heatmapLayout('关键时段 × 指标压力', periods.length, 92),
-        { responsive: true, displaylogo: false });
+      renderWeakPressureMatrix('weakLinkTemporalChart', '关键时段四维压力', data.critical_periods, '时段', row => ({
+        label: `${Number(row.hour).toFixed(2)} h`,
+        relation: WEAK_DIMENSION_LABELS[row.dominant_dimension]
+          ? `${WEAK_DIMENSION_LABELS[row.dominant_dimension]}主导` : '—',
+        relationClass: '',
+      }));
     }
 
     function showWeakLinkResults(data) {
@@ -16619,6 +16958,7 @@ const App = (() => {
         `${WEAK_DIMENSION_LABELS[dimension]} ${coverage[dimension] ? '有' : '缺'}`).join(' · ');
       const kpis = [
         [summary.input_entity_count ?? 0, '空间对象'],
+        [Object.keys(summary.comparison_group_counts || {}).filter(group => group !== 'unclassified').length, '可比元件组'],
         [summary.pareto_count ?? 0, 'Pareto 候选'],
         [summary.compatible_count ?? 0, '相融候选'],
         [summary.conflict_count ?? 0, '潜在冲突'],
@@ -16640,24 +16980,40 @@ const App = (() => {
         coordinated_dispatch: '协同调度', emergency_reconfiguration: '应急重构',
         redispatch_and_demand_response: '重调度/需求响应',
         operational_pareto_review: '运行Pareto权衡', enhanced_monitoring: '加强监视',
+        network_emergency_reconfiguration: '网架应急重构',
+        converter_control_coordination: '换流控制协调',
+        economic_low_carbon_redispatch: '经济低碳重调度',
+        flexibility_dispatch: '灵活资源调度',
+        demand_response_and_priority_service: '需求响应/优先供电',
+        automation_and_flisr: '自动化/FLISR',
+        network_hardening_and_redundancy: '网架加固/冗余',
+        capacity_and_loss_upgrade: '增容/降损', network_pareto_review: '网架Pareto权衡',
+        targeted_network_upgrade: '定向网架改造',
+        converter_efficiency_upgrade: '换流效率改造',
+        converter_redundancy_upgrade: '换流冗余改造',
+        economic_low_carbon_supply_upgrade: '经济低碳电源改造',
+        storage_and_flexibility_upgrade: '储能/灵活性扩展',
+        demand_efficiency_and_service_upgrade: '用能效率/供电服务',
+        automation_and_protection_upgrade: '自动化/保护升级',
+        voltage_and_topology_support: '电压/拓扑支撑',
       };
       const scoreCell = (row, dimension) => {
         const score = row?.dimensions?.[dimension];
         if (!score?.available) return '<td class="weak-pressure-missing">—</td>';
         const value = Number(score.normalized_pressure);
-        const level = value >= 1 ? 'critical' : value >= 0.75 ? 'high'
-          : value >= 0.5 ? 'medium' : 'low';
+        const level = weakPressureLevel(value);
         return `<td class="weak-pressure-${level}" title="${escapeHtml(score.detail || '')}"><span class="weak-link-pressure">${value.toFixed(2)}</span></td>`;
       };
       const maps = typeof Canvas !== 'undefined' && Canvas.getCompBusMap ? Canvas.getCompBusMap() : null;
-      let entityHtml = '<table><thead><tr><th>#</th><th>对象</th><th>Pareto</th><th>经济</th><th>碳排</th><th>可靠</th><th>韧性</th><th>指标关系</th><th>主导</th><th>决策方向</th></tr></thead><tbody>';
+      let entityHtml = '<table><thead><tr><th>#</th><th>对象</th><th>可比组</th><th>Pareto</th><th>经济</th><th>碳排</th><th>可靠</th><th>韧性</th><th>指标关系</th><th>主导</th><th>决策方向</th></tr></thead><tbody>';
       (data.entities || []).forEach((row, index) => {
         let attr = canvasRowAttr({
           canvas_type: row.canvas_type, canvas_index: row.canvas_index,
           index: row.canvas_index, primary_bus: row.primary_bus,
         }, maps);
         if (!attr && Number(row.primary_bus) >= 0) attr = busClickAttr(row.primary_bus, maps);
-        entityHtml += `<tr${attr}><td>${index + 1}</td><td>${escapeHtml(row.name || row.key)}</td><td>${row.pareto ? '✓' : ''}</td>`
+        entityHtml += `<tr${attr}><td>${index + 1}</td><td>${escapeHtml(row.name || row.key)}</td>`
+          + `<td>${escapeHtml(WEAK_GROUP_LABELS[row.comparison_group] || row.comparison_group || '—')}</td><td>${row.pareto ? '✓' : ''}</td>`
           + WEAK_DIMENSIONS.map(dimension => scoreCell(row, dimension)).join('')
           + `<td><span class="weak-link-relation ${escapeHtml(row.relation || '')}">${escapeHtml(relationLabel[row.relation] || row.relation || '—')}</span></td>`
           + `<td>${escapeHtml(WEAK_DIMENSION_LABELS[row.dominant_dimension] || row.dominant_dimension || '—')}</td>`
@@ -16686,13 +17042,17 @@ const App = (() => {
       }
       if (!await syncToBackend(false)) { setStatus('同步失败', 'error'); return; }
       const evidence = collectWeakLinkEvidence();
+      const selectedGroup = document.getElementById('weakComponentGroup')?.value || 'all';
+      if (selectedGroup !== 'all') {
+        evidence.entities = evidence.entities.filter(row => row.comparison_group === selectedGroup);
+      }
       const mode = document.querySelector('input[name="weakDecisionMode"]:checked')?.value || 'planning';
       const payload = {
         ...evidence,
         options: {
           mode,
-          top_k: Math.round(weakPositiveNumber('weakTopK', 15)),
-          minimum_dimensions: Math.round(weakPositiveNumber('weakMinimumDimensions', 2)),
+          top_k: Math.round(weakPositiveNumber('weakTopK', 30)),
+          minimum_dimensions: Math.round(weakPositiveNumber('weakMinimumDimensions', 1)),
           target_pressure: { economic: 1, carbon: 1, reliability: 1, resilience: 1 },
         },
       };
@@ -16702,7 +17062,7 @@ const App = (() => {
       showWeakLinkResults(data);
       switchTab('results');
       const covered = Object.values(data.dimension_coverage || {}).filter(Boolean).length;
-      log(`多维薄弱环节辨识完成：${data.summary?.input_entity_count || 0} 个空间对象，${covered}/4 类证据，${data.summary?.conflict_count || 0} 个潜在冲突`, 'success');
+      log(`多维薄弱环节辨识完成：${data.summary?.input_entity_count || 0} 个空间对象，${covered}/4 类证据，${data.summary?.conflict_count || 0} 个潜在冲突${selectedGroup === 'all' ? '' : `，组别 ${WEAK_GROUP_LABELS[selectedGroup] || selectedGroup}`}`, 'success');
       setStatus('多维辨识完成');
     }
 
@@ -18651,6 +19011,7 @@ const App = (() => {
     loadMatpowerCase,
     runPowerFlow,
     runOpf,
+    collectWeakLinkEvidence,
     getTaskStatus: taskStatusSnapshot,
     getAnnualTimelineWindowStatus: annualTimelineWindowStatus,
     getAccessibilityAudit: () => HySimCore.Accessibility?.audit() || null,

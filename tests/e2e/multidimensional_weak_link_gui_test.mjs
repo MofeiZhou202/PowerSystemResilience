@@ -12,8 +12,9 @@ assert.match(html, /data-module="weakLinks"[^>]*>多维薄弱环节</);
 assert.match(html, /class="sub-section" data-sub="weakLinks" hidden/);
 assert.match(html, /name="weakDecisionMode" value="planning" checked/);
 assert.match(html, /name="weakDecisionMode" value="operation"/);
+assert.match(html, /option value="complete" selected>自动补齐/);
 for (const id of [
-  'weakEvidenceMode', 'weakMinimumDimensions', 'weakEconomicThreshold',
+  'weakEvidenceMode', 'weakComponentGroup', 'weakMinimumDimensions', 'weakEconomicThreshold',
   'weakCarbonThreshold', 'weakReliabilityThreshold', 'weakResilienceThreshold',
   'weakTopK', 'btnRunWeakLinks', 'btnExportWeakLinks', 'weakLinkSummary',
   'weakLinkSpatialChart', 'weakLinkTemporalChart', 'weakLinkEntityResults',
@@ -33,6 +34,10 @@ const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index);
 assert.deepEqual([...new Set(duplicates)], [], 'page must not introduce duplicate ids');
 
 assert.match(app, /function collectWeakLinkEvidence\(\)/);
+assert.match(app, /runOpf,\s*collectWeakLinkEvidence,/);
+assert.match(app, /function weakComponentCatalog\(/);
+assert.match(app, /function weakCanonicalCanvasType\(/);
+assert.match(app, /function weakComparisonGroup\(/);
 assert.match(app, /function showWeakLinkResults\(data\)/);
 assert.match(app, /function renderWeakLinkCharts\(data\)/);
 assert.match(app, /\/api\/session\/run_multidimensional_weak_links/);
@@ -44,9 +49,15 @@ for (const dimension of ['economic', 'carbon', 'reliability', 'resilience']) {
 assert.match(css, /data-active-group="weakLinks"/);
 assert.match(css, /\.weak-link-visuals/);
 assert.match(css, /\.counterfactual-matrix/);
-assert.equal([...app.matchAll(/type: 'heatmap'/g)].length >= 1, true,
-  'weak-link views use directly annotated pressure heatmaps');
-assert.match(app, /texttemplate: '%\{text\}'/);
+assert.match(app, /function renderWeakPressureMatrix\(/);
+assert.doesNotMatch(app, /function renderWeakLinkCharts\(data\) \{\s*if \(typeof Plotly/,
+  'core weak-link matrices must render without the optional Plotly CDN');
+assert.match(html, /id="weakLinkSpatialChart" class="weak-link-pressure-matrix"/);
+assert.match(html, /id="weakLinkTemporalChart" class="weak-link-pressure-matrix"/);
+assert.match(css, /\.weak-pressure-matrix-table/);
 assert.match(css, /\.weak-pressure-critical/);
+for (const group of ['network', 'conversion', 'supply', 'flexibility', 'demand', 'protection']) {
+  assert.match(app, new RegExp(`\\b${group}\\b`), `missing component group ${group}`);
+}
 
 console.log('multidimensional weak-link GUI contract passed');

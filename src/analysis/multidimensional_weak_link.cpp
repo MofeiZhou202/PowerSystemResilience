@@ -51,6 +51,7 @@ unsigned coverage_mask(const WeakLinkEntityResult& row) {
 
 bool dominates(const WeakLinkEntityResult& lhs,
                const WeakLinkEntityResult& rhs) {
+  if (lhs.comparison_group != rhs.comparison_group) return false;
   if (coverage_mask(lhs) != coverage_mask(rhs)) return false;
   bool strictly_greater = false;
   for (int d = 0; d < kDimensionCount; ++d) {
@@ -72,13 +73,35 @@ std::string decision_hint(const WeakLinkEntityResult& row,
   const double operations = std::max(score(0), score(1));
   const double security = std::max(score(2), score(3));
   if (row.relation == "insufficient_evidence") return "complete_evidence";
+  const auto& group = row.comparison_group;
   if (mode == WeakLinkDecisionMode::Operation) {
+    if (group == "network" && security > operations + 0.25)
+      return "network_emergency_reconfiguration";
+    if (group == "conversion") return "converter_control_coordination";
+    if (group == "supply") return "economic_low_carbon_redispatch";
+    if (group == "flexibility") return "flexibility_dispatch";
+    if (group == "demand") return "demand_response_and_priority_service";
+    if (group == "protection") return "automation_and_flisr";
     if (row.relation == "compatible") return "coordinated_dispatch";
     if (security > operations + 0.25) return "emergency_reconfiguration";
     if (operations > security + 0.25) return "redispatch_and_demand_response";
     if (row.relation == "conflict") return "operational_pareto_review";
     return "enhanced_monitoring";
   }
+  if (group == "network") {
+    if (security > operations + 0.25) return "network_hardening_and_redundancy";
+    if (operations > security + 0.25) return "capacity_and_loss_upgrade";
+    return row.relation == "conflict" ? "network_pareto_review"
+                                      : "targeted_network_upgrade";
+  }
+  if (group == "conversion")
+    return operations >= security ? "converter_efficiency_upgrade"
+                                  : "converter_redundancy_upgrade";
+  if (group == "supply") return "economic_low_carbon_supply_upgrade";
+  if (group == "flexibility") return "storage_and_flexibility_upgrade";
+  if (group == "demand") return "demand_efficiency_and_service_upgrade";
+  if (group == "protection") return "automation_and_protection_upgrade";
+  if (group == "node") return "voltage_and_topology_support";
   if (row.relation == "compatible") return "integrated_upgrade";
   if (security > operations + 0.25) return "hardening_and_redundancy";
   if (operations > security + 0.25) return "dispatch_and_loss_reduction";
@@ -112,6 +135,7 @@ MultidimensionalWeakLinkResult run_multidimensional_weak_link_assessment(
     row.key = input.key;
     row.name = input.name;
     row.canvas_type = input.canvas_type;
+    row.comparison_group = input.comparison_group;
     row.canvas_index = input.canvas_index;
     row.domain = input.domain;
     row.primary_bus = input.primary_bus;
