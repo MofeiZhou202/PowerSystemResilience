@@ -19,6 +19,7 @@
 #include "hacdcpf/time_series/annual_production_sim.hpp"
 #include "hacdcpf/time_series/lifecycle_simulation.hpp"
 #include "hacdcpf/integrated_energy/integrated_energy_optimizer.hpp"
+#include "hacdcpf/market/market_simulation.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
 #include "hacdcpf/resilience/resilience_assessment.hpp"
 #include "hacdcpf/time_series/time_series_pf.hpp"

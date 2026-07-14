@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>HySim-XJTU-HRPES</title>
-<link rel="stylesheet" href="css/style.css?v=20260714-weak-components-v4"/>
+<link rel="stylesheet" href="css/style.css?v=20260714-market-v1"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -95,6 +95,7 @@
   <button id="moduleTopology"     class="module-btn" data-module="topology" data-group="planning">拓扑重构</button>
   <button id="moduleTopologyAnalysis" class="module-btn" data-module="topologyAnalysis" data-group="modeling">拓扑分析</button>
   <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries" data-group="planning">时序生产模拟</button>
+  <button id="moduleMarket"       class="module-btn" data-module="market" data-group="planning">电力市场</button>
   <button id="moduleIntegratedEnergy" class="module-btn" data-module="integratedEnergy" data-group="ies">园区综合能源</button>
   <button id="moduleEvTraffic"    class="module-btn" data-module="evTraffic" data-group="ies">电力-交通</button>
   <button id="moduleHosting"      class="module-btn" data-module="hosting" data-group="steady">承载力分析</button>
@@ -982,6 +983,115 @@
     <input type="file" id="fileImportIrradiance"  accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
     <input type="file" id="fileImportPrice"       accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
     <input type="file" id="fileImportLoadProfile" accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
+  </div>
+  <!-- Native day-ahead electricity market -->
+  <div class="sub-section market-sub-section" data-sub="market" hidden>
+    <div class="control-param-group market-param-group" title="日前市场基础设置">
+      <span class="control-param-title">市场出清</span>
+      <label class="sub-label">时段
+        <input id="marketNumSteps" type="number" value="24" min="1" max="8760" step="1"/>
+      </label>
+      <label class="sub-label">报价段数
+        <input id="marketOfferSegments" type="number" value="8" min="1" max="64" step="1"/>
+      </label>
+      <label class="sub-label">备用率(%)
+        <input id="marketReservePct" type="number" value="5" min="0" max="100" step="0.5"/>
+      </label>
+      <label class="sub-label">弃电代价(/MWh)
+        <input id="marketCurtailmentPenalty" type="number" value="0" min="0" step="1"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="在 SCUC/SCED 中启用直流潮流与线路容量约束">
+        <input id="marketNetworkConstraints" type="checkbox" checked/><span>网络约束</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="对最终商业调度运行基态非线性 AC 潮流">
+        <input id="marketAcValidation" type="checkbox" checked/><span>基态AC校核</span>
+      </label>
+      <button id="btnMarketParticipants" class="toolbar-btn" type="button" title="按机组配置市场主体归属、报价加成和容量扣留">主体策略</button>
+      <span id="marketParticipantSummary" class="sub-hint">默认：各机组独立成本报价</span>
+    </div>
+    <div class="control-param-group market-param-group" title="预防性 N-1 与事故后 AC 认证设置">
+      <span class="control-param-title">安全校核</span>
+      <label class="sub-label sub-checkbox" title="使用 LODF 筛选并迭代加入线路 N-1 安全切平面">
+        <input id="marketEnableN1" type="checkbox"/><span>N-1预防控制</span>
+      </label>
+      <label class="sub-label">最大迭代
+        <input id="marketN1Iterations" type="number" value="8" min="0" max="100" step="1"/>
+      </label>
+      <label class="sub-label">每轮切平面
+        <input id="marketN1Cuts" type="number" value="200" min="0" max="10000" step="1"/>
+      </label>
+      <label class="sub-label">事故数
+        <input id="marketN1Contingencies" type="number" value="0" min="0" step="1" title="0 表示筛选全部非孤岛线路事故"/>
+      </label>
+      <label class="sub-label">紧急限值倍数
+        <input id="marketEmergencyMultiplier" type="number" value="1" min="0" step="0.05"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="在最终预防调度上逐事故运行非线性 AC 潮流，不安全时明确返回失败">
+        <input id="marketAcContingency" type="checkbox"/><span>事故后AC认证</span>
+      </label>
+      <label class="sub-label">AC事故数
+        <input id="marketMaxAcContingencies" type="number" value="3" min="0" step="1" title="0 表示认证全部可用事故"/>
+      </label>
+      <button id="btnRunMarket" class="toolbar-btn run-btn" type="button">运行市场出清</button>
+      <button id="btnExportMarket" class="toolbar-btn" type="button">结果导出</button>
+    </div>
+    <div class="control-param-group market-param-group" title="实际运行偏差、双结算与重复博弈">
+      <span class="control-param-title">实时与博弈</span>
+      <label class="sub-label">实际负荷偏差(%)
+        <input id="marketRealizedLoadDeviationPct" type="number" value="5" min="-100" max="500" step="1"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="在固定日前启停的实时调度结果上运行基态 AC 潮流">
+        <input id="marketRealTimeAcValidation" type="checkbox"/><span>实时AC校核</span>
+      </label>
+      <button id="btnRunRealTimeMarket" class="toolbar-btn run-btn" type="button">运行实时市场</button>
+      <span class="sub-divider"></span>
+      <label class="sub-label">博弈轮数
+        <input id="marketGameRounds" type="number" value="4" min="1" max="30" step="1"/>
+      </label>
+      <label class="sub-label">加价步长(%)
+        <input id="marketGameMarkupStepPct" type="number" value="5" min="0" max="100" step="1"/>
+      </label>
+      <label class="sub-label">扣留步长(%)
+        <input id="marketGameWithholdingStepPct" type="number" value="5" min="0" max="95" step="1"/>
+      </label>
+      <label class="sub-label">最大加价(%)
+        <input id="marketGameMaxMarkupPct" type="number" value="100" min="0" max="1000" step="5"/>
+      </label>
+      <label class="sub-label">最大扣留(%)
+        <input id="marketGameMaxWithholdingPct" type="number" value="50" min="0" max="95" step="5"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="允许当前成本型主体也参与策略学习；默认只更新已配置为策略报价的主体">
+        <input id="marketGameIncludeCostBased" type="checkbox"/><span>成本主体参与学习</span>
+      </label>
+      <button id="btnRunMarketGame" class="toolbar-btn run-btn" type="button">运行重复博弈</button>
+    </div>
+    <div class="control-param-group market-param-group" title="实时备用激活、履约奖惩以及发电侧和负荷侧偏差考核">
+      <span class="control-param-title">实时辅助服务</span>
+      <label class="sub-label sub-checkbox" title="启用备用激活、履约率、偏差容忍带与奖惩结算">
+        <input id="marketAncillaryEnabled" type="checkbox"/><span>启用辅助服务结算</span>
+      </label>
+      <label class="sub-label">发电偏差容忍带(%)
+        <input id="marketGeneratorImbalanceTolerancePct" type="number" value="2" min="0" max="100" step="0.5"/>
+      </label>
+      <label class="sub-label">负荷偏差容忍带(%)
+        <input id="marketLoadImbalanceTolerancePct" type="number" value="2" min="0" max="100" step="0.5"/>
+      </label>
+      <label class="sub-label">发电偏差罚价(/MWh)
+        <input id="marketGeneratorImbalancePenalty" type="number" value="50" min="0" step="1"/>
+      </label>
+      <label class="sub-label">负荷偏差罚价(/MWh)
+        <input id="marketLoadImbalancePenalty" type="number" value="50" min="0" step="1"/>
+      </label>
+      <label class="sub-label">备用履约奖励(/MWh)
+        <input id="marketReservePerformancePayment" type="number" value="10" min="0" step="1"/>
+      </label>
+      <label class="sub-label">未履约扣款(/MWh)
+        <input id="marketReserveNonperformancePenalty" type="number" value="100" min="0" step="1"/>
+      </label>
+      <label class="sub-label">统一备用履约率(%)
+        <input id="marketReservePerformancePct" type="number" value="100" min="0" max="100" step="1"/>
+      </label>
+    </div>
   </div>
   <!-- Campus integrated energy simulation -->
   <div class="sub-section integrated-energy-sub-section" data-sub="integratedEnergy" hidden>
@@ -2398,6 +2508,67 @@
           <div id="annualSimRenStats" class="topo-table-wrap"></div>
         </div>
         </div><!-- /result-group timeSeries -->
+        <div class="result-group" data-result-group="market">
+          <div class="topo-section">
+            <h4>日前电力市场 — 出清概览</h4>
+            <div id="marketSummary" class="results-summary"></div>
+          </div>
+          <div class="topo-section">
+            <h4>价格与 N-1 收敛轨迹</h4>
+            <div class="market-chart-grid">
+              <div id="marketLmpChart" class="tspf-chart market-chart"></div>
+              <div id="marketSecurityChart" class="tspf-chart market-chart"></div>
+            </div>
+          </div>
+          <div class="topo-section">
+            <h4>分时段出清结果</h4>
+            <div id="marketPricingResults" class="topo-table-wrap"></div>
+          </div>
+          <div class="topo-section">
+            <h4>市场主体与结算</h4>
+            <div id="marketParticipantResults" class="topo-table-wrap"></div>
+          </div>
+          <div class="topo-section">
+            <h4>基态 AC 安全认证</h4>
+            <div id="marketAcValidationResults" class="topo-table-wrap"></div>
+          </div>
+          <div class="topo-section">
+            <h4>N-1 安全约束轨迹</h4>
+            <div id="marketSecurityResults" class="topo-table-wrap"></div>
+          </div>
+          <div class="topo-section">
+            <h4>事故后 AC 认证</h4>
+            <div id="marketContingencyResults" class="topo-table-wrap"></div>
+          </div>
+          <div class="topo-section">
+            <h4>资金平衡账本</h4>
+            <div id="marketSettlementResults" class="topo-table-wrap"></div>
+          </div>
+          <div class="topo-section" id="marketRealTimeSection" style="display:none">
+            <h4>日前—实时双结算</h4>
+            <div id="marketRealTimeSummary" class="results-summary"></div>
+            <div class="market-chart-grid">
+              <div id="marketRealTimePriceChart" class="tspf-chart market-chart"></div>
+              <div id="marketDeviationChart" class="tspf-chart market-chart"></div>
+              <div id="marketReservePerformanceChart" class="tspf-chart market-chart"></div>
+            </div>
+            <h5>分时偏差</h5>
+            <div id="marketRealTimePeriodResults" class="topo-table-wrap"></div>
+            <h5>主体双结算</h5>
+            <div id="marketRealTimeParticipantResults" class="topo-table-wrap"></div>
+            <h5>双结算资金账本</h5>
+            <div id="marketRealTimeLedgerResults" class="topo-table-wrap"></div>
+          </div>
+          <div class="topo-section" id="marketGameSection" style="display:none">
+            <h4>市场主体重复博弈</h4>
+            <div id="marketGameSummary" class="results-summary"></div>
+            <div class="market-chart-grid">
+              <div id="marketGameProfitChart" class="tspf-chart market-chart"></div>
+              <div id="marketGameStrategyChart" class="tspf-chart market-chart"></div>
+            </div>
+            <div id="marketGameRoundResults" class="topo-table-wrap"></div>
+          </div>
+        </div><!-- /result-group market -->
         <div class="result-group" data-result-group="integratedEnergy">
           <div class="topo-section" id="iesResultsSection">
             <h4>园区综合能源仿真结果 — 概览</h4>
@@ -2697,6 +2868,32 @@
   </div>
 </div>
 
+<!-- Electricity-market participant behaviour editor -->
+<div id="marketParticipantModal" class="modal" style="display:none">
+  <div class="modal-backdrop" data-close-market-participants></div>
+  <div class="modal-content evpt-designer-modal market-participant-modal">
+    <div class="evpt-designer-header">
+      <h3>市场主体与报价行为</h3>
+      <div class="evpt-designer-header-actions">
+        <button class="toolbar-btn" type="button" title="关闭" data-close-market-participants>关闭 ×</button>
+      </div>
+    </div>
+    <div class="market-participant-body">
+      <div class="evpt-designer-table-actions">
+        <span id="marketParticipantCount" class="sub-hint"></span>
+        <span id="marketParticipantValidation" class="cost-editor-validation"></span>
+        <button id="btnMarketParticipantsReset" class="toolbar-btn" type="button">恢复成本报价</button>
+      </div>
+      <div id="marketParticipantTable" class="topo-table-wrap evpt-designer-table market-participant-table"></div>
+      <p class="sub-hint">相同主体ID的机组会合并归属；同一主体各行必须采用一致的策略参数。容量扣留仅作用于最小稳定出力以上的灵活容量。</p>
+    </div>
+    <div class="modal-actions evpt-designer-footer">
+      <button id="btnMarketParticipantsApply" class="btn btn-accent" type="button">应用策略</button>
+      <button class="btn" type="button" data-close-market-participants>取消</button>
+    </div>
+  </div>
+</div>
+
 <!-- Sequential Monte Carlo load profile designer -->
 <div id="seqProfileEditorModal" class="modal" style="display:none">
   <div class="modal-backdrop" data-close-seq-profile-editor></div>
@@ -2765,7 +2962,7 @@
   <script src="js/components.js?v=20260712-cb-source-flow-v2"></script>
   <script src="js/search_registry.js?v=20260709-phase5"></script>
   <script src="js/canvas.js?v=20260714-pf-overlay-v1"></script>
-  <script src="js/core/analysis_contracts.js?v=20260714-cps-controls-v1"></script>
+  <script src="js/core/analysis_contracts.js?v=20260714-market-v3"></script>
   <script src="js/core/task_manager.js?v=20260712-hysim-phase3-v1"></script>
   <script src="js/core/api_client.js?v=20260712-hysim-phase3-v1"></script>
   <script src="js/core/result_mapping.js?v=20260712-hysim-phase3-v1"></script>
@@ -2775,6 +2972,6 @@
   <script src="js/core/layout_engine.js?v=20260712-hysim-layout-v1"></script>
   <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
-  <script src="js/app.js?v=20260714-weak-components-v4"></script>
+  <script src="js/app.js?v=20260714-market-v5"></script>
 </body>
 </html>

@@ -63,6 +63,7 @@
 #include "hacdcpf/time_series/annual_production_sim.hpp"
 #include "hacdcpf/time_series/lifecycle_simulation.hpp"
 #include "hacdcpf/integrated_energy/integrated_energy_optimizer.hpp"
+#include "hacdcpf/market/market_simulation.hpp"
 #include "hacdcpf/carbon_analysis/carbon_analysis.hpp"
 #include "hacdcpf/carbon_analysis/annual_carbon_analysis.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
@@ -6851,6 +6852,446 @@ void assign_available_default_profiles(hacdcpf::HybridPowerSystem& sys,
     for (auto& pv : sys.dc.pv_arrays)
       if (!has_profile(pv.profile_id)) pv.profile_id = 2;
   }
+}
+
+hacdcpf::market::BehaviorPolicyType market_behavior_type(
+    const std::string& type) {
+  using Behavior = hacdcpf::market::BehaviorPolicyType;
+  if (type == "fixed_markup") return Behavior::FixedMarkup;
+  if (type == "capacity_withholding") return Behavior::CapacityWithholding;
+  if (type == "markup_and_withholding") {
+    return Behavior::MarkupAndWithholding;
+  }
+  if (type == "cost_based") return Behavior::CostBased;
+  throw std::runtime_error("Unknown participant behavior type: " + type);
+}
+
+std::string market_behavior_name(
+    hacdcpf::market::BehaviorPolicyType type) {
+  using Behavior = hacdcpf::market::BehaviorPolicyType;
+  if (type == Behavior::FixedMarkup) return "fixed_markup";
+  if (type == Behavior::CapacityWithholding) return "capacity_withholding";
+  if (type == Behavior::MarkupAndWithholding) {
+    return "markup_and_withholding";
+  }
+  return "cost_based";
+}
+
+json market_behavior_json(const hacdcpf::market::ParticipantBehavior& behavior) {
+  return json{
+      {"type", market_behavior_name(behavior.type)},
+      {"energy_markup_fraction", behavior.energy_markup_fraction},
+      {"capacity_withholding_fraction",
+       behavior.capacity_withholding_fraction},
+      {"commitment_markup_fraction", behavior.commitment_markup_fraction},
+      {"upward_reserve_price_per_mwh",
+       behavior.upward_reserve_price_per_mwh}};
+}
+
+hacdcpf::market::MarketOptions market_options_from_json(
+    const json& j,
+    const hacdcpf::HybridPowerSystem& sys) {
+  hacdcpf::market::MarketOptions opts;
+  opts.energy_offer_segments = std::max(1, j.value("offer_segments", 8));
+  opts.upward_reserve_fraction =
+      std::max(0.0, j.value("reserve_fraction", 0.05));
+  opts.value_of_lost_load_per_mwh =
+      std::max(1.0, j.value("voll_per_mwh", 10000.0));
+  opts.exogenous_curtailment_penalty_per_mwh = std::max(
+      0.0, j.value("exogenous_curtailment_penalty_per_mwh", 0.0));
+  opts.enable_network_constraints = j.value("network_constraints", true);
+  opts.run_ac_validation = j.value("run_ac_validation", true);
+  opts.ac_validation_voltage_tolerance_pu = std::max(
+      0.0, j.value("ac_validation_voltage_tolerance_pu", 1e-5));
+  opts.ac_validation_thermal_tolerance_mva = std::max(
+      0.0, j.value("ac_validation_thermal_tolerance_mva", 1e-4));
+  opts.ac_validation_generator_tolerance_mw = std::max(
+      0.0, j.value("ac_validation_generator_tolerance_mw", 1e-5));
+  opts.enable_n1_security = j.value("enable_n1_security", false);
+  opts.n1_max_iterations = std::max(0, j.value("n1_max_iterations", 8));
+  opts.n1_max_cuts_per_iteration =
+      std::max(0, j.value("n1_max_cuts_per_iteration", 200));
+  opts.n1_max_contingencies =
+      std::max(0, j.value("n1_max_contingencies", 0));
+  opts.n1_emergency_rating_multiplier = std::max(
+      0.0, j.value("n1_emergency_rating_multiplier", 1.0));
+  opts.n1_violation_tolerance_mw = std::max(
+      0.0, j.value("n1_violation_tolerance_mw", 1e-5));
+  opts.run_ac_contingency_validation =
+      j.value("run_ac_contingency_validation", false);
+  opts.max_ac_contingencies =
+      std::max(0, j.value("max_ac_contingencies", 3));
+  opts.ac_contingency_voltage_tolerance_pu = std::max(
+      0.0, j.value("ac_contingency_voltage_tolerance_pu", 1e-5));
+  opts.ac_contingency_thermal_tolerance_mva = std::max(
+      0.0, j.value("ac_contingency_thermal_tolerance_mva", 1e-4));
+  opts.verbose = j.value("verbose", false);
+  opts.uc_options.uc_solver = hacdcpf::UCSolverChoice::Auto;
+  opts.ac_validation_options.max_iter = 100;
+  opts.ac_validation_options.tol = 1e-8;
+  if (!j.contains("participants") || !j["participants"].is_array()) {
+    return opts;
+  }
+  for (const auto& item : j["participants"]) {
+    hacdcpf::market::MarketParticipant participant;
+    participant.participant_id = item.value("participant_id", "");
+    participant.participant_name = item.value(
+        "participant_name", participant.participant_id);
+    if (item.contains("generator_positions") &&
+        item["generator_positions"].is_array()) {
+      participant.generator_positions =
+          item["generator_positions"].get<std::vector<int>>();
+    }
+    if (item.contains("generator_indices") &&
+        item["generator_indices"].is_array()) {
+      for (int generator_index :
+           item["generator_indices"].get<std::vector<int>>()) {
+        const auto found = std::find_if(
+            sys.ac.generators.begin(), sys.ac.generators.end(),
+            [&](const auto& generator) {
+              return generator.index == generator_index;
+            });
+        if (found == sys.ac.generators.end()) {
+          throw std::runtime_error(
+              "Unknown participant generator_index " +
+              std::to_string(generator_index));
+        }
+        participant.generator_positions.push_back(
+            static_cast<int>(std::distance(sys.ac.generators.begin(), found)));
+      }
+    }
+    const auto behavior = item.value("behavior", json::object());
+    participant.behavior.type = market_behavior_type(
+        behavior.value("type", "cost_based"));
+    participant.behavior.energy_markup_fraction =
+        behavior.value("energy_markup_fraction", 0.0);
+    participant.behavior.capacity_withholding_fraction =
+        behavior.value("capacity_withholding_fraction", 0.0);
+    participant.behavior.commitment_markup_fraction =
+        behavior.value("commitment_markup_fraction", 0.0);
+    participant.behavior.upward_reserve_price_per_mwh =
+        behavior.value("upward_reserve_price_per_mwh", 0.0);
+    opts.participants.push_back(std::move(participant));
+  }
+  return opts;
+}
+
+hacdcpf::market::AncillaryServiceOptions ancillary_options_from_json(
+    const json& request,
+    const hacdcpf::HybridPowerSystem& sys) {
+  hacdcpf::market::AncillaryServiceOptions options;
+  const json settings =
+      request.contains("ancillary_services") &&
+              request["ancillary_services"].is_object()
+          ? request["ancillary_services"]
+          : json::object();
+  options.enabled = settings.value("enabled", false);
+  options.generator_imbalance_tolerance_fraction = std::max(
+      0.0, settings.value(
+               "generator_imbalance_tolerance_fraction", 0.02));
+  options.load_imbalance_tolerance_fraction = std::max(
+      0.0, settings.value("load_imbalance_tolerance_fraction", 0.02));
+  options.generator_imbalance_penalty_per_mwh = std::max(
+      0.0, settings.value("generator_imbalance_penalty_per_mwh", 50.0));
+  options.load_imbalance_penalty_per_mwh = std::max(
+      0.0, settings.value("load_imbalance_penalty_per_mwh", 50.0));
+  options.reserve_performance_payment_per_mwh = std::max(
+      0.0, settings.value("reserve_performance_payment_per_mwh", 10.0));
+  options.reserve_nonperformance_penalty_per_mwh = std::max(
+      0.0,
+      settings.value("reserve_nonperformance_penalty_per_mwh", 100.0));
+  if (settings.contains("reserve_performance_factor_by_generator") &&
+      settings["reserve_performance_factor_by_generator"].is_array()) {
+    options.reserve_performance_factor_by_generator =
+        settings["reserve_performance_factor_by_generator"]
+            .get<std::vector<double>>();
+    for (double& factor :
+         options.reserve_performance_factor_by_generator) {
+      factor = std::clamp(factor, 0.0, 1.0);
+    }
+  } else if (settings.contains("reserve_performance_factor")) {
+    const double factor = std::clamp(
+        settings.value("reserve_performance_factor", 1.0), 0.0, 1.0);
+    options.reserve_performance_factor_by_generator.assign(
+        sys.ac.generators.size(), factor);
+  }
+  return options;
+}
+
+hacdcpf::TimeSeriesData realized_market_time_series(
+    const hacdcpf::TimeSeriesData& day_ahead,
+    const json& j) {
+  hacdcpf::TimeSeriesData realized = day_ahead;
+  const double multiplier = std::max(
+      0.0, j.value("realized_load_multiplier", 1.0));
+  std::vector<double> multipliers;
+  if (j.contains("realized_load_multipliers") &&
+      j["realized_load_multipliers"].is_array()) {
+    multipliers = j["realized_load_multipliers"].get<std::vector<double>>();
+  }
+  for (auto& profile : realized.profiles) {
+    if (profile.id != 0) continue;
+    for (int t = 0; t < static_cast<int>(profile.values.size()); ++t) {
+      const double factor = t < static_cast<int>(multipliers.size())
+          ? std::max(0.0, multipliers[static_cast<size_t>(t)])
+          : multiplier;
+      profile.values[static_cast<size_t>(t)] *= factor;
+    }
+  }
+  if (j.contains("realized_profiles") &&
+      j["realized_profiles"].is_array()) {
+    for (const auto& override_profile : j["realized_profiles"]) {
+      const int id = override_profile.value("id", -1);
+      if (!override_profile.contains("values") ||
+          !override_profile["values"].is_array()) {
+        continue;
+      }
+      auto values = override_profile["values"].get<std::vector<double>>();
+      if (static_cast<int>(values.size()) != realized.num_steps) {
+        throw std::runtime_error(
+            "realized profile length must equal num_steps");
+      }
+      const auto found = std::find_if(
+          realized.profiles.begin(), realized.profiles.end(),
+          [&](const auto& profile) { return profile.id == id; });
+      if (found == realized.profiles.end()) {
+        hacdcpf::TimeSeriesProfile profile;
+        profile.id = id;
+        profile.name = "realized_" + std::to_string(id);
+        profile.values = std::move(values);
+        realized.profiles.push_back(std::move(profile));
+      } else {
+        found->values = std::move(values);
+      }
+    }
+  }
+  return realized;
+}
+
+json market_pricing_json(
+    const std::vector<hacdcpf::market::PricingPeriod>& pricing) {
+  json rows = json::array();
+  for (size_t t = 0; t < pricing.size(); ++t) {
+    const auto& period = pricing[t];
+    rows.push_back(json{
+        {"period", t},
+        {"converged", period.converged},
+        {"status", period.status},
+        {"generator_dispatch_mw", period.generator_dispatch_mw},
+        {"upward_reserve_mw", period.upward_reserve_mw},
+        {"lmp_per_mwh", period.lmp_per_mwh},
+        {"branch_flow_mw", period.branch_flow_mw},
+        {"load_shedding_mw", period.load_shedding_mw},
+        {"exogenous_curtailment_mw",
+         period.exogenous_curtailment_mw},
+        {"gross_demand_mw", period.gross_demand_mw},
+        {"reserve_requirement_mw", period.reserve_requirement_mw},
+        {"upward_reserve_price_per_mwh",
+         period.upward_reserve_price_per_mwh},
+        {"objective", period.objective}});
+  }
+  return rows;
+}
+
+json real_time_market_json(
+    const hacdcpf::market::MarketResult& day_ahead,
+    const hacdcpf::market::RealTimeMarketResult& real_time) {
+  json generator_rows = json::array();
+  for (const auto& row : real_time.generator_deviation_settlement) {
+    generator_rows.push_back(json{
+        {"participant_id", row.participant_id},
+        {"generator_position", row.generator_position},
+        {"generator_index", row.generator_index},
+        {"generator_name", row.generator_name},
+        {"day_ahead_energy_mwh", row.day_ahead_energy_mwh},
+        {"real_time_energy_mwh", row.real_time_energy_mwh},
+        {"real_time_dispatch_instruction_mwh",
+         row.real_time_dispatch_instruction_mwh},
+        {"actual_output_deviation_mwh",
+         row.actual_output_deviation_mwh},
+        {"deviation_mwh", row.deviation_mwh},
+        {"day_ahead_energy_revenue", row.day_ahead_energy_revenue},
+        {"real_time_deviation_revenue", row.real_time_deviation_revenue},
+        {"day_ahead_reserve_revenue", row.day_ahead_reserve_revenue},
+        {"day_ahead_uplift", row.day_ahead_uplift},
+        {"instructed_reserve_mwh", row.instructed_reserve_mwh},
+        {"delivered_reserve_mwh", row.delivered_reserve_mwh},
+        {"reserve_shortfall_mwh", row.reserve_shortfall_mwh},
+        {"reserve_performance_ratio", row.reserve_performance_ratio},
+        {"reserve_performance_payment", row.reserve_performance_payment},
+        {"reserve_nonperformance_charge",
+         row.reserve_nonperformance_charge},
+        {"penalized_imbalance_mwh", row.penalized_imbalance_mwh},
+        {"imbalance_charge", row.imbalance_charge},
+        {"net_ancillary_adjustment", row.net_ancillary_adjustment},
+        {"two_settlement_revenue", row.two_settlement_revenue},
+        {"actual_true_cost", row.actual_true_cost},
+        {"profit_after_two_settlement",
+         row.profit_after_two_settlement}});
+  }
+  json participant_rows = json::array();
+  for (const auto& row : real_time.participant_deviation_settlement) {
+    participant_rows.push_back(json{
+        {"participant_id", row.participant_id},
+        {"participant_name", row.participant_name},
+        {"generator_positions", row.generator_positions},
+        {"day_ahead_energy_mwh", row.day_ahead_energy_mwh},
+        {"real_time_energy_mwh", row.real_time_energy_mwh},
+        {"real_time_dispatch_instruction_mwh",
+         row.real_time_dispatch_instruction_mwh},
+        {"actual_output_deviation_mwh",
+         row.actual_output_deviation_mwh},
+        {"deviation_mwh", row.deviation_mwh},
+        {"day_ahead_market_revenue", row.day_ahead_market_revenue},
+        {"real_time_deviation_revenue", row.real_time_deviation_revenue},
+        {"instructed_reserve_mwh", row.instructed_reserve_mwh},
+        {"delivered_reserve_mwh", row.delivered_reserve_mwh},
+        {"reserve_shortfall_mwh", row.reserve_shortfall_mwh},
+        {"reserve_performance_ratio", row.reserve_performance_ratio},
+        {"reserve_performance_payment", row.reserve_performance_payment},
+        {"reserve_nonperformance_charge",
+         row.reserve_nonperformance_charge},
+        {"penalized_imbalance_mwh", row.penalized_imbalance_mwh},
+        {"imbalance_charge", row.imbalance_charge},
+        {"net_ancillary_adjustment", row.net_ancillary_adjustment},
+        {"two_settlement_revenue", row.two_settlement_revenue},
+        {"actual_true_cost", row.actual_true_cost},
+        {"profit_after_two_settlement",
+         row.profit_after_two_settlement}});
+  }
+  json period_rows = json::array();
+  for (const auto& row : real_time.periods) {
+    period_rows.push_back(json{
+        {"period", row.period},
+        {"day_ahead_demand_mw", row.day_ahead_demand_mw},
+        {"realized_demand_mw", row.realized_demand_mw},
+        {"demand_deviation_mw", row.demand_deviation_mw},
+        {"absolute_generator_deviation_mw",
+         row.absolute_generator_deviation_mw},
+        {"average_day_ahead_lmp_per_mwh",
+         row.average_day_ahead_lmp_per_mwh},
+        {"average_real_time_lmp_per_mwh",
+         row.average_real_time_lmp_per_mwh},
+        {"customer_deviation_payment", row.customer_deviation_payment},
+        {"resource_deviation_revenue", row.resource_deviation_revenue},
+        {"deviation_congestion_rent", row.deviation_congestion_rent},
+        {"reserve_activation_requirement_mw",
+         row.reserve_activation_requirement_mw},
+        {"reserve_instruction_mw", row.reserve_instruction_mw},
+        {"reserve_delivered_mw", row.reserve_delivered_mw},
+        {"reserve_shortfall_mw", row.reserve_shortfall_mw},
+        {"load_penalized_imbalance_mwh",
+         row.load_penalized_imbalance_mwh},
+        {"load_imbalance_penalty", row.load_imbalance_penalty}});
+  }
+  const auto& ledger = real_time.settlement;
+  return json{
+      {"mode", "native_two_settlement_market"},
+      {"status", real_time.status},
+      {"feasible", real_time.feasible},
+      {"ancillary_services_enabled",
+       real_time.ancillary_services_enabled},
+      {"warnings", real_time.warnings},
+      {"total_absolute_generator_deviation_mwh",
+       real_time.total_absolute_generator_deviation_mwh},
+      {"day_ahead", json{
+          {"status", day_ahead.status},
+          {"feasible", day_ahead.feasible},
+          {"pricing", market_pricing_json(day_ahead.pricing)}}},
+      {"dispatch_instruction", json{
+          {"status", real_time.dispatch_instruction_market.status},
+          {"feasible", real_time.dispatch_instruction_market.feasible},
+          {"pricing", market_pricing_json(
+              real_time.dispatch_instruction_market.pricing)}}},
+      {"real_time", json{
+          {"status", real_time.real_time_market.status},
+          {"feasible", real_time.real_time_market.feasible},
+          {"pricing", market_pricing_json(
+              real_time.real_time_market.pricing)}}},
+      {"periods", std::move(period_rows)},
+      {"generator_deviation_settlement", std::move(generator_rows)},
+      {"participant_deviation_settlement", std::move(participant_rows)},
+      {"settlement", json{
+          {"customer_day_ahead_payment",
+           ledger.customer_day_ahead_payment},
+          {"customer_real_time_deviation_payment",
+           ledger.customer_real_time_deviation_payment},
+          {"customer_imbalance_penalty",
+           ledger.customer_imbalance_penalty},
+          {"customer_two_settlement_payment",
+           ledger.customer_two_settlement_payment},
+          {"resource_day_ahead_revenue",
+           ledger.resource_day_ahead_revenue},
+          {"resource_real_time_deviation_revenue",
+           ledger.resource_real_time_deviation_revenue},
+          {"resource_reserve_performance_payment",
+           ledger.resource_reserve_performance_payment},
+          {"resource_generator_imbalance_charge",
+           ledger.resource_generator_imbalance_charge},
+          {"resource_reserve_nonperformance_charge",
+           ledger.resource_reserve_nonperformance_charge},
+          {"resource_two_settlement_revenue",
+           ledger.resource_two_settlement_revenue},
+          {"day_ahead_congestion_rent",
+           ledger.day_ahead_congestion_rent},
+          {"real_time_deviation_congestion_rent",
+           ledger.real_time_deviation_congestion_rent},
+          {"total_congestion_rent", ledger.total_congestion_rent},
+          {"system_operator_ancillary_balance",
+           ledger.system_operator_ancillary_balance},
+          {"cashflow_residual", ledger.cashflow_residual}}}};
+}
+
+json repeated_game_json(const hacdcpf::market::RepeatedGameResult& game) {
+  json rounds = json::array();
+  for (const auto& round : game.rounds) {
+    json participants = json::array();
+    for (const auto& participant : round.participants) {
+      participants.push_back(json{
+          {"participant_id", participant.participant_id},
+          {"behavior", market_behavior_json(participant.behavior)},
+          {"next_behavior", market_behavior_json(participant.next_behavior)},
+          {"profit", participant.profit},
+          {"net_ancillary_adjustment",
+           participant.net_ancillary_adjustment},
+          {"best_response_profit", participant.best_response_profit},
+          {"best_response_improvement",
+           participant.best_response_improvement},
+          {"strategy_changed", participant.strategy_changed}});
+    }
+    rounds.push_back(json{
+        {"round", round.round},
+        {"day_ahead_feasible", round.day_ahead_feasible},
+        {"real_time_feasible", round.real_time_feasible},
+        {"day_ahead_average_lmp_per_mwh",
+         round.day_ahead_average_lmp_per_mwh},
+        {"real_time_average_lmp_per_mwh",
+         round.real_time_average_lmp_per_mwh},
+        {"total_absolute_generator_deviation_mwh",
+         round.total_absolute_generator_deviation_mwh},
+        {"output_hhi", round.output_hhi},
+        {"participants", std::move(participants)}});
+  }
+  json final_participants = json::array();
+  for (const auto& participant : game.final_participants) {
+    final_participants.push_back(json{
+        {"participant_id", participant.participant_id},
+        {"participant_name", participant.participant_name},
+        {"generator_positions", participant.generator_positions},
+        {"behavior", market_behavior_json(participant.behavior)}});
+  }
+  return json{
+      {"mode", "repeated_market_best_response"},
+      {"status", game.status},
+      {"feasible", game.feasible},
+      {"converged", game.converged},
+      {"warnings", game.warnings},
+      {"rounds", std::move(rounds)},
+      {"final_participants", std::move(final_participants)},
+      {"final_day_ahead_status", game.final_day_ahead.status},
+      {"final_real_time_status", game.final_real_time.status},
+      {"final_two_settlement", real_time_market_json(
+          game.final_day_ahead, game.final_real_time)}};
 }
 
 // Build annual time-series data with seasonal variation
@@ -15455,12 +15896,6 @@ int main(int argc, char** argv) {
           return;
         }
 
-        // NOTE (simulation build): the full market-clearing pipeline
-        // (SCED + LMP + settlement) from HybridACDCPowerSystemsPlanning is a
-        // planning-only module and is not part of this distribution-simulation
-        // backend. We honour the request by running the SCUC unit-commitment
-        // stage (solve_unit_commitment) so a meaningful dispatch schedule is
-        // still returned. Full LMP/settlement fields are intentionally omitted.
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         const int num_periods = std::max(1, j.value("num_steps", 24));
 
@@ -15473,22 +15908,338 @@ int main(int argc, char** argv) {
         }
         assign_available_default_profiles(sys, ts_data);
 
-        hacdcpf::TimeSeriesPFOptions opts; opts.verbose = false;
-        auto uc = hacdcpf::solve_unit_commitment(sys, ts_data, opts);
+        hacdcpf::market::MarketOptions opts;
+        opts.energy_offer_segments = std::max(1, j.value("offer_segments", 8));
+        opts.upward_reserve_fraction =
+            std::max(0.0, j.value("reserve_fraction", 0.05));
+        opts.value_of_lost_load_per_mwh =
+            std::max(1.0, j.value("voll_per_mwh", 10000.0));
+        opts.exogenous_curtailment_penalty_per_mwh = std::max(
+            0.0, j.value("exogenous_curtailment_penalty_per_mwh", 0.0));
+        opts.enable_network_constraints = j.value("network_constraints", true);
+        opts.run_ac_validation = j.value("run_ac_validation", true);
+        opts.ac_validation_voltage_tolerance_pu = std::max(
+            0.0, j.value("ac_validation_voltage_tolerance_pu", 1e-5));
+        opts.ac_validation_thermal_tolerance_mva = std::max(
+            0.0, j.value("ac_validation_thermal_tolerance_mva", 1e-4));
+        opts.ac_validation_generator_tolerance_mw = std::max(
+            0.0, j.value("ac_validation_generator_tolerance_mw", 1e-5));
+        opts.enable_n1_security = j.value("enable_n1_security", false);
+        opts.n1_max_iterations =
+            std::max(0, j.value("n1_max_iterations", 8));
+        opts.n1_max_cuts_per_iteration =
+            std::max(0, j.value("n1_max_cuts_per_iteration", 200));
+        opts.n1_max_contingencies =
+            std::max(0, j.value("n1_max_contingencies", 0));
+        opts.n1_emergency_rating_multiplier = std::max(
+            0.0, j.value("n1_emergency_rating_multiplier", 1.0));
+        opts.n1_violation_tolerance_mw = std::max(
+            0.0, j.value("n1_violation_tolerance_mw", 1e-5));
+        opts.run_ac_contingency_validation =
+            j.value("run_ac_contingency_validation", false);
+        opts.max_ac_contingencies =
+            std::max(0, j.value("max_ac_contingencies", 3));
+        opts.ac_contingency_voltage_tolerance_pu = std::max(
+            0.0, j.value("ac_contingency_voltage_tolerance_pu", 1e-5));
+        opts.ac_contingency_thermal_tolerance_mva = std::max(
+            0.0, j.value("ac_contingency_thermal_tolerance_mva", 1e-4));
+        opts.verbose = j.value("verbose", false);
+        opts.uc_options.uc_solver = hacdcpf::UCSolverChoice::Auto;
+        opts.ac_validation_options.max_iter = 100;
+        opts.ac_validation_options.tol = 1e-8;
+        if (j.contains("participants") && j["participants"].is_array()) {
+          for (const auto& item : j["participants"]) {
+            hacdcpf::market::MarketParticipant participant;
+            participant.participant_id = item.value("participant_id", "");
+            participant.participant_name = item.value(
+                "participant_name", participant.participant_id);
+            if (item.contains("generator_positions") &&
+                item["generator_positions"].is_array()) {
+              participant.generator_positions =
+                  item["generator_positions"].get<std::vector<int>>();
+            }
+            if (item.contains("generator_indices") &&
+                item["generator_indices"].is_array()) {
+              for (int generator_index :
+                   item["generator_indices"].get<std::vector<int>>()) {
+                const auto found = std::find_if(
+                    sys.ac.generators.begin(), sys.ac.generators.end(),
+                    [&](const auto& generator) {
+                      return generator.index == generator_index;
+                    });
+                if (found == sys.ac.generators.end()) {
+                  throw std::runtime_error(
+                      "Unknown participant generator_index " +
+                      std::to_string(generator_index));
+                }
+                participant.generator_positions.push_back(
+                    static_cast<int>(std::distance(sys.ac.generators.begin(), found)));
+              }
+            }
+            const auto behavior = item.value("behavior", json::object());
+            const std::string type = behavior.value("type", "cost_based");
+            using Behavior = hacdcpf::market::BehaviorPolicyType;
+            if (type == "fixed_markup") {
+              participant.behavior.type = Behavior::FixedMarkup;
+            } else if (type == "capacity_withholding") {
+              participant.behavior.type = Behavior::CapacityWithholding;
+            } else if (type == "markup_and_withholding") {
+              participant.behavior.type = Behavior::MarkupAndWithholding;
+            } else if (type == "cost_based") {
+              participant.behavior.type = Behavior::CostBased;
+            } else {
+              throw std::runtime_error("Unknown participant behavior type: " + type);
+            }
+            participant.behavior.energy_markup_fraction =
+                behavior.value("energy_markup_fraction", 0.0);
+            participant.behavior.capacity_withholding_fraction =
+                behavior.value("capacity_withholding_fraction", 0.0);
+            participant.behavior.commitment_markup_fraction =
+                behavior.value("commitment_markup_fraction", 0.0);
+            participant.behavior.upward_reserve_price_per_mwh =
+                behavior.value("upward_reserve_price_per_mwh", 0.0);
+            opts.participants.push_back(std::move(participant));
+          }
+        }
+        auto market = hacdcpf::market::run_day_ahead_market(sys, ts_data, opts);
 
         json payload;
-        payload["mode"] = "scuc";
-        payload["note"] = "Market settlement (SCED/LMP) not available in simulation build; "
-                          "returning SCUC unit-commitment dispatch.";
+        payload["mode"] = "native_day_ahead_market";
+        payload["status"] = market.status;
         payload["num_periods"] = num_periods;
-        payload["feasible"] = uc.feasible;
-        payload["total_cost"] = uc.total_cost;
-        payload["solver_name"] = uc.solver_name;
-        payload["gen_dispatch"] = uc.gen_dispatch;
-        payload["gen_commit"] = uc.gen_commit;
-        payload["ess_dispatch"] = uc.ess_dispatch;
-        payload["ess_soc"] = uc.ess_soc;
-        payload["renewable_dispatch"] = uc.renewable_dispatch;
+        payload["feasible"] = market.feasible;
+        payload["warnings"] = market.warnings;
+        payload["commitment"] = json{
+            {"feasible", market.commitment.feasible},
+            {"cost", market.commitment_cost},
+            {"solver_name", market.commitment.solver_name},
+            {"generator_dispatch_mw", market.commitment.gen_dispatch},
+            {"generator_commitment", market.commitment.gen_commit}};
+        payload["pricing_objective"] = market.pricing_objective;
+        payload["num_pricing_converged"] = market.num_pricing_converged;
+        payload["num_ac_converged"] = market.num_ac_converged;
+        payload["num_ac_secure"] = market.num_ac_secure;
+
+        const auto& security = market.security;
+        json trajectory = json::array();
+        for (const auto& iteration : security.trajectory) {
+          trajectory.push_back(json{
+              {"iteration", iteration.iteration},
+              {"violations", iteration.violations},
+              {"cuts_added", iteration.cuts_added},
+              {"cumulative_cuts", iteration.cumulative_cuts},
+              {"worst_overload_mw", iteration.worst_overload_mw}});
+        }
+        json remaining_violations = json::array();
+        for (const auto& violation : security.remaining_violations) {
+          remaining_violations.push_back(json{
+              {"period", violation.period},
+              {"outage_branch_position", violation.outage_branch_position},
+              {"outage_branch_index", violation.outage_branch_index},
+              {"monitored_branch_position",
+               violation.monitored_branch_position},
+              {"monitored_branch_index", violation.monitored_branch_index},
+              {"base_flow_mw", violation.base_flow_mw},
+              {"post_contingency_flow_mw",
+               violation.post_contingency_flow_mw},
+              {"emergency_rating_mw", violation.emergency_rating_mw},
+              {"overload_mw", violation.overload_mw}});
+        }
+        json ac_contingency_checks = json::array();
+        for (const auto& check : security.ac_checks) {
+          ac_contingency_checks.push_back(json{
+              {"period", check.period},
+              {"outage_branch_position", check.outage_branch_position},
+              {"outage_branch_index", check.outage_branch_index},
+              {"converged", check.converged},
+              {"secure", check.secure},
+              {"maximum_voltage_violation_pu",
+               check.maximum_voltage_violation_pu},
+              {"maximum_branch_overload_mva",
+               check.maximum_branch_overload_mva},
+              {"status", check.status}});
+        }
+        payload["security"] = json{
+            {"enabled", security.enabled},
+            {"lodf_available", security.lodf_available},
+            {"dc_n1_secured", security.dc_n1_secured},
+            {"ac_contingency_validation_run",
+             security.ac_contingency_validation_run},
+            {"ac_contingencies_secure", security.ac_contingencies_secure},
+            {"candidate_contingencies", security.candidate_contingencies},
+            {"iterations", security.iterations},
+            {"cuts_added", security.cuts_added},
+            {"initial_violations", security.initial_violations},
+            {"final_violations", security.final_violations},
+            {"initial_worst_overload_mw",
+             security.initial_worst_overload_mw},
+            {"final_worst_overload_mw",
+             security.final_worst_overload_mw},
+            {"baseline_pricing_objective",
+             security.baseline_pricing_objective},
+            {"secured_pricing_objective",
+             security.secured_pricing_objective},
+            {"preventive_redispatch_cost",
+             security.preventive_redispatch_cost},
+            {"incremental_security_uplift",
+             security.incremental_security_uplift},
+            {"customer_payment_impact", security.customer_payment_impact},
+            {"skipped_islanding_branch_positions",
+             security.skipped_islanding_branch_positions},
+            {"trajectory", std::move(trajectory)},
+            {"remaining_violations", std::move(remaining_violations)},
+            {"ac_checks", std::move(ac_contingency_checks)},
+            {"warnings", security.warnings}};
+
+        payload["offers"] = json::array();
+        for (const auto& offer : market.offers) {
+          json segments = json::array();
+          for (const auto& segment : offer.energy_segments) {
+            segments.push_back(json{{"quantity_mw", segment.quantity_mw},
+                                    {"price_per_mwh", segment.price_per_mwh}});
+          }
+          payload["offers"].push_back(json{
+              {"participant_id", offer.participant_id},
+              {"generator_position", offer.generator_position},
+              {"generator_index", offer.generator_index},
+              {"generator_name", offer.generator_name},
+              {"minimum_output_mw", offer.minimum_output_mw},
+              {"physical_maximum_output_mw",
+               offer.physical_maximum_output_mw},
+              {"offered_maximum_output_mw",
+               offer.offered_maximum_output_mw},
+              {"minimum_output_cost_per_hour",
+               offer.minimum_output_cost_per_hour},
+              {"no_load_price_per_hour", offer.no_load_price_per_hour},
+              {"startup_price", offer.startup_price},
+              {"shutdown_price", offer.shutdown_price},
+              {"energy_segments", std::move(segments)},
+              {"upward_reserve_price_per_mwh",
+               offer.upward_reserve_price_per_mwh}});
+        }
+
+        payload["pricing"] = json::array();
+        for (size_t t = 0; t < market.pricing.size(); ++t) {
+          const auto& period = market.pricing[t];
+          payload["pricing"].push_back(json{
+              {"period", t}, {"converged", period.converged},
+              {"status", period.status},
+              {"generator_dispatch_mw", period.generator_dispatch_mw},
+              {"upward_reserve_mw", period.upward_reserve_mw},
+              {"lmp_per_mwh", period.lmp_per_mwh},
+              {"branch_flow_mw", period.branch_flow_mw},
+              {"load_shedding_mw", period.load_shedding_mw},
+              {"exogenous_curtailment_mw",
+               period.exogenous_curtailment_mw},
+              {"gross_demand_mw", period.gross_demand_mw},
+              {"reserve_requirement_mw", period.reserve_requirement_mw},
+              {"upward_reserve_price_per_mwh",
+               period.upward_reserve_price_per_mwh},
+              {"objective", period.objective}});
+        }
+
+        payload["ac_validation"] = json::array();
+        for (size_t t = 0; t < market.ac_validation.size(); ++t) {
+          const auto& ac = market.ac_validation[t];
+          payload["ac_validation"].push_back(json{
+              {"period", t}, {"converged", ac.converged},
+              {"secure", ac.secure},
+              {"status", ac.status}, {"residual", ac.residual},
+              {"total_branch_loss_mw", ac.total_branch_loss_mw},
+              {"maximum_branch_loading_percent",
+               ac.maximum_branch_loading_percent},
+              {"maximum_voltage_violation_pu",
+               ac.maximum_voltage_violation_pu},
+              {"maximum_branch_overload_mva",
+               ac.maximum_branch_overload_mva},
+              {"maximum_generator_active_violation_mw",
+               ac.maximum_generator_active_violation_mw},
+              {"slack_adjustment_mw", ac.slack_adjustment_mw},
+              {"slack_generator_position",
+               ac.slack_generator_position}});
+        }
+
+        payload["generator_settlement"] = json::array();
+        for (const auto& item : market.generator_settlement) {
+          payload["generator_settlement"].push_back(json{
+              {"generator_position", item.generator_position},
+              {"generator_index", item.generator_index},
+              {"generator_name", item.generator_name},
+              {"energy_mwh", item.energy_mwh},
+              {"reserve_mwh", item.reserve_mwh},
+              {"energy_revenue", item.energy_revenue},
+              {"reserve_revenue", item.reserve_revenue},
+              {"true_cost", item.true_cost},
+              {"as_bid_cost", item.as_bid_cost},
+              {"offered_cost_markup", item.offered_cost_markup},
+              {"uplift", item.uplift},
+              {"profit_after_uplift", item.profit_after_uplift}});
+        }
+        payload["participants"] = json::array();
+        for (const auto& participant : market.participants) {
+          payload["participants"].push_back(json{
+              {"participant_id", participant.participant_id},
+              {"participant_name", participant.participant_name},
+              {"generator_positions", participant.generator_positions}});
+        }
+        payload["behavior_actions"] = json::array();
+        for (const auto& action : market.behavior_actions) {
+          payload["behavior_actions"].push_back(json{
+              {"participant_id", action.participant_id},
+              {"generator_position", action.generator_position},
+              {"generator_index", action.generator_index},
+              {"energy_markup_fraction", action.energy_markup_fraction},
+              {"capacity_withholding_fraction",
+               action.capacity_withholding_fraction},
+              {"physical_capacity_mw", action.physical_capacity_mw},
+              {"offered_capacity_mw", action.offered_capacity_mw},
+              {"withheld_capacity_mw", action.withheld_capacity_mw}});
+        }
+        payload["participant_settlement"] = json::array();
+        for (const auto& item : market.participant_settlement) {
+          payload["participant_settlement"].push_back(json{
+              {"participant_id", item.participant_id},
+              {"participant_name", item.participant_name},
+              {"generator_positions", item.generator_positions},
+              {"physical_capacity_mw", item.physical_capacity_mw},
+              {"offered_capacity_mw", item.offered_capacity_mw},
+              {"withheld_capacity_mw", item.withheld_capacity_mw},
+              {"energy_mwh", item.energy_mwh},
+              {"reserve_mwh", item.reserve_mwh},
+              {"market_revenue", item.market_revenue},
+              {"true_cost", item.true_cost},
+              {"as_bid_cost", item.as_bid_cost},
+              {"uplift", item.uplift},
+              {"profit_after_uplift", item.profit_after_uplift}});
+        }
+        payload["market_power"] = json{
+            {"output_hhi", market.market_power.output_hhi},
+            {"revenue_hhi", market.market_power.revenue_hhi},
+            {"top3_output_share_percent",
+             market.market_power.top3_output_share_percent},
+            {"maximum_output_share_percent",
+             market.market_power.maximum_output_share_percent},
+            {"maximum_output_participant",
+             market.market_power.maximum_output_participant},
+            {"maximum_profit", market.market_power.maximum_profit},
+            {"maximum_profit_participant",
+             market.market_power.maximum_profit_participant},
+            {"total_withheld_capacity_mw",
+             market.market_power.total_withheld_capacity_mw},
+            {"average_offer_markup_fraction",
+             market.market_power.average_offer_markup_fraction}};
+        const auto& ledger = market.settlement;
+        payload["settlement"] = json{
+            {"customer_energy_payment", ledger.customer_energy_payment},
+            {"customer_reserve_charge", ledger.customer_reserve_charge},
+            {"customer_uplift_charge", ledger.customer_uplift_charge},
+            {"customer_total_payment", ledger.customer_total_payment},
+            {"resource_energy_revenue", ledger.resource_energy_revenue},
+            {"resource_reserve_revenue", ledger.resource_reserve_revenue},
+            {"resource_uplift_revenue", ledger.resource_uplift_revenue},
+            {"resource_total_revenue", ledger.resource_total_revenue},
+            {"congestion_rent", ledger.congestion_rent},
+            {"cashflow_residual", ledger.cashflow_residual}};
 
         res.set_content(payload.dump(), "application/json");
         g_session.busy.store(false);
@@ -15496,6 +16247,146 @@ int main(int argc, char** argv) {
         g_session.busy.store(false);
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Real-time fixed-commitment market + two-settlement deviations ----
+    svr.Post("/api/session/run_real_time_market",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) {
+            throw std::runtime_error("No system loaded");
+          }
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(
+              json{{"error", "Another analysis is already running"}}.dump(),
+              "application/json");
+          return;
+        }
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        const int num_periods = std::max(1, j.value("num_steps", 24));
+        hacdcpf::TimeSeriesData day_ahead_series;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (g_session.ts_data.num_steps != num_periods ||
+              g_session.ts_data.profiles.empty()) {
+            g_session.ts_data = make_default_ts_data(num_periods);
+          }
+          day_ahead_series = g_session.ts_data;
+        }
+        assign_available_default_profiles(sys, day_ahead_series);
+        auto day_ahead_options = market_options_from_json(j, sys);
+        const auto day_ahead = hacdcpf::market::run_day_ahead_market(
+            sys, day_ahead_series, day_ahead_options);
+        const auto realized_series = realized_market_time_series(
+            day_ahead_series, j);
+
+        json real_time_json = j;
+        if (j.contains("real_time") && j["real_time"].is_object()) {
+          for (auto it = j["real_time"].begin();
+               it != j["real_time"].end(); ++it) {
+            real_time_json[it.key()] = it.value();
+          }
+        }
+        hacdcpf::market::RealTimeMarketOptions real_time_options;
+        real_time_options.market_options =
+            market_options_from_json(real_time_json, sys);
+        real_time_options.ancillary_services =
+            ancillary_options_from_json(j, sys);
+        const auto real_time = hacdcpf::market::run_real_time_market(
+            sys, day_ahead_series, realized_series, day_ahead,
+            real_time_options);
+        res.set_content(
+            real_time_market_json(day_ahead, real_time).dump(),
+            "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& error) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", error.what()}}.dump(),
+                        "application/json");
+      }
+    });
+
+    // ---- Repeated participant best-response game ----
+    svr.Post("/api/session/run_repeated_market_game",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) {
+            throw std::runtime_error("No system loaded");
+          }
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(
+              json{{"error", "Another analysis is already running"}}.dump(),
+              "application/json");
+          return;
+        }
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        const int num_periods = std::max(1, j.value("num_steps", 1));
+        hacdcpf::TimeSeriesData day_ahead_series;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (g_session.ts_data.num_steps != num_periods ||
+              g_session.ts_data.profiles.empty()) {
+            g_session.ts_data = make_default_ts_data(num_periods);
+          }
+          day_ahead_series = g_session.ts_data;
+        }
+        assign_available_default_profiles(sys, day_ahead_series);
+        const auto realized_series = realized_market_time_series(
+            day_ahead_series, j);
+
+        hacdcpf::market::RepeatedGameOptions game_options;
+        game_options.day_ahead_options = market_options_from_json(j, sys);
+        json real_time_json = j;
+        if (j.contains("real_time") && j["real_time"].is_object()) {
+          for (auto it = j["real_time"].begin();
+               it != j["real_time"].end(); ++it) {
+            real_time_json[it.key()] = it.value();
+          }
+        }
+        game_options.real_time_options.market_options =
+            market_options_from_json(real_time_json, sys);
+        game_options.real_time_options.ancillary_services =
+            ancillary_options_from_json(j, sys);
+        const auto game = j.value("game", json::object());
+        game_options.max_rounds =
+            std::max(1, game.value("max_rounds", 4));
+        game_options.markup_step_fraction = std::max(
+            0.0, game.value("markup_step_fraction", 0.05));
+        game_options.withholding_step_fraction = std::max(
+            0.0, game.value("withholding_step_fraction", 0.05));
+        game_options.maximum_markup_fraction = std::max(
+            0.0, game.value("maximum_markup_fraction", 1.0));
+        game_options.maximum_withholding_fraction = std::clamp(
+            game.value("maximum_withholding_fraction", 0.50), 0.0, 0.95);
+        game_options.profit_improvement_tolerance = std::max(
+            0.0, game.value("profit_improvement_tolerance", 1e-4));
+        game_options.include_cost_based_participants =
+            game.value("include_cost_based_participants", false);
+        game_options.run_real_time = game.value("run_real_time", true);
+        const auto result = hacdcpf::market::run_repeated_market_game(
+            sys, day_ahead_series, realized_series, game_options);
+        res.set_content(repeated_game_json(result).dump(),
+                        "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& error) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", error.what()}}.dump(),
+                        "application/json");
       }
     });
 

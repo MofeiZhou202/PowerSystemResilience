@@ -1,0 +1,826 @@
+#include <algorithm>
+#include <cmath>
+#include <numeric>
+#include <stdexcept>
+#include <string>
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
+
+#include "hacdcpf/io/matpower_parser.hpp"
+#include "hacdcpf/market/market_simulation.hpp"
+
+#ifndef HACDCPF_TEST_DATA_DIR
+#define HACDCPF_TEST_DATA_DIR "../data"
+#endif
+
+namespace {
+
+hacdcpf::TimeSeriesData case9_day_profile() {
+  hacdcpf::TimeSeriesData time_series;
+  time_series.num_steps = 24;
+  time_series.step_duration_hr = 1.0;
+  hacdcpf::TimeSeriesProfile load;
+  load.id = 0;
+  load.name = "case9_day_load";
+  load.values = {
+      0.72, 0.68, 0.65, 0.64, 0.66, 0.72,
+      0.80, 0.88, 0.94, 0.98, 1.00, 0.99,
+      0.97, 0.96, 0.98, 1.02, 1.06, 1.10,
+      1.08, 1.03, 0.96, 0.88, 0.81, 0.76};
+  time_series.profiles.push_back(std::move(load));
+  return time_series;
+}
+
+hacdcpf::market::MarketOptions market_options() {
+  hacdcpf::market::MarketOptions options;
+  options.energy_offer_segments = 12;
+  options.upward_reserve_fraction = 0.05;
+  options.value_of_lost_load_per_mwh = 10000.0;
+  options.enable_network_constraints = true;
+  options.run_ac_validation = true;
+  options.uc_options.uc_solver = hacdcpf::UCSolverChoice::Native;
+  options.ac_validation_options.max_iter = 100;
+  options.ac_validation_options.tol = 1e-8;
+  return options;
+}
+
+double sum(const std::vector<double>& values) {
+  return std::accumulate(values.begin(), values.end(), 0.0);
+}
+
+}  // namespace
+
+TEST_CASE("Case9 24-hour native market closes SCUC-SCED-LMP-ACPF-settlement",
+          "[market][case9][integration]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  const auto original = system;
+  const auto time_series = case9_day_profile();
+
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, time_series, market_options());
+
+  INFO("market status=" << result.status);
+  for (const auto& warning : result.warnings) INFO(warning);
+  REQUIRE(result.feasible);
+  REQUIRE(result.status == "converged");
+  REQUIRE(result.commitment.feasible);
+  REQUIRE(result.pricing.size() == 24);
+  REQUIRE(result.num_pricing_converged == 24);
+  REQUIRE(result.ac_validation.size() == 24);
+  REQUIRE(result.num_ac_converged == 24);
+  REQUIRE(result.num_ac_secure == 24);
+  REQUIRE(result.offers.size() == 3);
+  REQUIRE(result.generator_settlement.size() == 3);
+
+  for (const auto& period : result.pricing) {
+    REQUIRE(period.converged);
+    CHECK(period.generator_dispatch_mw.size() == system.ac.generators.size());
+    CHECK(period.lmp_per_mwh.size() == system.ac.buses.size());
+    CHECK(period.branch_flow_mw.size() == system.ac.branches.size());
+    CHECK(period.exogenous_curtailment_mw.size() == system.ac.buses.size());
+    CHECK(sum(period.load_shedding_mw) < 1e-6);
+    CHECK(sum(period.upward_reserve_mw) ==
+          Catch::Approx(period.reserve_requirement_mw).margin(1e-7));
+    CHECK(std::all_of(period.lmp_per_mwh.begin(), period.lmp_per_mwh.end(),
+                      [](double value) { return std::isfinite(value); }));
+    CHECK(std::isfinite(period.upward_reserve_price_per_mwh));
+  }
+
+  for (const auto& validation : result.ac_validation) {
+    REQUIRE(validation.converged);
+    REQUIRE(validation.secure);
+    CHECK(validation.status == "secure");
+    CHECK(validation.residual < 1e-5);
+    CHECK(validation.total_branch_loss_mw >= -1e-6);
+    CHECK(validation.maximum_voltage_violation_pu <= 1e-5);
+    CHECK(validation.maximum_branch_overload_mva <= 1e-4);
+    CHECK(validation.maximum_generator_active_violation_mw <= 1e-5);
+  }
+
+  CHECK(result.settlement.cashflow_residual == Catch::Approx(0.0).margin(1e-6));
+  CHECK(result.settlement.customer_total_payment ==
+        Catch::Approx(result.settlement.resource_total_revenue +
+                      result.settlement.congestion_rent).margin(1e-6));
+  for (const auto& generator : result.generator_settlement) {
+    CHECK(generator.uplift >= -1e-9);
+    CHECK(generator.profit_after_uplift >= -1e-6);
+  }
+
+  // The market runner operates on snapshots and must not mutate the authored case.
+  REQUIRE(system.ac.generators.size() == original.ac.generators.size());
+  for (size_t g = 0; g < system.ac.generators.size(); ++g) {
+    CHECK(system.ac.generators[g].pg_mw == original.ac.generators[g].pg_mw);
+    CHECK(system.ac.generators[g].in_service == original.ac.generators[g].in_service);
+  }
+}
+
+TEST_CASE("Base AC certification rejects converged voltage-limit violations",
+          "[market][case9][ac-security]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  for (auto& bus : system.ac.buses) bus.vmax_pu = 0.95;
+  auto time_series = case9_day_profile();
+  time_series.num_steps = 1;
+  time_series.profiles.front().values = {1.0};
+  auto options = market_options();
+  options.enable_network_constraints = false;
+  options.run_ac_validation = true;
+
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, time_series, options);
+
+  REQUIRE(result.ac_validation.size() == 1);
+  const auto& validation = result.ac_validation.front();
+  REQUIRE(validation.converged);
+  CHECK_FALSE(validation.secure);
+  CHECK(validation.maximum_voltage_violation_pu > 1e-4);
+  CHECK(validation.status == "ac_security_limits_violated");
+  CHECK(result.num_ac_converged == 1);
+  CHECK(result.num_ac_secure == 0);
+  CHECK_FALSE(result.feasible);
+  CHECK(result.status == "ac_validation_failed");
+
+  auto thermal_system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  for (auto& branch : thermal_system.ac.branches) branch.rate_a_mva = 1.0;
+  const auto thermal_result = hacdcpf::market::run_day_ahead_market(
+      thermal_system, time_series, options);
+  REQUIRE(thermal_result.ac_validation.size() == 1);
+  const auto& thermal_validation = thermal_result.ac_validation.front();
+  REQUIRE(thermal_validation.converged);
+  CHECK_FALSE(thermal_validation.secure);
+  CHECK(thermal_validation.maximum_branch_overload_mva > 1.0);
+  CHECK(thermal_validation.maximum_branch_loading_percent > 100.0);
+  CHECK_FALSE(thermal_result.feasible);
+  CHECK(thermal_result.status == "ac_validation_failed");
+}
+
+TEST_CASE("Cost-based offers preserve true cost separately from physical assets",
+          "[market][offers]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  const double original_c1 = system.ac.generators.front().cost_c1;
+  const auto offers = hacdcpf::market::make_cost_based_offers(system, 6);
+
+  REQUIRE(offers.size() == system.ac.generators.size());
+  REQUIRE(offers.front().energy_segments.size() == 6);
+  CHECK(offers.front().generator_position == 0);
+  CHECK(offers.front().generator_index == system.ac.generators.front().index);
+  CHECK(std::is_sorted(
+      offers.front().energy_segments.begin(), offers.front().energy_segments.end(),
+      [](const auto& lhs, const auto& rhs) {
+        return lhs.price_per_mwh < rhs.price_per_mwh;
+      }));
+  CHECK(system.ac.generators.front().cost_c1 == original_c1);
+}
+
+TEST_CASE("Market SCUC objective uses the complete submitted energy commitment and reserve offer",
+          "[market][scuc][offers]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  for (size_t g = 0; g < system.ac.generators.size(); ++g) {
+    auto& generator = system.ac.generators[g];
+    generator.cost_c0 = 10.0 + static_cast<double>(g);
+    generator.startup_cost = 100.0 + 10.0 * static_cast<double>(g);
+    generator.shutdown_cost = 40.0 + 5.0 * static_cast<double>(g);
+  }
+  auto time_series = case9_day_profile();
+  time_series.num_steps = 2;
+  time_series.profiles.front().values = {0.90, 1.00};
+
+  hacdcpf::market::MarketParticipant portfolio;
+  portfolio.participant_id = "portfolio";
+  portfolio.generator_positions = {0, 1, 2};
+  portfolio.behavior.type =
+      hacdcpf::market::BehaviorPolicyType::MarkupAndWithholding;
+  portfolio.behavior.energy_markup_fraction = 0.12;
+  portfolio.behavior.commitment_markup_fraction = 0.08;
+  portfolio.behavior.upward_reserve_price_per_mwh = 7.5;
+
+  auto options = market_options();
+  options.participants = {portfolio};
+  options.upward_reserve_fraction = 0.08;
+  options.run_ac_validation = false;
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, time_series, options);
+
+  INFO("complete-offer SCUC status=" << result.status);
+  for (const auto& warning : result.warnings) INFO(warning);
+  REQUIRE(result.feasible);
+  const double settled_as_bid_cost = std::accumulate(
+      result.generator_settlement.begin(), result.generator_settlement.end(),
+      0.0, [](double total, const auto& row) {
+        return total + row.as_bid_cost;
+      });
+  CHECK(result.commitment_cost ==
+        Catch::Approx(settled_as_bid_cost).margin(1e-5));
+  CHECK(sum(result.pricing.front().upward_reserve_mw) > 1e-6);
+  CHECK(std::any_of(
+      result.offers.begin(), result.offers.end(), [](const auto& offer) {
+        return offer.shutdown_price > 0.0 &&
+               offer.upward_reserve_price_per_mwh > 0.0;
+      }));
+}
+
+TEST_CASE("Exogenous renewable surplus is curtailed explicitly",
+          "[market][sced][curtailment]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  hacdcpf::StaticGenerator renewable;
+  renewable.index = 1001;
+  renewable.bus = 5;
+  renewable.name = "must-take renewable";
+  renewable.p_mw = 500.0;
+  renewable.p_rated_mw = 500.0;
+  renewable.pmax_mw = 500.0;
+  renewable.scaling = 1.0;
+  system.ac.static_generators.push_back(renewable);
+  auto time_series = case9_day_profile();
+  time_series.num_steps = 1;
+  time_series.profiles.front().values = {1.0};
+  auto options = market_options();
+  options.upward_reserve_fraction = 0.0;
+  options.exogenous_curtailment_penalty_per_mwh = 5.0;
+  options.run_ac_validation = false;
+
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, time_series, options);
+  INFO("surplus market status=" << result.status);
+  for (const auto& warning : result.warnings) INFO(warning);
+  REQUIRE(result.feasible);
+  REQUIRE(result.pricing.size() == 1);
+  CHECK(sum(result.pricing.front().exogenous_curtailment_mw) > 100.0);
+  CHECK(sum(result.pricing.front().load_shedding_mw) < 1e-7);
+  CHECK(result.settlement.cashflow_residual == Catch::Approx(0.0).margin(1e-6));
+}
+
+TEST_CASE("Load shedding settlement charges only served demand",
+          "[market][settlement][load-shedding]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  for (auto& generator : system.ac.generators) {
+    generator.pmin_mw = 0.0;
+    generator.pmax_mw = 20.0;
+    generator.pg_mw = std::min(generator.pg_mw, generator.pmax_mw);
+  }
+  auto time_series = case9_day_profile();
+  time_series.num_steps = 1;
+  time_series.profiles.front().values = {1.0};
+  auto options = market_options();
+  options.upward_reserve_fraction = 0.0;
+  options.enable_network_constraints = false;
+  options.run_ac_validation = false;
+
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, time_series, options);
+  INFO("load-shedding market status=" << result.status);
+  for (const auto& warning : result.warnings) INFO(warning);
+  REQUIRE(result.feasible);
+  REQUIRE(result.pricing.size() == 1);
+  const auto& period = result.pricing.front();
+  REQUIRE(sum(period.load_shedding_mw) > 1.0);
+  double expected_payment = 0.0;
+  double gross_payment = 0.0;
+  for (size_t b = 0; b < system.ac.buses.size(); ++b) {
+    const double demand = std::max(0.0, system.ac.buses[b].pd_mw);
+    expected_payment += period.lmp_per_mwh[b] *
+        (demand - period.load_shedding_mw[b]);
+    gross_payment += period.lmp_per_mwh[b] * demand;
+  }
+  CHECK(result.settlement.customer_energy_payment ==
+        Catch::Approx(expected_payment).margin(1e-6));
+  CHECK(std::abs(result.settlement.customer_energy_payment - gross_payment) >
+        1.0);
+  CHECK(result.settlement.cashflow_residual == Catch::Approx(0.0).margin(1e-6));
+}
+
+TEST_CASE("First market slice rejects hybrid assets explicitly",
+          "[market][scope]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  hacdcpf::DCBus dc_bus;
+  dc_bus.index = 101;
+  dc_bus.in_service = true;
+  system.dc.buses.push_back(dc_bus);
+
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, case9_day_profile(), market_options());
+  CHECK_FALSE(result.feasible);
+  CHECK(result.status == "unsupported_hybrid_market_assets");
+  REQUIRE_FALSE(result.warnings.empty());
+}
+
+TEST_CASE("Strategic policy marks up offers and withholds flexible capacity",
+          "[market][behavior][offers]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  const auto original = system;
+
+  hacdcpf::market::MarketParticipant strategic;
+  strategic.participant_id = "strategic_firm";
+  strategic.participant_name = "Strategic Firm";
+  strategic.generator_positions = {2};
+  strategic.behavior.type =
+      hacdcpf::market::BehaviorPolicyType::MarkupAndWithholding;
+  strategic.behavior.energy_markup_fraction = 0.25;
+  strategic.behavior.capacity_withholding_fraction = 0.10;
+  strategic.behavior.commitment_markup_fraction = 0.05;
+  strategic.behavior.upward_reserve_price_per_mwh = 3.0;
+
+  const auto competitive =
+      hacdcpf::market::submit_participant_offers(system, {}, 6);
+  const auto submission =
+      hacdcpf::market::submit_participant_offers(system, {strategic}, 6);
+
+  REQUIRE(submission.offers.size() == 3);
+  REQUIRE(submission.actions.size() == 3);
+  REQUIRE(submission.participants.size() == 3);
+  const auto& offer = submission.offers[2];
+  const auto& action = submission.actions[2];
+  CHECK(offer.participant_id == "strategic_firm");
+  CHECK(offer.physical_maximum_output_mw == Catch::Approx(270.0));
+  CHECK(offer.offered_maximum_output_mw == Catch::Approx(244.0));
+  CHECK(action.withheld_capacity_mw == Catch::Approx(26.0));
+  CHECK(action.energy_markup_fraction == Catch::Approx(0.25));
+  CHECK(offer.energy_segments.front().price_per_mwh >
+        competitive.offers[2].energy_segments.front().price_per_mwh);
+  CHECK(offer.startup_price == Catch::Approx(3150.0));
+  CHECK(offer.upward_reserve_price_per_mwh == Catch::Approx(3.0));
+  CHECK(system.ac.generators[2].pmax_mw == original.ac.generators[2].pmax_mw);
+  CHECK(system.ac.generators[2].cost_c1 == original.ac.generators[2].cost_c1);
+}
+
+TEST_CASE("Strategic Case9 clearing preserves true cost and aggregates market power",
+          "[market][behavior][settlement]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  auto time_series = case9_day_profile();
+  time_series.num_steps = 6;
+  time_series.profiles.front().values.resize(6);
+
+  hacdcpf::market::MarketParticipant strategic;
+  strategic.participant_id = "strategic_firm";
+  strategic.participant_name = "Strategic Firm";
+  strategic.generator_positions = {2};
+  strategic.behavior.type =
+      hacdcpf::market::BehaviorPolicyType::MarkupAndWithholding;
+  strategic.behavior.energy_markup_fraction = 0.15;
+  strategic.behavior.capacity_withholding_fraction = 0.10;
+  strategic.behavior.upward_reserve_price_per_mwh = 2.0;
+
+  auto options = market_options();
+  options.run_ac_validation = false;
+  options.participants = {strategic};
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, time_series, options);
+
+  INFO("strategic market status=" << result.status);
+  for (const auto& warning : result.warnings) INFO(warning);
+  REQUIRE(result.feasible);
+  REQUIRE(result.participant_settlement.size() == 3);
+  REQUIRE(result.behavior_actions.size() == 3);
+  CHECK(result.market_power.total_withheld_capacity_mw == Catch::Approx(26.0));
+  CHECK(result.market_power.output_hhi > 0.0);
+  CHECK(result.market_power.output_hhi <= 10000.0 + 1e-6);
+  CHECK(result.market_power.top3_output_share_percent ==
+        Catch::Approx(100.0).margin(1e-6));
+  CHECK(result.settlement.cashflow_residual == Catch::Approx(0.0).margin(1e-6));
+
+  const auto participant = std::find_if(
+      result.participant_settlement.begin(), result.participant_settlement.end(),
+      [](const auto& row) { return row.participant_id == "strategic_firm"; });
+  REQUIRE(participant != result.participant_settlement.end());
+  CHECK(participant->withheld_capacity_mw == Catch::Approx(26.0));
+  CHECK(participant->energy_mwh > 0.0);
+  CHECK(participant->as_bid_cost > participant->true_cost);
+  CHECK(participant->profit_after_uplift ==
+        Catch::Approx(participant->market_revenue + participant->uplift -
+                      participant->true_cost).margin(1e-6));
+
+  for (const auto& period : result.pricing) {
+    CHECK(period.generator_dispatch_mw[2] <= 244.0 + 1e-7);
+    CHECK(period.generator_dispatch_mw[2] + period.upward_reserve_mw[2] <=
+          244.0 + 1e-7);
+  }
+  CHECK(system.ac.generators[2].pmax_mw == Catch::Approx(270.0));
+}
+
+TEST_CASE("Duplicate participant ownership is rejected",
+          "[market][behavior][validation]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  hacdcpf::market::MarketParticipant first;
+  first.participant_id = "first";
+  first.generator_positions = {0};
+  hacdcpf::market::MarketParticipant second;
+  second.participant_id = "second";
+  second.generator_positions = {0};
+  CHECK_THROWS_AS(
+      hacdcpf::market::submit_participant_offers(system, {first, second}, 4),
+      std::invalid_argument);
+}
+
+TEST_CASE("Case9 preventive SCED closes iterative DC N-1 security cuts",
+          "[market][security][n-1]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  auto time_series = case9_day_profile();
+  time_series.num_steps = 1;
+  time_series.profiles.front().values = {1.10};
+
+  auto options = market_options();
+  options.run_ac_validation = false;
+  options.enable_n1_security = true;
+  options.n1_max_iterations = 8;
+  options.n1_max_cuts_per_iteration = 100;
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, time_series, options);
+
+  INFO("security market status=" << result.status);
+  INFO("initial violations=" << result.security.initial_violations);
+  INFO("final violations=" << result.security.final_violations);
+  INFO("cuts=" << result.security.cuts_added);
+  INFO("initial worst overload="
+       << result.security.initial_worst_overload_mw);
+  for (const auto& warning : result.warnings) INFO(warning);
+  for (const auto& warning : result.security.warnings) INFO(warning);
+  REQUIRE(result.security.enabled);
+  REQUIRE(result.security.lodf_available);
+  REQUIRE(result.security.candidate_contingencies > 0);
+  REQUIRE(result.security.dc_n1_secured);
+  CHECK(result.security.final_violations == 0);
+  if (result.security.initial_violations > 0) {
+    CHECK(result.security.cuts_added > 0);
+  } else {
+    CHECK(result.security.cuts_added == 0);
+  }
+  CHECK(result.security.secured_pricing_objective >=
+        result.security.baseline_pricing_objective - 1e-7);
+  CHECK(result.security.preventive_redispatch_cost >= -1e-9);
+  CHECK(result.settlement.cashflow_residual == Catch::Approx(0.0).margin(1e-6));
+}
+
+TEST_CASE("Case9 final dispatch reports nonlinear AC contingency certification",
+          "[market][security][ac-contingency]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  auto time_series = case9_day_profile();
+  time_series.num_steps = 1;
+  time_series.profiles.front().values = {1.0};
+
+  auto options = market_options();
+  options.run_ac_validation = false;
+  options.run_ac_contingency_validation = true;
+  options.max_ac_contingencies = 2;
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, time_series, options);
+
+  INFO("AC contingency market status=" << result.status);
+  for (const auto& warning : result.security.warnings) INFO(warning);
+  REQUIRE(result.security.lodf_available);
+  REQUIRE(result.security.ac_contingency_validation_run);
+  REQUIRE(result.security.ac_checks.size() == 2);
+  for (const auto& check : result.security.ac_checks) {
+    CHECK(check.outage_branch_position >= 0);
+    CHECK(std::isfinite(check.maximum_voltage_violation_pu));
+    CHECK(std::isfinite(check.maximum_branch_overload_mva));
+    CHECK_FALSE(check.status.empty());
+  }
+}
+
+TEST_CASE("Case9 real-time fixed-commitment market closes two-settlement deviations",
+          "[market][real-time][settlement]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  const auto original = system;
+  auto day_ahead_series = case9_day_profile();
+  day_ahead_series.num_steps = 3;
+  day_ahead_series.profiles.front().values = {0.90, 1.00, 0.95};
+  auto realized_series = day_ahead_series;
+  realized_series.profiles.front().values = {0.96, 0.94, 1.04};
+
+  auto day_ahead_options = market_options();
+  day_ahead_options.run_ac_validation = false;
+  const auto day_ahead = hacdcpf::market::run_day_ahead_market(
+      system, day_ahead_series, day_ahead_options);
+  REQUIRE(day_ahead.feasible);
+
+  auto rejected_baseline = day_ahead;
+  rejected_baseline.feasible = false;
+  rejected_baseline.status = "ac_validation_failed";
+  hacdcpf::market::RealTimeMarketOptions rejected_options;
+  rejected_options.market_options = day_ahead_options;
+  const auto rejected_real_time = hacdcpf::market::run_real_time_market(
+      system, day_ahead_series, realized_series, rejected_baseline,
+      rejected_options);
+  CHECK_FALSE(rejected_real_time.feasible);
+  CHECK(rejected_real_time.status == "invalid_day_ahead_baseline");
+  CHECK(rejected_real_time.real_time_market.pricing.empty());
+
+  hacdcpf::market::RealTimeMarketOptions real_time_options;
+  real_time_options.market_options = day_ahead_options;
+  const auto real_time = hacdcpf::market::run_real_time_market(
+      system, day_ahead_series, realized_series, day_ahead,
+      real_time_options);
+
+  INFO("real-time status=" << real_time.status);
+  for (const auto& warning : real_time.warnings) INFO(warning);
+  REQUIRE(real_time.feasible);
+  REQUIRE(real_time.real_time_market.pricing.size() == 3);
+  REQUIRE(real_time.periods.size() == 3);
+  REQUIRE(real_time.generator_deviation_settlement.size() == 3);
+  REQUIRE(real_time.participant_deviation_settlement.size() == 3);
+  CHECK(real_time.total_absolute_generator_deviation_mwh > 1e-6);
+  CHECK(real_time.settlement.cashflow_residual ==
+        Catch::Approx(0.0).margin(1e-6));
+  CHECK(real_time.settlement.customer_two_settlement_payment ==
+        Catch::Approx(
+            real_time.settlement.customer_day_ahead_payment +
+            real_time.settlement.customer_real_time_deviation_payment)
+            .margin(1e-7));
+  CHECK(real_time.settlement.resource_two_settlement_revenue ==
+        Catch::Approx(
+            real_time.settlement.resource_day_ahead_revenue +
+            real_time.settlement.resource_real_time_deviation_revenue)
+            .margin(1e-7));
+  REQUIRE(real_time.real_time_market.commitment.gen_commit ==
+          day_ahead.commitment.gen_commit);
+  for (const auto& period : real_time.real_time_market.pricing) {
+    CHECK(period.reserve_requirement_mw == Catch::Approx(0.0).margin(1e-9));
+    CHECK(sum(period.upward_reserve_mw) == Catch::Approx(0.0).margin(1e-9));
+  }
+  for (const auto& generator : real_time.generator_deviation_settlement) {
+    CHECK(generator.two_settlement_revenue ==
+          Catch::Approx(generator.day_ahead_energy_revenue +
+                        generator.day_ahead_reserve_revenue +
+                        generator.day_ahead_uplift +
+                        generator.real_time_deviation_revenue)
+              .margin(1e-7));
+    CHECK(generator.profit_after_two_settlement ==
+          Catch::Approx(generator.two_settlement_revenue -
+                        generator.actual_true_cost)
+              .margin(1e-7));
+  }
+  for (size_t g = 0; g < system.ac.generators.size(); ++g) {
+    CHECK(system.ac.generators[g].pg_mw == original.ac.generators[g].pg_mw);
+  }
+}
+
+TEST_CASE("Fixed-commitment SCED enforces initial and inter-period ramp deliverability",
+          "[market][sced][ramp]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  for (auto& generator : system.ac.generators) {
+    generator.ramp_up_mw_min = 3.0;
+    generator.ramp_dn_mw_min = 3.0;
+  }
+  auto time_series = case9_day_profile();
+  time_series.num_steps = 3;
+  time_series.profiles.front().values = {0.90, 1.00, 0.92};
+  auto options = market_options();
+  options.upward_reserve_fraction = 0.05;
+  options.run_ac_validation = false;
+
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, time_series, options);
+  INFO("ramp-constrained market status=" << result.status);
+  for (const auto& warning : result.warnings) INFO(warning);
+  REQUIRE(result.feasible);
+  REQUIRE(result.pricing.size() == 3);
+  const double ramp_mw = 3.0 * 60.0 * time_series.step_duration_hr;
+  for (size_t g = 0; g < system.ac.generators.size(); ++g) {
+    double previous = system.ac.generators[g].pg_mw;
+    for (const auto& period : result.pricing) {
+      const double dispatch = period.generator_dispatch_mw[g];
+      const double reserve = period.upward_reserve_mw[g];
+      CHECK(dispatch + reserve - previous <= ramp_mw + 1e-6);
+      CHECK(previous - dispatch <= ramp_mw + 1e-6);
+      previous = dispatch;
+    }
+  }
+}
+
+TEST_CASE("Case9 real-time reserve performance and imbalance charges close the ancillary ledger",
+          "[market][real-time][ancillary-services]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  auto day_ahead_series = case9_day_profile();
+  day_ahead_series.num_steps = 1;
+  day_ahead_series.profiles.front().values = {1.00};
+  auto realized_series = day_ahead_series;
+  realized_series.profiles.front().values = {1.10};
+
+  auto day_ahead_options = market_options();
+  day_ahead_options.upward_reserve_fraction = 0.10;
+  day_ahead_options.run_ac_validation = false;
+  const auto day_ahead = hacdcpf::market::run_day_ahead_market(
+      system, day_ahead_series, day_ahead_options);
+  REQUIRE(day_ahead.feasible);
+
+  hacdcpf::market::RealTimeMarketOptions real_time_options;
+  real_time_options.market_options = day_ahead_options;
+  auto& ancillary = real_time_options.ancillary_services;
+  ancillary.enabled = true;
+  ancillary.generator_imbalance_tolerance_fraction = 0.01;
+  ancillary.load_imbalance_tolerance_fraction = 0.02;
+  ancillary.generator_imbalance_penalty_per_mwh = 60.0;
+  ancillary.load_imbalance_penalty_per_mwh = 80.0;
+  ancillary.reserve_performance_payment_per_mwh = 12.0;
+  ancillary.reserve_nonperformance_penalty_per_mwh = 120.0;
+  ancillary.reserve_performance_factor_by_generator.assign(
+      system.ac.generators.size(), 0.0);
+
+  const auto real_time = hacdcpf::market::run_real_time_market(
+      system, day_ahead_series, realized_series, day_ahead,
+      real_time_options);
+
+  INFO("ancillary real-time status=" << real_time.status);
+  for (const auto& warning : real_time.warnings) INFO(warning);
+  REQUIRE(real_time.feasible);
+  REQUIRE(real_time.dispatch_instruction_market.feasible);
+  REQUIRE(real_time.dispatch_instruction_market.pricing.size() == 1);
+  REQUIRE(real_time.periods.size() == 1);
+  const auto& period = real_time.periods.front();
+  CHECK(period.reserve_activation_requirement_mw > 1e-6);
+  CHECK(period.reserve_instruction_mw > 1e-6);
+  CHECK(period.reserve_delivered_mw == Catch::Approx(0.0).margin(1e-9));
+  CHECK(period.reserve_shortfall_mw ==
+        Catch::Approx(period.reserve_instruction_mw).margin(1e-8));
+  CHECK(period.load_penalized_imbalance_mwh > 1e-6);
+  CHECK(period.load_imbalance_penalty > 1e-6);
+
+  double instructed = 0.0;
+  double shortfall = 0.0;
+  double instruction_dispatch_mw = 0.0;
+  double actual_dispatch_mw = 0.0;
+  double replacement_dispatch_mw = 0.0;
+  bool saw_failed_reserve_response = false;
+  const auto& instruction_pricing =
+      real_time.dispatch_instruction_market.pricing.front();
+  const auto& actual_pricing = real_time.real_time_market.pricing.front();
+  for (size_t g = 0; g < system.ac.generators.size(); ++g) {
+    instruction_dispatch_mw += instruction_pricing.generator_dispatch_mw[g];
+    actual_dispatch_mw += actual_pricing.generator_dispatch_mw[g];
+    if (real_time.generator_deviation_settlement[g].instructed_reserve_mwh <=
+        1e-9) {
+      replacement_dispatch_mw += std::max(
+          0.0, actual_pricing.generator_dispatch_mw[g] -
+                   instruction_pricing.generator_dispatch_mw[g]);
+    }
+  }
+  for (const auto& generator : real_time.generator_deviation_settlement) {
+    instructed += generator.instructed_reserve_mwh;
+    shortfall += generator.reserve_shortfall_mwh;
+    CHECK(generator.reserve_performance_payment ==
+          Catch::Approx(generator.delivered_reserve_mwh * 12.0).margin(1e-8));
+    CHECK(generator.reserve_nonperformance_charge ==
+          Catch::Approx(generator.reserve_shortfall_mwh * 120.0).margin(1e-8));
+    if (generator.instructed_reserve_mwh > 1e-8) {
+      saw_failed_reserve_response = true;
+      CHECK(generator.actual_output_deviation_mwh ==
+            Catch::Approx(-generator.reserve_shortfall_mwh).margin(1e-7));
+      CHECK(generator.real_time_dispatch_instruction_mwh >
+            generator.real_time_energy_mwh);
+    }
+    CHECK(generator.imbalance_charge ==
+          Catch::Approx(generator.penalized_imbalance_mwh * 60.0).margin(1e-8));
+    CHECK(generator.two_settlement_revenue ==
+          Catch::Approx(generator.day_ahead_energy_revenue +
+                        generator.day_ahead_reserve_revenue +
+                        generator.day_ahead_uplift +
+                        generator.real_time_deviation_revenue +
+                        generator.reserve_performance_payment -
+                        generator.reserve_nonperformance_charge -
+                        generator.imbalance_charge)
+              .margin(1e-7));
+  }
+  CHECK(instructed == Catch::Approx(period.reserve_instruction_mw).margin(1e-8));
+  CHECK(shortfall == Catch::Approx(period.reserve_shortfall_mw).margin(1e-8));
+  CHECK(saw_failed_reserve_response);
+  CHECK(actual_dispatch_mw ==
+        Catch::Approx(instruction_dispatch_mw).margin(1e-7));
+  CHECK(replacement_dispatch_mw > 1e-6);
+  CHECK(real_time.real_time_market.pricing.front().reserve_requirement_mw ==
+        Catch::Approx(0.0).margin(1e-9));
+  CHECK(real_time.settlement.customer_imbalance_penalty > 1e-6);
+  CHECK(real_time.settlement.resource_reserve_nonperformance_charge > 1e-6);
+  CHECK(real_time.settlement.resource_generator_imbalance_charge >= 0.0);
+  CHECK(real_time.settlement.system_operator_ancillary_balance > 1e-6);
+  CHECK(real_time.settlement.cashflow_residual ==
+        Catch::Approx(0.0).margin(1e-6));
+}
+
+TEST_CASE("Case9 repeated participant game evaluates bounded local best responses",
+          "[market][game][best-response]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  auto day_ahead_series = case9_day_profile();
+  day_ahead_series.num_steps = 1;
+  day_ahead_series.profiles.front().values = {1.00};
+  auto realized_series = day_ahead_series;
+  realized_series.profiles.front().values = {1.05};
+
+  hacdcpf::market::MarketParticipant strategic;
+  strategic.participant_id = "strategic_firm";
+  strategic.participant_name = "Strategic Firm";
+  // A portfolio spanning all three generators is deliberately used here so a
+  // one-step uniform markup has a deterministic profitable direction.  A
+  // single marginal/non-marginal unit is not guaranteed to have one once SCUC
+  // evaluates the complete piecewise offer curve.
+  strategic.generator_positions = {0, 1, 2};
+  strategic.behavior.type =
+      hacdcpf::market::BehaviorPolicyType::MarkupAndWithholding;
+  strategic.behavior.energy_markup_fraction = 0.10;
+  strategic.behavior.capacity_withholding_fraction = 0.05;
+
+  hacdcpf::market::RepeatedGameOptions options;
+  options.max_rounds = 3;
+  options.markup_step_fraction = 0.05;
+  options.withholding_step_fraction = 0.05;
+  options.maximum_markup_fraction = 0.30;
+  options.maximum_withholding_fraction = 0.20;
+  options.day_ahead_options = market_options();
+  options.day_ahead_options.run_ac_validation = false;
+  options.day_ahead_options.participants = {strategic};
+  options.real_time_options.market_options = options.day_ahead_options;
+  options.real_time_options.ancillary_services.enabled = true;
+  options.real_time_options.ancillary_services
+      .reserve_performance_factor_by_generator.assign(
+          system.ac.generators.size(), 0.5);
+  const auto game = hacdcpf::market::run_repeated_market_game(
+      system, day_ahead_series, realized_series, options);
+
+  INFO("game status=" << game.status);
+  for (const auto& warning : game.warnings) INFO(warning);
+  REQUIRE_FALSE(game.rounds.empty());
+  REQUIRE(game.rounds.size() <= 3);
+  REQUIRE(game.final_day_ahead.commitment.feasible);
+  REQUIRE_FALSE(game.final_real_time.real_time_market.pricing.empty());
+  bool saw_strategic = false;
+  bool saw_change = false;
+  for (const auto& round : game.rounds) {
+    CHECK(round.day_ahead_feasible);
+    CHECK(round.real_time_feasible);
+    for (const auto& participant : round.participants) {
+      CHECK(participant.best_response_profit + 1e-7 >= participant.profit);
+      if (participant.participant_id != "strategic_firm") continue;
+      saw_strategic = true;
+      saw_change = saw_change || participant.strategy_changed;
+      CHECK(participant.next_behavior.energy_markup_fraction <= 0.30 + 1e-12);
+      CHECK(participant.next_behavior.capacity_withholding_fraction <=
+            0.20 + 1e-12);
+    }
+  }
+  CHECK(saw_strategic);
+  CHECK(saw_change);
+  REQUIRE_FALSE(game.final_real_time.participant_deviation_settlement.empty());
+  const auto& final_round = game.rounds.back();
+  for (const auto& settlement :
+       game.final_real_time.participant_deviation_settlement) {
+    const auto round_row = std::find_if(
+        final_round.participants.begin(), final_round.participants.end(),
+        [&](const auto& row) {
+          return row.participant_id == settlement.participant_id;
+        });
+    REQUIRE(round_row != final_round.participants.end());
+    CHECK(round_row->profit ==
+          Catch::Approx(settlement.profit_after_two_settlement).margin(1e-7));
+    CHECK(round_row->net_ancillary_adjustment ==
+          Catch::Approx(settlement.net_ancillary_adjustment).margin(1e-7));
+    CHECK(settlement.two_settlement_revenue ==
+          Catch::Approx(settlement.day_ahead_market_revenue +
+                        settlement.real_time_deviation_revenue +
+                        settlement.net_ancillary_adjustment)
+              .margin(1e-7));
+  }
+
+  auto limited_options = options;
+  limited_options.max_rounds = 1;
+  limited_options.real_time_options.ancillary_services.enabled = false;
+  const auto limited_game = hacdcpf::market::run_repeated_market_game(
+      system, day_ahead_series, realized_series, limited_options);
+  REQUIRE(limited_game.rounds.size() == 1);
+  CHECK_FALSE(limited_game.converged);
+  CHECK(limited_game.status == "maximum_rounds_reached");
+  const auto limited_strategic = std::find_if(
+      limited_game.rounds.front().participants.begin(),
+      limited_game.rounds.front().participants.end(),
+      [](const auto& row) { return row.participant_id == "strategic_firm"; });
+  REQUIRE(limited_strategic !=
+          limited_game.rounds.front().participants.end());
+  CHECK(limited_strategic->strategy_changed);
+  CHECK(limited_strategic->best_response_improvement >
+        limited_options.profit_improvement_tolerance);
+
+  auto no_learning_options = limited_options;
+  no_learning_options.day_ahead_options.participants.clear();
+  no_learning_options.real_time_options.market_options.participants.clear();
+  no_learning_options.include_cost_based_participants = false;
+  const auto no_learning_game = hacdcpf::market::run_repeated_market_game(
+      system, day_ahead_series, realized_series, no_learning_options);
+  REQUIRE(no_learning_game.rounds.size() == 1);
+  CHECK(no_learning_game.converged);
+  CHECK(no_learning_game.status == "converged");
+}

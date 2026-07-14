@@ -1173,6 +1173,7 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
 #resultsContent[data-active-group="topologyAnalysis"] .result-group[data-result-group="topologyAnalysis"],
 #resultsContent[data-active-group="hosting"]      .result-group[data-result-group="hosting"],
 #resultsContent[data-active-group="timeSeries"]   .result-group[data-result-group="timeSeries"],
+#resultsContent[data-active-group="market"]       .result-group[data-result-group="market"],
 #resultsContent[data-active-group="integratedEnergy"] .result-group[data-result-group="integratedEnergy"],
 #resultsContent[data-active-group="evTraffic"]    .result-group[data-result-group="evTraffic"],
 #resultsContent[data-active-group="reliability"]  .result-group[data-result-group="reliability"],
@@ -2353,6 +2354,41 @@ tr.topo-clickable:focus-visible {
 .cost-editor-na { color: var(--ink3); text-align: center; }
 .cost-editor-validation { margin-left: auto; font-size: 11px; color: var(--green); }
 .cost-editor-validation.invalid { color: var(--orange); }
+.market-participant-modal {
+  width: min(1480px, 98vw);
+  height: min(760px, 92vh);
+}
+.market-participant-modal .evpt-designer-header-actions { margin-left: auto; }
+.market-participant-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+}
+.market-participant-table { flex: 1; max-height: none; }
+.market-participant-table th,
+.market-participant-table td { white-space: nowrap; }
+.market-participant-table input,
+.market-participant-table select {
+  width: 100%;
+  min-width: 96px;
+  height: 25px;
+  box-sizing: border-box;
+}
+.market-participant-table input[data-market-field="participant_id"] { min-width: 140px; }
+.market-participant-table input[data-market-field="participant_name"] { min-width: 130px; }
+.market-participant-table select[data-market-field="type"] { min-width: 150px; }
+.market-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.market-chart { min-width: 0; height: 300px; }
+@media (max-width: 900px) {
+  .market-chart-grid { grid-template-columns: 1fr; }
+}
 .seq-profile-editor-table td:first-child,
 .seq-profile-editor-table th:first-child { width: 64px; }
 .seq-profile-editor-table .seq-spatial-kind {

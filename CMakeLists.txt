@@ -418,6 +418,9 @@ set(HACDCPF_SOURCES
   src/time_series/annual_production_sim.cpp
   src/time_series/lifecycle_simulation.cpp
   src/integrated_energy/integrated_energy_optimizer.cpp
+  # ── day-ahead electricity market ────────────────────────────────────────
+  src/market/participant_behavior.cpp
+  src/market/market_simulation.cpp
   # ── power_models stubs (AML model builders) ──────────────────────────
   src/power_models/acopf_builder.cpp
   src/power_models/acdcopf_builder.cpp

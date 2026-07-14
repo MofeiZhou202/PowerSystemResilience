@@ -62,6 +62,9 @@ const App = (() => {
   let _lastIntegratedEnergyData = null;
   let _lastEvTrafficData = null;
   let _lastAnnualData = null;
+  let _lastMarketData = null;
+  let _lastRealTimeMarketData = null;
+  let _lastMarketGameData = null;
   const _annualTimelineWindowState = { data: null, theme: null, start: 0, last: null };
   let _lastCarbonData = null;
   let _lastDynamicCarbonData = null;
@@ -116,6 +119,15 @@ const App = (() => {
     1.00, 0.98, 0.94, 0.90, 0.86, 0.82, 0.78, 0.75,
   ];
   let _seqProfileEditorState = null;
+  let _marketParticipantRows = null;
+  let _collectWeakLinkEvidence = null;
+
+  function collectWeakLinkEvidence(...args) {
+    if (!_collectWeakLinkEvidence) {
+      throw new Error('多维薄弱环节模块尚未初始化');
+    }
+    return _collectWeakLinkEvidence(...args);
+  }
 
   class CanvasPlaybackController {
     constructor(root) {
@@ -266,6 +278,7 @@ const App = (() => {
     tspf: 'security',
     topology: 'planning',
     timeSeries: 'planning',
+    market: 'planning',
     scenarioGeneration: 'planning',
     weakLinks: 'planning',
     carbonFlow: 'sustainability',
@@ -332,6 +345,9 @@ const App = (() => {
     _lastTspfData = null;
     _lastIntegratedEnergyData = null;
     _lastEvTrafficData = null;
+    _lastMarketData = null;
+    _lastRealTimeMarketData = null;
+    _lastMarketGameData = null;
     _lastCarbonData = null;
     _lastDynamicCarbonData = null;
     _lastTransientData = null;
@@ -339,6 +355,9 @@ const App = (() => {
     _lastResilienceData = null;
     _lastWeakLinkData = null;
     _lastCounterfactualData = null;
+    _marketParticipantRows = null;
+    const marketParticipantSummary = document.getElementById('marketParticipantSummary');
+    if (marketParticipantSummary) marketParticipantSummary.textContent = '默认：各机组独立成本报价';
     _pfInvalidated = hadPf;
     _tspfInvalidated = hadTspf;
     _lastInvalidationReason = reason || (hadPf || hadTspf ? '网络或参数已变更，旧分析结果已失效' : '');
@@ -1670,6 +1689,9 @@ const App = (() => {
     add('campus_integrated_energy', _lastIntegratedEnergyData);
     add('ev_power_traffic', _lastEvTrafficData);
     add('annual_production_simulation', _lastAnnualData);
+    add('day_ahead_market', _lastMarketData);
+    add('real_time_market', _lastRealTimeMarketData);
+    add('repeated_market_game', _lastMarketGameData);
     add('carbon_flow', _lastCarbonData);
     add('dynamic_carbon_flow', _lastDynamicCarbonData);
     add('transient_simulation', _lastTransientData);
@@ -12081,6 +12103,711 @@ const App = (() => {
     if (moduleName === 'resilience') markResilienceFaultBranches();
   }
 
+  // ========== Native day-ahead electricity market ==========
+  const MARKET_BEHAVIOUR_LABELS = {
+    cost_based: '成本报价',
+    fixed_markup: '固定加价',
+    capacity_withholding: '容量扣留',
+    markup_and_withholding: '加价+扣留',
+  };
+
+  function marketNumber(id, fallback, minimum = -Infinity, maximum = Infinity) {
+    const value = Number(document.getElementById(id)?.value);
+    return Number.isFinite(value)
+      ? Math.max(minimum, Math.min(maximum, value))
+      : fallback;
+  }
+
+  function marketChecked(id, fallback = false) {
+    const el = document.getElementById(id);
+    return el ? !!el.checked : fallback;
+  }
+
+  function defaultMarketParticipantRow(generator, position) {
+    const index = generator.index ?? position;
+    const name = generator.name || `Gen ${index}`;
+    return {
+      generator_position: position,
+      generator_index: index,
+      generator_name: name,
+      bus: generator.bus ?? '—',
+      pmax_mw: Number(generator.pmax_mw || 0),
+      participant_id: `generator:${index}`,
+      participant_name: name,
+      type: 'cost_based',
+      energy_markup_percent: 0,
+      capacity_withholding_percent: 0,
+      commitment_markup_percent: 0,
+      upward_reserve_price_per_mwh: 0,
+    };
+  }
+
+  function buildMarketParticipantRows() {
+    const system = Canvas.buildSystemJson();
+    const previous = new Map((_marketParticipantRows || []).map(row =>
+      [String(row.generator_index), row]));
+    return (system.ac?.generators || [])
+      .map((generator, position) => ({ generator, position }))
+      .filter(({ generator }) => generator.in_service !== false)
+      .map(({ generator, position }) => {
+        const fallback = defaultMarketParticipantRow(generator, position);
+        const retained = previous.get(String(fallback.generator_index));
+        return retained ? { ...fallback, ...retained,
+          generator_position: position,
+          generator_name: fallback.generator_name,
+          bus: fallback.bus,
+          pmax_mw: fallback.pmax_mw } : fallback;
+      });
+  }
+
+  function validateMarketParticipantRows() {
+    const errors = [];
+    const groups = new Map();
+    (_marketParticipantRows || []).forEach((row, index) => {
+      const prefix = row.generator_name || `机组 ${index}`;
+      row.participant_id = String(row.participant_id || '').trim();
+      row.participant_name = String(row.participant_name || row.participant_id).trim();
+      if (!row.participant_id) errors.push(`${prefix}: 主体ID不能为空`);
+      if (!MARKET_BEHAVIOUR_LABELS[row.type]) errors.push(`${prefix}: 未知策略`);
+      const numeric = [
+        ['能量加价', row.energy_markup_percent, 0, Infinity],
+        ['容量扣留', row.capacity_withholding_percent, 0, 100],
+        ['启停加价', row.commitment_markup_percent, 0, Infinity],
+        ['备用报价', row.upward_reserve_price_per_mwh, 0, Infinity],
+      ];
+      numeric.forEach(([label, raw, min, max]) => {
+        const value = Number(raw);
+        if (!Number.isFinite(value) || value < min || value > max) {
+          errors.push(`${prefix}: ${label}参数无效`);
+        }
+      });
+      const signature = JSON.stringify([
+        row.type,
+        Number(row.energy_markup_percent),
+        Number(row.capacity_withholding_percent),
+        Number(row.commitment_markup_percent),
+        Number(row.upward_reserve_price_per_mwh),
+      ]);
+      const existing = groups.get(row.participant_id);
+      if (existing && existing !== signature) {
+        errors.push(`主体 ${row.participant_id}: 多台机组的策略参数必须一致`);
+      } else if (row.participant_id) {
+        groups.set(row.participant_id, signature);
+      }
+    });
+    const el = document.getElementById('marketParticipantValidation');
+    if (el) {
+      el.textContent = errors.length ? `${errors.length} 个配置问题` : '策略配置有效';
+      el.className = `cost-editor-validation${errors.length ? ' invalid' : ''}`;
+      el.title = errors.slice(0, 12).join('\n');
+    }
+    return errors;
+  }
+
+  function renderMarketParticipantTable() {
+    const container = document.getElementById('marketParticipantTable');
+    const count = document.getElementById('marketParticipantCount');
+    if (!container) return;
+    const rows = _marketParticipantRows || [];
+    const options = Object.entries(MARKET_BEHAVIOUR_LABELS)
+      .map(([value, label]) => ({ value, label }));
+    const body = rows.map((row, rowIndex) => `
+      <tr>
+        <td>${escapeHtml(String(row.generator_index))}</td>
+        <td>${escapeHtml(row.generator_name)}</td>
+        <td>${escapeHtml(String(row.bus))}</td>
+        <td>${Number(row.pmax_mw).toFixed(2)}</td>
+        <td><input data-market-row="${rowIndex}" data-market-field="participant_id" value="${escapeHtml(row.participant_id)}"/></td>
+        <td><input data-market-row="${rowIndex}" data-market-field="participant_name" value="${escapeHtml(row.participant_name)}"/></td>
+        <td><select data-market-row="${rowIndex}" data-market-field="type">${options.map(option =>
+          `<option value="${option.value}"${row.type === option.value ? ' selected' : ''}>${option.label}</option>`).join('')}</select></td>
+        <td><input type="number" min="0" step="1" data-market-row="${rowIndex}" data-market-field="energy_markup_percent" value="${row.energy_markup_percent}"/></td>
+        <td><input type="number" min="0" max="100" step="1" data-market-row="${rowIndex}" data-market-field="capacity_withholding_percent" value="${row.capacity_withholding_percent}"/></td>
+        <td><input type="number" min="0" step="1" data-market-row="${rowIndex}" data-market-field="commitment_markup_percent" value="${row.commitment_markup_percent}"/></td>
+        <td><input type="number" min="0" step="0.1" data-market-row="${rowIndex}" data-market-field="upward_reserve_price_per_mwh" value="${row.upward_reserve_price_per_mwh}"/></td>
+      </tr>`).join('');
+    container.innerHTML = `<table><thead><tr><th>机组Index</th><th>机组</th><th>母线</th><th>Pmax(MW)</th><th>主体ID</th><th>主体名称</th><th>行为策略</th><th>能量加价(%)</th><th>容量扣留(%)</th><th>启停加价(%)</th><th>备用报价</th></tr></thead><tbody>${body || '<tr><td colspan="11" class="empty-hint">当前系统没有在运同步发电机</td></tr>'}</tbody></table>`;
+    if (count) count.textContent = `${rows.length} 台在运机组`;
+    validateMarketParticipantRows();
+  }
+
+  function updateMarketParticipantSummary() {
+    const summary = document.getElementById('marketParticipantSummary');
+    if (!summary) return;
+    const rows = _marketParticipantRows || [];
+    if (!rows.length) {
+      summary.textContent = '默认：各机组独立成本报价';
+      return;
+    }
+    const firms = new Set(rows.map(row => row.participant_id).filter(Boolean));
+    const strategic = rows.filter(row => row.type !== 'cost_based').length;
+    summary.textContent = `${firms.size} 个主体 · ${strategic} 台策略报价机组`;
+  }
+
+  function openMarketParticipantEditor() {
+    _marketParticipantRows = buildMarketParticipantRows();
+    renderMarketParticipantTable();
+    const modal = document.getElementById('marketParticipantModal');
+    if (modal) modal.style.display = 'flex';
+  }
+
+  function closeMarketParticipantEditor() {
+    const modal = document.getElementById('marketParticipantModal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  function resetMarketParticipantRows() {
+    const system = Canvas.buildSystemJson();
+    _marketParticipantRows = (system.ac?.generators || [])
+      .map((generator, position) => ({ generator, position }))
+      .filter(({ generator }) => generator.in_service !== false)
+      .map(({ generator, position }) => defaultMarketParticipantRow(generator, position));
+    renderMarketParticipantTable();
+  }
+
+  function applyMarketParticipantRows() {
+    const errors = validateMarketParticipantRows();
+    if (errors.length) {
+      setStatus('市场主体策略存在无效配置', 'warn');
+      return false;
+    }
+    updateMarketParticipantSummary();
+    closeMarketParticipantEditor();
+    setStatus('市场主体策略已应用', 'success');
+    return true;
+  }
+
+  function marketParticipantsPayload() {
+    if (!_marketParticipantRows) _marketParticipantRows = buildMarketParticipantRows();
+    const errors = validateMarketParticipantRows();
+    if (errors.length) throw new Error(errors[0]);
+    const groups = new Map();
+    _marketParticipantRows.forEach(row => {
+      if (!groups.has(row.participant_id)) {
+        groups.set(row.participant_id, {
+          participant_id: row.participant_id,
+          participant_name: row.participant_name || row.participant_id,
+          generator_indices: [],
+          behavior: {
+            type: row.type,
+            energy_markup_fraction: Number(row.energy_markup_percent) / 100,
+            capacity_withholding_fraction:
+              Number(row.capacity_withholding_percent) / 100,
+            commitment_markup_fraction:
+              Number(row.commitment_markup_percent) / 100,
+            upward_reserve_price_per_mwh:
+              Number(row.upward_reserve_price_per_mwh),
+          },
+        });
+      }
+      groups.get(row.participant_id).generator_indices.push(row.generator_index);
+    });
+    return [...groups.values()];
+  }
+
+  function collectMarketPayload() {
+    return {
+      num_steps: Math.round(marketNumber('marketNumSteps', 24, 1, 8760)),
+      offer_segments: Math.round(marketNumber('marketOfferSegments', 8, 1, 64)),
+      reserve_fraction: marketNumber('marketReservePct', 5, 0, 100) / 100,
+      exogenous_curtailment_penalty_per_mwh:
+        marketNumber('marketCurtailmentPenalty', 0, 0, 1e9),
+      network_constraints: marketChecked('marketNetworkConstraints', true),
+      run_ac_validation: marketChecked('marketAcValidation', true),
+      enable_n1_security: marketChecked('marketEnableN1'),
+      n1_max_iterations: Math.round(marketNumber('marketN1Iterations', 8, 0, 100)),
+      n1_max_cuts_per_iteration:
+        Math.round(marketNumber('marketN1Cuts', 200, 0, 10000)),
+      n1_max_contingencies:
+        Math.round(marketNumber('marketN1Contingencies', 0, 0, 100000)),
+      n1_emergency_rating_multiplier:
+        marketNumber('marketEmergencyMultiplier', 1, 0, 100),
+      run_ac_contingency_validation: marketChecked('marketAcContingency'),
+      max_ac_contingencies:
+        Math.round(marketNumber('marketMaxAcContingencies', 3, 0, 100000)),
+      participants: marketParticipantsPayload(),
+    };
+  }
+
+  function marketFmt(value, digits = 2) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number.toFixed(digits) : '—';
+  }
+
+  function marketStatusLabel(status) {
+    const labels = {
+      converged: '出清通过',
+      n1_security_failed: 'N-1 未通过',
+      ac_contingency_failed: '事故后 AC 未通过',
+      ac_validation_failed: '基态 AC 未通过',
+      scuc_infeasible: 'SCUC 不可行',
+    };
+    return labels[status] || status || '—';
+  }
+
+  function marketTheme(title, yTitle) {
+    const styles = getComputedStyle(document.documentElement);
+    const ink = styles.getPropertyValue('--ink').trim() || '#dcdfe4';
+    const border = styles.getPropertyValue('--border').trim() || '#3e4451';
+    return {
+      title,
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      font: { color: ink, size: 11 },
+      xaxis: { title: '时段', gridcolor: border },
+      yaxis: { title: yTitle, gridcolor: border, rangemode: 'tozero' },
+      margin: { l: 56, r: 50, t: 38, b: 46 },
+      legend: { orientation: 'h', y: -0.24 },
+    };
+  }
+
+  function renderMarketCharts(data) {
+    if (typeof Plotly === 'undefined') return;
+    const pricing = Array.isArray(data.pricing) ? data.pricing : [];
+    const x = pricing.map((_, index) => index + 1);
+    const lmpDiv = document.getElementById('marketLmpChart');
+    if (lmpDiv) {
+      const busCount = pricing[0]?.lmp_per_mwh?.length || 0;
+      let traces = [];
+      if (busCount <= 12) {
+        traces = Array.from({ length: busCount }, (_, bus) => ({
+          x,
+          y: pricing.map(period => Number(period.lmp_per_mwh?.[bus] || 0)),
+          type: 'scatter', mode: 'lines+markers', name: `Bus ${bus + 1}`,
+        }));
+      } else {
+        const rows = pricing.map(period => (period.lmp_per_mwh || []).map(Number)
+          .filter(Number.isFinite));
+        traces = [
+          ['最低 LMP', rows.map(values => values.length ? Math.min(...values) : 0)],
+          ['平均 LMP', rows.map(values => values.length ?
+            values.reduce((sum, value) => sum + value, 0) / values.length : 0)],
+          ['最高 LMP', rows.map(values => values.length ? Math.max(...values) : 0)],
+        ].map(([name, y]) => ({ x, y, type: 'scatter', mode: 'lines+markers', name }));
+      }
+      Plotly.react(lmpDiv, traces, marketTheme('节点边际电价', '价格 / MWh'),
+        { responsive: true, displayModeBar: false });
+    }
+
+    const securityDiv = document.getElementById('marketSecurityChart');
+    const trajectory = Array.isArray(data.security?.trajectory)
+      ? data.security.trajectory : [];
+    if (securityDiv && trajectory.length) {
+      const iterations = trajectory.map(row => row.iteration);
+      const layout = marketTheme('N-1 切平面收敛', '违约数');
+      layout.xaxis.title = '迭代';
+      layout.yaxis2 = {
+        title: '最严重过载 (MW)', overlaying: 'y', side: 'right',
+        gridcolor: 'rgba(0,0,0,0)', rangemode: 'tozero',
+      };
+      Plotly.react(securityDiv, [
+        { x: iterations, y: trajectory.map(row => row.violations),
+          type: 'bar', name: '违约数' },
+        { x: iterations, y: trajectory.map(row => row.worst_overload_mw),
+          type: 'scatter', mode: 'lines+markers', name: '最严重过载', yaxis: 'y2' },
+      ], layout, { responsive: true, displayModeBar: false });
+    } else if (securityDiv) {
+      Plotly.purge(securityDiv);
+      securityDiv.innerHTML = '<p class="empty-hint">本次未运行 N-1 预防控制。</p>';
+    }
+  }
+
+  function renderMarketResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('market');
+    switchTab('results');
+    const security = data.security || {};
+    const ledger = data.settlement || {};
+    const acValidation = Array.isArray(data.ac_validation)
+      ? data.ac_validation : [];
+    const acSecureCount = acValidation.filter(row => row.secure).length;
+    const statusClass = data.feasible ? 'converged' : 'failed';
+    document.getElementById('marketSummary').innerHTML = `
+      <div class="result-item"><span class="result-label">市场状态</span><span class="result-value ${statusClass}">${escapeHtml(marketStatusLabel(data.status))}</span></div>
+      <div class="result-item"><span class="result-label">定价目标</span><span class="result-value">${marketFmt(data.pricing_objective, 2)}</span></div>
+      <div class="result-item"><span class="result-label">机组组合成本</span><span class="result-value">${marketFmt(data.commitment?.cost, 2)}</span></div>
+      <div class="result-item"><span class="result-label">N-1</span><span class="result-value ${security.enabled ? (security.dc_n1_secured ? 'converged' : 'failed') : ''}">${security.enabled ? (security.dc_n1_secured ? '通过' : '未通过') : '未启用'}</span></div>
+      <div class="result-item"><span class="result-label">切平面</span><span class="result-value">${Number(security.cuts_added || 0)} 条 / ${Number(security.iterations || 0)} 轮</span></div>
+      <div class="result-item"><span class="result-label">安全再调度成本</span><span class="result-value">${marketFmt(security.preventive_redispatch_cost, 2)}</span></div>
+      <div class="result-item"><span class="result-label">安全增量Uplift</span><span class="result-value">${marketFmt(security.incremental_security_uplift, 2)}</span></div>
+      <div class="result-item"><span class="result-label">基态AC安全</span><span class="result-value ${acValidation.length ? (acSecureCount === acValidation.length ? 'converged' : 'failed') : ''}">${acValidation.length ? `${acSecureCount} / ${acValidation.length}` : '未启用'}</span></div>
+      <div class="result-item"><span class="result-label">资金残差</span><span class="result-value">${marketFmt(ledger.cashflow_residual, 6)}</span></div>`;
+
+    const pricing = Array.isArray(data.pricing) ? data.pricing : [];
+    let pricingHtml = '<table><thead><tr><th>时段</th><th>需求(MW)</th><th>发电(MW)</th><th>备用需求(MW)</th><th>备用价格</th><th>LMP最低</th><th>LMP平均</th><th>LMP最高</th><th>切负荷(MW)</th><th>弃电(MW)</th><th>目标</th></tr></thead><tbody>';
+    pricing.forEach((period, index) => {
+      const lmps = (period.lmp_per_mwh || []).map(Number).filter(Number.isFinite);
+      const average = lmps.length ? lmps.reduce((sum, value) => sum + value, 0) / lmps.length : 0;
+      const generation = (period.generator_dispatch_mw || []).reduce((sum, value) => sum + Number(value || 0), 0);
+      const shedding = (period.load_shedding_mw || []).reduce((sum, value) => sum + Number(value || 0), 0);
+      const curtailment = (period.exogenous_curtailment_mw || []).reduce((sum, value) => sum + Number(value || 0), 0);
+      pricingHtml += `<tr><td>${index + 1}</td><td>${marketFmt(period.gross_demand_mw)}</td><td>${marketFmt(generation)}</td><td>${marketFmt(period.reserve_requirement_mw)}</td><td>${marketFmt(period.upward_reserve_price_per_mwh)}</td><td>${marketFmt(lmps.length ? Math.min(...lmps) : 0)}</td><td>${marketFmt(average)}</td><td>${marketFmt(lmps.length ? Math.max(...lmps) : 0)}</td><td>${marketFmt(shedding)}</td><td>${marketFmt(curtailment)}</td><td>${marketFmt(period.objective)}</td></tr>`;
+    });
+    pricingHtml += pricing.length ? '</tbody></table>' : '<tr><td colspan="11">无定价结果</td></tr></tbody></table>';
+    document.getElementById('marketPricingResults').innerHTML = pricingHtml;
+
+    const participants = Array.isArray(data.participant_settlement)
+      ? data.participant_settlement : [];
+    let participantHtml = '<table><thead><tr><th>主体</th><th>机组位置</th><th>物理容量</th><th>申报容量</th><th>扣留容量</th><th>电量(MWh)</th><th>备用(MWh)</th><th>市场收入</th><th>真实成本</th><th>申报成本</th><th>Uplift</th><th>利润</th></tr></thead><tbody>';
+    participants.forEach(row => {
+      participantHtml += `<tr><td>${escapeHtml(row.participant_name || row.participant_id || '')}<br><span class="sub-hint">${escapeHtml(row.participant_id || '')}</span></td><td>${escapeHtml((row.generator_positions || []).join(', '))}</td><td>${marketFmt(row.physical_capacity_mw)}</td><td>${marketFmt(row.offered_capacity_mw)}</td><td>${marketFmt(row.withheld_capacity_mw)}</td><td>${marketFmt(row.energy_mwh)}</td><td>${marketFmt(row.reserve_mwh)}</td><td>${marketFmt(row.market_revenue)}</td><td>${marketFmt(row.true_cost)}</td><td>${marketFmt(row.as_bid_cost)}</td><td>${marketFmt(row.uplift)}</td><td>${marketFmt(row.profit_after_uplift)}</td></tr>`;
+    });
+    participantHtml += participants.length ? '</tbody></table>' : '<tr><td colspan="12">无主体结算结果</td></tr></tbody></table>';
+    document.getElementById('marketParticipantResults').innerHTML = participantHtml;
+
+    let acHtml = '<table><thead><tr><th>时段</th><th>潮流收敛</th><th>安全</th><th>电压越限(pu)</th><th>线路过载(MVA)</th><th>最大负载率</th><th>Slack调整(MW)</th><th>机组P越限(MW)</th><th>状态</th></tr></thead><tbody>';
+    acValidation.forEach(row => {
+      acHtml += `<tr><td>${Number(row.period || 0) + 1}</td><td>${row.converged ? '是' : '否'}</td><td class="${row.secure ? 'converged' : 'failed'}">${row.secure ? '通过' : '未通过'}</td><td>${marketFmt(row.maximum_voltage_violation_pu, 6)}</td><td>${marketFmt(row.maximum_branch_overload_mva, 4)}</td><td>${marketFmt(row.maximum_branch_loading_percent, 2)}%</td><td>${marketFmt(row.slack_adjustment_mw, 4)}</td><td>${marketFmt(row.maximum_generator_active_violation_mw, 4)}</td><td>${escapeHtml(row.status || '')}</td></tr>`;
+    });
+    acHtml += acValidation.length ? '</tbody></table>' : '<tr><td colspan="9">本次未运行基态 AC 安全认证</td></tr></tbody></table>';
+    document.getElementById('marketAcValidationResults').innerHTML = acHtml;
+
+    const trajectory = Array.isArray(security.trajectory) ? security.trajectory : [];
+    let securityHtml = `<div class="sub-hint">候选事故 ${Number(security.candidate_contingencies || 0)}；跳过孤岛支路位置 ${(security.skipped_islanding_branch_positions || []).join(', ') || '无'}；基线目标 ${marketFmt(security.baseline_pricing_objective)}；安全目标 ${marketFmt(security.secured_pricing_objective)}；用户支付影响 ${marketFmt(security.customer_payment_impact)}</div>`;
+    securityHtml += '<table><thead><tr><th>迭代</th><th>违约数</th><th>本轮切平面</th><th>累计切平面</th><th>最严重过载(MW)</th></tr></thead><tbody>';
+    trajectory.forEach(row => {
+      securityHtml += `<tr><td>${row.iteration}</td><td>${row.violations}</td><td>${row.cuts_added}</td><td>${row.cumulative_cuts}</td><td>${marketFmt(row.worst_overload_mw, 4)}</td></tr>`;
+    });
+    securityHtml += trajectory.length ? '</tbody></table>' : '<tr><td colspan="5">本次未运行 N-1 预防控制</td></tr></tbody></table>';
+    document.getElementById('marketSecurityResults').innerHTML = securityHtml;
+
+    const checks = Array.isArray(security.ac_checks) ? security.ac_checks : [];
+    let checkHtml = '<table><thead><tr><th>时段</th><th>停运支路</th><th>收敛</th><th>安全</th><th>最大电压越限(pu)</th><th>最大热过载(MVA)</th><th>状态</th></tr></thead><tbody>';
+    checks.forEach(check => {
+      checkHtml += `<tr><td>${Number(check.period || 0) + 1}</td><td>Index ${check.outage_branch_index} / Pos ${check.outage_branch_position}</td><td>${check.converged ? '是' : '否'}</td><td class="${check.secure ? 'converged' : 'failed'}">${check.secure ? '通过' : '未通过'}</td><td>${marketFmt(check.maximum_voltage_violation_pu, 6)}</td><td>${marketFmt(check.maximum_branch_overload_mva, 4)}</td><td>${escapeHtml(check.status || '')}</td></tr>`;
+    });
+    checkHtml += checks.length ? '</tbody></table>' : '<tr><td colspan="7">本次未运行事故后 AC 认证</td></tr></tbody></table>';
+    document.getElementById('marketContingencyResults').innerHTML = checkHtml;
+
+    const ledgerRows = [
+      ['用户能量支付', ledger.customer_energy_payment],
+      ['用户备用费用', ledger.customer_reserve_charge],
+      ['用户Uplift费用', ledger.customer_uplift_charge],
+      ['用户总支付', ledger.customer_total_payment],
+      ['资源能量收入', ledger.resource_energy_revenue],
+      ['资源备用收入', ledger.resource_reserve_revenue],
+      ['资源Uplift收入', ledger.resource_uplift_revenue],
+      ['资源总收入', ledger.resource_total_revenue],
+      ['拥塞租金', ledger.congestion_rent],
+      ['资金残差', ledger.cashflow_residual],
+    ];
+    document.getElementById('marketSettlementResults').innerHTML =
+      `<table><thead><tr><th>账本科目</th><th>金额</th></tr></thead><tbody>${ledgerRows.map(([label, value]) => `<tr><td>${label}</td><td>${marketFmt(value, 4)}</td></tr>`).join('')}</tbody></table>`;
+    requestAnimationFrame(() => renderMarketCharts(data));
+  }
+
+  async function runMarketClearing() {
+    let payload;
+    try {
+      payload = collectMarketPayload();
+    } catch (error) {
+      setStatus(error.message || '市场参数无效', 'warn');
+      return;
+    }
+    const retainedRows = (_marketParticipantRows || []).map(row => ({ ...row }));
+    setStatus('日前市场出清中...', 'busy');
+    if (!await syncToBackend(true)) {
+      setStatus('市场出清前模型同步失败', 'error');
+      return;
+    }
+    _marketParticipantRows = retainedRows;
+    updateMarketParticipantSummary();
+    const response = await apiPostResult('/api/session/run_market_clearing', payload);
+    if (!response.ok) {
+      setStatus(`市场出清失败: ${response.error || '未知错误'}`, 'error');
+      return;
+    }
+    _lastMarketData = response.data;
+    renderMarketResults(response.data);
+    const completed = response.data.feasible === true;
+    setStatus(completed ? '日前市场出清与安全校核完成' :
+      `市场结果：${marketStatusLabel(response.data.status)}`,
+      completed ? 'success' : 'warn');
+  }
+
+  function marketRealTimePayload() {
+    const payload = collectMarketPayload();
+    payload.realized_load_multiplier = Math.max(
+      0, 1 + marketNumber('marketRealizedLoadDeviationPct', 5, -100, 500) / 100);
+    payload.real_time = {
+      run_ac_validation: marketChecked('marketRealTimeAcValidation'),
+      enable_n1_security: payload.enable_n1_security,
+      run_ac_contingency_validation: payload.run_ac_contingency_validation,
+    };
+    payload.ancillary_services = {
+      enabled: marketChecked('marketAncillaryEnabled'),
+      generator_imbalance_tolerance_fraction:
+        marketNumber('marketGeneratorImbalanceTolerancePct', 2, 0, 100) / 100,
+      load_imbalance_tolerance_fraction:
+        marketNumber('marketLoadImbalanceTolerancePct', 2, 0, 100) / 100,
+      generator_imbalance_penalty_per_mwh:
+        marketNumber('marketGeneratorImbalancePenalty', 50, 0, 1e9),
+      load_imbalance_penalty_per_mwh:
+        marketNumber('marketLoadImbalancePenalty', 50, 0, 1e9),
+      reserve_performance_payment_per_mwh:
+        marketNumber('marketReservePerformancePayment', 10, 0, 1e9),
+      reserve_nonperformance_penalty_per_mwh:
+        marketNumber('marketReserveNonperformancePenalty', 100, 0, 1e9),
+      reserve_performance_factor:
+        marketNumber('marketReservePerformancePct', 100, 0, 100) / 100,
+    };
+    return payload;
+  }
+
+  function renderRealTimeMarketCharts(data) {
+    if (typeof Plotly === 'undefined') return;
+    const periods = Array.isArray(data.periods) ? data.periods : [];
+    const x = periods.map(period => Number(period.period) + 1);
+    const priceDiv = document.getElementById('marketRealTimePriceChart');
+    if (priceDiv) {
+      Plotly.react(priceDiv, [
+        { x, y: periods.map(period => period.average_day_ahead_lmp_per_mwh),
+          type: 'scatter', mode: 'lines+markers', name: '日前平均LMP' },
+        { x, y: periods.map(period => period.average_real_time_lmp_per_mwh),
+          type: 'scatter', mode: 'lines+markers', name: '实时平均LMP' },
+      ], marketTheme('日前与实时价格', '价格 / MWh'),
+      { responsive: true, displayModeBar: false });
+    }
+    const deviationDiv = document.getElementById('marketDeviationChart');
+    if (deviationDiv) {
+      Plotly.react(deviationDiv, [
+        { x, y: periods.map(period => period.demand_deviation_mw),
+          type: 'bar', name: '负荷偏差' },
+        { x, y: periods.map(period => period.absolute_generator_deviation_mw),
+          type: 'scatter', mode: 'lines+markers', name: '机组绝对偏差' },
+      ], marketTheme('实时偏差', 'MW'),
+      { responsive: true, displayModeBar: false });
+    }
+    const reserveDiv = document.getElementById('marketReservePerformanceChart');
+    if (reserveDiv && data.ancillary_services_enabled) {
+      Plotly.react(reserveDiv, [
+        { x, y: periods.map(period => period.reserve_delivered_mw),
+          type: 'bar', name: '已履约备用' },
+        { x, y: periods.map(period => period.reserve_shortfall_mw),
+          type: 'bar', name: '未履约备用' },
+        { x, y: periods.map(period => period.reserve_activation_requirement_mw),
+          type: 'scatter', mode: 'lines+markers', name: '激活需求' },
+      ], { ...marketTheme('实时备用履约', 'MW'), barmode: 'stack' },
+      { responsive: true, displayModeBar: false });
+    } else if (reserveDiv) {
+      Plotly.purge(reserveDiv);
+      reserveDiv.innerHTML = '<p class="empty-hint">本次未启用实时辅助服务结算。</p>';
+    }
+  }
+
+  function renderRealTimeMarketResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('market');
+    switchTab('results');
+    const section = document.getElementById('marketRealTimeSection');
+    if (section) section.style.display = 'block';
+    const ledger = data.settlement || {};
+    const statusClass = data.feasible ? 'converged' : 'failed';
+    document.getElementById('marketRealTimeSummary').innerHTML = `
+      <div class="result-item"><span class="result-label">实时状态</span><span class="result-value ${statusClass}">${escapeHtml(marketStatusLabel(data.status))}</span></div>
+      <div class="result-item"><span class="result-label">绝对调节电量</span><span class="result-value">${marketFmt(data.total_absolute_generator_deviation_mwh, 3)} MWh</span></div>
+      <div class="result-item"><span class="result-label">实时偏差支付</span><span class="result-value">${marketFmt(ledger.customer_real_time_deviation_payment, 2)}</span></div>
+      <div class="result-item"><span class="result-label">双结算总支付</span><span class="result-value">${marketFmt(ledger.customer_two_settlement_payment, 2)}</span></div>
+      <div class="result-item"><span class="result-label">实时拥塞租金</span><span class="result-value">${marketFmt(ledger.real_time_deviation_congestion_rent, 2)}</span></div>
+      <div class="result-item"><span class="result-label">负荷偏差惩罚</span><span class="result-value">${marketFmt(ledger.customer_imbalance_penalty, 2)}</span></div>
+      <div class="result-item"><span class="result-label">备用履约奖励</span><span class="result-value">${marketFmt(ledger.resource_reserve_performance_payment, 2)}</span></div>
+      <div class="result-item"><span class="result-label">未履约扣款</span><span class="result-value">${marketFmt(ledger.resource_reserve_nonperformance_charge, 2)}</span></div>
+      <div class="result-item"><span class="result-label">发电偏差扣款</span><span class="result-value">${marketFmt(ledger.resource_generator_imbalance_charge, 2)}</span></div>
+      <div class="result-item"><span class="result-label">运营方辅助服务余额</span><span class="result-value">${marketFmt(ledger.system_operator_ancillary_balance, 2)}</span></div>
+      <div class="result-item"><span class="result-label">资金残差</span><span class="result-value">${marketFmt(ledger.cashflow_residual, 8)}</span></div>`;
+
+    const periods = Array.isArray(data.periods) ? data.periods : [];
+    let periodHtml = '<table><thead><tr><th>时段</th><th>日前需求(MW)</th><th>实际需求(MW)</th><th>需求偏差(MW)</th><th>机组绝对偏差(MW)</th><th>备用激活需求(MW)</th><th>备用指令(MW)</th><th>已履约(MW)</th><th>未履约(MW)</th><th>负荷考核电量(MWh)</th><th>负荷偏差惩罚</th><th>日前LMP</th><th>实时LMP</th><th>用户偏差支付</th><th>资源偏差收入</th><th>偏差拥塞租金</th></tr></thead><tbody>';
+    periods.forEach(row => {
+      periodHtml += `<tr><td>${Number(row.period) + 1}</td><td>${marketFmt(row.day_ahead_demand_mw)}</td><td>${marketFmt(row.realized_demand_mw)}</td><td>${marketFmt(row.demand_deviation_mw)}</td><td>${marketFmt(row.absolute_generator_deviation_mw)}</td><td>${marketFmt(row.reserve_activation_requirement_mw)}</td><td>${marketFmt(row.reserve_instruction_mw)}</td><td>${marketFmt(row.reserve_delivered_mw)}</td><td>${marketFmt(row.reserve_shortfall_mw)}</td><td>${marketFmt(row.load_penalized_imbalance_mwh)}</td><td>${marketFmt(row.load_imbalance_penalty)}</td><td>${marketFmt(row.average_day_ahead_lmp_per_mwh)}</td><td>${marketFmt(row.average_real_time_lmp_per_mwh)}</td><td>${marketFmt(row.customer_deviation_payment)}</td><td>${marketFmt(row.resource_deviation_revenue)}</td><td>${marketFmt(row.deviation_congestion_rent, 6)}</td></tr>`;
+    });
+    periodHtml += periods.length ? '</tbody></table>' : '<tr><td colspan="16">无实时偏差结果</td></tr></tbody></table>';
+    document.getElementById('marketRealTimePeriodResults').innerHTML = periodHtml;
+
+    const participants = Array.isArray(data.participant_deviation_settlement)
+      ? data.participant_deviation_settlement : [];
+    let participantHtml = '<table><thead><tr><th>主体</th><th>日前电量(MWh)</th><th>ISO实时指令(MWh)</th><th>实际电量(MWh)</th><th>实际-指令(MWh)</th><th>日前-实时偏差(MWh)</th><th>备用指令(MWh)</th><th>履约(MWh)</th><th>履约率</th><th>未履约(MWh)</th><th>履约奖励</th><th>未履约扣款</th><th>发电偏差扣款</th><th>辅助服务净调整</th><th>日前市场收入</th><th>实时偏差收入</th><th>双结算收入</th><th>实际成本</th><th>双结算利润</th></tr></thead><tbody>';
+    participants.forEach(row => {
+      participantHtml += `<tr><td>${escapeHtml(row.participant_name || row.participant_id || '')}<br><span class="sub-hint">${escapeHtml(row.participant_id || '')}</span></td><td>${marketFmt(row.day_ahead_energy_mwh)}</td><td>${marketFmt(row.real_time_dispatch_instruction_mwh)}</td><td>${marketFmt(row.real_time_energy_mwh)}</td><td>${marketFmt(row.actual_output_deviation_mwh)}</td><td>${marketFmt(row.deviation_mwh)}</td><td>${marketFmt(row.instructed_reserve_mwh)}</td><td>${marketFmt(row.delivered_reserve_mwh)}</td><td>${marketFmt(100 * Number(row.reserve_performance_ratio || 0), 1)}%</td><td>${marketFmt(row.reserve_shortfall_mwh)}</td><td>${marketFmt(row.reserve_performance_payment)}</td><td>${marketFmt(row.reserve_nonperformance_charge)}</td><td>${marketFmt(row.imbalance_charge)}</td><td>${marketFmt(row.net_ancillary_adjustment)}</td><td>${marketFmt(row.day_ahead_market_revenue)}</td><td>${marketFmt(row.real_time_deviation_revenue)}</td><td>${marketFmt(row.two_settlement_revenue)}</td><td>${marketFmt(row.actual_true_cost)}</td><td>${marketFmt(row.profit_after_two_settlement)}</td></tr>`;
+    });
+    participantHtml += participants.length ? '</tbody></table>' : '<tr><td colspan="19">无主体双结算结果</td></tr></tbody></table>';
+    document.getElementById('marketRealTimeParticipantResults').innerHTML = participantHtml;
+
+    const ledgerRows = [
+      ['用户日前支付', ledger.customer_day_ahead_payment],
+      ['用户实时偏差支付', ledger.customer_real_time_deviation_payment],
+      ['用户负荷偏差惩罚', ledger.customer_imbalance_penalty],
+      ['用户双结算总支付', ledger.customer_two_settlement_payment],
+      ['资源日前收入', ledger.resource_day_ahead_revenue],
+      ['资源实时偏差收入', ledger.resource_real_time_deviation_revenue],
+      ['资源备用履约奖励', ledger.resource_reserve_performance_payment],
+      ['资源发电偏差扣款', ledger.resource_generator_imbalance_charge],
+      ['资源备用未履约扣款', ledger.resource_reserve_nonperformance_charge],
+      ['资源双结算总收入', ledger.resource_two_settlement_revenue],
+      ['日前拥塞租金', ledger.day_ahead_congestion_rent],
+      ['实时偏差拥塞租金', ledger.real_time_deviation_congestion_rent],
+      ['总拥塞租金', ledger.total_congestion_rent],
+      ['运营方辅助服务余额', ledger.system_operator_ancillary_balance],
+      ['资金残差', ledger.cashflow_residual],
+    ];
+    document.getElementById('marketRealTimeLedgerResults').innerHTML =
+      `<table><thead><tr><th>账本科目</th><th>金额</th></tr></thead><tbody>${ledgerRows.map(([label, value]) => `<tr><td>${label}</td><td>${marketFmt(value, 6)}</td></tr>`).join('')}</tbody></table>`;
+    requestAnimationFrame(() => renderRealTimeMarketCharts(data));
+  }
+
+  async function runRealTimeMarket() {
+    let payload;
+    try {
+      payload = marketRealTimePayload();
+    } catch (error) {
+      setStatus(error.message || '实时市场参数无效', 'warn');
+      return;
+    }
+    const retainedRows = (_marketParticipantRows || []).map(row => ({ ...row }));
+    setStatus('实时市场与双结算计算中...', 'busy');
+    if (!await syncToBackend(true)) {
+      setStatus('实时市场计算前模型同步失败', 'error');
+      return;
+    }
+    _marketParticipantRows = retainedRows;
+    updateMarketParticipantSummary();
+    const response = await apiPostResult('/api/session/run_real_time_market', payload);
+    if (!response.ok) {
+      setStatus(`实时市场失败: ${response.error || '未知错误'}`, 'error');
+      return;
+    }
+    _lastRealTimeMarketData = response.data;
+    renderRealTimeMarketResults(response.data);
+    setStatus(response.data.feasible ? '实时市场与双结算完成' :
+      `实时市场结果：${marketStatusLabel(response.data.status)}`,
+      response.data.feasible ? 'success' : 'warn');
+  }
+
+  function marketGamePayload() {
+    const payload = marketRealTimePayload();
+    payload.game = {
+      max_rounds: Math.round(marketNumber('marketGameRounds', 4, 1, 30)),
+      markup_step_fraction:
+        marketNumber('marketGameMarkupStepPct', 5, 0, 100) / 100,
+      withholding_step_fraction:
+        marketNumber('marketGameWithholdingStepPct', 5, 0, 95) / 100,
+      maximum_markup_fraction:
+        marketNumber('marketGameMaxMarkupPct', 100, 0, 1000) / 100,
+      maximum_withholding_fraction:
+        marketNumber('marketGameMaxWithholdingPct', 50, 0, 95) / 100,
+      include_cost_based_participants: marketChecked('marketGameIncludeCostBased'),
+      run_real_time: true,
+    };
+    return payload;
+  }
+
+  function renderMarketGameCharts(data) {
+    if (typeof Plotly === 'undefined') return;
+    const rounds = Array.isArray(data.rounds) ? data.rounds : [];
+    const participantIds = [...new Set(rounds.flatMap(round =>
+      (round.participants || []).map(row => row.participant_id)))];
+    const profitDiv = document.getElementById('marketGameProfitChart');
+    if (profitDiv) {
+      const traces = participantIds.map(participantId => ({
+        x: rounds.map(round => Number(round.round) + 1),
+        y: rounds.map(round => Number((round.participants || [])
+          .find(row => row.participant_id === participantId)?.profit || 0)),
+        type: 'scatter', mode: 'lines+markers', name: participantId,
+      }));
+      const layout = marketTheme('主体利润演化', '双结算利润');
+      layout.xaxis.title = '博弈轮次';
+      Plotly.react(profitDiv, traces, layout,
+        { responsive: true, displayModeBar: false });
+    }
+    const strategyDiv = document.getElementById('marketGameStrategyChart');
+    if (strategyDiv) {
+      const strategicIds = participantIds.filter(participantId =>
+        rounds.some(round => {
+          const row = (round.participants || [])
+            .find(item => item.participant_id === participantId);
+          return row && (row.strategy_changed ||
+            Number(row.behavior?.energy_markup_fraction || 0) > 0 ||
+            Number(row.behavior?.capacity_withholding_fraction || 0) > 0);
+        }));
+      const traces = strategicIds.flatMap(participantId => [
+        { x: rounds.map(round => Number(round.round) + 1),
+          y: rounds.map(round => 100 * Number((round.participants || [])
+            .find(row => row.participant_id === participantId)
+            ?.behavior?.energy_markup_fraction || 0)),
+          type: 'scatter', mode: 'lines+markers', name: `${participantId} 加价` },
+        { x: rounds.map(round => Number(round.round) + 1),
+          y: rounds.map(round => 100 * Number((round.participants || [])
+            .find(row => row.participant_id === participantId)
+            ?.behavior?.capacity_withholding_fraction || 0)),
+          type: 'scatter', mode: 'lines+markers', line: { dash: 'dot' },
+          name: `${participantId} 扣留` },
+      ]);
+      const layout = marketTheme('策略演化', '策略比例 (%)');
+      layout.xaxis.title = '博弈轮次';
+      Plotly.react(strategyDiv, traces, layout,
+        { responsive: true, displayModeBar: false });
+    }
+  }
+
+  function renderMarketGameResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('market');
+    switchTab('results');
+    const section = document.getElementById('marketGameSection');
+    if (section) section.style.display = 'block';
+    const rounds = Array.isArray(data.rounds) ? data.rounds : [];
+    const finalLedger = data.final_two_settlement?.settlement || {};
+    document.getElementById('marketGameSummary').innerHTML = `
+      <div class="result-item"><span class="result-label">博弈状态</span><span class="result-value ${data.feasible ? 'converged' : 'failed'}">${escapeHtml(data.converged ? '局部均衡' : (data.status || '未收敛'))}</span></div>
+      <div class="result-item"><span class="result-label">完成轮数</span><span class="result-value">${rounds.length}</span></div>
+      <div class="result-item"><span class="result-label">最终日前状态</span><span class="result-value">${escapeHtml(marketStatusLabel(data.final_day_ahead_status))}</span></div>
+      <div class="result-item"><span class="result-label">最终实时状态</span><span class="result-value">${escapeHtml(marketStatusLabel(data.final_real_time_status))}</span></div>
+      <div class="result-item"><span class="result-label">最终双结算残差</span><span class="result-value">${marketFmt(finalLedger.cashflow_residual, 8)}</span></div>`;
+
+    let html = '<table><thead><tr><th>轮次</th><th>主体</th><th>能量加价</th><th>容量扣留</th><th>本轮利润</th><th>辅助服务净调整</th><th>最佳响应利润</th><th>改善</th><th>下一策略</th><th>日前LMP</th><th>实时LMP</th><th>HHI</th></tr></thead><tbody>';
+    rounds.forEach(round => {
+      (round.participants || []).forEach(row => {
+        const next = row.next_behavior || {};
+        html += `<tr><td>${Number(round.round) + 1}</td><td>${escapeHtml(row.participant_id || '')}</td><td>${marketFmt(100 * Number(row.behavior?.energy_markup_fraction || 0), 1)}%</td><td>${marketFmt(100 * Number(row.behavior?.capacity_withholding_fraction || 0), 1)}%</td><td>${marketFmt(row.profit)}</td><td>${marketFmt(row.net_ancillary_adjustment)}</td><td>${marketFmt(row.best_response_profit)}</td><td>${marketFmt(row.best_response_improvement)}</td><td>${row.strategy_changed ? `${marketFmt(100 * Number(next.energy_markup_fraction || 0), 1)}% / ${marketFmt(100 * Number(next.capacity_withholding_fraction || 0), 1)}%` : '保持'}</td><td>${marketFmt(round.day_ahead_average_lmp_per_mwh)}</td><td>${marketFmt(round.real_time_average_lmp_per_mwh)}</td><td>${marketFmt(round.output_hhi, 0)}</td></tr>`;
+      });
+    });
+    html += rounds.length ? '</tbody></table>' : '<tr><td colspan="12">无博弈结果</td></tr></tbody></table>';
+    document.getElementById('marketGameRoundResults').innerHTML = html;
+    requestAnimationFrame(() => renderMarketGameCharts(data));
+  }
+
+  async function runMarketGame() {
+    let payload;
+    try {
+      payload = marketGamePayload();
+    } catch (error) {
+      setStatus(error.message || '重复博弈参数无效', 'warn');
+      return;
+    }
+    const retainedRows = (_marketParticipantRows || []).map(row => ({ ...row }));
+    setStatus('市场主体重复博弈中...', 'busy');
+    if (!await syncToBackend(true)) {
+      setStatus('重复博弈前模型同步失败', 'error');
+      return;
+    }
+    _marketParticipantRows = retainedRows;
+    updateMarketParticipantSummary();
+    const response = await apiPostResult(
+      '/api/session/run_repeated_market_game', payload);
+    if (!response.ok) {
+      setStatus(`重复博弈失败: ${response.error || '未知错误'}`, 'error');
+      return;
+    }
+    _lastMarketGameData = response.data;
+    renderMarketGameResults(response.data);
+    setStatus(response.data.converged ? '重复博弈达到局部均衡' :
+      `重复博弈结束：${response.data.status || '未收敛'}`,
+      response.data.feasible ? 'success' : 'warn');
+  }
+
   function iesNumber(id, fallback) {
     const v = Number(document.getElementById(id)?.value);
     return Number.isFinite(v) ? v : fallback;
@@ -14003,6 +14730,13 @@ const App = (() => {
   function toggleThemeMode() {
     const current = document.documentElement.getAttribute('data-theme') || 'dark';
     setThemeMode(current === 'light' ? 'dark' : 'light');
+    if (_lastMarketData) requestAnimationFrame(() => renderMarketCharts(_lastMarketData));
+    if (_lastRealTimeMarketData) {
+      requestAnimationFrame(() => renderRealTimeMarketCharts(_lastRealTimeMarketData));
+    }
+    if (_lastMarketGameData) {
+      requestAnimationFrame(() => renderMarketGameCharts(_lastMarketGameData));
+    }
   }
 
   function initThemeMode() {
@@ -14288,6 +15022,45 @@ const App = (() => {
     document.getElementById('btnShortCircuit')?.addEventListener('click', showScDialog);
     document.getElementById('btnTopology')?.addEventListener('click', runTopologyReconfig);
     document.getElementById('btnTimeSeries')?.addEventListener('click', showTspfDialog);
+
+    // Bar 3: native day-ahead electricity market
+    document.getElementById('btnMarketParticipants')?.addEventListener('click',
+      openMarketParticipantEditor);
+    document.querySelectorAll('[data-close-market-participants]').forEach(button => {
+      button.addEventListener('click', closeMarketParticipantEditor);
+    });
+    document.getElementById('btnMarketParticipantsReset')?.addEventListener('click',
+      resetMarketParticipantRows);
+    document.getElementById('btnMarketParticipantsApply')?.addEventListener('click',
+      applyMarketParticipantRows);
+    const marketParticipantTable = document.getElementById('marketParticipantTable');
+    const updateMarketParticipantField = event => {
+      const input = event.target.closest('[data-market-row][data-market-field]');
+      if (!input || !_marketParticipantRows) return;
+      const row = _marketParticipantRows[Number(input.dataset.marketRow)];
+      const field = input.dataset.marketField;
+      if (!row || !field) return;
+      row[field] = input.type === 'number' ? Number(input.value) : input.value;
+      validateMarketParticipantRows();
+    };
+    marketParticipantTable?.addEventListener('input', updateMarketParticipantField);
+    marketParticipantTable?.addEventListener('change', updateMarketParticipantField);
+    document.getElementById('btnRunMarket')?.addEventListener('click', runMarketClearing);
+    document.getElementById('btnRunRealTimeMarket')?.addEventListener(
+      'click', runRealTimeMarket);
+    document.getElementById('btnRunMarketGame')?.addEventListener(
+      'click', runMarketGame);
+    document.getElementById('btnExportMarket')?.addEventListener('click', () => {
+      if (!_lastMarketData && !_lastRealTimeMarketData && !_lastMarketGameData) {
+        log('暂无市场结果可导出，请先运行日前、实时市场或重复博弈', 'warn');
+        return;
+      }
+      downloadJsonFile(`market_simulation_${tsTagForFilename()}.json`, {
+        day_ahead_market: _lastMarketData,
+        real_time_market: _lastRealTimeMarketData,
+        repeated_market_game: _lastMarketGameData,
+      });
+    });
 
     // Bar 3: shortCircuit sub-toolbar
     document.getElementById('btnFaultLocation')?.addEventListener('click', showScDialog);
@@ -18984,6 +19757,7 @@ const App = (() => {
       });
     }
 
+    _collectWeakLinkEvidence = collectWeakLinkEvidence;
     log('HySim-XJTU-HRPES 已启动', 'success');
     log('使用左侧元件库拖放元件到画布，或加载内置算例', 'info');
 
