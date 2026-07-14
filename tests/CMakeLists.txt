@@ -245,6 +245,8 @@ endif()
 # resilience index bounds, fault sequence, legacy field sync, step count, MIP stub.
 hacdcpf_add_test(test_resilience_assessment test_resilience_assessment.cpp)
 hacdcpf_add_test(test_hosting_capacity test_hosting_capacity.cpp)
+hacdcpf_add_test(test_multidimensional_weak_link test_multidimensional_weak_link.cpp)
+hacdcpf_add_test(test_counterfactual_planning test_counterfactual_planning.cpp)
 hacdcpf_add_test(test_scenario_generation test_scenario_generation.cpp)
 hacdcpf_add_test(test_scenario_bundle_schema test_scenario_bundle_schema.cpp)
 
@@ -421,6 +423,18 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
               "${CMAKE_SOURCE_DIR}/tests/e2e/reliability_control_state_test.mjs")
     set_tests_properties(reliability_control_state_test PROPERTIES
       LABELS "gui;unit;reliability")
+
+    add_test(NAME multidimensional_weak_link_gui_test
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/multidimensional_weak_link_gui_test.mjs")
+    set_tests_properties(multidimensional_weak_link_gui_test PROPERTIES
+      LABELS "gui;unit;planning;weak_link")
+
+    add_test(NAME top_toolbar_semantics_test
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/top_toolbar_semantics_test.mjs")
+    set_tests_properties(top_toolbar_semantics_test PROPERTIES
+      LABELS "gui;unit;layout;semantics")
 
     add_test(NAME gui_scale_features_e2e
       COMMAND "${HACDCPF_NODE_EXECUTABLE}"

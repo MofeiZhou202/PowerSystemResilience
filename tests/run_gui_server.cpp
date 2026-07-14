@@ -72,6 +72,8 @@
 #include "hacdcpf/analysis/typhoon_resilience.hpp"
 #include "hacdcpf/analysis/scenario_generation.hpp"
 #include "hacdcpf/analysis/hosting_capacity.hpp"
+#include "hacdcpf/analysis/multidimensional_weak_link.hpp"
+#include "hacdcpf/analysis/counterfactual_planning.hpp"
 #include "hacdcpf/power_flow/island_detector.hpp"
 #include "hacdcpf/graph/graph.hpp"
 #include "hacdcpf/dynamics/dynamics.hpp"
@@ -18818,6 +18820,362 @@ int main(int argc, char** argv) {
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
     });
+
+  svr.Post("/api/session/run_multidimensional_weak_links",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+      }
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      const auto entity_rows = j.value("entities", json::array());
+      const auto period_rows = j.value("periods", json::array());
+      if (!entity_rows.is_array() || !period_rows.is_array())
+        throw std::runtime_error("entities and periods must be arrays");
+      if (entity_rows.size() > 10000 || period_rows.size() > 10000)
+        throw std::runtime_error("weak-link evidence exceeds the 10000-row limit");
+
+      static constexpr std::array<const char*, 4> dimension_names = {
+          "economic", "carbon", "reliability", "resilience"};
+      auto parse_dimension = [](const json& dimensions, const char* name) {
+        hacdcpf::analysis::WeakLinkDimensionEvidence evidence;
+        if (!dimensions.is_object() || !dimensions.contains(name) ||
+            dimensions[name].is_null()) return evidence;
+        const auto& value = dimensions[name];
+        if (value.is_number()) {
+          evidence.pressure = value.get<double>();
+        } else if (value.is_object()) {
+          if (value.contains("pressure") && value["pressure"].is_number())
+            evidence.pressure = value["pressure"].get<double>();
+          else if (value.contains("value") && value["value"].is_number())
+            evidence.pressure = value["value"].get<double>();
+          evidence.detail = value.value("detail", std::string());
+        } else {
+          throw std::runtime_error(std::string("dimension ") + name +
+                                   " must be a number, object, or null");
+        }
+        if (evidence.pressure && !std::isfinite(*evidence.pressure))
+          throw std::runtime_error(std::string("dimension ") + name +
+                                   " pressure must be finite");
+        return evidence;
+      };
+
+      std::vector<hacdcpf::analysis::WeakLinkEntityEvidence> entities;
+      entities.reserve(entity_rows.size());
+      std::unordered_set<std::string> keys;
+      for (const auto& row : entity_rows) {
+        if (!row.is_object()) throw std::runtime_error("entity evidence rows must be objects");
+        hacdcpf::analysis::WeakLinkEntityEvidence entity;
+        entity.key = row.value("key", std::string());
+        if (entity.key.empty()) throw std::runtime_error("entity evidence key cannot be empty");
+        if (!keys.insert(entity.key).second)
+          throw std::runtime_error("duplicate entity evidence key: " + entity.key);
+        entity.name = row.value("name", entity.key);
+        entity.canvas_type = row.value("canvas_type", std::string());
+        entity.canvas_index = row.value("canvas_index", -1);
+        entity.domain = row.value("domain", std::string());
+        entity.primary_bus = row.value("primary_bus", -1);
+        entity.secondary_bus = row.value("secondary_bus", -1);
+        const auto dimensions = row.value("dimensions", json::object());
+        for (size_t d = 0; d < dimension_names.size(); ++d)
+          entity.dimensions[d] = parse_dimension(dimensions, dimension_names[d]);
+        entities.push_back(std::move(entity));
+      }
+
+      std::vector<hacdcpf::analysis::WeakLinkPeriodEvidence> periods;
+      periods.reserve(period_rows.size());
+      for (const auto& row : period_rows) {
+        if (!row.is_object()) throw std::runtime_error("period evidence rows must be objects");
+        hacdcpf::analysis::WeakLinkPeriodEvidence period;
+        period.step = row.value("step", 0);
+        period.hour = row.value("hour", static_cast<double>(period.step));
+        if (!std::isfinite(period.hour))
+          throw std::runtime_error("period hour must be finite");
+        const auto dimensions = row.value("dimensions", json::object());
+        for (size_t d = 0; d < dimension_names.size(); ++d)
+          period.dimensions[d] = parse_dimension(dimensions, dimension_names[d]);
+        periods.push_back(std::move(period));
+      }
+
+      hacdcpf::analysis::MultidimensionalWeakLinkOptions options;
+      const auto option_json = j.value("options", json::object());
+      options.mode = option_json.value("mode", std::string("planning")) == "operation"
+          ? hacdcpf::analysis::WeakLinkDecisionMode::Operation
+          : hacdcpf::analysis::WeakLinkDecisionMode::Planning;
+      options.top_k = std::clamp(option_json.value("top_k", 15), 1, 100);
+      options.minimum_dimensions = std::clamp(
+          option_json.value("minimum_dimensions", 1), 1, 4);
+      options.high_pressure_threshold = option_json.value("high_pressure_threshold", 0.75);
+      options.compatibility_threshold = option_json.value("compatibility_threshold", 0.50);
+      options.conflict_gap_threshold = option_json.value("conflict_gap_threshold", 0.60);
+      const auto target_json = option_json.value("target_pressure", json::object());
+      for (size_t d = 0; d < dimension_names.size(); ++d) {
+        const double target = target_json.value(dimension_names[d], 1.0);
+        if (!std::isfinite(target) || target <= 0.0)
+          throw std::runtime_error(std::string("target pressure for ") +
+                                   dimension_names[d] + " must be positive");
+        options.target_pressure[d] = target;
+      }
+
+      const auto result = hacdcpf::analysis::run_multidimensional_weak_link_assessment(
+          entities, periods, options);
+      auto dimension_json = [](const hacdcpf::analysis::WeakLinkDimensionScore& score) {
+        if (!score.available) return json{{"available", false}};
+        return json{{"available", true},
+                    {"raw_pressure", score.raw_pressure},
+                    {"normalized_pressure", score.normalized_pressure},
+                    {"detail", score.detail}};
+      };
+      auto dimensions_json = [&](const auto& scores) {
+        json out = json::object();
+        for (size_t d = 0; d < dimension_names.size(); ++d)
+          out[dimension_names[d]] = dimension_json(scores[d]);
+        return out;
+      };
+
+      json out;
+      out["schema"] = result.schema;
+      out["mode"] = hacdcpf::analysis::weak_link_mode_name(result.mode);
+      out["dimension_coverage"] = {
+          {"economic", result.dimension_coverage[0]},
+          {"carbon", result.dimension_coverage[1]},
+          {"reliability", result.dimension_coverage[2]},
+          {"resilience", result.dimension_coverage[3]}};
+      out["summary"] = {{"pareto_count", result.pareto_count},
+                        {"compatible_count", result.compatible_count},
+                        {"conflict_count", result.conflict_count},
+                        {"insufficient_count", result.insufficient_count},
+                        {"input_entity_count", entities.size()},
+                        {"input_period_count", periods.size()}};
+      out["entities"] = json::array();
+      for (const auto& row : result.entities) {
+        out["entities"].push_back({
+            {"key", row.key}, {"name", row.name},
+            {"canvas_type", row.canvas_type}, {"canvas_index", row.canvas_index},
+            {"domain", row.domain}, {"primary_bus", row.primary_bus},
+            {"secondary_bus", row.secondary_bus},
+            {"dimensions", dimensions_json(row.dimensions)},
+            {"evidence_dimensions", row.evidence_dimensions},
+            {"severity", row.severity}, {"consensus", row.consensus},
+            {"disagreement", row.disagreement}, {"pareto", row.pareto},
+            {"dominant_dimension", row.dominant_dimension},
+            {"relation", row.relation}, {"decision_hint", row.decision_hint}});
+      }
+      out["critical_periods"] = json::array();
+      for (const auto& row : result.critical_periods) {
+        out["critical_periods"].push_back({
+            {"step", row.step}, {"hour", row.hour},
+            {"dimensions", dimensions_json(row.dimensions)},
+            {"evidence_dimensions", row.evidence_dimensions},
+            {"severity", row.severity}, {"consensus", row.consensus},
+            {"dominant_dimension", row.dominant_dimension}});
+      }
+      out["methodology"] = {
+          {"pressure_direction", "higher_is_weaker"},
+          {"missing_evidence", "unavailable_not_zero"},
+          {"pareto_rule", "dominance_is_compared_only_with_equal_dimension_coverage"},
+          {"relation_rule", "compatible_means_shared_high_pressure; conflict_means_cross-dimension_rank_disagreement"},
+          {"decision_scope", "screening_not_counterfactual_investment_optimization"}};
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/run_counterfactual_planning",
+           [](const httplib::Request& req, httplib::Response& res) {
+    bool busy_acquired = false;
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error", "Another analysis is already running"}}.dump(),
+                        "application/json");
+        return;
+      }
+      busy_acquired = true;
+      g_session.cancel.store(false);
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      const auto option_json = j.value("options", json::object());
+
+      hacdcpf::analysis::CounterfactualPlanningOptions options;
+      options.enable_line_capacity = option_json.value("enable_line_capacity", true);
+      options.enable_storage = option_json.value("enable_storage", true);
+      options.enable_tie_switch = option_json.value("enable_tie_switch", true);
+      options.enable_automation = option_json.value("enable_automation", true);
+      options.enable_der = option_json.value("enable_der", true);
+      options.include_economic = option_json.value("include_economic", true);
+      options.include_carbon = option_json.value("include_carbon", true);
+      options.include_reliability = option_json.value("include_reliability", true);
+      options.include_resilience = option_json.value("include_resilience", true);
+      options.include_pairs = option_json.value("include_pairs", true);
+      options.max_measures = std::clamp(option_json.value("max_measures", 5), 1, 20);
+      options.max_pairs = std::clamp(option_json.value("max_pairs", 10), 0, 100);
+      options.reliability_physical_budget = std::clamp(
+          option_json.value("reliability_physical_budget", 40), 1, 500);
+      options.resilience_horizon_hours = std::clamp(
+          option_json.value("resilience_horizon_hours", 12), 1, 168);
+      options.resilience_fault_count = std::clamp(
+          option_json.value("resilience_fault_count", 1), 0, 20);
+      options.resilience_repair_time_hr = option_json.value(
+          "resilience_repair_time_hr", 6.0);
+      options.annual_hours = option_json.value("annual_hours", 8760.0);
+      options.energy_price_per_mwh = option_json.value(
+          "energy_price_per_mwh", 100.0);
+      options.line_expansion_factor = option_json.value(
+          "line_expansion_factor", 1.5);
+      options.storage_power_mw = option_json.value("storage_power_mw", 0.0);
+      options.storage_duration_hr = option_json.value("storage_duration_hr", 4.0);
+      options.storage_dispatch_fraction = option_json.value(
+          "storage_dispatch_fraction", 0.25);
+      options.der_capacity_mw = option_json.value("der_capacity_mw", 0.0);
+      options.der_capacity_factor = option_json.value("der_capacity_factor", 0.4);
+      options.tie_capacity_mw = option_json.value("tie_capacity_mw", 0.0);
+      if (option_json.contains("resilience_fault_branch_indices"))
+        options.resilience_fault_branch_indices =
+            option_json["resilience_fault_branch_indices"].get<std::vector<int>>();
+
+      const std::array<double, 9> finite_values = {
+          options.resilience_repair_time_hr, options.annual_hours,
+          options.energy_price_per_mwh, options.line_expansion_factor,
+          options.storage_power_mw, options.storage_duration_hr,
+          options.storage_dispatch_fraction, options.der_capacity_mw,
+          options.der_capacity_factor};
+      if (std::any_of(finite_values.begin(), finite_values.end(),
+                      [](double value) { return !std::isfinite(value); }) ||
+          !std::isfinite(options.tie_capacity_mw))
+        throw std::runtime_error("counterfactual numeric options must be finite");
+      if (options.line_expansion_factor <= 1.0 || options.storage_power_mw < 0.0 ||
+          options.storage_duration_hr <= 0.0 || options.der_capacity_mw < 0.0 ||
+          options.tie_capacity_mw < 0.0 || options.annual_hours <= 0.0 ||
+          options.energy_price_per_mwh < 0.0 ||
+          options.resilience_repair_time_hr <= 0.0)
+        throw std::runtime_error("invalid counterfactual numeric option range");
+
+      auto parse_type = [](const std::string& value) {
+        using Type = hacdcpf::analysis::CounterfactualMeasureType;
+        if (value == "line_capacity") return Type::LineCapacity;
+        if (value == "storage") return Type::Storage;
+        if (value == "tie_switch") return Type::TieSwitch;
+        if (value == "automation") return Type::Automation;
+        if (value == "der") return Type::DistributedEnergyResource;
+        throw std::runtime_error("unknown counterfactual measure type: " + value);
+      };
+      std::vector<hacdcpf::analysis::CounterfactualMeasure> measures;
+      if (j.contains("measures")) {
+        if (!j["measures"].is_array())
+          throw std::runtime_error("measures must be an array");
+        if (j["measures"].size() > 20)
+          throw std::runtime_error("counterfactual measures exceed the 20-row limit");
+        std::unordered_set<std::string> ids;
+        for (const auto& row : j["measures"]) {
+          hacdcpf::analysis::CounterfactualMeasure measure;
+          measure.type = parse_type(row.value("type", std::string()));
+          measure.id = row.value("id", std::string());
+          if (measure.id.empty() || !ids.insert(measure.id).second)
+            throw std::runtime_error("counterfactual measure IDs must be non-empty and unique");
+          measure.name = row.value("name", measure.id);
+          measure.domain = row.value("domain", std::string("AC"));
+          measure.target_index = row.value("target_index", -1);
+          measure.bus = row.value("bus", -1);
+          measure.from_bus = row.value("from_bus", -1);
+          measure.to_bus = row.value("to_bus", -1);
+          measure.expansion_factor = row.value("expansion_factor", 1.5);
+          measure.capacity_mw = row.value("capacity_mw", 0.0);
+          measure.energy_mwh = row.value("energy_mwh", 0.0);
+          measure.dispatch_fraction = row.value("dispatch_fraction", 0.25);
+          measure.capacity_factor = row.value("capacity_factor", 0.4);
+          measure.capex = row.value("capex", 0.0);
+          measures.push_back(std::move(measure));
+        }
+      }
+
+      const auto result = hacdcpf::analysis::run_counterfactual_planning_assessment(
+          sys, measures, options);
+      static constexpr std::array<const char*, 4> dimensions = {
+          "economic", "carbon", "reliability", "resilience"};
+      auto metrics_json = [&](const auto& metrics) {
+        json out = json::object();
+        for (size_t d = 0; d < dimensions.size(); ++d) {
+          out[dimensions[d]] = {
+              {"value", metrics.values[d] ? json(*metrics.values[d]) : json(nullptr)},
+              {"unit", hacdcpf::analysis::counterfactual_metric_unit(static_cast<int>(d))},
+              {"diagnostic", metrics.diagnostics[d]}};
+        }
+        return out;
+      };
+      auto benefit_json = [&](const auto& benefit) {
+        json out;
+        out["relation"] = benefit.relation;
+        out["improved_dimensions"] = benefit.improved_dimensions;
+        out["worsened_dimensions"] = benefit.worsened_dimensions;
+        out["dimensions"] = json::object();
+        for (size_t d = 0; d < dimensions.size(); ++d) {
+          out["dimensions"][dimensions[d]] = {
+              {"absolute", benefit.absolute[d] ? json(*benefit.absolute[d]) : json(nullptr)},
+              {"relative", benefit.relative[d] ? json(*benefit.relative[d]) : json(nullptr)},
+              {"unit", hacdcpf::analysis::counterfactual_metric_unit(static_cast<int>(d))}};
+        }
+        return out;
+      };
+      auto measure_json = [](const auto& measure) {
+        return json{{"id", measure.id}, {"name", measure.name},
+                    {"type", hacdcpf::analysis::counterfactual_measure_type_name(measure.type)},
+                    {"domain", measure.domain}, {"target_index", measure.target_index},
+                    {"bus", measure.bus}, {"from_bus", measure.from_bus},
+                    {"to_bus", measure.to_bus},
+                    {"expansion_factor", measure.expansion_factor},
+                    {"capacity_mw", measure.capacity_mw},
+                    {"energy_mwh", measure.energy_mwh},
+                    {"dispatch_fraction", measure.dispatch_fraction},
+                    {"capacity_factor", measure.capacity_factor},
+                    {"capex", measure.capex}};
+      };
+
+      json out;
+      out["schema"] = result.schema;
+      out["baseline"] = metrics_json(result.baseline);
+      out["measures"] = json::array();
+      for (const auto& row : result.measures) {
+        out["measures"].push_back({
+            {"measure", measure_json(row.measure)}, {"applied", row.applied},
+            {"apply_status", row.apply_status}, {"metrics", metrics_json(row.metrics)},
+            {"benefit", benefit_json(row.benefit)}});
+      }
+      out["interactions"] = json::array();
+      for (const auto& row : result.interactions) {
+        out["interactions"].push_back({
+            {"measure_a", row.measure_a}, {"measure_b", row.measure_b},
+            {"applied", row.applied}, {"apply_status", row.apply_status},
+            {"combined_capex", row.combined_capex},
+            {"metrics", metrics_json(row.metrics)},
+            {"combined_benefit", benefit_json(row.combined_benefit)},
+            {"synergy", benefit_json(row.synergy)}});
+      }
+      out["summary"] = {{"evaluated_systems", result.evaluated_systems},
+                        {"failed_systems", result.failed_systems},
+                        {"measure_count", result.measures.size()},
+                        {"pair_count", result.interactions.size()}};
+      out["resilience_fault_branch_indices"] =
+          result.resilience_fault_branch_indices;
+      out["methodology"] = result.methodology;
+      out["benefit_definition"] = "baseline_metric - counterfactual_metric";
+      out["synergy_definition"] = "B(a+b) - B(a) - B(b)";
+      g_session.busy.store(false);
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      if (busy_acquired) g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
 
   // ---- Legacy endpoints ----
   svr.Post("/api/load_case", [](const httplib::Request& req, httplib::Response& res) {

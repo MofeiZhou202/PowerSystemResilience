@@ -561,6 +561,119 @@ def main() -> int:
             "exported distribution CIM re-imports without topology loss",
         )
 
+        print("2f. Spatiotemporal multidimensional weak-link identification")
+        weak_entities = [
+            {
+                "key": "AC:ac_branch:1", "name": "Economic Carbon Corridor",
+                "canvas_type": "ac_branch", "canvas_index": 1, "domain": "AC",
+                "dimensions": {
+                    "economic": {"pressure": 0.95, "detail": "loading"},
+                    "carbon": {"pressure": 0.85, "detail": "loss emissions"},
+                    "reliability": 0.10, "resilience": 0.10,
+                },
+            },
+            {
+                "key": "AC:ac_branch:2", "name": "Reliability Resilience Feeder",
+                "canvas_type": "ac_branch", "canvas_index": 2, "domain": "AC",
+                "dimensions": {
+                    "economic": 0.10, "carbon": 0.10,
+                    "reliability": 0.95, "resilience": 0.85,
+                },
+            },
+            {
+                "key": "AC:ac_bus:3", "name": "Integrated Upgrade Location",
+                "canvas_type": "ac_bus", "canvas_index": 3, "domain": "AC",
+                "dimensions": {
+                    "economic": 0.80, "carbon": 0.75,
+                    "reliability": 0.82, "resilience": 0.78,
+                },
+            },
+            {
+                "key": "AC:ac_bus:4", "name": "Dominated Location",
+                "canvas_type": "ac_bus", "canvas_index": 4, "domain": "AC",
+                "dimensions": {
+                    "economic": 0.20, "carbon": 0.20,
+                    "reliability": 0.20, "resilience": 0.20,
+                },
+            },
+        ]
+        weak_periods = [
+            {"step": 0, "hour": 8.0,
+             "dimensions": {"economic": 0.90, "carbon": 0.75}},
+            {"step": 1, "hour": 20.0,
+             "dimensions": {"reliability": 0.88, "resilience": 1.10}},
+        ]
+        st, weak_result = c.post_json(
+            "/api/session/run_multidimensional_weak_links",
+            {
+                "entities": weak_entities,
+                "periods": weak_periods,
+                "options": {"mode": "planning", "top_k": 10,
+                            "minimum_dimensions": 2},
+            },
+        )
+        weak_summary = weak_result.get("summary", {})
+        weak_rows = {row.get("key"): row for row in weak_result.get("entities", [])}
+        critical_periods = weak_result.get("critical_periods", [])
+        chk.check(
+            st == 200 and
+            weak_result.get("schema") == "hacdcpf.multidimensional_weak_link.v1" and
+            weak_summary.get("pareto_count") == 3 and
+            weak_summary.get("compatible_count") == 1 and
+            weak_summary.get("conflict_count") == 2 and
+            weak_rows.get("AC:ac_bus:3", {}).get("relation") == "compatible" and
+            weak_rows.get("AC:ac_bus:4", {}).get("pareto") is False and
+            critical_periods and critical_periods[0].get("hour") == 20.0,
+            "weak-link API separates Pareto, compatible, conflict, and critical periods",
+        )
+
+        print("2g. Explicit counterfactual measures and pairwise synergy")
+        st, _ = c.post_json(
+            "/api/session/load_builtin",
+            {"case": "cyber_physical_reliability_demo"},
+        )
+        st, counterfactual = c.post_json(
+            "/api/session/run_counterfactual_planning",
+            {
+                "measures": [
+                    {
+                        "id": "line:1", "name": "Feeder reinforcement",
+                        "type": "line_capacity", "target_index": 1,
+                        "expansion_factor": 2.0, "capex": 300000.0,
+                    },
+                    {
+                        "id": "storage:2", "name": "Bus 2 storage",
+                        "type": "storage", "bus": 2,
+                        "capacity_mw": 0.4, "energy_mwh": 1.6,
+                        "dispatch_fraction": 0.25, "capex": 740000.0,
+                    },
+                ],
+                "options": {
+                    "max_measures": 2, "max_pairs": 1,
+                    "include_pairs": True,
+                    "reliability_physical_budget": 20,
+                    "resilience_horizon_hours": 4,
+                    "resilience_fault_branch_indices": [1],
+                },
+            },
+        )
+        cf_summary = counterfactual.get("summary", {})
+        cf_measures = counterfactual.get("measures", [])
+        cf_pairs = counterfactual.get("interactions", [])
+        pair_synergy = (cf_pairs[0].get("synergy", {}) if cf_pairs else {})
+        chk.check(
+            st == 200 and
+            counterfactual.get("schema") == "hacdcpf.counterfactual_planning.v1" and
+            cf_summary.get("evaluated_systems") == 4 and
+            cf_summary.get("failed_systems") == 0 and
+            len(cf_measures) == 2 and all(row.get("applied") for row in cf_measures) and
+            len(cf_pairs) == 1 and cf_pairs[0].get("applied") is True and
+            set(pair_synergy.get("dimensions", {})) ==
+                {"economic", "carbon", "reliability", "resilience"} and
+            counterfactual.get("synergy_definition") == "B(a+b) - B(a) - B(b)",
+            "counterfactual API recomputes baseline, singles, pair, and four-dimensional synergy",
+        )
+
         print("3. MATPOWER OPF regression cases")
         opf_payload = {
             "solver": "parity",

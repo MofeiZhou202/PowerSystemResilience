@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>HySim-XJTU-HRPES</title>
-<link rel="stylesheet" href="css/style.css?v=20260712-hysim-phase6-v1"/>
+<link rel="stylesheet" href="css/style.css?v=20260714-weak-heatmap-v2"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -46,7 +46,6 @@
   <label class="toolbar-check" title="拖动时对齐相邻元件"><input type="checkbox" id="chkAlignSnap" checked/>吸附</label>
   <button id="btnRotateCW" class="toolbar-btn" title="顺时针旋转90° (R)">顺时针<br>旋转</button>
   <button id="btnRotateCCW" class="toolbar-btn" title="逆时针旋转90° (Shift+R)">逆时针<br>旋转</button>
-  <button id="btnOpenCostEditor" class="toolbar-btn" title="集中编辑 OPF、时序潮流和年度生产模拟使用的成本参数">成本<br>参数</button>
   <span class="toolbar-spacer"></span>
   <div class="toolbar-aux">
     <button id="btnNewSystem" class="btn btn-sm legacy-io-shortcut" title="新建空白系统">新建</button>
@@ -101,6 +100,7 @@
   <button id="moduleHosting"      class="module-btn" data-module="hosting" data-group="steady">承载力分析</button>
   <button id="moduleReliability"  class="module-btn" data-module="reliability" data-group="sustainability">可靠性分析</button>
   <button id="moduleScenarioGeneration" class="module-btn" data-module="scenarioGeneration" data-group="planning">场景生成</button>
+  <button id="moduleWeakLinks" class="module-btn" data-module="weakLinks" data-group="planning">多维薄弱环节</button>
   <button id="moduleResilience"   class="module-btn" data-module="resilience" data-group="sustainability">弹性分析</button>
   <button id="moduleCarbonFlow"   class="module-btn" data-module="carbonFlow" data-group="sustainability">碳流分析</button>
 </div>
@@ -187,6 +187,10 @@
       <div class="io-toolbar-group-title">模型检查</div>
       <button id="btnParameterLibraryValidate" class="toolbar-btn run-btn" title="使用当前参数库检查当前模型">校验当前模型</button>
       <button id="btnParameterLibraryApply" class="toolbar-btn" title="只为缺失或无效的参数应用当前配置默认值">补全缺失参数</button>
+    </div>
+    <div class="io-toolbar-group">
+      <div class="io-toolbar-group-title">经济参数</div>
+      <button id="btnOpenCostEditor" class="toolbar-btn" title="集中编辑 OPF、时序潮流和年度生产模拟使用的电源成本、储能报价与负荷价值">成本参数</button>
     </div>
     <div class="io-toolbar-group">
       <div class="io-toolbar-group-title">交换</div>
@@ -1563,6 +1567,76 @@
     <button id="btnRunCarbon" class="toolbar-btn run-btn" title="基于当前系统与潮流结果进行碳排放溯源分析">运行碳排放分析</button>
     <button id="btnExportCarbonResults" class="toolbar-btn" title="将碳排放分析结果导出为 JSON">结果导出</button>
   </div>
+  <!-- Spatiotemporal multidimensional weak-link identification -->
+  <div class="sub-section" data-sub="weakLinks" hidden>
+    <div class="weak-mode-segmented" role="radiogroup" aria-label="决策模式">
+      <label><input type="radio" name="weakDecisionMode" value="planning" checked/><span>规划</span></label>
+      <label><input type="radio" name="weakDecisionMode" value="operation"/><span>运行</span></label>
+    </div>
+    <label class="sub-label" title="当前结果只使用已完成分析；自动补齐会依次运行缺失的 OPF、碳流、可靠性和弹性分析">证据
+      <select id="weakEvidenceMode">
+        <option value="current" selected>当前结果</option>
+        <option value="complete">自动补齐</option>
+      </select>
+    </label>
+    <label class="sub-label" title="进入主要排名至少需要多少类指标证据">最少维度
+      <select id="weakMinimumDimensions">
+        <option value="1">1</option>
+        <option value="2" selected>2</option>
+        <option value="3">3</option>
+        <option value="4">4</option>
+      </select>
+    </label>
+    <label class="sub-label" title="线路经济压力达到 1.0 时对应的负载率阈值">经济阈值(%)
+      <input id="weakEconomicThreshold" type="number" value="80" min="1" max="200" step="5"/>
+    </label>
+    <label class="sub-label" title="母线碳强度达到 1.0 时对应的碳强度阈值">碳阈值(t/MWh)
+      <input id="weakCarbonThreshold" type="number" value="0.5" min="0.001" step="0.05"/>
+    </label>
+    <label class="sub-label" title="元件年 EENS 贡献达到 1.0 时对应的阈值">可靠阈值(MWh/yr)
+      <input id="weakReliabilityThreshold" type="number" value="1" min="0.0001" step="0.5"/>
+    </label>
+    <label class="sub-label" title="母线灾害期加权未供电量达到 1.0 时对应的阈值">韧性阈值(MWh)
+      <input id="weakResilienceThreshold" type="number" value="1" min="0.0001" step="0.5"/>
+    </label>
+    <label class="sub-label" title="空间对象和关键时段的最大显示数量">Top K
+      <input id="weakTopK" type="number" value="15" min="3" max="100" step="1"/>
+    </label>
+    <button id="btnRunWeakLinks" class="toolbar-btn run-btn" title="运行时空多维薄弱环节辨识">运行辨识</button>
+    <button id="btnExportWeakLinks" class="toolbar-btn" title="导出多维薄弱环节结果 JSON">结果导出</button>
+    <span class="weak-counterfactual-divider" aria-hidden="true"></span>
+    <label class="sub-label sub-checkbox" title="候选线路采用增容并联等值，容量提高且阻抗按比例降低"><input id="cfEnableLine" type="checkbox" checked/><span>线路增容</span></label>
+    <label class="sub-label sub-checkbox" title="在高负荷母线增加构网型储能"><input id="cfEnableStorage" type="checkbox" checked/><span>储能</span></label>
+    <label class="sub-label sub-checkbox" title="增加常开联络线路及远方开关"><input id="cfEnableTie" type="checkbox" checked/><span>联络开关</span></label>
+    <label class="sub-label sub-checkbox" title="将馈线开关升级为远方自动开关"><input id="cfEnableAutomation" type="checkbox" checked/><span>自动化</span></label>
+    <label class="sub-label sub-checkbox" title="在高负荷母线增加可控低碳分布式电源"><input id="cfEnableDer" type="checkbox" checked/><span>DER</span></label>
+    <label class="sub-label" title="参与反事实重算的最大候选措施数">措施数
+      <input id="cfMaxMeasures" type="number" value="5" min="1" max="20" step="1"/>
+    </label>
+    <label class="sub-label" title="执行真实组合重算的最大措施对数量">组合数
+      <input id="cfMaxPairs" type="number" value="10" min="0" max="100" step="1"/>
+    </label>
+    <label class="sub-label" title="线路增容倍率，同时按该倍率降低并联等值阻抗">增容倍率
+      <input id="cfLineFactor" type="number" value="1.5" min="1.01" max="10" step="0.1"/>
+    </label>
+    <label class="sub-label" title="储能额定功率；0 表示按系统负荷自动选取">储能(MW)
+      <input id="cfStoragePower" type="number" value="0" min="0" step="0.1"/>
+    </label>
+    <label class="sub-label" title="储能时长，用于确定额定能量">储能时长(h)
+      <input id="cfStorageDuration" type="number" value="4" min="1" max="24" step="1"/>
+    </label>
+    <label class="sub-label" title="DER 额定容量；0 表示按系统负荷自动选取">DER(MW)
+      <input id="cfDerPower" type="number" value="0" min="0" step="0.1"/>
+    </label>
+    <label class="sub-label" title="DER 在反事实运行点的出力系数">DER系数
+      <input id="cfDerCapacityFactor" type="number" value="0.4" min="0" max="1" step="0.05"/>
+    </label>
+    <label class="sub-label" title="联络线路容量；0 表示按系统负荷自动选取">联络容量(MW)
+      <input id="cfTieCapacity" type="number" value="0" min="0" step="0.1"/>
+    </label>
+    <button id="btnRunCounterfactual" class="toolbar-btn run-btn" title="对基线、单措施和措施对分别克隆系统并重算四类指标">反事实重算</button>
+    <button id="btnExportCounterfactual" class="toolbar-btn" title="导出措施收益和两两协同矩阵 JSON">收益导出</button>
+  </div>
 </div>
 
 <!-- ===== Case Load Modal ===== -->
@@ -2412,6 +2486,44 @@
             </div>
           </div>
         </div><!-- /result-group resilience -->
+        <div class="result-group" data-result-group="weakLinks">
+          <div class="topo-section">
+            <h4>时空多维薄弱环节</h4>
+            <div id="weakLinkSummary" class="weak-link-summary"></div>
+          </div>
+          <div class="topo-section weak-link-visuals">
+            <div id="weakLinkSpatialChart" class="weak-link-chart"></div>
+            <div id="weakLinkTemporalChart" class="weak-link-chart"></div>
+          </div>
+          <div class="topo-section">
+            <h4>空间对象与指标关系</h4>
+            <div id="weakLinkEntityResults" class="topo-table-wrap weak-link-table">
+              <p class="empty-hint">暂无辨识结果</p>
+            </div>
+          </div>
+          <div class="topo-section">
+            <h4>关键时段</h4>
+            <div id="weakLinkPeriodResults" class="topo-table-wrap weak-link-table"></div>
+          </div>
+          <div class="topo-section">
+            <h4>措施反事实基线</h4>
+            <div id="counterfactualBaseline" class="weak-link-summary">
+              <p class="empty-hint">运行反事实重算后查看基线指标</p>
+            </div>
+          </div>
+          <div class="topo-section weak-link-visuals">
+            <div id="counterfactualBenefitChart" class="weak-link-chart"></div>
+            <div id="counterfactualMeasureResults" class="topo-table-wrap weak-link-table">
+              <p class="empty-hint">暂无措施收益结果</p>
+            </div>
+          </div>
+          <div class="topo-section">
+            <h4>两两协同矩阵</h4>
+            <div id="counterfactualSynergyMatrix" class="topo-table-wrap counterfactual-matrix">
+              <p class="empty-hint">暂无措施组合结果</p>
+            </div>
+          </div>
+        </div><!-- /result-group weakLinks -->
         <div class="result-group" data-result-group="carbonAnalysis">
           <div class="topo-section">
             <h4>碳排放分析结果</h4>
@@ -2651,6 +2763,6 @@
   <script src="js/core/layout_engine.js?v=20260712-hysim-layout-v1"></script>
   <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
-  <script src="js/app.js?v=20260714-cps-controls-v1"></script>
+  <script src="js/app.js?v=20260714-weak-heatmap-v2"></script>
 </body>
 </html>

@@ -398,6 +398,8 @@ set(HACDCPF_SOURCES
   src/scenario_generation/scenario_generation.cpp
   # ── hosting-capacity assessment (DL/T 2041-2025) ─────────────────────────
   src/analysis/hosting_capacity.cpp
+  src/analysis/counterfactual_planning.cpp
+  src/analysis/multidimensional_weak_link.cpp
 
   # ── analysis ────────────────────────────────────────────────────────
   src/scenario_generation/typhoon_resilience.cpp

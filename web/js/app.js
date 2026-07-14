@@ -68,6 +68,8 @@ const App = (() => {
   let _lastTransientData = null;
   let _lastReliabilityData = null;
   let _lastResilienceData = null;
+  let _lastWeakLinkData = null;
+  let _lastCounterfactualData = null;
   let _lastScenarioGenerationData = null;
   let _lastTopoAnalysisData = null;
   let _lastNetReductionData = null;
@@ -265,6 +267,7 @@ const App = (() => {
     topology: 'planning',
     timeSeries: 'planning',
     scenarioGeneration: 'planning',
+    weakLinks: 'planning',
     carbonFlow: 'sustainability',
     reliability: 'sustainability',
     resilience: 'sustainability',
@@ -332,6 +335,10 @@ const App = (() => {
     _lastCarbonData = null;
     _lastDynamicCarbonData = null;
     _lastTransientData = null;
+    _lastReliabilityData = null;
+    _lastResilienceData = null;
+    _lastWeakLinkData = null;
+    _lastCounterfactualData = null;
     _pfInvalidated = hadPf;
     _tspfInvalidated = hadTspf;
     _lastInvalidationReason = reason || (hadPf || hadTspf ? '网络或参数已变更，旧分析结果已失效' : '');
@@ -1668,6 +1675,8 @@ const App = (() => {
     add('transient_simulation', _lastTransientData);
     add('reliability', _lastReliabilityData);
     add('resilience', _lastResilienceData);
+    add('multidimensional_weak_links', _lastWeakLinkData);
+    add('counterfactual_planning', _lastCounterfactualData);
     add('scenario_generation', _lastScenarioGenerationData);
     add('topology_analysis', _lastTopoAnalysisData);
     add('network_reduction', _lastNetReductionData);
@@ -2775,6 +2784,7 @@ const App = (() => {
       updateDependencyChips();
       return true;
     }
+    const modelChanged = _canvasDirty;
     const sys = Canvas.buildSystemJson();
     const jsonStr = JSON.stringify(sys);
     if (window.__HACDCPF_DEBUG_SYNC) {
@@ -2790,7 +2800,11 @@ const App = (() => {
       return false;
     }
     _canvasDirty = false;
-    invalidateAnalysisResults('网络已同步，旧潮流和碳流结果已失效');
+    if (modelChanged) {
+      invalidateAnalysisResults('网络已同步，旧分析结果已失效');
+    } else {
+      updateDependencyChips();
+    }
     return true;
   }
 
@@ -16281,6 +16295,597 @@ const App = (() => {
 
       renderResilienceCharts(data);
     }
+
+    const WEAK_DIMENSIONS = ['economic', 'carbon', 'reliability', 'resilience'];
+    const WEAK_DIMENSION_LABELS = {
+      economic: '经济', carbon: '碳排', reliability: '可靠', resilience: '韧性',
+    };
+
+    function weakPositiveNumber(id, fallback) {
+      const value = Number(document.getElementById(id)?.value);
+      return Number.isFinite(value) && value > 0 ? value : fallback;
+    }
+
+    function weakEntityKey(canvasType, index, domain = '') {
+      return `${String(domain || '').toUpperCase()}:${String(canvasType || 'component').toLowerCase()}:${index}`;
+    }
+
+    function collectWeakLinkEvidence() {
+      const entities = new Map();
+      const periods = new Map();
+      const economicThreshold = weakPositiveNumber('weakEconomicThreshold', 80);
+      const carbonThreshold = weakPositiveNumber('weakCarbonThreshold', 0.5);
+      const reliabilityThreshold = weakPositiveNumber('weakReliabilityThreshold', 1);
+      const resilienceThreshold = weakPositiveNumber('weakResilienceThreshold', 1);
+      const system = Canvas.buildSystemJson ? Canvas.buildSystemJson() : { ac: {}, dc: {} };
+
+      const mergeEntity = (meta, dimension, pressure, detail) => {
+        const value = Number(pressure);
+        if (!WEAK_DIMENSIONS.includes(dimension) || !Number.isFinite(value) || value < 0) return;
+        const key = meta.key || weakEntityKey(meta.canvas_type, meta.canvas_index, meta.domain);
+        let row = entities.get(key);
+        if (!row) {
+          row = {
+            key,
+            name: meta.name || key,
+            canvas_type: meta.canvas_type || '',
+            canvas_index: Number.isFinite(Number(meta.canvas_index)) ? Number(meta.canvas_index) : -1,
+            domain: meta.domain || '',
+            primary_bus: Number.isFinite(Number(meta.primary_bus)) ? Number(meta.primary_bus) : -1,
+            secondary_bus: Number.isFinite(Number(meta.secondary_bus)) ? Number(meta.secondary_bus) : -1,
+            dimensions: {},
+          };
+          entities.set(key, row);
+        }
+        const previous = row.dimensions[dimension];
+        if (!previous || value > Number(previous.pressure || 0)) {
+          row.dimensions[dimension] = { pressure: value, detail: String(detail || '') };
+        }
+      };
+      const mergePeriod = (step, hour, dimension, pressure, detail) => {
+        const value = Number(pressure);
+        if (!WEAK_DIMENSIONS.includes(dimension) || !Number.isFinite(value) || value < 0) return;
+        const index = Number.isFinite(Number(step)) ? Number(step) : periods.size;
+        let row = periods.get(index);
+        if (!row) {
+          row = { step: index, hour: Number.isFinite(Number(hour)) ? Number(hour) : index, dimensions: {} };
+          periods.set(index, row);
+        }
+        const previous = row.dimensions[dimension];
+        if (!previous || value > Number(previous.pressure || 0)) {
+          row.dimensions[dimension] = { pressure: value, detail: String(detail || '') };
+        }
+      };
+      const busMeta = (domain, bus, name = '') => ({
+        key: weakEntityKey(domain === 'DC' ? 'dc_bus' : 'ac_bus', bus, domain),
+        name: name || `${domain} Bus ${bus}`,
+        canvas_type: domain === 'DC' ? 'dc_bus' : 'ac_bus',
+        canvas_index: Number(bus), domain, primary_bus: Number(bus), secondary_bus: -1,
+      });
+      const branchMeta = (domain, row, fallbackIndex = 0) => {
+        const index = Number(row.canvas_index ?? row.branch_index ?? row.index ?? fallbackIndex);
+        return {
+          key: weakEntityKey(domain === 'DC' ? 'dc_branch' : 'ac_branch', index, domain),
+          name: row.display_name || row.name || `${domain} Branch ${index}`,
+          canvas_type: domain === 'DC' ? 'dc_branch' : 'ac_branch',
+          canvas_index: index, domain,
+          primary_bus: Number(row.from_bus ?? row.from ?? row.bus_in ?? -1),
+          secondary_bus: Number(row.to_bus ?? row.to ?? row.bus_out ?? -1),
+        };
+      };
+
+      const pf = _lastOpfData || _lastPfData || {};
+      const addBranchEconomic = (rows, domain) => (rows || []).forEach((row, index) => {
+        let loading = Number(row.loading_pct ?? row.loading_percent ?? row.metrics?.loading_pct);
+        if (!Number.isFinite(loading)) {
+          const p = Number(row.pf_mw ?? row.p_from_mw ?? row.p_mw);
+          const q = Number(row.qf_mvar ?? row.q_from_mvar ?? 0);
+          const rating = Number(row.rate_mva ?? row.rate_a_mva ?? row.rating_mva);
+          if (Number.isFinite(p) && Number.isFinite(rating) && rating > 0)
+            loading = Math.hypot(p, Number.isFinite(q) ? q : 0) / rating * 100;
+        }
+        if (Number.isFinite(loading))
+          mergeEntity(branchMeta(domain, row, index), 'economic', loading / economicThreshold,
+            `负载率 ${loading.toFixed(1)}% / 阈值 ${economicThreshold.toFixed(1)}%`);
+      });
+      addBranchEconomic(pf.geo_ac_branches || pf.branch_flows, 'AC');
+      addBranchEconomic(pf.geo_dc_branches || pf.dc_branch_flows, 'DC');
+
+      const acBusRows = Array.isArray(_lastOpfData?.ac_bus_results)
+        ? _lastOpfData.ac_bus_results : [];
+      const lmpValues = acBusRows.map(row => Number(row.lmp_p)).filter(Number.isFinite);
+      if (lmpValues.length) {
+        const sorted = [...lmpValues].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)];
+        const scale = Math.max(...lmpValues.map(v => Math.abs(v - median)), 1e-9);
+        acBusRows.forEach((row, position) => {
+          const lmp = Number(row.lmp_p);
+          if (!Number.isFinite(lmp)) return;
+          const bus = Number(row.index ?? row.bus ?? system.ac?.buses?.[position]?.index ?? position);
+          mergeEntity(busMeta('AC', bus), 'economic', Math.abs(lmp - median) / scale,
+            `LMP ${lmp.toFixed(3)}，相对中位值偏差 ${Math.abs(lmp - median).toFixed(3)}`);
+        });
+      }
+
+      const carbon = _lastCarbonData || {};
+      (carbon.bus_carbon || []).forEach(row => {
+        const intensity = Number(row.carbon_intensity_tco2_mwh);
+        if (Number.isFinite(intensity)) mergeEntity(busMeta('AC', row.bus_index), 'carbon',
+          intensity / carbonThreshold,
+          `碳强度 ${intensity.toFixed(4)} tCO2/MWh / 阈值 ${carbonThreshold.toFixed(4)}`);
+      });
+      (carbon.dc_bus_carbon || []).forEach(row => {
+        const intensity = Number(row.carbon_intensity_tco2_mwh);
+        if (Number.isFinite(intensity)) mergeEntity(busMeta('DC', row.bus_index), 'carbon',
+          intensity / carbonThreshold,
+          `碳强度 ${intensity.toFixed(4)} tCO2/MWh / 阈值 ${carbonThreshold.toFixed(4)}`);
+      });
+      const carbonBranches = [
+        ['AC', carbon.branch_carbon || []], ['DC', carbon.dc_branch_carbon || []],
+      ];
+      carbonBranches.forEach(([domain, rows]) => {
+        const maximum = Math.max(...rows.map(row => Number(row.total_emissions_tco2 || 0)), 0);
+        rows.forEach((row, index) => {
+          const emissions = Number(row.total_emissions_tco2);
+          if (Number.isFinite(emissions) && maximum > 0) mergeEntity(branchMeta(domain, row, index),
+            'carbon', emissions / maximum,
+            `网损碳排 ${emissions.toFixed(6)} tCO2（同类最大值占比 ${(emissions / maximum * 100).toFixed(1)}%）`);
+        });
+      });
+
+      const reliability = _lastReliabilityData || {};
+      const reliabilityRows = Array.isArray(reliability.contingencies) && reliability.contingencies.length
+        ? reliability.contingencies
+        : (Array.isArray(reliability.critical_components) ? reliability.critical_components : []);
+      reliabilityRows.forEach((row, position) => {
+        const eens = Number(row.eens_contribution ?? row.associated_eens_mwh_yr ?? row.eens_contribution_mwh_yr);
+        if (!Number.isFinite(eens)) return;
+        const canvasType = row.canvas_type || row.component_type || 'component';
+        const canvasIndex = Number(row.canvas_index ?? row.component_index ?? row.index ?? position);
+        const domain = row.component_domain || (String(canvasType).toLowerCase().includes('dc') ? 'DC' : 'AC');
+        mergeEntity({
+          key: weakEntityKey(canvasType, canvasIndex, domain),
+          name: row.display_name || row.component_name || `${canvasType} ${canvasIndex}`,
+          canvas_type: canvasType, canvas_index: canvasIndex, domain,
+          primary_bus: Number(row.primary_bus ?? row.from_bus ?? -1),
+          secondary_bus: Number(row.secondary_bus ?? row.to_bus ?? -1),
+        }, 'reliability', eens / reliabilityThreshold,
+        `EENS 贡献 ${eens.toFixed(4)} MWh/yr / 阈值 ${reliabilityThreshold.toFixed(4)}`);
+      });
+      const nodalEens = Array.isArray(reliability.nodal_eens_mwh_yr)
+        ? reliability.nodal_eens_mwh_yr : [];
+      nodalEens.forEach((value, position) => {
+        const eens = Number(value);
+        const bus = Number(system.ac?.buses?.[position]?.index ?? position);
+        if (Number.isFinite(eens) && eens > 0) mergeEntity(busMeta('AC', bus), 'reliability',
+          eens / reliabilityThreshold,
+          `节点 EENS ${eens.toFixed(4)} MWh/yr / 阈值 ${reliabilityThreshold.toFixed(4)}`);
+      });
+
+      const resilience = _lastResilienceData || {};
+      const hours = Array.isArray(resilience.hours) ? resilience.hours.map(Number) : [];
+      const busResilience = new Map();
+      hours.forEach((hour, step) => {
+        const nextHour = Number(hours[step + 1]);
+        const dt = Number.isFinite(nextHour) && nextHour > hour ? nextHour - hour : 1;
+        const kinds = resilience.bus_supply_kind?.[step] || [];
+        const indices = resilience.bus_supply_index?.[step] || [];
+        const shed = resilience.bus_supply_shed_mw?.[step] || [];
+        const importance = resilience.bus_supply_importance?.[step] || [];
+        let weightedStepShed = 0;
+        indices.forEach((busValue, position) => {
+          const domain = String(kinds[position] || 'AC').toUpperCase() === 'DC' ? 'DC' : 'AC';
+          const bus = Number(busValue);
+          const shedMw = Math.max(0, Number(shed[position] || 0));
+          const weight = Math.max(1, Number(importance[position] || 1));
+          const key = weakEntityKey(domain === 'DC' ? 'dc_bus' : 'ac_bus', bus, domain);
+          busResilience.set(key, (busResilience.get(key) || 0) + shedMw * weight * dt);
+          weightedStepShed += shedMw * weight * dt;
+        });
+        const aggregateShed = Math.max(weightedStepShed, Number(resilience.shed_mw?.[step] || 0) * dt);
+        mergePeriod(step, hour, 'resilience', aggregateShed / resilienceThreshold,
+          `加权未供 ${aggregateShed.toFixed(4)} MWh / 阈值 ${resilienceThreshold.toFixed(4)}`);
+      });
+      busResilience.forEach((weightedMwh, key) => {
+        const parts = key.split(':');
+        const domain = parts[0] || 'AC';
+        const bus = Number(parts[2]);
+        mergeEntity(busMeta(domain, bus), 'resilience', weightedMwh / resilienceThreshold,
+          `灾害期加权未供 ${weightedMwh.toFixed(4)} MWh / 阈值 ${resilienceThreshold.toFixed(4)}`);
+      });
+
+      const crossval = Array.isArray(_lastTspfData?.crossval) ? _lastTspfData.crossval : [];
+      const objectives = crossval.map(row => Number(row.opf_objective)).filter(v => Number.isFinite(v) && v >= 0);
+      const objectiveScale = Math.max(...objectives, 0);
+      crossval.forEach((row, step) => {
+        const objective = Number(row.opf_objective);
+        if (Number.isFinite(objective) && objectiveScale > 0) mergePeriod(step, step,
+          'economic', objective / objectiveScale,
+          `时段运行成本 ${objective.toFixed(3)}（峰值占比 ${(objective / objectiveScale * 100).toFixed(1)}%）`);
+      });
+      const carbonSteps = Array.isArray(_lastDynamicCarbonData?.step_results)
+        ? _lastDynamicCarbonData.step_results : [];
+      const stepEmissions = carbonSteps.map(row => Number(row.total_generation_emissions_tco2 || 0));
+      const emissionScale = Math.max(...stepEmissions.filter(Number.isFinite), 0);
+      carbonSteps.forEach((row, step) => {
+        const emissions = Number(row.total_generation_emissions_tco2 || 0);
+        if (Number.isFinite(emissions) && emissionScale > 0) mergePeriod(step, row.hour ?? step,
+          'carbon', emissions / emissionScale,
+          `时段源端碳排 ${emissions.toFixed(5)} tCO2（峰值占比 ${(emissions / emissionScale * 100).toFixed(1)}%）`);
+      });
+
+      return { entities: [...entities.values()], periods: [...periods.values()] };
+    }
+
+    async function completeWeakLinkEvidence() {
+      const retained = {
+        opf: _lastOpfData, carbon: _lastCarbonData,
+        dynamicCarbon: _lastDynamicCarbonData,
+        reliability: _lastReliabilityData, resilience: _lastResilienceData,
+      };
+      if (!retained.opf) {
+        await runOpf();
+        retained.opf = _lastOpfData;
+      }
+      if (!retained.carbon) {
+        await runCarbonAnalysis();
+        retained.carbon = _lastCarbonData;
+      }
+      if (!retained.reliability) {
+        await runReliability();
+        retained.reliability = _lastReliabilityData;
+      }
+      if (!retained.resilience) {
+        await runResilience();
+        retained.resilience = _lastResilienceData;
+      }
+      _lastOpfData = retained.opf;
+      _lastCarbonData = retained.carbon;
+      _lastDynamicCarbonData = retained.dynamicCarbon;
+      _lastReliabilityData = retained.reliability;
+      _lastResilienceData = retained.resilience;
+    }
+
+    function weakDimensionScore(row, dimension) {
+      const score = row?.dimensions?.[dimension];
+      return score?.available ? Number(score.normalized_pressure || 0) : null;
+    }
+
+    function renderWeakLinkCharts(data) {
+      if (typeof Plotly === 'undefined') return;
+      const relationLabels = {
+        compatible: '相融', conflict: '冲突', single_dimension: '单维',
+        watch: '观察', insufficient_evidence: '证据不足',
+      };
+      const pressureColors = [
+        [0.00, '#e8f1f2'], [0.33, '#a7d8c5'], [0.50, '#f6d365'],
+        [0.67, '#ef8a62'], [1.00, '#b2182b'],
+      ];
+      const heatmapTrace = (rows, labels) => ({
+        type: 'heatmap',
+        x: WEAK_DIMENSIONS.map(dimension => WEAK_DIMENSION_LABELS[dimension]),
+        y: labels,
+        z: rows.map(row => WEAK_DIMENSIONS.map(dimension => {
+          const value = weakDimensionScore(row, dimension);
+          return Number.isFinite(value) ? Math.min(value, 1.5) : null;
+        })),
+        text: rows.map(row => WEAK_DIMENSIONS.map(dimension => {
+          const value = weakDimensionScore(row, dimension);
+          return Number.isFinite(value) ? value.toFixed(2) : '—';
+        })),
+        customdata: rows.map(row => WEAK_DIMENSIONS.map(dimension =>
+          row?.dimensions?.[dimension]?.detail || '缺少该维度证据')),
+        texttemplate: '%{text}', textfont: { size: 11 },
+        zmin: 0, zmax: 1.5, colorscale: pressureColors,
+        hoverongaps: false,
+        hovertemplate: '%{y}<br>%{x}压力 %{text}<br>%{customdata}<extra></extra>',
+        colorbar: {
+          title: '压力', thickness: 12, len: 0.78,
+          tickvals: [0, 0.5, 0.75, 1, 1.5],
+          ticktext: ['0', '0.5', '0.75', '1 阈值', '≥1.5'],
+        },
+      });
+      const heatmapLayout = (title, rowCount, leftMargin) => ({
+        title, height: Math.max(290, Math.min(610, 105 + rowCount * 30)),
+        margin: { l: leftMargin, r: 64, t: 42, b: 42 },
+        xaxis: { side: 'top', fixedrange: true },
+        yaxis: { autorange: 'reversed', fixedrange: true, automargin: true },
+        paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+        font: { color: '#111827', size: 10 },
+      });
+
+      const entities = (Array.isArray(data.entities) ? data.entities : []).slice(0, 20);
+      const entityLabels = entities.map(row =>
+        `${row.pareto ? '◆ ' : ''}${row.name || row.key} · ${relationLabels[row.relation] || row.relation || '—'}`);
+      Plotly.react('weakLinkSpatialChart', [heatmapTrace(entities, entityLabels)],
+        heatmapLayout('对象 × 指标压力（◆ Pareto）', entities.length, 150),
+        { responsive: true, displaylogo: false });
+
+      const periods = (Array.isArray(data.critical_periods) ? data.critical_periods : []).slice(0, 20);
+      const periodLabels = periods.map(row =>
+        `${Number(row.hour).toFixed(2)} h · ${WEAK_DIMENSION_LABELS[row.dominant_dimension] || '—'}`);
+      Plotly.react('weakLinkTemporalChart', [heatmapTrace(periods, periodLabels)],
+        heatmapLayout('关键时段 × 指标压力', periods.length, 92),
+        { responsive: true, displaylogo: false });
+    }
+
+    function showWeakLinkResults(data) {
+      document.getElementById('resultsEmpty').style.display = 'none';
+      document.getElementById('resultsContent').style.display = 'block';
+      setActiveResultGroup('weakLinks');
+      const summary = data.summary || {};
+      const coverage = data.dimension_coverage || {};
+      const coverageText = WEAK_DIMENSIONS.map(dimension =>
+        `${WEAK_DIMENSION_LABELS[dimension]} ${coverage[dimension] ? '有' : '缺'}`).join(' · ');
+      const kpis = [
+        [summary.input_entity_count ?? 0, '空间对象'],
+        [summary.pareto_count ?? 0, 'Pareto 候选'],
+        [summary.compatible_count ?? 0, '相融候选'],
+        [summary.conflict_count ?? 0, '潜在冲突'],
+        [summary.insufficient_count ?? 0, '证据不足'],
+        [data.mode === 'operation' ? '运行' : '规划', '决策模式'],
+      ];
+      document.getElementById('weakLinkSummary').innerHTML = kpis.map(([value, label]) =>
+        `<div class="weak-link-kpi"><strong>${escapeHtml(String(value))}</strong><span>${escapeHtml(label)}</span></div>`).join('')
+        + `<div class="weak-link-kpi"><strong>${Object.values(coverage).filter(Boolean).length}/4</strong><span title="${escapeHtml(coverageText)}">证据覆盖</span></div>`;
+
+      const relationLabel = {
+        compatible: '相融', conflict: '潜在冲突', single_dimension: '单维主导',
+        watch: '观察', insufficient_evidence: '证据不足',
+      };
+      const hintLabel = {
+        integrated_upgrade: '综合改造', hardening_and_redundancy: '加固/冗余',
+        dispatch_and_loss_reduction: '调度/降损', pareto_tradeoff_review: 'Pareto权衡',
+        monitor_and_targeted_upgrade: '监测/定向改造', complete_evidence: '补齐证据',
+        coordinated_dispatch: '协同调度', emergency_reconfiguration: '应急重构',
+        redispatch_and_demand_response: '重调度/需求响应',
+        operational_pareto_review: '运行Pareto权衡', enhanced_monitoring: '加强监视',
+      };
+      const scoreCell = (row, dimension) => {
+        const score = row?.dimensions?.[dimension];
+        if (!score?.available) return '<td class="weak-pressure-missing">—</td>';
+        const value = Number(score.normalized_pressure);
+        const level = value >= 1 ? 'critical' : value >= 0.75 ? 'high'
+          : value >= 0.5 ? 'medium' : 'low';
+        return `<td class="weak-pressure-${level}" title="${escapeHtml(score.detail || '')}"><span class="weak-link-pressure">${value.toFixed(2)}</span></td>`;
+      };
+      const maps = typeof Canvas !== 'undefined' && Canvas.getCompBusMap ? Canvas.getCompBusMap() : null;
+      let entityHtml = '<table><thead><tr><th>#</th><th>对象</th><th>Pareto</th><th>经济</th><th>碳排</th><th>可靠</th><th>韧性</th><th>指标关系</th><th>主导</th><th>决策方向</th></tr></thead><tbody>';
+      (data.entities || []).forEach((row, index) => {
+        let attr = canvasRowAttr({
+          canvas_type: row.canvas_type, canvas_index: row.canvas_index,
+          index: row.canvas_index, primary_bus: row.primary_bus,
+        }, maps);
+        if (!attr && Number(row.primary_bus) >= 0) attr = busClickAttr(row.primary_bus, maps);
+        entityHtml += `<tr${attr}><td>${index + 1}</td><td>${escapeHtml(row.name || row.key)}</td><td>${row.pareto ? '✓' : ''}</td>`
+          + WEAK_DIMENSIONS.map(dimension => scoreCell(row, dimension)).join('')
+          + `<td><span class="weak-link-relation ${escapeHtml(row.relation || '')}">${escapeHtml(relationLabel[row.relation] || row.relation || '—')}</span></td>`
+          + `<td>${escapeHtml(WEAK_DIMENSION_LABELS[row.dominant_dimension] || row.dominant_dimension || '—')}</td>`
+          + `<td>${escapeHtml(hintLabel[row.decision_hint] || row.decision_hint || '—')}</td></tr>`;
+      });
+      entityHtml += '</tbody></table>';
+      document.getElementById('weakLinkEntityResults').innerHTML = (data.entities || []).length
+        ? entityHtml : '<p class="empty-hint">当前没有可用空间证据</p>';
+
+      let periodHtml = '<table><thead><tr><th>#</th><th>时段(h)</th><th>经济</th><th>碳排</th><th>可靠</th><th>韧性</th><th>主导</th></tr></thead><tbody>';
+      (data.critical_periods || []).forEach((row, index) => {
+        periodHtml += `<tr><td>${index + 1}</td><td>${Number(row.hour).toFixed(2)}</td>`
+          + WEAK_DIMENSIONS.map(dimension => scoreCell(row, dimension)).join('')
+          + `<td>${escapeHtml(WEAK_DIMENSION_LABELS[row.dominant_dimension] || row.dominant_dimension || '—')}</td></tr>`;
+      });
+      periodHtml += '</tbody></table>';
+      document.getElementById('weakLinkPeriodResults').innerHTML = (data.critical_periods || []).length
+        ? periodHtml : '<p class="empty-hint">当前没有可用时序证据</p>';
+      renderWeakLinkCharts(data);
+    }
+
+    async function runWeakLinkAssessment() {
+      setStatus('多维薄弱环节辨识中...', 'busy');
+      if (document.getElementById('weakEvidenceMode')?.value === 'complete') {
+        await completeWeakLinkEvidence();
+      }
+      if (!await syncToBackend(false)) { setStatus('同步失败', 'error'); return; }
+      const evidence = collectWeakLinkEvidence();
+      const mode = document.querySelector('input[name="weakDecisionMode"]:checked')?.value || 'planning';
+      const payload = {
+        ...evidence,
+        options: {
+          mode,
+          top_k: Math.round(weakPositiveNumber('weakTopK', 15)),
+          minimum_dimensions: Math.round(weakPositiveNumber('weakMinimumDimensions', 2)),
+          target_pressure: { economic: 1, carbon: 1, reliability: 1, resilience: 1 },
+        },
+      };
+      const data = await apiPost('/api/session/run_multidimensional_weak_links', payload);
+      if (!data || data.error) { setStatus('多维辨识失败', 'error'); return; }
+      _lastWeakLinkData = data;
+      showWeakLinkResults(data);
+      switchTab('results');
+      const covered = Object.values(data.dimension_coverage || {}).filter(Boolean).length;
+      log(`多维薄弱环节辨识完成：${data.summary?.input_entity_count || 0} 个空间对象，${covered}/4 类证据，${data.summary?.conflict_count || 0} 个潜在冲突`, 'success');
+      setStatus('多维辨识完成');
+    }
+
+    document.getElementById('btnRunWeakLinks')?.addEventListener('click', runWeakLinkAssessment);
+    document.getElementById('btnExportWeakLinks')?.addEventListener('click', () => {
+      if (!_lastWeakLinkData) {
+        log('暂无多维薄弱环节结果可导出', 'warn');
+        return;
+      }
+      downloadJsonFile(`multidimensional_weak_links_${tsTagForFilename()}.json`, _lastWeakLinkData);
+    });
+
+    function counterfactualNumber(id, fallback, minimum = -Infinity) {
+      const value = Number(document.getElementById(id)?.value);
+      return Number.isFinite(value) && value >= minimum ? value : fallback;
+    }
+
+    function counterfactualMetricValue(metrics, dimension) {
+      const raw = metrics?.[dimension]?.value;
+      return raw === null || raw === undefined || !Number.isFinite(Number(raw))
+        ? null : Number(raw);
+    }
+
+    function formatCounterfactualValue(value, unit = '') {
+      if (value === null || value === undefined || !Number.isFinite(Number(value))) return '—';
+      const number = Number(value);
+      const magnitude = Math.abs(number);
+      const formatted = magnitude >= 1e6
+        ? number.toExponential(3)
+        : number.toLocaleString('zh-CN', { maximumFractionDigits: magnitude < 1 ? 4 : 2 });
+      return `${formatted}${unit ? ` ${unit}` : ''}`;
+    }
+
+    function counterfactualSignedCell(dimension) {
+      const absolute = dimension?.absolute;
+      if (absolute === null || absolute === undefined || !Number.isFinite(Number(absolute))) return '<td>—</td>';
+      const value = Number(absolute);
+      const cls = value > 0 ? 'counterfactual-benefit-positive'
+        : value < 0 ? 'counterfactual-benefit-negative' : '';
+      const relative = dimension?.relative;
+      const relativeText = relative === null || relative === undefined || !Number.isFinite(Number(relative))
+        ? '' : ` (${Number(relative) >= 0 ? '+' : ''}${(Number(relative) * 100).toFixed(1)}%)`;
+      return `<td class="${cls}">${escapeHtml(formatCounterfactualValue(value))}${escapeHtml(relativeText)}</td>`;
+    }
+
+    function renderCounterfactualResults(data) {
+      document.getElementById('resultsEmpty').style.display = 'none';
+      document.getElementById('resultsContent').style.display = 'block';
+      setActiveResultGroup('weakLinks');
+      const baseline = data.baseline || {};
+      document.getElementById('counterfactualBaseline').innerHTML = WEAK_DIMENSIONS.map(dimension => {
+        const metric = baseline[dimension] || {};
+        return `<div class="weak-link-kpi"><strong>${escapeHtml(formatCounterfactualValue(counterfactualMetricValue(baseline, dimension), metric.unit || ''))}</strong><span title="${escapeHtml(metric.diagnostic || '')}">${escapeHtml(WEAK_DIMENSION_LABELS[dimension])}基线</span></div>`;
+      }).join('') + `<div class="weak-link-kpi"><strong>${Number(data.summary?.evaluated_systems || 0)}</strong><span>真实重算系统</span></div>`;
+
+      const typeLabels = {
+        line_capacity: '线路增容', storage: '储能', tie_switch: '联络开关',
+        automation: '自动化', der: 'DER',
+      };
+      const relationLabels = {
+        compatible: '多指标相融', conflict: '指标冲突', single_benefit: '单指标改善',
+        adverse: '整体不利', neutral: '中性',
+      };
+      const measures = Array.isArray(data.measures) ? data.measures : [];
+      let measureHtml = '<table><thead><tr><th>候选措施</th><th>类型</th><th>CAPEX</th><th>关系</th><th>经济收益</th><th>碳排收益</th><th>可靠收益</th><th>韧性收益</th></tr></thead><tbody>';
+      measures.forEach(row => {
+        const dims = row.benefit?.dimensions || {};
+        measureHtml += `<tr><td title="${escapeHtml(row.apply_status || '')}">${escapeHtml(row.measure?.name || row.measure?.id || '—')}</td>`
+          + `<td>${escapeHtml(typeLabels[row.measure?.type] || row.measure?.type || '—')}</td>`
+          + `<td>${escapeHtml(formatCounterfactualValue(row.measure?.capex, 'USD'))}</td>`
+          + `<td>${escapeHtml(relationLabels[row.benefit?.relation] || row.benefit?.relation || (row.applied ? '—' : '未应用'))}</td>`
+          + WEAK_DIMENSIONS.map(dimension => counterfactualSignedCell(dims[dimension])).join('') + '</tr>';
+      });
+      measureHtml += '</tbody></table>';
+      document.getElementById('counterfactualMeasureResults').innerHTML = measures.length
+        ? measureHtml : '<p class="empty-hint">没有启用或可应用的候选措施</p>';
+
+      if (typeof Plotly !== 'undefined') {
+        const colors = { economic: '#2563eb', carbon: '#15803d', reliability: '#dc2626', resilience: '#7c3aed' };
+        const traces = WEAK_DIMENSIONS.map(dimension => ({
+          type: 'bar', name: WEAK_DIMENSION_LABELS[dimension],
+          x: measures.map(row => row.measure?.name || row.measure?.id),
+          y: measures.map(row => {
+            const relative = row.benefit?.dimensions?.[dimension]?.relative;
+            return relative === null || relative === undefined ? null : Number(relative) * 100;
+          }),
+          marker: { color: colors[dimension] },
+          hovertemplate: '%{x}<br>%{fullData.name}收益 %{y:.2f}%<extra></extra>',
+        }));
+        Plotly.react('counterfactualBenefitChart', traces, {
+          title: '单措施相对收益（正值为改善）', barmode: 'group',
+          margin: { l: 55, r: 18, t: 38, b: 90 },
+          xaxis: { tickangle: -25, automargin: true }, yaxis: { title: '相对收益 (%)', zeroline: true },
+          legend: { orientation: 'h', y: -0.32 },
+          paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+          font: { color: '#111827', size: 10 },
+        }, { responsive: true, displaylogo: false });
+      }
+
+      const names = new Map(measures.map(row => [row.measure?.id, row.measure?.name || row.measure?.id]));
+      const interactions = Array.isArray(data.interactions) ? data.interactions : [];
+      const pairs = new Map();
+      interactions.forEach(row => {
+        pairs.set(`${row.measure_a}\u0000${row.measure_b}`, row);
+        pairs.set(`${row.measure_b}\u0000${row.measure_a}`, row);
+      });
+      const ids = measures.map(row => row.measure?.id).filter(Boolean);
+      let matrixHtml = '<table><thead><tr><th>措施</th>'
+        + ids.map(id => `<th>${escapeHtml(names.get(id) || id)}</th>`).join('') + '</tr></thead><tbody>';
+      ids.forEach(rowId => {
+        matrixHtml += `<tr><th>${escapeHtml(names.get(rowId) || rowId)}</th>`;
+        ids.forEach(columnId => {
+          if (rowId === columnId) {
+            matrixHtml += '<td class="counterfactual-matrix-cell">—</td>';
+            return;
+          }
+          const pair = pairs.get(`${rowId}\u0000${columnId}`);
+          if (!pair) {
+            matrixHtml += '<td class="counterfactual-matrix-cell">未重算</td>';
+            return;
+          }
+          const dimensionHtml = WEAK_DIMENSIONS.map(dimension => {
+            const item = pair.synergy?.dimensions?.[dimension] || {};
+            const raw = item.relative;
+            if (raw === null || raw === undefined || !Number.isFinite(Number(raw))) return '';
+            const value = Number(raw) * 100;
+            const cls = value > 0 ? 'counterfactual-benefit-positive'
+              : value < 0 ? 'counterfactual-benefit-negative' : '';
+            const shortLabel = WEAK_DIMENSION_LABELS[dimension].slice(0, 1);
+            return `<span class="${cls}" title="${escapeHtml(formatCounterfactualValue(item.absolute, item.unit || ''))}">${shortLabel}${value >= 0 ? '+' : ''}${value.toFixed(1)}%</span>`;
+          }).join('');
+          matrixHtml += `<td class="counterfactual-matrix-cell" title="${escapeHtml(pair.synergy?.relation || '')}">${dimensionHtml || '无可比值'}</td>`;
+        });
+        matrixHtml += '</tr>';
+      });
+      matrixHtml += '</tbody></table>';
+      document.getElementById('counterfactualSynergyMatrix').innerHTML = ids.length
+        ? matrixHtml : '<p class="empty-hint">暂无措施组合结果</p>';
+    }
+
+    async function runCounterfactualPlanning() {
+      setStatus('措施反事实重算中...', 'busy');
+      if (!await syncToBackend(false)) { setStatus('同步失败', 'error'); return; }
+      const enabledCount = ['cfEnableLine', 'cfEnableStorage', 'cfEnableTie', 'cfEnableAutomation', 'cfEnableDer']
+        .filter(id => document.getElementById(id)?.checked).length;
+      if (!enabledCount) {
+        log('请至少启用一种反事实措施', 'warn');
+        setStatus('未选择措施', 'error');
+        return;
+      }
+      const payload = { options: {
+        enable_line_capacity: document.getElementById('cfEnableLine')?.checked === true,
+        enable_storage: document.getElementById('cfEnableStorage')?.checked === true,
+        enable_tie_switch: document.getElementById('cfEnableTie')?.checked === true,
+        enable_automation: document.getElementById('cfEnableAutomation')?.checked === true,
+        enable_der: document.getElementById('cfEnableDer')?.checked === true,
+        max_measures: Math.round(counterfactualNumber('cfMaxMeasures', 5, 1)),
+        max_pairs: Math.round(counterfactualNumber('cfMaxPairs', 10, 0)),
+        include_pairs: counterfactualNumber('cfMaxPairs', 10, 0) > 0,
+        line_expansion_factor: counterfactualNumber('cfLineFactor', 1.5, 1.01),
+        storage_power_mw: counterfactualNumber('cfStoragePower', 0, 0),
+        storage_duration_hr: counterfactualNumber('cfStorageDuration', 4, 1),
+        der_capacity_mw: counterfactualNumber('cfDerPower', 0, 0),
+        der_capacity_factor: Math.min(1, counterfactualNumber('cfDerCapacityFactor', 0.4, 0)),
+        tie_capacity_mw: counterfactualNumber('cfTieCapacity', 0, 0),
+      }};
+      const data = await apiPost('/api/session/run_counterfactual_planning', payload);
+      if (!data || data.error) { setStatus('反事实重算失败', 'error'); return; }
+      _lastCounterfactualData = data;
+      renderCounterfactualResults(data);
+      switchTab('results');
+      log(`反事实重算完成：${data.summary?.measure_count || 0} 个单措施、${data.summary?.pair_count || 0} 个措施对、${data.summary?.evaluated_systems || 0} 次系统评估`, 'success');
+      setStatus('反事实重算完成');
+    }
+
+    document.getElementById('btnRunCounterfactual')?.addEventListener('click', runCounterfactualPlanning);
+    document.getElementById('btnExportCounterfactual')?.addEventListener('click', () => {
+      if (!_lastCounterfactualData) {
+        log('暂无措施收益和协同矩阵可导出', 'warn');
+        return;
+      }
+      downloadJsonFile(`counterfactual_planning_${tsTagForFilename()}.json`, _lastCounterfactualData);
+    });
 
     document.getElementById('resConsiderSwitches')?.addEventListener('change', e => { e.currentTarget.dataset.userTouched = '1'; });
     document.getElementById('btnRunResilience')?.addEventListener('click', runResilience);
