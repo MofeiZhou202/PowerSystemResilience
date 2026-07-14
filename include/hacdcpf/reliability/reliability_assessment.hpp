@@ -374,10 +374,22 @@ void apply_comprehensive_reliability_data(HybridPowerSystem& sys);
 /// automation available and automation unavailable.  This is the scalar
 /// interface-matrix model from docs/cyber_physical_reliability_extension.md;
 /// it does not claim to model a communication topology or cyber-node power.
+///
+/// Class semantics (doc section 4.1):
+///  - automation available: FLISR-speed switching, full remote restoration.
+///  - automation unavailable: manual restoration.  The crew still performs
+///    switch/tie reconfiguration during the repair stage, but remotely
+///    dispatched resources (DER promotion, storage, grid-forming VSC support,
+///    black start, microgrid islanding) are frozen when
+///    `freeze_der_on_automation_loss` is set.
+/// When enabled, the class switching times REPLACE the global
+/// `FMEAOptions::switching_time_hr` for every contingency.
 struct CyberPhysicalFMEAOptions {
   bool enabled{false};
   double automation_availability{0.97};
   double automatic_switching_time_hr{0.05};  // 3 minutes
+  /// Clamped to >= automatic_switching_time_hr at evaluation time (manual
+  /// restoration cannot beat automatic restoration).
   double manual_switching_time_hr{1.0};
   bool freeze_der_on_automation_loss{true};
 
@@ -522,10 +534,20 @@ struct CyberPhysicalReliabilityMetrics {
   double eens_adjusted_mwh_yr{0.0};
   double delta_cyber_duration_mwh_yr{0.0};
   double delta_cyber_control_mwh_yr{0.0};
+  /// Reserved placeholder: always 0 at Level 1.  Protection misoperation
+  /// (fail-to-trip / nuisance trip) is a failure-mode FMEA concern (doc C3);
+  /// the field exists so the doc's four-term decomposition is API-stable.
   double delta_protection_misoperation_mwh_yr{0.0};
+  /// eta = (EENS_noAuto - EENS) / (EENS_noAuto - EENS_perfect), clamped [0,1].
+  /// With a UNIFORM availability A this equals A by construction; it becomes
+  /// informative once per-component availability_overrides differ.
   double automation_efficacy{1.0};
   double saidi_perfect_cyber_hr_cust_yr{0.0};
   double saidi_no_automation_hr_cust_yr{0.0};
+  /// Share of SAIDI in EXCESS of the perfect-cyber bound:
+  /// (SAIDI - SAIDI_perfect) / SAIDI, clamped [0,1].  This is the "how much of
+  /// today's SAIDI is attributable to imperfect automation" reading, not the
+  /// class-c2-weighted CID share.
   double cyber_caused_saidi_share{0.0};
 };
 

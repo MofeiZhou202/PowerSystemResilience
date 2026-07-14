@@ -1,9 +1,20 @@
 > Document status (2026-07-14)
-> Scope: theoretical design & decision document — NOT implementation-backed.
-> Companion to [`reliability_assessment_models.md`](reliability_assessment_models.md)
-> (the implemented physical baseline). Nothing in this file describes shipped
-> behaviour; every section states what *would* be added, why, and at what cost.
-> Source of truth for the baseline: src/, include/, tests/.
+> Scope: theoretical design & decision document. **Level 1 (§4.1, §6) is now
+> implemented for the deterministic FMEA method** — `CyberPhysicalFMEAOptions`
+> in `include/hacdcpf/reliability/reliability_assessment.hpp`, evaluated in
+> `run_distribution_fmea`, exposed via the GUI server (`cyber_physical` request
+> block) and the reliability panel. Levels 2–4 remain design-only. Companion to
+> [`reliability_assessment_models.md`](reliability_assessment_models.md)
+> (the implemented physical baseline, whose §5 documents the shipped Level-1
+> conditioning). Source of truth: src/, include/, tests/.
+>
+> Implementation notes where the shipped Level 1 refines this text:
+> the automation-unavailable class **credits crew-based switch reconfiguration
+> during the repair stage** (manual restoration, per §4.1's c₂ table) while
+> freezing DER/storage/grid-forming/islanding dispatch;
+> `manual_switching_time_hr` is clamped to ≥ the automatic time;
+> `delta_protection_misoperation_mwh_yr` is an API placeholder (always 0 at
+> Level 1 — protection misoperation belongs to the failure-mode FMEA, §4.2 C3).
 
 # Cyber-Physical Reliability Assessment — Theoretical Extension & Decision Guide
 
@@ -439,13 +450,20 @@ Keep every existing index; add decompositions and three cyber-native indices:
   for that case.
 - **Automation efficacy** $\eta = \dfrac{\text{EENS}^{A=0} - \text{EENS}}{\text{EENS}^{A=0} - \text{EENS}^{A=1}} \in [0,1]$ —
   how much of the achievable automation benefit current cyber reliability
-  actually delivers.
+  actually delivers. ◐ Note: with a *uniform* scalar availability the Level-1
+  mixture is linear in $A$, so $\eta \equiv A$ by construction; the index
+  becomes informative once per-component availabilities differ (overrides,
+  Level 2 cut sets).
 - **Expected observability/controllability loss**: $\sum_d w_d (1-A_d)$ —
   a pure cyber-layer KPI, reportable even with no physical run (GUI panel
   analog of the data-quality report).
-- **Cyber-caused SAIDI share**: class-$c_2$-weighted CID over total CID —
-  auditable against utilities' actual "automation failed to operate" event
-  logs (IEEE 1366 major-event discipline applies unchanged).
+- **Cyber-caused SAIDI share**: the share of SAIDI in excess of the
+  perfect-cyber bound, $(\text{SAIDI}-\text{SAIDI}^{A=1})/\text{SAIDI}$ —
+  "how much of today's SAIDI is attributable to imperfect automation".
+  (An alternative reading — class-$c_2$-weighted CID over total CID — is
+  auditable against utilities' "automation failed to operate" event logs; the
+  implemented definition is the excess-share form. IEEE 1366 major-event
+  discipline applies unchanged.)
 
 Every reported figure carries the existing `model_scope` / `validity`-flag
 discipline, extended with e.g. `cyber_topology_modelled`,
@@ -502,7 +520,7 @@ of the interface-matrix boundary (§3.3).
 | Level | Model | New data | New code | Answers that the previous level cannot | Verdict |
 |---|---|---|---|---|---|
 | **0** (today) | per-device cyber modes, no topology, no time channel | — | — | "does a frozen VSC shed load *now*" | shipped |
-| **1** | scalar $A$ per feeder/device; class-conditioned staged FMEA (§4.1); bounding pair | 2–3 scalars per feeder | days–1 wk | **value of automation** in EENS/SAIDI; whether cyber matters *at all* for a given case | **do now** |
+| **1** | scalar $A$ per feeder/device; class-conditioned staged FMEA (§4.1); bounding pair | 2–3 scalars per feeder | days–1 wk | **value of automation** in EENS/SAIDI; whether cyber matters *at all* for a given case | **✓ shipped** (FMEA method: `CyberPhysicalFMEAOptions`, GUI 网络物理 L1 panel, `cyber_physical_reliability_demo` case) |
 | **2** | explicit $G_c$, cut-set $A_k$, common-cause via shared elements; joint NSQ; protection $\nu_d$ wiring | comm inventory + per-kind λ/r | 2–4 wk | *which* cyber element/redundancy dominates; correlated feeder-wide automation loss; N-1 cyber contingency ranking | **target architecture** |
 | **3** | SEQ co-simulation: battery depletion, storm common cause, valid cyber tail risk | bindings, $T_b$, hazard series | 2–3 wk on top of 2 | storm-year tails; C4; multi-event interactions | build **only** via existing SEQ; needs sub-hour events |
 | **4** | adversarial interdiction / scenario-conditional compromise | threat scenarios | separate track | worst-case N-k cyber survivability | keep **outside** reliability indices; resilience track |
@@ -515,7 +533,9 @@ of the interface-matrix boundary (§3.3).
    ($A\!\equiv\!1$ vs $A\!\equiv\!0$) on the reference cases. This is days of
    work, needs no new data, and tells you per-case whether the cyber layer is
    worth modeling at depth — the cheapest possible de-risking of the whole
-   roadmap.
+   roadmap. *(✓ done — shipped for the FMEA method with per-contingency
+   bounding values, EENS decomposition, and the demo case; see the status
+   header.)*
 3. **Commit to Level 2 as the architecture** (cyber graph + interface matrix +
    catalog integration), because it is the lowest level at which the
    common-cause structure — the thing Level 0/1 provably understate — exists,

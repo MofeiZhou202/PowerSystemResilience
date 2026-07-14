@@ -4034,10 +4034,16 @@ FMEAResult run_distribution_fmea(
     result.model_limitations +=
         " Cyber-physical conditioning is Level 1: scalar automation availability "
         "with class-conditioned restoration duration and optional DER/control "
-        "freezing. Communication topology, shared cyber cut sets, cyber-node "
-        "power supply, weather common cause, and adversarial attacks are not modelled. "
-        "Cyber-conditioned class evaluations are serialized because concurrent "
-        "DC-OPF backend calls are not process-safe.";
+        "freezing. The automation-unavailable class still credits crew-based "
+        "switch reconfiguration during the repair stage (manual restoration), "
+        "but DER/storage dispatch, grid-forming support, and microgrid islanding "
+        "are frozen. The class switching times replace the global "
+        "switching_time_hr for every contingency. Communication topology, shared "
+        "cyber cut sets, cyber-node power supply, weather common cause, and "
+        "adversarial attacks are not modelled; "
+        "delta_protection_misoperation_mwh_yr is a reserved placeholder (always "
+        "zero at Level 1 — protection misoperation lives in the failure-mode "
+        "FMEA).";
   }
   const size_t nb = sys.ac.buses.size() + (hybrid_fmea ? sys.dc.buses.size() : 0U);
   result.nodal_eens_mwh_yr.resize(nb, 0.0);
@@ -4089,14 +4095,15 @@ FMEAResult run_distribution_fmea(
     detail.failure_rate = comp.lambda;
     detail.component_type = fmea_component_type_name(comp.type);
 
-    double automation_availability = options.cyber_physical.enabled
-        ? options.cyber_physical.automation_availability
-        : 1.0;
-    for (const auto& override : options.cyber_physical.availability_overrides) {
-      if (override.component_type == detail.component_type &&
-          override.component_index == comp.idx) {
-        automation_availability = override.availability;
-        break;
+    double automation_availability = 1.0;
+    if (options.cyber_physical.enabled) {
+      automation_availability = options.cyber_physical.automation_availability;
+      for (const auto& override : options.cyber_physical.availability_overrides) {
+        if (override.component_type == detail.component_type &&
+            override.component_index == comp.idx) {
+          automation_availability = override.availability;
+          break;
+        }
       }
     }
     automation_availability = std::clamp(automation_availability, 0.0, 1.0);
@@ -4106,9 +4113,12 @@ FMEAResult run_distribution_fmea(
             ? options.cyber_physical.automatic_switching_time_hr
             : comp.tau_sw_hr,
         0.0, std::max(0.0, comp.tau_rep_hr));
+    // Manual restoration cannot beat automatic restoration: a manual switching
+    // time below the automatic one would produce a negative duration increment.
     const double manual_tau_sw = std::clamp(
         options.cyber_physical.enabled
-            ? options.cyber_physical.manual_switching_time_hr
+            ? std::max(options.cyber_physical.manual_switching_time_hr,
+                       options.cyber_physical.automatic_switching_time_hr)
             : comp.tau_sw_hr,
         0.0, std::max(0.0, comp.tau_rep_hr));
 
@@ -4117,8 +4127,12 @@ FMEAResult run_distribution_fmea(
     FMEAOptions manual_options = automatic_options;
     if (options.cyber_physical.enabled &&
         options.cyber_physical.freeze_der_on_automation_loss) {
+      // Class c2 = manual restoration: the crew still performs switch/tie
+      // reconfiguration during the repair stage (enable_switch_reconfiguration
+      // is deliberately kept), but everything that requires a live control
+      // channel — DER re-dispatch, storage, grid-forming support, black start,
+      // microgrid islanding — is unavailable.
       manual_options.enable_repair_reconfiguration = false;
-      manual_options.enable_switch_reconfiguration = false;
       manual_options.enable_storage_dispatch = false;
       manual_options.enable_grid_forming_vsc_support = false;
       manual_options.enable_black_start_storage = false;
@@ -4136,7 +4150,8 @@ FMEAResult run_distribution_fmea(
     };
     auto evaluate_class = [&](const FMEAOptions& class_options,
                               double tau_sw_hr,
-                              bool cyber_control_frozen) {
+                              bool cyber_control_frozen,
+                              const FMEAStageEval* reuse_repair = nullptr) {
       ClassEvaluation class_eval;
       class_eval.tau_sw_hr = tau_sw_hr;
       // F11: the event lasts MTTR in total. Switching and repair are disjoint
@@ -4147,10 +4162,14 @@ FMEAResult run_distribution_fmea(
           sys, comp, class_options, opf_opt, class_eval.tau_sw_hr, false,
           cyber_control_frozen);
       // The physical repair horizon is retained for storage-energy feasibility;
-      // only the frequency-weighted stage duration uses tau_rep_hr.
-      class_eval.repair = evaluate_contingency_stage(
-          sys, comp, class_options, opf_opt, comp.tau_rep_hr, true,
-          cyber_control_frozen);
+      // only the frequency-weighted stage duration uses tau_rep_hr.  The repair
+      // evaluation depends on (options, horizon, freeze) but NOT on tau_sw, so
+      // a caller that already solved the identical repair problem passes it in.
+      class_eval.repair = reuse_repair
+          ? *reuse_repair
+          : evaluate_contingency_stage(
+                sys, comp, class_options, opf_opt, comp.tau_rep_hr, true,
+                cyber_control_frozen);
       class_eval.ens_mwh =
           class_eval.switching.eval.curtailment_mw * class_eval.tau_sw_hr +
           class_eval.repair.eval.curtailment_mw * class_eval.tau_rep_hr;
@@ -4165,8 +4184,11 @@ FMEAResult run_distribution_fmea(
 
     const ClassEvaluation automatic =
         evaluate_class(automatic_options, automatic_tau_sw, false);
+    // duration_only differs from automatic only in the switching-stage
+    // duration; its repair problem is identical, so reuse the solved stage.
     const ClassEvaluation duration_only = options.cyber_physical.enabled
-        ? evaluate_class(automatic_options, manual_tau_sw, false)
+        ? evaluate_class(automatic_options, manual_tau_sw, false,
+                         &automatic.repair)
         : automatic;
     const ClassEvaluation manual = options.cyber_physical.enabled &&
                                            options.cyber_physical.freeze_der_on_automation_loss
@@ -4294,27 +4316,30 @@ FMEAResult run_distribution_fmea(
                    comp.name, detail.shed_rep_mw, detail.eens_contribution);
     }
 
-    work.causes_loss = automatic.causes_loss || manual.causes_loss;
+    // A class that can never occur (probability 0) must not mark the
+    // contingency as loss-causing; mirrors the causes_loss_sw/rep gating.
+    work.causes_loss =
+        (automation_availability > 0.0 && automatic.causes_loss) ||
+        (down_probability > 0.0 && manual.causes_loss);
     work.detail = std::move(detail);
     return work;
   };
 
   std::vector<FMEAContingencyWorkResult> work_results(catalog.size());
-  const bool cyber_serial_guard =
-      options.enable_parallel && options.cyber_physical.enabled;
-  const int fmea_workers = options.enable_parallel && !cyber_serial_guard
+  // Cyber-conditioned evaluations parallelize exactly like the physical path:
+  // each worker owns its contingency's system copies and OPF instances, so the
+  // extra per-class stage solves introduce no shared mutable state.
+  const int fmea_workers = options.enable_parallel
       ? resolve_reliability_worker_count(options.parallel_threads,
                                          static_cast<int>(catalog.size()))
       : 1;
   result.parallel_workers = fmea_workers;
   result.parallel_effective = options.enable_parallel && fmea_workers > 1 &&
                               catalog.size() > 1U;
-  result.parallel_mode = cyber_serial_guard
-      ? "serial/cyber-conditioned-solver-safety"
-      : (result.parallel_effective
-             ? "parallel-fmea-contingencies"
-             : (options.enable_parallel ? "serial/insufficient-work"
-                                        : "serial/disabled"));
+  result.parallel_mode = result.parallel_effective
+      ? "parallel-fmea-contingencies"
+      : (options.enable_parallel ? "serial/insufficient-work"
+                                 : "serial/disabled");
   result.parallel_execution = util::make_parallel_execution_info(
       options.enable_parallel, options.parallel_threads,
       static_cast<int>(catalog.size()), "parallel-fmea-contingencies",
@@ -4322,11 +4347,7 @@ FMEAResult run_distribution_fmea(
   result.parallel_execution.effective = result.parallel_effective;
   result.parallel_execution.resolved_workers = fmea_workers;
   result.parallel_execution.mode = result.parallel_mode;
-  if (cyber_serial_guard) {
-    result.parallel_execution.guard_reason =
-        "Cyber-conditioned class evaluations are serialized because concurrent "
-        "DC-OPF backend calls are not process-safe.";
-  } else if (!result.parallel_effective && options.enable_parallel) {
+  if (!result.parallel_effective && options.enable_parallel) {
     result.parallel_execution.guard_reason =
         util::insufficient_work_reason(result.parallel_execution);
   }

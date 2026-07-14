@@ -1150,7 +1150,15 @@ TEST_CASE("FMEA: Level-1 cyber conditioning preserves bounds and decomposition",
   CHECK(branch->eens_contribution == Approx(0.2875).margin(1e-6));
   CHECK(branch->tau_sw_hr == Approx(0.2875).margin(1e-8));
 
+  // Cyber conditioning parallelizes exactly like the physical path (no serial
+  // guard) and the parallel run reproduces the serial numbers.
   options.enable_parallel = true;
+  options.parallel_threads = 2;
+  const auto parallel_run = run_distribution_fmea(sys, options);
+  CHECK(parallel_run.parallel_effective);
+  CHECK(parallel_run.parallel_mode == "parallel-fmea-contingencies");
+  CHECK(parallel_run.eens_mwh_yr == Approx(result.eens_mwh_yr).margin(1e-9));
+
   options.cyber_physical.automation_availability = 1.0;
   const auto perfect_cyber = run_distribution_fmea(sys, options);
   const auto perfect_branch = std::find_if(
@@ -1164,9 +1172,6 @@ TEST_CASE("FMEA: Level-1 cyber conditioning preserves bounds and decomposition",
         Approx(1.0).margin(1e-6));
   CHECK(perfect_cyber.cyber_physical.eens_no_automation_mwh_yr >=
         perfect_cyber.cyber_physical.eens_perfect_cyber_mwh_yr);
-  CHECK_FALSE(perfect_cyber.parallel_effective);
-  CHECK(perfect_cyber.parallel_mode ==
-        "serial/cyber-conditioned-solver-safety");
 
   options.cyber_physical.enabled = false;
   options.enable_parallel = false;
@@ -1281,7 +1286,9 @@ TEST_CASE("built-in cyber-physical demo exposes automation value",
   REQUIRE(sys.ac.buses.size() == 3);
   REQUIRE(sys.ac.loads.size() == 2);
   REQUIRE(sys.ac.branches.size() == 3);
+  REQUIRE(sys.ac.storage.size() == 1);
   CHECK_FALSE(sys.ac.branches[2].in_service);
+  CHECK_FALSE(sys.ac.storage[0].grid_forming);
 
   FMEAOptions options;
   options.enable_parallel = false;
@@ -1301,11 +1308,19 @@ TEST_CASE("built-in cyber-physical demo exposes automation value",
       });
   REQUIRE(feeder != result.contingencies.end());
 
+  // Automatic class: FLISR closes the tie and dispatches the battery to cover
+  // the 0.8 MW tie shortfall -> repair shed 0.  ens = 2 MW * 0.05 h = 0.1.
+  CHECK(feeder->shed_rep_automatic_mw == Approx(0.0).margin(1e-8));
   CHECK(feeder->eens_perfect_cyber_contribution == Approx(0.1).margin(1e-6));
-  CHECK(feeder->eens_no_automation_contribution == Approx(8.0).margin(1e-6));
+  // Manual class: the crew still closes the tie during the repair stage, but
+  // the battery is frozen, so the 1.2 MVA tie limit leaves 0.8 MW shed.
+  // ens = 2 MW * 1 h + 0.8 MW * 3 h = 4.4.
+  CHECK(feeder->shed_rep_manual_mw == Approx(0.8).margin(1e-6));
+  CHECK(feeder->eens_no_automation_contribution == Approx(4.4).margin(1e-6));
+  // Increments at A = 0.75: duration 0.25*(2.0-0.1), control 0.25*(4.4-2.0).
   CHECK(feeder->eens_cyber_duration_increment == Approx(0.475).margin(1e-6));
-  CHECK(feeder->eens_cyber_control_increment == Approx(1.5).margin(1e-6));
-  CHECK(feeder->eens_contribution == Approx(2.075).margin(1e-6));
+  CHECK(feeder->eens_cyber_control_increment == Approx(0.6).margin(1e-6));
+  CHECK(feeder->eens_contribution == Approx(1.175).margin(1e-6));
   CHECK(result.cyber_physical.delta_cyber_duration_mwh_yr > 0.0);
   CHECK(result.cyber_physical.delta_cyber_control_mwh_yr > 0.0);
   CHECK(result.cyber_physical.eens_perfect_cyber_mwh_yr < result.eens_mwh_yr);

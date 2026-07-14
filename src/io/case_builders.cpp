@@ -1549,9 +1549,12 @@ HybridPowerSystem build_case2000_acdc() {
 }
 
 // Three-bus FLISR benchmark for the Level-1 cyber-physical reliability model.
-// A feeder fault isolates both loads. With automation available, the open tie
-// is closed after the automatic switching delay. With automation unavailable,
-// restoration is manual and remote reconfiguration is not credited.
+// A feeder fault isolates both loads.  With automation available, the open tie
+// is closed after the automatic switching delay and the controllable storage
+// covers the tie's thermal shortfall.  With automation unavailable, the crew
+// still closes the tie manually during the repair stage, but the storage
+// cannot be dispatched (frozen), so the tie limit leaves residual shed — the
+// case therefore separates the restoration-delay and control-loss increments.
 HybridPowerSystem build_cyber_physical_reliability_demo() {
   HybridPowerSystem sys;
   sys.name = "Cyber-Physical Reliability Demo";
@@ -1611,11 +1614,31 @@ HybridPowerSystem build_cyber_physical_reliability_demo() {
   section.mttr_hr = 4.0;
   ACBranch tie = make_ac_branch(3, 1, 3, 0.01, 0.15, 0.0, 1.0);
   tie.name = "Normally Open FLISR Tie";
-  tie.rate_a_mva = 10.0;
+  // Deliberately below the 2.0 MW demand: tie closure alone leaves 0.8 MW
+  // unserved, which only the (remotely dispatched) storage can cover.
+  tie.rate_a_mva = 1.2;
   tie.in_service = false;
   tie.failure_rate = 0.0;
   tie.mttr_hr = 4.0;
   sys.ac.branches = {feeder, section, tie};
+
+  // Grid-following battery: dispatchable through the DMS when communications
+  // are up, frozen when automation is lost.  Not grid-forming, so it cannot
+  // energize the de-energized island during the switching stage.
+  Storage battery;
+  battery.index = 1;
+  battery.bus = 3;
+  battery.in_service = true;
+  battery.name = "Feeder Battery";
+  battery.controllable = true;
+  battery.grid_forming = false;
+  battery.pmax_mw = 1.0;
+  battery.p_rated_mw = 1.0;
+  battery.e_rated_mwh = 10.0;
+  battery.e_mwh = 10.0;
+  battery.soc_min = 0.0;
+  battery.eta_discharge = 1.0;
+  sys.ac.storage = {battery};
 
   return sys;
 }

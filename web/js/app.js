@@ -14942,6 +14942,11 @@ const App = (() => {
 	        log('自动化可用率必须在 0-1 内，自动/人工恢复时间必须为非负分钟数', 'error');
 	        return;
 	      }
+	      if (cyberEnabled && cyberManualMinutes < cyberAutoMinutes) {
+	        setStatus('网络物理可靠性参数无效', 'error');
+	        log('人工恢复时间不能小于自动恢复时间', 'error');
+	        return;
+	      }
 	      if (method === 'seq' && seqProfileText.trim() &&
 	          (!seqProfile.length || seqProfile.some(v => !Number.isFinite(v) || v < 0))) {
 	        setStatus('SEQ负荷曲线包含无效倍率', 'error');

@@ -512,11 +512,15 @@ def main() -> int:
             ),
             {},
         )
+        # Automatic: tie + dispatched battery -> ens 0.1.  Manual: crew closes
+        # the tie but the battery is frozen, tie limit sheds 0.8 MW -> ens 4.4.
+        # A=0.75: 0.1 + 0.25*(2.0-0.1) + 0.25*(4.4-2.0) = 1.175.
         chk.check(
             st == 200 and
             float(demo_cyber.get("delta_cyber_duration_mwh_yr", 0.0)) > 0.0 and
             float(demo_cyber.get("delta_cyber_control_mwh_yr", 0.0)) > 0.0 and
-            abs(float(feeder_result.get("eens_contribution", 0.0)) - 2.075) < 1e-6,
+            abs(float(feeder_result.get("shed_rep_manual_mw", 0.0)) - 0.8) < 1e-6 and
+            abs(float(feeder_result.get("eens_contribution", 0.0)) - 1.175) < 1e-6,
             "built-in demo separates restoration-delay and control-loss EENS",
         )
 

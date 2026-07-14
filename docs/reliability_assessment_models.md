@@ -50,7 +50,7 @@ assumptions), **◐ approximate** (sound but with a documented simplification),
 | F8 | NSQ tail-risk built on per-state `shed×8760` samples | ✗ misleading | medium | `:1264-1267`, `:1396-1400` |
 | F9 | Hybrid consequence engine now enforces AC-branch DC power flow (Kirchhoff via angles) | ✓ fixed | medium | `:3248-3640` |
 | F10 | MC unavailabilities bypass the unified resolver; per-method missing-data defaults diverge | ⚠ inconsistent | medium | `:959-1135`, `:1459-1584` vs `:2413-2428` |
-| F11 | FMEA event duration = `τ_sw + full MTTR` (switching time double-counted) | ◐ small bias | low | `:3935`, `:3943`, `:2444-2447` |
+| F11 | FMEA event duration = `τ_sw + full MTTR` (switching time double-counted) | ✓ fixed (τ_rep = MTTR − τ_sw, see §5) | — | `run_distribution_fmea` stage loop |
 | F12 | FMEA grid-forming/microgrid support modeled as an unbounded slack (rating ignored) | ⚠ over-optimistic | medium | `:3095-3118`, `:2964-2986` |
 | F13 | Single load level in NSQ & F&D (no load-duration curve) | ◐ documented | low | `:1199-1208`, `:2049` |
 | F14 | Three-stage reactive demand rebuilt from PF=0.9 (ignores `q_mvar`) | ⚠ discards data | low | `three_stage…:548` |
@@ -295,8 +295,12 @@ frequency $\lambda_k$. Two stages are evaluated by the consequence engine:
 - **Switching stage** (duration $\tau^{sw}_k$ = `switching_time_hr`, default 0.5 hr):
   fault isolated, emergency sources and islanding applied, **no** tie
   reconfiguration. Shed $S^{sw}_k$.
-- **Repair stage** (duration $\tau^{rep}_k=\text{MTTR}_k$): fault still out, plus a
-  greedy ≤2-action switch/branch reconfiguration search. Shed $S^{rep}_k$.
+- **Repair stage** (duration $\tau^{rep}_k=\text{MTTR}_k-\tau^{sw}_k$, F11 fix —
+  the event lasts MTTR in total and the two stages are disjoint windows): fault
+  still out, plus a greedy ≤2-action switch/branch reconfiguration search.
+  Shed $S^{rep}_k$. The physical repair horizon (full MTTR) is still used for
+  storage-energy feasibility; only the frequency weighting uses the stage
+  duration.
 
 Aggregation (`:3949-3976`):
 
@@ -316,11 +320,23 @@ that switching cannot restore, $S^{rep}_k\cdot\text{MTTR}_k$ is charged, which i
 physically right (contrast F7). Sorting, nodal accumulation, and CIF/CID→SAIFI
 are consistent.
 
-> ◐ **F11.** Event duration is $\tau^{sw}_k+\tau^{rep}_k=0.5+\text{MTTR}_k$, i.e.
-> the switching time is added *on top of* the full MTTR (`:3935`,`:3943`). The
-> textbook convention is switching shed for $\tau^{sw}$ then reconfigured shed for
-> $(\text{MTTR}-\tau^{sw})$. Over-counts duration by $\tau^{sw}$ (≈5% at MTTR=10h).
-> Small, but inconsistent with the three-stage convention $\tau^{rep}=\text{MTTR}-\tau^{TP}$.
+> ✓ **F11 (fixed).** The event now lasts MTTR in total: switching shed is
+> charged for $\tau^{sw}$ and reconfigured shed for
+> $\tau^{rep}=\max(0,\text{MTTR}-\tau^{sw})$ (with $\tau^{sw}$ clamped to
+> $\le$ MTTR), matching the textbook and three-stage conventions. The physical
+> repair horizon (full MTTR) is retained for storage-energy limits. Note this
+> slightly LOWERED historical FMEA EENS values (≈5% at MTTR=10 h) relative to
+> the old $\tau^{sw}+\text{MTTR}$ accounting.
+
+> **Level-1 cyber-physical conditioning (optional).** When
+> `FMEAOptions::cyber_physical.enabled` is set, every stage above is evaluated
+> per cyber class (automation available / unavailable) and mixed with the
+> scalar automation availability $A_k$; the class switching times replace
+> `switching_time_hr`, and the automation-unavailable class keeps crew-based
+> switch reconfiguration in the repair stage but freezes DER/storage/
+> grid-forming/islanding dispatch. Model, decomposition, and metric definitions:
+> [`cyber_physical_reliability_extension.md`](cyber_physical_reliability_extension.md)
+> §4.1/§6 (implemented at Level 1 for this method only).
 
 > ⚠ **F12.** Grid-forming support is modeled by promoting the device's bus to a
 > **SLACK external grid** (`mark_island_anchor:2931-2947`) which
@@ -570,8 +586,8 @@ rig (§7); the consequence-patch provenance/support-gate discipline.
    richness. DC/converter transfers remain (appropriately) transportation-bound.
 5. **F12** — cap FMEA grid-forming/microgrid support at the device rating with an
    islanded power balance, instead of a 2×demand slack.
-6. **F11/§6** — adopt one stage-duration convention
-   ($\tau^{rep}=\text{MTTR}-\tau^{sw}$) across FMEA and three-stage.
+6. **F11/§6** ✓ *done* — FMEA now uses the three-stage convention
+   ($\tau^{rep}=\text{MTTR}-\tau^{sw}$); one duration convention across methods.
 7. **F14** — use measured `q_mvar` in the three-stage MILP when available.
 8. **F15** ✓ *done* — control-unavailable / setpoint-frozen and communication-loss
    on a dispatchable converter/DER now wire into the shed engine (frozen dispatch

@@ -5219,6 +5219,12 @@ static void parse_cyber_physical_fmea_options(
   target.manual_switching_time_hr = finite_in_range(
       cyber.value("manual_switching_time_hr", 1.0), 0.0, 8760.0,
       "manual_switching_time_hr");
+  if (target.manual_switching_time_hr < target.automatic_switching_time_hr) {
+    throw std::runtime_error(
+        "cyber_physical.manual_switching_time_hr must be >= "
+        "automatic_switching_time_hr (manual restoration cannot beat "
+        "automatic restoration)");
+  }
   target.freeze_der_on_automation_loss =
       cyber.value("freeze_der_on_automation_loss", true);
   target.availability_overrides.clear();
