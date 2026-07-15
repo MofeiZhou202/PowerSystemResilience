@@ -836,7 +836,7 @@ const App = (() => {
     document.body?.setAttribute('data-active-result-group', active);
     const panel = document.getElementById('rightPanel');
     if (panel) {
-      if (active === 'transient' || active === 'modelIO' || active === 'parameterLibrary') {
+      if (active === 'transient' || active === 'modelIO' || active === 'parameterLibrary' || active === 'rpo') {
         const target = window.innerWidth <= 900 ? window.innerWidth : Math.round(Math.min(window.innerWidth * 0.66, 1180));
         const minUseful = window.innerWidth <= 900 ? window.innerWidth : Math.min(target, Math.max(560, window.innerWidth - 420));
         if (!panel.style.width || panel.offsetWidth < minUseful) {
@@ -4630,6 +4630,19 @@ const App = (() => {
     const fmt = (value, digits = 6) => Number.isFinite(Number(value))
       ? Number(value).toFixed(digits) : '—';
     const cv = data.cross_validation || {};
+    const vmBefore = Array.isArray(data.vm_before) ? data.vm_before.map(Number) : [];
+    const vmAfter = Array.isArray(data.vm_after) ? data.vm_after.map(Number) : [];
+    const qgBefore = Array.isArray(data.qg_before) ? data.qg_before.map(Number) : [];
+    const qgAfter = Array.isArray(data.qg_after) ? data.qg_after.map(Number) : [];
+    const vMin = Number.isFinite(Number(data.v_min)) ? Number(data.v_min) : 0.95;
+    const vMax = Number.isFinite(Number(data.v_max)) ? Number(data.v_max) : 1.05;
+    const violationCount = values => values.filter(v => Number.isFinite(v) && (v < vMin || v > vMax)).length;
+    const vmViolationBefore = violationCount(vmBefore);
+    const vmViolationAfter = violationCount(vmAfter);
+    const vdevBefore = Number(data.max_vdev_before);
+    const vdevAfter = Number(data.max_vdev_after);
+    const vdevReductionPct = Number.isFinite(vdevBefore) && vdevBefore > 0 && Number.isFinite(vdevAfter)
+      ? 100 * (vdevBefore - vdevAfter) / vdevBefore : NaN;
     const summary = document.getElementById('rpoSummary');
     if (summary) summary.innerHTML = `
       <div class="result-item"><span class="result-label">求解状态</span><span class="result-value ${data.converged ? 'converged' : 'failed'}">${data.converged ? '可行' : '失败'}</span></div>
@@ -4643,6 +4656,40 @@ const App = (() => {
       <div class="result-item"><span class="result-label">全过程验证</span><span class="result-value ${cv.overall_pass ? 'converged' : 'failed'}">${cv.overall_pass ? (cv.hybrid_dispatch_replay_partial ? '通过（部分覆盖）' : '通过') : '未完整通过'}</span></div>
       <div class="result-item"><span class="result-label">状态说明</span><span class="result-value">${escapeHtml(data.status || '')}</span></div>
       <div class="result-item" style="flex-basis:100%"><span class="result-label">模型口径</span><span class="result-value">${escapeHtml(data.model_statement || '')}</span></div>`;
+
+    const tapsChanged = (data.tap_pos_before || []).filter((value, i) => value !== data.tap_pos_after?.[i]).length;
+    const shuntsChanged = (data.shunt_before || []).filter((value, i) => value !== data.shunt_after?.[i]).length;
+    const pfLossBefore = Number(cv.baseline_pf_loss_mw);
+    const pfLossAfter = Number(cv.optimized_pf_loss_mw);
+    const pfLossDelta = Number.isFinite(pfLossBefore) && Number.isFinite(pfLossAfter)
+      ? pfLossAfter - pfLossBefore : NaN;
+    const impactSummary = document.getElementById('rpoImpactSummary');
+    if (impactSummary) impactSummary.innerHTML = `
+      <div class="result-item"><span class="result-label">电压越限母线</span><span class="result-value ${vmViolationAfter === 0 ? 'converged' : 'failed'}">${vmViolationBefore} → ${vmViolationAfter}</span></div>
+      <div class="result-item"><span class="result-label">最大偏差改善</span><span class="result-value">${fmt(vdevReductionPct, 2)} %</span></div>
+      <div class="result-item"><span class="result-label">PF物理网损</span><span class="result-value">${fmt(pfLossBefore)} → ${fmt(pfLossAfter)} MW</span></div>
+      <div class="result-item"><span class="result-label">PF网损变化</span><span class="result-value">${fmt(pfLossDelta)} MW</span></div>
+      <div class="result-item"><span class="result-label">OLTC动作</span><span class="result-value">${tapsChanged} / ${(data.tap_names || []).length}</span></div>
+      <div class="result-item"><span class="result-label">补偿器动作</span><span class="result-value">${shuntsChanged} / ${(data.shunt_names || []).length}</span></div>`;
+
+    const busChanges = vmAfter.map((after, i) => ({
+      category: '母线电压', name: `Bus ${i + 1}`, before: vmBefore[i], after,
+      delta: after - vmBefore[i], unit: 'pu',
+    })).filter(row => Number.isFinite(row.before) && Number.isFinite(row.after));
+    const genNames = Array.isArray(data.gen_names) ? data.gen_names : [];
+    const genChanges = qgAfter.map((after, i) => ({
+      category: '机组无功', name: genNames[i] || `Gen ${i + 1}`, before: qgBefore[i], after,
+      delta: after - qgBefore[i], unit: 'MVar',
+    })).filter(row => Number.isFinite(row.before) && Number.isFinite(row.after));
+    const topChanges = [
+      ...busChanges.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, 8),
+      ...genChanges.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, 8),
+    ];
+    const changeDiv = document.getElementById('rpoChangeResults');
+    if (changeDiv) changeDiv.innerHTML = topChanges.length
+      ? `<table><thead><tr><th>类别</th><th>对象</th><th>单位</th><th>优化前</th><th>优化后</th><th>变化量</th></tr></thead><tbody>${topChanges.map(row =>
+        `<tr><td>${row.category}</td><td>${escapeHtml(row.name)}</td><td>${row.unit}</td><td>${fmt(row.before)}</td><td>${fmt(row.after)}</td><td class="${Math.abs(row.delta) > 1e-9 ? 'converged' : ''}">${row.delta >= 0 ? '+' : ''}${fmt(row.delta)}</td></tr>`).join('')}</tbody></table>`
+      : '<p class="empty-hint">求解未返回可比较的电压或机组无功序列。</p>';
 
     const checks = [
       ['RPO内层求解', cv.rpo_converged ? 'pass' : 'fail', data.status || ''],
@@ -4689,25 +4736,61 @@ const App = (() => {
         `<tr><td>${row.type}</td><td>${escapeHtml(row.name || '')}</td><td>${row.before}</td><td>${row.after}</td><td>${fmt(row.physicalBefore)}</td><td>${fmt(row.physicalAfter)}</td><td class="${row.before === row.after ? '' : 'converged'}">${row.before === row.after ? '保持' : '调整'}</td></tr>`).join('')}</tbody></table>`
       : '<p class="empty-hint">当前系统没有可调两绕组 OLTC 或可投切并联补偿；连续OPF点仍已完成验证。</p>';
 
-    if ((data.vm_after || []).length && typeof Plotly !== 'undefined') {
-      const buses = (data.vm_before || []).map((_, i) => i + 1);
+    // Make the result tab and RPO group measurable before Plotly calculates
+    // its responsive width. Plotting into a hidden tab can produce a zero-size
+    // graph even though all result arrays are present.
+    switchTab('results');
+    if (vmAfter.length && typeof Plotly !== 'undefined') {
+      const buses = vmAfter.map((_, i) => i + 1);
+      const voltageMode = buses.length > 80 ? 'lines' : 'lines+markers';
+      const voltageLayout = marketTheme('母线电压对比（含运行上下限）', 'Vm / pu');
+      const finiteVoltages = [...vmBefore, ...vmAfter].filter(Number.isFinite);
+      voltageLayout.xaxis = { ...voltageLayout.xaxis, title: '母线编号' };
+      voltageLayout.yaxis = {
+        ...voltageLayout.yaxis,
+        rangemode: 'normal',
+        range: [
+          Math.min(vMin - 0.02, ...(finiteVoltages.length ? finiteVoltages.map(v => v - 0.01) : [vMin - 0.02])),
+          Math.max(vMax + 0.02, ...(finiteVoltages.length ? finiteVoltages.map(v => v + 0.01) : [vMax + 0.02])),
+        ],
+      };
+      voltageLayout.shapes = [vMin, vMax].map(limit => ({
+        type: 'line', xref: 'paper', x0: 0, x1: 1, y0: limit, y1: limit,
+        line: { color: '#e39b36', width: 1, dash: 'dash' },
+      }));
       Plotly.react('rpoVoltageChart', [
-        { x: buses, y: data.vm_before || [], type: 'scatter', mode: 'lines+markers', name: '优化前' },
-        { x: buses, y: data.vm_after || [], type: 'scatter', mode: 'lines+markers', name: '优化后' },
-      ], marketTheme('母线电压对比', 'Vm / pu'), { responsive: true, displayModeBar: false });
-      const gens = data.gen_names || (data.qg_before || []).map((_, i) => `Gen ${i + 1}`);
-      Plotly.react('rpoReactiveChart', [
-        { x: gens, y: data.qg_before || [], type: 'bar', name: '优化前' },
-        { x: gens, y: data.qg_after || [], type: 'bar', name: '优化后' },
-      ], { ...marketTheme('机组无功对比', 'Qg / MVar'), barmode: 'group' },
-      { responsive: true, displayModeBar: false });
-    } else if (!(data.vm_after || []).length) {
+        { x: buses, y: vmBefore, type: buses.length > 500 ? 'scattergl' : 'scatter', mode: voltageMode, name: '优化前', hovertemplate: 'Bus %{x}<br>Vm=%{y:.6f} pu<extra>优化前</extra>' },
+        { x: buses, y: vmAfter, type: buses.length > 500 ? 'scattergl' : 'scatter', mode: voltageMode, name: '优化后', hovertemplate: 'Bus %{x}<br>Vm=%{y:.6f} pu<extra>优化后</extra>' },
+      ], voltageLayout, { responsive: true, displayModeBar: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d', 'select2d'] });
+      const shownGenerators = genChanges.slice().sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, 15).reverse();
+      const reactiveChart = document.getElementById('rpoReactiveChart');
+      if (shownGenerators.length) {
+        const reactiveLayout = marketTheme('无功调整量最大的机组（Top 15）', '');
+        reactiveLayout.xaxis = { ...reactiveLayout.xaxis, title: 'ΔQg / MVar', zeroline: true };
+        reactiveLayout.yaxis = { ...reactiveLayout.yaxis, title: '机组', rangemode: 'normal', automargin: true };
+        reactiveLayout.margin = { ...reactiveLayout.margin, l: 110 };
+        reactiveLayout.showlegend = false;
+        Plotly.react('rpoReactiveChart', [{
+          x: shownGenerators.map(row => row.delta), y: shownGenerators.map(row => row.name),
+          type: 'bar', orientation: 'h', name: 'ΔQg',
+          marker: { color: shownGenerators.map(row => row.delta >= 0 ? '#2fbf9f' : '#e36c6c') },
+          hovertemplate: '%{y}<br>ΔQg=%{x:.6f} MVar<extra></extra>',
+        }], reactiveLayout,
+        { responsive: true, displayModeBar: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d', 'select2d'] });
+      } else if (reactiveChart) {
+        reactiveChart.innerHTML = '<p class="empty-hint">当前结果没有可比较的机组无功数据。</p>';
+      }
+    } else if (vmAfter.length) {
+      const voltageChart = document.getElementById('rpoVoltageChart');
+      const reactiveChart = document.getElementById('rpoReactiveChart');
+      if (voltageChart) voltageChart.innerHTML = '<p class="empty-hint">图形库未加载；完整数值结果已在“优化效果与关键变化”表中展示。</p>';
+      if (reactiveChart) reactiveChart.innerHTML = '<p class="empty-hint">图形库未加载；机组无功变化已在上方表格中展示。</p>';
+    } else {
       const voltageChart = document.getElementById('rpoVoltageChart');
       const reactiveChart = document.getElementById('rpoReactiveChart');
       if (voltageChart) voltageChart.innerHTML = '<p class="empty-hint">无可显示的母线电压结果；请查看上方求解状态和失败原因。</p>';
       if (reactiveChart) reactiveChart.innerHTML = '<p class="empty-hint">无可显示的机组无功结果；请查看上方求解状态和失败原因。</p>';
     }
-    switchTab('results');
   }
 
   async function runRpo() {

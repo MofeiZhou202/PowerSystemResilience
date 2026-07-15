@@ -633,6 +633,7 @@ select:focus-visible, .btn:focus-visible, button:focus-visible, [role="button"]:
 body[data-active-result-group="transient"] #rightPanel,
 body[data-active-result-group="modelIO"] #rightPanel,
 body[data-active-result-group="evTraffic"] #rightPanel,
+body[data-active-result-group="rpo"] #rightPanel,
 body[data-active-result-group="parameterLibrary"] #rightPanel {
   width: clamp(760px, 66vw, 1180px);
   min-width: min(760px, calc(100vw - var(--lib-w) - 220px));
@@ -1163,6 +1164,7 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
 .result-group { display: none; }
 #resultsContent[data-active-group="powerFlow"]    .result-group[data-result-group="powerFlow"],
 #resultsContent[data-active-group="opf"]          .result-group[data-result-group="opf"],
+#resultsContent[data-active-group="rpo"]          .result-group[data-result-group="rpo"],
 #resultsContent[data-active-group="carbonFlow"]   .result-group[data-result-group="carbonFlow"],
 #resultsContent[data-active-group="shortCircuit"] .result-group[data-result-group="shortCircuit"],
 #resultsContent[data-active-group="harmonics"]    .result-group[data-result-group="harmonics"],
@@ -1181,6 +1183,16 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
 #resultsContent[data-active-group="resilience"]   .result-group[data-result-group="resilience"],
 #resultsContent[data-active-group="weakLinks"]    .result-group[data-result-group="weakLinks"] {
   display: block;
+}
+
+/* RPO needs enough horizontal space for before/after charts and audit tables. */
+body[data-active-result-group="rpo"] .result-group[data-result-group="rpo"] .topo-table-wrap {
+  max-height: 280px;
+}
+body[data-active-result-group="rpo"] #rpoChangeResults td:nth-child(n+4),
+body[data-active-result-group="rpo"] #rpoChangeResults th:nth-child(n+4) {
+  text-align: right;
+  font-family: "IBM Plex Mono", monospace;
 }
 
 .weak-mode-segmented {
@@ -1982,6 +1994,7 @@ body[data-active-result-group="parameterLibrary"] .result-group[data-result-grou
   body[data-active-result-group="transient"] #rightPanel,
   body[data-active-result-group="modelIO"] #rightPanel,
   body[data-active-result-group="evTraffic"] #rightPanel,
+  body[data-active-result-group="rpo"] #rightPanel,
   body[data-active-result-group="parameterLibrary"] #rightPanel {
     width: 100vw;
     min-width: 0;
@@ -1990,13 +2003,16 @@ body[data-active-result-group="parameterLibrary"] .result-group[data-result-grou
   body[data-active-result-group="transient"] #componentLib,
   body[data-active-result-group="modelIO"] #componentLib,
   body[data-active-result-group="evTraffic"] #componentLib,
+  body[data-active-result-group="rpo"] #componentLib,
   body[data-active-result-group="parameterLibrary"] #componentLib,
   body[data-active-result-group="transient"] #canvasContainer,
   body[data-active-result-group="modelIO"] #canvasContainer,
   body[data-active-result-group="evTraffic"] #canvasContainer,
+  body[data-active-result-group="rpo"] #canvasContainer,
   body[data-active-result-group="parameterLibrary"] #canvasContainer,
   body[data-active-result-group="transient"] #rightPanelResizer,
-  body[data-active-result-group="evTraffic"] #rightPanelResizer {
+  body[data-active-result-group="evTraffic"] #rightPanelResizer,
+  body[data-active-result-group="rpo"] #rightPanelResizer {
     display: none;
   }
   body[data-active-result-group="modelIO"] #rightPanelResizer {

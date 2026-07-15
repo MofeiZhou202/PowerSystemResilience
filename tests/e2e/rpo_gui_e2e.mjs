@@ -52,7 +52,7 @@ async function main() {
     page.on('pageerror', error => errors.push(error.message));
     await page.route('https://cdn.plot.ly/**', route => route.fulfill({
       contentType: 'application/javascript',
-      body: `window.Plotly={react:(t)=>{const e=typeof t==='string'?document.getElementById(t):t;e?.classList.add('js-plotly-plot');},purge:()=>{},Plots:{resize(){}}};`,
+      body: `window.Plotly={react:(t)=>{const e=typeof t==='string'?document.getElementById(t):t;if(e){e.classList.add('js-plotly-plot');e.innerHTML='<svg data-plotly-offline-smoke="1" width="100%" height="100%"></svg>';}return Promise.resolve();},purge:()=>{},Plots:{resize(){}}};`,
     }));
     await page.goto(`${base}/xjtu/`, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForFunction(() => typeof App !== 'undefined');
@@ -80,8 +80,14 @@ async function main() {
     await page.waitForFunction(() =>
       document.querySelector('#resultsContent')?.dataset.activeGroup === 'rpo' &&
       document.getElementById('rpoSummary')?.textContent?.includes('局部可行解') &&
+      document.getElementById('rpoImpactSummary')?.textContent?.includes('电压越限母线') &&
       document.getElementById('rpoCoverageResults')?.textContent?.includes('交流母线') &&
       document.getElementById('rpoCrossValidation')?.textContent?.includes('独立OPF重算'));
+    if (!await page.locator('[data-result-group="rpo"]').isVisible() ||
+        !await page.locator('#rpoVoltageChart').isVisible() ||
+        !await page.locator('#rpoChangeResults table').isVisible()) {
+      throw new Error('RPO result group contains data but is not visibly rendered');
+    }
 
     // Large hybrid regression: case300 previously returned empty Vm/Qg arrays
     // after an unseeded Ipopt step-computation failure, leaving both charts
@@ -109,9 +115,34 @@ async function main() {
     await page.waitForFunction(() =>
       document.querySelector('#resultsContent')?.dataset.activeGroup === 'rpo' &&
       document.getElementById('rpoSummary')?.textContent?.includes('通过（部分覆盖）') &&
+      document.getElementById('rpoChangeResults')?.textContent?.includes('母线电压') &&
+      document.getElementById('rpoChangeResults')?.textContent?.includes('机组无功') &&
       document.getElementById('rpoCrossValidation')?.textContent?.includes('部分覆盖') &&
       document.getElementById('rpoVoltageChart')?.classList.contains('js-plotly-plot') &&
       document.getElementById('rpoReactiveChart')?.classList.contains('js-plotly-plot'));
+    const visibleResult = await page.evaluate(() => {
+      const inspect = id => {
+        const element = document.querySelector(id);
+        const rect = element?.getBoundingClientRect();
+        return {
+          width: rect?.width || 0,
+          height: rect?.height || 0,
+          display: element ? getComputedStyle(element).display : 'missing',
+          hasDrawing: !!element?.querySelector('svg, canvas'),
+        };
+      };
+      return {
+        group: inspect('[data-result-group="rpo"]'),
+        voltage: inspect('#rpoVoltageChart'),
+        reactive: inspect('#rpoReactiveChart'),
+      };
+    });
+    if (visibleResult.group.display === 'none' ||
+        visibleResult.voltage.width < 100 || visibleResult.voltage.height < 100 ||
+        visibleResult.reactive.width < 100 || visibleResult.reactive.height < 100 ||
+        !visibleResult.voltage.hasDrawing || !visibleResult.reactive.hasDrawing) {
+      throw new Error(`case300 RPO plots are not measurably visible: ${JSON.stringify(visibleResult)}`);
+    }
     if (errors.length) throw new Error(`browser errors: ${errors.join(' | ')}`);
     console.log(`RPO GUI passed: case9=${result.cross_validation.overall_pass}, case300=${case300.cross_validation.validation_summary}`);
   } finally {
