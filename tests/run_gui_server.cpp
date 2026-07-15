@@ -5904,6 +5904,31 @@ void opf_require_aligned(const char* helper, const char* field,
   }
 }
 
+json opf_ipm_profiling_json(const hacdcpf::opf::ACOPFResult& r) {
+  return json{{"warm_start_used", r.profiling.warm_start_used},
+              {"initial_primal_residual", r.profiling.initial_primal_residual},
+              {"initial_dual_residual", r.profiling.initial_dual_residual},
+              {"symbolic_analyze_calls", r.profiling.analyze_calls},
+              {"factorization_calls", r.profiling.factorization_calls},
+              {"linear_solve_calls", r.profiling.linear_solve_calls},
+              {"accepted_steps", r.profiling.accepted_steps},
+              {"rejected_steps", r.profiling.rejected_steps},
+              {"backend_escalations", r.profiling.backend_escalations},
+              {"scaling_rebuilds", r.profiling.scaling_rebuilds},
+              {"max_ac_p_balance_residual_pu",
+               r.profiling.max_ac_p_balance_residual_pu},
+              {"max_ac_q_balance_residual_pu",
+               r.profiling.max_ac_q_balance_residual_pu},
+              {"max_dc_balance_residual_pu",
+               r.profiling.max_dc_balance_residual_pu},
+              {"max_converter_balance_residual_pu",
+               r.profiling.max_converter_balance_residual_pu},
+              {"max_other_equality_residual_pu",
+               r.profiling.max_other_equality_residual_pu},
+              {"max_nonlinear_inequality_violation_pu",
+               r.profiling.max_nonlinear_inequality_violation_pu}};
+}
+
 json opf_ac_bus_results_json(const hacdcpf::HybridPowerSystem& sys,
                              const std::vector<double>& vm,
                              const std::vector<double>& va,
@@ -13310,6 +13335,7 @@ int main(int argc, char** argv) {
         // Report the engine that actually ran (e.g. parity_ipm:sparse_umfpack
         // or ipopt_filter_linesearch) so the GUI can show the realized backend.
         out["solver_backend"]=r.profiling.linear_solver_backend;
+        out["ipm_profiling"] = opf_ipm_profiling_json(r);
         out["solver_path"]=(r.solver_path==hacdcpf::opf::OPFSolverPath::ParityIPM)?"parity":
                            (r.solver_path==hacdcpf::opf::OPFSolverPath::NativeAC)?"native_ac":"other";
 	        out["vm"]=r.vm; out["va"]=r.va; out["pg_mw"]=r.pg_mw; out["qg_mvar"]=r.qg_mvar;
@@ -13955,6 +13981,7 @@ int main(int argc, char** argv) {
       out["converged"]=r.converged; out["iterations"]=r.iterations;
       out["objective"]=r.objective; out["status"]=r.status;
       out["solver_backend"]=r.profiling.linear_solver_backend;
+      out["ipm_profiling"] = opf_ipm_profiling_json(r);
       out["vm"]=r.vm; out["va"]=r.va; out["pg_mw"]=r.pg_mw; out["qg_mvar"]=r.qg_mvar;
       out["vdc"]=r.vdc; out["pac_mw"]=r.pac_mw; out["qac_mvar"]=r.qac_mvar;
       if (!r.lmp_p.empty()) out["lmp_p"]=r.lmp_p;

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <exception>
 #include <functional>
 #include <future>
 #include <mutex>
@@ -89,13 +90,24 @@ class ThreadPool {
       futures.push_back(submit([&body, begin, end]() { body(begin, end); }));
     }
 
-    // Chunk 0 runs on the caller.
+    std::exception_ptr first_error;
+    // Chunk 0 runs on the caller.  Preserve its exception but still join every
+    // submitted task before local captures (`body`, chunk state) are destroyed.
     const size_t end0 = count / static_cast<size_t>(num_tasks);
-    body(0, end0);
+    try {
+      body(0, end0);
+    } catch (...) {
+      first_error = std::current_exception();
+    }
 
     for (auto& f : futures) {
-      f.get();
+      try {
+        f.get();
+      } catch (...) {
+        if (!first_error) first_error = std::current_exception();
+      }
     }
+    if (first_error) std::rethrow_exception(first_error);
   }
 
   /// Execute one work item at a time using an atomic cursor.  This is better
@@ -113,11 +125,17 @@ class ThreadPool {
     }
 
     std::atomic<size_t> next{0};
+    std::atomic<bool> cancel{false};
     auto run_worker = [&]() {
-      while (true) {
+      while (!cancel.load(std::memory_order_relaxed)) {
         const size_t i = next.fetch_add(1, std::memory_order_relaxed);
         if (i >= count) break;
-        body(i);
+        try {
+          body(i);
+        } catch (...) {
+          cancel.store(true, std::memory_order_relaxed);
+          throw;
+        }
       }
     };
 
@@ -126,10 +144,20 @@ class ThreadPool {
     for (int t = 1; t < num_tasks; ++t) {
       futures.push_back(submit(run_worker));
     }
-    run_worker();
-    for (auto& f : futures) {
-      f.get();
+    std::exception_ptr first_error;
+    try {
+      run_worker();
+    } catch (...) {
+      first_error = std::current_exception();
     }
+    for (auto& f : futures) {
+      try {
+        f.get();
+      } catch (...) {
+        if (!first_error) first_error = std::current_exception();
+      }
+    }
+    if (first_error) std::rethrow_exception(first_error);
   }
 
   /// Process-wide singleton (lazy, thread-safe).

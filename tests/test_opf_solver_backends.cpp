@@ -9,6 +9,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <cstdlib>
 #include <cmath>
 #include <string>
@@ -88,11 +89,83 @@ TEST_CASE("AC OPF converges on internal hybrid case300_acdc", "[opf][acdc]") {
   INFO("iterations=" << r.iterations
        << " max_constraint_violation=" << r.max_constraint_violation
        << " max_stationarity=" << r.max_stationarity
-       << " linear_solver=" << r.profiling.linear_solver_backend);
+       << " linear_solver=" << r.profiling.linear_solver_backend
+       << " factorization_calls=" << r.profiling.factorization_calls
+       << " linear_solve_calls=" << r.profiling.linear_solve_calls
+       << " accepted_steps=" << r.profiling.accepted_steps
+       << " rejected_steps=" << r.profiling.rejected_steps);
   CHECK(r.converged);
   CHECK(r.solver_path == opf::OPFSolverPath::ParityIPM);
   CHECK(r.objective > 0.0);
   CHECK_FALSE(r.vm.empty());
+  CHECK(r.profiling.accepted_steps > 0);
+  CHECK(r.profiling.accepted_steps <= r.iterations);
+  CHECK(r.profiling.rejected_steps > 0);
+}
+
+TEST_CASE("case300_acdc forwards iteration and tolerance options to Ipopt",
+          "[opf][acdc][ipopt][options]") {
+  const HybridPowerSystem sys = io::build_case300_acdc();
+
+  opf::ACOPFOptions capped_options;
+  capped_options.ac_solver_backend = opf::ACOPFSolverBackend::Ipopt;
+  capped_options.max_inner_iterations = 1;
+  capped_options.max_outer_iterations = 1;
+  capped_options.allow_fallback = false;
+  capped_options.feasibility_tol = 1e-7;
+  capped_options.stationarity_tol = 1e-7;
+  capped_options.barrier_mu_min = 1e-9;
+  const opf::ACOPFResult capped = opf::solve_ac_opf(sys, capped_options);
+
+  INFO("capped status=" << capped.status
+       << " iterations=" << capped.iterations
+       << " primal=" << capped.max_constraint_violation
+       << " dual=" << capped.max_stationarity);
+  CHECK_FALSE(capped.converged);
+  CHECK(capped.iterations <= 2);
+  CHECK(capped.status.find("Max iterations exceeded") != std::string::npos);
+
+  opf::ACOPFOptions full_options = capped_options;
+  full_options.max_inner_iterations = 800;
+  full_options.stationarity_tol = 1e-3;
+  const opf::ACOPFResult full = opf::solve_ac_opf(sys, full_options);
+  INFO("full status=" << full.status
+       << " iterations=" << full.iterations
+       << " primal=" << full.max_constraint_violation
+       << " dual=" << full.max_stationarity);
+  REQUIRE(full.converged);
+  CHECK(full.iterations > capped.iterations);
+  CHECK(full.iterations <= full_options.max_inner_iterations + 1);
+  CHECK(full.max_constraint_violation < 1e-6);
+  CHECK(full.max_stationarity < full_options.stationarity_tol);
+}
+
+TEST_CASE("case300_acdc reuses a compatible primal OPF warm start",
+          "[opf][acdc][warm-start][performance]") {
+  HybridPowerSystem sys = io::build_case300_acdc();
+
+  opf::ACOPFOptions cold_options;
+  cold_options.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  cold_options.max_inner_iterations = 200;
+  const opf::ACOPFResult cold = opf::solve_ac_opf(sys, cold_options);
+  REQUIRE(cold.converged);
+  REQUIRE_FALSE(cold.profiling.warm_start_used);
+
+  opf::ACOPFOptions warm_options = cold_options;
+  warm_options.warm_start = &cold;
+  const opf::ACOPFResult warm = opf::solve_ac_opf(sys, warm_options);
+
+  INFO("cold iterations=" << cold.iterations
+       << " initial_primal=" << cold.profiling.initial_primal_residual);
+  INFO("warm iterations=" << warm.iterations
+       << " initial_primal=" << warm.profiling.initial_primal_residual);
+  REQUIRE(warm.converged);
+  CHECK(warm.profiling.warm_start_used);
+  CHECK(warm.profiling.initial_primal_residual <=
+        cold.profiling.initial_primal_residual + 1e-10);
+  CHECK(warm.iterations <= cold.iterations);
+  CHECK(std::abs(warm.objective - cold.objective) <=
+        1e-5 * std::max(1.0, std::abs(cold.objective)));
 }
 
 TEST_CASE("Hybrid microgrid OPF fixes DC reference voltage and balances DC generation",
@@ -186,12 +259,56 @@ TEST_CASE("AC OPF converges on internal hybrid case2000_acdc", "[opf][acdc]") {
   opf::ACOPFOptions opt;
   opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
   opt.max_inner_iterations = 400;
+  const auto started = std::chrono::steady_clock::now();
   const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+  const double elapsed_sec = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - started).count();
 
   // Gradient-based objective scaling is what lets a ~2000-bus hybrid system
   // converge in the native IPM (it stalled before the scaling fix).
+  INFO("case2000 native IPM: buses=" << sys.ac.buses.size()
+       << " vsc=" << sys.vsc_converters.size()
+       << " iterations=" << r.iterations
+       << " elapsed_sec=" << elapsed_sec
+       << " factorization_calls=" << r.profiling.factorization_calls
+       << " linear_solve_calls=" << r.profiling.linear_solve_calls
+       << " primal=" << r.max_constraint_violation
+       << " dual=" << r.max_stationarity
+       << " backend=" << r.profiling.linear_solver_backend);
   CHECK(r.converged);
   CHECK(r.objective > 0.0);
+  CHECK(r.max_constraint_violation < 1e-5);
+}
+
+TEST_CASE("case2000 AC/DC Ipopt bounded performance benchmark",
+          "[.performance][opf][acdc][ipopt][case2000]") {
+  const HybridPowerSystem sys = io::build_case2000_acdc();
+  REQUIRE(sys.ac.buses.size() == 2000);
+
+  opf::ACOPFOptions opt;
+  opt.ac_solver_backend = opf::ACOPFSolverBackend::Ipopt;
+  opt.max_inner_iterations = 100;
+  opt.max_outer_iterations = 1;
+  opt.allow_fallback = false;
+  opt.feasibility_tol = 1e-6;
+  opt.stationarity_tol = 1e-3;
+  opt.barrier_mu_min = 1e-8;
+
+  const auto started = std::chrono::steady_clock::now();
+  const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+  const double elapsed_sec = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - started).count();
+
+  INFO("case2000 Ipopt: converged=" << r.converged
+       << " iterations=" << r.iterations
+       << " elapsed_sec=" << elapsed_sec
+       << " primal=" << r.max_constraint_violation
+       << " dual=" << r.max_stationarity
+       << " status=" << r.status);
+  CHECK(r.iterations <= opt.max_inner_iterations + 1);
+  CHECK(std::isfinite(r.objective));
+  CHECK(std::isfinite(r.max_constraint_violation));
+  CHECK(std::isfinite(r.max_stationarity));
 }
 
 // ── Objective-scaling regression guard ───────────────────────────────────────

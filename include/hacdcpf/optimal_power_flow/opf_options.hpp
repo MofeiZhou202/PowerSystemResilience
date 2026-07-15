@@ -9,6 +9,8 @@
 
 namespace hacdcpf::opf {
 
+struct ACOPFResult;
+
 // ═══════════════════════════════════════════════════════════════════════
 // AC OPF Solver Backend
 // ═══════════════════════════════════════════════════════════════════════
@@ -76,6 +78,12 @@ struct ACOPFOptions {
   bool use_parity_ipm{false};
   bool allow_fallback{true};
   bool verbose{false};
+
+  /// Optional non-owning warm start from a previous compatible OPF solve.
+  /// The pointed result must remain alive until solve_ac_opf() returns.  Each
+  /// variable family is mapped independently; incompatible/missing families
+  /// fall back to the normal physics-informed initial point.
+  const ACOPFResult* warm_start{nullptr};
 
   // Constraint-family toggles for the hybrid parity-IPM formulation
   // (multi-converter model §3.1).  Default true keeps the always-enforce

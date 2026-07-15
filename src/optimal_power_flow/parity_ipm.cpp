@@ -125,6 +125,9 @@ struct SparseKKTCache {
   int pat_nnz{-1};
   bool factored{false};
   bool solve_degraded{false};  ///< last solve was inaccurate → escalate backend
+  int symbolic_analyze_calls{0};
+  int backend_escalations{0};
+  int scaling_rebuilds{0};
   int nn{0};
   int meq{0};
 };
@@ -180,6 +183,7 @@ std::vector<int> backend_order(SparseBackend pref) {
 // Numeric factorization for the active backend; analyzes the pattern only when
 // it has changed (first call or a genuine pattern change).
 bool sparse_factorize_active(SparseKKTCache& cache, bool pattern_changed) {
+  if (pattern_changed) ++cache.symbolic_analyze_calls;
   switch (cache.active) {
 #if defined(HACDCPF_OPF_HAVE_UMFPACK)
     case 1:
@@ -292,6 +296,7 @@ bool factor_kkt_sparse(SparseKKTCache& cache,
   // Equilibrate: replace K with D·K·D so the factorization sees a balanced
   // matrix.  The scaling is undone around each solve (see kkt_solve_sparse).
   cache.scale = compute_ruiz_scaling(cache.kkt);
+  ++cache.scaling_rebuilds;
   for (int col = 0; col < cache.kkt.outerSize(); ++col) {
     for (Eigen::SparseMatrix<double>::InnerIterator it(cache.kkt, col); it; ++it) {
       it.valueRef() *= cache.scale[it.row()] * cache.scale[it.col()];
@@ -309,6 +314,7 @@ bool factor_kkt_sparse(SparseKKTCache& cache,
     const auto it = std::find(order.begin(), order.end(), cache.active);
     if (it != order.end() && std::next(it) != order.end()) {
       cache.active = *std::next(it);
+      ++cache.backend_escalations;
     }
     cache.solve_degraded = false;
   }
@@ -532,7 +538,29 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   Eigen::VectorXd xmax;
   Eigen::VectorXd x;
   build_variable_bounds(prob, xmin, xmax);
-  build_initial_point(prob, xmin, xmax, x);
+  bool warm_start_used = false;
+  if (opt.primal_start != nullptr && opt.primal_start->size() == n &&
+      opt.primal_start->allFinite()) {
+    x = *opt.primal_start;
+    // Keep a very small interior margin.  A previous optimum often lies on an
+    // active bound; moving it by 1% would discard most warm-start benefit.
+    for (int i = 0; i < n; ++i) {
+      const double lo = xmin[i];
+      const double hi = xmax[i];
+      if (std::isfinite(lo) && std::isfinite(hi)) {
+        const double width = std::max(0.0, hi - lo);
+        const double eps = std::min(1e-6 * std::max(1.0, width), 0.49 * width);
+        x[i] = std::clamp(x[i], lo + eps, hi - eps);
+      } else if (std::isfinite(lo)) {
+        x[i] = std::max(x[i], lo + 1e-8);
+      } else if (std::isfinite(hi)) {
+        x[i] = std::min(x[i], hi - 1e-8);
+      }
+    }
+    warm_start_used = true;
+  } else {
+    build_initial_point(prob, xmin, xmax, x);
+  }
 
   // Identify finite-bound variable indices
   std::vector<int> lb_cols;
@@ -557,22 +585,42 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     throw std::runtime_error("solve_primal_dual_ipm: no inequality constraints assembled.");
   }
 
-  // Slack initialization: use a larger minimum floor (1.0) to ensure
-  // well-conditioned condensed KKT from the start.
-  // This creates initial artificial infeasibility (h + z ≠ 0) but gives
-  // max(σ)/min(σ) ≈ 100 instead of 10^6, enabling accurate Newton steps.
+  const bool compatible_dual_start =
+      warm_start_used && opt.equality_dual_start != nullptr &&
+      opt.inequality_dual_start != nullptr && opt.slack_start != nullptr &&
+      opt.equality_dual_start->size() == meq &&
+      opt.inequality_dual_start->size() == niq &&
+      opt.slack_start->size() == niq &&
+      opt.equality_dual_start->allFinite() &&
+      opt.inequality_dual_start->allFinite() && opt.slack_start->allFinite() &&
+      opt.inequality_dual_start->minCoeff() > 0.0 &&
+      opt.slack_start->minCoeff() > 0.0;
+
+  // Slack initialization: use a larger minimum floor (1.0) to ensure a
+  // well-conditioned condensed KKT from a cold start.  A compatible warm
+  // start instead preserves the previous central-path state.
   Eigen::VectorXd z(niq);
-  for (int i = 0; i < niq; ++i) {
-    z[i] = (rh[i] >= 0.0) ? std::max(rh[i], 1.0) : std::max(-rh[i], 1e-2);
+  if (compatible_dual_start) {
+    z = *opt.slack_start;
+  } else {
+    for (int i = 0; i < niq; ++i) {
+      z[i] = (rh[i] >= 0.0) ? std::max(rh[i], 1.0) : std::max(-rh[i], 1e-2);
+    }
   }
 
   // Multiplier initialization: μ_i ≈ 1/z_i to maintain μ·z ≈ 1
   Eigen::VectorXd mu(niq);
-  for (int i = 0; i < niq; ++i) {
-    mu[i] = std::max(1.0 / z[i], 1e-2);
+  if (compatible_dual_start) {
+    mu = *opt.inequality_dual_start;
+  } else {
+    for (int i = 0; i < niq; ++i) {
+      mu[i] = std::max(1.0 / z[i], 1e-2);
+    }
   }
 
-  Eigen::VectorXd lambda = Eigen::VectorXd::Zero(meq);
+  Eigen::VectorXd lambda = compatible_dual_start
+                               ? *opt.equality_dual_start
+                               : Eigen::VectorXd::Zero(meq);
 
   const double tau = opt.alpha_max;  // fraction-to-boundary factor
 
@@ -667,6 +715,10 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
 
   IPMResult out;
   out.status = "maximum iterations reached";
+  out.warm_start_used = warm_start_used;
+  out.initial_primal_inf = feascond;
+  out.initial_dual_inf = gradcond;
+  out.initial_complementarity = compcond;
 
   // Best-iterate tracking: store the iterate with the smallest max(feas, grad, comp).
   // For oscillating problems on constraint boundaries, the best iterate may satisfy
@@ -706,6 +758,7 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   auto factor_kkt = [&](const Eigen::SparseMatrix<double>& w,
                         const Eigen::SparseMatrix<double>& jg_mat,
                         double reg) -> bool {
+    ++out.factorization_calls;
     if (use_dense) {
       return factor_kkt_dense(dense_cache, w, jg_mat, reg);
     }
@@ -714,6 +767,7 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   auto solve_kkt = [&](const Eigen::VectorXd& rhs,
                        Eigen::VectorXd& dx_out,
                        Eigen::VectorXd& dlambda_out) -> bool {
+    ++out.linear_solve_calls;
     if (use_dense) {
       return kkt_solve_dense(dense_cache, rhs, dx_out, dlambda_out);
     }
@@ -905,34 +959,106 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     }
 
     // ────────────────────────────────────────────────────────────────
-    // Accept step (no line search)
+    // Residual filter line search
     // ────────────────────────────────────────────────────────────────
-    x += alpha_p * dx;
-    z += alpha_p * dz;
-    mu += alpha_d * dmu;
-    lambda += alpha_d * dlambda;
+    // A full nonlinear OPF Newton step is not globally convergent.  The former
+    // unconditional update allowed a locally accurate KKT step to increase the
+    // nonlinear AC/DC residual repeatedly until the condensed KKT became
+    // singular (case300_acdc typically failed around iteration 700).  Evaluate
+    // the actual nonlinear residuals and accept a trial when it improves at
+    // least one filter axis without materially degrading the others.
+    constexpr int kMaxBacktracks = 14;
+    constexpr double kBacktrack = 0.5;
+    constexpr double kFilterEta = 1e-4;
+    // Small OPFs historically converge reliably with the undamped
+    // predictor-corrector step and can require a temporary increase in all
+    // three filter axes.  Enable the more expensive globalization where the
+    // KKT is large enough for that undamped behavior to become brittle.
+    constexpr int kLargeKktFilterThreshold = 512;
+    const bool use_residual_filter = kkt_dim >= kLargeKktFilterThreshold;
+    bool step_accepted = false;
+    Eigen::VectorXd x_trial, z_trial, mu_trial, lambda_trial;
+    Eigen::VectorXd rg_trial, rh_trial, grad_trial, hdiag_trial, Lx_trial;
+    Eigen::SparseMatrix<double> jg_trial, dh_trial;
+    double obj_trial = obj;
+    double feas_trial = feascond;
+    double grad_trial_cond = gradcond;
+    double comp_trial = compcond;
+    double cost_trial = costcond;
 
-    // Safeguard positivity
-    z = z.cwiseMax(1e-12);
-    mu = mu.cwiseMax(1e-12);
+    for (int bt = 0; bt <= kMaxBacktracks; ++bt) {
+      x_trial = x + alpha_p * dx;
+      z_trial = (z + alpha_p * dz).cwiseMax(1e-12);
+      mu_trial = (mu + alpha_d * dmu).cwiseMax(1e-12);
+      lambda_trial = lambda + alpha_d * dlambda;
+      if (!x_trial.allFinite() || !z_trial.allFinite() ||
+          !mu_trial.allFinite() || !lambda_trial.allFinite()) {
+        alpha_p *= kBacktrack;
+        alpha_d *= kBacktrack;
+        continue;
+      }
 
-    if (!x.allFinite()) {
-      out.status = "NaN in x after step";
+      obj_trial = obj_scale * objective(prob, x_trial);
+      equality_constraints(prob, x_trial, eq_ws, rg_trial);
+      equality_jacobian(prob, x_trial, eq_ws, jg_trial);
+      assemble_inequalities(prob, x_trial, xmin, xmax, lb_cols, ub_cols,
+                            rh_trial, dh_trial);
+      objective_gradient_hessian_diag(prob, x_trial, grad_trial, hdiag_trial);
+      Lx_trial = obj_scale * grad_trial + jg_trial.transpose() * lambda_trial +
+                 dh_trial.transpose() * mu_trial;
+      std::tie(feas_trial, grad_trial_cond, comp_trial, cost_trial) =
+          compute_convergence(x_trial, z_trial, lambda_trial, mu_trial,
+                              rg_trial, rh_trial, Lx_trial, obj_trial);
+
+      const double ap_progress = kFilterEta * std::max(alpha_p, 1e-8);
+      const double ad_progress = kFilterEta * std::max(alpha_d, 1e-8);
+      const double feas_guard = std::max(10.0 * feas_tol, 1.02 * feascond);
+      const double grad_guard = std::max(10.0 * opt.tol_dual, 1.02 * gradcond);
+      const bool feasibility_progress =
+          feas_trial <= (1.0 - ap_progress) * feascond;
+      const bool stationarity_progress =
+          feas_trial <= feas_guard &&
+          grad_trial_cond <= (1.0 - ad_progress) * gradcond;
+      const bool complementarity_progress =
+          feas_trial <= feas_guard && grad_trial_cond <= grad_guard &&
+          comp_trial <= (1.0 - ad_progress) * compcond;
+      if (!use_residual_filter || feasibility_progress || stationarity_progress ||
+          complementarity_progress) {
+        step_accepted = true;
+        ++out.accepted_steps;
+        break;
+      }
+      ++out.rejected_steps;
+      alpha_p *= kBacktrack;
+      alpha_d *= kBacktrack;
+    }
+
+    if (!step_accepted) {
+      out.status = "filter line search failed";
       break;
     }
 
-    // Re-evaluate functions and derivatives
-    obj = obj_scale * objective(prob, x);
-    equality_constraints(prob, x, eq_ws, rg);
-    equality_jacobian(prob, x, eq_ws, jg);
-    assemble_inequalities(prob, x, xmin, xmax, lb_cols, ub_cols, rh, dh);
-    objective_gradient_hessian_diag(prob, x, grad, hdiag);
-    Lx = obj_scale * grad + jg.transpose() * lambda + dh.transpose() * mu;
+    x = std::move(x_trial);
+    z = std::move(z_trial);
+    mu = std::move(mu_trial);
+    lambda = std::move(lambda_trial);
+    rg = std::move(rg_trial);
+    rh = std::move(rh_trial);
+    grad = std::move(grad_trial);
+    hdiag = std::move(hdiag_trial);
+    Lx = std::move(Lx_trial);
+    jg = std::move(jg_trial);
+    dh = std::move(dh_trial);
+    obj = obj_trial;
+
+    // Rebuild curvature at the accepted point.
     lagrangian_hessian(prob, x, lambda, get_nu_ptr(mu), Lxx, 1e-12);
     apply_obj_scale_hessian(Lxx, hdiag);
 
-    std::tie(feascond, gradcond, compcond, costcond) =
-        compute_convergence(x, z, lambda, mu, rg, rh, Lx, obj);
+    feascond = feas_trial;
+    gradcond = grad_trial_cond;
+    compcond = comp_trial;
+    costcond = cost_trial;
 
     // Track best iterate
     const double cur_metric = std::max({feascond, gradcond, compcond});
@@ -993,6 +1119,9 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
       default: out.linear_solver = "sparse"; break;
     }
   }
+  out.symbolic_analyze_calls = sparse_cache.symbolic_analyze_calls;
+  out.backend_escalations = sparse_cache.backend_escalations;
+  out.scaling_rebuilds = sparse_cache.scaling_rebuilds;
   return out;
 }
 

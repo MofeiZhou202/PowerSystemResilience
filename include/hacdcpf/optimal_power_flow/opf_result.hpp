@@ -52,6 +52,17 @@ struct ACOPFProfiling {
   int total_iterations{0};
   int accepted_steps{0};
   int rejected_steps{0};
+  int backend_escalations{0};
+  int scaling_rebuilds{0};
+  bool warm_start_used{false};
+  double initial_primal_residual{0.0};
+  double initial_dual_residual{0.0};
+  double max_ac_p_balance_residual_pu{0.0};
+  double max_ac_q_balance_residual_pu{0.0};
+  double max_dc_balance_residual_pu{0.0};
+  double max_converter_balance_residual_pu{0.0};
+  double max_other_equality_residual_pu{0.0};
+  double max_nonlinear_inequality_violation_pu{0.0};
   double final_barrier_mu{0.0};
 };
 
@@ -84,6 +95,15 @@ struct ACOPFResult {
 
   std::vector<double> lmp_p;
   std::vector<double> lmp_q;
+
+  /// Opaque native-IPM continuation state.  Callers normally leave these
+  /// untouched and pass this result through ACOPFOptions::warm_start.  The
+  /// solver validates all dimensions before reuse and otherwise falls back to
+  /// the public physical-variable mapping above.
+  std::vector<double> ipm_primal_state;
+  std::vector<double> ipm_equality_dual_state;
+  std::vector<double> ipm_inequality_dual_state;
+  std::vector<double> ipm_slack_state;
 
   struct ComponentRef {
     int original_index{0};

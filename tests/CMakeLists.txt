@@ -30,6 +30,7 @@ hacdcpf_add_test(test_multiscale_comprehensive test_multiscale_comprehensive.cpp
 hacdcpf_add_test(test_unified_pf_upgrade  test_unified_pf_upgrade.cpp)
 hacdcpf_add_test(test_acopf_dcopf_crossval test_acopf_dcopf_crossval.cpp)
 hacdcpf_add_test(test_opf_solver_backends test_opf_solver_backends.cpp)
+hacdcpf_add_test(test_thread_pool test_thread_pool.cpp)
 hacdcpf_add_test(test_reactive_power_opt test_reactive_power_opt.cpp)
 hacdcpf_add_test(test_enhanced_solver     test_enhanced_solver.cpp)
 hacdcpf_add_test(test_uc_external_grid     test_uc_external_grid.cpp)

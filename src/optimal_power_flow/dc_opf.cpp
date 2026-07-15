@@ -776,13 +776,19 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
       value.pg_mw.resize(original_generator_count);
     if (sys.bus_merge_map) {
       const auto& map = *sys.bus_merge_map;
-      value.va = unproject_bus_vector(
-          value.va, map, BusVectorSemantics::Intensive);
-      if (!value.lmp.empty()) {
+      // A failed DC-OPF legitimately returns empty primal vectors.  Do not feed
+      // those through the successful-solve projection contract: doing so masks
+      // the original infeasibility with an unrelated size exception.
+      if (value.va.size() == static_cast<size_t>(map.n_merged)) {
+        value.va = unproject_bus_vector(
+            value.va, map, BusVectorSemantics::Intensive);
+      }
+      if (value.lmp.size() == static_cast<size_t>(map.n_merged)) {
         value.lmp = unproject_bus_vector(
             value.lmp, map, BusVectorSemantics::Intensive);
       }
-      if (!value.load_shedding_mw.empty()) {
+      if (value.load_shedding_mw.size() ==
+          static_cast<size_t>(map.n_merged)) {
         value.load_shedding_mw =
             unproject_bus_vector(value.load_shedding_mw, map,
                                  BusVectorSemantics::Extensive);

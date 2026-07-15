@@ -146,14 +146,30 @@ static HybridPowerSystem build_stressed_hybrid_acdc() {
   auto sys = build_ieee14_acdc();
 
   // Increase converter losses to create strong AC/DC coupling.
+  VSCConverter* pq_converter = nullptr;
+  VSCConverter* vdc_converter = nullptr;
   for (auto& conv : sys.vsc_converters) {
     conv.loss_percent = 1.5;    // 1.5% switching loss
     conv.loss_mw = 0.3;         // 0.3 MW no-load loss
     conv.eta = 0.98;            // 2% conduction loss
+    conv.r_conv_ac_pu = 0.02;   // activates DC-residual <- AC-Vm coupling
     // Increase power transfer to stress cross-coupling.
     if (conv.control_mode == ConverterMode::PQ_MODE) {
       conv.p_set_mw = 20.0;    // moderate transfer
+      pq_converter = &conv;
+    } else if (conv.control_mode == ConverterMode::VDC_Q ||
+               conv.control_mode == ConverterMode::VDC_VAC) {
+      vdc_converter = &conv;
     }
+  }
+
+  // The stock IEEE-14 AC/DC case places its VDC controller on the fixed DC_V
+  // reference bus, so Vdc is not a Newton variable and all AC<-Vdc test
+  // derivatives are identically zero.  Swap only the DC terminals in this
+  // purpose-built fixture: the ideal DC_V boundary remains backed by the PQ
+  // converter while the VDC controller acts on the solved DC_P bus.
+  if (pq_converter != nullptr && vdc_converter != nullptr) {
+    std::swap(pq_converter->bus_dc, vdc_converter->bus_dc);
   }
 
   return sys;
@@ -319,6 +335,7 @@ TEST_CASE("FD Jacobian: coupled cross-coupling derivatives are correct", "[upgra
 
   std::printf("  FD Jacobian: max_rel_err=%.2e, coupling_entries=%d, violations=%d\n",
               max_rel_error, coupling_entries_checked, violations);
+  CHECK(coupling_entries_checked > 0);
   CHECK(max_rel_error < 1e-3);
   CHECK(violations == 0);
 }

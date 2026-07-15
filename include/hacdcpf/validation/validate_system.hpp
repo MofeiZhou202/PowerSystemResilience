@@ -43,9 +43,11 @@ enum class ValidationLevel {
 ///   - ACSystem / DCSystem base_mva mismatch vs HybridPowerSystem base_mva
 ValidationReport validate(const HybridPowerSystem& sys);
 
-/// Validate that every authored AC SLACK / DC_V bus is backed by a physical
-/// device capable of establishing the corresponding voltage reference and
-/// balancing power. This focused preflight is used by PF and OPF entry points.
+/// Validate reference-bus eligibility for solver entry points.  An AC SLACK
+/// requires a physical balancing device.  A bare DC_V bus is supported by PF
+/// as an ideal bidirectional voltage boundary, but is reported as a warning
+/// when no physical DC balancing device is present.  Optimisation callers may
+/// promote that warning because an ideal boundary has no dispatch cost model.
 ValidationReport validate_reference_bus_eligibility(
     const HybridPowerSystem& sys);
 

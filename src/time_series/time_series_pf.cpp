@@ -4210,7 +4210,12 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
 
       // ── Run OPF on sys_t ──
       auto& opf_res = result.opf_results[static_cast<size_t>(t)];
-      opf_res = opf::solve_ac_opf(sys_t, opts.opf_options);
+      opf::ACOPFOptions step_opf_options = opts.opf_options;
+      if (t > 0) {
+        const auto& previous = result.opf_results[static_cast<size_t>(t - 1)];
+        if (previous.converged) step_opf_options.warm_start = &previous;
+      }
+      opf_res = opf::solve_ac_opf(sys_t, step_opf_options);
 
       auto& cv = result.crossval[static_cast<size_t>(t)];
       cv.opf_converged = opf_res.converged;

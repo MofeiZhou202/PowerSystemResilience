@@ -22,6 +22,13 @@ struct IPMOptions {
   double regularization{1e-8};
   double alpha_max{0.95};
   bool verbose{false};
+  /// Optional primal start already expressed in the current Problem layout.
+  const Eigen::VectorXd* primal_start{nullptr};
+  /// Optional native-IPM state for a structurally compatible problem.  These
+  /// blocks are used only when every dimension and positivity check succeeds.
+  const Eigen::VectorXd* equality_dual_start{nullptr};
+  const Eigen::VectorXd* inequality_dual_start{nullptr};
+  const Eigen::VectorXd* slack_start{nullptr};
 };
 
 struct IPMResult {
@@ -30,6 +37,17 @@ struct IPMResult {
   double primal_inf{0.0};
   double dual_inf{0.0};
   double complementarity{0.0};
+  double initial_primal_inf{0.0};
+  double initial_dual_inf{0.0};
+  double initial_complementarity{0.0};
+  bool warm_start_used{false};
+  int factorization_calls{0};
+  int linear_solve_calls{0};
+  int accepted_steps{0};
+  int rejected_steps{0};
+  int symbolic_analyze_calls{0};
+  int backend_escalations{0};
+  int scaling_rebuilds{0};
   std::string status;
   /// Concrete KKT linear-algebra path used, e.g. "dense_lu",
   /// "sparse_umfpack", "sparse_klu", or "sparse_eigen_lu".

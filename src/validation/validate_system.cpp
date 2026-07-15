@@ -117,11 +117,13 @@ ValidationReport validate_reference_bus_eligibility(
     for (const auto& bus : sys.dc.buses) {
         if (!bus.in_service || bus.bus_type != DCBusType::DC_V) continue;
         if (!has_dc_support(bus.index)) {
-            r.add(S::Error, "DCBus", std::to_string(bus.index), "bus_type",
+            r.add(S::Warning, "DCBus", std::to_string(bus.index), "bus_type",
                   "DC voltage-reference bus " + std::to_string(bus.index) +
-                  " has no in-service balancing device. Add controllable DC "
-                  "storage, a DC-voltage-forming VSC, or a voltage-forming "
-                  "DC/DC converter before assigning DC_V.");
+                  " has no in-service physical balancing device. It will be "
+                  "treated as an ideal bidirectional DC voltage boundary; add "
+                  "controllable DC storage, a DC-voltage-forming VSC, or a "
+                  "voltage-forming DC/DC converter when a physical boundary "
+                  "model is required.");
         }
     }
     return r;

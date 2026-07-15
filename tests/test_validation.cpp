@@ -32,6 +32,7 @@ using hacdcpf::validation::ValidationReport;
 using hacdcpf::validation::ValidationLevel;
 using hacdcpf::validation::Severity;
 using Catch::Matchers::ContainsSubstring;
+using Catch::Matchers::WithinAbs;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -221,8 +222,8 @@ TEST_CASE("validate: AC slack bus requires a physical balancing device",
           "Reference-bus eligibility check failed");
 }
 
-TEST_CASE("validate: bare DC_V bus is not an implicit source",
-          "[validation][fault][slack][reference][dc]") {
+TEST_CASE("validate: bare DC_V bus is an ideal boundary with a warning",
+          "[validation][slack][reference][dc]") {
     auto sys = make_valid_2bus();
     DCBus dc1;
     dc1.index = 1;
@@ -230,13 +231,13 @@ TEST_CASE("validate: bare DC_V bus is not an implicit source",
     dc1.in_service = true;
     sys.dc.buses = {dc1};
     const auto r = val::validate_reference_bus_eligibility(sys);
-    REQUIRE(r.has_errors());
+    REQUIRE(r.ok());
+    REQUIRE_FALSE(r.issues.empty());
     CHECK(has_issue(r, "DCBus", "bus_type"));
     const auto pf = solve_power_flow(sys);
-    CHECK_FALSE(pf.converged);
-    CHECK(pf.iterations == 0);
-    CHECK(pf.diagnostics.termination_reason ==
-          "Reference-bus eligibility check failed");
+    CHECK(pf.converged);
+    REQUIRE(pf.vdc.size() == 1);
+    CHECK_THAT(pf.vdc.front(), WithinAbs(dc1.vm_pu, 1e-12));
 }
 
 TEST_CASE("validate: PQ VSC can back a declared DC_V bus through auto-promotion",

@@ -1865,6 +1865,133 @@ bool try_dispatch_pf_fallback(const HybridPowerSystem& ac_only_sys,
 //   Ipopt     : embedded Ipopt (filter line-search) only
 enum class ParityInnerSolver { Auto, NativeIPM, Ipopt };
 
+// Map a previous public ACOPFResult into the current compact parity variable
+// layout.  Start from the normal physics-informed point so a missing or
+// incompatible component family degrades gracefully instead of rejecting the
+// whole warm start.
+Eigen::VectorXd build_parity_primal_warm_start(const parity::Problem& prob,
+                                               const ACOPFResult& warm,
+                                               bool& mapped_any) {
+  Eigen::VectorXd xmin;
+  Eigen::VectorXd xmax;
+  Eigen::VectorXd x0;
+  parity::build_variable_bounds(prob, xmin, xmax);
+  parity::build_initial_point(prob, xmin, xmax, x0);
+  const auto& idx = prob.vidx;
+  const double base = prob.data.base_mva;
+  mapped_any = false;
+
+  if (warm.ipm_primal_state.size() == static_cast<size_t>(idx.n_total)) {
+    Eigen::Map<const Eigen::VectorXd> raw(warm.ipm_primal_state.data(),
+                                          idx.n_total);
+    if (raw.allFinite()) {
+      mapped_any = true;
+      return raw;
+    }
+  }
+
+  const auto assign_block = [&](int offset, int count,
+                                const std::vector<double>& values,
+                                double divisor = 1.0) {
+    if (count <= 0 || values.size() != static_cast<size_t>(count)) return;
+    for (int k = 0; k < count; ++k) {
+      const double value = values[static_cast<size_t>(k)] / divisor;
+      if (std::isfinite(value)) x0[offset + k] = value;
+    }
+    mapped_any = true;
+  };
+
+  assign_block(idx.i_vm, idx.n_vm, warm.vm);
+  assign_block(idx.i_va, idx.n_va, warm.va);
+  assign_block(idx.i_vdc, idx.n_vdc, warm.vdc);
+  assign_block(idx.i_pac, idx.n_pac, warm.pac_mw, base);
+  assign_block(idx.i_qac, idx.n_qac, warm.qac_mvar, base);
+  if (idx.n_pdc == idx.n_pac &&
+      warm.pac_mw.size() == static_cast<size_t>(idx.n_pac) &&
+      warm.qac_mvar.size() == static_cast<size_t>(idx.n_qac)) {
+    for (int k = 0; k < idx.n_pac; ++k) {
+      const auto& conv = prob.data.converters[static_cast<size_t>(
+          prob.conv_var_to_data[static_cast<size_t>(k)])];
+      const int ac = prob.conv_ac_bus[static_cast<size_t>(k)];
+      const double vm = (warm.vm.size() == static_cast<size_t>(idx.n_vm))
+                            ? std::max(warm.vm[static_cast<size_t>(ac)], 1e-8)
+                            : std::max(x0[idx.i_vm + ac], 1e-8);
+      const double p = warm.pac_mw[static_cast<size_t>(k)] / base;
+      const double q = warm.qac_mvar[static_cast<size_t>(k)] / base;
+      const double iac = std::sqrt(p * p + q * q +
+                                  std::max(prob.options.eps_iac, 1e-12)) / vm;
+      const double loss = conv.loss_mw / base +
+                          conv.loss_percent / 100.0 * iac +
+                          (1.0 - conv.eta) * iac * iac;
+      x0[idx.i_pdc + k] = -(p + loss);
+    }
+    mapped_any = true;
+  }
+  assign_block(idx.i_dpd, idx.n_dpd, warm.dpd_mw, base);
+  assign_block(idx.i_dqd, idx.n_dqd, warm.dqd_mvar, base);
+  assign_block(idx.i_pren, idx.n_pren, warm.pren_mw, base);
+  assign_block(idx.i_qren, idx.n_qren, warm.qren_mvar, base);
+  assign_block(idx.i_pdcdc, idx.n_pdcdc, warm.pdcdc_mw, base);
+  assign_block(idx.i_pflex, idx.n_pflex, warm.pflex_mw, base);
+  assign_block(idx.i_erp, idx.n_erp, warm.er_port_p_mw, base);
+
+  // Generator rows in the current problem may include synthetic external-grid
+  // generators appended after authored generators.  Map both public result
+  // families without relying on unstable compact-row positions.
+  for (int k = 0; k < idx.n_pg; ++k) {
+    const int data_index = prob.gen_var_to_data[static_cast<size_t>(k)];
+    if (data_index >= 0 && data_index < static_cast<int>(warm.pg_mw.size())) {
+      if (std::isfinite(warm.pg_mw[static_cast<size_t>(data_index)]))
+        x0[idx.i_pg + k] = warm.pg_mw[static_cast<size_t>(data_index)] / base;
+      if (data_index < static_cast<int>(warm.qg_mvar.size()) &&
+          std::isfinite(warm.qg_mvar[static_cast<size_t>(data_index)]))
+        x0[idx.i_qg + k] = warm.qg_mvar[static_cast<size_t>(data_index)] / base;
+      mapped_any = true;
+      continue;
+    }
+    const int external = data_index - static_cast<int>(warm.pg_mw.size());
+    if (external >= 0 &&
+        external < static_cast<int>(warm.external_grid_p_mw.size())) {
+      x0[idx.i_pg + k] =
+          warm.external_grid_p_mw[static_cast<size_t>(external)] / base;
+      if (external < static_cast<int>(warm.external_grid_q_mvar.size()))
+        x0[idx.i_qg + k] =
+            warm.external_grid_q_mvar[static_cast<size_t>(external)] / base;
+      mapped_any = true;
+    }
+  }
+
+  if (idx.n_pstor > 0 &&
+      warm.pstor_mw.size() >= static_cast<size_t>(idx.n_pstor)) {
+    for (int k = 0; k < idx.n_pstor; ++k) {
+      x0[idx.i_pstor + k] = warm.pstor_mw[static_cast<size_t>(k)] / base;
+      if (warm.qstor_mvar.size() > static_cast<size_t>(k))
+        x0[idx.i_qstor + k] = warm.qstor_mvar[static_cast<size_t>(k)] / base;
+    }
+    mapped_any = true;
+  }
+  const size_t dc_storage_offset = static_cast<size_t>(idx.n_pstor);
+  if (idx.n_pstordc > 0 &&
+      warm.pstor_mw.size() >= dc_storage_offset +
+                                static_cast<size_t>(idx.n_pstordc)) {
+    for (int k = 0; k < idx.n_pstordc; ++k)
+      x0[idx.i_pstordc + k] =
+          warm.pstor_mw[dc_storage_offset + static_cast<size_t>(k)] / base;
+    mapped_any = true;
+  }
+  if (idx.n_erq > 0 &&
+      warm.er_port_q_mvar.size() >= static_cast<size_t>(idx.n_erq)) {
+    for (const auto& port : prob.er_ports) {
+      if (port.qvar >= 0 &&
+          static_cast<size_t>(port.pvar) < warm.er_port_q_mvar.size())
+        x0[idx.i_erq + port.qvar] =
+            warm.er_port_q_mvar[static_cast<size_t>(port.pvar)] / base;
+    }
+    mapped_any = true;
+  }
+  return x0;
+}
+
 // Solve the assembled parity OPF nonlinear program with the embedded Ipopt
 // filter line-search NLP solver.  The parity `Problem` already exposes every
 // callback Ipopt needs (objective, gradient, equality/inequality residuals and
@@ -1897,7 +2024,29 @@ parity::IPMResult solve_parity_with_ipopt(const parity::Problem& prob,
   Eigen::VectorXd xmax;
   Eigen::VectorXd x0;
   parity::build_variable_bounds(prob, xmin, xmax);
-  parity::build_initial_point(prob, xmin, xmax, x0);
+  if (ipm_opt.primal_start != nullptr &&
+      ipm_opt.primal_start->size() == prob.vidx.n_total &&
+      ipm_opt.primal_start->allFinite()) {
+    x0 = *ipm_opt.primal_start;
+    for (int i = 0; i < x0.size(); ++i) {
+      if (std::isfinite(xmin[i])) x0[i] = std::max(x0[i], xmin[i] + 1e-8);
+      if (std::isfinite(xmax[i])) x0[i] = std::min(x0[i], xmax[i] - 1e-8);
+    }
+    res.warm_start_used = true;
+  } else {
+    parity::build_initial_point(prob, xmin, xmax, x0);
+  }
+
+  {
+    parity::EvalWorkspace ws0;
+    Eigen::VectorXd g0;
+    Eigen::VectorXd h0;
+    parity::equality_constraints(prob, x0, ws0, g0);
+    parity::nonlinear_inequality_constraints(prob, x0, h0);
+    const double eq0 = g0.size() ? g0.cwiseAbs().maxCoeff() : 0.0;
+    const double ineq0 = h0.size() ? std::max(0.0, h0.maxCoeff()) : 0.0;
+    res.initial_primal_inf = std::max(eq0, ineq0);
+  }
 
   const int n = prob.vidx.n_total;
 
@@ -1912,6 +2061,13 @@ parity::IPMResult solve_parity_with_ipopt(const parity::Problem& prob,
     nlp.vars[static_cast<size_t>(i)] = vm;
   }
   nlp.x0 = x0;
+  nlp.solver_options.max_iterations = std::max(1, ipm_opt.max_iter);
+  nlp.solver_options.tolerance = std::min(
+      {ipm_opt.tol_primal, ipm_opt.tol_dual,
+       ipm_opt.tol_complementarity});
+  nlp.solver_options.acceptable_tolerance = std::max(
+      {ipm_opt.tol_primal, ipm_opt.tol_dual,
+       ipm_opt.tol_complementarity});
 
   nlp.f = [&prob](const Eigen::VectorXd& x) -> double {
     return parity::objective(prob, x);
@@ -2017,6 +2173,35 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   ipm_opt.regularization = std::max(opt.regularization, 1e-12);
   ipm_opt.alpha_max = std::clamp(opt.interior_fraction, 0.5, 0.9999);
   ipm_opt.verbose = opt.verbose;
+  Eigen::VectorXd primal_warm_start;
+  Eigen::VectorXd equality_dual_warm_start;
+  Eigen::VectorXd inequality_dual_warm_start;
+  Eigen::VectorXd slack_warm_start;
+  bool warm_start_mapped = false;
+  if (opt.warm_start != nullptr) {
+    primal_warm_start =
+        build_parity_primal_warm_start(prob, *opt.warm_start, warm_start_mapped);
+    if (warm_start_mapped) {
+      ipm_opt.primal_start = &primal_warm_start;
+      const auto copy_state = [](const std::vector<double>& source,
+                                 Eigen::VectorXd& destination) {
+        if (source.empty()) {
+          destination.resize(0);
+          return;
+        }
+        destination = Eigen::Map<const Eigen::VectorXd>(
+            source.data(), static_cast<Eigen::Index>(source.size()));
+      };
+      copy_state(opt.warm_start->ipm_equality_dual_state,
+                 equality_dual_warm_start);
+      copy_state(opt.warm_start->ipm_inequality_dual_state,
+                 inequality_dual_warm_start);
+      copy_state(opt.warm_start->ipm_slack_state, slack_warm_start);
+      ipm_opt.equality_dual_start = &equality_dual_warm_start;
+      ipm_opt.inequality_dual_start = &inequality_dual_warm_start;
+      ipm_opt.slack_start = &slack_warm_start;
+    }
+  }
 
   // ── Inner nonlinear solver selection ──────────────────────────────────────
   // Auto: native parity IPM first; if it does not converge, retry the SAME
@@ -2056,9 +2241,29 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   out.profiling.linear_solver_backend = backend_label;
   out.solver_path = OPFSolverPath::ParityIPM;
   out.profiling.total_iterations = out.iterations;
-  out.profiling.accepted_steps = out.iterations;
-  out.profiling.rejected_steps = 0;
+  out.profiling.analyze_calls = ipm_res.symbolic_analyze_calls;
+  out.profiling.factorization_calls = ipm_res.factorization_calls;
+  out.profiling.linear_solve_calls = ipm_res.linear_solve_calls;
+  out.profiling.accepted_steps = ipm_res.accepted_steps;
+  out.profiling.rejected_steps = ipm_res.rejected_steps;
+  out.profiling.backend_escalations = ipm_res.backend_escalations;
+  out.profiling.scaling_rebuilds = ipm_res.scaling_rebuilds;
+  out.profiling.warm_start_used = ipm_res.warm_start_used;
+  out.profiling.initial_primal_residual = ipm_res.initial_primal_inf;
+  out.profiling.initial_dual_residual = ipm_res.initial_dual_inf;
   out.profiling.final_barrier_mu = ipm_res.complementarity;
+  const auto save_state = [](const Eigen::VectorXd& source,
+                             std::vector<double>& destination) {
+    if (source.size() == 0) {
+      destination.clear();
+    } else {
+      destination.assign(source.data(), source.data() + source.size());
+    }
+  };
+  save_state(ipm_res.x, out.ipm_primal_state);
+  save_state(ipm_res.lambda_eq, out.ipm_equality_dual_state);
+  save_state(ipm_res.mu, out.ipm_inequality_dual_state);
+  save_state(ipm_res.z, out.ipm_slack_state);
 
   out.vm.assign(static_cast<size_t>(vidx.n_vm), 1.0);
   out.va.assign(static_cast<size_t>(vidx.n_va), 0.0);
@@ -2235,6 +2440,27 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
     }
     const double max_hplus =
         (h_nonlin.size() > 0) ? std::max(0.0, h_nonlin.maxCoeff()) : 0.0;
+    const auto block_inf = [&](int offset, int count) {
+      if (count <= 0 || offset < 0 || offset + count > g_eq.size()) return 0.0;
+      return g_eq.segment(offset, count).cwiseAbs().maxCoeff();
+    };
+    out.profiling.max_ac_p_balance_residual_pu =
+        block_inf(cidx.i_pbal_ac, cidx.n_pbal_ac) /
+        std::max(prob.scale_p, 1e-16);
+    out.profiling.max_ac_q_balance_residual_pu =
+        block_inf(cidx.i_qbal_ac, cidx.n_qbal_ac) /
+        std::max(prob.scale_q, 1e-16);
+    out.profiling.max_dc_balance_residual_pu =
+        block_inf(cidx.i_pbal_dc, cidx.n_pbal_dc);
+    out.profiling.max_converter_balance_residual_pu =
+        block_inf(cidx.i_conv_bal, cidx.n_conv_bal);
+    double other_eq = 0.0;
+    other_eq = std::max(other_eq,
+                        block_inf(cidx.i_dcdc_bal, cidx.n_dcdc_bal));
+    other_eq = std::max(other_eq, block_inf(cidx.i_er_bal, cidx.n_er_bal));
+    other_eq = std::max(other_eq, block_inf(cidx.i_dc_ref, cidx.n_dc_ref));
+    out.profiling.max_other_equality_residual_pu = other_eq;
+    out.profiling.max_nonlinear_inequality_violation_pu = max_hplus;
     out.max_constraint_violation = std::max({inf_norm(g_eq), max_hplus, max_bound});
   } else {
     out.objective = std::numeric_limits<double>::infinity();
@@ -2331,9 +2557,20 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
 
   const auto reference_validation =
       validation::validate_reference_bus_eligibility(sys);
-  if (reference_validation.has_errors()) {
+  const bool bare_ideal_dc_boundary = std::any_of(
+      reference_validation.issues.begin(), reference_validation.issues.end(),
+      [](const validation::ValidationIssue& issue) {
+        return issue.severity == validation::Severity::Warning &&
+               issue.component_type == "DCBus" && issue.field == "bus_type";
+      });
+  if (reference_validation.has_errors() || bare_ideal_dc_boundary) {
     out.status = "AC OPF failed: reference-bus eligibility check failed: " +
                  reference_validation.summary();
+    if (bare_ideal_dc_boundary) {
+      out.status +=
+          " Optimisation requires an explicit controllable DC balancing "
+          "device because an ideal DC_V boundary has no dispatch-cost model.";
+    }
     for (const auto& issue : reference_validation.issues)
       out.infeasibility_hints.push_back(issue.message);
     return out;
