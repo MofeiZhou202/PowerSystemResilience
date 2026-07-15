@@ -30,6 +30,9 @@ api::Result to_api_result(const SolveResult& in) {
   out.stats.primal_feas = in.stats.primal_feas;
   out.stats.dual_feas = in.stats.dual_feas;
   out.stats.complementarity = in.stats.complementarity;
+  out.stats.unscaled_primal_feas = in.stats.unscaled_primal_feas;
+  out.stats.unscaled_dual_feas = in.stats.unscaled_dual_feas;
+  out.stats.unscaled_complementarity = in.stats.unscaled_complementarity;
   out.stats.mip_gap = in.stats.mip_gap;
   out.stats.runtime_sec = in.stats.runtime_sec;
   out.stats.status = in.stats.status;

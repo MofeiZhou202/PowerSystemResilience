@@ -37,6 +37,7 @@
 #endif
 
 #ifdef HACDCPF_HAVE_IPOPT
+#include "IpIpoptCalculatedQuantities.hpp"
 #include "IpIpoptApplication.hpp"
 #include "IpTNLP.hpp"
 #endif
@@ -1072,6 +1073,9 @@ class CallbackTNLP final : public Ipopt::TNLP {
         primal_inf_(0.0),
         dual_inf_(0.0),
         complementarity_(0.0),
+        unscaled_primal_inf_(0.0),
+        unscaled_dual_inf_(0.0),
+        unscaled_complementarity_(0.0),
         objective_(0.0) {
     if (prob_.g) {
       Eigen::VectorXd geq;
@@ -1123,8 +1127,9 @@ class CallbackTNLP final : public Ipopt::TNLP {
 
       nnz_jac_ = static_cast<int>(jac_rows_.size());
     }
-    // Ipopt requires nnz_jac_g >= 1 even for unconstrained problems.
-    if (nnz_jac_ == 0) nnz_jac_ = 1;
+    // Ipopt accepts nnz_jac_g == 0 for unconstrained problems.  Advertising a
+    // synthetic entry here is unsafe because there is no valid constraint row
+    // to attach it to and the value callback cannot reproduce that structure.
   }
 
   bool get_nlp_info(Ipopt::Index& n,
@@ -1429,8 +1434,17 @@ class CallbackTNLP final : public Ipopt::TNLP {
     (void)alpha_pr;
     (void)ls_trials;
     (void)ip_data;
-    (void)ip_cq;
     iters_ = static_cast<int>(iter);
+    if (ip_cq != nullptr) {
+      // Preserve Ipopt's scaled callback metrics for convergence parity, and
+      // expose original-model residuals alongside them for physical audits.
+      unscaled_primal_inf_ = ip_cq->unscaled_curr_nlp_constraint_violation(
+          Ipopt::NORM_MAX);
+      unscaled_dual_inf_ =
+          ip_cq->unscaled_curr_dual_infeasibility(Ipopt::NORM_MAX);
+      unscaled_complementarity_ = ip_cq->unscaled_curr_complementarity(
+          0.0, Ipopt::NORM_MAX);
+    }
     primal_inf_ = inf_pr;
     dual_inf_ = inf_du;
     complementarity_ = mu;
@@ -1445,6 +1459,9 @@ class CallbackTNLP final : public Ipopt::TNLP {
     out.stats.primal_feas = primal_inf_;
     out.stats.dual_feas = dual_inf_;
     out.stats.complementarity = complementarity_;
+    out.stats.unscaled_primal_feas = unscaled_primal_inf_;
+    out.stats.unscaled_dual_feas = unscaled_dual_inf_;
+    out.stats.unscaled_complementarity = unscaled_complementarity_;
     out.stats.residual_inf = std::max(primal_inf_, dual_inf_);
 
     switch (app_status) {
@@ -1457,6 +1474,22 @@ class CallbackTNLP final : public Ipopt::TNLP {
       case Ipopt::Maximum_Iterations_Exceeded:
         out.stats.success = false;
         out.stats.status = "Max iterations exceeded";
+        break;
+      case Ipopt::Infeasible_Problem_Detected:
+        out.stats.success = false;
+        out.stats.status = "Ipopt infeasible problem detected";
+        break;
+      case Ipopt::Search_Direction_Becomes_Too_Small:
+        out.stats.success = false;
+        out.stats.status = "Ipopt search direction too small";
+        break;
+      case Ipopt::Diverging_Iterates:
+        out.stats.success = false;
+        out.stats.status = "Ipopt diverging iterates";
+        break;
+      case Ipopt::User_Requested_Stop:
+        out.stats.success = false;
+        out.stats.status = "Ipopt user requested stop";
         break;
       case Ipopt::Restoration_Failed:
         out.stats.success = false;
@@ -1477,6 +1510,34 @@ class CallbackTNLP final : public Ipopt::TNLP {
       case Ipopt::Not_Enough_Degrees_Of_Freedom:
         out.stats.success = false;
         out.stats.status = "Ipopt insufficient degrees of freedom";
+        break;
+      case Ipopt::Invalid_Problem_Definition:
+        out.stats.success = false;
+        out.stats.status = "Ipopt invalid problem definition";
+        break;
+      case Ipopt::Maximum_CpuTime_Exceeded:
+        out.stats.success = false;
+        out.stats.status = "Ipopt CPU time limit exceeded";
+        break;
+      case Ipopt::Maximum_WallTime_Exceeded:
+        out.stats.success = false;
+        out.stats.status = "Ipopt wall time limit exceeded";
+        break;
+      case Ipopt::Insufficient_Memory:
+        out.stats.success = false;
+        out.stats.status = "Ipopt insufficient memory";
+        break;
+      case Ipopt::Unrecoverable_Exception:
+        out.stats.success = false;
+        out.stats.status = "Ipopt unrecoverable exception";
+        break;
+      case Ipopt::NonIpopt_Exception_Thrown:
+        out.stats.success = false;
+        out.stats.status = "Ipopt non-Ipopt exception";
+        break;
+      case Ipopt::Internal_Error:
+        out.stats.success = false;
+        out.stats.status = "Ipopt internal error";
         break;
       default:
         out.stats.success = false;
@@ -1501,6 +1562,9 @@ class CallbackTNLP final : public Ipopt::TNLP {
   double primal_inf_;
   double dual_inf_;
   double complementarity_;
+  double unscaled_primal_inf_;
+  double unscaled_dual_inf_;
+  double unscaled_complementarity_;
   double objective_;
 };
 #endif
@@ -2247,14 +2311,50 @@ SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
   app->Options()->SetIntegerValue("print_level", 0);
   app->Options()->SetStringValue("sb", "yes");
   app->Options()->SetStringValue("hessian_approximation", "limited-memory");
+  // Keep the adapter boundary deterministic for malformed configuration.
+  // Passing NaN/Inf through SetNumericValue makes Ipopt fail during option
+  // initialisation, while zero/negative tolerances are outside its contract.
+  // Fall back to the documented historical defaults, then enforce Ipopt's
+  // practical lower bound and acceptable_tol >= tol relationship.
   const int max_iterations = std::max(1, prob.solver_options.max_iterations);
-  const double tolerance =
-      std::max(prob.solver_options.tolerance, 1e-14);
-  const double acceptable_tolerance =
-      std::max(prob.solver_options.acceptable_tolerance, tolerance);
+  const auto positive_finite_or = [](double value, double fallback) {
+    return std::isfinite(value) && value > 0.0 ? value : fallback;
+  };
+  const double tolerance = std::max(
+      positive_finite_or(prob.solver_options.tolerance, 1e-8), 1e-14);
+  const double acceptable_tolerance = std::max(
+      positive_finite_or(prob.solver_options.acceptable_tolerance, 1e-6),
+      tolerance);
+  const double dual_tolerance = positive_finite_or(
+      prob.solver_options.dual_infeasibility_tolerance, 1.0);
+  const double constraint_tolerance = positive_finite_or(
+      prob.solver_options.constraint_violation_tolerance, 1e-4);
+  const double complementarity_tolerance = positive_finite_or(
+      prob.solver_options.complementarity_tolerance, 1e-4);
+  const double acceptable_dual_tolerance = std::max(
+      positive_finite_or(
+          prob.solver_options.acceptable_dual_infeasibility_tolerance, 1e10),
+      dual_tolerance);
+  const double acceptable_constraint_tolerance = std::max(
+      positive_finite_or(
+          prob.solver_options.acceptable_constraint_violation_tolerance, 1e-2),
+      constraint_tolerance);
+  const double acceptable_complementarity_tolerance = std::max(
+      positive_finite_or(
+          prob.solver_options.acceptable_complementarity_tolerance, 1e-2),
+      complementarity_tolerance);
   app->Options()->SetIntegerValue("max_iter", max_iterations);
   app->Options()->SetNumericValue("tol", tolerance);
+  app->Options()->SetNumericValue("dual_inf_tol", dual_tolerance);
+  app->Options()->SetNumericValue("constr_viol_tol", constraint_tolerance);
+  app->Options()->SetNumericValue("compl_inf_tol", complementarity_tolerance);
   app->Options()->SetNumericValue("acceptable_tol", acceptable_tolerance);
+  app->Options()->SetNumericValue(
+      "acceptable_dual_inf_tol", acceptable_dual_tolerance);
+  app->Options()->SetNumericValue(
+      "acceptable_constr_viol_tol", acceptable_constraint_tolerance);
+  app->Options()->SetNumericValue(
+      "acceptable_compl_inf_tol", acceptable_complementarity_tolerance);
 
   const Ipopt::ApplicationReturnStatus init_status = app->Initialize();
   if (init_status != Ipopt::Solve_Succeeded) {

@@ -182,6 +182,15 @@ struct NLPSolverOptions {
   int max_iterations{500};
   double tolerance{1e-8};
   double acceptable_tolerance{1e-6};
+  // Absolute, unscaled component tolerances.  Defaults match Ipopt; callers
+  // with dimensionless models can tighten these independently of the scaled
+  // aggregate tolerance above.
+  double dual_infeasibility_tolerance{1.0};
+  double constraint_violation_tolerance{1e-4};
+  double complementarity_tolerance{1e-4};
+  double acceptable_dual_infeasibility_tolerance{1e10};
+  double acceptable_constraint_violation_tolerance{1e-2};
+  double acceptable_complementarity_tolerance{1e-2};
 };
 
 struct NLPModel {

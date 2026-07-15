@@ -16,6 +16,9 @@ struct SolveStats {
   double primal_feas{0.0};
   double dual_feas{0.0};
   double complementarity{0.0};
+  double unscaled_primal_feas{0.0};
+  double unscaled_dual_feas{0.0};
+  double unscaled_complementarity{0.0};
   double mip_gap{0.0};
   double runtime_sec{0.0};
   std::string status;

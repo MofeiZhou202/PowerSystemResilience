@@ -475,6 +475,7 @@ if(MIPSOLVERS_BUILD_TESTS)
   endmacro()
 
   mipsolvers_add_test(test_engine_api          TIER unit)
+  mipsolvers_add_test(test_ipopt_parameter_stability TIER integration)
   mipsolvers_add_test(test_lp_solver           TIER unit)
   mipsolvers_add_test(test_milp_solver         TIER unit)
   mipsolvers_add_test(test_ipm_solver          TIER unit)
