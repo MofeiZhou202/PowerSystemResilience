@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cmath>
+#include <iostream>
 #include <string>
 
 #include "hacdcpf/io/case_builders.hpp"
@@ -309,6 +310,87 @@ TEST_CASE("case2000 AC/DC Ipopt bounded performance benchmark",
   CHECK(std::isfinite(r.objective));
   CHECK(std::isfinite(r.max_constraint_violation));
   CHECK(std::isfinite(r.max_stationarity));
+}
+
+TEST_CASE("Ipopt OPF parameter stability matrix",
+          "[.performance][opf][ipopt][parameter-matrix]") {
+  struct MatrixConfig {
+    int budget;
+    double feasibility_tolerance;
+    double stationarity_tolerance;
+    double complementarity_tolerance;
+  };
+
+  const auto run = [](const HybridPowerSystem& system,
+                      const char* case_name,
+                      const MatrixConfig& config) {
+    opf::ACOPFOptions opt;
+    opt.ac_solver_backend = opf::ACOPFSolverBackend::Ipopt;
+    opt.max_inner_iterations = config.budget;
+    opt.max_outer_iterations = 1;
+    opt.allow_fallback = false;
+    opt.feasibility_tol = config.feasibility_tolerance;
+    opt.stationarity_tol = config.stationarity_tolerance;
+    opt.barrier_mu_min = config.complementarity_tolerance;
+
+    const auto started = std::chrono::steady_clock::now();
+    const opf::ACOPFResult result = opf::solve_ac_opf(system, opt);
+    const double elapsed_sec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - started).count();
+    std::cout << "IPOPT_MATRIX case=" << case_name
+              << " budget=" << config.budget
+              << " feasibility_tol=" << config.feasibility_tolerance
+              << " stationarity_tol=" << config.stationarity_tolerance
+              << " complementarity_tol=" << config.complementarity_tolerance
+              << " converged=" << result.converged
+              << " iterations=" << result.iterations
+              << " elapsed_sec=" << elapsed_sec
+              << " primal=" << result.max_constraint_violation
+              << " dual=" << result.max_stationarity
+              << " status=\"" << result.status << "\"\n";
+
+    CAPTURE(case_name, config.budget, config.feasibility_tolerance,
+            config.stationarity_tolerance,
+            config.complementarity_tolerance, result.status);
+    CHECK(result.iterations <= config.budget + 1);
+    CHECK(std::isfinite(result.objective));
+    CHECK(std::isfinite(result.max_constraint_violation));
+    CHECK(std::isfinite(result.max_stationarity));
+    return result;
+  };
+
+  SECTION("case30 tolerance and budget sweep") {
+    const HybridPowerSystem system = io::parse_matpower(data_path("case30.m"));
+    const MatrixConfig configs[] = {
+        {1, 1e-8, 1e-8, 1e-10},
+        {20, 1e-4, 1e-4, 1e-8},
+        {100, 1e-6, 1e-6, 1e-8},
+        {200, 1e-8, 1e-8, 1e-10},
+    };
+    for (const MatrixConfig& config : configs) run(system, "case30", config);
+  }
+
+  SECTION("case300 tolerance and budget sweep") {
+    const HybridPowerSystem system = io::build_case300_acdc();
+    const MatrixConfig configs[] = {
+        {100, 1e-7, 1e-3, 1e-9},
+        {500, 1e-7, 1e-3, 1e-9},
+        {800, 1e-7, 1e-2, 1e-9},
+        {800, 1e-7, 1e-3, 1e-9},
+        {800, 1e-7, 1e-4, 1e-9},
+    };
+    for (const MatrixConfig& config : configs) run(system, "case300", config);
+  }
+
+  SECTION("case2000 bounded budget sweep") {
+    const HybridPowerSystem system = io::build_case2000_acdc();
+    const MatrixConfig configs[] = {
+        {20, 1e-6, 1e-3, 1e-8},
+        {50, 1e-6, 1e-3, 1e-8},
+        {100, 1e-6, 1e-3, 1e-8},
+    };
+    for (const MatrixConfig& config : configs) run(system, "case2000", config);
+  }
 }
 
 // ── Objective-scaling regression guard ───────────────────────────────────────

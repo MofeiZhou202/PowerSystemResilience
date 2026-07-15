@@ -136,3 +136,85 @@ MUMPS 设为默认后端。
 目标目前仍优先使用嵌入式 Ipopt filter-line-search 作为连续 NLP 后端；其离散
 层仍是局部搜索，不构成全局 MINLP 证明。三相不平衡单体 RPO 和富混合设备的
 完整 authored-space PF 写回仍按覆盖审计标记为部分支持。
+
+## 10. MIPSolvers/Ipopt 参数稳定性矩阵
+
+### 10.1 参数契约与残差口径
+
+专项审计发现，单独设置 Ipopt 的 `tol` 和 `acceptable_tol` 不等于约束了所有
+原始量纲下的 KKT 分量。Ipopt 的总 NLP error 会进行目标和乘子缩放，而
+`dual_inf_tol`、`constr_viol_tol`、`compl_inf_tol` 是独立的绝对门槛。对于
+成本梯度、功率约束和电压变量量纲不同的 OPF，不能把同一个数值无条件复制给
+所有未缩放分量。
+
+`NLPSolverOptions` 因此保留原有三个总控参数，并新增六个分量参数：
+
+| 参数 | 默认值 | 含义 |
+|---|---:|---|
+| `max_iterations` | 500 | Ipopt `max_iter`，小于 1 时归一化为 1 |
+| `tolerance` | $10^{-8}$ | 缩放后总 NLP error 的严格容差 |
+| `acceptable_tolerance` | $10^{-6}$ | 缩放后可接受收敛容差 |
+| `dual_infeasibility_tolerance` | 1 | 未缩放对偶不可行度严格门槛 |
+| `constraint_violation_tolerance` | $10^{-4}$ | 未缩放约束违反严格门槛 |
+| `complementarity_tolerance` | $10^{-4}$ | 未缩放互补残差严格门槛 |
+| `acceptable_dual_infeasibility_tolerance` | $10^{10}$ | 可接受对偶门槛 |
+| `acceptable_constraint_violation_tolerance` | $10^{-2}$ | 可接受约束门槛 |
+| `acceptable_complementarity_tolerance` | $10^{-2}$ | 可接受互补门槛 |
+
+分量默认值与 Ipopt 保持一致，避免改变有量纲 OPF 的历史收敛口径。调用方只有在
+模型已经无量纲化时才应统一收紧六个分量门槛。`SolveStats` 同时提供原有的
+scaled 残差和 `unscaled_primal_feas`、`unscaled_dual_feas`、
+`unscaled_complementarity`，防止把缩放后的微小数值误称为物理 KKT 残差。
+
+零、负数、NaN 和 Inf 容差现在稳定回退到历史默认值；
+`acceptable_tolerance < tolerance` 及相同的分量关系会归一化为“不小于严格
+容差”。无约束 NLP 不再虚构 Jacobian 非零项。所有 Ipopt 退出码也映射为明确
+状态，而不是统一的 `Ipopt failed`。
+
+### 10.2 专项 NLP 结果
+
+Homebrew Ipopt/MUMPS 组合通过 439 项断言，覆盖：
+
+- $10^{-4}$、$10^{-6}$、$10^{-8}$、$10^{-10}$ 四档严格容差与
+  1、10、1000 倍 acceptable 容差的 12 组组合；
+- 1、5、20、100、500 次迭代预算；
+- 非正、NaN、Inf 参数和 acceptable/strict 倒置；
+- 活动变量边界、Rosenbrock 等式约束、近线性相关等式；
+- 变量和 Jacobian 的尺度失衡。
+
+Jacobian 系数跨度到 $10^6$ 时仍得到正确最优点。跨度达到 $10^{12}$ 时，默认
+gradient scaling 会把 scaled 对偶误差显著压小；启用严格的未缩放分量门槛后，
+适配器不再报告假收敛，而是明确返回 `Ipopt search direction too small`。这类
+模型必须在建模层进行变量/约束无量纲化，不能仅靠降低 `tol` 修复。
+
+强制源码构建的顺序 MUMPS 5.7.3 在相同六类测试中全部于第 1 次迭代进入
+`Ipopt restoration failed`，首个良态二次 NLP 的诊断为
+`primal=3, dual=999`。故障与容差、预算和模型类型无关，继续归类为 arm64
+本地静态 MUMPS 的运行时/ABI 问题；当前默认仍应使用 Homebrew MUMPS 动态库。
+
+### 10.3 真实 OPF 参数敏感性
+
+以下为 Release、内嵌 Ipopt + Homebrew MUMPS 的冷启动实测。时间是单机墙钟
+时间，只用于同机相对比较。
+
+| 算例 | 预算 | 可行/平稳/互补容差 | 迭代 | 时间/s | 原始残差 | scaled 对偶残差 | 结果 |
+|---|---:|---|---:|---:|---:|---:|---|
+| case30 | 1 | $10^{-8}/10^{-8}/10^{-10}$ | 2 | 0.004 | $3.10\times10^{-2}$ | 84.1 | 截断 |
+| case30 | 20 | $10^{-4}/10^{-4}/10^{-8}$ | 21 | 0.020 | $5.06\times10^{-7}$ | $2.27\times10^{-2}$ | 截断 |
+| case30 | 100 | $10^{-6}/10^{-6}/10^{-8}$ | 70 | 0.064 | $1.05\times10^{-8}$ | $5.66\times10^{-9}$ | 收敛 |
+| case30 | 200 | $10^{-8}/10^{-8}/10^{-10}$ | 85 | 0.078 | $1.05\times10^{-8}$ | $3.32\times10^{-11}$ | 收敛 |
+| case300 AC/DC | 100 | $10^{-7}/10^{-3}/10^{-9}$ | 101 | 0.587 | $2.83\times10^{-5}$ | 0.150 | 截断 |
+| case300 AC/DC | 500 | $10^{-7}/10^{-3}/10^{-9}$ | 501 | 2.98 | $2.47\times10^{-9}$ | $4.68\times10^{-4}$ | 未满足连续 acceptable 判据 |
+| case300 AC/DC | 800 | $10^{-7}/10^{-2}/10^{-9}$ | 497 | 2.96 | $1.22\times10^{-8}$ | $1.69\times10^{-3}$ | 收敛 |
+| case300 AC/DC | 800 | $10^{-7}/10^{-3}/10^{-9}$ | 722 | 4.34 | $4.19\times10^{-8}$ | $1.39\times10^{-4}$ | 收敛 |
+| case300 AC/DC | 800 | $10^{-7}/10^{-4}/10^{-9}$ | 801 | 4.83 | $3.31\times10^{-8}$ | $9.61\times10^{-4}$ | 截断且后期退化 |
+| case2000 AC/DC | 20 | $10^{-6}/10^{-3}/10^{-8}$ | 21 | 10.10 | $1.07\times10^3$ | $3.24\times10^5$ | 截断 |
+| case2000 AC/DC | 50 | $10^{-6}/10^{-3}/10^{-8}$ | 51 | 23.69 | 0.110 | 5.99 | 截断 |
+| case2000 AC/DC | 100 | $10^{-6}/10^{-3}/10^{-8}$ | 101 | 46.82 | $4.96\times10^{-4}$ | 1.49 | 截断 |
+
+据此，当前推荐配置为：case30 级别至少 100 次；case300 AC/DC 使用 800 次、
+可行容差 $10^{-7}$、平稳性容差 $10^{-3}$、互补容差 $10^{-9}$。在当前
+limited-memory Hessian + MUMPS 组合上，把 case300 平稳性收紧到 $10^{-4}$
+不会单调改善结果，800 次末反而偏离约第 500--720 次附近的较好迭代。对
+case2000 AC/DC，100 次内虽然原始残差持续下降，但对偶平稳性远未合格；生产
+路径继续推荐原生 parity IPM + UMFPACK，Ipopt 仅作为有界交叉诊断后端。
