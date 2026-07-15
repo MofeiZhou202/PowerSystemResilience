@@ -1458,6 +1458,26 @@ class CallbackTNLP final : public Ipopt::TNLP {
         out.stats.success = false;
         out.stats.status = "Max iterations exceeded";
         break;
+      case Ipopt::Restoration_Failed:
+        out.stats.success = false;
+        out.stats.status = "Ipopt restoration failed";
+        break;
+      case Ipopt::Error_In_Step_Computation:
+        out.stats.success = false;
+        out.stats.status = "Ipopt step computation failed";
+        break;
+      case Ipopt::Invalid_Option:
+        out.stats.success = false;
+        out.stats.status = "Ipopt invalid option";
+        break;
+      case Ipopt::Invalid_Number_Detected:
+        out.stats.success = false;
+        out.stats.status = "Ipopt invalid number detected";
+        break;
+      case Ipopt::Not_Enough_Degrees_Of_Freedom:
+        out.stats.success = false;
+        out.stats.status = "Ipopt insufficient degrees of freedom";
+        break;
       default:
         out.stats.success = false;
         out.stats.status = "Ipopt failed";
@@ -2227,9 +2247,14 @@ SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
   app->Options()->SetIntegerValue("print_level", 0);
   app->Options()->SetStringValue("sb", "yes");
   app->Options()->SetStringValue("hessian_approximation", "limited-memory");
-  app->Options()->SetIntegerValue("max_iter", 500);
-  app->Options()->SetNumericValue("tol", 1e-8);
-  app->Options()->SetNumericValue("acceptable_tol", 1e-6);
+  const int max_iterations = std::max(1, prob.solver_options.max_iterations);
+  const double tolerance =
+      std::max(prob.solver_options.tolerance, 1e-14);
+  const double acceptable_tolerance =
+      std::max(prob.solver_options.acceptable_tolerance, tolerance);
+  app->Options()->SetIntegerValue("max_iter", max_iterations);
+  app->Options()->SetNumericValue("tol", tolerance);
+  app->Options()->SetNumericValue("acceptable_tol", acceptable_tolerance);
 
   const Ipopt::ApplicationReturnStatus init_status = app->Initialize();
   if (init_status != Ipopt::Solve_Succeeded) {

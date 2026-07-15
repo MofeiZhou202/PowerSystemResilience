@@ -13,9 +13,50 @@
 #include "mipsolvers/engine/problem_types.hpp"
 #include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
 #include "mipsolvers/engine/solver/adapter_registry.hpp"
+#include "mipsolvers/engine/solver/external/adapters.hpp"
 
 using namespace mipsolvers::engine;
 using Catch::Approx;
+
+#ifdef HACDCPF_HAVE_IPOPT
+namespace {
+
+NLPModel make_rosenbrock_nlp() {
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars = {
+      VariableMeta{VarType::Continuous, -5.0, 5.0},
+      VariableMeta{VarType::Continuous, -5.0, 5.0},
+  };
+  nlp.x0.resize(2);
+  nlp.x0 << -1.2, 1.0;
+  nlp.f = [](const Eigen::VectorXd& x) {
+    const double a = x[1] - x[0] * x[0];
+    const double b = 1.0 - x[0];
+    return 100.0 * a * a + b * b;
+  };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& grad) {
+    grad.resize(2);
+    const double a = x[1] - x[0] * x[0];
+    grad[0] = -400.0 * x[0] * a - 2.0 * (1.0 - x[0]);
+    grad[1] = 200.0 * a;
+  };
+  nlp.g = [](const Eigen::VectorXd& x, Eigen::VectorXd& g) {
+    g.resize(1);
+    g[0] = x[0] + x[1] - 2.0;
+  };
+  nlp.jac_g = [](const Eigen::VectorXd&,
+                 Eigen::SparseMatrix<double>& jac) {
+    jac.resize(1, 2);
+    jac.insert(0, 0) = 1.0;
+    jac.insert(0, 1) = 1.0;
+    jac.makeCompressed();
+  };
+  return nlp;
+}
+
+}  // namespace
+#endif
 
 // ─── SolverEngine construction ────────────────────────────────────────────────
 TEST_CASE("SolverEngine default construction registers adapters", "[engine][api]") {
@@ -54,6 +95,44 @@ TEST_CASE("SolverEngine adapter registration", "[engine][api]") {
   eng.register_default_adapters();
   CHECK_FALSE(eng.list_solvers(ProblemClass::LP).empty());
 }
+
+#ifdef HACDCPF_HAVE_IPOPT
+TEST_CASE("IpoptAdapter honors NLPModel iteration and tolerance options",
+          "[engine][api][ipopt][options]") {
+  IpoptAdapter ipopt;
+  REQUIRE(ipopt.available());
+
+  NLPModel capped = make_rosenbrock_nlp();
+  capped.solver_options.max_iterations = 1;
+  capped.solver_options.tolerance = 1e-12;
+  capped.solver_options.acceptable_tolerance = 1e-12;
+  const SolveResult short_run = ipopt.solve_nlp(capped);
+  INFO("short Ipopt status=" << short_run.stats.status
+       << " iterations=" << short_run.stats.iterations
+       << " primal=" << short_run.stats.primal_feas
+       << " dual=" << short_run.stats.dual_feas);
+  CHECK_FALSE(short_run.stats.success);
+  CHECK(short_run.stats.iterations <= 1);
+  CHECK(short_run.stats.status == "Max iterations exceeded");
+
+  NLPModel converged = make_rosenbrock_nlp();
+  converged.solver_options.max_iterations = 500;
+  converged.solver_options.tolerance = 1e-9;
+  converged.solver_options.acceptable_tolerance = 1e-7;
+  const SolveResult full_run = ipopt.solve_nlp(converged);
+  INFO("full Ipopt status=" << full_run.stats.status
+       << " iterations=" << full_run.stats.iterations
+       << " primal=" << full_run.stats.primal_feas
+       << " dual=" << full_run.stats.dual_feas);
+  REQUIRE(full_run.stats.success);
+  REQUIRE(full_run.x.size() == 2);
+  CHECK(std::abs(full_run.x.sum() - 2.0) < 1e-7);
+  CHECK(full_run.stats.objective < converged.f(converged.x0));
+  CHECK(full_run.stats.iterations > short_run.stats.iterations);
+  CHECK(full_run.stats.iterations <
+        converged.solver_options.max_iterations);
+}
+#endif
 
 // ─── Simple LP via SolverEngine ───────────────────────────────────────────────
 // min  -x - y

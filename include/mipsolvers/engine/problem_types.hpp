@@ -173,6 +173,17 @@ struct QPModel {
   std::vector<VariableMeta> vars;
 };
 
+/// Per-problem controls shared by external NLP solver adapters.
+///
+/// Defaults preserve the historical IpoptAdapter behaviour.  Native NLP
+/// solvers may continue using their adapter-specific options; external
+/// adapters should honor these fields whenever the backend supports them.
+struct NLPSolverOptions {
+  int max_iterations{500};
+  double tolerance{1e-8};
+  double acceptable_tolerance{1e-6};
+};
+
 struct NLPModel {
   Sense sense{Sense::Minimize};
   std::function<double(const Eigen::VectorXd&)> f;
@@ -198,6 +209,7 @@ struct NLPModel {
 
   std::vector<VariableMeta> vars;
   Eigen::VectorXd x0;
+  NLPSolverOptions solver_options;
 };
 
 struct MIPModel {
