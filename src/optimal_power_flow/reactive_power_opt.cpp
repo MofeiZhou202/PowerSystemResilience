@@ -45,6 +45,7 @@ struct TapInfo {
   int tap_pos, tap_min, tap_max, tap_neutral;
   double tap_step_pct;
   double ratio_before;
+  double electrical_tap_before;
   std::string name;
 };
 
@@ -121,6 +122,16 @@ std::vector<TapInfo> collect_taps(const HybridPowerSystem& sys,
     ti.tap_neutral  = t.tap_neutral;
     ti.tap_step_pct = t.tap_step_percent;
     ti.ratio_before = tap_ratio(t.tap_pos, t.tap_neutral, t.tap_step_percent);
+    ti.electrical_tap_before = ti.ratio_before;
+    if (t.source_branch_idx > 0) {
+      const auto branch = std::find_if(
+          sys.ac.branches.begin(), sys.ac.branches.end(), [&](const auto& item) {
+            return item.index == t.source_branch_idx;
+          });
+      if (branch != sys.ac.branches.end())
+        ti.electrical_tap_before = std::abs(branch->tap) < 1e-12
+            ? 1.0 : branch->tap;
+    }
     ti.name         = row.name;
     out.push_back(ti);
   }
@@ -396,6 +407,22 @@ RPOControlInventory inspect_rpo_controls(const HybridPowerSystem& sys,
                               t.tap_step_percent);
     row.ratio_max = tap_ratio(t.tap_max, t.tap_neutral,
                               t.tap_step_percent);
+    row.electrical_tap_current = row.ratio_current;
+    double electrical_tap_base = 1.0;
+    if (t.source_branch_idx > 0) {
+      const auto branch = std::find_if(
+          sys.ac.branches.begin(), sys.ac.branches.end(), [&](const auto& item) {
+            return item.index == t.source_branch_idx;
+          });
+      if (branch != sys.ac.branches.end()) {
+        row.electrical_tap_current = std::abs(branch->tap) < 1e-12
+            ? 1.0 : branch->tap;
+        electrical_tap_base = row.electrical_tap_current /
+            std::max(1e-6, row.ratio_current);
+      }
+    }
+    row.electrical_tap_min = electrical_tap_base * row.ratio_min;
+    row.electrical_tap_max = electrical_tap_base * row.ratio_max;
     inventory.taps.push_back(std::move(row));
   }
 
@@ -833,6 +860,9 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
     tr.ratio_before = taps[k].ratio_before;
     tr.ratio_after  = tap_ratio(tr.tap_after, taps[k].tap_neutral,
                                 taps[k].tap_step_pct);
+    tr.electrical_tap_before = taps[k].electrical_tap_before;
+    tr.electrical_tap_after = tr.electrical_tap_before *
+        tr.ratio_after / std::max(1e-6, tr.ratio_before);
     out.taps.push_back(tr);
   }
   for (int k = 0; k < n_shunts; ++k) {

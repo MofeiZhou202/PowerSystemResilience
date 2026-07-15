@@ -688,7 +688,7 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
   font-size: 11px;
   color: var(--ink2);
 }
-.prop-field input, .prop-field select, .prop-field textarea {
+.prop-field input, .prop-field select, .prop-field textarea, .prop-field output {
   padding: 4px 8px;
   border-radius: 4px;
   border: 1px solid var(--border);
@@ -697,6 +697,7 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
   font: inherit;
   font-size: 12px;
 }
+.prop-field output { min-height: 27px; }
 .prop-field input:focus,
 .prop-field select:focus,
 .prop-field textarea:focus { border-color: var(--accent); outline: none; }

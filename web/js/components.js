@@ -1012,7 +1012,7 @@ const COMP = (() => {
     mttr_hr: '平均修复时间(h)', mttr_hours: '平均修复时间(h)',
     mtbf_hr: '平均无故障时间(h)', mtbf_hours: '平均无故障时间(h)',
     t_scheduled_hr: '计划检修时间(h)',
-    tap: '变比', n_parallel: '并联数', s_sc_max_mva: '最大短路容量(MVA)',
+    tap: 'MATPOWER支路实际tap(pu)', n_parallel: '并联数', s_sc_max_mva: '最大短路容量(MVA)',
     s_sc_min_mva: '最小短路容量(MVA)', rx_max: 'R/X(max)', rx_min: 'R/X(min)',
     p_rated_mw: '额定功率(MW)', e_rated_mwh: '额定能量(MWh)',
     soc_init: '初始SOC', soc_min: '最小SOC', soc_max: '最大SOC',

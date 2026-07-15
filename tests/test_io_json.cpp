@@ -571,6 +571,26 @@ TEST_CASE("MATPOWER parser: case24_ieee_rts parses", "[io][matpower]") {
     auto sys = load_mp("case24_ieee_rts.m");
     CHECK(sys.ac.buses.size() == 24);
     CHECK(sys.ac.generators.size() >= 12);
+
+    // MATPOWER provides fixed off-nominal branch ratios, but no OLTC range or
+    // step metadata. Preserve the electrical taps without inventing controls.
+    const std::vector<double> expected_taps{1.03, 1.03, 1.03, 1.02, 1.02};
+    std::vector<double> actual_taps;
+    for (const auto& branch : sys.ac.branches) {
+        if (std::abs(branch.tap - 1.0) > 1e-12) actual_taps.push_back(branch.tap);
+    }
+    REQUIRE(actual_taps.size() == expected_taps.size());
+    for (std::size_t i = 0; i < expected_taps.size(); ++i)
+        CHECK_THAT(actual_taps[i], WithinAbs(expected_taps[i], 1e-12));
+
+    REQUIRE(sys.ac.transformers_2w.size() == expected_taps.size());
+    for (const auto& transformer : sys.ac.transformers_2w) {
+        CHECK(transformer.tap_pos == 0);
+        CHECK(transformer.tap_min == 0);
+        CHECK(transformer.tap_max == 0);
+        CHECK(transformer.tap_neutral == 0);
+        CHECK_THAT(transformer.tap_step_percent, WithinAbs(0.0, 1e-12));
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -5240,7 +5240,16 @@ const Canvas = (() => {
           t.setAttribute('y', comp.y - 24);
           t.setAttribute('fill', color);
           t.setAttribute('data-comp-id', comp.id);
-          t.textContent = `${vm.toFixed(4)}∠${(va * 180 / Math.PI).toFixed(2)}°`;
+          const baseKv = Number(comp.params?.base_kv);
+          const actualKv = Number.isFinite(baseKv) && baseKv > 0 ? vm * baseKv : NaN;
+          t.textContent = Number.isFinite(actualKv)
+            ? `${actualKv.toFixed(2)} kV`
+            : `${vm.toFixed(4)} pu`;
+          const tip = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+          tip.textContent = Number.isFinite(actualKv)
+            ? `${actualKv.toFixed(3)} kV = ${vm.toFixed(6)} pu; angle ${(va * 180 / Math.PI).toFixed(4)}°`
+            : `${vm.toFixed(6)} pu; angle ${(va * 180 / Math.PI).toFixed(4)}°`;
+          t.appendChild(tip);
           resultsLayer.appendChild(t);
         }
       } else if (comp.type === 'dc_bus') {
@@ -6804,8 +6813,17 @@ const Canvas = (() => {
     if (mode === 'voltage') {
       acVoltage.forEach((value, bus) => {
         const comp = componentForBus('AC', bus);
-        addBusGlow(comp, value, 0.9, 1.1, `AC Bus ${bus}: ${Number(value).toFixed(4)} pu`);
-        addText(comp, `${Number(value).toFixed(4)} pu`, '#61afef');
+        const baseKv = Number(comp?.params?.base_kv);
+        const actualKv = Number.isFinite(baseKv) && baseKv > 0
+          ? Number(value) * baseKv : NaN;
+        const voltageText = Number.isFinite(actualKv)
+          ? `${actualKv.toFixed(2)} kV`
+          : `${Number(value).toFixed(4)} pu`;
+        const voltageTitle = Number.isFinite(actualKv)
+          ? `AC Bus ${bus}: ${actualKv.toFixed(3)} kV = ${Number(value).toFixed(6)} pu`
+          : `AC Bus ${bus}: ${Number(value).toFixed(6)} pu`;
+        addBusGlow(comp, value, 0.9, 1.1, voltageTitle);
+        addText(comp, voltageText, '#61afef');
       });
       dcVoltage.forEach((value, bus) => {
         const comp = componentForBus('DC', bus);

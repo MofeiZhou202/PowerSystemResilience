@@ -77,6 +77,8 @@ struct TapResult {
   int    tap_after{0};
   double ratio_before{1.0};
   double ratio_after{1.0};
+  double electrical_tap_before{1.0};
+  double electrical_tap_after{1.0};
 };
 
 /// Per-shunt result entry.
@@ -115,6 +117,9 @@ struct RPOTapControlInput {
   double ratio_current{1.0};
   double ratio_min{1.0};
   double ratio_max{1.0};
+  double electrical_tap_current{1.0};
+  double electrical_tap_min{1.0};
+  double electrical_tap_max{1.0};
 };
 
 /// Auditable switchable-shunt input row.

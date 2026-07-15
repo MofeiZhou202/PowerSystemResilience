@@ -7635,6 +7635,9 @@ json rpo_control_inventory_json(const hacdcpf::HybridPowerSystem& sys,
         {"ratio_current", row.ratio_current},
         {"ratio_min", row.ratio_min},
         {"ratio_max", row.ratio_max},
+        {"electrical_tap_current", row.electrical_tap_current},
+        {"electrical_tap_min", row.electrical_tap_min},
+        {"electrical_tap_max", row.electrical_tap_max},
         {"at_lower_limit", row.tap_pos == row.tap_min},
         {"at_upper_limit", row.tap_pos == row.tap_max}});
   }
@@ -11377,6 +11380,27 @@ int main(int argc, char** argv) {
                               "双绕组变压器", tr.name.empty() ? ("Trafo " + std::to_string(tr.index)) : tr.name,
                               is_solved(tr.in_service),
                               ac_conn(tr.hv_bus) + " -> " + ac_conn(tr.lv_bus));
+          const double relative_tap = std::max(
+              1e-6, 1.0 + (static_cast<double>(tr.tap_pos - tr.tap_neutral) *
+                            tr.tap_step_percent / 100.0));
+          double electrical_tap = relative_tap;
+          if (tr.source_branch_idx > 0) {
+            const auto branch = std::find_if(
+                sys.ac.branches.begin(), sys.ac.branches.end(),
+                [&](const auto& item) {
+                  return item.index == tr.source_branch_idx;
+                });
+            if (branch != sys.ac.branches.end())
+              electrical_tap = std::abs(branch->tap) < 1e-12
+                  ? 1.0 : branch->tap;
+          }
+          add_text_metric(row, "调压类型",
+                          tr.tap_max > tr.tap_min && tr.tap_step_percent > 0.0
+                              ? "OLTC" : "固定变比");
+          add_metric(row, "整数档位", static_cast<double>(tr.tap_pos),
+                     "step", "scalar", 0);
+          add_metric(row, "相对变比", relative_tap, "pu", "scalar", 6);
+          add_metric(row, "实际支路tap", electrical_tap, "pu", "scalar", 6);
           if (i < trafo2w_flows.size() && trafo2w_flows[i].valid) {
             const auto& fl = trafo2w_flows[i];
             add_metric(row, "P_HV", fl.p_hv_mw, "MW", "p", 4);
@@ -17223,12 +17247,15 @@ int main(int argc, char** argv) {
 
         json tap_names = json::array(), tap_indices = json::array();
         json tap_ratio_before = json::array(), tap_ratio_after = json::array();
+        json electrical_tap_before = json::array(), electrical_tap_after = json::array();
         json tap_pos_before = json::array(), tap_pos_after = json::array();
         for (const auto& t : result.taps) {
           tap_names.push_back(t.name);
           tap_indices.push_back(t.trafo_index);
           tap_ratio_before.push_back(t.ratio_before);
           tap_ratio_after.push_back(t.ratio_after);
+          electrical_tap_before.push_back(t.electrical_tap_before);
+          electrical_tap_after.push_back(t.electrical_tap_after);
           tap_pos_before.push_back(t.tap_before);
           tap_pos_after.push_back(t.tap_after);
         }
@@ -17236,6 +17263,8 @@ int main(int argc, char** argv) {
         out["tap_indices"]      = tap_indices;
         out["tap_before"]       = tap_ratio_before;
         out["tap_after"]        = tap_ratio_after;
+        out["electrical_tap_before"] = electrical_tap_before;
+        out["electrical_tap_after"] = electrical_tap_after;
         out["tap_pos_before"]   = tap_pos_before;
         out["tap_pos_after"]    = tap_pos_after;
 

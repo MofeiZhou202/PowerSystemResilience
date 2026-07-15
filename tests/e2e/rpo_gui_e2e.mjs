@@ -56,6 +56,56 @@ async function main() {
     }));
     await page.goto(`${base}/xjtu/`, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForFunction(() => typeof App !== 'undefined');
+
+    // Direct MATPOWER import must keep case24's five 1.03/1.02 branch taps as
+    // fixed electrical ratios, never as fractional or hundreds-valued OLTC
+    // positions.  The GUI also exposes actual kV beside per-unit bus voltage.
+    await page.evaluate(() => App.loadMatpowerCase('case24_ieee_rts.m'));
+    const case24Canvas = await page.evaluate(() => {
+      const system = Canvas.buildSystemJson();
+      return {
+        taps: system.ac.branches.filter(branch => Math.abs(Number(branch.tap || 1) - 1) > 1e-9)
+          .map(branch => Number(branch.tap)),
+        controls: system.ac.transformers_2w.map(transformer => ({
+          pos: Number(transformer.tap_pos), min: Number(transformer.tap_min),
+          max: Number(transformer.tap_max), step: Number(transformer.tap_step_percent),
+        })),
+      };
+    });
+    const expectedFixedTaps = [1.03, 1.03, 1.03, 1.02, 1.02];
+    const tapsMatch = (actual, expected) => actual.length === expected.length &&
+      actual.every((value, i) => Math.abs(Number(value) - expected[i]) <= 1e-12);
+    if (!tapsMatch(case24Canvas.taps, expectedFixedTaps) ||
+        case24Canvas.controls.length !== 5 ||
+        case24Canvas.controls.some(row => row.pos !== 0 || row.min !== 0 ||
+          row.max !== 0 || row.step !== 0)) {
+      throw new Error(`case24 fixed-tap Canvas contract failed: ${JSON.stringify(case24Canvas)}`);
+    }
+    const voltageOverlay = await page.locator('.result-voltage').first().textContent();
+    const voltageOverlayTitle = await page.locator('.result-voltage').first()
+      .locator('title').textContent();
+    if (!voltageOverlay?.includes('kV') || !voltageOverlayTitle?.includes('pu')) {
+      throw new Error(`case24 Canvas voltage does not distinguish kV and pu: ${voltageOverlay}`);
+    }
+    if (!await page.locator('#pfBusResults').textContent().then(text =>
+      text.includes('基准电压(kV)') && text.includes('实际电压(kV)')) ||
+        !await page.locator('#pfAllComponentsResults').textContent().then(text =>
+          text.includes('实际支路tap') && text.includes('固定变比'))) {
+      throw new Error('case24 PF results do not distinguish actual kV, per-unit voltage and fixed branch tap');
+    }
+    await page.evaluate(() => App.setActiveModule('rpo'));
+    const case24InventoryPromise = page.waitForResponse(response =>
+      response.url().includes('/api/session/rpo_inputs') && response.request().method() === 'POST',
+      { timeout: 120000 });
+    await page.locator('#btnRefreshRpoInputs').click();
+    const case24Inventory = await (await case24InventoryPromise).json();
+    if (case24Inventory.adjustable_oltc_count !== 0 ||
+        case24Inventory.oltc.length !== 5 ||
+        !tapsMatch(case24Inventory.oltc.map(row => row.electrical_tap_current),
+          expectedFixedTaps)) {
+      throw new Error(`case24 fixed-tap inventory failed: ${JSON.stringify(case24Inventory)}`);
+    }
+
     await page.evaluate(() => App.loadMatpowerCase('case9.m'));
     await page.evaluate(() => App.setActiveModule('rpo'));
     if (!(await page.locator('#moduleRpo').evaluate(el => el.classList.contains('active'))) ||

@@ -4452,14 +4452,18 @@ const App = (() => {
 	      const lmpQ = data.lmp_q || [];
 	      const hasLmp = acRows.some(r => r.lmp_p != null) || lmpP.length > 0 || Array.isArray(data.lmp);
 	      const hasVm = acRows.some(r => r.vm_pu != null) || vm.length > 0;
-	      let html = `<table><thead><tr><th>Bus</th>${hasVm ? '<th>Vm(pu)</th>' : ''}<th>Va(°)</th>${hasLmp ? '<th>LMP-P</th><th>LMP-Q</th>' : ''}</tr></thead><tbody>`;
+	      let html = `<table><thead><tr><th>Bus</th>${hasVm ? '<th>基准电压(kV)</th><th>实际电压(kV)</th><th>Vm(pu)</th>' : ''}<th>Va(°)</th>${hasLmp ? '<th>LMP-P</th><th>LMP-Q</th>' : ''}</tr></thead><tbody>`;
 	      acRows.forEach((row, i) => {
 	        const busId = row.index ?? row.canvas_index;
 	        const v = row.vm_pu ?? vm[i];
+	        const baseKv = Number((opfSystem.ac?.buses || [])
+	          .find(bus => Number(bus.index) === Number(busId))?.base_kv);
+	        const actualKv = Number.isFinite(baseKv) && baseKv > 0 && Number.isFinite(Number(v))
+	          ? Number(v) * baseKv : NaN;
 	        const ang = row.va_rad != null ? (row.va_rad * 180 / Math.PI).toFixed(4)
 	          : (va[i] != null ? (va[i] * 180 / Math.PI).toFixed(4) : '0');
 	        const color = v < 0.95 ? 'color:#e06c75' : v > 1.05 ? 'color:#d19a66' : '';
-	        html += `<tr${attrForRow(row)}><td>${busId ?? `pos ${row.position ?? i}`}</td>${hasVm ? `<td style="${color}">${fmt(v, 6)}</td>` : ''}<td>${ang}</td>${hasLmp ? `<td>${fmt(row.lmp_p ?? lmpP[i] ?? data.lmp?.[i])}</td><td>${fmt(row.lmp_q ?? lmpQ[i])}</td>` : ''}</tr>`;
+	        html += `<tr${attrForRow(row)}><td>${busId ?? `pos ${row.position ?? i}`}</td>${hasVm ? `<td>${Number.isFinite(baseKv) ? fmt(baseKv, 3) : '—'}</td><td>${Number.isFinite(actualKv) ? fmt(actualKv, 3) : '—'}</td><td style="${color}">${fmt(v, 6)}</td>` : ''}<td>${ang}</td>${hasLmp ? `<td>${fmt(row.lmp_p ?? lmpP[i] ?? data.lmp?.[i])}</td><td>${fmt(row.lmp_q ?? lmpQ[i])}</td>` : ''}</tr>`;
 	      });
 	      html += '</tbody></table>';
 	      busDiv.innerHTML = html;
@@ -4698,13 +4702,13 @@ const App = (() => {
       (filter === 'adjustable' ? row.adjustable : !row.adjustable));
     const tapDiv = document.getElementById('rpoOltcInputTable');
     if (tapDiv) tapDiv.innerHTML = taps.length
-      ? `<table><thead><tr><th>参与</th><th>模型状态</th><th>变压器</th><th>连接</th><th>分接侧</th><th>当前位置</th><th>铭牌范围</th><th>本次优化范围</th><th>本次位置数</th><th>每档步长</th><th>当前变比</th><th>铭牌变比范围</th><th>判据/方向</th><th>操作</th></tr></thead><tbody>${taps.map(row => {
+      ? `<table><thead><tr><th>参与</th><th>模型状态</th><th>变压器</th><th>连接</th><th>分接侧</th><th>当前位置</th><th>铭牌范围</th><th>本次优化范围</th><th>本次位置数</th><th>每档步长</th><th>当前相对变比</th><th>实际支路tap</th><th>实际tap范围</th><th>判据/方向</th><th>操作</th></tr></thead><tbody>${taps.map(row => {
           const limit = row.at_lower_limit ? '（下限）' : row.at_upper_limit ? '（上限）' : '';
           const selected = !!row.selected_for_optimization;
           const reason = row.adjustable
             ? `+1位置 → 变比 +${fmt(row.tap_step_percent, 3)}%；电压响应方向由分接侧和网络决定`
             : (RPO_CONTROL_REASON_LABELS[row.exclusion_reason] || row.exclusion_reason || '不满足可调判据');
-          return `<tr><td><input type="checkbox" data-rpo-tap-toggle="${Number(row.trafo_index)}" ${selected ? 'checked' : ''} ${row.adjustable ? '' : 'disabled'} aria-label="${escapeHtml(row.name || '')}参与无功优化"/></td><td class="${selected ? 'rpo-control-adjustable' : 'rpo-control-excluded'}">${selected ? `进入优化${limit}` : (row.adjustable ? '可调但未选' : '固定/排除')}</td><td>${escapeHtml(row.name || `Trafo ${row.authored_index}`)}</td><td>${escapeHtml(row.hv_bus_label || row.hv_bus)} → ${escapeHtml(row.lv_bus_label || row.lv_bus)}</td><td>${escapeHtml(row.tap_side_label || '')}</td><td>${Number(row.tap_pos)}（相对中性 ${Number(row.tap_number) >= 0 ? '+' : ''}${Number(row.tap_number)}）</td><td>[${Number(row.tap_min)}, ${Number(row.tap_max)}]（${Number(row.position_count || 0)}位置）</td><td>${selected ? `[${Number(row.optimization_tap_min)}, ${Number(row.optimization_tap_max)}]` : '固定当前'}</td><td>${Number(row.optimization_position_count || 0)}</td><td>${fmt(row.tap_step_percent, 3)}%</td><td>${fmt(row.ratio_current)}</td><td>[${fmt(row.ratio_min)}, ${fmt(row.ratio_max)}]</td><td>${escapeHtml(reason)}</td><td><button class="toolbar-btn" type="button" data-rpo-locate="${escapeHtml(row.name || '')}" data-rpo-authored-index="${Number(row.authored_index)}" data-rpo-source-branch="${Number(row.source_branch_idx || 0)}">定位/编辑</button></td></tr>`;
+          return `<tr><td><input type="checkbox" data-rpo-tap-toggle="${Number(row.trafo_index)}" ${selected ? 'checked' : ''} ${row.adjustable ? '' : 'disabled'} aria-label="${escapeHtml(row.name || '')}参与无功优化"/></td><td class="${selected ? 'rpo-control-adjustable' : 'rpo-control-excluded'}">${selected ? `进入优化${limit}` : (row.adjustable ? '可调但未选' : '固定/排除')}</td><td>${escapeHtml(row.name || `Trafo ${row.authored_index}`)}</td><td>${escapeHtml(row.hv_bus_label || row.hv_bus)} → ${escapeHtml(row.lv_bus_label || row.lv_bus)}</td><td>${escapeHtml(row.tap_side_label || '')}</td><td>${Number(row.tap_pos)}（相对中性 ${Number(row.tap_number) >= 0 ? '+' : ''}${Number(row.tap_number)}）</td><td>[${Number(row.tap_min)}, ${Number(row.tap_max)}]（${Number(row.position_count || 0)}位置）</td><td>${selected ? `[${Number(row.optimization_tap_min)}, ${Number(row.optimization_tap_max)}]` : '固定当前'}</td><td>${Number(row.optimization_position_count || 0)}</td><td>${fmt(row.tap_step_percent, 3)}%</td><td>${fmt(row.ratio_current)}</td><td>${fmt(row.electrical_tap_current)}</td><td>[${fmt(row.electrical_tap_min)}, ${fmt(row.electrical_tap_max)}]</td><td>${escapeHtml(reason)}</td><td><button class="toolbar-btn" type="button" data-rpo-locate="${escapeHtml(row.name || '')}" data-rpo-authored-index="${Number(row.authored_index)}" data-rpo-source-branch="${Number(row.source_branch_idx || 0)}">定位/编辑</button></td></tr>`;
         }).join('')}</tbody></table>`
       : `<p class="empty-hint">${allTaps.length ? '当前筛选条件下没有变压器。' : '当前模型没有两绕组变压器。'}</p>`;
 
@@ -4847,7 +4851,8 @@ const App = (() => {
       return {
         type: '两绕组OLTC', controlType: 'tap', name,
         before: data.tap_pos_before?.[i], after: data.tap_pos_after?.[i],
-        physicalBefore: data.tap_before?.[i], physicalAfter: data.tap_after?.[i], unit: 'ratio',
+        physicalBefore: data.electrical_tap_before?.[i] ?? data.tap_before?.[i],
+        physicalAfter: data.electrical_tap_after?.[i] ?? data.tap_after?.[i], unit: '实际tap',
         allowed: meta ? `[${meta.optimization_tap_min}, ${meta.optimization_tap_max}]` : '—',
         authoredIndex: Number(meta?.authored_index),
         sourceBranchIdx: Number(meta?.source_branch_idx || 0),
@@ -10203,17 +10208,23 @@ const App = (() => {
     // AC Bus voltage table
     const busDiv = document.getElementById('pfBusResults');
     if (data.vm && data.vm.length > 0) {
-      let html = '<table><thead><tr><th>Bus</th><th>Vm(pu)</th><th>Va(°)</th></tr></thead><tbody>';
+      const voltageSystem = (typeof Canvas !== 'undefined' && Canvas.buildSystemJson)
+        ? Canvas.buildSystemJson() : { ac: { buses: [] } };
+      const voltageBusById = new Map((voltageSystem.ac?.buses || [])
+        .map(bus => [Number(bus.index), bus]));
+      let html = '<table><thead><tr><th>Bus</th><th>基准电压(kV)</th><th>实际电压(kV)</th><th>Vm(pu)</th><th>Va(°)</th></tr></thead><tbody>';
       data.vm.forEach((vm, i) => {
         const busId = pfBusIdByPosition('ac', i);
         const busLabel = busId ?? `pos ${i}`;
+        const baseKv = Number(voltageBusById.get(Number(busId))?.base_kv);
+        const actualKv = Number.isFinite(baseKv) && baseKv > 0 ? vm * baseKv : NaN;
         const va = data.va ? (data.va[i] * 180 / Math.PI).toFixed(4) : '0';
         const color = vm < 0.95 ? 'color:#e06c75' : vm > 1.05 ? 'color:#d19a66' : '';
         const resultRow = (data.component_results || []).find(r =>
           r.canvas_type === 'ac_bus' && (Number(r.position) === Number(i) || Number(r.index) === Number(busId))) ||
           { canvas_type: 'ac_bus', index: busId, position: i };
         const attr = resultRowAttr(resultRow, busId != null && busMap.ac ? busMap.ac[busId] : undefined);
-        html += `<tr${attr}><td>${busLabel}</td><td style="${color}">${vm.toFixed(6)}</td><td>${va}</td></tr>`;
+        html += `<tr${attr}><td>${busLabel}</td><td>${Number.isFinite(baseKv) ? baseKv.toFixed(3) : '—'}</td><td>${Number.isFinite(actualKv) ? actualKv.toFixed(3) : '—'}</td><td style="${color}">${vm.toFixed(6)}</td><td>${va}</td></tr>`;
       });
       html += '</tbody></table>';
       busDiv.innerHTML = html;
@@ -12008,6 +12019,29 @@ const App = (() => {
 
     const fieldsDiv = document.getElementById('propFields');
     fieldsDiv.innerHTML = '';
+
+    if (comp.type === 'transformer_2w' && comp.params?._from_branch) {
+      const heading = document.createElement('div');
+      heading.className = 'prop-section-header';
+      heading.textContent = 'MATPOWER 导入参数';
+      fieldsDiv.appendChild(heading);
+
+      const importedRows = [
+        ['固定支路变比 (pu)', Number(comp.params.tap || 1).toFixed(6)],
+        ['OLTC 控制', Number(comp.params.tap_max) > Number(comp.params.tap_min) &&
+          Number(comp.params.tap_step_percent) > 0 ? '已配置' : '未配置（固定变比）'],
+      ];
+      importedRows.forEach(([label, value]) => {
+        const row = document.createElement('div');
+        row.className = 'prop-field';
+        const name = document.createElement('label');
+        name.textContent = label;
+        const output = document.createElement('output');
+        output.textContent = value;
+        row.append(name, output);
+        fieldsDiv.appendChild(row);
+      });
+    }
 
     const defaults = COMP.defaults[comp.type] || {};
     // Optional section dividers: when a field key matches, a header row is
