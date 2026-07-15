@@ -504,14 +504,16 @@ HybridPowerSystem parse_matpower_impl(const std::string& filepath,
       const double z_pu = std::sqrt(br.r_pu * br.r_pu + br.x_pu * br.x_pu);
       tr.vk_percent = z_pu * sn_over_base * 100.0;
       tr.pk_kw = br.r_pu * tr.sn_mva * tr.sn_mva / std::max(1e-9, base_mva) * 1e3;
-      // Tap position: encode the off-nominal tap ratio as a step offset.
-      // Use tap_step_percent = 0.01% so that tap_pos encodes the
-      // deviation from nominal with 4 decimal places of precision.
-      tr.tap_step_percent = 0.01;
+      // MATPOWER supplies only the present off-nominal branch ratio.  It does
+      // not carry OLTC controllability, step size or position limits, so do not
+      // invent thousands of 0.01% tap positions.  The exact fixed ratio remains
+      // on the linked ACBranch; applications may explicitly promote selected
+      // metadata rows to OLTCs by providing a real range and step size.
+      tr.tap_step_percent = 0.0;
       tr.tap_neutral = 0;
-      tr.tap_min = -2000;
-      tr.tap_max = 2000;
-      tr.tap_pos = static_cast<int>(std::round((br.tap - 1.0) * 10000.0));
+      tr.tap_min = 0;
+      tr.tap_max = 0;
+      tr.tap_pos = 0;
       tr.tap_side = 0;  // HV side
       tr.shift_deg = br.shift_deg;
       tr.name = "Trafo" + std::to_string(tr.index);

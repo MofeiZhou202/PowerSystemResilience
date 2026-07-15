@@ -94,6 +94,7 @@ struct ShuntResult {
 struct RPOTapControlInput {
   int trafo_index{0};          ///< Position in ac.transformers_2w.
   int authored_index{0};       ///< User-facing component index.
+  int source_branch_idx{0};    ///< Linked MATPOWER branch, when present.
   std::string name;
   int hv_bus{0};
   int lv_bus{0};
@@ -138,10 +139,17 @@ struct RPOControlInventory {
   std::vector<RPOShuntControlInput> shunts;
 };
 
+struct RPOResult;
+
 /// Inspect every candidate discrete control, including excluded devices and
 /// the exact reason they do not enter the RPO decision vector.
 RPOControlInventory inspect_rpo_controls(const HybridPowerSystem& sys,
                                          const RPOOptions& opt = {});
+
+/// Apply a solved discrete RPO point back to the authored system, including
+/// linked MATPOWER branch tap ratios and switchable-shunt susceptance.
+void apply_rpo_discrete_solution(HybridPowerSystem& sys,
+                                 const RPOResult& result);
 
 /// Solution returned by the RPO solver.
 struct RPOResult {

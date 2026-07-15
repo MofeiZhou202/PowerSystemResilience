@@ -7610,6 +7610,7 @@ json rpo_control_inventory_json(const hacdcpf::HybridPowerSystem& sys,
     taps.push_back(json{
         {"trafo_index", row.trafo_index},
         {"authored_index", row.authored_index},
+        {"source_branch_idx", row.source_branch_idx},
         {"name", row.name},
         {"hv_bus", row.hv_bus},
         {"lv_bus", row.lv_bus},
@@ -16872,21 +16873,7 @@ int main(int argc, char** argv) {
         // and replay the optimized operating point through PF.  This is kept
         // separate from the RPO's inner solves so agreement is auditable.
         hacdcpf::HybridPowerSystem optimized_sys = sys;
-        for (const auto& tap : result.taps) {
-          if (tap.trafo_index >= 0 &&
-              tap.trafo_index < static_cast<int>(optimized_sys.ac.transformers_2w.size())) {
-            optimized_sys.ac.transformers_2w[static_cast<size_t>(tap.trafo_index)].tap_pos =
-                tap.tap_after;
-          }
-        }
-        for (const auto& shunt : result.shunts) {
-          if (shunt.shunt_index >= 0 &&
-              shunt.shunt_index < static_cast<int>(optimized_sys.ac.shunts.size())) {
-            auto& target = optimized_sys.ac.shunts[static_cast<size_t>(shunt.shunt_index)];
-            target.current_step = shunt.step_after;
-            target.bs_mvar = shunt.bs_mvar_after;
-          }
-        }
+        hacdcpf::opf::apply_rpo_discrete_solution(optimized_sys, result);
 
         hacdcpf::opf::ACOPFOptions independent_opt;
         independent_opt.ac_solver_backend =

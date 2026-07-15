@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <string>
 
@@ -100,7 +101,11 @@ TEST_CASE("case300 RPO returns complete display vectors from a seeded solve",
   CHECK(result.vm_before.size() == system.ac.buses.size());
   CHECK(result.vm_after.size() == system.ac.buses.size());
   CHECK(result.qg_mvar_after.size() == system.ac.generators.size());
-  CHECK(result.taps.size() == system.ac.transformers_2w.size());
+  const auto inventory = hacdcpf::opf::inspect_rpo_controls(system, options);
+  const auto selected_taps = std::count_if(
+      inventory.taps.begin(), inventory.taps.end(),
+      [](const auto& row) { return row.selected_for_optimization; });
+  CHECK(result.taps.size() == static_cast<size_t>(selected_taps));
 }
 
 TEST_CASE("RPO control inventory explains adjustable and excluded inputs",
@@ -173,4 +178,65 @@ TEST_CASE("RPO control inventory explains adjustable and excluded inputs",
   CHECK(restricted_inventory.taps[0].optimization_tap_max == 1);
   CHECK(restricted_inventory.taps[0].optimization_position_count == 3);
   CHECK_FALSE(restricted_inventory.taps[1].selected_for_optimization);
+}
+
+TEST_CASE("MATPOWER fixed tap ratios are not invented as 4001-position OLTCs",
+          "[rpo][matpower][controls]") {
+  const auto imported = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case300.m");
+  const auto imported_inventory = hacdcpf::opf::inspect_rpo_controls(imported);
+  REQUIRE_FALSE(imported_inventory.taps.empty());
+  CHECK(std::none_of(imported_inventory.taps.begin(),
+                     imported_inventory.taps.end(),
+                     [](const auto& row) { return row.adjustable; }));
+  CHECK(std::all_of(imported_inventory.taps.begin(),
+                    imported_inventory.taps.end(), [](const auto& row) {
+                      return row.tap_pos == 0 && row.tap_min == 0 &&
+                             row.tap_max == 0 && row.tap_step_percent == 0.0;
+                    }));
+
+  const auto authored = hacdcpf::io::build_case300_acdc();
+  const auto authored_inventory = hacdcpf::opf::inspect_rpo_controls(authored);
+  CHECK(std::count_if(authored_inventory.taps.begin(),
+                      authored_inventory.taps.end(),
+                      [](const auto& row) { return row.adjustable; }) == 3);
+  CHECK(std::all_of(authored_inventory.taps.begin(),
+                    authored_inventory.taps.end(), [](const auto& row) {
+                      return !row.adjustable ||
+                          (row.tap_pos == 0 && row.tap_min == -4 &&
+                           row.tap_max == 4 && row.position_count == 9 &&
+                           row.tap_step_percent == 1.25);
+                    }));
+}
+
+TEST_CASE("Applying an RPO tap action updates its linked electrical branch",
+          "[rpo][tap][projection]") {
+  hacdcpf::HybridPowerSystem system;
+  hacdcpf::ACBranch branch;
+  branch.index = 77;
+  branch.from_bus = 1;
+  branch.to_bus = 2;
+  branch.tap = 1.03;
+  system.ac.branches.push_back(branch);
+
+  hacdcpf::Transformer2W transformer;
+  transformer.index = 9;
+  transformer.hv_bus = 1;
+  transformer.lv_bus = 2;
+  transformer.tap_pos = 0;
+  transformer.tap_neutral = 0;
+  transformer.tap_min = -4;
+  transformer.tap_max = 4;
+  transformer.tap_step_percent = 1.25;
+  transformer.source_branch_idx = 77;
+  system.ac.transformers_2w.push_back(transformer);
+
+  hacdcpf::opf::RPOResult result;
+  result.taps.push_back(hacdcpf::opf::TapResult{
+      .trafo_index = 0, .name = "linked", .tap_before = 0,
+      .tap_after = 2, .ratio_before = 1.0, .ratio_after = 1.025});
+  hacdcpf::opf::apply_rpo_discrete_solution(system, result);
+
+  CHECK(system.ac.transformers_2w[0].tap_pos == 2);
+  CHECK(system.ac.branches[0].tap == Catch::Approx(1.03 * 1.025));
 }

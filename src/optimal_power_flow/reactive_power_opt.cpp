@@ -60,6 +60,30 @@ inline double tap_ratio(int tap_pos, int tap_neutral, double step_pct) {
   return 1.0 + (tap_pos - tap_neutral) * step_pct / 100.0;
 }
 
+void set_transformer_tap_position(HybridPowerSystem& sys, int trafo_idx,
+                                  int new_tap_pos) {
+  auto& transformer = sys.ac.transformers_2w.at(
+      static_cast<size_t>(trafo_idx));
+  const double old_ratio = std::max(
+      1e-6, tap_ratio(transformer.tap_pos, transformer.tap_neutral,
+                      transformer.tap_step_percent));
+  const double new_ratio = std::max(
+      1e-6, tap_ratio(new_tap_pos, transformer.tap_neutral,
+                      transformer.tap_step_percent));
+  if (transformer.source_branch_idx > 0) {
+    const auto branch = std::find_if(
+        sys.ac.branches.begin(), sys.ac.branches.end(), [&](const auto& item) {
+          return item.index == transformer.source_branch_idx;
+        });
+    if (branch != sys.ac.branches.end()) {
+      const double old_branch_tap = std::abs(branch->tap) < 1e-12
+          ? 1.0 : branch->tap;
+      branch->tap = std::max(1e-6, old_branch_tap * new_ratio / old_ratio);
+    }
+  }
+  transformer.tap_pos = new_tap_pos;
+}
+
 std::string tap_exclusion_reason(const Transformer2W& t) {
   if (!t.in_service) return "not_in_service";
   if (t.tap_max <= t.tap_min) return "fixed_or_invalid_tap_range";
@@ -242,9 +266,7 @@ void apply_settings(HybridPowerSystem& sys,
                     const std::vector<ShuntInfo>& shunts,
                     const std::vector<int>& shunt_steps) {
   for (size_t k = 0; k < taps.size(); ++k) {
-    auto& t = sys.ac.transformers_2w.at(
-        static_cast<size_t>(taps[k].trafo_idx));
-    t.tap_pos = tap_pos[k];
+    set_transformer_tap_position(sys, taps[k].trafo_idx, tap_pos[k]);
   }
   for (size_t k = 0; k < shunts.size(); ++k) {
     auto& sh = sys.ac.shunts.at(
@@ -335,6 +357,7 @@ RPOControlInventory inspect_rpo_controls(const HybridPowerSystem& sys,
     RPOTapControlInput row;
     row.trafo_index = static_cast<int>(i);
     row.authored_index = t.index;
+    row.source_branch_idx = t.source_branch_idx;
     row.name = t.name.empty() ? "Trafo" + std::to_string(i) : t.name;
     row.hv_bus = t.hv_bus;
     row.lv_bus = t.lv_bus;
@@ -398,6 +421,24 @@ RPOControlInventory inspect_rpo_controls(const HybridPowerSystem& sys,
     inventory.shunts.push_back(std::move(row));
   }
   return inventory;
+}
+
+void apply_rpo_discrete_solution(HybridPowerSystem& sys,
+                                 const RPOResult& result) {
+  for (const auto& tap : result.taps) {
+    if (tap.trafo_index < 0 ||
+        tap.trafo_index >= static_cast<int>(sys.ac.transformers_2w.size()))
+      continue;
+    set_transformer_tap_position(sys, tap.trafo_index, tap.tap_after);
+  }
+  for (const auto& shunt : result.shunts) {
+    if (shunt.shunt_index < 0 ||
+        shunt.shunt_index >= static_cast<int>(sys.ac.shunts.size()))
+      continue;
+    auto& target = sys.ac.shunts[static_cast<size_t>(shunt.shunt_index)];
+    target.current_step = shunt.step_after;
+    target.bs_mvar = shunt.bs_mvar_after;
+  }
 }
 
 RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {

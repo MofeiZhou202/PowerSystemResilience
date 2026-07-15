@@ -94,20 +94,41 @@ async function main() {
     // blank and labelling partial PF coverage as a numerical disagreement.
     await page.evaluate(() => App.loadBuiltinCase('case300_acdc'));
     await page.evaluate(() => App.setActiveModule('rpo'));
-    await page.waitForFunction(() =>
-      document.getElementById('rpoInputSummary')?.textContent?.includes('已选OLTC'));
     const inventoryResponsePromise = page.waitForResponse(response =>
       response.url().includes('/api/session/rpo_inputs') && response.request().method() === 'POST',
       { timeout: 120000 });
     await page.locator('#btnRefreshRpoInputs').click();
     const inventoryResponse = await inventoryResponsePromise;
     const inventory = await inventoryResponse.json();
-    if (!inventoryResponse.ok() || inventory.adjustable_oltc_count < 1 ||
+    if (!inventoryResponse.ok() || inventory.transformer_count !== 62 ||
+        inventory.adjustable_oltc_count !== 3 || inventory.excluded_transformer_count !== 59 ||
         inventory.selected_oltc_count !== inventory.adjustable_oltc_count ||
         inventory.max_tap_move !== 2 ||
         inventory.oltc.filter(row => row.selected_for_optimization)
-          .some(row => row.optimization_position_count > 5)) {
+          .some(row => row.tap_pos !== 0 || row.tap_min !== -4 || row.tap_max !== 4 ||
+            row.position_count !== 9 || row.optimization_position_count > 5)) {
       throw new Error(`case300 RPO input inventory failed: ${JSON.stringify(inventory)}`);
+    }
+    const firstLocate = page.locator('#rpoOltcInputTable [data-rpo-locate]').first();
+    const expectedSourceBranch = Number(await firstLocate.getAttribute('data-rpo-source-branch'));
+    await firstLocate.click();
+    await page.waitForFunction(sourceBranch => {
+      const selected = Canvas.getComponent(Canvas.state.selectedId);
+      return document.querySelector('.panel-tab[data-tab="properties"]')?.classList.contains('active') &&
+        selected?.type === 'transformer_2w' &&
+        Number(selected.params?.source_branch_idx) === sourceBranch;
+    }, expectedSourceBranch, { timeout: 120000 });
+    await page.evaluate(() => App.setActiveModule('rpo'));
+    const roundtripResponsePromise = page.waitForResponse(response =>
+      response.url().includes('/api/session/rpo_inputs') && response.request().method() === 'POST',
+      { timeout: 120000 });
+    await page.locator('#btnRefreshRpoInputs').click();
+    const roundtripResponse = await roundtripResponsePromise;
+    const roundtripInventory = await roundtripResponse.json();
+    if (!roundtripResponse.ok() ||
+        roundtripInventory.transformer_count !== inventory.transformer_count ||
+        roundtripInventory.adjustable_oltc_count !== inventory.adjustable_oltc_count) {
+      throw new Error(`Canvas roundtrip lost OLTC metadata: ${JSON.stringify(roundtripInventory)}`);
     }
     const selectionResponsePromise = page.waitForResponse(response =>
       response.url().includes('/api/session/rpo_inputs') && response.request().method() === 'POST',
@@ -116,7 +137,7 @@ async function main() {
     const selectionResponse = await selectionResponsePromise;
     const selectedInventory = await selectionResponse.json();
     if (!selectionResponse.ok() ||
-        selectedInventory.selected_oltc_count !== inventory.selected_oltc_count - 1) {
+        selectedInventory.selected_oltc_count !== roundtripInventory.selected_oltc_count - 1) {
       throw new Error(`case300 OLTC selection was not applied: ${JSON.stringify(selectedInventory)}`);
     }
     await page.locator('#rpoMaxEvaluations').fill('1');
@@ -136,6 +157,8 @@ async function main() {
         !case300.cross_validation?.overall_pass ||
         case300.n_taps !== selectedInventory.selected_oltc_count ||
         case300.control_inventory?.max_tap_move !== 2 ||
+        case300.tap_pos_before?.some(value => Math.abs(value) > 4) ||
+        case300.tap_pos_after?.some(value => Math.abs(value) > 4) ||
         case300.cross_validation?.pf_check_applicable !== false) {
       throw new Error(`case300 RPO response contract failed: ${JSON.stringify(case300)}`);
     }
@@ -171,6 +194,15 @@ async function main() {
         !visibleResult.voltage.hasDrawing || !visibleResult.reactive.hasDrawing) {
       throw new Error(`case300 RPO plots are not measurably visible: ${JSON.stringify(visibleResult)}`);
     }
+    const resultLocate = page.locator('#rpoDeviceResults [data-rpo-result-locate]').first();
+    const resultSourceBranch = Number(await resultLocate.getAttribute('data-rpo-source-branch'));
+    await resultLocate.click();
+    await page.waitForFunction(sourceBranch => {
+      const selected = Canvas.getComponent(Canvas.state.selectedId);
+      return document.querySelector('.panel-tab[data-tab="properties"]')?.classList.contains('active') &&
+        selected?.type === 'transformer_2w' &&
+        Number(selected.params?.source_branch_idx) === sourceBranch;
+    }, resultSourceBranch);
     if (errors.length) throw new Error(`browser errors: ${errors.join(' | ')}`);
     console.log(`RPO GUI passed: case9=${result.cross_validation.overall_pass}, case300=${case300.cross_validation.validation_summary}`);
   } finally {

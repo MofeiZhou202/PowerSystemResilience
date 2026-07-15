@@ -3203,9 +3203,17 @@ const Canvas = (() => {
           // export it back as an ac.branches entry so the solver sees it
           // with the correct branch-model parameters.
           if (p._from_branch) {
+            const sourceBranchIndex = Number.isFinite(Number(p.source_branch_idx))
+              ? Number(p.source_branch_idx)
+              : (Number.isFinite(Number(p.index)) ? Number(p.index) : brIdx);
+            const relativeTap = Math.max(1e-6, 1 +
+              (numOr(p.tap_pos, 0) - numOr(p.tap_neutral, 0)) *
+              numOr(p.tap_step_percent, 0) / 100);
+            const effectiveTap = Math.max(1e-6,
+              numOr(p._tap_base_ratio, numOr(p.tap, 1.0)) * relativeTap);
             sys.ac.branches.push({
-              index: Number.isFinite(Number(p.index)) ? Number(p.index) : brIdx,
-              name: p.name || `Line ${Number.isFinite(Number(p.index)) ? Number(p.index) : brIdx}`,
+              index: sourceBranchIndex,
+              name: p._branch_name || p.name || `Line ${sourceBranchIndex}`,
               from_bus: hv, to_bus: lv,
               r_pu: numOr(p.r_pu, 0.01),
               x_pu: numOr(p.x_pu, 0.1),
@@ -3214,12 +3222,35 @@ const Canvas = (() => {
               rate_b_mva: numOr(p.rate_b_mva, 0),
               rate_c_mva: numOr(p.rate_c_mva, 0),
               length_km: 0,
-              tap: numOr(p.tap, 1.0),
+              tap: effectiveTap,
               shift_deg: numOr(p.shift_deg, 0),
               in_service: p.in_service !== false,
               n_parallel: 1,
             });
+            sys.ac.transformers_2w.push({
+              index: Number.isFinite(Number(p._transformer_index))
+                ? Number(p._transformer_index) : trafoIdx,
+              name: p.name || `Trafo ${trafoIdx}`,
+              hv_bus: hv, lv_bus: lv,
+              sn_mva: numOr(p.sn_mva, numOr(p.rate_a_mva, 100)),
+              vn_hv_kv: numOr(p.vn_hv_kv, 0),
+              vn_lv_kv: numOr(p.vn_lv_kv, 0),
+              vk_percent: numOr(p.vk_percent, 0),
+              vkr_percent: numOr(p.vkr_percent, 0),
+              pfe_kw: numOr(p.pfe_kw, 0),
+              i0_percent: numOr(p.i0_percent, 0),
+              shift_deg: numOr(p.shift_deg, 0),
+              tap_side: numOr(p.tap_side, 0),
+              tap_pos: numOr(p.tap_pos, 0),
+              tap_min: numOr(p.tap_min, 0),
+              tap_max: numOr(p.tap_max, 0),
+              tap_neutral: numOr(p.tap_neutral, 0),
+              tap_step_percent: numOr(p.tap_step_percent, 0),
+              source_branch_idx: sourceBranchIndex,
+              in_service: p.in_service !== false,
+            });
             brIdx++;
+            trafoIdx++;
           } else {
             const trafoIndex = Number.isFinite(Number(p.index)) ? Number(p.index) : trafoIdx;
             const trafo = {
@@ -4413,6 +4444,11 @@ const Canvas = (() => {
       }, busCompMap);
     });
 
+    const linkedTransformerByBranch = new Map(
+      (jsonSys.ac?.transformers_2w || [])
+        .filter(tr => Number(tr.source_branch_idx) > 0)
+        .map(tr => [Number(tr.source_branch_idx), tr]));
+
     // Branches (lines)
     jsonSys.ac?.branches?.forEach(br => {
       const fromCompId = busCompMap[br.from_bus];
@@ -4433,18 +4469,34 @@ const Canvas = (() => {
       const isTrafo = (Math.abs(tapVal - 1.0) > 1e-6) || (Math.abs(shiftVal) > 1e-6);
 
       if (isTrafo) {
+        const linked = linkedTransformerByBranch.get(Number(br.index));
+        const linkedTapRatio = Math.max(1e-6, 1 +
+          (Number(linked?.tap_pos || 0) - Number(linked?.tap_neutral || 0)) *
+          Number(linked?.tap_step_percent || 0) / 100);
         const comp = addComponent('transformer_2w', mx + 60, my, {
           ...COMP.defaults.transformer_2w,
           index: br.index,
-          name: br.name || `Trafo ${br.index !== undefined ? br.index : ''}`,
+          name: linked?.name || br.name || `Trafo ${br.index !== undefined ? br.index : ''}`,
           hv_bus: br.from_bus, lv_bus: br.to_bus,
           // Store branch-model parameters so roundtrip is consistent
           _from_branch: true,
+          _branch_name: br.name || `Line${br.index}`,
+          _transformer_index: linked?.index,
+          _tap_base_ratio: tapVal / linkedTapRatio,
+          source_branch_idx: br.index,
           r_pu: br.r_pu, x_pu: br.x_pu, b_pu: br.b_pu,
           rate_a_mva: br.rate_a_mva, tap: tapVal, shift_deg: shiftVal,
-          sn_mva: br.rate_a_mva || 100,
-          vk_percent: (br.x_pu || 0.1) * 100,
-          vkr_percent: (br.r_pu || 0.01) * 100,
+          sn_mva: linked?.sn_mva || br.rate_a_mva || 100,
+          vn_hv_kv: linked?.vn_hv_kv,
+          vn_lv_kv: linked?.vn_lv_kv,
+          vk_percent: linked?.vk_percent ?? (br.x_pu || 0.1) * 100,
+          vkr_percent: linked?.vkr_percent ?? (br.r_pu || 0.01) * 100,
+          tap_side: linked?.tap_side ?? 0,
+          tap_pos: linked?.tap_pos ?? 0,
+          tap_min: linked?.tap_min ?? 0,
+          tap_max: linked?.tap_max ?? 0,
+          tap_neutral: linked?.tap_neutral ?? 0,
+          tap_step_percent: linked?.tap_step_percent ?? 0,
           in_service: br.in_service !== false,
         });
         addConnection(comp.id, 'hv', fromCompId, 'bottom');
@@ -7154,13 +7206,18 @@ const Canvas = (() => {
 
   // Force a full canvas render of the current headless system (user opt-in).
   function forceRenderCurrentSystem() {
-    if (!state.headless || !state.headlessSystem) return;
+    if (!state.headless || !state.headlessSystem) return Promise.resolve(false);
     const sys = state.headlessSystem;
     if (typeof App !== 'undefined' && App.log) {
       App.log('正在强制绘制大规模系统单线图，可能需要一些时间…', 'warn');
     }
     // Defer so the log/status paint before the (potentially heavy) render.
-    setTimeout(() => loadFromSystemJson(sys, { forceRender: true }), 30);
+    return new Promise(resolve => {
+      setTimeout(() => {
+        loadFromSystemJson(sys, { forceRender: true });
+        resolve(true);
+      }, 30);
+    });
   }
 
   // Mutate the stored headless system in place (used by the editable topology
@@ -7552,6 +7609,7 @@ const Canvas = (() => {
       if (_lastPfResult) showPowerFlowResults(_lastPfResult);
     },
     clearAll,
+    forceRenderCurrentSystem,
     panToComponent,
     panToBusId,
     getPerformanceStats,

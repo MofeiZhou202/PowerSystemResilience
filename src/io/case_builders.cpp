@@ -1254,6 +1254,21 @@ HybridPowerSystem build_case69_acdc() {
 HybridPowerSystem build_case300_acdc() {
   HybridPowerSystem sys = parse_matpower(data_file_path("case300.m").string());
   sys.name = "case300 AC/DC";
+  // MATPOWER does not describe OLTC ranges.  Keep all imported transformer
+  // ratios fixed by default, then explicitly promote a small, auditable subset
+  // for this authored AC/DC demonstration instead of treating all 62 fixed tap
+  // branches as 4001-position controls.
+  const size_t oltc_count = std::min<size_t>(3, sys.ac.transformers_2w.size());
+  for (size_t i = 0; i < oltc_count; ++i) {
+    auto& transformer = sys.ac.transformers_2w[i];
+    transformer.name = "OLTC-B" + std::to_string(transformer.hv_bus) + "/B" +
+                       std::to_string(transformer.lv_bus);
+    transformer.tap_pos = 0;
+    transformer.tap_neutral = 0;
+    transformer.tap_min = -4;
+    transformer.tap_max = 4;
+    transformer.tap_step_percent = 1.25;
+  }
   attach_case300_style_mtdc(sys);
   return sys;
 }
