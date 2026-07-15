@@ -424,6 +424,29 @@
   </div>
   <!-- Reactive power optimization -->
   <div class="sub-section rpo-sub-section" data-sub="rpo" hidden>
+    <div class="control-param-group rpo-input-audit-group" title="与求解器使用同一判据，列出所有两绕组变压器及其是否进入OLTC离散决策向量">
+      <span class="control-param-title">控制变量输入审计</span>
+      <div id="rpoInputSummary" class="rpo-input-summary"><span>尚未识别当前模型</span></div>
+      <label class="sub-label">OLTC显示
+        <select id="rpoInputFilter">
+          <option value="all" selected>全部变压器</option>
+          <option value="adjustable">仅可调整</option>
+          <option value="excluded">仅固定/排除</option>
+        </select>
+      </label>
+      <label class="sub-label" title="限制每台已选OLTC相对当前档位可移动的最大档数；-1表示使用完整铭牌范围，0表示全部保持当前档位">最大调档(-1=全范围)
+        <input id="rpoMaxTapMove" type="number" value="2" min="-1" max="50" step="1"/>
+      </label>
+      <button id="btnRpoSelectAllTaps" class="toolbar-btn" type="button">全选可调OLTC</button>
+      <button id="btnRpoClearTaps" class="toolbar-btn" type="button">清空OLTC选择</button>
+      <button id="btnRefreshRpoInputs" class="toolbar-btn" type="button">刷新输入识别</button>
+      <span class="sub-hint">点击“定位/编辑”可回到画布属性面板修改档位范围和步长。</span>
+      <div id="rpoOltcInputTable" class="topo-table-wrap rpo-input-table"><p class="empty-hint">进入无功优化模块后自动读取当前模型。</p></div>
+      <details id="rpoShuntInputDetails" class="rpo-input-details">
+        <summary>可投切并联补偿输入</summary>
+        <div id="rpoShuntInputTable" class="topo-table-wrap rpo-input-table"></div>
+      </details>
+    </div>
     <div class="control-param-group" title="两绕组OLTC、可投切并联补偿与连续AC/DC OPF协同优化">
       <span class="control-param-title">优化目标</span>
       <label class="sub-label">目标

@@ -1,6 +1,7 @@
 #include <cmath>
 #include <string>
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include "hacdcpf/io/matpower_parser.hpp"
@@ -88,6 +89,7 @@ TEST_CASE("case300 RPO returns complete display vectors from a seeded solve",
   options.max_ipm_iter = 400;
   options.ipm_tol = 1e-6;
   options.stationarity_tol = 1e-3;
+  options.max_tap_move = 2;
   const auto result = hacdcpf::opf::solve_rpo(system, options);
 
   INFO("status=" << result.status
@@ -99,4 +101,76 @@ TEST_CASE("case300 RPO returns complete display vectors from a seeded solve",
   CHECK(result.vm_after.size() == system.ac.buses.size());
   CHECK(result.qg_mvar_after.size() == system.ac.generators.size());
   CHECK(result.taps.size() == system.ac.transformers_2w.size());
+}
+
+TEST_CASE("RPO control inventory explains adjustable and excluded inputs",
+          "[rpo][controls][gui]") {
+  hacdcpf::HybridPowerSystem system;
+  auto make_transformer = [](int index, std::string name) {
+    hacdcpf::Transformer2W transformer;
+    transformer.index = index;
+    transformer.name = std::move(name);
+    transformer.hv_bus = 1;
+    transformer.lv_bus = 2;
+    transformer.tap_pos = 0;
+    transformer.tap_min = -2;
+    transformer.tap_max = 2;
+    transformer.tap_neutral = 0;
+    transformer.tap_step_percent = 1.25;
+    return transformer;
+  };
+  system.ac.transformers_2w.push_back(make_transformer(10, "eligible"));
+  auto fixed = make_transformer(11, "fixed");
+  fixed.tap_min = fixed.tap_max = 0;
+  system.ac.transformers_2w.push_back(fixed);
+  auto invalid = make_transformer(12, "invalid-current");
+  invalid.tap_pos = 3;
+  system.ac.transformers_2w.push_back(invalid);
+  auto offline = make_transformer(13, "offline");
+  offline.in_service = false;
+  system.ac.transformers_2w.push_back(offline);
+
+  hacdcpf::Shunt switchable;
+  switchable.index = 20;
+  switchable.name = "capacitor-bank";
+  switchable.bus = 2;
+  switchable.switchable = true;
+  switchable.current_step = 1;
+  switchable.n_steps = 4;
+  switchable.bs_per_step = 0.5;
+  switchable.bs_mvar = 0.5;
+  system.ac.shunts.push_back(switchable);
+  auto fixed_shunt = switchable;
+  fixed_shunt.index = 21;
+  fixed_shunt.name = "fixed-shunt";
+  fixed_shunt.switchable = false;
+  system.ac.shunts.push_back(fixed_shunt);
+
+  const auto inventory = hacdcpf::opf::inspect_rpo_controls(system);
+  REQUIRE(inventory.taps.size() == 4);
+  CHECK(inventory.taps[0].adjustable);
+  CHECK(inventory.taps[0].selected_for_optimization);
+  CHECK(inventory.taps[0].position_count == 5);
+  CHECK(inventory.taps[0].optimization_position_count == 5);
+  CHECK(inventory.taps[0].ratio_min == Catch::Approx(0.975));
+  CHECK(inventory.taps[0].ratio_max == Catch::Approx(1.025));
+  CHECK(inventory.taps[1].exclusion_reason == "fixed_or_invalid_tap_range");
+  CHECK(inventory.taps[2].exclusion_reason == "current_tap_out_of_range");
+  CHECK(inventory.taps[3].exclusion_reason == "not_in_service");
+  REQUIRE(inventory.shunts.size() == 2);
+  CHECK(inventory.shunts[0].adjustable);
+  CHECK(inventory.shunts[0].position_count == 5);
+  CHECK(inventory.shunts[1].exclusion_reason == "not_switchable");
+
+  hacdcpf::opf::RPOOptions restricted;
+  restricted.max_tap_move = 1;
+  restricted.restrict_tap_indices = true;
+  restricted.enabled_tap_indices = {0};
+  const auto restricted_inventory =
+      hacdcpf::opf::inspect_rpo_controls(system, restricted);
+  CHECK(restricted_inventory.taps[0].selected_for_optimization);
+  CHECK(restricted_inventory.taps[0].optimization_tap_min == -1);
+  CHECK(restricted_inventory.taps[0].optimization_tap_max == 1);
+  CHECK(restricted_inventory.taps[0].optimization_position_count == 3);
+  CHECK_FALSE(restricted_inventory.taps[1].selected_for_optimization);
 }

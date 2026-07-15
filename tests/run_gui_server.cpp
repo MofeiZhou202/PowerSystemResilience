@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -75,6 +76,7 @@
 #include "hacdcpf/analysis/hosting_capacity.hpp"
 #include "hacdcpf/analysis/multidimensional_weak_link.hpp"
 #include "hacdcpf/analysis/counterfactual_planning.hpp"
+#include "hacdcpf/optimal_power_flow/reactive_power_opt.hpp"
 #include "hacdcpf/power_flow/island_detector.hpp"
 #include "hacdcpf/graph/graph.hpp"
 #include "hacdcpf/dynamics/dynamics.hpp"
@@ -7563,6 +7565,126 @@ json system_summary(const hacdcpf::HybridPowerSystem& sys) {
   }
   s["counts"] = counts;
   return s;
+}
+
+json rpo_control_inventory_json(const hacdcpf::HybridPowerSystem& sys,
+                                const hacdcpf::opf::RPOOptions& opt = {}) {
+  const auto inventory = hacdcpf::opf::inspect_rpo_controls(sys, opt);
+  const auto bus_label = [&](int index) {
+    const auto it = std::find_if(sys.ac.buses.begin(), sys.ac.buses.end(),
+                                 [&](const auto& bus) {
+                                   return bus.index == index;
+                                 });
+    if (it == sys.ac.buses.end() || it->name.empty())
+      return std::string("Bus ") + std::to_string(index);
+    return it->name + " (" + std::to_string(index) + ")";
+  };
+
+  json taps = json::array();
+  json shunts = json::array();
+  int adjustable_taps = 0;
+  int selected_taps = 0;
+  int adjustable_shunts = 0;
+  long double log10_combinations = 0.0L;
+  std::uint64_t exact_combinations = 1;
+  bool exact_available = true;
+  constexpr std::uint64_t kMaxExactJsonInteger = 9007199254740991ULL;
+  const auto accumulate_space = [&](int positions) {
+    if (positions <= 0) return;
+    log10_combinations += std::log10(static_cast<long double>(positions));
+    if (exact_available) {
+      const auto p = static_cast<std::uint64_t>(positions);
+      if (exact_combinations > kMaxExactJsonInteger / p)
+        exact_available = false;
+      else
+        exact_combinations *= p;
+    }
+  };
+
+  for (const auto& row : inventory.taps) {
+    if (row.adjustable) ++adjustable_taps;
+    if (row.selected_for_optimization) {
+      ++selected_taps;
+      accumulate_space(row.optimization_position_count);
+    }
+    taps.push_back(json{
+        {"trafo_index", row.trafo_index},
+        {"authored_index", row.authored_index},
+        {"name", row.name},
+        {"hv_bus", row.hv_bus},
+        {"lv_bus", row.lv_bus},
+        {"hv_bus_label", bus_label(row.hv_bus)},
+        {"lv_bus_label", bus_label(row.lv_bus)},
+        {"tap_side", row.tap_side},
+        {"tap_side_label", row.tap_side == 0 ? "HV" : "LV"},
+        {"in_service", row.in_service},
+        {"adjustable", row.adjustable},
+        {"selected_for_optimization", row.selected_for_optimization},
+        {"exclusion_reason", row.exclusion_reason},
+        {"tap_pos", row.tap_pos},
+        {"tap_min", row.tap_min},
+        {"tap_max", row.tap_max},
+        {"tap_neutral", row.tap_neutral},
+        {"tap_number", row.tap_pos - row.tap_neutral},
+        {"position_count", row.position_count},
+        {"optimization_tap_min", row.optimization_tap_min},
+        {"optimization_tap_max", row.optimization_tap_max},
+        {"optimization_position_count", row.optimization_position_count},
+        {"tap_step_percent", row.tap_step_percent},
+        {"ratio_current", row.ratio_current},
+        {"ratio_min", row.ratio_min},
+        {"ratio_max", row.ratio_max},
+        {"at_lower_limit", row.tap_pos == row.tap_min},
+        {"at_upper_limit", row.tap_pos == row.tap_max}});
+  }
+  for (const auto& row : inventory.shunts) {
+    if (row.adjustable) {
+      ++adjustable_shunts;
+      accumulate_space(row.position_count);
+    }
+    shunts.push_back(json{
+        {"shunt_index", row.shunt_index},
+        {"authored_index", row.authored_index},
+        {"name", row.name},
+        {"bus", row.bus},
+        {"bus_label", bus_label(row.bus)},
+        {"in_service", row.in_service},
+        {"switchable", row.switchable},
+        {"adjustable", row.adjustable},
+        {"exclusion_reason", row.exclusion_reason},
+        {"current_step", row.current_step},
+        {"n_steps", row.n_steps},
+        {"position_count", row.position_count},
+        {"bs_per_step_mvar", row.bs_per_step_mvar},
+        {"bs_current_mvar", row.bs_current_mvar}});
+  }
+
+  return json{
+      {"eligibility_contract",
+       "OLTC: in_service && tap_max > tap_min && tap_step_percent > 0 && "
+       "tap_min <= tap_pos <= tap_max; shunt: in_service && switchable && "
+       "n_steps > 1 && abs(bs_per_step) > 0 && 0 <= current_step <= n_steps"},
+      {"tap_ratio_formula",
+       "ratio = 1 + (tap_pos - tap_neutral) * tap_step_percent / 100"},
+      {"optimization_range_contract",
+       "selected OLTC range = nameplate range intersected with "
+       "[tap_pos-max_tap_move, tap_pos+max_tap_move]; max_tap_move < 0 "
+       "uses the full nameplate range"},
+      {"transformer_count", inventory.taps.size()},
+      {"adjustable_oltc_count", adjustable_taps},
+      {"selected_oltc_count", selected_taps},
+      {"unselected_adjustable_oltc_count", adjustable_taps - selected_taps},
+      {"excluded_transformer_count",
+       static_cast<int>(inventory.taps.size()) - adjustable_taps},
+      {"shunt_count", inventory.shunts.size()},
+      {"adjustable_shunt_count", adjustable_shunts},
+      {"discrete_variable_count", selected_taps + adjustable_shunts},
+      {"max_tap_move", opt.max_tap_move},
+      {"search_space_log10", static_cast<double>(log10_combinations)},
+      {"search_space_exact",
+       exact_available ? json(exact_combinations) : json(nullptr)},
+      {"oltc", std::move(taps)},
+      {"shunts", std::move(shunts)}};
 }
 
 
@@ -16656,6 +16778,36 @@ int main(int argc, char** argv) {
       }
     });
 
+    // ---- Reactive Power Optimization input inventory ----
+    svr.Post("/api/session/rpo_inputs",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system)
+            throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        hacdcpf::opf::RPOOptions opt;
+        opt.max_tap_move = std::clamp(j.value("max_tap_move", 2), -1, 1000);
+        opt.restrict_tap_indices = j.value("restrict_tap_indices", false);
+        if (j.contains("enabled_tap_indices") &&
+            j["enabled_tap_indices"].is_array()) {
+          for (const auto& value : j["enabled_tap_indices"])
+            if (value.is_number_integer())
+              opt.enabled_tap_indices.push_back(value.get<int>());
+        }
+        res.set_content(rpo_control_inventory_json(sys, opt).dump(),
+                        "application/json");
+      } catch (const std::exception& e) {
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(),
+                        "application/json");
+      }
+    });
+
     // ---- Reactive Power Optimization (local discrete search + AC/DC NLP) ----
     svr.Post("/api/session/run_rpo",
              [](const httplib::Request& req, httplib::Response& res) {
@@ -16692,6 +16844,16 @@ int main(int argc, char** argv) {
         rpo_opt.ipm_tol        = std::max(1e-12, j.value("ipm_tol", 1e-6));
         rpo_opt.stationarity_tol =
             std::max(1e-12, j.value("stationarity_tol", 1e-3));
+        rpo_opt.max_tap_move =
+            std::clamp(j.value("max_tap_move", 2), -1, 1000);
+        rpo_opt.restrict_tap_indices =
+            j.value("restrict_tap_indices", false);
+        if (j.contains("enabled_tap_indices") &&
+            j["enabled_tap_indices"].is_array()) {
+          for (const auto& value : j["enabled_tap_indices"])
+            if (value.is_number_integer())
+              rpo_opt.enabled_tap_indices.push_back(value.get<int>());
+        }
         rpo_opt.enforce_branch_limits = j.value("branch_limits", true);
         rpo_opt.enforce_converter_capacity =
             j.value("converter_capacity", true);
@@ -16910,6 +17072,7 @@ int main(int argc, char** argv) {
             "离散坐标搜索(两绕组OLTC/可投切并联补偿)+以所选电压/网损"
             "目标直接求解的连续AC/DC OPF；"
             "返回可行局部最优点，不提供全局MINLP最优性证明。";
+        out["control_inventory"] = rpo_control_inventory_json(sys, rpo_opt);
 
         out["cross_validation"] = json{
             {"rpo_converged", result.converged},
@@ -17071,31 +17234,37 @@ int main(int argc, char** argv) {
         out["component_coverage"] = std::move(coverage);
         out["component_coverage_complete"] = coverage_complete;
 
-        json tap_names = json::array(), tap_ratio_before = json::array(), tap_ratio_after = json::array();
+        json tap_names = json::array(), tap_indices = json::array();
+        json tap_ratio_before = json::array(), tap_ratio_after = json::array();
         json tap_pos_before = json::array(), tap_pos_after = json::array();
         for (const auto& t : result.taps) {
           tap_names.push_back(t.name);
+          tap_indices.push_back(t.trafo_index);
           tap_ratio_before.push_back(t.ratio_before);
           tap_ratio_after.push_back(t.ratio_after);
           tap_pos_before.push_back(t.tap_before);
           tap_pos_after.push_back(t.tap_after);
         }
         out["tap_names"]        = tap_names;
+        out["tap_indices"]      = tap_indices;
         out["tap_before"]       = tap_ratio_before;
         out["tap_after"]        = tap_ratio_after;
         out["tap_pos_before"]   = tap_pos_before;
         out["tap_pos_after"]    = tap_pos_after;
 
-        json sh_names = json::array(), sh_before = json::array(), sh_after = json::array();
+        json sh_names = json::array(), sh_indices = json::array();
+        json sh_before = json::array(), sh_after = json::array();
         json sh_mvar_before = json::array(), sh_mvar_after = json::array();
         for (const auto& s : result.shunts) {
           sh_names.push_back(s.name);
+          sh_indices.push_back(s.shunt_index);
           sh_before.push_back(s.step_before);
           sh_after.push_back(s.step_after);
           sh_mvar_before.push_back(s.bs_mvar_before);
           sh_mvar_after.push_back(s.bs_mvar_after);
         }
         out["shunt_names"]       = sh_names;
+        out["shunt_indices"]     = sh_indices;
         out["shunt_before"]      = sh_before;
         out["shunt_after"]       = sh_after;
         out["shunt_mvar_before"] = sh_mvar_before;

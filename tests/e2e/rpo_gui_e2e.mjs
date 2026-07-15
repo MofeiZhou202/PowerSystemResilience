@@ -94,6 +94,31 @@ async function main() {
     // blank and labelling partial PF coverage as a numerical disagreement.
     await page.evaluate(() => App.loadBuiltinCase('case300_acdc'));
     await page.evaluate(() => App.setActiveModule('rpo'));
+    await page.waitForFunction(() =>
+      document.getElementById('rpoInputSummary')?.textContent?.includes('已选OLTC'));
+    const inventoryResponsePromise = page.waitForResponse(response =>
+      response.url().includes('/api/session/rpo_inputs') && response.request().method() === 'POST',
+      { timeout: 120000 });
+    await page.locator('#btnRefreshRpoInputs').click();
+    const inventoryResponse = await inventoryResponsePromise;
+    const inventory = await inventoryResponse.json();
+    if (!inventoryResponse.ok() || inventory.adjustable_oltc_count < 1 ||
+        inventory.selected_oltc_count !== inventory.adjustable_oltc_count ||
+        inventory.max_tap_move !== 2 ||
+        inventory.oltc.filter(row => row.selected_for_optimization)
+          .some(row => row.optimization_position_count > 5)) {
+      throw new Error(`case300 RPO input inventory failed: ${JSON.stringify(inventory)}`);
+    }
+    const selectionResponsePromise = page.waitForResponse(response =>
+      response.url().includes('/api/session/rpo_inputs') && response.request().method() === 'POST',
+      { timeout: 120000 });
+    await page.locator('[data-rpo-tap-toggle]:not(:disabled)').first().uncheck();
+    const selectionResponse = await selectionResponsePromise;
+    const selectedInventory = await selectionResponse.json();
+    if (!selectionResponse.ok() ||
+        selectedInventory.selected_oltc_count !== inventory.selected_oltc_count - 1) {
+      throw new Error(`case300 OLTC selection was not applied: ${JSON.stringify(selectedInventory)}`);
+    }
     await page.locator('#rpoMaxEvaluations').fill('1');
     await page.locator('#rpoTimeLimit').fill('30');
     await page.locator('#rpoMaxIpmIter').fill('400');
@@ -109,11 +134,14 @@ async function main() {
         !case300.cross_validation?.independent_opf_converged ||
         !case300.cross_validation?.opf_agrees ||
         !case300.cross_validation?.overall_pass ||
+        case300.n_taps !== selectedInventory.selected_oltc_count ||
+        case300.control_inventory?.max_tap_move !== 2 ||
         case300.cross_validation?.pf_check_applicable !== false) {
       throw new Error(`case300 RPO response contract failed: ${JSON.stringify(case300)}`);
     }
     await page.waitForFunction(() =>
       document.querySelector('#resultsContent')?.dataset.activeGroup === 'rpo' &&
+      document.getElementById('rpoInputSummary')?.textContent?.includes('已选OLTC') &&
       document.getElementById('rpoSummary')?.textContent?.includes('通过（部分覆盖）') &&
       document.getElementById('rpoChangeResults')?.textContent?.includes('母线电压') &&
       document.getElementById('rpoChangeResults')?.textContent?.includes('机组无功') &&

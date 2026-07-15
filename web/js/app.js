@@ -59,6 +59,8 @@ const App = (() => {
   let _lastPfData = null;
   let _lastOpfData = null;
   let _lastRpoData = null;
+  let _lastRpoInputInventory = null;
+  let _rpoSelectedTapIndices = null;
   let _lastTspfData = null;
   let _lastIntegratedEnergyData = null;
   let _lastEvTrafficData = null;
@@ -362,6 +364,8 @@ const App = (() => {
     _lastPfData = null;
     _lastOpfData = null;
     _lastRpoData = null;
+    _lastRpoInputInventory = null;
+    _rpoSelectedTapIndices = null;
     _lastTspfData = null;
     _lastIntegratedEnergyData = null;
     _lastEvTrafficData = null;
@@ -4623,6 +4627,86 @@ const App = (() => {
     return Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
   }
 
+  const RPO_CONTROL_REASON_LABELS = {
+    not_in_service: '未投运',
+    fixed_or_invalid_tap_range: '档位范围固定或无效',
+    non_positive_tap_step: '每档步长必须大于0',
+    current_tap_out_of_range: '当前档位超出上下限',
+    not_switchable: '未设置为可投切',
+    insufficient_step_range: '可选步数不足',
+    zero_or_invalid_step_size: '单步无功为0或无效',
+    current_step_out_of_range: '当前投切步超出范围',
+  };
+
+  function renderRpoInputAudit(data) {
+    if (!data) return;
+    _lastRpoInputInventory = data;
+    const allTaps = Array.isArray(data.oltc) ? data.oltc : [];
+    if (_rpoSelectedTapIndices === null) {
+      _rpoSelectedTapIndices = new Set(allTaps.filter(row => row.adjustable)
+        .map(row => Number(row.trafo_index)));
+    }
+    const fmt = (value, digits = 5) => Number.isFinite(Number(value))
+      ? Number(value).toFixed(digits) : '—';
+    const exactSpace = Number(data.search_space_exact);
+    const searchSpace = data.search_space_exact !== null && Number.isFinite(exactSpace)
+      ? exactSpace.toLocaleString('zh-CN')
+      : `约 10^${fmt(data.search_space_log10, 2)}`;
+    const summary = document.getElementById('rpoInputSummary');
+    if (summary) summary.innerHTML = `
+      <span class="rpo-input-chip good">已选OLTC ${Number(data.selected_oltc_count || 0)} / 可调 ${Number(data.adjustable_oltc_count || 0)}</span>
+      <span class="rpo-input-chip ${Number(data.excluded_transformer_count || 0) ? 'warn' : ''}">固定/排除 ${Number(data.excluded_transformer_count || 0)}</span>
+      <span class="rpo-input-chip good">可投切补偿 ${Number(data.adjustable_shunt_count || 0)}</span>
+      <span class="rpo-input-chip">离散变量 ${Number(data.discrete_variable_count || 0)}</span>
+      <span class="rpo-input-chip" title="所有可调设备档位数的乘积；算法不会穷举全部组合">组合空间 ${searchSpace}</span>`;
+
+    const filter = document.getElementById('rpoInputFilter')?.value || 'all';
+    const taps = allTaps.filter(row => filter === 'all' ||
+      (filter === 'adjustable' ? row.adjustable : !row.adjustable));
+    const tapDiv = document.getElementById('rpoOltcInputTable');
+    if (tapDiv) tapDiv.innerHTML = taps.length
+      ? `<table><thead><tr><th>参与</th><th>模型状态</th><th>变压器</th><th>连接</th><th>分接侧</th><th>当前位置</th><th>铭牌范围</th><th>本次优化范围</th><th>本次位置数</th><th>每档步长</th><th>当前变比</th><th>铭牌变比范围</th><th>判据/方向</th><th>操作</th></tr></thead><tbody>${taps.map(row => {
+          const limit = row.at_lower_limit ? '（下限）' : row.at_upper_limit ? '（上限）' : '';
+          const selected = !!row.selected_for_optimization;
+          const reason = row.adjustable
+            ? `+1位置 → 变比 +${fmt(row.tap_step_percent, 3)}%；电压响应方向由分接侧和网络决定`
+            : (RPO_CONTROL_REASON_LABELS[row.exclusion_reason] || row.exclusion_reason || '不满足可调判据');
+          return `<tr><td><input type="checkbox" data-rpo-tap-toggle="${Number(row.trafo_index)}" ${selected ? 'checked' : ''} ${row.adjustable ? '' : 'disabled'} aria-label="${escapeHtml(row.name || '')}参与无功优化"/></td><td class="${selected ? 'rpo-control-adjustable' : 'rpo-control-excluded'}">${selected ? `进入优化${limit}` : (row.adjustable ? '可调但未选' : '固定/排除')}</td><td>${escapeHtml(row.name || `Trafo ${row.authored_index}`)}</td><td>${escapeHtml(row.hv_bus_label || row.hv_bus)} → ${escapeHtml(row.lv_bus_label || row.lv_bus)}</td><td>${escapeHtml(row.tap_side_label || '')}</td><td>${Number(row.tap_pos)}（相对中性 ${Number(row.tap_number) >= 0 ? '+' : ''}${Number(row.tap_number)}）</td><td>[${Number(row.tap_min)}, ${Number(row.tap_max)}]（${Number(row.position_count || 0)}位置）</td><td>${selected ? `[${Number(row.optimization_tap_min)}, ${Number(row.optimization_tap_max)}]` : '固定当前'}</td><td>${Number(row.optimization_position_count || 0)}</td><td>${fmt(row.tap_step_percent, 3)}%</td><td>${fmt(row.ratio_current)}</td><td>[${fmt(row.ratio_min)}, ${fmt(row.ratio_max)}]</td><td>${escapeHtml(reason)}</td><td><button class="toolbar-btn" type="button" data-rpo-locate="${escapeHtml(row.name || '')}" data-rpo-authored-index="${Number(row.authored_index)}">定位/编辑</button></td></tr>`;
+        }).join('')}</tbody></table>`
+      : `<p class="empty-hint">${allTaps.length ? '当前筛选条件下没有变压器。' : '当前模型没有两绕组变压器。'}</p>`;
+
+    const allShunts = Array.isArray(data.shunts) ? data.shunts : [];
+    const shuntDiv = document.getElementById('rpoShuntInputTable');
+    if (shuntDiv) shuntDiv.innerHTML = allShunts.length
+      ? `<table><thead><tr><th>模型状态</th><th>补偿设备</th><th>母线</th><th>当前步</th><th>步范围</th><th>可选位置数</th><th>每步无功</th><th>当前无功</th><th>排除原因</th></tr></thead><tbody>${allShunts.map(row =>
+        `<tr><td class="${row.adjustable ? 'rpo-control-adjustable' : 'rpo-control-excluded'}">${row.adjustable ? '进入优化' : '固定/排除'}</td><td>${escapeHtml(row.name || '')}</td><td>${escapeHtml(row.bus_label || row.bus)}</td><td>${Number(row.current_step)}</td><td>[0, ${Number(row.n_steps)}]</td><td>${Number(row.position_count || 0)}</td><td>${fmt(row.bs_per_step_mvar)} MVar</td><td>${fmt(row.bs_current_mvar)} MVar</td><td>${escapeHtml(row.adjustable ? '满足可投切判据' : (RPO_CONTROL_REASON_LABELS[row.exclusion_reason] || row.exclusion_reason || '—'))}</td></tr>`).join('')}</tbody></table>`
+      : '<p class="empty-hint">当前模型没有并联补偿设备。</p>';
+  }
+
+  async function refreshRpoInputAudit(options = {}) {
+    const summary = document.getElementById('rpoInputSummary');
+    if (summary) summary.innerHTML = '<span class="rpo-input-chip">正在识别当前模型…</span>';
+    if (options.syncModel !== false && !await syncToBackend()) {
+      if (summary) summary.innerHTML = '<span class="rpo-input-chip warn">模型同步失败</span>';
+      return null;
+    }
+    const inventoryPayload = {
+      max_tap_move: Math.round(rpoNumber('rpoMaxTapMove', 2, -1, 50)),
+      restrict_tap_indices: _rpoSelectedTapIndices !== null,
+      enabled_tap_indices: _rpoSelectedTapIndices === null
+        ? [] : [..._rpoSelectedTapIndices],
+    };
+    const response = await apiPostResult('/api/session/rpo_inputs', inventoryPayload,
+      { quiet: !!options.quiet });
+    if (!response.ok || !response.data) {
+      if (summary) summary.innerHTML = '<span class="rpo-input-chip warn">输入识别失败</span>';
+      return null;
+    }
+    const data = response.data;
+    renderRpoInputAudit(data);
+    return data;
+  }
+
   function renderRpoResults(data) {
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
@@ -4721,19 +4805,30 @@ const App = (() => {
     if (coverageDiv) coverageDiv.innerHTML = `<table><thead><tr><th>元件类别</th><th>数量</th><th>模型处理</th><th>OPF/PF交叉验证</th><th>说明</th></tr></thead><tbody>${coverage.map(row =>
       `<tr><td>${escapeHtml(row.label || row.component_type || '')}</td><td>${Number(row.count || 0)}</td><td>${escapeHtml(row.treatment || '')}</td><td class="${row.cross_validated ? 'converged' : 'failed'}">${row.cross_validated ? '完整' : '部分/未覆盖'}</td><td>${escapeHtml(row.note || '')}</td></tr>`).join('')}</tbody></table>`;
 
+    const inputTapByIndex = new Map((data.control_inventory?.oltc || [])
+      .map(row => [Number(row.trafo_index), row]));
+    const inputShuntByIndex = new Map((data.control_inventory?.shunts || [])
+      .map(row => [Number(row.shunt_index), row]));
     const taps = (data.tap_names || []).map((name, i) => ({
       type: '两绕组OLTC', name, before: data.tap_pos_before?.[i], after: data.tap_pos_after?.[i],
       physicalBefore: data.tap_before?.[i], physicalAfter: data.tap_after?.[i], unit: 'ratio',
+      allowed: inputTapByIndex.has(Number(data.tap_indices?.[i]))
+        ? `[${inputTapByIndex.get(Number(data.tap_indices?.[i])).optimization_tap_min}, ${inputTapByIndex.get(Number(data.tap_indices?.[i])).optimization_tap_max}]`
+        : '—',
     }));
     const shunts = (data.shunt_names || []).map((name, i) => ({
       type: '并联补偿', name, before: data.shunt_before?.[i], after: data.shunt_after?.[i],
       physicalBefore: data.shunt_mvar_before?.[i], physicalAfter: data.shunt_mvar_after?.[i], unit: 'MVar',
+      allowed: inputShuntByIndex.has(Number(data.shunt_indices?.[i]))
+        ? `[0, ${inputShuntByIndex.get(Number(data.shunt_indices?.[i])).n_steps}]` : '—',
     }));
     const devices = [...taps, ...shunts];
     const deviceDiv = document.getElementById('rpoDeviceResults');
     if (deviceDiv) deviceDiv.innerHTML = devices.length
-      ? `<table><thead><tr><th>类型</th><th>设备</th><th>档位前</th><th>档位后</th><th>物理量前</th><th>物理量后</th><th>动作</th></tr></thead><tbody>${devices.map(row =>
-        `<tr><td>${row.type}</td><td>${escapeHtml(row.name || '')}</td><td>${row.before}</td><td>${row.after}</td><td>${fmt(row.physicalBefore)}</td><td>${fmt(row.physicalAfter)}</td><td class="${row.before === row.after ? '' : 'converged'}">${row.before === row.after ? '保持' : '调整'}</td></tr>`).join('')}</tbody></table>`
+      ? `<table><thead><tr><th>类型</th><th>设备</th><th>本次允许范围</th><th>离散位置</th><th>调整量</th><th>物理量变化</th><th>动作</th></tr></thead><tbody>${devices.map(row => {
+        const delta = Number(row.after) - Number(row.before);
+        return `<tr><td>${row.type}</td><td>${escapeHtml(row.name || '')}</td><td>${row.allowed}</td><td>${row.before} → ${row.after}</td><td>${delta >= 0 ? '+' : ''}${delta}</td><td>${fmt(row.physicalBefore)} → ${fmt(row.physicalAfter)} ${row.unit}</td><td class="${row.before === row.after ? '' : 'converged'}">${row.before === row.after ? '保持' : '已调整'}</td></tr>`;
+      }).join('')}</tbody></table>`
       : '<p class="empty-hint">当前系统没有可调两绕组 OLTC 或可投切并联补偿；连续OPF点仍已完成验证。</p>';
 
     // Make the result tab and RPO group measurable before Plotly calculates
@@ -4800,6 +4895,7 @@ const App = (() => {
         setStatus('同步失败', 'error');
         return null;
       }
+      await refreshRpoInputAudit({ syncModel: false, quiet: true });
       const payload = {
         objective: document.getElementById('rpoObjective')?.value || 'voltage',
         v_target: rpoNumber('rpoVoltageTarget', 1.0, 0.8, 1.2),
@@ -4810,6 +4906,10 @@ const App = (() => {
         max_ipm_iter: Math.round(rpoNumber('rpoMaxIpmIter', 400, 1, 100000)),
         ipm_tol: rpoNumber('rpoIpmTol', 1e-6, 1e-12, 1),
         stationarity_tol: rpoNumber('rpoStationarityTol', 1e-3, 1e-12, 1),
+        max_tap_move: Math.round(rpoNumber('rpoMaxTapMove', 2, -1, 50)),
+        restrict_tap_indices: _rpoSelectedTapIndices !== null,
+        enabled_tap_indices: _rpoSelectedTapIndices === null
+          ? [] : [..._rpoSelectedTapIndices],
         branch_limits: !!document.getElementById('rpoBranchLimits')?.checked,
         converter_capacity: !!document.getElementById('rpoConvCapacity')?.checked,
         converter_current: !!document.getElementById('rpoConvCurrent')?.checked,
@@ -4821,6 +4921,8 @@ const App = (() => {
         return null;
       }
       _lastRpoData = response.data;
+      if (response.data.control_inventory)
+        renderRpoInputAudit(response.data.control_inventory);
       renderRpoResults(response.data);
       const pass = response.data.cross_validation?.overall_pass === true;
       setStatus(pass
@@ -12312,6 +12414,9 @@ const App = (() => {
       if (shared) shared.innerHTML = '';
     }
     if (moduleName === 'parameterLibrary') loadParameterLibrary();
+    if (moduleName === 'rpo' && changed) {
+      setTimeout(() => refreshRpoInputAudit({ quiet: true }), 0);
+    }
     HySimCore.Accessibility?.syncNavigation();
   }
   function renderSubToolbar(moduleName) {
@@ -15358,6 +15463,44 @@ const App = (() => {
     });
     document.getElementById('btnRunOpf')?.addEventListener('click', runOpf);
     document.getElementById('btnRunRpo')?.addEventListener('click', runRpo);
+    document.getElementById('btnRefreshRpoInputs')?.addEventListener('click', () =>
+      refreshRpoInputAudit());
+    document.getElementById('btnRpoSelectAllTaps')?.addEventListener('click', () => {
+      _rpoSelectedTapIndices = new Set((_lastRpoInputInventory?.oltc || [])
+        .filter(row => row.adjustable).map(row => Number(row.trafo_index)));
+      refreshRpoInputAudit({ syncModel: false });
+    });
+    document.getElementById('btnRpoClearTaps')?.addEventListener('click', () => {
+      _rpoSelectedTapIndices = new Set();
+      refreshRpoInputAudit({ syncModel: false });
+    });
+    document.getElementById('rpoInputFilter')?.addEventListener('change', () => {
+      if (_lastRpoInputInventory) renderRpoInputAudit(_lastRpoInputInventory);
+    });
+    document.getElementById('rpoMaxTapMove')?.addEventListener('change', () =>
+      refreshRpoInputAudit({ syncModel: false }));
+    document.getElementById('rpoOltcInputTable')?.addEventListener('change', event => {
+      const toggle = event.target?.closest?.('[data-rpo-tap-toggle]');
+      if (!toggle) return;
+      if (_rpoSelectedTapIndices === null) _rpoSelectedTapIndices = new Set();
+      const index = Number(toggle.dataset.rpoTapToggle);
+      if (toggle.checked) _rpoSelectedTapIndices.add(index);
+      else _rpoSelectedTapIndices.delete(index);
+      refreshRpoInputAudit({ syncModel: false });
+    });
+    document.getElementById('rpoOltcInputTable')?.addEventListener('click', event => {
+      const button = event.target?.closest?.('[data-rpo-locate]');
+      if (!button) return;
+      const name = button.dataset.rpoLocate || '';
+      const authoredIndex = Number(button.dataset.rpoAuthoredIndex);
+      const row = findSystemElement(name) || findSystemElement(`transformer ${authoredIndex}`);
+      if (!row) {
+        setStatus(`未找到变压器 ${name || authoredIndex}`, 'warn');
+        return;
+      }
+      navigateToSearchResult(row);
+      if (row.compId !== undefined && row.compId !== null) switchTab('properties');
+    });
     document.getElementById('btnExportRpo')?.addEventListener('click', () => {
       if (!_lastRpoData) {
         log('暂无无功优化结果可导出', 'warn');

@@ -49,6 +49,18 @@ struct RPOOptions {
   /// feasibility because large OPF objectives require a looser dual target.
   double stationarity_tol{1e-3};
 
+  /// Limit each selected OLTC to this many positions above/below its current
+  /// position.  A negative value exposes the full nameplate range; zero holds
+  /// every OLTC fixed.  Library callers retain the full-range default; the GUI
+  /// explicitly defaults this control to two positions in either direction.
+  int max_tap_move{-1};
+
+  /// When true, only vector positions listed in enabled_tap_indices enter the
+  /// discrete decision vector.  This lets the GUI expose explicit per-device
+  /// participation without mutating transformer nameplate data.
+  bool restrict_tap_indices{false};
+  std::vector<int> enabled_tap_indices;
+
   bool verbose{false};
 
   bool enforce_branch_limits{true};
@@ -76,6 +88,60 @@ struct ShuntResult {
   double bs_mvar_before{0.0};
   double bs_mvar_after{0.0};
 };
+
+/// Auditable OLTC input row.  This is the single eligibility contract used by
+/// both the solver and the GUI input preview.
+struct RPOTapControlInput {
+  int trafo_index{0};          ///< Position in ac.transformers_2w.
+  int authored_index{0};       ///< User-facing component index.
+  std::string name;
+  int hv_bus{0};
+  int lv_bus{0};
+  int tap_side{0};             ///< 0 = HV, 1 = LV.
+  bool in_service{false};
+  bool adjustable{false};
+  bool selected_for_optimization{false};
+  std::string exclusion_reason;
+  int tap_pos{0};
+  int tap_min{0};
+  int tap_max{0};
+  int tap_neutral{0};
+  int position_count{0};
+  int optimization_tap_min{0};
+  int optimization_tap_max{0};
+  int optimization_position_count{0};
+  double tap_step_percent{0.0};
+  double ratio_current{1.0};
+  double ratio_min{1.0};
+  double ratio_max{1.0};
+};
+
+/// Auditable switchable-shunt input row.
+struct RPOShuntControlInput {
+  int shunt_index{0};          ///< Position in ac.shunts.
+  int authored_index{0};
+  std::string name;
+  int bus{0};
+  bool in_service{false};
+  bool switchable{false};
+  bool adjustable{false};
+  std::string exclusion_reason;
+  int current_step{0};
+  int n_steps{0};
+  int position_count{0};
+  double bs_per_step_mvar{0.0};
+  double bs_current_mvar{0.0};
+};
+
+struct RPOControlInventory {
+  std::vector<RPOTapControlInput> taps;
+  std::vector<RPOShuntControlInput> shunts;
+};
+
+/// Inspect every candidate discrete control, including excluded devices and
+/// the exact reason they do not enter the RPO decision vector.
+RPOControlInventory inspect_rpo_controls(const HybridPowerSystem& sys,
+                                         const RPOOptions& opt = {});
 
 /// Solution returned by the RPO solver.
 struct RPOResult {

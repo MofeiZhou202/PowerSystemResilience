@@ -60,22 +60,44 @@ inline double tap_ratio(int tap_pos, int tap_neutral, double step_pct) {
   return 1.0 + (tap_pos - tap_neutral) * step_pct / 100.0;
 }
 
+std::string tap_exclusion_reason(const Transformer2W& t) {
+  if (!t.in_service) return "not_in_service";
+  if (t.tap_max <= t.tap_min) return "fixed_or_invalid_tap_range";
+  if (!std::isfinite(t.tap_step_percent) || t.tap_step_percent <= 0.0)
+    return "non_positive_tap_step";
+  if (t.tap_pos < t.tap_min || t.tap_pos > t.tap_max)
+    return "current_tap_out_of_range";
+  return {};
+}
+
+std::string shunt_exclusion_reason(const Shunt& sh) {
+  if (!sh.in_service) return "not_in_service";
+  if (!sh.switchable) return "not_switchable";
+  if (sh.n_steps <= 1) return "insufficient_step_range";
+  if (!std::isfinite(sh.bs_per_step) || std::abs(sh.bs_per_step) <= 1e-12)
+    return "zero_or_invalid_step_size";
+  if (sh.current_step < 0 || sh.current_step > sh.n_steps)
+    return "current_step_out_of_range";
+  return {};
+}
+
 /// Collect transformers that have an adjustable OLTC range.
-std::vector<TapInfo> collect_taps(const HybridPowerSystem& sys) {
+std::vector<TapInfo> collect_taps(const HybridPowerSystem& sys,
+                                  const RPOOptions& opt) {
   std::vector<TapInfo> out;
-  for (size_t i = 0; i < sys.ac.transformers_2w.size(); ++i) {
-    const auto& t = sys.ac.transformers_2w[i];
-    if (!t.in_service) continue;
-    if (t.tap_max <= t.tap_min || t.tap_step_percent <= 0.0) continue;
+  const auto inventory = inspect_rpo_controls(sys, opt);
+  for (const auto& row : inventory.taps) {
+    if (!row.selected_for_optimization) continue;
+    const auto& t = sys.ac.transformers_2w[static_cast<size_t>(row.trafo_index)];
     TapInfo ti;
-    ti.trafo_idx    = static_cast<int>(i);
+    ti.trafo_idx    = row.trafo_index;
     ti.tap_pos      = t.tap_pos;
-    ti.tap_min      = t.tap_min;
-    ti.tap_max      = t.tap_max;
+    ti.tap_min      = row.optimization_tap_min;
+    ti.tap_max      = row.optimization_tap_max;
     ti.tap_neutral  = t.tap_neutral;
     ti.tap_step_pct = t.tap_step_percent;
     ti.ratio_before = tap_ratio(t.tap_pos, t.tap_neutral, t.tap_step_percent);
-    ti.name         = t.name.empty() ? "Trafo" + std::to_string(i) : t.name;
+    ti.name         = row.name;
     out.push_back(ti);
   }
   return out;
@@ -86,8 +108,7 @@ std::vector<ShuntInfo> collect_shunts(const HybridPowerSystem& sys) {
   std::vector<ShuntInfo> out;
   for (size_t i = 0; i < sys.ac.shunts.size(); ++i) {
     const auto& sh = sys.ac.shunts[i];
-    if (!sh.in_service || !sh.switchable) continue;
-    if (sh.n_steps <= 1) continue;
+    if (!shunt_exclusion_reason(sh).empty()) continue;
     ShuntInfo si;
     si.shunt_idx    = static_cast<int>(i);
     si.current_step = sh.current_step;
@@ -305,11 +326,85 @@ struct LocalSensitivityPlane {
 //  Public API
 // ════════════════════════════════════════════════════════════════
 
+RPOControlInventory inspect_rpo_controls(const HybridPowerSystem& sys,
+                                         const RPOOptions& opt) {
+  RPOControlInventory inventory;
+  inventory.taps.reserve(sys.ac.transformers_2w.size());
+  for (size_t i = 0; i < sys.ac.transformers_2w.size(); ++i) {
+    const auto& t = sys.ac.transformers_2w[i];
+    RPOTapControlInput row;
+    row.trafo_index = static_cast<int>(i);
+    row.authored_index = t.index;
+    row.name = t.name.empty() ? "Trafo" + std::to_string(i) : t.name;
+    row.hv_bus = t.hv_bus;
+    row.lv_bus = t.lv_bus;
+    row.tap_side = t.tap_side;
+    row.in_service = t.in_service;
+    row.exclusion_reason = tap_exclusion_reason(t);
+    row.adjustable = row.exclusion_reason.empty();
+    const bool explicitly_selected = !opt.restrict_tap_indices ||
+        std::find(opt.enabled_tap_indices.begin(),
+                  opt.enabled_tap_indices.end(), static_cast<int>(i)) !=
+            opt.enabled_tap_indices.end();
+    row.selected_for_optimization = row.adjustable &&
+        explicitly_selected && opt.max_tap_move != 0;
+    row.tap_pos = t.tap_pos;
+    row.tap_min = t.tap_min;
+    row.tap_max = t.tap_max;
+    row.tap_neutral = t.tap_neutral;
+    row.position_count = t.tap_max >= t.tap_min
+        ? t.tap_max - t.tap_min + 1 : 0;
+    if (row.adjustable) {
+      row.optimization_tap_min = opt.max_tap_move < 0
+          ? t.tap_min : std::max(t.tap_min, t.tap_pos - opt.max_tap_move);
+      row.optimization_tap_max = opt.max_tap_move < 0
+          ? t.tap_max : std::min(t.tap_max, t.tap_pos + opt.max_tap_move);
+      row.optimization_position_count = row.selected_for_optimization
+          ? row.optimization_tap_max - row.optimization_tap_min + 1 : 0;
+    } else {
+      row.optimization_tap_min = t.tap_pos;
+      row.optimization_tap_max = t.tap_pos;
+      row.optimization_position_count = 0;
+    }
+    row.tap_step_percent = t.tap_step_percent;
+    row.ratio_current = tap_ratio(t.tap_pos, t.tap_neutral,
+                                  t.tap_step_percent);
+    row.ratio_min = tap_ratio(t.tap_min, t.tap_neutral,
+                              t.tap_step_percent);
+    row.ratio_max = tap_ratio(t.tap_max, t.tap_neutral,
+                              t.tap_step_percent);
+    inventory.taps.push_back(std::move(row));
+  }
+
+  inventory.shunts.reserve(sys.ac.shunts.size());
+  for (size_t i = 0; i < sys.ac.shunts.size(); ++i) {
+    const auto& sh = sys.ac.shunts[i];
+    RPOShuntControlInput row;
+    row.shunt_index = static_cast<int>(i);
+    row.authored_index = sh.index;
+    row.name = sh.name.empty()
+        ? "Shunt" + std::to_string(i) + "@B" + std::to_string(sh.bus)
+        : sh.name;
+    row.bus = sh.bus;
+    row.in_service = sh.in_service;
+    row.switchable = sh.switchable;
+    row.exclusion_reason = shunt_exclusion_reason(sh);
+    row.adjustable = row.exclusion_reason.empty();
+    row.current_step = sh.current_step;
+    row.n_steps = sh.n_steps;
+    row.position_count = sh.n_steps >= 0 ? sh.n_steps + 1 : 0;
+    row.bs_per_step_mvar = sh.bs_per_step;
+    row.bs_current_mvar = sh.bs_mvar;
+    inventory.shunts.push_back(std::move(row));
+  }
+  return inventory;
+}
+
 RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
   RPOResult out;
   const auto t0 = std::chrono::steady_clock::now();
 
-  const auto taps   = collect_taps(sys);
+  const auto taps   = collect_taps(sys, opt);
   const auto shunts = collect_shunts(sys);
   const int n_taps   = static_cast<int>(taps.size());
   const int n_shunts = static_cast<int>(shunts.size());

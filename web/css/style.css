@@ -3259,6 +3259,45 @@ tr.topo-clickable:focus-visible {
 .rel-param-group .toolbar-btn {
   align-self: center;
 }
+.rpo-input-audit-group {
+  flex: 1 0 100%;
+  align-items: center;
+}
+.rpo-input-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 240px;
+}
+.rpo-input-chip {
+  padding: 3px 7px;
+  border: 1px solid var(--tb-border);
+  border-radius: 999px;
+  background: var(--bg3);
+  color: var(--ink2);
+  font: 10px/1.25 "IBM Plex Mono", monospace;
+  white-space: nowrap;
+}
+.rpo-input-chip.good { color: var(--status-success); border-color: color-mix(in srgb, var(--status-success) 55%, var(--tb-border)); }
+.rpo-input-chip.warn { color: var(--orange); border-color: color-mix(in srgb, var(--orange) 55%, var(--tb-border)); }
+.rpo-input-table {
+  flex: 1 0 100%;
+  width: 100%;
+  max-height: 190px;
+  border: 1px solid var(--tb-border);
+  border-radius: 4px;
+}
+.rpo-input-table td.rpo-control-adjustable { color: var(--status-success); font-weight: 700; }
+.rpo-input-table td.rpo-control-excluded { color: var(--orange); }
+.rpo-input-table .toolbar-btn { padding: 2px 6px; font-size: 10px; }
+.rpo-input-details {
+  flex: 1 0 100%;
+  width: 100%;
+  color: var(--ink2);
+  font-size: 11px;
+}
+.rpo-input-details > summary { cursor: pointer; padding: 3px 0; color: var(--accent2); }
 .ts-param-group {
   flex: 1 1 460px;
   max-width: 100%;
