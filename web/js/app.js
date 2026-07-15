@@ -58,6 +58,7 @@ const App = (() => {
   // Cache for re-rendering on unit change without re-running solver
   let _lastPfData = null;
   let _lastOpfData = null;
+  let _lastRpoData = null;
   let _lastTspfData = null;
   let _lastIntegratedEnergyData = null;
   let _lastEvTrafficData = null;
@@ -271,6 +272,7 @@ const App = (() => {
     evTraffic: 'ies',
     powerFlow: 'steady',
     opf: 'steady',
+    rpo: 'steady',
     harmonics: 'steady',
     hosting: 'steady',
     shortCircuit: 'security',
@@ -278,7 +280,11 @@ const App = (() => {
     tspf: 'security',
     topology: 'planning',
     timeSeries: 'planning',
-    market: 'planning',
+    market: 'market',
+    marketBehavior: 'market',
+    marketBoundary: 'market',
+    marketSecurity: 'market',
+    marketSettlement: 'market',
     scenarioGeneration: 'planning',
     weakLinks: 'planning',
     carbonFlow: 'sustainability',
@@ -290,6 +296,7 @@ const App = (() => {
     steady: 'powerFlow',
     security: 'shortCircuit',
     planning: 'topology',
+    market: 'marketBehavior',
     ies: 'integratedEnergy',
     sustainability: 'carbonFlow',
   };
@@ -297,8 +304,20 @@ const App = (() => {
   // result group (identical modeling controls). These maps route both modules to
   // the shared DOM while renderSubToolbar/setActiveModule show only the relevant
   // action group. Any module not listed uses its own name for both.
-  const SUBSECTION_FOR_MODULE = { tspf: 'timeSeries' };
-  const RESULT_GROUP_FOR_MODULE = { tspf: 'timeSeries' };
+  const SUBSECTION_FOR_MODULE = {
+    tspf: 'timeSeries',
+    marketBehavior: 'market',
+    marketBoundary: 'market',
+    marketSecurity: 'market',
+    marketSettlement: 'market',
+  };
+  const RESULT_GROUP_FOR_MODULE = {
+    tspf: 'timeSeries',
+    marketBehavior: 'market',
+    marketBoundary: 'market',
+    marketSecurity: 'market',
+    marketSettlement: 'market',
+  };
   const subsectionForModule = (m) => SUBSECTION_FOR_MODULE[m] || m;
   const resultGroupForModule = (m) => RESULT_GROUP_FOR_MODULE[m] || m;
 
@@ -342,6 +361,7 @@ const App = (() => {
     const hadTspf = !!_lastTspfData;
     _lastPfData = null;
     _lastOpfData = null;
+    _lastRpoData = null;
     _lastTspfData = null;
     _lastIntegratedEnergyData = null;
     _lastEvTrafficData = null;
@@ -1685,6 +1705,7 @@ const App = (() => {
     };
     add('power_flow', _lastPfData);
     add('optimal_power_flow', _lastOpfData);
+    add('reactive_power_optimization', _lastRpoData);
     add('time_series_power_flow', _lastTspfData);
     add('campus_integrated_energy', _lastIntegratedEnergyData);
     add('ev_power_traffic', _lastEvTrafficData);
@@ -4594,6 +4615,127 @@ const App = (() => {
     } else if (postCbSec) {
       postCbSec.style.display = 'none';
     }
+  }
+
+  // ========== Reactive Power Optimization ==========
+  function rpoNumber(id, fallback, min = -Infinity, max = Infinity) {
+    const value = Number(document.getElementById(id)?.value);
+    return Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
+  }
+
+  function renderRpoResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('rpo');
+    const fmt = (value, digits = 6) => Number.isFinite(Number(value))
+      ? Number(value).toFixed(digits) : '—';
+    const cv = data.cross_validation || {};
+    const summary = document.getElementById('rpoSummary');
+    if (summary) summary.innerHTML = `
+      <div class="result-item"><span class="result-label">求解状态</span><span class="result-value ${data.converged ? 'converged' : 'failed'}">${data.converged ? '可行' : '失败'}</span></div>
+      <div class="result-item"><span class="result-label">数学结论</span><span class="result-value ${data.globally_certified ? 'converged' : 'failed'}">${data.globally_certified ? '全局最优已证明' : '局部可行解，无全局证明'}</span></div>
+      <div class="result-item"><span class="result-label">算法</span><span class="result-value">${escapeHtml(data.algorithm || '')}</span></div>
+      <div class="result-item"><span class="result-label">目标值</span><span class="result-value">${fmt(data.objective)}</span></div>
+      <div class="result-item"><span class="result-label">NLP求解</span><span class="result-value">${Number(data.nlp_solves || 0)}</span></div>
+      <div class="result-item"><span class="result-label">运行时间</span><span class="result-value">${fmt(data.runtime_sec, 3)} s</span></div>
+      <div class="result-item"><span class="result-label">最大电压偏差</span><span class="result-value">${fmt(data.max_vdev_before)} → ${fmt(data.max_vdev_after)} pu</span></div>
+      <div class="result-item"><span class="result-label">损耗代理值</span><span class="result-value">${fmt(data.total_loss_before)} → ${fmt(data.total_loss_after)} MW</span></div>
+      <div class="result-item"><span class="result-label">全过程验证</span><span class="result-value ${cv.overall_pass ? 'converged' : 'failed'}">${cv.overall_pass ? '通过' : '未完整通过'}</span></div>
+      <div class="result-item"><span class="result-label">状态说明</span><span class="result-value">${escapeHtml(data.status || '')}</span></div>
+      <div class="result-item" style="flex-basis:100%"><span class="result-label">模型口径</span><span class="result-value">${escapeHtml(data.model_statement || '')}</span></div>`;
+
+    const checks = [
+      ['RPO内层求解', cv.rpo_converged, data.status || ''],
+      ['独立OPF重算', cv.independent_opf_converged,
+        `ΔVm=${fmt(cv.opf_max_vm_difference_pu)} pu；ΔPg=${fmt(cv.opf_max_pg_difference_mw)} MW；ΔQg=${fmt(cv.opf_max_qg_difference_mvar)} MVar`],
+      ['OPF可行性审计', cv.opf_audit_feasible,
+        (cv.opf_audit_violations || []).join('；') || '未发现审计违约'],
+      ['优化点PF回放', cv.optimized_pf_converged,
+        `ΔVm=${fmt(cv.pf_max_vm_difference_pu)} pu；残差=${fmt(cv.pf_residual, 9)}`],
+      ['OPF一致性', cv.opf_agrees, cv.opf_status || ''],
+      ['PF一致性', cv.pf_agrees,
+        cv.hybrid_dispatch_replay_partial ? '混合AC/DC富模型调度回放仍为部分映射' : '完整 authored-space 回放'],
+    ];
+    const cvDiv = document.getElementById('rpoCrossValidation');
+    if (cvDiv) cvDiv.innerHTML = `<table><thead><tr><th>验证环节</th><th>结论</th><th>证据</th></tr></thead><tbody>${checks.map(row =>
+      `<tr><td>${escapeHtml(row[0])}</td><td class="${row[1] ? 'converged' : 'failed'}">${row[1] ? '通过' : '未通过'}</td><td>${escapeHtml(row[2] || '—')}</td></tr>`).join('')}</tbody></table>`;
+
+    const coverage = Array.isArray(data.component_coverage) ? data.component_coverage : [];
+    const coverageSummary = document.getElementById('rpoCoverageSummary');
+    const covered = coverage.filter(row => row.cross_validated).reduce((sum, row) => sum + Number(row.count || 0), 0);
+    const total = coverage.reduce((sum, row) => sum + Number(row.count || 0), 0);
+    if (coverageSummary) coverageSummary.innerHTML = `
+      <div class="result-item"><span class="result-label">元件类别</span><span class="result-value">${coverage.length}</span></div>
+      <div class="result-item"><span class="result-label">交叉验证元件</span><span class="result-value">${covered} / ${total}</span></div>
+      <div class="result-item"><span class="result-label">完整覆盖</span><span class="result-value ${data.component_coverage_complete ? 'converged' : 'failed'}">${data.component_coverage_complete ? '是' : '否'}</span></div>`;
+    const coverageDiv = document.getElementById('rpoCoverageResults');
+    if (coverageDiv) coverageDiv.innerHTML = `<table><thead><tr><th>元件类别</th><th>数量</th><th>模型处理</th><th>OPF/PF交叉验证</th><th>说明</th></tr></thead><tbody>${coverage.map(row =>
+      `<tr><td>${escapeHtml(row.label || row.component_type || '')}</td><td>${Number(row.count || 0)}</td><td>${escapeHtml(row.treatment || '')}</td><td class="${row.cross_validated ? 'converged' : 'failed'}">${row.cross_validated ? '完整' : '部分/未覆盖'}</td><td>${escapeHtml(row.note || '')}</td></tr>`).join('')}</tbody></table>`;
+
+    const taps = (data.tap_names || []).map((name, i) => ({
+      type: '两绕组OLTC', name, before: data.tap_pos_before?.[i], after: data.tap_pos_after?.[i],
+      physicalBefore: data.tap_before?.[i], physicalAfter: data.tap_after?.[i], unit: 'ratio',
+    }));
+    const shunts = (data.shunt_names || []).map((name, i) => ({
+      type: '并联补偿', name, before: data.shunt_before?.[i], after: data.shunt_after?.[i],
+      physicalBefore: data.shunt_mvar_before?.[i], physicalAfter: data.shunt_mvar_after?.[i], unit: 'MVar',
+    }));
+    const devices = [...taps, ...shunts];
+    const deviceDiv = document.getElementById('rpoDeviceResults');
+    if (deviceDiv) deviceDiv.innerHTML = devices.length
+      ? `<table><thead><tr><th>类型</th><th>设备</th><th>档位前</th><th>档位后</th><th>物理量前</th><th>物理量后</th><th>动作</th></tr></thead><tbody>${devices.map(row =>
+        `<tr><td>${row.type}</td><td>${escapeHtml(row.name || '')}</td><td>${row.before}</td><td>${row.after}</td><td>${fmt(row.physicalBefore)}</td><td>${fmt(row.physicalAfter)}</td><td class="${row.before === row.after ? '' : 'converged'}">${row.before === row.after ? '保持' : '调整'}</td></tr>`).join('')}</tbody></table>`
+      : '<p class="empty-hint">当前系统没有可调两绕组 OLTC 或可投切并联补偿；连续OPF点仍已完成验证。</p>';
+
+    if (typeof Plotly !== 'undefined') {
+      const buses = (data.vm_before || []).map((_, i) => i + 1);
+      Plotly.react('rpoVoltageChart', [
+        { x: buses, y: data.vm_before || [], type: 'scatter', mode: 'lines+markers', name: '优化前' },
+        { x: buses, y: data.vm_after || [], type: 'scatter', mode: 'lines+markers', name: '优化后' },
+      ], marketTheme('母线电压对比', 'Vm / pu'), { responsive: true, displayModeBar: false });
+      const gens = data.gen_names || (data.qg_before || []).map((_, i) => `Gen ${i + 1}`);
+      Plotly.react('rpoReactiveChart', [
+        { x: gens, y: data.qg_before || [], type: 'bar', name: '优化前' },
+        { x: gens, y: data.qg_after || [], type: 'bar', name: '优化后' },
+      ], { ...marketTheme('机组无功对比', 'Qg / MVar'), barmode: 'group' },
+      { responsive: true, displayModeBar: false });
+    }
+    switchTab('results');
+  }
+
+  async function runRpo() {
+    return withAnalysisQueue(async () => {
+      setStatus('无功优化及OPF/PF交叉验证中...', 'busy');
+      if (!await syncToBackend()) {
+        setStatus('同步失败', 'error');
+        return null;
+      }
+      const payload = {
+        objective: document.getElementById('rpoObjective')?.value || 'voltage',
+        v_target: rpoNumber('rpoVoltageTarget', 1.0, 0.8, 1.2),
+        vdev_weight: rpoNumber('rpoVoltageWeight', 1.0, 0),
+        loss_weight: rpoNumber('rpoLossWeight', 1.0, 0),
+        max_evaluations: Math.round(rpoNumber('rpoMaxEvaluations', 500, 1, 100000)),
+        time_limit_s: rpoNumber('rpoTimeLimit', 120, 1, 3600),
+        max_ipm_iter: Math.round(rpoNumber('rpoMaxIpmIter', 400, 1, 100000)),
+        ipm_tol: rpoNumber('rpoIpmTol', 1e-6, 1e-12, 1),
+        branch_limits: !!document.getElementById('rpoBranchLimits')?.checked,
+        converter_capacity: !!document.getElementById('rpoConvCapacity')?.checked,
+        converter_current: !!document.getElementById('rpoConvCurrent')?.checked,
+        converter_modulation: !!document.getElementById('rpoConvModulation')?.checked,
+      };
+      const response = await apiPostResult('/api/session/run_rpo', payload);
+      if (!response.ok) {
+        setStatus(`无功优化失败: ${response.error || '未知错误'}`, 'error');
+        return null;
+      }
+      _lastRpoData = response.data;
+      renderRpoResults(response.data);
+      const pass = response.data.cross_validation?.overall_pass === true;
+      setStatus(pass ? '无功优化及交叉验证通过' : '无功优化完成，交叉验证存在差异',
+        pass ? 'success' : 'warn');
+      return response.data;
+    });
   }
 
   // ========== Short Circuit ==========
@@ -12100,6 +12242,25 @@ const App = (() => {
       const annCtl = document.getElementById('annualSimControls');
       if (annCtl && !isTspf) annCtl.hidden = false;
     }
+    if (subKey === 'market') {
+      const activeScope = moduleName === 'marketBehavior' ? 'behavior'
+        : moduleName === 'marketBoundary' ? 'boundary'
+        : moduleName === 'marketSecurity' ? 'security'
+        : moduleName === 'marketSettlement' ? 'settlement'
+        : 'clearing';
+      bar.querySelectorAll('[data-market-scope]').forEach(panel => {
+        panel.hidden = panel.dataset.marketScope !== activeScope;
+      });
+      bar.querySelectorAll('[data-market-step-target]').forEach(step => {
+        step.classList.toggle('active', step.dataset.marketStepTarget === moduleName);
+        step.setAttribute('aria-current',
+          step.dataset.marketStepTarget === moduleName ? 'step' : 'false');
+      });
+      document.querySelectorAll('[data-market-result-scope]').forEach(section => {
+        const scopes = String(section.dataset.marketResultScope || '').split(/\s+/);
+        section.hidden = !scopes.includes(activeScope);
+      });
+    }
     if (moduleName === 'resilience') markResilienceFaultBranches();
   }
 
@@ -12341,8 +12502,14 @@ const App = (() => {
       ac_contingency_failed: '事故后 AC 未通过',
       ac_validation_failed: '基态 AC 未通过',
       scuc_infeasible: 'SCUC 不可行',
+      unsupported_hybrid_market_assets: '存在市场模型不支持的设备',
+      empty_ac_market: '缺少交流母线或市场机组',
+      nonconvex_generator_offer: '机组报价非凸',
+      pricing_model_error: 'SCED 建模失败',
     };
-    return labels[status] || status || '—';
+    if (labels[status]) return labels[status];
+    if (String(status || '').startsWith('sced_infeasible')) return 'SCED 不可行';
+    return status || '—';
   }
 
   function marketTheme(title, yTitle) {
@@ -12463,6 +12630,106 @@ const App = (() => {
     acHtml += acValidation.length ? '</tbody></table>' : '<tr><td colspan="9">本次未运行基态 AC 安全认证</td></tr></tbody></table>';
     document.getElementById('marketAcValidationResults').innerHTML = acHtml;
 
+    const categoryLabels = {
+      bus_voltage: '母线电压', branch_thermal: '线路热稳',
+      generator_active: '机组有功', unsupported_asset: '模型范围',
+      n1_branch_overload: 'N-1线路过载', solver_nonconvergence: '方程未收敛',
+      market_model: '市场模型', pricing_infeasible: 'SCED不可行',
+    };
+    const issues = [];
+    const componentLocation = row => {
+      if (Number(row.bus)) return `Bus ${Number(row.bus)}`;
+      if (Number(row.from_bus) || Number(row.to_bus)) {
+        return `${Number(row.from_bus)} → ${Number(row.to_bus)}`;
+      }
+      return '—';
+    };
+    (Array.isArray(data.unsupported_assets) ? data.unsupported_assets : [])
+      .forEach(row => issues.push({
+        stage: '出清前', period: '—', category: 'unsupported_asset',
+        object: row.component_name || `${row.component_type} ${row.component_index}`,
+        location: componentLocation(row), actual: '—', limit: '—', violation: '—',
+        reason: row.reason || '当前市场模型不支持该设备',
+      }));
+    pricing.forEach((row, index) => {
+      if (row.converged === false) issues.push({
+        stage: 'SCED', period: index + 1, category: 'pricing_infeasible',
+        object: '系统约束集', location: '—', actual: '—', limit: '—', violation: '—',
+        reason: row.status || '定价出清未收敛',
+      });
+    });
+    acValidation.forEach(row => {
+      if (!row.converged) issues.push({
+        stage: '基态AC潮流', period: Number(row.period || 0) + 1,
+        category: 'solver_nonconvergence', object: '非线性潮流方程', location: '系统级',
+        actual: `P ${marketFmt(row.maximum_p_mismatch_pu, 6)} / Q ${marketFmt(row.maximum_q_mismatch_pu, 6)} pu`,
+        limit: '求解容差', violation: marketFmt(row.residual, 8),
+        reason: [row.status, ...(row.solver_warnings || [])].filter(Boolean).join('；'),
+      });
+      (Array.isArray(row.violations) ? row.violations : []).forEach(item => {
+        const unit = item.unit || '';
+        issues.push({
+          stage: '基态AC潮流', period: Number(row.period || 0) + 1,
+          category: item.category,
+          object: item.component_name || `${item.component_type} ${item.component_index}`,
+          location: componentLocation(item),
+          actual: `${marketFmt(item.actual, 6)} ${unit}`,
+          limit: item.category === 'branch_thermal'
+            ? `≤ ${marketFmt(item.upper_limit, 6)} ${unit}`
+            : `${marketFmt(item.lower_limit, 6)}–${marketFmt(item.upper_limit, 6)} ${unit}`,
+          violation: `${marketFmt(item.violation, 6)} ${unit}`,
+          reason: '市场出清调度的非线性物理复核越限',
+        });
+      });
+    });
+    (Array.isArray(security.remaining_violations)
+      ? security.remaining_violations : []).forEach(row => issues.push({
+        stage: 'N-1预防控制', period: Number(row.period || 0) + 1,
+        category: 'n1_branch_overload',
+        object: `监视线路 ${row.monitored_branch_index} (Pos ${row.monitored_branch_position})`,
+        location: `停运线路 ${row.outage_branch_index} (Pos ${row.outage_branch_position})`,
+        actual: `${marketFmt(row.post_contingency_flow_mw, 6)} MW`,
+        limit: `≤ ${marketFmt(row.emergency_rating_mw, 6)} MW`,
+        violation: `${marketFmt(row.overload_mw, 6)} MW`,
+        reason: '切平面迭代结束后仍存在事故后过载',
+      }));
+    const contingencyChecks = Array.isArray(security.ac_checks)
+      ? security.ac_checks : [];
+    contingencyChecks.forEach(check => {
+      const outage = `${check.outage_branch_name || `线路 ${check.outage_branch_index}`} (${Number(check.outage_from_bus)}→${Number(check.outage_to_bus)})`;
+      if (!check.converged) issues.push({
+        stage: '事故后AC潮流', period: Number(check.period || 0) + 1,
+        category: 'solver_nonconvergence', object: outage, location: '停运事故',
+        actual: '未收敛', limit: '应收敛', violation: '—', reason: check.status || '事故后潮流未收敛',
+      });
+      (Array.isArray(check.violations) ? check.violations : []).forEach(item => {
+        const unit = item.unit || '';
+        issues.push({
+          stage: '事故后AC潮流', period: Number(check.period || 0) + 1,
+          category: item.category,
+          object: item.component_name || `${item.component_type} ${item.component_index}`,
+          location: `${componentLocation(item)}；事故 ${outage}`,
+          actual: `${marketFmt(item.actual, 6)} ${unit}`,
+          limit: item.category === 'branch_thermal'
+            ? `≤ ${marketFmt(item.upper_limit, 6)} ${unit}`
+            : `${marketFmt(item.lower_limit, 6)}–${marketFmt(item.upper_limit, 6)} ${unit}`,
+          violation: `${marketFmt(item.violation, 6)} ${unit}`,
+          reason: '事故后非线性物理复核越限',
+        });
+      });
+    });
+    if (!data.feasible && !issues.length) issues.push({
+      stage: '市场模型', period: '—', category: 'market_model',
+      object: '系统约束集', location: '系统级', actual: '不可行', limit: '应可行', violation: '—',
+      reason: [marketStatusLabel(data.status), ...(data.warnings || [])].filter(Boolean).join('；'),
+    });
+    let issueHtml = '<table><thead><tr><th>阶段</th><th>时段</th><th>问题</th><th>对象</th><th>位置/事故</th><th>实际值</th><th>限值</th><th>超限量</th><th>原因</th></tr></thead><tbody>';
+    issues.forEach(row => {
+      issueHtml += `<tr><td>${escapeHtml(row.stage)}</td><td>${escapeHtml(String(row.period))}</td><td>${escapeHtml(categoryLabels[row.category] || row.category || '—')}</td><td>${escapeHtml(row.object || '—')}</td><td>${escapeHtml(row.location || '—')}</td><td>${escapeHtml(row.actual || '—')}</td><td>${escapeHtml(row.limit || '—')}</td><td class="failed">${escapeHtml(row.violation || '—')}</td><td>${escapeHtml(row.reason || '—')}</td></tr>`;
+    });
+    issueHtml += issues.length ? '</tbody></table>' : '<tr><td colspan="9" class="converged">未发现不可行设备或越限约束</td></tr></tbody></table>';
+    document.getElementById('marketFailureDetails').innerHTML = issueHtml;
+
     const trajectory = Array.isArray(security.trajectory) ? security.trajectory : [];
     let securityHtml = `<div class="sub-hint">候选事故 ${Number(security.candidate_contingencies || 0)}；跳过孤岛支路位置 ${(security.skipped_islanding_branch_positions || []).join(', ') || '无'}；基线目标 ${marketFmt(security.baseline_pricing_objective)}；安全目标 ${marketFmt(security.secured_pricing_objective)}；用户支付影响 ${marketFmt(security.customer_payment_impact)}</div>`;
     securityHtml += '<table><thead><tr><th>迭代</th><th>违约数</th><th>本轮切平面</th><th>累计切平面</th><th>最严重过载(MW)</th></tr></thead><tbody>';
@@ -12475,7 +12742,7 @@ const App = (() => {
     const checks = Array.isArray(security.ac_checks) ? security.ac_checks : [];
     let checkHtml = '<table><thead><tr><th>时段</th><th>停运支路</th><th>收敛</th><th>安全</th><th>最大电压越限(pu)</th><th>最大热过载(MVA)</th><th>状态</th></tr></thead><tbody>';
     checks.forEach(check => {
-      checkHtml += `<tr><td>${Number(check.period || 0) + 1}</td><td>Index ${check.outage_branch_index} / Pos ${check.outage_branch_position}</td><td>${check.converged ? '是' : '否'}</td><td class="${check.secure ? 'converged' : 'failed'}">${check.secure ? '通过' : '未通过'}</td><td>${marketFmt(check.maximum_voltage_violation_pu, 6)}</td><td>${marketFmt(check.maximum_branch_overload_mva, 4)}</td><td>${escapeHtml(check.status || '')}</td></tr>`;
+      checkHtml += `<tr><td>${Number(check.period || 0) + 1}</td><td>${escapeHtml(check.outage_branch_name || `Index ${check.outage_branch_index}`)} (${Number(check.outage_from_bus)}→${Number(check.outage_to_bus)}) / Pos ${check.outage_branch_position}</td><td>${check.converged ? '是' : '否'}</td><td class="${check.secure ? 'converged' : 'failed'}">${check.secure ? '通过' : '未通过'}</td><td>${marketFmt(check.maximum_voltage_violation_pu, 6)}</td><td>${marketFmt(check.maximum_branch_overload_mva, 4)}</td><td>${escapeHtml(check.status || '')}</td></tr>`;
     });
     checkHtml += checks.length ? '</tbody></table>' : '<tr><td colspan="7">本次未运行事故后 AC 认证</td></tr></tbody></table>';
     document.getElementById('marketContingencyResults').innerHTML = checkHtml;
@@ -14995,6 +15262,15 @@ const App = (() => {
       btn.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
     });
     document.getElementById('btnRunOpf')?.addEventListener('click', runOpf);
+    document.getElementById('btnRunRpo')?.addEventListener('click', runRpo);
+    document.getElementById('btnExportRpo')?.addEventListener('click', () => {
+      if (!_lastRpoData) {
+        log('暂无无功优化结果可导出', 'warn');
+        return;
+      }
+      downloadJsonFile(`reactive_power_optimization_${tsTagForFilename()}.json`,
+        _lastRpoData);
+    });
     document.getElementById('opfNetworkModel')?.addEventListener('change', updateAnalysisParameterVisibility);
     document.getElementById('opfSolver')?.addEventListener('change', updateAnalysisParameterVisibility);
     document.getElementById('btnOpfAdvanced')?.addEventListener('click', () => {
@@ -15046,10 +15322,21 @@ const App = (() => {
     marketParticipantTable?.addEventListener('input', updateMarketParticipantField);
     marketParticipantTable?.addEventListener('change', updateMarketParticipantField);
     document.getElementById('btnRunMarket')?.addEventListener('click', runMarketClearing);
+    document.getElementById('btnRunMarketSecurity')?.addEventListener(
+      'click', runMarketClearing);
     document.getElementById('btnRunRealTimeMarket')?.addEventListener(
       'click', runRealTimeMarket);
     document.getElementById('btnRunMarketGame')?.addEventListener(
       'click', runMarketGame);
+    document.querySelectorAll('[data-market-step-target]').forEach(button => {
+      button.addEventListener('click', () =>
+        setActiveModule(button.dataset.marketStepTarget));
+    });
+    document.getElementById('btnMarketViewSettlement')?.addEventListener('click', () => {
+      setActiveModule('marketSettlement');
+      setActiveResultGroup('market');
+      switchTab('results');
+    });
     document.getElementById('btnExportMarket')?.addEventListener('click', () => {
       if (!_lastMarketData && !_lastRealTimeMarketData && !_lastMarketGameData) {
         log('暂无市场结果可导出，请先运行日前、实时市场或重复博弈', 'warn');
@@ -19356,6 +19643,29 @@ const App = (() => {
     };
     const TS_PROFILE_ID = { irradiance: 2, price: 50, load_base: 100 };
 
+    function updateMarketBoundaryProfileStatus() {
+      const c = _tsProfileCache;
+      const loadCount = Array.isArray(c.load_profiles) ? c.load_profiles.length : 0;
+      const loadText = loadCount
+        ? `已导入 ${loadCount} 条负荷预测 · ${c.num_steps} 时段`
+        : '未导入时使用当前会话/默认负荷曲线';
+      const renewableText = c.irradiance
+        ? `已导入 ${c.irradiance.name || '新能源预测'} · ${c.num_steps} 时段`
+        : '未导入时沿用设备额定出力及当前时序配置';
+      const loadStatus = document.getElementById('marketLoadForecastStatus');
+      const renewableStatus = document.getElementById('marketRenewableForecastStatus');
+      if (loadStatus) loadStatus.textContent = loadText;
+      if (renewableStatus) renewableStatus.textContent = renewableText;
+      const boundary = document.getElementById('marketBoundaryResults');
+      if (boundary) {
+        boundary.innerHTML = `
+          <div class="result-item"><span class="result-label">市场时域</span><span class="result-value">${Number(c.num_steps || document.getElementById('marketNumSteps')?.value || 24)} 时段</span></div>
+          <div class="result-item"><span class="result-label">负荷预测</span><span class="result-value">${escapeHtml(loadText)}</span></div>
+          <div class="result-item"><span class="result-label">新能源预测</span><span class="result-value">${escapeHtml(renewableText)}</span></div>
+          <div class="result-item"><span class="result-label">检修计划</span><span class="result-value failed">仅支持全时域投运状态</span></div>`;
+      }
+    }
+
     async function pushTsConfigToServer(label) {
       const c = _tsProfileCache;
       if (!c.num_steps) {
@@ -19425,6 +19735,9 @@ const App = (() => {
         if (!r.ok) throw new Error(j.error || 'set_ts_config failed');
         const simHr = document.getElementById('simulationHours');
         if (simHr) simHr.value = String(c.num_steps);
+        const marketSteps = document.getElementById('marketNumSteps');
+        if (marketSteps) marketSteps.value = String(c.num_steps);
+        updateMarketBoundaryProfileStatus();
         log(`${label}：已上传配置 (num_steps=${j.num_steps}, profiles=${j.num_profiles}, loads_mapped=${j.num_loads_mapped ?? 0})`, 'success');
       } catch (err) {
         log(`${label}：上传失败 ${err.message || err}`, 'error');
@@ -19518,6 +19831,13 @@ const App = (() => {
         await handleTsImport(kind, label, f);
       });
     });
+    document.getElementById('btnMarketImportLoadProfile')?.addEventListener(
+      'click', () => document.getElementById('fileImportLoadProfile')?.click());
+    document.getElementById('btnMarketImportRenewableProfile')?.addEventListener(
+      'click', () => document.getElementById('fileImportIrradiance')?.click());
+    document.getElementById('marketNumSteps')?.addEventListener(
+      'input', updateMarketBoundaryProfileStatus);
+    updateMarketBoundaryProfileStatus();
 
     // Bar 2: workflow grouping and module switching
     document.querySelectorAll('.workflow-btn').forEach(btn => {

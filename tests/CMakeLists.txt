@@ -30,6 +30,7 @@ hacdcpf_add_test(test_multiscale_comprehensive test_multiscale_comprehensive.cpp
 hacdcpf_add_test(test_unified_pf_upgrade  test_unified_pf_upgrade.cpp)
 hacdcpf_add_test(test_acopf_dcopf_crossval test_acopf_dcopf_crossval.cpp)
 hacdcpf_add_test(test_opf_solver_backends test_opf_solver_backends.cpp)
+hacdcpf_add_test(test_reactive_power_opt test_reactive_power_opt.cpp)
 hacdcpf_add_test(test_enhanced_solver     test_enhanced_solver.cpp)
 hacdcpf_add_test(test_uc_external_grid     test_uc_external_grid.cpp)
 hacdcpf_add_test(test_uc_demand_response   test_uc_demand_response.cpp)
@@ -457,6 +458,13 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
               --server "$<TARGET_FILE:run_gui_server>")
     set_tests_properties(market_gui_e2e PROPERTIES
       LABELS "gui;e2e;browser;market" TIMEOUT 180)
+
+    add_test(NAME rpo_gui_e2e
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/rpo_gui_e2e.mjs"
+              --server "$<TARGET_FILE:run_gui_server>")
+    set_tests_properties(rpo_gui_e2e PROPERTIES
+      LABELS "gui;e2e;browser;rpo;cross_validation" TIMEOUT 180)
   endif()
 endif()
 

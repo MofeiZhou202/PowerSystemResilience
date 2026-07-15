@@ -2380,6 +2380,62 @@ tr.topo-clickable:focus-visible {
 .market-participant-table input[data-market-field="participant_id"] { min-width: 140px; }
 .market-participant-table input[data-market-field="participant_name"] { min-width: 130px; }
 .market-participant-table select[data-market-field="type"] { min-width: 150px; }
+.market-flow-strip {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  flex: 1 0 100%;
+  min-width: 760px;
+  padding: 4px 6px;
+  border: 1px solid var(--tb-border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--module-bar-bg2) 86%, transparent);
+}
+.market-flow-step {
+  display: grid;
+  grid-template-columns: 24px auto;
+  grid-template-rows: auto auto;
+  column-gap: 7px;
+  align-items: center;
+  flex: 1 1 0;
+  min-width: 118px;
+  padding: 6px 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--tb-text-muted);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+.market-flow-step b {
+  grid-row: 1 / 3;
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--tb-bg-hover);
+  color: var(--accent2);
+  font-size: 11px;
+}
+.market-flow-step span { color: var(--tb-text); font-size: 12px; font-weight: 700; }
+.market-flow-step small { font-size: 10px; white-space: nowrap; }
+.market-flow-step:hover { border-color: var(--tb-border-hover); background: var(--tb-bg-hover); }
+.market-flow-step.active {
+  border-color: var(--tb-active-border);
+  background: linear-gradient(180deg, var(--tb-active-bg1), var(--tb-active-bg2));
+  color: var(--tb-active-text);
+}
+.market-flow-step.active b { background: var(--accent2); color: var(--bg); }
+.market-flow-arrow { align-self: center; color: var(--ink3); font-size: 14px; }
+.market-boundary-notice {
+  padding: 4px 7px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--orange) 13%, transparent);
+  color: var(--orange);
+  font-size: 11px;
+}
+[data-market-result-scope][hidden] { display: none !important; }
 .market-chart-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2387,6 +2443,9 @@ tr.topo-clickable:focus-visible {
 }
 .market-chart { min-width: 0; height: 300px; }
 @media (max-width: 900px) {
+  .market-flow-strip { min-width: 620px; }
+  .market-flow-step { min-width: 96px; padding: 5px 6px; }
+  .market-flow-step small { display: none; }
   .market-chart-grid { grid-template-columns: 1fr; }
 }
 .seq-profile-editor-table td:first-child,

@@ -30,6 +30,17 @@ enum class ACOPFSolverBackend {
   EconomicDispatch
 };
 
+/// Continuous objective used by the full-space AC/DC OPF formulation.
+/// Economic remains the default for ordinary OPF.  The other modes are used
+/// by reactive-power optimisation so that voltage/loss terms are optimised by
+/// the inner NLP, rather than merely evaluated after an economic OPF solve.
+enum class ACOPFObjective {
+  Economic,
+  VoltageDeviation,
+  ActiveLoss,
+  VoltageDeviationAndLoss
+};
+
 // ═══════════════════════════════════════════════════════════════════════
 // AC OPF Options
 // ═══════════════════════════════════════════════════════════════════════
@@ -38,6 +49,11 @@ struct ACOPFOptions {
   /// `use_parity_ipm` / `enable_primal_dual` flags continue to control path
   /// selection (with an Ipopt fallback for hybrid AC/DC and large cases).
   ACOPFSolverBackend ac_solver_backend{ACOPFSolverBackend::Auto};
+
+  ACOPFObjective objective{ACOPFObjective::Economic};
+  double voltage_target_pu{1.0};
+  double voltage_deviation_weight{1.0};
+  double active_loss_weight{1.0};
 
   int max_inner_iterations{80};
   int max_outer_iterations{8};

@@ -99,6 +99,24 @@ struct PricingPeriod {
   double objective{0.0};
 };
 
+/// One physical limit that failed during post-clearing nonlinear validation.
+/// Positions use authored vector order while indices are stable model IDs.
+struct MarketConstraintViolation {
+  std::string category;       ///< bus_voltage / branch_thermal / generator_active
+  std::string component_type;
+  int component_position{-1};
+  int component_index{0};
+  std::string component_name;
+  int bus{0};
+  int from_bus{0};
+  int to_bus{0};
+  double actual{0.0};
+  double lower_limit{0.0};
+  double upper_limit{0.0};
+  double violation{0.0};
+  std::string unit;
+};
+
 /// AC power-flow certification of the commercial SCED dispatch.
 struct ACValidationPeriod {
   bool converged{false};
@@ -111,6 +129,10 @@ struct ACValidationPeriod {
   double maximum_generator_active_violation_mw{0.0};
   double slack_adjustment_mw{0.0};
   int slack_generator_position{-1};
+  double maximum_p_mismatch_pu{0.0};
+  double maximum_q_mismatch_pu{0.0};
+  std::vector<std::string> solver_warnings;
+  std::vector<MarketConstraintViolation> violations;
   std::string status;
 };
 
@@ -184,11 +206,28 @@ struct ACContingencyCheck {
   int period{0};
   int outage_branch_position{-1};
   int outage_branch_index{0};
+  std::string outage_branch_name;
+  int outage_from_bus{0};
+  int outage_to_bus{0};
   bool converged{false};
   bool secure{false};
   double maximum_voltage_violation_pu{0.0};
   double maximum_branch_overload_mva{0.0};
+  std::vector<MarketConstraintViolation> violations;
   std::string status;
+};
+
+/// In-service authored assets which the current market formulation cannot
+/// represent.  Returning them explicitly avoids a generic scope failure.
+struct UnsupportedMarketAsset {
+  std::string component_type;
+  int component_position{-1};
+  int component_index{0};
+  std::string component_name;
+  int bus{0};
+  int from_bus{0};
+  int to_bus{0};
+  std::string reason;
 };
 
 struct SecurityResult {
@@ -280,6 +319,7 @@ struct MarketResult {
   bool feasible{false};
   std::string status;
   std::vector<std::string> warnings;
+  std::vector<UnsupportedMarketAsset> unsupported_assets;
 
   std::vector<MarketParticipant> participants;
   std::vector<BehaviorAction> behavior_actions;

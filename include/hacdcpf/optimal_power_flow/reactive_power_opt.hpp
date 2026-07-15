@@ -2,6 +2,7 @@
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/engine/branch_and_cut.hpp"
+#include "hacdcpf/optimal_power_flow/opf_result.hpp"
 #include <string>
 #include <vector>
 
@@ -21,15 +22,23 @@ struct RPOOptions {
   /// Weight applied to the voltage-deviation term when objective is Combined.
   double vdev_weight{1.0};
 
+  /// Weight applied to active-power loss (MW) for Combined/MinActiveLoss.
+  double loss_weight{1.0};
+
   /// Target voltage magnitude (p.u.) for the deviation penalty.
   double v_target{1.0};
 
-  // ---- Branch-and-Bound parameters ----
+  // ---- Local discrete-search parameters ----
+  /// Maximum number of continuous OPF evaluations.
   int    max_nodes{50'000};
   double time_limit_sec{120.0};
+  /// Minimum objective improvement accepted by neighbourhood refinement.
   double gap_tol{1e-4};
+  /// Retained for source compatibility; discrete values are represented as int.
   double int_tol{1e-5};
 
+  // Retained for compatibility with older B&B-backed builds; the current local
+  // search does not consume these strategy selectors.
   engine::BranchingStrategy branching{engine::BranchingStrategy::Pseudocost};
   engine::NodeSelection     node_sel{engine::NodeSelection::Hybrid};
 
@@ -38,6 +47,11 @@ struct RPOOptions {
   double ipm_tol{1e-6};
 
   bool verbose{false};
+
+  bool enforce_branch_limits{true};
+  bool enforce_converter_capacity{true};
+  bool enforce_converter_current_limits{true};
+  bool enforce_converter_modulation_limits{true};
 };
 
 /// Per-transformer result entry.
@@ -69,6 +83,9 @@ struct RPOResult {
   int    nlp_solves{0};
   double runtime_sec{0.0};
   std::string status;
+  std::string algorithm{"discrete_coordinate_search_with_ac_opf"};
+  bool globally_certified{false};
+  bool optimality_gap_available{false};
 
   // Bus-level results
   std::vector<double> vm_before;
@@ -92,8 +109,13 @@ struct RPOResult {
   double max_vdev_before{0.0};
   double max_vdev_after{0.0};
 
-  // Full B&C statistics
+  // Legacy statistics envelope: counts local evaluations/sensitivity planes,
+  // not a branch-and-bound or global-gap certificate.
   engine::BCStats bc_stats;
+
+  /// Full inner OPF operating points retained for independent OPF/PF replay.
+  ACOPFResult baseline_opf;
+  ACOPFResult optimized_opf;
 };
 
 /// Solve the Reactive Power Optimization problem (MINLP).
@@ -104,9 +126,10 @@ struct RPOResult {
 ///   - Integer: transformer on-load tap-changer position  t_k ∈ [tap_min, tap_max],
 ///              switchable shunt step  s_j ∈ [0, n_steps].
 ///
-/// The problem is solved by Branch-and-Bound over the discrete variables.
-/// At each B&B node the continuous NLP relaxation is an AC OPF solved by the
-/// primal–dual interior-point method (parity IPM).
+/// The problem is solved by sensitivity-ranked discrete coordinate search and
+/// pairwise neighbourhood refinement.  Each evaluated discrete setting is
+/// completed by a nonlinear AC/DC OPF.  The method returns a feasible incumbent
+/// but does not claim a globally valid MINLP optimality certificate.
 RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt = {});
 
 }  // namespace hacdcpf::opf

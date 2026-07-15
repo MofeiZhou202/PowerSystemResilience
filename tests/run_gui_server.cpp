@@ -16003,12 +16003,38 @@ int main(int argc, char** argv) {
         }
         auto market = hacdcpf::market::run_day_ahead_market(sys, ts_data, opts);
 
+        const auto market_violation_json = [](const auto& violation) {
+          return json{{"category", violation.category},
+                      {"component_type", violation.component_type},
+                      {"component_position", violation.component_position},
+                      {"component_index", violation.component_index},
+                      {"component_name", violation.component_name},
+                      {"bus", violation.bus},
+                      {"from_bus", violation.from_bus},
+                      {"to_bus", violation.to_bus},
+                      {"actual", violation.actual},
+                      {"lower_limit", violation.lower_limit},
+                      {"upper_limit", violation.upper_limit},
+                      {"violation", violation.violation},
+                      {"unit", violation.unit}};
+        };
+
         json payload;
         payload["mode"] = "native_day_ahead_market";
         payload["status"] = market.status;
         payload["num_periods"] = num_periods;
         payload["feasible"] = market.feasible;
         payload["warnings"] = market.warnings;
+        payload["unsupported_assets"] = json::array();
+        for (const auto& item : market.unsupported_assets) {
+          payload["unsupported_assets"].push_back(json{
+              {"component_type", item.component_type},
+              {"component_position", item.component_position},
+              {"component_index", item.component_index},
+              {"component_name", item.component_name},
+              {"bus", item.bus}, {"from_bus", item.from_bus},
+              {"to_bus", item.to_bus}, {"reason", item.reason}});
+        }
         payload["commitment"] = json{
             {"feasible", market.commitment.feasible},
             {"cost", market.commitment_cost},
@@ -16047,16 +16073,24 @@ int main(int argc, char** argv) {
         }
         json ac_contingency_checks = json::array();
         for (const auto& check : security.ac_checks) {
+          json violations = json::array();
+          for (const auto& violation : check.violations) {
+            violations.push_back(market_violation_json(violation));
+          }
           ac_contingency_checks.push_back(json{
               {"period", check.period},
               {"outage_branch_position", check.outage_branch_position},
               {"outage_branch_index", check.outage_branch_index},
+              {"outage_branch_name", check.outage_branch_name},
+              {"outage_from_bus", check.outage_from_bus},
+              {"outage_to_bus", check.outage_to_bus},
               {"converged", check.converged},
               {"secure", check.secure},
               {"maximum_voltage_violation_pu",
                check.maximum_voltage_violation_pu},
               {"maximum_branch_overload_mva",
                check.maximum_branch_overload_mva},
+              {"violations", std::move(violations)},
               {"status", check.status}});
         }
         payload["security"] = json{
@@ -16141,6 +16175,10 @@ int main(int argc, char** argv) {
         payload["ac_validation"] = json::array();
         for (size_t t = 0; t < market.ac_validation.size(); ++t) {
           const auto& ac = market.ac_validation[t];
+          json violations = json::array();
+          for (const auto& violation : ac.violations) {
+            violations.push_back(market_violation_json(violation));
+          }
           payload["ac_validation"].push_back(json{
               {"period", t}, {"converged", ac.converged},
               {"secure", ac.secure},
@@ -16156,7 +16194,11 @@ int main(int argc, char** argv) {
                ac.maximum_generator_active_violation_mw},
               {"slack_adjustment_mw", ac.slack_adjustment_mw},
               {"slack_generator_position",
-               ac.slack_generator_position}});
+               ac.slack_generator_position},
+              {"maximum_p_mismatch_pu", ac.maximum_p_mismatch_pu},
+              {"maximum_q_mismatch_pu", ac.maximum_q_mismatch_pu},
+              {"solver_warnings", ac.solver_warnings},
+              {"violations", std::move(violations)}});
         }
 
         payload["generator_settlement"] = json::array();
@@ -16587,7 +16629,7 @@ int main(int argc, char** argv) {
       }
     });
 
-    // ---- Reactive Power Optimization (MINLP: B&B + IPM) ----
+    // ---- Reactive Power Optimization (local discrete search + AC/DC NLP) ----
     svr.Post("/api/session/run_rpo",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
@@ -16614,14 +16656,175 @@ int main(int argc, char** argv) {
         else
           rpo_opt.objective = hacdcpf::opf::RPOObjective::MinVoltageDeviation;
         rpo_opt.vdev_weight    = j.value("vdev_weight", 1.0);
+        rpo_opt.loss_weight    = j.value("loss_weight", 1.0);
+        rpo_opt.v_target       = j.value("v_target", 1.0);
         rpo_opt.gap_tol        = j.value("mip_gap", 0.01);
         rpo_opt.time_limit_sec = j.value("time_limit_s", 120.0);
+        rpo_opt.max_nodes      = std::max(1, j.value("max_evaluations", 50000));
+        rpo_opt.max_ipm_iter   = std::max(1, j.value("max_ipm_iter", 400));
+        rpo_opt.ipm_tol        = std::max(1e-12, j.value("ipm_tol", 1e-6));
+        rpo_opt.enforce_branch_limits = j.value("branch_limits", true);
+        rpo_opt.enforce_converter_capacity =
+            j.value("converter_capacity", true);
+        rpo_opt.enforce_converter_current_limits =
+            j.value("converter_current", true);
+        rpo_opt.enforce_converter_modulation_limits =
+            j.value("converter_modulation", true);
 
         if (j.value("relax_only", false)) {
           rpo_opt.max_nodes = 1;   // root relaxation only
         }
 
         auto result = hacdcpf::solve_rpo(sys, rpo_opt);
+
+        // Rebuild the optimized authored system, then solve an independent OPF
+        // and replay the optimized operating point through PF.  This is kept
+        // separate from the RPO's inner solves so agreement is auditable.
+        hacdcpf::HybridPowerSystem optimized_sys = sys;
+        for (const auto& tap : result.taps) {
+          if (tap.trafo_index >= 0 &&
+              tap.trafo_index < static_cast<int>(optimized_sys.ac.transformers_2w.size())) {
+            optimized_sys.ac.transformers_2w[static_cast<size_t>(tap.trafo_index)].tap_pos =
+                tap.tap_after;
+          }
+        }
+        for (const auto& shunt : result.shunts) {
+          if (shunt.shunt_index >= 0 &&
+              shunt.shunt_index < static_cast<int>(optimized_sys.ac.shunts.size())) {
+            auto& target = optimized_sys.ac.shunts[static_cast<size_t>(shunt.shunt_index)];
+            target.current_step = shunt.step_after;
+            target.bs_mvar = shunt.bs_mvar_after;
+          }
+        }
+
+        hacdcpf::opf::ACOPFOptions independent_opt;
+        independent_opt.ac_solver_backend =
+            hacdcpf::opf::ACOPFSolverBackend::Ipopt;
+        independent_opt.enable_primal_dual = true;
+        independent_opt.use_parity_ipm = true;
+        independent_opt.allow_fallback = true;
+        if (rpo_opt.objective == hacdcpf::opf::RPOObjective::MinActiveLoss) {
+          independent_opt.objective = hacdcpf::opf::ACOPFObjective::ActiveLoss;
+        } else if (rpo_opt.objective == hacdcpf::opf::RPOObjective::Combined) {
+          independent_opt.objective =
+              hacdcpf::opf::ACOPFObjective::VoltageDeviationAndLoss;
+        } else {
+          independent_opt.objective =
+              hacdcpf::opf::ACOPFObjective::VoltageDeviation;
+        }
+        independent_opt.voltage_target_pu = rpo_opt.v_target;
+        independent_opt.voltage_deviation_weight = rpo_opt.vdev_weight;
+        independent_opt.active_loss_weight = rpo_opt.loss_weight;
+        independent_opt.max_inner_iterations = rpo_opt.max_ipm_iter;
+        independent_opt.feasibility_tol = rpo_opt.ipm_tol;
+        independent_opt.enforce_branch_limits = rpo_opt.enforce_branch_limits;
+        independent_opt.enforce_converter_capacity =
+            rpo_opt.enforce_converter_capacity;
+        independent_opt.enforce_converter_current_limits =
+            rpo_opt.enforce_converter_current_limits;
+        independent_opt.enforce_converter_modulation_limits =
+            rpo_opt.enforce_converter_modulation_limits;
+        auto independent_opf = hacdcpf::solve_ac_opf(optimized_sys, independent_opt);
+        hacdcpf::verify_opf_result(optimized_sys, independent_opf);
+
+        const auto max_abs_difference = [](const std::vector<double>& lhs,
+                                           const std::vector<double>& rhs) {
+          const size_t n = std::min(lhs.size(), rhs.size());
+          if (n == 0 || lhs.size() != rhs.size())
+            return std::numeric_limits<double>::infinity();
+          double value = 0.0;
+          for (size_t i = 0; i < n; ++i)
+            value = std::max(value, std::abs(lhs[i] - rhs[i]));
+          return value;
+        };
+        const double opf_vm_difference = max_abs_difference(
+            result.optimized_opf.vm, independent_opf.vm);
+        const double opf_pg_difference = max_abs_difference(
+            result.optimized_opf.pg_mw, independent_opf.pg_mw);
+        const double opf_qg_difference = max_abs_difference(
+            result.optimized_opf.qg_mvar, independent_opf.qg_mvar);
+
+        hacdcpf::HybridPowerSystem replay_sys = optimized_sys;
+        const auto& optimized_opf = result.optimized_opf;
+        for (size_t i = 0; i < optimized_opf.pg_mw.size() &&
+                           i < replay_sys.ac.generators.size(); ++i) {
+          replay_sys.ac.generators[i].pg_mw = optimized_opf.pg_mw[i];
+          if (i < optimized_opf.qg_mvar.size())
+            replay_sys.ac.generators[i].qg_mvar = optimized_opf.qg_mvar[i];
+        }
+        for (size_t k = 0; k < optimized_opf.pren_mw.size() &&
+                           k < optimized_opf.ren_map.size(); ++k) {
+          const int pos = optimized_opf.ren_map[k].original_index;
+          if (optimized_opf.ren_map[k].source_type == 0 && pos >= 0 &&
+              pos < static_cast<int>(replay_sys.ac.renewable_gens.size())) {
+            replay_sys.ac.renewable_gens[static_cast<size_t>(pos)].p_mw =
+                optimized_opf.pren_mw[k];
+            if (k < optimized_opf.qren_mvar.size())
+              replay_sys.ac.renewable_gens[static_cast<size_t>(pos)].q_mvar =
+                  optimized_opf.qren_mvar[k];
+          } else if (optimized_opf.ren_map[k].source_type == 1 && pos >= 0 &&
+                     pos < static_cast<int>(replay_sys.ac.pv_systems.size())) {
+            replay_sys.ac.pv_systems[static_cast<size_t>(pos)].p_mw =
+                optimized_opf.pren_mw[k];
+            if (k < optimized_opf.qren_mvar.size())
+              replay_sys.ac.pv_systems[static_cast<size_t>(pos)].q_mvar =
+                  optimized_opf.qren_mvar[k];
+          }
+        }
+        for (size_t k = 0; k < optimized_opf.pstor_mw.size() &&
+                           k < optimized_opf.stor_map.size(); ++k) {
+          const int pos = optimized_opf.stor_map[k].original_index;
+          if (optimized_opf.stor_map[k].source_type == 0 && pos >= 0 &&
+              pos < static_cast<int>(replay_sys.ac.storage.size())) {
+            replay_sys.ac.storage[static_cast<size_t>(pos)].p_mw =
+                optimized_opf.pstor_mw[k];
+            if (k < optimized_opf.qstor_mvar.size())
+              replay_sys.ac.storage[static_cast<size_t>(pos)].q_mvar =
+                  optimized_opf.qstor_mvar[k];
+          }
+        }
+        for (size_t k = 0; k < optimized_opf.pflex_mw.size() &&
+                           k < optimized_opf.flex_map.size(); ++k) {
+          const int pos = optimized_opf.flex_map[k].original_index;
+          if (pos >= 0 && pos < static_cast<int>(replay_sys.ac.flexible_loads.size()))
+            replay_sys.ac.flexible_loads[static_cast<size_t>(pos)].p_mw =
+                optimized_opf.pflex_mw[k];
+        }
+        constexpr double kRadToDeg = 57.2957795130823208768;
+        for (size_t i = 0; i < optimized_opf.vm.size() &&
+                           i < replay_sys.ac.buses.size(); ++i) {
+          replay_sys.ac.buses[i].vm_pu = optimized_opf.vm[i];
+          if (i < optimized_opf.va.size())
+            replay_sys.ac.buses[i].va_deg = optimized_opf.va[i] * kRadToDeg;
+        }
+        hacdcpf::PowerFlowOptions replay_pf_opt;
+        replay_pf_opt.max_iter = 100;
+        replay_pf_opt.tol = 1e-8;
+        const auto baseline_pf = hacdcpf::solve_power_flow(sys, replay_pf_opt);
+        const auto replay_pf = hacdcpf::solve_power_flow(replay_sys, replay_pf_opt);
+        const double pf_vm_difference = max_abs_difference(
+            optimized_opf.vm, replay_pf.vm);
+        const auto pf_loss = [](const hacdcpf::PowerFlowResult& pf) {
+          double loss = 0.0;
+          for (const auto& branch : pf.branch_flows)
+            loss += branch.pf_mw + branch.pt_mw;
+          for (const auto& converter : pf.vsc_transfers)
+            loss += converter.loss_mw;
+          for (const auto& converter : pf.dcdc_transfers)
+            loss += converter.loss_mw;
+          return loss;
+        };
+
+        const bool hybrid_replay_partial =
+            !sys.dc.buses.empty() || !sys.vsc_converters.empty() ||
+            !sys.dc.dcdc_converters.empty() || !sys.energy_routers.empty();
+        const bool opf_agrees = result.converged && independent_opf.converged &&
+            std::isfinite(opf_vm_difference) && opf_vm_difference <= 1e-5 &&
+            std::isfinite(opf_pg_difference) && opf_pg_difference <= 1e-4 &&
+            std::isfinite(opf_qg_difference) && opf_qg_difference <= 1e-4;
+        const bool pf_agrees = result.converged && replay_pf.converged &&
+            std::isfinite(pf_vm_difference) && pf_vm_difference <= 1e-3 &&
+            !hybrid_replay_partial;
 
         // Build JSON response
         json out;
@@ -16645,8 +16848,159 @@ int main(int argc, char** argv) {
         out["max_vdev_before"]   = result.max_vdev_before;
         out["max_vdev_after"]    = result.max_vdev_after;
         out["status"]            = result.status;
+        out["algorithm"]         = result.algorithm;
+        out["globally_certified"] = result.globally_certified;
+        out["optimality_gap_available"] = result.optimality_gap_available;
         out["v_min"] = 0.95;
         out["v_max"] = 1.05;
+        out["model_statement"] =
+            "离散坐标搜索(两绕组OLTC/可投切并联补偿)+以所选电压/网损"
+            "目标直接求解的连续AC/DC OPF；"
+            "返回可行局部最优点，不提供全局MINLP最优性证明。";
+
+        out["cross_validation"] = json{
+            {"rpo_converged", result.converged},
+            {"independent_opf_converged", independent_opf.converged},
+            {"opf_agrees", opf_agrees},
+            {"opf_max_vm_difference_pu",
+             std::isfinite(opf_vm_difference) ? json(opf_vm_difference) : json(nullptr)},
+            {"opf_max_pg_difference_mw",
+             std::isfinite(opf_pg_difference) ? json(opf_pg_difference) : json(nullptr)},
+            {"opf_max_qg_difference_mvar",
+             std::isfinite(opf_qg_difference) ? json(opf_qg_difference) : json(nullptr)},
+            {"opf_status", independent_opf.status},
+            {"opf_audit_feasible", independent_opf.audit.feasible()},
+            {"opf_audit_violations", independent_opf.audit.violations},
+            {"baseline_pf_converged", baseline_pf.converged},
+            {"optimized_pf_converged", replay_pf.converged},
+            {"pf_agrees", pf_agrees},
+            {"pf_max_vm_difference_pu",
+             std::isfinite(pf_vm_difference) ? json(pf_vm_difference) : json(nullptr)},
+            {"baseline_pf_loss_mw", baseline_pf.converged ? json(pf_loss(baseline_pf)) : json(nullptr)},
+            {"optimized_pf_loss_mw", replay_pf.converged ? json(pf_loss(replay_pf)) : json(nullptr)},
+            {"pf_residual", replay_pf.residual},
+            {"pf_termination_reason", replay_pf.diagnostics.termination_reason},
+            {"hybrid_dispatch_replay_partial", hybrid_replay_partial},
+            {"overall_pass", opf_agrees && pf_agrees}};
+
+        const auto active_count = [](const auto& items) {
+          return static_cast<int>(std::count_if(
+              items.begin(), items.end(), [](const auto& item) {
+                return item.in_service;
+              }));
+        };
+        json coverage = json::array();
+        const auto add_coverage = [&](const std::string& type,
+                                      const std::string& label, int count,
+                                      const std::string& treatment,
+                                      bool cross_validated,
+                                      const std::string& note) {
+          if (count <= 0) return;
+          coverage.push_back(json{{"component_type", type}, {"label", label},
+                                  {"count", count}, {"treatment", treatment},
+                                  {"cross_validated", cross_validated},
+                                  {"note", note}});
+        };
+        add_coverage("ac_bus", "交流母线", active_count(sys.ac.buses),
+                     "连续状态", true, "Vm/Va进入OPF并由PF回放");
+        add_coverage("ac_branch", "交流线路", active_count(sys.ac.branches),
+                     rpo_opt.enforce_branch_limits ? "约束建模" : "建模但未限额",
+                     true, "AC潮流方程与热稳约束");
+        add_coverage("generator", "同步机组", active_count(sys.ac.generators),
+                     "连续协同优化", true, "Pg/Qg及能力上下限");
+        add_coverage("external_grid", "外部电网",
+                     active_count(sys.ac.external_grids), "连续边界电源", true,
+                     "参与OPF边界平衡；PF重新闭合Slack功率");
+        add_coverage("transformer_2w", "两绕组变压器",
+                     active_count(sys.ac.transformers_2w), "离散/固定混合", true,
+                     "有有效档位范围的OLTC直接离散优化，其余固定建模");
+        add_coverage("transformer_3w", "三绕组变压器",
+                     active_count(sys.ac.transformers_3w), "固定投影建模", true,
+                     "潮流参与；三绕组分接头尚非RPO离散变量");
+        add_coverage("shunt", "并联补偿", active_count(sys.ac.shunts),
+                     "离散/固定混合", true,
+                     "可投切步数直接优化；固定电纳作为网络参数");
+        add_coverage("load", "交流负荷", active_count(sys.ac.loads),
+                     "固定需求", true, "计入节点功率平衡和损耗核算");
+        add_coverage("asymmetric_load", "不对称负荷",
+                     active_count(sys.ac.asymmetric_loads), "平衡投影固定需求",
+                     true, "三相总量进入平衡聚合模型");
+        add_coverage("static_generator", "静态电源",
+                     active_count(sys.ac.static_generators), "固定注入", true,
+                     "不作为RPO决策变量但进入功率平衡");
+        add_coverage("flexible_load", "柔性负荷",
+                     active_count(sys.ac.flexible_loads), "连续协同优化", true,
+                     "沿用OPF柔性负荷上下限");
+        add_coverage("renewable_generator", "新能源机组",
+                     active_count(sys.ac.renewable_gens), "连续/固定混合", true,
+                     "可控P/Q进入OPF；不可控资源作为固定注入");
+        add_coverage("pv_system", "光伏系统", active_count(sys.ac.pv_systems),
+                     "连续/固定混合", true, "可控逆变器P/Q进入OPF");
+        add_coverage("storage", "交流储能", active_count(sys.ac.storage),
+                     "Q连续、P按计划", true,
+                     "单时段无SOC转移，P固定在计划附近，Q参与优化");
+        add_coverage("switch", "交流开关", active_count(sys.ac.switches),
+                     "固定拓扑", true, "保持当前开合状态");
+        add_coverage("circuit_breaker", "交流断路器",
+                     active_count(sys.ac.circuit_breakers), "固定拓扑", true,
+                     "保持当前开合状态");
+        add_coverage("charging_station", "充电站",
+                     active_count(sys.ac.charging_stations), "固定需求", true,
+                     "进入聚合功率平衡，不参与无功决策");
+        add_coverage("motor", "异步电动机", active_count(sys.ac.motors),
+                     "固定需求模型", true, "进入潮流回放，不参与RPO控制");
+        add_coverage("vsc_converter", "VSC换流器",
+                     active_count(sys.vsc_converters), "连续协同优化",
+                     !hybrid_replay_partial,
+                     "容量/电流/调制约束可启用；当前RPO-PF富模型回放为部分映射");
+        add_coverage("dc_bus", "直流母线", active_count(sys.dc.buses),
+                     "连续状态", !hybrid_replay_partial,
+                     "Vdc进入混合OPF；当前RPO-PF富模型回放为部分映射");
+        add_coverage("dc_branch", "直流线路", active_count(sys.dc.branches),
+                     "约束建模", !hybrid_replay_partial, "参与混合OPF/PF");
+        add_coverage("dc_load", "直流负荷", active_count(sys.dc.loads),
+                     "固定需求", !hybrid_replay_partial, "进入直流节点平衡");
+        add_coverage("dc_storage", "直流储能",
+                     active_count(sys.dc.storage) + active_count(sys.dc.dc_storage),
+                     "P按计划", !hybrid_replay_partial,
+                     "单时段无SOC转移；直流侧无无功变量");
+        add_coverage("dc_static_generator", "直流静态电源",
+                     active_count(sys.dc.static_generators) +
+                         active_count(sys.dc.dc_static_generators),
+                     "固定注入", !hybrid_replay_partial,
+                     "进入直流节点功率平衡");
+        add_coverage("dc_pv_array", "直流光伏", active_count(sys.dc.pv_arrays),
+                     "固定注入", !hybrid_replay_partial,
+                     "直流侧无无功变量");
+        add_coverage("dcdc_converter", "DC/DC换流器",
+                     active_count(sys.dc.dcdc_converters), "连续有功协同",
+                     !hybrid_replay_partial, "无功不适用；占空比约束由OPF处理");
+        add_coverage("energy_router", "能量路由器",
+                     active_count(sys.energy_routers), "端口投影协同",
+                     !hybrid_replay_partial, "当前RPO-PF富模型回放为部分映射");
+        add_coverage("mobile_storage", "移动储能",
+                     active_count(sys.mobile_storage), "固定/投影注入", true,
+                     "尚非RPO独立调压决策变量");
+        add_coverage("vpp", "虚拟电厂", active_count(sys.vpps),
+                     "固定/投影注入", true, "尚非RPO独立无功决策变量");
+        add_coverage("microgrid", "微网", active_count(sys.microgrids),
+                     "固定/投影交换", true, "尚非RPO独立无功决策变量");
+        add_coverage("regulator_control", "调压控制器",
+                     static_cast<int>(sys.ac.regulator_controls.size()),
+                     "未作为独立决策", false,
+                     "控制器逻辑尚未进入RPO离散变量集");
+        if (sys.three_phase_ac.has_value()) {
+          add_coverage("three_phase_ac", "三相不平衡子系统", 1,
+                       "未进入单体RPO", false,
+                       "当前RPO采用平衡聚合AC/DC模型");
+        }
+        const bool coverage_complete = std::none_of(
+            coverage.begin(), coverage.end(), [](const auto& row) {
+              return row.value("treatment", "").find("未") == 0 ||
+                     !row.value("cross_validated", false);
+            });
+        out["component_coverage"] = std::move(coverage);
+        out["component_coverage_complete"] = coverage_complete;
 
         json tap_names = json::array(), tap_ratio_before = json::array(), tap_ratio_after = json::array();
         json tap_pos_before = json::array(), tap_pos_after = json::array();

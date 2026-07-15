@@ -28,6 +28,7 @@
 
 #include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/optimal_power_flow/opf_options.hpp"
 
 namespace hacdcpf::opf::parity {
 
@@ -35,6 +36,10 @@ struct ParityOptions {
   bool load_shedding{true};
   double voll{0.0};     ///< 0.0 => auto-compute from max gen cost
   double eps_iac{1e-6}; ///< Smoothing in |Iac|
+  ACOPFObjective objective{ACOPFObjective::Economic};
+  double voltage_target_pu{1.0};
+  double voltage_deviation_weight{1.0};
+  double active_loss_weight{1.0};
   // Constraint-family toggles (multi-converter model §3.1).  Default true keeps
   // the always-enforce behavior; the GUI/OPF options can disable a family.
   bool enforce_branch_limits{true};

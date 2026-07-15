@@ -1,8 +1,8 @@
 /// @file  reactive_power_opt.cpp
-/// @brief MINLP Reactive Power Optimization with OA cutting planes.
+/// @brief Mixed discrete/continuous reactive-power optimisation heuristic.
 ///
-/// Solves the RPO problem using Outer-Approximation (OA) cutting
-/// planes combined with coordinate descent over discrete variables
+/// Solves the RPO problem using local sensitivity planes combined with
+/// coordinate search over discrete variables
 /// (OLTC tap positions and switchable shunt steps).
 ///
 ///   Phase 0 – Sensitivity ranking: ±1 perturbation of each variable
@@ -10,11 +10,10 @@
 ///             processed most-sensitive-first in all subsequent phases.
 ///   Phase 1 – Ternary-search sweep: for each variable, exploit
 ///             approximate unimodality via discrete ternary search
-///             (O(log R) evals), accumulating OA cuts.
-///   Phase 2 – Coordinate descent + OA pruning: iterate CD passes;
-///             cuts prune candidates whose OA lower bound ≥ incumbent.
+///             (O(log R) evals), accumulating local sensitivity data.
+///   Phase 2 – Coordinate descent over every admissible value.
 ///   Phase 3 – Pairwise neighbourhood refinement: check ±1
-///             perturbations of variable pairs, with OA pruning.
+///             perturbations of variable pairs.
 ///
 /// Additional per-solve optimizations:
 ///   • In-place system modification (no deep copy)
@@ -117,14 +116,17 @@ double compute_loss(const ACOPFResult& r, const HybridPowerSystem& sys) {
   // Conventional generators
   for (double p : r.pg_mw) gen_total += p;
 
+  // External grids are genuine boundary injections and must be included.
+  for (double p : r.external_grid_p_mw) gen_total += p;
+
   // Curtailable renewables (wind, hydro, PV dispatched by OPF)
   for (double p : r.pren_mw) gen_total += p;
 
   // Storage dispatch (positive = discharge/injection into grid)
   for (double p : r.pstor_mw) gen_total += p;
 
-  // VSC converter AC-side injection (positive = into AC bus)
-  for (double p : r.pac_mw) gen_total += p;
+  // VSC/DCDC/energy-router powers are internal transfers, not generation, and
+  // therefore must not be added to the system source ledger.
 
   // Static generators (fixed output, not in OPF result vectors)
   for (const auto& sg : sys.ac.static_generators)
@@ -139,9 +141,50 @@ double compute_loss(const ACOPFResult& r, const HybridPowerSystem& sys) {
     if (pv.in_service && !pv.controllable)
       gen_total += powerflow::compute_pv_power_mw(pv);
 
+  for (const auto& sg : sys.dc.static_generators)
+    if (sg.in_service) gen_total += sg.p_mw * sg.scaling;
+  for (const auto& sg : sys.dc.dc_static_generators)
+    if (sg.in_service) gen_total += sg.p_set_mw * sg.scaling;
+  for (const auto& pv : sys.dc.pv_arrays)
+    if (pv.in_service) gen_total += pv.p_set_mw;
+  for (const auto& mobile : sys.mobile_storage)
+    if (mobile.in_service) gen_total += mobile.p_mw;
+  for (const auto& vpp : sys.vpps)
+    if (vpp.in_service) gen_total += vpp.p_output_mw;
+  for (const auto& microgrid : sys.microgrids)
+    if (microgrid.in_service) gen_total -= microgrid.p_exchange_mw;
+
   double pd_total = 0.0;
+  for (const auto& bus : sys.ac.buses)
+    if (bus.in_service) pd_total += bus.pd_mw;
   for (const auto& ld : sys.ac.loads)
-    if (ld.in_service) pd_total += ld.p_mw;
+    if (ld.in_service) pd_total += ld.p_mw * ld.scaling;
+  for (const auto& ld : sys.ac.asymmetric_loads)
+    if (ld.in_service) pd_total += ld.pa_mw + ld.pb_mw + ld.pc_mw;
+  if (!r.pflex_mw.empty()) {
+    for (double p : r.pflex_mw) pd_total += p;
+  } else {
+    for (const auto& ld : sys.ac.flexible_loads)
+      if (ld.in_service) pd_total += ld.p_mw;
+  }
+  for (const auto& station : sys.ac.charging_stations) {
+    if (!station.in_service) continue;
+    pd_total += station.p_total_kw > 0.0
+        ? station.p_total_kw / 1000.0
+        : station.max_power_kw * station.utilization_rate *
+              station.simultaneity_factor / 1000.0;
+  }
+  for (const auto& motor : sys.ac.motors) {
+    if (!motor.in_service) continue;
+    pd_total += motor.efficiency > 1e-9
+        ? motor.sn_mva * motor.cos_phi / motor.efficiency
+        : motor.sn_mva * motor.cos_phi;
+  }
+  for (const auto& bus : sys.dc.buses)
+    if (bus.in_service) pd_total += bus.pd_mw;
+  for (const auto& ld : sys.dc.loads)
+    if (ld.in_service) pd_total += ld.p_mw * ld.scaling;
+  for (double shed : r.dpd_mw) pd_total -= std::max(0.0, shed);
 
   return gen_total - pd_total;
 }
@@ -160,7 +203,7 @@ double rpo_objective(const ACOPFResult& r,
   }
   if (opt.objective == RPOObjective::MinActiveLoss ||
       opt.objective == RPOObjective::Combined) {
-    obj += compute_loss(r, sys);
+    obj += opt.loss_weight * compute_loss(r, sys);
   }
   return obj;
 }
@@ -203,11 +246,29 @@ ACOPFResult solve_opf_inplace(
   apply_settings(mut_sys, taps, tap_pos, shunts, shunt_steps);
 
   ACOPFOptions opf_opt;
+  opf_opt.ac_solver_backend = ACOPFSolverBackend::Ipopt;
   opf_opt.enable_primal_dual = true;
   opf_opt.use_parity_ipm     = true;
   opf_opt.allow_fallback     = true;
+  if (rpo_opt.objective == RPOObjective::MinActiveLoss) {
+    opf_opt.objective = ACOPFObjective::ActiveLoss;
+  } else if (rpo_opt.objective == RPOObjective::Combined) {
+    opf_opt.objective = ACOPFObjective::VoltageDeviationAndLoss;
+  } else {
+    opf_opt.objective = ACOPFObjective::VoltageDeviation;
+  }
+  opf_opt.voltage_target_pu = rpo_opt.v_target;
+  opf_opt.voltage_deviation_weight = rpo_opt.vdev_weight;
+  opf_opt.active_loss_weight = rpo_opt.loss_weight;
   opf_opt.max_inner_iterations = rpo_opt.max_ipm_iter;
-  opf_opt.verbose = false;
+  opf_opt.feasibility_tol = rpo_opt.ipm_tol;
+  opf_opt.enforce_branch_limits = rpo_opt.enforce_branch_limits;
+  opf_opt.enforce_converter_capacity = rpo_opt.enforce_converter_capacity;
+  opf_opt.enforce_converter_current_limits =
+      rpo_opt.enforce_converter_current_limits;
+  opf_opt.enforce_converter_modulation_limits =
+      rpo_opt.enforce_converter_modulation_limits;
+  opf_opt.verbose = rpo_opt.verbose;
 
   ACOPFResult r = solve_ac_opf(mut_sys, opf_opt);
 
@@ -216,12 +277,12 @@ ACOPFResult solve_opf_inplace(
   return r;
 }
 
-// ───────── OA cutting planes for search-space pruning ──────────
+// ───────── Local sensitivity planes (diagnostic, never pruning) ──────────
 
-/// A linearised optimality cut generated at an evaluated point y_k:
+/// A local linear sensitivity model generated at an evaluated point y_k:
 ///   f(y) >= f_k + g_k^T (y - y_k)
 /// where g_k is a finite-difference gradient estimate.
-struct OACut {
+struct LocalSensitivityPlane {
   std::vector<double> y;          // evaluation point
   double              f{1e30};    // objective at y
   std::vector<double> g;          // gradient estimate
@@ -233,14 +294,6 @@ struct OACut {
     return val;
   }
 };
-
-/// Maximum of all OA cut predictions → lower bound at y.
-inline double oa_lower_bound(const std::vector<OACut>& cuts,
-                             const std::vector<double>& y) {
-  double lb = -1e30;
-  for (const auto& c : cuts) lb = std::max(lb, c.predict(y));
-  return lb;
-}
 
 }  // anonymous namespace
 
@@ -299,6 +352,7 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
                                           shunts, base_ss,
                                           orig_tp, orig_ss, opt);
   out.nlp_solves = 1;
+  out.baseline_opf = base_r;
   if (!base_r.converged) {
     out.status = "Baseline AC OPF failed: " + base_r.status;
     out.runtime_sec = std::chrono::duration<double>(
@@ -321,17 +375,18 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
     out.pg_mw_after         = out.pg_mw_before;
     out.total_loss_after_mw = out.total_loss_before_mw;
     out.max_vdev_after      = out.max_vdev_before;
-    out.objective           = 0.0;
-    out.gap     = 0.0;
+    out.objective           = rpo_objective(base_r, sys, opt);
+    out.optimized_opf       = base_r;
+    out.gap                 = 1.0;
     out.nodes_explored = 1;
     out.runtime_sec = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();
-    out.status = "Optimal (no discrete devices)";
+    out.status = "Feasible OPF point (no adjustable discrete devices)";
     return out;
   }
 
   // ═══════════════════════════════════════════════════════════════
-  //  OA cutting-plane accelerated coordinate optimisation
+  //  Sensitivity-guided coordinate optimisation
   // ═══════════════════════════════════════════════════════════════
 
   // -- Incumbent tracking --
@@ -341,8 +396,8 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
   std::vector<int> incumbent_ss = base_ss;
   out.nodes_explored = 1;
 
-  // -- OA cut pool & solution cache --
-  std::vector<OACut> cuts;
+  // -- Local sensitivity-plane pool & solution cache --
+  std::vector<LocalSensitivityPlane> planes;
   std::map<std::vector<int>, double> eval_cache;
 
   // Cache the baseline evaluation
@@ -390,16 +445,16 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
     return obj;
   };
 
-  // Helper: add an OA cut from a single 1-D evaluation.
-  auto add_1d_cut = [&](const std::vector<int>& tp,
-                        const std::vector<int>& ss,
-                        int vi, double obj, double dobj_dvar) {
-    OACut cut;
-    cut.y = to_dvec(tp, ss);
-    cut.f = obj;
-    cut.g.assign(static_cast<size_t>(n_disc), 0.0);
-    cut.g[vi] = dobj_dvar;
-    cuts.push_back(std::move(cut));
+  // Helper: retain a local 1-D sensitivity plane for diagnostics.
+  auto add_1d_plane = [&](const std::vector<int>& tp,
+                          const std::vector<int>& ss,
+                          int vi, double obj, double dobj_dvar) {
+    LocalSensitivityPlane plane;
+    plane.y = to_dvec(tp, ss);
+    plane.f = obj;
+    plane.g.assign(static_cast<size_t>(n_disc), 0.0);
+    plane.g[vi] = dobj_dvar;
+    planes.push_back(std::move(plane));
   };
 
   // ─── Phase 0: Sensitivity ranking ────────────────────────────
@@ -427,7 +482,7 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
 
         // Generate OA cut from this perturbation
         double grad = (obj - incumbent_obj) / dir;
-        add_1d_cut(trial_tp, trial_ss, vi, obj, grad);
+        add_1d_plane(trial_tp, trial_ss, vi, obj, grad);
       }
     }
     sensitivities.push_back({vi, best_delta});
@@ -469,11 +524,11 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
       set_var(tp2, ss2, vi, m2);
       double f2 = evaluate(tp2, ss2);
 
-      // Build cuts from both evaluations
+      // Retain local sensitivity planes from both evaluations.
       if (f1 < 1e20 && f2 < 1e20 && m2 != m1) {
         double grad = (f2 - f1) / (m2 - m1);
-        add_1d_cut(tp1, ss1, vi, f1, grad);
-        add_1d_cut(tp2, ss2, vi, f2, grad);
+        add_1d_plane(tp1, ss1, vi, f1, grad);
+        add_1d_plane(tp2, ss2, vi, f2, grad);
       }
 
       if (f1 < f2)
@@ -491,13 +546,11 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
     }
   }
 
-  // ─── Phase 2: Coordinate descent with OA cut pruning ──────────
+  // ─── Phase 2: Coordinate descent ──────────────────────────────
   //
-  // Subsequent CD passes benefit from the cut pool: before each
-  // NLP solve the OA lower bound is checked and the candidate is
-  // skipped if it cannot improve the incumbent.  New evaluations
-  // further enrich the cut pool, enabling more pruning in later
-  // iterations.
+  // Every admissible coordinate value is evaluated.  The local sensitivity
+  // planes are not globally valid lower bounds for this non-convex MINLP and
+  // therefore are never used to prune candidates.
 
   constexpr int kMaxCDCycles = 3;
   for (int cycle = 0; cycle < kMaxCDCycles && budget_ok(); ++cycle) {
@@ -512,10 +565,7 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
         if (v == cur_val) continue;
         set_var(sweep_tp, sweep_ss, vi, v);
 
-        // OA cut pruning
         auto y_cand = to_dvec(sweep_tp, sweep_ss);
-        if (oa_lower_bound(cuts, y_cand) >= incumbent_obj - opt.gap_tol)
-          continue;
 
         double obj = evaluate(sweep_tp, sweep_ss);
 
@@ -525,7 +575,7 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
           double dy = y_cand[vi] - y_inc[vi];
           double grad = (std::abs(dy) > 0.5)
                           ? (obj - incumbent_obj) / dy : 0.0;
-          add_1d_cut(sweep_tp, sweep_ss, vi, obj, grad);
+          add_1d_plane(sweep_tp, sweep_ss, vi, obj, grad);
 
           if (obj < incumbent_obj - opt.gap_tol)
             improved_this_cycle = true;
@@ -539,7 +589,7 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
   //
   // Check ±1 perturbations of every pair of discrete variables
   // around the incumbent, to capture 2-variable interactions that
-  // coordinate descent may miss.  OA cuts prune many candidates.
+  // coordinate descent may miss.
 
   for (size_t ii = 0; ii < var_order.size() && budget_ok(); ++ii) {
     for (size_t jj = ii + 1; jj < var_order.size() && budget_ok(); ++jj) {
@@ -560,9 +610,6 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
           set_var(trial_tp, trial_ss, vi, ni);
           set_var(trial_tp, trial_ss, vj, nj);
 
-          auto y_cand = to_dvec(trial_tp, trial_ss);
-          if (oa_lower_bound(cuts, y_cand) >= incumbent_obj - opt.gap_tol)
-            continue;
           evaluate(trial_tp, trial_ss);
         }
       }
@@ -577,18 +624,19 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
     out.va_after            = incumbent_result.va;
     out.qg_mvar_after       = incumbent_result.qg_mvar;
     out.pg_mw_after         = incumbent_result.pg_mw;
+    out.optimized_opf       = incumbent_result;
     out.total_loss_after_mw = compute_loss(incumbent_result, sys);
     out.max_vdev_after      = max_voltage_deviation(incumbent_result.vm, opt.v_target);
 
     double elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();
     if (elapsed >= opt.time_limit_sec)
-      out.status = "Time limit (OA)";
+      out.status = "Feasible incumbent at time limit";
     else if (out.nlp_solves >= opt.max_nodes)
-      out.status = "Node limit (OA)";
+      out.status = "Feasible incumbent at evaluation limit";
     else
-      out.status = "Optimal (OA)";
-    out.gap = 0.0;
+      out.status = "Feasible local optimum (heuristic search)";
+    out.gap = 1.0;
   } else {
     out.converged = false;
     out.vm_after            = out.vm_before;
@@ -597,7 +645,7 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
     out.pg_mw_after         = out.pg_mw_before;
     out.total_loss_after_mw = out.total_loss_before_mw;
     out.max_vdev_after      = out.max_vdev_before;
-    out.status = "No feasible configuration found (OA)";
+    out.status = "No feasible configuration found";
   }
 
   // ── Tap / shunt detail entries ──
@@ -623,10 +671,10 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
     out.shunts.push_back(sr);
   }
 
-  // ── B&C stats ──
+  // ── Legacy statistics envelope ──
   out.bc_stats.nodes_explored = out.nodes_explored;
   out.bc_stats.lp_solves      = out.nlp_solves;
-  out.bc_stats.cuts_added     = static_cast<int>(cuts.size());
+  out.bc_stats.cuts_added     = static_cast<int>(planes.size());
   out.bc_stats.best_obj       = incumbent_obj < 1e20 ? incumbent_obj : 0.0;
   out.bc_stats.gap            = out.gap;
   out.bc_stats.status         = out.status;

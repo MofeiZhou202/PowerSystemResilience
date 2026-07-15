@@ -136,6 +136,16 @@ TEST_CASE("Base AC certification rejects converged voltage-limit violations",
   REQUIRE(validation.converged);
   CHECK_FALSE(validation.secure);
   CHECK(validation.maximum_voltage_violation_pu > 1e-4);
+  REQUIRE_FALSE(validation.violations.empty());
+  CHECK(std::all_of(validation.violations.begin(), validation.violations.end(),
+                    [](const auto& violation) {
+                      return violation.category == "bus_voltage" &&
+                          violation.component_type == "ac_bus" &&
+                          violation.component_position >= 0 &&
+                          violation.component_index > 0 &&
+                          violation.violation > 0.0 &&
+                          violation.unit == "pu";
+                    }));
   CHECK(validation.status == "ac_security_limits_violated");
   CHECK(result.num_ac_converged == 1);
   CHECK(result.num_ac_secure == 0);
@@ -153,6 +163,16 @@ TEST_CASE("Base AC certification rejects converged voltage-limit violations",
   CHECK_FALSE(thermal_validation.secure);
   CHECK(thermal_validation.maximum_branch_overload_mva > 1.0);
   CHECK(thermal_validation.maximum_branch_loading_percent > 100.0);
+  REQUIRE_FALSE(thermal_validation.violations.empty());
+  CHECK(std::any_of(
+      thermal_validation.violations.begin(),
+      thermal_validation.violations.end(), [](const auto& violation) {
+        return violation.category == "branch_thermal" &&
+            violation.component_type == "ac_branch" &&
+            violation.from_bus > 0 && violation.to_bus > 0 &&
+            violation.actual > violation.upper_limit &&
+            violation.violation > 1.0 && violation.unit == "MVA";
+      }));
   CHECK_FALSE(thermal_result.feasible);
   CHECK(thermal_result.status == "ac_validation_failed");
 }
@@ -310,6 +330,11 @@ TEST_CASE("First market slice rejects hybrid assets explicitly",
   CHECK_FALSE(result.feasible);
   CHECK(result.status == "unsupported_hybrid_market_assets");
   REQUIRE_FALSE(result.warnings.empty());
+  REQUIRE(result.unsupported_assets.size() == 1);
+  CHECK(result.unsupported_assets.front().component_type == "dc_bus");
+  CHECK(result.unsupported_assets.front().component_index == 101);
+  CHECK(result.unsupported_assets.front().bus == 101);
+  CHECK_FALSE(result.unsupported_assets.front().reason.empty());
 }
 
 TEST_CASE("Strategic policy marks up offers and withholds flexible capacity",

@@ -78,14 +78,28 @@ async function main() {
     });
     if (!appReady) throw new Error(`App failed to initialize: ${pageErrors.join(' | ') || 'no page error captured'}`);
     await page.evaluate(() => App.loadMatpowerCase('case9.m'));
-    await page.evaluate(() => App.setActiveModule('market'));
+    await page.evaluate(() => App.setActiveModule('marketBehavior'));
 
-    const module = page.locator('#moduleMarket');
+    const module = page.locator('#moduleMarketBehavior');
     if (!(await module.evaluate(element => element.classList.contains('active')))) {
       throw new Error('market module did not become active');
     }
     if (!(await page.locator('[data-sub="market"]').isVisible())) {
       throw new Error('market controls are not visible');
+    }
+    if (!(await page.locator('#workflowMarket').evaluate(element =>
+      element.classList.contains('active')))) {
+      throw new Error('electricity market was not promoted to an active workflow');
+    }
+    const marketModules = await page.locator('.module-btn[data-group="market"]')
+      .evaluateAll(elements => elements.map(element => element.textContent.trim()));
+    if (JSON.stringify(marketModules) !== JSON.stringify([
+      '市场行为', '边界条件', '市场出清', '安全校核', '市场结算'])) {
+      throw new Error(`market workflow order is wrong: ${JSON.stringify(marketModules)}`);
+    }
+    if (!(await page.locator('[data-market-step-target="marketBehavior"]')
+      .evaluate(element => element.classList.contains('active')))) {
+      throw new Error('market behavior is not the active first workflow step');
     }
 
     await page.locator('#btnMarketParticipants').click();
@@ -100,13 +114,23 @@ async function main() {
     await page.locator('#btnMarketParticipantsApply').click();
     await page.locator('#marketParticipantModal').waitFor({ state: 'hidden' });
 
+    await page.evaluate(() => App.setActiveModule('marketBoundary'));
+    if (!(await page.locator('#marketNumSteps').isVisible()) ||
+        !(await page.locator('#btnMarketImportLoadProfile').isVisible()) ||
+        !(await page.locator('#marketLoadForecastStatus').isVisible()) ||
+        (await page.locator('#marketEnableN1').isVisible())) {
+      throw new Error('market boundary step mixes controls from another stage');
+    }
     await page.locator('#marketNumSteps').fill('1');
-    await page.locator('#marketAcValidation').uncheck();
+    await page.locator('#marketRealizedLoadDeviationPct').fill('5');
+
+    await page.evaluate(() => App.setActiveModule('marketSecurity'));
+    await page.locator('#marketAcValidation').check();
     await page.locator('#marketEnableN1').check();
     const responsePromise = page.waitForResponse(response =>
       response.url().includes('/api/session/run_market_clearing') &&
       response.request().method() === 'POST', { timeout: 120000 });
-    await page.locator('#btnRunMarket').click();
+    await page.locator('#btnRunMarketSecurity').click();
     const response = await responsePromise;
     const market = await response.json();
     if (!response.ok()) throw new Error(`market endpoint failed: ${market.error || response.status()}`);
@@ -115,6 +139,10 @@ async function main() {
     }
     if (!Array.isArray(market.security.trajectory) || !market.security.trajectory.length) {
       throw new Error('N-1 cut trajectory is missing');
+    }
+    if (!market.ac_validation?.[0]?.converged ||
+        !Array.isArray(market.ac_validation?.[0]?.violations)) {
+      throw new Error('automatic post-clearing AC power-flow diagnostics are missing');
     }
     const firm = (market.participant_settlement || [])
       .find(row => row.participant_id === 'firm_a');
@@ -131,19 +159,23 @@ async function main() {
       pricingRows: document.querySelectorAll('#marketPricingResults tbody tr').length,
       participantRows: document.querySelectorAll('#marketParticipantResults tbody tr').length,
       securityRows: document.querySelectorAll('#marketSecurityResults tbody tr').length,
+      failureDetails: document.getElementById('marketFailureDetails')?.textContent || '',
       lmpChart: !!document.querySelector('#marketLmpChart.js-plotly-plot'),
     }));
     if (!rendered.summary.includes('资金残差') || rendered.pricingRows !== 1 ||
-        rendered.participantRows < 1 || rendered.securityRows < 1 || !rendered.lmpChart) {
+        rendered.participantRows < 1 || rendered.securityRows < 1 ||
+        !rendered.failureDetails.includes('未发现不可行设备或越限约束') ||
+        !rendered.lmpChart) {
       throw new Error(`market dashboard incomplete: ${JSON.stringify(rendered)}`);
     }
 
     await page.locator('#marketEnableN1').uncheck();
-    await page.locator('#marketRealizedLoadDeviationPct').fill('5');
-    await page.locator('#marketAncillaryEnabled').check();
-    await page.locator('#marketReservePerformancePct').fill('0');
+    await page.evaluate(() => App.setActiveModule('marketSettlement'));
     await page.locator('#marketGeneratorImbalanceTolerancePct').fill('1');
     await page.locator('#marketLoadImbalanceTolerancePct').fill('2');
+    await page.evaluate(() => App.setActiveModule('market'));
+    await page.locator('#marketAncillaryEnabled').check();
+    await page.locator('#marketReservePerformancePct').fill('0');
     const realTimeResponsePromise = page.waitForResponse(response =>
       response.url().includes('/api/session/run_real_time_market') &&
       response.request().method() === 'POST', { timeout: 120000 });
@@ -166,6 +198,15 @@ async function main() {
       document.querySelector('#marketReservePerformanceChart')?.classList.contains('js-plotly-plot') &&
       document.getElementById('marketRealTimeLedgerResults')?.textContent?.includes('运营方辅助服务余额'));
 
+    await page.evaluate(() => App.setActiveModule('marketSettlement'));
+    await page.locator('#btnMarketViewSettlement').click();
+    if (!(await page.locator('#marketSettlementResults').isVisible()) ||
+        (await page.locator('#marketPricingResults').isVisible()) ||
+        !(await page.locator('#marketRealTimeLedgerResults').isVisible())) {
+      throw new Error('settlement step does not isolate settlement results');
+    }
+
+    await page.evaluate(() => App.setActiveModule('marketBehavior'));
     await page.locator('#marketGameRounds').fill('2');
     const gameResponsePromise = page.waitForResponse(response =>
       response.url().includes('/api/session/run_repeated_market_game') &&

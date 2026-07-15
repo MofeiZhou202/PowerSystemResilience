@@ -84,6 +84,11 @@ TEST_CASE("AC OPF converges on internal hybrid case300_acdc", "[opf][acdc]") {
   opt.max_inner_iterations = 200;
   const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
 
+  INFO("status=" << r.status);
+  INFO("iterations=" << r.iterations
+       << " max_constraint_violation=" << r.max_constraint_violation
+       << " max_stationarity=" << r.max_stationarity
+       << " linear_solver=" << r.profiling.linear_solver_backend);
   CHECK(r.converged);
   CHECK(r.solver_path == opf::OPFSolverPath::ParityIPM);
   CHECK(r.objective > 0.0);

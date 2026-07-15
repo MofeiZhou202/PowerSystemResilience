@@ -159,16 +159,59 @@ std::vector<int> active_branch_positions(const HybridPowerSystem& system) {
   return out;
 }
 
-bool has_unsupported_hybrid_market_assets(const HybridPowerSystem& system) {
-  const auto any_in_service = [](const auto& items) {
-    return std::any_of(items.begin(), items.end(),
-                       [](const auto& item) { return item.in_service; });
+std::vector<UnsupportedMarketAsset> unsupported_market_assets(
+    const HybridPowerSystem& system) {
+  std::vector<UnsupportedMarketAsset> out;
+  const auto add = [&](const std::string& type, int position, int index,
+                       const std::string& name, int bus, int from_bus,
+                       int to_bus, const std::string& reason) {
+    out.push_back(UnsupportedMarketAsset{
+        type, position, index, name, bus, from_bus, to_bus, reason});
   };
-  return any_in_service(system.dc.buses) || any_in_service(system.dc.branches) ||
-         any_in_service(system.dc.loads) || any_in_service(system.dc.storage) ||
-         any_in_service(system.vsc_converters) ||
-         any_in_service(system.dc.dcdc_converters) ||
-         any_in_service(system.ac.external_grids);
+  for (size_t i = 0; i < system.dc.buses.size(); ++i) {
+    const auto& item = system.dc.buses[i];
+    if (item.in_service)
+      add("dc_bus", static_cast<int>(i), item.index, item.name, item.index,
+          0, 0, "DC母线尚未纳入SCUC/SCED联合市场模型");
+  }
+  for (size_t i = 0; i < system.dc.branches.size(); ++i) {
+    const auto& item = system.dc.branches[i];
+    if (item.in_service)
+      add("dc_branch", static_cast<int>(i), item.index, item.name, 0,
+          item.from_bus, item.to_bus, "DC支路约束尚未纳入市场出清");
+  }
+  for (size_t i = 0; i < system.dc.loads.size(); ++i) {
+    const auto& item = system.dc.loads[i];
+    if (item.in_service)
+      add("dc_load", static_cast<int>(i), item.index, item.name, item.bus,
+          0, 0, "DC负荷尚未纳入市场需求与结算");
+  }
+  for (size_t i = 0; i < system.dc.storage.size(); ++i) {
+    const auto& item = system.dc.storage[i];
+    if (item.in_service)
+      add("dc_storage", static_cast<int>(i), item.index, item.name, item.bus,
+          0, 0, "DC储能尚未纳入市场跨时段调度");
+  }
+  for (size_t i = 0; i < system.vsc_converters.size(); ++i) {
+    const auto& item = system.vsc_converters[i];
+    if (item.in_service)
+      add("vsc_converter", static_cast<int>(i), item.index,
+          "VSC " + std::to_string(item.index), 0, item.bus_ac, item.bus_dc,
+          "VSC交直流耦合功率与容量约束尚未纳入市场出清");
+  }
+  for (size_t i = 0; i < system.dc.dcdc_converters.size(); ++i) {
+    const auto& item = system.dc.dcdc_converters[i];
+    if (item.in_service)
+      add("dcdc_converter", static_cast<int>(i), item.index, item.name, 0,
+          item.bus_in, item.bus_out, "DC/DC变换器约束尚未纳入市场出清");
+  }
+  for (size_t i = 0; i < system.ac.external_grids.size(); ++i) {
+    const auto& item = system.ac.external_grids[i];
+    if (item.in_service)
+      add("external_grid", static_cast<int>(i), item.index, item.name,
+          item.bus, 0, 0, "外部电网尚未建模为可报价的市场平衡资源");
+  }
+  return out;
 }
 
 PeriodNetworkData make_period_data(
@@ -1348,6 +1391,9 @@ ACValidationPeriod summarize_ac_validation(
   ACValidationPeriod out;
   out.converged = power_flow.converged;
   out.residual = power_flow.residual;
+  out.maximum_p_mismatch_pu = power_flow.diagnostics.max_p_mismatch_pu;
+  out.maximum_q_mismatch_pu = power_flow.diagnostics.max_q_mismatch_pu;
+  out.solver_warnings = power_flow.diagnostics.warnings;
   out.status = power_flow.converged
       ? "converged"
       : (power_flow.diagnostics.termination_reason.empty()
@@ -1362,6 +1408,14 @@ ACValidationPeriod summarize_ac_validation(
     out.maximum_voltage_violation_pu = std::max(
         out.maximum_voltage_violation_pu,
         std::max({0.0, bus.vmin_pu - vm, vm - bus.vmax_pu}));
+    const double violation =
+        std::max({0.0, bus.vmin_pu - vm, vm - bus.vmax_pu});
+    if (violation > std::max(0.0, options.ac_validation_voltage_tolerance_pu)) {
+      out.violations.push_back(MarketConstraintViolation{
+          "bus_voltage", "ac_bus", static_cast<int>(b), bus.index,
+          bus.name.empty() ? "Bus " + std::to_string(bus.index) : bus.name,
+          bus.index, 0, 0, vm, bus.vmin_pu, bus.vmax_pu, violation, "pu"});
+    }
   }
 
   for (size_t l = 0; l < power_flow.branch_flows.size(); ++l) {
@@ -1378,6 +1432,19 @@ ACValidationPeriod summarize_ac_validation(
             100.0 * apparent / rate);
         out.maximum_branch_overload_mva = std::max(
             out.maximum_branch_overload_mva, apparent - rate);
+        const double overload = std::max(0.0, apparent - rate);
+        if (overload >
+            std::max(0.0, options.ac_validation_thermal_tolerance_mva)) {
+          const auto& branch = snapshot.ac.branches[l];
+          out.violations.push_back(MarketConstraintViolation{
+              "branch_thermal", "ac_branch", static_cast<int>(l),
+              branch.index,
+              branch.name.empty()
+                  ? "Branch " + std::to_string(branch.index)
+                  : branch.name,
+              0, branch.from_bus, branch.to_bus, apparent, 0.0, rate,
+              overload, "MVA"});
+        }
       }
     }
   }
@@ -1406,6 +1473,18 @@ ACValidationPeriod summarize_ac_validation(
     const double adjusted = scheduled + out.slack_adjustment_mw;
     out.maximum_generator_active_violation_mw = std::max(
         {0.0, generator.pmin_mw - adjusted, adjusted - generator.pmax_mw});
+    if (out.maximum_generator_active_violation_mw >
+        std::max(0.0, options.ac_validation_generator_tolerance_mw)) {
+      out.violations.push_back(MarketConstraintViolation{
+          "generator_active", "generator", static_cast<int>(g),
+          generator.index,
+          generator.name.empty()
+              ? "Generator " + std::to_string(generator.index)
+              : generator.name,
+          generator.bus, 0, 0, adjusted, generator.pmin_mw,
+          generator.pmax_mw, out.maximum_generator_active_violation_mw,
+          "MW"});
+    }
     break;
   }
   out.maximum_branch_overload_mva =
@@ -1439,6 +1518,13 @@ void run_ac_contingency_validation(
       check.outage_branch_position = outage_position;
       check.outage_branch_index =
           system.ac.branches[static_cast<size_t>(outage_position)].index;
+      const auto& outage_branch =
+          system.ac.branches[static_cast<size_t>(outage_position)];
+      check.outage_branch_name = outage_branch.name.empty()
+          ? "Branch " + std::to_string(outage_branch.index)
+          : outage_branch.name;
+      check.outage_from_bus = outage_branch.from_bus;
+      check.outage_to_bus = outage_branch.to_bus;
       HybridPowerSystem snapshot = build.periods[static_cast<size_t>(t)].snapshot;
       apply_pricing_state(
           snapshot, build.periods[static_cast<size_t>(t)],
@@ -1461,6 +1547,16 @@ void run_ac_contingency_validation(
             check.maximum_voltage_violation_pu = std::max(
                 check.maximum_voltage_violation_pu,
                 std::max({0.0, bus.vmin_pu - vm, vm - bus.vmax_pu}));
+            const double violation =
+                std::max({0.0, bus.vmin_pu - vm, vm - bus.vmax_pu});
+            if (violation > options.ac_contingency_voltage_tolerance_pu) {
+              check.violations.push_back(MarketConstraintViolation{
+                  "bus_voltage", "ac_bus", static_cast<int>(b), bus.index,
+                  bus.name.empty() ? "Bus " + std::to_string(bus.index)
+                                   : bus.name,
+                  bus.index, 0, 0, vm, bus.vmin_pu, bus.vmax_pu,
+                  violation, "pu"});
+            }
           }
           for (size_t l = 0; l < power_flow.branch_flows.size() &&
                              l < snapshot.ac.branches.size(); ++l) {
@@ -1475,6 +1571,17 @@ void run_ac_contingency_validation(
                 branch.rate_a_mva;
             check.maximum_branch_overload_mva = std::max(
                 check.maximum_branch_overload_mva, apparent - emergency);
+            const double overload = std::max(0.0, apparent - emergency);
+            if (overload > options.ac_contingency_thermal_tolerance_mva) {
+              check.violations.push_back(MarketConstraintViolation{
+                  "branch_thermal", "ac_branch", static_cast<int>(l),
+                  branch.index,
+                  branch.name.empty()
+                      ? "Branch " + std::to_string(branch.index)
+                      : branch.name,
+                  0, branch.from_bus, branch.to_bus, apparent, 0.0,
+                  emergency, overload, "MVA"});
+            }
           }
         }
       } catch (const std::exception& error) {
@@ -1697,11 +1804,13 @@ MarketResult run_day_ahead_market(
     result.warnings.push_back("Market time series must have positive periods and duration.");
     return result;
   }
-  if (has_unsupported_hybrid_market_assets(system)) {
+  result.unsupported_assets = unsupported_market_assets(system);
+  if (!result.unsupported_assets.empty()) {
     result.status = "unsupported_hybrid_market_assets";
     result.warnings.push_back(
         "The first market slice prices the AC generator/branch subset only; "
-        "external-grid and hybrid AC/DC co-optimisation is not yet enabled.");
+        "external-grid and hybrid AC/DC co-optimisation is not yet enabled. "
+        "See unsupported_assets for the exact authored components.");
     return result;
   }
   if (system.ac.generators.empty() || system.ac.buses.empty()) {

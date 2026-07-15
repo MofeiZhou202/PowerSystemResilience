@@ -1992,9 +1992,15 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   }
 
   parity::ParityOptions form_opt;
-  form_opt.load_shedding = true;
+  // RPO objectives must not improve voltage/loss by dropping demand.  Ordinary
+  // economic OPF retains its existing VOLL-backed load-shedding recourse.
+  form_opt.load_shedding = opt.objective == ACOPFObjective::Economic;
   form_opt.voll = 0.0;
   form_opt.eps_iac = 1e-6;
+  form_opt.objective = opt.objective;
+  form_opt.voltage_target_pu = opt.voltage_target_pu;
+  form_opt.voltage_deviation_weight = opt.voltage_deviation_weight;
+  form_opt.active_loss_weight = opt.active_loss_weight;
   form_opt.enforce_branch_limits = opt.enforce_branch_limits;
   form_opt.enforce_converter_capacity = opt.enforce_converter_capacity;
   form_opt.enforce_converter_current_limits = opt.enforce_converter_current_limits;

@@ -1115,12 +1115,59 @@ void build_initial_point(const Problem& prob,
   }
 }
 
-// Economic objective in engineering units.  Decision variables are stored in
-// p.u., so each MW/MVAr cost term converts through base_mva before evaluating
-// generator cost, VOLL, or curtailment penalties.
+// Continuous OPF objective.  Ordinary OPF uses economic cost.  RPO modes use
+// voltage deviation and/or the variable part of the physical active-loss
+// ledger.  Fixed injections and demands are constants and therefore do not
+// affect the minimiser; the reported RPO loss adds those constants afterwards.
 double objective(const Problem& prob, const Eigen::VectorXd& x) {
   const auto& idx = prob.vidx;
   double f = 0.0;
+  constexpr double kRpoEconomicTieBreak = 1e-6;
+  const bool voltage_objective =
+      prob.options.objective == ACOPFObjective::VoltageDeviation ||
+      prob.options.objective == ACOPFObjective::VoltageDeviationAndLoss;
+  const bool loss_objective =
+      prob.options.objective == ACOPFObjective::ActiveLoss ||
+      prob.options.objective == ACOPFObjective::VoltageDeviationAndLoss;
+
+  if (voltage_objective) {
+    for (int i = 0; i < idx.n_vm; ++i) {
+      const double d = x[idx.i_vm + i] - prob.options.voltage_target_pu;
+      f += prob.options.voltage_deviation_weight * d * d;
+    }
+  }
+  if (loss_objective) {
+    double variable_loss_mw = 0.0;
+    const auto add_block = [&](int offset, int count, double sign) {
+      for (int k = 0; k < count; ++k)
+        variable_loss_mw += sign * x[offset + k] * prob.data.base_mva;
+    };
+    add_block(idx.i_pg, idx.n_pg, 1.0);
+    add_block(idx.i_pren, idx.n_pren, 1.0);
+    add_block(idx.i_pstor, idx.n_pstor, 1.0);
+    add_block(idx.i_pstordc, idx.n_pstordc, 1.0);
+    add_block(idx.i_pflex, idx.n_pflex, -1.0);
+    // When present (economic mode only in normal operation), shedding reduces
+    // served demand and therefore enters generation-minus-served-demand with a
+    // positive sign.
+    add_block(idx.i_dpd, idx.n_dpd, 1.0);
+    f += prob.options.active_loss_weight * variable_loss_mw;
+  }
+  if (prob.options.objective != ACOPFObjective::Economic) {
+    // The physical RPO objectives can leave equivalent active-dispatch
+    // directions.  A tiny economic tie-break selects one dispatch without
+    // materially changing voltage/loss rankings and keeps the KKT system
+    // better conditioned.  It is deliberately not applied to Vm/Q variables.
+    for (int k = 0; k < idx.n_pg; ++k) {
+      const auto& gen = prob.data.generators[
+          static_cast<size_t>(prob.gen_var_to_data[static_cast<size_t>(k)])];
+      const double pg_mw = x[idx.i_pg + k] * prob.data.base_mva;
+      f += kRpoEconomicTieBreak *
+           (gen.cost_c2 * pg_mw * pg_mw + gen.cost_c1 * pg_mw);
+    }
+    return f;
+  }
+
   for (int k = 0; k < idx.n_pg; ++k) {
     const auto& gen = prob.data.generators[static_cast<size_t>(prob.gen_var_to_data[static_cast<size_t>(k)])];
     const double pg_mw = x[idx.i_pg + k] * prob.data.base_mva;
@@ -1183,6 +1230,47 @@ void objective_gradient_hessian_diag(const Problem& prob,
   const auto& idx = prob.vidx;
   grad = Eigen::VectorXd::Zero(idx.n_total);
   hdiag = Eigen::VectorXd::Zero(idx.n_total);
+  constexpr double kRpoEconomicTieBreak = 1e-6;
+  const bool voltage_objective =
+      prob.options.objective == ACOPFObjective::VoltageDeviation ||
+      prob.options.objective == ACOPFObjective::VoltageDeviationAndLoss;
+  const bool loss_objective =
+      prob.options.objective == ACOPFObjective::ActiveLoss ||
+      prob.options.objective == ACOPFObjective::VoltageDeviationAndLoss;
+  if (voltage_objective) {
+    for (int i = 0; i < idx.n_vm; ++i) {
+      const int col = idx.i_vm + i;
+      grad[col] += 2.0 * prob.options.voltage_deviation_weight *
+                   (x[col] - prob.options.voltage_target_pu);
+      hdiag[col] += 2.0 * prob.options.voltage_deviation_weight;
+    }
+  }
+  if (loss_objective) {
+    const double scale = prob.options.active_loss_weight * prob.data.base_mva;
+    const auto add_linear_block = [&](int offset, int count, double sign) {
+      for (int k = 0; k < count; ++k) grad[offset + k] += sign * scale;
+    };
+    add_linear_block(idx.i_pg, idx.n_pg, 1.0);
+    add_linear_block(idx.i_pren, idx.n_pren, 1.0);
+    add_linear_block(idx.i_pstor, idx.n_pstor, 1.0);
+    add_linear_block(idx.i_pstordc, idx.n_pstordc, 1.0);
+    add_linear_block(idx.i_pflex, idx.n_pflex, -1.0);
+    add_linear_block(idx.i_dpd, idx.n_dpd, 1.0);
+  }
+  if (prob.options.objective != ACOPFObjective::Economic) {
+    for (int k = 0; k < idx.n_pg; ++k) {
+      const auto& gen = prob.data.generators[
+          static_cast<size_t>(prob.gen_var_to_data[static_cast<size_t>(k)])];
+      const int col = idx.i_pg + k;
+      const double quad = 2.0 * gen.cost_c2 * prob.data.base_mva *
+                          prob.data.base_mva;
+      const double lin = gen.cost_c1 * prob.data.base_mva;
+      grad[col] += kRpoEconomicTieBreak * (quad * x[col] + lin);
+      hdiag[col] += kRpoEconomicTieBreak * quad;
+    }
+    return;
+  }
+
   for (int k = 0; k < idx.n_pg; ++k) {
     const auto& gen = prob.data.generators[static_cast<size_t>(prob.gen_var_to_data[static_cast<size_t>(k)])];
     const int col = idx.i_pg + k;
