@@ -82,8 +82,38 @@ async function main() {
       document.getElementById('rpoSummary')?.textContent?.includes('局部可行解') &&
       document.getElementById('rpoCoverageResults')?.textContent?.includes('交流母线') &&
       document.getElementById('rpoCrossValidation')?.textContent?.includes('独立OPF重算'));
+
+    // Large hybrid regression: case300 previously returned empty Vm/Qg arrays
+    // after an unseeded Ipopt step-computation failure, leaving both charts
+    // blank and labelling partial PF coverage as a numerical disagreement.
+    await page.evaluate(() => App.loadBuiltinCase('case300_acdc'));
+    await page.evaluate(() => App.setActiveModule('rpo'));
+    await page.locator('#rpoMaxEvaluations').fill('1');
+    await page.locator('#rpoTimeLimit').fill('30');
+    await page.locator('#rpoMaxIpmIter').fill('400');
+    await page.locator('#rpoStationarityTol').fill('1e-3');
+    const case300ResponsePromise = page.waitForResponse(response =>
+      response.url().includes('/api/session/run_rpo') && response.request().method() === 'POST',
+      { timeout: 120000 });
+    await page.locator('#btnRunRpo').click();
+    const case300Response = await case300ResponsePromise;
+    const case300 = await case300Response.json();
+    if (!case300Response.ok() || !case300.converged ||
+        case300.vm_after?.length !== 300 || case300.qg_after?.length !== 69 ||
+        !case300.cross_validation?.independent_opf_converged ||
+        !case300.cross_validation?.opf_agrees ||
+        !case300.cross_validation?.overall_pass ||
+        case300.cross_validation?.pf_check_applicable !== false) {
+      throw new Error(`case300 RPO response contract failed: ${JSON.stringify(case300)}`);
+    }
+    await page.waitForFunction(() =>
+      document.querySelector('#resultsContent')?.dataset.activeGroup === 'rpo' &&
+      document.getElementById('rpoSummary')?.textContent?.includes('通过（部分覆盖）') &&
+      document.getElementById('rpoCrossValidation')?.textContent?.includes('部分覆盖') &&
+      document.getElementById('rpoVoltageChart')?.classList.contains('js-plotly-plot') &&
+      document.getElementById('rpoReactiveChart')?.classList.contains('js-plotly-plot'));
     if (errors.length) throw new Error(`browser errors: ${errors.join(' | ')}`);
-    console.log(`RPO GUI passed: status=${result.status}, coverage=${result.component_coverage.length}, cross=${result.cross_validation.overall_pass}`);
+    console.log(`RPO GUI passed: case9=${result.cross_validation.overall_pass}, case300=${case300.cross_validation.validation_summary}`);
   } finally {
     if (browser) await browser.close();
     proc.kill();

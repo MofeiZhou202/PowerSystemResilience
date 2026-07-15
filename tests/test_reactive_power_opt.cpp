@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "hacdcpf/io/matpower_parser.hpp"
+#include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/optimal_power_flow/reactive_power_opt.hpp"
 
 #ifndef HACDCPF_TEST_DATA_DIR
@@ -75,4 +76,27 @@ TEST_CASE("RPO exposes switchable shunt actions without a false global gap",
   CHECK_FALSE(result.globally_certified);
   CHECK_FALSE(result.optimality_gap_available);
   CHECK(result.gap == 1.0);
+}
+
+TEST_CASE("case300 RPO returns complete display vectors from a seeded solve",
+          "[.performance][rpo][case300][warm-start][gui]") {
+  const auto system = hacdcpf::io::build_case300_acdc();
+  hacdcpf::opf::RPOOptions options;
+  options.objective = hacdcpf::opf::RPOObjective::MinVoltageDeviation;
+  options.max_nodes = 3;
+  options.time_limit_sec = 30.0;
+  options.max_ipm_iter = 400;
+  options.ipm_tol = 1e-6;
+  options.stationarity_tol = 1e-3;
+  const auto result = hacdcpf::opf::solve_rpo(system, options);
+
+  INFO("status=" << result.status
+       << " nlp_solves=" << result.nlp_solves
+       << " runtime=" << result.runtime_sec);
+  REQUIRE(result.converged);
+  CHECK(result.nlp_solves == 3);
+  CHECK(result.vm_before.size() == system.ac.buses.size());
+  CHECK(result.vm_after.size() == system.ac.buses.size());
+  CHECK(result.qg_mvar_after.size() == system.ac.generators.size());
+  CHECK(result.taps.size() == system.ac.transformers_2w.size());
 }

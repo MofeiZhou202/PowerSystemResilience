@@ -4640,25 +4640,27 @@ const App = (() => {
       <div class="result-item"><span class="result-label">运行时间</span><span class="result-value">${fmt(data.runtime_sec, 3)} s</span></div>
       <div class="result-item"><span class="result-label">最大电压偏差</span><span class="result-value">${fmt(data.max_vdev_before)} → ${fmt(data.max_vdev_after)} pu</span></div>
       <div class="result-item"><span class="result-label">损耗代理值</span><span class="result-value">${fmt(data.total_loss_before)} → ${fmt(data.total_loss_after)} MW</span></div>
-      <div class="result-item"><span class="result-label">全过程验证</span><span class="result-value ${cv.overall_pass ? 'converged' : 'failed'}">${cv.overall_pass ? '通过' : '未完整通过'}</span></div>
+      <div class="result-item"><span class="result-label">全过程验证</span><span class="result-value ${cv.overall_pass ? 'converged' : 'failed'}">${cv.overall_pass ? (cv.hybrid_dispatch_replay_partial ? '通过（部分覆盖）' : '通过') : '未完整通过'}</span></div>
       <div class="result-item"><span class="result-label">状态说明</span><span class="result-value">${escapeHtml(data.status || '')}</span></div>
       <div class="result-item" style="flex-basis:100%"><span class="result-label">模型口径</span><span class="result-value">${escapeHtml(data.model_statement || '')}</span></div>`;
 
     const checks = [
-      ['RPO内层求解', cv.rpo_converged, data.status || ''],
-      ['独立OPF重算', cv.independent_opf_converged,
-        `ΔVm=${fmt(cv.opf_max_vm_difference_pu)} pu；ΔPg=${fmt(cv.opf_max_pg_difference_mw)} MW；ΔQg=${fmt(cv.opf_max_qg_difference_mvar)} MVar`],
-      ['OPF可行性审计', cv.opf_audit_feasible,
+      ['RPO内层求解', cv.rpo_converged ? 'pass' : 'fail', data.status || ''],
+      ['独立OPF重算', cv.independent_opf_converged ? 'pass' : 'fail',
+        `Δ目标=${fmt(cv.opf_objective_relative_difference, 8)}；ΔVm=${fmt(cv.opf_max_vm_difference_pu)} pu；ΔPg=${fmt(cv.opf_max_pg_difference_mw)} MW；ΔQg=${fmt(cv.opf_max_qg_difference_mvar)} MVar`],
+      ['OPF可行性审计', cv.opf_audit_feasible ? 'pass' : 'fail',
         (cv.opf_audit_violations || []).join('；') || '未发现审计违约'],
-      ['优化点PF回放', cv.optimized_pf_converged,
+      ['优化点PF回放', cv.optimized_pf_converged ? 'pass' : 'fail',
         `ΔVm=${fmt(cv.pf_max_vm_difference_pu)} pu；残差=${fmt(cv.pf_residual, 9)}`],
-      ['OPF一致性', cv.opf_agrees, cv.opf_status || ''],
-      ['PF一致性', cv.pf_agrees,
+      ['OPF目标/状态一致性', cv.opf_agrees ? 'pass' : 'fail', cv.opf_status || ''],
+      ['PF一致性', cv.pf_check_applicable === false
+          ? (cv.optimized_pf_converged ? 'partial' : 'fail')
+          : (cv.pf_agrees ? 'pass' : 'fail'),
         cv.hybrid_dispatch_replay_partial ? '混合AC/DC富模型调度回放仍为部分映射' : '完整 authored-space 回放'],
     ];
     const cvDiv = document.getElementById('rpoCrossValidation');
     if (cvDiv) cvDiv.innerHTML = `<table><thead><tr><th>验证环节</th><th>结论</th><th>证据</th></tr></thead><tbody>${checks.map(row =>
-      `<tr><td>${escapeHtml(row[0])}</td><td class="${row[1] ? 'converged' : 'failed'}">${row[1] ? '通过' : '未通过'}</td><td>${escapeHtml(row[2] || '—')}</td></tr>`).join('')}</tbody></table>`;
+      `<tr><td>${escapeHtml(row[0])}</td><td class="${row[1] === 'pass' ? 'converged' : (row[1] === 'fail' ? 'failed' : '')}">${row[1] === 'pass' ? '通过' : (row[1] === 'fail' ? '未通过' : '部分覆盖')}</td><td>${escapeHtml(row[2] || '—')}</td></tr>`).join('')}</tbody></table>`;
 
     const coverage = Array.isArray(data.component_coverage) ? data.component_coverage : [];
     const coverageSummary = document.getElementById('rpoCoverageSummary');
@@ -4687,7 +4689,7 @@ const App = (() => {
         `<tr><td>${row.type}</td><td>${escapeHtml(row.name || '')}</td><td>${row.before}</td><td>${row.after}</td><td>${fmt(row.physicalBefore)}</td><td>${fmt(row.physicalAfter)}</td><td class="${row.before === row.after ? '' : 'converged'}">${row.before === row.after ? '保持' : '调整'}</td></tr>`).join('')}</tbody></table>`
       : '<p class="empty-hint">当前系统没有可调两绕组 OLTC 或可投切并联补偿；连续OPF点仍已完成验证。</p>';
 
-    if (typeof Plotly !== 'undefined') {
+    if ((data.vm_after || []).length && typeof Plotly !== 'undefined') {
       const buses = (data.vm_before || []).map((_, i) => i + 1);
       Plotly.react('rpoVoltageChart', [
         { x: buses, y: data.vm_before || [], type: 'scatter', mode: 'lines+markers', name: '优化前' },
@@ -4699,6 +4701,11 @@ const App = (() => {
         { x: gens, y: data.qg_after || [], type: 'bar', name: '优化后' },
       ], { ...marketTheme('机组无功对比', 'Qg / MVar'), barmode: 'group' },
       { responsive: true, displayModeBar: false });
+    } else if (!(data.vm_after || []).length) {
+      const voltageChart = document.getElementById('rpoVoltageChart');
+      const reactiveChart = document.getElementById('rpoReactiveChart');
+      if (voltageChart) voltageChart.innerHTML = '<p class="empty-hint">无可显示的母线电压结果；请查看上方求解状态和失败原因。</p>';
+      if (reactiveChart) reactiveChart.innerHTML = '<p class="empty-hint">无可显示的机组无功结果；请查看上方求解状态和失败原因。</p>';
     }
     switchTab('results');
   }
@@ -4719,6 +4726,7 @@ const App = (() => {
         time_limit_s: rpoNumber('rpoTimeLimit', 120, 1, 3600),
         max_ipm_iter: Math.round(rpoNumber('rpoMaxIpmIter', 400, 1, 100000)),
         ipm_tol: rpoNumber('rpoIpmTol', 1e-6, 1e-12, 1),
+        stationarity_tol: rpoNumber('rpoStationarityTol', 1e-3, 1e-12, 1),
         branch_limits: !!document.getElementById('rpoBranchLimits')?.checked,
         converter_capacity: !!document.getElementById('rpoConvCapacity')?.checked,
         converter_current: !!document.getElementById('rpoConvCurrent')?.checked,
@@ -4732,7 +4740,11 @@ const App = (() => {
       _lastRpoData = response.data;
       renderRpoResults(response.data);
       const pass = response.data.cross_validation?.overall_pass === true;
-      setStatus(pass ? '无功优化及交叉验证通过' : '无功优化完成，交叉验证存在差异',
+      setStatus(pass
+          ? (response.data.cross_validation?.hybrid_dispatch_replay_partial
+              ? '无功优化完成；可用数值检查通过，PF回放为部分覆盖'
+              : '无功优化及交叉验证通过')
+          : '无功优化完成，交叉验证存在差异',
         pass ? 'success' : 'warn');
       return response.data;
     });

@@ -241,7 +241,8 @@ ACOPFResult solve_opf_inplace(
     const std::vector<ShuntInfo>& shunts, const std::vector<int>& shunt_steps,
     const std::vector<int>& orig_tap_pos,
     const std::vector<int>& orig_shunt_steps,
-    const RPOOptions& rpo_opt)
+    const RPOOptions& rpo_opt,
+    const ACOPFResult* warm_start)
 {
   apply_settings(mut_sys, taps, tap_pos, shunts, shunt_steps);
 
@@ -261,7 +262,10 @@ ACOPFResult solve_opf_inplace(
   opf_opt.voltage_deviation_weight = rpo_opt.vdev_weight;
   opf_opt.active_loss_weight = rpo_opt.loss_weight;
   opf_opt.max_inner_iterations = rpo_opt.max_ipm_iter;
+  opf_opt.max_outer_iterations = 1;
   opf_opt.feasibility_tol = rpo_opt.ipm_tol;
+  opf_opt.stationarity_tol = rpo_opt.stationarity_tol;
+  opf_opt.warm_start = warm_start;
   opf_opt.enforce_branch_limits = rpo_opt.enforce_branch_limits;
   opf_opt.enforce_converter_capacity = rpo_opt.enforce_converter_capacity;
   opf_opt.enforce_converter_current_limits =
@@ -344,14 +348,46 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
 
   // ── Mutable copy of system for in-place modification ──
   HybridPowerSystem mut_sys = sys;
-
-  // ── Baseline AC OPF ("before" state) ──
   std::vector<int> base_tp = orig_tp;
   std::vector<int> base_ss = orig_ss;
+
+  // Large non-economic OPFs are substantially more robust when initialized
+  // from a feasible economic operating point.  The native network-structured
+  // IPM produces this seed quickly on case300/case2000; subsequent discrete
+  // candidates reuse the current feasible RPO incumbent instead of restarting
+  // Ipopt from the flat point.
+  ACOPFResult economic_seed;
+  const bool use_economic_seed = sys.ac.buses.size() >= 100;
+  if (use_economic_seed) {
+    apply_settings(mut_sys, taps, base_tp, shunts, base_ss);
+    ACOPFOptions seed_opt;
+    seed_opt.ac_solver_backend = ACOPFSolverBackend::ParityIPM;
+    seed_opt.max_inner_iterations =
+        std::max(200, std::min(opt.max_ipm_iter, 800));
+    seed_opt.max_outer_iterations = 1;
+    seed_opt.feasibility_tol = opt.ipm_tol;
+    // The seed itself must be accurate enough to land the non-economic Ipopt
+    // solve inside its stable basin; using the looser RPO stopping threshold
+    // here caused case300 to exhaust 400 iterations.
+    seed_opt.stationarity_tol = std::min(opt.stationarity_tol, 1e-6);
+    seed_opt.allow_fallback = false;
+    seed_opt.enforce_branch_limits = opt.enforce_branch_limits;
+    seed_opt.enforce_converter_capacity = opt.enforce_converter_capacity;
+    seed_opt.enforce_converter_current_limits =
+        opt.enforce_converter_current_limits;
+    seed_opt.enforce_converter_modulation_limits =
+        opt.enforce_converter_modulation_limits;
+    economic_seed = solve_ac_opf(mut_sys, seed_opt);
+    apply_settings(mut_sys, taps, orig_tp, shunts, orig_ss);
+  }
+
+  // ── Baseline AC OPF ("before" state) ──
   ACOPFResult base_r = solve_opf_inplace(mut_sys, taps, base_tp,
                                           shunts, base_ss,
-                                          orig_tp, orig_ss, opt);
-  out.nlp_solves = 1;
+                                          orig_tp, orig_ss, opt,
+                                          economic_seed.converged
+                                              ? &economic_seed : nullptr);
+  out.nlp_solves = use_economic_seed ? 2 : 1;
   out.baseline_opf = base_r;
   if (!base_r.converged) {
     out.status = "Baseline AC OPF failed: " + base_r.status;
@@ -424,10 +460,13 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
     key.insert(key.end(), ss.begin(), ss.end());
     auto it = eval_cache.find(key);
     if (it != eval_cache.end()) return it->second;
+    if (!budget_ok()) return 1e30;
 
     ACOPFResult r = solve_opf_inplace(mut_sys, taps, tp,
                                       shunts, ss,
-                                      orig_tp, orig_ss, opt);
+                                      orig_tp, orig_ss, opt,
+                                      incumbent_result.converged
+                                          ? &incumbent_result : nullptr);
     ++out.nlp_solves;
     ++out.nodes_explored;
 

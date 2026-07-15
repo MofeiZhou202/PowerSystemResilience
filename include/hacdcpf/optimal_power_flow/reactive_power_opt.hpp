@@ -45,6 +45,9 @@ struct RPOOptions {
   // ---- Inner IPM (NLP relaxation) parameters ----
   int    max_ipm_iter{400};
   double ipm_tol{1e-6};
+  /// Scaled KKT stationarity tolerance.  Kept separate from physical
+  /// feasibility because large OPF objectives require a looser dual target.
+  double stationarity_tol{1e-3};
 
   bool verbose{false};
 
