@@ -80,7 +80,10 @@ const Canvas = (() => {
   // Above these limits a freshly loaded system enters headless (no-canvas) mode.
   // Either a large bus count or a large total-element count triggers it; users
   // can still force a full render from the overview overlay.
-  const HEADLESS_BUS_THRESHOLD = 600;      // AC + DC buses
+  // Full SVG routing becomes unresponsive around the 400-bus distribution
+  // feeder range because switches and transformers roughly double the glyph
+  // and connection count. Keep these models editable through virtual tables.
+  const HEADLESS_BUS_THRESHOLD = 400;      // AC + DC buses
   const HEADLESS_ELEMENT_THRESHOLD = 2500; // buses + branches + devices
   function cloneJsonBlock(value) {
     if (!value || typeof value !== 'object') return undefined;

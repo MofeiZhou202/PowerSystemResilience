@@ -22,7 +22,7 @@
 
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -76,6 +76,7 @@ async function waitUp(base, timeoutMs = 20000) {
 const LARGE_CASE = 'case2869pegase.m';
 const MEDIUM_CASE = 'case300_acdc';
 const SMALL_CASE = 'ieee14_acdc';
+const CIM_TEST_XML = path.join(REPO_ROOT, 'data', 'test.xml');
 
 async function main() {
   let chromium;
@@ -339,6 +340,30 @@ async function main() {
     check(sub.visible === 'flex', 'sub-diagram modal opens');
     check(sub.nodes >= 3 && sub.edges >= 2, `sub-diagram drew ${sub.nodes} nodes / ${sub.edges} branches`);
     check(sub.stillHeadless === true && sub.glyphs === 0, 'sub-diagram leaves headless state untouched');
+
+    // ---- 4a) The 439-bus distribution CIM fixture must stay out of the full
+    // SVG path. It previously rendered ~919 glyphs/connections and could freeze
+    // the browser before viewport culling had a chance to run.
+    const cimXml = readFileSync(CIM_TEST_XML, 'utf8');
+    const cimScale = await page.evaluate(async (xmlString) => {
+      const loaded = await fetch(window.location.origin + '/api/session/load_cim_dist', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ xml_string: xmlString }),
+      }).then((response) => response.json());
+      if (loaded.error) return { error: loaded.error };
+      Canvas.loadFromSystemJson(JSON.parse(loaded._raw_json));
+      const summary = Canvas.getSystemSummary();
+      return {
+        headless: Canvas.isHeadless(),
+        glyphs: Canvas.state.components.length,
+        buses: summary.buses,
+        totalElements: summary.totalElements,
+      };
+    }, cimXml);
+    check(!cimScale.error && cimScale.buses === 439,
+      `test.xml imports ${cimScale.buses} buses without a frontend error`);
+    check(cimScale.headless === true && cimScale.glyphs === 0,
+      `test.xml enters headless mode (${cimScale.totalElements} estimated elements)`);
 
     // ---- 5) Medium case uses viewport culling and RAF-batched pointer work ----
     const medium = await page.evaluate(async (caseName) => {
