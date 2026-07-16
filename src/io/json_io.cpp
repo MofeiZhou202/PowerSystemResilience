@@ -1581,6 +1581,7 @@ static json three_phase_bus_to_json(const ThreePhaseACBus& b) {
   j["name"] = b.name;
   j["base_kv"] = b.base_kv;
   j["in_service"] = b.in_service;
+  j["phase_mask"] = phase_mask_to_string(b.phase_mask);
   j["vm_a_pu"] = b.vm_a_pu;
   j["va_a_deg"] = b.va_a_deg;
   j["vm_b_pu"] = b.vm_b_pu;
@@ -1613,6 +1614,8 @@ static ThreePhaseACBus three_phase_bus_from_json(const json& j) {
   b.name = jget<std::string>(j, "name", "");
   b.base_kv = jget(j, "base_kv", 0.0);
   b.in_service = jget(j, "in_service", true);
+  b.phase_mask = phase_mask_from_string(
+      jget<std::string>(j, "phase_mask", "ABC"));
   b.vm_a_pu = jget(j, "vm_a_pu", 1.0);
   b.va_a_deg = jget(j, "va_a_deg", 0.0);
   b.vm_b_pu = jget(j, "vm_b_pu", 1.0);
@@ -1645,6 +1648,7 @@ static json three_phase_line_to_json(const ThreePhaseACLine& l) {
   j["to_bus"] = l.to_bus;
   j["name"] = l.name;
   j["in_service"] = l.in_service;
+  j["phase_mask"] = phase_mask_to_string(l.phase_mask);
   j["length_km"] = l.length_km;
   j["parallel"] = l.parallel;
   j["r1_ohm_per_km"] = l.r1_ohm_per_km;
@@ -1673,6 +1677,8 @@ static ThreePhaseACLine three_phase_line_from_json(const json& j) {
   l.to_bus = j.at("to_bus").get<int>();
   l.name = jget<std::string>(j, "name", "");
   l.in_service = jget(j, "in_service", true);
+  l.phase_mask = phase_mask_from_string(
+      jget<std::string>(j, "phase_mask", "ABC"));
   l.length_km = jget(j, "length_km", 0.0);
   l.parallel = jget(j, "parallel", 1);
   l.r1_ohm_per_km = jget(j, "r1_ohm_per_km", 0.0);
@@ -1701,6 +1707,8 @@ static json three_phase_transformer_to_json(const ThreePhaseTransformer& t) {
   j["hv_bus"] = t.hv_bus;
   j["lv_bus"] = t.lv_bus;
   j["in_service"] = t.in_service;
+  j["hv_phase_mask"] = phase_mask_to_string(t.hv_phase_mask);
+  j["lv_phase_mask"] = phase_mask_to_string(t.lv_phase_mask);
   j["sn_mva"] = t.sn_mva;
   j["vn_hv_kv"] = t.vn_hv_kv;
   j["vn_lv_kv"] = t.vn_lv_kv;
@@ -1733,6 +1741,10 @@ static ThreePhaseTransformer three_phase_transformer_from_json(const json& j) {
   t.hv_bus = j.at("hv_bus").get<int>();
   t.lv_bus = j.at("lv_bus").get<int>();
   t.in_service = jget(j, "in_service", true);
+  t.hv_phase_mask = phase_mask_from_string(
+      jget<std::string>(j, "hv_phase_mask", "ABC"));
+  t.lv_phase_mask = phase_mask_from_string(
+      jget<std::string>(j, "lv_phase_mask", "ABC"));
   t.sn_mva = jget(j, "sn_mva", 0.0);
   t.vn_hv_kv = jget(j, "vn_hv_kv", 0.0);
   t.vn_lv_kv = jget(j, "vn_lv_kv", 0.0);
@@ -1764,6 +1776,7 @@ static json three_phase_load_to_json(const ThreePhaseLoad& l) {
   j["bus"] = l.bus;
   j["name"] = l.name;
   j["in_service"] = l.in_service;
+  j["phase_mask"] = phase_mask_to_string(l.phase_mask);
   j["connection"] = l.connection;
   j["grounded"] = l.grounded;
   j["p_a_mw"] = l.p_a_mw;
@@ -1788,6 +1801,8 @@ static ThreePhaseLoad three_phase_load_from_json(const json& j) {
   l.bus = j.at("bus").get<int>();
   l.name = jget<std::string>(j, "name", "");
   l.in_service = jget(j, "in_service", true);
+  l.phase_mask = phase_mask_from_string(
+      jget<std::string>(j, "phase_mask", "ABC"));
   l.connection = jget<std::string>(j, "connection", "wye");
   l.grounded = jget(j, "grounded", true);
   l.p_a_mw = jget(j, "p_a_mw", 0.0);
@@ -1813,6 +1828,7 @@ static json three_phase_generator_to_json(const ThreePhaseGenerator& g) {
   j["name"] = g.name;
   j["in_service"] = g.in_service;
   j["is_slack"] = g.is_slack;
+  j["phase_mask"] = phase_mask_to_string(g.phase_mask);
   j["p_mw"] = g.p_mw;
   j["q_mvar"] = g.q_mvar;
   j["vm_pu"] = g.vm_pu;
@@ -1837,6 +1853,8 @@ static ThreePhaseGenerator three_phase_generator_from_json(const json& j) {
   g.name = jget<std::string>(j, "name", "");
   g.in_service = jget(j, "in_service", true);
   g.is_slack = jget(j, "is_slack", false);
+  g.phase_mask = phase_mask_from_string(
+      jget<std::string>(j, "phase_mask", "ABC"));
   g.p_mw = jget(j, "p_mw", 0.0);
   g.q_mvar = jget(j, "q_mvar", 0.0);
   g.vm_pu = jget(j, "vm_pu", 1.0);
@@ -1860,6 +1878,7 @@ static json three_phase_external_grid_to_json(const ThreePhaseExternalGrid& e) {
   j["bus"] = e.bus;
   j["name"] = e.name;
   j["in_service"] = e.in_service;
+  j["phase_mask"] = phase_mask_to_string(e.phase_mask);
   j["vm_pu"] = e.vm_pu;
   j["va_deg"] = e.va_deg;
   j["s_sc_max_mva"] = e.s_sc_max_mva;
@@ -1882,6 +1901,8 @@ static ThreePhaseExternalGrid three_phase_external_grid_from_json(const json& j)
   e.bus = j.at("bus").get<int>();
   e.name = jget<std::string>(j, "name", "");
   e.in_service = jget(j, "in_service", true);
+  e.phase_mask = phase_mask_from_string(
+      jget<std::string>(j, "phase_mask", "ABC"));
   e.vm_pu = jget(j, "vm_pu", 1.0);
   e.va_deg = jget(j, "va_deg", 0.0);
   e.s_sc_max_mva = jget(j, "s_sc_max_mva", 0.0);

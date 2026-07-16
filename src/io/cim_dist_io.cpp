@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
+#include <numeric>
 #include <map>
 #include <set>
 #include <sstream>
@@ -43,6 +46,31 @@ bool ends_with(const std::string& s, const std::string& suffix) {
 
 bool contains(const std::string& hay, const std::string& needle) {
   return hay.find(needle) != knpos;
+}
+
+PhaseMask cim_phase_mask(const std::string& text,
+                         PhaseMask fallback = PhaseMask::abc()) {
+  if (text.empty()) return fallback;
+  std::uint8_t bits = 0;
+  if (contains(text, "A") || contains(text, "a") || contains(text, "A相"))
+    bits |= PhaseMask::a().bits;
+  if (contains(text, "B") || contains(text, "b") || contains(text, "B相"))
+    bits |= PhaseMask::b().bits;
+  if (contains(text, "C") || contains(text, "c") || contains(text, "C相"))
+    bits |= PhaseMask::c().bits;
+  return bits == 0 ? fallback : PhaseMask(bits);
+}
+
+bool is_load_class(const std::string& cls) {
+  return cls == "EnergyConsumer" || cls == "ConformLoad" ||
+         cls == "NonConformLoad" || cls == "StationSupply";
+}
+
+bool is_generator_class(const std::string& cls) {
+  return cls == "SynchronousMachine" || cls == "GeneratingUnit" ||
+         cls == "EnergySource" || cls == "PowerElectronicsConnection" ||
+         cls == "PhotovoltaicUnit" || cls == "SolarGeneratingUnit" ||
+         cls == "WindGeneratingUnit";
 }
 
 std::string xml_escape(const std::string& s) {
@@ -226,6 +254,20 @@ double prop_double(const XmlNode& n, const std::string& suffix,
   }
 }
 
+double prop_double_any(const XmlNode& n,
+                       std::initializer_list<const char*> suffixes,
+                       double def = 0.0) {
+  for (const char* suffix : suffixes) {
+    const auto* child = child_by_suffix(n, suffix);
+    if (!child || child->text.empty()) continue;
+    try {
+      return std::stod(child->text);
+    } catch (...) {
+    }
+  }
+  return def;
+}
+
 std::string strip_hash(std::string r) {
   if (!r.empty() && r[0] == '#') r = r.substr(1);
   return r;
@@ -240,6 +282,97 @@ std::string object_id(const XmlNode& n) {
   std::string id = n.attr("rdf:ID");
   if (id.empty()) id = strip_hash(n.attr("rdf:about"));
   return id;
+}
+
+void serialize_xml_node(std::ostringstream& out, const XmlNode& node) {
+  out << '<' << node.tag;
+  for (const auto& [name, value] : node.attrs)
+    out << ' ' << name << "=\"" << value << "\"";
+  if (node.children.empty() && node.text.empty()) {
+    out << "/>\n";
+    return;
+  }
+  out << '>';
+  if (!node.text.empty()) out << node.text;
+  if (!node.children.empty()) out << '\n';
+  for (const auto& child : node.children) serialize_xml_node(out, child);
+  out << "</" << node.tag << ">\n";
+}
+
+struct StitchedXml {
+  std::string xml;
+  std::size_t duplicate_objects{0};
+  std::vector<std::string> warnings;
+};
+
+StitchedXml stitch_xml_documents(const std::vector<std::string>& documents) {
+  StitchedXml stitched;
+  XmlNode merged;
+  merged.tag = "rdf:RDF";
+  std::map<std::string, std::size_t> object_positions;
+
+  for (std::size_t document_index = 0; document_index < documents.size();
+       ++document_index) {
+    XmlNode doc = XmlParser(documents[document_index]).parse();
+    const XmlNode* rdf = nullptr;
+    for (const auto& child : doc.children)
+      if (local_name(child.tag) == "RDF") rdf = &child;
+    if (!rdf) {
+      throw std::runtime_error("CIM document " +
+                               std::to_string(document_index + 1) +
+                               " has no rdf:RDF root element");
+    }
+
+    for (const auto& object : rdf->children) {
+      const std::string id = object_id(object);
+      if (id.empty()) {
+        merged.children.push_back(object);
+        continue;
+      }
+      auto [position_it, inserted] =
+          object_positions.emplace(id, merged.children.size());
+      if (inserted) {
+        merged.children.push_back(object);
+        continue;
+      }
+
+      ++stitched.duplicate_objects;
+      XmlNode& existing = merged.children[position_it->second];
+      if (local_name(existing.tag) != local_name(object.tag)) {
+        stitched.warnings.push_back(
+            "重复 rdf:ID 的类型不一致，保留首次声明：" + id);
+        continue;
+      }
+
+      for (const auto& child : object.children) {
+        const std::string resource = child.attr("rdf:resource");
+        auto same = std::find_if(
+            existing.children.begin(), existing.children.end(),
+            [&](const XmlNode& current) {
+              if (current.tag != child.tag) return false;
+              const std::string current_resource = current.attr("rdf:resource");
+              return resource.empty() ? current_resource.empty()
+                                      : current_resource == resource;
+            });
+        if (same == existing.children.end()) {
+          existing.children.push_back(child);
+        } else if (same->text.empty() && !child.text.empty()) {
+          *same = child;
+        } else if (!child.text.empty() && same->text != child.text) {
+          stitched.warnings.push_back(
+              "重复对象属性冲突，保留首次声明：" + id + "/" + child.tag);
+        }
+      }
+    }
+  }
+
+  std::ostringstream out;
+  out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+      << "<rdf:RDF>\n";
+  for (const auto& child : merged.children) serialize_xml_node(out, child);
+  out << "</rdf:RDF>\n";
+  stitched.xml = out.str();
+  return stitched;
 }
 
 // ── Cable / line impedance estimate (0.4 kV / 10 kV distribution) ────────────
@@ -260,7 +393,7 @@ LineImpedance estimate_line_impedance(const std::string& model,
   const bool overhead = contains(model, "LGJ") || contains(model, "JKLYJ");
   // ρ at operating temperature (Ω·mm²/km): Cu ≈ 18.5, Al ≈ 29.4.
   const double rho = aluminium ? 29.4 : 18.5;
-  const double area = cross_section_mm2 > 0.0 ? cross_section_mm2 : 16.0;
+  const double area = cross_section_mm2 > 0.0 ? cross_section_mm2 : 50.0;
   LineImpedance z;
   z.r_ohm_per_km = rho / area;
   z.x_ohm_per_km = overhead ? 0.35 : 0.08;
@@ -307,28 +440,54 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
 
   // Pass 1: base voltages (nominalVoltage is in VOLTS in this dialect).
   std::map<std::string, double> bv_kv;  // bv id -> kV
+  std::map<std::string, std::string> psr_type_name;
   for (const auto& e : rdf->children)
     if (local_name(e.tag) == "BaseVoltage")
       bv_kv[object_id(e)] = prop_double(e, ".nominalVoltage", 0.0) / 1000.0;
+    else if (local_name(e.tag) == "PSRType")
+      psr_type_name[object_id(e)] = prop_text(e, ".name");
 
   // Pass 2: class + base-voltage index for every object, keyed by rdf:ID.
   std::map<std::string, std::string> equip_class;  // id -> local class name
   std::map<std::string, std::string> equip_bv;     // id -> base-voltage id
+  std::map<std::string, std::string> equip_psr_type;
+  std::map<std::string, PhaseMask> equip_phase;
   for (const auto& e : rdf->children) {
     const std::string id = object_id(e);
     if (id.empty()) continue;
-    equip_class[id] = local_name(e.tag);
+    const std::string cls = local_name(e.tag);
+    equip_class[id] = cls;
     const std::string bv = prop_ref(e, ".BaseVoltage");
     if (!bv.empty()) equip_bv[id] = bv;
+    const std::string psr_type = prop_ref(e, ".PSRType");
+    if (!psr_type.empty()) equip_psr_type[id] = psr_type;
+    const std::string phases = prop_text(e, ".phases");
+    if (!phases.empty()) {
+      equip_phase[id] = cim_phase_mask(phases);
+      result.has_explicit_phase_data = true;
+    }
+    if (is_load_class(cls)) ++result.source_load_objects;
+    if (is_generator_class(cls)) ++result.source_generator_objects;
   }
 
   // Pass 3: terminals → equipment-to-node adjacency (ordered by sequenceNumber).
   std::map<std::string, std::vector<std::pair<int, std::string>>> equip_terms;
+  std::size_t synthetic_winding_nodes = 0;
   for (const auto& e : rdf->children) {
     if (local_name(e.tag) != "Terminal") continue;
     const std::string equip = prop_ref(e, ".ConductingEquipment");
-    const std::string node = prop_ref(e, ".ConnectivityNode");
-    if (equip.empty() || node.empty()) continue;
+    std::string node = prop_ref(e, ".ConnectivityNode");
+    if (equip.empty()) continue;
+    if (node.empty()) {
+      const auto class_it = equip_class.find(equip);
+      if (class_it == equip_class.end() ||
+          class_it->second != "TransformerWinding")
+        continue;
+      // Feeder exports often omit the unloaded LV-side ConnectivityNode. Keep
+      // the transformer by giving that dangling winding its own synthetic bus.
+      node = "__CIM_SYNTHETIC_NODE_" + equip;
+      ++synthetic_winding_nodes;
+    }
     const int seq = static_cast<int>(prop_double(e, ".sequenceNumber", 0.0));
     equip_terms[equip].push_back({seq, node});
   }
@@ -340,9 +499,11 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
   // only touched by structural objects (cable heads, pole sites) are dropped.
   const auto is_topology_equip = [](const std::string& cls) {
     return cls == "ACLineSegment" || cls == "Breaker" ||
-           cls == "Disconnector" || cls == "Junction" ||
+           cls == "Disconnector" || cls == "LoadBreakSwitch" ||
+           cls == "Fuse" || cls == "Switch" || cls == "Junction" ||
            cls == "TransformerWinding" || cls == "BusbarSection" ||
-           cls == "LVBuilding";
+           cls == "LVBuilding" || is_load_class(cls) ||
+           is_generator_class(cls);
   };
 
   // Infer a node's nominal voltage from the base voltage of the equipment that
@@ -403,9 +564,18 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
 
   std::map<std::string, std::size_t> accepted;
   std::size_t dropped_lines = 0, dropped_switches = 0, dropped_buildings = 0;
+  std::map<std::string, std::size_t> transformer_position;
+  std::map<int, PhaseMask> branch_phase;
+  std::map<int, PhaseMask> switch_phase;
+  struct PhaseWeights {
+    double a{0.0};
+    double b{0.0};
+    double c{0.0};
+  };
+  std::map<int, PhaseWeights> load_phase_weights;
+  std::map<int, PhaseMask> generator_phase;
 
   // Pass 5: transformers (PowerTransformer + primary/secondary windings).
-  int ext_idx = 0;
   double sn_total_mva = 0.0;
   for (const auto& e : rdf->children) {
     if (local_name(e.tag) != "PowerTransformer") continue;
@@ -453,29 +623,9 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
     t.vector_group = "Dyn11";
     t.std_type = prop_text(e, ".model");
     sys.ac.transformers_2w.push_back(t);
+    transformer_position[tid] = sys.ac.transformers_2w.size() - 1;
     ++accepted["PowerTransformer"];
 
-    // The HV winding node is the incoming 10 kV feed: make it the slack bus and
-    // attach a synthetic external grid there.
-    if (auto* hv = bus_ptr(t.hv_bus)) {
-      hv->bus_type = BusType::SLACK;
-      hv->base_kv = t.vn_hv_kv;
-      hv->vm_pu = 1.0;
-    }
-    ExternalGrid grid;
-    grid.index = ++ext_idx;
-    grid.name = "10kV进线 ExternalGrid";
-    grid.bus = t.hv_bus;
-    grid.vm_pu = 1.0;
-    grid.vn_kv = t.vn_hv_kv;
-    grid.s_sc_max_mva = opts.grid_s_sc_mva;
-    grid.s_sc_min_mva = opts.grid_s_sc_mva * 0.6;
-    grid.rx_max = 0.1;
-    grid.rx_min = 0.1;
-    grid.r_pu = 0.001;
-    grid.x_pu = 0.01;
-    grid.controllable = true;
-    sys.ac.external_grids.push_back(grid);
   }
 
   // Pass 6: AC line segments → branches (impedance estimated from geometry).
@@ -484,6 +634,9 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
   int br_idx = 0;
   int sw_idx = 0;
   std::size_t connectors = 0;
+  std::size_t inferred_overhead_conductors = 0;
+  std::size_t inferred_cable_conductors = 0;
+  std::size_t inferred_other_conductors = 0;
   for (const auto& e : rdf->children) {
     if (local_name(e.tag) != "ACLineSegment") continue;
     const std::string id = object_id(e);
@@ -508,6 +661,8 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
       sw.switch_type = SwitchType::CircuitBreaker;
       sw.closed = true;
       sys.ac.switches.push_back(sw);
+      switch_phase[sw.index] =
+          equip_phase.count(id) ? equip_phase[id] : PhaseMask::abc();
       ++connectors;
       continue;
     }
@@ -516,31 +671,59 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
     br.name = prop_text(e, ".name");
     br.from_bus = from_bus;
     br.to_bus = to_bus;
-    const double area = prop_double(e, ".crossSectionArea", 0.0);
+    const double source_area = prop_double(e, ".crossSectionArea", 0.0);
     const std::string model = prop_text(e, ".model");
+    const std::string psr_id = equip_psr_type.count(id)
+                                   ? equip_psr_type[id]
+                                   : std::string();
+    const std::string psr_name = psr_type_name.count(psr_id)
+                                     ? psr_type_name[psr_id]
+                                     : std::string();
     br.length_km = length_m / 1000.0;
-    const LineImpedance z = estimate_line_impedance(model, area);
+    double base_kv = 0.4;
+    if (auto* fb = bus_ptr(br.from_bus)) base_kv = fb->base_kv;
+    double effective_area = source_area;
+    std::string impedance_model = model;
+    if (effective_area <= 0.0) {
+      if (contains(psr_name, "架空")) {
+        effective_area = opts.default_lv_overhead_cross_section_mm2;
+        impedance_model += " JKLYJ";  // aluminium overhead fallback
+        ++inferred_overhead_conductors;
+      } else if (contains(psr_name, "电缆")) {
+        effective_area = opts.default_lv_cable_cross_section_mm2;
+        ++inferred_cable_conductors;
+      } else {
+        effective_area = base_kv > 1.0
+                             ? opts.default_mv_cross_section_mm2
+                             : opts.default_lv_overhead_cross_section_mm2;
+        ++inferred_other_conductors;
+      }
+    }
+    const LineImpedance z =
+        estimate_line_impedance(impedance_model, effective_area);
     br.r_ohm_per_km = z.r_ohm_per_km;
     br.x_ohm_per_km = z.x_ohm_per_km;
     // Per-unit on the system base at this branch's nominal voltage.
-    double base_kv = 0.4;
-    if (auto* fb = bus_ptr(br.from_bus)) base_kv = fb->base_kv;
     const double zbase = (base_kv * base_kv) / opts.base_mva;  // Ω
     const double r_ohm = z.r_ohm_per_km * br.length_km;
     const double x_ohm = z.x_ohm_per_km * br.length_km;
     br.r_pu = zbase > 0.0 ? r_ohm / zbase : 0.0;
     br.x_pu = zbase > 0.0 ? x_ohm / zbase : 0.0;
     // Coarse thermal rating from cross-section (generous; ~2 A/mm²).
-    const double i_amp = area > 0.0 ? 2.0 * area : 100.0;
+    const double i_amp = 2.0 * effective_area;
     br.rate_a_mva = std::sqrt(3.0) * base_kv * i_amp / 1000.0;
     sys.ac.branches.push_back(br);
+    branch_phase[br.index] =
+        equip_phase.count(id) ? equip_phase[id] : PhaseMask::abc();
     ++accepted["ACLineSegment"];
   }
 
   // Pass 7: breakers / disconnectors → switches (closed = !normalOpen).
   for (const auto& e : rdf->children) {
     const std::string cls = local_name(e.tag);
-    if (cls != "Breaker" && cls != "Disconnector" && cls != "Junction")
+    if (cls != "Breaker" && cls != "Disconnector" &&
+        cls != "LoadBreakSwitch" && cls != "Fuse" && cls != "Switch" &&
+        cls != "Junction")
       continue;
     const std::string id = object_id(e);
     const auto& terms = equip_terms[id];
@@ -553,16 +736,162 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
     sw.name = prop_text(e, ".name");
     sw.bus_from = bus_of(terms[0].second);
     sw.bus_to = bus_of(terms[1].second);
-    sw.switch_type =
-        cls == "Disconnector" ? SwitchType::Disconnector : SwitchType::CircuitBreaker;
+    sw.switch_type = cls == "Disconnector" ? SwitchType::Disconnector
+                                            : SwitchType::CircuitBreaker;
     const std::string no = prop_text(e, ".normalOpen");
     sw.closed = !(no == "true" || no == "1");
     sys.ac.switches.push_back(sw);
+    switch_phase[sw.index] =
+        equip_phase.count(id) ? equip_phase[id] : PhaseMask::abc();
     ++accepted[cls];
   }
 
-  // Pass 8: meters aggregated per LVBuilding.
+  // Pass 7b: add one synthetic source at each CIM-declared feeder origin. A
+  // transformer-area export commonly omits the upstream MV feeder entirely;
+  // each transformer whose HV bus has no MV connection then needs its own
+  // source. Do not de-duplicate those sources through an LV tie line.
+  if (opts.auto_add_external_grid && !sys.ac.buses.empty()) {
+    std::map<int, std::size_t> bus_position;
+    for (std::size_t i = 0; i < sys.ac.buses.size(); ++i)
+      bus_position[sys.ac.buses[i].index] = i;
+    std::vector<std::size_t> parent(sys.ac.buses.size());
+    std::iota(parent.begin(), parent.end(), 0);
+    const auto find_root = [&](std::size_t start) {
+      std::size_t root = start;
+      while (parent[root] != root) root = parent[root];
+      while (parent[start] != start) {
+        const std::size_t next = parent[start];
+        parent[start] = root;
+        start = next;
+      }
+      return root;
+    };
+    const auto join_buses = [&](int a, int b) {
+      const auto ai = bus_position.find(a), bi = bus_position.find(b);
+      if (ai == bus_position.end() || bi == bus_position.end()) return;
+      const std::size_t ar = find_root(ai->second), br = find_root(bi->second);
+      if (ar != br) parent[br] = ar;
+    };
+    for (const auto& branch : sys.ac.branches)
+      if (branch.in_service) join_buses(branch.from_bus, branch.to_bus);
+    for (const auto& transformer : sys.ac.transformers_2w)
+      if (transformer.in_service)
+        join_buses(transformer.hv_bus, transformer.lv_bus);
+    // Source placement follows the physical feeder boundary. Open switches
+    // must not make a de-energized section look like an independent grid that
+    // needs its own synthetic source.
+    for (const auto& sw : sys.ac.switches)
+      join_buses(sw.bus_from, sw.bus_to);
+
+    std::set<int> source_buses;
+    std::set<std::size_t> explicitly_sourced_components;
+    for (const auto& object : rdf->children) {
+      if (local_name(object.tag) != "Circuit") continue;
+      const std::string breaker = prop_ref(object, ".SourceBreaker");
+      const auto terms_it = equip_terms.find(breaker);
+      if (breaker.empty() || terms_it == equip_terms.end() ||
+          terms_it->second.empty())
+        continue;
+      const int source_bus = bus_of(terms_it->second.front().second);
+      if (source_bus != 0) source_buses.insert(source_bus);
+      // Both sides belong to this declared feeder origin even if the source
+      // breaker is open; do not synthesize another source downstream.
+      for (const auto& [sequence, node] : terms_it->second) {
+        const auto position = bus_position.find(bus_of(node));
+        if (position != bus_position.end())
+          explicitly_sourced_components.insert(find_root(position->second));
+      }
+    }
+
+    const auto has_upstream_mv_connection = [&](int hv_bus) {
+      const ACBus* hv = bus_ptr(hv_bus);
+      if (!hv) return false;
+      const auto is_mv_peer = [&](int bus) {
+        const ACBus* peer = bus_ptr(bus);
+        return peer && peer->base_kv >= 0.9 * hv->base_kv;
+      };
+      for (const auto& branch : sys.ac.branches) {
+        if (!branch.in_service) continue;
+        if (branch.from_bus == hv_bus && is_mv_peer(branch.to_bus)) return true;
+        if (branch.to_bus == hv_bus && is_mv_peer(branch.from_bus)) return true;
+      }
+      for (const auto& sw : sys.ac.switches) {
+        if (!sw.closed) continue;
+        if (sw.bus_from == hv_bus && is_mv_peer(sw.bus_to)) return true;
+        if (sw.bus_to == hv_bus && is_mv_peer(sw.bus_from)) return true;
+      }
+      return false;
+    };
+
+    std::set<std::size_t> fallback_components;
+    std::set<std::size_t> components_with_transformer_source;
+    for (const auto& transformer : sys.ac.transformers_2w) {
+      const auto position = bus_position.find(transformer.hv_bus);
+      if (position == bus_position.end()) continue;
+      const std::size_t root = find_root(position->second);
+      if (explicitly_sourced_components.count(root) ||
+          has_upstream_mv_connection(transformer.hv_bus))
+        continue;
+      source_buses.insert(transformer.hv_bus);
+      components_with_transformer_source.insert(root);
+    }
+
+    // If the source-less model does contain an MV feeder, one transformer HV
+    // bus remains the fallback origin for that connected MV network.
+    for (const auto& transformer : sys.ac.transformers_2w) {
+      const auto position = bus_position.find(transformer.hv_bus);
+      if (position == bus_position.end()) continue;
+      const std::size_t root = find_root(position->second);
+      if (!explicitly_sourced_components.count(root) &&
+          !components_with_transformer_source.count(root) &&
+          fallback_components.insert(root).second)
+        source_buses.insert(transformer.hv_bus);
+    }
+
+    int ext_idx = 0;
+    for (const int source_bus : source_buses) {
+      ACBus* source = bus_ptr(source_bus);
+      if (!source) continue;
+      source->bus_type = BusType::SLACK;
+      source->vm_pu = 1.0;
+      ExternalGrid grid;
+      grid.index = ++ext_idx;
+      grid.name = "CIM自动外部电网#" + std::to_string(ext_idx);
+      grid.bus = source_bus;
+      grid.vm_pu = 1.0;
+      grid.vn_kv = source->base_kv;
+      grid.s_sc_max_mva = opts.grid_s_sc_mva;
+      grid.s_sc_min_mva = opts.grid_s_sc_mva * 0.6;
+      grid.rx_max = 0.1;
+      grid.rx_min = 0.1;
+      grid.r_pu = 0.001;
+      grid.x_pu = 0.01;
+      grid.controllable = true;
+      sys.ac.external_grids.push_back(grid);
+    }
+    if (!source_buses.empty()) {
+      report.add(ImportDisposition::Coerced, ImportReasonCode::MissingRequired,
+                 ImportSeverity::Warning, "ExternalGrid",
+                 "Added " + std::to_string(source_buses.size()) +
+                     " synthetic external grid source(s).");
+      result.warnings.push_back(
+          "源模型缺失，已自动添加 " + std::to_string(source_buses.size()) +
+          " 个外部电网（优先馈线首端；无上游中压连接的配变在高压侧独立补源）。");
+    }
+  }
+
+  const auto equal_phase_weights = [](PhaseMask mask) {
+    PhaseWeights weights;
+    const int count = std::max(1, mask.count());
+    if (mask.has(0)) weights.a = 1.0 / count;
+    if (mask.has(1)) weights.b = 1.0 / count;
+    if (mask.has(2)) weights.c = 1.0 / count;
+    return weights;
+  };
+
+  // Pass 8: meters aggregated per LVBuilding, including their actual phase.
   std::map<std::string, int> building_meters;
+  std::map<std::string, PhaseWeights> building_meter_phases;
   int total_meters = 0;
   for (const auto& e : rdf->children) {
     if (local_name(e.tag) != "Meter") continue;
@@ -570,14 +899,83 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
     if (b.empty()) continue;
     ++building_meters[b];
     ++total_meters;
+    const std::string phase_text = prop_text(e, ".phases");
+    if (phase_text.empty()) continue;
+    const PhaseMask phase = cim_phase_mask(phase_text);
+    auto& weights = building_meter_phases[b];
+    if (phase.has(0)) weights.a += 1.0;
+    if (phase.has(1)) weights.b += 1.0;
+    if (phase.has(2)) weights.c += 1.0;
   }
 
-  // Pass 9: LVBuildings → estimated loads.
+  // Pass 9a: explicit CIM load and generator objects. These take precedence
+  // over inferred transformer demand when present.
+  int load_idx = 0;
+  int generator_idx = 0;
+  for (const auto& e : rdf->children) {
+    const std::string cls = local_name(e.tag);
+    if (!is_load_class(cls) && !is_generator_class(cls)) continue;
+    const std::string id = object_id(e);
+    const auto terms_it = equip_terms.find(id);
+    if (terms_it == equip_terms.end() || terms_it->second.empty()) {
+      report.add(ImportDisposition::Skipped, ImportReasonCode::StructuralLoss,
+                 ImportSeverity::Warning, id,
+                 cls + " has no connected Terminal.");
+      continue;
+    }
+    const int bus = bus_of(terms_it->second.front().second);
+    const PhaseMask phase = equip_phase.count(id) ? equip_phase[id]
+                                                  : PhaseMask::abc();
+    if (is_load_class(cls)) {
+      Load load;
+      load.index = ++load_idx;
+      load.bus = bus;
+      load.name = prop_text(e, ".name");
+      if (load.name.empty()) load.name = cls + "#" + std::to_string(load.index);
+      load.p_mw = prop_double_any(
+          e, {".p", ".pfixed", ".pFixed", ".activePower"}, 0.0);
+      load.q_mvar = prop_double_any(
+          e, {".q", ".qfixed", ".qFixed", ".reactivePower"}, 0.0);
+      sys.ac.loads.push_back(load);
+      load_phase_weights[load.index] = equal_phase_weights(phase);
+      ++accepted[cls];
+      continue;
+    }
+
+    Generator generator;
+    generator.index = ++generator_idx;
+    generator.bus = bus;
+    generator.name = prop_text(e, ".name");
+    if (generator.name.empty())
+      generator.name = cls + "#" + std::to_string(generator.index);
+    generator.pg_mw = prop_double_any(
+        e, {".p", ".activePower", ".ratedNetMaxP"}, 0.0);
+    generator.qg_mvar =
+        prop_double_any(e, {".q", ".reactivePower"}, 0.0);
+    generator.pmax_mw = prop_double_any(
+        e, {".maxP", ".maxOperatingP", ".ratedNetMaxP"}, generator.pg_mw);
+    generator.pmin_mw =
+        prop_double_any(e, {".minP", ".minOperatingP"}, 0.0);
+    generator.qmax_mvar =
+        prop_double_any(e, {".maxQ", ".maxOperatingQ"}, generator.qg_mvar);
+    generator.qmin_mvar =
+        prop_double_any(e, {".minQ", ".minOperatingQ"}, generator.qg_mvar);
+    generator.mbase_mva =
+        prop_double_any(e, {".ratedS", ".ratedApparentPower"}, 0.0);
+    sys.ac.generators.push_back(generator);
+    generator_phase[generator.index] = phase;
+    ++accepted[cls];
+  }
+
+  // Pass 9b: LVBuildings -> estimated loads. Demand is allocated within each
+  // transformer district, not globally across unrelated folder documents.
   struct BuildingRec {
     std::string id;
     std::string name;
+    std::string transformer_id;
     int bus{0};
     int meters{0};
+    PhaseWeights meter_phases;
   };
   std::vector<BuildingRec> buildings;
   for (const auto& e : rdf->children) {
@@ -591,34 +989,302 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
     BuildingRec rec;
     rec.id = id;
     rec.name = prop_text(e, ".name");
+    rec.transformer_id = prop_ref(e, ".MemberOf_PowerTransformer");
     rec.bus = bus_of(terms.front().second);
     rec.meters = building_meters.count(id) ? building_meters[id] : 0;
+    if (building_meter_phases.count(id))
+      rec.meter_phases = building_meter_phases[id];
     buildings.push_back(rec);
   }
 
   const double pf = std::clamp(opts.power_factor, 0.1, 1.0);
   const double tan_phi = std::tan(std::acos(pf));
-  const double total_p_mw = sn_total_mva * opts.load_factor * pf;
-  int meter_sum = 0;
-  for (const auto& b : buildings) meter_sum += b.meters;
-  int load_idx = 0;
-  for (const auto& b : buildings) {
-    double share = 0.0;
-    if (meter_sum > 0)
-      share = static_cast<double>(b.meters) / static_cast<double>(meter_sum);
-    else if (!buildings.empty())
-      share = 1.0 / static_cast<double>(buildings.size());
-    Load l;
-    l.index = ++load_idx;
-    l.bus = b.bus;
-    l.name = b.name.empty() ? ("楼栋#" + std::to_string(l.index)) : b.name;
-    l.p_mw = total_p_mw * share;
-    l.q_mvar = l.p_mw * tan_phi;
-    l.n_customers = b.meters;
-    l.priority = LoadPriority::Medium;
-    sys.ac.loads.push_back(l);
-    ++accepted["LVBuilding"];
+  if (result.source_load_objects == 0) {
+    std::map<std::string, std::vector<std::size_t>> transformer_buildings;
+    for (std::size_t i = 0; i < buildings.size(); ++i)
+      if (!buildings[i].transformer_id.empty())
+        transformer_buildings[buildings[i].transformer_id].push_back(i);
+
+    std::vector<std::size_t> orphan_buildings;
+    for (std::size_t i = 0; i < buildings.size(); ++i)
+      if (buildings[i].transformer_id.empty() ||
+          !transformer_position.count(buildings[i].transformer_id))
+        orphan_buildings.push_back(i);
+
+    std::set<std::size_t> consumed_buildings;
+    double unallocated_transformer_mva = 0.0;
+    for (const auto& [transformer_id, transformer_pos] : transformer_position) {
+      const auto grouped = transformer_buildings.find(transformer_id);
+      if (grouped == transformer_buildings.end() || grouped->second.empty()) {
+        const auto& transformer = sys.ac.transformers_2w[transformer_pos];
+        if (!orphan_buildings.empty()) {
+          unallocated_transformer_mva += transformer.sn_mva;
+          continue;
+        }
+        Load load;
+        load.index = ++load_idx;
+        load.bus = transformer.lv_bus;
+        load.name = transformer.name + " 估算负荷";
+        load.p_mw = transformer.sn_mva * opts.load_factor * pf;
+        load.q_mvar = load.p_mw * tan_phi;
+        load.priority = LoadPriority::Medium;
+        sys.ac.loads.push_back(load);
+        load_phase_weights[load.index] = equal_phase_weights(PhaseMask::abc());
+        ++result.inferred_load_objects;
+        continue;
+      }
+
+      int group_meter_sum = 0;
+      for (const std::size_t building_pos : grouped->second)
+        group_meter_sum += buildings[building_pos].meters;
+      const double transformer_p =
+          sys.ac.transformers_2w[transformer_pos].sn_mva * opts.load_factor * pf;
+      for (const std::size_t building_pos : grouped->second) {
+        const auto& building = buildings[building_pos];
+        consumed_buildings.insert(building_pos);
+        const double share = group_meter_sum > 0
+                                 ? static_cast<double>(building.meters) /
+                                       static_cast<double>(group_meter_sum)
+                                 : 1.0 / static_cast<double>(grouped->second.size());
+        Load load;
+        load.index = ++load_idx;
+        load.bus = building.bus;
+        load.name = building.name.empty()
+                        ? ("楼栋#" + std::to_string(load.index))
+                        : building.name;
+        load.p_mw = transformer_p * share;
+        load.q_mvar = load.p_mw * tan_phi;
+        load.n_customers = building.meters;
+        load.priority = LoadPriority::Medium;
+        sys.ac.loads.push_back(load);
+        const double phase_total = building.meter_phases.a +
+                                   building.meter_phases.b +
+                                   building.meter_phases.c;
+        load_phase_weights[load.index] =
+            phase_total > 0.0
+                ? PhaseWeights{building.meter_phases.a / phase_total,
+                               building.meter_phases.b / phase_total,
+                               building.meter_phases.c / phase_total}
+                : equal_phase_weights(PhaseMask::abc());
+        ++accepted["LVBuilding"];
+        ++result.inferred_load_objects;
+      }
+    }
+
+    // Preserve orphan buildings even when their transformer reference is
+    // absent or unresolved. They share the otherwise unallocated capacity.
+    if (!orphan_buildings.empty()) {
+      int orphan_meter_sum = 0;
+      for (const auto pos : orphan_buildings)
+        orphan_meter_sum += buildings[pos].meters;
+      const double orphan_total_p =
+          unallocated_transformer_mva * opts.load_factor * pf;
+      for (const auto pos : orphan_buildings) {
+        const auto& building = buildings[pos];
+        const double share = orphan_meter_sum > 0
+                                 ? static_cast<double>(building.meters) /
+                                       static_cast<double>(orphan_meter_sum)
+                                 : 1.0 / static_cast<double>(orphan_buildings.size());
+        Load load;
+        load.index = ++load_idx;
+        load.bus = building.bus;
+        load.name = building.name.empty()
+                        ? ("楼栋#" + std::to_string(load.index))
+                        : building.name;
+        load.p_mw = orphan_total_p * share;
+        load.q_mvar = load.p_mw * tan_phi;
+        load.n_customers = building.meters;
+        sys.ac.loads.push_back(load);
+        const double phase_total = building.meter_phases.a +
+                                   building.meter_phases.b +
+                                   building.meter_phases.c;
+        load_phase_weights[load.index] =
+            phase_total > 0.0
+                ? PhaseWeights{building.meter_phases.a / phase_total,
+                               building.meter_phases.b / phase_total,
+                               building.meter_phases.c / phase_total}
+                : equal_phase_weights(PhaseMask::abc());
+        ++accepted["LVBuilding"];
+        ++result.inferred_load_objects;
+      }
+    }
   }
+
+  // Pass 10: preserve the phase-domain facts as an executable three-phase
+  // model. The positive-sequence AC model remains available for existing
+  // workflows, while single-phase meters/lines are no longer flattened away.
+  ThreePhaseACSystem three_phase;
+  three_phase.base_mva = sys.ac.base_mva;
+  three_phase.base_freq_hz = sys.ac.freq_hz;
+  three_phase.name = sys.ac.name;
+  for (const auto& bus : sys.ac.buses) {
+    ThreePhaseACBus phase_bus;
+    phase_bus.index = bus.index;
+    phase_bus.bus_type = bus.bus_type;
+    phase_bus.name = bus.name;
+    phase_bus.base_kv = bus.base_kv;
+    phase_bus.in_service = bus.in_service;
+    phase_bus.phase_mask = PhaseMask::abc();
+    phase_bus.vm_a_pu = bus.vm_pu;
+    phase_bus.vm_b_pu = bus.vm_pu;
+    phase_bus.vm_c_pu = bus.vm_pu;
+    phase_bus.vmin_pu = bus.vmin_pu;
+    phase_bus.vmax_pu = bus.vmax_pu;
+    three_phase.buses.push_back(phase_bus);
+  }
+  for (const auto& branch : sys.ac.branches) {
+    ThreePhaseACLine line;
+    line.index = branch.index;
+    line.from_bus = branch.from_bus;
+    line.to_bus = branch.to_bus;
+    line.name = branch.name;
+    line.in_service = branch.in_service;
+    line.phase_mask = branch_phase.count(branch.index)
+                          ? branch_phase[branch.index]
+                          : PhaseMask::abc();
+    line.length_km = branch.length_km;
+    line.r1_ohm_per_km = branch.r_ohm_per_km;
+    line.x1_ohm_per_km = branch.x_ohm_per_km;
+    line.r0_ohm_per_km = 3.0 * branch.r_ohm_per_km;
+    line.x0_ohm_per_km = 3.0 * branch.x_ohm_per_km;
+    line.r1_pu = branch.r_pu;
+    line.x1_pu = branch.x_pu;
+    line.b1_pu = branch.b_pu;
+    line.r0_pu = 3.0 * branch.r_pu;
+    line.x0_pu = 3.0 * branch.x_pu;
+    line.rate_a_mva = branch.rate_a_mva;
+    three_phase.lines.push_back(line);
+    if (line.phase_mask.bits != PhaseMask::abc().bits)
+      result.is_unbalanced = true;
+  }
+  int phase_line_index = static_cast<int>(three_phase.lines.size());
+  for (const auto& sw : sys.ac.switches) {
+    if (!sw.closed) continue;
+    ThreePhaseACLine line;
+    line.index = ++phase_line_index;
+    line.from_bus = sw.bus_from;
+    line.to_bus = sw.bus_to;
+    line.name = sw.name.empty() ? "CIM闭合开关" : sw.name;
+    line.phase_mask = switch_phase.count(sw.index)
+                          ? switch_phase[sw.index]
+                          : PhaseMask::abc();
+    line.r1_pu = 1e-6;
+    line.x1_pu = 1e-6;
+    line.r0_pu = 3e-6;
+    line.x0_pu = 3e-6;
+    three_phase.lines.push_back(line);
+    if (line.phase_mask.bits != PhaseMask::abc().bits)
+      result.is_unbalanced = true;
+  }
+  for (const auto& transformer : sys.ac.transformers_2w) {
+    ThreePhaseTransformer phase_transformer;
+    phase_transformer.index = transformer.index;
+    phase_transformer.name = transformer.name;
+    phase_transformer.hv_bus = transformer.hv_bus;
+    phase_transformer.lv_bus = transformer.lv_bus;
+    phase_transformer.in_service = transformer.in_service;
+    phase_transformer.sn_mva = transformer.sn_mva;
+    phase_transformer.vn_hv_kv = transformer.vn_hv_kv;
+    phase_transformer.vn_lv_kv = transformer.vn_lv_kv;
+    phase_transformer.vk_percent = transformer.vk_percent;
+    phase_transformer.vkr_percent = transformer.vkr_percent;
+    phase_transformer.i0_percent = transformer.i0_percent;
+    phase_transformer.vector_group = transformer.vector_group;
+    phase_transformer.shift_deg = transformer.shift_deg;
+    three_phase.transformers.push_back(phase_transformer);
+  }
+  double phase_p_a = 0.0, phase_p_b = 0.0, phase_p_c = 0.0;
+  for (const auto& load : sys.ac.loads) {
+    const PhaseWeights weights = load_phase_weights.count(load.index)
+                                     ? load_phase_weights[load.index]
+                                     : equal_phase_weights(PhaseMask::abc());
+    ThreePhaseLoad phase_load;
+    phase_load.index = load.index;
+    phase_load.bus = load.bus;
+    phase_load.name = load.name;
+    phase_load.in_service = load.in_service;
+    std::uint8_t bits = 0;
+    if (weights.a > 0.0) bits |= PhaseMask::a().bits;
+    if (weights.b > 0.0) bits |= PhaseMask::b().bits;
+    if (weights.c > 0.0) bits |= PhaseMask::c().bits;
+    phase_load.phase_mask = bits == 0 ? PhaseMask::abc() : PhaseMask(bits);
+    phase_load.p_a_mw = load.p_mw * weights.a;
+    phase_load.q_a_mvar = load.q_mvar * weights.a;
+    phase_load.p_b_mw = load.p_mw * weights.b;
+    phase_load.q_b_mvar = load.q_mvar * weights.b;
+    phase_load.p_c_mw = load.p_mw * weights.c;
+    phase_load.q_c_mvar = load.q_mvar * weights.c;
+    phase_p_a += phase_load.p_a_mw;
+    phase_p_b += phase_load.p_b_mw;
+    phase_p_c += phase_load.p_c_mw;
+    if (phase_load.phase_mask.bits != PhaseMask::abc().bits)
+      result.is_unbalanced = true;
+    three_phase.loads.push_back(phase_load);
+  }
+  for (const auto& generator : sys.ac.generators) {
+    ThreePhaseGenerator phase_generator;
+    phase_generator.index = generator.index;
+    phase_generator.bus = generator.bus;
+    phase_generator.name = generator.name;
+    phase_generator.in_service = generator.in_service;
+    phase_generator.is_slack = generator.is_slack;
+    phase_generator.phase_mask = generator_phase.count(generator.index)
+                                     ? generator_phase[generator.index]
+                                     : PhaseMask::abc();
+    const int active_phases = std::max(1, phase_generator.phase_mask.count());
+    const double p_per_phase = generator.pg_mw / active_phases;
+    const double q_per_phase = generator.qg_mvar / active_phases;
+    if (phase_generator.phase_mask.has(0)) {
+      phase_generator.p_a_mw = p_per_phase;
+      phase_generator.q_a_mvar = q_per_phase;
+    }
+    if (phase_generator.phase_mask.has(1)) {
+      phase_generator.p_b_mw = p_per_phase;
+      phase_generator.q_b_mvar = q_per_phase;
+    }
+    if (phase_generator.phase_mask.has(2)) {
+      phase_generator.p_c_mw = p_per_phase;
+      phase_generator.q_c_mvar = q_per_phase;
+    }
+    phase_generator.p_mw = generator.pg_mw;
+    phase_generator.q_mvar = generator.qg_mvar;
+    phase_generator.vm_pu = generator.vg_pu;
+    phase_generator.pmax_mw = generator.pmax_mw;
+    phase_generator.pmin_mw = generator.pmin_mw;
+    phase_generator.qmax_mvar = generator.qmax_mvar;
+    phase_generator.qmin_mvar = generator.qmin_mvar;
+    phase_generator.mbase_mva = generator.mbase_mva;
+    three_phase.generators.push_back(phase_generator);
+    if (phase_generator.phase_mask.bits != PhaseMask::abc().bits)
+      result.is_unbalanced = true;
+  }
+  for (const auto& grid : sys.ac.external_grids) {
+    ThreePhaseExternalGrid phase_grid;
+    phase_grid.index = grid.index;
+    phase_grid.bus = grid.bus;
+    phase_grid.name = grid.name;
+    phase_grid.in_service = grid.in_service;
+    phase_grid.vm_pu = grid.vm_pu;
+    phase_grid.va_deg = grid.va_deg;
+    phase_grid.s_sc_max_mva = grid.s_sc_max_mva;
+    phase_grid.s_sc_min_mva = grid.s_sc_min_mva;
+    phase_grid.rx_max = grid.rx_max;
+    phase_grid.rx_min = grid.rx_min;
+    phase_grid.r1_pu = grid.r_pu;
+    phase_grid.x1_pu = grid.x_pu;
+    phase_grid.r2_pu = grid.r_pu;
+    phase_grid.x2_pu = grid.x_pu;
+    phase_grid.r0_pu = grid.r0_pu > 0.0 ? grid.r0_pu : 3.0 * grid.r_pu;
+    phase_grid.x0_pu = grid.x0_pu > 0.0 ? grid.x0_pu : 3.0 * grid.x_pu;
+    three_phase.external_grids.push_back(phase_grid);
+  }
+  const double phase_scale = std::max({1e-9, std::abs(phase_p_a),
+                                       std::abs(phase_p_b), std::abs(phase_p_c)});
+  if (std::max({phase_p_a, phase_p_b, phase_p_c}) -
+          std::min({phase_p_a, phase_p_b, phase_p_c}) >
+      1e-6 * phase_scale)
+    result.is_unbalanced = true;
+  sys.three_phase_ac = std::move(three_phase);
 
   // System naming from the Substation.
   for (const auto& e : rdf->children) {
@@ -632,6 +1298,8 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
   }
   if (sys.name.empty() || sys.name == "Hybrid AC/DC System")
     sys.name = "配电台区 CIM 导入";
+  if (sys.ac.name.empty()) sys.ac.name = sys.name;
+  if (sys.three_phase_ac) sys.three_phase_ac->name = sys.name + " 三相模型";
 
   // ── Diagnostics ────────────────────────────────────────────────────────────
   for (const auto& [cls, n] : accepted)
@@ -652,16 +1320,70 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
   if (dropped_buildings)
     result.warnings.push_back(std::to_string(dropped_buildings) +
                               " 个低压楼栋无接入节点，已跳过。");
-  report.add(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
-             ImportSeverity::Warning, "Load",
-             "Loads are ESTIMATED from transformer capacity split by meter count.");
+  const std::size_t inferred_conductors = inferred_overhead_conductors +
+                                          inferred_cable_conductors +
+                                          inferred_other_conductors;
+  if (inferred_conductors) {
+    report.add(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
+               ImportSeverity::Warning, "ACLineSegment",
+               "Inferred conductor cross-section for " +
+                   std::to_string(inferred_conductors) + " line segment(s).");
+    result.warnings.push_back(
+        std::to_string(inferred_conductors) +
+        " 条线路缺少导线截面，已按 PSRType 使用典型截面：低压架空线 " +
+        std::to_string(opts.default_lv_overhead_cross_section_mm2) +
+        " mm²、低压站内电缆 " +
+        std::to_string(opts.default_lv_cable_cross_section_mm2) +
+        " mm²、中压线路 " +
+        std::to_string(opts.default_mv_cross_section_mm2) + " mm²。分类计数：架空 " +
+        std::to_string(inferred_overhead_conductors) + "、电缆 " +
+        std::to_string(inferred_cable_conductors) + "、其他 " +
+        std::to_string(inferred_other_conductors) + "。");
+  }
+  if (synthetic_winding_nodes) {
+    report.add(ImportDisposition::Coerced,
+               ImportReasonCode::MissingRequired, ImportSeverity::Warning,
+               "TransformerWinding",
+               "Created " + std::to_string(synthetic_winding_nodes) +
+                   " synthetic buses for winding terminals with no "
+                   "ConnectivityNode.");
+    result.warnings.push_back(
+        std::to_string(synthetic_winding_nodes) +
+        " 个变压器绕组端子缺少 ConnectivityNode，已生成独立低压母线以保留变压器。");
+  }
+  if (result.inferred_load_objects > 0) {
+    report.add(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
+               ImportSeverity::Warning, "Load",
+               "Created " + std::to_string(result.inferred_load_objects) +
+                   " estimated load(s) from transformer capacity and meter "
+                   "counts.");
+    result.warnings.push_back(
+        "源文件没有负荷功率值，已生成 " +
+        std::to_string(result.inferred_load_objects) +
+        " 个估算负荷：变压器容量 × 负载率(" +
+        std::to_string(opts.load_factor) + ") × 功率因数(" +
+        std::to_string(opts.power_factor) +
+        ")；有楼栋时按本台配变电表数分摊，否则挂到配变低压侧。");
+  }
+  if (result.source_generator_objects == 0) {
+    report.add(ImportDisposition::Accepted, ImportReasonCode::Ok,
+               ImportSeverity::Info, "Generator",
+               "The source CIM document contains no generator object.");
+    result.warnings.push_back(
+        "源 CIM 中未声明发电设备；外部电网是为潮流可解而生成的电源等值，不伪装成发电机。");
+  }
+  if (result.has_explicit_phase_data) {
+    result.warnings.push_back(
+        std::string("已读取 ConductingEquipment.phases 并生成三相 abc 模型；判定：") +
+        (result.is_unbalanced ? "存在三相不平衡。"
+                              : "已提供的相别字段中未发现不平衡。"));
+  } else {
+    result.warnings.push_back(
+        "源 CIM 未提供相别字段；已按 ABC 平衡假设生成三相等值模型，不能据此认定原系统平衡。");
+  }
   report.add(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
              ImportSeverity::Warning, "ACLineSegment",
              "Line impedances are ESTIMATED from length + cross-section.");
-  result.warnings.push_back(
-      "负荷为估算值：变压器容量 × 负载率(" +
-      std::to_string(opts.load_factor) + ") × 功率因数(" +
-      std::to_string(opts.power_factor) + ")，按各楼栋电表数分摊。");
   result.warnings.push_back(
       "线路阻抗为估算值：由导线截面与长度按典型电缆参数计算。");
   result.warnings.push_back(
@@ -686,6 +1408,69 @@ CimDistImportResult load_cim_dist(const std::filesystem::path& path,
   const std::string xml((std::istreambuf_iterator<char>(ifs)),
                         std::istreambuf_iterator<char>());
   return from_cim_dist(xml, mode, opts);
+}
+
+CimDistImportResult from_cim_dist(
+    const std::vector<std::string>& xml_documents, ImportMode mode,
+    const CimDistImportOptions& opts) {
+  if (xml_documents.empty()) {
+    CimDistImportResult result;
+    result.report.add(ImportDisposition::Rejected,
+                      ImportReasonCode::MissingRequired,
+                      ImportSeverity::Error, "<documents>",
+                      "No CIM XML documents were provided.");
+    result.warnings.push_back("未提供 CIM XML 文件。");
+    return result;
+  }
+  try {
+    StitchedXml stitched = stitch_xml_documents(xml_documents);
+    CimDistImportResult result = from_cim_dist(stitched.xml, mode, opts);
+    result.warnings.insert(result.warnings.begin(), stitched.warnings.begin(),
+                           stitched.warnings.end());
+    result.report.add(
+        ImportDisposition::Accepted, ImportReasonCode::Ok,
+        ImportSeverity::Info, "<documents>",
+        "Stitched " + std::to_string(xml_documents.size()) +
+            " CIM document(s); merged " +
+            std::to_string(stitched.duplicate_objects) +
+            " repeated rdf:ID declaration(s).");
+    if (xml_documents.size() > 1)
+      result.warnings.insert(
+          result.warnings.begin(),
+          "已拼接 " + std::to_string(xml_documents.size()) +
+              " 个 CIM XML 文件，按 rdf:ID 合并 " +
+              std::to_string(stitched.duplicate_objects) +
+              " 条重复对象声明及跨文件引用。");
+    return result;
+  } catch (const std::exception& e) {
+    CimDistImportResult result;
+    result.report.add(ImportDisposition::Rejected,
+                      ImportReasonCode::ParseError, ImportSeverity::Error,
+                      "<documents>", e.what());
+    result.warnings.push_back(std::string("CIM 多文件拼接失败：") + e.what());
+    return result;
+  }
+}
+
+CimDistImportResult load_cim_dist(
+    const std::vector<std::filesystem::path>& paths, ImportMode mode,
+    const CimDistImportOptions& opts) {
+  std::vector<std::string> documents;
+  documents.reserve(paths.size());
+  for (const auto& path : paths) {
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs) {
+      CimDistImportResult result;
+      result.report.add(ImportDisposition::Rejected,
+                        ImportReasonCode::ParseError, ImportSeverity::Error,
+                        path.string(), "Cannot open CIM file.");
+      result.warnings.push_back("无法打开文件：" + path.string());
+      return result;
+    }
+    documents.emplace_back(std::istreambuf_iterator<char>(ifs),
+                           std::istreambuf_iterator<char>());
+  }
+  return from_cim_dist(documents, mode, opts);
 }
 
 // ── Export ───────────────────────────────────────────────────────────────────

@@ -2647,24 +2647,48 @@ const App = (() => {
   // PowerTransformer / ConnectivityNode / ACLineSegment / Meter / LVBuilding).
   // Text upload -> load_cim_dist. Loads and line/transformer impedances are
   // ESTIMATED (surfaced as import warnings).
-  async function loadCimDist(file) {
-    if (!file) return;
+  async function loadCimDist(files, folderMode = false) {
+    const selected = Array.from(files || []).filter((file) =>
+      String(file.name || '').toLowerCase().endsWith('.xml'));
+    if (!selected.length) return;
     setStatus('导入配电台区CIM...', 'busy');
     try {
-      const xml = await file.text();
-      const data = await apiPost('/api/session/load_cim_dist', { xml_string: xml });
+      const xmlFiles = await Promise.all(selected.map(async (file) => ({
+        path: file.webkitRelativePath || file.name,
+        name: file.name,
+        content: await file.text(),
+      })));
+      const payload = !folderMode && xmlFiles.length === 1
+        ? { xml_string: xmlFiles[0].content }
+        : { xml_files: xmlFiles };
+      const data = await apiPost('/api/session/load_cim_dist', payload);
       if (!data) { setStatus('加载失败', 'error'); return; }
       if (data.error) throw new Error(data.error);
-      log(`已导入配电台区CIM: ${file.name}`, 'success');
+      const fileLabel = selected.map((file) => file.name).join(', ');
+      log(`已导入配电台区CIM: ${fileLabel}`, 'success');
       applyLoadedSystem(data, '配电台区CIM');
       showModelIoStatus('配电台区 CIM 导入完成', [
-        ['文件', file.name],
+        ['模式', data._cim_import_mode === 'folder_merge' ? '文件夹拼接' : '单文件'],
+        ['文件', selected.length === 1 ? selected[0].name : `${selected.length} 个 XML`],
         ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
         ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
         ['变压器', data.counts?.transformers_2w ?? data.transformers_2w ?? ''],
-        ['负荷', data.counts?.ac_loads ?? data.ac_loads ?? ''],
+        ['负荷', data.counts?.loads ?? data.loads?.length ?? ''],
+        ['发电机', data.counts?.generators ?? data.generators?.length ?? ''],
+        ['外部电网等值', data.counts?.external_grids ?? data.external_grids?.length ?? ''],
+        ['三相母线/线路/负荷', `${data.counts?.tp_buses ?? 0} / ${data.counts?.tp_lines ?? 0} / ${data.counts?.tp_loads ?? 0}`],
+        ['相别数据', data._cim_has_explicit_phase_data ? 'CIM明确提供' : '未提供，按ABC假设'],
+        ['三相判定', data._cim_has_explicit_phase_data
+          ? (data._cim_is_unbalanced ? '不平衡' : '已提供字段中未发现不平衡')
+          : '无法由源文件判定'],
+        ['负荷来源', data._cim_source_load_objects > 0
+          ? `${data._cim_source_load_objects} 个CIM负荷对象`
+          : `${data._cim_inferred_load_objects ?? 0} 个配变容量估算负荷`],
+        ['发电数据来源', data._cim_source_generator_objects > 0
+          ? `${data._cim_source_generator_objects} 个CIM发电对象`
+          : '源文件未提供'],
       ], {
-        subtitle: 'CIM/RDF 台区转换到当前系统（负荷与阻抗为估算值）',
+        subtitle: 'CIM/RDF 台区转换到正序与三相 abc 模型',
         warnings: data._cim_warnings || [],
       });
       setStatus('就绪');
@@ -15430,10 +15454,18 @@ const App = (() => {
     document.getElementById('btnIoImportCimDist')?.addEventListener('click', () => {
       document.getElementById('fileImportCimDist')?.click();
     });
+    document.getElementById('btnIoImportCimDistProject')?.addEventListener('click', () => {
+      document.getElementById('fileImportCimDistProject')?.click();
+    });
     document.getElementById('fileImportCimDist')?.addEventListener('change', (e) => {
-      const f = e.target.files[0];
+      const files = Array.from(e.target.files || []);
       e.target.value = '';
-      if (f) loadCimDist(f);
+      if (files.length) loadCimDist(files, false);
+    });
+    document.getElementById('fileImportCimDistProject')?.addEventListener('change', (e) => {
+      const files = Array.from(e.target.files || []);
+      e.target.value = '';
+      if (files.length) loadCimDist(files, true);
     });
     document.getElementById('btnIoImportGridlabd')?.addEventListener('click', () => {
       document.getElementById('fileImportGridlabd')?.click();

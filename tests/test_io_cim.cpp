@@ -7,8 +7,10 @@
 #include <string>
 #include <vector>
 
+#include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/cim_dist_io.hpp"
 #include "hacdcpf/io/cim_io.hpp"
+#include "hacdcpf/io/json_io.hpp"
 
 namespace {
 bool near(double a, double b) { return std::abs(a - b) < 1e-9; }
@@ -158,4 +160,155 @@ TEST_CASE("Distribution CIM parser rejects DOCTYPE and ENTITY declarations",
   const auto result = hacdcpf::io::from_cim_dist(evil);
   CHECK(result.report.has_errors());
   CHECK(result.system.ac.buses.empty());
+}
+
+TEST_CASE("Distribution CIM stitches documents and adds one source per feeder",
+          "[io][cim][distribution][multifile]") {
+  const std::string first = R"xml(<?xml version="1.0"?>
+<rdf:RDF>
+ <cim:BaseVoltage rdf:ID="BV10"><cim:BaseVoltage.nominalVoltage>10000</cim:BaseVoltage.nominalVoltage></cim:BaseVoltage>
+ <cim:BaseVoltage rdf:ID="BV04"><cim:BaseVoltage.nominalVoltage>400</cim:BaseVoltage.nominalVoltage></cim:BaseVoltage>
+ <cim:PowerTransformer rdf:ID="T1"><cim:Naming.name>T1</cim:Naming.name><cim:PowerTransformer.ratedCapacity>0.4</cim:PowerTransformer.ratedCapacity></cim:PowerTransformer>
+ <cim:ConnectivityNode rdf:ID="N1"/>
+</rdf:RDF>)xml";
+  const std::string second = R"xml(<?xml version="1.0"?>
+<rdf:RDF>
+ <cim:BaseVoltage rdf:ID="BV10"><cim:BaseVoltage.nominalVoltage>10000</cim:BaseVoltage.nominalVoltage></cim:BaseVoltage>
+ <cim:BaseVoltage rdf:ID="BV04"><cim:BaseVoltage.nominalVoltage>400</cim:BaseVoltage.nominalVoltage></cim:BaseVoltage>
+ <cim:TransformerWinding rdf:ID="T1P"><cim:TransformerWinding.windingType>primary</cim:TransformerWinding.windingType><cim:PowerSystemResource.BaseVoltage rdf:resource="#BV10"/><cim:TransformerWinding.MemberOf_PowerTransformer rdf:resource="#T1"/></cim:TransformerWinding>
+ <cim:Terminal rdf:ID="T1PT"><cim:Terminal.sequenceNumber>1</cim:Terminal.sequenceNumber><cim:Terminal.ConductingEquipment rdf:resource="#T1P"/><cim:Terminal.ConnectivityNode rdf:resource="#N1"/></cim:Terminal>
+ <cim:TransformerWinding rdf:ID="T1S"><cim:TransformerWinding.windingType>secondary</cim:TransformerWinding.windingType><cim:PowerSystemResource.BaseVoltage rdf:resource="#BV04"/><cim:TransformerWinding.MemberOf_PowerTransformer rdf:resource="#T1"/></cim:TransformerWinding>
+ <cim:Terminal rdf:ID="T1ST"><cim:Terminal.sequenceNumber>1</cim:Terminal.sequenceNumber><cim:Terminal.ConductingEquipment rdf:resource="#T1S"/><cim:Terminal.ConnectivityNode rdf:resource=""/></cim:Terminal>
+ <cim:PowerTransformer rdf:ID="T2"><cim:Naming.name>T2</cim:Naming.name><cim:PowerTransformer.ratedCapacity>0.63</cim:PowerTransformer.ratedCapacity></cim:PowerTransformer>
+ <cim:TransformerWinding rdf:ID="T2P"><cim:TransformerWinding.windingType>primary</cim:TransformerWinding.windingType><cim:PowerSystemResource.BaseVoltage rdf:resource="#BV10"/><cim:TransformerWinding.MemberOf_PowerTransformer rdf:resource="#T2"/></cim:TransformerWinding>
+ <cim:Terminal rdf:ID="T2PT"><cim:Terminal.sequenceNumber>1</cim:Terminal.sequenceNumber><cim:Terminal.ConductingEquipment rdf:resource="#T2P"/><cim:Terminal.ConnectivityNode rdf:resource="#N2"/></cim:Terminal>
+ <cim:TransformerWinding rdf:ID="T2S"><cim:TransformerWinding.windingType>secondary</cim:TransformerWinding.windingType><cim:PowerSystemResource.BaseVoltage rdf:resource="#BV04"/><cim:TransformerWinding.MemberOf_PowerTransformer rdf:resource="#T2"/></cim:TransformerWinding>
+ <cim:Terminal rdf:ID="T2ST"><cim:Terminal.sequenceNumber>1</cim:Terminal.sequenceNumber><cim:Terminal.ConductingEquipment rdf:resource="#T2S"/><cim:Terminal.ConnectivityNode rdf:resource=""/></cim:Terminal>
+ <cim:ACLineSegment rdf:ID="L1"><cim:Conductor.length>100</cim:Conductor.length><cim:Conductor.crossSectionArea>50</cim:Conductor.crossSectionArea><cim:PowerSystemResource.BaseVoltage rdf:resource="#BV10"/></cim:ACLineSegment>
+ <cim:Terminal rdf:ID="L1T1"><cim:Terminal.sequenceNumber>1</cim:Terminal.sequenceNumber><cim:Terminal.ConductingEquipment rdf:resource="#L1"/><cim:Terminal.ConnectivityNode rdf:resource="#N1"/></cim:Terminal>
+ <cim:Terminal rdf:ID="L1T2"><cim:Terminal.sequenceNumber>2</cim:Terminal.sequenceNumber><cim:Terminal.ConductingEquipment rdf:resource="#L1"/><cim:Terminal.ConnectivityNode rdf:resource="#N2"/></cim:Terminal>
+ <cim:ConnectivityNode rdf:ID="N2"/>
+</rdf:RDF>)xml";
+
+  const auto imported =
+      hacdcpf::io::from_cim_dist(std::vector<std::string>{first, second});
+  CHECK_FALSE(imported.report.has_errors());
+  CHECK(imported.system.ac.buses.size() == 4);
+  CHECK(imported.system.ac.branches.size() == 1);
+  CHECK(imported.system.ac.transformers_2w.size() == 2);
+  CHECK(imported.system.ac.external_grids.size() == 1);
+  REQUIRE(imported.system.ac.external_grids.size() == 1);
+  const int source_bus = imported.system.ac.external_grids.front().bus;
+  const auto source = std::find_if(
+      imported.system.ac.buses.begin(), imported.system.ac.buses.end(),
+      [source_bus](const auto& bus) { return bus.index == source_bus; });
+  REQUIRE(source != imported.system.ac.buses.end());
+  CHECK(source->bus_type == hacdcpf::BusType::SLACK);
+  CHECK(near(source->base_kv, 10.0));
+  CHECK(std::any_of(imported.warnings.begin(), imported.warnings.end(),
+                    [](const std::string& warning) {
+                      return warning.find("合并 2 条重复对象声明") !=
+                             std::string::npos;
+                    }));
+}
+
+TEST_CASE("Distribution CIM real feeder creates transformer-side fallback loads",
+          "[io][cim][distribution][fixture]") {
+  namespace fs = std::filesystem;
+  const fs::path fixture =
+      fs::path(__FILE__).parent_path().parent_path() / "data" / "test.xml";
+  REQUIRE(fs::is_regular_file(fixture));
+
+  const auto imported = hacdcpf::io::load_cim_dist(fixture);
+  CHECK_FALSE(imported.report.has_errors());
+  CHECK(imported.source_load_objects == 0);
+  CHECK(imported.source_generator_objects == 0);
+  REQUIRE(imported.system.ac.transformers_2w.size() == 41);
+  CHECK(imported.inferred_load_objects == 41);
+  CHECK(imported.system.ac.loads.size() == 41);
+  CHECK(imported.system.ac.generators.empty());
+  REQUIRE(imported.system.three_phase_ac.has_value());
+  CHECK(imported.system.three_phase_ac->loads.size() == 41);
+  CHECK(imported.has_explicit_phase_data);
+  CHECK_FALSE(imported.is_unbalanced);
+}
+
+TEST_CASE("Distribution CIM folder preserves loads and unbalanced meter phases",
+          "[io][cim][distribution][fixture][three_phase]") {
+  namespace fs = std::filesystem;
+  const fs::path fixture_dir =
+      fs::path(__FILE__).parent_path().parent_path() / "data" / "xmls";
+  REQUIRE(fs::is_directory(fixture_dir));
+  std::vector<fs::path> fixtures;
+  for (const auto& entry : fs::directory_iterator(fixture_dir))
+    if (entry.is_regular_file() && entry.path().extension() == ".xml")
+      fixtures.push_back(entry.path());
+  std::sort(fixtures.begin(), fixtures.end());
+  REQUIRE(fixtures.size() == 7);
+
+  const auto imported = hacdcpf::io::load_cim_dist(fixtures);
+  CHECK_FALSE(imported.report.has_errors());
+  CHECK(imported.system.ac.transformers_2w.size() == 7);
+  CHECK(imported.source_load_objects == 0);
+  // 138 LVBuilding loads in the newer exports plus one transformer-side
+  // fallback load for each of the four older exports with no LVBuilding data.
+  CHECK(imported.inferred_load_objects == 142);
+  CHECK(imported.system.ac.loads.size() == 142);
+  CHECK(imported.source_generator_objects == 0);
+  CHECK(imported.system.ac.generators.empty());
+  // Each transformer-area export omits its upstream 10 kV feeder. The two 5A
+  // and 5B LV networks are tied, but that must not suppress the 5B HV source.
+  CHECK(imported.system.ac.external_grids.size() == 7);
+  CHECK(imported.has_explicit_phase_data);
+  CHECK(imported.is_unbalanced);
+  REQUIRE(imported.system.three_phase_ac.has_value());
+  const auto& phase = *imported.system.three_phase_ac;
+  CHECK(phase.loads.size() == imported.system.ac.loads.size());
+  CHECK(std::any_of(phase.loads.begin(), phase.loads.end(), [](const auto& load) {
+    return load.phase_mask.bits == hacdcpf::PhaseMask::a().bits;
+  }));
+  CHECK(std::any_of(phase.loads.begin(), phase.loads.end(), [](const auto& load) {
+    return load.phase_mask.bits == hacdcpf::PhaseMask::c().bits;
+  }));
+
+  hacdcpf::PowerFlowOptions pf_options;
+  pf_options.max_iter = 200;
+  pf_options.tol = 1e-8;
+  pf_options.enable_converter_coordination_check = false;
+  const auto pf = hacdcpf::solve_power_flow(imported.system, pf_options);
+  REQUIRE(pf.converged);
+  REQUIRE_FALSE(pf.vm.empty());
+  CHECK(*std::min_element(pf.vm.begin(), pf.vm.end()) > 0.9);
+
+  const std::string json = hacdcpf::io::to_json(imported.system);
+  const auto restored = hacdcpf::io::from_json(json);
+  REQUIRE(restored.three_phase_ac.has_value());
+  REQUIRE(restored.three_phase_ac->loads.size() == phase.loads.size());
+  CHECK(restored.three_phase_ac->loads.front().phase_mask.bits ==
+        phase.loads.front().phase_mask.bits);
+}
+
+TEST_CASE("Distribution CIM maps explicit loads and generators",
+          "[io][cim][distribution][equipment]") {
+  const std::string xml = R"xml(<rdf:RDF>
+ <cim:BaseVoltage rdf:ID="BV"><cim:BaseVoltage.nominalVoltage>400</cim:BaseVoltage.nominalVoltage></cim:BaseVoltage>
+ <cim:ConnectivityNode rdf:ID="N1"/><cim:ConnectivityNode rdf:ID="N2"/>
+ <cim:EnergyConsumer rdf:ID="LD"><cim:Naming.name>Load A</cim:Naming.name><cim:EnergyConsumer.p>0.12</cim:EnergyConsumer.p><cim:EnergyConsumer.q>0.04</cim:EnergyConsumer.q><cim:ConductingEquipment.phases>A相</cim:ConductingEquipment.phases><cim:PowerSystemResource.BaseVoltage rdf:resource="#BV"/></cim:EnergyConsumer>
+ <cim:Terminal rdf:ID="LDT"><cim:Terminal.ConductingEquipment rdf:resource="#LD"/><cim:Terminal.ConnectivityNode rdf:resource="#N1"/></cim:Terminal>
+ <cim:SynchronousMachine rdf:ID="GEN"><cim:Naming.name>Generator C</cim:Naming.name><cim:RotatingMachine.p>0.08</cim:RotatingMachine.p><cim:SynchronousMachine.maxP>0.1</cim:SynchronousMachine.maxP><cim:ConductingEquipment.phases>C相</cim:ConductingEquipment.phases><cim:PowerSystemResource.BaseVoltage rdf:resource="#BV"/></cim:SynchronousMachine>
+ <cim:Terminal rdf:ID="GENT"><cim:Terminal.ConductingEquipment rdf:resource="#GEN"/><cim:Terminal.ConnectivityNode rdf:resource="#N2"/></cim:Terminal>
+</rdf:RDF>)xml";
+  const auto imported = hacdcpf::io::from_cim_dist(xml);
+  REQUIRE(imported.system.ac.loads.size() == 1);
+  REQUIRE(imported.system.ac.generators.size() == 1);
+  CHECK(near(imported.system.ac.loads.front().p_mw, 0.12));
+  CHECK(near(imported.system.ac.generators.front().pg_mw, 0.08));
+  CHECK(imported.source_load_objects == 1);
+  CHECK(imported.source_generator_objects == 1);
+  REQUIRE(imported.system.three_phase_ac.has_value());
+  CHECK(imported.system.three_phase_ac->loads.front().phase_mask.bits ==
+        hacdcpf::PhaseMask::a().bits);
+  CHECK(imported.system.three_phase_ac->generators.front().phase_mask.bits ==
+        hacdcpf::PhaseMask::c().bits);
+  CHECK(imported.is_unbalanced);
 }

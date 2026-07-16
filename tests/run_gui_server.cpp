@@ -8744,14 +8744,28 @@ int main(int argc, char** argv) {
            [](const httplib::Request& req, httplib::Response& res) {
     try {
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
-      const std::string xml = j.value("xml_string", "");
-      if (xml.empty()) throw std::runtime_error("Empty CIM XML string");
+      std::vector<std::string> xml_documents;
+      if (j.contains("xml_files") && j["xml_files"].is_array()) {
+        for (const auto& item : j["xml_files"]) {
+          if (item.is_string())
+            xml_documents.push_back(item.get<std::string>());
+          else if (item.is_object())
+            xml_documents.push_back(item.value("content", ""));
+        }
+      } else if (j.contains("xml_strings") && j["xml_strings"].is_array())
+        xml_documents = j["xml_strings"].get<std::vector<std::string>>();
+      else if (j.contains("xml_string"))
+        xml_documents.push_back(j.value("xml_string", ""));
+      xml_documents.erase(
+          std::remove(xml_documents.begin(), xml_documents.end(), ""),
+          xml_documents.end());
+      if (xml_documents.empty()) throw std::runtime_error("Empty CIM XML string");
       hacdcpf::io::CimDistImportOptions opts;
       if (j.contains("load_factor")) opts.load_factor = j.value("load_factor", opts.load_factor);
       if (j.contains("power_factor")) opts.power_factor = j.value("power_factor", opts.power_factor);
       if (j.contains("base_mva")) opts.base_mva = j.value("base_mva", opts.base_mva);
       auto imported = hacdcpf::io::from_cim_dist(
-          xml, hacdcpf::io::ImportMode::Permissive, opts);
+          xml_documents, hacdcpf::io::ImportMode::Permissive, opts);
       if (imported.report.has_errors()) {
         std::string msg = "CIM 导入失败";
         for (const auto& r : imported.report.records)
@@ -8768,6 +8782,16 @@ int main(int argc, char** argv) {
       auto summary = system_summary(*g_session.current_system);
       summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
       summary["_cim_warnings"] = imported.warnings;
+      summary["_cim_file_count"] = xml_documents.size();
+      summary["_cim_import_mode"] =
+          xml_documents.size() == 1 ? "single_file" : "folder_merge";
+      summary["_cim_source_load_objects"] = imported.source_load_objects;
+      summary["_cim_source_generator_objects"] =
+          imported.source_generator_objects;
+      summary["_cim_inferred_load_objects"] = imported.inferred_load_objects;
+      summary["_cim_has_explicit_phase_data"] =
+          imported.has_explicit_phase_data;
+      summary["_cim_is_unbalanced"] = imported.is_unbalanced;
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;

@@ -21,8 +21,9 @@
 ///
 /// Mapping (honest ceiling):
 ///   - ConnectivityNode (referenced by ≥1 Terminal)  → ACBus
-///   - PowerTransformer + primary/secondary Winding   → Transformer2W (+ HV
-///     side becomes the SLACK bus fed by a synthetic ExternalGrid)
+///   - PowerTransformer + primary/secondary Winding   → Transformer2W
+///   - Missing source model                           → one synthetic
+///     ExternalGrid per physical feeder component
 ///   - ACLineSegment                                  → ACBranch (impedance
 ///     estimated from Conductor.length + crossSectionArea + a cable table)
 ///   - Breaker / Disconnector                         → Switch (closed =
@@ -30,6 +31,12 @@
 ///   - LVBuilding (+ aggregated Meters)               → Load (per-building
 ///     demand estimated by splitting the transformer capacity across buildings
 ///     by meter count; Meter count → n_customers)
+///   - Transformer with no LVBuilding                  → one estimated Load at
+///     the low-voltage bus
+///   - EnergyConsumer / SynchronousMachine and common subclasses → explicit
+///     Load / Generator when a connected Terminal is present
+///   - ConductingEquipment.phases                      → executable
+///     ThreePhaseACSystem phase masks and per-phase load/generation values
 ///
 /// Loads carry no nameplate kW in the source, so demand is ESTIMATED (recorded
 /// as Coerced/BestEffort in the ImportReport). The RDF/XML reader is the same
@@ -54,10 +61,21 @@ struct CimDistImportOptions {
   double default_vk_percent{4.0};
   double default_vkr_percent{1.0};
   double default_i0_percent{0.5};
+  /// Type-aware conductor fallbacks used only when both Equipment.model and
+  /// Conductor.crossSectionArea are absent. These represent feeder conductors,
+  /// not customer service drops.
+  double default_lv_overhead_cross_section_mm2{35.0};
+  double default_lv_cable_cross_section_mm2{50.0};
+  double default_mv_cross_section_mm2{300.0};
   /// System power base (MVA). Kept near the transformer-district scale (≈1 MVA)
   /// so 0.4 kV feeder per-unit impedances stay O(0.01–1) and Newton power flow
   /// stays well conditioned (a 100 MVA base pushes them to 5–50 pu).
   double base_mva{1.0};
+  /// Add a synthetic ExternalGrid when the imported CIM has no explicit
+  /// source model. A Circuit.SourceBreaker is preferred. Transformer-area
+  /// exports with isolated HV buses get one source per transformer; a remaining
+  /// source-less MV network gets one source per connected component.
+  bool auto_add_external_grid{true};
 };
 
 /// Options for distribution-CIM export.
@@ -74,6 +92,13 @@ struct CimDistImportResult {
   HybridPowerSystem system;
   ImportReport report;
   std::vector<std::string> warnings;
+  /// Source-document facts used by the GUI to distinguish absent CIM data
+  /// from an importer failure or a synthesized equivalent.
+  std::size_t source_load_objects{0};
+  std::size_t source_generator_objects{0};
+  std::size_t inferred_load_objects{0};
+  bool has_explicit_phase_data{false};
+  bool is_unbalanced{false};
 };
 
 /// Import a distribution-CIM RDF/XML document.
@@ -81,10 +106,24 @@ CimDistImportResult from_cim_dist(const std::string& xml,
                                   ImportMode mode = ImportMode::Permissive,
                                   const CimDistImportOptions& opts = {});
 
+/// Import and stitch multiple distribution-CIM RDF/XML documents. Objects are
+/// joined by rdf:ID/rdf:about, so references may cross file boundaries; repeated
+/// declarations are de-duplicated and complementary properties are merged.
+CimDistImportResult from_cim_dist(
+    const std::vector<std::string>& xml_documents,
+    ImportMode mode = ImportMode::Permissive,
+    const CimDistImportOptions& opts = {});
+
 /// Import a distribution-CIM RDF/XML file.
 CimDistImportResult load_cim_dist(const std::filesystem::path& path,
                                   ImportMode mode = ImportMode::Permissive,
                                   const CimDistImportOptions& opts = {});
+
+/// Load and stitch multiple distribution-CIM RDF/XML files.
+CimDistImportResult load_cim_dist(
+    const std::vector<std::filesystem::path>& paths,
+    ImportMode mode = ImportMode::Permissive,
+    const CimDistImportOptions& opts = {});
 
 /// Export the current system to the distribution-CIM RDF/XML dialect.
 std::string to_cim_dist(const HybridPowerSystem& sys,
