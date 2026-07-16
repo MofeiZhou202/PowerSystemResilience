@@ -385,6 +385,90 @@ def main() -> int:
             f"parameter auto-fulfill changed={applied.get('fields_changed')} valid={validation.get('valid')}",
         )
 
+        print("2aa. design-handbook line parameter preview + apply")
+        handbook_model = {
+            "name": "design-handbook-parameter-e2e",
+            "base_mva": 1.0,
+            "ac": {
+                "base_mva": 1.0,
+                "freq_hz": 50.0,
+                "buses": [
+                    {"index": 1, "bus_type": "SLACK", "base_kv": 0.4},
+                    {"index": 2, "bus_type": "PQ", "base_kv": 0.4},
+                ],
+                "branches": [
+                    {
+                        "index": 7,
+                        "name": "ZRC feeder",
+                        "from_bus": 1,
+                        "to_bus": 2,
+                        "length_km": 0.1,
+                        "r_pu": (18.5 / 240.0) * 0.1 / 0.16,
+                        "x_pu": 0.08 * 0.1 / 0.16,
+                        "r_ohm_per_km": 18.5 / 240.0,
+                        "x_ohm_per_km": 0.08,
+                        "conductor_model": "ZRC-YJV22-",
+                        "cross_section_mm2": 240.0,
+                        "line_type": "low_voltage_cable",
+                        "parameter_source": "cim_model_cross_section_estimate",
+                        "parameters_inferred": True,
+                    },
+                ],
+            },
+        }
+        st, _ = c.post_json(
+            "/api/session/load_json_string",
+            {"json_string": json.dumps(handbook_model)},
+        )
+        st, preview = c.post_json(
+            "/api/session/design_handbook_parameters/preview",
+            {"overwrite_import_estimates": True},
+        )
+        suggestions = preview.get("suggestions", [])
+        suggestion = suggestions[0] if suggestions else {}
+        chk.check(
+            st == 200 and
+            preview.get("schema") == "design_handbook_parameter_completion_v1" and
+            preview.get("candidates") == 1 and
+            preview.get("fields_changed") == 0 and
+            suggestion.get("applied") is False and
+            suggestion.get("conductor_material") == "copper" and
+            suggestion.get("insulation") == "XLPE" and
+            abs(float(suggestion.get("r20_ohm_per_km", 0.0)) - 0.0754) < 1e-10 and
+            len(preview.get("references", [])) == 3,
+            "handbook preview identifies the 240 mm2 XLPE copper-cable rule",
+        )
+        st, preview_export = c.post_json("/api/session/export_json")
+        preview_system = json.loads(preview_export.get("json_string", "{}"))
+        preview_branch = preview_system.get("ac", {}).get("branches", [{}])[0]
+        chk.check(
+            st == 200 and
+            preview_branch.get("parameter_source") ==
+            "cim_model_cross_section_estimate" and
+            abs(float(preview_branch.get("r_ohm_per_km", 0.0)) -
+                18.5 / 240.0) < 1e-12,
+            "handbook preview leaves the session model unchanged",
+        )
+        st, completed = c.post_json(
+            "/api/session/design_handbook_parameters/apply",
+            {"overwrite_import_estimates": True},
+        )
+        completion = completed.get("handbook_completion", {})
+        completed_system = json.loads(completed.get("_raw_json", "{}"))
+        completed_branch = completed_system.get("ac", {}).get("branches", [{}])[0]
+        chk.check(
+            st == 200 and completion.get("candidates") == 1 and
+            completion.get("fields_changed", 0) >= 2 and
+            completion.get("suggestions", [{}])[0].get("applied") is True and
+            completed_branch.get("parameter_source") ==
+            "design_handbook_gbt3956_schneider_eig" and
+            completed_branch.get("parameters_inferred") is True and
+            abs(float(completed_branch.get("r_ohm_per_km", 0.0)) -
+                0.09614254) < 1e-8 and
+            abs(float(completed_branch.get("x_ohm_per_km", 0.0)) - 0.08) < 1e-12,
+            "handbook apply persists completed R/X values and provenance",
+        )
+
         print("2b. comprehensive hybrid 3W transformer balance attribution")
         st, _ = c.post_json(
             "/api/session/load_builtin",

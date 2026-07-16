@@ -77,6 +77,57 @@ struct StandardParameterApplyReport {
   std::vector<std::string> applied_rule_ids;
 };
 
+/// Opt-in completion of physical AC-line parameters from published handbook
+/// rules. Authored/manufacturer impedance is preserved unless it was previously
+/// marked as an importer estimate.
+struct DesignHandbookCompletionOptions {
+  bool apply{false};
+  bool overwrite_import_estimates{true};
+  double default_lv_overhead_cross_section_mm2{35.0};
+  double default_lv_cable_cross_section_mm2{50.0};
+  double default_mv_cross_section_mm2{300.0};
+  double cable_reactance_ohm_per_km{0.08};
+  double overhead_reactance_ohm_per_km{0.35};
+};
+
+struct DesignHandbookLineSuggestion {
+  int branch_index{0};
+  std::string branch_name;
+  std::string conductor_model;
+  std::string line_type;
+  std::string conductor_material;
+  std::string insulation;
+  std::string confidence;
+  std::string action;
+  std::string source;
+  double base_kv{0.0};
+  double length_km{0.0};
+  double cross_section_mm2{0.0};
+  double conductor_temperature_c{0.0};
+  double r20_ohm_per_km{0.0};
+  double old_r_ohm_per_km{0.0};
+  double old_x_ohm_per_km{0.0};
+  double new_r_ohm_per_km{0.0};
+  double new_x_ohm_per_km{0.0};
+  double old_r_pu{0.0};
+  double old_x_pu{0.0};
+  double new_r_pu{0.0};
+  double new_x_pu{0.0};
+  bool cross_section_inferred{false};
+  bool model_type_conflict{false};
+  bool applied{false};
+};
+
+struct DesignHandbookCompletionReport {
+  int branches_scanned{0};
+  int candidates{0};
+  int fields_changed{0};
+  int skipped_authored{0};
+  int skipped_missing_geometry{0};
+  std::vector<DesignHandbookLineSuggestion> suggestions;
+  std::vector<std::string> warnings;
+};
+
 std::vector<StandardParameterProfile> standard_parameter_profiles();
 
 StandardParameterLibrary make_standard_parameter_library(
@@ -94,5 +145,9 @@ StandardParameterApplyReport apply_standard_parameter_library(
     HybridPowerSystem& system,
     const StandardParameterLibrary& library =
         make_standard_parameter_library());
+
+DesignHandbookCompletionReport complete_design_handbook_parameters(
+    HybridPowerSystem& system,
+    const DesignHandbookCompletionOptions& options = {});
 
 }  // namespace hacdcpf

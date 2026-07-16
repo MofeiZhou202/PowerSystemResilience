@@ -2243,6 +2243,89 @@ json parameter_validation_to_json(
               {"diagnostics", std::move(diagnostics)}};
 }
 
+hacdcpf::DesignHandbookCompletionOptions design_handbook_options_from_json(
+    const json& input, bool apply) {
+  hacdcpf::DesignHandbookCompletionOptions options;
+  const json& body = input.contains("options") && input["options"].is_object()
+                         ? input["options"]
+                         : input;
+  options.apply = apply;
+  options.overwrite_import_estimates =
+      body.value("overwrite_import_estimates", true);
+  options.default_lv_overhead_cross_section_mm2 = body.value(
+      "default_lv_overhead_cross_section_mm2",
+      options.default_lv_overhead_cross_section_mm2);
+  options.default_lv_cable_cross_section_mm2 = body.value(
+      "default_lv_cable_cross_section_mm2",
+      options.default_lv_cable_cross_section_mm2);
+  options.default_mv_cross_section_mm2 = body.value(
+      "default_mv_cross_section_mm2",
+      options.default_mv_cross_section_mm2);
+  options.cable_reactance_ohm_per_km = body.value(
+      "cable_reactance_ohm_per_km",
+      options.cable_reactance_ohm_per_km);
+  options.overhead_reactance_ohm_per_km = body.value(
+      "overhead_reactance_ohm_per_km",
+      options.overhead_reactance_ohm_per_km);
+  return options;
+}
+
+json design_handbook_report_to_json(
+    const hacdcpf::DesignHandbookCompletionReport& report) {
+  json suggestions = json::array();
+  for (const auto& row : report.suggestions) {
+    suggestions.push_back({
+        {"branch_index", row.branch_index},
+        {"branch_name", row.branch_name},
+        {"conductor_model", row.conductor_model},
+        {"line_type", row.line_type},
+        {"conductor_material", row.conductor_material},
+        {"insulation", row.insulation},
+        {"confidence", row.confidence},
+        {"action", row.action},
+        {"source", row.source},
+        {"base_kv", row.base_kv},
+        {"length_km", row.length_km},
+        {"cross_section_mm2", row.cross_section_mm2},
+        {"conductor_temperature_c", row.conductor_temperature_c},
+        {"r20_ohm_per_km", row.r20_ohm_per_km},
+        {"old_r_ohm_per_km", row.old_r_ohm_per_km},
+        {"old_x_ohm_per_km", row.old_x_ohm_per_km},
+        {"new_r_ohm_per_km", row.new_r_ohm_per_km},
+        {"new_x_ohm_per_km", row.new_x_ohm_per_km},
+        {"old_r_pu", row.old_r_pu},
+        {"old_x_pu", row.old_x_pu},
+        {"new_r_pu", row.new_r_pu},
+        {"new_x_pu", row.new_x_pu},
+        {"cross_section_inferred", row.cross_section_inferred},
+        {"model_type_conflict", row.model_type_conflict},
+        {"applied", row.applied},
+    });
+  }
+  return {
+      {"schema", "design_handbook_parameter_completion_v1"},
+      {"branches_scanned", report.branches_scanned},
+      {"candidates", report.candidates},
+      {"fields_changed", report.fields_changed},
+      {"skipped_authored", report.skipped_authored},
+      {"skipped_missing_geometry", report.skipped_missing_geometry},
+      {"suggestions", std::move(suggestions)},
+      {"warnings", report.warnings},
+      {"references",
+       json::array({
+           {{"standard", "GB/T 3956-2008 / IEC 60228:2004"},
+            {"scope", "20 C maximum DC conductor resistance"},
+            {"url", "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=149B3068D059EFD9BCFB8A8AF57E5B1C"}},
+           {{"standard", "GB/T 12706.1-2020"},
+            {"scope", "PVC/XLPE power-cable construction and temperature context"},
+            {"url", "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=7593C7389ACDA76E0D40F6985E3A839D"}},
+           {{"standard", "Schneider Electrical Installation Guide"},
+            {"scope", "Voltage-drop resistance and default cable reactance"},
+            {"url", "https://www.electrical-installation.org/enwiki/Calculation_of_voltage_drop_in_steady_load_conditions"}},
+       })},
+  };
+}
+
 json parameter_library_to_json(
     const hacdcpf::StandardParameterLibrary& library,
     bool include_profiles = true) {
@@ -8101,6 +8184,46 @@ int main(int argc, char** argv) {
                                                   g_session.parameter_library));
       out["profile_id"] = g_session.parameter_library.profile_id;
       out["profile_name"] = g_session.parameter_library.name;
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: design-handbook AC-line parameter completion ----
+  svr.Post("/api/session/design_handbook_parameters/preview",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto body = json::parse(req.body.empty() ? "{}" : req.body);
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system)
+        throw std::runtime_error("No system loaded");
+      auto options = design_handbook_options_from_json(body, false);
+      const auto report = hacdcpf::complete_design_handbook_parameters(
+          *g_session.current_system, options);
+      res.set_content(design_handbook_report_to_json(report).dump(),
+                      "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/design_handbook_parameters/apply",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto body = json::parse(req.body.empty() ? "{}" : req.body);
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system)
+        throw std::runtime_error("No system loaded");
+      auto options = design_handbook_options_from_json(body, true);
+      const auto report = hacdcpf::complete_design_handbook_parameters(
+          *g_session.current_system, options);
+      clear_cached_analysis(g_session);
+      auto out = system_summary(*g_session.current_system);
+      out["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      out["handbook_completion"] = design_handbook_report_to_json(report);
       res.set_content(out.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;

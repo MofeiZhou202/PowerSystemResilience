@@ -81,6 +81,16 @@ struct ACBranch {
   double b_us_per_km{0.0};
   double c_nf_per_km{0.0};
 
+  // Physical conductor metadata retained by engineering-model importers.
+  // These fields let the explicit Model IO completion workflow derive actual
+  // units from a design handbook without overwriting authored per-unit data.
+  std::string conductor_model;
+  double cross_section_mm2{0.0};
+  bool cross_section_inferred{false};
+  std::string line_type;
+  std::string parameter_source;
+  bool parameters_inferred{false};
+
   // Reliability
   double failure_rate{0.0};
   double mttr_hr{0.0};

@@ -877,6 +877,102 @@ const App = (() => {
     switchTab('results');
   }
 
+  function designHandbookOptionsFromControls() {
+    const positive = (id, fallback) => {
+      const value = Number(document.getElementById(id)?.value);
+      return Number.isFinite(value) && value > 0 ? value : fallback;
+    };
+    return {
+      overwrite_import_estimates: document.getElementById('ioHandbookOverwriteEstimates')?.checked !== false,
+      default_lv_overhead_cross_section_mm2: positive('ioHandbookLvOverheadArea', 35),
+      default_lv_cable_cross_section_mm2: positive('ioHandbookLvCableArea', 50),
+      default_mv_cross_section_mm2: positive('ioHandbookMvArea', 300),
+      cable_reactance_ohm_per_km: 0.08,
+      overhead_reactance_ohm_per_km: 0.35,
+    };
+  }
+
+  function renderDesignHandbookCompletion(report, applied = false) {
+    const el = document.getElementById('modelIoResults');
+    if (!el || !report) return;
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('modelIO');
+    const rows = Array.isArray(report.suggestions) ? report.suggestions : [];
+    const fmt = (value, digits = 5) => Number.isFinite(Number(value))
+      ? Number(value).toFixed(digits) : '-';
+    const confidenceText = { high: '高', medium: '中', low: '低' };
+    const body = rows.map(row => `<tr>
+      <td>${escapeHtml(row.branch_index)}</td>
+      <td>${escapeHtml(row.branch_name || '')}</td>
+      <td>${escapeHtml(row.conductor_model || '未提供')}</td>
+      <td>${escapeHtml(row.line_type || '未提供')}</td>
+      <td>${escapeHtml(`${fmt(row.cross_section_mm2, 0)} / ${row.conductor_material === 'aluminium' ? '铝' : '铜'} / ${row.insulation || '-'}`)}</td>
+      <td>${escapeHtml(`${fmt(row.old_r_ohm_per_km)} → ${fmt(row.new_r_ohm_per_km)}`)}</td>
+      <td>${escapeHtml(`${fmt(row.old_x_ohm_per_km)} → ${fmt(row.new_x_ohm_per_km)}`)}</td>
+      <td><span class="model-io-severity ${row.confidence === 'low' ? 'error' : (row.confidence === 'medium' ? 'warning' : 'info')}">${escapeHtml(confidenceText[row.confidence] || row.confidence || '-')}</span></td>
+      <td>${row.model_type_conflict ? '型号/类别冲突' : (row.cross_section_inferred ? '截面推断' : '手册查表')}</td>
+    </tr>`).join('') || '<tr><td colspan="9">没有可补齐的线路；已有厂家或用户参数保持不变。</td></tr>';
+    const warningRows = (report.warnings || []).map(w =>
+      `<div class="transient-mini-card"><strong>Warning</strong><span>${escapeHtml(w)}</span></div>`).join('');
+    const references = (report.references || []).map(ref =>
+      `<a href="${parameterLibraryAttr(ref.url || '#')}" target="_blank" rel="noopener">${escapeHtml(ref.standard || '')}</a>`).join(' · ');
+    el.innerHTML = `
+      <div class="transient-section-head"><h5>${applied ? '设计手册参数已应用' : '设计手册参数建议'}</h5><span>${escapeHtml(report.schema || '')}</span></div>
+      <div class="model-io-contract-grid">
+        <div class="model-io-contract-item"><strong>扫描</strong><span>${escapeHtml(report.branches_scanned || 0)} 条</span></div>
+        <div class="model-io-contract-item"><strong>候选</strong><span>${escapeHtml(report.candidates || 0)} 条</span></div>
+        <div class="model-io-contract-item"><strong>变更</strong><span>${escapeHtml(report.fields_changed || 0)} 个字段</span></div>
+        <div class="model-io-contract-item"><strong>保留已有</strong><span>${escapeHtml(report.skipped_authored || 0)} 条</span></div>
+      </div>
+      <div class="transient-table-scroll model-io-compact-scroll"><table>
+        <thead><tr><th>ID</th><th>线路</th><th>型号</th><th>类别</th><th>截面/材质/绝缘</th><th>R Ω/km</th><th>X Ω/km</th><th>置信度</th><th>判定</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table></div>
+      ${warningRows ? `<div class="transient-mini-grid">${warningRows}</div>` : ''}
+      ${references ? `<div class="sub-hint">依据：${references}</div>` : ''}`;
+    switchTab('results');
+  }
+
+  async function previewDesignHandbookParameters() {
+    if (!await syncToBackend()) {
+      setStatus('模型同步失败', 'error');
+      return null;
+    }
+    setStatus('扫描手册参数...', 'busy');
+    const report = await apiPost('/api/session/design_handbook_parameters/preview', {
+      options: designHandbookOptionsFromControls(),
+    });
+    if (!report) {
+      setStatus('参数扫描失败', 'error');
+      return null;
+    }
+    renderDesignHandbookCompletion(report, false);
+    setStatus(`发现 ${report.candidates || 0} 条参数建议`);
+    return report;
+  }
+
+  async function applyDesignHandbookParameters() {
+    if (!await syncToBackend()) {
+      setStatus('模型同步失败', 'error');
+      return;
+    }
+    if (!window.confirm('应用设计手册参数将使已有分析结果失效；厂家和用户参数不会被覆盖。继续？')) return;
+    setStatus('应用手册参数...', 'busy');
+    const data = await apiPost('/api/session/design_handbook_parameters/apply', {
+      options: designHandbookOptionsFromControls(),
+    });
+    if (!data) {
+      setStatus('参数补齐失败', 'error');
+      return;
+    }
+    applyLoadedSystem(data, '设计手册参数');
+    renderDesignHandbookCompletion(data.handbook_completion, true);
+    const changed = data.handbook_completion?.fields_changed || 0;
+    setStatus(`已补齐 ${changed} 个字段`);
+    log(`设计手册参数补齐完成：${changed} 个字段`, 'success');
+  }
+
   function parameterLibraryNumber(value, fallback = 0) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
@@ -15527,6 +15623,8 @@ const App = (() => {
         setStatus('同步失败', 'error');
       }
     });
+    document.getElementById('btnIoHandbookPreview')?.addEventListener('click', previewDesignHandbookParameters);
+    document.getElementById('btnIoHandbookApply')?.addEventListener('click', applyDesignHandbookParameters);
 
     // Modeling / Model Parameters submodule
     document.getElementById('btnParameterLibrarySelect')?.addEventListener('click', selectParameterLibraryProfile);

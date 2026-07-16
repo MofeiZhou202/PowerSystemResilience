@@ -1,6 +1,7 @@
 #include "hacdcpf/model/standard_parameter_library.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <stdexcept>
@@ -91,6 +92,46 @@ void fill_impedance(double& target,
 bool transformer_like(const ACBranch& branch) {
   return branch.sn_mva > kMissing || branch.vn_hv_kv > kMissing ||
          branch.vn_lv_kv > kMissing;
+}
+
+std::string uppercase_ascii(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char ch) {
+                   return static_cast<char>(std::toupper(ch));
+                 });
+  return value;
+}
+
+bool contains_text(const std::string& value, const std::string& token) {
+  return value.find(token) != std::string::npos;
+}
+
+bool source_is_import_estimate(const std::string& source) {
+  return source.rfind("cim_", 0) == 0 ||
+         source.rfind("design_handbook", 0) == 0;
+}
+
+double standard_r20_ohm_per_km(double area_mm2, bool aluminium) {
+  struct Row { double area; double copper; double aluminium; };
+  static constexpr std::array<Row, 20> rows{{
+      {1.5, 12.1, 0.0}, {2.5, 7.41, 0.0}, {4.0, 4.61, 0.0},
+      {6.0, 3.08, 0.0}, {10.0, 1.83, 3.08}, {16.0, 1.15, 1.91},
+      {25.0, 0.727, 1.20}, {35.0, 0.524, 0.868},
+      {50.0, 0.387, 0.641}, {70.0, 0.268, 0.443},
+      {95.0, 0.193, 0.320}, {120.0, 0.153, 0.253},
+      {150.0, 0.124, 0.206}, {185.0, 0.0991, 0.164},
+      {240.0, 0.0754, 0.125}, {300.0, 0.0601, 0.100},
+      {400.0, 0.0470, 0.0778}, {500.0, 0.0366, 0.0605},
+      {630.0, 0.0283, 0.0469}, {800.0, 0.0221, 0.0367},
+  }};
+  for (const auto& row : rows) {
+    if (std::abs(row.area - area_mm2) <= 1e-6) {
+      const double value = aluminium ? row.aluminium : row.copper;
+      if (value > 0.0) return value;
+      break;
+    }
+  }
+  return 0.0;
 }
 
 void add_issue(ParameterValidationReport& report,
@@ -814,6 +855,214 @@ StandardParameterApplyReport apply_standard_parameter_library(
     }
   }
 
+  return report;
+}
+
+DesignHandbookCompletionReport complete_design_handbook_parameters(
+    HybridPowerSystem& system,
+    const DesignHandbookCompletionOptions& options) {
+  DesignHandbookCompletionReport report;
+  const double base_mva = system.ac.base_mva > kMissing
+                              ? system.ac.base_mva
+                              : system.base_mva;
+  int material_geometry_conflicts = 0;
+  int low_confidence_count = 0;
+  int missing_model_count = 0;
+
+  const auto bus_base_kv = [&](int index) {
+    const auto it = std::find_if(system.ac.buses.begin(), system.ac.buses.end(),
+                                 [&](const auto& bus) {
+                                   return bus.index == index;
+                                 });
+    return it == system.ac.buses.end() ? 0.0 : it->base_kv;
+  };
+
+  for (auto& branch : system.ac.branches) {
+    if (!branch.in_service || transformer_like(branch)) continue;
+    ++report.branches_scanned;
+
+    const bool has_impedance =
+        std::isfinite(branch.r_pu) && std::isfinite(branch.x_pu) &&
+        std::hypot(branch.r_pu, branch.x_pu) > kMissing;
+    const bool replaceable_estimate =
+        options.overwrite_import_estimates &&
+        source_is_import_estimate(branch.parameter_source);
+    if (has_impedance && !replaceable_estimate) {
+      ++report.skipped_authored;
+      continue;
+    }
+
+    const double base_kv = bus_base_kv(branch.from_bus) > kMissing
+                               ? bus_base_kv(branch.from_bus)
+                               : bus_base_kv(branch.to_bus);
+    if (!(base_mva > kMissing) || !(base_kv > kMissing) ||
+        !(branch.length_km > kMissing)) {
+      ++report.skipped_missing_geometry;
+      continue;
+    }
+
+    const std::string model = uppercase_ascii(branch.conductor_model);
+    const bool type_overhead = contains_text(branch.line_type, "架空");
+    const bool model_overhead = contains_text(model, "LGJ") ||
+                                contains_text(model, "JKL") ||
+                                contains_text(model, "JL/") ||
+                                contains_text(model, "JL-") ||
+                                model == "LJ" || model.rfind("LJ", 0) == 0;
+    const bool overhead = type_overhead || model_overhead;
+    const bool aluminium_by_model = contains_text(model, "YJLV") ||
+                                    contains_text(model, "BLV") ||
+                                    contains_text(model, "JKLYJ") ||
+                                    model_overhead;
+    const bool copper_by_model = !model.empty() && !aluminium_by_model;
+    const bool aluminium = aluminium_by_model || (!copper_by_model && overhead);
+    const bool model_cable_family = contains_text(model, "BVV") ||
+                                    contains_text(model, "YJV");
+    const bool model_type_conflict = type_overhead && model_cable_family;
+
+    double area = branch.cross_section_mm2;
+    const bool inferred_area = branch.cross_section_inferred ||
+                               !(area > kMissing);
+    if (!(area > kMissing)) {
+      area = base_kv > 1.0
+                 ? options.default_mv_cross_section_mm2
+                 : (overhead
+                        ? options.default_lv_overhead_cross_section_mm2
+                        : options.default_lv_cable_cross_section_mm2);
+    }
+    if (!(area > kMissing)) {
+      ++report.skipped_missing_geometry;
+      continue;
+    }
+
+    const bool xlpe = contains_text(model, "YJ") ||
+                      (model.empty() && !contains_text(branch.line_type, "架空裸线"));
+    const double temperature_c = xlpe ? 90.0 : 70.0;
+    const double alpha = aluminium ? 0.00403 : 0.00393;
+    const double temperature_factor =
+        1.0 + alpha * (temperature_c - 20.0);
+    double r20 = standard_r20_ohm_per_km(area, aluminium);
+    double resistance = 0.0;
+    if (r20 > kMissing) {
+      resistance = r20 * temperature_factor;
+    } else {
+      // Schneider Electrical Installation Guide voltage-drop design values.
+      resistance = (aluminium ? 37.6 : 23.7) / area;
+      r20 = resistance / temperature_factor;
+    }
+    const double reactance = overhead
+                                 ? options.overhead_reactance_ohm_per_km
+                                 : options.cable_reactance_ohm_per_km;
+    const double zbase = base_kv * base_kv / base_mva;
+    const double new_r_pu = resistance * branch.length_km / zbase;
+    const double new_x_pu = reactance * branch.length_km / zbase;
+
+    DesignHandbookLineSuggestion suggestion;
+    suggestion.branch_index = branch.index;
+    suggestion.branch_name = branch.name;
+    suggestion.conductor_model = branch.conductor_model;
+    suggestion.line_type = branch.line_type;
+    suggestion.conductor_material = aluminium ? "aluminium" : "copper";
+    suggestion.insulation = xlpe ? "XLPE" : "PVC";
+    suggestion.confidence = model.empty() && inferred_area
+                                ? "low"
+                                : ((model.empty() || inferred_area ||
+                                    model_type_conflict)
+                                       ? "medium"
+                                       : "high");
+    suggestion.action = has_impedance ? "replace_import_estimate"
+                                      : "fill_missing";
+    suggestion.source =
+        "GB/T 3956-2008; GB/T 12706.1-2020; Schneider Electrical Installation Guide";
+    suggestion.base_kv = base_kv;
+    suggestion.length_km = branch.length_km;
+    suggestion.cross_section_mm2 = area;
+    suggestion.conductor_temperature_c = temperature_c;
+    suggestion.r20_ohm_per_km = r20;
+    suggestion.old_r_ohm_per_km = branch.r_ohm_per_km;
+    suggestion.old_x_ohm_per_km = branch.x_ohm_per_km;
+    suggestion.new_r_ohm_per_km = resistance;
+    suggestion.new_x_ohm_per_km = reactance;
+    suggestion.old_r_pu = branch.r_pu;
+    suggestion.old_x_pu = branch.x_pu;
+    suggestion.new_r_pu = new_r_pu;
+    suggestion.new_x_pu = new_x_pu;
+    suggestion.cross_section_inferred = inferred_area;
+    suggestion.model_type_conflict = model_type_conflict;
+
+    const auto changed = [](double old_value, double new_value) {
+      const double scale = std::max({1.0, std::abs(old_value),
+                                     std::abs(new_value)});
+      return std::abs(old_value - new_value) > 1e-10 * scale;
+    };
+    const bool any_change = changed(branch.r_ohm_per_km, resistance) ||
+                            changed(branch.x_ohm_per_km, reactance) ||
+                            changed(branch.r_pu, new_r_pu) ||
+                            changed(branch.x_pu, new_x_pu);
+    ++report.candidates;
+    if (model_type_conflict) ++material_geometry_conflicts;
+    if (model.empty()) ++missing_model_count;
+    if (suggestion.confidence == "low") ++low_confidence_count;
+
+    if (options.apply && any_change) {
+      const double old_r_pu = branch.r_pu;
+      const double old_x_pu = branch.x_pu;
+      if (changed(branch.r_ohm_per_km, resistance)) ++report.fields_changed;
+      if (changed(branch.x_ohm_per_km, reactance)) ++report.fields_changed;
+      if (changed(branch.r_pu, new_r_pu)) ++report.fields_changed;
+      if (changed(branch.x_pu, new_x_pu)) ++report.fields_changed;
+      branch.r_ohm_per_km = resistance;
+      branch.x_ohm_per_km = reactance;
+      branch.r_pu = new_r_pu;
+      branch.x_pu = new_x_pu;
+      branch.cross_section_mm2 = area;
+      branch.cross_section_inferred = inferred_area;
+      branch.parameter_source = "design_handbook_gbt3956_schneider_eig";
+      branch.parameters_inferred = true;
+      suggestion.applied = true;
+
+      if (system.three_phase_ac.has_value()) {
+        for (auto& line : system.three_phase_ac->lines) {
+          if (line.index != branch.index) continue;
+          const bool zero_sequence_was_derived =
+              std::abs(line.r0_pu - 3.0 * old_r_pu) <=
+                  1e-8 * std::max(1.0, std::abs(line.r0_pu)) &&
+              std::abs(line.x0_pu - 3.0 * old_x_pu) <=
+                  1e-8 * std::max(1.0, std::abs(line.x0_pu));
+          line.r1_ohm_per_km = resistance;
+          line.x1_ohm_per_km = reactance;
+          line.r1_pu = new_r_pu;
+          line.x1_pu = new_x_pu;
+          if (zero_sequence_was_derived) {
+            line.r0_ohm_per_km = 3.0 * resistance;
+            line.x0_ohm_per_km = 3.0 * reactance;
+            line.r0_pu = 3.0 * new_r_pu;
+            line.x0_pu = 3.0 * new_x_pu;
+          }
+          break;
+        }
+      }
+    }
+    report.suggestions.push_back(std::move(suggestion));
+  }
+
+  if (material_geometry_conflicts > 0) {
+    report.warnings.push_back(
+        std::to_string(material_geometry_conflicts) +
+        " line(s) have a cable-family model name but an overhead PSR type; "
+        "material follows the model and reactance follows the PSR geometry.");
+  }
+  if (low_confidence_count > 0) {
+    report.warnings.push_back(
+        std::to_string(low_confidence_count) +
+        " line(s) lack both a reliable model and an explicit cross-section; "
+        "the configured voltage/type fallback was used.");
+  }
+  if (missing_model_count > low_confidence_count) {
+    report.warnings.push_back(
+        std::to_string(missing_model_count - low_confidence_count) +
+        " additional line(s) have an explicit cross-section but no conductor "
+        "model; material and insulation remain medium-confidence inferences.");
+  }
   return report;
 }
 

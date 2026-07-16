@@ -503,3 +503,142 @@ TEST_CASE("parameter validation reports OPF decision-bound risks",
   CHECK(has_code("opf_decision_bounds_zero_width"));
   CHECK(has_code("opf_initial_value_outside_bounds"));
 }
+
+TEST_CASE("design handbook completion previews and applies CIM line parameters",
+          "[model][parameter_library][design_handbook]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 1.0;
+  sys.ac.base_mva = 1.0;
+  sys.ac.freq_hz = 50.0;
+  ACBus b1;
+  b1.index = 1;
+  b1.base_kv = 0.4;
+  b1.bus_type = BusType::SLACK;
+  ACBus b2 = b1;
+  b2.index = 2;
+  b2.bus_type = BusType::PQ;
+  sys.ac.buses = {b1, b2};
+
+  ACBranch branch;
+  branch.index = 7;
+  branch.from_bus = 1;
+  branch.to_bus = 2;
+  branch.name = "ZRC feeder";
+  branch.length_km = 0.1;
+  branch.r_ohm_per_km = 18.5 / 240.0;
+  branch.x_ohm_per_km = 0.08;
+  branch.r_pu = branch.r_ohm_per_km * branch.length_km / 0.16;
+  branch.x_pu = branch.x_ohm_per_km * branch.length_km / 0.16;
+  branch.conductor_model = "ZRC-YJV22-";
+  branch.cross_section_mm2 = 240.0;
+  branch.line_type = "低压电缆段";
+  branch.parameter_source = "cim_model_cross_section_estimate";
+  sys.ac.branches.push_back(branch);
+
+  ThreePhaseACSystem phase;
+  phase.base_mva = 1.0;
+  phase.buses.resize(2);
+  phase.buses[0].index = 1;
+  phase.buses[0].base_kv = 0.4;
+  phase.buses[1].index = 2;
+  phase.buses[1].base_kv = 0.4;
+  ThreePhaseACLine line;
+  line.index = 7;
+  line.from_bus = 1;
+  line.to_bus = 2;
+  line.length_km = 0.1;
+  line.r1_pu = branch.r_pu;
+  line.x1_pu = branch.x_pu;
+  line.r0_pu = 3.0 * branch.r_pu;
+  line.x0_pu = 3.0 * branch.x_pu;
+  phase.lines.push_back(line);
+  sys.three_phase_ac = phase;
+
+  const double original_r = sys.ac.branches.front().r_ohm_per_km;
+  const auto preview = complete_design_handbook_parameters(sys);
+  REQUIRE(preview.candidates == 1);
+  REQUIRE(preview.suggestions.size() == 1);
+  CHECK(preview.fields_changed == 0);
+  CHECK(sys.ac.branches.front().r_ohm_per_km == original_r);
+  const auto& suggestion = preview.suggestions.front();
+  CHECK(suggestion.conductor_material == "copper");
+  CHECK(suggestion.insulation == "XLPE");
+  CHECK_THAT(suggestion.r20_ohm_per_km, WithinAbs(0.0754, 1e-12));
+  CHECK_THAT(suggestion.new_r_ohm_per_km, WithinAbs(0.09614254, 1e-8));
+  CHECK_THAT(suggestion.new_x_ohm_per_km, WithinAbs(0.08, 1e-12));
+
+  DesignHandbookCompletionOptions options;
+  options.apply = true;
+  const auto applied = complete_design_handbook_parameters(sys, options);
+  CHECK(applied.fields_changed > 0);
+  CHECK(applied.suggestions.front().applied);
+  CHECK_THAT(sys.ac.branches.front().r_ohm_per_km,
+             WithinAbs(0.09614254, 1e-8));
+  REQUIRE(sys.three_phase_ac.has_value());
+  CHECK_THAT(sys.three_phase_ac->lines.front().r1_pu,
+             WithinAbs(sys.ac.branches.front().r_pu, 1e-12));
+  CHECK_THAT(sys.three_phase_ac->lines.front().r0_pu,
+             WithinAbs(3.0 * sys.ac.branches.front().r_pu, 1e-12));
+
+  const auto restored = io::from_json(io::to_json(sys));
+  REQUIRE(restored.ac.branches.size() == 1);
+  CHECK(restored.ac.branches.front().conductor_model == "ZRC-YJV22-");
+  CHECK(restored.ac.branches.front().cross_section_mm2 == 240.0);
+  CHECK_FALSE(restored.ac.branches.front().cross_section_inferred);
+  CHECK(restored.ac.branches.front().parameter_source ==
+        "design_handbook_gbt3956_schneider_eig");
+  CHECK_THAT(restored.ac.branches.front().r_ohm_per_km,
+             WithinAbs(sys.ac.branches.front().r_ohm_per_km, 1e-12));
+}
+
+TEST_CASE("design handbook reports model and PSR geometry conflicts",
+          "[model][parameter_library][design_handbook][conflict]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 1.0;
+  sys.ac.base_mva = 1.0;
+  ACBus b1;
+  b1.index = 1;
+  b1.base_kv = 0.4;
+  ACBus b2 = b1;
+  b2.index = 2;
+  sys.ac.buses = {b1, b2};
+  ACBranch branch;
+  branch.index = 1;
+  branch.from_bus = 1;
+  branch.to_bus = 2;
+  branch.length_km = 0.05;
+  branch.conductor_model = "BVV";
+  branch.cross_section_mm2 = 120.0;
+  branch.line_type = "低压架空线段";
+  branch.parameter_source = "cim_model_cross_section_estimate";
+  branch.parameters_inferred = true;
+  sys.ac.branches.push_back(branch);
+
+  const auto preview = complete_design_handbook_parameters(sys);
+  REQUIRE(preview.suggestions.size() == 1);
+  const auto& row = preview.suggestions.front();
+  CHECK(row.conductor_material == "copper");
+  CHECK(row.insulation == "PVC");
+  CHECK(row.model_type_conflict);
+  CHECK_FALSE(row.cross_section_inferred);
+  CHECK(row.confidence == "medium");
+  CHECK_THAT(row.new_r_ohm_per_km, WithinAbs(0.1830645, 1e-7));
+  CHECK_THAT(row.new_x_ohm_per_km, WithinAbs(0.35, 1e-12));
+  CHECK_FALSE(preview.warnings.empty());
+
+  auto inferred = sys;
+  inferred.ac.branches.front().conductor_model.clear();
+  inferred.ac.branches.front().cross_section_mm2 = 35.0;
+  inferred.ac.branches.front().cross_section_inferred = true;
+  const auto inferred_preview = complete_design_handbook_parameters(inferred);
+  REQUIRE(inferred_preview.suggestions.size() == 1);
+  CHECK(inferred_preview.suggestions.front().cross_section_inferred);
+  CHECK(inferred_preview.suggestions.front().confidence == "low");
+
+  inferred.ac.branches.front().cross_section_inferred = false;
+  const auto missing_model_preview =
+      complete_design_handbook_parameters(inferred);
+  REQUIRE(missing_model_preview.suggestions.size() == 1);
+  CHECK_FALSE(missing_model_preview.suggestions.front().cross_section_inferred);
+  CHECK(missing_model_preview.suggestions.front().confidence == "medium");
+}

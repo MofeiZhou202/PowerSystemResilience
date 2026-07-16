@@ -176,6 +176,23 @@
       <button id="btnIoSyncBackend" class="toolbar-btn" title="将当前画布同步到后端会话">同步画布</button>
       <span class="sub-hint">统一入口：输入、输出、模型标准兼容性集中在这里。</span>
     </div>
+    <div class="io-toolbar-group">
+      <div class="io-toolbar-group-title">手册参数</div>
+      <label class="sub-label">低压架空(mm²)
+        <input id="ioHandbookLvOverheadArea" type="number" value="35" min="1" step="1" style="width:58px"/>
+      </label>
+      <label class="sub-label">低压电缆(mm²)
+        <input id="ioHandbookLvCableArea" type="number" value="50" min="1" step="1" style="width:58px"/>
+      </label>
+      <label class="sub-label">中压(mm²)
+        <input id="ioHandbookMvArea" type="number" value="300" min="1" step="1" style="width:62px"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="允许设计手册值替换 CIM 导入器生成的估算阻抗，不覆盖厂家或用户参数">
+        <input id="ioHandbookOverwriteEstimates" type="checkbox" checked/><span>替换导入估算</span>
+      </label>
+      <button id="btnIoHandbookPreview" class="toolbar-btn run-btn" title="按 GB/T 3956、GB/T 12706 和 Schneider Electrical Installation Guide 扫描线路参数">扫描建议</button>
+      <button id="btnIoHandbookApply" class="toolbar-btn" title="应用手册建议，仅补齐缺失参数或替换 CIM 导入估算参数">应用补齐</button>
+    </div>
   </div>
   <!-- Standard component parameter profiles and model diagnostics -->
   <div class="sub-section parameter-library-sub-section" data-sub="parameterLibrary" hidden>

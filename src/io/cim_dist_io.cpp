@@ -699,6 +699,14 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
         ++inferred_other_conductors;
       }
     }
+    br.conductor_model = model;
+    br.cross_section_mm2 = effective_area;
+    br.cross_section_inferred = source_area <= 0.0;
+    br.line_type = psr_name;
+    br.parameters_inferred = source_area <= 0.0 || model.empty();
+    br.parameter_source = br.parameters_inferred
+                              ? "cim_geometry_estimate"
+                              : "cim_model_cross_section_estimate";
     const LineImpedance z =
         estimate_line_impedance(impedance_model, effective_area);
     br.r_ohm_per_km = z.r_ohm_per_km;
@@ -1593,11 +1601,16 @@ std::string to_cim_dist(const HybridPowerSystem& sys,
       const double zbase = (base_kv * base_kv) / sys.ac.base_mva;
       r_ohm_per_km = zbase > 0.0 ? (br.r_pu * zbase) / length_km : 0.0;
     }
-    const double area = r_ohm_per_km > 0.0 ? 18.5 / r_ohm_per_km : 0.0;
+    const double area = br.cross_section_mm2 > 0.0
+                            ? br.cross_section_mm2
+                            : (r_ohm_per_km > 0.0 ? 18.5 / r_ohm_per_km : 0.0);
     o << " <cim:ACLineSegment rdf:ID=\"" << id << "\">\n"
       << "  <cim:Naming.name>" << xml_escape(br.name) << "</cim:Naming.name>\n"
       << "  <cim:Conductor.length>" << (length_km * 1000.0)
       << "</cim:Conductor.length>\n";
+    if (!br.conductor_model.empty())
+      o << "  <cim:Equipment.model>" << xml_escape(br.conductor_model)
+        << "</cim:Equipment.model>\n";
     if (area > 0.0)
       o << "  <cim:Conductor.crossSectionArea>" << std::lround(area)
         << "</cim:Conductor.crossSectionArea>\n";
