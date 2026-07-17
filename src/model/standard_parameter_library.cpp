@@ -1146,7 +1146,10 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
     double area = branch.cross_section_mm2;
     const bool inferred_area = branch.cross_section_inferred ||
                                !(area > kMissing);
-    if (!(area > kMissing)) {
+    // An importer fallback is not authored geometry.  Re-evaluate it from the
+    // actual voltage class so models imported by older versions (which used an
+    // LV fallback on MV cable/overhead PSR types) are repaired in-place.
+    if (inferred_area) {
       area = base_kv > 1.0
                  ? options.default_mv_cross_section_mm2
                  : (overhead
@@ -1179,6 +1182,8 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
     const double zbase = base_kv * base_kv / base_mva;
     const double new_r_pu = resistance * branch.length_km / zbase;
     const double new_x_pu = reactance * branch.length_km / zbase;
+    const double new_rate_a_mva =
+        std::sqrt(3.0) * base_kv * (2.0 * area) / 1000.0;
 
     DesignHandbookLineSuggestion suggestion;
     suggestion.branch_index = branch.index;
@@ -1210,6 +1215,8 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
     suggestion.old_x_pu = branch.x_pu;
     suggestion.new_r_pu = new_r_pu;
     suggestion.new_x_pu = new_x_pu;
+    suggestion.old_rate_a_mva = branch.rate_a_mva;
+    suggestion.new_rate_a_mva = new_rate_a_mva;
     suggestion.cross_section_inferred = inferred_area;
     suggestion.model_type_conflict = model_type_conflict;
 
@@ -1221,7 +1228,9 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
     const bool any_change = changed(branch.r_ohm_per_km, resistance) ||
                             changed(branch.x_ohm_per_km, reactance) ||
                             changed(branch.r_pu, new_r_pu) ||
-                            changed(branch.x_pu, new_x_pu);
+                            changed(branch.x_pu, new_x_pu) ||
+                            changed(branch.rate_a_mva, new_rate_a_mva) ||
+                            changed(branch.cross_section_mm2, area);
     ++report.candidates;
     if (model_type_conflict) ++material_geometry_conflicts;
     if (model.empty()) ++missing_model_count;
@@ -1234,10 +1243,13 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
       if (changed(branch.x_ohm_per_km, reactance)) ++report.fields_changed;
       if (changed(branch.r_pu, new_r_pu)) ++report.fields_changed;
       if (changed(branch.x_pu, new_x_pu)) ++report.fields_changed;
+      if (changed(branch.rate_a_mva, new_rate_a_mva)) ++report.fields_changed;
+      if (changed(branch.cross_section_mm2, area)) ++report.fields_changed;
       branch.r_ohm_per_km = resistance;
       branch.x_ohm_per_km = reactance;
       branch.r_pu = new_r_pu;
       branch.x_pu = new_x_pu;
+      branch.rate_a_mva = new_rate_a_mva;
       branch.cross_section_mm2 = area;
       branch.cross_section_inferred = inferred_area;
       branch.parameter_source = "design_handbook_gbt3956_schneider_eig";

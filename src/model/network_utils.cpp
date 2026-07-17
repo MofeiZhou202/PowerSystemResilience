@@ -111,7 +111,7 @@ void add_equivalent_load_from_flexible(const FlexibleLoad& fl, ACSystem& ac, int
   ld.index = next_idx++;
   ld.bus = fl.bus;
   ld.in_service = true;
-  ld.name = fl.name.empty() ? ("FlexibleLoad_" + std::to_string(fl.index)) : (fl.name + "_eq");
+  ld.name = fl.name.empty() ? ("FlexibleLoad_" + std::to_string(fl.index)) : fl.name;
   ld.p_mw = fl.p_mw;
   ld.q_mvar = fl.q_mvar;
   ld.model = LoadModel::ConstantPower;
@@ -132,7 +132,7 @@ void add_equivalent_load_from_asymmetric(const AsymmetricLoad& al, ACSystem& ac,
   ld.index = next_idx++;
   ld.bus = al.bus;
   ld.in_service = true;
-  ld.name = al.name.empty() ? ("AsymmetricLoad_" + std::to_string(al.index)) : (al.name + "_eq");
+  ld.name = al.name.empty() ? ("AsymmetricLoad_" + std::to_string(al.index)) : al.name;
   const double s = (al.scaling > 0.0) ? al.scaling : 1.0;
   ld.p_mw = s * (al.pa_mw + al.pb_mw + al.pc_mw);
   ld.q_mvar = s * (al.qa_mvar + al.qb_mvar + al.qc_mvar);
@@ -197,7 +197,7 @@ void add_equivalent_branch_from_transformer2w(const Transformer2W& tr,
   br.shift_deg = tr.shift_deg;
   br.rate_a_mva = tr.sn_mva;
   br.in_service = true;
-  br.name = tr.name.empty() ? ("Transformer2W_" + std::to_string(tr.index)) : (tr.name + "_eq");
+  br.name = tr.name.empty() ? ("Transformer2W_" + std::to_string(tr.index)) : tr.name;
   if (tr.z0_percent > 0.0) {
     auto [r0_pu, x0_pu] =
         rx_from_z_percent_x_over_r(tr.z0_percent, tr.x0_r0, base_mva, tr.sn_mva);
@@ -356,7 +356,7 @@ void add_equivalent_branch_from_switch(const Switch& sw,
   br.from_bus = sw.bus_from;
   br.to_bus = sw.bus_to;
   br.in_service = sw.closed;
-  br.name = sw.name.empty() ? ("Switch_" + std::to_string(sw.index)) : (sw.name + "_eq");
+  br.name = sw.name.empty() ? ("Switch_" + std::to_string(sw.index)) : sw.name;
 
   const double kv = bus_base_kv_or_default(ac, sw.bus_from);
   const double z_base = (kv * kv) / std::max(1e-9, base_mva);
@@ -402,7 +402,7 @@ void add_equivalent_branch_from_circuit_breaker(const CircuitBreaker& cb,
   br.from_bus = cb.bus_from;
   br.to_bus = cb.bus_to;
   br.in_service = cb.closed;   // open 鈫?out-of-service branch (same as Switch)
-  br.name = cb.name.empty() ? ("CB_" + std::to_string(cb.index)) : (cb.name + "_eq");
+  br.name = cb.name.empty() ? ("CB_" + std::to_string(cb.index)) : cb.name;
 
   const double kv = bus_base_kv_or_default(ac, cb.bus_from);
   const double z_base = (kv * kv) / std::max(1e-9, base_mva);
@@ -441,7 +441,7 @@ void add_equivalent_load_from_motor(const AsynchronousMotor& m,
   ld.index = next_idx++;
   ld.bus = m.bus;
   ld.in_service = true;
-  ld.name = m.name.empty() ? ("Motor_" + std::to_string(m.index)) : (m.name + "_eq");
+  ld.name = m.name.empty() ? ("Motor_" + std::to_string(m.index)) : m.name;
 
   const double cos_phi = std::clamp(m.cos_phi, 0.01, 1.0);
   const double sin_phi = std::sqrt(std::max(0.0, 1.0 - cos_phi * cos_phi));
@@ -491,7 +491,7 @@ void add_equivalent_static_gen_from_vpp(const VirtualPowerPlant& vpp,
   sg.index      = next_idx++;
   sg.bus        = vpp.pcc_bus;
   sg.in_service = true;
-  sg.name       = vpp.name.empty() ? ("VPP_" + std::to_string(vpp.index)) : (vpp.name + "_eq");
+  sg.name       = vpp.name.empty() ? ("VPP_" + std::to_string(vpp.index)) : vpp.name;
   sg.sgen_type  = SgenType::Other;
 
   sg.p_mw      = vpp.p_output_mw;
@@ -530,7 +530,7 @@ void add_equivalent_static_gen_from_microgrid(const Microgrid& mg,
   sg.index      = next_idx++;
   sg.bus        = mg.pcc_bus;
   sg.in_service = true;
-  sg.name       = mg.name.empty() ? ("Microgrid_" + std::to_string(mg.index)) : (mg.name + "_eq");
+  sg.name       = mg.name.empty() ? ("Microgrid_" + std::to_string(mg.index)) : mg.name;
   sg.sgen_type  = SgenType::Other;
 
   // p_exchange_mw > 0 means export from microgrid 鈫?injection into main grid
@@ -566,7 +566,7 @@ void add_equivalent_storage_from_mobile_storage(const MobileStorage& ms,
   st.index      = next_idx++;
   st.bus        = ms.bus;
   st.in_service = true;
-  st.name       = ms.name.empty() ? ("MobileStorage_" + std::to_string(ms.index)) : (ms.name + "_eq");
+  st.name       = ms.name.empty() ? ("MobileStorage_" + std::to_string(ms.index)) : ms.name;
 
   st.p_mw      = ms.p_mw;
   st.q_mvar    = ms.q_mvar;
@@ -652,7 +652,7 @@ void project_three_phase_if_needed(HybridPowerSystem& out) {
     br.from_bus = line.from_bus;
     br.to_bus = line.to_bus;
     br.in_service = line.in_service;
-    br.name = line.name.empty() ? ("ThreePhaseLine_" + std::to_string(line.index)) : (line.name + "_eq");
+    br.name = line.name.empty() ? ("ThreePhaseLine_" + std::to_string(line.index)) : line.name;
     br.r_pu = line.r1_pu;
     br.x_pu = line.x1_pu;
     br.b_pu = line.b1_pu;
@@ -707,7 +707,7 @@ void project_three_phase_if_needed(HybridPowerSystem& out) {
     eq.index = next_ld++;
     eq.bus = ld.bus;
     eq.in_service = ld.in_service;
-    eq.name = ld.name.empty() ? ("ThreePhaseLoad_" + std::to_string(ld.index)) : (ld.name + "_eq");
+    eq.name = ld.name.empty() ? ("ThreePhaseLoad_" + std::to_string(ld.index)) : ld.name;
     eq.p_mw = ld.p_a_mw + ld.p_b_mw + ld.p_c_mw;
     eq.q_mvar = ld.q_a_mvar + ld.q_b_mvar + ld.q_c_mvar;
     eq.z_percent_p = ld.const_z_percent;
@@ -732,7 +732,7 @@ void project_three_phase_if_needed(HybridPowerSystem& out) {
     eq.bus = g.bus;
     eq.in_service = g.in_service;
     eq.is_slack = g.is_slack;
-    eq.name = g.name.empty() ? ("ThreePhaseGen_" + std::to_string(g.index)) : (g.name + "_eq");
+    eq.name = g.name.empty() ? ("ThreePhaseGen_" + std::to_string(g.index)) : g.name;
     eq.pg_mw = g.p_mw;
     eq.qg_mvar = g.q_mvar;
     eq.vg_pu = g.vm_pu;
@@ -758,7 +758,7 @@ void project_three_phase_if_needed(HybridPowerSystem& out) {
     eq.index = next_eg++;
     eq.bus = eg.bus;
     eq.in_service = eg.in_service;
-    eq.name = eg.name.empty() ? ("ThreePhaseExternalGrid_" + std::to_string(eg.index)) : (eg.name + "_eq");
+    eq.name = eg.name.empty() ? ("ThreePhaseExternalGrid_" + std::to_string(eg.index)) : eg.name;
     eq.vm_pu = eg.vm_pu;
     eq.va_deg = eg.va_deg;
     eq.s_sc_max_mva = eg.s_sc_max_mva;
@@ -2099,6 +2099,8 @@ static void project_in_place(HybridPowerSystem& out,
   ProjectionCertificate projection_certificate;
   projection_certificate.mode = options.mode;
   projection_certificate.impedance_threshold = options.impedance_threshold;
+  projection_certificate.switch_branches_preserved =
+      options.preserve_switch_branches;
   projection_certificate.n_authored_dc_buses =
       static_cast<int>(out.dc.buses.size());
   ProjectionReport projection_report;
@@ -2139,6 +2141,7 @@ static void project_in_place(HybridPowerSystem& out,
   if (out.projection_certificate.has_value()) {
     const auto& carried = *out.projection_certificate;
     if (carried.mode != options.mode ||
+        carried.switch_branches_preserved != options.preserve_switch_branches ||
         std::abs(carried.impedance_threshold - options.impedance_threshold) >
             1e-15) {
       throw std::invalid_argument(
@@ -2347,7 +2350,8 @@ static void project_in_place(HybridPowerSystem& out,
   // In either case the bus list is canonicalized to 1-based contiguous indices,
   // which every positional PF/OPF builder (index-1) relies on.
   merge_zero_impedance_buses_impl(out,
-                                  !switch_merge_branch_semantics.empty(),
+                                  !options.preserve_switch_branches &&
+                                      !switch_merge_branch_semantics.empty(),
                                   &switch_merge_branch_semantics,
                                   options.impedance_threshold,
                                   &projection_certificate);

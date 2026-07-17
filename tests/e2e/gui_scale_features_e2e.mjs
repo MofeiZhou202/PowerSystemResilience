@@ -341,7 +341,66 @@ async function main() {
     check(sub.nodes >= 3 && sub.edges >= 2, `sub-diagram drew ${sub.nodes} nodes / ${sub.edges} branches`);
     check(sub.stillHeadless === true && sub.glyphs === 0, 'sub-diagram leaves headless state untouched');
 
-    // ---- 4a) The 439-bus distribution CIM fixture must stay out of the full
+    // ---- 4a) A rendered import must retain authored physical names when the
+    // canvas rebuilds the system JSON for a backend sync.
+    const cimNames = await page.evaluate(() => {
+      const system = {
+        name: '物理名称往返', base_mva: 10,
+        ac: {
+          buses: [
+            { index: 1, name: '站内一段母线', bus_type: 'SLACK', base_kv: 10 },
+            { index: 2, name: '人民路环网节点', bus_type: 'PQ', base_kv: 10 },
+            { index: 3, name: '台区低压母线', bus_type: 'PQ', base_kv: 0.4 },
+          ],
+          branches: [
+            { index: 11, name: '人民路一回线', from_bus: 1, to_bus: 2,
+              r_pu: 0.01, x_pu: 0.02, b_pu: 0, rate_a_mva: 5, in_service: true },
+          ],
+          transformers_2w: [
+            { index: 21, name: '人民路#1配变', hv_bus: 2, lv_bus: 3,
+              sn_mva: 0.4, vn_hv_kv: 10, vn_lv_kv: 0.4,
+              vk_percent: 4, vkr_percent: 1, in_service: true },
+          ],
+          switches: [
+            { index: 31, name: '人民路01T01刀闸', bus_from: 1, bus_to: 2,
+              switch_type: 'Disconnector', closed: true, in_service: true },
+          ],
+          circuit_breakers: [
+            { index: 41, name: '人民路进线断路器', bus_from: 1, bus_to: 2,
+              closed: true, in_service: true },
+          ],
+          loads: [{ index: 51, name: '人民路居民负荷', bus: 3, p_mw: 0.2, q_mvar: 0.05 }],
+          generators: [{ index: 61, name: '站内备用电源', bus: 1, pg_mw: 0, qg_mvar: 0 }],
+        },
+        dc: { buses: [], branches: [], loads: [] },
+      };
+      Canvas.loadFromSystemJson(system, { forceRender: true });
+      const roundTrip = Canvas.buildSystemJson();
+      return {
+        buses: roundTrip.ac.buses.map((item) => item.name),
+        branches: roundTrip.ac.branches.map((item) => item.name),
+        transformers: roundTrip.ac.transformers_2w.map((item) => item.name),
+        switches: roundTrip.ac.switches.map((item) => item.name),
+        breakers: roundTrip.ac.circuit_breakers.map((item) => item.name),
+        loads: roundTrip.ac.loads.map((item) => item.name),
+        generators: roundTrip.ac.generators.map((item) => item.name),
+      };
+    });
+    check(cimNames.buses.join('|') === '站内一段母线|人民路环网节点|台区低压母线',
+      'CIM bus physical names survive canvas round-trip');
+    check(cimNames.branches.includes('人民路一回线'),
+      'CIM line physical name survives canvas round-trip');
+    check(cimNames.transformers.includes('人民路#1配变'),
+      'CIM transformer physical name survives canvas round-trip');
+    check(cimNames.switches.includes('人民路01T01刀闸'),
+      'CIM switch physical name survives canvas round-trip');
+    check(cimNames.breakers.includes('人民路进线断路器'),
+      'CIM breaker physical name survives canvas round-trip');
+    check(cimNames.loads.includes('人民路居民负荷') &&
+          cimNames.generators.includes('站内备用电源'),
+      'CIM load and source physical names survive canvas round-trip');
+
+    // ---- 4b) The 439-bus distribution CIM fixture must stay out of the full
     // SVG path. It previously rendered ~919 glyphs/connections and could freeze
     // the browser before viewport culling had a chance to run.
     const cimXml = readFileSync(CIM_TEST_XML, 'utf8');

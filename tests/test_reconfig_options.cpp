@@ -2,6 +2,8 @@
 // bridges) and individual G4 (voltage) / G5 (thermal) constraint toggles.
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/network_reconfiguration/topology_reconfiguration.hpp"
 
@@ -119,4 +121,122 @@ TEST_CASE("Loss-aware objective keeps a needed tie closed", "[reconfig_opts]") {
   auto r = run_topology_reconfiguration(s, opt);
   CHECK(r.feasible);
   CHECK(r.closed_branches.size() == 2);  // both lines needed to feed the load
+}
+
+TEST_CASE("Fuse is never an immediate topology restoration candidate",
+          "[reconfig_opts][device_constraints]") {
+  HybridPowerSystem s;
+  s.base_mva = s.ac.base_mva = 10.0;
+  ACBus b1; b1.index = 1; b1.bus_type = BusType::SLACK; b1.base_kv = 10.0;
+  ACBus b2 = b1; b2.index = 2; b2.bus_type = BusType::PQ;
+  ACBus b3 = b2; b3.index = 3;
+  s.ac.buses = {b1, b2, b3};
+  ACBranch feeder; feeder.index = 1; feeder.from_bus = 1; feeder.to_bus = 2;
+  feeder.in_service = true; feeder.r_pu = 0.001; feeder.x_pu = 0.001;
+  feeder.rate_a_mva = 10.0; s.ac.branches = {feeder};
+  ExternalGrid grid; grid.index = 1; grid.bus = 1; grid.in_service = true;
+  grid.s_sc_max_mva = 100.0; s.ac.external_grids = {grid};
+  Load load; load.index = 1; load.bus = 3; load.p_mw = 0.5;
+  load.in_service = true; s.ac.loads = {load};
+  Switch fuse; fuse.index = 10; fuse.bus_from = 2; fuse.bus_to = 3;
+  fuse.closed = false; fuse.normal_closed = false;
+  fuse.switch_type = SwitchType::Fuse; fuse.role = SwitchRole::Protection;
+  fuse.capabilities = effective_switch_capabilities(fuse);
+  fuse.capabilities_explicit = true; s.ac.switches = {fuse};
+
+  TopoReconfOptions opt; opt.enable_pf = true; opt.skip_heuristic = true;
+  // The switch equivalent follows physical branch #1 as canonical branch #2.
+  // Explicit caller authorization must still not bypass fuse safety policy.
+  opt.switchable_branches = {{graph::EdgeCategory::AC_Line, 2}};
+  const auto result = run_topology_reconfiguration(s, opt);
+
+  REQUIRE(result.feasible);
+  CHECK(result.total_shed_mw > 0.49);
+  CHECK(std::none_of(result.switch_operations.begin(),
+                     result.switch_operations.end(), [](const auto& action) {
+                       return action.kind == TopoReconfResult::DeviceKind::Switch &&
+                              action.index == 10;
+                     }));
+  CHECK(result.validity.device_capability_constraints_enforced);
+}
+
+TEST_CASE("Capable tie switch restores load with a validated direct action",
+          "[reconfig_opts][device_constraints]") {
+  HybridPowerSystem s;
+  s.base_mva = s.ac.base_mva = 10.0;
+  ACBus b1; b1.index = 1; b1.bus_type = BusType::SLACK; b1.base_kv = 10.0;
+  ACBus b2 = b1; b2.index = 2; b2.bus_type = BusType::PQ;
+  s.ac.buses = {b1, b2};
+  ExternalGrid grid; grid.index = 1; grid.bus = 1; grid.in_service = true;
+  grid.s_sc_max_mva = 100.0; s.ac.external_grids = {grid};
+  Load load; load.index = 1; load.bus = 2; load.p_mw = 0.5;
+  load.in_service = true; s.ac.loads = {load};
+  Switch tie; tie.index = 11; tie.bus_from = 1; tie.bus_to = 2;
+  tie.closed = false; tie.normal_closed = false;
+  tie.switch_type = SwitchType::LoadBreakSwitch; tie.role = SwitchRole::Tie;
+  tie.capabilities = effective_switch_capabilities(tie);
+  tie.capabilities_explicit = true; s.ac.switches = {tie};
+
+  TopoReconfOptions opt; opt.enable_pf = true; opt.skip_heuristic = true;
+  const auto result = run_topology_reconfiguration(s, opt);
+
+  REQUIRE(result.feasible);
+  CHECK(result.total_shed_mw < 1e-8);
+  REQUIRE(result.ordered_switch_actions.size() == 1);
+  CHECK(result.ordered_switch_actions.front().index == 11);
+  CHECK(result.ordered_switch_actions.front().action == "close");
+  CHECK(result.switch_sequence_valid);
+}
+
+TEST_CASE("Isolation switch operation is ordered behind upstream protection",
+          "[reconfig_opts][device_constraints][interlock]") {
+  HybridPowerSystem s;
+  s.base_mva = s.ac.base_mva = 10.0;
+  ACBus b1; b1.index = 1; b1.bus_type = BusType::SLACK; b1.base_kv = 10.0;
+  ACBus b2 = b1; b2.index = 2; b2.bus_type = BusType::PQ;
+  ACBus b3 = b2; b3.index = 3;
+  s.ac.buses = {b1, b2, b3};
+  ExternalGrid grid; grid.index = 1; grid.bus = 1; grid.in_service = true;
+  grid.s_sc_max_mva = 100.0; s.ac.external_grids = {grid};
+  Load load; load.index = 1; load.bus = 3; load.p_mw = 0.5;
+  load.in_service = true; s.ac.loads = {load};
+  Switch breaker; breaker.index = 20; breaker.bus_from = 1; breaker.bus_to = 2;
+  breaker.closed = true; breaker.switch_type = SwitchType::CircuitBreaker;
+  breaker.role = SwitchRole::Protection;
+  breaker.capabilities = effective_switch_capabilities(breaker);
+  breaker.capabilities_explicit = true;
+  Switch isolator; isolator.index = 21; isolator.bus_from = 2; isolator.bus_to = 3;
+  isolator.closed = false; isolator.normal_closed = false;
+  isolator.switch_type = SwitchType::Disconnector;
+  isolator.role = SwitchRole::Isolation;
+  isolator.upstream_protective_switch_index = 20;
+  isolator.capabilities = effective_switch_capabilities(isolator);
+  isolator.capabilities_explicit = true;
+  s.ac.switches = {breaker, isolator};
+
+  TopoReconfOptions opt; opt.enable_pf = true; opt.skip_heuristic = true;
+  const auto result = run_topology_reconfiguration(s, opt);
+
+  REQUIRE(result.feasible);
+  CHECK(result.total_shed_mw < 1e-8);
+  REQUIRE(result.ordered_switch_actions.size() == 3);
+  CHECK(result.ordered_switch_actions[0].index == 20);
+  CHECK(result.ordered_switch_actions[0].action == "open");
+  CHECK(result.ordered_switch_actions[1].index == 21);
+  CHECK(result.ordered_switch_actions[1].action == "close");
+  CHECK(result.ordered_switch_actions[2].index == 20);
+  CHECK(result.ordered_switch_actions[2].action == "reclose");
+  CHECK(result.switch_sequence_valid);
+  CHECK(result.validity.protection_interlocks_enforced);
+
+  TopoReconfOptions constrained = opt;
+  constrained.max_switch_ops = 2;
+  const auto budgeted = run_topology_reconfiguration(s, constrained);
+  REQUIRE(budgeted.feasible);
+  CHECK(budgeted.total_shed_mw > 0.49);
+  CHECK(std::none_of(budgeted.switch_operations.begin(),
+                     budgeted.switch_operations.end(), [](const auto& action) {
+                       return action.kind == TopoReconfResult::DeviceKind::Switch &&
+                              action.index == 21;
+                     }));
 }

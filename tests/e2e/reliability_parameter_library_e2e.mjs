@@ -59,6 +59,38 @@ async function main() {
       throw new Error(`reliability data remains empty after apply: ${JSON.stringify(after)}`);
     }
 
+    const reconfiguration = await post(base, '/api/session/run_reconfig', {
+      options: {
+        enable_pf: true,
+        enable_voltage: true,
+        enable_thermal: true,
+        loss_aware: true,
+        lambda_shed: 1e4,
+        lambda_island: 1e5,
+        max_time_s: 60,
+        solver: 'auto',
+      },
+    });
+    if (!reconfiguration.milp_feasible) {
+      throw new Error('test.xml reconfiguration MILP candidate is infeasible');
+    }
+    if ((reconfiguration.switch_operations || []).some(operation =>
+      operation.kind === 'switch' && Number(operation.index) === 139)) {
+      throw new Error('topology reconfiguration illegally operated fuse 139');
+    }
+    if (!reconfiguration.switch_sequence_valid ||
+        !reconfiguration.validity?.device_capability_constraints_enforced ||
+        !reconfiguration.validity?.protection_interlocks_enforced ||
+        !reconfiguration.validity?.post_action_reprojection_validated ||
+        !reconfiguration.reconfig_pf_converged ||
+        !reconfiguration.opf_converged) {
+      throw new Error(`reconfiguration validation contract failed: ${JSON.stringify(reconfiguration.validity)}`);
+    }
+    if (reconfiguration.zero_load_loss_valid ||
+        Math.abs(Number(reconfiguration.total_shed_mw) - 0.144) > 1e-6) {
+      throw new Error(`invalid zero-loss claim for fuse-isolated load: ${reconfiguration.total_shed_mw}`);
+    }
+
     const system = JSON.parse(applied._raw_json);
     const branches = system.ac?.branches || [];
     const totalLengthKm = branches.reduce((sum, branch) => sum + Number(branch.length_km || 0), 0);
@@ -167,6 +199,10 @@ async function main() {
       nsq_baseline_eens_mwh_per_year: nsqBaseline,
       nsq_raw_eens_mwh_per_year: nsqRaw,
       nsq_model_scope: nsq.model_scope,
+      reconfiguration_executable: reconfiguration.executable,
+      reconfiguration_shed_mw: reconfiguration.total_shed_mw,
+      reconfiguration_zero_loss_valid: reconfiguration.zero_load_loss_valid,
+      fuse_139_operated: false,
       headless_mapping: `${mappedFault.source.bucket}:${mappedFault.item.index}`,
       original_xml_unchanged: true,
     }, null, 2));

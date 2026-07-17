@@ -7273,12 +7273,13 @@ const App = (() => {
     });
 
     if (data) {
-      if (data.feasible !== false) {
+      if (data.milp_feasible !== false) {
         const baseLoss = data.base_loss_mw?.toFixed(4) || '?';
         const reconLoss = data.reconfig_loss_mw?.toFixed(4) || '?';
         const redPct = data.loss_reduction_pct?.toFixed(1) || '0';
-        log(`拓扑重构完成: 重构前损耗=${baseLoss}MW, 重构后损耗=${reconLoss}MW, 降低${redPct}%, ` +
-            `辐射状=${data.reconfig_is_radial ? '是' : '否'}, 连通=${data.reconfig_is_connected ? '是' : '否'}`, 'success');
+        log(`拓扑重构候选: 重构前损耗=${baseLoss}MW, 重构后损耗=${reconLoss}MW, 降低${redPct}%, ` +
+            `辐射状=${data.reconfig_is_radial ? '是' : '否'}, 连通=${data.reconfig_is_connected ? '是' : '否'}`,
+            data.executable ? 'success' : 'warn');
         const ops = data.switch_operations || [];
         const ot = data.obj_terms || {};
         log(`目标分解: 损耗=${(ot.loss||0).toFixed(3)} 开关=${(ot.switching||0).toFixed(0)} 切负荷=${(ot.shed||0).toFixed(1)} 孤岛=${(ot.island||0).toFixed(0)} | 校验 PF=${data.reconfig_pf_converged?'✓':'✗'} OPF=${data.opf_converged?'✓':'✗'}(obj=${(data.opf_objective||0).toFixed(1)})`, 'info');
@@ -7289,7 +7290,12 @@ const App = (() => {
           const desc = ops.map(o => `${o.kind === 'circuit_breaker' ? '断路器' : (o.kind === 'switch' ? '开关' : '支路')}#${o.index}:${o.close ? '合' : '分'}`).join(', ');
           log(`联络开关/断路器操作 (${ops.length}): ${desc}`, 'info');
         }
-        setStatus('拓扑重构完成');
+        if (data.executable) {
+          setStatus('拓扑重构完成');
+        } else {
+          log(`重构候选不可执行: ${data.validation_message || data.switch_sequence_message || '联合校验未通过'}`, 'warn');
+          setStatus('重构候选未通过校验', 'error');
+        }
       } else {
         log(`拓扑重构: 未找到可行解${data.solver_status ? ` (${data.solver_status})` : ''}`, 'warn');
         setStatus('不可行', 'error');
@@ -11215,9 +11221,12 @@ const App = (() => {
     const lossCls = lossRed > 0.001 ? 'result-converged' : (lossRed < -0.001 ? 'result-failed' : '');
 
     summary.innerHTML = `
-      <div class="result-item"><span class="result-label">可行</span>
-        <span class="result-value ${data.feasible !== false ? 'result-converged' : 'result-failed'}">
-          ${data.feasible !== false ? '✓ 是' : '✗ 否'}</span></div>
+      <div class="result-item"><span class="result-label">MILP候选</span>
+        <span class="result-value ${data.milp_feasible !== false ? 'result-converged' : 'result-failed'}">
+          ${data.milp_feasible !== false ? '✓ 可行' : '✗ 不可行'}</span></div>
+      <div class="result-item"><span class="result-label">物理可执行</span>
+        <span class="result-value ${data.executable ? 'result-converged' : 'result-failed'}">
+          ${data.executable ? '✓ 是' : '✗ 否'}</span></div>
       <div class="result-item"><span class="result-label">求解器</span>
         <span class="result-value">${data.solver_name || 'N/A'}</span></div>
       <div class="result-item"><span class="result-label">MILP目标值</span>
@@ -11232,9 +11241,9 @@ const App = (() => {
       <div class="result-item"><span class="result-label">时步数</span>
         <span class="result-value">${data.num_steps || 'N/A'}</span></div>
       <div class="result-item"><span class="result-label">开关操作</span>
-        <span class="result-value">闭合 ${totalSwOn} / 断开 ${totalSwOff}</span></div>
+        <span class="result-value">拓扑闭合 ${totalSwOn} / 断开 ${totalSwOff}，设备动作 ${Number(data.device_action_count || 0)}</span></div>
       <div class="result-item"><span class="result-label">负荷削减(MW)</span>
-        <span class="result-value ${(data.total_shed_mw || 0) > 1e-6 ? 'result-failed' : 'result-converged'}">${Number(data.total_shed_mw || 0).toFixed(4)}</span></div>
+        <span class="result-value ${(data.total_shed_mw || 0) > 1e-6 || !data.zero_load_loss_valid ? 'result-failed' : 'result-converged'}">${Number(data.total_shed_mw || 0).toFixed(4)}${Number(data.total_shed_mw || 0) <= 1e-6 && !data.zero_load_loss_valid ? '（未通过校验）' : ''}</span></div>
       <div class="result-item"><span class="result-label">弃风弃光(MW)</span>
         <span class="result-value">${totalCurt.toFixed(2)}</span></div>
     `;
@@ -11270,6 +11279,9 @@ const App = (() => {
     html += `<tr><td>潮流收敛</td>
       <td>${data.base_pf_converged ? '✓ 收敛' : '✗'}</td>
       <td>${data.reconfig_pf_converged ? '✓ 收敛' : '✗'}</td></tr>`;
+    html += `<tr><td>动作序列校验</td><td>—</td><td class="${data.switch_sequence_valid ? 'grade-green' : 'grade-red'}">${data.switch_sequence_valid ? '✓ 通过' : '✗ 未通过'}</td></tr>`;
+    html += `<tr><td>富模型重新投影</td><td>—</td><td class="${data.validity?.post_action_reprojection_validated ? 'grade-green' : 'grade-red'}">${data.validity?.post_action_reprojection_validated ? '✓ 通过' : '✗ 未通过'}</td></tr>`;
+    html += `<tr><td>OPF校验</td><td>—</td><td class="${data.opf_converged ? 'grade-green' : 'grade-red'}">${data.opf_converged ? '✓ 通过' : '✗ 未通过'}</td></tr>`;
     html += `<tr><td>有功损耗(MW)</td>
       <td>${data.base_pf_converged ? baseLoss.toFixed(4) : '—'}</td>
       <td>${data.reconfig_pf_converged ? reconLoss.toFixed(4) : '—'}</td></tr>`;
@@ -11286,6 +11298,19 @@ const App = (() => {
     }
     if (data.closed_branch_ids && data.closed_branch_ids.length > 0) {
       html += `<p><strong>闭合支路 (最终):</strong> [${makeBrLinks(data.closed_branch_ids).join(', ')}]</p>`;
+    }
+    if (Array.isArray(data.ordered_switch_actions) && data.ordered_switch_actions.length) {
+      html += '<h4 style="margin:12px 0 6px;">有序设备动作</h4>';
+      html += '<table class="result-table"><thead><tr><th>顺序</th><th>设备</th><th>动作</th><th>依据</th></tr></thead><tbody>';
+      for (const action of data.ordered_switch_actions) {
+        const device = action.kind === 'circuit_breaker' ? '断路器' :
+          (action.kind === 'switch' ? '开关' : '支路');
+        const operation = action.action === 'open' ? '分闸' :
+          (action.action === 'reclose' ? '重合闸' :
+            (action.action === 'replace' ? '更换' : '合闸'));
+        html += `<tr><td>${action.order}</td><td>${device} #${action.index}</td><td>${operation}</td><td>${escapeHtml(action.reason || '')}</td></tr>`;
+      }
+      html += '</tbody></table>';
     }
 
     // Detailed branch status table — show which lines are open/closed with from/to bus
@@ -11701,7 +11726,7 @@ const App = (() => {
     // Bus table (always shown)
     fillTable('#busTableInner', null, sys.ac.buses, m.ac, bus => {
       const ld = busLoad[bus.index] || { p: bus.pd_mw, q: bus.qd_mvar };
-      return `<td>${bus.index}</td><td>${bus.bus_type}</td>
+      return `<td>${bus.index}</td><td>${escapeHtml(bus.name || '')}</td><td>${bus.bus_type}</td>
         <td>${bus.vm_pu.toFixed(4)}</td><td>${bus.va_deg.toFixed(2)}</td>
         <td>${ld.p.toFixed(2)}</td><td>${ld.q.toFixed(2)}</td>
         <td>${bus.base_kv}</td>`;
@@ -11717,7 +11742,7 @@ const App = (() => {
     // Generator table (always shown). Pg/Qg/Vg/Pmax/Pmin cells are editable
     // (double-click) and commit straight to the backend session.
     fillTable('#genTableInner', null, sys.ac.generators, m.gen, gen =>
-      `<td>${gen.bus}</td><td data-edit-field="pg_mw" data-edit-type="number">${gen.pg_mw}</td>
+      `<td>${escapeHtml(gen.name || '')}</td><td>${gen.bus}</td><td data-edit-field="pg_mw" data-edit-type="number">${gen.pg_mw}</td>
         <td data-edit-field="qg_mvar" data-edit-type="number">${gen.qg_mvar}</td><td data-edit-field="vg_pu" data-edit-type="number">${gen.vg_pu}</td>
         <td data-edit-field="pmax_mw" data-edit-type="number">${gen.pmax_mw}</td><td data-edit-field="pmin_mw" data-edit-type="number">${gen.pmin_mw}</td>
         <td>${carbonFactorDisplay(gen.emission_factor_tco2_mwh || gen.co2_emission_rate || 0).toFixed(1)}</td>
@@ -11725,16 +11750,16 @@ const App = (() => {
 
     // Load table. P/Q/Scaling cells are editable (double-click).
     fillTable('#loadTableInner', 'loadSection', sys.ac.loads, m.load, ld =>
-      `<td>${ld.bus}</td><td data-edit-field="p_mw" data-edit-type="number">${ld.p_mw}</td><td data-edit-field="q_mvar" data-edit-type="number">${ld.q_mvar}</td><td data-edit-field="scaling" data-edit-type="number">${ld.scaling}</td>`, 'loadTableInner');
+      `<td>${escapeHtml(ld.name || '')}</td><td>${ld.bus}</td><td data-edit-field="p_mw" data-edit-type="number">${ld.p_mw}</td><td data-edit-field="q_mvar" data-edit-type="number">${ld.q_mvar}</td><td data-edit-field="scaling" data-edit-type="number">${ld.scaling}</td>`, 'loadTableInner');
 
     // Transformer table (non-from_branch only)
     fillTable('#trafoTableInner', 'trafoSection', sys.ac.transformers_2w, m.trafo, t =>
-      `<td>${t.hv_bus}</td><td>${t.lv_bus}</td><td>${t.sn_mva}</td>
+      `<td>${escapeHtml(t.name || '')}</td><td>${t.hv_bus}</td><td>${t.lv_bus}</td><td>${t.sn_mva}</td>
         <td>${t.vk_percent}</td><td>${t.shift_deg}</td>`);
 
     // External Grid
     fillTable('#extGridTableInner', 'extGridSection', sys.ac.external_grids, m.extGrid, eg =>
-      `<td>${eg.bus}</td><td>${eg.vm_pu}</td><td>${eg.va_deg}</td><td>${eg.s_sc_max_mva}</td>
+      `<td>${escapeHtml(eg.name || '')}</td><td>${eg.bus}</td><td>${eg.vm_pu}</td><td>${eg.va_deg}</td><td>${eg.s_sc_max_mva}</td>
         <td>${carbonFactorDisplay(eg.emission_factor_tco2_mwh || eg.co2_emission_rate || 0).toFixed(1)}</td>`);
 
     // Storage
@@ -11759,11 +11784,11 @@ const App = (() => {
 
     // Switch
     fillTable('#switchTableInner', 'switchSection', sys.ac.switches, m.sw, sw =>
-      `<td>${sw.bus_from}</td><td>${sw.bus_to}</td><td>${sw.closed ? '✓' : '✗'}</td>`);
+      `<td>${escapeHtml(sw.name || '')}</td><td>${sw.bus_from}</td><td>${sw.bus_to}</td><td>${sw.closed ? '✓' : '✗'}</td>`);
 
     // Circuit Breaker
     fillTable('#cbTableInner', 'cbSection', sys.ac.circuit_breakers, m.cb, cb =>
-      `<td>${cb.bus_from}</td><td>${cb.bus_to}</td><td>${cb.closed ? '✓' : '✗'}</td><td>${cb.rated_current_ka}</td>`);
+      `<td>${escapeHtml(cb.name || '')}</td><td>${cb.bus_from}</td><td>${cb.bus_to}</td><td>${cb.closed ? '✓' : '✗'}</td><td>${cb.rated_current_ka}</td>`);
 
     // Motor
     fillTable('#motorTableInner', 'motorSection', sys.ac.motors, m.motor, mt =>

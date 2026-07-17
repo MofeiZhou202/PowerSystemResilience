@@ -685,7 +685,21 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
     double effective_area = source_area;
     std::string impedance_model = model;
     if (effective_area <= 0.0) {
-      if (contains(psr_name, "架空")) {
+      // Voltage class takes precedence over construction type.  The old
+      // ordering assigned the LV 35/50 mm2 fallbacks to every object whose
+      // PSR type said overhead/cable, including 10 kV feeders.  That produced
+      // false thermal bottlenecks and normal-state load shedding.
+      if (base_kv > 1.0) {
+        effective_area = opts.default_mv_cross_section_mm2;
+        if (contains(psr_name, "架空")) {
+          impedance_model += " JKLYJ";  // aluminium overhead fallback
+          ++inferred_overhead_conductors;
+        } else if (contains(psr_name, "电缆")) {
+          ++inferred_cable_conductors;
+        } else {
+          ++inferred_other_conductors;
+        }
+      } else if (contains(psr_name, "架空")) {
         effective_area = opts.default_lv_overhead_cross_section_mm2;
         impedance_model += " JKLYJ";  // aluminium overhead fallback
         ++inferred_overhead_conductors;
@@ -693,9 +707,7 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
         effective_area = opts.default_lv_cable_cross_section_mm2;
         ++inferred_cable_conductors;
       } else {
-        effective_area = base_kv > 1.0
-                             ? opts.default_mv_cross_section_mm2
-                             : opts.default_lv_overhead_cross_section_mm2;
+        effective_area = opts.default_lv_overhead_cross_section_mm2;
         ++inferred_other_conductors;
       }
     }

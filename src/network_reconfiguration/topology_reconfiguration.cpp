@@ -189,6 +189,7 @@ TopoReconfResult run_topology_reconfiguration(
   // the MILP's connectivity + slack-shed terms decide which stay energised.
   ProjectionOptions projection_options;
   projection_options.strip_dead_islands = false;
+  projection_options.preserve_switch_branches = true;
   const HybridPowerSystem proj =
       projection::RichToCanonicalOperator::apply(sys, projection_options)
           .canonical;
@@ -211,6 +212,8 @@ TopoReconfResult run_topology_reconfiguration(
   result.model_scope = opt.enable_pf ? "hybrid-acdc-topology-lindistflow"
                                      : "hybrid-acdc-topology-connectivity";
   result.validity.radial_topology_enforced = true;
+  result.validity.device_capability_constraints_enforced = true;
+  result.validity.protection_interlocks_enforced = true;
   result.validity.ac_lindistflow_enforced = opt.enable_pf;
   result.validity.dc_network_modelled = nb_dc > 0;
   result.validity.vsc_active_transfer_modelled = nl_vsc > 0;
@@ -249,7 +252,67 @@ TopoReconfResult run_topology_reconfiguration(
   std::vector<double> edge_rate(nl + nl_vsc, 0.0);
   std::vector<bool> edge_status(nl + nl_vsc, true);  // α (initial in_service)
   std::vector<bool> edge_switchable(nl + nl_vsc, false);
+  std::vector<int> edge_operation_cost(nl + nl_vsc, 1);
   std::vector<int> edge_orig_idx(nl + nl_vsc, -1);
+
+  // Canonical AC branches retain rich-device provenance under the
+  // reconfiguration projection. Device capability constraints override even
+  // an explicitly requested switchable branch: callers cannot authorize a
+  // fuse close or bypass a lock/interlock by passing a branch ID.
+  std::unordered_map<int, BranchExpandEntry> origin_by_branch;
+  if (proj.branch_expand_map) {
+    for (const auto& entry : proj.branch_expand_map->entries)
+      origin_by_branch[entry.branch_index] = entry;
+  }
+  std::unordered_map<int, const Switch*> rich_switch_by_index;
+  for (const auto& sw : sys.ac.switches)
+    rich_switch_by_index[sw.index] = &sw;
+  std::unordered_map<int, const CircuitBreaker*> rich_breaker_by_index;
+  for (const auto& breaker : sys.ac.circuit_breakers)
+    rich_breaker_by_index[breaker.index] = &breaker;
+
+  auto valid_upstream_protection = [&](const Switch& sw) {
+    if (sw.upstream_protective_switch_index < 0) return false;
+    const auto upstream = rich_switch_by_index.find(
+        sw.upstream_protective_switch_index);
+    if (upstream == rich_switch_by_index.end() || !upstream->second->in_service)
+      return false;
+    const auto& device = *upstream->second;
+    if (device.switch_type == SwitchType::Fuse || device.locked_open)
+      return false;
+    const auto caps = effective_switch_capabilities(device);
+    return caps.can_interrupt_fault_current || caps.can_interrupt_load_current;
+  };
+
+  auto rich_switch_change_allowed = [&](const Switch& sw) {
+    if (!sw.in_service || sw.switch_type == SwitchType::Fuse) return false;
+    const auto caps = effective_switch_capabilities(sw);
+    if (sw.closed) {
+      if (sw.locked_closed) return false;
+      if (caps.requires_deenergized_operation)
+        return valid_upstream_protection(sw);
+      return caps.can_interrupt_load_current ||
+             caps.can_interrupt_fault_current;
+    }
+    if (sw.locked_open) return false;
+    if (caps.requires_deenergized_operation)
+      return valid_upstream_protection(sw);
+    const bool supported_closing_device =
+        sw.role == SwitchRole::Tie ||
+        sw.switch_type == SwitchType::CircuitBreaker ||
+        sw.switch_type == SwitchType::Recloser ||
+        sw.switch_type == SwitchType::LoadBreakSwitch;
+    return caps.can_close_for_restoration && supported_closing_device;
+  };
+
+  auto rich_switch_operation_cost = [&](const Switch& sw) {
+    const auto caps = effective_switch_capabilities(sw);
+    if (!caps.requires_deenergized_operation) return 1;
+    // Conservative transient sequence budget: upstream trip, isolation-device
+    // operation, upstream reclose. This remains safe when the final topology
+    // leaves the upstream protector open (the actual sequence then uses fewer).
+    return 3;
+  };
 
   const bool has_explicit_switchables = !opt.switchable_branches.empty() ||
                                         !opt.switchable_branch_ids.empty();
@@ -296,7 +359,36 @@ TopoReconfResult run_topology_reconfiguration(
     edge_rate[i]     = (br.rate_a_mva > 1e-9) ? br.rate_a_mva / base_mva : default_rate_pu;
     edge_status[i]   = br.in_service;
     edge_orig_idx[i] = br.index;
-    edge_switchable[i] = has_explicit_switchables ? is_explicit_ac_switchable(br.index) : !br.in_service;
+    const bool requested = has_explicit_switchables
+                               ? is_explicit_ac_switchable(br.index)
+                               : !br.in_service;
+    const auto origin = origin_by_branch.find(br.index);
+    if (origin == origin_by_branch.end()) {
+      // Backward-compatible physical/legacy branch ties remain opt-in (or are
+      // auto-detected when authored out of service).
+      edge_switchable[i] = requested;
+    } else if (origin->second.origin_type == BranchOriginType::Switch) {
+      const auto rich = rich_switch_by_index.find(origin->second.origin_index);
+      const bool device_requested = has_explicit_switchables
+                                        ? requested
+                                        : true;
+      edge_switchable[i] = device_requested &&
+          rich != rich_switch_by_index.end() &&
+          rich_switch_change_allowed(*rich->second);
+      if (rich != rich_switch_by_index.end())
+        edge_operation_cost[i] = rich_switch_operation_cost(*rich->second);
+    } else if (origin->second.origin_type ==
+               BranchOriginType::CircuitBreaker) {
+      const auto rich = rich_breaker_by_index.find(origin->second.origin_index);
+      const bool device_requested = has_explicit_switchables
+                                        ? requested
+                                        : true;
+      edge_switchable[i] = device_requested &&
+          rich != rich_breaker_by_index.end() && rich->second->in_service;
+    } else {
+      // Transformers are never switching decisions in topology restoration.
+      edge_switchable[i] = false;
+    }
   }
   for (int i = 0; i < nl_dc; ++i) {
     const auto& br = dc.branches[i];
@@ -531,6 +623,57 @@ TopoReconfResult run_topology_reconfiguration(
     }
     return result;
   }
+
+  // A currently de-energized section may remain an island with all demand
+  // shed when no legal action is available or the operation budget is too
+  // small. Add a zero-capacity topology root to every current closed-edge
+  // component without a real source. Eligible ties can still connect that
+  // component and drive its pseudo-root gamma to zero. The pseudo root supplies
+  // fictitious connectivity only: Pg/Qg remain fixed at zero, so power balance
+  // enforces full shedding whenever the component remains isolated.
+  {
+    std::vector<std::vector<int>> potential_adj(static_cast<size_t>(nb));
+    for (int edge = 0; edge < nl + nl_vsc; ++edge) {
+      if (zeta[edge] < 0.5 || !edge_status[edge])
+        continue;
+      const int from = edge_from[edge], to = edge_to[edge];
+      if (from < 0 || to < 0 || from >= nb || to >= nb) continue;
+      potential_adj[from].push_back(to);
+      potential_adj[to].push_back(from);
+    }
+    std::vector<int> component(static_cast<size_t>(nb), -1);
+    int component_count = 0;
+    for (int start = 0; start < nb; ++start) {
+      if (component[start] >= 0) continue;
+      std::queue<int> queue;
+      queue.push(start);
+      component[start] = component_count;
+      while (!queue.empty()) {
+        const int at = queue.front();
+        queue.pop();
+        for (int next : potential_adj[at]) {
+          if (component[next] >= 0) continue;
+          component[next] = component_count;
+          queue.push(next);
+        }
+      }
+      ++component_count;
+    }
+    std::vector<bool> has_real_root(static_cast<size_t>(component_count), false);
+    std::vector<int> representative(static_cast<size_t>(component_count), -1);
+    for (int bus = 0; bus < nb; ++bus) {
+      const int id = component[bus];
+      if (representative[id] < 0) representative[id] = bus;
+      if (root_at[bus]) has_real_root[id] = true;
+    }
+    for (int id = 0; id < component_count; ++id) {
+      if (has_real_root[id] || representative[id] < 0) continue;
+      const int bus = representative[id];
+      source_at[bus] = true;
+      root_at[bus] = true;
+      // source_* bounds are already zero, intentionally creating no energy.
+    }
+  }
   result.validity.dc_source_dispatch_modelled = dc_source_present;
 
   std::vector<int> gen_bus;
@@ -764,12 +907,12 @@ TopoReconfResult run_topology_reconfiguration(
 
   for (int i = 0; i < nl + nl_vsc; ++i) {
     if (!edge_status[i])
-      c[idx.beta(i)] += lambda_sw;    // penalize closing tie switches
-    else if (!opt.loss_aware)
-      c[idx.beta(i)] -= lambda_sw;    // legacy: reward keeping in-service closed
-    // In loss-aware mode in-service edges carry no reward, so the objective is a
-    // physically meaningful non-negative cost (loss + switching + shed), not a
-    // large negative biased by the count of closed lines.
+      c[idx.beta(i)] += lambda_sw * edge_operation_cost[i];
+    else
+      c[idx.beta(i)] -= lambda_sw * edge_operation_cost[i];
+    // The omitted constant for an initially closed edge is
+    // lambda_switch*operation_cost; -cost*beta therefore penalizes opening
+    // without introducing an additional change-indicator variable.
   }
   for (int i = 0; i < nl; ++i)
     if (idx.loss_aware) c[idx.t(i)] += lambda_loss * std::abs(edge_r[i]);
@@ -804,7 +947,9 @@ TopoReconfResult run_topology_reconfiguration(
   // meshed DC island is not assumed to be fed solely through an AC root.
   int n_dc_sources = 0;
   for (int g = 0; g < ng; ++g)
-    if (gen_bus[g] >= nb_ac && root_at[gen_bus[g]]) ++n_dc_sources;
+    if (gen_bus[g] >= nb_ac && root_at[gen_bus[g]] &&
+        gen_Pmax[g] > 1e-9)
+      ++n_dc_sources;
   const int n_ineq_root = (!split && n_dc_sources > 0) ? 1 : 0;
   const int n_ineq_loss = idx.loss_aware ? 2 * nl : 0;  // t ≥ |P| both AC+DC
   const int n_ineq = n_ineq_topo + n_ineq_pf + n_ineq_budget + n_ineq_root + n_ineq_loss;
@@ -1062,13 +1207,19 @@ TopoReconfResult run_topology_reconfiguration(
   // adds +β; opening an in-service edge (β0=1) adds (1−β).  Fixed edges do
   // not change, so only free edges contribute.
   if (n_ineq_budget) {
-    int free_insvc = 0;
+    int free_insvc_cost = 0;
     for (int i = 0; i < nl + nl_vsc; ++i) {
       if (!beta_free[i]) continue;
-      if (edge_status[i]) { ineq_trips.emplace_back(ineq_row, idx.beta(i), -1.0); ++free_insvc; }
-      else                  ineq_trips.emplace_back(ineq_row, idx.beta(i),  1.0);
+      const double cost = static_cast<double>(edge_operation_cost[i]);
+      if (edge_status[i]) {
+        ineq_trips.emplace_back(ineq_row, idx.beta(i), -cost);
+        free_insvc_cost += edge_operation_cost[i];
+      } else {
+        ineq_trips.emplace_back(ineq_row, idx.beta(i), cost);
+      }
     }
-    b_ineq[ineq_row] = static_cast<double>(opt.max_switch_ops - free_insvc);
+    b_ineq[ineq_row] =
+        static_cast<double>(opt.max_switch_ops - free_insvc_cost);
     ++ineq_row;
   }
 
@@ -1556,6 +1707,82 @@ TopoReconfResult run_topology_reconfiguration(
     }
   }
 
+  // Build a deterministic, physically ordered action sequence in rich-device
+  // space. A disconnector/sectionalizer operation is executable only through
+  // its bound upstream protective switch: trip upstream, operate while dead,
+  // then reclose upstream when the final topology requires it closed.
+  {
+    std::unordered_map<int, bool> final_switch_closed;
+    for (const auto& sw : sys.ac.switches)
+      final_switch_closed[sw.index] = sw.closed;
+    for (const auto& operation : result.switch_operations) {
+      if (operation.kind == TopoReconfResult::DeviceKind::Switch)
+        final_switch_closed[operation.index] = operation.close;
+    }
+
+    int order = 1;
+    auto add_action = [&](TopoReconfResult::DeviceKind kind, int index,
+                          std::string action, std::string reason) {
+      result.ordered_switch_actions.push_back(
+          {order++, kind, index, std::move(action), std::move(reason)});
+    };
+    for (const auto& operation : result.switch_operations) {
+      if (operation.kind != TopoReconfResult::DeviceKind::Switch) {
+        add_action(operation.kind, operation.index,
+                   operation.close ? "close" : "open",
+                   "direct operation on an interrupting device");
+        continue;
+      }
+      const auto rich = rich_switch_by_index.find(operation.index);
+      if (rich == rich_switch_by_index.end()) {
+        result.switch_sequence_valid = false;
+        result.switch_sequence_message =
+            "switch operation cannot be mapped to the rich component model";
+        break;
+      }
+      const auto& sw = *rich->second;
+      if (sw.switch_type == SwitchType::Fuse) {
+        result.switch_sequence_valid = false;
+        result.switch_sequence_message =
+            "fuse operation is not an immediate restoration action";
+        break;
+      }
+      const auto caps = effective_switch_capabilities(sw);
+      if (!caps.requires_deenergized_operation) {
+        add_action(operation.kind, operation.index,
+                   operation.close ? "close" : "open",
+                   "device capability permits load-current operation");
+        continue;
+      }
+
+      const auto upstream = rich_switch_by_index.find(
+          sw.upstream_protective_switch_index);
+      if (upstream == rich_switch_by_index.end() ||
+          !valid_upstream_protection(sw)) {
+        result.switch_sequence_valid = false;
+        result.switch_sequence_message =
+            "isolation-device operation lacks an operable upstream protective switch";
+        break;
+      }
+      const auto& protector = *upstream->second;
+      add_action(TopoReconfResult::DeviceKind::Switch, protector.index,
+                 "open", "trip upstream protection before isolation operation");
+      add_action(operation.kind, operation.index,
+                 operation.close ? "close" : "open",
+                 "operate isolation device while de-energized");
+      if (final_switch_closed[protector.index]) {
+        add_action(TopoReconfResult::DeviceKind::Switch, protector.index,
+                   "reclose", "restore upstream protection after isolation operation");
+      }
+    }
+    if (result.switch_sequence_valid) {
+      result.switch_sequence_message = result.ordered_switch_actions.empty()
+          ? "no switching required"
+          : "ordered device sequence validated";
+    }
+    result.validity.switch_sequence_validated = result.switch_sequence_valid;
+  }
+
   // Loss estimate
   // NOTE: reconf_loss_mw is a nominal-current approximation, NOT a measured
   // MW value.  loss_proxy = Σ r_pu for all closed branches.  Multiplying by
@@ -1577,7 +1804,9 @@ TopoReconfResult run_topology_reconfiguration(
     else                result.obj_terms.loss += lambda_loss * std::abs(edge_r[i]) * x_sol[idx.beta(i)];
   }
   for (int i = 0; i < nl + nl_vsc; ++i)
-    if (!edge_status[i] && x_sol[idx.beta(i)] > 0.5) result.obj_terms.switching += lambda_sw;
+    if (edge_status[i] != (x_sol[idx.beta(i)] > 0.5))
+      result.obj_terms.switching +=
+          lambda_sw * static_cast<double>(edge_operation_cost[i]);
   if (opt.enable_pf) {
     for (int i = 0; i < nb; ++i) {
       result.total_shed_mw += x_sol[idx.sP(i)] * base_mva;

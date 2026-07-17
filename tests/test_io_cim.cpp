@@ -1,5 +1,6 @@
 // Bounded CIM / CGMES 3.0 (EQ+SSH) import/export contract (§5).
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -12,6 +13,7 @@
 #include "hacdcpf/io/cim_io.hpp"
 #include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/model/standard_parameter_library.hpp"
+#include "hacdcpf/projection/project_to_canonical.hpp"
 
 namespace {
 bool near(double a, double b) { return std::abs(a - b) < 1e-9; }
@@ -213,6 +215,31 @@ TEST_CASE("Distribution CIM stitches documents and adds one source per feeder",
                     }));
 }
 
+TEST_CASE("Distribution CIM folder stitching completes a physical name from a duplicate object",
+          "[io][cim][distribution][multifile][names]") {
+  const std::string topology = R"xml(<rdf:RDF>
+ <cim:BaseVoltage rdf:ID="BV"><cim:BaseVoltage.nominalVoltage>10000</cim:BaseVoltage.nominalVoltage></cim:BaseVoltage>
+ <cim:ConnectivityNode rdf:ID="N1"/>
+ <cim:ConnectivityNode rdf:ID="N2"><cim:Naming.name>受端节点</cim:Naming.name></cim:ConnectivityNode>
+ <cim:ACLineSegment rdf:ID="L1"><cim:Conductor.length>100</cim:Conductor.length><cim:PowerSystemResource.BaseVoltage rdf:resource="#BV"/></cim:ACLineSegment>
+ <cim:Terminal rdf:ID="L1T1"><cim:Terminal.sequenceNumber>1</cim:Terminal.sequenceNumber><cim:Terminal.ConductingEquipment rdf:resource="#L1"/><cim:Terminal.ConnectivityNode rdf:resource="#N1"/></cim:Terminal>
+ <cim:Terminal rdf:ID="L1T2"><cim:Terminal.sequenceNumber>2</cim:Terminal.sequenceNumber><cim:Terminal.ConductingEquipment rdf:resource="#L1"/><cim:Terminal.ConnectivityNode rdf:resource="#N2"/></cim:Terminal>
+</rdf:RDF>)xml";
+  const std::string names = R"xml(<rdf:RDF>
+ <cim:ConnectivityNode rdf:about="#N1"><cim:Naming.name>馈线首端节点</cim:Naming.name></cim:ConnectivityNode>
+ <cim:ACLineSegment rdf:about="#L1"><cim:Naming.name>人民路一回线</cim:Naming.name></cim:ACLineSegment>
+</rdf:RDF>)xml";
+
+  const auto imported =
+      hacdcpf::io::from_cim_dist(std::vector<std::string>{topology, names});
+  REQUIRE_FALSE(imported.report.has_errors());
+  REQUIRE(imported.system.ac.buses.size() == 2);
+  REQUIRE(imported.system.ac.branches.size() == 1);
+  CHECK(imported.system.ac.buses[0].name == "馈线首端节点");
+  CHECK(imported.system.ac.buses[1].name == "受端节点");
+  CHECK(imported.system.ac.branches[0].name == "人民路一回线");
+}
+
 TEST_CASE("Distribution CIM real feeder creates transformer-side fallback loads",
           "[io][cim][distribution][fixture]") {
   namespace fs = std::filesystem;
@@ -225,6 +252,16 @@ TEST_CASE("Distribution CIM real feeder creates transformer-side fallback loads"
   CHECK(imported.source_load_objects == 0);
   CHECK(imported.source_generator_objects == 0);
   REQUIRE(imported.system.ac.transformers_2w.size() == 41);
+  CHECK(std::any_of(imported.system.ac.transformers_2w.begin(),
+                    imported.system.ac.transformers_2w.end(),
+                    [](const auto& transformer) {
+                      return transformer.name == "大刀沙水厂#2变压器";
+                    }));
+  CHECK(std::any_of(imported.system.ac.switches.begin(),
+                    imported.system.ac.switches.end(), [](const auto& sw) {
+                      return sw.name ==
+                             "10kV草河F27大刀沙水厂支#04杆04T02RD跌落式熔断器";
+                    }));
   CHECK(imported.inferred_load_objects == 41);
   CHECK(imported.system.ac.loads.size() == 41);
   CHECK(imported.system.ac.generators.empty());
@@ -277,6 +314,18 @@ TEST_CASE("Distribution CIM folder preserves loads and unbalanced meter phases",
   const auto imported = hacdcpf::io::load_cim_dist(fixtures);
   CHECK_FALSE(imported.report.has_errors());
   CHECK(imported.system.ac.transformers_2w.size() == 7);
+  const std::vector<std::string> expected_transformer_names = {
+      "丹山新村3A公变房#1变压器", "丹山新村3B公变房#2变压器",
+      "丹山新村3C公变房#3变压器", "丹山新村3D公变房#4变压器",
+      "丹山新村3E公变房#5变压器", "丹山新村5A公变房#1变压器",
+      "丹山新村5B公变房#2变压器"};
+  for (const auto& expected_name : expected_transformer_names) {
+    CHECK(std::any_of(imported.system.ac.transformers_2w.begin(),
+                      imported.system.ac.transformers_2w.end(),
+                      [&](const auto& transformer) {
+                        return transformer.name == expected_name;
+                      }));
+  }
   CHECK(imported.source_load_objects == 0);
   // 138 LVBuilding loads in the newer exports plus one transformer-side
   // fallback load for each of the four older exports with no LVBuilding data.
@@ -341,6 +390,32 @@ TEST_CASE("Distribution CIM maps explicit loads and generators",
   CHECK(imported.is_unbalanced);
 }
 
+TEST_CASE("Distribution CIM uses MV conductor fallback before PSR geometry",
+          "[io][cim][distribution][parameters]") {
+  const std::string xml = R"xml(<rdf:RDF>
+ <cim:BaseVoltage rdf:ID="BV10"><cim:BaseVoltage.nominalVoltage>10000</cim:BaseVoltage.nominalVoltage></cim:BaseVoltage>
+ <cim:PSRType rdf:ID="CABLE"><cim:Naming.name>配电电缆段</cim:Naming.name></cim:PSRType>
+ <cim:ConnectivityNode rdf:ID="N1"/><cim:ConnectivityNode rdf:ID="N2"/>
+ <cim:ACLineSegment rdf:ID="L1"><cim:Naming.name>10 kV cable without size</cim:Naming.name><cim:Conductor.length>100</cim:Conductor.length><cim:PowerSystemResource.PSRType rdf:resource="#CABLE"/><cim:PowerSystemResource.BaseVoltage rdf:resource="#BV10"/></cim:ACLineSegment>
+ <cim:Terminal rdf:ID="L1T1"><cim:Terminal.sequenceNumber>1</cim:Terminal.sequenceNumber><cim:Terminal.ConductingEquipment rdf:resource="#L1"/><cim:Terminal.ConnectivityNode rdf:resource="#N1"/></cim:Terminal>
+ <cim:Terminal rdf:ID="L1T2"><cim:Terminal.sequenceNumber>2</cim:Terminal.sequenceNumber><cim:Terminal.ConductingEquipment rdf:resource="#L1"/><cim:Terminal.ConnectivityNode rdf:resource="#N2"/></cim:Terminal>
+</rdf:RDF>)xml";
+
+  hacdcpf::io::CimDistImportOptions options;
+  options.default_mv_cross_section_mm2 = 300.0;
+  const auto imported = hacdcpf::io::from_cim_dist(
+      xml, hacdcpf::io::ImportMode::Permissive, options);
+  REQUIRE(imported.system.ac.branches.size() == 1);
+  const auto& branch = imported.system.ac.branches.front();
+  CHECK(branch.cross_section_inferred);
+  CHECK_THAT(branch.cross_section_mm2,
+             Catch::Matchers::WithinAbs(300.0, 1e-12));
+  CHECK_THAT(branch.rate_a_mva,
+             Catch::Matchers::WithinAbs(std::sqrt(3.0) * 10.0 * 0.6, 1e-12));
+  CHECK_THAT(imported.system.ac.buses.front().base_kv,
+             Catch::Matchers::WithinAbs(10.0, 1e-12));
+}
+
 TEST_CASE("Distribution CIM preserves switching equipment classes and roles",
           "[io][cim][distribution][switchgear]") {
   const std::string xml = R"xml(<rdf:RDF>
@@ -364,6 +439,20 @@ TEST_CASE("Distribution CIM preserves switching equipment classes and roles",
   CHECK(tie.switch_type == hacdcpf::SwitchType::LoadBreakSwitch);
   CHECK(tie.role == hacdcpf::SwitchRole::Tie);
   CHECK(hacdcpf::effective_switch_capabilities(tie).can_close_for_restoration);
+
+  hacdcpf::ProjectionOptions projection_options;
+  projection_options.strip_dead_islands = false;
+  projection_options.preserve_switch_branches = true;
+  const auto projected = hacdcpf::project_to_canonical_models(
+      imported.system, projection_options);
+  CHECK(std::any_of(projected.ac.branches.begin(), projected.ac.branches.end(),
+                    [](const auto& branch) {
+                      return branch.name == "dropout fuse";
+                    }));
+  CHECK(std::any_of(projected.ac.branches.begin(), projected.ac.branches.end(),
+                    [](const auto& branch) {
+                      return branch.name == "ring tie";
+                    }));
 
   const std::string exported = hacdcpf::io::to_cim_dist(imported.system);
   CHECK(exported.find("<cim:Fuse") != std::string::npos);

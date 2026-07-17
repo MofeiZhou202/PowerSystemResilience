@@ -19,6 +19,11 @@ namespace hacdcpf {
 struct ProjectionOptions {
   ProjectionMode mode{ProjectionMode::ThresholdApproximate};
   bool strip_dead_islands{true};
+  /// Keep switch/circuit-breaker equivalents as explicit branches instead of
+  /// contracting their buses. Required by topology reconfiguration, where a
+  /// closed device must remain available as an opening decision and retain its
+  /// rich-device identity for action validation.
+  bool preserve_switch_branches{false};
   double impedance_threshold{1e-4};
 };
 

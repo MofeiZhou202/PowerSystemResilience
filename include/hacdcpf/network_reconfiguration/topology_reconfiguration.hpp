@@ -152,6 +152,19 @@ struct TopoReconfResult {
   /// circuit breakers.  Branch-origin operations fall back to DeviceKind::Branch.
   std::vector<SwitchOperation> switch_operations;
 
+  /// Physically ordered rich-device actions. Isolation devices are surrounded
+  /// by an upstream protective-device trip/reclose sequence when required.
+  struct OrderedSwitchAction {
+    int order{0};
+    DeviceKind kind{DeviceKind::Branch};
+    int index{-1};
+    std::string action;  ///< "open", "close", "replace", "reclose"
+    std::string reason;
+  };
+  std::vector<OrderedSwitchAction> ordered_switch_actions;
+  bool switch_sequence_valid{true};
+  std::string switch_sequence_message{"no switching required"};
+
   double base_loss_mw{0.0};
   /// Approximate post-reconfiguration resistive loss [MW].
   /// Computed as Σ r_pu × base_mva for all closed branches, assuming nominal
@@ -181,6 +194,10 @@ struct TopoReconfResult {
 
   struct ValidityFlags {
     bool radial_topology_enforced{false};
+    bool device_capability_constraints_enforced{false};
+    bool protection_interlocks_enforced{false};
+    bool switch_sequence_validated{false};
+    bool post_action_reprojection_validated{false};
     bool ac_lindistflow_enforced{false};
     bool dc_network_modelled{false};
     bool dc_source_dispatch_modelled{false};
@@ -188,6 +205,7 @@ struct TopoReconfResult {
     bool vsc_reactive_power_approximated{false};
     bool post_power_flow_validated{false};
     bool full_hybrid_opf_validated{false};
+    bool executable{false};
   };
 
   /// Machine-readable validity flags.  These distinguish the solved

@@ -462,7 +462,7 @@ const Canvas = (() => {
   function addComponent(type, x, y, params = null, rotation = 0) {
     const id = state.nextId++;
     const p = params || { ...COMP.defaults[type] };
-    if (!p.name || p.name === COMP.defaults[type]?.name) {
+    if (!p.name || (params === null && p.name === COMP.defaults[type]?.name)) {
       p.name = (COMP.defaults[type]?.name || type) + ' ' + id;
     }
 
@@ -2998,6 +2998,7 @@ const Canvas = (() => {
         compBusDomainMap[comp.id] = 'AC';
         sys.ac.buses.push({
           index: idx,
+          name: p.name || `Bus ${idx}`,
           bus_type: p.bus_type || 'PQ',
           base_kv: numOr(p.base_kv, 110),
           vm_pu: numOr(p.vm_pu, 1.0),
@@ -3021,6 +3022,7 @@ const Canvas = (() => {
         compBusDomainMap[comp.id] = 'DC';
         sys.dc.buses.push({
           index: idx,
+          name: p.name || `DC Bus ${idx}`,
           bus_type: p.bus_type || 'DC_P',
           base_kv: numOr(p.base_kv, 320),
           vm_pu: numOr(p.vm_pu, 1.0),
@@ -3267,7 +3269,9 @@ const Canvas = (() => {
           } else {
             const trafoIndex = Number.isFinite(Number(p.index)) ? Number(p.index) : trafoIdx;
             const trafo = {
-              index: trafoIndex, hv_bus: hv, lv_bus: lv,
+              index: trafoIndex,
+              name: p.name || `Trafo ${trafoIndex}`,
+              hv_bus: hv, lv_bus: lv,
               sn_mva: numOr(p.sn_mva, 100),
               vn_hv_kv: numOr(p.vn_hv_kv, 220),
               vn_lv_kv: numOr(p.vn_lv_kv, 110),
@@ -3645,6 +3649,7 @@ const Canvas = (() => {
           const [from, to] = findTwoBusIndices(comp.id);
           sys.ac.switches.push({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : swIdx,
+            name: p.name || `Switch ${Number.isFinite(Number(p.index)) ? Number(p.index) : swIdx}`,
             bus_from: from, bus_to: to,
             switch_type: p.switch_type || '',
             closed: p.closed !== false,
@@ -3675,6 +3680,7 @@ const Canvas = (() => {
           if (isDcBreaker) {
             sys.dc.dc_circuit_breakers.push({
               index: idxValue,
+              name: p.name || `DC Breaker ${idxValue}`,
               bus_from: from, bus_to: to,
               breaker_type: p.breaker_type || '',
               closed: p.closed !== false,
@@ -3687,6 +3693,7 @@ const Canvas = (() => {
           } else {
             sys.ac.circuit_breakers.push({
               index: idxValue,
+              name: p.name || `Breaker ${idxValue}`,
               bus_from: from, bus_to: to,
               breaker_type: p.breaker_type || '',
               closed: p.closed !== false,
@@ -4227,7 +4234,7 @@ const Canvas = (() => {
           {
             ...COMP.defaults.ac_bus,
             index: bus.index,
-            name: `Bus ${bus.index}`,
+            name: bus.name || `Bus ${bus.index}`,
             bus_type: bus.bus_type || 'PQ',
             base_kv: bus.base_kv || 110,
             vm_pu: bus.vm_pu || 1.0,
@@ -4258,7 +4265,7 @@ const Canvas = (() => {
           {
             ...COMP.defaults.dc_bus,
             index: bus.index,
-            name: `DC Bus ${bus.index}`,
+            name: bus.name || `DC Bus ${bus.index}`,
             bus_type: bus.bus_type || 'DC_P',
             base_kv: bus.base_kv || 320,
             vm_pu: bus.vm_pu || 1.0,
@@ -4577,7 +4584,7 @@ const Canvas = (() => {
       const comp = addComponent('transformer_2w', mx + 60, my, {
         ...COMP.defaults.transformer_2w,
         index: tr.index,
-        name: 'Trafo',
+        name: tr.name || `Trafo ${tr.index !== undefined ? tr.index : ''}`,
         hv_bus: tr.hv_bus, lv_bus: tr.lv_bus,
         sn_mva: tr.sn_mva,
         vn_hv_kv: tr.vn_hv_kv, vn_lv_kv: tr.vn_lv_kv,
@@ -4825,6 +4832,7 @@ const Canvas = (() => {
       const comp = addComponent('switch_comp', mx, my, {
         ...COMP.defaults.switch_comp,
         index: sw.index,
+        name: sw.name || `Switch ${sw.index !== undefined ? sw.index : ''}`,
         switch_type: sw.switch_type || '',
         closed: sw.closed !== false,
         r_contact_ohm: sw.r_contact_ohm,
@@ -4850,6 +4858,7 @@ const Canvas = (() => {
       const comp = addComponent('circuit_breaker', mx, my, {
         ...COMP.defaults.circuit_breaker,
         index: cb.index,
+        name: cb.name || `Breaker ${cb.index !== undefined ? cb.index : ''}`,
         breaker_type: cb.breaker_type || '',
         closed: cb.closed !== false,
         z_ohm: cb.z_ohm,
@@ -4877,6 +4886,7 @@ const Canvas = (() => {
       const comp = addComponent('circuit_breaker', mx, my, {
         ...COMP.defaults.circuit_breaker,
         index: cb.index,
+        name: cb.name || `DC Breaker ${cb.index !== undefined ? cb.index : ''}`,
         breaker_type: cb.breaker_type || '',
         closed: cb.closed !== false,
         r_ohm: cb.r_ohm,
@@ -4895,7 +4905,8 @@ const Canvas = (() => {
     jsonSys.ac?.motors?.forEach(m => {
       addDeviceAtBus('motor', m.bus, {
         ...COMP.defaults.motor,
-        name: 'Motor',
+        index: m.index,
+        name: m.name || `Motor ${m.index !== undefined ? m.index : ''}`,
         vn_kv: m.vn_kv, sn_mva: m.sn_mva,
         r_pu: m.r_pu, x_pu: m.x_pu,
         x_r: m.x_r, lrc: m.lrc, poles: m.poles,
@@ -4909,7 +4920,8 @@ const Canvas = (() => {
     jsonSys.ac?.flexible_loads?.forEach(fl => {
       addDeviceAtBus('flexible_load', fl.bus, {
         ...COMP.defaults.flexible_load,
-        name: 'Flex Load',
+        index: fl.index,
+        name: fl.name || `Flex Load ${fl.index !== undefined ? fl.index : ''}`,
         p_mw: fl.p_mw, q_mvar: fl.q_mvar,
         flex_up_mw: fl.flex_up_mw, flex_down_mw: fl.flex_down_mw,
         flex_duration_h: fl.flex_duration_h,
@@ -4927,7 +4939,8 @@ const Canvas = (() => {
     jsonSys.ac?.asymmetric_loads?.forEach(al => {
       addDeviceAtBus('asymmetric_load', al.bus, {
         ...COMP.defaults.asymmetric_load,
-        name: 'Asym Load',
+        index: al.index,
+        name: al.name || `Asym Load ${al.index !== undefined ? al.index : ''}`,
         connection: al.connection || 'wye',
         grounded: al.grounded,
         pa_mw: al.pa_mw, qa_mvar: al.qa_mvar,
@@ -4948,7 +4961,8 @@ const Canvas = (() => {
     jsonSys.ac?.shunts?.forEach(sh => {
       addDeviceAtBus('shunt', sh.bus, {
         ...COMP.defaults.shunt,
-        name: 'Shunt',
+        index: sh.index,
+        name: sh.name || `Shunt ${sh.index !== undefined ? sh.index : ''}`,
         gs_mw: sh.gs_mw, bs_mvar: sh.bs_mvar,
         switchable: sh.switchable || false,
         n_steps: sh.n_steps,
@@ -4968,7 +4982,8 @@ const Canvas = (() => {
       const y = hvComp ? hvComp.y : 300;
       const comp = addComponent('transformer_3w', x, y, {
         ...COMP.defaults.transformer_3w,
-        name: 'Trafo3W',
+        index: tr.index,
+        name: tr.name || `Trafo3W ${tr.index !== undefined ? tr.index : ''}`,
         sn_hv_mva: tr.sn_hv_mva, vn_hv_kv: tr.vn_hv_kv,
         sn_mv_mva: tr.sn_mv_mva, vn_mv_kv: tr.vn_mv_kv,
         sn_lv_mva: tr.sn_lv_mva, vn_lv_kv: tr.vn_lv_kv,
@@ -4995,7 +5010,8 @@ const Canvas = (() => {
     jsonSys.ac?.chargers?.forEach(ch => {
       const comp = addComponent('charger', 400, 400, {
         ...COMP.defaults.charger,
-        name: 'Charger',
+        index: ch.index,
+        name: ch.name || `Charger ${ch.index !== undefined ? ch.index : ''}`,
         station_id: ch.station_id, charger_type: ch.charger_type,
         p_rated_kw: ch.p_rated_kw,
         p_ch_max_kw: ch.p_ch_max_kw,
@@ -5011,7 +5027,8 @@ const Canvas = (() => {
     jsonSys.ac?.charging_stations?.forEach(cs => {
       addDeviceAtBus('charging_station', cs.bus, {
         ...COMP.defaults.charging_station,
-        name: 'EV Station',
+        index: cs.index,
+        name: cs.name || `EV Station ${cs.index !== undefined ? cs.index : ''}`,
         location: cs.location || '',
         n_fast: cs.n_fast, n_slow: cs.n_slow,
         num_chargers: cs.num_chargers,

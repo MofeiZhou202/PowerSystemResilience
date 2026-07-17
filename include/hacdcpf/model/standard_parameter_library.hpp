@@ -134,6 +134,8 @@ struct DesignHandbookLineSuggestion {
   double old_x_pu{0.0};
   double new_r_pu{0.0};
   double new_x_pu{0.0};
+  double old_rate_a_mva{0.0};
+  double new_rate_a_mva{0.0};
   bool cross_section_inferred{false};
   bool model_type_conflict{false};
   bool applied{false};

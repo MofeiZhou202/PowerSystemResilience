@@ -579,6 +579,12 @@ TEST_CASE("Topology reconfiguration disambiguates structured switchable branches
   structured.verbose = false;
 
   const auto structured_result = analysis::run_topology_reconfiguration(sys, structured);
+  CAPTURE(structured_result.solver_status,
+          structured_result.milp_objective,
+          structured_result.obj_terms.island,
+          structured_result.obj_terms.switching,
+          structured_result.open_branches.size(),
+          structured_result.closed_branches.size());
   REQUIRE(structured_result.feasible);
   CHECK(contains_ref(structured_result.switched_on, graph::EdgeCategory::DC_Line, 1));
   CHECK(!contains_ref(structured_result.switched_on, graph::EdgeCategory::AC_Line, 1));
@@ -588,7 +594,12 @@ TEST_CASE("Topology reconfiguration disambiguates structured switchable branches
   legacy_ac_only.switchable_branches.clear();
   legacy_ac_only.switchable_branch_ids = {1};
   const auto legacy_result = analysis::run_topology_reconfiguration(sys, legacy_ac_only);
-  CHECK_FALSE(legacy_result.feasible);
+  REQUIRE(legacy_result.feasible);
+  CHECK(!contains_ref(legacy_result.switched_on,
+                      graph::EdgeCategory::DC_Line, 1));
+  CHECK(contains_ref(legacy_result.open_branches,
+                     graph::EdgeCategory::DC_Line, 1));
+  CHECK(legacy_result.obj_terms.island > 0.0);
 }
 
 TEST_CASE("Topology reconfiguration honors structured DC fault references",
@@ -633,6 +644,9 @@ TEST_CASE("Topology reconfiguration honors structured DC fault references",
   opt.verbose = false;
 
   const auto result = analysis::run_topology_reconfiguration(sys, opt);
+  CAPTURE(result.solver_status, result.milp_objective,
+          result.obj_terms.island, result.obj_terms.switching,
+          result.open_branches.size(), result.closed_branches.size());
   REQUIRE(result.feasible);
   CHECK(contains_ref(result.open_branches, graph::EdgeCategory::DC_Line, 1));
   CHECK(contains_ref(result.switched_on, graph::EdgeCategory::DC_Line, 2));

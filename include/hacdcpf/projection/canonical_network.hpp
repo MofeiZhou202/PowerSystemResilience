@@ -34,6 +34,7 @@ struct MergeRecord {
 struct ProjectionCertificate {
   ProjectionMode mode{ProjectionMode::ThresholdApproximate};
   double impedance_threshold{1e-4};
+  bool switch_branches_preserved{false};
   int n_authored_dc_buses{0};
   std::vector<MergeRecord> merge_records;
   std::vector<std::string> diagnostics;

@@ -2300,6 +2300,8 @@ json design_handbook_report_to_json(
         {"old_x_pu", row.old_x_pu},
         {"new_r_pu", row.new_r_pu},
         {"new_x_pu", row.new_x_pu},
+        {"old_rate_a_mva", row.old_rate_a_mva},
+        {"new_rate_a_mva", row.new_rate_a_mva},
         {"cross_section_inferred", row.cross_section_inferred},
         {"model_type_conflict", row.model_type_conflict},
         {"applied", row.applied},
@@ -17671,14 +17673,18 @@ int main(int argc, char** argv) {
           }
         }
 
-        // Reconfiguration operates on the canonical electrical graph. Use the
-        // same projection for the MILP, status application, and PF/OPF
-        // validation so expanded switches/CBs/transformers keep identical IDs.
+        // Keep the rich model authoritative. The core reconfiguration solver
+        // performs a dedicated projection that preserves switch branches, so
+        // device capabilities and protection bindings remain available for
+        // hard candidate filtering and ordered action validation.
+        const hacdcpf::HybridPowerSystem rich_sys_tr = sys_tr;
         hacdcpf::ProjectionOptions reconfig_projection;
         reconfig_projection.strip_dead_islands = false;
-        sys_tr = hacdcpf::projection::RichToCanonicalOperator::apply(
-                     sys_tr, reconfig_projection)
-                     .canonical;
+        reconfig_projection.preserve_switch_branches = true;
+        auto reconfig_model =
+            hacdcpf::projection::RichToCanonicalOperator::apply(
+                rich_sys_tr, reconfig_projection)
+                .canonical;
 
         // ========== Step 2: Run topology reconfiguration (single snapshot) ==========
         // The SIM backend exposes a single-snapshot MILP reconfiguration
@@ -17718,19 +17724,19 @@ int main(int argc, char** argv) {
         tr_opts.solver = opts.value("solver", std::string("auto"));
         tr_opts.skip_heuristic = opts.value("skip_heuristic", false);
         tr_opts.verbose   = false;
-        // Use structured identities so overlapping AC/DC/VSC indices cannot
-        // alias. All three edge families participate in hybrid reconfiguration.
-        for (const auto& br : sys_tr.ac.branches)
-          tr_opts.switchable_branches.push_back({hacdcpf::graph::EdgeCategory::AC_Line, br.index});
-        for (const auto& br : sys_tr.dc.branches)
-          tr_opts.switchable_branches.push_back({hacdcpf::graph::EdgeCategory::DC_Line, br.index});
-        for (const auto& vsc : sys_tr.vsc_converters)
-          tr_opts.switchable_branches.push_back({hacdcpf::graph::EdgeCategory::VSC_Coupling, vsc.index});
+        // Candidate switching decisions are derived inside the core from rich
+        // SwitchType/role/capabilities/locks. Do not expose every equivalent
+        // AC branch as a switching variable: that previously authorized fuse,
+        // transformer and physical-line operations.
         // Auto-enable split-domain radiality when the case is hybrid (has DC
         // buses + converters) unless the caller overrode it.
-        if (!opts.contains("split_domain_trees") && !sys_tr.dc.buses.empty() && !sys_tr.vsc_converters.empty())
+        if (!opts.contains("split_domain_trees") && !rich_sys_tr.dc.buses.empty() && !rich_sys_tr.vsc_converters.empty())
           tr_opts.split_domain_trees = true;
-        auto recon = hacdcpf::analysis::run_topology_reconfiguration(sys_tr, tr_opts);
+        auto recon = hacdcpf::analysis::run_topology_reconfiguration(
+            rich_sys_tr, tr_opts);
+        // Response topology rows use the same preserved-switch canonical index
+        // space as the solver result.
+        sys_tr = std::move(reconfig_model);
 
         // Per-branch closed flag (1 = in service) derived from the open-branch set,
         // then exposed as a single-step [branch][1] matrix for the response code below.
@@ -17777,8 +17783,11 @@ int main(int argc, char** argv) {
         int reconfig_dc_closed_count = 0, reconfig_vsc_closed_count = 0;
         int reconfig_closed_count = 0;
         int reconfig_open_count = 0;
+        bool actions_applied_to_rich_model = false;
+        std::string validation_message;
         if (sched.feasible) {
-          // Apply final-step topology to a copy
+          // Apply the canonical final state to a display copy only. Electrical
+          // validation below is performed from rich-device actions.
           auto sys_reconfig = sys_tr;
           std::set<int> closed_ac, closed_dc, closed_vsc;
           for (const auto& ref : recon.closed_branches) {
@@ -17798,40 +17807,166 @@ int main(int argc, char** argv) {
             vsc.in_service = closed_vsc.count(vsc.index) != 0;
             if (vsc.in_service) ++reconfig_vsc_closed_count;
           }
-          int reconfig_ac_closed_unused = 0;
-          std::tie(reconfig_ac_radial, reconfig_ac_connected, reconfig_ac_islands,
-                   reconfig_ac_closed_unused) = ac_topology(sys_reconfig.ac);
-          std::tie(reconfig_dc_radial, reconfig_dc_connected, reconfig_dc_islands,
-                   reconfig_dc_closed_count) = dc_topology(sys_reconfig.dc);
-          std::tie(reconfig_is_connected, reconfig_islands) = hybrid_topology(sys_reconfig);
-          reconfig_is_radial = reconfig_ac_radial && (tr_opts.allow_dc_mesh || reconfig_dc_radial);
-
-          // Run power flow on reconfigured topology
-          hacdcpf::PowerFlowOptions pf_opt;
-          pf_opt.max_iter = 200; pf_opt.tol = 1e-6;
-          auto pf_reconfig = hacdcpf::solve_power_flow(sys_reconfig, pf_opt);
-          reconfig_pf_converged = pf_reconfig.converged;
-          reconfig_pf_iterations = pf_reconfig.iterations;
-          reconfig_pf_residual = pf_reconfig.residual;
-          if (pf_reconfig.converged) {
-            for (const auto& bf : pf_reconfig.branch_flows) {
-              double loss = bf.pf_mw + bf.pt_mw;
-              if (loss > 0.0) reconfig_loss_mw += loss;
+          // Apply faults and final device actions back to the rich model.
+          auto rich_reconfig = rich_sys_tr;
+          bool action_mapping_ok = true;
+          const auto set_ac_branch = [&](int index, bool in_service) {
+            auto it = std::find_if(rich_reconfig.ac.branches.begin(),
+                                   rich_reconfig.ac.branches.end(),
+                                   [&](const auto& branch) {
+                                     return branch.index == index;
+                                   });
+            if (it == rich_reconfig.ac.branches.end()) return false;
+            it->in_service = in_service;
+            return true;
+          };
+          for (int index : tr_opts.line_failures)
+            action_mapping_ok = set_ac_branch(index, false) && action_mapping_ok;
+          for (const auto& fault : tr_opts.faulted_branches) {
+            bool found = false;
+            if (fault.category == hacdcpf::graph::EdgeCategory::AC_Line) {
+              found = set_ac_branch(fault.index, false);
+            } else if (fault.category == hacdcpf::graph::EdgeCategory::DC_Line) {
+              auto it = std::find_if(rich_reconfig.dc.branches.begin(),
+                                     rich_reconfig.dc.branches.end(),
+                                     [&](const auto& branch) {
+                                       return branch.index == fault.index;
+                                     });
+              found = it != rich_reconfig.dc.branches.end();
+              if (found) it->in_service = false;
+            } else if (fault.category ==
+                       hacdcpf::graph::EdgeCategory::VSC_Coupling) {
+              auto it = std::find_if(rich_reconfig.vsc_converters.begin(),
+                                     rich_reconfig.vsc_converters.end(),
+                                     [&](const auto& converter) {
+                                       return converter.index == fault.index;
+                                     });
+              found = it != rich_reconfig.vsc_converters.end();
+              if (found) it->in_service = false;
             }
+            action_mapping_ok = found && action_mapping_ok;
           }
-          // OPF cross-validation on the reconfigured topology.
+          for (const auto& operation : recon.switch_operations) {
+            bool found = false;
+            if (operation.kind ==
+                hacdcpf::analysis::TopoReconfResult::DeviceKind::Switch) {
+              auto it = std::find_if(rich_reconfig.ac.switches.begin(),
+                                     rich_reconfig.ac.switches.end(),
+                                     [&](const auto& sw) {
+                                       return sw.index == operation.index;
+                                     });
+              found = it != rich_reconfig.ac.switches.end();
+              if (found) it->closed = operation.close;
+            } else if (operation.kind ==
+                       hacdcpf::analysis::TopoReconfResult::DeviceKind::CircuitBreaker) {
+              auto it = std::find_if(
+                  rich_reconfig.ac.circuit_breakers.begin(),
+                  rich_reconfig.ac.circuit_breakers.end(),
+                  [&](const auto& breaker) {
+                    return breaker.index == operation.index;
+                  });
+              found = it != rich_reconfig.ac.circuit_breakers.end();
+              if (found) it->closed = operation.close;
+            } else if (operation.category ==
+                       hacdcpf::graph::EdgeCategory::AC_Line) {
+              found = set_ac_branch(operation.index, operation.close);
+            } else if (operation.category ==
+                       hacdcpf::graph::EdgeCategory::DC_Line) {
+              auto it = std::find_if(rich_reconfig.dc.branches.begin(),
+                                     rich_reconfig.dc.branches.end(),
+                                     [&](const auto& branch) {
+                                       return branch.index == operation.index;
+                                     });
+              found = it != rich_reconfig.dc.branches.end();
+              if (found) it->in_service = operation.close;
+            } else if (operation.category ==
+                       hacdcpf::graph::EdgeCategory::VSC_Coupling) {
+              auto it = std::find_if(rich_reconfig.vsc_converters.begin(),
+                                     rich_reconfig.vsc_converters.end(),
+                                     [&](const auto& converter) {
+                                       return converter.index == operation.index;
+                                     });
+              found = it != rich_reconfig.vsc_converters.end();
+              if (found) it->in_service = operation.close;
+            }
+            action_mapping_ok = found && action_mapping_ok;
+          }
+
+          // Re-project from rich device state before every electrical audit.
           try {
-            hacdcpf::opf::ACOPFOptions oo;
-            auto opf_r = hacdcpf::solve_ac_opf(sys_reconfig, oo);
-            opf_converged = opf_r.converged; opf_objective = opf_r.objective;
-          } catch (...) {}
+            hacdcpf::ProjectionOptions final_projection_options;
+            final_projection_options.strip_dead_islands = false;
+            const auto final_projection =
+                hacdcpf::projection::RichToCanonicalOperator::apply(
+                    rich_reconfig, final_projection_options);
+            const auto& validated_system = final_projection.canonical;
+            actions_applied_to_rich_model = action_mapping_ok;
+            recon.validity.post_action_reprojection_validated =
+                action_mapping_ok;
+
+            int reconfig_ac_closed_unused = 0;
+            std::tie(reconfig_ac_radial, reconfig_ac_connected,
+                     reconfig_ac_islands, reconfig_ac_closed_unused) =
+                ac_topology(validated_system.ac);
+            std::tie(reconfig_dc_radial, reconfig_dc_connected,
+                     reconfig_dc_islands, reconfig_dc_closed_count) =
+                dc_topology(validated_system.dc);
+            std::tie(reconfig_is_connected, reconfig_islands) =
+                hybrid_topology(validated_system);
+            reconfig_is_radial = reconfig_ac_radial &&
+                (tr_opts.allow_dc_mesh || reconfig_dc_radial);
+
+            hacdcpf::PowerFlowOptions pf_opt;
+            pf_opt.max_iter = 200;
+            pf_opt.tol = 1e-6;
+            auto pf_reconfig = hacdcpf::solve_power_flow(
+                rich_reconfig, pf_opt);
+            reconfig_pf_converged = pf_reconfig.converged;
+            reconfig_pf_iterations = pf_reconfig.iterations;
+            reconfig_pf_residual = pf_reconfig.residual;
+            if (pf_reconfig.converged) {
+              for (const auto& bf : pf_reconfig.branch_flows) {
+                const double loss = bf.pf_mw + bf.pt_mw;
+                if (loss > 0.0) reconfig_loss_mw += loss;
+              }
+            }
+            try {
+              hacdcpf::opf::ACOPFOptions oo;
+              auto opf_r = hacdcpf::solve_ac_opf(rich_reconfig, oo);
+              opf_converged = opf_r.converged;
+              opf_objective = opf_r.objective;
+            } catch (const std::exception& error) {
+              validation_message = std::string("OPF validation failed: ") +
+                                   error.what();
+            }
+          } catch (const std::exception& error) {
+            validation_message = std::string("post-action projection failed: ") +
+                                 error.what();
+          }
           recon.validity.post_power_flow_validated = reconfig_pf_converged;
           recon.validity.full_hybrid_opf_validated = opf_converged;
+          recon.validity.executable =
+              actions_applied_to_rich_model &&
+              recon.switch_sequence_valid &&
+              recon.validity.post_action_reprojection_validated &&
+              reconfig_pf_converged && opf_converged;
+          if (validation_message.empty() && !recon.validity.executable) {
+            validation_message =
+                "candidate failed rich-model action, sequence, PF, or OPF validation";
+          }
         }
 
         // ========== Build JSON response ==========
         json out;
         out["feasible"] = sched.feasible;
+        out["milp_feasible"] = sched.feasible;
+        out["executable"] = recon.validity.executable;
+        out["zero_load_loss_valid"] = recon.validity.executable &&
+            recon.total_shed_mw <= 1e-6;
+        out["validation_message"] = validation_message;
+        out["switch_sequence_valid"] = recon.switch_sequence_valid;
+        out["switch_sequence_message"] = recon.switch_sequence_message;
+        out["device_action_count"] = recon.ordered_switch_actions.size();
         out["total_objective"] = sched.total_objective;
         out["obj_terms"] = json{{"loss", recon.obj_terms.loss}, {"switching", recon.obj_terms.switching},
                                 {"shed", recon.obj_terms.shed}, {"island", recon.obj_terms.island}};
@@ -17845,13 +17980,18 @@ int main(int argc, char** argv) {
         out["solver_status"] = recon.solver_status;
         out["model_scope"] = recon.model_scope;
         out["validity"] = json{{"radial_topology_enforced", recon.validity.radial_topology_enforced},
+                                {"device_capability_constraints_enforced", recon.validity.device_capability_constraints_enforced},
+                                {"protection_interlocks_enforced", recon.validity.protection_interlocks_enforced},
+                                {"switch_sequence_validated", recon.validity.switch_sequence_validated},
+                                {"post_action_reprojection_validated", recon.validity.post_action_reprojection_validated},
                                 {"ac_lindistflow_enforced", recon.validity.ac_lindistflow_enforced},
                                 {"dc_network_modelled", recon.validity.dc_network_modelled},
                                 {"dc_source_dispatch_modelled", recon.validity.dc_source_dispatch_modelled},
                                 {"vsc_active_transfer_modelled", recon.validity.vsc_active_transfer_modelled},
                                 {"vsc_reactive_power_approximated", recon.validity.vsc_reactive_power_approximated},
                                 {"post_power_flow_validated", recon.validity.post_power_flow_validated},
-                                {"full_hybrid_opf_validated", recon.validity.full_hybrid_opf_validated}};
+                                {"full_hybrid_opf_validated", recon.validity.full_hybrid_opf_validated},
+                                {"executable", recon.validity.executable}};
         out["num_steps"] = num_steps;
 
         // Loss comparison (before vs after reconfiguration)
@@ -17983,6 +18123,20 @@ int main(int argc, char** argv) {
               (op.close ? sw_close : sw_open)++;
           }
           out["switch_operations"] = sw_ops;
+          json ordered_actions = json::array();
+          for (const auto& action : recon.ordered_switch_actions) {
+            const char* kind =
+                action.kind == hacdcpf::analysis::TopoReconfResult::DeviceKind::CircuitBreaker
+                    ? "circuit_breaker"
+                    : (action.kind == hacdcpf::analysis::TopoReconfResult::DeviceKind::Switch
+                           ? "switch"
+                           : "branch");
+            ordered_actions.push_back(
+                json{{"order", action.order}, {"kind", kind},
+                     {"index", action.index}, {"action", action.action},
+                     {"reason", action.reason}});
+          }
+          out["ordered_switch_actions"] = std::move(ordered_actions);
           out["switch_op_summary"] = json{{"switch_close", sw_close}, {"switch_open", sw_open},
                                           {"cb_close", cb_close}, {"cb_open", cb_open}};
           out["applied_faults"] = json{{"ac", opts.value("line_failures", json::array())},

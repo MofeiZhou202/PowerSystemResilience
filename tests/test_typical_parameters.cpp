@@ -759,6 +759,53 @@ TEST_CASE("design handbook reports model and PSR geometry conflicts",
   CHECK(missing_model_preview.suggestions.front().confidence == "medium");
 }
 
+TEST_CASE("design handbook repairs inferred LV fallback on MV lines",
+          "[model][parameter_library][design_handbook][voltage_class]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 1.0;
+  ACBus b1;
+  b1.index = 1;
+  b1.base_kv = 10.0;
+  b1.bus_type = BusType::SLACK;
+  ACBus b2 = b1;
+  b2.index = 2;
+  b2.bus_type = BusType::PQ;
+  sys.ac.buses = {b1, b2};
+
+  ACBranch branch;
+  branch.index = 24;
+  branch.from_bus = 1;
+  branch.to_bus = 2;
+  branch.name = "10 kV cable imported with legacy LV fallback";
+  branch.length_km = 0.04229;
+  branch.line_type = "配电电缆段";
+  branch.cross_section_mm2 = 50.0;
+  branch.cross_section_inferred = true;
+  branch.r_pu = 0.001;
+  branch.x_pu = 0.001;
+  branch.rate_a_mva = std::sqrt(3.0);
+  branch.parameter_source = "cim_geometry_estimate";
+  branch.parameters_inferred = true;
+  sys.ac.branches = {branch};
+
+  const auto preview = complete_design_handbook_parameters(sys);
+  REQUIRE(preview.suggestions.size() == 1);
+  CHECK_THAT(preview.suggestions.front().cross_section_mm2,
+             WithinAbs(300.0, 1e-12));
+  CHECK_THAT(preview.suggestions.front().new_rate_a_mva,
+             WithinAbs(std::sqrt(3.0) * 10.0 * 0.6, 1e-12));
+
+  DesignHandbookCompletionOptions options;
+  options.apply = true;
+  const auto applied = complete_design_handbook_parameters(sys, options);
+  REQUIRE(applied.fields_changed > 0);
+  CHECK_THAT(sys.ac.branches.front().cross_section_mm2,
+             WithinAbs(300.0, 1e-12));
+  CHECK_THAT(sys.ac.branches.front().rate_a_mva,
+             WithinAbs(std::sqrt(3.0) * 10.0 * 0.6, 1e-12));
+  CHECK(sys.ac.branches.front().cross_section_inferred);
+}
+
 TEST_CASE("design handbook infers protection, sectionalizer, fuse, and tie bindings",
           "[model][parameter_library][design_handbook][switch_binding]") {
   HybridPowerSystem sys;
