@@ -1,0 +1,690 @@
+\documentclass[journal,10pt]{IEEEtran}
+
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{mathrsfs}
+\usepackage{amsthm}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{algorithmic}
+\usepackage{cite}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+
+\newcommand{\ac}{\mathrm{ac}}
+\newcommand{\dc}{\mathrm{dc}}
+\newcommand{\ph}{\varphi}
+\newcommand{\cN}{\mathcal{N}}
+\newcommand{\cE}{\mathcal{E}}
+\newcommand{\cF}{\mathcal{F}}
+\newcommand{\cB}{\mathcal{B}}
+\newcommand{\cI}{\mathcal{I}}
+\newcommand{\RR}{\mathbb{R}}
+\newcommand{\CC}{\mathbb{C}}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\rank}{\operatorname{rank}}
+\newcommand{\nullity}{\operatorname{nullity}}
+\newcommand{\Schur}{\operatorname{Schur}}
+\newcommand{\realify}{\mathscr{R}}
+\newcommand{\TBG}{\textcolor{red!70!black}{\textbf{TBG}}}
+
+\newtheorem{assumption}{Assumption}
+\newtheorem{definition}{Definition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\newtheorem{remark}{Remark}
+
+\title{Constraint-Preserving Phase-Node Graph Reduction and a Boundary-Schur Interior-Point Method for Unbalanced Hybrid AC/DC Optimal Power Flow}
+
+\author{Anonymous Authors%
+\thanks{Initial manuscript draft. The theoretical development and AC-feeder reduction certificate are complete at draft level; hybrid OPF entries marked TBG must be generated before submission.}}
+
+\markboth{IEEE Transactions Manuscript Draft}%
+{Anonymous Authors: Graph-Reduced Unbalanced Hybrid AC/DC OPF}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This paper develops a monolithic optimal power flow (OPF) formulation for
+unbalanced hybrid ac/dc distribution systems and an exact two-level reduction
+method tailored to feeders with missing phases and sparse converter interfaces.
+The network is represented by a compact phase-node graph containing only
+physically present ac phase nodes, dc nodes, and converter coupling hyperedges.
+Passive zero-injection interior phase nodes are eliminated by a
+constraint-preserving Kron map, while original line-current, voltage-unbalance,
+and device constraints are retained through explicit recovery operators.  We
+prove a bijection between the full and reduced feasible sets, equality of their
+global optimal values, correspondence of local minimizers and regular KKT
+points, and a closed-form recovery formula for eliminated equality multipliers.
+We further show that model-level graph reduction commutes with linearization and
+with elimination of the corresponding variables from the primal-dual KKT
+system.  This result enables a boundary-Schur interior-point method in which ac
+feeders and dc islands are factorized independently and only converter and
+controllable-device boundary variables enter the global interface solve.  A
+reproducible evaluation protocol is specified for hybridized IEEE 13-, 34-,
+123-, and 8500-node feeders.  An executable AC-feeder certificate demonstrates
+exact boundary equivalence and sparse linear-solve acceleration; monolithic
+hybrid OPF entries remain marked TBG until that solver produces auditable
+results.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Graph reduction, hybrid ac/dc distribution system, interior-point method,
+Kron reduction, missing phases, optimal power flow, Schur complement,
+three-phase unbalance.
+\end{IEEEkeywords}
+
+\section{Introduction}
+\IEEEPARstart{H}{ybrid} ac/dc distribution systems combine untransposed and
+partially phased ac feeders, dc subnetworks, interlinking voltage-source
+converters (VSCs), dc/dc converters, storage, and voltage-dependent demand.
+Their OPF model is therefore larger and more tightly coupled than either a
+positive-sequence hybrid OPF or an ac-only unbalanced distribution OPF.
+Nevertheless, most feeder nodes are passive transit nodes, whereas nonlinear
+controls and optimization variables are concentrated at a comparatively small
+set of sources, loads, converters, and monitored terminals.  This separation
+suggests reducing the physical graph before optimization and exploiting the
+remaining block structure inside each interior-point iteration.
+
+Three-phase unbalanced OPF has a long history
+\cite{bruno2011unbalanced,rao2019helm}.  Recent formulations cover
+voltage-dependent and delta-connected loads through power cones
+\cite{claeys2021powercones}, explicit four-wire models and Kron-reduction error
+benchmarks \cite{claeys2022fourwire}, current-voltage formulations at utility
+scale \cite{soltani2024ivopf}, and meshed multiphase linearized models with
+transformers and error bounds \cite{wang2026linearized}.  These works establish
+that phase detail and neutral or missing-phase semantics cannot be inferred
+reliably from a balanced equivalent.
+
+Hybrid ac/dc OPF is also mature.  The \emph{hynet} framework provides a unified
+hybrid formulation and convex relaxations \cite{hotz2020hynet}; distributed
+methods based on ADMM and ALADIN exploit ac/dc subsystem boundaries
+\cite{meyer2019distributed,zhai2022aladin}; and a recent universal branch model
+supports large ac/dc systems and converter controls \cite{shahbazi2025sadra}.
+For unbalanced hybrid microgrids, optimal phase and interlinking-converter power
+routing has been demonstrated in simulation and hardware
+\cite{esfahani2020routing}.  Accurate unbalanced hybrid power-flow methods have
+also been reported using implicit Z-bus and multidimensional holomorphic
+embedding \cite{pompodakis2021generic,sun2024mdhem}.  However, a general
+phase-domain hybrid OPF that simultaneously addresses missing phases, exact
+network reduction, and solver-level boundary condensation remains insufficiently
+developed.
+
+Kron reduction is the Schur complement of a network Laplacian or admittance
+matrix and has well-established graph-theoretic properties
+\cite{dorfler2013kron}.  Opti-KRON selects reductions by balancing compression
+and data-fitted voltage error \cite{chevalier2022optikron}.  In four-wire OPF,
+the error introduced by neutral elimination has been quantified empirically
+\cite{claeys2022fourwire}.  Separately, successive Schur complements and
+condensed-space KKT systems have accelerated security-constrained and GPU-based
+OPF solvers \cite{kardos2020schur,shin2024gpu}.  These two uses of a Schur
+complement act at different levels: Kron reduction changes the physical model
+once, whereas KKT condensation eliminates Newton directions at every
+optimization iteration.  Their equivalence has not, to the authors' knowledge,
+been established for a constraint-preserving, missing-phase hybrid ac/dc OPF.
+
+This paper makes the following contributions.
+\begin{enumerate}
+  \item A compact monolithic phase-node ac/dc OPF represents only existing ac
+  phases and includes dc voltage states, phase-resolved VSC injections, dc/dc
+  dispatch, converter loss and control equations, and unbalance constraints.
+  \item A safe graph-reduction rule eliminates only passive zero-injection
+  interior nodes.  Voltage, current, VUF, and device constraints associated with
+  eliminated nodes or branches are retained as functions of boundary states.
+  \item Feasible-set bijection, optimal-value equality, local-minimizer and KKT
+  correspondence, second-order-condition preservation, and eliminated-dual
+  recovery are proved under explicit regularity assumptions.
+  \item A commutativity theorem connects model-level Kron reduction with
+  linearization and KKT elimination.  It leads to a boundary-Schur IPM whose
+  global system scales primarily with converters and controllable boundary
+  devices rather than all feeder phase nodes.
+\end{enumerate}
+
+\begin{table*}[t]
+\caption{Capability Boundary Relative to Representative Prior Work}
+\label{tab:literature_position}
+\centering
+\footnotesize
+\begin{tabular}{lllllll}
+\toprule
+Work & Problem & Phase detail & AC/DC & Physical reduction & KKT Schur & OPF/dual preservation\\
+\midrule
+Bruno \emph{et al.} \cite{bruno2011unbalanced} & OPF & unbalanced $abc$ & no & no & no & no\\
+Claeys \emph{et al.} \cite{claeys2022fourwire} & OPF & four wire & no & neutral benchmark & no & no\\
+Hotz and Utschick \cite{hotz2020hynet} & OPF & sequence & yes & no & no & no\\
+Sun \emph{et al.} \cite{sun2024mdhem} & PF & three phase & yes & no & no & n/a\\
+Kardo\v{s} \emph{et al.} \cite{kardos2020schur} & SCOPF & sequence & no & no & yes & no\\
+This work & OPF & native phase masks & yes & constraint preserving & yes & primal and dual\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\section{Compact Phase-Node Hybrid OPF}
+\subsection{Phase-node graph}
+Let $\mathcal{P}_i\subseteq\{a,b,c\}$ denote the phases physically present at
+ac bus $i$.  The compact ac node set is
+\begin{equation}
+  \cN^{\ac}_{\phi}=\{(i,\phi):\phi\in\mathcal{P}_i\},\qquad
+  n_{\phi}=\sum_i |\mathcal{P}_i|\leq 3n_{\ac}.
+  \label{eq:phase_nodes}
+\end{equation}
+The complete hybrid graph is
+\begin{equation}
+  \mathcal{G}_{\phi\dc}=
+  (\cN^{\ac}_{\phi}\cup\cN^{\dc},
+   \cE^{\ac}\cup\cE^{\dc}\cup\cE^{c}),
+\end{equation}
+where $\cE^c$ contains VSC and dc/dc coupling hyperedges.  A phase-domain
+admittance $Y\in\CC^{n_\phi\times n_\phi}$ includes self and mutual coupling
+only among existing phase nodes.  The dc conductance matrix is
+$G\in\RR^{n_{\dc}\times n_{\dc}}$.
+
+Let $v\in\CC^{n_\phi}$ and $u\in\RR^{n_\dc}$ denote ac phase voltages and dc
+voltages.  The vector $y$ collects dispatch and device variables, including
+phase-resolved generation and VSC powers.  A rectangular real state is
+\begin{equation}
+  x=[\Re(v)^\top,\Im(v)^\top,u^\top,y^\top]^\top.
+\end{equation}
+
+\subsection{Network and converter equations}
+At an ac phase node $n=(i,\phi)$, the complex balance is
+\begin{equation}
+ s_n^{g}(y)-s_n^{d}(v,y)+s_n^{c}(y)
+ -v_n\overline{(Yv)_n}=0.                         \label{eq:ac_balance}
+\end{equation}
+At dc node $k$,
+\begin{equation}
+ p_k^{g}(y)-p_k^{d}(u,y)+p_k^{c}(y)-u_k(Gu)_k=0. \label{eq:dc_balance}
+\end{equation}
+For VSC $c$, with ac phases $\mathcal{P}_c$ and dc terminal $k(c)$,
+\begin{align}
+ p_c^{\dc}+\sum_{\phi\in\mathcal{P}_c}p_{c\phi}^{\ac}
+ +\ell_c(v,u,p_c^{\ac},q_c^{\ac})&=0,             \label{eq:vsc_energy}\\
+ r_c(v,u,y;\rho_c)&=0,                              \label{eq:vsc_control}
+\end{align}
+where $\rho_c$ specifies the converter control role.  Inequality constraints
+include phase and dc voltage limits, phase-current and branch thermal limits,
+VSC apparent-power, current and modulation limits, dc/dc duty limits, and
+optional voltage-unbalance constraints.  For a three-phase bus,
+\begin{equation}
+ \mathrm{VUF}_i=\frac{|V_{2,i}|}{|V_{1,i}|}\leq\overline{\nu}_i.
+ \label{eq:vuf}
+\end{equation}
+The full nonconvex OPF is written compactly as
+\begin{subequations}\label{eq:full_opf}
+\begin{align}
+  \min_x\quad & f(x),\\
+  \mathrm{s.t.}\quad & c(x)=0,\\
+  & h(x)\leq 0,\\
+  & \underline{x}\leq x\leq\overline{x}.
+\end{align}
+\end{subequations}
+The formulation targets a regular local KKT point; no global-optimality claim is
+made for the nonconvex NLP.  In the analysis below, finite variable bounds are
+appended to $h$ as ordinary inequalities so that one multiplier notation covers
+all inequality families.
+
+\section{Constraint-Preserving Graph Reduction}
+\subsection{Boundary and interior sets}
+Partition ac phase nodes and dc nodes into retained boundary sets $\cB$ and
+candidate interior sets $\cI$.  The boundary set contains every node with an
+independent injection, objective term, control variable, voltage reference,
+converter terminal, discrete topology decision, or nonrecoverable measurement.
+An internal monitored quantity may be eliminated only if its constraint and
+reported value are explicitly composed with the recovery map below.
+
+\begin{assumption}[Exact reducibility]\label{ass:exact}
+For each eliminated interior node: (i) the node is energized and has no
+independent current/power injection, control, or objective term; (ii) every
+constraint on its voltage or incident branch current is retained after
+substitution; (iii) the interior blocks $Y_{II}$ and $G_{II}$ are nonsingular;
+and (iv) ac voltage lower bounds are strictly positive, so zero complex power at
+an interior node is equivalent to zero current.
+\end{assumption}
+
+With boundary-first ordering,
+\begin{equation}
+Y=\begin{bmatrix}Y_{BB}&Y_{BI}\\Y_{IB}&Y_{II}\end{bmatrix},\qquad
+G=\begin{bmatrix}G_{BB}&G_{BI}\\G_{IB}&G_{II}\end{bmatrix}.
+\end{equation}
+Zero interior current gives
+\begin{align}
+v_I&=E_{\ac}v_B, & E_{\ac}&=-Y_{II}^{-1}Y_{IB},\label{eq:ac_recovery}\\
+u_I&=E_{\dc}u_B, & E_{\dc}&=-G_{II}^{-1}G_{IB}.\label{eq:dc_recovery}
+\end{align}
+The reduced network matrices are
+\begin{align}
+Y^r&=Y_{BB}-Y_{BI}Y_{II}^{-1}Y_{IB},\label{eq:kron_ac}\\
+G^r&=G_{BB}-G_{BI}G_{II}^{-1}G_{IB}.\label{eq:kron_dc}
+\end{align}
+For $T_{\ac}=[I\;E_{\ac}^\top]^\top$ and
+$T_{\dc}=[I\;E_{\dc}^\top]^\top$, define the real recovery operator
+\begin{equation}
+R=\diag\!\left(\realify(T_{\ac}),T_{\dc},I_y\right),\quad
+\realify(T)=\begin{bmatrix}\Re T&-\Im T\\\Im T&\Re T\end{bmatrix}.
+\label{eq:R}
+\end{equation}
+Thus $x=Rz$ for the reduced variable $z$.
+
+Original constraints are not discarded.  For example, the current of an
+eliminated ac branch $\ell$ is
+\begin{equation}
+ i_\ell=H_\ell T_{\ac}v_B,\qquad
+ |H_\ell T_{\ac}v_B|\leq \overline{i}_\ell,          \label{eq:recovered_current}
+\end{equation}
+and eliminated-bus voltage and VUF constraints are evaluated using
+$v_I=E_{\ac}v_B$.  This distinguishes constraint-preserving reduction from a
+boundary-equivalent model that silently removes internal operating limits.
+
+\subsection{Feasible-set and optimal-value preservation}
+Let $\cF_F$ be the feasible set of \eqref{eq:full_opf}, including passive
+interior equations, and define the reduced problem by exact substitution:
+\begin{subequations}\label{eq:reduced_opf}
+\begin{align}
+ \min_z\quad & f_R(z):=f(Rz),\\
+ \mathrm{s.t.}\quad & c_R(z):=c_o(Rz)=0,\\
+ & h_R(z):=h(Rz)\leq0,
+\end{align}
+\end{subequations}
+where $c_o$ excludes the passive equations already enforced by $R$.
+
+\begin{theorem}[Feasible-set bijection]\label{thm:feasible}
+Under Assumption~\ref{ass:exact}, $R$ is a bijection from the reduced feasible
+set $\cF_R$ to the full feasible set $\cF_F$.  Equivalently,
+\begin{equation}
+ R\cF_R=\cF_F,\qquad P_B\cF_F=\cF_R,
+\end{equation}
+where $P_B R=I$ is the boundary projection.
+\end{theorem}
+
+\begin{IEEEproof}
+For any $z\in\cF_R$, \eqref{eq:ac_recovery} and
+\eqref{eq:dc_recovery} satisfy all eliminated passive equations.  All remaining
+equalities, inequalities, and bounds are precisely their full counterparts
+composed with $R$; hence $Rz\in\cF_F$.  Conversely, let $x\in\cF_F$.  The
+interior passive equations and nonsingularity of $Y_{II}$ and $G_{II}$ uniquely
+imply \eqref{eq:ac_recovery}--\eqref{eq:dc_recovery}.  Therefore
+$x=RP_Bx$, and $P_Bx$ satisfies \eqref{eq:reduced_opf}.  Uniqueness of the
+interior solution makes both maps inverse on the feasible sets.
+\end{IEEEproof}
+
+\begin{corollary}[Optimality preservation]\label{cor:optimal}
+The full and reduced problems have equal global optimal values.  The map $R$
+gives a one-to-one correspondence between their global minimizers and between
+their local minimizers.
+\end{corollary}
+
+\begin{IEEEproof}
+By Theorem~\ref{thm:feasible}, feasible points correspond bijectively and
+$f_R(z)=f(Rz)$.  Global optimal values and minimizers therefore correspond.
+Because $R$ is linear, injective, and has continuous inverse $P_B$ on its image,
+relative neighborhoods of the feasible sets also correspond, which preserves
+local minimality.
+\end{IEEEproof}
+
+\subsection{KKT and dual recovery}
+Write the eliminated passive equations in real form as
+\begin{equation}
+ a(x)=A_Bx_B+A_Ix_I=0,\qquad A_I\ \text{nonsingular},
+ \label{eq:passive_real}
+\end{equation}
+so $E=-A_I^{-1}A_B$ and $R=[I\;E^\top]^\top$ for the corresponding state
+partition.  Let $\lambda$ and $\nu$ be multipliers of $c_o$ and active rows of
+$h$, respectively, and define the partial Lagrangian gradient excluding the
+passive multiplier,
+\begin{equation}
+ q=\nabla f+J_{c_o}^{\top}\lambda+J_h^{\top}\nu
+   =\begin{bmatrix}q_B\\q_I\end{bmatrix}.
+\end{equation}
+
+\begin{theorem}[KKT correspondence and eliminated-dual recovery]
+\label{thm:kkt}
+Suppose Assumption~\ref{ass:exact} holds and the same inequality active set is
+used.  A reduced primal-dual point $(z,\lambda,\nu)$ satisfying the reduced KKT
+conditions maps to a full KKT point $(Rz,\mu,\lambda,\nu)$ with
+\begin{equation}
+ \boxed{\mu=-A_I^{-\top}q_I}.                       \label{eq:dual_recovery}
+\end{equation}
+Conversely, boundary projection of any full KKT point satisfies the reduced KKT
+conditions.  Under LICQ, the recovered multiplier is unique.
+\end{theorem}
+
+\begin{IEEEproof}
+Reduced stationarity is $R^\top q=q_B+E^\top q_I=0$.  The internal full
+stationarity row requires $q_I+A_I^\top\mu=0$, which gives
+\eqref{eq:dual_recovery}.  The boundary row then becomes
+$q_B+A_B^\top\mu=q_B-A_B^\top A_I^{-\top}q_I
+=q_B+E^\top q_I=0$.  Primal feasibility follows from
+Theorem~\ref{thm:feasible}; dual feasibility and complementarity are unchanged
+because all inequalities are retained.  Conversely, premultiplying full
+stationarity by $R^\top$ cancels the passive term since
+$A R=0$, yielding reduced stationarity.  LICQ gives multiplier uniqueness.
+\end{IEEEproof}
+
+\begin{corollary}[Barrier-KKT correspondence]\label{cor:barrier}
+For every barrier parameter $\tau>0$, append slacks $s>0$ and multipliers
+$\nu>0$ so that $h(Rz)+s=0$ and $S\nu=\tau\mathbf{1}$.  The full and reduced
+perturbed KKT points correspond under the same primal recovery $x=Rz$, unchanged
+$(s,\nu)$, and the eliminated multiplier formula
+\eqref{eq:dual_recovery}.  Hence the correspondence holds along the entire
+primal--dual central path, not only after an active set is identified.
+\end{corollary}
+
+\begin{IEEEproof}
+The inequality residual, slack equation, positivity requirements, and
+complementarity products are identical because every original inequality is
+retained as $h(Rz)$.  Only stationarity in the eliminated state differs, and
+the proof of Theorem~\ref{thm:kkt} recovers its multiplier independently of
+$\tau$.  Premultiplication by $R^\top$ proves the converse.
+\end{IEEEproof}
+
+\begin{corollary}[Second-order conditions]\label{cor:sosc}
+If $H_L$ is the full Lagrangian Hessian, the reduced Hessian is
+$H_R=R^\top H_LR$.  LICQ and the second-order necessary or sufficient condition
+hold at the full point if and only if the corresponding condition holds on the
+mapped reduced critical cone.
+\end{corollary}
+
+\begin{IEEEproof}
+The recovery map is linear, so the chain rule gives $H_R=R^\top H_LR$ without
+second derivatives of $R$.  Theorem~\ref{thm:feasible} maps feasible tangent and
+critical directions bijectively through $d_x=Rd_z$, preserving the sign of the
+quadratic form.
+\end{IEEEproof}
+
+\section{Commuting Reduction and Boundary-Schur IPM}
+\subsection{Reduction-linearization commutativity}
+The physical reduction above is performed once and is independent of the OPF
+iteration.  KKT condensation instead acts on primal-dual increments at each
+iteration.  The following theorem relates the two operations.
+
+\begin{theorem}[Model/KKT Schur commutativity]\label{thm:commute}
+At either a regular KKT point with fixed active set or a perturbed barrier-KKT
+point with positive slacks and multipliers, forming the reduced OPF and then
+linearizing its primal--dual equations produces the same Newton system as
+linearizing the full OPF and exactly eliminating the passive internal state and
+passive-equation multiplier increments.  In particular, up to a symmetric
+permutation and congruence,
+\begin{equation}
+ K_R=\Schur_{(\Delta x_I,\Delta\mu)}(K_F),          \label{eq:kkt_schur_equiv}
+\end{equation}
+and the full primal step is recovered by $\Delta x=R\Delta z$ plus the affine
+residual correction when iterates are infeasible.
+\end{theorem}
+
+\begin{IEEEproof}
+Exact substitution gives the reduced residual $F_R(z)=F_o(Rz)$.  Since $R$ is
+constant, $J_R=J_oR$ and $H_R=R^\top H_LR$.  Linearized passive feasibility is
+$A_B\Delta x_B+A_I\Delta x_I=-a(x)$; nonsingularity of $A_I$ uniquely eliminates
+$\Delta x_I$.  Internal stationarity uniquely eliminates $\Delta\mu$ by the
+linearized counterpart of \eqref{eq:dual_recovery}.  Substitution into the
+remaining full KKT rows yields $J_oR$ and $R^\top H_LR$, exactly the KKT blocks
+obtained by differentiating the reduced problem.  Schur complementation is the
+block Gaussian elimination implementing these substitutions, proving
+\eqref{eq:kkt_schur_equiv}.  For barrier equations, the slack and
+complementarity rows are unchanged by Corollary~\ref{cor:barrier}, so the same
+elimination applies before convergence.
+\end{IEEEproof}
+
+\begin{proposition}[Missing-phase closure]\label{prop:missing}
+Phase-node reduction never creates a variable for a physically absent phase.
+Kron fill-in may couple retained existing phases, but the reduced node set
+remains a subset of $\cN^{\ac}_{\phi}$.
+\end{proposition}
+
+\begin{IEEEproof}
+Rows and columns of $Y$ are indexed only by \eqref{eq:phase_nodes}.  A Schur
+complement changes entries among retained indices but cannot introduce an index
+outside the original matrix.
+\end{IEEEproof}
+
+\subsection{Boundary-Schur step}
+After graph reduction, partition the reduced primal-dual variables into local
+ac/dc region variables $w_r$, $r=1,\ldots,m$, and global converter/control
+boundary variables $w_c$.  A stabilized IPM KKT step has arrow form
+\begin{equation}
+\begin{bmatrix}
+K_1&&&C_1^\top\\
+&K_2&&C_2^\top\\
+&&\ddots&\vdots\\
+C_1&C_2&\cdots&K_c
+\end{bmatrix}
+\begin{bmatrix}\Delta w_1\\\Delta w_2\\\vdots\\\Delta w_c\end{bmatrix}
+=-
+\begin{bmatrix}r_1\\r_2\\\vdots\\r_c\end{bmatrix}.
+\label{eq:arrow}
+\end{equation}
+Independent local factorizations form
+\begin{align}
+ S_c&=K_c-\sum_{r=1}^{m}C_rK_r^{-1}C_r^\top,\label{eq:boundary_schur}\\
+ \widehat r_c&=r_c-\sum_{r=1}^{m}C_rK_r^{-1}r_r.
+\end{align}
+After solving $S_c\Delta w_c=-\widehat r_c$, local directions follow from
+\begin{equation}
+ \Delta w_r=-K_r^{-1}(r_r+C_r^\top\Delta w_c).
+\end{equation}
+
+\begin{proposition}[Boundary-step exactness]\label{prop:boundary}
+If every $K_r$ and $S_c$ is nonsingular, the boundary-Schur step is identical to
+the solution of \eqref{eq:arrow}.  Its arithmetic work is
+\begin{equation}
+ \sum_{r=1}^{m}\mathrm{fact}(K_r)
+ +\mathrm{fact}(S_c)+\text{triangular solves},       \label{eq:cost}
+\end{equation}
+and local factorizations may execute in parallel.
+\end{proposition}
+
+\begin{IEEEproof}
+The formulas are exact block Gaussian elimination of \eqref{eq:arrow}.
+Equation~\eqref{eq:cost} follows by accounting for independent local
+factorizations, formation and factorization of the interface matrix, and back
+substitution.  Parallelism follows because no local solve depends on another
+before the interface accumulation.
+\end{IEEEproof}
+
+\begin{proposition}[Sparse elimination and recovery cost]\label{prop:complexity}
+Consider a sequential scalar or bus-block Kron ordering $k=1,\ldots,p$.  Let
+$d_k^-$ and $d_k^+$ be the active column and row front sizes at elimination.
+Without explicitly forming an inverse, numerical elimination requires
+\begin{equation}
+ O\!\left(\mathrm{nnz}(Y)+\sum_{k=1}^{p}d_k^-d_k^+\right)
+ \label{eq:reduction_cost}
+\end{equation}
+arithmetic and a recovery tape of $O(\sum_k d_k^+)$ coefficients.  State
+recovery has the same linear tape complexity.  A front cap and predicted-fill
+cap therefore bound setup work and may leave otherwise admissible nodes
+uneliminated without changing exactness for the accepted nodes.
+\end{proposition}
+
+\begin{IEEEproof}
+Eliminating pivot $k$ updates each pair in the Cartesian product of its active
+column and row neighbors, giving $d_k^-d_k^+$ Schur updates.  The recovery row
+$x_k=-A_{kk}^{-1}A_{kN_k}x_{N_k}$ stores $d_k^+$ coefficients.  Reverse-order
+substitution visits every stored coefficient once.  Rejecting a pivot changes
+the retained set but not the algebra of any accepted Schur step.
+\end{IEEEproof}
+
+\subsection{Algorithm}
+\begin{figure}[t]
+\small
+\begin{algorithmic}[1]
+\REQUIRE Rich hybrid feeder model and OPF options
+\STATE Build compact phase-node graph $\mathcal{G}_{\phi\dc}$
+\STATE Retain injection, control, converter, constrained, and reported nodes
+\STATE Classify passive zero-injection ac/dc interior nodes
+\STATE Order candidates by active front size
+\FOR{each candidate pivot $k$}
+  \STATE Reject $k$ if singular, ill-conditioned, or above fill/front caps
+  \STATE Apply its sparse Schur update and append one recovery-tape row
+\ENDFOR
+\STATE Form $Y^r,G^r$ and compose all original constraints with recovery
+\STATE Assemble monolithic reduced $abc$--dc--VSC OPF
+\FOR{each primal-dual IPM iteration}
+  \STATE Evaluate reduced residuals, Jacobian, and Hessian
+  \STATE Factor local region blocks $K_r$ in parallel
+  \STATE Form and solve boundary system \eqref{eq:boundary_schur}
+  \STATE Recover local and eliminated directions, including infeasible correction
+  \STATE Filter line search; update slacks, multipliers, and barrier
+\ENDFOR
+\STATE Recover full states, branch flows, device dispatch, and duals
+\STATE Independently evaluate the original-network KKT residual
+\RETURN Full-network auditable OPF result
+\end{algorithmic}
+\caption{Constraint-preserving graph-reduced boundary-Schur IPM.}
+\label{alg:method}
+\end{figure}
+
+\section{Numerical Evaluation and Protocol}
+\subsection{Test systems and deterministic hybridization}
+The evaluation uses the IEEE 13-, 34-, 123-, and 8500-node distribution
+feeders in their native phase configurations.  Hybrid cases are generated by a
+deterministic preprocessing script with the following rules.
+
+\begin{table}[b]
+\caption{Planned Hybrid Benchmark Configuration}
+\label{tab:cases}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabularx}{\columnwidth}{lccc>{\raggedright\arraybackslash}X}
+\toprule
+Case & Feeder & DC share & VSCs & Phase scope\\
+\midrule
+H13   & IEEE 13   & 15\% & 1  & Native masks\\
+H34   & IEEE 34   & 20\% & 2  & Native masks\\
+H123  & IEEE 123  & 25\% & 4  & Native masks\\
+H8500 & IEEE 8500 & 30\% & 12 & Native masks\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{enumerate}
+  \item Preserve all original ac phase masks, line matrices, transformers,
+  regulators, loads, and source data.
+  \item Rank eligible downstream subtrees by electrical distance from the
+  source, breaking ties by stable source-file bus identifier.
+  \item Select disjoint subtrees until a prescribed dc-load share is reached.
+  Replace their internal distribution branches by dc branches with matched
+  nameplate transfer capability and place one VSC at each ac/dc cut.
+  \item Retain original per-phase demand on the ac side; map selected subtree
+  demand to dc loads using the documented conversion efficiency.  Converter
+  ratings are set to $1.25$ times the subtree peak apparent demand.
+  \item Emit the full case, reduction certificate, and full-to-reduced recovery
+  maps so every experiment is reproducible.
+\end{enumerate}
+
+These percentages and minimum converter counts define the initial benchmark
+profile; the generated case manifest, not prose, is authoritative after case
+generation.  A sensitivity sweep varies dc share, number of VSC interfaces,
+loading, and the fraction of eliminable passive nodes.
+
+\subsection{Baselines, metrics, and acceptance thresholds}
+Four matched formulations isolate the two reduction levels:
+\begin{enumerate}
+  \item \textbf{Full-IPM}: no graph reduction and no boundary Schur solve;
+  \item \textbf{GR-IPM}: graph reduction with a monolithic KKT factorization;
+  \item \textbf{BS-IPM}: full graph with boundary-Schur KKT factorization;
+  \item \textbf{GRBS-IPM}: both proposed levels.
+\end{enumerate}
+All variants use identical equations, initialization, barrier schedule,
+tolerances, linear algebra backend, thread count, and stopping rules.  Reported
+metrics include objective value, full-network primal and dual residuals, KKT
+stationarity, recovered voltage and branch-current error, active-set agreement,
+dual recovery error, variable and constraint counts, KKT nonzeros and fill,
+factorization time, total time, peak memory, and speedup.
+
+The exact-reduction implementation passes only if, after full-network recovery,
+the relative objective difference is at most $10^{-8}$, the maximum state and
+branch-current difference is at most $10^{-7}$ p.u., the KKT residual is at most
+$10^{-7}$, and active inequalities agree within the stated complementarity
+tolerance.  These are acceptance thresholds, not numerical results.
+
+\subsection{Implemented AC-feeder reduction certificate}
+Before claiming hybrid-OPF acceleration, we isolate and test the model-level
+reduction on the official OpenDSS feeder scripts.  The accompanying benchmark
+imports only physically present phase nodes, marks zero-independent-injection
+candidates, and applies
+minimum-front sequential Schur updates.  The active front is capped at 12 and
+the predicted reduced-matrix nonzero count at twice the original count.  Every
+accepted pivot stores a reverse recovery row.  Boundary-current equivalence is
+then checked using a deterministic voltage vector, while an independently
+factorized full/reduced current-injection solve checks recovered states.
+
+Table~\ref{tab:reduction_certificate} reports a Release build on an Apple M4 Max
+(16 cores, 128~GB), macOS 26.5.2, and Apple Clang 21.0.0.  Linear-solve times are
+medians of seven symbolic-analysis, factorization, iterative-refinement, and
+solve repetitions in one process.  The certificate eliminates 41.5--75.9\% of
+the phase nodes and keeps the maximum boundary-current error below
+$5.5\times10^{-8}$.  The IEEE 8500 cross-solve state difference remains
+$2.2\times10^{-6}$ under the present sparse LU path despite a
+$2.4\times10^{-10}$ boundary-equivalence error; it is therefore a linear-solver
+conditioning diagnostic, not accepted evidence for the planned $10^{-7}$ OPF
+state threshold.
+
+\input{reduction_certificate_table.tex}
+
+The certificate validates exact sparse elimination and reverse recovery.  The
+observed nodal solves are 1.6--4.1$\times$ faster.  This experiment contains
+neither a dc subtree nor VSC dispatch, an objective, or a nonlinear KKT system;
+it is therefore not a monolithic three-phase hybrid OPF timing result.  The
+hybrid OPF fidelity and four-way IPM ablation entries below remain TBG rather
+than being inferred from this narrower experiment.
+
+\input{results_tables.tex}
+
+\subsection{Independent verification}
+Every reduced solution is expanded and checked by an evaluator that does not
+call the graph-reduction or production residual routines.  The evaluator
+reconstructs the original phase-domain Y-bus and dc G-bus, recomputes all VSC
+terminal balances and original line currents, and evaluates objective, primal
+feasibility, complementarity, stationarity, and \eqref{eq:dual_recovery}.
+Finite differences validate selected Jacobian and Hessian columns.  The ac-only
+intersection is cross-checked against PowerModelsDistribution.jl
+\cite{fobes2020pmd}; hybrid constraints are verified by independent equations
+because common distribution tools do not provide a one-to-one dc/VSC oracle.
+
+\section{Discussion}
+\subsection{What is exact and what is not}
+The theorems do not justify eliminating arbitrary PQ or voltage-dependent loads.
+Such nodes remain in $\cB$ unless their nonlinear device equations and controls
+are retained explicitly in the reduced problem.  Likewise, deleting original
+line limits after Kron reduction changes the OPF feasible set even if boundary
+voltages remain accurate.  Approximate pendant-load folding and threshold
+impedance contraction may be useful engineering heuristics, but they require a
+separate perturbation analysis and are outside the exact claims of this paper.
+
+The method also does not make a nonconvex OPF globally solvable.  It preserves
+the full problem's global optimum as a mathematical object and maps regular
+local KKT points exactly; the IPM still returns a locally converged point unless
+combined with a globally valid relaxation or enumeration method.
+
+\subsection{Expected operating regime}
+The largest benefit is expected when feeders contain many passive internal
+phase nodes and comparatively few converters or controllable devices.  If
+almost every node has a load, voltage constraint, or discrete control, safe
+graph reduction is small.  If converters are dense, the boundary Schur system
+may dominate.  Kron fill-in can also offset dimension reduction; therefore the
+reduction planner must reject candidates whose predicted fill or conditioning
+exceeds configurable limits.
+
+\section{Conclusion}
+This paper has formulated a unified theoretical basis for two-level reduction
+of unbalanced hybrid ac/dc OPF.  A compact missing-phase graph removes phantom
+variables; exact Kron maps eliminate only passive zero-injection interior
+nodes; original operating constraints remain visible through recovery maps;
+and a boundary-Schur IPM exploits the resulting converter-interface structure.
+The feasible-set, optimal-value, KKT, second-order, dual-recovery, and
+model/KKT-commutativity results establish when the reduced calculation is
+mathematically the same optimization problem rather than an approximate grid
+equivalent.  Completing the reproducible H13, H34, H123, and H8500 experiments
+and replacing all TBG entries are required before submission.
+
+\IEEEtriggeratref{10}
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

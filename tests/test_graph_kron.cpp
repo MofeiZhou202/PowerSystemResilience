@@ -20,6 +20,7 @@
 #include <Eigen/Sparse>
 
 #include "hacdcpf/graph/kron_reduction.hpp"
+#include "hacdcpf/graph/sparse_kron_reduction.hpp"
 
 using namespace hacdcpf::graph;
 using Catch::Matchers::WithinAbs;
@@ -38,6 +39,75 @@ static Eigen::SparseMatrix<cplx> dense_to_sparse(const Eigen::MatrixXcd& M) {
   Eigen::SparseMatrix<cplx> S(M.rows(), M.cols());
   S.setFromTriplets(trips.begin(), trips.end());
   return S;
+}
+
+TEST_CASE("Sparse Kron tape preserves boundary currents and recovers states",
+          "[graph][kron][sparse]") {
+  Eigen::MatrixXcd y(5, 5);
+  y.setZero();
+  const auto add_branch = [&](int i, int j, cplx admittance) {
+    y(i, i) += admittance;
+    y(j, j) += admittance;
+    y(i, j) -= admittance;
+    y(j, i) -= admittance;
+  };
+  add_branch(0, 1, {4.0, -12.0});
+  add_branch(1, 2, {3.0, -9.0});
+  add_branch(1, 3, {2.0, -8.0});
+  add_branch(3, 4, {5.0, -10.0});
+  y(0, 0) += cplx{1e-3, 0.0};
+
+  const auto sparse = dense_to_sparse(y);
+  std::vector<bool> eligible{false, true, false, true, false};
+  SparseKronOptions options;
+  options.max_front = 8;
+  options.max_nnz_ratio = 10.0;
+  const auto reduced = reduce_sparse_kron(sparse, eligible, options);
+
+  REQUIRE(reduced.valid());
+  REQUIRE(reduced.recovery_steps.size() == 2);
+  REQUIRE(reduced.retained.size() == 3);
+
+  Eigen::VectorXcd vb(3);
+  vb << cplx{1.01, 0.02}, cplx{0.97, -0.03}, cplx{1.0, 0.01};
+  const Eigen::VectorXcd vf = recover_sparse_kron_state(reduced, vb);
+  const Eigen::VectorXcd ifull = sparse * vf;
+  const Eigen::VectorXcd ired = reduced.reduced * vb;
+
+  for (int pos = 0; pos < static_cast<int>(reduced.retained.size()); ++pos) {
+    REQUIRE_THAT(std::abs(ifull[reduced.retained[static_cast<std::size_t>(pos)]] -
+                          ired[pos]),
+                 WithinAbs(0.0, 1e-10));
+  }
+  for (const auto& step : reduced.recovery_steps) {
+    REQUIRE_THAT(std::abs(ifull[step.node]), WithinAbs(0.0, 1e-10));
+  }
+
+  const Eigen::SparseMatrix<cplx> recovery =
+      sparse_kron_recovery_operator(reduced);
+  REQUIRE((recovery * vb - vf).cwiseAbs().maxCoeff() < 1e-12);
+}
+
+TEST_CASE("Sparse Kron caps leave inadmissible candidates retained",
+          "[graph][kron][sparse]") {
+  Eigen::MatrixXcd y(4, 4);
+  y.setZero();
+  for (int leaf = 1; leaf < 4; ++leaf) {
+    const cplx admittance{1.0 + leaf, -5.0 - leaf};
+    y(0, 0) += admittance;
+    y(leaf, leaf) += admittance;
+    y(0, leaf) -= admittance;
+    y(leaf, 0) -= admittance;
+  }
+
+  SparseKronOptions options;
+  options.max_front = 1;
+  options.max_nnz_ratio = 1.0;
+  const auto reduced = reduce_sparse_kron(
+      dense_to_sparse(y), std::vector<bool>{true, false, false, false}, options);
+  REQUIRE(reduced.valid());
+  CHECK(reduced.recovery_steps.empty());
+  CHECK(reduced.retained.size() == 4);
 }
 
 // ─────────────────────────────────────────────────────────────────────

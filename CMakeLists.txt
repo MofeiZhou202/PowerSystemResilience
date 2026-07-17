@@ -343,6 +343,7 @@ set(HACDCPF_SOURCES
   src/optimal_power_flow/dc_opf.cpp
   src/optimal_power_flow/parity_formulation.cpp
   src/optimal_power_flow/parity_ipm.cpp
+  src/optimal_power_flow/three_phase_hybrid_opf.cpp
   src/optimal_power_flow/reactive_power_opt.cpp
   # ── io (always-available: JSON / MATPOWER / case builders) ───────────────
   src/io/import_report.cpp
@@ -388,6 +389,7 @@ set(HACDCPF_SOURCES
   src/graph/reduction_plan.cpp
   src/graph/series_reduction.cpp
   src/graph/kron_reduction.cpp
+  src/graph/sparse_kron_reduction.cpp
   src/graph/result_recovery.cpp
   # ── short circuit analysis ───────────────────────────────────────────────
   src/short_circuit/short_circuit.cpp
@@ -712,6 +714,31 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/three_phase_hybrid_acdc_pf_study.cp
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -DNDEBUG>
     $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>)
   hacdcpf_copy_opendss_runtime(three_phase_hybrid_acdc_pf_study)
+endif()
+
+# Phase-node graph-reduction paper benchmark and reproducibility audit.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/phase_graph_reduction_benchmark.cpp")
+  add_executable(phase_graph_reduction_benchmark
+    tools/phase_graph_reduction_benchmark.cpp)
+  target_link_libraries(phase_graph_reduction_benchmark PRIVATE hacdcpf::hacdcpf)
+  target_compile_definitions(phase_graph_reduction_benchmark PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  target_compile_options(phase_graph_reduction_benchmark PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -DNDEBUG>
+    $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>)
+  hacdcpf_copy_opendss_runtime(phase_graph_reduction_benchmark)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/phase_hybrid_opf_benchmark.cpp")
+  add_executable(phase_hybrid_opf_benchmark
+    tools/phase_hybrid_opf_benchmark.cpp)
+  target_link_libraries(phase_hybrid_opf_benchmark PRIVATE hacdcpf::hacdcpf)
+  target_compile_definitions(phase_hybrid_opf_benchmark PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  target_compile_options(phase_hybrid_opf_benchmark PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -DNDEBUG>
+    $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>)
+  hacdcpf_copy_opendss_runtime(phase_hybrid_opf_benchmark)
 endif()
 
 # ── SPPT Verified-Intelligent-Modeling agent-loop demo (Alg. 2 / Thm. 8.9) ───

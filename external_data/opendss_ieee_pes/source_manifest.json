@@ -58,6 +58,22 @@
       "provenance": "OpenDSS official SourceForge Version8 IEEETestCases/13Bus raw coordinate file",
       "license_or_terms": "OpenDSS_official_reference_data",
       "local_path": "external_data/opendss_ieee_pes/opendss_reference/13_node/official_full/IEEE13Node_BusXY.csv"
+    },
+    {
+      "source_id": "dss_extensions_ieee_reference_cases",
+      "source_url": "https://github.com/dss-extensions/electricdss-tst/archive/refs/heads/master.zip",
+      "source_commit": "3b208397160213cae4a9e2d0a7d1aa3528ce26e1",
+      "download_date": "2026-07-17",
+      "sha256": "ace1ae8d669989d204ce67754cfc6752d3cf517333d1767cddba7a4fedaeea53",
+      "provenance": "DSS-Extensions filtered copy of the OpenDSS official SVN test repository",
+      "license_or_terms": "OpenDSS_official_reference_data",
+      "local_path": "external_data/opendss_ieee_pes/opendss_reference",
+      "extracted_subtrees": [
+        "34_node",
+        "123_node",
+        "8500_node",
+        "IEEELineCodes.DSS"
+      ]
     }
   ],
   "derivations": [

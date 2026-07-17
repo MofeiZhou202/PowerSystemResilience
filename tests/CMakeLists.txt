@@ -262,6 +262,7 @@ hacdcpf_add_test(test_graph test_graph.cpp)
 # Kron (Schur complement) reduction: Y-bus partitioning, voltage recovery,
 # fill-in guard, extended injection variant.
 hacdcpf_add_test(test_graph_kron test_graph_kron.cpp)
+hacdcpf_add_test(test_three_phase_hybrid_opf test_three_phase_hybrid_opf.cpp)
 
 # Graph aggregation round-trip: solve PF/OPF before vs after network-level
 # aggregation (switch/breaker contraction, series/pendant reduction) and assert
