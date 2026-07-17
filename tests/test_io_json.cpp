@@ -108,7 +108,7 @@ TEST_CASE("JSON round-trip: 2-bus system serialises and deserialises", "[io][jso
     CHECK_THAT(restored.ac.branches[0].b0_pu, WithinAbs(0.001, 1e-9));
 }
 
-TEST_CASE("JSON round-trip: renewable operating costs are preserved",
+TEST_CASE("JSON round-trip: renewable costs and islanding roles are preserved",
           "[io][json][roundtrip][cost]") {
     auto orig = make_2bus();
 
@@ -119,6 +119,8 @@ TEST_CASE("JSON round-trip: renewable operating costs are preserved",
     renewable.p_rated_mw = 10.0;
     renewable.cost_c1 = 3.25;
     renewable.cost_curtail_mwh = 42.0;
+    renewable.grid_forming = true;
+    renewable.anti_islanding = false;
     orig.ac.renewable_gens.push_back(renewable);
 
     PVSystem pv;
@@ -126,7 +128,26 @@ TEST_CASE("JSON round-trip: renewable operating costs are preserved",
     pv.bus = 2;
     pv.p_mw = 5.0;
     pv.cost_c1 = 2.5;
+    pv.grid_forming = true;
+    pv.anti_islanding = false;
     orig.ac.pv_systems.push_back(pv);
+
+    StaticGenerator sgen;
+    sgen.index = 1;
+    sgen.bus = 2;
+    sgen.p_mw = 1.0;
+    sgen.grid_forming = true;
+    sgen.anti_islanding = false;
+    orig.ac.static_generators.push_back(sgen);
+
+    Storage storage;
+    storage.index = 1;
+    storage.bus = 2;
+    storage.pmax_mw = 1.0;
+    storage.e_rated_mwh = 2.0;
+    storage.grid_forming = true;
+    storage.anti_islanding = false;
+    orig.ac.storage.push_back(storage);
 
     DCBus dc_bus;
     dc_bus.index = 1;
@@ -141,10 +162,20 @@ TEST_CASE("JSON round-trip: renewable operating costs are preserved",
     const auto restored = from_json(to_json(orig));
     REQUIRE(restored.ac.renewable_gens.size() == 1);
     REQUIRE(restored.ac.pv_systems.size() == 1);
+    REQUIRE(restored.ac.static_generators.size() == 1);
+    REQUIRE(restored.ac.storage.size() == 1);
     REQUIRE(restored.dc.pv_arrays.size() == 1);
     CHECK_THAT(restored.ac.renewable_gens.front().cost_c1, WithinAbs(3.25, 1e-12));
     CHECK_THAT(restored.ac.renewable_gens.front().cost_curtail_mwh, WithinAbs(42.0, 1e-12));
     CHECK_THAT(restored.ac.pv_systems.front().cost_c1, WithinAbs(2.5, 1e-12));
+    CHECK(restored.ac.renewable_gens.front().grid_forming);
+    CHECK_FALSE(restored.ac.renewable_gens.front().anti_islanding);
+    CHECK(restored.ac.pv_systems.front().grid_forming);
+    CHECK_FALSE(restored.ac.pv_systems.front().anti_islanding);
+    CHECK(restored.ac.static_generators.front().grid_forming);
+    CHECK_FALSE(restored.ac.static_generators.front().anti_islanding);
+    CHECK(restored.ac.storage.front().grid_forming);
+    CHECK_FALSE(restored.ac.storage.front().anti_islanding);
     CHECK_THAT(restored.dc.pv_arrays.front().cost_c1, WithinAbs(1.75, 1e-12));
 }
 

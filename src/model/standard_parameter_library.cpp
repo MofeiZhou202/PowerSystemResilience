@@ -400,25 +400,25 @@ StandardParameterLibrary make_standard_parameter_library(
            ParameterIssueSeverity::Error, baseline,
            "One-way discharging efficiency."),
       rule("reliability.ac_overhead.failure_rate", "Reliability - overhead line",
-           "failure_rate", "Failure rate", 0.50, "occ/yr", 1e-6, 100.0,
+           "failure_rate", "Failure rate per kilometre", 0.50, "occ/(km*yr)", 1e-6, 100.0,
            ParameterIssueSeverity::Warning, reliability_source,
-           "Annual failure frequency for one overhead-line component."),
+           "Annual failure frequency per kilometre of overhead line; model completion multiplies by line length."),
       rule("reliability.ac_overhead.mttr_hr", "Reliability - overhead line",
            "mttr_hr", "Mean repair time", 8.0, "h", 0.01, 8760.0,
            ParameterIssueSeverity::Warning, reliability_source,
            "Mean time to restore an overhead-line component."),
       rule("reliability.ac_cable.failure_rate", "Reliability - cable",
-           "failure_rate", "Failure rate", 0.08, "occ/yr", 1e-6, 100.0,
+           "failure_rate", "Failure rate per kilometre", 0.08, "occ/(km*yr)", 1e-6, 100.0,
            ParameterIssueSeverity::Warning, reliability_source,
-           "Annual failure frequency for one underground-cable component."),
+           "Annual failure frequency per kilometre of underground cable; model completion multiplies by line length."),
       rule("reliability.ac_cable.mttr_hr", "Reliability - cable",
            "mttr_hr", "Mean repair time", 24.0, "h", 0.01, 8760.0,
            ParameterIssueSeverity::Warning, reliability_source,
            "Mean time to locate, excavate and repair a cable fault."),
       rule("reliability.ac_branch.failure_rate", "Reliability - other line",
-           "failure_rate", "Failure rate", 0.30, "occ/yr", 1e-6, 100.0,
+           "failure_rate", "Failure rate per kilometre", 0.30, "occ/(km*yr)", 1e-6, 100.0,
            ParameterIssueSeverity::Warning, reliability_source,
-           "Fallback annual failure frequency for an unclassified AC branch."),
+           "Fallback annual failure frequency per kilometre for an unclassified AC branch; model completion multiplies by line length."),
       rule("reliability.ac_branch.mttr_hr", "Reliability - other line",
            "mttr_hr", "Mean repair time", 6.0, "h", 0.01, 8760.0,
            ParameterIssueSeverity::Warning, reliability_source,
@@ -957,8 +957,13 @@ StandardParameterApplyReport apply_standard_parameter_library(
     const std::string prefix = overhead
         ? "reliability.ac_overhead"
         : (cable ? "reliability.ac_cable" : "reliability.ac_branch");
-    fill_positive(branch.failure_rate,
-                  value_or(library, prefix + ".failure_rate", 0.30),
+    const double rate_per_km =
+        value_or(library, prefix + ".failure_rate", 0.30);
+    const double exposure_km =
+        std::isfinite(branch.length_km) && branch.length_km > kMissing
+            ? branch.length_km
+            : 1.0;
+    fill_positive(branch.failure_rate, rate_per_km * exposure_km,
                   prefix + ".failure_rate", report);
     fill_positive(branch.mttr_hr,
                   value_or(library, prefix + ".mttr_hr", 6.0),

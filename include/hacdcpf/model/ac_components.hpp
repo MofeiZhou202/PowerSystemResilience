@@ -350,6 +350,8 @@ struct StaticGenerator {
   double scaling{1.0};
 
   bool controllable{false};
+  bool grid_forming{false};
+  bool anti_islanding{true};
   double v_ref_pu{1.0};
   double k_p{0.0};
   double k_q{0.0};
@@ -387,6 +389,8 @@ struct RenewableGen {
   double qmin_mvar{0.0};
 
   bool curtailable{true};
+  bool grid_forming{false};
+  bool anti_islanding{true};
   double cost_c1{0.0};
   double cost_curtail_mwh{0.0};
   double capacity_factor{0.3};
@@ -421,6 +425,8 @@ struct PVSystem {
 
   PVControlMode control_mode{PVControlMode::MPPT};
   bool controllable{false};
+  bool grid_forming{false};
+  bool anti_islanding{true};
   double v_ac_set_pu{1.0};
   double v_dc_set_pu{1.0};
 
@@ -599,6 +605,7 @@ struct Storage {
 
   bool controllable{true};
   bool grid_forming{false};       // true = can black-start / anchor an island in restoration studies
+  bool anti_islanding{true};      // disconnects if no external or grid-forming voltage anchor remains
   std::string control_mode;
   std::string type;
 

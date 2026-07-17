@@ -969,6 +969,7 @@ TEST_CASE("hybrid LP: DC power flow constrains meshed loop flow (F9)",
   opt.max_iterations = 50;
   opt.seed = 3;
   opt.compute_tail_risk = false;
+  opt.data_policy.default_policy = ReliabilityDefaultPolicy::StrictCaseDataOnly;
   auto r = run_nonsequential_mc(sys, opt);
 
   CHECK(r.model_scope == "hybrid-acdc-network-lp");
@@ -976,6 +977,9 @@ TEST_CASE("hybrid LP: DC power flow constrains meshed loop flow (F9)",
   // shedding ~1 MW even in the healthy state (~1 MW * 8760 h).  A pure transport
   // LP would split freely and report ~0 EENS.
   CHECK(r.eens_mwh_yr > 1000.0);
+  CHECK(r.baseline_eens_mwh_yr > 1000.0);
+  CHECK(r.incremental_eens_mwh_yr == Approx(0.0).margin(1e-9));
+  CHECK(r.model_limitations.find("N-0 state already curtails") != std::string::npos);
 }
 
 // ─────────────────────────────────────────────────────────────────────────

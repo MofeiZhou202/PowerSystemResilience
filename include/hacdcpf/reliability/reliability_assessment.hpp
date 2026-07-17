@@ -245,6 +245,10 @@ struct ReliabilityResult {
   // System-level reliability indices
   double eens_mwh_yr{0.0};   // Expected Energy Not Supplied (MWh/yr)
   double edns_mw{0.0};       // Expected Demand Not Supplied (MW)
+  double baseline_eens_mwh_yr{0.0};   // N-0 curtailment annualized (MWh/yr)
+  double baseline_edns_mw{0.0};       // N-0 curtailment (MW)
+  double incremental_eens_mwh_yr{0.0}; // Outage-state excess above N-0 (MWh/yr)
+  double incremental_edns_mw{0.0};     // Expected outage-state excess above N-0 (MW)
   double lole_hr_yr{0.0};    // Loss of Load Expectation (hr/yr)
   double lolf_occ_yr{0.0};   // Loss of Load Frequency (occ/yr, SEQ only)
   double plc{0.0};           // Probability of Load Curtailment

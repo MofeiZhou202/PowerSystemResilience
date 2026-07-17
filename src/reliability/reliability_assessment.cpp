@@ -1235,7 +1235,8 @@ ReliabilityResult run_nonsequential_mc(
   
   // Accumulators
   double sum_dns = 0.0;
-  double sum_dns_sq = 0.0;
+  double sum_incremental_dns = 0.0;
+  double sum_incremental_dns_sq = 0.0;
   int loss_hours = 0;
 	  std::vector<double> nodal_dns_sum(nb, 0.0);
 	  std::vector<double> comp_fail_count(nc, 0.0);
@@ -1277,30 +1278,49 @@ ReliabilityResult run_nonsequential_mc(
     spdlog::warn("NSQ MC: N-0 baseline has {:.3f} MW curtailment — "
                  "base-case infeasibility will affect all samples' EENS/LOLE",
                  n0_result.curtailment_mw);
+  result.baseline_edns_mw = n0_result.curtailment_mw;
+  result.baseline_eens_mwh_yr = n0_result.curtailment_mw * 8760.0;
+  if (n0_result.curtailment_mw > options.curtail_threshold_mw) {
+    if (!result.model_limitations.empty()) result.model_limitations += " ";
+    result.model_limitations +=
+        "The N-0 state already curtails " +
+        std::to_string(n0_result.curtailment_mw) +
+        " MW; raw EENS includes this base-case deficit. Use incremental EENS "
+        "for contingency risk and repair the imported topology/source model.";
+  }
 
   auto consume_nsq_sample = [&](int iter,
                                 const std::vector<bool>& state,
                                 const StateEvalResult& eval_result) {
     // Accumulate results
     double dns = eval_result.curtailment_mw;
+    const double incremental_dns =
+        std::max(0.0, dns - n0_result.curtailment_mw);
     sum_dns += dns;
-    sum_dns_sq += dns * dns;
+    sum_incremental_dns += incremental_dns;
+    sum_incremental_dns_sq += incremental_dns * incremental_dns;
 
-    // F8: record the raw per-state DNS and loss flag; annual samples are built by
-    // bootstrap aggregation after the loop (a per-state dns*8760 is NOT annual).
+    // F8: bootstrap the contingency increment rather than annualizing the
+    // imported model's N-0 deficit as if it were a random outage state.
     if (options.compute_tail_risk) {
-      hourly_dns_samples.push_back(dns);
-      hourly_loss_samples.push_back(eval_result.is_loss_state ? 1u : 0u);
+      hourly_dns_samples.push_back(incremental_dns);
+      hourly_loss_samples.push_back(
+          incremental_dns > options.curtail_threshold_mw ? 1u : 0u);
     }
     
-	    if (eval_result.is_loss_state) {
+	    if (incremental_dns > options.curtail_threshold_mw) {
 	      ++loss_hours;
 	      ++total_loss_samples;
-	      total_loss_weighted_sum += dns;
+	      total_loss_weighted_sum += incremental_dns;
 	      
-	      // Accumulate nodal curtailment
+	      // Attribute only outage-state excess above the matching N-0 bus
+	      // curtailment. This keeps imported base-case islands out of the risk map.
 	      for (size_t b = 0; b < nb && b < eval_result.nodal_curtailment_mw.size(); ++b) {
-	        nodal_dns_sum[b] += eval_result.nodal_curtailment_mw[b];
+	        const double n0_bus = b < n0_result.nodal_curtailment_mw.size()
+	                                  ? n0_result.nodal_curtailment_mw[b]
+	                                  : 0.0;
+	        nodal_dns_sum[b] +=
+	            std::max(0.0, eval_result.nodal_curtailment_mw[b] - n0_bus);
 	      }
 	      
 	      // Track component failures during loss.  The conditional count is a
@@ -1309,34 +1329,35 @@ ReliabilityResult run_nonsequential_mc(
 	      for (size_t c = 0; c < nc; ++c) {
 	        if (state[c]) {
 	          comp_fail_count[c] += 1.0;
-	          comp_loss_weighted_sum[c] += dns;
+	          comp_loss_weighted_sum[c] += incremental_dns;
 	        }
 	      }
 	    }
     
     // Update expected indices
-    double edns = sum_dns / iter;
-    double eens = edns * 8760.0;  // MWh/yr
+    const double incremental_edns = sum_incremental_dns / iter;
     double lole = (double)loss_hours / iter * 8760.0;  // hr/yr
     (void)lole;  // Used in verbose output
     
     // Calculate CoV
     double cov = 0.0;
-    if (iter > 1 && edns > 0) {
-      double var = (sum_dns_sq / iter) - (edns * edns);
+    if (iter > 1 && incremental_edns > 0) {
+      double var = (sum_incremental_dns_sq / iter) -
+                   (incremental_edns * incremental_edns);
       if (var > 0) {
         double std_dev = std::sqrt(var);
-        cov = std_dev / (edns * std::sqrt((double)iter));
+        cov = std_dev /
+              (incremental_edns * std::sqrt(static_cast<double>(iter)));
       }
     }
     
     // Record history
-    result.eens_history.push_back(eens);
+    result.eens_history.push_back(incremental_edns * 8760.0);
     result.cov_history.push_back(cov);
     
     // Progress callback
     if (options.progress_callback) {
-      if (!options.progress_callback(iter, eens, cov)) {
+      if (!options.progress_callback(iter, incremental_edns * 8760.0, cov)) {
         spdlog::info("NSQ MC: Cancelled by user at iteration {}", iter);
         result.iterations_used = iter;  // P2a: ensure denominator is valid
         return false;
@@ -1345,8 +1366,8 @@ ReliabilityResult run_nonsequential_mc(
     
     // Verbose output
     if (options.verbose && iter % 1000 == 0) {
-      spdlog::info("NSQ MC: Iter {} | EENS={:.2f} MWh/yr | LOLE={:.2f} hr/yr | CoV={:.4f}",
-                   iter, eens, lole, cov);
+      spdlog::info("NSQ MC: Iter {} | incremental EENS={:.2f} MWh/yr | LOLE={:.2f} hr/yr | CoV={:.4f}",
+                   iter, incremental_edns * 8760.0, lole, cov);
     }
     
     // Check convergence
@@ -1512,6 +1533,8 @@ ReliabilityResult run_nonsequential_mc(
   }
   result.edns_mw = sum_dns / n;
   result.eens_mwh_yr = result.edns_mw * 8760.0;
+  result.incremental_edns_mw = sum_incremental_dns / n;
+  result.incremental_eens_mwh_yr = result.incremental_edns_mw * 8760.0;
   result.lole_hr_yr = (double)loss_hours / n * 8760.0;
   result.plc = (double)loss_hours / n;
   result.final_cov = result.cov_history.empty() ? 0.0 : result.cov_history.back();

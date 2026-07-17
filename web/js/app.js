@@ -112,6 +112,8 @@ const App = (() => {
   const _canvasPlaybackControllers = new Map();
   let _activeWorkflow = 'steady';
   let _parameterLibraryData = null;
+  const _reliabilityResultRefs = new Map();
+  let _reliabilityResultRefSequence = 0;
   let _importedEvTrafficScenario = null;
   let _evptDesignerScenario = null;
   let _evptDesignerTab = 'nodes';
@@ -1162,13 +1164,18 @@ const App = (() => {
     setStatus(data.valid ? '参数校验通过' : `参数错误 ${data.error_count || 0}`, data.valid ? '' : 'error');
   }
 
-  async function applyParameterLibraryDefaults() {
+  async function applyParameterLibraryDefaults(options = {}) {
+    if (!_parameterLibraryData && !await loadParameterLibrary()) {
+      setStatus('参数库载入失败', 'error');
+      return;
+    }
     if (!await saveParameterLibrary({ quiet: true })) return;
     if (!await syncToBackend()) {
       setStatus('模型同步失败', 'error');
       return;
     }
-    if (!window.confirm('仅为缺失或无效字段应用当前参数库默认值，并使已有分析结果失效。继续？')) return;
+    if (options.confirm !== false &&
+        !window.confirm('仅为缺失或无效字段应用当前参数库默认值，并使已有分析结果失效。继续？')) return;
     setStatus('补全模型参数...', 'busy');
     const data = await apiPost('/api/session/parameter_library/apply', {});
     if (!data) {
@@ -1176,9 +1183,11 @@ const App = (() => {
       return;
     }
     applyLoadedSystem(data, '参数库');
-    renderParameterLibraryDiagnostics(data.parameter_validation);
-    setActiveResultGroup('parameterLibrary');
-    switchTab('results');
+    if (options.showResults !== false) {
+      renderParameterLibraryDiagnostics(data.parameter_validation);
+      setActiveResultGroup('parameterLibrary');
+      switchTab('results');
+    }
     const changed = data.parameter_apply?.fields_changed || 0;
     setStatus(`已补全 ${changed} 个字段`);
     log(`参数库已补全 ${changed} 个缺失字段`, 'success');
@@ -1187,6 +1196,7 @@ const App = (() => {
       log(`可靠性数据覆盖：${quality.components_with_reliability_data || 0}/${quality.components_total || 0} 个元件`,
         (quality.missing_required_data || []).length ? 'warn' : 'success');
     }
+    return data;
   }
 
   async function importParameterLibrary(file) {
@@ -2399,6 +2409,14 @@ const App = (() => {
 	        if (methodInput && recommendedMethod &&
 	            Array.from(methodInput.options || []).some(option => option.value === recommendedMethod)) {
 	          methodInput.value = recommendedMethod;
+	        }
+	        const reliabilityModelInput = document.getElementById('relPhysicalModel');
+	        const recommendedReliabilityModel = data._recommended_reliability_model || '';
+	        if (reliabilityModelInput && recommendedReliabilityModel &&
+	            Array.from(reliabilityModelInput.options || []).some(
+	              option => option.value === recommendedReliabilityModel)) {
+	          reliabilityModelInput.value = recommendedReliabilityModel;
+	          updateReliabilityControlState();
 	        }
 	        const toleranceInput = document.getElementById('pfTol');
 	        const recommendedTolerance = Number(data._recommended_pf_tolerance);
@@ -8887,6 +8905,44 @@ const App = (() => {
 
   function reliabilityContingencyCompId(c, maps) {
     return rowCanvasCompId(c, maps);
+  }
+
+  function reliabilitySystemSearchRow(result) {
+    if (!result || typeof Canvas === 'undefined' || !Canvas.buildSystemJson) return null;
+    const bucketMaps = Object.fromEntries(SYSTEM_SEARCH_SOURCES.map(source => [source.bucket, {}]));
+    const row = HACDCSearch.resultRow(
+      Canvas.buildSystemJson(), result,
+      type => HySimCore.ResultMapping?.bucketFor(type, bucketMaps));
+    return row ? { ...row, compId: undefined } : null;
+  }
+
+  function navigateReliabilityResult(result, compId) {
+    const headless = !!(Canvas.isHeadless && Canvas.isHeadless());
+    if (!headless && Number.isInteger(Number(compId)) && Canvas.panToComponent) {
+      Canvas.panToComponent(Number(compId));
+      return true;
+    }
+    const searchRow = reliabilitySystemSearchRow(result);
+    if (!searchRow) return false;
+    navigateToSearchResult(searchRow);
+    const bus = resolveBusFromRow(searchRow) ||
+      (Number(result.primary_bus) > 0
+        ? { domain: String(result.component_domain || '').toLowerCase() === 'dc' ? 'dc' : 'ac',
+            index: Number(result.primary_bus) }
+        : null);
+    if (headless && bus && Number.isFinite(bus.index)) {
+      openSubDiagramFor(bus.domain, bus.index, 2);
+    }
+    return true;
+  }
+
+  function reliabilityClickAttr(result, maps) {
+    const compId = reliabilityContingencyCompId(result, maps);
+    if (Number.isInteger(Number(compId))) return compClickAttr(compId);
+    if (!(Canvas.isHeadless && Canvas.isHeadless())) return '';
+    const ref = String(++_reliabilityResultRefSequence);
+    _reliabilityResultRefs.set(ref, result);
+    return ` class="topo-clickable" data-reliability-ref="${ref}" role="button" tabindex="0"`;
   }
 
   function renderAllPowerFlowComponentStatus(data, busMap, options = {}) {
@@ -16500,10 +16556,64 @@ const App = (() => {
 	      updateReliabilityControlState();
 	    }
 
+	    function updateReliabilityParameterAdvice(quality, state = 'warning') {
+	      const panel = document.getElementById('relParameterAdvice');
+	      const text = document.getElementById('relParameterAdviceText');
+	      const button = document.getElementById('btnRelApplyParameters');
+	      if (!panel || !text || !button) return;
+	      if (!quality) {
+	        panel.hidden = true;
+	        return;
+	      }
+	      const covered = Number(quality.components_with_reliability_data || 0);
+	      const total = Number(quality.components_total || 0);
+	      panel.hidden = false;
+	      button.disabled = state === 'busy';
+	      if (state === 'busy') {
+	        text.textContent = '正在应用当前参数库...';
+	      } else if (state === 'applied') {
+	        text.textContent = `参数已写入当前会话模型，可靠性数据覆盖 ${covered}/${total}。`;
+	      } else {
+	        text.textContent = `当前模型可靠性数据覆盖 ${covered}/${total}；直接计算会采用统一回退值。`;
+	      }
+	    }
+
+	    async function applyReliabilityParametersAndRun() {
+	      if (!window.confirm(
+	          '将按当前模型参数库补全缺失的故障率和修复时间，并写入当前会话模型。原始 XML 不会被覆盖。继续？')) return;
+	      const existing = await apiGet('/api/session/reliability/data_quality', { quiet: true });
+	      updateReliabilityParameterAdvice(existing || {}, 'busy');
+	      const data = await applyParameterLibraryDefaults({ confirm: false, showResults: false });
+	      const quality = data?.reliability_data_quality;
+	      if (!data || !quality || Number(quality.components_with_reliability_data || 0) === 0) {
+	        updateReliabilityParameterAdvice(quality || existing || {}, 'warning');
+	        setStatus('可靠性参数补全失败', 'error');
+	        return;
+	      }
+	      updateReliabilityParameterAdvice(quality, 'applied');
+	      await runReliability({ skipParameterCheck: true });
+	    }
+
 	    // Bar 3: Reliability — run + export. Backend live.
-	    async function runReliability() {
+	    async function runReliability(options = {}) {
 	      setStatus('可靠性分析中...', 'busy');
 	      if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+	      if (!options.skipParameterCheck) {
+	        const quality = await apiGet('/api/session/reliability/data_quality');
+	        if (!quality) {
+	          setStatus('可靠性参数校验失败', 'error');
+	          return;
+	        }
+	        const total = Number(quality.components_total || 0);
+	        const covered = Number(quality.components_with_reliability_data || 0);
+	        if (total > 0 && covered === 0) {
+	          updateReliabilityParameterAdvice(quality, 'warning');
+	          setStatus('请先补全可靠性参数', 'error');
+	          log('当前模型没有有效故障率和修复时间；请点击“应用参数库后运行”', 'warn');
+	          return;
+	        }
+	        updateReliabilityParameterAdvice(null);
+	      }
 	      const selectedMethod = (document.getElementById('relMethod')?.value) || 'nsq';
 	      const physicalModel = (document.getElementById('relPhysicalModel')?.value) || 'auto';
 	      const method = physicalModel === 'restoration_milp' ? 'three_stage' : selectedMethod;
@@ -16745,8 +16855,8 @@ const App = (() => {
 
 		    function relFocusMetricKeys(focus) {
 		      const groups = {
-		        all: ['eens_mwh_yr', 'edns_mw', 'lole_hr_yr', 'lolf_occ_yr', 'lolp', 'plc', 'saifi', 'saidi', 'asai', 'eens_cost'],
-		        eens: ['eens_mwh_yr', 'eens_kwh_yr', 'edns_mw'],
+		        all: ['eens_mwh_yr', 'edns_mw', 'baseline_eens_mwh_yr', 'raw_eens_mwh_yr', 'lole_hr_yr', 'lolf_occ_yr', 'lolp', 'plc', 'saifi', 'saidi', 'asai', 'eens_cost'],
+		        eens: ['eens_mwh_yr', 'eens_kwh_yr', 'edns_mw', 'baseline_eens_mwh_yr', 'raw_eens_mwh_yr'],
 		        lole: ['lole_hr_yr', 'lolf_occ_yr', 'lolp', 'lold_hr', 'plc'],
 		        customer: ['saifi', 'saidi', 'saidi_min', 'caidi', 'asai'],
 		        cost: ['eens_cost', 'eens_mwh_yr'],
@@ -16757,8 +16867,10 @@ const App = (() => {
 		    function renderReliabilityKpiTiles(data, method) {
 		      const focus = relSelectedMetricFocus(data);
 		      const allowed = relFocusMetricKeys(focus);
+		      const baselineEens = relNumber(relMetricValue(data, 'baseline_eens_mwh_yr')) || 0;
 		      const allItems = [
-		        ['EENS', 'eens_mwh_yr', 'MWh/yr', 1],
+		        [baselineEens > 1e-9 ? '故障增量 EENS' : 'EENS', 'eens_mwh_yr', 'MWh/yr', 1],
+		        ['N-0 基线 EENS', 'baseline_eens_mwh_yr', 'MWh/yr', 1],
 		        ['EDNS', 'edns_mw', 'MW', 3],
 		        ['LOLE', 'lole_hr_yr', 'h/yr', 2],
 		        ['LOLF', 'lolf_occ_yr', 'occ/yr', 3],
@@ -16783,6 +16895,19 @@ const App = (() => {
 	      });
 	      html += '</div>';
 	      return html;
+	    }
+
+	    function renderReliabilityBaselineAuditHtml(data) {
+	      const baselineMw = relNumber(relMetricValue(data, 'baseline_edns_mw')) || 0;
+	      const baselineEens = relNumber(relMetricValue(data, 'baseline_eens_mwh_yr')) || 0;
+	      if (baselineMw <= 1e-9 && baselineEens <= 1e-9) return '';
+	      const rawEens = relNumber(relMetricValue(data, 'raw_eens_mwh_yr')) || 0;
+	      const incrementalEens = relNumber(relMetricValue(data, 'incremental_eens_mwh_yr')) ??
+	        relNumber(relMetricValue(data, 'eens_mwh_yr')) ?? 0;
+	      const html = `<div class="sub-hint-warn">正常态已存在 ${baselineMw.toFixed(3)} MW 未供电，` +
+	        `全年折算 ${baselineEens.toFixed(2)} MWh。原始总 EENS ${rawEens.toFixed(2)} MWh，` +
+	        `故障增量 EENS ${incrementalEens.toFixed(2)} MWh。请检查孤岛、开关状态和电源连接；风险排序已按故障增量计算。</div>`;
+	      return renderReliabilityPanel('N-0 基线审计', html);
 	    }
 
 		    function renderReliabilityDashboardShell(data, method) {
@@ -16824,6 +16949,7 @@ const App = (() => {
 		        y: relMetricField(r, basis),
 		        pct: Number(r.loss_weighted_risk ?? r.importance ?? 0) || 0,
 		        compId: reliabilityContingencyCompId(r, relMaps),
+		        row: r,
 		      }));
 		      const riskChart = document.getElementById('relRiskChart');
 		      if (riskChart && riskRows.length) {
@@ -16843,10 +16969,8 @@ const App = (() => {
 	        if (riskChart.on) {
 	          riskChart.on('plotly_click', ev => {
 	            const idx = Number(ev?.points?.[0]?.pointIndex);
-	            const compId = Number.isInteger(idx) ? riskRows[riskRows.length - 1 - idx]?.compId : undefined;
-	            if (compId != null && typeof Canvas !== 'undefined' && Canvas.panToComponent) {
-	              Canvas.panToComponent(compId);
-	            }
+	            const target = Number.isInteger(idx) ? riskRows[riskRows.length - 1 - idx] : null;
+	            if (target) navigateReliabilityResult(target.row, target.compId);
 	          });
 	        }
 	      }
@@ -16876,9 +17000,12 @@ const App = (() => {
 	        if (nodalChart.on) {
 	          nodalChart.on('plotly_click', ev => {
 	            const idx = Number(ev?.points?.[0]?.pointIndex);
-	            const compId = Number.isInteger(idx) ? nodal[nodal.length - 1 - idx]?.compId : undefined;
-	            if (compId != null && typeof Canvas !== 'undefined' && Canvas.panToComponent) {
-	              Canvas.panToComponent(compId);
+	            const target = Number.isInteger(idx) ? nodal[nodal.length - 1 - idx] : null;
+	            if (!target) return;
+	            if (target.compId != null && !(Canvas.isHeadless && Canvas.isHeadless())) {
+	              Canvas.panToComponent(target.compId);
+	            } else if (Canvas.isHeadless && Canvas.isHeadless()) {
+	              openSubDiagramFor('ac', target.bus, 2);
 	            }
 	          });
 	        }
@@ -16942,10 +17069,13 @@ const App = (() => {
 		    function renderReliabilityMetricsHtml(data, method) {
 		      const focus = relSelectedMetricFocus(data);
 		      const allowed = relFocusMetricKeys(focus);
+		      const baselineEens = relNumber(relMetricValue(data, 'baseline_eens_mwh_yr')) || 0;
 		      const rows = [
-		        ['EENS (MWh/yr)', 'eens_mwh_yr', 2, 1, 'eens'],
+		        [baselineEens > 1e-9 ? '故障增量 EENS (MWh/yr)' : 'EENS (MWh/yr)', 'eens_mwh_yr', 2, 1, 'eens'],
 		        ['EENS (kWh/yr)', 'eens_kwh_yr', 1, 1, 'eens'],
 		        ['EDNS (MW)', 'edns_mw', 3, 1, 'eens'],
+		        ['N-0 基线 EENS (MWh/yr)', 'baseline_eens_mwh_yr', 2, 1, 'eens'],
+		        ['原始总 EENS (MWh/yr)', 'raw_eens_mwh_yr', 2, 1, 'eens'],
 		        ['LOLE (h/yr)', 'lole_hr_yr', 2, 1, 'lole'],
 		        ['LOLF (occ/yr)', 'lolf_occ_yr', 3, 1, 'lole'],
 		        ['LOLP', 'lolp', 6, 1, 'lole'],
@@ -17116,6 +17246,8 @@ const App = (() => {
 		    }
 
 		    function showReliabilityResults(data, method) {
+		      _reliabilityResultRefs.clear();
+		      _reliabilityResultRefSequence = 0;
 		      document.getElementById('resultsEmpty').style.display = 'none';
 		      document.getElementById('resultsContent').style.display = 'block';
 		      setActiveResultGroup('reliability');
@@ -17128,6 +17260,7 @@ const App = (() => {
 		        ? `${Number(data.execution_time_sec).toFixed(3)} s` : '—';
 		      let html = `<div style="margin-bottom:8px;"><b>方法：</b>${escapeHtml(methodLabel)} · <b>计算时间：</b>${relTime}</div>`;
 		      html += renderReliabilityKpiTiles(data, method);
+		      html += renderReliabilityBaselineAuditHtml(data);
 		      html += renderReliabilityDashboardShell(data, method);
 		      html += renderReliabilityComponentModelHtml(data);
 		      html += renderFailureModeCoverageHtml(data);
@@ -17142,8 +17275,7 @@ const App = (() => {
 		        html += `<table><thead><tr><th>#</th><th>元件/模式</th><th>类型</th><th>${escapeHtml(weakMeta.label)}</th><th>风险占比</th><th>关联EENS</th><th>LOLE</th></tr></thead><tbody>`;
 		        const ccBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
 		        weakRows.slice(0, 15).forEach((c, i) => {
-		          const compId = reliabilityContingencyCompId(c, ccBusMap);
-		          const clk = compClickAttr(compId);
+		          const clk = reliabilityClickAttr(c, ccBusMap);
 		          const fallbackName = c.line_id != null
 		            ? `故障 ${c.line_id} (${c.from_bus ?? '—'} -> ${c.to_bus ?? '—'})`
 		            : `${c.component_type || ''}[${c.index ?? c.component_index ?? ''}]`;
@@ -17164,8 +17296,7 @@ const App = (() => {
 		          html += '<table><thead><tr><th>元件/模式</th><th>类型</th><th>激活</th><th>原因</th><th>后果</th><th>状态</th><th>EENS贡献</th><th>切负荷</th></tr></thead><tbody>';
 		          const relBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
 		          contingencyRows.slice(0, 15).forEach(c => {
-		            const compId = reliabilityContingencyCompId(c, relBusMap);
-		            const clk = compClickAttr(compId);
+		            const clk = reliabilityClickAttr(c, relBusMap);
 		            const name = c.display_name || c.mode_id || c.component_name || '—';
 		            const type = c.display_type || reliabilityComponentTypeLabel(c.component_type);
 		            const supported = c.supported === false ? (c.unsupported_reason || '不支持') : (c.data_source || '已评估');
@@ -17224,8 +17355,7 @@ const App = (() => {
 	        html += '<h4 style="margin:10px 0 4px;">三阶段故障传播与恢复</h4><table><thead><tr><th>元件</th><th>类型</th><th>状态</th><th>阶段1</th><th>阶段2</th><th>阶段3</th><th>合计(kW)</th><th>EENS</th><th>LOLE</th></tr></thead><tbody>';
 	        const tsMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
 	        faultRows.slice(0, 15).forEach(f => {
-	          const compId = reliabilityContingencyCompId(f, tsMap);
-	          const clk = compClickAttr(compId);
+	          const clk = reliabilityClickAttr(f, tsMap);
 	          const name = f.display_name || f.component_name || `故障 ${f.line_id} (${f.from_bus ?? '—'} -> ${f.to_bus ?? '—'})`;
 	          const type = f.display_type || reliabilityComponentTypeLabel(f.component_type);
 	          html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${escapeHtml(f.status || '')}</td><td>${nf(f.pls_stage1, 1)}</td><td>${nf(f.pls_stage2, 1)}</td><td>${nf(f.pls_stage3, 1)}</td><td>${nf(f.pls_total, 1)}</td><td>${nf(f.eens_contribution_mwh_yr ?? f.eens_contribution, 3)}</td><td>${nf(f.lole_contribution_hr_yr ?? f.lole_contribution, 3)}</td></tr>`;
@@ -17289,7 +17419,8 @@ const App = (() => {
 	    document.getElementById('relCyberEnabled')?.addEventListener('change', activateCyberPhysicalReliability);
 	    updateReliabilityControlState();
 	    updateSeqProfileSummary();
-	    document.getElementById('btnRunReliability')?.addEventListener('click', runReliability);
+	    document.getElementById('btnRunReliability')?.addEventListener('click', () => runReliability());
+	    document.getElementById('btnRelApplyParameters')?.addEventListener('click', applyReliabilityParametersAndRun);
     document.getElementById('btnExportReliabilityResults')?.addEventListener('click', () => {
       if (!_lastReliabilityData) {
         log('暂无可靠性分析结果可导出，请先运行可靠性分析', 'warn');
@@ -20516,6 +20647,12 @@ const App = (() => {
     // result renderer tags mappable rows with data-comp-id (exact component) or
     // data-bus (a bus id); unmappable rows carry neither and stay inert.
     document.getElementById('resultsContent')?.addEventListener('click', (ev) => {
+      const reliabilityEl = ev.target.closest('[data-reliability-ref]');
+      if (reliabilityEl) {
+        const result = _reliabilityResultRefs.get(reliabilityEl.dataset.reliabilityRef);
+        if (result) navigateReliabilityResult(result);
+        return;
+      }
       const compEl = ev.target.closest('[data-comp-id]');
       if (compEl && compEl.dataset.compId !== '') {
         const cid = parseInt(compEl.dataset.compId, 10);
@@ -20538,7 +20675,7 @@ const App = (() => {
     });
     document.getElementById('resultsContent')?.addEventListener('keydown', (ev) => {
       if (ev.key !== 'Enter' && ev.key !== ' ') return;
-      const target = ev.target.closest('[data-comp-id], [data-bus]');
+      const target = ev.target.closest('[data-comp-id], [data-bus], [data-reliability-ref]');
       if (!target) return;
       ev.preventDefault();
       target.click();

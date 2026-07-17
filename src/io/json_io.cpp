@@ -803,6 +803,9 @@ static json storage_to_json(const Storage& st) {
   j["charge_bid_price"] = st.charge_bid_price;
   j["discharge_bid_price"] = st.discharge_bid_price;
   j["daily_cycle_limit"] = st.daily_cycle_limit;
+  j["controllable"] = st.controllable;
+  j["grid_forming"] = st.grid_forming;
+  j["anti_islanding"] = st.anti_islanding;
   j["forced_outage_rate"] = st.forced_outage_rate;
   j["mttr_hr"] = st.mttr_hr;
   j["t_scheduled_hr"] = st.t_scheduled_hr;
@@ -841,6 +844,9 @@ static Storage storage_from_json(const json& j) {
   st.charge_bid_price = jget(j, "charge_bid_price", 0.0);
   st.discharge_bid_price = jget(j, "discharge_bid_price", 0.0);
   st.daily_cycle_limit = jget(j, "daily_cycle_limit", 0.0);
+  st.controllable = jget(j, "controllable", true);
+  st.grid_forming = jget(j, "grid_forming", false);
+  st.anti_islanding = jget(j, "anti_islanding", true);
   st.forced_outage_rate = jget(j, "forced_outage_rate", 0.0);
   st.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   st.t_scheduled_hr = jget(j, "t_scheduled_hr", 0.0);
@@ -938,6 +944,8 @@ static json renewable_gen_to_json(const RenewableGen& r) {
   j["qmax_mvar"] = r.qmax_mvar;
   j["qmin_mvar"] = r.qmin_mvar;
   j["curtailable"] = r.curtailable;
+  j["grid_forming"] = r.grid_forming;
+  j["anti_islanding"] = r.anti_islanding;
   j["cost_c1"] = r.cost_c1;
   j["cost_curtail_mwh"] = r.cost_curtail_mwh;
   j["capacity_factor"] = r.capacity_factor;
@@ -960,6 +968,8 @@ static RenewableGen renewable_gen_from_json(const json& j) {
   r.qmax_mvar = jget(j, "qmax_mvar", 0.0);
   r.qmin_mvar = jget(j, "qmin_mvar", 0.0);
   r.curtailable = jget(j, "curtailable", true);
+  r.grid_forming = jget(j, "grid_forming", false);
+  r.anti_islanding = jget(j, "anti_islanding", true);
   r.cost_c1 = jget(j, "cost_c1", 0.0);
   r.cost_curtail_mwh = jget(j, "cost_curtail_mwh", 0.0);
   r.capacity_factor = jget(j, "capacity_factor", 0.3);
@@ -1085,6 +1095,8 @@ static json static_generator_to_json(const StaticGenerator& g) {
   j["qmin_mvar"] = g.qmin_mvar;
   j["scaling"] = g.scaling;
   j["controllable"] = g.controllable;
+  j["grid_forming"] = g.grid_forming;
+  j["anti_islanding"] = g.anti_islanding;
   j["v_ref_pu"] = g.v_ref_pu;
   j["k_p"] = g.k_p;
   j["k_q"] = g.k_q;
@@ -1116,6 +1128,8 @@ static StaticGenerator static_generator_from_json(const json& j) {
   g.qmin_mvar = jget(j, "qmin_mvar", 0.0);
   g.scaling = jget(j, "scaling", 1.0);
   g.controllable = jget(j, "controllable", false);
+  g.grid_forming = jget(j, "grid_forming", false);
+  g.anti_islanding = jget(j, "anti_islanding", true);
   g.v_ref_pu = jget(j, "v_ref_pu", 1.0);
   g.k_p = jget(j, "k_p", 0.0);
   g.k_q = jget(j, "k_q", 0.0);
@@ -1245,6 +1259,8 @@ static json pv_system_to_json(const PVSystem& p) {
   j["qmin_mvar"] = p.qmin_mvar;
   j["control_mode"] = pv_control_str(p.control_mode);
   j["controllable"] = p.controllable;
+  j["grid_forming"] = p.grid_forming;
+  j["anti_islanding"] = p.anti_islanding;
   j["v_ac_set_pu"] = p.v_ac_set_pu;
   j["v_dc_set_pu"] = p.v_dc_set_pu;
   j["inverter_eff"] = p.inverter_eff;
@@ -1284,6 +1300,8 @@ static PVSystem pv_system_from_json(const json& j) {
   p.qmin_mvar = jget(j, "qmin_mvar", 0.0);
   p.control_mode = pv_control_from_str(jget<std::string>(j, "control_mode", "MPPT"));
   p.controllable = jget(j, "controllable", false);
+  p.grid_forming = jget(j, "grid_forming", false);
+  p.anti_islanding = jget(j, "anti_islanding", true);
   p.v_ac_set_pu = jget(j, "v_ac_set_pu", 1.0);
   p.v_dc_set_pu = jget(j, "v_dc_set_pu", 1.0);
   p.inverter_eff = jget(j, "inverter_eff", 0.97);

@@ -1677,6 +1677,11 @@
       <button id="btnImportGeneratedReliabilityScenario" class="toolbar-btn" title="导入场景生成模块导出的可靠性场景 JSON">导入生成<br>场景</button>
     </div>
     <input type="file" id="fileImportGeneratedReliabilityScenario" accept=".json" style="display:none"/>
+    <div id="relParameterAdvice" class="rel-parameter-advice" hidden>
+      <span id="relParameterAdviceText">当前模型缺少故障率和修复时间。</span>
+      <button id="btnRelApplyParameters" class="toolbar-btn" type="button"
+              title="按当前模型参数库补全缺失字段，并重新运行可靠性分析">应用参数库后运行</button>
+    </div>
     <button id="btnRunReliability" class="toolbar-btn run-btn" title="运行可靠性分析">运行可靠性分析</button>
     <button id="btnExportReliabilityResults" class="toolbar-btn" title="将可靠性分析结果导出为 JSON">结果导出</button>
   </div>

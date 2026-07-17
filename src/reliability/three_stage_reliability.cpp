@@ -206,6 +206,20 @@ double residual_microgrid_capacity_mw(const HybridPowerSystem& sys,
                            explicit_microgrid_source_capacity_mw(sys, microgrid));
 }
 
+double initial_storage_deliverable_energy_mwh(const Storage& storage) {
+  if (!storage.in_service || !std::isfinite(storage.e_rated_mwh) ||
+      storage.e_rated_mwh <= 0.0 || !std::isfinite(storage.soc_init) ||
+      !std::isfinite(storage.soc_min))
+    return 0.0;
+  const double eta = (std::isfinite(storage.eta_discharge) &&
+                      storage.eta_discharge > 0.0 &&
+                      storage.eta_discharge <= 1.0)
+      ? storage.eta_discharge : 0.0;
+  return std::max(0.0, storage.e_rated_mwh *
+                           (std::clamp(storage.soc_init, 0.0, 1.0) -
+                            std::clamp(storage.soc_min, 0.0, 1.0))) * eta;
+}
+
 NativeCase build_native_case(const HybridPowerSystem& sys,
                              const ThreeStageReliabilityOptions& options = {}) {
   NativeCase c;
@@ -564,6 +578,8 @@ struct StageSolve {
   std::vector<int> closed_legacy_branch_indices;
   bool switch_sequence_valid{true};
   std::string switch_sequence_message{"no switching required"};
+  std::vector<double> storage_discharge_mw;
+  std::vector<double> storage_energy_used_mwh;
 };
 
 bool eligible_restoration_tie(const Switch& sw) {
@@ -694,10 +710,14 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
                             const std::unordered_set<int>* unavailable_ties = nullptr,
                             const std::unordered_set<int>* forced_open_switches = nullptr,
                             const StageSolve* held_stage2_plan = nullptr,
-                            bool fixed_topology = false) {
+                            bool fixed_topology = false,
+                            const std::vector<double>* storage_energy_available_mwh = nullptr,
+                            double stage_duration_hr = 0.0) {
   StageSolve out;
   const int nd_total = static_cast<int>(c.loads.size());
   out.shed_by_load.assign(c.loads.size(), 0.0);
+  out.storage_discharge_mw.assign(c.sys.ac.storage.size(), 0.0);
+  out.storage_energy_used_mwh.assign(c.sys.ac.storage.size(), 0.0);
   if (nd_total == 0) {
     out.status = "success";
     return out;
@@ -851,27 +871,43 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   }
   const int n_br = static_cast<int>(ac_branches.size());
 
-  // ── Identify source buses (S set in radiality constraint C6) ────────────
-  // A bus is a source if it has an external grid, generator, static generator,
-  // storage, or renewable gen attached with positive capacity.
+  // ── Identify voltage anchors (S set in radiality constraint C6) ─────────
+  // Only an upstream grid, a synchronous source, a grid-forming inverter, or
+  // an explicitly island-capable microgrid aggregate may root an energized
+  // component. Grid-following DER can inject only after such a root exists.
   std::vector<bool> is_source(static_cast<size_t>(n_bus), false);
+  // Injection capability and voltage-reference duty are distinct. Grid-
+  // following/local DER can supply an island without forcing its terminal to
+  // exactly 1.0 pu when it remains connected to the upstream slack.
+  std::vector<bool> is_voltage_anchor(static_cast<size_t>(n_bus), false);
   // p_gen[i]: maximum active injection in MW at AC bus i (sum over all generators)
   std::vector<double> p_gen_max(static_cast<size_t>(n_bus), 0.0);
   // q_gen[i]: maximum reactive injection in Mvar (used in reactive balance C2)
   std::vector<double> q_gen_max(static_cast<size_t>(n_bus), 0.0);
+  const int n_storage = static_cast<int>(sys.ac.storage.size());
+  std::vector<int> storage_bus_pos(static_cast<size_t>(n_storage), -1);
+  std::vector<double> storage_pmax_mw(static_cast<size_t>(n_storage), 0.0);
 
-  auto mark_source = [&](int bus, double p_mw) {
+  auto add_dispatch = [&](int bus, double p_mw) {
+    auto it = ac_bus_pos.find(bus);
+    if (it == ac_bus_pos.end()) return;
+    p_gen_max[it->second] += std::max(0.0, p_mw);
+  };
+  auto mark_anchor = [&](int bus, bool fixes_voltage = true) {
     auto it = ac_bus_pos.find(bus);
     if (it == ac_bus_pos.end()) return;
     is_source[it->second] = true;
-    p_gen_max[it->second] += std::max(0.0, p_mw);
+    if (fixes_voltage) is_voltage_anchor[it->second] = true;
   };
   for (const auto& eg : sys.ac.external_grids) {
     if (!eg.in_service) continue;
     const double cap = eg.s_sc_max_mva > 0.0 ? eg.s_sc_max_mva : 1.0e4;
-    mark_source(eg.bus, cap);
+    add_dispatch(eg.bus, cap);
+    mark_anchor(eg.bus);
     auto it = ac_bus_pos.find(eg.bus);
-    if (it != ac_bus_pos.end()) q_gen_max[it->second] += cap;
+    if (it != ac_bus_pos.end()) {
+      q_gen_max[it->second] += cap;
+    }
   }
   for (int gi = 0; gi < static_cast<int>(sys.ac.generators.size()); ++gi) {
     const auto& g = sys.ac.generators[gi];
@@ -881,10 +917,14 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     // IS that repair window, so the faulted unit stays out in all three stages
     // (F7: Stage 3 is "during repair", not "after repair").
     if (fault.kind == FaultKind::Generator && gi == fault.index) continue;
-    mark_source(g.bus, g.pmax_mw > 0.0 ? g.pmax_mw : g.pg_mw);
+    add_dispatch(g.bus, g.pmax_mw > 0.0 ? g.pmax_mw : g.pg_mw);
+    // The Generator model represents a synchronous/voltage-controlled source.
+    // Inverter-based DER use StaticGenerator/RenewableGen/PVSystem instead.
+    mark_anchor(g.bus, g.is_slack);
     auto it = ac_bus_pos.find(g.bus);
-    if (it != ac_bus_pos.end())
+    if (it != ac_bus_pos.end()) {
       q_gen_max[it->second] += std::max(0.0, g.qmax_mvar > 0.0 ? g.qmax_mvar : std::abs(g.qg_mvar));
+    }
   }
   for (int i = 0; i < static_cast<int>(sys.ac.static_generators.size()); ++i) {
     const auto& sg = sys.ac.static_generators[i];
@@ -892,7 +932,8 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     if (fault.kind == FaultKind::StaticGenerator && fault.index == i) continue;
     if (!microgrid_available_for_islanding(sys, sg.bus, &fault)) continue;
     const double cap = hacdcpf::model::effective_capacity_mw(sg);
-    mark_source(sg.bus, cap);
+    add_dispatch(sg.bus, cap);
+    if (sg.grid_forming && cap > 1e-9) mark_anchor(sg.bus, false);
     auto it = ac_bus_pos.find(sg.bus);
     if (it != ac_bus_pos.end()) q_gen_max[it->second] += cap * 0.5;
   }
@@ -902,21 +943,38 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     if (fault.kind == FaultKind::RenewableGenerator && fault.index == i) continue;
     if (!microgrid_available_for_islanding(sys, rg.bus, &fault)) continue;
     const double cap = rg.p_rated_mw > 0.0 ? rg.p_rated_mw * rg.capacity_factor : rg.p_mw;
-    mark_source(rg.bus, cap);
+    add_dispatch(rg.bus, cap);
+    if (rg.grid_forming && cap > 1e-9) mark_anchor(rg.bus, false);
   }
   for (int i = 0; i < static_cast<int>(sys.ac.pv_systems.size()); ++i) {
     const auto& pv = sys.ac.pv_systems[i];
     if (!pv.in_service) continue;
     if (fault.kind == FaultKind::PVSystem && fault.index == i) continue;
     if (!microgrid_available_for_islanding(sys, pv.bus, &fault)) continue;
-    mark_source(pv.bus, pv.pmax_mw > 0.0 ? pv.pmax_mw : pv.p_mw);
+    const double cap = pv.pmax_mw > 0.0 ? pv.pmax_mw : pv.p_mw;
+    add_dispatch(pv.bus, cap);
+    if (pv.grid_forming && cap > 1e-9) mark_anchor(pv.bus, false);
   }
   for (int i = 0; i < static_cast<int>(sys.ac.storage.size()); ++i) {
     const auto& st = sys.ac.storage[i];
+    if (!st.in_service) continue;
     if (fault.kind == FaultKind::Storage && fault.index == i) continue;
     if (!microgrid_available_for_islanding(sys, st.bus, &fault)) continue;
-    const double cap = hacdcpf::model::effective_capacity_mw(st);
-    if (cap > 1e-9) mark_source(st.bus, cap);
+    const auto bus = ac_bus_pos.find(st.bus);
+    if (bus == ac_bus_pos.end()) continue;
+    const double available = storage_energy_available_mwh &&
+                                     i < static_cast<int>(storage_energy_available_mwh->size())
+        ? std::max(0.0, (*storage_energy_available_mwh)[static_cast<size_t>(i)])
+        : initial_storage_deliverable_energy_mwh(st);
+    double cap = std::max(0.0, hacdcpf::model::effective_capacity_mw(st));
+    if (stage_duration_hr > 1e-12)
+      cap = std::min(cap, available / stage_duration_hr);
+    if (available <= 1e-12) cap = 0.0;
+    storage_bus_pos[static_cast<size_t>(i)] = bus->second;
+    storage_pmax_mw[static_cast<size_t>(i)] = cap;
+    q_gen_max[static_cast<size_t>(bus->second)] +=
+        std::min(cap, std::max(0.0, st.qmax_mvar));
+    if (st.grid_forming && cap > 1e-9) mark_anchor(st.bus, false);
   }
   for (int i = 0; i < static_cast<int>(sys.microgrids.size()); ++i) {
     const auto& microgrid = sys.microgrids[i];
@@ -925,7 +983,8 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
       continue;
     const double residual = residual_microgrid_capacity_mw(sys, microgrid);
     if (residual <= 1e-9) continue;
-    mark_source(microgrid.pcc_bus, residual);
+    add_dispatch(microgrid.pcc_bus, residual);
+    mark_anchor(microgrid.pcc_bus, false);
     const auto bus = ac_bus_pos.find(microgrid.pcc_bus);
     if (bus != ac_bus_pos.end()) q_gen_max[bus->second] += 0.5 * residual;
   }
@@ -957,7 +1016,8 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   // (DC-only loads get connectivity fallback below)
 
   // ── Variable index helpers ────────────────────────────────────────────────
-  // Layout: [p^sh_i] [y_i] [z_ij] [P_ij] [Q_ij] [v_i] [f_ij] [p_g_i] [q_g_i]
+  // Layout: [p^sh_i] [y_i] [z_ij] [P_ij] [Q_ij] [v_i] [f_ij]
+  //         [p_g_i] [q_g_i] [p_storage_s]
   const int off_shed  = 0;
   const int off_y      = off_shed + n_bus;
   const int off_z      = off_y     + n_bus;
@@ -967,7 +1027,8 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   const int off_f     = off_v   + n_bus;
   const int off_pg    = off_f   + n_br;
   const int off_qg    = off_pg  + n_bus;
-  const int n_vars    = off_qg  + n_bus;
+  const int off_pst   = off_qg  + n_bus;
+  const int n_vars    = off_pst + n_storage;
 
   engine::MIPModel mip;
   auto& lp = mip.linear_part;
@@ -982,6 +1043,14 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
                               0.0, p_d[i],
                               "psh_" + std::to_string(sys.ac.buses[i].index)};
     lp.c[off_shed + i] = 1.0;  // minimise total MW shed (eq. 3)
+  }
+  for (int s = 0; s < n_storage; ++s) {
+    lp.vars[off_pst + s] = {engine::VarType::Continuous, 0.0,
+                             storage_pmax_mw[static_cast<size_t>(s)],
+                             "pst_" + std::to_string(sys.ac.storage[s].index)};
+    // Break dispatch degeneracy: upstream/non-storage supply is preferred when
+    // it can serve the same load, preserving battery energy for later stages.
+    lp.c[off_pst + s] = 1e-8;
   }
 
   const int n_sources = static_cast<int>(std::count(is_source.begin(), is_source.end(), true));
@@ -1160,7 +1229,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   // Load buses are bounded by [vmin², vmax²] per their bus data.
   for (int i = 0; i < n_bus; ++i) {
     double vmin2, vmax2;
-    if (is_source[i]) {
+    if (is_voltage_anchor[i]) {
       vmin2 = 1.0; vmax2 = 1.0;  // source bus: fixed at nominal 1.0 pu²
     } else {
       const double vmin = sys.ac.buses[i].vmin_pu;
@@ -1202,6 +1271,20 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     if (p_d[i] <= 1e-9) continue;
     add_le({{off_shed + i, -1.0}, {off_y + i, -p_d[i]}}, -p_d[i]);
   }
+  // Grid-following generation and storage cannot energize a dead component.
+  // Their dispatch is available only when y_i is established by an anchor.
+  for (int i = 0; i < n_bus; ++i) {
+    if (p_gen_max[i] > 1e-12)
+      add_le({{off_pg + i, 1.0}, {off_y + i, -p_gen_max[i]}}, 0.0);
+    if (q_gen_max[i] > 1e-12)
+      add_le({{off_qg + i, 1.0}, {off_y + i, -q_gen_max[i]}}, 0.0);
+  }
+  for (int s = 0; s < n_storage; ++s) {
+    const int bus = storage_bus_pos[static_cast<size_t>(s)];
+    const double cap = storage_pmax_mw[static_cast<size_t>(s)];
+    if (bus >= 0 && cap > 1e-12)
+      add_le({{off_pst + s, 1.0}, {off_y + bus, -cap}}, 0.0);
+  }
 
   // ── C1 (eq. 4'): LinDistFlow active power balance at every AC bus i ──────
   // Σ_{j:(j,i)} P_ji - Σ_{j:(i,j)} P_ij + p_g,i + p^sh_i = P^d_i
@@ -1210,6 +1293,10 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   for (int i = 0; i < n_bus; ++i) {
     std::vector<std::pair<int,double>> terms = {{off_shed + i, 1.0},
                                                 {off_pg + i, 1.0}};
+    for (int s = 0; s < n_storage; ++s) {
+      if (storage_bus_pos[static_cast<size_t>(s)] == i)
+        terms.push_back({off_pst + s, 1.0});
+    }
     // Flow: +P_ji for branches where to_pos = i; -P_ij for branches where from_pos = i
     for (int b = 0; b < n_br; ++b) {
       if (ac_branches[b].to_pos   == i) terms.push_back({off_P + b,  1.0});
@@ -1490,6 +1577,13 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     return out;
   }
   out.objective = recomputed_objective;
+
+  for (int s = 0; s < n_storage; ++s) {
+    const double discharge = std::max(0.0, res_x[off_pst + s]);
+    out.storage_discharge_mw[static_cast<size_t>(s)] = discharge;
+    out.storage_energy_used_mwh[static_cast<size_t>(s)] =
+        discharge * std::max(0.0, stage_duration_hr);
+  }
 
   // Post-solve: verify equality and inequality residuals
   if (n_eq > 0) {
@@ -1850,13 +1944,16 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
 StageSolve solve_stage2_by_topology_enumeration(
     const NativeCase& c, const FaultLine& fault, int max_sw_ops,
     const std::unordered_set<int>& unavailable_ties,
-    const std::unordered_set<int>& forced_open_switches) {
+    const std::unordered_set<int>& forced_open_switches,
+    const std::vector<double>* storage_energy_available_mwh,
+    double stage_duration_hr) {
   // Legacy normally-open branches have no controlling switch identifier and
   // cannot be represented by the auditable subset enumeration.
   if (std::any_of(c.sys.ac.branches.begin(), c.sys.ac.branches.end(),
                   [](const ACBranch& branch) { return !branch.in_service; })) {
     return solve_stage_milp(c, fault, 2, max_sw_ops, &unavailable_ties,
-                            &forced_open_switches);
+                            &forced_open_switches, nullptr, false,
+                            storage_energy_available_mwh, stage_duration_hr);
   }
 
   std::vector<int> candidates;
@@ -1874,7 +1971,8 @@ StageSolve solve_stage2_by_topology_enumeration(
   // MILP path; distribution cases with a handful of genuine ties use LPs.
   if (candidates.size() > 8) {
     return solve_stage_milp(c, fault, 2, max_sw_ops, &unavailable_ties,
-                            &forced_open_switches);
+                            &forced_open_switches, nullptr, false,
+                            storage_energy_available_mwh, stage_duration_hr);
   }
 
   std::vector<std::vector<int>> plans(1);
@@ -1889,7 +1987,8 @@ StageSolve solve_stage2_by_topology_enumeration(
   }
   if (plans.size() > 256) {
     return solve_stage_milp(c, fault, 2, max_sw_ops, &unavailable_ties,
-                            &forced_open_switches);
+                            &forced_open_switches, nullptr, false,
+                            storage_energy_available_mwh, stage_duration_hr);
   }
 
   StageSolve best;
@@ -1899,7 +1998,7 @@ StageSolve solve_stage2_by_topology_enumeration(
     held.closed_tie_switch_indices = closed_ties;
     auto candidate = solve_stage_milp(
         c, fault, 3, max_sw_ops, &unavailable_ties, &forced_open_switches,
-        &held, true);
+        &held, true, storage_energy_available_mwh, stage_duration_hr);
     if (candidate.status.rfind("success", 0) != 0) continue;
     if (!found || candidate.shed_kw < best.shed_kw - 1e-6 ||
         (std::abs(candidate.shed_kw - best.shed_kw) <= 1e-6 &&
@@ -1911,7 +2010,8 @@ StageSolve solve_stage2_by_topology_enumeration(
   }
   if (found) return best;
   return solve_stage_milp(c, fault, 2, max_sw_ops, &unavailable_ties,
-                          &forced_open_switches);
+                          &forced_open_switches, nullptr, false,
+                          storage_energy_available_mwh, stage_duration_hr);
 }
 
 void fill_summary(const NativeCase& c, ThreeStageReliabilityResult& r) {
@@ -1972,6 +2072,55 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
     StageSolve s2;
     StageSolve s3;
   };
+  struct BaselineStageEvaluation {
+    StageSolve s1;
+    StageSolve s2;
+    StageSolve s3;
+  };
+  std::vector<BaselineStageEvaluation> n0_evaluated(c.faults.size());
+  std::unordered_map<std::string, BaselineStageEvaluation> n0_cache;
+  const auto n0_key = [&](const FaultLine& fault) {
+    if (c.sys.ac.storage.empty()) return std::string("no-storage");
+    std::ostringstream os;
+    os.precision(12);
+    os << std::fixed << fault.tau_iso_hr << ':' << fault.tau_sw_hr << ':'
+       << fault.tau_rep_hr;
+    return os.str();
+  };
+  const auto evaluate_n0 = [&](const FaultLine& durations) {
+    BaselineStageEvaluation baseline;
+    FaultLine healthy;
+    healthy.kind = FaultKind::ACBranch;
+    healthy.index = -1;
+    std::vector<double> energy(c.sys.ac.storage.size(), 0.0);
+    for (size_t i = 0; i < c.sys.ac.storage.size(); ++i)
+      energy[i] = initial_storage_deliverable_energy_mwh(c.sys.ac.storage[i]);
+    const auto consume = [&](const StageSolve& solve) {
+      if (solve.status.rfind("success", 0) != 0) return;
+      for (size_t i = 0; i < energy.size() &&
+                         i < solve.storage_energy_used_mwh.size(); ++i)
+        energy[i] = std::max(0.0, energy[i] - solve.storage_energy_used_mwh[i]);
+    };
+    const auto solve_healthy_stage = [&](double duration_hr) {
+      auto solve = solve_stage_milp(c, healthy, 1, INT_MAX, nullptr, nullptr,
+                                    nullptr, true, &energy, duration_hr);
+      if (solve.status.rfind("success", 0) != 0)
+        solve = solve_stage_milp(c, healthy, 1, INT_MAX, nullptr, nullptr,
+                                 nullptr, false, &energy, duration_hr);
+      consume(solve);
+      return solve;
+    };
+    baseline.s1 = solve_healthy_stage(durations.tau_iso_hr);
+    baseline.s2 = solve_healthy_stage(durations.tau_sw_hr);
+    baseline.s3 = solve_healthy_stage(durations.tau_rep_hr);
+    return baseline;
+  };
+  for (size_t i = 0; i < c.faults.size(); ++i) {
+    const std::string key = n0_key(c.faults[i]);
+    auto [it, inserted] = n0_cache.try_emplace(key);
+    if (inserted) it->second = evaluate_n0(c.faults[i]);
+    n0_evaluated[i] = it->second;
+  }
   std::vector<FaultStageEvaluation> evaluated(c.faults.size());
   const int automatic_cap = 4;
   const int requested_workers = options.parallel_threads > 0
@@ -1987,25 +2136,46 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
   const auto evaluate_fault = [&](size_t fault_pos) {
     const auto& fault = c.faults[fault_pos];
     auto& item = evaluated[fault_pos];
+    std::vector<double> storage_energy(c.sys.ac.storage.size(), 0.0);
+    for (size_t i = 0; i < c.sys.ac.storage.size(); ++i)
+      storage_energy[i] = initial_storage_deliverable_energy_mwh(
+          c.sys.ac.storage[i]);
+    const auto consume_storage_energy = [&](const StageSolve& stage_solve) {
+      if (stage_solve.status.rfind("success", 0) != 0) return;
+      for (size_t i = 0; i < storage_energy.size() &&
+                         i < stage_solve.storage_energy_used_mwh.size(); ++i) {
+        storage_energy[i] = std::max(
+            0.0, storage_energy[i] - stage_solve.storage_energy_used_mwh[i]);
+      }
+    };
     item.interlock = precheck_protection_interlocks(c.sys, fault);
     item.s1 = solve_stage_milp(c, fault, 1, INT_MAX, nullptr,
                                &item.interlock.forced_open_switch_indices,
-                               nullptr, true);
+                               nullptr, true, &storage_energy,
+                               fault.tau_iso_hr);
     if (item.s1.status.rfind("success", 0) != 0) {
       // Meshed or otherwise non-fixed topology: preserve the generic MILP.
       item.s1 = solve_stage_milp(c, fault, 1, INT_MAX, nullptr,
-                                 &item.interlock.forced_open_switch_indices);
+                                 &item.interlock.forced_open_switch_indices,
+                                 nullptr, false, &storage_energy,
+                                 fault.tau_iso_hr);
     }
+    consume_storage_energy(item.s1);
     if (item.interlock.valid) {
       item.s2 = solve_stage2_by_topology_enumeration(
           c, fault, max_sw_ops, unavailable_ties,
-          item.interlock.forced_open_switch_indices);
-      if (options.revalidate_stage3_plan) {
+          item.interlock.forced_open_switch_indices, &storage_energy,
+          fault.tau_sw_hr);
+      consume_storage_energy(item.s2);
+      if (options.revalidate_stage3_plan || !c.sys.ac.storage.empty()) {
         // Diagnostic replay: Stage 3 is the repair window with the exact
-        // Stage-2 switching plan held as fixed binary bounds.
+        // Stage-2 switching plan held as fixed binary bounds. Storage always
+        // requires this replay because its remaining MWh and duration-limited
+        // discharge capability differ from Stage 2.
         item.s3 = solve_stage_milp(c, fault, 3, max_sw_ops, &unavailable_ties,
                                    &item.interlock.forced_open_switch_indices,
-                                   &item.s2, true);
+                                   &item.s2, true, &storage_energy,
+                                   fault.tau_rep_hr);
       } else {
         // The fault stays out throughout Stage 3 and demand/physical limits do
         // not change. The Stage-2 optimum therefore remains the exact optimum
@@ -2014,8 +2184,27 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
         item.s3 = item.s2;
       }
     } else {
-      item.s2 = item.s1;
-      item.s3 = item.s1;
+      // Restoration switching is blocked, but storage energy still advances
+      // through the remaining durations on the unchanged Stage-1 topology.
+      item.s2 = solve_stage_milp(c, fault, 1, INT_MAX, nullptr,
+                                 &item.interlock.forced_open_switch_indices,
+                                 nullptr, true, &storage_energy,
+                                 fault.tau_sw_hr);
+      if (item.s2.status.rfind("success", 0) != 0)
+        item.s2 = solve_stage_milp(c, fault, 1, INT_MAX, nullptr,
+                                   &item.interlock.forced_open_switch_indices,
+                                   nullptr, false, &storage_energy,
+                                   fault.tau_sw_hr);
+      consume_storage_energy(item.s2);
+      item.s3 = solve_stage_milp(c, fault, 1, INT_MAX, nullptr,
+                                 &item.interlock.forced_open_switch_indices,
+                                 nullptr, true, &storage_energy,
+                                 fault.tau_rep_hr);
+      if (item.s3.status.rfind("success", 0) != 0)
+        item.s3 = solve_stage_milp(c, fault, 1, INT_MAX, nullptr,
+                                   &item.interlock.forced_open_switch_indices,
+                                   nullptr, false, &storage_energy,
+                                   fault.tau_rep_hr);
       item.s2.status = "failed (protection interlock)";
       item.s3.status = "failed (protection interlock)";
       item.s2.switch_sequence_valid = false;
@@ -2045,6 +2234,31 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
     const auto& s1 = evaluated[fault_pos].s1;
     const auto& s2 = evaluated[fault_pos].s2;
     const auto& s3 = evaluated[fault_pos].s3;
+    const auto& n0 = n0_evaluated[fault_pos];
+    const auto incremental_shed = [&](const StageSolve& fault_stage,
+                                      const StageSolve& healthy_stage) {
+      std::vector<double> incremental(c.loads.size(), 0.0);
+      double positive_sum = 0.0;
+      for (size_t i = 0; i < incremental.size(); ++i) {
+        const double raw = i < fault_stage.shed_by_load.size()
+            ? fault_stage.shed_by_load[i] : 0.0;
+        const double healthy = i < healthy_stage.shed_by_load.size()
+            ? healthy_stage.shed_by_load[i] : 0.0;
+        incremental[i] = std::max(0.0, raw - healthy);
+        positive_sum += incremental[i];
+      }
+      const double target = std::max(0.0, fault_stage.shed_kw -
+                                             healthy_stage.shed_kw);
+      const double scale = positive_sum > 1e-12 ? target / positive_sum : 0.0;
+      for (double& shed : incremental) shed *= scale;
+      return incremental;
+    };
+    const auto incremental1 = incremental_shed(s1, n0.s1);
+    const auto incremental2 = incremental_shed(s2, n0.s2);
+    const auto incremental3 = incremental_shed(s3, n0.s3);
+    const auto shed_sum = [](const std::vector<double>& values) {
+      return std::accumulate(values.begin(), values.end(), 0.0);
+    };
 
     ThreeStageFaultDetail d;
     d.line_id = fault.id;
@@ -2061,17 +2275,49 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
     d.stage2_mip_gap = s2.mip_gap;
     d.stage3_mip_gap = s3.mip_gap;
     auto is_success_like = [](const std::string& s) { return s.rfind("success", 0) == 0; };
-    const bool all_success = is_success_like(s1.status) &&
+    const bool all_success = is_success_like(n0.s1.status) &&
+                 is_success_like(n0.s2.status) &&
+                 is_success_like(n0.s3.status) &&
+                 is_success_like(s1.status) &&
                  is_success_like(s2.status) &&
                  is_success_like(s3.status);
-    const bool any_approx = s1.status == "success (approximate)" ||
+    const bool any_approx = n0.s1.status == "success (approximate)" ||
+                n0.s2.status == "success (approximate)" ||
+                n0.s3.status == "success (approximate)" ||
+                s1.status == "success (approximate)" ||
                 s2.status == "success (approximate)" ||
                 s3.status == "success (approximate)";
     d.status = !all_success ? "failed" : (any_approx ? "success (approximate)" : "success");
-    d.pls_stage1 = s1.shed_kw;
-    d.pls_stage2 = s2.shed_kw;
-    d.pls_stage3 = s3.shed_kw;
+    d.raw_pls_stage1 = s1.shed_kw;
+    d.raw_pls_stage2 = s2.shed_kw;
+    d.raw_pls_stage3 = s3.shed_kw;
+    d.n0_pls_stage1 = n0.s1.shed_kw;
+    d.n0_pls_stage2 = n0.s2.shed_kw;
+    d.n0_pls_stage3 = n0.s3.shed_kw;
+    d.pls_stage1 = shed_sum(incremental1);
+    d.pls_stage2 = shed_sum(incremental2);
+    d.pls_stage3 = shed_sum(incremental3);
     d.pls_total = d.pls_stage1 + d.pls_stage2 + d.pls_stage3;
+    d.tau_iso_hr = fault.tau_iso_hr;
+    d.tau_sw_hr = fault.tau_sw_hr;
+    d.tau_rep_hr = fault.tau_rep_hr;
+    const auto storage_energy_sum = [](const std::vector<double>& values) {
+      return std::accumulate(values.begin(), values.end(), 0.0);
+    };
+    for (const auto& storage : c.sys.ac.storage)
+      d.storage_energy_initial_mwh +=
+          initial_storage_deliverable_energy_mwh(storage);
+    d.storage_energy_used_stage1_mwh =
+        storage_energy_sum(s1.storage_energy_used_mwh);
+    d.storage_energy_used_stage2_mwh =
+        storage_energy_sum(s2.storage_energy_used_mwh);
+    d.storage_energy_used_stage3_mwh =
+        storage_energy_sum(s3.storage_energy_used_mwh);
+    d.storage_energy_remaining_mwh = std::max(
+        0.0, d.storage_energy_initial_mwh -
+                 d.storage_energy_used_stage1_mwh -
+                 d.storage_energy_used_stage2_mwh -
+                 d.storage_energy_used_stage3_mwh);
     // P1c: per-component stage durations from the faulted component's MTTR.
     // Stage 1 = tau_iso, Stage 2 = tau_sw, Stage 3 = tau_rep (repair).
     d.objective = d.pls_stage1 * fault.tau_iso_hr
@@ -2282,17 +2528,19 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
 
     for (size_t i = 0; i < c.loads.size(); ++i) {
       const double ens = fault.failure_rate *
-          (s1.shed_by_load[i] * fault.tau_iso_hr +
-           s2.shed_by_load[i] * fault.tau_sw_hr +
-           s3.shed_by_load[i] * fault.tau_rep_hr);
+          (incremental1[i] * fault.tau_iso_hr +
+           incremental2[i] * fault.tau_sw_hr +
+           incremental3[i] * fault.tau_rep_hr);
       r.nodal_eens_kwh_yr[i] += ens;
       r.eens_kwh_yr += ens;
-      const bool interrupted = s1.shed_by_load[i] > 1e-6 || s2.shed_by_load[i] > 1e-6 || s3.shed_by_load[i] > 1e-6;
+      const bool interrupted = incremental1[i] > 1e-6 ||
+                               incremental2[i] > 1e-6 ||
+                               incremental3[i] > 1e-6;
       if (interrupted) {
         const double cust = std::max(1.0, c.loads[i].customers);
-        const double duration_min = ((s1.shed_by_load[i] > 1e-6 ? fault.tau_iso_hr : 0.0) +
-                                     (s2.shed_by_load[i] > 1e-6 ? fault.tau_sw_hr  : 0.0) +
-                                     (s3.shed_by_load[i] > 1e-6 ? fault.tau_rep_hr : 0.0)) * 60.0;
+        const double duration_min = ((incremental1[i] > 1e-6 ? fault.tau_iso_hr : 0.0) +
+                                     (incremental2[i] > 1e-6 ? fault.tau_sw_hr  : 0.0) +
+                                     (incremental3[i] > 1e-6 ? fault.tau_rep_hr : 0.0)) * 60.0;
         r.nodal_cif[i] += fault.failure_rate;
         r.nodal_cid_min[i] += fault.failure_rate * duration_min;
         weighted_interruptions += fault.failure_rate * cust;
@@ -2327,6 +2575,12 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
         "prechecked before restoration; validated trip/isolation devices are forced "
         "open in the MILP, invalid interlocks block restoration switching, and Stage-3 "
         "binary switch states are fixed to the accepted Stage-2 plan. "
+        "Grid-following DER injects only in a component containing an upstream or "
+        "grid-forming voltage anchor; it cannot root an outage island. AC storage "
+        "uses an explicit per-device discharge variable and sequentially carries "
+        "deliverable MWh from isolation through switching and the repair window. "
+        "Reported PLS and reliability indices are incremental to a matching N-0 "
+        "healthy-state solve; raw fault-state and N-0 shed remain available for audit. "
         "N-1 contingency enumeration covers ACBranch and DCBranch outages by default; "
         "generator, static/renewable/PV generation, storage, microgrid, transformer, "
         "VSC/DC-DC converter, AC switch, and AC/DC circuit-breaker "

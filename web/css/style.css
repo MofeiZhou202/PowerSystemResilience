@@ -3359,6 +3359,25 @@ tr.topo-clickable:focus-visible {
 }
 .sub-hint-warn { color: #d19a66; }
 .sub-hint-ok { color: var(--green); }
+.rel-parameter-advice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: min(100%, 340px);
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, #d19a66 55%, var(--tb-border));
+  border-radius: 6px;
+  color: #f0c48a;
+  font-size: 12px;
+}
+.rel-parameter-advice[hidden] { display: none; }
+.rel-parameter-advice > span {
+  flex: 1 1 220px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.rel-parameter-advice .toolbar-btn { flex: 0 0 auto; }
 
 /* ===== Case-load Modal ===== */
 .case-modal .modal-backdrop {

@@ -5765,6 +5765,20 @@ static json three_stage_fault_json(
       {"pls_stage2", f.pls_stage2},
       {"pls_stage3", f.pls_stage3},
       {"pls_total", f.pls_total},
+      {"raw_pls_stage1", f.raw_pls_stage1},
+      {"raw_pls_stage2", f.raw_pls_stage2},
+      {"raw_pls_stage3", f.raw_pls_stage3},
+      {"n0_pls_stage1", f.n0_pls_stage1},
+      {"n0_pls_stage2", f.n0_pls_stage2},
+      {"n0_pls_stage3", f.n0_pls_stage3},
+      {"tau_iso_hr", f.tau_iso_hr},
+      {"tau_sw_hr", f.tau_sw_hr},
+      {"tau_rep_hr", f.tau_rep_hr},
+      {"storage_energy_initial_mwh", f.storage_energy_initial_mwh},
+      {"storage_energy_used_stage1_mwh", f.storage_energy_used_stage1_mwh},
+      {"storage_energy_used_stage2_mwh", f.storage_energy_used_stage2_mwh},
+      {"storage_energy_used_stage3_mwh", f.storage_energy_used_stage3_mwh},
+      {"storage_energy_remaining_mwh", f.storage_energy_remaining_mwh},
       {"shed_kw", f.pls_total},
       {"shed_mw", f.pls_total / 1000.0},
       {"eens_contribution", f.eens_contribution_mwh_yr},
@@ -8235,6 +8249,28 @@ int main(int argc, char** argv) {
     }
   });
 
+  svr.Get("/api/session/reliability/data_quality",
+          [](const httplib::Request&, httplib::Response& res) {
+    try {
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system) {
+        throw std::runtime_error("No system loaded");
+      }
+      hacdcpf::analysis::ReliabilityDataPolicy policy;
+      policy.default_policy =
+          hacdcpf::analysis::ReliabilityDefaultPolicy::StrictCaseDataOnly;
+      res.set_content(
+          reliability_data_quality_json(
+              hacdcpf::analysis::summarize_reliability_data_quality(
+                  *g_session.current_system, policy))
+              .dump(),
+          "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
   svr.Post("/api/session/parameter_library/apply",
            [](const httplib::Request&, httplib::Response& res) {
     try {
@@ -8994,6 +9030,7 @@ int main(int argc, char** argv) {
       summary["_cim_has_explicit_phase_data"] =
           imported.has_explicit_phase_data;
       summary["_cim_is_unbalanced"] = imported.is_unbalanced;
+      summary["_recommended_reliability_model"] = "restoration_milp";
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;
@@ -18907,6 +18944,12 @@ int main(int argc, char** argv) {
         out["final_cov"] = result.final_cov;
         out["eens_mwh_yr"] = result.eens_mwh_yr;
         out["edns_mw"] = result.edns_mw;
+        out["raw_eens_mwh_yr"] = result.eens_mwh_yr;
+        out["raw_edns_mw"] = result.edns_mw;
+        out["baseline_eens_mwh_yr"] = result.baseline_eens_mwh_yr;
+        out["baseline_edns_mw"] = result.baseline_edns_mw;
+        out["incremental_eens_mwh_yr"] = result.incremental_eens_mwh_yr;
+        out["incremental_edns_mw"] = result.incremental_edns_mw;
         out["lole_hr_yr"] = result.lole_hr_yr;
         out["plc"] = result.plc;
         out["nodal_eens_mwh_yr"] = result.nodal_eens_mwh_yr;
@@ -20360,9 +20403,22 @@ int main(int argc, char** argv) {
           out["data_quality"] = reliability_data_quality_json(r.data_quality);
           add_reliability_parallel_json(out, opts.enable_parallel,
                                         r.parallel_execution);
-          out["metrics"] = json{
-            {"eens_mwh_yr", r.eens_mwh_yr}, {"edns_mw", r.edns_mw},
-            {"lole_hr_yr", r.lole_hr_yr},
+	          const bool incremental_nsq = method == "nsq";
+	          const double reported_eens = incremental_nsq
+	              ? r.incremental_eens_mwh_yr
+	              : r.eens_mwh_yr;
+	          const double reported_edns = incremental_nsq
+	              ? r.incremental_edns_mw
+	              : r.edns_mw;
+	          out["metrics"] = json{
+	            {"eens_mwh_yr", reported_eens}, {"edns_mw", reported_edns},
+	            {"raw_eens_mwh_yr", r.eens_mwh_yr},
+	            {"raw_edns_mw", r.edns_mw},
+	            {"baseline_eens_mwh_yr", r.baseline_eens_mwh_yr},
+	            {"baseline_edns_mw", r.baseline_edns_mw},
+	            {"incremental_eens_mwh_yr", r.incremental_eens_mwh_yr},
+	            {"incremental_edns_mw", r.incremental_edns_mw},
+	            {"lole_hr_yr", r.lole_hr_yr},
             {"lolf_occ_yr", method == "seq" ? json(r.lolf_occ_yr)
                                             : na("LOLF requires chronological simulation (sequential MC).")},
             {"plc", r.plc},

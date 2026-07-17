@@ -70,6 +70,20 @@ struct ThreeStageFaultDetail {
   double pls_stage2{0.0};     ///< load shed in Stage 2 (kW)
   double pls_stage3{0.0};     ///< load shed in Stage 3 (kW)
   double pls_total{0.0};      ///< pls_stage1 + 2 + 3 (kW)
+  double raw_pls_stage1{0.0}; ///< total Stage-1 shed before N-0 qualification
+  double raw_pls_stage2{0.0};
+  double raw_pls_stage3{0.0};
+  double n0_pls_stage1{0.0};  ///< healthy-state shed under matching stage conditions
+  double n0_pls_stage2{0.0};
+  double n0_pls_stage3{0.0};
+  double tau_iso_hr{0.0};     ///< Stage-1 fault isolation duration
+  double tau_sw_hr{0.0};      ///< Stage-2 switching/restoration duration
+  double tau_rep_hr{0.0};     ///< Stage-3 repair-window duration
+  double storage_energy_initial_mwh{0.0};
+  double storage_energy_used_stage1_mwh{0.0};
+  double storage_energy_used_stage2_mwh{0.0};
+  double storage_energy_used_stage3_mwh{0.0};
+  double storage_energy_remaining_mwh{0.0};
   double duration_hr{0.0};    ///< loss duration used for LOLE when this fault sheds load
   double ens_kwh{0.0};        ///< event energy not supplied before frequency weighting
   double eens_contribution_mwh_yr{0.0};

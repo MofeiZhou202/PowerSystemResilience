@@ -122,5 +122,37 @@ window.HACDCSearch = (() => {
     return SOURCES.find(s => s.tableId === tableId) || null;
   }
 
-  return { SOURCES, searchKey, parseQuery, sourceMatches, rowIds, rowText, itemTitle, summarizeItem, sourceByTableId };
+  function resultRow(sys, result, resolveBucket) {
+    if (!sys || !result || typeof resolveBucket !== 'function') return null;
+    const type = result.canvas_type || result.component_type ||
+      result.canonical_component_type || result.type;
+    const bucket = resolveBucket(type);
+    const source = SOURCES.find(item => item.bucket === bucket);
+    if (!source) return null;
+    const items = source.path(sys) || [];
+    if (!Array.isArray(items) || !items.length) return null;
+    const modelIndex = Number(result.canvas_index);
+    let position = Number.isFinite(modelIndex)
+      ? items.findIndex(item => Number(item?.index ?? item?.id) === modelIndex)
+      : -1;
+    const componentPosition = Number(
+      result.component_position ?? result.component_index ?? result.position);
+    if (position < 0 && Number.isInteger(componentPosition) &&
+        componentPosition >= 0 && componentPosition < items.length) {
+      position = componentPosition;
+    }
+    if (position < 0) return null;
+    const item = items[position] || {};
+    return {
+      source,
+      item,
+      position,
+      ids: rowIds(item, position, source),
+      title: itemTitle(item, source, position),
+      text: rowText(item, source, position),
+    };
+  }
+
+  return { SOURCES, searchKey, parseQuery, sourceMatches, rowIds, rowText,
+    itemTitle, summarizeItem, sourceByTableId, resultRow };
 })();

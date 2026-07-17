@@ -467,6 +467,35 @@ TEST_CASE("standard parameter reliability completion preserves authored data",
   CHECK_THAT(sys.microgrids[0].mttr_hours, WithinAbs(13.0, 1e-12));
 }
 
+TEST_CASE("standard line reliability defaults scale with physical exposure",
+          "[model][parameter_library][reliability][length]") {
+  HybridPowerSystem sys;
+  ACBus b1;
+  b1.index = 1;
+  b1.bus_type = BusType::SLACK;
+  ACBus b2;
+  b2.index = 2;
+  sys.ac.buses = {b1, b2};
+
+  ACBranch overhead;
+  overhead.index = 1;
+  overhead.from_bus = 1;
+  overhead.to_bus = 2;
+  overhead.line_type = "架空线";
+  overhead.length_km = 2.0;
+  ACBranch cable = overhead;
+  cable.index = 2;
+  cable.line_type = "电缆";
+  cable.length_km = 0.5;
+  sys.ac.branches = {overhead, cable};
+
+  apply_standard_parameter_library(sys, make_standard_parameter_library());
+  CHECK_THAT(sys.ac.branches[0].failure_rate, WithinAbs(1.0, 1e-12));
+  CHECK_THAT(sys.ac.branches[1].failure_rate, WithinAbs(0.04, 1e-12));
+  CHECK_THAT(sys.ac.branches[0].mttr_hr, WithinAbs(8.0, 1e-12));
+  CHECK_THAT(sys.ac.branches[1].mttr_hr, WithinAbs(24.0, 1e-12));
+}
+
 TEST_CASE("every registered standard parameter has an effective numerical override",
           "[model][parameter_library][contract][sensitivity]") {
   const auto baseline = make_standard_parameter_library();

@@ -72,6 +72,44 @@ ThreeStageReliabilityResult run_case(const char* json_name) {
   return run_three_stage_reliability(reliability_data(json_name), opts);
 }
 
+hacdcpf::HybridPowerSystem make_two_bus_islanding_case(double load_mw = 0.4,
+                                                        double mttr_hr = 1.0) {
+  hacdcpf::HybridPowerSystem sys;
+  sys.base_mva = 10.0;
+  sys.ac.base_mva = 10.0;
+  hacdcpf::ACBus upstream;
+  upstream.index = 1;
+  upstream.bus_type = hacdcpf::BusType::SLACK;
+  upstream.base_kv = 10.0;
+  upstream.vmin_pu = 0.9;
+  upstream.vmax_pu = 1.1;
+  hacdcpf::ACBus island = upstream;
+  island.index = 2;
+  island.bus_type = hacdcpf::BusType::PQ;
+  island.pd_mw = load_mw;
+  island.qd_mvar = load_mw * 0.2;
+  island.n_customers = 10;
+  sys.ac.buses = {upstream, island};
+
+  hacdcpf::ACBranch branch;
+  branch.index = 1;
+  branch.from_bus = 1;
+  branch.to_bus = 2;
+  branch.r_pu = 0.001;
+  branch.x_pu = 0.001;
+  branch.rate_a_mva = 5.0;
+  branch.failure_rate = 1.0;
+  branch.mttr_hr = mttr_hr;
+  sys.ac.branches = {branch};
+
+  hacdcpf::ExternalGrid grid;
+  grid.index = 1;
+  grid.bus = 1;
+  grid.s_sc_max_mva = 10.0;
+  sys.ac.external_grids = {grid};
+  return sys;
+}
+
 /// Common post-run assertions shared by all integration test cases.
 void check_result_shape(const ThreeStageReliabilityResult& r,
                         bool expect_exact_ok = true) {
@@ -123,6 +161,128 @@ void check_result_shape(const ThreeStageReliabilityResult& r,
 }
 
 }  // namespace
+
+TEST_CASE("Three-stage reliability - non-grid-forming 0.4 MW DER cannot anchor an outage island",
+          "[reliability][three_stage][islanding][der]") {
+  auto baseline = make_two_bus_islanding_case();
+  const auto without_der = run_three_stage_reliability_from_string(
+      hacdcpf::io::to_json(baseline, 2), {});
+
+  hacdcpf::StaticGenerator der;
+  der.index = 1;
+  der.bus = 2;
+  der.p_mw = 0.4;
+  der.pmax_mw = 0.4;
+  der.qmax_mvar = 0.4;
+  der.scaling = 1.0;
+  der.grid_forming = false;
+  der.anti_islanding = true;
+  baseline.ac.static_generators = {der};
+  const auto with_der = run_three_stage_reliability_from_string(
+      hacdcpf::io::to_json(baseline, 2), {});
+
+  REQUIRE(without_der.ok);
+  REQUIRE(with_der.ok);
+  REQUIRE(with_der.faults.size() == 1);
+  CHECK(with_der.faults[0].pls_stage1 == Catch::Approx(400.0).margin(1e-3));
+  CHECK(with_der.faults[0].pls_stage2 == Catch::Approx(400.0).margin(1e-3));
+  CHECK(with_der.faults[0].pls_stage3 == Catch::Approx(400.0).margin(1e-3));
+  CHECK(with_der.eens_kwh_yr == Catch::Approx(without_der.eens_kwh_yr).margin(1e-6));
+}
+
+TEST_CASE("Three-stage reliability - storage follows sequential stage energy and forming rules",
+          "[reliability][three_stage][islanding][storage]") {
+  auto make_storage_case = [](bool grid_forming, double energy_mwh) {
+    auto sys = make_two_bus_islanding_case(0.4, 1.0);
+    hacdcpf::Storage storage;
+    storage.index = 1;
+    storage.bus = 2;
+    storage.p_rated_mw = 0.4;
+    storage.pmax_mw = 0.4;
+    storage.qmax_mvar = 0.4;
+    storage.e_rated_mwh = energy_mwh;
+    storage.soc_init = 1.0;
+    storage.soc_min = 0.0;
+    storage.eta_discharge = 1.0;
+    storage.grid_forming = grid_forming;
+    storage.anti_islanding = true;
+    sys.ac.storage = {storage};
+    return run_three_stage_reliability_from_string(hacdcpf::io::to_json(sys, 2), {});
+  };
+
+  const auto following = make_storage_case(false, 1.0);
+  REQUIRE(following.ok);
+  CHECK(following.faults[0].pls_stage3 == Catch::Approx(400.0).margin(1e-3));
+  CHECK(following.faults[0].storage_energy_used_stage1_mwh ==
+        Catch::Approx(0.0).margin(1e-9));
+
+  const auto small_forming = make_storage_case(true, 0.1);
+  REQUIRE(small_forming.ok);
+  REQUIRE(small_forming.faults.size() == 1);
+  const auto& fault = small_forming.faults[0];
+  INFO("raw stage3=" << fault.raw_pls_stage3
+       << " n0 stage3=" << fault.n0_pls_stage3
+       << " incremental stage3=" << fault.pls_stage3);
+  CHECK(fault.pls_stage1 == Catch::Approx(0.0).margin(1e-3));
+  CHECK(fault.pls_stage2 == Catch::Approx(0.0).margin(1e-3));
+  CHECK(fault.pls_stage3 > 300.0);
+  CHECK(fault.pls_stage3 < 400.0);
+  CHECK(fault.tau_iso_hr == Catch::Approx(1.0 / 60.0));
+  CHECK(fault.tau_sw_hr == Catch::Approx(1.0 / 60.0));
+  CHECK(fault.tau_rep_hr == Catch::Approx(1.0 - 1.0 / 30.0));
+  CHECK(fault.storage_energy_initial_mwh == Catch::Approx(0.1));
+  CHECK(fault.storage_energy_used_stage1_mwh ==
+        Catch::Approx(0.4 / 60.0).margin(1e-8));
+  CHECK(fault.storage_energy_used_stage2_mwh ==
+        Catch::Approx(0.4 / 60.0).margin(1e-8));
+  CHECK(fault.storage_energy_remaining_mwh == Catch::Approx(0.0).margin(1e-8));
+
+  const auto large_forming = make_storage_case(true, 1.0);
+  REQUIRE(large_forming.ok);
+  CHECK(large_forming.faults[0].pls_stage3 == Catch::Approx(0.0).margin(1e-3));
+  CHECK(large_forming.eens_kwh_yr < small_forming.eens_kwh_yr);
+}
+
+TEST_CASE("Three-stage reliability - grid-following PV needs a grid-forming island anchor",
+          "[reliability][three_stage][islanding][pv]") {
+  const auto run = [](bool include_storage, bool storage_grid_forming) {
+    auto sys = make_two_bus_islanding_case(0.8, 1.0);
+    hacdcpf::PVSystem pv;
+    pv.index = 1;
+    pv.bus = 2;
+    pv.p_mw = 0.4;
+    pv.pmax_mw = 0.4;
+    pv.qmax_mvar = 0.4;
+    pv.grid_forming = false;
+    pv.anti_islanding = true;
+    sys.ac.pv_systems = {pv};
+    if (include_storage) {
+      hacdcpf::Storage storage;
+      storage.index = 1;
+      storage.bus = 2;
+      storage.p_rated_mw = 0.4;
+      storage.pmax_mw = 0.4;
+      storage.qmax_mvar = 0.4;
+      storage.e_rated_mwh = 2.0;
+      storage.soc_init = 1.0;
+      storage.soc_min = 0.0;
+      storage.eta_discharge = 1.0;
+      storage.grid_forming = storage_grid_forming;
+      sys.ac.storage = {storage};
+    }
+    return run_three_stage_reliability_from_string(hacdcpf::io::to_json(sys, 2), {});
+  };
+
+  const auto pv_only = run(false, false);
+  const auto following_storage = run(true, false);
+  const auto forming_storage = run(true, true);
+  REQUIRE(pv_only.ok);
+  REQUIRE(following_storage.ok);
+  REQUIRE(forming_storage.ok);
+  CHECK(pv_only.faults[0].pls_stage3 == Catch::Approx(800.0).margin(1e-3));
+  CHECK(following_storage.faults[0].pls_stage3 == Catch::Approx(800.0).margin(1e-3));
+  CHECK(forming_storage.faults[0].pls_stage3 == Catch::Approx(0.0).margin(1e-3));
+}
 
 // ─── TC-1: Symbol linkage (unconditional) ────────────────────────────────────
 
@@ -454,10 +614,11 @@ TEST_CASE("Three-stage reliability — source capacity is finite, not infinite s
   REQUIRE(r.ok);
   REQUIRE(r.faults.size() == 2);  // one fault per parallel branch
 
-  // Faulting either parallel branch leaves bus2 fed by the surviving branch;
-  // the finite 1 MW source serves 1 MW of the 3 MW load ⇒ 2 MW (2000 kW) shed
-  // during the repair window.
-  CHECK(r.faults.front().pls_stage3 == Catch::Approx(2000.0).margin(1e-3));
+  // The 2 MW deficit already exists in the healthy N-0 state. It remains
+  // visible in the raw audit fields but is not charged to either branch fault.
+  CHECK(r.faults.front().raw_pls_stage3 == Catch::Approx(2000.0).margin(1e-3));
+  CHECK(r.faults.front().n0_pls_stage3 == Catch::Approx(3000.0).margin(1e-3));
+  CHECK(r.faults.front().pls_stage3 == Catch::Approx(0.0).margin(1e-3));
 }
 
 TEST_CASE("Three-stage reliability — standalone AC switch is a Stage 2 candidate edge",
@@ -826,7 +987,7 @@ TEST_CASE("Three-stage reliability — DER storage and microgrid faults are enum
     "ac":{"base_mva":10.0,
       "buses":[{"index":1,"bus_type":3,"base_kv":10.0,"vmin_pu":0.9,"vmax_pu":1.1,"in_service":true,"pd_mw":0.5,"qd_mvar":0.0,"n_customers":10}],
       "branches":[],"loads":[],"external_grids":[],"generators":[],
-      "static_generators":[{"index":1,"bus":1,"in_service":true,"p_mw":0.3,"pmax_mw":0.3,"scaling":1.0,"mtbf_hours":3000.0,"mttr_hours":24.0}],
+      "static_generators":[{"index":1,"bus":1,"in_service":true,"p_mw":0.5,"pmax_mw":0.5,"qmax_mvar":0.5,"scaling":1.0,"grid_forming":true,"mtbf_hours":3000.0,"mttr_hours":24.0}],
       "renewable_gens":[{"index":1,"bus":1,"in_service":true,"p_mw":0.3,"p_rated_mw":0.3,"capacity_factor":1.0,"mtbf_hours":4000.0,"mttr_hours":48.0}],
       "pv_systems":[{"index":1,"bus":1,"in_service":true,"p_mw":0.3,"pmax_mw":0.3,"mtbf_hours":8000.0,"mttr_hours":12.0}],
       "storage":[{"index":1,"bus":1,"in_service":true,"p_mw":0.0,"pmax_mw":0.3,"p_rated_mw":0.3,"forced_outage_rate":0.015,"mttr_hr":24.0}],
@@ -938,9 +1099,11 @@ TEST_CASE("Three-stage reliability — healthy closed loop must shed to stay rad
   REQUIRE(spur != nullptr);
   REQUIRE(tri != nullptr);
 
-  // Spur fault: isolated spur load (1000 kW) + one triangle load shed to break the
-  // healthy closed loop (1000 kW) ⇒ ≈ 2000 kW.
-  CHECK(spur->pls_stage3 >= 1999.0);
+  // The healthy loop already requires 1000 kW of raw radiality shedding. The
+  // spur fault adds only the isolated 1000 kW spur load to that N-0 baseline.
+  CHECK(spur->raw_pls_stage3 >= 1999.0);
+  CHECK(spur->n0_pls_stage3 >= 999.0);
+  CHECK(spur->pls_stage3 == Catch::Approx(1000.0).margin(1e-3));
   // Triangle-edge fault breaks the loop itself ⇒ radial, fully served ⇒ ≈ 0.
   CHECK(tri->pls_stage3 == Catch::Approx(0.0).margin(1e-3));
 }
@@ -978,5 +1141,7 @@ TEST_CASE("Three-stage reliability — VSC transfer limits AC source support for
   CHECK(r.validity.dc_power_flow_enforced);
   REQUIRE(r.faults.size() == 1);
 
-  CHECK(r.faults.front().pls_stage3 == Catch::Approx(400.0).margin(1e-3));
+  CHECK(r.faults.front().raw_pls_stage3 == Catch::Approx(400.0).margin(1e-3));
+  CHECK(r.faults.front().n0_pls_stage3 == Catch::Approx(400.0).margin(1e-3));
+  CHECK(r.faults.front().pls_stage3 == Catch::Approx(0.0).margin(1e-3));
 }
