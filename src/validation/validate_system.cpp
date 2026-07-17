@@ -160,6 +160,13 @@ ValidationReport validate(const HybridPowerSystem& sys) {
 
     const auto ac_ids = collect_ids(sys.ac.buses, [](const ACBus& b){ return b.index; });
     const auto dc_ids = collect_ids(sys.dc.buses, [](const DCBus& b){ return b.index; });
+    const auto ac_branch_ids = collect_ids(
+        sys.ac.branches, [](const ACBranch& branch) { return branch.index; });
+    const auto transformer_2w_ids = collect_ids(
+        sys.ac.transformers_2w,
+        [](const Transformer2W& transformer) { return transformer.index; });
+    const auto switch_ids = collect_ids(
+        sys.ac.switches, [](const Switch& sw) { return sw.index; });
 
     auto require_ac_bus = [&](const std::string& type, int id,
                               const std::string& field, int bus) {
@@ -338,7 +345,56 @@ ValidationReport validate(const HybridPowerSystem& sys) {
     for (const auto& sw : sys.ac.switches) {
         require_ac_bus("Switch", sw.index, "bus_from", sw.bus_from);
         require_ac_bus("Switch", sw.index, "bus_to", sw.bus_to);
-        require_nonnegative("Switch", sw.index, "p_sw_fail", sw.p_sw_fail);
+        require_unit_interval("Switch", sw.index, "p_sw_fail", sw.p_sw_fail);
+        require_unit_interval("Switch", sw.index, "p_fail_to_open", sw.p_fail_to_open);
+        require_unit_interval("Switch", sw.index, "p_fail_to_close", sw.p_fail_to_close);
+        require_nonnegative("Switch", sw.index, "t_operation_s", sw.t_operation_s);
+        require_nonnegative("Switch", sw.index, "t_open_s", sw.t_open_s);
+        require_nonnegative("Switch", sw.index, "t_close_s", sw.t_close_s);
+        require_nonnegative("Switch", sw.index, "fuse.rated_current_a",
+                            sw.fuse_protection.rated_current_a);
+        require_nonnegative("Switch", sw.index, "fuse.minimum_melting_current_a",
+                            sw.fuse_protection.minimum_melting_current_a);
+        require_nonnegative("Switch", sw.index, "fuse.total_clearing_time_s",
+                            sw.fuse_protection.total_clearing_time_s);
+        require_unit_interval("Switch", sw.index,
+                              "recloser.successful_reclose_probability",
+                              sw.recloser_protection.successful_reclose_probability);
+        if (sw.locked_open && sw.locked_closed) {
+            r.add(S::Error, "Switch", std::to_string(sw.index), "locked_open",
+                  "switch cannot be locked open and locked closed simultaneously");
+        }
+        if (sw.controlled_element_index >= 0) {
+            bool found = false;
+            if (sw.controlled_element_type == "ac_branch")
+                found = ac_branch_ids.count(sw.controlled_element_index) > 0;
+            else if (sw.controlled_element_type == "transformer_2w")
+                found = transformer_2w_ids.count(sw.controlled_element_index) > 0;
+            if (!found) {
+                r.add(S::Error, "Switch", std::to_string(sw.index),
+                      "controlled_element_index",
+                      "controlled " + sw.controlled_element_type + " index " +
+                          std::to_string(sw.controlled_element_index) + " not found");
+            }
+        }
+        if (sw.controlled_branch_index >= 0 &&
+            ac_branch_ids.count(sw.controlled_branch_index) == 0) {
+            r.add(S::Error, "Switch", std::to_string(sw.index),
+                  "controlled_branch_index", "controlled AC branch not found");
+        }
+        if (sw.upstream_protective_switch_index >= 0 &&
+            switch_ids.count(sw.upstream_protective_switch_index) == 0) {
+            r.add(S::Error, "Switch", std::to_string(sw.index),
+                  "upstream_protective_switch_index",
+                  "upstream protective switch not found");
+        }
+        if (sw.sectionalizer_protection.upstream_switch_index >= 0 &&
+            switch_ids.count(
+                sw.sectionalizer_protection.upstream_switch_index) == 0) {
+            r.add(S::Error, "Switch", std::to_string(sw.index),
+                  "sectionalizer.upstream_switch_index",
+                  "upstream protective switch not found");
+        }
     }
     for (const auto& cb : sys.ac.circuit_breakers) {
         require_ac_bus("CircuitBreaker", cb.index, "bus_from", cb.bus_from);

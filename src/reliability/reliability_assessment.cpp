@@ -354,16 +354,18 @@ struct StateEvalResult {
 // [generators | AC branches | static gens | renewable gens | AC storage |
 //  VSC converters | DC branches | transformers_2w | transformers_3w |
 //  DC/DC converters | DC circuit breakers | DC storage | DC PV arrays |
-//  AC switches | AC circuit breakers]
+//  AC switches | AC circuit breakers | AC PV | DC static generation |
+//  microgrids]
 struct ComponentOffsets {
   size_t ng, nl, nsg, nrg, nst, nvsc, ndb, nt2, nt3;
   size_t ndcdc, ndccb, ndcst, ndcpv, nsw, ncb;
   size_t npvs;    ///< ac.pv_systems (PVSystem)
   size_t ndcsg;   ///< dc.static_generators (StaticGenerator AC-type in DC container)
   size_t ndcsgx;  ///< dc.dc_static_generators (StaticGeneratorDC)
+  size_t nmg;     ///< system-level microgrids
   size_t off_gen, off_br, off_sg, off_rg, off_st, off_vsc, off_db, off_t2, off_t3;
   size_t off_dcdc, off_dccb, off_dcst, off_dcpv, off_sw, off_cb;
-  size_t off_pvs, off_dcsg, off_dcsgx;
+  size_t off_pvs, off_dcsg, off_dcsgx, off_mg;
   size_t total;
 
   ComponentOffsets(const HybridPowerSystem& sys) {
@@ -385,6 +387,7 @@ struct ComponentOffsets {
     npvs  = sys.ac.pv_systems.size();
     ndcsg = sys.dc.static_generators.size();
     ndcsgx= sys.dc.dc_static_generators.size();
+    nmg   = sys.microgrids.size();
 
     off_gen   = 0;
     off_br    = ng;
@@ -404,7 +407,8 @@ struct ComponentOffsets {
     off_pvs   = off_cb   + ncb;
     off_dcsg  = off_pvs  + npvs;
     off_dcsgx = off_dcsg + ndcsg;
-    total     = off_dcsgx + ndcsgx;
+    off_mg    = off_dcsgx + ndcsgx;
+    total     = off_mg + nmg;
   }
 };
 
@@ -429,7 +433,8 @@ decode_component(size_t c, const ComponentOffsets& co) {
   else if (c < co.off_pvs)   return {int(c - co.off_cb),    "ACCircuitBreaker"};
   else if (c < co.off_dcsg)  return {int(c - co.off_pvs),   "ACPVSystem"};
   else if (c < co.off_dcsgx) return {int(c - co.off_dcsg),  "DCStaticGenAC"};
-  else                       return {int(c - co.off_dcsgx), "DCStaticGen"};
+  else if (c < co.off_mg)    return {int(c - co.off_dcsgx), "DCStaticGen"};
+  else                       return {int(c - co.off_mg), "Microgrid"};
 }
 
 // Per-state-vector-index flag: does the component have usable CASE reliability
@@ -478,6 +483,7 @@ static std::vector<bool> mc_component_has_case_data(
   for (size_t i = 0; i < co.npvs; ++i){ const auto& x = sys.ac.pv_systems[i];          hd[co.off_pvs + i]   = has(mtbf_mttr(x.mtbf_hours, x.mttr_hours)); }
   for (size_t i = 0; i < co.ndcsg; ++i){ const auto& x = sys.dc.static_generators[i];  hd[co.off_dcsg + i]  = has(mtbf_mttr(x.mtbf_hours, x.mttr_hours)); }
   for (size_t i = 0; i < co.ndcsgx; ++i){ const auto& x = sys.dc.dc_static_generators[i]; hd[co.off_dcsgx + i] = has(mtbf_mttr(x.mtbf_hours, x.mttr_hours)); }
+  for (size_t i = 0; i < co.nmg; ++i){ const auto& x = sys.microgrids[i]; hd[co.off_mg + i] = has(mtbf_mttr(x.mtbf_hours, x.mttr_hours)); }
   return hd;
 }
 
@@ -558,6 +564,7 @@ static MCReliability compute_mc_reliability(
   for (size_t i=0;i<co.npvs; ++i){ const auto& x=sys.ac.pv_systems[i];         set(co.off_pvs+i,  raw_mtbf(x.mtbf_hours,x.mttr_hours),     1.5, 24.0, false); }
   for (size_t i=0;i<co.ndcsg;++i){ const auto& x=sys.dc.static_generators[i];  set(co.off_dcsg+i, raw_mtbf(x.mtbf_hours,x.mttr_hours),     1.5, 24.0, false); }
   for (size_t i=0;i<co.ndcsgx;++i){const auto& x=sys.dc.dc_static_generators[i];set(co.off_dcsgx+i,raw_mtbf(x.mtbf_hours,x.mttr_hours),     1.5, 24.0, false); }
+  for (size_t i=0;i<co.nmg;   ++i){const auto& x=sys.microgrids[i];             set(co.off_mg+i,   raw_mtbf(x.mtbf_hours,x.mttr_hours),     8760.0/20000.0, 8.0, false); }
   return r;
 }
 
@@ -611,6 +618,8 @@ static std::string resolve_component_name(
     { const auto& x = sys.dc.static_generators[vec_idx];    return fmt(x.index, x.name); }
   if (type_name == "DCStaticGen"      && vec_idx < (int)sys.dc.dc_static_generators.size())
     { const auto& x = sys.dc.dc_static_generators[vec_idx]; return fmt(x.index, x.name); }
+  if (type_name == "Microgrid"        && vec_idx < (int)sys.microgrids.size())
+    { const auto& x = sys.microgrids[vec_idx];              return fmt(x.index, x.name); }
   // Fallback: vector position (unchanged from old behaviour)
   return type_name + "[" + std::to_string(vec_idx) + "]";
 }
@@ -637,6 +646,7 @@ static std::vector<bool> build_active_component_mask(
   for (size_t i = 0; i < co.npvs;  ++i) active[co.off_pvs  + i] = sys.ac.pv_systems[i].in_service;
   for (size_t i = 0; i < co.ndcsg; ++i) active[co.off_dcsg + i] = sys.dc.static_generators[i].in_service;
   for (size_t i = 0; i < co.ndcsgx;++i) active[co.off_dcsgx+ i] = sys.dc.dc_static_generators[i].in_service;
+  for (size_t i = 0; i < co.nmg;   ++i) active[co.off_mg   + i] = sys.microgrids[i].in_service;
   return active;
 }
 
@@ -684,6 +694,85 @@ static HybridPowerSystem apply_load_profile_spatial_factors(
     sys.dc.loads[i].p_mw *= factor_at(load_profile.dc_load_factors, i);
   }
   return sys;
+}
+
+bool reliability_microgrid_contains_bus(const Microgrid& microgrid, int bus) {
+  return microgrid.pcc_bus == bus ||
+         std::find(microgrid.internal_buses.begin(),
+                   microgrid.internal_buses.end(), bus) !=
+             microgrid.internal_buses.end();
+}
+
+double reliability_microgrid_capacity_mw(const Microgrid& microgrid) {
+  return std::max({0.0, microgrid.capacity_mw,
+                   microgrid.total_generation_mw,
+                   microgrid.total_dg_capacity_mw +
+                       microgrid.total_diesel_capacity_mw,
+                   microgrid.p_exchange_max_mw});
+}
+
+// Materialize only the aggregate capacity not already represented by explicit
+// devices. An islanding-capable microgrid also supplies the voltage-reference
+// role needed by the topology precheck. If its sampled MC state is failed,
+// neither the residual source nor that island anchor is created.
+void materialize_mc_microgrid_support(HybridPowerSystem& sys) {
+  int next_generator = 1;
+  for (const auto& generator : sys.ac.generators)
+    next_generator = std::max(next_generator, generator.index + 1);
+
+  for (const auto& microgrid : sys.microgrids) {
+    if (!microgrid.in_service || microgrid.pcc_bus <= 0) continue;
+
+    const auto inside = [&](int bus) {
+      return reliability_microgrid_contains_bus(microgrid, bus);
+    };
+    double explicit_capacity = 0.0;
+    for (const auto& generator : sys.ac.generators)
+      if (generator.in_service && inside(generator.bus))
+        explicit_capacity += hacdcpf::model::effective_capacity_mw(generator);
+    for (const auto& source : sys.ac.static_generators)
+      if (source.in_service && inside(source.bus))
+        explicit_capacity += hacdcpf::model::effective_capacity_mw(source);
+    for (const auto& source : sys.ac.renewable_gens)
+      if (source.in_service && inside(source.bus))
+        explicit_capacity += source.p_rated_mw > 0.0
+                                 ? source.p_rated_mw * source.capacity_factor
+                                 : std::max(0.0, source.p_mw);
+    for (const auto& source : sys.ac.pv_systems)
+      if (source.in_service && inside(source.bus))
+        explicit_capacity += source.pmax_mw > 0.0
+                                 ? source.pmax_mw
+                                 : std::max(0.0, source.p_mw);
+    for (const auto& storage : sys.ac.storage)
+      if (storage.in_service && inside(storage.bus))
+        explicit_capacity += hacdcpf::model::effective_capacity_mw(storage);
+
+    const double residual = std::max(
+        0.0, reliability_microgrid_capacity_mw(microgrid) - explicit_capacity);
+    if (residual > 1e-9) {
+      Generator aggregate;
+      aggregate.index = next_generator++;
+      aggregate.name = "Reliability_microgrid_" +
+                       std::to_string(microgrid.index);
+      aggregate.bus = microgrid.pcc_bus;
+      aggregate.in_service = true;
+      aggregate.pmin_mw = 0.0;
+      aggregate.pmax_mw = residual;
+      aggregate.qmin_mvar = -residual;
+      aggregate.qmax_mvar = residual;
+      aggregate.cost_c1 = 1.0;
+      sys.ac.generators.push_back(std::move(aggregate));
+    }
+
+    if (microgrid.islanding_capability) {
+      for (auto& bus : sys.ac.buses) {
+        if (bus.index == microgrid.pcc_bus) {
+          bus.bus_type = BusType::SLACK;
+          break;
+        }
+      }
+    }
+  }
 }
 
 // Evaluate a single system state using DC-OPF
@@ -841,6 +930,16 @@ StateEvalResult evaluate_state(
       sys.dc.dc_static_generators[i].in_service = false;
     }
   }
+
+  // Apply microgrid supervisory/islanding-function failures before aggregate
+  // capacity and island anchors are materialized for this sampled state.
+  for (size_t i = 0; i < co.nmg; ++i) {
+    if (component_failures[co.off_mg + i]) {
+      sys.microgrids[i].in_service = false;
+    }
+  }
+
+  materialize_mc_microgrid_support(sys);
 
   // Apply load scaling if needed
   if (std::abs(load_scale - 1.0) > 1e-9) {
@@ -1085,10 +1184,10 @@ ReliabilityResult run_nonsequential_mc(
 
   spdlog::info("NSQ MC: {} total components "
                "(gen={}, br={}, sg={}, rg={}, st={}, vsc={}, db={}, t2={}, t3={}, "
-               "dcdc={}, dccb={}, dcst={}, dcpv={}, sw={}, cb={}, pvs={}, dcsg={}, dcsgx={})",
+               "dcdc={}, dccb={}, dcst={}, dcpv={}, sw={}, cb={}, pvs={}, dcsg={}, dcsgx={}, mg={})",
                nc, co.ng, co.nl, co.nsg, co.nrg, co.nst, co.nvsc, co.ndb, co.nt2, co.nt3,
                co.ndcdc, co.ndccb, co.ndcst, co.ndcpv, co.nsw, co.ncb,
-               co.npvs, co.ndcsg, co.ndcsgx);
+               co.npvs, co.ndcsg, co.ndcsgx, co.nmg);
 
   // P2b: Zero unavailability for base-case out-of-service components.
   // Such components are already in their 'failed' state in the system baseline;
@@ -2425,6 +2524,7 @@ std::string switch_type_name(SwitchType type) {
     case SwitchType::Fuse: return "fuse";
     case SwitchType::Recloser: return "recloser";
     case SwitchType::Sectionalizer: return "sectionalizer";
+    case SwitchType::Unknown: return "unknown";
   }
   return "switch";
 }
@@ -2817,6 +2917,11 @@ std::vector<FMEAComponent> build_fmea_catalog(
 struct FMEAStageEval {
   StateEvalResult eval;
   std::vector<FMEAContingencyDetail::SwitchActionDetail> switch_actions;
+  bool switch_sequence_valid{true};
+  std::string switch_sequence_message{"no switching required"};
+  bool fault_isolation_explicit{false};
+  std::string fault_isolation_message{
+      "fault isolation represented by forced-open failed component"};
   bool search_truncated{false};  ///< true if OPF call budget was exhausted
 };
 
@@ -3735,10 +3840,144 @@ std::vector<int> repair_switch_candidates(const HybridPowerSystem& sys) {
   for (int i = 0; i < static_cast<int>(sys.ac.switches.size()); ++i) {
     const auto& sw = sys.ac.switches[i];
     if (!sw.in_service || sw.closed) continue;
-    if (!sw.is_automated && sw.t_operation_s <= 0.0) continue;
+    if (sw.locked_open) continue;
+    const auto caps = effective_switch_capabilities(sw);
+    if (!caps.can_close_for_restoration) continue;
+    if (sw.switch_type == SwitchType::Fuse) continue;
+    // Explicit equipment data must identify a restoration tie.  Unspecified
+    // legacy cases retain their previous type-derived behaviour.
+    if (sw.capabilities_explicit && sw.role != SwitchRole::Tie) continue;
+    if (!sw.capabilities_explicit && !sw.is_automated &&
+        sw.t_operation_s <= 0.0) continue;
     candidates.push_back(i);
   }
   return candidates;
+}
+
+struct IsolationPlan {
+  std::vector<int> switch_positions;
+  std::vector<FMEAContingencyDetail::SwitchActionDetail> actions;
+  bool explicit_plan{false};
+  bool valid{true};
+  std::string message{"fault isolation represented by forced-open failed component"};
+};
+
+IsolationPlan build_fmea_isolation_plan(const HybridPowerSystem& sys,
+                                        const FMEAComponent& comp) {
+  IsolationPlan plan;
+  std::string controlled_type;
+  int controlled_index = -1;
+  if (comp.type == FMEAComponent::ACBranch && comp.idx >= 0 &&
+      comp.idx < static_cast<int>(sys.ac.branches.size())) {
+    controlled_type = "ac_branch";
+    controlled_index = sys.ac.branches[comp.idx].index;
+  } else if (comp.type == FMEAComponent::Transformer2W && comp.idx >= 0 &&
+             comp.idx < static_cast<int>(sys.ac.transformers_2w.size())) {
+    controlled_type = "transformer_2w";
+    controlled_index = sys.ac.transformers_2w[comp.idx].index;
+  } else {
+    return plan;
+  }
+  std::vector<int> protection;
+  std::vector<int> boundaries;
+  std::unordered_map<int, int> switch_position_by_index;
+  std::unordered_map<int, int> boundary_upstream_position;
+  for (int i = 0; i < static_cast<int>(sys.ac.switches.size()); ++i)
+    switch_position_by_index[sys.ac.switches[i].index] = i;
+  const auto add_protection = [&](int pos) {
+    if (std::find(protection.begin(), protection.end(), pos) == protection.end())
+      protection.push_back(pos);
+  };
+  for (int i = 0; i < static_cast<int>(sys.ac.switches.size()); ++i) {
+    const auto& sw = sys.ac.switches[i];
+    const bool generic_match = sw.controlled_element_type == controlled_type &&
+                               sw.controlled_element_index == controlled_index;
+    const bool legacy_branch_match = controlled_type == "ac_branch" &&
+                                     sw.controlled_branch_index == controlled_index;
+    if (!sw.in_service || !sw.closed ||
+        (!generic_match && !legacy_branch_match))
+      continue;
+    if (sw.role == SwitchRole::Protection) add_protection(i);
+    else if (sw.role == SwitchRole::Sectionalizing ||
+             sw.role == SwitchRole::Isolation)
+      boundaries.push_back(i);
+  }
+  for (int pos : boundaries) {
+    const auto& boundary = sys.ac.switches[pos];
+    if (!effective_switch_capabilities(boundary).requires_deenergized_operation)
+      continue;
+    int upstream_index = boundary.upstream_protective_switch_index;
+    if (upstream_index < 0)
+      upstream_index = boundary.sectionalizer_protection.upstream_switch_index;
+    if (upstream_index < 0) continue;
+    const auto upstream = switch_position_by_index.find(upstream_index);
+    boundary_upstream_position[pos] =
+        upstream == switch_position_by_index.end() ? -1 : upstream->second;
+    if (upstream != switch_position_by_index.end()) {
+      const auto& protector = sys.ac.switches[upstream->second];
+      if (protector.in_service && protector.closed)
+        add_protection(upstream->second);
+    }
+  }
+  std::unordered_set<int> cleared_by_protection;
+  const auto append = [&](int pos, bool protection_action,
+                          bool upstream_cleared) {
+    const auto& sw = sys.ac.switches[pos];
+    const auto caps = effective_switch_capabilities(sw);
+    FMEAContingencyDetail::SwitchActionDetail action;
+    action.switch_index = sw.index;
+    action.switch_name = sw.name;
+    action.switch_type = switch_type_name(sw.switch_type);
+    action.action = protection_action ? "trip" : "open";
+    action.bus_from = sw.bus_from;
+    action.bus_to = sw.bus_to;
+    action.sequence_order = static_cast<int>(plan.actions.size()) + 1;
+    action.purpose = protection_action ? "fault_clearance" : "fault_section_isolation";
+    action.operation_time_s = sw.t_open_s > 0.0 ? sw.t_open_s : sw.t_operation_s;
+    action.validated = !sw.locked_closed &&
+        (protection_action ? (sw.role == SwitchRole::Protection &&
+                              caps.can_interrupt_fault_current)
+                           : (caps.can_interrupt_load_current ||
+                              (caps.requires_deenergized_operation &&
+                               upstream_cleared)));
+    action.validation_message = action.validated
+        ? (protection_action
+               ? "protection device is rated to interrupt fault current"
+               : "boundary device opens after upstream fault clearance")
+        : (caps.requires_deenergized_operation && !upstream_cleared
+               ? "de-energized operation requires a validated upstream protective trip"
+               : "device capability or lock state does not permit this isolation action");
+    plan.valid = plan.valid && action.validated;
+    if (action.validated) {
+      plan.switch_positions.push_back(pos);
+      if (protection_action) cleared_by_protection.insert(pos);
+    }
+    plan.actions.push_back(std::move(action));
+  };
+  for (int pos : protection) append(pos, true, false);
+  for (int pos : boundaries) {
+    const auto dependency = boundary_upstream_position.find(pos);
+    const bool upstream_cleared = dependency == boundary_upstream_position.end()
+        ? !cleared_by_protection.empty()
+        : dependency->second >= 0 &&
+              cleared_by_protection.count(dependency->second) > 0;
+    append(pos, false, upstream_cleared);
+  }
+  plan.explicit_plan = !plan.actions.empty();
+  if (plan.explicit_plan) {
+    plan.message = plan.valid
+        ? "protection and isolation actions validated from controlled-equipment bindings"
+        : "controlled-equipment isolation plan contains an invalid switch action";
+  }
+  return plan;
+}
+
+void apply_fmea_isolation_plan(HybridPowerSystem& sys,
+                               const IsolationPlan& plan) {
+  for (int pos : plan.switch_positions) {
+    if (pos >= 0 && pos < static_cast<int>(sys.ac.switches.size()))
+      sys.ac.switches[pos].closed = false;
+  }
 }
 
 std::vector<int> repair_branch_candidates(const HybridPowerSystem& sys) {
@@ -3777,12 +4016,22 @@ std::vector<FMEAContingencyDetail::SwitchActionDetail> describe_repair_actions(
     if (i < 0 || i >= static_cast<int>(sys.ac.switches.size())) continue;
     const auto& sw = sys.ac.switches[i];
     FMEAContingencyDetail::SwitchActionDetail a;
-    a.switch_index = i;
+    a.switch_index = sw.index;
     a.switch_name = sw.name.empty() ? "switch_" + std::to_string(sw.index) : sw.name;
     a.switch_type = switch_type_name(sw.switch_type);
     a.action = "close";
     a.bus_from = sw.bus_from;
     a.bus_to = sw.bus_to;
+    a.sequence_order = static_cast<int>(out.size()) + 1;
+    a.purpose = "service_restoration_tie_close";
+    a.operation_time_s = sw.t_close_s > 0.0 ? sw.t_close_s : sw.t_operation_s;
+    const auto caps = effective_switch_capabilities(sw);
+    a.validated = !sw.locked_open && caps.can_close_for_restoration &&
+                  sw.switch_type != SwitchType::Fuse &&
+                  (!sw.capabilities_explicit || sw.role == SwitchRole::Tie);
+    a.validation_message = a.validated
+        ? "eligible restoration tie; final topology accepted by contingency OPF"
+        : "switch is not eligible for restoration closing";
     out.push_back(std::move(a));
   }
   for (int i : branch_indices) {
@@ -3795,6 +4044,11 @@ std::vector<FMEAContingencyDetail::SwitchActionDetail> describe_repair_actions(
     a.action = "close";
     a.bus_from = br.from_bus;
     a.bus_to = br.to_bus;
+    a.sequence_order = static_cast<int>(out.size()) + 1;
+    a.purpose = "legacy_normally_open_branch_close";
+    a.validated = false;
+    a.validation_message =
+        "legacy out-of-service branch has no controlling switch capability metadata";
     out.push_back(std::move(a));
   }
   return out;
@@ -3861,11 +4115,20 @@ FMEAStageEval evaluate_contingency_stage(
   HybridPowerSystem sys_copy = sys;
   scale_fmea_loads(sys_copy, options.load_scale_factor);
   apply_fmea_component_outage(sys_copy, comp);
+  const IsolationPlan isolation = build_fmea_isolation_plan(sys, comp);
+  apply_fmea_isolation_plan(sys_copy, isolation);
   if (cyber_control_frozen) apply_fmea_cyber_control_freeze(sys_copy);
   add_external_grid_dispatch_sources(sys_copy, 1.0);
   apply_fmea_support_sources(sys_copy, options, stage_duration_hr, repair_stage);
 
   FMEAStageEval best;
+  if (repair_stage) {
+    best.switch_actions = isolation.actions;
+    best.switch_sequence_valid = isolation.valid;
+    best.switch_sequence_message = isolation.message;
+    best.fault_isolation_explicit = isolation.explicit_plan;
+    best.fault_isolation_message = isolation.message;
+  }
   best.eval = evaluate_prepared_fmea_system(
       sys_copy, options, opf_opt, stage_duration_hr);
 
@@ -3900,7 +4163,18 @@ FMEAStageEval evaluate_contingency_stage(
     ++opf_calls;
     if (ev.curtailment_mw + 1e-9 < best.eval.curtailment_mw) {
       best.eval = std::move(ev);
-      best.switch_actions = describe_repair_actions(sys_copy, switches, branches);
+      best.switch_actions = isolation.actions;
+      auto close_actions = describe_repair_actions(sys_copy, switches, branches);
+      for (auto& action : close_actions) {
+        action.sequence_order = static_cast<int>(best.switch_actions.size()) + 1;
+        best.switch_actions.push_back(std::move(action));
+      }
+      best.switch_sequence_valid = std::all_of(
+          best.switch_actions.begin(), best.switch_actions.end(),
+          [](const auto& action) { return action.validated; });
+      best.switch_sequence_message = best.switch_sequence_valid
+          ? "ordered isolation and restoration sequence validated; final topology accepted by contingency OPF"
+          : "sequence contains an invalid or metadata-free switching action";
     }
   };
 
@@ -4007,7 +4281,10 @@ FMEAResult run_distribution_fmea(
         "transfers are optimized for each stage. Nonlinear AC voltage/reactive limits "
       "are outside this reliability evaluator. Repair-stage explicit switch search "
       "enumerates AC switches/branches only; DC breakers, DC branches, DCDC devices, "
-      "and VSC topology actions are not repair reconfiguration candidates.";
+      "and VSC topology actions are not repair reconfiguration candidates. Ordered "
+      "restoration closures are capability-checked and reported, while fault isolation "
+      "is represented by forcing the failed component out because protection-zone-to-"
+      "switch bindings are not available in the base network schema.";
   } else {
     result.model_scope = "ac-only-dcopf";
     result.validity = FMEAResult::ValidityFlags{};
@@ -4015,7 +4292,10 @@ FMEAResult run_distribution_fmea(
     result.validity.repair_ac_switch_reconfiguration_modelled =
       options.enable_repair_reconfiguration && options.enable_switch_reconfiguration;
     result.model_limitations =
-        "FMEA physical evaluation uses AC-only DC-OPF for AC distribution contingencies.";
+        "FMEA physical evaluation uses AC-only DC-OPF for AC distribution contingencies. "
+        "Ordered restoration closures are capability-checked and reported; fault "
+        "isolation is represented by the failed component outage until explicit "
+        "protection-zone-to-switch bindings are supplied.";
   }
   if (options.cyber_physical.enabled) {
     auto& cyber = result.cyber_physical;
@@ -4230,6 +4510,18 @@ FMEAResult run_distribution_fmea(
     detail.repair_switch_actions = automation_availability > 0.0
         ? automatic.repair.switch_actions
         : manual.repair.switch_actions;
+    detail.repair_switch_sequence_valid = automation_availability > 0.0
+        ? automatic.repair.switch_sequence_valid
+        : manual.repair.switch_sequence_valid;
+    detail.repair_switch_sequence_message = automation_availability > 0.0
+        ? automatic.repair.switch_sequence_message
+        : manual.repair.switch_sequence_message;
+    detail.fault_isolation_explicit = automation_availability > 0.0
+        ? automatic.repair.fault_isolation_explicit
+        : manual.repair.fault_isolation_explicit;
+    detail.fault_isolation_message = automation_availability > 0.0
+        ? automatic.repair.fault_isolation_message
+        : manual.repair.fault_isolation_message;
     detail.repair_search_truncated = automatic.repair.search_truncated ||
                                      manual.repair.search_truncated;
 

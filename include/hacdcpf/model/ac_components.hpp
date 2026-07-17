@@ -751,6 +751,37 @@ struct ChargingStation {
 // ═══════════════════════════════════════════════════════════════════════
 // Switch
 // ═══════════════════════════════════════════════════════════════════════
+struct SwitchCapabilities {
+  bool can_interrupt_fault_current{false};
+  bool can_interrupt_load_current{false};
+  bool can_close_for_restoration{false};
+  bool requires_deenergized_operation{false};
+  bool allows_source_parallel{false};
+};
+
+struct FuseProtection {
+  std::string curve_type;
+  double rated_current_a{0.0};
+  double minimum_melting_current_a{0.0};
+  double total_clearing_time_s{0.0};
+  bool replace_after_operation{true};
+  double replacement_time_hr{0.0};
+};
+
+struct RecloserProtection {
+  std::string curve_type;
+  int max_reclose_attempts{0};
+  std::vector<double> reclose_intervals_s;
+  double lockout_time_s{0.0};
+  double successful_reclose_probability{0.0};
+};
+
+struct SectionalizerProtection {
+  int fault_count_to_open{0};
+  int upstream_switch_index{-1};
+  bool opens_during_dead_time{true};
+};
+
 struct Switch {
   int index{0};
   std::string name;
@@ -760,6 +791,35 @@ struct Switch {
 
   SwitchType switch_type{SwitchType::CircuitBreaker};
   bool closed{true};
+
+  // Normal planning state is distinct from the current handle state.  Legacy
+  // JSON without normal_closed is read with normal_closed == closed.
+  bool normal_closed{true};
+  bool normal_state_explicit{false};
+  bool locked_open{false};
+  bool locked_closed{false};
+  SwitchRole role{SwitchRole::Unspecified};
+  SwitchOperatingMode operating_mode{SwitchOperatingMode::Manual};
+  int protection_zone_id{0};
+  // Generic protection dependency used by disconnectors, sectionalizers and
+  // other boundary devices that may only operate after an upstream trip.
+  int upstream_protective_switch_index{-1};
+  int controlled_branch_index{-1};
+  std::string controlled_element_type;
+  int controlled_element_index{-1};
+  int interlock_group_id{0};
+  bool synchronization_required{false};
+  bool binding_inferred{false};
+  std::string binding_source;
+
+  // When false, algorithms derive conservative backward-compatible defaults
+  // from switch_type.  CIM and edited models should set this true.
+  bool capabilities_explicit{false};
+  SwitchCapabilities capabilities{};
+
+  FuseProtection fuse_protection{};
+  RecloserProtection recloser_protection{};
+  SectionalizerProtection sectionalizer_protection{};
 
   double r_contact_ohm{0.0};
   double z_ohm{0.0};
@@ -772,13 +832,50 @@ struct Switch {
   bool is_remote{false};
   bool is_automated{false};
   double t_operation_s{0.0};
+  double t_open_s{0.0};
+  double t_close_s{0.0};
 
   double p_sw_fail{0.0};
+  double p_fail_to_open{0.0};
+  double p_fail_to_close{0.0};
   double mtbf_hours{0.0};
   double mttr_hours{0.0};
   double t_scheduled_hr{0.0};
   double t_tp_hr{0.0};
 };
+
+inline SwitchCapabilities effective_switch_capabilities(const Switch& sw) {
+  if (sw.capabilities_explicit) return sw.capabilities;
+  SwitchCapabilities caps;
+  switch (sw.switch_type) {
+    case SwitchType::CircuitBreaker:
+    case SwitchType::Recloser:
+      caps.can_interrupt_fault_current = true;
+      caps.can_interrupt_load_current = true;
+      caps.can_close_for_restoration = true;
+      break;
+    case SwitchType::LoadBreakSwitch:
+      caps.can_interrupt_load_current = true;
+      caps.can_close_for_restoration = true;
+      break;
+    case SwitchType::Sectionalizer:
+      caps.requires_deenergized_operation = true;
+      break;
+    case SwitchType::Disconnector:
+      caps.requires_deenergized_operation = true;
+      break;
+    case SwitchType::Fuse:
+      caps.can_interrupt_fault_current = true;
+      break;
+    case SwitchType::Unknown:
+      break;
+  }
+  return caps;
+}
+
+inline bool effective_switch_normal_closed(const Switch& sw) {
+  return sw.normal_state_explicit ? sw.normal_closed : sw.closed;
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Circuit Breaker (HVCB)

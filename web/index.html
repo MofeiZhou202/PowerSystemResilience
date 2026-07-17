@@ -190,8 +190,14 @@
       <label class="sub-label sub-checkbox" title="允许设计手册值替换 CIM 导入器生成的估算阻抗，不覆盖厂家或用户参数">
         <input id="ioHandbookOverwriteEstimates" type="checkbox" checked/><span>替换导入估算</span>
       </label>
-      <button id="btnIoHandbookPreview" class="toolbar-btn run-btn" title="按 GB/T 3956、GB/T 12706 和 Schneider Electrical Installation Guide 扫描线路参数">扫描建议</button>
-      <button id="btnIoHandbookApply" class="toolbar-btn" title="应用手册建议，仅补齐缺失参数或替换 CIM 导入估算参数">应用补齐</button>
+      <label class="sub-label sub-checkbox" title="按正常开关状态和电源方向推断保护区、受控元件及上游保护设备">
+        <input id="ioHandbookInferSwitchBindings" type="checkbox" checked/><span>推断保护绑定</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="允许重新计算此前由参数补齐生成的绑定，不覆盖用户或厂家绑定">
+        <input id="ioHandbookOverwriteBindings" type="checkbox" checked/><span>刷新推断绑定</span>
+      </label>
+      <button id="btnIoHandbookPreview" class="toolbar-btn run-btn" title="扫描线路电气参数和开关保护绑定">扫描建议</button>
+      <button id="btnIoHandbookApply" class="toolbar-btn" title="应用线路参数及明确、无歧义的开关保护绑定建议">应用补齐</button>
     </div>
   </div>
   <!-- Standard component parameter profiles and model diagnostics -->
@@ -1595,9 +1601,9 @@
         </select>
       </label>
       <span id="relAnalysisHint" class="sub-hint"></span>
-      <label class="sub-label sub-checkbox" title="三阶段恢复重构：除 AC/DC 线路外，额外枚举 VSC/DC-DC 变换器、AC 开关、AC/DC 断路器以及发电机/变压器停运故障（仅三阶段恢复 MILP）">
+      <label class="sub-label sub-checkbox" title="三阶段恢复重构：除 AC/DC 线路外，额外枚举 VSC/DC-DC 变换器、AC 开关、AC/DC 断路器、变压器以及常规电源、分布式电源、新能源、光伏、储能和微电网停运故障（仅三阶段恢复 MILP）">
         <input id="relTsFaults" type="checkbox"/>
-        <span>三阶段扩展故障</span>
+        <span>三阶段设备/电源故障</span>
       </label>
       <label class="sub-label sub-checkbox" title="三阶段 DC 子网用 DC LinDistFlow 潮流替代容量回退：母线电压下限、线路电阻压降与热稳定限制（仅三阶段恢复 MILP；默认开启，取消勾选则回退到容量法）">
         <input id="relTsDcPf" type="checkbox" checked/>
@@ -3143,6 +3149,6 @@
   <script src="js/core/layout_engine.js?v=20260712-hysim-layout-v1"></script>
   <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
-  <script src="js/app.js?v=20260714-market-v5"></script>
+  <script src="js/app.js?v=20260716-switch-binding-v1"></script>
 </body>
 </html>

@@ -767,9 +767,13 @@ inline TypicalParameterFillReport apply_typical_parameters(
       report.short_circuit_fields += d::fill_positive(sw.i_rated_ka, TypicalParameters::kBreakerRatedCurrentKa);
       report.short_circuit_fields += d::fill_positive(sw.i_breaking_ka, TypicalParameters::kBreakerInterruptingCurrentKa);
       report.short_circuit_fields += d::fill_positive(sw.t_operation_s, TypicalParameters::kSwitchOperationTimeS);
+      report.short_circuit_fields += d::fill_positive(sw.t_open_s, sw.t_operation_s);
+      report.short_circuit_fields += d::fill_positive(sw.t_close_s, sw.t_operation_s);
     }
     if (options.fill_reliability) {
       report.reliability_fields += d::fill_positive(sw.p_sw_fail, TypicalParameters::kSwitchFailureProbability);
+      report.reliability_fields += d::fill_positive(sw.p_fail_to_open, sw.p_sw_fail);
+      report.reliability_fields += d::fill_positive(sw.p_fail_to_close, sw.p_sw_fail);
       report.reliability_fields += d::fill_positive(sw.mtbf_hours, TypicalParameters::kEquipmentMtbfHr);
       report.reliability_fields += d::fill_positive(sw.mttr_hours, TypicalParameters::kEquipmentMttrHr);
     }

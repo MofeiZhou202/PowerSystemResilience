@@ -585,6 +585,67 @@ TEST_CASE("Switch: closed switch equivalent branch round-trip", "[rich_component
     auto restored = from_json(to_json(sys));
     CHECK(restored.ac.switches.size() == 1);
     CHECK(restored.ac.switches[0].closed == true);
+    CHECK(restored.ac.switches[0].switch_type == SwitchType::CircuitBreaker);
+}
+
+TEST_CASE("Switch: protection and restoration metadata round-trip",
+          "[rich_components][switch][protection]") {
+    auto sys = make_3bus_backbone();
+    Switch sw;
+    sw.index = 7;
+    sw.bus_from = 2;
+    sw.bus_to = 3;
+    sw.switch_type = SwitchType::Recloser;
+    sw.closed = false;
+    sw.normal_closed = false;
+    sw.normal_state_explicit = true;
+    sw.role = SwitchRole::Tie;
+    sw.operating_mode = SwitchOperatingMode::Automatic;
+    sw.protection_zone_id = 4;
+    sw.upstream_protective_switch_index = 6;
+    sw.controlled_branch_index = 2;
+    sw.controlled_element_type = "ac_branch";
+    sw.controlled_element_index = 2;
+    sw.interlock_group_id = 9;
+    sw.synchronization_required = true;
+    sw.binding_inferred = true;
+    sw.binding_source = "unit_test";
+    sw.capabilities_explicit = true;
+    sw.capabilities.can_interrupt_fault_current = true;
+    sw.capabilities.can_interrupt_load_current = true;
+    sw.capabilities.can_close_for_restoration = true;
+    sw.t_open_s = 0.08;
+    sw.t_close_s = 0.25;
+    sw.p_fail_to_open = 0.002;
+    sw.p_fail_to_close = 0.004;
+    sw.recloser_protection.max_reclose_attempts = 3;
+    sw.recloser_protection.reclose_intervals_s = {0.5, 5.0, 30.0};
+    sw.recloser_protection.successful_reclose_probability = 0.9;
+    sys.ac.switches = {sw};
+
+    const auto restored = from_json(to_json(sys));
+    REQUIRE(restored.ac.switches.size() == 1);
+    const auto& actual = restored.ac.switches.front();
+    CHECK(actual.switch_type == SwitchType::Recloser);
+    CHECK(actual.role == SwitchRole::Tie);
+    CHECK(actual.operating_mode == SwitchOperatingMode::Automatic);
+    CHECK(actual.protection_zone_id == 4);
+    CHECK(actual.upstream_protective_switch_index == 6);
+    CHECK(actual.controlled_branch_index == 2);
+    CHECK(actual.controlled_element_type == "ac_branch");
+    CHECK(actual.controlled_element_index == 2);
+    CHECK(actual.interlock_group_id == 9);
+    CHECK(actual.synchronization_required);
+    CHECK(actual.binding_inferred);
+    CHECK(actual.binding_source == "unit_test");
+    CHECK(actual.capabilities_explicit);
+    CHECK(actual.capabilities.can_close_for_restoration);
+    CHECK_THAT(actual.t_close_s, WithinAbs(0.25, 1e-12));
+    CHECK_THAT(actual.p_fail_to_open, WithinAbs(0.002, 1e-12));
+    CHECK(actual.recloser_protection.max_reclose_attempts == 3);
+    REQUIRE(actual.recloser_protection.reclose_intervals_s.size() == 3);
+    CHECK_THAT(actual.recloser_protection.successful_reclose_probability,
+               WithinAbs(0.9, 1e-12));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

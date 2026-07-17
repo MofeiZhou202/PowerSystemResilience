@@ -30,6 +30,9 @@
 #include "hacdcpf/engine/problem_types.hpp"
 #include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/model/effective_capacity.hpp"
+#include "hacdcpf/model/enum_strings.hpp"
+#include "hacdcpf/util/parallel_execution.hpp"
+#include "hacdcpf/util/thread_pool.hpp"
 
 namespace fs = std::filesystem;
 namespace hacdcpf::analysis {
@@ -61,7 +64,8 @@ struct SourcePoint {
 
 enum class FaultKind { ACBranch, DCBranch, Generator, Transformer2W,
                        VSCConverter, DCDCConverter, ACSwitch, ACCircuitBreaker,
-                       DCCircuitBreaker };
+                       DCCircuitBreaker, StaticGenerator, RenewableGenerator,
+                       PVSystem, Storage, Microgrid };
 
 std::string fault_kind_type(FaultKind kind) {
   switch (kind) {
@@ -74,6 +78,11 @@ std::string fault_kind_type(FaultKind kind) {
     case FaultKind::ACSwitch: return "ac_switch";
     case FaultKind::ACCircuitBreaker: return "ac_circuit_breaker";
     case FaultKind::DCCircuitBreaker: return "dc_circuit_breaker";
+    case FaultKind::StaticGenerator: return "static_generator";
+    case FaultKind::RenewableGenerator: return "renewable_gen";
+    case FaultKind::PVSystem: return "ac_pv_system";
+    case FaultKind::Storage: return "storage";
+    case FaultKind::Microgrid: return "microgrid";
   }
   return "unknown";
 }
@@ -144,6 +153,59 @@ void add_source(std::vector<SourcePoint>& sources, int bus, double p_mw) {
   sources.push_back({bus, p_mw * 1000.0});
 }
 
+bool microgrid_contains_bus(const Microgrid& microgrid, int bus) {
+  return microgrid.pcc_bus == bus ||
+      std::find(microgrid.internal_buses.begin(), microgrid.internal_buses.end(),
+                bus) != microgrid.internal_buses.end();
+}
+
+bool microgrid_available_for_islanding(const HybridPowerSystem& sys, int bus,
+                                       const FaultLine* fault = nullptr) {
+  for (int i = 0; i < static_cast<int>(sys.microgrids.size()); ++i) {
+    const auto& microgrid = sys.microgrids[i];
+    if (!microgrid_contains_bus(microgrid, bus)) continue;
+    const bool faulted = fault && fault->kind == FaultKind::Microgrid &&
+                         fault->index == i;
+    return microgrid.in_service && microgrid.islanding_capability && !faulted;
+  }
+  return true;
+}
+
+double microgrid_declared_capacity_mw(const Microgrid& microgrid) {
+  return std::max({0.0, microgrid.capacity_mw,
+                   microgrid.total_dg_capacity_mw,
+                   microgrid.total_generation_mw});
+}
+
+double explicit_microgrid_source_capacity_mw(const HybridPowerSystem& sys,
+                                             const Microgrid& microgrid) {
+  const auto inside = [&](int bus) { return microgrid_contains_bus(microgrid, bus); };
+  double capacity = 0.0;
+  for (const auto& generator : sys.ac.generators)
+    if (generator.in_service && inside(generator.bus))
+      capacity += hacdcpf::model::effective_capacity_mw(generator);
+  for (const auto& source : sys.ac.static_generators)
+    if (source.in_service && inside(source.bus))
+      capacity += hacdcpf::model::effective_capacity_mw(source);
+  for (const auto& source : sys.ac.renewable_gens)
+    if (source.in_service && inside(source.bus))
+      capacity += source.p_rated_mw > 0.0
+          ? source.p_rated_mw * source.capacity_factor : source.p_mw;
+  for (const auto& source : sys.ac.pv_systems)
+    if (source.in_service && inside(source.bus))
+      capacity += source.pmax_mw > 0.0 ? source.pmax_mw : source.p_mw;
+  for (const auto& storage : sys.ac.storage)
+    if (storage.in_service && inside(storage.bus))
+      capacity += hacdcpf::model::effective_capacity_mw(storage);
+  return std::max(0.0, capacity);
+}
+
+double residual_microgrid_capacity_mw(const HybridPowerSystem& sys,
+                                      const Microgrid& microgrid) {
+  return std::max(0.0, microgrid_declared_capacity_mw(microgrid) -
+                           explicit_microgrid_source_capacity_mw(sys, microgrid));
+}
+
 NativeCase build_native_case(const HybridPowerSystem& sys,
                              const ThreeStageReliabilityOptions& options = {}) {
   NativeCase c;
@@ -195,18 +257,20 @@ NativeCase build_native_case(const HybridPowerSystem& sys,
     // Effective fixed-injection capacity must honour `scaling`; without it,
     // a unit scheduled out (scaling=0) would still appear at full nameplate
     // power in the connectivity model and over-state restoration headroom.
+    if (!microgrid_available_for_islanding(sys, sg.bus)) continue;
     const double cap = hacdcpf::model::effective_capacity_mw(sg);
     if (cap > 0.0) add_source(c.sources, sg.bus, cap);
   }
   for (const auto& rg : sys.ac.renewable_gens) {
-    if (!rg.in_service) continue;
+    if (!rg.in_service || !microgrid_available_for_islanding(sys, rg.bus)) continue;
     add_source(c.sources, rg.bus, rg.p_rated_mw > 0.0 ? rg.p_rated_mw * rg.capacity_factor : rg.p_mw);
   }
   for (const auto& pv : sys.ac.pv_systems) {
-    if (!pv.in_service) continue;
+    if (!pv.in_service || !microgrid_available_for_islanding(sys, pv.bus)) continue;
     add_source(c.sources, pv.bus, pv.pmax_mw > 0.0 ? pv.pmax_mw : pv.p_mw);
   }
   for (const auto& st : sys.ac.storage) {
+    if (!microgrid_available_for_islanding(sys, st.bus)) continue;
     const double cap = hacdcpf::model::effective_capacity_mw(st);
     if (cap > 0.0) add_source(c.sources, st.bus, cap);
   }
@@ -225,6 +289,11 @@ NativeCase build_native_case(const HybridPowerSystem& sys,
   }
   for (const auto& b : sys.dc.buses) {
     if (b.in_service && b.bus_type == DCBusType::DC_V) add_source(c.sources, b.index + kDCBusOffset, 1.0e4);
+  }
+  for (const auto& microgrid : sys.microgrids) {
+    if (!microgrid.in_service || !microgrid.islanding_capability) continue;
+    add_source(c.sources, microgrid.pcc_bus,
+               residual_microgrid_capacity_mw(sys, microgrid));
   }
 
   int id = 1;
@@ -256,6 +325,14 @@ NativeCase build_native_case(const HybridPowerSystem& sys,
   }
   // Generator forced-outage contingencies (opt-in).  lambda from FOR + MTTR.
   if (c.include_generator_faults) {
+    const auto add_ac_source_fault = [&](int index, int bus, double lambda,
+                                         double repair_hr, FaultKind kind) {
+      const double repair = repair_hr > 1e-9 ? repair_hr : kTauRepairHr;
+      c.faults.push_back({id++, true, index, bus, bus, true,
+                          lambda > 0.0 ? lambda : kDefaultFailureRate,
+                          kTauSwitchHr, kTauTrippingHr - kTauSwitchHr,
+                          std::max(0.0, repair - kTauTrippingHr), kind});
+    };
     for (int i = 0; i < static_cast<int>(sys.ac.generators.size()); ++i) {
       const auto& g = sys.ac.generators[i];
       if (!g.in_service) continue;
@@ -270,6 +347,60 @@ NativeCase build_native_case(const HybridPowerSystem& sys,
       c.faults.push_back({id++, true, i, g.bus, g.bus, true, lam,
                           kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_g,
                           FaultKind::Generator});
+    }
+    for (int i = 0; i < static_cast<int>(sys.ac.static_generators.size()); ++i) {
+      const auto& source = sys.ac.static_generators[i];
+      if (!source.in_service ||
+          hacdcpf::model::effective_capacity_mw(source) <= 1e-9)
+        continue;
+      add_ac_source_fault(i, source.bus,
+                          source.mtbf_hours > 0.0
+                              ? 8760.0 / source.mtbf_hours : kDefaultFailureRate,
+                          source.mttr_hours, FaultKind::StaticGenerator);
+    }
+    for (int i = 0; i < static_cast<int>(sys.ac.renewable_gens.size()); ++i) {
+      const auto& source = sys.ac.renewable_gens[i];
+      const double capacity = source.p_rated_mw > 0.0
+          ? source.p_rated_mw * source.capacity_factor : source.p_mw;
+      if (!source.in_service || capacity <= 1e-9) continue;
+      add_ac_source_fault(i, source.bus,
+                          source.mtbf_hours > 0.0
+                              ? 8760.0 / source.mtbf_hours : kDefaultFailureRate,
+                          source.mttr_hours, FaultKind::RenewableGenerator);
+    }
+    for (int i = 0; i < static_cast<int>(sys.ac.pv_systems.size()); ++i) {
+      const auto& source = sys.ac.pv_systems[i];
+      const double capacity = source.pmax_mw > 0.0 ? source.pmax_mw : source.p_mw;
+      if (!source.in_service || capacity <= 1e-9) continue;
+      add_ac_source_fault(i, source.bus,
+                          source.mtbf_hours > 0.0
+                              ? 8760.0 / source.mtbf_hours : kDefaultFailureRate,
+                          source.mttr_hours, FaultKind::PVSystem);
+    }
+    for (int i = 0; i < static_cast<int>(sys.ac.storage.size()); ++i) {
+      const auto& source = sys.ac.storage[i];
+      if (!source.in_service ||
+          hacdcpf::model::effective_capacity_mw(source) <= 1e-9)
+        continue;
+      double lambda = kDefaultFailureRate;
+      if (source.forced_outage_rate > 0.0 &&
+          source.forced_outage_rate < 1.0 && source.mttr_hr > 1e-9) {
+        lambda = source.forced_outage_rate /
+                 ((1.0 - source.forced_outage_rate) * source.mttr_hr) * 8760.0;
+      }
+      add_ac_source_fault(i, source.bus, lambda, source.mttr_hr,
+                          FaultKind::Storage);
+    }
+    for (int i = 0; i < static_cast<int>(sys.microgrids.size()); ++i) {
+      const auto& microgrid = sys.microgrids[i];
+      if (!microgrid.in_service || !microgrid.islanding_capability ||
+          microgrid_declared_capacity_mw(microgrid) <= 1e-9)
+        continue;
+      add_ac_source_fault(i, microgrid.pcc_bus,
+                          microgrid.mtbf_hours > 0.0
+                              ? 8760.0 / microgrid.mtbf_hours
+                              : kDefaultFailureRate,
+                          microgrid.mttr_hours, FaultKind::Microgrid);
     }
   }
   // 2-winding transformer outage contingencies (opt-in; modelled as edges).
@@ -429,7 +560,116 @@ struct StageSolve {
   double objective{0.0};
   double mip_gap{0.0};
   bool proven_optimal{true};
+  std::vector<int> closed_tie_switch_indices;
+  std::vector<int> closed_legacy_branch_indices;
+  bool switch_sequence_valid{true};
+  std::string switch_sequence_message{"no switching required"};
 };
+
+bool eligible_restoration_tie(const Switch& sw) {
+  if (!sw.in_service || sw.closed || sw.locked_open) return false;
+  const auto caps = effective_switch_capabilities(sw);
+  if (!caps.can_close_for_restoration || sw.switch_type == SwitchType::Fuse)
+    return false;
+  return !sw.capabilities_explicit || sw.role == SwitchRole::Tie;
+}
+
+struct ProtectionInterlockPrecheck {
+  bool valid{true};
+  bool explicit_plan{false};
+  std::string message{"fault isolation represented by forced-open failed component"};
+  std::unordered_set<int> forced_open_switch_indices;
+};
+
+ProtectionInterlockPrecheck precheck_protection_interlocks(
+    const HybridPowerSystem& sys, const FaultLine& fault) {
+  ProtectionInterlockPrecheck out;
+  std::string controlled_type;
+  int controlled_index = -1;
+  if (fault.kind == FaultKind::ACBranch && fault.index >= 0 &&
+      fault.index < static_cast<int>(sys.ac.branches.size())) {
+    controlled_type = "ac_branch";
+    controlled_index = sys.ac.branches[fault.index].index;
+  } else if (fault.kind == FaultKind::Transformer2W && fault.index >= 0 &&
+             fault.index < static_cast<int>(sys.ac.transformers_2w.size())) {
+    controlled_type = "transformer_2w";
+    controlled_index = sys.ac.transformers_2w[fault.index].index;
+  } else {
+    return out;
+  }
+
+  std::unordered_map<int, const Switch*> switch_by_index;
+  std::vector<const Switch*> protection;
+  std::vector<const Switch*> boundaries;
+  for (const auto& sw : sys.ac.switches) {
+    switch_by_index[sw.index] = &sw;
+    const bool generic_match =
+        sw.controlled_element_type == controlled_type &&
+        sw.controlled_element_index == controlled_index;
+    const bool legacy_match = controlled_type == "ac_branch" &&
+        sw.controlled_branch_index == controlled_index;
+    if (!sw.in_service || !sw.closed || (!generic_match && !legacy_match))
+      continue;
+    if (sw.role == SwitchRole::Protection) protection.push_back(&sw);
+    else if (sw.role == SwitchRole::Sectionalizing ||
+             sw.role == SwitchRole::Isolation)
+      boundaries.push_back(&sw);
+  }
+  out.explicit_plan = !protection.empty() || !boundaries.empty();
+  const auto add_protection = [&](const Switch* sw) {
+    if (std::none_of(protection.begin(), protection.end(),
+                     [&](const Switch* existing) {
+                       return existing->index == sw->index;
+                     }))
+      protection.push_back(sw);
+  };
+  std::unordered_map<int, int> boundary_upstream;
+  for (const Switch* boundary : boundaries) {
+    if (!effective_switch_capabilities(*boundary)
+             .requires_deenergized_operation)
+      continue;
+    int upstream_index = boundary->upstream_protective_switch_index;
+    if (upstream_index < 0)
+      upstream_index = boundary->sectionalizer_protection.upstream_switch_index;
+    if (upstream_index < 0) continue;
+    boundary_upstream[boundary->index] = upstream_index;
+    const auto upstream = switch_by_index.find(upstream_index);
+    if (upstream != switch_by_index.end() && upstream->second->in_service &&
+        upstream->second->closed)
+      add_protection(upstream->second);
+  }
+
+  std::unordered_set<int> valid_protection;
+  for (const Switch* sw : protection) {
+    const auto caps = effective_switch_capabilities(*sw);
+    const bool valid = !sw->locked_closed &&
+        sw->role == SwitchRole::Protection &&
+        caps.can_interrupt_fault_current;
+    out.valid = out.valid && valid;
+    if (valid) {
+      valid_protection.insert(sw->index);
+      out.forced_open_switch_indices.insert(sw->index);
+    }
+  }
+  for (const Switch* boundary : boundaries) {
+    const auto caps = effective_switch_capabilities(*boundary);
+    const auto dependency = boundary_upstream.find(boundary->index);
+    const bool upstream_cleared = dependency == boundary_upstream.end()
+        ? !valid_protection.empty()
+        : valid_protection.count(dependency->second) > 0;
+    const bool valid = !boundary->locked_closed &&
+        (caps.can_interrupt_load_current ||
+         (caps.requires_deenergized_operation && upstream_cleared));
+    out.valid = out.valid && valid;
+    if (valid) out.forced_open_switch_indices.insert(boundary->index);
+  }
+  if (out.explicit_plan) {
+    out.message = out.valid
+        ? "protection and interlock precheck passed; forced-open states applied to restoration MILP"
+        : "protection or interlock precheck failed; restoration switching is blocked";
+  }
+  return out;
+}
 
 double vsc_transfer_capacity_kw(const VSCConverter& vsc) {
   const double capacity_mw = std::max({std::abs(vsc.pmax_mw),
@@ -451,7 +691,10 @@ double vsc_transfer_capacity_kw(const VSCConverter& vsc) {
 // fallback at the end of this function.
 StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int stage,
                             int max_sw_ops = INT_MAX,
-                            const std::unordered_set<int>* unavailable_ties = nullptr) {
+                            const std::unordered_set<int>* unavailable_ties = nullptr,
+                            const std::unordered_set<int>* forced_open_switches = nullptr,
+                            const StageSolve* held_stage2_plan = nullptr,
+                            bool fixed_topology = false) {
   StageSolve out;
   const int nd_total = static_cast<int>(c.loads.size());
   out.shed_by_load.assign(c.loads.size(), 0.0);
@@ -483,6 +726,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     bool failed;         // true if this is the faulted branch
     int switch_index;    // Switch::index of the controlling tie (-1 if none)
     int transformer_index{-1};  // sys.ac.transformers_2w index (-1 if not a transformer)
+    bool restoration_eligible{true};
   };
   // Default branch rating: 2× total system demand (ensures feasibility when
   // no explicit rating is given, without making Big-M constraints too loose).
@@ -496,6 +740,13 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     if (a > b) std::swap(a, b);
     return (static_cast<long long>(a) << 32) ^ static_cast<unsigned int>(b);
   };
+  std::unordered_set<long long> forced_open_pairs;
+  if (forced_open_switches) {
+    for (const auto& sw : sys.ac.switches) {
+      if (forced_open_switches->count(sw.index) > 0)
+        forced_open_pairs.insert(undirected_key(sw.bus_from, sw.bus_to));
+    }
+  }
   std::unordered_map<long long, bool> branch_pair_seen;
   for (int b = 0; b < static_cast<int>(sys.ac.branches.size()); ++b) {
     const auto& br = sys.ac.branches[b];
@@ -506,6 +757,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
 
     bool has_open_switch = false;
     int open_switch_index = -1;
+    bool open_switch_eligible = true;
     for (const auto& sw : sys.ac.switches) {
       if (!sw.in_service) continue;
       if (!sw.closed &&
@@ -513,11 +765,14 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
            (sw.bus_from == br.to_bus   && sw.bus_to == br.from_bus))) {
         has_open_switch = true;
         open_switch_index = sw.index;
+        open_switch_eligible = eligible_restoration_tie(sw);
         break;
       }
     }
     const bool is_no_switch = !br.in_service || has_open_switch;
-    const bool is_failed = (fault.kind == FaultKind::ACBranch && b == fault.index);
+    const bool is_failed =
+        (fault.kind == FaultKind::ACBranch && b == fault.index) ||
+        forced_open_pairs.count(undirected_key(br.from_bus, br.to_bus)) > 0;
     const double s_max = br.rate_a_mva > 1e-9 ? br.rate_a_mva : default_rate_mw;
     ac_branches.push_back({b, it_f->second, it_t->second,
                            std::max(1e-6, br.r_pu),
@@ -525,7 +780,9 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
                            s_max,
                            is_no_switch,
                            is_failed,
-                           open_switch_index});
+                           open_switch_index,
+                           -1,
+                           !has_open_switch || open_switch_eligible});
   }
   for (int si = 0; si < static_cast<int>(sys.ac.switches.size()); ++si) {
     const auto& sw = sys.ac.switches[si];
@@ -534,12 +791,28 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     auto it_f = ac_bus_pos.find(sw.bus_from);
     auto it_t = ac_bus_pos.find(sw.bus_to);
     if (it_f == ac_bus_pos.end() || it_t == ac_bus_pos.end()) continue;
-    const bool sw_failed = (fault.kind == FaultKind::ACSwitch && si == fault.index);
+    const bool controlled_branch_fault = fault.kind == FaultKind::ACBranch &&
+        fault.index >= 0 && fault.index < static_cast<int>(sys.ac.branches.size()) &&
+        ((sw.controlled_element_type == "ac_branch" &&
+          sw.controlled_element_index == sys.ac.branches[fault.index].index) ||
+         sw.controlled_branch_index == sys.ac.branches[fault.index].index);
+    const bool controlled_transformer_fault =
+        fault.kind == FaultKind::Transformer2W && fault.index >= 0 &&
+        fault.index < static_cast<int>(sys.ac.transformers_2w.size()) &&
+        sw.controlled_element_type == "transformer_2w" &&
+        sw.controlled_element_index == sys.ac.transformers_2w[fault.index].index;
+    const bool sw_failed =
+        (fault.kind == FaultKind::ACSwitch && si == fault.index) ||
+        controlled_branch_fault || controlled_transformer_fault ||
+        (forced_open_switches &&
+         forced_open_switches->count(sw.index) > 0);
     ac_branches.push_back({-1, it_f->second, it_t->second,
                            1e-6, 1e-6, default_rate_mw,
                            !sw.closed,
                            sw_failed,
-                           sw.index});
+                           sw.index,
+                           -1,
+                           sw.closed || eligible_restoration_tie(sw)});
     branch_pair_seen[undirected_key(sw.bus_from, sw.bus_to)] = true;
   }
   // AC circuit breakers as near-ideal restoration edges (opt-in switch faults),
@@ -559,23 +832,22 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
       branch_pair_seen[undirected_key(cb.bus_from, cb.bus_to)] = true;
     }
   }
-  // Transformers as near-ideal capacity-limited restoration edges (opt-in).
-  // A faulted transformer edge is forced open in Stages 1/2 (isolation) and
-  // restored in Stage 3 (repair), exactly like a faulted branch.
-  if (c.include_transformer_faults) {
-    for (int t = 0; t < static_cast<int>(sys.ac.transformers_2w.size()); ++t) {
-      const auto& tr = sys.ac.transformers_2w[t];
-      if (!tr.in_service) continue;
-      auto it_f = ac_bus_pos.find(tr.hv_bus);
-      auto it_t = ac_bus_pos.find(tr.lv_bus);
-      if (it_f == ac_bus_pos.end() || it_t == ac_bus_pos.end()) continue;
-      const bool tf_failed =
-          (fault.kind == FaultKind::Transformer2W && t == fault.index);
-      const double s_max = tr.sn_mva > 1e-9 ? tr.sn_mva : default_rate_mw;
-      ac_branches.push_back({-1, it_f->second, it_t->second,
-                             1e-6, 1e-6, s_max,
-                             false, tf_failed, -1, t});
-    }
+  // Transformers are always part of the healthy network topology. The option
+  // include_transformer_faults controls contingency enumeration only; omitting
+  // the physical edge when that option is false disconnects every LV load and
+  // makes all upstream branch contingencies appear to shed the same total load.
+  for (int t = 0; t < static_cast<int>(sys.ac.transformers_2w.size()); ++t) {
+    const auto& tr = sys.ac.transformers_2w[t];
+    if (!tr.in_service) continue;
+    auto it_f = ac_bus_pos.find(tr.hv_bus);
+    auto it_t = ac_bus_pos.find(tr.lv_bus);
+    if (it_f == ac_bus_pos.end() || it_t == ac_bus_pos.end()) continue;
+    const bool tf_failed =
+        (fault.kind == FaultKind::Transformer2W && t == fault.index);
+    const double s_max = tr.sn_mva > 1e-9 ? tr.sn_mva : default_rate_mw;
+    ac_branches.push_back({-1, it_f->second, it_t->second,
+                           1e-6, 1e-6, s_max,
+                           false, tf_failed, -1, t});
   }
   const int n_br = static_cast<int>(ac_branches.size());
 
@@ -614,25 +886,48 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     if (it != ac_bus_pos.end())
       q_gen_max[it->second] += std::max(0.0, g.qmax_mvar > 0.0 ? g.qmax_mvar : std::abs(g.qg_mvar));
   }
-  for (const auto& sg : sys.ac.static_generators) {
+  for (int i = 0; i < static_cast<int>(sys.ac.static_generators.size()); ++i) {
+    const auto& sg = sys.ac.static_generators[i];
     if (!sg.in_service) continue;
+    if (fault.kind == FaultKind::StaticGenerator && fault.index == i) continue;
+    if (!microgrid_available_for_islanding(sys, sg.bus, &fault)) continue;
     const double cap = hacdcpf::model::effective_capacity_mw(sg);
     mark_source(sg.bus, cap);
     auto it = ac_bus_pos.find(sg.bus);
     if (it != ac_bus_pos.end()) q_gen_max[it->second] += cap * 0.5;
   }
-  for (const auto& rg : sys.ac.renewable_gens) {
+  for (int i = 0; i < static_cast<int>(sys.ac.renewable_gens.size()); ++i) {
+    const auto& rg = sys.ac.renewable_gens[i];
     if (!rg.in_service) continue;
+    if (fault.kind == FaultKind::RenewableGenerator && fault.index == i) continue;
+    if (!microgrid_available_for_islanding(sys, rg.bus, &fault)) continue;
     const double cap = rg.p_rated_mw > 0.0 ? rg.p_rated_mw * rg.capacity_factor : rg.p_mw;
     mark_source(rg.bus, cap);
   }
-  for (const auto& pv : sys.ac.pv_systems) {
+  for (int i = 0; i < static_cast<int>(sys.ac.pv_systems.size()); ++i) {
+    const auto& pv = sys.ac.pv_systems[i];
     if (!pv.in_service) continue;
+    if (fault.kind == FaultKind::PVSystem && fault.index == i) continue;
+    if (!microgrid_available_for_islanding(sys, pv.bus, &fault)) continue;
     mark_source(pv.bus, pv.pmax_mw > 0.0 ? pv.pmax_mw : pv.p_mw);
   }
-  for (const auto& st : sys.ac.storage) {
+  for (int i = 0; i < static_cast<int>(sys.ac.storage.size()); ++i) {
+    const auto& st = sys.ac.storage[i];
+    if (fault.kind == FaultKind::Storage && fault.index == i) continue;
+    if (!microgrid_available_for_islanding(sys, st.bus, &fault)) continue;
     const double cap = hacdcpf::model::effective_capacity_mw(st);
     if (cap > 1e-9) mark_source(st.bus, cap);
+  }
+  for (int i = 0; i < static_cast<int>(sys.microgrids.size()); ++i) {
+    const auto& microgrid = sys.microgrids[i];
+    if (!microgrid.in_service || !microgrid.islanding_capability ||
+        (fault.kind == FaultKind::Microgrid && fault.index == i))
+      continue;
+    const double residual = residual_microgrid_capacity_mw(sys, microgrid);
+    if (residual <= 1e-9) continue;
+    mark_source(microgrid.pcc_bus, residual);
+    const auto bus = ac_bus_pos.find(microgrid.pcc_bus);
+    if (bus != ac_bus_pos.end()) q_gen_max[bus->second] += 0.5 * residual;
   }
 
   // ── Build per-bus demand vectors (MW and Mvar) for AC loads ────────────
@@ -706,12 +1001,57 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     n_source_components = std::max(1, static_cast<int>(source_components.size()));
   }
 
+  std::vector<bool> fixed_bus_energized(static_cast<size_t>(n_bus), false);
+  std::vector<bool> fixed_branch_energized(static_cast<size_t>(n_br), false);
+  if (fixed_topology) {
+    const auto held_closed = [&](const BrInfo& br) {
+      if (!br.normally_open || br.failed) return !br.failed;
+      if (!held_stage2_plan) return false;
+      if (br.switch_index >= 0) {
+        return std::find(held_stage2_plan->closed_tie_switch_indices.begin(),
+                         held_stage2_plan->closed_tie_switch_indices.end(),
+                         br.switch_index) !=
+               held_stage2_plan->closed_tie_switch_indices.end();
+      }
+      return br.idx_global >= 0 &&
+             std::find(held_stage2_plan->closed_legacy_branch_indices.begin(),
+                       held_stage2_plan->closed_legacy_branch_indices.end(),
+                       br.idx_global) !=
+                 held_stage2_plan->closed_legacy_branch_indices.end();
+    };
+    DSU fixed_dsu(n_bus);
+    std::vector<bool> active(static_cast<size_t>(n_br), false);
+    for (int b = 0; b < n_br; ++b) {
+      active[static_cast<size_t>(b)] = held_closed(ac_branches[b]);
+      if (active[static_cast<size_t>(b)])
+        fixed_dsu.unite(ac_branches[b].from_pos, ac_branches[b].to_pos);
+    }
+    std::unordered_set<int> source_roots;
+    for (int i = 0; i < n_bus; ++i)
+      if (is_source[i]) source_roots.insert(fixed_dsu.find(i));
+    n_source_components = static_cast<int>(source_roots.size());
+    for (int i = 0; i < n_bus; ++i)
+      fixed_bus_energized[static_cast<size_t>(i)] =
+          source_roots.count(fixed_dsu.find(i)) > 0;
+    for (int b = 0; b < n_br; ++b) {
+      const auto& br = ac_branches[b];
+      fixed_branch_energized[static_cast<size_t>(b)] =
+          active[static_cast<size_t>(b)] &&
+          fixed_bus_energized[static_cast<size_t>(br.from_pos)] &&
+          fixed_bus_energized[static_cast<size_t>(br.to_pos)];
+    }
+  }
+
   // y_i — energized/served bus indicator.  Source buses are energized roots.
   // If no source exists, all y_i are fixed to zero and the model sheds all load.
   for (int i = 0; i < n_bus; ++i) {
     double y_lb = 0.0, y_ub = 1.0;
     engine::VarType y_type = engine::VarType::Binary;
-    if (is_source[i]) {
+    if (fixed_topology) {
+      y_lb = fixed_bus_energized[static_cast<size_t>(i)] ? 1.0 : 0.0;
+      y_ub = y_lb;
+      y_type = engine::VarType::Continuous;
+    } else if (is_source[i]) {
       y_lb = 1.0; y_ub = 1.0; y_type = engine::VarType::Continuous;
     } else if (n_sources == 0) {
       y_lb = 0.0; y_ub = 0.0; y_type = engine::VarType::Continuous;
@@ -724,7 +1064,8 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   // z_ij — binary branch status (1 = closed, 0 = open)
   const int n_no_switch = [&]() {
     int cnt = 0;
-    for (const auto& br : ac_branches) if (br.normally_open) ++cnt;
+    for (const auto& br : ac_branches)
+      if (br.normally_open && br.restoration_eligible) ++cnt;
     return cnt;
   }();
   // Big-M commodity capacity = |B| − 1 (number of buses minus 1) so that the
@@ -738,7 +1079,10 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     // C7: Forced-open failed branch (eq. 12).  F7: the faulted element is out for
     // the whole event and is only repaired at tau_RP, so it stays forced-open in
     // ALL stages, including the Stage-3 repair window [tau_TP, tau_RP].
-    if (br.failed) {
+    if (fixed_topology) {
+      z_lb = fixed_branch_energized[static_cast<size_t>(b)] ? 1.0 : 0.0;
+      z_ub = z_lb;
+    } else if (br.failed) {
       z_lb = 0.0; z_ub = 0.0;
     }
     // C8: z denotes energized branch use, not the mechanical switch handle.
@@ -763,6 +1107,24 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
         unavailable_ties->count(br.switch_index) > 0) {
       z_lb = 0.0;
       z_ub = 0.0;
+    }
+    if (br.normally_open && !br.restoration_eligible) {
+      z_lb = 0.0;
+      z_ub = 0.0;
+    }
+    if (stage == 3 && held_stage2_plan && br.normally_open && !br.failed) {
+      const bool held_closed = br.switch_index >= 0
+          ? std::find(held_stage2_plan->closed_tie_switch_indices.begin(),
+                      held_stage2_plan->closed_tie_switch_indices.end(),
+                      br.switch_index) !=
+                held_stage2_plan->closed_tie_switch_indices.end()
+          : br.idx_global >= 0 &&
+                std::find(held_stage2_plan->closed_legacy_branch_indices.begin(),
+                          held_stage2_plan->closed_legacy_branch_indices.end(),
+                          br.idx_global) !=
+                    held_stage2_plan->closed_legacy_branch_indices.end();
+      z_lb = held_closed ? 1.0 : 0.0;
+      z_ub = z_lb;
     }
 
     // Fixed z (lb==ub) → Continuous: pure-LP path, avoids B&C postsolve issues.
@@ -962,7 +1324,8 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   if ((stage == 2 || stage == 3) && n_no_switch > 0) {
     std::vector<std::pair<int,double>> sw_terms;
     for (int b = 0; b < n_br; ++b) {
-      if (ac_branches[b].normally_open) sw_terms.push_back({off_z + b, 1.0});
+      if (ac_branches[b].normally_open && ac_branches[b].restoration_eligible)
+        sw_terms.push_back({off_z + b, 1.0});
     }
     if (!sw_terms.empty()) {
       const double ksw = (max_sw_ops == INT_MAX)
@@ -1004,17 +1367,29 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   constexpr double kGapTol = 1e-6;
 
   if (mip.binary_idx.empty() && mip.integer_idx.empty()) {
-    // Pure LP — use the native dual simplex directly.
-    engine::SimplexOptions simp_opt;
-    simp_opt.max_iter        = 10000;
-    simp_opt.feasibility_tol = 1e-8;
-    simp_opt.optimality_tol  = 1e-8;
-    simp_opt.verbose         = false;
-    auto sr = engine::solve_lp_with_basis(lp, simp_opt, nullptr);
-    res_x        = sr.result.x;
-    res_success  = sr.result.stats.success;
-    res_status   = sr.result.stats.status;
-    res_objective= sr.result.stats.objective;
+    // Fixed-topology LPs are large and highly sparse. Prefer HiGHS here: the
+    // native dual simplex can return a nominally successful basis with material
+    // residual on these heavily fixed models, which then triggers a costly MILP
+    // fallback for every contingency.
+    engine::HighsAdapter highs;
+    if (highs.available()) {
+      auto hr = highs.solve_lp(lp);
+      res_x = hr.x;
+      res_success = hr.stats.success;
+      res_status = hr.stats.status;
+      res_objective = hr.stats.objective;
+    } else {
+      engine::SimplexOptions simp_opt;
+      simp_opt.max_iter        = 10000;
+      simp_opt.feasibility_tol = 1e-8;
+      simp_opt.optimality_tol  = 1e-8;
+      simp_opt.verbose         = false;
+      auto sr = engine::solve_lp_with_basis(lp, simp_opt, nullptr);
+      res_x        = sr.result.x;
+      res_success  = sr.result.stats.success;
+      res_status   = sr.result.stats.status;
+      res_objective= sr.result.stats.objective;
+    }
     res_mip_gap  = 0.0;  // pure LP has no integrality gap
   } else {
     auto solve_with_native_bc = [&](const std::string& previous_failure) {
@@ -1140,6 +1515,31 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
       out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
       return out;
     }
+  }
+
+  // Extract an auditable ordered switching plan from the accepted final
+  // topology.  Every prefix of these closures remains acyclic because the MILP
+  // final state is a strict radial forest and no normally-closed energized edge
+  // is silently opened to make room for a tie.
+  if (stage == 2 || stage == 3) {
+    for (int b = 0; b < n_br; ++b) {
+      const auto& br = ac_branches[b];
+      if (!br.normally_open || br.switch_index < 0) continue;
+      if (res_x[off_z + b] > 0.5)
+        out.closed_tie_switch_indices.push_back(br.switch_index);
+    }
+    for (int b = 0; b < n_br; ++b) {
+      const auto& br = ac_branches[b];
+      if (br.normally_open && br.switch_index < 0 && br.idx_global >= 0 &&
+          res_x[off_z + b] > 0.5)
+        out.closed_legacy_branch_indices.push_back(br.idx_global);
+    }
+    out.switch_sequence_valid = out.closed_legacy_branch_indices.empty();
+    out.switch_sequence_message = !out.switch_sequence_valid
+        ? "selected legacy out-of-service branch has no controlling switch metadata"
+        : (out.closed_tie_switch_indices.empty()
+               ? "no switching required"
+               : "ordered tie closures validated against eligibility, radiality, voltage, and branch limits");
   }
 
   // ── Extract p^sh_i (per AC bus) → map back to load points ───────────────
@@ -1447,6 +1847,73 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   return out;
 }
 
+StageSolve solve_stage2_by_topology_enumeration(
+    const NativeCase& c, const FaultLine& fault, int max_sw_ops,
+    const std::unordered_set<int>& unavailable_ties,
+    const std::unordered_set<int>& forced_open_switches) {
+  // Legacy normally-open branches have no controlling switch identifier and
+  // cannot be represented by the auditable subset enumeration.
+  if (std::any_of(c.sys.ac.branches.begin(), c.sys.ac.branches.end(),
+                  [](const ACBranch& branch) { return !branch.in_service; })) {
+    return solve_stage_milp(c, fault, 2, max_sw_ops, &unavailable_ties,
+                            &forced_open_switches);
+  }
+
+  std::vector<int> candidates;
+  for (const auto& sw : c.sys.ac.switches) {
+    if (!eligible_restoration_tie(sw) || unavailable_ties.count(sw.index) > 0 ||
+        forced_open_switches.count(sw.index) > 0)
+      continue;
+    candidates.push_back(sw.index);
+  }
+  const int limit = std::min<int>(
+      max_sw_ops == INT_MAX ? static_cast<int>(candidates.size())
+                            : std::max(0, max_sw_ops),
+      static_cast<int>(candidates.size()));
+  // Bound the exact subset count. Larger restoration spaces retain the generic
+  // MILP path; distribution cases with a handful of genuine ties use LPs.
+  if (candidates.size() > 8) {
+    return solve_stage_milp(c, fault, 2, max_sw_ops, &unavailable_ties,
+                            &forced_open_switches);
+  }
+
+  std::vector<std::vector<int>> plans(1);
+  for (int switch_index : candidates) {
+    const size_t existing = plans.size();
+    for (size_t i = 0; i < existing; ++i) {
+      if (static_cast<int>(plans[i].size()) >= limit) continue;
+      auto plan = plans[i];
+      plan.push_back(switch_index);
+      plans.push_back(std::move(plan));
+    }
+  }
+  if (plans.size() > 256) {
+    return solve_stage_milp(c, fault, 2, max_sw_ops, &unavailable_ties,
+                            &forced_open_switches);
+  }
+
+  StageSolve best;
+  bool found = false;
+  for (const auto& closed_ties : plans) {
+    StageSolve held;
+    held.closed_tie_switch_indices = closed_ties;
+    auto candidate = solve_stage_milp(
+        c, fault, 3, max_sw_ops, &unavailable_ties, &forced_open_switches,
+        &held, true);
+    if (candidate.status.rfind("success", 0) != 0) continue;
+    if (!found || candidate.shed_kw < best.shed_kw - 1e-6 ||
+        (std::abs(candidate.shed_kw - best.shed_kw) <= 1e-6 &&
+         candidate.closed_tie_switch_indices.size() <
+             best.closed_tie_switch_indices.size())) {
+      best = std::move(candidate);
+      found = true;
+    }
+  }
+  if (found) return best;
+  return solve_stage_milp(c, fault, 2, max_sw_ops, &unavailable_ties,
+                          &forced_open_switches);
+}
+
 void fill_summary(const NativeCase& c, ThreeStageReliabilityResult& r) {
   r.nb_ac = static_cast<int>(c.sys.ac.buses.size());
   r.nb_dc = static_cast<int>(c.sys.dc.buses.size());
@@ -1473,8 +1940,9 @@ void fill_summary(const NativeCase& c, ThreeStageReliabilityResult& r) {
 }
 
 void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
-                     int max_sw_ops = INT_MAX,
+                     const ThreeStageReliabilityOptions& options,
                      const std::unordered_set<int>& unavailable_ties = {}) {
+  int max_sw_ops = options.max_switch_operations;
   // Clamp negative values: negative has no sensible meaning; treat as 0
   // (no switching) rather than propagating a misleading negative count string.
   if (max_sw_ops < 0) max_sw_ops = 0;
@@ -1498,14 +1966,85 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
   double max_pls = -1.0;
   int worst = 0;
 
-  for (const auto& fault : c.faults) {
-    auto s1 = solve_stage_milp(c, fault, 1);
-    auto s2 = solve_stage_milp(c, fault, 2, max_sw_ops, &unavailable_ties);
-    // F7: Stage 3 is the repair window [tau_TP, tau_RP] with the fault still out
-    // and the Stage-2 reconfiguration held, so it uses the same switch budget and
-    // unavailable-tie set as Stage 2 (previously it ran with defaults and a
-    // silently-restored fault, which zeroed the repair-window shed).
-    auto s3 = solve_stage_milp(c, fault, 3, max_sw_ops, &unavailable_ties);
+  struct FaultStageEvaluation {
+    ProtectionInterlockPrecheck interlock;
+    StageSolve s1;
+    StageSolve s2;
+    StageSolve s3;
+  };
+  std::vector<FaultStageEvaluation> evaluated(c.faults.size());
+  const int automatic_cap = 4;
+  const int requested_workers = options.parallel_threads > 0
+      ? options.parallel_threads
+      : std::min(automatic_cap, hacdcpf::util::detect_hardware_threads());
+  r.parallel_execution = hacdcpf::util::make_parallel_execution_info(
+      options.enable_parallel, requested_workers,
+      static_cast<int>(c.faults.size()),
+      "parallel-three-stage-contingencies", "native-thread-pool");
+  r.parallel_execution.requested_threads = options.parallel_threads;
+  r.parallel_execution.batch_size = static_cast<int>(c.faults.size());
+
+  const auto evaluate_fault = [&](size_t fault_pos) {
+    const auto& fault = c.faults[fault_pos];
+    auto& item = evaluated[fault_pos];
+    item.interlock = precheck_protection_interlocks(c.sys, fault);
+    item.s1 = solve_stage_milp(c, fault, 1, INT_MAX, nullptr,
+                               &item.interlock.forced_open_switch_indices,
+                               nullptr, true);
+    if (item.s1.status.rfind("success", 0) != 0) {
+      // Meshed or otherwise non-fixed topology: preserve the generic MILP.
+      item.s1 = solve_stage_milp(c, fault, 1, INT_MAX, nullptr,
+                                 &item.interlock.forced_open_switch_indices);
+    }
+    if (item.interlock.valid) {
+      item.s2 = solve_stage2_by_topology_enumeration(
+          c, fault, max_sw_ops, unavailable_ties,
+          item.interlock.forced_open_switch_indices);
+      if (options.revalidate_stage3_plan) {
+        // Diagnostic replay: Stage 3 is the repair window with the exact
+        // Stage-2 switching plan held as fixed binary bounds.
+        item.s3 = solve_stage_milp(c, fault, 3, max_sw_ops, &unavailable_ties,
+                                   &item.interlock.forced_open_switch_indices,
+                                   &item.s2, true);
+      } else {
+        // The fault stays out throughout Stage 3 and demand/physical limits do
+        // not change. The Stage-2 optimum therefore remains the exact optimum
+        // for the same topology in the repair window; copying it removes one
+        // redundant model build and solve per contingency.
+        item.s3 = item.s2;
+      }
+    } else {
+      item.s2 = item.s1;
+      item.s3 = item.s1;
+      item.s2.status = "failed (protection interlock)";
+      item.s3.status = "failed (protection interlock)";
+      item.s2.switch_sequence_valid = false;
+      item.s3.switch_sequence_valid = false;
+      item.s2.switch_sequence_message = item.interlock.message;
+      item.s3.switch_sequence_message = item.interlock.message;
+    }
+  };
+  if (r.parallel_execution.effective) {
+    hacdcpf::util::ThreadPool pool(r.parallel_execution.resolved_workers);
+    pool.parallel_for_dynamic(c.faults.size(), evaluate_fault,
+                              r.parallel_execution.resolved_workers);
+    r.parallel_execution.actual_parallel_evaluations =
+        static_cast<long long>(c.faults.size());
+  } else {
+    for (size_t i = 0; i < c.faults.size(); ++i) evaluate_fault(i);
+    r.parallel_execution.serial_evaluations =
+        static_cast<long long>(c.faults.size());
+    if (options.enable_parallel)
+      r.parallel_execution.guard_reason =
+          hacdcpf::util::insufficient_work_reason(r.parallel_execution);
+  }
+
+  for (size_t fault_pos = 0; fault_pos < c.faults.size(); ++fault_pos) {
+    const auto& fault = c.faults[fault_pos];
+    const auto& interlock = evaluated[fault_pos].interlock;
+    const auto& s1 = evaluated[fault_pos].s1;
+    const auto& s2 = evaluated[fault_pos].s2;
+    const auto& s3 = evaluated[fault_pos].s3;
 
     ThreeStageFaultDetail d;
     d.line_id = fault.id;
@@ -1545,6 +2084,188 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
     d.eens_contribution_mwh_yr = fault.failure_rate * d.ens_kwh / 1000.0;
     d.lole_contribution_hr_yr = fault.failure_rate * d.duration_hr;
     d.lolf_contribution_occ_yr = d.duration_hr > 0.0 ? fault.failure_rate : 0.0;
+    d.protection_interlock_valid = interlock.valid;
+    d.restoration_milp_admitted = interlock.valid;
+    d.stage3_switch_plan_held = interlock.valid &&
+        s2.closed_tie_switch_indices == s3.closed_tie_switch_indices &&
+        s2.closed_legacy_branch_indices == s3.closed_legacy_branch_indices;
+    d.switching_sequence_valid = interlock.valid &&
+                                 s2.switch_sequence_valid &&
+                                 s3.switch_sequence_valid &&
+                                 s2.closed_tie_switch_indices ==
+                                     s3.closed_tie_switch_indices &&
+                                 s2.closed_legacy_branch_indices ==
+                                     s3.closed_legacy_branch_indices;
+    d.switching_sequence_message = !interlock.valid
+        ? interlock.message
+        : (d.switching_sequence_valid
+               ? s2.switch_sequence_message
+               : "Stage-2 and repair-window switching plans are inconsistent");
+    int action_order = 0;
+    bool isolation_valid = true;
+    std::vector<const Switch*> protection_actions;
+    std::vector<const Switch*> boundary_actions;
+    std::unordered_map<int, const Switch*> switch_by_index;
+    std::unordered_map<int, int> boundary_upstream_index;
+    for (const auto& sw : c.sys.ac.switches)
+      switch_by_index[sw.index] = &sw;
+    const auto add_protection_action = [&](const Switch* sw) {
+      if (std::none_of(protection_actions.begin(), protection_actions.end(),
+                       [&](const Switch* existing) {
+                         return existing->index == sw->index;
+                       }))
+        protection_actions.push_back(sw);
+    };
+    std::string controlled_type;
+    int controlled_index = -1;
+    if (fault.kind == FaultKind::ACBranch && fault.index >= 0 &&
+        fault.index < static_cast<int>(c.sys.ac.branches.size())) {
+      controlled_type = "ac_branch";
+      controlled_index = c.sys.ac.branches[fault.index].index;
+    } else if (fault.kind == FaultKind::Transformer2W && fault.index >= 0 &&
+               fault.index < static_cast<int>(c.sys.ac.transformers_2w.size())) {
+      controlled_type = "transformer_2w";
+      controlled_index = c.sys.ac.transformers_2w[fault.index].index;
+    }
+    if (controlled_index >= 0) {
+      for (const auto& sw : c.sys.ac.switches) {
+        const bool generic_match =
+            sw.controlled_element_type == controlled_type &&
+            sw.controlled_element_index == controlled_index;
+        const bool legacy_branch_match = controlled_type == "ac_branch" &&
+            sw.controlled_branch_index == controlled_index;
+        if (!sw.in_service || !sw.closed ||
+            (!generic_match && !legacy_branch_match))
+          continue;
+        if (sw.role == SwitchRole::Protection) add_protection_action(&sw);
+        else if (sw.role == SwitchRole::Sectionalizing ||
+                 sw.role == SwitchRole::Isolation)
+          boundary_actions.push_back(&sw);
+      }
+    }
+    for (const Switch* boundary : boundary_actions) {
+      if (!effective_switch_capabilities(*boundary)
+               .requires_deenergized_operation)
+        continue;
+      int upstream_index = boundary->upstream_protective_switch_index;
+      if (upstream_index < 0)
+        upstream_index =
+            boundary->sectionalizer_protection.upstream_switch_index;
+      if (upstream_index < 0) continue;
+      boundary_upstream_index[boundary->index] = upstream_index;
+      const auto upstream = switch_by_index.find(upstream_index);
+      if (upstream != switch_by_index.end() && upstream->second->in_service &&
+          upstream->second->closed)
+        add_protection_action(upstream->second);
+    }
+    std::unordered_set<int> cleared_by_protection;
+    const auto append_isolation_action = [&](const Switch& sw,
+                                             bool protection_action,
+                                             bool upstream_cleared) {
+      const auto caps = effective_switch_capabilities(sw);
+      ThreeStageSwitchAction action;
+      action.sequence_order = ++action_order;
+      action.switch_index = sw.index;
+      action.switch_name = sw.name;
+      action.switch_type = switch_type_str(sw.switch_type);
+      action.action = protection_action ? "trip" : "open";
+      action.purpose = protection_action ? "fault_clearance"
+                                         : "fault_section_isolation";
+      action.bus_from = sw.bus_from;
+      action.bus_to = sw.bus_to;
+      action.operation_time_s = sw.t_open_s > 0.0
+          ? sw.t_open_s : sw.t_operation_s;
+      action.validated = !sw.locked_closed &&
+          (protection_action ? (sw.role == SwitchRole::Protection &&
+                                caps.can_interrupt_fault_current)
+                             : (caps.can_interrupt_load_current ||
+                                (caps.requires_deenergized_operation &&
+                                 upstream_cleared)));
+      action.validation_message = action.validated
+          ? (protection_action
+                 ? "protection device is rated to interrupt fault current"
+                 : "boundary device opens after upstream fault clearance")
+          : (caps.requires_deenergized_operation && !upstream_cleared
+                 ? "de-energized operation requires a validated upstream protective trip"
+                 : "device capability or lock state does not permit this isolation action");
+      if (!action.validated) {
+        isolation_valid = false;
+        d.switching_sequence_valid = false;
+      } else if (protection_action) {
+        cleared_by_protection.insert(sw.index);
+      }
+      d.switching_sequence.push_back(std::move(action));
+    };
+    for (const Switch* sw : protection_actions)
+      append_isolation_action(*sw, true, false);
+    for (const Switch* sw : boundary_actions) {
+      const auto dependency = boundary_upstream_index.find(sw->index);
+      const bool upstream_cleared = dependency == boundary_upstream_index.end()
+          ? !cleared_by_protection.empty()
+          : cleared_by_protection.count(dependency->second) > 0;
+      append_isolation_action(*sw, false, upstream_cleared);
+    }
+    d.fault_isolation_explicit = !protection_actions.empty() ||
+                                 !boundary_actions.empty();
+    d.fault_isolation_message = d.fault_isolation_explicit
+        ? (isolation_valid
+               ? "controlled-equipment protection/isolation actions are explicit and validated"
+               : "controlled-equipment isolation contains an invalid action")
+        : "fault isolation represented by forced-open failed component; no controlled-equipment switch binding";
+    for (int switch_index : s2.closed_tie_switch_indices) {
+      ThreeStageSwitchAction action;
+      action.sequence_order = ++action_order;
+      action.switch_index = switch_index;
+      action.action = "close";
+      action.purpose = "service_restoration_tie_close";
+      const auto it = std::find_if(
+          c.sys.ac.switches.begin(), c.sys.ac.switches.end(),
+          [switch_index](const Switch& sw) { return sw.index == switch_index; });
+      if (it == c.sys.ac.switches.end()) {
+        action.validated = false;
+        action.validation_message = "selected topology edge has no switch metadata";
+        d.switching_sequence_valid = false;
+        d.switching_sequence_message = action.validation_message;
+      } else {
+        action.switch_name = it->name;
+        action.switch_type = switch_type_str(it->switch_type);
+        action.bus_from = it->bus_from;
+        action.bus_to = it->bus_to;
+        action.operation_time_s = it->t_close_s > 0.0
+            ? it->t_close_s : it->t_operation_s;
+        action.validated = eligible_restoration_tie(*it);
+        action.validation_message = action.validated
+            ? "eligible tie; ordered closure preserves the accepted radial forest"
+            : "switch capability or role forbids restoration closing";
+        if (!action.validated) {
+          d.switching_sequence_valid = false;
+          d.switching_sequence_message = action.validation_message;
+        }
+      }
+      d.switching_sequence.push_back(std::move(action));
+    }
+    for (int branch_pos : s2.closed_legacy_branch_indices) {
+      ThreeStageSwitchAction action;
+      action.sequence_order = ++action_order;
+      action.switch_index = -1;
+      action.switch_type = "normally_open_branch";
+      action.action = "close";
+      action.purpose = "legacy_normally_open_branch_close";
+      if (branch_pos >= 0 &&
+          branch_pos < static_cast<int>(c.sys.ac.branches.size())) {
+        const auto& branch = c.sys.ac.branches[branch_pos];
+        action.switch_name = branch.name;
+        action.bus_from = branch.from_bus;
+        action.bus_to = branch.to_bus;
+      }
+      action.validated = false;
+      action.validation_message =
+          "branch restoration edge has no controlling switch capability metadata";
+      d.switching_sequence.push_back(std::move(action));
+      d.switching_sequence_valid = false;
+      d.switching_sequence_message =
+          "sequence contains a legacy branch action without switch capability metadata";
+    }
     // SOP power vectors: zero-filled. Full SOP dispatch optimization is not
     // yet implemented; the binary load-shedding MILP above does not dispatch
     // SOP active-power flows. A dedicated OPF-based restoration model is
@@ -1599,11 +2320,19 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
            ? std::string(" (no limit)")
            : " (≤ " + std::to_string(max_sw_ops) + " operations per fault)")
       + ". "
+        "Selected restoration switch closures are returned in execution order and "
+        "checked against device role/capability plus the MILP radiality, voltage, and "
+        "branch limits. Legacy out-of-service branch closures are reported as "
+        "unvalidated. Controlled-equipment protection and interlock bindings are "
+        "prechecked before restoration; validated trip/isolation devices are forced "
+        "open in the MILP, invalid interlocks block restoration switching, and Stage-3 "
+        "binary switch states are fixed to the accepted Stage-2 plan. "
         "N-1 contingency enumeration covers ACBranch and DCBranch outages by default; "
-        "generator, transformer, VSC/DC-DC converter, AC switch, and AC/DC circuit-breaker "
+        "generator, static/renewable/PV generation, storage, microgrid, transformer, "
+        "VSC/DC-DC converter, AC switch, and AC/DC circuit-breaker "
         "outages are enumerated only when their opt-in flags are set (converter and "
         "switch/breaker faults act through the DC connectivity fallback or as forced-open "
-        "AC edges; a load/storage outage is not enumerated as a standalone fault). "
+        "AC edges; load outage is not enumerated as a standalone fault). "
        "DC sub-network: connectivity/capacity fallback with DC source capacity and "
        "AC-source surplus transferable through VSC capacity limits; no DC power-flow constraints. "
        "DCDC devices are still treated as lossless connectivity edges. "
@@ -1683,7 +2412,7 @@ ThreeStageReliabilityResult run_three_stage_reliability(
     std::unordered_set<int> unavailable_ties(
         options.unavailable_tie_switch_ids.begin(),
         options.unavailable_tie_switch_ids.end());
-    run_native_case(c, result, options.max_switch_operations, unavailable_ties);
+    run_native_case(c, result, options, unavailable_ties);
   } catch (const std::exception& e) {
     result.error = std::string("failed to evaluate native three-stage reliability: ") + e.what();
   }
@@ -1712,7 +2441,7 @@ ThreeStageReliabilityResult run_three_stage_reliability_from_string(
     std::unordered_set<int> unavailable_ties(
         options.unavailable_tie_switch_ids.begin(),
         options.unavailable_tie_switch_ids.end());
-    run_native_case(c, result, options.max_switch_operations, unavailable_ties);
+    run_native_case(c, result, options, unavailable_ties);
   } catch (const std::exception& e) {
     result.error = std::string("failed to evaluate native three-stage reliability: ") + e.what();
   }

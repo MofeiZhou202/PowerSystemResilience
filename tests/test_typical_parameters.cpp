@@ -44,13 +44,45 @@ HybridPowerSystem make_parameter_contract_system() {
   ACBranch transformer_branch = line;
   transformer_branch.index = 2;
   transformer_branch.sn_mva = 1.0;
-  sys.ac.branches = {line, transformer_branch};
+  ACBranch overhead_line = line;
+  overhead_line.index = 3;
+  overhead_line.line_type = "OVERHEAD";
+  ACBranch cable_line = line;
+  cable_line.index = 4;
+  cable_line.line_type = "CABLE";
+  sys.ac.branches = {line, transformer_branch, overhead_line, cable_line};
 
   Transformer2W transformer;
   transformer.index = 1;
   transformer.hv_bus = 1;
   transformer.lv_bus = 2;
   sys.ac.transformers_2w = {transformer};
+
+  Switch sw;
+  sw.index = 1;
+  sw.bus_from = 1;
+  sw.bus_to = 2;
+  sys.ac.switches = {sw};
+
+  Generator generator;
+  generator.index = 1;
+  generator.bus = 1;
+  sys.ac.generators = {generator};
+
+  StaticGenerator static_generator;
+  static_generator.index = 1;
+  static_generator.bus = 1;
+  sys.ac.static_generators = {static_generator};
+
+  RenewableGen renewable;
+  renewable.index = 1;
+  renewable.bus = 1;
+  sys.ac.renewable_gens = {renewable};
+
+  PVSystem pv;
+  pv.index = 1;
+  pv.bus = 1;
+  sys.ac.pv_systems = {pv};
 
   DCBus dc1;
   dc1.index = 1;
@@ -88,6 +120,11 @@ HybridPowerSystem make_parameter_contract_system() {
   storage.eta_charge = 0.0;
   storage.eta_discharge = 0.0;
   sys.ac.storage = {storage};
+
+  Microgrid microgrid;
+  microgrid.index = 1;
+  microgrid.pcc_bus = 1;
+  sys.microgrids = {microgrid};
   return sys;
 }
 
@@ -117,6 +154,34 @@ double representative_parameter_value(const HybridPowerSystem& sys,
   if (id == "dcdc.eta") return sys.dc.dcdc_converters[0].eta;
   if (id == "storage.eta_charge") return sys.ac.storage[0].eta_charge;
   if (id == "storage.eta_discharge") return sys.ac.storage[0].eta_discharge;
+  if (id == "reliability.ac_overhead.failure_rate") return sys.ac.branches[2].failure_rate;
+  if (id == "reliability.ac_overhead.mttr_hr") return sys.ac.branches[2].mttr_hr;
+  if (id == "reliability.ac_cable.failure_rate") return sys.ac.branches[3].failure_rate;
+  if (id == "reliability.ac_cable.mttr_hr") return sys.ac.branches[3].mttr_hr;
+  if (id == "reliability.ac_branch.failure_rate") return sys.ac.branches[0].failure_rate;
+  if (id == "reliability.ac_branch.mttr_hr") return sys.ac.branches[0].mttr_hr;
+  if (id == "reliability.transformer.mtbf_hours") return sys.ac.transformers_2w[0].mtbf_hours;
+  if (id == "reliability.transformer.mttr_hours") return sys.ac.transformers_2w[0].mttr_hours;
+  if (id == "reliability.switch.mtbf_hours") return sys.ac.switches[0].mtbf_hours;
+  if (id == "reliability.switch.mttr_hours") return sys.ac.switches[0].mttr_hours;
+  if (id == "reliability.generator.forced_outage_rate") return sys.ac.generators[0].forced_outage_rate;
+  if (id == "reliability.generator.mttr_hr") return sys.ac.generators[0].mttr_hr;
+  if (id == "reliability.static_generator.mtbf_hours") return sys.ac.static_generators[0].mtbf_hours;
+  if (id == "reliability.static_generator.mttr_hours") return sys.ac.static_generators[0].mttr_hours;
+  if (id == "reliability.renewable.mtbf_hours") return sys.ac.renewable_gens[0].mtbf_hours;
+  if (id == "reliability.renewable.mttr_hours") return sys.ac.renewable_gens[0].mttr_hours;
+  if (id == "reliability.pv.mtbf_hours") return sys.ac.pv_systems[0].mtbf_hours;
+  if (id == "reliability.pv.mttr_hours") return sys.ac.pv_systems[0].mttr_hours;
+  if (id == "reliability.storage.forced_outage_rate") return sys.ac.storage[0].forced_outage_rate;
+  if (id == "reliability.storage.mttr_hr") return sys.ac.storage[0].mttr_hr;
+  if (id == "reliability.vsc.forced_outage_rate") return sys.vsc_converters[0].forced_outage_rate;
+  if (id == "reliability.vsc.mttr_hr") return sys.vsc_converters[0].mttr_hr;
+  if (id == "reliability.dcdc.mtbf_hours") return sys.dc.dcdc_converters[0].mtbf_hours;
+  if (id == "reliability.dcdc.mttr_hours") return sys.dc.dcdc_converters[0].mttr_hours;
+  if (id == "reliability.dc_branch.mtbf_hours") return sys.dc.branches[0].mtbf_hours;
+  if (id == "reliability.dc_branch.mttr_hours") return sys.dc.branches[0].mttr_hours;
+  if (id == "reliability.microgrid.mtbf_hours") return sys.microgrids[0].mtbf_hours;
+  if (id == "reliability.microgrid.mttr_hours") return sys.microgrids[0].mttr_hours;
   FAIL("No parameter-contract representative for " + id);
   return 0.0;
 }
@@ -380,10 +445,32 @@ TEST_CASE("standard parameter library applies edited defaults only when requeste
   CHECK_THAT(sys.ac.branches.front().x_pu, WithinAbs(0.055, 1e-12));
 }
 
+TEST_CASE("standard parameter reliability completion preserves authored data",
+          "[model][parameter_library][reliability][missing_only]") {
+  auto sys = make_parameter_contract_system();
+  sys.ac.branches[0].failure_rate = 0.123;
+  sys.ac.branches[0].mttr_hr = 17.0;
+  sys.ac.generators[0].forced_outage_rate = 0.031;
+  sys.ac.generators[0].mttr_hr = 29.0;
+  sys.microgrids[0].mtbf_hours = 54321.0;
+  sys.microgrids[0].mttr_hours = 13.0;
+
+  const auto applied = apply_standard_parameter_library(
+      sys, make_standard_parameter_library());
+  CHECK(applied.fields_changed > 0);
+  CHECK_THAT(sys.ac.branches[0].failure_rate, WithinAbs(0.123, 1e-12));
+  CHECK_THAT(sys.ac.branches[0].mttr_hr, WithinAbs(17.0, 1e-12));
+  CHECK_THAT(sys.ac.generators[0].forced_outage_rate,
+             WithinAbs(0.031, 1e-12));
+  CHECK_THAT(sys.ac.generators[0].mttr_hr, WithinAbs(29.0, 1e-12));
+  CHECK_THAT(sys.microgrids[0].mtbf_hours, WithinAbs(54321.0, 1e-12));
+  CHECK_THAT(sys.microgrids[0].mttr_hours, WithinAbs(13.0, 1e-12));
+}
+
 TEST_CASE("every registered standard parameter has an effective numerical override",
           "[model][parameter_library][contract][sensitivity]") {
   const auto baseline = make_standard_parameter_library();
-  REQUIRE(baseline.rules.size() == 24);
+  REQUIRE(baseline.rules.size() >= 52);
 
   for (const auto& baseline_rule : baseline.rules) {
     DYNAMIC_SECTION(baseline_rule.id) {
@@ -641,4 +728,175 @@ TEST_CASE("design handbook reports model and PSR geometry conflicts",
   REQUIRE(missing_model_preview.suggestions.size() == 1);
   CHECK_FALSE(missing_model_preview.suggestions.front().cross_section_inferred);
   CHECK(missing_model_preview.suggestions.front().confidence == "medium");
+}
+
+TEST_CASE("design handbook infers protection, sectionalizer, fuse, and tie bindings",
+          "[model][parameter_library][design_handbook][switch_binding]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 10.0;
+  for (int index = 1; index <= 10; ++index) {
+    ACBus bus;
+    bus.index = index;
+    bus.base_kv = 10.0;
+    bus.bus_type = (index == 1 || index == 6) ? BusType::SLACK : BusType::PQ;
+    sys.ac.buses.push_back(bus);
+  }
+  ExternalGrid grid1;
+  grid1.index = 1;
+  grid1.bus = 1;
+  ExternalGrid grid2 = grid1;
+  grid2.index = 2;
+  grid2.bus = 6;
+  sys.ac.external_grids = {grid1, grid2};
+
+  ACBranch feeder;
+  feeder.index = 7;
+  feeder.from_bus = 2;
+  feeder.to_bus = 3;
+  feeder.r_pu = 0.01;
+  feeder.x_pu = 0.02;
+  ACBranch lateral = feeder;
+  lateral.index = 8;
+  lateral.from_bus = 4;
+  lateral.to_bus = 5;
+  ACBranch isolated_section = feeder;
+  isolated_section.index = 9;
+  isolated_section.from_bus = 9;
+  isolated_section.to_bus = 10;
+  sys.ac.branches = {feeder, lateral, isolated_section};
+
+  Transformer2W transformer;
+  transformer.index = 3;
+  transformer.hv_bus = 7;
+  transformer.lv_bus = 8;
+  transformer.sn_mva = 1.0;
+  sys.ac.transformers_2w = {transformer};
+
+  Switch breaker;
+  breaker.index = 10;
+  breaker.name = "feeder breaker";
+  breaker.bus_from = 1;
+  breaker.bus_to = 2;
+  breaker.switch_type = SwitchType::CircuitBreaker;
+  breaker.closed = true;
+  Switch sectionalizer;
+  sectionalizer.index = 11;
+  sectionalizer.name = "sectionalizer";
+  sectionalizer.bus_from = 3;
+  sectionalizer.bus_to = 4;
+  sectionalizer.switch_type = SwitchType::Sectionalizer;
+  sectionalizer.closed = true;
+  Switch fuse;
+  fuse.index = 12;
+  fuse.name = "dropout fuse";
+  fuse.bus_from = 5;
+  fuse.bus_to = 7;
+  fuse.switch_type = SwitchType::Fuse;
+  fuse.closed = true;
+  Switch disconnector;
+  disconnector.index = 14;
+  disconnector.name = "maintenance disconnector";
+  disconnector.bus_from = 5;
+  disconnector.bus_to = 9;
+  disconnector.switch_type = SwitchType::Disconnector;
+  disconnector.closed = true;
+  Switch tie;
+  tie.index = 13;
+  tie.name = "联络开关";
+  tie.bus_from = 3;
+  tie.bus_to = 6;
+  tie.switch_type = SwitchType::LoadBreakSwitch;
+  tie.closed = false;
+  tie.normal_closed = false;
+  tie.normal_state_explicit = true;
+  tie.role = SwitchRole::Tie;
+  sys.ac.switches = {breaker, sectionalizer, fuse, disconnector, tie};
+
+  const auto preview = complete_design_handbook_parameters(sys);
+  CHECK(preview.switches_scanned == 5);
+  CHECK(preview.switch_binding_candidates == 5);
+  CHECK(preview.switch_binding_fields_changed == 0);
+  CHECK(sys.ac.switches[0].controlled_branch_index == -1);
+
+  DesignHandbookCompletionOptions options;
+  options.apply = true;
+  const auto applied = complete_design_handbook_parameters(sys, options);
+  CHECK(applied.switch_binding_fields_changed > 0);
+  CHECK(sys.ac.switches[0].role == SwitchRole::Protection);
+  CHECK(sys.ac.switches[0].controlled_element_type == "ac_branch");
+  CHECK(sys.ac.switches[0].controlled_branch_index == 7);
+  CHECK(sys.ac.switches[0].protection_zone_id == 7);
+  CHECK(sys.ac.switches[1].role == SwitchRole::Sectionalizing);
+  CHECK(sys.ac.switches[1].controlled_branch_index == 8);
+  CHECK(sys.ac.switches[1].upstream_protective_switch_index == 10);
+  CHECK(sys.ac.switches[1].sectionalizer_protection.upstream_switch_index == 10);
+  CHECK(sys.ac.switches[2].controlled_element_type == "transformer_2w");
+  CHECK(sys.ac.switches[2].controlled_element_index == 3);
+  CHECK(sys.ac.switches[2].controlled_branch_index == -1);
+  CHECK(sys.ac.switches[3].role == SwitchRole::Isolation);
+  CHECK(sys.ac.switches[3].controlled_branch_index == 9);
+  CHECK(sys.ac.switches[3].upstream_protective_switch_index == 10);
+  CHECK(sys.ac.switches[4].role == SwitchRole::Tie);
+  CHECK(sys.ac.switches[4].controlled_element_index == -1);
+  CHECK(sys.ac.switches[4].synchronization_required);
+
+  auto authored = sys;
+  authored.ac.switches[0].controlled_element_type = "ac_branch";
+  authored.ac.switches[0].controlled_element_index = 8;
+  authored.ac.switches[0].controlled_branch_index = 8;
+  authored.ac.switches[0].binding_inferred = false;
+  authored.ac.switches[0].binding_source = "manufacturer";
+  complete_design_handbook_parameters(authored, options);
+  CHECK(authored.ac.switches[0].controlled_branch_index == 8);
+  CHECK(authored.ac.switches[0].binding_source == "manufacturer");
+
+  authored.ac.switches[0].binding_inferred = true;
+  authored.ac.switches[0].binding_source = "old_inference";
+  complete_design_handbook_parameters(authored, options);
+  CHECK(authored.ac.switches[0].controlled_branch_index == 7);
+  CHECK(authored.ac.switches[0].binding_source ==
+        "design_handbook_topology_inference_v1");
+}
+
+TEST_CASE("design handbook finds upstream protection inside a source-less island",
+          "[model][parameter_library][design_handbook][switch_binding]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 10.0;
+  for (int index = 0; index <= 4; ++index) {
+    ACBus bus;
+    bus.index = index;
+    bus.base_kv = 10.0;
+    bus.bus_type = index == 0 ? BusType::SLACK : BusType::PQ;
+    sys.ac.buses.push_back(bus);
+  }
+  ExternalGrid grid;
+  grid.index = 1;
+  grid.bus = 0;
+  sys.ac.external_grids = {grid};
+
+  ACBranch branch;
+  branch.index = 8;
+  branch.from_bus = 3;
+  branch.to_bus = 4;
+  branch.r_pu = 0.01;
+  branch.x_pu = 0.02;
+  sys.ac.branches = {branch};
+
+  Switch breaker;
+  breaker.index = 10;
+  breaker.bus_from = 1;
+  breaker.bus_to = 2;
+  breaker.switch_type = SwitchType::CircuitBreaker;
+  Switch disconnector;
+  disconnector.index = 11;
+  disconnector.bus_from = 2;
+  disconnector.bus_to = 3;
+  disconnector.switch_type = SwitchType::Disconnector;
+  sys.ac.switches = {breaker, disconnector};
+
+  DesignHandbookCompletionOptions options;
+  options.apply = true;
+  complete_design_handbook_parameters(sys, options);
+  CHECK(sys.ac.switches[1].controlled_branch_index == 8);
+  CHECK(sys.ac.switches[1].upstream_protective_switch_index == 10);
 }

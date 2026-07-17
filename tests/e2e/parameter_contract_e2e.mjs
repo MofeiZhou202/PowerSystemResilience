@@ -70,8 +70,18 @@ async function main() {
   try {
     await waitUp(base);
     const initial = await jsonRequest(base, '/api/session/parameter_library');
-    if (initial.rules.length !== 24) throw new Error(`expected 24 rules, got ${initial.rules.length}`);
-    if (initial.parameter_contract?.registered_count !== 24) throw new Error('registry count missing');
+    const expectedCount = initial.rules.length;
+    if (expectedCount < 52) throw new Error(`expected at least 52 rules, got ${expectedCount}`);
+    if (initial.parameter_contract?.registered_count !== expectedCount) {
+      throw new Error('registry count does not match the returned rule set');
+    }
+    for (const id of ['reliability.ac_branch.failure_rate',
+                      'reliability.generator.forced_outage_rate',
+                      'reliability.microgrid.mtbf_hours']) {
+      if (!initial.rules.some(rule => rule.id === id)) {
+        throw new Error(`${id}: reliability rule missing from GUI contract`);
+      }
+    }
     for (const rule of initial.rules) {
       const defaultEffective = initial.effective_parameters?.values?.[rule.id];
       if (!defaultEffective ||
@@ -101,8 +111,9 @@ async function main() {
     const page = await browser.newPage();
     await page.goto(`${base}/xjtu/`, { waitUntil: 'networkidle' });
     await page.evaluate(() => App.setActiveModule('parameterLibrary'));
-    await page.waitForFunction(() =>
-      document.querySelectorAll('#parameterLibraryTable tbody tr[data-rule-id]').length === 24);
+    await page.waitForFunction(expected =>
+      document.querySelectorAll('#parameterLibraryTable tbody tr[data-rule-id]').length === expected,
+      expectedCount);
     const gui = await page.evaluate(async () => {
       const rows = [...document.querySelectorAll('#parameterLibraryTable tbody tr[data-rule-id]')];
       const editable = rows.filter(row => {
@@ -128,13 +139,13 @@ async function main() {
       }
       return { rows: rows.length, editable: editable.length, id, next, effective: null };
     });
-    if (gui.rows !== 24 || gui.editable !== 24) {
-      throw new Error(`GUI coverage ${gui.editable}/${gui.rows}, expected 24/24`);
+    if (gui.rows !== expectedCount || gui.editable !== expectedCount) {
+      throw new Error(`GUI coverage ${gui.editable}/${gui.rows}, expected ${expectedCount}/${expectedCount}`);
     }
     if (Math.abs(gui.effective - gui.next) > 1e-12) {
       throw new Error(`${gui.id}: GUI edit did not reach effective API value`);
     }
-    console.log(`parameter contract passed: defaults=24, JSON=24, API=24, GUI=24, effective=24`);
+    console.log(`parameter contract passed: defaults=${expectedCount}, JSON=${expectedCount}, API=${expectedCount}, GUI=${expectedCount}, effective=${expectedCount}`);
   } finally {
     if (browser) await browser.close();
     proc.kill();

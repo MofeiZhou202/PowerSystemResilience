@@ -377,6 +377,42 @@ TEST_CASE("catalog: switch emits active + passive + cyber modes",
   }
 }
 
+TEST_CASE("catalog: fuse uses one-shot clearing failure and has no close command",
+          "[reliability][failure_mode][catalog][fuse]") {
+  HybridPowerSystem sys;
+  ACBus bus;
+  bus.index = 1;
+  bus.bus_type = BusType::SLACK;
+  sys.ac.buses = {bus};
+  Switch fuse;
+  fuse.index = 5;
+  fuse.name = "F5";
+  fuse.bus_from = 1;
+  fuse.bus_to = 1;
+  fuse.switch_type = SwitchType::Fuse;
+  fuse.p_fail_to_open = 0.003;
+  fuse.fuse_protection.replace_after_operation = true;
+  fuse.fuse_protection.replacement_time_hr = 1.5;
+  sys.ac.switches = {fuse};
+
+  const auto catalog = build_failure_mode_catalog(
+      sys, FailureModeCatalogOptions{}, ReliabilityDataPolicy{});
+  bool saw_fail_to_clear = false;
+  bool saw_fail_to_close = false;
+  for (const auto& entry : catalog) {
+    if (entry.mode.ref.component.kind != ReliabilityComponentKind::ACSwitch)
+      continue;
+    saw_fail_to_clear |= entry.mode.ref.mode_id.find("/fail_to_clear") !=
+                         std::string::npos;
+    saw_fail_to_close |= entry.mode.ref.mode_id.find("/fail_to_close") !=
+                         std::string::npos;
+    if (entry.mode.ref.mode_id.find("/fail_to_clear") != std::string::npos)
+      CHECK(entry.mode.probability_per_demand == Approx(0.003));
+  }
+  CHECK(saw_fail_to_clear);
+  CHECK_FALSE(saw_fail_to_close);
+}
+
 TEST_CASE("catalog: breaker emits fail-to-trip protection mode + VSC grid-forming",
           "[reliability][failure_mode][catalog]") {
   auto sys = make_switch_breaker_vsc_system();
@@ -858,6 +894,45 @@ TEST_CASE("nsq MC: hybrid system includes DC load curtailment in EENS",
   CHECK(r.eens_mwh_yr > 100.0);
 }
 
+TEST_CASE("nsq MC: microgrid supervisory outage removes island support",
+          "[reliability][mc][microgrid][e2e]") {
+  HybridPowerSystem sys;
+  ACBus bus;
+  bus.index = 1;
+  bus.bus_type = BusType::PQ;
+  bus.in_service = true;
+  bus.pd_mw = 0.5;
+  bus.n_customers = 10;
+  sys.ac.buses = {bus};
+
+  Microgrid microgrid;
+  microgrid.index = 7;
+  microgrid.name = "Island controller";
+  microgrid.pcc_bus = 1;
+  microgrid.in_service = true;
+  microgrid.islanding_capability = true;
+  microgrid.capacity_mw = 0.5;
+  microgrid.mtbf_hours = 1.0;
+  microgrid.mttr_hours = 8760.0;
+  sys.microgrids = {microgrid};
+
+  ReliabilityOptions options;
+  options.max_iterations = 200;
+  options.seed = 19;
+  options.compute_tail_risk = false;
+  const auto result = run_nonsequential_mc(sys, options);
+
+  CHECK(result.eens_mwh_yr > 4000.0);
+  const auto critical = std::find_if(
+      result.critical_components.begin(), result.critical_components.end(),
+      [](const auto& component) {
+        return component.component_type == "Microgrid";
+      });
+  REQUIRE(critical != result.critical_components.end());
+  CHECK(critical->component_name.find("Island controller") !=
+        std::string::npos);
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // F9: the hybrid LP now enforces DC power flow (Kirchhoff), so meshed loop
 // flow is constrained by reactance instead of split freely (transport).
@@ -1066,6 +1141,91 @@ TEST_CASE("FMEA: data-quality populated and strict policy flags missing data",
     auto result = run_distribution_fmea(sys, opts);
     CHECK_FALSE(result.data_quality.missing_required_data.empty());
   }
+}
+
+TEST_CASE("FMEA: upstream protection trip precedes disconnector isolation",
+          "[reliability][fmea][switch_sequence]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 10.0;
+  ACBus source, load_bus;
+  source.index = 1;
+  source.bus_type = BusType::SLACK;
+  load_bus.index = 2;
+  load_bus.bus_type = BusType::PQ;
+  sys.ac.buses = {source, load_bus};
+  Generator generator;
+  generator.index = 1;
+  generator.bus = 1;
+  generator.is_slack = true;
+  generator.pmax_mw = 5.0;
+  generator.forced_outage_rate = 0.01;
+  generator.mttr_hr = 2.0;
+  sys.ac.generators = {generator};
+  Load load;
+  load.index = 1;
+  load.bus = 2;
+  load.p_mw = 1.0;
+  load.n_customers = 10;
+  sys.ac.loads = {load};
+  ACBranch feeder;
+  feeder.index = 17;
+  feeder.from_bus = 1;
+  feeder.to_bus = 2;
+  feeder.r_pu = 0.01;
+  feeder.x_pu = 0.02;
+  feeder.rate_a_mva = 5.0;
+  feeder.failure_rate = 1.0;
+  feeder.mttr_hr = 4.0;
+  sys.ac.branches = {feeder};
+  Switch breaker;
+  breaker.index = 21;
+  breaker.name = "CB-17";
+  breaker.bus_from = 1;
+  breaker.bus_to = 2;
+  breaker.switch_type = SwitchType::CircuitBreaker;
+  breaker.role = SwitchRole::Protection;
+  breaker.capabilities_explicit = true;
+  breaker.capabilities.can_interrupt_fault_current = true;
+  breaker.capabilities.can_interrupt_load_current = true;
+  breaker.t_open_s = 0.08;
+  Switch disconnector;
+  disconnector.index = 22;
+  disconnector.name = "DS-17";
+  disconnector.bus_from = 1;
+  disconnector.bus_to = 2;
+  disconnector.switch_type = SwitchType::Disconnector;
+  disconnector.role = SwitchRole::Isolation;
+  disconnector.controlled_element_type = "ac_branch";
+  disconnector.controlled_element_index = 17;
+  disconnector.controlled_branch_index = 17;
+  disconnector.upstream_protective_switch_index = 21;
+  disconnector.capabilities_explicit = true;
+  disconnector.capabilities.requires_deenergized_operation = true;
+  disconnector.t_open_s = 1.0;
+  sys.ac.switches = {breaker, disconnector};
+
+  FMEAOptions options;
+  options.enable_parallel = false;
+  const auto result = run_distribution_fmea(sys, options);
+  const auto detail = std::find_if(
+      result.contingencies.begin(), result.contingencies.end(),
+      [](const auto& item) {
+        return item.component_type == "ac_branch" && item.component_index == 0;
+      });
+  REQUIRE(detail != result.contingencies.end());
+  CHECK(detail->fault_isolation_explicit);
+  CHECK(detail->repair_switch_sequence_valid);
+  REQUIRE(detail->repair_switch_actions.size() == 2);
+  const auto& trip = detail->repair_switch_actions[0];
+  CHECK(trip.sequence_order == 1);
+  CHECK(trip.switch_index == 21);
+  CHECK(trip.action == "trip");
+  CHECK(trip.validated);
+  const auto& isolate = detail->repair_switch_actions[1];
+  CHECK(isolate.sequence_order == 2);
+  CHECK(isolate.switch_index == 22);
+  CHECK(isolate.action == "open");
+  CHECK(isolate.validated);
 }
 
 TEST_CASE("FMEA: Level-1 cyber conditioning preserves bounds and decomposition",

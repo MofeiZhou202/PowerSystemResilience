@@ -11,6 +11,7 @@
 #include "hacdcpf/io/cim_dist_io.hpp"
 #include "hacdcpf/io/cim_io.hpp"
 #include "hacdcpf/io/json_io.hpp"
+#include "hacdcpf/model/standard_parameter_library.hpp"
 
 namespace {
 bool near(double a, double b) { return std::abs(a - b) < 1e-9; }
@@ -227,6 +228,33 @@ TEST_CASE("Distribution CIM real feeder creates transformer-side fallback loads"
   CHECK(imported.inferred_load_objects == 41);
   CHECK(imported.system.ac.loads.size() == 41);
   CHECK(imported.system.ac.generators.empty());
+  CHECK(std::count_if(imported.system.ac.switches.begin(),
+                      imported.system.ac.switches.end(), [](const auto& sw) {
+          return sw.switch_type == hacdcpf::SwitchType::Fuse;
+        }) == 28);
+  CHECK(std::count_if(imported.system.ac.switches.begin(),
+                      imported.system.ac.switches.end(), [](const auto& sw) {
+          return sw.switch_type == hacdcpf::SwitchType::LoadBreakSwitch;
+        }) == 55);
+  CHECK(std::all_of(imported.system.ac.switches.begin(),
+                    imported.system.ac.switches.end(), [](const auto& sw) {
+          return sw.switch_type != hacdcpf::SwitchType::Fuse ||
+                 (sw.role == hacdcpf::SwitchRole::Protection &&
+                  !hacdcpf::effective_switch_capabilities(sw)
+                       .can_close_for_restoration);
+        }));
+  auto completion_system = imported.system;
+  const auto binding_preview =
+      hacdcpf::complete_design_handbook_parameters(completion_system);
+  CHECK(binding_preview.switches_scanned ==
+        static_cast<int>(imported.system.ac.switches.size()));
+  CHECK(binding_preview.switch_bindings.size() ==
+        imported.system.ac.switches.size());
+  CHECK(binding_preview.switch_binding_candidates > 0);
+  CHECK(std::any_of(binding_preview.switch_bindings.begin(),
+                    binding_preview.switch_bindings.end(), [](const auto& row) {
+        return row.controlled_element_index >= 0 || row.ambiguous;
+      }));
   REQUIRE(imported.system.three_phase_ac.has_value());
   CHECK(imported.system.three_phase_ac->loads.size() == 41);
   CHECK(imported.has_explicit_phase_data);
@@ -311,4 +339,33 @@ TEST_CASE("Distribution CIM maps explicit loads and generators",
   CHECK(imported.system.three_phase_ac->generators.front().phase_mask.bits ==
         hacdcpf::PhaseMask::c().bits);
   CHECK(imported.is_unbalanced);
+}
+
+TEST_CASE("Distribution CIM preserves switching equipment classes and roles",
+          "[io][cim][distribution][switchgear]") {
+  const std::string xml = R"xml(<rdf:RDF>
+ <cim:BaseVoltage rdf:ID="BV"><cim:BaseVoltage.nominalVoltage>10000</cim:BaseVoltage.nominalVoltage></cim:BaseVoltage>
+ <cim:ConnectivityNode rdf:ID="N1"/><cim:ConnectivityNode rdf:ID="N2"/><cim:ConnectivityNode rdf:ID="N3"/>
+ <cim:Fuse rdf:ID="F1"><cim:Naming.name>dropout fuse</cim:Naming.name><cim:Switch.normalOpen>true</cim:Switch.normalOpen><cim:PowerSystemResource.BaseVoltage rdf:resource="#BV"/></cim:Fuse>
+ <cim:Terminal rdf:ID="F1T1"><cim:Terminal.ConductingEquipment rdf:resource="#F1"/><cim:Terminal.ConnectivityNode rdf:resource="#N1"/></cim:Terminal>
+ <cim:Terminal rdf:ID="F1T2"><cim:Terminal.ConductingEquipment rdf:resource="#F1"/><cim:Terminal.ConnectivityNode rdf:resource="#N2"/></cim:Terminal>
+ <cim:LoadBreakSwitch rdf:ID="T1"><cim:Naming.name>ring tie</cim:Naming.name><cim:Switch.normalOpen>true</cim:Switch.normalOpen><cim:Switch.isRing>true</cim:Switch.isRing><cim:PowerSystemResource.BaseVoltage rdf:resource="#BV"/></cim:LoadBreakSwitch>
+ <cim:Terminal rdf:ID="T1T1"><cim:Terminal.ConductingEquipment rdf:resource="#T1"/><cim:Terminal.ConnectivityNode rdf:resource="#N2"/></cim:Terminal>
+ <cim:Terminal rdf:ID="T1T2"><cim:Terminal.ConductingEquipment rdf:resource="#T1"/><cim:Terminal.ConnectivityNode rdf:resource="#N3"/></cim:Terminal>
+</rdf:RDF>)xml";
+
+  const auto imported = hacdcpf::io::from_cim_dist(xml);
+  REQUIRE(imported.system.ac.switches.size() == 2);
+  const auto& fuse = imported.system.ac.switches[0];
+  const auto& tie = imported.system.ac.switches[1];
+  CHECK(fuse.switch_type == hacdcpf::SwitchType::Fuse);
+  CHECK(fuse.role == hacdcpf::SwitchRole::Protection);
+  CHECK_FALSE(hacdcpf::effective_switch_capabilities(fuse).can_close_for_restoration);
+  CHECK(tie.switch_type == hacdcpf::SwitchType::LoadBreakSwitch);
+  CHECK(tie.role == hacdcpf::SwitchRole::Tie);
+  CHECK(hacdcpf::effective_switch_capabilities(tie).can_close_for_restoration);
+
+  const std::string exported = hacdcpf::io::to_cim_dist(imported.system);
+  CHECK(exported.find("<cim:Fuse") != std::string::npos);
+  CHECK(exported.find("<cim:LoadBreakSwitch") != std::string::npos);
 }

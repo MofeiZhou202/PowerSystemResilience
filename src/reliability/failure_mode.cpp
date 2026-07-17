@@ -364,21 +364,41 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
     ReliabilityRawFields hw = rf_mtbf(s.mtbf_hours, s.mttr_hours);
     ctx.add(ref, "hardware_outage", "mechanism unavailable", A::Passive, C::Physical,
             Q::ForcedOutage, hw, 0.05, 4.0, iso, sw);
-    // Active fail-to-open / fail-to-close (use p_sw_fail when present).
-    double p_d = (s.p_sw_fail > 0.0 && s.p_sw_fail < 1.0) ? s.p_sw_fail : 0.0;
-    // p_sw_fail is real case data (not a template); demand frequency is a study
-    // assumption, so provenance follows the per-demand probability.
-    const bool sw_active_template = (p_d <= 0.0);
-    ctx.add(ref, "fail_to_open", "fail to open on command", A::ActiveOnDemand,
-            C::Physical, Q::FailToOpen, rf_active(p_d, 2.0, 0.0, sw_active_template),
-            0.01, 1.0, iso, sw);
-    ctx.add(ref, "fail_to_close", "fail to close on command", A::ActiveOnDemand,
-            C::Physical, Q::FailToClose, rf_active(p_d, 2.0, 0.0, sw_active_template),
-            0.01, 1.0, iso, sw);
+    const auto demand_probability = [&](double specific) {
+      if (specific > 0.0 && specific < 1.0) return specific;
+      return (s.p_sw_fail > 0.0 && s.p_sw_fail < 1.0) ? s.p_sw_fail : 0.0;
+    };
+    double p_open = demand_probability(s.p_fail_to_open);
+    double p_close = demand_probability(s.p_fail_to_close);
+    if (s.switch_type == SwitchType::Fuse) {
+      ctx.add(ref, "fail_to_clear", "fuse fails to clear fault", A::ActiveOnDemand,
+              C::ProtectionLogic, Q::FailToTrip,
+              rf_active(p_open, 1.0, 0.0, p_open <= 0.0),
+              0.005, 1.0, iso, sw);
+    } else {
+      const char* open_mode = s.switch_type == SwitchType::Sectionalizer
+          ? "fail_to_sectionalize" : "fail_to_open";
+      const char* open_description = s.switch_type == SwitchType::Sectionalizer
+          ? "fails to open during upstream dead time" : "fail to open on command";
+      ctx.add(ref, open_mode, open_description, A::ActiveOnDemand,
+              C::Physical, Q::FailToOpen,
+              rf_active(p_open, 2.0, 0.0, p_open <= 0.0),
+              0.01, 1.0, iso, sw);
+      if (s.switch_type == SwitchType::Recloser &&
+          s.recloser_protection.successful_reclose_probability > 0.0) {
+        p_close = 1.0 - std::clamp(
+            s.recloser_protection.successful_reclose_probability, 0.0, 1.0);
+      }
+      ctx.add(ref, "fail_to_close", "fail to close during restoration",
+              A::ActiveOnDemand, C::Physical, Q::FailToClose,
+              rf_active(p_close, 2.0, 0.0, p_close <= 0.0),
+              0.01, 1.0, iso, sw);
+    }
     ctx.add(ref, "stuck_closed", "stuck closed", A::Passive, C::Physical,
             Q::StuckClosed, rf_lambda(0.0, 0.0), 0.005, 4.0, iso, sw);
     ctx.add(ref, "comm_loss", "remote command unavailable", A::Passive,
-            C::Communication, Q::CommunicationLoss, rf_cyber(0.5, 2.0), 0.5, 2.0, iso, sw);
+            C::Communication, Q::CommunicationLoss, rf_cyber(0.5, 2.0),
+            0.5, 2.0, iso, sw);
   }
 
   // ── AC circuit breakers ──

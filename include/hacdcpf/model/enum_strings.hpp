@@ -272,21 +272,57 @@ inline ERControlMode er_control_from_str(const std::string& s) {
 // ── SwitchType ──────────────────────────────────────────────────────────
 inline std::string switch_type_str(SwitchType t) {
   switch (t) {
+    case SwitchType::CircuitBreaker: return "CircuitBreaker";
     case SwitchType::Disconnector: return "Disconnector";
     case SwitchType::LoadBreakSwitch: return "LoadBreakSwitch";
     case SwitchType::Fuse: return "Fuse";
     case SwitchType::Recloser: return "Recloser";
     case SwitchType::Sectionalizer: return "Sectionalizer";
-    default: return "CircuitBreaker";
+    case SwitchType::Unknown: return "Unknown";
+    default: return "Unknown";
   }
 }
 inline SwitchType switch_type_from_str(const std::string& s) {
+  if (s == "CircuitBreaker") return SwitchType::CircuitBreaker;
   if (s == "Disconnector") return SwitchType::Disconnector;
   if (s == "LoadBreakSwitch") return SwitchType::LoadBreakSwitch;
   if (s == "Fuse") return SwitchType::Fuse;
   if (s == "Recloser") return SwitchType::Recloser;
   if (s == "Sectionalizer") return SwitchType::Sectionalizer;
+  if (s == "Unknown") return SwitchType::Unknown;
   return SwitchType::CircuitBreaker;
+}
+
+inline std::string switch_role_str(SwitchRole role) {
+  switch (role) {
+    case SwitchRole::Protection: return "Protection";
+    case SwitchRole::Sectionalizing: return "Sectionalizing";
+    case SwitchRole::Tie: return "Tie";
+    case SwitchRole::Isolation: return "Isolation";
+    case SwitchRole::Grounding: return "Grounding";
+    default: return "Unspecified";
+  }
+}
+inline SwitchRole switch_role_from_str(const std::string& s) {
+  if (s == "Protection") return SwitchRole::Protection;
+  if (s == "Sectionalizing") return SwitchRole::Sectionalizing;
+  if (s == "Tie") return SwitchRole::Tie;
+  if (s == "Isolation") return SwitchRole::Isolation;
+  if (s == "Grounding") return SwitchRole::Grounding;
+  return SwitchRole::Unspecified;
+}
+
+inline std::string switch_operating_mode_str(SwitchOperatingMode mode) {
+  switch (mode) {
+    case SwitchOperatingMode::Remote: return "Remote";
+    case SwitchOperatingMode::Automatic: return "Automatic";
+    default: return "Manual";
+  }
+}
+inline SwitchOperatingMode switch_operating_mode_from_str(const std::string& s) {
+  if (s == "Remote") return SwitchOperatingMode::Remote;
+  if (s == "Automatic") return SwitchOperatingMode::Automatic;
+  return SwitchOperatingMode::Manual;
 }
 
 // ── BreakerType ─────────────────────────────────────────────────────────

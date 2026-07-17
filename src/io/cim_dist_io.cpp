@@ -726,12 +726,13 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
     ++accepted["ACLineSegment"];
   }
 
-  // Pass 7: breakers / disconnectors → switches (closed = !normalOpen).
+  // Pass 7: switching/protection equipment.  Preserve the CIM device class;
+  // reliability restoration must not treat a fuse or disconnector as a tie CB.
   for (const auto& e : rdf->children) {
     const std::string cls = local_name(e.tag);
     if (cls != "Breaker" && cls != "Disconnector" &&
-        cls != "LoadBreakSwitch" && cls != "Fuse" && cls != "Switch" &&
-        cls != "Junction")
+        cls != "LoadBreakSwitch" && cls != "Fuse" && cls != "Recloser" &&
+        cls != "Sectionalizer" && cls != "Switch" && cls != "Junction")
       continue;
     const std::string id = object_id(e);
     const auto& terms = equip_terms[id];
@@ -744,10 +745,46 @@ CimDistImportResult from_cim_dist(const std::string& xml, ImportMode mode,
     sw.name = prop_text(e, ".name");
     sw.bus_from = bus_of(terms[0].second);
     sw.bus_to = bus_of(terms[1].second);
-    sw.switch_type = cls == "Disconnector" ? SwitchType::Disconnector
-                                            : SwitchType::CircuitBreaker;
+    if (cls == "Breaker") sw.switch_type = SwitchType::CircuitBreaker;
+    else if (cls == "Disconnector" || cls == "Junction")
+      sw.switch_type = SwitchType::Disconnector;
+    else if (cls == "LoadBreakSwitch") sw.switch_type = SwitchType::LoadBreakSwitch;
+    else if (cls == "Fuse") sw.switch_type = SwitchType::Fuse;
+    else if (cls == "Recloser") sw.switch_type = SwitchType::Recloser;
+    else if (cls == "Sectionalizer") sw.switch_type = SwitchType::Sectionalizer;
+    else sw.switch_type = SwitchType::Unknown;
     const std::string no = prop_text(e, ".normalOpen");
     sw.closed = !(no == "true" || no == "1");
+    sw.normal_closed = sw.closed;
+    sw.normal_state_explicit = true;
+
+    const bool is_ring = [&]() {
+      const std::string value = prop_text(e, ".isRing");
+      return value == "true" || value == "1";
+    }();
+    switch (sw.switch_type) {
+      case SwitchType::CircuitBreaker:
+      case SwitchType::Fuse:
+      case SwitchType::Recloser:
+        sw.role = SwitchRole::Protection;
+        break;
+      case SwitchType::LoadBreakSwitch:
+        // normalOpen is a state, not proof of a transfer function.  Only an
+        // explicit CIM ring indication authorizes restoration tie closing.
+        sw.role = is_ring ? SwitchRole::Tie : SwitchRole::Sectionalizing;
+        break;
+      case SwitchType::Disconnector:
+        sw.role = SwitchRole::Isolation;
+        break;
+      case SwitchType::Sectionalizer:
+        sw.role = SwitchRole::Sectionalizing;
+        break;
+      case SwitchType::Unknown:
+        sw.role = SwitchRole::Unspecified;
+        break;
+    }
+    sw.capabilities = effective_switch_capabilities(sw);
+    sw.capabilities_explicit = true;
     sys.ac.switches.push_back(sw);
     switch_phase[sw.index] =
         equip_phase.count(id) ? equip_phase[id] : PhaseMask::abc();
@@ -1621,14 +1658,23 @@ std::string to_cim_dist(const HybridPowerSystem& sys,
     emit_terminal(id + "_T2", id, 2, br.to_bus);
   }
 
-  // Breakers / disconnectors from switches.
+  // Switching and protection devices retain their CIM class on round-trip.
   for (const auto& sw : sys.ac.switches) {
     const std::string id = "SWITCH_" + std::to_string(sw.index);
-    const char* cls =
-        sw.switch_type == SwitchType::Disconnector ? "Disconnector" : "Breaker";
+    const char* cls = "Switch";
+    switch (sw.switch_type) {
+      case SwitchType::CircuitBreaker: cls = "Breaker"; break;
+      case SwitchType::Disconnector: cls = "Disconnector"; break;
+      case SwitchType::LoadBreakSwitch: cls = "LoadBreakSwitch"; break;
+      case SwitchType::Fuse: cls = "Fuse"; break;
+      case SwitchType::Recloser: cls = "Recloser"; break;
+      case SwitchType::Sectionalizer: cls = "Sectionalizer"; break;
+      case SwitchType::Unknown: cls = "Switch"; break;
+    }
     o << " <cim:" << cls << " rdf:ID=\"" << id << "\">\n"
       << "  <cim:Naming.name>" << xml_escape(sw.name) << "</cim:Naming.name>\n"
-      << "  <cim:Switch.normalOpen>" << (sw.closed ? "false" : "true")
+      << "  <cim:Switch.normalOpen>"
+      << (effective_switch_normal_closed(sw) ? "false" : "true")
       << "</cim:Switch.normalOpen>\n"
       << "  <cim:PowerSystemResource.BaseVoltage rdf:resource=\"#"
       << bv_id(base_kv_of(sw.bus_from)) << "\"/>\n"

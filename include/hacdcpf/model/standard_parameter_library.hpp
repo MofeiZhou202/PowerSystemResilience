@@ -83,11 +83,32 @@ struct StandardParameterApplyReport {
 struct DesignHandbookCompletionOptions {
   bool apply{false};
   bool overwrite_import_estimates{true};
+  bool infer_switch_bindings{true};
+  bool overwrite_inferred_switch_bindings{true};
   double default_lv_overhead_cross_section_mm2{35.0};
   double default_lv_cable_cross_section_mm2{50.0};
   double default_mv_cross_section_mm2{300.0};
   double cable_reactance_ohm_per_km{0.08};
   double overhead_reactance_ohm_per_km{0.35};
+};
+
+struct DesignHandbookSwitchBindingSuggestion {
+  int switch_index{0};
+  std::string switch_name;
+  std::string switch_type;
+  std::string old_role;
+  std::string new_role;
+  std::string controlled_element_type;
+  int controlled_element_index{-1};
+  int controlled_branch_index{-1};
+  int protection_zone_id{0};
+  int upstream_protective_switch_index{-1};
+  std::string confidence;
+  std::string action;
+  std::string rationale;
+  std::string source;
+  bool ambiguous{false};
+  bool applied{false};
 };
 
 struct DesignHandbookLineSuggestion {
@@ -124,7 +145,12 @@ struct DesignHandbookCompletionReport {
   int fields_changed{0};
   int skipped_authored{0};
   int skipped_missing_geometry{0};
+  int switches_scanned{0};
+  int switch_binding_candidates{0};
+  int switch_binding_fields_changed{0};
+  int skipped_ambiguous_bindings{0};
   std::vector<DesignHandbookLineSuggestion> suggestions;
+  std::vector<DesignHandbookSwitchBindingSuggestion> switch_bindings;
   std::vector<std::string> warnings;
 };
 

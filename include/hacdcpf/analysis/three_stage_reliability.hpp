@@ -29,7 +29,23 @@
 #include <string>
 #include <vector>
 
+#include "hacdcpf/util/parallel_execution.hpp"
+
 namespace hacdcpf::analysis {
+
+struct ThreeStageSwitchAction {
+  int sequence_order{0};
+  int switch_index{-1};
+  std::string switch_name;
+  std::string switch_type;
+  std::string action;  ///< "open", "trip", or "close"
+  std::string purpose;
+  int bus_from{0};
+  int bus_to{0};
+  double operation_time_s{0.0};
+  bool validated{false};
+  std::string validation_message;
+};
 
 // ─── Per-fault detail ────────────────────────────────────────────────────────
 
@@ -59,6 +75,14 @@ struct ThreeStageFaultDetail {
   double eens_contribution_mwh_yr{0.0};
   double lole_contribution_hr_yr{0.0};
   double lolf_contribution_occ_yr{0.0};
+  std::vector<ThreeStageSwitchAction> switching_sequence;
+  bool protection_interlock_valid{true};
+  bool restoration_milp_admitted{true};
+  bool stage3_switch_plan_held{true};
+  bool switching_sequence_valid{true};
+  std::string switching_sequence_message;
+  bool fault_isolation_explicit{false};
+  std::string fault_isolation_message;
   std::vector<double> psop1;  ///< SOP power per device, Stage 1 (kW)
   std::vector<double> psop2;
   std::vector<double> psop3;
@@ -150,6 +174,11 @@ struct ThreeStageReliabilityResult {
     bool restoration_milp_solved{false};
   };
   ValidityFlags validity{};
+
+  /// Fault-level outer-loop parallel execution diagnostics. Stage 1 -> 2 -> 3
+  /// remains sequential inside each fault because Stage 3 holds the accepted
+  /// Stage-2 switching plan.
+  hacdcpf::util::ParallelExecutionInfo parallel_execution;
 };
 
 // ─── Options ─────────────────────────────────────────────────────────────────
@@ -178,9 +207,9 @@ struct ThreeStageReliabilityOptions {
   bool include_generator_faults{false};
 
   /// Include 2-winding transformer outage contingencies.  When enabled the
-  /// transformer is also modelled as a (near-ideal, capacity-limited)
-  /// restoration edge so its outage disconnects the downstream zone.  Default
-  /// off preserves the historical branch-only model.
+  /// transformer outage disconnects the downstream zone. Healthy transformers
+  /// are always modelled as capacity-limited topology edges; this option only
+  /// controls whether their outages are added to the contingency set.
   bool include_transformer_faults{false};
 
   /// Include VSC and DC-DC converter outage contingencies.  A faulted converter
@@ -202,6 +231,18 @@ struct ThreeStageReliabilityOptions {
   /// and the aggregate capacity fallback is used automatically only if the DC LP
   /// fails to solve.  Set false to force the legacy capacity-only fallback.
   bool include_dc_power_flow{true};
+
+  /// Evaluate independent contingencies concurrently. The automatic worker
+  /// count is conservatively capped by the implementation to limit the memory
+  /// footprint of multiple simultaneous MILP models.
+  bool enable_parallel{true};
+  int parallel_threads{0};
+
+  /// Re-solve the repair-window continuous model with the accepted Stage-2
+  /// switch binaries fixed. Disabled by default because the fault remains out
+  /// and all physical constraints/demand are identical, so the accepted
+  /// Stage-2 solution is already an exact feasible optimum for Stage 3.
+  bool revalidate_stage3_plan{false};
 };
 
 // ─── Entry points ────────────────────────────────────────────────────────────

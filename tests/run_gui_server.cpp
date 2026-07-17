@@ -2252,6 +2252,9 @@ hacdcpf::DesignHandbookCompletionOptions design_handbook_options_from_json(
   options.apply = apply;
   options.overwrite_import_estimates =
       body.value("overwrite_import_estimates", true);
+  options.infer_switch_bindings = body.value("infer_switch_bindings", true);
+  options.overwrite_inferred_switch_bindings =
+      body.value("overwrite_inferred_switch_bindings", true);
   options.default_lv_overhead_cross_section_mm2 = body.value(
       "default_lv_overhead_cross_section_mm2",
       options.default_lv_overhead_cross_section_mm2);
@@ -2302,14 +2305,41 @@ json design_handbook_report_to_json(
         {"applied", row.applied},
     });
   }
+  json switch_bindings = json::array();
+  for (const auto& row : report.switch_bindings) {
+    switch_bindings.push_back({
+        {"switch_index", row.switch_index},
+        {"switch_name", row.switch_name},
+        {"switch_type", row.switch_type},
+        {"old_role", row.old_role},
+        {"new_role", row.new_role},
+        {"controlled_element_type", row.controlled_element_type},
+        {"controlled_element_index", row.controlled_element_index},
+        {"controlled_branch_index", row.controlled_branch_index},
+        {"protection_zone_id", row.protection_zone_id},
+        {"upstream_protective_switch_index",
+         row.upstream_protective_switch_index},
+        {"confidence", row.confidence},
+        {"action", row.action},
+        {"rationale", row.rationale},
+        {"source", row.source},
+        {"ambiguous", row.ambiguous},
+        {"applied", row.applied},
+    });
+  }
   return {
-      {"schema", "design_handbook_parameter_completion_v1"},
+      {"schema", "design_handbook_parameter_completion_v2"},
       {"branches_scanned", report.branches_scanned},
       {"candidates", report.candidates},
       {"fields_changed", report.fields_changed},
       {"skipped_authored", report.skipped_authored},
       {"skipped_missing_geometry", report.skipped_missing_geometry},
+      {"switches_scanned", report.switches_scanned},
+      {"switch_binding_candidates", report.switch_binding_candidates},
+      {"switch_binding_fields_changed", report.switch_binding_fields_changed},
+      {"skipped_ambiguous_bindings", report.skipped_ambiguous_bindings},
       {"suggestions", std::move(suggestions)},
+      {"switch_bindings", std::move(switch_bindings)},
       {"warnings", report.warnings},
       {"references",
        json::array({
@@ -4997,6 +5027,7 @@ std::string fmea_type_label(const std::string& type) {
       {"ac_circuit_breaker", "AC断路器"},
       {"ac_pv_system", "AC光伏"},
       {"dc_static_generator_ac", "DC分布式电源"},
+      {"microgrid", "微电网"},
   };
   const auto it = labels.find(type);
   return it == labels.end() ? type : it->second;
@@ -5064,6 +5095,22 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     return fmea_one_bus_component(sys.dc.static_generators, position, label, "dcSgen", "DC");
   if (type == "dc_static_generator")
     return fmea_one_bus_component(sys.dc.dc_static_generators, position, label, "", "DC");
+  if (type == "microgrid") {
+    FMEAComponentPresentation result;
+    result.display_type = label;
+    result.component_domain = "AC";
+    result.canvas_type = "microgrid";
+    if (position < 0 || position >= static_cast<int>(sys.microgrids.size())) {
+      result.display_name = fmea_default_name(label, position);
+      return result;
+    }
+    const auto& microgrid = sys.microgrids[static_cast<size_t>(position)];
+    result.canvas_index = microgrid.index;
+    result.primary_bus = microgrid.pcc_bus;
+    result.display_name = explicit_or_default_name(microgrid, label);
+    result.mappable = true;
+    return result;
+  }
 
   auto missing = [&] {
     p.canvas_index = -1;
@@ -5501,6 +5548,7 @@ static std::string fmea_type_from_failure_kind(
     case K::DCStorage: return "dc_storage";
     case K::DCPVArray: return "dc_pv_array";
     case K::VSCConverter: return "vsc_converter";
+    case K::Microgrid: return "microgrid";
     default: return hacdcpf::analysis::to_string(kind);
   }
 }
@@ -5667,6 +5715,21 @@ static json three_stage_fault_json(
   const auto meta = describe_fmea_component(sys, f.component_type, f.component_index);
   const std::string domain = meta.component_domain.empty() ? (f.ac ? "AC" : "DC")
                                                             : meta.component_domain;
+  json switching_sequence = json::array();
+  for (const auto& action : f.switching_sequence) {
+    switching_sequence.push_back({
+        {"sequence_order", action.sequence_order},
+        {"switch_index", action.switch_index},
+        {"switch_name", action.switch_name},
+        {"switch_type", action.switch_type},
+        {"action", action.action},
+        {"purpose", action.purpose},
+        {"bus_from", action.bus_from},
+        {"bus_to", action.bus_to},
+        {"operation_time_s", action.operation_time_s},
+        {"validated", action.validated},
+        {"validation_message", action.validation_message}});
+  }
   return json{
       {"line_id", f.line_id},
       {"index", f.component_index},
@@ -5710,7 +5773,15 @@ static json three_stage_fault_json(
       {"lole_contribution", f.lole_contribution_hr_yr},
       {"lole_contribution_hr_yr", f.lole_contribution_hr_yr},
       {"lolf_contribution", f.lolf_contribution_occ_yr},
-      {"lolf_contribution_occ_yr", f.lolf_contribution_occ_yr}};
+      {"lolf_contribution_occ_yr", f.lolf_contribution_occ_yr},
+      {"switching_sequence", switching_sequence},
+      {"protection_interlock_valid", f.protection_interlock_valid},
+      {"restoration_milp_admitted", f.restoration_milp_admitted},
+      {"stage3_switch_plan_held", f.stage3_switch_plan_held},
+      {"switching_sequence_valid", f.switching_sequence_valid},
+      {"switching_sequence_message", f.switching_sequence_message},
+      {"fault_isolation_explicit", f.fault_isolation_explicit},
+      {"fault_isolation_message", f.fault_isolation_message}};
 }
 
 static void populate_three_stage_result_json(
@@ -5725,6 +5796,8 @@ static void populate_three_stage_result_json(
   out["model_scope"] = r.model_scope;
   out["model_limitations"] = r.model_limitations;
   out["validity"] = three_stage_validity_json(r.validity);
+  add_reliability_parallel_json(out, r.parallel_execution.requested,
+                                r.parallel_execution);
   out["counts"] = json{{"nb", r.nb}, {"nb_ac", r.nb_ac}, {"nb_dc", r.nb_dc},
                        {"nl", r.nl}, {"nl_ac", r.nl_ac}, {"nl_dc", r.nl_dc},
                        {"nl_vsc", r.nl_vsc}, {"nl_sop", r.nl_sop},
@@ -8182,6 +8255,12 @@ int main(int argc, char** argv) {
       out["parameter_validation"] = parameter_validation_to_json(
           hacdcpf::validate_component_parameters(*g_session.current_system,
                                                   g_session.parameter_library));
+      hacdcpf::analysis::ReliabilityDataPolicy reliability_policy;
+      reliability_policy.default_policy =
+          hacdcpf::analysis::ReliabilityDefaultPolicy::StrictCaseDataOnly;
+      out["reliability_data_quality"] = reliability_data_quality_json(
+          hacdcpf::analysis::summarize_reliability_data_quality(
+              *g_session.current_system, reliability_policy));
       out["profile_id"] = g_session.parameter_library.profile_id;
       out["profile_name"] = g_session.parameter_library.name;
       res.set_content(out.dump(), "application/json");
@@ -19030,7 +19109,12 @@ int main(int argc, char** argv) {
               {"switch_type", sa.switch_type},
               {"action", sa.action},
               {"bus_from", sa.bus_from},
-              {"bus_to", sa.bus_to}
+              {"bus_to", sa.bus_to},
+              {"sequence_order", sa.sequence_order},
+              {"purpose", sa.purpose},
+              {"operation_time_s", sa.operation_time_s},
+              {"validated", sa.validated},
+              {"validation_message", sa.validation_message}
             });
           }
           cont_arr.push_back({
@@ -19060,6 +19144,10 @@ int main(int argc, char** argv) {
             {"causes_loss_rep", c.causes_loss_rep},
             {"repair_search_truncated", c.repair_search_truncated},
             {"repair_switch_actions", switch_actions},
+            {"repair_switch_sequence_valid", c.repair_switch_sequence_valid},
+            {"repair_switch_sequence_message", c.repair_switch_sequence_message},
+            {"fault_isolation_explicit", c.fault_isolation_explicit},
+            {"fault_isolation_message", c.fault_isolation_message},
             {"automation_availability", c.automation_availability},
             {"tau_sw_automatic_hr", c.tau_sw_automatic_hr},
             {"tau_sw_manual_hr", c.tau_sw_manual_hr},
@@ -20101,6 +20189,10 @@ int main(int argc, char** argv) {
         opts.include_converter_faults = j.value("include_converter_faults", false);
         opts.include_switch_faults = j.value("include_switch_faults", false);
         opts.include_dc_power_flow = j.value("include_dc_power_flow", true);
+        opts.enable_parallel = j.value("parallel", true);
+        opts.parallel_threads = j.value("parallel_threads", 0);
+        opts.revalidate_stage3_plan =
+            j.value("revalidate_stage3_plan", false);
 
         const std::string case_json = hacdcpf::io::to_json(sys, 2);
         auto r = hacdcpf::analysis::run_three_stage_reliability_from_string(case_json, opts);
@@ -20321,6 +20413,21 @@ int main(int argc, char** argv) {
 	          json cont = json::array();
 	          for (const auto& c : r.contingencies) {
 	            const auto meta = describe_fmea_component(sys, c.component_type, c.component_index);
+	            json switch_actions = json::array();
+	            for (const auto& sa : c.repair_switch_actions) {
+	              switch_actions.push_back({
+	                  {"switch_index", sa.switch_index},
+	                  {"switch_name", sa.switch_name},
+	                  {"switch_type", sa.switch_type},
+	                  {"action", sa.action},
+	                  {"bus_from", sa.bus_from},
+	                  {"bus_to", sa.bus_to},
+	                  {"sequence_order", sa.sequence_order},
+	                  {"purpose", sa.purpose},
+	                  {"operation_time_s", sa.operation_time_s},
+	                  {"validated", sa.validated},
+	                  {"validation_message", sa.validation_message}});
+	            }
 	            cont.push_back({
 	                {"component_name", meta.display_name},
 	                {"component_type", c.component_type},
@@ -20358,7 +20465,12 @@ int main(int argc, char** argv) {
                 {"eens_cyber_duration_increment",
                  c.eens_cyber_duration_increment},
                 {"eens_cyber_control_increment",
-                 c.eens_cyber_control_increment}});
+                 c.eens_cyber_control_increment},
+                {"repair_switch_actions", switch_actions},
+                {"repair_switch_sequence_valid", c.repair_switch_sequence_valid},
+                {"repair_switch_sequence_message", c.repair_switch_sequence_message},
+                {"fault_isolation_explicit", c.fault_isolation_explicit},
+                {"fault_isolation_message", c.fault_isolation_message}});
 	          }
 	          out["contingencies"] = cont;
 	        } else if (method == "failure_mode_fmea") {
@@ -20447,6 +20559,10 @@ int main(int argc, char** argv) {
           tso.include_converter_faults = rest.value("include_converter_faults", false);
           tso.include_switch_faults = rest.value("include_switch_faults", false);
           tso.include_dc_power_flow = rest.value("include_dc_power_flow", true);
+          tso.enable_parallel = rest.value("parallel", parallel_requested);
+          tso.parallel_threads = rest.value("parallel_threads", parallel_threads);
+          tso.revalidate_stage3_plan =
+              rest.value("revalidate_stage3_plan", false);
           const std::string case_json = hacdcpf::io::to_json(sys, 2);
           auto r = hacdcpf::analysis::run_three_stage_reliability_from_string(case_json, tso);
           out["data_quality"] = reliability_data_quality_json(

@@ -2095,6 +2095,46 @@ static json switch_to_json(const Switch& s) {
   j["in_service"] = s.in_service;
   j["switch_type"] = switch_type_str(s.switch_type);
   j["closed"] = s.closed;
+  j["normal_closed"] = s.normal_closed;
+  j["normal_state_explicit"] = s.normal_state_explicit;
+  j["locked_open"] = s.locked_open;
+  j["locked_closed"] = s.locked_closed;
+  j["role"] = switch_role_str(s.role);
+  j["operating_mode"] = switch_operating_mode_str(s.operating_mode);
+  j["protection_zone_id"] = s.protection_zone_id;
+  j["upstream_protective_switch_index"] =
+      s.upstream_protective_switch_index;
+  j["controlled_branch_index"] = s.controlled_branch_index;
+  j["controlled_element_type"] = s.controlled_element_type;
+  j["controlled_element_index"] = s.controlled_element_index;
+  j["interlock_group_id"] = s.interlock_group_id;
+  j["synchronization_required"] = s.synchronization_required;
+  j["binding_inferred"] = s.binding_inferred;
+  j["binding_source"] = s.binding_source;
+  j["capabilities_explicit"] = s.capabilities_explicit;
+  j["capabilities"] = {
+      {"can_interrupt_fault_current", s.capabilities.can_interrupt_fault_current},
+      {"can_interrupt_load_current", s.capabilities.can_interrupt_load_current},
+      {"can_close_for_restoration", s.capabilities.can_close_for_restoration},
+      {"requires_deenergized_operation", s.capabilities.requires_deenergized_operation},
+      {"allows_source_parallel", s.capabilities.allows_source_parallel}};
+  j["fuse_protection"] = {
+      {"curve_type", s.fuse_protection.curve_type},
+      {"rated_current_a", s.fuse_protection.rated_current_a},
+      {"minimum_melting_current_a", s.fuse_protection.minimum_melting_current_a},
+      {"total_clearing_time_s", s.fuse_protection.total_clearing_time_s},
+      {"replace_after_operation", s.fuse_protection.replace_after_operation},
+      {"replacement_time_hr", s.fuse_protection.replacement_time_hr}};
+  j["recloser_protection"] = {
+      {"curve_type", s.recloser_protection.curve_type},
+      {"max_reclose_attempts", s.recloser_protection.max_reclose_attempts},
+      {"reclose_intervals_s", s.recloser_protection.reclose_intervals_s},
+      {"lockout_time_s", s.recloser_protection.lockout_time_s},
+      {"successful_reclose_probability", s.recloser_protection.successful_reclose_probability}};
+  j["sectionalizer_protection"] = {
+      {"fault_count_to_open", s.sectionalizer_protection.fault_count_to_open},
+      {"upstream_switch_index", s.sectionalizer_protection.upstream_switch_index},
+      {"opens_during_dead_time", s.sectionalizer_protection.opens_during_dead_time}};
   j["r_contact_ohm"] = s.r_contact_ohm;
   j["z_ohm"] = s.z_ohm;
   j["i_rated_ka"] = s.i_rated_ka;
@@ -2104,9 +2144,15 @@ static json switch_to_json(const Switch& s) {
   j["is_remote"] = s.is_remote;
   j["is_automated"] = s.is_automated;
   j["t_operation_s"] = s.t_operation_s;
+  j["t_open_s"] = s.t_open_s;
+  j["t_close_s"] = s.t_close_s;
   j["p_sw_fail"] = s.p_sw_fail;
+  j["p_fail_to_open"] = s.p_fail_to_open;
+  j["p_fail_to_close"] = s.p_fail_to_close;
   j["mtbf_hours"] = s.mtbf_hours;
   j["mttr_hours"] = s.mttr_hours;
+  j["t_scheduled_hr"] = s.t_scheduled_hr;
+  j["t_tp_hr"] = s.t_tp_hr;
   return j;
 }
 
@@ -2119,6 +2165,88 @@ static Switch switch_from_json(const json& j) {
   s.in_service = jget(j, "in_service", true);
   s.switch_type = switch_type_from_str(jget<std::string>(j, "switch_type", "CircuitBreaker"));
   s.closed = jget(j, "closed", true);
+  const bool has_normal_state_explicit_flag = j.contains("normal_state_explicit");
+  s.normal_closed = jget(j, "normal_closed", s.closed);
+  s.normal_state_explicit = jget(j, "normal_state_explicit", false);
+  if (!has_normal_state_explicit_flag && j.contains("normal_closed"))
+    s.normal_state_explicit = true;
+  s.locked_open = jget(j, "locked_open", false);
+  s.locked_closed = jget(j, "locked_closed", false);
+  s.role = switch_role_from_str(jget<std::string>(j, "role", "Unspecified"));
+  s.protection_zone_id = jget(j, "protection_zone_id", 0);
+  s.upstream_protective_switch_index =
+      jget(j, "upstream_protective_switch_index", -1);
+  s.controlled_branch_index = jget(j, "controlled_branch_index", -1);
+  s.controlled_element_type =
+      jget<std::string>(j, "controlled_element_type", "");
+  s.controlled_element_index = jget(j, "controlled_element_index", -1);
+  s.interlock_group_id = jget(j, "interlock_group_id", 0);
+  s.synchronization_required = jget(j, "synchronization_required", false);
+  s.binding_inferred = jget(j, "binding_inferred", false);
+  s.binding_source = jget<std::string>(j, "binding_source", "");
+  if (j.contains("operating_mode")) {
+    s.operating_mode = switch_operating_mode_from_str(
+        jget<std::string>(j, "operating_mode", "Manual"));
+  }
+  const bool has_capabilities_explicit_flag = j.contains("capabilities_explicit");
+  s.capabilities_explicit = jget(j, "capabilities_explicit", false);
+  if (j.contains("capabilities") && j["capabilities"].is_object()) {
+    const auto& c = j["capabilities"];
+    s.capabilities.can_interrupt_fault_current =
+        jget(c, "can_interrupt_fault_current", false);
+    s.capabilities.can_interrupt_load_current =
+        jget(c, "can_interrupt_load_current", false);
+    s.capabilities.can_close_for_restoration =
+        jget(c, "can_close_for_restoration", false);
+    s.capabilities.requires_deenergized_operation =
+        jget(c, "requires_deenergized_operation", false);
+    s.capabilities.allows_source_parallel =
+        jget(c, "allows_source_parallel", false);
+    if (!has_capabilities_explicit_flag) s.capabilities_explicit = true;
+  }
+  if (j.contains("fuse_protection") && j["fuse_protection"].is_object()) {
+    const auto& p = j["fuse_protection"];
+    s.fuse_protection.curve_type = jget<std::string>(p, "curve_type", "");
+    s.fuse_protection.rated_current_a = jget(p, "rated_current_a", 0.0);
+    s.fuse_protection.minimum_melting_current_a =
+        jget(p, "minimum_melting_current_a", 0.0);
+    s.fuse_protection.total_clearing_time_s =
+        jget(p, "total_clearing_time_s", 0.0);
+    s.fuse_protection.replace_after_operation =
+        jget(p, "replace_after_operation", true);
+    s.fuse_protection.replacement_time_hr =
+        jget(p, "replacement_time_hr", 0.0);
+  }
+  if (j.contains("recloser_protection") && j["recloser_protection"].is_object()) {
+    const auto& p = j["recloser_protection"];
+    s.recloser_protection.curve_type = jget<std::string>(p, "curve_type", "");
+    s.recloser_protection.max_reclose_attempts =
+        jget(p, "max_reclose_attempts", 0);
+    s.recloser_protection.reclose_intervals_s =
+        jget<std::vector<double>>(p, "reclose_intervals_s", {});
+    s.recloser_protection.lockout_time_s = jget(p, "lockout_time_s", 0.0);
+    s.recloser_protection.successful_reclose_probability =
+        jget(p, "successful_reclose_probability", 0.0);
+  }
+  if (j.contains("sectionalizer_protection") &&
+      j["sectionalizer_protection"].is_object()) {
+    const auto& p = j["sectionalizer_protection"];
+    s.sectionalizer_protection.fault_count_to_open =
+        jget(p, "fault_count_to_open", 0);
+    s.sectionalizer_protection.upstream_switch_index =
+        jget(p, "upstream_switch_index", -1);
+    s.sectionalizer_protection.opens_during_dead_time =
+        jget(p, "opens_during_dead_time", true);
+  }
+  if (!j.contains("upstream_protective_switch_index")) {
+    s.upstream_protective_switch_index =
+        s.sectionalizer_protection.upstream_switch_index;
+  } else if (s.sectionalizer_protection.upstream_switch_index < 0 &&
+             (s.switch_type == SwitchType::Sectionalizer ||
+              s.role == SwitchRole::Sectionalizing)) {
+    s.sectionalizer_protection.upstream_switch_index =
+        s.upstream_protective_switch_index;
+  }
   s.r_contact_ohm = jget(j, "r_contact_ohm", 0.0);
   s.z_ohm = jget(j, "z_ohm", 0.0);
   s.i_rated_ka = jget(j, "i_rated_ka", 0.0);
@@ -2127,10 +2255,21 @@ static Switch switch_from_json(const json& j) {
   s.element_id = jget(j, "element_id", 0);
   s.is_remote = jget(j, "is_remote", false);
   s.is_automated = jget(j, "is_automated", false);
+  if (!j.contains("operating_mode")) {
+    s.operating_mode = s.is_automated ? SwitchOperatingMode::Automatic
+                                      : (s.is_remote ? SwitchOperatingMode::Remote
+                                                     : SwitchOperatingMode::Manual);
+  }
   s.t_operation_s = jget(j, "t_operation_s", 0.0);
+  s.t_open_s = jget(j, "t_open_s", s.t_operation_s);
+  s.t_close_s = jget(j, "t_close_s", s.t_operation_s);
   s.p_sw_fail = jget(j, "p_sw_fail", 0.0);
+  s.p_fail_to_open = jget(j, "p_fail_to_open", s.p_sw_fail);
+  s.p_fail_to_close = jget(j, "p_fail_to_close", s.p_sw_fail);
   s.mtbf_hours = jget_alias(j, "mtbf_hours", "mtbf_hours", 0.0);
   s.mttr_hours = jget_alias(j, "mttr_hours", "mttr_hours", 0.0);
+  s.t_scheduled_hr = jget(j, "t_scheduled_hr", 0.0);
+  s.t_tp_hr = jget(j, "t_tp_hr", 0.0);
   return s;
 }
 

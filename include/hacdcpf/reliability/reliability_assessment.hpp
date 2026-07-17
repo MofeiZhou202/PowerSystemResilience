@@ -494,13 +494,22 @@ struct FMEAContingencyDetail {
     int switch_index{0};
     std::string switch_name;
     std::string switch_type;
-    std::string action;  // "open" or "close"
+    std::string action;  // "trip", "open", or "close"
     int bus_from{0};
     int bus_to{0};
+    int sequence_order{0};
+    std::string purpose;
+    double operation_time_s{0.0};
+    bool validated{false};
+    std::string validation_message;
   };
 
   // Explicit repair-stage switch operations selected by the topology search.
   std::vector<SwitchActionDetail> repair_switch_actions;
+  bool repair_switch_sequence_valid{true};
+  std::string repair_switch_sequence_message;
+  bool fault_isolation_explicit{false};
+  std::string fault_isolation_message;
 
   // True if the repair-stage topology search was stopped early by the OPF
   // call budget (max_repair_opf_calls). Results remain valid but may not

@@ -46,6 +46,7 @@
 namespace fs = std::filesystem;
 
 using hacdcpf::analysis::run_three_stage_reliability;
+using hacdcpf::analysis::run_three_stage_reliability_from_string;
 using hacdcpf::analysis::ThreeStageReliabilityOptions;
 using hacdcpf::analysis::ThreeStageReliabilityResult;
 
@@ -308,6 +309,39 @@ TEST_CASE("Three-stage reliability — DC power flow captures a DC line-limit sh
   CHECK(overload_shed);
 }
 
+TEST_CASE("Three-stage reliability — fault-level parallel execution matches serial",
+          "[reliability][three_stage][parallel]") {
+  const auto path = reliability_data("test_1_no_sop.json");
+  ThreeStageReliabilityOptions serial_options;
+  serial_options.enable_parallel = false;
+  serial_options.revalidate_stage3_plan = true;
+  const auto serial = run_three_stage_reliability(path, serial_options);
+
+  ThreeStageReliabilityOptions parallel_options;
+  parallel_options.enable_parallel = true;
+  parallel_options.parallel_threads = 2;
+  const auto parallel = run_three_stage_reliability(path, parallel_options);
+
+  REQUIRE(serial.ok);
+  REQUIRE(parallel.ok);
+  CHECK_FALSE(serial.parallel_execution.effective);
+  CHECK(parallel.parallel_execution.effective);
+  CHECK(parallel.parallel_execution.resolved_workers == 2);
+  REQUIRE(parallel.faults.size() == serial.faults.size());
+  CHECK(parallel.eens_kwh_yr == Catch::Approx(serial.eens_kwh_yr));
+  CHECK(parallel.saifi == Catch::Approx(serial.saifi));
+  CHECK(parallel.saidi_min == Catch::Approx(serial.saidi_min));
+  for (size_t i = 0; i < serial.faults.size(); ++i) {
+    CHECK(parallel.faults[i].line_id == serial.faults[i].line_id);
+    CHECK(parallel.faults[i].pls_stage1 ==
+          Catch::Approx(serial.faults[i].pls_stage1));
+    CHECK(parallel.faults[i].pls_stage2 ==
+          Catch::Approx(serial.faults[i].pls_stage2));
+    CHECK(parallel.faults[i].pls_stage3 ==
+          Catch::Approx(serial.faults[i].pls_stage3));
+  }
+}
+
 // ─── TC-4: case33bw_acdc — IEEE 33-bus (BW) with SOP ────────────────────────
 
 TEST_CASE("Three-stage reliability — case33bw_acdc (33-bus BW + SOP)",
@@ -506,6 +540,87 @@ TEST_CASE("Three-stage reliability — unavailable tie (fail-to-close) loses Sta
   CHECK(failed.eens_kwh_yr > base.eens_kwh_yr);
 }
 
+TEST_CASE("Three-stage reliability — trip, isolate, then restore sequence is audited",
+          "[reliability][three_stage][switch_sequence]") {
+  const char* json = R"json({
+    "name":"typed_switch_restoration", "base_mva":10.0,
+    "ac":{"base_mva":10.0,
+      "buses":[
+        {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":3,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.5,"qd_mvar":0.0,"n_customers":10},
+        {"index":4,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1}
+      ],
+      "branches":[
+        {"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0},
+        {"index":2,"from_bus":2,"to_bus":3,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0},
+        {"index":3,"from_bus":4,"to_bus":3,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":0.0,"mttr_hr":1.0}
+      ],
+      "loads":[],"external_grids":[],
+      "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":2.0,"pmax_mw":2.0,"pmin_mw":0.0,"qmax_mvar":2.0,"qmin_mvar":0.0}],
+      "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],
+      "switches":[
+        {"index":10,"name":"CB-FEEDER","bus_from":1,"bus_to":2,"closed":true,"normal_closed":true,"in_service":true,"switch_type":"CircuitBreaker","role":"Protection","t_open_s":0.08,"capabilities":{"can_interrupt_fault_current":true,"can_interrupt_load_current":true,"can_close_for_restoration":true,"requires_deenergized_operation":false,"allows_source_parallel":false}},
+        {"index":13,"name":"DS-FEEDER","bus_from":2,"bus_to":3,"closed":true,"normal_closed":true,"in_service":true,"switch_type":"Disconnector","role":"Isolation","controlled_element_type":"ac_branch","controlled_element_index":1,"controlled_branch_index":1,"upstream_protective_switch_index":10,"t_open_s":1.0,"capabilities":{"can_interrupt_fault_current":false,"can_interrupt_load_current":false,"can_close_for_restoration":false,"requires_deenergized_operation":true,"allows_source_parallel":false}},
+        {"index":11,"name":"FUSE-NO","bus_from":1,"bus_to":4,"closed":false,"normal_closed":false,"in_service":true,"switch_type":"Fuse","role":"Protection","capabilities":{"can_interrupt_fault_current":true,"can_interrupt_load_current":false,"can_close_for_restoration":false,"requires_deenergized_operation":false,"allows_source_parallel":false}},
+        {"index":12,"name":"TIE-NO","bus_from":1,"bus_to":3,"closed":false,"normal_closed":false,"in_service":true,"switch_type":"LoadBreakSwitch","role":"Tie","t_close_s":2.5,"capabilities":{"can_interrupt_fault_current":false,"can_interrupt_load_current":true,"can_close_for_restoration":true,"requires_deenergized_operation":false,"allows_source_parallel":false}}
+      ]
+    },
+    "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+    "vsc_converters":[],"dcdc_converters":[]
+  })json";
+
+  ThreeStageReliabilityOptions opts;
+  opts.max_switch_operations = 1;
+  const auto result = run_three_stage_reliability_from_string(json, opts);
+  REQUIRE(result.ok);
+  REQUIRE(result.faults.size() == 3);
+  const auto& source_fault = result.faults.front();
+  CHECK(source_fault.pls_stage2 == Catch::Approx(0.0).margin(1e-6));
+  CHECK(source_fault.switching_sequence_valid);
+  CHECK(source_fault.protection_interlock_valid);
+  CHECK(source_fault.restoration_milp_admitted);
+  CHECK(source_fault.stage3_switch_plan_held);
+  CHECK(source_fault.fault_isolation_explicit);
+  REQUIRE(source_fault.switching_sequence.size() == 3);
+  const auto& trip = source_fault.switching_sequence[0];
+  CHECK(trip.sequence_order == 1);
+  CHECK(trip.switch_index == 10);
+  CHECK(trip.action == "trip");
+  CHECK(trip.validated);
+  const auto& isolate = source_fault.switching_sequence[1];
+  CHECK(isolate.sequence_order == 2);
+  CHECK(isolate.switch_index == 13);
+  CHECK(isolate.action == "open");
+  CHECK(isolate.validated);
+  const auto& close = source_fault.switching_sequence[2];
+  CHECK(close.sequence_order == 3);
+  CHECK(close.switch_index == 12);
+  CHECK(close.action == "close");
+  CHECK(close.validated);
+  CHECK(close.operation_time_s == Catch::Approx(2.5));
+
+  std::string blocked_json(json);
+  const std::string protection_marker = "\"role\":\"Protection\",";
+  const auto protection_pos = blocked_json.find(protection_marker);
+  REQUIRE(protection_pos != std::string::npos);
+  blocked_json.insert(protection_pos, "\"locked_closed\":true,");
+  const auto blocked = run_three_stage_reliability_from_string(blocked_json, opts);
+  CHECK_FALSE(blocked.ok);
+  REQUIRE_FALSE(blocked.faults.empty());
+  const auto& blocked_fault = blocked.faults.front();
+  CHECK(blocked_fault.stage2_status == "failed (protection interlock)");
+  CHECK(blocked_fault.stage3_status == "failed (protection interlock)");
+  CHECK_FALSE(blocked_fault.protection_interlock_valid);
+  CHECK_FALSE(blocked_fault.restoration_milp_admitted);
+  CHECK_FALSE(blocked_fault.stage3_switch_plan_held);
+  CHECK_FALSE(blocked_fault.switching_sequence_valid);
+  CHECK(blocked_fault.pls_stage2 == Catch::Approx(blocked_fault.pls_stage1));
+  CHECK(std::none_of(blocked_fault.switching_sequence.begin(),
+                     blocked_fault.switching_sequence.end(),
+                     [](const auto& action) { return action.action == "close"; }));
+}
+
 TEST_CASE("Three-stage reliability — longer MTTR raises EENS (per-component repair duration)",
           "[reliability][three_stage][duration]") {
   auto run_with_mttr = [](double mttr) {
@@ -642,6 +757,11 @@ TEST_CASE("Three-stage reliability — opt-in generator + transformer faults ext
   auto r_base = run_three_stage_reliability_from_string(json, base);
   REQUIRE(r_base.ok);
   const size_t n_base = r_base.faults.size();
+  REQUIRE(n_base == 1);
+  // Transformer faults are opt-in, but the healthy transformer must still be
+  // present as a topology edge. A fault on branch 1 must not strand bus 3.
+  CHECK(r_base.faults[0].pls_stage3 ==
+        Catch::Approx(1000.0).margin(1e-3));
 
   ThreeStageReliabilityOptions gen_on = base;
   gen_on.include_generator_faults = true;
@@ -662,6 +782,79 @@ TEST_CASE("Three-stage reliability — opt-in generator + transformer faults ext
   auto r_both = run_three_stage_reliability_from_string(json, both);
   REQUIRE(r_both.ok);
   CHECK(r_both.faults.size() == n_base + 2);
+}
+
+TEST_CASE("Three-stage reliability — islanding microgrid restores a feeder island",
+          "[reliability][three_stage][microgrid]") {
+  const auto run = [](bool islanding) {
+    std::string json = std::string(R"json({
+      "name":"microgrid_islanding","base_mva":10.0,
+      "ac":{"base_mva":10.0,
+        "buses":[
+          {"index":1,"bus_type":1,"base_kv":10.0,"vmin_pu":0.9,"vmax_pu":1.1,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+          {"index":2,"bus_type":3,"base_kv":10.0,"vmin_pu":0.9,"vmax_pu":1.1,"in_service":true,"pd_mw":1.0,"qd_mvar":0.0,"n_customers":10}
+        ],
+        "branches":[{"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":5.0,"in_service":true,"failure_rate":1.0,"mttr_hr":4.0}],
+        "loads":[],"external_grids":[],
+        "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":2.0,"pmax_mw":2.0,"pmin_mw":0.0,"qmax_mvar":2.0,"qmin_mvar":-2.0}],
+        "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],"switches":[]
+      },
+      "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+      "microgrids":[{"index":1,"pcc_bus":2,"in_service":true,"islanding_capability":)json")
+        + (islanding ? "true" : "false") + R"json(,"capacity_mw":1.0,"mtbf_hours":20000.0,"mttr_hours":8.0}],
+      "vsc_converters":[],"dcdc_converters":[]
+    })json";
+    return run_three_stage_reliability_from_string(json, {});
+  };
+
+  const auto without_islanding = run(false);
+  const auto with_islanding = run(true);
+  REQUIRE(without_islanding.ok);
+  REQUIRE(with_islanding.ok);
+  REQUIRE(without_islanding.faults.size() == 1);
+  REQUIRE(with_islanding.faults.size() == 1);
+  CHECK(without_islanding.faults[0].pls_stage3 >= 999.0);
+  CHECK(with_islanding.faults[0].pls_stage3 ==
+        Catch::Approx(0.0).margin(1e-3));
+  CHECK(with_islanding.eens_kwh_yr < without_islanding.eens_kwh_yr);
+}
+
+TEST_CASE("Three-stage reliability — DER storage and microgrid faults are enumerated",
+          "[reliability][three_stage][microgrid][fault_set]") {
+  const char* json = R"json({
+    "name":"der_microgrid_faults","base_mva":10.0,
+    "ac":{"base_mva":10.0,
+      "buses":[{"index":1,"bus_type":3,"base_kv":10.0,"vmin_pu":0.9,"vmax_pu":1.1,"in_service":true,"pd_mw":0.5,"qd_mvar":0.0,"n_customers":10}],
+      "branches":[],"loads":[],"external_grids":[],"generators":[],
+      "static_generators":[{"index":1,"bus":1,"in_service":true,"p_mw":0.3,"pmax_mw":0.3,"scaling":1.0,"mtbf_hours":3000.0,"mttr_hours":24.0}],
+      "renewable_gens":[{"index":1,"bus":1,"in_service":true,"p_mw":0.3,"p_rated_mw":0.3,"capacity_factor":1.0,"mtbf_hours":4000.0,"mttr_hours":48.0}],
+      "pv_systems":[{"index":1,"bus":1,"in_service":true,"p_mw":0.3,"pmax_mw":0.3,"mtbf_hours":8000.0,"mttr_hours":12.0}],
+      "storage":[{"index":1,"bus":1,"in_service":true,"p_mw":0.0,"pmax_mw":0.3,"p_rated_mw":0.3,"forced_outage_rate":0.015,"mttr_hr":24.0}],
+      "switches":[]
+    },
+    "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+    "microgrids":[{"index":1,"pcc_bus":1,"internal_buses":[1],"in_service":true,"islanding_capability":true,"capacity_mw":1.2,"mtbf_hours":20000.0,"mttr_hours":8.0}],
+    "vsc_converters":[],"dcdc_converters":[]
+  })json";
+
+  ThreeStageReliabilityOptions options;
+  options.include_generator_faults = true;
+  const auto result = run_three_stage_reliability_from_string(json, options);
+  REQUIRE(result.ok);
+  REQUIRE(result.faults.size() == 5);
+
+  std::vector<std::string> types;
+  for (const auto& fault : result.faults) types.push_back(fault.component_type);
+  for (const char* expected : {"static_generator", "renewable_gen",
+                               "ac_pv_system", "storage", "microgrid"}) {
+    CHECK(std::find(types.begin(), types.end(), expected) != types.end());
+  }
+  const auto microgrid_fault = std::find_if(
+      result.faults.begin(), result.faults.end(), [](const auto& fault) {
+        return fault.component_type == "microgrid";
+      });
+  REQUIRE(microgrid_fault != result.faults.end());
+  CHECK(microgrid_fault->pls_stage3 >= 499.0);
 }
 
 TEST_CASE("nsq Monte Carlo on a real hybrid case file routes through the hybrid LP",

@@ -854,6 +854,18 @@ const std::vector<ComponentParameterRule>& parameter_registry() {
     rules.push_back(nonnegative_rule("Switch", "ac.switches", "p_sw_fail",
                                      C::Failure, S::NERC,
                                      "switch reliability", "pu"));
+    rules.push_back(nonnegative_rule("Switch", "ac.switches", "p_fail_to_open",
+                                     C::Failure, S::NERC,
+                                     "switch fail-to-open probability", "pu"));
+    rules.push_back(nonnegative_rule("Switch", "ac.switches", "p_fail_to_close",
+                                     C::Failure, S::NERC,
+                                     "switch fail-to-close probability", "pu"));
+    rules.push_back(nonnegative_rule("Switch", "ac.switches", "t_open_s",
+                                     C::Static, S::IEC61850,
+                                     "switch opening time", "s"));
+    rules.push_back(nonnegative_rule("Switch", "ac.switches", "t_close_s",
+                                     C::Static, S::IEC61850,
+                                     "switch closing time", "s"));
     add_common_reliability_rules(rules, "Switch", "ac.switches");
     rules.push_back(nonnegative_rule("CircuitBreaker", "ac.circuit_breakers",
                                      "rated_voltage_kv", C::Static,
@@ -3345,6 +3357,12 @@ ComponentParameterAuditReport analyze_component_parameter_quality(
                      check_registered(report, id, "r_contact_ohm",
                                       sw.r_contact_ohm);
                      check_registered(report, id, "p_sw_fail", sw.p_sw_fail);
+                     check_registered(report, id, "p_fail_to_open",
+                                      sw.p_fail_to_open);
+                     check_registered(report, id, "p_fail_to_close",
+                                      sw.p_fail_to_close);
+                     check_registered(report, id, "t_open_s", sw.t_open_s);
+                     check_registered(report, id, "t_close_s", sw.t_close_s);
                      check_registered(report, id, "mtbf_hours", sw.mtbf_hours);
                      check_registered(report, id, "mttr_hours", sw.mttr_hours);
                      check_registered(report, id, "t_scheduled_hr",

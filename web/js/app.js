@@ -884,6 +884,8 @@ const App = (() => {
     };
     return {
       overwrite_import_estimates: document.getElementById('ioHandbookOverwriteEstimates')?.checked !== false,
+      infer_switch_bindings: document.getElementById('ioHandbookInferSwitchBindings')?.checked !== false,
+      overwrite_inferred_switch_bindings: document.getElementById('ioHandbookOverwriteBindings')?.checked !== false,
       default_lv_overhead_cross_section_mm2: positive('ioHandbookLvOverheadArea', 35),
       default_lv_cable_cross_section_mm2: positive('ioHandbookLvCableArea', 50),
       default_mv_cross_section_mm2: positive('ioHandbookMvArea', 300),
@@ -917,6 +919,24 @@ const App = (() => {
       `<div class="transient-mini-card"><strong>Warning</strong><span>${escapeHtml(w)}</span></div>`).join('');
     const references = (report.references || []).map(ref =>
       `<a href="${parameterLibraryAttr(ref.url || '#')}" target="_blank" rel="noopener">${escapeHtml(ref.standard || '')}</a>`).join(' · ');
+    const bindingRows = (report.switch_bindings || []).map(row => {
+      const target = row.controlled_element_index >= 0
+        ? `${row.controlled_element_type || '设备'} #${row.controlled_element_index}`
+        : '未绑定';
+      const upstream = row.upstream_protective_switch_index >= 0
+        ? `#${row.upstream_protective_switch_index}` : '-';
+      return `<tr>
+        <td>${escapeHtml(row.switch_index)}</td>
+        <td>${escapeHtml(row.switch_name || '')}</td>
+        <td>${escapeHtml(row.switch_type || '')}</td>
+        <td>${escapeHtml(`${row.old_role || '-'} → ${row.new_role || '-'}`)}</td>
+        <td>${escapeHtml(target)}</td>
+        <td>${escapeHtml(row.protection_zone_id || '-')}</td>
+        <td>${escapeHtml(upstream)}</td>
+        <td><span class="model-io-severity ${row.ambiguous || row.confidence === 'low' ? 'error' : (row.confidence === 'medium' ? 'warning' : 'info')}">${escapeHtml(confidenceText[row.confidence] || row.confidence || '-')}</span></td>
+        <td>${escapeHtml(row.rationale || row.action || '')}</td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="9">没有开关保护绑定建议。</td></tr>';
     el.innerHTML = `
       <div class="transient-section-head"><h5>${applied ? '设计手册参数已应用' : '设计手册参数建议'}</h5><span>${escapeHtml(report.schema || '')}</span></div>
       <div class="model-io-contract-grid">
@@ -924,10 +944,18 @@ const App = (() => {
         <div class="model-io-contract-item"><strong>候选</strong><span>${escapeHtml(report.candidates || 0)} 条</span></div>
         <div class="model-io-contract-item"><strong>变更</strong><span>${escapeHtml(report.fields_changed || 0)} 个字段</span></div>
         <div class="model-io-contract-item"><strong>保留已有</strong><span>${escapeHtml(report.skipped_authored || 0)} 条</span></div>
+        <div class="model-io-contract-item"><strong>开关扫描</strong><span>${escapeHtml(report.switches_scanned || 0)} 个</span></div>
+        <div class="model-io-contract-item"><strong>绑定候选</strong><span>${escapeHtml(report.switch_binding_candidates || 0)} 个</span></div>
+        <div class="model-io-contract-item"><strong>绑定歧义</strong><span>${escapeHtml(report.skipped_ambiguous_bindings || 0)} 个</span></div>
       </div>
       <div class="transient-table-scroll model-io-compact-scroll"><table>
         <thead><tr><th>ID</th><th>线路</th><th>型号</th><th>类别</th><th>截面/材质/绝缘</th><th>R Ω/km</th><th>X Ω/km</th><th>置信度</th><th>判定</th></tr></thead>
         <tbody>${body}</tbody>
+      </table></div>
+      <div class="transient-section-head"><h5>保护与操作绑定</h5><span>${escapeHtml(report.switches_scanned || 0)} 个开关</span></div>
+      <div class="transient-table-scroll model-io-compact-scroll"><table>
+        <thead><tr><th>ID</th><th>开关</th><th>类型</th><th>角色</th><th>受控设备</th><th>保护区</th><th>上游保护</th><th>置信度</th><th>依据</th></tr></thead>
+        <tbody>${bindingRows}</tbody>
       </table></div>
       ${warningRows ? `<div class="transient-mini-grid">${warningRows}</div>` : ''}
       ${references ? `<div class="sub-hint">依据：${references}</div>` : ''}`;
@@ -1154,6 +1182,11 @@ const App = (() => {
     const changed = data.parameter_apply?.fields_changed || 0;
     setStatus(`已补全 ${changed} 个字段`);
     log(`参数库已补全 ${changed} 个缺失字段`, 'success');
+    const quality = data.reliability_data_quality;
+    if (quality) {
+      log(`可靠性数据覆盖：${quality.components_with_reliability_data || 0}/${quality.components_total || 0} 个元件`,
+        (quality.missing_required_data || []).length ? 'warn' : 'success');
+    }
   }
 
   async function importParameterLibrary(file) {
@@ -16550,6 +16583,7 @@ const App = (() => {
 	        restoration: {
 	          enable_switch_reconfiguration: true,
 	          max_switch_actions: 2,
+	          max_switch_operations: 2,
 	          parallel: relParallel,
 	          parallel_threads: Number.isFinite(relParallelThreads) ? relParallelThreads : 0,
 	          include_converter_faults: !!document.getElementById('relTsFaults')?.checked,
@@ -17138,6 +17172,21 @@ const App = (() => {
 		            html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${escapeHtml(reliabilityFmLabel(c.activation))}</td><td>${escapeHtml(reliabilityFmLabel(c.cause))}</td><td>${escapeHtml(reliabilityFmLabel(c.consequence))}</td><td>${escapeHtml(supported)}</td><td>${nf(c.eens_contribution, 2)}</td><td>${nf(c.shed_mw ?? c.total_shed_mw, 2)}</td></tr>`;
 		          });
 		          html += '</tbody></table>';
+		          const switchingRows = contingencyRows.filter(c =>
+		            Array.isArray(c.repair_switch_actions) && c.repair_switch_actions.length);
+		          if (switchingRows.length) {
+		            html += '<h4 style="margin:10px 0 4px;">故障隔离与恢复动作</h4>';
+		            html += '<table><thead><tr><th>故障元件</th><th>动作序列</th><th>校验</th></tr></thead><tbody>';
+		            switchingRows.slice(0, 15).forEach(c => {
+		              const sequence = [...c.repair_switch_actions]
+		                .sort((a, b) => Number(a.sequence_order || 0) - Number(b.sequence_order || 0))
+		                .map(a => `${a.sequence_order || '—'}. ${a.action || '—'} ${a.switch_name || a.switch_index || '—'}`)
+		                .join('；');
+		              const valid = c.repair_switch_sequence_valid !== false;
+		              html += `<tr><td>${escapeHtml(c.display_name || c.component_name || '—')}</td><td>${escapeHtml(sequence)}</td><td>${escapeHtml(valid ? '通过' : (c.repair_switch_sequence_message || '未通过'))}</td></tr>`;
+		            });
+		            html += '</tbody></table>';
+		          }
 		        } else {
 		          html += `<div style="color:var(--muted,#8a909c);font-size:12px;">该 FMEA 结果没有“${escapeHtml(weakMeta.label)}”排序值。</div>`;
 		        }
@@ -17154,6 +17203,20 @@ const App = (() => {
 	          html += `<tr><td>${escapeHtml(na2)}</td><td>${escapeHtml(nb2)}</td><td>${uij}</td><td>${nf(co.total_shed_mw, 2)}</td><td>${nf(co.eens_contribution, 3)}</td></tr>`;
 	        });
 	        html += '</tbody></table>';
+	        const sequenceRows = faultRows.filter(f =>
+	          Array.isArray(f.switching_sequence) && f.switching_sequence.length);
+	        if (sequenceRows.length) {
+	          html += '<h4 style="margin:10px 0 4px;">倒闸动作序列</h4>';
+	          html += '<table><thead><tr><th>故障元件</th><th>动作序列</th><th>隔离</th><th>校验</th></tr></thead><tbody>';
+	          sequenceRows.slice(0, 15).forEach(f => {
+	            const sequence = [...f.switching_sequence]
+	              .sort((a, b) => Number(a.sequence_order || 0) - Number(b.sequence_order || 0))
+	              .map(a => `${a.sequence_order || '—'}. ${a.action || '—'} ${a.switch_name || a.switch_index || '—'}`)
+	              .join('；');
+	            html += `<tr><td>${escapeHtml(f.display_name || f.component_name || `故障 ${f.line_id}`)}</td><td>${escapeHtml(sequence)}</td><td>${escapeHtml(f.fault_isolation_explicit ? '显式' : '等效')}</td><td>${escapeHtml(f.switching_sequence_valid !== false ? '通过' : (f.switching_sequence_message || '未通过'))}</td></tr>`;
+	          });
+	          html += '</tbody></table>';
+	        }
 	      }
 	      // Three-stage restoration: per-fault load shed by stage
 	      if (method === 'three_stage' && Array.isArray(data.faults) && data.faults.length) {
