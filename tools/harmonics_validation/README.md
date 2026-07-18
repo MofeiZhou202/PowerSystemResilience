@@ -59,3 +59,35 @@ complex nodal solve. GridLAB-D 5.3 is reported as unsupported for native
 frequency-domain harmonic power flow; ordinary fundamental power flow is never
 presented as harmonic validation. A future GridLAB-D numeric comparison must use
 a qualified deltamode waveform case and integer-cycle FFT pipeline.
+
+## Real-Feeder Harmonic Penetration (IEEE13)
+
+`validate_harmonics_ieee13.cpp` loads a real OpenDSS feeder through the
+phase-domain bridge (`load_three_phase_system_from_opendss`), injects a
+balanced six-pulse spectrum at one bus, and emits per-order per-phase complex
+bus voltages. `compare_ieee13_opendss.py` replays the identical injections in
+OpenDSS harmonic mode (three single-phase ISources per order, Vsource kept
+enabled) and compares phasors.
+
+```bash
+cmake --build build/macos-release --target validate_harmonics_ieee13
+tools/harmonics_validation/.venv/bin/python \
+  tools/harmonics_validation/compare_ieee13_opendss.py \
+  --out /tmp/ieee13_report.json
+```
+
+Current status on IEEE13 (164 bus/phase/order points, injection 100 A at bus
+675): max complex voltage deviation 1.7e-3 pu; driving-point impedance
+|Z(675, h)| matches OpenDSS across h=2..25 including the h4/h8 resonances.
+Residual deviation is dominated by regulator tap ratios, which the harmonic
+study does not model (taps are held at ratio 1.0).
+
+Setup notes learned the hard way:
+
+- Keep the OpenDSS `Vsource` enabled in harmonic mode — it is the network's
+  harmonic reference impedance; disabling it detaches the network.
+- OpenDSS `AllBusVolts` reports only the most recently solved harmonic; solve
+  and sample each order separately.
+- `Bus.kVBase` is already line-neutral; do not divide by sqrt(3) again.
+- `Circuit.AllBusVolts` returns flat re/im pairs, not complex objects.
+

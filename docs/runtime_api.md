@@ -25,8 +25,8 @@ is dirty. Result playback never synchronizes or changes the model.
 
 | Route | Result family |
 |---|---|
-| `POST /api/session/pf` | Authored-space PF result with rich component attribution and P/Q diagnostics. |
-| `POST /api/session/opf` | OPF plus authored-space post-PF Canvas payload. |
+| `POST /api/session/pf` | Authored-space PF result with rich component attribution and P/Q diagnostics. `method=three_phase_hybrid` selects the monolithic unbalanced abc/DC/VSC Newton path. |
+| `POST /api/session/opf` | OPF plus authored-space post-PF Canvas payload. `network_model=three_phase_hybrid` selects Full/GraphReduced phase-domain hybrid OPF and same-model PF replay. |
 | `POST /api/session/run_ts_pf` | UC/OPF/PF time-series summary and cached per-step results. |
 | `POST /api/session/run_annual_sim` | Annual production simulation and aggregate statistics. |
 | `POST /api/session/run_carbon` | Static carbon flow. |
@@ -84,4 +84,3 @@ python3 tools/gui_api_e2e.py \
 
 The E2E suite covers PF/OPF Canvas reprojection, Grid and CB P/Q, TSPF frame
 retrieval, P/Q diagnostics, and the transient no-fabricated-flow contract.
-

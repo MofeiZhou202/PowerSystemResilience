@@ -2071,11 +2071,12 @@ TEST_CASE("HPF 3-phase load impedance attenuates harmonic voltage (analytic)",
   REQUIRE(r_on.ac_order_solved.at(7));
 
   // Two-node positive-sequence closed form with the load shunt at bus 2:
-  //   y_src = 1/(j*7*0.2), y_line = 1/(j*7*0.1), y_load = 0.2 (q = 0).
+  //   y_src = 1/(j*7*0.2), y_line = 1/(j*7*0.1),
+  //   y_load = 3*0.2 (per-phase Mvar -> admittance pu on the 3-phase base).
   const Cx I(1.0, 0.0);
   const Cx ysrc  = I / Cx(0.0, 7.0 * 0.2);
   const Cx yline = I / Cx(0.0, 7.0 * 0.1);
-  const Cx yload(0.2, 0.0);
+  const Cx yload(0.6, 0.0);
   const Cx Y11 = ysrc + yline, Y22 = yline + yload, Y12 = -yline;
   const Cx det = Y11 * Y22 - Y12 * Y12;
   const Cx v2_expected = I * Y11 / det;

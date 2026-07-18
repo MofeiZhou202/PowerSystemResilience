@@ -633,6 +633,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/matpower_pf_compare.cpp")
   hacdcpf_copy_opendss_runtime(matpower_pf_compare)
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/transformer_tap_crosscheck.cpp")
+  add_executable(transformer_tap_crosscheck tools/transformer_tap_crosscheck.cpp)
+  target_link_libraries(transformer_tap_crosscheck PRIVATE hacdcpf::hacdcpf)
+  hacdcpf_copy_opendss_runtime(transformer_tap_crosscheck)
+endif()
+
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/gridlabd_validation_matrix.cpp")
   add_executable(gridlabd_validation_matrix tools/gridlabd_validation_matrix.cpp)
   target_link_libraries(gridlabd_validation_matrix PRIVATE hacdcpf::hacdcpf)

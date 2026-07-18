@@ -243,7 +243,8 @@
           <option value="hybrid_linearized">混合线性化</option>
           <option value="islanded">孤岛检测</option>
           <option value="distributed_slack">分布式平衡</option>
-          <option value="three_phase">三相不对称</option>
+          <option value="three_phase">三相不平衡交流</option>
+          <option value="three_phase_hybrid">三相不平衡交直流混合</option>
         </select>
       </label>
       <label id="pfLossModelControl" class="sub-label">损耗模型
@@ -284,24 +285,27 @@
     <div id="pfAdvancedPanel" class="pf-advanced-panel" hidden>
       <div id="pfThreePhaseOptions" class="pf-option-group pf-three-phase-options" hidden>
         <div class="pf-option-title">三相abc</div>
-        <label class="sub-label">求解器
+        <label id="pfThreePhaseAlgorithmControl" class="sub-label">求解器
           <select id="pfThreePhaseAlgorithm" title="abc相域潮流求解器">
             <option value="compact">紧凑不动点</option>
             <option value="newton">牛顿-拉夫逊</option>
             <option value="fixed_point">固定点</option>
           </select>
         </label>
-        <label class="sub-label">分析范围
+        <label id="pfThreePhaseScopeControl" class="sub-label">分析范围
           <select id="pfThreePhaseScope" title="三相交流或分阶段三相交直流分析">
             <option value="auto">自动</option>
             <option value="ac_only">仅三相交流</option>
             <option value="staged_hybrid">分阶段三相交直流</option>
           </select>
         </label>
-        <label class="sub-label">调压迭代<input id="pfThreePhaseControlIter" type="number" min="1" step="1" value="100"/></label>
-        <label class="sub-label">最低V(pu)<input id="pfThreePhaseVmin" type="number" min="0.01" step="0.01" value="0.95"/></label>
+        <label id="pfThreePhaseControlIterControl" class="sub-label">调压迭代<input id="pfThreePhaseControlIter" type="number" min="1" step="1" value="100"/></label>
+        <label id="pfThreePhaseVminControl" class="sub-label">最低V(pu)<input id="pfThreePhaseVmin" type="number" min="0.01" step="0.01" value="0.95"/></label>
+        <label class="sub-label">VUF告警值<input id="pfThreePhaseVufMax" type="number" min="0" max="1" step="0.005" value="0.03"/></label>
+        <label class="sub-label">DC最低V(pu)<input id="pfThreePhaseMinDcV" type="number" min="0.001" max="1" step="0.01" value="0.05"/></label>
+        <label class="sub-label">混合线搜索<input id="pfThreePhaseLineSearch" type="number" min="1" step="1" value="18"/></label>
         <label class="sub-label sub-checkbox"><input id="pfThreePhaseShunts" type="checkbox" checked/><span>并联支路</span></label>
-        <label class="sub-label sub-checkbox"><input id="pfThreePhaseOpenDss" type="checkbox" checked/><span>OpenDSS对比</span></label>
+        <label id="pfThreePhaseOpenDssControl" class="sub-label sub-checkbox"><input id="pfThreePhaseOpenDss" type="checkbox" checked/><span>OpenDSS对比</span></label>
       </div>
       <div class="pf-option-group" data-pf-model="balanced">
         <div class="pf-option-title">收敛</div>
@@ -391,6 +395,7 @@
         <select id="opfNetworkModel" title="OPF网络模型及三相可行性校验范围">
           <option value="balanced_aggregate">平衡聚合模型</option>
           <option value="balanced_with_three_phase_validation">平衡OPF + 三相校验</option>
+          <option value="three_phase_hybrid">三相不平衡交直流混合OPF</option>
         </select>
       </label>
       <label class="sub-label sub-checkbox" title="支路热稳定限值 (rate_a)">
@@ -430,8 +435,8 @@
         <label class="sub-label sub-checkbox"><input id="opfVerbose" type="checkbox"/><span>Verbose</span></label>
       </div>
       <div id="opfThreePhaseOptions" class="pf-option-group" hidden>
-        <div class="pf-option-title">三相校验</div>
-        <label class="sub-label">求解器
+        <div class="pf-option-title">三相相域</div>
+        <label id="opfThreePhaseAlgorithmControl" class="sub-label">校验求解器
           <select id="opfThreePhaseAlgorithm">
             <option value="compact">紧凑不动点</option>
             <option value="newton">牛顿-拉夫逊</option>
@@ -442,6 +447,14 @@
         <label class="sub-label">容差<input id="opfThreePhaseTol" type="number" min="1e-12" step="1e-7" value="1e-6"/></label>
         <label class="sub-label">调压迭代<input id="opfThreePhaseControlIter" type="number" min="1" step="1" value="100"/></label>
         <label class="sub-label">最低V(pu)<input id="opfThreePhaseVmin" type="number" min="0.01" step="0.01" value="0.95"/></label>
+        <label id="opfThreePhaseVariantControl" class="sub-label">混合模型
+          <select id="opfThreePhaseVariant">
+            <option value="graph_reduced">图降阶</option>
+            <option value="full">完整相图</option>
+          </select>
+        </label>
+        <label id="opfThreePhaseVufControl" class="sub-label">VUF上限<input id="opfThreePhaseVufMax" type="number" min="0" max="1" step="0.005" value="0.03"/></label>
+        <label id="opfThreePhaseOracleControl" class="sub-label sub-checkbox"><input id="opfThreePhaseOracle" type="checkbox"/><span>约束筛选</span></label>
         <label class="sub-label sub-checkbox"><input id="opfThreePhaseShunts" type="checkbox" checked/><span>并联支路</span></label>
         <label class="sub-label sub-checkbox"><input id="opfThreePhaseOpenDss" type="checkbox" checked/><span>OpenDSS对比</span></label>
       </div>

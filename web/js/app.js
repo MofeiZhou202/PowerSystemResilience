@@ -4141,15 +4141,28 @@ const App = (() => {
         max_control_iter: pfInteger('pfThreePhaseControlIter', 100),
         include_shunts: pfBool('pfThreePhaseShunts', true),
         vmin_pu: pfNumber('pfThreePhaseVmin', 0.95),
+        vuf_max: pfNumber('pfThreePhaseVufMax', 0.03),
+        minimum_dc_voltage_pu: pfNumber('pfThreePhaseMinDcV', 0.05),
+        max_line_search_steps: pfInteger('pfThreePhaseLineSearch', 18),
         compare_opendss: pfBool('pfThreePhaseOpenDss', true),
       },
     };
   }
 
   async function runPowerFlow() {
+    const method = document.getElementById('pfMethod')?.value || 'ac_newton';
+    return method === 'three_phase_hybrid'
+      ? runThreePhaseHybridPowerFlow()
+      : executePowerFlow(method);
+  }
+
+  async function runThreePhaseHybridPowerFlow() {
+    return executePowerFlow('three_phase_hybrid');
+  }
+
+  async function executePowerFlow(method) {
     return withAnalysisQueue(async () => {
       setStatus('潮流计算中...', 'busy');
-      const method = document.getElementById('pfMethod').value;
 
       // Sync canvas to backend first
       if (!await syncToBackend()) {
@@ -4220,6 +4233,17 @@ const App = (() => {
   // converter AC/DC current limits, and converter modulation-ratio limits, all
   // of which are honoured by the parity manual-KKT formulation.
   async function runOpf() {
+    const networkModel = document.getElementById('opfNetworkModel')?.value || 'balanced_aggregate';
+    return networkModel === 'three_phase_hybrid'
+      ? runThreePhaseHybridOpf()
+      : executeOpf(networkModel);
+  }
+
+  async function runThreePhaseHybridOpf() {
+    return executeOpf('three_phase_hybrid');
+  }
+
+  async function executeOpf(networkModel) {
     if (_activeLoadPromise) {
       setStatus('等待算例加载完成...', 'busy');
       await _activeLoadPromise.catch(() => null);
@@ -4227,13 +4251,13 @@ const App = (() => {
     return withAnalysisQueue(async () => {
       setStatus('最优潮流计算中...', 'busy');
       const solver = document.getElementById('opfSolver')?.value || 'parity';
-      const networkModel = document.getElementById('opfNetworkModel')?.value || 'balanced_aggregate';
       const checkConsistency = !!(document.getElementById('opfCheckConsistency')?.checked);
+      const monolithicPhaseHybrid = networkModel === 'three_phase_hybrid';
       const constraints = {
-        branch_limits:        !!(document.getElementById('opfBranchLimits')?.checked),
+        branch_limits:        !monolithicPhaseHybrid && !!(document.getElementById('opfBranchLimits')?.checked),
         converter_capacity:   !!(document.getElementById('opfConvCapacity')?.checked),
         converter_current:    !!(document.getElementById('opfConvCurrent')?.checked),
-        converter_modulation: !!(document.getElementById('opfConvModulation')?.checked),
+        converter_modulation: !monolithicPhaseHybrid && !!(document.getElementById('opfConvModulation')?.checked),
       };
       const options = {
         max_inner_iterations: pfInteger('opfMaxIterations', 400),
@@ -4256,6 +4280,9 @@ const App = (() => {
         max_control_iter: pfInteger('opfThreePhaseControlIter', 100),
         include_shunts: pfBool('opfThreePhaseShunts', true),
         vmin_pu: pfNumber('opfThreePhaseVmin', 0.95),
+        variant: document.getElementById('opfThreePhaseVariant')?.value || 'graph_reduced',
+        vuf_max: pfNumber('opfThreePhaseVufMax', 0.03),
+        constraint_oracle: pfBool('opfThreePhaseOracle', false),
         compare_opendss: pfBool('opfThreePhaseOpenDss', true),
       };
 
@@ -11427,35 +11454,59 @@ const App = (() => {
   // ========== Topology Tables ==========
   // The phase-domain method remains available on hybrid cases when the model
   // carries an abc subsystem; the backend labels that path as staged coupling.
-  const HYBRID_PF_METHODS = new Set(['ac_newton', 'adaptive', 'islanded', 'distributed_slack']);
+  const HYBRID_PF_METHODS = new Set([
+    'ac_newton', 'adaptive', 'islanded', 'distributed_slack', 'three_phase_hybrid',
+  ]);
   function updateAnalysisParameterVisibility() {
-    const isThreePhase = document.getElementById('pfMethod')?.value === 'three_phase';
+    const pfMethod = document.getElementById('pfMethod')?.value;
+    const isThreePhaseAc = pfMethod === 'three_phase';
+    const isThreePhaseHybrid = pfMethod === 'three_phase_hybrid';
+    const isThreePhase = isThreePhaseAc || isThreePhaseHybrid;
     const phaseScopeControl = document.getElementById('pfThreePhaseScope');
     const phaseScope = phaseScopeControl?.value || 'auto';
     const phaseHasDc = phaseScopeControl?.dataset.hasDc === 'true';
     document.getElementById('pfThreePhaseOptions')?.toggleAttribute('hidden', !isThreePhase);
+    document.getElementById('pfThreePhaseAlgorithmControl')?.toggleAttribute('hidden', isThreePhaseHybrid);
+    document.getElementById('pfThreePhaseScopeControl')?.toggleAttribute('hidden', isThreePhaseHybrid);
+    document.getElementById('pfThreePhaseControlIterControl')?.toggleAttribute('hidden', isThreePhaseHybrid);
+    document.getElementById('pfThreePhaseVminControl')?.toggleAttribute('hidden', isThreePhaseHybrid);
+    document.getElementById('pfThreePhaseOpenDssControl')?.toggleAttribute('hidden', isThreePhaseHybrid);
     document.querySelectorAll('#pfAdvancedPanel [data-pf-model="balanced"]').forEach(group => {
       group.toggleAttribute('hidden', isThreePhase);
     });
-    const boundaryControlsVisible = !isThreePhase ||
+    const boundaryControlsVisible = !isThreePhase || isThreePhaseHybrid ||
       (phaseHasDc && (phaseScope === 'auto' || phaseScope === 'staged_hybrid'));
     document.getElementById('pfLossModelControl')?.toggleAttribute('hidden', !boundaryControlsVisible);
     document.getElementById('pfCoordCheckControl')?.toggleAttribute('hidden', !boundaryControlsVisible);
 
     const opfNetwork = document.getElementById('opfNetworkModel');
-    const phaseChoice = opfNetwork
-      ? Array.from(opfNetwork.options).find(opt => opt.value === 'balanced_with_three_phase_validation')
-      : null;
-    const phaseModelAvailable = phaseChoice?.dataset.phaseAvailable === 'true';
-    const dcOnlyOpf = document.getElementById('opfSolver')?.value === 'dc';
-    if (phaseChoice) phaseChoice.disabled = !phaseModelAvailable || dcOnlyOpf;
-    if (opfNetwork && phaseChoice?.disabled &&
-        opfNetwork.value === 'balanced_with_three_phase_validation') {
+    const phaseChoices = opfNetwork
+      ? Array.from(opfNetwork.options).filter(opt =>
+          opt.value === 'balanced_with_three_phase_validation' || opt.value === 'three_phase_hybrid')
+      : [];
+    const opfSolver = document.getElementById('opfSolver')?.value;
+    const incompatiblePhaseOpf = opfSolver === 'dc' || opfSolver === 'dispatch';
+    phaseChoices.forEach(choice => {
+      const available = choice.dataset.phaseAvailable === 'true' &&
+        (choice.value !== 'three_phase_hybrid' ||
+          (choice.dataset.hasDc === 'true' && choice.dataset.phaseHybridSupported === 'true'));
+      choice.disabled = !available || incompatiblePhaseOpf;
+    });
+    const selectedPhaseChoice = phaseChoices.find(choice => choice.value === opfNetwork?.value);
+    if (opfNetwork && selectedPhaseChoice?.disabled) {
       opfNetwork.value = 'balanced_aggregate';
     }
-    const phaseOpf = opfNetwork?.value ===
-      'balanced_with_three_phase_validation';
+    const phaseOpf = phaseChoices.some(choice => choice.value === opfNetwork?.value);
+    const monolithicPhaseOpf = opfNetwork?.value === 'three_phase_hybrid';
     document.getElementById('opfThreePhaseOptions')?.toggleAttribute('hidden', !phaseOpf);
+    document.getElementById('opfThreePhaseAlgorithmControl')?.toggleAttribute('hidden', monolithicPhaseOpf);
+    document.getElementById('opfThreePhaseVariantControl')?.toggleAttribute('hidden', !monolithicPhaseOpf);
+    document.getElementById('opfThreePhaseVufControl')?.toggleAttribute('hidden', !monolithicPhaseOpf);
+    document.getElementById('opfThreePhaseOracleControl')?.toggleAttribute('hidden', !monolithicPhaseOpf);
+    ['opfBranchLimits', 'opfConvModulation'].forEach(id => {
+      const control = document.getElementById(id);
+      if (control) control.disabled = monolithicPhaseOpf;
+    });
   }
 
   function updatePfMethodAvailability(sys) {
@@ -11464,9 +11515,26 @@ const App = (() => {
     const dc = (sys && sys.dc) ? sys.dc : {};
     const hasDc = (Array.isArray(dc.buses) && dc.buses.length > 0) ||
       (sys && Array.isArray(sys.vsc_converters) && sys.vsc_converters.length > 0) ||
-      (sys && Array.isArray(sys.dcdc_converters) && sys.dcdc_converters.length > 0);
+      (Array.isArray(dc.dcdc_converters) && dc.dcdc_converters.length > 0);
     const hasThreePhase = !!(sys && sys.three_phase_ac &&
       Array.isArray(sys.three_phase_ac.buses) && sys.three_phase_ac.buses.length > 0);
+    const phaseLoads = Array.isArray(sys?.three_phase_ac?.loads)
+      ? sys.three_phase_ac.loads : [];
+    const hasUnsupportedPhaseLoad = phaseLoads.some(load => {
+      const connection = String(load?.connection || 'wye').toLowerCase();
+      const zipValues = [
+        load?.const_z_percent, load?.const_i_percent,
+        load?.p_const_z_percent, load?.p_const_i_percent,
+        load?.q_const_z_percent, load?.q_const_i_percent,
+      ];
+      return connection === 'delta' || zipValues.some(value => Number(value) > 1e-9);
+    });
+    const hasUnsupportedPhaseHybridDevice =
+      (Array.isArray(dc.dcdc_converters) && dc.dcdc_converters.length > 0) ||
+      (Array.isArray(sys?.energy_routers) && sys.energy_routers.length > 0) ||
+      (Array.isArray(dc.dc_static_generators) &&
+        dc.dc_static_generators.some(source => source?.in_service !== false && source?.controllable));
+    const phaseHybridSupported = !hasUnsupportedPhaseLoad && !hasUnsupportedPhaseHybridDevice;
     const phaseScopeControl = document.getElementById('pfThreePhaseScope');
     if (phaseScopeControl) {
       phaseScopeControl.dataset.hasDc = hasDc ? 'true' : 'false';
@@ -11482,26 +11550,42 @@ const App = (() => {
     }
     let selectedGotDisabled = false;
     Array.from(sel.options).forEach(opt => {
-      const missingPhaseModel = opt.value === 'three_phase' && !hasThreePhase;
+      const missingPhaseModel =
+        (opt.value === 'three_phase' || opt.value === 'three_phase_hybrid') && !hasThreePhase;
+      const missingHybridDc = opt.value === 'three_phase_hybrid' && !hasDc;
+      const unsupportedHybridModel = opt.value === 'three_phase_hybrid' && !phaseHybridSupported;
       const restrictHybrid = hasDc && opt.value !== 'three_phase' && !HYBRID_PF_METHODS.has(opt.value);
-      const restrict = missingPhaseModel || restrictHybrid;
+      const restrict = missingPhaseModel || missingHybridDc || unsupportedHybridModel || restrictHybrid;
       opt.disabled = restrict;
       opt.title = missingPhaseModel
         ? '当前算例没有 three_phase_ac 相域模型'
-        : (restrictHybrid ? '该算法不适合作为混合交直流算例的直接GUI潮流方法' : '');
+        : missingHybridDc
+          ? '当前算例没有直流网络或VSC换流器'
+          : unsupportedHybridModel
+            ? '当前相域混合接口仅支持恒功率星形负荷、纯电阻DC支路和直接VSC'
+          : (restrictHybrid ? '该算法不适合作为混合交直流算例的直接GUI潮流方法' : '');
       if (restrict && opt.selected) selectedGotDisabled = true;
     });
     if (selectedGotDisabled) sel.value = 'ac_newton';
     const opfNetwork = document.getElementById('opfNetworkModel');
     if (opfNetwork) {
-      const phaseChoice = Array.from(opfNetwork.options)
-        .find(opt => opt.value === 'balanced_with_three_phase_validation');
-      if (phaseChoice) {
-        phaseChoice.dataset.phaseAvailable = hasThreePhase ? 'true' : 'false';
-        phaseChoice.disabled = !hasThreePhase;
-        phaseChoice.title = hasThreePhase ? '' : '当前算例没有 three_phase_ac 相域模型';
-      }
-      if (!hasThreePhase && opfNetwork.value === 'balanced_with_three_phase_validation') {
+      const phaseChoices = Array.from(opfNetwork.options).filter(opt =>
+        opt.value === 'balanced_with_three_phase_validation' || opt.value === 'three_phase_hybrid');
+      phaseChoices.forEach(choice => {
+        choice.dataset.phaseAvailable = hasThreePhase ? 'true' : 'false';
+        choice.dataset.hasDc = hasDc ? 'true' : 'false';
+        choice.dataset.phaseHybridSupported = phaseHybridSupported ? 'true' : 'false';
+        const unavailable = !hasThreePhase ||
+          (choice.value === 'three_phase_hybrid' && (!hasDc || !phaseHybridSupported));
+        choice.disabled = unavailable;
+        choice.title = !hasThreePhase
+          ? '当前算例没有 three_phase_ac 相域模型'
+          : (choice.value === 'three_phase_hybrid' && !hasDc
+              ? '当前算例没有直流网络或VSC换流器'
+              : (choice.value === 'three_phase_hybrid' && !phaseHybridSupported
+                  ? '当前相域混合接口仅支持恒功率星形负荷、纯电阻DC支路和直接VSC' : ''));
+      });
+      if (phaseChoices.some(choice => choice.value === opfNetwork.value && choice.disabled)) {
         opfNetwork.value = 'balanced_aggregate';
       }
     }
@@ -20778,7 +20862,9 @@ const App = (() => {
     loadBuiltinCase,
     loadMatpowerCase,
     runPowerFlow,
+    runThreePhaseHybridPowerFlow,
     runOpf,
+    runThreePhaseHybridOpf,
     collectWeakLinkEvidence,
     getTaskStatus: taskStatusSnapshot,
     getAnnualTimelineWindowStatus: annualTimelineWindowStatus,

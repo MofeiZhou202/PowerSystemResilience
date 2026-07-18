@@ -483,6 +483,12 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/validate_harmonics_xre
     "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/validate_harmonics_xref.cpp")
   target_link_libraries(validate_harmonics_xref PRIVATE hacdcpf::hacdcpf)
 
+if(EXISTS "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/validate_harmonics_ieee13.cpp")
+  add_executable(validate_harmonics_ieee13
+    "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/validate_harmonics_ieee13.cpp")
+  target_link_libraries(validate_harmonics_ieee13 PRIVATE hacdcpf::hacdcpf)
+endif()
+
   set(_HACDCPF_HARMONICS_VALIDATION_PY
       "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/.venv/bin/python")
   if(EXISTS "${_HACDCPF_HARMONICS_VALIDATION_PY}" AND

@@ -1,6 +1,6 @@
 # Documentation Index
 
-Updated: 2026-07-18
+Updated: 2026-07-19
 
 This directory separates implementation contracts from mathematical references.
 When documentation and runtime behavior differ, `include/`, `src/`,
@@ -11,7 +11,8 @@ When documentation and runtime behavior differ, `include/`, `src/`,
 | Need | Document |
 |---|---|
 | Build on macOS, Linux, or Windows | [cross_platform_build.md](cross_platform_build.md) |
-| Runtime HTTP endpoints | [runtime_api.md](runtime_api.md) |
+| Runtime HTTP endpoints, including monolithic three-phase hybrid PF/OPF | [runtime_api.md](runtime_api.md) |
+| Python SDK and AI enhancement architecture | [python_api.md](python_api.md) |
 | Editable parameter registry and effective values | [parameter_system.md](parameter_system.md) |
 | Rich/canonical projection and result attribution | [projection_and_results.md](projection_and_results.md) |
 | Canvas result rendering and time playback | [gui_canvas_runtime.md](gui_canvas_runtime.md) |

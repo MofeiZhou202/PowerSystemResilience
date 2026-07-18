@@ -2,6 +2,11 @@
 // -----------------------------
 // Minimal MATPOWER AC PF runner used by external cross-tool checks.
 // Prints a compact JSON object with convergence flags and solved voltages.
+//
+// Flags:
+//   --no-pv-pq    disable PV->PQ switching (match MATPOWER default runpf)
+//   --flows       append per-branch from/to flows and total losses
+//   --repeat N    solve N extra times (warm cache) and report per-solve ms
 
 #include <chrono>
 #include <cmath>
@@ -30,13 +35,23 @@ static std::string json_escape(const std::string& s) {
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::cerr << "usage: matpower_pf_compare <case.m> [--no-pv-pq]\n";
+    std::cerr << "usage: matpower_pf_compare <case.m> [--no-pv-pq] [--flows] "
+                 "[--repeat N]\n";
     return 2;
   }
-  const bool no_pv_pq =
-      argc > 2 && std::string(argv[2]) == "--no-pv-pq";
-  const bool flows =
-      argc > 2 && std::string(argv[2]) == "--flows";
+  bool no_pv_pq = false;
+  bool flows = false;
+  int repeat = 0;
+  for (int i = 2; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (a == "--no-pv-pq") {
+      no_pv_pq = true;
+    } else if (a == "--flows") {
+      flows = true;
+    } else if (a == "--repeat" && i + 1 < argc) {
+      repeat = std::max(0, std::atoi(argv[++i]));
+    }
+  }
 
   try {
     const std::string case_path = argv[1];
@@ -47,16 +62,26 @@ int main(int argc, char** argv) {
     hacdcpf::PowerFlowOptions opt;
     opt.tol = 1e-8;
     opt.max_iter = 80;
+    opt.enable_solver_profiling = true;
     if (no_pv_pq) {
       opt.enable_pv_pq_conversion = false;
     }
 
-    const auto pf = hacdcpf::solve_power_flow(sys, opt);
-    const auto t_solve1 = std::chrono::steady_clock::now();
-
     const auto ms = [](auto a, auto b) {
       return std::chrono::duration<double, std::milli>(b - a).count();
     };
+
+    auto pf = hacdcpf::solve_power_flow(sys, opt);
+    const auto t_solve1 = std::chrono::steady_clock::now();
+
+    std::vector<double> repeat_ms;
+    repeat_ms.reserve(static_cast<size_t>(repeat));
+    for (int k = 0; k < repeat; ++k) {
+      const auto t0 = std::chrono::steady_clock::now();
+      pf = hacdcpf::solve_power_flow(sys, opt);
+      repeat_ms.push_back(ms(t0, std::chrono::steady_clock::now()));
+    }
+    const auto t_end = std::chrono::steady_clock::now();
 
     std::cout << "{\"converged\":" << (pf.converged ? "true" : "false")
               << ",\"iterations\":" << pf.iterations
@@ -76,6 +101,20 @@ int main(int argc, char** argv) {
                  }()
               << ",\"parse_ms\":" << ms(t_parse0, t_parse1)
               << ",\"solve_ms\":" << ms(t_parse1, t_solve1)
+              << ",\"total_ms\":" << ms(t_parse1, t_end)
+              << ",\"repeat_ms\":[";
+    for (size_t i = 0; i < repeat_ms.size(); ++i) {
+      if (i) std::cout << ',';
+      std::cout << repeat_ms[i];
+    }
+    std::cout << "],\"linear_backend\":\""
+              << json_escape(pf.profiling.linear_solver_backend)
+              << "\",\"factorization_calls\":" << pf.profiling.factorization_calls
+              << ",\"eval_jacobian_ms_total\":" << pf.profiling.eval_jacobian_ms_total
+              << ",\"linear_solve_ms_total\":" << pf.profiling.linear_solve_ms_total
+              << ",\"line_search_ms_total\":" << pf.profiling.line_search_ms_total
+              << ",\"pv_to_pq_switches\":" << pf.profiling.pv_to_pq_switches
+              << ",\"pq_to_pv_switches\":" << pf.profiling.pq_to_pv_switches
               << ",\"bus_ids\":[";
     // parse_matpower renumbers buses to 1..N in .index and stores the
     // original MATPOWER bus number in .name as "Bus<id>"; report the

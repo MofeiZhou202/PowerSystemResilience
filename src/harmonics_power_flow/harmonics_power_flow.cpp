@@ -24,6 +24,8 @@
 #include <cctype>
 #include <cmath>
 #include <complex>
+#include <cstdlib>
+#include <fstream>
 #include <map>
 #include <sstream>
 #include <string>
@@ -930,7 +932,27 @@ SpMat build_3ph_ac_ybus(const ThreePhaseACSystem& sys,
       yshh = Mat3::Zero();
       for (int ph = 0; ph < 3; ++ph) yshh(ph, ph) = Cx(0.0, hh * ln.b1_pu / 2.0);
     }
-    Mat3 yser = zabc.inverse();
+    Mat3 yser;
+    if (ln.use_phase_matrix) {
+      // Invert only the active-phase submatrix: 1-/2-phase lines carry a
+      // rank-deficient 3x3 Z (zero rows/cols for the missing phases), so a
+      // full 3x3 inverse produces NaN (IEEE13 671-684 / 632-645 hit this).
+      int act[3];
+      int na = 0;
+      for (int r = 0; r < 3; ++r)
+        if (ln.phase_mask.has(r)) act[na++] = r;
+      yser = Mat3::Zero();
+      if (na > 0) {
+        Eigen::MatrixXcd zsub(na, na);
+        for (int i = 0; i < na; ++i)
+          for (int j = 0; j < na; ++j) zsub(i, j) = zabc(act[i], act[j]);
+        const Eigen::MatrixXcd ysub = zsub.inverse();
+        for (int i = 0; i < na; ++i)
+          for (int j = 0; j < na; ++j) yser(act[i], act[j]) = ysub(i, j);
+      }
+    } else {
+      yser = zabc.inverse();
+    }
     stamp_block(pf, pt, yser, yshh, sys.buses[pf].phase_mask,
                 sys.buses[pt].phase_mask, ln.phase_mask);
   }
@@ -939,8 +961,17 @@ SpMat build_3ph_ac_ybus(const ThreePhaseACSystem& sys,
     if (!tf.in_service || tf.sn_mva <= 0) continue;
     int pf = pos(tf.hv_bus), pt = pos(tf.lv_bus);
     if (pf < 0 || pt < 0) continue;
-    double zpu = (tf.vk_percent / 100.0) * (base / tf.sn_mva);
-    double rpu = (tf.vkr_percent / 100.0) * (base / tf.sn_mva);
+    // Nameplate impedance is on (Sn, Vn_lv); scale onto the LV bus voltage
+    // base when the two differ (e.g. 2.4 kV regulator windings on a 4.16 kV
+    // bus need (2.4/4.16)² = 1/3).
+    double vbase_scale = 1.0;
+    const double lv_bus_kv = sys.buses[static_cast<size_t>(pt)].base_kv;
+    if (tf.vn_lv_kv > 1e-9 && lv_bus_kv > 1e-9) {
+      const double r = tf.vn_lv_kv / lv_bus_kv;
+      vbase_scale = r * r;
+    }
+    double zpu = (tf.vk_percent / 100.0) * (base / tf.sn_mva) * vbase_scale;
+    double rpu = (tf.vkr_percent / 100.0) * (base / tf.sn_mva) * vbase_scale;
     double xpu = std::sqrt(std::max(zpu * zpu - rpu * rpu, 0.0));
     Cx yt = Cx(1.0, 0.0) / Cx(skin_r(rpu, h, opt), hh * xpu);
     // Vector-group aware connection blocks: encodes Dy/Yd ±30° shift and the
@@ -999,7 +1030,9 @@ SpMat build_3ph_ac_ybus(const ThreePhaseACSystem& sys,
   if (opt.include_load_impedance) {
     auto stamp_load = [&](int p, int ph, double pmw, double qmvar) {
       if (p < 0 || !sys.buses[p].phase_mask.has(ph)) return;
-      double pp = pmw / base, qq = qmvar / base;
+      // Per-phase load power -> per-phase admittance in pu on the three-phase
+      // base (same 3·q/S_base scaling as bus shunts).
+      double pp = 3.0 * pmw / base, qq = 3.0 * qmvar / base;
       double vm = std::abs(vph1[p][ph]);
       if (vm < 1e-6) vm = 1.0;
       double v2 = vm * vm;
@@ -1019,9 +1052,11 @@ SpMat build_3ph_ac_ybus(const ThreePhaseACSystem& sys,
     const auto& b = sys.buses[i];
     const double gs[3] = {b.gs_a_mw, b.gs_b_mw, b.gs_c_mw};
     const double bs[3] = {b.bs_a_mvar, b.bs_b_mvar, b.bs_c_mvar};
+    // Per-phase shunt Mvar/MW (LN, at 1.0 pu) -> per-phase admittance in pu on
+    // the three-phase base: B_pu = 3·q/S_base (V_base is LL; Z_base = V_LL²/S).
     for (int ph = 0; ph < 3; ++ph) {
       if (gs[ph] != 0.0 || bs[ph] != 0.0)
-        diag[i][ph] += Cx(gs[ph] / base, hh * bs[ph] / base);
+        diag[i][ph] += Cx(3.0 * gs[ph] / base, hh * 3.0 * bs[ph] / base);
     }
   }
   for (int i = 0; i < n; ++i) {
@@ -1235,6 +1270,22 @@ HPF3phResult solve_harmonic_power_flow_3ph(const ThreePhaseACSystem& sys,
     if (h <= 1) continue;
     SpMat Y = build_ybus(h);
     Eigen::VectorXcd I = build_inj(h);
+    // Optional diagnostic dump of the per-order matrix (triplet CSV) for
+    // singularity analysis: HACDCPF_HPF_DUMP_YBUS=<dir> writes ybus_h<h>.csv.
+    if (const char* dump_dir = std::getenv("HACDCPF_HPF_DUMP_YBUS")) {
+      if (dump_dir[0] != '\0') {
+        std::ofstream fy(std::string(dump_dir) + "/ybus_h" + std::to_string(h) + ".csv");
+        fy << "row,col,re,im\n";
+        for (int k = 0; k < Y.outerSize(); ++k)
+          for (SpMat::InnerIterator it(Y, k); it; ++it)
+            fy << it.row() << ',' << it.col() << ','
+               << it.value().real() << ',' << it.value().imag() << '\n';
+        std::ofstream fi(std::string(dump_dir) + "/inj_h" + std::to_string(h) + ".csv");
+        fi << "row,re,im\n";
+        for (int k = 0; k < I.size(); ++k)
+          if (I(k) != Cx(0, 0)) fi << k << ',' << I(k).real() << ',' << I(k).imag() << '\n';
+      }
+    }
     Eigen::SparseLU<SpMat> lu;
     lu.compute(Y);
     bool okrow = (lu.info() == Eigen::Success);

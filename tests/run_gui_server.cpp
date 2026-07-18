@@ -57,6 +57,8 @@
 #include "hacdcpf/model/enum_strings.hpp"
 #include "hacdcpf/model/standard_parameter_library.hpp"
 #include "hacdcpf/power_flow/three_phase.hpp"
+#include "hacdcpf/power_flow/three_phase_hybrid.hpp"
+#include "hacdcpf/optimal_power_flow/three_phase_hybrid_opf.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
 #include "hacdcpf/network_reconfiguration/topology_analysis.hpp"
 #include "hacdcpf/network_reconfiguration/topology_reconfiguration.hpp"
@@ -3069,6 +3071,540 @@ int append_balanced_vsc_injection(
   }
   phase_system.loads.push_back(std::move(load));
   return 1;
+}
+
+struct GuiPhaseHybridGeneratorBinding {
+  int component_index{0};
+  int bus_id{0};
+  int phase{0};
+  std::string name;
+  std::string source_type{"three_phase_generator"};
+};
+
+struct GuiPhaseHybridModel {
+  hacdcpf::opf::phase_hybrid::ThreePhaseHybridOPFCase opf;
+  hacdcpf::powerflow::ThreePhaseHybridPFCase pf;
+  std::vector<std::array<int, 3>> bus_nodes;
+  std::vector<int> dc_bus_ids;
+  std::vector<int> vsc_positions;
+  std::vector<GuiPhaseHybridGeneratorBinding> generator_bindings;
+  std::vector<std::string> limitations;
+};
+
+std::array<double, 3> gui_phase_values(double a, double b, double c) {
+  return {a, b, c};
+}
+
+GuiPhaseHybridModel build_gui_phase_hybrid_model(
+    const hacdcpf::HybridPowerSystem& sys,
+    bool include_shunts,
+    bool enforce_converter_capacity,
+    bool enforce_converter_current,
+    double vuf_max) {
+  using hacdcpf::opf::phase_hybrid::PhaseGenerator;
+  using hacdcpf::opf::phase_hybrid::PhaseVSC;
+  using hacdcpf::opf::phase_hybrid::PhaseVSCControlMode;
+  using hacdcpf::powerflow::ThreePhaseHybridPFControlMode;
+  using hacdcpf::powerflow::ThreePhaseHybridPFConverter;
+
+  if (!sys.three_phase_ac.has_value()) {
+    throw std::invalid_argument(
+        "Monolithic three-phase hybrid analysis requires three_phase_ac");
+  }
+  if (sys.dc.buses.empty() || sys.vsc_converters.empty()) {
+    throw std::invalid_argument(
+        "Monolithic three-phase hybrid analysis requires a DC network and VSC converter");
+  }
+  if (!sys.dc.dcdc_converters.empty()) {
+    throw std::invalid_argument(
+        "Monolithic three-phase hybrid GUI adapter does not yet support DC/DC converters");
+  }
+  if (!sys.energy_routers.empty()) {
+    throw std::invalid_argument(
+        "Monolithic three-phase hybrid GUI adapter does not yet expand energy routers");
+  }
+
+  const auto& tp = *sys.three_phase_ac;
+  GuiPhaseHybridModel model;
+  auto& opf = model.opf;
+  auto& pf = model.pf;
+  opf.name = sys.name + "_gui_phase_hybrid_opf";
+  opf.base_mva = tp.base_mva > 0.0 ? tp.base_mva
+                                    : (sys.base_mva > 0.0 ? sys.base_mva : 100.0);
+  opf.vuf_max = std::clamp(vuf_max, 0.0, 1.0);
+
+  const int full_n = static_cast<int>(tp.buses.size()) * 3;
+  std::vector<int> full_to_node(static_cast<std::size_t>(full_n), -1);
+  model.bus_nodes.resize(tp.buses.size(), std::array<int, 3>{-1, -1, -1});
+  int node_count = 0;
+  for (std::size_t bus_pos = 0; bus_pos < tp.buses.size(); ++bus_pos) {
+    const auto& bus = tp.buses[bus_pos];
+    if (!bus.in_service) continue;
+    for (int phase = 0; phase < 3; ++phase) {
+      if (!bus.phase_mask.has(phase)) continue;
+      full_to_node[bus_pos * 3 + static_cast<std::size_t>(phase)] = node_count;
+      model.bus_nodes[bus_pos][static_cast<std::size_t>(phase)] = node_count++;
+    }
+  }
+  if (node_count == 0) {
+    throw std::invalid_argument("three_phase_ac has no in-service phase nodes");
+  }
+
+  opf.y_ac.resize(node_count, node_count);
+  std::vector<Eigen::Triplet<std::complex<double>>> ac_triplets;
+  auto phase_network = tp;
+  // The hybrid kernels represent an external grid as fixed reference voltage
+  // plus dispatchable source power. Do not also stamp its Norton impedance.
+  phase_network.external_grids.clear();
+  for (const auto& entry :
+       hacdcpf::analysis::build_full_ybus_phase_entries(
+           phase_network, include_shunts)) {
+    if (entry.row < 0 || entry.row >= full_n ||
+        entry.col < 0 || entry.col >= full_n) continue;
+    const int row = full_to_node[static_cast<std::size_t>(entry.row)];
+    const int col = full_to_node[static_cast<std::size_t>(entry.col)];
+    if (row >= 0 && col >= 0) ac_triplets.emplace_back(row, col, entry.value);
+  }
+  opf.y_ac.setFromTriplets(ac_triplets.begin(), ac_triplets.end());
+  opf.y_ac.makeCompressed();
+  opf.i_ac_fixed = Eigen::VectorXcd::Zero(node_count);
+  opf.p_load_pu = Eigen::VectorXd::Zero(node_count);
+  opf.q_load_pu = Eigen::VectorXd::Zero(node_count);
+  opf.v_min_pu = Eigen::VectorXd::Constant(node_count, 0.9);
+  opf.v_max_pu = Eigen::VectorXd::Constant(node_count, 1.1);
+  opf.voltage_start = Eigen::VectorXcd::Ones(node_count);
+  opf.ac_phase_index.assign(static_cast<std::size_t>(node_count), 0);
+  Eigen::VectorXcd fixed_generation = Eigen::VectorXcd::Zero(node_count);
+
+  std::unordered_map<int, int> tp_bus_pos;
+  for (std::size_t pos = 0; pos < tp.buses.size(); ++pos) {
+    tp_bus_pos[tp.buses[pos].index] = static_cast<int>(pos);
+    const auto& bus = tp.buses[pos];
+    const auto vm = gui_phase_values(bus.vm_a_pu, bus.vm_b_pu, bus.vm_c_pu);
+    const auto va = gui_phase_values(bus.va_a_deg, bus.va_b_deg, bus.va_c_deg);
+    const auto pd = gui_phase_values(bus.pd_a_mw, bus.pd_b_mw, bus.pd_c_mw);
+    const auto qd = gui_phase_values(bus.qd_a_mvar, bus.qd_b_mvar, bus.qd_c_mvar);
+    std::vector<int> complete_bus;
+    for (int phase = 0; phase < 3; ++phase) {
+      const int node = model.bus_nodes[pos][static_cast<std::size_t>(phase)];
+      if (node < 0) continue;
+      opf.p_load_pu[node] += pd[static_cast<std::size_t>(phase)] / opf.base_mva;
+      opf.q_load_pu[node] += qd[static_cast<std::size_t>(phase)] / opf.base_mva;
+      opf.v_min_pu[node] = bus.vmin_pu > 0.0 ? bus.vmin_pu : 0.9;
+      opf.v_max_pu[node] = bus.vmax_pu > 0.0 ? bus.vmax_pu : 1.1;
+      opf.voltage_start[node] = std::polar(
+          vm[static_cast<std::size_t>(phase)] > 0.0
+              ? vm[static_cast<std::size_t>(phase)] : 1.0,
+          va[static_cast<std::size_t>(phase)] * M_PI / 180.0);
+      opf.ac_phase_index[static_cast<std::size_t>(node)] = phase;
+      complete_bus.push_back(node);
+    }
+    if (complete_bus.size() == 3) opf.three_phase_bus_nodes.push_back(complete_bus);
+  }
+
+  for (const auto& load : tp.loads) {
+    if (!load.in_service) continue;
+    std::string connection = load.connection;
+    std::transform(connection.begin(), connection.end(), connection.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (connection == "delta") {
+      throw std::invalid_argument(
+          "Monolithic three-phase hybrid GUI adapter currently requires wye phase loads");
+    }
+    if (load.const_z_percent > 1.0e-9 || load.const_i_percent > 1.0e-9 ||
+        load.p_const_z_percent > 1.0e-9 || load.p_const_i_percent > 1.0e-9 ||
+        load.q_const_z_percent > 1.0e-9 || load.q_const_i_percent > 1.0e-9) {
+      throw std::invalid_argument(
+          "Monolithic three-phase hybrid GUI adapter currently requires constant-power phase loads");
+    }
+    const auto bus_it = tp_bus_pos.find(load.bus);
+    if (bus_it == tp_bus_pos.end()) continue;
+    const auto p = gui_phase_values(load.p_a_mw, load.p_b_mw, load.p_c_mw);
+    const auto q = gui_phase_values(load.q_a_mvar, load.q_b_mvar, load.q_c_mvar);
+    for (int phase = 0; phase < 3; ++phase) {
+      if (!load.phase_mask.has(phase)) continue;
+      const int node = model.bus_nodes[static_cast<std::size_t>(bus_it->second)]
+                                      [static_cast<std::size_t>(phase)];
+      if (node < 0) continue;
+      opf.p_load_pu[node] += p[static_cast<std::size_t>(phase)] / opf.base_mva;
+      opf.q_load_pu[node] += q[static_cast<std::size_t>(phase)] / opf.base_mva;
+    }
+  }
+
+  const double total_load_mw = std::max(1.0, opf.p_load_pu.cwiseMax(0.0).sum() * opf.base_mva);
+  for (const auto& generator : tp.generators) {
+    if (!generator.in_service) continue;
+    const auto bus_it = tp_bus_pos.find(generator.bus);
+    if (bus_it == tp_bus_pos.end()) continue;
+    const auto p = gui_phase_values(generator.p_a_mw, generator.p_b_mw,
+                                    generator.p_c_mw);
+    const auto q = gui_phase_values(generator.q_a_mvar, generator.q_b_mvar,
+                                    generator.q_c_mvar);
+    const bool explicit_phase =
+        std::abs(generator.p_a_mw) + std::abs(generator.p_b_mw) +
+        std::abs(generator.p_c_mw) + std::abs(generator.q_a_mvar) +
+        std::abs(generator.q_b_mvar) + std::abs(generator.q_c_mvar) > 1.0e-12;
+    const double phase_count = std::max(1, generator.phase_mask.count());
+    for (int phase = 0; phase < 3; ++phase) {
+      if (!generator.phase_mask.has(phase)) continue;
+      const int node = model.bus_nodes[static_cast<std::size_t>(bus_it->second)]
+                                      [static_cast<std::size_t>(phase)];
+      if (node < 0) continue;
+      const double pg = explicit_phase ? p[static_cast<std::size_t>(phase)]
+                                       : generator.p_mw / phase_count;
+      const double qg = explicit_phase ? q[static_cast<std::size_t>(phase)]
+                                       : generator.q_mvar / phase_count;
+      fixed_generation[node] += std::complex<double>(pg, qg) / opf.base_mva;
+      PhaseGenerator item;
+      item.phase_node = node;
+      const bool has_p_bounds = generator.pmax_mw > generator.pmin_mw;
+      const bool has_q_bounds = generator.qmax_mvar > generator.qmin_mvar;
+      item.p_min_pu = (has_p_bounds ? generator.pmin_mw / phase_count : pg) / opf.base_mva;
+      item.p_max_pu = (has_p_bounds ? generator.pmax_mw / phase_count : pg) / opf.base_mva;
+      item.q_min_pu = (has_q_bounds ? generator.qmin_mvar / phase_count : qg) / opf.base_mva;
+      item.q_max_pu = (has_q_bounds ? generator.qmax_mvar / phase_count : qg) / opf.base_mva;
+      const auto rich = std::find_if(
+          sys.ac.generators.begin(), sys.ac.generators.end(), [&](const auto& g) {
+            return g.in_service && g.bus == generator.bus &&
+                   (generator.name.empty() || g.name.empty() || g.name == generator.name);
+          });
+      if (rich != sys.ac.generators.end()) {
+        item.cost_c2 = rich->cost_c2 * phase_count;
+        item.cost_c1 = rich->cost_c1;
+      } else {
+        item.cost_c1 = 30.0;
+      }
+      opf.generators.push_back(item);
+      model.generator_bindings.push_back(
+          {generator.index, generator.bus, phase, generator.name,
+           "three_phase_generator"});
+    }
+  }
+
+  std::unordered_set<int> reference_nodes;
+  const auto add_reference = [&](int bus_pos, hacdcpf::PhaseMask mask,
+                                 const std::array<double, 3>& vm,
+                                 const std::array<double, 3>& va) {
+    for (int phase = 0; phase < 3; ++phase) {
+      if (!mask.has(phase)) continue;
+      const int node = model.bus_nodes[static_cast<std::size_t>(bus_pos)]
+                                      [static_cast<std::size_t>(phase)];
+      if (node < 0 || !reference_nodes.insert(node).second) continue;
+      opf.reference_nodes.push_back(node);
+      opf.reference_voltage.conservativeResize(opf.reference_voltage.size() + 1);
+      opf.reference_voltage[opf.reference_voltage.size() - 1] =
+          std::polar(vm[static_cast<std::size_t>(phase)],
+                     va[static_cast<std::size_t>(phase)] * M_PI / 180.0);
+    }
+  };
+  for (const auto& grid : tp.external_grids) {
+    if (!grid.in_service) continue;
+    const auto bus_it = tp_bus_pos.find(grid.bus);
+    if (bus_it == tp_bus_pos.end()) continue;
+    const std::array<double, 3> vm = grid.use_phase_voltage_setpoint
+        ? gui_phase_values(grid.vm_a_pu, grid.vm_b_pu, grid.vm_c_pu)
+        : gui_phase_values(grid.vm_pu, grid.vm_pu, grid.vm_pu);
+    const std::array<double, 3> va = grid.use_phase_voltage_setpoint
+        ? gui_phase_values(grid.va_a_deg, grid.va_b_deg, grid.va_c_deg)
+        : gui_phase_values(grid.va_deg, grid.va_deg - 120.0, grid.va_deg + 120.0);
+    add_reference(bus_it->second, grid.phase_mask, vm, va);
+    for (int phase = 0; phase < 3; ++phase) {
+      if (!grid.phase_mask.has(phase)) continue;
+      const int node = model.bus_nodes[static_cast<std::size_t>(bus_it->second)]
+                                      [static_cast<std::size_t>(phase)];
+      if (node < 0) continue;
+      PhaseGenerator source;
+      source.phase_node = node;
+      source.p_min_pu = -5.0 * total_load_mw / opf.base_mva;
+      source.p_max_pu = 5.0 * total_load_mw / opf.base_mva;
+      source.q_min_pu = -5.0 * total_load_mw / opf.base_mva;
+      source.q_max_pu = 5.0 * total_load_mw / opf.base_mva;
+      const auto rich = std::find_if(
+          sys.ac.external_grids.begin(), sys.ac.external_grids.end(),
+          [&](const auto& g) { return g.in_service && g.bus == grid.bus; });
+      if (rich != sys.ac.external_grids.end()) {
+        source.cost_c2 = rich->cost_c2 * 3.0;
+        source.cost_c1 = rich->cost_c1;
+      } else {
+        source.cost_c1 = 30.0;
+      }
+      opf.generators.push_back(source);
+      model.generator_bindings.push_back(
+          {grid.index, grid.bus, phase, grid.name, "three_phase_external_grid"});
+    }
+  }
+  if (opf.reference_nodes.empty()) {
+    for (std::size_t pos = 0; pos < tp.buses.size(); ++pos) {
+      const auto& bus = tp.buses[pos];
+      if (!bus.in_service || bus.bus_type != hacdcpf::BusType::SLACK) continue;
+      add_reference(static_cast<int>(pos), bus.phase_mask,
+                    gui_phase_values(bus.vm_a_pu, bus.vm_b_pu, bus.vm_c_pu),
+                    gui_phase_values(bus.va_a_deg, bus.va_b_deg, bus.va_c_deg));
+      break;
+    }
+  }
+  if (opf.reference_nodes.empty()) {
+    throw std::invalid_argument(
+        "Monolithic three-phase hybrid analysis requires an AC reference source");
+  }
+
+  std::unordered_map<int, int> dc_bus_pos;
+  for (std::size_t pos = 0; pos < sys.dc.buses.size(); ++pos) {
+    const auto& bus = sys.dc.buses[pos];
+    if (!bus.in_service) continue;
+    dc_bus_pos[bus.index] = static_cast<int>(model.dc_bus_ids.size());
+    model.dc_bus_ids.push_back(bus.index);
+  }
+  const int ndc = static_cast<int>(model.dc_bus_ids.size());
+  if (ndc == 0) throw std::invalid_argument("DC network has no in-service buses");
+  opf.g_dc.resize(ndc, ndc);
+  std::vector<Eigen::Triplet<double>> dc_triplets;
+  for (const auto& branch : sys.dc.branches) {
+    if (!branch.in_service) continue;
+    const auto from = dc_bus_pos.find(branch.from_bus);
+    const auto to = dc_bus_pos.find(branch.to_bus);
+    if (from == dc_bus_pos.end() || to == dc_bus_pos.end()) continue;
+    if (!(branch.r_pu > 0.0)) {
+      throw std::invalid_argument(
+          "Monolithic three-phase hybrid analysis requires positive DC branch r_pu");
+    }
+    const double conductance = std::max(1, branch.n_parallel) / branch.r_pu;
+    dc_triplets.emplace_back(from->second, from->second, conductance);
+    dc_triplets.emplace_back(to->second, to->second, conductance);
+    dc_triplets.emplace_back(from->second, to->second, -conductance);
+    dc_triplets.emplace_back(to->second, from->second, -conductance);
+  }
+  opf.g_dc.setFromTriplets(dc_triplets.begin(), dc_triplets.end());
+  opf.g_dc.makeCompressed();
+  opf.p_dc_load_pu = Eigen::VectorXd::Zero(ndc);
+  opf.v_dc_start = Eigen::VectorXd::Ones(ndc);
+  opf.v_dc_min_pu = Eigen::VectorXd::Constant(ndc, 0.9);
+  opf.v_dc_max_pu = Eigen::VectorXd::Constant(ndc, 1.1);
+  for (const auto& bus : sys.dc.buses) {
+    const auto it = dc_bus_pos.find(bus.index);
+    if (it == dc_bus_pos.end()) continue;
+    opf.p_dc_load_pu[it->second] += bus.pd_mw / opf.base_mva;
+    opf.v_dc_start[it->second] = bus.vm_pu > 0.0 ? bus.vm_pu : 1.0;
+    opf.v_dc_min_pu[it->second] = bus.vmin_pu > 0.0 ? bus.vmin_pu : 0.9;
+    opf.v_dc_max_pu[it->second] = bus.vmax_pu > 0.0 ? bus.vmax_pu : 1.1;
+    if (bus.bus_type == hacdcpf::DCBusType::DC_V) {
+      opf.dc_reference_terminals.push_back(it->second);
+      opf.dc_reference_voltage_pu.conservativeResize(
+          opf.dc_reference_voltage_pu.size() + 1);
+      opf.dc_reference_voltage_pu[opf.dc_reference_voltage_pu.size() - 1] =
+          opf.v_dc_start[it->second];
+    }
+  }
+  for (const auto& load : sys.dc.loads) {
+    if (!load.in_service) continue;
+    const auto it = dc_bus_pos.find(load.bus);
+    if (it != dc_bus_pos.end())
+      opf.p_dc_load_pu[it->second] += load.p_mw * load.scaling / opf.base_mva;
+  }
+  for (const auto& source : sys.dc.dc_static_generators) {
+    if (!source.in_service) continue;
+    if (source.controllable) {
+      throw std::invalid_argument(
+          "Monolithic three-phase hybrid GUI adapter does not yet dispatch DC static generators");
+    }
+    const auto it = dc_bus_pos.find(source.bus);
+    if (it != dc_bus_pos.end())
+      opf.p_dc_load_pu[it->second] -= source.p_set_mw * source.scaling / opf.base_mva;
+  }
+  for (const auto& source : sys.dc.pv_arrays) {
+    if (!source.in_service) continue;
+    const auto it = dc_bus_pos.find(source.bus);
+    if (it != dc_bus_pos.end())
+      opf.p_dc_load_pu[it->second] -= source.p_set_mw / opf.base_mva;
+  }
+  for (const auto& storage : sys.dc.dc_storage) {
+    if (!storage.in_service) continue;
+    const auto it = dc_bus_pos.find(storage.bus);
+    if (it != dc_bus_pos.end())
+      opf.p_dc_load_pu[it->second] -= storage.p_mw / opf.base_mva;
+  }
+
+  bool pf_has_vdc_controller = false;
+  for (std::size_t pos = 0; pos < sys.vsc_converters.size(); ++pos) {
+    const auto& converter = sys.vsc_converters[pos];
+    if (!converter.in_service) continue;
+    const auto ac_bus = tp_bus_pos.find(converter.bus_ac);
+    const auto dc_bus = dc_bus_pos.find(converter.bus_dc);
+    if (ac_bus == tp_bus_pos.end() || dc_bus == dc_bus_pos.end()) continue;
+    std::vector<int> phase_nodes;
+    for (int phase = 0; phase < 3; ++phase) {
+      const int node = model.bus_nodes[static_cast<std::size_t>(ac_bus->second)]
+                                      [static_cast<std::size_t>(phase)];
+      if (node >= 0) phase_nodes.push_back(node);
+    }
+    if (phase_nodes.size() != 3) {
+      throw std::invalid_argument(
+          "Sequence-aware monolithic hybrid VSC terminals require phases A/B/C");
+    }
+    PhaseVSC opf_converter;
+    opf_converter.phase_nodes = phase_nodes;
+    opf_converter.dc_terminal = dc_bus->second;
+    opf_converter.efficiency = std::clamp(converter.eta, 0.01, 1.0);
+    const double rated_mva = std::max(
+        {converter.p_rated_mw, std::abs(converter.pmax_mw),
+         std::abs(converter.pmin_mw), std::abs(converter.qmax_mvar),
+         std::abs(converter.qmin_mvar), total_load_mw});
+    opf_converter.s_max_pu = enforce_converter_capacity
+        ? rated_mva / opf.base_mva : 1.0e6;
+    opf_converter.phase_current_max_pu =
+        enforce_converter_current && converter.i_ac_max_pu > 0.0
+            ? converter.i_ac_max_pu : 1.0e6;
+    opf_converter.control_mode = converter.ac_grid_forming ||
+                                         converter.control_mode ==
+                                             hacdcpf::ConverterMode::AC_GRID_FORMING
+                                     ? PhaseVSCControlMode::GridFormingDroop
+                                     : PhaseVSCControlMode::EqualPhasePower;
+    opf_converter.virtual_r_pu = converter.r_conv_ac_pu > 0.0
+                                     ? converter.r_conv_ac_pu : 0.01;
+    opf_converter.virtual_x_pu = converter.x_sc_pu > 0.0
+                                     ? converter.x_sc_pu : 0.10;
+    opf_converter.voltage_reference_pu = converter.v_ac_set_pu > 0.0
+                                              ? converter.v_ac_set_pu : 1.0;
+    opf.converters.push_back(opf_converter);
+
+    ThreePhaseHybridPFConverter pf_converter;
+    pf_converter.phase_nodes = phase_nodes;
+    pf_converter.dc_terminal = dc_bus->second;
+    pf_converter.efficiency = opf_converter.efficiency;
+    pf_converter.p_set_pu = converter.p_set_mw / opf.base_mva;
+    pf_converter.q_set_pu = converter.q_set_mvar / opf.base_mva;
+    pf_converter.v_dc_set_pu = converter.v_dc_set_pu > 0.0
+                                   ? converter.v_dc_set_pu : opf.v_dc_start[dc_bus->second];
+    pf_converter.virtual_r_pu = opf_converter.virtual_r_pu;
+    pf_converter.virtual_x_pu = opf_converter.virtual_x_pu;
+    pf_converter.internal_voltage_positive = std::polar(
+        converter.v_ac_set_pu > 0.0 ? converter.v_ac_set_pu : 1.0,
+        converter.v_ac_angle_set_deg * M_PI / 180.0);
+    const bool vdc_control =
+        converter.grid_forming || converter.control_mode == hacdcpf::ConverterMode::VDC_Q ||
+        converter.control_mode == hacdcpf::ConverterMode::VDC_VAC ||
+        converter.control_mode == hacdcpf::ConverterMode::DC_V_DROOP_AC_V;
+    if (converter.ac_grid_forming) {
+      pf_converter.control_mode = vdc_control
+          ? ThreePhaseHybridPFControlMode::GridFormingVdc
+          : ThreePhaseHybridPFControlMode::GridFormingVoltage;
+    } else {
+      pf_converter.control_mode = vdc_control
+          ? ThreePhaseHybridPFControlMode::GridFollowingVdcQ
+          : ThreePhaseHybridPFControlMode::GridFollowingPQ;
+    }
+    pf_has_vdc_controller = pf_has_vdc_controller || vdc_control;
+    pf.converters.push_back(pf_converter);
+    model.vsc_positions.push_back(static_cast<int>(pos));
+  }
+  if (pf.converters.empty()) {
+    throw std::invalid_argument(
+        "No in-service VSC has both a three-phase AC terminal and DC terminal");
+  }
+  if (!pf_has_vdc_controller) {
+    pf.converters.front().control_mode =
+        ThreePhaseHybridPFControlMode::GridFollowingVdcQ;
+    pf.converters.front().v_dc_set_pu =
+        opf.v_dc_start[pf.converters.front().dc_terminal];
+    model.limitations.push_back(
+        "No Vdc-forming VSC was declared; the first VSC was promoted to Vdc-Q for PF closure");
+  }
+  if (opf.dc_reference_terminals.empty()) {
+    const int terminal = opf.converters.front().dc_terminal;
+    opf.dc_reference_terminals.push_back(terminal);
+    opf.dc_reference_voltage_pu = Eigen::VectorXd::Constant(
+        1, opf.v_dc_start[terminal]);
+    model.limitations.push_back(
+        "No DC_V bus was declared; the first VSC terminal voltage anchors the OPF DC island");
+  }
+
+  pf.name = sys.name + "_gui_phase_hybrid_pf";
+  pf.base_mva = opf.base_mva;
+  pf.y_ac = opf.y_ac;
+  pf.i_ac_fixed = opf.i_ac_fixed;
+  pf.p_load_pu = opf.p_load_pu - fixed_generation.real();
+  pf.q_load_pu = opf.q_load_pu - fixed_generation.imag();
+  pf.voltage_start = opf.voltage_start;
+  pf.ac_phase_index = opf.ac_phase_index;
+  pf.reference_nodes = opf.reference_nodes;
+  pf.reference_voltage = opf.reference_voltage;
+  pf.g_dc = opf.g_dc;
+  pf.p_dc_load_pu = opf.p_dc_load_pu;
+  pf.v_dc_start = opf.v_dc_start;
+  model.limitations.push_back(
+      "GUI adapter supports constant-power wye phase loads, resistive DC branches, and direct VSC ports");
+  return model;
+}
+
+json gui_phase_hybrid_bus_results(
+    const hacdcpf::ThreePhaseACSystem& tp,
+    const GuiPhaseHybridModel& model,
+    const Eigen::VectorXcd& voltage) {
+  json rows = json::array();
+  for (std::size_t bus_pos = 0; bus_pos < tp.buses.size(); ++bus_pos) {
+    const auto& bus = tp.buses[bus_pos];
+    json row{{"bus_id", bus.index},
+             {"bus", bus.index},
+             {"name", bus.name},
+             {"phases", hacdcpf::phase_mask_to_string(bus.phase_mask)}};
+    for (int phase = 0; phase < 3; ++phase) {
+      const int node = model.bus_nodes[bus_pos][static_cast<std::size_t>(phase)];
+      const std::string suffix(1, static_cast<char>('a' + phase));
+      if (node >= 0 && node < voltage.size()) {
+        row["vm_" + suffix + "_pu"] = std::abs(voltage[node]);
+        row["va_" + suffix + "_deg"] = std::arg(voltage[node]) * 180.0 / M_PI;
+      } else {
+        row["vm_" + suffix + "_pu"] = nullptr;
+        row["va_" + suffix + "_deg"] = nullptr;
+      }
+    }
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
+void gui_phase_hybrid_average_voltage(
+    const GuiPhaseHybridModel& model,
+    const Eigen::VectorXcd& voltage,
+    json& vm,
+    json& va) {
+  vm = json::array();
+  va = json::array();
+  for (const auto& nodes : model.bus_nodes) {
+    std::complex<double> positive{0.0, 0.0};
+    int count = 0;
+    const std::complex<double> a = std::polar(1.0, 2.0 * M_PI / 3.0);
+    const std::complex<double> rotation[3] = {{1.0, 0.0}, a, a * a};
+    for (int phase = 0; phase < 3; ++phase) {
+      const int node = nodes[static_cast<std::size_t>(phase)];
+      if (node < 0 || node >= voltage.size()) continue;
+      positive += rotation[phase] * voltage[node];
+      ++count;
+    }
+    if (count == 0) {
+      vm.push_back(nullptr);
+      va.push_back(nullptr);
+    } else {
+      positive /= static_cast<double>(count);
+      vm.push_back(std::abs(positive));
+      va.push_back(std::arg(positive));
+    }
+  }
+}
+
+json gui_phase_hybrid_dc_bus_results(
+    const GuiPhaseHybridModel& model,
+    const Eigen::VectorXd& voltage) {
+  json rows = json::array();
+  for (std::size_t pos = 0; pos < model.dc_bus_ids.size(); ++pos) {
+    rows.push_back(json{{"position", pos},
+                        {"index", model.dc_bus_ids[pos]},
+                        {"canvas_type", "dc"},
+                        {"canvas_index", model.dc_bus_ids[pos]},
+                        {"vdc_pu", pos < static_cast<std::size_t>(voltage.size())
+                                           ? voltage[static_cast<int>(pos)] : 0.0}});
+  }
+  return rows;
 }
 
 void apply_current_carbon_factors_to_snapshot(
@@ -12433,6 +12969,110 @@ int main(int argc, char** argv) {
         } else {
           add_solver_diagnostics(pf.diagnostics);
         }
+	      } else if (method == "three_phase_hybrid") {
+	        const json phase_options =
+	            j.contains("options") && j["options"].is_object() &&
+	                    j["options"].contains("three_phase") &&
+	                    j["options"]["three_phase"].is_object()
+	                ? j["options"]["three_phase"]
+	                : json::object();
+	        const bool include_shunts = phase_options.value("include_shunts", true);
+	        const double vuf_max = std::clamp(
+	            phase_options.value("vuf_max", 0.03), 0.0, 1.0);
+	        auto model = build_gui_phase_hybrid_model(
+	            sys, include_shunts, true, true, vuf_max);
+	        hacdcpf::powerflow::ThreePhaseHybridPFOptions hybrid_options;
+	        hybrid_options.max_iterations = std::clamp(opt.max_iter, 1, 100000);
+	        hybrid_options.tolerance = std::clamp(opt.tol, 1.0e-14, 1.0);
+	        hybrid_options.verbose = opt.verbose;
+	        hybrid_options.max_line_search_steps = std::clamp(
+	            phase_options.value("max_line_search_steps", 18), 1, 1000);
+	        hybrid_options.minimum_dc_voltage_pu = std::clamp(
+	            phase_options.value("minimum_dc_voltage_pu", 0.05), 1.0e-4, 1.0);
+	        const auto hybrid = hacdcpf::powerflow::solve_three_phase_hybrid_pf(
+	            model.pf, hybrid_options);
+	        out["converged"] = hybrid.converged;
+	        out["iterations"] = hybrid.iterations;
+	        out["residual"] = hybrid.residual;
+	        out["status"] = hybrid.status;
+	        out["method_actual"] = "three_phase_unbalanced_hybrid_ac_dc_monolithic";
+	        out["solver_used"] = "three_phase_hybrid_sparse_newton";
+	        out["three_phase"] = true;
+	        out["tp_bus_results"] = gui_phase_hybrid_bus_results(
+	            *sys.three_phase_ac, model, hybrid.voltage);
+	        gui_phase_hybrid_average_voltage(model, hybrid.voltage,
+	                                         out["vm"], out["va"]);
+	        out["vdc"] = hybrid.dc_voltage;
+	        out["dc_bus_results"] =
+	            gui_phase_hybrid_dc_bus_results(model, hybrid.dc_voltage);
+	        double min_vm = std::numeric_limits<double>::infinity();
+	        double max_vm = 0.0;
+	        for (int node = 0; node < hybrid.voltage.size(); ++node) {
+	          min_vm = std::min(min_vm, std::abs(hybrid.voltage[node]));
+	          max_vm = std::max(max_vm, std::abs(hybrid.voltage[node]));
+	        }
+	        if (!std::isfinite(min_vm)) min_vm = 0.0;
+	        out["phase_metrics"] =
+	            json{{"active_phase_nodes", hybrid.voltage.size()},
+	                 {"min_vm_pu", min_vm},
+	                 {"max_vm_pu", max_vm},
+	                 {"max_vuf_percent", 100.0 * hybrid.max_vuf}};
+	        if (hybrid.max_vuf > vuf_max) {
+	          out["warnings"].push_back(
+	              "Maximum voltage unbalance factor exceeds the requested GUI warning threshold");
+	        }
+	        out["vsc_transfers"] = json::array();
+	        for (std::size_t k = 0; k < hybrid.converters.size(); ++k) {
+	          const int source_pos = model.vsc_positions[k];
+	          const auto& source = sys.vsc_converters[static_cast<std::size_t>(source_pos)];
+	          const auto& solved = hybrid.converters[k];
+	          double pac_pu = 0.0;
+	          double qac_pu = 0.0;
+	          json phase_power = json::array();
+	          for (const auto& value : solved.phase_power_pu) {
+	            pac_pu += std::real(value);
+	            qac_pu += std::imag(value);
+	            phase_power.push_back(
+	                json{{"p_mw", std::real(value) * model.pf.base_mva},
+	                     {"q_mvar", std::imag(value) * model.pf.base_mva}});
+	          }
+	          out["vsc_transfers"].push_back(
+	              json{{"index", source.index},
+	                   {"name", source.name},
+	                   {"bus_ac", source.bus_ac},
+	                   {"bus_dc", source.bus_dc},
+	                   {"p_ac_mw", pac_pu * model.pf.base_mva},
+	                   {"q_ac_mvar", qac_pu * model.pf.base_mva},
+	                   {"p_dc_mw", solved.p_dc_pu * model.pf.base_mva},
+	                   {"phase_power", std::move(phase_power)},
+	                   {"current_vuf_percent", 100.0 * solved.current_vuf},
+	                   {"canvas_type", "vsc"},
+	                   {"canvas_index", source.index}});
+	        }
+	        out["analysis_scope"] =
+	            json{{"model_scope", "monolithic_three_phase_unbalanced_ac_dc_pf"},
+	                 {"coupling", "native_abc_dc_converter_equations"},
+	                 {"monolithic_abc_dc_jacobian", true},
+	                 {"phase_load_model", "constant_power_wye"},
+	                 {"dc_branch_model", "resistive_nodal"}};
+	        out["model_limitations"] = model.limitations;
+	        out["power_balance_diagnostics"] =
+	            json{{"basis", "monolithic_three_phase_abc_dc"},
+	                 {"ordinary", json::array()},
+	                 {"sources", json::array()},
+	                 {"ac_active_residual", hybrid.ac_active_balance_residual},
+	                 {"ac_reactive_residual", hybrid.ac_reactive_balance_residual},
+	                 {"dc_residual", hybrid.dc_balance_residual},
+	                 {"converter_coupling_residual", hybrid.converter_coupling_residual},
+	                 {"message", "相域 AC、DC 节点平衡与 VSC 稳态方程在同一牛顿系统中联立求解。"}};
+	        out["options_effective"]["three_phase_hybrid"] =
+	            json{{"max_iterations", hybrid_options.max_iterations},
+	                 {"tolerance", hybrid_options.tolerance},
+	                 {"max_line_search_steps", hybrid_options.max_line_search_steps},
+	                 {"minimum_dc_voltage_pu", hybrid_options.minimum_dc_voltage_pu},
+	                 {"include_shunts", include_shunts},
+	                 {"vuf_max", vuf_max}};
+	        store_last_pf(nullptr);
 	      } else if (method == "three_phase") {
 	        if (!sys.three_phase_ac.has_value()) {
 	          throw std::runtime_error("Three-phase subsystem not available in this case");
@@ -13584,7 +14224,8 @@ int main(int argc, char** argv) {
       const std::string network_model =
           j.value("network_model", std::string("balanced_aggregate"));
       if (network_model != "balanced_aggregate" &&
-          network_model != "balanced_with_three_phase_validation") {
+          network_model != "balanced_with_three_phase_validation" &&
+          network_model != "three_phase_hybrid") {
         throw std::invalid_argument("Unsupported OPF network model: " + network_model);
       }
       // Optional post-OPF power-flow consistency audit (OPF ↔ PF model/parameters).
@@ -13619,16 +14260,277 @@ int main(int argc, char** argv) {
       out["solver"] = solver;
       out["network_model"] = network_model;
       out["analysis_scope"] =
-          json{{"optimization_model", "balanced_aggregate_ac_dc"},
+          json{{"optimization_model",
+                network_model == "three_phase_hybrid"
+                    ? "monolithic_three_phase_unbalanced_ac_dc"
+                    : "balanced_aggregate_ac_dc"},
                {"three_phase_validation_requested",
                 network_model == "balanced_with_three_phase_validation"},
-               {"monolithic_three_phase_opf", false}};
+               {"monolithic_three_phase_opf",
+                network_model == "three_phase_hybrid"}};
       out["constraints"] = {{"branch_limits", en_branch},
                             {"converter_capacity", en_cap},
                             {"converter_current", en_iac},
                             {"converter_modulation", en_mod}};
 
-	      if (solver == "dc") {
+	      if (network_model == "three_phase_hybrid") {
+	        if (solver == "dc" || solver == "dispatch") {
+	          throw std::invalid_argument(
+	              "Three-phase hybrid OPF requires Ipopt, Parity, or Auto backend");
+	        }
+	        const json phase_request =
+	            j.contains("three_phase") && j["three_phase"].is_object()
+	                ? j["three_phase"] : json::object();
+	        const bool include_shunts = phase_request.value("include_shunts", true);
+	        const double vuf_max = std::clamp(
+	            phase_request.value("vuf_max", 0.03), 0.0, 1.0);
+	        auto phase_model = build_gui_phase_hybrid_model(
+	            original_sys, include_shunts, en_cap, en_iac, vuf_max);
+	        hacdcpf::opf::phase_hybrid::ThreePhaseHybridOPFOptions phase_opt;
+	        phase_opt.variant = phase_request.value(
+	                                "variant", std::string("graph_reduced")) == "full"
+	                                ? hacdcpf::opf::phase_hybrid::ModelVariant::Full
+	                                : hacdcpf::opf::phase_hybrid::ModelVariant::GraphReduced;
+	        phase_opt.backend = solver == "ipopt"
+	                                ? hacdcpf::opf::phase_hybrid::SolverBackend::Ipopt
+	                                : hacdcpf::opf::phase_hybrid::SolverBackend::NativeIPM;
+	        phase_opt.max_iterations = std::clamp(
+	            opf_request_options.value("max_iterations", 400), 1, 100000);
+	        phase_opt.tolerance = std::clamp(
+	            opf_request_options.value("feasibility_tol", 1.0e-6),
+	            1.0e-12, 1.0);
+	        phase_opt.verbose = opf_request_options.value("verbose", false);
+	        phase_opt.verify_derivatives =
+	            phase_request.value("verify_derivatives", false);
+	        phase_opt.use_constraint_oracle =
+	            phase_request.value("constraint_oracle", false);
+	        phase_opt.oracle_max_rounds = std::clamp(
+	            phase_request.value("oracle_max_rounds", 8), 1, 100);
+	        phase_opt.reduction_options.max_front = std::clamp(
+	            phase_request.value("reduction_max_front", 64), 1, 100000);
+	        phase_opt.reduction_options.max_nnz_ratio = std::clamp(
+	            phase_request.value("reduction_max_nnz_ratio", 10.0), 1.0, 1.0e6);
+	        auto phase_result =
+	            hacdcpf::opf::phase_hybrid::solve_three_phase_hybrid_opf(
+	                phase_model.opf, phase_opt);
+	        bool phase_auto_fallback = false;
+	        if (solver == "auto" && !phase_result.converged) {
+	          phase_opt.backend = hacdcpf::opf::phase_hybrid::SolverBackend::Ipopt;
+	          phase_result =
+	              hacdcpf::opf::phase_hybrid::solve_three_phase_hybrid_opf(
+	                  phase_model.opf, phase_opt);
+	          phase_auto_fallback = true;
+	        }
+
+	        out["converged"] = phase_result.converged;
+	        out["iterations"] = phase_result.iterations;
+	        out["objective"] = phase_result.objective;
+	        out["status"] = phase_result.status;
+	        out["solver"] = phase_result.solver.empty() ? solver : phase_result.solver;
+	        out["solver_backend"] =
+	            phase_opt.backend == hacdcpf::opf::phase_hybrid::SolverBackend::Ipopt
+	                ? "phase_hybrid_ipopt" : "phase_hybrid_native_ipm";
+	        out["fallback_used"] = phase_auto_fallback;
+	        out["max_constraint_violation_pu"] = phase_result.primal_residual;
+	        out["max_stationarity"] = phase_result.dual_residual;
+	        out["vdc"] = phase_result.dc_voltage;
+	        out["dc_bus_results"] = gui_phase_hybrid_dc_bus_results(
+	            phase_model, phase_result.dc_voltage);
+	        gui_phase_hybrid_average_voltage(
+	            phase_model, phase_result.full_voltage, out["vm"], out["va"]);
+	        out["tp_bus_results"] = gui_phase_hybrid_bus_results(
+	            *original_sys.three_phase_ac, phase_model,
+	            phase_result.full_voltage);
+	        out["ac_bus_results"] = json::array();
+	        for (std::size_t bus_pos = 0;
+	             bus_pos < original_sys.three_phase_ac->buses.size(); ++bus_pos) {
+	          const auto& bus = original_sys.three_phase_ac->buses[bus_pos];
+	          out["ac_bus_results"].push_back(
+	              json{{"position", bus_pos},
+	                   {"index", bus.index},
+	                   {"name", bus.name},
+	                   {"vm_pu", out["vm"][bus_pos]},
+	                   {"va_rad", out["va"][bus_pos]},
+	                   {"canvas_type", "ac"},
+	                   {"canvas_index", bus.index}});
+	        }
+
+	        out["pg_mw"] = json::array();
+	        out["qg_mvar"] = json::array();
+	        out["generator_dispatch"] = json::array();
+	        const int reduced_nv = static_cast<int>(phase_model.opf.y_ac.rows()) -
+	                               phase_result.eliminated_phase_nodes;
+	        const int pg_offset = 2 * reduced_nv;
+	        const int qg_offset = pg_offset +
+	                              static_cast<int>(phase_model.opf.generators.size());
+	        for (std::size_t k = 0; k < phase_model.generator_bindings.size(); ++k) {
+	          const double pg = phase_result.primal.size() > pg_offset + static_cast<int>(k)
+	                                ? phase_result.primal[pg_offset + static_cast<int>(k)] *
+	                                      phase_model.opf.base_mva
+	                                : 0.0;
+	          const double qg = phase_result.primal.size() > qg_offset + static_cast<int>(k)
+	                                ? phase_result.primal[qg_offset + static_cast<int>(k)] *
+	                                      phase_model.opf.base_mva
+	                                : 0.0;
+	          const auto& binding = phase_model.generator_bindings[k];
+	          out["pg_mw"].push_back(pg);
+	          out["qg_mvar"].push_back(qg);
+	          out["generator_dispatch"].push_back(
+	              json{{"position", k},
+	                   {"index", binding.component_index},
+	                   {"name", binding.name},
+	                   {"bus", binding.bus_id},
+	                   {"phase", std::string(1, static_cast<char>('A' + binding.phase))},
+	                   {"pg_mw", pg},
+	                   {"qg_mvar", qg},
+	                   {"canvas_type", binding.source_type},
+	                   {"canvas_index", binding.component_index}});
+	        }
+
+	        out["pac_mw"] = json::array();
+	        out["qac_mvar"] = json::array();
+	        out["vsc_dispatch"] = json::array();
+	        for (std::size_t k = 0;
+	             k < phase_result.converter_phase_power_pu.size(); ++k) {
+	          const int source_pos = phase_model.vsc_positions[k];
+	          const auto& source = original_sys.vsc_converters[
+	              static_cast<std::size_t>(source_pos)];
+	          double p_mw = 0.0;
+	          double q_mvar = 0.0;
+	          json phase_power = json::array();
+	          for (const auto& value : phase_result.converter_phase_power_pu[k]) {
+	            p_mw += std::real(value) * phase_model.opf.base_mva;
+	            q_mvar += std::imag(value) * phase_model.opf.base_mva;
+	            phase_power.push_back(
+	                json{{"p_mw", std::real(value) * phase_model.opf.base_mva},
+	                     {"q_mvar", std::imag(value) * phase_model.opf.base_mva}});
+	          }
+	          out["pac_mw"].push_back(p_mw);
+	          out["qac_mvar"].push_back(q_mvar);
+	          out["vsc_dispatch"].push_back(
+	              json{{"position", k},
+	                   {"index", source.index},
+	                   {"name", source.name},
+	                   {"bus_ac", source.bus_ac},
+	                   {"bus_dc", source.bus_dc},
+	                   {"pac_mw", p_mw},
+	                   {"qac_mvar", q_mvar},
+	                   {"pdc_mw", k < phase_result.converter_dc_power_pu.size()
+	                                    ? phase_result.converter_dc_power_pu[k] *
+	                                          phase_model.opf.base_mva
+	                                    : 0.0},
+	                   {"phase_power", std::move(phase_power)},
+	                   {"canvas_type", "vsc"},
+	                   {"canvas_index", source.index}});
+	        }
+
+	        double min_vm = std::numeric_limits<double>::infinity();
+	        double max_vm = 0.0;
+	        for (int node = 0; node < phase_result.full_voltage.size(); ++node) {
+	          min_vm = std::min(min_vm, std::abs(phase_result.full_voltage[node]));
+	          max_vm = std::max(max_vm, std::abs(phase_result.full_voltage[node]));
+	        }
+	        if (!std::isfinite(min_vm)) min_vm = 0.0;
+	        const json phase_metrics =
+	            json{{"active_phase_nodes", phase_result.full_voltage.size()},
+	                 {"min_vm_pu", min_vm},
+	                 {"max_vm_pu", max_vm},
+	                 {"max_vuf_percent", 100.0 * phase_result.max_vuf},
+	                 {"max_converter_current_vuf_percent",
+	                  100.0 * phase_result.max_converter_current_vuf},
+	                 {"max_converter_current_loading",
+	                  phase_result.max_converter_current_loading}};
+	        out["three_phase_validation"] =
+	            json{{"ran", true},
+	                 {"role", "monolithic_optimization_solution"},
+	                 {"converged", phase_result.converged},
+	                 {"algorithm", "phase_hybrid_opf"},
+	                 {"iterations", phase_result.iterations},
+	                 {"residual", phase_result.primal_residual},
+	                 {"metrics", phase_metrics},
+	                 {"bus_results", out["tp_bus_results"]}};
+	        out["scope"] =
+	            json{{"model_scope", "monolithic_three_phase_unbalanced_ac_dc_opf"},
+	                 {"branch_limits", false},
+	                 {"capacity", en_cap},
+	                 {"current", en_iac},
+	                 {"modulation", false},
+	                 {"dcdc_duty", false},
+	                 {"vdc_control", "explicit_dc_reference_terminal"}};
+	        out["analysis_scope"]["three_phase_validation_effective"] = true;
+	        out["analysis_scope"]["three_phase_validation_model"] =
+	            "native_monolithic_abc_dc_solution";
+	        out["analysis_scope"]["phase_graph_variant"] =
+	            phase_opt.variant == hacdcpf::opf::phase_hybrid::ModelVariant::Full
+	                ? "full" : "graph_reduced";
+	        phase_model.limitations.push_back(
+	            "Phase-hybrid OPF does not currently enforce AC branch thermal or converter modulation constraints");
+	        out["model_limitations"] = phase_model.limitations;
+	        out["options_effective"] =
+	            json{{"max_iterations", phase_opt.max_iterations},
+	                 {"tolerance", phase_opt.tolerance},
+	                 {"variant", out["analysis_scope"]["phase_graph_variant"]},
+	                 {"backend", out["solver_backend"]},
+	                 {"vuf_max", vuf_max},
+	                 {"constraint_oracle", phase_opt.use_constraint_oracle},
+	                 {"include_shunts", include_shunts}};
+
+	        if (phase_result.converged) {
+	          try {
+	            const auto replay_case =
+	                hacdcpf::opf::phase_hybrid::make_three_phase_hybrid_pf_case(
+	                    phase_model.opf, phase_result);
+	            hacdcpf::powerflow::ThreePhaseHybridPFOptions replay_options;
+	            replay_options.max_iterations = 100;
+	            replay_options.tolerance = std::max(1.0e-10, phase_opt.tolerance);
+	            const auto replay = hacdcpf::powerflow::solve_three_phase_hybrid_pf(
+	                replay_case, replay_options);
+	            json replay_vm;
+	            json replay_va;
+	            gui_phase_hybrid_average_voltage(
+	                phase_model, replay.voltage, replay_vm, replay_va);
+	            out["post_pf"] =
+	                json{{"schema", "power_flow_result_v1"},
+	                     {"method", "three_phase_hybrid_opf_replay"},
+	                     {"method_actual", "monolithic_abc_dc_dispatch_replay"},
+	                     {"converged", replay.converged},
+	                     {"iterations", replay.iterations},
+	                     {"residual", replay.residual},
+	                     {"vm", replay_vm},
+	                     {"va", replay_va},
+	                     {"vdc", replay.dc_voltage},
+	                     {"tp_bus_results", gui_phase_hybrid_bus_results(
+	                          *original_sys.three_phase_ac, phase_model,
+	                          replay.voltage)},
+	                     {"dc_bus_results", gui_phase_hybrid_dc_bus_results(
+	                          phase_model, replay.dc_voltage)}};
+	            double max_dv = 0.0;
+	            if (replay.voltage.size() == phase_result.full_voltage.size()) {
+	              max_dv = (replay.voltage - phase_result.full_voltage)
+	                           .cwiseAbs().maxCoeff();
+	            }
+	            if (want_consistency) {
+	              out["consistency"] =
+	                  json{{"ran", true},
+	                       {"pf_converged", replay.converged},
+	                       {"consistent", replay.converged && max_dv <= 1.0e-5},
+	                       {"max_dvm_pu", max_dv},
+	                       {"tol_vm_pu", 1.0e-5},
+	                       {"pf_iterations", replay.iterations},
+	                       {"pf_residual", replay.residual},
+	                       {"note", "三相混合 OPF 点由同一相域 AC/DC 物理方程独立回放。"}};
+	            }
+	          } catch (const std::exception& ex) {
+	            if (want_consistency) {
+	              out["consistency"] =
+	                  json{{"ran", true},
+	                       {"pf_converged", false},
+	                       {"consistent", false},
+	                       {"note", ex.what()}};
+	            }
+	          }
+	        }
+	      } else if (solver == "dc") {
 	        hacdcpf::opf::DCOPFOptions opt;
 	        opt.include_branch_limits = en_branch;
 	        set_if_double(opf_request_options, "feasibility_tol", opt.feasibility_tol);

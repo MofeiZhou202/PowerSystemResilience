@@ -5,11 +5,12 @@
 
 本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。文档入口见 `docs/README.md`，更底层的公式和接口见 `docs/technical_notebook/`。
 
-## 文档同步状态（2026-07-18）
+## 文档同步状态（2026-07-19）
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
 - 已删除被实现取代的阶段计划、一次性代码审查和重复暂态设计稿；不再用历史 roadmap 描述当前行为。
 - 本次同步（2026-07-18）补入 2026 年 5–7 月新增能力域：电力市场、园区综合能源、承载力/薄弱环节/反事实规划、场景生成与台风弹性、年度碳/GEC、SPPT 可执行理论层、三相混合 OPF、电压稳定 CPF，以及 CIM/GridLAB-D/PSD.jl 等 IO 通道；并修正两处过时表述（ETAP 默认开关、短路分析入口名）。
+- 2026-07-19 增加 Python SDK 与 AI 工具接口首版，设计与演进边界见 `docs/python_api.md`。
 - 同步依据为当前 `CMakeLists.txt`、`CMakePresets.json`、`tests/CMakeLists.txt`、`src/`、`include/`、GUI 路由和 E2E 验证。
 - 如文档描述与代码行为冲突，以仓库实现为准：`src/`、`include/`、`tests/`、`CMake` 配置优先。
 
@@ -35,7 +36,7 @@ cmake --build --preset windows-vcpkg-release
 ctest --preset windows-vcpkg-release
 ```
 
-## 当前建模与仿真包状态快照（2026-07-18）
+## 当前建模与仿真包状态快照（2026-07-19）
 
 本节用于快速回答“现在这个包到底做到哪一步了”。结论基于当前仓库源码组织、CMake 选项与已注册测试目标，而不是历史规划文档。
 
@@ -45,7 +46,7 @@ ctest --preset windows-vcpkg-release
 |---|---|---|
 | 混合 AC/DC 潮流与聚合建模 | 已实现并持续回归 | 覆盖 canonical projection、AC/DC 潮流、换流器协调与图分析链路；求解器族含 Newton、FDPF、DC、自适应孤岛、分布式松弛、HELM、同伦延拓与 Newton-Krylov，并有 LM 信赖域/非单调线搜索/非线性缩放全局化层。 |
 | OPF 与约束优化 | 已实现并持续回归 | AC OPF / DC OPF / RPO（含 OLTC 离散档位控制）已集成，支持 Native AC、Parity IPM、嵌入式 Ipopt 等多后端路径。 |
-| 三相混合 OPF | 活跃研发中 | `opf::phase_hybrid` 提供 Full 与 GraphReduced（稀疏 Kron 降阶）模型变体，Ipopt/NativeIPM 双后端；配套论文同步撰写中。 |
+| 三相混合 PF / OPF | 活跃研发中，GUI 已接入 | `powerflow::solve_three_phase_hybrid_pf` 与 `opf::phase_hybrid` 已接入 `/xjtu/` 潮流/OPF 工具栏；OPF 提供 Full 与 GraphReduced（稀疏 Kron 降阶）、Ipopt/NativeIPM 双后端。GUI rich-model 适配范围见下文。 |
 | 电压稳定 | 已实现 | 连续潮流（CPF）P-V 曲线与 VSI 指标。 |
 | 图建模、网络降阶、重构 | 已实现并持续回归 | 支持连通性、开关收缩、Kron/series/pendant/sparse-Kron reduction、ONR。 |
 | 可靠性与弹性分析 | 已实现并持续回归 | 包含 MC、FMEA（含 failure-mode 目录路径与信息物理 Level 1 调节）、三阶段可靠性与配电弹性分析（含 MIP 路径）。 |
@@ -61,6 +62,7 @@ ctest --preset windows-vcpkg-release
 | EV-电力-交通耦合 | 已实现（持续扩展） | CTM/LTM 传播、Formulation A–H 联合优化家族、选址定容 MILP 与滚动时域 MPC；结果按“可证伪证书”口径区分全局最优/局部驻点/启发式。 |
 | SPPT 可执行理论层 | 已实现（研究验证性质） | 语义保持投影理论（`docs/latex/sppt_theory.tex`）的 MR1–MR8 证伪套件、MR3 证书语料（CSV/LaTeX）、准入守卫与 agent 循环。 |
 | Web GUI 服务 | 已集成可运行 | `run_gui_server` 为独立可执行服务，上述能力均经 HTTP API 暴露；前端为原生 JS 单页应用。 |
+| Python SDK 与 AI 工具层 | 首版已实现 | 零运行时依赖的类型化 HTTP 客户端、结果诚实性检查、隔离服务生命周期、工具 Schema、影响分级与显式变更批准。 |
 
 ### 2) 依赖与功能开关状态（当前默认）
 
@@ -196,7 +198,7 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 | 三相潮流 | `analysis::solve_three_phase_nr` | `ThreePhaseACSystem` | abc 相电压、电流和三相收敛信息 |
 | 三相混合 PF | `powerflow::solve_three_phase_hybrid_pf` | 原生相域 AC + DC 节点平衡 + equal-phase/GFL/GFM 变换器稳态闭合 | AC/DC 电压、逐相变换器功率/电流、VUF、分域物理残差；可从工程初值独立复核三相混合 OPF 点 |
 | OPF | `solve_ac_opf`, `solve_dc_opf`, `solve_rpo` | AC/IPM、DC LP/QP、无功优化模型（RPO 含 OLTC 离散档位邻域搜索） | 调度、目标值、节点 LMP、约束诊断、solver path、audit/infeasibility hints、`converter_model_scope`；DCOPF branch congestion dual 仅在 `branch_mu_valid=true` 时可作工程解释 |
-| 三相混合 OPF | `opf::phase_hybrid::solve_three_phase_hybrid_opf`（Full / GraphReduced 变体，Ipopt / NativeIPM 后端） | 相域 AC + DC 混合 OPF，可选稀疏 Kron 降阶 | 三相调度与约束诊断（活跃研发中） |
+| 三相混合 OPF | `opf::phase_hybrid::solve_three_phase_hybrid_opf`（Full / GraphReduced 变体，Ipopt / NativeIPM 后端） | 相域 AC + DC 混合 OPF，可选稀疏 Kron 降阶 | 三相调度、约束诊断与同模型 PF 回放（活跃研发中） |
 | 电压稳定 | `CpfSolver`、`compute_vsi`（`power_flow/voltage_stability.hpp`） | 连续潮流（CPF） | P-V 曲线、VSI 指标 |
 | 网络重构 | `solve_optimal_reconfiguration`, `run_topology_reconfiguration` | LinDistFlow MILP + graph connectivity | 开/合支路集合、损耗 proxy、PF 校验 |
 | 图分析/降阶 | `build_power_system_graph`, `contract_zero_impedance_edges`, Kron/series/pendant/sparse-Kron recovery | graph abstraction | 连通性、径向性、super-node、恢复映射 |
@@ -389,7 +391,9 @@ Python 侧 `etap-main/src/canonical_schema.py` 提供与 C++ 完全一致的列�
 | 导入 ETAP `.xlsx`（二进制上传） | `POST /api/session/load_etap_xlsx`；「加载算例」对话框「导入ETAP工作簿 (.xlsx)」 |
 | 导入原生 ETAP `.xml` | `POST /api/session/load_etap_xml`；「加载算例」对话框「导入ETAP工程 (.xml)」 |
 
-GUI 的 OPF 入口 `POST /api/session/opf` 支持 parity/native/dc 求解路径，并把实际约束范围以 `scope.model_scope` 与布尔 flags 返回。AC/parity OPF 收敛后，后端会在 OPF 调度点再跑一次 PF，并返回 `post_pf` 支路潮流/VSC 转移以及 best-effort `post_carbon` 碳流结果；前端将 `post_pf.branch_flows` 用于 OPF 解上的潮流/负载率热力图叠加。
+GUI 潮流入口 `POST /api/session/pf` 新增 `method=three_phase_hybrid`，在同一 Newton 系统中联立 abc 相域 AC、DC 节点平衡与 VSC 稳态方程。GUI OPF 入口 `POST /api/session/opf` 新增 `network_model=three_phase_hybrid`，可选择 Full / GraphReduced 与 NativeIPM / Ipopt，并返回逐相电压、DC 电压、逐相电源/VSC 调度及同模型 `post_pf` 回放。该 GUI 适配器当前精确覆盖恒功率星形相负荷、纯电阻 DC 支路与直接 VSC；Delta/ZIP、DC/DC、能量路由器和可调 DC 静态电源会在前端禁用并由后端显式拒绝。AC 支路热限与 VSC 调制比尚未进入相域混合 OPF，响应通过 `scope` / `model_limitations` 如实标注。
+
+平衡聚合 OPF 仍支持 parity/native/dc 求解路径，并把实际约束范围以 `scope.model_scope` 与布尔 flags 返回。AC/parity OPF 收敛后，后端会在 OPF 调度点再跑一次 PF，并返回 `post_pf` 支路潮流/VSC 转移以及 best-effort `post_carbon` 碳流结果；前端将 `post_pf.branch_flows` 用于 OPF 解上的潮流/负载率热力图叠加。
 
 GUI 第一阶段统一契约包括：`hysim_task_status_v1`（任务状态、耗时与模型版本）、`hysim_result_v1`（分析、请求 ID、结果状态与陈旧性）和 `hysim_canvas_ref_v1`（结果行的元件类型、模型索引与 Canvas ID）。PF/OPF 在计算期间检测到模型版本变化时会丢弃过期结果；结果表统一通过 `data-result-ref` / `data-comp-id` 定位 Canvas，并支持鼠标和键盘操作。
 
@@ -451,6 +455,7 @@ fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到
 | I/O | `include/hacdcpf/io/`, `src/io/`（JSON、MATPOWER、CIM、GridLAB-D、PSD.jl；ETAP/OpenDSS 可选） |
 | 并行工具 | `include/hacdcpf/util/thread_pool.hpp`（`ThreadPool`、`parallel_for`） |
 | GUI 后端服务 | `tests/run_gui_server.cpp`（独立可执行，HTTP API + 静态挂载 `web/`） |
+| Python SDK / AI 工具层 | `python/src/hysim/`（类型化客户端、可替换传输、结果口径、工具策略与本地服务生命周期） |
 | Diagnostics/benchmarks | `tools/`（`opendss_pf_compare`、`etap_convert`、`matpower_pf_compare`、`sppt_certify`/`sppt_ablation`/`sppt_benchmark`/`sppt_agent_demo`、`hybrid_acdc_pf_study`、`phase_graph_reduction_benchmark`、`phase_hybrid_opf_benchmark`、gridlabd/transient/short-circuit validation matrices 等） |
 | 文档索引 | `docs/README.md` |
 | 技术笔记 | `docs/technical_notebook/` |
