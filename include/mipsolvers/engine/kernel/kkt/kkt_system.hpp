@@ -70,6 +70,23 @@ struct SparseKKTCache {
   int symbolic_analyses{0};        ///< Number of ordering/symbolic analyses
   int numeric_factorizations{0};   ///< Number of numeric factorizations
   int linear_solves{0};            ///< Number of back-solves, including refinement
+
+  // ── Assembly scatter map (analyze-once for the [W; Jg] → KKT structure) ──
+  // Positions of each source entry inside kkt's CSC value array.  Rebuilt
+  // only when the (w, jg) sparsity structure changes; per-iteration assembly
+  // then refills values in O(nnz) with no triplet allocation — the same
+  // "analyze once, factorize many" contract as the IPM-LP kernel.
+  int asm_w_nnz{-1};               ///< Fingerprint: nnz(W) (-1 = map not built)
+  int asm_jg_nnz{-1};              ///< Fingerprint: nnz(Jg)
+  std::vector<int> asm_w_outer;    ///< Fingerprint: W column pointers
+  std::vector<int> asm_w_inner;    ///< Fingerprint: W row indices
+  std::vector<int> asm_jg_outer;   ///< Fingerprint: Jg column pointers
+  std::vector<int> asm_jg_inner;   ///< Fingerprint: Jg row indices
+  std::vector<int> asm_w_pos;      ///< nnz(W): value index of W(i,j) in kkt
+  std::vector<int> asm_jg_top;     ///< nnz(Jg): value index of Jg(r,c) at (n+r, c)
+  std::vector<int> asm_jg_bot;     ///< nnz(Jg): value index of Jg(r,c) at (c, n+r)
+  std::vector<int> asm_diag_w;     ///< n: value index of (i,i)
+  std::vector<int> asm_diag_c;     ///< meq: value index of (n+i, n+i)
 };
 
 /// Persistent factorization state for the filter-IPM augmented KKT system.
@@ -124,6 +141,12 @@ bool solve_kkt_sparse(SparseKKTCache& cache,
                       const Eigen::VectorXd& rhs,
                       Eigen::VectorXd& dx,
                       Eigen::VectorXd& dlambda);
+
+/// Factor cache.kkt as currently assembled (re-analyzing the pattern only
+/// when the exact compressed structure changed).  Used by cached-assembly
+/// paths that keep cache.kkt resident across calls (e.g. the augmented
+/// Newton assembler in ipm_solver.cpp).
+bool factor_current_kkt(SparseKKTCache& cache, int n, int meq);
 
 /// Factor a sparse augmented KKT matrix with inertia-preserving
 /// regularization. This operation performs no right-hand-side solve; call

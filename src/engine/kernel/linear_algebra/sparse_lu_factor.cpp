@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <numeric>
 
 #ifdef HACDCPF_HAVE_UMFPACK
@@ -61,28 +62,39 @@ bool SparseLUFactor::extract(void* Numeric, int m_in) {
   valid = false;
   ft_entries.clear();
 
-  int lnz, unz, n_row, n_col, nz_udiag;
-  if (umfpack_di_get_lunz(&lnz, &unz, &n_row, &n_col, &nz_udiag, Numeric) != UMFPACK_OK)
+  // Factor sizes via the int64 dl interface (the int32 di counters
+  // silently wrapped past 2^31 nnz).
+  int64_t lnz, unz, n_row, n_col, nz_udiag;
+  if (umfpack_dl_get_lunz(&lnz, &unz, &n_row, &n_col, &nz_udiag, Numeric) != UMFPACK_OK)
     return false;
   if (n_row != m || n_col != m) return false;
-  if (lnz < 0 || unz < 0) {
-    // int32 nnz counters wrapped: the factorization exceeds the int32
-    // ceiling — fail loudly instead of allocating garbage-sized buffers.
+  if (lnz > std::numeric_limits<int>::max() ||
+      unz > std::numeric_limits<int>::max()) {
+    // The internal CCS/CSR caches below are int32; fail loudly and let the
+    // caller fall back to the (fully int64) UMFPACK wsolve path.
     return false;
   }
 
-  // Temporary extraction buffers.
-  std::vector<int> Lp(m + 1), Lj(lnz), Up(m + 1), Ui(unz);
+  // Temporary extraction buffers (int64 from UMFPACK; every stored value is
+  // a row/col index < m, so the int32 narrowing below is exact).
+  std::vector<int64_t> Lp64(m + 1), Lj64(lnz), Up64(m + 1), Ui64(unz);
   std::vector<double> Lx(lnz), Ux(unz);
-  P.resize(m); Q.resize(m); Rs.resize(m);
-  int do_recip_int;
+  std::vector<int64_t> P64(m), Q64(m);
+  Rs.resize(m);
+  int64_t do_recip_int;
 
-  if (umfpack_di_get_numeric(Lp.data(), Lj.data(), Lx.data(),
-                             Up.data(), Ui.data(), Ux.data(),
-                             P.data(), Q.data(), nullptr, &do_recip_int,
+  if (umfpack_dl_get_numeric(Lp64.data(), Lj64.data(), Lx.data(),
+                             Up64.data(), Ui64.data(), Ux.data(),
+                             P64.data(), Q64.data(), nullptr, &do_recip_int,
                              Rs.data(), Numeric) != UMFPACK_OK)
     return false;
   do_recip = (do_recip_int != 0);
+
+  // Narrow to the int32 internal representation (count guard above).
+  std::vector<int> Lp(Lp64.begin(), Lp64.end()), Lj(Lj64.begin(), Lj64.end());
+  std::vector<int> Up(Up64.begin(), Up64.end()), Ui(Ui64.begin(), Ui64.end());
+  P.assign(P64.begin(), P64.end());
+  Q.assign(Q64.begin(), Q64.end());
 
   // Inverse permutations.
   Pinv.resize(m); Qinv.resize(m);

@@ -33,7 +33,10 @@ set(BUILD_SHARED_LIBS OFF)
 set(ZLIB OFF)
 set(ZLIB_FOUND FALSE)
 set(HIPO OFF)
-set(HIGHSINT64 OFF)
+# 64-bit HighsInt across the whole embedded HiGHS build — must match the
+# vendored HFactor stub (HIGHSINT64) since the two share HVectorBase/
+# HighsSparseMatrix template sources; mixing int32/int64 ABIs is an ODR trap.
+set(HIGHSINT64 ON)
 set(CUPDLP_CPU ON)
 set(CUPDLP_GPU OFF)
 set(CUPDLP_FIND_CUDA OFF)

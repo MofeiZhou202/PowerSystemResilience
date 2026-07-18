@@ -2872,35 +2872,45 @@ struct NativeLU {
     m = m_in;
     valid = false;
 
-    // Get factor sizes.
-    int lnz, unz, n_row, n_col, nz_udiag;
-    if (umfpack_di_get_lunz(&lnz, &unz, &n_row, &n_col, &nz_udiag,
+    // Get factor sizes (int64 via the dl interface — the int32 di counters
+    // silently wrapped past 2^31 nnz).
+    int64_t lnz, unz, n_row, n_col, nz_udiag;
+    if (umfpack_dl_get_lunz(&lnz, &unz, &n_row, &n_col, &nz_udiag,
                             Numeric) != UMFPACK_OK)
       return false;
     if (n_row != m || n_col != m) return false;
+    if (lnz > std::numeric_limits<int>::max() ||
+        unz > std::numeric_limits<int>::max()) {
+      // The internal CCS/CSR caches below are int32; fail loudly and let
+      // the caller fall back to the (fully int64) UMFPACK wsolve path.
+      return false;
+    }
 
     // Temporary extraction buffers.
-    std::vector<int> Lp(m + 1), Lj(lnz);
+    std::vector<int64_t> Lp(m + 1), Lj(lnz);
     std::vector<double> Lx(lnz);
-    std::vector<int> Up(m + 1), Ui(unz);
+    std::vector<int64_t> Up(m + 1), Ui(unz);
     std::vector<double> Ux(unz);
-    P.resize(m);
-    Q.resize(m);
+    std::vector<int64_t> P64(m), Q64(m);
     Rs.resize(m);
-    int do_recip_int;
+    int64_t do_recip_int;
 
-    int status = umfpack_di_get_numeric(
+    int status = umfpack_dl_get_numeric(
         Lp.data(), Lj.data(), Lx.data(),
         Up.data(), Ui.data(), Ux.data(),
-        P.data(), Q.data(),
+        P64.data(), Q64.data(),
         nullptr, &do_recip_int, Rs.data(), Numeric);
     if (status != UMFPACK_OK) return false;
     do_recip = (do_recip_int != 0);
 
-    // Build inverse permutations.
+    // Build inverse permutations (values < m fit int32).
+    P.resize(m);
+    Q.resize(m);
     Pinv.resize(m);
     Qinv.resize(m);
     for (int k = 0; k < m; ++k) {
+      P[k] = static_cast<int>(P64[k]);
+      Q[k] = static_cast<int>(Q64[k]);
       Pinv[P[k]] = k;
       Qinv[Q[k]] = k;
     }
@@ -2911,16 +2921,17 @@ struct NativeLU {
       int lr_nnz = 0;
       for (int i = 0; i < m; ++i) {
         Lr_start[i] = lr_nnz;
-        lr_nnz += std::max(0, Lp[i + 1] - Lp[i] - 1);  // exclude diagonal
+        lr_nnz += static_cast<int>(
+            std::max<int64_t>(0, Lp[i + 1] - Lp[i] - 1));  // exclude diagonal
       }
       Lr_start[m] = lr_nnz;
       Lr_index.resize(lr_nnz);
       Lr_value.resize(lr_nnz);
       for (int i = 0; i < m; ++i) {
         int dst = Lr_start[i];
-        const int end = Lp[i + 1] - 1;  // skip last (diagonal=1)
-        for (int k = Lp[i]; k < end; ++k) {
-          Lr_index[dst] = Lj[k];
+        const int end = static_cast<int>(Lp[i + 1]) - 1;  // skip last (diagonal=1)
+        for (int k = static_cast<int>(Lp[i]); k < end; ++k) {
+          Lr_index[dst] = static_cast<int>(Lj[k]);
           Lr_value[dst] = Lx[k];
           ++dst;
         }
@@ -2958,9 +2969,9 @@ struct NativeLU {
       int uc_nnz = 0;
       for (int j = 0; j < m; ++j) {
         Uc_start[j] = uc_nnz;
-        const int cnt = Up[j + 1] - Up[j];
+        const int cnt = static_cast<int>(Up[j + 1] - Up[j]);
         if (cnt > 0) {
-          Uc_diag[j] = Ux[Up[j + 1] - 1];   // last entry = diagonal
+          Uc_diag[j] = Ux[static_cast<int>(Up[j + 1]) - 1];  // last entry = diagonal
           uc_nnz += cnt - 1;                   // off-diagonal count
         } else {
           Uc_diag[j] = 0.0;
@@ -2971,9 +2982,9 @@ struct NativeLU {
       Uc_value.resize(uc_nnz);
       for (int j = 0; j < m; ++j) {
         int dst = Uc_start[j];
-        const int end = Up[j + 1] - 1;  // skip diagonal
-        for (int k = Up[j]; k < end; ++k) {
-          Uc_index[dst] = Ui[k];
+        const int end = static_cast<int>(Up[j + 1]) - 1;  // skip diagonal
+        for (int k = static_cast<int>(Up[j]); k < end; ++k) {
+          Uc_index[dst] = static_cast<int>(Ui[k]);
           Uc_value[dst] = Ux[k];
           ++dst;
         }
@@ -3479,7 +3490,7 @@ class SparseBasis : public BasisOps {
     //   solve accuracy on ill-conditioned bases for one extra SpMV + sparse
     //   triangular solve only when the residual demands it.
     // - Use row-sum scaling for better numerical conditioning
-    umfpack_di_defaults(Control_);
+    umfpack_dl_defaults(Control_);
     Control_[UMFPACK_IRSTEP] = 2;
     Control_[UMFPACK_SCALE] = UMFPACK_SCALE_SUM;
     // Pre-allocate solve workspace (avoids per-call heap allocation).
@@ -3492,8 +3503,8 @@ class SparseBasis : public BasisOps {
 
   ~SparseBasis() {
 #ifdef MIPSOLVERS_HAVE_UMFPACK
-    if (Numeric_) umfpack_di_free_numeric(&Numeric_);
-    if (Symbolic_) umfpack_di_free_symbolic(&Symbolic_);
+    if (Numeric_) umfpack_dl_free_numeric(&Numeric_);
+    if (Symbolic_) umfpack_dl_free_symbolic(&Symbolic_);
 #endif
   }
   SparseBasis(const SparseBasis&) = delete;
@@ -3787,52 +3798,44 @@ class SparseBasis : public BasisOps {
     }
     B_ = build_sparse_basis(basis);
 #ifdef MIPSOLVERS_HAVE_UMFPACK
-    if (Numeric_) { umfpack_di_free_numeric(&Numeric_); Numeric_ = nullptr; }
+    if (Numeric_) { umfpack_dl_free_numeric(&Numeric_); Numeric_ = nullptr; }
+
+    // Widen B_'s int32 CSC indices to int64 for the umfpack_dl_* interface
+    // (factor nnz past 2^31 is representable through this path; the pattern
+    // comparison below also runs on these widened arrays).
+    const int nnz_b = B_.outerIndexPtr()[m_];
+    std::vector<int64_t> Ap64(B_.outerIndexPtr(), B_.outerIndexPtr() + m_ + 1);
+    std::vector<int64_t> Ai64(B_.innerIndexPtr(), B_.innerIndexPtr() + nnz_b);
 
     // Check if sparsity pattern is unchanged — if so, reuse Symbolic_.
     bool pattern_same = false;
-    if (Symbolic_) {
-      const int* new_Ap = B_.outerIndexPtr();
-      const int* new_Ai = B_.innerIndexPtr();
-      const int new_nnz = new_Ap[m_];
-      if (static_cast<int>(Ap_.size()) == m_ + 1 &&
-          static_cast<int>(Ai_.size()) == new_nnz &&
-          std::memcmp(new_Ap, Ap_.data(),
-                      static_cast<size_t>(m_ + 1) * sizeof(int)) == 0 &&
-          std::memcmp(new_Ai, Ai_.data(),
-                      static_cast<size_t>(new_nnz) * sizeof(int)) == 0) {
-        pattern_same = true;
-      }
+    if (Symbolic_ && Ap_.size() == Ap64.size() && Ai_.size() == Ai64.size() &&
+        Ap_ == Ap64 && Ai_ == Ai64) {
+      pattern_same = true;
     }
 
     if (!pattern_same) {
-      // UMFPACK's di interface is int32-indexed: fail loudly past the
-      // int32 ceiling instead of silently overflowing index counters.
-      if (B_.nonZeros() > std::numeric_limits<int>::max()) return false;
-      if (Symbolic_) { umfpack_di_free_symbolic(&Symbolic_); Symbolic_ = nullptr; }
-      int status = umfpack_di_symbolic(m_, m_, B_.outerIndexPtr(),
-                                       B_.innerIndexPtr(), B_.valuePtr(),
-                                       &Symbolic_, Control_, nullptr);
+      if (Symbolic_) { umfpack_dl_free_symbolic(&Symbolic_); Symbolic_ = nullptr; }
+      int status = umfpack_dl_symbolic(m_, m_, Ap64.data(), Ai64.data(),
+                                       B_.valuePtr(), &Symbolic_, Control_,
+                                       nullptr);
       if (status != UMFPACK_OK) return false;
     }
     {
-      int status = umfpack_di_numeric(B_.outerIndexPtr(), B_.innerIndexPtr(),
-                                  B_.valuePtr(), Symbolic_, &Numeric_,
-                                  Control_, nullptr);
+      int status = umfpack_dl_numeric(Ap64.data(), Ai64.data(),
+                                      B_.valuePtr(), Symbolic_, &Numeric_,
+                                      Control_, nullptr);
       if (status != UMFPACK_OK) {
-        umfpack_di_free_symbolic(&Symbolic_);
+        umfpack_dl_free_symbolic(&Symbolic_);
         Symbolic_ = nullptr;
         return false;
       }
     }
     // Cache CCS arrays — UMFPACK solve uses them for iterative refinement.
     // Storing our own copies avoids any lifetime issues with B_'s internals.
-    {
-      const int nnz = B_.outerIndexPtr()[m_];
-      Ap_.assign(B_.outerIndexPtr(), B_.outerIndexPtr() + m_ + 1);
-      Ai_.assign(B_.innerIndexPtr(), B_.innerIndexPtr() + nnz);
-      Ax_.assign(B_.valuePtr(), B_.valuePtr() + nnz);
-    }
+    Ap_ = std::move(Ap64);
+    Ai_ = std::move(Ai64);
+    Ax_.assign(B_.valuePtr(), B_.valuePtr() + nnz_b);
     if (!prepare_factor_backend_after_numeric()) return false;
 #else
     lu_.setPivotThreshold(1.0);
@@ -3881,7 +3884,7 @@ class SparseBasis : public BasisOps {
       nlu_.ftran(rhs.data(), z.data());
       for (const auto& eta : etas_) apply_eta_ftran(z, eta);
     } else {
-      int status = umfpack_di_wsolve(UMFPACK_A, Ap_.data(), Ai_.data(),
+      int status = umfpack_dl_wsolve(UMFPACK_A, Ap_.data(), Ai_.data(),
                                      Ax_.data(), z.data(), rhs.data(), Numeric_,
                                      Control_, nullptr, wsolve_Wi_.data(),
                                      wsolve_W_.data());
@@ -3921,7 +3924,7 @@ class SparseBasis : public BasisOps {
       for (const auto& eta : etas_) apply_eta_ftran(rhs, eta);
     } else {
       solve_work_.noalias() = rhs;  // UMFPACK needs separate input/output
-      int status = umfpack_di_wsolve(UMFPACK_A, Ap_.data(), Ai_.data(),
+      int status = umfpack_dl_wsolve(UMFPACK_A, Ap_.data(), Ai_.data(),
                                      Ax_.data(), rhs.data(), solve_work_.data(),
                                      Numeric_, Control_, nullptr,
                                      wsolve_Wi_.data(), wsolve_W_.data());
@@ -3981,7 +3984,7 @@ class SparseBasis : public BasisOps {
       if (nlu_.valid && is_sparse_rhs(z.data(), m_)) {
         nlu_.btran(z.data(), y.data());
       } else {
-        int status = umfpack_di_wsolve(UMFPACK_At, Ap_.data(), Ai_.data(),
+        int status = umfpack_dl_wsolve(UMFPACK_At, Ap_.data(), Ai_.data(),
                                        Ax_.data(), y.data(), z.data(), Numeric_,
                                        Control_, nullptr, wsolve_Wi_.data(),
                                        wsolve_W_.data());
@@ -4026,7 +4029,7 @@ class SparseBasis : public BasisOps {
         nlu_.btran(rhs.data(), rhs.data());
       } else {
         solve_work_.noalias() = rhs;
-        int status = umfpack_di_wsolve(UMFPACK_At, Ap_.data(), Ai_.data(),
+        int status = umfpack_dl_wsolve(UMFPACK_At, Ap_.data(), Ai_.data(),
                                        Ax_.data(), rhs.data(),
                                        solve_work_.data(), Numeric_, Control_,
                                        nullptr, wsolve_Wi_.data(),
@@ -4837,11 +4840,11 @@ class SparseBasis : public BasisOps {
 #ifdef MIPSOLVERS_HAVE_UMFPACK
   void* Symbolic_ = nullptr;
   void* Numeric_ = nullptr;
-  std::vector<int> Ap_, Ai_;
+  std::vector<int64_t> Ap_, Ai_;  // int64 CSC for the umfpack_dl_* interface
   std::vector<double> Ax_;
   double Control_[UMFPACK_CONTROL];       // UMFPACK control parameters
   mutable std::vector<double> wsolve_W_;  // Pre-allocated wsolve workspace (5*m doubles)
-  mutable std::vector<int> wsolve_Wi_;    // Pre-allocated wsolve workspace (m ints)
+  mutable std::vector<int64_t> wsolve_Wi_;  // Pre-allocated wsolve workspace (m int64s)
   mutable NativeLU nlu_;                  // Extracted L,U for sparse solves
   mutable SparseLUFactor slu_;             // Sparse LU with Forrest-Tomlin update
   mutable std::vector<double> entering_col_buf_;  // Buffer for FT entering column

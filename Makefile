@@ -406,6 +406,19 @@ test_numerical_stability/fast:
 .PHONY : test_numerical_stability/fast
 
 #=============================================================================
+# Target rules for targets named test_netlib_regression
+
+# Build rule for target.
+test_netlib_regression: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_netlib_regression
+.PHONY : test_netlib_regression
+
+# fast build rule for target.
+test_netlib_regression/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_netlib_regression.dir/build.make CMakeFiles/test_netlib_regression.dir/build
+.PHONY : test_netlib_regression/fast
+
+#=============================================================================
 # Target rules for targets named test_scuc_module
 
 # Build rule for target.
@@ -4173,6 +4186,30 @@ src/engine/solver/native/milp/bc/legacy/bc_cuts.s: src/engine/solver/native/milp
 src/engine/solver/native/milp/bc/legacy/bc_cuts.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_cuts.cpp.s
 .PHONY : src/engine/solver/native/milp/bc/legacy/bc_cuts.cpp.s
+
+src/engine/solver/native/milp/bc/legacy/bc_env_options.o: src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_env_options.o
+
+# target to build an object file
+src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp.o
+
+src/engine/solver/native/milp/bc/legacy/bc_env_options.i: src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_env_options.i
+
+# target to preprocess a source file
+src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp.i
+
+src/engine/solver/native/milp/bc/legacy/bc_env_options.s: src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_env_options.s
+
+# target to generate assembly for a file
+src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp.s
 
 src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.o: src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.cpp.o
 .PHONY : src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.o
@@ -10894,6 +10931,30 @@ tests/test_milp_solver.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_milp_solver.dir/build.make CMakeFiles/test_milp_solver.dir/tests/test_milp_solver.cpp.s
 .PHONY : tests/test_milp_solver.cpp.s
 
+tests/test_netlib_regression.o: tests/test_netlib_regression.cpp.o
+.PHONY : tests/test_netlib_regression.o
+
+# target to build an object file
+tests/test_netlib_regression.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_netlib_regression.dir/build.make CMakeFiles/test_netlib_regression.dir/tests/test_netlib_regression.cpp.o
+.PHONY : tests/test_netlib_regression.cpp.o
+
+tests/test_netlib_regression.i: tests/test_netlib_regression.cpp.i
+.PHONY : tests/test_netlib_regression.i
+
+# target to preprocess a source file
+tests/test_netlib_regression.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_netlib_regression.dir/build.make CMakeFiles/test_netlib_regression.dir/tests/test_netlib_regression.cpp.i
+.PHONY : tests/test_netlib_regression.cpp.i
+
+tests/test_netlib_regression.s: tests/test_netlib_regression.cpp.s
+.PHONY : tests/test_netlib_regression.s
+
+# target to generate assembly for a file
+tests/test_netlib_regression.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_netlib_regression.dir/build.make CMakeFiles/test_netlib_regression.dir/tests/test_netlib_regression.cpp.s
+.PHONY : tests/test_netlib_regression.cpp.s
+
 tests/test_numerical_stability.o: tests/test_numerical_stability.cpp.o
 .PHONY : tests/test_numerical_stability.o
 
@@ -11030,6 +11091,7 @@ help:
 	@echo "... test_lp_solver"
 	@echo "... test_market_simulation"
 	@echo "... test_milp_solver"
+	@echo "... test_netlib_regression"
 	@echo "... test_numerical_stability"
 	@echo "... test_presolve"
 	@echo "... test_problem_validation"
@@ -11484,6 +11546,9 @@ help:
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_cuts.o"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_cuts.i"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_cuts.s"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_env_options.o"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_env_options.i"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_env_options.s"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.o"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.i"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.s"
@@ -12321,6 +12386,9 @@ help:
 	@echo "... tests/test_milp_solver.o"
 	@echo "... tests/test_milp_solver.i"
 	@echo "... tests/test_milp_solver.s"
+	@echo "... tests/test_netlib_regression.o"
+	@echo "... tests/test_netlib_regression.i"
+	@echo "... tests/test_netlib_regression.s"
 	@echo "... tests/test_numerical_stability.o"
 	@echo "... tests/test_numerical_stability.i"
 	@echo "... tests/test_numerical_stability.s"

@@ -15,6 +15,7 @@
 #include <Eigen/Sparse>
 #include <fmt/format.h>
 
+#include "mipsolvers/engine/detail/bc_env_options.hpp"
 #include "mipsolvers/engine/detail/bc_utils.hpp"
 
 namespace mipsolvers::engine {
@@ -67,12 +68,12 @@ bool bc_first_class_lp_state_conformance_enabled() {
 
 bool bc_vendored_highs_lp_kernel_enabled(const BCOptions& opt) {
   return opt.use_vendored_highs_lp_kernel ||
-         bc_env_flag_enabled("MIPSOLVERS_USE_VENDORED_HIGHS_LP");
+         bc_env_options().use_vendored_highs_lp;
 }
 
 bool bc_vendored_highs_root_frontier_enabled(const BCOptions& opt) {
   return !opt.suppress_vendored_highs_root_frontier &&
-         !bc_env_flag_enabled("MIPSOLVERS_SUPPRESS_VENDORED_HIGHS_ROOT_FRONTIER");
+         !bc_env_options().suppress_vendored_highs_root_frontier;
 }
 
 BcStrictHighsContractState apply_bc_strict_highs_contract(BCOptions& opt) {
@@ -88,7 +89,7 @@ BcStrictHighsContractState apply_bc_strict_highs_contract(BCOptions& opt) {
 
   if (state.requested_vendored_highs_lp) {
     const bool strict_tree_exhaustion =
-        bc_env_flag_enabled("MIPSOLVERS_REQUIRE_STRICT_TREE_EXHAUSTION");
+        bc_env_options().require_strict_tree_exhaustion;
     // Suppressing the vendored root frontier only removes the direct
     // HiGHS-root certificate.  It must not also disable HiGHS' normal MIP
     // optimality-limit lifecycle: HighsMipSolverData keeps upper_limit for

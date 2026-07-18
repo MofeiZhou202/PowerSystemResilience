@@ -47,6 +47,14 @@ struct IPMOptions {
   // --- Filter-driver options (PR2+) -----------------------------------
   Globalization globalization{Globalization::Filter};
   bool use_inertia_correction{true};
+  // Solve the Newton step in the uncondensed augmented form
+  //   [ H + δ_W I   Jgᵀ   Jhᵀ  ] [dx ]   [-r_d                       ]
+  //   [ Jg          0     0    ] [dλ ] = [-r_eq                       ]
+  //   [ Jh          0   -SM⁻¹  ] [dμ ]   [-r_ineq - M⁻¹(μ̄e - Sμ)      ]
+  // instead of the condensed [H + Jhᵀ(M/S)Jh, Jgᵀ; Jg, 0] form.  The
+  // augmented form avoids the Jhᵀ(M/S)Jh product (fill + squared
+  // conditioning) at the price of a larger sparse factorization.
+  bool use_augmented_newton{false};
 
   // Additional PR3 feature flags (all default-on; flip false to disable
   // individually).

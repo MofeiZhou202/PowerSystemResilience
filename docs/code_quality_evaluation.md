@@ -246,3 +246,72 @@ rejection). Full unit tier green: 10/10 suites.
 (vendored `cmake/BuildMUMPS.cmake` already exists for Ipopt); UMFPACK
 `di`→`dl`; `HIGHSINT64`; B&C copy elimination (entry copy + per-node SF
 workspace + Node slimming — full file:line map available).
+
+---
+
+## 10. Phase-1 Closure, Phase-2/3 Log, and Theoretical Notes
+
+Derivations for the numerical choices in this section live in
+**`docs/numerical_methods.md`** (one-sided rows, Ruiz scaling and its failure
+modes, iterative refinement, analyze-once/factorize-many, condensed vs
+augmented Newton systems, index width, backend selection, memory-bandwidth
+model of the copy chains).
+
+### Item 6 — int64 indexing (closed)
+
+| Slice | Status |
+|---|---|
+| UMFPACK `di`→`dl` | ✅ `dual_simplex.cpp` (SparseBasis: `Ap_/Ai_`/`wsolve_Wi_` → `int64_t`, `umfpack_dl_*` throughout, pattern-compare on widened arrays) + `sparse_lu_factor.cpp` (`get_lunz/get_numeric` → dl, int64 buffers, guarded narrowing into int32 caches with fallback to the int64 wsolve path). `NativeLU::extract` likewise |
+| `HIGHSINT64` | ✅ vendored HFactor stub + full embedded HiGHS build (`BuildHiGHS.cmake`) flipped consistently (shared template sources can't mix ABIs); `scip/lpi/lpi_highs.cpp` patched for the int64 HiGHS API (21 sites, zero behavior change) |
+| Eigen `StorageIndex=int64_t` | ⏸ deferred — ABI-wide (240 files + Python + vendored interfaces); int32-overflow guards from Phase 1 stand as the safety net |
+
+### Item 7 — copy chains (closed at approved scope)
+
+- Engine API: by-value `solve()` + moved normalization (3 → 1 full-model copy). ✅ (Phase 1)
+- B&C entry: `strict_highs_original_entry_lp` copy made conditional on strict mode. ✅
+- Per-node `StandardFormLP` copies → single shared workspace + cuts-augmented dirty flag (restore pristine base only on transition); `active_lp_for_proof` aliases `base_lp` in the no-cuts case. ✅
+- Node slimming: `nlp_down/up_scores` are dead in the MILP path but read by `bc_minlp_legacy.cpp` — left in place (full `TreeNode` migration stays deferred; the dead duplicate `bc/core/node_types.hpp` was removed). ⚠️
+
+### Phase 2
+
+| # | Item | Status |
+|---|---|---|
+| 11 | KKT analyze-once/factorize-many | ✅ scatter-map assembly in `kkt_system.cpp` (`assemble_augmented_kkt_cached`) used by `factor_kkt_sparse` and all three inertia-correction retry sites; pattern fingerprints via `memcmp` on outer/inner index arrays |
+| 12 | Augmented `-S·M⁻¹` Newton system | ✅ `IPMOptions::use_augmented_newton` (default off) — 3-block assembly with per-iteration scatter refill, δ_W/δ_C escalation, direct dμ recovery; Gondzio corrector rhs `[0;0;−M⁻¹ε]` and SOC made path-aware; matches condensed path on the test NLP |
+| 13 | OpenMP | ✅ `MIPSOLVERS_USE_OPENMP` (libomp on Apple), threshold-guarded parallel SpMV (`ae_mul`/`aet_mul`/`ae_mul_sub`) and theta/residual element-wise loops in the LP IPM. Node-level B&C parallelism (dead `parallel/` stack) stays deferred |
+
+### Phase 3
+
+| # | Item | Status |
+|---|---|---|
+| 14 | Env-var governance | ⚠️ first step — `BcEnvOptions` (`bc_env_options.hpp/.cpp`) parses the 11 algorithm-affecting toggles once; migrated the 3 centralized helpers + 8 direct sites (strict-HiGHS root pipeline, SCUC dynamic-cut toggles). ~190 debug/trace flags remain env-driven by design (diagnostics, not algorithm choices) — full tree split stays deferred |
+| 15 | NETLIB regression suite | ✅ `tests/test_netlib_regression.cpp` (integration tier) + 5 vendored problems (`tests/data/netlib/`, coin-or Data-Netlib, MIT): afiro, adlittle, share2b, stocfor1, kb2 against published optima via the vendored HiGHS MPS reader |
+
+### Bugs found by the NETLIB suite (all fixed)
+
+1. **G-type rows broke the IPM** (`b = +∞` → infinite initial slack → NaN
+   barrier). Fixed by one-sided-row normalization (negate to L-type, dual
+   sign restored) in both IPM paths — see `numerical_methods.md` §1.
+2. **IPM least-squares init produced inf/huge iterates** on near-singular
+   initial systems. Fixed: finiteness + magnitude sanity with plain-interior
+   fallback.
+3. **Dual simplex "Phase I failed" on G-type rows** — `build_standard_form_lp`
+   treated `b = +∞` rows as vacuous with `rhs = +∞` (NaN in Phase I). Fixed:
+   proper `sense='G'` surplus classification with finite shifted RHS.
+4. **Ruiz scaling stalls some degenerate problems** (stocfor1) while being
+   required on others (afiro). Fixed: **scaling fallback** — failed scaled
+   solves retry with `ruiz_rounds = 0` (`NativeIPMLPAdapter::solve_lp`).
+
+### Validation (final)
+
+- `ctest -L unit`: **10/10** suites (engine_api, lp, milp, ipm, dual_simplex,
+  problem_validation, adapter_registry, presolve, l2o_trace,
+  numerical_stability — 8 cases/354 assertions).
+- Integration: `test_netlib_regression` (220 assertions) passes.
+- Pre-existing failures (verified at HEAD via stash-check, unrelated to this
+  work): `test_ipopt_parameter_stability` (1 assertion) and
+  `test_scuc_module`'s SCED-LP case (embedded HiGHS returns "solve failed" on
+  the small binary-fixed SCED LP even at HEAD — separate issue to triage).
+- Repo hygiene note: `.gitignore` line 125 has a bare `tests/` entry, so NEW
+  files under `tests/` (e.g. `test_netlib_regression.cpp`,
+  `tests/data/netlib/`) are ignored by default and need `git add -f`.

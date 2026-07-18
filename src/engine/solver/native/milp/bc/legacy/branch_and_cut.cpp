@@ -60,6 +60,7 @@
 
 #include "mipsolvers/engine/detail/bc_types.hpp"
 #include "mipsolvers/engine/detail/bc_domain.hpp"
+#include "mipsolvers/engine/detail/bc_env_options.hpp"
 #include "mipsolvers/engine/detail/bc_implied_bounds.hpp"
 #include "mipsolvers/engine/detail/bc_legacy_helpers.hpp"
 #include "mipsolvers/engine/detail/bc_minlp_legacy.hpp"
@@ -144,10 +145,10 @@ double strict_scuc_original_value(const BCDynamicNodeCutContext& ctx, int col) {
 }
 
 bool strict_scuc_dynamic_cuts_enabled(const MIPModel::UCGenHint& uc) {
-  if (std::getenv("MIPSOLVERS_ENABLE_SCUC_DYNAMIC_CUTS") == nullptr) {
+  if (!bc_env_options().scuc_dynamic_cuts_enabled) {
     return false;
   }
-  if (std::getenv("MIPSOLVERS_DISABLE_SCUC_DYNAMIC_CUTS") != nullptr) {
+  if (bc_env_options().scuc_dynamic_cuts_disabled) {
     return false;
   }
   const std::size_t block = static_cast<std::size_t>(std::max(0, uc.ng) *
@@ -191,8 +192,7 @@ void append_strict_scuc_dynamic_cuts(const MIPModel::UCGenHint& uc,
       "MIPSOLVERS_SCUC_DYNAMIC_MIN_SCORE_FACTOR", 0.20, 0.0, 1.0);
   const double max_parallelism = strict_scuc_env_double(
       "MIPSOLVERS_SCUC_DYNAMIC_MAX_PARALLELISM", 0.10, 0.0, 1.0);
-  const bool unit_ramp_cuts =
-      std::getenv("MIPSOLVERS_SCUC_DYNAMIC_UNIT_RAMP_CUTS") != nullptr;
+  const bool unit_ramp_cuts = bc_env_options().scuc_dynamic_unit_ramp_cuts;
 
   std::vector<StrictScucDynamicCutCandidate> candidates;
   candidates.reserve(static_cast<std::size_t>(max_return * 8));
@@ -1648,10 +1648,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       declared_integrality.integer_cols;
   const auto& original_declared_binary_cols =
       declared_integrality.binary_cols;
-  const LPModel strict_highs_original_entry_lp = base_lp;
+  // Deep-copied only in strict-HiGHS mode: every use below is guarded by
+  // strict_highs_root_fixed_point (directly or via
+  // strict_highs_evaluate_root_enabled), so non-strict runs skip the copy.
+  const LPModel strict_highs_original_entry_lp =
+      strict_highs_root_fixed_point ? base_lp : LPModel{};
 
   if (strict_highs_root_fixed_point &&
-      !bc_env_flag_enabled("MIPSOLVERS_ROOT_SEPARATION_ONLY")) {
+      !bc_env_options().root_separation_only) {
 #ifdef MIPSOLVERS_HAVE_HIGHS_LIB
     const auto t_highs_full0 = std::chrono::steady_clock::now();
     Highs highs;
@@ -2355,7 +2359,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       }
 
       std::optional<ScopedEnvVar> retain_root_lp_env;
-      if (bc_env_flag_enabled("MIPSOLVERS_STRICT_FULL_RETAIN_ROOT_LP")) {
+      if (bc_env_options().strict_full_retain_root_lp) {
         retain_root_lp_env.emplace("MIPSOLVERS_RETAIN_ROOT_LP_RELAXATION", "1");
       }
       // [K7] Inject pseudocost warm-start (original → presolved space mapping
@@ -12819,7 +12823,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	  bool strict_highs_evaluate_root_imported = false;
 	  const bool strict_highs_evaluate_root_enabled =
 	      strict_highs_root_fixed_point &&
-	      !bc_env_flag_enabled("MIPSOLVERS_STRICT_ROOT_DISABLE_HIGHS_EVALUATE_ROOT");
+	      !bc_env_options().strict_root_disable_highs_evaluate_root;
 	  if (strict_highs_evaluate_root_enabled) {
 	    const auto t_eval_root0 = std::chrono::steady_clock::now();
 	    auto highs_root_owner = std::make_shared<Highs>();
@@ -13016,7 +13020,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	      const ScopedEnvVar stop_after_root_env(
 	          "MIPSOLVERS_ROOT_ORACLE_STOP_AFTER_EVALUATE_ROOT", "1");
 	      const bool stop_after_root_round =
-	          bc_env_flag_enabled("MIPSOLVERS_STRICT_ROOT_STOP_AFTER_ROUND");
+	          bc_env_options().strict_root_stop_after_round;
 	      std::optional<ScopedEnvVar> stop_after_round_env;
 	      if (stop_after_root_round) {
 	        stop_after_round_env.emplace(
@@ -13063,7 +13067,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	          root_xpool_authority_lpsolver->getLp();
 	      LPModel final_root_lp =
 	          root_native_lp_from_highs_lp(final_highs_lp, root_lp.sense);
-	      if (bc_env_flag_enabled("MIPSOLVERS_ROOT_ORACLE_STOP_AFTER_ROOT_ROUND") ||
+	      if (bc_env_options().root_oracle_stop_after_root_round ||
 	          strict_highs_evaluate_root_enabled) {
 	        const int keep_cols = std::min(
 	            static_cast<int>(final_root_lp.vars.size()),
@@ -23141,6 +23145,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   ruiz_scale_standard_form(tree_base_sf);
   update_standard_form_bounds(tree_base_sf, base_lp, root.lb, root.ub);
   StandardFormLP node_sf = tree_base_sf;
+  // Shared node-SF workspace hygiene: process_single_child and the refresh/
+  // replay paths reuse node_sf, and cuts-augmented solves replace it with a
+  // locally-augmented SF.  This flag tracks that state so the next child can
+  // restore the pristine tree base exactly once (avoids a full SF copy per
+  // child in the common no-cuts path).
+  bool node_sf_cuts_augmented = false;
   auto build_node_sf_with_local_cuts = [&](const Node& node) -> StandardFormLP {
     if (node.local_cuts.empty()) {
       StandardFormLP local_sf = tree_base_sf;
@@ -23190,8 +23200,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     canonicalize_branch_literals(scope);
     return scope;
   };
-  auto active_lp_for_proof = [&](const Node& node) -> LPModel {
-    return node.local_cuts.empty() ? base_lp : build_node_lp_with_local_cuts(node);
+  // Returns the LP to use for proof construction.  When the node has no
+  // local cuts this aliases base_lp (zero copy); otherwise the augmented
+  // model is built into the caller-provided scratch.
+  auto active_lp_for_proof = [&](const Node& node, LPModel& scratch) -> const LPModel& {
+    return node.local_cuts.empty() ? base_lp
+                                   : (scratch = build_node_lp_with_local_cuts(node));
   };
   const double root_domain_bound_floor =
       std::isfinite(root.bound) ? root.bound : -kInf;
@@ -27878,6 +27892,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       }
 
       node_sf = build_node_sf_with_local_cuts(qnode);
+      node_sf_cuts_augmented = true;
       SimplexOptions refresh_opt = simplex_opt;
       refresh_opt.allow_cold_start = true;
       auto refresh_res =
@@ -28004,6 +28019,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         }
 
         node_sf = build_node_sf_with_local_cuts(qnode);
+      node_sf_cuts_augmented = true;
         SimplexOptions rc_refresh_opt = simplex_opt;
         rc_refresh_opt.allow_cold_start = true;
         auto rc_refresh_res =
@@ -30065,6 +30081,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	      update_standard_form_bounds(node_sf_ref, base_lp, child.lb, child.ub);
 	    } else {
 	      node_sf_ref = build_node_sf_with_local_cuts(child);
+        node_sf_cuts_augmented = true;
 	    }
 	    auto _t2 = std::chrono::steady_clock::now();
 
@@ -30325,7 +30342,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		            has_child_upper_limit &&
 	            (opt.enable_reduced_cost_proof_cut_resolve ||
 	             opt.enable_reduced_cost_proof_conflict_minimization)) {
-          const LPModel proof_lp = active_lp_for_proof(child);
+          LPModel proof_lp_scratch;
+          const LPModel& proof_lp = active_lp_for_proof(child, proof_lp_scratch);
           const bool proof_is_local = !child.local_cuts.empty();
           const std::vector<BranchDomainLiteral> proof_scope =
               proof_is_local ? node_local_validity_scope(child)
@@ -30500,6 +30518,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         child.lp_refresh_needed = true;
 
 	        node_sf_ref = build_node_sf_with_local_cuts(child);
+        node_sf_cuts_augmented = true;
 	        std::vector<BoundChangeInfo> rc_closure_changes;
         NodeDomainClosureStats rc_closure_stats;
         const std::vector<DomainReasonBound> no_rc_reasons;
@@ -30512,6 +30531,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
         }
         node_sf_ref = build_node_sf_with_local_cuts(child);
+        node_sf_cuts_augmented = true;
 
         SimplexOptions rc_fp_resolve_opt = simplex_opt;
         rc_fp_resolve_opt.allow_cold_start = true;
@@ -30579,7 +30599,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        (opt.enable_reduced_cost_proof_cut_resolve ||
 	         opt.enable_reduced_cost_proof_conflict_minimization)) {
 	      SimplexResult& proof_simplex = *child_final_simplex_for_proof;
-	      const LPModel proof_lp = active_lp_for_proof(child);
+	      LPModel proof_lp_scratch;
+	      const LPModel& proof_lp = active_lp_for_proof(child, proof_lp_scratch);
 	      const bool proof_is_local = !child.local_cuts.empty();
 	      const std::vector<BranchDomainLiteral> proof_scope =
 	          proof_is_local ? node_local_validity_scope(child)
@@ -31008,6 +31029,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	            rc_proof_cut_resolve_lps_left > 0;
 	        if (allow_proof_domain_lp_refresh) {
 		        node_sf_ref = build_node_sf_with_local_cuts(child);
+        node_sf_cuts_augmented = true;
 	        SimplexOptions proof_domain_resolve_opt = simplex_opt;
 	        proof_domain_resolve_opt.allow_cold_start = true;
 	        auto proof_domain_res = solve_lp_from_sf(
@@ -31083,7 +31105,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 			          child_dual_proof = DualProofRow{};
 			          child_objective_event_proof = DualProofRow{};
 			          child_rc_mass_proof = DualProofRow{};
-			          const LPModel proof_lp = active_lp_for_proof(child);
+			          LPModel proof_lp_scratch;
+			          const LPModel& proof_lp = active_lp_for_proof(child, proof_lp_scratch);
 				          child_dual_proof_ok = build_full_dual_proof_row(
 				              proof_lp, proof_domain_res, root.lb, root.ub, child.x_relax,
 				              proof_domain_res.result.stats.objective,
@@ -31798,6 +31821,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	              rc_proof_cut_resolve_lps_left > 0;
 	          if (allow_target_lp_refresh) {
 	          node_sf_ref = build_node_sf_with_local_cuts(child);
+        node_sf_cuts_augmented = true;
 	          SimplexOptions target_resolve_opt = simplex_opt;
 	          target_resolve_opt.allow_cold_start = true;
 	          auto target_res = solve_lp_from_sf(node_sf_ref, target_resolve_opt,
@@ -31912,6 +31936,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	              rc_proof_cut_resolve_lps_left > 0;
 	          if (allow_scoped_lp_refresh) {
 	          node_sf_ref = build_node_sf_with_local_cuts(child);
+        node_sf_cuts_augmented = true;
 	          SimplexOptions scoped_resolve_opt = simplex_opt;
 	          scoped_resolve_opt.allow_cold_start = true;
 	          auto scoped_res = solve_lp_from_sf(node_sf_ref, scoped_resolve_opt,
@@ -32405,6 +32430,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           rc_fixed >= std::max(1, opt.reduced_cost_fixing_resolve_min_fixings)) {
         const double old_bound = child.bound;
         node_sf_ref = build_node_sf_with_local_cuts(child);
+        node_sf_cuts_augmented = true;
         SimplexOptions rc_resolve_opt = simplex_opt;
         rc_resolve_opt.allow_cold_start = true;
         auto rc_res = solve_lp_from_sf(node_sf_ref, rc_resolve_opt,
@@ -32643,6 +32669,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           fix_ub[i] = rv;
         }
         node_sf_ref = build_node_sf_with_bounds(child, fix_lb, fix_ub);
+        node_sf_cuts_augmented = true;
         SimplexOptions round_opt;
         // Progressive iter budget: shallow nodes get fewer iters since the
         // rounding LP rarely converges before enough branching decisions.
@@ -32673,6 +32700,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         }
         // Restore node_sf_ref to child's actual bounds for subsequent use.
         node_sf_ref = build_node_sf_with_local_cuts(child);
+        node_sf_cuts_augmented = true;
       } else if (has_inc_snapshot && sols.empty() && !use_ipm_nodes &&
                  !is_up_branch && incumbent_repair_lps_left > 0 &&
                  incumbent_x.size() == n) {
@@ -32694,6 +32722,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           ++out.bc_stats.incumbent_repair_lp_attempts;
           const auto rep0 = std::chrono::steady_clock::now();
           node_sf_ref = build_node_sf_with_bounds(child, fix_lb, fix_ub);
+        node_sf_cuts_augmented = true;
           SimplexOptions repair_opt;
           repair_opt.max_iter = (child.depth < 16) ? 120 : 300;
           repair_opt.allow_cold_start = false;
@@ -32726,6 +32755,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             }
           }
           node_sf_ref = build_node_sf_with_local_cuts(child);
+        node_sf_cuts_augmented = true;
         }
       } else if (!has_inc_snapshot && sols.empty() && use_ipm_nodes && ipm_node_solver
                  && !is_up_branch
@@ -33482,6 +33512,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 			           cur.lp_refresh_needed) &&
 		          bounds_consistent(replay_node.lb, replay_node.ub)) {
 	        node_sf = build_node_sf_with_local_cuts(replay_node);
+        node_sf_cuts_augmented = true;
 	        SimplexOptions late_opt = simplex_opt;
 	        late_opt.allow_cold_start = true;
 	        auto late_res = solve_lp_from_sf(node_sf, late_opt, cur.basis_hint.get());
@@ -34065,10 +34096,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		    bool incumbent_changed_this_node = false;
 		    bool child_domain_source_added = false;
 			    {
-				      StandardFormLP child_down_sf = tree_base_sf;
+				      // Shared node-SF workspace: restore the pristine tree base only when the
+// previous solve left it cuts-augmented; bounds are re-applied inside.
+if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = false; }
 				      auto [valid, pcu, sols, ncuts, lps, ca, ps] =
 		          process_single_child(child_down, false, j, cur.bound,
-		                                child_down_sf, cut_pool, incumbent_obj, has_incumbent,
+		                                node_sf, cut_pool, incumbent_obj, has_incumbent,
 		                                &retained_down_probe);
       down_valid = valid;
       if (trace_bc_timeline) {
@@ -34108,10 +34141,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     }
 
     {
-		      StandardFormLP child_up_sf = tree_base_sf;
+		      // Shared node-SF workspace: restore the pristine tree base only when the
+// previous solve left it cuts-augmented; bounds are re-applied inside.
+if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = false; }
 		      auto [valid, pcu, sols, ncuts, lps, ca, ps] =
 		          process_single_child(child_up, true, j, cur.bound,
-		                                child_up_sf, cut_pool, incumbent_obj, has_incumbent,
+		                                node_sf, cut_pool, incumbent_obj, has_incumbent,
 		                                &retained_up_probe);
       up_valid = valid;
       if (trace_bc_timeline) {

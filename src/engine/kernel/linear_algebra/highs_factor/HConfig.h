@@ -15,4 +15,8 @@
 #define HIGHS_VERSION_MINOR 14
 #define HIGHS_VERSION_PATCH 0
 
+// 64-bit index type (HighsInt = int64_t): raises the factor-nnz ceiling
+// from 2^31 to 2^63 for the vendored HFactor simplex backend.
+#define HIGHSINT64
+
 #endif /* HCONFIG_H_ */

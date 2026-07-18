@@ -126,6 +126,15 @@
                         }                                                                                      \
                         while( FALSE )
 
+/** widens an array of SCIP int indices to the HighsInt index type used by the HiGHS API */
+static std::vector<HighsInt> widenToHighsInt(
+   const int*            p,                  /**< int array to widen */
+   int                   n                   /**< number of entries to widen */
+   )
+{
+   return std::vector<HighsInt>(p, p + n);
+}
+
 /** SCIP's HiGHS class */
 class HighsSCIP : public Highs
 {
@@ -450,11 +459,11 @@ SCIP_RETCODE lpiSolve(
    case HighsModelStatus::kIterationLimit:
 #ifdef SCIP_DEBUG
       {
-         int simplex_strategy = -1;
+         HighsInt simplex_strategy = -1;
          HIGHS_CALL( lpi->highs->getOptionValue("simplex_strategy", simplex_strategy) );
          SCIPdebugMessage("HiGHS terminated with model status <%s> (%d) after simplex strategy <%s> (%d)\n",
             lpi->highs->modelStatusToString(model_status).c_str(), (int)model_status,
-            simplexStrategyToString(simplex_strategy).c_str(), simplex_strategy);
+            simplexStrategyToString((int)simplex_strategy).c_str(), (int)simplex_strategy);
       }
 #endif
       break;
@@ -470,11 +479,11 @@ SCIP_RETCODE lpiSolve(
    case HighsModelStatus::kUnknown:
    default:
       {
-         int simplex_strategy = -1;
+         HighsInt simplex_strategy = -1;
          HIGHS_CALL( lpi->highs->getOptionValue("simplex_strategy", simplex_strategy) );
          SCIPerrorMessage("HiGHS terminated with model status <%s> (%d) after simplex strategy <%s> (%d)\n",
             lpi->highs->modelStatusToString(model_status).c_str(), (int)model_status,
-            simplexStrategyToString(simplex_strategy).c_str(), simplex_strategy);
+            simplexStrategyToString((int)simplex_strategy).c_str(), (int)simplex_strategy);
       }
       return SCIP_LPERROR;
    }
@@ -747,7 +756,10 @@ SCIP_RETCODE SCIPlpiLoadColLP(
 #endif
 
    int objectiveSenseInt = objsen == SCIP_OBJSEN_MAXIMIZE ? (int)ObjSense::kMaximize : (int)ObjSense::kMinimize;
-   HIGHS_CALL( lpi->highs->passModel(ncols, nrows, nnonz, 1, objectiveSenseInt, 0, obj, lb, ub, lhs, rhs, beg, ind, val) );
+   std::vector<HighsInt> highs_beg = widenToHighsInt(beg, ncols);
+   std::vector<HighsInt> highs_ind = widenToHighsInt(ind, nnonz);
+   HIGHS_CALL( lpi->highs->passModel(ncols, nrows, nnonz, 1, objectiveSenseInt, 0, obj, lb, ub, lhs, rhs,
+      highs_beg.data(), highs_ind.data(), val) );
 
    assert((objsen == SCIP_OBJSEN_MAXIMIZE && lpi->highs->getLp().sense_ == ObjSense::kMaximize)
       || (objsen == SCIP_OBJSEN_MINIMIZE && lpi->highs->getLp().sense_ == ObjSense::kMinimize));
@@ -787,6 +799,17 @@ SCIP_RETCODE SCIPlpiAddCols(
 
    invalidateSolution(lpi);
 
+   /* HiGHS expects index arrays of type HighsInt, so widen SCIP's int arrays */
+   std::vector<HighsInt> highs_beg;
+   std::vector<HighsInt> highs_ind;
+   if( nnonz > 0 )
+   {
+      highs_beg = widenToHighsInt(beg, ncols);
+      highs_ind = widenToHighsInt(ind, nnonz);
+   }
+   const HighsInt* highs_beg_ptr = nnonz > 0 ? highs_beg.data() : NULL;
+   const HighsInt* highs_ind_ptr = nnonz > 0 ? highs_ind.data() : NULL;
+
 #ifndef NDEBUG
    if( nnonz > 0 )
    {
@@ -803,9 +826,9 @@ SCIP_RETCODE SCIPlpiAddCols(
 
    /* HiGHS returns with a warning if values are within the zero tolerance, but seems to continue safely simply ignoring
     * them; in debug mode we stop, in optimized mode we accept this behavior */
-   HIGHS_CALL( lpi->highs->addCols(ncols, obj, lb, ub, nnonz, beg, ind, val) );
+   HIGHS_CALL( lpi->highs->addCols(ncols, obj, lb, ub, nnonz, highs_beg_ptr, highs_ind_ptr, val) );
 #else
-   HIGHS_CALL_WITH_WARNING( lpi->highs->addCols(ncols, obj, lb, ub, nnonz, beg, ind, val) );
+   HIGHS_CALL_WITH_WARNING( lpi->highs->addCols(ncols, obj, lb, ub, nnonz, highs_beg_ptr, highs_ind_ptr, val) );
 #endif
 
    return SCIP_OKAY;
@@ -854,7 +877,14 @@ SCIP_RETCODE SCIPlpiDelColset(
 
    invalidateSolution(lpi);
 
-   HIGHS_CALL( lpi->highs->deleteCols(dstat) );
+   /* HiGHS expects and updates an index array of type HighsInt, so use a temporary buffer and copy the values back */
+   int num_col = lpi->highs->getLp().num_col_;
+   std::vector<HighsInt> highs_dstat = widenToHighsInt(dstat, num_col);
+
+   HIGHS_CALL( lpi->highs->deleteCols(highs_dstat.data()) );
+
+   for( int i = 0; i < num_col; ++i )
+      dstat[i] = (int)highs_dstat[i];
 
    assert(lpi->highs->getLp().num_col_ >= 0);
    return SCIP_OKAY;
@@ -887,6 +917,17 @@ SCIP_RETCODE SCIPlpiAddRows(
 
    invalidateSolution(lpi);
 
+   /* HiGHS expects index arrays of type HighsInt, so widen SCIP's int arrays */
+   std::vector<HighsInt> highs_beg;
+   std::vector<HighsInt> highs_ind;
+   if( nnonz > 0 )
+   {
+      highs_beg = widenToHighsInt(beg, nrows);
+      highs_ind = widenToHighsInt(ind, nnonz);
+   }
+   const HighsInt* highs_beg_ptr = nnonz > 0 ? highs_beg.data() : NULL;
+   const HighsInt* highs_ind_ptr = nnonz > 0 ? highs_ind.data() : NULL;
+
 #ifndef NDEBUG
    if( nnonz > 0 )
    {
@@ -902,9 +943,9 @@ SCIP_RETCODE SCIPlpiAddRows(
 
    /* HiGHS returns with a warning if values are within the zero tolerance, but seems to continue safely simply ignoring
     * them; in debug mode we stop, in optimized mode we accept this behavior */
-   HIGHS_CALL( lpi->highs->addRows(nrows, lhs, rhs, nnonz, beg, ind, val) );
+   HIGHS_CALL( lpi->highs->addRows(nrows, lhs, rhs, nnonz, highs_beg_ptr, highs_ind_ptr, val) );
 #else
-   HIGHS_CALL_WITH_WARNING( lpi->highs->addRows(nrows, lhs, rhs, nnonz, beg, ind, val) );
+   HIGHS_CALL_WITH_WARNING( lpi->highs->addRows(nrows, lhs, rhs, nnonz, highs_beg_ptr, highs_ind_ptr, val) );
 #endif
 
    return SCIP_OKAY;
@@ -953,7 +994,14 @@ SCIP_RETCODE SCIPlpiDelRowset(
 
    invalidateSolution(lpi);
 
-   HIGHS_CALL( lpi->highs->deleteRows(dstat) );
+   /* HiGHS expects and updates an index array of type HighsInt, so use a temporary buffer and copy the values back */
+   int num_row = lpi->highs->getLp().num_row_;
+   std::vector<HighsInt> highs_dstat = widenToHighsInt(dstat, num_row);
+
+   HIGHS_CALL( lpi->highs->deleteRows(highs_dstat.data()) );
+
+   for( int i = 0; i < num_row; ++i )
+      dstat[i] = (int)highs_dstat[i];
 
    assert(lpi->highs->getLp().num_row_ >= 0);
 
@@ -1016,7 +1064,8 @@ SCIP_RETCODE SCIPlpiChgBounds(
       }
    }
 
-   HIGHS_CALL( lpi->highs->changeColsBounds(ncols, ind, lb, ub) );
+   std::vector<HighsInt> highs_ind = widenToHighsInt(ind, ncols);
+   HIGHS_CALL( lpi->highs->changeColsBounds(ncols, highs_ind.data(), lb, ub) );
 
    return SCIP_OKAY;
 }
@@ -1045,7 +1094,8 @@ SCIP_RETCODE SCIPlpiChgSides(
    for( i = 0; i < nrows; ++i )
       assert(0 <= ind[i] && ind[i] < lpi->highs->getLp().num_row_);
 
-   HIGHS_CALL( lpi->highs->changeRowsBounds(nrows, ind, lhs, rhs) );
+   std::vector<HighsInt> highs_ind = widenToHighsInt(ind, nrows);
+   HIGHS_CALL( lpi->highs->changeRowsBounds(nrows, highs_ind.data(), lhs, rhs) );
 
    return SCIP_OKAY;
 }
@@ -1106,7 +1156,8 @@ SCIP_RETCODE SCIPlpiChgObj(
 
    invalidateSolution(lpi);
 
-   HIGHS_CALL( lpi->highs->changeColsCost(ncols, ind, obj) );
+   std::vector<HighsInt> highs_ind = widenToHighsInt(ind, ncols);
+   HIGHS_CALL( lpi->highs->changeColsCost(ncols, highs_ind.data(), obj) );
 
    return SCIP_OKAY;
 }
@@ -1228,7 +1279,10 @@ SCIP_RETCODE SCIPlpiGetCols(
       SCIP_Real*            val                 /**< buffer to store values of constraint matrix entries, or NULL */
       )
 {
-   int num_col;
+   HighsInt num_col;
+   HighsInt num_nz;
+   std::vector<HighsInt> highs_beg;
+   std::vector<HighsInt> highs_ind;
 
    assert(lpi != NULL);
    assert(lpi->highs != NULL);
@@ -1238,7 +1292,27 @@ SCIP_RETCODE SCIPlpiGetCols(
 
    SCIPdebugMessage("calling SCIPlpiGetCols()\n");
 
-   HIGHS_CALL( lpi->highs->getCols(firstcol, lastcol, num_col, NULL, lb, ub, *nnonz, beg, ind, val) );
+   /* HiGHS writes index arrays of type HighsInt, so use temporary buffers and copy the values back */
+   if( beg != NULL )
+      highs_beg.resize(lastcol - firstcol + 1);
+   if( ind != NULL )
+      highs_ind.resize(lpi->highs->getLp().a_matrix_.numNz());
+
+   HIGHS_CALL( lpi->highs->getCols(firstcol, lastcol, num_col, NULL, lb, ub, num_nz,
+      beg != NULL ? highs_beg.data() : NULL, ind != NULL ? highs_ind.data() : NULL, val) );
+
+   if( nnonz != NULL )
+      *nnonz = (int)num_nz;
+   if( beg != NULL )
+   {
+      for( HighsInt i = 0; i < num_col; ++i )
+         beg[i] = (int)highs_beg[i];
+   }
+   if( ind != NULL )
+   {
+      for( HighsInt i = 0; i < num_nz; ++i )
+         ind[i] = (int)highs_ind[i];
+   }
 
    return SCIP_OKAY;
 }
@@ -1259,7 +1333,10 @@ SCIP_RETCODE SCIPlpiGetRows(
       SCIP_Real*            val                 /**< buffer to store values of constraint matrix entries, or NULL */
       )
 {
-   int num_row;
+   HighsInt num_row;
+   HighsInt num_nz;
+   std::vector<HighsInt> highs_beg;
+   std::vector<HighsInt> highs_ind;
 
    assert(lpi != NULL);
    assert(lpi->highs != NULL);
@@ -1269,7 +1346,27 @@ SCIP_RETCODE SCIPlpiGetRows(
 
    SCIPdebugMessage("calling SCIPlpiGetRows()\n");
 
-   HIGHS_CALL( lpi->highs->getRows(firstrow, lastrow, num_row, lhs, rhs, *nnonz, beg, ind, val) );
+   /* HiGHS writes index arrays of type HighsInt, so use temporary buffers and copy the values back */
+   if( beg != NULL )
+      highs_beg.resize(lastrow - firstrow + 1);
+   if( ind != NULL )
+      highs_ind.resize(lpi->highs->getLp().a_matrix_.numNz());
+
+   HIGHS_CALL( lpi->highs->getRows(firstrow, lastrow, num_row, lhs, rhs, num_nz,
+      beg != NULL ? highs_beg.data() : NULL, ind != NULL ? highs_ind.data() : NULL, val) );
+
+   if( nnonz != NULL )
+      *nnonz = (int)num_nz;
+   if( beg != NULL )
+   {
+      for( HighsInt i = 0; i < num_row; ++i )
+         beg[i] = (int)highs_beg[i];
+   }
+   if( ind != NULL )
+   {
+      for( HighsInt i = 0; i < num_nz; ++i )
+         ind[i] = (int)highs_ind[i];
+   }
 
    return SCIP_OKAY;
 }
@@ -1945,7 +2042,7 @@ SCIP_Bool SCIPlpiIsDualFeasible(
    else if( model_status == HighsModelStatus::kUnbounded || model_status == HighsModelStatus::kUnboundedOrInfeasible )
       return FALSE;
 
-   int num_dual_infeasibilities = 1;
+   HighsInt num_dual_infeasibilities = 1;
    HighsStatus status = lpi->highs->getInfoValue("num_dual_infeasibilities", num_dual_infeasibilities);
    bool has_dual_feasible_sol = (status == HighsStatus::kOk) && (num_dual_infeasibilities == 0);
    return has_dual_feasible_sol;
@@ -2258,8 +2355,10 @@ SCIP_RETCODE SCIPlpiGetIterations(
    assert(iterations != NULL);
 
    *iterations = 0;
+   HighsInt highs_iterations = 0;
    /* this may return with a warning if the last solve failed */
-   HIGHS_CALL_WITH_WARNING( lpi->highs->getInfoValue("simplex_iteration_count", *iterations) );
+   HIGHS_CALL_WITH_WARNING( lpi->highs->getInfoValue("simplex_iteration_count", highs_iterations) );
+   *iterations = (int)highs_iterations;
    assert(*iterations >= 0);
    return SCIP_OKAY;
 }
@@ -2370,7 +2469,15 @@ SCIP_RETCODE SCIPlpiGetBasisInd(
        SCIPdebugMessage( "HiGHS Basis is not valid in function call SCIPlpiGetBasisInd()\n" );
        return SCIP_ERROR;
     }
-    HIGHS_CALL( lpi->highs->getBasicVariables(bind) );
+
+    /* HiGHS writes index arrays of type HighsInt, so use a temporary buffer and copy the values back */
+    int num_row = lpi->highs->getLp().num_row_;
+    std::vector<HighsInt> highs_bind(num_row);
+
+    HIGHS_CALL( lpi->highs->getBasicVariables(highs_bind.data()) );
+
+    for( int i = 0; i < num_row; ++i )
+       bind[i] = (int)highs_bind[i];
 
     return SCIP_OKAY;
 }
@@ -2395,12 +2502,29 @@ SCIP_RETCODE SCIPlpiGetBInvRow(
    assert(lpi != NULL);
    assert(lpi->highs != NULL);
 
-   if( lpi->highs->getBasisInverseRow(r, coef, ninds, inds) != HighsStatus::kOk )
+   /* HiGHS writes index data of type HighsInt, so use temporary data and copy the values back */
+   HighsInt highs_ninds = ninds != NULL ? *ninds : 0;
+   std::vector<HighsInt> highs_inds;
+   if( inds != NULL )
+      highs_inds.resize(lpi->highs->getLp().num_row_);
+   HighsInt* highs_ninds_ptr = ninds != NULL ? &highs_ninds : NULL;
+   HighsInt* highs_inds_ptr = inds != NULL ? highs_inds.data() : NULL;
+
+   if( lpi->highs->getBasisInverseRow(r, coef, highs_ninds_ptr, highs_inds_ptr) != HighsStatus::kOk )
    {
       SCIP_CALL( SCIPlpiSolveDual(lpi) );
    }
 
-   HIGHS_CALL( lpi->highs->getBasisInverseRow(r, coef, ninds, inds) );
+   HIGHS_CALL( lpi->highs->getBasisInverseRow(r, coef, highs_ninds_ptr, highs_inds_ptr) );
+
+   if( ninds != NULL )
+      *ninds = (int)highs_ninds;
+   if( inds != NULL )
+   {
+      assert(ninds != NULL);
+      for( HighsInt i = 0; i < highs_ninds; ++i )
+         inds[i] = (int)highs_inds[i];
+   }
    return SCIP_OKAY;
 }
 
@@ -2428,12 +2552,29 @@ SCIP_RETCODE SCIPlpiGetBInvCol(
    assert(lpi != NULL);
    assert(lpi->highs != NULL);
 
-   if( lpi->highs->getBasisInverseCol(c, coef, ninds, inds) != HighsStatus::kOk )
+   /* HiGHS writes index data of type HighsInt, so use temporary data and copy the values back */
+   HighsInt highs_ninds = ninds != NULL ? *ninds : 0;
+   std::vector<HighsInt> highs_inds;
+   if( inds != NULL )
+      highs_inds.resize(lpi->highs->getLp().num_row_);
+   HighsInt* highs_ninds_ptr = ninds != NULL ? &highs_ninds : NULL;
+   HighsInt* highs_inds_ptr = inds != NULL ? highs_inds.data() : NULL;
+
+   if( lpi->highs->getBasisInverseCol(c, coef, highs_ninds_ptr, highs_inds_ptr) != HighsStatus::kOk )
    {
       SCIP_CALL( SCIPlpiSolveDual(lpi) );
    }
 
-   HIGHS_CALL( lpi->highs->getBasisInverseCol(c, coef, ninds, inds) );
+   HIGHS_CALL( lpi->highs->getBasisInverseCol(c, coef, highs_ninds_ptr, highs_inds_ptr) );
+
+   if( ninds != NULL )
+      *ninds = (int)highs_ninds;
+   if( inds != NULL )
+   {
+      assert(ninds != NULL);
+      for( HighsInt i = 0; i < highs_ninds; ++i )
+         inds[i] = (int)highs_inds[i];
+   }
 
    return SCIP_OKAY;
 }
@@ -2459,12 +2600,29 @@ SCIP_RETCODE SCIPlpiGetBInvARow(
    assert(lpi != NULL);
    assert(lpi->highs != NULL);
 
-   if( lpi->highs->getReducedRow(r, coef, ninds, inds, binvrow) != HighsStatus::kOk )
+   /* HiGHS writes index data of type HighsInt, so use temporary data and copy the values back */
+   HighsInt highs_ninds = ninds != NULL ? *ninds : 0;
+   std::vector<HighsInt> highs_inds;
+   if( inds != NULL )
+      highs_inds.resize(lpi->highs->getLp().num_col_);
+   HighsInt* highs_ninds_ptr = ninds != NULL ? &highs_ninds : NULL;
+   HighsInt* highs_inds_ptr = inds != NULL ? highs_inds.data() : NULL;
+
+   if( lpi->highs->getReducedRow(r, coef, highs_ninds_ptr, highs_inds_ptr, binvrow) != HighsStatus::kOk )
    {
       SCIP_CALL( SCIPlpiSolveDual(lpi) );
    }
 
-   HIGHS_CALL( lpi->highs->getReducedRow(r, coef, ninds, inds, binvrow) );
+   HIGHS_CALL( lpi->highs->getReducedRow(r, coef, highs_ninds_ptr, highs_inds_ptr, binvrow) );
+
+   if( ninds != NULL )
+      *ninds = (int)highs_ninds;
+   if( inds != NULL )
+   {
+      assert(ninds != NULL);
+      for( HighsInt i = 0; i < highs_ninds; ++i )
+         inds[i] = (int)highs_inds[i];
+   }
 
    return SCIP_OKAY;
 }
@@ -2490,12 +2648,29 @@ SCIP_RETCODE SCIPlpiGetBInvACol(
    assert(lpi != NULL);
    assert(lpi->highs != NULL);
 
-   if( lpi->highs->getReducedColumn(c, coef, ninds, inds) != HighsStatus::kOk )
+   /* HiGHS writes index data of type HighsInt, so use temporary data and copy the values back */
+   HighsInt highs_ninds = ninds != NULL ? *ninds : 0;
+   std::vector<HighsInt> highs_inds;
+   if( inds != NULL )
+      highs_inds.resize(lpi->highs->getLp().num_row_);
+   HighsInt* highs_ninds_ptr = ninds != NULL ? &highs_ninds : NULL;
+   HighsInt* highs_inds_ptr = inds != NULL ? highs_inds.data() : NULL;
+
+   if( lpi->highs->getReducedColumn(c, coef, highs_ninds_ptr, highs_inds_ptr) != HighsStatus::kOk )
    {
       SCIP_CALL( SCIPlpiSolveDual(lpi) );
    }
 
-   HIGHS_CALL( lpi->highs->getReducedColumn(c, coef, ninds, inds) );
+   HIGHS_CALL( lpi->highs->getReducedColumn(c, coef, highs_ninds_ptr, highs_inds_ptr) );
+
+   if( ninds != NULL )
+      *ninds = (int)highs_ninds;
+   if( inds != NULL )
+   {
+      assert(ninds != NULL);
+      for( HighsInt i = 0; i < highs_ninds; ++i )
+         inds[i] = (int)highs_inds[i];
+   }
    return SCIP_OKAY;
 }
 
@@ -2773,7 +2948,11 @@ SCIP_RETCODE SCIPlpiGetIntpar(
       }
       break;
    case SCIP_LPPAR_SCALING:
-      HIGHS_CALL( lpi->highs->getOptionValue("simplex_scale_strategy", *ival) );
+      {
+         HighsInt highs_ival;
+         HIGHS_CALL( lpi->highs->getOptionValue("simplex_scale_strategy", highs_ival) );
+         *ival = (int)highs_ival;
+      }
       assert(*ival == 0 || *ival == 2 || *ival == 4); /* values used in SCIPlpiSetIntpar() */
       if( *ival <= 0 )
          *ival = 0;
@@ -2792,10 +2971,18 @@ SCIP_RETCODE SCIPlpiGetIntpar(
       *ival = lpi->nthreads;
       break;
    case SCIP_LPPAR_LPITLIM:
-      HIGHS_CALL( lpi->highs->getOptionValue("simplex_iteration_limit", *ival) );
+      {
+         HighsInt highs_ival;
+         HIGHS_CALL( lpi->highs->getOptionValue("simplex_iteration_limit", highs_ival) );
+         *ival = (int)highs_ival;
+      }
       break;
    case SCIP_LPPAR_RANDOMSEED:
-      HIGHS_CALL( lpi->highs->getOptionValue("random_seed", *ival) );
+      {
+         HighsInt highs_ival;
+         HIGHS_CALL( lpi->highs->getOptionValue("random_seed", highs_ival) );
+         *ival = (int)highs_ival;
+      }
       break;
    default:
       return SCIP_PARAMETERUNKNOWN;

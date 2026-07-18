@@ -479,6 +479,260 @@ bool factor_kkt_with_regularization(const Eigen::SparseMatrix<double>& w,
   return false;
 }
 
+// ── Augmented (uncondensed) Newton system ────────────────────────────────────
+// Assembles the primal-dual Newton matrix in the uncondensed form
+//   [ H + δ_W I   Jgᵀ   Jhᵀ  ]
+//   [ Jg         -δ_C I   0   ]
+//   [ Jh           0   -SM⁻¹  ]
+// instead of the condensed [H + Jhᵀ(M/S)Jh, Jgᵀ; Jg, 0].  The augmented form
+// trades a larger sparse factorization for: (i) no Jhᵀ(M/S)Jh product —
+// O(nnz) assembly instead of a sparse triple product whose fill can be
+// quadratic in the row counts; (ii) condition number ~κ of the Jacobian part
+// instead of ~κ² (the same normal-equations penalty as in dense LA); and
+// (iii) an inertia identity: by block elimination of the -SM⁻¹ block,
+// inertia(augmented) = inertia(condensed) + (0, m_ineq, 0), so the usual
+// (n, m_eq, 0) descent condition on the condensed form is equivalent to
+// (n, m_eq + m_ineq, 0) here.  The sparsity pattern is invariant per problem;
+// values are refilled per iteration through a scatter map (the same
+// analyze-once/factorize-many contract as the KKT assembler).
+struct AugmentedNewtonCache {
+  SparseKKTCache kkt;  // solver + factor state (generic sparse LU)
+  int n = 0, meq = 0, miq = 0;
+  int h_nnz = -1, jg_nnz = -1, jh_nnz = -1;
+  std::vector<int> h_outer, h_inner, jg_outer, jg_inner, jh_outer, jh_inner;
+  std::vector<int> h_pos;   // nnz(H): value index of H(i,j)
+  std::vector<int> jg_top;  // nnz(Jg): value index of Jg(r,c) at (n+r, c)
+  std::vector<int> jg_bot;  // nnz(Jg): value index of Jg(r,c) at (c, n+r)
+  std::vector<int> jh_top;  // nnz(Jh): value index of Jh(r,c) at (n+meq+r, c)
+  std::vector<int> jh_bot;  // nnz(Jh): value index of Jh(r,c) at (c, n+meq+r)
+  std::vector<int> diag_w;  // n: value index of (i,i)                 [+δ_W]
+  std::vector<int> diag_c;  // meq: value index of (n+i,n+i)          [-δ_C]
+  std::vector<int> diag_s;  // miq: value index of (n+meq+i,n+meq+i)  [-s_i/μ_i]
+};
+
+// Triplet-assemble the augmented pattern once (values zeroed except source
+// entries; the diagonal slots exist explicitly so the scatter refill can
+// address them).
+Eigen::SparseMatrix<double> assemble_augmented_newton_pattern(
+    const Eigen::SparseMatrix<double>& h,
+    const Eigen::SparseMatrix<double>& jg,
+    const Eigen::SparseMatrix<double>& jh) {
+  const int n = static_cast<int>(h.rows());
+  const int meq = static_cast<int>(jg.rows());
+  const int miq = static_cast<int>(jh.rows());
+  const int dim = n + meq + miq;
+  std::vector<Eigen::Triplet<double>> tri;
+  tri.reserve(static_cast<size_t>(h.nonZeros() + 2 * jg.nonZeros() +
+                                  2 * jh.nonZeros() + dim));
+  for (int col = 0; col < h.outerSize(); ++col)
+    for (Eigen::SparseMatrix<double>::InnerIterator it(h, col); it; ++it)
+      tri.emplace_back(it.row(), it.col(), it.value());
+  for (int i = 0; i < n; ++i) tri.emplace_back(i, i, 0.0);
+  for (int col = 0; col < jg.outerSize(); ++col)
+    for (Eigen::SparseMatrix<double>::InnerIterator it(jg, col); it; ++it) {
+      tri.emplace_back(n + it.row(), it.col(), it.value());
+      tri.emplace_back(it.col(), n + it.row(), it.value());
+    }
+  for (int i = 0; i < meq; ++i) tri.emplace_back(n + i, n + i, 0.0);
+  for (int col = 0; col < jh.outerSize(); ++col)
+    for (Eigen::SparseMatrix<double>::InnerIterator it(jh, col); it; ++it) {
+      tri.emplace_back(n + meq + it.row(), it.col(), it.value());
+      tri.emplace_back(it.col(), n + meq + it.row(), it.value());
+    }
+  for (int i = 0; i < miq; ++i)
+    tri.emplace_back(n + meq + i, n + meq + i, 0.0);
+  Eigen::SparseMatrix<double> kkt(dim, dim);
+  kkt.setFromTriplets(tri.begin(), tri.end());
+  kkt.makeCompressed();
+  return kkt;
+}
+
+void build_augmented_newton_scatter(AugmentedNewtonCache& c,
+                                    const Eigen::SparseMatrix<double>& h,
+                                    const Eigen::SparseMatrix<double>& jg,
+                                    const Eigen::SparseMatrix<double>& jh) {
+  const int n = c.n, meq = c.meq, miq = c.miq;
+  const int* ko = c.kkt.kkt.outerIndexPtr();
+  const int* ki = c.kkt.kkt.innerIndexPtr();
+  auto find = [&](int col, int row) {
+    const int* b = ki + ko[col];
+    const int* e = ki + ko[col + 1];
+    const int* p = std::lower_bound(b, e, row);
+    return static_cast<int>(p - ki);
+  };
+  c.h_pos.resize(static_cast<size_t>(h.nonZeros()));
+  for (int j = 0; j < h.outerSize(); ++j)
+    for (int p = h.outerIndexPtr()[j]; p < h.outerIndexPtr()[j + 1]; ++p)
+      c.h_pos[static_cast<size_t>(p)] = find(j, h.innerIndexPtr()[p]);
+  c.jg_top.resize(static_cast<size_t>(jg.nonZeros()));
+  c.jg_bot.resize(static_cast<size_t>(jg.nonZeros()));
+  for (int j = 0; j < jg.outerSize(); ++j)
+    for (int p = jg.outerIndexPtr()[j]; p < jg.outerIndexPtr()[j + 1]; ++p) {
+      c.jg_top[static_cast<size_t>(p)] = find(j, n + jg.innerIndexPtr()[p]);
+      c.jg_bot[static_cast<size_t>(p)] = find(n + jg.innerIndexPtr()[p], j);
+    }
+  c.jh_top.resize(static_cast<size_t>(jh.nonZeros()));
+  c.jh_bot.resize(static_cast<size_t>(jh.nonZeros()));
+  for (int j = 0; j < jh.outerSize(); ++j)
+    for (int p = jh.outerIndexPtr()[j]; p < jh.outerIndexPtr()[j + 1]; ++p) {
+      c.jh_top[static_cast<size_t>(p)] = find(j, n + meq + jh.innerIndexPtr()[p]);
+      c.jh_bot[static_cast<size_t>(p)] = find(n + meq + jh.innerIndexPtr()[p], j);
+    }
+  c.diag_w.resize(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) c.diag_w[static_cast<size_t>(i)] = find(i, i);
+  c.diag_c.resize(static_cast<size_t>(meq));
+  for (int i = 0; i < meq; ++i) c.diag_c[static_cast<size_t>(i)] = find(n + i, n + i);
+  c.diag_s.resize(static_cast<size_t>(miq));
+  for (int i = 0; i < miq; ++i)
+    c.diag_s[static_cast<size_t>(i)] = find(n + meq + i, n + meq + i);
+
+  c.h_nnz = static_cast<int>(h.nonZeros());
+  c.jg_nnz = static_cast<int>(jg.nonZeros());
+  c.jh_nnz = static_cast<int>(jh.nonZeros());
+  c.h_outer.assign(h.outerIndexPtr(), h.outerIndexPtr() + h.outerSize() + 1);
+  c.h_inner.assign(h.innerIndexPtr(), h.innerIndexPtr() + h.nonZeros());
+  c.jg_outer.assign(jg.outerIndexPtr(), jg.outerIndexPtr() + jg.outerSize() + 1);
+  c.jg_inner.assign(jg.innerIndexPtr(), jg.innerIndexPtr() + jg.nonZeros());
+  c.jh_outer.assign(jh.outerIndexPtr(), jh.outerIndexPtr() + jh.outerSize() + 1);
+  c.jh_inner.assign(jh.innerIndexPtr(), jh.innerIndexPtr() + jh.nonZeros());
+}
+
+bool augmented_newton_structure_matches(const AugmentedNewtonCache& c,
+                                        const Eigen::SparseMatrix<double>& h,
+                                        const Eigen::SparseMatrix<double>& jg,
+                                        const Eigen::SparseMatrix<double>& jh) {
+  const int h_nnz = static_cast<int>(h.nonZeros());
+  const int jg_nnz = static_cast<int>(jg.nonZeros());
+  const int jh_nnz = static_cast<int>(jh.nonZeros());
+  return c.h_nnz == h_nnz && c.jg_nnz == jg_nnz && c.jh_nnz == jh_nnz &&
+         c.h_outer.size() == static_cast<size_t>(h.outerSize() + 1) &&
+         c.jg_outer.size() == static_cast<size_t>(jg.outerSize() + 1) &&
+         c.jh_outer.size() == static_cast<size_t>(jh.outerSize() + 1) &&
+         std::memcmp(c.h_outer.data(), h.outerIndexPtr(),
+                     (h.outerSize() + 1) * sizeof(int)) == 0 &&
+         std::memcmp(c.jg_outer.data(), jg.outerIndexPtr(),
+                     (jg.outerSize() + 1) * sizeof(int)) == 0 &&
+         std::memcmp(c.jh_outer.data(), jh.outerIndexPtr(),
+                     (jh.outerSize() + 1) * sizeof(int)) == 0 &&
+         std::memcmp(c.h_inner.data(), h.innerIndexPtr(), h_nnz * sizeof(int)) == 0 &&
+         std::memcmp(c.jg_inner.data(), jg.innerIndexPtr(), jg_nnz * sizeof(int)) == 0 &&
+         std::memcmp(c.jh_inner.data(), jh.innerIndexPtr(), jh_nnz * sizeof(int)) == 0;
+}
+
+// Assemble [H + δ_W I, Jgᵀ, Jhᵀ; Jg, -δ_C I, 0; Jh, 0, -SM⁻¹] into the cache.
+void assemble_augmented_newton(AugmentedNewtonCache& c,
+                               const Eigen::SparseMatrix<double>& h,
+                               const Eigen::SparseMatrix<double>& jg,
+                               const Eigen::SparseMatrix<double>& jh,
+                               const Eigen::VectorXd& s,
+                               const Eigen::VectorXd& mu_ineq,
+                               double delta_w, double delta_c) {
+  const int n = c.n, meq = c.meq, miq = c.miq;
+  if (!augmented_newton_structure_matches(c, h, jg, jh)) {
+    c.kkt.kkt = assemble_augmented_newton_pattern(h, jg, jh);
+    build_augmented_newton_scatter(c, h, jg, jh);
+  }
+  double* v = c.kkt.kkt.valuePtr();
+  std::memset(v, 0, static_cast<size_t>(c.kkt.kkt.nonZeros()) * sizeof(double));
+  const double* hv = h.valuePtr();
+  for (int k = 0; k < c.h_nnz; ++k)
+    v[c.h_pos[static_cast<size_t>(k)]] += hv[k];
+  const double* gv = jg.valuePtr();
+  for (int k = 0; k < c.jg_nnz; ++k) {
+    v[c.jg_top[static_cast<size_t>(k)]] += gv[k];
+    v[c.jg_bot[static_cast<size_t>(k)]] += gv[k];
+  }
+  const double* jhv = jh.valuePtr();
+  for (int k = 0; k < c.jh_nnz; ++k) {
+    v[c.jh_top[static_cast<size_t>(k)]] += jhv[k];
+    v[c.jh_bot[static_cast<size_t>(k)]] += jhv[k];
+  }
+  for (int i = 0; i < n; ++i) v[c.diag_w[static_cast<size_t>(i)]] += delta_w;
+  for (int i = 0; i < meq; ++i) v[c.diag_c[static_cast<size_t>(i)]] -= delta_c;
+  for (int i = 0; i < miq; ++i) {
+    // -S·M⁻¹ diagonal: -s_i / μ_i (μ_i floored away from zero).
+    const double mui = std::max(mu_ineq[i], kMinPositive);
+    v[c.diag_s[static_cast<size_t>(i)]] -= s[i] / mui;
+  }
+}
+
+// Solve the assembled system with the cached factor, splitting the solution
+// into (dx, dλ, dμ) and applying up to 2 iterative-refinement steps.
+bool solve_augmented_newton(AugmentedNewtonCache& c,
+                            const Eigen::VectorXd& rhs,
+                            Eigen::VectorXd& dx,
+                            Eigen::VectorXd& dlambda,
+                            Eigen::VectorXd& dmu) {
+  if (!c.kkt.factored) return false;
+  Eigen::VectorXd sol;
+  if (!c.kkt.solver || !c.kkt.solver->solve(rhs, sol) || !sol.allFinite())
+    return false;
+  for (int ref = 0; ref < 2; ++ref) {
+    Eigen::VectorXd residual = rhs - c.kkt.kkt_orig * sol;
+    if (residual.cwiseAbs().maxCoeff() <
+        1e-14 * std::max(1.0, rhs.cwiseAbs().maxCoeff()))
+      break;
+    Eigen::VectorXd corr;
+    if (!c.kkt.solver->solve(residual, corr) || !corr.allFinite()) break;
+    sol += corr;
+  }
+  dx = sol.head(c.n);
+  dlambda = sol.segment(c.n, c.meq);
+  dmu = sol.tail(c.miq);
+  return true;
+}
+
+// Factor + solve the augmented Newton step with Wächter–Biegler δ_W
+// escalation (no formal inertia certificate on this path yet — the condensed
+// path's reduced-space certificate does not transfer directly).
+bool factor_solve_augmented_newton(
+    AugmentedNewtonCache& c,
+    const Eigen::SparseMatrix<double>& h,
+    const Eigen::SparseMatrix<double>& jg,
+    const Eigen::SparseMatrix<double>& jh,
+    const Eigen::VectorXd& s,
+    const Eigen::VectorXd& mu_ineq,
+    double& delta_w_last,
+    const InertiaSettings& settings,
+    const Eigen::VectorXd& rhs,
+    Eigen::VectorXd& dx,
+    Eigen::VectorXd& dlambda,
+    Eigen::VectorXd& dmu) {
+  double delta_w = std::max(0.0, delta_w_last);
+  bool delta_w_was_zero = (delta_w == 0.0);
+  const double delta_c = settings.delta_c_stripe *
+      std::pow(std::max(settings.mu, 1e-20), 0.25);
+  for (int attempt = 0; attempt < 60; ++attempt) {
+    assemble_augmented_newton(c, h, jg, jh, s, mu_ineq, delta_w, 0.0);
+    if (factor_current_kkt(c.kkt, c.n, c.meq + c.miq) &&
+        solve_augmented_newton(c, rhs, dx, dlambda, dmu)) {
+      delta_w_last = std::max(settings.delta_w_min,
+                              delta_w * settings.kappa_w_minus);
+      return true;
+    }
+    // Dual perturbation before escalating δ_W (mirrors the condensed path).
+    assemble_augmented_newton(c, h, jg, jh, s, mu_ineq, delta_w, delta_c);
+    if (factor_current_kkt(c.kkt, c.n, c.meq + c.miq) &&
+        solve_augmented_newton(c, rhs, dx, dlambda, dmu)) {
+      delta_w_last = std::max(settings.delta_w_min,
+                              delta_w * settings.kappa_w_minus);
+      return true;
+    }
+    // Wächter–Biegler δ_W schedule.
+    if (delta_w_was_zero) {
+      delta_w = settings.delta_w_0;
+      delta_w_was_zero = false;
+    } else if (attempt == 0) {
+      delta_w *= settings.kappa_w_plus_first;
+    } else {
+      delta_w *= settings.kappa_w_plus;
+    }
+    if (delta_w > settings.delta_w_max) return false;
+  }
+  return false;
+}
+
+
 bool evaluate_nlp_state(const NLPModel& prob,
                         const Eigen::VectorXd& x,
                         const std::vector<int>& lb_cols,
@@ -830,6 +1084,9 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
   double delta_w_last = 0.0;
   SparseInertiaKKTCache kkt_cache;
   kkt_cache.preferred_free_columns = prob.equality_free_columns;
+  // Augmented (uncondensed) Newton path cache — persists across iterations
+  // so the sparsity pattern/scatter map is built once per problem.
+  AugmentedNewtonCache augmented_cache;
   int total_iters = 0;
   int outer_iters = 0;
   const int max_outer = 60;
@@ -951,8 +1208,55 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
         break;  // proceed to μ update
       }
 
-      // Build the primal-dual reduced KKT matrix W = H + Σ + Jh^T (M/S) Jh.
+      // Build the primal-dual reduced KKT matrix W = H + Σ + Jh^T (M/S) Jh
+      // (condensed path) — or solve the augmented uncondensed system.
       const auto w_build_start = std::chrono::steady_clock::now();
+      Eigen::VectorXd dx;
+      Eigen::VectorXd dlambda;
+      Eigen::VectorXd ds = Eigen::VectorXd::Zero(s.size());
+      Eigen::VectorXd dmu_ineq = Eigen::VectorXd::Zero(mu_ineq.size());
+      Eigen::VectorXd rhs;  // Newton rhs (layout depends on the active path)
+      InertiaSettings isettings;
+      isettings.mu = mu_bar;
+
+      const bool use_augmented_newton =
+          opt.use_augmented_newton && state.jh.rows() > 0;
+      if (use_augmented_newton) {
+        // ── Augmented (uncondensed) Newton path ──
+        // [H + δ_W I, Jgᵀ, Jhᵀ; Jg, 0, 0; Jh, 0, -SM⁻¹] (dx, dλ, dμ) =
+        //   [-r_d; -r_eq; -r_ineq - M⁻¹(μ̄e - Sμ)]
+        augmented_cache.n = static_cast<int>(state.hess.rows());
+        augmented_cache.meq = static_cast<int>(state.jg.rows());
+        augmented_cache.miq = static_cast<int>(state.jh.rows());
+        const int miq = augmented_cache.miq;
+        Eigen::VectorXd rhs_ineq_aug(miq);
+        for (int i = 0; i < miq; ++i) {
+          const double mui = std::max(mu_ineq[i], kMinPositive);
+          rhs_ineq_aug[i] = -r_ineq[i] - (mu_bar - s[i] * mu_ineq[i]) / mui;
+        }
+        rhs.resize(augmented_cache.n + augmented_cache.meq + miq);
+        rhs << -r_d, -r_eq, rhs_ineq_aug;
+        if (!factor_solve_augmented_newton(
+                augmented_cache, state.hess, state.jg, state.jh, s, mu_ineq,
+                delta_w_last, isettings, rhs, dx, dlambda, dmu_ineq)) {
+          snapshot_outcome(
+              false, total_iters + 1,
+              "Filter: augmented KKT regularization cap exceeded", rs);
+          return result;
+        }
+        ds = -r_ineq - state.jh * dx;
+        if (opt.verbose) {
+          std::cerr << "[NativeIPM] iter=" << total_iters
+                    << " augmented Newton: dim="
+                    << augmented_cache.n + augmented_cache.meq + miq
+                    << " nnz=" << augmented_cache.kkt.nnz
+                    << ", seconds="
+                    << std::chrono::duration<double>(
+                           std::chrono::steady_clock::now() - w_build_start)
+                           .count()
+                    << '\n' << std::flush;
+        }
+      } else {
       Eigen::SparseMatrix<double> w = state.hess;
       if (state.jh.rows() > 0) {
         const Eigen::VectorXd d = mu_ineq.cwiseQuotient(
@@ -989,13 +1293,9 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
         }
         rhs_x -= state.jh.transpose() * v;
       }
-      Eigen::VectorXd rhs(rhs_x.size() + r_eq.size());
+      rhs.resize(rhs_x.size() + r_eq.size());
       rhs << rhs_x, -r_eq;
 
-      InertiaSettings isettings;
-      isettings.mu = mu_bar;
-      Eigen::VectorXd dx;
-      Eigen::VectorXd dlambda;
       InertiaStatus istatus;
       const auto factor_start = std::chrono::steady_clock::now();
       if (opt.verbose) {
@@ -1040,8 +1340,6 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
       // Recover step directions for the eliminated variables:
       //   ds       = −r_ineq − Jh dx
       //   dmu_ineq = (μ_bar − s·μ − μ·ds) / s
-      Eigen::VectorXd ds = Eigen::VectorXd::Zero(s.size());
-      Eigen::VectorXd dmu_ineq = Eigen::VectorXd::Zero(mu_ineq.size());
       if (s.size() > 0) {
         ds = -r_ineq - state.jh * dx;
         for (int i = 0; i < s.size(); ++i) {
@@ -1049,6 +1347,7 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
           dmu_ineq[i] = (mu_bar - s[i] * mu_ineq[i] - mu_ineq[i] * ds[i]) / si;
         }
       }
+      }  // end condensed (explicit Jhᵀ(M/S)Jh) Newton path
 
       // Fraction-to-boundary step caps.
       const double tau = std::max(0.5, std::min(opt.alpha_max,
@@ -1075,31 +1374,49 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
             break;
           }
 
-          Eigen::VectorXd rhs_gc(rhs_x.size() + r_eq.size());
-          rhs_gc.head(rhs_x.size()) =
-              -(state.jh.transpose() *
-                eps_gc.cwiseQuotient(
-                    s.cwiseMax(Eigen::VectorXd::Constant(s.size(), kMinPositive))));
-          rhs_gc.tail(r_eq.size()).setZero();
-
           Eigen::VectorXd dx_gc;
           Eigen::VectorXd dlambda_gc;
-          if (!solve_kkt_inertia_corrected_sparse(
-                  kkt_cache, rhs_gc, dx_gc, dlambda_gc)) {
+          Eigen::VectorXd dmu_gc;
+          bool gc_ok = false;
+          if (use_augmented_newton) {
+            // Augmented correction rhs: [0; 0; -M⁻¹ε] — derived from the
+            // same correction equations (see Newton-step comment).
+            Eigen::VectorXd rhs_gc = Eigen::VectorXd::Zero(
+                augmented_cache.n + augmented_cache.meq + augmented_cache.miq);
+            for (int i = 0; i < augmented_cache.miq; ++i) {
+              const double mui = std::max(mu_ineq[i], kMinPositive);
+              rhs_gc[augmented_cache.n + augmented_cache.meq + i] =
+                  -eps_gc[i] / mui;
+            }
+            gc_ok = solve_augmented_newton(augmented_cache, rhs_gc, dx_gc,
+                                           dlambda_gc, dmu_gc);
+          } else {
+            const int n_x = static_cast<int>(state.hess.rows());
+            Eigen::VectorXd rhs_gc(n_x + r_eq.size());
+            rhs_gc.head(n_x) =
+                -(state.jh.transpose() *
+                  eps_gc.cwiseQuotient(
+                      s.cwiseMax(Eigen::VectorXd::Constant(s.size(), kMinPositive))));
+            rhs_gc.tail(r_eq.size()).setZero();
+            gc_ok = solve_kkt_inertia_corrected_sparse(
+                kkt_cache, rhs_gc, dx_gc, dlambda_gc);
+            if (gc_ok) {
+              const Eigen::VectorXd ds_gc0 = -state.jh * dx_gc;
+              dmu_gc =
+                  eps_gc.cwiseQuotient(
+                      s.cwiseMax(Eigen::VectorXd::Constant(s.size(), kMinPositive))) -
+                  mu_ineq.cwiseQuotient(
+                      s.cwiseMax(Eigen::VectorXd::Constant(s.size(), kMinPositive)))
+                      .cwiseProduct(ds_gc0);
+            }
+          }
+          if (!gc_ok) {
             break;
           }
 
-          const Eigen::VectorXd ds_gc = -state.jh * dx_gc;
-          const Eigen::VectorXd dmu_gc =
-              eps_gc.cwiseQuotient(
-                  s.cwiseMax(Eigen::VectorXd::Constant(s.size(), kMinPositive))) -
-              mu_ineq.cwiseQuotient(
-                  s.cwiseMax(Eigen::VectorXd::Constant(s.size(), kMinPositive)))
-                  .cwiseProduct(ds_gc);
-
           dx += dx_gc;
           dlambda += dlambda_gc;
-          ds += ds_gc;
+          ds += -state.jh * dx_gc;
           dmu_ineq += dmu_gc;
         }
       }
@@ -1250,14 +1567,23 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
 
           Eigen::VectorXd c_soc = alpha * r_eq + trial.state.g;
           Eigen::VectorXd rhs_soc = rhs;
-          // Overwrite the equality block of the RHS with -c_soc; the primal
-          // block (rhs_x) stays the same.
-          rhs_soc.tail(r_eq.size()) = -c_soc;
-
           Eigen::VectorXd dx_soc;
           Eigen::VectorXd dlambda_soc;
-          if (solve_kkt_inertia_corrected_sparse(
-                  kkt_cache, rhs_soc, dx_soc, dlambda_soc)) {
+          Eigen::VectorXd dmu_soc;
+          bool soc_ok;
+          if (use_augmented_newton) {
+            // Augmented layout: the equality block is the middle segment.
+            rhs_soc.segment(augmented_cache.n, r_eq.size()) = -c_soc;
+            soc_ok = solve_augmented_newton(augmented_cache, rhs_soc, dx_soc,
+                                            dlambda_soc, dmu_soc);
+          } else {
+            // Overwrite the equality block of the RHS with -c_soc; the primal
+            // block (rhs_x) stays the same.
+            rhs_soc.tail(r_eq.size()) = -c_soc;
+            soc_ok = solve_kkt_inertia_corrected_sparse(
+                kkt_cache, rhs_soc, dx_soc, dlambda_soc);
+          }
+          if (soc_ok) {
             // Composite primal step; update slacks via linearized h.
             const Eigen::VectorXd x_soc_trial = x + alpha * dx + dx_soc;
             Eigen::VectorXd s_soc_trial;
@@ -1277,8 +1603,12 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
             if (soc_slack_ok) {
               Eigen::VectorXd dmu_soc_extra = Eigen::VectorXd::Zero(mu_ineq.size());
               if (mu_ineq.size() > 0 && s.size() > 0) {
-                dmu_soc_extra = -mu_ineq.cwiseProduct(ds_soc_delta).cwiseQuotient(
-                    s.cwiseMax(Eigen::VectorXd::Constant(s.size(), kMinPositive)));
+                if (use_augmented_newton) {
+                  dmu_soc_extra = dmu_soc;  // solved directly on this path
+                } else {
+                  dmu_soc_extra = -mu_ineq.cwiseProduct(ds_soc_delta).cwiseQuotient(
+                      s.cwiseMax(Eigen::VectorXd::Constant(s.size(), kMinPositive)));
+                }
               }
               const Eigen::VectorXd lambda_soc_trial =
                   lambda + alpha_dual * dlambda + dlambda_soc;

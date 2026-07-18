@@ -51,42 +51,8 @@ bool factor_cached_sparse_matrix(SparseKKTCache& cache,
                                  int n,
                                  int meq) {
   matrix.makeCompressed();
-  cache.n = n;
-  cache.meq = meq;
   cache.kkt = std::move(matrix);
-  cache.kkt_orig = cache.kkt;
-
-  if (!cache.solver) {
-    cache.solver = make_default_sparse_solver();
-    cache.pattern_analyzed = false;
-  }
-  const bool pattern_changed =
-      !cache.pattern_analyzed ||
-      !same_sparse_pattern(cache.kkt, cache.dim, cache.pattern_outer,
-                           cache.pattern_inner);
-  if (pattern_changed) {
-    cache.solver->analyze_pattern(cache.kkt);
-    remember_sparse_pattern(cache.kkt, cache.pattern_outer,
-                            cache.pattern_inner);
-    cache.pattern_analyzed = true;
-    ++cache.symbolic_analyses;
-  }
-  if (cache.kkt.rows() > std::numeric_limits<int>::max() ||
-      cache.kkt.nonZeros() > std::numeric_limits<int>::max()) {
-    // The solver backend is int32-indexed: fail loudly rather than
-    // silently truncating the dimension/nnz counters to int.
-    cache.factored = false;
-    return false;
-  }
-  cache.dim = static_cast<int>(cache.kkt.rows());
-  cache.nnz = static_cast<int>(cache.kkt.nonZeros());
-  ++cache.numeric_factorizations;
-  if (!cache.solver->factorize(cache.kkt)) {
-    cache.factored = false;
-    return false;
-  }
-  cache.factored = true;
-  return true;
+  return factor_current_kkt(cache, n, meq);
 }
 
 Eigen::SparseMatrix<double> assemble_augmented_kkt(
@@ -124,7 +90,156 @@ Eigen::SparseMatrix<double> assemble_augmented_kkt(
   return kkt;
 }
 
+// ── Analyze-once assembly for the augmented KKT structure ───────────────────
+// The IPM rebuilds [W + δ_W I, Jg'; Jg, -δ_C I] every iteration (and several
+// times per iteration in the inertia-correction retry loop).  The sparsity
+// pattern is invariant per problem, so the triplet assembly is replaced by a
+// precomputed scatter map: slow path builds the pattern once and records, for
+// every source entry, its position in the KKT value array; the fast path then
+// refills values in O(nnz) with no allocation.
+
+// Compute scatter positions of every (W, Jg) entry inside cache.kkt's CSC
+// value array (pattern must already hold the augmented structure).
+void build_augmented_scatter(SparseKKTCache& cache,
+                             const Eigen::SparseMatrix<double>& w,
+                             const Eigen::SparseMatrix<double>& jg) {
+  const int n = static_cast<int>(w.rows());
+  const int meq = static_cast<int>(jg.rows());
+  const int* ko = cache.kkt.outerIndexPtr();
+  const int* ki = cache.kkt.innerIndexPtr();
+  // Position of (row, col) in the KKT CSC arrays (entry must exist).
+  auto find = [&](int col, int row) {
+    const int* b = ki + ko[col];
+    const int* e = ki + ko[col + 1];
+    const int* p = std::lower_bound(b, e, row);
+    return static_cast<int>(p - ki);
+  };
+
+  // Direct CSC loops: p is the storage offset in the source value array
+  // (InnerIterator::index() would be the ROW index, not the offset).
+  cache.asm_w_pos.resize(static_cast<size_t>(w.nonZeros()));
+  for (int j = 0; j < w.outerSize(); ++j)
+    for (int p = w.outerIndexPtr()[j]; p < w.outerIndexPtr()[j + 1]; ++p)
+      cache.asm_w_pos[static_cast<size_t>(p)] =
+          find(j, w.innerIndexPtr()[p]);
+
+  cache.asm_jg_top.resize(static_cast<size_t>(jg.nonZeros()));
+  cache.asm_jg_bot.resize(static_cast<size_t>(jg.nonZeros()));
+  for (int j = 0; j < jg.outerSize(); ++j)
+    for (int p = jg.outerIndexPtr()[j]; p < jg.outerIndexPtr()[j + 1]; ++p) {
+      cache.asm_jg_top[static_cast<size_t>(p)] = find(j, n + jg.innerIndexPtr()[p]);
+      cache.asm_jg_bot[static_cast<size_t>(p)] = find(n + jg.innerIndexPtr()[p], j);
+    }
+
+  cache.asm_diag_w.resize(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i)
+    cache.asm_diag_w[static_cast<size_t>(i)] = find(i, i);
+  cache.asm_diag_c.resize(static_cast<size_t>(meq));
+  for (int i = 0; i < meq; ++i)
+    cache.asm_diag_c[static_cast<size_t>(i)] = find(n + i, n + i);
+
+  // Structure fingerprints for change detection on later calls.
+  cache.asm_w_nnz = static_cast<int>(w.nonZeros());
+  cache.asm_jg_nnz = static_cast<int>(jg.nonZeros());
+  cache.asm_w_outer.assign(w.outerIndexPtr(), w.outerIndexPtr() + w.outerSize() + 1);
+  cache.asm_w_inner.assign(w.innerIndexPtr(), w.innerIndexPtr() + w.nonZeros());
+  cache.asm_jg_outer.assign(jg.outerIndexPtr(), jg.outerIndexPtr() + jg.outerSize() + 1);
+  cache.asm_jg_inner.assign(jg.innerIndexPtr(), jg.innerIndexPtr() + jg.nonZeros());
+}
+
+bool augmented_structure_matches(const SparseKKTCache& cache,
+                                 const Eigen::SparseMatrix<double>& w,
+                                 const Eigen::SparseMatrix<double>& jg) {
+  const int w_nnz = static_cast<int>(w.nonZeros());
+  const int jg_nnz = static_cast<int>(jg.nonZeros());
+  return cache.asm_w_nnz == w_nnz && cache.asm_jg_nnz == jg_nnz &&
+         cache.asm_w_outer.size() == static_cast<size_t>(w.outerSize() + 1) &&
+         cache.asm_jg_outer.size() == static_cast<size_t>(jg.outerSize() + 1) &&
+         std::memcmp(cache.asm_w_outer.data(), w.outerIndexPtr(),
+                     (w.outerSize() + 1) * sizeof(int)) == 0 &&
+         std::memcmp(cache.asm_jg_outer.data(), jg.outerIndexPtr(),
+                     (jg.outerSize() + 1) * sizeof(int)) == 0 &&
+         std::memcmp(cache.asm_w_inner.data(), w.innerIndexPtr(),
+                     w_nnz * sizeof(int)) == 0 &&
+         std::memcmp(cache.asm_jg_inner.data(), jg.innerIndexPtr(),
+                     jg_nnz * sizeof(int)) == 0;
+}
+
+// Assemble [W + δ_W I, Jg'; Jg, -δ_C I] into cache.kkt, reusing the cached
+// scatter map whenever the (w, jg) structure is unchanged.
+void assemble_augmented_kkt_cached(SparseKKTCache& cache,
+                                   const Eigen::SparseMatrix<double>& w,
+                                   const Eigen::SparseMatrix<double>& jg,
+                                   double delta_w, double delta_c) {
+  const int n = static_cast<int>(w.rows());
+  const int meq = static_cast<int>(jg.rows());
+  if (!augmented_structure_matches(cache, w, jg)) {
+    // Slow path: triplet-assemble once to obtain the pattern, then build
+    // the scatter map for subsequent fast refills.
+    cache.kkt = assemble_augmented_kkt(w, jg, 0.0, 0.0);
+    build_augmented_scatter(cache, w, jg);
+  }
+  double* v = cache.kkt.valuePtr();
+  std::memset(v, 0, static_cast<size_t>(cache.kkt.nonZeros()) * sizeof(double));
+  const double* wv = w.valuePtr();
+  const int w_nnz = static_cast<int>(w.nonZeros());
+  for (int k = 0; k < w_nnz; ++k)
+    v[cache.asm_w_pos[static_cast<size_t>(k)]] += wv[k];
+  const double* jv = jg.valuePtr();
+  const int jg_nnz = static_cast<int>(jg.nonZeros());
+  for (int k = 0; k < jg_nnz; ++k) {
+    v[cache.asm_jg_top[static_cast<size_t>(k)]] += jv[k];
+    v[cache.asm_jg_bot[static_cast<size_t>(k)]] += jv[k];
+  }
+  for (int i = 0; i < n; ++i)
+    v[cache.asm_diag_w[static_cast<size_t>(i)]] += delta_w;
+  for (int i = 0; i < meq; ++i)
+    v[cache.asm_diag_c[static_cast<size_t>(i)]] -= delta_c;
+}
+
 }  // namespace
+
+// Factor cache.kkt as currently assembled (pattern re-analysis only when the
+// exact compressed structure changed).  Used by cached-assembly paths that
+// keep cache.kkt resident across calls (kkt scatter assembly here and the
+// augmented Newton assembler in ipm_solver.cpp).
+bool factor_current_kkt(SparseKKTCache& cache, int n, int meq) {
+  cache.n = n;
+  cache.meq = meq;
+  cache.kkt_orig = cache.kkt;
+
+  if (!cache.solver) {
+    cache.solver = make_default_sparse_solver();
+    cache.pattern_analyzed = false;
+  }
+  const bool pattern_changed =
+      !cache.pattern_analyzed ||
+      !same_sparse_pattern(cache.kkt, cache.dim, cache.pattern_outer,
+                           cache.pattern_inner);
+  if (pattern_changed) {
+    cache.solver->analyze_pattern(cache.kkt);
+    remember_sparse_pattern(cache.kkt, cache.pattern_outer,
+                            cache.pattern_inner);
+    cache.pattern_analyzed = true;
+    ++cache.symbolic_analyses;
+  }
+  if (cache.kkt.rows() > std::numeric_limits<int>::max() ||
+      cache.kkt.nonZeros() > std::numeric_limits<int>::max()) {
+    // The solver backend is int32-indexed: fail loudly rather than
+    // silently truncating the dimension/nnz counters to int.
+    cache.factored = false;
+    return false;
+  }
+  cache.dim = static_cast<int>(cache.kkt.rows());
+  cache.nnz = static_cast<int>(cache.kkt.nonZeros());
+  ++cache.numeric_factorizations;
+  if (!cache.solver->factorize(cache.kkt)) {
+    cache.factored = false;
+    return false;
+  }
+  cache.factored = true;
+  return true;
+}
 
 bool factor_kkt_sparse(SparseKKTCache& cache,
                        const Eigen::SparseMatrix<double>& w,
@@ -132,8 +247,8 @@ bool factor_kkt_sparse(SparseKKTCache& cache,
                        double reg) {
   const int n = static_cast<int>(w.rows());
   const int meq = static_cast<int>(jg.rows());
-  return factor_cached_sparse_matrix(
-      cache, assemble_augmented_kkt(w, jg, reg, reg), n, meq);
+  assemble_augmented_kkt_cached(cache, w, jg, reg, reg);
+  return factor_current_kkt(cache, n, meq);
 }
 
 bool solve_kkt_sparse(SparseKKTCache& cache,
@@ -569,9 +684,8 @@ bool factor_kkt_inertia_corrected_sparse(
     bool delta_w_was_zero = (delta_w == 0.0);
     for (; status.factorization_attempts < 8;
          ++status.factorization_attempts) {
-      if (factor_cached_sparse_matrix(
-              cache.augmented,
-              assemble_augmented_kkt(w, jg, delta_w, 0.0), n, meq)) {
+      assemble_augmented_kkt_cached(cache.augmented, w, jg, delta_w, 0.0);
+      if (factor_current_kkt(cache.augmented, n, meq)) {
         cache.factored = true;
         status.correct = true;
         status.n_pos = n;
@@ -619,9 +733,8 @@ bool factor_kkt_inertia_corrected_sparse(
     // augmented matrix is equivalent to full row rank of Jg. The block LDLT
     // congruence then gives inertia (n, meq, 0) without materializing the dense
     // Schur complement.
-    if (factor_cached_sparse_matrix(
-            cache.augmented,
-            assemble_augmented_kkt(w, jg, delta_w, 0.0), n, meq)) {
+    assemble_augmented_kkt_cached(cache.augmented, w, jg, delta_w, 0.0);
+    if (factor_current_kkt(cache.augmented, n, meq)) {
       cache.factored = true;
       status.correct = true;
       status.delta_w_used = delta_w;
@@ -636,9 +749,8 @@ bool factor_kkt_inertia_corrected_sparse(
     // deficient, so the augmented inertia remains (n, meq, 0).
     const double delta_c = settings.delta_c_stripe *
         std::pow(std::max(settings.mu, 1e-20), 0.25);
-    if (factor_cached_sparse_matrix(
-            cache.augmented,
-            assemble_augmented_kkt(w, jg, delta_w, delta_c), n, meq)) {
+    assemble_augmented_kkt_cached(cache.augmented, w, jg, delta_w, delta_c);
+    if (factor_current_kkt(cache.augmented, n, meq)) {
       cache.factored = true;
       status.correct = true;
       status.n_zero = meq;

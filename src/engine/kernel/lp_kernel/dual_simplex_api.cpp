@@ -58,6 +58,17 @@ StandardFormLP build_standard_form_lp(const LPModel& lp) {
     for (int i = 0; i < m_ineq; ++i) {
       const double lhs = lp_row_lhs_or_neg_inf(lp, i);
       const double rhs = lp.b[i];
+      if (!std::isfinite(rhs) && std::isfinite(lhs)) {
+        // One-sided G-type row A x >= lhs (b = +inf): surplus form
+        // A x - s = lhs with s >= 0.  Keeping rhs = +inf would poison the
+        // standard-form RHS (inf → NaN in Phase I).
+        rows[i].rhs_value = lhs;
+        rows[i].rhs = lhs - a_lb[i];
+        rows[i].sense = 'G';
+        rows[i].sign = 1;
+        rows[i].slack_ub = kInf;
+        continue;
+      }
       rows[i].rhs_value = rhs;
       rows[i].rhs = rhs - a_lb[i];
       rows[i].sense = 'L';

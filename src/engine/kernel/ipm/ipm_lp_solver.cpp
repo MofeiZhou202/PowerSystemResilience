@@ -41,6 +41,20 @@
 #define MIPSOLVERS_RESTRICT
 #endif
 
+// OpenMP for the big embarrassingly-parallel kernel loops (SpMV, element-wise
+// builds).  Threshold-guarded at runtime so small problems stay serial.
+// Only loops with provably disjoint per-iteration outputs are parallelized.
+#if defined(MIPSOLVERS_USE_OPENMP)
+#include <omp.h>
+#define MIPSOLVERS_OMP_STR_(x) #x
+#define MIPSOLVERS_OMP_STR(x) MIPSOLVERS_OMP_STR_(x)
+#define MIPSOLVERS_OMP_PARALLEL_IF(cond) \
+  _Pragma(MIPSOLVERS_OMP_STR(omp parallel for if(cond)))
+#else
+#define MIPSOLVERS_OMP_PARALLEL_IF(cond)
+#endif
+#define MIPSOLVERS_OMP_THRESHOLD 4096  // parallelize only loops larger than this
+
 namespace mipsolvers::engine {
 
 // Apple Accelerate sparse Cholesky cache — persists across IPM solve calls
@@ -357,6 +371,19 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob) const {
 }
 
 SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::VectorXd& x0) const {
+  // Scaling fallback: solve with the configured Ruiz rounds first; if it
+  // fails to converge, retry without scaling.  Equilibration helps most
+  // problems (e.g. NETLIB afiro) but stalls some degenerate ones
+  // (e.g. stocfor1) — retrying unscaled is the standard robustness answer.
+  SolveResult res = solve_lp_impl(prob, x0, opt_.ruiz_rounds);
+  if (!res.stats.success && opt_.ruiz_rounds > 0) {
+    SolveResult raw = solve_lp_impl(prob, x0, 0);
+    if (raw.stats.success) res = std::move(raw);
+  }
+  return res;
+}
+
+SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::VectorXd& x0, int ruiz_rounds) const {
   const bool has_warm_start = (x0.size() == prob.c.size());
   SolveResult out;
   out.stats.solver_name = name();
@@ -376,12 +403,42 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   const int m = mi + me;
   const int nn = n_orig + mi;  // original vars + inequality slacks
 
-  // === Ruiz equilibration (honors opt_.ruiz_rounds) ===
+  // === One-sided (G-type) row normalization ===
+  // The IPM's slack form A x + s = b requires a finite upper bound on every
+  // inequality row.  Rows of the form A x >= lhs (b = +inf) are negated to
+  // -A x <= -lhs (L-type); constraint_duals for flipped rows are negated
+  // back at extraction.  `lp` is the effective problem for all constraint
+  // data below (identical to prob when no one-sided rows exist).
+  std::vector<char> flip_row(static_cast<size_t>(mi), 0);
+  bool any_flip = false;
+  for (int i = 0; i < mi; ++i) {
+    const double lhs_i = lp_row_lhs_or_neg_inf(prob, i);
+    if (!std::isfinite(prob.b[i]) && std::isfinite(lhs_i)) {
+      flip_row[static_cast<size_t>(i)] = 1;
+      any_flip = true;
+    }
+  }
+  LPModel norm_lp;
+  if (any_flip) {
+    norm_lp = prob;
+    for (int k = 0; k < norm_lp.A.outerSize(); ++k)
+      for (Eigen::SparseMatrix<double>::InnerIterator it(norm_lp.A, k); it; ++it)
+        if (flip_row[static_cast<size_t>(it.row())]) it.valueRef() = -it.value();
+    for (int i = 0; i < mi; ++i) {
+      if (!flip_row[static_cast<size_t>(i)]) continue;
+      norm_lp.b[i] = -lp_row_lhs_or_neg_inf(prob, i);
+      if (norm_lp.row_lhs.size() == norm_lp.A.rows())
+        norm_lp.row_lhs[i] = -std::numeric_limits<double>::infinity();
+    }
+  }
+  const LPModel& lp = any_flip ? norm_lp : prob;
+
+  // === Ruiz equilibration (honors the caller's round count) ===
   // Scales A/Aeq/b/c and finite variable bounds; slacks keep coefficient 1.
   // Outputs are unscaled at extraction: x = Dc·x̂, y = Dr·ŷ, z = ẑ/Dc.
   const RuizScaling scal =
-      (opt_.ruiz_rounds > 0 && m > 0)
-          ? ruiz_equilibrate(prob.A, prob.Aeq, n_orig, opt_.ruiz_rounds)
+      (ruiz_rounds > 0 && m > 0)
+          ? ruiz_equilibrate(lp.A, lp.Aeq, n_orig, ruiz_rounds)
           : RuizScaling{};
 
   // === Bounds — use double flags (0.0/1.0) for branchless arithmetic ===
@@ -402,12 +459,12 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   }
   for (int i = 0; i < mi; ++i) {
     lb[n_orig + i] = 0.0;
-    const double lhs = lp_row_lhs_or_neg_inf(prob, i);
+    const double lhs = lp_row_lhs_or_neg_inf(lp, i);
     // Both b_i and lhs_i scale with dr_i, so the slack range scales once.
     const double dri = scal.active ? scal.dr[static_cast<size_t>(i)] : 1.0;
     ub[n_orig + i] =
-        std::isfinite(lhs) && std::isfinite(prob.b[i])
-            ? std::max(0.0, dri * (prob.b[i] - lhs))
+        std::isfinite(lhs) && std::isfinite(lp.b[i])
+            ? std::max(0.0, dri * (lp.b[i] - lhs))
             : kBig;
     flb[n_orig + i] = 1.0;
     fub[n_orig + i] = (ub[n_orig + i] < kBig - 1) ? 1.0 : 0.0;
@@ -437,13 +494,13 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
 
   std::vector<double> b(m);
   for (int i = 0; i < mi; ++i)
-    b[i] = (scal.active ? scal.dr[static_cast<size_t>(i)] : 1.0) * prob.b(i);
+    b[i] = (scal.active ? scal.dr[static_cast<size_t>(i)] : 1.0) * lp.b(i);
   for (int i = 0; i < me; ++i)
-    b[mi + i] = (scal.active ? scal.dr[static_cast<size_t>(mi + i)] : 1.0) * prob.beq(i);
+    b[mi + i] = (scal.active ? scal.dr[static_cast<size_t>(mi + i)] : 1.0) * lp.beq(i);
 
   // CSC pointers — from the scaled copies when Ruiz is active, else direct
-  const Eigen::SparseMatrix<double>& A_mat = scal.active ? scal.A : prob.A;
-  const Eigen::SparseMatrix<double>& Aeq_mat = scal.active ? scal.Aeq : prob.Aeq;
+  const Eigen::SparseMatrix<double>& A_mat = scal.active ? scal.A : lp.A;
+  const Eigen::SparseMatrix<double>& Aeq_mat = scal.active ? scal.Aeq : lp.Aeq;
   const int* A_o = A_mat.outerIndexPtr();
   const int* A_i = A_mat.innerIndexPtr();
   const double* A_v = A_mat.valuePtr();
@@ -482,12 +539,14 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   // === SpMV operations ===
   // y -= Ae * x  (CSR-based: sequential y writes)
   auto ae_mul_sub = [&](const double* MIPSOLVERS_RESTRICT x, double* MIPSOLVERS_RESTRICT y) {
+    MIPSOLVERS_OMP_PARALLEL_IF(mi > MIPSOLVERS_OMP_THRESHOLD)
     for (int i = 0; i < mi; ++i) {
       double s = x[n_orig + i];
       for (int p = A_rp[i]; p < A_rp[i + 1]; ++p)
         s += A_rv[p] * x[A_ci[p]];
       y[i] -= s;
     }
+    MIPSOLVERS_OMP_PARALLEL_IF(me > MIPSOLVERS_OMP_THRESHOLD)
     for (int k = 0; k < me; ++k) {
       double s = 0.0;
       for (int p = Aeq_rp[k]; p < Aeq_rp[k + 1]; ++p)
@@ -498,6 +557,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
 
   // y = Ae' * w  (CSC-based: gather from w, natural for CSC)
   auto aet_mul = [&](const double* MIPSOLVERS_RESTRICT w, double* MIPSOLVERS_RESTRICT y) {
+    MIPSOLVERS_OMP_PARALLEL_IF(n_orig > MIPSOLVERS_OMP_THRESHOLD)
     for (int j = 0; j < n_orig; ++j) {
       double s = 0.0;
       for (int p = A_o[j]; p < A_o[j + 1]; ++p)
@@ -833,12 +893,14 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
 
   // ae_mul for init (CSR-based)
   auto ae_mul = [&](const double* MIPSOLVERS_RESTRICT x, double* MIPSOLVERS_RESTRICT y) {
+    MIPSOLVERS_OMP_PARALLEL_IF(mi > MIPSOLVERS_OMP_THRESHOLD)
     for (int i = 0; i < mi; ++i) {
       double s = x[n_orig + i];
       for (int p = A_rp[i]; p < A_rp[i + 1]; ++p)
         s += A_rv[p] * x[A_ci[p]];
       y[i] = s;
     }
+    MIPSOLVERS_OMP_PARALLEL_IF(me > MIPSOLVERS_OMP_THRESHOLD)
     for (int k = 0; k < me; ++k) {
       double s = 0.0;
       for (int p = Aeq_rp[k]; p < Aeq_rp[k + 1]; ++p)
@@ -869,7 +931,13 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
         double ax = 0.0;
         for (int p = A_rp[i]; p < A_rp[i + 1]; ++p)
           ax += A_rv[p] * x_d[A_ci[p]];
-        x_d[n_orig + i] = std::max(b[i] - ax, 1e-4);
+        // Interior slack, finite even for G-type rows (b = +inf) and for
+        // inits violating the row's two-sided range — otherwise the barrier
+        // gap gu = ub - s goes negative/inf and NaNs the normal equations.
+        double s_init = b[i] - ax;
+        if (!std::isfinite(s_init)) s_init = 1.0;
+        x_d[n_orig + i] =
+            std::clamp(s_init, 1e-4, std::max(1e-4, ub[n_orig + i] - 1e-4));
       }
       // Dual initial: y = 0 (least-squares dual was tested but adds ~1ms
       // factorization overhead with no iteration reduction — primal warm-start
@@ -983,6 +1051,25 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
       if (is_fixed[j]) x_d[j] = lb[j];
     }
 
+    // If the least-squares init produced non-finite iterates or
+    // astronomically large ones (near-singular initial normal matrix —
+    // e.g. problems with many one-sided rows), fall back to the plain
+    // interior point instead of propagating inf/huge values into the
+    // barrier (comp_sum/mu or pf = inf at iteration 0).
+    bool init_ok = true;
+    for (int j = 0; j < nn && init_ok; ++j) {
+      const double xj = x_d[j];
+      init_ok = std::isfinite(xj) && std::abs(xj) < 1e10;
+    }
+    for (int i = 0; i < m && init_ok; ++i) {
+      const double yi = y_d[i];
+      init_ok = std::isfinite(yi) && std::abs(yi) < 1e10;
+    }
+    if (!init_ok) {
+      std::fill(xv.begin(), xv.end(), 0.5);
+      std::fill(yv.begin(), yv.end(), 0.0);
+    }
+
     // Clamp original variables to bounds, then recompute slacks.
     for (int j = 0; j < n_orig; ++j) {
       if (is_fixed[j]) continue;  // already locked
@@ -997,7 +1084,12 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
       double ax = 0.0;
       for (int p = A_rp[i]; p < A_rp[i + 1]; ++p)
         ax += A_rv[p] * x_d[A_ci[p]];
-      x_d[n_orig + i] = std::max(b[i] - ax, 1e-4);
+      // Interior slack, finite even for G-type rows (b = +inf) and for
+      // inits violating the row's two-sided range (see warm-start path).
+      double s_init = b[i] - ax;
+      if (!std::isfinite(s_init)) s_init = 1.0;
+      x_d[n_orig + i] =
+          std::clamp(s_init, 1e-4, std::max(1e-4, ub[n_orig + i] - 1e-4));
     }
     for (int j = 0; j < nn; ++j) {
       gl_d[j] = flb[j] ? std::max(x_d[j] - lb[j], 1e-4) : kBig;
@@ -1259,6 +1351,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
 
     // Build Θ, precompute inv_gl, inv_gu, and factorize
     auto t_su = tnow();
+    MIPSOLVERS_OMP_PARALLEL_IF(nn > MIPSOLVERS_OMP_THRESHOLD)
     for (int j = 0; j < nn; ++j) {
       if (j < n_orig && is_fixed[j]) {
         inv_gl_d[j] = 0.0;
@@ -1517,9 +1610,14 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   out.stats.objective = prob.c.dot(out.x);
   if (m > 0) {
     out.constraint_duals.resize(m);
-    for (int i = 0; i < m; ++i)
-      out.constraint_duals(i) = sense_sign * y_d[i] *
+    for (int i = 0; i < m; ++i) {
+      // G-type rows were negated to L-type at input: flip the dual sign back
+      // (KKT multiplier of -A x <= -lhs is the negative of A x >= lhs).
+      const double row_sign =
+          (any_flip && i < mi && flip_row[static_cast<size_t>(i)]) ? -1.0 : 1.0;
+      out.constraint_duals(i) = row_sign * sense_sign * y_d[i] *
                                 (scal.active ? scal.dr[static_cast<size_t>(i)] : 1.0);
+    }
   }
   // Export bound multipliers for original variables (used by IPM→simplex crossover).
   out.box_dual_lb.resize(n_orig);
@@ -1634,6 +1732,11 @@ struct NativeIPMLPAdapter::CachedState {
   // Copy of base LP (owns the Eigen sparse matrices whose pointers we borrow)
   LPModel base_lp_copy;
 
+  // One-sided (G-type) rows negated to L-type at prepare time (same
+  // normalization as solve_lp): constraint_duals for these rows are negated
+  // back at extraction.
+  std::vector<char> flip_row;
+
   // Ruiz scaling (inactive when opt_.ruiz_rounds == 0).  When active, the
   // A_o/A_i/A_v and Aeq_* pointers reference the owned scaled matrices
   // below, and c/b are stored scaled.  Node bounds are scaled by 1/dc per
@@ -1662,6 +1765,39 @@ void NativeIPMLPAdapter::prepare_for_node_solves(const LPModel& base_lp) {
 
   // Keep a copy so CSC pointers remain valid
   cs->base_lp_copy = base_lp;
+
+  // One-sided (G-type) row normalization (same as solve_lp): rows of the
+  // form A x >= lhs (b = +inf) are negated to -A x <= -lhs so every row has
+  // a finite upper bound; duals are negated back at extraction.
+  {
+    const int mi0 = static_cast<int>(cs->base_lp_copy.A.rows());
+    cs->flip_row.assign(static_cast<size_t>(mi0), 0);
+    bool any_flip = false;
+    for (int i = 0; i < mi0; ++i) {
+      const double lhs_i = lp_row_lhs_or_neg_inf(cs->base_lp_copy, i);
+      if (!std::isfinite(cs->base_lp_copy.b[i]) && std::isfinite(lhs_i)) {
+        cs->flip_row[static_cast<size_t>(i)] = 1;
+        any_flip = true;
+      }
+    }
+    if (any_flip) {
+      for (int k = 0; k < cs->base_lp_copy.A.outerSize(); ++k)
+        for (Eigen::SparseMatrix<double>::InnerIterator it(cs->base_lp_copy.A, k);
+             it; ++it)
+          if (cs->flip_row[static_cast<size_t>(it.row())])
+            it.valueRef() = -it.value();
+      for (int i = 0; i < mi0; ++i) {
+        if (!cs->flip_row[static_cast<size_t>(i)]) continue;
+        cs->base_lp_copy.b[i] = -lp_row_lhs_or_neg_inf(base_lp, i);
+        if (cs->base_lp_copy.row_lhs.size() == cs->base_lp_copy.A.rows())
+          cs->base_lp_copy.row_lhs[i] =
+              -std::numeric_limits<double>::infinity();
+      }
+    } else {
+      cs->flip_row.clear();
+    }
+  }
+
   const auto& lp = cs->base_lp_copy;
 
   cs->n_orig = static_cast<int>(lp.c.size());
@@ -2193,7 +2329,13 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
       double ax = 0.0;
       for (int p = A_rp[i]; p < A_rp[i + 1]; ++p)
         ax += A_rv[p] * x_d[A_ci[p]];
-      x_d[n_orig + i] = std::max(b_vec[i] - ax, 1e-4);
+      x_d[n_orig + i] = [&] {
+        // Interior slack, finite even for G-type rows (b = +inf) and for
+        // inits violating the row's two-sided range (see solve_lp).
+        double s_init = b_vec[i] - ax;
+        if (!std::isfinite(s_init)) s_init = 1.0;
+        return std::clamp(s_init, 1e-4, std::max(1e-4, ub[n_orig + i] - 1e-4));
+      }();
     }
 
     // Dual warm-start: reuse previous solve's dual if available.
@@ -2223,7 +2365,13 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
     double ax = 0.0;
     for (int p = A_rp[i]; p < A_rp[i + 1]; ++p)
       ax += A_rv[p] * x_d[A_ci[p]];
-    x_d[n_orig + i] = std::max(b_vec[i] - ax, 1e-4);
+    x_d[n_orig + i] = [&] {
+      // Interior slack, finite even for G-type rows (b = +inf) and for
+      // inits violating the row's two-sided range (see solve_lp).
+      double s_init = b_vec[i] - ax;
+      if (!std::isfinite(s_init)) s_init = 1.0;
+      return std::clamp(s_init, 1e-4, std::max(1e-4, ub[n_orig + i] - 1e-4));
+    }();
   }
   // Bound slacks and initial multipliers.
   // If we have previous zl/zu, use them (scaled to current gap sizes).
@@ -2687,9 +2835,14 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
   out.stats.objective = cs.base_lp_copy.c.dot(out.x);
   if (m > 0) {
     out.constraint_duals.resize(m);
-    for (int i = 0; i < m; ++i)
-      out.constraint_duals(i) = sense_sign * y_d[i] *
+    for (int i = 0; i < m; ++i) {
+      // G-type rows were negated to L-type at prepare time: flip back.
+      const double row_sign =
+          (!cs.flip_row.empty() && i < mi &&
+           cs.flip_row[static_cast<size_t>(i)] != 0) ? -1.0 : 1.0;
+      out.constraint_duals(i) = row_sign * sense_sign * y_d[i] *
                                 (scaling ? cs.scal_dr[static_cast<size_t>(i)] : 1.0);
+    }
   }
   out.box_dual_lb.resize(n_orig);
   out.box_dual_ub.resize(n_orig);

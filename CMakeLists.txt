@@ -140,6 +140,7 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
   # Native B&C: strict HiGHS + dynamic cutting planes
   target_sources(mipsolvers PRIVATE
     src/engine/solver/native/milp/bc/legacy/branch_and_cut.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp
     src/engine/solver/native/milp/bc/legacy/bc_parallel.cpp
     src/engine/solver/native/milp/bc/legacy/bc_utils.cpp
     src/engine/solver/native/milp/bc/legacy/bc_branching.cpp
@@ -285,6 +286,38 @@ if(MIPSOLVERS_HAVE_CHOLMOD)
   target_link_libraries(mipsolvers PRIVATE cholmod_vendored)
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_CHOLMOD=1 HACDCPF_HAVE_CHOLMOD=1)
+endif()
+
+# ── OpenMP (optional) ─────────────────────────────────────────────────────────
+# Parallelizes the big embarrassingly-parallel kernel loops (SpMV, theta/residual
+# builds) with threshold guards; serial fallback when unavailable.
+option(MIPSOLVERS_USE_OPENMP "Enable OpenMP in numerical kernels" ON)
+if(MIPSOLVERS_USE_OPENMP)
+  find_package(OpenMP QUIET COMPONENTS CXX)
+  if(NOT OpenMP_CXX_FOUND AND APPLE)
+    # Apple Clang: needs -Xpreprocessor -fopenmp + explicit libomp paths.
+    find_path(_OMP_INCLUDE omp.h
+      HINTS /opt/homebrew/opt/libomp/include /usr/local/opt/libomp/include)
+    find_library(_OMP_LIB NAMES omp
+      HINTS /opt/homebrew/opt/libomp/lib /usr/local/opt/libomp/lib)
+    if(_OMP_INCLUDE AND _OMP_LIB)
+      set(OpenMP_CXX_FOUND ON)
+      add_library(OpenMP::OpenMP_CXX INTERFACE IMPORTED)
+      set_target_properties(OpenMP::OpenMP_CXX PROPERTIES
+        INTERFACE_COMPILE_OPTIONS "-Xpreprocessor;-fopenmp"
+        INTERFACE_INCLUDE_DIRECTORIES "${_OMP_INCLUDE}"
+        INTERFACE_LINK_LIBRARIES "${_OMP_LIB}")
+      unset(_OMP_INCLUDE)
+      unset(_OMP_LIB)
+    endif()
+  endif()
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(mipsolvers PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_definitions(mipsolvers PRIVATE MIPSOLVERS_USE_OPENMP=1)
+    message(STATUS "mipsolvers: OpenMP enabled in numerical kernels")
+  else()
+    message(STATUS "mipsolvers: OpenMP not found; numerical kernels stay serial")
+  endif()
 endif()
 
 # ── SuperLU ───────────────────────────────────────────────────────────────────
@@ -470,6 +503,8 @@ if(MIPSOLVERS_BUILD_TESTS)
       target_link_libraries(${_name} PRIVATE mipsolvers Catch2::Catch2WithMain)
       target_include_directories(${_name} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/highs
+        ${CMAKE_CURRENT_BINARY_DIR}/_deps/embedded_highs
         ${CMAKE_CURRENT_SOURCE_DIR}/tests)
       add_test(NAME ${_name} COMMAND ${_name})
       set(_tier "")
@@ -499,6 +534,7 @@ if(MIPSOLVERS_BUILD_TESTS)
   mipsolvers_add_test(test_presolve            TIER unit)
   mipsolvers_add_test(test_l2o_trace           TIER unit)
   mipsolvers_add_test(test_numerical_stability TIER unit)
+  mipsolvers_add_test(test_netlib_regression   TIER integration)
 
   # SCUC module test requires scuc.cpp (not in base mipsolvers lib)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scuc_module.cpp" AND MIPSOLVERS_BUILD_SCUC)

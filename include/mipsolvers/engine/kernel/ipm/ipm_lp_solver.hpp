@@ -91,6 +91,12 @@ class NativeIPMLPAdapter final : public SolverAdapter {
   void update_cached_cost(const Eigen::VectorXd& new_c);
 
  private:
+  /// Core solve with an explicit Ruiz round count.  The public entry points
+  /// retry with scaling disabled when a scaled solve fails to converge
+  /// (scaling helps most problems but stalls some degenerate ones).
+  SolveResult solve_lp_impl(const LPModel& prob, const Eigen::VectorXd& x0,
+                            int ruiz_rounds) const;
+
   IPMLPOptions opt_;
   mutable std::unique_ptr<AccelSparseCache> accel_cache_;
 
