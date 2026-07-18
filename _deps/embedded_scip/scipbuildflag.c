@@ -37,8 +37,8 @@ const char* SCIPgetBuildFlags(
    )
 {
    return " ARCH=arm64\n\
- OSTYPE=Darwin-25.4.0\n\
- COMP=AppleClang 21.0.0.21000099\n\
+ OSTYPE=Darwin-25.5.0\n\
+ COMP=AppleClang 21.0.0.21000101\n\
  BUILD=Release\n\
  CHECKSTAGE=\n\
  CHECKNAME=\n\

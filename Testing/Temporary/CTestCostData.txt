@@ -1,0 +1,11 @@
+test_engine_api 1 0.0190865
+test_lp_solver 1 0.0113501
+test_milp_solver 1 0.0587762
+test_ipm_solver 1 0.0316739
+test_dual_simplex 1 0.00991108
+test_problem_validation 1 0.55274
+test_adapter_registry 1 0.539489
+test_presolve 1 0.454611
+test_l2o_trace 0 0
+---
+test_l2o_trace

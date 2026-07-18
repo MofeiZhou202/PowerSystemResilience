@@ -524,7 +524,15 @@ void HFactor::update(HVector* aq, HVector* ep, HighsInt* iRow, HighsInt* hint) {
     return;
   }
 
-  if (update_method == kUpdateMethodFt) updateFT(aq, ep, *iRow);
+  if (update_method == kUpdateMethodFt) {
+    updateFT(aq, ep, *iRow);
+    // See if we want refactor. Upstream keeps this fill-based trigger
+    // commented out at the end of updateFT; it is evaluated here instead
+    // (updateFT's signature is fixed by the shared highs/util/HFactor.h),
+    // right after updateFT has updated u_total_x, so that FT updates set
+    // the refactor hint with the same semantics as the PF/MPF branches.
+    if (u_total_x > u_merit_x && pf_pivot_index.size() > 100) *hint = 1;
+  }
   if (update_method == kUpdateMethodPf) updatePF(aq, *iRow, hint);
   if (update_method == kUpdateMethodMpf) updateMPF(aq, ep, *iRow, hint);
   if (update_method == kUpdateMethodApf) updateAPF(aq, ep, *iRow);

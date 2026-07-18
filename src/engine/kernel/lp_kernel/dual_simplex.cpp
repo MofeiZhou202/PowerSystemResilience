@@ -3875,9 +3875,16 @@ class SparseBasis : public BasisOps {
       nlu_.ftran(rhs.data(), z.data());
       for (const auto& eta : etas_) apply_eta_ftran(z, eta);
     } else {
-      umfpack_di_wsolve(UMFPACK_A, Ap_.data(), Ai_.data(),
-                        Ax_.data(), z.data(), rhs.data(), Numeric_,
-                        Control_, nullptr, wsolve_Wi_.data(), wsolve_W_.data());
+      int status = umfpack_di_wsolve(UMFPACK_A, Ap_.data(), Ai_.data(),
+                                     Ax_.data(), z.data(), rhs.data(), Numeric_,
+                                     Control_, nullptr, wsolve_Wi_.data(),
+                                     wsolve_W_.data());
+      if (status != UMFPACK_OK) {
+        // Solve failed: poison with NaN so downstream isfinite guards abort
+        // instead of consuming garbage (same pattern as VendoredHighsBasis).
+        return Eigen::VectorXd::Constant(
+            m_, std::numeric_limits<double>::quiet_NaN());
+      }
       for (const auto& eta : etas_) apply_eta_ftran(z, eta);
     }
 #else
@@ -3908,9 +3915,16 @@ class SparseBasis : public BasisOps {
       for (const auto& eta : etas_) apply_eta_ftran(rhs, eta);
     } else {
       solve_work_.noalias() = rhs;  // UMFPACK needs separate input/output
-      umfpack_di_wsolve(UMFPACK_A, Ap_.data(), Ai_.data(),
-                        Ax_.data(), rhs.data(), solve_work_.data(), Numeric_,
-                        Control_, nullptr, wsolve_Wi_.data(), wsolve_W_.data());
+      int status = umfpack_di_wsolve(UMFPACK_A, Ap_.data(), Ai_.data(),
+                                     Ax_.data(), rhs.data(), solve_work_.data(),
+                                     Numeric_, Control_, nullptr,
+                                     wsolve_Wi_.data(), wsolve_W_.data());
+      if (status != UMFPACK_OK) {
+        // Solve failed: poison with NaN so downstream isfinite guards abort
+        // instead of consuming garbage (same pattern as VendoredHighsBasis).
+        rhs.setConstant(std::numeric_limits<double>::quiet_NaN());
+        return;
+      }
       for (const auto& eta : etas_) apply_eta_ftran(rhs, eta);
     }
 #else
@@ -3961,9 +3975,16 @@ class SparseBasis : public BasisOps {
       if (nlu_.valid && is_sparse_rhs(z.data(), m_)) {
         nlu_.btran(z.data(), y.data());
       } else {
-        umfpack_di_wsolve(UMFPACK_At, Ap_.data(), Ai_.data(),
-                          Ax_.data(), y.data(), z.data(), Numeric_,
-                          Control_, nullptr, wsolve_Wi_.data(), wsolve_W_.data());
+        int status = umfpack_di_wsolve(UMFPACK_At, Ap_.data(), Ai_.data(),
+                                       Ax_.data(), y.data(), z.data(), Numeric_,
+                                       Control_, nullptr, wsolve_Wi_.data(),
+                                       wsolve_W_.data());
+        if (status != UMFPACK_OK) {
+          // Solve failed: poison with NaN so downstream isfinite guards abort
+          // instead of consuming garbage (same pattern as VendoredHighsBasis).
+          return Eigen::VectorXd::Constant(
+              m_, std::numeric_limits<double>::quiet_NaN());
+        }
       }
     }
 #else
@@ -3999,9 +4020,17 @@ class SparseBasis : public BasisOps {
         nlu_.btran(rhs.data(), rhs.data());
       } else {
         solve_work_.noalias() = rhs;
-        umfpack_di_wsolve(UMFPACK_At, Ap_.data(), Ai_.data(),
-                          Ax_.data(), rhs.data(), solve_work_.data(), Numeric_,
-                          Control_, nullptr, wsolve_Wi_.data(), wsolve_W_.data());
+        int status = umfpack_di_wsolve(UMFPACK_At, Ap_.data(), Ai_.data(),
+                                       Ax_.data(), rhs.data(),
+                                       solve_work_.data(), Numeric_, Control_,
+                                       nullptr, wsolve_Wi_.data(),
+                                       wsolve_W_.data());
+        if (status != UMFPACK_OK) {
+          // Solve failed: poison with NaN so downstream isfinite guards abort
+          // instead of consuming garbage (same pattern as VendoredHighsBasis).
+          rhs.setConstant(std::numeric_limits<double>::quiet_NaN());
+          return;
+        }
       }
     }
 #else

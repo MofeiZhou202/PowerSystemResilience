@@ -10,7 +10,7 @@
 /* #undef HIGHSINT64 */
 /* #undef HIGHS_NO_DEFAULT_THREADS */
 /* #undef HIGHS_HAVE_MM_PAUSE */
-/* #undef HIGHS_HAVE_BUILTIN_CLZ */
+#define HIGHS_HAVE_BUILTIN_CLZ
 /* #undef HIGHS_HAVE_BITSCAN_REVERSE */
 /* #undef BLAS_LIBRARIES */
 

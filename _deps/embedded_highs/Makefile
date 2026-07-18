@@ -4121,6 +4121,54 @@ simplex/HighsSimplexAnalysis.cpp.s:
 	cd /Users/tianyangzhao/Codes/MIPSolvers && $(MAKE) $(MAKESILENT) -f _deps/embedded_highs/CMakeFiles/highs.dir/build.make _deps/embedded_highs/CMakeFiles/highs.dir/simplex/HighsSimplexAnalysis.cpp.s
 .PHONY : simplex/HighsSimplexAnalysis.cpp.s
 
+test_kkt/DevKkt.o: test_kkt/DevKkt.cpp.o
+.PHONY : test_kkt/DevKkt.o
+
+# target to build an object file
+test_kkt/DevKkt.cpp.o:
+	cd /Users/tianyangzhao/Codes/MIPSolvers && $(MAKE) $(MAKESILENT) -f _deps/embedded_highs/CMakeFiles/highs.dir/build.make _deps/embedded_highs/CMakeFiles/highs.dir/test_kkt/DevKkt.cpp.o
+.PHONY : test_kkt/DevKkt.cpp.o
+
+test_kkt/DevKkt.i: test_kkt/DevKkt.cpp.i
+.PHONY : test_kkt/DevKkt.i
+
+# target to preprocess a source file
+test_kkt/DevKkt.cpp.i:
+	cd /Users/tianyangzhao/Codes/MIPSolvers && $(MAKE) $(MAKESILENT) -f _deps/embedded_highs/CMakeFiles/highs.dir/build.make _deps/embedded_highs/CMakeFiles/highs.dir/test_kkt/DevKkt.cpp.i
+.PHONY : test_kkt/DevKkt.cpp.i
+
+test_kkt/DevKkt.s: test_kkt/DevKkt.cpp.s
+.PHONY : test_kkt/DevKkt.s
+
+# target to generate assembly for a file
+test_kkt/DevKkt.cpp.s:
+	cd /Users/tianyangzhao/Codes/MIPSolvers && $(MAKE) $(MAKESILENT) -f _deps/embedded_highs/CMakeFiles/highs.dir/build.make _deps/embedded_highs/CMakeFiles/highs.dir/test_kkt/DevKkt.cpp.s
+.PHONY : test_kkt/DevKkt.cpp.s
+
+test_kkt/KktCh2.o: test_kkt/KktCh2.cpp.o
+.PHONY : test_kkt/KktCh2.o
+
+# target to build an object file
+test_kkt/KktCh2.cpp.o:
+	cd /Users/tianyangzhao/Codes/MIPSolvers && $(MAKE) $(MAKESILENT) -f _deps/embedded_highs/CMakeFiles/highs.dir/build.make _deps/embedded_highs/CMakeFiles/highs.dir/test_kkt/KktCh2.cpp.o
+.PHONY : test_kkt/KktCh2.cpp.o
+
+test_kkt/KktCh2.i: test_kkt/KktCh2.cpp.i
+.PHONY : test_kkt/KktCh2.i
+
+# target to preprocess a source file
+test_kkt/KktCh2.cpp.i:
+	cd /Users/tianyangzhao/Codes/MIPSolvers && $(MAKE) $(MAKESILENT) -f _deps/embedded_highs/CMakeFiles/highs.dir/build.make _deps/embedded_highs/CMakeFiles/highs.dir/test_kkt/KktCh2.cpp.i
+.PHONY : test_kkt/KktCh2.cpp.i
+
+test_kkt/KktCh2.s: test_kkt/KktCh2.cpp.s
+.PHONY : test_kkt/KktCh2.s
+
+# target to generate assembly for a file
+test_kkt/KktCh2.cpp.s:
+	cd /Users/tianyangzhao/Codes/MIPSolvers && $(MAKE) $(MAKESILENT) -f _deps/embedded_highs/CMakeFiles/highs.dir/build.make _deps/embedded_highs/CMakeFiles/highs.dir/test_kkt/KktCh2.cpp.s
+.PHONY : test_kkt/KktCh2.cpp.s
+
 util/HFactor.o: util/HFactor.cpp.o
 .PHONY : util/HFactor.o
 
@@ -4987,6 +5035,12 @@ help:
 	@echo "... simplex/HighsSimplexAnalysis.o"
 	@echo "... simplex/HighsSimplexAnalysis.i"
 	@echo "... simplex/HighsSimplexAnalysis.s"
+	@echo "... test_kkt/DevKkt.o"
+	@echo "... test_kkt/DevKkt.i"
+	@echo "... test_kkt/DevKkt.s"
+	@echo "... test_kkt/KktCh2.o"
+	@echo "... test_kkt/KktCh2.i"
+	@echo "... test_kkt/KktCh2.s"
 	@echo "... util/HFactor.o"
 	@echo "... util/HFactor.i"
 	@echo "... util/HFactor.s"

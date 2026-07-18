@@ -65,6 +65,8 @@ constexpr double kTau = 0.9995;
 constexpr double kMinVal = 1e-14;
 constexpr int kBandedThreshold = 128;  // use banded Cholesky when bandwidth <= this
 constexpr size_t kDenseScatterThreshold = 4'000'000;  // switch to dense BLAS when scatter > 4M
+constexpr size_t kDenseMaxBytes = 256 * 1024 * 1024;  // memory gate for the dense path
+constexpr size_t kMaxScatterEntries = 100'000'000;  // scatter map cap (~1.6GB)
 
 // =====================================================================
 // SIMD-optimized vector operations (ARM NEON)
@@ -471,12 +473,16 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
     // Build banded scatter map for original variable columns
     // Column j of Ae touches: A's rows for col j (at rows 0..mi-1)
     //                         plus Aeq's rows for col j (at rows mi..m-1)
+    // Tight reserve bound: per column, each row pairs only with rows
+    // inside the band (r1 - r2 <= bw), i.e. at most min(nz, bw+1) partners
+    // per row.  Reserving nz^2 would over-allocate — a single dense column
+    // (nz = 1e5) would request 1e10 entries -> bad_alloc.
     size_t total = 0;
     for (int j = 0; j < n_orig; ++j) {
-      int nz_a = A_o[j + 1] - A_o[j];
-      int nz_eq = (me > 0) ? (Aeq_o[j + 1] - Aeq_o[j]) : 0;
-      int nz = nz_a + nz_eq;
-      total += static_cast<size_t>(nz) * nz;
+      const size_t nz =
+          static_cast<size_t>(A_o[j + 1] - A_o[j]) +
+          (me > 0 ? static_cast<size_t>(Aeq_o[j + 1] - Aeq_o[j]) : 0);
+      total += nz * std::min(nz, static_cast<size_t>(bw) + 1);
     }
     band_scatter.reserve(total);
     band_scatter_col_start.resize(n_orig + 1);
@@ -527,7 +533,24 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
         if (me > 0) nz_j += static_cast<size_t>(Aeq_o[j + 1] - Aeq_o[j]);
         estimated_scatter += nz_j * nz_j;
       }
-      use_dense = (estimated_scatter > kDenseScatterThreshold);
+      // Memory feasibility gate: the dense path allocates m x nn (Ae_dense,
+      // Ae_sqrt) plus m x m (N_dense).  Huge sparse LPs (n ~ 1e6) always
+      // exceed the scatter threshold, which would request terabytes of
+      // dense storage — stay sparse unless the dominant m x nn matrix
+      // fits a bounded budget.
+      const size_t dense_bytes =
+          sizeof(double) * static_cast<size_t>(m) * static_cast<size_t>(nn);
+      use_dense = (estimated_scatter > kDenseScatterThreshold) &&
+                  (dense_bytes <= kDenseMaxBytes);
+      if (!use_dense && estimated_scatter > kMaxScatterEntries) {
+        // Neither path is memory-feasible: the dense matrices exceed the
+        // byte budget and the sparse scatter map (Theta(estimated_scatter)
+        // entries, also a proxy for nnz of N = Ae*Ae') exceeds its cap.
+        // Fail cleanly instead of dying in reserve() with bad_alloc.
+        out.stats.status = "ProblemTooLarge";
+        out.stats.success = false;
+        return out;
+      }
     }
 
     if (use_dense) {
@@ -1041,8 +1064,12 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
       double dyn_reg = std::max(reg * 1e4, 1e-8);
       for (int retry = 0; retry < 4 && !factor_ok; ++retry) {
         if (use_banded) {
-          // Refill banded from theta, then add dynamic reg to diagonal
-          fill_and_factor_banded();  // fills band_storage + copies to band_work
+          // Restore the pristine matrix before perturbing: the failed
+          // attempt left band_work partially factorized, so adding dyn_reg
+          // without this refill would factorize garbage.  band_storage
+          // still holds the untouched fill from fill_and_factor_banded().
+          std::memcpy(band_work.data(), band_storage.data(),
+                      sizeof(double) * band_storage.size());
           double* bw_data = band_work.data();
           for (int i = 0; i < m; ++i) bw_data[i] += dyn_reg;
           factor_ok = banded_chol_factor(bw_data, m, bw);
@@ -1132,7 +1159,11 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
       mu_aff += fub_d[j] * (gu_d[j] - ap_aff * dx_aff_d[j]) * (zu_d[j] + ad_aff * dzu_aff_d[j]);
     }
     mu_aff = (n_compl > 0) ? mu_aff / n_compl : 0.0;
-    double sigma = std::min(std::pow(mu_aff / mu, 3.0), 0.5);
+    // n_compl == 0 (no finite bounds anywhere) gives mu = mu_aff = 0, so
+    // mu_aff / mu would be 0/0 = NaN.  With no complementarity there is
+    // nothing to center — take a pure affine step instead of letting NaN
+    // propagate into the corrector rhs and the returned solution.
+    double sigma = (mu > 0.0) ? std::min(std::pow(mu_aff / mu, 3.0), 0.5) : 0.0;
     double sigma_mu = sigma * mu;
 
     t_pred += std::chrono::duration<double, std::milli>(tnow() - t_p).count();
@@ -1197,6 +1228,22 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
     }
 
     t_corr += std::chrono::duration<double, std::milli>(tnow() - t_c).count();
+
+    // Finiteness guard: a failed solve or NaN in the search direction must
+    // abort the loop instead of polluting the iterate and returning a NaN
+    // "solution" after MaxIter.  dzl/dzu derive from dx, so checking the
+    // two solve outputs dx/dy covers every NaN source upstream.
+    bool step_finite = true;
+    for (int j = 0; j < nn; ++j)
+      if (!std::isfinite(dx_d[j])) { step_finite = false; break; }
+    if (step_finite)
+      for (int i = 0; i < m; ++i)
+        if (!std::isfinite(dy_d[i])) { step_finite = false; break; }
+    if (!step_finite) {
+      out.stats.status = "NumericalError";
+      out.stats.iterations = iter;
+      break;
+    }
 
     // ---- Update (SIMD-accelerated) ----
     auto t_u = tnow();
@@ -1450,12 +1497,21 @@ void NativeIPMLPAdapter::prepare_for_node_solves(const LPModel& base_lp) {
     const int bw = cs->bandwidth;
     cs->band_storage.resize(static_cast<size_t>(bw + 1) * m, 0.0);
 
+    // Tight reserve bound (same as solve_lp): rows pair only within the
+    // band, so nz^2 would over-allocate and a single dense column would
+    // request ~1e10 entries -> bad_alloc.
     size_t total = 0;
     for (int j = 0; j < n_orig; ++j) {
-      int nz_a = cs->A_o[j + 1] - cs->A_o[j];
-      int nz_eq = (me > 0) ? (cs->Aeq_o[j + 1] - cs->Aeq_o[j]) : 0;
-      int nz = nz_a + nz_eq;
-      total += static_cast<size_t>(nz) * nz;
+      const size_t nz =
+          static_cast<size_t>(cs->A_o[j + 1] - cs->A_o[j]) +
+          (me > 0 ? static_cast<size_t>(cs->Aeq_o[j + 1] - cs->Aeq_o[j]) : 0);
+      total += nz * std::min(nz, static_cast<size_t>(bw) + 1);
+    }
+    if (total > kMaxScatterEntries) {
+      // Scatter map too large — skip caching; node LPs fall back to the
+      // full solve_lp path (which has its own memory-feasibility gates).
+      cached_state_.reset();
+      return;
     }
     cs->band_scatter.reserve(total);
     cs->band_scatter_col_start.resize(n_orig + 1);
@@ -1487,6 +1543,23 @@ void NativeIPMLPAdapter::prepare_for_node_solves(const LPModel& base_lp) {
       cs->band_scatter_col_start[j + 1] = static_cast<int>(cs->band_scatter.size());
     }
   } else {
+    // Estimate the scatter map size (Theta(sum_j nz_j^2), also an upper
+    // proxy for nnz of N = Ae*Ae') before building anything: a single
+    // dense column (nz = 1e5) implies ~1e10 entries -> bad_alloc.  Skip
+    // caching in that case; node LPs fall back to the full solve_lp path.
+    {
+      size_t scatter_est = 0;
+      for (int j = 0; j < n_orig; ++j) {
+        const size_t nz =
+            static_cast<size_t>(cs->A_o[j + 1] - cs->A_o[j]) +
+            (me > 0 ? static_cast<size_t>(cs->Aeq_o[j + 1] - cs->Aeq_o[j]) : 0);
+        scatter_est += nz * nz;
+      }
+      if (scatter_est > kMaxScatterEntries) {
+        cached_state_.reset();
+        return;
+      }
+    }
     // Sparse path: build Ae, N_sparse, scatter maps, symbolic factorization
     using T = Eigen::Triplet<double>;
     std::vector<T> trips;
@@ -2060,6 +2133,11 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
       for (int retry = 0; retry < 5 && !factor_ok; ++retry) {
         // Add extra regularization to diagonal
         if (use_banded) {
+          // Restore the pristine matrix before perturbing (same fix as the
+          // non-cached path): band_work was left partially factorized by
+          // the failed attempt; band_storage_local holds the fresh fill.
+          std::memcpy(band_work.data(), band_storage_local.data(),
+                      sizeof(double) * band_storage_local.size());
           double* bs = band_work.data();
           for (int i = 0; i < m; ++i) bs[i] += dyn_reg;
           factor_ok = banded_chol_factor(band_work.data(), m, bw);
@@ -2138,7 +2216,11 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
       mu_aff += fub_d[j] * (gu_d[j] - ap_aff * dx_aff_d[j]) * (zu_d[j] + ad_aff * dzu_aff_d[j]);
     }
     mu_aff = (n_compl > 0) ? mu_aff / n_compl : 0.0;
-    double sigma = std::min(std::pow(mu_aff / mu, 3.0), 0.5);
+    // n_compl == 0 (no finite bounds anywhere) gives mu = mu_aff = 0, so
+    // mu_aff / mu would be 0/0 = NaN.  With no complementarity there is
+    // nothing to center — take a pure affine step instead of letting NaN
+    // propagate into the corrector rhs and the returned solution.
+    double sigma = (mu > 0.0) ? std::min(std::pow(mu_aff / mu, 3.0), 0.5) : 0.0;
     double sigma_mu = sigma * mu;
 
     double ap, ad;
@@ -2191,6 +2273,21 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
       }
       ap = std::max(ap, kMinVal);
       ad = std::max(ad, kMinVal);
+    }
+
+    // Finiteness guard (same as the non-cached path): abort on a NaN
+    // search direction instead of returning a NaN "solution" after
+    // MaxIter.  dzl/dzu derive from dx, so dx/dy cover all NaN sources.
+    bool step_finite = true;
+    for (int j = 0; j < nn; ++j)
+      if (!std::isfinite(dx_d[j])) { step_finite = false; break; }
+    if (step_finite)
+      for (int i = 0; i < m; ++i)
+        if (!std::isfinite(dy_d[i])) { step_finite = false; break; }
+    if (!step_finite) {
+      out.stats.status = "NumericalError";
+      out.stats.iterations = iter;
+      break;
     }
 
     // Update
