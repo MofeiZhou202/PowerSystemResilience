@@ -11,9 +11,8 @@
 #include <vector>
 
 #ifdef MIPSOLVERS_HAVE_CHOLMOD
-extern "C" {
+// SuiteSparse v7 headers are C++-safe (own extern "C" guards) — no wrapper.
 #include <cholmod.h>
-}
 #endif
 
 namespace mipsolvers::engine {
@@ -37,6 +36,10 @@ struct CholmodLDLT::Impl {
 CholmodLDLT::CholmodLDLT() : impl_(new Impl) {
 #ifdef MIPSOLVERS_HAVE_CHOLMOD
   impl_->started = cholmod_l_start(&impl_->c) != 0;
+  if (impl_->started) {
+    // Status is reported via return codes — keep CHOLMOD quiet on stdout.
+    impl_->c.print = 0;
+  }
 #endif
 }
 
@@ -67,9 +70,9 @@ CholmodLDLT& CholmodLDLT::operator=(CholmodLDLT&& other) noexcept {
 }
 
 bool CholmodLDLT::analyze(int64_t m, const int* outer, const int* inner,
-                          int64_t nnz) {
+                          const double* values, int64_t nnz) {
 #ifdef MIPSOLVERS_HAVE_CHOLMOD
-  if (!impl_->started || m <= 0 || nnz < 0) return false;
+  if (!impl_->started || m <= 0 || nnz < 0 || values == nullptr) return false;
   impl_->m = m;
   impl_->nnz = nnz;
   // One-time int32 → int64 widening of the pattern (values are never
@@ -83,7 +86,7 @@ bool CholmodLDLT::analyze(int64_t m, const int* outer, const int* inner,
   impl_->A.p = impl_->p64.data();
   impl_->A.i = impl_->i64.data();
   impl_->A.nz = nullptr;
-  impl_->A.x = nullptr;  // bound at factorize() time
+  impl_->A.x = const_cast<double*>(values);  // required non-null for REAL
   impl_->A.z = nullptr;
   impl_->A.stype = -1;  // lower triangle stored (matches N_sparse layout)
   impl_->A.itype = CHOLMOD_LONG;

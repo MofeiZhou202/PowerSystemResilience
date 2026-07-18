@@ -69,6 +69,7 @@ add_library(mipsolvers STATIC
   src/engine/kernel/linear_algebra/linear_solver.cpp
   src/engine/kernel/linear_algebra/sparse_lu_factor.cpp
   src/engine/kernel/linear_algebra/hfactor_backend.cpp
+  src/engine/kernel/linear_algebra/cholmod_ldlt.cpp
   src/engine/kernel/lp_kernel/dual_simplex.cpp
   src/engine/kernel/lp_kernel/dual_simplex_api.cpp
   src/engine/kernel/kkt/kkt_system.cpp
@@ -279,7 +280,8 @@ endif()
 # include (public API headers never expose cholmod types) and exported with
 # the mipsolversTargets set like the other vendored libraries.
 if(MIPSOLVERS_HAVE_CHOLMOD)
-  target_include_directories(mipsolvers PRIVATE ${MIPSOLVERS_CHOLMOD_INCLUDE_DIRS})
+  # BEFORE: the vendored headers must win over any system SuiteSparse dir.
+  target_include_directories(mipsolvers BEFORE PRIVATE ${MIPSOLVERS_CHOLMOD_INCLUDE_DIRS})
   target_link_libraries(mipsolvers PRIVATE cholmod_vendored)
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_CHOLMOD=1 HACDCPF_HAVE_CHOLMOD=1)

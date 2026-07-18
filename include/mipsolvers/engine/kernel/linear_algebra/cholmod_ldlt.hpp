@@ -27,7 +27,10 @@ class CholmodLDLT {
 
   /// Symbolic analysis of a lower-triangular CSC pattern (int32 input,
   /// widened to int64 once here).  `outer` has m+1 entries, `inner` has nnz.
-  bool analyze(int64_t m, const int* outer, const int* inner, int64_t nnz);
+  /// `values` (nnz entries) is aliased — CHOLMOD requires a non-null x for
+  /// REAL matrices; factorize() re-aliases it on every call.
+  bool analyze(int64_t m, const int* outer, const int* inner,
+               const double* values, int64_t nnz);
 
   /// Numeric factorization of the analyzed matrix.  `values` (nnz entries,
   /// matching the analyzed pattern) is aliased, not copied; later calls

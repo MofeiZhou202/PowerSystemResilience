@@ -204,3 +204,45 @@ with scaling on (primal, dual, box multipliers).
 presolve, l2o_trace, numerical_stability). `test_ipopt_parameter_stability`
 (integration tier) has one assertion failure that reproduces on the pristine
 tree (verified via stash-check) — pre-existing, unrelated to these changes.
+
+---
+
+## 9. LA Backend Log — vendored CHOLMOD (roadmap item 10, partial)
+
+**Adopted open-source LA package: CHOLMOD 5.3.4** (SuiteSparse 7.12.2,
+supernodal BLAS-3 sparse Cholesky) as the portable SPD backend, replacing the
+serial `Eigen::SimplicialLDLT` fallback.
+
+- **Vendored for offline builds** — the needed SuiteSparse subset
+  (`SuiteSparse_config`, `AMD`, `CAMD`, `COLAMD`, `CCOLAMD`, `CHOLMOD`) is
+  committed in-tree under `suitesparse/` (~24 MB) and compiled by
+  `cmake/BuildCHOLMOD.cmake` into the static `cholmod_vendored` target
+  (sources inlined, no FetchContent/network at configure, build, or deploy
+  time; mirrors the `highs/` `scip/` `ipopt/` convention). BLAS for the
+  supernodal kernels: Accelerate on macOS, system BLAS/LAPACK elsewhere
+  (graceful degradation to simplicial if absent). Exported in
+  `mipsolversTargets`; system `libcholmod` is skipped to avoid symbol
+  collisions.
+- **Wrapper** — `cholmod_ldlt.{hpp,cpp}` (RAII over the int64 `cholmod_l_*`
+  API): analyze once per sparsity pattern, zero-copy factorize per iteration
+  (values alias `N_sparse`/`N_local`), preallocated solve workspace.
+- **Integration** — LP IPM sparse normal-equations path, both `solve_lp` and
+  the cached node-LP path, including init least-squares and dynamic-reg
+  retries; CHOLMOD solve failures poison with NaN into the Phase-0 finiteness
+  guard.
+- **Backend priority (measured, not assumed):** Accelerate (macOS) > CHOLMOD >
+  Eigen. On a 3000×63000 sparse LP (N: 3000², ~55k nnz), 19 IPM iterations:
+  Accelerate factor time **0.45–0.50 s** vs CHOLMOD **1.29–1.61 s** — Apple's
+  sparse Cholesky is ~2.7× faster on Apple Silicon even with both on
+  Accelerate BLAS, so macOS keeps Accelerate; CHOLMOD is the primary backend
+  where Accelerate does not exist (Linux deployment), where the previous
+  fallback was serial Eigen.
+
+**Tests:** `test_numerical_stability` gains a direct `CholmodLDLT` case
+(factorize/solve vs analytic, analyze-once/factorize-many refresh, not-PD
+rejection). Full unit tier green: 10/10 suites.
+
+**Follow-ups (explored, queued):** MUMPS for the indefinite KKT path
+(vendored `cmake/BuildMUMPS.cmake` already exists for Ipopt); UMFPACK
+`di`→`dl`; `HIGHSINT64`; B&C copy elimination (entry copy + per-node SF
+workspace + Node slimming — full file:line map available).
