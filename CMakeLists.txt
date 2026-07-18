@@ -485,6 +485,7 @@ if(MIPSOLVERS_BUILD_TESTS)
   mipsolvers_add_test(test_adapter_registry    TIER unit)
   mipsolvers_add_test(test_presolve            TIER unit)
   mipsolvers_add_test(test_l2o_trace           TIER unit)
+  mipsolvers_add_test(test_numerical_stability TIER unit)
 
   # SCUC module test requires scuc.cpp (not in base mipsolvers lib)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scuc_module.cpp" AND MIPSOLVERS_BUILD_SCUC)

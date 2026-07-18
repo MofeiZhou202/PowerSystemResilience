@@ -7,13 +7,16 @@ namespace mipsolvers::engine {
 
 namespace {
 
-double row_infty_norm(const Eigen::SparseMatrix<double>& M, int i) {
-  double nrm = 0.0;
-  const Eigen::SparseMatrix<double> R = M.row(i);
-  for (Eigen::SparseMatrix<double>::InnerIterator it(R, 0); it; ++it) {
-    nrm = std::max(nrm, std::abs(it.value()));
+// Row infinity norms of a CSC sparse matrix in a single O(nnz) sweep
+// (previously materialized M.row(i) per row — O(m·nnz) total, which dies
+// first on million-dimension problems).
+void row_infty_norms(const Eigen::SparseMatrix<double>& M, double* out) {
+  std::fill(out, out + M.rows(), 0.0);
+  for (int k = 0; k < M.outerSize(); ++k) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(M, k); it; ++it) {
+      out[it.row()] = std::max(out[it.row()], std::abs(it.value()));
+    }
   }
-  return nrm;
 }
 
 double scale_from_norm(double norm, double g_max) {
@@ -46,9 +49,12 @@ ScalingFactors compute_scaling_factors(const NLPModel& prob,
     Eigen::SparseMatrix<double> Jg;
     prob.jac_g(x0, Jg);
     if (Jg.rows() > 0) {
+      Eigen::VectorXd norms;
+      norms.setZero(Jg.rows());
+      row_infty_norms(Jg, norms.data());
       out.s_g.resize(Jg.rows());
       for (int i = 0; i < Jg.rows(); ++i) {
-        out.s_g[i] = scale_from_norm(row_infty_norm(Jg, i), g_max);
+        out.s_g[i] = scale_from_norm(norms[i], g_max);
       }
     }
   }
@@ -57,9 +63,12 @@ ScalingFactors compute_scaling_factors(const NLPModel& prob,
     Eigen::SparseMatrix<double> Jh;
     prob.jac_h(x0, Jh);
     if (Jh.rows() > 0) {
+      Eigen::VectorXd norms;
+      norms.setZero(Jh.rows());
+      row_infty_norms(Jh, norms.data());
       out.s_h.resize(Jh.rows());
       for (int i = 0; i < Jh.rows(); ++i) {
-        out.s_h[i] = scale_from_norm(row_infty_norm(Jh, i), g_max);
+        out.s_h[i] = scale_from_norm(norms[i], g_max);
       }
     }
   }

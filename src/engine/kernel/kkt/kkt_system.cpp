@@ -71,6 +71,13 @@ bool factor_cached_sparse_matrix(SparseKKTCache& cache,
     cache.pattern_analyzed = true;
     ++cache.symbolic_analyses;
   }
+  if (cache.kkt.rows() > std::numeric_limits<int>::max() ||
+      cache.kkt.nonZeros() > std::numeric_limits<int>::max()) {
+    // The solver backend is int32-indexed: fail loudly rather than
+    // silently truncating the dimension/nnz counters to int.
+    cache.factored = false;
+    return false;
+  }
   cache.dim = static_cast<int>(cache.kkt.rows());
   cache.nnz = static_cast<int>(cache.kkt.nonZeros());
   ++cache.numeric_factorizations;

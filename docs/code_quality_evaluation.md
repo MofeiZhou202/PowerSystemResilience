@@ -173,3 +173,34 @@ Ruiz equilibration, Pock–Chambolle preconditioning, primal-weight balancing, a
 | 5 | Unchecked `umfpack_di_wsolve` returns | `dual_simplex.cpp` | ✅ fixed — all four sites check for `UMFPACK_OK` and poison the result with NaN so downstream `isfinite` guards abort |
 
 **Validation:** `test_ipm_solver` (75 assertions / 9 cases), `test_dual_simplex` (11/4), `test_lp_solver` (36/5), `test_milp_solver` (70/6), `test_engine_api` (92/19) — all passing on macOS Release after the fixes.
+
+---
+
+## 8. Phase-1 Log
+
+Scope (agreed): items 8 and 9 in full, with numerical tests; item 6 as loud
+overflow guards; item 7 as API-layer copy elimination. Full int64 migration
+and the B&C `TreeNode` rewrite remain deferred — they are ABI-wide / legacy-
+rewrite efforts of their own, not single changesets.
+
+| # | Item | Status |
+|---|---|---|
+| 8a | `row_infty_norm` O(m·nnz) → O(nnz) | ✅ done — `compute_scaling_factors` now computes all row ∞-norms in a single column sweep (`ipm_scaling.cpp`); bit-identical results |
+| 8b | Real Ruiz scaling in LP IPM | ✅ done — `ruiz_rounds` (default 10) now performs alternating row/column ∞-norm equilibration of `[A; Aeq]` in both `solve_lp` and the cached node-LP path; cost/RHS/bounds scaled at setup, primal/dual/box-multiplier outputs unscaled (`x = Dc·x̂`, `y = Dr·ŷ`, `z = ẑ/Dc`). Slacks keep coefficient 1, so all slack logic is untouched. One implementation bug was caught by the new tests: row factors were accumulated per nonzero instead of per row (dr squared per round) — fixed before merge |
+| 9a | Re-enable UMFPACK iterative refinement | ✅ done — `Control_[UMFPACK_IRSTEP] = 2` in `SparseBasis` (`dual_simplex.cpp`); UMFPACK early-stops, so the extra SpMV + triangular solve is only paid when the residual demands it |
+| 9b | IR on the normal-equations path | ✅ done — conditional refinement in both `solve_normal` lambdas: residual `r = rhs − N·dy` against the pristine matrix (new `banded_sym_matvec` for the banded path, `selfadjointView<Lower>` for sparse/dense), ≤ 2 correction solves with the existing factorization when `‖r‖∞ > 1e-12·max(1, ‖rhs‖∞)` |
+| 6 | int64 index migration | ⚠️ guards only — loud failure past the int32 ceiling at the doc-cited points (`kkt_system.cpp` dim/nnz truncation, `sparse_lu_factor.cpp` negative lnz/unz after `get_lunz`, `dual_simplex.cpp` `B_.nonZeros()` before `umfpack_di_symbolic`). Full migration deferred |
+| 7 | Copy chains | ⚠️ partial — engine API layer down to 1 copy: `SolverEngine::solve` takes the variant by value and moves through `normalize_problem`; `solve_lp/qp/milp/minlp` move their normalized model into the variant (3 → 1 full-model copies). B&C-side copies and `TreeNode` migration deferred |
+
+**Numerical tests** — new `tests/test_numerical_stability.cpp` (332 assertions / 6 cases):
+ill-scaled LP rescued by Ruiz (entries 1e⁻¹⁰..1e¹⁰, exact optimum recovered);
+`compute_scaling_factors` row-norm regression; near-parallel equality LP
+(cond(N) ~ 4e10) solved accurately on the banded path; sparse-path IR sanity;
+ill-conditioned equality LP through dual simplex; cached node LP ≡ fresh solve
+with scaling on (primal, dual, box multipliers).
+
+**Validation:** full unit tier green — `ctest -L unit`: 10/10 suites pass
+(engine_api, lp, milp, ipm, dual_simplex, problem_validation, adapter_registry,
+presolve, l2o_trace, numerical_stability). `test_ipopt_parameter_stability`
+(integration tier) has one assertion failure that reproduces on the pristine
+tree (verified via stash-check) — pre-existing, unrelated to these changes.

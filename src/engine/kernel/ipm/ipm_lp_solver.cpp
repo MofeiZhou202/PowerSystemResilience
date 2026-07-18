@@ -239,6 +239,106 @@ inline void banded_chol_solve(const double* MIPSOLVERS_RESTRICT band, int m, int
   }
 }
 
+// y = N * x with N symmetric banded, stored as band[(row-col)*m + col]
+// (lower triangle, row >= col, row-col <= bw).  Used by iterative
+// refinement against the pristine (unfactorized) band storage.
+inline void banded_sym_matvec(const double* MIPSOLVERS_RESTRICT band, int m, int bw,
+                              const double* MIPSOLVERS_RESTRICT x,
+                              double* MIPSOLVERS_RESTRICT y) {
+  std::fill(y, y + m, 0.0);
+  for (int j = 0; j < m; ++j) {
+    const double xj = x[j];
+    y[j] += band[j] * xj;  // diagonal
+    const int kmax = std::min(bw, m - 1 - j);
+    for (int k = 1; k <= kmax; ++k) {
+      const double v = band[k * m + j];  // N[j+k, j] == N[j, j+k]
+      y[j + k] += v * xj;
+      y[j] += v * x[j + k];
+    }
+  }
+}
+
+// =====================================================================
+// Ruiz equilibration
+// =====================================================================
+// Alternating row/column infinity-norm scaling of the constraint system
+// [A; Aeq] (inequality rows first, then equality rows).  Returns scaled
+// copies plus cumulative diagonal scalings dr (rows) and dc (columns).
+// The scaled LP  min (Dc c)'x̂  s.t.  (Dr A Dc) x̂ + ŝ = Dr b, ŝ >= 0
+// has the same feasible set as the original under
+//   x = Dc·x̂,  y_orig = Dr·ŷ,  z_orig = ẑ / Dc (box multipliers).
+// Slack coefficients stay 1, so no slack handling anywhere changes.
+struct RuizScaling {
+  Eigen::SparseMatrix<double> A;    // Dr·A·Dc
+  Eigen::SparseMatrix<double> Aeq;  // Dr·Aeq·Dc
+  std::vector<double> dr;           // row scales, size mi + me
+  std::vector<double> dc;           // column scales, size n
+  bool active = false;
+};
+
+RuizScaling ruiz_equilibrate(const Eigen::SparseMatrix<double>& A,
+                             const Eigen::SparseMatrix<double>& Aeq,
+                             int n, int rounds) {
+  RuizScaling rs;
+  const int mi = static_cast<int>(A.rows());
+  const int me = static_cast<int>(Aeq.rows());
+  const int na = static_cast<int>(A.outerSize());
+  const int ne = static_cast<int>(Aeq.outerSize());
+  if (rounds <= 0 || n <= 0 || (mi + me) <= 0) return rs;
+
+  rs.active = true;
+  rs.A = A;
+  rs.Aeq = Aeq;
+  rs.dr.assign(static_cast<size_t>(mi + me), 1.0);
+  rs.dc.assign(static_cast<size_t>(n), 1.0);
+
+  std::vector<double> row_max(static_cast<size_t>(mi + me));
+  std::vector<double> row_factor(static_cast<size_t>(mi + me));
+  std::vector<double> col_max(static_cast<size_t>(n));
+  for (int round = 0; round < rounds; ++round) {
+    // Row equilibration: dr_i *= 1/sqrt(max_j |a_ij|)
+    std::fill(row_max.begin(), row_max.end(), 0.0);
+    for (int j = 0; j < na; ++j)
+      for (Eigen::SparseMatrix<double>::InnerIterator it(rs.A, j); it; ++it)
+        row_max[it.row()] = std::max(row_max[it.row()], std::abs(it.value()));
+    for (int j = 0; j < ne; ++j)
+      for (Eigen::SparseMatrix<double>::InnerIterator it(rs.Aeq, j); it; ++it)
+        row_max[mi + it.row()] = std::max(row_max[mi + it.row()], std::abs(it.value()));
+    // Accumulate once per row (per-entry accumulation would square dr).
+    for (int i = 0; i < mi + me; ++i) {
+      row_factor[i] = (row_max[i] > 0.0) ? 1.0 / std::sqrt(row_max[i]) : 1.0;
+      rs.dr[i] *= row_factor[i];
+    }
+    for (int j = 0; j < na; ++j)
+      for (Eigen::SparseMatrix<double>::InnerIterator it(rs.A, j); it; ++it)
+        it.valueRef() *= row_factor[it.row()];
+    for (int j = 0; j < ne; ++j)
+      for (Eigen::SparseMatrix<double>::InnerIterator it(rs.Aeq, j); it; ++it)
+        it.valueRef() *= row_factor[mi + it.row()];
+    // Column equilibration: dc_j *= 1/sqrt(max_i |a_ij|)
+    std::fill(col_max.begin(), col_max.end(), 0.0);
+    for (int j = 0; j < na; ++j)
+      for (Eigen::SparseMatrix<double>::InnerIterator it(rs.A, j); it; ++it)
+        col_max[j] = std::max(col_max[j], std::abs(it.value()));
+    for (int j = 0; j < ne; ++j)
+      for (Eigen::SparseMatrix<double>::InnerIterator it(rs.Aeq, j); it; ++it)
+        col_max[j] = std::max(col_max[j], std::abs(it.value()));
+    for (int j = 0; j < n; ++j) {
+      const double cmax = col_max[j];
+      if (cmax <= 0.0) continue;
+      const double f = 1.0 / std::sqrt(cmax);
+      if (j < na)
+        for (Eigen::SparseMatrix<double>::InnerIterator it(rs.A, j); it; ++it)
+          it.valueRef() *= f;
+      if (j < ne)
+        for (Eigen::SparseMatrix<double>::InnerIterator it(rs.Aeq, j); it; ++it)
+          it.valueRef() *= f;
+      rs.dc[j] *= f;
+    }
+  }
+  return rs;
+}
+
 }  // namespace
 
 NativeIPMLPAdapter::NativeIPMLPAdapter(IPMLPOptions opt)
@@ -274,6 +374,14 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   const int m = mi + me;
   const int nn = n_orig + mi;  // original vars + inequality slacks
 
+  // === Ruiz equilibration (honors opt_.ruiz_rounds) ===
+  // Scales A/Aeq/b/c and finite variable bounds; slacks keep coefficient 1.
+  // Outputs are unscaled at extraction: x = Dc·x̂, y = Dr·ŷ, z = ẑ/Dc.
+  const RuizScaling scal =
+      (opt_.ruiz_rounds > 0 && m > 0)
+          ? ruiz_equilibrate(prob.A, prob.Aeq, n_orig, opt_.ruiz_rounds)
+          : RuizScaling{};
+
   // === Bounds — use double flags (0.0/1.0) for branchless arithmetic ===
   std::vector<double> lb(nn), ub(nn), flb(nn), fub(nn);
   for (int j = 0; j < n_orig; ++j) {
@@ -281,16 +389,23 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
     double hi = (j < (int)prob.vars.size()) ? prob.vars[j].ub : kBig;
     if (lo < -kBig + 1) lo = -kBig;
     if (hi > kBig - 1) hi = kBig;
-    lb[j] = lo; ub[j] = hi;
     flb[j] = (lo > -kBig + 1) ? 1.0 : 0.0;
     fub[j] = (hi < kBig - 1) ? 1.0 : 0.0;
+    if (scal.active) {
+      const double inv_d = 1.0 / scal.dc[static_cast<size_t>(j)];
+      if (flb[j]) lo *= inv_d;
+      if (fub[j]) hi *= inv_d;
+    }
+    lb[j] = lo; ub[j] = hi;
   }
   for (int i = 0; i < mi; ++i) {
     lb[n_orig + i] = 0.0;
     const double lhs = lp_row_lhs_or_neg_inf(prob, i);
+    // Both b_i and lhs_i scale with dr_i, so the slack range scales once.
+    const double dri = scal.active ? scal.dr[static_cast<size_t>(i)] : 1.0;
     ub[n_orig + i] =
         std::isfinite(lhs) && std::isfinite(prob.b[i])
-            ? std::max(0.0, prob.b[i] - lhs)
+            ? std::max(0.0, dri * (prob.b[i] - lhs))
             : kBig;
     flb[n_orig + i] = 1.0;
     fub[n_orig + i] = (ub[n_orig + i] < kBig - 1) ? 1.0 : 0.0;
@@ -314,19 +429,25 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
 
   // === Cost vector (with sense) ===
   std::vector<double> c(nn, 0.0);
-  for (int j = 0; j < n_orig; ++j) c[j] = sense_sign * prob.c(j);
+  for (int j = 0; j < n_orig; ++j)
+    c[j] = sense_sign * prob.c(j) *
+           (scal.active ? scal.dc[static_cast<size_t>(j)] : 1.0);
 
   std::vector<double> b(m);
-  for (int i = 0; i < mi; ++i) b[i] = prob.b(i);
-  for (int i = 0; i < me; ++i) b[mi + i] = prob.beq(i);
+  for (int i = 0; i < mi; ++i)
+    b[i] = (scal.active ? scal.dr[static_cast<size_t>(i)] : 1.0) * prob.b(i);
+  for (int i = 0; i < me; ++i)
+    b[mi + i] = (scal.active ? scal.dr[static_cast<size_t>(mi + i)] : 1.0) * prob.beq(i);
 
-  // CSC pointers — direct from Eigen sparse
-  const int* A_o = prob.A.outerIndexPtr();
-  const int* A_i = prob.A.innerIndexPtr();
-  const double* A_v = prob.A.valuePtr();
-  const int* Aeq_o = me > 0 ? prob.Aeq.outerIndexPtr() : nullptr;
-  const int* Aeq_i = me > 0 ? prob.Aeq.innerIndexPtr() : nullptr;
-  const double* Aeq_v = me > 0 ? prob.Aeq.valuePtr() : nullptr;
+  // CSC pointers — from the scaled copies when Ruiz is active, else direct
+  const Eigen::SparseMatrix<double>& A_mat = scal.active ? scal.A : prob.A;
+  const Eigen::SparseMatrix<double>& Aeq_mat = scal.active ? scal.Aeq : prob.Aeq;
+  const int* A_o = A_mat.outerIndexPtr();
+  const int* A_i = A_mat.innerIndexPtr();
+  const double* A_v = A_mat.valuePtr();
+  const int* Aeq_o = me > 0 ? Aeq_mat.outerIndexPtr() : nullptr;
+  const int* Aeq_i = me > 0 ? Aeq_mat.innerIndexPtr() : nullptr;
+  const double* Aeq_v = me > 0 ? Aeq_mat.valuePtr() : nullptr;
 
   // Build CSR for A (inequality) — needed for forward SpMV (sequential y writes)
   std::vector<int> A_rp, A_ci, Aeq_rp, Aeq_ci;
@@ -353,8 +474,8 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
         ci[q] = k; rv[q] = Mv[p];
       }
   };
-  if (mi > 0) build_csr(prob.A, A_rp, A_ci, A_rv);
-  if (me > 0) build_csr(prob.Aeq, Aeq_rp, Aeq_ci, Aeq_rv);
+  if (mi > 0) build_csr(A_mat, A_rp, A_ci, A_rv);
+  if (me > 0) build_csr(Aeq_mat, Aeq_rp, Aeq_ci, Aeq_rv);
 
   // === SpMV operations ===
   // y -= Ae * x  (CSR-based: sequential y writes)
@@ -715,10 +836,13 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
       for (int j = 0; j < n_orig; ++j) {
         double lo = flb[j] ? lb[j] : -kBig;
         double hi = fub[j] ? ub[j] : kBig;
+        // Caller-provided x0 is in original coordinates: x̂0 = x0 / Dc.
+        const double x0j =
+            scal.active ? x0[j] / scal.dc[static_cast<size_t>(j)] : x0[j];
         if (hi - lo < 2e-6) {
           x_d[j] = 0.5 * (lo + hi);
         } else {
-          x_d[j] = std::clamp(x0[j], lo + 1e-6, hi - 1e-6);
+          x_d[j] = std::clamp(x0j, lo + 1e-6, hi - 1e-6);
         }
       }
       // Compute inequality slacks: s_i = b_i - A_i * x  (must be > 0)
@@ -966,27 +1090,62 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
 #endif
   };
 
-  // Lambda: solve normal equations
+  // Lambda: solve normal equations, with conditional iterative refinement
+  // (mirrors the KKT path): after each solve, the residual r = rhs - N·dy
+  // is checked against the pristine matrix; up to 2 correction solves with
+  // the existing factorization run when ||r||∞ > 1e-12·max(1, ||rhs||∞).
+  // Cost: one matvec per linear solve — negligible next to factorization.
+  std::vector<double> ir_ndy(m), ir_r(m), ir_corr(m);
   auto solve_normal = [&](double* rhs_buf, double* dy_buf) {
-    if (use_banded) {
-      std::memcpy(dy_buf, rhs_buf, sizeof(double) * m);
-      banded_chol_solve(band_work.data(), m, bw, dy_buf);
-    } else if (use_dense) {
-      Eigen::Map<const Eigen::VectorXd> rhs_map(rhs_buf, m);
-      Eigen::Map<Eigen::VectorXd> dy_map(dy_buf, m);
-      dy_map = ldlt_dense.solve(rhs_map);
-    } else {
+    auto raw_solve = [&](const double* rhs, double* dy) {
+      if (use_banded) {
+        std::memcpy(dy, rhs, sizeof(double) * m);
+        banded_chol_solve(band_work.data(), m, bw, dy);
+      } else if (use_dense) {
+        Eigen::Map<const Eigen::VectorXd> rhs_map(rhs, m);
+        Eigen::Map<Eigen::VectorXd> dy_map(dy, m);
+        dy_map = ldlt_dense.solve(rhs_map);
+      } else {
 #if MIPSOLVERS_USE_ACCELERATE
-      std::memcpy(dy_buf, rhs_buf, sizeof(double) * m);
-      DenseVector_Double xb{};
-      xb.count = m;
-      xb.data = dy_buf;
-      SparseSolve(accel_numeric, xb);
+        std::memcpy(dy, rhs, sizeof(double) * m);
+        DenseVector_Double xb{};
+        xb.count = m;
+        xb.data = dy;
+        SparseSolve(accel_numeric, xb);
 #else
-      Eigen::Map<Eigen::VectorXd> rhs_map(rhs_buf, m);
-      Eigen::Map<Eigen::VectorXd> dy_map(dy_buf, m);
-      dy_map = ldlt.solve(rhs_map);
+        Eigen::Map<const Eigen::VectorXd> rhs_map(rhs, m);
+        Eigen::Map<Eigen::VectorXd> dy_map(dy, m);
+        dy_map = ldlt.solve(rhs_map);
 #endif
+      }
+    };
+    raw_solve(rhs_buf, dy_buf);
+    if (m == 0) return;
+    double rhs_norm = 0.0;
+    for (int i = 0; i < m; ++i)
+      rhs_norm = std::max(rhs_norm, std::abs(rhs_buf[i]));
+    const double ir_tol = 1e-12 * std::max(1.0, rhs_norm);
+    for (int ref = 0; ref < 2; ++ref) {
+      // ndy = N * dy against the pristine matrix
+      if (use_banded) {
+        banded_sym_matvec(band_storage.data(), m, bw, dy_buf, ir_ndy.data());
+      } else {
+        Eigen::Map<const Eigen::VectorXd> dy_map(dy_buf, m);
+        Eigen::Map<Eigen::VectorXd> ndy_map(ir_ndy.data(), m);
+        if (use_dense) {
+          ndy_map = N_dense.selfadjointView<Eigen::Lower>() * dy_map;
+        } else {
+          ndy_map = N_sparse.selfadjointView<Eigen::Lower>() * dy_map;
+        }
+      }
+      double r_norm = 0.0;
+      for (int i = 0; i < m; ++i) {
+        ir_r[i] = rhs_buf[i] - ir_ndy[i];
+        r_norm = std::max(r_norm, std::abs(ir_r[i]));
+      }
+      if (r_norm <= ir_tol) break;
+      raw_solve(ir_r.data(), ir_corr.data());
+      for (int i = 0; i < m; ++i) dy_buf[i] += ir_corr[i];
     }
   };
 
@@ -1285,19 +1444,23 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
     out.stats.success = false;
   }
   out.x.resize(n_orig);
-  for (int j = 0; j < n_orig; ++j) out.x(j) = x_d[j];
+  for (int j = 0; j < n_orig; ++j)
+    out.x(j) = scal.active ? x_d[j] * scal.dc[static_cast<size_t>(j)] : x_d[j];
   out.stats.objective = prob.c.dot(out.x);
   if (m > 0) {
     out.constraint_duals.resize(m);
     for (int i = 0; i < m; ++i)
-      out.constraint_duals(i) = sense_sign * y_d[i];
+      out.constraint_duals(i) = sense_sign * y_d[i] *
+                                (scal.active ? scal.dr[static_cast<size_t>(i)] : 1.0);
   }
   // Export bound multipliers for original variables (used by IPM→simplex crossover).
   out.box_dual_lb.resize(n_orig);
   out.box_dual_ub.resize(n_orig);
   for (int j = 0; j < n_orig; ++j) {
-    out.box_dual_lb(j) = zl_d[j];
-    out.box_dual_ub(j) = zu_d[j];
+    out.box_dual_lb(j) = scal.active ? zl_d[j] / scal.dc[static_cast<size_t>(j)]
+                                     : zl_d[j];
+    out.box_dual_ub(j) = scal.active ? zu_d[j] / scal.dc[static_cast<size_t>(j)]
+                                     : zu_d[j];
   }
   out.stats.runtime_sec =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -1403,6 +1566,14 @@ struct NativeIPMLPAdapter::CachedState {
   // Copy of base LP (owns the Eigen sparse matrices whose pointers we borrow)
   LPModel base_lp_copy;
 
+  // Ruiz scaling (inactive when opt_.ruiz_rounds == 0).  When active, the
+  // A_o/A_i/A_v and Aeq_* pointers reference the owned scaled matrices
+  // below, and c/b are stored scaled.  Node bounds are scaled by 1/dc per
+  // solve; outputs are unscaled: x = Dc·x̂, y = Dr·ŷ, z = ẑ/Dc.
+  bool scaling_active = false;
+  std::vector<double> scal_dr, scal_dc;
+  Eigen::SparseMatrix<double> A_scaled, Aeq_scaled;
+
   ~CachedState() {
 #if MIPSOLVERS_USE_ACCELERATE
     if (accel_symbolic_valid) SparseCleanup(accel_symbolic);
@@ -1432,22 +1603,47 @@ void NativeIPMLPAdapter::prepare_for_node_solves(const LPModel& base_lp) {
   const int m = cs->m;
   const int nn = cs->nn;
 
+  // Ruiz equilibration (same option as solve_lp).  Scaled matrices and the
+  // dr/dc vectors move into the cache; all downstream structures (CSR,
+  // scatter maps, symbolic factorization) are built from the scaled data.
+  {
+    RuizScaling scal =
+        (opt_.ruiz_rounds > 0 && m > 0)
+            ? ruiz_equilibrate(lp.A, lp.Aeq, n_orig, opt_.ruiz_rounds)
+            : RuizScaling{};
+    cs->scaling_active = scal.active;
+    if (scal.active) {
+      cs->A_scaled = std::move(scal.A);
+      cs->Aeq_scaled = std::move(scal.Aeq);
+      cs->scal_dr = std::move(scal.dr);
+      cs->scal_dc = std::move(scal.dc);
+    }
+  }
+  const Eigen::SparseMatrix<double>& A_mat =
+      cs->scaling_active ? cs->A_scaled : lp.A;
+  const Eigen::SparseMatrix<double>& Aeq_mat =
+      cs->scaling_active ? cs->Aeq_scaled : lp.Aeq;
+
   // Cost
   cs->c.resize(nn, 0.0);
-  for (int j = 0; j < n_orig; ++j) cs->c[j] = cs->sense_sign * lp.c(j);
+  for (int j = 0; j < n_orig; ++j)
+    cs->c[j] = cs->sense_sign * lp.c(j) *
+               (cs->scaling_active ? cs->scal_dc[static_cast<size_t>(j)] : 1.0);
 
   // RHS
   cs->b.resize(m);
-  for (int i = 0; i < mi; ++i) cs->b[i] = lp.b(i);
-  for (int i = 0; i < me; ++i) cs->b[mi + i] = lp.beq(i);
+  for (int i = 0; i < mi; ++i)
+    cs->b[i] = (cs->scaling_active ? cs->scal_dr[static_cast<size_t>(i)] : 1.0) * lp.b(i);
+  for (int i = 0; i < me; ++i)
+    cs->b[mi + i] = (cs->scaling_active ? cs->scal_dr[static_cast<size_t>(mi + i)] : 1.0) * lp.beq(i);
 
-  // CSC pointers from our copy
-  cs->A_o = lp.A.outerIndexPtr();
-  cs->A_i = lp.A.innerIndexPtr();
-  cs->A_v = lp.A.valuePtr();
-  cs->Aeq_o = me > 0 ? lp.Aeq.outerIndexPtr() : nullptr;
-  cs->Aeq_i = me > 0 ? lp.Aeq.innerIndexPtr() : nullptr;
-  cs->Aeq_v = me > 0 ? lp.Aeq.valuePtr() : nullptr;
+  // CSC pointers from our copy (scaled matrices when Ruiz is active)
+  cs->A_o = A_mat.outerIndexPtr();
+  cs->A_i = A_mat.innerIndexPtr();
+  cs->A_v = A_mat.valuePtr();
+  cs->Aeq_o = me > 0 ? Aeq_mat.outerIndexPtr() : nullptr;
+  cs->Aeq_i = me > 0 ? Aeq_mat.innerIndexPtr() : nullptr;
+  cs->Aeq_v = me > 0 ? Aeq_mat.valuePtr() : nullptr;
 
   // Build CSR
   auto build_csr = [](const Eigen::SparseMatrix<double>& M,
@@ -1472,8 +1668,8 @@ void NativeIPMLPAdapter::prepare_for_node_solves(const LPModel& base_lp) {
         ci[q] = k; rv[q] = Mv[p];
       }
   };
-  if (mi > 0) build_csr(lp.A, cs->A_rp, cs->A_ci, cs->A_rv);
-  if (me > 0) build_csr(lp.Aeq, cs->Aeq_rp, cs->Aeq_ci, cs->Aeq_rv);
+  if (mi > 0) build_csr(A_mat, cs->A_rp, cs->A_ci, cs->A_rv);
+  if (me > 0) build_csr(Aeq_mat, cs->Aeq_rp, cs->Aeq_ci, cs->Aeq_rv);
 
   // Bandwidth
   for (int j = 0; j < n_orig; ++j) {
@@ -1563,14 +1759,14 @@ void NativeIPMLPAdapter::prepare_for_node_solves(const LPModel& base_lp) {
     // Sparse path: build Ae, N_sparse, scatter maps, symbolic factorization
     using T = Eigen::Triplet<double>;
     std::vector<T> trips;
-    trips.reserve(lp.A.nonZeros() + lp.Aeq.nonZeros() + mi);
-    for (int k = 0; k < lp.A.outerSize(); ++k)
-      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, k); it; ++it)
+    trips.reserve(A_mat.nonZeros() + Aeq_mat.nonZeros() + mi);
+    for (int k = 0; k < A_mat.outerSize(); ++k)
+      for (Eigen::SparseMatrix<double>::InnerIterator it(A_mat, k); it; ++it)
         trips.emplace_back(it.row(), it.col(), it.value());
     for (int i = 0; i < mi; ++i)
       trips.emplace_back(i, n_orig + i, 1.0);
-    for (int k = 0; k < lp.Aeq.outerSize(); ++k)
-      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, k); it; ++it)
+    for (int k = 0; k < Aeq_mat.outerSize(); ++k)
+      for (Eigen::SparseMatrix<double>::InnerIterator it(Aeq_mat, k); it; ++it)
         trips.emplace_back(mi + it.row(), it.col(), it.value());
     Eigen::SparseMatrix<double> Ae(m, nn);
     Ae.setFromTriplets(trips.begin(), trips.end());
@@ -1705,8 +1901,10 @@ void NativeIPMLPAdapter::update_cached_cost(const Eigen::VectorXd& new_c) {
   if (!cached_state_ || cached_state_->n_orig == 0) return;
   auto& cs = *cached_state_;
   const int n_orig = cs.n_orig;
+  // new_c is in the original LP convention; the cache stores Dc-scaled cost.
   for (int j = 0; j < n_orig && j < static_cast<int>(new_c.size()); ++j)
-    cs.c[j] = cs.sense_sign * new_c[j];
+    cs.c[j] = cs.sense_sign * new_c[j] *
+              (cs.scaling_active ? cs.scal_dc[static_cast<size_t>(j)] : 1.0);
   // Slack costs (indices n_orig..nn-1) remain 0.
 }
 
@@ -1750,23 +1948,33 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
   const int* Aeq_i = cs.Aeq_i;
   const double* Aeq_v = cs.Aeq_v;
 
-  // Bounds — only thing that changes per node
+  // Bounds — only thing that changes per node.  Node bounds arrive in
+  // original coordinates; the cache holds the Ruiz-scaled problem, so
+  // finite bounds are scaled by 1/dc here (flags from original bounds).
+  const bool scaling = cs.scaling_active;
   std::vector<double> lb(nn), ub(nn), flb(nn), fub(nn);
   for (int j = 0; j < n_orig; ++j) {
     double lo = (j < (int)node_lb.size()) ? node_lb[j] : -kBig;
     double hi = (j < (int)node_ub.size()) ? node_ub[j] : kBig;
     if (lo < -kBig + 1) lo = -kBig;
     if (hi > kBig - 1) hi = kBig;
-    lb[j] = lo; ub[j] = hi;
     flb[j] = (lo > -kBig + 1) ? 1.0 : 0.0;
     fub[j] = (hi < kBig - 1) ? 1.0 : 0.0;
+    if (scaling) {
+      const double inv_d = 1.0 / cs.scal_dc[static_cast<size_t>(j)];
+      if (flb[j]) lo *= inv_d;
+      if (fub[j]) hi *= inv_d;
+    }
+    lb[j] = lo; ub[j] = hi;
   }
   for (int i = 0; i < mi; ++i) {
     lb[n_orig + i] = 0.0;
     const double lhs = lp_row_lhs_or_neg_inf(cs.base_lp_copy, i);
+    // cs.b is stored scaled; scale (b - lhs) by the same dr_i.
+    const double dri = scaling ? cs.scal_dr[static_cast<size_t>(i)] : 1.0;
     ub[n_orig + i] =
         std::isfinite(lhs) && std::isfinite(cs.base_lp_copy.b[i])
-            ? std::max(0.0, cs.base_lp_copy.b[i] - lhs)
+            ? std::max(0.0, dri * (cs.base_lp_copy.b[i] - lhs))
             : kBig;
     flb[n_orig + i] = 1.0;
     fub[n_orig + i] = (ub[n_orig + i] < kBig - 1) ? 1.0 : 0.0;
@@ -1866,10 +2074,13 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
       for (int j = 0; j < n_orig; ++j) {
         double lo = flb[j] ? lb[j] : -kBig;
         double hi = fub[j] ? ub[j] : kBig;
+        // Caller-provided x0 is in original coordinates: x̂0 = x0 / Dc.
+        const double x0j =
+            scaling ? x0[j] / cs.scal_dc[static_cast<size_t>(j)] : x0[j];
         if (hi - lo < 2e-6) {
           x_d[j] = 0.5 * (lo + hi);
         } else {
-          x_d[j] = std::clamp(x0[j], lo + 1e-6, hi - 1e-6);
+          x_d[j] = std::clamp(x0j, lo + 1e-6, hi - 1e-6);
         }
       }
     } else {
@@ -2044,22 +2255,52 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
 #endif
   };
 
+  // Solve normal equations with conditional iterative refinement (same
+  // scheme as the non-cached path: residual against the pristine matrix,
+  // up to 2 correction solves with the existing factorization).
+  std::vector<double> ir_ndy(m), ir_r(m), ir_corr(m);
   auto solve_normal = [&](double* rhs_buf, double* dy_buf) {
-    if (use_banded) {
-      std::memcpy(dy_buf, rhs_buf, sizeof(double) * m);
-      banded_chol_solve(band_work.data(), m, bw, dy_buf);
-    } else {
+    auto raw_solve = [&](const double* rhs, double* dy) {
+      if (use_banded) {
+        std::memcpy(dy, rhs, sizeof(double) * m);
+        banded_chol_solve(band_work.data(), m, bw, dy);
+      } else {
 #if MIPSOLVERS_USE_ACCELERATE
-      std::memcpy(dy_buf, rhs_buf, sizeof(double) * m);
-      DenseVector_Double xb{};
-      xb.count = m;
-      xb.data = dy_buf;
-      SparseSolve(accel_numeric, xb);
+        std::memcpy(dy, rhs, sizeof(double) * m);
+        DenseVector_Double xb{};
+        xb.count = m;
+        xb.data = dy;
+        SparseSolve(accel_numeric, xb);
 #else
-      Eigen::Map<Eigen::VectorXd> rhs_map(rhs_buf, m);
-      Eigen::Map<Eigen::VectorXd> dy_map(dy_buf, m);
-      dy_map = ldlt_local.solve(rhs_map);
+        Eigen::Map<const Eigen::VectorXd> rhs_map(rhs, m);
+        Eigen::Map<Eigen::VectorXd> dy_map(dy, m);
+        dy_map = ldlt_local.solve(rhs_map);
 #endif
+      }
+    };
+    raw_solve(rhs_buf, dy_buf);
+    if (m == 0) return;
+    double rhs_norm = 0.0;
+    for (int i = 0; i < m; ++i)
+      rhs_norm = std::max(rhs_norm, std::abs(rhs_buf[i]));
+    const double ir_tol = 1e-12 * std::max(1.0, rhs_norm);
+    for (int ref = 0; ref < 2; ++ref) {
+      // ndy = N * dy against the pristine matrix
+      if (use_banded) {
+        banded_sym_matvec(band_storage_local.data(), m, bw, dy_buf, ir_ndy.data());
+      } else {
+        Eigen::Map<const Eigen::VectorXd> dy_map(dy_buf, m);
+        Eigen::Map<Eigen::VectorXd> ndy_map(ir_ndy.data(), m);
+        ndy_map = N_local.selfadjointView<Eigen::Lower>() * dy_map;
+      }
+      double r_norm = 0.0;
+      for (int i = 0; i < m; ++i) {
+        ir_r[i] = rhs_buf[i] - ir_ndy[i];
+        r_norm = std::max(r_norm, std::abs(ir_r[i]));
+      }
+      if (r_norm <= ir_tol) break;
+      raw_solve(ir_r.data(), ir_corr.data());
+      for (int i = 0; i < m; ++i) dy_buf[i] += ir_corr[i];
     }
   };
 
@@ -2321,18 +2562,22 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
     out.stats.complementarity = last_mu;
   }
   out.x.resize(n_orig);
-  for (int j = 0; j < n_orig; ++j) out.x(j) = x_d[j];
+  for (int j = 0; j < n_orig; ++j)
+    out.x(j) = scaling ? x_d[j] * cs.scal_dc[static_cast<size_t>(j)] : x_d[j];
   out.stats.objective = cs.base_lp_copy.c.dot(out.x);
   if (m > 0) {
     out.constraint_duals.resize(m);
     for (int i = 0; i < m; ++i)
-      out.constraint_duals(i) = sense_sign * y_d[i];
+      out.constraint_duals(i) = sense_sign * y_d[i] *
+                                (scaling ? cs.scal_dr[static_cast<size_t>(i)] : 1.0);
   }
   out.box_dual_lb.resize(n_orig);
   out.box_dual_ub.resize(n_orig);
   for (int j = 0; j < n_orig; ++j) {
-    out.box_dual_lb(j) = zl_d[j];
-    out.box_dual_ub(j) = zu_d[j];
+    out.box_dual_lb(j) = scaling ? zl_d[j] / cs.scal_dc[static_cast<size_t>(j)]
+                                 : zl_d[j];
+    out.box_dual_ub(j) = scaling ? zu_d[j] / cs.scal_dc[static_cast<size_t>(j)]
+                                 : zu_d[j];
   }
   out.stats.runtime_sec =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

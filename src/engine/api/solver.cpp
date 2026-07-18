@@ -185,9 +185,12 @@ std::vector<std::string> SolverEngine::list_solvers(ProblemClass cls) const {
   return dispatcher_.list_solvers(registry_, cls);
 }
 
-api::Result SolverEngine::solve(const api::ProblemVariant& problem,
+api::Result SolverEngine::solve(api::ProblemVariant problem,
                                 const SolveOptions& options) const {
-  const api::ProblemVariant normalized = normalize_problem(problem);
+  // problem arrives by value (moved in by rvalue callers); normalize_problem
+  // takes it by value too, so the chain below is copy-free after the single
+  // unavoidable copy at the public boundary for lvalue callers.
+  const api::ProblemVariant normalized = normalize_problem(std::move(problem));
   throw_if_invalid(normalized);
   const SolveResult internal = dispatcher_.solve(
       registry_,
@@ -213,14 +216,14 @@ api::Result SolverEngine::solve_lp(const LPModel& problem,
                                    const SolveOptions& options) const {
   LPModel normalized = problem;
   normalize_lp_matrices(normalized);
-  return solve(api::ProblemVariant{normalized}, options);
+  return solve(api::ProblemVariant{std::move(normalized)}, options);
 }
 
 api::Result SolverEngine::solve_qp(const QPModel& problem,
                                    const SolveOptions& options) const {
   QPModel normalized = problem;
   normalize_qp_matrices(normalized);
-  return solve(api::ProblemVariant{normalized}, options);
+  return solve(api::ProblemVariant{std::move(normalized)}, options);
 }
 
 api::Result SolverEngine::solve_nlp(const NLPModel& problem,
@@ -232,7 +235,7 @@ api::Result SolverEngine::solve_milp(const MIPModel& problem,
                                      const SolveOptions& options) const {
   MIPModel normalized = problem;
   normalize_lp_matrices(normalized.linear_part);
-  return solve(api::ProblemVariant{normalized}, options);
+  return solve(api::ProblemVariant{std::move(normalized)}, options);
 }
 
 api::Result SolverEngine::solve_minlp(const MINLPModel& problem,

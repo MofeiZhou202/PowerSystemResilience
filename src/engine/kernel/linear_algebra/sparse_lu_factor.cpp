@@ -65,6 +65,11 @@ bool SparseLUFactor::extract(void* Numeric, int m_in) {
   if (umfpack_di_get_lunz(&lnz, &unz, &n_row, &n_col, &nz_udiag, Numeric) != UMFPACK_OK)
     return false;
   if (n_row != m || n_col != m) return false;
+  if (lnz < 0 || unz < 0) {
+    // int32 nnz counters wrapped: the factorization exceeds the int32
+    // ceiling — fail loudly instead of allocating garbage-sized buffers.
+    return false;
+  }
 
   // Temporary extraction buffers.
   std::vector<int> Lp(m + 1), Lj(lnz), Up(m + 1), Ui(unz);

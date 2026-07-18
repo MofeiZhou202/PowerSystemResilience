@@ -3474,10 +3474,13 @@ class SparseBasis : public BasisOps {
     }
 #ifdef MIPSOLVERS_HAVE_UMFPACK
     // Initialize UMFPACK control with defaults, then customize for simplex:
-    // - Disable iterative refinement (we control accuracy via refactorization)
+    // - Iterative refinement on (max 2 steps, UMFPACK early-stops): the FT
+    //   update chain accumulates error between refactorizations; IR restores
+    //   solve accuracy on ill-conditioned bases for one extra SpMV + sparse
+    //   triangular solve only when the residual demands it.
     // - Use row-sum scaling for better numerical conditioning
     umfpack_di_defaults(Control_);
-    Control_[UMFPACK_IRSTEP] = 0;          // No iterative refinement (saves ~50% solve time)
+    Control_[UMFPACK_IRSTEP] = 2;
     Control_[UMFPACK_SCALE] = UMFPACK_SCALE_SUM;
     // Pre-allocate solve workspace (avoids per-call heap allocation).
     solve_work_.resize(m_);
@@ -3803,6 +3806,9 @@ class SparseBasis : public BasisOps {
     }
 
     if (!pattern_same) {
+      // UMFPACK's di interface is int32-indexed: fail loudly past the
+      // int32 ceiling instead of silently overflowing index counters.
+      if (B_.nonZeros() > std::numeric_limits<int>::max()) return false;
       if (Symbolic_) { umfpack_di_free_symbolic(&Symbolic_); Symbolic_ = nullptr; }
       int status = umfpack_di_symbolic(m_, m_, B_.outerIndexPtr(),
                                        B_.innerIndexPtr(), B_.valuePtr(),

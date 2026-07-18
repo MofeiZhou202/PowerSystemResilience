@@ -380,6 +380,19 @@ test_l2o_trace/fast:
 .PHONY : test_l2o_trace/fast
 
 #=============================================================================
+# Target rules for targets named test_numerical_stability
+
+# Build rule for target.
+test_numerical_stability: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_numerical_stability
+.PHONY : test_numerical_stability
+
+# fast build rule for target.
+test_numerical_stability/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_numerical_stability.dir/build.make CMakeFiles/test_numerical_stability.dir/build
+.PHONY : test_numerical_stability/fast
+
+#=============================================================================
 # Target rules for targets named test_scuc_module
 
 # Build rule for target.
@@ -5300,6 +5313,30 @@ tests/test_milp_solver.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_milp_solver.dir/build.make CMakeFiles/test_milp_solver.dir/tests/test_milp_solver.cpp.s
 .PHONY : tests/test_milp_solver.cpp.s
 
+tests/test_numerical_stability.o: tests/test_numerical_stability.cpp.o
+.PHONY : tests/test_numerical_stability.o
+
+# target to build an object file
+tests/test_numerical_stability.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_numerical_stability.dir/build.make CMakeFiles/test_numerical_stability.dir/tests/test_numerical_stability.cpp.o
+.PHONY : tests/test_numerical_stability.cpp.o
+
+tests/test_numerical_stability.i: tests/test_numerical_stability.cpp.i
+.PHONY : tests/test_numerical_stability.i
+
+# target to preprocess a source file
+tests/test_numerical_stability.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_numerical_stability.dir/build.make CMakeFiles/test_numerical_stability.dir/tests/test_numerical_stability.cpp.i
+.PHONY : tests/test_numerical_stability.cpp.i
+
+tests/test_numerical_stability.s: tests/test_numerical_stability.cpp.s
+.PHONY : tests/test_numerical_stability.s
+
+# target to generate assembly for a file
+tests/test_numerical_stability.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_numerical_stability.dir/build.make CMakeFiles/test_numerical_stability.dir/tests/test_numerical_stability.cpp.s
+.PHONY : tests/test_numerical_stability.cpp.s
+
 tests/test_presolve.o: tests/test_presolve.cpp.o
 .PHONY : tests/test_presolve.o
 
@@ -5411,6 +5448,7 @@ help:
 	@echo "... test_lp_solver"
 	@echo "... test_market_simulation"
 	@echo "... test_milp_solver"
+	@echo "... test_numerical_stability"
 	@echo "... test_presolve"
 	@echo "... test_problem_validation"
 	@echo "... test_scuc_module"
@@ -6005,6 +6043,9 @@ help:
 	@echo "... tests/test_milp_solver.o"
 	@echo "... tests/test_milp_solver.i"
 	@echo "... tests/test_milp_solver.s"
+	@echo "... tests/test_numerical_stability.o"
+	@echo "... tests/test_numerical_stability.i"
+	@echo "... tests/test_numerical_stability.s"
 	@echo "... tests/test_presolve.o"
 	@echo "... tests/test_presolve.i"
 	@echo "... tests/test_presolve.s"

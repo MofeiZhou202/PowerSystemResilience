@@ -22,7 +22,7 @@ class SolverEngine {
   void set_solver_preference(ProblemClass cls, const std::string& adapter_name);
   std::vector<std::string> list_solvers(ProblemClass cls) const;
 
-  api::Result solve(const api::ProblemVariant& problem,
+  api::Result solve(api::ProblemVariant problem,
                     const SolveOptions& options = {}) const;
 
   api::Result solve_le(const SparseLinSys& problem, const SolveOptions& options = {}) const;
