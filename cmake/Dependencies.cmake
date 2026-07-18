@@ -220,6 +220,12 @@ else()
   message(STATUS "mipsolvers: PaPILO disabled (MIPSOLVERS_USE_PAPILO=OFF)")
 endif()
 
+# ── Vendored CHOLMOD (offline, in-tree SuiteSparse sources) ─────────────────
+# Sets MIPSOLVERS_HAVE_CHOLMOD and creates the cholmod_vendored target.
+# Must run before the system SuiteSparse block below, which skips the system
+# cholmod library when the vendored build is active (no duplicate symbols).
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildCHOLMOD.cmake")
+
 # ── SuiteSparse (optional) ───────────────────────────────────────────────────
 set(MIPSOLVERS_HAVE_SUITESPARSE OFF)
 set(MIPSOLVERS_HAVE_UMFPACK OFF)
@@ -254,8 +260,14 @@ if(MIPSOLVERS_USE_SUITESPARSE)
     endif()
     find_library(_SS_AMD NAMES amd HINTS ${_SS_HINTS} PATH_SUFFIXES lib)
     find_library(_SS_COLAMD NAMES colamd HINTS ${_SS_HINTS} PATH_SUFFIXES lib)
-    find_library(_SS_CHOLMOD NAMES cholmod HINTS ${_SS_HINTS} PATH_SUFFIXES lib)
     find_library(_SS_SUITESPARSECONFIG NAMES suitesparseconfig HINTS ${_SS_HINTS} PATH_SUFFIXES lib)
+    # System cholmod is only linked when the vendored build is off —
+    # otherwise its symbols would collide with cholmod_vendored.
+    if(NOT MIPSOLVERS_HAVE_CHOLMOD)
+      find_library(_SS_CHOLMOD NAMES cholmod HINTS ${_SS_HINTS} PATH_SUFFIXES lib)
+    else()
+      set(_SS_CHOLMOD "")  # shadow any cached result from prior configures
+    endif()
     foreach(_SS_LIB _SS_AMD _SS_COLAMD _SS_CHOLMOD _SS_SUITESPARSECONFIG)
       if(${_SS_LIB})
         list(APPEND MIPSOLVERS_SUITESPARSE_LIBRARIES "${${_SS_LIB}}")

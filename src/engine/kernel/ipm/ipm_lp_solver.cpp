@@ -16,6 +16,8 @@
 #include <Eigen/Dense>
 #include <Eigen/SparseCholesky>
 
+#include "mipsolvers/engine/kernel/linear_algebra/cholmod_ldlt.hpp"
+
 #if defined(HACDCPF_HAVE_ACCELERATE) && defined(__APPLE__)
 #define MIPSOLVERS_USE_ACCELERATE 1
 #include <Accelerate/Accelerate.h>
@@ -569,6 +571,14 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
 
   // === Sparse path — normal equations N = Ae·Θ·Ae' ===
   Eigen::SparseMatrix<double> N_sparse;
+#if MIPSOLVERS_HAVE_CHOLMOD
+  // CHOLMOD is the preferred sparse Cholesky backend (supernodal BLAS-3).
+  CholmodLDLT cholmod_ldlt;
+#endif
+  // True when the CHOLMOD backend owns the sparse normal-equations path;
+  // false when CHOLMOD is not compiled or analyze failed, in which case
+  // the platform backend below (Accelerate / Eigen) handles factorization.
+  bool cholmod_ok = false;
 #if MIPSOLVERS_USE_ACCELERATE
   std::vector<long> accel_col_starts;
   SparseOpaqueSymbolicFactorization accel_symbolic{};
@@ -745,8 +755,14 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
         const int* pos = std::lower_bound(Ni + No[i], Ni + No[i + 1], i);
         sparse_diag_offsets[i] = static_cast<int>(pos - Ni);
       }
+#if MIPSOLVERS_HAVE_CHOLMOD
+      // CHOLMOD symbolic analysis — once per sparsity pattern; the numeric
+      // factorization later re-reads the aliased N_sparse.valuePtr().
+      cholmod_ok = cholmod_ldlt.analyze(m, N_sparse.outerIndexPtr(),
+                                        N_sparse.innerIndexPtr(), sparse_n_nnz);
+#endif
 #if !MIPSOLVERS_USE_ACCELERATE
-      ldlt.analyzePattern(N_sparse);
+      if (!cholmod_ok) ldlt.analyzePattern(N_sparse);
 #endif
     }
   }
@@ -776,7 +792,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
     return mat;
   };
 
-  if (!use_banded && !use_dense) {
+  if (!use_banded && !use_dense && !cholmod_ok) {
     // Convert Eigen CSC column starts (int) to Apple format (long)
     const int* No = N_sparse.outerIndexPtr();
     accel_col_starts.resize(m + 1);
@@ -895,7 +911,27 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
         std::fill(yv.begin(), yv.end(), 0.0);
       }
     } else {
+#if MIPSOLVERS_HAVE_CHOLMOD
+      if (cholmod_ok) {
+        // N_sparse currently holds the theta=1 fill (N = Ae*Ae' + reg).
+        if (cholmod_ldlt.factorize(N_sparse.valuePtr())) {
+          // x_init = Ae' * (N \ b)
+          std::memcpy(y_d, b.data(), sizeof(double) * m);
+          cholmod_ldlt.solve(y_d, y_d);
+          aet_mul(y_d, x_d);
+          // y_init = N \ (Ae * c)
+          std::vector<double> tmp2(m);
+          ae_mul(c.data(), tmp2.data());
+          cholmod_ldlt.solve(tmp2.data(), tmp2.data());
+          std::memcpy(y_d, tmp2.data(), sizeof(double) * m);
+        } else {
+          std::fill(xv.begin(), xv.end(), 0.5);
+          std::fill(yv.begin(), yv.end(), 0.0);
+        }
+      } else
+#endif
 #if MIPSOLVERS_USE_ACCELERATE
+      {
       SparseOpaqueFactorization_Double init_fac = SparseFactor(accel_symbolic, make_apple_matrix());
       if (init_fac.status == SparseStatusOK) {
         // x_init = Ae' * (N \ b)
@@ -918,7 +954,9 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
         std::fill(yv.begin(), yv.end(), 0.0);
       }
       SparseCleanup(init_fac);
+      }
 #else
+      {
       ldlt.factorize(N_sparse);
       if (ldlt.info() == Eigen::Success) {
         Eigen::Map<Eigen::VectorXd> bmap(b.data(), m);
@@ -932,6 +970,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
       } else {
         std::fill(xv.begin(), xv.end(), 0.5);
         std::fill(yv.begin(), yv.end(), 0.0);
+      }
       }
 #endif
     }
@@ -1073,6 +1112,13 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
     for (int i = 0; i < m; ++i) Nv[sparse_diag_offsets[i]] += reg;
     auto t_ff2 = tnow();
     t_fill += std::chrono::duration<double, std::milli>(t_ff2 - t_ff).count();
+#if MIPSOLVERS_HAVE_CHOLMOD
+    if (cholmod_ok) {
+      const bool ok = cholmod_ldlt.factorize(N_sparse.valuePtr());
+      t_factor += std::chrono::duration<double, std::milli>(tnow() - t_ff2).count();
+      return ok;
+    }
+#endif
 #if MIPSOLVERS_USE_ACCELERATE
     SparseMatrix_Double apple_N = make_apple_matrix();
     if (accel_numeric_valid) {
@@ -1106,6 +1152,16 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
         Eigen::Map<Eigen::VectorXd> dy_map(dy, m);
         dy_map = ldlt_dense.solve(rhs_map);
       } else {
+#if MIPSOLVERS_HAVE_CHOLMOD
+        if (cholmod_ok) {
+          if (!cholmod_ldlt.solve(rhs, dy)) {
+            // Poison with NaN so the finiteness guard aborts the loop
+            // (same pattern as the UMFPACK failure handling).
+            std::fill(dy, dy + m, std::numeric_limits<double>::quiet_NaN());
+          }
+          return;
+        }
+#endif
 #if MIPSOLVERS_USE_ACCELERATE
         std::memcpy(dy, rhs, sizeof(double) * m);
         DenseVector_Double xb{};
@@ -1240,7 +1296,13 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
           // Re-fill sparse normal equations with extra diagonal reg
           double* Nv = N_sparse.valuePtr();
           for (int i = 0; i < m; ++i) Nv[sparse_diag_offsets[i]] += dyn_reg;
+#if MIPSOLVERS_HAVE_CHOLMOD
+          if (cholmod_ok) {
+            factor_ok = cholmod_ldlt.factorize(N_sparse.valuePtr());
+          } else
+#endif
 #if MIPSOLVERS_USE_ACCELERATE
+          {
           SparseMatrix_Double apple_N = make_apple_matrix();
           if (accel_numeric_valid) {
             SparseRefactor(apple_N, &accel_numeric);
@@ -1249,9 +1311,12 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
             accel_numeric_valid = true;
           }
           factor_ok = (accel_numeric.status == SparseStatusOK);
+          }
 #else
+          {
           ldlt.factorize(N_sparse);
           factor_ok = (ldlt.info() == Eigen::Success);
+          }
 #endif
         }
         if (!factor_ok) dyn_reg *= 100.0;
@@ -1573,6 +1638,13 @@ struct NativeIPMLPAdapter::CachedState {
   bool scaling_active = false;
   std::vector<double> scal_dr, scal_dc;
   Eigen::SparseMatrix<double> A_scaled, Aeq_scaled;
+
+#if MIPSOLVERS_HAVE_CHOLMOD
+  // CHOLMOD backend for the sparse normal-equations path (preferred over
+  // Accelerate/Eigen when cholmod_ok is true).
+  CholmodLDLT cholmod;
+#endif
+  bool cholmod_ok = false;
 
   ~CachedState() {
 #if MIPSOLVERS_USE_ACCELERATE

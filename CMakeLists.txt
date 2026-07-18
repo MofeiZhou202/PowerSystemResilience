@@ -274,6 +274,17 @@ if(MIPSOLVERS_HAVE_SUITESPARSE)
   endif()
 endif()
 
+# ── Vendored CHOLMOD ──────────────────────────────────────────────────────────
+# Built from in-tree SuiteSparse sources (cmake/BuildCHOLMOD.cmake); PRIVATE
+# include (public API headers never expose cholmod types) and exported with
+# the mipsolversTargets set like the other vendored libraries.
+if(MIPSOLVERS_HAVE_CHOLMOD)
+  target_include_directories(mipsolvers PRIVATE ${MIPSOLVERS_CHOLMOD_INCLUDE_DIRS})
+  target_link_libraries(mipsolvers PRIVATE cholmod_vendored)
+  target_compile_definitions(mipsolvers PUBLIC
+    MIPSOLVERS_HAVE_CHOLMOD=1 HACDCPF_HAVE_CHOLMOD=1)
+endif()
+
 # ── SuperLU ───────────────────────────────────────────────────────────────────
 # PRIVATE：同 SuiteSparse，不向消费者传播绝对路径。
 if(MIPSOLVERS_HAVE_SUPERLU)
@@ -670,6 +681,11 @@ install(TARGETS mipsolvers
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(MIPSOLVERS_BUILD_HFACTOR)
   install(TARGETS mipsolvers_hfactor
+    EXPORT mipsolversTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
+if(MIPSOLVERS_HAVE_CHOLMOD)
+  install(TARGETS cholmod_vendored
     EXPORT mipsolversTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 endif()
