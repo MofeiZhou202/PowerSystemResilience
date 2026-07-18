@@ -2,24 +2,94 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include <Eigen/Core>
 #include <Eigen/Cholesky>
+#include <Eigen/Eigenvalues>
 #include <Eigen/Sparse>
+#include <Eigen/SparseQR>
 
 namespace mipsolvers::engine {
 
-bool factor_kkt_sparse(SparseKKTCache& cache,
-                       const Eigen::SparseMatrix<double>& w,
-                       const Eigen::SparseMatrix<double>& jg,
-                       double reg) {
-  const int n = static_cast<int>(w.rows());
-  const int meq = static_cast<int>(jg.rows());
+namespace {
+
+bool same_sparse_pattern(const Eigen::SparseMatrix<double>& matrix,
+                         int cached_rows,
+                         const std::vector<int>& outer,
+                         const std::vector<int>& inner) {
+  if (cached_rows != matrix.rows() ||
+      outer.size() != static_cast<size_t>(matrix.outerSize() + 1) ||
+      inner.size() != static_cast<size_t>(matrix.nonZeros())) {
+    return false;
+  }
+  for (int i = 0; i <= matrix.outerSize(); ++i) {
+    if (outer[static_cast<size_t>(i)] != matrix.outerIndexPtr()[i]) {
+      return false;
+    }
+  }
+  for (int i = 0; i < matrix.nonZeros(); ++i) {
+    if (inner[static_cast<size_t>(i)] != matrix.innerIndexPtr()[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void remember_sparse_pattern(const Eigen::SparseMatrix<double>& matrix,
+                             std::vector<int>& outer,
+                             std::vector<int>& inner) {
+  outer.assign(matrix.outerIndexPtr(),
+               matrix.outerIndexPtr() + matrix.outerSize() + 1);
+  inner.assign(matrix.innerIndexPtr(),
+               matrix.innerIndexPtr() + matrix.nonZeros());
+}
+
+bool factor_cached_sparse_matrix(SparseKKTCache& cache,
+                                 Eigen::SparseMatrix<double> matrix,
+                                 int n,
+                                 int meq) {
+  matrix.makeCompressed();
   cache.n = n;
   cache.meq = meq;
-  const int dim = n + meq;
+  cache.kkt = std::move(matrix);
+  cache.kkt_orig = cache.kkt;
 
+  if (!cache.solver) {
+    cache.solver = make_default_sparse_solver();
+    cache.pattern_analyzed = false;
+  }
+  const bool pattern_changed =
+      !cache.pattern_analyzed ||
+      !same_sparse_pattern(cache.kkt, cache.dim, cache.pattern_outer,
+                           cache.pattern_inner);
+  if (pattern_changed) {
+    cache.solver->analyze_pattern(cache.kkt);
+    remember_sparse_pattern(cache.kkt, cache.pattern_outer,
+                            cache.pattern_inner);
+    cache.pattern_analyzed = true;
+    ++cache.symbolic_analyses;
+  }
+  cache.dim = static_cast<int>(cache.kkt.rows());
+  cache.nnz = static_cast<int>(cache.kkt.nonZeros());
+  ++cache.numeric_factorizations;
+  if (!cache.solver->factorize(cache.kkt)) {
+    cache.factored = false;
+    return false;
+  }
+  cache.factored = true;
+  return true;
+}
+
+Eigen::SparseMatrix<double> assemble_augmented_kkt(
+    const Eigen::SparseMatrix<double>& w,
+    const Eigen::SparseMatrix<double>& jg,
+    double delta_w,
+    double delta_c) {
+  const int n = static_cast<int>(w.rows());
+  const int meq = static_cast<int>(jg.rows());
+  const int dim = n + meq;
   std::vector<Eigen::Triplet<double>> tri;
   tri.reserve(static_cast<size_t>(w.nonZeros() + 2 * jg.nonZeros() + dim));
 
@@ -29,44 +99,34 @@ bool factor_kkt_sparse(SparseKKTCache& cache,
     }
   }
   for (int i = 0; i < n; ++i) {
-    tri.emplace_back(i, i, reg);
+    tri.emplace_back(i, i, delta_w);
   }
-
   for (int col = 0; col < jg.outerSize(); ++col) {
     for (Eigen::SparseMatrix<double>::InnerIterator it(jg, col); it; ++it) {
       tri.emplace_back(it.col(), n + it.row(), it.value());
       tri.emplace_back(n + it.row(), it.col(), it.value());
     }
   }
-
   for (int i = 0; i < meq; ++i) {
-    tri.emplace_back(n + i, n + i, -reg);
+    tri.emplace_back(n + i, n + i, -delta_c);
   }
 
-  cache.kkt.resize(dim, dim);
-  cache.kkt.setFromTriplets(tri.begin(), tri.end());
-  cache.kkt.makeCompressed();
-  cache.kkt_orig = cache.kkt;
+  Eigen::SparseMatrix<double> kkt(dim, dim);
+  kkt.setFromTriplets(tri.begin(), tri.end());
+  kkt.makeCompressed();
+  return kkt;
+}
 
-  if (!cache.solver) {
-    cache.solver = make_default_sparse_solver();
-    cache.pattern_analyzed = false;
-  }
-  const bool pattern_changed = !cache.pattern_analyzed || cache.dim != dim ||
-                               cache.nnz != cache.kkt.nonZeros();
-  if (pattern_changed) {
-    cache.solver->analyze_pattern(cache.kkt);
-    cache.pattern_analyzed = true;
-    cache.dim = dim;
-    cache.nnz = cache.kkt.nonZeros();
-  }
+}  // namespace
 
-  if (!cache.solver->factorize(cache.kkt)) {
-    cache.factored = false;
-    return false;
-  }
-  cache.factored = true;
-  return true;
+bool factor_kkt_sparse(SparseKKTCache& cache,
+                       const Eigen::SparseMatrix<double>& w,
+                       const Eigen::SparseMatrix<double>& jg,
+                       double reg) {
+  const int n = static_cast<int>(w.rows());
+  const int meq = static_cast<int>(jg.rows());
+  return factor_cached_sparse_matrix(
+      cache, assemble_augmented_kkt(w, jg, reg, reg), n, meq);
 }
 
 bool solve_kkt_sparse(SparseKKTCache& cache,
@@ -80,6 +140,7 @@ bool solve_kkt_sparse(SparseKKTCache& cache,
   if (!cache.solver || !cache.solver->solve(rhs, sol) || !sol.allFinite()) {
     return false;
   }
+  ++cache.linear_solves;
   for (int ref = 0; ref < 2; ++ref) {
     Eigen::VectorXd residual = rhs - cache.kkt_orig * sol;
     if (residual.cwiseAbs().maxCoeff() < 1e-14 * std::max(1.0, rhs.cwiseAbs().maxCoeff())) {
@@ -89,6 +150,7 @@ bool solve_kkt_sparse(SparseKKTCache& cache,
     if (!cache.solver->solve(residual, correction) || !correction.allFinite()) {
       break;
     }
+    ++cache.linear_solves;
     sol += correction;
   }
   dx = sol.head(cache.n);
@@ -184,29 +246,421 @@ Eigen::SparseMatrix<double> add_scaled_identity(
   return out;
 }
 
-// Materialize H_delta^{-1} * Jg^T one column at a time into a dense matrix.
-// Returns false if any column solve fails numerically.
-bool apply_inverse_to_jgt(
-    Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>, Eigen::Lower>& ldlt,
-    const Eigen::SparseMatrix<double>& jg,
-    Eigen::MatrixXd& z_cols) {
-  const int n = static_cast<int>(jg.cols());
-  const int meq = static_cast<int>(jg.rows());
-  z_cols.setZero(n, meq);
-  Eigen::SparseMatrix<double> jgt = jg.transpose();
-  for (int i = 0; i < meq; ++i) {
-    Eigen::VectorXd rhs = Eigen::VectorXd::Zero(n);
-    for (Eigen::SparseMatrix<double>::InnerIterator it(jgt, i); it; ++it) {
-      rhs[it.row()] = it.value();
-    }
-    const Eigen::VectorXd col = ldlt.solve(rhs);
-    if (!col.allFinite()) return false;
-    z_cols.col(i) = col;
+double increased_primal_regularization(double delta_w,
+                                       bool& delta_w_was_zero,
+                                       const InertiaSettings& settings) {
+  if (delta_w_was_zero) {
+    delta_w_was_zero = false;
+    return settings.delta_w_0;
   }
+  const double multiplier = (delta_w < settings.delta_w_0 * 1.1)
+      ? settings.kappa_w_plus_first
+      : settings.kappa_w_plus;
+  return std::max(delta_w * multiplier, settings.delta_w_0);
+}
+
+bool certify_primal_positive_definite(
+    const Eigen::SparseMatrix<double>& h_delta,
+    SparseInertiaKKTCache& cache) {
+  const bool pattern_changed =
+      !cache.primal_pattern_analyzed ||
+      !same_sparse_pattern(h_delta, cache.primal_rows,
+                           cache.primal_pattern_outer,
+                           cache.primal_pattern_inner);
+  if (pattern_changed) {
+    cache.primal_ldlt.analyzePattern(h_delta);
+    remember_sparse_pattern(h_delta, cache.primal_pattern_outer,
+                            cache.primal_pattern_inner);
+    cache.primal_rows = static_cast<int>(h_delta.rows());
+    cache.primal_pattern_analyzed = true;
+    ++cache.primal_symbolic_analyses;
+  }
+  cache.primal_ldlt.factorize(h_delta);
+  ++cache.primal_numeric_factorizations;
+  if (cache.primal_ldlt.info() != Eigen::Success) {
+    return false;
+  }
+  const Eigen::VectorXd diagonal = cache.primal_ldlt.vectorD();
+  return (diagonal.array() > 0.0).all();
+}
+
+void remember_tangent_partition_pattern(
+    const Eigen::SparseMatrix<double>& jg,
+    SparseInertiaKKTCache& cache) {
+  remember_sparse_pattern(jg, cache.equality_pattern_outer,
+                          cache.equality_pattern_inner);
+  cache.equality_rows = static_cast<int>(jg.rows());
+  cache.tangent_partition_valid = true;
+  cache.tangent_basis = SparseKKTCache{};
+  ++cache.tangent_partition_analyses;
+}
+
+void select_natural_tangent_partition(
+    const Eigen::SparseMatrix<double>& jg,
+    SparseInertiaKKTCache& cache) {
+  const int meq = static_cast<int>(jg.rows());
+  const int n = static_cast<int>(jg.cols());
+  cache.basic_columns.resize(static_cast<size_t>(meq));
+  cache.free_columns.resize(static_cast<size_t>(n - meq));
+  for (int col = 0; col < meq; ++col) {
+    cache.basic_columns[static_cast<size_t>(col)] = col;
+  }
+  for (int col = meq; col < n; ++col) {
+    cache.free_columns[static_cast<size_t>(col - meq)] = col;
+  }
+  cache.tangent_partition_strategy = 2;
+  remember_tangent_partition_pattern(jg, cache);
+}
+
+bool select_preferred_tangent_partition(
+    const Eigen::SparseMatrix<double>& jg,
+    SparseInertiaKKTCache& cache) {
+  const int meq = static_cast<int>(jg.rows());
+  const int n = static_cast<int>(jg.cols());
+  const int nullity = n - meq;
+  if (static_cast<int>(cache.preferred_free_columns.size()) != nullity) {
+    return false;
+  }
+  std::vector<bool> is_free(static_cast<size_t>(n), false);
+  for (int col : cache.preferred_free_columns) {
+    if (col < 0 || col >= n || is_free[static_cast<size_t>(col)]) {
+      return false;
+    }
+    is_free[static_cast<size_t>(col)] = true;
+  }
+  cache.free_columns = cache.preferred_free_columns;
+  cache.basic_columns.clear();
+  cache.basic_columns.reserve(static_cast<size_t>(meq));
+  for (int col = 0; col < n; ++col) {
+    if (!is_free[static_cast<size_t>(col)]) {
+      cache.basic_columns.push_back(col);
+    }
+  }
+  if (static_cast<int>(cache.basic_columns.size()) != meq) return false;
+  cache.tangent_partition_strategy = 1;
+  remember_tangent_partition_pattern(jg, cache);
+  return true;
+}
+
+bool select_qr_tangent_partition(
+    const Eigen::SparseMatrix<double>& jg,
+    SparseInertiaKKTCache& cache) {
+  const int meq = static_cast<int>(jg.rows());
+  const int n = static_cast<int>(jg.cols());
+  Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> qr;
+  qr.compute(jg);
+  if (qr.info() != Eigen::Success || qr.rank() != meq) {
+    cache.tangent_partition_valid = false;
+    return false;
+  }
+
+  const auto& permutation = qr.colsPermutation().indices();
+  if (permutation.size() != n) {
+    cache.tangent_partition_valid = false;
+    return false;
+  }
+  cache.basic_columns.resize(static_cast<size_t>(meq));
+  cache.free_columns.resize(static_cast<size_t>(n - meq));
+  for (int col = 0; col < meq; ++col) {
+    cache.basic_columns[static_cast<size_t>(col)] = permutation[col];
+  }
+  for (int col = meq; col < n; ++col) {
+    cache.free_columns[static_cast<size_t>(col - meq)] = permutation[col];
+  }
+  cache.tangent_partition_strategy = 3;
+  remember_tangent_partition_pattern(jg, cache);
+  return true;
+}
+
+Eigen::SparseMatrix<double> extract_basic_jacobian(
+    const Eigen::SparseMatrix<double>& jg,
+    const std::vector<int>& basic_columns) {
+  const int meq = static_cast<int>(jg.rows());
+  std::vector<Eigen::Triplet<double>> trips;
+  trips.reserve(static_cast<size_t>(jg.nonZeros()));
+  for (int basic = 0; basic < static_cast<int>(basic_columns.size()); ++basic) {
+    const int source_col = basic_columns[static_cast<size_t>(basic)];
+    for (Eigen::SparseMatrix<double>::InnerIterator it(jg, source_col); it; ++it) {
+      trips.emplace_back(it.row(), basic, it.value());
+    }
+  }
+  Eigen::SparseMatrix<double> basis(meq, meq);
+  basis.setFromTriplets(trips.begin(), trips.end());
+  basis.makeCompressed();
+  return basis;
+}
+
+bool factor_tangent_basis(const Eigen::SparseMatrix<double>& jg,
+                          SparseInertiaKKTCache& cache) {
+  const bool equality_pattern_changed =
+      !cache.tangent_partition_valid ||
+      !same_sparse_pattern(jg, cache.equality_rows,
+                           cache.equality_pattern_outer,
+                           cache.equality_pattern_inner);
+  if (equality_pattern_changed) {
+    // Most NLP models order state variables before a small control/interface
+    // block. Try that physically meaningful partition first and validate it by
+    // numerical factorization. Rank-revealing sparse QR remains a fallback.
+    if (!select_preferred_tangent_partition(jg, cache)) {
+      select_natural_tangent_partition(jg, cache);
+    }
+  }
+
+  Eigen::SparseMatrix<double> basis =
+      extract_basic_jacobian(jg, cache.basic_columns);
+  if (factor_cached_sparse_matrix(cache.tangent_basis, basis,
+                                  static_cast<int>(jg.rows()), 0)) {
+    return true;
+  }
+
+  if (cache.tangent_partition_strategy == 1) {
+    select_natural_tangent_partition(jg, cache);
+    basis = extract_basic_jacobian(jg, cache.basic_columns);
+    if (factor_cached_sparse_matrix(cache.tangent_basis, basis,
+                                    static_cast<int>(jg.rows()), 0)) {
+      return true;
+    }
+  }
+
+  // A numerically singular cached state block can occur even when the exact
+  // Jacobian pattern is unchanged. Re-pivot numerically once before giving up.
+  if (!select_qr_tangent_partition(jg, cache)) return false;
+  basis = extract_basic_jacobian(jg, cache.basic_columns);
+  return factor_cached_sparse_matrix(cache.tangent_basis, basis,
+                                     static_cast<int>(jg.rows()), 0);
+}
+
+struct ReducedSpaceCertificate {
+  double min_curvature{0.0};
+  double margin{0.0};
+  double nullspace_residual{0.0};
+  int dimension{0};
+};
+
+bool build_reduced_space_certificate(
+    const Eigen::SparseMatrix<double>& w,
+    const Eigen::SparseMatrix<double>& jg,
+    const InertiaSettings& settings,
+    SparseInertiaKKTCache& cache,
+    ReducedSpaceCertificate& certificate) {
+  const int n = static_cast<int>(w.rows());
+  const int meq = static_cast<int>(jg.rows());
+  const int nullity = n - meq;
+  certificate = ReducedSpaceCertificate{};
+  certificate.dimension = nullity;
+  if (meq < 0 || nullity < 0 ||
+      nullity > settings.max_tangent_dimension) {
+    return false;
+  }
+  if (nullity == 0) {
+    if (!factor_tangent_basis(jg, cache)) return false;
+    certificate.margin = settings.reduced_curvature_tolerance;
+    certificate.min_curvature = certificate.margin;
+    return true;
+  }
+
+  Eigen::MatrixXd z = Eigen::MatrixXd::Zero(n, nullity);
+  if (meq == 0) {
+    z.setIdentity();
+  } else {
+    if (!factor_tangent_basis(jg, cache)) return false;
+    for (int tangent = 0; tangent < nullity; ++tangent) {
+      const int free_col = cache.free_columns[static_cast<size_t>(tangent)];
+      Eigen::VectorXd rhs = Eigen::VectorXd::Zero(meq);
+      for (Eigen::SparseMatrix<double>::InnerIterator it(jg, free_col); it; ++it) {
+        rhs[it.row()] = -it.value();
+      }
+      Eigen::VectorXd basic_values;
+      Eigen::VectorXd unused;
+      if (!solve_kkt_sparse(cache.tangent_basis, rhs,
+                            basic_values, unused)) {
+        return false;
+      }
+      for (int basic = 0; basic < meq; ++basic) {
+        z(cache.basic_columns[static_cast<size_t>(basic)], tangent) =
+            basic_values[basic];
+      }
+      z(free_col, tangent) = 1.0;
+    }
+  }
+
+  const Eigen::MatrixXd null_residual = jg * z;
+  certificate.nullspace_residual = null_residual.size() == 0
+      ? 0.0 : null_residual.cwiseAbs().maxCoeff();
+  Eigen::VectorXd jacobian_row_sum = Eigen::VectorXd::Zero(meq);
+  for (int col = 0; col < jg.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(jg, col); it; ++it) {
+      jacobian_row_sum[it.row()] += std::abs(it.value());
+    }
+  }
+  const double jacobian_inf = meq == 0 ? 0.0 : jacobian_row_sum.maxCoeff();
+  const double z_inf = z.cwiseAbs().rowwise().sum().maxCoeff();
+  const double residual_limit = settings.nullspace_residual_tolerance *
+      std::max(1.0, jacobian_inf * z_inf);
+  if (!z.allFinite() || !std::isfinite(certificate.nullspace_residual) ||
+      certificate.nullspace_residual > residual_limit) {
+    return false;
+  }
+
+  Eigen::MatrixXd reduced = z.transpose() * (w * z);
+  reduced = 0.5 * (reduced + reduced.transpose());
+  Eigen::MatrixXd metric = z.transpose() * z;
+  metric = 0.5 * (metric + metric.transpose());
+  Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> eigensolver;
+  eigensolver.compute(reduced, metric, Eigen::EigenvaluesOnly);
+  if (eigensolver.info() != Eigen::Success ||
+      !eigensolver.eigenvalues().allFinite()) {
+    return false;
+  }
+  certificate.min_curvature = eigensolver.eigenvalues().minCoeff();
+  const double spectral_scale = std::max(
+      1.0, eigensolver.eigenvalues().cwiseAbs().maxCoeff());
+  // A symmetric eigensolve is backward stable: the absolute eigenvalue error
+  // is O(d * eps * ||C||_2) for the d-dimensional orthonormalized projected
+  // problem. Use that bound, rather than a fixed relative gap, so a large
+  // positive barrier eigenvalue cannot manufacture a large primal shift while
+  // the smallest tangent eigenvalue remains safely positive.
+  constexpr double kDenseEigenRoundoffMultiplier = 64.0;
+  const double roundoff_margin = kDenseEigenRoundoffMultiplier *
+      std::max(1, nullity) * std::numeric_limits<double>::epsilon() *
+      spectral_scale;
+  certificate.margin = std::max(
+      settings.reduced_curvature_tolerance, roundoff_margin);
   return true;
 }
 
 }  // namespace
+
+bool factor_kkt_inertia_corrected_sparse(
+    const Eigen::SparseMatrix<double>& w,
+    const Eigen::SparseMatrix<double>& jg,
+    const InertiaSettings& settings,
+    double& delta_w_last,
+    SparseInertiaKKTCache& cache,
+    InertiaStatus& status) {
+  const int n = static_cast<int>(w.rows());
+  const int meq = static_cast<int>(jg.rows());
+  status = InertiaStatus{};
+  cache.factored = false;
+  if (w.cols() != n || jg.cols() != n) return false;
+
+  // For full-row-rank Jg, the bordered-Hessian identity gives
+  // inertia(K) = (meq, meq, 0) + inertia(Z' (W + delta_W I) Z).
+  // The generalized eigenvalues of (Z'WZ, Z'Z) therefore provide the exact
+  // scalar regularization threshold on the tangent space. This avoids forcing
+  // negative curvature in constrained normal directions to become positive.
+  ReducedSpaceCertificate reduced_certificate;
+  if (build_reduced_space_certificate(
+          w, jg, settings, cache, reduced_certificate)) {
+    status.reduced_space_certificate = true;
+    status.tangent_dimension = reduced_certificate.dimension;
+    status.min_reduced_curvature = reduced_certificate.min_curvature;
+    status.reduced_curvature_margin = reduced_certificate.margin;
+    status.nullspace_residual = reduced_certificate.nullspace_residual;
+    double delta_w = std::max(
+        0.0, reduced_certificate.margin - reduced_certificate.min_curvature);
+    bool delta_w_was_zero = (delta_w == 0.0);
+    for (; status.factorization_attempts < 8;
+         ++status.factorization_attempts) {
+      if (factor_cached_sparse_matrix(
+              cache.augmented,
+              assemble_augmented_kkt(w, jg, delta_w, 0.0), n, meq)) {
+        cache.factored = true;
+        status.correct = true;
+        status.n_pos = n;
+        status.n_neg = meq;
+        status.delta_w_used = delta_w;
+        status.delta_c_used = 0.0;
+        delta_w_last = std::max(
+            settings.delta_w_min, delta_w * settings.kappa_w_minus);
+        return true;
+      }
+      delta_w = increased_primal_regularization(
+          delta_w, delta_w_was_zero, settings);
+      if (delta_w > settings.delta_w_max) {
+        status.delta_w_used = delta_w;
+        return false;
+      }
+    }
+    status.reduced_space_certificate = false;
+  }
+
+  // Wächter-Biegler δ_W schedule: start from last successful δ_W; on failure,
+  // if δ_W was zero → jump to δ_w_0; else multiply by κ_W⁺_first (first
+  // repair) or κ_W⁺ (subsequent).
+  double delta_w = std::max(0.0, delta_w_last);
+  bool delta_w_was_zero = (delta_w == 0.0);
+
+  for (; status.factorization_attempts < 60; ++status.factorization_attempts) {
+    const Eigen::SparseMatrix<double> h_delta =
+        add_scaled_identity(w, delta_w);
+    if (!certify_primal_positive_definite(h_delta, cache)) {
+      delta_w = increased_primal_regularization(
+          delta_w, delta_w_was_zero, settings);
+      if (delta_w > settings.delta_w_max) {
+        status.delta_w_used = delta_w;
+        status.delta_c_used = 0.0;
+        return false;
+      }
+      continue;
+    }
+
+    status.n_pos = n;
+    status.n_neg = meq;
+
+    // With H_delta positive definite and delta_C=0, nonsingularity of the
+    // augmented matrix is equivalent to full row rank of Jg. The block LDLT
+    // congruence then gives inertia (n, meq, 0) without materializing the dense
+    // Schur complement.
+    if (factor_cached_sparse_matrix(
+            cache.augmented,
+            assemble_augmented_kkt(w, jg, delta_w, 0.0), n, meq)) {
+      cache.factored = true;
+      status.correct = true;
+      status.delta_w_used = delta_w;
+      status.delta_c_used = 0.0;
+      delta_w_last = std::max(
+          settings.delta_w_min, delta_w * settings.kappa_w_minus);
+      return true;
+    }
+
+    // A positive dual regularization makes
+    // Jg H_delta^{-1} Jg' + delta_C I positive definite even when Jg is rank
+    // deficient, so the augmented inertia remains (n, meq, 0).
+    const double delta_c = settings.delta_c_stripe *
+        std::pow(std::max(settings.mu, 1e-20), 0.25);
+    if (factor_cached_sparse_matrix(
+            cache.augmented,
+            assemble_augmented_kkt(w, jg, delta_w, delta_c), n, meq)) {
+      cache.factored = true;
+      status.correct = true;
+      status.n_zero = meq;
+      status.delta_w_used = delta_w;
+      status.delta_c_used = delta_c;
+      delta_w_last = std::max(
+          settings.delta_w_min, delta_w * settings.kappa_w_minus);
+      return true;
+    }
+
+    delta_w = increased_primal_regularization(
+        delta_w, delta_w_was_zero, settings);
+    if (delta_w > settings.delta_w_max) {
+      status.delta_w_used = delta_w;
+      status.delta_c_used = delta_c;
+      return false;
+    }
+  }
+  return false;
+}
+
+bool solve_kkt_inertia_corrected_sparse(
+    SparseInertiaKKTCache& cache,
+    const Eigen::VectorXd& rhs,
+    Eigen::VectorXd& dx,
+    Eigen::VectorXd& dlambda) {
+  if (!cache.factored) return false;
+  return solve_kkt_sparse(cache.augmented, rhs, dx, dlambda);
+}
 
 bool factor_and_solve_kkt_inertia_corrected(
     const Eigen::SparseMatrix<double>& w,
@@ -217,167 +671,10 @@ bool factor_and_solve_kkt_inertia_corrected(
     Eigen::VectorXd& dx,
     Eigen::VectorXd& dlambda,
     InertiaStatus& status) {
-  const int n = static_cast<int>(w.rows());
-  const int meq = static_cast<int>(jg.rows());
-  status = InertiaStatus{};
-  if (rhs.size() != n + meq) return false;
-
-  const Eigen::VectorXd rhs_x = rhs.head(n);
-  const Eigen::VectorXd rhs_eq = (meq > 0) ? Eigen::VectorXd(rhs.tail(meq)) : Eigen::VectorXd();
-
-  // Wächter-Biegler δ_W schedule: start from last successful δ_W; on failure,
-  // if δ_W was zero → jump to δ_w_0; else multiply by κ_W⁺_first (first
-  // repair) or κ_W⁺ (subsequent). δ_C stays at 0 unless we later detect Jg
-  // rank deficiency.
-  double delta_w = std::max(0.0, delta_w_last);
-  double delta_c = 0.0;
-  bool delta_w_was_zero = (delta_w == 0.0);
-
-  for (; status.factorization_attempts < 60; ++status.factorization_attempts) {
-    // Primal SPD test: factor H + δ_W I.
-    Eigen::SparseMatrix<double> h_delta = add_scaled_identity(w, delta_w);
-    Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>, Eigen::Lower> primal_ldlt;
-    primal_ldlt.compute(h_delta);
-    const bool primal_ok = (primal_ldlt.info() == Eigen::Success);
-
-    // Additional guard: SimplicialLDLT does not pivot, so a "success" status
-    // on a matrix with a tiny negative pivot is possible for numerically
-    // borderline inputs. Verify by scanning D.
-    bool primal_has_negative = false;
-    if (primal_ok) {
-      const Eigen::VectorXd d = primal_ldlt.vectorD();
-      for (int i = 0; i < d.size(); ++i) {
-        if (!(d[i] > 0.0)) { primal_has_negative = true; break; }
-      }
-    }
-
-    if (!primal_ok || primal_has_negative) {
-      if (delta_w_was_zero) {
-        delta_w = settings.delta_w_0;
-        delta_w_was_zero = false;
-      } else {
-        const double mult = (delta_w < settings.delta_w_0 * 1.1)
-                                ? settings.kappa_w_plus_first
-                                : settings.kappa_w_plus;
-        delta_w = std::max(delta_w * mult, settings.delta_w_0);
-      }
-      if (delta_w > settings.delta_w_max) {
-        status.delta_w_used = delta_w;
-        status.delta_c_used = delta_c;
-        return false;
-      }
-      continue;
-    }
-
-    status.n_pos = n;
-
-    if (meq == 0) {
-      // Pure unconstrained primal block.
-      dx = primal_ldlt.solve(rhs_x);
-      dlambda.resize(0);
-      if (!dx.allFinite()) {
-        // Treat as indefinite and regularize more.
-        if (delta_w_was_zero) {
-          delta_w = settings.delta_w_0;
-          delta_w_was_zero = false;
-        } else {
-          delta_w = std::max(delta_w * settings.kappa_w_plus,
-                             settings.delta_w_0);
-        }
-        if (delta_w > settings.delta_w_max) return false;
-        continue;
-      }
-      status.correct = true;
-      status.delta_w_used = delta_w;
-      status.delta_c_used = 0.0;
-      delta_w_last = std::max(settings.delta_w_min, delta_w * settings.kappa_w_minus);
-      return true;
-    }
-
-    // Schur complement S = Jg H_δ⁻¹ Jgᵀ + δ_C I.
-    Eigen::MatrixXd z_cols;
-    if (!apply_inverse_to_jgt(primal_ldlt, jg, z_cols)) {
-      delta_w = std::max(delta_w * settings.kappa_w_plus, settings.delta_w_0);
-      if (delta_w > settings.delta_w_max) return false;
-      continue;
-    }
-
-    Eigen::MatrixXd schur_dense = jg * z_cols;
-    // Symmetrize numerically.
-    schur_dense = 0.5 * (schur_dense + schur_dense.transpose());
-    if (delta_c > 0.0) {
-      schur_dense.diagonal().array() += delta_c;
-    }
-
-    Eigen::LDLT<Eigen::MatrixXd> schur_ldlt(schur_dense);
-    bool schur_ok = (schur_ldlt.info() == Eigen::Success);
-    bool schur_all_positive = false;
-    if (schur_ok) {
-      const Eigen::VectorXd d = schur_ldlt.vectorD();
-      schur_all_positive = true;
-      for (int i = 0; i < d.size(); ++i) {
-        // S should be positive definite (its eigenvalues equal the magnitudes
-        // of the negative eigenvalues of the block-diagonal congruent KKT);
-        // any non-positive pivot means Jg is rank-deficient at tolerance.
-        if (!(d[i] > 0.0)) { schur_all_positive = false; break; }
-      }
-    }
-
-    if (!schur_ok || !schur_all_positive) {
-      // Dual regularization — Jg is rank-deficient. δ_C = stripe · μ^{1/4}.
-      delta_c = settings.delta_c_stripe *
-                std::pow(std::max(settings.mu, 1e-20), 0.25);
-      // Retry with the same δ_W but now positive δ_C.
-      Eigen::MatrixXd schur_reg = schur_dense;
-      schur_reg.diagonal().array() += delta_c;
-      schur_ldlt.compute(schur_reg);
-      if (schur_ldlt.info() != Eigen::Success) {
-        // Cannot fix — bump δ_W and restart from scratch.
-        if (delta_w_was_zero) {
-          delta_w = settings.delta_w_0;
-          delta_w_was_zero = false;
-        } else {
-          delta_w = std::max(delta_w * settings.kappa_w_plus,
-                             settings.delta_w_0);
-        }
-        if (delta_w > settings.delta_w_max) return false;
-        continue;
-      }
-      status.n_zero = meq;  // diagnostic
-    }
-    status.n_neg = meq;
-
-    // Block solve: dλ = S⁻¹ (Jg H_δ⁻¹ rhs_x − rhs_eq)
-    //              dx  = H_δ⁻¹ (rhs_x − Jgᵀ dλ)
-    const Eigen::VectorXd v = primal_ldlt.solve(rhs_x);
-    if (!v.allFinite()) {
-      delta_w = std::max(delta_w * settings.kappa_w_plus, settings.delta_w_0);
-      if (delta_w > settings.delta_w_max) return false;
-      continue;
-    }
-    const Eigen::VectorXd rhs_schur = Eigen::VectorXd(jg * v) - rhs_eq;
-    dlambda = schur_ldlt.solve(rhs_schur);
-    if (!dlambda.allFinite()) {
-      delta_w = std::max(delta_w * settings.kappa_w_plus, settings.delta_w_0);
-      if (delta_w > settings.delta_w_max) return false;
-      continue;
-    }
-    const Eigen::VectorXd corrected_rhs_x =
-        rhs_x - Eigen::VectorXd(jg.transpose() * dlambda);
-    dx = primal_ldlt.solve(corrected_rhs_x);
-    if (!dx.allFinite()) {
-      delta_w = std::max(delta_w * settings.kappa_w_plus, settings.delta_w_0);
-      if (delta_w > settings.delta_w_max) return false;
-      continue;
-    }
-
-    status.correct = true;
-    status.delta_w_used = delta_w;
-    status.delta_c_used = delta_c;
-    delta_w_last = std::max(settings.delta_w_min, delta_w * settings.kappa_w_minus);
-    return true;
-  }
-  return false;
+  SparseInertiaKKTCache cache;
+  return factor_kkt_inertia_corrected_sparse(
+             w, jg, settings, delta_w_last, cache, status) &&
+         solve_kkt_inertia_corrected_sparse(cache, rhs, dx, dlambda);
 }
 
 Eigen::SparseMatrix<double> assemble_primal_hessian_with_bounds(

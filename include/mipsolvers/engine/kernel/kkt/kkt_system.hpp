@@ -4,6 +4,7 @@
 #include <vector>
 
 #include <Eigen/Sparse>
+#include <Eigen/SparseCholesky>
 
 #include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
 #include "mipsolvers/engine/solver/solver_adapter.hpp"
@@ -14,10 +15,11 @@ namespace mipsolvers::engine {
 /// For a nonconvex primal-dual IPM the saddle-point matrix
 ///   K(δ_W, δ_C) = [ H + δ_W I   Jgᵀ      ]
 ///                 [ Jg          -δ_C I   ]
-/// must have inertia (n_free, m_eq, 0) to guarantee that the Newton direction
-/// is a descent direction on the reduced space. Wrong signature means either
-/// H has negative curvature on the tangent space (fix by boosting δ_W) or Jg
-/// is rank-deficient (fix by boosting δ_C).
+/// should have inertia (n_free, m_eq, 0) for the usual reduced-space descent
+/// property. When the equality nullity is modest, the sparse implementation
+/// certifies this condition directly on null(Jg). It falls back to the stronger
+/// full-space condition H + δ_W I > 0 only when a reliable null-space basis
+/// cannot be constructed economically.
 struct InertiaStatus {
   bool correct{false};            ///< true iff the factored system has inertia (n, m, 0)
   int n_pos{0};                   ///< eigenvalues detected positive (primal block)
@@ -26,6 +28,11 @@ struct InertiaStatus {
   double delta_w_used{0.0};       ///< primal regularization applied on success
   double delta_c_used{0.0};       ///< dual regularization applied on success
   int factorization_attempts{0};  ///< count of (δ_W, δ_C) retries, diagnostic
+  bool reduced_space_certificate{false}; ///< inertia certified on null(Jg)
+  int tangent_dimension{0};       ///< n - rank(Jg) used by the certificate
+  double min_reduced_curvature{0.0}; ///< min eig of (Z'WZ, Z'Z)
+  double reduced_curvature_margin{0.0}; ///< positive numerical margin required
+  double nullspace_residual{0.0}; ///< infinity norm of Jg*Z
 };
 
 /// Wächter-Biegler regularization schedule parameters for inertia correction.
@@ -39,6 +46,9 @@ struct InertiaSettings {
   double kappa_w_minus{1.0 / 3.0}; ///< δ_W_last ← κ_W⁻ · δ_W after a successful solve.
   double delta_c_stripe{1e-8};     ///< δ_C = delta_c_stripe · μ^{1/4} when Jg rank-deficient.
   double mu{1.0};                  ///< Current barrier parameter (only used for δ_C).
+  int max_tangent_dimension{128};  ///< Explicit null-space certificate size cap.
+  double reduced_curvature_tolerance{1e-10}; ///< Absolute projected-eigenvalue margin floor.
+  double nullspace_residual_tolerance{1e-8}; ///< Relative acceptance tolerance for Jg*Z.
 };
 
 /// Cached KKT matrix and its LU factorization.
@@ -55,6 +65,47 @@ struct SparseKKTCache {
   int meq{0};  ///< Number of equality constraints
   int dim{0};  ///< Total KKT dimension
   int nnz{0};  ///< Cached nonzero count for pattern reuse
+  std::vector<int> pattern_outer;  ///< Exact compressed-column outer pattern
+  std::vector<int> pattern_inner;  ///< Exact compressed-column row indices
+  int symbolic_analyses{0};        ///< Number of ordering/symbolic analyses
+  int numeric_factorizations{0};   ///< Number of numeric factorizations
+  int linear_solves{0};            ///< Number of back-solves, including refinement
+};
+
+/// Persistent factorization state for the filter-IPM augmented KKT system.
+///
+/// The primal LDLT certifies W + delta_W I is positive definite. The sparse
+/// augmented factor then solves
+///
+///   [ W + delta_W I   Jg'       ] [dx] = [rx]
+///   [ Jg              -delta_C I] [dl]   [rg].
+///
+/// If delta_C is zero and this matrix is nonsingular, Jg has full row rank and
+/// the inertia is (n, meq, 0). A positive delta_C makes the same inertia
+/// unconditional once the primal block is positive definite. The augmented
+/// factor is retained for all predictor/corrector/SOC right-hand sides, while
+/// both primal and augmented symbolic analyses are reused across iterations
+/// whenever their exact compressed sparsity patterns are unchanged.
+struct SparseInertiaKKTCache {
+  SparseKKTCache augmented;
+  SparseKKTCache tangent_basis;
+  Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>, Eigen::Lower> primal_ldlt;
+  std::vector<int> primal_pattern_outer;
+  std::vector<int> primal_pattern_inner;
+  int primal_rows{0};
+  bool primal_pattern_analyzed{false};
+  bool factored{false};
+  int primal_symbolic_analyses{0};
+  int primal_numeric_factorizations{0};
+  std::vector<int> equality_pattern_outer;
+  std::vector<int> equality_pattern_inner;
+  std::vector<int> basic_columns;
+  std::vector<int> free_columns;
+  std::vector<int> preferred_free_columns;
+  int equality_rows{0};
+  bool tangent_partition_valid{false};
+  int tangent_partition_strategy{0}; ///< 1=model hint, 2=natural, 3=sparse QR
+  int tangent_partition_analyses{0};
 };
 
 /// Build and factorise the KKT matrix from W (primal Hessian/augmented),
@@ -73,6 +124,26 @@ bool solve_kkt_sparse(SparseKKTCache& cache,
                       const Eigen::VectorXd& rhs,
                       Eigen::VectorXd& dx,
                       Eigen::VectorXd& dlambda);
+
+/// Factor a sparse augmented KKT matrix with inertia-preserving
+/// regularization. This operation performs no right-hand-side solve; call
+/// solve_kkt_inertia_corrected_sparse() repeatedly for predictor, corrector,
+/// and second-order-correction right-hand sides.
+bool factor_kkt_inertia_corrected_sparse(
+    const Eigen::SparseMatrix<double>& w,
+    const Eigen::SparseMatrix<double>& jg,
+    const InertiaSettings& settings,
+    double& delta_w_last,
+    SparseInertiaKKTCache& cache,
+    InertiaStatus& status);
+
+/// Solve against the most recently factored augmented KKT matrix. The numeric
+/// and symbolic factors are not recomputed.
+bool solve_kkt_inertia_corrected_sparse(
+    SparseInertiaKKTCache& cache,
+    const Eigen::VectorXd& rhs,
+    Eigen::VectorXd& dx,
+    Eigen::VectorXd& dlambda);
 
 /// Solve the KKT system through the reduced Schur complement when the equality
 /// block is small enough to treat densely.
@@ -97,16 +168,20 @@ void split_inequalities(const NLPModel& prob,
                         Eigen::VectorXd& h,
                         Eigen::SparseMatrix<double>& jh);
 
-/// Factor and solve the regularized KKT system with Wächter-Biegler inertia
-/// correction. Uses a Schur-complement strategy that relies only on Cholesky
-/// (SPD) factorizations: `H + δ_W I` is factored by SimplicialLDLT — failure
-/// signals negative curvature and triggers a δ_W bump. The Schur complement
-/// `S = Jg (H+δ_W I)⁻¹ Jgᵀ + δ_C I` is then factored; failure signals a
-/// rank-deficient equality Jacobian and triggers a δ_C bump.
+/// Compatibility wrapper that factors the sparse augmented KKT matrix and
+/// solves one right-hand side. New IPM code should keep a
+/// `SparseInertiaKKTCache` and call factor_kkt_inertia_corrected_sparse() once
+/// per Newton matrix, followed by any number of
+/// solve_kkt_inertia_corrected_sparse() back-solves.
 ///
-/// Both SPD factorizations succeeding is equivalent to the augmented KKT
-/// matrix having inertia (n_free, m_eq, 0) — the sufficient condition for
-/// the Newton direction to be a descent direction on the reduced space.
+/// For modest equality nullity, the implementation constructs `Jg Z = 0` from
+/// a cached sparse state/control partition and certifies
+/// `Z' (H + δ_W I) Z > 0`. The bordered-Hessian inertia identity then gives
+/// augmented inertia (n_free, m_eq, 0) without requiring H to be positive in
+/// constrained normal directions. Otherwise it uses the stronger sparse-LDLT
+/// full-space certificate. In both cases it factors the sparse augmented matrix
+/// directly and never forms the generally dense Schur complement
+/// `Jg (H+δ_W I)⁻¹ Jgᵀ`.
 ///
 /// `delta_w_last` is an in/out parameter used to warm-start the regularization
 /// from the previous successful value, following the IPOPT schedule.

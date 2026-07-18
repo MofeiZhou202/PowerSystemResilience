@@ -1076,7 +1076,13 @@ class CallbackTNLP final : public Ipopt::TNLP {
         unscaled_primal_inf_(0.0),
         unscaled_dual_inf_(0.0),
         unscaled_complementarity_(0.0),
-        objective_(0.0) {
+        objective_(0.0),
+        best_merit_(std::numeric_limits<double>::infinity()),
+        best_primal_inf_(0.0),
+        best_dual_inf_(0.0),
+        best_complementarity_(0.0),
+        best_iter_(0),
+        best_iterate_valid_(false) {
     if (prob_.g) {
       Eigen::VectorXd geq;
       prob_.g(prob_.x0, geq);
@@ -1397,20 +1403,46 @@ class CallbackTNLP final : public Ipopt::TNLP {
                          Ipopt::Number obj_value,
                          const Ipopt::IpoptData* ip_data,
                          Ipopt::IpoptCalculatedQuantities* ip_cq) override {
-    (void)z_L;
-    (void)z_U;
-    (void)m;
     (void)g;
-    (void)lambda;
     (void)ip_data;
     (void)ip_cq;
-    (void)status;
     if (x != nullptr && n > 0) {
       solution_ = Eigen::Map<const Eigen::VectorXd>(x, n);
     } else {
       solution_ = Eigen::VectorXd::Zero(n_);
     }
+    bound_dual_lb_ = Eigen::VectorXd::Zero(n_);
+    bound_dual_ub_ = Eigen::VectorXd::Zero(n_);
+    constraint_dual_ = Eigen::VectorXd::Zero(m_);
+    if (z_L != nullptr && n == n_) {
+      bound_dual_lb_ = Eigen::Map<const Eigen::VectorXd>(z_L, n);
+    }
+    if (z_U != nullptr && n == n_) {
+      bound_dual_ub_ = Eigen::Map<const Eigen::VectorXd>(z_U, n);
+    }
+    if (lambda != nullptr && m == m_) {
+      constraint_dual_ = Eigen::Map<const Eigen::VectorXd>(lambda, m);
+    }
     objective_ = obj_value;
+
+    const bool successful_terminal =
+        status == Ipopt::SUCCESS ||
+        status == Ipopt::STOP_AT_ACCEPTABLE_POINT ||
+        status == Ipopt::FEASIBLE_POINT_FOUND;
+    if (!successful_terminal && best_iterate_valid_) {
+      solution_ = best_solution_;
+      constraint_dual_ = best_constraint_dual_;
+      bound_dual_lb_ = best_bound_dual_lb_;
+      bound_dual_ub_ = best_bound_dual_ub_;
+      objective_ = prob_.f(solution_);
+      iters_ = best_iter_;
+      primal_inf_ = best_primal_inf_;
+      dual_inf_ = best_dual_inf_;
+      complementarity_ = best_complementarity_;
+      unscaled_primal_inf_ = best_primal_inf_;
+      unscaled_dual_inf_ = best_dual_inf_;
+      unscaled_complementarity_ = best_complementarity_;
+    }
   }
 
   bool intermediate_callback(Ipopt::AlgorithmMode mode,
@@ -1426,14 +1458,12 @@ class CallbackTNLP final : public Ipopt::TNLP {
                              Ipopt::Index ls_trials,
                              const Ipopt::IpoptData* ip_data,
                              Ipopt::IpoptCalculatedQuantities* ip_cq) override {
-    (void)mode;
     (void)obj_value;
     (void)d_norm;
     (void)regularization_size;
     (void)alpha_du;
     (void)alpha_pr;
     (void)ls_trials;
-    (void)ip_data;
     iters_ = static_cast<int>(iter);
     if (ip_cq != nullptr) {
       // Preserve Ipopt's scaled callback metrics for convergence parity, and
@@ -1448,12 +1478,96 @@ class CallbackTNLP final : public Ipopt::TNLP {
     primal_inf_ = inf_pr;
     dual_inf_ = inf_du;
     complementarity_ = mu;
+
+    // Keep a coherent unscaled primal-dual iterate from the regular algorithm.
+    // A later restoration failure can otherwise pair restoration variables with
+    // KKT metrics from the last regular iterate.
+    if (mode == Ipopt::RegularMode && ip_data != nullptr && ip_cq != nullptr) {
+      Eigen::VectorXd current_x(n_);
+      Eigen::VectorXd current_z_l(n_);
+      Eigen::VectorXd current_z_u(n_);
+      Eigen::VectorXd current_g(m_);
+      Eigen::VectorXd current_lambda(m_);
+      Eigen::VectorXd lower_violation(n_);
+      Eigen::VectorXd upper_violation(n_);
+      Eigen::VectorXd lower_complementarity(n_);
+      Eigen::VectorXd upper_complementarity(n_);
+      Eigen::VectorXd lagrangian_gradient(n_);
+      Eigen::VectorXd constraint_violation(m_);
+      Eigen::VectorXd constraint_complementarity(m_);
+      const bool have_iterate = get_curr_iterate(
+          ip_data, ip_cq, false, n_, current_x.data(), current_z_l.data(),
+          current_z_u.data(), m_, current_g.data(), current_lambda.data());
+      const bool have_violations = get_curr_violations(
+          ip_data, ip_cq, false, n_, lower_violation.data(),
+          upper_violation.data(), lower_complementarity.data(),
+          upper_complementarity.data(), lagrangian_gradient.data(), m_,
+          constraint_violation.data(), constraint_complementarity.data());
+      const bool finite =
+          have_iterate && have_violations && current_x.allFinite() &&
+          current_z_l.allFinite() && current_z_u.allFinite() &&
+          current_lambda.allFinite() && lower_violation.allFinite() &&
+          upper_violation.allFinite() && lagrangian_gradient.allFinite() &&
+          constraint_violation.allFinite() &&
+          lower_complementarity.allFinite() &&
+          upper_complementarity.allFinite() &&
+          constraint_complementarity.allFinite();
+      if (finite) {
+        const auto max_abs = [](const Eigen::VectorXd& values) {
+          return values.size() > 0 ? values.cwiseAbs().maxCoeff() : 0.0;
+        };
+        const double primal = std::max({
+            max_abs(lower_violation), max_abs(upper_violation),
+            max_abs(constraint_violation)});
+        const double multiplier_scale = 1.0 + std::max({
+            max_abs(current_lambda), max_abs(current_z_l),
+            max_abs(current_z_u)});
+        const double dual = max_abs(lagrangian_gradient) / multiplier_scale;
+        const double inequality_multiplier_scale = 1.0 + std::max({
+            mineq_ > 0
+                ? max_abs(current_lambda.tail(mineq_).eval())
+                : 0.0,
+            max_abs(current_z_l), max_abs(current_z_u)});
+        const double comp = std::max({
+            max_abs(lower_complementarity),
+            max_abs(upper_complementarity),
+            max_abs(constraint_complementarity)}) /
+            inequality_multiplier_scale;
+        const double merit = std::max({primal, dual, comp});
+        if (std::isfinite(merit) && merit < best_merit_) {
+          best_merit_ = merit;
+          best_solution_ = std::move(current_x);
+          best_bound_dual_lb_ = std::move(current_z_l);
+          best_bound_dual_ub_ = std::move(current_z_u);
+          best_constraint_dual_ = std::move(current_lambda);
+          best_primal_inf_ = primal;
+          best_dual_inf_ = dual;
+          best_complementarity_ = comp;
+          best_iter_ = static_cast<int>(iter);
+          best_iterate_valid_ = true;
+        }
+      }
+    }
     return true;
   }
 
   SolveResult build_result(Ipopt::ApplicationReturnStatus app_status) const {
     SolveResult out;
     out.x = solution_;
+    // Ipopt returns rows as [equalities | upper-bounded h(x) <= 0].  The
+    // engine certificate contract is [inequalities | equalities].  Ipopt's
+    // upper-row multipliers have the same nonnegative sign convention as the
+    // native Lagrangian f + lambda^T g + mu^T h.
+    out.constraint_duals.resize(mineq_ + meq_);
+    if (mineq_ > 0) {
+      out.constraint_duals.head(mineq_) =
+          constraint_dual_.segment(meq_, mineq_);
+    }
+    if (meq_ > 0) {
+      out.constraint_duals.tail(meq_) = constraint_dual_.head(meq_);
+    }
+    out.box_dual_lb = bound_dual_lb_;
+    out.box_dual_ub = bound_dual_ub_;
     out.stats.objective = objective_;
     out.stats.iterations = iters_;
     out.stats.primal_feas = primal_inf_;
@@ -1558,6 +1672,9 @@ class CallbackTNLP final : public Ipopt::TNLP {
   std::vector<int> jac_cols_;   ///< Sparse Jacobian column indices (structural pattern)
 
   Eigen::VectorXd solution_;
+  Eigen::VectorXd constraint_dual_;
+  Eigen::VectorXd bound_dual_lb_;
+  Eigen::VectorXd bound_dual_ub_;
   int iters_;
   double primal_inf_;
   double dual_inf_;
@@ -1566,6 +1683,16 @@ class CallbackTNLP final : public Ipopt::TNLP {
   double unscaled_dual_inf_;
   double unscaled_complementarity_;
   double objective_;
+  double best_merit_;
+  double best_primal_inf_;
+  double best_dual_inf_;
+  double best_complementarity_;
+  int best_iter_;
+  bool best_iterate_valid_;
+  Eigen::VectorXd best_solution_;
+  Eigen::VectorXd best_constraint_dual_;
+  Eigen::VectorXd best_bound_dual_lb_;
+  Eigen::VectorXd best_bound_dual_ub_;
 };
 #endif
 

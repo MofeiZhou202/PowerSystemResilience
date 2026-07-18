@@ -37,6 +37,13 @@ struct IPMOptions {
   int qn_max_blocks{6};
   bool verbose{false};
 
+  // Optional primal-dual central-path warm start. Each vector is used only
+  // when its dimension matches the assembled block and all entries are finite;
+  // slack and inequality-dual entries must additionally be strictly positive.
+  Eigen::VectorXd equality_dual_start;
+  Eigen::VectorXd inequality_dual_start;
+  Eigen::VectorXd slack_start;
+
   // --- Filter-driver options (PR2+) -----------------------------------
   Globalization globalization{Globalization::Filter};
   bool use_inertia_correction{true};

@@ -4,6 +4,7 @@
 #include <catch2/catch_approx.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 #include "mipsolvers/engine/api/solver.hpp"
@@ -114,6 +115,22 @@ TEST_CASE("IpoptAdapter honors NLPModel iteration and tolerance options",
   CHECK_FALSE(short_run.stats.success);
   CHECK(short_run.stats.iterations <= 1);
   CHECK(short_run.stats.status == "Max iterations exceeded");
+  REQUIRE(short_run.constraint_duals.size() == 1);
+  REQUIRE(short_run.box_dual_lb.size() == 2);
+  REQUIRE(short_run.box_dual_ub.size() == 2);
+  Eigen::VectorXd short_gradient;
+  capped.grad(short_run.x, short_gradient);
+  const Eigen::VectorXd short_stationarity =
+      short_gradient +
+      Eigen::VectorXd::Constant(2, short_run.constraint_duals[0]) -
+      short_run.box_dual_lb + short_run.box_dual_ub;
+  const double short_multiplier_scale = 1.0 + std::max({
+      short_run.constraint_duals.cwiseAbs().maxCoeff(),
+      short_run.box_dual_lb.cwiseAbs().maxCoeff(),
+      short_run.box_dual_ub.cwiseAbs().maxCoeff()});
+  CHECK(short_run.stats.unscaled_dual_feas ==
+        Approx(short_stationarity.cwiseAbs().maxCoeff() /
+               short_multiplier_scale).margin(1e-8));
 
   NLPModel converged = make_rosenbrock_nlp();
   converged.solver_options.max_iterations = 500;
@@ -131,6 +148,92 @@ TEST_CASE("IpoptAdapter honors NLPModel iteration and tolerance options",
   CHECK(full_run.stats.iterations > short_run.stats.iterations);
   CHECK(full_run.stats.iterations <
         converged.solver_options.max_iterations);
+}
+
+TEST_CASE("IpoptAdapter returns NLP multipliers in engine KKT convention",
+          "[engine][api][ipopt][duals]") {
+  IpoptAdapter ipopt;
+  REQUIRE(ipopt.available());
+
+  // min 0.5*(x-2)^2 + 0.5*(y+1)^2
+  // s.t. x+y-1=0, x-0.5<=0, y>=0.
+  // The solution is (0.5, 0.5), with lambda_eq=-1.5,
+  // mu_{x<=0.5}=3.0 and z_L(y)=0.
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars = {
+      VariableMeta{VarType::Continuous, -5.0, 5.0},
+      VariableMeta{VarType::Continuous, 0.0, 5.0},
+  };
+  nlp.x0 = Eigen::Vector2d(0.25, 0.75);
+  nlp.f = [](const Eigen::VectorXd& x) {
+    return 0.5 * std::pow(x[0] - 2.0, 2) +
+           0.5 * std::pow(x[1] + 1.0, 2);
+  };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& grad) {
+    grad.resize(2);
+    grad << x[0] - 2.0, x[1] + 1.0;
+  };
+  nlp.g = [](const Eigen::VectorXd& x, Eigen::VectorXd& g) {
+    g = Eigen::VectorXd::Constant(1, x[0] + x[1] - 1.0);
+  };
+  nlp.jac_g = [](const Eigen::VectorXd&,
+                 Eigen::SparseMatrix<double>& jac) {
+    jac.resize(1, 2);
+    jac.insert(0, 0) = 1.0;
+    jac.insert(0, 1) = 1.0;
+    jac.makeCompressed();
+  };
+  nlp.h = [](const Eigen::VectorXd& x, Eigen::VectorXd& h) {
+    h = Eigen::VectorXd::Constant(1, x[0] - 0.5);
+  };
+  nlp.jac_h = [](const Eigen::VectorXd&,
+                 Eigen::SparseMatrix<double>& jac) {
+    jac.resize(1, 2);
+    jac.insert(0, 0) = 1.0;
+    jac.makeCompressed();
+  };
+  nlp.solver_options.tolerance = 1e-10;
+  nlp.solver_options.acceptable_tolerance = 1e-9;
+
+  const SolveResult result = ipopt.solve_nlp(nlp);
+  REQUIRE(result.stats.success);
+  REQUIRE(result.constraint_duals.size() == 2);
+  REQUIRE(result.box_dual_lb.size() == 2);
+  REQUIRE(result.box_dual_ub.size() == 2);
+  CHECK(result.x[0] == Approx(0.5).margin(1e-7));
+  CHECK(result.x[1] == Approx(0.5).margin(1e-7));
+  CHECK(result.constraint_duals[0] == Approx(3.0).margin(1e-5));
+  CHECK(result.constraint_duals[1] == Approx(-1.5).margin(1e-5));
+  CHECK(result.box_dual_lb[1] >= 0.0);
+  CHECK(result.box_dual_ub[0] >= 0.0);
+}
+
+TEST_CASE("IpoptAdapter unscales active variable-bound multipliers",
+          "[engine][api][ipopt][duals][bounds]") {
+  IpoptAdapter ipopt;
+  REQUIRE(ipopt.available());
+
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars = {VariableMeta{VarType::Continuous, 0.0, 5.0}};
+  nlp.x0 = Eigen::VectorXd::Constant(1, 1.0);
+  nlp.f = [](const Eigen::VectorXd& x) {
+    return 0.5 * std::pow(x[0] + 1.0, 2);
+  };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& grad) {
+    grad = Eigen::VectorXd::Constant(1, x[0] + 1.0);
+  };
+  nlp.solver_options.tolerance = 1e-10;
+  nlp.solver_options.acceptable_tolerance = 1e-9;
+
+  const SolveResult result = ipopt.solve_nlp(nlp);
+  REQUIRE(result.stats.success);
+  REQUIRE(result.box_dual_lb.size() == 1);
+  REQUIRE(result.box_dual_ub.size() == 1);
+  CHECK(result.x[0] == Approx(0.0).margin(1e-7));
+  CHECK(result.box_dual_lb[0] == Approx(1.0).margin(1e-6));
+  CHECK(result.box_dual_ub[0] == Approx(0.0).margin(1e-6));
 }
 #endif
 

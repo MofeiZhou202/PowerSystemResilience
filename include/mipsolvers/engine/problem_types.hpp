@@ -212,6 +212,12 @@ struct NLPModel {
   std::function<void(const Eigen::VectorXd&, Eigen::VectorXd&)> h;
   std::function<void(const Eigen::VectorXd&, Eigen::SparseMatrix<double>&)> jac_h;
 
+  // Optional independent-control columns for equality-constrained Newton
+  // systems. When its size equals n - m_eq, native IPM may use the complement
+  // as a square state Jacobian to construct and verify a sparse null-space
+  // basis. Invalid or singular hints are ignored in favor of generic pivoting.
+  std::vector<int> equality_free_columns;
+
   // Optional symbolic representation for exportable solver adapters.
   std::shared_ptr<SymExpr> symbolic_objective;
   std::vector<SymbolicConstraint> symbolic_constraints;
