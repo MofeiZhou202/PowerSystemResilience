@@ -3,6 +3,7 @@
 // Minimal MATPOWER AC PF runner used by external cross-tool checks.
 // Prints a compact JSON object with convergence flags and solved voltages.
 
+#include <chrono>
 #include <cmath>
 #include <exception>
 #include <iostream>
@@ -29,24 +30,69 @@ static std::string json_escape(const std::string& s) {
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::cerr << "usage: matpower_pf_compare <case.m>\n";
+    std::cerr << "usage: matpower_pf_compare <case.m> [--no-pv-pq]\n";
     return 2;
   }
+  const bool no_pv_pq =
+      argc > 2 && std::string(argv[2]) == "--no-pv-pq";
+  const bool flows =
+      argc > 2 && std::string(argv[2]) == "--flows";
 
   try {
     const std::string case_path = argv[1];
+    const auto t_parse0 = std::chrono::steady_clock::now();
     const auto sys = hacdcpf::io::parse_matpower(case_path);
+    const auto t_parse1 = std::chrono::steady_clock::now();
 
     hacdcpf::PowerFlowOptions opt;
     opt.tol = 1e-8;
     opt.max_iter = 80;
+    if (no_pv_pq) {
+      opt.enable_pv_pq_conversion = false;
+    }
 
     const auto pf = hacdcpf::solve_power_flow(sys, opt);
+    const auto t_solve1 = std::chrono::steady_clock::now();
+
+    const auto ms = [](auto a, auto b) {
+      return std::chrono::duration<double, std::milli>(b - a).count();
+    };
 
     std::cout << "{\"converged\":" << (pf.converged ? "true" : "false")
               << ",\"iterations\":" << pf.iterations
               << ",\"residual\":" << pf.residual
-              << ",\"vm\":[";
+              << ",\"n_bus\":" << sys.ac.buses.size()
+              << ",\"n_gen\":" << sys.ac.generators.size()
+              << ",\"n_branch\":" << sys.ac.branches.size()
+              << ",\"pd_total_mw\":" << [&] {
+                   double s = 0.0;
+                   for (const auto& b : sys.ac.buses) s += b.pd_mw;
+                   return s;
+                 }()
+              << ",\"qd_total_mvar\":" << [&] {
+                   double s = 0.0;
+                   for (const auto& b : sys.ac.buses) s += b.qd_mvar;
+                   return s;
+                 }()
+              << ",\"parse_ms\":" << ms(t_parse0, t_parse1)
+              << ",\"solve_ms\":" << ms(t_parse1, t_solve1)
+              << ",\"bus_ids\":[";
+    // parse_matpower renumbers buses to 1..N in .index and stores the
+    // original MATPOWER bus number in .name as "Bus<id>"; report the
+    // original number so cross-tool comparisons align on MATPOWER ids.
+    for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+      if (i) std::cout << ',';
+      const auto& b = sys.ac.buses[i];
+      int id = b.index;
+      if (b.name.size() > 3 && b.name.rfind("Bus", 0) == 0) {
+        try {
+          id = std::stoi(b.name.substr(3));
+        } catch (const std::exception&) {
+        }
+      }
+      std::cout << id;
+    }
+    std::cout << "],\"vm\":[";
     for (size_t i = 0; i < pf.vm.size(); ++i) {
       if (i) std::cout << ',';
       std::cout << pf.vm[i];
@@ -56,7 +102,24 @@ int main(int argc, char** argv) {
       if (i) std::cout << ',';
       std::cout << pf.va[i];
     }
-    std::cout << "]}";
+    std::cout << ']';
+    if (flows) {
+      double loss_p = 0.0;
+      for (const auto& f : pf.branch_flows) loss_p += f.pf_mw + f.pt_mw;
+      std::cout << ",\"loss_p_mw\":" << loss_p << ",\"branches\":[";
+      for (size_t i = 0; i < sys.ac.branches.size() &&
+                          i < pf.branch_flows.size(); ++i) {
+        if (i) std::cout << ',';
+        const auto& br = sys.ac.branches[i];
+        const auto& f = pf.branch_flows[i];
+        std::cout << "{\"from\":" << br.from_bus << ",\"to\":" << br.to_bus
+                  << ",\"in_service\":" << (br.in_service ? 1 : 0)
+                  << ",\"pf_mw\":" << f.pf_mw << ",\"pt_mw\":" << f.pt_mw
+                  << '}';
+      }
+      std::cout << ']';
+    }
+    std::cout << "}";
 
     return pf.converged ? 0 : 1;
   } catch (const std::exception& e) {

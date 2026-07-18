@@ -137,6 +137,12 @@ HybridPowerSystem make_rich_idempotence_case() {
   sys.ac.freq_hz = 50.0;
   sys.ac.buses = {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ),
                   make_bus(3, BusType::PQ)};
+  // Match the 20/10 kV transformer nameplate voltages so the canonical model
+  // is physically consistent (off-nominal tap and impedance voltage-base
+  // scale are both 1). ACBus::base_kv defaults to 110 kV otherwise.
+  sys.ac.buses[0].base_kv = 20.0;
+  sys.ac.buses[1].base_kv = 10.0;
+  sys.ac.buses[2].base_kv = 10.0;
   sys.ac.generators = {make_slack_gen(1, 1)};
 
   Transformer2W tr;

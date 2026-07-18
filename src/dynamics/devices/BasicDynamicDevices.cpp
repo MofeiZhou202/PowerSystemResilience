@@ -5540,15 +5540,24 @@ bool GridFormingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkState
   if (!params_.in_service || range_.empty() || params_.bus_pos < 0) return false;
   const Eigen::Vector3cd vabc = bus_voltage(y, params_.bus_pos);
   const Complex v = positive_sequence_voltage(vabc);
-  const double vt = std::max(kMinVoltage, std::abs(v));
-  const double v_angle = std::arg(v);
+  const double vt = std::max(kMinVoltage, avg_voltage_mag(vabc));
   const double p_ref = params_.p_ref_mw / safe_base(params_.base_mva);
   const double q_ref = params_.q_ref_mvar / safe_base(params_.base_mva);
   const Complex z(params_.virtual_r_pu, std::max(1e-5, params_.virtual_x_pu));
   const Complex yv = Complex(1.0, 0.0) / z;
   const Complex s_ref(p_ref, q_ref);
-  const Complex i_ref = std::conj(s_ref / v);
-  const Complex e = v + z * i_ref;
+  const Complex a = std::polar(1.0, 2.0 * kPi / 3.0);
+  const Complex rotation[3] = {Complex(1.0, 0.0), a * a, a};
+  Complex denominator(0.0, 0.0);
+  double voltage_norm_sum = 0.0;
+  for (int phase = 0; phase < 3; ++phase) {
+    denominator += vabc[phase] * std::conj(rotation[phase]);
+    voltage_norm_sum += std::norm(vabc[phase]);
+  }
+  const Complex e = std::abs(denominator) > 1e-12
+      ? std::conj((3.0 * std::conj(z) * s_ref + voltage_norm_sum) /
+                  denominator)
+      : v;
   const double e_mag =
       clamp_voltage_window(std::abs(e), params_.vmin_internal_pu, params_.vmax_internal_pu);
   const double theta = std::arg(e);

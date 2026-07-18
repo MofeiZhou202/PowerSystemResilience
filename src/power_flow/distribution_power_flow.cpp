@@ -3340,7 +3340,10 @@ std::unordered_map<std::string, double> get_opendss_regulator_taps(
 
 OpenDSSSparseYMatrix build_opendss_sparse_y_matrix(
     const std::filesystem::path& master_dss,
-    const std::unordered_map<std::string, double>& reg_taps) {
+    const std::unordered_map<std::string, double>& reg_taps,
+    bool series_only,
+    bool exclude_voltage_sources,
+    bool exclude_loads) {
   OpenDSSSparseYMatrix snapshot;
 #ifdef HACDCPF_HAVE_OPENDSS
   LocalDSSContext api;
@@ -3351,16 +3354,66 @@ OpenDSSSparseYMatrix build_opendss_sparse_y_matrix(
         api,
         "Transformer." + name + ".wdg=2 Tap=" + std::to_string(tap_pu));
   }
+  std::unordered_map<std::string, Complex> solved_node_voltage;
+  if (exclude_voltage_sources) {
+    ctx_Solution_Solve(api.get());
+    api.check("ctx_Solution_Solve");
+    const std::vector<std::string> solved_node_names =
+        dss_get_string_array(api, ctx_Circuit_Get_AllNodeNames);
+    const std::vector<double> solved_node_volts =
+        dss_get_double_array(api, ctx_Circuit_Get_AllBusVolts);
+    const std::size_t solved_pairs =
+        std::min(solved_node_names.size(), solved_node_volts.size() / 2);
+    solved_node_voltage.reserve(solved_pairs);
+    for (std::size_t index = 0; index < solved_pairs; ++index) {
+      solved_node_voltage[lowercase_ascii_copy(solved_node_names[index])] =
+          Complex(solved_node_volts[2 * index], solved_node_volts[2 * index + 1]);
+    }
+    std::vector<std::string> source_names;
+    for (int has_source = ctx_Vsources_Get_First(api.get());
+         has_source != 0;
+         has_source = ctx_Vsources_Get_Next(api.get())) {
+      api.check("ctx_Vsources_Get_First/Next");
+      source_names.push_back(dss_get_string_value(
+          api, ctx_Vsources_Get_Name, "ctx_Vsources_Get_Name"));
+    }
+    for (const std::string& source_name : source_names) {
+      dss_run_command(api, "Vsource." + source_name + ".enabled=no");
+    }
+  }
+  if (exclude_loads) {
+    std::vector<std::string> load_names;
+    for (int has_load = ctx_Loads_Get_First(api.get());
+         has_load != 0;
+         has_load = ctx_Loads_Get_Next(api.get())) {
+      api.check("ctx_Loads_Get_First/Next");
+      load_names.push_back(dss_get_string_value(
+          api, ctx_Loads_Get_Name, "ctx_Loads_Get_Name"));
+    }
+    for (const std::string& load_name : load_names) {
+      dss_run_command(api, "Load." + load_name + ".enabled=no");
+    }
+  }
   dss_run_command(api, "Set ControlMode=OFF");
   ctx_Solution_InitSnap(api.get());
   api.check("ctx_Solution_InitSnap");
-  ctx_YMatrix_BuildYMatrixD(api.get(), 2, 1);
+  ctx_YMatrix_BuildYMatrixD(api.get(), series_only ? 1 : 2, 1);
   api.check("ctx_YMatrix_BuildYMatrixD");
 
   snapshot.node_order = dss_get_string_array(api, ctx_Circuit_Get_YNodeOrder);
   snapshot.dimension = static_cast<int>(snapshot.node_order.size());
   if (snapshot.dimension == 0) {
     throw std::runtime_error("build_opendss_sparse_y_matrix: empty YNodeOrder");
+  }
+  snapshot.node_voltage_volts.assign(
+      static_cast<std::size_t>(snapshot.dimension), Complex{});
+  for (int node = 0; node < snapshot.dimension; ++node) {
+    const auto voltage_it = solved_node_voltage.find(lowercase_ascii_copy(
+        snapshot.node_order[static_cast<std::size_t>(node)]));
+    if (voltage_it != solved_node_voltage.end()) {
+      snapshot.node_voltage_volts[static_cast<std::size_t>(node)] =
+          voltage_it->second;
+    }
   }
 
   uint32_t n_bus = 0;
@@ -3415,6 +3468,9 @@ OpenDSSSparseYMatrix build_opendss_sparse_y_matrix(
 #else
   (void)master_dss;
   (void)reg_taps;
+  (void)series_only;
+  (void)exclude_voltage_sources;
+  (void)exclude_loads;
   throw std::runtime_error(
       "build_opendss_sparse_y_matrix requires HACDCPF_HAVE_OPENDSS");
 #endif

@@ -104,10 +104,6 @@ double load_motor_pn_mw(const Load& ld, double motor_fraction) {
   return pn;
 }
 
-int motor_pair_count_from_poles(int poles) {
-  return std::max(1, poles / 2);
-}
-
 struct ExternalGridScImpedance {
   Cx z1{0.0, 0.0};
   Cx z0{0.0, 0.0};
@@ -392,7 +388,8 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
                                          int n,
                                          const SCDetailedOptions& opt,
                                          const std::unordered_map<int, TransformerBranchCorrection>& transformer_corrections,
-                                         bool steady_state) {
+                                         bool steady_state,
+                                         bool machine_shunts = true) {
   Eigen::MatrixXcd Ybus  = Eigen::MatrixXcd::Zero(n, n);
   Eigen::MatrixXcd Ybus2 = Eigen::MatrixXcd::Zero(n, n);  // negative-sequence
   Eigen::MatrixXcd Ybus0 = Eigen::MatrixXcd::Zero(n, n);
@@ -469,6 +466,7 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
 
   // --- generators (subtransient or steady-state shunt with KG correction) ---
   for (const auto& g : ac.generators) {
+    if (!machine_shunts) break;  // network-only build: skip all machine shunts
     if (!g.in_service) continue;
     auto it = id_map.find(g.bus);
     if (it == id_map.end()) continue;
@@ -515,7 +513,7 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
   }
 
   // --- asynchronous motors (subtransient only, not in steady-state) ---
-  if (!steady_state) {
+  if (!steady_state && machine_shunts) {
     for (const auto& m : ac.motors) {
       if (!m.in_service) continue;
       const double motor_p_mw = m.sn_mva * std::clamp(m.cos_phi, 0.01, 1.0);
@@ -589,7 +587,7 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
   }
 
   // --- VSC converters (AC grid-forming contributes to Ybus; grid-following = current source) ---
-  if (!steady_state) {
+  if (!steady_state && machine_shunts) {
     for (const auto& conv : vsc_converters) {
       if (!conv.in_service) continue;
       auto it = id_map.find(conv.bus_ac);
@@ -1102,6 +1100,10 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
 
   // ====== Step 3: Compute per-source contributions at fault bus ======
   double gen_contrib = 0.0, motor_contrib = 0.0, load_contrib = 0.0;
+  // Per-contribution peak data: (current [kA], source impedance [pu]) for
+  // every voltage-source contribution; consumed by the formula-(59) peak
+  // summation at the fault bus in Step 5.
+  std::vector<std::pair<double, Cx>> vs_peak_contribs;
 
   auto source_transfer_abs = [&](int source_bus_id) -> double {
     auto it = id_map.find(source_bus_id);
@@ -1137,26 +1139,30 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
     double KG = c / (1.0 + xdpp * sin_phi);
     Cx z_gen_corr = z_gen * KG;
 
+    double gen_ci = 0.0;
+    Cx gen_z = z_gen_corr;
     if (opt.fault_type == FaultType::ThreePhase) {
-      gen_contrib += voltage_source_contribution_ka(g.bus, z_gen_corr);
+      gen_ci = voltage_source_contribution_ka(g.bus, z_gen_corr);
     } else if (opt.fault_type == FaultType::SinglePhaseGround) {
       double x0 = g.x0_pu, r0 = g.r0_pu;
       Cx z_gen_0 = Cx(r0, x0) * (base_mva / mbase);
       double KG0 = c / (1.0 + x0 * sin_phi);
       Cx z_gen_0_corr = z_gen_0 * KG0;
-      Cx z_k = (z_gen_corr * 2.0 + z_gen_0_corr) / 3.0;
-      gen_contrib += voltage_source_contribution_ka(g.bus, z_k);
+      gen_z = (z_gen_corr * 2.0 + z_gen_0_corr) / 3.0;
+      gen_ci = voltage_source_contribution_ka(g.bus, gen_z);
     } else if (opt.fault_type == FaultType::TwoPhase) {
-      Cx z_k = z_gen_corr * 2.0 / std::sqrt(3.0);
-      gen_contrib += voltage_source_contribution_ka(g.bus, z_k);
+      gen_z = z_gen_corr * 2.0 / std::sqrt(3.0);
+      gen_ci = voltage_source_contribution_ka(g.bus, gen_z);
     } else if (opt.fault_type == FaultType::TwoPhaseGround) {
       double x0 = g.x0_pu, r0 = g.r0_pu;
       Cx z_gen_0 = Cx(r0, x0) * (base_mva / mbase);
       double KG0 = c / (1.0 + x0 * sin_phi);
       Cx z_gen_0_corr = z_gen_0 * KG0;
-      Cx z_k = (2.0 * z_gen_corr * z_gen_0_corr + z_gen_corr * z_gen_corr) / (3.0 * z_gen_corr);
-      gen_contrib += voltage_source_contribution_ka(g.bus, z_k);
+      gen_z = (2.0 * z_gen_corr * z_gen_0_corr + z_gen_corr * z_gen_corr) / (3.0 * z_gen_corr);
+      gen_ci = voltage_source_contribution_ka(g.bus, gen_z);
     }
+    gen_contrib += gen_ci;
+    vs_peak_contribs.emplace_back(gen_ci, gen_z);
   }
 
   // Motor contributions at fault bus
@@ -1170,22 +1176,26 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
     double z_base = mvn * mvn / base_mva;
     Cx z_motor = z_motor_ohm / z_base;
 
+    double motor_ci = 0.0;
+    Cx motor_z = z_motor;
     if (opt.fault_type == FaultType::ThreePhase) {
-      motor_contrib += voltage_source_contribution_ka(m.bus, z_motor);
+      motor_ci = voltage_source_contribution_ka(m.bus, z_motor);
     } else if (opt.fault_type == FaultType::SinglePhaseGround) {
       Cx z_m0_ohm(m.r0_pu, m.x0_pu);
       Cx z_m0 = z_m0_ohm / z_base;
-      Cx z_k = (2.0 * z_motor + z_m0) / 3.0;
-      motor_contrib += voltage_source_contribution_ka(m.bus, z_k);
+      motor_z = (2.0 * z_motor + z_m0) / 3.0;
+      motor_ci = voltage_source_contribution_ka(m.bus, motor_z);
     } else if (opt.fault_type == FaultType::TwoPhase) {
-      Cx z_k = z_motor * 2.0 / std::sqrt(3.0);
-      motor_contrib += voltage_source_contribution_ka(m.bus, z_k);
+      motor_z = z_motor * 2.0 / std::sqrt(3.0);
+      motor_ci = voltage_source_contribution_ka(m.bus, motor_z);
     } else if (opt.fault_type == FaultType::TwoPhaseGround) {
       Cx z_m0_ohm(m.r0_pu, m.x0_pu);
       Cx z_m0 = z_m0_ohm / z_base;
-      Cx z_k = (2.0 * z_motor * z_m0 + z_motor * z_motor) / (3.0 * z_motor);
-      motor_contrib += voltage_source_contribution_ka(m.bus, z_k);
+      motor_z = (2.0 * z_motor * z_m0 + z_motor * z_motor) / (3.0 * z_motor);
+      motor_ci = voltage_source_contribution_ka(m.bus, motor_z);
     }
+    motor_contrib += motor_ci;
+    vs_peak_contribs.emplace_back(motor_ci, motor_z);
   }
 
   // Load motor-fraction contributions at fault bus
@@ -1198,6 +1208,7 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
     if (actual_s < 1e-12) continue;
     Cx z_load = Cx(ld.r_sc_pu, ld.x_sub_pu) * (base_mva / actual_s);
     const double contrib = voltage_source_contribution_ka(ld.bus, z_load);
+    vs_peak_contribs.emplace_back(contrib, z_load);
     if (is_projected_rich_motor_load(ld)) {
       motor_contrib += contrib;
     } else {
@@ -1246,6 +1257,7 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
                         * (base_mva / s_rated);
       const double contrib = voltage_source_contribution_ka(conv.bus_ac, z_conv);
       converter_contrib += contrib;
+      vs_peak_contribs.emplace_back(contrib, z_conv);
       conv_row.model = "ac_grid_forming_voltage_source";
       conv_row.contribution_ka = contrib;
       out.converter_contributions.push_back(std::move(conv_row));
@@ -1458,10 +1470,13 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   }
 
   // ====== Step 5: Peak current (ip) ======
-  // The DC-offset factor is a property of the fault-point Thevenin impedance,
-  // not of the bus at which a contribution happens to be reported. IEC 60909
-  // current-source contributions have no decaying DC component, so add their
-  // instantaneous peak without multiplying them by kappa.
+  // Fault bus: IEC 60909-0 formula (59) — sum of per-contribution peaks
+  //   ip = Σ κ_i·√2·I"k_i
+  // with κ_i derived from each contribution's own R/X ratio. The network
+  // part uses the Thevenin impedance of the network without machine shunts;
+  // current sources (static generators, grid-following converters) have no
+  // decaying DC component and are added without κ. Non-fault buses keep the
+  // single-κ approximation on the transferred current (method A/B).
   Cx Z_k_kappa = compute_Zk(opt.fault_type,
                             Z1_fault, Z2_fault, Z0_fault, Zf);
   double rx_ratio = (std::abs(std::imag(Z_k_kappa)) > 1e-15)
@@ -1474,12 +1489,58 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
     kappa = std::clamp(kappa, 1.0, 2.0);
   }
 
+  auto kappa_of = [](Cx z) {
+    const double rx = (std::abs(std::imag(z)) > 1e-15)
+                          ? std::abs(std::real(z) / std::imag(z))
+                          : 0.0;
+    return std::clamp(calculate_kappa_basic_sc(rx), 1.0, 2.0);
+  };
+
+  // Network-only Thevenin impedance (branches + external grids, no machine
+  // shunts) feeding the fault, for the network part of the peak summation.
+  double kappa_net = kappa;
+  {
+    auto [Ybus_net, Ybus2_net, Ybus0_net] = build_sc_admittance_matrices(
+        ac, projected.vsc_converters, id_map, n, opt, transformer_corrections,
+        false, false);
+    Eigen::MatrixXcd Zbus_net = safe_inverse(Ybus_net);
+    Cx Zk_net;
+    if (opt.fault_type == FaultType::ThreePhase) {
+      Zk_net = compute_Zk(opt.fault_type,
+                          Zbus_net(fault_idx, fault_idx),
+                          Zbus_net(fault_idx, fault_idx),
+                          Cx(0.0, 0.0), Zf);
+    } else {
+      Eigen::MatrixXcd Zbus0_net = safe_inverse(Ybus0_net);
+      Zk_net = compute_Zk(opt.fault_type,
+                          Zbus_net(fault_idx, fault_idx),
+                          Zbus_net(fault_idx, fault_idx),
+                          Zbus0_net(fault_idx, fault_idx), Zf);
+    }
+    kappa_net = kappa_of(Zk_net);
+  }
+
+  const double conv_gfm_contrib =
+      std::max(0.0, converter_contrib - converter_current_source_contrib);
+  const double i_network_ka =
+      std::max(0.0, I_kss_kA - gen_contrib - motor_contrib - load_contrib -
+                        conv_gfm_contrib);
+
   for (int k = 0; k < n; ++k) {
     auto& row = out.bus_results[k];
-    const double current_source_ka =
-        std::max(0.0, row.ikss_ka - row.ikss_1_ka);
-    row.ip_ka = std::sqrt(2.0) *
-                (kappa * row.ikss_1_ka + current_source_ka);
+    if (k != fault_idx) {
+      const double current_source_ka =
+          std::max(0.0, row.ikss_ka - row.ikss_1_ka);
+      row.ip_ka = std::sqrt(2.0) *
+                  (kappa * row.ikss_1_ka + current_source_ka);
+      continue;
+    }
+    double ip_sum = kappa_net * i_network_ka;
+    for (const auto& [i_ka, z_src] : vs_peak_contribs) {
+      ip_sum += kappa_of(z_src) * i_ka;
+    }
+    ip_sum += sgen_contrib + converter_current_source_contrib;  // κ = 1
+    row.ip_ka = std::sqrt(2.0) * ip_sum;
   }
 
   // ====== Step 6: Breaking current (Ib) ======
@@ -1555,7 +1616,9 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
           double Ik_ratio = motor_current * std::sqrt(3.0) * mvn / sn;
           double mu = compute_mu(Ik_ratio, t_break);
           double pn_mw = sn * m.cos_phi * m.efficiency;
-          double q = compute_q(pn_mw, motor_pair_count_from_poles(m.poles), t_break);
+          // IEC 60909 q factor uses PrM/p with p = pole pairs per motor
+          // (AsynchronousMotor::poles carries the IEC pole-pair count).
+          double q = compute_q(pn_mw, m.poles, t_break);
           Ib += mu * q * motor_current_tr;
         }
       }
@@ -1583,7 +1646,7 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
         const double mu = compute_mu(Ik_ratio, t_break);
         const double q = compute_q(
             load_motor_pn_mw(ld, motor_fraction),
-            motor_pair_count_from_poles(ld.motor_poles),
+            ld.motor_poles,
             t_break);
         Ib += mu * q * motor_current_tr;
       }

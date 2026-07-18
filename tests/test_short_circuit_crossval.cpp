@@ -111,6 +111,13 @@ static const SCDetailedBusResult& fault_row(const SCDetailedResult& r) {
   return r.bus_results.front();
 }
 
+static const SCDetailedBusResult& bus_row(const SCDetailedResult& r, int bus_id) {
+  for (const auto& row : r.bus_results)
+    if (row.bus_id == bus_id) return row;
+  FAIL("Bus row not found");
+  return r.bus_results.front();
+}
+
 static const SCDetailedBranchResult* branch_row(const SCDetailedResult& r,
                                                 int branch_index) {
   for (const auto& row : r.branch_results)
@@ -647,8 +654,13 @@ TEST_CASE("SC detailed: minimum external-grid data lowers fault current",
   CHECK(i_min < i_max * 0.2);
 }
 
-TEST_CASE("SC detailed: IEC method B peak factor is capped at 1.8",
+TEST_CASE("SC detailed: fault-bus peak uses formula (59) per-contribution kappa",
           "[short_circuit][iec60909][peak]") {
+  // Network-only fault (no machine shunts): the peak at the fault bus is
+  // sqrt(2)·kappa_net·I"k with kappa_net from the network R/X ratio. For
+  // R/X -> 0 the basic kappa saturates at its 2.0 clamp; the method-B 1.15
+  // factor no longer applies at the fault bus (it still applies to
+  // transferred currents at non-fault buses).
   HybridPowerSystem sys;
   sys.base_mva = 100.0;
   sys.ac.base_mva = 100.0;
@@ -671,8 +683,41 @@ TEST_CASE("SC detailed: IEC method B peak factor is capped at 1.8",
   const auto result = run_short_circuit_detailed(sys, 1, opt);
   REQUIRE(result.solved);
   const auto& row = fault_row(result);
-  CHECK(row.ip_ka == Catch::Approx(1.8 * std::sqrt(2.0) * row.ikss_ka)
-                         .epsilon(1e-12));
+  // R/X = 1e-8 (not exactly 0), so the basic kappa is 2.0 - O(1e-8).
+  CHECK(row.ip_ka == Catch::Approx(2.0 * std::sqrt(2.0) * row.ikss_ka)
+                         .epsilon(1e-6));
+}
+
+TEST_CASE("SC detailed: transferred current peak keeps method B 1.8 cap",
+          "[short_circuit][iec60909][peak]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK, 20.0),
+                  make_bus(2, BusType::PQ, 20.0)};
+  ExternalGrid eg;
+  eg.index = 1;
+  eg.bus = 1;
+  eg.r_pu = 1e-9;
+  eg.x_pu = 0.1;
+  sys.ac.external_grids = {eg};
+  sys.ac.generators.clear();
+  sys.ac.branches = {make_branch(1, 1, 2, 0.01, 0.05)};
+
+  SCDetailedOptions opt;
+  opt.fault_type = FaultType::ThreePhase;
+  opt.c_factor = 1.0;
+  opt.kappa_method = SCKappaMethod::B;
+  opt.topology = SCTopology::Meshed;
+  opt.compute_ith = false;
+
+  const auto result = run_short_circuit_detailed(sys, 1, opt);
+  REQUIRE(result.solved);
+  const auto& row2 = bus_row(result, 2);
+  // Non-fault bus: single-kappa approximation with method-B 1.15 factor
+  // capped at 1.8 on the transferred current.
+  CHECK(row2.ip_ka == Catch::Approx(1.8 * std::sqrt(2.0) * row2.ikss_1_ka)
+                          .epsilon(1e-12));
 }
 
 TEST_CASE("SC detailed: transformer correction factor is applied in canonical space",

@@ -159,10 +159,32 @@ void add_equivalent_branch_from_transformer2w(const Transformer2W& tr,
   if (!tr.in_service) return;
   if (tr.hv_bus == 0 || tr.lv_bus == 0) return;
 
+  // uk%/vkr% are nameplate values (on Sn, Vn) while the canonical branch
+  // impedance must be on the system base (base_mva, bus base kV), so the
+  // bus voltage bases are needed before converting the impedance.
+  const double base_kv_hv = bus_base_kv_or_default(ac, tr.hv_bus);
+  const double base_kv_lv = bus_base_kv_or_default(ac, tr.lv_bus);
+
   auto [r_pu, x_pu] = rx_from_vk_vkr(tr.vk_percent, tr.vkr_percent, base_mva, tr.sn_mva);
   if (r_pu == 0.0 && x_pu == 0.0) {
     x_pu = 1e-4;
   }
+  // The pi-model series impedance sits at the LV (to-bus) side of the ideal
+  // tap transformer; convert the nameplate impedance onto the LV bus voltage
+  // base. The factor is 1 when nameplate and bus base voltages coincide, and
+  // also when the LV bus carries no usable base_kv (pu system ill-defined
+  // otherwise; keep the legacy unscaled behaviour in that case).
+  double impedance_vbase_scale = 1.0;
+  double lv_bus_base_kv = 0.0;
+  for (const auto& b : ac.buses) {
+    if (b.index == tr.lv_bus) { lv_bus_base_kv = b.base_kv; break; }
+  }
+  if (tr.vn_lv_kv > 1e-9 && lv_bus_base_kv > 1e-9) {
+    const double vbase_ratio = tr.vn_lv_kv / lv_bus_base_kv;
+    impedance_vbase_scale = vbase_ratio * vbase_ratio;
+  }
+  r_pu *= impedance_vbase_scale;
+  x_pu *= impedance_vbase_scale;
 
   // Canonical ACBranch stores off-nominal tap on the from side. For an LV-side
   // physical tap, invert the tap and scale leakage impedance by tap^2.
@@ -175,8 +197,6 @@ void add_equivalent_branch_from_transformer2w(const Transformer2W& tr,
       (tr.tap_side == 1) ? (clamped_tap * clamped_tap) : 1.0;
 
   // Include the nameplate-to-bus-base ratio when voltage bases do not match.
-  const double base_kv_hv = bus_base_kv_or_default(ac, tr.hv_bus);
-  const double base_kv_lv = bus_base_kv_or_default(ac, tr.lv_bus);
   double nominal_ratio_pu = 1.0;
   if (tr.vn_hv_kv > 1e-9 && tr.vn_lv_kv > 1e-9 &&
       base_kv_hv > 1e-9 && base_kv_lv > 1e-9) {
@@ -201,8 +221,8 @@ void add_equivalent_branch_from_transformer2w(const Transformer2W& tr,
   if (tr.z0_percent > 0.0) {
     auto [r0_pu, x0_pu] =
         rx_from_z_percent_x_over_r(tr.z0_percent, tr.x0_r0, base_mva, tr.sn_mva);
-    br.r0_pu = r0_pu * impedance_scale;
-    br.x0_pu = x0_pu * impedance_scale;
+    br.r0_pu = r0_pu * impedance_scale * impedance_vbase_scale;
+    br.x0_pu = x0_pu * impedance_scale * impedance_vbase_scale;
   } else {
     br.r0_pu = r_pu * impedance_scale;
     br.x0_pu = x_pu * impedance_scale;

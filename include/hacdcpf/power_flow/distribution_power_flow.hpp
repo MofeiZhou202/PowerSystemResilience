@@ -384,6 +384,7 @@ struct ThreePhaseJPCPhase {
 struct OpenDSSSparseYMatrix {
   int dimension{0};
   std::vector<std::string> node_order;
+  std::vector<std::complex<double>> node_voltage_volts;
   std::vector<PhaseDomainSparseEntry> entries;
 };
 
@@ -506,7 +507,10 @@ std::unordered_map<std::string, double> get_opendss_regulator_taps(
 
 OpenDSSSparseYMatrix build_opendss_sparse_y_matrix(
     const std::filesystem::path& master_dss,
-    const std::unordered_map<std::string, double>& reg_taps = {});
+    const std::unordered_map<std::string, double>& reg_taps = {},
+    bool series_only = false,
+    bool exclude_voltage_sources = false,
+    bool exclude_loads = false);
 
 ThreePhaseJPCPhase case2jpc_phase(
     const ThreePhaseACSystem& sys,

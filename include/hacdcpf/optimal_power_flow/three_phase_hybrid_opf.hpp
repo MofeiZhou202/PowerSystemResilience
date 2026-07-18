@@ -1,6 +1,7 @@
 #pragma once
 
 #include <complex>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -8,6 +9,7 @@
 #include <Eigen/Sparse>
 
 #include "hacdcpf/graph/sparse_kron_reduction.hpp"
+#include "hacdcpf/power_flow/three_phase_hybrid.hpp"
 
 namespace hacdcpf::opf::phase_hybrid {
 
@@ -21,12 +23,44 @@ struct PhaseGenerator {
   double cost_c1{0.0};
 };
 
+enum class PhaseVSCControlMode {
+  EqualPhasePower = 0,
+  GridFollowingPLL = 1,
+  PositiveSequenceCurrent = GridFollowingPLL,
+  GridFormingDroop = 2,
+};
+
 struct PhaseVSC {
   std::vector<int> phase_nodes;
   int dc_terminal{-1};
   double efficiency{0.98};
   double s_max_pu{0.0};
+  double phase_current_max_pu{0.0};
   bool fixed_unity_power_factor{false};
+  PhaseVSCControlMode control_mode{PhaseVSCControlMode::EqualPhasePower};
+  double nominal_frequency_hz{50.0};
+  double pll_kp{0.01};
+  double pll_ki{1.0};
+  double virtual_r_pu{0.0};
+  double virtual_x_pu{0.10};
+  double p_droop_pu{0.01};
+  double q_droop_pu{0.05};
+  double voltage_reference_pu{1.0};
+  double voltage_integral_gain{10.0};
+};
+
+struct PhaseVSCDynamicEquilibrium {
+  PhaseVSCControlMode control_mode{PhaseVSCControlMode::EqualPhasePower};
+  double pll_angle_rad{0.0};
+  double pll_integrator{0.0};
+  std::complex<double> internal_voltage_positive{0.0, 0.0};
+  double active_power_reference_pu{0.0};
+  double reactive_power_reference_pu{0.0};
+  double voltage_reference_pu{1.0};
+  double filtered_active_power_pu{0.0};
+  double filtered_reactive_power_pu{0.0};
+  double voltage_integrator{0.0};
+  double max_differential_residual{0.0};
 };
 
 struct ThreePhaseHybridOPFCase {
@@ -39,6 +73,7 @@ struct ThreePhaseHybridOPFCase {
   Eigen::VectorXd v_min_pu;
   Eigen::VectorXd v_max_pu;
   Eigen::VectorXcd voltage_start;
+  std::vector<int> ac_phase_index;
 
   std::vector<int> reference_nodes;
   Eigen::VectorXcd reference_voltage;
@@ -52,6 +87,8 @@ struct ThreePhaseHybridOPFCase {
   Eigen::VectorXd v_dc_start;
   Eigen::VectorXd v_dc_min_pu;
   Eigen::VectorXd v_dc_max_pu;
+  std::vector<int> dc_reference_terminals;
+  Eigen::VectorXd dc_reference_voltage_pu;
 };
 
 enum class ModelVariant {
@@ -72,7 +109,30 @@ struct ThreePhaseHybridOPFOptions {
   double tolerance{1e-7};
   bool warm_start_with_ipopt{false};
   bool verify_derivatives{false};
+  bool verbose{false};
+  bool use_constraint_oracle{false};
+  double oracle_initial_margin{1e-3};
+  double oracle_activation_margin{1e-5};
+  int oracle_probe_iterations{0};
+  int oracle_max_rounds{8};
+  std::vector<int> oracle_seed_rows;
+  // Internal/advanced override used by the exact constraint-oracle rounds.
+  // Empty means that every nonlinear inequality is enforced.
+  std::vector<int> enforced_inequality_rows;
   Eigen::VectorXd primal_start;
+  Eigen::VectorXd equality_dual_start;
+  Eigen::VectorXd nonlinear_inequality_dual_start;
+  Eigen::VectorXd nonlinear_slack_start;
+};
+
+struct ConstraintOracleRoundDiagnostic {
+  int round{0};
+  int enforced_rows{0};
+  int added_rows{0};
+  int iterations{0};
+  bool restricted_converged{false};
+  double runtime_ms{0.0};
+  double max_full_inequality{0.0};
 };
 
 struct ThreePhaseHybridOPFResult {
@@ -83,11 +143,18 @@ struct ThreePhaseHybridOPFResult {
   int variables{0};
   int equalities{0};
   int inequalities{0};
+  int enforced_inequalities{0};
+  int constraint_oracle_rounds{0};
+  int constraint_oracle_added_rows{0};
   int equality_jacobian_nonzeros{0};
+  int inequality_jacobian_nonzeros{0};
+  double max_omitted_inequality{
+      -std::numeric_limits<double>::infinity()};
   int eliminated_phase_nodes{0};
   double objective{0.0};
   double runtime_ms{0.0};
   double initial_primal_residual{0.0};
+  double initial_dual_residual{0.0};
   int initial_worst_equality{-1};
   int initial_worst_inequality{-1};
   double primal_residual{0.0};
@@ -95,19 +162,43 @@ struct ThreePhaseHybridOPFResult {
   double complementarity{0.0};
   double max_voltage_violation{0.0};
   double max_vuf{0.0};
+  double max_converter_current_vuf{0.0};
+  double max_converter_current_loading{0.0};
   double max_converter_violation{0.0};
+  double max_dynamic_equilibrium_residual{0.0};
   double max_equality_jacobian_error{0.0};
   double max_inequality_jacobian_error{0.0};
   double max_lagrangian_hessian_error{0.0};
   Eigen::VectorXd primal;
   Eigen::VectorXd equality_dual;
   Eigen::VectorXd inequality_dual;
+  Eigen::VectorXd inequality_slack;
   Eigen::VectorXcd full_voltage;
+  Eigen::VectorXd dc_voltage;
+  std::vector<std::vector<std::complex<double>>> converter_phase_power_pu;
+  std::vector<double> converter_dc_power_pu;
+  std::vector<int> enforced_inequality_rows;
+  std::vector<ConstraintOracleRoundDiagnostic> constraint_oracle_trace;
+  std::vector<PhaseVSCDynamicEquilibrium> converter_dynamic_equilibria;
   graph::SparseKronResult reduction;
 };
 
 ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf(
     const ThreePhaseHybridOPFCase& problem,
+    const ThreePhaseHybridOPFOptions& options = {});
+
+powerflow::ThreePhaseHybridPFCase make_three_phase_hybrid_pf_case(
+    const ThreePhaseHybridOPFCase& problem,
+    const ThreePhaseHybridOPFResult& operating_point);
+
+std::vector<ThreePhaseHybridOPFResult> solve_three_phase_hybrid_opf_sequence(
+    const std::vector<ThreePhaseHybridOPFCase>& problems,
+    const ThreePhaseHybridOPFOptions& options = {});
+
+std::vector<ThreePhaseHybridOPFResult> solve_three_phase_hybrid_opf_branches(
+    const ThreePhaseHybridOPFCase& base_problem,
+    const ThreePhaseHybridOPFResult& certified_base,
+    const std::vector<ThreePhaseHybridOPFCase>& perturbed_problems,
     const ThreePhaseHybridOPFOptions& options = {});
 
 }  // namespace hacdcpf::opf::phase_hybrid

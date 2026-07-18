@@ -1,14 +1,21 @@
 #include "hacdcpf/optimal_power_flow/three_phase_hybrid_opf.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
+#include <Eigen/OrderingMethods>
+#include <Eigen/QR>
 #include <Eigen/Sparse>
+#include <Eigen/SparseCholesky>
+#include <Eigen/SparseLU>
+#include <Eigen/SparseQR>
 
 #include "hacdcpf/engine/engine.hpp"
 #include <mipsolvers/engine/kernel/ipm/ipm_solver.hpp>
@@ -27,6 +34,7 @@ struct Layout {
   int ndc{0};
   int ncp{0};
   int nc{0};
+  int ngfm{0};
   int i_e{0};
   int i_f{0};
   int i_pg{0};
@@ -34,6 +42,8 @@ struct Layout {
   int i_udc{0};
   int i_pac{0};
   int i_qac{0};
+  int i_gfm_e{0};
+  int i_gfm_f{0};
   int i_pdc{0};
   int nvar{0};
   int neq{0};
@@ -43,14 +53,38 @@ struct Layout {
 struct ConverterMap {
   std::vector<int> model_phase_nodes;
   std::vector<int> phase_var_positions;
+  std::array<int, 3> model_node_by_phase{{-1, -1, -1}};
+  std::array<int, 3> phase_var_by_phase{{-1, -1, -1}};
+  int gfm_var_position{-1};
   int dc_terminal{-1};
   double efficiency{0.98};
   double s_max_pu{0.0};
+  double phase_current_max_pu{0.0};
   bool fixed_unity_power_factor{false};
+  PhaseVSCControlMode control_mode{PhaseVSCControlMode::EqualPhasePower};
+  double nominal_frequency_hz{50.0};
+  double pll_kp{0.01};
+  double pll_ki{1.0};
+  double virtual_r_pu{0.0};
+  double virtual_x_pu{0.10};
+  double p_droop_pu{0.01};
+  double q_droop_pu{0.05};
+  double voltage_reference_pu{1.0};
+  double voltage_integral_gain{10.0};
+};
+
+struct ParametricHessianTerm {
+  int row{0};
+  int col{0};
+  int multiplier_row_1{0};
+  int multiplier_row_2{-1};
+  double coefficient_1{0.0};
+  double coefficient_2{0.0};
 };
 
 struct ModelData {
   const ThreePhaseHybridOPFCase* source{nullptr};
+  bool verbose{false};
   graph::SparseComplexMatrix y;
   graph::SparseKronResult reduction;
   Eigen::VectorXcd fixed_current;
@@ -62,6 +96,9 @@ struct ModelData {
   std::vector<int> converter_for_phase_var;
   std::vector<int> converter_local_phase;
   std::vector<int> reference_model_nodes;
+  std::vector<int> enforced_inequality_rows;
+  std::vector<ParametricHessianTerm> inequality_hessian_terms;
+  std::vector<ParametricHessianTerm> enforced_inequality_hessian_terms;
   Eigen::VectorXd equality_scale;
   Layout layout;
 };
@@ -86,6 +123,13 @@ void validate_case(const ThreePhaseHybridOPFCase& c) {
   if (c.voltage_start.size() != n) {
     throw std::invalid_argument("voltage_start dimension mismatch");
   }
+  if (!c.ac_phase_index.empty()) {
+    if (static_cast<int>(c.ac_phase_index.size()) != n ||
+        std::any_of(c.ac_phase_index.begin(), c.ac_phase_index.end(),
+                    [](int phase) { return phase < 0 || phase > 2; })) {
+      throw std::invalid_argument("ac_phase_index is invalid");
+    }
+  }
   if (c.reference_voltage.size() !=
       static_cast<int>(c.reference_nodes.size())) {
     throw std::invalid_argument("reference voltage dimension mismatch");
@@ -95,6 +139,15 @@ void validate_case(const ThreePhaseHybridOPFCase& c) {
       c.v_dc_start.size() != ndc || c.v_dc_min_pu.size() != ndc ||
       c.v_dc_max_pu.size() != ndc) {
     throw std::invalid_argument("DC model dimension mismatch");
+  }
+  if (c.dc_reference_voltage_pu.size() !=
+      static_cast<int>(c.dc_reference_terminals.size())) {
+    throw std::invalid_argument("DC reference voltage dimension mismatch");
+  }
+  for (int terminal : c.dc_reference_terminals) {
+    if (terminal < 0 || terminal >= ndc) {
+      throw std::invalid_argument("DC reference terminal is out of range");
+    }
   }
   for (const auto& generator : c.generators) {
     if (generator.phase_node < 0 || generator.phase_node >= n) {
@@ -111,6 +164,27 @@ void validate_case(const ThreePhaseHybridOPFCase& c) {
         throw std::invalid_argument("converter phase node is out of range");
       }
     }
+    if (converter.control_mode != PhaseVSCControlMode::EqualPhasePower) {
+      if (converter.phase_nodes.size() != 3 || c.ac_phase_index.empty()) {
+        throw std::invalid_argument(
+            "sequence-aware converter control requires one a/b/c terminal");
+      }
+      std::array<bool, 3> present{};
+      for (int node : converter.phase_nodes) {
+        present[static_cast<std::size_t>(
+            c.ac_phase_index[static_cast<std::size_t>(node)])] = true;
+      }
+      if (!present[0] || !present[1] || !present[2]) {
+        throw std::invalid_argument(
+            "sequence-aware converter control requires distinct a/b/c phases");
+      }
+    }
+    if (converter.control_mode == PhaseVSCControlMode::GridFormingDroop &&
+        std::abs(converter.virtual_r_pu) + std::abs(converter.virtual_x_pu) <=
+            1e-8) {
+      throw std::invalid_argument(
+          "grid-forming converter requires nonzero virtual impedance");
+    }
   }
 }
 
@@ -120,12 +194,169 @@ Eigen::SparseMatrix<Complex> identity_recovery(int n) {
   return t;
 }
 
+std::vector<std::pair<int, Complex>> complex_linear_map(
+    const ModelData& d,
+    const std::vector<int>& full_nodes,
+    const std::vector<Complex>& coefficients) {
+  std::unordered_map<int, Complex> accumulated;
+  for (int k = 0; k < static_cast<int>(full_nodes.size()); ++k) {
+    const int full_node = full_nodes[static_cast<std::size_t>(k)];
+    const Complex factor = coefficients[static_cast<std::size_t>(k)];
+    for (const auto& [model_node, recovery] :
+         d.recovery_rows[static_cast<std::size_t>(full_node)]) {
+      accumulated[d.layout.i_e + model_node] += factor * recovery;
+      accumulated[d.layout.i_f + model_node] +=
+          Complex{0.0, 1.0} * factor * recovery;
+    }
+  }
+  std::vector<std::pair<int, Complex>> result;
+  result.reserve(accumulated.size());
+  for (const auto& entry : accumulated) {
+    if (entry.second != Complex{0.0, 0.0}) result.push_back(entry);
+  }
+  std::sort(result.begin(), result.end(),
+            [](const auto& lhs, const auto& rhs) {
+              return lhs.first < rhs.first;
+            });
+  return result;
+}
+
+void append_parametric_norm_hessian(
+    std::vector<ParametricHessianTerm>& terms,
+    const std::vector<std::pair<int, Complex>>& map,
+    int multiplier_row_1,
+    double multiplier_scale_1,
+    int multiplier_row_2 = -1,
+    double multiplier_scale_2 = 0.0) {
+  for (auto first = map.begin(); first != map.end(); ++first) {
+    for (auto second = first; second != map.end(); ++second) {
+      const double norm_coefficient = 2.0 *
+          std::real(std::conj(first->second) * second->second);
+      if (norm_coefficient == 0.0) continue;
+      terms.push_back(
+          {first->first, second->first,
+           multiplier_row_1, multiplier_row_2,
+           multiplier_scale_1 * norm_coefficient,
+           multiplier_scale_2 * norm_coefficient});
+      if (first->first != second->first) {
+        terms.push_back(
+            {second->first, first->first,
+             multiplier_row_1, multiplier_row_2,
+             multiplier_scale_1 * norm_coefficient,
+             multiplier_scale_2 * norm_coefficient});
+      }
+    }
+  }
+}
+
+void build_inequality_hessian_template(ModelData& d) {
+  const int full_n = d.reduction.original_size;
+  const Complex one{1.0, 0.0};
+  for (int node = 0; node < full_n; ++node) {
+    const auto map = complex_linear_map(d, {node}, {one});
+    append_parametric_norm_hessian(
+        d.inequality_hessian_terms, map, node, -1.0,
+        full_n + node, 1.0);
+  }
+
+  const Complex a = std::polar(1.0, 2.0 * kPi / 3.0);
+  const Complex a2 = a * a;
+  const std::vector<Complex> positive{
+      Complex{1.0 / 3.0, 0.0}, a / 3.0, a2 / 3.0};
+  const std::vector<Complex> negative{
+      Complex{1.0 / 3.0, 0.0}, a2 / 3.0, a / 3.0};
+  int inequality_row = 2 * full_n;
+  for (const auto& nodes : d.source->three_phase_bus_nodes) {
+    append_parametric_norm_hessian(
+        d.inequality_hessian_terms,
+        complex_linear_map(d, nodes, negative), inequality_row, 1.0);
+    append_parametric_norm_hessian(
+        d.inequality_hessian_terms,
+        complex_linear_map(d, nodes, positive), inequality_row,
+        -d.source->vuf_max * d.source->vuf_max);
+    ++inequality_row;
+  }
+  for (const auto& converter : d.converters) {
+    for (int pos : converter.phase_var_positions) {
+      d.inequality_hessian_terms.push_back(
+          {d.layout.i_pac + pos, d.layout.i_pac + pos,
+           inequality_row, -1, 2.0, 0.0});
+      d.inequality_hessian_terms.push_back(
+          {d.layout.i_qac + pos, d.layout.i_qac + pos,
+           inequality_row, -1, 2.0, 0.0});
+    }
+    ++inequality_row;
+  }
+  for (const auto& converter : d.converters) {
+    for (int local = 0;
+         local < static_cast<int>(converter.phase_var_positions.size());
+         ++local) {
+      const int pos =
+          converter.phase_var_positions[static_cast<std::size_t>(local)];
+      d.inequality_hessian_terms.push_back(
+          {d.layout.i_pac + pos, d.layout.i_pac + pos,
+           inequality_row, -1, 2.0, 0.0});
+      d.inequality_hessian_terms.push_back(
+          {d.layout.i_qac + pos, d.layout.i_qac + pos,
+           inequality_row, -1, 2.0, 0.0});
+      const int full_node = d.reduction.retained[static_cast<std::size_t>(
+          converter.model_phase_nodes[static_cast<std::size_t>(local)])];
+      append_parametric_norm_hessian(
+          d.inequality_hessian_terms,
+          complex_linear_map(d, {full_node}, {one}), inequality_row,
+          -converter.phase_current_max_pu * converter.phase_current_max_pu);
+      ++inequality_row;
+    }
+  }
+}
+
+void configure_enforced_inequalities(ModelData& data,
+                                     const std::vector<int>& requested_rows) {
+  const int nineq = data.layout.nineq;
+  data.enforced_inequality_rows.clear();
+  if (requested_rows.empty()) {
+    data.enforced_inequality_rows.reserve(static_cast<std::size_t>(nineq));
+    for (int row = 0; row < nineq; ++row) {
+      data.enforced_inequality_rows.push_back(row);
+    }
+  } else {
+    data.enforced_inequality_rows = requested_rows;
+    std::sort(data.enforced_inequality_rows.begin(),
+              data.enforced_inequality_rows.end());
+    const auto duplicate = std::adjacent_find(
+        data.enforced_inequality_rows.begin(),
+        data.enforced_inequality_rows.end());
+    if (duplicate != data.enforced_inequality_rows.end() ||
+        data.enforced_inequality_rows.front() < 0 ||
+        data.enforced_inequality_rows.back() >= nineq) {
+      throw std::invalid_argument(
+          "enforced nonlinear inequality rows are invalid");
+    }
+  }
+
+  std::vector<bool> enforced_mask(static_cast<std::size_t>(nineq), false);
+  for (int row : data.enforced_inequality_rows) {
+    enforced_mask[static_cast<std::size_t>(row)] = true;
+  }
+  data.enforced_inequality_hessian_terms.clear();
+  data.enforced_inequality_hessian_terms.reserve(
+      data.inequality_hessian_terms.size());
+  for (const auto& term : data.inequality_hessian_terms) {
+    if (enforced_mask[static_cast<std::size_t>(term.multiplier_row_1)] ||
+        (term.multiplier_row_2 >= 0 &&
+         enforced_mask[static_cast<std::size_t>(term.multiplier_row_2)])) {
+      data.enforced_inequality_hessian_terms.push_back(term);
+    }
+  }
+}
+
 std::shared_ptr<ModelData> build_model_data(
     const ThreePhaseHybridOPFCase& c,
     const ThreePhaseHybridOPFOptions& options) {
   validate_case(c);
   auto data = std::make_shared<ModelData>();
   data->source = &c;
+  data->verbose = options.verbose;
   const int full_n = static_cast<int>(c.y_ac.rows());
 
   if (options.variant == ModelVariant::GraphReduced) {
@@ -183,6 +414,14 @@ std::shared_ptr<ModelData> build_model_data(
           it.col(), it.value());
     }
   }
+  for (int full_node = 0; full_node < full_n; ++full_node) {
+    if (data->recovery_rows[static_cast<std::size_t>(full_node)].empty()) {
+      throw std::runtime_error(
+          "graph-reduction certificate has an empty voltage-recovery row at "
+          "phase node " + std::to_string(full_node) +
+          "; remove reference-disconnected passive components before OPF");
+    }
+  }
 
   for (const auto& generator : c.generators) {
     const int node = data->full_to_model[static_cast<std::size_t>(
@@ -192,18 +431,41 @@ std::shared_ptr<ModelData> build_model_data(
   }
 
   int phase_var = 0;
+  int gfm_var = 0;
   for (int ci = 0; ci < static_cast<int>(c.converters.size()); ++ci) {
     const auto& converter = c.converters[static_cast<std::size_t>(ci)];
     ConverterMap map;
     map.dc_terminal = converter.dc_terminal;
     map.efficiency = std::clamp(converter.efficiency, 0.01, 1.0);
     map.s_max_pu = converter.s_max_pu;
+    map.phase_current_max_pu = converter.phase_current_max_pu > 0.0
+        ? converter.phase_current_max_pu
+        : converter.s_max_pu /
+              std::sqrt(static_cast<double>(converter.phase_nodes.size()));
     map.fixed_unity_power_factor = converter.fixed_unity_power_factor;
+    map.control_mode = converter.control_mode;
+    map.nominal_frequency_hz = converter.nominal_frequency_hz;
+    map.pll_kp = converter.pll_kp;
+    map.pll_ki = converter.pll_ki;
+    map.virtual_r_pu = converter.virtual_r_pu;
+    map.virtual_x_pu = converter.virtual_x_pu;
+    map.p_droop_pu = converter.p_droop_pu;
+    map.q_droop_pu = converter.q_droop_pu;
+    map.voltage_reference_pu = converter.voltage_reference_pu;
+    map.voltage_integral_gain = converter.voltage_integral_gain;
+    if (converter.control_mode == PhaseVSCControlMode::GridFormingDroop) {
+      map.gfm_var_position = gfm_var++;
+    }
     for (int full_node : converter.phase_nodes) {
       const int node = data->full_to_model[static_cast<std::size_t>(full_node)];
       if (node < 0) throw std::runtime_error("converter node was eliminated");
       map.model_phase_nodes.push_back(node);
       map.phase_var_positions.push_back(phase_var++);
+      if (!c.ac_phase_index.empty()) {
+        const int phase = c.ac_phase_index[static_cast<std::size_t>(full_node)];
+        map.model_node_by_phase[static_cast<std::size_t>(phase)] = node;
+        map.phase_var_by_phase[static_cast<std::size_t>(phase)] = phase_var - 1;
+      }
       data->converter_for_phase_var.push_back(ci);
       data->converter_local_phase.push_back(
           static_cast<int>(map.model_phase_nodes.size()) - 1);
@@ -223,6 +485,7 @@ std::shared_ptr<ModelData> build_model_data(
   l.ndc = static_cast<int>(c.g_dc.rows());
   l.ncp = phase_var;
   l.nc = static_cast<int>(c.converters.size());
+  l.ngfm = gfm_var;
   l.i_e = 0;
   l.i_f = l.i_e + l.nv;
   l.i_pg = l.i_f + l.nv;
@@ -230,33 +493,27 @@ std::shared_ptr<ModelData> build_model_data(
   l.i_udc = l.i_qg + l.ng;
   l.i_pac = l.i_udc + l.ndc;
   l.i_qac = l.i_pac + l.ncp;
-  l.i_pdc = l.i_qac + l.ncp;
+  l.i_gfm_e = l.i_qac + l.ncp;
+  l.i_gfm_f = l.i_gfm_e + l.ngfm;
+  l.i_pdc = l.i_gfm_f + l.ngfm;
   l.nvar = l.i_pdc + l.nc;
-  l.neq = 2 * l.nv + l.ndc + 2 * l.nc + 2 * (l.ncp - l.nc) +
+  int converter_control_equalities = 0;
+  for (const auto& converter : data->converters) {
+    converter_control_equalities +=
+        converter.control_mode == PhaseVSCControlMode::GridFormingDroop
+            ? 2 * static_cast<int>(converter.phase_var_positions.size())
+            : 2 *
+                  (static_cast<int>(converter.phase_var_positions.size()) - 1);
+  }
+  l.neq = 2 * l.nv + l.ndc + l.nc +
+          static_cast<int>(c.dc_reference_terminals.size()) +
+          converter_control_equalities +
           2 * static_cast<int>(c.reference_nodes.size());
-  l.nineq = 2 * full_n + static_cast<int>(c.three_phase_bus_nodes.size()) + l.nc;
+  l.nineq = 2 * full_n + static_cast<int>(c.three_phase_bus_nodes.size()) +
+            l.nc + l.ncp;
   data->equality_scale = Eigen::VectorXd::Ones(l.neq);
-  Eigen::VectorXd ac_row_norm = Eigen::VectorXd::Zero(l.nv);
-  for (int col = 0; col < data->y.outerSize(); ++col) {
-    for (graph::SparseComplexMatrix::InnerIterator it(data->y, col); it; ++it) {
-      ac_row_norm[it.row()] += std::abs(it.value());
-    }
-  }
-  for (int i = 0; i < l.nv; ++i) {
-    const double scale = 1.0 / std::max(1.0, ac_row_norm[i]);
-    data->equality_scale[i] = scale;
-    data->equality_scale[l.nv + i] = scale;
-  }
-  Eigen::VectorXd dc_row_norm = Eigen::VectorXd::Zero(l.ndc);
-  for (int col = 0; col < c.g_dc.outerSize(); ++col) {
-    for (Eigen::SparseMatrix<double>::InnerIterator it(c.g_dc, col); it; ++it) {
-      dc_row_norm[it.row()] += std::abs(it.value());
-    }
-  }
-  for (int i = 0; i < l.ndc; ++i) {
-    data->equality_scale[2 * l.nv + i] =
-        1.0 / std::max(1.0, dc_row_norm[i]);
-  }
+  build_inequality_hessian_template(*data);
+  configure_enforced_inequalities(*data, options.enforced_inequality_rows);
   return data;
 }
 
@@ -319,21 +576,64 @@ void evaluate_equalities(const ModelData& d,
   }
 
   int row = dc_row + l.ndc + l.nc;
-  for (const auto& converter : d.converters) {
-    g[row++] = x[l.i_udc + converter.dc_terminal] -
-               c.v_dc_start[converter.dc_terminal];
+  for (int ri = 0;
+       ri < static_cast<int>(c.dc_reference_terminals.size()); ++ri) {
+    g[row++] = x[l.i_udc + c.dc_reference_terminals[static_cast<std::size_t>(ri)]] -
+               c.dc_reference_voltage_pu[ri];
   }
   for (const auto& converter : d.converters) {
-    const int first = converter.phase_var_positions.front();
-    for (int local = 1;
-         local < static_cast<int>(converter.phase_var_positions.size()); ++local) {
-      const int pos = converter.phase_var_positions[static_cast<std::size_t>(local)];
-      g[row++] = x[l.i_pac + pos] - x[l.i_pac + first];
-    }
-    for (int local = 1;
-         local < static_cast<int>(converter.phase_var_positions.size()); ++local) {
-      const int pos = converter.phase_var_positions[static_cast<std::size_t>(local)];
-      g[row++] = x[l.i_qac + pos] - x[l.i_qac + first];
+    if (converter.control_mode == PhaseVSCControlMode::GridFormingDroop) {
+      const Complex a = std::polar(1.0, 2.0 * kPi / 3.0);
+      const Complex phase_rotation[3] = {
+          Complex{1.0, 0.0}, a * a, a};
+      const Complex z{converter.virtual_r_pu, converter.virtual_x_pu};
+      const Complex e_a{x[l.i_gfm_e + converter.gfm_var_position],
+                        x[l.i_gfm_f + converter.gfm_var_position]};
+      for (int phase = 0; phase < 3; ++phase) {
+        const int pos =
+            converter.phase_var_by_phase[static_cast<std::size_t>(phase)];
+        const int node =
+            converter.model_node_by_phase[static_cast<std::size_t>(phase)];
+        const Complex s{x[l.i_pac + pos], x[l.i_qac + pos]};
+        const Complex e_phase = phase_rotation[phase] * e_a;
+        const Complex residual =
+            std::conj(e_phase) * v[node] - std::norm(v[node]) -
+            std::conj(z) * s;
+        g[row++] = std::real(residual);
+        g[row++] = std::imag(residual);
+      }
+    } else if (converter.control_mode ==
+               PhaseVSCControlMode::GridFollowingPLL) {
+      const Complex a = std::polar(1.0, 2.0 * kPi / 3.0);
+      const Complex rotation[2] = {a, a * a};
+      const int pos_a = converter.phase_var_by_phase[0];
+      const int node_a = converter.model_node_by_phase[0];
+      const Complex s_a{x[l.i_pac + pos_a], x[l.i_qac + pos_a]};
+      for (int phase = 1; phase < 3; ++phase) {
+        const int pos = converter.phase_var_by_phase[static_cast<std::size_t>(phase)];
+        const int node = converter.model_node_by_phase[static_cast<std::size_t>(phase)];
+        const Complex s{x[l.i_pac + pos], x[l.i_qac + pos]};
+        const Complex residual =
+            s * v[node_a] - rotation[phase - 1] * v[node] * s_a;
+        g[row++] = std::real(residual);
+        g[row++] = std::imag(residual);
+      }
+    } else {
+      const int first = converter.phase_var_positions.front();
+      for (int local = 1;
+           local < static_cast<int>(converter.phase_var_positions.size());
+           ++local) {
+        const int pos =
+            converter.phase_var_positions[static_cast<std::size_t>(local)];
+        g[row++] = x[l.i_pac + pos] - x[l.i_pac + first];
+      }
+      for (int local = 1;
+           local < static_cast<int>(converter.phase_var_positions.size());
+           ++local) {
+        const int pos =
+            converter.phase_var_positions[static_cast<std::size_t>(local)];
+        g[row++] = x[l.i_qac + pos] - x[l.i_qac + first];
+      }
     }
   }
   for (int ri = 0; ri < static_cast<int>(c.reference_nodes.size()); ++ri) {
@@ -413,22 +713,87 @@ void equality_jacobian(const ModelData& d,
     }
   }
   int row = dc_row + l.ndc + l.nc;
-  for (const auto& converter : d.converters) {
-    trips.emplace_back(row++, l.i_udc + converter.dc_terminal, 1.0);
+  for (int terminal : c.dc_reference_terminals) {
+    trips.emplace_back(row++, l.i_udc + terminal, 1.0);
   }
   for (const auto& converter : d.converters) {
-    const int first = converter.phase_var_positions.front();
-    for (int local = 1;
-         local < static_cast<int>(converter.phase_var_positions.size()); ++local) {
-      const int pos = converter.phase_var_positions[static_cast<std::size_t>(local)];
-      trips.emplace_back(row, l.i_pac + pos, 1.0);
-      trips.emplace_back(row++, l.i_pac + first, -1.0);
-    }
-    for (int local = 1;
-         local < static_cast<int>(converter.phase_var_positions.size()); ++local) {
-      const int pos = converter.phase_var_positions[static_cast<std::size_t>(local)];
-      trips.emplace_back(row, l.i_qac + pos, 1.0);
-      trips.emplace_back(row++, l.i_qac + first, -1.0);
+    if (converter.control_mode == PhaseVSCControlMode::GridFormingDroop) {
+      const Complex a = std::polar(1.0, 2.0 * kPi / 3.0);
+      const Complex phase_rotation[3] = {
+          Complex{1.0, 0.0}, a * a, a};
+      const Complex z{converter.virtual_r_pu, converter.virtual_x_pu};
+      const Complex e_a{x[l.i_gfm_e + converter.gfm_var_position],
+                        x[l.i_gfm_f + converter.gfm_var_position]};
+      for (int phase = 0; phase < 3; ++phase) {
+        const int pos =
+            converter.phase_var_by_phase[static_cast<std::size_t>(phase)];
+        const int node =
+            converter.model_node_by_phase[static_cast<std::size_t>(phase)];
+        const Complex coefficient = std::conj(phase_rotation[phase]);
+        const Complex common = coefficient * std::conj(e_a);
+        const auto append = [&](int col, Complex derivative) {
+          trips.emplace_back(row, col, std::real(derivative));
+          trips.emplace_back(row + 1, col, std::imag(derivative));
+        };
+        append(l.i_gfm_e + converter.gfm_var_position,
+               coefficient * v[node]);
+        append(l.i_gfm_f + converter.gfm_var_position,
+               -Complex{0.0, 1.0} * coefficient * v[node]);
+        append(l.i_e + node,
+               common - Complex{2.0 * std::real(v[node]), 0.0});
+        append(l.i_f + node,
+               Complex{0.0, 1.0} * common -
+                   Complex{2.0 * std::imag(v[node]), 0.0});
+        append(l.i_pac + pos, -std::conj(z));
+        append(l.i_qac + pos,
+               -Complex{0.0, 1.0} * std::conj(z));
+        row += 2;
+      }
+    } else if (converter.control_mode ==
+               PhaseVSCControlMode::GridFollowingPLL) {
+      const Complex a = std::polar(1.0, 2.0 * kPi / 3.0);
+      const Complex rotation[2] = {a, a * a};
+      const int pos_a = converter.phase_var_by_phase[0];
+      const int node_a = converter.model_node_by_phase[0];
+      const Complex s_a{x[l.i_pac + pos_a], x[l.i_qac + pos_a]};
+      for (int phase = 1; phase < 3; ++phase) {
+        const int pos = converter.phase_var_by_phase[static_cast<std::size_t>(phase)];
+        const int node = converter.model_node_by_phase[static_cast<std::size_t>(phase)];
+        const Complex s{x[l.i_pac + pos], x[l.i_qac + pos]};
+        const Complex rot = rotation[phase - 1];
+        const auto append = [&](int col, Complex derivative) {
+          trips.emplace_back(row, col, std::real(derivative));
+          trips.emplace_back(row + 1, col, std::imag(derivative));
+        };
+        append(l.i_pac + pos, v[node_a]);
+        append(l.i_qac + pos, Complex{0.0, 1.0} * v[node_a]);
+        append(l.i_e + node_a, s);
+        append(l.i_f + node_a, Complex{0.0, 1.0} * s);
+        append(l.i_e + node, -rot * s_a);
+        append(l.i_f + node, -Complex{0.0, 1.0} * rot * s_a);
+        append(l.i_pac + pos_a, -rot * v[node]);
+        append(l.i_qac + pos_a,
+               -Complex{0.0, 1.0} * rot * v[node]);
+        row += 2;
+      }
+    } else {
+      const int first = converter.phase_var_positions.front();
+      for (int local = 1;
+           local < static_cast<int>(converter.phase_var_positions.size());
+           ++local) {
+        const int pos =
+            converter.phase_var_positions[static_cast<std::size_t>(local)];
+        trips.emplace_back(row, l.i_pac + pos, 1.0);
+        trips.emplace_back(row++, l.i_pac + first, -1.0);
+      }
+      for (int local = 1;
+           local < static_cast<int>(converter.phase_var_positions.size());
+           ++local) {
+        const int pos =
+            converter.phase_var_positions[static_cast<std::size_t>(local)];
+        trips.emplace_back(row, l.i_qac + pos, 1.0);
+        trips.emplace_back(row++, l.i_qac + first, -1.0);
+      }
     }
   }
   for (int node : d.reference_model_nodes) {
@@ -474,6 +839,25 @@ void append_full_gradient(const ModelData& d,
   }
 }
 
+void append_voltage_norm_gradient(const ModelData& d,
+                                  int row,
+                                  int full_node,
+                                  Complex voltage,
+                                  double sign,
+                                  std::vector<Triplet>& trips) {
+  const double e = std::real(voltage);
+  const double f = std::imag(voltage);
+  for (const auto& [model_node, recovery] :
+       d.recovery_rows[static_cast<std::size_t>(full_node)]) {
+    const double cr = std::real(recovery);
+    const double ci = std::imag(recovery);
+    trips.emplace_back(row, d.layout.i_e + model_node,
+                       2.0 * sign * (e * cr + f * ci));
+    trips.emplace_back(row, d.layout.i_f + model_node,
+                       2.0 * sign * (-e * ci + f * cr));
+  }
+}
+
 std::pair<Complex, Complex> sequence_components(
     const Eigen::VectorXcd& v,
     const std::vector<int>& nodes) {
@@ -510,28 +894,103 @@ void evaluate_inequalities(const ModelData& d,
     }
     h[row++] = s2 - converter.s_max_pu * converter.s_max_pu;
   }
+  for (int ci = 0; ci < static_cast<int>(d.converters.size()); ++ci) {
+    const auto& converter = d.converters[static_cast<std::size_t>(ci)];
+    const auto& source_converter = c.converters[static_cast<std::size_t>(ci)];
+    for (int local = 0;
+         local < static_cast<int>(converter.phase_var_positions.size());
+         ++local) {
+      const int pos =
+          converter.phase_var_positions[static_cast<std::size_t>(local)];
+      const int full_node =
+          source_converter.phase_nodes[static_cast<std::size_t>(local)];
+      h[row++] = x[l.i_pac + pos] * x[l.i_pac + pos] +
+                 x[l.i_qac + pos] * x[l.i_qac + pos] -
+                 converter.phase_current_max_pu *
+                     converter.phase_current_max_pu * std::norm(v[full_node]);
+    }
+  }
 }
 
 void inequality_jacobian(const ModelData& d,
                          const Eigen::VectorXd& x,
-                         Eigen::SparseMatrix<double>& jac) {
+                         Eigen::SparseMatrix<double>& jac,
+                         const std::vector<int>* enforced_rows = nullptr) {
   const Layout& l = d.layout;
   const auto& c = *d.source;
   const Eigen::VectorXcd v = full_voltage(d, x);
   const int full_n = static_cast<int>(v.size());
-  std::vector<Triplet> trips;
-  for (int i = 0; i < full_n; ++i) {
-    const double e = std::real(v[i]);
-    const double f = std::imag(v[i]);
-    append_full_gradient(d, i, {{i, -2.0 * e}}, {{i, -2.0 * f}}, trips);
-    append_full_gradient(d, full_n + i, {{i, 2.0 * e}}, {{i, 2.0 * f}}, trips);
+  const int output_rows = enforced_rows == nullptr
+      ? l.nineq : static_cast<int>(enforced_rows->size());
+  std::vector<int> full_to_output(static_cast<std::size_t>(l.nineq), -1);
+  if (enforced_rows == nullptr) {
+    for (int row = 0; row < l.nineq; ++row) {
+      full_to_output[static_cast<std::size_t>(row)] = row;
+    }
+  } else {
+    for (int local = 0; local < output_rows; ++local) {
+      full_to_output[static_cast<std::size_t>(
+          (*enforced_rows)[static_cast<std::size_t>(local)])] = local;
+    }
   }
-  int row = 2 * full_n;
+  const auto output_row = [&](int full_row) {
+    return full_to_output[static_cast<std::size_t>(full_row)];
+  };
+  std::vector<Triplet> trips;
+  std::size_t reserve_count = 0;
+  for (int node = 0; node < full_n; ++node) {
+    if (output_row(node) >= 0) {
+      reserve_count += 2 * d.recovery_rows[static_cast<std::size_t>(node)].size();
+    }
+    if (output_row(full_n + node) >= 0) {
+      reserve_count += 2 * d.recovery_rows[static_cast<std::size_t>(node)].size();
+    }
+  }
+  int full_row = 2 * full_n;
+  for (const auto& nodes : c.three_phase_bus_nodes) {
+    if (output_row(full_row++) < 0) continue;
+    for (int node : nodes) {
+      reserve_count += 2 * d.recovery_rows[static_cast<std::size_t>(node)].size();
+    }
+  }
+  for (const auto& converter : d.converters) {
+    if (output_row(full_row++) >= 0) {
+      reserve_count += 2 * converter.phase_var_positions.size();
+    }
+  }
+  for (int ci = 0; ci < static_cast<int>(d.converters.size()); ++ci) {
+    const auto& converter = d.converters[static_cast<std::size_t>(ci)];
+    const auto& source_converter = c.converters[static_cast<std::size_t>(ci)];
+    for (int local = 0;
+         local < static_cast<int>(converter.phase_var_positions.size());
+         ++local) {
+      const int row = output_row(full_row++);
+      if (row < 0) continue;
+      const int full_node =
+          source_converter.phase_nodes[static_cast<std::size_t>(local)];
+      reserve_count += 2 +
+          2 * d.recovery_rows[static_cast<std::size_t>(full_node)].size();
+    }
+  }
+  trips.reserve(reserve_count);
+  for (int i = 0; i < full_n; ++i) {
+    const int lower_row = output_row(i);
+    const int upper_row = output_row(full_n + i);
+    if (lower_row >= 0) {
+      append_voltage_norm_gradient(d, lower_row, i, v[i], -1.0, trips);
+    }
+    if (upper_row >= 0) {
+      append_voltage_norm_gradient(d, upper_row, i, v[i], 1.0, trips);
+    }
+  }
+  full_row = 2 * full_n;
   const Complex a = std::polar(1.0, 2.0 * kPi / 3.0);
   const Complex a2 = a * a;
   const Complex c1[3] = {Complex{1.0 / 3.0, 0.0}, a / 3.0, a2 / 3.0};
   const Complex c2[3] = {Complex{1.0 / 3.0, 0.0}, a2 / 3.0, a / 3.0};
   for (const auto& nodes : c.three_phase_bus_nodes) {
+    const int row = output_row(full_row++);
+    if (row < 0) continue;
     const auto [v1, v2] = sequence_components(v, nodes);
     std::vector<std::pair<int, double>> de;
     std::vector<std::pair<int, double>> df;
@@ -542,16 +1001,37 @@ void inequality_jacobian(const ModelData& d,
       df.emplace_back(nodes[static_cast<std::size_t>(phase)],
                       2.0 * std::real(Complex{0.0, 1.0} * z));
     }
-    append_full_gradient(d, row++, de, df, trips);
+    append_full_gradient(d, row, de, df, trips);
   }
   for (const auto& converter : d.converters) {
+    const int row = output_row(full_row++);
+    if (row < 0) continue;
     for (int pos : converter.phase_var_positions) {
       trips.emplace_back(row, l.i_pac + pos, 2.0 * x[l.i_pac + pos]);
       trips.emplace_back(row, l.i_qac + pos, 2.0 * x[l.i_qac + pos]);
     }
-    ++row;
   }
-  jac.resize(l.nineq, l.nvar);
+  for (int ci = 0; ci < static_cast<int>(d.converters.size()); ++ci) {
+    const auto& converter = d.converters[static_cast<std::size_t>(ci)];
+    const auto& source_converter = c.converters[static_cast<std::size_t>(ci)];
+    for (int local = 0;
+         local < static_cast<int>(converter.phase_var_positions.size());
+         ++local) {
+      const int row = output_row(full_row++);
+      if (row < 0) continue;
+      const int pos =
+          converter.phase_var_positions[static_cast<std::size_t>(local)];
+      const int full_node =
+          source_converter.phase_nodes[static_cast<std::size_t>(local)];
+      trips.emplace_back(row, l.i_pac + pos, 2.0 * x[l.i_pac + pos]);
+      trips.emplace_back(row, l.i_qac + pos, 2.0 * x[l.i_qac + pos]);
+      append_voltage_norm_gradient(
+          d, row, full_node, v[full_node],
+          -converter.phase_current_max_pu * converter.phase_current_max_pu,
+          trips);
+    }
+  }
+  jac.resize(output_rows, l.nvar);
   jac.setFromTriplets(trips.begin(), trips.end());
   jac.makeCompressed();
 }
@@ -631,51 +1111,40 @@ void add_symmetric(std::vector<Triplet>& trips,
   }
 }
 
-std::unordered_map<int, Complex> complex_linear_map(
-    const ModelData& d,
-    const std::vector<int>& full_nodes,
-    const std::vector<Complex>& coefficients) {
-  std::unordered_map<int, Complex> map;
-  for (int k = 0; k < static_cast<int>(full_nodes.size()); ++k) {
-    const int full_node = full_nodes[static_cast<std::size_t>(k)];
-    const Complex factor = coefficients[static_cast<std::size_t>(k)];
-    for (const auto& [model_node, recovery] :
-         d.recovery_rows[static_cast<std::size_t>(full_node)]) {
-      map[d.layout.i_e + model_node] += factor * recovery;
-      map[d.layout.i_f + model_node] +=
-          Complex{0.0, 1.0} * factor * recovery;
-    }
-  }
-  return map;
-}
-
-void add_complex_norm_hessian(
+void add_weighted_complex_product_hessian(
     std::vector<Triplet>& trips,
-    const std::unordered_map<int, Complex>& map,
-    double multiplier) {
-  for (auto first = map.begin(); first != map.end(); ++first) {
-    auto second = first;
-    for (; second != map.end(); ++second) {
-      const double value = multiplier *
-          2.0 * std::real(std::conj(first->second) * second->second);
-      if (first->first == second->first) {
-        trips.emplace_back(first->first, second->first, value);
-      } else {
-        trips.emplace_back(first->first, second->first, value);
-        trips.emplace_back(second->first, first->first, value);
-      }
-    }
-  }
+    int x_real,
+    int x_imag,
+    int y_real,
+    int y_imag,
+    Complex coefficient,
+    double lambda_real,
+    double lambda_imag) {
+  const double cr = std::real(coefficient);
+  const double ci = std::imag(coefficient);
+  const double same = lambda_real * cr + lambda_imag * ci;
+  const double cross = -lambda_real * ci + lambda_imag * cr;
+  add_symmetric(trips, x_real, y_real, same);
+  add_symmetric(trips, x_real, y_imag, cross);
+  add_symmetric(trips, x_imag, y_real, cross);
+  add_symmetric(trips, x_imag, y_imag, -same);
 }
 
 void lagrangian_hessian(const ModelData& d,
                         const Eigen::VectorXd& x,
                         const Eigen::VectorXd& lambda,
                         const Eigen::VectorXd* nu,
-                        Eigen::SparseMatrix<double>& hessian) {
+                        Eigen::SparseMatrix<double>& hessian,
+                        bool enforced_only = true) {
   (void)x;
   const Layout& l = d.layout;
   std::vector<Triplet> trips;
+  const auto& inequality_terms = enforced_only
+      ? d.enforced_inequality_hessian_terms : d.inequality_hessian_terms;
+  trips.reserve(inequality_terms.size() +
+                static_cast<std::size_t>(8 * d.y.nonZeros() +
+                                         2 * d.source->g_dc.nonZeros() +
+                                         l.nvar));
   Eigen::SparseMatrix<double> objective_part;
   objective_hessian(d, x, objective_part);
   for (int col = 0; col < objective_part.outerSize(); ++col) {
@@ -712,42 +1181,401 @@ void lagrangian_hessian(const ModelData& d,
                       multiplier * it.value());
       }
     }
+    int control_row = dc_row + l.ndc + l.nc +
+        static_cast<int>(d.source->dc_reference_terminals.size());
+    const Complex a = std::polar(1.0, 2.0 * kPi / 3.0);
+    const Complex rotation[2] = {a, a * a};
+    for (const auto& converter : d.converters) {
+      if (converter.control_mode == PhaseVSCControlMode::GridFormingDroop) {
+        const Complex phase_rotation[3] = {
+            Complex{1.0, 0.0}, a * a, a};
+        const int er = l.i_gfm_e + converter.gfm_var_position;
+        const int ei = l.i_gfm_f + converter.gfm_var_position;
+        for (int phase = 0; phase < 3; ++phase) {
+          const int node =
+              converter.model_node_by_phase[static_cast<std::size_t>(phase)];
+          const double lr =
+              lambda[control_row] * d.equality_scale[control_row];
+          const double li =
+              lambda[control_row + 1] * d.equality_scale[control_row + 1];
+          const Complex coefficient = std::conj(phase_rotation[phase]);
+          const auto weighted = [&](Complex c) {
+            return lr * std::real(c) + li * std::imag(c);
+          };
+          add_symmetric(trips, er, l.i_e + node, weighted(coefficient));
+          add_symmetric(trips, er, l.i_f + node,
+                        weighted(Complex{0.0, 1.0} * coefficient));
+          add_symmetric(trips, ei, l.i_e + node,
+                        weighted(-Complex{0.0, 1.0} * coefficient));
+          add_symmetric(trips, ei, l.i_f + node, weighted(coefficient));
+          add_symmetric(trips, l.i_e + node, l.i_e + node, -lr);
+          add_symmetric(trips, l.i_f + node, l.i_f + node, -lr);
+          control_row += 2;
+        }
+      } else if (converter.control_mode ==
+                 PhaseVSCControlMode::GridFollowingPLL) {
+        const int pos_a = converter.phase_var_by_phase[0];
+        const int node_a = converter.model_node_by_phase[0];
+        for (int phase = 1; phase < 3; ++phase) {
+          const int pos =
+              converter.phase_var_by_phase[static_cast<std::size_t>(phase)];
+          const int node =
+              converter.model_node_by_phase[static_cast<std::size_t>(phase)];
+          const double lr =
+              lambda[control_row] * d.equality_scale[control_row];
+          const double li =
+              lambda[control_row + 1] * d.equality_scale[control_row + 1];
+          add_weighted_complex_product_hessian(
+              trips, l.i_pac + pos, l.i_qac + pos,
+              l.i_e + node_a, l.i_f + node_a, Complex{1.0, 0.0}, lr, li);
+          add_weighted_complex_product_hessian(
+              trips, l.i_e + node, l.i_f + node,
+              l.i_pac + pos_a, l.i_qac + pos_a,
+              -rotation[phase - 1], lr, li);
+          control_row += 2;
+        }
+      } else {
+        control_row += 2 *
+            (static_cast<int>(converter.phase_var_positions.size()) - 1);
+      }
+    }
   }
 
   if (nu != nullptr && nu->size() >= l.nineq) {
-    const int full_n = d.reduction.original_size;
-    for (int node = 0; node < full_n; ++node) {
-      const double multiplier = -(*nu)[node] + (*nu)[full_n + node];
-      const auto map = complex_linear_map(
-          d, std::vector<int>{node}, std::vector<Complex>{Complex{1.0, 0.0}});
-      add_complex_norm_hessian(trips, map, multiplier);
-    }
-    int row = 2 * full_n;
-    const Complex a = std::polar(1.0, 2.0 * kPi / 3.0);
-    const Complex a2 = a * a;
-    const std::vector<Complex> positive{
-        Complex{1.0 / 3.0, 0.0}, a / 3.0, a2 / 3.0};
-    const std::vector<Complex> negative{
-        Complex{1.0 / 3.0, 0.0}, a2 / 3.0, a / 3.0};
-    for (const auto& nodes : d.source->three_phase_bus_nodes) {
-      const double multiplier = (*nu)[row++];
-      add_complex_norm_hessian(
-          trips, complex_linear_map(d, nodes, negative), multiplier);
-      add_complex_norm_hessian(
-          trips, complex_linear_map(d, nodes, positive),
-          -multiplier * d.source->vuf_max * d.source->vuf_max);
-    }
-    for (const auto& converter : d.converters) {
-      const double multiplier = 2.0 * (*nu)[row++];
-      for (int pos : converter.phase_var_positions) {
-        trips.emplace_back(l.i_pac + pos, l.i_pac + pos, multiplier);
-        trips.emplace_back(l.i_qac + pos, l.i_qac + pos, multiplier);
+    for (const auto& term : inequality_terms) {
+      double value = (*nu)[term.multiplier_row_1] * term.coefficient_1;
+      if (term.multiplier_row_2 >= 0) {
+        value += (*nu)[term.multiplier_row_2] * term.coefficient_2;
+      }
+      if (value != 0.0) {
+        trips.emplace_back(term.row, term.col, value);
       }
     }
   }
   hessian.resize(l.nvar, l.nvar);
   hessian.setFromTriplets(trips.begin(), trips.end());
   hessian.makeCompressed();
+}
+
+bool initialize_ac_power_flow(const ModelData& d, Eigen::VectorXd& x) {
+  const Layout& l = d.layout;
+  const auto& c = *d.source;
+  const auto fail = [&](const std::string& reason) {
+    if (d.verbose) {
+      std::cerr << '[' << c.name << "] AC continuation initialization skipped: "
+                << reason << "\n" << std::flush;
+    }
+    return false;
+  };
+  std::vector<bool> is_reference(static_cast<std::size_t>(l.nv), false);
+  for (int node : d.reference_model_nodes) {
+    is_reference[static_cast<std::size_t>(node)] = true;
+  }
+  for (int node : d.generator_nodes) {
+    if (!is_reference[static_cast<std::size_t>(node)]) {
+      return fail("non-reference generator requires a specified dispatch");
+    }
+  }
+
+  for (int index = 0; index < static_cast<int>(d.reference_model_nodes.size()); ++index) {
+    const int node = d.reference_model_nodes[static_cast<std::size_t>(index)];
+    x[l.i_e + node] = std::real(c.reference_voltage[index]);
+    x[l.i_f + node] = std::imag(c.reference_voltage[index]);
+  }
+
+  std::vector<int> unknown_nodes;
+  std::vector<int> unknown_position(static_cast<std::size_t>(l.nv), -1);
+  for (int node = 0; node < l.nv; ++node) {
+    if (is_reference[static_cast<std::size_t>(node)]) continue;
+    unknown_position[static_cast<std::size_t>(node)] =
+        static_cast<int>(unknown_nodes.size());
+    unknown_nodes.push_back(node);
+  }
+  if (unknown_nodes.empty()) return true;
+
+  std::vector<Eigen::Triplet<Complex>> trips;
+  for (int col = 0; col < d.y.outerSize(); ++col) {
+    const int reduced_col = unknown_position[static_cast<std::size_t>(col)];
+    if (reduced_col < 0) continue;
+    for (graph::SparseComplexMatrix::InnerIterator it(d.y, col); it; ++it) {
+      const int reduced_row =
+          unknown_position[static_cast<std::size_t>(it.row())];
+      if (reduced_row >= 0) {
+        trips.emplace_back(reduced_row, reduced_col, it.value());
+      }
+    }
+  }
+  Eigen::SparseMatrix<Complex> y_uu(
+      static_cast<int>(unknown_nodes.size()),
+      static_cast<int>(unknown_nodes.size()));
+  y_uu.setFromTriplets(trips.begin(), trips.end());
+  y_uu.makeCompressed();
+  Eigen::SparseLU<Eigen::SparseMatrix<Complex>> lu;
+  lu.analyzePattern(y_uu);
+  lu.factorize(y_uu);
+  if (lu.info() != Eigen::Success) return fail("Y_UU factorization failed");
+
+  Eigen::VectorXcd specified_power = Eigen::VectorXcd::Zero(l.nv);
+  for (int node = 0; node < l.nv; ++node) {
+    const int full_node = d.reduction.retained[static_cast<std::size_t>(node)];
+    specified_power[node] =
+        Complex{-c.p_load_pu[full_node], -c.q_load_pu[full_node]};
+  }
+  for (const auto& converter : d.converters) {
+    for (int local = 0;
+         local < static_cast<int>(converter.model_phase_nodes.size()); ++local) {
+      const int node = converter.model_phase_nodes[static_cast<std::size_t>(local)];
+      const int pos = converter.phase_var_positions[static_cast<std::size_t>(local)];
+      specified_power[node] +=
+          Complex{x[l.i_pac + pos], x[l.i_qac + pos]};
+    }
+  }
+
+  const Eigen::VectorXd original_x = x;
+  const auto ac_residual = [&](const Eigen::VectorXd& point,
+                               Eigen::VectorXd* residual_vector) {
+    const Eigen::VectorXcd voltage = model_voltage(d, point);
+    const Eigen::VectorXcd current = d.y * voltage + d.fixed_current;
+    Eigen::VectorXd residual(2 * static_cast<int>(unknown_nodes.size()));
+    for (int local = 0; local < static_cast<int>(unknown_nodes.size()); ++local) {
+      const int node = unknown_nodes[static_cast<std::size_t>(local)];
+      const Complex mismatch =
+          voltage[node] * std::conj(current[node]) - specified_power[node];
+      residual[local] = std::real(mismatch);
+      residual[static_cast<int>(unknown_nodes.size()) + local] =
+          std::imag(mismatch);
+    }
+    const double norm = residual.cwiseAbs().maxCoeff();
+    if (residual_vector != nullptr) *residual_vector = std::move(residual);
+    return norm;
+  };
+
+  for (int iteration = 0; iteration < 20; ++iteration) {
+    Eigen::VectorXd residual;
+    const double norm = ac_residual(x, &residual);
+    if (d.verbose) {
+      const Eigen::VectorXcd recovered = full_voltage(d, x);
+      std::cerr << '[' << c.name << "] AC Newton initialization: iteration="
+                << iteration << ", residual=" << norm
+                << ", Vmin=" << recovered.cwiseAbs().minCoeff()
+                << ", Vmax=" << recovered.cwiseAbs().maxCoeff() << "\n"
+                << std::flush;
+    }
+    if (norm <= 1e-10) return true;
+
+    Eigen::SparseMatrix<double> full_jacobian;
+    equality_jacobian(d, x, full_jacobian);
+    std::vector<Eigen::Triplet<double>> jacobian_trips;
+    for (int col = 0; col < full_jacobian.outerSize(); ++col) {
+      int reduced_col = -1;
+      if (col >= l.i_e && col < l.i_e + l.nv) {
+        const int node = col - l.i_e;
+        const int local = unknown_position[static_cast<std::size_t>(node)];
+        if (local >= 0) reduced_col = local;
+      } else if (col >= l.i_f && col < l.i_f + l.nv) {
+        const int node = col - l.i_f;
+        const int local = unknown_position[static_cast<std::size_t>(node)];
+        if (local >= 0) {
+          reduced_col = static_cast<int>(unknown_nodes.size()) + local;
+        }
+      }
+      if (reduced_col < 0) continue;
+      for (Eigen::SparseMatrix<double>::InnerIterator it(full_jacobian, col);
+           it; ++it) {
+        int reduced_row = -1;
+        if (it.row() < l.nv) {
+          reduced_row = unknown_position[static_cast<std::size_t>(it.row())];
+        } else if (it.row() < 2 * l.nv) {
+          const int local = unknown_position[static_cast<std::size_t>(
+              it.row() - l.nv)];
+          if (local >= 0) {
+            reduced_row = static_cast<int>(unknown_nodes.size()) + local;
+          }
+        }
+        if (reduced_row >= 0) {
+          jacobian_trips.emplace_back(reduced_row, reduced_col, it.value());
+        }
+      }
+    }
+    const int newton_dimension = 2 * static_cast<int>(unknown_nodes.size());
+    Eigen::SparseMatrix<double> jacobian(newton_dimension, newton_dimension);
+    jacobian.setFromTriplets(jacobian_trips.begin(), jacobian_trips.end());
+    Eigen::SparseLU<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> lu_newton;
+    lu_newton.analyzePattern(jacobian);
+    lu_newton.factorize(jacobian);
+    if (lu_newton.info() != Eigen::Success) {
+      if (d.verbose) std::cerr << '[' << c.name << "] AC Newton factorization failed\n";
+      break;
+    }
+    const Eigen::VectorXd step = lu_newton.solve(-residual);
+    if (lu_newton.info() != Eigen::Success || !step.allFinite()) {
+      if (d.verbose) std::cerr << '[' << c.name << "] AC Newton solve failed\n";
+      break;
+    }
+
+    bool accepted = false;
+    double alpha = 1.0;
+    for (int line_search = 0; line_search < 20; ++line_search) {
+      Eigen::VectorXd trial = x;
+      for (int local = 0; local < static_cast<int>(unknown_nodes.size()); ++local) {
+        const int node = unknown_nodes[static_cast<std::size_t>(local)];
+        trial[l.i_e + node] += alpha * step[local];
+        trial[l.i_f + node] +=
+            alpha * step[static_cast<int>(unknown_nodes.size()) + local];
+      }
+      const Eigen::VectorXcd recovered = full_voltage(d, trial);
+      const double min_voltage = recovered.cwiseAbs().minCoeff();
+      const double max_voltage = recovered.cwiseAbs().maxCoeff();
+      if (trial.allFinite() && min_voltage > 0.5 && max_voltage < 1.3 &&
+          ac_residual(trial, nullptr) < norm) {
+        x = std::move(trial);
+        accepted = true;
+        break;
+      }
+      alpha *= 0.5;
+    }
+    if (!accepted) {
+      if (d.verbose) {
+        std::cerr << '[' << c.name
+                  << "] AC Newton line search failed at residual=" << norm << "\n"
+                  << std::flush;
+      }
+      break;
+    }
+  }
+  x = original_x;
+
+  Eigen::VectorXcd voltage = model_voltage(d, x);
+  Eigen::VectorXcd reference_voltage = Eigen::VectorXcd::Zero(l.nv);
+  for (int node : d.reference_model_nodes) reference_voltage[node] = voltage[node];
+  const Eigen::VectorXcd known_current = d.y * reference_voltage + d.fixed_current;
+  Eigen::VectorXcd no_load_rhs(static_cast<int>(unknown_nodes.size()));
+  for (int local = 0; local < static_cast<int>(unknown_nodes.size()); ++local) {
+    no_load_rhs[local] = -known_current[unknown_nodes[static_cast<std::size_t>(local)]];
+  }
+  const Eigen::VectorXcd no_load_voltage = lu.solve(no_load_rhs);
+  if (lu.info() != Eigen::Success || !no_load_voltage.allFinite()) {
+    return fail("zero-injection solve failed");
+  }
+  for (int local = 0; local < static_cast<int>(unknown_nodes.size()); ++local) {
+    voltage[unknown_nodes[static_cast<std::size_t>(local)]] = no_load_voltage[local];
+  }
+
+  constexpr int kContinuationSteps = 20;
+  for (int continuation = 1; continuation <= kContinuationSteps; ++continuation) {
+    const double loading =
+        static_cast<double>(continuation) / kContinuationSteps;
+    for (int iteration = 0; iteration < 80; ++iteration) {
+      Eigen::VectorXcd rhs(static_cast<int>(unknown_nodes.size()));
+      for (int local = 0; local < static_cast<int>(unknown_nodes.size()); ++local) {
+        const int node = unknown_nodes[static_cast<std::size_t>(local)];
+        if (std::abs(voltage[node]) <= 0.2) {
+          return fail("voltage collapsed below 0.2 p.u. at continuation step " +
+                      std::to_string(continuation));
+        }
+        rhs[local] = loading * std::conj(specified_power[node] / voltage[node]) -
+                     known_current[node];
+      }
+      const Eigen::VectorXcd candidate = lu.solve(rhs);
+      if (lu.info() != Eigen::Success || !candidate.allFinite()) {
+        return fail("Z-bus solve failed at continuation step " +
+                    std::to_string(continuation));
+      }
+      double alpha = 0.65;
+      Eigen::VectorXcd trial = voltage;
+      while (alpha >= 1e-4) {
+        bool acceptable = true;
+        for (int local = 0; local < static_cast<int>(unknown_nodes.size()); ++local) {
+          const int node = unknown_nodes[static_cast<std::size_t>(local)];
+          trial[node] = (1.0 - alpha) * voltage[node] + alpha * candidate[local];
+          acceptable = acceptable && std::abs(trial[node]) > 0.2;
+        }
+        if (acceptable) break;
+        alpha *= 0.5;
+      }
+      if (alpha < 1e-4) {
+        return fail("positive-voltage line search failed at continuation step " +
+                    std::to_string(continuation));
+      }
+      double voltage_change = 0.0;
+      for (int node : unknown_nodes) {
+        voltage_change = std::max(voltage_change, std::abs(trial[node] - voltage[node]));
+      }
+      voltage = std::move(trial);
+      if (voltage_change <= 1e-11) break;
+    }
+  }
+  if (!voltage.allFinite()) return fail("continuation returned a nonfinite voltage");
+  for (int node = 0; node < l.nv; ++node) {
+    x[l.i_e + node] = std::real(voltage[node]);
+    x[l.i_f + node] = std::imag(voltage[node]);
+  }
+  return true;
+}
+
+void project_converter_control(const ModelData& d, Eigen::VectorXd& x) {
+  const Layout& l = d.layout;
+  const Eigen::VectorXcd v = model_voltage(d, x);
+  const Complex a = std::polar(1.0, 2.0 * kPi / 3.0);
+  const Complex current_conjugate_rotation[3] = {
+      Complex{1.0, 0.0}, a, a * a};
+  for (const auto& converter : d.converters) {
+    Complex total_power{0.0, 0.0};
+    for (int pos : converter.phase_var_positions) {
+      total_power += Complex{x[l.i_pac + pos], x[l.i_qac + pos]};
+    }
+    if (converter.control_mode == PhaseVSCControlMode::GridFormingDroop) {
+      const Complex voltage_rotation[3] = {
+          Complex{1.0, 0.0}, a * a, a};
+      const Complex z{converter.virtual_r_pu, converter.virtual_x_pu};
+      Complex denominator{0.0, 0.0};
+      double voltage_norm_sum = 0.0;
+      for (int phase = 0; phase < 3; ++phase) {
+        const int node =
+            converter.model_node_by_phase[static_cast<std::size_t>(phase)];
+        denominator += v[node] * std::conj(voltage_rotation[phase]);
+        voltage_norm_sum += std::norm(v[node]);
+      }
+      if (std::abs(denominator) <= 1e-12 || std::abs(z) <= 1e-12) continue;
+      const Complex e_conjugate =
+          (std::conj(z) * total_power + voltage_norm_sum) / denominator;
+      const Complex e_a = std::conj(e_conjugate);
+      x[l.i_gfm_e + converter.gfm_var_position] = std::real(e_a);
+      x[l.i_gfm_f + converter.gfm_var_position] = std::imag(e_a);
+      for (int phase = 0; phase < 3; ++phase) {
+        const int pos =
+            converter.phase_var_by_phase[static_cast<std::size_t>(phase)];
+        const int node =
+            converter.model_node_by_phase[static_cast<std::size_t>(phase)];
+        const Complex current =
+            (voltage_rotation[phase] * e_a - v[node]) / z;
+        const Complex power = v[node] * std::conj(current);
+        x[l.i_pac + pos] = std::real(power);
+        x[l.i_qac + pos] = std::imag(power);
+      }
+      continue;
+    }
+    if (converter.control_mode != PhaseVSCControlMode::GridFollowingPLL) {
+      continue;
+    }
+    const Complex v1 =
+        (v[converter.model_node_by_phase[0]] +
+         a * v[converter.model_node_by_phase[1]] +
+         a * a * v[converter.model_node_by_phase[2]]) /
+        3.0;
+    if (std::abs(v1) <= 1e-12) continue;
+    const Complex ia_conjugate = total_power / (3.0 * v1);
+    for (int phase = 0; phase < 3; ++phase) {
+      const int pos =
+          converter.phase_var_by_phase[static_cast<std::size_t>(phase)];
+      const int node =
+          converter.model_node_by_phase[static_cast<std::size_t>(phase)];
+      const Complex power = v[node] *
+          current_conjugate_rotation[phase] * ia_conjugate;
+      x[l.i_pac + pos] = std::real(power);
+      x[l.i_qac + pos] = std::imag(power);
+    }
+  }
 }
 
 Eigen::VectorXd build_initial_point(const ModelData& d) {
@@ -770,6 +1598,13 @@ Eigen::VectorXd build_initial_point(const ModelData& d) {
         (converter.efficiency * converter.phase_var_positions.size());
     for (int pos : converter.phase_var_positions) x[l.i_pac + pos] = pac;
   }
+
+  initialize_ac_power_flow(d, x);
+  for (int pass = 0; pass < 3; ++pass) {
+    project_converter_control(d, x);
+    initialize_ac_power_flow(d, x);
+  }
+  project_converter_control(d, x);
 
   const Eigen::VectorXcd v = model_voltage(d, x);
   const Eigen::VectorXcd current = d.y * v + d.fixed_current;
@@ -798,7 +1633,31 @@ Eigen::VectorXd build_initial_point(const ModelData& d) {
   return x;
 }
 
-engine::NLPModel build_nlp(const std::shared_ptr<ModelData>& d) {
+Eigen::VectorXd select_inequality_rows(
+    const Eigen::VectorXd& full,
+    const std::vector<int>& rows) {
+  Eigen::VectorXd selected(static_cast<int>(rows.size()));
+  for (int local = 0; local < static_cast<int>(rows.size()); ++local) {
+    selected[local] = full[rows[static_cast<std::size_t>(local)]];
+  }
+  return selected;
+}
+
+Eigen::VectorXd expand_inequality_multipliers(
+    const Eigen::VectorXd& selected,
+    const std::vector<int>& rows,
+    int full_count) {
+  Eigen::VectorXd full = Eigen::VectorXd::Zero(full_count);
+  const int count = std::min(
+      static_cast<int>(rows.size()), static_cast<int>(selected.size()));
+  for (int local = 0; local < count; ++local) {
+    full[rows[static_cast<std::size_t>(local)]] = selected[local];
+  }
+  return full;
+}
+
+engine::NLPModel build_nlp(const std::shared_ptr<ModelData>& d,
+                           const Eigen::VectorXd* primal_start = nullptr) {
   const Layout& l = d->layout;
   const auto& c = *d->source;
   engine::NLPModel nlp;
@@ -838,12 +1697,21 @@ engine::NLPModel build_nlp(const std::shared_ptr<ModelData>& d) {
         d->converters[static_cast<std::size_t>(ci)].fixed_unity_power_factor
             ? 0.0 : cap;
   }
+  for (int pos = 0; pos < l.ngfm; ++pos) {
+    nlp.vars[static_cast<std::size_t>(l.i_gfm_e + pos)].lb = -1.5;
+    nlp.vars[static_cast<std::size_t>(l.i_gfm_e + pos)].ub = 1.5;
+    nlp.vars[static_cast<std::size_t>(l.i_gfm_f + pos)].lb = -1.5;
+    nlp.vars[static_cast<std::size_t>(l.i_gfm_f + pos)].ub = 1.5;
+  }
   for (int ci = 0; ci < l.nc; ++ci) {
     const double cap = d->converters[static_cast<std::size_t>(ci)].s_max_pu;
     nlp.vars[static_cast<std::size_t>(l.i_pdc + ci)].lb = -cap;
     nlp.vars[static_cast<std::size_t>(l.i_pdc + ci)].ub = cap;
   }
-  nlp.x0 = build_initial_point(*d);
+  nlp.x0 = primal_start != nullptr &&
+                   primal_start->size() == l.nvar &&
+                   primal_start->allFinite()
+      ? *primal_start : build_initial_point(*d);
   nlp.f = [d](const Eigen::VectorXd& x) { return objective(*d, x); };
   nlp.grad = [d](const Eigen::VectorXd& x, Eigen::VectorXd& g) {
     objective_gradient(*d, x, g);
@@ -856,7 +1724,13 @@ engine::NLPModel build_nlp(const std::shared_ptr<ModelData>& d) {
           const Eigen::VectorXd& lambda,
           const Eigen::VectorXd* nu,
           Eigen::SparseMatrix<double>& h) {
-        lagrangian_hessian(*d, x, lambda, nu, h);
+        if (nu == nullptr) {
+          lagrangian_hessian(*d, x, lambda, nullptr, h);
+          return;
+        }
+        const Eigen::VectorXd full_nu = expand_inequality_multipliers(
+            *nu, d->enforced_inequality_rows, d->layout.nineq);
+        lagrangian_hessian(*d, x, lambda, &full_nu, h);
       };
   nlp.g = [d](const Eigen::VectorXd& x, Eigen::VectorXd& g) {
     evaluate_equalities(*d, x, g);
@@ -865,12 +1739,416 @@ engine::NLPModel build_nlp(const std::shared_ptr<ModelData>& d) {
     equality_jacobian(*d, x, j);
   };
   nlp.h = [d](const Eigen::VectorXd& x, Eigen::VectorXd& h) {
-    evaluate_inequalities(*d, x, h);
+    Eigen::VectorXd full;
+    evaluate_inequalities(*d, x, full);
+    h = select_inequality_rows(full, d->enforced_inequality_rows);
   };
   nlp.jac_h = [d](const Eigen::VectorXd& x, Eigen::SparseMatrix<double>& j) {
-    inequality_jacobian(*d, x, j);
+    inequality_jacobian(*d, x, j, &d->enforced_inequality_rows);
   };
+  const int equality_nullity = l.nvar - l.neq;
+  if (equality_nullity == l.nc) {
+    nlp.equality_free_columns.reserve(static_cast<std::size_t>(l.nc));
+    for (const auto& converter : d->converters) {
+      nlp.equality_free_columns.push_back(
+          l.i_qac + converter.phase_var_positions.front());
+    }
+  }
   return nlp;
+}
+
+void initialize_primal_dual_start(const engine::NLPModel& nlp,
+                                  const Eigen::VectorXd* equality_dual_seed,
+                                  const Eigen::VectorXd* inequality_dual_seed,
+                                  const Eigen::VectorXd* slack_seed,
+                                  double* initial_dual_residual,
+                                  engine::IPMOptions& options) {
+  const int n = static_cast<int>(nlp.vars.size());
+  if (nlp.x0.size() != n || !nlp.x0.allFinite()) return;
+
+  Eigen::VectorXd gradient;
+  Eigen::VectorXd equalities;
+  Eigen::VectorXd nonlinear_inequalities;
+  Eigen::SparseMatrix<double> equality_jacobian;
+  Eigen::SparseMatrix<double> nonlinear_jacobian;
+  nlp.grad(nlp.x0, gradient);
+  nlp.g(nlp.x0, equalities);
+  nlp.jac_g(nlp.x0, equality_jacobian);
+  nlp.h(nlp.x0, nonlinear_inequalities);
+  nlp.jac_h(nlp.x0, nonlinear_jacobian);
+  const double primal_neighborhood = std::max(
+      equalities.size() > 0 ? equalities.cwiseAbs().maxCoeff() : 0.0,
+      nonlinear_inequalities.size() > 0
+          ? std::max(0.0, nonlinear_inequalities.maxCoeff())
+          : 0.0);
+  if (primal_neighborhood > 1e-5) return;
+
+  std::vector<int> lower_bound_variables;
+  std::vector<int> upper_bound_variables;
+  for (int col = 0; col < n; ++col) {
+    const auto& variable = nlp.vars[static_cast<std::size_t>(col)];
+    if (std::isfinite(variable.lb) && std::abs(variable.lb) < 1e19) {
+      lower_bound_variables.push_back(col);
+    }
+    if (std::isfinite(variable.ub) && std::abs(variable.ub) < 1e19) {
+      upper_bound_variables.push_back(col);
+    }
+  }
+
+  const int nonlinear_count = static_cast<int>(nonlinear_inequalities.size());
+  const int inequality_count =
+      nonlinear_count + static_cast<int>(lower_bound_variables.size()) +
+      static_cast<int>(upper_bound_variables.size());
+  Eigen::VectorXd inequality_values = Eigen::VectorXd::Zero(inequality_count);
+  inequality_values.head(nonlinear_count) = nonlinear_inequalities;
+  std::vector<Triplet> trips;
+  trips.reserve(static_cast<std::size_t>(
+      nonlinear_jacobian.nonZeros() + lower_bound_variables.size() +
+      upper_bound_variables.size()));
+  for (int col = 0; col < nonlinear_jacobian.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(nonlinear_jacobian, col);
+         it; ++it) {
+      trips.emplace_back(it.row(), it.col(), it.value());
+    }
+  }
+  int row = nonlinear_count;
+  for (int col : lower_bound_variables) {
+    inequality_values[row] =
+        nlp.vars[static_cast<std::size_t>(col)].lb - nlp.x0[col];
+    trips.emplace_back(row++, col, -1.0);
+  }
+  for (int col : upper_bound_variables) {
+    inequality_values[row] =
+        nlp.x0[col] - nlp.vars[static_cast<std::size_t>(col)].ub;
+    trips.emplace_back(row++, col, 1.0);
+  }
+  Eigen::SparseMatrix<double> inequality_jacobian(inequality_count, n);
+  inequality_jacobian.setFromTriplets(trips.begin(), trips.end());
+  inequality_jacobian.makeCompressed();
+
+  const bool has_inequality_dual_seed =
+      inequality_dual_seed != nullptr &&
+      inequality_dual_seed->size() == nonlinear_count &&
+      inequality_dual_seed->allFinite();
+  // Slack is a primal state tied to the current Full point by h(x)+s=0.  A
+  // reduced-model slack cannot be copied after voltage recovery; reconstruct
+  // it first, then transfer the inequality multiplier.
+  options.slack_start = has_inequality_dual_seed
+      ? (-inequality_values.array()).max(2e-10).matrix()
+      : (-inequality_values.array()).max(1e-2).matrix();
+  if (!has_inequality_dual_seed && slack_seed != nullptr &&
+      slack_seed->size() == nonlinear_count && slack_seed->allFinite() &&
+      (slack_seed->array() > 0.0).all()) {
+    options.slack_start.head(nonlinear_count) = *slack_seed;
+  }
+  const double barrier = std::max(options.mu_min, options.mu_init);
+  options.inequality_dual_start =
+      (barrier / options.slack_start.array()).matrix();
+  if (has_inequality_dual_seed) {
+    options.inequality_dual_start.head(nonlinear_count) =
+        inequality_dual_seed->cwiseMax(1e-12);
+    const double recovered_barrier =
+        options.slack_start.head(nonlinear_count).dot(
+            options.inequality_dual_start.head(nonlinear_count)) /
+        std::max(1, nonlinear_count);
+    options.mu_init = std::clamp(recovered_barrier,
+                                 options.mu_min, 0.1);
+    if (inequality_count > nonlinear_count) {
+      options.inequality_dual_start.tail(
+          inequality_count - nonlinear_count) =
+          (options.mu_init /
+           options.slack_start.tail(inequality_count - nonlinear_count).array())
+              .matrix();
+    }
+  }
+
+  Eigen::VectorXd stationarity_without_equalities =
+      gradient + inequality_jacobian.transpose() *
+                     options.inequality_dual_start;
+
+  // If the model supplies independent control columns, recover equality
+  // multipliers from stationarity on the complementary state variables:
+  // J_B' lambda = -r_B. The remaining control components are exactly the
+  // reduced gradient and must not be erased by a global least-squares fit.
+  const int equality_count = static_cast<int>(equalities.size());
+  if (equality_dual_seed == nullptr && equality_count <= n &&
+      static_cast<int>(nlp.equality_free_columns.size()) ==
+          n - equality_count) {
+    std::vector<bool> is_free(static_cast<std::size_t>(n), false);
+    bool valid_partition = true;
+    for (int col : nlp.equality_free_columns) {
+      if (col < 0 || col >= n || is_free[static_cast<std::size_t>(col)]) {
+        valid_partition = false;
+        break;
+      }
+      is_free[static_cast<std::size_t>(col)] = true;
+    }
+    std::vector<int> basic_columns;
+    std::vector<int> variable_to_basic(static_cast<std::size_t>(n), -1);
+    if (valid_partition) {
+      basic_columns.reserve(static_cast<std::size_t>(equality_count));
+      for (int col = 0; col < n; ++col) {
+        if (!is_free[static_cast<std::size_t>(col)]) {
+          variable_to_basic[static_cast<std::size_t>(col)] =
+              static_cast<int>(basic_columns.size());
+          basic_columns.push_back(col);
+        }
+      }
+      valid_partition =
+          static_cast<int>(basic_columns.size()) == equality_count;
+    }
+    if (valid_partition) {
+      std::vector<Triplet> transpose_trips;
+      transpose_trips.reserve(
+          static_cast<std::size_t>(equality_jacobian.nonZeros()));
+      for (int col = 0; col < equality_jacobian.outerSize(); ++col) {
+        const int basic = variable_to_basic[static_cast<std::size_t>(col)];
+        if (basic < 0) continue;
+        for (Eigen::SparseMatrix<double>::InnerIterator it(
+                 equality_jacobian, col); it; ++it) {
+          transpose_trips.emplace_back(basic, it.row(), it.value());
+        }
+      }
+      Eigen::SparseMatrix<double> transpose_basis(
+          equality_count, equality_count);
+      transpose_basis.setFromTriplets(transpose_trips.begin(),
+                                      transpose_trips.end());
+      transpose_basis.makeCompressed();
+      Eigen::SparseLU<Eigen::SparseMatrix<double>,
+                      Eigen::COLAMDOrdering<int>> lu;
+      lu.analyzePattern(transpose_basis);
+      lu.factorize(transpose_basis);
+      if (lu.info() == Eigen::Success) {
+        Eigen::VectorXd rhs(equality_count);
+        for (int basic = 0; basic < equality_count; ++basic) {
+          rhs[basic] = -stationarity_without_equalities[
+              basic_columns[static_cast<std::size_t>(basic)]];
+        }
+        Eigen::VectorXd equality_dual = lu.solve(rhs);
+        if (lu.info() == Eigen::Success && equality_dual.allFinite()) {
+          options.equality_dual_start = std::move(equality_dual);
+          if (initial_dual_residual != nullptr) {
+            const Eigen::VectorXd stationarity =
+                stationarity_without_equalities + equality_jacobian.transpose() *
+                                                     options.equality_dual_start;
+            const double multiplier_scale = 1.0 + std::max(
+                options.equality_dual_start.cwiseAbs().maxCoeff(),
+                options.inequality_dual_start.cwiseAbs().maxCoeff());
+            *initial_dual_residual =
+                stationarity.cwiseAbs().maxCoeff() / multiplier_scale;
+          }
+          return;
+        }
+      }
+    }
+  }
+
+  std::vector<int> unknown_equalities;
+  Eigen::VectorXd equality_dual = Eigen::VectorXd::Zero(equalities.size());
+  const bool seeded = equality_dual_seed != nullptr &&
+      equality_dual_seed->size() == equalities.size();
+  for (int row = 0; row < equalities.size(); ++row) {
+    if (seeded && std::isfinite((*equality_dual_seed)[row])) {
+      equality_dual[row] = (*equality_dual_seed)[row];
+    } else {
+      unknown_equalities.push_back(row);
+    }
+  }
+  if (seeded) {
+    stationarity_without_equalities +=
+        equality_jacobian.transpose() * equality_dual;
+    if (unknown_equalities.empty()) {
+      options.equality_dual_start = std::move(equality_dual);
+      if (initial_dual_residual != nullptr) {
+        const double multiplier_scale = 1.0 + std::max(
+            options.equality_dual_start.cwiseAbs().maxCoeff(),
+            options.inequality_dual_start.cwiseAbs().maxCoeff());
+        *initial_dual_residual =
+            stationarity_without_equalities.cwiseAbs().maxCoeff() /
+            multiplier_scale;
+      }
+      return;
+    }
+  }
+
+  const bool schur_recovery = seeded && std::all_of(
+      unknown_equalities.begin(), unknown_equalities.end(),
+      [n](int index) { return index >= 0 && index < n; });
+  const int stationarity_rows = schur_recovery
+      ? static_cast<int>(unknown_equalities.size()) : n;
+  std::vector<int> variable_to_recovery_row(
+      static_cast<std::size_t>(n), -1);
+  if (schur_recovery) {
+    for (int local = 0; local < static_cast<int>(unknown_equalities.size());
+         ++local) {
+      variable_to_recovery_row[static_cast<std::size_t>(
+          unknown_equalities[static_cast<std::size_t>(local)])] = local;
+    }
+  }
+  std::vector<Triplet> stationarity_trips;
+  for (int col = 0; col < equality_jacobian.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(equality_jacobian, col);
+         it; ++it) {
+      auto found = std::lower_bound(unknown_equalities.begin(),
+                                    unknown_equalities.end(), it.row());
+      if (found != unknown_equalities.end() && *found == it.row()) {
+        const int recovery_row = schur_recovery
+            ? variable_to_recovery_row[static_cast<std::size_t>(it.col())]
+            : it.col();
+        if (recovery_row < 0) continue;
+        stationarity_trips.emplace_back(
+            recovery_row,
+            static_cast<int>(found - unknown_equalities.begin()),
+            it.value());
+      }
+    }
+  }
+  Eigen::SparseMatrix<double> stationarity_matrix(
+      stationarity_rows, static_cast<int>(unknown_equalities.size()));
+  stationarity_matrix.setFromTriplets(stationarity_trips.begin(),
+                                      stationarity_trips.end());
+  stationarity_matrix.makeCompressed();
+  Eigen::VectorXd column_scale =
+      Eigen::VectorXd::Ones(unknown_equalities.size());
+  for (int col = 0; col < stationarity_matrix.outerSize(); ++col) {
+    double norm = 0.0;
+    for (Eigen::SparseMatrix<double>::InnerIterator it(stationarity_matrix, col);
+         it; ++it) {
+      norm = std::max(norm, std::abs(it.value()));
+    }
+    column_scale[col] = 1.0 / std::max(norm, 1e-12);
+    for (Eigen::SparseMatrix<double>::InnerIterator it(stationarity_matrix, col);
+         it; ++it) {
+      it.valueRef() *= column_scale[col];
+    }
+  }
+  Eigen::VectorXd recovery_rhs(stationarity_rows);
+  if (schur_recovery) {
+    for (int local = 0; local < stationarity_rows; ++local) {
+      recovery_rhs[local] = stationarity_without_equalities[
+          unknown_equalities[static_cast<std::size_t>(local)]];
+    }
+  } else {
+    recovery_rhs = stationarity_without_equalities;
+  }
+  Eigen::VectorXd scaled_dual;
+  bool solved_dual = false;
+  if (n <= 2000) {
+    Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> solver{
+        Eigen::MatrixXd(stationarity_matrix)};
+    solver.setThreshold(1e-14);
+    scaled_dual = solver.solve(-recovery_rhs);
+    solved_dual = scaled_dual.allFinite();
+  } else {
+    Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> qr;
+    qr.compute(stationarity_matrix);
+    if (qr.info() != Eigen::Success) return;
+    scaled_dual = qr.solve(-recovery_rhs);
+    solved_dual = qr.info() == Eigen::Success && scaled_dual.allFinite();
+  }
+  if (solved_dual) {
+    const Eigen::VectorXd recovered = column_scale.cwiseProduct(scaled_dual);
+    for (int local = 0; local < static_cast<int>(unknown_equalities.size());
+         ++local) {
+      equality_dual[unknown_equalities[static_cast<std::size_t>(local)]] =
+          recovered[local];
+    }
+    options.equality_dual_start = std::move(equality_dual);
+    if (initial_dual_residual != nullptr) {
+      const Eigen::VectorXd stationarity =
+          gradient + inequality_jacobian.transpose() *
+                         options.inequality_dual_start +
+          equality_jacobian.transpose() * options.equality_dual_start;
+      const double multiplier_scale = 1.0 + std::max(
+          options.equality_dual_start.cwiseAbs().maxCoeff(),
+          options.inequality_dual_start.cwiseAbs().maxCoeff());
+      *initial_dual_residual =
+          stationarity.cwiseAbs().maxCoeff() / multiplier_scale;
+    }
+  }
+}
+
+bool restore_primal_feasibility(const engine::NLPModel& nlp,
+                                Eigen::VectorXd& x,
+                                double tolerance) {
+  const auto physical_residual = [&](const Eigen::VectorXd& point) {
+    Eigen::VectorXd equality;
+    Eigen::VectorXd inequality;
+    nlp.g(point, equality);
+    nlp.h(point, inequality);
+    const double eq = equality.size() > 0
+        ? equality.cwiseAbs().maxCoeff() : 0.0;
+    const double ineq = inequality.size() > 0
+        ? std::max(0.0, inequality.maxCoeff()) : 0.0;
+    return std::max(eq, ineq);
+  };
+
+  double residual = physical_residual(x);
+  for (int iteration = 0; iteration < 30 && residual > tolerance; ++iteration) {
+    Eigen::VectorXd equality;
+    Eigen::SparseMatrix<double> jacobian;
+    nlp.g(x, equality);
+    nlp.jac_g(x, jacobian);
+    Eigen::VectorXd row_scale = Eigen::VectorXd::Ones(equality.size());
+    for (int col = 0; col < jacobian.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(jacobian, col);
+           it; ++it) {
+        row_scale[it.row()] = std::max(row_scale[it.row()], std::abs(it.value()));
+      }
+    }
+    row_scale = row_scale.cwiseInverse();
+    for (int col = 0; col < jacobian.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(jacobian, col);
+           it; ++it) {
+        it.valueRef() *= row_scale[it.row()];
+      }
+    }
+    const Eigen::VectorXd scaled_equality =
+        row_scale.cwiseProduct(equality);
+    Eigen::VectorXd step;
+    if (x.size() <= 2000) {
+      Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> solver{
+          Eigen::MatrixXd(jacobian)};
+      solver.setThreshold(1e-12);
+      step = solver.solve(-scaled_equality);
+    } else {
+      Eigen::SparseMatrix<double> normal = jacobian * jacobian.transpose();
+      for (int row = 0; row < normal.rows(); ++row) {
+        normal.coeffRef(row, row) += 1e-10;
+      }
+      normal.makeCompressed();
+      Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver;
+      solver.compute(normal);
+      if (solver.info() != Eigen::Success) return false;
+      const Eigen::VectorXd dual_step = solver.solve(-scaled_equality);
+      if (solver.info() != Eigen::Success || !dual_step.allFinite()) return false;
+      step = jacobian.transpose() * dual_step;
+    }
+    if (!step.allFinite()) return false;
+
+    bool accepted = false;
+    double alpha = 1.0;
+    for (int line_search = 0; line_search < 24; ++line_search) {
+      Eigen::VectorXd trial = x + alpha * step;
+      bool finite = trial.allFinite();
+      for (int col = 0; col < trial.size() && finite; ++col) {
+        const auto& variable = nlp.vars[static_cast<std::size_t>(col)];
+        trial[col] = std::min(variable.ub, std::max(variable.lb, trial[col]));
+      }
+      if (finite) {
+        const double trial_residual = physical_residual(trial);
+        if (trial_residual < residual) {
+          x = trial;
+          residual = trial_residual;
+          accepted = true;
+          break;
+        }
+      }
+      alpha *= 0.5;
+    }
+    if (!accepted) return false;
+  }
+  return residual <= tolerance;
 }
 
 double max_vuf(const ThreePhaseHybridOPFCase& c,
@@ -883,16 +2161,383 @@ double max_vuf(const ThreePhaseHybridOPFCase& c,
   return result;
 }
 
+double max_converter_current_vuf(const ModelData& d,
+                                 const Eigen::VectorXd& x,
+                                 const Eigen::VectorXcd& voltage) {
+  const Layout& l = d.layout;
+  const auto& c = *d.source;
+  const Complex a = std::polar(1.0, 2.0 * kPi / 3.0);
+  const Complex a2 = a * a;
+  double result = 0.0;
+  for (int ci = 0; ci < static_cast<int>(d.converters.size()); ++ci) {
+    const auto& converter = d.converters[static_cast<std::size_t>(ci)];
+    const auto& source_converter = c.converters[static_cast<std::size_t>(ci)];
+    if (converter.phase_var_positions.size() != 3 ||
+        source_converter.phase_nodes.size() != 3 || c.ac_phase_index.empty()) {
+      continue;
+    }
+    std::array<Complex, 3> phase_current{};
+    std::array<bool, 3> present{};
+    for (int local = 0; local < 3; ++local) {
+      const int full_node =
+          source_converter.phase_nodes[static_cast<std::size_t>(local)];
+      const int phase = c.ac_phase_index[static_cast<std::size_t>(full_node)];
+      if (phase < 0 || phase > 2 || std::abs(voltage[full_node]) <= 1e-12) {
+        continue;
+      }
+      const int pos =
+          converter.phase_var_positions[static_cast<std::size_t>(local)];
+      const Complex power{x[l.i_pac + pos], x[l.i_qac + pos]};
+      phase_current[static_cast<std::size_t>(phase)] =
+          std::conj(power / voltage[full_node]);
+      present[static_cast<std::size_t>(phase)] = true;
+    }
+    if (!present[0] || !present[1] || !present[2]) continue;
+    const Complex i1 =
+        (phase_current[0] + a * phase_current[1] + a2 * phase_current[2]) /
+        3.0;
+    const Complex i2 =
+        (phase_current[0] + a2 * phase_current[1] + a * phase_current[2]) /
+        3.0;
+    result = std::max(
+        result, std::abs(i2) / std::max(1e-12, std::abs(i1)));
+  }
+  return result;
+}
+
+double max_converter_current_loading(const ModelData& d,
+                                     const Eigen::VectorXd& x,
+                                     const Eigen::VectorXcd& voltage) {
+  const Layout& l = d.layout;
+  const auto& c = *d.source;
+  double result = 0.0;
+  for (int ci = 0; ci < static_cast<int>(d.converters.size()); ++ci) {
+    const auto& converter = d.converters[static_cast<std::size_t>(ci)];
+    const auto& source_converter = c.converters[static_cast<std::size_t>(ci)];
+    for (int local = 0;
+         local < static_cast<int>(converter.phase_var_positions.size());
+         ++local) {
+      const int pos =
+          converter.phase_var_positions[static_cast<std::size_t>(local)];
+      const int full_node =
+          source_converter.phase_nodes[static_cast<std::size_t>(local)];
+      if (std::abs(voltage[full_node]) <= 1e-12) continue;
+      const Complex power{x[l.i_pac + pos], x[l.i_qac + pos]};
+      const double current = std::abs(power / voltage[full_node]);
+      result = std::max(
+          result, current / std::max(1e-12, converter.phase_current_max_pu));
+    }
+  }
+  return result;
+}
+
+std::vector<PhaseVSCDynamicEquilibrium> recover_dynamic_equilibria(
+    const ModelData& d,
+    const Eigen::VectorXd& x,
+    const Eigen::VectorXcd& voltage,
+    double* max_residual) {
+  const Layout& l = d.layout;
+  const auto& c = *d.source;
+  const Complex a = std::polar(1.0, 2.0 * kPi / 3.0);
+  const Complex a2 = a * a;
+  std::vector<PhaseVSCDynamicEquilibrium> result;
+  result.reserve(d.converters.size());
+  double maximum = 0.0;
+  for (int ci = 0; ci < static_cast<int>(d.converters.size()); ++ci) {
+    const auto& converter = d.converters[static_cast<std::size_t>(ci)];
+    const auto& source_converter = c.converters[static_cast<std::size_t>(ci)];
+    PhaseVSCDynamicEquilibrium equilibrium;
+    equilibrium.control_mode = converter.control_mode;
+    std::array<Complex, 3> phase_voltage{};
+    std::array<Complex, 3> phase_current{};
+    Complex total_power{0.0, 0.0};
+    for (int local = 0;
+         local < static_cast<int>(converter.phase_var_positions.size());
+         ++local) {
+      const int pos =
+          converter.phase_var_positions[static_cast<std::size_t>(local)];
+      const int full_node =
+          source_converter.phase_nodes[static_cast<std::size_t>(local)];
+      const int phase = c.ac_phase_index[static_cast<std::size_t>(full_node)];
+      const Complex power{x[l.i_pac + pos], x[l.i_qac + pos]};
+      phase_voltage[static_cast<std::size_t>(phase)] = voltage[full_node];
+      phase_current[static_cast<std::size_t>(phase)] =
+          std::conj(power / voltage[full_node]);
+      total_power += power;
+    }
+    // The transient inverter uses a three-phase device base, so its dq power
+    // state is the average of the three phase-domain per-unit powers.
+    equilibrium.active_power_reference_pu = std::real(total_power) / 3.0;
+    equilibrium.reactive_power_reference_pu = std::imag(total_power) / 3.0;
+    equilibrium.filtered_active_power_pu = std::real(total_power) / 3.0;
+    equilibrium.filtered_reactive_power_pu = std::imag(total_power) / 3.0;
+    const Complex v1 =
+        (phase_voltage[0] + a * phase_voltage[1] + a2 * phase_voltage[2]) /
+        3.0;
+    if (converter.control_mode == PhaseVSCControlMode::GridFollowingPLL) {
+      equilibrium.pll_angle_rad = std::arg(v1);
+      const Complex i0 =
+          (phase_current[0] + phase_current[1] + phase_current[2]) / 3.0;
+      const Complex i2 =
+          (phase_current[0] + a2 * phase_current[1] + a * phase_current[2]) /
+          3.0;
+      const Complex v_dq = v1 * std::exp(
+          Complex{0.0, -equilibrium.pll_angle_rad});
+      const double vq = std::imag(v_dq);
+      equilibrium.pll_integrator = std::abs(converter.pll_ki) > 1e-12
+          ? -converter.pll_kp * vq / converter.pll_ki
+          : 0.0;
+      equilibrium.max_differential_residual = std::max(
+          {std::abs(i0), std::abs(i2),
+           std::abs(converter.pll_kp * vq +
+                    converter.pll_ki * equilibrium.pll_integrator)});
+    } else if (converter.control_mode ==
+               PhaseVSCControlMode::GridFormingDroop) {
+      const Complex e_a{x[l.i_gfm_e + converter.gfm_var_position],
+                        x[l.i_gfm_f + converter.gfm_var_position]};
+      equilibrium.internal_voltage_positive = e_a;
+      const double vt =
+          (std::abs(phase_voltage[0]) + std::abs(phase_voltage[1]) +
+           std::abs(phase_voltage[2])) /
+          3.0;
+      equilibrium.voltage_reference_pu = vt;
+      equilibrium.voltage_integrator =
+          std::abs(converter.voltage_integral_gain) > 1e-12
+          ? (std::abs(e_a) - vt) / converter.voltage_integral_gain
+          : 0.0;
+      const Complex z{converter.virtual_r_pu, converter.virtual_x_pu};
+      const Complex rotation[3] = {Complex{1.0, 0.0}, a2, a};
+      double residual = 0.0;
+      for (int phase = 0; phase < 3; ++phase) {
+        residual = std::max(
+            residual,
+            std::abs(rotation[phase] * e_a - phase_voltage[phase] -
+                     z * phase_current[phase]));
+      }
+      equilibrium.max_differential_residual = residual;
+    }
+    maximum = std::max(maximum, equilibrium.max_differential_residual);
+    result.push_back(equilibrium);
+  }
+  if (max_residual != nullptr) *max_residual = maximum;
+  return result;
+}
+
 }  // namespace
 
-ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf(
+ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
     const ThreePhaseHybridOPFCase& problem,
-    const ThreePhaseHybridOPFOptions& options) {
-  const auto data = build_model_data(problem, options);
-  engine::NLPModel nlp = build_nlp(data);
+    const ThreePhaseHybridOPFOptions& options,
+    const std::shared_ptr<ModelData>& prebuilt_data = nullptr) {
+  const auto function_start = std::chrono::steady_clock::now();
+  const auto log_stage = [&](const std::string& stage) {
+    if (!options.verbose) return;
+    std::cerr << '[' << problem.name << "] " << stage << " at "
+              << std::chrono::duration<double>(
+                     std::chrono::steady_clock::now() - function_start).count()
+              << " s\n" << std::flush;
+  };
+  if (options.use_constraint_oracle) {
+    ThreePhaseHybridOPFOptions screening_options = options;
+    screening_options.use_constraint_oracle = false;
+    screening_options.enforced_inequality_rows.clear();
+    std::shared_ptr<ModelData> screening_data;
+    if (prebuilt_data != nullptr) {
+      screening_data = std::make_shared<ModelData>(*prebuilt_data);
+      screening_data->source = &problem;
+      configure_enforced_inequalities(*screening_data, {});
+    } else {
+      screening_data = build_model_data(problem, screening_options);
+    }
+    Eigen::VectorXd current_start =
+        options.primal_start.size() == screening_data->layout.nvar &&
+                options.primal_start.allFinite()
+            ? options.primal_start : build_initial_point(*screening_data);
+    Eigen::VectorXd initial_h;
+    evaluate_inequalities(*screening_data, current_start, initial_h);
+    const double initial_margin = std::max(
+        options.oracle_activation_margin, options.oracle_initial_margin);
+    std::vector<bool> enforced_mask(
+        static_cast<std::size_t>(screening_data->layout.nineq), false);
+    for (int row : options.oracle_seed_rows) {
+      if (row < 0 || row >= screening_data->layout.nineq) {
+        throw std::invalid_argument(
+            "constraint-oracle seed row is outside the full inequality range");
+      }
+      enforced_mask[static_cast<std::size_t>(row)] = true;
+    }
+    const int converter_row =
+        2 * screening_data->reduction.original_size +
+        static_cast<int>(problem.three_phase_bus_nodes.size());
+    for (int row = 0; row < initial_h.size(); ++row) {
+      if (initial_h[row] >= -initial_margin || row >= converter_row) {
+        enforced_mask[static_cast<std::size_t>(row)] = true;
+      }
+    }
+    std::vector<int> enforced_rows;
+    for (int row = 0; row < initial_h.size(); ++row) {
+      if (enforced_mask[static_cast<std::size_t>(row)]) {
+        enforced_rows.push_back(row);
+      }
+    }
+    log_stage("constraint oracle: initial rows=" +
+              std::to_string(enforced_rows.size()) + "/" +
+              std::to_string(screening_data->layout.nineq));
+
+    ThreePhaseHybridOPFResult latest;
+    std::vector<ConstraintOracleRoundDiagnostic> oracle_trace;
+    int total_iterations = 0;
+    int total_added = 0;
+    bool exact_corrector_required = false;
+    const int max_rounds = std::max(1, options.oracle_max_rounds);
+    for (int round = 0; round < max_rounds; ++round) {
+      ThreePhaseHybridOPFOptions round_options = options;
+      round_options.use_constraint_oracle = false;
+      round_options.enforced_inequality_rows = enforced_rows;
+      round_options.primal_start = current_start;
+      const bool predictor_round =
+          !exact_corrector_required && options.oracle_probe_iterations > 0 &&
+          options.oracle_probe_iterations < options.max_iterations;
+      if (predictor_round) {
+        round_options.max_iterations = options.oracle_probe_iterations;
+      }
+      if (round > 0) {
+        // The previous restricted solution remains equality-feasible.  Newly
+        // activated inequalities are handled by the infeasible-start filter;
+        // an Ipopt feasibility solve would discard the oracle continuation.
+        round_options.warm_start_with_ipopt = false;
+        round_options.equality_dual_start = latest.equality_dual;
+        round_options.nonlinear_inequality_dual_start =
+            latest.inequality_dual.size() >= screening_data->layout.nineq
+                ? latest.inequality_dual.head(screening_data->layout.nineq)
+                : Eigen::VectorXd{};
+        round_options.nonlinear_slack_start =
+            latest.inequality_slack.size() >= screening_data->layout.nineq
+                ? latest.inequality_slack.head(screening_data->layout.nineq)
+                : Eigen::VectorXd{};
+      }
+      log_stage("constraint oracle: round=" + std::to_string(round + 1) +
+                ", rows=" + std::to_string(enforced_rows.size()));
+      const int rows_before_solve = static_cast<int>(enforced_rows.size());
+      const auto round_start = std::chrono::steady_clock::now();
+      auto round_data = std::make_shared<ModelData>(*screening_data);
+      configure_enforced_inequalities(*round_data, enforced_rows);
+      latest = solve_three_phase_hybrid_opf_impl(
+          problem, round_options, round_data);
+      total_iterations += latest.iterations;
+      if (latest.primal.size() != screening_data->layout.nvar ||
+          !latest.primal.allFinite()) {
+        latest.converged = false;
+        latest.status = "Constraint oracle: restricted solve returned no "
+                        "finite primal point";
+        latest.constraint_oracle_rounds = round + 1;
+        latest.constraint_oracle_added_rows = total_added;
+        latest.runtime_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - function_start).count();
+        return latest;
+      }
+      current_start = latest.primal;
+      Eigen::VectorXd full_h;
+      evaluate_inequalities(*screening_data, current_start, full_h);
+      int added_this_round = 0;
+      for (int row = 0; row < full_h.size(); ++row) {
+        if (!enforced_mask[static_cast<std::size_t>(row)] &&
+            full_h[row] >= -options.oracle_activation_margin) {
+          enforced_mask[static_cast<std::size_t>(row)] = true;
+          enforced_rows.push_back(row);
+          ++added_this_round;
+        }
+      }
+      std::sort(enforced_rows.begin(), enforced_rows.end());
+      total_added += added_this_round;
+      oracle_trace.push_back({
+          round + 1,
+          rows_before_solve,
+          added_this_round,
+          latest.iterations,
+          latest.converged,
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - round_start).count(),
+          full_h.maxCoeff()});
+      log_stage("constraint oracle: checked, added=" +
+                std::to_string(added_this_round) +
+                ", full_max=" + std::to_string(full_h.maxCoeff()));
+      if (predictor_round) {
+        if (added_this_round == 0 && latest.converged) {
+          latest.constraint_oracle_rounds = round + 1;
+          latest.constraint_oracle_added_rows = total_added;
+          latest.constraint_oracle_trace = oracle_trace;
+          latest.iterations = total_iterations;
+          latest.runtime_ms = std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - function_start).count();
+          return latest;
+        }
+        exact_corrector_required = added_this_round == 0;
+        if (exact_corrector_required) {
+          log_stage("constraint oracle: active set stable; exact corrector "
+                    "required");
+        }
+        continue;
+      }
+      if (added_this_round == 0) {
+        latest.constraint_oracle_rounds = round + 1;
+        latest.constraint_oracle_added_rows = total_added;
+        latest.constraint_oracle_trace = oracle_trace;
+        latest.iterations = total_iterations;
+        latest.runtime_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - function_start).count();
+        return latest;
+      }
+      exact_corrector_required = false;
+    }
+    latest.converged = false;
+    latest.status = "Constraint oracle: enrichment round limit reached";
+    latest.constraint_oracle_rounds = max_rounds;
+    latest.constraint_oracle_added_rows = total_added;
+    latest.constraint_oracle_trace = oracle_trace;
+    latest.iterations = total_iterations;
+    latest.runtime_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - function_start).count();
+    return latest;
+  }
+  log_stage("model build: start");
+  const auto data = prebuilt_data != nullptr
+      ? prebuilt_data : build_model_data(problem, options);
+  const Eigen::VectorXd* supplied_primal =
+      options.primal_start.size() == data->layout.nvar &&
+              options.primal_start.allFinite()
+          ? &options.primal_start : nullptr;
+  engine::NLPModel nlp = build_nlp(data, supplied_primal);
+  log_stage("model build: done (n=" + std::to_string(data->layout.nvar) +
+            ", meq=" + std::to_string(data->layout.neq) +
+            ", mineq=" +
+            std::to_string(data->enforced_inequality_rows.size()) + "/" +
+            std::to_string(data->layout.nineq) + ")");
   if (options.primal_start.size() == data->layout.nvar &&
       options.primal_start.allFinite()) {
     nlp.x0 = options.primal_start;
+  }
+  if (options.verbose) {
+    const Eigen::VectorXcd recovered_start = full_voltage(*data, nlp.x0);
+    Eigen::Index min_voltage_node = 0;
+    recovered_start.cwiseAbs().minCoeff(&min_voltage_node);
+    const auto& recovery_row =
+        data->recovery_rows[static_cast<std::size_t>(min_voltage_node)];
+    double recovery_row_norm = 0.0;
+    for (const auto& [unused, coefficient] : recovery_row) {
+      (void)unused;
+      recovery_row_norm += std::norm(coefficient);
+    }
+    recovery_row_norm = std::sqrt(recovery_row_norm);
+    std::cerr << '[' << problem.name << "] recovery diagnostic: full-node="
+              << min_voltage_node << ", retained-position="
+              << data->full_to_model[static_cast<std::size_t>(min_voltage_node)]
+              << ", original-start="
+              << std::abs(problem.voltage_start[min_voltage_node])
+              << ", recovered-start=" << std::abs(recovered_start[min_voltage_node])
+              << ", row-nnz=" << recovery_row.size()
+              << ", row-norm=" << recovery_row_norm << "\n"
+              << std::flush;
   }
   nlp.solver_options.max_iterations = options.max_iterations;
   nlp.solver_options.tolerance = options.tolerance;
@@ -909,29 +2554,158 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf(
 
   engine::SolveResult solved;
   engine::IPMDetail detail;
+  double initial_dual_residual = 0.0;
   const auto start = std::chrono::steady_clock::now();
   if (options.backend == SolverBackend::NativeIPM) {
-    if (options.warm_start_with_ipopt) {
+    const auto primal_residual = [&](const Eigen::VectorXd& point) {
+      Eigen::VectorXd equalities;
+      Eigen::VectorXd inequalities;
+      nlp.g(point, equalities);
+      nlp.h(point, inequalities);
+      return std::max(
+          equalities.size() > 0
+              ? equalities.cwiseAbs().maxCoeff() : 0.0,
+          inequalities.size() > 0
+              ? std::max(0.0, inequalities.maxCoeff()) : 0.0);
+    };
+    double start_primal_residual = primal_residual(nlp.x0);
+    log_stage("initial residual=" + std::to_string(start_primal_residual));
+    if (options.verbose) {
+      Eigen::VectorXd debug_equalities;
+      Eigen::VectorXd debug_inequalities;
+      nlp.g(nlp.x0, debug_equalities);
+      nlp.h(nlp.x0, debug_inequalities);
+      Eigen::Index worst_eq = 0;
+      Eigen::Index worst_ineq = 0;
+      const double eq_residual = debug_equalities.size() > 0
+          ? debug_equalities.cwiseAbs().maxCoeff(&worst_eq) : 0.0;
+      const double ineq_residual = debug_inequalities.size() > 0
+          ? std::max(0.0, debug_inequalities.maxCoeff(&worst_ineq)) : 0.0;
+      std::cerr << '[' << problem.name << "] initial components: eq="
+                << eq_residual << " (row " << worst_eq << "), ineq="
+                << ineq_residual << " (row " << worst_ineq << ")\n"
+                << std::flush;
+      if (worst_eq >= 0 && worst_eq < 2 * data->layout.nv) {
+        const bool reactive_row = worst_eq >= data->layout.nv;
+        const int model_node = static_cast<int>(worst_eq) % data->layout.nv;
+        const int full_node = data->reduction.retained[static_cast<std::size_t>(
+            model_node)];
+        const Eigen::VectorXcd voltage = model_voltage(*data, nlp.x0);
+        const Eigen::VectorXcd current =
+            data->y * voltage + data->fixed_current;
+        const Complex power = voltage[model_node] * std::conj(current[model_node]);
+        std::cerr << '[' << problem.name << "] worst AC balance: kind="
+                  << (reactive_row ? 'Q' : 'P') << ", model-node=" << model_node
+                  << ", full-node=" << full_node
+                  << ", |V|=" << std::abs(voltage[model_node])
+                  << ", Pnet=" << std::real(power)
+                  << ", Qnet=" << std::imag(power)
+                  << ", Pload=" << problem.p_load_pu[full_node]
+                  << ", Qload=" << problem.q_load_pu[full_node] << "\n"
+                  << std::flush;
+      }
+    }
+
+    log_stage("primal restoration: start");
+    Eigen::VectorXd restored_start = nlp.x0;
+    bool restored = restore_primal_feasibility(nlp, restored_start, 1e-7);
+    if (restored_start.allFinite()) nlp.x0 = std::move(restored_start);
+    start_primal_residual = primal_residual(nlp.x0);
+    log_stage(std::string("primal restoration: ") +
+              (restored ? "converged" : "incomplete") + " (p=" +
+              std::to_string(start_primal_residual) + ")");
+
+    if (options.warm_start_with_ipopt && start_primal_residual > 1e-5) {
+      log_stage("Ipopt warm solve: start");
       engine::IpoptAdapter ipopt;
-      const engine::SolveResult warm = ipopt.solve_nlp(nlp);
+      engine::NLPModel feasibility_nlp = nlp;
+      feasibility_nlp.solver_options.tolerance = 1e-9;
+      feasibility_nlp.solver_options.acceptable_tolerance = 1e-8;
+      feasibility_nlp.solver_options.constraint_violation_tolerance = 1e-9;
+      feasibility_nlp.solver_options.acceptable_constraint_violation_tolerance =
+          1e-8;
+      const engine::SolveResult warm = ipopt.solve_nlp(feasibility_nlp);
+      log_stage("Ipopt warm solve: done (status=" + warm.stats.status +
+                ", p=" + std::to_string(warm.stats.unscaled_primal_feas) +
+                ", d=" + std::to_string(warm.stats.unscaled_dual_feas) + ")");
       if (warm.x.size() == data->layout.nvar && warm.x.allFinite()) nlp.x0 = warm.x;
+      log_stage("post-Ipopt primal restoration: start");
+      restored_start = nlp.x0;
+      restored = restore_primal_feasibility(nlp, restored_start, 1e-7);
+      if (restored_start.allFinite()) nlp.x0 = std::move(restored_start);
+      log_stage(std::string("post-Ipopt primal restoration: ") +
+                (restored ? "converged" : "incomplete") + " (p=" +
+                std::to_string(primal_residual(nlp.x0)) + ")");
     }
     engine::IPMOptions ipm_options;
     ipm_options.max_iter = options.max_iterations;
-    ipm_options.tol_primal = options.tolerance;
+    ipm_options.tol_primal = std::min(options.tolerance, 1e-7);
     ipm_options.tol_dual = options.tolerance;
     ipm_options.tol_complementarity = options.tolerance;
-    ipm_options.tol_accept = std::max(options.tolerance, 1e-5);
+    ipm_options.tol_accept = 0.0;
     ipm_options.globalization = engine::Globalization::Filter;
     ipm_options.scale_problem = false;
+    ipm_options.verbose = options.verbose;
+    const Eigen::VectorXd* equality_dual_seed =
+        options.equality_dual_start.size() == data->layout.neq
+            ? &options.equality_dual_start : nullptr;
+    Eigen::VectorXd selected_inequality_dual_seed;
+    Eigen::VectorXd selected_slack_seed;
+    const int enforced_count =
+        static_cast<int>(data->enforced_inequality_rows.size());
+    if (options.nonlinear_inequality_dual_start.size() == data->layout.nineq) {
+      selected_inequality_dual_seed = select_inequality_rows(
+          options.nonlinear_inequality_dual_start,
+          data->enforced_inequality_rows);
+    } else if (options.nonlinear_inequality_dual_start.size() == enforced_count) {
+      selected_inequality_dual_seed =
+          options.nonlinear_inequality_dual_start;
+    }
+    if (options.nonlinear_slack_start.size() == data->layout.nineq) {
+      selected_slack_seed = select_inequality_rows(
+          options.nonlinear_slack_start, data->enforced_inequality_rows);
+    } else if (options.nonlinear_slack_start.size() == enforced_count) {
+      selected_slack_seed = options.nonlinear_slack_start;
+    }
+    const Eigen::VectorXd* inequality_dual_seed =
+        selected_inequality_dual_seed.size() == enforced_count
+            ? &selected_inequality_dual_seed : nullptr;
+    const Eigen::VectorXd* slack_seed =
+        selected_slack_seed.size() == enforced_count
+            ? &selected_slack_seed : nullptr;
+    log_stage("dual initialization: start");
+    initialize_primal_dual_start(nlp, equality_dual_seed,
+                                 inequality_dual_seed, slack_seed,
+                                 &initial_dual_residual, ipm_options);
+    log_stage("dual initialization: done (d=" +
+              std::to_string(initial_dual_residual) + ")");
     engine::NativeIPMAdapter native(ipm_options);
+    log_stage("NativeIPM: start");
     std::tie(solved, detail) = native.solve_nlp_detail(nlp);
+    log_stage("NativeIPM: done (status=" + solved.stats.status + ")");
   } else {
     engine::IpoptAdapter ipopt;
     solved = ipopt.solve_nlp(nlp);
   }
   const double runtime_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - start).count();
+
+  if (detail.lambda_eq.size() != data->layout.neq &&
+      solved.x.size() == data->layout.nvar && solved.x.allFinite()) {
+    engine::NLPModel recovery_nlp = nlp;
+    recovery_nlp.x0 = solved.x;
+    engine::IPMOptions recovery_options;
+    double recovered_dual_residual = 0.0;
+    initialize_primal_dual_start(recovery_nlp, nullptr, nullptr, nullptr,
+                                 &recovered_dual_residual,
+                                 recovery_options);
+    if (recovered_dual_residual <= 1e-6 &&
+        recovery_options.equality_dual_start.size() == data->layout.neq) {
+      detail.lambda_eq = recovery_options.equality_dual_start;
+      detail.mu_ineq = recovery_options.inequality_dual_start;
+      detail.z_slack = recovery_options.slack_start;
+    }
+  }
 
   ThreePhaseHybridOPFResult result;
   result.converged = solved.stats.success;
@@ -941,8 +2715,11 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf(
   result.variables = data->layout.nvar;
   result.equalities = data->layout.neq;
   result.inequalities = data->layout.nineq;
+  result.enforced_inequalities =
+      static_cast<int>(data->enforced_inequality_rows.size());
   result.objective = solved.stats.objective;
   result.runtime_ms = runtime_ms;
+  result.initial_dual_residual = initial_dual_residual;
   Eigen::VectorXd initial_g;
   Eigen::VectorXd initial_h;
   evaluate_equalities(*data, nlp.x0, initial_g);
@@ -963,12 +2740,43 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf(
   }
   result.primal_residual = solved.stats.unscaled_primal_feas > 0.0
       ? solved.stats.unscaled_primal_feas : solved.stats.primal_feas;
-  result.dual_residual = solved.stats.dual_feas;
-  result.complementarity = solved.stats.complementarity;
+  result.dual_residual = solved.stats.unscaled_dual_feas > 0.0
+      ? solved.stats.unscaled_dual_feas : solved.stats.dual_feas;
+  result.complementarity = solved.stats.unscaled_complementarity > 0.0
+      ? solved.stats.unscaled_complementarity
+      : solved.stats.complementarity;
   result.primal = solved.x;
   result.equality_dual = detail.lambda_eq;
-  result.inequality_dual = detail.mu_ineq;
+  const int enforced_count =
+      static_cast<int>(data->enforced_inequality_rows.size());
+  const int bound_multiplier_count = std::max(
+      0, static_cast<int>(detail.mu_ineq.size()) - enforced_count);
+  result.inequality_dual = Eigen::VectorXd::Zero(
+      data->layout.nineq + bound_multiplier_count);
+  if (detail.mu_ineq.size() >= enforced_count) {
+    result.inequality_dual.head(data->layout.nineq) =
+        expand_inequality_multipliers(
+            detail.mu_ineq.head(enforced_count),
+            data->enforced_inequality_rows, data->layout.nineq);
+    if (bound_multiplier_count > 0) {
+      result.inequality_dual.tail(bound_multiplier_count) =
+          detail.mu_ineq.tail(bound_multiplier_count);
+    }
+  }
+  result.inequality_slack = Eigen::VectorXd::Zero(
+      data->layout.nineq + bound_multiplier_count);
+  if (solved.x.size() == data->layout.nvar && solved.x.allFinite()) {
+    Eigen::VectorXd full_h;
+    evaluate_inequalities(*data, solved.x, full_h);
+    result.inequality_slack.head(data->layout.nineq) =
+        (-full_h.array()).max(1e-12).matrix();
+  }
+  if (detail.z_slack.size() >= enforced_count && bound_multiplier_count > 0) {
+    result.inequality_slack.tail(bound_multiplier_count) =
+        detail.z_slack.tail(bound_multiplier_count);
+  }
   result.reduction = data->reduction;
+  result.enforced_inequality_rows = data->enforced_inequality_rows;
   result.eliminated_phase_nodes =
       static_cast<int>(data->reduction.recovery_steps.size());
 
@@ -1014,7 +2822,7 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf(
       nu[i] = 0.01 * static_cast<double>((i % 5) + 1);
     }
     Eigen::SparseMatrix<double> analytic_hessian;
-    lagrangian_hessian(*data, x0, lambda, &nu, analytic_hessian);
+    lagrangian_hessian(*data, x0, lambda, &nu, analytic_hessian, false);
     const auto lagrangian_gradient = [&](const Eigen::VectorXd& point) {
       Eigen::VectorXd gradient;
       objective_gradient(*data, point, gradient);
@@ -1045,13 +2853,43 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf(
   Eigen::SparseMatrix<double> jac;
   equality_jacobian(*data, nlp.x0, jac);
   result.equality_jacobian_nonzeros = static_cast<int>(jac.nonZeros());
+  inequality_jacobian(*data, nlp.x0, jac,
+                      &data->enforced_inequality_rows);
+  result.inequality_jacobian_nonzeros = static_cast<int>(jac.nonZeros());
   if (solved.x.size() == data->layout.nvar && solved.x.allFinite()) {
     result.full_voltage = full_voltage(*data, solved.x);
+    result.dc_voltage = solved.x.segment(data->layout.i_udc, data->layout.ndc);
+    result.converter_phase_power_pu.clear();
+    result.converter_dc_power_pu.clear();
+    result.converter_phase_power_pu.reserve(data->converters.size());
+    result.converter_dc_power_pu.reserve(data->converters.size());
+    for (int ci = 0; ci < static_cast<int>(data->converters.size()); ++ci) {
+      const auto& converter = data->converters[static_cast<std::size_t>(ci)];
+      std::vector<Complex> phase_power;
+      phase_power.reserve(converter.phase_var_positions.size());
+      for (int pos : converter.phase_var_positions) {
+        phase_power.emplace_back(solved.x[data->layout.i_pac + pos],
+                                 solved.x[data->layout.i_qac + pos]);
+      }
+      result.converter_phase_power_pu.push_back(std::move(phase_power));
+      result.converter_dc_power_pu.push_back(solved.x[data->layout.i_pdc + ci]);
+    }
     Eigen::VectorXd physical_g;
     evaluate_equalities(*data, solved.x, physical_g);
     physical_g.array() /= data->equality_scale.array();
     Eigen::VectorXd h;
     evaluate_inequalities(*data, solved.x, h);
+    std::vector<bool> enforced_mask(
+        static_cast<std::size_t>(data->layout.nineq), false);
+    for (int row : data->enforced_inequality_rows) {
+      enforced_mask[static_cast<std::size_t>(row)] = true;
+    }
+    for (int row = 0; row < h.size(); ++row) {
+      if (!enforced_mask[static_cast<std::size_t>(row)]) {
+        result.max_omitted_inequality =
+            std::max(result.max_omitted_inequality, h[row]);
+      }
+    }
     const double equality_residual = physical_g.size() > 0
         ? physical_g.cwiseAbs().maxCoeff() : 0.0;
     const double inequality_residual = h.size() > 0
@@ -1063,15 +2901,226 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf(
           result.max_voltage_violation, std::max(0.0, std::max(h[i], h[full_n + i])));
     }
     result.max_vuf = max_vuf(problem, result.full_voltage);
+    result.max_converter_current_vuf =
+        max_converter_current_vuf(*data, result.primal, result.full_voltage);
+    result.max_converter_current_loading =
+        max_converter_current_loading(*data, result.primal, result.full_voltage);
+    result.converter_dynamic_equilibria = recover_dynamic_equilibria(
+        *data, result.primal, result.full_voltage,
+        &result.max_dynamic_equilibrium_residual);
     const int converter_row = 2 * full_n +
         static_cast<int>(problem.three_phase_bus_nodes.size());
-    for (int ci = 0; ci < data->layout.nc; ++ci) {
+    for (int ci = 0; ci < data->layout.nc + data->layout.ncp; ++ci) {
       result.max_converter_violation = std::max(
-          result.max_converter_violation, std::max(0.0, h[converter_row + ci]));
+          result.max_converter_violation,
+          std::max(0.0, h[converter_row + ci]));
     }
-    result.converged = result.converged && result.primal_residual <= 1e-7;
+    const bool audited_kkt =
+        result.primal_residual <= 1e-6 &&
+        result.dual_residual <= 1e-6 &&
+        result.complementarity <= 1e-6 &&
+        result.max_voltage_violation <= 1e-6 &&
+        result.max_converter_violation <= 1e-6;
+    result.converged = solved.stats.success && audited_kkt;
   }
   return result;
+}
+
+ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf(
+    const ThreePhaseHybridOPFCase& problem,
+    const ThreePhaseHybridOPFOptions& options) {
+  return solve_three_phase_hybrid_opf_impl(problem, options);
+}
+
+powerflow::ThreePhaseHybridPFCase make_three_phase_hybrid_pf_case(
+    const ThreePhaseHybridOPFCase& problem,
+    const ThreePhaseHybridOPFResult& operating_point) {
+  if (!operating_point.converged ||
+      operating_point.full_voltage.size() != problem.y_ac.rows() ||
+      operating_point.converter_phase_power_pu.size() !=
+          problem.converters.size()) {
+    throw std::invalid_argument(
+        "make_three_phase_hybrid_pf_case requires a converged matching OPF point");
+  }
+  powerflow::ThreePhaseHybridPFCase pf;
+  pf.name = problem.name + "_opf_dispatch_pf";
+  pf.base_mva = problem.base_mva;
+  pf.y_ac = problem.y_ac;
+  pf.i_ac_fixed = problem.i_ac_fixed;
+  pf.p_load_pu = problem.p_load_pu;
+  pf.q_load_pu = problem.q_load_pu;
+  pf.voltage_start = problem.voltage_start;
+  pf.ac_phase_index = problem.ac_phase_index;
+  pf.reference_nodes = problem.reference_nodes;
+  pf.reference_voltage = problem.reference_voltage;
+  pf.g_dc = problem.g_dc;
+  pf.p_dc_load_pu = problem.p_dc_load_pu;
+  pf.v_dc_start = problem.v_dc_start;
+
+  const auto is_dc_reference = [&](int terminal) {
+    return std::find(problem.dc_reference_terminals.begin(),
+                     problem.dc_reference_terminals.end(), terminal) !=
+           problem.dc_reference_terminals.end();
+  };
+  const auto dc_setpoint = [&](int terminal) {
+    for (int k = 0; k < static_cast<int>(problem.dc_reference_terminals.size()); ++k) {
+      if (problem.dc_reference_terminals[static_cast<std::size_t>(k)] == terminal) {
+        return problem.dc_reference_voltage_pu[k];
+      }
+    }
+    return pf.v_dc_start[terminal];
+  };
+  pf.converters.reserve(problem.converters.size());
+  for (int ci = 0; ci < static_cast<int>(problem.converters.size()); ++ci) {
+    const auto& source = problem.converters[static_cast<std::size_t>(ci)];
+    const auto& powers =
+        operating_point.converter_phase_power_pu[static_cast<std::size_t>(ci)];
+    Complex total{0.0, 0.0};
+    for (const Complex value : powers) total += value;
+    powerflow::ThreePhaseHybridPFConverter converter;
+    converter.phase_nodes = source.phase_nodes;
+    converter.dc_terminal = source.dc_terminal;
+    converter.efficiency = source.efficiency;
+    converter.p_set_pu = std::real(total);
+    converter.q_set_pu = std::imag(total);
+    converter.v_dc_set_pu = dc_setpoint(source.dc_terminal);
+    converter.virtual_r_pu = source.virtual_r_pu;
+    converter.virtual_x_pu = source.virtual_x_pu;
+    const bool controls_vdc = is_dc_reference(source.dc_terminal);
+    if (source.control_mode == PhaseVSCControlMode::GridFollowingPLL) {
+      converter.control_mode = controls_vdc
+          ? powerflow::ThreePhaseHybridPFControlMode::GridFollowingVdcQ
+          : powerflow::ThreePhaseHybridPFControlMode::GridFollowingPQ;
+    } else if (source.control_mode == PhaseVSCControlMode::GridFormingDroop) {
+      converter.control_mode = controls_vdc
+          ? powerflow::ThreePhaseHybridPFControlMode::GridFormingVdc
+          : powerflow::ThreePhaseHybridPFControlMode::GridFormingVoltage;
+      if (ci < static_cast<int>(operating_point.converter_dynamic_equilibria.size())) {
+        converter.internal_voltage_positive =
+            operating_point.converter_dynamic_equilibria[static_cast<std::size_t>(ci)]
+                .internal_voltage_positive;
+      }
+    } else {
+      converter.control_mode = controls_vdc
+          ? powerflow::ThreePhaseHybridPFControlMode::EqualPhaseVdcQ
+          : powerflow::ThreePhaseHybridPFControlMode::EqualPhasePQ;
+    }
+    pf.converters.push_back(std::move(converter));
+  }
+  return pf;
+}
+
+std::vector<ThreePhaseHybridOPFResult> solve_three_phase_hybrid_opf_sequence(
+    const std::vector<ThreePhaseHybridOPFCase>& problems,
+    const ThreePhaseHybridOPFOptions& options) {
+  std::vector<ThreePhaseHybridOPFResult> results;
+  if (problems.empty()) return results;
+
+  const auto preparation_start = std::chrono::steady_clock::now();
+  ThreePhaseHybridOPFOptions preparation_options = options;
+  preparation_options.use_constraint_oracle = false;
+  preparation_options.enforced_inequality_rows.clear();
+  const auto prepared = build_model_data(problems.front(), preparation_options);
+  const double preparation_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - preparation_start).count();
+
+  results.reserve(problems.size());
+  for (std::size_t index = 0; index < problems.size(); ++index) {
+    const auto& problem = problems[index];
+    validate_case(problem);
+    if (problem.y_ac.rows() != problems.front().y_ac.rows() ||
+        problem.y_ac.nonZeros() != problems.front().y_ac.nonZeros() ||
+        problem.g_dc.rows() != problems.front().g_dc.rows() ||
+        problem.g_dc.nonZeros() != problems.front().g_dc.nonZeros() ||
+        problem.generators.size() != problems.front().generators.size() ||
+        problem.converters.size() != problems.front().converters.size()) {
+      throw std::invalid_argument(
+          "hybrid OPF sequence requires a fixed network and device topology");
+    }
+    auto step_data = std::make_shared<ModelData>(*prepared);
+    step_data->source = &problem;
+    for (int pos = 0;
+         pos < static_cast<int>(step_data->reduction.retained.size()); ++pos) {
+      step_data->fixed_current[pos] = problem.i_ac_fixed[
+          step_data->reduction.retained[static_cast<std::size_t>(pos)]];
+    }
+
+    ThreePhaseHybridOPFOptions step_options = options;
+    if (!results.empty()) {
+      const auto& previous = results.back();
+      step_options.warm_start_with_ipopt = false;
+      step_options.oracle_seed_rows = previous.enforced_inequality_rows;
+      step_options.primal_start = previous.primal;
+      step_options.equality_dual_start = previous.equality_dual;
+      if (previous.inequality_dual.size() >= previous.inequalities) {
+        step_options.nonlinear_inequality_dual_start =
+            previous.inequality_dual.head(previous.inequalities);
+      }
+      if (previous.inequality_slack.size() >= previous.inequalities) {
+        step_options.nonlinear_slack_start =
+            previous.inequality_slack.head(previous.inequalities);
+      }
+    }
+    results.push_back(solve_three_phase_hybrid_opf_impl(
+        problem, step_options, step_data));
+  }
+  results.front().runtime_ms += preparation_ms;
+  return results;
+}
+
+std::vector<ThreePhaseHybridOPFResult> solve_three_phase_hybrid_opf_branches(
+    const ThreePhaseHybridOPFCase& base_problem,
+    const ThreePhaseHybridOPFResult& certified_base,
+    const std::vector<ThreePhaseHybridOPFCase>& perturbed_problems,
+    const ThreePhaseHybridOPFOptions& options) {
+  if (!certified_base.converged) {
+    throw std::invalid_argument(
+        "parametric OPF branches require a converged certified base point");
+  }
+  ThreePhaseHybridOPFOptions preparation_options = options;
+  preparation_options.use_constraint_oracle = false;
+  preparation_options.enforced_inequality_rows.clear();
+  const auto prepared = build_model_data(base_problem, preparation_options);
+
+  std::vector<ThreePhaseHybridOPFResult> results;
+  results.reserve(perturbed_problems.size());
+  for (const auto& problem : perturbed_problems) {
+    validate_case(problem);
+    if (problem.y_ac.rows() != base_problem.y_ac.rows() ||
+        problem.y_ac.nonZeros() != base_problem.y_ac.nonZeros() ||
+        problem.g_dc.rows() != base_problem.g_dc.rows() ||
+        problem.g_dc.nonZeros() != base_problem.g_dc.nonZeros() ||
+        problem.generators.size() != base_problem.generators.size() ||
+        problem.converters.size() != base_problem.converters.size()) {
+      throw std::invalid_argument(
+          "hybrid OPF branches require a fixed network and device topology");
+    }
+    auto step_data = std::make_shared<ModelData>(*prepared);
+    step_data->source = &problem;
+    for (int pos = 0;
+         pos < static_cast<int>(step_data->reduction.retained.size()); ++pos) {
+      step_data->fixed_current[pos] = problem.i_ac_fixed[
+          step_data->reduction.retained[static_cast<std::size_t>(pos)]];
+    }
+    ThreePhaseHybridOPFOptions step_options = options;
+    step_options.warm_start_with_ipopt = false;
+    step_options.oracle_seed_rows = certified_base.enforced_inequality_rows;
+    step_options.primal_start = certified_base.primal;
+    step_options.equality_dual_start = certified_base.equality_dual;
+    if (certified_base.inequality_dual.size() >=
+        certified_base.inequalities) {
+      step_options.nonlinear_inequality_dual_start =
+          certified_base.inequality_dual.head(certified_base.inequalities);
+    }
+    if (certified_base.inequality_slack.size() >=
+        certified_base.inequalities) {
+      step_options.nonlinear_slack_start =
+          certified_base.inequality_slack.head(certified_base.inequalities);
+    }
+    results.push_back(solve_three_phase_hybrid_opf_impl(
+        problem, step_options, step_data));
+  }
+  return results;
 }
 
 }  // namespace hacdcpf::opf::phase_hybrid

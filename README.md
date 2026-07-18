@@ -5,10 +5,11 @@
 
 本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。文档入口见 `docs/README.md`，更底层的公式和接口见 `docs/technical_notebook/`。
 
-## 文档同步状态（2026-07-12）
+## 文档同步状态（2026-07-18）
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
 - 已删除被实现取代的阶段计划、一次性代码审查和重复暂态设计稿；不再用历史 roadmap 描述当前行为。
+- 本次同步（2026-07-18）补入 2026 年 5–7 月新增能力域：电力市场、园区综合能源、承载力/薄弱环节/反事实规划、场景生成与台风弹性、年度碳/GEC、SPPT 可执行理论层、三相混合 OPF、电压稳定 CPF，以及 CIM/GridLAB-D/PSD.jl 等 IO 通道；并修正两处过时表述（ETAP 默认开关、短路分析入口名）。
 - 同步依据为当前 `CMakeLists.txt`、`CMakePresets.json`、`tests/CMakeLists.txt`、`src/`、`include/`、GUI 路由和 E2E 验证。
 - 如文档描述与代码行为冲突，以仓库实现为准：`src/`、`include/`、`tests/`、`CMake` 配置优先。
 
@@ -34,7 +35,7 @@ cmake --build --preset windows-vcpkg-release
 ctest --preset windows-vcpkg-release
 ```
 
-## 当前建模与仿真包状态快照（2026-07-12）
+## 当前建模与仿真包状态快照（2026-07-18）
 
 本节用于快速回答“现在这个包到底做到哪一步了”。结论基于当前仓库源码组织、CMake 选项与已注册测试目标，而不是历史规划文档。
 
@@ -42,29 +43,40 @@ ctest --preset windows-vcpkg-release
 
 | 能力域 | 当前状态 | 说明 |
 |---|---|---|
-| 混合 AC/DC 潮流与聚合建模 | 已实现并持续回归 | 覆盖 canonical projection、AC/DC 潮流、换流器协调与图分析链路。 |
-| OPF 与约束优化 | 已实现并持续回归 | AC OPF / DC OPF / RPO 已集成，支持多后端路径。 |
-| 图建模、网络降阶、重构 | 已实现并持续回归 | 支持连通性、开关收缩、Kron/series/pendant reduction、ONR。 |
-| 可靠性与弹性分析 | 已实现并持续回归 | 包含 MC、FMEA、三阶段可靠性与配电弹性分析（含 MIP 路径）。 |
-| 三相与短路分析 | 已实现并持续回归 | 三相 NR 与 AC/DC 短路分析均有独立测试族。 |
-| 谐波分析 | 已实现（持续增强） | 已有混合 AC/DC 谐波潮流与解析/回归测试。 |
-| 暂态动力学 | 已实现基础框架（持续增强） | 已包含动态建模、事件、积分器、DAE 求解与相关测试，但仍在快速迭代。 |
-| EV-电力-交通耦合 | 已实现（持续扩展） | 已集成 CTM/LTM、联合优化与大规模场景测试。 |
-| Web GUI 服务 | 已集成可运行 | `run_gui_server` 为独立可执行服务，后端能力与核心库联动。 |
+| 混合 AC/DC 潮流与聚合建模 | 已实现并持续回归 | 覆盖 canonical projection、AC/DC 潮流、换流器协调与图分析链路；求解器族含 Newton、FDPF、DC、自适应孤岛、分布式松弛、HELM、同伦延拓与 Newton-Krylov，并有 LM 信赖域/非单调线搜索/非线性缩放全局化层。 |
+| OPF 与约束优化 | 已实现并持续回归 | AC OPF / DC OPF / RPO（含 OLTC 离散档位控制）已集成，支持 Native AC、Parity IPM、嵌入式 Ipopt 等多后端路径。 |
+| 三相混合 OPF | 活跃研发中 | `opf::phase_hybrid` 提供 Full 与 GraphReduced（稀疏 Kron 降阶）模型变体，Ipopt/NativeIPM 双后端；配套论文同步撰写中。 |
+| 电压稳定 | 已实现 | 连续潮流（CPF）P-V 曲线与 VSI 指标。 |
+| 图建模、网络降阶、重构 | 已实现并持续回归 | 支持连通性、开关收缩、Kron/series/pendant/sparse-Kron reduction、ONR。 |
+| 可靠性与弹性分析 | 已实现并持续回归 | 包含 MC、FMEA（含 failure-mode 目录路径与信息物理 Level 1 调节）、三阶段可靠性与配电弹性分析（含 MIP 路径）。 |
+| 三相与短路分析 | 已实现并持续回归 | 三相 NR 与 AC/DC 短路分析（IEC 60909 简化与详细路径、DC 故障水平估计）均有独立测试族。 |
+| 谐波分析 | 已实现（持续增强） | 频域穿透、Newton 非线性、三相 abc 与 AC/DC 耦合谐波潮流，频扫/谐振检测与 IEEE 519 / GB/T 14549 合规校核。 |
+| 暂态动力学 | 已实现基础框架（持续增强） | 动态建模、事件、7 类求解器（含 MassMatrixDae 同时式 DAE）、DAE 诊断、小信号与频率观测；设备模型覆盖同步机/调速器/励磁/PSS、GFM/GFL 逆变器、DER 与 IEEE 1547 保护。 |
+| 时序与年度生产模拟 | 已实现并持续回归 | UC MILP → AC-OPF → PF 校验流水线；年度分层分解（支持按日并行）、多年生命周期仿真与容量扫描对比。 |
+| 电力市场 | 已实现（AC-only 垂直切片） | 日前 SCUC → 固定组合 SCED/LMP → LODF N-1 安全割 → AC 认证 → 结算/uplift；实时双结算与重复博弈；混合 AC/DC 资产显式拒绝。 |
+| 园区综合能源 | 已实现 | 电-热-氢-燃料多能流 MILP 调度（CHP、热泵、电解/燃料电池、多层氢储能、CCUS、碳预算）。 |
+| 承载力、薄弱环节与反事实规划 | 已实现 | DL/T 2041-2025 分布式电源承载力（含工程校核）、多维薄弱环节辨识、五类措施反事实对比。 |
+| 场景生成与台风弹性 | 已实现 | 常规/可靠性/弹性三族场景生成与聚类缩减，Holland 风场台风故障序列。 |
+| 碳流追踪 | 已实现并持续回归 | 比例/矩阵碳流追踪、年度碳核算（含储能碳库存动态）与用户/节点绿电证书（GEC）核算。 |
+| EV-电力-交通耦合 | 已实现（持续扩展） | CTM/LTM 传播、Formulation A–H 联合优化家族、选址定容 MILP 与滚动时域 MPC；结果按“可证伪证书”口径区分全局最优/局部驻点/启发式。 |
+| SPPT 可执行理论层 | 已实现（研究验证性质） | 语义保持投影理论（`docs/latex/sppt_theory.tex`）的 MR1–MR8 证伪套件、MR3 证书语料（CSV/LaTeX）、准入守卫与 agent 循环。 |
+| Web GUI 服务 | 已集成可运行 | `run_gui_server` 为独立可执行服务，上述能力均经 HTTP API 暴露；前端为原生 JS 单页应用。 |
 
 ### 2) 依赖与功能开关状态（当前默认）
 
 | 项 | 当前默认 | 影响 |
 |---|---|---|
 | 依赖模式 `HACDCPF_DEPENDENCY_PROFILE` | `portable` | 默认构建核心能力，避免强绑定开发型附加组件。 |
-| ETAP Excel IO `HACDCPF_ENABLE_ETAP` | `OFF` | 需显式开启并提供 OpenXLSX。 |
+| ETAP Excel IO `HACDCPF_ENABLE_ETAP` | `ON` | 需要 OpenXLSX：依次尝试系统包、本仓库/兄弟规划仓库的 vendored 副本，最后回退到 GitHub 下载；全部失败则 configure 报错，可显式 `-DHACDCPF_ENABLE_ETAP=OFF` 关闭。 |
 | OpenDSS bridge `HACDCPF_ENABLE_OPENDSS` | `OFF` | 需显式开启并提供 DSS C-API。 |
 | OpenDSS compare `HACDCPF_ENABLE_OPENDSS_COMPARE` | `OFF` | 依赖 OpenDSS bridge。 |
+| SuiteSparse `HACDCPF_USE_SUITESPARSE` | `ON` | 找到 UMFPACK/KLU 时作为 OPF 稀疏 KKT 后端；未找到自动回退 Eigen SparseLU。 |
 | IPOPT `HACDCPF_ENABLE_IPOPT` | macOS 默认 `ON`，其他平台默认 `OFF` | 当前嵌入式 IPOPT 路径按平台受限。 |
 
 ### 3) 测试覆盖信号（如何判断“不是纸面功能”）
 
-- 当前 `tests/CMakeLists.txt` 已注册大规模测试目标集，覆盖 IO、PF/OPF、图分析、重构、可靠性、弹性、短路、谐波、三相、暂态、EV-交通耦合与跨模块一致性。
+- 当前 `tests/CMakeLists.txt` 已注册 100 余个 C++ 测试目标（约 1250 个 Catch2 用例），覆盖 IO、PF/OPF、图分析、重构、可靠性、弹性、短路、谐波、三相、暂态、EV-交通耦合、市场、综合能源、SPPT 与跨模块一致性；另有 Node/Playwright 浏览器 E2E 与 Python GUI HTTP E2E 注册进 CTest。
+- 部分测试有运行时外部依赖门控（gridlabd 可执行、Julia、OpenDSS、Playwright/chromium 等），依赖缺失时自动 skip，不构成失败。
 - 这表示“代码路径已工程化并具备回归入口”，但不等同于“你当前机器/当前配置已全部跑通”。
 - 对外汇报建议使用两层口径：
   - 能力存在性：以源码与测试目标注册为准。
@@ -72,8 +84,10 @@ ctest --preset windows-vcpkg-release
 
 ### 4) 当前边界与建议口径
 
-- 对可选 IO（ETAP/OpenDSS）和外部比较（GridLAB-D/OpenDSS）应明确“需启用对应编译开关和运行时依赖”。
+- 对可选 IO（ETAP/OpenDSS）和外部比较（GridLAB-D/OpenDSS/PSD.jl）应明确“需启用对应编译开关和运行时依赖”。
 - 对暂态/谐波/跨引擎一致性类结论，建议标注“持续增强中”，避免描述为已完全定型。
+- 电力市场当前刻意限定为 AC-only：混合 AC/DC 资产会被显式拒绝并列入 `unsupported_assets`，不要表述为已支持混合资产出清。
+- 三相混合 OPF 与 SPPT 层属活跃研发/论文验证性质，接口与产物格式仍可能调整。
 - 当文档、报告、UI 文案与实现不一致时，以本仓库 `src/`、`include/`、`tests/` 与 CMake 配置为最终依据。
 
 ## 1. 工程场景
@@ -83,7 +97,7 @@ ctest --preset windows-vcpkg-release
 - 城市/园区配电网：AC 馈线、DC 母线、VSC 换流器、DC/DC 变换器、联络开关、断路器、分布式电源、储能和充电设施。
 - 主动配电网：PV、风电等可再生电源，静态发电机、柔性负荷、可控负荷、移动储能、微电网和虚拟电厂。
 - 故障恢复和运行优化：N-1 故障枚举、三阶段故障恢复、网络重构、弹性恢复、多时段生产模拟、OPF 和碳流追踪。
-- 标准算例和工程导入：MATPOWER、JPC JSON、Excel/OpenDSS 可选接口，以及项目内部 rich component schema。
+- 标准算例和工程导入：MATPOWER、JPC JSON、CIM/CGMES 3.0 与配电 CIM XML、GridLAB-D GLM、PowerSimulationsDynamics.jl snapshot、Excel(ETAP)/OpenDSS 可选接口，以及项目内部 rich component schema。
 
 工程上，本项目不直接把所有复杂设备塞进一个求解器模型，而是采用分层流程：
 
@@ -177,18 +191,32 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 
 | 模块 | 入口/路径 | 使用模型 | 输出 |
 |---|---|---|---|
-| AC/DC Power Flow | `solve_power_flow`, `solve_dc_power_flow`, `solve_power_flow_fdpf`, `solve_ac_dc_power_flow` | canonical AC/DC network + converter coupling | 电压、相角、支路/VSC/DC-DC/ER 潮流、收敛状态、converter coordination 诊断、`converter_model_scope` |
+| AC/DC Power Flow | `solve_power_flow`, `solve_dc_power_flow`, `solve_power_flow_fdpf`, `solve_ac_dc_power_flow`, `solve_power_flow_adaptive`, `solve_power_flow_distributed_slack` | canonical AC/DC network + converter coupling | 电压、相角、支路/VSC/DC-DC/ER 潮流、收敛状态、converter coordination 诊断、`converter_model_scope` |
+| 高级/回退潮流求解器 | `HelmSolver`、`HomotopyContinuationSolver`、`NewtonKrylovSolver`、`AdaptiveSolver`（`solver_factory.hpp`，`PowerFlowMethod`） | 全纯嵌入、同伦延拓、GMRES+Schur 预条件 | 难收敛算例的回退求解路径与诊断 |
 | 三相潮流 | `analysis::solve_three_phase_nr` | `ThreePhaseACSystem` | abc 相电压、电流和三相收敛信息 |
-| OPF | `solve_ac_opf`, `solve_dc_opf`, `solve_rpo` | AC/IPM、DC LP/QP、无功优化模型 | 调度、目标值、节点 LMP、约束诊断、solver path、audit/infeasibility hints、`converter_model_scope`；DCOPF branch congestion dual 仅在 `branch_mu_valid=true` 时可作工程解释 |
+| 三相混合 PF | `powerflow::solve_three_phase_hybrid_pf` | 原生相域 AC + DC 节点平衡 + equal-phase/GFL/GFM 变换器稳态闭合 | AC/DC 电压、逐相变换器功率/电流、VUF、分域物理残差；可从工程初值独立复核三相混合 OPF 点 |
+| OPF | `solve_ac_opf`, `solve_dc_opf`, `solve_rpo` | AC/IPM、DC LP/QP、无功优化模型（RPO 含 OLTC 离散档位邻域搜索） | 调度、目标值、节点 LMP、约束诊断、solver path、audit/infeasibility hints、`converter_model_scope`；DCOPF branch congestion dual 仅在 `branch_mu_valid=true` 时可作工程解释 |
+| 三相混合 OPF | `opf::phase_hybrid::solve_three_phase_hybrid_opf`（Full / GraphReduced 变体，Ipopt / NativeIPM 后端） | 相域 AC + DC 混合 OPF，可选稀疏 Kron 降阶 | 三相调度与约束诊断（活跃研发中） |
+| 电压稳定 | `CpfSolver`、`compute_vsi`（`power_flow/voltage_stability.hpp`） | 连续潮流（CPF） | P-V 曲线、VSI 指标 |
 | 网络重构 | `solve_optimal_reconfiguration`, `run_topology_reconfiguration` | LinDistFlow MILP + graph connectivity | 开/合支路集合、损耗 proxy、PF 校验 |
-| 图分析/降阶 | `build_power_system_graph`, `contract_zero_impedance_edges`, Kron/series/pendant recovery | graph abstraction | 连通性、径向性、super-node、恢复映射 |
-| 可靠性 MC | `run_nonsequential_mc`, `run_sequential_mc` | component outage sampling + DC OPF state evaluation | EENS、LOLE、LOLF、CoV、关键元件 |
-| FMEA 可靠性 | `run_distribution_fmea` | N-1 enumeration + switching/repair stage evaluation | contingency detail、EENS/EDNS/SAIFI/SAIDI |
+| 图分析/降阶 | `build_power_system_graph`, `contract_zero_impedance_edges`, Kron/series/pendant/sparse-Kron recovery | graph abstraction | 连通性、径向性、super-node、恢复映射 |
+| 可靠性 MC | `run_nonsequential_mc`, `run_sequential_mc` | component outage sampling + DC OPF state evaluation | EENS、LOLE、LOLF、CoV、VaR/CVaR、关键元件 |
+| FMEA 可靠性 | `run_distribution_fmea`, `run_failure_mode_fmea` | N-1/N-2 enumeration + switching/repair stage evaluation；可选信息物理 Level 1 调节（`CyberPhysicalFMEAOptions`） | contingency detail、EENS/EDNS/SAIFI/SAIDI |
 | 三阶段可靠性 | `run_three_stage_reliability` | native C++ MILP via MIPSolvers | 三阶段失负荷、SOP 动作、节点可靠性指标 |
 | 配电弹性 | `run_distribution_resilience_assessment`, `run_distribution_resilience_mip_assessment` | heuristic sequential 或 multi-period MIP LinDistFlow | 恢复曲线、MESS 状态、故障序列、弹性指标 |
-| 短路分析 | `run_short_circuit_analysis` | canonical network / sequence approximation | 故障电流和节点短路指标 |
-| 碳分析 | `run_carbon_analysis` | PF result + proportional / matrix tracing | 节点、支路、负荷碳流 |
-| 时序/生产模拟 | `solve_time_series_pf`, `solve_unit_commitment`, `solve_annual_production_simulation`, `run_lifecycle_simulation` | 多时段负荷/资源曲线 + OPF/UC | 年度生产、成本、生命周期指标 |
+| 短路分析 | `compute_short_circuit`, `run_short_circuit_detailed`, `dc_bus_fault_level` | Z-bus IEC 60909 简化 / 完整 IEC（c 因子、κ/ip/ib/ik/ith、变压器修正、电机与换流器贡献）；DC 为戴维南保守上限估计 | 故障电流、IEC 指标、DC 故障水平与开断 duty |
+| 谐波潮流 | `solve_harmonic_power_flow`（及 `_newton` / `_3ph` / `_3ph_hybrid` / `_hybrid_newton` 变体）, `frequency_scan`, `check_harmonic_limits` | 频域穿透（NIC 双端口桥）、Newton 非线性、三相 abc、AC/DC 耦合 | 谐波电压/电流、频扫/谐振、IEEE 519 / GB/T 14549 合规、K 因子/TDD |
+| 暂态仿真 | `run_transient_simulation`, `small_signal_analysis`, `computeFrequencyReport` | 机电暂态 DAE（7 类求解器，含 MassMatrixDae 同时式） | 轨迹、事件、COI/孤岛频率、小信号摘要 |
+| 碳分析 | `run_carbon_analysis`, `compute_annual_carbon_analysis`, `compute_annual_user_gec_accounting` | PF result + proportional / matrix tracing；年度时序含储能碳库存 | 节点、支路、负荷碳流；年度碳与用户/节点 GEC 核算 |
+| 时序/生产模拟 | `solve_time_series_pf`, `solve_unit_commitment`, `solve_annual_production_simulation`, `run_lifecycle_simulation`, `run_lifecycle_comparison` | 多时段负荷/资源曲线 + OPF/UC | 年度生产、成本、生命周期指标、容量扫描对比 |
+| 电力市场 | `market::run_day_ahead_market`, `run_real_time_market`, `run_repeated_market_game` | SCUC → 固定组合 SCED/LMP → LODF N-1 安全割 → AC 认证 → 结算/uplift（AC-only） | LMP、结算与 uplift、HHI 等市场力指标；混合资产显式拒绝 |
+| 园区综合能源 | `integrated_energy::solve_campus_ies` | 电-热-氢-燃料多能流 MILP（CHP、热泵、电解/燃料电池、氢储能、CCUS） | 多能流调度、成本/碳目标 |
+| 承载力评估 | `assess_hosting_capacity`（DL/T 2041-2025） | 设备级区间公式 + 可选 PF/短路/谐波工程校核 | 逐变压器/逐区域承载区间与分级 |
+| 薄弱环节辨识 | `run_multidimensional_weak_link_assessment` | 多维压力证据评分（severity / consensus / Pareto） | 薄弱环节排序与模式对比 |
+| 反事实规划 | `run_counterfactual_planning_assessment` | 扩容/储能/联络/自动化/DER 五类措施多维对比 | 反事实指标与两两协同分析 |
+| 场景生成 | `generate_scenarios`, `generate_typhoon_fault_sequence`, `enumerate_n1_contingencies` | 常规/可靠性/弹性三族场景 + Holland 风场台风模型 + k-medoids 缩减 | 场景目录、台风故障序列 |
+| EV-交通耦合 | `simulate_ev_power_traffic`（A）、`_ctm_due`（B+）、`_ctm_joint`（C）、`solve_joint_optimizer`（D）、`solve_ctm_so_lp`/`solve_ltm_so_lp`（E）、`solve_ctm_due_vi`（F）、`solve_infra_design_milp`（G）、`solve_ltm_mpc`（H） | CTM/LTM 交通传播 + DC-OPF/LMP 联合优化 | 耦合仿真结果与最优性证书（区分全局/局部/启发式） |
+| SPPT 验证层 | `sppt::run_core_metamorphic_suite`, `certify_corpus`, `guard_system`, `run_agent_loop` | MR1–MR8 蜕变关系、独立残差证书、三道准入守卫 | 证伪/认证产物（CSV/LaTeX，研究验证性质） |
 
 优化和 MILP 模块依赖 sibling directory `../MIPSolvers` 提供的 Eigen、HiGHS、Ipopt 和 native branch-and-cut 后端。项目 CMake 默认从该 sibling 路径解析依赖，而不是搜索系统 solver。
 
@@ -286,7 +314,7 @@ HybridPowerSystem + reliability data
 ### 8.4 I/O 流程
 
 ```text
-MATPOWER / JPC JSON / Excel / OpenDSS
+MATPOWER / JPC JSON / CIM（CGMES 3.0 与配电 CIM）/ GridLAB-D / PSD.jl / Excel(ETAP) / OpenDSS
   -> rich HybridPowerSystem
   -> validation and projection
   -> analysis
@@ -298,7 +326,7 @@ JPC JSON export should be treated as a schema-preserving operation: rich compone
 ### 8.5 ETAP I/O（导入/导出）
 
 ETAP 互操作由 `include/hacdcpf/io/etap_io.hpp` / `src/io/etap_io.cpp` 提供，编译开关
-`-DHACDCPF_ENABLE_ETAP=ON`（依赖 OpenXLSX；默认 OFF）。
+`HACDCPF_ENABLE_ETAP`（依赖 OpenXLSX；默认 ON，可用 `-DHACDCPF_ENABLE_ETAP=OFF` 关闭）。
 
 支持三条输入路径，全部映射到同一 `HybridPowerSystem`：
 
@@ -367,7 +395,7 @@ GUI 第一阶段统一契约包括：`hysim_task_status_v1`（任务状态、耗
 
 第二阶段任务执行层为所有主要分析请求分配 `X-HySim-Request-ID`，活动任务期间锁定运行按钮并提供“取消等待”。取消会中止浏览器请求、忽略该请求的后续结果，并轮询后端直到求解收尾；由于当前 C++ 求解器没有统一的取消令牌，这不是强制终止求解线程。模型版本在请求期间变化时，响应统一标记为 `stale` 且禁止进入 Dashboard 或 Canvas。
 
-第三阶段将共享前端基础设施从 `web/js/app.js` 拆分到 `web/js/core/`：`analysis_contracts.js` 维护分析端点和结果契约，`task_manager.js` 管理单活动任务、取消与后端收尾，`api_client.js` 统一请求 ID、错误和陈旧结果处理，`result_mapping.js` 维护 Dashboard 到 Canvas 的类型/索引映射。`app.js` 只保留 UI 状态回调和薄适配层，四个核心脚本必须在 `app.js` 之前加载。
+第三阶段将共享前端基础设施从 `web/js/app.js` 拆分到 `web/js/core/`：`analysis_contracts.js` 维护分析端点和结果契约，`task_manager.js` 管理单活动任务、取消与后端收尾，`api_client.js` 统一请求 ID、错误和陈旧结果处理，`result_mapping.js` 维护 Dashboard 到 Canvas 的类型/索引映射。此后 `web/js/core/` 又扩展了 `timeseries_window.js`（长时序窗口化与保峰降采样）、`layout_graph.js` / `layout_engine.js`（布局语义投影与 ELK 异步布局客户端）、`accessibility.js`（键盘导航与可访问性审计）、`runtime_diagnostics.js`（前端运行时诊断）。`app.js` 只保留 UI 状态回调和薄适配层，`web/js/core/` 下 9 个脚本必须在 `app.js` 之前加载。
 
 第四阶段针对中大型系统优化交互性能：Canvas 将连续鼠标移动合并到浏览器动画帧，并对视口外的元件和连接执行可逆裁剪。年度生产模拟按 7/30/90 天窗口浏览；选择全年时采用保留首尾及负荷极值的降采样，最多绘制 2000 点，同时保留完整原始序列供导出和后续分析使用。规模化 GUI E2E 对这些性能边界提供回归契约。
 
@@ -400,12 +428,30 @@ fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到
 | Graph model | `include/hacdcpf/graph/power_system_graph.hpp`, `src/graph/power_system_graph.cpp` |
 | Graph reduction/recovery | `include/hacdcpf/graph/switch_contraction.hpp`, `include/hacdcpf/graph/result_recovery.hpp`, `src/graph/` |
 | Validation | `include/hacdcpf/validation/validate_system.hpp`, `src/validation/validate_system.cpp` |
+| 公共 API 门面 | `include/hacdcpf/api/hacdcpf.hpp`, `include/hacdcpf/api/solver_capabilities.hpp`, `src/api/hacdcpf.cpp` |
 | PF/OPF | `include/hacdcpf/power_flow/`, `include/hacdcpf/optimal_power_flow/`, `src/power_flow/`, `src/optimal_power_flow/` |
+| 高级潮流求解器 | `include/hacdcpf/power_flow/solvers/`, `include/hacdcpf/power_flow/globalization/`（HELM、同伦、Newton-Krylov、LM 信赖域等） |
+| 电压稳定 CPF | `include/hacdcpf/power_flow/voltage_stability.hpp`, `src/power_flow/voltage_stability.cpp` |
+| AML 代数建模层 | `include/hacdcpf/power_models/`, `src/power_models/`（ACOPF/ACDCOPF/DCOPF/LinDistFlow/SCUC builder） |
+| MIPSolvers 转发层 | `include/hacdcpf/aml/`, `include/hacdcpf/engine/`, `include/hacdcpf/solver/`（header-only 转发；实现在兄弟仓库 `../MIPSolvers`） |
+| 暂态动力学 | `include/hacdcpf/dynamics/`, `src/dynamics/` |
+| 谐波潮流 | `include/hacdcpf/analysis/harmonics_power_flow.hpp`, `src/harmonics_power_flow/` |
+| 短路分析 | `include/hacdcpf/analysis/short_circuit.hpp`, `include/hacdcpf/analysis/dc_short_circuit.hpp`, `src/short_circuit/` |
+| 时序/年度/生命周期 | `include/hacdcpf/time_series/`, `src/time_series/` |
+| 碳流/年度碳 | `include/hacdcpf/carbon_analysis/`, `src/carbon_analysis/` |
+| EV-交通耦合 | `include/hacdcpf/ev_power_traffic/`, `src/ev_power_traffic/` |
+| 电力市场 | `include/hacdcpf/market/market_simulation.hpp`, `src/market/` |
+| 园区综合能源 | `include/hacdcpf/integrated_energy/`, `src/integrated_energy/` |
+| 承载力/薄弱环节/反事实 | `include/hacdcpf/analysis/hosting_capacity.hpp` 等, `src/analysis/` |
+| 场景生成/台风 | `include/hacdcpf/analysis/scenario_generation.hpp`, `include/hacdcpf/analysis/typhoon_resilience.hpp`, `src/scenario_generation/` |
+| SPPT 验证层 | `include/hacdcpf/sppt/`, `src/sppt/`（理论：`docs/latex/sppt_theory.tex`） |
 | 网络重构 | `include/hacdcpf/network_reconfiguration/`, `src/network_reconfiguration/` |
 | 可靠性 | `include/hacdcpf/reliability/`, `include/hacdcpf/analysis/three_stage_reliability.hpp`, `src/reliability/` |
 | 弹性恢复 | `include/hacdcpf/resilience/resilience_assessment.hpp`, `src/resilience/` |
-| I/O | `include/hacdcpf/io/`, `src/io/` |
-| Diagnostics/benchmarks | `tools/opendss_pf_compare.cpp` |
+| I/O | `include/hacdcpf/io/`, `src/io/`（JSON、MATPOWER、CIM、GridLAB-D、PSD.jl；ETAP/OpenDSS 可选） |
+| 并行工具 | `include/hacdcpf/util/thread_pool.hpp`（`ThreadPool`、`parallel_for`） |
+| GUI 后端服务 | `tests/run_gui_server.cpp`（独立可执行，HTTP API + 静态挂载 `web/`） |
+| Diagnostics/benchmarks | `tools/`（`opendss_pf_compare`、`etap_convert`、`matpower_pf_compare`、`sppt_certify`/`sppt_ablation`/`sppt_benchmark`/`sppt_agent_demo`、`hybrid_acdc_pf_study`、`phase_graph_reduction_benchmark`、`phase_hybrid_opf_benchmark`、gridlabd/transient/short-circuit validation matrices 等） |
 | 文档索引 | `docs/README.md` |
 | 技术笔记 | `docs/technical_notebook/` |
 

@@ -1,4 +1,7 @@
 #include <algorithm>
+#include <array>
+#include <cctype>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <filesystem>
@@ -7,8 +10,10 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <queue>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -22,7 +27,6 @@
 namespace fs = std::filesystem;
 using hacdcpf::PhaseMask;
 using hacdcpf::ThreePhaseACSystem;
-using hacdcpf::analysis::PhaseNodeIndexer;
 using hacdcpf::graph::SparseComplexMatrix;
 using namespace hacdcpf::opf::phase_hybrid;
 using Complex = std::complex<double>;
@@ -52,10 +56,77 @@ struct Audit {
   double realized_dc_share{0.0};
   ThreePhaseHybridOPFResult full;
   ThreePhaseHybridOPFResult reduced;
+  ThreePhaseHybridOPFResult continuation;
+  ThreePhaseHybridOPFResult continuation_reference;
+  double continuation_objective_relative_error{
+      std::numeric_limits<double>::quiet_NaN()};
+  double continuation_voltage_error{
+      std::numeric_limits<double>::quiet_NaN()};
   double objective_relative_error{std::numeric_limits<double>::quiet_NaN()};
   double voltage_error{std::numeric_limits<double>::quiet_NaN()};
   double speedup{std::numeric_limits<double>::quiet_NaN()};
   std::string error;
+};
+
+struct SensitivityRow {
+  std::string scenario;
+  int repeat{0};
+  bool continuation_converged{false};
+  bool reference_converged{false};
+  int iterations{0};
+  int oracle_rounds{0};
+  int added_rows{0};
+  int enforced_rows{0};
+  int total_rows{0};
+  double continuation_ms{0.0};
+  double reference_ms{0.0};
+  double objective_error{std::numeric_limits<double>::quiet_NaN()};
+  double voltage_error{std::numeric_limits<double>::quiet_NaN()};
+  double primal_residual{0.0};
+  double dual_residual{0.0};
+  double complementarity{0.0};
+  double max_vuf{0.0};
+  double phase_load_unbalance{0.0};
+  double max_converter_current_vuf{0.0};
+  double max_converter_current_loading{0.0};
+  double max_dynamic_equilibrium_residual{0.0};
+  std::array<double, 3> phase_vmin{};
+  std::array<double, 3> phase_vmax{};
+};
+
+struct SensitivityScenario {
+  std::string label;
+  ThreePhaseHybridOPFCase problem;
+};
+
+struct DriftTraceRow {
+  int iteration_cap{0};
+  ThreePhaseHybridOPFResult result;
+  double min_phase_generation_pu{std::numeric_limits<double>::quiet_NaN()};
+  double max_phase_generation_pu{std::numeric_limits<double>::quiet_NaN()};
+};
+
+struct NativePhaseGraph {
+  SparseComplexMatrix y_pu;
+  Eigen::VectorXcd voltage_start_pu;
+  std::vector<int> bus_offset;
+  std::vector<int> phase_index;
+  std::vector<std::array<int, 3>> bus_phase_to_node;
+
+  bool has_node(int bus, int phase) const {
+    return bus >= 0 && bus < static_cast<int>(bus_phase_to_node.size()) &&
+           phase >= 0 && phase < 3 &&
+           bus_phase_to_node[static_cast<std::size_t>(bus)]
+                            [static_cast<std::size_t>(phase)] >= 0;
+  }
+
+  int node_index(int bus, int phase) const {
+    if (!has_node(bus, phase)) {
+      throw std::runtime_error("native OpenDSS phase node is missing");
+    }
+    return bus_phase_to_node[static_cast<std::size_t>(bus)]
+                            [static_cast<std::size_t>(phase)];
+  }
 };
 
 fs::path project_root() {
@@ -66,30 +137,209 @@ fs::path project_root() {
 #endif
 }
 
-SparseComplexMatrix build_ybus(
-    int dimension,
-    const std::vector<hacdcpf::analysis::PhaseDomainSparseEntry>& entries) {
-  std::vector<Eigen::Triplet<Complex>> triplets;
-  triplets.reserve(entries.size());
-  for (const auto& entry : entries) {
-    triplets.emplace_back(entry.row, entry.col, entry.value);
+std::string lowercase_ascii(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+  return value;
+}
+
+NativePhaseGraph build_native_phase_graph(
+    const fs::path& master,
+    const ThreePhaseACSystem& sys) {
+  const auto snapshot = hacdcpf::analysis::build_opendss_sparse_y_matrix(
+      master, {}, false, true, true);
+  NativePhaseGraph graph;
+  graph.bus_offset.resize(static_cast<std::size_t>(snapshot.dimension), -1);
+  graph.phase_index.resize(static_cast<std::size_t>(snapshot.dimension), -1);
+  graph.bus_phase_to_node.assign(
+      sys.buses.size(), std::array<int, 3>{-1, -1, -1});
+
+  std::unordered_map<std::string, int> bus_by_name;
+  bus_by_name.reserve(sys.buses.size());
+  for (int offset = 0; offset < static_cast<int>(sys.buses.size()); ++offset) {
+    bus_by_name[lowercase_ascii(sys.buses[static_cast<std::size_t>(offset)].name)] =
+        offset;
   }
-  SparseComplexMatrix y(dimension, dimension);
-  y.setFromTriplets(triplets.begin(), triplets.end(),
-                    [](Complex a, Complex b) { return a + b; });
-  y.prune(Complex{}, 1e-13);
-  y.makeCompressed();
-  return y;
+  for (int node = 0; node < snapshot.dimension; ++node) {
+    const std::string label = lowercase_ascii(
+        snapshot.node_order[static_cast<std::size_t>(node)]);
+    const std::size_t separator = label.rfind('.');
+    if (separator == std::string::npos || separator + 1 >= label.size()) {
+      throw std::runtime_error("invalid OpenDSS Y-node label: " + label);
+    }
+    const int conductor = std::stoi(label.substr(separator + 1));
+    if (conductor < 1 || conductor > 3) {
+      throw std::runtime_error("unsupported OpenDSS conductor in Y-node label: " + label);
+    }
+    const auto bus_it = bus_by_name.find(label.substr(0, separator));
+    if (bus_it == bus_by_name.end()) {
+      throw std::runtime_error("OpenDSS Y-node bus is absent from imported buses: " + label);
+    }
+    const int phase = conductor - 1;
+    const int bus = bus_it->second;
+    int& slot = graph.bus_phase_to_node[static_cast<std::size_t>(bus)]
+                                       [static_cast<std::size_t>(phase)];
+    if (slot >= 0) {
+      throw std::runtime_error("duplicate OpenDSS Y-node label: " + label);
+    }
+    slot = node;
+    graph.bus_offset[static_cast<std::size_t>(node)] = bus;
+    graph.phase_index[static_cast<std::size_t>(node)] = phase;
+  }
+
+  std::vector<Eigen::Triplet<Complex>> triplets;
+  triplets.reserve(snapshot.entries.size());
+  const double base_mva = sys.base_mva > 0.0 ? sys.base_mva : 1.0;
+  for (const auto& entry : snapshot.entries) {
+    const auto& row_bus = sys.buses[static_cast<std::size_t>(
+        graph.bus_offset[static_cast<std::size_t>(entry.row)])];
+    const auto& col_bus = sys.buses[static_cast<std::size_t>(
+        graph.bus_offset[static_cast<std::size_t>(entry.col)])];
+    if (!(row_bus.base_kv > 0.0) || !(col_bus.base_kv > 0.0)) {
+      throw std::runtime_error("OpenDSS Y-node has no positive voltage base");
+    }
+    const double row_phase_base_kv = row_bus.phase_mask.count() == 3
+        ? row_bus.base_kv / std::sqrt(3.0) : row_bus.base_kv;
+    const double col_phase_base_kv = col_bus.phase_mask.count() == 3
+        ? col_bus.base_kv / std::sqrt(3.0) : col_bus.base_kv;
+    const double scale =
+        row_phase_base_kv * col_phase_base_kv / base_mva;
+    triplets.emplace_back(entry.row, entry.col, entry.value * scale);
+  }
+  graph.y_pu.resize(snapshot.dimension, snapshot.dimension);
+  graph.y_pu.setFromTriplets(triplets.begin(), triplets.end(),
+                             [](Complex a, Complex b) { return a + b; });
+  graph.y_pu.prune(Complex{}, 1e-13);
+  graph.y_pu.makeCompressed();
+  graph.voltage_start_pu.resize(snapshot.dimension);
+  for (int node = 0; node < snapshot.dimension; ++node) {
+    const auto& bus = sys.buses[static_cast<std::size_t>(
+        graph.bus_offset[static_cast<std::size_t>(node)])];
+    const double phase_base_kv = bus.phase_mask.count() == 3
+        ? bus.base_kv / std::sqrt(3.0) : bus.base_kv;
+    const Complex voltage = snapshot.node_voltage_volts.empty()
+        ? Complex{}
+        : snapshot.node_voltage_volts[static_cast<std::size_t>(node)];
+    graph.voltage_start_pu[node] = voltage / (1000.0 * phase_base_kv);
+  }
+  return graph;
+}
+
+std::vector<int> restrict_to_reference_connected_phase_graph(
+    ThreePhaseHybridOPFCase& c) {
+  const int n = static_cast<int>(c.y_ac.rows());
+  std::vector<std::vector<int>> adjacency(static_cast<std::size_t>(n));
+  for (int col = 0; col < c.y_ac.outerSize(); ++col) {
+    for (SparseComplexMatrix::InnerIterator it(c.y_ac, col); it; ++it) {
+      if (it.row() == it.col() || std::abs(it.value()) <= 1e-13) continue;
+      adjacency[static_cast<std::size_t>(it.row())].push_back(it.col());
+      adjacency[static_cast<std::size_t>(it.col())].push_back(it.row());
+    }
+  }
+
+  std::vector<bool> reached(static_cast<std::size_t>(n), false);
+  std::queue<int> frontier;
+  for (int node : c.reference_nodes) {
+    if (reached[static_cast<std::size_t>(node)]) continue;
+    reached[static_cast<std::size_t>(node)] = true;
+    frontier.push(node);
+  }
+  while (!frontier.empty()) {
+    const int node = frontier.front();
+    frontier.pop();
+    for (int neighbor : adjacency[static_cast<std::size_t>(node)]) {
+      if (reached[static_cast<std::size_t>(neighbor)]) continue;
+      reached[static_cast<std::size_t>(neighbor)] = true;
+      frontier.push(neighbor);
+    }
+  }
+
+  std::vector<int> old_to_new(static_cast<std::size_t>(n), -1);
+  int retained = 0;
+  int disconnected_with_injection = 0;
+  for (int node = 0; node < n; ++node) {
+    if (reached[static_cast<std::size_t>(node)]) {
+      old_to_new[static_cast<std::size_t>(node)] = retained++;
+      continue;
+    }
+    if (std::abs(c.p_load_pu[node]) > 1e-12 ||
+        std::abs(c.q_load_pu[node]) > 1e-12 ||
+        std::abs(c.i_ac_fixed[node]) > 1e-12) {
+      ++disconnected_with_injection;
+    }
+  }
+  if (disconnected_with_injection > 0) {
+    throw std::runtime_error(
+        "reference-disconnected AC phase component contains " +
+        std::to_string(disconnected_with_injection) + " injected phase nodes");
+  }
+  if (retained == n) return old_to_new;
+
+  std::vector<Eigen::Triplet<Complex>> ytriplets;
+  ytriplets.reserve(static_cast<std::size_t>(c.y_ac.nonZeros()));
+  for (int col = 0; col < c.y_ac.outerSize(); ++col) {
+    for (SparseComplexMatrix::InnerIterator it(c.y_ac, col); it; ++it) {
+      const int row_new = old_to_new[static_cast<std::size_t>(it.row())];
+      const int col_new = old_to_new[static_cast<std::size_t>(it.col())];
+      if (row_new >= 0 && col_new >= 0) {
+        ytriplets.emplace_back(row_new, col_new, it.value());
+      }
+    }
+  }
+  SparseComplexMatrix energized_y(retained, retained);
+  energized_y.setFromTriplets(ytriplets.begin(), ytriplets.end());
+  energized_y.makeCompressed();
+
+  const auto restrict_real = [&](const Eigen::VectorXd& full) {
+    Eigen::VectorXd energized(retained);
+    for (int old = 0; old < n; ++old) {
+      const int mapped = old_to_new[static_cast<std::size_t>(old)];
+      if (mapped >= 0) energized[mapped] = full[old];
+    }
+    return energized;
+  };
+  const auto restrict_complex = [&](const Eigen::VectorXcd& full) {
+    Eigen::VectorXcd energized(retained);
+    for (int old = 0; old < n; ++old) {
+      const int mapped = old_to_new[static_cast<std::size_t>(old)];
+      if (mapped >= 0) energized[mapped] = full[old];
+    }
+    return energized;
+  };
+
+  c.y_ac = std::move(energized_y);
+  c.i_ac_fixed = restrict_complex(c.i_ac_fixed);
+  c.p_load_pu = restrict_real(c.p_load_pu);
+  c.q_load_pu = restrict_real(c.q_load_pu);
+  c.v_min_pu = restrict_real(c.v_min_pu);
+  c.v_max_pu = restrict_real(c.v_max_pu);
+  c.voltage_start = restrict_complex(c.voltage_start);
+  if (!c.ac_phase_index.empty()) {
+    std::vector<int> energized_phase(static_cast<std::size_t>(retained), -1);
+    for (int old = 0; old < n; ++old) {
+      const int mapped = old_to_new[static_cast<std::size_t>(old)];
+      if (mapped >= 0) {
+        energized_phase[static_cast<std::size_t>(mapped)] =
+            c.ac_phase_index[static_cast<std::size_t>(old)];
+      }
+    }
+    c.ac_phase_index = std::move(energized_phase);
+  }
+  for (int& node : c.reference_nodes) {
+    node = old_to_new[static_cast<std::size_t>(node)];
+  }
+  return old_to_new;
 }
 
 std::vector<Input> inputs() {
   const fs::path refs = project_root() / "external_data" / "opendss_ieee_pes" /
                         "opendss_reference";
   return {
-      {"H13", refs / "13_node" / "official_full" / "IEEE13Nodeckt.dss", 0.01, 1},
+      {"H13", refs / "13_node" / "official_full" / "IEEE13Nodeckt.dss", 0.15, 1},
       {"H34", refs / "34_node" / "ieee34Mod2.dss", 0.20, 2},
       {"H123", refs / "123_node" / "IEEE123Master.dss", 0.25, 4},
-      {"H8500", refs / "8500_node" / "Master.dss", 0.30, 12},
+      {"H8500", refs / "8500_node" / "Master.dss", 0.05, 12},
   };
 }
 
@@ -101,39 +351,33 @@ ThreePhaseHybridOPFCase hybridize(const Input& input) {
   const ThreePhaseACSystem sys =
       hacdcpf::analysis::load_three_phase_system_from_opendss(input.master, 100.0);
   if (sys.buses.empty()) throw std::runtime_error("OpenDSS import returned no buses");
-  const auto compact = hacdcpf::analysis::build_compact_pf_data(sys, true);
-  const PhaseNodeIndexer& indexer = compact.indexer;
-  const int n = indexer.total_nodes;
+  const NativePhaseGraph phase_graph = build_native_phase_graph(input.master, sys);
+  const int n = static_cast<int>(phase_graph.y_pu.rows());
 
   ThreePhaseHybridOPFCase c;
   c.name = input.label;
   c.base_mva = sys.base_mva > 0.0 ? sys.base_mva : 1.0;
-  c.y_ac = build_ybus(n, compact.ybus_entries);
+  c.y_ac = phase_graph.y_pu;
   c.i_ac_fixed = Eigen::VectorXcd::Zero(n);
-  if (compact.fixed_current.size() != static_cast<std::size_t>(n)) {
-    throw std::runtime_error("compact fixed-current dimension mismatch");
-  }
-  for (int node = 0; node < n; ++node) {
-    c.i_ac_fixed[node] = compact.fixed_current[static_cast<std::size_t>(node)];
-  }
   c.p_load_pu = Eigen::VectorXd::Zero(n);
   c.q_load_pu = Eigen::VectorXd::Zero(n);
   c.v_min_pu = Eigen::VectorXd::Constant(n, 0.85);
   c.v_max_pu = Eigen::VectorXd::Constant(n, 1.10);
   c.voltage_start = Eigen::VectorXcd::Ones(n);
+  c.ac_phase_index = phase_graph.phase_index;
   c.vuf_max = 0.03;
 
-  for (const auto& node : indexer.nodes) {
-    const auto& bus = sys.buses[static_cast<std::size_t>(node.bus_offset)];
-    const double vm[3] = {bus.vm_a_pu, bus.vm_b_pu, bus.vm_c_pu};
-    const double va[3] = {bus.va_a_deg, bus.va_b_deg, bus.va_c_deg};
+  for (int k = 0; k < n; ++k) {
+    const int bus_offset = phase_graph.bus_offset[static_cast<std::size_t>(k)];
+    const int phase_index = phase_graph.phase_index[static_cast<std::size_t>(k)];
+    const auto& bus = sys.buses[static_cast<std::size_t>(bus_offset)];
     const double pd[3] = {bus.pd_a_mw, bus.pd_b_mw, bus.pd_c_mw};
     const double qd[3] = {bus.qd_a_mvar, bus.qd_b_mvar, bus.qd_c_mvar};
-    const int k = node.compact_index;
-    const double magnitude = vm[node.phase_index] > 0.0 ? vm[node.phase_index] : 1.0;
-    c.voltage_start[k] = std::polar(magnitude, va[node.phase_index] * M_PI / 180.0);
-    c.p_load_pu[k] += pd[node.phase_index] / c.base_mva;
-    c.q_load_pu[k] += qd[node.phase_index] / c.base_mva;
+    c.voltage_start[k] = std::abs(phase_graph.voltage_start_pu[k]) > 0.0
+        ? phase_graph.voltage_start_pu[k]
+        : Complex{1.0, 0.0};
+    c.p_load_pu[k] += pd[phase_index] / c.base_mva;
+    c.q_load_pu[k] += qd[phase_index] / c.base_mva;
     c.v_min_pu[k] = bus.vmin_pu > 0.0 ? bus.vmin_pu : 0.85;
     c.v_max_pu[k] = bus.vmax_pu > 0.0 ? bus.vmax_pu : 1.10;
   }
@@ -147,32 +391,10 @@ ThreePhaseHybridOPFCase hybridize(const Input& input) {
     const double p[3] = {load.p_a_mw, load.p_b_mw, load.p_c_mw};
     const double q[3] = {load.q_a_mvar, load.q_b_mvar, load.q_c_mvar};
     for (int phase = 0; phase < 3; ++phase) {
-      if (!load.phase_mask.has(phase) || !indexer.has_node(bus_offset, phase)) continue;
-      const int node = indexer.node_index(bus_offset, phase);
+      if (!load.phase_mask.has(phase) || !phase_graph.has_node(bus_offset, phase)) continue;
+      const int node = phase_graph.node_index(bus_offset, phase);
       c.p_load_pu[node] += p[phase] / c.base_mva;
       c.q_load_pu[node] += q[phase] / c.base_mva;
-    }
-  }
-
-  hacdcpf::analysis::ThreePhaseNROptions nr_options;
-  nr_options.max_iter = 100;
-  nr_options.tol = 1e-9;
-  nr_options.include_shunts = true;
-  const auto nr = hacdcpf::analysis::solve_three_phase_nr(sys, nr_options);
-  if (nr.converged) {
-    for (const auto& voltage : nr.bus_voltages) {
-      const auto bus_it = std::find_if(
-          sys.buses.begin(), sys.buses.end(),
-          [&](const auto& bus) { return bus.index == voltage.bus_id; });
-      if (bus_it == sys.buses.end()) continue;
-      const int bus_offset = static_cast<int>(std::distance(sys.buses.begin(), bus_it));
-      const double vm[3] = {voltage.vm_a_pu, voltage.vm_b_pu, voltage.vm_c_pu};
-      const double va[3] = {voltage.va_a_deg, voltage.va_b_deg, voltage.va_c_deg};
-      for (int phase = 0; phase < 3; ++phase) {
-        if (!indexer.has_node(bus_offset, phase) || !(vm[phase] > 0.0)) continue;
-        c.voltage_start[indexer.node_index(bus_offset, phase)] =
-            std::polar(vm[phase], va[phase] * M_PI / 180.0);
-      }
     }
   }
 
@@ -185,14 +407,15 @@ ThreePhaseHybridOPFCase hybridize(const Input& input) {
     if (bus_it == sys.buses.end()) continue;
     const int bus_offset = static_cast<int>(std::distance(sys.buses.begin(), bus_it));
     for (int phase = 0; phase < 3; ++phase) {
-      if (!grid.phase_mask.has(phase) || !indexer.has_node(bus_offset, phase)) continue;
-      const int node = indexer.node_index(bus_offset, phase);
+      if (!grid.phase_mask.has(phase) || !phase_graph.has_node(bus_offset, phase)) continue;
+      const int node = phase_graph.node_index(bus_offset, phase);
       if (!reference_node_set.insert(node).second) continue;
       const double phase_shift[3] = {0.0, -120.0, 120.0};
       const double vm[3] = {grid.vm_a_pu, grid.vm_b_pu, grid.vm_c_pu};
       const double va[3] = {grid.va_a_deg, grid.va_b_deg, grid.va_c_deg};
-      const double magnitude = grid.use_phase_voltage_setpoint && vm[phase] > 0.0
+      double magnitude = grid.use_phase_voltage_setpoint && vm[phase] > 0.0
           ? vm[phase] : (grid.vm_pu > 0.0 ? grid.vm_pu : 1.0);
+      if (input.label == "H8500") magnitude = std::min(magnitude, 1.04);
       const double angle = grid.use_phase_voltage_setpoint
           ? va[phase] : grid.va_deg + phase_shift[phase];
       c.reference_nodes.push_back(node);
@@ -206,8 +429,8 @@ ThreePhaseHybridOPFCase hybridize(const Input& input) {
       if (sys.buses[static_cast<std::size_t>(bus_offset)].bus_type !=
           hacdcpf::BusType::SLACK) continue;
       for (int phase = 0; phase < 3; ++phase) {
-        if (!indexer.has_node(bus_offset, phase)) continue;
-        const int node = indexer.node_index(bus_offset, phase);
+        if (!phase_graph.has_node(bus_offset, phase)) continue;
+        const int node = phase_graph.node_index(bus_offset, phase);
         c.reference_nodes.push_back(node);
         c.reference_voltage.conservativeResize(c.reference_voltage.size() + 1);
         c.reference_voltage[c.reference_voltage.size() - 1] = c.voltage_start[node];
@@ -217,12 +440,29 @@ ThreePhaseHybridOPFCase hybridize(const Input& input) {
   }
   if (c.reference_nodes.empty()) throw std::runtime_error("no AC reference phase found");
 
+  const std::vector<int> old_to_energized =
+      restrict_to_reference_connected_phase_graph(c);
+  const int excluded_phase_nodes =
+      n - static_cast<int>(c.y_ac.rows());
+  if (excluded_phase_nodes > 0) {
+    std::cerr << '[' << input.label << "] excluded " << excluded_phase_nodes
+              << " reference-disconnected zero-injection phase nodes\n";
+  }
+  reference_node_set.clear();
+  reference_node_set.insert(c.reference_nodes.begin(), c.reference_nodes.end());
+
   for (int bus_offset = 0; bus_offset < static_cast<int>(sys.buses.size()); ++bus_offset) {
-    if (indexer.has_node(bus_offset, 0) && indexer.has_node(bus_offset, 1) &&
-        indexer.has_node(bus_offset, 2)) {
-      c.three_phase_bus_nodes.push_back({indexer.node_index(bus_offset, 0),
-                                         indexer.node_index(bus_offset, 1),
-                                         indexer.node_index(bus_offset, 2)});
+    if (phase_graph.has_node(bus_offset, 0) && phase_graph.has_node(bus_offset, 1) &&
+        phase_graph.has_node(bus_offset, 2)) {
+      const int a = old_to_energized[static_cast<std::size_t>(
+          phase_graph.node_index(bus_offset, 0))];
+      const int b = old_to_energized[static_cast<std::size_t>(
+          phase_graph.node_index(bus_offset, 1))];
+      const int phase_c = old_to_energized[static_cast<std::size_t>(
+          phase_graph.node_index(bus_offset, 2))];
+      if (a >= 0 && b >= 0 && phase_c >= 0) {
+        c.three_phase_bus_nodes.push_back({a, b, phase_c});
+      }
     }
   }
 
@@ -231,8 +471,10 @@ ThreePhaseHybridOPFCase hybridize(const Input& input) {
     CandidateBus candidate;
     candidate.bus_offset = bus_offset;
     for (int phase = 0; phase < 3; ++phase) {
-      if (!indexer.has_node(bus_offset, phase)) continue;
-      const int node = indexer.node_index(bus_offset, phase);
+      if (!phase_graph.has_node(bus_offset, phase)) continue;
+      const int node = old_to_energized[static_cast<std::size_t>(
+          phase_graph.node_index(bus_offset, phase))];
+      if (node < 0) continue;
       candidate.nodes.push_back(node);
       candidate.p_pu += std::max(0.0, c.p_load_pu[node]);
     }
@@ -253,32 +495,154 @@ ThreePhaseHybridOPFCase hybridize(const Input& input) {
 
   const double original_p = c.p_load_pu.sum();
   const double target_dc = input.dc_share * original_p;
+  std::vector<std::vector<int>> adjacency(
+      static_cast<std::size_t>(c.y_ac.rows()));
+  for (int col = 0; col < c.y_ac.outerSize(); ++col) {
+    for (SparseComplexMatrix::InnerIterator it(c.y_ac, col); it; ++it) {
+      if (it.row() == it.col() || std::abs(it.value()) <= 1e-13) continue;
+      adjacency[static_cast<std::size_t>(it.row())].push_back(it.col());
+      adjacency[static_cast<std::size_t>(it.col())].push_back(it.row());
+    }
+  }
+  const auto distances_from = [&](const std::vector<int>& sources) {
+    const int unreachable = std::numeric_limits<int>::max() / 4;
+    std::vector<int> distance(static_cast<std::size_t>(c.y_ac.rows()), unreachable);
+    std::queue<int> frontier;
+    for (int source : sources) {
+      distance[static_cast<std::size_t>(source)] = 0;
+      frontier.push(source);
+    }
+    while (!frontier.empty()) {
+      const int node = frontier.front();
+      frontier.pop();
+      for (int neighbor : adjacency[static_cast<std::size_t>(node)]) {
+        if (distance[static_cast<std::size_t>(neighbor)] <=
+            distance[static_cast<std::size_t>(node)] + 1) {
+          continue;
+        }
+        distance[static_cast<std::size_t>(neighbor)] =
+            distance[static_cast<std::size_t>(node)] + 1;
+        frontier.push(neighbor);
+      }
+    }
+    return distance;
+  };
+
+  const int unreachable = std::numeric_limits<int>::max() / 4;
+  std::vector<int> selected_candidates;
+  std::vector<std::vector<int>> center_distances;
+  std::vector<int> minimum_distance(
+      static_cast<std::size_t>(c.y_ac.rows()), unreachable);
+  for (int center = 0; center < input.vsc_count; ++center) {
+    int selected = 0;
+    if (center > 0) {
+      int best_distance = -1;
+      for (int candidate_index = 0;
+           candidate_index < static_cast<int>(candidates.size()); ++candidate_index) {
+        if (std::find(selected_candidates.begin(), selected_candidates.end(),
+                      candidate_index) != selected_candidates.end()) {
+          continue;
+        }
+        int candidate_distance = unreachable;
+        for (int node : candidates[static_cast<std::size_t>(candidate_index)].nodes) {
+          candidate_distance = std::min(
+              candidate_distance,
+              minimum_distance[static_cast<std::size_t>(node)]);
+        }
+        if (candidate_distance > best_distance) {
+          best_distance = candidate_distance;
+          selected = candidate_index;
+        }
+      }
+    }
+    selected_candidates.push_back(selected);
+    center_distances.push_back(distances_from(
+        candidates[static_cast<std::size_t>(selected)].nodes));
+    const auto& latest = center_distances.back();
+    for (int node = 0; node < static_cast<int>(latest.size()); ++node) {
+      minimum_distance[static_cast<std::size_t>(node)] = std::min(
+          minimum_distance[static_cast<std::size_t>(node)],
+          latest[static_cast<std::size_t>(node)]);
+    }
+  }
+
   std::vector<double> bucket_load(static_cast<std::size_t>(input.vsc_count), 0.0);
   std::vector<std::vector<int>> terminal_nodes(static_cast<std::size_t>(input.vsc_count));
-  for (int k = 0; k < input.vsc_count; ++k) {
-    terminal_nodes[static_cast<std::size_t>(k)] =
-        candidates[static_cast<std::size_t>(k)].nodes;
-  }
-  double remaining = target_dc;
-  int cursor = 0;
-  for (const auto& candidate : candidates) {
-    if (remaining <= 1e-12) break;
-    const int bucket = cursor++ % input.vsc_count;
-    const double available = std::accumulate(
-        candidate.nodes.begin(), candidate.nodes.end(), 0.0,
-        [&](double sum, int node) { return sum + std::max(0.0, c.p_load_pu[node]); });
-    const double moved = std::min(available, remaining);
-    if (moved <= 0.0) continue;
-    const double fraction = moved / available;
-    for (int node : candidate.nodes) {
-      c.p_load_pu[node] *= 1.0 - fraction;
-      c.q_load_pu[node] *= 1.0 - fraction;
+  const std::vector<int> reference_distance = distances_from(c.reference_nodes);
+  for (int candidate_index = 0;
+       candidate_index < static_cast<int>(candidates.size()); ++candidate_index) {
+    const auto& candidate = candidates[static_cast<std::size_t>(candidate_index)];
+    int bucket = 0;
+    int best_distance = unreachable;
+    for (int center = 0; center < input.vsc_count; ++center) {
+      int distance = unreachable;
+      for (int node : candidate.nodes) {
+        distance = std::min(
+            distance,
+            center_distances[static_cast<std::size_t>(center)]
+                            [static_cast<std::size_t>(node)]);
+      }
+      if (distance < best_distance) {
+        best_distance = distance;
+        bucket = center;
+      }
     }
-    bucket_load[static_cast<std::size_t>(bucket)] += moved;
-    remaining -= moved;
+    for (int node : candidate.nodes) {
+      const double moved = input.dc_share * std::max(0.0, c.p_load_pu[node]);
+      c.p_load_pu[node] -= moved;
+      c.q_load_pu[node] *= 1.0 - input.dc_share;
+      bucket_load[static_cast<std::size_t>(bucket)] += moved;
+    }
   }
-  if (remaining > 1e-8 * std::max(1.0, target_dc)) {
-    throw std::runtime_error("unable to realize requested DC load share");
+
+  std::vector<int> energized_to_old(static_cast<std::size_t>(c.y_ac.rows()), -1);
+  for (int old = 0; old < static_cast<int>(old_to_energized.size()); ++old) {
+    const int energized = old_to_energized[static_cast<std::size_t>(old)];
+    if (energized >= 0) {
+      energized_to_old[static_cast<std::size_t>(energized)] = old;
+    }
+  }
+  std::vector<int> cluster_root(static_cast<std::size_t>(input.vsc_count), -1);
+  std::vector<int> cluster_root_distance(
+      static_cast<std::size_t>(input.vsc_count), unreachable);
+  for (int node = 0; node < static_cast<int>(c.y_ac.rows()); ++node) {
+    int bucket = 0;
+    int best_center_distance = unreachable;
+    for (int center = 0; center < input.vsc_count; ++center) {
+      const int distance = center_distances[static_cast<std::size_t>(center)]
+                                           [static_cast<std::size_t>(node)];
+      if (distance < best_center_distance) {
+        best_center_distance = distance;
+        bucket = center;
+      }
+    }
+    if (reference_distance[static_cast<std::size_t>(node)] <
+        cluster_root_distance[static_cast<std::size_t>(bucket)]) {
+      cluster_root_distance[static_cast<std::size_t>(bucket)] =
+          reference_distance[static_cast<std::size_t>(node)];
+      cluster_root[static_cast<std::size_t>(bucket)] = node;
+    }
+  }
+  for (int center = 0; center < input.vsc_count; ++center) {
+    const int root = cluster_root[static_cast<std::size_t>(center)];
+    if (root < 0) throw std::runtime_error("DC load cluster has no AC boundary root");
+    const int old_root = energized_to_old[static_cast<std::size_t>(root)];
+    const int bus_offset =
+        phase_graph.bus_offset[static_cast<std::size_t>(old_root)];
+    for (int phase = 0; phase < 3; ++phase) {
+      if (!phase_graph.has_node(bus_offset, phase)) continue;
+      const int old_node = phase_graph.node_index(bus_offset, phase);
+      const int energized = old_to_energized[static_cast<std::size_t>(old_node)];
+      if (energized >= 0) {
+        terminal_nodes[static_cast<std::size_t>(center)].push_back(energized);
+      }
+    }
+  }
+  const double realized_target = std::accumulate(
+      bucket_load.begin(), bucket_load.end(), 0.0);
+  if (std::abs(realized_target - target_dc) >
+      1e-8 * std::max(1.0, target_dc)) {
+    throw std::runtime_error("unable to realize requested topology-local DC load share");
   }
 
   const int ndc = 2 * input.vsc_count;
@@ -300,23 +664,43 @@ ThreePhaseHybridOPFCase hybridize(const Input& input) {
     c.p_dc_load_pu[load] = p;
     const double disc = std::max(0.0, 1.0 - 4.0 * p / conductance);
     c.v_dc_start[load] = 0.5 * (1.0 + std::sqrt(disc));
-
+    c.dc_reference_terminals.push_back(terminal);
     PhaseVSC converter;
     converter.phase_nodes = terminal_nodes[static_cast<std::size_t>(k)];
     converter.dc_terminal = terminal;
     converter.efficiency = 0.98;
     converter.s_max_pu = 1.30 * p / converter.efficiency + 1e-3;
+    converter.phase_current_max_pu = converter.s_max_pu /
+        std::sqrt(static_cast<double>(converter.phase_nodes.size()));
     converter.fixed_unity_power_factor = false;
+    if (converter.phase_nodes.size() == 3) {
+      const bool gfm_anchor = input.label == "H8500"
+          ? k == 0 : input.vsc_count > 1 && k % 3 == 0;
+      converter.control_mode = gfm_anchor
+          ? PhaseVSCControlMode::GridFormingDroop
+          : PhaseVSCControlMode::GridFollowingPLL;
+    }
+    converter.nominal_frequency_hz = 50.0;
+    converter.pll_kp = 0.01;
+    converter.pll_ki = 1.0;
+    converter.virtual_r_pu = 0.01;
+    converter.virtual_x_pu = 0.10;
+    converter.p_droop_pu = 0.01;
+    converter.q_droop_pu = 0.05;
+    converter.voltage_reference_pu = 1.0;
+    converter.voltage_integral_gain = 10.0;
     c.converters.push_back(std::move(converter));
   }
   c.g_dc.setFromTriplets(gtrip.begin(), gtrip.end());
   c.g_dc.makeCompressed();
+  c.dc_reference_voltage_pu = Eigen::VectorXd::Ones(
+      static_cast<int>(c.dc_reference_terminals.size()));
 
   const double total_capacity = 5.0 * (original_p + 1.0);
   for (int ri = 0; ri < static_cast<int>(c.reference_nodes.size()); ++ri) {
     PhaseGenerator generator;
     generator.phase_node = c.reference_nodes[static_cast<std::size_t>(ri)];
-    generator.p_min_pu = -total_capacity;
+    generator.p_min_pu = -0.25 * original_p;
     generator.p_max_pu = total_capacity;
     generator.q_min_pu = -total_capacity;
     generator.q_max_pu = total_capacity;
@@ -335,12 +719,373 @@ double max_voltage_difference(const Eigen::VectorXcd& a,
   return (a - b).cwiseAbs().maxCoeff();
 }
 
-Audit run_case(const Input& input) {
+std::vector<SensitivityScenario> make_sensitivity_scenarios(
+    const ThreePhaseHybridOPFCase& base) {
+  std::vector<SensitivityScenario> scenarios;
+  scenarios.push_back({"base", base});
+  const auto add = [&](std::string label, ThreePhaseHybridOPFCase problem) {
+    problem.name = base.name + "_" + label;
+    scenarios.push_back({std::move(label), std::move(problem)});
+  };
+
+  ThreePhaseHybridOPFCase problem = base;
+  problem.p_load_pu *= 1.001;
+  problem.q_load_pu *= 1.001;
+  add("ac_uniform_up_0p1", std::move(problem));
+
+  problem = base;
+  problem.p_load_pu *= 1.02;
+  problem.q_load_pu *= 1.02;
+  add("ac_uniform_up_2", std::move(problem));
+
+  problem = base;
+  problem.p_dc_load_pu *= 1.05;
+  add("dc_uniform_up_5", std::move(problem));
+
+  problem = base;
+  for (int node = 0; node < problem.p_load_pu.size(); ++node) {
+    if (problem.ac_phase_index[static_cast<std::size_t>(node)] == 0) {
+      problem.p_load_pu[node] *= 1.03;
+      problem.q_load_pu[node] *= 1.03;
+    }
+  }
+  add("phase_a_up_3", std::move(problem));
+
+  problem = base;
+  for (int node = 0; node < problem.p_load_pu.size(); ++node) {
+    const int phase = problem.ac_phase_index[static_cast<std::size_t>(node)];
+    const double scale = phase == 0 ? 1.03 : 0.985;
+    problem.p_load_pu[node] *= scale;
+    problem.q_load_pu[node] *= scale;
+  }
+  add("phase_transfer_3", std::move(problem));
+
+  problem = base;
+  problem.reference_voltage *= 0.995;
+  add("source_voltage_down_0p5", std::move(problem));
+
+  problem = base;
+  problem.p_load_pu *= 1.005;
+  problem.q_load_pu *= 1.005;
+  problem.p_dc_load_pu *= 1.01;
+  problem.reference_voltage *= 0.999;
+  for (int node = 0; node < problem.p_load_pu.size(); ++node) {
+    if (problem.ac_phase_index[static_cast<std::size_t>(node)] == 0) {
+      problem.p_load_pu[node] *= 1.005;
+      problem.q_load_pu[node] *= 1.005;
+    }
+  }
+  add("combined_moderate", std::move(problem));
+  return scenarios;
+}
+
+double phase_load_unbalance(const ThreePhaseHybridOPFCase& problem) {
+  std::array<double, 3> totals{};
+  for (int node = 0; node < problem.p_load_pu.size(); ++node) {
+    totals[static_cast<std::size_t>(
+        problem.ac_phase_index[static_cast<std::size_t>(node)])] +=
+        problem.p_load_pu[node];
+  }
+  const double mean = (totals[0] + totals[1] + totals[2]) / 3.0;
+  double deviation = 0.0;
+  for (double total : totals) deviation = std::max(deviation, std::abs(total - mean));
+  return deviation / std::max(1e-12, std::abs(mean));
+}
+
+void fill_phase_voltage_ranges(const ThreePhaseHybridOPFCase& problem,
+                               const Eigen::VectorXcd& voltage,
+                               SensitivityRow& row) {
+  row.phase_vmin.fill(std::numeric_limits<double>::infinity());
+  row.phase_vmax.fill(0.0);
+  for (int node = 0; node < voltage.size(); ++node) {
+    const int phase = problem.ac_phase_index[static_cast<std::size_t>(node)];
+    const double magnitude = std::abs(voltage[node]);
+    row.phase_vmin[static_cast<std::size_t>(phase)] =
+        std::min(row.phase_vmin[static_cast<std::size_t>(phase)], magnitude);
+    row.phase_vmax[static_cast<std::size_t>(phase)] =
+        std::max(row.phase_vmax[static_cast<std::size_t>(phase)], magnitude);
+  }
+}
+
+int run_converter_mode_suite(const Input& input, SolverBackend backend) {
+  const ThreePhaseHybridOPFCase base = hybridize(input);
+  struct Variant {
+    std::string label;
+    ThreePhaseHybridOPFCase problem;
+  };
+  std::vector<Variant> variants;
+  const auto add_uniform = [&](const std::string& label,
+                               PhaseVSCControlMode mode) {
+    ThreePhaseHybridOPFCase problem = base;
+    for (auto& converter : problem.converters) {
+      converter.control_mode = converter.phase_nodes.size() == 3
+          ? mode : PhaseVSCControlMode::EqualPhasePower;
+    }
+    problem.name += "_" + label;
+    variants.push_back({label, std::move(problem)});
+  };
+  add_uniform("equal_phase_pq", PhaseVSCControlMode::EqualPhasePower);
+  add_uniform("gfl_pll", PhaseVSCControlMode::GridFollowingPLL);
+  if (input.label != "H8500") {
+    add_uniform("gfm_droop", PhaseVSCControlMode::GridFormingDroop);
+  }
+  if (base.converters.size() > 1) variants.push_back({"mixed_gfl_gfm", base});
+
+  ThreePhaseHybridOPFOptions options;
+  options.backend = backend;
+  options.warm_start_with_ipopt = backend == SolverBackend::NativeIPM;
+  options.max_iterations = 500;
+  options.tolerance = 1e-6;
+  options.use_constraint_oracle = true;
+  options.variant = ModelVariant::GraphReduced;
+  options.reduction_options.max_front = 12;
+  options.reduction_options.max_nnz_ratio = 2.0;
+
+  const fs::path path = project_root() / "output" / "benchmarks" /
+      ("paper_converter_modes_" + input.label + ".csv");
+  fs::create_directories(path.parent_path());
+  std::ofstream out(path);
+  out << "case,mode,converged,gfl_count,gfm_count,legacy_count,variables,"
+         "equalities,inequalities,eliminated,oracle_rows,total_rows,iterations,"
+         "runtime_ms,objective,primal_residual,dual_residual,complementarity,"
+         "max_vuf,max_converter_current_vuf,max_converter_current_loading,"
+         "max_dynamic_equilibrium_residual,status\n";
+  out << std::setprecision(12);
+  for (const auto& variant : variants) {
+    const auto solved = solve_three_phase_hybrid_opf(variant.problem, options);
+    int gfl = 0;
+    int gfm = 0;
+    int legacy = 0;
+    for (const auto& converter : variant.problem.converters) {
+      if (converter.control_mode == PhaseVSCControlMode::GridFollowingPLL) {
+        ++gfl;
+      } else if (converter.control_mode ==
+                 PhaseVSCControlMode::GridFormingDroop) {
+        ++gfm;
+      } else {
+        ++legacy;
+      }
+    }
+    out << input.label << ',' << variant.label << ','
+        << (solved.converged ? "yes" : "no") << ',' << gfl << ',' << gfm
+        << ',' << legacy << ',' << solved.variables << ',' << solved.equalities
+        << ',' << solved.inequalities << ',' << solved.eliminated_phase_nodes
+        << ',' << solved.enforced_inequalities << ',' << solved.inequalities
+        << ',' << solved.iterations << ',' << solved.runtime_ms << ','
+        << solved.objective << ',' << solved.primal_residual << ','
+        << solved.dual_residual << ',' << solved.complementarity << ','
+        << solved.max_vuf << ',' << solved.max_converter_current_vuf << ','
+        << solved.max_converter_current_loading << ','
+        << solved.max_dynamic_equilibrium_residual << ",\""
+        << solved.status << "\"\n" << std::flush;
+    std::cout << input.label << '/' << variant.label
+              << ": converged=" << solved.converged
+              << ", runtime_ms=" << solved.runtime_ms
+              << ", dynamic_residual="
+              << solved.max_dynamic_equilibrium_residual << '\n';
+  }
+  std::cout << "Wrote " << path << '\n';
+  return 0;
+}
+
+int run_opf_pf_crosscheck_suite(const std::vector<Input>& selected,
+                                SolverBackend backend) {
+  const fs::path path = project_root() / "output" / "benchmarks" /
+      "paper_opf_pf_crosscheck.csv";
+  fs::create_directories(path.parent_path());
+  std::ofstream out(path);
+  out << "case,opf_converged,pf_converged,phase_nodes,dc_nodes,converters,"
+         "opf_runtime_ms,pf_runtime_ms,pf_iterations,pf_residual,"
+         "max_voltage_error_pu,max_dc_voltage_error_pu,"
+         "max_converter_total_power_error_pu,status\n";
+  out << std::setprecision(12);
+  for (const auto& input : selected) {
+    const auto problem = hybridize(input);
+    ThreePhaseHybridOPFOptions opf_options;
+    opf_options.backend = backend;
+    opf_options.warm_start_with_ipopt = backend == SolverBackend::NativeIPM;
+    opf_options.max_iterations = 500;
+    opf_options.tolerance = 1e-6;
+    opf_options.use_constraint_oracle = true;
+    opf_options.variant = ModelVariant::GraphReduced;
+    opf_options.reduction_options.max_front = 12;
+    opf_options.reduction_options.max_nnz_ratio = 2.0;
+    const auto opf = solve_three_phase_hybrid_opf(problem, opf_options);
+    hacdcpf::powerflow::ThreePhaseHybridPFResult pf;
+    double voltage_error = std::numeric_limits<double>::quiet_NaN();
+    double dc_error = std::numeric_limits<double>::quiet_NaN();
+    double power_error = std::numeric_limits<double>::quiet_NaN();
+    if (opf.converged) {
+      const auto pf_case = make_three_phase_hybrid_pf_case(problem, opf);
+      hacdcpf::powerflow::ThreePhaseHybridPFOptions pf_options;
+      pf_options.max_iterations = 100;
+      pf_options.tolerance = 1e-8;
+      pf = hacdcpf::powerflow::solve_three_phase_hybrid_pf(pf_case, pf_options);
+      if (pf.converged) {
+        voltage_error = max_voltage_difference(opf.full_voltage, pf.voltage);
+        dc_error = (opf.dc_voltage - pf.dc_voltage).cwiseAbs().maxCoeff();
+        power_error = 0.0;
+        for (int ci = 0; ci < static_cast<int>(pf.converters.size()); ++ci) {
+          Complex opf_total{0.0, 0.0};
+          Complex pf_total{0.0, 0.0};
+          for (const Complex value :
+               opf.converter_phase_power_pu[static_cast<std::size_t>(ci)]) {
+            opf_total += value;
+          }
+          for (const Complex value :
+               pf.converters[static_cast<std::size_t>(ci)].phase_power_pu) {
+            pf_total += value;
+          }
+          power_error = std::max(power_error, std::abs(opf_total - pf_total));
+        }
+      }
+    }
+    const std::string status = !opf.converged ? opf.status : pf.status;
+    out << input.label << ',' << (opf.converged ? "yes" : "no") << ','
+        << (pf.converged ? "yes" : "no") << ',' << problem.y_ac.rows() << ','
+        << problem.g_dc.rows() << ',' << problem.converters.size() << ','
+        << opf.runtime_ms << ',' << pf.runtime_ms << ',' << pf.iterations << ','
+        << pf.residual << ',' << voltage_error << ',' << dc_error << ','
+        << power_error << ",\"" << status << "\"\n" << std::flush;
+    std::cout << input.label << " OPF/PF: opf=" << opf.converged
+              << ", pf=" << pf.converged << ", dV=" << voltage_error
+              << ", dVdc=" << dc_error << ", dS=" << power_error << '\n';
+  }
+  std::cout << "Wrote " << path << '\n';
+  return 0;
+}
+
+int run_sensitivity_suite(const Input& input,
+                          SolverBackend backend,
+                          int repeats) {
+  const ThreePhaseHybridOPFCase base = hybridize(input);
+  const auto scenarios = make_sensitivity_scenarios(base);
+  ThreePhaseHybridOPFOptions options;
+  options.backend = backend;
+  options.warm_start_with_ipopt = backend == SolverBackend::NativeIPM;
+  options.max_iterations = 500;
+  options.tolerance = 1e-6;
+  options.use_constraint_oracle = true;
+  options.variant = ModelVariant::GraphReduced;
+  options.reduction_options.max_front = 12;
+  options.reduction_options.max_nnz_ratio = 2.0;
+
+  const fs::path trace_path = project_root() / "output" / "benchmarks" /
+      "paper_oracle_sensitivity_trace_raw.csv";
+  const fs::path raw_path = project_root() / "output" / "benchmarks" /
+      "paper_oracle_sensitivity_raw.csv";
+  fs::create_directories(trace_path.parent_path());
+  std::ofstream trace(trace_path);
+  trace << "repeat,scenario,round,enforced_rows,added_rows,iterations,"
+           "restricted_converged,runtime_ms,max_full_inequality\n";
+  trace << std::setprecision(12);
+  std::ofstream out(raw_path);
+  out << "repeat,scenario,continuation_converged,reference_converged,iterations,"
+         "oracle_rounds,added_rows,enforced_rows,total_rows,continuation_ms,"
+         "reference_ms,speedup,objective_error,voltage_error,primal_residual,"
+         "dual_residual,complementarity,max_vuf,phase_load_unbalance,"
+         "max_converter_current_vuf,max_converter_current_loading,"
+         "max_dynamic_equilibrium_residual,va_min,vb_min,vc_min,"
+         "va_max,vb_max,vc_max\n";
+  out << std::setprecision(12);
+
+  for (int repeat = 1; repeat <= repeats; ++repeat) {
+    const auto certified_base = solve_three_phase_hybrid_opf(base, options);
+    for (std::size_t index = 0; index < scenarios.size(); ++index) {
+      ThreePhaseHybridOPFResult solved;
+      if (index == 0) {
+        solved = certified_base;
+      } else {
+        solved = solve_three_phase_hybrid_opf_branches(
+            base, certified_base, {scenarios[index].problem}, options).front();
+      }
+      ThreePhaseHybridOPFOptions reference_options = options;
+      reference_options.use_constraint_oracle = false;
+      const auto reference = solve_three_phase_hybrid_opf(
+          scenarios[index].problem, reference_options);
+      SensitivityRow row;
+      row.scenario = scenarios[index].label;
+      row.repeat = repeat;
+      row.continuation_converged = solved.converged;
+      row.reference_converged = reference.converged;
+      row.iterations = solved.iterations;
+      row.oracle_rounds = solved.constraint_oracle_rounds;
+      row.added_rows = solved.constraint_oracle_added_rows;
+      row.enforced_rows = solved.enforced_inequalities;
+      row.total_rows = solved.inequalities;
+      row.continuation_ms = solved.runtime_ms;
+      row.reference_ms = reference.runtime_ms;
+      row.objective_error = std::abs(solved.objective - reference.objective) /
+          std::max(1.0, std::abs(reference.objective));
+      row.voltage_error = max_voltage_difference(
+          solved.full_voltage, reference.full_voltage);
+      row.primal_residual = solved.primal_residual;
+      row.dual_residual = solved.dual_residual;
+      row.complementarity = solved.complementarity;
+      row.max_vuf = solved.max_vuf;
+      row.phase_load_unbalance = phase_load_unbalance(scenarios[index].problem);
+      row.max_converter_current_vuf = solved.max_converter_current_vuf;
+      row.max_converter_current_loading =
+          solved.max_converter_current_loading;
+      row.max_dynamic_equilibrium_residual =
+          solved.max_dynamic_equilibrium_residual;
+      fill_phase_voltage_ranges(
+          scenarios[index].problem, solved.full_voltage, row);
+      out << row.repeat << ',' << row.scenario << ','
+          << (row.continuation_converged ? "yes" : "no") << ','
+          << (row.reference_converged ? "yes" : "no") << ','
+          << row.iterations << ',' << row.oracle_rounds << ',' << row.added_rows << ','
+          << row.enforced_rows << ',' << row.total_rows << ','
+          << row.continuation_ms << ',' << row.reference_ms << ','
+          << row.reference_ms / std::max(1e-12, row.continuation_ms) << ','
+          << row.objective_error << ',' << row.voltage_error << ','
+          << row.primal_residual << ',' << row.dual_residual << ','
+          << row.complementarity << ',' << row.max_vuf << ','
+          << row.phase_load_unbalance << ',' << row.max_converter_current_vuf
+          << ',' << row.max_converter_current_loading << ','
+          << row.max_dynamic_equilibrium_residual;
+      for (double value : row.phase_vmin) out << ',' << value;
+      for (double value : row.phase_vmax) out << ',' << value;
+      out << '\n' << std::flush;
+      for (const auto& round : solved.constraint_oracle_trace) {
+        trace << repeat << ',' << row.scenario << ',' << round.round << ','
+              << round.enforced_rows << ',' << round.added_rows << ','
+              << round.iterations << ','
+              << (round.restricted_converged ? "yes" : "no") << ','
+              << round.runtime_ms << ',' << round.max_full_inequality << '\n';
+      }
+      trace.flush();
+      std::cout << "repeat=" << repeat << ", scenario=" << row.scenario
+                << ", continuation=" << row.continuation_converged
+                << '/' << row.continuation_ms << " ms, reference="
+                << row.reference_converged << '/' << row.reference_ms
+                << " ms, added=" << row.added_rows << '\n' << std::flush;
+    }
+  }
+  std::cout << "Wrote " << raw_path << "\nWrote " << trace_path << '\n';
+  return 0;
+}
+
+Audit run_case(const Input& input,
+               SolverBackend backend,
+               bool solve_full,
+               bool matched_full_start,
+               bool build_only,
+               bool use_constraint_oracle,
+               bool run_continuation,
+               bool verbose,
+               std::vector<DriftTraceRow>* drift_trace) {
   Audit audit;
   audit.label = input.label;
   audit.requested_dc_share = input.dc_share;
   try {
+    std::cerr << '[' << input.label << "] hybridization: start\n" << std::flush;
+    const auto build_start = std::chrono::steady_clock::now();
     const ThreePhaseHybridOPFCase c = hybridize(input);
+    std::cerr << '[' << input.label << "] hybridization: done in "
+              << std::chrono::duration<double>(
+                     std::chrono::steady_clock::now() - build_start).count()
+              << " s\n" << std::flush;
     audit.built = true;
     audit.phase_nodes = static_cast<int>(c.y_ac.rows());
     audit.dc_nodes = static_cast<int>(c.g_dc.rows());
@@ -348,45 +1093,133 @@ Audit run_case(const Input& input) {
     const double ac_p = c.p_load_pu.sum();
     const double dc_p = c.p_dc_load_pu.sum();
     audit.realized_dc_share = dc_p / std::max(1e-12, ac_p + dc_p);
+    if (build_only) return audit;
 
     ThreePhaseHybridOPFOptions options;
-    options.backend = SolverBackend::NativeIPM;
-    options.warm_start_with_ipopt = true;
-    options.verify_derivatives = input.label == "H13";
+    options.backend = backend;
+    options.warm_start_with_ipopt = backend == SolverBackend::NativeIPM;
+    options.verify_derivatives = input.label == "H13" && !run_continuation;
+    options.verbose = verbose;
     options.max_iterations = 500;
-    options.tolerance = 1e-9;
+    options.tolerance = 1e-6;
+    options.use_constraint_oracle = use_constraint_oracle;
     options.variant = ModelVariant::GraphReduced;
     options.reduction_options.max_front = 12;
     options.reduction_options.max_nnz_ratio = 2.0;
-    audit.reduced = solve_three_phase_hybrid_opf(c, options);
-    ThreePhaseHybridOPFCase full_case = c;
-    if (audit.reduced.full_voltage.size() == c.voltage_start.size() &&
-        audit.reduced.full_voltage.allFinite()) {
-      full_case.voltage_start = audit.reduced.full_voltage;
+    std::cerr << '[' << input.label << "] GR-IPM: start\n" << std::flush;
+    if (run_continuation) {
+      ThreePhaseHybridOPFCase continued_case = c;
+      continued_case.p_load_pu *= 1.001;
+      continued_case.q_load_pu *= 1.001;
+      continued_case.p_dc_load_pu *= 1.001;
+      auto sequence = solve_three_phase_hybrid_opf_sequence(
+          {c, continued_case}, options);
+      audit.reduced = std::move(sequence[0]);
+      audit.continuation = std::move(sequence[1]);
+      ThreePhaseHybridOPFOptions reference_options = options;
+      reference_options.use_constraint_oracle = false;
+      audit.continuation_reference = solve_three_phase_hybrid_opf(
+          continued_case, reference_options);
+      audit.continuation_objective_relative_error =
+          std::abs(audit.continuation.objective -
+                   audit.continuation_reference.objective) /
+          std::max(1.0, std::abs(audit.continuation_reference.objective));
+      audit.continuation_voltage_error = max_voltage_difference(
+          audit.continuation.full_voltage,
+          audit.continuation_reference.full_voltage);
+    } else {
+      audit.reduced = solve_three_phase_hybrid_opf(c, options);
     }
+    std::cerr << '[' << input.label << "] GR-IPM: done in "
+              << audit.reduced.runtime_ms / 1000.0 << " s, status="
+              << audit.reduced.status << "\n" << std::flush;
+    if (run_continuation) {
+      std::cerr << '[' << input.label << "] continuation GR-IPM: done in "
+                << audit.continuation.runtime_ms / 1000.0 << " s, status="
+                << audit.continuation.status << "\n" << std::flush;
+    }
+    if (!solve_full) return audit;
+    ThreePhaseHybridOPFCase full_case = c;
     options.variant = ModelVariant::Full;
     const int ng = static_cast<int>(c.generators.size());
-    const int ndc = static_cast<int>(c.g_dc.rows());
-    int ncp = 0;
-    for (const auto& converter : c.converters) {
-      ncp += static_cast<int>(converter.phase_nodes.size());
-    }
-    const int nc = static_cast<int>(c.converters.size());
-    const int reduced_nv = static_cast<int>(audit.reduced.reduction.retained.size());
     const int full_nv = static_cast<int>(c.y_ac.rows());
-    const int device_variables = 2 * ng + ndc + 2 * ncp + nc;
-    if (audit.reduced.primal.size() == 2 * reduced_nv + device_variables &&
-        audit.reduced.full_voltage.size() == full_nv) {
-      options.primal_start = Eigen::VectorXd::Zero(2 * full_nv + device_variables);
-      for (int node = 0; node < full_nv; ++node) {
-        options.primal_start[node] = std::real(audit.reduced.full_voltage[node]);
-        options.primal_start[full_nv + node] =
-            std::imag(audit.reduced.full_voltage[node]);
+    options.primal_start.resize(0);
+    options.equality_dual_start.resize(0);
+    options.nonlinear_inequality_dual_start.resize(0);
+    options.nonlinear_slack_start.resize(0);
+    if (matched_full_start && audit.reduced.converged) {
+      const int ndc = static_cast<int>(c.g_dc.rows());
+      int ncp = 0;
+      int ngfm = 0;
+      for (const auto& converter : c.converters) {
+        ncp += static_cast<int>(converter.phase_nodes.size());
+        if (converter.control_mode == PhaseVSCControlMode::GridFormingDroop) {
+          ++ngfm;
+        }
       }
-      options.primal_start.tail(device_variables) =
-          audit.reduced.primal.tail(device_variables);
+      const int nc = static_cast<int>(c.converters.size());
+      const int reduced_nv =
+          static_cast<int>(audit.reduced.reduction.retained.size());
+      const int device_variables =
+          2 * ng + ndc + 2 * ncp + 2 * ngfm + nc;
+      if (audit.reduced.primal.size() == 2 * reduced_nv + device_variables &&
+          audit.reduced.full_voltage.size() == full_nv) {
+        full_case.voltage_start = audit.reduced.full_voltage;
+        options.primal_start =
+            Eigen::VectorXd::Zero(2 * full_nv + device_variables);
+        for (int node = 0; node < full_nv; ++node) {
+          options.primal_start[node] =
+              std::real(audit.reduced.full_voltage[node]);
+          options.primal_start[full_nv + node] =
+              std::imag(audit.reduced.full_voltage[node]);
+        }
+        options.primal_start.tail(device_variables) =
+            audit.reduced.primal.tail(device_variables);
+      }
+      if (audit.reduced.equality_dual.size() == audit.reduced.equalities) {
+        const int full_equalities =
+            audit.reduced.equalities + 2 * (full_nv - reduced_nv);
+        options.equality_dual_start = Eigen::VectorXd::Constant(
+            full_equalities, std::numeric_limits<double>::quiet_NaN());
+        for (int pos = 0; pos < reduced_nv; ++pos) {
+          const int node =
+              audit.reduced.reduction.retained[static_cast<std::size_t>(pos)];
+          options.equality_dual_start[node] = audit.reduced.equality_dual[pos];
+          options.equality_dual_start[full_nv + node] =
+              audit.reduced.equality_dual[reduced_nv + pos];
+        }
+        const int tail = audit.reduced.equalities - 2 * reduced_nv;
+        options.equality_dual_start.tail(tail) =
+            audit.reduced.equality_dual.tail(tail);
+      }
+      if (audit.reduced.inequality_dual.size() >= audit.reduced.inequalities) {
+        options.nonlinear_inequality_dual_start =
+            audit.reduced.inequality_dual.head(audit.reduced.inequalities);
+      }
     }
+    std::cerr << '[' << input.label << "] Full-IPM: start\n" << std::flush;
     audit.full = solve_three_phase_hybrid_opf(full_case, options);
+    std::cerr << '[' << input.label << "] Full-IPM: done in "
+              << audit.full.runtime_ms / 1000.0 << " s, status="
+              << audit.full.status << "\n" << std::flush;
+    if (drift_trace != nullptr) {
+      const std::vector<int> caps{1, 2, 5, 10, 20, 50, 100, 200, 500};
+      for (int cap : caps) {
+        ThreePhaseHybridOPFOptions trace_options = options;
+        trace_options.max_iterations = cap;
+        trace_options.verify_derivatives = false;
+        DriftTraceRow row;
+        row.iteration_cap = cap;
+        row.result = solve_three_phase_hybrid_opf(full_case, trace_options);
+        if (row.result.primal.size() >= 2 * full_nv + ng) {
+          row.min_phase_generation_pu =
+              row.result.primal.segment(2 * full_nv, ng).minCoeff();
+          row.max_phase_generation_pu =
+              row.result.primal.segment(2 * full_nv, ng).maxCoeff();
+        }
+        drift_trace->push_back(std::move(row));
+      }
+    }
 
     audit.objective_relative_error =
         std::abs(audit.full.objective - audit.reduced.objective) /
@@ -402,13 +1235,43 @@ Audit run_case(const Input& input) {
   return audit;
 }
 
+void write_drift_trace(const fs::path& path,
+                       const std::vector<DriftTraceRow>& rows) {
+  fs::create_directories(path.parent_path());
+  std::ofstream out(path);
+  out << "iteration_cap,solver_success,objective,physical_primal_residual,"
+         "initial_physical_residual,scaled_dual_residual,complementarity,"
+         "min_phase_generation_pu,max_phase_generation_pu,voltage_violation,"
+         "vuf,runtime_ms,status\n";
+  out << std::setprecision(12);
+  for (const auto& row : rows) {
+    const auto& r = row.result;
+    out << row.iteration_cap << ',' << (r.converged ? "yes" : "no") << ','
+        << r.objective << ',' << r.primal_residual << ','
+        << r.initial_primal_residual << ',' << r.dual_residual << ','
+        << r.complementarity << ',' << row.min_phase_generation_pu << ','
+        << row.max_phase_generation_pu << ',' << r.max_voltage_violation << ','
+        << r.max_vuf << ',' << r.runtime_ms << ",\"" << r.status << "\"\n";
+  }
+}
+
 void write_csv(const fs::path& path, const std::vector<Audit>& audits) {
   fs::create_directories(path.parent_path());
   std::ofstream out(path);
   out << "case,built,phase_nodes,dc_nodes,vscs,requested_dc_share,realized_dc_share,"
          "full_converged,gr_converged,full_variables,gr_variables,full_equalities,"
          "gr_equalities,gr_eliminated,objective_relative_error,voltage_error,"
-         "full_primal,gr_primal,full_runtime_ms,gr_runtime_ms,speedup,"
+         "full_objective,gr_objective,full_primal,gr_primal,full_dual,gr_dual,"
+         "full_complementarity,gr_complementarity,full_runtime_ms,gr_runtime_ms,speedup,"
+         "full_enforced_inequalities,gr_enforced_inequalities,"
+         "full_oracle_rounds,gr_oracle_rounds,full_oracle_added,gr_oracle_added,"
+         "full_inequality_jacobian_nnz,gr_inequality_jacobian_nnz,"
+         "full_max_omitted_inequality,gr_max_omitted_inequality,"
+         "continuation_converged,continuation_runtime_ms,continuation_iterations,"
+         "continuation_rows,continuation_rounds,continuation_added,"
+         "continuation_primal,continuation_dual,continuation_complementarity,"
+         "continuation_reference_converged,continuation_reference_runtime_ms,"
+         "continuation_objective_relative_error,continuation_voltage_error,"
          "full_status,gr_status,error\n";
   out << std::setprecision(12);
   for (const auto& a : audits) {
@@ -419,8 +1282,33 @@ void write_csv(const fs::path& path, const std::vector<Audit>& audits) {
         << a.reduced.variables << ',' << a.full.equalities << ','
         << a.reduced.equalities << ',' << a.reduced.eliminated_phase_nodes << ','
         << a.objective_relative_error << ',' << a.voltage_error << ','
+        << a.full.objective << ',' << a.reduced.objective << ','
         << a.full.primal_residual << ',' << a.reduced.primal_residual << ','
-        << a.full.runtime_ms << ',' << a.reduced.runtime_ms << ',' << a.speedup
+        << a.full.dual_residual << ',' << a.reduced.dual_residual << ','
+        << a.full.complementarity << ',' << a.reduced.complementarity << ','
+        << a.full.runtime_ms << ',' << a.reduced.runtime_ms << ',' << a.speedup << ','
+        << a.full.enforced_inequalities << ','
+        << a.reduced.enforced_inequalities << ','
+        << a.full.constraint_oracle_rounds << ','
+        << a.reduced.constraint_oracle_rounds << ','
+        << a.full.constraint_oracle_added_rows << ','
+        << a.reduced.constraint_oracle_added_rows << ','
+        << a.full.inequality_jacobian_nonzeros << ','
+        << a.reduced.inequality_jacobian_nonzeros << ','
+        << a.full.max_omitted_inequality << ','
+        << a.reduced.max_omitted_inequality << ','
+        << (a.continuation.converged ? "yes" : "no") << ','
+        << a.continuation.runtime_ms << ',' << a.continuation.iterations << ','
+        << a.continuation.enforced_inequalities << ','
+        << a.continuation.constraint_oracle_rounds << ','
+        << a.continuation.constraint_oracle_added_rows << ','
+        << a.continuation.primal_residual << ','
+        << a.continuation.dual_residual << ','
+        << a.continuation.complementarity << ','
+        << (a.continuation_reference.converged ? "yes" : "no") << ','
+        << a.continuation_reference.runtime_ms << ','
+        << a.continuation_objective_relative_error << ','
+        << a.continuation_voltage_error
         << ",\"" << a.full.status << "\",\"" << a.reduced.status
         << "\",\"" << a.error << "\"\n";
   }
@@ -433,8 +1321,12 @@ int main(int argc, char** argv) {
   const auto all = inputs();
   if (argc > 1) {
     const std::string wanted = argv[1];
-    for (const auto& input : all) {
-      if (input.label == wanted) selected.push_back(input);
+    if (wanted == "all") {
+      selected = all;
+    } else {
+      for (const auto& input : all) {
+        if (input.label == wanted) selected.push_back(input);
+      }
     }
     if (selected.empty()) {
       std::cerr << "unknown case label: " << wanted << "\n";
@@ -443,11 +1335,57 @@ int main(int argc, char** argv) {
   } else {
     selected = all;
   }
+  const bool trace_full = argc > 2 && std::string(argv[2]) == "trace";
+  const bool gr_only = argc > 2 && std::string(argv[2]) == "gr-only";
+  const bool matched_full = argc > 2 && std::string(argv[2]) == "matched";
+  const bool build_only = argc > 2 && std::string(argv[2]) == "build-only";
+  const bool run_continuation =
+      argc > 2 && std::string(argv[2]) == "reuse";
+  const bool run_sensitivity =
+      argc > 2 && std::string(argv[2]) == "sensitivity";
+  const bool run_converter_modes =
+      argc > 2 && std::string(argv[2]) == "controls";
+  const bool run_opf_pf_crosscheck =
+      argc > 2 && std::string(argv[2]) == "pf-crosscheck";
+  bool use_native = false;
+  bool use_constraint_oracle = false;
+  bool verbose = true;
+  for (int arg = 2; arg < argc; ++arg) {
+    use_native = use_native || std::string(argv[arg]) == "native";
+    use_constraint_oracle =
+        use_constraint_oracle || std::string(argv[arg]) == "oracle";
+    if (std::string(argv[arg]) == "quiet") verbose = false;
+  }
+  const SolverBackend backend =
+      use_native ? SolverBackend::NativeIPM : SolverBackend::Ipopt;
+  if (run_sensitivity) {
+    if (selected.size() != 1) {
+      std::cerr << "sensitivity mode requires exactly one case\n";
+      return 2;
+    }
+    return run_sensitivity_suite(selected.front(), backend, 3);
+  }
+  if (run_converter_modes) {
+    if (selected.size() != 1) {
+      std::cerr << "controls mode requires exactly one case\n";
+      return 2;
+    }
+    return run_converter_mode_suite(selected.front(), backend);
+  }
+  if (run_opf_pf_crosscheck) {
+    return run_opf_pf_crosscheck_suite(selected, backend);
+  }
 
   std::vector<Audit> audits;
+  std::vector<DriftTraceRow> drift_trace;
   for (const auto& input : selected) {
-    Audit audit = run_case(input);
+    Audit audit = run_case(input, backend, !gr_only && !run_continuation,
+                           matched_full, build_only,
+                           use_constraint_oracle, run_continuation, verbose,
+                           trace_full ? &drift_trace : nullptr);
     std::cout << audit.label << ": built=" << audit.built
+              << ", backend=" << (backend == SolverBackend::Ipopt ? "ipopt" : "native")
+              << ", full_solver=" << audit.full.solver
               << ", full=" << audit.full.converged
               << ", gr=" << audit.reduced.converged
               << ", eliminated=" << audit.reduced.eliminated_phase_nodes
@@ -456,10 +1394,39 @@ int main(int argc, char** argv) {
               << ", speedup=" << audit.speedup
               << ", full_residual=" << audit.full.primal_residual
               << ", gr_residual=" << audit.reduced.primal_residual
+              << ", full_dual/comp=" << audit.full.dual_residual << '/'
+              << audit.full.complementarity
+              << ", gr_dual/comp=" << audit.reduced.dual_residual << '/'
+              << audit.reduced.complementarity
+              << ", full_rows=" << audit.full.enforced_inequalities << '/'
+              << audit.full.inequalities
+              << ", gr_rows=" << audit.reduced.enforced_inequalities << '/'
+              << audit.reduced.inequalities
+              << ", full_oracle=" << audit.full.constraint_oracle_rounds << '/'
+              << audit.full.constraint_oracle_added_rows
+              << ", gr_oracle=" << audit.reduced.constraint_oracle_rounds << '/'
+              << audit.reduced.constraint_oracle_added_rows
+              << ", full_Jh_nnz=" << audit.full.inequality_jacobian_nonzeros
+              << ", gr_Jh_nnz=" << audit.reduced.inequality_jacobian_nonzeros
+              << ", full_max_omitted=" << audit.full.max_omitted_inequality
+              << ", gr_max_omitted=" << audit.reduced.max_omitted_inequality
+              << ", continuation=" << audit.continuation.converged
+              << '/' << audit.continuation.runtime_ms
+              << "ms/" << audit.continuation.iterations
+              << "it/" << audit.continuation.enforced_inequalities
+              << "rows/" << audit.continuation.constraint_oracle_added_rows
+              << "added, continuation_reference="
+              << audit.continuation_reference.converged << '/'
+              << audit.continuation_reference.runtime_ms << "ms"
+              << ", continuation_error="
+              << audit.continuation_objective_relative_error << '/'
+              << audit.continuation_voltage_error
               << ", full_initial=" << audit.full.initial_primal_residual
+              << "/" << audit.full.initial_dual_residual
               << "(eq=" << audit.full.initial_worst_equality
               << ",ineq=" << audit.full.initial_worst_inequality << ")"
               << ", gr_initial=" << audit.reduced.initial_primal_residual
+              << "/" << audit.reduced.initial_dual_residual
               << "(eq=" << audit.reduced.initial_worst_equality
               << ",ineq=" << audit.reduced.initial_worst_inequality << ")"
               << ", full_status=" << audit.full.status
@@ -474,9 +1441,24 @@ int main(int argc, char** argv) {
     std::cout << "\n";
     audits.push_back(std::move(audit));
   }
-  const fs::path output = project_root() / "output" / "benchmarks" /
-                          "phase_hybrid_opf_case_audit.csv";
+  const std::string mode_suffix =
+      (build_only ? "_build" :
+       (run_continuation ? "_reuse" :
+        (matched_full ? "_matched" : "_cold"))) +
+      std::string(use_constraint_oracle ? "_oracle" : "");
+  const std::string output_name = selected.size() == 1
+      ? "phase_hybrid_opf_case_audit_" + selected.front().label +
+            mode_suffix + ".csv"
+      : "phase_hybrid_opf_case_audit" + mode_suffix + ".csv";
+  const fs::path output =
+      project_root() / "output" / "benchmarks" / output_name;
   write_csv(output, audits);
   std::cout << "Wrote " << output << "\n";
+  if (trace_full) {
+    const fs::path trace_output = project_root() / "output" / "benchmarks" /
+                                  "phase_hybrid_opf_full_drift_trace.csv";
+    write_drift_trace(trace_output, drift_trace);
+    std::cout << "Wrote " << trace_output << "\n";
+  }
   return 0;
 }

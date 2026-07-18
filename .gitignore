@@ -71,3 +71,7 @@ output/
 34_node/
 123_node/
 8500_node/
+
+tests/short_circuit/
+
+paper/phase_graph_reduced_hybrid_opf/

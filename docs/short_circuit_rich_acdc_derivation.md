@@ -334,16 +334,27 @@ the detailed short-circuit calculation. From `vk_percent`, `vkr_percent`,
 `sn_mva`, and system base:
 
 ```math
-z_T = \frac{vk\_\%}{100} \frac{S_b}{S_{rT}}
+z_T = \frac{vk\_\%}{100} \frac{S_b}{S_{rT}} \left(\frac{U_{rTLV}}{U_{base,LV}}\right)^2
 ```
 
 ```math
-r_T = \frac{vkr\_\%}{100} \frac{S_b}{S_{rT}}
+r_T = \frac{vkr\_\%}{100} \frac{S_b}{S_{rT}} \left(\frac{U_{rTLV}}{U_{base,LV}}\right)^2
 ```
 
 ```math
 x_T = \sqrt{z_T^2 - r_T^2}
 ```
+
+The factor `(U_rTLV / U_base,LV)²` converts the nameplate impedance (given on
+the transformer rated base `S_rT`, `U_rT`) onto the LV bus voltage base of the
+per-unit system; it equals 1 when the LV nameplate voltage matches the bus
+base voltage. It is required by IEC 60909, which refers all impedances with
+the transformer *rated* ratio (e.g. 33/6.3 kV) regardless of the bus nominal
+voltage (6 kV). The same factor applies to the zero-sequence impedance
+(`z0_percent`, `x0_r0`). The ideal-tap part of the canonical branch carries
+the off-nominal ratio `(U_rTHV/U_rTLV)/(U_base,HV/U_base,LV)` times the OLTC
+position. When the LV bus carries no usable `base_kv`, the factor is skipped
+(legacy unscaled behaviour).
 
 The detailed short-circuit builder then uses branch provenance to apply the
 transformer correction:
@@ -352,7 +363,8 @@ transformer correction:
 K_T = \frac{0.95c}{1 + 0.6x_T^{(Tbase)}}
 ```
 
-where:
+where `x_T^{(Tbase)}` is the reactance on the transformer *nameplate* base
+(without the voltage-base factor):
 
 ```math
 x_T^{(Tbase)} = |x_{T,pu,system}| \frac{S_{rT}}{S_b}
@@ -716,25 +728,39 @@ screening DC cables and breakers, but it is not a complete DC protection model.
 
 ### 9.1 Peak Current
 
-The implemented peak factor is:
+At the fault bus the module applies IEC 60909-0 formula (59): the peak is the
+sum of the per-contribution peaks,
 
 ```math
-\kappa = 1.02 + 0.98e^{-3R/X}
+i_p = \sqrt{2}\Big(\kappa_{net} I_{k,net}'' + \sum_i \kappa_i I_{k,i}''\Big)
 ```
 
-For method B in a meshed network, the code multiplies by `1.15`, then clamps:
+with a per-contribution factor
 
 ```math
-1.0 \le \kappa \le 2.0
+\kappa_i = 1.02 + 0.98e^{-3R_i/X_i}
 ```
 
-Peak current:
+taken from each contribution's own R/X ratio:
+
+- the network part (branches + external grids) uses the Thévenin impedance of
+  the network with all machine shunts removed;
+- each generator / motor / load-motor / grid-forming converter contribution
+  uses its own source impedance;
+- current sources (static generators, grid-following converters) have no
+  decaying DC component and are added without κ (κ = 1).
+
+This reproduces the IEC TR 60909-4:2021 §6.2 worked example
+(`tests/test_short_circuit_iec60909_4.cpp`).
+
+At non-fault buses the transferred current keeps the single-κ approximation
 
 ```math
 i_p = \kappa \sqrt{2} I_{k,1}''
 ```
 
-where the code uses the positive-sequence initial current field.
+where κ uses the fault-point R/X ratio; for method B in a meshed network the
+code multiplies by `1.15`, then clamps `1.0 ≤ κ ≤ 2.0`.
 
 ### 9.2 Breaking Current
 

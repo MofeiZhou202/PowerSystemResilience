@@ -186,6 +186,9 @@ hacdcpf_add_test(test_nighttime_opf test_nighttime_opf.cpp)
 #   7. IEEE 33-bus BW: monotonic Sk, end-of-feeder attenuation, API round-trip
 hacdcpf_add_test(test_short_circuit_crossval test_short_circuit_crossval.cpp)
 hacdcpf_add_test(test_dc_short_circuit test_dc_short_circuit.cpp)
+# IEC TR 60909-4:2021 §6.2 reference case (33/6 kV + asynchronous motors):
+# I"k/ip/Ib/Ik at the 6 kV busbar checked against the published values.
+hacdcpf_add_test(test_short_circuit_iec60909_4 test_short_circuit_iec60909_4.cpp)
 
 # Harmonic power flow (hybrid AC/DC): frequency-domain harmonic penetration with
 # NIC AC/DC coupling, validated against closed-form analytical voltages.
@@ -207,6 +210,7 @@ hacdcpf_add_test(test_three_phase_nr_phase_indexing test_three_phase_nr_phase_in
 hacdcpf_add_test(test_three_phase_nr_load_models test_three_phase_nr_load_models.cpp)
 hacdcpf_add_test(test_three_phase_nr_transformer_source test_three_phase_nr_transformer_source.cpp)
 hacdcpf_add_test(test_three_phase_nr_regulator test_three_phase_nr_regulator.cpp)
+hacdcpf_add_test(test_three_phase_hybrid_pf test_three_phase_hybrid_pf.cpp)
 
 # Transient dynamics: rich/canonical model builder, device-stamped phasor
 # network solve, events, and hybrid AC/DC converter coupling.

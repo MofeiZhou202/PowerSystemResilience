@@ -257,7 +257,7 @@ struct AsynchronousMotor {
   double x_pu{0.0};
   double x_r{0.0};
   double lrc{0.0};
-  int    poles{2};
+  int    poles{2};               ///< pole pairs p (IEC 60909 q factor uses PrM/p)
   double cos_phi{0.85};
   double efficiency{0.95};
   double r0_pu{0.0};

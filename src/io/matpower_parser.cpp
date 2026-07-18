@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -38,6 +39,9 @@ std::string read_text_file(const std::string& path) {
   return oss.str();
 }
 
+bool parse_plain_number(const std::string& token, double& out);
+bool parse_arithmetic_token(const std::string& token, double& out);
+
 double parse_scalar_assignment(const std::string& text,
                                const std::string& key,
                                double default_value) {
@@ -57,11 +61,92 @@ double parse_scalar_assignment(const std::string& text,
   if (token.empty()) {
     return default_value;
   }
-  try {
-    return std::stod(token);
-  } catch (const std::exception&) {
-    return default_value;
+  // Accept tiny inline expressions as well ("50/3", "100/sqrt(3)", ...).
+  double value = 0.0;
+  if (parse_plain_number(token, value) ||
+      parse_arithmetic_token(token, value)) {
+    return value;
   }
+  return default_value;
+}
+
+// Evaluate tiny MATPOWER inline numeric expressions found in some shipped
+// cases (e.g. case533mt_* uses "135/sqrt(3)" for baseKV). Supports a
+// '*'/'/'-separated chain of plain numbers, "pi", or sqrt(<number>) terms.
+// Anything more complex is rejected (returns false) so the caller can error.
+bool parse_plain_number(const std::string& token, double& out) {
+  std::string lower = token;
+  std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+  if (lower == "inf" || lower == "+inf" || lower == "infinity" || lower == "+infinity") {
+    out = std::numeric_limits<double>::infinity();
+    return true;
+  }
+  if (lower == "-inf" || lower == "-infinity") {
+    out = -std::numeric_limits<double>::infinity();
+    return true;
+  }
+  if (lower == "nan" || lower == "+nan" || lower == "-nan") {
+    out = std::numeric_limits<double>::quiet_NaN();
+    return true;
+  }
+  if (lower == "pi") {
+    out = 3.14159265358979323846;
+    return true;
+  }
+  char* end = nullptr;
+  const double value = std::strtod(token.c_str(), &end);
+  if (end == token.c_str() || *end != '\0') {
+    return false;
+  }
+  out = value;
+  return true;
+}
+
+bool parse_sqrt_or_number(const std::string& tok, double& out) {
+  std::string lower = tok;
+  std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+  if (lower.rfind("sqrt(", 0) == 0 && tok.back() == ')') {
+    double inner = 0.0;
+    if (!parse_plain_number(tok.substr(5, tok.size() - 6), inner) || inner < 0.0) {
+      return false;
+    }
+    out = std::sqrt(inner);
+    return true;
+  }
+  return parse_plain_number(tok, out);
+}
+
+bool parse_arithmetic_token(const std::string& token, double& out) {
+  size_t start = 0;
+  char pending = '*';
+  double acc = 1.0;
+  bool any_op = false;
+  for (size_t i = 0; i <= token.size(); ++i) {
+    const char c = (i < token.size()) ? token[i] : '\0';
+    if (c != '*' && c != '/' && c != '\0') {
+      continue;
+    }
+    const std::string part = token.substr(start, i - start);
+    double v = 0.0;
+    if (part.empty() || !parse_sqrt_or_number(part, v)) {
+      return false;
+    }
+    acc = (pending == '*') ? acc * v : acc / v;
+    pending = c;
+    if (c != '\0') {
+      any_op = true;
+    }
+    start = i + 1;
+  }
+  if (!any_op) {
+    return false;  // plain numbers are handled by the caller
+  }
+  out = acc;
+  return true;
 }
 
 std::vector<double> parse_number_row(const std::string& row_text) {
@@ -76,31 +161,10 @@ std::vector<double> parse_number_row(const std::string& row_text) {
     if (token.empty()) {
       return false;
     }
-
-    std::string lower = token;
-    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
-      return static_cast<char>(std::tolower(ch));
-    });
-    if (lower == "inf" || lower == "+inf" || lower == "infinity" || lower == "+infinity") {
-      out = std::numeric_limits<double>::infinity();
+    if (parse_plain_number(token, out)) {
       return true;
     }
-    if (lower == "-inf" || lower == "-infinity") {
-      out = -std::numeric_limits<double>::infinity();
-      return true;
-    }
-    if (lower == "nan" || lower == "+nan" || lower == "-nan") {
-      out = std::numeric_limits<double>::quiet_NaN();
-      return true;
-    }
-
-    char* end = nullptr;
-    const double value = std::strtod(token.c_str(), &end);
-    if (end == token.c_str() || *end != '\0') {
-      return false;
-    }
-    out = value;
-    return true;
+    return parse_arithmetic_token(token, out);
   };
 
   std::stringstream ss(s);
@@ -146,6 +210,12 @@ std::vector<std::vector<double>> parse_matrix_block(const std::string& text,
     if (clean.empty()) {
       continue;
     }
+    // MATLAB line continuation: a trailing "..." joins the next physical line.
+    bool continuation = false;
+    if (clean.size() >= 3 && clean.compare(clean.size() - 3, 3, "...") == 0) {
+      clean = trim(clean.substr(0, clean.size() - 3));
+      continuation = true;
+    }
     if (!acc.empty()) {
       acc.push_back(' ');
     }
@@ -161,6 +231,16 @@ std::vector<std::vector<double>> parse_matrix_block(const std::string& text,
         }
       }
       acc = trim(acc.substr(semi + 1));
+    }
+    // In MATLAB matrix literals a newline also terminates a row (e.g.
+    // case533mt_* omits the ';' on some bus rows). Flush any remainder
+    // unless the row is explicitly continued with "...".
+    if (!continuation && !acc.empty()) {
+      auto row = parse_number_row(acc);
+      if (!row.empty()) {
+        rows.push_back(std::move(row));
+      }
+      acc.clear();
     }
   }
 
@@ -187,6 +267,34 @@ bool has_load_kw_conversion(const std::string& text) {
 
 bool has_branch_ohm_conversion(const std::string& text) {
   return text.find("mpc.branch(:, [BR_R BR_X])") != std::string::npos;
+}
+
+// case141-style fixed-power-factor load restatement:
+//   pf = <num>;
+//   mpc.bus(:, QD) = mpc.bus(:, PD) * sin(acos(pf));
+//   mpc.bus(:, PD) = mpc.bus(:, PD) * pf;
+// QD is recomputed from PD wholesale (not scaled).  Returns the pf value
+// when both assignment statements are present.
+std::optional<double> detect_load_pf_override(const std::string& text) {
+  if (text.find("mpc.bus(:, QD) = mpc.bus(:, PD) * sin(acos(pf))") ==
+          std::string::npos ||
+      text.find("mpc.bus(:, PD) = mpc.bus(:, PD) * pf") == std::string::npos) {
+    return std::nullopt;
+  }
+  const size_t p = text.find("pf = ");
+  if (p == std::string::npos) {
+    return std::nullopt;
+  }
+  const size_t semi = text.find(';', p);
+  if (semi == std::string::npos) {
+    return std::nullopt;
+  }
+  double value = 0.0;
+  const std::string token = trim(text.substr(p + 5, semi - p - 5));
+  if (parse_plain_number(token, value) && value > 0.0 && value <= 1.0) {
+    return value;
+  }
+  return std::nullopt;
 }
 
 void parse_gencost_row(const std::vector<double>& row, double& c2, double& c1, double& c0) {
@@ -298,6 +406,24 @@ HybridPowerSystem parse_matpower_impl(const std::string& filepath,
                 "Non-standard kW load marker present but not applied on the "
                 "twin path; enable best_effort_import or provide standard "
                 "per-unit values.");
+  }
+
+  const std::optional<double> load_pf_override = detect_load_pf_override(text);
+  if (load_pf_override && apply_conversions) {
+    const double pf = *load_pf_override;
+    const double sin_acos_pf = std::sin(std::acos(pf));
+    for (auto& row : bus_rows) {
+      if (row.size() >= 4) {
+        row[3] = row[2] * sin_acos_pf;  // QD recomputed from PD wholesale
+        row[2] *= pf;
+      }
+    }
+    if (report)
+      report->add(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
+                  ImportSeverity::Warning, "mpc.bus[PD,QD]",
+                  "Load PD/QD restated at fixed power factor " +
+                      std::to_string(pf) + " via a non-standard file marker "
+                      "(best-effort).");
   }
 
   if (has_ohm_marker && apply_conversions) {

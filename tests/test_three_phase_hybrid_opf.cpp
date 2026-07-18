@@ -1,14 +1,19 @@
 #include <cmath>
 #include <complex>
+#include <limits>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "hacdcpf/dynamics/NetworkState.hpp"
+#include "hacdcpf/dynamics/devices/BasicDynamicDevices.hpp"
 #include "hacdcpf/optimal_power_flow/three_phase_hybrid_opf.hpp"
+#include "hacdcpf/power_flow/power_flow_result.hpp"
 
 namespace {
 
 using hacdcpf::graph::SparseComplexMatrix;
 using namespace hacdcpf::opf::phase_hybrid;
+using namespace hacdcpf::dynamics;
 using Complex = std::complex<double>;
 
 ThreePhaseHybridOPFCase make_small_hybrid_case() {
@@ -41,11 +46,13 @@ ThreePhaseHybridOPFCase make_small_hybrid_case() {
   c.v_min_pu = Eigen::VectorXd::Constant(n, 0.85);
   c.v_max_pu = Eigen::VectorXd::Constant(n, 1.10);
   c.voltage_start.resize(n);
+  c.ac_phase_index.resize(n);
   const double angles[3] = {0.0, -2.0 * M_PI / 3.0, 2.0 * M_PI / 3.0};
   for (int bus = 0; bus < 3; ++bus) {
     for (int phase = 0; phase < 3; ++phase) {
       c.voltage_start[3 * bus + phase] =
           std::polar(1.0 - 0.01 * bus, angles[phase]);
+      c.ac_phase_index[static_cast<std::size_t>(3 * bus + phase)] = phase;
     }
   }
   c.reference_nodes = {0, 1, 2};
@@ -78,7 +85,8 @@ ThreePhaseHybridOPFCase make_small_hybrid_case() {
   c.v_dc_start << 1.0, 0.997996;
   c.v_dc_min_pu = Eigen::VectorXd::Constant(2, 0.90);
   c.v_dc_max_pu = Eigen::VectorXd::Constant(2, 1.10);
-
+  c.dc_reference_terminals = {0};
+  c.dc_reference_voltage_pu = Eigen::VectorXd::Ones(1);
   PhaseVSC converter;
   converter.phase_nodes = {6, 7, 8};
   converter.dc_terminal = 0;
@@ -119,4 +127,297 @@ TEST_CASE("Monolithic phase hybrid OPF Full and GR recover the same solution",
   CHECK(reduced.max_voltage_violation < 1e-8);
   CHECK(full.max_vuf <= c.vuf_max + 1e-7);
   CHECK(reduced.max_vuf <= c.vuf_max + 1e-7);
+  CHECK(std::isfinite(reduced.max_converter_current_vuf));
+  CHECK(reduced.max_converter_current_vuf > 0.0);
+  CHECK(std::abs(full.max_converter_current_vuf -
+                 reduced.max_converter_current_vuf) < 1e-6);
+}
+
+TEST_CASE("Sequence-aware VSC ports recover GFL and GFM dynamic equilibria",
+          "[opf][three_phase][hybrid][converter][dynamics]") {
+  ThreePhaseHybridOPFOptions options;
+  options.variant = ModelVariant::GraphReduced;
+  options.backend = SolverBackend::Ipopt;
+  options.max_iterations = 500;
+  options.tolerance = 1e-7;
+  options.verify_derivatives = true;
+  options.reduction_options.max_front = 8;
+  options.reduction_options.max_nnz_ratio = 10.0;
+
+  SECTION("grid-following PLL positive-sequence current equilibrium") {
+    auto c = make_small_hybrid_case();
+    c.converters.front().control_mode = PhaseVSCControlMode::GridFollowingPLL;
+    const auto result = solve_three_phase_hybrid_opf(c, options);
+    INFO(result.status);
+    REQUIRE(result.converged);
+    REQUIRE(result.converter_dynamic_equilibria.size() == 1);
+    CHECK(result.max_converter_current_vuf < 1e-7);
+    CHECK(result.max_converter_current_loading <= 1.0 + 1e-7);
+    CHECK(result.max_dynamic_equilibrium_residual < 1e-7);
+    CHECK(result.max_equality_jacobian_error < 1e-5);
+    CHECK(result.max_lagrangian_hessian_error < 1e-5);
+
+    NetworkState network;
+    network.resize(3, 0);
+    for (int phase = 0; phase < 3; ++phase) {
+      network.Vac_abc[phase] = result.full_voltage[6 + phase];
+    }
+    hacdcpf::PowerFlowResult pf;
+    const Complex a = std::polar(1.0, 2.0 * M_PI / 3.0);
+    const Complex v1 = (network.Vac_abc[0] + a * network.Vac_abc[1] +
+                        a * a * network.Vac_abc[2]) / 3.0;
+    pf.vm = {std::abs(v1)};
+    pf.va = {std::arg(v1)};
+    GridFollowingInverterParams params;
+    params.bus_pos = 0;
+    params.base_mva = 1.0;
+    params.p_ref_mw = result.converter_dynamic_equilibria.front()
+                          .active_power_reference_pu;
+    params.q_ref_mvar = result.converter_dynamic_equilibria.front()
+                           .reactive_power_reference_pu;
+    params.current_limit_pu = c.converters.front().phase_current_max_pu;
+    params.pll_kp = c.converters.front().pll_kp;
+    params.pll_ki = c.converters.front().pll_ki;
+    GridFollowingInverter dynamic(params);
+    int offset = 0;
+    dynamic.assignStateIndices(offset);
+    DynamicState state;
+    state.resize(static_cast<std::size_t>(offset));
+    dynamic.initializeFromPowerFlow(pf, state, network);
+    dynamic.trimToNetworkEquilibrium(state, network);
+    Eigen::VectorXd derivative = Eigen::VectorXd::Zero(offset);
+    dynamic.computeDerivatives(0.0, state, network, derivative);
+    CHECK(derivative.cwiseAbs().maxCoeff() < 1e-7);
+  }
+
+  SECTION("grid-forming droop Norton equilibrium") {
+    auto c = make_small_hybrid_case();
+    c.converters.front().control_mode = PhaseVSCControlMode::GridFormingDroop;
+    c.converters.front().virtual_r_pu = 0.01;
+    c.converters.front().virtual_x_pu = 0.10;
+    const auto result = solve_three_phase_hybrid_opf(c, options);
+    INFO(result.status);
+    REQUIRE(result.converged);
+    REQUIRE(result.converter_dynamic_equilibria.size() == 1);
+    CHECK(result.max_converter_current_loading <= 1.0 + 1e-7);
+    CHECK(result.max_dynamic_equilibrium_residual < 1e-7);
+    CHECK(result.max_equality_jacobian_error < 1e-5);
+    CHECK(result.max_lagrangian_hessian_error < 1e-5);
+    CHECK(std::abs(result.converter_dynamic_equilibria.front()
+                       .internal_voltage_positive) > 0.5);
+
+    NetworkState network;
+    network.resize(3, 0);
+    for (int phase = 0; phase < 3; ++phase) {
+      network.Vac_abc[phase] = result.full_voltage[6 + phase];
+    }
+    hacdcpf::PowerFlowResult pf;
+    const Complex a = std::polar(1.0, 2.0 * M_PI / 3.0);
+    const Complex v1 = (network.Vac_abc[0] + a * network.Vac_abc[1] +
+                        a * a * network.Vac_abc[2]) / 3.0;
+    pf.vm = {std::abs(v1)};
+    pf.va = {std::arg(v1)};
+    const auto& equilibrium = result.converter_dynamic_equilibria.front();
+    GridFormingInverterParams params;
+    params.bus_pos = 0;
+    params.base_mva = 1.0;
+    params.p_ref_mw = equilibrium.active_power_reference_pu;
+    params.q_ref_mvar = equilibrium.reactive_power_reference_pu;
+    params.v_ref_pu = equilibrium.voltage_reference_pu;
+    params.virtual_r_pu = c.converters.front().virtual_r_pu;
+    params.virtual_x_pu = c.converters.front().virtual_x_pu;
+    params.current_limit_pu = c.converters.front().phase_current_max_pu;
+    params.p_droop_pu = c.converters.front().p_droop_pu;
+    params.q_droop_pu = c.converters.front().q_droop_pu;
+    params.voltage_ki = c.converters.front().voltage_integral_gain;
+    GridFormingInverter dynamic(params);
+    int offset = 0;
+    dynamic.assignStateIndices(offset);
+    DynamicState state;
+    state.resize(static_cast<std::size_t>(offset));
+    dynamic.initializeFromPowerFlow(pf, state, network);
+    dynamic.trimToNetworkEquilibrium(state, network);
+    Eigen::VectorXd derivative = Eigen::VectorXd::Zero(offset);
+    dynamic.computeDerivatives(0.0, state, network, derivative);
+    CHECK(derivative.cwiseAbs().maxCoeff() < 1e-7);
+  }
+}
+
+TEST_CASE("Independent coupled PF reproduces the OPF operating point",
+          "[opf][power_flow][three_phase][hybrid][crosscheck]") {
+  ThreePhaseHybridOPFOptions options;
+  options.variant = ModelVariant::GraphReduced;
+  options.backend = SolverBackend::Ipopt;
+  options.max_iterations = 500;
+  options.tolerance = 1e-8;
+  options.reduction_options.max_front = 8;
+  options.reduction_options.max_nnz_ratio = 10.0;
+
+  for (const auto mode : {PhaseVSCControlMode::GridFollowingPLL,
+                          PhaseVSCControlMode::GridFormingDroop}) {
+    auto c = make_small_hybrid_case();
+    c.converters.front().control_mode = mode;
+    c.converters.front().virtual_r_pu = 0.01;
+    c.converters.front().virtual_x_pu = 0.10;
+    const auto opf = solve_three_phase_hybrid_opf(c, options);
+    INFO(opf.status);
+    REQUIRE(opf.converged);
+    const auto pf_case = make_three_phase_hybrid_pf_case(c, opf);
+    hacdcpf::powerflow::ThreePhaseHybridPFOptions pf_options;
+    pf_options.max_iterations = 80;
+    pf_options.tolerance = 1e-9;
+    const auto pf =
+        hacdcpf::powerflow::solve_three_phase_hybrid_pf(pf_case, pf_options);
+    INFO(pf.status);
+    REQUIRE(pf.converged);
+    CHECK(pf.residual < 1e-8);
+    REQUIRE(pf.voltage.size() == opf.full_voltage.size());
+    REQUIRE(pf.dc_voltage.size() == opf.dc_voltage.size());
+    CHECK((pf.voltage - opf.full_voltage).cwiseAbs().maxCoeff() < 2e-6);
+    CHECK((pf.dc_voltage - opf.dc_voltage).cwiseAbs().maxCoeff() < 2e-6);
+  }
+}
+
+TEST_CASE("Native Full certifies a graph-reduced primal-dual transport",
+          "[opf][three_phase][hybrid][kron][native][warm_start]") {
+  const auto c = make_small_hybrid_case();
+  ThreePhaseHybridOPFOptions options;
+  options.variant = ModelVariant::GraphReduced;
+  options.backend = SolverBackend::NativeIPM;
+  options.warm_start_with_ipopt = true;
+  options.max_iterations = 500;
+  options.tolerance = 1e-6;
+  options.reduction_options.max_front = 8;
+  options.reduction_options.max_nnz_ratio = 10.0;
+
+  const auto reduced = solve_three_phase_hybrid_opf(c, options);
+  INFO("reduced status=" << reduced.status
+       << " p=" << reduced.primal_residual
+       << " d=" << reduced.dual_residual
+       << " c=" << reduced.complementarity);
+  REQUIRE(reduced.converged);
+
+  const int full_nv = static_cast<int>(c.y_ac.rows());
+  const int reduced_nv = static_cast<int>(reduced.reduction.retained.size());
+  const int ng = static_cast<int>(c.generators.size());
+  const int ndc = static_cast<int>(c.g_dc.rows());
+  int ncp = 0;
+  int ngfm = 0;
+  for (const auto& converter : c.converters) {
+    ncp += static_cast<int>(converter.phase_nodes.size());
+    if (converter.control_mode == PhaseVSCControlMode::GridFormingDroop) {
+      ++ngfm;
+    }
+  }
+  const int nc = static_cast<int>(c.converters.size());
+  const int device_variables = 2 * ng + ndc + 2 * ncp + 2 * ngfm + nc;
+
+  REQUIRE(reduced.primal.size() == 2 * reduced_nv + device_variables);
+  REQUIRE(reduced.full_voltage.size() == full_nv);
+  options.variant = ModelVariant::Full;
+  options.primal_start = Eigen::VectorXd::Zero(
+      2 * full_nv + device_variables);
+  for (int node = 0; node < full_nv; ++node) {
+    options.primal_start[node] = std::real(reduced.full_voltage[node]);
+    options.primal_start[full_nv + node] =
+        std::imag(reduced.full_voltage[node]);
+  }
+  options.primal_start.tail(device_variables) =
+      reduced.primal.tail(device_variables);
+
+  const int full_equalities =
+      reduced.equalities + 2 * (full_nv - reduced_nv);
+  options.equality_dual_start = Eigen::VectorXd::Constant(
+      full_equalities, std::numeric_limits<double>::quiet_NaN());
+  for (int pos = 0; pos < reduced_nv; ++pos) {
+    const int node =
+        reduced.reduction.retained[static_cast<std::size_t>(pos)];
+    options.equality_dual_start[node] = reduced.equality_dual[pos];
+    options.equality_dual_start[full_nv + node] =
+        reduced.equality_dual[reduced_nv + pos];
+  }
+  const int tail = reduced.equalities - 2 * reduced_nv;
+  options.equality_dual_start.tail(tail) =
+      reduced.equality_dual.tail(tail);
+  options.nonlinear_inequality_dual_start =
+      reduced.inequality_dual.head(reduced.inequalities);
+  options.nonlinear_slack_start =
+      reduced.inequality_slack.head(reduced.inequalities);
+
+  ThreePhaseHybridOPFCase full_case = c;
+  full_case.voltage_start = reduced.full_voltage;
+  const auto full = solve_three_phase_hybrid_opf(full_case, options);
+  INFO("full status=" << full.status
+       << " initial=" << full.initial_primal_residual << "/"
+       << full.initial_dual_residual
+       << " final=" << full.primal_residual << "/"
+       << full.dual_residual << "/" << full.complementarity);
+  REQUIRE(full.converged);
+  CHECK(full.initial_primal_residual <= 1e-6);
+  CHECK(full.initial_dual_residual <= 1e-6);
+  CHECK(full.primal_residual <= 1e-6);
+  CHECK(full.dual_residual <= 1e-6);
+  CHECK(full.complementarity <= 1e-6);
+  CHECK(std::abs(full.objective - reduced.objective) <=
+        1e-6 * std::max(1.0, std::abs(full.objective)));
+}
+
+TEST_CASE("Exact constraint oracle preserves the graph-reduced OPF solution",
+          "[opf][three_phase][hybrid][kron][constraint_oracle]") {
+  const auto c = make_small_hybrid_case();
+  ThreePhaseHybridOPFOptions all_rows_options;
+  all_rows_options.variant = ModelVariant::GraphReduced;
+  all_rows_options.backend = SolverBackend::Ipopt;
+  all_rows_options.max_iterations = 300;
+  all_rows_options.tolerance = 1e-7;
+  all_rows_options.reduction_options.max_front = 8;
+  all_rows_options.reduction_options.max_nnz_ratio = 10.0;
+
+  ThreePhaseHybridOPFOptions oracle_options = all_rows_options;
+  oracle_options.use_constraint_oracle = true;
+  oracle_options.oracle_initial_margin = 1e-4;
+  oracle_options.oracle_activation_margin = 1e-6;
+
+  const auto all_rows = solve_three_phase_hybrid_opf(c, all_rows_options);
+  const auto oracle = solve_three_phase_hybrid_opf(c, oracle_options);
+  INFO("all-row status=" << all_rows.status
+       << " residual=" << all_rows.primal_residual);
+  INFO("oracle status=" << oracle.status
+       << " residual=" << oracle.primal_residual
+       << " rows=" << oracle.enforced_inequalities << '/'
+       << oracle.inequalities
+       << " max omitted=" << oracle.max_omitted_inequality);
+  REQUIRE(all_rows.converged);
+  REQUIRE(oracle.converged);
+  CHECK(oracle.constraint_oracle_rounds >= 1);
+  CHECK(oracle.enforced_inequalities < oracle.inequalities);
+  CHECK(oracle.max_omitted_inequality <
+        -oracle_options.oracle_activation_margin);
+  CHECK(std::abs(all_rows.objective - oracle.objective) <=
+        1e-7 * std::max(1.0, std::abs(all_rows.objective)));
+  REQUIRE(all_rows.full_voltage.size() == oracle.full_voltage.size());
+  CHECK((all_rows.full_voltage - oracle.full_voltage)
+            .cwiseAbs().maxCoeff() < 1e-6);
+  CHECK(oracle.primal_residual <= 1e-6);
+  CHECK(oracle.dual_residual <= 1e-6);
+  CHECK(oracle.complementarity <= 1e-6);
+
+  ThreePhaseHybridOPFOptions seeded_options = oracle_options;
+  seeded_options.oracle_seed_rows = oracle.enforced_inequality_rows;
+  seeded_options.primal_start = oracle.primal;
+  seeded_options.equality_dual_start = oracle.equality_dual;
+  seeded_options.nonlinear_inequality_dual_start =
+      oracle.inequality_dual.head(oracle.inequalities);
+  seeded_options.nonlinear_slack_start =
+      oracle.inequality_slack.head(oracle.inequalities);
+  const auto seeded = solve_three_phase_hybrid_opf(c, seeded_options);
+  INFO("seeded status=" << seeded.status
+       << " residual=" << seeded.primal_residual
+       << " rows=" << seeded.enforced_inequalities << '/'
+       << seeded.inequalities);
+  REQUIRE(seeded.converged);
+  CHECK(seeded.constraint_oracle_added_rows == 0);
+  CHECK(seeded.enforced_inequality_rows == oracle.enforced_inequality_rows);
+  CHECK(std::abs(seeded.objective - oracle.objective) <=
+        1e-8 * std::max(1.0, std::abs(oracle.objective)));
 }

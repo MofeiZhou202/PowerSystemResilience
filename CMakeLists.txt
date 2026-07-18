@@ -410,6 +410,7 @@ set(HACDCPF_SOURCES
   src/carbon_analysis/carbon_analysis.cpp
   src/carbon_analysis/annual_carbon_analysis.cpp
   src/power_flow/three_phase_nr.cpp
+  src/power_flow/three_phase_hybrid.cpp
   src/reliability/reliability_assessment.cpp
   src/reliability/reliability_data.cpp
   src/reliability/failure_mode.cpp
@@ -715,6 +716,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/three_phase_hybrid_acdc_pf_study.cp
     $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>)
   hacdcpf_copy_opendss_runtime(three_phase_hybrid_acdc_pf_study)
 endif()
+
+add_executable(three_phase_hybrid_pf_external_case
+  tools/three_phase_hybrid_pf_external_case.cpp)
+target_link_libraries(three_phase_hybrid_pf_external_case PRIVATE hacdcpf::hacdcpf)
+hacdcpf_copy_opendss_runtime(three_phase_hybrid_pf_external_case)
 
 # Phase-node graph-reduction paper benchmark and reproducibility audit.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/phase_graph_reduction_benchmark.cpp")

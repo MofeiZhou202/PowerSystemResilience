@@ -1,6 +1,6 @@
 # Documentation Index
 
-Updated: 2026-07-12
+Updated: 2026-07-18
 
 This directory separates implementation contracts from mathematical references.
 When documentation and runtime behavior differ, `include/`, `src/`,
@@ -22,10 +22,18 @@ When documentation and runtime behavior differ, `include/`, `src/`,
 | 中文 LaTeX：时序潮流/年度模拟数学模型 + 需求响应效应 | [latex/time_series_annual_simulation_zh.tex](latex/time_series_annual_simulation_zh.tex) |
 | Transient runtime and validation boundary | [transient_runtime.md](transient_runtime.md) |
 | Reliability methods | [reliability_assessment_models.md](reliability_assessment_models.md) |
+| Cyber-physical reliability levels (L0–L4; Level 1 implemented) | [cyber_physical_reliability_extension.md](cyber_physical_reliability_extension.md) |
 | Short-circuit methods | [short_circuit_rich_acdc_derivation.md](short_circuit_rich_acdc_derivation.md) |
 | Network reconfiguration | [network_reconfiguration_models.md](network_reconfiguration_models.md) |
+| RPO structure (OLTC + continuous) and cross-validation | [reactive_power_optimization_validation.md](reactive_power_optimization_validation.md) |
+| Large hybrid OPF IPM diagnostics | [large_hybrid_ipm_diagnostics.md](large_hybrid_ipm_diagnostics.md) |
+| Multidimensional weak-link identification | [multidimensional_weak_link_identification.md](multidimensional_weak_link_identification.md) |
+| Hosting capacity (DL/T 2041-2025) implementation | [../capacity_analysis_implementation.md](../capacity_analysis_implementation.md) |
+| CIM/CGMES 3.0 field crosswalk and round-trip contract | [cim_cgmes3_crosswalk.md](cim_cgmes3_crosswalk.md) |
+| PowerSimulationsDynamics.jl interop validation | [powersimulationsdynamics_interop.md](powersimulationsdynamics_interop.md) |
 | Digital-twin and IO architecture | [digital_twin_data_io_architecture.md](digital_twin_data_io_architecture.md) |
 | EV/traffic scenario schema | [ev_traffic_scenario_format.md](ev_traffic_scenario_format.md) |
+| Code commenting conventions | [commenting_guide.md](commenting_guide.md) |
 
 ## Technical notebook
 
