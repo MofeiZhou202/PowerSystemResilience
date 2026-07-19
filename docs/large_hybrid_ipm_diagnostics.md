@@ -237,3 +237,53 @@ case2000 AC/DC，100 次内虽然原始残差持续下降，但对偶平稳性�
 `ACOPFOptions::ac_pf_warm_start=true`（默认 false）会先从算例当前运行点求解普通 AC 潮流（Newton–Raphson），把 AC 可行的 (vm, va) 通过既有 warm-start 映射注入 parity IPM —— IPM 第 0 次迭代即 θ ≈ 0，始终停留在可行域盆地内。
 
 实测：case13659pegase 以 189 次迭代、约 41 s 收敛于参考最优 obj=386107（maxviol 2.2e-6），此前所有路径（含 Ipopt 同机 ~55 min 未返回）均失败。注意选项是**选择性启用**而非默认：在良态算例上精确可行起点反而更慢（case1354：88→330 迭代），个别 rte 算例落入较差盆地（6468）或不收敛（6495）；建议在默认起点失败的大型/受压电网上启用。理论分析见 MIPSolvers `docs/numerical_methods.md` §11。
+
+## 更新（2026-07-19，其三）：结构感知的稀疏 KKT 后端（纯 AC→KLU，混合→MUMPS）
+
+###  profiling（`HACDCPF_OPF_PROF=1`，进程退出时打印 factorize/solve/assembly 分解）
+
+2869 单次 IPM 的时间构成：**数值分解 ~43%（0.0144 s/次）、回代求解 ~35%
+（注意每次分解配 ~5.7 次回代）、KKT 装配仅 ~4.6%**。大头是稀疏直接分解。
+
+### 两条被实测否定的"提速"路
+
+- **MUMPS OpenMP 树并行**：在 2869 规模（KKT ~1.8 万维、单次分解 14 ms）是
+  **净亏损**——1/8/16 线程的分解耗时 0.023/0.019/0.018 s，全部慢于串行
+  0.014 s。线程同步/临界区开销超过小 frontal 矩阵能给的并行收益；OpenMP
+  要在大得多（10 万+ 未知量、大 frontal）才回本。且 libgomp 非 vendored，
+  已放弃。
+- **Accelerate 线程**：`VECLIB_MAXIMUM_THREADS=1/8/16` 运行时间完全一致
+  （user≈real，本就单线程）——叶部大量小 frontal 吃不到 GEMM 线程。
+
+### 真正的杠杆：后端选择（全部 vendored，零新依赖，纯算法单线程）
+
+2869 串行端到端：MUMPS 12.05 s / UMFPACK 16.11 s / **KLU 5.97 s**。
+KLU 的 **BTF（块三角）** 预分解天然契合电网 KKT 的近块三角结构，fill 远小于
+通用 multifrontal：分解 0.006 s vs 0.015 s、回代 0.0004 s vs 0.0019 s。
+三个大纯 AC 案例全部收敛到**同一参考目标**且更快更准：
+
+| 案例 | MUMPS | KLU | 加速 | KLU 精度 |
+|---|---|---|---|---|
+| 2869 | 86 s (133999) | 59 s (133999) | 1.45× | stat 相当 |
+| 9241 | 606 s (315837) | 498 s (315837) | 1.22× | stat 2.2e-7 |
+| 13659 | 34 s (386107) | 23 s (386118) | 1.48× | stat 优 ~100× |
+
+**但 KLU 不能用于混合 AC/DC**：增广 KKT 的 Wächter–Biegler δ_W 正则依赖
+LDLᵀ **惯性**（负主元个数），只有 MUMPS 报告；KLU/LU 不报告 → 僵硬混合案例
+失去正则而停滞（实测 case1354+500 MW dc：MUMPS 收敛 stat 8.4e-5，KLU
+" objective-stagnant" stat 0.070）。
+
+### 为什么不能靠"编号重排"让混合也用上 KLU（理论）
+
+块三角可分解性是**置换不变量**：矩阵可约与否由其图的强连通性决定，与排序
+选择无关。混合 AC/DC 引入稠密 DC 耦合块（`gdc_dense`）+ 换流器方程 → 图
+不可约 → 没有任何重排能排成块三角。fill-reducing 排序（PORD/METIS/AMD）
+只能增量减 fill（10–30%），改不了可约性。所以格局是本质的：
+**纯 AC→KLU（BTF），混合→MUMPS（惯性）**。
+
+### 实现
+
+`backend_order(pref, pure_ac)`：`pure_ac`（无 DC/换流器/DC-DC/能量路由器）
+时 Auto 顺序为 KLU→MUMPS→UMFPACK→Eigen，否则 MUMPS 优先；`HACDCPF_OPF_
+LINEAR_SOLVER` 仍可钉死任一后端（覆盖结构逻辑）。回归：IEEE24 混合 RPO
+（vdev/loss）与 case1354 混合逐位不变（仍 MUMPS），2869/13659 自动 KLU 提速。

@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
@@ -109,6 +111,59 @@ SparseBackend sparse_backend_preference() {
   return SparseBackend::Auto;
 }
 
+// ── Lightweight cumulative profiler (HACDCPF_OPF_PROF=1) ────────────────────
+// Decomposes parity-IPM wall time into the three candidate bottlenecks:
+// KKT numeric factorization, KKT back-solve, and KKT assembly (triplet build +
+// equilibration).  Accumulators are process-global and printed at exit; the
+// IPM is single-threaded today, so plain doubles suffice.
+struct IpmProf {
+  double t_factorize{0.0}, t_solve{0.0}, t_assembly{0.0};
+  long   n_factorize{0}, n_solve{0}, n_assembly{0};
+  // Per-backend factorize breakdown (index: 1=UMFPACK, 2=KLU, 3=Eigen, 4=MUMPS).
+  double t_fbe[5]{0.0, 0.0, 0.0, 0.0, 0.0};
+  long   n_fbe[5]{0, 0, 0, 0, 0};
+  bool   enabled{false};
+  IpmProf() : enabled(std::getenv("HACDCPF_OPF_PROF") != nullptr) {}
+  static const char* be_name(int b) {
+    switch (b) {
+      case 1: return "umfpack"; case 2: return "klu";
+      case 3: return "eigen";   case 4: return "mumps";
+      default: return "?";
+    }
+  }
+  ~IpmProf() {
+    if (!enabled) return;
+    std::fprintf(stderr,
+        "[prof] factorize %.3fs (%ld, %.4fs avg) | solve %.3fs (%ld, %.4fs) | "
+        "assembly %.3fs (%ld)\n",
+        t_factorize, n_factorize, n_factorize ? t_factorize / n_factorize : 0.0,
+        t_solve, n_solve, n_solve ? t_solve / n_solve : 0.0,
+        t_assembly, n_assembly);
+    for (int b = 1; b <= 4; ++b) {
+      if (n_fbe[b])
+        std::fprintf(stderr, "[prof]   %-8s factorize %.3fs (%ld, %.4fs avg)\n",
+                     be_name(b), t_fbe[b], n_fbe[b], t_fbe[b] / n_fbe[b]);
+    }
+  }
+};
+inline IpmProf& ipm_prof() { static IpmProf p; return p; }
+struct IpmProfTimer {
+  double& acc; long& cnt; bool on;
+  std::chrono::steady_clock::time_point t0;
+  IpmProfTimer(double& a, long& c, bool on_)
+      : acc(a), cnt(c), on(on_), t0(std::chrono::steady_clock::now()) {
+    if (on) ++cnt;
+  }
+  void stop() {
+    if (on) {
+      acc += std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - t0).count();
+      on = false;
+    }
+  }
+  ~IpmProfTimer() { stop(); }
+};
+
 // Newton-system form for the KKT solve.  The condensed form eliminates the
 // inequality multipliers into W = Lxx + JhᵀΣJh: a sparse triple product per
 // iteration, extra fill-in, and — decisively — a squared condition number.
@@ -167,6 +222,7 @@ struct SparseKKTCache {
 #endif
   int active{0};         ///< 0=unset, 1=UMFPACK, 2=KLU, 3=Eigen SparseLU, 4=MUMPS
   int analyzed_for{0};   ///< backend whose symbolic analysis is currently valid
+  bool pure_ac{false};   ///< no DC/VSC/ER subsystems → KLU-eligible (see below)
   int pat_dim{-1};
   int pat_nnz{-1};
   bool factored{false};
@@ -180,18 +236,29 @@ struct SparseKKTCache {
 };
 
 // Ordered candidate backends for a preference (most-preferred first), filtered
-// to those compiled in and de-duplicated.  Auto prefers MUMPS: the KKT is
-// symmetric indefinite, so a symmetric LDLᵀ factorization halves work and fill
-// versus unsymmetric LU, and MUMPS' multifrontal nested-dissection ordering is
-// near-optimal on the mesh-like graphs of power networks — this is what makes
-// ≳10000-bus cases tractable at all.  UMFPACK follows: its pivoting stays
-// accurate on the near-singular KKTs of very large / ill-conditioned grids
-// (≳6000 buses), where Eigen's SparseLU returns an accurately-solved but
-// wrong step (the system itself is near-singular) and the IPM diverges to NaN.
-// KLU then Eigen SparseLU are escalation failovers.  Eigen SparseLU is ~3–7×
-// faster on well-conditioned KKTs, so a caller that knows its case is benign can
-// pin it via HACDCPF_OPF_SPARSE_SOLVER=eigen.
-std::vector<int> backend_order(SparseBackend pref) {
+// to those compiled in and de-duplicated.  The Auto order is structure-aware:
+//
+//  * Pure-AC problems (pure_ac=true, no DC/VSC/energy-router subsystems) put
+//    KLU first.  KLU's block-triangular-form (BTF) decomposition matches the
+//    near-block-triangular structure of network KKTs, giving far less fill
+//    than a general multifrontal LDLᵀ — measured on case2869 (factorize
+//    0.006 s vs MUMPS 0.015 s, end-to-end 5.97 s vs 12.05 s, SAME exact
+//    reference objective 133999) and case13659 (22.9 s vs 33.9 s, with ~100×
+//    tighter stationarity).  MUMPS and UMFPACK follow as escalation failovers.
+//
+//  * Hybrid AC/DC problems (pure_ac=false) keep MUMPS first: the augmented
+//    KKT's Wächter–Biegler δ_W regularisation needs the LDLᵀ inertia (negative
+//    pivot count), which only MUMPS reports — on stiff hybrid cases KLU/LU
+//    accept the unregularised factorisation and stagnate (measured:
+//    case1354+500 MW dc converges with MUMPS, stagnates with KLU).  MUMPS'
+//    symmetric LDLᵀ also halves work/fill versus unsymmetric LU here, and its
+//    nested-dissection ordering suits the mesh-like network graph.
+//
+// UMFPACK's pivoting stays accurate on near-singular KKTs; Eigen SparseLU is
+// ~3–7× faster on well-conditioned KKTs but returns an accurately-solved-yet
+// -wrong step on very large/ill-conditioned grids.  A caller can pin any
+// backend via HACDCPF_OPF_SPARSE_SOLVER (overrides this structure logic).
+std::vector<int> backend_order(SparseBackend pref, bool pure_ac) {
   std::vector<int> order;
 #if defined(HACDCPF_OPF_HAVE_UMFPACK)
   const bool have_umf = true;
@@ -230,10 +297,19 @@ std::vector<int> backend_order(SparseBackend pref) {
       break;
     case SparseBackend::Auto:
     default:
-      if (have_mumps) order.push_back(4);
-      if (have_umf) order.push_back(1);
-      if (have_klu) order.push_back(2);
-      order.push_back(3);
+      if (pure_ac) {
+        // Pure-AC: KLU first (BTF structure, measured fastest on network KKTs).
+        if (have_klu) order.push_back(2);
+        if (have_mumps) order.push_back(4);
+        if (have_umf) order.push_back(1);
+        order.push_back(3);
+      } else {
+        // Hybrid AC/DC: MUMPS first (LDLᵀ inertia needed for δ_W regularisation).
+        if (have_mumps) order.push_back(4);
+        if (have_umf) order.push_back(1);
+        if (have_klu) order.push_back(2);
+        order.push_back(3);
+      }
       break;
   }
   std::vector<int> uniq;
@@ -246,6 +322,10 @@ std::vector<int> backend_order(SparseBackend pref) {
 // Numeric factorization for the active backend; analyzes the pattern only when
 // it has changed (first call or a genuine pattern change).
 bool sparse_factorize_active(SparseKKTCache& cache, bool pattern_changed) {
+  const bool _prof = ipm_prof().enabled;
+  const int  _be = cache.active;  // backend is fixed for this call
+  const auto _t0 = std::chrono::steady_clock::now();
+  bool ok = false;
   if (pattern_changed) ++cache.symbolic_analyze_calls;
   switch (cache.active) {
 #if defined(HACDCPF_OPF_HAVE_UMFPACK)
@@ -254,7 +334,8 @@ bool sparse_factorize_active(SparseKKTCache& cache, bool pattern_changed) {
         cache.umf.analyzePattern(cache.kkt);
       }
       cache.umf.factorize(cache.kkt);
-      return cache.umf.info() == Eigen::Success;
+      ok = cache.umf.info() == Eigen::Success;
+      break;
 #endif
 #if defined(HACDCPF_OPF_HAVE_KLU)
     case 2:
@@ -262,26 +343,41 @@ bool sparse_factorize_active(SparseKKTCache& cache, bool pattern_changed) {
         cache.klu.analyzePattern(cache.kkt);
       }
       cache.klu.factorize(cache.kkt);
-      return cache.klu.info() == Eigen::Success;
+      ok = cache.klu.info() == Eigen::Success;
+      break;
 #endif
 #if defined(HACDCPF_HAVE_MUMPS)
     case 4:
       if (pattern_changed) {
         cache.mumps.analyze_pattern(cache.kkt);
       }
-      return cache.mumps.factorize(cache.kkt);
+      ok = cache.mumps.factorize(cache.kkt);
+      break;
 #endif
     default:
       if (pattern_changed) {
         cache.lu.analyzePattern(cache.kkt);
       }
       cache.lu.factorize(cache.kkt);
-      return cache.lu.info() == Eigen::Success;
+      ok = cache.lu.info() == Eigen::Success;
+      break;
   }
+  if (_prof) {
+    const double dt = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - _t0).count();
+    ipm_prof().t_factorize += dt;
+    ++ipm_prof().n_factorize;
+    if (_be >= 1 && _be <= 4) {
+      ipm_prof().t_fbe[_be] += dt;
+      ++ipm_prof().n_fbe[_be];
+    }
+  }
+  return ok;
 }
 
 // Back-solve for the active backend.
 Eigen::VectorXd sparse_solve_active(SparseKKTCache& cache, const Eigen::VectorXd& rhs) {
+  IpmProfTimer _pt(ipm_prof().t_solve, ipm_prof().n_solve, ipm_prof().enabled);
   switch (cache.active) {
 #if defined(HACDCPF_OPF_HAVE_UMFPACK)
     case 1: return cache.umf.solve(rhs);
@@ -382,6 +478,8 @@ bool factor_kkt_sparse(SparseKKTCache& cache,
 // and augmented forms; the caller fills cache.nn/meq/niq to its block sizes.
 bool factor_assembled_kkt(SparseKKTCache& cache,
                           std::vector<Eigen::Triplet<double>>& trips) {
+  IpmProfTimer _asm(ipm_prof().t_assembly, ipm_prof().n_assembly,
+                    ipm_prof().enabled);
   const int dim = cache.nn + cache.meq + cache.niq;
   cache.kkt.resize(dim, dim);
   cache.kkt.setFromTriplets(trips.begin(), trips.end());
@@ -410,9 +508,11 @@ bool factor_assembled_kkt(SparseKKTCache& cache,
     }
   }
   cache.kkt_orig = cache.kkt;
+  _asm.stop();  // assembly + equilibration ends here; factorization follows
 
   const int nnz = static_cast<int>(cache.kkt.nonZeros());
-  const std::vector<int> order = backend_order(sparse_backend_preference());
+  const std::vector<int> order =
+      backend_order(sparse_backend_preference(), cache.pure_ac);
   if (cache.active == 0) cache.active = order.front();
 
   // If the previous solve was inaccurate (a sign the current backend cannot
@@ -969,6 +1069,15 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
       (!has_linear_solver_override() && kDenseAutoKktDim > 0 && kkt_dim <= kDenseAutoKktDim);
   DenseKKTCache dense_cache;
   SparseKKTCache sparse_cache;
+  // Structure-aware backend selection (see backend_order): a problem is KLU-
+  // eligible only when it has no DC / VSC / DC-DC / energy-router subsystems,
+  // i.e. it is a pure AC network.  Hybrid AC/DC KKTs need the MUMPS LDLᵀ
+  // inertia for the δ_W regularisation and must not take the KLU path.
+  sparse_cache.pure_ac = prob.data.dc_buses.empty() &&
+                         prob.data.dc_branches.empty() &&
+                         prob.data.converters.empty() &&
+                         prob.data.dcdc_converters.empty() &&
+                         prob.data.energy_routers.empty();
 
   // Newton-system form.  The dense path has no inertia oracle and no
   // inequality-block structure, so it always uses the condensed form; the
@@ -2010,6 +2119,11 @@ bool homotopy_tangent(const Problem& prob,
 
   // Assemble + factor with Wächter–Biegler inertia control (mirrors the IPM).
   SparseKKTCache cache;
+  cache.pure_ac = prob.data.dc_buses.empty() &&
+                  prob.data.dc_branches.empty() &&
+                  prob.data.converters.empty() &&
+                  prob.data.dcdc_converters.empty() &&
+                  prob.data.energy_routers.empty();
   const double lxx_norm = std::max(1.0, Lxx.coeffs().cwiseAbs().maxCoeff());
   const double delta_c = 1e-8 * lxx_norm;
   double delta_w = 0.0;
