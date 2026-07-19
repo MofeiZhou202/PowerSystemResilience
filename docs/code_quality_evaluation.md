@@ -566,3 +566,46 @@ feasibility valley (theory: `numerical_methods.md` §14).**
 |---|---|---|
 | F1 | Freeze equilibration once per solve (default; `HACDCPF_OPF_RESCALE_PER_ITER=1` opts out) | ✅ **IEEE24-expanded: 640-fail → 36 iters certified** (viol 6.1e-6, stat 2.1e-7, 0.02 s, obj 44958.5 ≈ Ipopt's 44930) |
 | F2 | Full regression after F1 | ✅ all green: 13659 = 386107 (35 s); 9241 homotopy = 315837 (606 s, was 721); 2869 homotopy = 133999 exact (86 s); 1888rte 168→89 iters (obj 59730.4, viol 4.8e-3 — slightly looser point, noted); 1354/1951/14–300 unchanged; 1354+500MWdc hybrid converged (7.6 s, was 9.4) |
+
+### Phase-13 slice — IEEE24-expanded RPO (无功优化) debug chain
+
+User report: reactive power optimization fails on the IEEE24-expanded case.
+Measured chain of THREE stacked defects:
+
+1. **RPO inner solves hardcoded embedded Ipopt** (`reactive_power_opt.cpp`).
+   On the stiff hybrid case (DC line g ≈ 250 pu), Ipopt asymptotes: even at
+   60 600 iterations it reports "Max iterations exceeded" with
+   viol 5.4e-8 / stat 2.7e-6.  The parity IPM is not a drop-in here: on the
+   voltage-deviation objective it reaches feas 4.9e-5 by iter 4 then walks
+   away — the small-KKT unsupervised path (dim 221 < 512) has no filter, and
+   with `HACDCPF_OPF_FILTER_ALL=1` it still stalls at viol 0.51.  Backends
+   fail in *opposite* regimes, so neither is globally right.
+2. **RPO rejected points by raw solver status** instead of its own
+   tolerances: the Ipopt asymptote point (viol 5.4e-8, stat 2.7e-6) already
+   satisfies `ipm_tol=1e-6`-class feasibility and `stationarity_tol=1e-3`,
+   but "Max iterations exceeded" aborted the whole RPO.
+3. **Inner iteration budget 400**: Ipopt reaches viol 5.2e-6 at 400 (above
+   ipm_tol) but 4.7e-8 at 2000 (inside it) — the sweet spot is ~2000, after
+   which the trajectory is flat.
+
+Fixes (all in `reactive_power_opt.*` + `run_gui_server.cpp`):
+- Inner backend is now `inner_solver_backend` (default ParityIPM) with an
+  automatic second leg: when the primary result neither converges nor meets
+  the measured tolerances, retry with the other backend and keep the
+  better-measured point (parity walks away on vdev, Ipopt asymptotes but
+  lands acceptably, and vice versa on economic objectives).
+- Baseline + inner evaluations accept **measured-tolerance convergence**
+  (viol ≤ ipm_tol ∧ stat ≤ stationarity_tol) even when the raw status reads
+  max-iterations, with the acceptance recorded honestly in the status.
+- `max_ipm_iter` default 400 → 2000 (cap only; easy cases never use it).
+
+Measured end-to-end on IEEE24-3area-expanded: **RPO converges** —
+"Feasible local optimum (heuristic search)", 137 nodes, baseline
+viol 1.16e-7, **loss 36.45 → 35.34 MW (−1.11 MW), max voltage deviation
+0.0180 → 0.0114 (−37%)**.  OPF (economic) on the same case stays at 36
+iterations / obj 44958.5.
+
+Known limitation (documented, not addressed here): the parity IPM's
+voltage-deviation trajectory on small stiff hybrid systems can walk away
+from a nearly converged point — the unsupervised small-KKT path lacks
+globalization; RPO's second leg currently routes those to Ipopt.
