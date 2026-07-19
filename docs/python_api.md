@@ -31,7 +31,8 @@ future in-process transport possible without changing experiment code.
 |---|---|---|
 | Runtime | `LocalHySimServer` | One isolated C++ process per experiment or AI worker. |
 | Transport | `Transport`, `UrllibTransport` | Replaceable request execution; no unsafe automatic retry. |
-| SDK v1 | `HySimV1Client`, `HySimV1Session`, `HySimJob` | Isolated model lifecycle, optimistic concurrency, asynchronous PF/OPF, topology and result chunks. |
+| SDK v1 | `HySimV1Client`, `HySimV1Session`, `HySimJob` | Isolated model lifecycle, optimistic concurrency, asynchronous PF/OPF, typed topology and result chunks. |
+| Resources | `TopologyChunk`, `SubgraphView`, `ResultFrameChunk`, `ViolationChunk` | Validate schemas/counts, expose stable bus references, and retain forward-compatible raw payloads. |
 | SDK legacy | `HySimClient` | GUI-compatible global lifecycle, registered analyses, lazy frames. |
 | Models | `BusRef`, `ComponentRef`, request dataclasses | Domain-qualified bus IDs and stable authored component IDs. |
 | Results | `AnalysisResult` | Request/model provenance, scientific status, limitations, raw payload. |
@@ -85,6 +86,36 @@ model for visualization. After a job succeeds, `job.frame(step, domain=...,
 indices=..., viewport=...)` returns a bounded result window and
 `job.violations(step)` returns the worst voltage/loading excursions. These
 methods preserve domain-qualified stable IDs and pass unknown fields through.
+
+The recommended scalable access pattern is:
+
+```python
+for page in session.topology_pages(lod=2, page_size=5000):
+    consume(page.nodes)
+
+focus = session.subgraph_view(BusRef(BusDomain.AC, 100), depth=2)
+result = job.wait_result().require_usable()
+frame = job.frame_chunk(0, domain="ac", limit=500)
+worst = job.violation_chunk(0, limit=50)
+```
+
+`topology_pages()` and `frame_pages()` reject non-advancing pagination tokens
+instead of looping forever. `iter_topology_nodes()` and `iter_frame_nodes()`
+flatten node pages for streaming consumers. Direct raw methods remain available
+where a caller must consume newly added server fields before the typed SDK is
+updated. Client-side validation rejects invalid LOD, domain, viewport, paging,
+stable-index, and engineering-limit inputs before any network request.
+
+The v1 AI registry exposes bounded read tools for topology pages, subgraphs,
+job frames, violations, and compact job lists. Tool-level limits are deliberately
+smaller than direct SDK limits so an agent cannot accidentally pull tens of
+thousands of rows into one context window.
+
+`HySimV1Client(audit_hook=...)` now emits the same `ApiCallEvent` contract as
+the legacy client. Each event contains a generated request ID, route, HTTP
+status, elapsed time, resolved model revision, and SHA-256 of request/query
+parameters. It does not retain the full model payload. The request ID is also
+sent as `X-HySim-Request-ID` for correlation with gateway or server logs.
 
 ## Evolution path
 

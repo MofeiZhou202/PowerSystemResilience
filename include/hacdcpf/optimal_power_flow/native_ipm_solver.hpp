@@ -89,4 +89,27 @@ struct IPMResult {
 /// @return Primal/dual solution, KKT residual metrics, and convergence status.
 IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt = {});
 
+/// Davidenko tangent of the objective homotopy P(t): min t·f(x) at a path
+/// point (x, z, lambda, mu) of the t-scaled problem.  Differentiating the
+/// perturbed KKT conditions with respect to t gives
+///
+///   K_aug · (dx/dt, dλ/dt, dμ/dt) = (−∇f/t, 0, 0),  dz/dt = −Jh·dx/dt,
+///
+/// where ∇f is the gradient of the t-scaled objective (so ∇f/t is the full
+/// cost gradient entering the stationarity at rate 1) and K_aug is the
+/// IPM's own augmented system — one factorization + back-solve with the
+/// existing LDLᵀ machinery (inertia-controlled) yields the full path
+/// tangent.  Returns false when t ≈ 0, the system cannot be factored, or
+/// the solve is non-finite.  Theory: docs/numerical_methods.md §13.
+bool homotopy_tangent(const Problem& prob,
+                      const Eigen::VectorXd& x,
+                      const Eigen::VectorXd& z,
+                      const Eigen::VectorXd& lambda,
+                      const Eigen::VectorXd& mu,
+                      double t,
+                      Eigen::VectorXd& dx_dt,
+                      Eigen::VectorXd& dz_dt,
+                      Eigen::VectorXd& dlambda_dt,
+                      Eigen::VectorXd& dmu_dt);
+
 }  // namespace hacdcpf::opf::parity

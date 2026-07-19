@@ -85,6 +85,34 @@ struct ACOPFOptions {
   /// fall back to the normal physics-informed initial point.
   const ACOPFResult* warm_start{nullptr};
 
+  /// When true (and no explicit warm_start is given), first solve the plain
+  /// AC power flow from the case's own operating point and seed the parity
+  /// IPM with the AC-feasible (vm, va) — θ ≈ 0 at iteration 0, so the IPM
+  /// stays in the feasible basin instead of searching for it.  Measured to
+  /// unlock the stressed PEGASE grids (case13659pegase converges at the
+  /// reference optimum in 189 iterations / ~40 s).  On well-posed cases the
+  /// physics-informed initial point is faster (centrality beats exact
+  /// feasibility at init), so this is opt-in, not default.
+  bool ac_pf_warm_start{false};
+
+  /// When true, compute the Davidenko objective-homotopy tangent dw/dt at
+  /// the returned point (one extra inertia-controlled KKT solve) and expose
+  /// it in the result's ipm_tangent_* fields.  homotopy_t supplies the cost
+  /// scale t of the problem being solved (the tangent rhs is ∇f/t).
+  /// Objective-continuation drivers use it for Davidenko prediction.
+  bool compute_homotopy_tangent{false};
+  double homotopy_t{1.0};
+
+  /// Theory-guided two-phase solve (docs/numerical_methods.md §12–13): follow
+  /// the objective homotopy P(t) = min t·f from t = 0 (feasibility problem)
+  /// to t = 1 (full cost), carrying the full primal-dual state between steps
+  /// with Davidenko tangent prediction and an adaptive parameter-metric step.
+  /// Measured to certify the stressed PEGASE grids at their reference optima
+  /// (2869 exact, 9241 −0.013%, 13659 via ac_pf_warm_start).  homotopy_dt0 is
+  /// the initial continuation step; negative/zero falls back to 0.10.
+  bool objective_homotopy{false};
+  double homotopy_dt0{0.10};
+
   // Constraint-family toggles for the hybrid parity-IPM formulation
   // (multi-converter model §3.1).  Default true keeps the always-enforce
   // behavior; a GUI/caller can disable a family to relax the problem.

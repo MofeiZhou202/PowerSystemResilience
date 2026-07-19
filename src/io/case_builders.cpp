@@ -2037,6 +2037,46 @@ HybridPowerSystem build_dist33_microgrid_der() {
     sys.ac.switches.push_back(mg1_island);
   }
 
+  // ── Reliability & resilience enrichment (non-electrical fields only) ──────
+  // Feeder-position layered failure statistics, DER outage parameters and
+  // per-bus customer/importance data, so the reliability (SAIDI/SAIFI/ASUI)
+  // and resilience (priority-weighted restoration) modules produce
+  // differentiated results out of the box.  No electrical parameter changes.
+  {
+    for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
+      auto& br = sys.ac.branches[i];
+      if (!br.in_service) {        // 常开联络线：故障率最低
+        br.failure_rate = 0.02;    // occ/yr
+        br.mttr_hr = 4.0;
+      } else if (i < 18) {         // 主干段（辐射主链）
+        br.failure_rate = 0.15;
+        br.mttr_hr = 8.0;
+      } else {                     // 分支/末梢段
+        br.failure_rate = 0.08;
+        br.mttr_hr = 5.0;
+      }
+    }
+    // 柴油/燃气静态发电机：FOR ≈ 3%/2%（mtbf = mttr·(1−FOR)/FOR）
+    for (auto& sg : sys.ac.static_generators) {
+      const bool is_diesel = sg.name.find("Diesel") != std::string::npos ||
+                             sg.name.find("diesel") != std::string::npos;
+      const double fo = is_diesel ? 0.03 : 0.02;
+      sg.mttr_hours = is_diesel ? 36.0 : 48.0;
+      sg.mtbf_hours = sg.mttr_hours * (1.0 - fo) / fo;
+    }
+    // 3 台 BESS
+    for (auto& st : sys.ac.storage) {
+      st.forced_outage_rate = 0.01;
+      st.mttr_hr = 12.0;
+    }
+    // 用户数与重要度：按母线负荷规模分层，供 SAIDI/SAIFI 与恢复权重使用
+    for (auto& bus : sys.ac.buses) {
+      if (bus.pd_mw <= 0.0) continue;
+      bus.n_customers = std::max(1, static_cast<int>(std::lround(bus.pd_mw * 10.0)));
+      bus.importance = bus.pd_mw >= 0.2 ? 2.0 : 1.0;
+    }
+  }
+
   return sys;
 }
 
@@ -3170,6 +3210,31 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   sw_mg_island.element_id = 1;  // Microgrid 1
   sys.ac.switches.push_back(sw_mg_island);
 
+  // ── Hosting-capacity enrichment (non-electrical fields only) ──────────────
+  // DL/T 2041-2025 equipment-level assessment parameters: OLTC reverse-load
+  // and distributed-resource hosting limits, breaker short-circuit ratings on
+  // backbone buses, and one storage unit with a static charging strategy to
+  // contrast with the default OPF strategy.  No electrical parameter changes.
+  {
+    for (auto& tr : sys.ac.transformers_2w) {
+      tr.cap_power_factor = 0.95;
+      tr.cap_max_reverse_load_rate = 0.8;    // β：反向负载率上限
+      tr.cap_dr_max_output_coeff = 1.2;      // τ_max
+      tr.cap_registered_dr_mw = 2.0;         // S_d,reg：已注册未并网分布式
+      tr.cap_expected_new_storage_max_mw = 2.0;  // ΔP_ESS 上限
+    }
+    for (auto& bus : sys.ac.buses) {
+      if (bus.base_kv >= 110.0)      bus.i_breaker_ka = 40.0;
+      else if (bus.base_kv >= 20.0)  bus.i_breaker_ka = 25.0;
+      else if (bus.base_kv >  0.0)   bus.i_breaker_ka = 12.5;
+    }
+    if (!sys.ac.storage.empty()) {
+      auto& st = sys.ac.storage.front();
+      st.cap_charging_strategy = "static";
+      st.cap_static_charging_mw = 0.5;  // 严格处于 ±p_rated 内部，避免贴边
+    }
+  }
+
   return sys;
 }
 
@@ -4029,7 +4094,7 @@ HybridPowerSystem build_five_province_acdc() {
 
     DCBus db1;
     db1.index = dc_base;
-    db1.bus_type = DCBusType::DC_V;
+    db1.bus_type = DCBusType::DC_P;
     db1.vm_pu = 1.0;
     db1.pd_mw = 0.0;
     db1.in_service = true;
@@ -4040,8 +4105,8 @@ HybridPowerSystem build_five_province_acdc() {
 
     DCBus db2;
     db2.index = dc_base + 1;
-    db2.bus_type = DCBusType::DC_P;
-    db2.vm_pu = 1.0;
+    db2.bus_type = DCBusType::DC_V;
+    db2.vm_pu = 1.02;
     db2.pd_mw = 0.0;
     db2.in_service = true;
     db2.latitude = ac_b_to.latitude;

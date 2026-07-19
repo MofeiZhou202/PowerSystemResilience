@@ -105,8 +105,8 @@ def main() -> int:
             print("FAIL: one of the isolated PF jobs did not converge", file=sys.stderr)
             return 1
 
-        topology = first.topology(lod=2, limit=10_000)
-        topology_nodes = topology.get("nodes", [])
+        topology = first.topology_chunk(lod=2, limit=10_000)
+        topology_nodes = topology.nodes
         if not topology_nodes or any(
             node.get("ref", {}).get("domain") not in {"ac", "dc"}
             or not isinstance(node.get("ref", {}).get("index"), int)
@@ -114,19 +114,30 @@ def main() -> int:
         ):
             print("FAIL: topology chunk does not use stable bus references", file=sys.stderr)
             return 1
-        first_ref = topology_nodes[0]["ref"]
-        subgraph = first.subgraph(first_ref["domain"], first_ref["index"], depth=1)
-        if subgraph.get("center") != first_ref or not subgraph.get("nodes"):
+        first_ref = topology.bus_refs[0]
+        subgraph = first.subgraph_view(first_ref, depth=1)
+        if subgraph.center != first_ref or not subgraph.nodes:
             print("FAIL: stable-ref subgraph query returned the wrong center", file=sys.stderr)
             return 1
 
-        frame = first_job.frame(0, domain="ac", limit=3)
-        if frame.get("returned_nodes", 0) > 3 or frame.get("step") != 0:
-            print("FAIL: result frame did not honor the requested time/spatial chunk", file=sys.stderr)
+        frame = first_job.frame_chunk(0, domain="ac", limit=3)
+        if frame.returned_nodes > 3 or frame.step != 0:
+            print(
+                "FAIL: result frame did not honor the requested time/spatial chunk",
+                file=sys.stderr,
+            )
             return 1
-        violations = first_job.violations(0, limit=5)
-        if violations.get("returned", 0) > 5:
+        violations = first_job.violation_chunk(0, limit=5)
+        if violations.returned > 5:
             print("FAIL: violation chunk did not honor its limit", file=sys.stderr)
+            return 1
+        paged_refs = [
+            ref
+            for page in first.topology_pages(lod=2, page_size=5)
+            for ref in page.bus_refs
+        ]
+        if len(paged_refs) != topology.total_nodes or paged_refs != list(topology.bus_refs):
+            print("FAIL: typed topology auto-pagination changed stable node order", file=sys.stderr)
             return 1
 
         old_etag = first.etag
@@ -167,9 +178,10 @@ def main() -> int:
                     "jobs": [first_job.state, second_job.state],
                     "stale_after_update": True,
                     "topology_nodes": len(topology_nodes),
-                    "subgraph_nodes": len(subgraph.get("nodes", [])),
-                    "frame_nodes": frame.get("returned_nodes", 0),
-                    "violations": violations.get("returned", 0),
+                    "topology_pages": (topology.total_nodes + 4) // 5,
+                    "subgraph_nodes": len(subgraph.nodes),
+                    "frame_nodes": frame.returned_nodes,
+                    "violations": violations.returned,
                 },
                 sort_keys=True,
             )

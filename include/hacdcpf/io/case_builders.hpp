@@ -28,6 +28,10 @@ HybridPowerSystem build_cyber_physical_reliability_demo();
 HybridPowerSystem build_market_3bus_toy();
 HybridPowerSystem build_market_5bus_acdc_toy();
 
+/// Southern China 5-province regional grid: ~60 AC buses, 3 HVDC links,
+/// 16 AC tie-lines, geographic coordinates for GIS rendering.
+HybridPowerSystem build_five_province_acdc();
+
 /// LVNT-inspired urban benchmark with a 230/13.8 kV primary substation,
 /// four 13.8 kV feeders, 24 distribution transformers, detailed 0.48 kV
 /// secondary streets, unbalanced wye/delta services, DER, storage, and a

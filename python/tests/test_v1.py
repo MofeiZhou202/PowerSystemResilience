@@ -6,16 +6,23 @@ from typing import Any, Mapping
 
 from hysim import (
     ApiError,
-    HySimV1Session,
+    ApiCallEvent,
+    BusDomain,
+    BusRef,
     HySimV1Client,
+    HySimV1Session,
     HySimV1ToolRegistry,
     JobFailedError,
+    LocalHySimServer,
     PowerFlowOptions,
     PowerFlowRequest,
     TransportResponse,
     ToolEffect,
     ToolPolicy,
     ToolPolicyError,
+    TopologyChunk,
+    TransportError,
+    ViolationChunk,
 )
 from hysim.v1 import HySimJob
 
@@ -85,6 +92,24 @@ class V1ClientTests(unittest.TestCase):
         self.assertEqual(
             transport.calls[2]["json_body"]["request"]["options"]["max_iter"],
             50,
+        )
+
+    def test_v1_audit_hook_records_request_id_hash_and_revision(self) -> None:
+        transport = FakeTransport(
+            [(201, {"ETag": '"hysim-ses-1-r1"'}, session_body(1))]
+        )
+        events: list[ApiCallEvent] = []
+        client = HySimV1Client(transport=transport, audit_hook=events.append)
+
+        client.create_session(case="ieee14_acdc")
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].model_revision, 1)
+        self.assertEqual(events[0].status_code, 201)
+        self.assertEqual(len(events[0].request_sha256), 64)
+        self.assertEqual(
+            transport.calls[0]["headers"]["X-HySim-Request-ID"],
+            events[0].request_id,
         )
 
     def test_job_wait_and_result_preserve_revision_contract(self) -> None:
@@ -197,6 +222,172 @@ class V1ClientTests(unittest.TestCase):
         self.assertEqual(transport.calls[2]["path"], "/api/v1/jobs/job-1/frames/4")
         self.assertEqual(transport.calls[2]["query"]["indices"], "2,9")
         self.assertEqual(transport.calls[3]["query"]["step"], 4)
+
+    def test_typed_topology_pages_advance_and_expose_bus_refs(self) -> None:
+        def page(offset: int, nodes: list[dict[str, Any]], next_offset: int | None):
+            return {
+                "schema": "hysim_topology_chunk_v1",
+                "session_id": "ses-1",
+                "model_revision": 3,
+                "lod": 2,
+                "total_nodes": 3,
+                "returned_nodes": len(nodes),
+                "offset": offset,
+                "limit": 2,
+                "next_offset": next_offset,
+                "nodes": nodes,
+                "edges": [],
+            }
+
+        transport = FakeTransport(
+            [
+                (200, {}, page(0, [
+                    {"ref": {"domain": "ac", "index": 1}},
+                    {"ref": {"domain": "dc", "index": 2}},
+                ], 2)),
+                (200, {}, page(2, [
+                    {"ref": {"domain": "ac", "index": 9}},
+                ], None)),
+            ]
+        )
+        session = HySimV1Session(
+            HySimV1Client(transport=transport),
+            "ses-1",
+            3,
+            '"hysim-ses-1-r3"',
+            session_body(3),
+        )
+        pages = list(session.topology_pages(page_size=2))
+
+        self.assertTrue(all(isinstance(item, TopologyChunk) for item in pages))
+        self.assertEqual([ref.to_dict() for page in pages for ref in page.bus_refs], [
+            {"domain": "ac", "index": 1},
+            {"domain": "dc", "index": 2},
+            {"domain": "ac", "index": 9},
+        ])
+        self.assertEqual([call["query"]["offset"] for call in transport.calls], [0, 2])
+
+    def test_typed_subgraph_frame_violation_and_wait_result(self) -> None:
+        transport = FakeTransport(
+            [
+                (200, {}, {
+                    "schema": "hysim_subgraph_v1",
+                    "session_id": "ses-1",
+                    "model_revision": 1,
+                    "center": {"domain": "dc", "index": 7},
+                    "depth": 2,
+                    "truncated": False,
+                    "nodes": [{"domain": "dc", "index": 7}],
+                    "edges": [],
+                }),
+                (200, {}, {
+                    "schema": "hysim_result_frame_chunk_v1",
+                    "job_id": "job-1",
+                    "session_id": "ses-1",
+                    "model_revision": 1,
+                    "step": 0,
+                    "domain": "dc",
+                    "lod": 2,
+                    "total_nodes": 1,
+                    "returned_nodes": 1,
+                    "offset": 0,
+                    "limit": 10,
+                    "next_offset": None,
+                    "nodes": [{"domain": "dc", "index": 7, "vdc_pu": 0.88}],
+                    "branches": [],
+                }),
+                (200, {}, {
+                    "schema": "hysim_result_violation_chunk_v1",
+                    "job_id": "job-1",
+                    "session_id": "ses-1",
+                    "model_revision": 1,
+                    "step": 0,
+                    "total": 1,
+                    "returned": 1,
+                    "items": [{"kind": "undervoltage", "severity": 0.02}],
+                }),
+                (200, {}, {
+                    "job_id": "job-1", "analysis": "power_flow", "state": "running",
+                }),
+                (200, {}, {
+                    "job_id": "job-1", "analysis": "power_flow", "state": "succeeded",
+                    "model_revision": 1,
+                    "result": {"converged": True},
+                }),
+            ]
+        )
+        client = HySimV1Client(transport=transport)
+        session = HySimV1Session(
+            client, "ses-1", 1, '"hysim-ses-1-r1"', session_body(1)
+        )
+        view = session.subgraph_view(BusRef(BusDomain.DC, 7))
+        job = HySimJob(client, "job-1", {"state": "succeeded"})
+        frame = job.frame_chunk(0, domain="dc", limit=10)
+        violations = job.violation_chunk()
+        updates: list[str] = []
+        waiting = HySimJob(client, "job-1", {"state": "queued"})
+        result = waiting.wait_result(
+            timeout=1, poll_interval=0, on_update=lambda value: updates.append(value.state)
+        )
+
+        self.assertEqual(view.center, BusRef(BusDomain.DC, 7))
+        self.assertEqual(frame.bus_refs, (BusRef(BusDomain.DC, 7),))
+        self.assertIsInstance(violations, ViolationChunk)
+        self.assertEqual(updates, ["running", "succeeded"])
+        self.assertEqual(result.scientific_status, "qualified")
+
+    def test_chunk_arguments_are_validated_before_transport(self) -> None:
+        transport = FakeTransport([])
+        client = HySimV1Client(transport=transport)
+        session = HySimV1Session(
+            client, "ses-1", 1, '"hysim-ses-1-r1"', session_body(1)
+        )
+        job = HySimJob(client, "job-1", {"state": "succeeded"})
+        with self.assertRaisesRegex(ValueError, "lod"):
+            session.topology(lod=4)
+        with self.assertRaisesRegex(ValueError, "viewport"):
+            session.topology(viewport=(3, 0, 2, 1))
+        with self.assertRaisesRegex(TypeError, "indices"):
+            job.frame(indices=(1, True))
+        with self.assertRaisesRegex(ValueError, "vmin"):
+            job.violations(vmin=1.2, vmax=1.1)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            job.violations(vmin=float("nan"))
+        self.assertEqual(transport.calls, [])
+
+    def test_typed_lod2_rejects_missing_stable_reference(self) -> None:
+        transport = FakeTransport([(200, {}, {
+            "schema": "hysim_topology_chunk_v1",
+            "model_revision": 1,
+            "lod": 2,
+            "total_nodes": 1,
+            "returned_nodes": 1,
+            "offset": 0,
+            "limit": 10,
+            "next_offset": None,
+            "nodes": [{"domain": "ac", "index": 1}],
+            "edges": [],
+        })])
+        session = HySimV1Session(
+            HySimV1Client(transport=transport),
+            "ses-1",
+            1,
+            '"hysim-ses-1-r1"',
+            session_body(1),
+        )
+        with self.assertRaisesRegex(TransportError, "stable bus ref"):
+            session.topology_chunk()
+
+    def test_local_runtime_exposes_v1_client_and_worker_configuration(self) -> None:
+        runtime = LocalHySimServer(
+            "run_gui_server", data_dir="data", port=18088, api_job_workers=4
+        )
+        self.assertIsInstance(runtime.v1_client(), HySimV1Client)
+        self.assertEqual(runtime.api_job_workers, 4)
+        with self.assertRaisesRegex(ValueError, "api_job_workers"):
+            LocalHySimServer(
+                "run_gui_server", data_dir="data", port=18088, api_job_workers=0
+            )
 
     def test_v1_ai_tools_submit_jobs_but_guard_model_changes(self) -> None:
         transport = FakeTransport(

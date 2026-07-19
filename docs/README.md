@@ -12,6 +12,7 @@ When documentation and runtime behavior differ, `include/`, `src/`,
 |---|---|
 | Build on macOS, Linux, or Windows | [cross_platform_build.md](cross_platform_build.md) |
 | Runtime HTTP endpoints, including monolithic three-phase hybrid PF/OPF | [runtime_api.md](runtime_api.md) |
+| Built-in case catalog: capability-oriented showcase guide | [case_catalog.md](case_catalog.md) |
 | Python SDK and AI enhancement architecture | [python_api.md](python_api.md) |
 | Editable parameter registry and effective values | [parameter_system.md](parameter_system.md) |
 | Rich/canonical projection and result attribution | [projection_and_results.md](projection_and_results.md) |
@@ -24,6 +25,8 @@ When documentation and runtime behavior differ, `include/`, `src/`,
 | Transient runtime and validation boundary | [transient_runtime.md](transient_runtime.md) |
 | Reliability methods | [reliability_assessment_models.md](reliability_assessment_models.md) |
 | Cyber-physical reliability levels (L0–L4; Level 1 implemented) | [cyber_physical_reliability_extension.md](cyber_physical_reliability_extension.md) |
+| Consolidated reliability mathematics + intelligent cyber-physical extension | [reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md](reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md) |
+| IEEE Transactions on Reliability draft: progressive class-conditioned frequency--duration method | [latex/Progressive Class-Conditioned Frequency–Duration/main.tex](latex/Progressive%20Class-Conditioned%20Frequency%E2%80%93Duration/main.tex) |
 | Short-circuit methods | [short_circuit_rich_acdc_derivation.md](short_circuit_rich_acdc_derivation.md) |
 | Network reconfiguration | [network_reconfiguration_models.md](network_reconfiguration_models.md) |
 | RPO structure (OLTC + continuous) and cross-validation | [reactive_power_optimization_validation.md](reactive_power_optimization_validation.md) |

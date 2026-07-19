@@ -390,6 +390,10 @@ void apply_comprehensive_reliability_data(HybridPowerSystem& sys);
 /// `FMEAOptions::switching_time_hr` for every contingency.
 struct CyberPhysicalFMEAOptions {
   bool enabled{false};
+  /// Information/service dimension.  When false, the scalar communication
+  /// service factor is bypassed (treated as 1.0), while intelligent local
+  /// functions may still be screened independently.
+  bool information_enabled{true};
   double automation_availability{0.97};
   double automatic_switching_time_hr{0.05};  // 3 minutes
   /// Clamped to >= automatic_switching_time_hr at evaluation time (manual
@@ -403,6 +407,20 @@ struct CyberPhysicalFMEAOptions {
     double availability{0.97};
   };
   std::vector<AvailabilityOverride> availability_overrides;
+
+  /// Level-1+ factorized intelligent-function screening.  This does not model
+  /// relay pickup, protection/FRT trajectories, or joint class dependence.
+  /// A failed function is routed to the existing degraded/manual consequence
+  /// class, so protection_success_probability is a consequence proxy rather
+  /// than an explicit backup-zone calculation.
+  struct IntelligentFunctionOptions {
+    bool enabled{false};
+    double detection_success_probability{0.98};
+    double isolation_success_probability{0.97};
+    double restoration_decision_valid_probability{0.98};
+    double restoration_execution_success_probability{0.98};
+    double protection_success_probability{0.995};
+  } intelligent{};
 };
 
 /// Options for FMEA distribution reliability assessment.
@@ -539,6 +557,17 @@ struct CyberPhysicalReliabilityMetrics {
   bool enabled{false};
   int level{0};
   std::string model_scope{"physical-only"};
+  bool information_enabled{false};
+  bool intelligent_enabled{false};
+  bool independent_factorization{false};
+  double information_service_availability{1.0};
+  double intelligent_function_success_probability{1.0};
+  double effective_automation_probability{1.0};
+  double detection_success_probability{1.0};
+  double isolation_success_probability{1.0};
+  double restoration_decision_valid_probability{1.0};
+  double restoration_execution_success_probability{1.0};
+  double protection_success_probability{1.0};
   double automation_availability{1.0};
   double automatic_switching_time_hr{0.0};
   double manual_switching_time_hr{0.0};
@@ -617,6 +646,11 @@ struct FMEAResult {
     bool restoration_duration_cyber_conditioned{false};
     bool cyber_control_consequence_modelled{false};
     bool cyber_power_coupling_modelled{false};
+    bool information_service_conditioned{false};
+    bool intelligent_function_probabilities_modelled{false};
+    bool joint_class_probability_modelled{false};
+    bool protection_logic_modelled{false};
+    bool protection_frt_reliability_coupled{false};
   };
   ValidityFlags validity{};
 };

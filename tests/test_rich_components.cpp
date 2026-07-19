@@ -724,3 +724,80 @@ TEST_CASE("Comprehensive hybrid builder: converters and DC side present", "[rich
     CHECK(sys.vsc_converters.size()    >= 1);
     CHECK(sys.ac.buses.size()          >= 4);
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 25. Five-province regional builder: exposed showcase case is well-formed
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Five-province builder: regional grid content present", "[rich_components][case_builder]") {
+    auto sys = build_five_province_acdc();
+    CHECK(sys.ac.buses.size()       == 52);
+    CHECK(sys.vsc_converters.size() == 6);
+    CHECK(sys.dc.branches.size()    == 3);
+    CHECK(sys.ac.generators.size()  >= 60);
+    // GIS coordinates drive the map rendering; every AC bus should have one.
+    size_t with_geo = 0;
+    for (const auto& b : sys.ac.buses)
+        if (b.latitude != 0.0 || b.longitude != 0.0) ++with_geo;
+    CHECK(with_geo == sys.ac.buses.size());
+    // Converter/DC-bus role convention used by the unified Newton solver:
+    // PQ converters sit on DC_P buses, VDC_Q converters on DC_V buses.
+    for (const auto& vsc : sys.vsc_converters) {
+        const DCBus* dc_bus = nullptr;
+        for (const auto& db : sys.dc.buses)
+            if (db.index == vsc.bus_dc) { dc_bus = &db; break; }
+        REQUIRE(dc_bus != nullptr);
+        if (vsc.control_mode == ConverterMode::VDC_Q)
+            CHECK(dc_bus->bus_type == DCBusType::DC_V);
+        if (vsc.control_mode == ConverterMode::PQ_MODE)
+            CHECK(dc_bus->bus_type == DCBusType::DC_P);
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 26. Dist33 DER reliability/resilience enrichment
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Dist33 DER builder: reliability and resilience fields enriched", "[rich_components][case_builder]") {
+    auto sys = build_dist33_microgrid_der();
+    size_t branches_with_fr = 0;
+    for (const auto& br : sys.ac.branches)
+        if (br.failure_rate > 0.0 && br.mttr_hr > 0.0) ++branches_with_fr;
+    CHECK(branches_with_fr >= 30);
+
+    size_t sgen_with_mtbf = 0;
+    for (const auto& sg : sys.ac.static_generators)
+        if (sg.mtbf_hours > 0.0 && sg.mttr_hours > 0.0) ++sgen_with_mtbf;
+    CHECK(sgen_with_mtbf >= 2);
+
+    size_t storage_with_for = 0;
+    for (const auto& st : sys.ac.storage)
+        if (st.forced_outage_rate > 0.0 && st.mttr_hr > 0.0) ++storage_with_for;
+    CHECK(storage_with_for >= 3);
+
+    size_t buses_with_customers = 0;
+    for (const auto& b : sys.ac.buses)
+        if (b.n_customers > 0) ++buses_with_customers;
+    CHECK(buses_with_customers >= 10);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 27. Comprehensive hosting-capacity enrichment
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Comprehensive builder: hosting-capacity fields enriched", "[rich_components][case_builder]") {
+    auto sys = build_comprehensive_hybrid_acdc();
+    size_t tr_with_cap = 0;
+    for (const auto& tr : sys.ac.transformers_2w)
+        if (tr.cap_max_reverse_load_rate > 0.0 && tr.cap_dr_max_output_coeff > 1.0) ++tr_with_cap;
+    CHECK(tr_with_cap >= 1);
+
+    size_t buses_with_breaker = 0;
+    for (const auto& b : sys.ac.buses)
+        if (b.i_breaker_ka > 0.0) ++buses_with_breaker;
+    CHECK(buses_with_breaker >= 2);
+
+    REQUIRE(!sys.ac.storage.empty());
+    CHECK(sys.ac.storage.front().cap_charging_strategy == "static");
+    CHECK(sys.ac.storage.front().cap_static_charging_mw > 0.0);
+}

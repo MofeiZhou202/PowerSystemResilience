@@ -285,6 +285,55 @@ class HySimV1ToolRegistry:
         )
         self._register(
             ToolSpec(
+                "hysim_v1_topology",
+                "Read a bounded topology LOD page with domain-qualified stable bus IDs.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "lod": {"type": "integer", "minimum": 0, "maximum": 2,
+                                "default": 2},
+                        "offset": {"type": "integer", "minimum": 0, "default": 0},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000,
+                                  "default": 200},
+                    },
+                    "additionalProperties": False,
+                },
+                ToolEffect.READ,
+                self._topology,
+            )
+        )
+        self._register(
+            ToolSpec(
+                "hysim_v1_subgraph",
+                "Read a bounded k-hop subgraph around one stable AC or DC bus reference.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "domain": {"type": "string", "enum": ["ac", "dc"]},
+                        "index": {"type": "integer"},
+                        "depth": {"type": "integer", "minimum": 0, "maximum": 8,
+                                  "default": 2},
+                        "max_nodes": {"type": "integer", "minimum": 1,
+                                      "maximum": 500, "default": 200},
+                    },
+                    "required": ["domain", "index"],
+                    "additionalProperties": False,
+                },
+                ToolEffect.READ,
+                self._subgraph,
+            )
+        )
+        self._register(
+            ToolSpec(
+                "hysim_v1_list_jobs",
+                "List compact retained-job metadata for this isolated session.",
+                no_arguments,
+                ToolEffect.READ,
+                self._list_jobs,
+            )
+        )
+        self._register(
+            ToolSpec(
                 "hysim_v1_replace_builtin",
                 "Replace this session model with a built-in case using its current ETag.",
                 {
@@ -368,6 +417,98 @@ class HySimV1ToolRegistry:
                 ),
             )
         )
+        self._register(
+            ToolSpec(
+                "hysim_v1_job_frame",
+                "Read a bounded spatial/time result frame without downloading full vectors.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string", "minLength": 1},
+                        "step": {"type": "integer", "minimum": 0, "default": 0},
+                        "domain": {"type": "string", "enum": ["all", "ac", "dc"],
+                                   "default": "all"},
+                        "offset": {"type": "integer", "minimum": 0, "default": 0},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 500,
+                                  "default": 200},
+                        "indices": {"type": "array", "items": {"type": "integer"},
+                                    "maxItems": 200},
+                    },
+                    "required": ["job_id"],
+                    "additionalProperties": False,
+                },
+                ToolEffect.READ,
+                self._job_frame,
+            )
+        )
+        self._register(
+            ToolSpec(
+                "hysim_v1_job_violations",
+                "Read the worst voltage and loading violations for one result step.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string", "minLength": 1},
+                        "step": {"type": "integer", "minimum": 0, "default": 0},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 200,
+                                  "default": 50},
+                        "vmin": {"type": "number", "default": 0.9},
+                        "vmax": {"type": "number", "default": 1.1},
+                        "loading_limit_pct": {"type": "number", "minimum": 0,
+                                              "default": 100.0},
+                    },
+                    "required": ["job_id"],
+                    "additionalProperties": False,
+                },
+                ToolEffect.READ,
+                self._job_violations,
+            )
+        )
+
+    def _topology(self, args: Mapping[str, Any]) -> Mapping[str, Any]:
+        return self.session.topology(
+            lod=int(args.get("lod", 2)),
+            offset=int(args.get("offset", 0)),
+            limit=int(args.get("limit", 200)),
+        )
+
+    def _subgraph(self, args: Mapping[str, Any]) -> Mapping[str, Any]:
+        return self.session.subgraph(
+            str(args["domain"]),
+            int(args["index"]),
+            depth=int(args.get("depth", 2)),
+            max_nodes=int(args.get("max_nodes", 200)),
+        )
+
+    def _list_jobs(self, _: Mapping[str, Any]) -> Mapping[str, Any]:
+        jobs = self.session.list_jobs()
+        compact = []
+        for item in jobs[:100]:
+            compact.append({key: item[key] for key in (
+                "job_id", "analysis", "state", "model_revision",
+                "created_at", "started_at", "finished_at",
+                "stale_against_current_model",
+            ) if key in item})
+        return {"count": len(jobs), "returned": len(compact), "jobs": compact}
+
+    def _job_frame(self, args: Mapping[str, Any]) -> Mapping[str, Any]:
+        indices = args.get("indices")
+        return self.session.client.get_job(str(args["job_id"])).frame(
+            int(args.get("step", 0)),
+            domain=str(args.get("domain", "all")),
+            offset=int(args.get("offset", 0)),
+            limit=int(args.get("limit", 200)),
+            indices=tuple(indices) if isinstance(indices, list) else None,
+        )
+
+    def _job_violations(self, args: Mapping[str, Any]) -> Mapping[str, Any]:
+        return self.session.client.get_job(str(args["job_id"])).violations(
+            int(args.get("step", 0)),
+            limit=int(args.get("limit", 50)),
+            vmin=float(args.get("vmin", 0.9)),
+            vmax=float(args.get("vmax", 1.1)),
+            loading_limit_pct=float(args.get("loading_limit_pct", 100.0)),
+        )
 
     def _submit_power_flow(self, args: Mapping[str, Any]) -> Mapping[str, Any]:
         request = PowerFlowRequest(
@@ -438,3 +579,21 @@ def _validate_arguments(schema: Mapping[str, Any], arguments: Mapping[str, Any])
                 raise ValueError(f"tool argument {name} is below its minimum")
             if "exclusiveMinimum" in field_schema and value <= field_schema["exclusiveMinimum"]:
                 raise ValueError(f"tool argument {name} must exceed its minimum")
+            if "maximum" in field_schema and value > field_schema["maximum"]:
+                raise ValueError(f"tool argument {name} exceeds its maximum")
+        if isinstance(value, list):
+            if "maxItems" in field_schema and len(value) > field_schema["maxItems"]:
+                raise ValueError(f"tool argument {name} has too many items")
+            item_schema = field_schema.get("items")
+            if isinstance(item_schema, Mapping):
+                expected_item = item_schema.get("type")
+                for item in value:
+                    item_valid = {
+                        "integer": isinstance(item, int) and not isinstance(item, bool),
+                        "number": isinstance(item, (int, float)) and not isinstance(item, bool),
+                        "string": isinstance(item, str),
+                    }.get(expected_item, True)
+                    if not item_valid:
+                        raise ValueError(
+                            f"tool argument {name} items must have type {expected_item}"
+                        )

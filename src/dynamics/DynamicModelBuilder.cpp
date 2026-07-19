@@ -1236,15 +1236,64 @@ bool nearly_equal(double lhs, double rhs) {
   return std::abs(lhs - rhs) <= 1e-9 * std::max({1.0, std::abs(lhs), std::abs(rhs)});
 }
 
+// Opt-in: a slack machine that swings like any other synchronous machine
+// (dynamic_angle = true) instead of being pinned as an infinite angle
+// reference.  Enable per generator via dynamic_model parameters
+// {"slack_dynamic_angle", 1} (alias {"dynamic_slack", 1}).  Use for
+// multi-machine transient studies where the slack is one of several real
+// machines — pinning it would freeze the system frequency and create
+// pathological reactive circulation with the dynamic machines.
+bool slack_dynamic_angle_enabled(const hacdcpf::DynamicModelProfile& profile) {
+  auto flag_in = [](const std::map<std::string, double>& p) {
+    if (const auto it = p.find("slack_dynamic_angle"); it != p.end()) {
+      return it->second != 0.0;
+    }
+    if (const auto it = p.find("dynamic_slack"); it != p.end()) {
+      return it->second != 0.0;
+    }
+    return false;
+  };
+  if (flag_in(profile.parameters)) return true;
+  for (const auto& component : profile.components) {
+    if (flag_in(component.parameters)) return true;
+  }
+  return false;
+}
+
+// Opt-out counterpart of the above: forces a slack machine to stay pinned
+// (dynamic_angle = false) even in a multi-machine system where the builder's
+// default rule would let it swing.  dynamic_model parameters
+// {"pin_slack", 1} (alias {"slack_pin_angle", 1}).
+bool pin_slack_angle_enabled(const hacdcpf::DynamicModelProfile& profile) {
+  auto flag_in = [](const std::map<std::string, double>& p) {
+    if (const auto it = p.find("pin_slack"); it != p.end()) {
+      return it->second != 0.0;
+    }
+    if (const auto it = p.find("slack_pin_angle"); it != p.end()) {
+      return it->second != 0.0;
+    }
+    return false;
+  };
+  if (flag_in(profile.parameters)) return true;
+  for (const auto& component : profile.components) {
+    if (flag_in(component.parameters)) return true;
+  }
+  return false;
+}
+
 bool is_projected_asymmetric_load_equivalent(
     const Load& load,
     const std::vector<AsymmetricLoad>& asymmetric_loads) {
   for (const auto& source : asymmetric_loads) {
     if (!source.in_service || source.bus == 0 || source.bus != load.bus) continue;
-    const std::string expected_name =
-        source.name.empty() ? "AsymmetricLoad_" + std::to_string(source.index)
-                            : source.name + "_eq";
-    if (load.name != expected_name) continue;
+    // The projection names the equivalent Load after the source: e4bc1c59
+    // switched "name_eq" to the plain source name; accept both conventions so
+    // systems projected before/after the switch are de-duplicated either way.
+    const bool name_matches =
+        source.name.empty()
+            ? load.name == "AsymmetricLoad_" + std::to_string(source.index)
+            : (load.name == source.name || load.name == source.name + "_eq");
+    if (!name_matches) continue;
 
     const double scale = scale_or_one(source.scaling);
     const double p_mw = scale * (source.pa_mw + source.pb_mw + source.pc_mw);
@@ -1600,6 +1649,32 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
       options);
   dyn.initialization = make_initialization_summary(options, dyn.initial_power_flow);
 
+  // Multi-machine rule (PSD semantics): with >= 2 in-service synchronous
+  // machines a slack machine is one of several real machines and swings with
+  // them — pinning it would freeze the system frequency and create
+  // pathological reactive circulation.  Per-generator flags always win:
+  // slack_dynamic_angle/dynamic_slack forces a swing, pin_slack/slack_pin_angle
+  // forces a pin.  Single-machine systems keep the pinned infinite-bus
+  // behavior by default.
+  const int n_sync_machines = [&] {
+    int n = 0;
+    for (const auto& g : dyn.canonical_system.ac.generators) {
+      if (g.in_service) ++n;
+    }
+    if (dyn.canonical_system.three_phase_ac) {
+      for (const auto& g : dyn.canonical_system.three_phase_ac->generators) {
+        if (g.in_service) ++n;
+      }
+    }
+    return n;
+  }();
+  const bool multimachine_slack_swings = n_sync_machines >= 2;
+  const auto dynamic_angle_for = [&](const auto& gen) {
+    if (slack_dynamic_angle_enabled(gen.dynamic_model)) return true;
+    if (pin_slack_angle_enabled(gen.dynamic_model)) return false;
+    return !gen.is_slack || multimachine_slack_swings;
+  };
+
   auto& network = dyn.network;
   network.base_mva = positive_or(dyn.canonical_system.base_mva, 100.0);
   network.frequency_hz = positive_or(dyn.canonical_system.ac.freq_hz, 50.0);
@@ -1799,7 +1874,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
         p.xd_pu = gen.xd_pu;
         p.xdpp_pu = gen.xdpp_pu;
         p.inertia_h = gen.is_slack ? 5.0 : 1.0;
-        p.dynamic_angle = !gen.is_slack;
+        p.dynamic_angle = dynamic_angle_for(gen);
         apply_voltage_source_profile(gen.dynamic_model, p);
         auto machine = std::make_unique<SynchronousMachine>(p);
         SynchronousMachine* machine_ptr = machine.get();
@@ -1905,12 +1980,30 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.p_mech_mw = gen.pg_mw;
     p.q_elec_mvar = gen.qg_mvar;
     p.phase_power_scale = ac_phase_power_scale;
-    if (pf_bus_injection_init &&
+    // A slack machine's authored pg_mw is not its operating point — the power
+    // flow adjusts the slack injection.  When the machine will actually swing
+    // (multi-machine rule or explicit slack_dynamic_angle), seed p_mech from
+    // the PF-solved injection at single-generator buses; at multi-generator
+    // buses the injection cannot be attributed, so the authored value stands.
+    // Pinned machines keep the legacy authored seed entirely (invisible in
+    // their frozen swing anyway) so their calibrated behavior is unchanged.
+    const bool machine_will_swing = dynamic_angle_for(gen);
+    const bool single_gen_at_bus =
         std::count_if(dyn.canonical_system.ac.generators.begin(),
                       dyn.canonical_system.ac.generators.end(),
                       [&](const Generator& other) {
                         return other.in_service && other.bus == gen.bus;
-                      }) == 1) {
+                      }) == 1;
+    if (gen.is_slack && machine_will_swing && single_gen_at_bus) {
+      // pf_ac_bus_device_injection_mva is always populated (unlike
+      // pf_ac_device_injection_mva, which is empty when the
+      // pf_bus_injection_init style is off).
+      const auto inj = pf_ac_bus_device_injection_mva.find(gen.bus);
+      if (inj != pf_ac_bus_device_injection_mva.end()) {
+        p.p_mech_mw = inj->second.real();
+        p.q_elec_mvar = inj->second.imag();
+      }
+    } else if (pf_bus_injection_init && single_gen_at_bus) {
       const auto inj = pf_ac_device_injection_mva.find(gen.bus);
       if (inj != pf_ac_device_injection_mva.end()) {
         p.p_mech_mw = inj->second.real();
@@ -1925,7 +2018,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.td0pp_s = gen.td0pp_s;
     p.inertia_h = positive_or(gen.inertia_h, gen.is_slack ? 5.0 : 1.0);
     p.droop_r = positive_or(gen.droop_r, 0.05);
-    p.dynamic_angle = !gen.is_slack;
+    p.dynamic_angle = dynamic_angle_for(gen);
     apply_voltage_source_profile(gen.dynamic_model, p);
     auto machine = std::make_unique<SynchronousMachine>(p);
     SynchronousMachine* machine_ptr = machine.get();

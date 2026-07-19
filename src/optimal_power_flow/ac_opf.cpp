@@ -19,6 +19,7 @@
 #include <Eigen/SparseCholesky>
 
 #include "hacdcpf/graph/graph.hpp"
+#include "hacdcpf/power_flow/ac.hpp"
 #include "hacdcpf/power_flow/jacobian_builder.hpp"
 #include "hacdcpf/detail/core_compat.hpp"
 #include "hacdcpf/assembly/solver_data.hpp"
@@ -1885,8 +1886,16 @@ Eigen::VectorXd build_parity_primal_warm_start(const parity::Problem& prob,
     Eigen::Map<const Eigen::VectorXd> raw(warm.ipm_primal_state.data(),
                                           idx.n_total);
     if (raw.allFinite()) {
+      // Clamp into the bounds interior: warm/extrapolated states (e.g.
+      // Davidenko-predicted points) can overshoot variable bounds, which
+      // otherwise start the IPM with floored slacks on those rows.
+      Eigen::VectorXd clipped = raw;
+      for (int i = 0; i < idx.n_total; ++i) {
+        if (std::isfinite(xmin[i])) clipped[i] = std::max(clipped[i], xmin[i] + 1e-8);
+        if (std::isfinite(xmax[i])) clipped[i] = std::min(clipped[i], xmax[i] - 1e-8);
+      }
       mapped_any = true;
-      return raw;
+      return clipped;
     }
   }
 
@@ -2178,6 +2187,24 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   Eigen::VectorXd inequality_dual_warm_start;
   Eigen::VectorXd slack_warm_start;
   bool warm_start_mapped = false;
+  // AC-PF warm start (opt-in): solve the plain AC power flow from the case's
+  // own operating point and seed the IPM with the AC-feasible (vm, va).
+  // Newton–Raphson converges from flat start even on the stressed PEGASE
+  // grids where ACPF-from-dispatch diverges; measured to unlock
+  // case13659pegase (reference optimum, 189 iterations, ~40 s).
+  ACOPFResult pf_warm;
+  if (opt.ac_pf_warm_start && opt.warm_start == nullptr) {
+    const hacdcpf::PowerFlowResult pf = hacdcpf::powerflow::solve_ac(sys);
+    if (pf.converged) {
+      pf_warm.vm = pf.vm;
+      pf_warm.va = pf.va;
+      primal_warm_start =
+          build_parity_primal_warm_start(prob, pf_warm, warm_start_mapped);
+      if (warm_start_mapped) {
+        ipm_opt.primal_start = &primal_warm_start;
+      }
+    }
+  }
   if (opt.warm_start != nullptr) {
     primal_warm_start =
         build_parity_primal_warm_start(prob, *opt.warm_start, warm_start_mapped);
@@ -2264,6 +2291,23 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   save_state(ipm_res.lambda_eq, out.ipm_equality_dual_state);
   save_state(ipm_res.mu, out.ipm_inequality_dual_state);
   save_state(ipm_res.z, out.ipm_slack_state);
+
+  // Optional Davidenko homotopy tangent at the returned point (one extra
+  // inertia-controlled KKT solve) for objective-continuation drivers.
+  if (opt.compute_homotopy_tangent && ipm_res.x.size() == vidx.n_total) {
+    Eigen::VectorXd dxdt;
+    Eigen::VectorXd dzdt;
+    Eigen::VectorXd dldt;
+    Eigen::VectorXd dmdt;
+    if (parity::homotopy_tangent(prob, ipm_res.x, ipm_res.z, ipm_res.lambda_eq,
+                                 ipm_res.mu, opt.homotopy_t,
+                                 dxdt, dzdt, dldt, dmdt)) {
+      save_state(dxdt, out.ipm_tangent_primal);
+      save_state(dzdt, out.ipm_tangent_slack);
+      save_state(dldt, out.ipm_tangent_equality_dual);
+      save_state(dmdt, out.ipm_tangent_inequality_dual);
+    }
+  }
 
   out.vm.assign(static_cast<size_t>(vidx.n_vm), 1.0);
   out.va.assign(static_cast<size_t>(vidx.n_va), 0.0);
@@ -2737,6 +2781,104 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
   }
 
   if (opt.enable_primal_dual && opt.use_parity_ipm) {
+    if (opt.objective_homotopy) {
+      // Theory-guided two-phase solve (docs/numerical_methods.md §12–13):
+      // follow the objective homotopy P(t) = min t·f from t = 0 (feasibility)
+      // to t = 1 (full cost), carrying the full primal-dual state between
+      // steps with Davidenko tangent prediction (parameter-metric trust
+      // radius) and the adaptive step rule (fast steps double, failures
+      // halve; collapse → honest minimal-violation report).
+      std::vector<ACOPFResult> chain;
+      ACOPFResult predicted;
+      bool have_prediction = false;
+      double t_ok = 0.0;
+      double dt = (opt.homotopy_dt0 > 0.0) ? opt.homotopy_dt0 : 0.10;
+      for (int step = 0; step < 120 && t_ok < 1.0; ++step) {
+        const double t = (step == 0) ? 0.0 : std::min(1.0, t_ok + dt);
+        HybridPowerSystem sys_t = sys_work;
+        for (auto& g : sys_t.ac.generators) {
+          g.cost_c0 *= t;
+          g.cost_c1 *= t;
+          g.cost_c2 *= t;
+        }
+        ACOPFOptions opt_t = opt;
+        opt_t.compute_homotopy_tangent = true;
+        opt_t.homotopy_t = t;
+        if (step == 0) {
+          opt_t.ac_pf_warm_start = true;
+        } else if (have_prediction) {
+          opt_t.warm_start = &predicted;
+        } else if (!chain.empty()) {
+          opt_t.warm_start = &chain.back();
+        }
+        ACOPFResult r_t = solve_with_parity_ipm(sys_t, opt_t, inner);
+        if (r_t.converged) {
+          const bool fast = r_t.iterations <= 20;
+          chain.push_back(std::move(r_t));
+          t_ok = t;
+          if (fast) dt = std::min(dt * 2.0, 0.5);
+          // Davidenko predictor for the next step: w_pred = w(t) + h·w′(t),
+          // h capped by the parameter-metric trust radius κ/‖dx/dt‖∞.
+          predicted = ACOPFResult();
+          have_prediction = false;
+          const ACOPFResult& rb = chain.back();
+          if (!rb.ipm_tangent_primal.empty() && t < 1.0) {
+            double w_norm = 0.0;
+            for (double v : rb.ipm_tangent_primal) {
+              w_norm = std::max(w_norm, std::abs(v));
+            }
+            constexpr double kTrustRadius = 0.05;
+            const double h = std::min(dt, kTrustRadius / std::max(w_norm, 1e-30));
+            const auto adv = [&](const std::vector<double>& w,
+                                 const std::vector<double>& dw, double floor) {
+              std::vector<double> out_v(w.size());
+              for (size_t i = 0; i < w.size(); ++i) {
+                out_v[i] = std::max(w[i] + h * dw[i], floor);
+              }
+              return out_v;
+            };
+            const auto adv_free = [&](const std::vector<double>& w,
+                                      const std::vector<double>& dw) {
+              std::vector<double> out_v(w.size());
+              for (size_t i = 0; i < w.size(); ++i) {
+                out_v[i] = w[i] + h * dw[i];
+              }
+              return out_v;
+            };
+            predicted.ipm_primal_state =
+                adv_free(rb.ipm_primal_state, rb.ipm_tangent_primal);
+            predicted.ipm_slack_state =
+                adv(rb.ipm_slack_state, rb.ipm_tangent_slack, 1e-8);
+            predicted.ipm_equality_dual_state =
+                adv_free(rb.ipm_equality_dual_state, rb.ipm_tangent_equality_dual);
+            predicted.ipm_inequality_dual_state =
+                adv(rb.ipm_inequality_dual_state, rb.ipm_tangent_inequality_dual, 1e-8);
+            have_prediction = true;
+          }
+        } else {
+          have_prediction = false;
+          dt *= 0.5;
+          if (dt < 0.005) {
+            break;  // minimal-violation region reached — report honestly below
+          }
+        }
+      }
+      if (chain.empty()) {
+        out.status =
+            "AC OPF failed: objective homotopy could not find a feasible point "
+            "(Phase I diverged).";
+        return out;
+      }
+      if (t_ok < 1.0) {
+        ACOPFResult best = std::move(chain.back());
+        best.status +=
+            " [objective homotopy stopped at t=" + std::to_string(t_ok) +
+            " (minimal-violation region)]";
+        return separate_external_grid_dispatch(std::move(best));
+      }
+      // t = 1 was solved in-loop as a normal step; its result is the answer.
+      return separate_external_grid_dispatch(std::move(chain.back()));
+    }
     // The parity path internally applies the Ipopt fallback when inner == Auto
     // and opt.allow_fallback is set, so no separate recursive economic-dispatch
     // fallback is needed here.

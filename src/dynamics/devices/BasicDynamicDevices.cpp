@@ -3647,6 +3647,28 @@ DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
                                              params_.component_domain,
                                              params_.source_type);
   out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  if (!params_.in_service) {
+    // Tripped/offline machine: the stamp injects nothing and the states are
+    // frozen, so any EMF-based power evaluation would report fake output
+    // power that follows the network voltage.  Report an honest zero for the
+    // power family; angle/frequency stay at their frozen pre-trip values.
+    const double delta = (!range_.empty() && range_.offset + 1 < x.x.size())
+                             ? x.x[range_.offset + 0]
+                             : 0.0;
+    const double omega = (!range_.empty() && range_.offset + 1 < x.x.size())
+                             ? x.x[range_.offset + 1]
+                             : 1.0;
+    out.values["angle_rad"] = delta;
+    out.values["delta_rad"] = delta;
+    out.values["omega_pu"] = omega;
+    out.values["frequency_hz"] = omega * params_.frequency_hz;
+    out.values["p_mw"] = 0.0;
+    out.values["q_mvar"] = 0.0;
+    out.values["i_rms_pu"] = 0.0;
+    out.values["torque_e_pu"] = 0.0;
+    out.values["p_mech_mw"] = 0.0;
+    return out;
+  }
   GeneratorInnerVariableSnapshot inner =
       generator_inner_base_snapshot(link_.generatorBus(), x, y);
   if (machine_is_onedoneq(params_) && !range_.empty() && range_.offset + 5 < x.x.size()) {

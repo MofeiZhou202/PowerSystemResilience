@@ -5869,49 +5869,95 @@ static json fmea_validity_json(
        v.restoration_duration_cyber_conditioned},
       {"cyber_control_consequence_modelled",
        v.cyber_control_consequence_modelled},
-      {"cyber_power_coupling_modelled", v.cyber_power_coupling_modelled}};
+      {"cyber_power_coupling_modelled", v.cyber_power_coupling_modelled},
+      {"information_service_conditioned", v.information_service_conditioned},
+      {"intelligent_function_probabilities_modelled",
+       v.intelligent_function_probabilities_modelled},
+      {"joint_class_probability_modelled",
+       v.joint_class_probability_modelled},
+      {"protection_logic_modelled", v.protection_logic_modelled},
+      {"protection_frt_reliability_coupled",
+       v.protection_frt_reliability_coupled}};
 }
 
 static void parse_cyber_physical_fmea_options(
     const json& request,
     hacdcpf::analysis::FMEAOptions& options) {
-  if (!request.contains("cyber_physical")) return;
-  if (!request["cyber_physical"].is_object()) {
+  json information = json::object();
+  json intelligent = json::object();
+  bool has_contract = false;
+  if (request.contains("cyber_physical")) {
+    if (!request["cyber_physical"].is_object()) {
+      throw std::runtime_error("cyber_physical must be an object");
+    }
+    information = request["cyber_physical"];
+    if (information.contains("intelligent")) {
+      if (!information["intelligent"].is_object()) {
+        throw std::runtime_error("cyber_physical.intelligent must be an object");
+      }
+      intelligent = information["intelligent"];
+    }
+    has_contract = true;
+  }
+  if (request.contains("dimensions")) {
+    if (!request["dimensions"].is_object()) {
+      throw std::runtime_error("dimensions must be an object");
+    }
+    const auto& dimensions = request["dimensions"];
+    if (dimensions.contains("information")) {
+      if (!dimensions["information"].is_object()) {
+        throw std::runtime_error("dimensions.information must be an object");
+      }
+      information = dimensions["information"];
+      has_contract = true;
+    }
+    if (dimensions.contains("intelligent")) {
+      if (!dimensions["intelligent"].is_object()) {
+        throw std::runtime_error("dimensions.intelligent must be an object");
+      }
+      intelligent = dimensions["intelligent"];
+      has_contract = true;
+    }
+  }
+  if (!has_contract) return;
+  if (!information.is_object()) {
     throw std::runtime_error("cyber_physical must be an object");
   }
-  const auto& cyber = request["cyber_physical"];
   auto finite_in_range = [](double value, double lo, double hi,
                             const char* field) {
     if (!std::isfinite(value) || value < lo || value > hi) {
-      throw std::runtime_error(std::string("cyber_physical.") + field +
+      throw std::runtime_error(std::string(field) +
                                " is outside its valid range");
     }
     return value;
   };
   auto& target = options.cyber_physical;
-  target.enabled = cyber.value("enabled", false);
+  target.information_enabled = information.value("enabled", false);
+  target.intelligent.enabled = intelligent.value("enabled", false);
+  target.enabled = target.information_enabled || target.intelligent.enabled;
   target.automation_availability = finite_in_range(
-      cyber.value("automation_availability", 0.97), 0.0, 1.0,
-      "automation_availability");
+      information.value("service_availability",
+                        information.value("automation_availability", 0.97)),
+      0.0, 1.0, "dimensions.information.service_availability");
   target.automatic_switching_time_hr = finite_in_range(
-      cyber.value("automatic_switching_time_hr", 0.05), 0.0, 8760.0,
-      "automatic_switching_time_hr");
+      information.value("automatic_switching_time_hr", 0.05), 0.0, 8760.0,
+      "dimensions.information.automatic_switching_time_hr");
   target.manual_switching_time_hr = finite_in_range(
-      cyber.value("manual_switching_time_hr", 1.0), 0.0, 8760.0,
-      "manual_switching_time_hr");
+      information.value("manual_switching_time_hr", 1.0), 0.0, 8760.0,
+      "dimensions.information.manual_switching_time_hr");
   if (target.manual_switching_time_hr < target.automatic_switching_time_hr) {
     throw std::runtime_error(
-        "cyber_physical.manual_switching_time_hr must be >= "
-        "automatic_switching_time_hr (manual restoration cannot beat "
-        "automatic restoration)");
+        "dimensions.information.manual_switching_time_hr must be >= "
+        "dimensions.information.automatic_switching_time_hr");
   }
   target.freeze_der_on_automation_loss =
-      cyber.value("freeze_der_on_automation_loss", true);
+      information.value("freeze_der_on_service_loss",
+                        information.value("freeze_der_on_automation_loss", true));
   target.availability_overrides.clear();
-  const json overrides = cyber.value("availability_overrides", json::array());
+  const json overrides = information.value("availability_overrides", json::array());
   if (!overrides.is_array()) {
     throw std::runtime_error(
-        "cyber_physical.availability_overrides must be an array");
+        "dimensions.information.availability_overrides must be an array");
   }
   for (const auto& row : overrides) {
     if (!row.is_object() || !row.contains("component_type") ||
@@ -5919,16 +5965,40 @@ static void parse_cyber_physical_fmea_options(
         !row.contains("component_index") ||
         !row["component_index"].is_number_integer()) {
       throw std::runtime_error(
-          "cyber_physical availability overrides require component_type and component_index");
+          "information availability overrides require component_type and component_index");
     }
     hacdcpf::analysis::CyberPhysicalFMEAOptions::AvailabilityOverride value;
     value.component_type = row["component_type"].get<std::string>();
     value.component_index = row["component_index"].get<int>();
     value.availability = finite_in_range(
         row.value("availability", target.automation_availability), 0.0, 1.0,
-        "availability_overrides[].availability");
+        "dimensions.information.availability_overrides[].availability");
     target.availability_overrides.push_back(std::move(value));
   }
+
+  if (intelligent.value("independent_factorization", true) == false) {
+    throw std::runtime_error(
+        "dimensions.intelligent.independent_factorization=false is not supported; "
+        "supply a joint class model before disabling the screening approximation");
+  }
+  auto& fn = target.intelligent;
+  fn.detection_success_probability = finite_in_range(
+      intelligent.value("detection_success_probability", 0.98), 0.0, 1.0,
+      "dimensions.intelligent.detection_success_probability");
+  fn.isolation_success_probability = finite_in_range(
+      intelligent.value("isolation_success_probability", 0.97), 0.0, 1.0,
+      "dimensions.intelligent.isolation_success_probability");
+  fn.restoration_decision_valid_probability = finite_in_range(
+      intelligent.value("restoration_decision_valid_probability", 0.98),
+      0.0, 1.0,
+      "dimensions.intelligent.restoration_decision_valid_probability");
+  fn.restoration_execution_success_probability = finite_in_range(
+      intelligent.value("restoration_execution_success_probability", 0.98),
+      0.0, 1.0,
+      "dimensions.intelligent.restoration_execution_success_probability");
+  fn.protection_success_probability = finite_in_range(
+      intelligent.value("protection_success_probability", 0.995), 0.0, 1.0,
+      "dimensions.intelligent.protection_success_probability");
 }
 
 static json cyber_physical_reliability_json(
@@ -5937,6 +6007,22 @@ static json cyber_physical_reliability_json(
       {"enabled", cyber.enabled},
       {"level", cyber.level},
       {"model_scope", cyber.model_scope},
+      {"information_enabled", cyber.information_enabled},
+      {"intelligent_enabled", cyber.intelligent_enabled},
+      {"independent_factorization", cyber.independent_factorization},
+      {"information_service_availability",
+       cyber.information_service_availability},
+      {"intelligent_function_success_probability",
+       cyber.intelligent_function_success_probability},
+      {"effective_automation_probability",
+       cyber.effective_automation_probability},
+      {"detection_success_probability", cyber.detection_success_probability},
+      {"isolation_success_probability", cyber.isolation_success_probability},
+      {"restoration_decision_valid_probability",
+       cyber.restoration_decision_valid_probability},
+      {"restoration_execution_success_probability",
+       cyber.restoration_execution_success_probability},
+      {"protection_success_probability", cyber.protection_success_probability},
       {"automation_availability", cyber.automation_availability},
       {"automatic_switching_time_hr", cyber.automatic_switching_time_hr},
       {"manual_switching_time_hr", cyber.manual_switching_time_hr},
@@ -8116,29 +8202,79 @@ hacdcpf::TimeSeriesData make_annual_day_slice(
   return day_ts;
 }
 
-std::vector<std::string> case_names() {
-  return {
-      "ieee14_acdc",
-      "ieee24_3area_acdc",
-      "ieee24_3area_acdc_expanded",
-      "ieee118_acdc",
-      "case33bw_acdc",
-      "case33mg_acdc",
-      "case69_acdc",
-      "case300_acdc",
-      "case2000_acdc",
-      "demo_multizone_acdc",
-      "dist33_microgrid_der",
-      "urban_lvn_primary_secondary",
-      "comprehensive_hybrid_acdc",
-      "multiscale_comprehensive_acdc",
-      "hybrid_acdc_microgrid_island",
-      "networked_microgrids_islanding",
-      "cyber_physical_reliability_demo",
-      "market_3bus_toy",
-      "market_5bus_acdc_toy",
-      "dist33_tie_demo",
+// ── Built-in case catalog ─────────────────────────────────────────────────────
+// Capability-oriented metadata for the GUI case selector.  `case_names()` is
+// derived from this table so the dropdown and build_case() never drift apart.
+// scale/blurb are display strings; keep scale consistent with builder output
+// (a structure test cross-checks component counts against these labels).
+
+struct CaseInfo {
+  const char* name;
+  const char* label;  // 中文短名
+  const char* group;  // 下拉分组（optgroup）
+  const char* scale;  // 规模标注
+  const char* blurb;  // 一句话用途/推荐演示路径
+  bool featured = true;  // 旗舰案例：工具栏下拉只列 featured；其余归入模态框全量清单
+};
+
+const std::vector<CaseInfo>& case_catalog() {
+  static const std::vector<CaseInfo> kCatalog = {
+      // ── 快速上手与综合展示 ──
+      {"ieee14_acdc", "IEEE14 混合入门", "快速上手与综合展示", "14 AC + 2 DC",
+       "最小交直流混合系统：潮流求解器家族对比与谐波 VSC 自动 NIC 基例"},
+      {"ieee24_3area_acdc_expanded", "IEEE24 三区域扩展 · 默认", "快速上手与综合展示", "24 AC + 8 DC",
+       "默认基准：含成本/碳因子/OLTC/储能，覆盖 UC、OPF、RPO、时序潮流与碳流"},
+      {"ieee24_3area_acdc", "IEEE24 三区域基础版", "快速上手与综合展示", "24 AC + 4 DC",
+       "扩展版的轻量基座：10 机全成本与碳因子，适合 UC/OPF 快速验证", false},
+      {"comprehensive_hybrid_acdc", "综合全组件秀场", "快速上手与综合展示", "21 AC + 4 DC",
+       "110kV+20kV 三馈线全组件：OLTC/开关/微网/EV 充电/3 台 VSC，兼承载力评估旗舰"},
+      {"multiscale_comprehensive_acdc", "多尺度时序旗舰", "快速上手与综合展示", "21 AC + 4 DC",
+       "综合秀场 + VPP/能量路由器/移动储能：日 24 步与年度 8760h 生产模拟基线"},
+      {"demo_multizone_acdc", "多电压等级 DER 演示", "快速上手与综合展示", "24 AC + 4 DC",
+       "多 zone 多电压等级 + 风/光/储/燃料电池混合建模演示", false},
+      // ── 配电网与 DER ──
+      {"case33bw_acdc", "IEEE33 配电混合", "配电网与 DER", "33 AC + 2 DC",
+       "经典 33 节点配电 + 双端 DC：配网潮流与重构入门", false},
+      {"case33mg_acdc", "IEEE33 多微网", "配电网与 DER", "33 AC + 2 DC",
+       "33 节点 + 3 条微网记录（自动汇总负荷/装机/储能容量）", false},
+      {"case69_acdc", "IEEE69 配电混合", "配电网与 DER", "69 AC + 2 DC",
+       "69 节点径向配网 + 双端 DC：中等规模配网潮流", false},
+      {"dist33_microgrid_der", "Dist33 DER 可靠性·弹性旗舰", "配电网与 DER", "33 AC + 2 DC",
+       "3 微网多类 DER + 需求响应 + 自动化开关：可靠性 SAIDI/SAIFI 与弹性恢复演示"},
+      {"dist33_tie_demo", "Dist33 联络重构专用", "配电网与 DER", "33 AC 纯交流",
+       "5 条标准联络线全部断开：ONR 自动重选更低损耗的径向树"},
+      {"urban_lvn_primary_secondary", "城市低压三相 338 节点", "配电网与 DER", "338 AC + 3 DC",
+       "230/13.8/0.48kV 三级城市低压网：唯一带完整三相相域模型的案例，兼 DC 快充走廊"},
+      // ── 微网与暂态动态 ──
+      {"hybrid_acdc_microgrid_island", "混合微网孤岛暂态", "微网与暂态动态", "6 AC + 2 DC",
+       "genset + 构网型 BESS + VSC DC 子网：孤岛/并网暂态全流程（TGOV1/SEXS/GFM）"},
+      {"networked_microgrids_islanding", "联网微网群多机暂态", "微网与暂态动态", "8 AC + 2 DC",
+       "4 台同步机 + 3 微网 PCC：多机系统 slack 动态化与发电机跳闸事件演示"},
+      // ── 可靠性·弹性·市场 ──
+      {"cyber_physical_reliability_demo", "信息物理 FLISR 基准", "可靠性·弹性·市场", "3 AC",
+       "3 节点 FLISR 基准：量化自动化可用/不可用时的恢复增量（唯一带故障率的小例）"},
+      {"market_3bus_toy", "市场 3 节点阻塞", "可靠性·弹性·市场", "3 AC",
+       "紧凑线路限额制造阻塞：SCUC/SCED 闭环，峰时段 LMP 明显分裂（市场出清旗舰）"},
+      {"market_5bus_acdc_toy", "市场 5 节点混合边界演示", "可靠性·弹性·市场", "5 AC + 2 DC",
+       "AC 阻塞 + DC 通道限额的混合拓扑；市场模块声明 AC-only 边界并拒绝混合资产——用于潮流/OPF 与诚实结果口径演示", false},
+      // ── 输电网与性能基准 ──
+      {"five_province_acdc", "南方五省区域电网", "输电网与性能基准", "52 AC + 6 DC",
+       "真实区域电网：3 条 HVDC + 16 回交流联络线、GIS 坐标渲染；系统刚性强，潮流推荐 FDPF（统一 NR 收敛性待改进）"},
+      {"ieee118_acdc", "IEEE118 混合", "输电网与性能基准", "118 AC + 6 DC",
+       "118 节点 54 机 + 6 端 DC：中大型 OPF/潮流基准", false},
+      {"case300_acdc", "IEEE300 + MTDC", "输电网与性能基准", "300 AC + 6 DC",
+       "300 节点 + 6 端环网 MTDC + 3 台 OLTC：大系统 RPO/OPF 基准", false},
+      {"case2000_acdc", "ACTIVSg2000 性能旗舰", "输电网与性能基准", "2000 AC + 8 DC",
+       "2000 节点 544 机 + 8 端 MTDC：纯 AC 牛顿潮流 12 迭代约 2.3s；混合 NR 对 MTDC 下垂参数敏感，推荐 pure_ac/FDPF"},
   };
+  return kCatalog;
+}
+
+std::vector<std::string> case_names() {
+  std::vector<std::string> names;
+  names.reserve(case_catalog().size());
+  for (const auto& c : case_catalog()) names.emplace_back(c.name);
+  return names;
 }
 
 hacdcpf::HybridPowerSystem build_case(const std::string& name) {
@@ -8168,6 +8304,7 @@ hacdcpf::HybridPowerSystem build_case(const std::string& name) {
   }
   if (name == "market_3bus_toy") return build_market_3bus_toy();
   if (name == "market_5bus_acdc_toy") return build_market_5bus_acdc_toy();
+  if (name == "five_province_acdc") return build_five_province_acdc();
   if (name == "dist33_tie_demo") {
     // Pure-AC IEEE 33-bus with the 5 standard ties open (suboptimal radial).
     // Every branch is switchable, so ONR re-picks a lower-loss radial tree.
@@ -8500,7 +8637,19 @@ int main(int argc, char** argv) {
 
   svr.Get("/api/cases", [](const httplib::Request&, httplib::Response& res) {
     json out;
-    out["cases"] = case_names();
+    // Structured catalog (name/label/group/scale/blurb) for the grouped GUI
+    // selector; `case_names` keeps the legacy plain-string list for older
+    // clients and e2e scripts.
+    out["cases"] = json::array();
+    for (const auto& c : case_catalog()) {
+      out["cases"].push_back({{"name", c.name},
+                              {"label", c.label},
+                              {"group", c.group},
+                              {"scale", c.scale},
+                              {"blurb", c.blurb},
+                              {"featured", c.featured}});
+    }
+    out["case_names"] = case_names();
     out["default_case"] = "ieee24_3area_acdc_expanded";
     res.set_content(out.dump(), "application/json");
   });
@@ -21351,8 +21500,20 @@ int main(int argc, char** argv) {
         const json mc   = j.value("monte_carlo", json::object());
         const json rest = j.value("restoration", json::object());
         const json exec = j.value("execution", json::object());
+        const json dimensions = j.value("dimensions", json::object());
+        if (!dimensions.is_object())
+          throw std::runtime_error("dimensions must be an object");
+        const json physical_dimension =
+            dimensions.value("physical", json::object());
+        if (!physical_dimension.is_object())
+          throw std::runtime_error("dimensions.physical must be an object");
         const double load_scale =
-            load.value("scale_factor", j.value("load_scale_factor", 1.0));
+            physical_dimension.value(
+                "load_scale_factor",
+                load.value("scale_factor", j.value("load_scale_factor", 1.0)));
+        if (!std::isfinite(load_scale) || load_scale < 0.0)
+          throw std::runtime_error(
+              "dimensions.physical.load_scale_factor must be finite and non-negative");
         const bool parallel_requested =
             exec.value("parallel", j.value("parallel", true));
         const int parallel_threads =
@@ -21502,12 +21663,28 @@ int main(int argc, char** argv) {
 	          for (const auto& ci : r.critical_components)
 	            crit.push_back(mc_critical_component_json(sys, ci));
 	          out["critical_components"] = crit;
-	        } else if (method == "fmea") {
+        } else if (method == "fmea") {
           hacdcpf::analysis::FMEAOptions fo;
           fo.data_policy = pol;
           fo.load_scale_factor = load_scale;
-          fo.switching_time_hr = rest.value("switching_time_hr", 0.5);
-          fo.enable_switch_reconfiguration = rest.value("enable_switch_reconfiguration", true);
+          fo.switching_time_hr = physical_dimension.value(
+              "switching_time_hr", rest.value("switching_time_hr", 0.5));
+          if (!std::isfinite(fo.switching_time_hr) || fo.switching_time_hr < 0.0)
+            throw std::runtime_error(
+                "dimensions.physical.switching_time_hr must be finite and non-negative");
+          fo.enable_switch_reconfiguration = physical_dimension.value(
+              "enable_switch_reconfiguration",
+              rest.value("enable_switch_reconfiguration", true));
+          fo.enable_repair_reconfiguration = physical_dimension.value(
+              "enable_repair_reconfiguration", true);
+          fo.enable_microgrid_islanding = physical_dimension.value(
+              "enable_microgrid_islanding", true);
+          fo.enable_storage_dispatch = physical_dimension.value(
+              "enable_storage_dispatch", true);
+          fo.enable_grid_forming_vsc_support = physical_dimension.value(
+              "enable_grid_forming_vsc_support", true);
+          fo.enable_black_start_storage = physical_dimension.value(
+              "enable_black_start_storage", true);
           fo.max_repair_switch_actions = rest.value("max_switch_actions", 2);
           fo.max_repair_opf_calls = rest.value("max_physical_evaluations", 200);
           fo.enable_parallel = rest.value("parallel", parallel_requested);
@@ -21521,6 +21698,51 @@ int main(int argc, char** argv) {
           out["validity"] = fmea_validity_json(r.validity);
           out["cyber_physical"] =
               cyber_physical_reliability_json(r.cyber_physical);
+          out["dimension_audit"] = json{
+              {"physical",
+               {{"applied", true},
+                {"load_scale_factor", fo.load_scale_factor},
+                {"switching_time_hr", fo.switching_time_hr},
+                {"enable_switch_reconfiguration",
+                 fo.enable_switch_reconfiguration},
+                {"enable_repair_reconfiguration",
+                 fo.enable_repair_reconfiguration},
+                {"enable_microgrid_islanding", fo.enable_microgrid_islanding},
+                {"enable_storage_dispatch", fo.enable_storage_dispatch},
+                {"enable_grid_forming_vsc_support",
+                 fo.enable_grid_forming_vsc_support},
+                {"enable_black_start_storage", fo.enable_black_start_storage}}},
+              {"information",
+               {{"applied", fo.cyber_physical.information_enabled},
+                {"service_availability",
+                 r.cyber_physical.information_service_availability},
+                {"automatic_switching_time_hr",
+                 fo.cyber_physical.automatic_switching_time_hr},
+                {"manual_switching_time_hr",
+                 fo.cyber_physical.manual_switching_time_hr},
+                {"freeze_der_on_service_loss",
+                 fo.cyber_physical.freeze_der_on_automation_loss}}},
+              {"intelligent",
+               {{"applied", fo.cyber_physical.intelligent.enabled},
+                {"algorithm", "factorized_screening"},
+                {"independent_factorization", true},
+                {"detection_success_probability",
+                 r.cyber_physical.detection_success_probability},
+                {"isolation_success_probability",
+                 r.cyber_physical.isolation_success_probability},
+                {"restoration_decision_valid_probability",
+                 r.cyber_physical.restoration_decision_valid_probability},
+                {"restoration_execution_success_probability",
+                 r.cyber_physical.restoration_execution_success_probability},
+                {"protection_success_probability",
+                 r.cyber_physical.protection_success_probability},
+                {"function_success_probability",
+                 r.cyber_physical.intelligent_function_success_probability},
+                {"effective_automation_probability",
+                 r.cyber_physical.effective_automation_probability},
+                {"joint_class_probability_modelled", false},
+                {"protection_logic_modelled", false},
+                {"protection_frt_reliability_coupled", false}}}};
           out["data_quality"] = reliability_data_quality_json(r.data_quality);
           add_reliability_parallel_json(out, fo.enable_parallel,
                                         r.parallel_execution);

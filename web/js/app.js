@@ -2328,24 +2328,59 @@ const App = (() => {
   }
 
   // ========== Load Built-in Cases ==========
-  function fillSelectOptions(selectId, values, placeholder) {
+  function fillSelectOptions(selectId, values, placeholder, defaultValue) {
     const select = document.getElementById(selectId);
     if (!select) return;
     select.innerHTML = `<option value="">${escapeHtml(placeholder)}</option>`;
-    (values || []).forEach(value => {
+    const groups = new Map();
+    (values || []).forEach(item => {
+      // Backward compatible: plain strings render as-is; structured items
+      // ({value,label,group,title}) get display labels and <optgroup> buckets.
+      const it = (item && typeof item === 'object') ? item : { value: item, label: item };
       const opt = document.createElement('option');
-      opt.value = value;
-      opt.textContent = value;
-      select.appendChild(opt);
+      opt.value = it.value;
+      opt.textContent = it.label != null ? it.label : it.value;
+      if (it.title) opt.title = it.title;
+      if (it.group) {
+        let og = groups.get(it.group);
+        if (!og) {
+          og = document.createElement('optgroup');
+          og.label = it.group;
+          groups.set(it.group, og);
+          select.appendChild(og);
+        }
+        og.appendChild(opt);
+      } else {
+        select.appendChild(opt);
+      }
     });
+    if (defaultValue) select.value = defaultValue;
   }
 
   async function loadCaseList() {
     const data = await apiGet('/api/cases');
     if (!data) return;
-    fillSelectOptions('caseSelect', data.cases, '-- 加载算例 --');
-    fillSelectOptions('ioCaseSelect', data.cases, '-- 选择算例 --');
-    log(`已加载 ${(data.cases || []).length} 个内置算例`, 'success');
+    // Structured catalog entries -> grouped Chinese-labelled options; fall back
+    // to the legacy plain-string list when talking to an older server.
+    const structured = Array.isArray(data.cases) && data.cases.length > 0 && typeof data.cases[0] === 'object';
+    const toItem = c => ({
+      value: c.name,
+      label: c.scale ? `${c.label} · ${c.scale}` : c.label,
+      group: c.group,
+      title: c.blurb,
+    });
+    const items = structured
+      ? data.cases.map(toItem)
+      : (data.case_names || data.cases || []);
+    // Toolbar selector shows only flagship (featured) cases; the load-case
+    // dialog keeps the full catalog so every legacy case stays reachable.
+    const featured = structured ? data.cases.filter(c => c.featured !== false).map(toItem) : items;
+    const extended = structured
+      ? data.cases.filter(c => c.featured === false).map(c => ({ ...toItem(c), group: '更多算例（扩展）' }))
+      : [];
+    fillSelectOptions('caseSelect', [...featured, ...extended], '-- 加载算例 --', data.default_case);
+    fillSelectOptions('ioCaseSelect', featured, '-- 选择算例 --', data.default_case);
+    log(`已加载 ${featured.length} 个旗舰算例（共 ${items.length} 个内置算例）`, 'success');
   }
 
   async function loadMatpowerFileList() {
@@ -16643,21 +16678,38 @@ const App = (() => {
 	      const maxIterEl = document.getElementById('relMaxIter');
 	      const hintEl = document.getElementById('relAnalysisHint');
 	      const cyberToggle = document.getElementById('relCyberEnabled');
+	      const intelligentToggle = document.getElementById('relIntelligentEnabled');
 	      const controlState = HySimCore.AnalysisContracts.reliabilityControlState({
 	        physicalModel,
 	        method: methodEl?.value || 'nsq',
 	        cyberEnabled: cyberToggle?.checked === true,
+	        informationEnabled: cyberToggle?.checked === true,
+	        intelligentEnabled: intelligentToggle?.checked === true,
 	      });
 	      if (methodEl) methodEl.disabled = controlState.useThreeStage;
 	      if (maxIterEl) maxIterEl.disabled = controlState.useThreeStage;
-	      if (cyberToggle) cyberToggle.disabled = !controlState.cyberToggleEnabled;
+	      if (cyberToggle) cyberToggle.disabled = !controlState.informationToggleEnabled;
+	      if (intelligentToggle) {
+	        intelligentToggle.disabled = !controlState.intelligentToggleEnabled;
+	      }
+	      document.querySelectorAll('.rel-physical-fmea-control').forEach(element => {
+	        element.querySelectorAll('input,select').forEach(input => {
+	          input.disabled = !controlState.physicalFmeaParametersEnabled;
+	        });
+	      });
 	      document.querySelectorAll('.rel-seq-profile').forEach(element => {
 	        element.hidden = !controlState.useSequential;
 	      });
 	      document.querySelectorAll('.rel-cyber-control').forEach(element => {
-	        element.hidden = !controlState.cyberParametersVisible;
+	        element.hidden = !controlState.informationParametersVisible;
 	        element.querySelectorAll('input').forEach(input => {
-	          input.disabled = !controlState.cyberParametersEnabled;
+	          input.disabled = !controlState.informationInputsEnabled;
+	        });
+	      });
+	      document.querySelectorAll('.rel-intelligent-control').forEach(element => {
+	        element.hidden = !controlState.intelligentParametersVisible;
+	        element.querySelectorAll('input').forEach(input => {
+	          input.disabled = !controlState.intelligentInputsEnabled;
 	        });
 	      });
 	      if (hintEl) {
@@ -16680,18 +16732,37 @@ const App = (() => {
 	      updateReliabilityControlState();
 	    }
 
+	    function activateIntelligentReliability() {
+	      const intelligentToggle = document.getElementById('relIntelligentEnabled');
+	      const methodEl = document.getElementById('relMethod');
+	      const physicalModelEl = document.getElementById('relPhysicalModel');
+	      if (intelligentToggle?.checked) {
+	        if (physicalModelEl?.value === 'restoration_milp') {
+	          physicalModelEl.value = 'auto';
+	        }
+	        if (methodEl) methodEl.value = 'fmea';
+	      }
+	      updateReliabilityControlState();
+	    }
+
 	    function changeReliabilityMethod() {
 	      const methodEl = document.getElementById('relMethod');
 	      const cyberToggle = document.getElementById('relCyberEnabled');
-	      if (methodEl?.value !== 'fmea' && cyberToggle) cyberToggle.checked = false;
+	      const intelligentToggle = document.getElementById('relIntelligentEnabled');
+	      if (methodEl?.value !== 'fmea') {
+	        if (cyberToggle) cyberToggle.checked = false;
+	        if (intelligentToggle) intelligentToggle.checked = false;
+	      }
 	      updateReliabilityControlState();
 	    }
 
 	    function changeReliabilityPhysicalModel() {
 	      const physicalModelEl = document.getElementById('relPhysicalModel');
 	      const cyberToggle = document.getElementById('relCyberEnabled');
-	      if (physicalModelEl?.value === 'restoration_milp' && cyberToggle) {
-	        cyberToggle.checked = false;
+	      const intelligentToggle = document.getElementById('relIntelligentEnabled');
+	      if (physicalModelEl?.value === 'restoration_milp') {
+	        if (cyberToggle) cyberToggle.checked = false;
+	        if (intelligentToggle) intelligentToggle.checked = false;
 	      }
 	      updateReliabilityControlState();
 	    }
@@ -16762,26 +16833,49 @@ const App = (() => {
 	      const weakBasis = (document.getElementById('relWeakBasis')?.value) || 'auto';
 	      const relParallel = document.getElementById('relParallel')?.checked ?? true;
 	      const relParallelThreads = parseInt(document.getElementById('relParallelThreads')?.value, 10);
-	      const cyberEnabled = method === 'fmea' &&
+	      const informationEnabled = method === 'fmea' &&
 	        document.getElementById('relCyberEnabled')?.checked === true;
+	      const intelligentEnabled = method === 'fmea' &&
+	        document.getElementById('relIntelligentEnabled')?.checked === true;
+	      const physicalLoadScale = Number(document.getElementById('relPhysicalLoadScale')?.value);
+	      const physicalSwitchMinutes = Number(document.getElementById('relPhysicalSwitchMinutes')?.value);
 	      const cyberAvailability = Number(document.getElementById('relCyberAvailability')?.value);
 	      const cyberAutoMinutes = Number(document.getElementById('relCyberAutoMinutes')?.value);
 	      const cyberManualMinutes = Number(document.getElementById('relCyberManualMinutes')?.value);
+	      const intelligentProbabilities = {
+	        detection_success_probability: Number(document.getElementById('relDetectionSuccess')?.value),
+	        isolation_success_probability: Number(document.getElementById('relIsolationSuccess')?.value),
+	        restoration_decision_valid_probability: Number(document.getElementById('relRestorationDecisionSuccess')?.value),
+	        restoration_execution_success_probability: Number(document.getElementById('relRestorationExecutionSuccess')?.value),
+	        protection_success_probability: Number(document.getElementById('relProtectionSuccess')?.value),
+	      };
 	      const seqProfileText = document.getElementById('relSeqLoadProfile')?.value || '';
 	      const seqProfile = seqProfileText.split(/[\s,;]+/).filter(Boolean).map(Number);
 	      const seqSpatialText = document.getElementById('relSeqSpatialFactors')?.value?.trim() || '';
 	      let seqSpatialFactors = [];
-	      if (cyberEnabled &&
+	      if (!Number.isFinite(physicalLoadScale) || physicalLoadScale < 0 ||
+	          !Number.isFinite(physicalSwitchMinutes) || physicalSwitchMinutes < 0) {
+	        setStatus('物理维度参数无效', 'error');
+	        log('负荷倍率和默认切换时间必须是非负数', 'error');
+	        return;
+	      }
+	      if (informationEnabled &&
 	          (!Number.isFinite(cyberAvailability) || cyberAvailability < 0 || cyberAvailability > 1 ||
 	           !Number.isFinite(cyberAutoMinutes) || cyberAutoMinutes < 0 ||
 	           !Number.isFinite(cyberManualMinutes) || cyberManualMinutes < 0)) {
-	        setStatus('网络物理可靠性参数无效', 'error');
-	        log('自动化可用率必须在 0-1 内，自动/人工恢复时间必须为非负分钟数', 'error');
+	        setStatus('信息维度参数无效', 'error');
+	        log('服务可用率必须在 0-1 内，自动/人工响应时间必须为非负分钟数', 'error');
 	        return;
 	      }
-	      if (cyberEnabled && cyberManualMinutes < cyberAutoMinutes) {
-	        setStatus('网络物理可靠性参数无效', 'error');
-	        log('人工恢复时间不能小于自动恢复时间', 'error');
+	      if (informationEnabled && cyberManualMinutes < cyberAutoMinutes) {
+	        setStatus('信息维度参数无效', 'error');
+	        log('人工响应时间不能小于自动响应时间', 'error');
+	        return;
+	      }
+	      if (intelligentEnabled && Object.values(intelligentProbabilities).some(value =>
+	          !Number.isFinite(value) || value < 0 || value > 1)) {
+	        setStatus('智能维度参数无效', 'error');
+	        log('检测、隔离、决策、执行和保护成功率必须在 0-1 内', 'error');
 	        return;
 	      }
 	      if (method === 'seq' && seqProfileText.trim() &&
@@ -16814,7 +16908,7 @@ const App = (() => {
 	        data_policy: (document.getElementById('relDataPolicy')?.value) || 'missing_only',
 	        reliability_template: (document.getElementById('relTemplate')?.value) || 'none',
 	        load: {
-	          scale_factor: 1.0,
+	          scale_factor: physicalLoadScale,
 	          hours_per_year: 8736,
 	          profile_factors: method === 'seq' && seqProfileText.trim() ? seqProfile : [],
 	          spatial_factors: method === 'seq' ? seqSpatialFactors : [],
@@ -16831,7 +16925,9 @@ const App = (() => {
 	          parallel_threads: Number.isFinite(relParallelThreads) ? relParallelThreads : 0,
 	        },
 	        restoration: {
-	          enable_switch_reconfiguration: true,
+	          switching_time_hr: physicalSwitchMinutes / 60,
+	          enable_switch_reconfiguration:
+	            document.getElementById('relPhysicalReconfiguration')?.checked !== false,
 	          max_switch_actions: 2,
 	          max_switch_operations: 2,
 	          parallel: relParallel,
@@ -16855,14 +16951,40 @@ const App = (() => {
 	          only_in_service: true,
 	        },
 	        max_order: (document.getElementById('relFmN2')?.checked ? 2 : 1),
-	        cyber_physical: {
-	          enabled: cyberEnabled,
-	          automation_availability: cyberEnabled ? cyberAvailability : 0.97,
-	          automatic_switching_time_hr: cyberEnabled ? cyberAutoMinutes / 60 : 0.05,
-	          manual_switching_time_hr: cyberEnabled ? cyberManualMinutes / 60 : 1,
-	          freeze_der_on_automation_loss:
-	            document.getElementById('relCyberFreezeDer')?.checked !== false,
-	          availability_overrides: [],
+	        dimensions: {
+	          physical: {
+	            load_scale_factor: physicalLoadScale,
+	            switching_time_hr: physicalSwitchMinutes / 60,
+	            enable_switch_reconfiguration:
+	              document.getElementById('relPhysicalReconfiguration')?.checked !== false,
+	            enable_repair_reconfiguration:
+	              document.getElementById('relPhysicalReconfiguration')?.checked !== false,
+	            enable_microgrid_islanding:
+	              document.getElementById('relPhysicalMicrogrid')?.checked !== false,
+	            enable_storage_dispatch:
+	              document.getElementById('relPhysicalStorage')?.checked !== false,
+	            enable_grid_forming_vsc_support:
+	              document.getElementById('relPhysicalGfm')?.checked !== false,
+	            enable_black_start_storage:
+	              document.getElementById('relPhysicalBlackStart')?.checked !== false,
+	          },
+	          information: {
+	            enabled: informationEnabled,
+	            service_availability: informationEnabled ? cyberAvailability : 1,
+	            automatic_switching_time_hr:
+	              (informationEnabled ? cyberAutoMinutes : physicalSwitchMinutes) / 60,
+	            manual_switching_time_hr:
+	              (informationEnabled ? cyberManualMinutes : physicalSwitchMinutes) / 60,
+	            freeze_der_on_service_loss: informationEnabled
+	              ? document.getElementById('relCyberFreezeDer')?.checked !== false
+	              : true,
+	            availability_overrides: [],
+	          },
+	          intelligent: {
+	            enabled: intelligentEnabled,
+	            independent_factorization: true,
+	            ...intelligentProbabilities,
+	          },
 	        },
 	        reporting: { metric_focus: metricFocus, weak_basis: weakBasis },
 	      };
@@ -17267,7 +17389,9 @@ const App = (() => {
 	      const pct = value => Number.isFinite(Number(value))
 	        ? `${(Number(value) * 100).toFixed(2)}%` : '—';
 	      const rows = [
-	        ['自动化可用率', pct(cyber.automation_availability)],
+	        ['信息服务可用率', pct(cyber.information_service_availability)],
+	        ['智能功能成功率', pct(cyber.intelligent_function_success_probability)],
+	        ['自动后果类有效概率', pct(cyber.effective_automation_probability)],
 	        ['自动 / 人工恢复时间', `${relMetricHtml(cyber.automatic_switching_time_hr, 3)} / ${relMetricHtml(cyber.manual_switching_time_hr, 3)} h`],
 	        ['全自动化 EENS 下界', `${relMetricHtml(cyber.eens_perfect_cyber_mwh_yr, 3)} MWh/yr`],
 	        ['网络物理修正 EENS', `${relMetricHtml(cyber.eens_adjusted_mwh_yr, 3)} MWh/yr`],
@@ -17277,10 +17401,17 @@ const App = (() => {
 	        ['自动化效能', pct(cyber.automation_efficacy)],
 	        ['网络故障导致的 SAIDI 占比', pct(cyber.cyber_caused_saidi_share)],
 	      ];
+	      if (cyber.intelligent_enabled) {
+	        rows.splice(3, 0,
+	          ['检测 / 隔离成功率', `${pct(cyber.detection_success_probability)} / ${pct(cyber.isolation_success_probability)}`],
+	          ['决策 / 执行成功率', `${pct(cyber.restoration_decision_valid_probability)} / ${pct(cyber.restoration_execution_success_probability)}`],
+	          ['保护成功率（筛查代理）', pct(cyber.protection_success_probability)]);
+	      }
 	      let html = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">' +
-	        relScopeBadge(`Level ${cyber.level || 1} 标量接口矩阵`, true) +
+	        relScopeBadge(cyber.intelligent_enabled ? '物理-信息-智能筛查' : `Level ${cyber.level || 1} 标量接口矩阵`, true) +
+	        (cyber.independent_factorization ? relScopeBadge('独立因子近似', false) : '') +
 	        relScopeBadge('通信拓扑未建模', false) +
-	        relScopeBadge('网络节点供电耦合未建模', false) + '</div>';
+	        relScopeBadge('保护-FRT未耦合', false) + '</div>';
 	      html += '<table><tbody>';
 	      rows.forEach(([label, value]) => {
 	        html += `<tr><td>${escapeHtml(label)}</td><td>${value}</td></tr>`;
@@ -17309,7 +17440,47 @@ const App = (() => {
 	        });
 	        html += '</tbody></table>';
 	      }
-	      return renderReliabilityPanel('网络物理可靠性', html);
+	      return renderReliabilityPanel('信息与智能可靠性', html);
+	    }
+
+	    function renderReliabilityDimensionAuditHtml(data) {
+	      const audit = data?.dimension_audit;
+	      if (!audit) return '';
+	      const yesNo = value => value ? '启用' : '关闭';
+	      const p = audit.physical || {};
+	      const i = audit.information || {};
+	      const a = audit.intelligent || {};
+	      const columns = [
+	        ['物理', [
+	          ['负荷倍率', relMetricHtml(p.load_scale_factor, 3)],
+	          ['切换时间', `${relMetricHtml(p.switching_time_hr, 3)} h`],
+	          ['恢复重构', yesNo(p.enable_repair_reconfiguration)],
+	          ['微网 / 储能 / 构网', `${yesNo(p.enable_microgrid_islanding)} / ${yesNo(p.enable_storage_dispatch)} / ${yesNo(p.enable_grid_forming_vsc_support)}`],
+	          ['黑启动储能', yesNo(p.enable_black_start_storage)],
+	        ]],
+	        ['信息', [
+	          ['状态', yesNo(i.applied)],
+	          ['服务可用率', `${(Number(i.service_availability || 0) * 100).toFixed(2)}%`],
+	          ['自动 / 人工响应', `${relMetricHtml(i.automatic_switching_time_hr, 3)} / ${relMetricHtml(i.manual_switching_time_hr, 3)} h`],
+	          ['失联冻结 DER', yesNo(i.freeze_der_on_service_loss)],
+	        ]],
+	        ['智能', [
+	          ['状态', yesNo(a.applied)],
+	          ['算法', escapeHtml(a.algorithm || '—')],
+	          ['功能成功率', `${(Number(a.function_success_probability || 0) * 100).toFixed(2)}%`],
+	          ['自动类有效概率', `${(Number(a.effective_automation_probability || 0) * 100).toFixed(2)}%`],
+	        ]],
+	      ];
+	      let html = '<div class="reliability-dimension-audit">';
+	      columns.forEach(([title, rows]) => {
+	        html += `<section><h5>${escapeHtml(title)}</h5><table><tbody>`;
+	        rows.forEach(([label, value]) => {
+	          html += `<tr><td>${escapeHtml(label)}</td><td>${value}</td></tr>`;
+	        });
+	        html += '</tbody></table></section>';
+	      });
+	      html += '</div>';
+	      return renderReliabilityPanel('三维参数审计', html);
 	    }
 
 	    function renderFailureModeCoverageHtml(data) {
@@ -17406,6 +17577,7 @@ const App = (() => {
 		      html += renderFailureModeCoverageHtml(data);
 		      html += renderFailureModeLegendHtml(data);
 		      html += renderReliabilitySelectionHtml(data, method);
+		      html += renderReliabilityDimensionAuditHtml(data);
 		      html += renderRelScopeHtml(data);
 		      html += renderCyberPhysicalReliabilityHtml(data);
 		      html += renderReliabilityMetricsHtml(data, method);
@@ -17557,6 +17729,7 @@ const App = (() => {
 	    document.getElementById('relPhysicalModel')?.addEventListener('change', changeReliabilityPhysicalModel);
 	    document.getElementById('relMethod')?.addEventListener('change', changeReliabilityMethod);
 	    document.getElementById('relCyberEnabled')?.addEventListener('change', activateCyberPhysicalReliability);
+	    document.getElementById('relIntelligentEnabled')?.addEventListener('change', activateIntelligentReliability);
 	    updateReliabilityControlState();
 	    updateSeqProfileSummary();
 	    document.getElementById('btnRunReliability')?.addEventListener('click', () => runReliability());

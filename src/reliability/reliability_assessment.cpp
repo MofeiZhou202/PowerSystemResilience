@@ -4289,6 +4289,21 @@ FMEAResult run_distribution_fmea(
   spdlog::info("FMEA: Starting N-1 failure-mode enumeration");
   
   FMEAResult result;
+  const auto probability = [](double value) {
+    return std::clamp(value, 0.0, 1.0);
+  };
+  const auto& intelligent = options.cyber_physical.intelligent;
+  const double intelligent_success_probability = intelligent.enabled
+      ? probability(intelligent.detection_success_probability) *
+            probability(intelligent.isolation_success_probability) *
+            probability(intelligent.restoration_decision_valid_probability) *
+            probability(intelligent.restoration_execution_success_probability) *
+            probability(intelligent.protection_success_probability)
+      : 1.0;
+  const double information_service_availability =
+      options.cyber_physical.information_enabled
+          ? probability(options.cyber_physical.automation_availability)
+          : 1.0;
   const bool hybrid_fmea = has_hybrid_fmea_components(sys);
   if (hybrid_fmea) {
     result.model_scope = "hybrid-acdc-network-lp";
@@ -4324,14 +4339,42 @@ FMEAResult run_distribution_fmea(
     auto& cyber = result.cyber_physical;
     cyber.enabled = true;
     cyber.level = 1;
-    cyber.model_scope = "level1-scalar-interface-matrix";
-    cyber.automation_availability =
-        std::clamp(options.cyber_physical.automation_availability, 0.0, 1.0);
+    cyber.model_scope = intelligent.enabled
+        ? "level1-factorized-physical-information-intelligent-screening"
+        : "level1-scalar-interface-matrix";
+    cyber.information_enabled = options.cyber_physical.information_enabled;
+    cyber.intelligent_enabled = intelligent.enabled;
+    cyber.independent_factorization = intelligent.enabled;
+    cyber.information_service_availability = information_service_availability;
+    cyber.intelligent_function_success_probability =
+        intelligent_success_probability;
+    cyber.effective_automation_probability =
+        information_service_availability * intelligent_success_probability;
+    cyber.detection_success_probability = intelligent.enabled
+        ? probability(intelligent.detection_success_probability) : 1.0;
+    cyber.isolation_success_probability = intelligent.enabled
+        ? probability(intelligent.isolation_success_probability) : 1.0;
+    cyber.restoration_decision_valid_probability = intelligent.enabled
+        ? probability(intelligent.restoration_decision_valid_probability) : 1.0;
+    cyber.restoration_execution_success_probability = intelligent.enabled
+        ? probability(intelligent.restoration_execution_success_probability) : 1.0;
+    cyber.protection_success_probability = intelligent.enabled
+        ? probability(intelligent.protection_success_probability) : 1.0;
+    // Compatibility field: this is the effective automatic-class probability
+    // after the enabled information and intelligent screening factors.
+    cyber.automation_availability = cyber.effective_automation_probability;
     cyber.automatic_switching_time_hr =
         std::max(0.0, options.cyber_physical.automatic_switching_time_hr);
     cyber.manual_switching_time_hr =
         std::max(0.0, options.cyber_physical.manual_switching_time_hr);
     result.validity.restoration_duration_cyber_conditioned = true;
+    result.validity.information_service_conditioned =
+        options.cyber_physical.information_enabled;
+    result.validity.intelligent_function_probabilities_modelled =
+        intelligent.enabled;
+    result.validity.joint_class_probability_modelled = false;
+    result.validity.protection_logic_modelled = false;
+    result.validity.protection_frt_reliability_coupled = false;
     result.validity.cyber_control_consequence_modelled =
         options.cyber_physical.freeze_der_on_automation_loss;
     result.model_limitations +=
@@ -4347,6 +4390,15 @@ FMEAResult run_distribution_fmea(
         "delta_protection_misoperation_mwh_yr is a reserved placeholder (always "
         "zero at Level 1 — protection misoperation lives in the failure-mode "
         "FMEA).";
+    if (intelligent.enabled) {
+      result.model_limitations +=
+          " Intelligent detection, isolation, restoration-decision, action-"
+          "execution, and protection-success inputs are multiplied as a "
+          "conditional-independence screening approximation. Any failed "
+          "function is routed to the existing degraded/manual class; protection "
+          "pickup, backup-zone mutation, joint class dependence, DER FRT, and "
+          "dynamic event trajectories are not modelled.";
+    }
   }
   const size_t nb = sys.ac.buses.size() + (hybrid_fmea ? sys.dc.buses.size() : 0U);
   result.nodal_eens_mwh_yr.resize(nb, 0.0);
@@ -4400,14 +4452,18 @@ FMEAResult run_distribution_fmea(
 
     double automation_availability = 1.0;
     if (options.cyber_physical.enabled) {
-      automation_availability = options.cyber_physical.automation_availability;
-      for (const auto& override : options.cyber_physical.availability_overrides) {
-        if (override.component_type == detail.component_type &&
-            override.component_index == comp.idx) {
-          automation_availability = override.availability;
-          break;
+      double information_availability = information_service_availability;
+      if (options.cyber_physical.information_enabled) {
+        for (const auto& override : options.cyber_physical.availability_overrides) {
+          if (override.component_type == detail.component_type &&
+              override.component_index == comp.idx) {
+            information_availability = override.availability;
+            break;
+          }
         }
       }
+      automation_availability =
+          probability(information_availability) * intelligent_success_probability;
     }
     automation_availability = std::clamp(automation_availability, 0.0, 1.0);
     const double down_probability = 1.0 - automation_availability;

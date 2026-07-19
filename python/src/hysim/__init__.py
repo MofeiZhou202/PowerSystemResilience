@@ -30,6 +30,7 @@ from .models import (
     PowerFlowOptions,
     PowerFlowRequest,
 )
+from .resources import ResultFrameChunk, SubgraphView, TopologyChunk, ViolationChunk
 from .server import LocalHySimServer
 from .transport import Transport, TransportResponse, UrllibTransport
 from .v1 import HySimJob, HySimV1Client, HySimV1Session, TERMINAL_JOB_STATES
@@ -60,6 +61,9 @@ __all__ = [
     "PowerFlowMethod",
     "PowerFlowOptions",
     "PowerFlowRequest",
+    "ResultFrameChunk",
+    "SubgraphView",
+    "TopologyChunk",
     "ToolEffect",
     "ToolPolicy",
     "ToolPolicyError",
@@ -69,4 +73,5 @@ __all__ = [
     "TransportError",
     "TransportResponse",
     "UrllibTransport",
+    "ViolationChunk",
 ]

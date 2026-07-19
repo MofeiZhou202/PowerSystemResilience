@@ -30,6 +30,22 @@ class BusRef:
     def to_dict(self) -> dict[str, Any]:
         return {"domain": self.domain.value, "index": self.stable_id}
 
+    @property
+    def index(self) -> int:
+        return self.stable_id
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "BusRef":
+        domain = value.get("domain")
+        index = value.get("index")
+        try:
+            typed_domain = BusDomain(str(domain))
+        except ValueError as exc:
+            raise ValueError(f"unsupported bus domain: {domain!r}") from exc
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise TypeError("bus reference index must be an integer")
+        return cls(typed_domain, index)
+
 
 @dataclass(frozen=True)
 class ComponentRef:

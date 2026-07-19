@@ -26,6 +26,14 @@ assert.equal(fmeaOff.cyberEffective, false);
 const fmeaOn = controls({ method: 'fmea', cyberEnabled: true });
 assert.equal(fmeaOn.cyberEffective, true);
 assert.equal(fmeaOn.cyberParametersEnabled, true);
+assert.equal(fmeaOn.informationInputsEnabled, true);
+
+const intelligentOn = controls({
+  method: 'fmea', informationEnabled: true, intelligentEnabled: true,
+});
+assert.equal(intelligentOn.intelligentEffective, true);
+assert.equal(intelligentOn.intelligentInputsEnabled, true);
+assert.equal(intelligentOn.physicalFmeaParametersEnabled, true);
 
 const threeStage = controls({
   physicalModel: 'restoration_milp', method: 'fmea', cyberEnabled: true,
@@ -33,9 +41,18 @@ const threeStage = controls({
 assert.equal(threeStage.useThreeStage, true);
 assert.equal(threeStage.useCyberPhysical, false);
 assert.equal(threeStage.cyberEffective, false);
+assert.equal(threeStage.intelligentEffective, false);
 
 const html = readFileSync(path.join(root, 'web/index.html'), 'utf8');
 assert.match(html, /class="sub-label sub-checkbox rel-cyber-toggle"[^>]*>[\s\S]*?id="relCyberEnabled"/);
 assert.doesNotMatch(html, /class="[^"]*rel-cyber-control[^"]*"[^>]*>[\s\S]{0,300}?id="relCyberEnabled"/);
+assert.match(html, /data-rel-dimension="physical"/);
+assert.match(html, /data-rel-dimension="information"/);
+assert.match(html, /data-rel-dimension="intelligent"/);
+assert.match(html, /id="relIntelligentEnabled"/);
+assert.match(html, /id="relDetectionSuccess"/);
+assert.match(html, /id="relProtectionSuccess"/);
+assert.match(html, /id="relPhysicalGfm"/);
+assert.match(html, /id="relPhysicalBlackStart"/);
 
 console.log('reliability control-state contract passed');

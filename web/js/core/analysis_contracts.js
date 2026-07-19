@@ -57,17 +57,27 @@
   }
 
   function reliabilityControlState({ physicalModel = 'auto', method = 'nsq',
-                                     cyberEnabled = false } = {}) {
+                                     cyberEnabled = false,
+                                     informationEnabled = cyberEnabled,
+                                     intelligentEnabled = false } = {}) {
     const useThreeStage = physicalModel === 'restoration_milp';
     const useCyberPhysical = method === 'fmea' && !useThreeStage;
     return {
       useThreeStage,
       useSequential: method === 'seq' && !useThreeStage,
       useCyberPhysical,
-      cyberEffective: useCyberPhysical && cyberEnabled,
+      cyberEffective: useCyberPhysical && informationEnabled,
       cyberToggleEnabled: true,
       cyberParametersVisible: useCyberPhysical,
       cyberParametersEnabled: useCyberPhysical,
+      physicalFmeaParametersEnabled: useCyberPhysical,
+      informationToggleEnabled: true,
+      informationParametersVisible: useCyberPhysical,
+      informationInputsEnabled: useCyberPhysical && informationEnabled,
+      intelligentToggleEnabled: true,
+      intelligentParametersVisible: useCyberPhysical,
+      intelligentInputsEnabled: useCyberPhysical && intelligentEnabled,
+      intelligentEffective: useCyberPhysical && intelligentEnabled,
     };
   }
 

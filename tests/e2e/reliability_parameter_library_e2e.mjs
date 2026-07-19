@@ -156,6 +156,66 @@ async function main() {
       throw new Error('headless reliability result did not map to its topology branch');
     }
 
+    const dimensionProbabilities = {
+      detection_success_probability: 0.8,
+      isolation_success_probability: 0.9,
+      restoration_decision_valid_probability: 0.95,
+      restoration_execution_success_probability: 0.96,
+      protection_success_probability: 0.99,
+    };
+    const expectedIntelligent = Object.values(dimensionProbabilities)
+      .reduce((product, value) => product * value, 1);
+    const expectedEffective = 0.9 * expectedIntelligent;
+    const threeDimension = await post(base, '/api/session/run_reliability', {
+      method: 'fmea',
+      data_policy: 'case_data_only',
+      load: { hours_per_year: 8760 },
+      execution: { parallel: false, parallel_threads: 0 },
+      restoration: { max_switch_actions: 1, max_physical_evaluations: 40 },
+      dimensions: {
+        physical: {
+          load_scale_factor: 1.0,
+          switching_time_hr: 0.5,
+          enable_switch_reconfiguration: true,
+          enable_repair_reconfiguration: true,
+          enable_microgrid_islanding: true,
+          enable_storage_dispatch: true,
+          enable_grid_forming_vsc_support: true,
+          enable_black_start_storage: false,
+        },
+        information: {
+          enabled: true,
+          service_availability: 0.9,
+          automatic_switching_time_hr: 0.05,
+          manual_switching_time_hr: 1.0,
+          freeze_der_on_service_loss: true,
+        },
+        intelligent: {
+          enabled: true,
+          independent_factorization: true,
+          ...dimensionProbabilities,
+        },
+      },
+    });
+    if (Math.abs(Number(threeDimension.cyber_physical?.intelligent_function_success_probability) -
+        expectedIntelligent) > 1e-12 ||
+        Math.abs(Number(threeDimension.cyber_physical?.effective_automation_probability) -
+        expectedEffective) > 1e-12) {
+      throw new Error('three-dimensional reliability probabilities were not consumed');
+    }
+    if (!threeDimension.dimension_audit?.physical?.applied ||
+        threeDimension.dimension_audit?.physical?.enable_black_start_storage !== false ||
+        !threeDimension.dimension_audit?.information?.applied ||
+        !threeDimension.dimension_audit?.intelligent?.applied ||
+        !threeDimension.validity?.intelligent_function_probabilities_modelled ||
+        threeDimension.validity?.joint_class_probability_modelled ||
+        threeDimension.validity?.protection_frt_reliability_coupled) {
+      throw new Error(`three-dimensional reliability audit is invalid: ${JSON.stringify({
+        audit: threeDimension.dimension_audit,
+        validity: threeDimension.validity,
+      })}`);
+    }
+
     const nsq = await post(base, '/api/session/run_reliability', {
       method: 'nsq',
       data_policy: 'case_data_only',
@@ -204,6 +264,9 @@ async function main() {
       reconfiguration_zero_loss_valid: reconfiguration.zero_load_loss_valid,
       fuse_139_operated: false,
       headless_mapping: `${mappedFault.source.bucket}:${mappedFault.item.index}`,
+      intelligent_function_success_probability: expectedIntelligent,
+      effective_automation_probability: expectedEffective,
+      three_dimension_audit: true,
       original_xml_unchanged: true,
     }, null, 2));
   } finally {

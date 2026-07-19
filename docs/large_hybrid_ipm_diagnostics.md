@@ -218,3 +218,22 @@ limited-memory Hessian + MUMPS 组合上，把 case300 平稳性收紧到 $10^{-
 不会单调改善结果，800 次末反而偏离约第 500--720 次附近的较好迭代。对
 case2000 AC/DC，100 次内虽然原始残差持续下降，但对偶平稳性远未合格；生产
 路径继续推荐原生 parity IPM + UMFPACK，Ipopt 仅作为有界交叉诊断后端。
+
+---
+
+## 更新（2026-07-19）：MUMPS 后端、增广 KKT 与 (θ,φ) filter
+
+本文 §1–§2 描述的调用链仍然成立，但以下默认值已更新（均可用环境变量回退到旧行为）：
+
+1. **线性代数后端**：MIPSolvers 提供 MUMPS（对称不定 LDLᵀ，含惯性信息）时为默认后端，顺序为 MUMPS → UMFPACK → KLU → Eigen SparseLU；`HACDCPF_OPF_LINEAR_SOLVER=mumps|umfpack|klu|eigen|dense`。
+2. **Newton 系统形式**：默认改为**增广 KKT**（保留 −ZM⁻¹ 对角块，不再凝聚成 W = Lxx + JhᵀΣJh；`HACDCPF_OPF_KKT_FORM=condensed` 可切回）。动机：凝聚形式把 σ=μ/z 的动态范围（~1e10）平方进条件数，导致 PEGASE/rte 大算例上所有后端得到同一条"残差小但方向错"的失败轨迹；增广形式 + Wächter–Biegler δ_W 惯性校正（negevals 必须等于 meq+niq）从理论上消除了该病态。
+3. **全局化**：残差 filter 升级为 Wächter–Biegler (θ,φ) filter（含支配历史、切换条件与 Armijo、二阶校正 SOC、θ_max 上限）+ 有界 restoration（filter 全拒时用 (1,1):=ρI 的可行化步）。原三轴判据保留为附加接受路径。
+4. **暖启动稀疏化**：`dc_warm_start` 的稠密 (nb−1)² B′ 装配 + 稠密 LU 已改为稀疏装配 + SparseLU（case13659 仅此一项 48.3 s → 5.5 s）。
+
+数值推导与实测瓶颈层级见 MIPSolvers `docs/numerical_methods.md` §9–§10。
+
+## 更新（2026-07-19，其二）：AC 潮流暖启动选项
+
+`ACOPFOptions::ac_pf_warm_start=true`（默认 false）会先从算例当前运行点求解普通 AC 潮流（Newton–Raphson），把 AC 可行的 (vm, va) 通过既有 warm-start 映射注入 parity IPM —— IPM 第 0 次迭代即 θ ≈ 0，始终停留在可行域盆地内。
+
+实测：case13659pegase 以 189 次迭代、约 41 s 收敛于参考最优 obj=386107（maxviol 2.2e-6），此前所有路径（含 Ipopt 同机 ~55 min 未返回）均失败。注意选项是**选择性启用**而非默认：在良态算例上精确可行起点反而更慢（case1354：88→330 迭代），个别 rte 算例落入较差盆地（6468）或不收敛（6495）；建议在默认起点失败的大型/受压电网上启用。理论分析见 MIPSolvers `docs/numerical_methods.md` §11。

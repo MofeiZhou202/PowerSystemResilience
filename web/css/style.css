@@ -3162,6 +3162,16 @@ tr.topo-clickable:focus-visible {
 .io-toolbar-group:nth-child(3) {
   flex: 1 1 360px;
 }
+/* Model IO: format-family cards (supersede the positional defaults above) */
+.io-toolbar-group.io-group-builtin { flex: 1 1 700px; }
+.io-toolbar-group.io-group-json { flex: 1 1 400px; }
+.io-toolbar-group.io-group-cim { flex: 1 1 420px; }
+.io-toolbar-group.io-group-dss { flex: 1 1 360px; }
+.io-toolbar-group.io-group-out-json { flex: 1 1 400px; }
+.io-toolbar-group.io-group-out-grid { flex: 1 1 360px; }
+.io-toolbar-group.io-group-out-cim { flex: 1 1 300px; }
+.io-toolbar-group.io-group-compat { flex: 1 1 320px; }
+.io-toolbar-group.io-group-handbook { flex: 1 1 640px; }
 .io-toolbar-group-title {
   align-self: stretch;
   display: inline-flex;
@@ -3200,6 +3210,18 @@ tr.topo-clickable:focus-visible {
 .transient-param-group-actions {
   flex: 0 1 430px;
 }
+.pf-param-group,
+.opf-param-group { flex: 1 1 380px; }
+.pf-param-group-actions,
+.opf-param-group-actions { flex: 0 1 300px; }
+.cflow-param-group { flex: 1 1 300px; }
+.sc-param-group { flex: 1 1 340px; }
+.hpf-param-group { flex: 1 1 320px; }
+.topo-param-group { flex: 1 1 360px; }
+.hosting-param-group { flex: 1 1 300px; }
+.res-param-group { flex: 1 1 340px; }
+.scen-param-group { flex: 1 1 320px; }
+.weak-param-group { flex: 1 1 460px; }
 .transient-advanced-panel {
   margin-top: 4px;
   padding-top: 8px;
@@ -3212,8 +3234,26 @@ tr.topo-clickable:focus-visible {
 .transient-event-row {
   margin-top: 2px;
 }
-.transient-event-group {
+.transient-event-block {
+  flex: 1 1 300px;
+  max-width: 100%;
+  align-content: flex-start;
+}
+.transient-event-block-define {
+  flex: 2 1 460px;
+}
+.transient-event-block-value {
+  flex: 1 1 300px;
+}
+.transient-event-block-extra {
+  flex: 1 1 360px;
+}
+.transient-event-block-schedule {
   flex: 1 1 100%;
+  align-items: flex-start;
+}
+.transient-event-block-schedule .control-param-title {
+  align-self: center;
 }
 .transient-event-schedule {
   display: flex;
@@ -3350,6 +3390,43 @@ tr.topo-clickable:focus-visible {
 .control-param-group .toolbar-btn,
 .rel-param-group .toolbar-btn {
   align-self: center;
+}
+.rel-dimension {
+  position: relative;
+  border-left-width: 3px;
+}
+.rel-dimension-physical {
+  flex: 1 1 360px;
+  border-left-color: #61afef;
+}
+.rel-dimension-information {
+  flex: 1 1 520px;
+  border-left-color: #56b6c2;
+}
+.rel-dimension-intelligent {
+  flex: 1 1 620px;
+  border-left-color: #e5c07b;
+}
+.rel-dimension-information .rel-param-title { color: #56b6c2; }
+.rel-dimension-intelligent .rel-param-title { color: #e5c07b; }
+.reliability-dimension-audit {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.reliability-dimension-audit section {
+  min-width: 0;
+}
+.reliability-dimension-audit h5 {
+  margin: 0 0 5px;
+  color: var(--accent2);
+  font-size: 12px;
+}
+.reliability-dimension-audit table {
+  width: 100%;
+}
+@media (max-width: 900px) {
+  .reliability-dimension-audit { grid-template-columns: 1fr; }
 }
 .rpo-input-audit-group {
   flex: 1 0 100%;

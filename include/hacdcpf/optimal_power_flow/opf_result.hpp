@@ -105,6 +105,17 @@ struct ACOPFResult {
   std::vector<double> ipm_inequality_dual_state;
   std::vector<double> ipm_slack_state;
 
+  /// Optional Davidenko homotopy tangent dw/dt at the returned point
+  /// (primal, slack, equality-dual, inequality-dual), populated when
+  /// ACOPFOptions::compute_homotopy_tangent is set; ACOPFOptions::homotopy_t
+  /// supplies the cost scale t of the solved problem.  Objective-continuation
+  /// drivers extrapolate the next path point as w + Δt·w′ with positivity
+  /// repair on the barrier pairs.
+  std::vector<double> ipm_tangent_primal;
+  std::vector<double> ipm_tangent_slack;
+  std::vector<double> ipm_tangent_equality_dual;
+  std::vector<double> ipm_tangent_inequality_dual;
+
   struct ComponentRef {
     int original_index{0};
     int source_type{0};

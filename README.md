@@ -72,7 +72,7 @@ ctest --preset windows-vcpkg-release
 | ETAP Excel IO `HACDCPF_ENABLE_ETAP` | `ON` | 需要 OpenXLSX：依次尝试系统包、本仓库/兄弟规划仓库的 vendored 副本，最后回退到 GitHub 下载；全部失败则 configure 报错，可显式 `-DHACDCPF_ENABLE_ETAP=OFF` 关闭。 |
 | OpenDSS bridge `HACDCPF_ENABLE_OPENDSS` | `OFF` | 需显式开启并提供 DSS C-API。 |
 | OpenDSS compare `HACDCPF_ENABLE_OPENDSS_COMPARE` | `OFF` | 依赖 OpenDSS bridge。 |
-| SuiteSparse `HACDCPF_USE_SUITESPARSE` | `ON` | 找到 UMFPACK/KLU 时作为 OPF 稀疏 KKT 后端；未找到自动回退 Eigen SparseLU。 |
+| SuiteSparse `HACDCPF_USE_SUITESPARSE` | `ON` | 找到 UMFPACK/KLU 时作为 OPF 稀疏 KKT 后端；未找到自动回退 Eigen SparseLU。MIPSolvers 提供 MUMPS（LDLᵀ）时其为默认后端（可用 `HACDCPF_OPF_LINEAR_SOLVER=mumps/umfpack/klu/eigen` 指定）；Parity IPM 默认采用增广 Newton 形式（`HACDCPF_OPF_KKT_FORM=condensed` 可切回）。 |
 | IPOPT `HACDCPF_ENABLE_IPOPT` | macOS 默认 `ON`，其他平台默认 `OFF` | 当前嵌入式 IPOPT 路径按平台受限。 |
 
 ### 3) 测试覆盖信号（如何判断“不是纸面功能”）
@@ -100,6 +100,7 @@ ctest --preset windows-vcpkg-release
 - 主动配电网：PV、风电等可再生电源，静态发电机、柔性负荷、可控负荷、移动储能、微电网和虚拟电厂。
 - 故障恢复和运行优化：N-1 故障枚举、三阶段故障恢复、网络重构、弹性恢复、多时段生产模拟、OPF 和碳流追踪。
 - 标准算例和工程导入：MATPOWER、JPC JSON、CIM/CGMES 3.0 与配电 CIM XML、GridLAB-D GLM、PowerSimulationsDynamics.jl snapshot、Excel(ETAP)/OpenDSS 可选接口，以及项目内部 rich component schema。
+- 内置案例目录：能力导向的两级内置案例体系——旗舰 13 个（GUI「模型IO → 内置/算例」工具栏下拉）+ 扩展 8 个（「加载算例」模态框"更多算例"组，`GET /api/cases` 全量 21 个结构化目录均含 `featured` 标记）；每个案例的规模、数据亮点与推荐演示路径见 [docs/case_catalog.md](docs/case_catalog.md)，19 个能力域 × 案例 × 断言的覆盖矩阵由 `tools/validate_case_capabilities.py` 一键验证（输出 `output/capability_coverage.md`）。
 
 工程上，本项目不直接把所有复杂设备塞进一个求解器模型，而是采用分层流程：
 
@@ -404,6 +405,8 @@ GUI 第一阶段统一契约包括：`hysim_task_status_v1`（任务状态、耗
 第四阶段针对中大型系统优化交互性能：普通规模仍使用 SVG 单线图编辑，并将连续鼠标移动合并到浏览器动画帧、对视口外元件执行可逆裁剪；超过规模阈值时不再显示空白“无画布”摘要，而由 WebGL2 点/线缓冲绘制 LOD0 域、LOD1 区域和 LOD2 母线全网总览，同时保持 SVG glyph 数为零。WebGL、局部 k 跳 SVG、虚拟拓扑表和结果导航统一使用 `{domain,index}` 母线引用。年度生产模拟按 7/30/90 天窗口浏览；选择全年时采用保留首尾及负荷极值的降采样，最多绘制 2000 点，同时保留完整原始序列供导出和后续分析使用。规模化 GUI E2E 对 WebGL 非空像素、选择同步、局部 SVG 和这些性能边界提供回归契约。
 
 `/api/v1` 为大模型客户端提供后端分块：`sessions/{id}/topology` 支持 LOD、空间视口和分页，`sessions/{id}/subgraph` 按稳定母线引用提取有界邻域，`jobs/{id}/frames/{step}` 按时间/域/稳定索引/空间返回结果窗口，`jobs/{id}/violations` 返回最严重电压与负载率越限。静态 PF/OPF 使用第 0 帧，后续生产模拟沿同一帧协议扩展多时步。
+
+Python v1 SDK 对上述接口提供 `TopologyChunk`、`SubgraphView`、`ResultFrameChunk` 和 `ViolationChunk` 类型校验，支持自动分页、`BusRef` 稳定引用、指数退避作业等待与请求哈希审计。AI 工具层只暴露有明确行数上限的拓扑、子图、帧、越限和作业摘要，避免把完整大模型意外装入上下文。
 
 第五阶段补齐工程界面的可访问性：工作流、模块和页签采用 roving-tabindex 键盘导航，支持方向键、Home/End，提供主工作区跳转、清晰焦点环、对话框语义、控制台播报、减少动画和高对比度偏好。`hysim_accessibility_audit_v1` 会检查关键地标、导航和控件名称。
 

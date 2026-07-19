@@ -10,6 +10,7 @@ from typing import IO, Any
 
 from .client import HySimClient
 from .errors import HySimError
+from .v1 import HySimV1Client
 
 
 class LocalHySimServer:
@@ -24,6 +25,7 @@ class LocalHySimServer:
         host: str = "127.0.0.1",
         port: int | None = None,
         startup_timeout: float = 20.0,
+        api_job_workers: int = 2,
         log: IO[str] | int | None = subprocess.DEVNULL,
     ) -> None:
         self.executable = Path(executable)
@@ -32,6 +34,13 @@ class LocalHySimServer:
         self.host = host
         self.port = port or _free_port(host)
         self.startup_timeout = startup_timeout
+        if (
+            isinstance(api_job_workers, bool)
+            or not isinstance(api_job_workers, int)
+            or not 1 <= api_job_workers <= 32
+        ):
+            raise ValueError("api_job_workers must be an integer in [1, 32]")
+        self.api_job_workers = api_job_workers
         self.log = log
         self.process: subprocess.Popen[str] | None = None
 
@@ -50,6 +59,8 @@ class LocalHySimServer:
             str(self.port),
             "--data-dir",
             str(self.data_dir),
+            "--api-job-workers",
+            str(self.api_job_workers),
         ]
         if self.matpower_dir is not None:
             command.extend(["--matpower-dir", str(self.matpower_dir)])
@@ -86,6 +97,9 @@ class LocalHySimServer:
 
     def client(self, **kwargs: Any) -> HySimClient:
         return HySimClient(self.base_url, **kwargs)
+
+    def v1_client(self, **kwargs: Any) -> HySimV1Client:
+        return HySimV1Client(self.base_url, **kwargs)
 
     def __enter__(self) -> "LocalHySimServer":
         return self.start()

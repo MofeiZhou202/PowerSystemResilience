@@ -262,6 +262,10 @@ HybridPowerSystem make_psd_genrou_three_bus_subset_case() {
   slack.dynamic_model.standard = "PSS/E";
   slack.dynamic_model.model_name = "GENCLS";
   slack.dynamic_model.source_id = "PowerSimulationsDynamics:test_case15_genrou";
+  // xdpp=1e-5 makes the 101 support machine a de-facto infinite bus; pinning
+  // it (rather than letting it swing under the multi-machine rule) keeps the
+  // benchmark well-conditioned.
+  slack.dynamic_model.parameters["pin_slack"] = 1.0;
 
   Generator genrou;
   genrou.index = 2;
@@ -3759,6 +3763,10 @@ HybridPowerSystem make_controlled_machine_case(bool governor, bool avr, bool pss
 
   Generator gs; gs.index = 1; gs.bus = 1; gs.is_slack = true; gs.vg_pu = 1.02;
   gs.pg_mw = 40.0; gs.xdpp_pu = 0.20; gs.qmax_mvar = 300; gs.qmin_mvar = -300;
+  // These sections test DAE-solver machinery and controller wiring, not slack
+  // physics; keep the slack pinned (the multi-machine default would let it
+  // swing).  The fixture also relies on a slack absorbing ~20 MW.
+  gs.dynamic_model.parameters["pin_slack"] = 1.0;
   Generator g2; g2.index = 2; g2.bus = 2; g2.is_slack = false; g2.vg_pu = 1.0;
   g2.pg_mw = 50.0; g2.qg_mvar = 10.0; g2.xdpp_pu = 0.20; g2.inertia_h = 3.0;
   g2.pmax_mw = 200.0; g2.pmin_mw = 0.0; g2.qmax_mvar = 300; g2.qmin_mvar = -300;
@@ -6465,6 +6473,9 @@ HybridPowerSystem make_small_signal_case(const std::string& model, bool avr, boo
   sys.ac.branches = {br};
   Generator gs; gs.index = 1; gs.bus = 1; gs.is_slack = true; gs.vg_pu = 1.02; gs.pg_mw = 40;
   gs.xdpp_pu = 0.2; gs.qmax_mvar = 300; gs.qmin_mvar = -300;
+  // Small-signal / time-domain modal checks are calibrated for a pinned slack
+  // (the multi-machine default would let it swing); pin explicitly.
+  gs.dynamic_model.parameters["pin_slack"] = 1.0;
   Generator g2; g2.index = 2; g2.bus = 2; g2.vg_pu = 1.0; g2.pg_mw = 50; g2.qg_mvar = 10;
   g2.xdpp_pu = 0.2; g2.inertia_h = 3.0; g2.pmax_mw = 200; g2.qmax_mvar = 300; g2.qmin_mvar = -300;
   g2.dynamic_model.model_name = model;

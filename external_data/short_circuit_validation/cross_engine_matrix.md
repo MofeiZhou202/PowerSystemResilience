@@ -9,7 +9,7 @@ GridLAB-D: available
 | Quantity | Mean relative error | Maximum relative error | Worst case |
 |---|---:|---:|---|
 | ikss_ka | 0.000007% | 0.000018% | ibr_mixed_gfm_gfl |
-| ip_ka | 0.000006% | 0.000017% | transformer_vk_16 |
+| ip_ka | 0.035993% | 1.315782% | gfm_remote_bus |
 | GridLAB-D Ikss (35 balanced cases) | 0.000001% | 0.000002% | gfm_x_30 |
 
 ## Category Coverage
@@ -19,8 +19,8 @@ GridLAB-D: available
 | distribution_feeder | 3 | 0.000000% | 0.000000% | 3 | 0.000000% |
 | fault_type | 1 | 0.000000% | 0.000000% | 0 | n/a |
 | ibr_grid_following | 8 | 0.000015% | 0.000009% | 0 | n/a |
-| ibr_grid_forming | 7 | 0.000000% | 0.000000% | 7 | 0.000002% |
-| ibr_mixed | 1 | 0.000018% | 0.000010% | 0 | n/a |
+| ibr_grid_forming | 7 | 0.000000% | 1.315782% | 7 | 0.000002% |
+| ibr_mixed | 1 | 0.000018% | 0.062441% | 0 | n/a |
 | line_sweep | 4 | 0.000000% | 0.000000% | 4 | 0.000001% |
 | source_sweep | 4 | 0.000000% | 0.000000% | 4 | 0.000002% |
 | topology | 3 | 0.000000% | 0.000000% | 3 | 0.000000% |
@@ -74,14 +74,14 @@ GridLAB-D: available
 | gfl_rating_50 | ibr_grid_following | three_phase | 17.715483 | 1.732051 | 17.715480 | 1.732048 | 0.0000% | unsupported_gfl_current_limit | n/a | 41.376629 | 41.376625 | 0.0000% |
 | gfl_remote_bus | ibr_grid_following | three_phase | 13.501430 | 0.470905 | 13.501428 | 0.470903 | 0.0000% | unsupported_gfl_current_limit | n/a | 31.455524 | 31.455521 | 0.0000% |
 | gfl_dual_local | ibr_grid_following | three_phase | 16.806156 | 0.822724 | 16.806154 | 0.822722 | 0.0000% | unsupported_gfl_current_limit | n/a | 40.090647 | 40.090643 | 0.0000% |
-| gfm_rating_10 | ibr_grid_forming | three_phase | 17.902002 | 1.920238 | 17.902002 | 0.000000 | 0.0000% | 17.902002 | 0.0000% | 43.856873 | 43.856873 | 0.0000% |
-| gfm_rating_25 | ibr_grid_forming | three_phase | 20.780435 | 4.800596 | 20.780435 | 0.000000 | 0.0000% | 20.780436 | 0.0000% | 51.257876 | 51.257876 | 0.0000% |
-| gfm_rating_50 | ibr_grid_forming | three_phase | 25.578787 | 9.601192 | 25.578787 | 0.000000 | 0.0000% | 25.578787 | 0.0000% | 63.603721 | 63.603721 | 0.0000% |
-| gfm_x_10 | ibr_grid_forming | three_phase | 23.164194 | 7.181062 | 23.164194 | 0.000000 | 0.0000% | 23.164194 | 0.0000% | 56.655427 | 56.655427 | 0.0000% |
-| gfm_x_20 | ibr_grid_forming | three_phase | 19.581947 | 3.603937 | 19.581947 | 0.000000 | 0.0000% | 19.581948 | 0.0000% | 48.361344 | 48.361344 | 0.0000% |
-| gfm_x_30 | ibr_grid_forming | three_phase | 18.381470 | 2.404291 | 18.381470 | 0.000000 | 0.0000% | 18.381471 | 0.0000% | 45.335954 | 45.335954 | 0.0000% |
-| gfm_remote_bus | ibr_grid_forming | three_phase | 15.083228 | 3.021247 | 15.083228 | 0.000000 | 0.0000% | 15.083228 | 0.0000% | 35.816109 | 35.816109 | 0.0000% |
-| ibr_mixed_gfm_gfl | ibr_mixed | three_phase | 21.473256 | 5.493416 | 21.473252 | 0.692816 | 0.0000% | unsupported_gfl_current_limit | n/a | 52.237672 | 52.237667 | 0.0000% |
+| gfm_rating_10 | ibr_grid_forming | three_phase | 17.902002 | 1.920238 | 17.902002 | 0.000000 | 0.0000% | 17.902002 | 0.0000% | 43.871916 | 43.856873 | 0.0343% |
+| gfm_rating_25 | ibr_grid_forming | three_phase | 20.780435 | 4.800596 | 20.780435 | 0.000000 | 0.0000% | 20.780436 | 0.0000% | 51.290489 | 51.257876 | 0.0636% |
+| gfm_rating_50 | ibr_grid_forming | three_phase | 25.578787 | 9.601192 | 25.578787 | 0.000000 | 0.0000% | 25.578787 | 0.0000% | 63.657122 | 63.603721 | 0.0840% |
+| gfm_x_10 | ibr_grid_forming | three_phase | 23.164194 | 7.181062 | 23.164194 | 0.000000 | 0.0000% | 23.164194 | 0.0000% | 56.658026 | 56.655427 | 0.0046% |
+| gfm_x_20 | ibr_grid_forming | three_phase | 19.581947 | 3.603937 | 19.581947 | 0.000000 | 0.0000% | 19.581948 | 0.0000% | 48.411671 | 48.361344 | 0.1041% |
+| gfm_x_30 | ibr_grid_forming | three_phase | 18.381470 | 2.404291 | 18.381470 | 0.000000 | 0.0000% | 18.381471 | 0.0000% | 45.395174 | 45.335954 | 0.1306% |
+| gfm_remote_bus | ibr_grid_forming | three_phase | 15.083228 | 3.021247 | 15.083228 | 0.000000 | 0.0000% | 15.083228 | 0.0000% | 36.287371 | 35.816109 | 1.3158% |
+| ibr_mixed_gfm_gfl | ibr_mixed | three_phase | 21.473256 | 5.493416 | 21.473252 | 0.692816 | 0.0000% | unsupported_gfl_current_limit | n/a | 52.270285 | 52.237667 | 0.0624% |
 
 ## GridLAB-D Scope
 

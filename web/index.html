@@ -134,8 +134,8 @@
 <div id="subToolbar" class="sub-toolbar hidden">
   <!-- Unified model input / output / compatibility -->
   <div class="sub-section model-io-sub-section" data-sub="modelIO" hidden>
-    <div class="io-toolbar-group">
-      <div class="io-toolbar-group-title">输入</div>
+    <div class="io-toolbar-group io-group-builtin">
+      <div class="io-toolbar-group-title">内置/算例</div>
       <label class="sub-label">内置算例
         <select id="ioCaseSelect" title="选择并加载内置算例">
           <option value="">-- 选择算例 --</option>
@@ -148,35 +148,50 @@
         </select>
       </label>
       <button id="btnIoLoadMatpower" class="toolbar-btn" title="加载选中的 MATPOWER 算例">加载MATPOWER</button>
+      <button id="btnIoNewSystem" class="toolbar-btn" title="新建空白系统">新建</button>
+    </div>
+    <div class="io-toolbar-group io-group-json">
+      <div class="io-toolbar-group-title">JSON / ETAP</div>
       <button id="btnIoImportJson" class="toolbar-btn" title="导入系统 JSON">导入JSON</button>
       <button id="btnIoImportEtapXlsx" class="toolbar-btn" title="导入 ETAP 工作簿 (.xlsx)">导入ETAP</button>
       <button id="btnIoImportEtapXml" class="toolbar-btn" title="导入 ETAP 工程 XML (.xml)">导入ETAP XML</button>
+    </div>
+    <div class="io-toolbar-group io-group-cim">
+      <div class="io-toolbar-group-title">CIM / GLM</div>
       <button id="btnIoImportCimDist" class="toolbar-btn" title="导入单个配电台区 CIM/RDF (国网/南网 .xml)">导入配电CIM</button>
       <button id="btnIoImportCimDistProject" class="toolbar-btn" title="拼接导入一个文件夹内的配电 CIM XML">导入CIM文件夹</button>
       <button id="btnIoImportGridlabd" class="toolbar-btn" title="导入 GridLAB-D GLM 文本">导入GLM</button>
+    </div>
+    <div class="io-toolbar-group io-group-dss">
+      <div class="io-toolbar-group-title">OpenDSS / PSD.jl</div>
       <button id="btnIoImportOpendss" class="toolbar-btn" title="导入 OpenDSS DSS 文本或多文件选择">导入DSS</button>
       <button id="btnIoImportOpendssProject" class="toolbar-btn" title="导入 OpenDSS 工程目录">导入DSS工程</button>
       <button id="btnIoImportPsdJulia" class="toolbar-btn" title="导入 PowerSimulationsDynamics.jl Julia 文件 (.jl)">导入PSD.jl</button>
-      <button id="btnIoNewSystem" class="toolbar-btn" title="新建空白系统">新建</button>
     </div>
-    <div class="io-toolbar-group">
-      <div class="io-toolbar-group-title">输出</div>
+    <div class="io-toolbar-group io-group-out-json">
+      <div class="io-toolbar-group-title">导出 JSON / ETAP</div>
       <button id="btnIoExportJson" class="toolbar-btn run-btn" title="导出当前系统 JSON">导出JSON</button>
-      <button id="btnIoExportMatpower" class="toolbar-btn" title="导出当前系统的 MATPOWER AC 子集 (.m)">导出MATPOWER</button>
       <button id="btnIoExportEtap" class="toolbar-btn" title="导出 ETAP 工作簿 (.xlsx)">导出ETAP</button>
       <button id="btnIoExportEtapXml" class="toolbar-btn" title="导出 ETAP 工程 XML (.xml)">导出ETAP XML</button>
-      <button id="btnIoExportCimDist" class="toolbar-btn" title="导出配电台区 CIM/RDF (.xml)">导出配电CIM</button>
+    </div>
+    <div class="io-toolbar-group io-group-out-grid">
+      <div class="io-toolbar-group-title">导出 潮流/仿真格式</div>
+      <button id="btnIoExportMatpower" class="toolbar-btn" title="导出当前系统的 MATPOWER AC 子集 (.m)">导出MATPOWER</button>
       <button id="btnIoExportGridlabd" class="toolbar-btn" title="导出 GridLAB-D GLM">导出GLM</button>
       <button id="btnIoExportOpendss" class="toolbar-btn" title="导出 OpenDSS DSS">导出DSS</button>
+    </div>
+    <div class="io-toolbar-group io-group-out-cim">
+      <div class="io-toolbar-group-title">导出 CIM / PSD.jl</div>
+      <button id="btnIoExportCimDist" class="toolbar-btn" title="导出配电台区 CIM/RDF (.xml)">导出配电CIM</button>
       <button id="btnIoExportPsd" class="toolbar-btn" title="导出 PowerSimulationsDynamics.jl / PowerSystems.jl Julia 文件 (.jl)">导出PSD.jl</button>
     </div>
-    <div class="io-toolbar-group">
+    <div class="io-toolbar-group io-group-compat">
       <div class="io-toolbar-group-title">模型兼容</div>
       <button id="btnIoModelCompatibility" class="toolbar-btn run-btn" title="检查当前系统与 JSON / Canonical / GridLAB-D / OpenDSS / PSD.jl / 标准模型的兼容性">模型兼容</button>
       <button id="btnIoSyncBackend" class="toolbar-btn" title="将当前画布同步到后端会话">同步画布</button>
       <span class="sub-hint">统一入口：输入、输出、模型标准兼容性集中在这里。</span>
     </div>
-    <div class="io-toolbar-group">
+    <div class="io-toolbar-group io-group-handbook">
       <div class="io-toolbar-group-title">手册参数</div>
       <label class="sub-label">低压架空(mm²)
         <input id="ioHandbookLvOverheadArea" type="number" value="35" min="1" step="1" style="width:58px"/>
@@ -233,54 +248,63 @@
   <!-- Power flow -->
   <div class="sub-section power-flow-sub-section" data-sub="powerFlow" hidden>
     <div class="pf-toolbar-row">
-      <label class="sub-label">潮流算法
-        <select id="pfMethod" title="潮流计算方法">
-          <option value="ac_newton">交直流统一NR</option>
-          <option value="pure_ac">交流NR</option>
-          <option value="dc">直流潮流(B-θ)</option>
-          <option value="fdpf">快速解耦</option>
-          <option value="adaptive">自适应分区</option>
-          <option value="hybrid_linearized">混合线性化</option>
-          <option value="islanded">孤岛检测</option>
-          <option value="distributed_slack">分布式平衡</option>
-          <option value="three_phase">三相不平衡交流</option>
-          <option value="three_phase_hybrid">三相不平衡交直流混合</option>
-        </select>
-      </label>
-      <label id="pfLossModelControl" class="sub-label">损耗模型
-        <select id="pfLossModel" title="VSC / DC-DC 损耗模型">
-          <option value="linear">线性</option>
-          <option value="current_based">电流相关</option>
-        </select>
-      </label>
-      <label class="sub-label">容差
-        <input id="pfTol" type="number" step="1e-10" value="1e-8" title="潮流收敛容差"/>
-      </label>
-      <label class="sub-label">最大迭代
-        <input id="pfMaxIter" type="number" min="1" step="1" value="100" title="NR / 统一潮流最大迭代"/>
-      </label>
-      <label class="sub-label">单位切换
-        <select id="pfDisplayUnit" title="功率显示单位">
-          <option value="MW">MW / MVar</option>
-          <option value="kW">kW / kVar</option>
-          <option value="W">W / Var</option>
-        </select>
-      </label>
-      <label class="sub-label">可视化
-        <select id="vizMode" title="可视化模式">
-          <option value="off">关闭</option>
-          <option value="flow">潮流方向</option>
-          <option value="heatmap">热力图</option>
-          <option value="both">方向+热力图</option>
-        </select>
-      </label>
-      <button id="btnPowerFlow" class="toolbar-btn run-btn" title="运行潮流计算">运行潮流计算</button>
-      <button id="btnExportPfResults" class="toolbar-btn" title="将潮流计算结果导出为 JSON 文件">结果导出</button>
-      <button id="btnPfAdvanced" class="toolbar-btn" type="button" aria-expanded="false" aria-controls="pfAdvancedPanel" title="展开高级潮流参数">高级潮流</button>
-      <label id="pfCoordCheckControl" class="sub-label sub-checkbox" title="混合 AC/DC 潮流必须校核 DC 岛电压形成与变换器协调可行性">
-        <input id="pfCoordCheck" type="checkbox" checked/>
-        <span>多变换器校核</span>
-      </label>
+      <div class="control-param-group pf-param-group" title="潮流算法、损耗模型与收敛判据等求解设置">
+        <span class="control-param-title">求解设置</span>
+        <label class="sub-label">潮流算法
+          <select id="pfMethod" title="潮流计算方法">
+            <option value="ac_newton">交直流统一NR</option>
+            <option value="pure_ac">交流NR</option>
+            <option value="dc">直流潮流(B-θ)</option>
+            <option value="fdpf">快速解耦</option>
+            <option value="adaptive">自适应分区</option>
+            <option value="hybrid_linearized">混合线性化</option>
+            <option value="islanded">孤岛检测</option>
+            <option value="distributed_slack">分布式平衡</option>
+            <option value="three_phase">三相不平衡交流</option>
+            <option value="three_phase_hybrid">三相不平衡交直流混合</option>
+          </select>
+        </label>
+        <label id="pfLossModelControl" class="sub-label">损耗模型
+          <select id="pfLossModel" title="VSC / DC-DC 损耗模型">
+            <option value="linear">线性</option>
+            <option value="current_based">电流相关</option>
+          </select>
+        </label>
+        <label class="sub-label">容差
+          <input id="pfTol" type="number" step="1e-10" value="1e-8" title="潮流收敛容差"/>
+        </label>
+        <label class="sub-label">最大迭代
+          <input id="pfMaxIter" type="number" min="1" step="1" value="100" title="NR / 统一潮流最大迭代"/>
+        </label>
+        <label id="pfCoordCheckControl" class="sub-label sub-checkbox" title="混合 AC/DC 潮流必须校核 DC 岛电压形成与变换器协调可行性">
+          <input id="pfCoordCheck" type="checkbox" checked/>
+          <span>多变换器校核</span>
+        </label>
+      </div>
+      <div class="control-param-group pf-param-group" title="结果功率单位与画布可视化模式">
+        <span class="control-param-title">显示</span>
+        <label class="sub-label">单位切换
+          <select id="pfDisplayUnit" title="功率显示单位">
+            <option value="MW">MW / MVar</option>
+            <option value="kW">kW / kVar</option>
+            <option value="W">W / Var</option>
+          </select>
+        </label>
+        <label class="sub-label">可视化
+          <select id="vizMode" title="可视化模式">
+            <option value="off">关闭</option>
+            <option value="flow">潮流方向</option>
+            <option value="heatmap">热力图</option>
+            <option value="both">方向+热力图</option>
+          </select>
+        </label>
+      </div>
+      <div class="control-param-group pf-param-group pf-param-group-actions" title="运行潮流、导出结果、展开高级潮流参数">
+        <span class="control-param-title">运行</span>
+        <button id="btnPowerFlow" class="toolbar-btn run-btn" title="运行潮流计算">运行潮流计算</button>
+        <button id="btnExportPfResults" class="toolbar-btn" title="将潮流计算结果导出为 JSON 文件">结果导出</button>
+        <button id="btnPfAdvanced" class="toolbar-btn" type="button" aria-expanded="false" aria-controls="pfAdvancedPanel" title="展开高级潮流参数">高级潮流</button>
+      </div>
     </div>
     <div id="pfAdvancedPanel" class="pf-advanced-panel" hidden>
       <div id="pfThreePhaseOptions" class="pf-option-group pf-three-phase-options" hidden>
@@ -382,39 +406,51 @@
   <!-- Optimal power flow -->
   <div class="sub-section opf-sub-section" data-sub="opf" hidden>
     <div class="opf-toolbar-row">
-      <label class="sub-label">求解器
-        <select id="opfSolver" title="最优潮流求解器">
-          <option value="parity">混合AC/DC · 原生IPM (Parity)</option>
-          <option value="ipopt">混合AC/DC · Ipopt</option>
-          <option value="auto">自动 (Parity→Ipopt)</option>
-          <option value="dispatch">经济调度 (交流)</option>
-          <option value="dc">直流OPF</option>
-        </select>
-      </label>
-      <label class="sub-label">网络模型
-        <select id="opfNetworkModel" title="OPF网络模型及三相可行性校验范围">
-          <option value="balanced_aggregate">平衡聚合模型</option>
-          <option value="balanced_with_three_phase_validation">平衡OPF + 三相校验</option>
-          <option value="three_phase_hybrid">三相不平衡交直流混合OPF</option>
-        </select>
-      </label>
-      <label class="sub-label sub-checkbox" title="支路热稳定限值 (rate_a)">
-        <input id="opfBranchLimits" type="checkbox" checked/><span>支路限值</span>
-      </label>
-      <label class="sub-label sub-checkbox" title="换流器容量圆约束 P²+Q²≤S²">
-        <input id="opfConvCapacity" type="checkbox" checked/><span>换流器容量</span>
-      </label>
-      <label class="sub-label sub-checkbox" title="换流器交/直流电流限值 (i_ac_max_pu / i_dc_max_pu)">
-        <input id="opfConvCurrent" type="checkbox" checked/><span>换流器电流</span>
-      </label>
-      <label class="sub-label sub-checkbox" title="AC/DC、DC/DC换流器调制比限值 m_min ≤ m ≤ m_max">
-        <input id="opfConvModulation" type="checkbox" checked/><span>换流器调制</span>
-      </label>
-      <label class="sub-label sub-checkbox" title="OPF 收敛后，在 OPF 调度点固定发电出力与电压设定，独立再求解一次潮流，校验 OPF 与潮流的建模/参数一致性">
-        <input id="opfCheckConsistency" type="checkbox"/><span>潮流一致性校验</span>
-      </label>
-      <button id="btnRunOpf" class="toolbar-btn run-btn" title="运行最优潮流">运行最优潮流</button>
-      <button id="btnOpfAdvanced" class="toolbar-btn" type="button" aria-expanded="false" aria-controls="opfAdvancedPanel" title="展开高级最优潮流参数">高级OPF</button>
+      <div class="control-param-group opf-param-group" title="最优潮流求解器与网络模型">
+        <span class="control-param-title">求解器与模型</span>
+        <label class="sub-label">求解器
+          <select id="opfSolver" title="最优潮流求解器">
+            <option value="parity">混合AC/DC · 原生IPM (Parity)</option>
+            <option value="ipopt">混合AC/DC · Ipopt</option>
+            <option value="auto">自动 (Parity→Ipopt)</option>
+            <option value="dispatch">经济调度 (交流)</option>
+            <option value="dc">直流OPF</option>
+          </select>
+        </label>
+        <label class="sub-label">网络模型
+          <select id="opfNetworkModel" title="OPF网络模型及三相可行性校验范围">
+            <option value="balanced_aggregate">平衡聚合模型</option>
+            <option value="balanced_with_three_phase_validation">平衡OPF + 三相校验</option>
+            <option value="three_phase_hybrid">三相不平衡交直流混合OPF</option>
+          </select>
+        </label>
+      </div>
+      <div class="control-param-group opf-param-group" title="支路与换流器物理约束族">
+        <span class="control-param-title">约束</span>
+        <label class="sub-label sub-checkbox" title="支路热稳定限值 (rate_a)">
+          <input id="opfBranchLimits" type="checkbox" checked/><span>支路限值</span>
+        </label>
+        <label class="sub-label sub-checkbox" title="换流器容量圆约束 P²+Q²≤S²">
+          <input id="opfConvCapacity" type="checkbox" checked/><span>换流器容量</span>
+        </label>
+        <label class="sub-label sub-checkbox" title="换流器交/直流电流限值 (i_ac_max_pu / i_dc_max_pu)">
+          <input id="opfConvCurrent" type="checkbox" checked/><span>换流器电流</span>
+        </label>
+        <label class="sub-label sub-checkbox" title="AC/DC、DC/DC换流器调制比限值 m_min ≤ m ≤ m_max">
+          <input id="opfConvModulation" type="checkbox" checked/><span>换流器调制</span>
+        </label>
+      </div>
+      <div class="control-param-group opf-param-group" title="OPF 收敛后的独立潮流一致性校验">
+        <span class="control-param-title">验证</span>
+        <label class="sub-label sub-checkbox" title="OPF 收敛后，在 OPF 调度点固定发电出力与电压设定，独立再求解一次潮流，校验 OPF 与潮流的建模/参数一致性">
+          <input id="opfCheckConsistency" type="checkbox"/><span>潮流一致性校验</span>
+        </label>
+      </div>
+      <div class="control-param-group opf-param-group opf-param-group-actions" title="运行最优潮流、展开高级最优潮流参数">
+        <span class="control-param-title">运行</span>
+        <button id="btnRunOpf" class="toolbar-btn run-btn" title="运行最优潮流">运行最优潮流</button>
+        <button id="btnOpfAdvanced" class="toolbar-btn" type="button" aria-expanded="false" aria-controls="opfAdvancedPanel" title="展开高级最优潮流参数">高级OPF</button>
+      </div>
     </div>
     <div id="opfAdvancedPanel" class="pf-advanced-panel" hidden>
       <div class="pf-option-group">
@@ -513,183 +549,220 @@
       <label class="sub-label sub-checkbox"><input id="rpoConvCurrent" type="checkbox" checked/><span>换流器电流</span></label>
       <label class="sub-label sub-checkbox"><input id="rpoConvModulation" type="checkbox" checked/><span>换流器调制</span></label>
       <span class="sub-hint">固定执行：RPO内层OPF ↔ 独立OPF ↔ 优化点PF交叉验证</span>
+    </div>
+    <div class="control-param-group" title="运行无功优化与导出结果">
+      <span class="control-param-title">运行与导出</span>
       <button id="btnRunRpo" class="toolbar-btn run-btn" type="button">运行无功优化</button>
       <button id="btnExportRpo" class="toolbar-btn" type="button">结果导出</button>
     </div>
   </div>
   <!-- Carbon flow -->
   <div class="sub-section" data-sub="carbonFlow" hidden>
-    <button id="btnImportCarbonFactors" class="toolbar-btn" title="导入发电机、静态电源和外部电网碳排放因子 JSON">碳因子导入</button>
-    <button id="btnCarbonFlow" class="toolbar-btn run-btn" title="基于最近一次潮流结果运行静态碳流分析">静态碳流分析</button>
-    <button id="btnDynamicCarbonFlow" class="toolbar-btn run-btn" title="基于最近一次时序潮流或时序OPF结果运行动态碳流分析">动态碳流分析</button>
-    <span id="carbonFlowHint" class="sub-hint">静态碳流需先运行潮流；动态碳流需先运行时序潮流/OPF。</span>
-    <input type="file" id="fileImportCarbonFactors" accept=".json,application/json" style="display:none"/>
+    <div class="control-param-group cflow-param-group" title="导入发电机、静态电源和外部电网碳排放因子">
+      <span class="control-param-title">数据</span>
+      <button id="btnImportCarbonFactors" class="toolbar-btn" title="导入发电机、静态电源和外部电网碳排放因子 JSON">碳因子导入</button>
+      <input type="file" id="fileImportCarbonFactors" accept=".json,application/json" style="display:none"/>
+    </div>
+    <div class="control-param-group cflow-param-group" title="基于最近一次潮流或时序仿真结果运行碳流分析">
+      <span class="control-param-title">运行</span>
+      <button id="btnCarbonFlow" class="toolbar-btn run-btn" title="基于最近一次潮流结果运行静态碳流分析">静态碳流分析</button>
+      <button id="btnDynamicCarbonFlow" class="toolbar-btn run-btn" title="基于最近一次时序潮流或时序OPF结果运行动态碳流分析">动态碳流分析</button>
+      <span id="carbonFlowHint" class="sub-hint">静态碳流需先运行潮流；动态碳流需先运行时序潮流/OPF。</span>
+    </div>
   </div>
   <!-- Short circuit -->
   <div class="sub-section" data-sub="shortCircuit" hidden>
-    <button id="btnFaultLocation" class="toolbar-btn" title="设置故障母线">故障点位设置</button>
-    <label class="sub-label">故障域
-      <select id="scDomainSelect">
-        <option value="AC">AC</option>
-        <option value="DC">DC</option>
-      </select>
-    </label>
-    <label class="sub-label">故障类型
-      <select id="faultTypeSelect">
-        <option value="ThreePhase">三相短路</option>
-        <option value="SinglePhaseGround">单相接地</option>
-        <option value="TwoPhase">两相短路</option>
-        <option value="TwoPhaseGround">两相接地</option>
-      </select>
-    </label>
-    <label class="sub-label">计算类型
-      <select id="scCalcTypeSelect">
-        <option value="Max">最大短路电流</option>
-        <option value="Min">最小短路电流</option>
-      </select>
-    </label>
-    <label class="sub-label">电压矫正系数
-      <input id="voltageCorrectionFactor" type="number" value="1.1" step="0.05" min="0"/>
-    </label>
-    <label class="sub-label">峰值法
-      <select id="scKappaMethodSelect">
-        <option value="B">IEC B</option>
-        <option value="A">IEC A</option>
-        <option value="C">IEC C</option>
-      </select>
-    </label>
-    <label class="sub-label">网络
-      <select id="scTopologySelect">
-        <option value="Meshed">网状</option>
-        <option value="Radial">辐射状</option>
-      </select>
-    </label>
-    <label class="sub-label">Zf(pu)
-      <input id="scFaultImpedance" type="number" value="0" step="0.001" min="0"/>
-    </label>
-    <label class="sub-label">tb(s)
-      <input id="scBreakingTime" type="number" value="0.05" step="0.01" min="0"/>
-    </label>
-    <label class="sub-label">Tk(s)
-      <input id="scIthDuration" type="number" value="1.0" step="0.1" min="0"/>
-    </label>
-    <label class="sub-label">f(Hz)
-      <input id="scBaseFrequency" type="number" value="50" step="1" min="1"/>
-    </label>
-    <label class="sub-label">x''d(pu)
-      <input id="scDefaultXdpp" type="number" value="0.2" step="0.01" min="0"/>
-    </label>
-    <label class="sub-label">DC Vsrc(pu)
-      <input id="dcScSourceVoltage" type="number" value="0" step="0.01" min="0"/>
-    </label>
-    <label class="sub-label sub-checkbox" title="DC短路计算考虑DCCB开合状态">
-      <input id="dcScConsiderBreakers" type="checkbox" checked/><span>DCCB拓扑</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="匹配DCCB控制对应DC支路">
-      <input id="dcScBreakerControlsBranch" type="checkbox" checked/><span>DCCB支路</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="未分配闭合DCCB作为独立导通边">
-      <input id="dcScAddBreakerEdges" type="checkbox" checked/><span>DCCB成边</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="计算故障期间各母线剩余电压">
-      <input id="scComputeVoltageDrops" type="checkbox" checked/><span>电压</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="计算热等效短路电流 Ith">
-      <input id="scComputeIth" type="checkbox" checked/><span>Ith</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="详细短路计算输出支路故障电流">
-      <input id="scComputeBranchFlows" type="checkbox" checked/><span>支路</span>
-    </label>
-    <button id="btnRunShortCircuit" class="toolbar-btn run-btn" title="运行短路计算">运行短路计算</button>
+    <div class="control-param-group sc-param-group" title="故障点位、故障域、故障类型与故障阻抗">
+      <span class="control-param-title">故障设置</span>
+      <button id="btnFaultLocation" class="toolbar-btn" title="设置故障母线">故障点位设置</button>
+      <label class="sub-label">故障域
+        <select id="scDomainSelect">
+          <option value="AC">AC</option>
+          <option value="DC">DC</option>
+        </select>
+      </label>
+      <label class="sub-label">故障类型
+        <select id="faultTypeSelect">
+          <option value="ThreePhase">三相短路</option>
+          <option value="SinglePhaseGround">单相接地</option>
+          <option value="TwoPhase">两相短路</option>
+          <option value="TwoPhaseGround">两相接地</option>
+        </select>
+      </label>
+      <label class="sub-label">Zf(pu)
+        <input id="scFaultImpedance" type="number" value="0" step="0.001" min="0"/>
+      </label>
+    </div>
+    <div class="control-param-group sc-param-group" title="IEC 60909 计算类型、电压矫正系数、峰值法与网络/设备参数">
+      <span class="control-param-title">IEC 参数</span>
+      <label class="sub-label">计算类型
+        <select id="scCalcTypeSelect">
+          <option value="Max">最大短路电流</option>
+          <option value="Min">最小短路电流</option>
+        </select>
+      </label>
+      <label class="sub-label">电压矫正系数
+        <input id="voltageCorrectionFactor" type="number" value="1.1" step="0.05" min="0"/>
+      </label>
+      <label class="sub-label">峰值法
+        <select id="scKappaMethodSelect">
+          <option value="B">IEC B</option>
+          <option value="A">IEC A</option>
+          <option value="C">IEC C</option>
+        </select>
+      </label>
+      <label class="sub-label">网络
+        <select id="scTopologySelect">
+          <option value="Meshed">网状</option>
+          <option value="Radial">辐射状</option>
+        </select>
+      </label>
+      <label class="sub-label">f(Hz)
+        <input id="scBaseFrequency" type="number" value="50" step="1" min="1"/>
+      </label>
+      <label class="sub-label">x''d(pu)
+        <input id="scDefaultXdpp" type="number" value="0.2" step="0.01" min="0"/>
+      </label>
+      <label class="sub-label">tb(s)
+        <input id="scBreakingTime" type="number" value="0.05" step="0.01" min="0"/>
+      </label>
+      <label class="sub-label">Tk(s)
+        <input id="scIthDuration" type="number" value="1.0" step="0.1" min="0"/>
+      </label>
+    </div>
+    <div class="control-param-group sc-param-group" title="DC 短路专属：直流源电压与 DCCB 断路器拓扑处理">
+      <span class="control-param-title">DC 专属</span>
+      <label class="sub-label">DC Vsrc(pu)
+        <input id="dcScSourceVoltage" type="number" value="0" step="0.01" min="0"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="DC短路计算考虑DCCB开合状态">
+        <input id="dcScConsiderBreakers" type="checkbox" checked/><span>DCCB拓扑</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="匹配DCCB控制对应DC支路">
+        <input id="dcScBreakerControlsBranch" type="checkbox" checked/><span>DCCB支路</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="未分配闭合DCCB作为独立导通边">
+        <input id="dcScAddBreakerEdges" type="checkbox" checked/><span>DCCB成边</span>
+      </label>
+    </div>
+    <div class="control-param-group sc-param-group" title="短路计算附加输出量">
+      <span class="control-param-title">输出选项</span>
+      <label class="sub-label sub-checkbox" title="计算故障期间各母线剩余电压">
+        <input id="scComputeVoltageDrops" type="checkbox" checked/><span>电压</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="计算热等效短路电流 Ith">
+        <input id="scComputeIth" type="checkbox" checked/><span>Ith</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="详细短路计算输出支路故障电流">
+        <input id="scComputeBranchFlows" type="checkbox" checked/><span>支路</span>
+      </label>
+    </div>
+    <div class="control-param-group sc-param-group" title="运行短路计算">
+      <span class="control-param-title">运行</span>
+      <button id="btnRunShortCircuit" class="toolbar-btn run-btn" title="运行短路计算">运行短路计算</button>
+    </div>
   </div>
   <!-- Harmonic power flow (hybrid AC/DC) -->
   <div class="sub-section" data-sub="harmonics" hidden>
-    <label class="sub-label">分析模式
-      <select id="hpfMode" title="谐波分析模式">
-        <option value="penetration">谐波潮流 (穿透)</option>
-        <option value="freqscan">频率扫描 / 谐振</option>
-        <option value="threephase">三相 (abc) 谐波</option>
-        <option value="metrics">谐波指标 (K系数/损耗)</option>
-        <option value="newton">牛顿 (非线性)</option>
-      </select>
-    </label>
-
-    <!-- Common: harmonic orders -->
-    <label class="sub-label hpf-ctl" data-modes="penetration threephase metrics newton">AC 谐波次数
-      <input id="hpfAcOrders" type="text" value="5,7,11,13,17,19,23,25"
-             title="逗号分隔的 AC 谐波次数" style="width:150px"/>
-    </label>
-    <label class="sub-label hpf-ctl" data-modes="penetration metrics">DC 纹波次数
-      <input id="hpfDcOrders" type="text" value="2,6,12,18,24"
-             title="逗号分隔的 DC 纹波次数" style="width:100px"/>
-    </label>
-    <label class="sub-label sub-checkbox hpf-ctl" data-modes="penetration threephase metrics newton"
-           title="将负荷建模为谐波阻抗 (CIGRE 并联 R // jX)">
-      <input id="hpfLoadImpedance" type="checkbox" checked/><span>负荷阻抗</span>
-    </label>
-    <label class="sub-label sub-checkbox hpf-ctl" data-modes="penetration metrics"
-           title="对在运 VSC 自动施加六脉波特征谐波频谱">
-      <input id="hpfAutoNic" type="checkbox" checked/><span>换流器自动谐波源</span>
-    </label>
-    <label class="sub-label hpf-ctl" data-modes="penetration freqscan threephase metrics newton">源 x''
-      <input id="hpfSourceXpp" type="number" value="0.2" step="0.05" min="0.01" style="width:64px"/>
-    </label>
-    <label class="sub-label hpf-ctl" data-modes="penetration freqscan threephase metrics newton">趋肤效应
-      <select id="hpfSkin" title="导体电阻频变 (趋肤效应) 模型">
-        <option value="none">无</option>
-        <option value="sqrt">R·√h</option>
-        <option value="prop">R·(1+k√h)</option>
-      </select>
-    </label>
-    <label class="sub-label hpf-ctl" data-modes="penetration threephase">畸变限值标准
-      <select id="hpfStandard" title="谐波电压畸变限值标准">
-        <option value="">不校核</option>
-        <option value="IEEE519">IEEE 519-2014</option>
-        <option value="GBT14549">GB/T 14549-1993</option>
-      </select>
-    </label>
-
-    <!-- Frequency scan controls -->
-    <label class="sub-label hpf-ctl" data-modes="freqscan">扫描范围(次)
-      <input id="hpfFsStart" type="number" value="1" step="0.5" min="0.5" style="width:50px"/>
-      <span>–</span>
-      <input id="hpfFsEnd" type="number" value="25" step="1" min="2" style="width:50px"/>
-      <span>步</span>
-      <input id="hpfFsStep" type="number" value="0.1" step="0.05" min="0.02" style="width:56px"/>
-    </label>
-    <label class="sub-label hpf-ctl" data-modes="freqscan">母线(空=全部)
-      <input id="hpfFsBuses" type="text" placeholder="如 4,7" style="width:80px"/>
-    </label>
-    <label class="sub-label sub-checkbox hpf-ctl" data-modes="freqscan"
-           title="按正/负/零序分别扫描 (需三相模型)">
-      <input id="hpfFsSequence" type="checkbox"/><span>序分量扫描</span>
-    </label>
-
-    <!-- Metrics controls -->
-    <label class="sub-label hpf-ctl" data-modes="metrics" title="IEEE 519 TDD 的最大需量电流 I_L (pu)；≤0 时用基波电流">最大需量 I_L
-      <input id="hpfIDemand" type="number" value="0" step="0.1" min="0" style="width:64px"/>
-    </label>
-
-    <!-- Newton controls -->
-    <label class="sub-label hpf-ctl" data-modes="newton">牛顿类型
-      <select id="hpfNewtonMode" title="非线性谐振资源类型">
-        <option value="holomorphic">二次电压相关 (g2)</option>
-        <option value="constant_power">恒功率谐波负荷</option>
-      </select>
-    </label>
-    <label class="sub-label hpf-ctl" data-modes="newton" title="非线性资源 (JSON 数组)。留空则退化为线性解。g2 例(默认): [{&quot;bus&quot;:4,&quot;i_src&quot;:[{&quot;order&quot;:5,&quot;re&quot;:0.05,&quot;im&quot;:0}],&quot;g2&quot;:[{&quot;order&quot;:5,&quot;re&quot;:0.1,&quot;im&quot;:0}]}]。恒功率需在该次/母线有较强谐波激励才收敛。">资源 (JSON)
-      <input id="hpfNewtonResources" type="text"
-             value='[{"bus":4,"i_src":[{"order":5,"re":0.05,"im":0.0}],"g2":[{"order":5,"re":0.1,"im":0.0}]}]'
-             placeholder="[] 退化为线性" style="width:320px"/>
-    </label>
-
-    <button id="btnRunHarmonics" class="toolbar-btn run-btn" title="运行谐波分析">运行</button>
+    <div class="control-param-group hpf-param-group" title="谐波分析模式选择">
+      <span class="control-param-title">分析模式</span>
+      <label class="sub-label">分析模式
+        <select id="hpfMode" title="谐波分析模式">
+          <option value="penetration">谐波潮流 (穿透)</option>
+          <option value="freqscan">频率扫描 / 谐振</option>
+          <option value="threephase">三相 (abc) 谐波</option>
+          <option value="metrics">谐波指标 (K系数/损耗)</option>
+          <option value="newton">牛顿 (非线性)</option>
+        </select>
+      </label>
+    </div>
+    <!-- 频谱与网络 -->
+    <div class="control-param-group hpf-param-group" title="谐波次数频谱、负荷/换流器谐波模型与网络频变参数">
+      <span class="control-param-title">频谱与网络</span>
+      <label class="sub-label hpf-ctl" data-modes="penetration threephase metrics newton">AC 谐波次数
+        <input id="hpfAcOrders" type="text" value="5,7,11,13,17,19,23,25"
+               title="逗号分隔的 AC 谐波次数" style="width:150px"/>
+      </label>
+      <label class="sub-label hpf-ctl" data-modes="penetration metrics">DC 纹波次数
+        <input id="hpfDcOrders" type="text" value="2,6,12,18,24"
+               title="逗号分隔的 DC 纹波次数" style="width:100px"/>
+      </label>
+      <label class="sub-label sub-checkbox hpf-ctl" data-modes="penetration threephase metrics newton"
+             title="将负荷建模为谐波阻抗 (CIGRE 并联 R // jX)">
+        <input id="hpfLoadImpedance" type="checkbox" checked/><span>负荷阻抗</span>
+      </label>
+      <label class="sub-label sub-checkbox hpf-ctl" data-modes="penetration metrics"
+             title="对在运 VSC 自动施加六脉波特征谐波频谱">
+        <input id="hpfAutoNic" type="checkbox" checked/><span>换流器自动谐波源</span>
+      </label>
+      <label class="sub-label hpf-ctl" data-modes="penetration freqscan threephase metrics newton">源 x''
+        <input id="hpfSourceXpp" type="number" value="0.2" step="0.05" min="0.01" style="width:64px"/>
+      </label>
+      <label class="sub-label hpf-ctl" data-modes="penetration freqscan threephase metrics newton">趋肤效应
+        <select id="hpfSkin" title="导体电阻频变 (趋肤效应) 模型">
+          <option value="none">无</option>
+          <option value="sqrt">R·√h</option>
+          <option value="prop">R·(1+k√h)</option>
+        </select>
+      </label>
+      <label class="sub-label hpf-ctl" data-modes="penetration threephase">畸变限值标准
+        <select id="hpfStandard" title="谐波电压畸变限值标准">
+          <option value="">不校核</option>
+          <option value="IEEE519">IEEE 519-2014</option>
+          <option value="GBT14549">GB/T 14549-1993</option>
+        </select>
+      </label>
+    </div>
+    <!-- 频率扫描 -->
+    <div class="control-param-group hpf-param-group hpf-ctl" data-modes="freqscan" title="频率扫描范围、目标母线与序分量选项">
+      <span class="control-param-title">频率扫描</span>
+      <label class="sub-label hpf-ctl" data-modes="freqscan">扫描范围(次)
+        <input id="hpfFsStart" type="number" value="1" step="0.5" min="0.5" style="width:50px"/>
+        <span>–</span>
+        <input id="hpfFsEnd" type="number" value="25" step="1" min="2" style="width:50px"/>
+        <span>步</span>
+        <input id="hpfFsStep" type="number" value="0.1" step="0.05" min="0.02" style="width:56px"/>
+      </label>
+      <label class="sub-label hpf-ctl" data-modes="freqscan">母线(空=全部)
+        <input id="hpfFsBuses" type="text" placeholder="如 4,7" style="width:80px"/>
+      </label>
+      <label class="sub-label sub-checkbox hpf-ctl" data-modes="freqscan"
+             title="按正/负/零序分别扫描 (需三相模型)">
+        <input id="hpfFsSequence" type="checkbox"/><span>序分量扫描</span>
+      </label>
+    </div>
+    <!-- 指标 -->
+    <div class="control-param-group hpf-param-group hpf-ctl" data-modes="metrics" title="谐波指标 (TDD / K系数 / 损耗) 参数">
+      <span class="control-param-title">指标</span>
+      <label class="sub-label hpf-ctl" data-modes="metrics" title="IEEE 519 TDD 的最大需量电流 I_L (pu)；≤0 时用基波电流">最大需量 I_L
+        <input id="hpfIDemand" type="number" value="0" step="0.1" min="0" style="width:64px"/>
+      </label>
+    </div>
+    <!-- 牛顿 -->
+    <div class="control-param-group hpf-param-group hpf-ctl" data-modes="newton" title="牛顿非线性谐波求解：非线性资源类型与资源定义 (JSON)">
+      <span class="control-param-title">牛顿</span>
+      <label class="sub-label hpf-ctl" data-modes="newton">牛顿类型
+        <select id="hpfNewtonMode" title="非线性谐振资源类型">
+          <option value="holomorphic">二次电压相关 (g2)</option>
+          <option value="constant_power">恒功率谐波负荷</option>
+        </select>
+      </label>
+      <label class="sub-label hpf-ctl" data-modes="newton" title="非线性资源 (JSON 数组)。留空则退化为线性解。g2 例(默认): [{&quot;bus&quot;:4,&quot;i_src&quot;:[{&quot;order&quot;:5,&quot;re&quot;:0.05,&quot;im&quot;:0}],&quot;g2&quot;:[{&quot;order&quot;:5,&quot;re&quot;:0.1,&quot;im&quot;:0}]}]。恒功率需在该次/母线有较强谐波激励才收敛。">资源 (JSON)
+        <input id="hpfNewtonResources" type="text"
+               value='[{"bus":4,"i_src":[{"order":5,"re":0.05,"im":0.0}],"g2":[{"order":5,"re":0.1,"im":0.0}]}]'
+               placeholder="[] 退化为线性" style="width:320px"/>
+      </label>
+    </div>
+    <div class="control-param-group hpf-param-group" title="运行谐波分析">
+      <span class="control-param-title">运行</span>
+      <button id="btnRunHarmonics" class="toolbar-btn run-btn" title="运行谐波分析">运行</button>
+    </div>
   </div>
   <!-- Transient phasor-domain dynamics -->
   <div class="sub-section transient-sub-section" data-sub="transient" hidden>
     <div class="transient-toolbar-row">
       <div class="control-param-group transient-param-group" title="暂态积分器、仿真终止时间和基础步长">
-        <span class="control-param-title">时间/积分</span>
+        <span class="control-param-title">仿真设置</span>
         <label class="sub-label">积分器
           <select id="trSolver" title="暂态积分/DAE求解器">
             <option value="heun" selected>Heun 显式二阶</option>
@@ -711,8 +784,8 @@
           <input id="trAdaptive" type="checkbox" checked/><span>自适应</span>
         </label>
       </div>
-      <div class="control-param-group transient-param-group transient-param-group-actions" title="运行暂态、检查模型兼容性、导出结果、控制动态设备轨迹输出，以及展开高级数值参数">
-        <span class="control-param-title">运行/输出</span>
+      <div class="control-param-group transient-param-group" title="控制动态设备轨迹输出、初始小信号模态分析和刚性自动选择">
+        <span class="control-param-title">输出选项</span>
         <label class="sub-label sub-checkbox" title="记录动态设备输出，用于传统机组、GFL/GFM、逆变器和 DC 链轨迹">
           <input id="trRecordDeviceOutputs" type="checkbox" checked/><span>动态设备</span>
         </label>
@@ -722,6 +795,9 @@
         <label class="sub-label sub-checkbox" title="当显式积分器对当前运行点过刚时，自动从求解器阶梯（Heun→RK4→隐式）中选取最省的稳定积分器并给出提示">
           <input id="trAutoStiff" type="checkbox"/><span>自动刚性</span>
         </label>
+      </div>
+      <div class="control-param-group transient-param-group transient-param-group-actions" title="运行暂态、检查模型兼容性、导出结果、展开高级数值参数">
+        <span class="control-param-title">动作</span>
         <button id="btnRunTransient" class="toolbar-btn run-btn" title="运行暂态仿真">运行暂态</button>
         <button id="btnTransientCompatibility" class="toolbar-btn" title="检查当前系统动态模型与 GridLAB-D / OpenDSS / 标准模型兼容性">模型兼容</button>
         <button id="btnExportTransient" class="toolbar-btn" title="导出暂态仿真结果 JSON">结果导出</button>
@@ -807,119 +883,147 @@
       </div>
       </div>
     </div>
-    <div class="transient-toolbar-row transient-event-row control-param-group transient-param-group transient-event-group">
-      <span class="control-param-title">扰动序列</span>
-      <label class="sub-label">扰动
-        <select id="trEventType" title="可选扰动事件">
-          <option value="">无</option>
-          <option value="FaultShunt">母线故障</option>
-          <option value="ClearFault">清除故障</option>
-          <option value="ACLoadScale">AC负荷阶跃</option>
-          <option value="DCLoadScale">DC负荷阶跃</option>
-          <option value="GeneratorTrip">发电机跳闸</option>
-          <option value="VSCTrip">VSC跳闸</option>
-          <option value="DCDCTrip">DC/DC跳闸</option>
-          <option value="ACBranchTrip">AC支路跳闸</option>
-          <option value="DCBranchTrip">DC支路跳闸</option>
-          <option value="ACBranchClose">AC支路合闸</option>
-          <option value="DCBranchClose">DC支路合闸</option>
-          <option value="StoragePowerStep">AC储能P阶跃</option>
-          <option value="DCStoragePowerStep">DC储能P阶跃</option>
-        </select>
-      </label>
-      <label class="sub-label">域
-        <select id="trEventDomain" title="故障/母线扰动的网络域">
-          <option value="AC" selected>AC</option>
-          <option value="DC">DC</option>
-        </select>
-      </label>
-      <label class="sub-label">t(s)
-        <input id="trEventTime" type="number" value="0.2" step="0.01" min="0" style="width:64px"/>
-      </label>
-      <label class="sub-label">对象
-        <input id="trEventTarget" type="number" value="1" step="1" min="0" style="width:58px"/>
-      </label>
-      <label class="sub-label" id="trEventValueWrap" title="随扰动类型变化：故障为并联导纳 g，负荷为倍率，储能为 MW，跳闸/合闸不需要数值">
-        <span id="trEventValueLabel">事件值</span>
-        <input id="trEventValue" type="number" value="0.5" step="0.1" style="width:72px"/>
-      </label>
-      <label class="sub-label tr-fault-param" title="母线故障等值阻抗的电阻 R(pu)；填写 R/X 时后端按 1/(R+jX) 计算故障导纳，优先于左侧 g 值">
-        故障R(pu)
-        <input id="trFaultRPu" type="number" value="" step="0.0001" min="0" placeholder="可空" style="width:76px"/>
-      </label>
-      <label class="sub-label tr-fault-param" title="母线故障等值阻抗的电抗 X(pu)；可为 0。填写 R/X 时优先于左侧 g 值">
-        故障X(pu)
-        <input id="trFaultXPu" type="number" value="" step="0.0001" placeholder="0" style="width:76px"/>
-      </label>
-      <label class="sub-label">持续(s)
-        <input id="trEventDuration" type="number" value="0.08" step="0.01" min="0" style="width:64px"/>
-      </label>
-      <label class="sub-label">参数(JSON)
-        <input id="trEventParams" type="text" value="" placeholder='{"r_pu":0.001}' style="width:160px"/>
-      </label>
-      <label class="sub-label">标签
-        <input id="trEventLabel" type="text" value="" placeholder="可选" style="width:120px"/>
-      </label>
-      <button id="btnAddTransientEvent" class="toolbar-btn" title="加入暂态扰动序列">加入</button>
-      <button id="btnClearTransientEvents" class="toolbar-btn" title="清空暂态扰动序列">清空</button>
-      <div id="trEventSchedule" class="transient-event-schedule" aria-live="polite"></div>
+    <div class="transient-event-row">
+      <div class="control-param-group transient-event-block transient-event-block-define" title="扰动类型、作用域、对象、时刻与持续时间">
+        <span class="control-param-title">事件定义</span>
+        <label class="sub-label">扰动
+          <select id="trEventType" title="可选扰动事件">
+            <option value="">无</option>
+            <option value="FaultShunt">母线故障</option>
+            <option value="ClearFault">清除故障</option>
+            <option value="ACLoadScale">AC负荷阶跃</option>
+            <option value="DCLoadScale">DC负荷阶跃</option>
+            <option value="GeneratorTrip">发电机跳闸</option>
+            <option value="VSCTrip">VSC跳闸</option>
+            <option value="DCDCTrip">DC/DC跳闸</option>
+            <option value="ACBranchTrip">AC支路跳闸</option>
+            <option value="DCBranchTrip">DC支路跳闸</option>
+            <option value="ACBranchClose">AC支路合闸</option>
+            <option value="DCBranchClose">DC支路合闸</option>
+            <option value="StoragePowerStep">AC储能P阶跃</option>
+            <option value="DCStoragePowerStep">DC储能P阶跃</option>
+          </select>
+        </label>
+        <label class="sub-label">域
+          <select id="trEventDomain" title="故障/母线扰动的网络域">
+            <option value="AC" selected>AC</option>
+            <option value="DC">DC</option>
+          </select>
+        </label>
+        <label class="sub-label">对象
+          <input id="trEventTarget" type="number" value="1" step="1" min="0" style="width:58px"/>
+        </label>
+        <label class="sub-label">t(s)
+          <input id="trEventTime" type="number" value="0.2" step="0.01" min="0" style="width:64px"/>
+        </label>
+        <label class="sub-label">持续(s)
+          <input id="trEventDuration" type="number" value="0.08" step="0.01" min="0" style="width:64px"/>
+        </label>
+      </div>
+      <div class="control-param-group transient-event-block transient-event-block-value" title="随扰动类型变化的事件数值与母线故障等值阻抗">
+        <span class="control-param-title">事件数值</span>
+        <label class="sub-label" id="trEventValueWrap" title="随扰动类型变化：故障为并联导纳 g，负荷为倍率，储能为 MW，跳闸/合闸不需要数值">
+          <span id="trEventValueLabel">事件值</span>
+          <input id="trEventValue" type="number" value="0.5" step="0.1" style="width:72px"/>
+        </label>
+        <label class="sub-label tr-fault-param" title="母线故障等值阻抗的电阻 R(pu)；填写 R/X 时后端按 1/(R+jX) 计算故障导纳，优先于左侧 g 值">
+          故障R(pu)
+          <input id="trFaultRPu" type="number" value="" step="0.0001" min="0" placeholder="可空" style="width:76px"/>
+        </label>
+        <label class="sub-label tr-fault-param" title="母线故障等值阻抗的电抗 X(pu)；可为 0。填写 R/X 时优先于左侧 g 值">
+          故障X(pu)
+          <input id="trFaultXPu" type="number" value="" step="0.0001" placeholder="0" style="width:76px"/>
+        </label>
+      </div>
+      <div class="control-param-group transient-event-block transient-event-block-extra" title="事件标签、可选 JSON 高级参数与序列维护">
+        <span class="control-param-title">附加/维护</span>
+        <label class="sub-label">标签
+          <input id="trEventLabel" type="text" value="" placeholder="可选" style="width:110px"/>
+        </label>
+        <label class="sub-label">参数(JSON)
+          <input id="trEventParams" type="text" value="" placeholder='{"r_pu":0.001}' style="width:150px"/>
+        </label>
+        <button id="btnAddTransientEvent" class="toolbar-btn" title="加入暂态扰动序列">加入</button>
+        <button id="btnClearTransientEvents" class="toolbar-btn" title="清空暂态扰动序列">清空</button>
+      </div>
+      <div class="control-param-group transient-event-block transient-event-block-schedule" title="当前扰动序列（时间顺序）">
+        <span class="control-param-title">扰动序列</span>
+        <div id="trEventSchedule" class="transient-event-schedule" aria-live="polite"></div>
+      </div>
     </div>
   </div>
   <!-- Topology reconstruction -->
   <div class="sub-section" data-sub="topology" hidden>
-    <label class="sub-label">潮流 <select id="rcEnablePF"><option value="1" selected>LinDistFlow</option><option value="0">仅连通</option></select></label>
-    <label class="sub-label">目标 <select id="rcObjective" onchange="var p={loss:[10,1],switch:[5,20],restore:[10,1]}[this.value];if(p){rcLambdaLoss.value=p[0];rcLambdaSwitch.value=p[1];}"><option value="loss" selected>最小损耗</option><option value="switch">最少开关</option><option value="restore">最大恢复</option><option value="custom">自定义</option></select></label>
-    <label class="sub-label">λloss <input id="rcLambdaLoss" type="number" min="0" value="10" style="width:55px"/></label>
-    <label class="sub-label">λsw <input id="rcLambdaSwitch" type="number" min="0" value="1" style="width:50px"/></label>
-    <label class="sub-label">λshed <input id="rcLambdaShed" type="number" min="0" value="10000" style="width:70px"/></label>
-    <label class="sub-label">λisl <input id="rcLambdaIsland" type="number" min="0" value="100000" style="width:70px"/></label>
-    <label class="sub-label sub-checkbox"><input id="rcEnableVoltage" type="checkbox" checked/><span>G4电压</span></label>
-    <label class="sub-label sub-checkbox"><input id="rcEnableThermal" type="checkbox" checked/><span>G5容量</span></label>
-    <label class="sub-label sub-checkbox"><input id="rcSplitTrees" type="checkbox" checked/><span>AC/DC分域</span></label>
-    <label class="sub-label sub-checkbox"><input id="rcDcMesh" type="checkbox"/><span>DC环网</span></label>
-    <label class="sub-label sub-checkbox"><input id="rcLossAware" type="checkbox" checked/><span>I²R损耗</span></label>
-    <label class="sub-label">开关上限 <input id="rcMaxSwOps" type="number" min="0" value="0" style="width:50px"/></label>
-    <label class="sub-label">求解器 <select id="rcSolver"><option value="auto" selected>Auto</option><option value="native">Native</option><option value="highs">HiGHS</option><option value="scip">SCIP</option></select></label>
-    <label class="sub-label">故障AC <input id="rcFaults" type="text" placeholder="5,9" style="width:60px"/></label>
-    <label class="sub-label">故障DC <input id="rcFaultsDc" type="text" placeholder="id" style="width:50px"/></label>
-    <label class="sub-label">故障VSC <input id="rcFaultsVsc" type="text" placeholder="id" style="width:50px"/></label>
-    <button id="btnRunTopology" class="toolbar-btn run-btn" title="运行拓扑重构">运行拓扑重构</button>
+    <div class="control-param-group topo-param-group" title="潮流模型、重构目标与各项目标权重（λ）">
+      <span class="control-param-title">模型与目标</span>
+      <label class="sub-label">潮流 <select id="rcEnablePF"><option value="1" selected>LinDistFlow</option><option value="0">仅连通</option></select></label>
+      <label class="sub-label">目标 <select id="rcObjective" onchange="var p={loss:[10,1],switch:[5,20],restore:[10,1]}[this.value];if(p){rcLambdaLoss.value=p[0];rcLambdaSwitch.value=p[1];}"><option value="loss" selected>最小损耗</option><option value="switch">最少开关</option><option value="restore">最大恢复</option><option value="custom">自定义</option></select></label>
+      <label class="sub-label">λloss <input id="rcLambdaLoss" type="number" min="0" value="10" style="width:55px"/></label>
+      <label class="sub-label">λsw <input id="rcLambdaSwitch" type="number" min="0" value="1" style="width:50px"/></label>
+      <label class="sub-label">λshed <input id="rcLambdaShed" type="number" min="0" value="10000" style="width:70px"/></label>
+      <label class="sub-label">λisl <input id="rcLambdaIsland" type="number" min="0" value="100000" style="width:70px"/></label>
+      <label class="sub-label">开关上限 <input id="rcMaxSwOps" type="number" min="0" value="0" style="width:50px"/></label>
+    </div>
+    <div class="control-param-group topo-param-group" title="电压、容量、AC/DC 分域等重构约束开关">
+      <span class="control-param-title">约束选项</span>
+      <label class="sub-label sub-checkbox"><input id="rcEnableVoltage" type="checkbox" checked/><span>G4电压</span></label>
+      <label class="sub-label sub-checkbox"><input id="rcEnableThermal" type="checkbox" checked/><span>G5容量</span></label>
+      <label class="sub-label sub-checkbox"><input id="rcSplitTrees" type="checkbox" checked/><span>AC/DC分域</span></label>
+      <label class="sub-label sub-checkbox"><input id="rcDcMesh" type="checkbox"/><span>DC环网</span></label>
+      <label class="sub-label sub-checkbox"><input id="rcLossAware" type="checkbox" checked/><span>I²R损耗</span></label>
+    </div>
+    <div class="control-param-group topo-param-group" title="故障输入：AC 母线、DC 支路与 VSC 换流器">
+      <span class="control-param-title">故障输入</span>
+      <label class="sub-label">故障AC <input id="rcFaults" type="text" placeholder="5,9" style="width:60px"/></label>
+      <label class="sub-label">故障DC <input id="rcFaultsDc" type="text" placeholder="id" style="width:50px"/></label>
+      <label class="sub-label">故障VSC <input id="rcFaultsVsc" type="text" placeholder="id" style="width:50px"/></label>
+    </div>
+    <div class="control-param-group topo-param-group" title="MILP 求解器选择与重构运行">
+      <span class="control-param-title">求解与运行</span>
+      <label class="sub-label">求解器 <select id="rcSolver"><option value="auto" selected>Auto</option><option value="native">Native</option><option value="highs">HiGHS</option><option value="scip">SCIP</option></select></label>
+      <button id="btnRunTopology" class="toolbar-btn run-btn" title="运行拓扑重构">运行拓扑重构</button>
+    </div>
   </div>
   <!-- Topology analysis (graph structure) -->
   <div class="sub-section" data-sub="topologyAnalysis" hidden>
-    <label class="sub-label sub-checkbox" title="在画布上按电气孤岛着色母线">
-      <input id="topoShowIslands" type="checkbox" checked/>
-      <span>孤岛着色</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="高亮桥支路（割边 / 单点故障支路）">
-      <input id="topoShowBridges" type="checkbox" checked/>
-      <span>桥支路高亮</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="标记割点母线（关节点）">
-      <input id="topoShowCutVertices" type="checkbox" checked/>
-      <span>割点标记</span>
-    </label>
-    <button id="btnRunTopologyAnalysis" class="toolbar-btn run-btn" title="运行拓扑分析">运行拓扑分析</button>
-    <button id="btnExportTopologyAnalysis" class="toolbar-btn" title="将拓扑分析结果导出为 JSON 文件">结果导出</button>
-    <span class="sub-divider"></span>
-    <label class="sub-label sub-checkbox" title="合并闭合开关/断路器两端母线（超级节点）；不影响普通线路">
-      <input id="redEnableSwitch" type="checkbox" checked/>
-      <span>开关合并</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="将零阻抗线路（如 r=0 的直流线）两端母线也合并为超级节点；默认关闭，避免无开关时母线被意外合并">
-      <input id="redEnableZeroZLines" type="checkbox"/>
-      <span>零阻抗线路合并</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="消去无注入的二度母线（串联等效）">
-      <input id="redEnableSeries" type="checkbox" checked/>
-      <span>串联化简</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="折叠仅含负荷的叶子母线（近似）">
-      <input id="redEnablePendant" type="checkbox"/>
-      <span>悬挂折叠</span>
-    </label>
-    <button id="btnRunNetworkReduction" class="toolbar-btn run-btn" title="运行网络化简并显示化简前后对比">网络化简</button>
-    <button id="btnExportNetworkReduction" class="toolbar-btn" title="将网络化简结果导出为 JSON 文件">化简导出</button>
+    <div class="control-param-group topo-param-group" title="孤岛、桥支路与割点的图结构拓扑分析">
+      <span class="control-param-title">拓扑分析</span>
+      <label class="sub-label sub-checkbox" title="在画布上按电气孤岛着色母线">
+        <input id="topoShowIslands" type="checkbox" checked/>
+        <span>孤岛着色</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="高亮桥支路（割边 / 单点故障支路）">
+        <input id="topoShowBridges" type="checkbox" checked/>
+        <span>桥支路高亮</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="标记割点母线（关节点）">
+        <input id="topoShowCutVertices" type="checkbox" checked/>
+        <span>割点标记</span>
+      </label>
+      <button id="btnRunTopologyAnalysis" class="toolbar-btn run-btn" title="运行拓扑分析">运行拓扑分析</button>
+      <button id="btnExportTopologyAnalysis" class="toolbar-btn" title="将拓扑分析结果导出为 JSON 文件">结果导出</button>
+    </div>
+    <div class="control-param-group topo-param-group" title="开关/零阻抗线路合并与串联、悬挂母线的网络化简">
+      <span class="control-param-title">网络化简</span>
+      <label class="sub-label sub-checkbox" title="合并闭合开关/断路器两端母线（超级节点）；不影响普通线路">
+        <input id="redEnableSwitch" type="checkbox" checked/>
+        <span>开关合并</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="将零阻抗线路（如 r=0 的直流线）两端母线也合并为超级节点；默认关闭，避免无开关时母线被意外合并">
+        <input id="redEnableZeroZLines" type="checkbox"/>
+        <span>零阻抗线路合并</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="消去无注入的二度母线（串联等效）">
+        <input id="redEnableSeries" type="checkbox" checked/>
+        <span>串联化简</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="折叠仅含负荷的叶子母线（近似）">
+        <input id="redEnablePendant" type="checkbox"/>
+        <span>悬挂折叠</span>
+      </label>
+      <button id="btnRunNetworkReduction" class="toolbar-btn run-btn" title="运行网络化简并显示化简前后对比">网络化简</button>
+      <button id="btnExportNetworkReduction" class="toolbar-btn" title="将网络化简结果导出为 JSON 文件">化简导出</button>
+    </div>
   </div>
   <!-- Time-series PF -->
   <div class="sub-section" data-sub="timeSeries" hidden>
@@ -933,8 +1037,11 @@
         <input id="regUseScenarioTimeSeries" type="checkbox"/>
         <span>使用场景时序</span>
       </label>
+      <input type="file" id="fileImportGeneratedRegularScenario" accept=".json" style="display:none"/>
+      <input type="file" id="fileImportIrradiance"  accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
+      <input type="file" id="fileImportPrice"       accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
+      <input type="file" id="fileImportLoadProfile" accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
     </div>
-    <input type="file" id="fileImportGeneratedRegularScenario" accept=".json" style="display:none"/>
     <div class="control-param-group ts-param-group" title="以下为「时序潮流」与「年度仿真」共用的建模设置（求解器/网络约束/优化目标/各类丰富模型）">
       <span class="control-param-title">公共建模</span>
       <label class="sub-label" title="机组组合(MILP)求解器：Auto 自动优选；Native 原生分支定界；HiGHS / SCIP 为外部 MILP 求解器">机组组合求解器
@@ -1052,7 +1159,7 @@
     <div class="control-param-group ts-param-group ts-annual-group ts-param-group-actions" title="年度生产模拟：将一年按日并行分解求解（每日能量自平衡/周期SOC）">
       <span class="control-param-title">年度并行仿真</span>
       <button id="btnToggleAnnualPanel" class="toolbar-btn" title="展开/收起年度并行生产模拟控制面板" aria-expanded="false">展开<br>年度设置 ▸</button>
-      <span id="annualSimControls" class="ts-annual-controls" hidden>
+      <div id="annualSimControls" class="ts-annual-controls" hidden>
         <label class="sub-label" title="时间分辨率：6 小时(全年1460步) 或 1 小时(全年8760步)">分辨率
           <select id="annResolution">
             <option value="6h" selected>6 小时</option>
@@ -1079,11 +1186,8 @@
         </label>
         <button id="btnRunAnnualSim" class="toolbar-btn run-btn" title="运行年度并行生产模拟（复用上方机组组合求解器/网络约束/旋转备用/优化目标设置）">运行年度<br>仿真</button>
         <button id="btnExportAnnualSim" class="toolbar-btn" title="将年度生产模拟结果导出为 JSON 文件">年度结果<br>导出</button>
-      </span>
+      </div>
     </div>
-    <input type="file" id="fileImportIrradiance"  accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
-    <input type="file" id="fileImportPrice"       accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
-    <input type="file" id="fileImportLoadProfile" accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
   </div>
   <!-- Native day-ahead electricity market -->
   <div class="sub-section market-sub-section" data-sub="market" hidden>
@@ -1137,6 +1241,8 @@
       </label>
       <button id="btnMarketImportLoadProfile" class="toolbar-btn" type="button" title="导入日前负荷预测时序 JSON">导入负荷预测</button>
       <span id="marketLoadForecastStatus" class="sub-hint">未导入时使用当前会话/默认负荷曲线</span>
+      <span class="market-boundary-notice">当前采用设备“投运/停运”状态作为全时域可用性。</span>
+      <span class="sub-hint">逐时段机组、线路检修窗口尚未接入市场 SCUC/SCED，界面不提供无效参数。</span>
     </div>
     <div class="control-param-group market-param-group" data-market-scope="boundary" title="设置新能源可用出力和弃电处理方式">
       <span class="control-param-title">新能源处理</span>
@@ -1145,11 +1251,6 @@
         <input id="marketCurtailmentPenalty" type="number" value="0" min="0" step="1"/>
       </label>
       <span id="marketRenewableForecastStatus" class="sub-hint">未导入时沿用设备额定出力及当前时序配置</span>
-    </div>
-    <div class="control-param-group market-param-group" data-market-scope="boundary" title="当前市场核心读取设备投运状态；尚未实现逐时段检修窗口约束">
-      <span class="control-param-title">检修计划</span>
-      <span class="market-boundary-notice">当前采用设备“投运/停运”状态作为全时域可用性。</span>
-      <span class="sub-hint">逐时段机组、线路检修窗口尚未接入市场 SCUC/SCED，界面不提供无效参数。</span>
     </div>
 
     <div class="control-param-group market-param-group" data-market-scope="clearing" title="日前市场机组组合、经济调度和节点边际电价设置">
@@ -1242,8 +1343,8 @@
   </div>
   <!-- Campus integrated energy simulation -->
   <div class="sub-section integrated-energy-sub-section" data-sub="integratedEnergy" hidden>
-    <div class="control-param-group ies-param-group" title="园区综合能源仿真基础设置">
-      <span class="control-param-title">仿真</span>
+    <div class="control-param-group ies-param-group" title="仿真时长、求解器与优化目标">
+      <span class="control-param-title">求解设置</span>
       <label class="sub-label">小时
         <input id="iesHours" type="number" value="24" min="1" max="8760" step="1"/>
       </label>
@@ -1263,6 +1364,9 @@
           <option value="weighted">加权</option>
         </select>
       </label>
+    </div>
+    <div class="control-param-group ies-param-group" title="并网购售电限额、画布建模与综合能源时序数据导入">
+      <span class="control-param-title">并网与数据</span>
       <label class="sub-label">购电上限(MW)
         <input id="iesImportLimit" type="number" value="16" min="0" step="0.5"/>
       </label>
@@ -1275,6 +1379,7 @@
       </label>
       <button id="btnSeedIntegratedEnergyCanvas" class="toolbar-btn" title="在当前画布添加一套可编辑的园区综合能源示例元件">示例<br>画布</button>
       <button id="btnImportIntegratedEnergyProfiles" class="toolbar-btn" title="导入园区综合能源负荷、可再生出力、电价和碳因子时序 (JSON / CSV)">时序<br>导入</button>
+      <input type="file" id="fileImportIntegratedEnergyProfiles" accept=".json,.csv,.txt" style="display:none"/>
     </div>
     <div class="control-param-group ies-param-group" title="多能需求与新能源可用容量">
       <span class="control-param-title">负荷/资源</span>
@@ -1314,8 +1419,12 @@
       <label class="sub-label">氢储能(MWh)
         <input id="iesHydrogenStorage" type="number" value="8" min="0" step="1"/>
       </label>
+      <label class="sub-label sub-checkbox" title="终端储能回到初始能量，避免跨周期透支">
+        <input id="iesCyclicStorage" type="checkbox" checked/>
+        <span>周期储能</span>
+      </label>
     </div>
-    <div class="control-param-group ies-param-group ies-param-group-actions" title="碳预算、交通与运行控制">
+    <div class="control-param-group ies-param-group" title="碳预算与交通电气化比例">
       <span class="control-param-title">碳/交通</span>
       <label class="sub-label sub-checkbox" title="启用总碳预算约束">
         <input id="iesEnableCarbonBudget" type="checkbox"/>
@@ -1333,14 +1442,12 @@
       <label class="sub-label">HV比例
         <input id="iesHvRatio" type="number" value="0.20" min="0" max="1" step="0.05"/>
       </label>
-      <label class="sub-label sub-checkbox" title="终端储能回到初始能量，避免跨周期透支">
-        <input id="iesCyclicStorage" type="checkbox" checked/>
-        <span>周期储能</span>
-      </label>
+    </div>
+    <div class="control-param-group ies-param-group ies-param-group-actions" title="运行园区综合能源仿真与结果导出">
+      <span class="control-param-title">运行</span>
       <button id="btnRunIntegratedEnergy" class="toolbar-btn run-btn" title="运行园区综合能源仿真">运行<br>综合能源</button>
       <button id="btnExportIntegratedEnergy" class="toolbar-btn" title="导出园区综合能源仿真结果">结果<br>导出</button>
     </div>
-    <input type="file" id="fileImportIntegratedEnergyProfiles" accept=".json,.csv,.txt" style="display:none"/>
   </div>
   <!-- EV power-traffic coupling -->
   <div class="sub-section ev-traffic-sub-section" data-sub="evTraffic" hidden>
@@ -1354,15 +1461,15 @@
           <option value="custom">当前电网+导入交通</option>
         </select>
       </label>
+      <span id="evptScenarioStatus" class="sub-hint">综合联合仿真验证算例</span>
       <button id="btnOpenEvTrafficDesigner" class="toolbar-btn" title="用结构化表格和路网预览创建交通场景">交通网络<br>设计</button>
       <button id="btnImportEvTrafficScenario" class="toolbar-btn" title="导入交通节点、路段、候选路径、出行需求和电价 JSON">交通场景<br>导入</button>
       <button id="btnDownloadEvTrafficTemplate" class="toolbar-btn" title="下载标准 EV 电力-交通场景 JSON 模板">标准模板<br>下载</button>
       <button id="btnExportEvTrafficScenario" class="toolbar-btn" title="导出当前计算使用的电力-交通场景 JSON">场景<br>导出</button>
-      <span id="evptScenarioStatus" class="sub-hint">综合联合仿真验证算例</span>
+      <input type="file" id="fileImportEvTrafficScenario" accept=".json,application/json" style="display:none"/>
     </div>
-    <input type="file" id="fileImportEvTrafficScenario" accept=".json,application/json" style="display:none"/>
-    <div class="control-param-group evpt-param-group" title="耦合仿真范围、交通分配和充放电经济参数">
-      <span class="control-param-title">公共建模</span>
+    <div class="control-param-group evpt-param-group" title="耦合仿真模型、时段步长与交通分配设置">
+      <span class="control-param-title">模型与时间</span>
       <label class="sub-label">模型
         <select id="evptFormulation">
           <option value="assignment">静态分配+充电</option>
@@ -1386,6 +1493,17 @@
           <option value="system_optimal_milp">系统最优MILP</option>
         </select>
       </label>
+      <label class="sub-label sub-checkbox" title="允许具备双向充放电能力的路径停车点向电网回馈能量">
+        <input id="evptAllowV2g" type="checkbox" checked/>
+        <span>V2G</span>
+      </label>
+      <label class="sub-label sub-checkbox">
+        <input id="evptRoadCapacity" type="checkbox" checked/>
+        <span>道路容量</span>
+      </label>
+    </div>
+    <div class="control-param-group evpt-param-group" title="时间价值、电能权重与缺省电价等充放电经济参数">
+      <span class="control-param-title">经济参数</span>
       <label class="sub-label">时间价值($/veh·h)
         <input id="evptValueOfTime" type="number" value="1" min="0" step="0.1"/>
       </label>
@@ -1394,14 +1512,6 @@
       </label>
       <label class="sub-label">缺省电价($/kWh)
         <input id="evptDefaultPrice" type="number" value="0.30" min="0" step="0.01"/>
-      </label>
-      <label class="sub-label sub-checkbox" title="允许具备双向充放电能力的路径停车点向电网回馈能量">
-        <input id="evptAllowV2g" type="checkbox" checked/>
-        <span>V2G</span>
-      </label>
-      <label class="sub-label sub-checkbox">
-        <input id="evptRoadCapacity" type="checkbox" checked/>
-        <span>道路容量</span>
       </label>
     </div>
     <div class="control-param-group evpt-param-group evpt-formulation-group" data-evpt-for="ctm_due ctm_joint" title="CTM离散化与DUE迭代参数">
@@ -1488,7 +1598,7 @@
     <div class="control-param-group evpt-param-group evpt-param-group-actions" title="高级物理参数、惩罚项和求解模型精度">
       <span class="control-param-title">运行</span>
       <button id="btnToggleEvTrafficAdvanced" class="toolbar-btn" title="展开/收起充电、容量与求解器高级参数" aria-expanded="false">展开<br>高级设置 ▸</button>
-      <span id="evptAdvancedControls" class="evpt-advanced-controls" hidden>
+      <div id="evptAdvancedControls" class="evpt-advanced-controls" hidden>
         <label class="sub-label">充电效率
           <input id="evptChargeEfficiency" type="number" value="0.95" min="0.01" max="1" step="0.01"/>
         </label>
@@ -1516,50 +1626,62 @@
         <label class="sub-label">NCP惩罚
           <input id="evptNcpPenalty" type="number" value="10" min="0" step="1"/>
         </label>
-      </span>
+      </div>
       <button id="btnRunEvTraffic" class="toolbar-btn run-btn" title="运行电力-交通耦合分析">运行<br>电力-交通</button>
       <button id="btnExportEvTrafficResults" class="toolbar-btn" title="导出完整参数、场景和计算结果 JSON">结果<br>导出</button>
     </div>
   </div>
   <!-- Hosting capacity -->
   <div class="sub-section" data-sub="hosting" hidden>
-    <label class="sub-label" title="默认功率因数 cosθ（变压器自身 cap_power_factor 优先）">cosθ
-      <input id="bcPowerFactor" type="number" value="0.95" step="0.01" min="0.5" max="1" style="width:64px"/>
-    </label>
-    <label class="sub-label" title="默认最大出力系数 τ_max（变压器自身 cap_dr_max_output_coeff 优先）">τ<sub>max</sub>
-      <input id="bcTauMax" type="number" value="1.0" step="0.05" min="0.1" max="1.2" style="width:64px"/>
-    </label>
-    <label class="sub-label" title="单台变压器反向负载率 β（β=0 时按 N-1 自动计算）">单台β
-      <input id="bcSingleBeta" type="number" value="0.8" step="0.05" min="0" max="1.5" style="width:64px"/>
-    </label>
-    <label class="sub-label" title="N-1 负载能力上限，用于 β_N-1=(n-1)/n×上限">N-1上限
-      <input id="bcN1Limit" type="number" value="1.0" step="0.05" min="0" max="1.5" style="width:64px"/>
-    </label>
-    <label class="sub-label sub-checkbox" title="启用工程校验：潮流/短路/电压偏差/谐波 (§12)">
-      <input id="bcEnableVerify" type="checkbox"/><span>工程校验</span>
-    </label>
-    <label class="sub-label" title="设备运行裕度系数 k_r">k<sub>r</sub>
-      <input id="bcKr" type="number" value="0.8" step="0.05" min="0" max="1" style="width:56px"/>
-    </label>
-    <label class="sub-label" title="正电压偏差限值 (%)">ΔU<sub>H</sub>%
-      <input id="bcDeltaUH" type="number" value="7" step="0.5" min="0" style="width:52px"/>
-    </label>
-    <label class="sub-label" title="负电压偏差限值 (%)">ΔU<sub>L</sub>%
-      <input id="bcDeltaUL" type="number" value="7" step="0.5" min="0" style="width:52px"/>
-    </label>
-    <label class="sub-label sub-checkbox" title="工程校验时运行谐波潮流校核">
-      <input id="bcEnableHarmonic" type="checkbox"/><span>谐波校核</span>
-    </label>
-    <label class="sub-label" title="谐波电压总畸变率限值 (%)">THD%
-      <input id="bcThdLimit" type="number" value="5" step="0.5" min="0" style="width:52px"/>
-    </label>
-    <button id="btnRunBearingCap" class="toolbar-btn run-btn" title="运行DG承载力评估">运行承载力评估</button>
-    <span class="sub-hint">全局缺省参数；构件自身 cap_* 属性优先。工程校验为可选。</span>
+    <div class="control-param-group hosting-param-group" title="DG 承载力全局缺省参数；构件自身 cap_* 属性优先">
+      <span class="control-param-title">缺省参数</span>
+      <label class="sub-label" title="默认功率因数 cosθ（变压器自身 cap_power_factor 优先）">cosθ
+        <input id="bcPowerFactor" type="number" value="0.95" step="0.01" min="0.5" max="1" style="width:64px"/>
+      </label>
+      <label class="sub-label" title="默认最大出力系数 τ_max（变压器自身 cap_dr_max_output_coeff 优先）">τ<sub>max</sub>
+        <input id="bcTauMax" type="number" value="1.0" step="0.05" min="0.1" max="1.2" style="width:64px"/>
+      </label>
+      <label class="sub-label" title="单台变压器反向负载率 β（β=0 时按 N-1 自动计算）">单台β
+        <input id="bcSingleBeta" type="number" value="0.8" step="0.05" min="0" max="1.5" style="width:64px"/>
+      </label>
+      <label class="sub-label" title="N-1 负载能力上限，用于 β_N-1=(n-1)/n×上限">N-1上限
+        <input id="bcN1Limit" type="number" value="1.0" step="0.05" min="0" max="1.5" style="width:64px"/>
+      </label>
+    </div>
+    <div class="control-param-group hosting-param-group" title="工程校验开关与设备裕度、电压偏差限值 (§12)">
+      <span class="control-param-title">工程校验</span>
+      <label class="sub-label sub-checkbox" title="启用工程校验：潮流/短路/电压偏差/谐波 (§12)">
+        <input id="bcEnableVerify" type="checkbox"/><span>工程校验</span>
+      </label>
+      <label class="sub-label" title="设备运行裕度系数 k_r">k<sub>r</sub>
+        <input id="bcKr" type="number" value="0.8" step="0.05" min="0" max="1" style="width:56px"/>
+      </label>
+      <label class="sub-label" title="正电压偏差限值 (%)">ΔU<sub>H</sub>%
+        <input id="bcDeltaUH" type="number" value="7" step="0.5" min="0" style="width:52px"/>
+      </label>
+      <label class="sub-label" title="负电压偏差限值 (%)">ΔU<sub>L</sub>%
+        <input id="bcDeltaUL" type="number" value="7" step="0.5" min="0" style="width:52px"/>
+      </label>
+    </div>
+    <div class="control-param-group hosting-param-group" title="谐波潮流校核开关与电压总畸变率限值">
+      <span class="control-param-title">谐波校核</span>
+      <label class="sub-label sub-checkbox" title="工程校验时运行谐波潮流校核">
+        <input id="bcEnableHarmonic" type="checkbox"/><span>谐波校核</span>
+      </label>
+      <label class="sub-label" title="谐波电压总畸变率限值 (%)">THD%
+        <input id="bcThdLimit" type="number" value="5" step="0.5" min="0" style="width:52px"/>
+      </label>
+    </div>
+    <div class="control-param-group hosting-param-group" title="运行 DG 承载力评估">
+      <span class="control-param-title">运行</span>
+      <button id="btnRunBearingCap" class="toolbar-btn run-btn" title="运行DG承载力评估">运行承载力评估</button>
+      <span class="sub-hint">全局缺省参数；构件自身 cap_* 属性优先。工程校验为可选。</span>
+    </div>
   </div>
   <!-- Reliability -->
   <div class="sub-section" data-sub="reliability" hidden>
-    <div class="rel-param-group" title="可靠性元件参数来源与模板覆盖策略">
-      <span class="rel-param-title">元件建模</span>
+    <div class="rel-param-group rel-dimension rel-dimension-physical" data-rel-dimension="physical" title="物理维度：可靠性元件参数来源与模板覆盖策略">
+      <span class="rel-param-title">物理 · 元件</span>
       <label class="sub-label" title="可靠性数据策略：命名模板现为可选（不再自动套用）">数据策略
         <select id="relDataPolicy">
           <option value="missing_only" selected>缺失项→默认值</option>
@@ -1575,8 +1697,8 @@
         </select>
       </label>
     </div>
-    <div class="rel-param-group" title="失效模式筛选：时基/按需、物理/cyber/control/protection">
-      <span class="rel-param-title">故障模式</span>
+    <div class="rel-param-group rel-dimension rel-dimension-physical" data-rel-dimension="physical" title="物理维度：失效模式与故障后果类型">
+      <span class="rel-param-title">物理 · 失效</span>
       <label class="sub-label sub-checkbox" title="被动/时基：元件运行中按年故障率 λ 自然发生，例如线路永久故障、设备老化损坏">
         <input id="relFmPassive" type="checkbox" checked/>
         <span>时基失效</span>
@@ -1602,8 +1724,8 @@
         <span>N-2 共因</span>
       </label>
     </div>
-    <div class="rel-param-group" title="故障后果与恢复重构模型">
-      <span class="rel-param-title">故障分析</span>
+    <div class="rel-param-group rel-dimension rel-dimension-physical" data-rel-dimension="physical" title="物理维度：电网后果、恢复重构、微网与 DER 支撑">
+      <span class="rel-param-title">物理 · 后果</span>
       <label class="sub-label" title="故障后果模型；选择三阶段恢复 MILP 时会调用三阶段可靠性评估器">后果模型
         <select id="relPhysicalModel">
           <option value="auto" selected>自动</option>
@@ -1614,6 +1736,32 @@
         </select>
       </label>
       <span id="relAnalysisHint" class="sub-hint"></span>
+      <label class="sub-label" title="所有负荷的统一倍率；1.0 表示用例原值">负荷倍率
+        <input id="relPhysicalLoadScale" type="number" value="1" min="0" max="5" step="0.05"/>
+      </label>
+      <label class="sub-label rel-physical-fmea-control" title="FMEA 未配置专用自动/人工时延时使用的默认切换隔离时间（分钟）">默认切换(min)
+        <input id="relPhysicalSwitchMinutes" type="number" value="30" min="0" max="10080" step="5"/>
+      </label>
+      <label class="sub-label sub-checkbox rel-physical-fmea-control" title="故障后搜索可执行的开关操作与修复阶段重构方案">
+        <input id="relPhysicalReconfiguration" type="checkbox" checked/>
+        <span>恢复重构</span>
+      </label>
+      <label class="sub-label sub-checkbox rel-physical-fmea-control" title="允许具备构网锚点的微电网在故障隔离后维持孤岛供电">
+        <input id="relPhysicalMicrogrid" type="checkbox" checked/>
+        <span>微网孤岛</span>
+      </label>
+      <label class="sub-label sub-checkbox rel-physical-fmea-control" title="在切换与修复阶段按功率、SOC 和能量约束使用储能">
+        <input id="relPhysicalStorage" type="checkbox" checked/>
+        <span>储能支撑</span>
+      </label>
+      <label class="sub-label sub-checkbox rel-physical-fmea-control" title="允许额定容量受限的 GFM VSC 作为孤岛电压与频率参考">
+        <input id="relPhysicalGfm" type="checkbox" checked/>
+        <span>构网支撑</span>
+      </label>
+      <label class="sub-label sub-checkbox rel-physical-fmea-control" title="允许具备黑启动能力且能量充足的储能建立孤岛电压与频率参考">
+        <input id="relPhysicalBlackStart" type="checkbox" checked/>
+        <span>黑启动储能</span>
+      </label>
       <label class="sub-label sub-checkbox" title="三阶段恢复重构：除 AC/DC 线路外，额外枚举 VSC/DC-DC 变换器、AC 开关、AC/DC 断路器、变压器以及常规电源、分布式电源、新能源、光伏、储能和微电网停运故障（仅三阶段恢复 MILP）">
         <input id="relTsFaults" type="checkbox"/>
         <span>三阶段设备/电源故障</span>
@@ -1623,8 +1771,83 @@
         <span>三阶段DC潮流</span>
       </label>
     </div>
-    <div class="rel-param-group rel-param-group-actions" title="统计评估方法、抽样规模与结果输出">
-      <span class="rel-param-title">统计指标与薄弱环节</span>
+    <div class="rel-param-group rel-dimension rel-dimension-information" data-rel-dimension="information" title="信息维度：通信服务可用性、响应时延与失联控制退化">
+      <span class="rel-param-title">信息</span>
+      <label class="sub-label sub-checkbox rel-cyber-toggle" title="启用信息服务条件化；当前为 Level-1 条件后果筛查，不构造显式通信拓扑">
+        <input id="relCyberEnabled" type="checkbox" aria-controls="relCyberAvailability relCyberAutoMinutes relCyberManualMinutes relCyberFreezeDer"/>
+        <span>启用信息维度</span>
+      </label>
+      <label class="sub-label rel-cyber-control" title="故障发生时传感、通信、控制与执行服务联合可用的条件概率">服务可用率
+        <input id="relCyberAvailability" type="number" value="0.97" min="0" max="1" step="0.01"/>
+      </label>
+      <label class="sub-label rel-cyber-control" title="信息服务可用时故障定位、隔离和远方恢复所需时间（分钟）">自动响应(min)
+        <input id="relCyberAutoMinutes" type="number" value="3" min="0" max="1440" step="1"/>
+      </label>
+      <label class="sub-label rel-cyber-control" title="信息服务不可用时人工巡检和现场操作所需时间（分钟）">人工响应(min)
+        <input id="relCyberManualMinutes" type="number" value="60" min="0" max="10080" step="5"/>
+      </label>
+      <label class="sub-label sub-checkbox rel-cyber-control" title="信息服务不可用时不计远方 DER、储能、VSC 构网和微网孤岛控制能力">
+        <input id="relCyberFreezeDer" type="checkbox" checked/>
+        <span>失联冻结 DER</span>
+      </label>
+      <span class="sub-hint">Level 1 条件后果</span>
+    </div>
+    <div class="rel-param-group rel-dimension rel-dimension-intelligent" data-rel-dimension="intelligent" title="智能维度：检测、隔离、恢复决策、动作执行和保护成功率">
+      <span class="rel-param-title">智能</span>
+      <label class="sub-label sub-checkbox rel-intelligent-toggle" title="启用智能功能成功率筛查；当前采用条件独立乘积并将失败路由到退化/人工后果类">
+        <input id="relIntelligentEnabled" type="checkbox" aria-controls="relDetectionSuccess relIsolationSuccess relRestorationDecisionSuccess relRestorationExecutionSuccess relProtectionSuccess"/>
+        <span>启用智能维度</span>
+      </label>
+      <label class="sub-label rel-intelligent-control" title="故障被及时正确检测的条件概率">检测成功
+        <input id="relDetectionSuccess" type="number" value="0.98" min="0" max="1" step="0.01"/>
+      </label>
+      <label class="sub-label rel-intelligent-control" title="故障区段被正确识别并形成有效隔离方案的条件概率">隔离成功
+        <input id="relIsolationSuccess" type="number" value="0.97" min="0" max="1" step="0.01"/>
+      </label>
+      <label class="sub-label rel-intelligent-control" title="恢复策略通过电气、保护和同步安全校核的条件概率">决策有效
+        <input id="relRestorationDecisionSuccess" type="number" value="0.98" min="0" max="1" step="0.01"/>
+      </label>
+      <label class="sub-label rel-intelligent-control" title="已验证恢复动作被完整执行的条件概率">执行成功
+        <input id="relRestorationExecutionSuccess" type="number" value="0.98" min="0" max="1" step="0.01"/>
+      </label>
+      <label class="sub-label rel-intelligent-control" title="主保护和开断链路完成预期清除的筛查概率；当前不计算继电器时限或备用区扩大">
+        <input id="relProtectionSuccess" type="number" value="0.995" min="0" max="1" step="0.001"/>
+      </label>
+      <span class="sub-hint">独立因子筛查 · 保护-FRT 未耦合</span>
+    </div>
+    <div class="rel-param-group" title="可靠性统计评估方法、抽样规模与序贯负荷模型">
+      <span class="rel-param-title">方法与抽样</span>
+      <label class="sub-label" title="可靠性统计方法；三阶段恢复 MILP 已移动到故障分析后果模型">方法
+        <select id="relMethod">
+          <option value="nsq">非序贯蒙特卡洛 (NSQ)</option>
+          <option value="seq">序贯蒙特卡洛 (SEQ)</option>
+          <option value="fmea">元件 N-1 FMEA</option>
+          <option value="failure_mode_fmea">失效模式 FMEA</option>
+          <option value="fd">频率-持续时间 (F&amp;D)</option>
+        </select>
+      </label>
+      <label class="sub-label" title="蒙特卡洛最大抽样次数 (NSQ) / 年数×10 (SEQ)">抽样次数
+        <input id="relMaxIter" type="number" value="2000" min="100" step="500"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="并行评估独立样本、年份或故障枚举项">
+        <input id="relParallel" type="checkbox" checked/>
+        <span>并行</span>
+      </label>
+      <label class="sub-label" title="可靠性分析线程数；0 表示自动使用硬件并发数">线程
+        <input id="relParallelThreads" type="number" value="0" min="0" max="256" step="1"/>
+      </label>
+      <div class="rel-seq-profile rel-seq-editor-launch" title="编辑序贯蒙特卡洛逐时负荷曲线和各 AC/DC 负荷点的空间倍率">
+        <span>SEQ负荷模型</span>
+        <button id="btnOpenSeqProfileEditor" class="toolbar-btn" type="button">编辑曲线</button>
+        <span id="relSeqProfileSummary" class="sub-hint">24 时步 · 空间倍率待同步</span>
+        <textarea id="relSeqLoadProfile" hidden>0.72,0.68,0.65,0.64,0.66,0.72,0.80,0.88,0.94,0.98,1.00,0.99,0.97,0.95,0.96,0.99,1.00,0.98,0.94,0.90,0.86,0.82,0.78,0.75</textarea>
+        <textarea id="relSeqSpatialFactors" hidden></textarea>
+      </div>
+      <button id="btnImportGeneratedReliabilityScenario" class="toolbar-btn" title="导入场景生成模块导出的可靠性场景 JSON">导入生成<br>场景</button>
+      <input type="file" id="fileImportGeneratedReliabilityScenario" accept=".json" style="display:none"/>
+    </div>
+    <div class="rel-param-group" title="结果面板优先展示的指标族与薄弱环节排序依据">
+      <span class="rel-param-title">显示偏好</span>
       <label class="sub-label" title="选择结果面板优先展示的指标族；后端仍返回所有可用指标">指标
         <select id="relMetricFocus">
           <option value="all" selected>全部</option>
@@ -1644,272 +1867,268 @@
           <option value="stage_shed">按阶段切负荷</option>
         </select>
       </label>
-      <label class="sub-label" title="可靠性统计方法；三阶段恢复 MILP 已移动到故障分析后果模型">方法
-        <select id="relMethod">
-          <option value="nsq">非序贯蒙特卡洛 (NSQ)</option>
-          <option value="seq">序贯蒙特卡洛 (SEQ)</option>
-          <option value="fmea">元件 N-1 FMEA</option>
-          <option value="failure_mode_fmea">失效模式 FMEA</option>
-          <option value="fd">频率-持续时间 (F&amp;D)</option>
-        </select>
-      </label>
-      <label class="sub-label" title="蒙特卡洛最大抽样次数 (NSQ) / 年数×10 (SEQ)">抽样次数
-        <input id="relMaxIter" type="number" value="2000" min="100" step="500"/>
-      </label>
-      <label class="sub-label sub-checkbox rel-cyber-toggle" title="启用 Level 1 网络物理可靠性：按自动化可用/不可用两类修正恢复时长和控制能力">
-        <input id="relCyberEnabled" type="checkbox" aria-controls="relCyberAvailability relCyberAutoMinutes relCyberManualMinutes relCyberFreezeDer"/>
-        <span>网络物理化 L1</span>
-      </label>
-      <label class="sub-label rel-cyber-control" title="故障发生时 FLISR、远方控制和通信链路可用的概率">自动化可用率
-        <input id="relCyberAvailability" type="number" value="0.97" min="0" max="1" step="0.01"/>
-      </label>
-      <label class="sub-label rel-cyber-control" title="自动故障定位、隔离和恢复所需时间（分钟）">自动恢复(min)
-        <input id="relCyberAutoMinutes" type="number" value="3" min="0" max="1440" step="1"/>
-      </label>
-      <label class="sub-label rel-cyber-control" title="自动化不可用时人工巡检和操作所需时间（分钟）">人工恢复(min)
-        <input id="relCyberManualMinutes" type="number" value="60" min="0" max="10080" step="5"/>
-      </label>
-      <label class="sub-label sub-checkbox rel-cyber-control" title="自动化不可用时不计远方 DER、储能、VSC 构网和微网孤岛控制能力">
-        <input id="relCyberFreezeDer" type="checkbox" checked/>
-        <span>失联冻结 DER</span>
-      </label>
-      <div class="rel-seq-profile rel-seq-editor-launch" title="编辑序贯蒙特卡洛逐时负荷曲线和各 AC/DC 负荷点的空间倍率">
-        <span>SEQ负荷模型</span>
-        <button id="btnOpenSeqProfileEditor" class="toolbar-btn" type="button">编辑曲线</button>
-        <span id="relSeqProfileSummary" class="sub-hint">24 时步 · 空间倍率待同步</span>
-        <textarea id="relSeqLoadProfile" hidden>0.72,0.68,0.65,0.64,0.66,0.72,0.80,0.88,0.94,0.98,1.00,0.99,0.97,0.95,0.96,0.99,1.00,0.98,0.94,0.90,0.86,0.82,0.78,0.75</textarea>
-        <textarea id="relSeqSpatialFactors" hidden></textarea>
+    </div>
+    <div class="rel-param-group rel-param-group-actions" title="参数库补全建议、运行可靠性分析与结果导出">
+      <span class="rel-param-title">运行与导出</span>
+      <div id="relParameterAdvice" class="rel-parameter-advice" hidden>
+        <span id="relParameterAdviceText">当前模型缺少故障率和修复时间。</span>
+        <button id="btnRelApplyParameters" class="toolbar-btn" type="button"
+                title="按当前模型参数库补全缺失字段，并重新运行可靠性分析">应用参数库后运行</button>
       </div>
-      <label class="sub-label sub-checkbox" title="并行评估独立样本、年份或故障枚举项">
-        <input id="relParallel" type="checkbox" checked/>
-        <span>并行</span>
-      </label>
-      <label class="sub-label" title="可靠性分析线程数；0 表示自动使用硬件并发数">线程
-        <input id="relParallelThreads" type="number" value="0" min="0" max="256" step="1"/>
-      </label>
-      <button id="btnImportGeneratedReliabilityScenario" class="toolbar-btn" title="导入场景生成模块导出的可靠性场景 JSON">导入生成<br>场景</button>
+      <button id="btnRunReliability" class="toolbar-btn run-btn" title="运行可靠性分析">运行可靠性分析</button>
+      <button id="btnExportReliabilityResults" class="toolbar-btn" title="将可靠性分析结果导出为 JSON">结果导出</button>
     </div>
-    <input type="file" id="fileImportGeneratedReliabilityScenario" accept=".json" style="display:none"/>
-    <div id="relParameterAdvice" class="rel-parameter-advice" hidden>
-      <span id="relParameterAdviceText">当前模型缺少故障率和修复时间。</span>
-      <button id="btnRelApplyParameters" class="toolbar-btn" type="button"
-              title="按当前模型参数库补全缺失字段，并重新运行可靠性分析">应用参数库后运行</button>
-    </div>
-    <button id="btnRunReliability" class="toolbar-btn run-btn" title="运行可靠性分析">运行可靠性分析</button>
-    <button id="btnExportReliabilityResults" class="toolbar-btn" title="将可靠性分析结果导出为 JSON">结果导出</button>
   </div>
   <!-- Scenario generation -->
   <div class="sub-section" data-sub="scenarioGeneration" hidden>
-    <label class="sub-label" title="默认模拟 SSP126/245/370/585 与 2050/2080 全部组合；输入 5 表示每个 SSP×年份组合聚 5 类，总计 5×4×2 类。">常规场景每个 SSP/年份聚类数
-      <input id="scenRegularClusters" type="number" value="8" min="1" max="100" step="1"/>
-    </label>
-    <label class="sub-label" title="按可靠性 FMEA 模块枚举 N-1：AC 发电机、AC 线路、DC 线路、VSC、AC 静态电源、AC 新能源、AC 储能、2/3 绕组变压器；候选数自动为聚类数×10。">可靠性场景聚类个数
-      <input id="scenReliabilityClusters" type="number" value="4" min="1" max="50" step="1"/>
-    </label>
-    <label class="sub-label" title="先按 1-12 月生成并分类台风样本，分类使用不含初始时刻的最大风速；每个台风等级单独聚类，候选数自动为聚类数×10。">弹性场景每个台风等级聚类数
-      <input id="scenResilienceClusters" type="number" value="5" min="1" max="50" step="1"/>
-    </label>
-    <label class="sub-label" title="hybrid 方法会保留风险尾部锚点，并与旧 k-medoids 做对比">场景约减方法
-      <select id="scenClusteringMethod">
-        <option value="hybrid_kmedoids_tail_5pct" selected>混合密度感知 k-medoids + 尾部锚点</option>
-        <option value="weighted_k_medoids">旧 weighted k-medoids</option>
-      </select>
-    </label>
-    <label class="sub-label sub-checkbox" title="启用后返回 hybrid 与旧 k-medoids 的覆盖率/距离对比">
-      <input id="scenCompareBaseline" type="checkbox" checked/>
-      <span>对比旧 k-medoids</span>
-    </label>
-    <button id="btnGenerateScenarios" class="toolbar-btn run-btn" title="按聚类数自动生成候选并聚类">生成场景</button>
-    <button id="btnExportRegularScenarioJson" class="toolbar-btn" title="导出常规代表场景为标幺值/倍率空间 JSON">导出常规<br>JSON</button>
-    <button id="btnExportReliabilityScenarioJson" class="toolbar-btn" title="导出可靠性代表场景为标幺值/倍率空间 JSON">导出可靠<br>JSON</button>
-    <button id="btnExportResilienceScenarioJson" class="toolbar-btn" title="导出弹性代表场景为标幺值/倍率空间 JSON">导出弹性<br>JSON</button>
-    <button id="btnScenarioJsonToExcel" class="toolbar-btn" title="选择已导出的常规/可靠/弹性 JSON，并转换为 Excel 工作簿">JSON转<br>Excel</button>
-    <input type="file" id="fileScenarioJsonToExcel" accept=".json" style="display:none"/>
-    <button id="btnScenarioExcelToJson" class="toolbar-btn" title="选择场景 Excel 工作簿，并转换回对应 JSON">Excel转<br>JSON</button>
-    <input type="file" id="fileScenarioExcelToJson" accept=".xlsx" style="display:none"/>
-    <button id="btnExportScenarioResults" class="toolbar-btn" title="将完整场景生成结果导出为 JSON">完整结果<br>导出</button>
-    <button id="btnExportScenarioPlots" class="toolbar-btn" title="导出当前场景生成图表 PNG">导出图表</button>
+    <div class="control-param-group scen-param-group" title="常规/可靠性/弹性场景的聚类规模与场景约减方法">
+      <span class="control-param-title">聚类与约减</span>
+      <label class="sub-label" title="默认模拟 SSP126/245/370/585 与 2050/2080 全部组合；输入 5 表示每个 SSP×年份组合聚 5 类，总计 5×4×2 类。">常规场景每个 SSP/年份聚类数
+        <input id="scenRegularClusters" type="number" value="8" min="1" max="100" step="1"/>
+      </label>
+      <label class="sub-label" title="按可靠性 FMEA 模块枚举 N-1：AC 发电机、AC 线路、DC 线路、VSC、AC 静态电源、AC 新能源、AC 储能、2/3 绕组变压器；候选数自动为聚类数×10。">可靠性场景聚类个数
+        <input id="scenReliabilityClusters" type="number" value="4" min="1" max="50" step="1"/>
+      </label>
+      <label class="sub-label" title="先按 1-12 月生成并分类台风样本，分类使用不含初始时刻的最大风速；每个台风等级单独聚类，候选数自动为聚类数×10。">弹性场景每个台风等级聚类数
+        <input id="scenResilienceClusters" type="number" value="5" min="1" max="50" step="1"/>
+      </label>
+      <label class="sub-label" title="hybrid 方法会保留风险尾部锚点，并与旧 k-medoids 做对比">场景约减方法
+        <select id="scenClusteringMethod">
+          <option value="hybrid_kmedoids_tail_5pct" selected>混合密度感知 k-medoids + 尾部锚点</option>
+          <option value="weighted_k_medoids">旧 weighted k-medoids</option>
+        </select>
+      </label>
+      <label class="sub-label sub-checkbox" title="启用后返回 hybrid 与旧 k-medoids 的覆盖率/距离对比">
+        <input id="scenCompareBaseline" type="checkbox" checked/>
+        <span>对比旧 k-medoids</span>
+      </label>
+      <button id="btnGenerateScenarios" class="toolbar-btn run-btn" title="按聚类数自动生成候选并聚类">生成场景</button>
+    </div>
+    <div class="control-param-group scen-param-group" title="导出三类代表场景 JSON、完整生成结果与图表">
+      <span class="control-param-title">场景导出</span>
+      <button id="btnExportRegularScenarioJson" class="toolbar-btn" title="导出常规代表场景为标幺值/倍率空间 JSON">导出常规<br>JSON</button>
+      <button id="btnExportReliabilityScenarioJson" class="toolbar-btn" title="导出可靠性代表场景为标幺值/倍率空间 JSON">导出可靠<br>JSON</button>
+      <button id="btnExportResilienceScenarioJson" class="toolbar-btn" title="导出弹性代表场景为标幺值/倍率空间 JSON">导出弹性<br>JSON</button>
+      <button id="btnExportScenarioResults" class="toolbar-btn" title="将完整场景生成结果导出为 JSON">完整结果<br>导出</button>
+      <button id="btnExportScenarioPlots" class="toolbar-btn" title="导出当前场景生成图表 PNG">导出图表</button>
+    </div>
+    <div class="control-param-group scen-param-group" title="场景 JSON 与 Excel 工作簿互转">
+      <span class="control-param-title">格式转换</span>
+      <button id="btnScenarioJsonToExcel" class="toolbar-btn" title="选择已导出的常规/可靠/弹性 JSON，并转换为 Excel 工作簿">JSON转<br>Excel</button>
+      <input type="file" id="fileScenarioJsonToExcel" accept=".json" style="display:none"/>
+      <button id="btnScenarioExcelToJson" class="toolbar-btn" title="选择场景 Excel 工作簿，并转换回对应 JSON">Excel转<br>JSON</button>
+      <input type="file" id="fileScenarioExcelToJson" accept=".xlsx" style="display:none"/>
+    </div>
   </div>
   <!-- Resilience -->
   <div class="sub-section" data-sub="resilience" hidden>
-    <label class="sub-label" title="按 GB/T 19201-2006 热带气旋强度等级生成台风场景" style="display:none">台风强度
-      <select id="resTyphoonIntensity">
-        <option value="TD">热带低压 TD</option>
-        <option value="TS">热带风暴 TS</option>
-        <option value="STS">强热带风暴 STS</option>
-        <option value="TY" selected>台风 TY</option>
-        <option value="STY">强台风 STY</option>
-        <option value="SuperTY">超强台风 SuperTY</option>
-      </select>
-    </label>
-    <button id="btnGenExtremeScenario" class="toolbar-btn" title="按台风强度等级从样本库抽取轨迹，自动生成 AC/DC 故障序列并填入故障输入框" style="display:none">台风场景<br>生成</button>
-    <button id="btnImportGeneratedResilienceScenario" class="toolbar-btn" title="导入场景生成模块导出的弹性场景 JSON">导入生成<br>场景</button>
-    <input type="file" id="fileImportGeneratedResilienceScenario" accept=".json" style="display:none"/>
-    <label class="sub-label sub-checkbox" title="导入弹性场景后始终优先使用其中的 48h 时序配置和故障序列" style="display:none">
-      <input id="resUseScenarioTimeSeries" type="checkbox" checked/>
-      <span>使用场景时序</span>
-    </label>
-    <label class="sub-label" title="模拟故障总数量（台风生成/场景导入时自动更新）">故障数量
-      <input id="resFaultCount" type="number" value="1" min="0" step="1"/>
-    </label>
-    <label class="sub-label" title="AC 故障支路 ID，逗号分隔">AC故障支路
-      <input id="resAcFaultLocations" type="text" placeholder="6,27,19"/>
-    </label>
-    <label class="sub-label" title="DC 故障支路 ID，逗号分隔">DC故障支路
-      <input id="resDcFaultLocations" type="text" placeholder="1,2"/>
-    </label>
-    <label class="sub-label" title="AC 故障开始时间（小时），单值或逗号列表">AC故障时间
-      <input id="resAcFaultStartHour" type="text" value="13" placeholder="13,13,14"/>
-    </label>
-    <label class="sub-label" title="DC 故障开始时间（小时），单值或逗号列表">DC故障时间
-      <input id="resDcFaultStartHour" type="text" value="0" placeholder="0,6"/>
-    </label>
-    <label class="sub-label" title="AC 修复时长（小时），单值或逗号列表">AC修复时长
-      <input id="resAcRepairDuration" type="text" value="5" placeholder="5,3,3"/>
-    </label>
-    <label class="sub-label" title="DC 修复时长（小时），单值或逗号列表">DC修复时长
-      <input id="resDcRepairDuration" type="text" value="8" placeholder="8,8"/>
-    </label>
-    <label class="sub-label" title="弹性分析总时长；如果故障修复结束晚于该值，运行时会自动延长">
-      时长(h)
-      <input id="resHorizonHours" type="number" value="48" min="1" step="1"/>
-    </label>
-    <label class="sub-label" title="灾害期间负荷倍率，1.0 表示使用当前算例/导入场景负荷">
-      负荷倍率
-      <input id="resLoadScale" type="number" value="1.0" min="0" step="0.05"/>
-    </label>
-    <label class="sub-label sub-checkbox" title="启用开关约束的故障隔离与故障后重构；默认按当前算例是否含开关/断路器自动勾选">
-      <input id="resConsiderSwitches" type="checkbox"/>
-      <span>开关隔离/重构</span>
-    </label>
-    <label class="sub-label" title="故障隔离后允许进行重构的时间窗口（小时）；会传给 post_fault_reconfig_window_hr / disaster_post_fault_reconfig_window_hr">
-      重构窗(h)
-      <input id="resPostFaultWindow" type="number" value="2.0" min="0" step="0.5"/>
-    </label>
-    <label class="sub-label sub-checkbox" title="只允许远方/可遥控开关参与隔离与重构">
-      <input id="resUseRemoteSwitchOnly" type="checkbox"/>
-      <span>仅远方开关</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="允许没有显式开关的非故障支路被操作；用于对比理想化重构能力">
-      <input id="resAllowBranchWithoutSwitch" type="checkbox"/>
-      <span>允许无开关操作</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="启用内置演示负荷/储能/优先级补全；关闭后尽量使用当前算例数据">
-      <input id="resApplyDemoData" type="checkbox" checked/>
-      <span>演示数据</span>
-    </label>
-    <label class="sub-label" title="是否考虑移动储能 MESS；关闭可显著加快弹性分析">考虑移储
-      <input id="resAllowMess" type="checkbox"/>
-    </label>
-    <label class="sub-label" title="移动储能行驶速度 (km/h)，仅在考虑移储时生效">移储速度
-      <input id="resMobileSpeed" type="number" value="40" min="0" step="5"/>
-    </label>
-    <label class="sub-label" title="MIP 求解时间上限（秒）；默认 180 秒。Native 求解器严格使用该限制，Gurobi 受后端适配器支持情况影响。">时限(s)
-      <input id="resMipTimeLimit" type="number" value="180" min="10" step="10"/>
-    </label>
-    <label class="sub-label" title="MIP 相对 gap；默认 0.03。较大 gap 可加快求解。">Gap
-      <input id="resMipGap" type="number" value="0.03" min="0" max="1" step="0.01"/>
-    </label>
-    <input id="resModelSelect" type="hidden" value="RAStyleStageMILP"/>
-    <label class="sub-label" title="MIP模型使用的求解器；启发式序贯模型会忽略该选项">求解器
-      <select id="resSolverSelect">
-        <option value="Native">Native</option>
-        <option value="HiGHS">HiGHS</option>
-        <option value="Gurobi" selected>Gurobi</option>
-      </select>
-    </label>
-    <button id="btnRunResilience" class="toolbar-btn run-btn" title="运行弹性分析">运行弹性分析</button>
-    <button id="btnExportResilienceResults" class="toolbar-btn" title="将评估结果导出为 JSON">评估结果<br>导出</button>
+    <div class="control-param-group res-param-group" title="导入场景生成模块导出的弹性场景；含遗留台风场景生成控件">
+      <span class="control-param-title">场景来源</span>
+      <button id="btnImportGeneratedResilienceScenario" class="toolbar-btn" title="导入场景生成模块导出的弹性场景 JSON">导入生成<br>场景</button>
+      <input type="file" id="fileImportGeneratedResilienceScenario" accept=".json" style="display:none"/>
+      <label class="sub-label" title="按 GB/T 19201-2006 热带气旋强度等级生成台风场景" style="display:none">台风强度
+        <select id="resTyphoonIntensity">
+          <option value="TD">热带低压 TD</option>
+          <option value="TS">热带风暴 TS</option>
+          <option value="STS">强热带风暴 STS</option>
+          <option value="TY" selected>台风 TY</option>
+          <option value="STY">强台风 STY</option>
+          <option value="SuperTY">超强台风 SuperTY</option>
+        </select>
+      </label>
+      <button id="btnGenExtremeScenario" class="toolbar-btn" title="按台风强度等级从样本库抽取轨迹，自动生成 AC/DC 故障序列并填入故障输入框" style="display:none">台风场景<br>生成</button>
+      <label class="sub-label sub-checkbox" title="导入弹性场景后始终优先使用其中的 48h 时序配置和故障序列" style="display:none">
+        <input id="resUseScenarioTimeSeries" type="checkbox" checked/>
+        <span>使用场景时序</span>
+      </label>
+    </div>
+    <div class="control-param-group res-param-group" title="AC/DC 故障支路、开始时间与修复时长">
+      <span class="control-param-title">故障事件</span>
+      <label class="sub-label" title="模拟故障总数量（台风生成/场景导入时自动更新）">故障数量
+        <input id="resFaultCount" type="number" value="1" min="0" step="1"/>
+      </label>
+      <label class="sub-label" title="AC 故障支路 ID，逗号分隔">AC故障支路
+        <input id="resAcFaultLocations" type="text" placeholder="6,27,19"/>
+      </label>
+      <label class="sub-label" title="DC 故障支路 ID，逗号分隔">DC故障支路
+        <input id="resDcFaultLocations" type="text" placeholder="1,2"/>
+      </label>
+      <label class="sub-label" title="AC 故障开始时间（小时），单值或逗号列表">AC故障时间
+        <input id="resAcFaultStartHour" type="text" value="13" placeholder="13,13,14"/>
+      </label>
+      <label class="sub-label" title="DC 故障开始时间（小时），单值或逗号列表">DC故障时间
+        <input id="resDcFaultStartHour" type="text" value="0" placeholder="0,6"/>
+      </label>
+      <label class="sub-label" title="AC 修复时长（小时），单值或逗号列表">AC修复时长
+        <input id="resAcRepairDuration" type="text" value="5" placeholder="5,3,3"/>
+      </label>
+      <label class="sub-label" title="DC 修复时长（小时），单值或逗号列表">DC修复时长
+        <input id="resDcRepairDuration" type="text" value="8" placeholder="8,8"/>
+      </label>
+    </div>
+    <div class="control-param-group res-param-group" title="弹性分析时长与灾害期负荷倍率">
+      <span class="control-param-title">时序与负荷</span>
+      <label class="sub-label" title="弹性分析总时长；如果故障修复结束晚于该值，运行时会自动延长">
+        时长(h)
+        <input id="resHorizonHours" type="number" value="48" min="1" step="1"/>
+      </label>
+      <label class="sub-label" title="灾害期间负荷倍率，1.0 表示使用当前算例/导入场景负荷">
+        负荷倍率
+        <input id="resLoadScale" type="number" value="1.0" min="0" step="0.05"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="启用内置演示负荷/储能/优先级补全；关闭后尽量使用当前算例数据">
+        <input id="resApplyDemoData" type="checkbox" checked/>
+        <span>演示数据</span>
+      </label>
+    </div>
+    <div class="control-param-group res-param-group" title="开关隔离与故障后重构设置">
+      <span class="control-param-title">隔离与重构</span>
+      <label class="sub-label sub-checkbox" title="启用开关约束的故障隔离与故障后重构；默认按当前算例是否含开关/断路器自动勾选">
+        <input id="resConsiderSwitches" type="checkbox"/>
+        <span>开关隔离/重构</span>
+      </label>
+      <label class="sub-label" title="故障隔离后允许进行重构的时间窗口（小时）；会传给 post_fault_reconfig_window_hr / disaster_post_fault_reconfig_window_hr">
+        重构窗(h)
+        <input id="resPostFaultWindow" type="number" value="2.0" min="0" step="0.5"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="只允许远方/可遥控开关参与隔离与重构">
+        <input id="resUseRemoteSwitchOnly" type="checkbox"/>
+        <span>仅远方开关</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="允许没有显式开关的非故障支路被操作；用于对比理想化重构能力">
+        <input id="resAllowBranchWithoutSwitch" type="checkbox"/>
+        <span>允许无开关操作</span>
+      </label>
+    </div>
+    <div class="control-param-group res-param-group" title="移动储能 MESS 参与与行驶速度">
+      <span class="control-param-title">移动储能</span>
+      <label class="sub-label" title="是否考虑移动储能 MESS；关闭可显著加快弹性分析">考虑移储
+        <input id="resAllowMess" type="checkbox"/>
+      </label>
+      <label class="sub-label" title="移动储能行驶速度 (km/h)，仅在考虑移储时生效">移储速度
+        <input id="resMobileSpeed" type="number" value="40" min="0" step="5"/>
+      </label>
+    </div>
+    <div class="control-param-group res-param-group" title="MIP 求解时限、相对 gap 与求解器选择">
+      <span class="control-param-title">求解设置</span>
+      <label class="sub-label" title="MIP 求解时间上限（秒）；默认 180 秒。Native 求解器严格使用该限制，Gurobi 受后端适配器支持情况影响。">时限(s)
+        <input id="resMipTimeLimit" type="number" value="180" min="10" step="10"/>
+      </label>
+      <label class="sub-label" title="MIP 相对 gap；默认 0.03。较大 gap 可加快求解。">Gap
+        <input id="resMipGap" type="number" value="0.03" min="0" max="1" step="0.01"/>
+      </label>
+      <input id="resModelSelect" type="hidden" value="RAStyleStageMILP"/>
+      <label class="sub-label" title="MIP模型使用的求解器；启发式序贯模型会忽略该选项">求解器
+        <select id="resSolverSelect">
+          <option value="Native">Native</option>
+          <option value="HiGHS">HiGHS</option>
+          <option value="Gurobi" selected>Gurobi</option>
+        </select>
+      </label>
+    </div>
+    <div class="control-param-group res-param-group" title="运行弹性分析与评估结果导出">
+      <span class="control-param-title">运行</span>
+      <button id="btnRunResilience" class="toolbar-btn run-btn" title="运行弹性分析">运行弹性分析</button>
+      <button id="btnExportResilienceResults" class="toolbar-btn" title="将评估结果导出为 JSON">评估结果<br>导出</button>
+    </div>
   </div>
   <!-- Carbon Analysis -->
   <div class="sub-section" data-sub="carbonAnalysis" hidden>
-    <label class="sub-label" title="碳排放分析基于当前潮流结果；若未运行潮流则自动求解一次交流潮流">潮流来源
-      <span class="sub-static" style="opacity:.8;">当前潮流 / 自动</span>
-    </label>
-    <button id="btnRunCarbon" class="toolbar-btn run-btn" title="基于当前系统与潮流结果进行碳排放溯源分析">运行碳排放分析</button>
-    <button id="btnExportCarbonResults" class="toolbar-btn" title="将碳排放分析结果导出为 JSON">结果导出</button>
+    <div class="control-param-group cflow-param-group" title="基于当前潮流结果的碳排放溯源分析与结果导出">
+      <span class="control-param-title">碳排放</span>
+      <label class="sub-label" title="碳排放分析基于当前潮流结果；若未运行潮流则自动求解一次交流潮流">潮流来源
+        <span class="sub-static" style="opacity:.8;">当前潮流 / 自动</span>
+      </label>
+      <button id="btnRunCarbon" class="toolbar-btn run-btn" title="基于当前系统与潮流结果进行碳排放溯源分析">运行碳排放分析</button>
+      <button id="btnExportCarbonResults" class="toolbar-btn" title="将碳排放分析结果导出为 JSON">结果导出</button>
+    </div>
   </div>
   <!-- Spatiotemporal multidimensional weak-link identification -->
   <div class="sub-section" data-sub="weakLinks" hidden>
-    <div class="weak-mode-segmented" role="radiogroup" aria-label="决策模式">
-      <label><input type="radio" name="weakDecisionMode" value="planning" checked/><span>规划</span></label>
-      <label><input type="radio" name="weakDecisionMode" value="operation"/><span>运行</span></label>
+    <div class="control-param-group weak-param-group" title="时空多维薄弱环节辨识：决策模式、证据筛选与指标阈值">
+      <span class="control-param-title">薄弱环节辨识</span>
+      <div class="weak-mode-segmented" role="radiogroup" aria-label="决策模式">
+        <label><input type="radio" name="weakDecisionMode" value="planning" checked/><span>规划</span></label>
+        <label><input type="radio" name="weakDecisionMode" value="operation"/><span>运行</span></label>
+      </div>
+      <label class="sub-label" title="当前结果只使用已完成分析；自动补齐会依次运行缺失的 OPF、碳流、可靠性和弹性分析">证据
+        <select id="weakEvidenceMode">
+          <option value="current">当前结果</option>
+          <option value="complete" selected>自动补齐</option>
+        </select>
+      </label>
+      <label class="sub-label" title="按可优化元件类别进行组内辨识和 Pareto 比较">元件组
+        <select id="weakComponentGroup">
+          <option value="all" selected>全部可优化元件</option>
+          <option value="network">网架输配</option>
+          <option value="conversion">能量变换</option>
+          <option value="supply">供电电源</option>
+          <option value="flexibility">灵活调节</option>
+          <option value="demand">用户需求</option>
+          <option value="protection">保护自动化</option>
+          <option value="node">节点支撑</option>
+        </select>
+      </label>
+      <label class="sub-label" title="进入主要排名至少需要多少类指标证据">最少维度
+        <select id="weakMinimumDimensions">
+          <option value="1" selected>1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+        </select>
+      </label>
+      <label class="sub-label" title="线路经济压力达到 1.0 时对应的负载率阈值">经济阈值(%)
+        <input id="weakEconomicThreshold" type="number" value="80" min="1" max="200" step="5"/>
+      </label>
+      <label class="sub-label" title="母线碳强度达到 1.0 时对应的碳强度阈值">碳阈值(t/MWh)
+        <input id="weakCarbonThreshold" type="number" value="0.5" min="0.001" step="0.05"/>
+      </label>
+      <label class="sub-label" title="元件年 EENS 贡献达到 1.0 时对应的阈值">可靠阈值(MWh/yr)
+        <input id="weakReliabilityThreshold" type="number" value="1" min="0.0001" step="0.5"/>
+      </label>
+      <label class="sub-label" title="母线灾害期加权未供电量达到 1.0 时对应的阈值">韧性阈值(MWh)
+        <input id="weakResilienceThreshold" type="number" value="1" min="0.0001" step="0.5"/>
+      </label>
+      <label class="sub-label" title="空间对象和关键时段的最大显示数量">Top K
+        <input id="weakTopK" type="number" value="30" min="3" max="100" step="1"/>
+      </label>
+      <button id="btnRunWeakLinks" class="toolbar-btn run-btn" title="运行时空多维薄弱环节辨识">运行辨识</button>
+      <button id="btnExportWeakLinks" class="toolbar-btn" title="导出多维薄弱环节结果 JSON">结果导出</button>
     </div>
-    <label class="sub-label" title="当前结果只使用已完成分析；自动补齐会依次运行缺失的 OPF、碳流、可靠性和弹性分析">证据
-      <select id="weakEvidenceMode">
-        <option value="current">当前结果</option>
-        <option value="complete" selected>自动补齐</option>
-      </select>
-    </label>
-    <label class="sub-label" title="按可优化元件类别进行组内辨识和 Pareto 比较">元件组
-      <select id="weakComponentGroup">
-        <option value="all" selected>全部可优化元件</option>
-        <option value="network">网架输配</option>
-        <option value="conversion">能量变换</option>
-        <option value="supply">供电电源</option>
-        <option value="flexibility">灵活调节</option>
-        <option value="demand">用户需求</option>
-        <option value="protection">保护自动化</option>
-        <option value="node">节点支撑</option>
-      </select>
-    </label>
-    <label class="sub-label" title="进入主要排名至少需要多少类指标证据">最少维度
-      <select id="weakMinimumDimensions">
-        <option value="1" selected>1</option>
-        <option value="2">2</option>
-        <option value="3">3</option>
-        <option value="4">4</option>
-      </select>
-    </label>
-    <label class="sub-label" title="线路经济压力达到 1.0 时对应的负载率阈值">经济阈值(%)
-      <input id="weakEconomicThreshold" type="number" value="80" min="1" max="200" step="5"/>
-    </label>
-    <label class="sub-label" title="母线碳强度达到 1.0 时对应的碳强度阈值">碳阈值(t/MWh)
-      <input id="weakCarbonThreshold" type="number" value="0.5" min="0.001" step="0.05"/>
-    </label>
-    <label class="sub-label" title="元件年 EENS 贡献达到 1.0 时对应的阈值">可靠阈值(MWh/yr)
-      <input id="weakReliabilityThreshold" type="number" value="1" min="0.0001" step="0.5"/>
-    </label>
-    <label class="sub-label" title="母线灾害期加权未供电量达到 1.0 时对应的阈值">韧性阈值(MWh)
-      <input id="weakResilienceThreshold" type="number" value="1" min="0.0001" step="0.5"/>
-    </label>
-    <label class="sub-label" title="空间对象和关键时段的最大显示数量">Top K
-      <input id="weakTopK" type="number" value="30" min="3" max="100" step="1"/>
-    </label>
-    <button id="btnRunWeakLinks" class="toolbar-btn run-btn" title="运行时空多维薄弱环节辨识">运行辨识</button>
-    <button id="btnExportWeakLinks" class="toolbar-btn" title="导出多维薄弱环节结果 JSON">结果导出</button>
-    <span class="weak-counterfactual-divider" aria-hidden="true"></span>
-    <label class="sub-label sub-checkbox" title="候选线路采用增容并联等值，容量提高且阻抗按比例降低"><input id="cfEnableLine" type="checkbox" checked/><span>线路增容</span></label>
-    <label class="sub-label sub-checkbox" title="在高负荷母线增加构网型储能"><input id="cfEnableStorage" type="checkbox" checked/><span>储能</span></label>
-    <label class="sub-label sub-checkbox" title="增加常开联络线路及远方开关"><input id="cfEnableTie" type="checkbox" checked/><span>联络开关</span></label>
-    <label class="sub-label sub-checkbox" title="将馈线开关升级为远方自动开关"><input id="cfEnableAutomation" type="checkbox" checked/><span>自动化</span></label>
-    <label class="sub-label sub-checkbox" title="在高负荷母线增加可控低碳分布式电源"><input id="cfEnableDer" type="checkbox" checked/><span>DER</span></label>
-    <label class="sub-label" title="参与反事实重算的最大候选措施数">措施数
-      <input id="cfMaxMeasures" type="number" value="5" min="1" max="20" step="1"/>
-    </label>
-    <label class="sub-label" title="执行真实组合重算的最大措施对数量">组合数
-      <input id="cfMaxPairs" type="number" value="10" min="0" max="100" step="1"/>
-    </label>
-    <label class="sub-label" title="线路增容倍率，同时按该倍率降低并联等值阻抗">增容倍率
-      <input id="cfLineFactor" type="number" value="1.5" min="1.01" max="10" step="0.1"/>
-    </label>
-    <label class="sub-label" title="储能额定功率；0 表示按系统负荷自动选取">储能(MW)
-      <input id="cfStoragePower" type="number" value="0" min="0" step="0.1"/>
-    </label>
-    <label class="sub-label" title="储能时长，用于确定额定能量">储能时长(h)
-      <input id="cfStorageDuration" type="number" value="4" min="1" max="24" step="1"/>
-    </label>
-    <label class="sub-label" title="DER 额定容量；0 表示按系统负荷自动选取">DER(MW)
-      <input id="cfDerPower" type="number" value="0" min="0" step="0.1"/>
-    </label>
-    <label class="sub-label" title="DER 在反事实运行点的出力系数">DER系数
-      <input id="cfDerCapacityFactor" type="number" value="0.4" min="0" max="1" step="0.05"/>
-    </label>
-    <label class="sub-label" title="联络线路容量；0 表示按系统负荷自动选取">联络容量(MW)
-      <input id="cfTieCapacity" type="number" value="0" min="0" step="0.1"/>
-    </label>
-    <button id="btnRunCounterfactual" class="toolbar-btn run-btn" title="对基线、单措施和措施对分别克隆系统并重算四类指标">反事实重算</button>
-    <button id="btnExportCounterfactual" class="toolbar-btn" title="导出措施收益和两两协同矩阵 JSON">收益导出</button>
+    <div class="control-param-group weak-param-group" title="候选反事实措施、组合重算与收益导出">
+      <span class="control-param-title">反事实措施</span>
+      <label class="sub-label sub-checkbox" title="候选线路采用增容并联等值，容量提高且阻抗按比例降低"><input id="cfEnableLine" type="checkbox" checked/><span>线路增容</span></label>
+      <label class="sub-label sub-checkbox" title="在高负荷母线增加构网型储能"><input id="cfEnableStorage" type="checkbox" checked/><span>储能</span></label>
+      <label class="sub-label sub-checkbox" title="增加常开联络线路及远方开关"><input id="cfEnableTie" type="checkbox" checked/><span>联络开关</span></label>
+      <label class="sub-label sub-checkbox" title="将馈线开关升级为远方自动开关"><input id="cfEnableAutomation" type="checkbox" checked/><span>自动化</span></label>
+      <label class="sub-label sub-checkbox" title="在高负荷母线增加可控低碳分布式电源"><input id="cfEnableDer" type="checkbox" checked/><span>DER</span></label>
+      <label class="sub-label" title="参与反事实重算的最大候选措施数">措施数
+        <input id="cfMaxMeasures" type="number" value="5" min="1" max="20" step="1"/>
+      </label>
+      <label class="sub-label" title="执行真实组合重算的最大措施对数量">组合数
+        <input id="cfMaxPairs" type="number" value="10" min="0" max="100" step="1"/>
+      </label>
+      <label class="sub-label" title="线路增容倍率，同时按该倍率降低并联等值阻抗">增容倍率
+        <input id="cfLineFactor" type="number" value="1.5" min="1.01" max="10" step="0.1"/>
+      </label>
+      <label class="sub-label" title="储能额定功率；0 表示按系统负荷自动选取">储能(MW)
+        <input id="cfStoragePower" type="number" value="0" min="0" step="0.1"/>
+      </label>
+      <label class="sub-label" title="储能时长，用于确定额定能量">储能时长(h)
+        <input id="cfStorageDuration" type="number" value="4" min="1" max="24" step="1"/>
+      </label>
+      <label class="sub-label" title="DER 额定容量；0 表示按系统负荷自动选取">DER(MW)
+        <input id="cfDerPower" type="number" value="0" min="0" step="0.1"/>
+      </label>
+      <label class="sub-label" title="DER 在反事实运行点的出力系数">DER系数
+        <input id="cfDerCapacityFactor" type="number" value="0.4" min="0" max="1" step="0.05"/>
+      </label>
+      <label class="sub-label" title="联络线路容量；0 表示按系统负荷自动选取">联络容量(MW)
+        <input id="cfTieCapacity" type="number" value="0" min="0" step="0.1"/>
+      </label>
+      <button id="btnRunCounterfactual" class="toolbar-btn run-btn" title="对基线、单措施和措施对分别克隆系统并重算四类指标">反事实重算</button>
+      <button id="btnExportCounterfactual" class="toolbar-btn" title="导出措施收益和两两协同矩阵 JSON">收益导出</button>
+    </div>
   </div>
 </div>
 

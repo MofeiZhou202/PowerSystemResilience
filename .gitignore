@@ -61,7 +61,20 @@ tools/harmonics_validation/cpp_result.json
 
 tools/psd_validation/
 
-latex/
+docs/latex/
+docs/latex/*
+!docs/latex/Progressive Class-Conditioned Frequency–Duration/
+!docs/latex/Progressive Class-Conditioned Frequency–Duration/README.md
+!docs/latex/Progressive Class-Conditioned Frequency–Duration/main.tex
+!docs/latex/Progressive Class-Conditioned Frequency–Duration/references.bib
+!docs/latex/Progressive Class-Conditioned Frequency–Duration/main.pdf
+!docs/latex/Progressive Class-Conditioned Frequency–Duration/generate_layer2_benchmarks.py
+!docs/latex/Progressive Class-Conditioned Frequency–Duration/generate_external_validation_table.py
+!docs/latex/Progressive Class-Conditioned Frequency–Duration/external_cross_validation_results.tex
+!docs/latex/Progressive Class-Conditioned Frequency–Duration/layer2_benchmark_results.tex
+!docs/latex/Progressive Class-Conditioned Frequency–Duration/layer2_closed_loop_figure.tex
+!docs/latex/Progressive Class-Conditioned Frequency–Duration/layer2_closed_loop_trace.dat
+!docs/latex/Progressive Class-Conditioned Frequency–Duration/layer2_trace_macros.tex
 
 tmp/
 

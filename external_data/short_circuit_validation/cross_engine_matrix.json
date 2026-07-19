@@ -10,8 +10,8 @@
     },
     "gridlabd": {
       "available": true,
-      "executable": "/tmp/gridlabd-5.3.0/GridLAB-D-5.3.0-MacOS/bin/gridlabd",
-      "version": "GridLAB-D 5.3.0-20095 (1b2e463:HEAD) 64-bit MACOSX RELEASE\nWARNING  [INIT] : unable to set thread policy: No such process",
+      "executable": "/private/tmp/gridlabd-5.3.0/GridLAB-D-5.3.0-MacOS/bin/gridlabd",
+      "version": "GridLAB-D 5.3.0-20095 (1b2e463:HEAD) 64-bit MACOSX RELEASE",
       "short_circuit_api": "balanced_shunt_emulation",
       "status": "available",
       "detail": "GridLAB-D has no FaultStudy/Zsc result interface. Three-phase RMS current is extrapolated from an explicit 100 ohm balanced shunt-probe powerflow. GFM voltage-source equivalents are included; GFL current limits, unbalanced faults, and IEC peak remain unsupported by steady NR."
@@ -26,12 +26,12 @@
         "worst_case": "ibr_mixed_gfm_gfl"
       },
       "ip_ka": {
-        "mean_relative_error": 5.8387278797662925e-08,
-        "max_relative_error": 1.6684401282342018e-07,
-        "worst_case": "transformer_vk_16"
+        "mean_relative_error": 0.0003599323745821706,
+        "max_relative_error": 0.013157820918260149,
+        "worst_case": "gfm_remote_bus"
       }
     },
-    "within_0_1_percent": 50,
+    "within_0_1_percent": 47,
     "gridlabd_balanced_shunt": {
       "case_count": 35,
       "mean_relative_error": 6.310028758787477e-09,
@@ -61,14 +61,14 @@
       "ibr_grid_forming": {
         "case_count": 7,
         "opendss_ikss_max_relative_error": 5.442840239050563e-16,
-        "opendss_ip_max_relative_error": 5.951590680710072e-16,
+        "opendss_ip_max_relative_error": 0.013157820918260149,
         "gridlabd_case_count": 7,
         "gridlabd_ikss_max_relative_error": 2.3292252397255463e-08
       },
       "ibr_mixed": {
         "case_count": 1,
         "opendss_ikss_max_relative_error": 1.8055816397069185e-07,
-        "opendss_ip_max_relative_error": 1.0496540245650648e-07,
+        "opendss_ip_max_relative_error": 0.0006244128539732566,
         "gridlabd_case_count": 0
       },
       "line_sweep": {
@@ -2716,7 +2716,7 @@
       "hacdcpf": {
         "ibr_contribution_ka": 0.692820323027551,
         "ikss_ka": 16.676252518686695,
-        "ip_ka": 39.90693488215404
+        "ip_ka": 39.90693488215403
       },
       "model": {
         "base_kv": 20.0,
@@ -2770,7 +2770,7 @@
       },
       "comparison": {
         "ikss_ka_relative_error": 1.5290263994287712e-07,
-        "ip_ka_relative_error": 9.03607954775786e-08
+        "ip_ka_relative_error": 9.036079529952863e-08
       },
       "gridlabd": {
         "status": "unsupported_gfl_current_limit",
@@ -2786,7 +2786,7 @@
       "hacdcpf": {
         "ibr_contribution_ka": 0.8660254037844388,
         "ikss_ka": 16.849457599443582,
-        "ip_ka": 40.151883856432356
+        "ip_ka": 40.15188385643235
       },
       "model": {
         "base_kv": 20.0,
@@ -2840,7 +2840,7 @@
       },
       "comparison": {
         "ikss_ka_relative_error": 1.5290264007476455e-07,
-        "ip_ka_relative_error": 9.074233574719502e-08
+        "ip_ka_relative_error": 9.074233557023127e-08
       },
       "gridlabd": {
         "status": "unsupported_gfl_current_limit",
@@ -2856,7 +2856,7 @@
       "hacdcpf": {
         "ibr_contribution_ka": 0.17320508075688776,
         "ikss_ka": 16.15663727641603,
-        "ip_ka": 39.172087959319086
+        "ip_ka": 39.17208795931908
       },
       "model": {
         "base_kv": 20.0,
@@ -2910,7 +2910,7 @@
       },
       "comparison": {
         "ikss_ka_relative_error": 1.529026399700322e-07,
-        "ip_ka_relative_error": 8.918754490570674e-08
+        "ip_ka_relative_error": 8.918754472431667e-08
       },
       "gridlabd": {
         "status": "unsupported_gfl_current_limit",
@@ -2926,7 +2926,7 @@
       "hacdcpf": {
         "ibr_contribution_ka": 0.692820323027551,
         "ikss_ka": 16.676252518686695,
-        "ip_ka": 39.90693488215404
+        "ip_ka": 39.90693488215403
       },
       "model": {
         "base_kv": 20.0,
@@ -2980,7 +2980,7 @@
       },
       "comparison": {
         "ikss_ka_relative_error": 1.5290263994287712e-07,
-        "ip_ka_relative_error": 9.03607954775786e-08
+        "ip_ka_relative_error": 9.036079529952863e-08
       },
       "gridlabd": {
         "status": "unsupported_gfl_current_limit",
@@ -3144,7 +3144,7 @@
       "hacdcpf": {
         "ibr_contribution_ka": 0.8227241335952169,
         "ikss_ka": 16.80615632925436,
-        "ip_ka": 40.09064661286278
+        "ip_ka": 40.09064661286277
       },
       "model": {
         "base_kv": 20.0,
@@ -3208,7 +3208,7 @@
       },
       "comparison": {
         "ikss_ka_relative_error": 1.5290264014774438e-07,
-        "ip_ka_relative_error": 9.064738781744179e-08
+        "ip_ka_relative_error": 9.064738764020773e-08
       },
       "gridlabd": {
         "status": "unsupported_gfl_current_limit",
@@ -3224,7 +3224,7 @@
       "hacdcpf": {
         "ibr_contribution_ka": 1.9202384316064218,
         "ikss_ka": 17.902002374213957,
-        "ip_ka": 43.85687294286081
+        "ip_ka": 43.87191596454107
       },
       "model": {
         "base_kv": 20.0,
@@ -3277,7 +3277,7 @@
       },
       "comparison": {
         "ikss_ka_relative_error": 1.9845342462460114e-16,
-        "ip_ka_relative_error": 3.2402799747525765e-16,
+        "ip_ka_relative_error": 0.00034300260531207615,
         "gridlabd_ikss_ka_relative_error": 1.6924127900192712e-10
       },
       "gridlabd": {
@@ -3306,7 +3306,7 @@
       "hacdcpf": {
         "ibr_contribution_ka": 4.800596079016055,
         "ikss_ka": 20.780435486639217,
-        "ip_ka": 51.25787636840262
+        "ip_ka": 51.29048875585537
       },
       "model": {
         "base_kv": 20.0,
@@ -3359,7 +3359,7 @@
       },
       "comparison": {
         "ikss_ka_relative_error": 1.7096435159333975e-16,
-        "ip_ka_relative_error": 0.0,
+        "ip_ka_relative_error": 0.0006362414864470398,
         "gridlabd_ikss_ka_relative_error": 1.4236455920420243e-08
       },
       "gridlabd": {
@@ -3388,7 +3388,7 @@
       "hacdcpf": {
         "ibr_contribution_ka": 9.60119215803211,
         "ikss_ka": 25.57878688881167,
-        "ip_ka": 63.60372083091277
+        "ip_ka": 63.657121808452665
       },
       "model": {
         "base_kv": 20.0,
@@ -3441,7 +3441,7 @@
       },
       "comparison": {
         "ikss_ka_relative_error": 4.166789098611803e-16,
-        "ip_ka_relative_error": 4.468560810453472e-16,
+        "ip_ka_relative_error": 0.0008395888926345924,
         "gridlabd_ikss_ka_relative_error": 6.2455733345588464e-09
       },
       "gridlabd": {
@@ -3470,7 +3470,7 @@
       "hacdcpf": {
         "ibr_contribution_ka": 7.181062370267826,
         "ikss_ka": 23.164193763731987,
-        "ip_ka": 56.65542690256551
+        "ip_ka": 56.658025662633996
       },
       "model": {
         "base_kv": 20.0,
@@ -3523,7 +3523,7 @@
       },
       "comparison": {
         "ikss_ka_relative_error": 1.5337091871347406e-16,
-        "ip_ka_relative_error": 0.0,
+        "ip_ka_relative_error": 4.586956996999451e-05,
         "gridlabd_ikss_ka_relative_error": 9.106714159772827e-09
       },
       "gridlabd": {
@@ -3552,7 +3552,7 @@
       "hacdcpf": {
         "ibr_contribution_ka": 3.6039370731555747,
         "ikss_ka": 19.581947233969686,
-        "ip_ka": 48.361344423784224
+        "ip_ka": 48.41167109441928
       },
       "model": {
         "base_kv": 20.0,
@@ -3605,7 +3605,7 @@
       },
       "comparison": {
         "ikss_ka_relative_error": 5.442840239050563e-16,
-        "ip_ka_relative_error": 5.876947750117997e-16,
+        "ip_ka_relative_error": 0.001040638370060208,
         "gridlabd_ikss_ka_relative_error": 1.8096975564510033e-08
       },
       "gridlabd": {
@@ -3634,7 +3634,7 @@
       "hacdcpf": {
         "ibr_contribution_ka": 2.404290775352564,
         "ikss_ka": 18.381470339201393,
-        "ip_ka": 45.33595440965079
+        "ip_ka": 45.39517357678257
       },
       "model": {
         "base_kv": 20.0,
@@ -3687,7 +3687,7 @@
       },
       "comparison": {
         "ikss_ka_relative_error": 1.9327690403654914e-16,
-        "ip_ka_relative_error": 3.1345661297420277e-16,
+        "ip_ka_relative_error": 0.0013062296339169447,
         "gridlabd_ikss_ka_relative_error": 2.3292252397255463e-08
       },
       "gridlabd": {
@@ -3716,7 +3716,7 @@
       "hacdcpf": {
         "ibr_contribution_ka": 3.0212473185727102,
         "ikss_ka": 15.083228432279723,
-        "ip_ka": 35.81610903097219
+        "ip_ka": 36.28737097959063
       },
       "model": {
         "base_kv": 20.0,
@@ -3777,7 +3777,7 @@
       },
       "comparison": {
         "ikss_ka_relative_error": 4.710813331179566e-16,
-        "ip_ka_relative_error": 5.951590680710072e-16,
+        "ip_ka_relative_error": 0.013157820918260149,
         "gridlabd_ikss_ka_relative_error": 4.861228425503953e-10
       },
       "gridlabd": {
@@ -3806,7 +3806,7 @@
       "hacdcpf": {
         "ibr_contribution_ka": 5.493416402043605,
         "ikss_ka": 21.473255809666767,
-        "ip_ka": 52.23767226551588
+        "ip_ka": 52.27028465296865
       },
       "model": {
         "base_kv": 20.0,
@@ -3869,7 +3869,7 @@
       },
       "comparison": {
         "ikss_ka_relative_error": 1.8055816397069185e-07,
-        "ip_ka_relative_error": 1.0496540245650648e-07
+        "ip_ka_relative_error": 0.0006244128539732566
       },
       "gridlabd": {
         "status": "unsupported_gfl_current_limit",

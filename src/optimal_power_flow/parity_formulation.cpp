@@ -800,7 +800,13 @@ void dc_warm_start(const Problem& prob, Eigen::VectorXd& x0) {
     }
   }
 
-  Eigen::MatrixXd B_red = Eigen::MatrixXd::Zero(n_red, n_red);
+  // Assemble the reduced B' sparsely.  A dense (nb−1)×(nb−1) copy plus a dense
+  // LU costs O(nb²) memory (~1.5 GB at 13659 buses) and O(nb³) work (~1.7e12
+  // flops) — profiling showed this one-off warm start dominating the entire
+  // OPF solve (>90% of runtime).  B' has only O(nnz(Ybus)) nonzeros, and its
+  // grounded-Laplacian structure factors in roughly O(nb^{3/2}).
+  std::vector<Eigen::Triplet<double>> b_trips;
+  b_trips.reserve(static_cast<size_t>(prob.data.ybus.nonZeros()));
   Eigen::VectorXd P_red(n_red);
   // Map from bus index to reduced index (-1 for slack)
   std::vector<int> bus_to_red(static_cast<size_t>(nb), -1);
@@ -808,21 +814,31 @@ void dc_warm_start(const Problem& prob, Eigen::VectorXd& x0) {
     bus_to_red[static_cast<size_t>(non_slack[static_cast<size_t>(ri)])] = ri;
     P_red[ri] = -p_inj[non_slack[static_cast<size_t>(ri)]];
   }
-  // Fill B_red from sparse Ybus imaginary part
+  // Fill B_red from sparse Ybus imaginary part (duplicate entries are summed,
+  // matching the dense "+=" accumulation).
   for (int col = 0; col < prob.data.ybus.outerSize(); ++col) {
     for (Eigen::SparseMatrix<std::complex<double>>::InnerIterator it(prob.data.ybus, col); it; ++it) {
-      const int i = static_cast<int>(it.row());
-      const int j = static_cast<int>(it.col());
-      const int ri = bus_to_red[static_cast<size_t>(i)];
-      const int rj = bus_to_red[static_cast<size_t>(j)];
+      const int ri = bus_to_red[static_cast<size_t>(it.row())];
+      const int rj = bus_to_red[static_cast<size_t>(it.col())];
       if (ri >= 0 && rj >= 0) {
-        B_red(ri, rj) += it.value().imag();
+        b_trips.emplace_back(ri, rj, it.value().imag());
       }
     }
   }
+  Eigen::SparseMatrix<double> B_red(n_red, n_red);
+  B_red.setFromTriplets(b_trips.begin(), b_trips.end());
+  B_red.makeCompressed();
 
-  // Solve B_red * θ_red = P_red
-  Eigen::VectorXd theta_red = B_red.partialPivLu().solve(P_red);
+  // Solve B_red * θ_red = P_red with a sparse LU.  The reduced (grounded)
+  // network Laplacian is diagonally dominant and nonsingular, so COLAMD-
+  // ordered SparseLU is stable here; on any failure keep the bus-data angles.
+  Eigen::SparseLU<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> b_lu;
+  b_lu.analyzePattern(B_red);
+  b_lu.factorize(B_red);
+  if (b_lu.info() != Eigen::Success) {
+    return;
+  }
+  Eigen::VectorXd theta_red = b_lu.solve(P_red);
   if (!theta_red.allFinite()) {
     return;
   }

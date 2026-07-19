@@ -7,6 +7,9 @@ from typing import Any, Mapping
 from hysim import (
     HySimClient,
     HySimToolRegistry,
+    HySimV1Client,
+    HySimV1Session,
+    HySimV1ToolRegistry,
     ToolEffect,
     ToolPolicy,
     ToolPolicyError,
@@ -63,6 +66,56 @@ class AIToolTests(unittest.TestCase):
             registry.call("hysim_run_power_flow", {"bus_id": 7})
         with self.assertRaisesRegex(ValueError, "must have type integer"):
             registry.call("hysim_run_power_flow", {"max_iter": True})
+
+    def test_v1_read_tools_expose_bounded_chunks(self) -> None:
+        transport = FakeTransport([
+            {
+                "schema": "hysim_topology_chunk_v1",
+                "model_revision": 1,
+                "lod": 2,
+                "total_nodes": 1,
+                "returned_nodes": 1,
+                "offset": 0,
+                "limit": 20,
+                "next_offset": None,
+                "nodes": [{"ref": {"domain": "ac", "index": 1}}],
+                "edges": [],
+            },
+            {
+                "schema": "hysim_subgraph_v1",
+                "model_revision": 1,
+                "center": {"domain": "ac", "index": 1},
+                "depth": 1,
+                "truncated": False,
+                "nodes": [{"domain": "ac", "index": 1}],
+                "edges": [],
+            },
+        ])
+        session = HySimV1Session(
+            HySimV1Client(transport=transport),
+            "ses-1",
+            1,
+            '"hysim-ses-1-r1"',
+            {"session_id": "ses-1", "model_revision": 1},
+        )
+        registry = HySimV1ToolRegistry(session)
+
+        topology = registry.call("hysim_v1_topology", {"limit": 20})
+        subgraph = registry.call(
+            "hysim_v1_subgraph", {"domain": "ac", "index": 1, "depth": 1}
+        )
+        names = {schema["name"] for schema in registry.function_schemas()}
+
+        self.assertEqual(topology["returned_nodes"], 1)
+        self.assertEqual(subgraph["center"], {"domain": "ac", "index": 1})
+        self.assertIn("hysim_v1_job_frame", names)
+        self.assertIn("hysim_v1_job_violations", names)
+        with self.assertRaisesRegex(ValueError, "maximum"):
+            registry.call("hysim_v1_topology", {"limit": 1001})
+        with self.assertRaisesRegex(ValueError, "items"):
+            registry.call(
+                "hysim_v1_job_frame", {"job_id": "job-1", "indices": [1, True]}
+            )
 
 
 if __name__ == "__main__":

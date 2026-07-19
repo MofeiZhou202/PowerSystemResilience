@@ -1300,6 +1300,9 @@ TEST_CASE("FMEA: Level-1 cyber conditioning preserves bounds and decomposition",
   CHECK(result.eens_mwh_yr <=
         result.cyber_physical.eens_no_automation_mwh_yr + 1e-9);
   CHECK(result.cyber_physical.automation_efficacy == Approx(0.75).margin(1e-8));
+  CHECK(result.cyber_physical.information_service_availability ==
+        Approx(0.75).margin(1e-8));
+  CHECK_FALSE(result.cyber_physical.intelligent_enabled);
 
   const auto branch = std::find_if(
       result.contingencies.begin(), result.contingencies.end(),
@@ -1313,6 +1316,30 @@ TEST_CASE("FMEA: Level-1 cyber conditioning preserves bounds and decomposition",
   CHECK(branch->eens_cyber_control_increment == Approx(0.0).margin(1e-8));
   CHECK(branch->eens_contribution == Approx(0.2875).margin(1e-6));
   CHECK(branch->tau_sw_hr == Approx(0.2875).margin(1e-8));
+
+  // Level-1+ three-dimensional screening multiplies the information service
+  // probability by explicitly enabled intelligent-function probabilities.
+  options.cyber_physical.intelligent.enabled = true;
+  options.cyber_physical.intelligent.detection_success_probability = 0.8;
+  options.cyber_physical.intelligent.isolation_success_probability = 1.0;
+  options.cyber_physical.intelligent.restoration_decision_valid_probability = 1.0;
+  options.cyber_physical.intelligent.restoration_execution_success_probability = 1.0;
+  options.cyber_physical.intelligent.protection_success_probability = 1.0;
+  const auto three_dimension = run_distribution_fmea(sys, options);
+  CHECK(three_dimension.cyber_physical.intelligent_enabled);
+  CHECK(three_dimension.cyber_physical.independent_factorization);
+  CHECK(three_dimension.cyber_physical.intelligent_function_success_probability ==
+        Approx(0.8).margin(1e-8));
+  CHECK(three_dimension.cyber_physical.effective_automation_probability ==
+        Approx(0.6).margin(1e-8));
+  CHECK(three_dimension.cyber_physical.automation_efficacy ==
+        Approx(0.6).margin(1e-8));
+  CHECK(three_dimension.validity.information_service_conditioned);
+  CHECK(three_dimension.validity.intelligent_function_probabilities_modelled);
+  CHECK_FALSE(three_dimension.validity.joint_class_probability_modelled);
+  CHECK_FALSE(three_dimension.validity.protection_logic_modelled);
+  CHECK_FALSE(three_dimension.validity.protection_frt_reliability_coupled);
+  options.cyber_physical.intelligent.enabled = false;
 
   // Cyber conditioning parallelizes exactly like the physical path (no serial
   // guard) and the parallel run reproduces the serial numbers.

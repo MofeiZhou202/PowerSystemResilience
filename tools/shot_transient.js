@@ -1,0 +1,22 @@
+const { chromium } = require('playwright');
+(async () => {
+  const browser = await chromium.launch({ args: ['--no-proxy-server'] });
+  const page = await browser.newPage({ viewport: { width: 1360, height: 900 } });
+  await page.goto('http://127.0.0.1:18100/index.html', { waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(2500);
+  const wf = await page.$('[data-workflow="security"]');
+  if (wf) await wf.click();
+  await page.waitForTimeout(300);
+  await page.click('#moduleTransient', { force: true });
+  await page.waitForTimeout(600);
+  const bar = await page.$('#subToolbar');
+  if (bar) await bar.screenshot({ path: '/tmp/tr_toolbar.png' });
+  await page.click('#btnTrAdvanced', { force: true });
+  await page.waitForTimeout(300);
+  if (bar) await bar.screenshot({ path: '/tmp/tr_toolbar_adv.png' });
+  await page.setViewportSize({ width: 1000, height: 900 });
+  await page.waitForTimeout(300);
+  if (bar) await bar.screenshot({ path: '/tmp/tr_toolbar_narrow.png' });
+  await browser.close();
+  console.log('done');
+})().catch(e => { console.error(e); process.exit(1); });
