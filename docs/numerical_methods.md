@@ -646,3 +646,93 @@ case1888rte also converge certified.
    standard finishing step (Ipopt/MIPS multiplier estimates) and turns
    feasible-but-dual-floored endpoints into certified KKT points with an
    honest status (`converged (dual least-squares certified)`).
+
+---
+
+## 13. Davidenko tangent prediction: the step-efficiency theory
+
+**Problem.**  The §12 objective homotopy is the correct Phase I→II mapping,
+but its plain form is expensive: on case9241pegase each continuation step
+costs 270–460 corrector iterations (a near-cold re-solve per step) and the
+path dies at t ≈ 0.55 without help.  The efficiency question has a clean
+theoretical answer: follow the path with its *tangent* instead of jumping
+blindly.
+
+**Derivation.**  The KKT path `w(t) = (x, z, λ, μ)` of
+`P(t): min t·f(x) s.t. g = 0, h + z = 0, z ≥ 0` satisfies `F(w(t), t) = 0`.
+Differentiating in `t` gives the Davidenko equation
+
+```
+∂F/∂w · w′(t) = −∂F/∂t = −(∇f, 0, 0, 0)ᵀ
+```
+
+and `∂F/∂w` is exactly the IPM's augmented KKT, so **one back-solve with
+the existing LDLᵀ factorization** (analyze-once, inertia-controlled)
+yields the whole tangent, with `dz/dt = −Jh·dx/dt` recovered analytically:
+
+```
+[ Lxx   Jgᵀ   Jhᵀ  ] [dx/dt]   [−∇f/t]
+[ Jg     0     0   ] [dλ/dt] = [ 0   ]
+[ Jh     0   −ZM⁻¹ ] [dμ/dt]   [ 0   ]
+```
+
+(∇f is the t-scaled objective gradient; ∇f/t is the full cost gradient
+entering the stationarity at rate 1.)  The predictor
+`w_pred = w(t) + Δt·w′(t)` is first-order accurate (error O(Δt²)), and —
+crucially — its duals are *path-consistent* by construction: the
+hard-switch inconsistency that killed the naive two-phase never occurs.
+
+**Step-size theory (parameter-metric trust radius).**  A predicted step is
+valid only inside the corrector's convergence radius.  Todd's induced
+parameter metric maps the solution-space distance to a parameter-space
+step; the practical form is a component trust radius on the extrapolation
+`h ≤ κ/‖dx/dt‖∞` — measured here to be load-bearing: uncapped steps
+overshoot into infeasibility (viol ~ 1–10 at iteration 1), while
+κ = 0.05 keeps every predicted start in the corrector's basin.  The warm
+mapper additionally clamps predicted points into the bounds interior.
+Birgin–Krejić–Martínez's inexact-restoration criteria supply the
+accept/reject test and the turning-point diagnosis (Δt collapse ⇒ honest
+minimal-violation report).
+
+**Measured.**  case9241pegase — previously: filter-fail in every variant;
+plain homotopy without predictor dies at t ≈ 0.55 (obj 288 970,
+off-path).  With tangent prediction + centrality recovery + dual polish:
+**full path to t = 1, converged at obj = 315 873** (−0.013% vs the PGLIB
+reference 315 913), 25 continuation steps, the final solve certifying in
+6 further iterations.  Steps near t = 0 drop from ~300 to 28–78 corrector
+iterations; case2869pegase converges at the exact reference 133 999
+(107 s via `ACOPFOptions::objective_homotopy`).
+
+---
+
+## 14. Per-iteration re-equilibration is a noise source (the IEEE24 debug)
+
+**Observed.**  A hybrid AC/DC OPF (IEEE24-3area-expanded: 24 AC buses, 8 DC
+buses, 8 VSC + 2 DCDC converters, DC line resistances r ≈ 0.004 pu ⇒
+conductances g ≈ 250 pu) fails to converge: primal feasibility oscillates
+in a 3–8e-3 band for 640 iterations with stationarity already at 1e-7 —
+while the plain power flow converges in 5 iterations and Ipopt drives the
+DC-balance residual to 1.5e-4.  The feasibility valley of a network with
+g ≈ 250 pu is ~1/250 wide in voltage space; landing in it requires the
+Newton direction to be metrically stable across iterations.
+
+**Root cause (measured).**  The Ruiz equilibration `D` was recomputed
+*every* iteration from the current KKT.  As the barrier pairs evolve, the
+`−z/μ` block sweeps ratios of ~1e±10, so the row norms — and thus `D` —
+swing by orders of magnitude between consecutive factorizations.  On a
+stiff KKT the solve is performed as `(D K D)y = D b`, and the effective
+Newton direction `x = D y` therefore *jitters with D*: consecutive
+directions differ by more than the valley width, and the trajectory
+limit-cycles above the tolerance instead of landing in it.  All
+eliminated alternatives: δ_C·‖λ‖ floor (λ_DC ≈ 21.5, δ_C sweep 1e-8–1e-12
+no effect), linear-solver brand (MUMPS/UMFPACK/KLU/Eigen identical),
+genuine infeasibility (Ipopt closes to 1.5e-4), storage pinned by design.
+
+**Fix (measured).**  Compute the equilibration **once per solve** and
+freeze it (standard IPM practice — Ipopt scales from the NLP once).
+IEEE24-expanded: 640-iteration stall → **36 iterations to certified
+convergence** (viol 6.1e-6, stat 2.1e-7, 0.02 s).  Freeze is the default;
+`HACDCPF_OPF_RESCALE_PER_ITER=1` restores the old rebuild for A/B.
+Side benefits: no per-iteration Ruiz sweeps (~5×nnz per iteration saved —
+case9241 homotopy 721 → 606 s), and several trajectories improve
+(case1888rte 168 → 89 iterations).

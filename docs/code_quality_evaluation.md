@@ -529,3 +529,40 @@ the only mechanism so far that certifies 2869 at the exact optimum; its
 current cost on 9241 is many expensive steps (~55 s each) — the standard
 acceleration is the Davidenko tangent predictor (one back-solve per step
 for w′(t), then much bigger steps), noted as the next optimization.
+
+### Phase-11 slice — Davidenko tangent predictor (step-efficiency theory)
+
+User's question: what theory guides step efficiency?  Answer implemented:
+Davidenko continuation (tangent predictor from the KKT path's first-order
+equation) + parameter-metric trust radius (Todd) + Gondzio–Grothey
+well-centered absorption.  Docs: `numerical_methods.md` §13.
+
+| # | Item | Status |
+|---|---|---|
+| D1 | `parity::homotopy_tangent` — one inertia-controlled LDLᵀ solve for w′(t) = (dx/dt, dz/dt, dλ/dt, dμ/dt), rhs = (−∇f/t, 0, 0) | ✅ (bug found & fixed: `equality_jacobian` requires the workspace primed by `equality_constraints` — fresh ws segfaulted) |
+| D2 | ACOPFResult `ipm_tangent_*` fields + `ACOPFOptions::compute_homotopy_tangent` / `homotopy_t` | ✅ |
+| D3 | Davidenko predictor with trust radius h = min(dt, κ/‖dx/dt‖∞), κ = 0.05 + warm-mapper bounds clamping | ✅ uncapped steps overshoot (viol ~1–10 at iter 1); with κ every predicted start lands in the corrector basin |
+| D4 | Library driver `ACOPFOptions::objective_homotopy` (+`homotopy_dt0`) in `solve_ac_opf` | ✅ case2869: converged at the **exact reference 133 999** (107 s, stat 6.1e-7) |
+| D5 | case9241 with the full stack | ✅ **converged at obj 315 873** (−0.013% vs PGLIB 315 913), 25 steps, final solve certifies in 6 iters — previously: filter-fail in every variant; homotopy-without-predictor dies at t ≈ 0.55 |
+| D6 | Regression sweep after D1–D4 | ✅ bit-identical (1354/1888/1951/14/118/300); case13659 (pf-ws) still 386 107 |
+
+### Phase-12 slice — IEEE24-3area-expanded debug + freeze-scaling fix
+
+User report: IEEE24 three-area expanded case — PF converges, OPF does not.
+Reproduced with `io::build_ieee24_3area_acdc_expanded()` (24 AC + 8 DC
+buses, 8 VSC + 2 DCDC, DC line g ≈ 250 pu): OPF stalls at DC-balance
+residual 0.0721 (buses 7/8), feas oscillating 3–8e-3 for 640 iters.
+
+Elimination chain (all measured): δ_C·‖λ‖ floor (λ_DC ≈ 21.5, δ_C
+1e-8–1e-12 no effect) ✗; linear-solver brand (MUMPS/UMFPACK/KLU/Eigen
+identical) ✗; genuine infeasibility (Ipopt closes to 1.5e-4; PF
+converges) ✗; storage pinned (deliberate single-period SOC design) — not
+the blocker ✗.  **Root cause: per-iteration Ruiz re-equilibration — the
+`−z/μ` block's ~1e±10 ratio swings swing `D` by orders of magnitude per
+iteration, jittering the effective Newton direction across the ~1/250-wide
+feasibility valley (theory: `numerical_methods.md` §14).**
+
+| # | Item | Status |
+|---|---|---|
+| F1 | Freeze equilibration once per solve (default; `HACDCPF_OPF_RESCALE_PER_ITER=1` opts out) | ✅ **IEEE24-expanded: 640-fail → 36 iters certified** (viol 6.1e-6, stat 2.1e-7, 0.02 s, obj 44958.5 ≈ Ipopt's 44930) |
+| F2 | Full regression after F1 | ✅ all green: 13659 = 386107 (35 s); 9241 homotopy = 315837 (606 s, was 721); 2869 homotopy = 133999 exact (86 s); 1888rte 168→89 iters (obj 59730.4, viol 4.8e-3 — slightly looser point, noted); 1354/1951/14–300 unchanged; 1354+500MWdc hybrid converged (7.6 s, was 9.4) |
