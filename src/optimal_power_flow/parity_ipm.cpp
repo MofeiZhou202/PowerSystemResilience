@@ -221,10 +221,15 @@ struct SparseKKTCache {
   mipsolvers::engine::MumpsSolver mumps;
 #endif
   int active{0};         ///< 0=unset, 1=UMFPACK, 2=KLU, 3=Eigen SparseLU, 4=MUMPS
-  int analyzed_for{0};   ///< backend whose symbolic analysis is currently valid
   bool pure_ac{false};   ///< no DC/VSC/ER subsystems → KLU-eligible (see below)
-  int pat_dim{-1};
-  int pat_nnz{-1};
+  // Per-backend symbolic-analysis validity.  The KKT sparsity pattern is FIXED
+  // across IPM iterations (same structure, changing values), so each backend
+  // only needs to analyse the pattern ONCE — recording it per backend lets the
+  // inertia gate switch KLU↔MUMPS without re-analysing on every switch (that
+  // churn was the dominant gate overhead: ~18 s at case13659).  Indexed by
+  // backend id; -1 = not analysed for the current pattern.
+  int analyzed_dim[5]{-1, -1, -1, -1, -1};
+  int analyzed_nnz[5]{-1, -1, -1, -1, -1};
   bool factored{false};
   bool solve_degraded{false};  ///< last solve was inaccurate → escalate backend
   int symbolic_analyze_calls{0};
@@ -537,12 +542,11 @@ bool factor_assembled_kkt(SparseKKTCache& cache,
   for (int backend : trylist) {
     cache.active = backend;
     const bool need_analyze =
-        (cache.analyzed_for != backend) || (cache.pat_dim != dim) || (cache.pat_nnz != nnz);
+        (cache.analyzed_dim[backend] != dim) || (cache.analyzed_nnz[backend] != nnz);
     if (sparse_factorize_active(cache, need_analyze)) {
       if (need_analyze) {
-        cache.analyzed_for = backend;
-        cache.pat_dim = dim;
-        cache.pat_nnz = nnz;
+        cache.analyzed_dim[backend] = dim;
+        cache.analyzed_nnz[backend] = nnz;
       }
       cache.factored = true;
       return true;
@@ -1120,6 +1124,18 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   // iterations to warm-start the inertia loop (see below).
   double delta_w_prev = 0.0;
 
+  // Periodic inertia re-check for the pure-AC KLU fast path.  KLU/LU cannot
+  // report the KKT inertia (negative-pivot count), so the δ_W regularisation
+  // is silently bypassed while KLU is active.  Every kInertiaGatePeriod
+  // factorizations we re-check the inertia with MUMPS and apply δ_W to that
+  // step if the reduced Hessian is indefinite — this both regularises the
+  // step (large trajectory win: case2869 homotopy 154→73 iterations) and
+  // surfaces persistent difficulty.  KLU is always resumed afterwards (a
+  // one-off indefinite KKT is not grounds to abandon it — the (θ,φ) filter
+  // tolerates those steps); a genuine persistent KLU failure is left to the
+  // solve_degraded → escalation backstop.
+  int inertia_gate_countdown = 0;  // factorizations since the last MUMPS re-check
+
   // Objective-stagnation tracking (endgame early stop — see the epilogue).
   double obj_prev = obj0;
   int stagnant_count = 0;
@@ -1216,12 +1232,45 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
         }
         return 1e-8;
       }() * lxx_norm;
-      // Warm-start δ_W from the last accepted value (Ipopt's κ_W⁻ rule):
-      // consecutive Newton systems need similar regularization, so starting
-      // at δ_W⁻/2 instead of 0 skips the 5–8 full refactorizations that an
-      // escalate-from-scratch loop would run per iteration.  The inertia
-      // check below still guarantees the accepted value is sufficient.
-      double delta_w = (delta_w_prev > 0.0)
+      // Inertia gate: on the pure-AC KLU fast path, re-check the inertia with
+      // MUMPS every kInertiaGatePeriod factorizations (KLU cannot report it).
+      // HACDCPF_OPF_INERTIA_GATE = N (default 8; ≤0 disables the gate, keeping
+      // KLU throughout with no periodic MUMPS re-check).
+      // Inertia re-check (OPT-IN, disabled by default).  On the pure-AC KLU
+      // fast path, KLU cannot report the KKT inertia, so the δ_W regularisation
+      // is bypassed; this opt-in periodically re-checks the inertia with MUMPS
+      // and applies δ_W to that step.  It is OFF by default because its effect
+      // is strongly case-dependent and not predictable a priori: the periodic
+      // δ_W regularisation materially improves SOME trajectories (case2869
+      // homotopy 154 → 73 iterations, 59 s → 15 s) but DEGRADES others
+      // (case9241 homotopy stalls at t = 0.625 instead of reaching the 315837
+      // reference).  The robust default is the plain pure-AC→KLU path; a
+      // genuine persistent KLU failure is caught by solve_degraded →
+      // escalation.  HACDCPF_OPF_INERTIA_GATE = N enables a re-check every N
+      // factorizations (≤ 0 disables; default 0).
+      const int kInertiaGatePeriod = []() {
+        const char* env = std::getenv("HACDCPF_OPF_INERTIA_GATE");
+        return env != nullptr ? std::atoi(env) : 0;
+      }();
+      bool inertia_gate_check = false;
+      int klu_resume = 0;
+      if (kInertiaGatePeriod > 0 && sparse_cache.pure_ac &&
+          sparse_cache.active == 2) {
+        if (++inertia_gate_countdown >= kInertiaGatePeriod) {
+          inertia_gate_countdown = 0;
+          inertia_gate_check = true;
+          klu_resume = sparse_cache.active;  // = KLU(2)
+          sparse_cache.active = 4;           // force MUMPS for the check
+        }
+      }
+      // δ_W warm-start applies ONLY to MUMPS factorizations (which report
+      // inertia).  KLU factorizations are left UNREGULARISED (δ_W = 0) so a
+      // MUMPS re-check's escalated δ_W does not leak into and perturb the
+      // healthy KLU trajectory — that leak was measured to cost case13659
+      // ~44 extra iterations.  The warm-start itself (Ipopt's κ_W⁻ rule)
+      // skips the 5–8 escalate-from-scratch refactorizations per iteration.
+      const bool mumps_step = (sparse_cache.active == 4);
+      double delta_w = (mumps_step && delta_w_prev > 0.0)
                            ? std::max(1e-8 * lxx_norm, 0.5 * delta_w_prev)
                            : 0.0;
       for (int attempt = 0; attempt < 8; ++attempt) {
@@ -1245,7 +1294,24 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
                       : std::min(8.0 * delta_w, 1e-2 * lxx_norm);
         if (attempt == 7) factor_ok = true;  // accept best effort at the cap
       }
-      if (factor_ok) delta_w_prev = delta_w;
+      // Gate resolution: ALWAYS resume the KLU fast path after the periodic
+      // re-check.  The re-check's purpose is twofold — (a) apply δ_W
+      // regularisation to THIS step where the reduced Hessian is indefinite
+      // (which materially improves the trajectory: measured case2869 homotopy
+      // 154 → 73 iterations, 59 s → 17 s), and (b) detect a trajectory that
+      // persistently needs regularisation.  We deliberately do NOT lock to
+      // MUMPS on a single bad-inertia check: the (θ,φ) filter tolerates the
+      // mildly indefinite steps that KLU/LU still solves accurately, so a
+      // one-off indefinite KKT is not evidence that KLU must be abandoned
+      // (measured: case13659 locked prematurely and ran 2.4× slower / less
+      // accurately than pure KLU).  A genuine, persistent KLU failure surfaces
+      // instead through solve_degraded → escalation, the existing backstop.
+      if (inertia_gate_check) {
+        sparse_cache.active = klu_resume;  // resume the KLU fast path
+      }
+      // Only MUMPS steps contribute to the δ_W warm-start, so a re-check's
+      // escalated value never leaks into subsequent KLU steps.
+      if (factor_ok && mumps_step) delta_w_prev = delta_w;
       if (!factor_ok) {
         out.status = "KKT factorization failed";
         break;
