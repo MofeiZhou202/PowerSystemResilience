@@ -424,9 +424,17 @@ set_source_files_properties(
   PROPERTIES COMPILE_DEFINITIONS "MUMPS_ARITH=MUMPS_ARITH_d"
 )
 
-# ── Runtime dependency: BLAS/LAPACK via Accelerate (macOS) ───────────────────
+# ── Runtime dependencies: BLAS/LAPACK via Accelerate (macOS), plus the
+# Fortran runtime for the from-source Fortran objects.  CMake only injects
+# the implicit Fortran link libraries when the *final* link is Fortran-aware;
+# a CXX-only executable (e.g. a downstream consumer's server binary) fails
+# with undefined __gfortran_os_error_at/__gfortran_runtime_error_at without
+# this explicit interface dependency.
 target_link_libraries(dmumps PUBLIC
   "$<$<PLATFORM_ID:Darwin>:-framework Accelerate>")
+if(CMAKE_Fortran_IMPLICIT_LINK_LIBRARIES)
+  target_link_libraries(dmumps PUBLIC ${CMAKE_Fortran_IMPLICIT_LINK_LIBRARIES})
+endif()
 
 if(TARGET mipsolvers_fortran_main_stub)
   target_link_libraries(dmumps PUBLIC mipsolvers_fortran_main_stub)
