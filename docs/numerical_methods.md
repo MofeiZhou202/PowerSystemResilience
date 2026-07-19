@@ -429,3 +429,220 @@ terminates these cases and this one does not, and it is the next slice.
 Per-iteration cost is now ~55% MUMPS factor+solve, ~25% triplet
 re-assembly + per-iteration Ruiz rescaling (the engine's scatter-map
 assembly, §4, is the documented removal), ~20% model evaluations.
+
+---
+
+## 10. OPF-specific IPM design: problem characteristics and literature-grounded choices
+
+**Why a dedicated analysis.**  Large AC-OPF problems are not generic NLPs.
+Their interior-point behavior is dictated by a handful of structural
+characteristics; the state of the art (Ipopt, KNITRO, MIPS/MATPOWER,
+BELTISTOS, MadNLP/HyKKT on GPUs) is precisely the set of methods that
+exploit them.  This section records the characteristics, what the
+literature does with them, and which of those mechanisms this codebase now
+implements.
+
+### 10.1 The six characteristics
+
+- **C1 — Network-induced sparsity and separators.**  The power-balance
+  Jacobian has O(bus degree) ≈ 3–6 nonzeros per row on a near-planar
+  graph ⇒ O(√n) separators ⇒ nested-dissection ordering gives fill
+  O(n log n), work O(n^{3/2}) (§9.3).  This is what makes direct KKT
+  factorization viable at all at 10⁴–10⁵ buses.
+- **C2 — (Block-)diagonal Hessian.**  Generation costs are separable
+  quadratics; the only curvature coupling comes from branch-flow limits.
+  The (1,1) KKT block is diagonal-dominant — cheap to regularize (δ_W·I)
+  and benign for frontal solvers.
+- **C3 — Box-dominant inequalities.**  Most inequalities are variable
+  bounds (Pg, Qg, Vm) ⇒ Jh is mostly a signed selection; branch limits
+  add sparse quadratic rows.  The augmented (3,3) block is exactly
+  diagonal; the condensed JhᵀΣJh is diagonal-dominant + sparse
+  corrections.
+- **C4 — Sparse active set, occasional degeneracy.**  Active constraints
+  at solution are generator limits and a few branch flows; LICQ usually
+  holds, but parallel lines / identical generators create near-dependent
+  Jacobian rows — the matrices where MUMPS' null-pivot absorption vs
+  UMFPACK's singularity flagging diverge (§9.3's "one solver cannot serve
+  both paths").
+- **C5 — Structured barrier ill-conditioning.**  κ(KKT) = Θ(1/μ), but the
+  ill-conditioning is *structured*: the large eigenvalues live on
+  range(Aᵀ) (the active-Jacobian range) and the induced solution error
+  concentrates harmlessly there, provided the centrality conditions
+  s_i·v_i stay balanced (Wright 1998; Pacaud–Shin–Montoison–Schanen–
+  Anitescu 2024, arXiv:2405.14236, Thm 4.2 — "structured ill-conditioning
+  counterbalances the accuracy loss").  Their precision ceiling on
+  pivoting-free condensed GPU solves is ε^{1/4} ≈ 1e-4 — independent
+  evidence that the ~1e-4 "acceptable level" is a real, measurable
+  regime, not a cop-out.  Two consequences implemented here: iterative
+  refinement needs a divergence guard (their recommended Richardson on
+  the unreduced system; our guard keeps the correction only when the
+  residual provably shrinks), and Gondzio correctors (which rebalance
+  s_i·v_i) are load-bearing, not optional.
+- **C6 — Nonconvexity and basin sensitivity.**  AC balance equations are
+  quadratic equalities ⇒ nonconvex feasible set, multiple local optima
+  (rte cases notoriously).  Step-level perturbations shift basins
+  chaotically; convergence machinery must therefore be judged by
+  invariants (no poisoned axes, no diverged refinement), not by which
+  basin a lucky trajectory once found.
+
+### 10.2 What the literature does, mapped to this code
+
+| Mechanism | Source | Status here |
+|---|---|---|
+| MA57/PARDISO-class LDLᵀ + inertia control is the reliability winner on OPF KKTs | Kardos–Kourounis–Schenk–Zimmerman 2020 (arXiv:1807.03964) | ✅ MUMPS backend + Wächter–Biegler δ_W via `negative_eigenvalues()` |
+| 1e-6 tolerance practice; "acceptable" termination standard; <1e-9 numerically unstable | ibid., §5.2 | ✅ tol=1e-6 + acceptable-100× with honest status |
+| (θ,φ) filter + switching condition + Armijo + SOC + restoration = the globalization that terminates hard cases | Wächter–Biegler 2006 (Ipopt) | ✅ (θ,φ) filter with domination history, switching/Armijo, SOC, bounded restoration (§9.5–10.3) |
+| Filter must have *history*: current-point-only acceptance lets the iterate wander (600+ iterations of φ-wiggles with slow θ/comp degradation observed on case1888rte) | Wächter–Biegler §3.2 (domination of all previous pairs) | ✅ history with φ re-evaluated at current γ |
+| Structured ill-conditioning ⇒ condensed form viable for OPF on pivoting-free architectures; refinement on the unreduced system | Pacaud et al. 2024 (arXiv:2405.14236); Wright 1998 | ✅ refinement divergence guard; augmented form retained (CPU LBLᵀ is available, so no need to accept the ε^{1/4} ceiling) |
+| Dynamic barrier updates (relax central-path following; global-local unified convergence) | Armand–Benoist–Orban 2008/2013; Friedlander–Orban 2012 | ❌ tried, negative: the θ_S drop-in (γ = μ(1−α_aff) + α_aff·μ²/μ₀) broke convergence on case118/1354/1888rte (3/3).  Cause: ABO is a Newton step on the *augmented (w,μ) system* with its own μ-line-search; transplanted onto a Mehrotra skeleton it loses the σ³ self-limiting property (γ ≤ μ_cur) and, fed by the re-centering boost, μ can pump upward and wander.  Kept env-gated (`HACDCPF_OPF_MU_STRATEGY=abo`, default mehrotra); a faithful port needs the full augmented-system treatment — deferred |
+| Initial guess matters; MATPOWER default start is competitive; DC-OPF warm start is the cheap closer point | Kardos et al. §5.3 | ⚠️ tried, case-dependent: DC-OPF start + 5% interior shift (LP vertices are interior-hostile IPM starts) — case1888rte 168→130 iters, case1354 88→302 iters (**worse**), case118 neutral, case13659 obj 2.7e6→1.78e6 but viol 3.8→6.6, still capped (528 s incl. 146 s DC solve).  The existing physics-informed initializer already supplies the valuable part (DC-consistent θ + *interior* proportional dispatch); the LP-vertex dispatch adds boundary-exactness, which IPMs dislike.  Kept probe-gated, not a library default |
+| Structure-exploiting OPF IPM variants (BELTISTOS) use Ipopt algorithms + pivoting/scaling control | Kardos et al. | ✅ via MUMPS ICNTL/CNTL choices |
+
+### 10.3 The remaining engineered pieces and their exact theory
+
+- **(θ,φ) filter**: accept iff θ decreases by (1−γ_θ) or φ decreases by
+  γ_φ·θ against the current pair AND every history pair; near feasibility
+  (θ ≤ 1e-4) with genuine φ-descent, require Armijo on φ.  φ is the
+  barrier merit with the current corrector γ; with certified KKT inertia
+  the Newton direction is descent on φ — which the raw stationarity axis
+  cannot promise at κ ~ 1/μ (this is the precise reason the old 3-axis
+  filter stalled with a *good* direction).
+- **Bounded restoration**: on total filter failure, one Gauss-Newton-like
+  feasibility step with (1,1) := ρI (ρ = 1e-8·‖Lxx‖), θ-Armijo +
+  dual-axis bounds; repeated failures give repeated restoration steps.
+  Full Ipopt restoration reformulates the NLP with elastic variables —
+  this bounded variant reuses the same KKT machinery at one extra
+  factorization per call.
+- **Catastrophe guard**: no acceptance path may worsen grad/comp >100× —
+  the filter's φ-axis otherwise certifies steps that poison μ.
+
+### 10.4 Measured state after the literature slice
+
+- case1888rte: converged at obj 59771.2 (≈ the MATPOWER reference
+  59790.8, −0.03%), 152 iters — previously: fail, or 640-iteration
+  wander to 56714.5.
+- case1951rte: converged at obj 81757.8, 47 iters, 1.9 s.
+- case1354pegase: converged at obj 74069.4 (= Ipopt's 74069.1), 88
+  iters, 2.2 s (Ipopt: 75.6 s).
+- Small sweep (14/30/39/57/118/300): all converged at known optima,
+  violations ≤ 1.5e-5.
+- case13659pegase: still open.  With the (θ,φ) filter + history +
+  θ_max + the vacuous-step rule (α < 1e-7 declared unusable — at such
+  steps the filter margins ~1−1e-12 are numerically vacuous and the IPM
+  random-walks toward an infeasible barrier-stationary point), the raw
+  violation dropped 30 → 3.77 but the run still caps at 640 iterations
+  (327 s, obj 2.7e6).  The midgame convergence *rate* — ftb-limited
+  α ~ 1–2% over thousands of KKT unknowns — is what the dynamic-μ
+  (Armand–Benoist–Orban) and warm-start items of §10.2 must supply;
+  globalization alone cannot.  Also still open: case2869/9241pegase
+  (same family, same mechanism); all rte cases and case1354pegase
+  converge at their reference optima.
+
+---
+
+## 11. The AC-feasible start: why it unlocks stressed grids (measured)
+
+**Observation (Phase 8).**  The plain AC power flow converges from the
+case's own operating point even on the stressed PEGASE grids (case13659:
+9 NR iterations, residual 5e-12; case9241: 16 iters) — those grids ARE
+AC-feasible.  Yet the parity IPM could not converge on them from the
+physics-informed start (DC-θ + interior dispatch): the trajectory leaves
+the feasible basin midgame (objective undershoot, filter death).
+Starting instead from the solved power flow (θ ≈ 1e-12 at iteration 0),
+**case13659pegase converges at the reference optimum obj = 386107 in 189
+iterations / ~40 s** (`ACOPFOptions::ac_pf_warm_start`).
+
+**Derivation.**  The (θ,φ) filter's two regimes behave differently by
+region: in the infeasible region the θ-axis dominates and acceptance is
+fragile (Maratos, vacuous tiny-α, restoration loops — §9.5, §10.3); near
+feasibility (θ ≤ θ_min) the switching condition certifies steps by Armijo
+on the barrier merit φ, and with certified KKT inertia the Newton
+direction is *provably* descent on φ.  An AC-feasible start places the
+iterate in the second regime from the first iteration: the (θ,φ)
+machinery never has to recover feasibility, only to decrease φ — the
+regime where every component (inertia-controlled LDLᵀ step, SOC,
+domination history) is operating at design point.  The DC-OPF→ACPF
+cascade fails on stressed grids for the dual reason: the DC dispatch is
+AC-inconsistent (reactive/voltage-wise far from any AC solution), so
+Newton–Raphson diverges *from it* — ACPF correction must be applied to
+the default start, not to the DC dispatch.
+
+**Boundary of the result (honest).**  Feasible-but-off-center starts are
+not uniformly better: case1354 slows 88 → 330 iterations (centrality at
+init beats exact feasibility on well-posed cases — the same reason Ipopt
+initializes by least squares + bound pushes), case6468rte lands in a bad
+basin (obj −38%), case6495rte fails outright.  The option is therefore
+opt-in, indicated for large stressed grids whose default-start trajectory
+fails; case2869/9241pegase remain open even with it (their failure is the
+undershoot mode, not the start), where continuation on the stress
+parameter or full elastic restoration is the documented next mechanism.
+
+---
+
+## 12. Phase I → Phase II as objective homotopy: the theory-guided mapping
+
+**Question.**  For hard (stressed, near-infeasible) OPF instances: we have
+an AC solution meeting power balance but violating some inequalities — the
+start is not in the feasible interior.  Can the IPM be split into Phase I
+(find a feasible point) and Phase II (improve its quality)?  The simplex
+method does exactly this, but the LP feasible set is convex; for nonconvex
+OPF the Phase-I→II *mapping* needs theory, not trial and error.
+
+**Why the hard switch fails.**  Phase I as the zero-cost problem
+(min 0 s.t. g = 0, h + z = 0, z ≥ 0) converges fast (24–50 iterations on
+the PEGASE cases — the barrier alone drives it).  But switching the
+objective to full cost in one step breaks the iterate's *centrality*:
+the Phase-I duals satisfy stationarity of a Lagrangian with no economic
+gradient, so the costed KKT rejects every step (measured: 639 iterations
+with zero filter accepts, dual residual pinned at 1e-2), while resetting
+the duals loses the basin (trajectory dives to the infeasible
+low-objective region).  Warm-start theory says why: a primal-dual IPM
+start must be *well-centered*, and perturbations are absorbed in few
+steps only from such starts (Gondzio–Grothey, SIAM J. Optim. 13, 2003;
+Chen–Goulart–Jones 2025, arXiv:2512.00693 — centrality, not residual
+minimization, is the invariant to preserve).
+
+**The mapping.**  Follow the KKT path of the objective homotopy
+`P(t): min t·f(x) s.t. g = 0, h + z = 0, z ≥ 0` for `t : 0 → 1`.
+Under LICQ + SOSC + strict complementarity the path `w(t)` is C¹
+(implicit-function theorem on the perturbed KKT — the same argument that
+gives the central path's existence, cf. Armand–Benoist–Orban Lemma 3.3).
+Each continuation step is a full IPM solve (corrector) warm-started from
+the previous path point with the *complete* primal-dual state — the path
+duals are by construction consistent with `P(t)`'s stationarity, so the
+hard-switch inconsistency never occurs.  The step size adapts to the
+local convergence radius: a step converging in ≤ 20 iterations doubles
+Δt, a failure halves it (Todd's metric viewpoint on homotopy parameter
+adjustment; Birgin–Krejić–Martínez inexact-restoration criteria, which
+also identify turning points of the path with local violation minimizers
+— our honest "minimal violation" report when Δt collapses).
+Continuation-on-constraints for stressed OPF is the same idea in the
+constraint direction (Park–Glista–Lavaei–Sojoudi, homotopy for
+post-contingency OPF).
+
+**Measured path.**  case2869pegase: obj(t) tracks `t·f*` almost exactly
+(26 800 at t = 0.2 → 133 999 at t = 1), each step converging; the t = 1
+endpoint certifies at **obj = 133 999 — the exact PGLIB reference
+optimum** — in 5 further iterations (vs baseline: filter-fail at obj
+92 926; vs hard-switch two-phase: +0.74% uncertified).  case1354 and
+case1888rte also converge certified.
+
+**Two finishing mechanisms (also theory-standard).**
+
+1. *Objective-stagnation early stop.*  Hard trajectories reach the
+   endpoint long before any tolerance fires — the tail is restoration
+   crawl whose steps carry zero stationarity rhs, so the dual residual
+   cannot improve through them.  When feasibility (< 1e-4) and
+   complementarity (< comp_tol) are met and |Δobj| ≤ 1e-6(1+|obj|) over
+   20 accepted iterations, stop and certify by polish.  Cuts ~80% of
+   tail time; gated by feasibility so a healthy tail (where obj
+   stagnates while θ is still reduced) is never cut.
+
+2. *Dual least-squares polish.*  At the endpoint, re-estimate multipliers
+   from the exact stationarity LS `min_{λ,μ} ½‖f̃∇f + Jgᵀλ + Jhᵀμ‖²`,
+   whose KKT system is `[I Aᵀ; A 0]` with A = [Jg; Jh] — one solve with
+   the same LDLᵀ machinery (inactive-row multipliers clipped to μ ≥ 0;
+   solution certification per the sparse-LS literature).  This is the
+   standard finishing step (Ipopt/MIPS multiplier estimates) and turns
+   feasible-but-dual-floored endpoints into certified KKT points with an
+   honest status (`converged (dual least-squares certified)`).

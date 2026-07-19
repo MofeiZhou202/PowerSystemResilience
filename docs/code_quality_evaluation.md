@@ -380,3 +380,152 @@ Derivations and the per-mechanism evidence: `numerical_methods.md` §9.5.
 - Sweep after the slice: case14/30/39/57/118/300 converged at known optima;
   case1354 converged (113 iters, 2.2 s); rte cases as in P6.
 - MIPSolvers side untouched by this slice; `ctest -L unit` remains 10/10.
+
+### Phase-6 literature slice (searched-state-of-the-art → implemented)
+
+Sources searched and mapped (full table + six OPF characteristics C1–C6 in
+`numerical_methods.md` §10): Kardos–Kourounis–Schenk–Zimmerman 2020
+(arXiv:1807.03964, IPM-on-OPF benchmark); Pacaud–Shin–Montoison–Schanen–
+Anitescu 2024 (arXiv:2405.14236, structured ill-conditioning of condensed
+KKT); Wright 1998 (ill-conditioning structure); Wächter–Biegler 2006
+(filter/SOC/restoration); Armand–Benoist–Orban 2008/2013 (dynamic μ).
+
+| # | Item | Status |
+|---|---|---|
+| L1 | (θ,φ) filter + switching + Armijo (Wächter–Biegler) | ✅ replaces the heuristic 3-axis acceptance as the primary path (legacy axes kept as extra acceptance paths); φ = barrier merit with the current γ |
+| L2 | Filter domination history | ✅ observed defect: current-point-only pairs let case1888rte wander 640 iters (obj 56714); with history it converges at **59771.2 ≈ MATPOWER reference (−0.03%)** in 152 iters, 5.8 s |
+| L3 | Bounded restoration phase | ✅ (1,1):=ρI feasibility step on total filter failure, θ-Armijo + dual-axis bounds |
+| L4 | θ_max safeguard + vacuous-step rule | ✅ trajectory instrumentation showed the real defect was NOT a missing θ cap (1e4·θ₀ never binds on the scaled θ) but **vacuous tiny-α acceptance**: at α ~ 1e-9 the (1−ηα) margins are ~1−1e-12, so any wiggle passes and the IPM random-walks to the cap while comp improves toward an infeasible barrier-stationary point (feas stuck 0.16, viol 30).  Steps with min(α_p,α_d) < 1e-7 are now declared unusable → line search fails → restoration fires.  case1888rte improved further as a side effect: obj 59771 → **59786.2** (−0.008% vs MATPOWER reference), maxviol 2.7e-3 → 2.0e-3 |
+| L5 | Lazy φ evaluation | ✅ O(niq) log-sum only when θ-domination cannot settle acceptance — 1888rte 7.6→5.8 s, case1354 2.2→1.76 s, trajectories bit-identical |
+| L6 | Measured state | case1354 74069.4 (=Ipopt, 1.75 s, 43× Ipopt time); case1951rte 81757.8; case1888rte 59771.2; small sweep all at optima (viol ≤1.5e-5); case13659 — see below |
+| L7 | case13659 with L1–L5 | ⚠️ still open: with θ_max + vacuous-step gate + restoration, max violation 30 → **3.77** (8× more feasible), obj 2.72e6, but hits the 640-iter cap (327 s).  The pegase-13659 midgame needs the dynamic-μ / warm-start items (§10.2) — globalization alone cannot supply the convergence rate.  case9241pegase/case2869pegase likewise still fail (filter-fail); all rte cases (1888/1951/6468/6495) and case1354pegase now converge at their reference optima |
+
+Open (documented next): dynamic barrier updates (Armand–Benoist–Orban) for
+the ftb-limited α-crawl on case13659; DC-OPF warm start (Kardos §5.3);
+scatter-map KKT assembly (§4) for the ~25% per-iteration assembly cost.
+
+### Phase-7 slice — §10.2 candidates tried (ABO dynamic-μ, DC-OPF warm start)
+
+Both §10.2 "next slice" items were implemented per the cited literature and
+measured.  Both are **negative/mixed results**, documented with causes; the
+code keeps them env/probe-gated, defaults unchanged.
+
+| # | Item | Outcome |
+|---|---|---|
+| A1 | ABO dynamic-μ (`HACDCPF_OPF_MU_STRATEGY=abo`) | ❌ broke case118/1354/1888rte (3/3).  The θ_S update is a Newton step on the augmented (w,μ) system with its own μ-line-search (ABO 2008 §1,§6); dropped onto the Mehrotra skeleton it loses the σ³ self-limiting property, and the re-centering boost can pump μ upward.  Faithful port = full augmented-system treatment — deferred, documented in §10.2 |
+| A2 | DC-OPF warm start (+5% interior shift) | ⚠️ case-dependent: 1888rte 168→130 iters, 1354 88→302 iters (worse), 118 neutral; case13659 obj 2.7e6→1.78e6 but viol 3.8→6.6, still capped at 640 (528 s incl. 146 s DC solve — the DC LP itself is not cheap at this scale).  Existing physics-informed x0 already supplies DC-θ + interior dispatch; LP-vertex dispatches are interior-hostile.  Probe-gated (`HACDCPF_PROBE_DC_WS`), not a library default |
+| A3 | Ipopt-on-13659 calibration | Ipopt (MUMPS 5.7.3) ran ~55 min on case13659 with no result (stopped).  The DC LP reference (obj 381432, ≈ PGLIB 386107 −1.2%) confirms the model assembly is correct — the parity IPM's stall far from the optimum is algorithmic, not a modeling artifact; and the case is hard for the reference solver too |
+| A4 | case13659 final state | not converged: best endpoint obj 1.78e6 (DC-WS start) / viol 3.8 (vacuous gate + restoration).  The remaining gap is the midgame convergence *rate* on the pegase stressed-grid family (2869/9241/13659); rte family (1888/1951/6468/6495) + 1354pegase + all small cases converge at reference optima |
+
+### Phase-8 slice — DC-OPF → AC-PF cascade warm start (user-proposed, measured)
+
+User's proposal: DC OPF for dispatch, AC power flow to correct to an
+AC-feasible (vm, va), IPM from θ ≈ 0.  Measured across the case zoo with
+three variants (probe-gated: `HACDCPF_PROBE_DCPF_WS` cascade,
+`HACDCPF_PROBE_PF_WS` flat-start ACPF only, `HACDCPF_PROBE_DC_WS` DC only):
+
+| case | cascade (DC→ACPF→IPM) | flat ACPF start | no start (baseline) |
+|---|---|---|---|
+| case1888rte | **59791.2 (−0.0007% vs ref), 107 iters, 3.0 s** — best yet | 59791.4, 135 iters, 3.9 s | 59786.2, 168 iters, 5.0 s |
+| case1354pegase | 74069.4 ✓ but 479 iters (vs 88) | 74069.4 ✓ but 330 iters | **88 iters, 1.74 s — baseline wins** |
+| case2869pegase | still filter-fail | still filter-fail | still filter-fail |
+| case9241pegase | **ACPF diverged** (residual 9.5/50 iters) → moot | still filter-fail | still filter-fail |
+| case13659pegase | **ACPF diverged** (residual 25.9/50 iters) → moot | (running) | viol 3.8, capped |
+
+Diagnostics extracted:
+- **The DC-OPF dispatch is AC-inconsistent on stressed cases**: ACPF
+  converges from the MATPOWER flat start on case13659 (9 iters, 5e-12) and
+  case9241 (16 iters) — the cases ARE AC-feasible — but diverges from the
+  DC-OPF dispatch on both.  Newton–Raphson cannot bridge the DC→AC gap on
+  stressed grids; the cascade inverts the useful order for exactly the
+  family that needs help.
+- **Feasible-but-off-center starts lose to infeasible-but-centered ones**
+  on well-posed cases: 1354 slows 88→330–479 iters with any
+  "exact-but-vertex" start.  Textbook IPM behavior (centrality > feasibility
+  at init), consistent with why Ipopt initializes by least squares + bound
+  pushes.
+- case6468/6495rte get worse with the PF start (bad basin / 640-cap) —
+  pf-ws must stay opt-in.
+
+### Headline result (Phase 8)
+
+**case13659pegase converges at the reference optimum** with the library
+option `ACOPFOptions::ac_pf_warm_start=true` (plain AC power flow from the
+case's own operating point seeds the IPM at θ ≈ 0):
+
+```
+converged (parity_ipm:sparse)  iters=189  obj=386107  maxviol=2.17e-06
+maxstat=9.35e-07  runtime=41.5s
+```
+
+obj = 386107 matches the PGLIB reference for case13659pegase.  Ipopt
+(MUMPS 5.7.3) did not return in ~55 min on the same case/machine; the
+plain-IPM default trajectory stalls far from the optimum (obj ~1.8–2.7e6,
+violation capped).  The mechanism: the stressed-pegase failure was the
+IPM *leaving the feasible basin* midgame; starting AC-feasible keeps the
+(θ,φ) filter in the switching/Armijo regime from iteration 0, so the
+barrier machinery only has to optimize.  The option is opt-in because the
+same start is case-dependent elsewhere (helps 13659/1888rte, slows
+case1354 88→330 iters, bad-basins 6468rte, breaks 6495rte) — enable for
+large stressed grids when the default start fails.
+
+### Phase-9 slice — two-phase IPM (Phase I feasibility → Phase II quality), user-proposed
+
+Probe-validated protocol: Phase I = the same parity problem with all
+generator costs zeroed (pure feasibility + barrier), from the
+`ac_pf_warm_start` point; Phase II = the costed problem warm-started from
+the full Phase-I IPM state (primal + slacks + duals — carrying them is
+load-bearing; resetting duals dives to the bad basin).
+
+| case | Phase I | Phase II endpoint |
+|---|---|---|
+| case2869pegase | converged 24 iters, viol 5.5e-11 (1.2 s) | feas 1e-11, comp 6e-12, obj 134 989 = **+0.74% vs PGLIB ref** |
+| case9241pegase | converged 50 iters, viol 2.9e-9 (7.4 s) | feas 1e-9, obj 318 772 = **+0.90% vs PGLIB ref** |
+
+Measured mechanics (trajectory instrumentation):
+- Phase II reaches its endpoint objective within ~100 iterations, then
+  stagnates: obj oscillates at 1e-5 relative, `grad` pinned at 9.9e-3,
+  zero normal-filter accepts — a pure restoration crawl to the 640 cap.
+  The restoration steps carry zero stationarity rhs, so the dual residual
+  can never improve through them.
+- Bound-relaxation Phase I (enlarge limits past the AC-PF violation) does
+  NOT converge — the 1–3% overloads at the PF start are not the blocker;
+  the midgame dynamics are.
+- Dual-state reset (fresh λ/μ for Phase II) dives to the same infeasible
+  low-objective region as the baseline failure — the Phase-I dual state
+  encodes the feasible basin's multiplier structure.
+
+Missing for certification (both standard, neither trajectory-altering):
+1. **Objective-stagnation termination** — endpoint reached by iter ~100;
+   stopping on |Δobj| < ε over ~20 accepted iterations cuts ~80% of
+   Phase-II runtime (87 s → ~15 s on 2869).
+2. **Dual polish (least-squares multiplier re-estimate)** at termination —
+   minimize ‖f̃∇f + Jgᵀλ + Jhᵀμ‖ over (λ, μ ≥ 0); the standard finishing
+   step (Ipopt/MIPS), expected to report maxstat at the primal level
+   instead of the 1e-2 floor.
+
+### Phase-10 slice — theory-guided Phase I→II mapping (objective homotopy + centrality recovery)
+
+User's direction: the Phase-I/II idea comes from dual simplex, but the LP
+feasible set is convex — for nonconvex OPF the mapping needs theory, not
+trial and error.  Literature searched: Gondzio–Grothey 2003 (well-centered
+warm starts), Chen–Goulart–Jones 2025 (central-path smoothing operator,
+arXiv:2512.00693), Birgin–Krejić–Martínez inexact restoration (predictor
+↔ optimality, corrector ↔ feasibility, turning points = local violation
+minimizers), Park–Glista–Lavaei–Sojoudi (constraint homotopy for OPF),
+Todd (homotopy parameter metrics), sparse-LS solution certification.
+
+| # | Item | Status |
+|---|---|---|
+| T1 | Objective homotopy P(t) = min t·f s.t. g, h+z, z ≥ 0, t: 0→1, adaptive Δt (converged-in-≤20-iters doubles, failure halves) with full primal-dual state carried | ✅ case2869pegase: obj(t) tracks t·f* exactly, t=1 **certified at the EXACT PGLIB reference 133 999** (12 iters, stat 7.8e-8) — vs baseline filter-fail at 92 926, vs hard-switch two-phase (+0.74% uncertified) |
+| T2 | Dual least-squares polish `[I Aᵀ; A 0]` via the existing LDLᵀ machinery, μ ≥ 0 clip | ✅ implemented at IPM exit; certifies feasible endpoints; zero regressions |
+| T3 | Objective-stagnation early stop (feas<1e-4 ∧ comp<comp_tol ∧ |Δobj|≤1e-6(1+|obj|) over 20 accepted iters) | ✅ cuts ~80% of restoration-crawl tails; gated so healthy tails are never cut |
+| T4 | Centrality-recovery retry (Gondzio–Grothey): on total line-search failure with feasibility NOT the blocker, re-solve the corrector with γ = μ_cur, cross = 0 and re-run the line search | ✅ the piece that carries 9241 past its walls: without it the homotopy dies at t ≈ 0.55 (obj 288 970, off-path); with it the path climbs steadily through t ≈ 0.4+ at ~55 s/step (run continuing at measurement time) |
+| T5 | case13659 with T2–T4 | ✅ still converges at 386 107 (reference), 162 iters, 42 s |
+| T6 | case9241 with T1–T4 | ⏳ in progress at measurement time — path alive and converging step-by-step toward the reference value; final t=1 number pending |
+
+Production notes: the homotopy is the correct theory-guided mapping and
+the only mechanism so far that certifies 2869 at the exact optimum; its
+current cost on 9241 is many expensive steps (~55 s each) — the standard
+acceleration is the Davidenko tangent predictor (one back-solve per step
+for w′(t), then much bigger steps), noted as the next optimization.
