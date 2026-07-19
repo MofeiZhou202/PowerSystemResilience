@@ -24,11 +24,28 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
       "Build type (Debug, Release, RelWithDebInfo)" FORCE)
 endif()
 
-include(CheckIPOSupported)
-check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_out)
-if(_ipo_ok)
-  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
-  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+if(MINGW)
+  set(_HACDCPF_ENABLE_IPO_DEFAULT OFF)
+else()
+  set(_HACDCPF_ENABLE_IPO_DEFAULT ON)
+endif()
+option(HACDCPF_ENABLE_IPO
+       "Enable interprocedural optimization when supported"
+       ${_HACDCPF_ENABLE_IPO_DEFAULT})
+unset(_HACDCPF_ENABLE_IPO_DEFAULT)
+if(HACDCPF_ENABLE_IPO)
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_out)
+  if(_ipo_ok)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+  endif()
+elseif(MINGW)
+  foreach(_hacdcpf_ipo_lang C CXX)
+    set(CMAKE_${_hacdcpf_ipo_lang}_COMPILE_OPTIONS_IPO "")
+    set(CMAKE_${_hacdcpf_ipo_lang}_LINK_OPTIONS_IPO "")
+  endforeach()
+  unset(_hacdcpf_ipo_lang)
 endif()
 
 # ── Options ───────────────────────────────────────────────────────────────────
@@ -109,6 +126,60 @@ if(HACDCPF_ENABLE_IPOPT AND NOT APPLE)
     "or extend MIPSolvers/cmake/BuildIpopt.cmake for that platform.")
 endif()
 
+include(FetchContent)
+
+set(_hacdcpf_fmt_source "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fmt-10.2.1")
+set(_hacdcpf_fmt_build "${CMAKE_CURRENT_BINARY_DIR}/_deps/fmt-build")
+file(TO_CMAKE_PATH "${_hacdcpf_fmt_build}" _hacdcpf_fmt_build_norm)
+if(DEFINED fmt_DIR)
+  file(TO_CMAKE_PATH "${fmt_DIR}" _hacdcpf_fmt_dir_norm)
+  if(_hacdcpf_fmt_dir_norm STREQUAL _hacdcpf_fmt_build_norm)
+    unset(fmt_DIR CACHE)
+  endif()
+endif()
+
+find_package(fmt CONFIG QUIET)
+if(NOT fmt_FOUND)
+  if(EXISTS "${_hacdcpf_fmt_source}/CMakeLists.txt")
+    set(FMT_INSTALL ON CACHE BOOL "" FORCE)
+    set(FMT_TEST OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${_hacdcpf_fmt_source}"
+                     "${_hacdcpf_fmt_build}"
+                     EXCLUDE_FROM_ALL)
+    set(fmt_DIR "${_hacdcpf_fmt_build}")
+    list(PREPEND CMAKE_PREFIX_PATH "${_hacdcpf_fmt_build}")
+  else()
+    FetchContent_Declare(
+      fmt
+      GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+      GIT_TAG        11.0.2
+      EXCLUDE_FROM_ALL)
+    FetchContent_MakeAvailable(fmt)
+  endif()
+endif()
+
+find_package(nlohmann_json 3.11 CONFIG QUIET)
+if(NOT nlohmann_json_FOUND)
+  set(_hacdcpf_json_source "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann_json-3.11.3")
+  if(EXISTS "${_hacdcpf_json_source}/CMakeLists.txt")
+    set(_hacdcpf_json_build "${CMAKE_CURRENT_BINARY_DIR}/_deps/nlohmann_json-build")
+    set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+    set(JSON_Install ON CACHE BOOL "" FORCE)
+    add_subdirectory("${_hacdcpf_json_source}"
+                     "${_hacdcpf_json_build}"
+                     EXCLUDE_FROM_ALL)
+    set(nlohmann_json_DIR "${_hacdcpf_json_build}" CACHE PATH "" FORCE)
+    list(PREPEND CMAKE_PREFIX_PATH "${_hacdcpf_json_build}")
+  else()
+    FetchContent_Declare(
+      nlohmann_json
+      GIT_REPOSITORY https://github.com/nlohmann/json.git
+      GIT_TAG        v3.11.3
+      EXCLUDE_FROM_ALL)
+    FetchContent_MakeAvailable(nlohmann_json)
+  endif()
+endif()
+
 if(HACDCPF_DEPENDENCY_PROFILE STREQUAL "minimal")
   set(_hacdcpf_build_mipsolvers_tests OFF)
   set(_hacdcpf_build_mipsolvers_scuc OFF)
@@ -176,6 +247,20 @@ if(WIN32 AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
       "Use the dynamic MSVC runtime so vcpkg x64-windows DLL packages link cleanly")
 endif()
 include(cmake/Dependencies.cmake)
+if(MINGW AND NOT HACDCPF_ENABLE_IPO)
+  foreach(_hacdcpf_no_ipo_target
+          mipsolvers libhighs libscip scip mipsolvers_hfactor)
+    if(TARGET ${_hacdcpf_no_ipo_target})
+      set_property(TARGET ${_hacdcpf_no_ipo_target} PROPERTY
+        INTERPROCEDURAL_OPTIMIZATION OFF)
+      set_property(TARGET ${_hacdcpf_no_ipo_target} PROPERTY
+        INTERPROCEDURAL_OPTIMIZATION_RELEASE OFF)
+      set_property(TARGET ${_hacdcpf_no_ipo_target} PROPERTY
+        INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO OFF)
+    endif()
+  endforeach()
+  unset(_hacdcpf_no_ipo_target)
+endif()
 
 set(HACDCPF_HAVE_OPENDSS OFF)
 set(HACDCPF_DSS_CAPI_RUNTIME_DLLS)
@@ -360,6 +445,7 @@ set(HACDCPF_SOURCES
   src/io/cim_io.cpp
   src/io/cim_dist_io.cpp
   src/io/matpower_parser.cpp
+  src/io/bpa_io.cpp
   src/io/case_builders.cpp
   src/io/scenario_bundle_io.cpp
   src/io/component_io_mapping.cpp
@@ -639,12 +725,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/matpower_pf_compare.cpp")
   add_executable(matpower_pf_compare tools/matpower_pf_compare.cpp)
   target_link_libraries(matpower_pf_compare PRIVATE hacdcpf::hacdcpf)
   hacdcpf_copy_opendss_runtime(matpower_pf_compare)
-endif()
-
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/transformer_tap_crosscheck.cpp")
-  add_executable(transformer_tap_crosscheck tools/transformer_tap_crosscheck.cpp)
-  target_link_libraries(transformer_tap_crosscheck PRIVATE hacdcpf::hacdcpf)
-  hacdcpf_copy_opendss_runtime(transformer_tap_crosscheck)
 endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/gridlabd_validation_matrix.cpp")

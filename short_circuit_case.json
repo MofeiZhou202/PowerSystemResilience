@@ -1,0 +1,440 @@
+{
+  "name": "Canvas System",
+  "base_mva": 100,
+  "ac": {
+    "buses": [
+      {
+        "index": 1,
+        "bus_type": "SLACK",
+        "base_kv": 33,
+        "vm_pu": 1,
+        "va_deg": 0,
+        "pd_mw": 0,
+        "qd_mvar": 0,
+        "vmin_pu": 0.9,
+        "vmax_pu": 1.1,
+        "gs_mw": 0,
+        "bs_mvar": 0,
+        "in_service": true,
+        "area": 1,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0
+      },
+      {
+        "index": 2,
+        "bus_type": "PQ",
+        "base_kv": 33,
+        "vm_pu": 1,
+        "va_deg": 0,
+        "pd_mw": 0,
+        "qd_mvar": 0,
+        "vmin_pu": 0.9,
+        "vmax_pu": 1.1,
+        "gs_mw": 0,
+        "bs_mvar": 0,
+        "in_service": true,
+        "area": 1,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0
+      },
+      {
+        "index": 3,
+        "bus_type": "PQ",
+        "base_kv": 33,
+        "vm_pu": 1,
+        "va_deg": 0,
+        "pd_mw": 0,
+        "qd_mvar": 0,
+        "vmin_pu": 0.9,
+        "vmax_pu": 1.1,
+        "gs_mw": 0,
+        "bs_mvar": 0,
+        "in_service": true,
+        "area": 1,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0
+      },
+      {
+        "index": 4,
+        "bus_type": "PQ",
+        "base_kv": 6,
+        "vm_pu": 1,
+        "va_deg": 0,
+        "pd_mw": 0,
+        "qd_mvar": 0,
+        "vmin_pu": 0.9,
+        "vmax_pu": 1.1,
+        "gs_mw": 0,
+        "bs_mvar": 0,
+        "in_service": true,
+        "area": 1,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0
+      }
+    ],
+    "branches": [
+      {
+        "index": 0,
+        "from_bus": 1,
+        "to_bus": 3,
+        "r_pu": 0.044536273094582184,
+        "x_pu": 0.044536273094582184,
+        "b_pu": 0,
+        "rate_a_mva": 100,
+        "rate_b_mva": 0,
+        "rate_c_mva": 0,
+        "length_km": 4.85,
+        "tap": 1,
+        "shift_deg": 0,
+        "in_service": true,
+        "n_parallel": 1
+      },
+      {
+        "index": 1,
+        "from_bus": 1,
+        "to_bus": 2,
+        "r_pu": 0.044536273094582184,
+        "x_pu": 0.044536273094582184,
+        "b_pu": 0,
+        "rate_a_mva": 100,
+        "rate_b_mva": 0,
+        "rate_c_mva": 0,
+        "length_km": 4.85,
+        "tap": 1,
+        "shift_deg": 0,
+        "in_service": true,
+        "n_parallel": 1
+      }
+    ],
+    "generators": [],
+    "loads": [],
+    "static_generators": [],
+    "storage": [],
+    "renewable_gens": [],
+    "pv_systems": [],
+    "external_grids": [
+      {
+        "index": 0,
+        "bus": 1,
+        "vm_pu": 1.05,
+        "va_deg": 0,
+        "s_sc_max_mva": 10000,
+        "s_sc_min_mva": 8000,
+        "rx_max": 0.1,
+        "rx_min": 0.1,
+        "ikq_ka": 13.12,
+        "x_r": 10,
+        "r_pu": 0.0146,
+        "x_pu": 0.146,
+        "r0_pu": 0,
+        "x0_pu": 0,
+        "vn_kv": 33,
+        "controllable": false,
+        "in_service": true
+      }
+    ],
+    "transformers_2w": [
+      {
+        "index": 0,
+        "hv_bus": 3,
+        "lv_bus": 4,
+        "sn_mva": 15,
+        "vn_hv_kv": 33,
+        "vn_lv_kv": 6.3,
+        "vk_percent": 15,
+        "vkr_percent": 0.601,
+        "pfe_kw": 30,
+        "i0_percent": 0.1,
+        "shift_deg": 0,
+        "tap_side": 0,
+        "tap_pos": 0,
+        "tap_min": -8,
+        "tap_max": 8,
+        "tap_neutral": 0,
+        "tap_step_percent": 1.25,
+        "vector_group": "",
+        "in_service": true
+      },
+      {
+        "index": 1,
+        "hv_bus": 2,
+        "lv_bus": 4,
+        "sn_mva": 15,
+        "vn_hv_kv": 33,
+        "vn_lv_kv": 6.3,
+        "vk_percent": 15,
+        "vkr_percent": 0.601,
+        "pfe_kw": 30,
+        "i0_percent": 0.1,
+        "shift_deg": 0,
+        "tap_side": 0,
+        "tap_pos": 0,
+        "tap_min": -8,
+        "tap_max": 8,
+        "tap_neutral": 0,
+        "tap_step_percent": 1.25,
+        "vector_group": "",
+        "in_service": true
+      }
+    ],
+    "switches": [],
+    "circuit_breakers": [],
+    "motors": [
+      {
+        "index": 0,
+        "bus": 4,
+        "vn_kv": 6,
+        "sn_mva": 5.994,
+        "r_pu": 0.14941,
+        "x_pu": 1.49411,
+        "x_r": 10,
+        "lrc": 4,
+        "poles": 2,
+        "cos_phi": 0.86,
+        "efficiency": 0.97,
+        "r0_pu": 0,
+        "x0_pu": 0,
+        "in_service": true
+      },
+      {
+        "index": 1,
+        "bus": 4,
+        "vn_kv": 6,
+        "sn_mva": 3.845,
+        "r_pu": 0.16938,
+        "x_pu": 1.69381,
+        "x_r": 10,
+        "lrc": 5.5,
+        "poles": 3,
+        "cos_phi": 0.83,
+        "efficiency": 0.94,
+        "r0_pu": 0,
+        "x0_pu": 0,
+        "in_service": true
+      }
+    ],
+    "flexible_loads": [],
+    "asymmetric_loads": [],
+    "shunts": [],
+    "transformers_3w": [],
+    "chargers": [],
+    "charging_stations": []
+  },
+  "dc": {
+    "buses": [],
+    "branches": [],
+    "loads": [],
+    "static_generators": [],
+    "pv_arrays": []
+  },
+  "vsc_converters": [],
+  "dcdc_converters": [],
+  "energy_routers": [],
+  "mobile_storage": [],
+  "vpps": [],
+  "microgrids": [],
+  "_canvas": {
+    "version": 1,
+    "viewBox": {
+      "x": -218.98398954199058,
+      "y": -71.53367989174222,
+      "w": 1157.549565568587,
+      "h": 675.237246581676
+    },
+    "components": [
+      {
+        "key": "ac_bus#1",
+        "type": "ac_bus",
+        "x": 300,
+        "y": 0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#2",
+        "type": "ac_bus",
+        "x": 400,
+        "y": 200,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#3",
+        "type": "ac_bus",
+        "x": 200,
+        "y": 200,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#4",
+        "type": "ac_bus",
+        "x": 300,
+        "y": 400,
+        "rotation": 0
+      },
+      {
+        "key": "external_grid#1",
+        "type": "external_grid",
+        "x": 300,
+        "y": -80,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#1",
+        "type": "ac_branch",
+        "x": 200,
+        "y": 100,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#2",
+        "type": "ac_branch",
+        "x": 400,
+        "y": 100,
+        "rotation": 0
+      },
+      {
+        "key": "transformer_2w#1",
+        "type": "transformer_2w",
+        "x": 200,
+        "y": 300,
+        "rotation": 0
+      },
+      {
+        "key": "transformer_2w#2",
+        "type": "transformer_2w",
+        "x": 400,
+        "y": 300,
+        "rotation": 0
+      },
+      {
+        "key": "motor#1",
+        "type": "motor",
+        "x": 240,
+        "y": 500,
+        "rotation": 0
+      },
+      {
+        "key": "motor#2",
+        "type": "motor",
+        "x": 360,
+        "y": 500,
+        "rotation": 0
+      }
+    ],
+    "connections": [
+      {
+        "from": {
+          "key": "external_grid#1",
+          "port": "bottom"
+        },
+        "to": {
+          "key": "ac_bus#1",
+          "port": "top"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "bottom"
+        },
+        "to": {
+          "key": "ac_branch#1",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#3",
+          "port": "top"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#3",
+          "port": "bottom"
+        },
+        "to": {
+          "key": "transformer_2w#1",
+          "port": "hv"
+        }
+      },
+      {
+        "from": {
+          "key": "transformer_2w#1",
+          "port": "lv"
+        },
+        "to": {
+          "key": "ac_bus#4",
+          "port": "top"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "bottom"
+        },
+        "to": {
+          "key": "ac_branch#2",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#2",
+          "port": "top"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#2",
+          "port": "bottom"
+        },
+        "to": {
+          "key": "transformer_2w#2",
+          "port": "hv"
+        }
+      },
+      {
+        "from": {
+          "key": "transformer_2w#2",
+          "port": "lv"
+        },
+        "to": {
+          "key": "ac_bus#4",
+          "port": "top"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#4",
+          "port": "bottom"
+        },
+        "to": {
+          "key": "motor#1",
+          "port": "top"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#4",
+          "port": "bottom"
+        },
+        "to": {
+          "key": "motor#2",
+          "port": "top"
+        }
+      }
+    ]
+  }
+}

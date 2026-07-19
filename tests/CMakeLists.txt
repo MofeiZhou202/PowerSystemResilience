@@ -56,6 +56,9 @@ hacdcpf_add_test(test_io_json             test_io_json.cpp)
 # I/O: MATPOWER unit-discipline contract (§6.3).
 hacdcpf_add_test(test_io_matpower         test_io_matpower.cpp)
 
+# I/O: PSD-BPA / DSP card-file (.dat) importer (structure + DSP-solution parity).
+hacdcpf_add_test(test_bpa_io              test_bpa_io.cpp)
+
 # I/O: round-trip / conformance contract (§7).
 hacdcpf_add_test(test_io_roundtrip        test_io_roundtrip.cpp)
 
@@ -396,8 +399,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
   add_custom_command(TARGET run_gui_server POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:run_gui_server>"
-            "${CMAKE_BINARY_DIR}/run_gui_server"
-    COMMENT "Copying run_gui_server to ${CMAKE_BINARY_DIR}/run_gui_server")
+            "${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:run_gui_server>"
+    COMMENT "Copying run_gui_server to ${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:run_gui_server>")
   if(HACDCPF_HAVE_OPENDSS AND HACDCPF_DSS_CAPI_RUNTIME_DLLS)
     add_custom_command(TARGET run_gui_server POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different

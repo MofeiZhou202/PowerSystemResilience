@@ -1045,6 +1045,36 @@ TEST_CASE("SC: classical hand examples match embedded expected values",
   }
 }
 
+TEST_CASE("SC: short_circuit_case bus4 matches classical reference",
+          "[short_circuit][regression]") {
+#ifdef HACDCPF_PROJECT_ROOT
+  const std::string root = HACDCPF_PROJECT_ROOT;
+#else
+  const std::string root = ".";
+#endif
+  const std::string text = read_text_file(root + "/short_circuit_case.json");
+  const auto sys = hacdcpf::io::from_json(text);
+
+  SCDetailedOptions opt;
+  opt.compute_branch_flows = false;
+  opt.compute_voltage_drops = false;
+  opt.compute_ith = false;
+
+  const auto result = run_short_circuit_detailed(sys, 4, opt);
+  REQUIRE(result.solved);
+  const auto& row = fault_row(result);
+
+  INFO("ikss_ka=" << row.ikss_ka << " ip_ka=" << row.ip_ka
+       << " ib_ka=" << row.ib_ka << " ik_ka=" << row.ik_ka
+       << " motor=" << row.ikss_motor_contrib_ka
+      << " no_motor=" << row.ikss_no_motor_ka
+       << " extgrid=" << row.ikss_extgrid_contrib_ka);
+  CHECK(std::abs(row.ikss_ka - 19.52) <= 0.05);
+  CHECK(std::abs(row.ip_ka - 48.82) <= 0.10);
+  CHECK(std::abs(row.ib_ka - 17.04) <= 0.05);
+  CHECK(std::abs(row.ik_ka - 14.74) <= 0.05);
+}
+
 TEST_CASE("SC: practical classical examples satisfy stress invariants",
           "[short_circuit][short_circuit_example][practical]") {
 #ifdef HACDCPF_PROJECT_ROOT

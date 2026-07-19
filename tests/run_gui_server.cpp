@@ -552,7 +552,7 @@ std::string sc_kappa_method_name(hacdcpf::analysis::SCKappaMethod km) {
     case hacdcpf::analysis::SCKappaMethod::B: return "B";
     case hacdcpf::analysis::SCKappaMethod::C: return "C";
   }
-  return "B";
+  return "C";
 }
 
 std::string sc_topology_name(hacdcpf::analysis::SCTopology top) {
@@ -640,7 +640,7 @@ void apply_sc_request_options(const json& root,
   }
 
   const std::string kappa =
-      o->value("kappa_method", o->value("kappa", std::string("B")));
+      o->value("kappa_method", o->value("kappa", std::string("C")));
   if (kappa == "A" || kappa == "a" || kappa == "MethodA" || kappa == "method_a") {
     opt.kappa_method = hacdcpf::analysis::SCKappaMethod::A;
   } else if (kappa == "C" || kappa == "c" || kappa == "MethodC" || kappa == "method_c") {
@@ -8419,6 +8419,7 @@ json system_summary(const hacdcpf::HybridPowerSystem& sys) {
   return s;
 }
 
+<<<<<<< Updated upstream
 json rpo_control_inventory_json(const hacdcpf::HybridPowerSystem& sys,
                                 const hacdcpf::opf::RPOOptions& opt = {}) {
   const auto inventory = hacdcpf::opf::inspect_rpo_controls(sys, opt);
@@ -8430,8 +8431,1460 @@ json rpo_control_inventory_json(const hacdcpf::HybridPowerSystem& sys,
     if (it == sys.ac.buses.end() || it->name.empty())
       return std::string("Bus ") + std::to_string(index);
     return it->name + " (" + std::to_string(index) + ")";
+=======
+#if 0
+std::string make_index_html() {
+  return R"html(<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Hybrid AC/DC Planning Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<style>
+:root {
+  --bg: #f3efe7; --paper: #fffdf8; --ink: #17252a;
+  --accent: #0b6e4f; --accent-2: #2c8c99; --muted: #5a666a;
+  --warn: #b5651d; --line: #d6d0c4; --danger: #c34d4d;
+}
+*{box-sizing:border-box;}
+body{margin:0;font-family:"Space Grotesk",sans-serif;color:var(--ink);
+  background:radial-gradient(circle at 10% 10%,rgba(44,140,153,0.14),transparent 35%),
+    radial-gradient(circle at 90% 80%,rgba(11,110,79,0.16),transparent 30%),
+    linear-gradient(165deg,#f8f3eb 0%,#ece7de 100%);min-height:100vh;}
+header{padding:16px 28px;border-bottom:1px solid var(--line);
+  backdrop-filter:blur(4px);background:rgba(255,253,248,0.85);
+  position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:18px;}
+header h1{margin:0;font-size:clamp(1rem,2vw,1.5rem);letter-spacing:.03em;}
+header .subtitle{color:var(--muted);font-size:.85rem;}
+header .spacer{flex:1;}
+.badge{display:inline-block;padding:3px 10px;border-radius:6px;font-size:.75rem;
+  font-weight:600;letter-spacing:.04em;}
+.badge-green{background:#d9f2e6;color:#0b6e4f;}
+.badge-orange{background:#fde8d0;color:#b5651d;}
+.container{width:min(1440px,97vw);margin:14px auto 28px;}
+.top-bar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center;}
+.top-bar select,.top-bar input[type=file]{border-radius:10px;border:1px solid #cfc7ba;
+  padding:7px 10px;font:inherit;background:#fff;min-width:160px;}
+.top-bar .sep{width:1px;height:28px;background:var(--line);}
+.grid{display:grid;grid-template-columns:1fr;gap:14px;}
+.panel{background:var(--paper);border:1px solid var(--line);border-radius:14px;
+  box-shadow:0 10px 28px rgba(23,37,42,.08);}
+.tabs{display:flex;gap:6px;padding:8px 10px;border-bottom:1px solid var(--line);
+  overflow-x:auto;flex-wrap:nowrap;}
+.tab{padding:8px 14px;border-radius:8px;border:1px solid var(--line);
+  cursor:pointer;background:#fdf9f1;font-size:.85rem;white-space:nowrap;
+  transition:all .15s ease;}
+.tab.active{background:var(--accent-2);color:#fff;border-color:var(--accent-2);}
+.tab:hover:not(.active){background:#f0ede5;}
+.tabpane{display:none;padding:14px;animation:fadeIn .25s ease;}
+.tabpane.active{display:block;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:none;}}
+.counts{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;}
+.count-chip{background:#fff;border:1px solid var(--line);border-radius:8px;
+  padding:5px 12px;font-size:.8rem;display:flex;align-items:center;gap:6px;}
+.count-chip .n{font-weight:700;color:var(--accent);font-size:.95rem;}
+.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));
+  gap:8px;margin-bottom:10px;}
+.kpi{border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px 10px;}
+.kpi .v{font-size:1.1rem;font-weight:700;color:#15353a;}
+.kpi .l{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;}
+.stg{padding:4px 10px;border-radius:12px;font-size:.78rem;font-weight:600;background:#e9ecef;color:#6c757d;}
+.stg.done{background:#d4edda;color:#155724;} .stg.active{background:#cce5ff;color:#004085;animation:pulse 1s infinite;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+.dtable-wrap{max-height:420px;overflow:auto;border:1px solid var(--line);
+  border-radius:10px;margin-bottom:10px;}
+table.dtable{width:100%;border-collapse:collapse;font-size:.8rem;}
+table.dtable th{position:sticky;top:0;background:#f4f1ea;border-bottom:2px solid var(--line);
+  padding:7px 8px;text-align:left;font-weight:600;white-space:nowrap;z-index:2;}
+table.dtable td{padding:5px 8px;border-bottom:1px solid #eae6de;white-space:nowrap;}
+table.dtable tr:hover{background:#f9f6ef;}
+table.dtable input,table.dtable select{border:1px solid transparent;background:transparent;
+  font:inherit;padding:2px 4px;width:100%;border-radius:4px;min-width:60px;}
+table.dtable input:focus,table.dtable select:focus{border-color:var(--accent-2);
+  background:#fff;outline:none;}
+table.dtable .row-del{cursor:pointer;color:var(--danger);font-size:.9rem;
+  background:none;border:none;width:auto;min-width:auto;padding:2px;}
+.chart{height:360px;border:1px solid var(--line);border-radius:10px;
+  background:#fff;margin-top:8px;}
+button,.btn{border-radius:10px;border:none;padding:8px 14px;font:inherit;
+  cursor:pointer;font-weight:600;font-size:.85rem;transition:all .15s ease;}
+.btn-primary{background:var(--accent);color:#fff;}
+.btn-primary:hover{box-shadow:0 6px 14px rgba(11,110,79,.25);transform:translateY(-1px);}
+.btn-secondary{background:#fff;color:var(--accent);border:1px solid var(--accent);}
+.btn-secondary:hover{background:#f0fdf6;}
+.btn-accent{background:var(--accent-2);color:#fff;}
+.btn-accent:hover{box-shadow:0 6px 14px rgba(44,140,153,.25);}
+.btn-danger{background:var(--danger);color:#fff;}
+.btn-sm{padding:5px 10px;font-size:.78rem;}
+.btn-group{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;}
+.status{margin-top:8px;border:1px dashed #bcc5bf;border-radius:9px;padding:8px 10px;
+  font-size:.85rem;color:#2d3f43;background:#fbfaf6;}
+.mono{font-family:"IBM Plex Mono",monospace;font-size:.78rem;}
+label{display:block;font-size:.82rem;margin:6px 0 4px;color:#294045;}
+select,input[type=number]{width:100%;border-radius:8px;border:1px solid #cfc7ba;
+  padding:7px 8px;font:inherit;background:#fff;}
+textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
+  font-family:"IBM Plex Mono",monospace;font-size:.78rem;
+  min-height:100px;resize:vertical;background:#fff;}
+.ctrl-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:6px;}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Hybrid AC/DC Planning Studio</h1>
+  <span class="subtitle">Power Flow &bull; OPF &bull; UC &bull; Carbon &bull; Reconfig &bull; Annual Sim &bull; Dashboard</span>
+  <span class="spacer"></span>
+  <span id="sysLabel" class="badge badge-orange">No system loaded</span>
+</header>
+
+<div class="container">
+  <!-- Top bar: case loading & file I/O -->
+  <div class="top-bar">
+    <select id="builtinSelect" title="Built-in case"></select>
+    <button class="btn btn-primary btn-sm" id="loadBuiltinBtn">Load Built-in</button>
+    <span class="sep"></span>
+    <select id="matpowerSelect" title="MATPOWER case file"></select>
+    <button class="btn btn-accent btn-sm" id="loadMatpowerBtn">Load MATPOWER</button>
+    <span class="sep"></span>
+    <input type="file" id="jsonFileInput" accept=".json" title="Upload JSON system file"/>
+    <button class="btn btn-secondary btn-sm" id="uploadJsonBtn">Upload JSON</button>
+    <span class="sep"></span>
+    <input type="file" id="etapXmlInput" accept=".xml" title="Import a native ETAP project XML (Feeder.xml)"/>
+    <button class="btn btn-secondary btn-sm" id="loadEtapXmlBtn">Import ETAP XML</button>
+    <span class="sep"></span>
+    <button class="btn btn-secondary btn-sm" id="exportJsonBtn">Export JSON</button>
+    <button class="btn btn-secondary btn-sm" id="exportEtapBtn">Export ETAP</button>
+    <button class="btn btn-secondary btn-sm" id="newCaseBtn">New Empty Case</button>
+  </div>
+
+  <!-- Component counts -->
+  <div id="countsBar" class="counts"></div>
+
+  <!-- Main panel -->
+  <div class="grid">
+    <div class="panel">
+      <div class="tabs">
+        <div class="tab active" data-tab="builderPane">Case Builder</div>
+        <div class="tab" data-tab="pfPane">Power Flow</div>
+        <div class="tab" data-tab="opfPane">OPF</div>
+        <div class="tab" data-tab="scPane">Short Circuit</div>
+        <div class="tab" data-tab="jsonPane">JSON Editor</div>
+        <div class="tab" data-tab="tsPane">Time-Series PF</div>
+        <div class="tab" data-tab="ucPane">Unit Commitment</div>
+        <div class="tab" data-tab="marketPane">Market Simulation</div>
+        <div class="tab" data-tab="carbonPane">Carbon Flow</div>
+        <div class="tab" data-tab="reliabilityPane">Reliability</div>
+        <div class="tab" data-tab="resiliencePane">Resilience</div>
+        <div class="tab" data-tab="rpoPane">RPO (MINLP)</div>
+        <div class="tab" data-tab="reconfigPane">Net. Reconfig</div>
+        <div class="tab" data-tab="annualPane">Annual Sim</div>
+        <div class="tab" data-tab="lifecyclePane">Lifecycle Sim</div>
+        <div class="tab" data-tab="dashPane">Dashboard</div>
+      </div>
+
+      <!-- ======================== CASE BUILDER TAB ======================== -->
+      <section id="builderPane" class="tabpane active">
+        <div class="tabs" id="compTabs" style="border:none;padding:0 0 8px 0;"></div>
+        <div class="btn-group">
+          <button class="btn btn-primary btn-sm" id="addRowBtn">+ Add Row</button>
+          <button class="btn btn-accent btn-sm" id="commitBtn">Commit Changes to System</button>
+        </div>
+        <div id="compTableArea"></div>
+      </section>
+
+      <!-- ======================== POWER FLOW TAB ========================= -->
+      <section id="pfPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Method</label>
+            <select id="pfMethod">
+              <option value="ac_newton">AC Newton-Raphson</option>
+              <option value="dc">DC Power Flow</option>
+              <option value="hybrid_linearized">Hybrid AC/DC Linearized</option>
+              <option value="fdpf">Fast-Decoupled PF</option>
+              <option value="adaptive">Adaptive PF</option>
+              <option value="islanded">Islanded PF</option>
+              <option value="distributed_slack">Distributed Slack PF</option>
+              <option value="three_phase">Three-Phase PF</option>
+            </select>
+          </div>
+          <div><label>Max iterations</label><input id="pfMaxIter" type="number" min="5" max="500" value="80"/></div>
+          <div><label>Tolerance</label><input id="pfTol" type="number" step="1e-8" value="1e-8"/></div>
+          <div><label>FDPF Max Iter</label><input id="pfFdpfMaxIter" type="number" min="10" max="5000" value="1000"/></div>
+        </div>
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label><input type="checkbox" id="pfPvPq" checked style="width:auto;min-width:auto;"/> PV-PQ Conversion</label></div>
+          <div><label><input type="checkbox" id="pfAutoSwing" checked style="width:auto;min-width:auto;"/> Auto Swing Selection</label></div>
+          <div><label><input type="checkbox" id="pfConvSwitch" checked style="width:auto;min-width:auto;"/> Converter Mode Switching</label></div>
+          <div><label><input type="checkbox" id="pfCoordCheck" checked disabled style="width:auto;min-width:auto;"/> Converter Coordination Check</label></div>
+          <div><label><input type="checkbox" id="pfVerbose" style="width:auto;min-width:auto;"/> Verbose</label></div>
+          <div><label>PV Q Hysteresis (pu)</label><input id="pfPvQHyst" type="number" step="0.001" value="0.01" style="width:90px;"/></div>
+          <div><label>Max ΔVa (rad)</label><input id="pfMaxDVa" type="number" step="0.1" value="1.5" style="width:80px;"/></div>
+          <div><label>Max ΔVm (pu)</label><input id="pfMaxDVm" type="number" step="0.1" value="0.5" style="width:80px;"/></div>
+          <div><label>Loss Model</label>
+            <select id="pfLossModel">
+              <option value="linear">Linear</option>
+              <option value="current_based">Current-Based</option>
+            </select>
+          </div>
+          <div><label>Display Unit</label>
+            <select id="pfDisplayUnit">
+              <option value="MW" selected>MW</option>
+              <option value="kW">kW</option>
+              <option value="W">W</option>
+            </select>
+          </div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runPfBtn">Run Selected Method</button>
+          <button class="btn btn-accent" id="runPfCompareBtn">Compare All Methods</button>
+          <button class="btn" id="runSpptAgentBtn" style="background:#1f6f5f;color:#fff;">Run SPPT Agent Loop</button>
+        </div>
+        <div id="spptAgentOut" class="status mono" style="margin-top:8px;max-height:140px;overflow:auto;display:none;"></div>
+        <div class="kpis">
+          <div class="kpi"><div id="pfConv" class="v">-</div><div class="l">Converged</div></div>
+          <div class="kpi"><div id="pfIter" class="v">-</div><div class="l">Iterations</div></div>
+          <div class="kpi"><div id="pfRes" class="v">-</div><div class="l">Residual</div></div>
+          <div class="kpi"><div id="pfNBus" class="v">-</div><div class="l">AC Buses</div></div>
+        </div>
+        <div id="pfVoltChart" class="chart"></div>
+        <div id="pfDcVoltChart" class="chart"></div>
+        <div id="pfConverterChart" class="chart"></div>
+        <div id="pfBranchChart" class="chart"></div>
+        <div id="pfCompareChart" class="chart"></div>
+        <div id="pfCompareTable" class="status mono"></div>
+        <h3 style="margin:1.5rem 0 0.5rem;color:var(--accent);">GIS Network Map</h3>
+        <div id="pfGeoMap" class="chart" style="height:500px;"></div>
+      </section>
+
+      <!-- ========================== OPF TAB ============================== -->
+      <section id="opfPane" class="tabpane">
+        <div class="btn-group">
+          <label style="align-self:center;font-size:13px;color:#555;">AC Solver</label>
+          <select id="opfSolver" title="AC OPF solver backend">
+            <option value="auto" selected>Auto (Parity IPM &rarr; Ipopt)</option>
+            <option value="parity">Parity IPM (native)</option>
+            <option value="ipopt">Ipopt (filter line-search)</option>
+            <option value="dispatch">Economic Dispatch (fast)</option>
+          </select>
+          <button class="btn btn-primary" id="runAcOpfBtn">Run AC OPF</button>
+          <button class="btn btn-accent" id="runDcOpfBtn">Run DC OPF</button>
+          <button class="btn" id="runParityOpfBtn" style="background:#6a0dad;color:#fff;">Run Parity OPF</button>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="opfType" class="v">-</div><div class="l">Solver</div></div>
+          <div class="kpi"><div id="opfConv" class="v">-</div><div class="l">Converged</div></div>
+          <div class="kpi"><div id="opfObj" class="v">-</div><div class="l">Objective</div></div>
+          <div class="kpi"><div id="opfIter" class="v">-</div><div class="l">Iterations</div></div>
+        </div>
+        <div id="opfDispatchChart" class="chart"></div>
+        <div id="opfAuxChart" class="chart"></div>
+        <div id="opfLmpChart" class="chart"></div>
+        <div id="opfDcVoltChart" class="chart"></div>
+        <div id="opfConverterChart" class="chart"></div>
+      </section>
+
+      <!-- ========================== SC TAB =============================== -->
+      <section id="scPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Domain</label>
+            <select id="scDomain">
+              <option value="AC">AC</option>
+              <option value="DC">DC</option>
+            </select>
+          </div>
+          <div><label>Fault type</label>
+            <select id="scFaultType">
+              <option value="ThreePhase">Three-Phase</option>
+              <option value="SinglePhaseGround">Single-Phase-Ground</option>
+              <option value="TwoPhase">Two-Phase</option>
+              <option value="TwoPhaseGround">Two-Phase-Ground</option>
+            </select>
+          </div>
+          <div><label>Calculation</label>
+            <select id="scCalcType">
+              <option value="Max">Maximum</option>
+              <option value="Min">Minimum</option>
+            </select>
+          </div>
+          <div><label>c-factor</label><input id="scCFactor" type="number" step=".01" value="1.10"/></div>
+          <div><label>Kappa method</label>
+            <select id="scKappaMethod">
+              <option value="B">IEC B</option>
+              <option value="A">IEC A</option>
+              <option value="C" selected>IEC C</option>
+            </select>
+          </div>
+          <div><label>Topology</label>
+            <select id="scTopology">
+              <option value="Meshed">Meshed</option>
+              <option value="Radial">Radial</option>
+            </select>
+          </div>
+          <div><label>Fault Z (pu)</label><input id="scFaultImpedance" type="number" step=".001" value="0"/></div>
+          <div><label>Breaking t (s)</label><input id="scBreakingTime" type="number" step=".01" value="0.10"/></div>
+          <div><label>Thermal Tk (s)</label><input id="scIthDuration" type="number" step=".1" value="1.0"/></div>
+          <div><label>Frequency (Hz)</label><input id="scBaseFrequency" type="number" step="1" value="50"/></div>
+          <div><label>Default x''d (pu)</label><input id="scDefaultXdpp" type="number" step=".01" value="0.20"/></div>
+          <div><label>DC Vsrc (pu)</label><input id="dcScSourceVoltage" type="number" step=".01" value="0"/></div>
+          <div><label><input id="dcScConsiderBreakers" type="checkbox" checked/> DCCB topology</label></div>
+          <div><label><input id="dcScBreakerControlsBranch" type="checkbox" checked/> DCCB controls branch</label></div>
+          <div><label><input id="dcScAddBreakerEdges" type="checkbox" checked/> Closed DCCB edges</label></div>
+          <div><label><input id="scComputeBranchFlows" type="checkbox" checked/> Branch flows</label></div>
+          <div><label><input id="scComputeVoltageDrops" type="checkbox" checked/> Voltage drops</label></div>
+          <div><label><input id="scComputeIth" type="checkbox" checked/> Thermal Ith</label></div>
+          <div><label>Fault Bus (blank=all)</label><input id="scFaultBus" type="text" placeholder="e.g. 0,3,5 or blank" style="width:130px;"/></div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runScBtn">Run Short Circuit (All Buses)</button>
+          <button class="btn btn-accent" id="runScDetailedBtn">Run Detailed SC (Selected Buses)</button>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="scFault" class="v">-</div><div class="l">Fault Type</div></div>
+          <div class="kpi"><div id="scBuses" class="v">-</div><div class="l">Buses</div></div>
+          <div class="kpi"><div id="scMaxIk" class="v">-</div><div class="l">Max Ik" kA</div></div>
+          <div class="kpi"><div id="scMinIk" class="v">-</div><div class="l">Min Ik" kA</div></div>
+        </div>
+        <div id="scIkChart" class="chart"></div>
+        <div id="scSkChart" class="chart"></div>
+        <div id="scDetailedChart" class="chart"></div>
+        <div id="scContribChart" class="chart"></div>
+        <div id="scVremainChart" class="chart"></div>
+      </section>
+
+      <!-- ======================== JSON EDITOR TAB ======================== -->
+      <section id="jsonPane" class="tabpane">
+        <div class="btn-group">
+          <button class="btn btn-primary btn-sm" id="applyJsonBtn">Apply JSON to System</button>
+          <button class="btn btn-secondary btn-sm" id="refreshJsonBtn">Refresh from System</button>
+        </div>
+        <textarea id="jsonEditor" style="min-height:500px;" placeholder="Load a case first..."></textarea>
+      </section>
+
+      <!-- =================== RPO (MINLP) TAB ========================= -->
+      <section id="rpoPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Objective</label>
+            <select id="rpoObjective">
+              <option value="voltage" selected>Minimize Voltage Deviation</option>
+              <option value="loss">Minimize Active Power Loss</option>
+              <option value="combined">Combined (Loss + V-dev)</option>
+            </select>
+          </div>
+          <div><label>MIP Gap (%)</label><input id="rpoMipGap" type="number" step="0.001" value="0.01"></div>
+          <div><label>Time Limit (s)</label><input id="rpoTimeLimit" type="number" min="10" max="600" value="120"></div>
+          <div><label>V-dev weight</label><input id="rpoVdevWeight" type="number" step="0.1" value="1.0"></div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runRPOBtn">Run RPO (Branch &amp; Bound + IPM)</button>
+          <button class="btn btn-secondary" id="runRPORelaxBtn">Run Continuous Relaxation Only</button>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="rpoConv" class="v">-</div><div class="l">Converged</div></div>
+          <div class="kpi"><div id="rpoObj" class="v">-</div><div class="l">Objective</div></div>
+          <div class="kpi"><div id="rpoGap" class="v">-</div><div class="l">MIP Gap %</div></div>
+          <div class="kpi"><div id="rpoNodes" class="v">-</div><div class="l">B&amp;B Nodes</div></div>
+          <div class="kpi"><div id="rpoLPSolves" class="v">-</div><div class="l">NLP Solves</div></div>
+          <div class="kpi"><div id="rpoTime" class="v">-</div><div class="l">Runtime (s)</div></div>
+          <div class="kpi"><div id="rpoLossBefore" class="v">-</div><div class="l">Loss Before MW</div></div>
+          <div class="kpi"><div id="rpoLossAfter" class="v">-</div><div class="l">Loss After MW</div></div>
+          <div class="kpi"><div id="rpoVdevBefore" class="v">-</div><div class="l">Max |V-1| Before</div></div>
+          <div class="kpi"><div id="rpoVdevAfter" class="v">-</div><div class="l">Max |V-1| After</div></div>
+          <div class="kpi"><div id="rpoStatus" class="v" style="font-size:11px;">-</div><div class="l">Status</div></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div id="rpoVoltChart" class="chart"></div>
+          <div id="rpoQgChart" class="chart"></div>
+          <div id="rpoPgChart" class="chart"></div>
+          <div id="rpoVaChart" class="chart"></div>
+          <div id="rpoTapChart" class="chart"></div>
+          <div id="rpoShuntChart" class="chart"></div>
+        </div>
+        <div id="rpoDetailsChart" class="chart" style="height:300px;margin-top:10px;"></div>
+        <div id="rpoResultTable" class="status mono" style="margin-top:8px;white-space:pre;overflow-x:auto;"></div>
+      </section>
+
+      <!-- =================== TIME-SERIES PF TAB ======================= -->
+      <section id="tsPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Time Steps</label>
+            <select id="tsNumSteps">
+              <option value="4">4 steps (quick test)</option>
+              <option value="24" selected>24 hours (1 day)</option>
+              <option value="48">48 hours (2 days)</option>
+            </select>
+          </div>
+          <div><label>Pipeline options</label>
+            <label style="font-size:.82rem;margin:2px 0;"><input type="checkbox" id="tsSkipUC" style="width:auto;min-width:auto;"> Skip UC (PF only)</label>
+            <label style="font-size:.82rem;margin:2px 0;"><input type="checkbox" id="tsRunOPF" style="width:auto;min-width:auto;"> Include OPF validation</label>
+          </div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runTsPfBtn">Run Time-Series PF</button>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="tsSteps" class="v">-</div><div class="l">Steps</div></div>
+          <div class="kpi"><div id="tsConv" class="v">-</div><div class="l">PF Converged</div></div>
+          <div class="kpi"><div id="tsOPFConv" class="v">-</div><div class="l">OPF Converged</div></div>
+          <div class="kpi"><div id="tsCost" class="v">-</div><div class="l">Total Gen Cost $</div></div>
+        </div>
+        <div id="tsGenDispatchChart" class="chart"></div>
+        <div id="tsVoltChart" class="chart"></div>
+        <div id="tsESSChart" class="chart"></div>
+      </section>
+
+      <!-- =================== UNIT COMMITMENT TAB ====================== -->
+      <section id="ucPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Time Steps</label>
+            <select id="ucNumSteps">
+              <option value="4">4 steps (quick test)</option>
+              <option value="24" selected>24 hours (1 day)</option>
+              <option value="48">48 hours (2 days)</option>
+            </select>
+          </div>
+          <div><label>MILP Solver</label>
+            <select id="ucSolverChoice">
+              <option value="auto" selected>Auto (Gurobi &gt; HiGHS &gt; Native)</option>
+              <option value="native">Native Branch &amp; Cut</option>
+              <option value="highs">HiGHS</option>
+              <option value="gurobi">Gurobi</option>
+            </select>
+          </div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runUCBtn">Run Unit Commitment</button>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="ucFeas" class="v">-</div><div class="l">Feasible</div></div>
+          <div class="kpi"><div id="ucCost" class="v">-</div><div class="l">Total Cost $</div></div>
+          <div class="kpi"><div id="ucNGen" class="v">-</div><div class="l">Generators</div></div>
+          <div class="kpi"><div id="ucNESS" class="v">-</div><div class="l">Storage Units</div></div>
+        </div>
+        <div id="ucDispatchChart" class="chart"></div>
+        <div id="ucCommitChart" class="chart"></div>
+        <div id="ucESSSOCChart" class="chart"></div>
+      </section>
+
+      <!-- =================== MARKET SIMULATION TAB ==================== -->
+      <section id="marketPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Time Steps</label>
+            <select id="mktNumSteps">
+              <option value="4">4 steps (quick test)</option>
+              <option value="24" selected>24 hours (1 day)</option>
+              <option value="48">48 hours (2 days)</option>
+            </select>
+          </div>
+          <div><label>MILP Solver</label>
+            <select id="milpSolverChoice">
+              <option value="auto" selected>Auto (Gurobi &gt; HiGHS &gt; Native)</option>
+              <option value="native">Native Branch &amp; Cut</option>
+              <option value="highs">HiGHS</option>
+              <option value="gurobi">Gurobi</option>
+            </select>
+          </div>
+          <div><label><input type="checkbox" id="scenarioToggle"> Enable Scenario Generation</label></div>
+        </div>
+        <div id="scenarioConfigPanel" style="display:none;margin-bottom:10px;padding:8px;background:#f0f4f8;border-radius:6px;">
+          <div class="ctrl-row">
+            <div><label>Periods/Day</label><input type="number" id="scenPeriodsPerDay" value="96" style="width:70px;"></div>
+            <div><label>Period (min)</label><input type="number" id="scenPeriodLen" value="15" step="1" style="width:70px;"></div>
+            <div><label>Load Noise</label><input type="number" id="scenLoadNoise" value="0.05" step="0.01" style="width:70px;"></div>
+            <div><label>Wind Err</label><input type="number" id="scenWindErr" value="0.20" step="0.01" style="width:70px;"></div>
+            <div><label>Solar Err</label><input type="number" id="scenSolarErr" value="0.15" step="0.01" style="width:70px;"></div>
+            <div><label>Seed (0=rand)</label><input type="number" id="scenSeed" value="42" style="width:70px;"></div>
+            <div><label><input type="checkbox" id="scenWorkday" checked> Workday</label></div>
+          </div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-accent" id="runMarketBtn">Run Market Clearing (§2 Pipeline)</button>
+        </div>
+        <!-- §2 Parameters (expandable) -->
+        <details style="margin:8px 0;padding:8px;background:#f0f4f8;border-radius:6px;">
+          <summary style="cursor:pointer;font-weight:600;font-size:13px;">§2 Market Parameters (click to expand)</summary>
+          <div class="ctrl-row" style="margin-top:8px;">
+            <div><label>§2.2 Bid Segments</label><input type="number" id="s22BidSegs" value="3" min="1" max="10" style="width:55px;"></div>
+            <div><label>§2.2 Price Cap (¥/MWh)</label><input type="number" id="s22PriceCap" value="1500" style="width:75px;"></div>
+            <div><label>§2.2 Price Floor (¥/MWh)</label><input type="number" id="s22PriceFloor" value="0" style="width:70px;"></div>
+          </div>
+          <div class="ctrl-row">
+            <div><label>§2.4 PTDF Threshold</label><input type="number" id="s24PtdfThresh" value="0.05" step="0.01" style="width:65px;"></div>
+            <div><label>§2.6 MIP Gap</label><input type="number" id="s26MipGap" value="0.0001" step="0.0001" style="width:75px;"></div>
+            <div><label>§2.6 Time Limit (s)</label><input type="number" id="s26TimeLimit" value="300" style="width:70px;"></div>
+          </div>
+          <div class="ctrl-row">
+            <div><label>§2.6 LMP Delta</label><input type="number" id="s26LmpDelta" value="0.10" step="0.01" style="width:65px;"></div>
+            <div><label>§2.8 N-1 Contingencies</label><input type="number" id="s28MaxN1" value="50" style="width:65px;"></div>
+            <div><label><input type="checkbox" id="s28EnableN1" checked> §2.8 N-1 Check</label></div>
+          </div>
+          <div class="ctrl-row">
+            <div><label>§2.9 VOLL ($/MWh)</label><input type="number" id="s29VOLL" value="10000" style="width:80px;"></div>
+            <div><label>Reserve Req (%)</label><input type="number" id="s29SpinReq" value="5" step="1" style="width:55px;"></div>
+          </div>
+        </details>
+        <!-- §2 Pipeline Progress (9 stages per market_rules.pdf) -->
+        <div id="pipelineStages" style="display:none;margin:10px 0;padding:8px;background:#f8f9fa;border-radius:6px;overflow-x:auto;">
+          <div style="display:flex;gap:3px;align-items:center;flex-wrap:wrap;font-size:11px;">
+            <span id="stg1" class="stg">§2.2 Bids</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg2" class="stg">§2.3-4 Bounds</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg3" class="stg">§2.6.1 SCUC</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg4" class="stg">§2.6.2 SCED</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg5" class="stg">§2.6.3 LMP</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg6" class="stg">§2.7 ACPF</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg7" class="stg">§2.8 Security</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg8" class="stg">§2.9 Settlement</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg9" class="stg">§2.10 Results</span>
+          </div>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="mktFeas" class="v">-</div><div class="l">Feasible</div></div>
+          <div class="kpi"><div id="mktCost" class="v">-</div><div class="l">Total Cost $</div></div>
+          <div class="kpi"><div id="mktNGen" class="v">-</div><div class="l">Generators</div></div>
+          <div class="kpi"><div id="mktSolver" class="v">-</div><div class="l">Solver</div></div>
+          <div class="kpi"><div id="mktValidation" class="v">-</div><div class="l">Validation</div></div>
+          <div class="kpi"><div id="mktAvgLmp" class="v">-</div><div class="l">Avg LMP $/MWh</div></div>
+        </div>
+        <div id="scenarioProfileChart" class="chart"></div>
+        <div id="mktDispatchChart" class="chart"></div>
+        <div id="marketBidChart" class="chart"></div>
+        <div id="marketLmpHeatmap" class="chart"></div>
+        <div id="marketGenCoProfit" class="chart"></div>
+        <div id="mktGenCoIncomeTable" style="margin:10px 0;"></div>
+        <div id="marketPfResidualChart" class="chart"></div>
+        <div id="mktVoltageProfileChart" class="chart"></div>
+        <div id="mktReactivePowerChart" class="chart"></div>
+        <div id="mktPtdfHeatmap" class="chart"></div>
+        <div id="mktPtdfVerifyChart" class="chart"></div>
+        <div id="mktViolationPanel" style="margin:10px 0;"></div>
+        <div id="mktSecurityPanel" style="margin:10px 0;"></div>
+        <div id="marketValidationPanel" style="margin:10px 0;"></div>
+        <div class="dtable-wrap"><table class="dtable" id="marketLmpDecompTable"></table></div>
+        <h3 style="margin:1.5rem 0 0.5rem;color:var(--accent);">GIS Network Map (LMP)</h3>
+        <div id="mktGeoMap" class="chart" style="height:550px;"></div>
+      </section>
+
+      <!-- =================== CARBON FLOW TAB ========================== -->
+      <section id="carbonPane" class="tabpane">
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runCarbonBtn">Run Carbon Flow Analysis</button>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="carbonGenEmit" class="v">-</div><div class="l">Gen Emissions tCO&#x2082;</div></div>
+          <div class="kpi"><div id="carbonLoadEmit" class="v">-</div><div class="l">Load Emissions tCO&#x2082;</div></div>
+          <div class="kpi"><div id="carbonLossEmit" class="v">-</div><div class="l">Loss Emissions tCO&#x2082;</div></div>
+          <div class="kpi"><div id="carbonMatrix" class="v">-</div><div class="l">Matrix Solved</div></div>
+        </div>
+        <div id="carbonBusChart" class="chart"></div>
+        <div id="carbonDcBusChart" class="chart"></div>
+        <div id="carbonLoadChart" class="chart" style="height:260px;"></div>
+        <div id="carbonBranchChart" class="chart" style="height:260px;"></div>
+        <div id="carbonSankeyChart" class="chart" style="height:380px;"></div>
+      </section>
+
+      <!-- =================== NET. RECONFIGURATION TAB ================= -->
+      <section id="reconfigPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Time Steps</label>
+            <select id="rcNumSteps">
+              <option value="4" selected>4 steps (quick test)</option>
+              <option value="24">24 hours (1 day)</option>
+            </select>
+          </div>
+          <div><label>Voltage Limits</label>
+            <div style="display:flex;gap:6px;">
+              <input id="rcVmin" type="number" step=".01" value="0.95" placeholder="Vmin" style="width:80px;">
+              <input id="rcVmax" type="number" step=".01" value="1.05" placeholder="Vmax" style="width:80px;">
+            </div>
+          </div>
+          <div><label>MIP Gap</label><input id="rcMipGap" type="number" step=".005" value="0.01"></div>
+          <div><label>Max time (s)</label><input id="rcMaxTime" type="number" min="10" max="600" value="60"></div>
+          <div><label>Power Flow</label>
+            <select id="rcEnablePF"><option value="1" selected>LinDistFlow (G3–G6)</option><option value="0">Connectivity only</option></select>
+          </div>
+          <div><label>Objective</label>
+            <select id="rcObjective" onchange="var p={loss:[10,1],switch:[5,20],restore:[10,1]}[this.value]||[10,1];rcLambdaLoss.value=p[0];rcLambdaSwitch.value=p[1];"><option value="loss" selected>Min loss</option><option value="switch">Min switching</option><option value="restore">Max restored</option></select>
+          </div>
+          <div><label>λ loss/sw/shed</label>
+            <span style="display:flex;gap:4px;"><input id="rcLambdaLoss" type="number" value="10" style="width:60px"><input id="rcLambdaSwitch" type="number" value="1" style="width:50px"><input id="rcLambdaShed" type="number" value="10000" style="width:70px"></span>
+          </div>
+          <div><label>Groups</label>
+            <span style="font-size:.85em;"><input type="checkbox" id="rcEnableVoltage" checked/>G4 <input type="checkbox" id="rcEnableThermal" checked/>G5 <input type="checkbox" id="rcSplitTrees"/>AC/DC <input type="checkbox" id="rcDcMesh"/>DCmesh <input type="checkbox" id="rcLossAware" checked/>I2R</span>
+          </div>
+          <div><label>Max switch ops</label><input id="rcMaxSwOps" type="number" min="0" value="0"></div>
+          <div><label>Solver</label><select id="rcSolver"><option value="auto" selected>Auto</option><option value="native">Native</option><option value="highs">HiGHS</option><option value="scip">SCIP</option></select></div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runReconfigBtn">Run Network Reconfiguration</button>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="rcFeas" class="v">-</div><div class="l">Feasible</div></div>
+          <div class="kpi"><div id="rcObj" class="v">-</div><div class="l">Objective</div></div>
+          <div class="kpi"><div id="rcACLoss" class="v">-</div><div class="l">Curtailment MW</div></div>
+          <div class="kpi"><div id="rcShed" class="v">-</div><div class="l">Branches</div></div>
+          <div class="kpi"><div id="rcSwActions" class="v">-</div><div class="l">Switch Actions</div></div>
+        </div>
+        <div id="rcLossChart" class="chart"></div>
+        <div id="rcSwitchChart" class="chart"></div>
+        <div id="rcESSChart" class="chart"></div>
+        <div id="rcSwOps" style="margin-top:10px;"></div>
+      </section>
+
+      <!-- =================== ANNUAL PRODUCTION SIM TAB ================ -->
+      <section id="annualPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Resolution</label>
+            <select id="annualResolution">
+              <option value="6h" selected>6-hour (1460 steps)</option>
+              <option value="1h">Hourly (8760 steps)</option>
+            </select>
+          </div>
+          <div><label>Block Type</label>
+            <select id="annualBlockType">
+              <option value="monthly" selected>Monthly (12 blocks)</option>
+              <option value="weekly">Weekly (52 blocks)</option>
+            </select>
+          </div>
+          <div><label>PF Snapshot Interval</label><input id="annualSnapshotInterval" type="number" min="0" max="168" value="24"/></div>
+          <div><label><input type="checkbox" id="annualRunOPF" checked style="width:auto;min-width:auto;"/> Include OPF</label></div>
+          <div><label><input type="checkbox" id="annualCyclicSOC" checked style="width:auto;min-width:auto;"/> Cyclic SOC</label></div>
+          <div><label><input type="checkbox" id="annualSkipReplay" style="width:auto;min-width:auto;"/> Schedule Only (skip replay)</label></div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runAnnualBtn">Run Annual Production Simulation</button>
+        </div>
+        <!-- Animation Playback Controls -->
+        <div id="annAnimControls" style="display:none;margin:12px 0;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <button class="btn" id="annAnimPlayPause" style="width:80px;">&#9658; Play</button>
+            <button class="btn" id="annAnimReset" style="width:60px;">&#8634;</button>
+            <input type="range" id="annAnimSlider" min="0" max="100" value="0" style="flex:1;min-width:200px;"/>
+            <span id="annAnimTimeLabel" style="min-width:80px;font-weight:600;">Hour 0</span>
+            <select id="annAnimSpeed" style="width:100px;">
+              <option value="200">Fast</option>
+              <option value="500" selected>Medium</option>
+              <option value="1000">Slow</option>
+            </select>
+            <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="annAnimGeo" checked style="width:auto;min-width:auto;"/> GIS Map</label>
+          </div>
+        </div>
+        <div id="annGeoMap" class="chart" style="height:450px;display:none;"></div>
+        <div class="kpis">
+          <div class="kpi"><div id="annFeas" class="v">-</div><div class="l">Feasible</div></div>
+          <div class="kpi"><div id="annCost" class="v">-</div><div class="l">Annual Cost $</div></div>
+          <div class="kpi"><div id="annGenMWh" class="v">-</div><div class="l">Generation MWh</div></div>
+          <div class="kpi"><div id="annRenMWh" class="v">-</div><div class="l">Renewable MWh</div></div>
+          <div class="kpi"><div id="annCurtMWh" class="v">-</div><div class="l">Curtailed MWh</div></div>
+          <div class="kpi"><div id="annENSMWh" class="v">-</div><div class="l">ENS MWh</div></div>
+          <div class="kpi"><div id="annLossMWh" class="v">-</div><div class="l">Losses MWh</div></div>
+          <div class="kpi"><div id="annPFConv" class="v">-</div><div class="l">PF Converged</div></div>
+        </div>
+        <div id="annTimelineChart" class="chart"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div id="annMonthlyChart" class="chart" style="height:320px;"></div>
+          <div id="annMonthlyCostChart" class="chart" style="height:320px;"></div>
+          <div id="annGenStatsChart" class="chart" style="height:320px;"></div>
+          <div id="annRenStatsChart" class="chart" style="height:320px;"></div>
+          <div id="annStorageStatsChart" class="chart" style="height:320px;"></div>
+          <div id="annVoltHeatmap" class="chart" style="height:320px;"></div>
+        </div>
+      </section>
+
+      <!-- =================== LIFECYCLE SIM TAB ======================== -->
+      <section id="lifecyclePane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Years</label><input id="lcNumYears" type="number" min="1" max="50" value="20"/></div>
+          <div><label>Discount Rate</label><input id="lcDiscountRate" type="number" min="0" max="0.2" step="0.01" value="0.05"/></div>
+          <div><label>Load Growth %/yr</label><input id="lcLoadGrowth" type="number" min="0" max="0.1" step="0.005" value="0.02"/></div>
+          <div><label>PV Derating %/yr</label><input id="lcPVDerating" type="number" min="0" max="0.05" step="0.001" value="0.005"/></div>
+          <div><label>Cal. Degrad. %/yr</label><input id="lcCalDegrad" type="number" min="0" max="0.1" step="0.005" value="0.02"/></div>
+          <div><label>Resolution</label>
+            <select id="lcResolution">
+              <option value="6h" selected>6-hour (1460 steps)</option>
+              <option value="1h">Hourly (8760 steps)</option>
+            </select>
+          </div>
+        </div>
+        <details style="margin-bottom:10px;border:1px solid var(--border);border-radius:6px;padding:8px 12px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">&#9881; Capacity Scaling (Planning Parameters)</summary>
+          <div class="ctrl-row" style="margin-top:8px;">
+            <div><label>PV Scale</label><input id="lcPVScale" type="number" min="0" max="10" step="0.1" value="1.0"/></div>
+            <div><label>Wind Scale</label><input id="lcWindScale" type="number" min="0" max="10" step="0.1" value="1.0"/></div>
+            <div><label>BESS Power Scale</label><input id="lcBESSPowerScale" type="number" min="0" max="10" step="0.1" value="1.0"/></div>
+            <div><label>BESS Energy Scale</label><input id="lcBESSEnergyScale" type="number" min="0" max="10" step="0.1" value="1.0"/></div>
+            <div><label>Diesel/Gas Scale</label><input id="lcDieselScale" type="number" min="0" max="10" step="0.1" value="1.0"/></div>
+          </div>
+        </details>
+        <div class="btn-group" style="margin-bottom:10px;">
+          <button class="btn btn-primary" id="runLifecycleBtn">Run Lifecycle Simulation</button>
+        </div>
+        <details open style="margin-bottom:10px;border:1px solid var(--border);border-radius:6px;padding:8px 12px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">&#128202; Capacity Comparison Sweep</summary>
+          <div class="ctrl-row" style="margin-top:8px;">
+            <div><label>Sweep Parameter</label>
+              <select id="lcSweepParam">
+                <option value="pv">PV Capacity</option>
+                <option value="wind">Wind Capacity</option>
+                <option value="bess_power">BESS Power (MW)</option>
+                <option value="bess_energy" selected>BESS Energy (MWh)</option>
+                <option value="diesel">Diesel/Gas</option>
+              </select>
+            </div>
+            <div><label>Min Scale</label><input id="lcSweepMin" type="number" min="0" max="10" step="0.25" value="0.5"/></div>
+            <div><label>Max Scale</label><input id="lcSweepMax" type="number" min="0.5" max="10" step="0.25" value="3.0"/></div>
+            <div><label>Steps</label><input id="lcSweepSteps" type="number" min="3" max="20" value="6"/></div>
+          </div>
+          <div class="btn-group" style="margin-top:6px;">
+            <button class="btn" id="runCapCompareBtn" style="background:#8e44ad;color:#fff;">&#9654; Run Capacity Comparison</button>
+          </div>
+        </details>
+        <div class="kpis" id="lcKPIs">
+          <div class="kpi"><div id="lcFeas" class="v">-</div><div class="l">Feasible</div></div>
+          <div class="kpi"><div id="lcNPV" class="v">-</div><div class="l">NPV Cost $</div></div>
+          <div class="kpi"><div id="lcTotalCarbon" class="v">-</div><div class="l">Total CO&#8322;</div></div>
+          <div class="kpi"><div id="lcReplacements" class="v">-</div><div class="l">Replacements</div></div>
+          <div class="kpi"><div id="lcReplCost" class="v">-</div><div class="l">Replacement $</div></div>
+          <div class="kpi"><div id="lcYears" class="v">-</div><div class="l">Years</div></div>
+        </div>
+        <div id="lcCostChart" class="chart" style="height:360px;"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div id="lcCarbonChart" class="chart" style="height:320px;"></div>
+          <div id="lcCarbonIntensityChart" class="chart" style="height:320px;"></div>
+          <div id="lcEnergyChart" class="chart" style="height:320px;"></div>
+          <div id="lcSOHChart" class="chart" style="height:320px;"></div>
+          <div id="lcPVChart" class="chart" style="height:320px;"></div>
+          <div id="lcBoundsChart" class="chart" style="height:320px;"></div>
+          <div id="lcBoundsBreakdownChart" class="chart" style="height:320px;"></div>
+          <div id="lcCrossValChart" class="chart" style="height:320px;"></div>
+          <div id="lcTightnessChart" class="chart" style="height:320px;"></div>
+        </div>
+        <h3 style="margin-top:18px;color:var(--accent);">Capacity Comparison Results</h3>
+        <div id="lcCompareStatus" class="status mono" style="margin-bottom:6px;">Run a capacity comparison sweep above.</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div id="lcCompNPVChart" class="chart" style="height:340px;"></div>
+          <div id="lcCompCarbonChart" class="chart" style="height:340px;"></div>
+          <div id="lcCompParetoChart" class="chart" style="height:340px;"></div>
+          <div id="lcCompCarbonTrajChart" class="chart" style="height:340px;"></div>
+        </div>
+      </section>
+
+      <!-- =================== RELIABILITY ASSESSMENT TAB ================ -->
+      <section id="reliabilityPane" class="tabpane">
+        <h3 style="color:var(--accent);margin-bottom:12px;">Monte Carlo Reliability Assessment</h3>
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Load Scale Factor</label><input id="relLoadScale" type="number" min="0.5" max="3.0" step="0.05" value="1.0" title="Scale load (>1 reduces reserve margin)"/></div>
+          <div><label>CoV Threshold</label><input id="relCovThresh" type="number" min="0.01" max="0.5" step="0.01" value="0.05"/></div>
+          <div><label>Random Seed</label><input id="relSeed" type="number" min="0" max="999999" value="0" title="0 = non-deterministic"/></div>
+          <div><label title="Reliability data policy: how missing component data is treated. Named templates are opt-in (no longer auto-applied).">Data Policy</label>
+            <select id="relDataPolicy">
+              <option value="missing_only" selected>Missing &rarr; generic defaults</option>
+              <option value="case_data_only">Case data only (strict)</option>
+              <option value="overwrite_template">Overwrite with template</option>
+            </select>
+          </div>
+          <div><label title="Named reliability template (only applied in Overwrite mode).">Template</label>
+            <select id="relTemplate">
+              <option value="none" selected>None</option>
+              <option value="ieee-rts-24">IEEE RTS-24</option>
+              <option value="comprehensive">Comprehensive hybrid</option>
+            </select>
+          </div>
+        </div>
+        <!-- Advanced Options: Tail Risk -->
+        <div class="ctrl-row" style="margin-bottom:10px;background:#f5f7f5;padding:8px;border-radius:5px;">
+          <div style="display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" id="relTailRisk"/>
+            <label for="relTailRisk" style="margin:0;">Compute Tail Risk (VaR/CVaR)</label>
+          </div>
+          <div><label>VaR Confidence</label><input id="relVarConf" type="number" min="0.80" max="0.99" step="0.01" value="0.95" title="Confidence level for VaR/CVaR"/></div>
+        </div>
+        <details open style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">Non-Sequential Monte Carlo (State Sampling)</summary>
+          <div class="ctrl-row" style="margin-top:10px;">
+            <div><label>Max Samples</label><input id="relNsqMaxIter" type="number" min="100" max="100000" value="5000"/></div>
+          </div>
+          <div class="btn-group" style="margin-top:8px;">
+            <button class="btn btn-primary" id="runNsqBtn">&#9654; Run NSQ Monte Carlo</button>
+          </div>
+        </details>
+        <details style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">Sequential Monte Carlo (Chronological Simulation)</summary>
+          <div class="ctrl-row" style="margin-top:10px;">
+            <div><label>Max Years</label><input id="relSeqMaxYears" type="number" min="10" max="5000" value="500"/></div>
+            <div><label>Hours/Year</label>
+              <select id="relSeqHours">
+                <option value="8736">8736 (52 weeks)</option>
+                <option value="8760">8760 (full year)</option>
+              </select>
+            </div>
+          </div>
+          <div class="btn-group" style="margin-top:8px;">
+            <button class="btn" style="background:#8e44ad;color:#fff;" id="runSeqBtn">&#9654; Run SEQ Monte Carlo</button>
+          </div>
+        </details>
+        <details style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">Frequency &amp; Duration (Analytical)</summary>
+          <p style="color:var(--muted);font-size:0.9em;margin:6px 0 10px 0;">Build COPT analytically (no simulation). Fast calculation of LOLP, LOLE, LOLF, LOLD.</p>
+          <div class="btn-group">
+            <button class="btn" style="background:#b57e2b;color:#fff;" id="runFDBtn">&#9654; Run F&amp;D Analysis</button>
+          </div>
+        </details>
+        <details style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">&#128270; FMEA (Failure Modes &amp; Effects Analysis)</summary>
+          <p style="color:var(--muted);font-size:0.9em;margin:6px 0 10px 0;">N-1 contingency enumeration for distribution system reliability. Evaluates each component failure individually.</p>
+          <p style="color:var(--muted);font-size:0.85em;margin:0 0 8px 0;">Uses the shared <b>Data Policy</b> / <b>Template</b> selectors at the top. To reproduce the comprehensive hybrid demo, choose <b>Overwrite with template</b> + <b>Comprehensive hybrid</b>.</p>
+          <div class="btn-group" style="margin-top:8px;">
+            <button class="btn" style="background:#c0392b;color:#fff;" id="runFmeaBtn">&#9654; Run FMEA</button>
+          </div>
+        </details>
+        <details open style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">&#128200; Cross-Validation (NSQ vs SEQ)</summary>
+          <p style="color:var(--muted);font-size:0.9em;margin:6px 0 10px 0;">Run both methods with the same settings and compare results.</p>
+          <div class="btn-group">
+            <button class="btn" style="background:#2c8c99;color:#fff;" id="runCrossValBtn">&#9654; Run Cross-Validation</button>
+          </div>
+        </details>
+        <div class="kpis" id="relKPIs">
+          <div class="kpi"><div id="relMethod" class="v">-</div><div class="l">Method</div></div>
+          <div class="kpi"><div id="relEENS" class="v">-</div><div class="l">EENS (MWh/yr)</div></div>
+          <div class="kpi"><div id="relLOLE" class="v">-</div><div class="l">LOLE (hr/yr)</div></div>
+          <div class="kpi"><div id="relLOLF" class="v">-</div><div class="l">LOLF (occ/yr)</div></div>
+          <div class="kpi"><div id="relPLC" class="v">-</div><div class="l">PLC (%)</div></div>
+          <div class="kpi"><div id="relCoV" class="v">-</div><div class="l">Final CoV</div></div>
+          <div class="kpi"><div id="relIters" class="v">-</div><div class="l">Iterations</div></div>
+        </div>
+        <!-- Tail Risk KPIs -->
+        <div class="kpis" id="relTailKPIs" style="display:none;margin-top:8px;background:#f5f7f5;border-radius:6px;padding:6px;">
+          <div class="kpi"><div id="relEENSVar" class="v">-</div><div class="l">EENS VaR</div></div>
+          <div class="kpi"><div id="relEENSCVar" class="v">-</div><div class="l">EENS CVaR</div></div>
+          <div class="kpi"><div id="relLOLEVar" class="v">-</div><div class="l">LOLE VaR</div></div>
+          <div class="kpi"><div id="relLOLECVar" class="v">-</div><div class="l">LOLE CVaR</div></div>
+        </div>
+        <div id="relStatus" class="status mono" style="margin-bottom:10px;">Set parameters above and run an analysis.</div>
+        <div id="relScopePanel" style="margin-bottom:10px;"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div id="relConvergenceChart" class="chart" style="height:320px;"></div>
+          <div id="relNodalEENSChart" class="chart" style="height:320px;"></div>
+          <div id="relCriticalChart" class="chart" style="height:320px;"></div>
+          <div id="relCrossValChart" class="chart" style="height:320px;"></div>
+        </div>
+        <!-- FMEA Results Section -->
+        <div id="fmeaResultsSection" style="display:none;margin-top:14px;">
+          <h4 style="color:var(--accent);margin-bottom:8px;">FMEA Results</h4>
+          <div class="kpis" id="fmeaKPIs">
+            <div class="kpi"><div id="fmeaEENS" class="v">-</div><div class="l">EENS (MWh/yr)</div></div>
+            <div class="kpi"><div id="fmeaLOLE" class="v">-</div><div class="l">LOLE (hr/yr)</div></div>
+            <div class="kpi"><div id="fmeaLOLF" class="v">-</div><div class="l">LOLF (occ/yr)</div></div>
+            <div class="kpi"><div id="fmeaSAIFI" class="v">-</div><div class="l">SAIFI</div></div>
+            <div class="kpi"><div id="fmeaSAIDI" class="v">-</div><div class="l">SAIDI</div></div>
+            <div class="kpi"><div id="fmeaCAIDI" class="v">-</div><div class="l">CAIDI</div></div>
+            <div class="kpi"><div id="fmeaASAI" class="v">-</div><div class="l">ASAI</div></div>
+            <div class="kpi"><div id="fmeaContingencies" class="v">-</div><div class="l">Contingencies</div></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">
+            <div id="fmeaContChart" class="chart" style="height:320px;"></div>
+            <div id="fmeaTypeChart" class="chart" style="height:320px;"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- =================== RESILIENCE TAB ============================ -->
+      <section id="resiliencePane" class="tabpane">
+        <h3 style="color:var(--accent);margin-bottom:12px;">Distribution Resilience Assessment (MESS)</h3>
+        <p style="color:var(--muted);font-size:0.9em;margin:0 0 14px 0;">Multi-hour restoration study with time-varying load/RES profiles, feeder outages, repair windows, tie-switch reconfiguration, and mobile energy storage dispatch &amp; routing.</p>
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Horizon (hr)</label><input id="resHorizonHours" type="number" min="1" max="168" value="24"/></div>
+          <div><label>Repair Time (hr)</label><input id="resRepairHours" type="number" min="1" max="72" value="6"/></div>
+          <div><label>Default Fault Count</label><input id="resFaultCount" type="number" min="1" max="10" value="1"/></div>
+          <div><label>MESS Speed (km/h)</label><input id="resMessSpeed" type="number" min="5" max="120" value="40"/></div>
+          <div><label>Load Scale Factor</label><input id="resLoadScale" type="number" min="0.5" max="3.0" step="0.05" value="1.0"/></div>
+        </div>
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div style="min-width:260px;flex:1;"><label>Fault Branch IDs</label><input id="resFaultBranches" type="text" placeholder="e.g. 25,37 (blank = auto-select)"/></div>
+          <div><label>Fault Stagger (hr)</label><input id="resFaultStagger" type="number" min="0" max="24" step="0.5" value="0"/></div>
+          <div><label>First Fault at (hr)</label><input id="resFaultStartHr" type="number" min="0" max="48" step="0.5" value="0"/></div>
+          <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resApplyDemoData" checked/><label for="resApplyDemoData" style="margin:0;">Apply Demo Data</label></div>
+          <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resAllowReconfig"/><label for="resAllowReconfig" style="margin:0;">Allow Reconfiguration</label></div>
+          <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resAllowMess" checked/><label for="resAllowMess" style="margin:0;">Allow MESS Dispatch</label></div>
+          <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resRunPF"/><label for="resRunPF" style="margin:0;">Run Power Flow</label></div>
+        </div>
+        <details style="margin-bottom:10px;border:1px solid var(--border);border-radius:8px;padding:6px 12px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);font-size:0.9em;">Advanced Fault / Stage Parameters</summary>
+          <div class="ctrl-row" style="margin-top:10px;">
+            <div><label>Model</label><select id="resModel"><option value="RAStyleStageMILP" selected>RA Stage MILP</option><option value="HeuristicSequential">Heuristic</option><option value="MultiPeriodMIPLinDistFlow">Strict MIP</option></select></div>
+            <div><label>Solver</label><select id="resSolver"><option value="Native">Native</option><option value="HiGHS">HiGHS</option><option value="Gurobi" selected>Gurobi</option></select></div>
+            <div><label>MIP Limit (s)</label><input id="resMipTimeLimit" type="number" min="10" step="10" value="180"/></div>
+            <div><label>MIP Gap</label><input id="resMipGap" type="number" min="0" max="1" step="0.01" value="0.03"/></div>
+            <div><label>Post-Fault Window (hr)</label><input id="resPostFaultWindow" type="number" min="0" step="0.5" value="2.0"/></div>
+            <div><label>AC Start (hr)</label><input id="resAcFaultStartHr" type="number" min="0" step="0.5" value="0"/></div>
+            <div><label>DC Start (hr)</label><input id="resDcFaultStartHr" type="number" min="0" step="0.5" value="0"/></div>
+            <div><label>AC Repair (hr)</label><input id="resAcRepairHours" type="number" min="0" step="0.5" value="6"/></div>
+            <div><label>DC Repair (hr)</label><input id="resDcRepairHours" type="number" min="0" step="0.5" value="8"/></div>
+            <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resConsiderSwitches" checked/><label for="resConsiderSwitches" style="margin:0;">Switch-Based Isolation</label></div>
+            <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resUseRemoteSwitchOnly"/><label for="resUseRemoteSwitchOnly" style="margin:0;">Remote Switches Only</label></div>
+            <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resAllowBranchWithoutSwitch"/><label for="resAllowBranchWithoutSwitch" style="margin:0;">Allow No-Switch Ops</label></div>
+          </div>
+        </details>
+        <details style="margin-bottom:10px;border:1px solid var(--border);border-radius:8px;padding:6px 12px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);font-size:0.9em;">&#9881; Manual Fault Sequence Editor</summary>
+          <p style="color:var(--muted);font-size:0.82em;margin:4px 0 8px 0;">Define individual AC/DC branch faults with branch ID, start time and repair duration. Leave empty to use auto-generation above.</p>
+          <table id="resFaultTable" style="width:100%;border-collapse:collapse;font-size:0.85em;">
+            <thead><tr style="background:var(--bg2);"><th style="padding:4px 8px;">Type</th><th style="padding:4px 8px;">Branch ID</th><th style="padding:4px 8px;">Start (hr)</th><th style="padding:4px 8px;">Repair (hr)</th><th style="padding:4px 8px;">Label</th><th style="width:40px;"></th></tr></thead>
+            <tbody id="resFaultTableBody"></tbody>
+          </table>
+          <button class="btn" style="margin-top:6px;font-size:0.82em;padding:4px 12px;" onclick="addFaultRow()">+ Add Fault</button>
+        </details>
+        <div class="btn-group" style="margin-bottom:10px;">
+          <button class="btn" style="background:#0f766e;color:#fff;" id="runResilienceBtn">&#9654; Run Resilience Assessment</button>
+        </div>
+        <div id="resStatus" class="status mono" style="margin-bottom:10px;">Set parameters and click Run.</div>
+        <div id="resilienceResultsSection" style="display:none;">
+          <div class="kpis" id="resilienceKPIs">
+            <div class="kpi"><div id="resilienceRI" class="v">-</div><div class="l">Resilience Index</div></div>
+            <div class="kpi"><div id="resilienceDemand" class="v">-</div><div class="l">Total Demand (MWh)</div></div>
+            <div class="kpi"><div id="resilienceShed" class="v">-</div><div class="l">Total Shed (MWh)</div></div>
+            <div class="kpi"><div id="resilienceFinalRestore" class="v">-</div><div class="l">Final Restoration (%)</div></div>
+            <div class="kpi"><div id="resilienceAvgRestore" class="v">-</div><div class="l">Avg Restoration (%)</div></div>
+            <div class="kpi"><div id="resiliencePeakShed" class="v">-</div><div class="l">Peak Shed (MW)</div></div>
+            <div class="kpi"><div id="resilienceMessEnergy" class="v">-</div><div class="l">MESS Energy (MWh)</div></div>
+            <div class="kpi"><div id="resilienceMessTravel" class="v">-</div><div class="l">MESS Travel (km)</div></div>
+            <div class="kpi"><div id="resilienceSwitches" class="v">-</div><div class="l">Switch Actions</div></div>
+            <div class="kpi"><div id="resilienceRepairs" class="v">-</div><div class="l">Repaired Faults</div></div>
+          </div>
+          <div id="resilienceCompareKPIs" style="display:none;margin-top:6px;padding:8px 14px;background:linear-gradient(135deg,#f0fdf4,#ecfdf5);border:1px solid #86efac;border-radius:8px;">
+            <span style="font-weight:600;color:#166534;font-size:0.85em;">&#9650; MESS Improvement:</span>
+            <span id="resCompRI" style="margin-left:10px;font-weight:600;color:#166534;"></span>
+            <span id="resCompShed" style="margin-left:10px;font-weight:600;color:#166534;"></span>
+            <span id="resCompServed" style="margin-left:10px;font-weight:600;color:#166534;"></span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">
+            <div id="resilienceRestorationChart" class="chart" style="height:340px;"></div>
+            <div id="resilienceMessChart" class="chart" style="height:340px;"></div>
+            <div id="resilienceEnergyChart" class="chart" style="height:340px;"></div>
+            <div id="resilienceIslandChart" class="chart" style="height:340px;"></div>
+            <div id="resilienceProfileChart" class="chart" style="height:340px;"></div>
+            <div id="resilienceTrajectoryChart" class="chart" style="height:340px;"></div>
+            <div id="resiliencePriorityChart" class="chart" style="height:340px;"></div>
+            <div id="resilienceMessSOCChart" class="chart" style="height:340px;"></div>
+            <div id="resilienceVoltageChart" class="chart" style="height:340px;display:none;"></div>
+            <div id="resilienceBranchFlowChart" class="chart" style="height:340px;display:none;"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- =================== DASHBOARD TAB ============================ -->
+      <section id="dashPane" class="tabpane">
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runDashBtn">&#9654; Run Full Analysis (TS-PF + Carbon)</button>
+        </div>
+        <div id="dashStatus" class="status mono" style="margin-bottom:8px;">Not run yet. Load a case and click Run.</div>
+        <div id="dashKPIs" class="kpis"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;">
+          <div id="dashGenChart" class="chart" style="height:300px;"></div>
+          <div id="dashCarbonChart" class="chart" style="height:300px;"></div>
+          <div id="dashVoltChart" class="chart" style="height:300px;"></div>
+          <div id="dashLossChart" class="chart" style="height:300px;"></div>
+          <div id="dashESSChart" class="chart" style="height:300px;"></div>
+          <div id="dashLoadChart" class="chart" style="height:300px;"></div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <div id="statusBox" class="status" style="display:flex;align-items:center;gap:10px;">
+    <span id="statusText">Ready. Load a case to begin.</span>
+    <button id="cancelBtn" style="display:none;padding:2px 12px;background:#c34d4d;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;" onclick="cancelAnalysis()">Cancel</button>
+  </div>
+</div>
+
+<script>
+let SYS=null, activeComp='ac_buses', lastPfBody=null, lastPfCompareRows=[];
+const statusBox=document.getElementById('statusBox');
+const statusText=document.getElementById('statusText');
+const cancelBtn=document.getElementById('cancelBtn');
+function setStatus(m,e=false){statusText.textContent=m;statusBox.style.borderColor=e?'#c34d4d':'#bcc5bf';statusBox.style.background=e?'#fff1f1':'#fbfaf6';cancelBtn.style.display=m.includes('Running')?'inline-block':'none';}
+async function cancelAnalysis(){try{await fetch('/api/session/cancel',{method:'POST'});setStatus('Cancellation requested...');}catch(e){console.error(e);}}
+async function api(p,d,method='POST'){const o={method,headers:{'Content-Type':'application/json'}};if(d!==undefined)o.body=JSON.stringify(d);const r=await fetch(p,o);const t=await r.text();let b={};try{b=JSON.parse(t);}catch{b={error:t};}if(!r.ok||b.error)throw new Error(b.error||'HTTP '+r.status);return b;}
+function fmt(v,d=4){if(v==null||v===undefined||Number.isNaN(Number(v)))return'-';return Number(v).toFixed(d);}
+
+/* Power unit conversion helpers */
+function getPowerUnit(){return document.getElementById('pfDisplayUnit').value||'MW';}
+function pScale(){const u=getPowerUnit();if(u==='kW')return 1e3;if(u==='W')return 1e6;return 1;}
+function pUnit(){return getPowerUnit();}
+function pConv(mw){return mw*pScale();}
+function pFmt(mw,d=2){return (mw*pScale()).toFixed(d);}
+function qUnit(){const u=getPowerUnit();if(u==='kW')return 'kVar';if(u==='W')return 'Var';return 'MVar';}
+
+document.querySelectorAll('.panel > .tabs > .tab').forEach(tab=>{
+  tab.addEventListener('click',()=>{
+    document.querySelectorAll('.panel > .tabs > .tab').forEach(t=>t.classList.remove('active'));
+    document.querySelectorAll('.panel > .tabpane').forEach(p=>p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(tab.dataset.tab).classList.add('active');
+  });
+});
+
+/* Case lists */
+async function loadCaseLists(){
+  const [cases,mfiles]=await Promise.all([fetch('/api/cases').then(r=>r.json()),fetch('/api/matpower_files').then(r=>r.json())]);
+  document.getElementById('builtinSelect').innerHTML=cases.cases.map(c=>`<option value="${c}"${c===cases.default_case?' selected':''}>${c}</option>`).join('');
+  document.getElementById('matpowerSelect').innerHTML=mfiles.files.map(f=>`<option value="${f}">${f}</option>`).join('');
+}
+
+async function loadSystem(ep,payload){
+  setStatus('Loading system...');
+  try{const d=await api(ep,payload);SYS=d;updateSystemUI();setStatus('Loaded: '+SYS.name+' ('+SYS.counts.ac_buses+' AC buses, '+SYS.counts.generators+' gens)');}
+  catch(e){setStatus(e.message,true);}
+}
+
+function updateSystemUI(){
+  if(!SYS)return;
+  document.getElementById('sysLabel').textContent=SYS.name;
+  document.getElementById('sysLabel').className='badge badge-green';
+  const cb=document.getElementById('countsBar');
+  const c=SYS.counts;
+  cb.innerHTML=Object.entries(c).map(([k,v])=>'<div class="count-chip"><span class="n">'+v+'</span>'+k.replace(/_/g,' ')+'</div>').join('');
+  renderCompTable(activeComp);
+  document.getElementById('jsonEditor').value=SYS._raw_json||'(use Refresh to load JSON)';
+}
+
+document.getElementById('loadBuiltinBtn').onclick=()=>loadSystem('/api/session/load_builtin',{case:document.getElementById('builtinSelect').value});
+document.getElementById('loadMatpowerBtn').onclick=()=>loadSystem('/api/session/load_matpower',{filename:document.getElementById('matpowerSelect').value});
+document.getElementById('uploadJsonBtn').onclick=()=>{
+  const fi=document.getElementById('jsonFileInput');
+  if(!fi.files.length){setStatus('Select a JSON file first.',true);return;}
+  const reader=new FileReader();
+  reader.onload=()=>loadSystem('/api/session/load_json_string',{json_string:reader.result});
+  reader.readAsText(fi.files[0]);
+};
+document.getElementById('loadEtapXmlBtn').onclick=()=>{
+  const fi=document.getElementById('etapXmlInput');
+  if(!fi.files.length){setStatus('Select an ETAP project .xml file first.',true);return;}
+  const reader=new FileReader();
+  reader.onload=()=>loadSystem('/api/session/load_etap_xml',{xml_string:reader.result});
+  reader.readAsText(fi.files[0]);
+};
+document.getElementById('exportJsonBtn').onclick=async()=>{
+  try{const d=await api('/api/session/export_json',{},'POST');
+  const blob=new Blob([d.json_string],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download=(SYS?SYS.name.replace(/[^a-zA-Z0-9_-]/g,'_'):'system')+'.json';a.click();
+  setStatus('JSON exported.');}catch(e){setStatus(e.message,true);}
+};
+document.getElementById('exportEtapBtn').onclick=async()=>{
+  try{setStatus('Exporting ETAP workbook...');
+  const resp=await fetch('/api/session/export_etap',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  if(!resp.ok){let m='HTTP '+resp.status;try{const j=await resp.json();if(j&&j.error)m=j.error;}catch(e){}throw new Error(m);}
+  const blob=await resp.blob();let fn='system.xlsx';const cd=resp.headers.get('Content-Disposition');
+  if(cd){const mm=/filename="?([^"]+)"?/.exec(cd);if(mm&&mm[1])fn=mm[1];}
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=fn;a.click();URL.revokeObjectURL(a.href);
+  setStatus('ETAP workbook exported: '+fn);}catch(e){setStatus(e.message,true);}
+};
+document.getElementById('newCaseBtn').onclick=()=>loadSystem('/api/session/new_empty',{});
+
+/* Case Builder tables – grouped by domain */
+const COMP_GROUPS=[
+  {label:'AC Network',items:[
+    ['ac_buses','Buses'],['ac_branches','Branches'],['transformers_2w','Trafo 2W'],['transformers_3w','Trafo 3W'],['switches','Switches'],['circuit_breakers','Breakers'],
+  ]},
+  {label:'AC Devices',items:[
+    ['generators','Generators'],['loads','Loads'],['shunts','Shunts'],['storage','Storage'],
+    ['static_generators','Static Gens'],['flexible_loads','Flex Loads'],['asymmetric_loads','Asym Loads'],
+    ['renewable_gens','Renewables'],['pv_systems','PV Systems'],['external_grids','Ext Grids'],
+    ['charging_stations','EV Stations'],['chargers','Chargers'],['motors','Motors'],
+  ]},
+  {label:'DC Network',items:[
+    ['dc_buses','Buses'],['dc_branches','Branches'],['vsc_converters','VSC Conv'],['dcdc_converters','DC/DC Conv'],['dc_circuit_breakers','Breakers'],
+  ]},
+  {label:'DC Devices',items:[
+    ['dc_loads','Loads'],['dc_storage','Storage'],['dc_static_generators','Static Gens'],
+    ['dc_native_static_generators','Native SGs'],['pv_arrays','PV Arrays'],
+    ['energy_routers','E-Routers'],['mobile_storage','Mobile Stor'],['vpps','VPPs'],['microgrids','Microgrids'],
+  ]},
+  {label:'Three-Phase',items:[
+    ['tp_buses','Buses'],['tp_lines','Lines'],['tp_transformers','Trafos'],
+    ['tp_loads','Loads'],['tp_generators','Generators'],['tp_external_grids','Ext Grids'],
+  ]},
+];
+/* flat list for legacy compat */
+const COMP_META=COMP_GROUPS.flatMap(g=>g.items);
+
+const COMP_COLS={
+  ac_buses:[{key:'index',label:'#',type:'int'},{key:'name',label:'Name',type:'str'},{key:'bus_type',label:'Type',type:'select',options:['PQ','PV','SLACK','ISOLATED']},{key:'base_kv',label:'Base kV',type:'num'},{key:'vm_pu',label:'Vm pu',type:'num'},{key:'va_deg',label:'Va deg',type:'num'},{key:'pd_mw',label:'Pd MW',type:'num'},{key:'qd_mvar',label:'Qd MVAr',type:'num'},{key:'vmax_pu',label:'Vmax',type:'num'},{key:'vmin_pu',label:'Vmin',type:'num'},{key:'i_breaker_ka',label:'Ib kA',type:'num'},{key:'area',label:'Area',type:'int'},{key:'zone',label:'Zone',type:'int'},{key:'in_service',label:'In Svc',type:'bool'}],
+  dc_buses:[{key:'index',label:'#',type:'int'},{key:'name',label:'Name',type:'str'},{key:'bus_type',label:'Type',type:'select',options:['DC_P','DC_V']},{key:'vm_pu',label:'Vm pu',type:'num'},{key:'pd_mw',label:'Pd MW',type:'num'},{key:'base_kv',label:'Base kV',type:'num'},{key:'in_service',label:'In Svc',type:'bool'}],
+};
+
+const COMP_DEFAULTS={
+  ac_buses:{index:0,name:'',bus_type:'PQ',base_kv:110,vm_pu:1.0,va_deg:0,pd_mw:0,qd_mvar:0,vmax_pu:1.05,vmin_pu:0.95,i_breaker_ka:0,area:1,zone:1,in_service:true},
+  ac_branches:{index:0,name:'',from_bus:1,to_bus:2,r_pu:0.01,x_pu:0.1,b_pu:0,tap:1.0,shift_deg:0,rate_a_mva:100,in_service:true},
+  generators:{index:0,name:'',bus:1,is_slack:false,pg_mw:0,qg_mvar:0,vg_pu:1.0,pmax_mw:100,pmin_mw:0,qmax_mvar:50,qmin_mvar:-50,cost_c2:0,cost_c1:20,cost_c0:0,in_service:true},
+  loads:{index:0,name:'',bus:1,p_mw:10,q_mvar:5,in_service:true},
+  storage:{index:0,name:'',bus:1,p_mw:0,p_rated_mw:10,e_rated_mwh:40,soc_init:0.5,eta_charge:0.95,eta_discharge:0.95,in_service:true},
+  dc_buses:{index:0,name:'',bus_type:'DC_P',vm_pu:1.0,pd_mw:0,base_kv:320,in_service:true},
+  dc_branches:{index:0,name:'',from_bus:1,to_bus:2,r_pu:0.01,rate_a_mva:100,in_service:true},
+  vsc_converters:{index:0,name:'',bus_ac:1,bus_dc:1,p_set_mw:0,q_set_mvar:0,v_dc_set_pu:1.0,eta:0.98,pmax_mw:100,p_rated_mw:100,in_service:true},
+  dcdc_converters:{index:0,name:'',bus_in:1,bus_out:2,p_ref_mw:0,v_ref_pu:1.0,eta:0.98,in_service:true},
+  energy_routers:{index:0,name:'',router_type:'SST',num_ports:0,ports:[],in_service:true},
+  mobile_storage:{index:0,name:'',bus:1,p_mw:0,e_rated_mwh:20,soc_init:0.5,in_service:true},
+  vpps:{index:0,name:'',pcc_bus:1,p_output_mw:0,q_output_mvar:0,in_service:true,aggregated_gen_ids:[],aggregated_storage_ids:[],aggregated_load_ids:[]},
+  microgrids:{index:0,name:'',pcc_bus:1,p_exchange_mw:0,in_service:true},
+  circuit_breakers:{index:0,name:'',bus_from:1,bus_to:2,breaker_type:'CB',closed:true,z_ohm:0,rated_voltage_kv:110,i_rated_ka:2.0,i_breaking_ka:40,element_type:'l',element_id:0,in_service:true},
+  dc_circuit_breakers:{index:0,name:'',bus_from:1,bus_to:2,breaker_type:'CB',closed:true,r_ohm:0,rated_voltage_kv:320,i_rated_ka:2.0,i_breaking_ka:20,element_type:'l',element_id:0,in_service:true},
+  transformers_2w:{index:0,name:'',std_type:'',hv_bus:1,lv_bus:2,in_service:true,sn_mva:25,vn_hv_kv:110,vn_lv_kv:20,vk_percent:10,vkr_percent:0.3,pk_kw:30,pfe_kw:20,i0_percent:0.5,tap_side:'hv',tap_pos:0,tap_min:-10,tap_max:10,tap_neutral:0,tap_step_percent:1.5,shift_deg:0,vector_group:'Dyn'},
+  transformers_3w:{index:0,name:'',std_type:'',hv_bus:1,mv_bus:2,lv_bus:3,in_service:true,sn_hv_mva:40,sn_mv_mva:20,sn_lv_mva:10,vn_hv_kv:110,vn_mv_kv:20,vn_lv_kv:10,vk_hv_mv_percent:10,vk_hv_lv_percent:10,vk_mv_lv_percent:10,vkr_hv_mv_percent:0.3,vkr_hv_lv_percent:0.3,vkr_mv_lv_percent:0.3,pfe_kw:30,i0_percent:0.5,tap_side:'hv',tap_pos:0,tap_step_percent:1.5,shift_mv_deg:0,shift_lv_deg:0},
+  switches:{index:0,name:'',bus_from:1,bus_to:2,in_service:true,switch_type:'CB',closed:true,r_contact_ohm:0,z_ohm:0,i_rated_ka:2.0,i_breaking_ka:40,element_type:'l',element_id:0},
+  shunts:{index:0,name:'',bus:1,in_service:true,gs_mw:0,bs_mvar:0,switchable:false,n_steps:1,current_step:1,bs_per_step:0},
+  static_generators:{index:0,name:'',bus:1,in_service:true,sgen_type:'PQ',p_mw:0,q_mvar:0,p_rated_mw:10,sn_mva:10,pmax_mw:10,pmin_mw:0,qmax_mvar:5,qmin_mvar:-5,scaling:1.0,controllable:false},
+  flexible_loads:{index:0,name:'',bus:1,in_service:true,p_mw:10,q_mvar:5,flex_up_mw:2,flex_down_mw:2,flex_duration_h:1,response_time_s:60,ramp_rate_mw_min:1,availability_pct:95,controllable:true,priority:1,control_area:''},
+  asymmetric_loads:{index:0,name:'',bus:1,in_service:true,connection:'wye',grounded:true,pa_mw:0,qa_mvar:0,pb_mw:0,qb_mvar:0,pc_mw:0,qc_mvar:0,scaling:1.0,controllable:false},
+  renewable_gens:{index:0,name:'',bus:1,in_service:true,type:'wind',p_mw:0,q_mvar:0,p_rated_mw:10,qmax_mvar:5,qmin_mvar:-5,curtailable:true,cost_curtail_mwh:0,capacity_factor:0.3,profile_id:''},
+  pv_systems:{index:0,name:'',bus:1,in_service:true,p_mw:0,q_mvar:0,sn_mva:10,pmax_mw:10,pmin_mw:0,qmax_mvar:5,qmin_mvar:-5,control_mode:'PQ',controllable:false},
+  external_grids:{index:0,name:'',bus:1,in_service:true,vm_pu:1.0,va_deg:0,s_sc_max_mva:1000,s_sc_min_mva:500,rx_max:0.1,rx_min:0.1},
+  charging_stations:{index:0,name:'',bus:1,location:'',in_service:true,n_fast:2,n_slow:4,num_chargers:6,p_fast_max_kw:150,p_slow_max_kw:22,max_power_kw:500,simultaneity_factor:0.8,power_factor:0.95,utilization_rate:0.3,p_total_kw:0,q_total_kvar:0},
+  chargers:{index:0,name:'',station_id:0,charger_type:'fast',in_service:true,p_rated_kw:150,p_ch_max_kw:150,p_ch_min_kw:0,eta:0.95,v2g_capable:false,p_dis_max_kw:0},
+  motors:{index:0,name:'',bus:1,in_service:true,vn_kv:0.4,sn_mva:0.1,r_pu:0.02,x_pu:0.15,x_r:7.5,lrc:6.0,poles:4,cos_phi:0.85,efficiency:0.9},
+  dc_loads:{index:0,name:'',bus:1,in_service:true,p_mw:10,controllable:false,p_min_mw:0,cost_mw:0,profile_id:''},
+  dc_storage:{index:0,name:'',bus:1,in_service:true,p_mw:0,p_rated_mw:10,e_rated_mwh:40,soc_init:0.5,eta_charge:0.95,eta_discharge:0.95},
+  dc_static_generators:{index:0,name:'',bus:1,in_service:true,sgen_type:'PQ',p_mw:0,q_mvar:0,p_rated_mw:10,sn_mva:10,pmax_mw:10,pmin_mw:0,qmax_mvar:5,qmin_mvar:-5,scaling:1.0,controllable:false},
+  dc_native_static_generators:{index:0,name:'',bus:1,in_service:true,type:'PQ',p_set_mw:0,scaling:1.0,profile_id:'',pmax_mw:10,pmin_mw:0,controllable:false},
+  pv_arrays:{index:0,name:'',bus:1,in_service:true,p_set_mw:0,profile_id:'',num_series:10,num_parallel:5,vmpp:30,impp:8,voc:37,isc:9,irradiance:1000,temperature:25},
+  tp_buses:{index:0,name:'',bus_type:'PQ',base_kv:20,in_service:true,vm_a_pu:1.0,va_a_deg:0,vm_b_pu:1.0,va_b_deg:-120,vm_c_pu:1.0,va_c_deg:120,vmin_pu:0.95,vmax_pu:1.05,area:1,zone:1},
+  tp_lines:{index:0,name:'',from_bus:1,to_bus:2,in_service:true,length_km:1,parallel:1,r1_ohm_per_km:0.1,x1_ohm_per_km:0.1,c1_nf_per_km:10,r0_ohm_per_km:0.3,x0_ohm_per_km:0.3,c0_nf_per_km:5,max_i_ka:0.5,rate_a_mva:20},
+  tp_transformers:{index:0,name:'',hv_bus:1,lv_bus:2,in_service:true,sn_mva:25,vn_hv_kv:110,vn_lv_kv:20,vk_percent:10,vkr_percent:0.3,pfe_kw:20,i0_percent:0.5,vector_group:'Dyn',tap_side:'hv',tap_pos:0,tap_min:-10,tap_max:10,tap_neutral:0,tap_step_percent:1.5,shift_deg:0},
+  tp_loads:{index:0,name:'',bus:1,in_service:true,connection:'wye',grounded:true,p_a_mw:0,q_a_mvar:0,p_b_mw:0,q_b_mvar:0,p_c_mw:0,q_c_mvar:0},
+  tp_generators:{index:0,name:'',bus:1,in_service:true,is_slack:false,p_mw:0,q_mvar:0,vm_pu:1.0,pmax_mw:100,pmin_mw:0,qmax_mvar:50,qmin_mvar:-50,mbase_mva:100},
+  tp_external_grids:{index:0,name:'',bus:1,in_service:true,vm_pu:1.0,va_deg:0,s_sc_max_mva:1000,s_sc_min_mva:500,rx_max:0.1,rx_min:0.1},
+};
+
+function prettyLabel(k){return k.replace(/_/g,' ').replace(/\b\w/g,m=>m.toUpperCase());}
+function inferType(v){if(typeof v==='boolean')return'bool';if(typeof v==='number')return'num';if(v===null||v===undefined)return'num';if(typeof v==='object')return'json';return'str';}
+function inferCols(comp,rows){
+  if(COMP_COLS[comp])return COMP_COLS[comp];
+  const keys=new Set(Object.keys(COMP_DEFAULTS[comp]||{}));
+  rows.forEach(r=>Object.keys(r||{}).forEach(k=>keys.add(k)));
+  return [...keys].map(k=>{
+    let sample=null;
+    for(const r of rows){if(r&&r[k]!==undefined&&r[k]!==null){sample=r[k];break;}}
+    if(sample===null&&COMP_DEFAULTS[comp]&&COMP_DEFAULTS[comp][k]!==undefined)sample=COMP_DEFAULTS[comp][k];
+    return {key:k,label:(k==='index'?'#':prettyLabel(k)),type:inferType(sample)};
+  });
+}
+
+function initCompTabs(){
+  const ct=document.getElementById('compTabs');
+  let html='',first=true;
+  COMP_GROUPS.forEach(g=>{
+    html+='<div style="display:flex;flex-wrap:wrap;align-items:center;margin-bottom:2px;">';
+    html+='<span style="margin:2px 6px 2px 0;padding:2px 6px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;border-left:3px solid var(--accent);user-select:none;white-space:nowrap;">'+g.label+'</span>';
+    g.items.forEach(([k,l])=>{
+      html+='<div class="tab'+(first?' active':'')+'" data-comp="'+k+'">'+l+'</div>';
+      first=false;
+    });
+    html+='</div>';
+  });
+  ct.innerHTML=html;
+  ct.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>{
+    ct.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+    tab.classList.add('active');
+    activeComp=tab.dataset.comp;
+    renderCompTable(activeComp);
+  }));
+}
+initCompTabs();
+
+function renderCompTable(comp){
+  const area=document.getElementById('compTableArea');
+  if(!SYS){area.innerHTML='<div style="padding:20px;color:var(--muted);">Load a system first.</div>';return;}
+  if(!SYS[comp]||!Array.isArray(SYS[comp]))SYS[comp]=[];
+  const rows=SYS[comp];
+  const cols=inferCols(comp,rows);
+  let h='<div class="dtable-wrap"><table class="dtable"><thead><tr>';
+  cols.forEach(c=>h+='<th>'+c.label+'</th>');h+='<th></th></tr></thead><tbody>';
+  rows.forEach((row,ri)=>{
+    h+='<tr data-ri="'+ri+'">';
+    cols.forEach(c=>{
+      const v=row[c.key]??'';
+      if(c.type==='bool')h+='<td><input type="checkbox" data-key="'+c.key+'" '+(v?'checked':'')+' style="width:auto;min-width:auto;"/></td>';
+      else if(c.type==='select'){h+='<td><select data-key="'+c.key+'">';c.options.forEach(o=>h+='<option'+(o===String(v)?' selected':'')+'>'+o+'</option>');h+='</select></td>';}
+      else if(c.type==='json')h+='<td><input type="text" data-key="'+c.key+'" value="'+String(JSON.stringify(v)).replace(/"/g,'&quot;')+'"/></td>';
+      else h+='<td><input type="'+(c.type==='str'?'text':'number')+'" data-key="'+c.key+'" value="'+v+'" '+(c.type==='num'?'step="any"':'')+'/></td>';
+    });
+    h+='<td><button class="row-del" data-ri="'+ri+'" title="Delete row">&times;</button></td></tr>';
+  });
+  h+='</tbody></table></div>';area.innerHTML=h;
+  area.querySelectorAll('.row-del').forEach(btn=>btn.addEventListener('click',()=>{SYS[comp].splice(parseInt(btn.dataset.ri),1);renderCompTable(comp);}));
+  area.querySelectorAll('input,select').forEach(el=>el.addEventListener('change',()=>{
+    const ri=parseInt(el.closest('tr').dataset.ri),key=el.dataset.key,col=cols.find(c=>c.key===key);
+    if(col.type==='bool')SYS[comp][ri][key]=el.checked;
+    else if(col.type==='int')SYS[comp][ri][key]=parseInt(el.value)||0;
+    else if(col.type==='num')SYS[comp][ri][key]=parseFloat(el.value)||0;
+    else if(col.type==='json'){try{SYS[comp][ri][key]=JSON.parse(el.value);}catch{SYS[comp][ri][key]=el.value;}}
+    else SYS[comp][ri][key]=el.value;
+  }));
+}
+
+document.getElementById('addRowBtn').onclick=()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  if(!SYS[activeComp])SYS[activeComp]=[];
+  const def={index:0,name:'',in_service:true,...(COMP_DEFAULTS[activeComp]||{})};
+  def.index=SYS[activeComp].reduce((mx,r)=>Math.max(mx,r.index||0),0)+1;
+  SYS[activeComp].push(def);renderCompTable(activeComp);
+  const w=document.querySelector('.dtable-wrap');if(w)w.scrollTop=w.scrollHeight;
+};
+
+document.getElementById('commitBtn').onclick=async()=>{
+  if(!SYS){setStatus('No system to commit.',true);return;}
+  try{setStatus('Committing changes...');const d=await api('/api/session/update_components',SYS);SYS=d;updateSystemUI();setStatus('Changes committed successfully.');}
+  catch(e){setStatus(e.message,true);}
+};
+
+/* JSON editor */
+document.getElementById('refreshJsonBtn').onclick=async()=>{try{const d=await api('/api/session/export_json',{},'POST');document.getElementById('jsonEditor').value=d.json_string;setStatus('JSON refreshed.');}catch(e){setStatus(e.message,true);}};
+document.getElementById('applyJsonBtn').onclick=async()=>{const j=document.getElementById('jsonEditor').value.trim();if(!j){setStatus('JSON editor is empty.',true);return;}loadSystem('/api/session/load_json_string',{json_string:j});};
+
+/* Power Flow */
+const PF_METHOD_LABEL={
+  ac_newton:'AC Newton-Raphson',dc:'DC PF',hybrid_linearized:'Hybrid AC/DC Linearized',fdpf:'Fast-Decoupled PF',
+  adaptive:'Adaptive PF',islanded:'Islanded PF',distributed_slack:'Distributed Slack PF',three_phase:'Three-Phase PF',
+};
+
+async function runPfMethod(method){
+  const body=await api('/api/session/pf',{method,options:{
+    max_iter:Number(document.getElementById('pfMaxIter').value||80),
+    tol:Number(document.getElementById('pfTol').value||1e-8),
+    fdpf_max_iter:Number(document.getElementById('pfFdpfMaxIter').value||1000),
+    enable_pv_pq_conversion:document.getElementById('pfPvPq').checked,
+    enable_auto_swing_selection:document.getElementById('pfAutoSwing').checked,
+    enable_converter_mode_switching:document.getElementById('pfConvSwitch').checked,
+    enable_converter_coordination_check:true,
+    verbose:document.getElementById('pfVerbose').checked,
+    pv_q_hysteresis_pu:Number(document.getElementById('pfPvQHyst').value||0.01),
+    max_delta_va_rad:Number(document.getElementById('pfMaxDVa').value||1.5),
+    max_delta_vm_pu:Number(document.getElementById('pfMaxDVm').value||0.5),
+    loss_model:document.getElementById('pfLossModel').value,
+  }});
+  body.method=method;
+  return body;
+}
+
+function renderPf(body){
+  document.getElementById('pfConv').textContent=body.converged?'Yes':'No';
+  document.getElementById('pfIter').textContent=body.iterations;
+  document.getElementById('pfRes').textContent=fmt(body.residual,3);
+  document.getElementById('pfNBus').textContent=(body.vm||[]).length;
+  const coord=body.converter_coordination;
+  if(coord&&coord.enabled){
+    const blocking=(coord.blocking_count!=null)?coord.blocking_count:((coord.fatal_count||0)+(coord.error_count||0));
+    const lines=[`Converter coordination: ${coord.feasible?'feasible':'infeasible'}; blocking=${blocking||0}; fatal=${coord.fatal_count||0}; error=${coord.error_count||0}; warnings=${coord.warning_count||0}`];
+    (coord.issues||[]).forEach(i=>lines.push(`${i.severity||''} ${i.rule_id||''} ${i.component_type||''}${i.component_index>=0?'#'+i.component_index:''}: ${i.message||''}`));
+    document.getElementById('pfCompareTable').textContent=lines.join('\n');
+  }
+
+  const u=pUnit(), sc=pScale(), qu=qUnit();
+  const vm=body.vm||[];
+  const branch=body.branch_abs||[];
+  const geoBuses=body.geo_buses||[];
+  const acBusIds=geoBuses.filter(b=>b.type==='AC').map(b=>b.id);
+  const dcBusIds=geoBuses.filter(b=>b.type==='DC').map(b=>b.id);
+  const acVoltX=vm.map((_,i)=>acBusIds[i]??`pos ${i}`);
+  const dcVoltX=(body.vdc||[]).map((_,i)=>dcBusIds[i]??`pos ${i}`);
+  const branchX=(body.geo_ac_branches||[]).length
+    ? (body.geo_ac_branches||[]).map(b=>b.index??`${b.from}->${b.to}`)
+    : branch.map((_,i)=>`pos ${i}`);
+  Plotly.newPlot('pfVoltChart',[{x:acVoltX,y:vm,mode:'lines+markers',line:{color:'#0b6e4f',width:2},marker:{size:5},name:'Vm'}],
+    {title:`AC Voltage Magnitude (${PF_METHOD_LABEL[body.method]||body.method})`,xaxis:{title:'AC Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+
+  /* DC Bus Voltages */
+  const vdc=body.vdc||[];
+  if(vdc.length>0){
+    Plotly.newPlot('pfDcVoltChart',[{x:dcVoltX,y:vdc,mode:'lines+markers',line:{color:'#6a0dad',width:2},marker:{size:5,color:'#6a0dad'},name:'Vdc'}],
+      {title:'DC Bus Voltage',xaxis:{title:'DC Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  } else { Plotly.purge('pfDcVoltChart'); }
+
+  /* VSC Converter Transfers */
+  const vsc=body.vsc_transfers||[];
+  if(vsc.length>0){
+    const labels=vsc.map(v=>'VSC'+v.index+' (AC'+v.bus_ac+'↔DC'+v.bus_dc+')');
+    Plotly.newPlot('pfConverterChart',[
+      {x:labels,y:vsc.map(v=>pConv(v.p_ac_mw)),type:'bar',name:`P_ac (${u})`,marker:{color:'#0b6e4f'}},
+      {x:labels,y:vsc.map(v=>pConv(v.p_dc_mw)),type:'bar',name:`P_dc (${u})`,marker:{color:'#6a0dad'}},
+      {x:labels,y:vsc.map(v=>pConv(v.loss_mw)),type:'bar',name:`Loss (${u})`,marker:{color:'#c34d4d'}}
+    ],{title:'VSC Converter Power Transfers',barmode:'group',xaxis:{title:'Converter'},yaxis:{title:u},margin:{l:55,r:15,t:45,b:80}},{responsive:true});
+  } else { Plotly.purge('pfConverterChart'); }
+
+  Plotly.newPlot('pfBranchChart',[{x:branchX,y:branch.map(v=>pConv(v)),type:'bar',marker:{color:'#2c8c99'}}],
+    {title:`Branch |P|`,xaxis:{title:'Branch'},yaxis:{title:u},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+
+  // GIS Map
+  renderGeoMap(body);
+}
+
+function renderPfCompare(rows){
+  if(!rows.length){document.getElementById('pfCompareTable').textContent='No comparison results yet.';return;}
+  const methods=rows.map(r=>PF_METHOD_LABEL[r.method]||r.method);
+  const iters=rows.map(r=>r.iterations||0);
+  const residuals=rows.map(r=>Number(r.residual||0));
+  Plotly.newPlot('pfCompareChart',[
+    {x:methods,y:iters,type:'bar',name:'Iterations',marker:{color:'#0b6e4f'}},
+    {x:methods,y:residuals,type:'scatter',mode:'lines+markers',name:'Residual',yaxis:'y2',line:{color:'#b5651d',width:2}},
+  ],{title:'PF Method Comparison',yaxis:{title:'Iterations'},yaxis2:{title:'Residual',overlaying:'y',side:'right'},margin:{l:55,r:55,t:45,b:80}}, {responsive:true});
+  const lines=['Method | Conv | Iter | Residual | |Vm| count'];
+  rows.forEach(r=>lines.push(`${PF_METHOD_LABEL[r.method]||r.method} | ${r.converged?'Y':'N'} | ${r.iterations} | ${fmt(r.residual,4)} | ${(r.vm||[]).length}`));
+  document.getElementById('pfCompareTable').textContent=lines.join('\n');
+}
+
+function renderGeoMap(body){
+  const buses=body.geo_buses||[];
+  const acBranches=body.geo_ac_branches||[];
+  const dcBranches=body.geo_dc_branches||[];
+  const vsc=body.geo_vsc||[];
+  const dcdc=body.geo_dcdc||[];
+  const u=pUnit(), qu=qUnit();
+  
+  if(!buses.length){Plotly.purge('pfGeoMap');return;}
+  
+  // Check if we have valid geo coordinates (not all zeros)
+  const hasGeo=buses.some(b=>Math.abs(b.lat)>0.001||Math.abs(b.lon)>0.001);
+  
+  const traces=[];
+  
+  // AC Branches as lines
+  for(const br of acBranches){
+    traces.push({
+      type:'scattergeo',
+      mode:'lines',
+      lon:[br.from_lon,br.to_lon],
+      lat:[br.from_lat,br.to_lat],
+      line:{width:Math.max(1,Math.min(6,(br.loading_pct||0)/20)),color:'#0b6e4f'},
+      hoverinfo:'text',
+      text:`AC ${br.from}-${br.to}: Pf=${pFmt(br.pf_mw||0)} Pt=${pFmt(br.pt_mw||0)} Loss=${pFmt(br.loss_mw||0,3)} ${u} (${(br.loading_pct||0).toFixed(1)}%)`,
+      showlegend:false
+    });
+  }
+  
+  // DC Branches as lines
+  for(const br of dcBranches){
+    traces.push({
+      type:'scattergeo',
+      mode:'lines',
+      lon:[br.from_lon,br.to_lon],
+      lat:[br.from_lat,br.to_lat],
+      line:{width:2,color:'#6a0dad',dash:'dash'},
+      hoverinfo:'text',
+      text:`DC ${br.from}-${br.to}: ${pFmt(br.pf_mw||0)} ${u}`,
+      showlegend:false
+    });
+  }
+  
+  // VSC connections
+  for(const v of vsc){
+    traces.push({
+      type:'scattergeo',
+      mode:'lines',
+      lon:[v.ac_lon,v.dc_lon],
+      lat:[v.ac_lat,v.dc_lat],
+      line:{width:3,color:'#b5651d'},
+      hoverinfo:'text',
+      text:`VSC: AC${v.bus_ac}↔DC${v.bus_dc} P=${pFmt(v.p_ac_mw||0)}${u}`,
+      showlegend:false
+    });
+  }
+  
+  // DC-DC converter connections
+  for(const d of dcdc){
+    traces.push({
+      type:'scattergeo',
+      mode:'lines',
+      lon:[d.in_lon,d.out_lon],
+      lat:[d.in_lat,d.out_lat],
+      line:{width:3,color:'#c34d4d',dash:'dot'},
+      hoverinfo:'text',
+      text:`DCDC: DC${d.bus_in}↔DC${d.bus_out} P=${pFmt(d.p_in_mw||0)}${u}`,
+      showlegend:false
+    });
+  }
+  
+  // AC buses with dynamic voltage color range
+  const acBuses=buses.filter(b=>b.type==='AC');
+  if(acBuses.length){
+    const vmVals=acBuses.map(b=>b.vm_pu||1.0);
+    const vmMin=Math.min(...vmVals);
+    const vmMax=Math.max(...vmVals);
+    const vmRange=Math.max(vmMax-vmMin,0.005);
+    const cmin=Math.max(0.9, vmMin-vmRange*0.3);
+    const cmax=Math.min(1.1, vmMax+vmRange*0.3);
+    traces.push({
+      type:'scattergeo',
+      mode:'markers+text',
+      lon:acBuses.map(b=>b.lon),
+      lat:acBuses.map(b=>b.lat),
+      marker:{size:acBuses.map(b=>b.bus_type==='SLACK'?14:10),color:vmVals,colorscale:'RdYlGn',cmin:cmin,cmax:cmax,colorbar:{title:'Vm (pu)',x:1.02,thickness:12,len:0.7}},
+      text:acBuses.map(b=>b.name||'AC'+b.id),
+      textposition:'top center',
+      textfont:{size:9},
+      hoverinfo:'text',
+      hovertext:acBuses.map(b=>`AC${b.id} ${b.name||''}<br>Vm=${(b.vm_pu||1.0).toFixed(4)} Va=${((b.va_rad||0)*180/Math.PI).toFixed(2)}°<br>P=${pFmt(b.pd_mw||0)}${u} Q=${pFmt(b.qd_mvar||0)}${qu}`),
+      name:'AC Buses',
+      showlegend:true
+    });
+  }
+  
+  // DC buses with voltage-based coloring
+  const dcBuses=buses.filter(b=>b.type==='DC');
+  if(dcBuses.length){
+    const vdcVals=dcBuses.map(b=>b.vm_pu||1.0);
+    const vdcMin=Math.min(...vdcVals);
+    const vdcMax=Math.max(...vdcVals);
+    const vdcRange=Math.max(vdcMax-vdcMin,0.005);
+    traces.push({
+      type:'scattergeo',
+      mode:'markers+text',
+      lon:dcBuses.map(b=>b.lon),
+      lat:dcBuses.map(b=>b.lat),
+      marker:{size:12,color:vdcVals,colorscale:'Purples',cmin:Math.max(0.9,vdcMin-vdcRange*0.3),cmax:Math.min(1.1,vdcMax+vdcRange*0.3),symbol:'square'},
+      text:dcBuses.map(b=>b.name||'DC'+b.id),
+      textposition:'top center',
+      textfont:{size:9},
+      hoverinfo:'text',
+      hovertext:dcBuses.map(b=>`DC${b.id} ${b.name||''}<br>Vdc=${(b.vm_pu||1.0).toFixed(4)}<br>P=${pFmt(b.pd_mw||0)}${u}`),
+      name:'DC Buses',
+      showlegend:true
+    });
+  }
+  
+  const layout={
+    title:'Network GIS Visualization',
+    geo:{
+      scope:hasGeo?undefined:'usa',
+      projection:{type:hasGeo?'mercator':'albers usa'},
+      showland:true,landcolor:'#f5f5dc',
+      showlakes:true,lakecolor:'#a0d2db',
+      showcountries:true,countrycolor:'#888',
+      showsubunits:true,subunitcolor:'#aaa',
+      resolution:hasGeo?50:110,
+      lonaxis:hasGeo?(()=>{const lons=buses.map(b=>b.lon);const minL=Math.min(...lons),maxL=Math.max(...lons);const span=maxL-minL;const pad=Math.max(0.002,span*0.08);return{range:[minL-pad,maxL+pad]};})():undefined,
+      lataxis:hasGeo?(()=>{const lats=buses.map(b=>b.lat);const minL=Math.min(...lats),maxL=Math.max(...lats);const span=maxL-minL;const pad=Math.max(0.002,span*0.08);return{range:[minL-pad,maxL+pad]};})():undefined
+    },
+    margin:{l:0,r:0,t:40,b:0},
+    legend:{x:0,y:1,bgcolor:'rgba(255,255,255,0.7)'}
+>>>>>>> Stashed changes
   };
 
+<<<<<<< Updated upstream
   json taps = json::array();
   json shunts = json::array();
   int adjustable_taps = 0;
@@ -8451,6 +9904,289 @@ json rpo_control_inventory_json(const hacdcpf::HybridPowerSystem& sys,
       else
         exact_combinations *= p;
     }
+=======
+// --- Market GIS Map: buses coloured by average LMP, branches/DC links overlaid ---
+function renderMktGeoMap(body, lmp, sced){
+  const el=document.getElementById('mktGeoMap');
+  if(!el)return;
+  if(!SYS||!SYS.ac_buses||!SYS.ac_buses.length){el.innerHTML='<p style=\"color:#999\">No system loaded.</p>';return;}
+
+  // Build bus coord map from the loaded system
+  const busList=SYS.ac_buses||[];
+  const brList=SYS.ac_branches||[];
+  const dcBusList=SYS.dc_buses||[];
+  const dcBrList=SYS.dc_branches||[];
+  const vscList=SYS.vsc_converters||[];
+
+  const hasGeo=busList.some(b=>(Math.abs(b.latitude||0)>0.001||Math.abs(b.longitude||0)>0.001));
+  if(!hasGeo){el.innerHTML='<p style=\"color:#999\">No geographic coordinates available for this case.</p>';return;}
+
+  // Average LMP per bus across all periods
+  const nodalLmp=lmp.nodal_lmp||[];
+  const T=nodalLmp.length>0?(nodalLmp[0]||[]).length:0;
+  const avgLmp=nodalLmp.map(arr=>{
+    if(!arr||!arr.length)return 0;
+    return arr.reduce((s,v)=>s+Number(v||0),0)/arr.length;
+  });
+  const maxLmp=Math.max(1,...avgLmp);
+  const minLmp=Math.min(0,...avgLmp);
+
+  // Province colour palette
+  const areaColors=['#666','#2c8c99','#ff9800','#6a0dad','#27ae60','#d32f2f'];
+
+  const traces=[];
+
+  // AC Branches
+  for(const br of brList){
+    const fb=busList.find(b=>b.index===br.from_bus);
+    const tb=busList.find(b=>b.index===br.to_bus);
+    if(!fb||!tb)continue;
+    const fromArea=fb.area||0, toArea=tb.area||0;
+    const isInterArea=fromArea!==toArea;
+    traces.push({
+      type:'scattergeo',mode:'lines',
+      lon:[fb.longitude,tb.longitude],lat:[fb.latitude,tb.latitude],
+      line:{width:isInterArea?2.5:1.5,color:isInterArea?'#333':'#aaa',dash:isInterArea?'solid':'solid'},
+      hoverinfo:'text',
+      text:'AC '+(br.name||br.index)+' ('+fmt(br.rate_a_mva||0,0)+' MVA)',
+      showlegend:false
+    });
+  }
+
+  // DC Branches (dashed purple)
+  for(const dbr of dcBrList){
+    const fb=dcBusList.find(b=>b.index===dbr.from_bus);
+    const tb=dcBusList.find(b=>b.index===dbr.to_bus);
+    if(!fb||!tb)continue;
+    traces.push({
+      type:'scattergeo',mode:'lines',
+      lon:[fb.longitude,tb.longitude],lat:[fb.latitude,tb.latitude],
+      line:{width:3,color:'#6a0dad',dash:'dash'},
+      hoverinfo:'text',
+      text:'HVDC '+(dbr.name||dbr.index)+' ('+fmt(dbr.rate_a_mva||dbr.s_max_mva||0,0)+' MW)',
+      showlegend:false
+    });
+  }
+
+  // AC buses coloured by average LMP
+  if(busList.length){
+    traces.push({
+      type:'scattergeo',mode:'markers+text',
+      lon:busList.map(b=>b.longitude||0),
+      lat:busList.map(b=>b.latitude||0),
+      marker:{
+        size:busList.map((b,i)=>{const bt=b.bus_type||'PQ';return(bt==='SLACK'||bt===3||bt==='3')?14:10;}),
+        color:avgLmp.length>=busList.length?avgLmp.slice(0,busList.length):busList.map(()=>0),
+        colorscale:[[0,'#2166ac'],[0.25,'#67a9cf'],[0.5,'#f7f7f7'],[0.75,'#ef8a62'],[1,'#b2182b']],
+        cmin:minLmp,cmax:maxLmp,
+        colorbar:{title:'Avg LMP ($/MWh)',x:1.02,thickness:12,len:0.7},
+        line:{width:1,color:'#333'}
+      },
+      text:busList.map(b=>b.name||('Bus '+b.index)),
+      textposition:'top center',
+      textfont:{size:8},
+      hoverinfo:'text',
+      hovertext:busList.map((b,i)=>{
+        const al=avgLmp[i]||0;
+        return (b.name||'Bus '+b.index)+'<br>Area '+b.area+', Zone '+b.zone+
+          '<br>Avg LMP: $'+fmt(al,2)+'/MWh'+
+          '<br>Load: '+fmt(b.pd_mw||0,1)+' MW';
+      }),
+      name:'AC Buses (LMP)',
+      showlegend:true
+    });
+  }
+
+  // DC buses (squares)
+  if(dcBusList.length&&dcBusList.some(b=>Math.abs(b.latitude||0)>0.001)){
+    traces.push({
+      type:'scattergeo',mode:'markers+text',
+      lon:dcBusList.map(b=>b.longitude||0),
+      lat:dcBusList.map(b=>b.latitude||0),
+      marker:{size:10,color:'#6a0dad',symbol:'square'},
+      text:dcBusList.map(b=>b.name||('DC '+b.index)),
+      textposition:'top center',
+      textfont:{size:8},
+      hoverinfo:'text',
+      hovertext:dcBusList.map(b=>(b.name||'DC '+b.index)),
+      name:'DC Buses',
+      showlegend:true
+    });
+  }
+
+  const lons=busList.map(b=>b.longitude||0).concat(dcBusList.map(b=>b.longitude||0));
+  const lats=busList.map(b=>b.latitude||0).concat(dcBusList.map(b=>b.latitude||0));
+  const lonMin=Math.min(...lons),lonMax=Math.max(...lons);
+  const latMin=Math.min(...lats),latMax=Math.max(...lats);
+  const lonPad=Math.max(0.5,(lonMax-lonMin)*0.08);
+  const latPad=Math.max(0.3,(latMax-latMin)*0.08);
+
+  Plotly.newPlot('mktGeoMap',traces,{
+    title:'GIS Network Map — Average LMP by Bus',
+    geo:{
+      projection:{type:'mercator'},
+      showland:true,landcolor:'#f5f5dc',
+      showlakes:true,lakecolor:'#a0d2db',
+      showcountries:true,countrycolor:'#888',
+      showsubunits:true,subunitcolor:'#aaa',
+      resolution:50,
+      lonaxis:{range:[lonMin-lonPad,lonMax+lonPad]},
+      lataxis:{range:[latMin-latPad,latMax+latPad]}
+    },
+    margin:{l:0,r:0,t:40,b:0},
+    legend:{x:0,y:1,bgcolor:'rgba(255,255,255,0.7)'}
+  },{responsive:true});
+}
+
+document.getElementById('runPfBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  const method=document.getElementById('pfMethod').value;
+  try{
+    setStatus('Running '+(PF_METHOD_LABEL[method]||method)+'...');
+    const body=await runPfMethod(method);
+    lastPfBody=body; lastPfCompareRows=[body];
+    renderPf(body);
+    renderPfCompare([body]);
+    setStatus('Power flow completed: '+(PF_METHOD_LABEL[method]||method));
+  }catch(e){setStatus(e.message,true);}
+};
+
+document.getElementById('runPfCompareBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  const methods=['ac_newton','dc','hybrid_linearized','fdpf','adaptive','islanded','distributed_slack','three_phase'];
+  setStatus('Running comparison across PF methods...');
+  const rows=[];
+  for(const m of methods){
+    try{rows.push(await runPfMethod(m));}
+    catch(e){rows.push({method:m,converged:false,iterations:0,residual:NaN,vm:[],_error:e.message});}
+  }
+  const selected=rows.find(r=>r.method===document.getElementById('pfMethod').value)||rows[0];
+  if(selected){lastPfBody=selected;renderPf(selected);}
+  lastPfCompareRows=rows;
+  renderPfCompare(rows);
+  const ok=rows.filter(r=>r.converged).length;
+  setStatus(`PF comparison complete: ${ok}/${rows.length} methods converged.`);
+};
+
+document.getElementById('runSpptAgentBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  const outBox=document.getElementById('spptAgentOut');
+  try{
+    setStatus('Running SPPT guarded agent loop...');
+    const body=await api('/api/session/sppt_agent',{},'POST');
+    const m=body.metrics||{};
+    const steps=(body.steps||[]).map((s,i)=>
+      `${i+1}. ${s.edit}: ${s.accepted?'ACCEPT':'REJECT'}${s.reason?` (${s.reason})`:''}`+
+      `${s.analysis_ran?` | analysis ${s.analysis_converged?'ok':'fail'} | attributed ${s.attributed_buses}`:''}`
+    ).join('\n');
+    outBox.style.display='block';
+    outBox.textContent=
+      `sound=${body.sound?'true':'false'}\n`+
+      `tp=${m.tp??0} tn=${m.tn??0} fp=${m.fp??0} fn=${m.fn??0}\n`+
+      `precision=${fmt(m.precision??0,3)} recall=${fmt(m.recall??0,3)} catch=${fmt(m.catch_rate??0,3)}\n\n`+
+      steps;
+    setStatus(`SPPT agent loop complete: sound=${body.sound?'true':'false'}, catch=${fmt(m.catch_rate??0,3)}.`);
+  }catch(e){
+    outBox.style.display='block';
+    outBox.textContent=`SPPT agent loop failed: ${e.message}`;
+    setStatus(e.message,true);
+  }
+};
+
+/* Re-render on display unit change */
+document.getElementById('pfDisplayUnit').onchange=()=>{
+  if(lastPfBody)renderPf(lastPfBody);
+  if(lastPfCompareRows.length)renderPfCompare(lastPfCompareRows);
+};
+
+/* OPF */
+function renderOpfDcResults(body){
+  const acBusX=(n)=>Array.from({length:n},(_,i)=>(SYS&&SYS.ac_buses&&SYS.ac_buses[i]&&SYS.ac_buses[i].index!=null)?SYS.ac_buses[i].index:`pos ${i}`);
+  const dcBusX=(n)=>Array.from({length:n},(_,i)=>(SYS&&SYS.dc_buses&&SYS.dc_buses[i]&&SYS.dc_buses[i].index!=null)?SYS.dc_buses[i].index:`pos ${i}`);
+  const vdc=body.vdc||[];
+  if(vdc.length>0){
+    Plotly.newPlot('opfDcVoltChart',[{x:dcBusX(vdc.length),y:vdc,mode:'lines+markers',line:{color:'#6a0dad',width:2},marker:{size:5,color:'#6a0dad'},name:'Vdc'}],
+      {title:'DC Bus Voltage',xaxis:{title:'DC Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  } else { Plotly.purge('opfDcVoltChart'); }
+  const pac=body.pac_mw||[], qac=body.qac_mvar||[];
+  if(pac.length>0){
+    const u=pUnit(), qu=qUnit();
+    Plotly.newPlot('opfConverterChart',[
+      {x:pac.map((_,i)=>'VSC'+(i+1)),y:pac.map(v=>pConv(v)),type:'bar',name:`P_ac (${u})`,marker:{color:'#0b6e4f'}},
+      {x:qac.map((_,i)=>'VSC'+(i+1)),y:qac.map(v=>pConv(v)),type:'bar',name:`Q_ac (${qu})`,marker:{color:'#2c8c99'}}
+    ],{title:'Converter Operating Points',barmode:'group',xaxis:{title:'Converter'},yaxis:{title:`${u} / ${qu}`},margin:{l:55,r:15,t:45,b:65}},{responsive:true});
+  } else { Plotly.purge('opfConverterChart'); }
+  // LMP chart
+  const lp=body.lmp_p||[], lq=body.lmp_q||[], lmp=body.lmp||[];
+  if(lp.length>0){
+    const busX=acBusX(lp.length);
+    const traces=[{x:busX,y:lp,type:'bar',name:'Active LMP ($/MWh)',marker:{color:'#0b6e4f'}}];
+    if(lq.length>0) traces.push({x:busX,y:lq,type:'bar',name:'Reactive LMP ($/MVArh)',marker:{color:'#2c8c99'}});
+    Plotly.newPlot('opfLmpChart',traces,{title:'Locational Marginal Prices',barmode:'group',xaxis:{title:'Bus'},yaxis:{title:'$/MWh'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.15}},{responsive:true});
+  } else if(lmp.length>0){
+    Plotly.newPlot('opfLmpChart',[{x:dcBusX(lmp.length),y:lmp,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5},name:'LMP ($/MWh)'}],
+      {title:'Locational Marginal Prices (DC OPF)',xaxis:{title:'Bus'},yaxis:{title:'$/MWh'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  } else { Plotly.purge('opfLmpChart'); }
+}
+document.getElementById('runAcOpfBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  const solver=document.getElementById('opfSolver').value;
+  try{setStatus('Running AC OPF ('+solver+')...');const body=await api('/api/session/opf_ac',{solver});
+  document.getElementById('opfType').textContent=body.solver_backend?body.solver_backend:('AC ('+solver+')');
+  document.getElementById('opfConv').textContent=body.converged?'Yes':'No';
+  document.getElementById('opfObj').textContent=fmt(body.objective,2);
+  document.getElementById('opfIter').textContent=body.iterations;
+  Plotly.newPlot('opfDispatchChart',[{x:body.pg_mw.map((_,i)=>i+1),y:body.pg_mw.map(v=>pConv(v)),type:'bar',marker:{color:'#0b6e4f'}}],{title:'AC OPF Dispatch',xaxis:{title:'Gen'},yaxis:{title:pUnit()},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  if(body.vm)Plotly.newPlot('opfAuxChart',[{x:Array.from({length:body.vm.length},(_,i)=>(SYS&&SYS.ac_buses&&SYS.ac_buses[i]&&SYS.ac_buses[i].index!=null)?SYS.ac_buses[i].index:`pos ${i}`),y:body.vm,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5}}],{title:'AC OPF Voltage',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  renderOpfDcResults(body);
+  setStatus(body.converged?('AC OPF completed ('+(body.solver_backend||solver)+').'):('AC OPF did not converge: '+(body.status||'')) ,!body.converged);}catch(e){setStatus(e.message,true);}
+};
+
+document.getElementById('runDcOpfBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{setStatus('Running DC OPF...');const body=await api('/api/session/opf_dc',{});
+  document.getElementById('opfType').textContent='DC';
+  document.getElementById('opfConv').textContent=body.converged?'Yes':'No';
+  document.getElementById('opfObj').textContent=fmt(body.objective,2);
+  document.getElementById('opfIter').textContent=body.iterations;
+  Plotly.newPlot('opfDispatchChart',[{x:body.pg_mw.map((_,i)=>i+1),y:body.pg_mw.map(v=>pConv(v)),type:'bar',marker:{color:'#2c8c99'}}],{title:'DC OPF Dispatch',xaxis:{title:'Gen'},yaxis:{title:pUnit()},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  Plotly.purge('opfAuxChart');
+  renderOpfDcResults(body);
+  setStatus('DC OPF completed.');}catch(e){setStatus(e.message,true);}
+};
+
+document.getElementById('runParityOpfBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{setStatus('Running Parity OPF (full-space IPM)...');const body=await api('/api/session/opf_parity',{});
+  document.getElementById('opfType').textContent='Parity IPM';
+  document.getElementById('opfConv').textContent=body.converged?'Yes':'No';
+  document.getElementById('opfObj').textContent=fmt(body.objective,2);
+  document.getElementById('opfIter').textContent=body.iterations;
+  Plotly.newPlot('opfDispatchChart',[{x:body.pg_mw.map((_,i)=>i+1),y:body.pg_mw.map(v=>pConv(v)),type:'bar',marker:{color:'#6a0dad'}}],{title:'Parity OPF Dispatch',xaxis:{title:'Gen'},yaxis:{title:pUnit()},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  if(body.vm)Plotly.newPlot('opfAuxChart',[{x:Array.from({length:body.vm.length},(_,i)=>(SYS&&SYS.ac_buses&&SYS.ac_buses[i]&&SYS.ac_buses[i].index!=null)?SYS.ac_buses[i].index:`pos ${i}`),y:body.vm,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5}}],{title:'Parity OPF AC Voltage',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  renderOpfDcResults(body);
+  setStatus('Parity OPF completed.');}catch(e){setStatus(e.message,true);}
+};
+
+/* Short Circuit */
+function scNumber(id,fallback){const el=document.getElementById(id);const v=Number(el&&el.value);return Number.isFinite(v)?v:fallback;}
+function scChecked(id,fallback){const el=document.getElementById(id);return el?!!el.checked:!!fallback;}
+function scOptions(detailed){
+  return {
+    fault_type:document.getElementById('scFaultType').value,
+    calc_type:document.getElementById('scCalcType').value,
+    c_factor:scNumber('scCFactor',1.1),
+    kappa_method:document.getElementById('scKappaMethod').value,
+    topology:document.getElementById('scTopology').value,
+    fault_impedance_pu:scNumber('scFaultImpedance',0),
+    breaking_time_s:scNumber('scBreakingTime',0.10),
+    ith_duration_s:scNumber('scIthDuration',1),
+    base_frequency_hz:scNumber('scBaseFrequency',50),
+    default_xdpp:scNumber('scDefaultXdpp',0.2),
+    compute_branch_flows:!!detailed&&scChecked('scComputeBranchFlows',true),
+    compute_voltage_drops:!!detailed&&scChecked('scComputeVoltageDrops',true),
+    compute_ith:scChecked('scComputeIth',true)
+>>>>>>> Stashed changes
   };
 
   for (const auto& row : inventory.taps) {

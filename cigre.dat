@@ -1,0 +1,30 @@
+....................................................................................................
+(POWERFLOW,CASEID=dc,PROJECT=dctest)
+/MVA_BASE=100 \
+/ P_INPUT_LIST,FULL \
+/ P_OUTPUT_LIST,FULL \
+/ P_ANALYSIS_REPORT,LEVEL=4\
+/ AI_LIST,FULL \
+/NEW_BASE,FILE=dc.bse\
+/PF_MAP,FILE=dc.MAP\
+
+BS    RECGEN  525.                    3100     9999.-99991005    
+B     RECAC   525.                740.                   1005    
+B     INVAC   525.                740.                   1.      
+BS    INVGEN  525.                    9999     9999 -99991000    
+L     RECGEN  525. RECAC   525.             0.0001                        
+L     INVGEN  525. INVAC   525.             0.0001                        
+
+BD    RECDC   217.SX    2 200.   5. 140. 100.3000.RECAC    525
+BD    INVDC   217.SX    2 200.   5. 140. 100.3000.INVAC    525
+T     RECAC   525. RECDC   217.  1800       .00833            525.0217.
+T     INVAC   525. INVDC   217.  1800       .00833            525.0217.
+R     RECAC   525.1RECDC   217.  RECDC   217.6100047500
+R     INVAC   525.1INVDC   217.  INVDC   217.6037549875
+LD    RECDC   217.2INVDC   217.  300010.               R1500. 500. 15. 17.1067
+
+/ SOLUTION\
+>AI_CONTROL=OFF<
+>LTC=ON<
+>SOL_ITER,DECOUPLED=60,CURRENT=30,NEWTON=55,OPTIM=0<
+(END)
