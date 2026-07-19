@@ -122,4 +122,11 @@ LearningtoOptimize/
 .vscode/
 
 
-tests/
+# Test/benchmark executables are built into tests/ (RUNTIME_OUTPUT_DIRECTORY);
+# ignore the binaries but keep sources, baselines and data visible.
+tests/*
+!tests/*.cpp
+!tests/*.hpp
+!tests/*.h
+!tests/baselines/
+!tests/data/

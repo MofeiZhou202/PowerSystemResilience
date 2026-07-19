@@ -178,6 +178,8 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
       benchmark/milp_benchmark_runner.cpp
       src/scuc/scuc.cpp
       src/scuc/case_builder.cpp)
+    set_target_properties(milp_benchmark_runner PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     target_include_directories(milp_benchmark_runner PRIVATE
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
     target_link_libraries(milp_benchmark_runner PRIVATE mipsolvers highs::highs)
@@ -227,6 +229,8 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
       benchmark/solver_comparison.cpp
       src/scuc/scuc.cpp
       src/scuc/case_builder.cpp)
+    set_target_properties(solver_comparison PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     target_include_directories(solver_comparison PRIVATE
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
     target_link_libraries(solver_comparison PRIVATE mipsolvers)
@@ -253,8 +257,16 @@ endif()
 # 将绝对路径限定在本项目构建内，避免平台相关路径写入导出的 targets 文件。
 if(MIPSOLVERS_HAVE_SUITESPARSE)
   target_include_directories(mipsolvers PRIVATE ${MIPSOLVERS_SUITESPARSE_INCLUDE_DIRS})
-  # BUILD_INTERFACE: SuiteSparse 是平台特定共享库，不向消费者导出绝对路径；
-  # mipsolversConfig.cmake 会在消费者机器上用 find_package 重新找到它们。
+  # Vendored SuiteSparse targets (offline) take precedence when built from
+  # in-tree sources; otherwise link the system SuiteSparse libraries found by
+  # Dependencies.cmake (BUILD_INTERFACE keeps their absolute paths out of the
+  # exported targets).
+  if(TARGET umfpack_vendored)
+    target_link_libraries(mipsolvers PRIVATE umfpack_vendored)
+  endif()
+  if(TARGET klu_vendored)
+    target_link_libraries(mipsolvers PRIVATE klu_vendored)
+  endif()
   foreach(_ss_lib IN LISTS MIPSOLVERS_SUITESPARSE_LIBRARIES)
     target_link_libraries(mipsolvers PRIVATE "$<BUILD_INTERFACE:${_ss_lib}>")
   endforeach()
@@ -268,12 +280,6 @@ if(MIPSOLVERS_HAVE_SUITESPARSE)
     target_compile_definitions(mipsolvers PUBLIC
       MIPSOLVERS_HAVE_KLU=1 HACDCPF_HAVE_KLU=1)
   endif()
-  if(APPLE)
-    # PRIVATE rpath: 仅影响本项目产出物，不传播给消费者
-    target_link_options(mipsolvers PRIVATE
-      "-Wl,-rpath,/opt/homebrew/opt/suite-sparse/lib"
-      "-Wl,-rpath,/usr/local/opt/suite-sparse/lib")
-  endif()
 endif()
 
 # ── Vendored CHOLMOD ──────────────────────────────────────────────────────────
@@ -286,6 +292,21 @@ if(MIPSOLVERS_HAVE_CHOLMOD)
   target_link_libraries(mipsolvers PRIVATE cholmod_vendored)
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_CHOLMOD=1 HACDCPF_HAVE_CHOLMOD=1)
+endif()
+
+# ── MUMPS (multifrontal symmetric-indefinite direct solver) ──────────────────
+# MUMPS::MUMPS is provided by cmake/BuildMUMPS.cmake (vendored sources or a
+# system/Homebrew MUMPS wrapped as an INTERFACE target on Apple).  Links the
+# headers (dmumps_c.h) and libraries into mipsolvers for the MumpsSolver
+# sparse-direct backend used by the OPF/KKT paths.
+option(MIPSOLVERS_USE_MUMPS "Enable the MUMPS sparse-direct backend" ON)
+if(MIPSOLVERS_USE_MUMPS AND TARGET MUMPS::MUMPS)
+  target_link_libraries(mipsolvers PRIVATE MUMPS::MUMPS)
+  target_compile_definitions(mipsolvers PUBLIC
+    MIPSOLVERS_HAVE_MUMPS=1 HACDCPF_HAVE_MUMPS=1)
+  message(STATUS "mipsolvers: MUMPS sparse-direct backend enabled")
+else()
+  message(STATUS "mipsolvers: MUMPS backend unavailable (no MUMPS::MUMPS target)")
 endif()
 
 # ── OpenMP (optional) ─────────────────────────────────────────────────────────
@@ -436,6 +457,7 @@ if(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE)
     # macOS libtool cleanly merges archives and de-dups member names.
     add_custom_command(
       OUTPUT "${_bundle_output}"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "$<CONFIG>"
       COMMAND libtool -static -o "${_bundle_output}" ${_bundle_inputs}
       DEPENDS mipsolvers
       COMMENT "Bundling single static archive: ${_bundle_output}"
@@ -500,6 +522,9 @@ if(MIPSOLVERS_BUILD_TESTS)
   macro(mipsolvers_add_test _name)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${_name}.cpp")
       add_executable(${_name} tests/${_name}.cpp)
+      # Test executables live in tests/ (gitignored), not the repo root.
+      set_target_properties(${_name} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
       target_link_libraries(${_name} PRIVATE mipsolvers Catch2::Catch2WithMain)
       target_include_directories(${_name} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -536,12 +561,24 @@ if(MIPSOLVERS_BUILD_TESTS)
   mipsolvers_add_test(test_numerical_stability TIER unit)
   mipsolvers_add_test(test_netlib_regression   TIER integration)
 
+  # Temporary OPF scalability probe (not a test; removed after use).
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/opf_scale_probe.cpp")
+    add_executable(opf_scale_probe benchmark/opf_scale_probe.cpp)
+    set_target_properties(opf_scale_probe PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    target_link_libraries(opf_scale_probe PRIVATE mipsolvers)
+    target_include_directories(opf_scale_probe PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  endif()
+
   # SCUC module test requires scuc.cpp (not in base mipsolvers lib)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scuc_module.cpp" AND MIPSOLVERS_BUILD_SCUC)
     add_executable(test_scuc_module
       tests/test_scuc_module.cpp
       src/scuc/scuc.cpp
     )
+    set_target_properties(test_scuc_module PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     target_link_libraries(test_scuc_module PRIVATE mipsolvers Catch2::Catch2WithMain)
     target_include_directories(test_scuc_module PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -557,6 +594,8 @@ if(MIPSOLVERS_BUILD_TESTS)
       src/scuc/scuc.cpp
       src/scuc/case_builder.cpp
     )
+    set_target_properties(test_market_simulation PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     target_link_libraries(test_market_simulation PRIVATE mipsolvers Catch2::Catch2WithMain)
     target_include_directories(test_market_simulation PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -724,6 +763,16 @@ if(MIPSOLVERS_BUILD_HFACTOR)
 endif()
 if(MIPSOLVERS_HAVE_CHOLMOD)
   install(TARGETS cholmod_vendored
+    EXPORT mipsolversTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
+if(TARGET umfpack_vendored)
+  install(TARGETS umfpack_vendored
+    EXPORT mipsolversTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
+if(TARGET klu_vendored)
+  install(TARGETS klu_vendored
     EXPORT mipsolversTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 endif()

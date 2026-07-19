@@ -96,6 +96,40 @@ class MKLPardisoSolver final : public SparseLinearSolver {
 };
 #endif
 
+#ifdef HACDCPF_HAVE_MUMPS
+/// MUMPS multifrontal direct solver (Bunch–Kaufman LDLᵀ) for symmetric
+/// indefinite systems — the open-source counterpart to MA57/Pardiso for the
+/// KKT/Newton systems in the IPM paths.  Symmetric-indefinite factorization
+/// exploits symmetry (≈half the fill and flops of a generic unsymmetric LU)
+/// and uses nested-dissection ordering, which is near-optimal for grid-type
+/// graphs (power networks, meshes).  The analyze/factorize/solve contract
+/// matches the IPM's "analyze once, factorize many" pattern: the sparsity
+/// pattern is analyzed once (lower triangle is extracted then), the numeric
+/// values are refilled per iteration.
+class MumpsSolver final : public SparseLinearSolver {
+ public:
+  MumpsSolver();
+  ~MumpsSolver() override;
+  const char* backend_name() const override;
+  void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
+  bool factorize(const Eigen::SparseMatrix<double>& a) override;
+  bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
+
+  /// Number of negative eigenvalues of the factored matrix — the negative
+  /// pivots of the LDLᵀ factorization (INFOG(12)), which equal the matrix
+  /// inertia by Sylvester's congruence (K = LDLᵀ ⇒ inertia(K) = inertia(D)).
+  /// Free with the factorization; this is what the Wächter–Biegler δ_W
+  /// inertia-correction loop queries each IPM iteration.  Returns -1 when no
+  /// factorization has run yet.
+  int negative_eigenvalues() const;
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+  bool empty_system_{false};
+};
+#endif
+
 std::unique_ptr<SparseLinearSolver> make_default_sparse_solver();
 
 }  // namespace mipsolvers::engine

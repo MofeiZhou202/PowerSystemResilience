@@ -1,14 +1,16 @@
-test_engine_api 15 0.0351356
-test_lp_solver 15 0.036402
-test_milp_solver 15 0.037625
-test_ipm_solver 15 0.0359147
-test_dual_simplex 15 0.0140122
-test_problem_validation 15 0.0129621
-test_adapter_registry 15 0.0348803
-test_presolve 15 0.0124694
-test_l2o_trace 14 0.015103
-test_numerical_stability 14 0.0366885
+test_engine_api 19 0.000806941
+test_lp_solver 21 0.00051227
+test_milp_solver 21 0.00202523
+test_ipm_solver 19 0.00057773
+test_dual_simplex 21 0.000469512
+test_problem_validation 21 0.000418141
+test_adapter_registry 21 0.000471667
+test_presolve 21 0.000447788
+test_l2o_trace 20 0.000509665
+test_numerical_stability 20 0.000550285
 test_ipopt_parameter_stability 0 0
-test_netlib_regression 3 0.10855
+test_netlib_regression 4 0.0788693
 test_scuc_module 0 0
+milp_benchmark 0 0
+test_market_simulation 1 23.37
 ---

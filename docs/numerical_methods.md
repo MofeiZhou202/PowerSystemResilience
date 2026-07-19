@@ -228,8 +228,10 @@ guards + `dl` interfaces close the silent-overflow hole now.
   numeric-per-iteration, portable (SuiteSparse, no vendor lock).
 - **Multifrontal / Bunch–Kaufman** (MUMPS, MA57, Pardiso): required for
   *indefinite* KKT systems at scale (the augmented Newton form of §5).
-  MUMPS is the open-source counterpart (vendored here for Ipopt); wiring
-  it as the indefinite backend is the documented Phase-2 follow-up.
+  MUMPS is the open-source counterpart — vendored in-tree (offline build,
+  no Homebrew) and wired both into the embedded Ipopt and as the
+  `MumpsSolver` backend of the parity-IPM OPF path; the full derivation of
+  why this class wins on OPF KKTs is §9.
 - **Apple Accelerate** sparse Cholesky: on Apple Silicon it beats CHOLMOD
   (~2.7× on the measured normal equations) — keep it first on macOS;
   CHOLMOD is the portable primary elsewhere (measured priority
@@ -255,3 +257,154 @@ reused per iteration (see §4).  These are the changes made in Phase 1/2;
 the remaining deep item is migrating the B&C node representation itself
 to the incremental `TreeNode` (bound-change deltas instead of full
 `lb/ub` arrays) — a rewrite of the legacy tree loop, deferred deliberately.
+
+---
+
+## 9. OPF-scale Newton systems: measured bottleneck hierarchy
+
+**Problem.**  The native parity IPM "could not solve" the PEGASE-13659 OPF
+(>10⁴ buses): 53 s and a filter line-search failure.  This section records
+the actual bottleneck hierarchy found by profiling and the derivation of
+each fix, in the order in which they bind.  The lesson is that three
+*distinct* asymptotic mechanisms were stacked; fixing the linear solver
+alone moved total runtime by <10%.
+
+### 9.1 First bind: an O(n³) dense warm start (engineering asymptotics)
+
+`build_initial_point`'s DC warm start solved `B'θ = P_inj` — the reduced
+network Laplacian system — by materializing a **dense** `(nb−1)×(nb−1)`
+matrix and calling `partialPivLu`:
+
+```
+memory  = (nb−1)² · 8 B          ≈ 1.5 GB   at nb = 13659
+work    = (2/3)(nb−1)³ flops     ≈ 1.7e12   at nb = 13659
+```
+
+Profiled share of the whole OPF solve: **94%** (48.3 s of 51 s), all inside
+Eigen's dense GEMM/LU kernels.  But `B'` is the imaginary part of `Ybus` —
+a grounded graph Laplacian with `O(nnz)` nonzeros and, for near-planar
+power grids, `O(√n)` separators, so sparse LU with a fill-reducing ordering
+costs `~O(n^{3/2})` (§9.3).  Replacing the dense LU with triplet assembly +
+`SparseLU(COLAMD)` took case13659 from 48.3 s to 5.5 s.  *Any* remaining
+claim about "the KKT factorization dominating" had to be re-measured after
+this fix — the earlier >99%-factorization figure came from a regime where
+this warm start had already been paid once per solve and amortized away.
+
+### 9.2 Second bind: the condensed Newton form (the solvability barrier)
+
+With the warm start sparse, all linear solvers (MUMPS/UMFPACK/KLU) produced
+**bit-identical trajectories** and the same failure: the filter line search
+stalls — 15 backtracks to α ≈ 1e-6 with *no* descent in any filter axis
+(feasibility, stationarity, complementarity).  Measured at the stall:
+
+```
+σ = μ/z  spans  [2e-5, 3e5]      (dynamic range ~1.5e10)
+‖W‖∞     ≈ 9e8 ,  W = Lxx + JhᵀΣJh (condensed Hessian, §5)
+```
+
+The condensed form (§5) squares the Jacobian's condition number and
+injects `Σ = diag(μ/z)` *into* `W`: by the stall, `κ(W) ≳ 1e10`, so the
+computed Newton direction carries only ~5–6 correct digits in the worst
+subspace — it is numerically perpendicular to the true direction
+("accurately-solved but wrong step": small KKT residual, worthless step).
+No linear solver can fix this, because the *system* is wrong, not its
+solution — exactly the §5 conditioning argument, here measured.
+
+The augmented form keeps `−ZM⁻¹` explicit:
+
+```
+[ Lxx+δW·I   Jgᵀ      Jhᵀ  ] [dx]   [−rd ]
+[ Jg        −δC·I     0   ] [dλ] = [−req]
+[ Jh          0     −ZM⁻¹ ] [dμ]   [rhs3]
+```
+
+Conditioning drops from `O(κ(Jh)²·range(σ))` to `O(κ(Jh)·range(σ))` and no
+triple product is formed (also removing its per-iteration fill and flops).
+Result on case1354pegase: **fail (iter 25, obj 435 567) → converged
+(iter 110, obj 74 069.4)** — matching embedded Ipopt's objective
+(74 069.1) to 4e-6, 31× faster than Ipopt (2.45 s vs 75.6 s).  The
+augmented form alone already converges with LU backends (UMFPACK: iter
+104, same objective); the LDLᵀ backend adds the inertia oracle:
+
+**Wächter–Biegler δ_W loop.**  With the reduced Hessian positive definite,
+`inertia(K_aug) = (n, meq+niq, 0)`.  An LDLᵀ factorization reports the
+negative-pivot count for free (§9.4); when `negevals ≠ meq+niq` the reduced
+Hessian is indefinite and the step need not be descent, so δ_W is
+escalated (kick `1e-8·‖Lxx‖`, ×8 per retry, cap `1e-2·‖Lxx‖`) and the KKT
+is refactorized.  This replaces the previous blind regularization ladder
+which accepted the first factorization that did not fail — including ones
+with wrong inertia, which is precisely how non-descent steps were
+accepted.
+
+### 9.3 Third bind: factorization backend class (the remaining constant)
+
+After 9.1–9.2, the per-iteration cost is a healthy mix of assembly,
+factorization, and solves.  Here the §7-class theory applies and is now
+measurable: on the same filled graph, symmetric LDLᵀ costs ~½ the flops
+and fill of unsymmetric LU (one triangle eliminated, Bunch–Kaufman 1×1/2×2
+pivoting with the `(1+√17)/8` threshold is backward stable on indefinite
+systems), and nested dissection on near-planar grid graphs gives fill
+`O(n log n)`, work `O(n^{3/2})` (George 1973; Lipton–Tarjan 1979) versus
+minimum-degree's degradation toward `O(n²)` on large meshes.  Measured on
+case13659 (condensed form, same failure, so trajectories are comparable):
+MUMPS 45.8 s vs UMFPACK 50.1 s pre-warm-start-fix; **5.5 s vs 9.6 s**
+after — i.e. LDLᵀ ≈ **1.75×** on the factorization-bound remainder,
+consistent with the ~2× symmetry prediction.
+
+**Inertia vs singularity flags — why one solver cannot serve both paths.**
+The parity-IPM OPF KKT is well-posed after Ruiz equilibration + δ_W, so
+MUMPS is its default backend.  The *generic* IPM instead drives δ_C
+escalation off singularity *flags*; MUMPS absorbs null/tiny pivots
+(`CNTL(3)`, `ICNTL(24)`) instead of failing, which would defeat that
+machinery — so `make_default_sparse_solver()` keeps UMFPACK > KLU > … and
+MUMPS is selected explicitly where the KKT is known well-posed.  This
+asymmetry is a consequence of the algorithms, not of preference.
+
+### 9.4 Inertia is free with LDLᵀ
+
+`K = LDLᵀ` is a congruence, so by Sylvester's law `inertia(K) = inertia(D)`
+and the negative eigenvalue count is the negative-pivot count of `D`
+(MUMPS `INFOG(12)`; exposed as `MumpsSolver::negative_eigenvalues()`).
+LU backends cannot provide inertia at all — with them the IPM must
+regularize blindly.  Free per-iteration inertia is a first-order
+algorithmic advantage of symmetric-indefinite factorization for interior
+point methods, not an implementation detail.
+
+### 9.5 Remaining gap: filter globalization in the mid/endgame
+
+With 9.1–9.3 fixed, the large cases fail *differently* — and the failure
+mode moved from the linear algebra to the globalization:
+
+- **case13659** (augmented + MUMPS + δ_W persistence): progresses steadily
+  (obj 1.69e7 → 1.38e7 at the 640-iteration cap, → **1.17e6 when the filter
+  stalls at iter 251**, 149 s ≈ 0.59 s/iter).  The Newton direction is now
+  good — α ≈ 1–2% fraction-to-boundary steps are accepted without
+  backtracking — but convergence is crawl-rate and the filter's strict
+  progress test `(1−ηα)` eventually rejects every trial.
+- **case1888rte**: reaches feas 2.1e-5 / grad 4e-6 / comp 1.5e-4 (essentially
+  the endgame, obj within 4% of the MATPOWER optimum) and the same strict
+  progress test fails the last few iterations.  A best-iterate restoration
+  exists but — despite its comment saying "10× tolerance" — currently
+  applies the *same* strict tolerances as the main loop.
+
+Derivation of the stall: the filter accepts a step only if some axis
+improves by `(1−ηα)` with ≤2% degradation on the others.  Near a solution
+(or on a slow tail), the true Newton decrement is smaller than the step's
+own rounding/linearization error, so no α passes — this is the classic
+Maratos-adjacent regime that **second-order correction (SOC)** was designed
+for (Wächter–Biegler §3.2): on rejection, re-solve the same factorization
+with the equality residual re-evaluated at the trial point
+(`rhs₂ ← −(rg + rg_trial)`), which cancels the Maratos increase at
+back-solve cost.  Failing that, Ipopt's **restoration phase** (minimize
+‖θ‖ with bound-relaxing slack variables) is the standard fallback; the
+parity IPM has neither yet.  Per-iteration cost is now ~55% MUMPS
+factor+solve and ~25% triplet re-assembly + per-iteration Ruiz rescaling —
+the engine's analyze-once scatter-map assembly (§4) is the documented way
+to remove the latter.
+
+**Phase-4 status.**  case1354pegase is *cured* (converges to Ipopt's
+objective, 31× faster than Ipopt); case13659pegase is improved 12× in
+final objective and 3× in time-to-best-point but does not yet converge;
+the rte cases die in the endgame within ~4% of the optimum.  Next
+mechanisms, in order of expected leverage: SOC in the filter, honest
+10× best-iterate acceptance, restoration, scatter-map assembly.

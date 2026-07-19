@@ -228,12 +228,18 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildCHOLMOD.cmake")
 
 # ── SuiteSparse (optional) ───────────────────────────────────────────────────
 set(MIPSOLVERS_HAVE_SUITESPARSE OFF)
-set(MIPSOLVERS_HAVE_UMFPACK OFF)
-set(MIPSOLVERS_HAVE_KLU OFF)
-set(MIPSOLVERS_SUITESPARSE_INCLUDE_DIRS "")
 set(MIPSOLVERS_SUITESPARSE_LIBRARIES "")
 option(MIPSOLVERS_USE_SUITESPARSE "Enable SuiteSparse backends when available" ON)
-if(MIPSOLVERS_USE_SUITESPARSE)
+
+# Vendored SuiteSparse (CHOLMOD/UMFPACK/KLU from in-tree sources via
+# cmake/BuildCHOLMOD.cmake) is the authoritative offline path — when it is
+# active we do not look for a system/Homebrew SuiteSparse at all.
+if(MIPSOLVERS_USE_SUITESPARSE AND MIPSOLVERS_HAVE_CHOLMOD)
+  set(MIPSOLVERS_HAVE_SUITESPARSE ON)
+  message(STATUS "mipsolvers: SuiteSparse via vendored in-tree sources (offline)")
+elseif(MIPSOLVERS_USE_SUITESPARSE)
+  set(MIPSOLVERS_HAVE_UMFPACK OFF)
+  set(MIPSOLVERS_HAVE_KLU OFF)
   set(_SS_HINTS
     $ENV{SUITESPARSE_ROOT}
     /opt/homebrew/opt/suite-sparse
@@ -261,14 +267,7 @@ if(MIPSOLVERS_USE_SUITESPARSE)
     find_library(_SS_AMD NAMES amd HINTS ${_SS_HINTS} PATH_SUFFIXES lib)
     find_library(_SS_COLAMD NAMES colamd HINTS ${_SS_HINTS} PATH_SUFFIXES lib)
     find_library(_SS_SUITESPARSECONFIG NAMES suitesparseconfig HINTS ${_SS_HINTS} PATH_SUFFIXES lib)
-    # System cholmod is only linked when the vendored build is off —
-    # otherwise its symbols would collide with cholmod_vendored.
-    if(NOT MIPSOLVERS_HAVE_CHOLMOD)
-      find_library(_SS_CHOLMOD NAMES cholmod HINTS ${_SS_HINTS} PATH_SUFFIXES lib)
-    else()
-      set(_SS_CHOLMOD "")  # shadow any cached result from prior configures
-    endif()
-    foreach(_SS_LIB _SS_AMD _SS_COLAMD _SS_CHOLMOD _SS_SUITESPARSECONFIG)
+    foreach(_SS_LIB _SS_AMD _SS_COLAMD _SS_SUITESPARSECONFIG)
       if(${_SS_LIB})
         list(APPEND MIPSOLVERS_SUITESPARSE_LIBRARIES "${${_SS_LIB}}")
       endif()

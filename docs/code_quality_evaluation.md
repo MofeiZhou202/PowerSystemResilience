@@ -315,3 +315,45 @@ model of the copy chains).
 - Repo hygiene note: `.gitignore` line 125 has a bare `tests/` entry, so NEW
   files under `tests/` (e.g. `test_netlib_regression.cpp`,
   `tests/data/netlib/`) are ignored by default and need `git add -f`.
+
+## 11. Phase-4 Log — OPF-scale Newton systems (measured)
+
+Driver: the native parity IPM "cannot solve >10000-bus OPF" (PEGASE-13659:
+53 s, filter line-search failure; PEGASE-1354 likewise).  Full derivations
+in `numerical_methods.md` §9; this is the change log.
+
+| # | Item | Status |
+|---|---|---|
+| 16 | MUMPS 5.7.3 vendored in-tree | ✅ `mumps/` mirrors the `highs/ scip/ ipopt/ suitesparse/` vendoring convention; `cmake/BuildMUMPS.cmake` builds sequential double-precision `dmumps` from source by default (`MIPSOLVERS_FORCE_BUILD_MUMPS=ON`) — no network, no Homebrew at configure/build/deploy. PORD + mpiseq compiled in; Accelerate BLAS |
+| 17 | SuiteSparse extended in-tree | ✅ `suitesparse/` now carries UMFPACK + KLU + BTF next to CHOLMOD; `umfpack_vendored`/`klu_vendored` static targets, vendored include dirs authoritative (Homebrew SuiteSparse block skipped when vendored CHOLMOD is active) |
+| 18 | `MumpsSolver` backend | ✅ `engine::MumpsSolver` (RAII `dmumps_c`, sym=2, auto ordering, no internal scaling, cntl(1)=0.01) + `negative_eigenvalues()` (INFOG(12) inertia for Wächter–Biegler). Unit test in `test_numerical_stability.cpp` (`[numerical][mumps]`) |
+| 19 | Stale-ABI header bug (root-caused) | ✅ `ipopt/Algorithm/LinearSolvers/` carried hand-vendored **MUMPS-5.6.2-ABI** headers (`dmumps_c.h`, `mpi.h`, `mumps_compat.h`, `mumps_mpi.h`, `smumps_c.h`, commit `41c314a`) that shadowed the real 5.7.3 headers via same-dir include resolution → struct-layout mismatch → Ipopt read `infog[11]=0` ≠ expected inertia → infinite re-factorization loop ("Error in step computation", 0 iterations, 3 failing `test_engine_api` cases). Deleted the stale bundle; embedded Ipopt now compiles against the same 5.7.3 headers as the library. Ipopt then converged case1354 (obj 74069.1, 479 iters, 75.6 s) |
+| 20 | Factory policy documented | ✅ `make_default_sparse_solver()` deliberately keeps UMFPACK > KLU > MKL > SuperLU > Eigen: MUMPS absorbs null pivots instead of flagging singularity, which would defeat the generic IPM's δ_C escalation (regression: `test_ipm_solver` δ_C assertion). MUMPS is selected explicitly on well-posed KKTs (parity OPF) |
+
+HybridACDC `optimal_power_flow` side (sibling repo, same investigation):
+
+| # | Item | Status |
+|---|---|---|
+| H1 | Dense O(n³) warm start | ✅ `dc_warm_start` built a dense 13658×13658 `MatrixXd` (~1.5 GB) + dense LU (~1.7e12 flops) — **94% of total runtime** on case13659. Replaced with sparse triplet assembly + `SparseLU(COLAMD)` on the grounded-Laplacian B′: 48.3 s → 5.5 s |
+| H2 | MUMPS as parity-KKT backend | ✅ backend id 4 in `SparseKKTCache`, first in Auto order, `HACDCPF_OPF_LINEAR_SOLVER=mumps` pin; UMFPACK/KLU/Eigen remain escalation failovers. Measured ≈1.75× UMFPACK on the post-H1 remainder (5.5 s vs 9.6 s), matching the §9.3 symmetry prediction (~2×) |
+| H3 | Augmented Newton form (the convergence fix) | ✅ `HACDCPF_OPF_KKT_FORM=augmented|condensed`, default augmented (condensed when dense path or niq=0). Condensed `W = Lxx + JhᵀΣJh` reached κ ≳ 1e10 (σ-range ~1.5e10, ‖W‖ ≈ 9e8) → non-descent Newton step → filter stall *with every solver*. Augmented keeps −ZM⁻¹ explicit; Wächter–Biegler δ_W inertia loop via `negative_eigenvalues()` (negevals must equal meq+niq; kick 1e-8·‖Lxx‖, ×8, cap 1e-2·‖Lxx‖). **case1354: fail(25) → converged(110), obj 74069.4 = Ipopt's 74069.1, 2.45 s vs Ipopt 75.6 s (31×)**. Also converges augmented+UMFPACK (no inertia oracle) |
+| H4 | Small-case regression sweep | ✅ case14/30/39/57/118/300 all converged with augmented default at their known optima (8081.52 / 576.892 / 41864.2 / 41737.9 / 129661 / 719723), ≤0.12 s each |
+| H5 | case13659 augmented | ⚠️ improved, not cured: condensed stalled at iter 59 (obj 1.69e7, 47 s); augmented descends steadily — obj 1.38e7 at the 640-iter cap (447 s), and with δ_W persistence obj **1.17e6 at iter 251** (149 s, 0.59 s/iter) where the filter stalls.  The remaining gap is globalization (SOC/restoration — `numerical_methods.md` §9.5), not linear algebra |
+| H6 | δ_W persistence (κ_W⁻ rule) | ✅ inertia loop warm-starts at δ_W⁻/2 instead of 0 (Ipopt practice): case13659 447→149 s, case1354 2.45→2.06 s, small-case sweep unchanged |
+| H7 | rte endgame diagnosis | 📋 case1888rte reaches feas 2.1e-5 / grad 4e-6 / comp 1.5e-4 (~4% from the MATPOWER optimum) then the strict `(1−ηα)` filter test fails the last iterations; the best-iterate restoration says "10× tolerance" in its comment but applies 1× — flagged as a documented-but-unimplemented relaxation |
+
+### Validation (Phase 4)
+
+- `ctest -L unit`: 10/10 suites pass after the MUMPS/Ipopt changes
+  (`test_engine_api` 92 assertions, `test_numerical_stability` 360
+  assertions incl. the MumpsSolver case).
+- Pre-existing failures unchanged: `test_ipopt_parameter_stability` (one
+  assertion — its `unscaled_dual_feas > 1e-8` bound is calibrated to MUMPS
+  5.6.2 numerics; the from-source 5.7.3 stack lands at 2.4e-10, i.e. the
+  solver is *more* accurate than the test anticipated — flagged for the
+  user, not silently relaxed) and `test_scuc_module`'s SCED-LP case
+  (HiGHS "solve failed" at HEAD, unrelated).
+- HybridACDC's own ctest suite could not be re-run here: its Release-mode
+  configure enforces a clean-tree pin on the sibling MIPSolvers checkout
+  (dirty = FATAL by design).  Parity-side validation used a probe binary
+  linking the Release `libhacdcpf.a` recompiled with the same flags.

@@ -67,39 +67,43 @@ endif()
 
 enable_language(Fortran)
 
-# ── Download MUMPS 5.7.3 ──────────────────────────────────────────────────────
-FetchContent_Declare(
-  mumps_upstream
-  URL      "https://mumps-solver.org/MUMPS_5.7.3.tar.gz"
-  URL_HASH "SHA256=84a47f7c4231b9efdf4d4f631a2cae2bdd9adeaabc088261d15af040143ed112"
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-FetchContent_GetProperties(mumps_upstream)
-if(NOT mumps_upstream_POPULATED)
-  FetchContent_Populate(mumps_upstream)
+# ── MUMPS 5.7.3 — vendored in-tree sources (offline; no download, no Homebrew) ─
+# The MUMPS source tree is committed under mumps/ (mirrors the highs/, scip/,
+# ipopt/, suitesparse/ vendoring convention) so configure/build/deploy never
+# touch the network.  FetchContent is kept only as a fallback for checkouts
+# that predate the vendored copy.
+set(_M "${CMAKE_CURRENT_SOURCE_DIR}/mumps")
+if(NOT EXISTS "${_M}/include/dmumps_c.h")
+  FetchContent_Declare(
+    mumps_upstream
+    URL      "https://mumps-solver.org/MUMPS_5.7.3.tar.gz"
+    URL_HASH "SHA256=84a47f7c4231b9efdf4d4f631a2cae2bdd9adeaabc088261d15af040143ed112"
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  )
+  FetchContent_GetProperties(mumps_upstream)
+  if(NOT mumps_upstream_POPULATED)
+    FetchContent_Populate(mumps_upstream)
+  endif()
+  set(_M "${mumps_upstream_SOURCE_DIR}")
 endif()
-set(_M "${mumps_upstream_SOURCE_DIR}")
 
 # ── Generate mumps_int_def.h (32-bit integer variant) ────────────────────────
 file(WRITE "${_M}/include/mumps_int_def.h"
   "#ifndef MUMPS_INT_H\n#define MUMPS_INT_H\n#define MUMPS_INTSIZE32\n#endif\n")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# macOS: prefer the complete Homebrew MUMPS over the from-source static build.
+# MUMPS is built from the vendored in-tree sources (mumps/) by default — the
+# deployment environment has no network and no Homebrew, so the from-source
+# build is the only supported path.  A system/Homebrew MUMPS is used only when
+# explicitly opted back in via -DMIPSOLVERS_FORCE_BUILD_MUMPS=OFF.
 #
-# The from-source static libdmumps.a has exhibited *unresolvable* Fortran
-# symbols (e.g. _dmumps_diag_ana_, _dmumps_mtrans_driver_) when linked into an
-# executable on arm64 macOS — the symbols are present in the archive yet ld
-# reports them missing, and neither ranlib nor -force_load resolves it.
-# Homebrew's Ipopt ships a complete, working MUMPS (same Add_ trailing-underscore
-# ABI).  Use its dylibs for the *library* while keeping the downloaded MUMPS
-# 5.7.3 *headers* (dmumps_c.h, libseq/mpi.h) for compilation, so ipopt_local
-# still builds against a matching API.
-#
-# Override with -DMIPSOLVERS_FORCE_BUILD_MUMPS=ON to force the from-source build.
+# Note: the from-source static libdmumps.a previously exhibited *unresolvable*
+# Fortran symbols when linked into an executable on arm64 macOS; that trace is
+# stale for the current 5.7.3 vendored build, which links and runs correctly
+# (see the MumpsSolver tests).
 # ─────────────────────────────────────────────────────────────────────────────
 option(MIPSOLVERS_FORCE_BUILD_MUMPS
-  "Build MUMPS from source even when a system MUMPS is available" OFF)
+  "Build MUMPS from the vendored in-tree sources (offline default)" ON)
 
 set(_ms_use_brew_mumps OFF)
 if(APPLE AND NOT MIPSOLVERS_FORCE_BUILD_MUMPS)
