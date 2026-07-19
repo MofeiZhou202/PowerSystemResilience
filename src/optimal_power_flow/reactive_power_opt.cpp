@@ -671,12 +671,22 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
           opt.enforce_converter_current_limits;
       seed_opt.enforce_converter_modulation_limits =
           opt.enforce_converter_modulation_limits;
+      // On large grids the direct parity seed reliably fails (it grinds, then
+      // falls back to the homotopy anyway — measured ~6 s wasted at case2869).
+      // Skip the doomed direct attempt and start on the homotopy directly.
+      const bool large_grid =
+          static_cast<int>(sys.ac.buses.size()) >= opt.robust_inner_min_buses;
+      if (large_grid && opt.seed_homotopy_on_failure) {
+        seed_opt.objective_homotopy = true;
+        seed_opt.allow_fallback = true;
+      }
       economic_seed = solve_ac_opf(mut_sys, seed_opt);
       // Robust one-time fallback for large/stiff grids (3000+ buses): when the
       // direct parity seed does not converge, follow the economic objective
       // homotopy P(t): min t·f — measured to certify case2869-class grids at
       // the exact reference objective.
-      if (!economic_seed.converged && opt.seed_homotopy_on_failure) {
+      if (!economic_seed.converged && opt.seed_homotopy_on_failure &&
+          !seed_opt.objective_homotopy) {
         seed_opt.objective_homotopy = true;
         seed_opt.allow_fallback = true;
         economic_seed = solve_ac_opf(mut_sys, seed_opt);
