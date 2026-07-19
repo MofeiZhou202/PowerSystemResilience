@@ -10,19 +10,18 @@ python3 -m pip install -e python
 ```
 
 ```python
-from hysim import HySimClient, PowerFlowOptions, PowerFlowRequest
+from hysim import HySimV1Client, PowerFlowOptions, PowerFlowRequest
 
-client = HySimClient("http://127.0.0.1:8088")
-client.load_builtin("ieee14_acdc")
-result = client.power_flow(
+client = HySimV1Client("http://127.0.0.1:8088")
+session = client.create_session(case="ieee14_acdc")
+job = session.power_flow(
     PowerFlowRequest(options=PowerFlowOptions(max_iter=100, tol=1e-8))
 )
-result.require_usable()
+result = job.wait().result().require_usable()
 print(result.summary())
 ```
 
-The runtime currently owns one process-global model session. Use one server
-process per independent experiment until the C++ service gains session IDs.
-See `docs/python_api.md` for architecture, AI tool policy, and the evolution
-path toward multi-session jobs.
-
+`HySimV1Client` is the preferred interface for new automation: each session is
+isolated, model mutations use ETags, and analyses run as revision-bound jobs.
+`HySimClient` remains available for the legacy GUI-compatible process-global
+routes. See `docs/python_api.md` for architecture and AI tool policy.

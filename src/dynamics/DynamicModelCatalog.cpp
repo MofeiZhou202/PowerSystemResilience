@@ -439,7 +439,22 @@ std::vector<DynamicModelDescriptor> build_catalog() {
        real("filter_grid_r_pu", {"Rg", "Rgrid"}, "LCL grid-side resistance", "pu", 0.0, 0.0, 1.0, "Filter", true),
        real("filter_grid_x_pu", {"Xg", "Xgrid"}, "LCL grid-side reactance", "pu", 0.05, 0.0, 2.0, "Filter", true),
        real("frequency_watt_droop_pu", {"Ddn", "kf"}, "Frequency-watt droop", "pu", 0.0, 0.0, 50.0, "Droop", true),
-       real("volt_var_droop_pu", {"Dvv", "kq"}, "Volt-var droop", "pu", 0.0, 0.0, 50.0, "Droop", true)}));
+       real("volt_var_droop_pu", {"Dvv", "kq"}, "Volt-var droop", "pu", 0.0, 0.0, 50.0, "Droop", true),
+       real("full_fidelity", {}, "PSD full-fidelity outer/inner PI + LCL chain", "", 0.0, 0.0, 1.0, "Full fidelity", true),
+       real("outer_kp_p", {"Kp_p"}, "Outer P-loop proportional (full fidelity)", "", 2.0, 0.0, 100.0, "Full fidelity", true),
+       real("outer_ki_p", {"Ki_p"}, "Outer P-loop integral (full fidelity)", "", 30.0, 0.0, 1e4, "Full fidelity", true),
+       real("outer_omega_z", {"omega_z"}, "Outer P measurement low-pass", "rad/s", 41.468, 0.0, 1e4, "Full fidelity", true),
+       real("outer_kp_q", {"Kp_q"}, "Outer Q-loop proportional (full fidelity)", "", 2.0, 0.0, 100.0, "Full fidelity", true),
+       real("outer_ki_q", {"Ki_q"}, "Outer Q-loop integral (full fidelity)", "", 30.0, 0.0, 1e4, "Full fidelity", true),
+       real("outer_omega_f", {"omega_f"}, "Outer Q measurement low-pass", "rad/s", 41.468, 0.0, 1e4, "Full fidelity", true),
+       real("inner_kpc", {"kpc"}, "Inner current-loop proportional (full fidelity)", "", 0.37, 0.0, 100.0, "Full fidelity", true),
+       real("inner_kic", {"kic"}, "Inner current-loop integral (full fidelity)", "", 0.7, 0.0, 1e4, "Full fidelity", true),
+       real("inner_kffv", {"kffv"}, "Inner voltage feedforward (full fidelity)", "", 1.0, 0.0, 10.0, "Full fidelity", true),
+       real("lcl_lf_pu", {"lf"}, "LCL converter-side inductance (full fidelity)", "pu", 0.009, 0.0, 2.0, "Full fidelity", true),
+       real("lcl_rf_pu", {"rf"}, "LCL converter-side resistance (full fidelity)", "pu", 0.016, 0.0, 2.0, "Full fidelity", true),
+       real("lcl_cf_pu", {"cf"}, "LCL shunt capacitance (full fidelity)", "pu", 2.5, 0.0, 20.0, "Full fidelity", true),
+       real("lcl_lg_pu", {"lg"}, "LCL grid-side inductance (full fidelity)", "pu", 0.002, 0.0, 2.0, "Full fidelity", true),
+       real("lcl_rg_pu", {"rg"}, "LCL grid-side resistance (full fidelity)", "pu", 0.003, 0.0, 2.0, "Full fidelity", true)}));
 
   // ── Grid-forming inverter ──
   c.push_back(model(
@@ -817,9 +832,11 @@ std::vector<DynamicComponentComposition> build_composition() {
              "ReducedOrderPLL", "REGC_REEC_GFL_Subset"),
         slot("outer_control", "Outer control", false,
              {"GFLPQOuterControl", "GFMDroopOuterControl",
-              "VSMOuterControl", "VOCOuterControl"}, "GFLPQOuterControl"),
+              "VSMOuterControl", "VOCOuterControl",
+              "ActivePowerPI", "ReactivePowerPI"}, "GFLPQOuterControl"),
         slot("inner_control", "Inner control", false,
-             {"PIInnerCurrentControl", "VirtualImpedanceInnerControl"},
+             {"PIInnerCurrentControl", "VirtualImpedanceInnerControl",
+              "CurrentModeControl"},
              "PIInnerCurrentControl")}});
 
   const auto gfl_component = [](std::string canvas, std::string name) {

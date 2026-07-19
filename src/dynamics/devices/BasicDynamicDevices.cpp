@@ -685,7 +685,10 @@ int gfl_vdc_local(const GridFollowingInverterParams& params) {
 }
 
 bool gfl_uses_lcl_filter(const GridFollowingInverterParams& params) {
-  return params.filter_kind == InverterFilterKind::LCL &&
+  // The 2-state first-order LCL approximation is superseded by the
+  // differential LCL block in full-fidelity mode.
+  return !params.full_fidelity &&
+         params.filter_kind == InverterFilterKind::LCL &&
          params.filter_c_pu > 0.0;
 }
 
@@ -709,7 +712,60 @@ int gfl_state_count(const GridFollowingInverterParams& params) {
   if (uses_kaura_pll(params.frequency_estimator)) count += 2;
   if (gfl_vdc_local(params) >= 0) count += 1;
   if (gfl_uses_lcl_filter(params)) count += 2;
+  if (params.full_fidelity) {
+    // +1 vpll_q low-pass (ReducedOrderPLL only; KauraPLL uses vdf/vqf),
+    // +2 outer-PI integrators, +2 inner-PI integrators, +6 differential LCL.
+    count += (uses_kaura_pll(params.frequency_estimator) ? 0 : 1) + 2 + 2 + 6;
+  }
   return count;
+}
+
+// ── Full-fidelity block layout (appended after every legacy block) ────────
+int gfl_ff_base_local(const GridFollowingInverterParams& params) {
+  int local = 6;
+  if (uses_kaura_pll(params.frequency_estimator)) local += 2;
+  if (gfl_vdc_local(params) >= 0) local += 1;
+  if (gfl_uses_lcl_filter(params)) local += 2;
+  return local;
+}
+
+int gfl_ff_vpllq_local(const GridFollowingInverterParams& params) {
+  return params.full_fidelity &&
+                 !uses_kaura_pll(params.frequency_estimator)
+             ? gfl_ff_base_local(params)
+             : -1;
+}
+
+int gfl_ff_sigma_p_local(const GridFollowingInverterParams& params) {
+  return gfl_ff_base_local(params) +
+         (uses_kaura_pll(params.frequency_estimator) ? 0 : 1);
+}
+int gfl_ff_sigma_q_local(const GridFollowingInverterParams& params) {
+  return gfl_ff_sigma_p_local(params) + 1;
+}
+int gfl_ff_gamma_d_local(const GridFollowingInverterParams& params) {
+  return gfl_ff_sigma_p_local(params) + 2;
+}
+int gfl_ff_gamma_q_local(const GridFollowingInverterParams& params) {
+  return gfl_ff_sigma_p_local(params) + 3;
+}
+int gfl_ff_ir_cnv_local(const GridFollowingInverterParams& params) {
+  return gfl_ff_sigma_p_local(params) + 4;
+}
+int gfl_ff_ii_cnv_local(const GridFollowingInverterParams& params) {
+  return gfl_ff_sigma_p_local(params) + 5;
+}
+int gfl_ff_vr_filter_local(const GridFollowingInverterParams& params) {
+  return gfl_ff_sigma_p_local(params) + 6;
+}
+int gfl_ff_vi_filter_local(const GridFollowingInverterParams& params) {
+  return gfl_ff_sigma_p_local(params) + 7;
+}
+int gfl_ff_ir_filter_local(const GridFollowingInverterParams& params) {
+  return gfl_ff_sigma_p_local(params) + 8;
+}
+int gfl_ff_ii_filter_local(const GridFollowingInverterParams& params) {
+  return gfl_ff_sigma_p_local(params) + 9;
 }
 
 std::pair<double, double> pll_measurement(const GridFollowingInverterParams& params,
@@ -6064,6 +6120,10 @@ void GridFollowingInverter::assignStateIndices(int& offset) {
 void GridFollowingInverter::initializeFromPowerFlow(const PowerFlowResult& pf,
                                                    DynamicState& x,
                                                    NetworkState& y) {
+  if (params_.full_fidelity) {
+    seedFullFidelityEquilibrium(x, y, true);
+    return;
+  }
   double angle = 0.0;
   if (params_.bus_pos >= 0 && params_.bus_pos < static_cast<int>(pf.va.size())) {
     angle = pf.va[static_cast<std::size_t>(params_.bus_pos)];
@@ -6117,6 +6177,18 @@ void GridFollowingInverter::initializeFromPowerFlow(const PowerFlowResult& pf,
 
 bool GridFollowingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
   if (!params_.in_service || range_.empty() || params_.bus_pos < 0) return false;
+  if (params_.full_fidelity) {
+    const DynamicState before = x;
+    seedFullFidelityEquilibrium(x, y, false);
+    bool changed = false;
+    for (int i = range_.offset; i < range_.offset + range_.size; ++i) {
+      if (std::abs(x.x[i] - before.x[i]) > 0.0) {
+        changed = true;
+        break;
+      }
+    }
+    return changed;
+  }
   const Eigen::Vector3cd vabc = bus_voltage(y, params_.bus_pos);
   const Complex vpos = positive_sequence_voltage(vabc);
   const double theta = std::arg(vpos);
@@ -6194,11 +6266,236 @@ bool GridFollowingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkSta
   return changed;
 }
 
+void GridFollowingInverter::seedFullFidelityEquilibrium(DynamicState& x,
+                                                        const NetworkState& y,
+                                                        bool set_reference) {
+  // Steady-state seed for the full-fidelity chain, mirroring the PSD
+  // initialization: solve the LCL filter equilibrium from the bus voltage and
+  // the scheduled power, align the PLL to the capacitor voltage, seed the
+  // outer integrators from the converter dq current, and solve the inner
+  // integrators for zero residual.  With set_reference the outer power
+  // references are overridden by the measured capacitor-node power (PSD
+  // init semantics: P_ref <- p_elec_out, Q_ref <- q_elec_out).
+  const Complex vpos = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+  const Complex s0(params_.p_ref_mw / safe_base(params_.base_mva),
+                   params_.q_ref_mvar / safe_base(params_.base_mva));
+  const Complex i_grid = std::conj(s0 / vpos);
+  const Complex z_g(params_.lcl_rg_pu, std::max(1e-6, params_.lcl_lg_pu));
+  const Complex v_filter = vpos + z_g * i_grid;
+  // Capacitor steady state: I_cnv = I_grid + j·ω·cf·V_filter (PSD init_filter).
+  const Complex i_cnv = i_grid + Complex(0.0, params_.lcl_cf_pu) * v_filter;
+  const Complex z_f(params_.lcl_rf_pu, std::max(1e-6, params_.lcl_lf_pu));
+  const Complex v_cnv = v_filter + z_f * i_cnv;
+
+  const double theta_f = std::arg(v_filter);
+  const auto [vd_f, vq_f] = dq_from_phasor(v_filter, theta_f);
+  const auto [id_g, iq_g] = dq_from_phasor(i_grid, theta_f);
+  const auto [id_c, iq_c] = dq_from_phasor(i_cnv, theta_f);
+  const auto [vd_c, vq_c] = dq_from_phasor(v_cnv, theta_f);
+  const double p_e = vd_f * id_g + vq_f * iq_g;
+  const double q_e = vq_f * id_g - vd_f * iq_g;
+
+  x.x[state_index(range_, 0)] = theta_f;
+  x.x[state_index(range_, 1)] = 0.0;
+  x.x[state_index(range_, 2)] = id_c;  // telemetry mirrors
+  x.x[state_index(range_, 3)] = iq_c;
+  x.x[state_index(range_, 4)] = p_e;
+  x.x[state_index(range_, 5)] = q_e;
+  if (uses_kaura_pll(params_.frequency_estimator)) {
+    x.x[state_index(range_, gfl_vdf_local(params_))] = std::abs(v_filter);
+    x.x[state_index(range_, gfl_vqf_local(params_))] = 0.0;
+  }
+  const int vpllq = gfl_ff_vpllq_local(params_);
+  if (vpllq >= 0) {
+    x.x[state_index(range_, vpllq)] = 0.0;
+  }
+  const double ki_p = std::max(1e-9, std::abs(params_.outer_ki_p));
+  const double ki_q = std::max(1e-9, std::abs(params_.outer_ki_q));
+  x.x[state_index(range_, gfl_ff_sigma_p_local(params_))] = iq_c / ki_p;
+  x.x[state_index(range_, gfl_ff_sigma_q_local(params_))] = id_c / ki_q;
+  const double kic = std::max(1e-9, std::abs(params_.inner_kic));
+  x.x[state_index(range_, gfl_ff_gamma_d_local(params_))] =
+      (vd_c + params_.lcl_lf_pu * iq_c - params_.inner_kffv * vd_f) / kic;
+  x.x[state_index(range_, gfl_ff_gamma_q_local(params_))] =
+      (vq_c - params_.lcl_lf_pu * id_c - params_.inner_kffv * vq_f) / kic;
+  x.x[state_index(range_, gfl_ff_ir_cnv_local(params_))] = i_cnv.real();
+  x.x[state_index(range_, gfl_ff_ii_cnv_local(params_))] = i_cnv.imag();
+  x.x[state_index(range_, gfl_ff_vr_filter_local(params_))] = v_filter.real();
+  x.x[state_index(range_, gfl_ff_vi_filter_local(params_))] = v_filter.imag();
+  x.x[state_index(range_, gfl_ff_ir_filter_local(params_))] = i_grid.real();
+  x.x[state_index(range_, gfl_ff_ii_filter_local(params_))] = i_grid.imag();
+  const int vdc_local = gfl_vdc_local(params_);
+  if (vdc_local >= 0) {
+    double vdc = params_.vdc_ref_pu;
+    if (params_.dc_bus_pos >= 0 && params_.dc_bus_pos < y.Vdc.size()) {
+      vdc = y.Vdc[params_.dc_bus_pos];
+    }
+    x.x[state_index(range_, vdc_local)] =
+        clamp_voltage_window(vdc, params_.vdc_min_pu, params_.vdc_max_pu);
+  }
+  if (set_reference) {
+    params_.p_ref_mw = p_e * safe_base(params_.base_mva);
+    params_.q_ref_mvar = q_e * safe_base(params_.base_mva);
+  }
+}
+
+void GridFollowingInverter::computeDerivativesFullFidelity(
+    const DynamicState& x,
+    const NetworkState& y,
+    Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  const double theta = x.x[state_index(range_, 0)];
+  const double xi_pll = x.x[state_index(range_, 1)];
+  const Complex vpos = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
+
+  const Complex i_grid(x.x[state_index(range_, gfl_ff_ir_filter_local(params_))],
+                       x.x[state_index(range_, gfl_ff_ii_filter_local(params_))]);
+  const Complex v_filter(
+      x.x[state_index(range_, gfl_ff_vr_filter_local(params_))],
+      x.x[state_index(range_, gfl_ff_vi_filter_local(params_))]);
+  const Complex i_cnv(x.x[state_index(range_, gfl_ff_ir_cnv_local(params_))],
+                      x.x[state_index(range_, gfl_ff_ii_cnv_local(params_))]);
+
+  const auto [vd_f, vq_f] = dq_from_phasor(v_filter, theta);
+  const auto [id_g, iq_g] = dq_from_phasor(i_grid, theta);
+  const auto [id_c, iq_c] = dq_from_phasor(i_cnv, theta);
+
+  // Measured power at the capacitor node (PSD: filter V x grid-side I).
+  const double p_e = vd_f * id_g + vq_f * iq_g;
+  const double q_e = vq_f * id_g - vd_f * iq_g;
+  if (std::getenv("GFL_FF_DEBUG")) {
+    static int dbg_calls = 0;
+    if (dbg_calls++ < 40) {
+      std::fprintf(stderr,
+                   "[gfl_ff dx#%d] theta=%.5f vpos.i=%.6f vf=(%.5f,%.5f) "
+                   "ig=(%.5f,%.5f) ic=(%.5f,%.5f) vq_f=%.5f p_e=%.5f q_e=%.5f "
+                   "d_ii_f=%.4f\n",
+                   dbg_calls, theta, vpos.imag(), v_filter.real(),
+                   v_filter.imag(), i_grid.real(), i_grid.imag(), i_cnv.real(),
+                   i_cnv.imag(), vq_f, p_e, q_e,
+                   (kTwoPi * params_.f_ref_hz / std::max(1e-6, params_.lcl_lg_pu)) *
+                       (v_filter.imag() - vpos.imag() -
+                        params_.lcl_rg_pu * i_grid.imag() -
+                        std::max(1e-6, params_.lcl_lg_pu) * i_grid.real()));
+    }
+  }
+
+  // pf/qf act as p_oc/q_oc (ωz/ωf low-passed measurements).
+  dxdt[state_index(range_, 4)] =
+      params_.outer_omega_z * (p_e - x.x[state_index(range_, 4)]);
+  dxdt[state_index(range_, 5)] =
+      params_.outer_omega_f * (q_e - x.x[state_index(range_, 5)]);
+  const double p_oc = x.x[state_index(range_, 4)];
+  const double q_oc = x.x[state_index(range_, 5)];
+
+  const double p_ref = params_.p_ref_mw / safe_base(params_.base_mva);
+  const double q_ref = params_.q_ref_mvar / safe_base(params_.base_mva);
+
+  // Outer PI: P-loop -> Iq_ref, Q-loop -> Id_ref (PSD wiring).
+  dxdt[state_index(range_, gfl_ff_sigma_p_local(params_))] = p_ref - p_oc;
+  dxdt[state_index(range_, gfl_ff_sigma_q_local(params_))] = q_ref - q_oc;
+  const double sigma_p = x.x[state_index(range_, gfl_ff_sigma_p_local(params_))];
+  const double sigma_q = x.x[state_index(range_, gfl_ff_sigma_q_local(params_))];
+  const double iq_ref =
+      params_.outer_kp_p * (p_ref - p_oc) + params_.outer_ki_p * sigma_p;
+  const double id_ref =
+      params_.outer_kp_q * (q_ref - q_oc) + params_.outer_ki_q * sigma_q;
+
+  // PLL (frequency estimate in pu; ReducedOrderPLL low-passes vq, KauraPLL
+  // low-passes vd/vq and uses the voltage angle).
+  double pll_err = 0.0;
+  const double omega_lp = 1.0 / std::max(kMinTimeConstant, params_.pll_lpf_t_s);
+  if (params_.frequency_estimator == FrequencyEstimatorKind::KauraPLL) {
+    const double vdf = x.x[state_index(range_, gfl_vdf_local(params_))];
+    const double vqf = x.x[state_index(range_, gfl_vqf_local(params_))];
+    pll_err = std::atan2(vqf, vdf);
+    dxdt[state_index(range_, gfl_vdf_local(params_))] = omega_lp * (vd_f - vdf);
+    dxdt[state_index(range_, gfl_vqf_local(params_))] = omega_lp * (vq_f - vqf);
+  } else if (params_.frequency_estimator ==
+             FrequencyEstimatorKind::ReducedOrderPLL) {
+    const int vpllq = gfl_ff_vpllq_local(params_);
+    const double vq_l = x.x[state_index(range_, vpllq)];
+    pll_err = vq_l;
+    dxdt[state_index(range_, vpllq)] = omega_lp * (vq_f - vq_l);
+  }
+  const double freq_error_pu = params_.pll_kp * pll_err + params_.pll_ki * xi_pll;
+  const double omega_pll = 1.0 + freq_error_pu;
+  dxdt[state_index(range_, 0)] = kTwoPi * params_.f_ref_hz * freq_error_pu;
+  dxdt[state_index(range_, 1)] = pll_err;
+
+  // Inner PI (CurrentModeControl) with dq decoupling and voltage feedforward.
+  dxdt[state_index(range_, gfl_ff_gamma_d_local(params_))] = id_ref - id_c;
+  dxdt[state_index(range_, gfl_ff_gamma_q_local(params_))] = iq_ref - iq_c;
+  const double gamma_d = x.x[state_index(range_, gfl_ff_gamma_d_local(params_))];
+  const double gamma_q = x.x[state_index(range_, gfl_ff_gamma_q_local(params_))];
+  const double vd_cnv_ref = params_.inner_kpc * (id_ref - id_c) +
+                            params_.inner_kic * gamma_d -
+                            omega_pll * params_.lcl_lf_pu * iq_c +
+                            params_.inner_kffv * vd_f;
+  const double vq_cnv_ref = params_.inner_kpc * (iq_ref - iq_c) +
+                            params_.inner_kic * gamma_q +
+                            omega_pll * params_.lcl_lf_pu * id_c +
+                            params_.inner_kffv * vq_f;
+  // Average converter: V_cnv(dq) = V_cnv_ref(dq), back to the network RI frame.
+  const Complex v_cnv = phasor_from_dq(vd_cnv_ref, vq_cnv_ref, theta);
+
+  // Differential LCL filter (RI frame, ωb = 2π·f_ref, ω_sys = 1).
+  const double wb = kTwoPi * params_.f_ref_hz;
+  const double lf = std::max(1e-6, params_.lcl_lf_pu);
+  const double cf = std::max(1e-6, params_.lcl_cf_pu);
+  const double lg = std::max(1e-6, params_.lcl_lg_pu);
+  dxdt[state_index(range_, gfl_ff_ir_cnv_local(params_))] =
+      (wb / lf) * (v_cnv.real() - v_filter.real() -
+                   params_.lcl_rf_pu * i_cnv.real() + lf * i_cnv.imag());
+  dxdt[state_index(range_, gfl_ff_ii_cnv_local(params_))] =
+      (wb / lf) * (v_cnv.imag() - v_filter.imag() -
+                   params_.lcl_rf_pu * i_cnv.imag() - lf * i_cnv.real());
+  dxdt[state_index(range_, gfl_ff_vr_filter_local(params_))] =
+      (wb / cf) * (i_cnv.real() - i_grid.real() + cf * v_filter.imag());
+  dxdt[state_index(range_, gfl_ff_vi_filter_local(params_))] =
+      (wb / cf) * (i_cnv.imag() - i_grid.imag() - cf * v_filter.real());
+  dxdt[state_index(range_, gfl_ff_ir_filter_local(params_))] =
+      (wb / lg) * (v_filter.real() - vpos.real() -
+                   params_.lcl_rg_pu * i_grid.real() + lg * i_grid.imag());
+  dxdt[state_index(range_, gfl_ff_ii_filter_local(params_))] =
+      (wb / lg) * (v_filter.imag() - vpos.imag() -
+                   params_.lcl_rg_pu * i_grid.imag() - lg * i_grid.real());
+
+  // Legacy id/iq states mirror the converter dq current (telemetry only).
+  dxdt[state_index(range_, 2)] = (id_c - x.x[state_index(range_, 2)]) / 0.01;
+  dxdt[state_index(range_, 3)] = (iq_c - x.x[state_index(range_, 3)]) / 0.01;
+
+  const int vdc_local = gfl_vdc_local(params_);
+  if (vdc_local >= 0) {
+    const Eigen::Vector3cd current =
+        balanced_current_from_positive_sequence(i_grid);
+    const double p_ac =
+        finite_value(inverter_complex_power(bus_voltage(y, params_.bus_pos), current).real());
+    const double vdc_link = x.x[state_index(range_, vdc_local)];
+    const double pdc_net =
+        dc_link_network_power_pu(y,
+                                 params_.dc_bus_pos,
+                                 vdc_link,
+                                 params_.dc_link_conductance_pu);
+    dxdt[state_index(range_, vdc_local)] =
+        dc_link_voltage_derivative(p_ac,
+                                   pdc_net,
+                                   vdc_link,
+                                   params_.dc_link_capacitance_s,
+                                   params_.eta,
+                                   params_.vdc_min_pu,
+                                   params_.vdc_max_pu);
+  }
+}
+
 void GridFollowingInverter::computeDerivatives(double,
                                                const DynamicState& x,
                                                const NetworkState& y,
                                                Eigen::Ref<Eigen::VectorXd> dxdt) const {
   if (!params_.in_service || range_.empty()) return;
+  if (params_.full_fidelity) {
+    computeDerivativesFullFidelity(x, y, dxdt);
+    return;
+  }
   const double theta = x.x[state_index(range_, 0)];
   const double xi_pll = x.x[state_index(range_, 1)];
   const double id = x.x[state_index(range_, 2)];
@@ -6305,7 +6602,14 @@ void GridFollowingInverter::stamp(double,
   // no reconnect is in progress.
   const double der_scale =
       params_.protection.enabled ? protection_state_.restore_scale : 1.0;
-  if (gfl_uses_lcl_filter(params_)) {
+  if (params_.full_fidelity) {
+    // Inject the grid-side LCL current (network RI frame) directly.
+    const Complex i_grid(x.x[state_index(range_, gfl_ff_ir_filter_local(params_))],
+                         x.x[state_index(range_, gfl_ff_ii_filter_local(params_))]);
+    add_balanced_current(
+        stamp, params_.bus_pos,
+        der_scale * balanced_current_from_positive_sequence(i_grid));
+  } else if (gfl_uses_lcl_filter(params_)) {
     const Complex vf = gfl_filter_voltage(params_,
                                           x,
                                           range_,
@@ -6354,7 +6658,20 @@ void GridFollowingInverter::addJacobian(
   const int theta_col = state_index(range_, 0);
   const int id_col = state_index(range_, 2);
   const int iq_col = state_index(range_, 3);
-  if (gfl_uses_lcl_filter(params_)) {
+  if (params_.full_fidelity) {
+    const int ifr_col = state_index(range_, gfl_ff_ir_filter_local(params_));
+    const int ifi_col = state_index(range_, gfl_ff_ii_filter_local(params_));
+    const Eigen::Vector3cd d_i_d_ifr =
+        balanced_current_from_positive_sequence(Complex(1.0, 0.0));
+    const Eigen::Vector3cd d_i_d_ifi =
+        balanced_current_from_positive_sequence(Complex(0.0, 1.0));
+    if (context.validStateIndex(ifr_col)) {
+      add_balanced_current_derivative(context, params_.bus_pos, ifr_col, d_i_d_ifr, triplets);
+    }
+    if (context.validStateIndex(ifi_col)) {
+      add_balanced_current_derivative(context, params_.bus_pos, ifi_col, d_i_d_ifi, triplets);
+    }
+  } else if (gfl_uses_lcl_filter(params_)) {
     const int vf_re_col = state_index(range_, gfl_filter_vr_local(params_));
     const int vf_im_col = state_index(range_, gfl_filter_vi_local(params_));
     const Complex y_grid = gfl_lcl_grid_admittance(params_);
@@ -6507,7 +6824,76 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
   out.values["protection_f_meas_hz"] = protection_state_.f_meas_hz;
   out.values["protection_restore_scale"] = protection_state_.restore_scale;
   InverterInnerVariableSnapshot inner;
-  if (!range_.empty() && state_index(range_, 5) < x.x.size()) {
+  if (!range_.empty() && state_index(range_, 5) < x.x.size() &&
+      params_.full_fidelity) {
+    const double theta = x.x[state_index(range_, 0)];
+    const double xi_pll = x.x[state_index(range_, 1)];
+    const Eigen::Vector3cd vabc = bus_voltage(y, params_.bus_pos);
+    const Complex vpos = positive_sequence_voltage(vabc);
+    const Complex i_grid(
+        x.x[state_index(range_, gfl_ff_ir_filter_local(params_))],
+        x.x[state_index(range_, gfl_ff_ii_filter_local(params_))]);
+    const Complex v_filter(
+        x.x[state_index(range_, gfl_ff_vr_filter_local(params_))],
+        x.x[state_index(range_, gfl_ff_vi_filter_local(params_))]);
+    const Complex i_cnv(
+        x.x[state_index(range_, gfl_ff_ir_cnv_local(params_))],
+        x.x[state_index(range_, gfl_ff_ii_cnv_local(params_))]);
+    const auto [vd_f, vq_f] = dq_from_phasor(v_filter, theta);
+    const auto [id_c, iq_c] = dq_from_phasor(i_cnv, theta);
+    const auto [id_g, iq_g] = dq_from_phasor(i_grid, theta);
+    double pll_err = 0.0;
+    if (params_.frequency_estimator == FrequencyEstimatorKind::KauraPLL) {
+      pll_err = std::atan2(x.x[state_index(range_, gfl_vqf_local(params_))],
+                           x.x[state_index(range_, gfl_vdf_local(params_))]);
+    } else if (params_.frequency_estimator ==
+               FrequencyEstimatorKind::ReducedOrderPLL) {
+      pll_err = x.x[state_index(range_, gfl_ff_vpllq_local(params_))];
+    }
+    const double freq_error_pu =
+        params_.pll_kp * pll_err + params_.pll_ki * xi_pll;
+    const Complex s =
+        inverter_complex_power(vabc,
+                               balanced_current_from_positive_sequence(i_grid));
+    out.values["pll_angle_rad"] = theta;
+    out.values["pll_frequency_hz"] = params_.f_ref_hz * (1.0 + freq_error_pu);
+    out.values["pll_vq_pu"] = vq_f;
+    out.values["pll_vd_pu"] = vd_f;
+    out.values["pll_integrator"] = xi_pll;
+    out.values["id_pu"] = id_c;
+    out.values["iq_pu"] = iq_c;
+    out.values["i_mag_pu"] = std::abs(i_cnv);
+    out.values["p_mw"] = s.real() * safe_base(params_.base_mva);
+    out.values["q_mvar"] = s.imag() * safe_base(params_.base_mva);
+    out.values["p_ref_mw"] = params_.p_ref_mw;
+    out.values["q_ref_mvar"] = params_.q_ref_mvar;
+    out.values["p_filtered_mw"] = x.x[state_index(range_, 4)] * safe_base(params_.base_mva);
+    out.values["q_filtered_mvar"] = x.x[state_index(range_, 5)] * safe_base(params_.base_mva);
+    out.values["lcl_filter"] = 1.0;
+    out.values["gfl_full_fidelity"] = 1.0;
+    out.values["filter_voltage_re_pu"] = v_filter.real();
+    out.values["filter_voltage_im_pu"] = v_filter.imag();
+    out.values["filter_current_re_pu"] = i_grid.real();
+    out.values["filter_current_im_pu"] = i_grid.imag();
+    out.values["cnv_current_re_pu"] = i_cnv.real();
+    out.values["cnv_current_im_pu"] = i_cnv.imag();
+    inner.set(InverterInnerVar::PllAngle, theta);
+    inner.set(InverterInnerVar::PllOmega, 1.0 + freq_error_pu);
+    inner.set(InverterInnerVar::FilterVoltageReal, v_filter.real());
+    inner.set(InverterInnerVar::FilterVoltageImag, v_filter.imag());
+    inner.set(InverterInnerVar::PllVoltageD, vd_f);
+    inner.set(InverterInnerVar::PllVoltageQ, vq_f);
+    inner.set(InverterInnerVar::InnerCurrentD, id_c);
+    inner.set(InverterInnerVar::InnerCurrentQ, iq_c);
+    inner.set(InverterInnerVar::OuterCurrentD, id_g);
+    inner.set(InverterInnerVar::OuterCurrentQ, iq_g);
+    inner.set(InverterInnerVar::ConverterCurrentReal, i_cnv.real());
+    inner.set(InverterInnerVar::ConverterCurrentImag, i_cnv.imag());
+    inner.set(InverterInnerVar::FilterCurrentReal, i_grid.real());
+    inner.set(InverterInnerVar::FilterCurrentImag, i_grid.imag());
+    inner.set(InverterInnerVar::FilteredActivePower, x.x[state_index(range_, 4)]);
+    inner.set(InverterInnerVar::FilteredReactivePower, x.x[state_index(range_, 5)]);
+  } else if (!range_.empty() && state_index(range_, 5) < x.x.size()) {
     const double theta = x.x[state_index(range_, 0)];
     const double xi_pll = x.x[state_index(range_, 1)];
     const double id = x.x[state_index(range_, 2)];

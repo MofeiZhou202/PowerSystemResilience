@@ -15,7 +15,7 @@ When documentation and runtime behavior differ, `include/`, `src/`,
 | Python SDK and AI enhancement architecture | [python_api.md](python_api.md) |
 | Editable parameter registry and effective values | [parameter_system.md](parameter_system.md) |
 | Rich/canonical projection and result attribution | [projection_and_results.md](projection_and_results.md) |
-| Canvas result rendering and time playback | [gui_canvas_runtime.md](gui_canvas_runtime.md) |
+| WebGL/SVG rendering, large-model interaction, and time playback | [gui_canvas_runtime.md](gui_canvas_runtime.md) |
 | TSPF, annual simulation, storage, and profiles | [sequential_production_simulation_rich_models.md](sequential_production_simulation_rich_models.md) |
 | Time-series PF pipeline: math models + analysis | [time_series_power_flow_models.md](time_series_power_flow_models.md) |
 | Native day-ahead market: SCUC, SCED/LMP, AC validation, settlement | [market_simulation_runtime.md](market_simulation_runtime.md) |

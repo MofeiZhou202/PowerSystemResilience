@@ -295,6 +295,7 @@ const Canvas = (() => {
     } catch (e) { /* ignore */ }
 
     initMinimap();
+    if (typeof NetworkOverview !== 'undefined') NetworkOverview.init();
   }
 
   // ========== View ==========
@@ -1672,7 +1673,7 @@ const Canvas = (() => {
     // headless — there is no diagram to attach to. Keep select mode and hint.
     if (state.headless && (mode === 'place' || mode === 'connect')) {
       if (typeof App !== 'undefined' && App.log) {
-        App.log('大规模系统处于无画布模式，暂不支持画布编辑；如需绘制请点击“仍然绘制单线图”。', 'warn');
+        App.log('大规模系统正在使用 WebGL 全网总览；请从所选母线打开局部 SVG，或在拓扑表中编辑全量数据。', 'warn');
       }
       mode = 'select';
       placeType = null;
@@ -7217,7 +7218,7 @@ const Canvas = (() => {
     if (el) {
       if (state.headless && state.headlessMeta) {
         const c = state.headlessMeta.counts || {};
-        el.textContent = `无画布模式 · ${state.headlessMeta.buses} 母线 | ` +
+        el.textContent = `WebGL 全网 · ${state.headlessMeta.buses} 母线 | ` +
           `${state.headlessMeta.branches} 支路 | ${state.headlessMeta.devices} 设备`;
       } else {
         const selCount = state.selectedIds.size;
@@ -7236,6 +7237,13 @@ const Canvas = (() => {
   function renderHeadlessOverview(summary) {
     const host = document.getElementById('canvasContainer');
     if (!host) return;
+    if (typeof NetworkOverview !== 'undefined' &&
+        NetworkOverview.show(state.headlessSystem || {})) {
+      if (svg) svg.hidden = true;
+      const fallback = document.getElementById('canvasHeadlessOverlay');
+      if (fallback) fallback.style.display = 'none';
+      return;
+    }
     let ov = document.getElementById('canvasHeadlessOverlay');
     if (!ov) {
       ov = document.createElement('div');
@@ -7270,6 +7278,8 @@ const Canvas = (() => {
   }
 
   function hideHeadlessOverview() {
+    if (typeof NetworkOverview !== 'undefined') NetworkOverview.hide();
+    if (svg) svg.hidden = false;
     const ov = document.getElementById('canvasHeadlessOverlay');
     if (ov) ov.style.display = 'none';
   }
@@ -7671,6 +7681,12 @@ const Canvas = (() => {
     loadFromSystemJson,
     isHeadless,
     getSystemSummary,
+    getNetworkOverviewStats() {
+      return typeof NetworkOverview !== 'undefined' ? NetworkOverview.stats() : null;
+    },
+    selectStableRef(ref) {
+      return typeof NetworkOverview !== 'undefined' && NetworkOverview.selectRef(ref);
+    },
     updateHeadlessSystem,
 	    showPowerFlowResults,
 	    renderFrame,

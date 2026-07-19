@@ -1,13 +1,14 @@
 // @ts-check
 // gui_scale_features_e2e.mjs — browser end-to-end test for the large-system /
 // scalability GUI features:
-//   * headless (no-canvas) mode for large systems + auto return to canvas mode
+//   * WebGL large-system mode + automatic return to the SVG editor
 //   * calculations (PF / OPF) run headless against the backend session
 //   * virtualized, editable topology tables (no row cap; inline edit -> sync)
 //   * global element search (canvas pan + headless row highlight, any position)
 //   * time-series split: 时序潮流 (tspf) in 安全与动态, 时序生产模拟 in 规划与运行
-//   * on-demand neighborhood sub-diagram (read-only, leaves state untouched)
-//   * minimap (canvas mode) hidden in headless mode
+//   * on-demand selectable local SVG (leaves full-model state untouched)
+//   * WebGL full-network overview with zero large SVG glyphs
+//   * minimap (SVG mode) hidden while the WebGL overview is active
 //   * dependency chips reflect PF / canvas state
 //
 // Requirements (not part of the C++ build):
@@ -262,7 +263,7 @@ async function main() {
           runtimeGuard.networkFailure?.last_error?.source === '/phase6-network-test',
       'ApiClient network failures flow into the runtime diagnostics contract');
 
-    // ---- 1) Large case -> headless mode, PF + OPF run against the backend ----
+    // ---- 1) Large case -> WebGL overview, PF + OPF run against the backend ----
     const big = await page.evaluate(async (caseName) => {
       await App.loadMatpowerCase(caseName);
       const summary = Canvas.getSystemSummary();
@@ -270,6 +271,23 @@ async function main() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ solver: 'dc', constraints: {} }),
       }).then((r) => r.json()).catch((e) => ({ error: String(e) }));
+      const overview = Canvas.getNetworkOverviewStats();
+      const webglCanvas = document.getElementById('networkOverviewCanvas');
+      const gl = webglCanvas?.getContext('webgl2');
+      let nonBlankSamples = 0;
+      if (gl && webglCanvas.width && webglCanvas.height) {
+        const pixel = new Uint8Array(4);
+        const background = new Uint8Array(4);
+        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, background);
+        for (let gy = 1; gy < 16; gy += 1) {
+          for (let gx = 1; gx < 24; gx += 1) {
+            gl.readPixels(Math.floor(webglCanvas.width * gx / 24),
+              Math.floor(webglCanvas.height * gy / 16), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+            if (pixel[0] !== background[0] || pixel[1] !== background[1] ||
+                pixel[2] !== background[2]) nonBlankSamples += 1;
+          }
+        }
+      }
       return {
         headless: Canvas.isHeadless(),
         glyphs: Canvas.state.components.length,
@@ -278,15 +296,21 @@ async function main() {
         pfChip: document.getElementById('depChipPf')?.textContent || '',
         opfConverged: !!(opf && opf.converged),
         minimapHidden: document.getElementById('minimap')?.hidden,
+        overview,
+        overviewVisible: !document.getElementById('networkOverview')?.hidden,
+        nonBlankSamples,
       };
     }, LARGE_CASE);
-    check(big.headless === true, `large case (${LARGE_CASE}) enters headless mode`);
-    check(big.glyphs === 0, 'headless mode creates zero canvas glyphs');
+    check(big.headless === true, `large case (${LARGE_CASE}) enters large-system overview mode`);
+    check(big.glyphs === 0, 'WebGL overview creates zero SVG component glyphs');
     check(big.buses > 600, `system summary reports ${big.buses} buses`);
-    check(/无画布/.test(big.canvasChip), `canvas chip shows headless: "${big.canvasChip}"`);
+    check(/WebGL/.test(big.canvasChip), `view chip shows WebGL: "${big.canvasChip}"`);
+    check(big.overviewVisible && big.overview?.webgl2 && big.overview.nodes > 600,
+      `WebGL overview renders ${big.overview?.nodes || 0} nodes`);
+    check(big.nonBlankSamples > 0, `WebGL canvas has ${big.nonBlankSamples} non-background pixel samples`);
     check(/收敛/.test(big.pfChip), `PF auto-ran and chip shows converged: "${big.pfChip}"`);
     check(big.opfConverged === true, 'OPF converges headless against the backend session');
-    check(big.minimapHidden === true, 'minimap hidden in headless mode');
+    check(big.minimapHidden === true, 'SVG minimap hidden in WebGL overview mode');
 
     // ---- 2) Virtualized tables (no cap) + high-position search highlight ----
     const virt = await page.evaluate(async () => {
@@ -306,6 +330,16 @@ async function main() {
     check(virt.rendered > 0 && virt.rendered < 60, `only ~${virt.rendered} rows are materialized (windowed)`);
     check(virt.highlightRow === '2499', 'search highlights bus 2500 (row 2499) beyond the old cap');
 
+    const overviewSelection = await page.evaluate(() => {
+      const selected = App.selectStableRef({ domain: 'ac', index: 100 });
+      const stats = Canvas.getNetworkOverviewStats();
+      const highlighted = document.querySelector('.topo-search-highlight');
+      return { selected, ref: stats?.selected, highlighted: highlighted?.closest('tr')?.dataset.row };
+    });
+    check(overviewSelection.selected && overviewSelection.ref?.domain === 'ac' &&
+          overviewSelection.ref?.index === 100 && overviewSelection.highlighted === '99',
+      'stable AC bus selection synchronizes WebGL overview and virtual topology table');
+
     // ---- 3) Inline edit in headless mode commits to the backend ----
     const edit = await page.evaluate(async () => {
       const genTable = document.getElementById('genTableInner');
@@ -320,7 +354,7 @@ async function main() {
     });
     check(edit.before !== 137.5 && edit.after === 137.5, `inline edit applied gen pg_mw ${edit.before} -> ${edit.after}`);
 
-    // ---- 4) Neighborhood sub-diagram is read-only (state untouched) ----
+    // ---- 4) Local SVG is bounded/selectable and leaves full-model state untouched ----
     const sub = await page.evaluate(async () => {
       document.getElementById('globalElementSearch').value = 'bus 100';
       document.getElementById('subDiagramHops').value = '2';
@@ -339,6 +373,8 @@ async function main() {
     });
     check(sub.visible === 'flex', 'sub-diagram modal opens');
     check(sub.nodes >= 3 && sub.edges >= 2, `sub-diagram drew ${sub.nodes} nodes / ${sub.edges} branches`);
+    check(await page.locator('#subDiagramSvg .subdiag-node').count() === sub.nodes,
+      'local SVG exposes stable selectable node marks');
     check(sub.stillHeadless === true && sub.glyphs === 0, 'sub-diagram leaves headless state untouched');
 
     // ---- 4a) A rendered import must retain authored physical names when the
@@ -422,7 +458,7 @@ async function main() {
     check(!cimScale.error && cimScale.buses === 439,
       `test.xml imports ${cimScale.buses} buses without a frontend error`);
     check(cimScale.headless === true && cimScale.glyphs === 0,
-      `test.xml enters headless mode (${cimScale.totalElements} estimated elements)`);
+      `test.xml enters WebGL overview mode (${cimScale.totalElements} estimated elements)`);
 
     // ---- 5) Medium case uses viewport culling and RAF-batched pointer work ----
     const medium = await page.evaluate(async (caseName) => {

@@ -402,6 +402,83 @@ select:focus-visible, .btn:focus-visible, button:focus-visible, [role="button"]:
   cursor: default;
   background: var(--canvas-bg);
 }
+
+/* ===== WebGL full-network overview ===== */
+.network-overview {
+  position: absolute;
+  inset: 0;
+  z-index: 24;
+  background: var(--canvas-bg);
+  overflow: hidden;
+}
+.network-overview[hidden] { display: none; }
+#networkOverviewCanvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+  touch-action: none;
+}
+#networkOverviewCanvas:active { cursor: grabbing; }
+.network-overview-toolbar {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  background: color-mix(in srgb, var(--bg2) 92%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--ink2);
+  font-size: 11px;
+}
+.network-overview-status {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  max-width: calc(100% - 20px);
+  padding: 5px 8px;
+  background: color-mix(in srgb, var(--bg2) 92%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--ink2);
+  font-size: 11px;
+  white-space: normal;
+}
+@media (max-width: 640px) {
+  .network-overview-toolbar {
+    right: 8px;
+    left: 8px;
+    flex-wrap: wrap;
+  }
+  body.network-overview-active:not(.network-overview-table) #componentLib,
+  body.network-overview-active:not(.network-overview-table) #rightPanel,
+  body.network-overview-active:not(.network-overview-table) #rightPanelResizer {
+    display: none;
+  }
+  body.network-overview-active:not(.network-overview-table) #canvasContainer {
+    display: flex;
+    width: 100%;
+    min-width: 0;
+  }
+  body.network-overview-active.network-overview-table #componentLib,
+  body.network-overview-active.network-overview-table #canvasContainer,
+  body.network-overview-active.network-overview-table #rightPanelResizer {
+    display: none;
+  }
+  body.network-overview-active.network-overview-table #rightPanel {
+    display: flex;
+    width: 100vw;
+    min-width: 0;
+    max-width: none;
+  }
+  body.network-overview-active.network-overview-table .overview-return {
+    display: block;
+  }
+}
 #canvas .component { cursor: move; }
 #canvas .component:hover .comp-outline { stroke: var(--accent); stroke-width: 2; }
 #canvas .component.selected .comp-outline { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 5 3; }
@@ -565,6 +642,8 @@ select:focus-visible, .btn:focus-visible, button:focus-visible, [role="button"]:
 }
 .minimap svg { width: 100%; height: 100%; display: block; }
 #minimapViewport { pointer-events: none; }
+.subdiag-node { cursor: pointer; }
+.subdiag-node:hover { stroke: var(--yellow); stroke-width: 3; }
 
 /* ===== Large-system headless (no-canvas) overlay ===== */
 #canvasHeadlessOverlay {
@@ -644,6 +723,7 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
+.overview-return { display: none; }
 .panel-tab {
   flex: 1;
   padding: 8px 4px;
@@ -2472,6 +2552,17 @@ tr.topo-clickable:focus-visible {
   min-width: 62px;
   color: var(--accent2);
   font: 10px/1.3 "IBM Plex Mono", "Cascadia Code", monospace;
+}
+
+/* Large-system overview is the primary workspace. The component palette cannot
+   edit a headless model, so give WebGL the width and retain a bounded inspector. */
+@media (min-width: 641px) {
+  body.network-overview-active #componentLib { display: none; }
+  body.network-overview-active #rightPanel {
+    width: clamp(300px, 34vw, 480px) !important;
+    min-width: 280px;
+    max-width: 42vw;
+  }
 }
 .evpt-designer-footer {
   padding-top: 10px;

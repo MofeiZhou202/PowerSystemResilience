@@ -461,7 +461,7 @@ const App = (() => {
     const busCount = summary ? systemBusCount(summary) : 0;
     const headless = !!(typeof Canvas !== 'undefined' && Canvas.isHeadless && Canvas.isHeadless());
     if (headless) {
-      setDependencyChip('depChipCanvas', `Canvas: 无画布 · ${busCount || '?'}母线`, 'warn', '大规模系统使用无画布模式，计算仍直接使用后端模型');
+      setDependencyChip('depChipCanvas', `视图: WebGL · ${busCount || '?'}母线`, 'ok', '全网由 WebGL 绘制；局部 SVG 与虚拟表格按需编辑');
     } else if (_canvasDirty) {
       setDependencyChip('depChipCanvas', 'Canvas: 已修改', 'warn', '画布有未同步编辑，运行分析前会同步到后端');
     } else {
@@ -603,11 +603,32 @@ const App = (() => {
     switchTab('topology');
     showTopologySearchResult(row);
     const visible = highlightVisibleTopologyRow(row);
+    const stableBus = resolveBusFromRow(row);
+    if (stableBus && typeof NetworkOverview !== 'undefined') {
+      NetworkOverview.selectRef(stableBus);
+    }
     // Virtualized tables can scroll-highlight any row regardless of size. If the
     // element's table simply isn't present in the DOM, the banner still carries
     // the full record, so name the element and point at the summary.
     setStatus(visible ? `已定位 ${row.title}` : `已定位 ${row.title}（详见上方摘要）`);
-    log(`${headless ? '无画布模式' : '拓扑表'}定位：${row.title} (${summarizeSearchItem(row)})`, 'info');
+    log(`${headless ? 'WebGL/拓扑表' : '拓扑表'}定位：${row.title} (${summarizeSearchItem(row)})`, 'info');
+  }
+
+  function selectStableRef(ref, options = {}) {
+    if (!ref || !['ac', 'dc'].includes(String(ref.domain))) return false;
+    const index = Number(ref.index);
+    if (!Number.isFinite(index)) return false;
+    const row = buildSystemSearchRows().find(candidate =>
+      candidate.source.bucket === String(ref.domain) &&
+      candidate.ids.includes(index));
+    if (!row) return false;
+    navigateToSearchResult(row);
+    if (window.innerWidth <= 640 && !options.openLocal) {
+      document.body.classList.add('network-overview-table');
+    }
+    if (options.openLocal) openSubDiagramFor(String(ref.domain), index,
+      Number(document.getElementById('subDiagramHops')?.value) || 2);
+    return true;
   }
 
   function handleGlobalElementSearch() {
@@ -784,12 +805,22 @@ const App = (() => {
       if (dev.load) badges.push('L');
       if (dev.storage) badges.push('S');
       if (dev.grid) badges.push('⚡');
-      svgParts.push(`<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r}" fill="${fill}" stroke="${isCenter ? '#d19a66' : '#26324a'}" stroke-width="${isCenter ? 3 : 1.5}"/>`);
+      svgParts.push(`<circle class="subdiag-node" data-domain="${domain}" data-index="${index}" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r}" fill="${fill}" stroke="${isCenter ? '#d19a66' : '#26324a'}" stroke-width="${isCenter ? 3 : 1.5}"/>`);
       svgParts.push(`<text x="${p.x.toFixed(1)}" y="${(p.y + 3).toFixed(1)}" text-anchor="middle" font-size="9" font-weight="700" fill="#0b1522">${index}</text>`);
       svgParts.push(`<text x="${p.x.toFixed(1)}" y="${(p.y - r - 3).toFixed(1)}" text-anchor="middle" font-size="8" fill="var(--ink2,#8a94a6)">${domain.toUpperCase()}${badges.length ? ' ' + badges.join('') : ''}</text>`);
     });
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
     svg.innerHTML = svgParts.join('');
+    svg.onclick = event => {
+      const node = event.target.closest?.('.subdiag-node');
+      if (!node) return;
+      selectStableRef({ domain: node.dataset.domain, index: Number(node.dataset.index) });
+    };
+    svg.ondblclick = event => {
+      const node = event.target.closest?.('.subdiag-node');
+      if (!node) return;
+      openSubDiagramFor(node.dataset.domain, Number(node.dataset.index), model.hops);
+    };
     // Info summary
     const info = document.getElementById('subDiagramInfo');
     if (info) {
@@ -1350,10 +1381,10 @@ const App = (() => {
       : (context === 'resilience' ? 'resilienceComponentCurveTargets' : 'tspfComponentCurveTargets');
     const div = document.getElementById(divId);
     if (!div) return;
-    // Per-component curve editing needs canvas glyphs to anchor to; a headless
-    // large system has none. Skip (and avoid deep-cloning the big system JSON).
+    // Per-component curve editing needs SVG glyphs to anchor to; a WebGL large
+    // system has none. Skip (and avoid deep-cloning the big system JSON).
     if (typeof Canvas !== 'undefined' && Canvas.isHeadless && Canvas.isHeadless()) {
-      div.innerHTML = '<p class="empty-hint">大规模系统处于无画布模式，逐元件曲线编辑不可用；请使用整体缩放/曲线参数。</p>';
+      div.innerHTML = '<p class="empty-hint">大规模系统使用 WebGL 总览，逐元件曲线请从全量表格或局部 SVG 选择；也可使用整体缩放/曲线参数。</p>';
       return;
     }
     const rows = componentCurveTargets();
@@ -2355,7 +2386,7 @@ const App = (() => {
           ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
           ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
           ['发电机', data.counts?.generators ?? data.generators ?? ''],
-        ], { subtitle: `已同步到后端并自动运行潮流${Canvas.isHeadless && Canvas.isHeadless() ? '（大规模系统：无画布模式）' : '（已同步到画布）'}` });
+        ], { subtitle: `已同步到后端并自动运行潮流${Canvas.isHeadless && Canvas.isHeadless() ? '（大规模系统：WebGL 全网总览）' : '（已同步到画布）'}` });
       } else {
         setStatus('加载失败', 'error');
       }
@@ -2597,15 +2628,15 @@ const App = (() => {
     cb.checked = currentCaseHasSwitches();
   }
 
-  // After loading a system, tell the user when the canvas entered headless mode
-  // (large-system, no single-line diagram). Calculations are unaffected. Returns
+  // After loading a system, tell the user when the canvas entered WebGL mode.
+  // Calculations are unaffected. Returns
   // a short subtitle suffix that callers can append to their model-IO status.
   function noteHeadlessAfterLoad() {
     if (typeof Canvas === 'undefined' || !Canvas.isHeadless || !Canvas.isHeadless()) return '';
     const s = (Canvas.getSystemSummary && Canvas.getSystemSummary()) || {};
-    log(`系统规模较大（${s.buses ?? '?'} 母线 / ${s.branches ?? '?'} 支路），已启用无画布计算模式；` +
+    log(`系统规模较大（${s.buses ?? '?'} 母线 / ${s.branches ?? '?'} 支路），已启用 WebGL 全网总览；` +
         `所有计算功能可正常使用。`, 'info');
-    return '（大规模系统：已启用无画布计算模式，计算功能不受影响）';
+    return '（大规模系统：已启用 WebGL 全网总览，计算功能不受影响）';
   }
 
   // Import an ETAP-schema .xlsx workbook (raw binary upload -> load_etap).
@@ -20621,6 +20652,14 @@ const App = (() => {
     });
     document.querySelectorAll('[data-close-subdiagram]').forEach(el =>
       el.addEventListener('click', closeSubDiagram));
+    window.addEventListener('hysim:network-selection', event => {
+      const ref = event.detail?.ref;
+      if (ref) selectStableRef(ref, { openLocal: event.detail?.openLocal === true });
+    });
+    window.addEventListener('hysim:overview-table', () => switchTab('topology'));
+    document.getElementById('btnOverviewReturn')?.addEventListener('click', () => {
+      document.body.classList.remove('network-overview-table');
+    });
 
     // Display unit selector — re-render cached PF results on change
     const pfDisplayUnit = document.getElementById('pfDisplayUnit');
@@ -20745,7 +20784,7 @@ const App = (() => {
     document.getElementById('btnApplyProp').addEventListener('click', applyProperties);
 
     // Tab switching
-    document.querySelectorAll('.panel-tab').forEach(tab => {
+    document.querySelectorAll('.panel-tab[data-tab]').forEach(tab => {
       tab.addEventListener('click', () => switchTab(tab.dataset.tab));
     });
 
@@ -20871,6 +20910,10 @@ const App = (() => {
     getAccessibilityAudit: () => HySimCore.Accessibility?.audit() || null,
     getRuntimeDiagnostics: () => HySimCore.RuntimeDiagnostics?.snapshot() || null,
     clearRuntimeDiagnostics: () => HySimCore.RuntimeDiagnostics?.clear() || null,
+    selectStableRef,
+    openLocalSubgraph(domain, index, hops = 2) {
+      openSubDiagramFor(domain, Number(index), Number(hops) || 2);
+    },
     cancelActiveTask,
   };
 })();

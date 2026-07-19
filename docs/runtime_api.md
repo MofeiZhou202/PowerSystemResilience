@@ -1,10 +1,68 @@
 # Runtime API Contract
 
-Updated: 2026-07-12
+Updated: 2026-07-19
 
 The GUI server is implemented in `tests/run_gui_server.cpp`. Session endpoints
 operate on one loaded `HybridPowerSystem`; a model-changing request clears
 cached analysis results.
+
+## Version 1 multi-session API
+
+New automation and AI clients should use `/api/v1`. These resources are
+independent of the GUI's process-global `/api/session/*` state.
+
+| Method and route | Contract |
+|---|---|
+| `GET /api/v1` | Capability and bounded-resource declaration. |
+| `POST /api/v1/sessions` | Create an empty session or load `case`, `model`, or `json_string`; returns `201`, `Location`, and `ETag`. |
+| `GET /api/v1/sessions` | List in-memory sessions. |
+| `GET /api/v1/sessions/{session_id}` | Read model summary and current revision. Supports `If-None-Match`. |
+| `GET /api/v1/sessions/{session_id}/model` | Read the authored rich model and its ETag. |
+| `GET /api/v1/sessions/{session_id}/topology` | Read a paged LOD0/1/2 topology chunk; accepts `offset`, `limit`, and a complete `xmin,ymin,xmax,ymax` viewport. |
+| `GET /api/v1/sessions/{session_id}/subgraph` | Read a bounded k-hop subgraph around the required domain-qualified `domain,index` bus reference. |
+| `PUT /api/v1/sessions/{session_id}/model` | Atomically replace the model and increment revision. Requires the current `If-Match`. |
+| `DELETE /api/v1/sessions/{session_id}` | Delete a session with no active jobs. Requires `If-Match`. |
+| `POST /api/v1/sessions/{session_id}/jobs` | Snapshot the matched model revision and enqueue PF or OPF; returns `202` and `Location`. |
+| `GET /api/v1/sessions/{session_id}/jobs` | List that session's retained jobs without result arrays. |
+| `GET /api/v1/jobs/{job_id}` | Poll state and retrieve the terminal result. |
+| `GET /api/v1/jobs/{job_id}/frames/{step}` | Read one time step with domain, stable-index, viewport, offset, and limit filters. Static PF/OPF has step 0. |
+| `GET /api/v1/jobs/{job_id}/violations` | Read the worst voltage/loading violations for one step without downloading the full frame. |
+| `POST /api/v1/jobs/{job_id}/cancel` | Cancel queued work immediately or mark running work as cancelling. |
+| `DELETE /api/v1/jobs/{job_id}` | Remove a retained terminal job. |
+
+The model ETag is a strong opaque value such as
+`"hysim-ses-...-r3"`. Missing `If-Match` returns HTTP 428; a stale value
+returns HTTP 412 with `current_etag` and `current_model_revision`. A submitted
+job owns an immutable model snapshot, so a later model replacement cannot alter
+the solve. Polling reports `stale_against_current_model`; the nested
+`hysim_result_v1` contract repeats the job and current revisions.
+
+The bounded in-memory worker pool defaults to two threads and is configurable
+with `--api-job-workers 1..32`. The process retains at most 128 sessions and
+4096 jobs. Terminal jobs should be deleted by the client. Storage is not durable
+across server restarts.
+
+Version 1 currently accepts `power_flow` with `method=ac_newton` and
+`optimal_power_flow` with `network_model=balanced_aggregate` using parity,
+Ipopt, auto, economic dispatch, or DC. Other production analyses remain on the
+legacy routes until their result contracts are migrated.
+
+Queued cancellation is immediate. A running PF/OPF solver currently has no
+cooperative cancellation token; its state becomes `cancelling`, its eventual
+result is discarded, and its terminal state becomes `cancelled`.
+
+Topology LOD2 nodes expose stable `ref: {domain,index}` values. Edge references
+also carry `resource` so a branch, transformer, and converter cannot collide.
+LOD1 aggregates by domain/area/zone; LOD0 aggregates by electrical domain.
+Spatial coordinates are an API layout space, not graph indices or engineering
+identity. Pagination is applied to nodes and only edges whose endpoints are in
+the returned node chunk are included.
+
+Frame chunks return authored-space result rows. `indices=1,7,20` always means
+stable component indices in the selected domain. A viewport filter is available
+while the matching session revision still exists. The violation endpoint keeps
+the largest engineering excursions first so overview clients can inspect the
+worst state before requesting dense detail.
 
 ## Session lifecycle
 
@@ -84,3 +142,10 @@ python3 tools/gui_api_e2e.py \
 
 The E2E suite covers PF/OPF Canvas reprojection, Grid and CB P/Q, TSPF frame
 retrieval, P/Q diagnostics, and the transient no-fabricated-flow contract.
+
+The v1 isolation and concurrency contract is covered independently:
+
+```bash
+python3 tools/runtime_api_v1_e2e.py \
+  --server build/macos-release/tests/run_gui_server --data-dir data
+```

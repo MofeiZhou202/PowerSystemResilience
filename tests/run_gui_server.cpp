@@ -82,6 +82,7 @@
 #include "hacdcpf/power_flow/island_detector.hpp"
 #include "hacdcpf/graph/graph.hpp"
 #include "hacdcpf/dynamics/dynamics.hpp"
+#include "runtime_api_v1.hpp"
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -2132,13 +2133,15 @@ void append_typhoon_result_metadata(json& target,
 struct Args {
   std::string host{"127.0.0.1"};
   int port{8088};
+  int api_job_workers{2};
   std::string data_dir{"../data"};
   std::string matpower_dir{"../external_data/matpower"};
 };
 
 void usage(const char* prog) {
   std::cerr << "Usage: " << prog
-            << " [--host <host>] [--port <port>] [--data-dir <path>] [--matpower-dir <path>]\n";
+            << " [--host <host>] [--port <port>] [--api-job-workers <count>]"
+               " [--data-dir <path>] [--matpower-dir <path>]\n";
 }
 
 bool parse_args(int argc, char** argv, Args& args) {
@@ -2151,6 +2154,10 @@ bool parse_args(int argc, char** argv, Args& args) {
       if (i + 1 >= argc) return false;
       args.port = std::atoi(argv[++i]);
       if (args.port <= 0) return false;
+    } else if (k == "--api-job-workers") {
+      if (i + 1 >= argc) return false;
+      args.api_job_workers = std::atoi(argv[++i]);
+      if (args.api_job_workers <= 0 || args.api_job_workers > 32) return false;
     } else if (k == "--data-dir") {
       if (i + 1 >= argc) return false;
       args.data_dir = argv[++i];
@@ -8408,6 +8415,10 @@ int main(int argc, char** argv) {
 
   httplib::Server svr;
   svr.new_task_queue = [] { return new httplib::ThreadPool(8); };
+  hacdcpf::server::RuntimeApiV1 api_v1(
+      [](const std::string& name) { return build_case(name); },
+      args.api_job_workers);
+  api_v1.register_routes(svr);
   // Request *reading* timeout — bounds how long a worker thread waits for the
   // request bytes (NOT the handler/computation, which runs unbounded after the
   // request is read).  Kept modest so a slow or body-less POST (e.g. a POST
@@ -22309,7 +22320,10 @@ int main(int argc, char** argv) {
   svr.set_default_headers({
     {"Access-Control-Allow-Origin", "*"},
     {"Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"},
-    {"Access-Control-Allow-Headers", "Content-Type, Authorization, X-HySim-Request-ID"}
+    {"Access-Control-Allow-Headers",
+     "Content-Type, Authorization, If-Match, If-None-Match, X-HySim-Request-ID"},
+    {"Access-Control-Expose-Headers",
+     "ETag, Location, Retry-After, X-HySim-Session-ID, X-HySim-Model-Revision"}
   });
 
   // Handle OPTIONS preflight requests

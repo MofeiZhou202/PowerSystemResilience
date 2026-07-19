@@ -49,11 +49,15 @@ all 163 manifest metrics, including synchronous-machine and controller cases.
 ## Fidelity Boundary
 
 PSD Tests 24 and 51 include ActivePowerPI, ReactivePowerPI, CurrentModeControl,
-and a detailed LCL filter. HACDCPF's promoted GFL model is a compact first-order
-REGC/REEC subset. The 0.28 pu P and 0.41 pu Q peaks occur only during the first
-20 ms after the reference step and are retained in the report rather than
-hidden by relative alignment. Full transient parity requires implementation of
-the PSD outer PI and current-controller states, not a tolerance adjustment.
+and a detailed LCL filter. HACDCPF now provides that same chain as an opt-in
+**full-fidelity GFL mode** (outer PI + inner current PI + differential 6-state
+LCL filter, wired P→Iq_ref / Q→Id_ref exactly as PSD). With it enabled, the
+P/Q step-peak deviations collapse from 0.28/0.41 pu to **0.066/0.044 pu**
+(test24) and **0.082/0.068 pu** (test51) vs PSD ResidualModel/IDA; the legacy
+compact first-order REGC/REEC subset remains the default for backward
+compatibility. The full-fidelity chain is stiff (ωb/lf ≈ 3.5e4 /s) and is
+integrated with the A-stable MassMatrixDae solver; manifest max tolerances for
+`p_device_pu`/`q_device_pu` are tightened from 0.30/0.45 to 0.15 accordingly.
 
 The promoted gate currently covers the matched active-power reference
 disturbance. Reactive-reference, source-voltage, impedance-switching, temporary

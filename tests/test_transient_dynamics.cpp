@@ -2810,6 +2810,21 @@ HybridPowerSystem make_psd_gfl_case(const PsdGflCase& spec,
        {{"kp_pll", spec.pll_kp},
         {"ki_pll", spec.pll_ki},
         {"pll_lpf_t_s", spec.pll_lpf_t_s}}});
+  // PSD full-fidelity chain: OuterControl ActivePowerPI/ReactivePowerPI +
+  // CurrentModeControl + differential LCL filter (params from
+  // PowerSimulationsDynamics.jl dynamic_test_data.jl).
+  inverter.dynamic_model.components.push_back(
+      {"outer_control", "ActivePowerPI", "PowerSimulationsDynamics", spec.psd_case,
+       {{"Kp_p", 2.0}, {"Ki_p", 30.0}, {"omega_z", 0.132 * 2.0 * 3.14159265358979323846 * 50.0}}});
+  inverter.dynamic_model.components.push_back(
+      {"outer_control", "ReactivePowerPI", "PowerSimulationsDynamics", spec.psd_case,
+       {{"Kp_q", 2.0}, {"Ki_q", 30.0}, {"omega_f", 0.132 * 2.0 * 3.14159265358979323846 * 50.0}}});
+  inverter.dynamic_model.components.push_back(
+      {"inner_control", "CurrentModeControl", "PowerSimulationsDynamics", spec.psd_case,
+       {{"kpc", 0.37}, {"kic", 0.7}, {"kffv", 1.0}}});
+  inverter.dynamic_model.components.push_back(
+      {"filter", "LCLFilter", "PowerSimulationsDynamics", spec.psd_case,
+       {{"lf", 0.009}, {"rf", 0.016}, {"cf", 2.5}, {"lg", 0.002}, {"rg", 0.003}}});
   sys.vsc_converters = {inverter};
   return sys;
 }
@@ -2823,6 +2838,10 @@ DynamicResults run_hacdcpf_psd_gfl_case(const PsdGflCase& spec,
   opt.t_end_s = 2.0;
   opt.dt_s = 0.005;
   opt.record_every_step = true;
+  // The full-fidelity GFL chain carries the stiff differential LCL filter
+  // (wb/lf ~ 3.5e4 /s); the explicit partitioned steppers cannot take ms
+  // steps on it, so use the A-stable mass-matrix DAE (as the manifest does).
+  opt.solver_type = DynamicSolverType::MassMatrixDae;
 
   DynamicModelBuilder builder;
   DynamicSystem dyn = builder.build(sys, opt);
@@ -6137,6 +6156,8 @@ TEST_CASE("PSD grid-following comparison harness is available",
   for (const auto& spec : cases) {
     INFO("PSD validation case: " << spec.name);
     const DynamicResults result = run_hacdcpf_psd_gfl_case(spec, base_mva);
+    INFO("solver message: " << result.message);
+    INFO("init fast_dxdt_inf_norm: " << result.initialization.dynamic_fast_dxdt_inf_norm);
     REQUIRE(result.success);
     REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm < 1e-5);
     REQUIRE(result.snapshots.size() > 100);

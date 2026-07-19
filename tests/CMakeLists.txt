@@ -380,9 +380,13 @@ hacdcpf_add_test(test_ctm_ltm_comparison test_ctm_ltm_comparison.cpp)
 # under third_party/; nlohmann_json arrives transitively via hacdcpf -> mipsolvers.
 # Not a Catch2 test — a standalone executable serving web/ at /xjtu/ (port 8088).
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
-  add_executable(run_gui_server run_gui_server.cpp)
+  add_executable(run_gui_server
+    run_gui_server.cpp
+    "${CMAKE_SOURCE_DIR}/src/server/runtime_api_v1.cpp")
   target_link_libraries(run_gui_server PRIVATE hacdcpf::hacdcpf)
-  target_include_directories(run_gui_server PRIVATE "${CMAKE_SOURCE_DIR}/third_party")
+  target_include_directories(run_gui_server PRIVATE
+    "${CMAKE_SOURCE_DIR}/third_party"
+    "${CMAKE_SOURCE_DIR}/src/server")
   target_compile_definitions(run_gui_server PRIVATE
     HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
   # httplib needs Winsock2 on Windows (freeaddrinfo / WSACleanup / socket).
@@ -418,8 +422,19 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
     endif()
   endif()
 
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME runtime_api_v1_e2e
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tools/runtime_api_v1_e2e.py"
+              --server "$<TARGET_FILE:run_gui_server>"
+              --data-dir "${CMAKE_SOURCE_DIR}/data")
+    set_tests_properties(runtime_api_v1_e2e PROPERTIES
+      LABELS "api;v1;e2e" TIMEOUT 120)
+  endif()
+
   # Browser end-to-end smoke test for the large-system / scalability GUI features
-  # (headless no-canvas mode, virtualized editable topology tables, global
+  # (WebGL full-network mode, virtualized editable topology tables, global
   # element search, neighborhood sub-diagram, minimap, and the time-series
   # 时序潮流/时序生产模拟 split). Standalone Node + Playwright driver; opt-in via
   # the "browser" label since it needs `npm i -D playwright && npx playwright
@@ -450,6 +465,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
               --server "$<TARGET_FILE:run_gui_server>"
               --data-dir "${CMAKE_SOURCE_DIR}/data")
     set_tests_properties(gui_scale_features_e2e PROPERTIES LABELS "gui;e2e;browser" TIMEOUT 300)
+
+    add_test(NAME network_overview_e2e
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/network_overview_e2e.mjs"
+              --server "$<TARGET_FILE:run_gui_server>"
+              --data-dir "${CMAKE_SOURCE_DIR}/data")
+    set_tests_properties(network_overview_e2e PROPERTIES
+      LABELS "gui;e2e;browser;webgl;scale" TIMEOUT 120)
 
     add_test(NAME parameter_contract_e2e
       COMMAND "${HACDCPF_NODE_EXECUTABLE}"

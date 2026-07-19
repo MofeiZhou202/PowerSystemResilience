@@ -1034,6 +1034,26 @@ struct GridFollowingInverterParams {
   // IEEE 1547 ride-through / trip / reconnect protection (design doc §11.7).
   // Disabled by default; opt-in per device.
   IEEE1547Settings protection{};
+  // Full-fidelity GFL chain (PowerSimulationsDynamics.jl-compatible):
+  // OuterControl ActivePowerPI/ReactivePowerPI + CurrentModeControl inner PI
+  // + differential LCL filter.  Opt-in; when false the compact first-order
+  // REGC/REEC response is used.  References follow the PSD wiring: the P-loop
+  // drives Iq_ref, the Q-loop drives Id_ref.
+  bool full_fidelity{false};
+  double outer_kp_p{2.0};        // Kp_p
+  double outer_ki_p{30.0};       // Ki_p
+  double outer_omega_z{41.468};  // ωz  = 0.132·2π·50 (p measurement low-pass)
+  double outer_kp_q{2.0};        // Kp_q
+  double outer_ki_q{30.0};       // Ki_q
+  double outer_omega_f{41.468};  // ωf  = 0.132·2π·50 (q measurement low-pass)
+  double inner_kpc{0.37};        // kpc current-loop proportional gain
+  double inner_kic{0.7};         // kic current-loop integral gain
+  double inner_kffv{1.0};        // kffv voltage feedforward
+  double lcl_lf_pu{0.009};       // converter-side inductance
+  double lcl_rf_pu{0.016};       // converter-side resistance
+  double lcl_cf_pu{2.5};         // shunt capacitance
+  double lcl_lg_pu{0.002};       // grid-side inductance
+  double lcl_rg_pu{0.003};       // grid-side resistance
   bool in_service{true};
 };
 
@@ -1082,6 +1102,13 @@ class GridFollowingInverter : public DynamicDevice {
       const DynamicState& x, const NetworkState& y) const override;
 
  private:
+  void computeDerivativesFullFidelity(const DynamicState& x,
+                                      const NetworkState& y,
+                                      Eigen::Ref<Eigen::VectorXd> dxdt) const;
+  void seedFullFidelityEquilibrium(DynamicState& x,
+                                   const NetworkState& y,
+                                   bool set_reference);
+
   GridFollowingInverterParams params_;
   StateIndexRange range_;
   InverterInnerVariableBus inner_vars_;

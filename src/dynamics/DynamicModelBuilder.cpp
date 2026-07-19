@@ -226,6 +226,21 @@ void apply_gfl_params(const std::map<std::string, double>& p,
   params.volt_var_droop_pu = param_or(p, {"volt_var_droop_pu", "Dvv", "kq"}, params.volt_var_droop_pu);
   apply_ieee1547_params(p, params.protection, params.f_ref_hz);
   apply_smart_inverter_params(p, params.volt_var, params.freq_watt, params.f_ref_hz);
+  // Full-fidelity chain (PSD.jl OuterControl/InnerControl/LCLFilter aliases).
+  params.outer_kp_p = param_or(p, {"outer_kp_p", "Kp_p", "kp_p"}, params.outer_kp_p);
+  params.outer_ki_p = param_or(p, {"outer_ki_p", "Ki_p", "ki_p"}, params.outer_ki_p);
+  params.outer_omega_z = param_or(p, {"outer_omega_z", "omega_z", "wz"}, params.outer_omega_z);
+  params.outer_kp_q = param_or(p, {"outer_kp_q", "Kp_q", "kp_q"}, params.outer_kp_q);
+  params.outer_ki_q = param_or(p, {"outer_ki_q", "Ki_q", "ki_q"}, params.outer_ki_q);
+  params.outer_omega_f = param_or(p, {"outer_omega_f", "omega_f", "wf"}, params.outer_omega_f);
+  params.inner_kpc = param_or(p, {"inner_kpc", "kpc"}, params.inner_kpc);
+  params.inner_kic = param_or(p, {"inner_kic", "kic"}, params.inner_kic);
+  params.inner_kffv = param_or(p, {"inner_kffv", "kffv"}, params.inner_kffv);
+  params.lcl_lf_pu = param_or(p, {"lcl_lf_pu", "lf"}, params.lcl_lf_pu);
+  params.lcl_rf_pu = param_or(p, {"lcl_rf_pu", "rf"}, params.lcl_rf_pu);
+  params.lcl_cf_pu = param_or(p, {"lcl_cf_pu", "cf"}, params.lcl_cf_pu);
+  params.lcl_lg_pu = param_or(p, {"lcl_lg_pu", "lg"}, params.lcl_lg_pu);
+  params.lcl_rg_pu = param_or(p, {"lcl_rg_pu", "rg"}, params.lcl_rg_pu);
 }
 
 void apply_gfl_profile(const hacdcpf::DynamicModelProfile& profile,
@@ -249,6 +264,11 @@ void apply_gfl_profile(const hacdcpf::DynamicModelProfile& profile,
   apply_name(profile.model_name);
   for (const auto& component : profile.components) {
     apply_name(component.model);
+    if (iequals(component.model, "ActivePowerPI") ||
+        iequals(component.model, "ReactivePowerPI") ||
+        iequals(component.model, "CurrentModeControl")) {
+      params.full_fidelity = true;
+    }
     if (!iequals(component.type, "pll")) continue;
     auto it = component.parameters.find("kp_pll");
     if (it != component.parameters.end()) params.pll_kp = it->second;

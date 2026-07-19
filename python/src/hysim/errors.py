@@ -38,3 +38,7 @@ class InvalidResultError(HySimError):
 class ToolPolicyError(HySimError):
     """An AI tool call violates the configured effect or approval policy."""
 
+
+class JobFailedError(HySimError):
+    """An asynchronous v1 analysis job reached the failed state."""
+

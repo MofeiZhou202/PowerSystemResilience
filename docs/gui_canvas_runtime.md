@@ -1,5 +1,21 @@
 # Canvas Runtime and Result Playback
 
+For large models the main viewport is no longer an empty headless surface.
+`web/js/core/network_overview.js` renders the full bus/primary-edge graph with
+WebGL2 and LOD0/1/2 aggregation while creating no per-bus SVG DOM. The existing
+SVG canvas remains authoritative for normal-size authored diagrams. Large-model
+selection uses one `{domain,index}` bus reference across WebGL, the virtualized
+topology tables, result navigation, and the bounded local SVG subgraph.
+
+The intended division of work is:
+
+- WebGL: pan, zoom, hit-test, and inspect the full network.
+- Local SVG: inspect/select a bounded k-hop neighborhood.
+- Virtual tables: edit the complete authored model without materializing rows.
+- Charts: browse downsampled time windows while retaining complete export data.
+- Backend chunks: serve topology LOD, spatial windows, time frames, and worst
+  violations through `/api/v1`.
+
 Updated: 2026-07-12
 
 The authored model lives in `Canvas.state`, while analysis results live in SVG
@@ -50,4 +66,3 @@ The backend does not send thousands of complete Canvas frames with the main
 analysis response. Playback requests one frame by index and caches a small
 window in the browser. This keeps long runs responsive and avoids contaminating
 the next authored-model synchronization.
-

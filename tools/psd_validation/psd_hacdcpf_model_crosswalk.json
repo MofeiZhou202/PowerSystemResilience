@@ -367,7 +367,7 @@
       "status": "supported-subset",
       "comparison_level": "L2",
       "trace_case": "test24/test51:p_oc",
-      "notes": "HACDCPF has a generic REGC/REEC subset; many PSD flags, deadbands, and plant-control paths remain unrepresented."
+      "notes": "Two fidelity tiers: compact REGC/REEC subset (first-order response) and the PSD-compatible full-fidelity chain (ActivePowerPI/ReactivePowerPI outer PI). Full fidelity drives p_device_pu/q_device_pu step-peak errors from 0.28/0.41 pu to 0.066/0.044 pu (test24) and 0.082/0.068 pu (test51). Full-fidelity variant selectable via the full_fidelity flag with ActivePowerPI/ReactivePowerPI outer PI, CurrentModeControl inner PI and the differential LCL filter (catalog-registered parameters)."
     },
     {
       "domain": "inverter",
@@ -378,7 +378,7 @@
       "status": "supported-subset",
       "comparison_level": "L2",
       "trace_case": "test24/test51:p_oc",
-      "notes": "Current response and limit behavior are simplified in HACDCPF."
+      "notes": "Compact first-order current response by default; CurrentModeControl inner PI (kpc/kic/kffv) with dq decoupling is available in full-fidelity mode. Full-fidelity variant selectable via the full_fidelity flag with ActivePowerPI/ReactivePowerPI outer PI, CurrentModeControl inner PI and the differential LCL filter (catalog-registered parameters)."
     },
     {
       "domain": "inverter",
@@ -407,11 +407,11 @@
       "psd_slot": "filter",
       "psd_model": "LCLFilter / LCFilter",
       "hacdcpf_slot": "filter",
-      "hacdcpf_model": "",
-      "status": "missing",
-      "comparison_level": "L0",
-      "trace_case": "",
-      "notes": "Needs differential filter states and mass-matrix participation."
+      "hacdcpf_model": "LCLFilter",
+      "status": "supported-subset",
+      "comparison_level": "L2",
+      "trace_case": "test24/test51:p_oc",
+      "notes": "Differential 6-state LCL filter (converter-side RL, shunt C, grid-side RL) available in the full-fidelity GFL chain; integrates with MassMatrixDae (stiff)."
     },
     {
       "domain": "inverter",

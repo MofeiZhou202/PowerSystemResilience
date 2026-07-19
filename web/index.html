@@ -125,8 +125,8 @@
   </div>
   <div class="global-search">
     <input id="globalElementSearch" type="search" placeholder="定位: bus 1487 / dc bus 3 / gen 12 / 名称" aria-label="定位母线或元件"/>
-    <button id="btnGlobalElementSearch" class="toolbar-btn" title="在画布或无画布拓扑中定位">定位</button>
-    <button id="btnNeighborhoodDiagram" class="toolbar-btn" title="绘制该母线的局部邻域子图（适用于无画布/大规模系统）">邻域图</button>
+    <button id="btnGlobalElementSearch" class="toolbar-btn" title="在 SVG、WebGL 或全量拓扑表中定位">定位</button>
+    <button id="btnNeighborhoodDiagram" class="toolbar-btn" title="绘制该母线的局部 SVG 邻域（适用于大规模系统）">邻域图</button>
   </div>
 </div>
 
@@ -1983,6 +1983,21 @@
 
   <!-- Center: Canvas -->
   <div id="canvasContainer">
+    <section id="networkOverview" class="network-overview" aria-label="全网 WebGL 总览" hidden>
+      <canvas id="networkOverviewCanvas" aria-label="可缩放的全网拓扑总览"></canvas>
+      <div class="network-overview-toolbar" aria-label="全网总览工具">
+        <label for="networkOverviewLod">层级</label>
+        <select id="networkOverviewLod" class="canvas-tool-select" aria-label="总览细节层级">
+          <option value="0">LOD0 域</option>
+          <option value="1">LOD1 区域</option>
+          <option value="2" selected>LOD2 母线</option>
+        </select>
+        <button id="btnOverviewFit" class="toolbar-btn" type="button" title="适应全网">适应</button>
+        <button id="btnOverviewLocal" class="toolbar-btn" type="button" title="打开所选母线的局部 SVG">局部 SVG</button>
+        <button id="btnOverviewTable" class="toolbar-btn" type="button" title="打开全量拓扑表">表格</button>
+      </div>
+      <div id="networkOverviewStatus" class="network-overview-status" aria-live="polite"></div>
+    </section>
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <!-- Grid pattern -->
@@ -2024,6 +2039,7 @@
   <aside id="rightPanel">
     <!-- Tabs -->
     <div class="panel-tabs">
+      <button id="btnOverviewReturn" class="panel-tab overview-return" type="button">全网</button>
       <button class="panel-tab active" data-tab="properties">属性</button>
       <button class="panel-tab" data-tab="topology">拓扑</button>
       <button class="panel-tab" data-tab="results">结果</button>
@@ -3133,7 +3149,7 @@
   <div class="modal-backdrop" data-close-subdiagram></div>
   <div class="modal-content sub-diagram-modal">
     <div class="sub-diagram-header">
-      <span id="subDiagramTitle" class="sub-diagram-title">邻域子图</span>
+      <span id="subDiagramTitle" class="sub-diagram-title">局部 SVG</span>
       <span class="sub-diagram-controls">
         <label class="sub-label">跳数
           <select id="subDiagramHops">
@@ -3156,7 +3172,8 @@
 
   <script src="js/components.js?v=20260712-cb-source-flow-v2"></script>
   <script src="js/search_registry.js?v=20260709-phase5"></script>
-  <script src="js/canvas.js?v=20260716-cim-headless-v1"></script>
+  <script src="js/core/network_overview.js?v=20260719-webgl-lod-v1"></script>
+  <script src="js/canvas.js?v=20260719-webgl-lod-v1"></script>
   <script src="js/core/analysis_contracts.js?v=20260714-market-v3"></script>
   <script src="js/core/task_manager.js?v=20260712-hysim-phase3-v1"></script>
   <script src="js/core/api_client.js?v=20260712-hysim-phase3-v1"></script>

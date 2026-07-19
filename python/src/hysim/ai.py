@@ -9,6 +9,7 @@ from typing import Any, Callable, Mapping
 from .client import HySimClient
 from .errors import ToolPolicyError
 from .models import OPFRequest, PowerFlowOptions, PowerFlowRequest
+from .v1 import HySimV1Session
 
 
 class ToolEffect(str, Enum):
@@ -218,6 +219,177 @@ class HySimToolRegistry:
         return self.client.optimal_power_flow(request).to_record(
             include_raw=bool(args.get("include_raw", False))
         )
+
+
+class HySimV1ToolRegistry:
+    """AI tool surface backed by one isolated, revision-aware v1 session."""
+
+    def __init__(
+        self,
+        session: HySimV1Session,
+        *,
+        policy: ToolPolicy | None = None,
+    ) -> None:
+        self.session = session
+        self.policy = policy or ToolPolicy()
+        self._tools: dict[str, ToolSpec] = {}
+        self._register_builtins()
+
+    def specs(self) -> tuple[ToolSpec, ...]:
+        return tuple(self._tools[name] for name in sorted(self._tools))
+
+    def function_schemas(self) -> list[dict[str, Any]]:
+        return [tool.function_schema() for tool in self.specs()]
+
+    def openai_tools(self) -> list[dict[str, Any]]:
+        return [
+            {"type": "function", "function": schema}
+            for schema in self.function_schemas()
+        ]
+
+    def call(
+        self,
+        name: str,
+        arguments: Mapping[str, Any] | None = None,
+        *,
+        approved: bool = False,
+    ) -> Mapping[str, Any]:
+        try:
+            tool = self._tools[name]
+        except KeyError as exc:
+            raise ValueError(f"unknown HySim v1 tool: {name}") from exc
+        self.policy.authorize(tool, approved=approved)
+        validated = dict(arguments or {})
+        _validate_arguments(tool.input_schema, validated)
+        return tool.handler(validated)
+
+    def _register(self, tool: ToolSpec) -> None:
+        if tool.name in self._tools:
+            raise ValueError(f"duplicate tool name: {tool.name}")
+        self._tools[tool.name] = tool
+
+    def _register_builtins(self) -> None:
+        no_arguments = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+        self._register(
+            ToolSpec(
+                "hysim_v1_session",
+                "Read the isolated session ID, model revision, ETag, and model summary.",
+                no_arguments,
+                ToolEffect.READ,
+                lambda _: dict(self.session.refresh().raw),
+            )
+        )
+        self._register(
+            ToolSpec(
+                "hysim_v1_replace_builtin",
+                "Replace this session model with a built-in case using its current ETag.",
+                {
+                    "type": "object",
+                    "properties": {"case": {"type": "string", "minLength": 1}},
+                    "required": ["case"],
+                    "additionalProperties": False,
+                },
+                ToolEffect.MODIFY_MODEL,
+                lambda args: dict(
+                    self.session.replace_model(case=str(args["case"])).raw
+                ),
+            )
+        )
+        self._register(
+            ToolSpec(
+                "hysim_v1_submit_power_flow",
+                "Submit a power-flow job bound to the current model revision.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "max_iter": {"type": "integer", "minimum": 1},
+                        "tol": {"type": "number", "exclusiveMinimum": 0},
+                    },
+                    "additionalProperties": False,
+                },
+                ToolEffect.ANALYZE,
+                self._submit_power_flow,
+            )
+        )
+        self._register(
+            ToolSpec(
+                "hysim_v1_submit_optimal_power_flow",
+                "Submit an OPF job bound to the current model revision.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "solver": {
+                            "type": "string",
+                            "enum": ["parity", "ipopt", "auto", "dc", "dispatch"],
+                            "default": "parity",
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+                ToolEffect.ANALYZE,
+                self._submit_opf,
+            )
+        )
+        job_schema = {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string", "minLength": 1},
+                "include_result": {"type": "boolean", "default": False},
+            },
+            "required": ["job_id"],
+            "additionalProperties": False,
+        }
+        self._register(
+            ToolSpec(
+                "hysim_v1_get_job",
+                "Poll a job and return compact result metadata unless full output is requested.",
+                job_schema,
+                ToolEffect.READ,
+                self._get_job,
+            )
+        )
+        self._register(
+            ToolSpec(
+                "hysim_v1_cancel_job",
+                "Request cancellation of a queued or running job.",
+                {
+                    "type": "object",
+                    "properties": {"job_id": {"type": "string", "minLength": 1}},
+                    "required": ["job_id"],
+                    "additionalProperties": False,
+                },
+                ToolEffect.CONTROL,
+                lambda args: dict(
+                    self.session.client.get_job(str(args["job_id"])).cancel().raw
+                ),
+            )
+        )
+
+    def _submit_power_flow(self, args: Mapping[str, Any]) -> Mapping[str, Any]:
+        request = PowerFlowRequest(
+            options=PowerFlowOptions(
+                max_iter=_optional_int(args.get("max_iter")),
+                tol=_optional_float(args.get("tol")),
+            )
+        )
+        return dict(self.session.power_flow(request).raw)
+
+    def _submit_opf(self, args: Mapping[str, Any]) -> Mapping[str, Any]:
+        request = OPFRequest(solver=str(args.get("solver", "parity")))
+        return dict(self.session.optimal_power_flow(request).raw)
+
+    def _get_job(self, args: Mapping[str, Any]) -> Mapping[str, Any]:
+        job = self.session.client.get_job(str(args["job_id"]))
+        if job.state != "succeeded" or bool(args.get("include_result", False)):
+            return dict(job.raw)
+        compact = dict(job.raw)
+        compact.pop("result", None)
+        compact["result_summary"] = job.result().to_record()
+        return compact
 
 
 def _optional_int(value: Any) -> int | None:

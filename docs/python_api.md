@@ -13,9 +13,9 @@ session routes in `tests/run_gui_server.cpp`.
 ```text
 AI / optimization / data science code
         |
-        +-- HySimToolRegistry (schemas, effect policy, compact context)
+        +-- HySimV1ToolRegistry (schemas, effect policy, compact context)
         |
-        +-- HySimClient (typed requests, provenance, honest results)
+        +-- HySimV1Client (isolated sessions, ETags, async jobs)
         |
         +-- Transport protocol (HTTP now; in-process binding later)
         |
@@ -31,10 +31,11 @@ future in-process transport possible without changing experiment code.
 |---|---|---|
 | Runtime | `LocalHySimServer` | One isolated C++ process per experiment or AI worker. |
 | Transport | `Transport`, `UrllibTransport` | Replaceable request execution; no unsafe automatic retry. |
-| SDK | `HySimClient` | Model lifecycle, PF/OPF, registered analyses, lazy frames. |
+| SDK v1 | `HySimV1Client`, `HySimV1Session`, `HySimJob` | Isolated model lifecycle, optimistic concurrency, asynchronous PF/OPF, topology and result chunks. |
+| SDK legacy | `HySimClient` | GUI-compatible global lifecycle, registered analyses, lazy frames. |
 | Models | `BusRef`, `ComponentRef`, request dataclasses | Domain-qualified bus IDs and stable authored component IDs. |
 | Results | `AnalysisResult` | Request/model provenance, scientific status, limitations, raw payload. |
-| AI | `HySimToolRegistry`, `ToolPolicy` | Tool schemas, effect allowlist, explicit mutation approval. |
+| AI | `HySimV1ToolRegistry`, `ToolPolicy` | Job-oriented tool schemas, effect allowlist, explicit mutation approval. |
 
 The SDK intentionally preserves unknown response fields. C++ modules evolve
 quickly, so Python must not discard new diagnostics while waiting for a package
@@ -50,7 +51,8 @@ native JSON payload through `run_analysis()`.
 3. A successful HTTP response is not automatically a valid engineering result.
    Consumers must inspect `scientific_status`, call `require_usable()`, and retain
    `model_scope`, `validity_flags`, fallback state, warnings, and limitations.
-4. Each analysis carries a request UUID and the Python client's model revision.
+4. Each v1 analysis carries its job ID, session ID, immutable model revision,
+   and the current revision used to determine staleness.
    The audit hook stores a request hash rather than logging the full system model.
 5. Requests are not retried automatically because model changes and analyses are
    not idempotent under the current process-global session.
@@ -68,20 +70,30 @@ retain the full raw result for NumPy/pandas/PyTorch post-processing. Provider
 adapters can consume `function_schemas()` or `openai_tools()`; provider-specific
 dependencies do not belong in the core package.
 
-## Current limitation
+## Runtime boundaries
 
-`run_gui_server` owns one process-global session and one busy flag. It is suitable
-for a desktop GUI or one AI worker, but not for multiple tenants sharing a
-process. The SDK serializes model access within one client, but cannot coordinate
-independent clients. Use `LocalHySimServer` to isolate concurrent experiments.
+`/api/v1` now owns independent in-memory sessions and a bounded asynchronous
+worker pool. The GUI remains on the backward-compatible process-global routes;
+the two state stores do not interact. Sessions and job results are not durable,
+and v1 currently migrates only balanced aggregate PF/OPF. Deployments exposed
+beyond a trusted workstation still require authentication, authorization,
+request-size limits, and TLS at a gateway.
+
+Large-model consumers should use `session.topology(lod=..., viewport=...)` and
+`session.subgraph(domain, index, depth=...)` instead of reading the complete
+model for visualization. After a job succeeds, `job.frame(step, domain=...,
+indices=..., viewport=...)` returns a bounded result window and
+`job.violations(step)` returns the worst voltage/loading excursions. These
+methods preserve domain-qualified stable IDs and pass unknown fields through.
 
 ## Evolution path
 
 | Phase | Server/API change | AI capability unlocked |
 |---|---|---|
 | 0 (implemented) | Python SDK over current production routes | Typed experiments, tool calling, audit hooks. |
-| 1 | Move runtime source out of `tests/`; add `/api/v1`, `session_id`, model revision/ETag, OpenAPI schema | Safe multi-client model editing and generated clients. |
-| 2 | Add `POST /jobs`, cancellation token, progress events, artifact IDs, bounded worker pool | Long simulation campaigns and resumable agents. |
+| 1 (implemented) | `/api/v1`, independent `session_id`, model revision and ETag; v1 implementation isolated under `src/server/` | Safe multi-client model replacement and snapshot consistency. |
+| 2 (implemented base) | Bounded asynchronous PF/OPF jobs, polling, cancellation request, retention cleanup, topology LOD and spatial/time result chunks | Concurrent experiment queues, scalable AI context retrieval, and resumable polling. |
+| 2 next | Cooperative solver cancellation, progress events, artifact IDs and durable metadata | Long simulation campaigns and restart recovery. |
 | 3 | Add immutable experiment manifests, dataset/artifact store, seed and solver-build provenance | Reproducible surrogate training and benchmark evaluation. |
 | 4 | Add an optional pybind11 in-process transport only for high-throughput kernels | Batched RL/surrogate loops without HTTP serialization cost. |
 
@@ -94,7 +106,7 @@ would create two competing public contracts.
 ```bash
 python3 -m pip install -e python
 ./build/macos-release/tests/run_gui_server --port 8088 --data-dir data
-python3 python/examples/ai_ready_workflow.py
+python3 python/examples/v1_async_workflow.py
 ```
 
 For tests without a running solver:
@@ -102,4 +114,3 @@ For tests without a running solver:
 ```bash
 PYTHONPATH=python/src python3 -m unittest discover -s python/tests -v
 ```
-

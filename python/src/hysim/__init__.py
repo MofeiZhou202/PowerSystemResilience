@@ -1,12 +1,19 @@
 """Python SDK for HySim-XJTU-HRPES."""
 
-from .ai import HySimToolRegistry, ToolEffect, ToolPolicy, ToolSpec
+from .ai import (
+    HySimToolRegistry,
+    HySimV1ToolRegistry,
+    ToolEffect,
+    ToolPolicy,
+    ToolSpec,
+)
 from .client import ANALYSIS_ROUTES, ApiCallEvent, HySimClient
 from .errors import (
     ApiError,
     BusyError,
     HySimError,
     InvalidResultError,
+    JobFailedError,
     ToolPolicyError,
     TransportError,
 )
@@ -25,6 +32,7 @@ from .models import (
 )
 from .server import LocalHySimServer
 from .transport import Transport, TransportResponse, UrllibTransport
+from .v1 import HySimJob, HySimV1Client, HySimV1Session, TERMINAL_JOB_STATES
 
 __all__ = [
     "ANALYSIS_ROUTES",
@@ -37,8 +45,13 @@ __all__ = [
     "ComponentRef",
     "HySimClient",
     "HySimError",
+    "HySimJob",
     "HySimToolRegistry",
+    "HySimV1ToolRegistry",
+    "HySimV1Client",
+    "HySimV1Session",
     "InvalidResultError",
+    "JobFailedError",
     "LocalHySimServer",
     "OPFConstraints",
     "OPFNetworkModel",
@@ -51,9 +64,9 @@ __all__ = [
     "ToolPolicy",
     "ToolPolicyError",
     "ToolSpec",
+    "TERMINAL_JOB_STATES",
     "Transport",
     "TransportError",
     "TransportResponse",
     "UrllibTransport",
 ]
-

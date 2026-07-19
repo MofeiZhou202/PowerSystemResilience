@@ -10,7 +10,7 @@
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
 - 已删除被实现取代的阶段计划、一次性代码审查和重复暂态设计稿；不再用历史 roadmap 描述当前行为。
 - 本次同步（2026-07-18）补入 2026 年 5–7 月新增能力域：电力市场、园区综合能源、承载力/薄弱环节/反事实规划、场景生成与台风弹性、年度碳/GEC、SPPT 可执行理论层、三相混合 OPF、电压稳定 CPF，以及 CIM/GridLAB-D/PSD.jl 等 IO 通道；并修正两处过时表述（ETAP 默认开关、短路分析入口名）。
-- 2026-07-19 增加 Python SDK 与 AI 工具接口首版，设计与演进边界见 `docs/python_api.md`。
+- 2026-07-19 增加 `/api/v1` 多会话、模型 revision/ETag、异步 PF/OPF 作业，以及对应 Python SDK 与 AI 工具层；设计边界见 `docs/python_api.md`。
 - 同步依据为当前 `CMakeLists.txt`、`CMakePresets.json`、`tests/CMakeLists.txt`、`src/`、`include/`、GUI 路由和 E2E 验证。
 - 如文档描述与代码行为冲突，以仓库实现为准：`src/`、`include/`、`tests/`、`CMake` 配置优先。
 
@@ -62,7 +62,7 @@ ctest --preset windows-vcpkg-release
 | EV-电力-交通耦合 | 已实现（持续扩展） | CTM/LTM 传播、Formulation A–H 联合优化家族、选址定容 MILP 与滚动时域 MPC；结果按“可证伪证书”口径区分全局最优/局部驻点/启发式。 |
 | SPPT 可执行理论层 | 已实现（研究验证性质） | 语义保持投影理论（`docs/latex/sppt_theory.tex`）的 MR1–MR8 证伪套件、MR3 证书语料（CSV/LaTeX）、准入守卫与 agent 循环。 |
 | Web GUI 服务 | 已集成可运行 | `run_gui_server` 为独立可执行服务，上述能力均经 HTTP API 暴露；前端为原生 JS 单页应用。 |
-| Python SDK 与 AI 工具层 | 首版已实现 | 零运行时依赖的类型化 HTTP 客户端、结果诚实性检查、隔离服务生命周期、工具 Schema、影响分级与显式变更批准。 |
+| Python SDK 与 AI 工具层 | v1 已实现 | `/api/v1` 独立会话、模型 revision/ETag、异步 PF/OPF 作业；Python 提供类型化客户端、结果诚实性检查、工具 Schema、影响分级与显式变更批准。 |
 
 ### 2) 依赖与功能开关状态（当前默认）
 
@@ -399,9 +399,11 @@ GUI 第一阶段统一契约包括：`hysim_task_status_v1`（任务状态、耗
 
 第二阶段任务执行层为所有主要分析请求分配 `X-HySim-Request-ID`，活动任务期间锁定运行按钮并提供“取消等待”。取消会中止浏览器请求、忽略该请求的后续结果，并轮询后端直到求解收尾；由于当前 C++ 求解器没有统一的取消令牌，这不是强制终止求解线程。模型版本在请求期间变化时，响应统一标记为 `stale` 且禁止进入 Dashboard 或 Canvas。
 
-第三阶段将共享前端基础设施从 `web/js/app.js` 拆分到 `web/js/core/`：`analysis_contracts.js` 维护分析端点和结果契约，`task_manager.js` 管理单活动任务、取消与后端收尾，`api_client.js` 统一请求 ID、错误和陈旧结果处理，`result_mapping.js` 维护 Dashboard 到 Canvas 的类型/索引映射。此后 `web/js/core/` 又扩展了 `timeseries_window.js`（长时序窗口化与保峰降采样）、`layout_graph.js` / `layout_engine.js`（布局语义投影与 ELK 异步布局客户端）、`accessibility.js`（键盘导航与可访问性审计）、`runtime_diagnostics.js`（前端运行时诊断）。`app.js` 只保留 UI 状态回调和薄适配层，`web/js/core/` 下 9 个脚本必须在 `app.js` 之前加载。
+第三阶段将共享前端基础设施从 `web/js/app.js` 拆分到 `web/js/core/`：`analysis_contracts.js` 维护分析端点和结果契约，`task_manager.js` 管理单活动任务、取消与后端收尾，`api_client.js` 统一请求 ID、错误和陈旧结果处理，`result_mapping.js` 维护 Dashboard 到 Canvas 的类型/索引映射。此后 `web/js/core/` 又扩展了 `timeseries_window.js`（长时序窗口化与保峰降采样）、`layout_graph.js` / `layout_engine.js`（布局语义投影与 ELK 异步布局客户端）、`accessibility.js`（键盘导航与可访问性审计）、`runtime_diagnostics.js`（前端运行时诊断）和 `network_overview.js`（WebGL2 全网 LOD 总览）。`app.js` 只保留 UI 状态回调和薄适配层，这些核心脚本必须在 `app.js` 之前加载。
 
-第四阶段针对中大型系统优化交互性能：Canvas 将连续鼠标移动合并到浏览器动画帧，并对视口外的元件和连接执行可逆裁剪。年度生产模拟按 7/30/90 天窗口浏览；选择全年时采用保留首尾及负荷极值的降采样，最多绘制 2000 点，同时保留完整原始序列供导出和后续分析使用。规模化 GUI E2E 对这些性能边界提供回归契约。
+第四阶段针对中大型系统优化交互性能：普通规模仍使用 SVG 单线图编辑，并将连续鼠标移动合并到浏览器动画帧、对视口外元件执行可逆裁剪；超过规模阈值时不再显示空白“无画布”摘要，而由 WebGL2 点/线缓冲绘制 LOD0 域、LOD1 区域和 LOD2 母线全网总览，同时保持 SVG glyph 数为零。WebGL、局部 k 跳 SVG、虚拟拓扑表和结果导航统一使用 `{domain,index}` 母线引用。年度生产模拟按 7/30/90 天窗口浏览；选择全年时采用保留首尾及负荷极值的降采样，最多绘制 2000 点，同时保留完整原始序列供导出和后续分析使用。规模化 GUI E2E 对 WebGL 非空像素、选择同步、局部 SVG 和这些性能边界提供回归契约。
+
+`/api/v1` 为大模型客户端提供后端分块：`sessions/{id}/topology` 支持 LOD、空间视口和分页，`sessions/{id}/subgraph` 按稳定母线引用提取有界邻域，`jobs/{id}/frames/{step}` 按时间/域/稳定索引/空间返回结果窗口，`jobs/{id}/violations` 返回最严重电压与负载率越限。静态 PF/OPF 使用第 0 帧，后续生产模拟沿同一帧协议扩展多时步。
 
 第五阶段补齐工程界面的可访问性：工作流、模块和页签采用 roving-tabindex 键盘导航，支持方向键、Home/End，提供主工作区跳转、清晰焦点环、对话框语义、控制台播报、减少动画和高对比度偏好。`hysim_accessibility_audit_v1` 会检查关键地标、导航和控件名称。
 
@@ -454,7 +456,8 @@ fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到
 | 弹性恢复 | `include/hacdcpf/resilience/resilience_assessment.hpp`, `src/resilience/` |
 | I/O | `include/hacdcpf/io/`, `src/io/`（JSON、MATPOWER、CIM、GridLAB-D、PSD.jl；ETAP/OpenDSS 可选） |
 | 并行工具 | `include/hacdcpf/util/thread_pool.hpp`（`ThreadPool`、`parallel_for`） |
-| GUI 后端服务 | `tests/run_gui_server.cpp`（独立可执行，HTTP API + 静态挂载 `web/`） |
+| GUI 后端服务 | `tests/run_gui_server.cpp`（独立可执行，旧 GUI API + 静态挂载 `web/`） |
+| v1 运行时 API | `src/server/runtime_api_v1.hpp`, `src/server/runtime_api_v1.cpp`（多会话、ETag、异步作业） |
 | Python SDK / AI 工具层 | `python/src/hysim/`（类型化客户端、可替换传输、结果口径、工具策略与本地服务生命周期） |
 | Diagnostics/benchmarks | `tools/`（`opendss_pf_compare`、`etap_convert`、`matpower_pf_compare`、`sppt_certify`/`sppt_ablation`/`sppt_benchmark`/`sppt_agent_demo`、`hybrid_acdc_pf_study`、`phase_graph_reduction_benchmark`、`phase_hybrid_opf_benchmark`、gridlabd/transient/short-circuit validation matrices 等） |
 | 文档索引 | `docs/README.md` |

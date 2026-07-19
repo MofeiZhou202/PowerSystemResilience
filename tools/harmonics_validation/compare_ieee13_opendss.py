@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""IEEE13 multi-bus harmonic penetration cross-check vs OpenDSS.
+"""Multi-bus feeder harmonic penetration cross-check vs OpenDSS.
 
 Runs tools/harmonics_validation/validate_harmonics_ieee13 (hacdcpf 3ph HPF on
-the real IEEE13 feeder) and replays the identical balanced current injections
+a real OpenDSS feeder) and replays the identical balanced current injections
 in OpenDSS harmonic mode (three single-phase ISources per order at the same
 bus), then compares per-order per-phase complex bus voltages.
 
 Usage:
   tools/harmonics_validation/.venv/bin/python \
-      tools/harmonics_validation/compare_ieee13_opendss.py [--out report.json]
+      tools/harmonics_validation/compare_ieee13_opendss.py \
+      [--dss feeder.dss] [--bus 675] [--i-ref-amps 100] [--out report.json]
 """
 from __future__ import annotations
 
@@ -23,8 +24,8 @@ from pathlib import Path
 import opendssdirect as dss
 
 REPO = Path(__file__).resolve().parents[2]
-DSS_FILE = (REPO / "external_data/opendss_ieee_pes/opendss_reference/13_node" /
-            "official_full/IEEE13Nodeckt.dss")
+DEFAULT_DSS = (REPO / "external_data/opendss_ieee_pes/opendss_reference/13_node" /
+               "official_full/IEEE13Nodeckt.dss")
 CPP_BIN = REPO / "build/macos-release/tests/validate_harmonics_ieee13"
 ORDERS = [5, 7, 11, 13]
 SPECTRUM = {5: 20.0, 7: 100.0 / 7.0, 11: 100.0 / 11.0, 13: 100.0 / 13.0}
@@ -43,8 +44,9 @@ def run_dss(cmd: str) -> None:
     dss.Text.Command(cmd)
 
 
-def opendss_harmonic_voltages() -> dict[int, dict[str, dict[int, complex]]]:
-    """Solve OpenDSS harmonic mode with ISource injections at SRC_BUS.
+def opendss_harmonic_voltages(dss_file: Path, src_bus: str,
+                              i_ref_amps: float) -> dict[int, dict[str, dict[int, complex]]]:
+    """Solve OpenDSS harmonic mode with ISource injections at src_bus.
 
     OpenDSS reports bus voltages only for the most recently solved harmonic,
     so each order is solved and sampled separately.
@@ -52,7 +54,7 @@ def opendss_harmonic_voltages() -> dict[int, dict[str, dict[int, complex]]]:
     """
     dss.Basic.ClearAll()
     run_dss("clear")
-    run_dss(f'compile "{DSS_FILE}"')
+    run_dss(f'compile "{dss_file}"')
     run_dss("solve mode=snap")
     # match hacdcpf study: loads excluded from the harmonic network
     run_dss("disable load.*")
@@ -61,12 +63,12 @@ def opendss_harmonic_voltages() -> dict[int, dict[str, dict[int, complex]]]:
     # ExternalGrid stamping on the hacdcpf side.
     # one ISource per order per phase, each at its own harmonic frequency
     for order in ORDERS:
-        mag = I_REF_AMPS * SPECTRUM[order] / 100.0
+        mag = i_ref_amps * SPECTRUM[order] / 100.0
         ang = sequence_angles(order)
         for ph in (1, 2, 3):
             run_dss(
                 f"new isource.inj_h{order}_p{ph} phases=1 "
-                f"bus1={SRC_BUS}.{ph} amps={mag:.17g} "
+                f"bus1={src_bus}.{ph} amps={mag:.17g} "
                 f"angle={ang[ph - 1]:.17g} frequency={60.0 * order:.17g}")
     run_dss("set mode=harmonic")
     out: dict[int, dict[str, dict[int, complex]]] = {}
@@ -86,18 +88,21 @@ def opendss_harmonic_voltages() -> dict[int, dict[str, dict[int, complex]]]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--dss", type=Path, default=DEFAULT_DSS)
+    ap.add_argument("--bus", type=str, default="675")
+    ap.add_argument("--i-ref-amps", type=float, default=100.0)
     ap.add_argument("--out", type=Path, default=None)
-    ap.add_argument("--i-ref-amps", type=float, default=I_REF_AMPS)
     args = ap.parse_args()
+    args.dss = args.dss.resolve()  # loader requires an absolute master path
 
-    with tempfile.TemporaryDirectory(prefix="ieee13_hpf_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="feeder_hpf_") as tmp:
         hy_path = Path(tmp) / "hy.json"
         subprocess.run(
-            [str(CPP_BIN), str(DSS_FILE), SRC_BUS, str(args.i_ref_amps),
+            [str(CPP_BIN), str(args.dss), args.bus, str(args.i_ref_amps),
              str(hy_path)], check=True)
         hy = json.loads(hy_path.read_text())
         dss.Basic.DataPath(tmp)
-        od = opendss_harmonic_voltages()
+        od = opendss_harmonic_voltages(args.dss, args.bus, args.i_ref_amps)
 
     # per-bus base kV (line-neutral, as reported by OpenDSS) for pu conversion
     kvbase: dict[str, float] = {}
@@ -131,8 +136,8 @@ def main() -> int:
                              "od_ang": math.degrees(cmath.phase(od_v)),
                              "err_pu": err})
 
-    report = {"feeder": DSS_FILE.name,
-              "source_bus": SRC_BUS,
+    report = {"feeder": args.dss.name,
+              "source_bus": args.bus,
               "i_ref_amps": args.i_ref_amps,
               "orders": ORDERS,
               "n_points": len(rows),
@@ -143,7 +148,7 @@ def main() -> int:
     if args.out:
         args.out.write_text(text + "\n")
         print(f"wrote {args.out}")
-    print(f"IEEE13 harmonic penetration vs OpenDSS: n={len(rows)} points, "
+    print(f"{args.dss.name} harmonic penetration vs OpenDSS: n={len(rows)} points, "
           f"max |dV| = {max_err:.3e} pu")
     for r in report["worst"][:5]:
         print(f"  {r['bus']:>10}.{r['node']} h{r['order']:>2}: "
