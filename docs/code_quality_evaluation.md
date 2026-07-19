@@ -357,3 +357,26 @@ HybridACDC `optimal_power_flow` side (sibling repo, same investigation):
   configure enforces a clean-tree pin on the sibling MIPSolvers checkout
   (dirty = FATAL by design).  Parity-side validation used a probe binary
   linking the Release `libhacdcpf.a` recompiled with the same flags.
+
+### Phase-5 globalization slice (HybridACDC parity IPM, measured)
+
+Derivations and the per-mechanism evidence: `numerical_methods.md` §9.5.
+
+| # | Item | Status |
+|---|---|---|
+| P1 | Second-order correction (SOC) in the filter | ✅ on rejection with θ_trial > θ_k, re-solve with `rhs_eq ← −(α·rg + rg_trial)`, composite step once/iter. case13659: 251→377 iters before stall |
+| P2 | Iterative-refinement divergence guard | ✅ correction applied only if it provably shrinks the residual — killed the ‖d‖~1e85 blow-ups in the rte endgame |
+| P3 | Corrector re-centering | ✅ γ ← max(γ, μ_cur/2), ≤2 retries, triggered at ftb α < 1e-9 (μ-collapse detector) |
+| P4 | Catastrophe guard | ✅ no acceptance path may worsen grad/comp >100× (was: comp 1.1e-3→7.6e8 accepted → μ blew to 1e9) |
+| P5 | Acceptable-level termination | ✅ best-iterate acceptance now implements the documented relaxation (Ipopt convention 100× tol, honest status string) — previously the comment said "10×" but the code applied 1× |
+| P6 | Outcomes | case1951rte **converged at optimum** (81737.8); case1888rte converged-acceptable at 27224.8 (bad basin; pre-guard trajectory once saw 59790.2 — knife-edge basin sensitivity, documented in §9.5(c)); case1354 cured (74069.4, 31× Ipopt time); small sweep unchanged; case13659 best obj 1.17e6, still not converged — remaining gap is architectural (restoration phase / (θ,φ) barrier-merit filter), see §9.5 |
+
+### Validation (Phase 5)
+
+- All changes are in the sibling HybridACDC `optimal_power_flow/parity_ipm.cpp`
+  (probe-linked against Release `libhacdcpf.a` with identical flags; the
+  Release configure there still requires a clean MIPSolvers tree to re-run
+  their ctest suite).
+- Sweep after the slice: case14/30/39/57/118/300 converged at known optima;
+  case1354 converged (113 iters, 2.2 s); rte cases as in P6.
+- MIPSolvers side untouched by this slice; `ctest -L unit` remains 10/10.

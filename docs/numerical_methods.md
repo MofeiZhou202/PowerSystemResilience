@@ -370,41 +370,62 @@ regularize blindly.  Free per-iteration inertia is a first-order
 algorithmic advantage of symmetric-indefinite factorization for interior
 point methods, not an implementation detail.
 
-### 9.5 Remaining gap: filter globalization in the mid/endgame
+### 9.5 Globalization in the mid/endgame: mechanisms added and what they did
 
-With 9.1–9.3 fixed, the large cases fail *differently* — and the failure
-mode moved from the linear algebra to the globalization:
+With 9.1–9.3 fixed, the large cases fail *differently* — the failure moved
+from the linear algebra to the globalization.  Trajectory instrumentation
+(MUMPS pivot counts, direction norms, per-trial filter axes) isolated three
+distinct endgame mechanisms; for each, the standard theory remedy was
+implemented and measured.  Outcomes are honest: some cure, some only move
+the stall.
 
-- **case13659** (augmented + MUMPS + δ_W persistence): progresses steadily
-  (obj 1.69e7 → 1.38e7 at the 640-iteration cap, → **1.17e6 when the filter
-  stalls at iter 251**, 149 s ≈ 0.59 s/iter).  The Newton direction is now
-  good — α ≈ 1–2% fraction-to-boundary steps are accepted without
-  backtracking — but convergence is crawl-rate and the filter's strict
-  progress test `(1−ηα)` eventually rejects every trial.
-- **case1888rte**: reaches feas 2.1e-5 / grad 4e-6 / comp 1.5e-4 (essentially
-  the endgame, obj within 4% of the MATPOWER optimum) and the same strict
-  progress test fails the last few iterations.  A best-iterate restoration
-  exists but — despite its comment saying "10× tolerance" — currently
-  applies the *same* strict tolerances as the main loop.
+**(a) Maratos rejection — second-order correction (SOC).**  When the first
+trial is rejected with θ_trial > θ_k, re-solve the same factorization with
+`rhs_eq ← −(α·rg + rg(x+αdx))` and try the composite step once per
+iteration (Wächter–Biegler §3.2; mirrors the engine IPM's
+`use_second_order_correction`).  case13659: 251 → 377 iterations before the
+stall, same final objective — more progress per unit regularization, no
+cure.
 
-Derivation of the stall: the filter accepts a step only if some axis
-improves by `(1−ηα)` with ≤2% degradation on the others.  Near a solution
-(or on a slow tail), the true Newton decrement is smaller than the step's
-own rounding/linearization error, so no α passes — this is the classic
-Maratos-adjacent regime that **second-order correction (SOC)** was designed
-for (Wächter–Biegler §3.2): on rejection, re-solve the same factorization
-with the equality residual re-evaluated at the trial point
-(`rhs₂ ← −(rg + rg_trial)`), which cancels the Maratos increase at
-back-solve cost.  Failing that, Ipopt's **restoration phase** (minimize
-‖θ‖ with bound-relaxing slack variables) is the standard fallback; the
-parity IPM has neither yet.  Per-iteration cost is now ~55% MUMPS
-factor+solve and ~25% triplet re-assembly + per-iteration Ruiz rescaling —
-the engine's analyze-once scatter-map assembly (§4) is the documented way
-to remove the latter.
+**(b) Direction blow-up — re-centering + refinement guard.**  Near the
+barrier boundary κ(KKT) ~ 1/μ; at the stall the solved direction reached
+‖d‖ ~ 1e85, so even α = 1e-10 trials exploded (residuals ~1e75).  Two
+defects compounded: iterative refinement with no divergence guard
+(amplifies near-null-space noise — now applies a correction only when it
+provably shrinks the residual), and μ-collapse past the useful limit —
+the corrector now re-centers (γ ← max(γ, μ_cur/2), ≤2 retries) when the
+fraction-to-boundary limit drops below 1e-9.  The 1e85 blow-ups are gone;
+trajectories changed but the stall itself is not removed.
 
-**Phase-4 status.**  case1354pegase is *cured* (converges to Ipopt's
-objective, 31× faster than Ipopt); case13659pegase is improved 12× in
-final objective and 3× in time-to-best-point but does not yet converge;
-the rte cases die in the endgame within ~4% of the optimum.  Next
-mechanisms, in order of expected leverage: SOC in the filter, honest
-10× best-iterate acceptance, restoration, scatter-map assembly.
+**(c) Poisoned acceptance — catastrophe guard + acceptable termination.**
+The filter's feasibility axis accepted steps regardless of dual-axis
+damage (comp 1.1e-3 → 7.6e8 accepted at rte iter 104, blowing μ to 1e9
+and killing the run).  Every acceptance path now requires
+grad/comp ≤ 100× current.  And the best-iterate restoration — whose
+comment promised "10× tolerance" but applied 1× — now implements
+Ipopt's acceptable-level convention: 100× primal/dual tolerance with
+complementarity inside comp_tol, reported honestly as
+`converged (acceptable tolerance, best iterate)`.
+
+**Measured outcomes (final build).**  case1951rte converges at obj
+81737.8 (the MATPOWER optimum).  case1888rte converges *acceptably* at
+obj 27224.8 — a valid KKT-acceptable point but a worse basin than the
+59790.2 its pre-guard trajectory once touched: on knife-edge nonconvex
+cases, step-level changes shift basins chaotically; the guards are kept
+because accepting 6-orders-of-magnitude axis damage or refinement-diverged
+noise is indefensible even when luck once made it useful.  case1354pegase
+remains cured.  Small-case sweep unchanged.
+
+**What remains open.**  case13659 progresses steadily (best obj 1.17e6)
+but does not converge: its midgame crawl (α ~ 1–2% fraction-to-boundary)
+outruns the iteration budget.  The mechanisms that would close this are
+architectural, not local: a restoration phase (Ipopt-style infeasibility
+minimization with bound-relaxing slacks) for when the filter fails, and
+a (θ, φ) merit filter whose φ is the *barrier objective* — the Newton
+direction is descent on φ by construction with correct inertia, whereas
+descent on the raw stationarity axis used here is not guaranteed at
+κ ~ 1/μ.  That is the principled explanation for why Ipopt's filter
+terminates these cases and this one does not, and it is the next slice.
+Per-iteration cost is now ~55% MUMPS factor+solve, ~25% triplet
+re-assembly + per-iteration Ruiz rescaling (the engine's scatter-map
+assembly, §4, is the documented removal), ~20% model evaluations.
