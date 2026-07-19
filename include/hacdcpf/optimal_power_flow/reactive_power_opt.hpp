@@ -92,6 +92,15 @@ struct RPOOptions {
   // IEEE24-3area-expanded); easy cases finish far earlier and never consume
   // the budget.
   int    max_ipm_iter{2000};
+  /// Fail-fast iteration cap for SEARCH evaluations (not the baseline).  A
+  /// warm-chained perturbation that is a *good* candidate converges in a few
+  /// iterations (measured 2–7 at 3000 buses); a candidate that grinds far past
+  /// this cap is a bad/infeasible one, and the discrete search is better off
+  /// rejecting it (obj = infeasible) than burning ~max_ipm_iter iterations on
+  /// it — a single such grind (~150 s at 2000 iters) overruns the whole RPO
+  /// time budget because the budget can only be checked *between* solves.
+  /// Set ≤ 0 to leave search evaluations uncapped (use max_ipm_iter).
+  int    search_ipm_iter{200};
   double ipm_tol{1e-6};
   /// Scaled KKT stationarity tolerance.  Kept separate from physical
   /// feasibility because large OPF objectives require a looser dual target.

@@ -29,10 +29,28 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <numeric>
 #include <vector>
+
+namespace {
+// Env-gated phase timer for RPO wall-clock decomposition (HACDCPF_RPO_PROF=1).
+bool rpo_prof_enabled() {
+  static const bool v = std::getenv("HACDCPF_RPO_PROF") != nullptr;
+  return v;
+}
+void rpo_phase_log(const char* label,
+                   std::chrono::steady_clock::time_point t0) {
+  if (!rpo_prof_enabled()) return;
+  const double s = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - t0).count();
+  std::fprintf(stderr, "[rpo-prof] %-28s elapsed %.1fs\n", label, s);
+}
+}  // namespace
+
 
 namespace hacdcpf::opf {
 
@@ -296,7 +314,9 @@ ACOPFResult solve_opf_inplace(
     const std::vector<int>& orig_tap_pos,
     const std::vector<int>& orig_shunt_steps,
     const RPOOptions& rpo_opt,
-    const ACOPFResult* warm_start)
+    const ACOPFResult* warm_start,
+    int ipm_iter_cap = 0,      // 0 → rpo_opt.max_ipm_iter (full budget, e.g. baseline)
+    bool allow_second_leg = true)  // false → fail-fast (skip the slow Ipopt retry)
 {
   apply_settings(mut_sys, taps, tap_pos, shunts, shunt_steps);
 
@@ -327,7 +347,8 @@ ACOPFResult solve_opf_inplace(
   opf_opt.voltage_target_pu = rpo_opt.v_target;
   opf_opt.voltage_deviation_weight = rpo_opt.vdev_weight;
   opf_opt.active_loss_weight = rpo_opt.loss_weight;
-  opf_opt.max_inner_iterations = rpo_opt.max_ipm_iter;
+  opf_opt.max_inner_iterations =
+      (ipm_iter_cap > 0) ? ipm_iter_cap : rpo_opt.max_ipm_iter;
   opf_opt.max_outer_iterations = 1;
   opf_opt.feasibility_tol = rpo_opt.ipm_tol;
   opf_opt.stationarity_tol = rpo_opt.stationarity_tol;
@@ -355,7 +376,12 @@ ACOPFResult solve_opf_inplace(
            (rr.max_constraint_violation <= rpo_opt.ipm_tol &&
             rr.max_stationarity <= rpo_opt.stationarity_tol);
   };
-  if (!measured_ok(r)) {
+  // Fail-fast (search evaluations): a bad candidate the parity IPM cannot
+  // solve within the cap is rejected outright instead of being retried with
+  // the embedded Ipopt — which is far slower per iteration on large grids
+  // (~0.76 s/iter at 2869) and, run to the cap, single-handedly overruns the
+  // RPO time budget.  The baseline keeps the second leg for robustness.
+  if (!measured_ok(r) && allow_second_leg) {
     opf_opt.ac_solver_backend =
         (opf_opt.ac_solver_backend == ACOPFSolverBackend::ParityIPM)
             ? ACOPFSolverBackend::Ipopt
@@ -513,6 +539,23 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
   RPOOptions opt = opt_in;
   RPOResult out;
   const auto t0 = std::chrono::steady_clock::now();
+  if (rpo_prof_enabled()) {
+    std::fprintf(stderr, "[rpo-prof] time_limit=%.1fs max_nodes=%d\n",
+                 opt.time_limit_sec, opt.max_nodes);
+  }
+  // Hybrid AC/DC vs pure-AC: the parity IPM is reliable on pure-AC inner
+  // solves (KLU on the network KKT), so the second (Ipopt) leg only ever fires
+  // on genuinely bad candidates there — skip it and fail fast.  On hybrid
+  // AC/DC the parity IPM can walk away from a nearly-converged voltage-
+  // deviation point, and the embedded Ipopt second leg is what rescues those
+  // candidates — keep it.  This mirrors the pure_ac split in the parity IPM
+  // and is what makes fail-fast safe on 3000+-bus pure-AC grids without
+  // regressing hybrid cases (measured: IEEE24-expanded vdev relies on the
+  // second leg; case2869's slow Ipopt leg was the budget-overrun culprit).
+  const bool is_hybrid = !sys.dc.buses.empty() || !sys.dc.branches.empty() ||
+                         !sys.vsc_converters.empty() ||
+                         !sys.dc.dcdc_converters.empty() ||
+                         !sys.energy_routers.empty();
 
   const auto taps   = collect_taps(sys, opt);
   const auto shunts = collect_shunts(sys);
@@ -640,12 +683,14 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
         ++out.nlp_solves;
       }
       apply_settings(mut_sys, taps, orig_tp, shunts, orig_ss);
+      rpo_phase_log("seed (direct+homotopy)", t0);
     }
     // ── Baseline AC OPF ("before" state) ──
     base_r = solve_opf_inplace(mut_sys, taps, base_tp, shunts, base_ss,
                                orig_tp, orig_ss, opt,
                                economic_seed.converged ? &economic_seed
                                                        : nullptr);
+    rpo_phase_log("baseline solve", t0);
     out.nlp_solves += use_economic_seed ? 2 : 1;
     // Baseline acceptance: on asymptotically hard cases the inner solver can
     // exhaust its iteration budget while sitting at a point that already
@@ -756,11 +801,18 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
     if (it != eval_cache.end()) return it->second;
     if (!budget_ok()) return 1e30;
 
+    // Fail-fast applies ONLY to pure-AC grids: there the parity IPM (KLU) is
+    // reliable, so a candidate that grinds is simply bad and is rejected at the
+    // search cap with no second leg.  Hybrid AC/DC keeps the full budget and
+    // the Ipopt second leg — its vdev asymptote legitimately needs it.
+    const int eval_cap = is_hybrid ? 0 : opt.search_ipm_iter;
     ACOPFResult r = solve_opf_inplace(mut_sys, taps, tp,
                                       shunts, ss,
                                       orig_tp, orig_ss, opt,
                                       incumbent_result.converged
-                                          ? &incumbent_result : nullptr);
+                                          ? &incumbent_result : nullptr,
+                                      eval_cap,
+                                      /*allow_second_leg=*/is_hybrid);
     ++out.nlp_solves;
     ++out.nodes_explored;
 
@@ -835,6 +887,7 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
   std::vector<int> var_order;
   for (const auto& se : sensitivities)
     var_order.push_back(se.var_idx);
+  rpo_phase_log("phase0 sensitivity", t0);
 
   // ─── Phase 1: Ternary-search sweep per variable ───────────────
   //
@@ -883,6 +936,7 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
       evaluate(sweep_tp, sweep_ss);
     }
   }
+  rpo_phase_log("phase1 ternary", t0);
 
   // ─── Phase 2: Coordinate descent ──────────────────────────────
   //
@@ -922,6 +976,7 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
     }
     if (!improved_this_cycle) break;
   }
+  rpo_phase_log("phase2 coord-descent", t0);
 
   // ─── Phase 3: Pairwise neighbourhood polishing ────────────────
   //
@@ -953,6 +1008,7 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
       }
     }
   }
+  rpo_phase_log("phase3 pairwise", t0);
 
   // ── Fill results ──
   if (incumbent_obj < 1e20) {
