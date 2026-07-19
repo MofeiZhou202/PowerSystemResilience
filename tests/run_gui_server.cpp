@@ -18192,7 +18192,7 @@ int main(int argc, char** argv) {
         rpo_opt.gap_tol        = j.value("mip_gap", 0.01);
         rpo_opt.time_limit_sec = j.value("time_limit_s", 120.0);
         rpo_opt.max_nodes      = std::max(1, j.value("max_evaluations", 50000));
-        rpo_opt.max_ipm_iter   = std::max(1, j.value("max_ipm_iter", 400));
+        rpo_opt.max_ipm_iter   = std::max(1, j.value("max_ipm_iter", 2000));
         rpo_opt.ipm_tol        = std::max(1e-12, j.value("ipm_tol", 1e-6));
         rpo_opt.stationarity_tol =
             std::max(1e-12, j.value("stationarity_tol", 1e-3));

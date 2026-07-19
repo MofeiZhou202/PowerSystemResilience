@@ -2,6 +2,7 @@
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/engine/branch_and_cut.hpp"
+#include "hacdcpf/optimal_power_flow/opf_options.hpp"
 #include "hacdcpf/optimal_power_flow/opf_result.hpp"
 #include <string>
 #include <vector>
@@ -43,11 +44,23 @@ struct RPOOptions {
   engine::NodeSelection     node_sel{engine::NodeSelection::Hybrid};
 
   // ---- Inner IPM (NLP relaxation) parameters ----
-  int    max_ipm_iter{400};
+  // Budget cap for each inner solve (does not force iterations).  Stiff
+  // hybrid AC/DC baselines need ~2000 iterations for embedded Ipopt to reach
+  // ipm_tol (measured: viol 5.2e-6 at 400 → 4.7e-8 at 2000 on
+  // IEEE24-3area-expanded); easy cases finish far earlier and never consume
+  // the budget.
+  int    max_ipm_iter{2000};
   double ipm_tol{1e-6};
   /// Scaled KKT stationarity tolerance.  Kept separate from physical
   /// feasibility because large OPF objectives require a looser dual target.
   double stationarity_tol{1e-3};
+
+  /// Backend for every inner AC OPF evaluation (baseline + sensitivity
+  /// planes).  The native parity IPM is the default: it converges the stiff
+  /// hybrid AC/DC cases where the embedded Ipopt exhausts its iteration
+  /// budget (measured on IEEE24-3area-expanded), at a fraction of the time.
+  /// Set to Ipopt for bit-exact comparison with older results.
+  ACOPFSolverBackend inner_solver_backend{ACOPFSolverBackend::ParityIPM};
 
   /// Limit each selected OLTC to this many positions above/below its current
   /// position.  A negative value exposes the full nameplate range; zero holds

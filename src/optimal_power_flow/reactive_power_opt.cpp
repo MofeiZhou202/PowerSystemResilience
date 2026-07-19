@@ -301,7 +301,9 @@ ACOPFResult solve_opf_inplace(
   apply_settings(mut_sys, taps, tap_pos, shunts, shunt_steps);
 
   ACOPFOptions opf_opt;
-  opf_opt.ac_solver_backend = ACOPFSolverBackend::Ipopt;
+  // Inner backend is configurable (ParityIPM default — converges the stiff
+  // hybrid AC/DC cases where embedded Ipopt exhausts its iteration budget).
+  opf_opt.ac_solver_backend = rpo_opt.inner_solver_backend;
   opf_opt.enable_primal_dual = true;
   opf_opt.use_parity_ipm     = true;
   opf_opt.allow_fallback     = true;
@@ -329,6 +331,33 @@ ACOPFResult solve_opf_inplace(
   opf_opt.verbose = rpo_opt.verbose;
 
   ACOPFResult r = solve_ac_opf(mut_sys, opf_opt);
+
+  // Hard-case second leg: when the primary backend neither converges nor
+  // meets RPO's measured tolerances, retry with the other backend and keep
+  // the better-measured point.  The two backends fail in opposite regimes on
+  // stressed hybrid AC/DC cases: the parity IPM can walk away from a nearly
+  // converged point on the voltage-deviation objective (small-KKT unsupervised
+  // path), while embedded Ipopt can asymptote at max-iterations on the same
+  // problem yet already sit inside RPO's tolerances — so the better of the
+  // two is problem-dependent and must be picked by measurement, not status.
+  const auto measured_ok = [&](const ACOPFResult& rr) {
+    return rr.converged ||
+           (rr.max_constraint_violation <= rpo_opt.ipm_tol &&
+            rr.max_stationarity <= rpo_opt.stationarity_tol);
+  };
+  if (!measured_ok(r)) {
+    opf_opt.ac_solver_backend =
+        (opf_opt.ac_solver_backend == ACOPFSolverBackend::ParityIPM)
+            ? ACOPFSolverBackend::Ipopt
+            : ACOPFSolverBackend::ParityIPM;
+    ACOPFResult r2 = solve_ac_opf(mut_sys, opf_opt);
+    const auto quality = [](const ACOPFResult& rr) {
+      return std::max(rr.max_constraint_violation, rr.max_stationarity);
+    };
+    if (measured_ok(r2) || quality(r2) < quality(r)) {
+      r = std::move(r2);
+    }
+  }
 
   // Restore original settings so mut_sys is clean for next call
   apply_settings(mut_sys, taps, orig_tap_pos, shunts, orig_shunt_steps);
@@ -552,12 +581,30 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
                                               ? &economic_seed : nullptr);
   out.nlp_solves = use_economic_seed ? 2 : 1;
   out.baseline_opf = base_r;
-  if (!base_r.converged) {
+  // Baseline acceptance: on asymptotically hard cases (stiff hybrid AC/DC)
+  // the inner solver can exhaust its iteration budget while sitting at a
+  // point that already satisfies RPO's own tolerances — e.g. embedded Ipopt
+  // reports "Max iterations exceeded" at viol 5e-8 / stat 2.7e-6 on the
+  // IEEE24-expanded vdev problem, which is inside ipm_tol/stationarity_tol.
+  // Rejecting such a point by the raw status flag would make RPO unusable on
+  // exactly the stressed cases it exists for, so accept measured-tolerance
+  // convergence and record it honestly in the status.
+  const bool baseline_ok =
+      base_r.converged ||
+      (base_r.max_constraint_violation <= opt.ipm_tol &&
+       base_r.max_stationarity <= opt.stationarity_tol);
+  if (!baseline_ok) {
     out.status = "Baseline AC OPF failed: " + base_r.status;
     out.runtime_sec = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();
     return out;
   }
+  const std::string baseline_note =
+      base_r.converged ? ""
+                       : " [baseline accepted at measured tolerance: viol " +
+                             std::to_string(base_r.max_constraint_violation) +
+                             ", stat " +
+                             std::to_string(base_r.max_stationarity) + "]";
   out.vm_before            = base_r.vm;
   out.va_before            = base_r.va;
   out.qg_mvar_before       = base_r.qg_mvar;
@@ -634,7 +681,12 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
     ++out.nodes_explored;
 
     double obj = 1e30;
-    if (r.converged) {
+    // Same measured-tolerance acceptance as the baseline (see above): on
+    // asymptotically hard cases the inner solver's status can read
+    // max-iterations at points already inside RPO's own tolerances.
+    if (r.converged ||
+        (r.max_constraint_violation <= opt.ipm_tol &&
+         r.max_stationarity <= opt.stationarity_tol)) {
       obj = rpo_objective(r, sys, opt);
       if (obj < incumbent_obj) {
         incumbent_obj    = obj;
@@ -838,6 +890,7 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
       out.status = "Feasible incumbent at evaluation limit";
     else
       out.status = "Feasible local optimum (heuristic search)";
+    out.status += baseline_note;
     out.gap = 1.0;
   } else {
     out.converged = false;

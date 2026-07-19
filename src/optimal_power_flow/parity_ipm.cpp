@@ -1464,7 +1464,13 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     // three filter axes.  Enable the more expensive globalization where the
     // KKT is large enough for that undamped behavior to become brittle.
     constexpr int kLargeKktFilterThreshold = 512;
-    const bool use_residual_filter = kkt_dim >= kLargeKktFilterThreshold;
+    // HACDCPF_OPF_FILTER_ALL=1 forces the residual filter on regardless of
+    // KKT size: small-but-stiff systems (e.g. hybrid AC/DC with ~250-pu line
+    // conductances) diverge on the unsupervised full-step path even though
+    // their dimension is below the historical 512 cutoff.
+    const bool use_residual_filter =
+        kkt_dim >= kLargeKktFilterThreshold ||
+        std::getenv("HACDCPF_OPF_FILTER_ALL") != nullptr;
     const bool strict_theta_filter =
         std::getenv("HACDCPF_OPF_STRICT_THETA") != nullptr;
     bool step_accepted = false;

@@ -158,6 +158,14 @@ set(MIPSOLVERS_USE_GUROBI ${HACDCPF_USE_GUROBI} CACHE BOOL
     "Enable Gurobi detection in MIPSolvers when available" FORCE)
 set(MIPSOLVERS_USE_PAPILO ${_hacdcpf_use_papilo} CACHE BOOL
     "Enable PaPILO presolve in MIPSolvers when available" FORCE)
+# MUMPS must be built from the vendored in-tree sources — a cached
+# MIPSOLVERS_FORCE_BUILD_MUMPS=OFF from an earlier configure silently links
+# the Homebrew MUMPS 5.6.2 dylib while compiling against 5.7.3 headers
+# (ABI mismatch → garbage KKT solves, OPF fails at iter ~3).  The deployment
+# environment has no network and no Homebrew, so the from-source build is
+# the only supported configuration.
+set(MIPSOLVERS_FORCE_BUILD_MUMPS ON CACHE BOOL
+    "Build MUMPS from vendored in-tree sources (offline; no Homebrew)" FORCE)
 
 set(MIPSOLVERS_BUILD_LOCAL_IPOPT ${HACDCPF_ENABLE_IPOPT} CACHE BOOL
     "Build embedded Ipopt from MIPSolvers/ipopt when supported" FORCE)
