@@ -434,6 +434,7 @@ target_link_libraries(dmumps PUBLIC
   "$<$<PLATFORM_ID:Darwin>:-framework Accelerate>")
 if(CMAKE_Fortran_IMPLICIT_LINK_LIBRARIES)
   target_link_libraries(dmumps PUBLIC ${CMAKE_Fortran_IMPLICIT_LINK_LIBRARIES})
+  target_link_directories(dmumps PUBLIC ${CMAKE_Fortran_IMPLICIT_LINK_DIRECTORIES})
 endif()
 
 if(TARGET mipsolvers_fortran_main_stub)
