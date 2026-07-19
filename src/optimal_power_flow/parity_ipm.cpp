@@ -388,9 +388,22 @@ bool factor_assembled_kkt(SparseKKTCache& cache,
   cache.kkt.makeCompressed();
 
   // Equilibrate: replace K with D·K·D so the factorization sees a balanced
-  // matrix.  The scaling is undone around each solve (see kkt_solve_sparse).
-  cache.scale = compute_ruiz_scaling(cache.kkt);
-  ++cache.scaling_rebuilds;
+  // matrix.  The scaling is computed ONCE per solve and frozen by default:
+  // rebuilding the equilibration every iteration lets the extreme −z/μ
+  // ratios swing the row norms by orders of magnitude, which jitters the
+  // effective Newton direction on stiff (hybrid AC/DC) KKTs and shows up as
+  // a feasibility limit cycle above the tolerance (root cause of the
+  // IEEE24-3area-expanded OPF stall: 640 iters → 36 with frozen scaling).
+  // HACDCPF_OPF_RESCALE_PER_ITER=1 restores the old per-iteration rebuild.
+  const bool freeze_scaling = []() {
+    static const bool v =
+        std::getenv("HACDCPF_OPF_RESCALE_PER_ITER") == nullptr;
+    return v;
+  }();
+  if (!freeze_scaling || cache.scale.size() != dim) {
+    cache.scale = compute_ruiz_scaling(cache.kkt);
+    ++cache.scaling_rebuilds;
+  }
   for (int col = 0; col < cache.kkt.outerSize(); ++col) {
     for (Eigen::SparseMatrix<double>::InnerIterator it(cache.kkt, col); it; ++it) {
       it.valueRef() *= cache.scale[it.row()] * cache.scale[it.col()];
@@ -1081,7 +1094,19 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
       // the factorization is accepted as-is (the pre-augmentation policy).
       bool factor_ok = false;
       const double lxx_norm = std::max(1.0, Lxx.coeffs().cwiseAbs().maxCoeff());
-      const double delta_c = 1e-8 * lxx_norm;
+      // δ_C for the (2,2) equality block.  The regularized saddle system
+      // permits equality residuals of order δ_C·‖λ_eq‖ — with stiff DC
+      // networks (line conductances ~250 pu and large LMPs) that floor can
+      // dominate the convergence tolerance, so it is exposed for tuning.
+      // HACDCPF_OPF_DELTA_C (absolute, default 1e-8·‖Lxx‖).
+      const double delta_c = []() {
+        const char* env = std::getenv("HACDCPF_OPF_DELTA_C");
+        if (env != nullptr) {
+          const double v = std::atof(env);
+          if (v > 0.0) return v;
+        }
+        return 1e-8;
+      }() * lxx_norm;
       // Warm-start δ_W from the last accepted value (Ipopt's κ_W⁻ rule):
       // consecutive Newton systems need similar regularization, so starting
       // at δ_W⁻/2 instead of 0 skips the 5–8 full refactorizations that an
@@ -1440,6 +1465,8 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     // KKT is large enough for that undamped behavior to become brittle.
     constexpr int kLargeKktFilterThreshold = 512;
     const bool use_residual_filter = kkt_dim >= kLargeKktFilterThreshold;
+    const bool strict_theta_filter =
+        std::getenv("HACDCPF_OPF_STRICT_THETA") != nullptr;
     bool step_accepted = false;
     Eigen::VectorXd x_trial, z_trial, mu_trial, lambda_trial;
     Eigen::VectorXd rg_trial, rh_trial, grad_trial, hdiag_trial, Lx_trial;
@@ -1561,6 +1588,13 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
 
       if (!use_residual_filter) return true;
       if (feas_trial > theta_max) return false;  // θ_max safeguard
+      // Diagnostic gate (HACDCPF_OPF_STRICT_THETA=1): accept only on strict
+      // feasibility decrease — used to isolate whether φ-greedy acceptance is
+      // what keeps a trajectory oscillating above the tolerance.
+      if (strict_theta_filter) {
+        return dual_axes_bounded &&
+               feas_trial <= (1.0 - 1e-4 * std::max(alpha_p, 1e-8)) * feascond;
+      }
       return filter_accept || feasibility_progress ||
              stationarity_progress || complementarity_progress;
     };

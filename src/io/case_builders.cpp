@@ -4534,6 +4534,12 @@ HybridPowerSystem build_hybrid_acdc_microgrid_island() {
     g.emission_factor_tco2_mwh = 0.40;
     g.cost_c2 = 0.010;
     g.cost_c1 = 45.0;
+    // 外部电网等值 = 并网时的锚定无穷大参考（多机规则的按机 opt-out）。
+    // 否则等值机、微网 genset、GFM 储能三个"构网"设备之间没有角度锚点，
+    // 平衡点出现正实部漂移模态（小信号实测 max_real=+0.35）。
+    g.dynamic_model.model_name = "ClassicalMachine";
+    g.dynamic_model.standard = "IEEE";
+    g.dynamic_model.parameters["pin_slack"] = 1.0;
     sys.ac.generators.push_back(g);
   }
 
@@ -4799,6 +4805,12 @@ HybridPowerSystem build_networked_microgrids_islanding() {
     g.emission_factor_tco2_mwh = 0.40;
     g.cost_c2 = 0.010;
     g.cost_c1 = 45.0;
+    // 外部电网等值 = 并网时的锚定无穷大参考（多机规则的按机 opt-out）。
+    // 否则等值机与三个微网 genset、MG-B 的 GFM 储能之间缺少角度锚点，
+    // 平衡点出现正实部漂移模态（小信号实测 max_real=+1e-5）。
+    g.dynamic_model.model_name = "ClassicalMachine";
+    g.dynamic_model.standard = "IEEE";
+    g.dynamic_model.parameters["pin_slack"] = 1.0;
     sys.ac.generators.push_back(g);
   }
 
