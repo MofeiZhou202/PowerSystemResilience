@@ -307,8 +307,18 @@ ACOPFResult solve_opf_inplace(
   opf_opt.enable_primal_dual = true;
   opf_opt.use_parity_ipm     = true;
   opf_opt.allow_fallback     = true;
-  if (rpo_opt.objective == RPOObjective::MinActiveLoss) {
-    opf_opt.objective = ACOPFObjective::ActiveLoss;
+  // Inner NLP objective is decoupled from the RPO objective (which is always
+  // *evaluated* from the returned power flows by rpo_objective).  LossEconomic
+  // — economic dispatch at unit marginal cost (min total generation == min
+  // loss) — is the robust path on large grids; MatchRPO minimises the RPO
+  // objective directly.  MinActiveLoss always maps to LossEconomic.  When the
+  // economic inner is used the generator costs in mut_sys have already been
+  // rewritten to c1 = 1, c2 = c0 = 0 by solve_rpo.
+  const bool econ_inner =
+      rpo_opt.objective == RPOObjective::MinActiveLoss ||
+      rpo_opt.inner_nlp_objective == RPOInnerObjective::LossEconomic;
+  if (econ_inner) {
+    opf_opt.objective = ACOPFObjective::Economic;
   } else if (rpo_opt.objective == RPOObjective::Combined) {
     opf_opt.objective = ACOPFObjective::VoltageDeviationAndLoss;
   } else {
@@ -497,7 +507,10 @@ void apply_rpo_discrete_solution(HybridPowerSystem& sys,
   }
 }
 
-RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
+RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
+  // Local mutable copy: the inner NLP objective may be upgraded to the robust
+  // LossEconomic path mid-flight if the MatchRPO baseline fails (see below).
+  RPOOptions opt = opt_in;
   RPOResult out;
   const auto t0 = std::chrono::steady_clock::now();
 
@@ -543,56 +556,127 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt) {
   std::vector<int> base_tp = orig_tp;
   std::vector<int> base_ss = orig_ss;
 
-  // Large non-economic OPFs are substantially more robust when initialized
-  // from a feasible economic operating point.  The native network-structured
-  // IPM produces this seed quickly on case300/case2000; subsequent discrete
-  // candidates reuse the current feasible RPO incumbent instead of restarting
-  // Ipopt from the flat point.
-  ACOPFResult economic_seed;
-  const bool use_economic_seed = sys.ac.buses.size() >= 100;
-  if (use_economic_seed) {
-    apply_settings(mut_sys, taps, base_tp, shunts, base_ss);
-    ACOPFOptions seed_opt;
-    seed_opt.ac_solver_backend = ACOPFSolverBackend::ParityIPM;
-    seed_opt.max_inner_iterations =
-        std::max(200, std::min(opt.max_ipm_iter, 800));
-    seed_opt.max_outer_iterations = 1;
-    seed_opt.feasibility_tol = opt.ipm_tol;
-    // The seed itself must be accurate enough to land the non-economic Ipopt
-    // solve inside its stable basin; using the looser RPO stopping threshold
-    // here caused case300 to exhaust 400 iterations.
-    seed_opt.stationarity_tol = std::min(opt.stationarity_tol, 1e-6);
-    seed_opt.allow_fallback = false;
-    seed_opt.enforce_branch_limits = opt.enforce_branch_limits;
-    seed_opt.enforce_converter_capacity = opt.enforce_converter_capacity;
-    seed_opt.enforce_converter_current_limits =
-        opt.enforce_converter_current_limits;
-    seed_opt.enforce_converter_modulation_limits =
-        opt.enforce_converter_modulation_limits;
-    economic_seed = solve_ac_opf(mut_sys, seed_opt);
-    apply_settings(mut_sys, taps, orig_tp, shunts, orig_ss);
+  // ── Inner NLP objective (decoupled from the RPO objective) ──
+  // MinActiveLoss is ALWAYS solved as an economic dispatch at UNIT marginal
+  // cost.  Rationale (theory, not tuning): with demand fixed by the power
+  // balance, loss = (total generation) − (total demand), so minimising loss
+  // is *identical* to minimising total generation, i.e. an economic dispatch
+  // with c1 = 1, c2 = c0 = 0 on every conventional unit.  That reformulation
+  // inherits the economic path's full robust machinery (VOLL-backed
+  // load-shedding recourse, reactive regularisation, and the economic
+  // objective homotopy), whereas the stripped ActiveLoss/VoltageDeviation
+  // objectives return early without those terms and stall on large grids
+  // (measured: case2869 stalls at homotopy t = 0 while the equivalent
+  // unit-cost economic dispatch reaches the exact reference optimum 133999 in
+  // 74 iterations / 25 s).  The reported loss is recomputed from power flows
+  // (compute_loss), so it is unaffected by the cost values.  Costs are
+  // rewritten once here so the economic seed, the baseline, and every inner
+  // evaluation share the same objective — keeping warm-chaining sound.  The
+  // same LossEconomic inner is used for vdev/Combined when the direct
+  // (MatchRPO) baseline fails (robust upgrade below).
+  const auto apply_unit_costs = [&]() {
+    for (auto& g : mut_sys.ac.generators) {
+      g.cost_c0 = 0.0;
+      g.cost_c1 = 1.0;
+      g.cost_c2 = 0.0;
+    }
+  };
+  bool econ_inner = opt.objective == RPOObjective::MinActiveLoss ||
+                    opt.inner_nlp_objective == RPOInnerObjective::LossEconomic;
+  // Size-based robustness guard: on large grids the stripped voltage-deviation
+  // objective does not converge, and discovering that is expensive (parity
+  // grinds to its budget, then the Ipopt second leg grinds again).  Start
+  // vdev/Combined directly on the robust LossEconomic inner above the
+  // threshold; below it MatchRPO is tried first (failure upgrade is the
+  // backstop).
+  if (!econ_inner && opt.objective != RPOObjective::MinActiveLoss &&
+      opt.robust_inner_on_failure &&
+      static_cast<int>(sys.ac.buses.size()) >= opt.robust_inner_min_buses) {
+    econ_inner = true;
+  }
+  if (econ_inner) {
+    opt.inner_nlp_objective = RPOInnerObjective::LossEconomic;
+    apply_unit_costs();
   }
 
-  // ── Baseline AC OPF ("before" state) ──
-  ACOPFResult base_r = solve_opf_inplace(mut_sys, taps, base_tp,
-                                          shunts, base_ss,
-                                          orig_tp, orig_ss, opt,
-                                          economic_seed.converged
-                                              ? &economic_seed : nullptr);
-  out.nlp_solves = use_economic_seed ? 2 : 1;
+  // Economic seed + baseline, wrapped in a lambda so the inner objective can
+  // be upgraded to LossEconomic and re-run once if the MatchRPO path fails.
+  // Large non-economic OPFs are substantially more robust when initialized
+  // from a feasible economic operating point; subsequent discrete candidates
+  // reuse the current feasible RPO incumbent instead of restarting cold.
+  ACOPFResult economic_seed;
+  ACOPFResult base_r;
+  const bool use_economic_seed = sys.ac.buses.size() >= 100;
+  const auto run_baseline = [&]() -> bool {
+    economic_seed = ACOPFResult();
+    if (use_economic_seed) {
+      apply_settings(mut_sys, taps, base_tp, shunts, base_ss);
+      ACOPFOptions seed_opt;
+      seed_opt.ac_solver_backend = ACOPFSolverBackend::ParityIPM;
+      seed_opt.max_inner_iterations =
+          std::max(200, std::min(opt.max_ipm_iter, 800));
+      seed_opt.max_outer_iterations = 1;
+      seed_opt.feasibility_tol = opt.ipm_tol;
+      // The seed itself must be accurate enough to land the non-economic Ipopt
+      // solve inside its stable basin; using the looser RPO stopping threshold
+      // here caused case300 to exhaust 400 iterations.
+      seed_opt.stationarity_tol = std::min(opt.stationarity_tol, 1e-6);
+      seed_opt.allow_fallback = false;
+      seed_opt.enforce_branch_limits = opt.enforce_branch_limits;
+      seed_opt.enforce_converter_capacity = opt.enforce_converter_capacity;
+      seed_opt.enforce_converter_current_limits =
+          opt.enforce_converter_current_limits;
+      seed_opt.enforce_converter_modulation_limits =
+          opt.enforce_converter_modulation_limits;
+      economic_seed = solve_ac_opf(mut_sys, seed_opt);
+      // Robust one-time fallback for large/stiff grids (3000+ buses): when the
+      // direct parity seed does not converge, follow the economic objective
+      // homotopy P(t): min t·f — measured to certify case2869-class grids at
+      // the exact reference objective.
+      if (!economic_seed.converged && opt.seed_homotopy_on_failure) {
+        seed_opt.objective_homotopy = true;
+        seed_opt.allow_fallback = true;
+        economic_seed = solve_ac_opf(mut_sys, seed_opt);
+        ++out.nlp_solves;
+      }
+      apply_settings(mut_sys, taps, orig_tp, shunts, orig_ss);
+    }
+    // ── Baseline AC OPF ("before" state) ──
+    base_r = solve_opf_inplace(mut_sys, taps, base_tp, shunts, base_ss,
+                               orig_tp, orig_ss, opt,
+                               economic_seed.converged ? &economic_seed
+                                                       : nullptr);
+    out.nlp_solves += use_economic_seed ? 2 : 1;
+    // Baseline acceptance: on asymptotically hard cases the inner solver can
+    // exhaust its iteration budget while sitting at a point that already
+    // satisfies RPO's own tolerances, so accept measured-tolerance convergence
+    // (viol ≤ ipm_tol ∧ stat ≤ stationarity_tol) and record it honestly.
+    return base_r.converged ||
+           (base_r.max_constraint_violation <= opt.ipm_tol &&
+            base_r.max_stationarity <= opt.stationarity_tol);
+  };
+
+  out.nlp_solves = 0;
+  bool baseline_ok = run_baseline();
+  // Robust upgrade: if the direct (MatchRPO) baseline failed on a vdev /
+  // Combined run, switch the inner objective to the LossEconomic path and
+  // re-solve once.  This is what makes vdev-class RPO usable on 3000+-bus
+  // grids, where the stripped voltage-deviation objective does not converge;
+  // the discrete tap/shunt search then corrects the voltage profile on top of
+  // the certified loss-economic base point.
+  if (!baseline_ok && !econ_inner &&
+      opt.objective != RPOObjective::MinActiveLoss &&
+      opt.robust_inner_on_failure) {
+    econ_inner = true;
+    opt.inner_nlp_objective = RPOInnerObjective::LossEconomic;
+    apply_unit_costs();
+    baseline_ok = run_baseline();
+    if (baseline_ok) {
+      base_r.status +=
+          " [inner objective upgraded to unit-cost economic (robust path)]";
+    }
+  }
   out.baseline_opf = base_r;
-  // Baseline acceptance: on asymptotically hard cases (stiff hybrid AC/DC)
-  // the inner solver can exhaust its iteration budget while sitting at a
-  // point that already satisfies RPO's own tolerances — e.g. embedded Ipopt
-  // reports "Max iterations exceeded" at viol 5e-8 / stat 2.7e-6 on the
-  // IEEE24-expanded vdev problem, which is inside ipm_tol/stationarity_tol.
-  // Rejecting such a point by the raw status flag would make RPO unusable on
-  // exactly the stressed cases it exists for, so accept measured-tolerance
-  // convergence and record it honestly in the status.
-  const bool baseline_ok =
-      base_r.converged ||
-      (base_r.max_constraint_violation <= opt.ipm_tol &&
-       base_r.max_stationarity <= opt.stationarity_tol);
   if (!baseline_ok) {
     out.status = "Baseline AC OPF failed: " + base_r.status;
     out.runtime_sec = std::chrono::duration<double>(

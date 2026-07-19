@@ -2804,6 +2804,13 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
         ACOPFOptions opt_t = opt;
         opt_t.compute_homotopy_tangent = true;
         opt_t.homotopy_t = t;
+        // Generalize the homotopy to non-economic objectives (RPO): the
+        // voltage-deviation and active-loss objective weights are scaled by t
+        // alongside the generation costs, so t = 0 is a pure feasibility
+        // problem for EVERY objective class and the path is meaningful for
+        // the RPO baseline, not only for economic dispatch.
+        opt_t.voltage_deviation_weight *= t;
+        opt_t.active_loss_weight *= t;
         if (step == 0) {
           opt_t.ac_pf_warm_start = true;
         } else if (have_prediction) {

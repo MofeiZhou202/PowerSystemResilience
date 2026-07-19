@@ -16,9 +16,51 @@ enum class RPOObjective {
   Combined,              ///< weighted combination of voltage deviation + loss
 };
 
+/// Inner continuous NLP objective, decoupled from the RPO objective that is
+/// *evaluated* for the discrete ranking.  This separation exists because the
+/// stripped physical objectives (voltage deviation / active loss) stall the
+/// parity IPM on large/stiff grids, while an economic dispatch at unit
+/// marginal cost (== min total generation == min loss) inherits the economic
+/// path's robust machinery and converges.
+enum class RPOInnerObjective {
+  /// Inner IPM minimises the RPO objective directly.  Preferred on small /
+  /// medium grids where it converges and lets generator reactive power help
+  /// the voltage profile.
+  MatchRPO,
+  /// Inner IPM minimises total generation (economic dispatch at unit marginal
+  /// cost).  Robust on large grids; the discrete tap/shunt search then
+  /// corrects the voltage / loss profile on top of the feasible base point.
+  LossEconomic,
+};
+
 /// Options for the MINLP Reactive Power Optimization solver.
 struct RPOOptions {
   RPOObjective objective{RPOObjective::MinVoltageDeviation};
+
+  /// Inner NLP objective (see RPOInnerObjective).  MinActiveLoss always uses
+  /// LossEconomic (it is mathematically identical to loss minimisation).
+  /// For MinVoltageDeviation / Combined the default MatchRPO is upgraded to
+  /// LossEconomic automatically when the baseline fails to converge, provided
+  /// robust_inner_on_failure is set.
+  RPOInnerObjective inner_nlp_objective{RPOInnerObjective::MatchRPO};
+
+  /// When the MatchRPO baseline fails on a vdev/Combined run, upgrade the
+  /// inner objective to LossEconomic (robust) and re-solve instead of failing
+  /// the whole RPO.  This is the mechanism that makes vdev-class RPO usable
+  /// on 3000+-bus grids.
+  bool robust_inner_on_failure{true};
+
+  /// Above this AC-bus count a vdev/Combined run starts directly on the
+  /// LossEconomic inner instead of attempting MatchRPO first.  Rationale:
+  /// the stripped voltage-deviation objective does not converge on large /
+  /// stiff grids, and *discovering* that failure is expensive (the parity IPM
+  /// grinds to its iteration budget, then the Ipopt second leg grinds again,
+  /// ~8 min at 3000 buses before the upgrade could trigger).  Starting on the
+  /// robust inner avoids the doomed match attempt.  Below the threshold
+  /// MatchRPO is still tried first (it converges and lets generator reactive
+  /// power help the voltage profile), with the failure upgrade as backstop.
+  /// Set to 0 to always start on MatchRPO; MinActiveLoss is unaffected.
+  int robust_inner_min_buses{1000};
 
   /// Weight applied to the voltage-deviation term when objective is Combined.
   double vdev_weight{1.0};
@@ -61,6 +103,12 @@ struct RPOOptions {
   /// budget (measured on IEEE24-3area-expanded), at a fraction of the time.
   /// Set to Ipopt for bit-exact comparison with older results.
   ACOPFSolverBackend inner_solver_backend{ACOPFSolverBackend::ParityIPM};
+
+  /// One-time robust fallback for the economic seed on large/stiff grids
+  /// (3000+ buses): when the direct parity seed does not converge, follow the
+  /// economic objective homotopy to a certified endpoint (one-time cost ~1–2
+  /// min at 3000 buses) instead of failing the whole RPO.
+  bool seed_homotopy_on_failure{true};
 
   /// Limit each selected OLTC to this many positions above/below its current
   /// position.  A negative value exposes the full nameplate range; zero holds

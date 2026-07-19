@@ -1473,6 +1473,8 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
         std::getenv("HACDCPF_OPF_FILTER_ALL") != nullptr;
     const bool strict_theta_filter =
         std::getenv("HACDCPF_OPF_STRICT_THETA") != nullptr;
+    const bool no_legacy_paths =
+        std::getenv("HACDCPF_OPF_NO_LEGACY") != nullptr;
     bool step_accepted = false;
     Eigen::VectorXd x_trial, z_trial, mu_trial, lambda_trial;
     Eigen::VectorXd rg_trial, rh_trial, grad_trial, hdiag_trial, Lx_trial;
@@ -1600,6 +1602,14 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
       if (strict_theta_filter) {
         return dual_axes_bounded &&
                feas_trial <= (1.0 - 1e-4 * std::max(alpha_p, 1e-8)) * feascond;
+      }
+      // HACDCPF_OPF_NO_LEGACY=1 disables the legacy 3-axis acceptance paths
+      // (diagnostic): the complementarity axis' loose grad guard (2%/step,
+      // compounding) lets a trajectory ride comp-decrease into a wrong corner
+      // — observed on case2869pegase: feas/comp converging while obj and
+      // stationarity inflate ~3×.
+      if (no_legacy_paths) {
+        return filter_accept;
       }
       return filter_accept || feasibility_progress ||
              stationarity_progress || complementarity_progress;
