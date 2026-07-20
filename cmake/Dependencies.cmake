@@ -149,6 +149,7 @@ if(HACDCPF_BUILD_TESTS)
   # Prefer a pre-existing local source tree over a network download to avoid
   # depending on GitHub connectivity.
   set(_CATCH2_LOCAL_CANDIDATES
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/catch2-src"
     "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build_rel/_deps/catch2-src"
     "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build/_deps/catch2-src"
     "${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers/build_mipsolvers/_deps/catch2-src"

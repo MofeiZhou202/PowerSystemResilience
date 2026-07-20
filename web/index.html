@@ -572,95 +572,80 @@
   </div>
   <!-- Short circuit -->
   <div class="sub-section" data-sub="shortCircuit" hidden>
-    <div class="control-param-group sc-param-group" title="故障点位、故障域、故障类型与故障阻抗">
-      <span class="control-param-title">故障设置</span>
-      <button id="btnFaultLocation" class="toolbar-btn" title="设置故障母线">故障点位设置</button>
-      <label class="sub-label">故障域
-        <select id="scDomainSelect">
-          <option value="AC">AC</option>
-          <option value="DC">DC</option>
-        </select>
-      </label>
-      <label class="sub-label">故障类型
-        <select id="faultTypeSelect">
-          <option value="ThreePhase">三相短路</option>
-          <option value="SinglePhaseGround">单相接地</option>
-          <option value="TwoPhase">两相短路</option>
-          <option value="TwoPhaseGround">两相接地</option>
-        </select>
-      </label>
-      <label class="sub-label">Zf(pu)
-        <input id="scFaultImpedance" type="number" value="0" step="0.001" min="0"/>
-      </label>
-    </div>
-    <div class="control-param-group sc-param-group" title="IEC 60909 计算类型、电压矫正系数、峰值法与网络/设备参数">
-      <span class="control-param-title">IEC 参数</span>
-      <label class="sub-label">计算类型
-        <select id="scCalcTypeSelect">
-          <option value="Max">最大短路电流</option>
-          <option value="Min">最小短路电流</option>
-        </select>
-      </label>
-      <label class="sub-label">电压矫正系数
-        <input id="voltageCorrectionFactor" type="number" value="1.1" step="0.05" min="0"/>
-      </label>
-      <label class="sub-label">峰值法
-        <select id="scKappaMethodSelect">
-          <option value="B">IEC B</option>
-          <option value="A">IEC A</option>
-          <option value="C">IEC C</option>
-        </select>
-      </label>
-      <label class="sub-label">网络
-        <select id="scTopologySelect">
-          <option value="Meshed">网状</option>
-          <option value="Radial">辐射状</option>
-        </select>
-      </label>
-      <label class="sub-label">f(Hz)
-        <input id="scBaseFrequency" type="number" value="50" step="1" min="1"/>
-      </label>
-      <label class="sub-label">x''d(pu)
-        <input id="scDefaultXdpp" type="number" value="0.2" step="0.01" min="0"/>
-      </label>
-      <label class="sub-label">tb(s)
-        <input id="scBreakingTime" type="number" value="0.05" step="0.01" min="0"/>
-      </label>
-      <label class="sub-label">Tk(s)
-        <input id="scIthDuration" type="number" value="1.0" step="0.1" min="0"/>
-      </label>
-    </div>
-    <div class="control-param-group sc-param-group" title="DC 短路专属：直流源电压与 DCCB 断路器拓扑处理">
-      <span class="control-param-title">DC 专属</span>
-      <label class="sub-label">DC Vsrc(pu)
-        <input id="dcScSourceVoltage" type="number" value="0" step="0.01" min="0"/>
-      </label>
-      <label class="sub-label sub-checkbox" title="DC短路计算考虑DCCB开合状态">
-        <input id="dcScConsiderBreakers" type="checkbox" checked/><span>DCCB拓扑</span>
-      </label>
-      <label class="sub-label sub-checkbox" title="匹配DCCB控制对应DC支路">
-        <input id="dcScBreakerControlsBranch" type="checkbox" checked/><span>DCCB支路</span>
-      </label>
-      <label class="sub-label sub-checkbox" title="未分配闭合DCCB作为独立导通边">
-        <input id="dcScAddBreakerEdges" type="checkbox" checked/><span>DCCB成边</span>
-      </label>
-    </div>
-    <div class="control-param-group sc-param-group" title="短路计算附加输出量">
-      <span class="control-param-title">输出选项</span>
-      <label class="sub-label sub-checkbox" title="计算故障期间各母线剩余电压">
-        <input id="scComputeVoltageDrops" type="checkbox" checked/><span>电压</span>
-      </label>
-      <label class="sub-label sub-checkbox" title="计算热等效短路电流 Ith">
-        <input id="scComputeIth" type="checkbox" checked/><span>Ith</span>
-      </label>
-      <label class="sub-label sub-checkbox" title="详细短路计算输出支路故障电流">
-        <input id="scComputeBranchFlows" type="checkbox" checked/><span>支路</span>
-      </label>
-    </div>
-    <div class="control-param-group sc-param-group" title="运行短路计算">
-      <span class="control-param-title">运行</span>
-      <button id="btnRunShortCircuit" class="toolbar-btn run-btn" title="运行短路计算">运行短路计算</button>
-    </div>
+    <button id="btnFaultLocation" class="toolbar-btn" title="设置故障母线">故障点位设置</button>
+    <label class="sub-label">故障域
+      <select id="scDomainSelect">
+        <option value="AC">AC</option>
+        <option value="DC">DC</option>
+      </select>
+    </label>
+    <label class="sub-label">故障类型
+      <select id="faultTypeSelect">
+        <option value="ThreePhase">三相短路</option>
+        <option value="SinglePhaseGround">单相接地</option>
+        <option value="TwoPhase">两相短路</option>
+        <option value="TwoPhaseGround">两相接地</option>
+      </select>
+    </label>
+    <label class="sub-label">计算类型
+      <select id="scCalcTypeSelect">
+        <option value="Max">最大短路电流</option>
+        <option value="Min">最小短路电流</option>
+      </select>
+    </label>
+    <label class="sub-label">电压矫正系数
+      <input id="voltageCorrectionFactor" type="number" value="1.1" step="0.05" min="0"/>
+    </label>
+    <label class="sub-label">峰值法
+      <select id="scKappaMethodSelect">
+        <option value="B">IEC B</option>
+        <option value="A">IEC A</option>
+        <option value="C">IEC C</option>
+      </select>
+    </label>
+    <label class="sub-label">网络
+      <select id="scTopologySelect">
+        <option value="Meshed">网状</option>
+        <option value="Radial">辐射状</option>
+      </select>
+    </label>
+    <label class="sub-label">Zf(pu)
+      <input id="scFaultImpedance" type="number" value="0" step="0.001" min="0"/>
+    </label>
+    <label class="sub-label">tb(s)
+      <input id="scBreakingTime" type="number" value="0.05" step="0.01" min="0"/>
+    </label>
+    <label class="sub-label">Tk(s)
+      <input id="scIthDuration" type="number" value="1.0" step="0.1" min="0"/>
+    </label>
+    <label class="sub-label">f(Hz)
+      <input id="scBaseFrequency" type="number" value="50" step="1" min="1"/>
+    </label>
+    <label class="sub-label">x''d(pu)
+      <input id="scDefaultXdpp" type="number" value="0.2" step="0.01" min="0"/>
+    </label>
+    <label class="sub-label">DC Vsrc(pu)
+      <input id="dcScSourceVoltage" type="number" value="0" step="0.01" min="0"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="DC短路计算考虑DCCB开合状态">
+      <input id="dcScConsiderBreakers" type="checkbox" checked/><span>DCCB拓扑</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="匹配DCCB控制对应DC支路">
+      <input id="dcScBreakerControlsBranch" type="checkbox" checked/><span>DCCB支路</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="未分配闭合DCCB作为独立导通边">
+      <input id="dcScAddBreakerEdges" type="checkbox" checked/><span>DCCB成边</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="计算故障期间各母线剩余电压">
+      <input id="scComputeVoltageDrops" type="checkbox" checked/><span>电压</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="计算热等效短路电流 Ith">
+      <input id="scComputeIth" type="checkbox" checked/><span>Ith</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="详细短路计算输出支路故障电流">
+      <input id="scComputeBranchFlows" type="checkbox" checked/><span>支路</span>
+    </label>
+    <button id="btnRunShortCircuit" class="toolbar-btn run-btn" title="运行短路计算">运行短路计算</button>
   </div>
   <!-- Harmonic power flow (hybrid AC/DC) -->
   <div class="sub-section" data-sub="harmonics" hidden>
@@ -3174,7 +3159,7 @@
     <input type="hidden" id="scFaultType" value="ThreePhase"/>
     <input type="hidden" id="scCalcType" value="Max"/>
     <input type="hidden" id="scCFactor" value="1.1"/>
-    <input type="hidden" id="scKappaMethod" value="B"/>
+    <input type="hidden" id="scKappaMethod" value="C"/>
     <input type="hidden" id="scTopology" value="Meshed"/>
     <div class="modal-actions">
       <button id="btnScRun" class="btn btn-warn">确定</button>

@@ -406,17 +406,51 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
 
     if (std::abs(br.r_pu) < 1e-12 && std::abs(br.x_pu) < 1e-12) continue;
 
-    Cx z_series(br.r_pu, br.x_pu);
-    if (auto it_corr = transformer_corrections.find(br.index);
-        it_corr != transformer_corrections.end()) {
-      z_series *= it_corr->second.k1;
-    }
-    Cx y_series = Cx(1.0, 0.0) / z_series;
-    Cx y_shunt(0.0, br.b_pu / 2.0);
+    const bool transformer_like =
+        (br.sn_mva > 1e-9) && (br.vn_hv_kv > 1e-9) && (br.vn_lv_kv > 1e-9);
 
-    double tap = (br.tap > 1e-9) ? br.tap : 1.0;
-    double shift_rad = br.shift_deg * M_PI / 180.0;
-    Cx t(tap * std::cos(shift_rad), tap * std::sin(shift_rad));
+    Cx z_series(br.r_pu, br.x_pu);
+    if (transformer_like) {
+      const double c_tr = detailed_voltage_factor(br.vn_hv_kv, opt);
+      const double x_t_rel = std::abs(br.x_pu) *
+          (br.sn_mva / std::max(1e-9, base_mva));
+      const double k_t = 0.95 * c_tr / (1.0 + 0.6 * x_t_rel);
+      z_series *= k_t;
+
+      const double hv_base_kv = (ac.buses[static_cast<size_t>(fi)].base_kv > 1e-9)
+                                    ? ac.buses[static_cast<size_t>(fi)].base_kv
+                                    : br.vn_hv_kv;
+      const double lv_base_kv = (ac.buses[static_cast<size_t>(ti)].base_kv > 1e-9)
+                                    ? ac.buses[static_cast<size_t>(ti)].base_kv
+                                    : br.vn_lv_kv;
+      double k_pu = 1.0;
+      if (br.vn_lv_kv > 1e-9 && hv_base_kv > 1e-9 && lv_base_kv > 1e-9) {
+        k_pu = (br.vn_hv_kv / br.vn_lv_kv) / (hv_base_kv / lv_base_kv);
+      }
+
+      const Cx y = Cx(k_pu, 0.0) / z_series;
+      const Cx y_hv = Cx(1.0 - k_pu, 0.0) / z_series;
+      const Cx y_lv = Cx(k_pu * (k_pu - 1.0), 0.0) / z_series;
+
+      Ybus(fi, fi) += y + y_hv;
+      Ybus(ti, ti) += y + y_lv;
+      Ybus(fi, ti) += -y;
+      Ybus(ti, fi) += -y;
+      Ybus2(fi, fi) += y + y_hv;
+      Ybus2(ti, ti) += y + y_lv;
+      Ybus2(fi, ti) += -y;
+      Ybus2(ti, fi) += -y;
+    } else {
+      if (auto it_corr = transformer_corrections.find(br.index);
+          it_corr != transformer_corrections.end()) {
+        z_series *= it_corr->second.k1;
+      }
+      Cx y_series = Cx(1.0, 0.0) / z_series;
+      Cx y_shunt(0.0, br.b_pu / 2.0);
+
+      double tap = (br.tap > 1e-9) ? br.tap : 1.0;
+      double shift_rad = br.shift_deg * M_PI / 180.0;
+      Cx t(tap * std::cos(shift_rad), tap * std::sin(shift_rad));
 
     if (std::abs(t - Cx(1.0, 0.0)) < 1e-9) {
       Ybus(fi, fi) += y_series + y_shunt;

@@ -90,12 +90,12 @@ enum class SCConverterModel {
 struct SCDetailedOptions {
   FaultType fault_type{FaultType::ThreePhase};
   SCCalcType calc_type{SCCalcType::Max};
-  SCKappaMethod kappa_method{SCKappaMethod::B};
+  SCKappaMethod kappa_method{SCKappaMethod::C};
   SCTopology topology{SCTopology::Meshed};
   double c_factor{0.0};                 ///< Optional explicit IEC voltage factor.
                                         ///  <=0 uses calc_type + nominal voltage.
   double fault_impedance_pu{0.0};
-  double breaking_time_s{0.05};
+  double breaking_time_s{0.10};
   double base_frequency_hz{50.0};
   double default_xdpp{0.2};
   bool   apply_iec_transformer_correction{true}; ///< Apply IEC 60909 K_T to transformer impedance.
