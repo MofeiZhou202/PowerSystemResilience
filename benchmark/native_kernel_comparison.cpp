@@ -371,6 +371,9 @@ LpRow run_native_simplex_lp(const std::string& case_name, const engine::LPModel&
     engine::SimplexOptions opts;
     opts.max_iter = 100000;
     opts.phase1_strategy = g_phase1_strategy;
+    // [ITER-TIMING] / [SIMPLEX-DIAG] on the pure-LP rows (same env as the
+    // MILP-level BCOptions::verbose plumbing).
+    if (std::getenv("MIPSOLVERS_NKC_VERBOSE") != nullptr) opts.verbose = true;
 
     const auto t0 = std::chrono::steady_clock::now();
     engine::SimplexResult res = engine::solve_lp_with_basis(lp, opts);
@@ -1034,6 +1037,8 @@ int main(int argc, char** argv) {
     bool   check_mode     = false;
     bool   warm_probe     = false;
     bool   warm_probe_39  = false;
+    int    lp_native_only = 0;  // 118 or 39: run just that SCUC relaxation
+                                // through natDualSimplex (fast profiling loop)
     double time_limit_sec = 120.0;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--full") == 0) {
@@ -1048,6 +1053,10 @@ int main(int argc, char** argv) {
             warm_probe = true;
         } else if (std::strcmp(argv[i], "--warm-probe-39") == 0) {
             warm_probe_39 = true;
+        } else if (std::strcmp(argv[i], "--lp118-native") == 0) {
+            lp_native_only = 118;
+        } else if (std::strcmp(argv[i], "--lp39-native") == 0) {
+            lp_native_only = 39;
         } else if (std::strcmp(argv[i], "--time-limit") == 0 && i + 1 < argc) {
             time_limit_sec = std::atof(argv[++i]);
         } else if (std::strcmp(argv[i], "--phase1") == 0 && i + 1 < argc) {
@@ -1056,6 +1065,24 @@ int main(int argc, char** argv) {
     }
     if (warm_probe) return run_warm_probe(true);
     if (warm_probe_39) return run_warm_probe(false);
+
+    if (lp_native_only != 0) {
+        SCUCInput inp = (lp_native_only == 118) ? build_ieee118_case(/*T=*/24)
+                                                : build_ieee39_case(/*T=*/24);
+        inp.config.solve_sced = false;
+        inp.config.solve_lmp  = false;
+        engine::MIPModel mip = build_scuc_mip(inp);
+        engine::LPModel lp = mip.linear_part;  // integrality dropped
+        const char* label = (lp_native_only == 118) ? "UC_118bus_24T-relax"
+                                                    : "UC_39bus_24T-relax";
+        LpRow r = run_native_simplex_lp(
+            label, lp, std::numeric_limits<double>::quiet_NaN());
+        std::printf("%s natDualSimplex %.1f ms iters=%d obj=%.8e "
+                    "rowviol=%.2e bndviol=%.2e status=%s\n",
+                    label, r.runtime_ms, r.iterations, r.objective,
+                    r.max_row_viol, r.max_bound_viol, r.status.c_str());
+        return r.success ? 0 : 1;
+    }
 
     // --check: exit nonzero if any must-pass row fails.  The must-pass set
     // deliberately excludes natIPM rows (known-weak kernel, informational)
