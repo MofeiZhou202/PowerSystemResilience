@@ -619,6 +619,7 @@ int main(int argc, char** argv) {
     bool   full_mode      = false;
     bool   skip_milp      = false;
     bool   skip_lp        = false;
+    bool   check_mode     = false;
     double time_limit_sec = 120.0;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--full") == 0) {
@@ -627,12 +628,25 @@ int main(int argc, char** argv) {
             skip_milp = true;
         } else if (std::strcmp(argv[i], "--skip-lp") == 0) {
             skip_lp = true;
+        } else if (std::strcmp(argv[i], "--check") == 0) {
+            check_mode = true;
         } else if (std::strcmp(argv[i], "--time-limit") == 0 && i + 1 < argc) {
             time_limit_sec = std::atof(argv[++i]);
         } else if (std::strcmp(argv[i], "--phase1") == 0 && i + 1 < argc) {
             g_phase1_strategy = std::atoi(argv[++i]);
         }
     }
+
+    // --check: exit nonzero if any must-pass row fails.  The must-pass set
+    // deliberately excludes natIPM rows (known-weak kernel, informational)
+    // and time-limit-sensitive cases (118-bus): natDualSimplex on NETLIB,
+    // no-false-optimum on the scaled probes (honest failures allowed), and
+    // NativeBC[natSimplex]-vs-HiGHS optimum agreement on the small MILPs.
+    int check_failures = 0;
+    auto check_fail = [&](const std::string& what) {
+        ++check_failures;
+        std::printf("[CHECK-FAIL] %s\n", what.c_str());
+    };
 
     // ── MILP level ────────────────────────────────────────────────────────
     if (!skip_milp) {
@@ -685,6 +699,33 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
         }
         print_milp_table(rows);
+
+        if (check_mode) {
+            for (const auto& tc : cases) {
+                if (tc.name.find("118bus") != std::string::npos) continue;
+                const MilpRow* native = nullptr;
+                const MilpRow* highs = nullptr;
+                for (const auto& r : rows) {
+                    if (r.case_name != tc.name) continue;
+                    if (r.solver == "NativeBC[natSimplex]") native = &r;
+                    if (r.solver == "HiGHS[direct]") highs = &r;
+                }
+                if (!native || !native->success) {
+                    check_fail(tc.name + ": NativeBC[natSimplex] failed");
+                    continue;
+                }
+                if (!highs || !highs->success) {
+                    check_fail(tc.name + ": HiGHS[direct] failed");
+                    continue;
+                }
+                const double rel = std::abs(native->objective - highs->objective) /
+                                   std::max(1.0, std::abs(highs->objective));
+                if (rel > 1e-4) {
+                    check_fail(tc.name + ": NativeBC/HiGHS optima differ (rel " +
+                               std::to_string(rel) + ")");
+                }
+            }
+        }
     }
 
     // ── LP level ──────────────────────────────────────────────────────────
@@ -709,6 +750,17 @@ int main(int argc, char** argv) {
             netlib_rows.push_back(run_highs_lp(name, lp, obj, time_limit_sec));
         }
         print_lp_table("LP level: NETLIB published optima", netlib_rows);
+        if (check_mode) {
+            for (const auto& r : netlib_rows) {
+                if (r.solver != "natDualSimplex") continue;
+                if (!r.success || !(r.obj_rel_err >= 0.0) ||
+                    r.obj_rel_err > 1e-6) {
+                    check_fail(r.case_name + ": natDualSimplex NETLIB (relerr " +
+                               std::to_string(r.obj_rel_err) + ", status " +
+                               r.status + ")");
+                }
+            }
+        }
 
         // 2) SCUC LP relaxations (large, highly degenerate).  Reference =
         //    HiGHS LP objective (no published optimum available).
@@ -746,12 +798,12 @@ int main(int argc, char** argv) {
         print_lp_table("LP level: SCUC LP relaxations (ref = HiGHS)", relax_rows);
 
         // 3) Adversarial diagonal scaling stress (numerical stability probe)
+        //    over all 5 NETLIB problems with published optima (objective is
+        //    invariant under the diagonal scaling).
         std::vector<LpRow> scale_rows;
-        for (const char* name : {"afiro", "adlittle"}) {
+        for (const auto& [name, ref_obj] : kNetlib) {
             engine::LPModel base;
             if (!read_mps_as_lp(netlib_path(name), base)) continue;
-            const double ref_obj = (name[0] == 'a' && name[1] == 'f')
-                                   ? -4.6475314286e+02 : 2.2549496316e+05;
             for (double k : {2.0, 4.0, 6.0}) {
                 engine::LPModel scaled = scale_lp(base, k, /*seed=*/42);
                 char label[64];
@@ -765,7 +817,27 @@ int main(int argc, char** argv) {
         }
         print_lp_table("LP level: adversarial diagonal scaling (10^k dynamic range)",
                        scale_rows);
+        if (check_mode) {
+            for (const auto& r : scale_rows) {
+                if (r.solver != "natDualSimplex") continue;
+                // The enforced property on adversarial rows is "no false
+                // optimum": a successful solve must be accurate, while an
+                // honest failure (e.g. the residual audit demoting a garbage
+                // "Optimal") is acceptable — stocfor1 at 1e6 scaling defeats
+                // HiGHS too (7e17 rel-err "Optimal").
+                if (r.success &&
+                    (!(r.obj_rel_err >= 0.0) || r.obj_rel_err > 1e-6)) {
+                    check_fail(r.case_name + ": natDualSimplex scaled false "
+                               "optimal (relerr " + std::to_string(r.obj_rel_err) +
+                               ", status " + r.status + ")");
+                }
+            }
+        }
     }
 
+    if (check_mode) {
+        std::printf("\n[CHECK] %d must-pass failure(s)\n", check_failures);
+        return check_failures == 0 ? 0 : 1;
+    }
     return 0;
 }

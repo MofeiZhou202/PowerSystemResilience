@@ -120,3 +120,64 @@ TEST_CASE("Presolve: should_presolve runs without crash", "[presolve]") {
   (void)ps.should_presolve(tiny, opts);
   SUCCEED();
 }
+
+// ─── Matrix scaling statistics (P0(b) presolve-hardening diagnostics) ───────
+
+#include "mipsolvers/engine/strategy/papilo_presolve.hpp"
+
+TEST_CASE("compute_matrix_scaling_stats: known matrix", "[presolve][scaling]") {
+  // A (2x3 inequality): row0 = [1e-4, 0, 1e6] (range 1e10 > 1e8),
+  //                     row1 = [2, 3, 0]      (range 1.5)
+  // Aeq (1x3):          row2 = [0, 5, 0]
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c.resize(3);
+  lp.c << 1.0, -7.0, 2.0;
+
+  Eigen::SparseMatrix<double> A(2, 3);
+  A.insert(0, 0) = 1e-4;
+  A.insert(0, 2) = 1e6;
+  A.insert(1, 0) = 2.0;
+  A.insert(1, 1) = 3.0;
+  A.makeCompressed();
+  lp.A = A;
+  lp.b.resize(2);
+  lp.b << 4.0, -11.0;
+
+  Eigen::SparseMatrix<double> Aeq(1, 3);
+  Aeq.insert(0, 1) = 5.0;
+  Aeq.makeCompressed();
+  lp.Aeq = Aeq;
+  lp.beq.resize(1);
+  lp.beq << 2.0;
+
+  for (int i = 0; i < 3; ++i)
+    lp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+
+  const MatrixScalingStats s = compute_matrix_scaling_stats(lp);
+  CHECK(s.rows == 3);
+  CHECK(s.cols == 3);
+  CHECK(s.nnz == 5);
+  CHECK(s.abs_min == Approx(1e-4));
+  CHECK(s.abs_max == Approx(1e6));
+  CHECK(s.dynamic_range == Approx(1e10));
+  CHECK(s.max_row_nnz == 2);
+  CHECK(s.max_col_nnz == 2);  // column 0 (rows 0,1) and column 1 (rows 1,2)
+  CHECK(s.rows_with_large_range == 1);
+  CHECK(s.worst_row == 0);
+  CHECK(s.worst_row_range == Approx(1e10));
+  CHECK(s.b_abs_max == Approx(11.0));
+  CHECK(s.c_abs_max == Approx(7.0));
+}
+
+TEST_CASE("compute_matrix_scaling_stats: empty model", "[presolve][scaling]") {
+  LPModel lp;
+  const MatrixScalingStats s = compute_matrix_scaling_stats(lp);
+  CHECK(s.rows == 0);
+  CHECK(s.cols == 0);
+  CHECK(s.nnz == 0);
+  CHECK(s.abs_min == 0.0);
+  CHECK(s.abs_max == 0.0);
+  CHECK(s.dynamic_range == 1.0);
+  CHECK(s.worst_row == -1);
+}

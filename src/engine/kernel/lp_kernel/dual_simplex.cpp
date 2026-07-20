@@ -7325,7 +7325,6 @@ static SimplexResult solve_lp_with_basis_impl(const LPModel& lp,
 }
 
 // ── Cold-start escalation chain ─────────────────────────────────────────────
-namespace {
 
 /// Original-space feasibility audit used to reject numerically false
 /// "Optimal" results from cold-start solves.  Accepts when
@@ -7335,12 +7334,23 @@ bool lp_solution_residual_acceptable(const LPModel& lp,
   if (x.size() != static_cast<int>(lp.vars.size())) return false;
   double viol = 0.0;
   double scale = 1.0;
+  // Row sides with |side| >= 1e19 are "no bound" sentinels (1e20, possibly
+  // enlarged further by adversarial instance scaling).  They must not enter
+  // the acceptance scale — otherwise tol * scale turns astronomical and the
+  // audit accepts anything (found on stocfor1 at 1e6 diagonal scaling,
+  // rel-err 7e17 returned as "Optimal").
+  constexpr double kSideSentinel = 1e19;
   const Eigen::VectorXd ax = lp.A * x;
   for (int i = 0; i < ax.size(); ++i) {
-    viol = std::max(viol, ax[i] - lp.b[i]);
+    if (std::abs(lp.b[i]) < kSideSentinel) {
+      viol = std::max(viol, ax[i] - lp.b[i]);
+      scale = std::max(scale, std::abs(lp.b[i]));
+    }
     const double lhs = lp_row_lhs_or_neg_inf(lp, i);
-    if (std::isfinite(lhs)) viol = std::max(viol, lhs - ax[i]);
-    scale = std::max(scale, std::abs(lp.b[i]));
+    if (std::isfinite(lhs) && std::abs(lhs) < kSideSentinel) {
+      viol = std::max(viol, lhs - ax[i]);
+      scale = std::max(scale, std::abs(lhs));
+    }
   }
   const Eigen::VectorXd aeqx = lp.Aeq * x;
   for (int i = 0; i < aeqx.size(); ++i) {
@@ -7354,6 +7364,8 @@ bool lp_solution_residual_acceptable(const LPModel& lp,
   }
   return viol <= tol * scale;
 }
+
+namespace {
 
 /// Highest escalation level currently implemented.  Level 2 is the KLU
 /// rescue backend (FactorBackendKind::KluRescue), available only when KLU
@@ -7382,16 +7394,33 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
       std::clamp(input_opt.escalation_start_level, 0, max_level);
   const auto esc_wall_t0 = std::chrono::steady_clock::now();
   for (int level = start_level;; ++level) {
-    SimplexResult res = solve_lp_with_basis_impl(lp, input_opt, basis_hint, level);
+    // Each level runs against what is LEFT of the caller's budget — the impl
+    // measures its wall clock from its own start, so handing every level the
+    // full budget would multiply the effective limit (observed: 118-bus root
+    // LP burning ~1.8x the MILP time limit).
+    SimplexOptions level_opt = input_opt;
+    if (input_opt.time_limit_sec > 0.0) {
+      const double elapsed = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - esc_wall_t0).count();
+      level_opt.time_limit_sec =
+          std::max(0.001, input_opt.time_limit_sec - elapsed);
+    }
+    SimplexResult res = solve_lp_with_basis_impl(lp, level_opt, basis_hint, level);
 
     // False-optimal audit: a cold-start "Optimal" whose original-space
-    // residual is too large is treated as a failure and retried at the next
-    // escalation level (guards against accepting garbage from a bad basis).
+    // residual is too large (or whose objective is not even finite) is
+    // treated as a failure and retried at the next escalation level.  At
+    // the last level the result is demoted to an honest failure instead of
+    // being returned as a false optimum (the "Optimal but 7-16% wrong"
+    // failure mode this gate exists to reject).
     if (res.result.stats.success && !res.solved_from_hint &&
-        level < max_level &&
-        !lp_solution_residual_acceptable(lp, res.result.x,
-                                         input_opt.escalation_residual_tol)) {
-      continue;
+        (!std::isfinite(res.result.stats.objective) ||
+         !lp_solution_residual_acceptable(lp, res.result.x,
+                                          input_opt.escalation_residual_tol))) {
+      if (level < max_level) continue;
+      res.result.stats.success = false;
+      res.result.stats.status = "Residual audit rejected";
+      return res;
     }
     if (res.result.stats.success || level >= max_level) return res;
     // Never retry terminal answers or time limits.
@@ -7444,10 +7473,11 @@ bool vendored_highs_sf_backend_thread_enabled() {
   return tl_vendored_highs_sf_backend_enabled;
 }
 
-SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
-                               const SimplexOptions& input_opt,
-                               const SimplexBasis* basis_hint,
-                               [[maybe_unused]] const std::vector<BoundChangeInfo>* bound_changes) {
+static SimplexResult solve_lp_from_sf_impl(
+    const StandardFormLP& sf, const SimplexOptions& input_opt,
+    const SimplexBasis* basis_hint,
+    [[maybe_unused]] const std::vector<BoundChangeInfo>* bound_changes,
+    int esc_level) {
   // bound_changes: when provided, describes which bounds changed since the
   // last solve. Reserved for future incremental warm-start optimisation
   // (e.g., skip O(n) at_upper scan, incremental FTRAN via delta_b).
@@ -8667,7 +8697,12 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
     if (m > kSparseSimplexThreshold) {
       // --- Sparse LU simplex for large problems ---
       SparseBasis sbasis(sf.A,
-             SparseBasis::from_public_backend(opt.factor_backend));
+             esc_level >= 2
+                 ? SparseBasis::FactorBackendKind::KluRescue
+                 : SparseBasis::from_public_backend(opt.factor_backend));
+      if (esc_level == 1) {
+        sbasis.set_pivot_tolerance(opt.escalation_umfpack_pivot_tolerance);
+      }
 
       // Validate crash basis: if the greedy crash produced a singular basis,
       // revert all crash swaps back to slacks/artificials.
@@ -8982,7 +9017,12 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
     }
     if (m > kSparseSimplexThreshold) {
       SparseBasis sbasis(sf.A,
-             SparseBasis::from_public_backend(opt.factor_backend));
+             esc_level >= 2
+                 ? SparseBasis::FactorBackendKind::KluRescue
+                 : SparseBasis::from_public_backend(opt.factor_backend));
+      if (esc_level == 1) {
+        sbasis.set_pivot_tolerance(opt.escalation_umfpack_pivot_tolerance);
+      }
       if (!sparse_primal_simplex_optimize(sf, basis, can_enter, opt,
                                           sbasis, x_b, reduced_costs, obj, at_upper)) {
         out.result.stats.status = "Simplex Phase II failed";
@@ -9098,6 +9138,127 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
             ms, (int)out.solved_from_hint, (int)out.dual_reoptimized);
   }
   return out;
+}
+
+bool sf_solution_residual_acceptable(const StandardFormLP& sf,
+                                     const Eigen::VectorXd& x_std,
+                                     double tol) {
+  const int m = static_cast<int>(sf.A.rows());
+  const int n = static_cast<int>(sf.A.cols());
+  if (x_std.size() != n) return false;
+  const bool has_row_scale = sf.row_scale.size() == m;
+  const bool has_col_scale = sf.col_scale.size() == n;
+  double viol = 0.0;
+  double scale = 1.0;
+  // Scaled system: (D_r A D_c) y = D_r b, so the original-units residual and
+  // RHS are the scaled ones divided by the row factor.
+  const Eigen::VectorXd r = sf.A * x_std - sf.b;
+  for (int i = 0; i < m; ++i) {
+    const double rs = has_row_scale ? sf.row_scale[i] : 1.0;
+    viol = std::max(viol, std::abs(r[i]) / rs);
+    scale = std::max(scale, std::abs(sf.b[i]) / rs);
+  }
+  // x_orig = D_c y: bound violations convert with the column factor.
+  const bool has_ub = sf.var_ub.size() == n;
+  for (int j = 0; j < n; ++j) {
+    const double cs = has_col_scale ? sf.col_scale[j] : 1.0;
+    if (x_std[j] < 0.0) viol = std::max(viol, -x_std[j] * cs);
+    if (has_ub && std::isfinite(sf.var_ub[j]) && x_std[j] > sf.var_ub[j]) {
+      viol = std::max(viol, (x_std[j] - sf.var_ub[j]) * cs);
+    }
+  }
+  return viol <= tol * scale;
+}
+
+SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
+                               const SimplexOptions& input_opt,
+                               const SimplexBasis* basis_hint,
+                               const std::vector<BoundChangeInfo>* bound_changes) {
+  // Escalation only rescues cold-start solves (cut re-solves, IPM-repair
+  // crossover); warm-started tree node LPs keep single-attempt behaviour.
+  const int max_level =
+      input_opt.allow_cold_start
+          ? std::min(std::max(0, input_opt.escalation_max_level_sf),
+                     max_available_escalation_level())
+          : 0;
+  const int start_level =
+      std::clamp(input_opt.escalation_start_level, 0, max_level);
+  const auto esc_wall_t0 = std::chrono::steady_clock::now();
+  // Each level runs against what is LEFT of the caller's budget — the impl
+  // measures its wall clock from its own start, so handing every level the
+  // full budget would multiply the effective limit.
+  auto sf_remaining_opt = [&]() {
+    SimplexOptions o = input_opt;
+    if (input_opt.time_limit_sec > 0.0) {
+      const double elapsed = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - esc_wall_t0).count();
+      o.time_limit_sec = std::max(0.001, input_opt.time_limit_sec - elapsed);
+    }
+    return o;
+  };
+  for (int level = start_level;; ++level) {
+    SimplexResult res;
+    if (level == 0) {
+      res = solve_lp_from_sf_impl(sf, sf_remaining_opt(), basis_hint,
+                                  bound_changes, 0);
+    } else {
+      // Level >= 1: re-equilibrate a copy (extra Ruiz rounds) and solve it
+      // cold at the escalated level.  ruiz_scale_standard_form RESETS
+      // row/col_scale, so the copy's outputs live in a different scaled
+      // space than the caller's sf; instead of hand-mapping every output,
+      // take only the basis (scale-invariant) and publish through a warm
+      // re-solve of the caller's sf — a ~0-iteration re-opt that produces
+      // all outputs natively in caller space.
+      StandardFormLP rescaled = sf;
+      ruiz_scale_standard_form(rescaled, input_opt.escalation_ruiz_rounds);
+      // The caller's fallback basis carries numeric caches (reduced costs,
+      // factorizations) in caller scaling — invalid against the re-scaled
+      // copy.  The escalated attempt is strictly cold.
+      SimplexOptions esc_opt = sf_remaining_opt();
+      esc_opt.fallback_basis = nullptr;
+      SimplexResult esc =
+          solve_lp_from_sf_impl(rescaled, esc_opt, nullptr, nullptr, level);
+      if (esc.result.stats.success) {
+        // Strip the copy-space numeric caches (factorization, reduced costs,
+        // x caches); only indices + bound status transfer across scalings.
+        SimplexBasis clean_hint;
+        clean_hint.indices = esc.basis.basis_indices();
+        clean_hint.rows = esc.basis.rows;
+        clean_hint.cols = esc.basis.cols;
+        clean_hint.at_upper = esc.basis.at_upper;
+        SimplexOptions publish_opt = sf_remaining_opt();
+        publish_opt.allow_cold_start = false;
+        res = solve_lp_from_sf_impl(sf, publish_opt, &clean_hint, nullptr, 0);
+        // Fail-closed: an unsuccessful publish re-solve falls through to the
+        // next escalation level like any other failure.
+      } else {
+        res = std::move(esc);
+      }
+    }
+
+    // False-optimal audit: a cold-start "Optimal" whose caller-space residual
+    // is too large (or whose objective is not even finite) is treated as a
+    // failure and retried at the next level; at the last level it is demoted
+    // to an honest failure instead of being returned as a false optimum.
+    if (res.result.stats.success && !res.solved_from_hint &&
+        (!std::isfinite(res.result.stats.objective) ||
+         !sf_solution_residual_acceptable(sf, res.x_std,
+                                          input_opt.escalation_residual_tol))) {
+      if (level < max_level) continue;
+      res.result.stats.success = false;
+      res.result.stats.status = "Residual audit rejected";
+      return res;
+    }
+    if (res.result.stats.success || level >= max_level) return res;
+    // Never retry terminal answers or time limits.
+    if (res.result.stats.has_farkas_certificate) return res;
+    if (res.result.stats.status == "Time limit") return res;
+    // Respect the caller's wall-clock budget between levels.
+    if (simplex_wall_time_limit_hit(input_opt, esc_wall_t0)) {
+      mark_simplex_time_limit(res.result.stats, esc_wall_t0);
+      return res;
+    }
+  }
 }
 
 }  // namespace mipsolvers::engine

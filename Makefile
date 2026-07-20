@@ -393,6 +393,19 @@ test_dual_simplex/fast:
 .PHONY : test_dual_simplex/fast
 
 #=============================================================================
+# Target rules for targets named test_branch_and_cut
+
+# Build rule for target.
+test_branch_and_cut: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_branch_and_cut
+.PHONY : test_branch_and_cut
+
+# fast build rule for target.
+test_branch_and_cut/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_branch_and_cut.dir/build.make CMakeFiles/test_branch_and_cut.dir/build
+.PHONY : test_branch_and_cut/fast
+
+#=============================================================================
 # Target rules for targets named test_problem_validation
 
 # Build rule for target.
@@ -24562,6 +24575,30 @@ tests/test_adapter_registry.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_adapter_registry.dir/build.make CMakeFiles/test_adapter_registry.dir/tests/test_adapter_registry.cpp.s
 .PHONY : tests/test_adapter_registry.cpp.s
 
+tests/test_branch_and_cut.o: tests/test_branch_and_cut.cpp.o
+.PHONY : tests/test_branch_and_cut.o
+
+# target to build an object file
+tests/test_branch_and_cut.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_branch_and_cut.dir/build.make CMakeFiles/test_branch_and_cut.dir/tests/test_branch_and_cut.cpp.o
+.PHONY : tests/test_branch_and_cut.cpp.o
+
+tests/test_branch_and_cut.i: tests/test_branch_and_cut.cpp.i
+.PHONY : tests/test_branch_and_cut.i
+
+# target to preprocess a source file
+tests/test_branch_and_cut.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_branch_and_cut.dir/build.make CMakeFiles/test_branch_and_cut.dir/tests/test_branch_and_cut.cpp.i
+.PHONY : tests/test_branch_and_cut.cpp.i
+
+tests/test_branch_and_cut.s: tests/test_branch_and_cut.cpp.s
+.PHONY : tests/test_branch_and_cut.s
+
+# target to generate assembly for a file
+tests/test_branch_and_cut.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_branch_and_cut.dir/build.make CMakeFiles/test_branch_and_cut.dir/tests/test_branch_and_cut.cpp.s
+.PHONY : tests/test_branch_and_cut.cpp.s
+
 tests/test_dual_simplex.o: tests/test_dual_simplex.cpp.o
 .PHONY : tests/test_dual_simplex.o
 
@@ -24910,6 +24947,7 @@ help:
 	@echo "... scuc_solve"
 	@echo "... solver_comparison"
 	@echo "... test_adapter_registry"
+	@echo "... test_branch_and_cut"
 	@echo "... test_dual_simplex"
 	@echo "... test_engine_api"
 	@echo "... test_ipm_solver"
@@ -27909,6 +27947,9 @@ help:
 	@echo "... tests/test_adapter_registry.o"
 	@echo "... tests/test_adapter_registry.i"
 	@echo "... tests/test_adapter_registry.s"
+	@echo "... tests/test_branch_and_cut.o"
+	@echo "... tests/test_branch_and_cut.i"
+	@echo "... tests/test_branch_and_cut.s"
 	@echo "... tests/test_dual_simplex.o"
 	@echo "... tests/test_dual_simplex.i"
 	@echo "... tests/test_dual_simplex.s"

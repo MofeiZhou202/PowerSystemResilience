@@ -293,3 +293,122 @@ TEST_CASE("MILP: StrictHiGHS [A+B] warm-start injection correctness and node red
   CHECK(warm.bc_stats.nodes_explored <= cold.bc_stats.nodes_explored);
 }
 
+
+// ─── P1 failure-path hardening (round 2) ───────────────────────────────────
+//
+// These tests pin the reporting hygiene added for the evaluation-doc roadmap:
+// no -1e30/1e30 BCStats sentinels may leak to callers, a proven-optimal tree
+// exhaustion must report best_bound == best_obj, and pathologically poor warm
+// starts must not survive as root incumbents.
+
+#include <cmath>
+#include <limits>
+
+TEST_CASE("MILP: failure paths report honest best_bound/gap, no sentinels",
+          "[milp][hygiene]") {
+  BCOptions opt;
+  opt.time_limit_sec = 1e-6;  // expire before the root relaxation
+
+  MIPModel mip = make_knapsack_10();
+  mip.initial_solution = Eigen::VectorXd::Zero(10);  // feasible (weight 0 <= 14)
+  auto res = solve_milp_bc(mip, opt);
+
+  // Whether or not the verified warm start was published, the untouched
+  // BCStats defaults (best_bound -1e30, best_obj/gap 1e30) must have been
+  // scrubbed to honest infinities.
+  CHECK(!(std::isfinite(res.bc_stats.best_bound) &&
+          std::abs(res.bc_stats.best_bound) >= 1e29));
+  CHECK(!(std::isfinite(res.bc_stats.best_obj) &&
+          std::abs(res.bc_stats.best_obj) >= 1e29));
+  CHECK(!(std::isfinite(res.bc_stats.gap) && res.bc_stats.gap >= 1e29));
+}
+
+TEST_CASE("MILP: tree-exhausted optimality syncs best_bound to incumbent",
+          "[milp][hygiene]") {
+  BCOptions opt;
+  opt.require_tree_exhaustion_certificate = true;
+
+  MIPModel mip = make_knapsack_10();
+  auto res = solve_milp_bc(mip, opt);
+
+  REQUIRE(res.stats.success);
+  CHECK(!(std::isfinite(res.bc_stats.best_bound) &&
+          std::abs(res.bc_stats.best_bound) >= 1e29));
+  if (res.stats.status == "Optimal (tree exhausted)") {
+    CHECK(res.bc_stats.gap == 0.0);
+    CHECK(res.bc_stats.best_bound ==
+          Approx(res.bc_stats.best_obj).margin(1e-6));
+  }
+}
+
+TEST_CASE("MILP: garbage warm start does not survive as the final incumbent",
+          "[milp][hygiene]") {
+  // minimise x0 + 1e12*x1  s.t. x0 + x1 >= 1, x binary.
+  // Optimal: x0=1, x1=0, obj=1.  The warm start (0,1) is feasible but ~1e12x
+  // worse than the root bound; the incumbent-quality gate must reject it as a
+  // root incumbent and the solve must still return the true optimum.
+  MIPModel mip;
+  mip.linear_part.sense = Sense::Minimize;
+  mip.linear_part.c.resize(2);
+  mip.linear_part.c << 1.0, 1e12;
+
+  Eigen::SparseMatrix<double> A(1, 2);
+  A.insert(0, 0) = -1.0;
+  A.insert(0, 1) = -1.0;
+  A.makeCompressed();
+  mip.linear_part.A = A;
+  mip.linear_part.b.resize(1);
+  mip.linear_part.b << -1.0;
+  mip.linear_part.Aeq = Eigen::SparseMatrix<double>(0, 2);
+  mip.linear_part.beq.resize(0);
+
+  for (int i = 0; i < 2; ++i) {
+    mip.linear_part.vars.push_back({VarType::Binary, 0.0, 1.0});
+    mip.binary_idx.push_back(i);
+  }
+  Eigen::VectorXd bad_warm(2);
+  bad_warm << 0.0, 1.0;
+  mip.initial_solution = bad_warm;
+
+  BCOptions opt;
+  opt.use_papilo_presolve = false;  // keep original/reduced spaces identical
+
+  auto res = solve_milp_bc(mip, opt);
+  REQUIRE(res.stats.success);
+  CHECK(res.stats.objective == Approx(1.0).margin(1e-4));
+
+  // Disabling the gate must not change the optimum either (the improvement
+  // path replaces the weak incumbent) — guards against over-eager rejection.
+  BCOptions no_gate = opt;
+  no_gate.incumbent_quality_reject_factor = 0.0;
+  auto res2 = solve_milp_bc(mip, no_gate);
+  REQUIRE(res2.stats.success);
+  CHECK(res2.stats.objective == Approx(1.0).margin(1e-4));
+}
+
+// ─── P2-short: IPM root health probe ────────────────────────────────────────
+//
+// On a healthy instance the probe must be behaviour-neutral: same optimum
+// with the gate on and off (the probe iterate seeds the full solve, so no
+// work is wasted).  Unhealthy classification (NumericalError / Cholesky
+// failed / ProblemTooLarge) is exercised at benchmark scale where the IPM
+// genuinely fails; here we pin the gate's no-harm contract.
+
+TEST_CASE("MILP: IPM root probe is behaviour-neutral on a healthy instance",
+          "[milp][ipm_probe]") {
+  MIPModel mip = make_knapsack_10();
+
+  BCOptions probed;
+  probed.use_ipm_root = true;
+  probed.ipm_root_probe = true;
+  auto res_probed = solve_milp_bc(mip, probed);
+
+  BCOptions unprobed = probed;
+  unprobed.ipm_root_probe = false;
+  auto res_unprobed = solve_milp_bc(mip, unprobed);
+
+  REQUIRE(res_probed.stats.success);
+  REQUIRE(res_unprobed.stats.success);
+  CHECK(res_probed.stats.objective ==
+        Approx(res_unprobed.stats.objective).margin(1e-6));
+}

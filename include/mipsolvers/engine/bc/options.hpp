@@ -117,6 +117,17 @@ struct BCOptions {
   bool use_simplex_lp_nodes{true};
   bool use_ipm_root{false};
   bool use_ipm_nodes{false};
+  /// Health-probe gate for the IPM root path: before paying for a full IPM
+  /// root solve, run a few relaxed-tolerance iterations on the same LP.  A
+  /// probe ending in NumericalError / Cholesky failed / ProblemTooLarge
+  /// diagnoses the IPM as unhealthy on this instance: the root solve routes
+  /// straight to simplex and the simplex-failure IPM repair is skipped
+  /// (MaxIter / Time limit / success all count as healthy).  On healthy
+  /// probes the full solve is seeded with the probe iterate, so probe work
+  /// is not wasted.
+  bool ipm_root_probe{true};
+  int ipm_probe_max_iter{20};
+  double ipm_probe_time_sec{5.0};
   /// Use the self-contained embedded HiGHS simplex kernel for native B&C LP
   /// relaxations.  The MIP tree, cuts, proof frontier, scheduling, and domain
   /// heuristics remain native; HiGHS is used only as the LP numerical kernel.
@@ -149,6 +160,29 @@ struct BCOptions {
   /// dispatch LP verifies feasibility.  Even a weak incumbent is useful for
   /// objective cutoffs, reduced-cost fixing, and pruning.
   bool accept_verified_warm_start_incumbent{true};
+  /// Reject candidate incumbents whose (minimize-convention) objective
+  /// exceeds the best known dual bound by more than this relative factor:
+  ///   obj - bound > factor * max(1, |bound|).
+  /// Catches pathological repair-path incumbents (e.g. 1e6x the optimum)
+  /// without blocking legitimately weak early heuristics.  Non-positive or
+  /// non-finite disables the gate.
+  double incumbent_quality_reject_factor{1e6};
+  /// When the root LP relaxation of the PaPILO-presolved model fails or
+  /// exhausts its (capped) budget, retry the whole solve once with PaPILO
+  /// presolve disabled.  The presolved 118-bus SCUC root LP is unsolvable
+  /// for the native simplex while the unpresolved one solves cleanly; this
+  /// converts such failures into valid (if slower) solves.  Only fires when
+  /// presolve actually reduced the model and enough wall-clock remains.
+  bool root_presolve_fallback{true};
+  /// Minimum remaining wall-clock (seconds) required to attempt the
+  /// unpresolved-root fallback retry.
+  double root_presolve_fallback_min_remaining_sec{5.0};
+  /// Fraction of the total time limit reserved for the unpresolved-root
+  /// fallback retry: the presolved root LP's budget is capped at
+  /// (limit - max(min_remaining, fraction * limit)) so a hard presolved
+  /// root cannot starve the retry.  0 disables the reserve (root LP may
+  /// use the full remaining budget, as before).
+  double root_presolve_fallback_budget_fraction{0.5};
   /// Generic HiGHS-style feasibility jump: locally flips binary variables to
   /// reduce row infeasibility, then repairs continuous variables by an LP with
   /// integers fixed.  No model-specific metadata is used.

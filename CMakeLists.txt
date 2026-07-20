@@ -262,6 +262,19 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
         $<$<CONFIG:Release>:-O3 -DNDEBUG>
         $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
     endif()
+
+    # CTest integration: standing pure-native A/B harness.  --check turns the
+    # must-pass rows (natDualSimplex NETLIB + scaled probes, NativeBC-vs-HiGHS
+    # optimum agreement on the small MILPs) into an exit code; natIPM rows and
+    # the time-limit-sensitive 118-bus case stay informational.  Not part of
+    # the CI-critical set (CI runs -L unit and -R milp_benchmark$ only).
+    if(MIPSOLVERS_BUILD_TESTS)
+      add_test(NAME native_kernel_comparison
+        COMMAND native_kernel_comparison --check --time-limit 60)
+      set_tests_properties(native_kernel_comparison PROPERTIES
+        LABELS   "benchmark"
+        TIMEOUT  600)
+    endif()
   endif()
 endif()
 

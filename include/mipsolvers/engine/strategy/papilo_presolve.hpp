@@ -15,6 +15,35 @@ namespace mipsolvers::engine {
 /// Opaque storage for PaPILO postsolve data.
 struct PaPILOPostsolveData;
 
+/// O(nnz) numerical-conditioning summary of an LPModel's constraint data.
+/// Used to compare matrix scaling before/after presolve (P0(b) diagnostics:
+/// the PaPILO-presolved 118-bus SCUC root LP is harder for the native
+/// simplex Phase I than the unpresolved one; these stats attribute why).
+struct MatrixScalingStats {
+  int rows{0};
+  int cols{0};
+  long long nnz{0};
+  /// Smallest / largest nonzero |A| entry (0 when the matrix is empty).
+  double abs_min{0.0};
+  double abs_max{0.0};
+  /// abs_max / abs_min; 1 when empty.
+  double dynamic_range{1.0};
+  int max_row_nnz{0};
+  int max_col_nnz{0};
+  /// Rows whose intra-row |coefficient| dynamic range exceeds 1e8.
+  int rows_with_large_range{0};
+  /// Row with the largest intra-row range (combined index: inequality rows
+  /// first, then equality rows; -1 when no nonzeros) and that range.
+  int worst_row{-1};
+  double worst_row_range{1.0};
+  /// Largest |RHS| over b, finite row_lhs, and beq; largest |c|.
+  double b_abs_max{0.0};
+  double c_abs_max{0.0};
+};
+
+/// Compute MatrixScalingStats for an LPModel in one O(nnz) sweep.
+MatrixScalingStats compute_matrix_scaling_stats(const LPModel& lp);
+
 /// Result of PaPILO presolve including mappings for postsolve.
 struct PaPILOPresolveResult {
   LPModel reduced_lp;          ///< Reduced problem (fewer rows/cols)
@@ -54,6 +83,11 @@ struct PaPILOPresolveResult {
 
   bool success{false};
   bool infeasible{false};
+
+  /// Matrix-conditioning snapshots of the input and reduced models
+  /// (after_stats only populated on a successful reducing run).
+  MatrixScalingStats before_stats;
+  MatrixScalingStats after_stats;
 
   /// Opaque postsolve data (PaPILO's PostsolveStorage + Num)
   std::shared_ptr<PaPILOPostsolveData> postsolve_data;

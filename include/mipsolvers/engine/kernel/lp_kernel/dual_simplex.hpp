@@ -200,6 +200,12 @@ struct SimplexOptions {
   // skip the cheaper levels; used to exercise the rescue backends directly
   // (e.g. 2 = KLU rescue) in tests and diagnostics.
   int escalation_start_level{0};
+  // Separate escalation cap for the standard-form entry point
+  // (solve_lp_from_sf: cut re-solves, IPM-repair crossover).  Same level
+  // semantics as escalation_max_level; 0 disables SF-path escalation
+  // independently of the LPModel path.  Cold-start gating applies unchanged
+  // (warm node LPs with allow_cold_start == false are never retried).
+  int escalation_max_level_sf{2};
   // ── Phase I strategy (cold start) ────────────────────────────────────────
   // 0 = Native legacy: uniform ±(|rc|+1) cost shifts in Dual Phase I.
   // 1 = HiGHS-style: magnitude-aware randomized perturbations of costs / RHS
@@ -435,6 +441,25 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
                                const SimplexOptions& opt = {},
                                const SimplexBasis* basis_hint = nullptr,
                                const std::vector<BoundChangeInfo>* bound_changes = nullptr);
+
+// Original-units feasibility audit for a standard-form solution x_std (the
+// scaled standard-form variable vector, as returned in SimplexResult::x_std).
+// Undoes the Ruiz row/column scaling recorded on sf, then accepts iff
+//   max(row residual, bound violation) <= tol * max(1, |b_orig|_inf).
+// Used by the solve_lp_from_sf escalation chain to reject numerically false
+// "Optimal" results; exposed for tests.
+bool sf_solution_residual_acceptable(const StandardFormLP& sf,
+                                     const Eigen::VectorXd& x_std,
+                                     double tol);
+
+// Original-space feasibility audit for an LPModel solution x (as returned in
+// SolveResult::x).  Accepts iff
+//   max(row violation, bound violation) <= tol * max(1, |b|_inf, |beq|_inf).
+// Used by the cold-start escalation chain to reject numerically false
+// "Optimal" results; exposed for tests.
+bool lp_solution_residual_acceptable(const LPModel& lp,
+                                     const Eigen::VectorXd& x,
+                                     double tol);
 
 // Thread-local B&C integration switch for vendored HiGHS standard-form LPs.
 // Returns the previous value so callers can restore it with RAII.

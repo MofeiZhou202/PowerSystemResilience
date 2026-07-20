@@ -88,6 +88,10 @@ struct BCStats {
   double root_only_objective_offset{0.0};
   bool root_only_result{false};
   double runtime_sec{0.0};
+  /// Number of unpresolved-root fallback retries taken after a root-LP
+  /// failure on the PaPILO-presolved model (0 or 1; see
+  /// BCOptions::root_presolve_fallback).
+  int presolve_fallback_attempts{0};
   std::uint64_t incumbent_updates{0};
   int first_incumbent_node{-1};
   int last_incumbent_node{-1};

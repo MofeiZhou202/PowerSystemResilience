@@ -1847,11 +1847,25 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
   const bool trace_huge_root_relax = opt.verbose;
   auto relax_t0 = std::chrono::steady_clock::now();
   const double lp_wall_budget = opt.time_limit_sec > 0.0 ? opt.time_limit_sec : 0.0;
+  // Each solver stage (IPM root, simplex, IPM repair) must run against what
+  // is LEFT of the budget, not the full budget again — otherwise a failing
+  // multi-stage solve overruns the caller's limit severalfold.  0 keeps the
+  // "unlimited" convention of {Simplex,IPMLP}Options::time_limit_sec; the
+  // 1 ms floor keeps an exhausted budget from turning back into "unlimited".
+  auto lp_remaining_budget = [&]() -> double {
+    if (lp_wall_budget <= 0.0) return 0.0;
+    const double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - relax_t0).count();
+    return std::max(0.001, lp_wall_budget - elapsed);
+  };
+  auto lp_budget_exhausted = [&]() -> bool {
+    return lp_wall_budget > 0.0 && lp_remaining_budget() <= 0.001;
+  };
   auto apply_simplex_budget = [&](SimplexOptions& simplex_opt) {
-    simplex_opt.time_limit_sec = lp_wall_budget;
+    simplex_opt.time_limit_sec = lp_remaining_budget();
   };
   auto apply_ipm_budget = [&](IPMLPOptions& ipm_opt) {
-    ipm_opt.time_limit_sec = lp_wall_budget;
+    ipm_opt.time_limit_sec = lp_remaining_budget();
   };
 
   const int n_lp = static_cast<int>(lp.vars.size());
@@ -1904,11 +1918,56 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     }
   }
 
+  // P2-short: IPM health probe.  The IPM-LP kernel hard-fails on degenerate
+  // and badly scaled instances (NumericalError / Cholesky failed /
+  // ProblemTooLarge); a few relaxed-tolerance iterations on the exact LP the
+  // IPM would see diagnose that for a fraction of a full doomed solve.  This
+  // single choke point covers auto-enabled, forced-huge-warmstart, and
+  // caller-set IPM-root routes.
+  bool ipm_probe_diagnosed_failure = false;
+  Eigen::VectorXd ipm_probe_seed;
+  if (opt.use_ipm_root && opt.ipm_root_probe && !lp_budget_exhausted()) {
+    IPMLPOptions probe_opt;
+    probe_opt.max_iter = std::max(1, opt.ipm_probe_max_iter);
+    probe_opt.tol_primal = 1e-6;
+    probe_opt.tol_dual = 1e-6;
+    probe_opt.tol_gap = 1e-6;
+    probe_opt.verbose = false;
+    const double rem = lp_remaining_budget();
+    probe_opt.time_limit_sec =
+        rem > 0.0 ? std::min(opt.ipm_probe_time_sec, 0.15 * rem)
+                  : opt.ipm_probe_time_sec;
+    NativeIPMLPAdapter probe_solver(probe_opt);
+    SolveResult probe_res = probe_solver.solve_lp(lp);
+    const std::string& probe_status = probe_res.stats.status;
+    if (!probe_res.stats.success &&
+        (probe_status == "NumericalError" ||
+         probe_status == "Cholesky failed" ||
+         probe_status == "ProblemTooLarge")) {
+      ipm_probe_diagnosed_failure = true;
+      if (opt.verbose) {
+        fprintf(stderr,
+                "[BC_RELAX] IPM probe unhealthy (status='%s', %d iters) — "
+                "skipping IPM root, routing to simplex\n",
+                probe_status.c_str(), probe_res.stats.iterations);
+      }
+    } else if (probe_res.x.size() == n_lp) {
+      // Healthy (converged, MaxIter, or Time limit with an iterate): reuse
+      // the probe point to warm-start the full solve.
+      ipm_probe_seed = std::move(probe_res.x);
+    }
+  }
+
   // ---- Interior-point root-LP path ----
   // Uses the new LP IPM adapter (based on Mehrotra LCQP core) to solve
   // the root relaxation directly, then crosses over to simplex to get
   // a basis for Gomory cut generation and warm-started child nodes.
-  if (opt.use_ipm_root) {
+  if (opt.use_ipm_root && !ipm_probe_diagnosed_failure) {
+    if (lp_budget_exhausted()) {
+      out.primal.stats.success = false;
+      out.primal.stats.status = "Time limit";
+      return out;
+    }
     const bool require_simplex_crossover = opt.use_simplex_lp_nodes;
     IPMLPOptions ipm_opt;
     ipm_opt.max_iter = std::max(opt.max_lp_iter, 200);
@@ -1919,7 +1978,9 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     apply_ipm_budget(ipm_opt);
 
     NativeIPMLPAdapter ipm_solver(ipm_opt);
-    SolveResult ipm_res = ipm_solver.solve_lp(lp);
+    SolveResult ipm_res = ipm_probe_seed.size() == n_lp
+                              ? ipm_solver.solve_lp(lp, ipm_probe_seed)
+                              : ipm_solver.solve_lp(lp);
     if (ipm_res.stats.status == "Time limit") {
       out.primal = std::move(ipm_res);
       out.dual_bound = out.primal.stats.objective;
@@ -2479,8 +2540,22 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
   }
 
   if (opt.use_simplex_lp_nodes) {
+    if (lp_budget_exhausted()) {
+      out.primal.stats.success = false;
+      out.primal.stats.status = "Time limit";
+      return out;
+    }
     SimplexOptions simplex_opt;
-    simplex_opt.max_iter = std::max(opt.max_lp_iter * 10, 2000);
+    // Cold-start solves (roots, repair re-solves) on large degenerate LPs can
+    // need orders of magnitude more pivots than a warm node LP — the
+    // unpresolved 118-bus relaxation takes ~1e5 pivots (~40 s), far above
+    // max_lp_iter*10 = 5000, which turned a solvable root into a MaxIter
+    // failure.  The wall-clock budget (apply_simplex_budget) is the real
+    // governor for cold solves, so give them a generous iteration cap.
+    const bool cold_root_solve = (basis_hint == nullptr);
+    simplex_opt.max_iter =
+        cold_root_solve ? std::max(opt.max_lp_iter * 10, 100000)
+                        : std::max(opt.max_lp_iter * 10, 2000);
     simplex_opt.feasibility_tol = std::max(1e-10, opt.lp_tol * 0.1);
     simplex_opt.optimality_tol = std::max(1e-10, opt.lp_tol * 0.1);
     simplex_opt.verbose = false;
@@ -2498,6 +2573,20 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
         out.primal.stats.success = false;
         out.primal.stats.status = "Time limit";
         out.dual_bound = out.primal.stats.objective;
+        return out;
+      }
+      if (lp_budget_exhausted()) {
+        out.primal.stats.status = "Time limit";
+        return out;
+      }
+      if (ipm_probe_diagnosed_failure) {
+        // The probe already showed the IPM cannot handle this LP; a repair
+        // attempt would burn the remaining budget on a doomed solve.
+        if (opt.verbose) {
+          fprintf(stderr,
+                  "[BC_RELAX] Simplex failed and IPM probe was unhealthy — "
+                  "skipping IPM-LP repair\n");
+        }
         return out;
       }
       if (opt.verbose) {

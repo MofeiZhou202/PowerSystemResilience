@@ -1613,7 +1613,26 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     out.bc_stats.propagation_wall_ns = profile.wall_ns;
   };
 
+  // Failure paths can leave BCStats at its defaults (best_bound -1e30,
+  // best_obj/gap 1e30).  Those sentinels are finite, so downstream
+  // isfinite() guards ingest them as real values and report nonsense gaps;
+  // publish honest infinities instead.
+  auto finalize_reported_stats_hygiene = [&]() {
+    const double inf = std::numeric_limits<double>::infinity();
+    if (std::abs(out.bc_stats.best_bound) >= 1e29) {
+      out.bc_stats.best_bound =
+          (prob.linear_part.sense == Sense::Minimize) ? -inf : inf;
+    }
+    if (out.bc_stats.best_obj >= 1e29) {
+      out.bc_stats.best_obj = inf;
+    }
+    if (out.bc_stats.gap >= 1e29) {
+      out.bc_stats.gap = inf;
+    }
+  };
+
   auto return_with_profile = [&]() {
+    finalize_reported_stats_hygiene();
     sync_propagation_profile();
     --propagation_profile_scope_depth;
     return out;
@@ -1632,6 +1651,22 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   };
   auto bc_time_limit_expired = [&]() -> bool {
     return opt.time_limit_sec > 0.0 && bc_elapsed_sec() >= opt.time_limit_sec;
+  };
+
+  // P1: reject pathologically poor candidate incumbents.  A candidate whose
+  // (minimize-convention) objective exceeds the reference dual bound by more
+  // than incumbent_quality_reject_factor * max(1, |bound|) is a repair-path
+  // artefact, not a usable solution.  Accepts when the gate is disabled or
+  // no finite bound is available.
+  auto incumbent_quality_acceptable = [&](double candidate_obj,
+                                          double reference_bound) -> bool {
+    const double factor = opt.incumbent_quality_reject_factor;
+    if (!(factor > 0.0) || !std::isfinite(factor) ||
+        !std::isfinite(reference_bound)) {
+      return true;
+    }
+    return candidate_obj - reference_bound <=
+           factor * std::max(1.0, std::abs(reference_bound));
   };
 
   if (prob.linear_part.vars.empty() || prob.linear_part.c.size() == 0) {
@@ -2829,6 +2864,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                strict_highs_lp_contract ? 1 : 0, orig_n);
   }
 
+  // Best dual bound known at publish time (minimize convention).  NaN until
+  // the root relaxation produces one.  Note: after PaPILO presolve the bound
+  // lives in the reduced space while heuristic_obj is original-space; a
+  // presolve objective offset can therefore shift the comparison, which is
+  // acceptable for the 1e6-relative quality gate and for honest (if slightly
+  // approximate) gap reporting on failure paths.
+  double best_known_root_bound = std::numeric_limits<double>::quiet_NaN();
+
   auto publish_verified_warm_start_time_limit = [&]() {
     out.stats.status = bc_status::kTimeLimitReached;
     out.bc_stats.status = out.stats.status;
@@ -2836,6 +2879,23 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     out.bc_stats.runtime_sec = out.stats.runtime_sec;
     out.stats.solver_name = "NativeBranchAndCut";
     if (heuristic_x_orig.size() == orig_n && std::isfinite(heuristic_obj)) {
+      if (!incumbent_quality_acceptable(heuristic_obj, best_known_root_bound)) {
+        if (opt.verbose) {
+          fmt::print(stderr,
+                     "[B&C] verified warm start rejected by quality gate: "
+                     "obj={:.6g} vs bound={:.6g}\n",
+                     heuristic_obj, best_known_root_bound);
+        }
+        return;
+      }
+      if (opt.verbose && !std::isfinite(best_known_root_bound) &&
+          std::abs(heuristic_obj) > 1e10) {
+        fmt::print(stderr,
+                   "[B&C] warning: publishing verified warm-start incumbent "
+                   "with large objective {:.6g} and no dual bound; solution "
+                   "quality is unknown\n",
+                   heuristic_obj);
+      }
       out.x = heuristic_x_orig;
       out.stats.success = true;
       out.stats.objective = objective_value(prob.linear_part.c, out.x,
@@ -2843,6 +2903,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       out.stats.primal_feas = 0.0;
       out.stats.residual_inf = 0.0;
       out.bc_stats.best_obj = heuristic_obj;
+      if (std::isfinite(best_known_root_bound)) {
+        out.bc_stats.best_bound = best_known_root_bound;
+        out.bc_stats.gap = std::max(
+            0.0, (heuristic_obj - best_known_root_bound) /
+                     std::max(1.0, std::abs(heuristic_obj)));
+      }
       out.bc_stats.incumbent_updates = std::max<std::uint64_t>(
           out.bc_stats.incumbent_updates, 1);
       out.bc_stats.first_incumbent_node = 0;
@@ -2883,6 +2949,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 
   // ── PaPILO presolve ──
   PaPILOPresolveResult papilo_ps;
+  // True iff the working model below is the PaPILO-reduced one; gates the
+  // unpresolved-root fallback retry (root_presolve_fallback).
+  bool papilo_model_reduced = false;
 #ifdef MIPSOLVERS_HAVE_PAPILO
   if (opt.use_papilo_presolve && !strict_highs_root_fixed_point) {
     papilo_ps = papilo_presolve_mip(base_lp, opt.verbose,
@@ -2900,10 +2969,25 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                 "[PAPILO-AUTO] default run: bnd_chg=%d coef_chg=%d — escalating to aggressive\n",
                 papilo_ps.total_bnd_chg, papilo_ps.total_coef_chg);
       papilo_ps = papilo_presolve_mip(base_lp, opt.verbose, PaPILOProfile::kAggressive);
+      // P0(b) diagnostics: the auto-escalated aggressive result is what the
+      // solver actually uses below — attribute its conditioning explicitly so
+      // hardening can be traced to this swap rather than the default run.
+      if ((opt.verbose ||
+           bc_env_flag_enabled("MIPSOLVERS_PRESOLVE_SCALING_DIAG")) &&
+          papilo_ps.success && papilo_ps.reduced_cols > 0) {
+        const auto& as = papilo_ps.after_stats;
+        fprintf(stderr,
+                "[PRESOLVE-SCALING] stage=aggressive-rerun-swap rows=%d "
+                "cols=%d nnz=%lld dyn=%.3e rows_range_gt_1e8=%d "
+                "worst_range=%.3e\n",
+                as.rows, as.cols, as.nnz, as.dynamic_range,
+                as.rows_with_large_range, as.worst_row_range);
+      }
     }
     if (papilo_ps.success && !papilo_ps.infeasible &&
         papilo_ps.reduced_cols > 0) {
       base_lp = std::move(papilo_ps.reduced_lp);
+      papilo_model_reduced = true;
     } else if (papilo_ps.infeasible) {
       out.stats.status = bc_status::kInfeasiblePapiloPresolve;
       return return_with_profile();
@@ -4742,6 +4826,20 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     return return_with_profile();
   }
   root_solve_opt.time_limit_sec = std::max(0.001, bc_remaining_sec());
+  // P0(a) budget reserve: when the unpresolved-root fallback is available,
+  // cap the presolved root LP so a hard root cannot burn the whole limit
+  // before the retry gets a chance (the presolved 118-bus root otherwise
+  // consumes the entire budget in the simplex escalation chain and the
+  // fallback has nothing left to run with).
+  if (papilo_model_reduced && opt.root_presolve_fallback &&
+      opt.time_limit_sec > 0.0 &&
+      opt.root_presolve_fallback_budget_fraction > 0.0) {
+    const double reserve = std::max(
+        opt.root_presolve_fallback_min_remaining_sec,
+        opt.root_presolve_fallback_budget_fraction * opt.time_limit_sec);
+    root_solve_opt.time_limit_sec =
+        std::max(0.001, root_solve_opt.time_limit_sec - reserve);
+  }
 
   // ── P8.1: Background analytic-centre thread ─────────────────────────────
   // Spawn concurrently with the root LP solve so it overlaps with the root LP
@@ -4817,6 +4915,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                       static_cast<int>(root_lp.vars.size()));
   }
   out.bc_stats.lp_solves += 1;
+  // Test seam: deterministically exercise the unpresolved-root fallback.
+  // Fails only the presolved attempt (the retry runs with presolve off), so
+  // the hook is reusable across test cases without hidden static state.
+  if (opt.use_papilo_presolve &&
+      bc_env_flag_enabled("MIPSOLVERS_BC_TEST_FORCE_ROOT_FAIL")) {
+    root_relax.primal.stats.success = false;
+    root_relax.primal.stats.status = "Forced root failure (test seam)";
+  }
   if (!root_relax.primal.stats.success || root_relax.primal.x.size() != n) {
     out.stats.status = root_relax.primal.stats.status == "Time limit"
                            ? bc_status::kTimeLimitReached
@@ -4824,6 +4930,52 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     // Keep bc_stats.status in sync: callers reading BCResult::bc_stats.status
     // must not see an empty string on the root-relaxation failure path.
     out.bc_stats.status = out.stats.status;
+    // P0(a): the presolved root LP can be genuinely harder for the native
+    // simplex than the original one (observed on 118-bus SCUC).  Retry the
+    // whole solve once without PaPILO presolve instead of entering the
+    // repair path with no usable root relaxation.  A root-stage time limit
+    // also qualifies: with the budget reserve above it means the presolved
+    // root exhausted its capped share, not the whole budget (a genuinely
+    // expired limit leaves <= min_remaining and is filtered by the guard).
+    const bool test_forced_fallback =
+        opt.use_papilo_presolve &&
+        bc_env_flag_enabled("MIPSOLVERS_BC_TEST_FORCE_ROOT_FAIL");
+    if ((out.stats.status == bc_status::kRootRelaxationFailed ||
+         out.stats.status == bc_status::kTimeLimitReached) &&
+        opt.root_presolve_fallback &&
+        (papilo_model_reduced || test_forced_fallback) &&
+        bc_remaining_sec() > opt.root_presolve_fallback_min_remaining_sec) {
+      // ac_thread captures references to locals of this frame — join before
+      // anything else.
+      join_root_background_tasks();
+      if (opt.verbose) {
+        fmt::print(stderr,
+                   "[B&C] root relaxation failed on the presolved model — "
+                   "retrying without PaPILO presolve ({:.1f}s remaining)\n",
+                   bc_remaining_sec());
+      }
+      BCOptions retry_opt = opt;
+      retry_opt.use_papilo_presolve = false;
+      // Inner call has presolve off, so the fallback condition cannot
+      // re-fire: recursion depth is bounded at 2 by construction.
+      if (opt.time_limit_sec > 0.0) {
+        retry_opt.time_limit_sec = std::max(0.001, bc_remaining_sec());
+      }
+      BCResult retry =
+          branch_and_cut_lp(prob, retry_opt, callbacks);
+      // The retry result is already original-space (no presolve), so no
+      // postsolve mapping is needed; merge the outer attempt's counters.
+      retry.bc_stats.lp_solves += out.bc_stats.lp_solves;
+      retry.bc_stats.presolve_fallback_attempts += 1;
+      retry.stats.runtime_sec = bc_elapsed_sec();
+      retry.bc_stats.runtime_sec = retry.stats.runtime_sec;
+      // Balance this frame's propagation-profile scope (the retry synced its
+      // own stats at depth 2; the thread-local depth still needs our
+      // decrement, and `out` is abandoned).
+      sync_propagation_profile();
+      --propagation_profile_scope_depth;
+      return retry;
+    }
     if (out.stats.status == bc_status::kTimeLimitReached) {
       publish_verified_warm_start_time_limit();
     }
@@ -4944,6 +5096,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    join_root_background_tasks();
 	    return return_with_profile();
 	  }
+	  best_known_root_bound = root.bound;
 	  root.depth = 0;
 	  const bool highs_root_cutpool_original_lp =
 	      strict_highs_root_fixed_point;
@@ -15376,6 +15529,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    const double actual_obj =
 	        objective_value(base_lp.c, candidate_x, base_lp.sense);
 	    if (!std::isfinite(actual_obj)) {
+	      return false;
+	    }
+	    if (!incumbent_quality_acceptable(actual_obj, root.bound)) {
+	      if (opt.verbose) {
+	        fmt::print(stderr,
+	                   "[B&C] root incumbent from {} rejected by quality gate: "
+	                   "obj={:.6g} vs root bound={:.6g}\n",
+	                   source, actual_obj, root.bound);
+	      }
 	      return false;
 	    }
 	    if (has_incumbent && !(actual_obj + 1e-9 < incumbent_obj)) {
@@ -35108,6 +35270,10 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
         // Tree fully explored with no solver failures and a valid proof gap.
         out.bc_stats.gap = 0.0;
         out.stats.status = bc_status::kOptimalTreeExhausted;
+        // The exhaustion proof makes the incumbent optimal; report the bound
+        // at the incumbent instead of a stale weaker tree bound (which used
+        // to show up as a 7-21% "gap" alongside an Optimal status).
+        out.bc_stats.best_bound = out.bc_stats.best_obj;
       }
       // Otherwise keep the measured gap — queue exhaustion without a closed
       // proof gap is a solver/frontier failure, not an optimality proof.
@@ -35218,6 +35384,20 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
     const int x_sz = static_cast<int>(out.x.size());
     for (int j = 0; j < orig_nc && j < x_sz; ++j)
       obj_val += orig_lp.c[j] * out.x[j];
+    // The reduced model folds constants out of the objective (presolve
+    // reductions), so the internal-space best_obj/best_bound diverge from
+    // the original-space objective by that constant — showing up as a fake
+    // 7-21% "gap" on proven-optimal solves.  Shift the reported bookkeeping
+    // by the same delta to keep all three in one (original) space.
+    const double obj_delta = obj_val - out.stats.objective;
+    if (obj_delta != 0.0) {
+      if (std::isfinite(out.bc_stats.best_obj))
+        out.bc_stats.best_obj += obj_delta;
+      if (std::isfinite(out.bc_stats.best_bound))
+        out.bc_stats.best_bound += obj_delta;
+      if (std::isfinite(out.bc_stats.best_bound_at_last_incumbent))
+        out.bc_stats.best_bound_at_last_incumbent += obj_delta;
+    }
     out.stats.objective = obj_val;
   }
 
@@ -35253,8 +35433,7 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
             out.bc_stats.fallback_l3_success);
   }
 
-  --propagation_profile_scope_depth;
-  return out;
+  return return_with_profile();
 }
 
 

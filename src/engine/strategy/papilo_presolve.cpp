@@ -3,6 +3,102 @@
 
 #include "mipsolvers/engine/strategy/papilo_presolve.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
+#include <vector>
+
+namespace mipsolvers::engine {
+
+MatrixScalingStats compute_matrix_scaling_stats(const LPModel& lp) {
+  MatrixScalingStats s;
+  const int m_ineq = static_cast<int>(lp.A.rows());
+  const int m_eq = static_cast<int>(lp.Aeq.rows());
+  s.rows = m_ineq + m_eq;
+  s.cols = static_cast<int>(lp.vars.size());
+  s.nnz = static_cast<long long>(lp.A.nonZeros()) +
+          static_cast<long long>(lp.Aeq.nonZeros());
+
+  std::vector<double> row_min(static_cast<std::size_t>(std::max(0, s.rows)),
+                              std::numeric_limits<double>::infinity());
+  std::vector<double> row_max(static_cast<std::size_t>(std::max(0, s.rows)),
+                              0.0);
+  std::vector<int> row_nnz(static_cast<std::size_t>(std::max(0, s.rows)), 0);
+  std::vector<int> col_nnz(static_cast<std::size_t>(std::max(0, s.cols)), 0);
+
+  auto scan = [&](const Eigen::SparseMatrix<double>& M, int row_offset) {
+    for (int j = 0; j < M.outerSize(); ++j) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(M, j); it; ++it) {
+        const double a = std::abs(it.value());
+        if (a == 0.0) continue;
+        const std::size_t i =
+            static_cast<std::size_t>(it.row() + row_offset);
+        row_min[i] = std::min(row_min[i], a);
+        row_max[i] = std::max(row_max[i], a);
+        ++row_nnz[i];
+        if (j >= 0 && j < s.cols) ++col_nnz[static_cast<std::size_t>(j)];
+        if (s.abs_min == 0.0 || a < s.abs_min) s.abs_min = a;
+        s.abs_max = std::max(s.abs_max, a);
+      }
+    }
+  };
+  scan(lp.A, 0);
+  scan(lp.Aeq, m_ineq);
+
+  for (int i = 0; i < s.rows; ++i) {
+    const std::size_t iz = static_cast<std::size_t>(i);
+    s.max_row_nnz = std::max(s.max_row_nnz, row_nnz[iz]);
+    if (row_nnz[iz] == 0) continue;
+    const double range = row_max[iz] / row_min[iz];
+    if (range > 1e8) ++s.rows_with_large_range;
+    if (s.worst_row < 0 || range > s.worst_row_range) {
+      s.worst_row = i;
+      s.worst_row_range = range;
+    }
+  }
+  for (int c : col_nnz) s.max_col_nnz = std::max(s.max_col_nnz, c);
+  if (s.abs_min > 0.0) s.dynamic_range = s.abs_max / s.abs_min;
+
+  for (int i = 0; i < lp.b.size(); ++i) {
+    s.b_abs_max = std::max(s.b_abs_max, std::abs(lp.b[i]));
+    const double lhs = i < lp.row_lhs.size() ? lp.row_lhs[i]
+                                             : -std::numeric_limits<double>::infinity();
+    if (std::isfinite(lhs)) s.b_abs_max = std::max(s.b_abs_max, std::abs(lhs));
+  }
+  for (int i = 0; i < lp.beq.size(); ++i) {
+    s.b_abs_max = std::max(s.b_abs_max, std::abs(lp.beq[i]));
+  }
+  for (int j = 0; j < lp.c.size(); ++j) {
+    s.c_abs_max = std::max(s.c_abs_max, std::abs(lp.c[j]));
+  }
+  return s;
+}
+
+namespace {
+
+[[maybe_unused]] bool presolve_scaling_diag_enabled() {
+  const char* e = std::getenv("MIPSOLVERS_PRESOLVE_SCALING_DIAG");
+  return e != nullptr && e[0] != '\0' && e[0] != '0';
+}
+
+[[maybe_unused]] void print_matrix_scaling_stats(const char* stage,
+                                                 const MatrixScalingStats& s) {
+  fprintf(stderr,
+          "[PRESOLVE-SCALING] stage=%s rows=%d cols=%d nnz=%lld "
+          "|A|min=%.3e |A|max=%.3e dyn=%.3e max_row_nnz=%d max_col_nnz=%d "
+          "rows_range_gt_1e8=%d worst_row=%d worst_range=%.3e "
+          "|b|max=%.3e |c|max=%.3e\n",
+          stage, s.rows, s.cols, s.nnz, s.abs_min, s.abs_max, s.dynamic_range,
+          s.max_row_nnz, s.max_col_nnz, s.rows_with_large_range, s.worst_row,
+          s.worst_row_range, s.b_abs_max, s.c_abs_max);
+}
+
+}  // namespace
+
+}  // namespace mipsolvers::engine
+
 #ifdef HACDCPF_HAVE_PAPILO
 
 #include <papilo/core/Problem.hpp>
@@ -100,6 +196,12 @@ PaPILOPresolveResult papilo_presolve_mip(const LPModel& lp, bool verbose,
   result.orig_cols = ncols;
   result.orig_rows = nrows;
   result.orig_nnz = static_cast<int>(lp.A.nonZeros() + lp.Aeq.nonZeros());
+
+  const bool scaling_diag = verbose || presolve_scaling_diag_enabled();
+  result.before_stats = compute_matrix_scaling_stats(lp);
+  if (scaling_diag) {
+    print_matrix_scaling_stats("before", result.before_stats);
+  }
 
   if (ncols == 0 || nrows == 0) {
     result.reduced_lp = lp;
@@ -408,6 +510,15 @@ PaPILOPresolveResult papilo_presolve_mip(const LPModel& lp, bool verbose,
 
   auto t1 = std::chrono::steady_clock::now();
   result.presolve_time_sec = std::chrono::duration<double>(t1 - t0).count();
+
+  if (result.reduced_cols > 0) {
+    result.after_stats = compute_matrix_scaling_stats(result.reduced_lp);
+    if (scaling_diag) {
+      print_matrix_scaling_stats(
+          profile == PaPILOProfile::kAggressive ? "after-aggressive" : "after",
+          result.after_stats);
+    }
+  }
 
   if (verbose) {
     fprintf(stderr,

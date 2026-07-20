@@ -517,4 +517,161 @@ TEST_CASE("Cold-start escalation chain agrees with default solve",
   REQUIRE(res_off.result.stats.success);
   CHECK(res.result.stats.objective ==
         Approx(res_off.result.stats.objective).margin(1e-9));
+
+  SimplexOptions start1;
+  start1.max_iter = 100000;
+  start1.escalation_start_level = 1;  // begin directly at the hardened level
+  const auto res_start1 = solve_lp_with_basis(lp, start1);
+  REQUIRE(res_start1.result.stats.success);
+  CHECK(res_start1.result.stats.objective ==
+        Approx(res_off.result.stats.objective).margin(1e-9));
+}
+
+// ─── False-optimal residual audit (round 2) ──────────────────────────────────
+// The audit that guards cold-start "Optimal" results must accept a true
+// solution and reject a corrupted one (the HiGHS-style "Optimal but wrong"
+// failure mode from the scaling probe).
+TEST_CASE("Residual audit accepts true solutions and rejects corrupted ones",
+          "[numerical][escalation][audit]") {
+  LPModel lp = make_scaled_lp(1.0, 1.0, 1.0, 1.0);  // optimum (2, 4), obj -14
+  const auto res = solve_lp_with_basis(lp, SimplexOptions{});
+  REQUIRE(res.result.stats.success);
+  CHECK(res.result.stats.objective == Approx(-14.0).margin(1e-8));
+
+  CHECK(lp_solution_residual_acceptable(lp, res.result.x, 1e-8));
+
+  // Corrupted iterate: violates the row 2x + y <= 8 by a wide margin.
+  Eigen::VectorXd bad = res.result.x;
+  bad[0] += 1.0;
+  CHECK_FALSE(lp_solution_residual_acceptable(lp, bad, 1e-8));
+
+  // Bound violation is also caught.
+  Eigen::VectorXd below = res.result.x;
+  below[1] = -1.0;
+  CHECK_FALSE(lp_solution_residual_acceptable(lp, below, 1e-8));
+
+  // Wrong-sized vector is rejected outright.
+  CHECK_FALSE(lp_solution_residual_acceptable(lp, Eigen::VectorXd::Zero(1), 1e-8));
+
+  // A cold-start "Optimal" that fails the audit at every escalation level is
+  // demoted to an honest failure, never returned as a false optimum (the
+  // stocfor1-1e6 scaling probe is the deterministic real-world trigger).
+  SimplexOptions paranoid;
+  // Negative tol rejects even an exact zero-residual solution (viol >= 0 by
+  // construction), forcing the audit to fail at every escalation level.
+  paranoid.escalation_residual_tol = -1.0;
+  const auto demoted = solve_lp_with_basis(lp, paranoid);
+  CHECK_FALSE(demoted.result.stats.success);
+  CHECK(demoted.result.stats.status == "Residual audit rejected");
+}
+
+// ─── solve_lp_from_sf escalation chain (round 2) ─────────────────────────────
+// The standard-form entry point (cut re-solves, IPM-repair crossover) gets the
+// same cold-start escalation as the LPModel path.  Levels >= 1 solve a
+// re-equilibrated copy and publish through a warm re-solve of the caller's sf,
+// so all outputs must land in caller space.
+
+namespace {
+
+// Degenerate assignment LP (same family as the escalation tests above):
+// m = S + T rows > kSparseSimplexThreshold so the sparse path is exercised.
+LPModel make_assignment_lp(int S, int T) {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  const int n = S * T;
+  lp.c.resize(n);
+  auto planted = [&](int i) { return (i * 7 + 3) % T; };
+  std::vector<Eigen::Triplet<double>> trips, trips_eq;
+  for (int i = 0; i < S; ++i) {
+    for (int j = 0; j < T; ++j) {
+      const int v = i * T + j;
+      lp.c[v] = (j == planted(i)) ? 0.0
+                                  : 1.0 + static_cast<double>((i * T + j) % 11) * 1e-3;
+      trips.emplace_back(i, v, 1.0);
+      trips_eq.emplace_back(j, v, 1.0);
+      lp.vars.push_back({VarType::Continuous, 0.0, 1.0});
+    }
+  }
+  lp.A.resize(S, n);
+  lp.A.setFromTriplets(trips.begin(), trips.end());
+  lp.b = Eigen::VectorXd::Ones(S);
+  lp.Aeq.resize(T, n);
+  lp.Aeq.setFromTriplets(trips_eq.begin(), trips_eq.end());
+  lp.beq = Eigen::VectorXd::Ones(T);
+  return lp;
+}
+
+}  // namespace
+
+TEST_CASE("solve_lp_from_sf escalation levels agree with the default path",
+          "[numerical][escalation][sf]") {
+  LPModel lp = make_assignment_lp(110, 110);
+  StandardFormLP sf = build_standard_form_lp(lp);
+  ruiz_scale_standard_form(sf, 10);
+
+  SimplexOptions base;
+  base.max_iter = 100000;
+  const auto res0 = solve_lp_from_sf(sf, base);
+  REQUIRE(res0.result.stats.success);
+  CHECK(res0.result.stats.objective == Approx(0.0).margin(1e-6));
+
+  SimplexOptions lvl1 = base;
+  lvl1.escalation_start_level = 1;
+  const auto res1 = solve_lp_from_sf(sf, lvl1);
+  REQUIRE(res1.result.stats.success);
+  CHECK(res1.result.stats.objective ==
+        Approx(res0.result.stats.objective).margin(1e-9));
+
+#if defined(MIPSOLVERS_HAVE_KLU)
+  SimplexOptions lvl2 = base;
+  lvl2.escalation_start_level = 2;
+  const auto res2 = solve_lp_from_sf(sf, lvl2);
+  REQUIRE(res2.result.stats.success);
+  CHECK(res2.result.stats.objective ==
+        Approx(res0.result.stats.objective).margin(1e-9));
+#endif
+}
+
+TEST_CASE("solve_lp_from_sf escalation publishes in caller sf space",
+          "[numerical][escalation][sf]") {
+  LPModel lp = make_assignment_lp(110, 110);
+  StandardFormLP sf = build_standard_form_lp(lp);
+  ruiz_scale_standard_form(sf, 10);
+
+  SimplexOptions lvl1;
+  lvl1.max_iter = 100000;
+  lvl1.escalation_start_level = 1;  // forces the copy-solve + publish path
+  const auto res = solve_lp_from_sf(sf, lvl1);
+  REQUIRE(res.result.stats.success);
+
+  // x_std must satisfy the CALLER's scaled system, not the re-equilibrated
+  // copy's: a hand-mapping bug between the two scalings would show up here.
+  REQUIRE(res.x_std.size() == static_cast<int>(sf.A.cols()));
+  const Eigen::VectorXd r = sf.A * res.x_std - sf.b;
+  CHECK(r.cwiseAbs().maxCoeff() < 1e-7);
+  CHECK(sf_solution_residual_acceptable(sf, res.x_std, 1e-6));
+}
+
+TEST_CASE("solve_lp_from_sf warm hints are never audited or escalated",
+          "[numerical][escalation][sf]") {
+  LPModel lp = make_assignment_lp(110, 110);
+  StandardFormLP sf = build_standard_form_lp(lp);
+  ruiz_scale_standard_form(sf, 10);
+
+  SimplexOptions opt;
+  opt.max_iter = 100000;
+  const auto cold = solve_lp_from_sf(sf, opt);
+  REQUIRE(cold.result.stats.success);
+
+  // Absurd residual tolerance: if the chain audited warm-hint results, this
+  // would reject the (perfectly good) solution and trigger cold escalation;
+  // with allow_cold_start=false the single warm attempt must stand.
+  SimplexOptions warm = opt;
+  warm.allow_cold_start = false;
+  warm.escalation_residual_tol = 1e-300;
+  const auto res = solve_lp_from_sf(sf, warm, &cold.basis);
+  REQUIRE(res.result.stats.success);
+  CHECK(res.solved_from_hint);
+  CHECK(res.result.stats.objective ==
+        Approx(cold.result.stats.objective).margin(1e-9));
 }
