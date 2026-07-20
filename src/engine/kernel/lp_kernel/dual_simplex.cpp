@@ -6023,6 +6023,58 @@ bool sparse_primal_simplex_optimize(
 // Advanced sparse dual simplex with Harris ratio test.
 // This is the primary warm-start method for B&C: when branching changes bounds,
 // dual feasibility is preserved and only primal feasibility needs restoration.
+// ── Singularity autopsy dump (MIPSOLVERS_SING_DUMP=1) ─────────────────────
+// Called when a warm reopt hits a refactorize failure.  Dumps the SF matrix,
+// the failing basis, and the HFactor no-pivot row set (independent rank
+// detection) so the exact dependent combination can be analysed offline.
+static void sing_autopsy_dump(const StandardFormLP& sf,
+                              const std::vector<int>& basis,
+                              const char* tag) {
+  static const bool enabled = []() {
+    const char* e = std::getenv("MIPSOLVERS_SING_DUMP");
+    return e && e[0] == '1';
+  }();
+  if (!enabled) return;
+  static std::atomic<int> counter{0};
+  const int id = counter.fetch_add(1);
+  if (id >= 4) return;  // cap dumps per process
+  const int m = static_cast<int>(sf.A.rows());
+  char path[256];
+  std::snprintf(path, sizeof(path), "/tmp/sing_autopsy_%d_%s.txt", id, tag);
+  FILE* f = std::fopen(path, "w");
+  if (!f) return;
+  const int n = static_cast<int>(sf.A.cols());
+  std::fprintf(f, "m %d n %d n_original %d\n", m, n, sf.n_original);
+  std::fprintf(f, "basis");
+  for (int i = 0; i < m; ++i) std::fprintf(f, " %d", basis[i]);
+  std::fprintf(f, "\n");
+  std::fprintf(f, "row_to_slack");
+  for (int i = 0; i < m; ++i) std::fprintf(f, " %d", sf.row_to_slack_col[i]);
+  std::fprintf(f, "\n");
+  std::fprintf(f, "row_to_artificial");
+  for (int i = 0; i < m; ++i) std::fprintf(f, " %d", sf.row_to_artificial_col[i]);
+  std::fprintf(f, "\n");
+  std::fprintf(f, "var_ub");
+  for (int j = 0; j < n; ++j) std::fprintf(f, " %.17g", sf.var_ub[j]);
+  std::fprintf(f, "\n");
+  for (int j = 0; j < n; ++j) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, j); it; ++it)
+      std::fprintf(f, "a %d %d %.17g\n", it.row(), j, it.value());
+  }
+  // HFactor diagnostic rank detection on the failing basis.
+  HFactorBackend diag;
+  if (!diag.factorize(sf.A, basis.data(), m)) {
+    std::fprintf(f, "hfactor_rank_deficiency %d\n", diag.rank_deficiency);
+    std::fprintf(f, "no_pivot_rows");
+    for (int r : diag.no_pivot_rows()) std::fprintf(f, " %d", r);
+    std::fprintf(f, "\n");
+  } else {
+    std::fprintf(f, "hfactor_rank_deficiency 0\n");
+  }
+  std::fclose(f);
+  std::fprintf(stderr, "[SING-DUMP] wrote %s\n", path);
+}
+
 bool sparse_dual_simplex_reoptimize(
     const StandardFormLP& sf,
     std::vector<int>& basis,
@@ -6714,7 +6766,11 @@ bool sparse_dual_simplex_reoptimize(
     iter_timing.dse_ns += it_ns(t7, t8);
 
     if (sbasis.needs_refactorize(m)) {
-      if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) { tl_dual_reopt_fail_reason = 7; return false; }
+      if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) {
+        tl_dual_reopt_fail_reason = 7;
+        sing_autopsy_dump(sf, basis, "periodic");
+        return false;
+      }
       sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
       cleanup_reduced_costs();
       // Reset sparse pricing state so next iteration does full zeroing.
