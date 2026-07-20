@@ -80,6 +80,21 @@ struct RPOOptions {
   /// Retained for source compatibility; discrete values are represented as int.
   double int_tol{1e-5};
 
+  // ---- Parallel discrete evaluation ----
+  /// Threads used to evaluate independent discrete candidates (OLTC tap /
+  /// switchable-shunt settings) in each search wave.  Each candidate is a full
+  /// AC OPF solve; evaluating a batch in parallel is near-linear on the search
+  /// phase.  0 = auto (hardware_concurrency, clamped to the batch size), 1 =
+  /// sequential.  Forced to 1 on hybrid AC/DC grids: those drive MUMPS, which
+  /// keeps mutable state in Fortran modules and is serialised by a process-wide
+  /// mutex (correct but not faster), so threading only adds overhead there.
+  /// Pure-AC grids use KLU (per-instance, thread-safe); the rare KLU→MUMPS
+  /// escalation is serialised by the same mutex, so parallel stays safe.
+  /// Note: parallel changes the search from Gauss-Seidel to Jacobi (incumbent
+  /// updated between waves, not within), so the trajectory — and possibly the
+  /// local optimum found — can differ slightly from the sequential path.
+  int num_threads{0};
+
   // Retained for compatibility with older B&B-backed builds; the current local
   // search does not consume these strategy selectors.
   engine::BranchingStrategy branching{engine::BranchingStrategy::Pseudocost};

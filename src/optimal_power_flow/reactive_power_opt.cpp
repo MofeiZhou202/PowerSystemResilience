@@ -27,6 +27,7 @@
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <chrono>
 #include <cstdio>
@@ -34,6 +35,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -398,6 +400,89 @@ ACOPFResult solve_opf_inplace(
   // Restore original settings so mut_sys is clean for next call
   apply_settings(mut_sys, taps, orig_tap_pos, shunts, orig_shunt_steps);
   return r;
+}
+
+// ───────── Parallel batch evaluation ──────────────────────────────────────
+
+// Evaluate a set of independent discrete candidates in parallel (vendored
+// std::thread only).  candidates[i] = (tap_pos, shunt_steps); objectives[i] is
+// filled with the RPO objective, or 1e30 if the inner solve is infeasible.
+//
+// Each worker thread deep-copies the system ONCE and solves its share via
+// solve_opf_inplace, warm-started from the SAME read-only incumbent snapshot —
+// so a wave is Jacobi (incumbent advances between waves, not within), matching
+// how the search phases are driven.  num_threads <= 1 (and hybrid AC/DC, whose
+// MUMPS path is serialised by a process-wide mutex and gains nothing) runs an
+// in-line sequential loop.  Pure-AC uses KLU (per-instance, thread-safe); the
+// rare KLU→MUMPS escalation is serialised by that mutex, so it stays safe.
+void evaluate_batch_parallel(
+    HybridPowerSystem& mut_sys,   // template — read concurrently, deep-copied per thread
+    const std::vector<TapInfo>& taps,
+    const std::vector<ShuntInfo>& shunts,
+    const std::vector<int>& orig_tap_pos,
+    const std::vector<int>& orig_shunt_steps,
+    const RPOOptions& rpo_opt,
+    const ACOPFResult* warm_start,
+    int ipm_iter_cap,
+    bool allow_second_leg,
+    const std::vector<std::pair<std::vector<int>, std::vector<int>>>& candidates,
+    std::vector<double>& objectives,
+    int num_threads,
+    // Best-candidate tracking (mutex-guarded): lets the caller advance the
+    // incumbent with the full result, avoiding a deterministic re-solve.
+    double& best_obj,                 // in: incumbent_obj threshold; out: best found
+    ACOPFResult& best_result,         // out: result of the best improving candidate
+    std::pair<std::vector<int>, std::vector<int>>& best_cand)  // out: its settings
+{
+  const size_t nc = candidates.size();
+  objectives.assign(nc, 1e30);
+  if (nc == 0) return;
+  const auto measured_ok = [&](const ACOPFResult& rr) {
+    return rr.converged ||
+           (rr.max_constraint_violation <= rpo_opt.ipm_tol &&
+            rr.max_stationarity <= rpo_opt.stationarity_tol);
+  };
+  std::mutex best_mu;
+  bool have_best = false;
+  // Dynamic work-stealing over a shared atomic index: per-candidate solve
+  // times vary (fail-fast cap bounds the worst, but not uniformly), so a
+  // static partition would leave cores idle.
+  std::atomic<size_t> next{0};
+  const auto worker = [&]() {
+    HybridPowerSystem sys_t = mut_sys;  // one deep copy per thread, reused
+    for (;;) {
+      const size_t i = next.fetch_add(1, std::memory_order_relaxed);
+      if (i >= nc) break;
+      ACOPFResult r = solve_opf_inplace(sys_t, taps, candidates[i].first,
+                                        shunts, candidates[i].second,
+                                        orig_tap_pos, orig_shunt_steps,
+                                        rpo_opt, warm_start, ipm_iter_cap,
+                                        allow_second_leg);
+      const double obj =
+          measured_ok(r) ? rpo_objective(r, sys_t, rpo_opt) : 1e30;
+      objectives[i] = obj;
+      if (obj < best_obj) {
+        std::lock_guard<std::mutex> lk(best_mu);
+        if (obj < best_obj) {
+          best_obj = obj;
+          best_result = r;  // copy (kept for the incumbent)
+          best_cand = candidates[i];
+          have_best = true;
+        }
+      }
+    }
+  };
+  const int nthreads =
+      std::max(1, std::min(num_threads, static_cast<int>(nc)));
+  if (nthreads == 1) {
+    worker();
+  } else {
+    std::vector<std::thread> pool;
+    pool.reserve(static_cast<size_t>(nthreads));
+    for (int t = 0; t < nthreads; ++t) pool.emplace_back(worker);
+    for (auto& th : pool) th.join();
+  }
+  if (!have_best) best_cand = {{}, {}};
 }
 
 // ───────── Local sensitivity planes (diagnostic, never pruning) ──────────
@@ -845,6 +930,66 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
     return obj;
   };
 
+  // ── Parallel-wave evaluation ─────────────────────────────────────────────
+  // Resolve the parallel width: 0 → hardware_concurrency; forced to 1 on
+  // hybrid (MUMPS path is mutex-serialised, so threading only adds overhead).
+  int nthreads = opt.num_threads;
+  if (nthreads <= 0)
+    nthreads = static_cast<int>(std::thread::hardware_concurrency());
+  if (is_hybrid) nthreads = 1;
+  if (nthreads < 1) nthreads = 1;
+
+  // Evaluate a WAVE of independent candidates (all warm-started from the
+  // current incumbent snapshot) in parallel, then merge: cache every result
+  // and advance the incumbent to the best improving candidate (whose full
+  // result the parallel evaluator tracked).  Returns the per-candidate
+  // objective (cached values reused).  This is the Jacobi form of the search:
+  // the incumbent advances between waves, not within.
+  auto evaluate_wave = [&](const std::vector<
+      std::pair<std::vector<int>, std::vector<int>>>& cands) {
+    std::vector<double> objs(cands.size(), 1e30);
+    std::vector<std::pair<std::vector<int>, std::vector<int>>> fresh;
+    std::vector<size_t> fresh_idx;
+    const auto make_key = [](const std::pair<std::vector<int>,
+                                             std::vector<int>>& c) {
+      std::vector<int> key;
+      key.insert(key.end(), c.first.begin(), c.first.end());
+      key.insert(key.end(), c.second.begin(), c.second.end());
+      return key;
+    };
+    for (size_t i = 0; i < cands.size(); ++i) {
+      const auto key = make_key(cands[i]);
+      auto it = eval_cache.find(key);
+      if (it != eval_cache.end()) objs[i] = it->second;
+      else { fresh.push_back(cands[i]); fresh_idx.push_back(i); }
+    }
+    if (fresh.empty()) return objs;
+    const int eval_cap = is_hybrid ? 0 : opt.search_ipm_iter;
+    std::vector<double> fresh_objs;
+    double best_obj = incumbent_obj;
+    ACOPFResult best_result;
+    std::pair<std::vector<int>, std::vector<int>> best_cand;
+    evaluate_batch_parallel(mut_sys, taps, shunts, orig_tp, orig_ss, opt,
+                            incumbent_result.converged ? &incumbent_result
+                                                       : nullptr,
+                            eval_cap, /*allow_second_leg=*/is_hybrid,
+                            fresh, fresh_objs, nthreads,
+                            best_obj, best_result, best_cand);
+    out.nlp_solves += static_cast<int>(fresh.size());
+    out.nodes_explored += static_cast<int>(fresh.size());
+    for (size_t j = 0; j < fresh.size(); ++j) {
+      objs[fresh_idx[j]] = fresh_objs[j];
+      eval_cache[make_key(fresh[j])] = fresh_objs[j];
+    }
+    if (!best_cand.first.empty() || !best_cand.second.empty()) {
+      incumbent_obj = best_obj;
+      incumbent_result = std::move(best_result);
+      incumbent_tp = best_cand.first;
+      incumbent_ss = best_cand.second;
+    }
+    return objs;
+  };
+
   // Helper: retain a local 1-D sensitivity plane for diagnostics.
   auto add_1d_plane = [&](const std::vector<int>& tp,
                           const std::vector<int>& ss,
@@ -866,27 +1011,65 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
   struct SensEntry { int var_idx; double sensitivity; };
   std::vector<SensEntry> sensitivities;
 
-  for (int vi = 0; vi < n_disc && budget_ok(); ++vi) {
-    int cur = get_var(base_tp, base_ss, vi);
-    double best_delta = 0.0;
-
-    for (int dir : {-1, 1}) {
-      int nv = cur + dir;
-      if (nv < var_lo(vi) || nv > var_hi(vi)) continue;
-      auto trial_tp = base_tp;
-      auto trial_ss = base_ss;
-      set_var(trial_tp, trial_ss, vi, nv);
-      double obj = evaluate(trial_tp, trial_ss);
-      if (obj < 1e20) {
-        best_delta = std::max(best_delta, std::abs(obj - incumbent_obj));
-
-        // Generate OA cut from this perturbation
-        double grad = (obj - incumbent_obj) / dir;
-        add_1d_plane(trial_tp, trial_ss, vi, obj, grad);
+  if (nthreads > 1) {
+    // Phase 0 (parallel wave): all ±1 candidates are independent of the
+    // baseline; sensitivities are computed against the wave-start (baseline)
+    // objective.
+    std::vector<std::pair<std::vector<int>, std::vector<int>>> cands;
+    std::vector<std::pair<int, int>> cand_var_dir;  // (vi, dir) per candidate
+    for (int vi = 0; vi < n_disc; ++vi) {
+      const int cur = get_var(base_tp, base_ss, vi);
+      for (int dir : {-1, 1}) {
+        const int nv = cur + dir;
+        if (nv < var_lo(vi) || nv > var_hi(vi)) continue;
+        auto t_tp = base_tp;
+        auto t_ss = base_ss;
+        set_var(t_tp, t_ss, vi, nv);
+        cands.push_back({t_tp, t_ss});
+        cand_var_dir.push_back({vi, dir});
       }
     }
-    sensitivities.push_back({vi, best_delta});
+    std::vector<double> best_delta(static_cast<size_t>(n_disc), 0.0);
+    if (budget_ok() && !cands.empty()) {
+      const double base_obj = incumbent_obj;  // wave-start reference
+      const std::vector<double> objs = evaluate_wave(cands);
+      for (size_t k = 0; k < cands.size(); ++k) {
+        const int vi = cand_var_dir[k].first;
+        const int dir = cand_var_dir[k].second;
+        const double obj = objs[k];
+        if (obj < 1e20) {
+          best_delta[vi] = std::max(best_delta[vi], std::abs(obj - base_obj));
+          const double grad = (obj - base_obj) / dir;
+          add_1d_plane(cands[k].first, cands[k].second, vi, obj, grad);
+        }
+      }
+    }
+    for (int vi = 0; vi < n_disc; ++vi)
+      sensitivities.push_back({vi, best_delta[vi]});
+  } else {
+    // Phase 0 (sequential, bit-identical to the pre-parallel path): live
+    // incumbent reference, Gauss–Seidel update order.
+    std::vector<double> best_delta(static_cast<size_t>(n_disc), 0.0);
+    for (int vi = 0; vi < n_disc && budget_ok(); ++vi) {
+      const int cur = get_var(base_tp, base_ss, vi);
+      for (int dir : {-1, 1}) {
+        const int nv = cur + dir;
+        if (nv < var_lo(vi) || nv > var_hi(vi)) continue;
+        auto trial_tp = base_tp;
+        auto trial_ss = base_ss;
+        set_var(trial_tp, trial_ss, vi, nv);
+        const double obj = evaluate(trial_tp, trial_ss);
+        if (obj < 1e20) {
+          best_delta[vi] = std::max(best_delta[vi], std::abs(obj - incumbent_obj));
+          const double grad = (obj - incumbent_obj) / dir;
+          add_1d_plane(trial_tp, trial_ss, vi, obj, grad);
+        }
+      }
+    }
+    for (int vi = 0; vi < n_disc; ++vi)
+      sensitivities.push_back({vi, best_delta[vi]});
   }
+  rpo_phase_log("phase0 sensitivity", t0);
 
   // Sort by decreasing sensitivity
   std::sort(sensitivities.begin(), sensitivities.end(),
@@ -897,7 +1080,6 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
   std::vector<int> var_order;
   for (const auto& se : sensitivities)
     var_order.push_back(se.var_idx);
-  rpo_phase_log("phase0 sensitivity", t0);
 
   // ─── Phase 1: Ternary-search sweep per variable ───────────────
   //
@@ -907,6 +1089,17 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
   // evaluations per variable.  Falls back to golden-section-style
   // narrowing on the integer grid.
 
+  // ─── Phase 1: Ternary-search sweep per variable ───────────────
+  //
+  // For each variable (in sensitivity order), perform a discrete
+  // ternary search exploiting approximate unimodality of the RPO
+  // objective in each variable.  This reduces O(R) to O(log R)
+  // evaluations per variable.  Falls back to golden-section-style
+  // narrowing on the integer grid.  This phase is kept SEQUENTIAL
+  // (Gauss–Seidel): a cross-variable Jacobi form was measured to lose the
+  // directed per-variable optimisation and degrade RPO quality (more
+  // evaluations but less loss reduction); the parallel phases 0/2/3 carry
+  // the speedup.
   for (int vi : var_order) {
     if (!budget_ok()) break;
     int lo = var_lo(vi);
@@ -917,17 +1110,23 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
       int m1 = lo + (hi - lo) / 3;
       int m2 = hi - (hi - lo) / 3;
 
+      double f1, f2;
       auto tp1 = incumbent_tp, ss1 = incumbent_ss;
       set_var(tp1, ss1, vi, m1);
-      double f1 = evaluate(tp1, ss1);
-
       auto tp2 = incumbent_tp, ss2 = incumbent_ss;
       set_var(tp2, ss2, vi, m2);
-      double f2 = evaluate(tp2, ss2);
-
-      // Retain local sensitivity planes from both evaluations.
+      if (nthreads > 1) {
+        // Pure-AC: evaluate the (m1, m2) pair as a 2-candidate parallel wave,
+        // keeping the per-variable Gauss–Seidel narrowing structure.
+        const std::vector<double> fv = evaluate_wave({{tp1, ss1}, {tp2, ss2}});
+        f1 = fv[0];
+        f2 = fv[1];
+      } else {
+        f1 = evaluate(tp1, ss1);
+        f2 = evaluate(tp2, ss2);
+      }
       if (f1 < 1e20 && f2 < 1e20 && m2 != m1) {
-        double grad = (f2 - f1) / (m2 - m1);
+        const double grad = (f2 - f1) / (m2 - m1);
         add_1d_plane(tp1, ss1, vi, f1, grad);
         add_1d_plane(tp2, ss2, vi, f2, grad);
       }
@@ -939,11 +1138,22 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
     }
 
     // Exhaustive search in the remaining small window [lo, hi]
-    for (int v = lo; v <= hi && budget_ok(); ++v) {
-      auto sweep_tp = incumbent_tp;
-      auto sweep_ss = incumbent_ss;
-      set_var(sweep_tp, sweep_ss, vi, v);
-      evaluate(sweep_tp, sweep_ss);
+    if (nthreads > 1) {
+      std::vector<std::pair<std::vector<int>, std::vector<int>>> cands;
+      for (int v = lo; v <= hi; ++v) {
+        auto t_tp = incumbent_tp;
+        auto t_ss = incumbent_ss;
+        set_var(t_tp, t_ss, vi, v);
+        cands.push_back({t_tp, t_ss});
+      }
+      if (budget_ok() && !cands.empty()) evaluate_wave(cands);
+    } else {
+      for (int v = lo; v <= hi && budget_ok(); ++v) {
+        auto sweep_tp = incumbent_tp;
+        auto sweep_ss = incumbent_ss;
+        set_var(sweep_tp, sweep_ss, vi, v);
+        evaluate(sweep_tp, sweep_ss);
+      }
     }
   }
   rpo_phase_log("phase1 ternary", t0);
@@ -959,28 +1169,53 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
     bool improved_this_cycle = false;
     for (int vi : var_order) {
       if (!budget_ok()) break;
-      int cur_val = get_var(incumbent_tp, incumbent_ss, vi);
-      auto sweep_tp = incumbent_tp;
-      auto sweep_ss = incumbent_ss;
-
-      for (int v = var_lo(vi); v <= var_hi(vi) && budget_ok(); ++v) {
-        if (v == cur_val) continue;
-        set_var(sweep_tp, sweep_ss, vi, v);
-
-        auto y_cand = to_dvec(sweep_tp, sweep_ss);
-
-        double obj = evaluate(sweep_tp, sweep_ss);
-
-        // Add OA cut from this evaluation
-        if (obj < 1e20) {
-          auto y_inc = to_dvec(incumbent_tp, incumbent_ss);
-          double dy = y_cand[vi] - y_inc[vi];
-          double grad = (std::abs(dy) > 0.5)
-                          ? (obj - incumbent_obj) / dy : 0.0;
-          add_1d_plane(sweep_tp, sweep_ss, vi, obj, grad);
-
-          if (obj < incumbent_obj - opt.gap_tol)
-            improved_this_cycle = true;
+      const int cur_val = get_var(incumbent_tp, incumbent_ss, vi);
+      if (nthreads > 1) {
+        // Parallel wave: this variable's sweep is evaluated from the SAME
+        // sweep-start incumbent (semantically a wave; best value applied).
+        std::vector<std::pair<std::vector<int>, std::vector<int>>> cands;
+        std::vector<int> cand_v;
+        for (int v = var_lo(vi); v <= var_hi(vi); ++v) {
+          if (v == cur_val) continue;
+          auto t_tp = incumbent_tp;
+          auto t_ss = incumbent_ss;
+          set_var(t_tp, t_ss, vi, v);
+          cands.push_back({t_tp, t_ss});
+          cand_v.push_back(v);
+        }
+        if (cands.empty()) continue;
+        const double wave_start_obj = incumbent_obj;
+        const auto y_inc = to_dvec(incumbent_tp, incumbent_ss);
+        const std::vector<double> objs = evaluate_wave(cands);
+        for (size_t k = 0; k < cands.size(); ++k) {
+          const double obj = objs[k];
+          if (obj < 1e20) {
+            const double dy = cand_v[k] - y_inc[vi];
+            const double grad =
+                (std::abs(dy) > 0.5) ? (obj - wave_start_obj) / dy : 0.0;
+            add_1d_plane(cands[k].first, cands[k].second, vi, obj, grad);
+          }
+        }
+        if (incumbent_obj < wave_start_obj - opt.gap_tol)
+          improved_this_cycle = true;
+      } else {
+        // Sequential (bit-identical to the pre-parallel path).
+        auto sweep_tp = incumbent_tp;
+        auto sweep_ss = incumbent_ss;
+        for (int v = var_lo(vi); v <= var_hi(vi) && budget_ok(); ++v) {
+          if (v == cur_val) continue;
+          set_var(sweep_tp, sweep_ss, vi, v);
+          const auto y_cand = to_dvec(sweep_tp, sweep_ss);
+          const double obj = evaluate(sweep_tp, sweep_ss);
+          if (obj < 1e20) {
+            const auto y_inc = to_dvec(incumbent_tp, incumbent_ss);
+            const double dy = y_cand[vi] - y_inc[vi];
+            const double grad =
+                (std::abs(dy) > 0.5) ? (obj - incumbent_obj) / dy : 0.0;
+            add_1d_plane(sweep_tp, sweep_ss, vi, obj, grad);
+            if (obj < incumbent_obj - opt.gap_tol)
+              improved_this_cycle = true;
+          }
         }
       }
     }
@@ -994,26 +1229,53 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
   // around the incumbent, to capture 2-variable interactions that
   // coordinate descent may miss.
 
-  for (size_t ii = 0; ii < var_order.size() && budget_ok(); ++ii) {
-    for (size_t jj = ii + 1; jj < var_order.size() && budget_ok(); ++jj) {
-      int vi = var_order[ii];
-      int vj = var_order[jj];
-      int ci = get_var(incumbent_tp, incumbent_ss, vi);
-      int cj = get_var(incumbent_tp, incumbent_ss, vj);
-      for (int di : {-1, 1}) {
-        int ni = ci + di;
-        if (ni < var_lo(vi) || ni > var_hi(vi)) continue;
-        for (int dj : {-1, 1}) {
-          if (!budget_ok()) break;
-          int nj = cj + dj;
-          if (nj < var_lo(vj) || nj > var_hi(vj)) continue;
-
-          auto trial_tp = incumbent_tp;
-          auto trial_ss = incumbent_ss;
-          set_var(trial_tp, trial_ss, vi, ni);
-          set_var(trial_tp, trial_ss, vj, nj);
-
-          evaluate(trial_tp, trial_ss);
+  if (nthreads > 1) {
+    // Parallel wave: all ±1 pair perturbations are independent of the
+    // incumbent — one Jacobi polish wave.
+    std::vector<std::pair<std::vector<int>, std::vector<int>>> cands;
+    for (size_t ii = 0; ii < var_order.size(); ++ii) {
+      for (size_t jj = ii + 1; jj < var_order.size(); ++jj) {
+        const int vi = var_order[ii];
+        const int vj = var_order[jj];
+        const int ci = get_var(incumbent_tp, incumbent_ss, vi);
+        const int cj = get_var(incumbent_tp, incumbent_ss, vj);
+        for (int di : {-1, 1}) {
+          const int ni = ci + di;
+          if (ni < var_lo(vi) || ni > var_hi(vi)) continue;
+          for (int dj : {-1, 1}) {
+            const int nj = cj + dj;
+            if (nj < var_lo(vj) || nj > var_hi(vj)) continue;
+            auto t_tp = incumbent_tp;
+            auto t_ss = incumbent_ss;
+            set_var(t_tp, t_ss, vi, ni);
+            set_var(t_tp, t_ss, vj, nj);
+            cands.push_back({t_tp, t_ss});
+          }
+        }
+      }
+    }
+    if (budget_ok() && !cands.empty()) evaluate_wave(cands);
+  } else {
+    // Sequential (bit-identical to the pre-parallel path).
+    for (size_t ii = 0; ii < var_order.size() && budget_ok(); ++ii) {
+      for (size_t jj = ii + 1; jj < var_order.size() && budget_ok(); ++jj) {
+        const int vi = var_order[ii];
+        const int vj = var_order[jj];
+        const int ci = get_var(incumbent_tp, incumbent_ss, vi);
+        const int cj = get_var(incumbent_tp, incumbent_ss, vj);
+        for (int di : {-1, 1}) {
+          const int ni = ci + di;
+          if (ni < var_lo(vi) || ni > var_hi(vi)) continue;
+          for (int dj : {-1, 1}) {
+            if (!budget_ok()) break;
+            const int nj = cj + dj;
+            if (nj < var_lo(vj) || nj > var_hi(vj)) continue;
+            auto trial_tp = incumbent_tp;
+            auto trial_ss = incumbent_ss;
+            set_var(trial_tp, trial_ss, vi, ni);
+            set_var(trial_tp, trial_ss, vj, nj);
+            evaluate(trial_tp, trial_ss);
+          }
         }
       }
     }
