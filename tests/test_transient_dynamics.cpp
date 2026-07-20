@@ -23,6 +23,7 @@
 #include "hacdcpf/dynamics/dynamics.hpp"
 #include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
+#include "hacdcpf/resilience/certified_restoration.hpp"
 using namespace hacdcpf;
 using namespace hacdcpf::dynamics;
 
@@ -3943,6 +3944,45 @@ TEST_CASE("Hybrid AC/DC microgrid holds up through islanding and reconnection",
   }
 }
 
+TEST_CASE("Grid-forming storage default impedance is converted to the network base",
+          "[dynamics][transient][microgrid][gfm][initialization]") {
+  const auto sys = io::build_hybrid_acdc_microgrid_island();
+
+  DynamicSolverOptions opt;
+  opt.t_end_s = 0.02;
+  opt.dt_s = 0.005;
+  opt.solver_type = DynamicSolverType::TrapezoidalNewton;
+  opt.run_power_flow_initialization = true;
+  opt.use_consistent_dynamic_initialization = true;
+  opt.record_every_step = true;
+
+  const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
+
+  INFO(result.message);
+  REQUIRE(result.success);
+  CHECK(result.initialization.power_flow_converged);
+  CHECK(result.initialization.dynamic_trim_converged);
+  CHECK(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
+  REQUIRE(result.final_snapshot() != nullptr);
+  const auto& outputs = result.final_snapshot()->device_outputs;
+  const auto gfm = std::find_if(
+      outputs.begin(), outputs.end(), [](const DynamicDeviceOutput& output) {
+        return output.type == "GridFormingStorage" && output.component_index == 1;
+      });
+  REQUIRE(gfm != outputs.end());
+  REQUIRE(gfm->values.count("virtual_x_pu") == 1);
+  REQUIRE(gfm->values.count("p_droop_pu") == 1);
+  REQUIRE(gfm->values.count("q_droop_pu") == 1);
+  REQUIRE(gfm->values.count("current_limit_pu") == 1);
+  REQUIRE(gfm->values.count("current_loading_ratio") == 1);
+  CHECK(gfm->values.at("virtual_x_pu") == Catch::Approx(10.0));
+  CHECK(gfm->values.at("p_droop_pu") == Catch::Approx(1.0));
+  CHECK(gfm->values.at("q_droop_pu") == Catch::Approx(5.0));
+  CHECK(gfm->values.at("current_limit_pu") == Catch::Approx(0.01));
+  CHECK(gfm->values.at("current_loading_ratio") <= 1.0 + 1e-6);
+  CHECK(gfm->values.at("current_limit_active") == Catch::Approx(0.0));
+}
+
 TEST_CASE("Networked microgrids ride through a utility outage on distributed gensets",
           "[dynamics][transient][microgrid][networked][islanding]") {
   auto sys = io::build_networked_microgrids_islanding();
@@ -4269,6 +4309,125 @@ TEST_CASE("Explicit three-phase transient model keeps unbalanced phase loads", "
   const double vmax = std::max({va, vb, vc});
   const double vmin = std::min({va, vb, vc});
   CHECK(vmax - vmin > 1e-4);
+}
+
+TEST_CASE("Phase-domain GFL carries independent phase-current states under unbalance",
+          "[dynamics][three_phase][gfl][unbalanced]") {
+  GridFollowingInverterParams params;
+  params.component_index = 31;
+  params.bus = 1;
+  params.bus_pos = 0;
+  params.base_mva = 100.0;
+  params.p_ref_mw = 45.0;
+  params.q_ref_mvar = 8.0;
+  params.current_limit_pu = 0.40;
+  params.phase_domain_control = true;
+  params.response_t_s = 0.02;
+  GridFollowingInverter inverter(params);
+
+  int offset = 0;
+  inverter.assignStateIndices(offset);
+  REQUIRE(offset == 12);  // six legacy/PLL states plus three complex phase currents
+  DynamicState x;
+  x.resize(static_cast<std::size_t>(offset));
+  NetworkState y;
+  y.resize(3, 0);
+  y.Vac_abc[0] = std::polar(0.75, 0.0);
+  y.Vac_abc[1] = std::polar(1.00, -2.0 * 3.14159265358979323846 / 3.0);
+  y.Vac_abc[2] = std::polar(0.92, 2.0 * 3.14159265358979323846 / 3.0);
+  PowerFlowResult pf;
+  inverter.initializeFromPowerFlow(pf, x, y);
+
+  DynamicStamp stamp(3, 0);
+  inverter.stamp(0.0, x, y, stamp);
+  REQUIRE(stamp.Iac.size() == 3);
+  const double ia = std::abs(stamp.Iac[0]);
+  const double ib = std::abs(stamp.Iac[1]);
+  const double ic = std::abs(stamp.Iac[2]);
+  CHECK(ia <= params.current_limit_pu + 1e-12);
+  CHECK(ib <= params.current_limit_pu + 1e-12);
+  CHECK(ic <= params.current_limit_pu + 1e-12);
+  CHECK(std::max({ia, ib, ic}) - std::min({ia, ib, ic}) > 1e-3);
+
+  const auto out = inverter.output(x, y);
+  CHECK(out.values.at("phase_domain_control") == Catch::Approx(1.0));
+  CHECK(out.values.at("i_negative_sequence_pu") > 1e-4);
+  CHECK(out.values.at("i_zero_sequence_pu") < 1e-10);
+  CHECK(out.values.at("i_phase_max_pu") <= params.current_limit_pu + 1e-12);
+  CHECK(out.values.at("current_limit_active") == Catch::Approx(1.0));
+
+  const DynamicJacobianContext context = test_jacobian_context(offset, 3, 0);
+  for (int col = 6; col < 12; ++col) {
+    check_device_current_jacobian_column(inverter, x, y, context, col);
+  }
+}
+
+TEST_CASE("Phase-domain GFM exposes negative-sequence current and phase limit metric",
+          "[dynamics][three_phase][gfm][unbalanced]") {
+  GridFormingInverterParams params;
+  params.component_index = 32;
+  params.bus = 1;
+  params.bus_pos = 0;
+  params.base_mva = 100.0;
+  params.virtual_r_pu = 0.02;
+  params.virtual_x_pu = 0.20;
+  params.current_limit_pu = 2.0;
+  params.phase_domain_control = true;
+  GridFormingInverter inverter(params);
+
+  int offset = 0;
+  inverter.assignStateIndices(offset);
+  DynamicState x;
+  x.resize(static_cast<std::size_t>(offset));
+  NetworkState y;
+  y.resize(3, 0);
+  y.Vac_abc[0] = std::polar(0.80, 0.0);
+  y.Vac_abc[1] = std::polar(1.00, -2.0 * 3.14159265358979323846 / 3.0);
+  y.Vac_abc[2] = std::polar(0.95, 2.0 * 3.14159265358979323846 / 3.0);
+  PowerFlowResult pf;
+  inverter.initializeFromPowerFlow(pf, x, y);
+  inverter.trimToNetworkEquilibrium(x, y);
+
+  const auto out = inverter.output(x, y);
+  CHECK(out.values.at("phase_domain_control") == Catch::Approx(1.0));
+  CHECK(out.values.at("v_negative_sequence_pu") > 1e-4);
+  CHECK(out.values.at("i_negative_sequence_pu") > 1e-4);
+  CHECK(out.values.at("i_zero_sequence_pu") < 1e-10);
+  CHECK(out.values.at("i_phase_max_pu") >= out.values.at("i_rms_pu"));
+  CHECK(out.values.at("current_loading_ratio") ==
+        Catch::Approx(out.values.at("i_phase_max_pu") / params.current_limit_pu));
+}
+
+TEST_CASE("Explicit three-phase builder enables phase-domain GFL automatically",
+          "[dynamics][three_phase][gfl][builder]") {
+  auto sys = make_unbalanced_three_phase_case();
+  REQUIRE(sys.three_phase_ac.has_value());
+  ThreePhaseGenerator inverter;
+  inverter.index = 2;
+  inverter.bus = 2;
+  inverter.name = "phase-domain inverter";
+  inverter.p_mw = 0.15;
+  inverter.q_mvar = 0.02;
+  inverter.vm_pu = 1.0;
+  inverter.in_service = true;
+  sys.three_phase_ac->generators.push_back(inverter);
+
+  auto opt = fast_options();
+  opt.t_end_s = 0.02;
+  opt.record_every_step = true;
+  const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
+
+  INFO(result.message);
+  REQUIRE(result.success);
+  REQUIRE(result.final_snapshot() != nullptr);
+  const auto& outputs = result.final_snapshot()->device_outputs;
+  const auto gfl = std::find_if(
+      outputs.begin(), outputs.end(), [](const DynamicDeviceOutput& output) {
+        return output.type == "ThreePhaseGenerator" && output.component_index == 2;
+      });
+  REQUIRE(gfl != outputs.end());
+  CHECK(gfl->values.at("phase_domain_control") == Catch::Approx(1.0));
+  CHECK(gfl->values.at("i_negative_sequence_pu") > 1e-6);
 }
 
 TEST_CASE("Updated GFL inverter exposes PLL current-limited positive-sequence telemetry",
@@ -6358,6 +6517,38 @@ TEST_CASE("PSD grid-forming VSM and VOC outer-control profiles run numerically",
   }
 }
 
+TEST_CASE("PSD GFM active-power reference reaches the Norton port",
+          "[dynamics][gfm][psd][reference-step]") {
+  for (const std::string model : {"VSMGridForming", "GridFormingNortonDroop"}) {
+    auto sys = make_psd_gfm_omib_case(model);
+    auto opt = fast_options();
+    opt.t_end_s = 1.5;
+    opt.dt_s = 0.005;
+    opt.record_every_step = true;
+    opt.run_power_flow_initialization = true;
+    opt.solver_type = DynamicSolverType::MassMatrixDae;
+
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(sys, opt);
+    DynamicEvent pref_step;
+    pref_step.time_s = 1.0;
+    pref_step.type = DynamicEventType::Custom;
+    pref_step.component_type = "VSC";
+    pref_step.component_index = 1;
+    pref_step.params["p_ref_mw"] = 70.0;
+    dyn.events.push_back(pref_step);
+
+    DynamicSolver solver;
+    const DynamicResults result = solver.solve(dyn);
+    INFO(model);
+    REQUIRE(result.success);
+    const auto p = device_output_series(result, "VSCGridForming", 1, "p_mw");
+    REQUIRE(p.t.size() == p.y.size());
+    REQUIRE(p.y.size() > 2);
+    CHECK(std::abs(p.y.back() - p.y.front()) > 5.0);
+  }
+}
+
 TEST_CASE("PSD standalone IBR dynamic injectors initialize and run",
           "[dynamics][psd][ibr]") {
   SECTION("PeriodicVariableSource") {
@@ -7975,10 +8166,57 @@ TEST_CASE("Frequency observability: single-machine COI tracks the rotor speed",
   const auto [lo, hi] = std::minmax_element(coi.begin(), coi.end());
   CHECK((*hi - *lo) > 1e-4);  // the disturbance actually moved the frequency
 
+  double max_rocof_consistency_error = 0.0;
+  for (std::size_t i = 1; i + 1 < result.snapshots.size(); ++i) {
+    const auto& left = result.snapshots[i - 1];
+    const auto& center = result.snapshots[i];
+    const auto& right = result.snapshots[i + 1];
+    if (std::abs(center.time_s - trip.time_s) < 2.0 * opt.dt_s) continue;
+    const double dt = right.time_s - left.time_s;
+    REQUIRE(dt > 0.0);
+    const double centered =
+        (right.coi_frequency_hz - left.coi_frequency_hz) / dt;
+    max_rocof_consistency_error = std::max(
+        max_rocof_consistency_error,
+        std::abs(centered - center.coi_rocof_hz_s));
+  }
+  CHECK(max_rocof_consistency_error < 2.5e-2);
+
   CHECK(std::none_of(result.warnings.begin(), result.warnings.end(),
                      [](const std::string& w) {
                        return w.find("no frequency anchor") != std::string::npos;
                      }));
+}
+
+TEST_CASE("Frequency observability falls back to droop GFM anchors without inertia",
+          "[dynamics][frequency][gfm][droop]") {
+  GridFormingInverterParams params;
+  params.component_index = 91;
+  params.bus = 1;
+  params.bus_pos = 0;
+  params.base_mva = 10.0;
+  params.frequency_hz = 50.0;
+  params.control_kind = GridFormingControlKind::Droop;
+  params.p_droop_pu = 0.05;
+  params.p_ref_mw = 0.0;
+
+  auto gfm = std::make_unique<GridFormingInverter>(params);
+  DynamicSystem system;
+  system.network.frequency_hz = 50.0;
+  system.network.ac_bus_ids = {1};
+  int offset = 0;
+  gfm->assignStateIndices(offset);
+  system.x.resize(static_cast<std::size_t>(offset));
+  system.y.resize(3, 0);
+  system.x.x[2] = 0.2;      // filtered active power [pu]
+  system.x.dxdt[2] = 0.1;  // filtered-power rate [pu/s]
+  system.devices.push_back(std::move(gfm));
+
+  const DynamicFrequencyReport report = computeFrequencyReport(system);
+  REQUIRE(report.islands.size() == 1);
+  CHECK(report.islands.front().total_inertia_mws == Catch::Approx(0.0));
+  CHECK(report.system_coi_frequency_hz == Catch::Approx(49.5));
+  CHECK(report.system_coi_rocof_hz_s == Catch::Approx(-0.25));
 }
 
 TEST_CASE("Frequency observability: two-machine COI is inertia-weighted",
@@ -9220,9 +9458,138 @@ TEST_CASE("Unbalanced sequence braking torque extends to all machine models",
   CHECK(rotor_accel(true) < rotor_accel(false));
 }
 
+TEST_CASE("Native DAE residual evaluates differential and phase-domain algebraic equations",
+          "[dynamics][dae_residual][certificate]") {
+  DynamicSolverOptions options;
+  options.run_power_flow_initialization = true;
+  DynamicModelBuilder builder;
+  DynamicSystem system = builder.build(make_hybrid_dc_case(), options);
 
+  Eigen::VectorXd xdot;
+  std::string error;
+  REQUIRE(system.evaluateDerivatives(0.0, system.x.x, xdot, error));
+  Eigen::VectorXd r_f;
+  Eigen::VectorXd r_g;
+  REQUIRE(system.evaluateDaeResidual(0.0, system.x.x, system.y, xdot,
+                                     r_f, r_g, error));
+  CHECK(r_f.lpNorm<Eigen::Infinity>() < 1.0e-10);
+  CHECK(r_g.size() == 2 * system.network.acPhaseNodeCount() +
+                          system.network.dcBusCount());
+  CHECK(r_g.lpNorm<Eigen::Infinity>() < 1.0e-7);
+}
 
+TEST_CASE("Certified restoration master enforces cyber and MESS executability",
+          "[resilience][certificate][master_oracle]") {
+  DynamicSolverOptions dynamic_options;
+  dynamic_options.t_end_s = 0.02;
+  dynamic_options.dt_s = 0.01;
+  dynamic_options.solver_type = DynamicSolverType::TrapezoidalNewton;
+  dynamic_options.run_power_flow_initialization = true;
 
+  analysis::MultiFidelityCertificateOptions certificate_options;
+  certificate_options.max_residual_samples = 4;
+  certificate_options.max_jacobian_samples = 1;
+  certificate_options.require_converter_current_observation = false;
+  analysis::MultiFidelityCertificateEngine engine(
+      make_transient_2bus(), dynamic_options, certificate_options);
 
+  analysis::CertifiedRestorationAction safe;
+  safe.id = "safe_static_action";
+  safe.objective = 1.0;
 
+  analysis::CertifiedRestorationAction backup = safe;
+  backup.id = "lower_value_backup";
+  backup.objective = 0.5;
 
+  analysis::CertifiedRestorationAction cyber_blocked = safe;
+  cyber_blocked.id = "cyber_blocked";
+  cyber_blocked.objective = 3.0;
+  cyber_blocked.command_path_available = false;
+
+  analysis::CertifiedRestorationAction mess_blocked = safe;
+  mess_blocked.id = "mess_blocked";
+  mess_blocked.objective = 2.0;
+  mess_blocked.requires_mess = true;
+  mess_blocked.mess_travel_time_s = 20.0;
+  mess_blocked.mess_connection_deadline_s = 10.0;
+  mess_blocked.mess_required_energy_mwh = 2.0;
+  mess_blocked.mess_available_energy_mwh = 1.0;
+
+  analysis::CertifiedRestorationCoordinator coordinator(engine);
+  const auto result =
+      coordinator.solve({safe, backup, cyber_blocked, mess_blocked});
+  INFO("coordinator status=" << result.status);
+  INFO("master solves=" << result.master_mip_solves
+                         << " iterations=" << result.iterations.size());
+  REQUIRE(result.success);
+  CHECK(result.optimality_proven_over_catalog);
+  CHECK(result.incumbent_action_id == "safe_static_action");
+  CHECK(result.master_filtered_actions.size() == 2);
+  CHECK(result.dynamic_oracle_calls == 1);
+  REQUIRE_FALSE(result.iterations.empty());
+  REQUIRE_FALSE(result.iterations.front().certificates.empty());
+  const auto& diagnostic = result.iterations.front().certificates.front();
+  CHECK(std::isfinite(diagnostic.reconstruction_defect_integral));
+  CHECK(diagnostic.forcing_method ==
+        "cubic_hermite_continuous_defect_plus_algebraic_residual");
+  CHECK(std::any_of(
+      diagnostic.margins.begin(), diagnostic.margins.end(),
+      [](const analysis::MarginCertificate& margin) {
+        return (margin.bound_method == "sampled_output_defect_convolution" ||
+                margin.bound_method == "sampled_output_semigroup_envelope") &&
+               std::isfinite(margin.output_transition_gain);
+      }));
+  CHECK(result.iterations.front().certificates.back().proof_valid);
+}
+
+TEST_CASE("Executable MESS is materialized as a dynamic target-bus device",
+          "[resilience][certificate][mess_dynamic]") {
+  HybridPowerSystem system = make_transient_2bus();
+  MobileStorage mobile;
+  mobile.index = 77;
+  mobile.name = "Test-MESS";
+  mobile.bus = 1;
+  mobile.target_bus = 2;
+  mobile.in_service = true;
+  mobile.p_rated_mw = 0.2;
+  mobile.pmax_mw = 0.2;
+  mobile.pmin_mw = -0.2;
+  mobile.qmax_mvar = 0.1;
+  mobile.qmin_mvar = -0.1;
+  mobile.e_rated_mwh = 0.5;
+  mobile.e_mwh = 0.4;
+  mobile.soc_init = 0.8;
+  mobile.soc_min = 0.1;
+  mobile.soc_max = 0.9;
+  mobile.grid_forming = true;
+  system.mobile_storage.push_back(mobile);
+
+  DynamicSolverOptions dynamic_options;
+  dynamic_options.t_end_s = 0.02;
+  dynamic_options.dt_s = 0.01;
+  dynamic_options.record_device_outputs = true;
+  analysis::MultiFidelityCertificateOptions certificate_options;
+  certificate_options.max_residual_samples = 3;
+  certificate_options.max_jacobian_samples = 1;
+  certificate_options.require_converter_current_observation = false;
+  analysis::MultiFidelityCertificateEngine engine(
+      system, dynamic_options, certificate_options);
+
+  analysis::CertifiedRestorationAction action;
+  action.id = "mess_arrived";
+  action.requires_mess = true;
+  action.requires_grid_forming_mess = true;
+  action.mess_grid_forming_capable = true;
+  action.mess_storage_index = 77;
+  action.mess_target_ac_bus = 2;
+  action.mess_travel_time_s = 10.0;
+  action.mess_connection_deadline_s = 20.0;
+  action.mess_required_energy_mwh = 0.1;
+  action.mess_available_energy_mwh = 0.4;
+
+  REQUIRE(engine.checkExecutability(action).executable);
+  const auto certificate = engine.evaluate(action, 3);
+  REQUIRE(certificate.simulation_success);
+  CHECK(certificate.mess_materialized_in_dae);
+  CHECK(certificate.mess_dynamic_device_observed);
+}

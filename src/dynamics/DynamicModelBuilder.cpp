@@ -241,6 +241,12 @@ void apply_gfl_params(const std::map<std::string, double>& p,
   params.lcl_cf_pu = param_or(p, {"lcl_cf_pu", "cf"}, params.lcl_cf_pu);
   params.lcl_lg_pu = param_or(p, {"lcl_lg_pu", "lg"}, params.lcl_lg_pu);
   params.lcl_rg_pu = param_or(p, {"lcl_rg_pu", "rg"}, params.lcl_rg_pu);
+  params.phase_domain_control =
+      param_or(p, {"phase_domain_control", "per_phase_control"},
+               params.phase_domain_control ? 1.0 : 0.0) > 0.5;
+  params.allow_zero_sequence_current =
+      param_or(p, {"allow_zero_sequence_current", "four_wire_converter"},
+               params.allow_zero_sequence_current ? 1.0 : 0.0) > 0.5;
 }
 
 void apply_gfl_profile(const hacdcpf::DynamicModelProfile& profile,
@@ -310,8 +316,22 @@ void apply_gfm_params(const std::map<std::string, double>& p, P& params) {
   params.voc_k1 = param_or(p, {"k1", "voc_k1"}, params.voc_k1);
   params.voc_psi_rad = param_or(p, {"ψ", "psi", "voc_psi_rad"}, params.voc_psi_rad);
   params.voc_k2 = param_or(p, {"k2", "voc_k2"}, params.voc_k2);
-  params.reference_frame_locked =
-      param_or(p, {"is_not_reference", "reference_frame_unlocked"}, params.reference_frame_locked ? 1.0 : 0.0) == 0.0;
+  // PSD marks a non-reference GFM with is_not_reference=1.  Absence of that
+  // optional flag must preserve the native default; otherwise every GFM
+  // profile is silently locked to the synchronous reference frame and its
+  // active-power loop cannot move the internal-source angle.
+  if (const auto it = p.find("is_not_reference"); it != p.end()) {
+    params.reference_frame_locked = it->second <= 0.5;
+  }
+  if (const auto it = p.find("reference_frame_unlocked"); it != p.end()) {
+    params.reference_frame_locked = it->second <= 0.5;
+  }
+  params.phase_domain_control =
+      param_or(p, {"phase_domain_control", "per_phase_control"},
+               params.phase_domain_control ? 1.0 : 0.0) > 0.5;
+  params.allow_zero_sequence_current =
+      param_or(p, {"allow_zero_sequence_current", "four_wire_converter"},
+               params.allow_zero_sequence_current ? 1.0 : 0.0) > 0.5;
   apply_ieee1547_params(p, params.protection,
                         param_or(p, {"f_ref_hz", "frequency_hz", "fn"}, 60.0));
   apply_smart_inverter_params(p, params.volt_var, params.freq_watt,
@@ -1894,6 +1914,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
         p.p_ref_mw = gen.p_mw;
         p.q_ref_mvar = gen.q_mvar;
         p.f_ref_hz = network.frequency_hz;
+        p.phase_domain_control = true;
         apply_gfl_profile(gen.dynamic_model, p);
         dyn.devices.push_back(std::make_unique<GridFollowingInverter>(p));
       }
@@ -2161,6 +2182,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
       p.canvas_type = "sgen";
       p.source_type = "static_generator_grid_forming";
       p.base_mva = base_mva;
+      p.phase_domain_control = using_explicit_three_phase;
       p.p_ref_mw = gen.p_mw * gen.scaling;
       p.q_ref_mvar = gen.q_mvar * gen.scaling;
       p.v_ref_pu = positive_or(gen.v_ref_pu, 1.0);
@@ -2189,6 +2211,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.canvas_type = "sgen";
     p.source_type = "static_generator";
     p.base_mva = base_mva;
+    p.phase_domain_control = using_explicit_three_phase;
     p.p_ref_mw = gen.p_mw * gen.scaling;
     p.q_ref_mvar = gen.q_mvar * gen.scaling;
     p.response_t_s = 0.05;
@@ -2217,6 +2240,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.canvas_type = "pv";
     p.source_type = "pv_system";
     p.base_mva = base_mva;
+    p.phase_domain_control = using_explicit_three_phase;
     p.p_ref_mw = pv.p_mw;
     p.q_ref_mvar = pv.q_mvar;
     p.eta = positive_or(pv.inverter_eff, 0.97);
@@ -2242,6 +2266,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.canvas_type = "renGen";
     p.source_type = "renewable_gen";
     p.base_mva = base_mva;
+    p.phase_domain_control = using_explicit_three_phase;
     p.p_ref_mw = rg.p_mw;
     p.q_ref_mvar = rg.q_mvar;
     p.f_ref_hz = network.frequency_hz;
@@ -2264,9 +2289,21 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
       p.canvas_type = "storage";
       p.source_type = "grid_forming_storage";
       p.base_mva = base_mva;
+      p.phase_domain_control = using_explicit_three_phase;
       p.p_ref_mw = st.p_mw;
       p.q_ref_mvar = st.q_mvar;
-      p.virtual_x_pu = options.inverter_virtual_reactance_pu;
+      // The solver equations use the network MVA base.  The default virtual
+      // impedance is a device-base inverter parameter, so convert it before
+      // stamping.  An explicit dynamic-model value applied below retains the
+      // existing system-base override semantics.
+      const double device_base_mva =
+          positive_or(st.p_rated_mw,
+                      std::max({std::abs(st.pmax_mw), std::abs(st.pmin_mw), 1.0}));
+      const double device_to_system_base = base_mva / device_base_mva;
+      p.virtual_x_pu =
+          options.inverter_virtual_reactance_pu * device_to_system_base;
+      p.p_droop_pu *= device_to_system_base;
+      p.q_droop_pu *= device_to_system_base;
       p.frequency_hz = network.frequency_hz;
       p.current_limit_pu = st.p_rated_mw > 0.0
                                ? st.p_rated_mw / base_mva
@@ -2420,6 +2457,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
       p.canvas_type = "vsc";
       p.source_type = "vsc_grid_forming";
       p.base_mva = base_mva;
+      p.phase_domain_control = using_explicit_three_phase;
       p.p_ref_mw = conv.p_schedule_mw != 0.0 ? conv.p_schedule_mw : conv.p_set_mw;
       p.q_ref_mvar = conv.q_set_mvar;
       p.v_ref_pu = positive_or(conv.v_ac_set_pu, positive_or(conv.v_ref_pu, 1.0));
@@ -2457,6 +2495,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
       p.canvas_type = "vsc";
       p.source_type = "vsc_grid_following";
       p.base_mva = base_mva;
+      p.phase_domain_control = using_explicit_three_phase;
       p.p_ref_mw = conv.p_schedule_mw != 0.0 ? conv.p_schedule_mw : conv.p_set_mw;
       p.q_ref_mvar = conv.q_set_mvar;
       p.current_limit_pu = conv.i_ac_max_pu;

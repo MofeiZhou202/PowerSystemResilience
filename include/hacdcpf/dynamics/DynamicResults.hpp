@@ -67,6 +67,7 @@ struct DynamicIslandFrequency {
   bool has_anchor{false};          // island contains a machine/GFM/slack
   bool has_source{false};          // island contains any generation-capable device
   double coi_frequency_hz{0.0};    // inertia-weighted center-of-inertia frequency
+  double coi_rocof_hz_s{0.0};      // inertia-weighted frequency derivative
   double total_inertia_mws{0.0};   // Sum of H*S over the island [MW*s]
 };
 
@@ -99,6 +100,7 @@ struct DynamicSnapshot {
   double min_dc_voltage_pu{0.0};
   double frequency_hz{0.0};
   double coi_frequency_hz{0.0};
+  double coi_rocof_hz_s{0.0};
   std::vector<DynamicIslandFrequency> island_frequencies;
   // Measured (low-pass filtered) frequency per AC bus, derived from the bus
   // voltage-angle derivative (design doc §7 role 4). This is an output signal for

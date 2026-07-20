@@ -425,6 +425,7 @@ set(HACDCPF_SOURCES
   src/resilience/resilience_assessment.cpp
   src/resilience/resilience_stage_milp.cpp
   src/resilience/resilience_restoration_mip.cpp
+  src/resilience/certified_restoration.cpp
   src/time_series/time_series_pf.cpp
   src/time_series/annual_production_sim.cpp
   src/time_series/lifecycle_simulation.cpp
@@ -670,6 +671,27 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/transient_validation_matrix.cpp")
       WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
       COMMENT "Running native/GridLAB-D transient disturbance matrix")
   endif()
+endif()
+
+# Paper experiment: deterministic small-case dynamic-security baseline.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/cyber_dynamic_safe_restoration_small.cpp")
+  add_executable(cyber_dynamic_safe_restoration_small
+    tools/cyber_dynamic_safe_restoration_small.cpp)
+  target_link_libraries(cyber_dynamic_safe_restoration_small
+    PRIVATE hacdcpf::hacdcpf)
+  target_compile_definitions(cyber_dynamic_safe_restoration_small PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  hacdcpf_copy_opendss_runtime(cyber_dynamic_safe_restoration_small)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/cyber_dynamic_safe_restoration_scale.cpp")
+  add_executable(cyber_dynamic_safe_restoration_scale
+    tools/cyber_dynamic_safe_restoration_scale.cpp)
+  target_link_libraries(cyber_dynamic_safe_restoration_scale
+    PRIVATE hacdcpf::hacdcpf)
+  target_compile_definitions(cyber_dynamic_safe_restoration_scale PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  hacdcpf_copy_opendss_runtime(cyber_dynamic_safe_restoration_scale)
 endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/short_circuit_validation_matrix.cpp")

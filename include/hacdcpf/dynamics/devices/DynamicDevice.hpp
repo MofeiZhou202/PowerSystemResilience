@@ -78,6 +78,7 @@ struct FrequencyParticipation {
   double inertia_h{0.0};        // inertia constant H on the device base [s]
   double base_mva{0.0};         // device base S [MVA]
   double speed_pu{1.0};         // rotor / virtual speed (pu of nominal frequency)
+  double speed_derivative_pu_s{0.0};  // derivative of speed_pu [pu/s]
 };
 
 class DynamicDevice {

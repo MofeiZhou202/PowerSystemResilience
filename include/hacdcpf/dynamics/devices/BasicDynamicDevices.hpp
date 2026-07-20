@@ -920,6 +920,11 @@ struct GridFormingInverterParams {
   double voc_psi_rad{0.7853981633974483};
   double voc_k2{0.0796};
   bool reference_frame_locked{false};
+  // Phase-domain terminal model for explicitly unbalanced networks. The GFM
+  // retains one common frequency-forming oscillator, while its Norton port,
+  // power feedback, current limit, and telemetry are evaluated per phase.
+  bool phase_domain_control{false};
+  bool allow_zero_sequence_current{false};
   DCLinkMode dc_link_mode{DCLinkMode::ConstantDCVoltage};
   // IEEE 1547 ride-through / trip / reconnect protection (design doc §11.7).
   // Disabled by default; opt-in per device. A grid-forming DER re-energizes on
@@ -1031,6 +1036,12 @@ struct GridFollowingInverterParams {
   DCLinkMode dc_link_mode{DCLinkMode::ConstantDCVoltage};
   bool stamp_dc_power{false};
   bool reactive_current_priority{false};
+  // Phase-domain current control for explicitly unbalanced networks. Six
+  // differential states represent the real/imaginary current of phases a/b/c;
+  // each phase follows its own terminal voltage and current limit while the
+  // positive-sequence PLL supplies the common synchronization angle.
+  bool phase_domain_control{false};
+  bool allow_zero_sequence_current{false};
   // IEEE 1547 ride-through / trip / reconnect protection (design doc §11.7).
   // Disabled by default; opt-in per device.
   IEEE1547Settings protection{};

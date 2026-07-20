@@ -1309,23 +1309,29 @@ theory/architecture assessment rather than an API guarantee.)*
 | Adaptive stepping **off by default**; MassMatrixDae trapezoidal has an embedded BE/TR estimator, while partitioned implicit steppers still use **dense** FD state Jacobians | `DynamicSolver.cpp:444-666, 1210-1280` | Fixed-step remains the default for parity stability; adaptive DAE runs can now reject oversized steps without step-doubling |
 | No `ResidualModel`-shaped API (IDA-ready object); PSD-coordinate diagnostics generic only for one stack | crosswalk rows `:80-81`; `psd_validation/README.md:222-243` | 3 `blocked-missing-formulation` rows; no production adaptive-BDF option |
 
-### 23.2 Unbalance: a three-phase network driven by balanced devices
+### 23.2 Unbalance: implemented phase ports and remaining controller detail
 
-The single largest capability asymmetry. The network is honestly unbalanced (22.1), but **every
-dynamic source reads `positive_sequence_voltage(...)` and injects balanced positive-sequence
-current** (machines: BDD:2538, 2906; inverters: BDD:4747, 4818). Consequently:
+The network is genuinely unbalanced (22.1), and the principal dynamic-source ports now preserve
+that phase-domain information:
 
-- Machines present **no negative-/zero-sequence admittance** (no `Y₂/Y₀` stamps per §8.8) and feel
-  **no negative-sequence braking torque** — an unbalanced fault looks to the rotor like its
-  positive-sequence shadow only; SLG-fault machine response is quantitatively wrong.
-- Inverter controls cannot see or respond to unbalance (no per-phase PLLs, no negative-sequence
-  current control/limits), so unbalanced ride-through studies — a core use case for a
-  distribution tool — are out of reach.
-- Unbalance propagates through the passive network only; the validation notes correctly call this
-  a "synthesized three-phase network solve" (`tools/psd_validation/README.md:182-184`).
+- Synchronous machines can stamp explicit negative- and zero-sequence Norton admittances and apply
+  negative-sequence braking torque. The legacy positive-sequence-only behavior remains available
+  when sequence parameters are absent.
+- A GFM inverter retains one physical frequency-forming oscillator, but evaluates terminal power
+  on all three phases, stamps a phase-domain Norton block, uses the maximum phase current for
+  limiting, and reports phase and sequence currents. A three-wire interface blocks zero sequence;
+  `allow_zero_sequence_current` enables a four-wire interface explicitly.
+- A GFL inverter in `phase_domain_control` mode adds six differential phase-current states. Each
+  phase follows its terminal voltage, the coupled command is projected onto the three-wire
+  zero-sequence-free subspace, and a common scale enforces the maximum phase-current limit. The
+  builder enables this mode automatically for explicit `ThreePhaseACSystem` generators and VSCs.
 
-The §19.4 phase-signature design (PosSeq / PerPhase / SeqCoupled) is the planned cure; §8.8 gives
-the machine math; GLD supplies the cross-validation oracle.
+The remaining distinction is controller fidelity, not network fidelity. The phase-domain GFL uses
+one positive-sequence PLL and a compact phase-current loop; the detailed differential LCL chain is
+still positive-sequence. Independent per-phase PLLs, explicit negative-sequence current references,
+and phase-domain switching/EMT validation remain future extensions. Current regression evidence
+covers unbalanced phase-current injection, zero-sequence blocking, analytic DAE current Jacobians,
+GFM negative-sequence response, and builder-level automatic activation.
 
 ### 23.3 Frequency
 

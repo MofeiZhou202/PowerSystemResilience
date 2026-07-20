@@ -14,7 +14,8 @@ struct DynamicSystem;  // forward declaration (defined in DynamicSystem.hpp)
 // Frequency is not a single physical unknown in a phasor simulator; this report
 // derives the observable quantities from the per-device speed states:
 //   * a per-island center-of-inertia (COI) frequency, inertia-weighted over the
-//     rotor/virtual speeds of the generation in each connected AC component;
+//     rotor/virtual speeds in each connected AC component; an island with only
+//     inertia-less GFM anchors uses their base-MVA-weighted forming frequency;
 //   * a single system COI frequency (inertia-weighted across all islands);
 //   * detection of energized islands that have lost their frequency anchor
 //     (sources present but no machine / grid-forming / slack device), which is
@@ -22,6 +23,7 @@ struct DynamicSystem;  // forward declaration (defined in DynamicSystem.hpp)
 struct DynamicFrequencyReport {
   double nominal_frequency_hz{50.0};
   double system_coi_frequency_hz{50.0};
+  double system_coi_rocof_hz_s{0.0};
   std::vector<DynamicIslandFrequency> islands;  // energized islands only
   bool has_anchorless_source_island{false};
 };

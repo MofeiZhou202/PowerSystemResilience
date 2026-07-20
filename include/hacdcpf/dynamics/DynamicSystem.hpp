@@ -167,6 +167,16 @@ struct DynamicSystem {
                                          const Eigen::VectorXd& state,
                                          Eigen::VectorXd& dxdt,
                                          std::string& error);
+  /// Evaluate the semi-explicit DAE residual at an arbitrary snapshot without
+  /// solving the algebraic equations:
+  ///   r_f = xdot - f(t, x, y),
+  ///   r_g = [Re(Iac-Yac*Vac), Im(Iac-Yac*Vac), Idc-Gdc*Vdc].
+  /// The method does not mutate the system state. The caller is responsible for
+  /// applying all topology/device events active at `t` before evaluation.
+  [[nodiscard]] bool evaluateDaeResidual(
+      double t, const Eigen::VectorXd& state, const NetworkState& algebraic,
+      const Eigen::VectorXd& state_derivative, Eigen::VectorXd& r_f,
+      Eigen::VectorXd& r_g, std::string& error) const;
   [[nodiscard]] double derivativeInfinityNorm(double t, std::string& error);
   [[nodiscard]] int stateCount() const noexcept { return x.size(); }
 

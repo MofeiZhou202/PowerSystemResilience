@@ -12,6 +12,13 @@ class DynamicSolver {
   DynamicResults solve(DynamicSystem& system) const;
 };
 
+/// Apply every unapplied authored event with time <= `t`, including device
+/// event handlers and required network/cache rebuilds. This is the public event
+/// replay path used by trajectory diagnostics and multi-fidelity certificates.
+/// Applied event records are appended when `results` is non-null.
+bool applyDynamicEventsThrough(DynamicSystem& system, double t,
+                               DynamicResults* results = nullptr);
+
 // Compact small-signal (modal) screen about the system's current operating point
 // (design doc §18), for attaching to a transient result. Wraps
 // small_signal_analysis(); the input state is saved and restored, so it can be

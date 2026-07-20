@@ -1090,6 +1090,62 @@ bool DynamicSystem::evaluateDerivatives(double t,
   return true;
 }
 
+bool DynamicSystem::evaluateDaeResidual(
+    double t, const Eigen::VectorXd& state, const NetworkState& algebraic,
+    const Eigen::VectorXd& state_derivative, Eigen::VectorXd& r_f,
+    Eigen::VectorXd& r_g, std::string& error) const {
+  if (state.size() != x.x.size() || state_derivative.size() != state.size()) {
+    error = "DAE residual state or derivative dimension mismatch";
+    return false;
+  }
+  const int n_ac = network.acPhaseNodeCount();
+  const int n_dc = network.dcBusCount();
+  if (algebraic.Vac_abc.size() != n_ac || algebraic.Vdc.size() != n_dc) {
+    error = "DAE residual algebraic-state dimension mismatch";
+    return false;
+  }
+
+  DynamicState state_view;
+  state_view.x = state;
+  state_view.dxdt = state_derivative;
+  state_view.time_s = t;
+
+  Eigen::VectorXd field = Eigen::VectorXd::Zero(state.size());
+  for (const auto& device : devices) {
+    device->computeDerivatives(t, state_view, algebraic, field);
+  }
+  r_f = state_derivative - field;
+
+  DynamicStamp stamp(n_ac, n_dc);
+  for (const auto& device : devices) {
+    device->stamp(t, state_view, algebraic, stamp);
+  }
+  Eigen::SparseMatrix<Complex> yac;
+  Eigen::VectorXcd iac;
+  Eigen::SparseMatrix<double> gdc;
+  Eigen::VectorXd idc;
+  network.assembleEffectiveMatrices(stamp, options.singular_regularization_pu,
+                                    yac, iac, gdc, idc);
+  r_g = Eigen::VectorXd::Zero(2 * n_ac + n_dc);
+  if (n_ac > 0) {
+    const Eigen::VectorXcd residual = iac - yac * algebraic.Vac_abc;
+    for (int i = 0; i < n_ac; ++i) {
+      r_g[i] = residual[i].real();
+      r_g[n_ac + i] = residual[i].imag();
+    }
+  }
+  if (n_dc > 0) {
+    const Eigen::VectorXd residual = idc - gdc * algebraic.Vdc;
+    r_g.tail(n_dc) = residual;
+  }
+  if (!r_f.allFinite() || !r_g.allFinite()) {
+    error = "DAE residual contains a non-finite value";
+    return false;
+  }
+  error.clear();
+  return true;
+}
+
 double DynamicSystem::derivativeInfinityNorm(double t, std::string& error) {
   Eigen::VectorXd dxdt;
   if (!evaluateDerivatives(t, x.x, dxdt, error)) {

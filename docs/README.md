@@ -1,6 +1,6 @@
 # Documentation Index
 
-Updated: 2026-07-19
+Updated: 2026-07-20
 
 This directory separates implementation contracts from mathematical references.
 When documentation and runtime behavior differ, `include/`, `src/`,
@@ -29,6 +29,7 @@ When documentation and runtime behavior differ, `include/`, `src/`,
 | IEEE Transactions on Reliability draft: progressive class-conditioned frequency--duration method | [latex/Progressive Class-Conditioned Frequency–Duration/main.tex](latex/Progressive%20Class-Conditioned%20Frequency%E2%80%93Duration/main.tex) |
 | Short-circuit methods | [short_circuit_rich_acdc_derivation.md](short_circuit_rich_acdc_derivation.md) |
 | Network reconfiguration | [network_reconfiguration_models.md](network_reconfiguration_models.md) |
+| Certified restoration master-oracle runtime | [certified_restoration_runtime.md](certified_restoration_runtime.md) |
 | RPO structure (OLTC + continuous) and cross-validation | [reactive_power_optimization_validation.md](reactive_power_optimization_validation.md) |
 | Large hybrid OPF IPM diagnostics | [large_hybrid_ipm_diagnostics.md](large_hybrid_ipm_diagnostics.md) |
 | Multidimensional weak-link identification | [multidimensional_weak_link_identification.md](multidimensional_weak_link_identification.md) |

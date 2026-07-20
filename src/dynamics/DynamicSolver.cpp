@@ -27,6 +27,7 @@ DynamicSnapshot make_snapshot(const DynamicSystem& sys, bool include_device_outp
 
   const DynamicFrequencyReport freq = computeFrequencyReport(sys);
   s.coi_frequency_hz = freq.system_coi_frequency_hz;
+  s.coi_rocof_hz_s = freq.system_coi_rocof_hz_s;
   s.frequency_hz = freq.system_coi_frequency_hz;
   s.island_frequencies = freq.islands;
 
@@ -320,6 +321,7 @@ bool apply_events(DynamicSystem& sys, double t, DynamicResults& results) {
   if (rebuild) {
     sys.network.rebuildBaseMatrices(sys.options.singular_regularization_pu);
     sys.network_cache.reset();
+    sys.dae_admittance_valid = false;
   }
   return changed;
 }
@@ -1816,6 +1818,12 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
 }
 
 }  // namespace
+
+bool applyDynamicEventsThrough(DynamicSystem& system, double t,
+                               DynamicResults* results) {
+  DynamicResults sink;
+  return apply_events(system, t, results != nullptr ? *results : sink);
+}
 
 DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
   DynamicResults results;
