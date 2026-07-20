@@ -46,6 +46,13 @@ class HFactorBackend {
   // Rank deficiency reported by the last factorize().  0 on success.
   int rank_deficiency = 0;
 
+  // Rows that received no pivot in the last failed build (HiGHS-style
+  // basis repair input): replace each such row's basic column with the
+  // row's logical (slack/artificial) and refactorize.  Valid only right
+  // after a factorize() that returned false with rank_deficiency > 0.
+  const std::vector<int>& no_pivot_rows() const { return no_pivot_rows_; }
+  int no_pivot_var(int k) const { return no_pivot_vars_[k]; }
+
   // ── Build / refactorize ─────────────────────────────────────────────────
   //
   // Bind the constraint matrix `A` (column-major Eigen sparse) and factorize
@@ -100,6 +107,8 @@ class HFactorBackend {
  private:
   struct Impl;
   std::unique_ptr<Impl> p_;
+  std::vector<int> no_pivot_rows_;
+  std::vector<int> no_pivot_vars_;
   // Updated by every call to update(); kept out of Impl so the inline
   // accessor above stays cheap.
   mutable int refactor_hint_ = 0;

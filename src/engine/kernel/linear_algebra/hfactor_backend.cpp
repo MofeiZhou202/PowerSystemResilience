@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 // HiGHS headers (vendored copies).
@@ -127,8 +128,20 @@ bool HFactorBackend::factorize(const Eigen::SparseMatrix<double>& A,
   p_->num_col = num_col;
 
   // setupGeneral: pass num_basic == n_basic (== num_row in normal usage).
-  // We use the original-HFactor logic and the Forrest-Tomlin update method,
-  // matching HiGHS' simplex defaults.
+  // Update method selectable for diagnosis: MPF is HiGHS' modern default;
+  // FT showed a single-component solve corruption after the 2nd update on
+  // the SCUC crash basis (selftest, 2026-07-20).
+  const HighsInt update_method =
+      (std::getenv("MIPSOLVERS_HFACTOR_FT") != nullptr) ? kUpdateMethodFt
+                                                        : kUpdateMethodMpf;
+  // Pivot tolerance (min absolute pivot for rank determination) is
+  // env-overridable for diagnosis: the default 1e-10 declares mildly
+  // ill-conditioned SCUC bases rank-deficient where UMFPACK still succeeds.
+  double pivot_tol = kDefaultPivotTolerance;
+  if (const char* e = std::getenv("MIPSOLVERS_HFACTOR_PIVOT_TOL")) {
+    const double v = std::atof(e);
+    if (v >= 0.0 && v <= 1.0) pivot_tol = v;
+  }
   p_->f.setupGeneral(
       /*num_col*/ num_col,
       /*num_row*/ num_row,
@@ -138,20 +151,28 @@ bool HFactorBackend::factorize(const Eigen::SparseMatrix<double>& A,
       p_->a_value.data(),
       p_->basic_index.data(),
       kDefaultPivotThreshold,
-      kDefaultPivotTolerance,
+      pivot_tol,
       kHighsDebugLevelMin,
       /*log_options*/ nullptr,
       /*use_original_HFactor_logic*/ true,
-      /*update_method*/ kUpdateMethodFt);
+      /*update_method*/ update_method);
 
   p_->setup_done = true;
 
   const HighsInt rd = p_->f.build(/*factor_timer_clock_pointer*/ nullptr);
   rank_deficiency = static_cast<int>(rd);
   if (rd != 0) {
+    // Export the no-pivot rows/vars for HiGHS-style basis repair by the
+    // caller (replace the row's basic with its logical column).
+    no_pivot_rows_.assign(p_->f.row_with_no_pivot.begin(),
+                          p_->f.row_with_no_pivot.end());
+    no_pivot_vars_.assign(p_->f.var_with_no_pivot.begin(),
+                          p_->f.var_with_no_pivot.end());
     valid = false;
     return false;
   }
+  no_pivot_rows_.clear();
+  no_pivot_vars_.clear();
 
   p_->solve_buf.assign(static_cast<size_t>(num_row), 0.0);
 

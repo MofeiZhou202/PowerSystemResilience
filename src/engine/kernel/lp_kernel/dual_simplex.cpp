@@ -3826,6 +3826,26 @@ class SparseBasis : public BasisOps {
       accumulated_fill_ = 0;
 #ifdef MIPSOLVERS_HAVE_HFACTOR
       const bool ok = hfb_.factorize(*A_, basis.data(), m_);
+      static const bool hf_diag = []() {
+        const char* e = std::getenv("MIPSOLVERS_HF_DIAG");
+        return e && e[0] == '1';
+      }();
+      if (hf_diag && !ok) {
+        std::fprintf(stderr, "[HFACTOR-DIAG] factorize FAILED m=%d rank_def=%d\n",
+                     m_, hfb_.rank_deficiency);
+        // Cross-check with Eigen SparseLU on the same basis matrix.
+        Eigen::SparseMatrix<double> Bchk(m_, m_);
+        std::vector<Eigen::Triplet<double>> trips;
+        for (int i = 0; i < m_; ++i)
+          for (Eigen::SparseMatrix<double>::InnerIterator it(*A_, basis[i]); it; ++it)
+            trips.emplace_back(it.row(), i, it.value());
+        Bchk.setFromTriplets(trips.begin(), trips.end());
+        Eigen::SparseLU<Eigen::SparseMatrix<double>> lu;
+        lu.analyzePattern(Bchk);
+        lu.factorize(Bchk);
+        std::fprintf(stderr, "[HFACTOR-DIAG]   eigen cross-check: %s\n",
+                     lu.info() == Eigen::Success ? "NONSINGULAR" : "singular");
+      }
       return ok;
 #else
       return false;  // HFactorPort requested but MIPSOLVERS_HAVE_HFACTOR not compiled
@@ -3901,6 +3921,52 @@ class SparseBasis : public BasisOps {
         umfpack_dl_free_symbolic(&Symbolic_);
         Symbolic_ = nullptr;
         last_refactor_fail_detail_ = 4;
+        static const bool sing_diag = []() {
+          const char* e = std::getenv("MIPSOLVERS_SING_DIAG");
+          return e && e[0] == '1';
+        }();
+        if (sing_diag) {
+          // Autopsy: is the basis exactly singular through a (near-)zero or
+          // (near-)duplicate column?  Report the smallest column 2-norms and
+          // the best cosine similarity among cheap-to-compare column pairs.
+          double min_norm = 1e30; int min_col = -1;
+          std::vector<double> norms(m_, 0.0);
+          for (int i = 0; i < m_; ++i) {
+            double s = 0.0;
+            for (Eigen::SparseMatrix<double>::InnerIterator it(*A_, basis[i]); it; ++it)
+              s += it.value() * it.value();
+            norms[i] = std::sqrt(s);
+            if (norms[i] < min_norm) { min_norm = norms[i]; min_col = basis[i]; }
+          }
+          std::fprintf(stderr,
+              "[SING-DIAG] umf-numeric fail m=%d status=%d min_col_norm=%.3e (col %d)\n",
+              m_, status, min_norm, min_col);
+          // Sampled pairwise cosine check on the 200 smallest-norm columns.
+          std::vector<int> ord(m_);
+          std::iota(ord.begin(), ord.end(), 0);
+          std::partial_sort(ord.begin(), ord.begin() + std::min(m_, 200), ord.end(),
+                            [&](int a, int b) { return norms[a] < norms[b]; });
+          double best_cos = 0.0; int bi = -1, bj = -1;
+          const int lim = std::min(m_, 200);
+          for (int a = 0; a < lim; ++a) {
+            for (int b = a + 1; b < lim; ++b) {
+              const int ca = basis[ord[a]], cb = basis[ord[b]];
+              double dot = 0.0;
+              Eigen::SparseMatrix<double>::InnerIterator ia(*A_, ca), ib(*A_, cb);
+              while (ia && ib) {
+                if (ia.row() < ib.row()) ++ia;
+                else if (ib.row() < ia.row()) ++ib;
+                else { dot += ia.value() * ib.value(); ++ia; ++ib; }
+              }
+              const double c = (norms[ord[a]] > 0 && norms[ord[b]] > 0)
+                  ? std::fabs(dot) / (norms[ord[a]] * norms[ord[b]]) : 0.0;
+              if (c > best_cos) { best_cos = c; bi = ca; bj = cb; }
+            }
+          }
+          std::fprintf(stderr,
+              "[SING-DIAG]   best cosine among 200 smallest-norm cols: %.6f (cols %d,%d)\n",
+              best_cos, bi, bj);
+        }
         return false;
       }
     }
@@ -3922,6 +3988,102 @@ class SparseBasis : public BasisOps {
     max_eta_norm_ = 0.0;
     accumulated_fill_ = 0;
     return true;
+  }
+
+  // HiGHS-style basis repair: on an HFactorPort rank-deficiency failure,
+  // replace each no-pivot row's basic column with the row's logical
+  // (slack, else artificial) and retry.  Mutates `basis` on success so the
+  // caller's basis vector stays consistent with the factorization.
+  bool refactorize_with_repair(std::vector<int>& basis,
+                               const StandardFormLP& sf,
+                               std::vector<char>* is_basic = nullptr) {
+    if (refactorize(basis)) return true;
+#ifdef MIPSOLVERS_HAVE_HFACTOR
+    // Identify the dependent rows with an HFactor diagnostic build (its
+    // rank detection reports no-pivot rows; UMFPACK gives none).  This is
+    // the HiGHS handleRankDeficiency strategy: swap each no-pivot row's
+    // basic column for the row's logical and retry.
+    static thread_local HFactorBackend* diag_factor = nullptr;
+    if (!diag_factor) diag_factor = new HFactorBackend();  // per-thread diag use
+    // HiGHS-style repair loop: swap every no-pivot row to its logical and
+    // retry.  Logical unit columns are mutually independent, so each round
+    // strictly reduces the set of candidate deficient rows and the loop
+    // terminates (worst case: the all-logical identity basis).
+    const int ncols = static_cast<int>(sf.c_max.size());
+    for (int round = 0; round < 16; ++round) {
+      int rd = 0;
+      const std::vector<int>* rows = nullptr;
+      if (backend_kind_ == FactorBackendKind::HFactorPort) {
+        rd = hfb_.rank_deficiency;
+        rows = &hfb_.no_pivot_rows();
+      } else {
+        // UMFPACK backend.  Default: no repair — on this model family the
+        // logical-swap repair loop destroys the simplex trajectory (each
+        // swap surfaces another borderline row: whack-a-mole, 2026-07-20)
+        // and the HFactor diagnostic builds pile up.  Opt-in via env for
+        // experimentation only.
+        static const bool umf_repair = []() {
+          const char* e = std::getenv("MIPSOLVERS_UMF_REPAIR");
+          return e && e[0] == '1';
+        }();
+        if (!umf_repair) return false;
+        // Run the HFactor diagnostic build on this basis.
+        if (!diag_factor->factorize(*A_, basis.data(), m_)) {
+          rd = diag_factor->rank_deficiency;
+          rows = &diag_factor->no_pivot_rows();
+        } else {
+          // HFactor succeeds where UMFPACK failed (borderline basis):
+          // demote this basis to the HFactor backend for the rest of the
+          // solve — the factorization is valid and build+eta mode is
+          // fully wired for HFactorPort.
+          backend_kind_ = FactorBackendKind::HFactorPort;
+          hfb_ = std::move(*diag_factor);
+          diag_factor = new HFactorBackend();
+          etas_.clear();
+          min_pivot_ = 1e30;
+          max_eta_norm_ = 0.0;
+          accumulated_fill_ = 0;
+          return true;
+        }
+      }
+      if (rd <= 0 || rows == nullptr) return false;
+      if (static_cast<int>(rows->size()) < rd) return false;
+      // Membership map for duplicate avoidance: a logical that is already
+      // basic elsewhere must not be swapped in again (it would re-create
+      // the exact singularity being repaired).
+      std::vector<char> in_basis(static_cast<std::size_t>(ncols), 0);
+      for (int c : basis) if (c >= 0 && c < ncols) in_basis[static_cast<std::size_t>(c)] = 1;
+      for (int k = 0; k < rd; ++k) {
+        const int r = (*rows)[static_cast<std::size_t>(k)];
+        if (r < 0 || r >= m_) return false;
+        const int old_col = basis[static_cast<std::size_t>(r)];
+        if (old_col >= 0 && old_col < ncols) in_basis[static_cast<std::size_t>(old_col)] = 0;
+        int col = -1;
+        if (r < static_cast<int>(sf.row_to_slack_col.size()) &&
+            sf.row_to_slack_col[static_cast<std::size_t>(r)] >= 0 &&
+            !in_basis[static_cast<std::size_t>(sf.row_to_slack_col[static_cast<std::size_t>(r)])]) {
+          col = sf.row_to_slack_col[static_cast<std::size_t>(r)];
+        } else if (r < static_cast<int>(sf.row_to_artificial_col.size()) &&
+                   sf.row_to_artificial_col[static_cast<std::size_t>(r)] >= 0 &&
+                   !in_basis[static_cast<std::size_t>(sf.row_to_artificial_col[static_cast<std::size_t>(r)])]) {
+          col = sf.row_to_artificial_col[static_cast<std::size_t>(r)];
+        }
+        if (col < 0) return false;
+        in_basis[static_cast<std::size_t>(col)] = 1;
+        if (is_basic && !is_basic->empty()) {
+          if (old_col >= 0 && old_col < static_cast<int>(is_basic->size()))
+            (*is_basic)[static_cast<std::size_t>(old_col)] = 0;
+          if (col < static_cast<int>(is_basic->size()))
+            (*is_basic)[static_cast<std::size_t>(col)] = 1;
+        }
+        basis[static_cast<std::size_t>(r)] = col;
+      }
+      if (refactorize(basis)) return true;
+    }
+    return false;
+#else
+    return false;
+#endif
   }
 
   // Check if a vector is sparse enough for NativeLU to be beneficial.
@@ -3948,6 +4110,10 @@ class SparseBasis : public BasisOps {
     Eigen::VectorXd z(m_);
     if (backend_kind_ == FactorBackendKind::HFactorPort && hfb_.valid) {
       hfb_.ftran(rhs.data(), z.data());
+      // HFactorPort is build+eta: FT updates go through the eta stack, not
+      // HFactor::update (the vendored updateFT leaves an incomplete
+      // factorization — pf row-eta missing, 2026-07-20 diagnosis).
+      for (const auto& eta : etas_) apply_eta_ftran(z, eta);
       return z;
     }
 #ifdef MIPSOLVERS_HAVE_KLU
@@ -3998,6 +4164,7 @@ class SparseBasis : public BasisOps {
     if (backend_kind_ == FactorBackendKind::HFactorPort && hfb_.valid) {
       solve_work_.noalias() = rhs;
       hfb_.ftran(solve_work_.data(), rhs.data());
+      for (const auto& eta : etas_) apply_eta_ftran(rhs, eta);
       return;
     }
 #ifdef MIPSOLVERS_HAVE_KLU
@@ -4067,7 +4234,12 @@ class SparseBasis : public BasisOps {
     }
     Eigen::VectorXd y(m_);
     if (backend_kind_ == FactorBackendKind::HFactorPort && hfb_.valid) {
-      hfb_.btran(rhs.data(), y.data());
+      // Build+eta mode: apply the eta stack (reverse order) before the
+      // fresh-factor BTRAN (mirrors the UMFPACK eta path).
+      Eigen::VectorXd z = rhs;
+      for (int k = static_cast<int>(etas_.size()) - 1; k >= 0; --k)
+        apply_eta_btran(z, etas_[static_cast<std::size_t>(k)]);
+      hfb_.btran(z.data(), y.data());
       return y;
     }
 #ifdef MIPSOLVERS_HAVE_KLU
@@ -4119,6 +4291,8 @@ class SparseBasis : public BasisOps {
       return;
     }
     if (backend_kind_ == FactorBackendKind::HFactorPort && hfb_.valid) {
+      for (int k = static_cast<int>(etas_.size()) - 1; k >= 0; --k)
+        apply_eta_btran(rhs, etas_[static_cast<std::size_t>(k)]);
       solve_work_.noalias() = rhs;
       hfb_.btran(solve_work_.data(), rhs.data());
       return;
@@ -4397,7 +4571,9 @@ class SparseBasis : public BasisOps {
       basis_columns_[static_cast<std::size_t>(pivot_row)] = entering_col;
     }
     if (backend_kind_ == FactorBackendKind::HFactorPort && hfb_.valid) {
-      try_hfactor_update(pivot_row, direction);
+      // Build+eta mode: record the pivot as an eta instead of HFactor's
+      // native FT update (incomplete factorization bug, 2026-07-20).
+      push_eta_sparse(pivot_row, direction, dir_nz);
       return;
     }
     if (try_incremental_basis_update(pivot_row, A, entering_col)) return;
@@ -4502,8 +4678,16 @@ class SparseBasis : public BasisOps {
     //   the near-degenerate bases that produce the tightest LP bound,
     //   costing 1.3--2x in tree size; at m > 20000 this cost is dwarfed
     //   by the stability benefit on uc_500g-class instances.
-    const int max_etas = (m > 20000) ? std::clamp(m / 40, 10, 40)
-                                      : std::clamp(m / 30, 10, 60);
+    const int max_etas_default = (m > 20000) ? std::clamp(m / 40, 10, 40)
+                                             : std::clamp(m / 30, 10, 60);
+    // Env override for the eta-chain cap: the tree warm-reopt failures
+    // (2026-07-20) point at drifted eta chains admitting truly dependent
+    // columns; a shorter chain trades refactorization time for accuracy.
+    static const int max_etas_env = []() {
+      const char* e = std::getenv("MIPSOLVERS_MAX_ETAS");
+      return e ? std::max(1, std::atoi(e)) : -1;
+    }();
+    const int max_etas = (max_etas_env > 0) ? max_etas_env : max_etas_default;
     const double min_piv_tol = (m > 20000) ? 1e-7 : 1e-8;
     const double max_norm_tol = (m > 20000) ? 5e5 : 1e6;
 
@@ -4753,9 +4937,10 @@ class SparseBasis : public BasisOps {
 
   bool backend_needs_refactorise() const {
     if (backend_kind_ == FactorBackendKind::HFactorPort) {
+      // Build+eta mode: use the generic eta-based triggers below
+      // (min pivot / eta norm / fill), not HFactor's FT hint.
       if (!hfb_.valid) return true;
-      return hfb_.needs_refactorise();
-    }
+    } else {
 #ifdef MIPSOLVERS_HAVE_UMFPACK
     switch (backend_kind_) {
       case FactorBackendKind::UmfpackNativeA:
@@ -4842,6 +5027,7 @@ class SparseBasis : public BasisOps {
         return false;
     }
 #endif
+    }  // end non-HFactorPort backends
     return false;
   }
 
@@ -5456,6 +5642,10 @@ bool sparse_primal_simplex_optimize(
     double& obj,
     std::vector<char>& at_upper) {
   tl_primal_simplex_iters = 0;
+  static const bool primal_diag = []() {
+    const char* e = std::getenv("MIPSOLVERS_PRIMAL_DIAG");
+    return e && e[0] == '1';
+  }();
   const bool exact_edge_mode =
       opt.exact_dse_initialization || simplex_exact_edge_env_enabled();
   const int m = sf.A.rows();
@@ -5467,7 +5657,7 @@ bool sparse_primal_simplex_optimize(
     if (idx >= 0 && idx < n) is_basic[static_cast<size_t>(idx)] = 1;
   }
 
-  if (!sbasis.refactorize(basis)) return false;
+  if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) return false;
   sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
 
   // Legacy primal perturbation is opt-in.  Root LP conformance must preserve
@@ -5604,12 +5794,15 @@ bool sparse_primal_simplex_optimize(
           // Primal infeasible - likely at_upper corruption or numerical issues.
           // Return false to trigger fallback.
           MIPSOLVERS_LOG_DEBUG("[sparse_primal_simplex] PRIMAL INFEASIBLE at termination: min_xb={:.2e}", min_xb);
+          if (primal_diag)
+            std::fprintf(stderr, "[PRIMAL-DIAG] FAIL: primal-infeasible-at-termination min_xb=%.3e iter=%d\n",
+                         min_xb, tl_primal_simplex_iters);
           return false;
         }
         
         return true;
       }
-      if (!sbasis.refactorize(basis)) return false;
+      if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) return false;
       sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
       just_refactored = true;
       continue;
@@ -5726,7 +5919,12 @@ bool sparse_primal_simplex_optimize(
       devex_edge[static_cast<size_t>(entering)] = std::max(0.001, direction.squaredNorm());
     } else {
       const double pivot = direction[leaving_row];
-      if (std::abs(pivot) < 1e-12) return false;
+      if (std::abs(pivot) < 1e-12) {
+        if (primal_diag)
+          std::fprintf(stderr, "[PRIMAL-DIAG] FAIL: tiny pivot %.3e at iter=%d\n",
+                       pivot, tl_primal_simplex_iters);
+        return false;
+      }
 
       const int old_leaving = basis[leaving_row];
       is_basic[static_cast<size_t>(old_leaving)] = 0;
@@ -5791,7 +5989,7 @@ bool sparse_primal_simplex_optimize(
       }
     }
     if (!bound_flip && sbasis.needs_refactorize(m)) {
-      if (!sbasis.refactorize(basis)) return false;
+      if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) return false;
       sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
       // Re-apply legacy perturbation only when explicitly requested.
       if (opt.perturb_degenerate_primal) {
@@ -5816,6 +6014,9 @@ bool sparse_primal_simplex_optimize(
     }
   }
 
+  if (primal_diag)
+    std::fprintf(stderr, "[PRIMAL-DIAG] FAIL: max_iter reached (%d)\n",
+                 tl_primal_simplex_iters);
   return false;
 }
 
@@ -5852,6 +6053,11 @@ bool sparse_dual_simplex_reoptimize(
   for (int idx : basis) {
     if (idx >= 0 && idx < n) is_basic[static_cast<size_t>(idx)] = 1;
   }
+  // Candidates rejected by the absolute pivot floor in this reopt.  While
+  // the blacklist is non-empty, an empty BFRT candidate list must NOT be
+  // read as a Farkas proof (excluded on numerical grounds, not ratio test).
+  std::vector<char> pivot_blacklist(static_cast<size_t>(n), 0);
+  int pivot_blacklist_count = 0;
 
   // NOTE: We deliberately do NOT clamp reduced costs before the first
   // iteration. Clamping hides valid entering candidates from the dual
@@ -6025,7 +6231,7 @@ bool sparse_dual_simplex_reoptimize(
     }
     if (stall_count > 50) {
       if (!just_refactored) {
-        if (!sbasis.refactorize(basis)) { tl_dual_reopt_fail_reason = 2; return false; }
+        if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) { tl_dual_reopt_fail_reason = 2; return false; }
         sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
         cleanup_reduced_costs();
         just_refactored = true;
@@ -6079,7 +6285,7 @@ bool sparse_dual_simplex_reoptimize(
         // Apparently optimal under expanded tolerance — enter cleanup phase.
         // First, refactorize to remove numerical drift from incremental updates.
         if (!just_refactored) {
-          if (!sbasis.refactorize(basis)) { tl_dual_reopt_fail_reason = 3; return false; }
+          if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) { tl_dual_reopt_fail_reason = 3; return false; }
           sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
           cleanup_reduced_costs();
           just_refactored = true;
@@ -6196,6 +6402,7 @@ bool sparse_dual_simplex_reoptimize(
 
     auto collect_bfrt_candidate = [&](int j, double cur_alpha_tol) {
       if (!can_enter[static_cast<size_t>(j)] || is_basic[static_cast<size_t>(j)]) return;
+      if (pivot_blacklist[static_cast<size_t>(j)]) return;
       const bool j_up = at_upper[static_cast<size_t>(j)];
       double alpha_j;
       if (leaving_below) {
@@ -6261,7 +6468,7 @@ bool sparse_dual_simplex_reoptimize(
     if (entering < 0) {
       // No entering variable found — could be numerical drift or true infeasibility.
       if (!just_refactored) {
-        if (!sbasis.refactorize(basis)) { tl_dual_reopt_fail_reason = 4; return false; }
+        if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) { tl_dual_reopt_fail_reason = 4; return false; }
         sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
         cleanup_reduced_costs();
         just_refactored = true;
@@ -6285,6 +6492,9 @@ bool sparse_dual_simplex_reoptimize(
         }
       }
       if (entering < 0) {
+        // Candidates were excluded on numerical grounds (blacklist), not by
+        // the ratio test — an empty list here is NOT a Farkas proof.
+        if (pivot_blacklist_count > 0) return false;
         proved_infeasible = true;
         return false;
       }
@@ -6361,8 +6571,34 @@ bool sparse_dual_simplex_reoptimize(
 
     const double pivot_val = direction[leaving_row];
 
-    if (std::abs(pivot_val) < 1e-10) {
-      // Numerically zero pivot — undo flips and retry.
+    static const bool pivot_watch = []() {
+      const char* e = std::getenv("MIPSOLVERS_PIVOT_WATCH");
+      return e && e[0] == '1';
+    }();
+    if (pivot_watch) {
+      static thread_local double min_seen = 1e30;
+      const double apv = std::abs(pivot_val);
+      if (apv < min_seen && apv >= 1e-10) {
+        min_seen = apv;
+        std::fprintf(stderr, "[PIVOT-WATCH] new min admitted pivot: %.3e (iter=%d m=%d)\n",
+                     apv, iter, m);
+      }
+    }
+
+    // Absolute pivot floor (Harris-style, but on the Ruiz-scaled matrix).
+    // Data (2026-07-20, PIVOT-WATCH on healthy cold solves): the 39-bus
+    // cold trajectory never admits a pivot below 3.0e-3; the 118-bus one
+    // never below 1.49e-7.  The tree warm-reopt failures, by contrast, are
+    // det(B)->0 death spirals through the [1e-10, 1e-7) band that end in
+    // UMFPACK umf-numeric refactorize failures.  An absolute 1e-8 floor
+    // sits 15x below the worst observed healthy pivot and blocks the
+    // spiral.  A dir_inf-relative floor was tried first and rejected: on
+    // this model family ||direction||inf reaches 1e6, turning a relative
+    // floor into an absolute 1e-2 one that starves legitimate pivots.
+    const double pivot_floor = 1e-8;
+
+    if (std::abs(pivot_val) < pivot_floor) {
+      // Unacceptable pivot — undo flips and retry with another candidate.
       Eigen::VectorXd undo_rhs_delta = Eigen::VectorXd::Zero(m);
       for (int idx = static_cast<int>(flipped_vars.size()) - 1; idx >= 0; --idx) {
         int fj = flipped_vars[static_cast<size_t>(idx)];
@@ -6379,8 +6615,12 @@ bool sparse_dual_simplex_reoptimize(
         Eigen::VectorXd delta_xb = sbasis.ftran(undo_rhs_delta);
         x_b += delta_xb;
       }
+      if (!pivot_blacklist[static_cast<size_t>(entering)]) {
+        pivot_blacklist[static_cast<size_t>(entering)] = 1;
+        ++pivot_blacklist_count;
+      }
       if (!just_refactored) {
-        if (!sbasis.refactorize(basis)) { tl_dual_reopt_fail_reason = 5; return false; }
+        if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) { tl_dual_reopt_fail_reason = 5; return false; }
         sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
         cleanup_reduced_costs();
         just_refactored = true;
@@ -6388,8 +6628,15 @@ bool sparse_dual_simplex_reoptimize(
         touched_cols.clear();
         continue;
       }
-      proved_infeasible = true;
-      return false;
+      // Fresh factorization, still an exact-zero pivot: genuine Farkas
+      // signal.  A merely small pivot (1e-10..floor) is NOT an
+      // infeasibility proof — blacklist it and re-price on the clean
+      // state without another refactorization.
+      if (std::abs(pivot_val) < 1e-10) {
+        proved_infeasible = true;
+        return false;
+      }
+      continue;
     }
 
     const double old_rc_entering = reduced_costs[entering];
@@ -6467,7 +6714,7 @@ bool sparse_dual_simplex_reoptimize(
     iter_timing.dse_ns += it_ns(t7, t8);
 
     if (sbasis.needs_refactorize(m)) {
-      if (!sbasis.refactorize(basis)) { tl_dual_reopt_fail_reason = 7; return false; }
+      if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) { tl_dual_reopt_fail_reason = 7; return false; }
       sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
       cleanup_reduced_costs();
       // Reset sparse pricing state so next iteration does full zeroing.
@@ -6564,7 +6811,7 @@ bool dual_cleanup_resolve(StandardFormLP& sf, std::vector<int>& basis,
     }
   }
 
-  if (!sbasis.refactorize(basis)) return false;
+  if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) return false;
   sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b,
                         reduced_costs, obj);
 
@@ -8135,7 +8382,7 @@ static SimplexResult solve_lp_from_sf_impl(
         }
       }
       if (!factorize_ok) {
-        factorize_ok = sbasis.refactorize(basis);
+        factorize_ok = sbasis.refactorize_with_repair(basis, sf);
       }
       { auto t_now = tp(); lp_timing.refact_us += us(t_phase, t_now); t_phase = t_now; }
       if (!factorize_ok) {
@@ -8150,7 +8397,7 @@ static SimplexResult solve_lp_from_sf_impl(
           }
         }
         crash_artificial_basis(sf, basis);
-        factorize_ok = sbasis.refactorize(basis);
+        factorize_ok = sbasis.refactorize_with_repair(basis, sf);
         used_appended_parent_factor = false;
         if (factorize_ok) {
           MIPSOLVERS_LOG_DEBUG("[PATH A] singular crash repaired via crash_artificial_basis m={}", m);
@@ -8350,7 +8597,7 @@ static SimplexResult solve_lp_from_sf_impl(
               // object, pivot from a freshly refactorized basis.
               used_appended_parent_factor = false;
               can_reuse_parent_rc = false;
-              if (!sbasis.refactorize(basis)) {
+              if (!sbasis.refactorize_with_repair(basis, sf, &is_basic_sp)) {
                 factorize_ok = false;
                 MIPSOLVERS_LOG_DEBUG("[PATH A] appended parent-factor primal fallback failed m={}", m);
               } else {
@@ -8383,7 +8630,7 @@ static SimplexResult solve_lp_from_sf_impl(
             // conformance is preserved.
             used_appended_parent_factor = false;
             can_reuse_parent_rc = false;
-            if (!sbasis.refactorize(basis)) {
+            if (!sbasis.refactorize_with_repair(basis, sf, &is_basic_sp)) {
               factorize_ok = false;
               MIPSOLVERS_LOG_DEBUG("[PATH A] appended parent-factor refactor fallback failed m={}", m);
             } else {
@@ -8454,7 +8701,7 @@ static SimplexResult solve_lp_from_sf_impl(
               else if (sf.row_to_artificial_col[ii] >= 0) basis[ii] = sf.row_to_artificial_col[ii];
             }
             crash_artificial_basis(sf, basis);
-            if (sbasis.refactorize(basis)) {
+            if (sbasis.refactorize_with_repair(basis, sf)) {
               // Recompute state from scratch with the crash basis.
               std::vector<char> is_basic2(static_cast<size_t>(n), 0);
               for (int idx : basis) if (idx >= 0 && idx < n) is_basic2[static_cast<size_t>(idx)] = 1;

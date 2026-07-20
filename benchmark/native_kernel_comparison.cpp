@@ -37,6 +37,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <numeric>
 #include <random>
 #include <string>
 #include <vector>
@@ -714,6 +715,19 @@ int run_warm_probe(bool use_118) {
                 for (int j = 0; j < n && static_cast<int>(nonbasic.size()) < 400; ++j)
                     if (!in_basis[j]) nonbasic.push_back(j);
                 Eigen::VectorXd aq(m), ep(m), e_row = Eigen::VectorXd::Zero(m);
+                Eigen::SparseLU<Eigen::SparseMatrix<double>> lu_ref;
+                bool lu_ref_ok = false;
+                {
+                    Eigen::SparseMatrix<double> B0(m, m);
+                    std::vector<Eigen::Triplet<double>> tr0;
+                    for (int i = 0; i < m; ++i)
+                        for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, basis[i]); it; ++it)
+                            tr0.emplace_back(it.row(), i, it.value());
+                    B0.setFromTriplets(tr0.begin(), tr0.end());
+                    lu_ref.analyzePattern(B0);
+                    lu_ref.factorize(B0);
+                    lu_ref_ok = (lu_ref.info() == Eigen::Success);
+                }
                 int done = 0, bad_update = 0;
                 double worst_resid = 0.0;
                 for (int t = 0; t < 50 && t < static_cast<int>(nonbasic.size()); ++t) {
@@ -723,6 +737,21 @@ int run_warm_probe(bool use_118) {
                     for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, q); it; ++it)
                         col[it.row()] = it.value();
                     hfb.ftran(col.data(), aq.data());
+                    // Verify the input aq against the reference factor BEFORE
+                    // applying the update (catches ftran-after-update errors
+                    // that the b-RHS check is blind to).
+                    if (lu_ref_ok) {
+                        const Eigen::VectorXd aq_ref = lu_ref.solve(col);
+                        const double aq_err = (aq - aq_ref).cwiseAbs().maxCoeff();
+                        if (aq_err > 1e-8) {
+                            std::printf("hfactor selftest: BEFORE update %d ftran(a_q) WRONG err=%.3e (q=%d)\n",
+                                        done + 1, aq_err, q);
+                            break;
+                        }
+                    }
+                    const bool ref_inputs =
+                        std::getenv("MIPSOLVERS_HFACTOR_SELFTEST_REFINPUTS") != nullptr;
+                    if (ref_inputs && lu_ref_ok) aq = lu_ref.solve(col);
                     int p = -1;
                     double best = 1e-6;
                     for (int i = 0; i < m; ++i)
@@ -732,11 +761,20 @@ int run_warm_probe(bool use_118) {
                     e_row.setZero();
                     e_row[p] = 1.0;
                     hfb.btran(e_row.data(), ep.data());
-                    if (!hfb.update(p, aq.data(), ep.data())) { ++bad_update; break; }
-                    basis[p] = q;
+                    if (ref_inputs && lu_ref_ok) ep = lu_ref.transpose().solve(e_row);
+                    const bool refact_mode =
+                        std::getenv("MIPSOLVERS_HFACTOR_SELFTEST_REFACT") != nullptr;
+                    if (refact_mode) {
+                        // Control: fresh factorization instead of FT update.
+                        basis[p] = q;
+                        if (!hfb.factorize(sf.A, basis.data(), m)) { ++bad_update; break; }
+                    } else {
+                        if (!hfb.update(p, aq.data(), ep.data())) { ++bad_update; break; }
+                        basis[p] = q;
+                    }
                     in_basis[q] = 1;
                     ++done;
-                    if (done % 10 == 0) {
+                    {
                         // Fresh reference factorization of the current basis.
                         Eigen::SparseMatrix<double> B2(m, m);
                         std::vector<Eigen::Triplet<double>> tr2;
@@ -755,11 +793,70 @@ int run_warm_probe(bool use_118) {
                         Eigen::VectorXd x2(m);
                         hfb.ftran(sf.b.data(), x2.data());
                         const double res = (x2 - xr2).cwiseAbs().maxCoeff();
-                        worst_resid = std::max(worst_resid, res);
-                        if (res > 1e-6) {
-                            std::printf("hfactor selftest: update %d DIVERGED resid=%.3e\n", done, res);
+                        // BTRAN check too: y = B^{-T} c_b against reference.
+                        Eigen::VectorXd cb2(m), y2(m);
+                        for (int i = 0; i < m; ++i) cb2[i] = sf.c_max[basis[i]];
+                        hfb.btran(cb2.data(), y2.data());
+                        const Eigen::VectorXd yr2 = lu2.transpose().solve(cb2);
+                        const double res_b = (y2 - yr2).cwiseAbs().maxCoeff();
+                        worst_resid = std::max(worst_resid, std::max(res, res_b));
+                        if (done <= 6 || res > 1e-6 || res_b > 1e-6)
+                            std::printf("hfactor selftest: update %d ftran_resid=%.3e btran_resid=%.3e (p=%d q=%d piv=%.3e)\n",
+                                        done, res, res_b, p, q, best);
+                        if (res > 1e-6 || res_b > 1e-6) {
+                            std::printf("hfactor selftest: update %d DIVERGED ftran=%.3e btran=%.3e\n",
+                                        done, res, res_b);
+                            // Top error components of the failing b-solve.
+                            {
+                                int n_nan = 0, n_inf = 0;
+                                double max_finite = 0.0;
+                                int max_finite_row = -1, first_nan_row = -1;
+                                for (int i = 0; i < m; ++i) {
+                                    const double dv = std::fabs(x2[i] - xr2[i]);
+                                    if (std::isnan(x2[i])) { ++n_nan; if (first_nan_row < 0) first_nan_row = i; }
+                                    else if (std::isinf(x2[i])) ++n_inf;
+                                    else if (dv > max_finite) { max_finite = dv; max_finite_row = i; }
+                                }
+                                std::printf("  x2: nan=%d inf=%d max_finite_err=%.3e at row %d first_nan_row=%d\n",
+                                            n_nan, n_inf, max_finite, max_finite_row, first_nan_row);
+                                int n_bad = 0;
+                                for (int i = 0; i < m; ++i)
+                                    if (std::fabs(x2[i] - xr2[i]) > 1e-9) ++n_bad;
+                                std::printf("  x2: rows with err>1e-9: %d / %d\n", n_bad, m);
+                                if (max_finite_row >= 0) {
+                                    Eigen::VectorXd e_w = Eigen::VectorXd::Zero(m);
+                                    e_w[max_finite_row] = 1.0;
+                                    Eigen::VectorXd xh2(m);
+                                    hfb.ftran(e_w.data(), xh2.data());
+                                    const Eigen::VectorXd xe2 = lu2.solve(e_w);
+                                    const Eigen::VectorXd dv2 = (xh2 - xe2).cwiseAbs();
+                                    Eigen::Index wi2;
+                                    const double we2 = dv2.maxCoeff(&wi2);
+                                    std::printf("  B^-1 e_%d: worst=%.3e at row %d\n",
+                                                max_finite_row, we2, static_cast<int>(wi2));
+                                }
+                            }
+                            // Localize: columns of B^{-1} via unit-vector
+                            // solves; report the worst components.
+                            for (int probe = 0; probe < 8; ++probe) {
+                                const int j = (probe * 1447 + 1917) % m;
+                                Eigen::VectorXd e_j = Eigen::VectorXd::Zero(m);
+                                e_j[j] = 1.0;
+                                Eigen::VectorXd xh(m);
+                                hfb.ftran(e_j.data(), xh.data());
+                                const Eigen::VectorXd xe = lu2.solve(e_j);
+                                const Eigen::VectorXd dvec = (xh - xe).cwiseAbs();
+                                Eigen::Index widx;
+                                const double werr = dvec.maxCoeff(&widx);
+                                std::printf("  B^-1 e_%d: worst err=%.3e at row %d (xh=%.6g xe=%.6g)\n",
+                                            j, werr, static_cast<int>(widx),
+                                            xh[widx], xe[widx]);
+                            }
                             break;
                         }
+                        lu_ref.analyzePattern(B2);
+                        lu_ref.factorize(B2);
+                        lu_ref_ok = (lu_ref.info() == Eigen::Success);
                     }
                 }
                 std::printf("hfactor selftest: updates done=%d bad=%d worst_resid=%.3e\n",

@@ -2312,6 +2312,11 @@ void HFactor::updateFT(HVector* aq, HVector* ep, HighsInt iRow
   HighsInt p_logic = u_pivot_lookup[iRow];
   double pivot = u_pivot_value[p_logic];
   double alpha = aq->array[iRow];
+  if (std::getenv("MIPSOLVERS_HFACTOR_DIAG"))
+    printf("[UPDATEFT-DIAG] enter iRow=%d p_logic=%d pivot=%.6g alpha=%.6g "
+           "aq_nnz=%d ep_nnz=%d upiv_n=%zu upiv_val[p_logic]=%.6g\n",
+           (int)iRow, (int)p_logic, pivot, alpha, (int)aq->packCount,
+           (int)ep->packCount, u_pivot_index.size(), u_pivot_value[p_logic]);
   u_pivot_index[p_logic] = -1;
 
   // Delete pivotal row from U
@@ -2322,6 +2327,9 @@ void HFactor::updateFT(HVector* aq, HVector* ep, HighsInt iRow
     HighsInt i_last = --u_last_p[i_logic];
     for (; i_find <= i_last; i_find++)
       if (u_index[i_find] == iRow) break;
+    if (i_find > i_last && std::getenv("MIPSOLVERS_HFACTOR_DIAG"))
+      printf("[UPDATEFT-DIAG] row-delete MISS iRow=%d col_slot=%d p_logic=%d\n",
+             (int)iRow, (int)i_logic, (int)p_logic);
     // Put last to find, and delete last
     u_index[i_find] = u_index[i_last];
     u_value[i_find] = u_value[i_last];
@@ -2335,6 +2343,9 @@ void HFactor::updateFT(HVector* aq, HVector* ep, HighsInt iRow
     HighsInt i_last = --ur_lastp[i_logic];
     for (; i_find <= i_last; i_find++)
       if (ur_index[i_find] == iRow) break;
+    if (i_find > i_last && std::getenv("MIPSOLVERS_HFACTOR_DIAG"))
+      printf("[UPDATEFT-DIAG] col-delete MISS iRow=%d row_slot=%d p_logic=%d\n",
+             (int)iRow, (int)i_logic, (int)p_logic);
     // Put last to find, and delete last
     ur_space[i_logic]++;
     ur_index[i_find] = ur_index[i_last];
