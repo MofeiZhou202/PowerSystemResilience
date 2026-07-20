@@ -114,6 +114,12 @@ SparseFactorTelemetry BasisOps::factor_telemetry() const {
 
 // Thread-local counter for dual simplex iteration profiling.
 thread_local int tl_dual_reopt_iters = 0;
+// Why the last sparse_dual_simplex_reoptimize returned false without a
+// certificate: 0=not-failed/certified, 1=wall-limit, 2=refact-stall,
+// 3=refact-cleanup, 4=refact-noenter, 5=refact-ratio, 6=nan-guard,
+// 7=refact-periodic, 8=max-iter.  (cutoff / proved_infeasible are reported
+// through their own flags and keep 0.)
+thread_local int tl_dual_reopt_fail_reason = 0;
 thread_local int tl_primal_simplex_iters = 0;
 
 namespace {
@@ -3769,6 +3775,7 @@ class SparseBasis : public BasisOps {
   bool refactorize(const std::vector<int>& basis) {
     ++gen_;
     ++refactor_count_;
+    last_refactor_fail_detail_ = 0;
     clear_appended_slack_extension();
     basis_columns_ = basis;
     // FT diagnostics: show success/fail/chain-broken rates between
@@ -3800,8 +3807,8 @@ class SparseBasis : public BasisOps {
       std::vector<char> seen(static_cast<size_t>(A_->cols()), 0);
       for (int i = 0; i < m_; ++i) {
         const int col = basis[static_cast<size_t>(i)];
-        if (col < 0 || col >= A_->cols()) return false;
-        if (seen[static_cast<size_t>(col)]) return false;
+        if (col < 0 || col >= A_->cols()) { last_refactor_fail_detail_ = 1; return false; }
+        if (seen[static_cast<size_t>(col)]) { last_refactor_fail_detail_ = 2; return false; }
         seen[static_cast<size_t>(col)] = 1;
       }
     }
@@ -3830,6 +3837,14 @@ class SparseBasis : public BasisOps {
     // Numerically conservative rescue path — correctness over speed.
     if (backend_kind_ == FactorBackendKind::KluRescue) {
 #ifdef MIPSOLVERS_HAVE_KLU
+      // Invalidate any stale incremental-factor state from a previous
+      // UMFPACK-based refactorize: ftran_sparse_inplace/btran_sparse_inplace
+      // check slu_.valid FIRST and would otherwise keep solving with the
+      // previous basis's factorization after a backend demotion.
+#ifdef MIPSOLVERS_HAVE_UMFPACK
+      slu_.valid = false;
+#endif
+      nlu_.valid = false;
       const Eigen::SparseMatrix<double> Bt = B_.transpose();
       klu_lu_.compute(B_);
       klu_lu_t_.compute(Bt);
@@ -3876,7 +3891,7 @@ class SparseBasis : public BasisOps {
       int status = umfpack_dl_symbolic(m_, m_, Ap64.data(), Ai64.data(),
                                        B_.valuePtr(), &Symbolic_, Control_,
                                        nullptr);
-      if (status != UMFPACK_OK) return false;
+      if (status != UMFPACK_OK) { last_refactor_fail_detail_ = 3; return false; }
     }
     {
       int status = umfpack_dl_numeric(Ap64.data(), Ai64.data(),
@@ -3885,6 +3900,7 @@ class SparseBasis : public BasisOps {
       if (status != UMFPACK_OK) {
         umfpack_dl_free_symbolic(&Symbolic_);
         Symbolic_ = nullptr;
+        last_refactor_fail_detail_ = 4;
         return false;
       }
     }
@@ -3893,7 +3909,7 @@ class SparseBasis : public BasisOps {
     Ap_ = std::move(Ap64);
     Ai_ = std::move(Ai64);
     Ax_.assign(B_.valuePtr(), B_.valuePtr() + nnz_b);
-    if (!prepare_factor_backend_after_numeric()) return false;
+    if (!prepare_factor_backend_after_numeric()) { last_refactor_fail_detail_ = 7; return false; }
 #else
     lu_.setPivotThreshold(1.0);
     lu_.compute(B_);
@@ -4995,6 +5011,10 @@ class SparseBasis : public BasisOps {
   mutable int ft_fail_count_ = 0;
   mutable int ft_chain_broken_refactor_count_ = 0;
   mutable int refactor_count_ = 0;
+  // Why the last refactorize() returned false: 0=ok, 1=col-out-of-range,
+  // 2=duplicate-basis-column, 3=umfpack-symbolic, 4=umfpack-numeric,
+  // 7=post-numeric-backend-prep.
+  int last_refactor_fail_detail_ = 0;
 
   // ── P10 persisted DSE weights (2026-04-22) ──
   // Non-mutable: written on save_dse_weights from solve; read on entry.
@@ -5004,6 +5024,7 @@ class SparseBasis : public BasisOps {
   int ft_success_count() const { return ft_success_count_; }
   int ft_fail_count() const { return ft_fail_count_; }
   int ft_chain_broken_refactor_count() const { return ft_chain_broken_refactor_count_; }
+  int last_refactor_fail_detail() const { return last_refactor_fail_detail_; }
   int refactor_count() const { return refactor_count_; }
  private:
 
@@ -5817,6 +5838,7 @@ bool sparse_dual_simplex_reoptimize(
   cutoff_reached = false;
   // Reset file-scope thread_local counter for iteration profiling.
   tl_dual_reopt_iters = 0;
+  tl_dual_reopt_fail_reason = 0;
   const bool exact_edge_mode =
       opt.exact_dse_initialization || simplex_exact_edge_env_enabled();
   const int m = sf.A.rows();
@@ -5970,6 +5992,7 @@ bool sparse_dual_simplex_reoptimize(
 
   for (int iter = 0; iter < opt.max_iter; ++iter, ++g_simplex_iter_count) {
     if ((iter & 15) == 0 && simplex_wall_time_limit_hit(opt, wall_t0)) {
+      tl_dual_reopt_fail_reason = 1;
       return false;
     }
     ++tl_dual_reopt_iters;
@@ -6002,7 +6025,7 @@ bool sparse_dual_simplex_reoptimize(
     }
     if (stall_count > 50) {
       if (!just_refactored) {
-        if (!sbasis.refactorize(basis)) return false;
+        if (!sbasis.refactorize(basis)) { tl_dual_reopt_fail_reason = 2; return false; }
         sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
         cleanup_reduced_costs();
         just_refactored = true;
@@ -6056,7 +6079,7 @@ bool sparse_dual_simplex_reoptimize(
         // Apparently optimal under expanded tolerance — enter cleanup phase.
         // First, refactorize to remove numerical drift from incremental updates.
         if (!just_refactored) {
-          if (!sbasis.refactorize(basis)) return false;
+          if (!sbasis.refactorize(basis)) { tl_dual_reopt_fail_reason = 3; return false; }
           sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
           cleanup_reduced_costs();
           just_refactored = true;
@@ -6238,7 +6261,7 @@ bool sparse_dual_simplex_reoptimize(
     if (entering < 0) {
       // No entering variable found — could be numerical drift or true infeasibility.
       if (!just_refactored) {
-        if (!sbasis.refactorize(basis)) return false;
+        if (!sbasis.refactorize(basis)) { tl_dual_reopt_fail_reason = 4; return false; }
         sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
         cleanup_reduced_costs();
         just_refactored = true;
@@ -6357,7 +6380,7 @@ bool sparse_dual_simplex_reoptimize(
         x_b += delta_xb;
       }
       if (!just_refactored) {
-        if (!sbasis.refactorize(basis)) return false;
+        if (!sbasis.refactorize(basis)) { tl_dual_reopt_fail_reason = 5; return false; }
         sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
         cleanup_reduced_costs();
         just_refactored = true;
@@ -6406,7 +6429,7 @@ bool sparse_dual_simplex_reoptimize(
     iter_timing.update_ns += it_ns(t5, t6);
 
     // NaN/Inf guard: numerical breakdown in pivot updates.
-    if (!std::isfinite(obj)) return false;
+    if (!std::isfinite(obj)) { tl_dual_reopt_fail_reason = 6; return false; }
 
     sbasis.update_basis_sparse(leaving_row, direction.data(), dir_nz, sf.A, entering);
     auto t7 = it_tp();
@@ -6444,7 +6467,7 @@ bool sparse_dual_simplex_reoptimize(
     iter_timing.dse_ns += it_ns(t7, t8);
 
     if (sbasis.needs_refactorize(m)) {
-      if (!sbasis.refactorize(basis)) return false;
+      if (!sbasis.refactorize(basis)) { tl_dual_reopt_fail_reason = 7; return false; }
       sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
       cleanup_reduced_costs();
       // Reset sparse pricing state so next iteration does full zeroing.
@@ -6462,6 +6485,7 @@ bool sparse_dual_simplex_reoptimize(
     iter_timing.dump(m, opt.verbose);
   }
 
+  tl_dual_reopt_fail_reason = 8;
   return false;  // MAX_ITER reached
 }
 
@@ -7443,6 +7467,9 @@ struct SolveLPCounters {
   std::atomic<int> path_a_ok{0};
   std::atomic<int> path_a_infeasible{0};
   std::atomic<int> path_a_fail{0};
+  std::atomic<int> path_a_fail_reason[9] = {};
+  std::atomic<int> path_a_fail_refact_detail[8] = {};
+  std::atomic<int64_t> path_a_fail_reopt_iters{0}; // iters burned in failed reopts
   std::atomic<int> cold_start{0};
   std::atomic<int64_t> cold_us{0};      // cumulative cold-start microseconds
   std::atomic<int64_t> warm_us{0};      // cumulative warm-start microseconds
@@ -7458,8 +7485,33 @@ void dump_solve_lp_counters() {
     c.path_a_entered.load(), c.path_a_ok.load(), c.path_a_infeasible.load(), c.path_a_fail.load(),
     c.cold_start.load(),
     c.warm_us.load() / 1000.0, c.cold_us.load() / 1000.0, c.path_a_fail_us.load() / 1000.0);
+  if (c.path_a_fail.load() > 0) {
+    static const char* kReasonNames[9] = {
+        "certified", "wall-limit", "refact-stall", "refact-cleanup",
+        "refact-noenter", "refact-ratio", "nan-guard", "refact-periodic",
+        "max-iter"};
+    fmt::print(stderr, "[LP-STATS] PATH_A fail reasons:");
+    for (int r = 0; r < 9; ++r) {
+      const int cnt = c.path_a_fail_reason[r].load();
+      if (cnt > 0) fmt::print(stderr, " {}={}", kReasonNames[r], cnt);
+    }
+    fmt::print(stderr, " | reopt_iters_burned={}\n",
+               c.path_a_fail_reopt_iters.load());
+    static const char* kDetailNames[8] = {
+        "refact-ok", "col-range", "dup-basis-col", "umf-symbolic",
+        "umf-numeric", "x5", "x6", "post-numeric-prep"};
+    fmt::print(stderr, "[LP-STATS] PATH_A fail refact detail:");
+    for (int r = 0; r < 8; ++r) {
+      const int cnt = c.path_a_fail_refact_detail[r].load();
+      if (cnt > 0) fmt::print(stderr, " {}={}", kDetailNames[r], cnt);
+    }
+    fmt::print(stderr, "\n");
+  }
   // Reset for next solve
   c.path_a_entered = 0; c.path_a_ok = 0; c.path_a_infeasible = 0; c.path_a_fail = 0;
+  for (auto& r : c.path_a_fail_reason) r = 0;
+  for (auto& r : c.path_a_fail_refact_detail) r = 0;
+  c.path_a_fail_reopt_iters = 0;
   c.cold_start = 0; c.cold_us = 0; c.warm_us = 0; c.path_a_fail_us = 0;
 }
 
@@ -7919,6 +7971,8 @@ static SimplexResult solve_lp_from_sf_impl(
     auto us = [](auto a, auto b){ return std::chrono::duration_cast<std::chrono::microseconds>(b-a).count(); };
     auto t_phase = tp();
     g_slp_counters.path_a_entered.fetch_add(1, std::memory_order_relaxed);
+    tl_dual_reopt_fail_reason = 0;  // clear stale reason from a previous solve
+    int path_a_refact_detail = 0;   // captured from sbasis before scope exit
     // Validate all basis column indices.
     bool basis_valid = true;
     for (int i = 0; i < m; ++i) {
@@ -8348,21 +8402,25 @@ static SimplexResult solve_lp_from_sf_impl(
                      x_b[i] > sf.var_ub[basis[i]] + opt.feasibility_tol) ++n_primal_viol;
           }
           MIPSOLVERS_LOG_DEBUG("[PATH A] primal infeasible: {} violations, trying dual reopt m={} max_iter={}",
-                           n_primal_viol, m, opt.allow_cold_start ? std::max(2000, m) : std::max(500, m/2));
+                           n_primal_viol, m, opt.allow_cold_start ? std::max(2000, m/2) : std::max(500, m/10));
           bool proved_infeasible = false;
           bool cutoff_reached = false;
           // Cap reopt iterations. For tree nodes (near-vertex start),
           // convergence should be fast — spending many iterations on a
-          // failure wastes time. For crossover (far-from-vertex start),
-          // the caller can set a higher max_iter. Use opt.allow_cold_start
-          // as a proxy: crossover allows cold fallback and needs more room.
+          // failure wastes time (observed on 118-bus SCUC: doomed warm
+          // reopts burning ~5 s each before the cold fallback, ~80% of all
+          // LP time in the failure path).  Legitimate warm re-solves on this
+          // model family finish in <= ~2k pivots, so m/10 is generous
+          // headroom for tree nodes and m/2 for crossover/root-level
+          // (far-from-vertex starts).  When a cold fallback exists, a slow
+          // warm attempt is far better abandoned than indulged.
           SimplexOptions reopt_opt = opt;
           if (opt.allow_cold_start) {
-            // Crossover or root-level: allow up to m iterations.
-            reopt_opt.max_iter = std::min(opt.max_iter, std::max(2000, m));
+            // Crossover or root-level: allow up to m/2 iterations.
+            reopt_opt.max_iter = std::min(opt.max_iter, std::max(2000, m / 2));
           } else {
             // Tree node: cap aggressively to fail fast.
-            reopt_opt.max_iter = std::min(opt.max_iter, std::max(500, m / 2));
+            reopt_opt.max_iter = std::min(opt.max_iter, std::max(500, m / 10));
           }
           bool dr_ok = sparse_dual_simplex_reoptimize(sf, basis, sp_can_enter, reopt_opt,
                                                       sbasis, x_b, reduced_costs, obj, at_upper,
@@ -8423,7 +8481,10 @@ static SimplexResult solve_lp_from_sf_impl(
               bool proved_inf2 = false;
               bool cutoff_reached2 = false;
               SimplexOptions reopt_opt2 = opt;
-              reopt_opt2.max_iter = std::min(opt.max_iter, std::max(2000, m));
+              // Crash-repair is a rescue, not the primary: if the warm reopt
+              // already failed, indulging a second long reopt just doubles
+              // the wasted time before the cold fallback.  Fail fast here.
+              reopt_opt2.max_iter = std::min(opt.max_iter, std::max(500, m / 10));
               bool dr2 = sparse_dual_simplex_reoptimize(sf, basis, sp_can_enter, reopt_opt2,
                                                         sbasis, x_b, reduced_costs, obj, at_upper,
                                                         proved_inf2, cutoff_reached2);
@@ -8463,6 +8524,7 @@ static SimplexResult solve_lp_from_sf_impl(
         // Persist as-is (may have etas). Child will refactorize if needed.
         solved_sparse_basis = sbasis_shared;
       }
+      path_a_refact_detail = sbasis.last_refactor_fail_detail();
       } else {  // factorize_ok == false
         MIPSOLVERS_LOG_DEBUG("[PATH A] refactorize FAILED m={} — singular crash basis", m);
       }
@@ -8480,6 +8542,13 @@ static SimplexResult solve_lp_from_sf_impl(
       } else {
         g_slp_counters.path_a_fail.fetch_add(1, std::memory_order_relaxed);
         g_slp_counters.path_a_fail_us.fetch_add(warm_dur, std::memory_order_relaxed);
+        const int reason = tl_dual_reopt_fail_reason;
+        if (reason >= 0 && reason < 9)
+          g_slp_counters.path_a_fail_reason[reason].fetch_add(1, std::memory_order_relaxed);
+        g_slp_counters.path_a_fail_reopt_iters.fetch_add(tl_dual_reopt_iters, std::memory_order_relaxed);
+        const int rdetail = path_a_refact_detail;
+        if (rdetail >= 0 && rdetail < 8)
+          g_slp_counters.path_a_fail_refact_detail[rdetail].fetch_add(1, std::memory_order_relaxed);
       }
     }
   }

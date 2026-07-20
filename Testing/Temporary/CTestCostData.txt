@@ -16,3 +16,4 @@ test_market_simulation 1 23.37
 native_kernel_comparison 2 1.74884
 test_branch_and_cut 4 0.159988
 ---
+milp_benchmark

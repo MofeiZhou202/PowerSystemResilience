@@ -51,6 +51,7 @@
 #include "mipsolvers/engine/bc/options.hpp"
 #include "mipsolvers/engine/bc/stats.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
+#include "mipsolvers/engine/kernel/linear_algebra/hfactor_backend.hpp"
 #include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
 #include "mipsolvers/scuc/case_builder.hpp"
@@ -308,6 +309,13 @@ MilpRow run_native_bc(const TestCase& tc, bool ipm_root, double time_limit_sec) 
     opt.time_limit_sec               = time_limit_sec;
     opt.gap_tol                      = 1e-3;
     opt.verbose                      = false;
+    // Diagnostic overrides (development only):
+    //   MIPSOLVERS_NKC_VERBOSE=1            -> BCOptions::verbose (LP-STATS etc.)
+    //   MIPSOLVERS_NKC_REQUIRE_TREE_CERT=1  -> force real tree exploration
+    //     (disables 0-node root-certificate optimality shortcuts)
+    if (std::getenv("MIPSOLVERS_NKC_VERBOSE") != nullptr) opt.verbose = true;
+    if (std::getenv("MIPSOLVERS_NKC_REQUIRE_TREE_CERT") != nullptr)
+        opt.require_tree_exhaustion_certificate = true;
 
     const auto t0 = std::chrono::steady_clock::now();
     engine::BCResult res = engine::solve_milp_bc(mip, opt);
@@ -615,11 +623,320 @@ void print_lp_table(const char* title, const std::vector<LpRow>& rows) {
 
 }  // namespace
 
+// ── Warm-start (incremental node-LP) probe ──────────────────────────────────
+// Mirrors exactly what a B&C tree node does: one shared Ruiz-scaled standard
+// form, bound-only updates via update_standard_form_bounds, warm re-solves
+// with the parent basis hint and allow_cold_start=false.  A working
+// incremental solver should re-optimize each child in a handful of pivots and
+// milliseconds; if every probe falls back to a cold solve (or burns thousands
+// of iterations before failing), the warm-start path is broken, not the model.
+namespace {
+int run_warm_probe(bool use_118) {
+    SCUCInput inp = use_118 ? build_ieee118_case(/*T=*/24)
+                            : build_ieee39_case(/*T=*/24);
+    inp.config.solve_sced = false;
+    inp.config.solve_lmp  = false;
+    engine::MIPModel mip = build_scuc_mip(inp);
+    engine::LPModel lp = mip.linear_part;
+    const int n = static_cast<int>(lp.vars.size());
+    Eigen::VectorXd lb0(n), ub0(n);
+    for (int j = 0; j < n; ++j) {
+        lb0[j] = lp.vars[static_cast<size_t>(j)].lb;
+        ub0[j] = lp.vars[static_cast<size_t>(j)].ub;
+    }
+
+    engine::StandardFormLP sf = engine::build_standard_form_lp(lp);
+    engine::ruiz_scale_standard_form(sf);
+
+    // ── HFactor backend self-test (MIPSOLVERS_HFACTOR_SELFTEST=1) ────────
+    // Isolates the vendored-HFactor port from the simplex driver: factorize
+    // the crash basis (slack-or-artificial per row) and check FTRAN/BTRAN
+    // against an independent Eigen SparseLU reference.
+    if (std::getenv("MIPSOLVERS_HFACTOR_SELFTEST") != nullptr) {
+        const int m = static_cast<int>(sf.A.rows());
+        const int n = static_cast<int>(sf.A.cols());
+        std::vector<int> basis(m, -1);
+        for (int i = 0; i < m; ++i)
+            basis[i] = (sf.row_to_slack_col[i] >= 0) ? sf.row_to_slack_col[i]
+                                                     : sf.row_to_artificial_col[i];
+        int missing = 0;
+        for (int i = 0; i < m; ++i) if (basis[i] < 0) ++missing;
+        engine::HFactorBackend hfb;
+        const auto tf0 = std::chrono::steady_clock::now();
+        const bool ok = hfb.factorize(sf.A, basis.data(), m);
+        const double fms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - tf0).count();
+        std::printf("hfactor selftest: m=%d n=%d missing_basis_cols=%d "
+                    "factorize ok=%d rank_def=%d time=%.1f ms\n",
+                    m, n, missing, ok ? 1 : 0, hfb.rank_deficiency, fms);
+        if (ok) {
+            Eigen::VectorXd x(m), r(m);
+            hfb.ftran(sf.b.data(), x.data());
+            r = -sf.b;
+            for (int i = 0; i < m; ++i)
+                for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, basis[i]); it; ++it)
+                    r[it.row()] += it.value() * x[i];
+            std::printf("hfactor selftest: ftran residual inf-norm=%.3e\n",
+                        r.cwiseAbs().maxCoeff());
+            // Reference factorization (Eigen SparseLU).
+            Eigen::SparseMatrix<double> B(m, m);
+            std::vector<Eigen::Triplet<double>> trips;
+            for (int i = 0; i < m; ++i)
+                for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, basis[i]); it; ++it)
+                    trips.emplace_back(it.row(), i, it.value());
+            B.setFromTriplets(trips.begin(), trips.end());
+            Eigen::SparseLU<Eigen::SparseMatrix<double>> lu;
+            lu.analyzePattern(B);
+            lu.factorize(B);
+            std::printf("hfactor selftest: eigen lu %s\n",
+                        lu.info() == Eigen::Success ? "ok" : "FAILED");
+            if (lu.info() == Eigen::Success) {
+                const Eigen::VectorXd xr = lu.solve(sf.b);
+                std::printf("hfactor selftest: |x_hfactor-x_eigen|inf=%.3e\n",
+                            (x - xr).cwiseAbs().maxCoeff());
+                // BTRAN check: y = B^{-T} c_b on basic costs.
+                Eigen::VectorXd cb(m), y(m), yr(m);
+                for (int i = 0; i < m; ++i) cb[i] = sf.c_max[basis[i]];
+                hfb.btran(cb.data(), y.data());
+                yr = lu.transpose().solve(cb);
+                std::printf("hfactor selftest: |y_hfactor-y_eigen|inf=%.3e\n",
+                            (y - yr).cwiseAbs().maxCoeff());
+            }
+            // ── Update (Forrest-Tomlin) stress test ──────────────────────
+            // Simulate simplex pivots: enter a non-basic column, leave at a
+            // row with a safely nonzero pivot element, then periodically
+            // compare FTRAN results against a fresh Eigen LU of the current
+            // basis.  This exercises exactly the path the dual simplex uses.
+            {
+                std::vector<char> in_basis(n, 0);
+                for (int i = 0; i < m; ++i) in_basis[basis[i]] = 1;
+                std::vector<int> nonbasic;
+                for (int j = 0; j < n && static_cast<int>(nonbasic.size()) < 400; ++j)
+                    if (!in_basis[j]) nonbasic.push_back(j);
+                Eigen::VectorXd aq(m), ep(m), e_row = Eigen::VectorXd::Zero(m);
+                int done = 0, bad_update = 0;
+                double worst_resid = 0.0;
+                for (int t = 0; t < 50 && t < static_cast<int>(nonbasic.size()); ++t) {
+                    const int q = nonbasic[static_cast<size_t>(t)];
+                    // aq = B^{-1} a_q
+                    Eigen::VectorXd col = Eigen::VectorXd::Zero(m);
+                    for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, q); it; ++it)
+                        col[it.row()] = it.value();
+                    hfb.ftran(col.data(), aq.data());
+                    int p = -1;
+                    double best = 1e-6;
+                    for (int i = 0; i < m; ++i)
+                        if (std::fabs(aq[i]) > best) { best = std::fabs(aq[i]); p = i; }
+                    if (p < 0) continue;  // column ~dependent on current basis
+                    // ep = B^{-T} e_p
+                    e_row.setZero();
+                    e_row[p] = 1.0;
+                    hfb.btran(e_row.data(), ep.data());
+                    if (!hfb.update(p, aq.data(), ep.data())) { ++bad_update; break; }
+                    basis[p] = q;
+                    in_basis[q] = 1;
+                    ++done;
+                    if (done % 10 == 0) {
+                        // Fresh reference factorization of the current basis.
+                        Eigen::SparseMatrix<double> B2(m, m);
+                        std::vector<Eigen::Triplet<double>> tr2;
+                        for (int i = 0; i < m; ++i)
+                            for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, basis[i]); it; ++it)
+                                tr2.emplace_back(it.row(), i, it.value());
+                        B2.setFromTriplets(tr2.begin(), tr2.end());
+                        Eigen::SparseLU<Eigen::SparseMatrix<double>> lu2;
+                        lu2.analyzePattern(B2);
+                        lu2.factorize(B2);
+                        if (lu2.info() != Eigen::Success) {
+                            std::printf("hfactor selftest: update %d made basis SINGULAR\n", done);
+                            break;
+                        }
+                        const Eigen::VectorXd xr2 = lu2.solve(sf.b);
+                        Eigen::VectorXd x2(m);
+                        hfb.ftran(sf.b.data(), x2.data());
+                        const double res = (x2 - xr2).cwiseAbs().maxCoeff();
+                        worst_resid = std::max(worst_resid, res);
+                        if (res > 1e-6) {
+                            std::printf("hfactor selftest: update %d DIVERGED resid=%.3e\n", done, res);
+                            break;
+                        }
+                    }
+                }
+                std::printf("hfactor selftest: updates done=%d bad=%d worst_resid=%.3e\n",
+                            done, bad_update, worst_resid);
+            }
+        }
+        return ok ? 0 : 1;
+    }
+
+    engine::SimplexOptions cold_opt;
+    cold_opt.max_iter = 100000;
+    const auto t0 = std::chrono::steady_clock::now();
+    engine::SimplexResult r0 = engine::solve_lp_from_sf(sf, cold_opt);
+    const double cold_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
+    std::printf("cold root: success=%d status=%s obj=%.4f iters=%d time=%.0f ms\n",
+                r0.result.stats.success ? 1 : 0, r0.result.stats.status.c_str(),
+                r0.result.stats.objective, r0.result.stats.iterations, cold_ms);
+    if (!r0.result.stats.success) return 1;
+
+    // One branch per probe, always starting from the ROOT basis (B&C child
+    // semantics: parent bounds + a single branching decision).  Each fixed LP
+    // is cross-checked against HiGHS to distinguish genuine infeasibility
+    // from a false warm-start certificate.
+    std::printf("%-4s %-7s %-8s %-6s %-14s %-8s %-10s %-8s %s\n", "k", "x_root",
+                "fix", "succ", "objective", "iters", "time[ms]", "hint",
+                "HiGHS(status/obj)");
+    const auto& bins = mip.binary_idx;
+    for (int k = 0; k < 8 && k < static_cast<int>(bins.size()); ++k) {
+        const int j = bins[static_cast<size_t>(k)];
+        const double xr = r0.result.x[j];
+        // Branch AWAY from the relaxation value (the "hard child"): this
+        // genuinely changes the LP and exercises the dual warm start.
+        const double v = (xr >= 0.5) ? 0.0 : 1.0;
+        Eigen::VectorXd lb = lb0, ub = ub0;
+        lb[j] = v;
+        ub[j] = v;
+        engine::StandardFormLP sf_k = sf;
+        engine::update_standard_form_bounds(sf_k, lp, lb, ub);
+        engine::SimplexOptions node_opt;
+        node_opt.max_iter = 100000;
+        node_opt.allow_cold_start = false;  // tree-node semantics: warm or fail
+        const auto t1 = std::chrono::steady_clock::now();
+        engine::SimplexResult rk =
+            engine::solve_lp_from_sf(sf_k, node_opt, &r0.basis);
+        const double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t1).count();
+        std::string highs_info = "-";
+        if (!use_118) {
+            engine::LPModel lp_fixed = lp;
+            lp_fixed.vars[static_cast<size_t>(j)].lb = v;
+            lp_fixed.vars[static_cast<size_t>(j)].ub = v;
+            HighsRunOut hi = run_highs_raw(nullptr, &lp_fixed, 60.0);
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "%s/%.2f", hi.status.c_str(),
+                          hi.objective);
+            highs_info = buf;
+        }
+        std::printf("%-4d %-7.3f %-8.0f %-6d %-14.4f %-8d %-10.1f %-8s %s [%s]\n",
+                    k, xr, v, rk.result.stats.success ? 1 : 0,
+                    rk.result.stats.objective, rk.result.stats.iterations, ms,
+                    rk.solved_from_hint ? "yes" : "no", highs_info.c_str(),
+                    rk.result.stats.status.c_str());
+    }
+
+    // ── Tree-chain probe (mirrors descending a B&C path) ─────────────────
+    // Cumulative away-fixings, warm from the PREVIOUS node's basis — the
+    // exact tree pattern (parent basis + accumulated domain), as opposed to
+    // the single-fixing probes above which always start from the root basis.
+    // In the real 118-bus tree 8/10 PATH-A warm attempts fail; if this chain
+    // reproduces the failures, the bug is in the warm machinery itself, not
+    // in tree bookkeeping.
+    {
+        std::printf("tree-chain (cumulative fixings, parent-basis hint):\n");
+        std::printf("%-4s %-6s %-14s %-8s %-10s %-8s %s\n", "depth", "succ",
+                    "objective", "iters", "time[ms]", "hint", "status");
+        Eigen::VectorXd lb = lb0, ub = ub0;
+        engine::StandardFormLP sf_chain = sf;
+        const engine::SimplexBasis* hint = &r0.basis;
+        engine::SimplexResult prev = r0;  // only basis/result carriers are used
+        for (int d = 1; d <= 6 && d <= static_cast<int>(bins.size()); ++d) {
+            const int j = bins[static_cast<size_t>(d - 1)];
+            const double xr = r0.result.x[j];
+            const double v = (xr >= 0.5) ? 0.0 : 1.0;
+            lb[j] = v;
+            ub[j] = v;
+            engine::update_standard_form_bounds(sf_chain, lp, lb, ub);
+            engine::SimplexOptions chain_opt;
+            chain_opt.max_iter = 100000;
+            chain_opt.allow_cold_start = false;  // tree-node semantics
+            const auto t1 = std::chrono::steady_clock::now();
+            engine::SimplexResult rd =
+                engine::solve_lp_from_sf(sf_chain, chain_opt, hint);
+            const double ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t1).count();
+            std::printf("%-4d %-6d %-14.4f %-8d %-10.1f %-8s [%s]\n", d,
+                        rd.result.stats.success ? 1 : 0,
+                        rd.result.stats.objective, rd.result.stats.iterations,
+                        ms, rd.solved_from_hint ? "yes" : "no",
+                        rd.result.stats.status.c_str());
+            if (!rd.result.stats.success) {
+                // Ground-truth cross-check: a false infeasibility/failure at
+                // a tree node prunes a valid subtree — verify against HiGHS
+                // on the identically-fixed LP before trusting the verdict.
+                engine::LPModel lp_fixed = lp;
+                for (int jj = 0; jj < n; ++jj) {
+                    lp_fixed.vars[static_cast<size_t>(jj)].lb = lb[jj];
+                    lp_fixed.vars[static_cast<size_t>(jj)].ub = ub[jj];
+                }
+                HighsRunOut hi = run_highs_raw(nullptr, &lp_fixed, 600.0);
+                std::printf("  -> HiGHS ground truth: %s obj=%.4f (%s)\n",
+                            hi.status.c_str(), hi.objective,
+                            (hi.status == "Infeasible") ? "verdict CONFIRMED"
+                                                        : "FALSE CERTIFICATE!");
+                break;
+            }
+            prev = rd;
+            hint = &prev.basis;
+        }
+    }
+
+    // ── Cut-appended warm re-solve (mirrors B&C cut rounds) ──────────────
+    // Append violated cover cuts on fractional root binaries to the SF and
+    // warm re-solve with the root basis — the exact pattern of a cut
+    // re-solve in the tree (hint must be projected across the added rows).
+    {
+        std::vector<int> frac;
+        for (int idx : bins) {
+            const double x = r0.result.x[idx];
+            if (x > 1e-3 && x < 1.0 - 1e-3) frac.push_back(idx);
+        }
+        std::printf("fractional root binaries: %zu\n", frac.size());
+        for (int round = 0; round < 3 && frac.size() >= 4; ++round) {
+            const int take = std::min<int>(8, static_cast<int>(frac.size()));
+            Eigen::SparseVector<double> cut(n);
+            double act = 0.0;
+            for (int t = 0; t < take; ++t) {
+                const int j = frac[static_cast<size_t>(round * 3 + t) %
+                                     frac.size()];
+                cut.coeffRef(j) = 1.0;
+                act += r0.result.x[j];
+            }
+            const double rhs = std::max(1.0, std::floor(act - 0.5));
+            engine::StandardFormLP sf_cut;
+            std::vector<Eigen::SparseVector<double>> rows{cut};
+            if (!engine::append_leq_rows_to_standard_form(sf, rows, {rhs},
+                                                          sf_cut)) {
+                std::printf("cut round %d: append failed\n", round);
+                break;
+            }
+            engine::SimplexOptions cut_opt;
+            cut_opt.max_iter = 100000;
+            cut_opt.allow_cold_start = false;  // cut re-solve: warm or fail
+            const auto tc = std::chrono::steady_clock::now();
+            engine::SimplexResult rc =
+                engine::solve_lp_from_sf(sf_cut, cut_opt, &r0.basis);
+            const double ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - tc).count();
+            std::printf("cut round %d: succ=%d obj=%.4f iters=%d time=%.1f ms "
+                        "hint=%s [%s]\n",
+                        round, rc.result.stats.success ? 1 : 0,
+                        rc.result.stats.objective, rc.result.stats.iterations,
+                        ms, rc.solved_from_hint ? "yes" : "no",
+                        rc.result.stats.status.c_str());
+        }
+    }
+    return 0;
+}
+}  // namespace
+
 int main(int argc, char** argv) {
     bool   full_mode      = false;
     bool   skip_milp      = false;
     bool   skip_lp        = false;
     bool   check_mode     = false;
+    bool   warm_probe     = false;
+    bool   warm_probe_39  = false;
     double time_limit_sec = 120.0;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--full") == 0) {
@@ -630,12 +947,18 @@ int main(int argc, char** argv) {
             skip_lp = true;
         } else if (std::strcmp(argv[i], "--check") == 0) {
             check_mode = true;
+        } else if (std::strcmp(argv[i], "--warm-probe") == 0) {
+            warm_probe = true;
+        } else if (std::strcmp(argv[i], "--warm-probe-39") == 0) {
+            warm_probe_39 = true;
         } else if (std::strcmp(argv[i], "--time-limit") == 0 && i + 1 < argc) {
             time_limit_sec = std::atof(argv[++i]);
         } else if (std::strcmp(argv[i], "--phase1") == 0 && i + 1 < argc) {
             g_phase1_strategy = std::atoi(argv[++i]);
         }
     }
+    if (warm_probe) return run_warm_probe(true);
+    if (warm_probe_39) return run_warm_probe(false);
 
     // --check: exit nonzero if any must-pass row fails.  The must-pass set
     // deliberately excludes natIPM rows (known-weak kernel, informational)

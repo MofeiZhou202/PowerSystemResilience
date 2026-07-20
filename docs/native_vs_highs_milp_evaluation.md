@@ -166,11 +166,45 @@ Implements roadmap items P0(a,b,c) + P1 (all) + P2-short + P4 from §7, plus thr
 - MILP level: small-case optima unchanged, fake gaps gone; 118-bus row in §4 (honest trajectory, bound 135.7k, ~1.5× limit).
 - Production path unaffected (all changes are on native-kernel/failure paths; StrictHiGHS rows route around them).
 
+## 5.7 Round 3 — tree node-LP warm-start diagnosis + fail-fast (2026-07-20)
+
+Motivation: native B&C tree throughput with the native LP kernel is orders of magnitude off HiGHS (retry tree: 10 LPs in ~150 s; HiGHS: ~720k LPs in 300 s), i.e. incremental (warm-start) LP solving was not delivering.  New diagnostics: driver env overrides `MIPSOLVERS_NKC_VERBOSE` / `MIPSOLVERS_NKC_REQUIRE_TREE_CERT`, and a kernel-level `--warm-probe` (shared Ruiz-scaled SF + bound-only updates + root-basis hint, exactly the B&C node pattern; `--warm-probe-39` adds a HiGHS LP cross-check per probe).
+
+**Findings (layered).**
+
+1. **The kernel warm machinery is functional in isolation at 118-bus scale.** Single branch fixings from the root basis re-optimize warm in 35–1379 pivots (78 ms–5.4 s), cut-appended re-solves in 43–255 pivots (0.13–0.8 s); infeasibility certificates match HiGHS exactly on 39-bus (away-fixings there are genuinely infeasible — SCUC commitment logic — and both solvers agree).
+2. **In the real B&C context, 8/10 PATH-A warm attempts fail** (LP-STATS: `entered=10 ok=1 fail=8`), and each failure burns ~5 s because the doomed warm reopt was allowed `max(2000, m)` iterations, *plus* an equally large crash-repair retry, before the cold fallback ran.  Failed warm starts alone accounted for ~40 s of ~52 s LP time in the 118-bus failure path (`fail_ms=40.3k`).
+3. **Even successful warm re-solves are ~100–1000× slower per LP than HiGHS** (0.1–5 s vs ~0.4 ms): the per-pivot cost at 35.6k rows (~3 ms) and the pivot counts for single bound changes (hundreds–thousands vs HiGHS' tens) are the structural bottleneck — this is the P3 simplex-speed item, not a bookkeeping bug.
+
+**Change (fail-fast warm caps).** Warm-reopt iteration caps reduced to `max(2000, m/2)` (crossover/root-level, was `max(2000, m)`) and `max(500, m/10)` (tree nodes, was `max(500, m/2)`); the crash-repair retry is capped at `max(500, m/10)` as well (was `max(2000, m)`).  A doomed warm start now bails to the cold fallback quickly instead of indulging two long reopts.  Verification: `--warm-probe(-39)` results unchanged (all observed legitimate re-solves need ≤ ~1.4k pivots, far below the new caps); LP-STATS on the 118-bus B&C row (240 s limit, require-tree-cert): `entered=10 ok=1 infeas=0 fail=8 | COLD=24 | warm_ms=30 cold_ms=12.8k fail_ms=34.6k`.
+
+**Round-3 addendum (2026-07-20, second session) — root cause of the 8/10 warm failures found.**
+
+New kernel instrumentation: per-`return false` reason codes in `sparse_dual_simplex_reoptimize` (wall-limit / 4× refactorization-failure sites / NaN-guard / max-iter) plus a `SparseBasis::refactorize` sub-reason detail, both aggregated into `[LP-STATS]`.  A new `--warm-probe` **tree-chain section** (cumulative away-fixings, parent-basis hint — the exact B&C descent pattern) reproduces a depth-2 `LP infeasible` verdict on 118-bus that HiGHS **confirms as genuinely infeasible** (cross-check now built into the probe): the warm machinery issues no false certificates, in isolation or chained.
+
+Instrumented tree run (same row as above):
+
+```
+[LP-STATS] PATH_A fail reasons: refact-periodic=6 max-iter=2 | reopt_iters_burned=19277
+[LP-STATS] PATH_A fail refact detail: umf-numeric=8
+```
+
+i.e. the tree-context warm failures are **not** iteration-cap exhaustion (the round-3 hypothesis) and not basis bookkeeping (no duplicate/out-of-range columns): every failure bottoms out in **UMFPACK's numeric phase rejecting the warm-drifted basis as (numerically) singular** at a periodic refactorization.  Small pivots admitted by the BFRT (admission `max(1e-9, 1e-7·‖w‖∞)`, hard guard only 1e-10) compound `|det B| ← |det B|·|pivot|` over hundreds–thousands of pivots until a fresh LU sees an exactly-singular matrix; the reopt then has no repair path (fail → crash-repair reopt drifts the same way → fail → cold fallback).  This also means the fail-fast caps buy less than hoped (fail_ms 40.3k → 34.6k; the failures die at expensive refactorizations, not at the cap).
+
+**Two attempted cures, both rejected by evidence:**
+
+1. *Relative pivot admission (Harris-style `max(1e-10, 1e-8·‖direction‖∞)` + candidate blacklist + Farkas gating).*  Fixed the tree failures in principle but **broke the 118-bus cold root** (`Simplex Phase II failed`, 137–193 s vs 44 s healthy): the cold dual Phase I (which shares `sparse_dual_simplex_reoptimize`, call site at the shifted-cost Phase-I) *needs* pivots in the rejected band on this model.  Reverted.
+2. *KLU rescue on umf-numeric* (demote `SparseBasis` to the existing `KluRescue` backend and retry the refactorization).  Also broke the cold root — at m≈27.7k KLU's BTF ordering degenerates to one giant block (two full factorizations per refactorize), turning each rescue into a multi-second grind; an initial version additionally left stale `slu_/nlu_` state behind (fixed, but the speed verdict stands).  `MIPSOLVERS_FACTOR_BACKEND=hfactor` was probed as an alternative: cold Phase I fails immediately (2.9 s) — the vendored HFactor port is not cold-start-capable at this scale yet.  Both reverted; the stale-`slu_` invalidation in the `KluRescue` branch is kept as a correctness guard.
+
+**Status:** the failure mechanism is pinned (UMFPACK numeric singularity of warm-drifted bases), correctness of all verdicts is HiGHS-verified, and the cost is bounded by the fail-fast caps.  A real fix needs one of: (a) a HiGHS-style *basis repair* on singularity (replace the dependent basic columns with logicals and continue — requires column-level dependence info UMFPACK does not expose, or a rank-revealing factor); (b) maturing the HFactor port for the warm path only (it is HiGHS' own factor and handles rank deficiency natively); (c) pivot-quality work inside the BFRT that does not starve Phase I (item P3).
+
+**Not fixed (explicitly out of scope, P3):** per-pivot cost at 35.6k rows (FTRAN/BTRAN, refactorization frequency, DSE weight updates; candidate lever: the already-built vendored `mipsolvers_hfactor` backend A/B) and the tree-context warm failures themselves (see addendum — mechanism identified, cure deferred to (a)/(b)/(c) above).
+
 ## 6. Open issues (ranked, post-round-2)
 
 1. **Presolved 118-bus root LP (m≈27.7k) still unsolvable natively** (unchanged — but now routed around by the P0(a) fallback, §5.6). Round-2 diagnostics (§5.6, Stage E) rule out coefficient blow-up: presolve *improves* every scaling metric. The hardening is structural — substitution/aggregation produces fewer but denser rows/columns (max_col_nnz 364 → 157 at 1/5 the nnz), which the native dual Phase I handles far worse than the sparse original. Next diagnostic step: compare Phase-I iteration/factorization profiles on the two matrices, not scaling stats.
 2. **Fallback retry overruns its own time budget (~1.5× the MILP limit).** The retry solves the root and starts the tree, but tree-side work (root cut rounds, node LPs) still runs against the stale `root_solve_opt.time_limit_sec` snapshot taken once before the root solve. Plumb a live `bc_remaining_sec()`-derived budget into tree-stage LP/cut re-solves.
-3. **Native node-LP throughput.** 10 LPs in ~150 s on the retry's tree (HiGHS: ~720k LPs in 300 s). Even with a valid root, the native tree barely moves at 118-bus scale — the FTRAN/BTRAN/refactorization costs from round-1 item 5 dominate everything downstream.
+3. **Native node-LP throughput.** 10 LPs in ~150 s on the retry's tree (HiGHS: ~720k LPs in 300 s). Even with a valid root, the native tree barely moves at 118-bus scale — the FTRAN/BTRAN/refactorization costs from round-1 item 5 dominate everything downstream. Round-3 addendum (§5.7) pins the warm-failure mechanism (UMFPACK numeric rejection of warm-drifted bases; no false certificates — HiGHS-verified) and records two rejected cures; the repair path is now scoped to (a) HiGHS-style basis repair on singularity, (b) HFactor warm-path maturation, or (c) BFRT pivot-quality work that does not starve Phase I.
 4. **IPM-LP (natIPM) robustness** (unchanged): NumericalError/MaxIter on degenerate and SCUC-relaxation LPs; mitigated at B&C level by the round-2 health probe (doomed root solves are now skipped cheaply), but the kernel itself is unfixed. `use_ipm_root` / `natIPMroot` configurations remain unsafe at scale.
 5. **natDualSimplex speed** — ~4× slower than HiGHS on the 39-bus relaxation (parity on small LPs).
 
