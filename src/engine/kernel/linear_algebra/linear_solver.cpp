@@ -241,6 +241,8 @@ bool MKLPardisoSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
 
 #include <dmumps_c.h>
 
+#include <mutex>
+
 namespace {
 
 // Homebrew/system MUMPS runs through the mpiseq sequential stub, whose
@@ -253,6 +255,14 @@ void ensure_mpi_initialized() {
     done = true;
   }
 }
+
+// Serialises ALL MUMPS API calls process-wide.  MUMPS keeps mutable state in
+// Fortran modules (not only in DMUMPS_STRUC_C), so concurrently driving two
+// MumpsSolver instances from different threads is not safe; KLU/UMFPACK/Eigen
+// are per-instance and stay fully parallel.  Uncontended lock cost is ~20 ns
+// and irrelevant next to a factorization.  Recursive because factorize() may
+// fall through to analyze_pattern() on the same thread.
+std::recursive_mutex g_mumps_api_mutex;
 
 }  // namespace
 
@@ -272,6 +282,7 @@ class MumpsSolver::Impl {
 
   ~Impl() {
     if (analyzed) {
+      std::lock_guard<std::recursive_mutex> _lk(g_mumps_api_mutex);
       par.job = -2;  // JOB_END: free the factorization instance
       dmumps_c(&par);
     }
@@ -286,6 +297,7 @@ const char* MumpsSolver::backend_name() const {
 }
 
 void MumpsSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
+  std::lock_guard<std::recursive_mutex> _lk(g_mumps_api_mutex);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return;
   ensure_mpi_initialized();
@@ -338,6 +350,7 @@ void MumpsSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
 }
 
 bool MumpsSolver::factorize(const Eigen::SparseMatrix<double>& a) {
+  std::lock_guard<std::recursive_mutex> _lk(g_mumps_api_mutex);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return true;
   if (!impl_ || !impl_->analyzed) {
@@ -362,6 +375,7 @@ bool MumpsSolver::factorize(const Eigen::SparseMatrix<double>& a) {
 }
 
 bool MumpsSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
+  std::lock_guard<std::recursive_mutex> _lk(g_mumps_api_mutex);
   if (empty_system_) {
     if (rhs.size() != 0) return false;
     x.resize(0);
