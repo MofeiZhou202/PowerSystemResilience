@@ -406,3 +406,115 @@ TEST_CASE("MumpsSolver solves symmetric indefinite KKT systems",
   SUCCEED("MUMPS not enabled in this build");
 #endif
 }
+
+// ─── KLU rescue backend (cold-start escalation level 2) ─────────────────────
+// Large degenerate assignment LP (m = 240 > kSparseSimplexThreshold so the
+// sparse SparseBasis path is used): S supply rows sum_j x_ij <= 1, T demand
+// rows sum_i x_ij = 1, planted optimal permutation with cost 0.  The KLU
+// rescue backend (forced via escalation_start_level = 2) must find the same
+// optimum as the default UMFPACK path.
+TEST_CASE("KLU rescue backend solves a large degenerate assignment LP",
+          "[numerical][klu][escalation]") {
+#if defined(MIPSOLVERS_HAVE_KLU)
+  const int S = 120, T = 120;
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  const int n = S * T;
+  lp.c.resize(n);
+  // Planted optimum: x_{i, p(i)} = 1 with p(i) = (i * 7 + 3) % T (a
+  // permutation since gcd(7,120)=1), cost 0 on the permutation, positive
+  // elsewhere → unique optimal objective 0.
+  auto planted = [&](int i) { return (i * 7 + 3) % T; };
+  std::vector<Eigen::Triplet<double>> trips, trips_eq;
+  trips.reserve(static_cast<std::size_t>(n));
+  trips_eq.reserve(static_cast<std::size_t>(n));
+  for (int i = 0; i < S; ++i) {
+    for (int j = 0; j < T; ++j) {
+      const int v = i * T + j;
+      lp.c[v] = (j == planted(i)) ? 0.0
+                                  : 1.0 + static_cast<double>((i * T + j) % 11) * 1e-3;
+      trips.emplace_back(i, v, 1.0);       // supply row i
+      trips_eq.emplace_back(j, v, 1.0);    // demand row j
+      lp.vars.push_back({VarType::Continuous, 0.0, 1.0});
+    }
+  }
+  lp.A.resize(S, n);
+  lp.A.setFromTriplets(trips.begin(), trips.end());
+  lp.b = Eigen::VectorXd::Ones(S);
+  lp.Aeq.resize(T, n);
+  lp.Aeq.setFromTriplets(trips_eq.begin(), trips_eq.end());
+  lp.beq = Eigen::VectorXd::Ones(T);
+
+  SimplexOptions def;
+  def.max_iter = 100000;
+  const auto res_def = solve_lp_with_basis(lp, def);
+  REQUIRE(res_def.result.stats.success);
+  CHECK(res_def.result.stats.objective == Approx(0.0).margin(1e-6));
+
+  SimplexOptions klu;
+  klu.max_iter = 100000;
+  klu.escalation_start_level = 2;  // force FactorBackendKind::KluRescue
+  const auto res_klu = solve_lp_with_basis(lp, klu);
+  REQUIRE(res_klu.result.stats.success);
+  CHECK(res_klu.result.stats.objective == Approx(0.0).margin(1e-6));
+  CHECK(res_klu.result.stats.objective ==
+        Approx(res_def.result.stats.objective).margin(1e-9));
+
+  // Original-space feasibility audit of the KLU solution.
+  double max_row_viol = 0.0;
+  const Eigen::VectorXd ax = lp.A * res_klu.result.x;
+  for (int i = 0; i < ax.size(); ++i)
+    max_row_viol = std::max(max_row_viol, ax[i] - lp.b[i]);
+  const Eigen::VectorXd aeqx = lp.Aeq * res_klu.result.x;
+  for (int i = 0; i < aeqx.size(); ++i)
+    max_row_viol = std::max(max_row_viol, std::abs(aeqx[i] - lp.beq[i]));
+  CHECK(max_row_viol < 1e-8);
+#else
+  SUCCEED("KLU not compiled; rescue backend unavailable");
+#endif
+}
+
+// ─── Escalation chain integration ───────────────────────────────────────────
+// The full chain (levels 0→2) on the same degenerate LP must succeed and
+// agree with the single-attempt default within tolerance.
+TEST_CASE("Cold-start escalation chain agrees with default solve",
+          "[numerical][escalation]") {
+  const int S = 110, T = 110;
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  const int n = S * T;
+  lp.c.resize(n);
+  auto planted = [&](int i) { return (i * 7 + 3) % T; };
+  std::vector<Eigen::Triplet<double>> trips, trips_eq;
+  for (int i = 0; i < S; ++i) {
+    for (int j = 0; j < T; ++j) {
+      const int v = i * T + j;
+      lp.c[v] = (j == planted(i)) ? 0.0
+                                  : 1.0 + static_cast<double>((i * T + j) % 11) * 1e-3;
+      trips.emplace_back(i, v, 1.0);
+      trips_eq.emplace_back(j, v, 1.0);
+      lp.vars.push_back({VarType::Continuous, 0.0, 1.0});
+    }
+  }
+  lp.A.resize(S, n);
+  lp.A.setFromTriplets(trips.begin(), trips.end());
+  lp.b = Eigen::VectorXd::Ones(S);
+  lp.Aeq.resize(T, n);
+  lp.Aeq.setFromTriplets(trips_eq.begin(), trips_eq.end());
+  lp.beq = Eigen::VectorXd::Ones(T);
+
+  SimplexOptions opt;
+  opt.max_iter = 100000;
+  opt.escalation_max_level = 2;
+  const auto res = solve_lp_with_basis(lp, opt);
+  REQUIRE(res.result.stats.success);
+  CHECK(res.result.stats.objective == Approx(0.0).margin(1e-6));
+
+  SimplexOptions off;
+  off.max_iter = 100000;
+  off.escalation_max_level = 0;  // legacy behaviour
+  const auto res_off = solve_lp_with_basis(lp, off);
+  REQUIRE(res_off.result.stats.success);
+  CHECK(res.result.stats.objective ==
+        Approx(res_off.result.stats.objective).margin(1e-9));
+}

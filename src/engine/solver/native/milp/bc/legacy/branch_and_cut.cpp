@@ -4821,6 +4821,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     out.stats.status = root_relax.primal.stats.status == "Time limit"
                            ? bc_status::kTimeLimitReached
                            : bc_status::kRootRelaxationFailed;
+    // Keep bc_stats.status in sync: callers reading BCResult::bc_stats.status
+    // must not see an empty string on the root-relaxation failure path.
+    out.bc_stats.status = out.stats.status;
     if (out.stats.status == bc_status::kTimeLimitReached) {
       publish_verified_warm_start_time_limit();
     }

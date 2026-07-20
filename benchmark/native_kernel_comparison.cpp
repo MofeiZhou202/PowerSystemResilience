@@ -1,0 +1,771 @@
+/// native_kernel_comparison.cpp
+///
+/// Pure-native vs HiGHS comparison driver.
+///
+/// Unlike milp_benchmark_runner.cpp / solver_comparison.cpp — which force
+/// BCOptions::use_vendored_highs_lp_kernel = true and therefore exercise
+/// HiGHS LP numerics inside the native B&C — this driver benchmarks the
+/// *fully native* numerical stack:
+///
+///   MILP level : native branch-and-cut with the native dual simplex as the
+///                LP relaxation kernel (use_vendored_highs_lp_kernel=false),
+///                optionally with the native IPM at the root
+///                vs. raw-API HiGHS MIP as the reference.
+///   LP level   : native dual simplex (UMFPACK LU + eta updates, Ruiz
+///                scaling) and native IPM-LP vs. HiGHS LP on
+///                  - the 5 NETLIB problems with published optima
+///                  - the LP relaxations of the SCUC cases (large/degenerate)
+///                  - adversarially diagonally-scaled NETLIB problems
+///                    (dynamic range 10^k) to probe numerical stability.
+///
+/// Reported per run: success/status, objective, relative objective error
+/// (LP level, vs published optimum or HiGHS reference), runtime, iterations
+/// (LP) / nodes+LP solves (MILP), and a solution audit (max row / bound /
+/// integrality violation) computed independently from the returned x.
+///
+/// Usage:
+///   native_kernel_comparison                 # quick cases
+///   native_kernel_comparison --full          # + 118-bus/24T MILP + SCUC LPs
+///   native_kernel_comparison --time-limit 60 # per-solve wall clock cap
+///   native_kernel_comparison --skip-milp     # LP-level only
+///   native_kernel_comparison --skip-lp       # MILP level only
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
+#include <random>
+#include <string>
+#include <vector>
+
+#include <Eigen/Core>
+#include <Eigen/Sparse>
+
+#include "Highs.h"
+#include "io/HMPSIO.h"  // vendored HiGHS MPS reader
+
+#include "mipsolvers/engine/bc/api.hpp"
+#include "mipsolvers/engine/bc/options.hpp"
+#include "mipsolvers/engine/bc/stats.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
+#include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
+#include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/scuc/case_builder.hpp"
+
+using namespace mipsolvers;
+using namespace mipsolvers::scuc;
+
+namespace {
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Passed to the native simplex LP runs (SimplexOptions::phase1_strategy),
+/// set by --phase1 N for A/B evaluation of the HiGHS-style Phase I.
+int g_phase1_strategy = 0;
+
+struct TestCase {
+    std::string name;
+    SCUCInput   inp;
+};
+
+struct MilpRow {
+    std::string case_name;
+    std::string solver;
+    bool        success{false};
+    int         nodes{0};
+    int         lp_solves{0};
+    double      objective{0.0};
+    double      best_bound{0.0};
+    double      gap{0.0};
+    double      runtime_ms{0.0};
+    double      max_row_viol{0.0};
+    double      max_bound_viol{0.0};
+    double      max_int_viol{0.0};
+    std::string status;
+};
+
+struct LpRow {
+    std::string case_name;
+    std::string solver;
+    bool        success{false};
+    int         iterations{0};
+    double      objective{0.0};
+    double      obj_rel_err{-1.0};   // vs reference, -1 = unknown
+    double      runtime_ms{0.0};
+    double      max_row_viol{0.0};
+    double      max_bound_viol{0.0};
+    std::string status;
+};
+
+/// Independent feasibility audit of a solution vector against the model.
+void audit_lp(const engine::LPModel& lp, const Eigen::VectorXd& x,
+              double& max_row_viol, double& max_bound_viol) {
+    max_row_viol = 0.0;
+    max_bound_viol = 0.0;
+    if (x.size() != static_cast<int>(lp.vars.size())) {
+        max_row_viol = max_bound_viol = std::numeric_limits<double>::infinity();
+        return;
+    }
+    const Eigen::VectorXd ax = lp.A * x;
+    for (int i = 0; i < ax.size(); ++i) {
+        max_row_viol = std::max(max_row_viol, std::max(0.0, ax[i] - lp.b[i]));
+        const double lhs = engine::lp_row_lhs_or_neg_inf(lp, i);
+        if (std::isfinite(lhs)) {
+            max_row_viol = std::max(max_row_viol, std::max(0.0, lhs - ax[i]));
+        }
+    }
+    const Eigen::VectorXd aeqx = lp.Aeq * x;
+    for (int i = 0; i < aeqx.size(); ++i) {
+        max_row_viol = std::max(max_row_viol, std::abs(aeqx[i] - lp.beq[i]));
+    }
+    for (int j = 0; j < x.size(); ++j) {
+        const auto& v = lp.vars[static_cast<std::size_t>(j)];
+        max_bound_viol = std::max(max_bound_viol,
+            std::max(std::max(0.0, v.lb - x[j]), std::max(0.0, x[j] - v.ub)));
+    }
+}
+
+void audit_milp(const engine::MIPModel& mip, const Eigen::VectorXd& x,
+                double& max_row_viol, double& max_bound_viol,
+                double& max_int_viol) {
+    audit_lp(mip.linear_part, x, max_row_viol, max_bound_viol);
+    max_int_viol = 0.0;
+    if (x.size() != static_cast<int>(mip.linear_part.vars.size())) {
+        max_int_viol = std::numeric_limits<double>::infinity();
+        return;
+    }
+    for (int idx : mip.integer_idx) {
+        if (idx >= 0 && idx < x.size()) {
+            max_int_viol = std::max(max_int_viol,
+                                    std::abs(x[idx] - std::round(x[idx])));
+        }
+    }
+    for (int idx : mip.binary_idx) {
+        if (idx >= 0 && idx < x.size()) {
+            max_int_viol = std::max(max_int_viol,
+                                    std::abs(x[idx] - std::round(x[idx])));
+        }
+    }
+}
+
+double rel_gap(double obj, double bound) {
+    if (!std::isfinite(obj) || !std::isfinite(bound)) return 0.0;
+    return std::abs(obj - bound) / (1.0 + std::abs(obj));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HiGHS raw-API runner (MIP when integrality given, otherwise pure LP)
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct HighsRunOut {
+    bool        success{false};
+    double      objective{0.0};
+    double      best_bound{0.0};
+    double      mip_gap{0.0};
+    double      runtime_ms{0.0};
+    int         simplex_iterations{0};
+    int         nodes{0};
+    std::string status;
+    Eigen::VectorXd x;
+};
+
+HighsRunOut run_highs_raw(const engine::MIPModel* mip, const engine::LPModel* lp_in,
+                          double time_limit_sec) {
+    HighsRunOut out;
+    engine::LPModel lp = mip ? mip->linear_part : *lp_in;
+    if (mip) {
+        for (int idx : mip->integer_idx) {
+            lp.vars[static_cast<std::size_t>(idx)].type = engine::VarType::Integer;
+        }
+        for (int idx : mip->binary_idx) {
+            auto& var = lp.vars[static_cast<std::size_t>(idx)];
+            var.type = engine::VarType::Binary;
+            var.lb = std::max(0.0, var.lb);
+            var.ub = std::min(1.0, var.ub);
+        }
+    }
+
+    const int ncols  = static_cast<int>(lp.vars.size());
+    const int m_ineq = static_cast<int>(lp.A.rows());
+    const int m_eq   = static_cast<int>(lp.Aeq.rows());
+    const int nrows  = m_ineq + m_eq;
+
+    std::vector<double> col_cost(static_cast<std::size_t>(ncols), 0.0);
+    std::vector<double> col_lower(static_cast<std::size_t>(ncols), -kHighsInf);
+    std::vector<double> col_upper(static_cast<std::size_t>(ncols), kHighsInf);
+    std::vector<HighsInt> integrality(static_cast<std::size_t>(ncols),
+                                      static_cast<HighsInt>(HighsVarType::kContinuous));
+    for (int j = 0; j < ncols; ++j) {
+        const auto& var = lp.vars[static_cast<std::size_t>(j)];
+        col_cost[static_cast<std::size_t>(j)]  = lp.c[j];
+        col_lower[static_cast<std::size_t>(j)] = std::isfinite(var.lb) ? var.lb : -kHighsInf;
+        col_upper[static_cast<std::size_t>(j)] = std::isfinite(var.ub) ? var.ub : kHighsInf;
+        if (var.type != engine::VarType::Continuous) {
+            integrality[static_cast<std::size_t>(j)] =
+                static_cast<HighsInt>(HighsVarType::kInteger);
+        }
+    }
+
+    std::vector<double> row_lower(static_cast<std::size_t>(nrows), -kHighsInf);
+    std::vector<double> row_upper(static_cast<std::size_t>(nrows), kHighsInf);
+    for (int r = 0; r < m_ineq; ++r) {
+        const double lhs = engine::lp_row_lhs_or_neg_inf(lp, r);
+        row_lower[static_cast<std::size_t>(r)] = std::isfinite(lhs) ? lhs : -kHighsInf;
+        row_upper[static_cast<std::size_t>(r)] = std::isfinite(lp.b[r]) ? lp.b[r] : kHighsInf;
+    }
+    for (int r = 0; r < m_eq; ++r) {
+        const int rr = m_ineq + r;
+        row_lower[static_cast<std::size_t>(rr)] = lp.beq[r];
+        row_upper[static_cast<std::size_t>(rr)] = lp.beq[r];
+    }
+
+    std::vector<HighsInt> start(static_cast<std::size_t>(ncols + 1), 0);
+    std::vector<HighsInt> index;
+    std::vector<double>   value;
+    index.reserve(static_cast<std::size_t>(lp.A.nonZeros() + lp.Aeq.nonZeros()));
+    value.reserve(index.capacity());
+    for (int j = 0; j < ncols; ++j) {
+        start[static_cast<std::size_t>(j)] = static_cast<HighsInt>(index.size());
+        for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, j); it; ++it) {
+            if (it.value() == 0.0) continue;
+            index.push_back(static_cast<HighsInt>(it.row()));
+            value.push_back(it.value());
+        }
+        for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, j); it; ++it) {
+            if (it.value() == 0.0) continue;
+            index.push_back(static_cast<HighsInt>(m_ineq + it.row()));
+            value.push_back(it.value());
+        }
+    }
+    start[static_cast<std::size_t>(ncols)] = static_cast<HighsInt>(index.size());
+
+    const auto t0 = std::chrono::steady_clock::now();
+    Highs::resetGlobalScheduler(true);
+    Highs highs;
+    highs.setOptionValue("output_flag", false);
+    highs.setOptionValue("log_to_console", false);
+    highs.setOptionValue("threads", static_cast<HighsInt>(1));
+    highs.setOptionValue("time_limit", std::max(0.001, time_limit_sec));
+    if (mip) {
+        highs.setOptionValue("mip_rel_gap", 1e-4);
+    }
+
+    const auto pass_status = highs.passModel(
+        static_cast<HighsInt>(ncols), static_cast<HighsInt>(nrows),
+        static_cast<HighsInt>(index.size()), static_cast<HighsInt>(MatrixFormat::kColwise),
+        static_cast<HighsInt>(lp.sense == engine::Sense::Maximize ? ObjSense::kMaximize
+                                                                  : ObjSense::kMinimize),
+        0.0, col_cost.data(), col_lower.data(), col_upper.data(), row_lower.data(),
+        row_upper.data(), start.data(), index.data(), value.data(), integrality.data());
+    if (pass_status == HighsStatus::kError) {
+        out.status = "PassModelError";
+        out.runtime_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0).count();
+        return out;
+    }
+
+    const auto run_status = highs.run();
+    out.runtime_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
+    const HighsModelStatus ms = highs.getModelStatus();
+    out.status = highs.modelStatusToString(ms);
+    out.success = (run_status == HighsStatus::kOk)
+                  && (ms == HighsModelStatus::kOptimal
+                      || ms == HighsModelStatus::kTimeLimit
+                      || ms == HighsModelStatus::kIterationLimit);
+    const HighsInfo& info = highs.getInfo();
+    out.objective  = info.objective_function_value;
+    out.best_bound = info.mip_dual_bound;
+    out.mip_gap    = info.mip_gap;
+    out.simplex_iterations = static_cast<int>(info.simplex_iteration_count)
+                             + static_cast<int>(info.ipm_iteration_count);
+    out.nodes = static_cast<int>(info.mip_node_count);
+    const HighsSolution& sol = highs.getSolution();
+    out.x = Eigen::VectorXd::Map(sol.col_value.data(),
+                                 static_cast<int>(sol.col_value.size()));
+    return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MILP-level runners
+// ─────────────────────────────────────────────────────────────────────────────
+
+MilpRow run_native_bc(const TestCase& tc, bool ipm_root, double time_limit_sec) {
+    MilpRow r;
+    r.case_name = tc.name;
+    r.solver    = ipm_root ? "NativeBC[natIPMroot]" : "NativeBC[natSimplex]";
+
+    engine::MIPModel mip = build_scuc_mip(tc.inp);
+
+    engine::BCOptions opt;
+    opt.use_vendored_highs_lp_kernel = false;   // <-- the whole point
+    opt.use_ipm_root                 = ipm_root;
+    opt.time_limit_sec               = time_limit_sec;
+    opt.gap_tol                      = 1e-3;
+    opt.verbose                      = false;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    engine::BCResult res = engine::solve_milp_bc(mip, opt);
+    const auto t1 = std::chrono::steady_clock::now();
+
+    r.success    = res.stats.success;
+    r.nodes      = res.bc_stats.nodes_explored;
+    r.lp_solves  = res.bc_stats.lp_solves;
+    r.objective  = res.stats.objective;
+    r.best_bound = res.bc_stats.best_bound;
+    r.runtime_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    r.status     = res.bc_stats.status.empty() ? res.stats.status : res.bc_stats.status;
+    if (r.success) {
+        r.gap = rel_gap(r.objective, r.best_bound);
+        audit_milp(mip, res.x, r.max_row_viol, r.max_bound_viol, r.max_int_viol);
+    }
+    return r;
+}
+
+MilpRow run_highs_mip(const TestCase& tc, double time_limit_sec) {
+    MilpRow r;
+    r.case_name = tc.name;
+    r.solver    = "HiGHS[direct]";
+
+    engine::MIPModel mip = build_scuc_mip(tc.inp);
+    HighsRunOut out = run_highs_raw(&mip, nullptr, time_limit_sec);
+
+    r.success    = out.success;
+    r.nodes      = out.nodes;
+    r.lp_solves  = out.simplex_iterations;
+    r.objective  = out.objective;
+    r.best_bound = out.best_bound;
+    r.runtime_ms = out.runtime_ms;
+    r.status     = out.status;
+    if (r.success) {
+        r.gap = rel_gap(r.objective, r.best_bound);
+        audit_milp(mip, out.x, r.max_row_viol, r.max_bound_viol, r.max_int_viol);
+    }
+    return r;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LP-level runners
+// ─────────────────────────────────────────────────────────────────────────────
+
+LpRow run_native_simplex_lp(const std::string& case_name, const engine::LPModel& lp,
+                            double ref_obj) {
+    LpRow r;
+    r.case_name = case_name;
+    r.solver    = "natDualSimplex";
+
+    engine::SimplexOptions opts;
+    opts.max_iter = 100000;
+    opts.phase1_strategy = g_phase1_strategy;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    engine::SimplexResult res = engine::solve_lp_with_basis(lp, opts);
+    const auto t1 = std::chrono::steady_clock::now();
+
+    r.success    = res.result.stats.success;
+    r.iterations = res.result.stats.iterations;
+    r.objective  = res.result.stats.objective;
+    r.runtime_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    r.status     = res.result.stats.status;
+    if (r.success) {
+        audit_lp(lp, res.result.x, r.max_row_viol, r.max_bound_viol);
+        if (std::isfinite(ref_obj)) {
+            r.obj_rel_err = std::abs(r.objective - ref_obj) / (1.0 + std::abs(ref_obj));
+        }
+    }
+    return r;
+}
+
+LpRow run_native_ipm_lp(const std::string& case_name, const engine::LPModel& lp,
+                        double ref_obj) {
+    LpRow r;
+    r.case_name = case_name;
+    r.solver    = "natIPM";
+
+    engine::NativeIPMLPAdapter ipm{};
+    const auto t0 = std::chrono::steady_clock::now();
+    engine::SolveResult res = ipm.solve_lp(lp);
+    const auto t1 = std::chrono::steady_clock::now();
+
+    r.success    = res.stats.success;
+    r.iterations = res.stats.iterations;
+    r.objective  = res.stats.objective;
+    r.runtime_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    r.status     = res.stats.status;
+    if (r.success) {
+        audit_lp(lp, res.x, r.max_row_viol, r.max_bound_viol);
+        if (std::isfinite(ref_obj)) {
+            r.obj_rel_err = std::abs(r.objective - ref_obj) / (1.0 + std::abs(ref_obj));
+        }
+    }
+    return r;
+}
+
+LpRow run_highs_lp(const std::string& case_name, const engine::LPModel& lp,
+                   double ref_obj, double time_limit_sec) {
+    LpRow r;
+    r.case_name = case_name;
+    r.solver    = "HiGHS-LP";
+
+    HighsRunOut out = run_highs_raw(nullptr, &lp, time_limit_sec);
+    r.success    = out.success;
+    r.iterations = out.simplex_iterations;
+    r.objective  = out.objective;
+    r.runtime_ms = out.runtime_ms;
+    r.status     = out.status;
+    if (r.success) {
+        audit_lp(lp, out.x, r.max_row_viol, r.max_bound_viol);
+        if (std::isfinite(ref_obj)) {
+            r.obj_rel_err = std::abs(r.objective - ref_obj) / (1.0 + std::abs(ref_obj));
+        }
+    }
+    return r;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NETLIB MPS reading (mirrors tests/test_netlib_regression.cpp)
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::string netlib_path(const std::string& name) {
+    for (const char* prefix : {"tests/data/netlib/", "../tests/data/netlib/"}) {
+        const std::string p = std::string(prefix) + name + ".mps";
+        if (FILE* f = std::fopen(p.c_str(), "r")) {
+            std::fclose(f);
+            return p;
+        }
+    }
+    return "tests/data/netlib/" + name + ".mps";
+}
+
+bool read_mps_as_lp(const std::string& path, engine::LPModel& lp) {
+    bool output_flag = false;
+    bool log_to_console = false;
+    HighsInt log_dev_level = kHighsLogDevLevelNone;
+    HighsLogOptions log_options;
+    log_options.output_flag = &output_flag;
+    log_options.log_to_console = &log_to_console;
+    log_options.log_dev_level = &log_dev_level;
+    HighsInt num_row = 0, num_col = 0;
+    ObjSense sense = ObjSense::kMinimize;
+    double offset = 0.0;
+    std::vector<HighsInt> Astart, Aindex;
+    std::vector<double> Avalue, colCost, colLower, colUpper, rowLower, rowUpper;
+    std::vector<HighsVarType> integer;
+    std::string objective_name;
+    std::vector<std::string> col_names, row_names;
+    HighsInt Qdim = 0, cost_row_location = 0;
+    std::vector<HighsInt> Qstart, Qindex;
+    std::vector<double> Qvalue;
+    bool warning_issued = false;
+    const FilereaderRetcode rc = readMps(
+        log_options, path, -1, -1, num_row, num_col, sense, offset, Astart,
+        Aindex, Avalue, colCost, colLower, colUpper, rowLower, rowUpper, integer,
+        objective_name, col_names, row_names, Qdim, Qstart, Qindex, Qvalue,
+        cost_row_location, warning_issued);
+    if (rc != FilereaderRetcode::kOk) return false;
+
+    lp.sense = (sense == ObjSense::kMaximize) ? engine::Sense::Maximize
+                                              : engine::Sense::Minimize;
+    const int n = static_cast<int>(num_col);
+    const int m = static_cast<int>(num_row);
+    lp.c = Eigen::VectorXd::Map(colCost.data(), n);
+    lp.vars.resize(static_cast<std::size_t>(n));
+    for (int j = 0; j < n; ++j) {
+        lp.vars[static_cast<std::size_t>(j)].type = engine::VarType::Continuous;
+        const double lo = colLower[static_cast<std::size_t>(j)];
+        const double hi = colUpper[static_cast<std::size_t>(j)];
+        lp.vars[static_cast<std::size_t>(j)].lb = std::isfinite(lo) ? lo : -1e20;
+        lp.vars[static_cast<std::size_t>(j)].ub = std::isfinite(hi) ? hi : 1e20;
+    }
+
+    std::vector<int> ineq_row(static_cast<std::size_t>(m), -1);
+    std::vector<int> eq_row(static_cast<std::size_t>(m), -1);
+    int n_ineq = 0, n_eq = 0;
+    for (int i = 0; i < m; ++i) {
+        if (rowLower[static_cast<std::size_t>(i)] == rowUpper[static_cast<std::size_t>(i)]) {
+            eq_row[static_cast<std::size_t>(i)] = n_eq++;
+        } else {
+            ineq_row[static_cast<std::size_t>(i)] = n_ineq++;
+        }
+    }
+    std::vector<Eigen::Triplet<double>> trips, trips_eq;
+    std::vector<double> b(static_cast<std::size_t>(n_ineq)),
+        beq(static_cast<std::size_t>(n_eq)), lhs(static_cast<std::size_t>(n_ineq));
+    for (int i = 0; i < m; ++i) {
+        if (eq_row[static_cast<std::size_t>(i)] >= 0) {
+            beq[static_cast<std::size_t>(eq_row[static_cast<std::size_t>(i)])] =
+                rowLower[static_cast<std::size_t>(i)];
+        } else {
+            b[static_cast<std::size_t>(ineq_row[static_cast<std::size_t>(i)])] =
+                rowUpper[static_cast<std::size_t>(i)];
+            lhs[static_cast<std::size_t>(ineq_row[static_cast<std::size_t>(i)])] =
+                rowLower[static_cast<std::size_t>(i)];
+        }
+    }
+    for (int j = 0; j < n; ++j) {
+        for (HighsInt p = Astart[j]; p < Astart[j + 1]; ++p) {
+            const int i = static_cast<int>(Aindex[static_cast<std::size_t>(p)]);
+            if (eq_row[static_cast<std::size_t>(i)] >= 0) {
+                trips_eq.emplace_back(eq_row[static_cast<std::size_t>(i)], j,
+                                      Avalue[static_cast<std::size_t>(p)]);
+            } else {
+                trips.emplace_back(ineq_row[static_cast<std::size_t>(i)], j,
+                                   Avalue[static_cast<std::size_t>(p)]);
+            }
+        }
+    }
+    lp.A.resize(n_ineq, n);
+    lp.A.setFromTriplets(trips.begin(), trips.end());
+    lp.b = Eigen::VectorXd::Map(b.data(), n_ineq);
+    lp.row_lhs = Eigen::VectorXd::Map(lhs.data(), n_ineq);
+    lp.Aeq.resize(n_eq, n);
+    lp.Aeq.setFromTriplets(trips_eq.begin(), trips_eq.end());
+    lp.beq = Eigen::VectorXd::Map(beq.data(), n_eq);
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Adversarial diagonal scaling: A' = Dr * A * Dc, b' = Dr*b, c' = Dc*c,
+// bounds divided by Dc.  Optimal objective is invariant; solver numerics
+// are stressed by a dynamic range of ~10^(2*K).
+// ─────────────────────────────────────────────────────────────────────────────
+
+engine::LPModel scale_lp(const engine::LPModel& lp, double max_log10,
+                         unsigned seed) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> dist(-max_log10, max_log10);
+
+    const int m_ineq = static_cast<int>(lp.A.rows());
+    const int m_eq   = static_cast<int>(lp.Aeq.rows());
+    const int n      = static_cast<int>(lp.vars.size());
+
+    Eigen::VectorXd dr_ineq(m_ineq), dr_eq(m_eq), dc(n);
+    for (int i = 0; i < m_ineq; ++i) dr_ineq[i] = std::pow(10.0, dist(rng));
+    for (int i = 0; i < m_eq;   ++i) dr_eq[i]   = std::pow(10.0, dist(rng));
+    for (int j = 0; j < n;      ++j) dc[j]      = std::pow(10.0, dist(rng));
+
+    engine::LPModel out = lp;
+    out.A    = dr_ineq.asDiagonal() * lp.A * dc.asDiagonal();
+    out.Aeq  = dr_eq.asDiagonal() * lp.Aeq * dc.asDiagonal();
+    out.b    = dr_ineq.asDiagonal() * lp.b;
+    out.beq  = dr_eq.asDiagonal() * lp.beq;
+    if (lp.row_lhs.size() == m_ineq) {
+        out.row_lhs = dr_ineq.asDiagonal() * lp.row_lhs;
+    }
+    out.c = dc.asDiagonal() * lp.c;
+    for (int j = 0; j < n; ++j) {
+        auto& v = out.vars[static_cast<std::size_t>(j)];
+        const double d = dc[j];
+        if (d > 0.0) {
+            v.lb = v.lb / d;
+            v.ub = v.ub / d;
+        }
+    }
+    return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reporting
+// ─────────────────────────────────────────────────────────────────────────────
+
+void print_milp_table(const std::vector<MilpRow>& rows) {
+    std::printf("\n=== MILP level: native B&C (native LP kernel) vs HiGHS ===\n");
+    std::printf("%-18s %-22s %9s %7s %7s %14s %14s %8s %9s %9s %9s %s\n",
+                "Case", "Solver", "Time[ms]", "Nodes", "LPs", "Objective",
+                "BestBound", "Gap[%]", "RowViol", "BndViol", "IntViol", "Status");
+    std::printf("%s\n", std::string(150, '-').c_str());
+    std::string current;
+    for (const auto& r : rows) {
+        if (r.case_name != current) {
+            if (!current.empty()) std::printf("\n");
+            current = r.case_name;
+        }
+        std::printf("%-18s %-22s %9.1f %7d %7d %14.4f %14.4f %8.3f %9.2e %9.2e %9.2e %s%s\n",
+                    r.case_name.c_str(), r.solver.c_str(), r.runtime_ms, r.nodes,
+                    r.lp_solves, r.objective, r.best_bound, 100.0 * r.gap,
+                    r.max_row_viol, r.max_bound_viol, r.max_int_viol,
+                    r.success ? "" : "FAIL:", r.status.c_str());
+    }
+}
+
+void print_lp_table(const char* title, const std::vector<LpRow>& rows) {
+    std::printf("\n=== %s ===\n", title);
+    std::printf("%-22s %-15s %9s %8s %16s %11s %10s %10s %s\n",
+                "Case", "Solver", "Time[ms]", "Iters", "Objective",
+                "ObjRelErr", "RowViol", "BndViol", "Status");
+    std::printf("%s\n", std::string(125, '-').c_str());
+    std::string current;
+    for (const auto& r : rows) {
+        if (r.case_name != current) {
+            if (!current.empty()) std::printf("\n");
+            current = r.case_name;
+        }
+        std::printf("%-22s %-15s %9.1f %8d %16.6e %11.3e %10.2e %10.2e %s%s\n",
+                    r.case_name.c_str(), r.solver.c_str(), r.runtime_ms,
+                    r.iterations, r.objective, r.obj_rel_err,
+                    r.max_row_viol, r.max_bound_viol,
+                    r.success ? "" : "FAIL:", r.status.c_str());
+    }
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    bool   full_mode      = false;
+    bool   skip_milp      = false;
+    bool   skip_lp        = false;
+    double time_limit_sec = 120.0;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--full") == 0) {
+            full_mode = true;
+        } else if (std::strcmp(argv[i], "--skip-milp") == 0) {
+            skip_milp = true;
+        } else if (std::strcmp(argv[i], "--skip-lp") == 0) {
+            skip_lp = true;
+        } else if (std::strcmp(argv[i], "--time-limit") == 0 && i + 1 < argc) {
+            time_limit_sec = std::atof(argv[++i]);
+        } else if (std::strcmp(argv[i], "--phase1") == 0 && i + 1 < argc) {
+            g_phase1_strategy = std::atoi(argv[++i]);
+        }
+    }
+
+    // ── MILP level ────────────────────────────────────────────────────────
+    if (!skip_milp) {
+        std::vector<TestCase> cases;
+        {
+            SCUCInput inp = build_6bus_case(/*T=*/4);
+            inp.config.solve_sced = false;
+            inp.config.solve_lmp  = false;
+            cases.push_back({"UC_6bus_3G_4T", std::move(inp)});
+        }
+        {
+            SCUCInput inp = build_ieee39_case(/*T=*/4);
+            inp.config.solve_sced = false;
+            inp.config.solve_lmp  = false;
+            cases.push_back({"UC_39bus_10G_4T", std::move(inp)});
+        }
+        {
+            SCUCInput inp = build_ieee39_case(/*T=*/24);
+            inp.config.solve_sced = false;
+            inp.config.solve_lmp  = false;
+            cases.push_back({"UC_39bus_10G_24T", std::move(inp)});
+        }
+        if (full_mode) {
+            SCUCInput inp = build_ieee118_case(/*T=*/24);
+            inp.config.solve_sced = false;
+            inp.config.solve_lmp  = false;
+            cases.push_back({"UC_118bus_54G_24T", std::move(inp)});
+        }
+
+        std::vector<MilpRow> rows;
+        for (const auto& tc : cases) {
+            engine::MIPModel probe = build_scuc_mip(tc.inp);
+            std::printf("--- %s: %zu vars (%zu bin), %ld ineq, %ld eq ---\n",
+                        tc.name.c_str(), probe.linear_part.vars.size(),
+                        probe.binary_idx.size(),
+                        static_cast<long>(probe.linear_part.b.size()),
+                        static_cast<long>(probe.linear_part.beq.size()));
+            std::fflush(stdout);
+
+            rows.push_back(run_native_bc(tc, /*ipm_root=*/false, time_limit_sec));
+            std::printf("  NativeBC[natSimplex] done (%.1f ms)\n", rows.back().runtime_ms);
+            std::fflush(stdout);
+
+            rows.push_back(run_native_bc(tc, /*ipm_root=*/true, time_limit_sec));
+            std::printf("  NativeBC[natIPMroot] done (%.1f ms)\n", rows.back().runtime_ms);
+            std::fflush(stdout);
+
+            rows.push_back(run_highs_mip(tc, time_limit_sec));
+            std::printf("  HiGHS[direct]        done (%.1f ms)\n", rows.back().runtime_ms);
+            std::fflush(stdout);
+        }
+        print_milp_table(rows);
+    }
+
+    // ── LP level ──────────────────────────────────────────────────────────
+    if (!skip_lp) {
+        // 1) NETLIB with published optima
+        const std::pair<const char*, double> kNetlib[] = {
+            {"afiro",    -4.6475314286e+02},
+            {"adlittle",  2.2549496316e+05},
+            {"share2b",  -4.1573224074e+02},
+            {"stocfor1", -4.1131976219e+04},
+            {"kb2",      -1.7499001299e+03},
+        };
+        std::vector<LpRow> netlib_rows;
+        for (const auto& [name, obj] : kNetlib) {
+            engine::LPModel lp;
+            if (!read_mps_as_lp(netlib_path(name), lp)) {
+                std::printf("WARN: cannot read %s\n", name);
+                continue;
+            }
+            netlib_rows.push_back(run_native_simplex_lp(name, lp, obj));
+            netlib_rows.push_back(run_native_ipm_lp(name, lp, obj));
+            netlib_rows.push_back(run_highs_lp(name, lp, obj, time_limit_sec));
+        }
+        print_lp_table("LP level: NETLIB published optima", netlib_rows);
+
+        // 2) SCUC LP relaxations (large, highly degenerate).  Reference =
+        //    HiGHS LP objective (no published optimum available).
+        std::vector<LpRow> relax_rows;
+        auto run_relax = [&](const char* label, const SCUCInput& inp) {
+            engine::MIPModel mip = build_scuc_mip(inp);
+            engine::LPModel lp = mip.linear_part;  // integrality dropped
+            LpRow hi = run_highs_lp(label, lp,
+                                    std::numeric_limits<double>::quiet_NaN(),
+                                    time_limit_sec);
+            const double ref = hi.success ? hi.objective
+                                          : std::numeric_limits<double>::quiet_NaN();
+            relax_rows.push_back(run_native_simplex_lp(label, lp, ref));
+            relax_rows.push_back(run_native_ipm_lp(label, lp, ref));
+            relax_rows.push_back(hi);
+        };
+        {
+            SCUCInput inp = build_6bus_case(4);
+            inp.config.solve_sced = false;
+            inp.config.solve_lmp  = false;
+            run_relax("UC_6bus_4T-relax", inp);
+        }
+        {
+            SCUCInput inp = build_ieee39_case(24);
+            inp.config.solve_sced = false;
+            inp.config.solve_lmp  = false;
+            run_relax("UC_39bus_24T-relax", inp);
+        }
+        if (full_mode) {
+            SCUCInput inp = build_ieee118_case(24);
+            inp.config.solve_sced = false;
+            inp.config.solve_lmp  = false;
+            run_relax("UC_118bus_24T-relax", inp);
+        }
+        print_lp_table("LP level: SCUC LP relaxations (ref = HiGHS)", relax_rows);
+
+        // 3) Adversarial diagonal scaling stress (numerical stability probe)
+        std::vector<LpRow> scale_rows;
+        for (const char* name : {"afiro", "adlittle"}) {
+            engine::LPModel base;
+            if (!read_mps_as_lp(netlib_path(name), base)) continue;
+            const double ref_obj = (name[0] == 'a' && name[1] == 'f')
+                                   ? -4.6475314286e+02 : 2.2549496316e+05;
+            for (double k : {2.0, 4.0, 6.0}) {
+                engine::LPModel scaled = scale_lp(base, k, /*seed=*/42);
+                char label[64];
+                std::snprintf(label, sizeof(label), "%s-scale1e%d", name,
+                              static_cast<int>(k));
+                scale_rows.push_back(run_native_simplex_lp(label, scaled, ref_obj));
+                scale_rows.push_back(run_native_ipm_lp(label, scaled, ref_obj));
+                scale_rows.push_back(run_highs_lp(label, scaled, ref_obj,
+                                                  time_limit_sec));
+            }
+        }
+        print_lp_table("LP level: adversarial diagonal scaling (10^k dynamic range)",
+                       scale_rows);
+    }
+
+    return 0;
+}

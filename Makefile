@@ -289,6 +289,19 @@ solver_comparison/fast:
 .PHONY : solver_comparison/fast
 
 #=============================================================================
+# Target rules for targets named native_kernel_comparison
+
+# Build rule for target.
+native_kernel_comparison: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 native_kernel_comparison
+.PHONY : native_kernel_comparison
+
+# fast build rule for target.
+native_kernel_comparison/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_kernel_comparison.dir/build.make CMakeFiles/native_kernel_comparison.dir/build
+.PHONY : native_kernel_comparison/fast
+
+#=============================================================================
 # Target rules for targets named mipsolvers_bundled
 
 # Build rule for target.
@@ -662,6 +675,30 @@ benchmark/milp_benchmark_runner.s: benchmark/milp_benchmark_runner.cpp.s
 benchmark/milp_benchmark_runner.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/milp_benchmark_runner.dir/build.make CMakeFiles/milp_benchmark_runner.dir/benchmark/milp_benchmark_runner.cpp.s
 .PHONY : benchmark/milp_benchmark_runner.cpp.s
+
+benchmark/native_kernel_comparison.o: benchmark/native_kernel_comparison.cpp.o
+.PHONY : benchmark/native_kernel_comparison.o
+
+# target to build an object file
+benchmark/native_kernel_comparison.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_kernel_comparison.dir/build.make CMakeFiles/native_kernel_comparison.dir/benchmark/native_kernel_comparison.cpp.o
+.PHONY : benchmark/native_kernel_comparison.cpp.o
+
+benchmark/native_kernel_comparison.i: benchmark/native_kernel_comparison.cpp.i
+.PHONY : benchmark/native_kernel_comparison.i
+
+# target to preprocess a source file
+benchmark/native_kernel_comparison.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_kernel_comparison.dir/build.make CMakeFiles/native_kernel_comparison.dir/benchmark/native_kernel_comparison.cpp.i
+.PHONY : benchmark/native_kernel_comparison.cpp.i
+
+benchmark/native_kernel_comparison.s: benchmark/native_kernel_comparison.cpp.s
+.PHONY : benchmark/native_kernel_comparison.s
+
+# target to generate assembly for a file
+benchmark/native_kernel_comparison.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_kernel_comparison.dir/build.make CMakeFiles/native_kernel_comparison.dir/benchmark/native_kernel_comparison.cpp.s
+.PHONY : benchmark/native_kernel_comparison.cpp.s
 
 benchmark/opf_scale_probe.o: benchmark/opf_scale_probe.cpp.o
 .PHONY : benchmark/opf_scale_probe.o
@@ -9070,6 +9107,7 @@ src/scuc/case_builder.o: src/scuc/case_builder.cpp.o
 src/scuc/case_builder.cpp.o:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/milp_benchmark_runner.dir/build.make CMakeFiles/milp_benchmark_runner.dir/src/scuc/case_builder.cpp.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/solver_comparison.dir/build.make CMakeFiles/solver_comparison.dir/src/scuc/case_builder.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_kernel_comparison.dir/build.make CMakeFiles/native_kernel_comparison.dir/src/scuc/case_builder.cpp.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_market_simulation.dir/build.make CMakeFiles/test_market_simulation.dir/src/scuc/case_builder.cpp.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/scuc_case_builder.dir/build.make CMakeFiles/scuc_case_builder.dir/src/scuc/case_builder.cpp.o
 .PHONY : src/scuc/case_builder.cpp.o
@@ -9081,6 +9119,7 @@ src/scuc/case_builder.i: src/scuc/case_builder.cpp.i
 src/scuc/case_builder.cpp.i:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/milp_benchmark_runner.dir/build.make CMakeFiles/milp_benchmark_runner.dir/src/scuc/case_builder.cpp.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/solver_comparison.dir/build.make CMakeFiles/solver_comparison.dir/src/scuc/case_builder.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_kernel_comparison.dir/build.make CMakeFiles/native_kernel_comparison.dir/src/scuc/case_builder.cpp.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_market_simulation.dir/build.make CMakeFiles/test_market_simulation.dir/src/scuc/case_builder.cpp.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/scuc_case_builder.dir/build.make CMakeFiles/scuc_case_builder.dir/src/scuc/case_builder.cpp.i
 .PHONY : src/scuc/case_builder.cpp.i
@@ -9092,6 +9131,7 @@ src/scuc/case_builder.s: src/scuc/case_builder.cpp.s
 src/scuc/case_builder.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/milp_benchmark_runner.dir/build.make CMakeFiles/milp_benchmark_runner.dir/src/scuc/case_builder.cpp.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/solver_comparison.dir/build.make CMakeFiles/solver_comparison.dir/src/scuc/case_builder.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_kernel_comparison.dir/build.make CMakeFiles/native_kernel_comparison.dir/src/scuc/case_builder.cpp.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_market_simulation.dir/build.make CMakeFiles/test_market_simulation.dir/src/scuc/case_builder.cpp.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/scuc_case_builder.dir/build.make CMakeFiles/scuc_case_builder.dir/src/scuc/case_builder.cpp.s
 .PHONY : src/scuc/case_builder.cpp.s
@@ -9151,6 +9191,7 @@ src/scuc/scuc.o: src/scuc/scuc.cpp.o
 src/scuc/scuc.cpp.o:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/milp_benchmark_runner.dir/build.make CMakeFiles/milp_benchmark_runner.dir/src/scuc/scuc.cpp.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/solver_comparison.dir/build.make CMakeFiles/solver_comparison.dir/src/scuc/scuc.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_kernel_comparison.dir/build.make CMakeFiles/native_kernel_comparison.dir/src/scuc/scuc.cpp.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_scuc_module.dir/build.make CMakeFiles/test_scuc_module.dir/src/scuc/scuc.cpp.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_market_simulation.dir/build.make CMakeFiles/test_market_simulation.dir/src/scuc/scuc.cpp.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/scuc_solve.dir/build.make CMakeFiles/scuc_solve.dir/src/scuc/scuc.cpp.o
@@ -9164,6 +9205,7 @@ src/scuc/scuc.i: src/scuc/scuc.cpp.i
 src/scuc/scuc.cpp.i:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/milp_benchmark_runner.dir/build.make CMakeFiles/milp_benchmark_runner.dir/src/scuc/scuc.cpp.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/solver_comparison.dir/build.make CMakeFiles/solver_comparison.dir/src/scuc/scuc.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_kernel_comparison.dir/build.make CMakeFiles/native_kernel_comparison.dir/src/scuc/scuc.cpp.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_scuc_module.dir/build.make CMakeFiles/test_scuc_module.dir/src/scuc/scuc.cpp.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_market_simulation.dir/build.make CMakeFiles/test_market_simulation.dir/src/scuc/scuc.cpp.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/scuc_solve.dir/build.make CMakeFiles/scuc_solve.dir/src/scuc/scuc.cpp.i
@@ -9177,6 +9219,7 @@ src/scuc/scuc.s: src/scuc/scuc.cpp.s
 src/scuc/scuc.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/milp_benchmark_runner.dir/build.make CMakeFiles/milp_benchmark_runner.dir/src/scuc/scuc.cpp.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/solver_comparison.dir/build.make CMakeFiles/solver_comparison.dir/src/scuc/scuc.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_kernel_comparison.dir/build.make CMakeFiles/native_kernel_comparison.dir/src/scuc/scuc.cpp.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_scuc_module.dir/build.make CMakeFiles/test_scuc_module.dir/src/scuc/scuc.cpp.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_market_simulation.dir/build.make CMakeFiles/test_market_simulation.dir/src/scuc/scuc.cpp.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/scuc_solve.dir/build.make CMakeFiles/scuc_solve.dir/src/scuc/scuc.cpp.s
@@ -24860,6 +24903,7 @@ help:
 	@echo "... milp_benchmark_runner"
 	@echo "... mipsolvers"
 	@echo "... mipsolvers_hfactor"
+	@echo "... native_kernel_comparison"
 	@echo "... opf_scale_probe"
 	@echo "... scip"
 	@echo "... scuc_case_builder"
@@ -24883,6 +24927,9 @@ help:
 	@echo "... benchmark/milp_benchmark_runner.o"
 	@echo "... benchmark/milp_benchmark_runner.i"
 	@echo "... benchmark/milp_benchmark_runner.s"
+	@echo "... benchmark/native_kernel_comparison.o"
+	@echo "... benchmark/native_kernel_comparison.i"
+	@echo "... benchmark/native_kernel_comparison.s"
 	@echo "... benchmark/opf_scale_probe.o"
 	@echo "... benchmark/opf_scale_probe.i"
 	@echo "... benchmark/opf_scale_probe.s"

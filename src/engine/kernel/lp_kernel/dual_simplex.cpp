@@ -4,42 +4,44 @@
 //
 // File organization (line ranges are approximate; use a symbol search to jump):
 //
-//   Section 1  [~30   –  770 ]  Anonymous-namespace utilities
+//   Section 1  [~110  – 2350 ]  Anonymous-namespace utilities
 //                                  * mark_proven_infeasible, approx_nonnegative
 //                                  * RowSpec, extract_solution, basis_matrix
 //                                  * primal_simplex_optimize
 //                                  * dual_simplex_reoptimize
 //
-//   Section 2  [~775  – 1395 ]  NativeLU
+//   Section 2  [~2350 – 3446 ]  NativeLU + incremental state update helpers
 //                                  * Extracted L,U factors from UMFPACK
 //                                  * Sparse FTRAN / BTRAN with DFS-based
 //                                    triangular solves
+//                                  * SimplexBoundChange helpers
 //
-//   Section 3  [~1396 – 2033 ]  SparseBasis
+//   Section 3  [~3447 – 4930 ]  SparseBasis
 //                                  * Owns the basis matrix + LU factorization
 //                                  * Forrest-Tomlin η-vector updates
+//                                  * Factor backends: UMFPACK (default),
+//                                    HFactorPort, KluRescue (escalation L2)
 //                                  * Refactorization bookkeeping
 //
-//   Section 4  [~2034 – 3010 ]  Incremental state update / simplex bound
-//                               change helpers (SimplexBoundChange, etc.)
+//   Section 4  [~4930 – 6570 ]  Sparse simplex drivers
+//                                  * sparse_primal_simplex_optimize
+//                                  * sparse_dual_simplex_reoptimize
+//                                  * HiGHS-style Phase I helpers
+//                                    (highs_style_perturb,
+//                                     dual_cleanup_resolve)
 //
-//   Section 5  [~3013 – 3050 ]  Opaque-handle C-style accessors for
+//   Section 5  [~6570 – 6800 ]  Opaque-handle C-style accessors for
 //                               SparseBasis (clear_sparse_basis_etas,
 //                               truncate_sparse_basis_etas, ...)
 //
-//   Section 6  [~3051 – 3290 ]  build_standard_form_lp
-//                                  * Converts an LPModel to standard-form
-//                                    with variable shifts and slack columns
-//
-//   Section 7  [~3291 – 4060 ]  ruiz_scale_standard_form
-//                                  * Symmetric Ruiz equilibration
-//
-//   Section 8  [~4063 – 4075 ]  SolveLPCounters (diagnostic counters)
-//
-//   Section 9  [~4077 – 5160 ]  High-level LP solve entry points
-//                                  * solve_lp_with_basis
+//   Section 6  [~6800 – end  ]  High-level LP solve entry points
+//                                  * solve_lp_with_basis (+ cold-start
+//                                    escalation chain wrapper)
 //                                  * solve_lp_from_sf
 //                                  * dump_solve_lp_counters
+//
+//   Note: build_standard_form_lp and ruiz_scale_standard_form now live in
+//   the sibling TU src/engine/kernel/lp_kernel/dual_simplex_api.cpp.
 //
 // Future refactor plan (tracked in /memories/repo/forrest-tomlin-update-design.md):
 //
@@ -66,6 +68,7 @@
 #include <deque>
 #include <limits>
 #include <numeric>
+#include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -83,6 +86,10 @@
 extern "C" {
 #include <umfpack.h>
 }
+#endif
+
+#ifdef MIPSOLVERS_HAVE_KLU
+#include <Eigen/KLUSupport>
 #endif
 
 #include "mipsolvers/core/logging.hpp"
@@ -110,6 +117,11 @@ thread_local int tl_dual_reopt_iters = 0;
 thread_local int tl_primal_simplex_iters = 0;
 
 namespace {
+
+// Thread-local simplex iteration accumulator: every primal/dual reoptimize
+// loop bumps this per pivot; solve_lp_with_basis_impl resets it on entry and
+// reports it via SolveStats::iterations (previously hard-coded to 0).
+thread_local int g_simplex_iter_count = 0;
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
 constexpr double kHighsDefaultKktTolerance = 1e-7;
@@ -2342,7 +2354,7 @@ bool primal_simplex_optimize(const StandardFormLP& sf,
   bool just_refactored = true;  // Initial compute_basis_state counts.
   const auto wall_t0 = std::chrono::steady_clock::now();
 
-  for (int iter = 0; iter < opt.max_iter; ++iter) {
+  for (int iter = 0; iter < opt.max_iter; ++iter, ++g_simplex_iter_count) {
     if ((iter & 15) == 0 && simplex_wall_time_limit_hit(opt, wall_t0)) {
       return false;
     }
@@ -2573,7 +2585,7 @@ bool dual_simplex_reoptimize(const StandardFormLP& sf,
   Eigen::RowVectorXd pivot_row(m);
   const auto wall_t0 = std::chrono::steady_clock::now();
 
-  for (int iter = 0; iter < opt.max_iter; ++iter) {
+  for (int iter = 0; iter < opt.max_iter; ++iter, ++g_simplex_iter_count) {
     if ((iter & 15) == 0 && simplex_wall_time_limit_hit(opt, wall_t0)) {
       return false;
     }
@@ -3456,6 +3468,11 @@ class SparseBasis : public BasisOps {
     // public SimplexFactorBackend enum is intentionally not extended yet
     // until Phase 4 benchmarks justify a default-on flip.
     HFactorPort = 4,
+    // Stage 2 rescue backend: KLU LU with two fresh factorizations (B and
+    // B^T) per refactorize() and standard eta updates between them.
+    // Selected only by the cold-start escalation chain at level >= 2;
+    // never via the public SimplexFactorBackend ids.
+    KluRescue = 5,
   };
 
   static FactorBackendKind from_public_backend(SimplexFactorBackend backend) {
@@ -3509,6 +3526,17 @@ class SparseBasis : public BasisOps {
   }
   SparseBasis(const SparseBasis&) = delete;
   SparseBasis& operator=(const SparseBasis&) = delete;
+
+  /// Override UMFPACK's partial-pivoting tolerance (0,1]; 1.0 requests true
+  /// partial pivoting.  Takes effect at the next refactorize() call.  Used by
+  /// the cold-start escalation chain; no-op without UMFPACK.
+  void set_pivot_tolerance(double tol) {
+#ifdef MIPSOLVERS_HAVE_UMFPACK
+    if (tol > 0.0 && tol <= 1.0) Control_[UMFPACK_PIVOT_TOLERANCE] = tol;
+#else
+    (void)tol;
+#endif
+  }
 
   BasisOpsKind kind() const override { return BasisOpsKind::NativeSparse; }
 
@@ -3797,6 +3825,35 @@ class SparseBasis : public BasisOps {
 #endif
     }
     B_ = build_sparse_basis(basis);
+    // Stage 2: KLU rescue backend.  Two fresh factorizations (B and B^T) per
+    // refactorize; standard eta updates apply between refactorizations.
+    // Numerically conservative rescue path — correctness over speed.
+    if (backend_kind_ == FactorBackendKind::KluRescue) {
+#ifdef MIPSOLVERS_HAVE_KLU
+      const Eigen::SparseMatrix<double> Bt = B_.transpose();
+      klu_lu_.compute(B_);
+      klu_lu_t_.compute(Bt);
+      klu_use_fallback_ = (klu_lu_.info() != Eigen::Success) ||
+                          (klu_lu_t_.info() != Eigen::Success);
+      if (klu_use_fallback_) {
+        klu_fallback_lu_.setPivotThreshold(1.0);
+        klu_fallback_lu_.compute(B_);
+        klu_fallback_lu_t_.setPivotThreshold(1.0);
+        klu_fallback_lu_t_.compute(Bt);
+        if (klu_fallback_lu_.info() != Eigen::Success ||
+            klu_fallback_lu_t_.info() != Eigen::Success) {
+          return false;
+        }
+      }
+      etas_.clear();
+      min_pivot_ = 1e30;
+      max_eta_norm_ = 0.0;
+      accumulated_fill_ = 0;
+      return true;
+#else
+      return false;  // KluRescue requested but KLU not compiled
+#endif
+    }
 #ifdef MIPSOLVERS_HAVE_UMFPACK
     if (Numeric_) { umfpack_dl_free_numeric(&Numeric_); Numeric_ = nullptr; }
 
@@ -3877,6 +3934,18 @@ class SparseBasis : public BasisOps {
       hfb_.ftran(rhs.data(), z.data());
       return z;
     }
+#ifdef MIPSOLVERS_HAVE_KLU
+    if (backend_kind_ == FactorBackendKind::KluRescue) {
+      Eigen::VectorXd zr;
+      if (klu_use_fallback_) {
+        zr = klu_fallback_lu_.solve(rhs);
+      } else {
+        zr = klu_lu_.solve(rhs);
+      }
+      for (const auto& eta : etas_) apply_eta_ftran(zr, eta);
+      return zr;
+    }
+#endif
 #ifdef MIPSOLVERS_HAVE_UMFPACK
     if (slu_.valid) {
       slu_.ftran(rhs.data(), z.data());
@@ -3915,6 +3984,17 @@ class SparseBasis : public BasisOps {
       hfb_.ftran(solve_work_.data(), rhs.data());
       return;
     }
+#ifdef MIPSOLVERS_HAVE_KLU
+    if (backend_kind_ == FactorBackendKind::KluRescue) {
+      if (klu_use_fallback_) {
+        rhs = klu_fallback_lu_.solve(rhs);
+      } else {
+        rhs = klu_lu_.solve(rhs);
+      }
+      for (const auto& eta : etas_) apply_eta_ftran(rhs, eta);
+      return;
+    }
+#endif
 #ifdef MIPSOLVERS_HAVE_UMFPACK
     if (slu_.valid) {
       solve_work_.noalias() = rhs;
@@ -3974,6 +4054,15 @@ class SparseBasis : public BasisOps {
       hfb_.btran(rhs.data(), y.data());
       return y;
     }
+#ifdef MIPSOLVERS_HAVE_KLU
+    if (backend_kind_ == FactorBackendKind::KluRescue) {
+      Eigen::VectorXd zr = rhs;
+      for (int k = static_cast<int>(etas_.size()) - 1; k >= 0; --k)
+        apply_eta_btran(zr, etas_[static_cast<std::size_t>(k)]);
+      if (klu_use_fallback_) return klu_fallback_lu_t_.solve(zr);
+      return klu_lu_t_.solve(zr);
+    }
+#endif
 #ifdef MIPSOLVERS_HAVE_UMFPACK
     if (slu_.valid) {
       slu_.btran(rhs.data(), y.data());
@@ -4018,6 +4107,18 @@ class SparseBasis : public BasisOps {
       hfb_.btran(solve_work_.data(), rhs.data());
       return;
     }
+#ifdef MIPSOLVERS_HAVE_KLU
+    if (backend_kind_ == FactorBackendKind::KluRescue) {
+      for (int k = static_cast<int>(etas_.size()) - 1; k >= 0; --k)
+        apply_eta_btran(rhs, etas_[static_cast<std::size_t>(k)]);
+      if (klu_use_fallback_) {
+        rhs = klu_fallback_lu_t_.solve(rhs);
+      } else {
+        rhs = klu_lu_t_.solve(rhs);
+      }
+      return;
+    }
+#endif
 #ifdef MIPSOLVERS_HAVE_UMFPACK
     if (slu_.valid) {
       solve_work_.noalias() = rhs;
@@ -4854,6 +4955,16 @@ class SparseBasis : public BasisOps {
 #else
   mutable Eigen::SparseLU<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> lu_;
 #endif
+#ifdef MIPSOLVERS_HAVE_KLU
+  // KLU rescue backend (FactorBackendKind::KluRescue).  Two factorizations
+  // (B and B^T) because this Eigen's SparseSolverBase has no transpose-solve
+  // API; falls back to Eigen::SparseLU (pivot threshold 1.0) when KLU
+  // reports a numerical/structural failure.
+  mutable Eigen::KLU<Eigen::SparseMatrix<double>> klu_lu_, klu_lu_t_;
+  mutable Eigen::SparseLU<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>>
+      klu_fallback_lu_, klu_fallback_lu_t_;
+  mutable bool klu_use_fallback_{false};
+#endif
   std::vector<EtaVector> etas_;   // Product-form etas for FTRAN/BTRAN
   // Parent-factor extension for scale-compatible appended <= rows.  The
   // current basis has the previous basis columns plus the new row slacks, so
@@ -5408,7 +5519,7 @@ bool sparse_primal_simplex_optimize(
   const int sector_size = (opt.use_partial_pricing && n > 2000) ? std::max(500, n / 6) : n;
   int sector_start = 0;
 
-  for (int iter = 0; iter < opt.max_iter; ++iter) {
+  for (int iter = 0; iter < opt.max_iter; ++iter, ++g_simplex_iter_count) {
     if ((iter & 15) == 0 && simplex_wall_time_limit_hit(opt, wall_t0)) {
       return false;
     }
@@ -5857,7 +5968,7 @@ bool sparse_dual_simplex_reoptimize(
   auto it_ns = [](auto a, auto b){ return std::chrono::duration_cast<std::chrono::nanoseconds>(b-a).count(); };
   const auto wall_t0 = std::chrono::steady_clock::now();
 
-  for (int iter = 0; iter < opt.max_iter; ++iter) {
+  for (int iter = 0; iter < opt.max_iter; ++iter, ++g_simplex_iter_count) {
     if ((iter & 15) == 0 && simplex_wall_time_limit_hit(opt, wall_t0)) {
       return false;
     }
@@ -6354,6 +6465,124 @@ bool sparse_dual_simplex_reoptimize(
   return false;  // MAX_ITER reached
 }
 
+// ── HiGHS-style Phase I helpers (SimplexOptions::phase1_strategy == 1) ──────
+
+/// Apply magnitude-aware randomized perturbations to costs and finite upper
+/// bounds, mirroring HEkk::initialiseCost / HEkk::initialiseBound:
+///   cost base  = 5e-7 * max(1, |c|_inf);  per-column (1+rand)(|c_j|+1)*base
+///   finite ub += (2rand-1) * 1e-7 * max(1, |ub|)
+/// Sign convention for costs follows HiGHS: lower-only-bounded (infinite ub)
+/// columns get +xpert, boxed columns are pushed away from zero.  The RHS is
+/// deliberately NOT perturbed: on tightly-balanced equality systems (e.g.
+/// SCUC power-balance rows where total capacity barely meets demand) an
+/// independent ±1e-7 RHS perturbation can make the perturbed problem
+/// genuinely infeasible — a false certificate.  Bounds at (near-)zero are
+/// also left untouched so fixed-at-zero columns stay fixed.  The RNG is
+/// deterministically seeded so runs are reproducible.
+void highs_style_perturb(StandardFormLP& sf, unsigned long long seed) {
+  const int n = static_cast<int>(sf.A.cols());
+  std::mt19937_64 rng(seed);
+  std::uniform_real_distribution<double> u01(0.0, 1.0);
+
+  double maxc = 1.0;
+  for (int j = 0; j < n; ++j) maxc = std::max(maxc, std::abs(sf.c_max[j]));
+  const double cost_base = 5e-7 * maxc;
+  const bool has_ub = static_cast<int>(sf.var_ub.size()) == n;
+  for (int j = 0; j < n; ++j) {
+    const double ub_j = has_ub ? sf.var_ub[j]
+                               : std::numeric_limits<double>::infinity();
+    const double xpert =
+        (1.0 + u01(rng)) * (std::abs(sf.c_max[j]) + 1.0) * cost_base;
+    if (std::isfinite(ub_j)) {
+      sf.c_max[j] += (sf.c_max[j] >= 0.0) ? xpert : -xpert;
+    } else {
+      sf.c_max[j] += xpert;
+    }
+  }
+  if (has_ub) {
+    for (int j = 0; j < n; ++j) {
+      double& ub = sf.var_ub[j];
+      if (std::isfinite(ub) && ub > 1e-12) {
+        ub += (2.0 * u01(rng) - 1.0) * 1e-7 * std::max(1.0, std::abs(ub));
+        ub = std::max(ub, 1e-12);
+      }
+    }
+  }
+}
+
+/// Exact-zero dual repair + dual simplex continuation, mirroring HiGHS'
+/// shiftCost-pinned-at-zero / correctDualInfeasibilities + continue pattern:
+/// for every non-basic column violating dual feasibility, shift its cost so
+/// the reduced cost lands exactly on the dual boundary (with a 1e-10 margin
+/// inside the feasible side), then run the dual simplex to restore primal
+/// feasibility.  Artificial columns are blocked from entering and are never
+/// shifted.  `sf` is modified in place (cost shifts); on success the basis /
+/// x_b / at_upper describe a primal-feasible point of `sf`.
+bool dual_cleanup_resolve(StandardFormLP& sf, std::vector<int>& basis,
+                          const SimplexOptions& opt, SparseBasis& sbasis,
+                          Eigen::VectorXd& x_b, Eigen::VectorXd& reduced_costs,
+                          double& obj, std::vector<char>& at_upper) {
+  const int m = static_cast<int>(sf.A.rows());
+  const int n = static_cast<int>(sf.A.cols());
+  std::vector<char> is_artificial(static_cast<std::size_t>(n), 0);
+  std::vector<char> can_enter(static_cast<std::size_t>(n), 1);
+  for (int i = 0; i < m; ++i) {
+    const int art = sf.row_to_artificial_col[i];
+    if (art >= 0 && art < n) {
+      is_artificial[static_cast<std::size_t>(art)] = 1;
+      can_enter[static_cast<std::size_t>(art)] = 0;
+    }
+  }
+  std::vector<char> is_basic(static_cast<std::size_t>(n), 0);
+  for (int i = 0; i < m; ++i) {
+    if (basis[i] >= 0 && basis[i] < n) {
+      is_basic[static_cast<std::size_t>(basis[i])] = 1;
+    }
+  }
+
+  if (!sbasis.refactorize(basis)) return false;
+  sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b,
+                        reduced_costs, obj);
+
+  constexpr double kShiftMargin = 1e-10;
+  for (int j = 0; j < n; ++j) {
+    if (is_basic[static_cast<std::size_t>(j)] ||
+        is_artificial[static_cast<std::size_t>(j)]) {
+      continue;
+    }
+    const bool j_up = at_upper[static_cast<std::size_t>(j)];
+    if (!j_up && reduced_costs[j] > opt.optimality_tol) {
+      sf.c_max[j] -= (reduced_costs[j] + kShiftMargin);
+      reduced_costs[j] = -kShiftMargin;
+    } else if (j_up && reduced_costs[j] < -opt.optimality_tol) {
+      sf.c_max[j] += (-reduced_costs[j] + kShiftMargin);
+      reduced_costs[j] = kShiftMargin;
+    }
+  }
+
+  bool inf = false, cut = false;
+  const bool ok = sparse_dual_simplex_reoptimize(
+      sf, basis, can_enter, opt, sbasis, x_b, reduced_costs, obj, at_upper,
+      inf, cut);
+  return ok && !inf;
+}
+
+/// Primal feasibility of the current basic state (x_b >= -tol, plus upper
+/// bound violations when finite var_ub exists).
+bool primal_state_feasible(const StandardFormLP& sf,
+                           const std::vector<int>& basis,
+                           const Eigen::VectorXd& x_b, double tol) {
+  const int m = static_cast<int>(sf.A.rows());
+  if (!approx_nonnegative(x_b, tol)) return false;
+  for (int i = 0; i < m; ++i) {
+    const int bvar = basis[static_cast<std::size_t>(i)];
+    if (bvar < 0 || bvar >= static_cast<int>(sf.var_ub.size())) continue;
+    const double ub_i = sf.var_ub[bvar];
+    if (std::isfinite(ub_i) && x_b[i] > ub_i + tol) return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 void clear_sparse_basis_etas(const std::shared_ptr<BasisOps>& sb) {
@@ -6430,19 +6659,31 @@ bool sparse_basis_tableau_row(const std::shared_ptr<BasisOps>& cached_sparse_bas
   return cached_sparse_basis->tableau_row(row, out);
 }
 
-SimplexResult solve_lp_with_basis(const LPModel& lp,
-                                  const SimplexOptions& input_opt,
-                                  const SimplexBasis* basis_hint) {
+/// Internal implementation of solve_lp_with_basis with an explicit
+/// cold-start escalation level (see SimplexOptions::escalation_max_level).
+/// Level 0 is the historical behaviour; higher levels use progressively more
+/// conservative numerics (more Ruiz rounds, stricter UMFPACK pivoting).
+static SimplexResult solve_lp_with_basis_impl(const LPModel& lp,
+                                              const SimplexOptions& input_opt,
+                                              const SimplexBasis* basis_hint,
+                                              int esc_level) {
   SimplexOptions opt = input_opt;
+  if (opt.phase1_strategy == 0) {
+    if (const char* e = std::getenv("MIPSOLVERS_SIMPLEX_PHASE1")) {
+      if (e[0] == '1') opt.phase1_strategy = 1;
+    }
+  }
   bool local_time_limit_hit = false;
   if (opt.time_limit_hit == nullptr) opt.time_limit_hit = &local_time_limit_hit;
   SimplexResult out;
   const auto solve_wall_t0 = std::chrono::steady_clock::now();
+  g_simplex_iter_count = 0;
   struct TimeLimitStatusGuard {
     SimplexResult& out;
     const SimplexOptions& opt;
     const std::chrono::steady_clock::time_point& start;
     ~TimeLimitStatusGuard() {
+      out.result.stats.iterations = g_simplex_iter_count;
       const bool hit = opt.time_limit_hit != nullptr && *opt.time_limit_hit;
       if (!out.result.stats.success &&
           (hit || simplex_wall_time_limit_hit(opt, start))) {
@@ -6451,7 +6692,8 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
     }
   } time_limit_guard{out, opt, solve_wall_t0};
   out.form = build_standard_form_lp(lp);
-  ruiz_scale_standard_form(out.form);
+  ruiz_scale_standard_form(out.form,
+                           esc_level >= 1 ? opt.escalation_ruiz_rounds : 10);
   out.result.stats.solver_name = "NativeSimplex";
 
   const int m = out.form.A.rows();
@@ -6645,7 +6887,12 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
     if (m > kSparseSimplexThreshold) {
       // --- Sparse LU simplex for large problems ---
       SparseBasis sbasis(out.form.A,
-             SparseBasis::from_public_backend(opt.factor_backend));
+             esc_level >= 2
+                 ? SparseBasis::FactorBackendKind::KluRescue
+                 : SparseBasis::from_public_backend(opt.factor_backend));
+      if (esc_level == 1) {
+        sbasis.set_pivot_tolerance(opt.escalation_umfpack_pivot_tolerance);
+      }
 
       // Validate crash: the greedy crash (m > 200) does not track x_b,
       // so the BFS may be primal infeasible.  Compute x_b = B^{-1} b
@@ -6731,8 +6978,23 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
       sparse_full_recompute(out.form, basis, at_upper, is_basic_cr,
                             sbasis, x_b, reduced_costs, obj);
 
+      // HiGHS-style Phase I (SimplexOptions::phase1_strategy == 1): run the
+      // Phase-I machinery on a perturbed copy of the standard form
+      // (randomized cost/RHS/bound perturbations, deterministic seed) with
+      // exact-zero cost shifts, then restore the unperturbed problem before
+      // Phase II.  phase1_form selects the form Phase I operates on.
+      const bool highs_phase1 = (opt.phase1_strategy == 1);
+      StandardFormLP perturbed;
+      if (highs_phase1) {
+        perturbed = out.form;
+        highs_style_perturb(
+            perturbed,
+            0x5EED5EEDULL + static_cast<unsigned long long>(esc_level));
+      }
+      const StandardFormLP& phase1_form = highs_phase1 ? perturbed : out.form;
+
       // Build shifted LP: force artificial ub = 0.
-      StandardFormLP shifted = out.form;
+      StandardFormLP shifted = phase1_form;
       for (int i = 0; i < m; ++i) {
         const int art = shifted.row_to_artificial_col[i];
         if (art >= 0) shifted.var_ub[art] = 0.0;
@@ -6742,16 +7004,19 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
       sparse_full_recompute(shifted, basis, at_upper, is_basic_cr,
                             sbasis, x_b, reduced_costs, obj);
 
-      // Apply exact cost shifts for dual feasibility.
+      // Apply exact cost shifts for dual feasibility.  Legacy uses a uniform
+      // ±1 margin; HiGHS-style pins the reduced cost exactly on the dual
+      // boundary (1e-10 margin), mirroring HEkkDual::shiftCost.
+      const double shift_margin = highs_phase1 ? 1e-10 : 1.0;
       for (int j = 0; j < n; ++j) {
         if (is_basic_cr[static_cast<size_t>(j)]) continue;
         const bool j_up = at_upper[static_cast<size_t>(j)];
         if (!j_up && reduced_costs[j] > opt.optimality_tol) {
-          shifted.c_max[j] -= (reduced_costs[j] + 1.0);
-          reduced_costs[j] = -1.0;
+          shifted.c_max[j] -= (reduced_costs[j] + shift_margin);
+          reduced_costs[j] = -shift_margin;
         } else if (j_up && reduced_costs[j] < -opt.optimality_tol) {
-          shifted.c_max[j] += (-reduced_costs[j] + 1.0);
-          reduced_costs[j] = 1.0;
+          shifted.c_max[j] += (-reduced_costs[j] + shift_margin);
+          reduced_costs[j] = shift_margin;
         }
       }
       // Recompute shifted objective from scratch.
@@ -6779,7 +7044,7 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
           x_b, reduced_costs, obj, at_upper,
           dp1_inf, dp1_cut);
 
-      if (m > 5000) {
+      if (opt.verbose) {
         fprintf(stderr, "[SIMPLEX-DIAG] Dual Phase I: ok=%d inf=%d cut=%d m=%d n=%d\n",
                 dp1_ok ? 1 : 0, dp1_inf ? 1 : 0, dp1_cut ? 1 : 0, m, n);
       }
@@ -6815,7 +7080,7 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
           }
         }
         
-        StandardFormLP phase1 = out.form;
+        StandardFormLP phase1 = phase1_form;
         phase1.c_max.setZero();
         std::vector<char> p1_can_enter(static_cast<size_t>(n), 1);
         for (int i = 0; i < m; ++i) {
@@ -6833,6 +7098,38 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
         if (-obj > opt.feasibility_tol) {
           mark_proven_infeasible(out.result.stats);
           return out;
+        }
+      }
+
+      if (highs_phase1) {
+        // Restoration pass (HiGHS cleanup + continue): Phase I ran on
+        // perturbed data, so re-sync the state with the TRUE form; if the
+        // point drifted out of primal feasibility, repair it with the dual
+        // simplex on an exactly-shifted copy of the true form.
+        std::vector<char> is_basic_rt(static_cast<size_t>(n), 0);
+        for (int i = 0; i < m; ++i) {
+          if (basis[i] >= 0 && basis[i] < n)
+            is_basic_rt[static_cast<size_t>(basis[i])] = 1;
+        }
+        sparse_full_recompute(out.form, basis, at_upper, is_basic_rt,
+                              sbasis, x_b, reduced_costs, obj);
+        if (!primal_state_feasible(out.form, basis, x_b,
+                                   opt.feasibility_tol)) {
+          StandardFormLP repair = out.form;
+          for (int i = 0; i < m; ++i) {
+            const int art = repair.row_to_artificial_col[i];
+            if (art >= 0) repair.var_ub[art] = 0.0;
+          }
+          if (!dual_cleanup_resolve(repair, basis, opt, sbasis, x_b,
+                                    reduced_costs, obj, at_upper)) {
+            out.result.stats.status = "Simplex Phase I failed";
+            return out;
+          }
+          // Re-sync artificial at_upper flags after the repair pass.
+          for (int i = 0; i < m; ++i) {
+            const int art = out.form.row_to_artificial_col[i];
+            if (art >= 0) at_upper[static_cast<size_t>(art)] = 0;
+          }
         }
       }
 
@@ -6925,7 +7222,12 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
     }
     if (m > kSparseSimplexThreshold) {
       SparseBasis sbasis(out.form.A,
-             SparseBasis::from_public_backend(opt.factor_backend));
+             esc_level >= 2
+                 ? SparseBasis::FactorBackendKind::KluRescue
+                 : SparseBasis::from_public_backend(opt.factor_backend));
+      if (esc_level == 1) {
+        sbasis.set_pivot_tolerance(opt.escalation_umfpack_pivot_tolerance);
+      }
       if (!sparse_primal_simplex_optimize(out.form, basis, can_enter, opt,
                                           sbasis, x_b, reduced_costs, obj, at_upper)) {
         out.result.stats.status = "Simplex Phase II failed";
@@ -7020,6 +7322,89 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
                             out.basis.cached_sparse_basis,
                             out.reduced_costs, out.result);
   return out;
+}
+
+// ── Cold-start escalation chain ─────────────────────────────────────────────
+namespace {
+
+/// Original-space feasibility audit used to reject numerically false
+/// "Optimal" results from cold-start solves.  Accepts when
+///   max(row violation, bound violation) <= tol * max(1, |b|_inf, |beq|_inf).
+bool lp_solution_residual_acceptable(const LPModel& lp,
+                                     const Eigen::VectorXd& x, double tol) {
+  if (x.size() != static_cast<int>(lp.vars.size())) return false;
+  double viol = 0.0;
+  double scale = 1.0;
+  const Eigen::VectorXd ax = lp.A * x;
+  for (int i = 0; i < ax.size(); ++i) {
+    viol = std::max(viol, ax[i] - lp.b[i]);
+    const double lhs = lp_row_lhs_or_neg_inf(lp, i);
+    if (std::isfinite(lhs)) viol = std::max(viol, lhs - ax[i]);
+    scale = std::max(scale, std::abs(lp.b[i]));
+  }
+  const Eigen::VectorXd aeqx = lp.Aeq * x;
+  for (int i = 0; i < aeqx.size(); ++i) {
+    viol = std::max(viol, std::abs(aeqx[i] - lp.beq[i]));
+    scale = std::max(scale, std::abs(lp.beq[i]));
+  }
+  for (int j = 0; j < x.size(); ++j) {
+    const auto& v = lp.vars[static_cast<std::size_t>(j)];
+    if (std::isfinite(v.lb)) viol = std::max(viol, v.lb - x[j]);
+    if (std::isfinite(v.ub)) viol = std::max(viol, x[j] - v.ub);
+  }
+  return viol <= tol * scale;
+}
+
+/// Highest escalation level currently implemented.  Level 2 is the KLU
+/// rescue backend (FactorBackendKind::KluRescue), available only when KLU
+/// is compiled in; otherwise the chain stops at level 1.
+int max_available_escalation_level() {
+#ifdef MIPSOLVERS_HAVE_KLU
+  return 2;
+#else
+  return 1;
+#endif
+}
+
+}  // namespace
+
+SimplexResult solve_lp_with_basis(const LPModel& lp,
+                                  const SimplexOptions& input_opt,
+                                  const SimplexBasis* basis_hint) {
+  // Escalation only rescues cold-start solves; warm-started tree node LPs
+  // keep their single-attempt behaviour.
+  const int max_level =
+      input_opt.allow_cold_start
+          ? std::min(std::max(0, input_opt.escalation_max_level),
+                     max_available_escalation_level())
+          : 0;
+  const int start_level =
+      std::clamp(input_opt.escalation_start_level, 0, max_level);
+  const auto esc_wall_t0 = std::chrono::steady_clock::now();
+  for (int level = start_level;; ++level) {
+    SimplexResult res = solve_lp_with_basis_impl(lp, input_opt, basis_hint, level);
+
+    // False-optimal audit: a cold-start "Optimal" whose original-space
+    // residual is too large is treated as a failure and retried at the next
+    // escalation level (guards against accepting garbage from a bad basis).
+    if (res.result.stats.success && !res.solved_from_hint &&
+        level < max_level &&
+        !lp_solution_residual_acceptable(lp, res.result.x,
+                                         input_opt.escalation_residual_tol)) {
+      continue;
+    }
+    if (res.result.stats.success || level >= max_level) return res;
+    // Never retry terminal answers or time limits.
+    if (res.result.stats.has_farkas_certificate) return res;
+    if (res.result.stats.status == "Time limit") return res;
+    // Respect the caller's wall-clock budget between levels: escalation
+    // retries are expensive (stricter pivoting, KLU re-factorization) and
+    // must not double the effective time limit.
+    if (simplex_wall_time_limit_hit(input_opt, esc_wall_t0)) {
+      mark_simplex_time_limit(res.result.stats, esc_wall_t0);
+      return res;
+    }
+  }
 }
 
 // ── Thread-safe counters for diagnosing warm-start performance ──

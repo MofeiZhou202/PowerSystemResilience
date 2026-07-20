@@ -180,6 +180,36 @@ struct SimplexOptions {
   // Selects which basis-factor backend SparseBasis should use.
   // Defaults to current production backend (A).
   SimplexFactorBackend factor_backend{SimplexFactorBackend::BackendA_UmfpackNative};
+  // ── Cold-start escalation chain (root-LP rescue) ─────────────────────────
+  // When a cold-start solve fails (or returns a numerically false "Optimal"
+  // whose original-space residual exceeds escalation_residual_tol), retry
+  // with increasingly conservative numerics:
+  //   level 0 — current behaviour (Ruiz 10 rounds, UMFPACK pivot tol 0.1);
+  //   level 1 — rebuild + Ruiz escalation_ruiz_rounds, UMFPACK pivot tol
+  //             escalation_umfpack_pivot_tolerance (true partial pivoting);
+  //   level 2 — KLU rescue backend (when compiled in; Stage 2).
+  // Escalation only applies to cold-start solves (allow_cold_start == true);
+  // warm-started tree node LPs are never retried.  0 disables escalation.
+  int escalation_max_level{2};
+  double escalation_umfpack_pivot_tolerance{1.0};
+  int escalation_ruiz_rounds{25};
+  // Acceptance threshold for the original-space feasibility audit applied to
+  // cold-start results: max violation <= tol * max(1, |b|_inf, |beq|_inf).
+  double escalation_residual_tol{1e-6};
+  // First escalation level attempted (default 0 = normal path).  Values > 0
+  // skip the cheaper levels; used to exercise the rescue backends directly
+  // (e.g. 2 = KLU rescue) in tests and diagnostics.
+  int escalation_start_level{0};
+  // ── Phase I strategy (cold start) ────────────────────────────────────────
+  // 0 = Native legacy: uniform ±(|rc|+1) cost shifts in Dual Phase I.
+  // 1 = HiGHS-style: magnitude-aware randomized perturbations of costs / RHS
+  //     / finite bounds (mirroring HEkk::initialiseCost / initialiseBound,
+  //     deterministic seed), exact-zero cost shifts pinned at the dual
+  //     boundary (HEkkDual::shiftCost), and a restoration pass back to the
+  //     unperturbed problem before Phase II (HiGHS cleanup + continue).
+  //     Flag-gated for A/B evaluation; default stays 0 until benchmarks
+  //     justify a flip.  Overridable via env MIPSOLVERS_SIMPLEX_PHASE1.
+  int phase1_strategy{0};
 };
 
 struct SimplexBasis {

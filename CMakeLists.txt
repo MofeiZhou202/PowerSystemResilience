@@ -240,6 +240,29 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
         $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
     endif()
   endif()
+
+  # Pure-native vs HiGHS comparison driver: benchmarks the native B&C with
+  # the native dual simplex / IPM as LP kernel (use_vendored_highs_lp_kernel
+  # = false) against raw-API HiGHS at both MILP and LP level, including
+  # adversarially scaled LPs as a numerical-stability probe.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/native_kernel_comparison.cpp")
+    add_executable(native_kernel_comparison
+      benchmark/native_kernel_comparison.cpp
+      src/scuc/scuc.cpp
+      src/scuc/case_builder.cpp)
+    set_target_properties(native_kernel_comparison PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    target_include_directories(native_kernel_comparison PRIVATE
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+      ${CMAKE_CURRENT_SOURCE_DIR}/highs
+      ${CMAKE_CURRENT_BINARY_DIR}/_deps/embedded_highs)
+    target_link_libraries(native_kernel_comparison PRIVATE mipsolvers highs::highs)
+    if(NOT MSVC)
+      target_compile_options(native_kernel_comparison PRIVATE -Wall -Wextra
+        $<$<CONFIG:Release>:-O3 -DNDEBUG>
+        $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
+    endif()
+  endif()
 endif()
 
 # ── SCIP in-process library ───────────────────────────────────────────────────
