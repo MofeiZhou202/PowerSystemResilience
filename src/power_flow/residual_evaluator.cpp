@@ -11,7 +11,8 @@ namespace hacdcpf::powerflow {
 
 namespace {
 
-void compute_ac_power_injections(const Eigen::MatrixXcd& ybus,
+void compute_ac_power_injections(
+                                 const Eigen::SparseMatrix<std::complex<double>>& ybus,
                                  const Eigen::VectorXd& vm,
                                  const Eigen::VectorXd& va,
                                  Eigen::VectorXd& pcalc,
@@ -19,17 +20,15 @@ void compute_ac_power_injections(const Eigen::MatrixXcd& ybus,
   const int n = static_cast<int>(vm.size());
   pcalc = Eigen::VectorXd::Zero(n);
   qcalc = Eigen::VectorXd::Zero(n);
-
+  Eigen::VectorXcd voltage(n);
   for (int i = 0; i < n; ++i) {
-    for (int j = 0; j < n; ++j) {
-      const double theta = va[i] - va[j];
-      const double g = ybus(i, j).real();
-      const double b = ybus(i, j).imag();
-      const double c = std::cos(theta);
-      const double s = std::sin(theta);
-      pcalc[i] += vm[i] * vm[j] * (g * c + b * s);
-      qcalc[i] += vm[i] * vm[j] * (g * s - b * c);
-    }
+    voltage[i] = std::polar(vm[i], va[i]);
+  }
+  const Eigen::VectorXcd current = ybus * voltage;
+  for (int i = 0; i < n; ++i) {
+    const std::complex<double> injection = voltage[i] * std::conj(current[i]);
+    pcalc[i] = injection.real();
+    qcalc[i] = injection.imag();
   }
 }
 
@@ -70,8 +69,7 @@ ResidualBlocks evaluate_power_flow_residual(const SolverData& data,
   Eigen::VectorXd pcalc = Eigen::VectorXd::Zero(n);
   Eigen::VectorXd qcalc = Eigen::VectorXd::Zero(n);
   if (n > 0) {
-    const Eigen::MatrixXcd ybus_dense = Eigen::MatrixXcd(data.ybus);
-    compute_ac_power_injections(ybus_dense, vm, va, pcalc, qcalc);
+    compute_ac_power_injections(data.ybus, vm, va, pcalc, qcalc);
   }
 
   Eigen::VectorXd p_spec = Eigen::VectorXd::Zero(n);

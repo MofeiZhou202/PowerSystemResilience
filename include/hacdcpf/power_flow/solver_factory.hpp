@@ -45,12 +45,9 @@ public:
     [[nodiscard]] static std::unique_ptr<IPowerFlowSolver>
     create(PowerFlowMethod method);
 
-    /// Convenience overload: inspect \p options to pick the solver.
-    /// Rules (in priority order):
-    ///   1. options.method (if not Newton) → use as-is
-    ///   2. options.enable_semi_smooth_newton → Newton
-    ///   3. options.enable_coupled_jacobian  → Newton (full coupling)
-    ///   4. else → Newton (default)
+    /// Convenience overload for callers that use the default Newton method.
+    /// Algorithm selection is explicit through the PowerFlowMethod overload;
+    /// PowerFlowOptions configures a method but does not select one.
     [[nodiscard]] static std::unique_ptr<IPowerFlowSolver>
     create(const PowerFlowOptions& options);
 };

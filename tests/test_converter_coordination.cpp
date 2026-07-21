@@ -658,8 +658,8 @@ TEST_CASE("Power-flow result declares its converter model scope",
 
   const auto& sc = pf.converter_model_scope;
   CHECK(sc.model_scope == "steady-state-newton:vsc-3mode+dcdc-power-transfer");
-  // Honest fidelity declaration: losses + Vdc forming are modelled in the solve,
-  // but modulation / current limits / multi-source coordination are not (yet).
+  // Default compatibility mode reports physical-limit violations as warnings;
+  // strict acceptance enforcement is opt-in.
   CHECK(sc.validity.vsc_loss_modelled);
   CHECK(sc.validity.vsc_vdc_control_modelled);
   CHECK(sc.validity.vsc_ac_conduction_loss_modelled);
@@ -690,6 +690,19 @@ TEST_CASE("Tight VSC DC-current limit raises an ACDC-PHYS-03 diagnostic",
   const hacdcpf::PowerFlowResult limited = hacdcpf::solve_power_flow(sys, {});
   REQUIRE(limited.converged);  // diagnostic only, does not block convergence
   CHECK(has_phys03(limited));
+
+  hacdcpf::PowerFlowOptions strict_options;
+  strict_options.enforce_converter_physical_limits = true;
+  const hacdcpf::PowerFlowResult strict =
+      hacdcpf::solve_power_flow(sys, strict_options);
+  CHECK_FALSE(strict.converged);
+  CHECK(has_phys03(strict));
+  CHECK(strict.diagnostics.termination_reason ==
+        "Converter physical-limit feasibility check failed");
+  CHECK(strict.converter_model_scope.validity.vsc_capacity_circle_enforced);
+  CHECK(strict.converter_model_scope.validity.vsc_current_limits_enforced);
+  CHECK(strict.converter_model_scope.validity.vsc_modulation_limits_enforced);
+  CHECK(strict.converter_model_scope.validity.dcdc_duty_ratio_enforced);
 }
 
 TEST_CASE("Power-flow reports a structural equation-closure check",

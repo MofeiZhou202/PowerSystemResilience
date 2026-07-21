@@ -88,6 +88,16 @@ struct CpfOptions {
   /// Use a secant (two-point extrapolation) predictor.
   /// When false, a constant predictor (warm-start from current solution) is used.
   bool use_secant_predictor{true};
+
+  /// After the first natural-parameter step, augment the corrector with an
+  /// arc-length hyperplane and solve lambda as an unknown. This permits the
+  /// trace to pass the P-V nose instead of stopping when dV/dlambda is singular.
+  bool enable_arc_length{true};
+
+  /// Number of accepted lower-branch points to retain after lambda first turns
+  /// downward. A small positive value makes nose detection observable in tests
+  /// without tracing deep into the low-voltage branch.
+  int lower_branch_steps{2};
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -105,9 +115,13 @@ struct CpfPoint {
   /// CpfOptions::trace_all_buses is set.
   std::vector<double> vm;
 
-  /// All-bus voltage angles (degrees) — populated only when
+  /// All-bus voltage angles (radians) — populated only when
   /// CpfOptions::trace_all_buses is set.
   std::vector<double> va;
+
+  /// All DC-bus voltage magnitudes (p.u.) — populated only when
+  /// CpfOptions::trace_all_buses is set.
+  std::vector<double> vdc;
 };
 
 /// Output of the Continuation Power Flow solver.
@@ -162,14 +176,13 @@ struct VoltageStabilityIndex {
 /// Traces the P–V nose curve from the base operating point (λ = 0) toward
 /// voltage collapse using an adaptive predictor–corrector scheme:
 ///
-/// Predictor  — secant method (linear extrapolation from the two most recent
-///              accepted solution points).
-/// Corrector  — Newton–Raphson AC power flow at the predicted λ
-///              (natural parameterization; warm-started from the predicted point).
+/// Predictor  — normalized secant tangent in augmented [state, lambda] space.
+/// Corrector  — Newton solve of the power-flow residual plus an arc-length
+///              hyperplane; lambda is an unknown after the first step.
 /// Adaptation — step halved on corrector divergence; doubled on convergence
 ///              (bounded by [step_min, step_max]).
-/// Nose detection — when the step falls below step_min, the nose point is
-///              declared found and tracing stops.
+/// Nose detection — the first sign reversal of the lambda tangent identifies
+///              the upper/lower-branch transition.
 ///
 /// The solver reuses the existing NewtonSolver and SolverData infrastructure
 /// without modification.  It supports pure AC systems, hybrid AC–DC systems

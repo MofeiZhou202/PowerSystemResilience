@@ -64,10 +64,41 @@ struct UCSchedule {
   // Converter dispatch (populated when enable_dc_network_constraints=true)
   std::vector<std::vector<double>> vsc_dispatch;       // [c][t] MW (AC-side injection)
   std::vector<std::vector<double>> dcdc_dispatch;      // [dd][t] MW (bus_in→bus_out)
+  std::vector<std::vector<int>> vsc_direction_ac_to_dc; // [c][t] 1=AC->DC
+  std::vector<std::vector<int>> dcdc_direction_forward; // [dd][t] 1=bus_in->bus_out
+  // Market-only unified active DC-storage order: legacy dc.storage first,
+  // followed by rich dc.dc_storage. SOC is end-period stored energy in MWh.
+  std::vector<std::vector<double>> market_dc_storage_dispatch_mw;
+  std::vector<std::vector<double>> market_dc_storage_soc_mwh;
+  std::vector<std::vector<int>> market_dc_storage_direction_charging;
 
   double total_cost{0.0};
   bool feasible{false};
   std::string solver_name;
+  std::string solver_status;
+  double mip_gap{0.0};
+  bool mip_gap_target_met{false};
+  bool optimality_proven{false};
+  bool structured_branching_used{false};
+  bool mip_start_provided{false};
+  bool uc_structure_hint_provided{false};
+  bool branching_priorities_provided{false};
+  double warm_start_generation_sec{0.0};
+  bool cross_round_solver_state_reuse_enabled{false};
+  bool cross_round_solver_state_reuse_used{false};
+  int cross_round_solver_state_reuse_rounds{0};
+  bool root_cuts_reused{false};
+  int root_cuts_reused_count{0};
+  bool root_basis_reused{false};
+  bool pseudocosts_reused{false};
+  bool search_tree_rebuilt{false};
+  bool network_constraint_generation_run{false};
+  bool network_constraint_generation_converged{false};
+  int network_constraint_generation_iterations{0};
+  int network_constraint_candidates{0};
+  int network_constraints_activated{0};
+  int network_constraint_remaining_violations{0};
+  double network_constraint_worst_violation_mw{0.0};
 };
 
 // ═══════════════════════════════════════════════════════════════════════

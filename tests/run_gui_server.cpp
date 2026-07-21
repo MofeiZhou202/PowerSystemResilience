@@ -798,6 +798,8 @@ void apply_power_flow_request_options(const json& root, hacdcpf::PowerFlowOption
               opt.enable_converter_mode_switching);
   set_if_bool(*o, "enable_converter_coordination_check",
               opt.enable_converter_coordination_check);
+  set_if_bool(*o, "enforce_converter_physical_limits",
+              opt.enforce_converter_physical_limits);
   set_if_bool(*o, "enable_rigid_vdc_former", opt.enable_rigid_vdc_former);
   set_if_bool(*o, "verbose", opt.verbose);
   set_if_bool(*o, "enable_solver_profiling", opt.enable_solver_profiling);
@@ -922,6 +924,7 @@ json power_flow_options_to_json(const hacdcpf::PowerFlowOptions& opt) {
       {"enable_auto_swing_selection", opt.enable_auto_swing_selection},
       {"enable_converter_mode_switching", opt.enable_converter_mode_switching},
       {"enable_converter_coordination_check", opt.enable_converter_coordination_check},
+      {"enforce_converter_physical_limits", opt.enforce_converter_physical_limits},
       {"enable_rigid_vdc_former", opt.enable_rigid_vdc_former},
       {"verbose", opt.verbose},
       {"enable_solver_profiling", opt.enable_solver_profiling},
@@ -7728,6 +7731,33 @@ hacdcpf::market::MarketOptions market_options_from_json(
       std::max(1.0, j.value("voll_per_mwh", 10000.0));
   opts.exogenous_curtailment_penalty_per_mwh = std::max(
       0.0, j.value("exogenous_curtailment_penalty_per_mwh", 0.0));
+  opts.pricing_native_max_variables = std::max(
+      0, j.value("pricing_native_max_variables", 5000));
+  opts.structured_scuc_branching =
+      j.value("structured_scuc_branching", true);
+  opts.structured_scuc_min_binary_variables = std::max(
+      0, j.value("structured_scuc_min_binary_variables", 1000));
+  opts.scuc_mip_relative_gap = std::clamp(
+      j.value("scuc_mip_relative_gap", 1e-2), 0.0, 1.0);
+  opts.scuc_time_limit_sec = std::max(
+      0.0, j.value("scuc_time_limit_sec", 120.0));
+  opts.scuc_max_nodes = std::max(1, j.value("scuc_max_nodes", 50000));
+  opts.enable_scuc_cross_round_solver_state_reuse =
+      j.value("enable_scuc_cross_round_solver_state_reuse", true);
+  opts.enable_scuc_network_constraint_generation =
+      j.value("enable_scuc_network_constraint_generation", true);
+  opts.scuc_network_constraint_generation_min_candidates = std::max(
+      0, j.value("scuc_network_constraint_generation_min_candidates", 10000));
+  opts.scuc_network_constraint_generation_max_iterations = std::max(
+      1, j.value("scuc_network_constraint_generation_max_iterations", 8));
+  opts.scuc_network_constraint_generation_max_new_per_iteration = std::max(
+      0, j.value(
+             "scuc_network_constraint_generation_max_new_per_iteration", 0));
+  opts.scuc_network_constraint_generation_tolerance_mw = std::max(
+      0.0, j.value("scuc_network_constraint_generation_tolerance_mw", 1e-5));
+  opts.optimize_dc_storage = j.value("optimize_dc_storage", true);
+  opts.enforce_terminal_dc_storage_soc =
+      j.value("enforce_terminal_dc_storage_soc", true);
   opts.enable_network_constraints = j.value("network_constraints", true);
   opts.run_ac_validation = j.value("run_ac_validation", true);
   opts.ac_validation_voltage_tolerance_pu = std::max(
@@ -7746,6 +7776,9 @@ hacdcpf::market::MarketOptions market_options_from_json(
       0.0, j.value("n1_emergency_rating_multiplier", 1.0));
   opts.n1_violation_tolerance_mw = std::max(
       0.0, j.value("n1_violation_tolerance_mw", 1e-5));
+  opts.parallel_component_n1 = j.value("parallel_component_n1", true);
+  opts.component_n1_parallel_workers = std::max(
+      0, j.value("component_n1_parallel_workers", 4));
   opts.run_ac_contingency_validation =
       j.value("run_ac_contingency_validation", false);
   opts.max_ac_contingencies =
@@ -7755,7 +7788,8 @@ hacdcpf::market::MarketOptions market_options_from_json(
   opts.ac_contingency_thermal_tolerance_mva = std::max(
       0.0, j.value("ac_contingency_thermal_tolerance_mva", 1e-4));
   opts.verbose = j.value("verbose", false);
-  opts.uc_options.uc_solver = hacdcpf::UCSolverChoice::Auto;
+  opts.uc_options.uc_solver = parse_uc_solver_choice(
+      j.value("uc_solver", std::string("auto")));
   opts.ac_validation_options.max_iter = 100;
   opts.ac_validation_options.tol = 1e-8;
   if (!j.contains("participants") || !j["participants"].is_array()) {
@@ -7909,17 +7943,115 @@ json market_pricing_json(
         {"generator_dispatch_mw", period.generator_dispatch_mw},
         {"upward_reserve_mw", period.upward_reserve_mw},
         {"lmp_per_mwh", period.lmp_per_mwh},
+        {"dc_lmp_per_mwh", period.dc_lmp_per_mwh},
+        {"dc_bus_voltage_pu", period.dc_bus_voltage_pu},
         {"branch_flow_mw", period.branch_flow_mw},
+        {"dc_branch_flow_mw", period.dc_branch_flow_mw},
         {"load_shedding_mw", period.load_shedding_mw},
+        {"dc_load_shedding_mw", period.dc_load_shedding_mw},
         {"exogenous_curtailment_mw",
          period.exogenous_curtailment_mw},
+        {"dc_exogenous_curtailment_mw",
+         period.dc_exogenous_curtailment_mw},
+        {"vsc_ac_injection_mw", period.vsc_ac_injection_mw},
+        {"vsc_dc_injection_mw", period.vsc_dc_injection_mw},
+        {"vsc_loss_mw", period.vsc_loss_mw},
+        {"dcdc_input_withdrawal_mw", period.dcdc_input_withdrawal_mw},
+        {"dcdc_output_injection_mw", period.dcdc_output_injection_mw},
+        {"dcdc_loss_mw", period.dcdc_loss_mw},
+        {"legacy_dc_storage_dispatch_mw",
+         period.legacy_dc_storage_dispatch_mw},
+        {"legacy_dc_storage_soc_mwh", period.legacy_dc_storage_soc_mwh},
+        {"dc_storage_dispatch_mw", period.dc_storage_dispatch_mw},
+        {"dc_storage_soc_mwh", period.dc_storage_soc_mwh},
         {"gross_demand_mw", period.gross_demand_mw},
+        {"gross_dc_demand_mw", period.gross_dc_demand_mw},
         {"reserve_requirement_mw", period.reserve_requirement_mw},
         {"upward_reserve_price_per_mwh",
          period.upward_reserve_price_per_mwh},
         {"objective", period.objective}});
   }
   return rows;
+}
+
+json market_performance_json(
+    const hacdcpf::market::MarketPerformanceProfile& profile) {
+  return json{
+      {"periods", profile.periods},
+      {"active_generators", profile.active_generators},
+      {"active_ac_branches", profile.active_ac_branches},
+      {"active_dc_branches", profile.active_dc_branches},
+      {"active_vsc_converters", profile.active_vsc_converters},
+      {"active_dcdc_converters", profile.active_dcdc_converters},
+      {"optimized_dc_storages", profile.optimized_dc_storages},
+      {"estimated_scuc_variables", profile.estimated_scuc_variables},
+      {"estimated_scuc_binary_variables",
+       profile.estimated_scuc_binary_variables},
+      {"estimated_sced_variables", profile.estimated_sced_variables},
+      {"estimated_lodf_dense_bytes", profile.estimated_lodf_dense_bytes},
+      {"estimated_lodf_sparse_bytes", profile.estimated_lodf_sparse_bytes},
+      {"lodf_computed_columns", profile.lodf_computed_columns},
+      {"component_contingency_solves", profile.component_contingency_solves},
+      {"component_n1_parallel_requested",
+       profile.component_n1_parallel_requested},
+      {"component_n1_parallel_effective",
+       profile.component_n1_parallel_effective},
+      {"component_n1_parallel_workers",
+       profile.component_n1_parallel_workers},
+      {"scuc_solver_name", profile.scuc_solver_name},
+      {"pricing_solver_name", profile.pricing_solver_name},
+      {"pricing_solver_fallback_used",
+       profile.pricing_solver_fallback_used},
+      {"pricing_large_model_direct_highs_used",
+       profile.pricing_large_model_direct_highs_used},
+      {"scuc_mip_start_provided", profile.scuc_mip_start_provided},
+      {"scuc_structure_hint_provided",
+       profile.scuc_structure_hint_provided},
+      {"scuc_branching_priorities_provided",
+       profile.scuc_branching_priorities_provided},
+      {"scuc_warm_start_generation_sec",
+       profile.scuc_warm_start_generation_sec},
+      {"scuc_cross_round_solver_state_reuse_enabled",
+       profile.scuc_cross_round_solver_state_reuse_enabled},
+      {"scuc_cross_round_solver_state_reuse_used",
+       profile.scuc_cross_round_solver_state_reuse_used},
+      {"scuc_cross_round_solver_state_reuse_rounds",
+       profile.scuc_cross_round_solver_state_reuse_rounds},
+      {"scuc_root_cuts_reused", profile.scuc_root_cuts_reused},
+      {"scuc_root_cuts_reused_count",
+       profile.scuc_root_cuts_reused_count},
+      {"scuc_root_basis_reused", profile.scuc_root_basis_reused},
+      {"scuc_pseudocosts_reused", profile.scuc_pseudocosts_reused},
+      {"scuc_search_tree_rebuilt", profile.scuc_search_tree_rebuilt},
+      {"scuc_structured_branching_used",
+       profile.scuc_structured_branching_used},
+      {"scuc_mip_gap_target_met", profile.scuc_mip_gap_target_met},
+      {"scuc_optimality_proven", profile.scuc_optimality_proven},
+      {"scuc_mip_gap", profile.scuc_mip_gap},
+      {"scuc_solver_status", profile.scuc_solver_status},
+      {"scuc_network_constraint_generation_run",
+       profile.scuc_network_constraint_generation_run},
+      {"scuc_network_constraint_generation_converged",
+       profile.scuc_network_constraint_generation_converged},
+      {"scuc_network_constraint_generation_iterations",
+       profile.scuc_network_constraint_generation_iterations},
+      {"scuc_network_constraint_candidates",
+       profile.scuc_network_constraint_candidates},
+      {"scuc_network_constraints_activated",
+       profile.scuc_network_constraints_activated},
+      {"scuc_network_constraint_remaining_violations",
+       profile.scuc_network_constraint_remaining_violations},
+      {"scuc_network_constraint_worst_violation_mw",
+       profile.scuc_network_constraint_worst_violation_mw},
+      {"offer_submission_sec", profile.offer_submission_sec},
+      {"scuc_sec", profile.scuc_sec},
+      {"base_sced_sec", profile.base_sced_sec},
+      {"lodf_build_sec", profile.lodf_build_sec},
+      {"n1_cut_loop_sec", profile.n1_cut_loop_sec},
+      {"component_n1_sec", profile.component_n1_sec},
+      {"nonlinear_validation_sec", profile.nonlinear_validation_sec},
+      {"settlement_sec", profile.settlement_sec},
+      {"total_sec", profile.total_sec}};
 }
 
 json real_time_market_json(
@@ -8003,6 +8135,8 @@ json real_time_market_json(
          row.average_real_time_lmp_per_mwh},
         {"customer_deviation_payment", row.customer_deviation_payment},
         {"resource_deviation_revenue", row.resource_deviation_revenue},
+        {"dc_storage_deviation_revenue",
+         row.dc_storage_deviation_revenue},
         {"deviation_congestion_rent", row.deviation_congestion_rent},
         {"reserve_activation_requirement_mw",
          row.reserve_activation_requirement_mw},
@@ -8026,6 +8160,7 @@ json real_time_market_json(
       {"day_ahead", json{
           {"status", day_ahead.status},
           {"feasible", day_ahead.feasible},
+          {"performance", market_performance_json(day_ahead.performance)},
           {"pricing", market_pricing_json(day_ahead.pricing)}}},
       {"dispatch_instruction", json{
           {"status", real_time.dispatch_instruction_market.status},
@@ -8035,6 +8170,8 @@ json real_time_market_json(
       {"real_time", json{
           {"status", real_time.real_time_market.status},
           {"feasible", real_time.real_time_market.feasible},
+          {"performance", market_performance_json(
+              real_time.real_time_market.performance)},
           {"pricing", market_pricing_json(
               real_time.real_time_market.pricing)}}},
       {"periods", std::move(period_rows)},
@@ -17589,6 +17726,38 @@ int main(int argc, char** argv) {
             std::max(1.0, j.value("voll_per_mwh", 10000.0));
         opts.exogenous_curtailment_penalty_per_mwh = std::max(
             0.0, j.value("exogenous_curtailment_penalty_per_mwh", 0.0));
+        opts.pricing_native_max_variables = std::max(
+            0, j.value("pricing_native_max_variables", 5000));
+        opts.structured_scuc_branching =
+            j.value("structured_scuc_branching", true);
+        opts.structured_scuc_min_binary_variables = std::max(
+            0, j.value("structured_scuc_min_binary_variables", 1000));
+        opts.scuc_mip_relative_gap = std::clamp(
+            j.value("scuc_mip_relative_gap", 1e-2), 0.0, 1.0);
+        opts.scuc_time_limit_sec = std::max(
+            0.0, j.value("scuc_time_limit_sec", 120.0));
+        opts.scuc_max_nodes =
+            std::max(1, j.value("scuc_max_nodes", 50000));
+        opts.enable_scuc_cross_round_solver_state_reuse =
+            j.value("enable_scuc_cross_round_solver_state_reuse", true);
+        opts.enable_scuc_network_constraint_generation =
+            j.value("enable_scuc_network_constraint_generation", true);
+        opts.scuc_network_constraint_generation_min_candidates = std::max(
+            0, j.value(
+                   "scuc_network_constraint_generation_min_candidates", 10000));
+        opts.scuc_network_constraint_generation_max_iterations = std::max(
+            1, j.value(
+                   "scuc_network_constraint_generation_max_iterations", 8));
+        opts.scuc_network_constraint_generation_max_new_per_iteration = std::max(
+            0, j.value(
+                   "scuc_network_constraint_generation_max_new_per_iteration",
+                   0));
+        opts.scuc_network_constraint_generation_tolerance_mw = std::max(
+            0.0, j.value(
+                     "scuc_network_constraint_generation_tolerance_mw", 1e-5));
+        opts.optimize_dc_storage = j.value("optimize_dc_storage", true);
+        opts.enforce_terminal_dc_storage_soc =
+            j.value("enforce_terminal_dc_storage_soc", true);
         opts.enable_network_constraints = j.value("network_constraints", true);
         opts.run_ac_validation = j.value("run_ac_validation", true);
         opts.ac_validation_voltage_tolerance_pu = std::max(
@@ -17608,6 +17777,10 @@ int main(int argc, char** argv) {
             0.0, j.value("n1_emergency_rating_multiplier", 1.0));
         opts.n1_violation_tolerance_mw = std::max(
             0.0, j.value("n1_violation_tolerance_mw", 1e-5));
+        opts.parallel_component_n1 =
+            j.value("parallel_component_n1", true);
+        opts.component_n1_parallel_workers = std::max(
+            0, j.value("component_n1_parallel_workers", 4));
         opts.run_ac_contingency_validation =
             j.value("run_ac_contingency_validation", false);
         opts.max_ac_contingencies =
@@ -17617,7 +17790,8 @@ int main(int argc, char** argv) {
         opts.ac_contingency_thermal_tolerance_mva = std::max(
             0.0, j.value("ac_contingency_thermal_tolerance_mva", 1e-4));
         opts.verbose = j.value("verbose", false);
-        opts.uc_options.uc_solver = hacdcpf::UCSolverChoice::Auto;
+        opts.uc_options.uc_solver = parse_uc_solver_choice(
+            j.value("uc_solver", std::string("auto")));
         opts.ac_validation_options.max_iter = 100;
         opts.ac_validation_options.tol = 1e-8;
         if (j.contains("participants") && j["participants"].is_array()) {
@@ -17698,6 +17872,29 @@ int main(int argc, char** argv) {
         payload["num_periods"] = num_periods;
         payload["feasible"] = market.feasible;
         payload["warnings"] = market.warnings;
+        payload["model_scope"] = json{
+            {"model_scope", market.model_scope.model_scope},
+            {"ac_network_modelled", market.model_scope.ac_network_modelled},
+            {"dc_network_modelled", market.model_scope.dc_network_modelled},
+            {"dc_voltage_linearized", market.model_scope.dc_voltage_linearized},
+            {"dc_branch_losses_modelled",
+             market.model_scope.dc_branch_losses_modelled},
+            {"vsc_bidirectional_efficiency_modelled",
+             market.model_scope.vsc_bidirectional_efficiency_modelled},
+            {"vsc_fixed_and_quadratic_losses_modelled",
+             market.model_scope.vsc_fixed_and_quadratic_losses_modelled},
+            {"dcdc_bidirectional_efficiency_modelled",
+             market.model_scope.dcdc_bidirectional_efficiency_modelled},
+            {"dc_storage_optimized", market.model_scope.dc_storage_optimized},
+            {"dc_storage_intertemporal_modelled",
+             market.model_scope.dc_storage_intertemporal_modelled},
+            {"hybrid_n1_modelled", market.model_scope.hybrid_n1_modelled},
+            {"full_component_n1_modelled",
+             market.model_scope.full_component_n1_modelled},
+            {"n1_recourse_policy", market.model_scope.n1_recourse_policy},
+            {"energy_prices_valid", market.model_scope.energy_prices_valid},
+            {"limitations", market.model_scope.limitations}};
+        payload["performance"] = market_performance_json(market.performance);
         payload["unsupported_assets"] = json::array();
         for (const auto& item : market.unsupported_assets) {
           payload["unsupported_assets"].push_back(json{
@@ -17712,8 +17909,61 @@ int main(int argc, char** argv) {
             {"feasible", market.commitment.feasible},
             {"cost", market.commitment_cost},
             {"solver_name", market.commitment.solver_name},
+            {"solver_status", market.commitment.solver_status},
+            {"mip_gap", market.commitment.mip_gap},
+            {"mip_gap_target_met",
+             market.commitment.mip_gap_target_met},
+            {"optimality_proven", market.commitment.optimality_proven},
+            {"structured_branching_used",
+             market.commitment.structured_branching_used},
+            {"mip_start_provided",
+             market.commitment.mip_start_provided},
+            {"uc_structure_hint_provided",
+             market.commitment.uc_structure_hint_provided},
+            {"branching_priorities_provided",
+             market.commitment.branching_priorities_provided},
+            {"warm_start_generation_sec",
+             market.commitment.warm_start_generation_sec},
+            {"cross_round_solver_state_reuse_enabled",
+             market.commitment.cross_round_solver_state_reuse_enabled},
+            {"cross_round_solver_state_reuse_used",
+             market.commitment.cross_round_solver_state_reuse_used},
+            {"cross_round_solver_state_reuse_rounds",
+             market.commitment.cross_round_solver_state_reuse_rounds},
+            {"root_cuts_reused", market.commitment.root_cuts_reused},
+            {"root_cuts_reused_count",
+             market.commitment.root_cuts_reused_count},
+            {"root_basis_reused", market.commitment.root_basis_reused},
+            {"pseudocosts_reused", market.commitment.pseudocosts_reused},
+            {"search_tree_rebuilt", market.commitment.search_tree_rebuilt},
+            {"network_constraint_generation_run",
+             market.commitment.network_constraint_generation_run},
+            {"network_constraint_generation_converged",
+             market.commitment.network_constraint_generation_converged},
+            {"network_constraint_generation_iterations",
+             market.commitment.network_constraint_generation_iterations},
+            {"network_constraint_candidates",
+             market.commitment.network_constraint_candidates},
+            {"network_constraints_activated",
+             market.commitment.network_constraints_activated},
+            {"network_constraint_remaining_violations",
+             market.commitment.network_constraint_remaining_violations},
+            {"network_constraint_worst_violation_mw",
+             market.commitment.network_constraint_worst_violation_mw},
             {"generator_dispatch_mw", market.commitment.gen_dispatch},
-            {"generator_commitment", market.commitment.gen_commit}};
+            {"generator_commitment", market.commitment.gen_commit},
+            {"vsc_dispatch_mw", market.commitment.vsc_dispatch},
+            {"vsc_direction_ac_to_dc",
+             market.commitment.vsc_direction_ac_to_dc},
+            {"dcdc_dispatch_mw", market.commitment.dcdc_dispatch},
+            {"dcdc_direction_forward",
+             market.commitment.dcdc_direction_forward},
+            {"market_dc_storage_dispatch_mw",
+             market.commitment.market_dc_storage_dispatch_mw},
+            {"market_dc_storage_soc_mwh",
+             market.commitment.market_dc_storage_soc_mwh},
+            {"market_dc_storage_direction_charging",
+             market.commitment.market_dc_storage_direction_charging}};
         payload["pricing_objective"] = market.pricing_objective;
         payload["num_pricing_converged"] = market.num_pricing_converged;
         payload["num_ac_converged"] = market.num_ac_converged;
@@ -17766,6 +18016,26 @@ int main(int argc, char** argv) {
               {"violations", std::move(violations)},
               {"status", check.status}});
         }
+        json component_contingency_checks = json::array();
+        for (const auto& check : security.component_checks) {
+          component_contingency_checks.push_back(json{
+              {"component_type", check.component_type},
+              {"component_position", check.component_position},
+              {"component_index", check.component_index},
+              {"component_name", check.component_name},
+              {"bus", check.bus},
+              {"from_bus", check.from_bus},
+              {"to_bus", check.to_bus},
+              {"sced_converged", check.sced_converged},
+              {"secure", check.secure},
+              {"incremental_load_shedding_mwh",
+               check.incremental_load_shedding_mwh},
+              {"total_load_shedding_mwh", check.total_load_shedding_mwh},
+              {"total_exogenous_curtailment_mwh",
+               check.total_exogenous_curtailment_mwh},
+              {"objective", check.objective},
+              {"status", check.status}});
+        }
         payload["security"] = json{
             {"enabled", security.enabled},
             {"lodf_available", security.lodf_available},
@@ -17773,7 +18043,13 @@ int main(int argc, char** argv) {
             {"ac_contingency_validation_run",
              security.ac_contingency_validation_run},
             {"ac_contingencies_secure", security.ac_contingencies_secure},
+            {"full_component_validation_run",
+             security.full_component_validation_run},
+            {"full_component_contingencies_secure",
+             security.full_component_contingencies_secure},
             {"candidate_contingencies", security.candidate_contingencies},
+            {"full_component_candidate_contingencies",
+             security.full_component_candidate_contingencies},
             {"iterations", security.iterations},
             {"cuts_added", security.cuts_added},
             {"initial_violations", security.initial_violations},
@@ -17796,6 +18072,7 @@ int main(int argc, char** argv) {
             {"trajectory", std::move(trajectory)},
             {"remaining_violations", std::move(remaining_violations)},
             {"ac_checks", std::move(ac_contingency_checks)},
+            {"component_checks", std::move(component_contingency_checks)},
             {"warnings", security.warnings}};
 
         payload["offers"] = json::array();
@@ -17834,11 +18111,32 @@ int main(int argc, char** argv) {
               {"generator_dispatch_mw", period.generator_dispatch_mw},
               {"upward_reserve_mw", period.upward_reserve_mw},
               {"lmp_per_mwh", period.lmp_per_mwh},
+              {"dc_lmp_per_mwh", period.dc_lmp_per_mwh},
+              {"dc_bus_voltage_pu", period.dc_bus_voltage_pu},
               {"branch_flow_mw", period.branch_flow_mw},
+              {"dc_branch_flow_mw", period.dc_branch_flow_mw},
               {"load_shedding_mw", period.load_shedding_mw},
+              {"dc_load_shedding_mw", period.dc_load_shedding_mw},
               {"exogenous_curtailment_mw",
                period.exogenous_curtailment_mw},
+              {"dc_exogenous_curtailment_mw",
+               period.dc_exogenous_curtailment_mw},
+              {"vsc_ac_injection_mw", period.vsc_ac_injection_mw},
+              {"vsc_dc_injection_mw", period.vsc_dc_injection_mw},
+              {"vsc_loss_mw", period.vsc_loss_mw},
+              {"dcdc_input_withdrawal_mw",
+               period.dcdc_input_withdrawal_mw},
+              {"dcdc_output_injection_mw",
+               period.dcdc_output_injection_mw},
+              {"dcdc_loss_mw", period.dcdc_loss_mw},
+              {"legacy_dc_storage_dispatch_mw",
+               period.legacy_dc_storage_dispatch_mw},
+              {"legacy_dc_storage_soc_mwh",
+               period.legacy_dc_storage_soc_mwh},
+              {"dc_storage_dispatch_mw", period.dc_storage_dispatch_mw},
+              {"dc_storage_soc_mwh", period.dc_storage_soc_mwh},
               {"gross_demand_mw", period.gross_demand_mw},
+              {"gross_dc_demand_mw", period.gross_dc_demand_mw},
               {"reserve_requirement_mw", period.reserve_requirement_mw},
               {"upward_reserve_price_per_mwh",
                period.upward_reserve_price_per_mwh},
@@ -17865,6 +18163,16 @@ int main(int argc, char** argv) {
                ac.maximum_branch_overload_mva},
               {"maximum_generator_active_violation_mw",
                ac.maximum_generator_active_violation_mw},
+              {"maximum_dc_voltage_violation_pu",
+               ac.maximum_dc_voltage_violation_pu},
+              {"maximum_dc_branch_overload_mw",
+               ac.maximum_dc_branch_overload_mw},
+              {"maximum_vsc_schedule_deviation_mw",
+               ac.maximum_vsc_schedule_deviation_mw},
+              {"maximum_dcdc_schedule_deviation_mw",
+               ac.maximum_dcdc_schedule_deviation_mw},
+              {"converter_model_scope",
+               ac.converter_model_scope.model_scope},
               {"slack_adjustment_mw", ac.slack_adjustment_mw},
               {"slack_generator_position",
                ac.slack_generator_position},
@@ -17889,6 +18197,23 @@ int main(int argc, char** argv) {
               {"offered_cost_markup", item.offered_cost_markup},
               {"uplift", item.uplift},
               {"profit_after_uplift", item.profit_after_uplift}});
+        }
+        payload["dc_storage_settlement"] = json::array();
+        for (const auto& item : market.dc_storage_settlement) {
+          payload["dc_storage_settlement"].push_back(json{
+              {"component_type", item.component_type},
+              {"component_position", item.component_position},
+              {"component_index", item.component_index},
+              {"component_name", item.component_name},
+              {"dc_bus", item.dc_bus},
+              {"charge_mwh", item.charge_mwh},
+              {"discharge_mwh", item.discharge_mwh},
+              {"net_injection_mwh", item.net_injection_mwh},
+              {"energy_revenue", item.energy_revenue},
+              {"as_bid_cost", item.as_bid_cost},
+              {"profit", item.profit},
+              {"initial_soc_mwh", item.initial_soc_mwh},
+              {"terminal_soc_mwh", item.terminal_soc_mwh}});
         }
         payload["participants"] = json::array();
         for (const auto& participant : market.participants) {
@@ -17946,10 +18271,18 @@ int main(int argc, char** argv) {
         const auto& ledger = market.settlement;
         payload["settlement"] = json{
             {"customer_energy_payment", ledger.customer_energy_payment},
+            {"customer_ac_energy_payment",
+             ledger.customer_ac_energy_payment},
+            {"customer_dc_energy_payment",
+             ledger.customer_dc_energy_payment},
             {"customer_reserve_charge", ledger.customer_reserve_charge},
             {"customer_uplift_charge", ledger.customer_uplift_charge},
             {"customer_total_payment", ledger.customer_total_payment},
             {"resource_energy_revenue", ledger.resource_energy_revenue},
+            {"resource_ac_energy_revenue",
+             ledger.resource_ac_energy_revenue},
+            {"resource_dc_energy_revenue",
+             ledger.resource_dc_energy_revenue},
             {"resource_reserve_revenue", ledger.resource_reserve_revenue},
             {"resource_uplift_revenue", ledger.resource_uplift_revenue},
             {"resource_total_revenue", ledger.resource_total_revenue},

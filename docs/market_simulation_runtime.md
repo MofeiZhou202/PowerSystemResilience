@@ -8,9 +8,10 @@ The first native electricity-market vertical slice is implemented by
 participant behaviour and submitted offers
   -> network-constrained SCUC
   -> fixed-commitment multi-period SCED
-  -> iterative preventive branch N-1 cuts
+  -> DC-storage intertemporal co-optimization
+  -> preventive AC-branch cuts + corrective full-component N-1 checks
   -> nodal LMP and upward-reserve price
-  -> base-case and contingency AC power-flow certification
+  -> base-case nonlinear hybrid AC/DC power-flow certification
   -> day-ahead settlement and make-whole uplift
   -> fixed-commitment real-time SCED on realized profiles
   -> day-ahead schedule + real-time deviation two-settlement
@@ -27,10 +28,16 @@ participant behaviour and submitted offers
   cost, and exogenous-injection curtailment cost.  It enforces state
   transitions, minimum up/down times, daily startup/shutdown limits, initial
   and inter-period ramps, reserve deliverability, DC branch flows and thermal
-  limits.  SCED fixes the accepted binary decisions and retains the same
-  physical dispatch envelope.
-- LMPs are duals of nodal active-power balance.  The upward-reserve price is
-  the dual of the system reserve-balance row.
+  limits.  In a hybrid case it also models DC-bus voltage, lossless resistive
+  DC-branch transfer, and bidirectional VSC/DC-DC transfer with constant
+  efficiency. SCED fixes commitment and converter directions and retains the
+  same physical dispatch envelope. Eligible DC storage is co-optimized with
+  charge/discharge direction, efficiency, self-discharge, SOC bounds, optional
+  terminal-SOC recovery, and per-day throughput limits; SCED fixes its SCUC
+  direction while retaining continuous dispatch and SOC.
+- AC and DC LMPs are duals of their domain-qualified nodal active-power
+  balances.  The upward-reserve price is the dual of the system
+  reserve-balance row.
 - All dispatch quantities use MW, interval energy uses MWh, and prices use
   currency/MWh.  `TimeSeriesData::step_duration_hr` scales objectives,
   revenues, and costs.
@@ -61,6 +68,11 @@ injections are paid only for delivered injection after nodal curtailment.  This
 keeps load shedding, renewable curtailment, congestion rent, and the cash-flow
 identity separate and auditable.
 
+Eligible optimized DC storage is settled separately at its authored DC-bus LMP
+on net injection (discharge minus charge). `DCStorageSettlement` reports stable
+component identity, charge/discharge energy, initial/terminal SOC, energy
+revenue, as-bid cost, and profit. It receives no uplift or reserve award.
+
 ## Participant behaviour
 
 `MarketParticipant` owns one or more generator positions and submits offers
@@ -84,20 +96,21 @@ The result includes a per-generator `BehaviorAction`, participant-level
 settlement, output/revenue HHI, Top-3 output share, maximum participant profit,
 total withheld capacity, and average submitted markup.
 
-## AC certification
+## Nonlinear hybrid certification
 
-Each commercial SCED interval is replayed through the native AC power-flow
-solver after applying nodal load shedding to the physical snapshot.
+Each commercial SCED interval is replayed through the native hybrid AC/DC
+power-flow solver after applying AC/DC nodal load shedding, AC/DC exogenous
+curtailment, and converter schedules to the physical snapshot.
 `ACValidationPeriod` reports convergence, residual, physical branch loss,
-voltage violation, branch thermal overload, maximum branch loading, and the
-slack adjustment required to supply AC losses.  The adjusted slack output is
-also checked against its active-power limits.  A converged power flow is only
-`secure` when all configured voltage, thermal, and generator tolerances pass;
-otherwise the market returns `ac_validation_failed`.  The commercial lossless
-SCED schedule is preserved; physical slack adjustment is not silently written
-back into settlement.
+AC/DC voltage violations, AC apparent-power overload, physical DC-branch
+overload, converter schedule deviation, and the slack adjustment required to
+supply physical losses. One online slack generator is selected per connected
+AC component. A converged power flow is only `secure` when all configured
+voltage, thermal, and generator tolerances pass; otherwise the market returns
+`ac_validation_failed`. The commercial schedule is preserved; certification
+adjustments are not silently written back into settlement.
 
-## Preventive N-1 security
+## Full-component N-1 security
 
 When `enable_n1_security` is true, the runner first preserves an unconstrained
 SCED benchmark and constructs branch outage distribution factors (LODF) for
@@ -121,18 +134,142 @@ convergence, voltage-limit violation, and emergency thermal overload.  A
 failed AC contingency remains a failed certification and makes the requested
 market run infeasible; the validator does not silently redispatch it.
 
-DC screening treats the branch MVA rating as an active-power MW limit.  The
-subsequent AC certification uses apparent power and is therefore the physical
-thermal check.
+Commercial AC-branch screening treats the MVA rating as an active-power MW
+limit. The subsequent nonlinear certification uses apparent power and is
+therefore the physical AC thermal check.
+
+The same N-1 request also adds a preventive generator-capability constraint to
+SCUC, then enumerates every in-service AC generator, AC branch, DC branch, VSC,
+DC/DC converter, legacy DC storage, and rich DC storage. For each outage it
+holds the accepted commitment and converter/storage directions fixed and solves
+one corrective multi-period SCED with the component unavailable for the entire
+market horizon. Any SCED failure or incremental load shedding makes that
+contingency insecure. `n1_max_contingencies=0` means full coverage; a positive
+value truncates the candidate sets.
+
+This is deliberately a mixed recourse policy: only preventive AC-branch LODF
+cuts are rows of the pricing LP. Generator capability is procured in SCUC, and
+the corrective component checks are certifications rather than price-forming
+constraints. Bus, load, shunt, switchgear, and protection failures remain
+outside this market N-1 element set. Optional nonlinear outage replay remains
+AC-branch-only.
 
 ## Current scope boundary
 
-This slice supports AC buses, branches, physical generators, fixed renewable /
-static generation, loads, and storage injections.  It explicitly rejects
-in-service external grids and hybrid AC/DC assets rather than applying a silent
-AC-only approximation.  Hybrid VSC/DC/DC-DC market co-optimisation,
-probabilistic participant learning, and stochastic reserve procurement are
-subsequent extensions.
+This slice supports AC buses/branches/generators, DC buses/branches/loads and
+fixed resources, plus VSC and DC/DC transfer. Every energized metallic DC
+island must have a `DC_V` bus, a DC-voltage-forming VSC, or an output-side
+Voltage/Droop DC/DC control. In-service external grids and energy-router ports
+remain explicitly rejected.
+
+The commercial DC-branch model is voltage-linearized and lossless. VSC and
+DC/DC constant directional efficiency is modeled, but VSC fixed/quadratic
+losses, current/capability/modulation limits, converter bids, and price-forming
+DC/converter contingency cuts are not. AC storage remains exogenous. Optimized
+DC storage does not provide reserve or receive uplift. `MarketModelScope`
+exposes these boundaries and the N-1 recourse policy in every result.
+
+## Scalability and performance contract
+
+Every day-ahead result includes `MarketPerformanceProfile`: active component
+counts, exact SCUC/SCED variable-count estimates, binary-variable count, a
+legacy dense-LODF baseline, sparse working-memory estimate, actual computed
+LODF column count, selected solver names, pricing fallback status, contingency
+LP count/worker count, and wall-clock timings by stage.
+Pricing LPs with at most `pricing_native_max_variables` variables first use the
+native simplex and automatically retry with embedded HiGHS when the native
+Phase I or numerical path fails. Larger LPs route directly to HiGHS and skip
+the known-expensive native attempt; the default threshold is 5000 and zero
+means direct HiGHS for every pricing LP. HiGHS row duals remain the source of
+reported LMPs. The profile distinguishes direct routing from fallback.
+
+Large-system use remains bounded by three implementation facts. Generator N-1
+capability uses one total-reserve auxiliary per period, reducing its matrix
+nonzeros from `O(T * G^2)` to `O(T * G)`. The LODF builder now
+factorizes the reduced bus matrix once with sparse LU and stores only requested
+outage columns; full coverage still stores `L x L` values. Full-component
+corrective validation rebuilds and solves one multi-period SCED per candidate,
+using bounded task parallelism with deterministic authored-order reporting.
+Each worker owns a model and solver instance, so worker count trades elapsed
+time for peak memory. Consequently, an unrestricted 24-hour, full-component
+N-1 provincial run is still not a production latency contract.
+
+Only generator commitment states remain binary. Startup and shutdown
+auxiliaries are continuous in `[0,1]`: binary adjacent commitment states and
+the transition equality force every real transition, while an extra
+simultaneous startup/shutdown can only add non-negative cost and tighten the UC
+constraints. This reduces generator binaries from `3 * T * G` to `T * G`
+without changing the projected optimal commitment/dispatch contract.
+
+The market builder now supplies SCUC structure rather than submitting an
+anonymous MILP. `UCGenHint` describes commitment/transition/dispatch columns,
+unit limits, time coupling, reserve and offer segments. A continuous relaxation
+is rounded with load, reserve, contingency-capacity and merit-order knowledge;
+the integer choices are then fixed and the complete network LP is solved. Only
+a successful fixed-integer LP is passed as `initial_solution`. This warm start
+is skipped for one-period cases, where there is no temporal chain to exploit.
+Commitment
+variables receive higher branching priority than converter/storage directions;
+earlier periods and larger units rank first.
+
+For `highs`/`auto`, models at or above
+`structured_scuc_min_binary_variables=1000` use StrictHiGHS with the supplied
+priorities, root separation, reliable pseudocosts, symmetry detection and the
+verified incumbent. Smaller models retain lightweight HiGHS. The default
+`scuc_mip_relative_gap` is 0.01 and `scuc_time_limit_sec` is 120. Results expose
+the actual gap, solver termination, whether the target gap was met, and whether
+near-zero-gap optimality was proven; these states are not interchangeable.
+
+Large base-network SCUCs use exact AC thermal-limit constraint generation when
+the finite branch-period candidate count reaches
+`scuc_network_constraint_generation_min_candidates` (default 10000). Every
+nodal balance and branch flow equation remains in the master MILP; only finite
+AC flow bounds are initially relaxed. After each MILP solve, every omitted
+bound is scanned, violations are sorted by MW magnitude, and the
+violated bounds are restored. A fixed-integer LP repairs the incumbent before
+the next iteration.
+The run is accepted only when no omitted bound exceeds the configured tolerance.
+An iteration/time-limit exit with remaining violations returns infeasible and
+does not proceed to pricing. DC branch limits remain present in every master.
+The last restricted-master lower bound is also a valid lower bound for the full
+model, so its reported gap remains conservative once the incumbent passes the
+complete thermal scan.
+
+Structured StrictHiGHS rounds reuse original-space root cuts, the paired root
+simplex basis, and original-column pseudocost statistics. Tightening omitted
+flow bounds only shrinks the feasible set, so globally valid cuts from the
+previous master remain valid. Basis and pseudocost payloads are accepted only
+after exact dimension checks; missing or incompatible artifacts are ignored.
+The open search tree is rebuilt because tightened bounds invalidate stored node
+relaxations and bounds, and the current HiGHS API has no node-by-node certified
+tree checkpoint. Performance output distinguishes artifact reuse from tree
+rebuilding.
+
+For controlled large cases, run base SCUC/SCED first, apply a nonzero
+`n1_max_contingencies` budget, and perform the complete corrective sweep as an
+offline batch. The default corrective-SCED worker cap is four;
+`component_n1_parallel_workers=0` explicitly selects hardware concurrency and
+should only be used after measuring memory. HiGHS or SCIP should be preferred
+over native B&C. Job cancellation/progress, rolling-horizon decomposition,
+cross-run artifact caches, persistent search trees, and registered scaling budgets remain required
+before claiming province-scale online readiness.
+
+Current release-build reference runs show the intended direction: a one-period
+ACTIVSg2000 base market (432 active generators, 3206 branches, one offer block)
+dropped from about 28.52 s to 4.05 s after direct large-LP routing; a ten-candidate
+N-1 run dropped from about 26.29 s to 7.97 s after the linear-size generator
+capability reformulation. These are local development measurements, not an SLA.
+On the same build, a 56-generator ACTIVSg500 24-period run that exceeded 120 s
+at a `1e-3` target completed in about 2.13 s at an explicit `1e-2` target; its
+reported final gap was about 0.760%, so it met the configured target but did
+not constitute a zero-gap proof.
+The pre-reuse baseline with AC thermal limits enabled on the 24-period ACTIVSg2000 case generated only
+34 active bounds from 76,944 candidates, but the second master restart still
+exhausted the shared 120 s budget (120.92 s measured). It correctly returned
+infeasible/incomplete rather than pricing an unchecked schedule. Root-cut,
+basis and pseudocost reuse now targets that restart cost; a persistent search
+tree or native lazy-constraint callback remains the next escalation if the new
+benchmark still misses the latency target.
 
 ## Real-time market and deviation settlement
 
@@ -157,9 +294,11 @@ customer payment
 
 Actual generator profit uses the realized dispatch true cost, not the
 day-ahead scheduled cost.  Exogenous renewable/static-injection deviations are
-included in resource deviation revenue and the deviation congestion-rent
-identity.  `DeviationSettlementLedger::cashflow_residual` audits the combined
-day-ahead and real-time cash flow.
+included in resource deviation revenue. Optimized DC storage contributes its
+real-time-minus-day-ahead net-injection deviation at the real-time DC LMP; the
+day-ahead and real-time storage optimization policies must match. These terms
+enter the deviation congestion-rent identity. `DeviationSettlementLedger::cashflow_residual`
+audits the combined day-ahead and real-time cash flow.
 
 ### Real-time ancillary services and imbalance charges
 
@@ -222,15 +361,32 @@ no configured participant has a profitable local deviation.
 {
   "num_steps": 24,
   "offer_segments": 8,
+  "uc_solver": "highs",
+  "structured_scuc_branching": true,
+  "structured_scuc_min_binary_variables": 1000,
+  "scuc_mip_relative_gap": 0.01,
+  "scuc_time_limit_sec": 120,
+  "scuc_max_nodes": 50000,
+  "enable_scuc_cross_round_solver_state_reuse": true,
+  "enable_scuc_network_constraint_generation": true,
+  "scuc_network_constraint_generation_min_candidates": 10000,
+  "scuc_network_constraint_generation_max_iterations": 8,
+  "scuc_network_constraint_generation_max_new_per_iteration": 0,
+  "scuc_network_constraint_generation_tolerance_mw": 1e-5,
+  "pricing_native_max_variables": 5000,
   "reserve_fraction": 0.05,
   "voll_per_mwh": 10000.0,
   "exogenous_curtailment_penalty_per_mwh": 5.0,
+  "optimize_dc_storage": true,
+  "enforce_terminal_dc_storage_soc": true,
   "network_constraints": true,
   "run_ac_validation": true,
   "enable_n1_security": true,
   "n1_max_iterations": 8,
   "n1_max_cuts_per_iteration": 200,
   "n1_max_contingencies": 0,
+  "parallel_component_n1": true,
+  "component_n1_parallel_workers": 4,
   "n1_emergency_rating_multiplier": 1.0,
   "run_ac_contingency_validation": true,
   "max_ac_contingencies": 3,
@@ -251,10 +407,16 @@ no configured participant has a profitable local deviation.
 }
 ```
 
-The response includes cost offers, SCUC commitment, period SCED dispatch,
-upward reserve, nodal LMP, AC validation, DC N-1 cut trajectory, nonlinear AC
-contingency checks, security-cost attribution, generator/participant
-settlement, behaviour audit, market-power metrics, and the cashflow ledger.
+The response includes model scope, cost offers, SCUC commitment and converter
+directions, period dispatch, AC/DC LMP, DC voltage/branch/converter results,
+hybrid nonlinear validation, preventive AC-branch N-1 cut trajectory,
+full-component corrective checks, nonlinear AC contingency checks,
+security-cost attribution, AC/DC and DC-storage settlement,
+generator/participant settlement, behaviour audit, market-power metrics, and
+the cashflow ledger. `performance` contains the model-size and stage-timing
+profile, including exact network-generation candidates, activated bounds,
+iterations, remaining violations, and worst violation MW; `uc_solver` accepts `auto`, `highs`, `scip`, `native`, or `gurobi`
+with existing backend-availability fallback semantics.
 The Case9 contracts are registered in
 `tests/test_market_simulation.cpp`.
 
@@ -310,13 +472,16 @@ order.
 The **规划与运行 → 电力市场** module exposes the same runtime contract:
 
 - configure the horizon, offer segmentation, reserve requirement, renewable
-  curtailment cost, network constraints, and base-case AC validation;
+  curtailment cost, network constraints, DC-storage/terminal-SOC policy, and
+  base-case AC validation;
 - assign generators to participant IDs and choose cost-based, fixed-markup,
   capacity-withholding, or combined behaviour;
-- enable preventive N-1 cuts, iteration/cut limits, emergency-rating scaling,
-  and post-contingency AC certification;
-- inspect nodal LMP trajectories, period clearing, participant profit/uplift,
-  the N-1 cut trajectory, AC contingency failures, and the cash-flow ledger;
+- enable preventive AC-branch N-1 cuts, full-component corrective checks,
+  iteration/cut limits, emergency-rating scaling, and post-contingency AC
+  certification;
+- inspect nodal LMP trajectories, period clearing, DC-storage dispatch/SOC and
+  settlement, participant profit/uplift, the N-1 cut trajectory, component
+  checks, AC contingency failures, and the cash-flow ledger;
 - apply an actual-load deviation and inspect day-ahead/real-time prices,
   dispatch deviations, two-settlement profit, and the combined cash ledger;
 - enable real-time ancillary settlement, set deviation bands, penalty/reward
@@ -327,4 +492,5 @@ The **规划与运行 → 电力市场** module exposes the same runtime contrac
 - export either the market result alone or the combined GUI result bundle.
 
 The browser integration contract is exercised by
-`tests/e2e/market_gui_e2e.mjs` against the real HTTP server and Case9.
+`tests/e2e/market_gui_e2e.mjs` against the real HTTP server, Case9, and the
+built-in `market_5bus_acdc_toy` hybrid API contract.

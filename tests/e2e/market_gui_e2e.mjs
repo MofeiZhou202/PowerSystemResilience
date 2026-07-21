@@ -124,6 +124,18 @@ async function main() {
     await page.locator('#marketNumSteps').fill('1');
     await page.locator('#marketRealizedLoadDeviationPct').fill('5');
 
+    await page.evaluate(() => App.setActiveModule('market'));
+    if (!(await page.locator('#marketScucNetworkGeneration').isVisible()) ||
+        !(await page.locator('#marketScucCrossRoundStateReuse').isVisible()) ||
+        !(await page.locator('#marketScucNetworkGenerationMinCandidates').isVisible()) ||
+        !(await page.locator('#marketScucNetworkGenerationIterations').isVisible()) ||
+        !(await page.locator('#marketScucNetworkGenerationMaxNew').isVisible())) {
+      throw new Error('SCUC network constraint generation controls are missing');
+    }
+    await page.locator('#marketScucNetworkGeneration').check();
+    await page.locator('#marketScucCrossRoundStateReuse').check();
+    await page.locator('#marketScucNetworkGenerationMinCandidates').fill('0');
+
     await page.evaluate(() => App.setActiveModule('marketSecurity'));
     await page.locator('#marketAcValidation').check();
     await page.locator('#marketEnableN1').check();
@@ -139,6 +151,32 @@ async function main() {
     }
     if (!Array.isArray(market.security.trajectory) || !market.security.trajectory.length) {
       throw new Error('N-1 cut trajectory is missing');
+    }
+    if (!market.security.full_component_validation_run ||
+        !Array.isArray(market.security.component_checks) ||
+        !market.security.component_checks.length ||
+        !market.model_scope?.full_component_n1_modelled ||
+        !String(market.model_scope?.n1_recourse_policy || '').includes('corrective')) {
+      throw new Error('full-component corrective N-1 result is missing');
+    }
+    if (!(market.performance?.estimated_scuc_variables > 0) ||
+        !(market.performance?.estimated_sced_variables > 0) ||
+        !(market.performance?.estimated_lodf_sparse_bytes > 0) ||
+        !(market.performance?.lodf_computed_columns > 0) ||
+        !market.performance?.component_n1_parallel_requested ||
+        !(market.performance?.component_n1_parallel_workers >= 1) ||
+        !market.performance?.scuc_network_constraint_generation_run ||
+        !market.performance?.scuc_network_constraint_generation_converged ||
+        !(market.performance?.scuc_network_constraint_candidates > 0) ||
+        market.performance?.scuc_cross_round_solver_state_reuse_enabled !== true ||
+        typeof market.performance?.scuc_search_tree_rebuilt !== 'boolean' ||
+        market.performance?.scuc_network_constraint_remaining_violations !== 0 ||
+        !market.commitment?.network_constraint_generation_run ||
+        !market.commitment?.network_constraint_generation_converged ||
+        !(market.performance?.total_sec > 0) ||
+        !market.performance?.scuc_solver_name ||
+        !market.performance?.pricing_solver_name) {
+      throw new Error('market performance profile is missing');
     }
     if (!market.ac_validation?.[0]?.converged ||
         !Array.isArray(market.ac_validation?.[0]?.violations)) {
@@ -159,12 +197,17 @@ async function main() {
       pricingRows: document.querySelectorAll('#marketPricingResults tbody tr').length,
       participantRows: document.querySelectorAll('#marketParticipantResults tbody tr').length,
       securityRows: document.querySelectorAll('#marketSecurityResults tbody tr').length,
+      performanceRows: document.querySelectorAll('#marketPerformanceResults tbody tr').length,
       failureDetails: document.getElementById('marketFailureDetails')?.textContent || '',
       lmpChart: !!document.querySelector('#marketLmpChart.js-plotly-plot'),
     }));
-    if (!rendered.summary.includes('资金残差') || rendered.pricingRows !== 1 ||
+    const expectedFailureText = market.security.full_component_contingencies_secure
+      ? '未发现不可行设备或越限约束' : '全元件N-1纠正校核';
+    if (!rendered.summary.includes('全元件N-1') ||
+        !rendered.summary.includes('资金残差') || rendered.pricingRows !== 1 ||
         rendered.participantRows < 1 || rendered.securityRows < 1 ||
-        !rendered.failureDetails.includes('未发现不可行设备或越限约束') ||
+        rendered.performanceRows < 10 ||
+        !rendered.failureDetails.includes(expectedFailureText) ||
         !rendered.lmpChart) {
       throw new Error(`market dashboard incomplete: ${JSON.stringify(rendered)}`);
     }
@@ -230,10 +273,50 @@ async function main() {
     await page.waitForFunction(() =>
       document.getElementById('marketGameSection')?.style.display === 'block' &&
       document.querySelector('#marketGameProfitChart')?.classList.contains('js-plotly-plot'));
+
+    const hybridApi = await page.evaluate(async () => {
+      const post = async (url, body) => {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await response.json();
+        return { ok: response.ok, status: response.status, data };
+      };
+      const loaded = await post('/api/session/load_builtin', {
+        case: 'market_5bus_acdc_toy',
+      });
+      if (!loaded.ok) return { loaded };
+      const cleared = await post('/api/session/run_market_clearing', {
+        num_steps: 1,
+        reserve_fraction: 0,
+        network_constraints: true,
+        run_ac_validation: true,
+        enable_n1_security: false,
+      });
+      return { loaded, cleared };
+    });
+    const hybrid = hybridApi.cleared?.data;
+    if (!hybridApi.loaded?.ok || !hybridApi.cleared?.ok || !hybrid?.feasible ||
+        !hybrid.model_scope?.dc_network_modelled ||
+        !hybrid.model_scope?.energy_prices_valid ||
+        !hybrid.ac_validation?.[0]?.converged ||
+        !Array.isArray(hybrid.pricing?.[0]?.dc_lmp_per_mwh) ||
+        hybrid.pricing[0].dc_lmp_per_mwh.length === 0 ||
+        !Array.isArray(hybrid.pricing?.[0]?.vsc_ac_injection_mw) ||
+        hybrid.pricing[0].vsc_ac_injection_mw.length === 0 ||
+        !Array.isArray(hybrid.pricing?.[0]?.dc_storage_dispatch_mw) ||
+        !Array.isArray(hybrid.pricing?.[0]?.dc_storage_soc_mwh) ||
+        !Array.isArray(hybrid.dc_storage_settlement) ||
+        !(hybrid.performance?.estimated_scuc_variables > 0) ||
+        (hybrid.unsupported_assets || []).length !== 0) {
+      throw new Error(`hybrid market API contract invalid: ${JSON.stringify(hybridApi)}`);
+    }
     if (pageErrors.length) {
       throw new Error(`browser runtime errors: ${pageErrors.join(' | ')}`);
     }
-    console.log(`market GUI passed: DA=${market.status}, RT=${realTime.status}, game=${game.status}, rounds=${game.rounds.length}`);
+    console.log(`market GUI passed: DA=${market.status}, RT=${realTime.status}, game=${game.status}, hybrid=${hybrid.status}, rounds=${game.rounds.length}`);
   } finally {
     if (browser) await browser.close();
     proc.kill();

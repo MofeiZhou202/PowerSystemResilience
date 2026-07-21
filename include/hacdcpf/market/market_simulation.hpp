@@ -93,10 +93,104 @@ struct PricingPeriod {
   std::vector<double> branch_flow_mw;         ///< authored AC branch order
   std::vector<double> load_shedding_mw;       ///< authored AC bus order
   std::vector<double> exogenous_curtailment_mw; ///< authored AC bus order
+  std::vector<double> dc_lmp_per_mwh;          ///< authored DC bus order
+  std::vector<double> dc_bus_voltage_pu;       ///< authored DC bus order
+  std::vector<double> dc_branch_flow_mw;       ///< authored DC branch order
+  std::vector<double> dc_load_shedding_mw;     ///< authored DC bus order
+  std::vector<double> dc_exogenous_curtailment_mw; ///< authored DC bus order
+  std::vector<double> vsc_ac_injection_mw;     ///< authored VSC order; + into AC
+  std::vector<double> vsc_dc_injection_mw;     ///< authored VSC order; + into DC
+  std::vector<double> vsc_loss_mw;             ///< authored VSC order
+  std::vector<double> dcdc_input_withdrawal_mw; ///< authored DC/DC order
+  std::vector<double> dcdc_output_injection_mw; ///< authored DC/DC order
+  std::vector<double> dcdc_loss_mw;             ///< authored DC/DC order
+  std::vector<double> legacy_dc_storage_dispatch_mw; ///< dc.storage order; + discharge
+  std::vector<double> legacy_dc_storage_soc_mwh; ///< dc.storage order; end-period MWh
+  std::vector<double> dc_storage_dispatch_mw;   ///< dc.dc_storage order; + discharge
+  std::vector<double> dc_storage_soc_mwh;       ///< dc.dc_storage order; end-period MWh
   double reserve_requirement_mw{0.0};
   double upward_reserve_price_per_mwh{0.0};
   double gross_demand_mw{0.0};
+  double gross_dc_demand_mw{0.0};
   double objective{0.0};
+};
+
+/// Machine-readable fidelity declaration for the commercial market model.
+/// The nonlinear certification layer reports its own ConverterModelScope.
+struct MarketModelScope {
+  std::string model_scope{"ac-dc-linear-v1"};
+  bool ac_network_modelled{true};
+  bool dc_network_modelled{false};
+  bool dc_voltage_linearized{false};
+  bool dc_branch_losses_modelled{false};
+  bool vsc_bidirectional_efficiency_modelled{false};
+  bool vsc_fixed_and_quadratic_losses_modelled{false};
+  bool dcdc_bidirectional_efficiency_modelled{false};
+  bool dc_storage_optimized{false};
+  bool dc_storage_intertemporal_modelled{false};
+  bool hybrid_n1_modelled{false};
+  bool full_component_n1_modelled{false};
+  std::string n1_recourse_policy{"none"};
+  bool energy_prices_valid{false};
+  std::vector<std::string> limitations;
+};
+
+/// Model-size estimates and wall-clock stage timings for scalability audits.
+struct MarketPerformanceProfile {
+  int periods{0};
+  int active_generators{0};
+  int active_ac_branches{0};
+  int active_dc_branches{0};
+  int active_vsc_converters{0};
+  int active_dcdc_converters{0};
+  int optimized_dc_storages{0};
+  long long estimated_scuc_variables{0};
+  long long estimated_scuc_binary_variables{0};
+  long long estimated_sced_variables{0};
+  long long estimated_lodf_dense_bytes{0};
+  long long estimated_lodf_sparse_bytes{0};
+  int lodf_computed_columns{0};
+  int component_contingency_solves{0};
+  bool component_n1_parallel_requested{false};
+  bool component_n1_parallel_effective{false};
+  int component_n1_parallel_workers{1};
+  std::string scuc_solver_name;
+  std::string pricing_solver_name;
+  bool pricing_solver_fallback_used{false};
+  bool pricing_large_model_direct_highs_used{false};
+  bool scuc_mip_start_provided{false};
+  bool scuc_structure_hint_provided{false};
+  bool scuc_branching_priorities_provided{false};
+  bool scuc_structured_branching_used{false};
+  bool scuc_mip_gap_target_met{false};
+  bool scuc_optimality_proven{false};
+  double scuc_mip_gap{0.0};
+  std::string scuc_solver_status;
+  double scuc_warm_start_generation_sec{0.0};
+  bool scuc_cross_round_solver_state_reuse_enabled{false};
+  bool scuc_cross_round_solver_state_reuse_used{false};
+  int scuc_cross_round_solver_state_reuse_rounds{0};
+  bool scuc_root_cuts_reused{false};
+  int scuc_root_cuts_reused_count{0};
+  bool scuc_root_basis_reused{false};
+  bool scuc_pseudocosts_reused{false};
+  bool scuc_search_tree_rebuilt{false};
+  bool scuc_network_constraint_generation_run{false};
+  bool scuc_network_constraint_generation_converged{false};
+  int scuc_network_constraint_generation_iterations{0};
+  int scuc_network_constraint_candidates{0};
+  int scuc_network_constraints_activated{0};
+  int scuc_network_constraint_remaining_violations{0};
+  double scuc_network_constraint_worst_violation_mw{0.0};
+  double offer_submission_sec{0.0};
+  double scuc_sec{0.0};
+  double base_sced_sec{0.0};
+  double lodf_build_sec{0.0};
+  double n1_cut_loop_sec{0.0};
+  double component_n1_sec{0.0};
+  double nonlinear_validation_sec{0.0};
+  double settlement_sec{0.0};
+  double total_sec{0.0};
 };
 
 /// One physical limit that failed during post-clearing nonlinear validation.
@@ -127,12 +221,17 @@ struct ACValidationPeriod {
   double maximum_voltage_violation_pu{0.0};
   double maximum_branch_overload_mva{0.0};
   double maximum_generator_active_violation_mw{0.0};
+  double maximum_dc_voltage_violation_pu{0.0};
+  double maximum_dc_branch_overload_mw{0.0};
+  double maximum_vsc_schedule_deviation_mw{0.0};
+  double maximum_dcdc_schedule_deviation_mw{0.0};
   double slack_adjustment_mw{0.0};
   int slack_generator_position{-1};
   double maximum_p_mismatch_pu{0.0};
   double maximum_q_mismatch_pu{0.0};
   std::vector<std::string> solver_warnings;
   std::vector<MarketConstraintViolation> violations;
+  ConverterModelScope converter_model_scope;
   std::string status;
 };
 
@@ -152,6 +251,22 @@ struct GeneratorSettlement {
   double offered_cost_markup{0.0};
   double uplift{0.0};
   double profit_after_uplift{0.0};
+};
+
+struct DCStorageSettlement {
+  std::string component_type;  ///< legacy_dc_storage / dc_storage
+  int component_position{-1};
+  int component_index{0};
+  std::string component_name;
+  int dc_bus{0};
+  double charge_mwh{0.0};
+  double discharge_mwh{0.0};
+  double net_injection_mwh{0.0};
+  double energy_revenue{0.0};
+  double as_bid_cost{0.0};
+  double profit{0.0};
+  double initial_soc_mwh{0.0};
+  double terminal_soc_mwh{0.0};
 };
 
 struct ParticipantSettlement {
@@ -217,6 +332,25 @@ struct ACContingencyCheck {
   std::string status;
 };
 
+/// Corrective fixed-commitment SCED check for one authored N-1 component.
+/// AC branches additionally retain the preventive LODF cut workflow above.
+struct ComponentContingencyCheck {
+  std::string component_type;
+  int component_position{-1};
+  int component_index{0};
+  std::string component_name;
+  int bus{0};
+  int from_bus{0};
+  int to_bus{0};
+  bool sced_converged{false};
+  bool secure{false};
+  double incremental_load_shedding_mwh{0.0};
+  double total_load_shedding_mwh{0.0};
+  double total_exogenous_curtailment_mwh{0.0};
+  double objective{0.0};
+  std::string status;
+};
+
 /// In-service authored assets which the current market formulation cannot
 /// represent.  Returning them explicitly avoids a generic scope failure.
 struct UnsupportedMarketAsset {
@@ -233,10 +367,13 @@ struct UnsupportedMarketAsset {
 struct SecurityResult {
   bool enabled{false};
   bool lodf_available{false};
-  bool dc_n1_secured{false};
+  bool dc_n1_secured{false};  ///< legacy name: preventive AC-branch LODF secure
   bool ac_contingency_validation_run{false};
   bool ac_contingencies_secure{false};
+  bool full_component_validation_run{false};
+  bool full_component_contingencies_secure{false};
   int candidate_contingencies{0};
+  int full_component_candidate_contingencies{0};
   int iterations{0};
   int cuts_added{0};
   int initial_violations{0};
@@ -252,16 +389,21 @@ struct SecurityResult {
   std::vector<N1Iteration> trajectory;
   std::vector<N1Violation> remaining_violations;
   std::vector<ACContingencyCheck> ac_checks;
+  std::vector<ComponentContingencyCheck> component_checks;
   std::vector<std::string> warnings;
 };
 
 /// Auditable day-ahead cash-flow ledger.
 struct SettlementLedger {
   double customer_energy_payment{0.0};
+  double customer_ac_energy_payment{0.0};
+  double customer_dc_energy_payment{0.0};
   double customer_reserve_charge{0.0};
   double customer_uplift_charge{0.0};
   double customer_total_payment{0.0};
   double resource_energy_revenue{0.0};
+  double resource_ac_energy_revenue{0.0};
+  double resource_dc_energy_revenue{0.0};
   double resource_reserve_revenue{0.0};
   double resource_uplift_revenue{0.0};
   double resource_total_revenue{0.0};
@@ -279,6 +421,20 @@ struct MarketOptions {
   double upward_reserve_fraction{0.05};
   double value_of_lost_load_per_mwh{10000.0};
   double exogenous_curtailment_penalty_per_mwh{0.0};
+  int pricing_native_max_variables{5000}; ///< 0 = route every pricing LP to HiGHS
+  bool structured_scuc_branching{true};
+  int structured_scuc_min_binary_variables{1000};
+  double scuc_mip_relative_gap{1e-2};
+  double scuc_time_limit_sec{120.0};
+  int scuc_max_nodes{50000};
+  bool enable_scuc_cross_round_solver_state_reuse{true};
+  bool enable_scuc_network_constraint_generation{true};
+  int scuc_network_constraint_generation_min_candidates{10000};
+  int scuc_network_constraint_generation_max_iterations{8};
+  int scuc_network_constraint_generation_max_new_per_iteration{0};
+  double scuc_network_constraint_generation_tolerance_mw{1e-5};
+  bool optimize_dc_storage{true};
+  bool enforce_terminal_dc_storage_soc{true};
   bool enable_network_constraints{true};
   bool run_ac_validation{true};
   double ac_validation_voltage_tolerance_pu{1e-5};
@@ -299,9 +455,11 @@ struct MarketOptions {
   bool enable_n1_security{false};
   int n1_max_iterations{8};
   int n1_max_cuts_per_iteration{200};
-  int n1_max_contingencies{0};       ///< 0 = every valid active AC branch
+  int n1_max_contingencies{0};       ///< 0 = every active covered component
   double n1_emergency_rating_multiplier{1.0};
   double n1_violation_tolerance_mw{1e-5};
+  bool parallel_component_n1{true};
+  int component_n1_parallel_workers{4}; ///< 0 = hardware concurrency
 
   // Nonlinear certification of the final preventive dispatch.  This does not
   // silently repair a failed contingency: failures remain explicit results.
@@ -329,10 +487,13 @@ struct MarketResult {
   std::vector<ACValidationPeriod> ac_validation;
   std::vector<PowerFlowResult> ac_power_flow_results;
   std::vector<GeneratorSettlement> generator_settlement;
+  std::vector<DCStorageSettlement> dc_storage_settlement;
   std::vector<ParticipantSettlement> participant_settlement;
   MarketPowerMetrics market_power;
   SecurityResult security;
   SettlementLedger settlement;
+  MarketModelScope model_scope;
+  MarketPerformanceProfile performance;
 
   double commitment_cost{0.0};
   double pricing_objective{0.0};
@@ -374,6 +535,7 @@ struct RealTimePeriod {
   double average_real_time_lmp_per_mwh{0.0};
   double customer_deviation_payment{0.0};
   double resource_deviation_revenue{0.0};
+  double dc_storage_deviation_revenue{0.0};
   double deviation_congestion_rent{0.0};
   double reserve_activation_requirement_mw{0.0};
   double reserve_instruction_mw{0.0};

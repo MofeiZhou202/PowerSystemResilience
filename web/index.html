@@ -1250,11 +1250,56 @@
       <label class="sub-label">报价段数
         <input id="marketOfferSegments" type="number" value="8" min="1" max="64" step="1"/>
       </label>
+      <label class="sub-label">SCUC求解器
+        <select id="marketUcSolver" title="大规模系统优先使用 HiGHS 或 SCIP；Auto 当前优先 HiGHS">
+          <option value="auto" selected>Auto</option>
+          <option value="highs">HiGHS</option>
+          <option value="scip">SCIP</option>
+          <option value="native">Native B&amp;C</option>
+          <option value="gurobi">Gurobi</option>
+        </select>
+      </label>
+      <label class="sub-label">原生定价变量上限
+        <input id="marketPricingNativeMaxVariables" type="number" value="5000" min="0" step="100" title="超过该变量数直接使用 HiGHS；0 表示所有定价 LP 均使用 HiGHS"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="大型 SCUC 使用结构化 HiGHS 分支、根节点分离、对称检测和已验证 MIP start">
+        <input id="marketStructuredScuc" type="checkbox" checked/><span>结构化SCUC</span>
+      </label>
+      <label class="sub-label">结构化阈值
+        <input id="marketStructuredScucMinBinaries" type="number" value="1000" min="0" step="100" title="SCUC 二进制变量达到该数量后启用结构化分支；小模型保留轻量 HiGHS"/>
+      </label>
+      <label class="sub-label">SCUC Gap(%)
+        <input id="marketScucMipGapPct" type="number" value="1" min="0" max="100" step="0.1" title="默认 1% 用于大型日前市场；收紧会显著增加分支定界时间"/>
+      </label>
+      <label class="sub-label">SCUC时限(s)
+        <input id="marketScucTimeLimit" type="number" value="120" min="0" step="10"/>
+      </label>
       <label class="sub-label">备用率(%)
         <input id="marketReservePct" type="number" value="5" min="0" max="100" step="0.5"/>
       </label>
       <label class="sub-label sub-checkbox" title="在 SCUC/SCED 中启用直流潮流与线路容量约束">
         <input id="marketNetworkConstraints" type="checkbox" checked/><span>网络约束</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="大型 SCUC 先求解保留全部潮流方程的松弛主问题，再精确激活超限 AC 支路热限">
+        <input id="marketScucNetworkGeneration" type="checkbox" checked/><span>热限约束生成</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="约束生成后续轮次复用 StrictHiGHS 根割、根基和伪成本；新增热限后搜索树仍安全重建">
+        <input id="marketScucCrossRoundStateReuse" type="checkbox" checked/><span>跨轮求解状态复用</span>
+      </label>
+      <label class="sub-label">热限候选阈值
+        <input id="marketScucNetworkGenerationMinCandidates" type="number" value="10000" min="0" step="1000" title="AC支路×时段候选数达到该值后启用；0表示任何规模均启用"/>
+      </label>
+      <label class="sub-label">热限生成轮数
+        <input id="marketScucNetworkGenerationIterations" type="number" value="8" min="1" max="100" step="1"/>
+      </label>
+      <label class="sub-label">每轮新增上限
+        <input id="marketScucNetworkGenerationMaxNew" type="number" value="0" min="0" step="100" title="按超限量降序激活；0表示激活本轮全部违反项"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="联合优化投运且可控的 DC 储能充放电、效率和跨时段 SOC">
+        <input id="marketOptimizeDCStorage" type="checkbox" checked/><span>DC储能优化</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="要求市场时域末端 DC 储能 SOC 回到初始值">
+        <input id="marketTerminalDCStorageSoc" type="checkbox" checked/><span>终端SOC回归</span>
       </label>
       <button id="btnRunMarket" class="toolbar-btn run-btn" type="button">运行市场出清</button>
     </div>
@@ -1279,10 +1324,10 @@
       </label>
       <span class="sub-hint" title="常规 OPF 会重新优化机组出力并改变已结算的市场计划">OPF会再调度，不能直接认证原市场计划；此处采用固定出清快照潮流。</span>
     </div>
-    <div class="control-param-group market-param-group" data-market-scope="security" title="预防性 N-1 与事故后 AC 认证设置">
+    <div class="control-param-group market-param-group" data-market-scope="security" title="AC 支路预防式约束、全元件纠正式校核与事故后 AC 认证设置">
       <span class="control-param-title">N-1安全</span>
-      <label class="sub-label sub-checkbox" title="使用 LODF 筛选并迭代加入线路 N-1 安全切平面">
-        <input id="marketEnableN1" type="checkbox"/><span>N-1预防控制</span>
+      <label class="sub-label sub-checkbox" title="AC 支路使用 LODF 预防式切平面；发电机、AC/DC 支路、换流器和 DC 储能执行固定组合纠正式 SCED 校核">
+        <input id="marketEnableN1" type="checkbox"/><span>全元件N-1</span>
       </label>
       <label class="sub-label">最大迭代
         <input id="marketN1Iterations" type="number" value="8" min="0" max="100" step="1"/>
@@ -1291,7 +1336,13 @@
         <input id="marketN1Cuts" type="number" value="200" min="0" max="10000" step="1"/>
       </label>
       <label class="sub-label">事故数
-        <input id="marketN1Contingencies" type="number" value="0" min="0" step="1" title="0 表示筛选全部非孤岛线路事故"/>
+        <input id="marketN1Contingencies" type="number" value="0" min="0" step="1" title="0 表示覆盖全部已建模元件事故；非零值截断统一故障清单"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="对独立的全元件纠正式 SCED 使用有界任务并行；结果仍按元件原始顺序输出">
+        <input id="marketParallelComponentN1" type="checkbox" checked/><span>事故SCED并行</span>
+      </label>
+      <label class="sub-label">并行worker
+        <input id="marketComponentN1Workers" type="number" value="4" min="0" step="1" title="默认 4 以限制并发 SCED 的峰值内存；0 表示使用硬件并发数"/>
       </label>
       <label class="sub-label">紧急限值倍数
         <input id="marketEmergencyMultiplier" type="number" value="1" min="0" step="0.05"/>
@@ -2941,9 +2992,17 @@
             <h4>分时段出清结果</h4>
             <div id="marketPricingResults" class="topo-table-wrap"></div>
           </div>
+          <div class="topo-section" data-market-result-scope="clearing security">
+            <h4>模型规模与阶段耗时</h4>
+            <div id="marketPerformanceResults" class="topo-table-wrap"></div>
+          </div>
           <div class="topo-section" data-market-result-scope="behavior settlement">
             <h4>市场主体与结算</h4>
             <div id="marketParticipantResults" class="topo-table-wrap"></div>
+          </div>
+          <div class="topo-section" data-market-result-scope="clearing settlement">
+            <h4>DC 储能结算</h4>
+            <div id="marketStorageResults" class="topo-table-wrap"></div>
           </div>
           <div class="topo-section" data-market-result-scope="security">
             <h4>基态 AC 安全认证</h4>
@@ -2954,7 +3013,7 @@
             <div id="marketFailureDetails" class="topo-table-wrap"></div>
           </div>
           <div class="topo-section" data-market-result-scope="security">
-            <h4>N-1 安全约束轨迹</h4>
+            <h4>N-1 安全约束与全元件校核</h4>
             <div id="marketSecurityChart" class="tspf-chart market-chart"></div>
             <div id="marketSecurityResults" class="topo-table-wrap"></div>
           </div>
