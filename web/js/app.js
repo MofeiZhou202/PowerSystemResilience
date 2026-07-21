@@ -4317,6 +4317,7 @@ const App = (() => {
     return withAnalysisQueue(async () => {
       setStatus('最优潮流计算中...', 'busy');
       const solver = document.getElementById('opfSolver')?.value || 'parity';
+      const robustStrategy = solver === 'robust';
       const checkConsistency = !!(document.getElementById('opfCheckConsistency')?.checked);
       const monolithicPhaseHybrid = networkModel === 'three_phase_hybrid';
       const constraints = {
@@ -4336,7 +4337,10 @@ const App = (() => {
         barrier_mu_reduction: pfNumber('opfBarrierReduction', 0.2),
         regularization: pfNumber('opfRegularization', 1e-6),
         ac_eval_threads: pfInteger('opfAcEvalThreads', 1),
-        allow_fallback: pfBool('opfAllowFallback', true),
+        allow_fallback: robustStrategy || pfBool('opfAllowFallback', true),
+        ac_pf_warm_start: robustStrategy || pfBool('opfAcPfWarmStart', false),
+        objective_homotopy: robustStrategy || pfBool('opfObjectiveHomotopy', false),
+        homotopy_dt0: pfNumber('opfHomotopyDt0', 0.10),
         verbose: pfBool('opfVerbose', false),
       };
       const threePhase = {
@@ -4530,12 +4534,19 @@ const App = (() => {
 
     // Summary
     const sumDiv = document.getElementById('opfSummary');
+    const effectiveOptions = data.options_effective || {};
     if (sumDiv) {
       sumDiv.innerHTML = `
         <div class="result-item"><span class="result-label">求解器</span>
           <span class="result-value">${escapeHtml(data.solver || '')}</span></div>
+        <div class="result-item"><span class="result-label">求解策略</span>
+          <span class="result-value">${escapeHtml(data.strategy_effective || data.strategy_requested || data.solver || '-')}</span></div>
         <div class="result-item"><span class="result-label">实际后端</span>
           <span class="result-value">${escapeHtml(data.solver_backend || '-')}</span></div>
+        <div class="result-item"><span class="result-label">自动回退</span>
+          <span class="result-value">${data.fallback_used ? '已触发' : '未触发'}</span></div>
+        <div class="result-item"><span class="result-label">稳健启动</span>
+          <span class="result-value">AC热启动=${effectiveOptions.ac_pf_warm_start ? '开' : '关'}；目标同伦=${effectiveOptions.objective_homotopy ? '开' : '关'}</span></div>
         <div class="result-item"><span class="result-label">收敛</span>
           <span class="result-value ${data.converged ? 'result-converged' : 'result-failed'}">
             ${data.converged ? '✓ 是' : '✗ 否'}</span></div>

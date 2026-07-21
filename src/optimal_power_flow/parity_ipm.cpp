@@ -177,8 +177,14 @@ struct IpmProfTimer {
 // the Wächter–Biegler δ_W correction below.
 enum class KktForm { Condensed, Augmented };
 
-// HACDCPF_OPF_KKT_FORM = augmented | condensed  (default: augmented when an
-// inertia-reporting LDLᵀ backend is compiled in, else condensed).
+// HACDCPF_OPF_KKT_FORM = augmented | condensed.
+//
+// Condensed is the production default.  It is the mature fast path for the
+// ordinary economic OPF benchmarks (case2000_acdc: ~2 s, case2869pegase:
+// 54 iterations in Release).  Merely compiling MUMPS must not silently switch
+// every model to the augmented trajectory: that policy regressed both cases
+// into long filter stalls.  Augmented KKT remains available explicitly for
+// stiff models that benefit from inertia-controlled regularization.
 KktForm kkt_form_preference() {
   const char* env = std::getenv("HACDCPF_OPF_KKT_FORM");
   if (env != nullptr) {
@@ -189,11 +195,7 @@ KktForm kkt_form_preference() {
     if (s == "condensed") return KktForm::Condensed;
     if (s == "augmented") return KktForm::Augmented;
   }
-#if defined(HACDCPF_HAVE_MUMPS)
-  return KktForm::Augmented;
-#else
   return KktForm::Condensed;
-#endif
 }
 
 // Cache for the sparse KKT system.  Holds the assembled matrix plus whichever
@@ -1014,16 +1016,17 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
                                  const Eigen::VectorXd& rg_v, const Eigen::VectorXd& rh_v,
                                  const Eigen::VectorXd& Lx_v, double obj_v) {
     const double maxh = (niq > 0) ? std::max(rh_v.maxCoeff(), 0.0) : 0.0;
+    const double raw_feascond = std::max(inf_norm(rg_v), maxh);
     const double scale_x = std::max(inf_norm(x_v), inf_norm(z_v));
-    const double feascond = std::max(inf_norm(rg_v), maxh) / (1.0 + scale_x);
+    const double feascond = raw_feascond / (1.0 + scale_x);
     const double gradcond = inf_norm(Lx_v) / (1.0 + std::max(inf_norm(mu_v), inf_norm(lambda_v)));
     // Average complementarity per constraint — normalizes by niq to be problem-size-independent.
     const double compcond = (niq > 0) ? z_v.dot(mu_v) / static_cast<double>(niq) / (1.0 + inf_norm(x_v)) : 0.0;
     const double costcond = std::abs(obj_v - obj0) / (1.0 + std::abs(obj0));
-    return std::make_tuple(feascond, gradcond, compcond, costcond);
+    return std::make_tuple(feascond, raw_feascond, gradcond, compcond, costcond);
   };
 
-  auto [feascond, gradcond, compcond, costcond] =
+  auto [feascond, raw_feascond, gradcond, compcond, costcond] =
       compute_convergence(x, z, lambda, mu, rg, rh, Lx, obj);
 
   const double feas_tol = opt.tol_primal;
@@ -1031,7 +1034,8 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   // at ~1e-3 due to barrier ill-conditioning, while feas and grad are fully converged.
   // Use a relaxed tolerance for complementarity (minimum 2e-3).
   const double comp_tol = std::max(feas_tol * 10.0, 2e-3);
-  bool converged = (feascond < feas_tol && gradcond < feas_tol && compcond < comp_tol);
+  bool converged = (feascond < feas_tol && raw_feascond < feas_tol &&
+                    gradcond < feas_tol && compcond < comp_tol);
 
   IPMResult out;
   out.status = "maximum iterations reached";
@@ -1043,12 +1047,13 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   // Best-iterate tracking: store the iterate with the smallest max(feas, grad, comp).
   // For oscillating problems on constraint boundaries, the best iterate may satisfy
   // convergence even if the final iterate does not.
-  double best_metric = std::max({feascond, gradcond, compcond});
+  double best_metric = std::max({raw_feascond, gradcond, compcond});
   Eigen::VectorXd best_x = x;
   Eigen::VectorXd best_lambda = lambda;
   Eigen::VectorXd best_mu = mu;
   Eigen::VectorXd best_z = z;
   double best_feas = feascond;
+  double best_raw_feas = raw_feascond;
   double best_grad = gradcond;
   double best_comp = compcond;
   int best_iter = 0;
@@ -1158,8 +1163,8 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
 
     if (opt.verbose) {
       [[maybe_unused]] const double maxh_dbg = (niq > 0) ? std::max(rh.maxCoeff(), 0.0) : 0.0;
-      HACDCPF_LOG_DEBUG("[parity-ipm] iter={} feas={} grad={} comp={} cost={} |rg|={} maxh={} |Lx|={}",
-                iter, feascond, gradcond, compcond, costcond,
+      HACDCPF_LOG_DEBUG("[parity-ipm] iter={} feas={} raw_feas={} grad={} comp={} cost={} |rg|={} maxh={} |Lx|={}",
+                iter, feascond, raw_feascond, gradcond, compcond, costcond,
                 inf_norm(rg), maxh_dbg, inf_norm(Lx));
     }
 
@@ -1656,6 +1661,7 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     Eigen::SparseMatrix<double> jg_trial, dh_trial;
     double obj_trial = obj;
     double feas_trial = feascond;
+    double raw_feas_trial = raw_feascond;
     double grad_trial_cond = gradcond;
     double comp_trial = compcond;
     double cost_trial = costcond;
@@ -1693,7 +1699,8 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
       objective_gradient_hessian_diag(prob, x_trial, grad_trial, hdiag_trial);
       Lx_trial = obj_scale * grad_trial + jg_trial.transpose() * lambda_trial +
                  dh_trial.transpose() * mu_trial;
-      std::tie(feas_trial, grad_trial_cond, comp_trial, cost_trial) =
+      std::tie(feas_trial, raw_feas_trial, grad_trial_cond, comp_trial,
+               cost_trial) =
           compute_convergence(x_trial, z_trial, lambda_trial, mu_trial,
                               rg_trial, rh_trial, Lx_trial, obj_trial);
 
@@ -1977,12 +1984,13 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     apply_obj_scale_hessian(Lxx, hdiag);
 
     feascond = feas_trial;
+    raw_feascond = raw_feas_trial;
     gradcond = grad_trial_cond;
     compcond = comp_trial;
     costcond = cost_trial;
 
     // Track best iterate
-    const double cur_metric = std::max({feascond, gradcond, compcond});
+    const double cur_metric = std::max({raw_feascond, gradcond, compcond});
     if (cur_metric < best_metric) {
       best_metric = cur_metric;
       best_x = x;
@@ -1990,6 +1998,7 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
       best_mu = mu;
       best_z = z;
       best_feas = feascond;
+      best_raw_feas = raw_feascond;
       best_grad = gradcond;
       best_comp = compcond;
       best_iter = iter + 1;
@@ -2005,7 +2014,7 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     // cutting a healthy midgame tail, where obj also stagnates while θ is
     // still being reduced.
     constexpr int kStagnationWindow = 20;
-    if (feascond < 1e-4 && compcond < comp_tol) {
+    if (raw_feascond < 1e-4 && compcond < comp_tol) {
       const double d_obj = std::abs(obj - obj_prev);
       stagnant_count = (d_obj <= 1e-6 * (1.0 + std::abs(obj))) ? stagnant_count + 1 : 0;
       if (stagnant_count >= kStagnationWindow) {
@@ -2017,7 +2026,8 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     }
     obj_prev = obj;
 
-    if (feascond < feas_tol && gradcond < feas_tol && compcond < comp_tol) {
+    if (feascond < feas_tol && raw_feascond < feas_tol &&
+        gradcond < feas_tol && compcond < comp_tol) {
       converged = true;
       out.converged = true;
       out.status = "converged";
@@ -2032,17 +2042,20 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   // with complementarity already inside comp_tol.  The status string states
   // the relaxation honestly; this is NOT the strict tolerance.
   const double acceptable_tol = 100.0 * feas_tol;
+  const double acceptable_raw_feas_tol = 10.0 * feas_tol;
   if (!converged && opt.verbose) {
     HACDCPF_LOG_DEBUG("[parity-ipm] best iterate at iter={} feas={} grad={} comp={} metric={}",
               best_iter, best_feas, best_grad, best_comp, best_metric);
   }
-  if (!converged && best_feas < acceptable_tol && best_grad < acceptable_tol &&
-      best_comp < comp_tol) {
+  if (!converged && best_feas < acceptable_tol &&
+      best_raw_feas < acceptable_raw_feas_tol &&
+      best_grad < acceptable_tol && best_comp < comp_tol) {
     x = best_x;
     lambda = best_lambda;
     mu = best_mu;
     z = best_z;
     feascond = best_feas;
+    raw_feascond = best_raw_feas;
     gradcond = best_grad;
     compcond = best_comp;
     converged = true;
@@ -2094,6 +2107,7 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
         gradcond = stat_ls;
       }
       if (!converged && feascond < acceptable_tol &&
+          raw_feascond < acceptable_raw_feas_tol &&
           compcond < comp_tol && stat_ls < acceptable_tol) {
         converged = true;
         out.converged = true;
@@ -2167,12 +2181,19 @@ bool homotopy_tangent(const Problem& prob,
   assemble_inequalities(prob, x, xmin, xmax, lb_cols, ub_cols, rh, dh);
   const int meq = static_cast<int>(jg.rows());
   const int niq = static_cast<int>(dh.rows());
-  if (niq == 0) return false;
+  // A tangent is optional continuation metadata.  A solver result from an
+  // early/failed path may legitimately omit one of the primal-dual blocks;
+  // never turn that into an Eigen block assertion while solving the OPF.
+  if (x.size() != n || lambda.size() != meq || z.size() != niq ||
+      mu.size() != niq || niq == 0) {
+    return false;
+  }
 
   // Lagrangian Hessian of the t-scaled problem (the path curvature at w(t)).
   const int m_nonlin = prob.cidx.n_ineq_nonlin;
   Eigen::VectorXd nu_buf;
   const Eigen::VectorXd* nu_ptr = nullptr;
+  if (m_nonlin > mu.size()) return false;
   if (m_nonlin > 0) {
     nu_buf = mu.head(m_nonlin);
     nu_ptr = &nu_buf;

@@ -497,6 +497,7 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
       }
     }
   }
+  }
 
   // --- generators (subtransient or steady-state shunt with KG correction) ---
   for (const auto& g : ac.generators) {
