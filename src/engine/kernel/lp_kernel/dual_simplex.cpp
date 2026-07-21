@@ -3516,6 +3516,14 @@ class SparseBasis : public BasisOps {
     umfpack_dl_defaults(Control_);
     Control_[UMFPACK_IRSTEP] = 2;
     Control_[UMFPACK_SCALE] = UMFPACK_SCALE_SUM;
+    // Hot-loop control: identical except iterative refinement off.  The
+    // in-place FTRAN/BTRAN variants used inside the simplex iteration run
+    // with this one — each IR step costs an SpMV + full re-solve per call,
+    // and mid-chain solves are followed by unrefined eta applications
+    // anyway, so IR there buys little.  The virtual ftran()/btran() (duals,
+    // tableau rows for cuts, post-refactorize full recompute) keep IR.
+    std::memcpy(ControlHot_, Control_, sizeof(ControlHot_));
+    ControlHot_[UMFPACK_IRSTEP] = 0;
     // Pre-allocate solve workspace (avoids per-call heap allocation).
     solve_work_.resize(m_);
     // Pre-allocate wsolve workspace: 5*m doubles + m ints.
@@ -3538,7 +3546,10 @@ class SparseBasis : public BasisOps {
   /// the cold-start escalation chain; no-op without UMFPACK.
   void set_pivot_tolerance(double tol) {
 #ifdef MIPSOLVERS_HAVE_UMFPACK
-    if (tol > 0.0 && tol <= 1.0) Control_[UMFPACK_PIVOT_TOLERANCE] = tol;
+    if (tol > 0.0 && tol <= 1.0) {
+      Control_[UMFPACK_PIVOT_TOLERANCE] = tol;
+      ControlHot_[UMFPACK_PIVOT_TOLERANCE] = tol;
+    }
 #else
     (void)tol;
 #endif
@@ -3764,7 +3775,7 @@ class SparseBasis : public BasisOps {
     basis_columns_ = basis;
     etas_.clear();
     min_pivot_ = 1e30;
-    max_eta_norm_ = 0.0;
+    max_eta_norm_ = 0.0; max_eta_mult_ = 0.0;
     accumulated_fill_ = 0;
     ++gen_;
     return true;
@@ -3822,7 +3833,7 @@ class SparseBasis : public BasisOps {
 #endif
       etas_.clear();
       min_pivot_ = 1e30;
-      max_eta_norm_ = 0.0;
+      max_eta_norm_ = 0.0; max_eta_mult_ = 0.0;
       accumulated_fill_ = 0;
 #ifdef MIPSOLVERS_HAVE_HFACTOR
       const bool ok = hfb_.factorize(*A_, basis.data(), m_);
@@ -3851,11 +3862,11 @@ class SparseBasis : public BasisOps {
       return false;  // HFactorPort requested but MIPSOLVERS_HAVE_HFACTOR not compiled
 #endif
     }
-    B_ = build_sparse_basis(basis);
     // Stage 2: KLU rescue backend.  Two fresh factorizations (B and B^T) per
     // refactorize; standard eta updates apply between refactorizations.
     // Numerically conservative rescue path — correctness over speed.
     if (backend_kind_ == FactorBackendKind::KluRescue) {
+      B_ = build_sparse_basis(basis);
 #ifdef MIPSOLVERS_HAVE_KLU
       // Invalidate any stale incremental-factor state from a previous
       // UMFPACK-based refactorize: ftran_sparse_inplace/btran_sparse_inplace
@@ -3882,7 +3893,7 @@ class SparseBasis : public BasisOps {
       }
       etas_.clear();
       min_pivot_ = 1e30;
-      max_eta_norm_ = 0.0;
+      max_eta_norm_ = 0.0; max_eta_mult_ = 0.0;
       accumulated_fill_ = 0;
       return true;
 #else
@@ -3892,30 +3903,56 @@ class SparseBasis : public BasisOps {
 #ifdef MIPSOLVERS_HAVE_UMFPACK
     if (Numeric_) { umfpack_dl_free_numeric(&Numeric_); Numeric_ = nullptr; }
 
-    // Widen B_'s int32 CSC indices to int64 for the umfpack_dl_* interface
-    // (factor nnz past 2^31 is representable through this path; the pattern
-    // comparison below also runs on these widened arrays).
-    const int nnz_b = B_.outerIndexPtr()[m_];
-    std::vector<int64_t> Ap64(B_.outerIndexPtr(), B_.outerIndexPtr() + m_ + 1);
-    std::vector<int64_t> Ai64(B_.innerIndexPtr(), B_.innerIndexPtr() + nnz_b);
+    // Build the basis matrix CSC directly in int64 from A_'s compressed
+    // column buffers (row indices per column stay sorted, as UMFPACK
+    // requires).  Skips the Eigen insert-based construction plus the
+    // int32→int64 widening copy — both showed up hot at m≈35k where a
+    // refactorization runs every few dozen pivots.  Scratch members keep
+    // the previous Ap_/Ai_/Ax_ intact for the pattern comparison and for
+    // failure paths (old arrays preserved on early return, as before).
+    const auto* a_op = A_->outerIndexPtr();
+    const auto* a_ip = A_->innerIndexPtr();
+    const auto* a_vp = A_->valuePtr();
+    scratch_Ap64_.resize(static_cast<size_t>(m_) + 1);
+    scratch_Ap64_[0] = 0;
+    for (int i = 0; i < m_; ++i) {
+      const int col = basis[static_cast<size_t>(i)];
+      scratch_Ap64_[static_cast<size_t>(i) + 1] =
+          scratch_Ap64_[static_cast<size_t>(i)] + (a_op[col + 1] - a_op[col]);
+    }
+    const int64_t nnz_b = scratch_Ap64_[static_cast<size_t>(m_)];
+    scratch_Ai64_.resize(static_cast<size_t>(nnz_b));
+    scratch_Ax_.resize(static_cast<size_t>(nnz_b));
+    {
+      int64_t dst = 0;
+      for (int i = 0; i < m_; ++i) {
+        const int col = basis[static_cast<size_t>(i)];
+        for (int k = a_op[col]; k < a_op[col + 1]; ++k, ++dst) {
+          scratch_Ai64_[static_cast<size_t>(dst)] = a_ip[k];
+          scratch_Ax_[static_cast<size_t>(dst)] = a_vp[k];
+        }
+      }
+    }
 
     // Check if sparsity pattern is unchanged — if so, reuse Symbolic_.
     bool pattern_same = false;
-    if (Symbolic_ && Ap_.size() == Ap64.size() && Ai_.size() == Ai64.size() &&
-        Ap_ == Ap64 && Ai_ == Ai64) {
+    if (Symbolic_ && Ap_.size() == scratch_Ap64_.size() &&
+        Ai_.size() == scratch_Ai64_.size() && Ap_ == scratch_Ap64_ &&
+        Ai_ == scratch_Ai64_) {
       pattern_same = true;
     }
 
     if (!pattern_same) {
       if (Symbolic_) { umfpack_dl_free_symbolic(&Symbolic_); Symbolic_ = nullptr; }
-      int status = umfpack_dl_symbolic(m_, m_, Ap64.data(), Ai64.data(),
-                                       B_.valuePtr(), &Symbolic_, Control_,
+      int status = umfpack_dl_symbolic(m_, m_, scratch_Ap64_.data(),
+                                       scratch_Ai64_.data(),
+                                       scratch_Ax_.data(), &Symbolic_, Control_,
                                        nullptr);
       if (status != UMFPACK_OK) { last_refactor_fail_detail_ = 3; return false; }
     }
     {
-      int status = umfpack_dl_numeric(Ap64.data(), Ai64.data(),
-                                      B_.valuePtr(), Symbolic_, &Numeric_,
+      int status = umfpack_dl_numeric(scratch_Ap64_.data(), scratch_Ai64_.data(),
+                                      scratch_Ax_.data(), Symbolic_, &Numeric_,
                                       Control_, nullptr);
       if (status != UMFPACK_OK) {
         umfpack_dl_free_symbolic(&Symbolic_);
@@ -3971,12 +4008,14 @@ class SparseBasis : public BasisOps {
       }
     }
     // Cache CCS arrays — UMFPACK solve uses them for iterative refinement.
-    // Storing our own copies avoids any lifetime issues with B_'s internals.
-    Ap_ = std::move(Ap64);
-    Ai_ = std::move(Ai64);
-    Ax_.assign(B_.valuePtr(), B_.valuePtr() + nnz_b);
+    // Swap with the scratch buffers (the old arrays become next round's
+    // scratch, so steady state does no allocation).
+    Ap_.swap(scratch_Ap64_);
+    Ai_.swap(scratch_Ai64_);
+    Ax_.swap(scratch_Ax_);
     if (!prepare_factor_backend_after_numeric()) { last_refactor_fail_detail_ = 7; return false; }
 #else
+    B_ = build_sparse_basis(basis);
     lu_.setPivotThreshold(1.0);
     lu_.compute(B_);
     if (lu_.info() != Eigen::Success) {
@@ -3985,7 +4024,7 @@ class SparseBasis : public BasisOps {
 #endif
     etas_.clear();
     min_pivot_ = 1e30;
-    max_eta_norm_ = 0.0;
+    max_eta_norm_ = 0.0; max_eta_mult_ = 0.0;
     accumulated_fill_ = 0;
     return true;
   }
@@ -4041,7 +4080,7 @@ class SparseBasis : public BasisOps {
           diag_factor = new HFactorBackend();
           etas_.clear();
           min_pivot_ = 1e30;
-          max_eta_norm_ = 0.0;
+          max_eta_norm_ = 0.0; max_eta_mult_ = 0.0;
           accumulated_fill_ = 0;
           return true;
         }
@@ -4189,7 +4228,7 @@ class SparseBasis : public BasisOps {
       solve_work_.noalias() = rhs;  // UMFPACK needs separate input/output
       int status = umfpack_dl_wsolve(UMFPACK_A, Ap_.data(), Ai_.data(),
                                      Ax_.data(), rhs.data(), solve_work_.data(),
-                                     Numeric_, Control_, nullptr,
+                                     Numeric_, ControlHot_, nullptr,
                                      wsolve_Wi_.data(), wsolve_W_.data());
       if (status != UMFPACK_OK) {
         // Solve failed: poison with NaN so downstream isfinite guards abort
@@ -4322,7 +4361,7 @@ class SparseBasis : public BasisOps {
         solve_work_.noalias() = rhs;
         int status = umfpack_dl_wsolve(UMFPACK_At, Ap_.data(), Ai_.data(),
                                        Ax_.data(), rhs.data(),
-                                       solve_work_.data(), Numeric_, Control_,
+                                       solve_work_.data(), Numeric_, ControlHot_,
                                        nullptr, wsolve_Wi_.data(),
                                        wsolve_W_.data());
         if (status != UMFPACK_OK) {
@@ -4515,10 +4554,22 @@ class SparseBasis : public BasisOps {
     eta.pivot_row = pivot_row;
     eta.pivot_value = direction[pivot_row];
     const double* data = direction.data();
+    double off_max = 0.0;
     for (int i = 0; i < m_; ++i) {
       if (i == pivot_row) continue;
-      if (std::abs(data[i]) > drop_tol) { eta.nz_idx.push_back(i); eta.nz_val.push_back(data[i]); }
+      const double av = std::abs(data[i]);
+      if (av > drop_tol) {
+        eta.nz_idx.push_back(i);
+        eta.nz_val.push_back(data[i]);
+        if (av > off_max) off_max = av;
+      }
     }
+    // Amplification factor of this eta transform: |val|/|pivot| is the
+    // factor by which error in z[pivot_row] propagates into other entries
+    // (apply_eta_ftran: z_i -= (z_r/piv)*val_i).  The raw direction norm
+    // alone over-triggers when the pivot is comparably large (mult ~ 1).
+    const double mult = (piv > 0.0) ? off_max / piv : 1e30;
+    if (mult > max_eta_mult_) max_eta_mult_ = mult;
     accumulated_fill_ += static_cast<int>(eta.nz_idx.size());
     etas_.push_back(std::move(eta));
   }
@@ -4538,10 +4589,19 @@ class SparseBasis : public BasisOps {
     EtaVector eta;
     eta.pivot_row = pivot_row;
     eta.pivot_value = direction[pivot_row];
+    double off_max = 0.0;
     for (int i : dir_nz) {
       if (i == pivot_row) continue;
-      if (std::abs(direction[i]) > drop_tol) { eta.nz_idx.push_back(i); eta.nz_val.push_back(direction[i]); }
+      const double av = std::abs(direction[i]);
+      if (av > drop_tol) {
+        eta.nz_idx.push_back(i);
+        eta.nz_val.push_back(direction[i]);
+        if (av > off_max) off_max = av;
+      }
     }
+    // See push_eta: multiplier = amplification factor of the eta transform.
+    const double mult = (piv > 0.0) ? off_max / piv : 1e30;
+    if (mult > max_eta_mult_) max_eta_mult_ = mult;
     accumulated_fill_ += static_cast<int>(eta.nz_idx.size());
     etas_.push_back(std::move(eta));
   }
@@ -4626,7 +4686,7 @@ class SparseBasis : public BasisOps {
   void clear_etas() override {
     etas_.clear();
     min_pivot_ = 1e30;
-    max_eta_norm_ = 0.0;
+    max_eta_norm_ = 0.0; max_eta_mult_ = 0.0;
     accumulated_fill_ = 0;
     // P10: DSE weights tied to the basis remain valid — clearing etas just
     // collapses them into the current LU factorization, the basis is unchanged.
@@ -4639,13 +4699,20 @@ class SparseBasis : public BasisOps {
     etas_.resize(target_count);
     // Conservatively reset stability indicators.
     min_pivot_ = 1e30;
-    max_eta_norm_ = 0.0;
+    max_eta_norm_ = 0.0; max_eta_mult_ = 0.0;
     accumulated_fill_ = 0;
     // Recompute fill from remaining etas.
     for (int e = 0; e < static_cast<int>(etas_.size()); ++e) {
       const double piv = std::abs(etas_[e].pivot_value);
       if (piv < min_pivot_) min_pivot_ = piv;
       accumulated_fill_ += static_cast<int>(etas_[e].nz_idx.size());
+      double off_max = 0.0;
+      for (double v : etas_[e].nz_val) {
+        const double av = std::abs(v);
+        if (av > off_max) off_max = av;
+      }
+      const double mult = (piv > 0.0) ? off_max / piv : 1e30;
+      if (mult > max_eta_mult_) max_eta_mult_ = mult;
     }
   }
   
@@ -4658,7 +4725,7 @@ class SparseBasis : public BasisOps {
   bool needs_refactorize(int m) const {
     // Delegate to the selected factor backend when it has an active
     // incremental update state.
-    if (backend_needs_refactorise()) return true;
+    if (backend_needs_refactorise()) { last_refactor_reason_ = 5; return true; }
 
     // N5: Tighter, size-aware triggers for eta-vector accumulation.
     //
@@ -4691,12 +4758,34 @@ class SparseBasis : public BasisOps {
     const double min_piv_tol = (m > 20000) ? 1e-7 : 1e-8;
     const double max_norm_tol = (m > 20000) ? 5e5 : 1e6;
 
-    if (eta_count() >= max_etas) return true;
-    if (accumulated_fill_ > 3 * m) return true;
-    if (min_pivot_ < min_piv_tol) return true;
-    if (max_eta_norm_ > max_norm_tol) return true;
+    if (eta_count() >= max_etas) { last_refactor_reason_ = 1; return true; }
+    if (accumulated_fill_ > 3 * m) { last_refactor_reason_ = 2; return true; }
+    if (min_pivot_ < min_piv_tol) { last_refactor_reason_ = 3; return true; }
+    if (m > 20000) {
+      // Large bases: trigger on the true eta amplification factor
+      // max |off-pivot val| / |pivot| instead of the raw direction norm.
+      // On the SCUC 118-bus family ||direction||inf routinely reaches 1e6
+      // with healthy O(1)-magnitude pivots (mult ~ 1e0-1e2, harmless), and
+      // the raw-norm trigger at 5e5 forced a refactorization every ~10
+      // pivots — 82% of all refactorizations, ~half the total solve time
+      // (measured 2026-07-20).  The multiplier metric keeps the guard
+      // against genuinely amplifying etas (small pivot relative to its
+      // column) while ignoring benign large-norm directions.
+      static const double mult_tol = []() {
+        const char* e = std::getenv("MIPSOLVERS_ETA_MULT_TOL");
+        const double v = e ? std::atof(e) : 0.0;
+        return v > 0.0 ? v : 1e6;
+      }();
+      if (max_eta_mult_ > mult_tol) { last_refactor_reason_ = 4; return true; }
+    } else {
+      if (max_eta_norm_ > max_norm_tol) { last_refactor_reason_ = 4; return true; }
+    }
     return false;
   }
+
+  /// Which trigger fired on the last true return of needs_refactorize():
+  /// 1=eta-cap 2=fill 3=min-pivot 4=eta-norm 5=backend.
+  int last_refactor_reason() const { return last_refactor_reason_; }
   
   Eigen::MatrixXd compute_dense_inverse(const std::vector<int>& basis) {
     // Refactorize to produce clean columns (no eta accumulation).
@@ -5145,7 +5234,13 @@ class SparseBasis : public BasisOps {
   void* Numeric_ = nullptr;
   std::vector<int64_t> Ap_, Ai_;  // int64 CSC for the umfpack_dl_* interface
   std::vector<double> Ax_;
+  // Refactorize scratch: next basis CSC is built here, then swapped into
+  // Ap_/Ai_/Ax_ on success (no steady-state allocation, old arrays kept
+  // intact for the pattern check and early-failure returns).
+  std::vector<int64_t> scratch_Ap64_, scratch_Ai64_;
+  std::vector<double> scratch_Ax_;
   double Control_[UMFPACK_CONTROL];       // UMFPACK control parameters
+  double ControlHot_[UMFPACK_CONTROL];    // Same but IRSTEP=0 (hot-loop solves)
   mutable std::vector<double> wsolve_W_;  // Pre-allocated wsolve workspace (5*m doubles)
   mutable std::vector<int64_t> wsolve_Wi_;  // Pre-allocated wsolve workspace (m int64s)
   mutable NativeLU nlu_;                  // Extracted L,U for sparse solves
@@ -5185,7 +5280,9 @@ class SparseBasis : public BasisOps {
   std::vector<int> basis_columns_;
   double min_pivot_;      // Track smallest pivot for stability
   double max_eta_norm_;   // Track largest eta column norm
+  double max_eta_mult_ = 0.0;  // Track largest eta multiplier |val|/|pivot|
   int accumulated_fill_ = 0;  // Track fill-in accumulation
+  mutable int last_refactor_reason_ = 0;  // see last_refactor_reason()
   int gen_;  // Refactorization generation counter
   FactorBackendKind backend_kind_;
 
@@ -5262,12 +5359,15 @@ void sparse_full_recompute(const StandardFormLP& sf,
       }
     }
   }
-  sbasis.ftran_inplace(x_b);
+  // Refined (IR-enabled) solves: this recompute anchors x_b and the duals
+  // for the whole eta window that follows, so use the virtual ftran/btran
+  // (Control_ with IRSTEP=2) rather than the hot in-place variants.
+  x_b = sbasis.ftran(x_b);
 
-  // Dual variables and reduced costs (in-place BTRAN).
+  // Dual variables and reduced costs.
   Eigen::VectorXd c_b(m);
   for (int i = 0; i < m; ++i) c_b[i] = sf.c_max[basis[i]];
-  sbasis.btran_inplace(c_b);  // c_b becomes dual vector y
+  c_b = sbasis.btran(c_b);  // c_b becomes dual vector y
 
   // Sparse A^T * y using row-major A when y is sparse (y is now stored in c_b).
   {
@@ -5782,6 +5882,15 @@ bool sparse_primal_simplex_optimize(
       if (just_refactored) {
         // Final recompute to remove perturbation residuals from x_b and obj.
         sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
+        if (primal_diag) {
+          const double wall_ms =
+              std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() - wall_t0)
+                  .count();
+          std::fprintf(stderr,
+                       "[PRIMAL-DIAG] done m=%d iters=%d scans=%d wall=%.1fms\n",
+                       m, tl_primal_simplex_iters, iter, wall_ms);
+        }
         
         // Bug fix: verify primal feasibility before declaring optimal.
         // If x_b has significant negative values, the solution is not valid.
@@ -6228,25 +6337,47 @@ bool sparse_dual_simplex_reoptimize(
   thread_local struct {
     int64_t pricing_ns{0}, btran_ns{0}, sprice_ns{0}, ratio_ns{0};
     int64_t ftran_ns{0}, update_ns{0}, dse_ns{0}, refact_ns{0};
-    int64_t eta_ns{0};
+    int64_t eta_ns{0}, recompute_ns{0};
     int count{0}, refact_count{0};
+    int refact_reason[6]{0, 0, 0, 0, 0, 0};  // by last_refactor_reason()
     void dump(int m_val, bool verbose = false) {
       if (verbose && count > 0 && count % 2000 == 0) {
         auto us = [](int64_t ns, int n) -> double { return ns * 0.001 / n; };
         fprintf(stderr, "[ITER-TIMING] m=%d iters=%d refacts=%d: "
                 "pricing=%.1f btran=%.1f sprice=%.1f ratio=%.1f "
-                "ftran=%.1f update=%.1f eta=%.1f dse=%.1f us/iter\n",
+                "ftran=%.1f update=%.1f eta=%.1f dse=%.1f us/iter | "
+                "refact=%.1f recompute=%.1f ms/refact "
+                "reasons[cap/fill/minpiv/norm/backend]=%d/%d/%d/%d/%d\n",
                 m_val, count, refact_count,
                 us(pricing_ns, count), us(btran_ns, count),
                 us(sprice_ns, count), us(ratio_ns, count),
                 us(ftran_ns, count), us(update_ns, count),
-                us(eta_ns, count), us(dse_ns, count));
+                us(eta_ns, count), us(dse_ns, count),
+                refact_count ? refact_ns * 1e-6 / refact_count : 0.0,
+                refact_count ? recompute_ns * 1e-6 / refact_count : 0.0,
+                refact_reason[1], refact_reason[2], refact_reason[3],
+                refact_reason[4], refact_reason[5]);
       }
     }
   } iter_timing;
   auto it_tp = [](){ return std::chrono::high_resolution_clock::now(); };
   auto it_ns = [](auto a, auto b){ return std::chrono::duration_cast<std::chrono::nanoseconds>(b-a).count(); };
   const auto wall_t0 = std::chrono::steady_clock::now();
+
+  // Rollback snapshot: the last (basis, at_upper) state that had a valid
+  // fresh factorization.  When a periodic refactorize fails (the umf-numeric
+  // singularity lottery — a BFRT pivot admits a structurally dependent
+  // column and the drifted basis is exactly singular, round-4 diagnosis),
+  // rolling back here and continuing costs a few dozen lost pivots instead
+  // of failing a multi-thousand-pivot Phase I wholesale and cascading into
+  // the escalation chain.  Bounded budget guards against a rollback loop.
+  std::vector<int> rollback_basis = basis;
+  std::vector<char> rollback_at_upper = at_upper;
+  int rollback_budget = 3;
+  auto save_rollback_snapshot = [&]() {
+    rollback_basis = basis;
+    rollback_at_upper = at_upper;
+  };
 
   for (int iter = 0; iter < opt.max_iter; ++iter, ++g_simplex_iter_count) {
     if ((iter & 15) == 0 && simplex_wall_time_limit_hit(opt, wall_t0)) {
@@ -6284,6 +6415,7 @@ bool sparse_dual_simplex_reoptimize(
     if (stall_count > 50) {
       if (!just_refactored) {
         if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) { tl_dual_reopt_fail_reason = 2; return false; }
+        save_rollback_snapshot();
         sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
         cleanup_reduced_costs();
         just_refactored = true;
@@ -6338,6 +6470,7 @@ bool sparse_dual_simplex_reoptimize(
         // First, refactorize to remove numerical drift from incremental updates.
         if (!just_refactored) {
           if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) { tl_dual_reopt_fail_reason = 3; return false; }
+          save_rollback_snapshot();
           sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
           cleanup_reduced_costs();
           just_refactored = true;
@@ -6521,6 +6654,7 @@ bool sparse_dual_simplex_reoptimize(
       // No entering variable found — could be numerical drift or true infeasibility.
       if (!just_refactored) {
         if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) { tl_dual_reopt_fail_reason = 4; return false; }
+        save_rollback_snapshot();
         sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
         cleanup_reduced_costs();
         just_refactored = true;
@@ -6595,8 +6729,8 @@ bool sparse_dual_simplex_reoptimize(
       obj += sf.c_max[fj] * shift;
     }
     if (!flipped_vars.empty()) {
-      Eigen::VectorXd delta_xb = sbasis.ftran(flip_rhs_delta);
-      x_b += delta_xb;
+      sbasis.ftran_inplace(flip_rhs_delta);  // hot solve, no IR
+      x_b += flip_rhs_delta;
     }
 
     // FTRAN: compute pivot column direction = B^{-1} * A_entering (in-place).
@@ -6664,8 +6798,8 @@ bool sparse_dual_simplex_reoptimize(
         obj += sf.c_max[fj] * shift;
       }
       if (!flipped_vars.empty()) {
-        Eigen::VectorXd delta_xb = sbasis.ftran(undo_rhs_delta);
-        x_b += delta_xb;
+        sbasis.ftran_inplace(undo_rhs_delta);  // hot solve, no IR
+        x_b += undo_rhs_delta;
       }
       if (!pivot_blacklist[static_cast<size_t>(entering)]) {
         pivot_blacklist[static_cast<size_t>(entering)] = 1;
@@ -6673,6 +6807,7 @@ bool sparse_dual_simplex_reoptimize(
       }
       if (!just_refactored) {
         if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) { tl_dual_reopt_fail_reason = 5; return false; }
+        save_rollback_snapshot();
         sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
         cleanup_reduced_costs();
         just_refactored = true;
@@ -6766,11 +6901,50 @@ bool sparse_dual_simplex_reoptimize(
     iter_timing.dse_ns += it_ns(t7, t8);
 
     if (sbasis.needs_refactorize(m)) {
+      ++iter_timing.refact_reason[sbasis.last_refactor_reason() >= 0 &&
+                                          sbasis.last_refactor_reason() <= 5
+                                      ? sbasis.last_refactor_reason()
+                                      : 0];
+      bool rolled_back = false;
       if (!sbasis.refactorize_with_repair(basis, sf, &is_basic)) {
-        tl_dual_reopt_fail_reason = 7;
-        sing_autopsy_dump(sf, basis, "periodic");
-        return false;
+        // Singularity recovery: the current basis is (numerically) singular
+        // under a fresh factorization.  Restore the last state that DID
+        // factorize, refactorize it, and continue — the recomputed state
+        // (fresh DSE weights, reset EXPAND bookkeeping) steers the
+        // trajectory around the offending pivot sequence.  Only if the
+        // budget is exhausted (or the snapshot itself fails, which would
+        // mean the constraint matrix degraded) fail as before.
+        bool recovered = false;
+        if (rollback_budget > 0) {
+          --rollback_budget;
+          basis = rollback_basis;
+          at_upper = rollback_at_upper;
+          std::fill(is_basic.begin(), is_basic.end(), 0);
+          for (int c : basis) {
+            if (c >= 0 && c < n) is_basic[static_cast<size_t>(c)] = 1;
+          }
+          recovered = sbasis.refactorize_with_repair(basis, sf, &is_basic);
+          if (opt.verbose) {
+            std::fprintf(stderr,
+                         "[SIMPLEX-DIAG] periodic refactorize failed at iter=%d; "
+                         "rollback to last-good basis %s (budget left %d)\n",
+                         iter, recovered ? "ok" : "FAILED", rollback_budget);
+          }
+        }
+        if (!recovered) {
+          tl_dual_reopt_fail_reason = 7;
+          sing_autopsy_dump(sf, basis, "periodic");
+          return false;
+        }
+        // DSE weights refer to rows of the failed basis — reset to unit
+        // (Devex-style re-reference) for the restored one.
+        std::fill(dse_w.begin(), dse_w.end(), 1.0);
+        stall_count = 0;
+        rolled_back = true;
       }
+      if (!rolled_back) save_rollback_snapshot();
+      auto t_rf = it_tp();
+      iter_timing.refact_ns += it_ns(t8, t_rf);
       sparse_full_recompute(sf, basis, at_upper, is_basic, sbasis, x_b, reduced_costs, obj);
       cleanup_reduced_costs();
       // Reset sparse pricing state so next iteration does full zeroing.
@@ -6779,7 +6953,7 @@ bool sparse_dual_simplex_reoptimize(
       just_refactored = true;
       // DSE: do NOT reset weights on refactorization — they remain exact
       // (refactorization refreshes the LU decomposition of the same basis).
-      iter_timing.refact_ns += it_ns(t8, it_tp());
+      iter_timing.recompute_ns += it_ns(t_rf, it_tp());
       ++iter_timing.refact_count;
     } else {
       just_refactored = false;
@@ -7372,8 +7546,11 @@ static SimplexResult solve_lp_with_basis_impl(const LPModel& lp,
           dp1_inf, dp1_cut);
 
       if (opt.verbose) {
-        fprintf(stderr, "[SIMPLEX-DIAG] Dual Phase I: ok=%d inf=%d cut=%d m=%d n=%d\n",
-                dp1_ok ? 1 : 0, dp1_inf ? 1 : 0, dp1_cut ? 1 : 0, m, n);
+        fprintf(stderr,
+                "[SIMPLEX-DIAG] Dual Phase I: ok=%d inf=%d cut=%d m=%d n=%d "
+                "fail_reason=%d iters=%d\n",
+                dp1_ok ? 1 : 0, dp1_inf ? 1 : 0, dp1_cut ? 1 : 0, m, n,
+                dp1_ok ? 0 : tl_dual_reopt_fail_reason, tl_dual_reopt_iters);
       }
 
       // After Dual Phase I succeeds, we need to refactorize sbasis for the original LP
