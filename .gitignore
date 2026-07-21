@@ -1,5 +1,9 @@
 build/
 data/
+!data/
+data/*
+!data/dsp/
+!data/dsp/**
 
 build_codex/
 build-*/
@@ -108,6 +112,9 @@ output/
 8500_node/
 
 tests/short_circuit/
+!tests/short_circuit/
+tests/short_circuit/*
+!tests/short_circuit/short_circuit_case.json
 
 paper/phase_graph_reduced_hybrid_opf/
 

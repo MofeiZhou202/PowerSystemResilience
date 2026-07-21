@@ -4,6 +4,7 @@
 
 #include <algorithm>
 
+#include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/network_reconfiguration/topology_reconfiguration.hpp"
 
@@ -34,6 +35,25 @@ HybridPowerSystem make_loop_case() {
   return s;
 }
 }  // namespace
+
+TEST_CASE("Multiscale hybrid case has a feasible split-domain topology",
+          "[reconfig_opts][multiscale][regression]") {
+  const auto system = io::build_multiscale_comprehensive_acdc();
+  TopoReconfOptions options;
+  options.enable_pf = true;
+  options.enable_voltage = true;
+  options.enable_thermal = true;
+  options.loss_aware = true;
+  options.split_domain_trees = true;
+  options.allow_dc_mesh = false;
+  options.skip_heuristic = true;
+  options.solver = "highs";
+
+  const auto result = run_topology_reconfiguration(system, options);
+
+  INFO("solver=" << result.solver_backend << " status=" << result.solver_status);
+  REQUIRE(result.feasible);
+}
 
 TEST_CASE("Split-domain radiality keeps both converters as bridges", "[reconfig_opts]") {
   auto s = make_loop_case();

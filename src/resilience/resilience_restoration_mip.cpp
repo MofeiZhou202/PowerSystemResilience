@@ -1205,6 +1205,11 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
   bc_opts.stall_node_window = 1500;
   bc_opts.stall_gap_min_improvement = 0.02;
   bc_opts.verbose = opts.mip.verbose;
+  if (opts.mip.solver == DistributionResilienceMIPSolver::Native) {
+    // Native B&C remains responsible for the tree; use its supported HiGHS
+    // LP kernel until the 240ad84 native dual-simplex root regression is fixed.
+    bc_opts.use_vendored_highs_lp_kernel = true;
+  }
   // A/B gate: enable CGLP disjunctive cuts when the caller requests it.
   // Has no effect unless solver == Native (other adapters ignore BCOptions).
   bc_opts.enable_cglp_cuts = opts.mip.enable_cglp_cuts;

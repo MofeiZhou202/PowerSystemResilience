@@ -253,6 +253,8 @@ struct RPOResult {
   std::string algorithm{"discrete_coordinate_search_with_ac_opf"};
   bool globally_certified{false};
   bool optimality_gap_available{false};
+  RPOInnerObjective effective_inner_nlp_objective{
+      RPOInnerObjective::MatchRPO};
 
   // Bus-level results
   std::vector<double> vm_before;

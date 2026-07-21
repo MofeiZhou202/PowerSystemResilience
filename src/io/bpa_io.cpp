@@ -14,6 +14,7 @@
 #include "hacdcpf/io/bpa_io.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
 #include <cmath>
 #include <fstream>
@@ -25,6 +26,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <iconv.h>
 #endif
 
 namespace hacdcpf::io {
@@ -96,8 +99,8 @@ bool is_valid_utf8(const std::string& s) {
   return true;
 }
 
-/// Convert a GBK (CP936) byte string to UTF-8.  On non-Windows builds the
-/// bytes are passed through unchanged (documented limitation).
+/// Convert a GBK (CP936) byte string to UTF-8 while preserving the raw-byte
+/// fixed-column parsing performed before this function is called.
 std::string gbk_to_utf8(const std::string& s) {
 #ifdef _WIN32
   if (s.empty()) return s;
@@ -114,7 +117,32 @@ std::string gbk_to_utf8(const std::string& s) {
   if (!u.empty() && u.back() == '\0') u.pop_back();
   return u;
 #else
-  return s;
+  if (s.empty()) return s;
+  iconv_t converter = iconv_open("UTF-8", "GBK");
+  if (converter == reinterpret_cast<iconv_t>(-1)) return s;
+
+  char* input = const_cast<char*>(s.data());
+  size_t input_left = s.size();
+  std::string converted(std::max<size_t>(32, s.size() * 2), '\0');
+  size_t output_used = 0;
+
+  while (input_left > 0) {
+    char* output = converted.data() + output_used;
+    size_t output_left = converted.size() - output_used;
+    const size_t rc =
+        iconv(converter, &input, &input_left, &output, &output_left);
+    output_used = converted.size() - output_left;
+    if (rc != static_cast<size_t>(-1)) break;
+    if (errno != E2BIG) {
+      iconv_close(converter);
+      return s;
+    }
+    converted.resize(converted.size() * 2);
+  }
+
+  iconv_close(converter);
+  converted.resize(output_used);
+  return converted;
 #endif
 }
 

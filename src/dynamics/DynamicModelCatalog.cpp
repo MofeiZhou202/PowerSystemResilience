@@ -538,6 +538,27 @@ std::vector<DynamicModelDescriptor> build_catalog() {
        real("volt_var_droop_pu", {"Dvv", "kq"}, "Volt-var droop", "pu",
             0.0, 0.0, 50.0, "Droop", true)}));
   c.push_back(model(
+      "ActivePowerPI", "PowerSimulationsDynamics",
+      "Active-power outer PI control", "outer_control",
+      {real("outer_kp_p", {"Kp_p", "kp_p"}, "Active-power proportional gain",
+            "", 2.0, 0.0, 1000.0, "Active power"),
+       real("outer_ki_p", {"Ki_p", "ki_p"}, "Active-power integral gain", "",
+            30.0, 0.0, 10000.0, "Active power"),
+       real("outer_omega_z", {"omega_z", "wz"},
+            "Active-power measurement bandwidth", "rad/s", 41.468, 0.0,
+            10000.0, "Active power")}));
+  c.push_back(model(
+      "ReactivePowerPI", "PowerSimulationsDynamics",
+      "Reactive-power outer PI control", "outer_control",
+      {real("outer_kp_q", {"Kp_q", "kp_q"},
+            "Reactive-power proportional gain", "", 2.0, 0.0, 1000.0,
+            "Reactive power"),
+       real("outer_ki_q", {"Ki_q", "ki_q"}, "Reactive-power integral gain",
+            "", 30.0, 0.0, 10000.0, "Reactive power"),
+       real("outer_omega_f", {"omega_f", "wf"},
+            "Reactive-power measurement bandwidth", "rad/s", 41.468, 0.0,
+            10000.0, "Reactive power")}));
+  c.push_back(model(
       "GFMDroopOuterControl", "NERC", "Grid-forming droop outer control",
       "outer_control",
       {real("p_droop_pu", {"mp", "Dp"}, "P-f droop", "pu", 0.01, 0.0,
@@ -567,6 +588,15 @@ std::vector<DynamicModelDescriptor> build_catalog() {
             "s", 0.02, 0.0, 1.0, "Response"),
        real("current_limit_pu", {"Imax", "imax_pu"}, "Current limit (0=off)",
             "pu", 0.0, 0.0, 3.0, "Limits")}));
+  c.push_back(model(
+      "CurrentModeControl", "PowerSimulationsDynamics",
+      "Current-mode inner PI control", "inner_control",
+      {real("inner_kpc", {"kpc"}, "Current proportional gain", "", 0.37,
+            0.0, 1000.0, "Current control"),
+       real("inner_kic", {"kic"}, "Current integral gain", "", 0.7, 0.0,
+            10000.0, "Current control"),
+       real("inner_kffv", {"kffv"}, "Voltage feedforward gain", "", 1.0,
+            0.0, 10.0, "Current control")}));
   for (const auto& entry : {
            std::pair{"MagnitudeOutputCurrentLimiter", "Magnitude current limiter"},
            std::pair{"InstantaneousOutputCurrentLimiter", "Instantaneous current limiter"},

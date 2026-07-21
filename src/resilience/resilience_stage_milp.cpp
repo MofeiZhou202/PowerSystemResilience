@@ -899,6 +899,11 @@ StageSolution solve_stage_milp(const StageData& data,
   }
   bc_opts.branching = solver::BranchingStrategy::Pseudocost;
   bc_opts.node_sel = to_bc_node_selection(opts.mip.native_node_selection);
+  if (opts.mip.solver == DistributionResilienceMIPSolver::Native) {
+    // Keep the native branch-and-cut tree while avoiding the native
+    // dual-simplex regression in MIPSolvers 240ad84 at the root LP.
+    bc_opts.use_vendored_highs_lp_kernel = true;
+  }
   bc_opts.use_feasibility_pump = true;
   bc_opts.verbose = opts.mip.verbose;
 
@@ -1219,6 +1224,9 @@ engine::SolveResult solve_stage_mess_model(const engine::MIPModel& model,
   }
   bc_opts.branching = solver::BranchingStrategy::Pseudocost;
   bc_opts.node_sel = to_bc_node_selection(opts.mip.native_node_selection);
+  if (opts.mip.solver == DistributionResilienceMIPSolver::Native) {
+    bc_opts.use_vendored_highs_lp_kernel = true;
+  }
   bc_opts.use_feasibility_pump = true;
   bc_opts.verbose = opts.mip.verbose;
 

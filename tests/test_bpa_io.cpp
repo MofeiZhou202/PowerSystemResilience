@@ -3,7 +3,7 @@
 /// BPA/DSP .dat importer contract tests (io/bpa_io).
 ///
 ///   * Structure: bus / branch / generator / DC-element counts and spot
-///     values for the four sample cases at the repository root.
+///     values for the four sample cases under data/dsp.
 ///   * Round-trip: to_json -> from_json preserves element counts.
 ///   * Accuracy: Newton power flow on the converted pure-AC cases
 ///     (39.dat, IEEE90.dat) is compared against the DSP reference solutions
@@ -28,7 +28,7 @@ using Catch::Matchers::WithinRel;
 namespace {
 
 std::string dat_path(const std::string& name) {
-  return std::string(HACDCPF_PROJECT_ROOT) + "/" + name;
+  return std::string(HACDCPF_TEST_DATA_DIR) + "/dsp/" + name;
 }
 
 const hacdcpf::ACBus* find_bus(const hacdcpf::HybridPowerSystem& sys,

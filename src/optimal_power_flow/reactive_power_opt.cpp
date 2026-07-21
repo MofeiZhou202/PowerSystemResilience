@@ -816,6 +816,7 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
           " [inner objective upgraded to unit-cost economic (robust path)]";
     }
   }
+  out.effective_inner_nlp_objective = opt.inner_nlp_objective;
   out.baseline_opf = base_r;
   if (!baseline_ok) {
     out.status = "Baseline AC OPF failed: " + base_r.status;

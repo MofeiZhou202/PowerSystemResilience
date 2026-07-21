@@ -18280,14 +18280,26 @@ int main(int argc, char** argv) {
         // separate from the RPO's inner solves so agreement is auditable.
         hacdcpf::HybridPowerSystem optimized_sys = sys;
         hacdcpf::opf::apply_rpo_discrete_solution(optimized_sys, result);
+        const bool independent_uses_unit_cost =
+            result.effective_inner_nlp_objective ==
+            hacdcpf::opf::RPOInnerObjective::LossEconomic;
+        if (independent_uses_unit_cost) {
+          for (auto& generator : optimized_sys.ac.generators) {
+            generator.cost_c0 = 0.0;
+            generator.cost_c1 = 1.0;
+            generator.cost_c2 = 0.0;
+          }
+        }
 
         hacdcpf::opf::ACOPFOptions independent_opt;
         independent_opt.ac_solver_backend =
-            hacdcpf::opf::ACOPFSolverBackend::Ipopt;
+            hacdcpf::opf::ACOPFSolverBackend::Auto;
         independent_opt.enable_primal_dual = true;
         independent_opt.use_parity_ipm = true;
         independent_opt.allow_fallback = true;
-        if (rpo_opt.objective == hacdcpf::opf::RPOObjective::MinActiveLoss) {
+        if (independent_uses_unit_cost) {
+          independent_opt.objective = hacdcpf::opf::ACOPFObjective::Economic;
+        } else if (rpo_opt.objective == hacdcpf::opf::RPOObjective::MinActiveLoss) {
           independent_opt.objective = hacdcpf::opf::ACOPFObjective::ActiveLoss;
         } else if (rpo_opt.objective == hacdcpf::opf::RPOObjective::Combined) {
           independent_opt.objective =
@@ -18465,6 +18477,9 @@ int main(int argc, char** argv) {
             "离散坐标搜索(两绕组OLTC/可投切并联补偿)+以所选电压/网损"
             "目标直接求解的连续AC/DC OPF；"
             "返回可行局部最优点，不提供全局MINLP最优性证明。";
+        out["inner_objective_effective"] = independent_uses_unit_cost
+            ? "unit_cost_economic"
+            : "match_rpo";
         out["control_inventory"] = rpo_control_inventory_json(sys, rpo_opt);
 
         out["cross_validation"] = json{

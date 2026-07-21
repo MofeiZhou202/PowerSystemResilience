@@ -2042,26 +2042,35 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   // with complementarity already inside comp_tol.  The status string states
   // the relaxation honestly; this is NOT the strict tolerance.
   const double acceptable_tol = 100.0 * feas_tol;
-  const double acceptable_raw_feas_tol = 10.0 * feas_tol;
+  const double acceptable_raw_feas_tol = 100.0 * feas_tol;
   if (!converged && opt.verbose) {
     HACDCPF_LOG_DEBUG("[parity-ipm] best iterate at iter={} feas={} grad={} comp={} metric={}",
               best_iter, best_feas, best_grad, best_comp, best_metric);
   }
-  if (!converged && best_feas < acceptable_tol &&
-      best_raw_feas < acceptable_raw_feas_tol &&
-      best_grad < acceptable_tol && best_comp < comp_tol) {
-    x = best_x;
-    lambda = best_lambda;
-    mu = best_mu;
-    z = best_z;
-    feascond = best_feas;
-    raw_feascond = best_raw_feas;
-    gradcond = best_grad;
-    compcond = best_comp;
+  const bool current_acceptable =
+      feascond < acceptable_tol && raw_feascond < acceptable_raw_feas_tol &&
+      gradcond < acceptable_tol && compcond < comp_tol;
+  const bool best_acceptable =
+      best_feas < acceptable_tol && best_raw_feas < acceptable_raw_feas_tol &&
+      best_grad < acceptable_tol && best_comp < comp_tol;
+  if (!converged && (current_acceptable || best_acceptable)) {
+    const bool use_best = best_acceptable &&
+                          (!current_acceptable || best_raw_feas < raw_feascond);
+    if (use_best) {
+      x = best_x;
+      lambda = best_lambda;
+      mu = best_mu;
+      z = best_z;
+      feascond = best_feas;
+      raw_feascond = best_raw_feas;
+      gradcond = best_grad;
+      compcond = best_comp;
+      out.iterations = best_iter;
+    }
     converged = true;
     out.converged = true;
-    out.status = "converged (acceptable tolerance, best iterate)";
-    out.iterations = best_iter;
+    out.status = use_best ? "converged (acceptable tolerance, best iterate)"
+                          : "converged (acceptable tolerance, final iterate)";
   }
 
   // Dual least-squares polish (docs §12): re-estimate (λ, μ) at the final

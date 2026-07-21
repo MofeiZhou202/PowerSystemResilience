@@ -546,6 +546,11 @@ endif()
 add_library(hacdcpf STATIC ${HACDCPF_SOURCES})
 add_library(hacdcpf::hacdcpf ALIAS hacdcpf)
 
+if(NOT WIN32)
+  find_package(Iconv REQUIRED)
+  target_link_libraries(hacdcpf PRIVATE Iconv::Iconv)
+endif()
+
 # ── Include paths ─────────────────────────────────────────────────────────────
 target_include_directories(hacdcpf
   PUBLIC

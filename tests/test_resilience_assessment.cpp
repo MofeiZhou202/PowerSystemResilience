@@ -269,6 +269,8 @@ TEST_CASE("Resilience: no-fault system has zero shed", "[resilience]") {
   opts.allow_mess_dispatch = false;
 
   auto r = run_distribution_resilience_assessment(sys, opts);
+  INFO(r.status);
+  INFO(r.model_stats.solver_status);
   REQUIRE(r.feasible);
   CHECK(r.total_shed_mwh == Approx(0.0).margin(1e-9));
   CHECK(r.resilience_index == Approx(1.0).margin(1e-6));
@@ -292,6 +294,8 @@ TEST_CASE("Resilience: single fault causes shedding on downstream island", "[res
   opts.default_fault_count = 0;
 
   auto r = run_distribution_resilience_assessment(sys, opts);
+  INFO(r.status);
+  INFO(r.model_stats.solver_status);
   REQUIRE(r.feasible);
   CHECK(r.status == "Completed");
   CHECK(r.total_shed_mwh > 0.0);
@@ -322,6 +326,8 @@ TEST_CASE("Resilience: fault repair with reconfiguration restores load", "[resil
   opts.faults = {f};
 
   auto r = run_distribution_resilience_assessment(sys, opts);
+  INFO(r.status);
+  INFO(r.model_stats.solver_status);
   REQUIRE(r.feasible);
   REQUIRE(r.steps.size() == 10);
 
@@ -353,6 +359,8 @@ TEST_CASE("Resilience stage MILP: no-switch bus-load case uses virtual branch br
   opts.faults = {f};
 
   auto r = run_distribution_resilience_assessment(sys, opts);
+  INFO(r.status);
+  INFO(r.model_stats.solver_status);
   REQUIRE(r.feasible);
   CHECK(r.model == DistributionResilienceModel::RAStyleStageMILP);
   REQUIRE(r.steps.size() >= 2);
@@ -392,6 +400,8 @@ TEST_CASE("Resilience stage MILP: greedy repair restores repaired line", "[resil
   opts.faults = {f};
 
   auto r = run_distribution_resilience_assessment(sys, opts);
+  INFO(r.status);
+  INFO(r.model_stats.solver_status);
   REQUIRE(r.feasible);
   REQUIRE(r.steps.size() == 6);
   REQUIRE(r.fault_sequence.size() == 1);
@@ -486,6 +496,8 @@ TEST_CASE("Resilience stage MILP: final repair restores initial AC tie state", "
   opts.faults = {f};
 
   auto r = run_distribution_resilience_assessment(sys, opts);
+  INFO(r.status);
+  INFO(r.model_stats.solver_status);
   REQUIRE(r.feasible);
   CHECK(r.model_stats.formulation_notes.find("virtual operable AC/DC branch breakers") == std::string::npos);
   REQUIRE(r.steps.size() == 5);
@@ -601,6 +613,8 @@ TEST_CASE("Resilience stage MILP: MESS dispatch emits traces and energy", "[resi
   opts.faults = {f};
 
   auto r = run_distribution_resilience_assessment(sys, opts);
+  INFO(r.status);
+  INFO(r.model_stats.solver_status);
   REQUIRE(r.feasible);
   REQUIRE_FALSE(r.steps.empty());
   CHECK(r.mess_energy_delivered_mwh > 0.0);
@@ -660,6 +674,8 @@ TEST_CASE("Resilience stage MILP: strict MIP MESS routing can move and dispatch"
   opts.faults = {f};
 
   auto r = run_distribution_resilience_assessment(sys, opts);
+  INFO(r.status);
+  INFO(r.model_stats.solver_status);
   REQUIRE(r.feasible);
   CHECK(r.mess_dispatch_model == "ra_residual_mess_milp");
   bool saw_travel = false;
