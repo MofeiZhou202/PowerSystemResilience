@@ -180,6 +180,45 @@ async function main() {
           coreModules.annualWindow.first === 0 && coreModules.annualWindow.last === 8759 &&
           coreModules.annualWindow.hasPeak && coreModules.annualWindow.hasTrough,
       `annual window preserves endpoints and extrema in ${coreModules.annualWindow.rendered} rendered points`);
+    const cancellationScheduler = await page.evaluate(async () => {
+      let cancelRequests = 0;
+      let idleChecks = 0;
+      const manager = new HySimCore.AnalysisTaskManager({
+        cancelBackend: async () => { cancelRequests += 1; },
+        waitForIdle: async () => {
+          idleChecks += 1;
+          return idleChecks >= 2;
+        },
+        settlementRetryMs: 10,
+      });
+      const first = manager.start({
+        path: '/api/session/pf', requestId: 'cancel-first',
+        modelRevision: 1, analysis: 'power_flow',
+      });
+      const firstCancelAccepted = manager.cancel();
+      const duplicateCancelRejected = manager.cancel() === false;
+      manager.finish(first);
+      const deadline = Date.now() + 2000;
+      while (manager.settling && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      const second = manager.start({
+        path: '/api/session/opf', requestId: 'cancel-second',
+        modelRevision: 1, analysis: 'optimal_power_flow',
+      });
+      return {
+        cancelRequests, idleChecks, settling: manager.settling,
+        firstCancelAccepted, duplicateCancelRejected,
+        secondAccepted: second.duplicate === false,
+      };
+    });
+    check(cancellationScheduler.firstCancelAccepted &&
+          cancellationScheduler.duplicateCancelRejected &&
+          cancellationScheduler.cancelRequests === 1 &&
+          cancellationScheduler.idleChecks >= 2 &&
+          cancellationScheduler.settling === false &&
+          cancellationScheduler.secondAccepted,
+      'cancelled task polls through backend settlement and releases the next task');
     const resilienceLabel = await page.locator('#moduleResilience').textContent();
     check(resilienceLabel?.trim() === '弹性分析',
       'resilience module uses the 弹性分析 label');
@@ -262,6 +301,29 @@ async function main() {
           runtimeGuard.networkFailure?.last_error?.type === 'network' &&
           runtimeGuard.networkFailure?.last_error?.source === '/phase6-network-test',
       'ApiClient network failures flow into the runtime diagnostics contract');
+
+    // ---- Model IO: binary-safe BPA/DSP DAT upload and DAT download. ----
+    await page.evaluate(() => App.setActiveModule('modelIO'));
+    const bpaImportResponse = page.waitForResponse(response =>
+      response.url().includes('/api/session/load_bpa_dat') && response.status() === 200);
+    await page.locator('#fileImportBpaDat').setInputFiles(path.join(REPO_ROOT, 'data', 'dsp', '39.dat'));
+    await bpaImportResponse;
+    await page.waitForFunction(() => Canvas.getSystemSummary().buses === 39);
+    const bpaImport = await page.evaluate(() => ({
+      buses: Canvas.getSystemSummary().buses,
+      importButton: !!document.getElementById('btnIoImportBpaDat'),
+      exportButton: !!document.getElementById('btnIoExportBpaDat'),
+    }));
+    check(bpaImport.buses === 39 && bpaImport.importButton && bpaImport.exportButton,
+      'model IO imports a BPA/DSP DAT file through the binary-safe frontend path');
+    const bpaDownloadPromise = page.waitForEvent('download');
+    await page.locator('#btnIoExportBpaDat').click();
+    const bpaDownload = await bpaDownloadPromise;
+    const bpaDownloadPath = await bpaDownload.path();
+    const bpaExportText = bpaDownloadPath ? readFileSync(bpaDownloadPath, 'utf8') : '';
+    check(bpaDownload.suggestedFilename().endsWith('.dat') &&
+          bpaExportText.includes('A0000001') && bpaExportText.includes('(END)'),
+      'model IO downloads a fixed-column BPA/DSP DAT export');
 
     // ---- 1) Large case -> WebGL overview, PF + OPF run against the backend ----
     const big = await page.evaluate(async (caseName) => {
@@ -532,6 +594,8 @@ async function main() {
       } catch { /* request was intentionally aborted */ }
     };
     await page.route('**/api/session/pf', delayedPfRoute);
+    const backendCancelRequest = page.waitForRequest(request =>
+      request.url().includes('/api/session/cancel') && request.method() === 'POST');
     const cancelledTask = await page.evaluate(async () => {
       App.setActiveModule('powerFlow');
       const pending = App.runPowerFlow();
@@ -555,6 +619,7 @@ async function main() {
         cancelHiddenAfter: cancelButton?.hidden === true,
       };
     });
+    const cancelRequest = await backendCancelRequest;
     await new Promise((resolve) => setTimeout(resolve, 850));
     await page.unroute('**/api/session/pf', delayedPfRoute);
     check(cancelledTask.during?.state === 'running' && cancelledTask.during?.cancellable === true &&
@@ -563,6 +628,8 @@ async function main() {
     check(cancelledTask.resultWasDiscarded && cancelledTask.after?.state === 'cancelled' &&
           cancelledTask.after?.cancellable === false && cancelledTask.cancelHiddenAfter,
       'cancelled analysis discards its response and enters the cancelled state');
+    check(cancelRequest.method() === 'POST',
+      'frontend cancellation notifies the backend cancellation endpoint');
 
     const stalePfRoute = async (route) => {
       await new Promise((resolve) => setTimeout(resolve, 500));

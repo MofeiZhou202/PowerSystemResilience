@@ -54,6 +54,7 @@
     <button id="btnExportEtapXml" class="btn btn-sm legacy-io-shortcut" title="导出为 ETAP 工程 XML (.xml)">导出ETAP XML</button>
     <button id="btnImportJson" class="btn btn-sm legacy-io-shortcut" title="导入JSON">导入</button>
     <input type="file" id="fileImportJson" accept=".json" style="display:none"/>
+    <input type="file" id="fileImportBpaDat" accept=".dat,application/octet-stream,text/plain" style="display:none"/>
     <input type="file" id="fileImportGridlabd" accept=".glm,.txt" style="display:none"/>
     <input type="file" id="fileImportOpendss" accept=".dss,.txt,.csv,.dat" multiple style="display:none"/>
     <input type="file" id="fileImportOpendssProject" webkitdirectory directory multiple style="display:none"/>
@@ -151,10 +152,11 @@
       <button id="btnIoNewSystem" class="toolbar-btn" title="新建空白系统">新建</button>
     </div>
     <div class="io-toolbar-group io-group-json">
-      <div class="io-toolbar-group-title">JSON / ETAP</div>
+      <div class="io-toolbar-group-title">JSON / ETAP / BPA</div>
       <button id="btnIoImportJson" class="toolbar-btn" title="导入系统 JSON">导入JSON</button>
       <button id="btnIoImportEtapXlsx" class="toolbar-btn" title="导入 ETAP 工作簿 (.xlsx)">导入ETAP</button>
       <button id="btnIoImportEtapXml" class="toolbar-btn" title="导入 ETAP 工程 XML (.xml)">导入ETAP XML</button>
+      <button id="btnIoImportBpaDat" class="toolbar-btn" title="导入 PSD-BPA / DSP 固定列模型 (.dat)">导入BPA DAT</button>
     </div>
     <div class="io-toolbar-group io-group-cim">
       <div class="io-toolbar-group-title">CIM / GLM</div>
@@ -177,6 +179,7 @@
     <div class="io-toolbar-group io-group-out-grid">
       <div class="io-toolbar-group-title">导出 潮流/仿真格式</div>
       <button id="btnIoExportMatpower" class="toolbar-btn" title="导出当前系统的 MATPOWER AC 子集 (.m)">导出MATPOWER</button>
+      <button id="btnIoExportBpaDat" class="toolbar-btn" title="导出当前系统的 PSD-BPA / DSP 固定列子集 (.dat)">导出BPA DAT</button>
       <button id="btnIoExportGridlabd" class="toolbar-btn" title="导出 GridLAB-D GLM">导出GLM</button>
       <button id="btnIoExportOpendss" class="toolbar-btn" title="导出 OpenDSS DSS">导出DSS</button>
     </div>

@@ -2,7 +2,7 @@
 
 /// io/bpa_io.hpp
 /// =============
-/// PSD-BPA / DSP card-file (.dat) importer.
+/// PSD-BPA / DSP card-file (.dat) importer and exporter.
 ///
 /// Parses the fixed-column power-flow data cards used by the Chinese DSP
 /// (CSGStudio) and PSD-BPA programs into a HybridPowerSystem:
@@ -52,5 +52,19 @@ BpaImportResult parse_bpa_dat(const std::string& filepath,
 /// Parse BPA/DSP card text held in memory (used by the REST import path).
 BpaImportResult parse_bpa_dat_string(const std::string& content,
                                      const BpaImportOptions& options = {});
+
+/// Export the BPA-representable steady-state subset as fixed-column card text.
+///
+/// BPA bus identifiers are limited to eight bytes.  The exporter therefore
+/// assigns stable ASCII identifiers (A0000001, A0000002, ...) so UTF-8 model
+/// names cannot corrupt fixed columns.  AC buses, aggregated bus load/shunt/
+/// generator data, canonical AC branches, and two-terminal DC links backed by
+/// one VSC at each terminal are represented.  Rich assets outside that subset
+/// must be reported by the caller as model limitations.
+std::string to_bpa_dat(const HybridPowerSystem& system);
+
+/// Export to a BPA/DSP .dat file.
+void save_bpa_dat(const HybridPowerSystem& system,
+                  const std::string& filepath);
 
 }  // namespace hacdcpf::io

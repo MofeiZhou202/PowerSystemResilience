@@ -52,6 +52,7 @@
 #include "hacdcpf/io/external_grid_io.hpp"
 #include "hacdcpf/io/evpt_demo_cases.hpp"
 #include "hacdcpf/io/evpt_json.hpp"
+#include "hacdcpf/io/bpa_io.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/io/powersimulationsdynamics_io.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
@@ -9096,6 +9097,62 @@ int main(int argc, char** argv) {
     }
   });
 
+  // ---- Session: import a browser-uploaded PSD-BPA / DSP .dat card file ----
+  // The request body is intentionally raw binary: legacy files can be GBK and
+  // decoding them as browser text would corrupt both names and fixed columns.
+  svr.Post("/api/session/load_bpa_dat",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      if (req.body.empty()) throw std::runtime_error("Empty BPA/DSP DAT upload");
+      auto imported = hacdcpf::io::parse_bpa_dat_string(req.body);
+      if (imported.report.has_errors()) {
+        std::string message = "BPA/DSP DAT import failed";
+        for (const auto& record : imported.report.records) {
+          if (record.severity == hacdcpf::io::ImportSeverity::Error) {
+            message += ": " + record.message;
+            break;
+          }
+        }
+        throw std::runtime_error(message);
+      }
+
+      json warnings = json::array();
+      json records = json::array();
+      for (const auto& record : imported.report.records) {
+        records.push_back({{"source_locator", record.source_locator},
+                           {"disposition", hacdcpf::io::to_string(record.disposition)},
+                           {"reason_code", hacdcpf::io::to_string(record.reason_code)},
+                           {"severity", hacdcpf::io::to_string(record.severity)},
+                           {"message", record.message}});
+        if (record.severity == hacdcpf::io::ImportSeverity::Warning) {
+          warnings.push_back(record.message);
+        }
+      }
+
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      g_session.current_system = std::move(imported.system);
+      g_session.current_name = g_session.current_system->name;
+      clear_preserved_three_phase(g_session);
+      g_session.external_grid_carbon_profiles.clear();
+      clear_cached_analysis(g_session);
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_io_warnings"] = std::move(warnings);
+      summary["_bpa_import_report"] = {
+          {"binding_level", hacdcpf::io::to_string(imported.report.binding_level)},
+          {"unit_assertion", hacdcpf::io::to_string(imported.report.unit_assertion)},
+          {"accepted", imported.report.summary.accepted},
+          {"coerced", imported.report.summary.coerced},
+          {"rejected", imported.report.summary.rejected},
+          {"skipped", imported.report.summary.skipped},
+          {"records", std::move(records)}};
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
   svr.Post("/api/session/load_json_string",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
@@ -9211,6 +9268,66 @@ int main(int argc, char** argv) {
 
       res.set_content(json{{"matpower_string", matpower},
                            {"name", safe},
+                           {"warnings", warnings}}
+                          .dump(),
+                      "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: export the BPA-representable steady-state subset ----
+  svr.Post("/api/session/export_bpa_dat",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system) throw std::runtime_error("No system loaded");
+      const auto& sys = *g_session.current_system;
+      hacdcpf::HybridPowerSystem export_sys = sys;
+      json warnings = json::array();
+      const bool has_rich_series = !sys.ac.transformers_2w.empty() ||
+          !sys.ac.transformers_3w.empty() || !sys.ac.switches.empty() ||
+          !sys.ac.circuit_breakers.empty();
+      if (has_rich_series) {
+        try {
+          export_sys = hacdcpf::project_to_canonical_models(sys, /*strip_dead=*/false);
+          warnings.push_back(
+              "AC变压器、开关和断路器已按canonical等值支路导出；原始设备铭牌与控制字段不属于BPA基础卡片范围。");
+        } catch (const std::exception& e) {
+          warnings.push_back(std::string(
+              "canonical等值转换失败，已退回原始支路子集；部分rich串联设备可能被省略：") + e.what());
+        }
+      }
+      warnings.push_back(
+          "BPA母线名限8字节；导出文件使用稳定ASCII标识A0000001...，原始UTF-8名称不写入固定列。");
+      if (!sys.ac.static_generators.empty() || !sys.ac.renewable_gens.empty() ||
+          !sys.ac.pv_systems.empty() || !sys.ac.external_grids.empty() ||
+          !sys.ac.storage.empty()) {
+        warnings.push_back(
+            "部分rich AC电源/储能类型不能由BPA基础B卡完整表达；仅canonical发电机聚合值可导出。");
+      }
+      if (!sys.dc.loads.empty() || !sys.dc.static_generators.empty() ||
+          !sys.dc.dc_static_generators.empty() || !sys.dc.pv_arrays.empty() ||
+          !sys.dc.storage.empty() || !sys.dc.dc_storage.empty() ||
+          !sys.dc.dcdc_converters.empty() || !sys.energy_routers.empty()) {
+        warnings.push_back(
+            "DAT导出仅表示两端直流线路及其AC/DC换流端；其他DC资产、DC/DC和能量路由器被省略。");
+      }
+      if (!sys.dc.branches.empty() && !sys.vsc_converters.empty()) {
+        warnings.push_back(
+            "两端直流链路按BPA BD/LD卡片导出；VSC控制、损耗和限值会退化为LCC式定功率/定直流电压近似。");
+      }
+      const std::string dat = hacdcpf::io::to_bpa_dat(export_sys);
+      std::string safe;
+      for (char ch : g_session.current_name) {
+        safe += (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')
+                    ? ch : '_';
+      }
+      if (safe.empty()) safe = "system";
+      res.set_content(json{{"dat_string", dat},
+                           {"name", safe},
+                           {"format", "PSD-BPA/DSP fixed-column DAT"},
                            {"warnings", warnings}}
                           .dump(),
                       "application/json");

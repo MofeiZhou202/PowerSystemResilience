@@ -18,7 +18,9 @@
 #include <cctype>
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -657,6 +659,231 @@ BpaImportResult parse_bpa_dat(const std::string& filepath,
   BpaImportResult res = parse_bpa_dat_string(ss.str(), options);
   if (res.system.name == "BPA case") res.system.name = filepath;
   return res;
+}
+
+std::string to_bpa_dat(const HybridPowerSystem& system) {
+  using Values = std::unordered_map<int, double>;
+  struct GenValues {
+    double p{0.0};
+    double pmax{0.0};
+    double qmax{0.0};
+    double qmin{0.0};
+    double vg{1.0};
+    bool present{false};
+    bool slack{false};
+  };
+
+  auto number = [](double value, std::size_t width) {
+    if (!std::isfinite(value)) value = 0.0;
+    for (int precision = 6; precision >= 0; --precision) {
+      std::ostringstream out;
+      out << std::fixed << std::setprecision(precision) << value;
+      std::string text = out.str();
+      if (precision > 0) {
+        while (!text.empty() && text.back() == '0') text.pop_back();
+        if (!text.empty() && text.back() == '.') text.pop_back();
+      }
+      if (text == "-0") text = "0";
+      if (text.size() <= width) return text;
+    }
+    for (int precision = 3; precision >= 0; --precision) {
+      std::ostringstream out;
+      out << std::uppercase << std::scientific << std::setprecision(precision)
+          << value;
+      const std::string text = out.str();
+      if (text.size() <= width) return text;
+    }
+    throw std::runtime_error("BPA export: numeric value does not fit a fixed-width field");
+  };
+  auto put = [](std::string& card, std::size_t first, std::size_t last,
+                const std::string& value, bool right = true) {
+    if (first == 0 || first > last || last > card.size()) {
+      throw std::runtime_error("BPA export: invalid card field bounds");
+    }
+    const std::size_t width = last - first + 1;
+    if (value.size() > width) {
+      throw std::runtime_error("BPA export: card value exceeds field width");
+    }
+    const std::size_t offset = first - 1 + (right ? width - value.size() : 0);
+    card.replace(offset, value.size(), value);
+  };
+  auto bus_card_name = [](std::size_t ordinal) {
+    std::ostringstream out;
+    out << 'A' << std::setw(7) << std::setfill('0') << ordinal;
+    return out.str();
+  };
+
+  std::unordered_map<int, const ACBus*> ac_bus;
+  std::unordered_map<int, std::string> ac_name;
+  for (std::size_t i = 0; i < system.ac.buses.size(); ++i) {
+    const auto& bus = system.ac.buses[i];
+    ac_bus[bus.index] = &bus;
+    ac_name[bus.index] = bus_card_name(i + 1);
+  }
+
+  Values load_p, load_q, shunt_g, shunt_b;
+  std::unordered_map<int, GenValues> generation;
+  for (const auto& bus : system.ac.buses) {
+    load_p[bus.index] += bus.pd_mw;
+    load_q[bus.index] += bus.qd_mvar;
+    shunt_g[bus.index] += bus.gs_mw;
+    shunt_b[bus.index] += bus.bs_mvar;
+  }
+  for (const auto& load : system.ac.loads) {
+    if (!load.in_service) continue;
+    load_p[load.bus] += load.p_mw * load.scaling;
+    load_q[load.bus] += load.q_mvar * load.scaling;
+  }
+  for (const auto& shunt : system.ac.shunts) {
+    if (!shunt.in_service) continue;
+    shunt_g[shunt.bus] += shunt.gs_mw;
+    shunt_b[shunt.bus] += shunt.bs_mvar;
+  }
+  for (const auto& gen : system.ac.generators) {
+    if (!gen.in_service) continue;
+    auto& values = generation[gen.bus];
+    values.p += gen.pg_mw;
+    values.pmax += gen.pmax_mw;
+    values.qmax += gen.qmax_mvar;
+    values.qmin += gen.qmin_mvar;
+    values.vg = gen.vg_pu;
+    values.present = true;
+    values.slack = values.slack || gen.is_slack;
+  }
+
+  std::ostringstream output;
+  output << ".DSP 01000\n"
+         << "(POWERFLOW,CASEID=HACDCPF,PROJECT=HACDCPF_EXPORT)\n"
+         << "/MVA_BASE=" << (system.base_mva > 0.0 ? system.base_mva : 100.0)
+         << "\\\n/NETWORK_DATA\\\n";
+
+  for (const auto& bus : system.ac.buses) {
+    std::string card(81, ' ');
+    const auto gen_it = generation.find(bus.index);
+    const GenValues gen = gen_it == generation.end() ? GenValues{} : gen_it->second;
+    const bool slack = bus.bus_type == BusType::SLACK || gen.slack;
+    const bool pv = bus.bus_type == BusType::PV || gen.present;
+    put(card, 1, 2, slack ? "BS" : (pv ? "BE" : "B "), false);
+    put(card, 7, 14, ac_name.at(bus.index), false);
+    put(card, 15, 18, number(bus.base_kv, 4));
+    put(card, 19, 20, number(bus.zone, 2));
+    put(card, 21, 25, number(load_p[bus.index], 5));
+    put(card, 26, 30, number(load_q[bus.index], 5));
+    put(card, 31, 34, number(shunt_g[bus.index], 4));
+    put(card, 35, 38, number(shunt_b[bus.index], 4));
+    if (pv) {
+      put(card, 39, 42, number(gen.pmax, 4));
+      put(card, 43, 47, number(gen.p, 5));
+      put(card, 48, 52, number(gen.qmax, 5));
+      put(card, 53, 57, number(gen.qmin, 5));
+      put(card, 58, 61, number(gen.present ? gen.vg : bus.vm_pu, 4));
+      put(card, 62, 65, number(slack ? bus.va_deg : bus.vmin_pu, 4));
+    } else {
+      put(card, 58, 61, number(bus.vmax_pu, 4));
+      put(card, 62, 65, number(bus.vmin_pu, 4));
+    }
+    output << card << '\n';
+  }
+
+  std::unordered_map<int, const VSCConverter*> dc_converter;
+  for (const auto& converter : system.vsc_converters) {
+    if (converter.in_service && ac_name.count(converter.bus_ac)) {
+      dc_converter.emplace(converter.bus_dc, &converter);
+    }
+  }
+  for (const auto& dc_bus : system.dc.buses) {
+    const auto converter_it = dc_converter.find(dc_bus.index);
+    if (converter_it == dc_converter.end()) continue;
+    const auto* converter = converter_it->second;
+    std::string card(81, ' ');
+    put(card, 1, 2, "BD", false);
+    put(card, 7, 14, ac_name.at(converter->bus_ac), false);
+    const auto ac_it = ac_bus.find(converter->bus_ac);
+    put(card, 15, 18, number(ac_it->second->base_kv, 4));
+    const double dc_kv = dc_bus.base_kv > 0.0 ? dc_bus.base_kv : converter->vn_dc_kv;
+    put(card, 63, 66, number(dc_kv, 4));
+    output << card << '\n';
+  }
+
+  for (const auto& branch : system.ac.branches) {
+    if (!branch.in_service || !ac_name.count(branch.from_bus) ||
+        !ac_name.count(branch.to_bus)) continue;
+    const auto* from = ac_bus.at(branch.from_bus);
+    const auto* to = ac_bus.at(branch.to_bus);
+    const bool transformer = std::abs(branch.tap - 1.0) > 1e-9 ||
+                             branch.sn_mva > 0.0 || branch.vn_hv_kv > 0.0 ||
+                             branch.vn_lv_kv > 0.0 ||
+                             branch.name.rfind("T_", 0) == 0;
+    std::string card(81, ' ');
+    put(card, 1, 2, transformer ? "T " : "L ", false);
+    put(card, 7, 14, ac_name.at(branch.from_bus), false);
+    put(card, 15, 18, number(from->base_kv, 4));
+    put(card, 20, 27, ac_name.at(branch.to_bus), false);
+    put(card, 28, 31, number(to->base_kv, 4));
+    put(card, 32, 32, "1", false);
+    const double rating = transformer && branch.sn_mva > 0.0
+                              ? branch.sn_mva
+                              : (branch.rate_a_mva > 0.0 && from->base_kv > 0.0
+                                     ? branch.rate_a_mva * 1000.0 /
+                                           (std::sqrt(3.0) * from->base_kv)
+                                     : 0.0);
+    put(card, 34, 37, number(rating, 4));
+    put(card, 38, 38, number(std::max(1, branch.n_parallel), 1));
+    put(card, 39, 44, number(branch.r_pu, 6));
+    put(card, 45, 50, number(branch.x_pu, 6));
+    if (transformer) {
+      put(card, 62, 67, number(branch.tap * from->base_kv, 6));
+      put(card, 68, 73, number(to->base_kv, 6));
+    } else {
+      put(card, 57, 62, number(branch.b_pu / 2.0, 6));
+      put(card, 63, 68, number(branch.length_km, 6));
+    }
+    output << card << '\n';
+  }
+
+  const double mva_base = system.base_mva > 0.0 ? system.base_mva : 100.0;
+  for (const auto& branch : system.dc.branches) {
+    if (!branch.in_service) continue;
+    const auto from_converter = dc_converter.find(branch.from_bus);
+    const auto to_converter = dc_converter.find(branch.to_bus);
+    if (from_converter == dc_converter.end() || to_converter == dc_converter.end()) continue;
+    const auto* rectifier = from_converter->second;
+    const auto* inverter = to_converter->second;
+    const double dc_kv = branch.base_kv > 0.0
+                             ? branch.base_kv
+                             : std::max(rectifier->vn_dc_kv, inverter->vn_dc_kv);
+    const double resistance = dc_kv > 0.0
+                                  ? branch.r_pu * dc_kv * dc_kv / mva_base
+                                  : 0.0;
+    double scheduled = rectifier->p_set_mw < 0.0
+                           ? -rectifier->p_set_mw
+                           : std::abs(rectifier->p_schedule_mw);
+    if (scheduled == 0.0) scheduled = std::abs(inverter->p_schedule_mw);
+    std::string card(81, ' ');
+    put(card, 1, 2, "LD", false);
+    put(card, 7, 14, ac_name.at(rectifier->bus_ac), false);
+    put(card, 20, 27, ac_name.at(inverter->bus_ac), false);
+    if (branch.rate_a_mva > 0.0 && dc_kv > 0.0) {
+      put(card, 34, 37, number(branch.rate_a_mva * 1000.0 / dc_kv, 4));
+    }
+    put(card, 38, 41, number(resistance, 4));
+    put(card, 57, 61, number(scheduled, 5));
+    put(card, 62, 66, number(dc_kv, 5));
+    put(card, 77, 81, number(branch.length_km, 5));
+    output << card << '\n';
+  }
+
+  output << "(END)\n";
+  return output.str();
+}
+
+void save_bpa_dat(const HybridPowerSystem& system,
+                  const std::string& filepath) {
+  std::ofstream output(filepath, std::ios::binary);
+  if (!output) {
+    throw std::runtime_error("BPA export: cannot open for write " + filepath);
+  }
+  output << to_bpa_dat(system);
 }
 
 }  // namespace hacdcpf::io
