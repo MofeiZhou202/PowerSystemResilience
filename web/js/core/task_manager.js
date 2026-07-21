@@ -10,7 +10,10 @@
       this.settling = false;
       this.onChange = options.onChange || (() => {});
       this.onCancel = options.onCancel || (() => {});
+      this.cancelBackend = options.cancelBackend || (async () => {});
       this.waitForIdle = options.waitForIdle || (async () => true);
+      this.settlementRetryMs = options.settlementRetryMs ?? 500;
+      this.settlementGeneration = 0;
     }
 
     start({ path, requestId, modelRevision, analysis }) {
@@ -44,21 +47,38 @@
 
     cancel() {
       const context = this.active;
-      if (!context) return false;
+      if (!context || context.cancelled) return false;
       context.cancelled = true;
       context.controller.abort();
       this.settling = true;
+      const generation = ++this.settlementGeneration;
       this.onCancel(context);
       this.onChange(context);
-      void this._waitForSettlement();
+      void this._waitForSettlement(context, generation);
       return true;
     }
 
-    async _waitForSettlement() {
+    async _waitForSettlement(context, generation) {
+      try {
+        await this.cancelBackend(context);
+      } catch {
+        // Backend status polling below remains authoritative.
+      }
       await new Promise(resolve => setTimeout(resolve, 150));
-      const idle = await this.waitForIdle();
-      this.settling = !idle;
-      this.onChange(this.active);
+      while (this.settling && generation === this.settlementGeneration) {
+        let idle = false;
+        try {
+          idle = await this.waitForIdle();
+        } catch {
+          idle = false;
+        }
+        if (idle) {
+          this.settling = false;
+          this.onChange(this.active);
+          return;
+        }
+        await new Promise(resolve => setTimeout(resolve, this.settlementRetryMs));
+      }
     }
   }
 

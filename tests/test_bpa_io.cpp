@@ -3,7 +3,7 @@
 /// BPA/DSP .dat importer contract tests (io/bpa_io).
 ///
 ///   * Structure: bus / branch / generator / DC-element counts and spot
-///     values for the four sample cases at the repository root.
+///     values for the four sample cases under data/dsp.
 ///   * Round-trip: to_json -> from_json preserves element counts.
 ///   * Accuracy: Newton power flow on the converted pure-AC cases
 ///     (39.dat, IEEE90.dat) is compared against the DSP reference solutions
@@ -28,7 +28,7 @@ using Catch::Matchers::WithinRel;
 namespace {
 
 std::string dat_path(const std::string& name) {
-  return std::string(HACDCPF_PROJECT_ROOT) + "/" + name;
+  return std::string(HACDCPF_TEST_DATA_DIR) + "/dsp/" + name;
 }
 
 const hacdcpf::ACBus* find_bus(const hacdcpf::HybridPowerSystem& sys,
@@ -181,6 +181,28 @@ TEST_CASE("BPA import: JSON round-trip", "[bpa][roundtrip]") {
   REQUIRE(back.ac.branches.size() == res.system.ac.branches.size());
   REQUIRE(back.ac.generators.size() == res.system.ac.generators.size());
   REQUIRE(back.ac.loads.size() == res.system.ac.loads.size());
+}
+
+TEST_CASE("BPA export: fixed-column round-trip", "[bpa][roundtrip][export]") {
+  for (const auto* filename : {"39.dat", "2DC.dat"}) {
+    const auto imported = hacdcpf::io::parse_bpa_dat(dat_path(filename));
+    REQUIRE_FALSE(imported.report.has_errors());
+
+    const std::string dat = hacdcpf::io::to_bpa_dat(imported.system);
+    REQUIRE(dat.find("/MVA_BASE=100") != std::string::npos);
+    REQUIRE(dat.find("A0000001") != std::string::npos);
+    REQUIRE(dat.find("(END)") != std::string::npos);
+
+    const auto round_trip = hacdcpf::io::parse_bpa_dat_string(dat);
+    REQUIRE_FALSE(round_trip.report.has_errors());
+    REQUIRE(round_trip.system.ac.buses.size() == imported.system.ac.buses.size());
+    REQUIRE(round_trip.system.ac.branches.size() == imported.system.ac.branches.size());
+    REQUIRE(round_trip.system.ac.generators.size() == imported.system.ac.generators.size());
+    REQUIRE(round_trip.system.ac.loads.size() == imported.system.ac.loads.size());
+    REQUIRE(round_trip.system.dc.buses.size() == imported.system.dc.buses.size());
+    REQUIRE(round_trip.system.dc.branches.size() == imported.system.dc.branches.size());
+    REQUIRE(round_trip.system.vsc_converters.size() == imported.system.vsc_converters.size());
+  }
 }
 
 // DSP reference solutions (Samples/39bus/39NEW.SOL), name -> (vm, va_deg).

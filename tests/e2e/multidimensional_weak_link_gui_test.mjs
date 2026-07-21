@@ -34,7 +34,7 @@ const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index);
 assert.deepEqual([...new Set(duplicates)], [], 'page must not introduce duplicate ids');
 
 assert.match(app, /function collectWeakLinkEvidence\(\)/);
-assert.match(app, /runOpf,\s*collectWeakLinkEvidence,/);
+assert.match(app, /runOpf,\s*runThreePhaseHybridOpf,\s*collectWeakLinkEvidence,/);
 assert.match(app, /function weakComponentCatalog\(/);
 assert.match(app, /function weakCanonicalCanvasType\(/);
 assert.match(app, /function weakComparisonGroup\(/);

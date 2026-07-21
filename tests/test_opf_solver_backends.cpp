@@ -194,6 +194,53 @@ TEST_CASE("Hybrid microgrid OPF fixes DC reference voltage and balances DC gener
   CHECK(r.max_constraint_violation < 1e-5);
 }
 
+TEST_CASE("Market 5-bus AC/DC toy OPF preserves 1-based DC references",
+          "[opf][acdc][regression]") {
+  const HybridPowerSystem sys = io::build_market_5bus_acdc_toy();
+  REQUIRE(sys.dc.buses.size() == 2);
+  REQUIRE(sys.dc.branches.size() == 1);
+  CHECK(sys.dc.buses[0].index == 1);
+  CHECK(sys.dc.buses[1].index == 2);
+  CHECK(sys.dc.branches[0].from_bus == 1);
+  CHECK(sys.dc.branches[0].to_bus == 2);
+
+  opf::ACOPFOptions opt;
+  opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  opt.allow_fallback = false;
+  const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+
+  INFO("status=" << r.status << " backend="
+                  << r.profiling.linear_solver_backend);
+  CHECK(r.converged);
+  CHECK(r.solver_path == opf::OPFSolverPath::ParityIPM);
+}
+
+TEST_CASE("GUI Auto recovers the two built-in hybrid showcase OPFs",
+          "[opf][acdc][gui][regression]") {
+  for (const auto& named_case : {
+           std::pair<const char*, HybridPowerSystem (*)(void)>{
+               "ieee24_3area_acdc_expanded", io::build_ieee24_3area_acdc_expanded},
+           {"multiscale_comprehensive_acdc", io::build_multiscale_comprehensive_acdc}}) {
+    const HybridPowerSystem sys = named_case.second();
+    opf::ACOPFOptions opt;
+    opt.ac_solver_backend = opf::ACOPFSolverBackend::Auto;
+    opt.enable_primal_dual = true;
+    opt.use_parity_ipm = true;
+    opt.allow_fallback = true;
+    opt.ac_pf_warm_start = true;
+    opt.max_inner_iterations = 400;
+
+    const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+    INFO("case=" << named_case.first << " status=" << r.status
+                 << " backend=" << r.profiling.linear_solver_backend
+                 << " primal=" << r.max_constraint_violation
+                 << " dual=" << r.max_stationarity);
+    CHECK(r.converged);
+    CHECK(r.max_constraint_violation < 1e-6);
+    CHECK(r.max_stationarity < 1e-3);
+  }
+}
+
 TEST_CASE("Bare DC_V bus is rejected before OPF formulation",
           "[opf][acdc][slack][regression]") {
   HybridPowerSystem sys = io::build_actual_value_demo_acdc();
@@ -269,16 +316,22 @@ TEST_CASE("AC OPF converges on internal hybrid case2000_acdc", "[opf][acdc]") {
   // converge in the native IPM (it stalled before the scaling fix).
   INFO("case2000 native IPM: buses=" << sys.ac.buses.size()
        << " vsc=" << sys.vsc_converters.size()
+       << " status=" << r.status
        << " iterations=" << r.iterations
        << " elapsed_sec=" << elapsed_sec
        << " factorization_calls=" << r.profiling.factorization_calls
        << " linear_solve_calls=" << r.profiling.linear_solve_calls
        << " primal=" << r.max_constraint_violation
        << " dual=" << r.max_stationarity
+       << " ac_p=" << r.profiling.max_ac_p_balance_residual_pu
+       << " ac_q=" << r.profiling.max_ac_q_balance_residual_pu
+       << " dc=" << r.profiling.max_dc_balance_residual_pu
+       << " converter=" << r.profiling.max_converter_balance_residual_pu
        << " backend=" << r.profiling.linear_solver_backend);
   CHECK(r.converged);
   CHECK(r.objective > 0.0);
   CHECK(r.max_constraint_violation < 1e-5);
+  CHECK(r.iterations < 160);
 }
 
 TEST_CASE("case2000 AC/DC Ipopt bounded performance benchmark",
@@ -531,8 +584,16 @@ TEST_CASE("Large OPF takes the sparse KKT path and converges (case2869pegase)",
   opt.max_inner_iterations = 200;
   const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
 
+  INFO("status=" << r.status << " iterations=" << r.iterations
+       << " objective=" << r.objective
+       << " primal=" << r.max_constraint_violation
+       << " dual=" << r.max_stationarity
+       << " accepted=" << r.profiling.accepted_steps
+       << " rejected=" << r.profiling.rejected_steps
+       << " backend=" << r.profiling.linear_solver_backend);
   CHECK(r.converged);
   CHECK(std::isfinite(r.objective));
+  CHECK(r.iterations < 100);
   // A KKT with far more than 1500 unknowns must use the sparse factorization.
   CHECK(r.profiling.linear_solver_backend.find("sparse") != std::string::npos);
 }

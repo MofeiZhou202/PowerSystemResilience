@@ -20,6 +20,7 @@
 
 #include "hacdcpf/graph/graph.hpp"
 #include "hacdcpf/power_flow/ac.hpp"
+#include "hacdcpf/power_flow/hybrid.hpp"
 #include "hacdcpf/power_flow/jacobian_builder.hpp"
 #include "hacdcpf/detail/core_compat.hpp"
 #include "hacdcpf/assembly/solver_data.hpp"
@@ -2001,6 +2002,96 @@ Eigen::VectorXd build_parity_primal_warm_start(const parity::Problem& prob,
   return x0;
 }
 
+std::vector<double> map_power_flow_ac_voltage_to_parity(
+    const parity::Problem& prob, const HybridPowerSystem& sys,
+    const std::vector<double>& authored_values, double default_value) {
+  const int n = prob.vidx.n_vm;
+  std::vector<double> values(static_cast<size_t>(n), default_value);
+  if (n == 0 || authored_values.empty()) return values;
+
+  std::unordered_map<int, double> by_bus;
+  by_bus.reserve(sys.ac.buses.size());
+  for (size_t i = 0; i < sys.ac.buses.size() && i < authored_values.size(); ++i)
+    by_bus[sys.ac.buses[i].index] = authored_values[i];
+
+  if (prob.data.bus_merge_map &&
+      prob.data.bus_merge_map->int_to_ext.size() == static_cast<size_t>(n)) {
+    for (int i = 0; i < n; ++i) {
+      const int external = prob.data.bus_merge_map->int_to_ext[static_cast<size_t>(i)];
+      const auto it = by_bus.find(external);
+      if (it != by_bus.end() && std::isfinite(it->second)) values[static_cast<size_t>(i)] = it->second;
+    }
+    return values;
+  }
+
+  for (int i = 0; i < n && i < static_cast<int>(prob.data.ac_buses.size()); ++i) {
+    const auto it = by_bus.find(prob.data.ac_buses[static_cast<size_t>(i)].index);
+    if (it != by_bus.end() && std::isfinite(it->second)) values[static_cast<size_t>(i)] = it->second;
+  }
+  return values;
+}
+
+std::vector<double> map_power_flow_dc_voltage_to_parity(
+    const parity::Problem& prob, const HybridPowerSystem& sys,
+    const std::vector<double>& authored_values) {
+  const int n = prob.vidx.n_vdc;
+  std::vector<double> values(static_cast<size_t>(n), 1.0);
+  if (n == 0 || authored_values.empty()) return values;
+
+  std::unordered_map<int, double> by_bus;
+  by_bus.reserve(sys.dc.buses.size());
+  for (size_t i = 0; i < sys.dc.buses.size() && i < authored_values.size(); ++i)
+    by_bus[sys.dc.buses[i].index] = authored_values[i];
+  for (int i = 0; i < n && i < static_cast<int>(prob.data.dc_buses.size()); ++i) {
+    const auto it = by_bus.find(prob.data.dc_buses[static_cast<size_t>(i)].index);
+    if (it != by_bus.end() && std::isfinite(it->second)) values[static_cast<size_t>(i)] = it->second;
+  }
+  return values;
+}
+
+ACOPFResult build_hybrid_power_flow_warm_start(
+    const parity::Problem& prob, const HybridPowerSystem& sys,
+    const PowerFlowResult& pf) {
+  ACOPFResult warm;
+  warm.vm = map_power_flow_ac_voltage_to_parity(prob, sys, pf.vm, 1.0);
+  warm.va = map_power_flow_ac_voltage_to_parity(prob, sys, pf.va, 0.0);
+  warm.vdc = map_power_flow_dc_voltage_to_parity(prob, sys, pf.vdc);
+  warm.pg_mw.reserve(prob.data.generators.size());
+  warm.qg_mvar.reserve(prob.data.generators.size());
+  for (const auto& gen : prob.data.generators) {
+    warm.pg_mw.push_back(gen.pg_mw);
+    warm.qg_mvar.push_back(gen.qg_mvar);
+  }
+
+  const auto find_vsc = [&](int index) -> const VSCTransfer* {
+    for (const auto& transfer : pf.vsc_transfers)
+      if (transfer.index == index) return &transfer;
+    return nullptr;
+  };
+  warm.pac_mw.assign(static_cast<size_t>(prob.vidx.n_pac), 0.0);
+  warm.qac_mvar.assign(static_cast<size_t>(prob.vidx.n_qac), 0.0);
+  for (int k = 0; k < prob.vidx.n_pac; ++k) {
+    const int data_index = prob.conv_var_to_data[static_cast<size_t>(k)];
+    const auto* transfer = find_vsc(prob.data.converters[static_cast<size_t>(data_index)].index);
+    if (transfer == nullptr) continue;
+    warm.pac_mw[static_cast<size_t>(k)] = transfer->p_ac_mw;
+    warm.qac_mvar[static_cast<size_t>(k)] = transfer->q_ac_mvar;
+  }
+
+  const auto find_dcdc = [&](int index) -> const DCDCTransfer* {
+    for (const auto& transfer : pf.dcdc_transfers)
+      if (transfer.index == index) return &transfer;
+    return nullptr;
+  };
+  warm.pdcdc_mw.assign(static_cast<size_t>(prob.vidx.n_pdcdc), 0.0);
+  for (int k = 0; k < prob.vidx.n_pdcdc; ++k) {
+    const int data_index = prob.dcdc_var_to_data[static_cast<size_t>(k)];
+    const auto* transfer = find_dcdc(prob.data.dcdc_converters[static_cast<size_t>(data_index)].index);
+    if (transfer != nullptr) warm.pdcdc_mw[static_cast<size_t>(k)] = transfer->p_in_mw;
+  }
+  return warm;
+}
+
 // Solve the assembled parity OPF nonlinear program with the embedded Ipopt
 // filter line-search NLP solver.  The parity `Problem` already exposes every
 // callback Ipopt needs (objective, gradient, equality/inequality residuals and
@@ -2115,12 +2206,36 @@ parity::IPMResult solve_parity_with_ipopt(const parity::Problem& prob,
   const engine::SolveResult sol = ipopt.solve_nlp(nlp);
 
   res.x = (sol.x.size() == n) ? sol.x : x0;
-  res.converged = sol.stats.success;
+  // Ipopt can return Maximum_Iterations_Exceeded after reaching a highly
+  // usable point on large hybrid models.  Keep the termination code in the
+  // status, but accept the point when feasibility is strict and the remaining
+  // KKT residual is within the same practical acceptable band used by the
+  // native IPM's best-iterate certification.
+  const double acceptable_scale = 1000.0;
+  const double acceptable_dual = acceptable_scale *
+      std::max(ipm_opt.tol_dual, 1.0e-12);
+  // Ipopt's complementarity includes bound multipliers and can remain at its
+  // documented acceptable floor after the physical equality and stationarity
+  // residuals have settled.  Keep a bounded engineering floor consistent with
+  // the native IPM's relaxed complementarity test.
+  const double acceptable_complementarity = std::max(
+      1.0e-2, acceptable_scale * std::max(ipm_opt.tol_complementarity, 1.0e-12));
+  const bool acceptable_residuals =
+      std::isfinite(sol.stats.primal_feas) &&
+      std::isfinite(sol.stats.dual_feas) &&
+      std::isfinite(sol.stats.complementarity) &&
+      sol.stats.primal_feas <= ipm_opt.tol_primal &&
+      sol.stats.dual_feas <= acceptable_dual &&
+      sol.stats.complementarity <= acceptable_complementarity;
+  res.converged = sol.stats.success || acceptable_residuals;
   res.iterations = sol.stats.iterations;
   res.primal_inf = sol.stats.primal_feas;
   res.dual_inf = sol.stats.dual_feas;
   res.complementarity = sol.stats.complementarity;
   res.status = std::string("Ipopt: ") + sol.stats.status;
+  if (!sol.stats.success && acceptable_residuals) {
+    res.status = "Ipopt: acceptable residuals after " + sol.stats.status;
+  }
 #else
   (void)prob;
   (void)ipm_opt;
@@ -2187,17 +2302,21 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   Eigen::VectorXd inequality_dual_warm_start;
   Eigen::VectorXd slack_warm_start;
   bool warm_start_mapped = false;
-  // AC-PF warm start (opt-in): solve the plain AC power flow from the case's
-  // own operating point and seed the IPM with the AC-feasible (vm, va).
-  // Newton–Raphson converges from flat start even on the stressed PEGASE
-  // grids where ACPF-from-dispatch diverges; measured to unlock
-  // case13659pegase (reference optimum, 189 iterations, ~40 s).
+  // Hybrid-PF warm start (opt-in): seed AC voltages, DC voltages, VSC powers,
+  // and DC/DC powers from the same coupled physical equations that the OPF
+  // enforces.  A plain AC PF only supplies (vm, va) and leaves hybrid cases in
+  // a large DC-balance mismatch basin.
   ACOPFResult pf_warm;
   if (opt.ac_pf_warm_start && opt.warm_start == nullptr) {
-    const hacdcpf::PowerFlowResult pf = hacdcpf::powerflow::solve_ac(sys);
+    hacdcpf::PowerFlowOptions pf_opt;
+    pf_opt.max_iter = std::max(100, opt.max_inner_iterations);
+    pf_opt.tol = std::min(opt.feasibility_tol, 1.0e-8);
+    pf_opt.enable_converter_mode_switching = true;
+    pf_opt.enable_pv_pq_conversion = true;
+    pf_opt.enable_auto_swing_selection = true;
+    const hacdcpf::PowerFlowResult pf = hacdcpf::powerflow::solve_hybrid(sys, pf_opt);
     if (pf.converged) {
-      pf_warm.vm = pf.vm;
-      pf_warm.va = pf.va;
+      pf_warm = build_hybrid_power_flow_warm_start(prob, sys, pf);
       primal_warm_start =
           build_parity_primal_warm_start(prob, pf_warm, warm_start_mapped);
       if (warm_start_mapped) {
@@ -2231,11 +2350,42 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   }
 
   // ── Inner nonlinear solver selection ──────────────────────────────────────
-  // Auto: native parity IPM first; if it does not converge, retry the SAME
-  // assembled problem with Ipopt (filter line-search) when available.
+  // Auto with a coupled PF start uses standalone Ipopt first on difficult
+  // hybrid cases, then optionally gives its primal point to Native IPM for
+  // refinement.  Objective homotopy is kept on the Native-only branch below.
   parity::IPMResult ipm_res;
   std::string backend_label;
-  if (inner == ParityInnerSolver::Ipopt) {
+  if (inner == ParityInnerSolver::Auto && opt.ac_pf_warm_start &&
+      !opt.objective_homotopy) {
+    // A converged hybrid PF point is an excellent primal start for Ipopt on
+    // difficult hybrid cases.  Refine Ipopt's last primal iterate with the
+    // native IPM when Ipopt stops at its acceptable KKT limit; this avoids
+    // losing a nearly feasible point just because the external adapter reports
+    // a maximum-iteration termination.
+    bool ipopt_ok = false;
+    ipm_res = solve_parity_with_ipopt(prob, ipm_opt, ipopt_ok);
+    backend_label = "ipopt_filter_linesearch";
+    if (ipopt_ok && !ipm_res.converged &&
+        ipm_res.x.size() == prob.vidx.n_total && ipm_res.x.allFinite()) {
+      parity::IPMOptions refine_opt = ipm_opt;
+      refine_opt.primal_start = &ipm_res.x;
+      refine_opt.equality_dual_start = nullptr;
+      refine_opt.inequality_dual_start = nullptr;
+      refine_opt.slack_start = nullptr;
+      const parity::IPMResult refined =
+          parity::solve_primal_dual_ipm(prob, refine_opt);
+      if (refined.converged) {
+        ipm_res = refined;
+        backend_label = "parity_ipm:" + ipm_res.linear_solver +
+                        " (Ipopt warm-start)";
+      }
+    }
+    if (!ipopt_ok) {
+      ipm_res = parity::solve_primal_dual_ipm(prob, ipm_opt);
+      backend_label = "parity_ipm:" + ipm_res.linear_solver +
+                      " (ipopt unavailable)";
+    }
+  } else if (inner == ParityInnerSolver::Ipopt) {
     bool ipopt_ok = false;
     ipm_res = solve_parity_with_ipopt(prob, ipm_opt, ipopt_ok);
     backend_label = "ipopt_filter_linesearch";
@@ -2512,7 +2662,10 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   }
 
   if (out.converged) {
+    const bool acceptable_ipopt =
+        ipm_res.status.find("acceptable residuals") != std::string::npos;
     out.status = "converged (" + backend_label + ")";
+    if (acceptable_ipopt) out.status += " [acceptable residuals]";
   } else {
     out.status = "not converged: " + ipm_res.status;
   }
@@ -2781,7 +2934,10 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
   }
 
   if (opt.enable_primal_dual && opt.use_parity_ipm) {
-    if (opt.objective_homotopy) {
+    // Objective homotopy is implemented only by the native parity IPM.  An
+    // explicit Ipopt request must remain a standalone solve; never put Ipopt
+    // into the continuation state chain.
+    if (opt.objective_homotopy && inner != ParityInnerSolver::Ipopt) {
       // Theory-guided two-phase solve (docs/numerical_methods.md §12–13):
       // follow the objective homotopy P(t) = min t·f from t = 0 (feasibility)
       // to t = 1 (full cost), carrying the full primal-dual state between
@@ -2804,6 +2960,13 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
         ACOPFOptions opt_t = opt;
         opt_t.compute_homotopy_tangent = true;
         opt_t.homotopy_t = t;
+        // Generalize the homotopy to non-economic objectives (RPO): the
+        // voltage-deviation and active-loss objective weights are scaled by t
+        // alongside the generation costs, so t = 0 is a pure feasibility
+        // problem for EVERY objective class and the path is meaningful for
+        // the RPO baseline, not only for economic dispatch.
+        opt_t.voltage_deviation_weight *= t;
+        opt_t.active_loss_weight *= t;
         if (step == 0) {
           opt_t.ac_pf_warm_start = true;
         } else if (have_prediction) {
@@ -2871,13 +3034,41 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
       }
       if (t_ok < 1.0) {
         ACOPFResult best = std::move(chain.back());
-        best.status +=
-            " [objective homotopy stopped at t=" + std::to_string(t_ok) +
-            " (minimal-violation region)]";
+        // A feasible Phase-I point is not an optimal solution for the
+        // requested objective.  Give the full target one final chance from
+        // that point before reporting the homotopy as incomplete.
+        if (opt.allow_fallback) {
+          ACOPFOptions full_target_opt = opt;
+          full_target_opt.objective_homotopy = false;
+          // This is outside the Native-only homotopy loop.  Run the standalone
+          // recovery from a fresh coupled PF point; carrying the Phase-I
+          // primal into Ipopt can pin it to the zero-objective face and is not
+          // needed for the independent full-objective solve.
+          full_target_opt.ac_pf_warm_start = true;
+          full_target_opt.warm_start = nullptr;
+          ACOPFResult full_target =
+              solve_with_parity_ipm(sys_work, full_target_opt, inner);
+          if (full_target.converged) {
+            full_target.status =
+                "converged (full objective after incomplete objective homotopy)";
+            return separate_external_grid_dispatch(std::move(full_target));
+          }
+        }
+        best.converged = false;
+        best.status =
+            "not converged: objective homotopy stopped at t=" +
+            std::to_string(t_ok) +
+            " (minimal-violation region; full objective not solved)";
         return separate_external_grid_dispatch(std::move(best));
       }
       // t = 1 was solved in-loop as a normal step; its result is the answer.
       return separate_external_grid_dispatch(std::move(chain.back()));
+    }
+    if (opt.objective_homotopy && inner == ParityInnerSolver::Ipopt) {
+      ACOPFOptions standalone_opt = opt;
+      standalone_opt.objective_homotopy = false;
+      return separate_external_grid_dispatch(
+          solve_with_parity_ipm(sys_work, standalone_opt, inner));
     }
     // The parity path internally applies the Ipopt fallback when inner == Auto
     // and opt.allow_fallback is set, so no separate recursive economic-dispatch

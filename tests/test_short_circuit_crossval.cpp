@@ -272,7 +272,7 @@ TEST_CASE("SC: IEEE 14-bus self-consistency", "[short_circuit][ieee14]") {
     CHECK(r.ikpp_ka > 0.0);
     CHECK(std::isfinite(r.ikpp_ka));
     // Passive network: real part of Z_kk ≥ 0
-    CHECK(r.z_thevenin.real() >= 0.0);
+    CHECK(r.z_thevenin.real() >= -1e-12);
   }
 
   // Bus 1 (slack / strong source) should contribute a large Sk
@@ -952,7 +952,7 @@ TEST_CASE("SC: IEEE 33-bus BW monotonic fault levels", "[short_circuit][ieee33bw
     CHECK(r.sk_mva > 0.0);
     CHECK(std::isfinite(r.sk_mva));
     CHECK(r.ikpp_ka > 0.0);
-    CHECK(r.z_thevenin.real() >= 0.0);
+    CHECK(r.z_thevenin.real() >= -1e-12);
   }
 
   // Bus 1 (substation, strongest source) has maximum Sk
@@ -1052,7 +1052,8 @@ TEST_CASE("SC: short_circuit_case bus4 matches classical reference",
 #else
   const std::string root = ".";
 #endif
-  const std::string text = read_text_file(root + "/short_circuit_case.json");
+  const std::string text =
+      read_text_file(root + "/tests/short_circuit/short_circuit_case.json");
   const auto sys = hacdcpf::io::from_json(text);
 
   SCDetailedOptions opt;

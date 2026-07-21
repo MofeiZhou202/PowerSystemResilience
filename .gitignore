@@ -1,5 +1,9 @@
 build/
 data/
+!data/
+data/*
+!data/dsp/
+!data/dsp/**
 
 build_codex/
 build-*/
@@ -62,6 +66,7 @@ tools/harmonics_validation/cpp_result.json
 tools/psd_validation/
 
 docs/latex/
+!docs/latex/
 docs/latex/*
 !docs/latex/Progressive Class-Conditioned Frequency–Duration/
 !docs/latex/Progressive Class-Conditioned Frequency–Duration/README.md
@@ -76,9 +81,30 @@ docs/latex/*
 !docs/latex/Progressive Class-Conditioned Frequency–Duration/layer2_closed_loop_trace.dat
 !docs/latex/Progressive Class-Conditioned Frequency–Duration/layer2_trace_macros.tex
 
+docs/latex/Progressive*/
+
 tmp/
 
 paper/
+!docs/latex/paper/
+!docs/latex/paper/cyber_dynamic_safe_restoration/
+!docs/latex/paper/cyber_dynamic_safe_restoration/README.md
+!docs/latex/paper/cyber_dynamic_safe_restoration/main.tex
+!docs/latex/paper/cyber_dynamic_safe_restoration/case_studies_design.tex
+!docs/latex/paper/cyber_dynamic_safe_restoration/preliminary_results.tex
+!docs/latex/paper/cyber_dynamic_safe_restoration/experiment_matrix.csv
+!docs/latex/paper/cyber_dynamic_safe_restoration/references.bib
+!docs/latex/paper/cyber_dynamic_safe_restoration/main.pdf
+!docs/latex/paper/cyber_dynamic_safe_restoration/results/
+!docs/latex/paper/cyber_dynamic_safe_restoration/results/small_baseline/
+!docs/latex/paper/cyber_dynamic_safe_restoration/results/small_baseline/README.md
+!docs/latex/paper/cyber_dynamic_safe_restoration/results/small_baseline/summary.csv
+!docs/latex/paper/cyber_dynamic_safe_restoration/results/small_baseline/summary.json
+!docs/latex/paper/cyber_dynamic_safe_restoration/results/small_baseline/event_windows.csv
+!docs/latex/paper/cyber_dynamic_safe_restoration/results/small_baseline/*_metrics.csv
+!docs/latex/paper/cyber_dynamic_safe_restoration/results/small_baseline/algorithm_evidence.csv
+!docs/latex/paper/cyber_dynamic_safe_restoration/results/small_baseline/algorithm_evidence.json
+docs/latex/paper/cyber_dynamic_safe_restoration/results/small_baseline/*_raw.csv
 
 output/
 34_node/
@@ -86,5 +112,10 @@ output/
 8500_node/
 
 tests/short_circuit/
+!tests/short_circuit/
+tests/short_circuit/*
+!tests/short_circuit/short_circuit_case.json
 
 paper/phase_graph_reduced_hybrid_opf/
+
+docs/latex

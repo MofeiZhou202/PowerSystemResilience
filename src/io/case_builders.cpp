@@ -3745,14 +3745,16 @@ HybridPowerSystem build_market_5bus_acdc_toy() {
   // --- DC System ---
   // 2 DC buses connected by 1 DC line, linked to AC via 2 VSC converters
   sys.dc.buses = {
-    DCBus{.index = 0, .bus_type = DCBusType::DC_V,
+    // Solver-facing DC bus references are 1-based, matching the AC canonical
+    // model and the branch/converter indexing contract.
+    DCBus{.index = 1, .bus_type = DCBusType::DC_V,
           .vm_pu = 1.0, .pd_mw = 0.0, .in_service = true, .name = "DC_Bus0"},
-    DCBus{.index = 1, .bus_type = DCBusType::DC_P,
+    DCBus{.index = 2, .bus_type = DCBusType::DC_P,
           .vm_pu = 1.0, .pd_mw = 0.0, .in_service = true, .name = "DC_Bus1"},
   };
 
   sys.dc.branches = {
-    DCBranch{.index = 0, .from_bus = 0, .to_bus = 1,
+    DCBranch{.index = 0, .from_bus = 1, .to_bus = 2,
              .r_pu = 0.005, .in_service = true,
              .name = "DCLine_0_1",
              .rate_a_mva = 40.0, .s_max_mva = 40.0},
@@ -3761,7 +3763,7 @@ HybridPowerSystem build_market_5bus_acdc_toy() {
   // VSC1: Bus2 (AC) <-> DC_Bus0 (DC)
   // VSC2: Bus3 (AC) <-> DC_Bus1 (DC)
   sys.vsc_converters = {
-    VSCConverter{.index = 0, .bus_ac = 2, .bus_dc = 0,
+    VSCConverter{.index = 0, .bus_ac = 2, .bus_dc = 1,
                  .in_service = true,
                  .control_mode = ConverterMode::PQ_MODE,
                  .p_set_mw = 0.0, .q_set_mvar = 0.0,
@@ -3771,7 +3773,7 @@ HybridPowerSystem build_market_5bus_acdc_toy() {
                  .pmax_mw = 50.0, .pmin_mw = -50.0,
                  .qmax_mvar = 30.0, .qmin_mvar = -30.0,
                  .name = "VSC1_B2_DC0"},
-    VSCConverter{.index = 1, .bus_ac = 3, .bus_dc = 1,
+    VSCConverter{.index = 1, .bus_ac = 3, .bus_dc = 2,
                  .in_service = true,
                  .control_mode = ConverterMode::VDC_Q,
                  .p_set_mw = 0.0, .q_set_mvar = 0.0,

@@ -10,26 +10,26 @@ in this promoted gate is an active-power reference step from 0.5 to 0.7 pu at
 
 | Control | Metric | RMS error | Max error | Interpretation |
 |---|---:|---:|---:|---|
-| VSM GFM | angle, relative rad | 0.064621 | 0.079277 | compact virtual-impedance model |
-| VSM GFM | frequency, relative pu | 0.000381 | 0.000476 | strong agreement |
-| VSM GFM | P, device pu | 0.158881 | 0.194887 | compact inner/filter model |
-| VOC GFM | angle, relative rad | 0.030717 | 0.037559 | compact virtual-impedance model |
-| VOC GFM | internal voltage, pu | 0.010525 | 0.012117 | good agreement |
-| VOC GFM | frequency, relative pu | 0.000427 | 0.000495 | strong agreement |
-| Droop GFM | angle, relative rad | 0.069098 | 0.118155 | compact virtual-impedance model |
-| ReducedOrderPLL GFL | filtered P state, pu | 0.012504 | 0.105676 | matched controller state |
-| ReducedOrderPLL GFL | PLL angle, relative rad | 0.009897 | 0.014311 | good agreement |
-| ReducedOrderPLL GFL | PLL frequency, relative pu | 0.000154 | 0.001368 | strong agreement |
-| ReducedOrderPLL GFL | terminal P, device pu | 0.030598 | 0.278505 | PSD 20 ms inner-control overshoot |
-| ReducedOrderPLL GFL | terminal Q, device pu | 0.033998 | 0.411998 | PSD LCL/current-control cross-coupling |
-| KauraPLL GFL | filtered P state, pu | 0.012295 | 0.103692 | matched controller state |
-| KauraPLL GFL | PLL angle, relative rad | 0.009977 | 0.018173 | good agreement |
-| KauraPLL GFL | PLL frequency, relative pu | 0.000159 | 0.001046 | strong agreement |
-| KauraPLL GFL | terminal P, device pu | 0.030213 | 0.276941 | PSD 20 ms inner-control overshoot |
-| KauraPLL GFL | terminal Q, device pu | 0.033543 | 0.407675 | PSD LCL/current-control cross-coupling |
+| VSM GFM | angle, relative rad | 0.022170 | 0.029745 | matched forming-angle response |
+| VSM GFM | frequency, relative pu | 0.000072 | 0.000502 | strong agreement |
+| VSM GFM | P, device pu | 0.011333 | 0.033907 | active-power reference reaches the Norton port |
+| VOC GFM | angle, relative rad | 0.010788 | 0.014794 | good agreement |
+| VOC GFM | internal voltage, pu | 0.012087 | 0.012268 | compact virtual-impedance model |
+| VOC GFM | frequency, relative pu | 0.000104 | 0.000467 | strong agreement |
+| Droop GFM | angle, relative rad | 0.021510 | 0.037001 | matched droop response |
+| ReducedOrderPLL GFL | filtered P state, pu | 0.003472 | 0.027373 | matched controller state |
+| ReducedOrderPLL GFL | PLL angle, relative rad | 0.010636 | 0.027029 | good agreement |
+| ReducedOrderPLL GFL | PLL frequency, relative pu | 0.000500 | 0.007101 | event-localized deviation |
+| ReducedOrderPLL GFL | terminal P, device pu | 0.007562 | 0.065743 | full outer/inner/LCL chain |
+| ReducedOrderPLL GFL | terminal Q, device pu | 0.007542 | 0.043768 | full outer/inner/LCL chain |
+| KauraPLL GFL | filtered P state, pu | 0.004606 | 0.036534 | matched controller state |
+| KauraPLL GFL | PLL angle, relative rad | 0.010729 | 0.026628 | good agreement |
+| KauraPLL GFL | PLL frequency, relative pu | 0.000316 | 0.002479 | strong agreement |
+| KauraPLL GFL | terminal P, device pu | 0.008446 | 0.082164 | full outer/inner/LCL chain |
+| KauraPLL GFL | terminal Q, device pu | 0.009774 | 0.067528 | full outer/inner/LCL chain |
 
-Terminal-voltage magnitude errors are below 0.00421 pu for all five controls.
-GFL bus-angle relative errors are below 0.0182 rad. The aggregate CSV contains
+Terminal-voltage magnitude RMS errors are below 0.00615 pu for all five controls.
+GFL bus-angle relative RMS errors are below 0.0107 rad. The aggregate CSV contains
 all 163 manifest metrics, including synchronous-machine and controller cases.
 
 ## Bugs Found And Corrected
@@ -45,6 +45,10 @@ all 163 manifest metrics, including synchronous-machine and controller cases.
 3. PSD terminal P/Q is returned on the 100 MVA system base while inverter
    controller states use the 2.75 MVA device base. The exporter now exposes
    explicit `p_device_pu` and `q_device_pu` signals.
+4. An absent `is_not_reference` profile flag incorrectly locked every native
+   GFM angle to the synchronous reference frame. The default now remains
+   unlocked, and a regression requires VSM and droop power-reference steps to
+   change terminal active power.
 
 ## Fidelity Boundary
 

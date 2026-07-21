@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
@@ -109,6 +111,59 @@ SparseBackend sparse_backend_preference() {
   return SparseBackend::Auto;
 }
 
+// ── Lightweight cumulative profiler (HACDCPF_OPF_PROF=1) ────────────────────
+// Decomposes parity-IPM wall time into the three candidate bottlenecks:
+// KKT numeric factorization, KKT back-solve, and KKT assembly (triplet build +
+// equilibration).  Accumulators are process-global and printed at exit; the
+// IPM is single-threaded today, so plain doubles suffice.
+struct IpmProf {
+  double t_factorize{0.0}, t_solve{0.0}, t_assembly{0.0};
+  long   n_factorize{0}, n_solve{0}, n_assembly{0};
+  // Per-backend factorize breakdown (index: 1=UMFPACK, 2=KLU, 3=Eigen, 4=MUMPS).
+  double t_fbe[5]{0.0, 0.0, 0.0, 0.0, 0.0};
+  long   n_fbe[5]{0, 0, 0, 0, 0};
+  bool   enabled{false};
+  IpmProf() : enabled(std::getenv("HACDCPF_OPF_PROF") != nullptr) {}
+  static const char* be_name(int b) {
+    switch (b) {
+      case 1: return "umfpack"; case 2: return "klu";
+      case 3: return "eigen";   case 4: return "mumps";
+      default: return "?";
+    }
+  }
+  ~IpmProf() {
+    if (!enabled) return;
+    std::fprintf(stderr,
+        "[prof] factorize %.3fs (%ld, %.4fs avg) | solve %.3fs (%ld, %.4fs) | "
+        "assembly %.3fs (%ld)\n",
+        t_factorize, n_factorize, n_factorize ? t_factorize / n_factorize : 0.0,
+        t_solve, n_solve, n_solve ? t_solve / n_solve : 0.0,
+        t_assembly, n_assembly);
+    for (int b = 1; b <= 4; ++b) {
+      if (n_fbe[b])
+        std::fprintf(stderr, "[prof]   %-8s factorize %.3fs (%ld, %.4fs avg)\n",
+                     be_name(b), t_fbe[b], n_fbe[b], t_fbe[b] / n_fbe[b]);
+    }
+  }
+};
+inline IpmProf& ipm_prof() { static IpmProf p; return p; }
+struct IpmProfTimer {
+  double& acc; long& cnt; bool on;
+  std::chrono::steady_clock::time_point t0;
+  IpmProfTimer(double& a, long& c, bool on_)
+      : acc(a), cnt(c), on(on_), t0(std::chrono::steady_clock::now()) {
+    if (on) ++cnt;
+  }
+  void stop() {
+    if (on) {
+      acc += std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - t0).count();
+      on = false;
+    }
+  }
+  ~IpmProfTimer() { stop(); }
+};
+
 // Newton-system form for the KKT solve.  The condensed form eliminates the
 // inequality multipliers into W = Lxx + JhᵀΣJh: a sparse triple product per
 // iteration, extra fill-in, and — decisively — a squared condition number.
@@ -122,8 +177,14 @@ SparseBackend sparse_backend_preference() {
 // the Wächter–Biegler δ_W correction below.
 enum class KktForm { Condensed, Augmented };
 
-// HACDCPF_OPF_KKT_FORM = augmented | condensed  (default: augmented when an
-// inertia-reporting LDLᵀ backend is compiled in, else condensed).
+// HACDCPF_OPF_KKT_FORM = augmented | condensed.
+//
+// Condensed is the production default.  It is the mature fast path for the
+// ordinary economic OPF benchmarks (case2000_acdc: ~2 s, case2869pegase:
+// 54 iterations in Release).  Merely compiling MUMPS must not silently switch
+// every model to the augmented trajectory: that policy regressed both cases
+// into long filter stalls.  Augmented KKT remains available explicitly for
+// stiff models that benefit from inertia-controlled regularization.
 KktForm kkt_form_preference() {
   const char* env = std::getenv("HACDCPF_OPF_KKT_FORM");
   if (env != nullptr) {
@@ -134,11 +195,7 @@ KktForm kkt_form_preference() {
     if (s == "condensed") return KktForm::Condensed;
     if (s == "augmented") return KktForm::Augmented;
   }
-#if defined(HACDCPF_HAVE_MUMPS)
-  return KktForm::Augmented;
-#else
   return KktForm::Condensed;
-#endif
 }
 
 // Cache for the sparse KKT system.  Holds the assembled matrix plus whichever
@@ -166,9 +223,15 @@ struct SparseKKTCache {
   mipsolvers::engine::MumpsSolver mumps;
 #endif
   int active{0};         ///< 0=unset, 1=UMFPACK, 2=KLU, 3=Eigen SparseLU, 4=MUMPS
-  int analyzed_for{0};   ///< backend whose symbolic analysis is currently valid
-  int pat_dim{-1};
-  int pat_nnz{-1};
+  bool pure_ac{false};   ///< no DC/VSC/ER subsystems → KLU-eligible (see below)
+  // Per-backend symbolic-analysis validity.  The KKT sparsity pattern is FIXED
+  // across IPM iterations (same structure, changing values), so each backend
+  // only needs to analyse the pattern ONCE — recording it per backend lets the
+  // inertia gate switch KLU↔MUMPS without re-analysing on every switch (that
+  // churn was the dominant gate overhead: ~18 s at case13659).  Indexed by
+  // backend id; -1 = not analysed for the current pattern.
+  int analyzed_dim[5]{-1, -1, -1, -1, -1};
+  int analyzed_nnz[5]{-1, -1, -1, -1, -1};
   bool factored{false};
   bool solve_degraded{false};  ///< last solve was inaccurate → escalate backend
   int symbolic_analyze_calls{0};
@@ -180,18 +243,29 @@ struct SparseKKTCache {
 };
 
 // Ordered candidate backends for a preference (most-preferred first), filtered
-// to those compiled in and de-duplicated.  Auto prefers MUMPS: the KKT is
-// symmetric indefinite, so a symmetric LDLᵀ factorization halves work and fill
-// versus unsymmetric LU, and MUMPS' multifrontal nested-dissection ordering is
-// near-optimal on the mesh-like graphs of power networks — this is what makes
-// ≳10000-bus cases tractable at all.  UMFPACK follows: its pivoting stays
-// accurate on the near-singular KKTs of very large / ill-conditioned grids
-// (≳6000 buses), where Eigen's SparseLU returns an accurately-solved but
-// wrong step (the system itself is near-singular) and the IPM diverges to NaN.
-// KLU then Eigen SparseLU are escalation failovers.  Eigen SparseLU is ~3–7×
-// faster on well-conditioned KKTs, so a caller that knows its case is benign can
-// pin it via HACDCPF_OPF_SPARSE_SOLVER=eigen.
-std::vector<int> backend_order(SparseBackend pref) {
+// to those compiled in and de-duplicated.  The Auto order is structure-aware:
+//
+//  * Pure-AC problems (pure_ac=true, no DC/VSC/energy-router subsystems) put
+//    KLU first.  KLU's block-triangular-form (BTF) decomposition matches the
+//    near-block-triangular structure of network KKTs, giving far less fill
+//    than a general multifrontal LDLᵀ — measured on case2869 (factorize
+//    0.006 s vs MUMPS 0.015 s, end-to-end 5.97 s vs 12.05 s, SAME exact
+//    reference objective 133999) and case13659 (22.9 s vs 33.9 s, with ~100×
+//    tighter stationarity).  MUMPS and UMFPACK follow as escalation failovers.
+//
+//  * Hybrid AC/DC problems (pure_ac=false) keep MUMPS first: the augmented
+//    KKT's Wächter–Biegler δ_W regularisation needs the LDLᵀ inertia (negative
+//    pivot count), which only MUMPS reports — on stiff hybrid cases KLU/LU
+//    accept the unregularised factorisation and stagnate (measured:
+//    case1354+500 MW dc converges with MUMPS, stagnates with KLU).  MUMPS'
+//    symmetric LDLᵀ also halves work/fill versus unsymmetric LU here, and its
+//    nested-dissection ordering suits the mesh-like network graph.
+//
+// UMFPACK's pivoting stays accurate on near-singular KKTs; Eigen SparseLU is
+// ~3–7× faster on well-conditioned KKTs but returns an accurately-solved-yet
+// -wrong step on very large/ill-conditioned grids.  A caller can pin any
+// backend via HACDCPF_OPF_SPARSE_SOLVER (overrides this structure logic).
+std::vector<int> backend_order(SparseBackend pref, bool pure_ac) {
   std::vector<int> order;
 #if defined(HACDCPF_OPF_HAVE_UMFPACK)
   const bool have_umf = true;
@@ -230,10 +304,19 @@ std::vector<int> backend_order(SparseBackend pref) {
       break;
     case SparseBackend::Auto:
     default:
-      if (have_mumps) order.push_back(4);
-      if (have_umf) order.push_back(1);
-      if (have_klu) order.push_back(2);
-      order.push_back(3);
+      if (pure_ac) {
+        // Pure-AC: KLU first (BTF structure, measured fastest on network KKTs).
+        if (have_klu) order.push_back(2);
+        if (have_mumps) order.push_back(4);
+        if (have_umf) order.push_back(1);
+        order.push_back(3);
+      } else {
+        // Hybrid AC/DC: MUMPS first (LDLᵀ inertia needed for δ_W regularisation).
+        if (have_mumps) order.push_back(4);
+        if (have_umf) order.push_back(1);
+        if (have_klu) order.push_back(2);
+        order.push_back(3);
+      }
       break;
   }
   std::vector<int> uniq;
@@ -246,6 +329,10 @@ std::vector<int> backend_order(SparseBackend pref) {
 // Numeric factorization for the active backend; analyzes the pattern only when
 // it has changed (first call or a genuine pattern change).
 bool sparse_factorize_active(SparseKKTCache& cache, bool pattern_changed) {
+  const bool _prof = ipm_prof().enabled;
+  const int  _be = cache.active;  // backend is fixed for this call
+  const auto _t0 = std::chrono::steady_clock::now();
+  bool ok = false;
   if (pattern_changed) ++cache.symbolic_analyze_calls;
   switch (cache.active) {
 #if defined(HACDCPF_OPF_HAVE_UMFPACK)
@@ -254,7 +341,8 @@ bool sparse_factorize_active(SparseKKTCache& cache, bool pattern_changed) {
         cache.umf.analyzePattern(cache.kkt);
       }
       cache.umf.factorize(cache.kkt);
-      return cache.umf.info() == Eigen::Success;
+      ok = cache.umf.info() == Eigen::Success;
+      break;
 #endif
 #if defined(HACDCPF_OPF_HAVE_KLU)
     case 2:
@@ -262,26 +350,41 @@ bool sparse_factorize_active(SparseKKTCache& cache, bool pattern_changed) {
         cache.klu.analyzePattern(cache.kkt);
       }
       cache.klu.factorize(cache.kkt);
-      return cache.klu.info() == Eigen::Success;
+      ok = cache.klu.info() == Eigen::Success;
+      break;
 #endif
 #if defined(HACDCPF_HAVE_MUMPS)
     case 4:
       if (pattern_changed) {
         cache.mumps.analyze_pattern(cache.kkt);
       }
-      return cache.mumps.factorize(cache.kkt);
+      ok = cache.mumps.factorize(cache.kkt);
+      break;
 #endif
     default:
       if (pattern_changed) {
         cache.lu.analyzePattern(cache.kkt);
       }
       cache.lu.factorize(cache.kkt);
-      return cache.lu.info() == Eigen::Success;
+      ok = cache.lu.info() == Eigen::Success;
+      break;
   }
+  if (_prof) {
+    const double dt = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - _t0).count();
+    ipm_prof().t_factorize += dt;
+    ++ipm_prof().n_factorize;
+    if (_be >= 1 && _be <= 4) {
+      ipm_prof().t_fbe[_be] += dt;
+      ++ipm_prof().n_fbe[_be];
+    }
+  }
+  return ok;
 }
 
 // Back-solve for the active backend.
 Eigen::VectorXd sparse_solve_active(SparseKKTCache& cache, const Eigen::VectorXd& rhs) {
+  IpmProfTimer _pt(ipm_prof().t_solve, ipm_prof().n_solve, ipm_prof().enabled);
   switch (cache.active) {
 #if defined(HACDCPF_OPF_HAVE_UMFPACK)
     case 1: return cache.umf.solve(rhs);
@@ -382,6 +485,8 @@ bool factor_kkt_sparse(SparseKKTCache& cache,
 // and augmented forms; the caller fills cache.nn/meq/niq to its block sizes.
 bool factor_assembled_kkt(SparseKKTCache& cache,
                           std::vector<Eigen::Triplet<double>>& trips) {
+  IpmProfTimer _asm(ipm_prof().t_assembly, ipm_prof().n_assembly,
+                    ipm_prof().enabled);
   const int dim = cache.nn + cache.meq + cache.niq;
   cache.kkt.resize(dim, dim);
   cache.kkt.setFromTriplets(trips.begin(), trips.end());
@@ -410,9 +515,11 @@ bool factor_assembled_kkt(SparseKKTCache& cache,
     }
   }
   cache.kkt_orig = cache.kkt;
+  _asm.stop();  // assembly + equilibration ends here; factorization follows
 
   const int nnz = static_cast<int>(cache.kkt.nonZeros());
-  const std::vector<int> order = backend_order(sparse_backend_preference());
+  const std::vector<int> order =
+      backend_order(sparse_backend_preference(), cache.pure_ac);
   if (cache.active == 0) cache.active = order.front();
 
   // If the previous solve was inaccurate (a sign the current backend cannot
@@ -437,12 +544,11 @@ bool factor_assembled_kkt(SparseKKTCache& cache,
   for (int backend : trylist) {
     cache.active = backend;
     const bool need_analyze =
-        (cache.analyzed_for != backend) || (cache.pat_dim != dim) || (cache.pat_nnz != nnz);
+        (cache.analyzed_dim[backend] != dim) || (cache.analyzed_nnz[backend] != nnz);
     if (sparse_factorize_active(cache, need_analyze)) {
       if (need_analyze) {
-        cache.analyzed_for = backend;
-        cache.pat_dim = dim;
-        cache.pat_nnz = nnz;
+        cache.analyzed_dim[backend] = dim;
+        cache.analyzed_nnz[backend] = nnz;
       }
       cache.factored = true;
       return true;
@@ -910,16 +1016,17 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
                                  const Eigen::VectorXd& rg_v, const Eigen::VectorXd& rh_v,
                                  const Eigen::VectorXd& Lx_v, double obj_v) {
     const double maxh = (niq > 0) ? std::max(rh_v.maxCoeff(), 0.0) : 0.0;
+    const double raw_feascond = std::max(inf_norm(rg_v), maxh);
     const double scale_x = std::max(inf_norm(x_v), inf_norm(z_v));
-    const double feascond = std::max(inf_norm(rg_v), maxh) / (1.0 + scale_x);
+    const double feascond = raw_feascond / (1.0 + scale_x);
     const double gradcond = inf_norm(Lx_v) / (1.0 + std::max(inf_norm(mu_v), inf_norm(lambda_v)));
     // Average complementarity per constraint — normalizes by niq to be problem-size-independent.
     const double compcond = (niq > 0) ? z_v.dot(mu_v) / static_cast<double>(niq) / (1.0 + inf_norm(x_v)) : 0.0;
     const double costcond = std::abs(obj_v - obj0) / (1.0 + std::abs(obj0));
-    return std::make_tuple(feascond, gradcond, compcond, costcond);
+    return std::make_tuple(feascond, raw_feascond, gradcond, compcond, costcond);
   };
 
-  auto [feascond, gradcond, compcond, costcond] =
+  auto [feascond, raw_feascond, gradcond, compcond, costcond] =
       compute_convergence(x, z, lambda, mu, rg, rh, Lx, obj);
 
   const double feas_tol = opt.tol_primal;
@@ -927,7 +1034,8 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   // at ~1e-3 due to barrier ill-conditioning, while feas and grad are fully converged.
   // Use a relaxed tolerance for complementarity (minimum 2e-3).
   const double comp_tol = std::max(feas_tol * 10.0, 2e-3);
-  bool converged = (feascond < feas_tol && gradcond < feas_tol && compcond < comp_tol);
+  bool converged = (feascond < feas_tol && raw_feascond < feas_tol &&
+                    gradcond < feas_tol && compcond < comp_tol);
 
   IPMResult out;
   out.status = "maximum iterations reached";
@@ -939,12 +1047,13 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   // Best-iterate tracking: store the iterate with the smallest max(feas, grad, comp).
   // For oscillating problems on constraint boundaries, the best iterate may satisfy
   // convergence even if the final iterate does not.
-  double best_metric = std::max({feascond, gradcond, compcond});
+  double best_metric = std::max({raw_feascond, gradcond, compcond});
   Eigen::VectorXd best_x = x;
   Eigen::VectorXd best_lambda = lambda;
   Eigen::VectorXd best_mu = mu;
   Eigen::VectorXd best_z = z;
   double best_feas = feascond;
+  double best_raw_feas = raw_feascond;
   double best_grad = gradcond;
   double best_comp = compcond;
   int best_iter = 0;
@@ -969,6 +1078,15 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
       (!has_linear_solver_override() && kDenseAutoKktDim > 0 && kkt_dim <= kDenseAutoKktDim);
   DenseKKTCache dense_cache;
   SparseKKTCache sparse_cache;
+  // Structure-aware backend selection (see backend_order): a problem is KLU-
+  // eligible only when it has no DC / VSC / DC-DC / energy-router subsystems,
+  // i.e. it is a pure AC network.  Hybrid AC/DC KKTs need the MUMPS LDLᵀ
+  // inertia for the δ_W regularisation and must not take the KLU path.
+  sparse_cache.pure_ac = prob.data.dc_buses.empty() &&
+                         prob.data.dc_branches.empty() &&
+                         prob.data.converters.empty() &&
+                         prob.data.dcdc_converters.empty() &&
+                         prob.data.energy_routers.empty();
 
   // Newton-system form.  The dense path has no inertia oracle and no
   // inequality-block structure, so it always uses the condensed form; the
@@ -1011,6 +1129,18 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   // iterations to warm-start the inertia loop (see below).
   double delta_w_prev = 0.0;
 
+  // Periodic inertia re-check for the pure-AC KLU fast path.  KLU/LU cannot
+  // report the KKT inertia (negative-pivot count), so the δ_W regularisation
+  // is silently bypassed while KLU is active.  Every kInertiaGatePeriod
+  // factorizations we re-check the inertia with MUMPS and apply δ_W to that
+  // step if the reduced Hessian is indefinite — this both regularises the
+  // step (large trajectory win: case2869 homotopy 154→73 iterations) and
+  // surfaces persistent difficulty.  KLU is always resumed afterwards (a
+  // one-off indefinite KKT is not grounds to abandon it — the (θ,φ) filter
+  // tolerates those steps); a genuine persistent KLU failure is left to the
+  // solve_degraded → escalation backstop.
+  int inertia_gate_countdown = 0;  // factorizations since the last MUMPS re-check
+
   // Objective-stagnation tracking (endgame early stop — see the epilogue).
   double obj_prev = obj0;
   int stagnant_count = 0;
@@ -1033,8 +1163,8 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
 
     if (opt.verbose) {
       [[maybe_unused]] const double maxh_dbg = (niq > 0) ? std::max(rh.maxCoeff(), 0.0) : 0.0;
-      HACDCPF_LOG_DEBUG("[parity-ipm] iter={} feas={} grad={} comp={} cost={} |rg|={} maxh={} |Lx|={}",
-                iter, feascond, gradcond, compcond, costcond,
+      HACDCPF_LOG_DEBUG("[parity-ipm] iter={} feas={} raw_feas={} grad={} comp={} cost={} |rg|={} maxh={} |Lx|={}",
+                iter, feascond, raw_feascond, gradcond, compcond, costcond,
                 inf_norm(rg), maxh_dbg, inf_norm(Lx));
     }
 
@@ -1107,12 +1237,45 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
         }
         return 1e-8;
       }() * lxx_norm;
-      // Warm-start δ_W from the last accepted value (Ipopt's κ_W⁻ rule):
-      // consecutive Newton systems need similar regularization, so starting
-      // at δ_W⁻/2 instead of 0 skips the 5–8 full refactorizations that an
-      // escalate-from-scratch loop would run per iteration.  The inertia
-      // check below still guarantees the accepted value is sufficient.
-      double delta_w = (delta_w_prev > 0.0)
+      // Inertia gate: on the pure-AC KLU fast path, re-check the inertia with
+      // MUMPS every kInertiaGatePeriod factorizations (KLU cannot report it).
+      // HACDCPF_OPF_INERTIA_GATE = N (default 8; ≤0 disables the gate, keeping
+      // KLU throughout with no periodic MUMPS re-check).
+      // Inertia re-check (OPT-IN, disabled by default).  On the pure-AC KLU
+      // fast path, KLU cannot report the KKT inertia, so the δ_W regularisation
+      // is bypassed; this opt-in periodically re-checks the inertia with MUMPS
+      // and applies δ_W to that step.  It is OFF by default because its effect
+      // is strongly case-dependent and not predictable a priori: the periodic
+      // δ_W regularisation materially improves SOME trajectories (case2869
+      // homotopy 154 → 73 iterations, 59 s → 15 s) but DEGRADES others
+      // (case9241 homotopy stalls at t = 0.625 instead of reaching the 315837
+      // reference).  The robust default is the plain pure-AC→KLU path; a
+      // genuine persistent KLU failure is caught by solve_degraded →
+      // escalation.  HACDCPF_OPF_INERTIA_GATE = N enables a re-check every N
+      // factorizations (≤ 0 disables; default 0).
+      const int kInertiaGatePeriod = []() {
+        const char* env = std::getenv("HACDCPF_OPF_INERTIA_GATE");
+        return env != nullptr ? std::atoi(env) : 0;
+      }();
+      bool inertia_gate_check = false;
+      int klu_resume = 0;
+      if (kInertiaGatePeriod > 0 && sparse_cache.pure_ac &&
+          sparse_cache.active == 2) {
+        if (++inertia_gate_countdown >= kInertiaGatePeriod) {
+          inertia_gate_countdown = 0;
+          inertia_gate_check = true;
+          klu_resume = sparse_cache.active;  // = KLU(2)
+          sparse_cache.active = 4;           // force MUMPS for the check
+        }
+      }
+      // δ_W warm-start applies ONLY to MUMPS factorizations (which report
+      // inertia).  KLU factorizations are left UNREGULARISED (δ_W = 0) so a
+      // MUMPS re-check's escalated δ_W does not leak into and perturb the
+      // healthy KLU trajectory — that leak was measured to cost case13659
+      // ~44 extra iterations.  The warm-start itself (Ipopt's κ_W⁻ rule)
+      // skips the 5–8 escalate-from-scratch refactorizations per iteration.
+      const bool mumps_step = (sparse_cache.active == 4);
+      double delta_w = (mumps_step && delta_w_prev > 0.0)
                            ? std::max(1e-8 * lxx_norm, 0.5 * delta_w_prev)
                            : 0.0;
       for (int attempt = 0; attempt < 8; ++attempt) {
@@ -1136,7 +1299,24 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
                       : std::min(8.0 * delta_w, 1e-2 * lxx_norm);
         if (attempt == 7) factor_ok = true;  // accept best effort at the cap
       }
-      if (factor_ok) delta_w_prev = delta_w;
+      // Gate resolution: ALWAYS resume the KLU fast path after the periodic
+      // re-check.  The re-check's purpose is twofold — (a) apply δ_W
+      // regularisation to THIS step where the reduced Hessian is indefinite
+      // (which materially improves the trajectory: measured case2869 homotopy
+      // 154 → 73 iterations, 59 s → 17 s), and (b) detect a trajectory that
+      // persistently needs regularisation.  We deliberately do NOT lock to
+      // MUMPS on a single bad-inertia check: the (θ,φ) filter tolerates the
+      // mildly indefinite steps that KLU/LU still solves accurately, so a
+      // one-off indefinite KKT is not evidence that KLU must be abandoned
+      // (measured: case13659 locked prematurely and ran 2.4× slower / less
+      // accurately than pure KLU).  A genuine, persistent KLU failure surfaces
+      // instead through solve_degraded → escalation, the existing backstop.
+      if (inertia_gate_check) {
+        sparse_cache.active = klu_resume;  // resume the KLU fast path
+      }
+      // Only MUMPS steps contribute to the δ_W warm-start, so a re-check's
+      // escalated value never leaks into subsequent KLU steps.
+      if (factor_ok && mumps_step) delta_w_prev = delta_w;
       if (!factor_ok) {
         out.status = "KKT factorization failed";
         break;
@@ -1473,12 +1653,15 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
         std::getenv("HACDCPF_OPF_FILTER_ALL") != nullptr;
     const bool strict_theta_filter =
         std::getenv("HACDCPF_OPF_STRICT_THETA") != nullptr;
+    const bool no_legacy_paths =
+        std::getenv("HACDCPF_OPF_NO_LEGACY") != nullptr;
     bool step_accepted = false;
     Eigen::VectorXd x_trial, z_trial, mu_trial, lambda_trial;
     Eigen::VectorXd rg_trial, rh_trial, grad_trial, hdiag_trial, Lx_trial;
     Eigen::SparseMatrix<double> jg_trial, dh_trial;
     double obj_trial = obj;
     double feas_trial = feascond;
+    double raw_feas_trial = raw_feascond;
     double grad_trial_cond = gradcond;
     double comp_trial = compcond;
     double cost_trial = costcond;
@@ -1516,7 +1699,8 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
       objective_gradient_hessian_diag(prob, x_trial, grad_trial, hdiag_trial);
       Lx_trial = obj_scale * grad_trial + jg_trial.transpose() * lambda_trial +
                  dh_trial.transpose() * mu_trial;
-      std::tie(feas_trial, grad_trial_cond, comp_trial, cost_trial) =
+      std::tie(feas_trial, raw_feas_trial, grad_trial_cond, comp_trial,
+               cost_trial) =
           compute_convergence(x_trial, z_trial, lambda_trial, mu_trial,
                               rg_trial, rh_trial, Lx_trial, obj_trial);
 
@@ -1600,6 +1784,14 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
       if (strict_theta_filter) {
         return dual_axes_bounded &&
                feas_trial <= (1.0 - 1e-4 * std::max(alpha_p, 1e-8)) * feascond;
+      }
+      // HACDCPF_OPF_NO_LEGACY=1 disables the legacy 3-axis acceptance paths
+      // (diagnostic): the complementarity axis' loose grad guard (2%/step,
+      // compounding) lets a trajectory ride comp-decrease into a wrong corner
+      // — observed on case2869pegase: feas/comp converging while obj and
+      // stationarity inflate ~3×.
+      if (no_legacy_paths) {
+        return filter_accept;
       }
       return filter_accept || feasibility_progress ||
              stationarity_progress || complementarity_progress;
@@ -1792,12 +1984,13 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     apply_obj_scale_hessian(Lxx, hdiag);
 
     feascond = feas_trial;
+    raw_feascond = raw_feas_trial;
     gradcond = grad_trial_cond;
     compcond = comp_trial;
     costcond = cost_trial;
 
     // Track best iterate
-    const double cur_metric = std::max({feascond, gradcond, compcond});
+    const double cur_metric = std::max({raw_feascond, gradcond, compcond});
     if (cur_metric < best_metric) {
       best_metric = cur_metric;
       best_x = x;
@@ -1805,6 +1998,7 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
       best_mu = mu;
       best_z = z;
       best_feas = feascond;
+      best_raw_feas = raw_feascond;
       best_grad = gradcond;
       best_comp = compcond;
       best_iter = iter + 1;
@@ -1820,7 +2014,7 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     // cutting a healthy midgame tail, where obj also stagnates while θ is
     // still being reduced.
     constexpr int kStagnationWindow = 20;
-    if (feascond < 1e-4 && compcond < comp_tol) {
+    if (raw_feascond < 1e-4 && compcond < comp_tol) {
       const double d_obj = std::abs(obj - obj_prev);
       stagnant_count = (d_obj <= 1e-6 * (1.0 + std::abs(obj))) ? stagnant_count + 1 : 0;
       if (stagnant_count >= kStagnationWindow) {
@@ -1832,7 +2026,8 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     }
     obj_prev = obj;
 
-    if (feascond < feas_tol && gradcond < feas_tol && compcond < comp_tol) {
+    if (feascond < feas_tol && raw_feascond < feas_tol &&
+        gradcond < feas_tol && compcond < comp_tol) {
       converged = true;
       out.converged = true;
       out.status = "converged";
@@ -1847,23 +2042,35 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   // with complementarity already inside comp_tol.  The status string states
   // the relaxation honestly; this is NOT the strict tolerance.
   const double acceptable_tol = 100.0 * feas_tol;
+  const double acceptable_raw_feas_tol = 100.0 * feas_tol;
   if (!converged && opt.verbose) {
     HACDCPF_LOG_DEBUG("[parity-ipm] best iterate at iter={} feas={} grad={} comp={} metric={}",
               best_iter, best_feas, best_grad, best_comp, best_metric);
   }
-  if (!converged && best_feas < acceptable_tol && best_grad < acceptable_tol &&
-      best_comp < comp_tol) {
-    x = best_x;
-    lambda = best_lambda;
-    mu = best_mu;
-    z = best_z;
-    feascond = best_feas;
-    gradcond = best_grad;
-    compcond = best_comp;
+  const bool current_acceptable =
+      feascond < acceptable_tol && raw_feascond < acceptable_raw_feas_tol &&
+      gradcond < acceptable_tol && compcond < comp_tol;
+  const bool best_acceptable =
+      best_feas < acceptable_tol && best_raw_feas < acceptable_raw_feas_tol &&
+      best_grad < acceptable_tol && best_comp < comp_tol;
+  if (!converged && (current_acceptable || best_acceptable)) {
+    const bool use_best = best_acceptable &&
+                          (!current_acceptable || best_raw_feas < raw_feascond);
+    if (use_best) {
+      x = best_x;
+      lambda = best_lambda;
+      mu = best_mu;
+      z = best_z;
+      feascond = best_feas;
+      raw_feascond = best_raw_feas;
+      gradcond = best_grad;
+      compcond = best_comp;
+      out.iterations = best_iter;
+    }
     converged = true;
     out.converged = true;
-    out.status = "converged (acceptable tolerance, best iterate)";
-    out.iterations = best_iter;
+    out.status = use_best ? "converged (acceptable tolerance, best iterate)"
+                          : "converged (acceptable tolerance, final iterate)";
   }
 
   // Dual least-squares polish (docs §12): re-estimate (λ, μ) at the final
@@ -1909,6 +2116,7 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
         gradcond = stat_ls;
       }
       if (!converged && feascond < acceptable_tol &&
+          raw_feascond < acceptable_raw_feas_tol &&
           compcond < comp_tol && stat_ls < acceptable_tol) {
         converged = true;
         out.converged = true;
@@ -1982,12 +2190,19 @@ bool homotopy_tangent(const Problem& prob,
   assemble_inequalities(prob, x, xmin, xmax, lb_cols, ub_cols, rh, dh);
   const int meq = static_cast<int>(jg.rows());
   const int niq = static_cast<int>(dh.rows());
-  if (niq == 0) return false;
+  // A tangent is optional continuation metadata.  A solver result from an
+  // early/failed path may legitimately omit one of the primal-dual blocks;
+  // never turn that into an Eigen block assertion while solving the OPF.
+  if (x.size() != n || lambda.size() != meq || z.size() != niq ||
+      mu.size() != niq || niq == 0) {
+    return false;
+  }
 
   // Lagrangian Hessian of the t-scaled problem (the path curvature at w(t)).
   const int m_nonlin = prob.cidx.n_ineq_nonlin;
   Eigen::VectorXd nu_buf;
   const Eigen::VectorXd* nu_ptr = nullptr;
+  if (m_nonlin > mu.size()) return false;
   if (m_nonlin > 0) {
     nu_buf = mu.head(m_nonlin);
     nu_ptr = &nu_buf;
@@ -2000,6 +2215,11 @@ bool homotopy_tangent(const Problem& prob,
 
   // Assemble + factor with Wächter–Biegler inertia control (mirrors the IPM).
   SparseKKTCache cache;
+  cache.pure_ac = prob.data.dc_buses.empty() &&
+                  prob.data.dc_branches.empty() &&
+                  prob.data.converters.empty() &&
+                  prob.data.dcdc_converters.empty() &&
+                  prob.data.energy_routers.empty();
   const double lxx_norm = std::max(1.0, Lxx.coeffs().cwiseAbs().maxCoeff());
   const double delta_c = 1e-8 * lxx_norm;
   double delta_w = 0.0;

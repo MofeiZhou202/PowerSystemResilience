@@ -16,9 +16,51 @@ enum class RPOObjective {
   Combined,              ///< weighted combination of voltage deviation + loss
 };
 
+/// Inner continuous NLP objective, decoupled from the RPO objective that is
+/// *evaluated* for the discrete ranking.  This separation exists because the
+/// stripped physical objectives (voltage deviation / active loss) stall the
+/// parity IPM on large/stiff grids, while an economic dispatch at unit
+/// marginal cost (== min total generation == min loss) inherits the economic
+/// path's robust machinery and converges.
+enum class RPOInnerObjective {
+  /// Inner IPM minimises the RPO objective directly.  Preferred on small /
+  /// medium grids where it converges and lets generator reactive power help
+  /// the voltage profile.
+  MatchRPO,
+  /// Inner IPM minimises total generation (economic dispatch at unit marginal
+  /// cost).  Robust on large grids; the discrete tap/shunt search then
+  /// corrects the voltage / loss profile on top of the feasible base point.
+  LossEconomic,
+};
+
 /// Options for the MINLP Reactive Power Optimization solver.
 struct RPOOptions {
   RPOObjective objective{RPOObjective::MinVoltageDeviation};
+
+  /// Inner NLP objective (see RPOInnerObjective).  MinActiveLoss always uses
+  /// LossEconomic (it is mathematically identical to loss minimisation).
+  /// For MinVoltageDeviation / Combined the default MatchRPO is upgraded to
+  /// LossEconomic automatically when the baseline fails to converge, provided
+  /// robust_inner_on_failure is set.
+  RPOInnerObjective inner_nlp_objective{RPOInnerObjective::MatchRPO};
+
+  /// When the MatchRPO baseline fails on a vdev/Combined run, upgrade the
+  /// inner objective to LossEconomic (robust) and re-solve instead of failing
+  /// the whole RPO.  This is the mechanism that makes vdev-class RPO usable
+  /// on 3000+-bus grids.
+  bool robust_inner_on_failure{true};
+
+  /// Above this AC-bus count a vdev/Combined run starts directly on the
+  /// LossEconomic inner instead of attempting MatchRPO first.  Rationale:
+  /// the stripped voltage-deviation objective does not converge on large /
+  /// stiff grids, and *discovering* that failure is expensive (the parity IPM
+  /// grinds to its iteration budget, then the Ipopt second leg grinds again,
+  /// ~8 min at 3000 buses before the upgrade could trigger).  Starting on the
+  /// robust inner avoids the doomed match attempt.  Below the threshold
+  /// MatchRPO is still tried first (it converges and lets generator reactive
+  /// power help the voltage profile), with the failure upgrade as backstop.
+  /// Set to 0 to always start on MatchRPO; MinActiveLoss is unaffected.
+  int robust_inner_min_buses{1000};
 
   /// Weight applied to the voltage-deviation term when objective is Combined.
   double vdev_weight{1.0};
@@ -38,6 +80,21 @@ struct RPOOptions {
   /// Retained for source compatibility; discrete values are represented as int.
   double int_tol{1e-5};
 
+  // ---- Parallel discrete evaluation ----
+  /// Threads used to evaluate independent discrete candidates (OLTC tap /
+  /// switchable-shunt settings) in each search wave.  Each candidate is a full
+  /// AC OPF solve; evaluating a batch in parallel is near-linear on the search
+  /// phase.  0 = auto (hardware_concurrency, clamped to the batch size), 1 =
+  /// sequential.  Forced to 1 on hybrid AC/DC grids: those drive MUMPS, which
+  /// keeps mutable state in Fortran modules and is serialised by a process-wide
+  /// mutex (correct but not faster), so threading only adds overhead there.
+  /// Pure-AC grids use KLU (per-instance, thread-safe); the rare KLU→MUMPS
+  /// escalation is serialised by the same mutex, so parallel stays safe.
+  /// Note: parallel changes the search from Gauss-Seidel to Jacobi (incumbent
+  /// updated between waves, not within), so the trajectory — and possibly the
+  /// local optimum found — can differ slightly from the sequential path.
+  int num_threads{0};
+
   // Retained for compatibility with older B&B-backed builds; the current local
   // search does not consume these strategy selectors.
   engine::BranchingStrategy branching{engine::BranchingStrategy::Pseudocost};
@@ -50,6 +107,15 @@ struct RPOOptions {
   // IEEE24-3area-expanded); easy cases finish far earlier and never consume
   // the budget.
   int    max_ipm_iter{2000};
+  /// Fail-fast iteration cap for SEARCH evaluations (not the baseline).  A
+  /// warm-chained perturbation that is a *good* candidate converges in a few
+  /// iterations (measured 2–7 at 3000 buses); a candidate that grinds far past
+  /// this cap is a bad/infeasible one, and the discrete search is better off
+  /// rejecting it (obj = infeasible) than burning ~max_ipm_iter iterations on
+  /// it — a single such grind (~150 s at 2000 iters) overruns the whole RPO
+  /// time budget because the budget can only be checked *between* solves.
+  /// Set ≤ 0 to leave search evaluations uncapped (use max_ipm_iter).
+  int    search_ipm_iter{200};
   double ipm_tol{1e-6};
   /// Scaled KKT stationarity tolerance.  Kept separate from physical
   /// feasibility because large OPF objectives require a looser dual target.
@@ -61,6 +127,12 @@ struct RPOOptions {
   /// budget (measured on IEEE24-3area-expanded), at a fraction of the time.
   /// Set to Ipopt for bit-exact comparison with older results.
   ACOPFSolverBackend inner_solver_backend{ACOPFSolverBackend::ParityIPM};
+
+  /// One-time robust fallback for the economic seed on large/stiff grids
+  /// (3000+ buses): when the direct parity seed does not converge, follow the
+  /// economic objective homotopy to a certified endpoint (one-time cost ~1–2
+  /// min at 3000 buses) instead of failing the whole RPO.
+  bool seed_homotopy_on_failure{true};
 
   /// Limit each selected OLTC to this many positions above/below its current
   /// position.  A negative value exposes the full nameplate range; zero holds
@@ -181,6 +253,8 @@ struct RPOResult {
   std::string algorithm{"discrete_coordinate_search_with_ac_opf"};
   bool globally_certified{false};
   bool optimality_gap_available{false};
+  RPOInnerObjective effective_inner_nlp_objective{
+      RPOInnerObjective::MatchRPO};
 
   // Bus-level results
   std::vector<double> vm_before;

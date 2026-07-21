@@ -49,10 +49,10 @@ ctest --preset windows-vcpkg-release
 | 三相混合 PF / OPF | 活跃研发中，GUI 已接入 | `powerflow::solve_three_phase_hybrid_pf` 与 `opf::phase_hybrid` 已接入 `/xjtu/` 潮流/OPF 工具栏；OPF 提供 Full 与 GraphReduced（稀疏 Kron 降阶）、Ipopt/NativeIPM 双后端。GUI rich-model 适配范围见下文。 |
 | 电压稳定 | 已实现 | 连续潮流（CPF）P-V 曲线与 VSI 指标。 |
 | 图建模、网络降阶、重构 | 已实现并持续回归 | 支持连通性、开关收缩、Kron/series/pendant/sparse-Kron reduction、ONR。 |
-| 可靠性与弹性分析 | 已实现并持续回归 | 包含 MC、FMEA（含 failure-mode 目录路径与信息物理 Level 1 调节）、三阶段可靠性与配电弹性分析（含 MIP 路径）。 |
+| 可靠性与弹性分析 | 已实现并持续回归 | 包含 MC、FMEA（含 failure-mode 目录路径与信息物理 Level 1 调节）、三阶段可靠性与配电弹性分析（含 MIP 路径），以及有限恢复动作目录的 cyber/MESS 可执行性--多保真动态 oracle 主从循环；后者明确区分采样常数与全局证明。 |
 | 三相与短路分析 | 已实现并持续回归 | 三相 NR 与 AC/DC 短路分析（IEC 60909 简化与详细路径、DC 故障水平估计）均有独立测试族。 |
 | 谐波分析 | 已实现（持续增强） | 频域穿透、Newton 非线性、三相 abc 与 AC/DC 耦合谐波潮流，频扫/谐振检测与 IEEE 519 / GB/T 14549 合规校核。 |
-| 暂态动力学 | 已实现基础框架（持续增强） | 动态建模、事件、7 类求解器（含 MassMatrixDae 同时式 DAE）、DAE 诊断、小信号与频率观测；设备模型覆盖同步机/调速器/励磁/PSS、GFM/GFL 逆变器、DER 与 IEEE 1547 保护。 |
+| 暂态动力学 | 已实现基础框架（持续增强） | 动态建模、事件、7 类求解器（含 MassMatrixDae 同时式 DAE）、DAE 诊断、小信号与频率观测；设备模型覆盖同步机/调速器/励磁/PSS、GFM/GFL 逆变器、DER 与 IEEE 1547 保护。显式三相网络自动启用 GFL 逐相电流状态与相域限流，GFM 采用序耦合 Norton 端口和最大相电流限流；三线制默认阻断零序电流。 |
 | 时序与年度生产模拟 | 已实现并持续回归 | UC MILP → AC-OPF → PF 校验流水线；年度分层分解（支持按日并行）、多年生命周期仿真与容量扫描对比。 |
 | 电力市场 | 已实现（AC-only 垂直切片） | 日前 SCUC → 固定组合 SCED/LMP → LODF N-1 安全割 → AC 认证 → 结算/uplift；实时双结算与重复博弈；混合 AC/DC 资产显式拒绝。 |
 | 园区综合能源 | 已实现 | 电-热-氢-燃料多能流 MILP 调度（CHP、热泵、电解/燃料电池、多层氢储能、CCUS、碳预算）。 |

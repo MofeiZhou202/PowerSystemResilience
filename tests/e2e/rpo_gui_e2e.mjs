@@ -210,7 +210,17 @@ async function main() {
         case300.tap_pos_before?.some(value => Math.abs(value) > 4) ||
         case300.tap_pos_after?.some(value => Math.abs(value) > 4) ||
         case300.cross_validation?.pf_check_applicable !== false) {
-      throw new Error(`case300 RPO response contract failed: ${JSON.stringify(case300)}`);
+      throw new Error(`case300 RPO response contract failed: ${JSON.stringify({
+        converged: case300.converged,
+        vm_count: case300.vm_after?.length,
+        qg_count: case300.qg_after?.length,
+        n_taps: case300.n_taps,
+        max_tap_move: case300.control_inventory?.max_tap_move,
+        tap_before: case300.tap_pos_before,
+        tap_after: case300.tap_pos_after,
+        inner_objective_effective: case300.inner_objective_effective,
+        cross_validation: case300.cross_validation,
+      })}`);
     }
     await page.waitForFunction(() =>
       document.querySelector('#resultsContent')?.dataset.activeGroup === 'rpo' &&

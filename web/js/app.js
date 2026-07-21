@@ -445,7 +445,7 @@ const App = (() => {
     if (busy) {
       backendText = statusText.includes('同步') ? '后端: 同步中' : '后端: 运行中';
       backendState = 'busy';
-    } else if (analysisTaskManager().settling || _taskStatus.state === 'cancelled') {
+    } else if (analysisTaskManager().settling) {
       backendText = '后端: 可能收尾';
       backendState = 'warn';
     } else if (_lastStatusType === 'error') {
@@ -2061,6 +2061,14 @@ const App = (() => {
         log(`${label}：已取消前端等待，本次返回结果将被忽略；后端可能仍在收尾`, 'warn');
         setStatus(`${label}已取消等待`, 'cancelled');
       },
+      cancelBackend: async () => {
+        const response = await fetch(`${API_BASE}/api/session/cancel`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        if (!response.ok) throw new Error(`cancel failed: HTTP ${response.status}`);
+      },
       waitForIdle: () => waitForBackendIdle(30000),
     });
     return _analysisTaskManager;
@@ -2993,6 +3001,66 @@ const App = (() => {
     } catch (err) {
       log(`导出MATPOWER失败: ${err.message}`, 'error');
       setStatus('导出失败', 'error');
+    }
+  }
+
+  async function exportBpaDat() {
+    setStatus('导出BPA/DSP DAT中...', 'busy');
+    try {
+      const ok = await syncToBackend();
+      if (!ok) { setStatus('导出失败', 'error'); return; }
+      const data = await apiPost('/api/session/export_bpa_dat', {});
+      if (!data || data.error) throw new Error((data && data.error) || '导出失败');
+      const text = data.dat_string || '';
+      const filename = `${data.name || 'system'}.dat`;
+      downloadTextFile(filename, text, 'text/plain;charset=us-ascii');
+      log(`已导出BPA/DSP DAT: ${filename}`, 'success');
+      showModelIoStatus('BPA/DSP DAT 导出完成', [
+        ['文件', filename],
+        ['格式', data.format || 'PSD-BPA/DSP fixed-column DAT'],
+        ['大小', `${text.length} bytes`],
+      ], { subtitle: '导出当前系统可由BPA基础卡片表达的稳态子集', warnings: data.warnings || [] });
+      setStatus('就绪');
+    } catch (err) {
+      log(`导出BPA/DSP DAT失败: ${err.message}`, 'error');
+      setStatus('导出失败', 'error');
+    }
+  }
+
+  async function loadBpaDat(file) {
+    if (!file) return;
+    setStatus('导入BPA/DSP DAT...', 'busy');
+    try {
+      // Keep legacy GBK bytes intact; File.text() would corrupt fixed columns.
+      const response = await fetch(`${API_BASE}/api/session/load_bpa_dat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: await file.arrayBuffer(),
+      });
+      const data = await parseJsonResponse(response);
+      if (!response.ok || data.error) {
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
+      applyLoadedSystem(data, 'BPA/DSP DAT');
+      const report = data._bpa_import_report || {};
+      log(`已导入BPA/DSP DAT: ${file.name}`, 'success');
+      showModelIoStatus('BPA/DSP DAT 导入完成', [
+        ['文件', file.name],
+        ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+        ['DC母线', data.counts?.dc_buses ?? data.dc_buses ?? ''],
+        ['换流器', data.counts?.vsc_converters ?? data.vsc_converters ?? ''],
+        ['跳过记录', report.skipped ?? 0],
+      ], {
+        subtitle: `BPA/DSP固定列模型已同步到后端${noteHeadlessAfterLoad() || '并更新画布'}`,
+        warnings: data._io_warnings || [],
+      });
+      setStatus('就绪');
+      return data;
+    } catch (err) {
+      log(`导入BPA/DSP DAT失败: ${err.message}`, 'error');
+      setStatus('加载失败', 'error');
+      return null;
     }
   }
 
@@ -4351,6 +4419,7 @@ const App = (() => {
     return withAnalysisQueue(async () => {
       setStatus('最优潮流计算中...', 'busy');
       const solver = document.getElementById('opfSolver')?.value || 'parity';
+      const robustStrategy = solver === 'robust';
       const checkConsistency = !!(document.getElementById('opfCheckConsistency')?.checked);
       const monolithicPhaseHybrid = networkModel === 'three_phase_hybrid';
       const constraints = {
@@ -4370,7 +4439,10 @@ const App = (() => {
         barrier_mu_reduction: pfNumber('opfBarrierReduction', 0.2),
         regularization: pfNumber('opfRegularization', 1e-6),
         ac_eval_threads: pfInteger('opfAcEvalThreads', 1),
-        allow_fallback: pfBool('opfAllowFallback', true),
+        allow_fallback: robustStrategy || pfBool('opfAllowFallback', true),
+        ac_pf_warm_start: robustStrategy || pfBool('opfAcPfWarmStart', false),
+        objective_homotopy: robustStrategy || pfBool('opfObjectiveHomotopy', false),
+        homotopy_dt0: pfNumber('opfHomotopyDt0', 0.10),
         verbose: pfBool('opfVerbose', false),
       };
       const threePhase = {
@@ -4564,12 +4636,19 @@ const App = (() => {
 
     // Summary
     const sumDiv = document.getElementById('opfSummary');
+    const effectiveOptions = data.options_effective || {};
     if (sumDiv) {
       sumDiv.innerHTML = `
         <div class="result-item"><span class="result-label">求解器</span>
           <span class="result-value">${escapeHtml(data.solver || '')}</span></div>
+        <div class="result-item"><span class="result-label">求解策略</span>
+          <span class="result-value">${escapeHtml(data.strategy_effective || data.strategy_requested || data.solver || '-')}</span></div>
         <div class="result-item"><span class="result-label">实际后端</span>
           <span class="result-value">${escapeHtml(data.solver_backend || '-')}</span></div>
+        <div class="result-item"><span class="result-label">自动回退</span>
+          <span class="result-value">${data.fallback_used ? '已触发' : '未触发'}</span></div>
+        <div class="result-item"><span class="result-label">稳健启动</span>
+          <span class="result-value">AC热启动=${effectiveOptions.ac_pf_warm_start ? '开' : '关'}；目标同伦=${effectiveOptions.objective_homotopy ? '开' : '关'}</span></div>
         <div class="result-item"><span class="result-label">收敛</span>
           <span class="result-value ${data.converged ? 'result-converged' : 'result-failed'}">
             ${data.converged ? '✓ 是' : '✗ 否'}</span></div>
@@ -15839,6 +15918,14 @@ const App = (() => {
     document.getElementById('btnIoImportJson')?.addEventListener('click', () => {
       document.getElementById('fileImportJson')?.click();
     });
+    document.getElementById('btnIoImportBpaDat')?.addEventListener('click', () => {
+      document.getElementById('fileImportBpaDat')?.click();
+    });
+    document.getElementById('fileImportBpaDat')?.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      e.target.value = '';
+      if (file) loadBpaDat(file);
+    });
     document.getElementById('btnIoImportEtapXlsx')?.addEventListener('click', () => {
       document.getElementById('fileImportEtapXlsx')?.click();
     });
@@ -15904,6 +15991,7 @@ const App = (() => {
     document.getElementById('btnIoNewSystem')?.addEventListener('click', createNewSystem);
     document.getElementById('btnIoExportJson')?.addEventListener('click', exportJson);
     document.getElementById('btnIoExportMatpower')?.addEventListener('click', exportMatpower);
+    document.getElementById('btnIoExportBpaDat')?.addEventListener('click', exportBpaDat);
     document.getElementById('btnIoExportEtap')?.addEventListener('click', exportEtap);
     document.getElementById('btnIoExportEtapXml')?.addEventListener('click', exportEtapXml);
     document.getElementById('btnIoExportCimDist')?.addEventListener('click', exportCimDist);
@@ -21115,6 +21203,7 @@ const App = (() => {
     hideCaseLoadModal,
     loadBuiltinCase,
     loadMatpowerCase,
+    loadBpaDat,
     runPowerFlow,
     runThreePhaseHybridPowerFlow,
     runOpf,

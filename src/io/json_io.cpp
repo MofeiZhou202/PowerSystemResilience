@@ -2619,6 +2619,7 @@ static json mobile_storage_to_json(const MobileStorage& s) {
   j["current_cycles"] = s.current_cycles;
   j["soh"] = s.soh;
   j["is_mobile"] = s.is_mobile;
+  j["grid_forming"] = s.grid_forming;
   j["status"] = mobile_storage_status_str(s.status);
   j["current_location"] = s.current_location;
   j["target_bus"] = s.target_bus;
@@ -2653,6 +2654,7 @@ static MobileStorage mobile_storage_from_json(const json& j) {
   s.current_cycles = jget(j, "current_cycles", 0);
   s.soh = jget(j, "soh", 1.0);
   s.is_mobile = jget(j, "is_mobile", true);
+  s.grid_forming = jget(j, "grid_forming", false);
   s.status = mobile_storage_status_from_str(jget<std::string>(j, "status", "Stationary"));
   s.current_location = jget<std::string>(j, "current_location", "");
   s.target_bus = jget(j, "target_bus", 0);

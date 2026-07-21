@@ -252,6 +252,7 @@ TopoReconfResult run_topology_reconfiguration(
   std::vector<double> edge_rate(nl + nl_vsc, 0.0);
   std::vector<bool> edge_status(nl + nl_vsc, true);  // α (initial in_service)
   std::vector<bool> edge_switchable(nl + nl_vsc, false);
+  std::vector<bool> edge_participates(nl + nl_vsc, true);
   std::vector<int> edge_operation_cost(nl + nl_vsc, 1);
   std::vector<int> edge_orig_idx(nl + nl_vsc, -1);
 
@@ -421,6 +422,46 @@ TopoReconfResult run_topology_reconfiguration(
     edge_switchable[e] = has_explicit_switchables && is_explicit_vsc_switchable(vsc.index);
   }
 
+  // Some rich models attach switchgear directly across the same two buses as
+  // the physical line it controls. The canonical projection preserves both
+  // for attribution, but counting the switchgear equivalent as a second
+  // conductive corridor creates a false parallel edge and can make a radial
+  // topology impossible even with every controllable device open. Keep these
+  // overlay branches for status reporting while excluding them from the
+  // topology and LinDistFlow graphs. Standalone ties remain participating.
+  for (int edge = 0; edge < nl_ac; ++edge) {
+    const auto origin = origin_by_branch.find(edge_orig_idx[edge]);
+    if (origin == origin_by_branch.end() ||
+        (origin->second.origin_type != BranchOriginType::Switch &&
+         origin->second.origin_type != BranchOriginType::CircuitBreaker)) {
+      continue;
+    }
+    if (edge_from[edge] == edge_to[edge]) {
+      edge_participates[edge] = false;
+      continue;
+    }
+    for (int candidate = 0; candidate < nl_ac; ++candidate) {
+      if (candidate == edge) continue;
+      const auto candidate_origin =
+          origin_by_branch.find(edge_orig_idx[candidate]);
+      const bool candidate_is_device =
+          candidate_origin != origin_by_branch.end() &&
+          (candidate_origin->second.origin_type == BranchOriginType::Switch ||
+           candidate_origin->second.origin_type ==
+               BranchOriginType::CircuitBreaker);
+      if (candidate_is_device) continue;
+      const bool same_terminals =
+          (edge_from[edge] == edge_from[candidate] &&
+           edge_to[edge] == edge_to[candidate]) ||
+          (edge_from[edge] == edge_to[candidate] &&
+           edge_to[edge] == edge_from[candidate]);
+      if (same_terminals) {
+        edge_participates[edge] = false;
+        break;
+      }
+    }
+  }
+
   // -------------------------------------------------------------------
   // Fault status ζ: 1=available, 0=faulted
   // -------------------------------------------------------------------
@@ -473,6 +514,7 @@ TopoReconfResult run_topology_reconfiguration(
     out.component_by_bus.assign(static_cast<size_t>(bus_count), -1);
     std::vector<std::vector<int>> adj(static_cast<size_t>(bus_count));
     for (int e = edge_begin; e < edge_end; ++e) {
+      if (!edge_participates[e]) continue;
       if (zeta[e] < 0.5 || (!edge_status[e] && !edge_switchable[e])) continue;
       const int u = edge_from[e] - bus_begin;
       const int v = edge_to[e] - bus_begin;
@@ -634,6 +676,7 @@ TopoReconfResult run_topology_reconfiguration(
   {
     std::vector<std::vector<int>> potential_adj(static_cast<size_t>(nb));
     for (int edge = 0; edge < nl + nl_vsc; ++edge) {
+      if (!edge_participates[edge]) continue;
       if (zeta[edge] < 0.5 || !edge_status[edge])
         continue;
       const int from = edge_from[edge], to = edge_to[edge];
@@ -725,7 +768,19 @@ TopoReconfResult run_topology_reconfiguration(
     lb[idx.beta(i)] = 0.0;
     ub[idx.beta(i)] = 1.0;
 
-    if (zeta[i] < 0.5) {
+    if (!edge_participates[i]) {
+      const double fixed = edge_status[i] ? 1.0 : 0.0;
+      lb[idx.beta(i)] = fixed;
+      ub[idx.beta(i)] = fixed;
+      if (i < nl) {
+        lb[idx.Fij(i)] = 0.0;
+        ub[idx.Fij(i)] = 0.0;
+      } else {
+        lb[idx.Fij_vsc(i - nl)] = 0.0;
+        ub[idx.Fij_vsc(i - nl)] = 0.0;
+      }
+      ++n_beta_fixed;
+    } else if (zeta[i] < 0.5) {
       lb[idx.beta(i)] = 0.0; ub[idx.beta(i)] = 0.0;
       if (i < nl) { lb[idx.Fij(i)] = 0.0; ub[idx.Fij(i)] = 0.0; }
       else        { lb[idx.Fij_vsc(i-nl)] = 0.0; ub[idx.Fij_vsc(i-nl)] = 0.0; }
@@ -766,6 +821,7 @@ TopoReconfResult run_topology_reconfiguration(
   {
     std::vector<std::vector<int>> tree_adj(nb);
     for (int i = 0; i < nl + nl_vsc; ++i) {
+      if (!edge_participates[i]) continue;
       if (edge_status[i] && zeta[i] > 0.5 &&
           edge_from[i] >= 0 && edge_to[i] >= 0) {
         tree_adj[edge_from[i]].push_back(edge_to[i]);
@@ -809,6 +865,36 @@ TopoReconfResult run_topology_reconfiguration(
                      n_comp, n_comp_fixed, n_beta_free);
       }
     }
+  }
+
+  if (opt.verbose) {
+    const auto log_domain_cardinality = [&](const char* domain,
+                                            const DomainComponents& components,
+                                            int bus_begin, int edge_begin,
+                                            int edge_end) {
+      for (size_t component = 0; component < components.roots.size(); ++component) {
+        int fixed_closed = 0;
+        int closable = 0;
+        for (int edge = edge_begin; edge < edge_end; ++edge) {
+          if (!edge_participates[edge]) continue;
+          const int local_from = edge_from[edge] - bus_begin;
+          if (local_from < 0 ||
+              components.component_by_bus[local_from] !=
+                  static_cast<int>(component)) {
+            continue;
+          }
+          if (lb[idx.beta(edge)] > 0.5) ++fixed_closed;
+          if (ub[idx.beta(edge)] > 0.5) ++closable;
+        }
+        spdlog::info(
+            "[拓扑重构] {}分量{}: buses={}, tree_edges={}, fixed_closed={}, closable={}",
+            domain, component, components.sizes[component],
+            std::max(0, components.sizes[component] - 1), fixed_closed,
+            closable);
+      }
+    };
+    log_domain_cardinality("AC", ac_components, 0, 0, nl_ac);
+    log_domain_cardinality("DC", dc_components, nb_ac, nl_ac, nl);
   }
 
   // -------------------------------------------------------------------
@@ -867,13 +953,25 @@ TopoReconfResult run_topology_reconfiguration(
   // -------------------------------------------------------------------
   if (opt.enable_pf) {
     for (int i = 0; i < nl; ++i) {
-      lb[idx.Pij(i)] = -edge_rate[i]; ub[idx.Pij(i)] = edge_rate[i];
+      if (edge_participates[i]) {
+        lb[idx.Pij(i)] = -edge_rate[i];
+        ub[idx.Pij(i)] = edge_rate[i];
+      } else {
+        lb[idx.Pij(i)] = 0.0;
+        ub[idx.Pij(i)] = 0.0;
+      }
     }
     for (int i = 0; i < nl_vsc; ++i) {
       lb[idx.Pij_vsc(i)] = -Smax_vsc[i]; ub[idx.Pij_vsc(i)] = Smax_vsc[i];
     }
     for (int i = 0; i < nl_ac; ++i) {
-      lb[idx.Qij(i)] = -edge_rate[i]; ub[idx.Qij(i)] = edge_rate[i];
+      if (edge_participates[i]) {
+        lb[idx.Qij(i)] = -edge_rate[i];
+        ub[idx.Qij(i)] = edge_rate[i];
+      } else {
+        lb[idx.Qij(i)] = 0.0;
+        ub[idx.Qij(i)] = 0.0;
+      }
     }
     for (int i = 0; i < nl_vsc; ++i) {
       lb[idx.Qij_vsc(i)] = -Smax_vsc[i]; ub[idx.Qij_vsc(i)] = Smax_vsc[i];
@@ -967,6 +1065,7 @@ TopoReconfResult run_topology_reconfiguration(
   // DC commodities so a path through another electrical domain cannot hide a
   // cycle or disconnected component.
   for (int i = 0; i < nl; ++i) {
+    if (!edge_participates[i]) continue;
     if (edge_from[i] < 0) continue;
     eq_trips.emplace_back(eq_row + edge_from[i], idx.Fij(i),  1.0);
     eq_trips.emplace_back(eq_row + edge_to[i],   idx.Fij(i), -1.0);
@@ -974,6 +1073,7 @@ TopoReconfResult run_topology_reconfiguration(
   if (!split) {
     for (int i = 0; i < nl_vsc; ++i) {
       int e = nl + i;
+      if (!edge_participates[e]) continue;
       if (edge_from[e] < 0) continue;
       eq_trips.emplace_back(eq_row + edge_from[e], idx.Fij_vsc(i),  1.0);
       eq_trips.emplace_back(eq_row + edge_to[e],   idx.Fij_vsc(i), -1.0);
@@ -1004,7 +1104,8 @@ TopoReconfResult run_topology_reconfiguration(
   // not count as AC or DC line edges.
   if (!split) {
     for (int i = 0; i < nl + nl_vsc; ++i)
-      eq_trips.emplace_back(eq_row, idx.beta(i), 1.0);
+      if (edge_participates[i])
+        eq_trips.emplace_back(eq_row, idx.beta(i), 1.0);
     for (int g = 0; g < ng; ++g)
       eq_trips.emplace_back(eq_row, idx.gamma(g), 1.0);
     beq[eq_row] = static_cast<double>(nb);
@@ -1012,6 +1113,7 @@ TopoReconfResult run_topology_reconfiguration(
   } else {
     for (size_t cidx = 0; cidx < ac_components.roots.size(); ++cidx) {
       for (int i = 0; i < nl_ac; ++i) {
+        if (!edge_participates[i]) continue;
         const int local_from = edge_from[i];
         if (local_from >= 0 && ac_components.component_by_bus[local_from] == static_cast<int>(cidx))
           eq_trips.emplace_back(eq_row, idx.beta(i), 1.0);
@@ -1023,6 +1125,7 @@ TopoReconfResult run_topology_reconfiguration(
     if (!opt.allow_dc_mesh && nb_dc > 0) {
       for (size_t cidx = 0; cidx < dc_components.roots.size(); ++cidx) {
         for (int i = nl_ac; i < nl; ++i) {
+          if (!edge_participates[i]) continue;
           const int local_from = edge_from[i] - nb_ac;
           if (local_from >= 0 && dc_components.component_by_bus[local_from] == static_cast<int>(cidx))
             eq_trips.emplace_back(eq_row, idx.beta(i), 1.0);
@@ -1036,12 +1139,14 @@ TopoReconfResult run_topology_reconfiguration(
   // (P1) Active power balance
   if (opt.enable_pf) {
     for (int i = 0; i < nl; ++i) {
+      if (!edge_participates[i]) continue;
       if (edge_from[i] < 0) continue;
       eq_trips.emplace_back(eq_row + edge_from[i], idx.Pij(i),  1.0);
       eq_trips.emplace_back(eq_row + edge_to[i],   idx.Pij(i), -1.0);
     }
     for (int i = 0; i < nl_vsc; ++i) {
       int e = nl + i;
+      if (!edge_participates[e]) continue;
       if (edge_from[e] < 0) continue;
       eq_trips.emplace_back(eq_row + edge_from[e], idx.Pij_vsc(i),  1.0);
       eq_trips.emplace_back(eq_row + edge_to[e],   idx.Pij_vsc(i), -1.0);
@@ -1057,6 +1162,7 @@ TopoReconfResult run_topology_reconfiguration(
 
     // (P2) Reactive power balance (AC buses only)
     for (int i = 0; i < nl_ac; ++i) {
+      if (!edge_participates[i]) continue;
       int fi = edge_from[i], ti = edge_to[i];
       if (fi < 0) continue;
       if (fi < nb_ac) eq_trips.emplace_back(eq_row + fi, idx.Qij(i),  1.0);
@@ -1064,6 +1170,7 @@ TopoReconfResult run_topology_reconfiguration(
     }
     for (int i = 0; i < nl_vsc; ++i) {
       int e = nl + i;
+      if (!edge_participates[e]) continue;
       if (edge_from[e] >= 0 && edge_from[e] < nb_ac)
         eq_trips.emplace_back(eq_row + edge_from[e], idx.Qij_vsc(i),  1.0);
       if (edge_to[e] >= 0 && edge_to[e] < nb_ac)
@@ -1139,7 +1246,10 @@ TopoReconfResult run_topology_reconfiguration(
       return std::min(opt.big_m_v, std::max(0.1, m)); };
     for (int i = 0; i < nl; ++i) {
       int fi = edge_from[i], ti = edge_to[i];
-      if (fi < 0) { ineq_row += 2; continue; }
+      if (!edge_participates[i] || fi < 0) {
+        ineq_row += 2;
+        continue;
+      }
       double r = edge_r[i], x = edge_x[i];
       const double bM = bigm_branch(i);
       // Upper
@@ -1303,6 +1413,7 @@ TopoReconfResult run_topology_reconfiguration(
     // Active tree adjacency
     std::vector<std::vector<std::pair<int,int>>> adj(nb);
     for (int i = 0; i < nl + nl_vsc; ++i) {
+      if (!edge_participates[i]) continue;
       if (edge_status[i] && zeta[i] > 0.5 &&
           edge_from[i] >= 0 && edge_to[i] >= 0) {
         adj[edge_from[i]].emplace_back(edge_to[i], i);
@@ -1338,6 +1449,7 @@ TopoReconfResult run_topology_reconfiguration(
     int best_edge = -1;
     double best_cost = 1e20;
     for (int i = 0; i < nl + nl_vsc; ++i) {
+      if (!edge_participates[i]) continue;
       if (!beta_free[i]) continue;
       if (edge_status[i]) continue;
       if (zeta[i] < 0.5 || edge_from[i] < 0) continue;
@@ -1382,7 +1494,9 @@ TopoReconfResult run_topology_reconfiguration(
       // Set β based on BFS spanning tree (exactly nb-1 edges for nb visited)
       // rather than all in-service edges, to satisfy T4: Σβ + Σγ = nb
       for (int i = 0; i < nl + nl_vsc; ++i)
-        x_heur[idx.beta(i)] = 0.0;
+        x_heur[idx.beta(i)] = edge_participates[i]
+                                    ? 0.0
+                                    : (edge_status[i] ? 1.0 : 0.0);
       for (int k = 1; k < static_cast<int>(bfs_order.size()); ++k) {
         int v = bfs_order[k];
         if (parent_edge[v] >= 0) x_heur[idx.beta(parent_edge[v])] = 1.0;

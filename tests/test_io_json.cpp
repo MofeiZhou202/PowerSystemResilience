@@ -787,6 +787,7 @@ TEST_CASE("JPC JSON round-trip: all 12 rich component types preserved",
 
     // ── 9. MobileStorage ─────────────────────────────────────────────────────
     MobileStorage ms; ms.bus=2; ms.e_rated_mwh=10.0; ms.in_service=true;
+    ms.grid_forming = true;
     sys.mobile_storage = {ms};
 
     // ── 10. VirtualPowerPlant ────────────────────────────────────────────────
@@ -817,6 +818,8 @@ TEST_CASE("JPC JSON round-trip: all 12 rich component types preserved",
     CHECK(rt.ac.chargers.size()          == sys.ac.chargers.size());
     CHECK(rt.ac.motors.size()            == sys.ac.motors.size());
     CHECK(rt.mobile_storage.size()       == sys.mobile_storage.size());
+    REQUIRE_FALSE(rt.mobile_storage.empty());
+    CHECK(rt.mobile_storage.front().grid_forming);
     CHECK(rt.vpps.size()                 == sys.vpps.size());
     CHECK(rt.dc.dcdc_converters.size()   == sys.dc.dcdc_converters.size());
     CHECK(rt.dc.dc_circuit_breakers.size() == sys.dc.dc_circuit_breakers.size());

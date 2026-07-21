@@ -52,6 +52,7 @@
 #include "hacdcpf/io/external_grid_io.hpp"
 #include "hacdcpf/io/evpt_demo_cases.hpp"
 #include "hacdcpf/io/evpt_json.hpp"
+#include "hacdcpf/io/bpa_io.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/io/bpa_io.hpp"
 #include "hacdcpf/io/powersimulationsdynamics_io.hpp"
@@ -8420,3746 +8421,130 @@ json system_summary(const hacdcpf::HybridPowerSystem& sys) {
   return s;
 }
 
-#if 0
-std::string make_index_html() {
-  return R"html(<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>Hybrid AC/DC Planning Studio</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
-<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
-<style>
-:root {
-  --bg: #f3efe7; --paper: #fffdf8; --ink: #17252a;
-  --accent: #0b6e4f; --accent-2: #2c8c99; --muted: #5a666a;
-  --warn: #b5651d; --line: #d6d0c4; --danger: #c34d4d;
-}
-*{box-sizing:border-box;}
-body{margin:0;font-family:"Space Grotesk",sans-serif;color:var(--ink);
-  background:radial-gradient(circle at 10% 10%,rgba(44,140,153,0.14),transparent 35%),
-    radial-gradient(circle at 90% 80%,rgba(11,110,79,0.16),transparent 30%),
-    linear-gradient(165deg,#f8f3eb 0%,#ece7de 100%);min-height:100vh;}
-header{padding:16px 28px;border-bottom:1px solid var(--line);
-  backdrop-filter:blur(4px);background:rgba(255,253,248,0.85);
-  position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:18px;}
-header h1{margin:0;font-size:clamp(1rem,2vw,1.5rem);letter-spacing:.03em;}
-header .subtitle{color:var(--muted);font-size:.85rem;}
-header .spacer{flex:1;}
-.badge{display:inline-block;padding:3px 10px;border-radius:6px;font-size:.75rem;
-  font-weight:600;letter-spacing:.04em;}
-.badge-green{background:#d9f2e6;color:#0b6e4f;}
-.badge-orange{background:#fde8d0;color:#b5651d;}
-.container{width:min(1440px,97vw);margin:14px auto 28px;}
-.top-bar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center;}
-.top-bar select,.top-bar input[type=file]{border-radius:10px;border:1px solid #cfc7ba;
-  padding:7px 10px;font:inherit;background:#fff;min-width:160px;}
-.top-bar .sep{width:1px;height:28px;background:var(--line);}
-.grid{display:grid;grid-template-columns:1fr;gap:14px;}
-.panel{background:var(--paper);border:1px solid var(--line);border-radius:14px;
-  box-shadow:0 10px 28px rgba(23,37,42,.08);}
-.tabs{display:flex;gap:6px;padding:8px 10px;border-bottom:1px solid var(--line);
-  overflow-x:auto;flex-wrap:nowrap;}
-.tab{padding:8px 14px;border-radius:8px;border:1px solid var(--line);
-  cursor:pointer;background:#fdf9f1;font-size:.85rem;white-space:nowrap;
-  transition:all .15s ease;}
-.tab.active{background:var(--accent-2);color:#fff;border-color:var(--accent-2);}
-.tab:hover:not(.active){background:#f0ede5;}
-.tabpane{display:none;padding:14px;animation:fadeIn .25s ease;}
-.tabpane.active{display:block;}
-@keyframes fadeIn{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:none;}}
-.counts{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;}
-.count-chip{background:#fff;border:1px solid var(--line);border-radius:8px;
-  padding:5px 12px;font-size:.8rem;display:flex;align-items:center;gap:6px;}
-.count-chip .n{font-weight:700;color:var(--accent);font-size:.95rem;}
-.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));
-  gap:8px;margin-bottom:10px;}
-.kpi{border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px 10px;}
-.kpi .v{font-size:1.1rem;font-weight:700;color:#15353a;}
-.kpi .l{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;}
-.stg{padding:4px 10px;border-radius:12px;font-size:.78rem;font-weight:600;background:#e9ecef;color:#6c757d;}
-.stg.done{background:#d4edda;color:#155724;} .stg.active{background:#cce5ff;color:#004085;animation:pulse 1s infinite;}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
-.dtable-wrap{max-height:420px;overflow:auto;border:1px solid var(--line);
-  border-radius:10px;margin-bottom:10px;}
-table.dtable{width:100%;border-collapse:collapse;font-size:.8rem;}
-table.dtable th{position:sticky;top:0;background:#f4f1ea;border-bottom:2px solid var(--line);
-  padding:7px 8px;text-align:left;font-weight:600;white-space:nowrap;z-index:2;}
-table.dtable td{padding:5px 8px;border-bottom:1px solid #eae6de;white-space:nowrap;}
-table.dtable tr:hover{background:#f9f6ef;}
-table.dtable input,table.dtable select{border:1px solid transparent;background:transparent;
-  font:inherit;padding:2px 4px;width:100%;border-radius:4px;min-width:60px;}
-table.dtable input:focus,table.dtable select:focus{border-color:var(--accent-2);
-  background:#fff;outline:none;}
-table.dtable .row-del{cursor:pointer;color:var(--danger);font-size:.9rem;
-  background:none;border:none;width:auto;min-width:auto;padding:2px;}
-.chart{height:360px;border:1px solid var(--line);border-radius:10px;
-  background:#fff;margin-top:8px;}
-button,.btn{border-radius:10px;border:none;padding:8px 14px;font:inherit;
-  cursor:pointer;font-weight:600;font-size:.85rem;transition:all .15s ease;}
-.btn-primary{background:var(--accent);color:#fff;}
-.btn-primary:hover{box-shadow:0 6px 14px rgba(11,110,79,.25);transform:translateY(-1px);}
-.btn-secondary{background:#fff;color:var(--accent);border:1px solid var(--accent);}
-.btn-secondary:hover{background:#f0fdf6;}
-.btn-accent{background:var(--accent-2);color:#fff;}
-.btn-accent:hover{box-shadow:0 6px 14px rgba(44,140,153,.25);}
-.btn-danger{background:var(--danger);color:#fff;}
-.btn-sm{padding:5px 10px;font-size:.78rem;}
-.btn-group{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;}
-.status{margin-top:8px;border:1px dashed #bcc5bf;border-radius:9px;padding:8px 10px;
-  font-size:.85rem;color:#2d3f43;background:#fbfaf6;}
-.mono{font-family:"IBM Plex Mono",monospace;font-size:.78rem;}
-label{display:block;font-size:.82rem;margin:6px 0 4px;color:#294045;}
-select,input[type=number]{width:100%;border-radius:8px;border:1px solid #cfc7ba;
-  padding:7px 8px;font:inherit;background:#fff;}
-textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
-  font-family:"IBM Plex Mono",monospace;font-size:.78rem;
-  min-height:100px;resize:vertical;background:#fff;}
-.ctrl-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:6px;}
-</style>
-</head>
-<body>
-
-<header>
-  <h1>Hybrid AC/DC Planning Studio</h1>
-  <span class="subtitle">Power Flow &bull; OPF &bull; UC &bull; Carbon &bull; Reconfig &bull; Annual Sim &bull; Dashboard</span>
-  <span class="spacer"></span>
-  <span id="sysLabel" class="badge badge-orange">No system loaded</span>
-</header>
-
-<div class="container">
-  <!-- Top bar: case loading & file I/O -->
-  <div class="top-bar">
-    <select id="builtinSelect" title="Built-in case"></select>
-    <button class="btn btn-primary btn-sm" id="loadBuiltinBtn">Load Built-in</button>
-    <span class="sep"></span>
-    <select id="matpowerSelect" title="MATPOWER case file"></select>
-    <button class="btn btn-accent btn-sm" id="loadMatpowerBtn">Load MATPOWER</button>
-    <span class="sep"></span>
-    <input type="file" id="jsonFileInput" accept=".json" title="Upload JSON system file"/>
-    <button class="btn btn-secondary btn-sm" id="uploadJsonBtn">Upload JSON</button>
-    <span class="sep"></span>
-    <input type="file" id="bpaDatInput" accept=".dat" title="Import a PSD-BPA / DSP card file (.dat)"/>
-    <button class="btn btn-secondary btn-sm" id="loadBpaDatBtn">Import BPA DAT</button>
-    <span class="sep"></span>
-    <input type="file" id="etapXmlInput" accept=".xml" title="Import a native ETAP project XML (Feeder.xml)"/>
-    <button class="btn btn-secondary btn-sm" id="loadEtapXmlBtn">Import ETAP XML</button>
-    <span class="sep"></span>
-    <button class="btn btn-secondary btn-sm" id="exportJsonBtn">Export JSON</button>
-    <button class="btn btn-secondary btn-sm" id="exportEtapBtn">Export ETAP</button>
-    <button class="btn btn-secondary btn-sm" id="newCaseBtn">New Empty Case</button>
-  </div>
-
-  <!-- Component counts -->
-  <div id="countsBar" class="counts"></div>
-
-  <!-- Main panel -->
-  <div class="grid">
-    <div class="panel">
-      <div class="tabs">
-        <div class="tab active" data-tab="builderPane">Case Builder</div>
-        <div class="tab" data-tab="pfPane">Power Flow</div>
-        <div class="tab" data-tab="opfPane">OPF</div>
-        <div class="tab" data-tab="scPane">Short Circuit</div>
-        <div class="tab" data-tab="jsonPane">JSON Editor</div>
-        <div class="tab" data-tab="tsPane">Time-Series PF</div>
-        <div class="tab" data-tab="ucPane">Unit Commitment</div>
-        <div class="tab" data-tab="marketPane">Market Simulation</div>
-        <div class="tab" data-tab="carbonPane">Carbon Flow</div>
-        <div class="tab" data-tab="reliabilityPane">Reliability</div>
-        <div class="tab" data-tab="resiliencePane">Resilience</div>
-        <div class="tab" data-tab="rpoPane">RPO (MINLP)</div>
-        <div class="tab" data-tab="reconfigPane">Net. Reconfig</div>
-        <div class="tab" data-tab="annualPane">Annual Sim</div>
-        <div class="tab" data-tab="lifecyclePane">Lifecycle Sim</div>
-        <div class="tab" data-tab="dashPane">Dashboard</div>
-      </div>
-
-      <!-- ======================== CASE BUILDER TAB ======================== -->
-      <section id="builderPane" class="tabpane active">
-        <div class="tabs" id="compTabs" style="border:none;padding:0 0 8px 0;"></div>
-        <div class="btn-group">
-          <button class="btn btn-primary btn-sm" id="addRowBtn">+ Add Row</button>
-          <button class="btn btn-accent btn-sm" id="commitBtn">Commit Changes to System</button>
-        </div>
-        <div id="compTableArea"></div>
-      </section>
-
-      <!-- ======================== POWER FLOW TAB ========================= -->
-      <section id="pfPane" class="tabpane">
-        <div class="ctrl-row" style="margin-bottom:10px;">
-          <div><label>Method</label>
-            <select id="pfMethod">
-              <option value="ac_newton">AC Newton-Raphson</option>
-              <option value="dc">DC Power Flow</option>
-              <option value="hybrid_linearized">Hybrid AC/DC Linearized</option>
-              <option value="fdpf">Fast-Decoupled PF</option>
-              <option value="adaptive">Adaptive PF</option>
-              <option value="islanded">Islanded PF</option>
-              <option value="distributed_slack">Distributed Slack PF</option>
-              <option value="three_phase">Three-Phase PF</option>
-            </select>
-          </div>
-          <div><label>Max iterations</label><input id="pfMaxIter" type="number" min="5" max="500" value="80"/></div>
-          <div><label>Tolerance</label><input id="pfTol" type="number" step="1e-8" value="1e-8"/></div>
-          <div><label>FDPF Max Iter</label><input id="pfFdpfMaxIter" type="number" min="10" max="5000" value="1000"/></div>
-        </div>
-        <div class="ctrl-row" style="margin-bottom:10px;">
-          <div><label><input type="checkbox" id="pfPvPq" checked style="width:auto;min-width:auto;"/> PV-PQ Conversion</label></div>
-          <div><label><input type="checkbox" id="pfAutoSwing" checked style="width:auto;min-width:auto;"/> Auto Swing Selection</label></div>
-          <div><label><input type="checkbox" id="pfConvSwitch" checked style="width:auto;min-width:auto;"/> Converter Mode Switching</label></div>
-          <div><label><input type="checkbox" id="pfCoordCheck" checked disabled style="width:auto;min-width:auto;"/> Converter Coordination Check</label></div>
-          <div><label><input type="checkbox" id="pfVerbose" style="width:auto;min-width:auto;"/> Verbose</label></div>
-          <div><label>PV Q Hysteresis (pu)</label><input id="pfPvQHyst" type="number" step="0.001" value="0.01" style="width:90px;"/></div>
-          <div><label>Max ΔVa (rad)</label><input id="pfMaxDVa" type="number" step="0.1" value="1.5" style="width:80px;"/></div>
-          <div><label>Max ΔVm (pu)</label><input id="pfMaxDVm" type="number" step="0.1" value="0.5" style="width:80px;"/></div>
-          <div><label>Loss Model</label>
-            <select id="pfLossModel">
-              <option value="linear">Linear</option>
-              <option value="current_based">Current-Based</option>
-            </select>
-          </div>
-          <div><label>Display Unit</label>
-            <select id="pfDisplayUnit">
-              <option value="MW" selected>MW</option>
-              <option value="kW">kW</option>
-              <option value="W">W</option>
-            </select>
-          </div>
-        </div>
-        <div class="btn-group">
-          <button class="btn btn-primary" id="runPfBtn">Run Selected Method</button>
-          <button class="btn btn-accent" id="runPfCompareBtn">Compare All Methods</button>
-          <button class="btn" id="runSpptAgentBtn" style="background:#1f6f5f;color:#fff;">Run SPPT Agent Loop</button>
-        </div>
-        <div id="spptAgentOut" class="status mono" style="margin-top:8px;max-height:140px;overflow:auto;display:none;"></div>
-        <div class="kpis">
-          <div class="kpi"><div id="pfConv" class="v">-</div><div class="l">Converged</div></div>
-          <div class="kpi"><div id="pfIter" class="v">-</div><div class="l">Iterations</div></div>
-          <div class="kpi"><div id="pfRes" class="v">-</div><div class="l">Residual</div></div>
-          <div class="kpi"><div id="pfNBus" class="v">-</div><div class="l">AC Buses</div></div>
-        </div>
-        <div id="pfVoltChart" class="chart"></div>
-        <div id="pfDcVoltChart" class="chart"></div>
-        <div id="pfConverterChart" class="chart"></div>
-        <div id="pfBranchChart" class="chart"></div>
-        <div id="pfCompareChart" class="chart"></div>
-        <div id="pfCompareTable" class="status mono"></div>
-        <h3 style="margin:1.5rem 0 0.5rem;color:var(--accent);">GIS Network Map</h3>
-        <div id="pfGeoMap" class="chart" style="height:500px;"></div>
-      </section>
-
-      <!-- ========================== OPF TAB ============================== -->
-      <section id="opfPane" class="tabpane">
-        <div class="btn-group">
-          <label style="align-self:center;font-size:13px;color:#555;">AC Solver</label>
-          <select id="opfSolver" title="AC OPF solver backend">
-            <option value="auto" selected>Auto (Parity IPM &rarr; Ipopt)</option>
-            <option value="parity">Parity IPM (native)</option>
-            <option value="ipopt">Ipopt (filter line-search)</option>
-            <option value="dispatch">Economic Dispatch (fast)</option>
-          </select>
-          <button class="btn btn-primary" id="runAcOpfBtn">Run AC OPF</button>
-          <button class="btn btn-accent" id="runDcOpfBtn">Run DC OPF</button>
-          <button class="btn" id="runParityOpfBtn" style="background:#6a0dad;color:#fff;">Run Parity OPF</button>
-        </div>
-        <div class="kpis">
-          <div class="kpi"><div id="opfType" class="v">-</div><div class="l">Solver</div></div>
-          <div class="kpi"><div id="opfConv" class="v">-</div><div class="l">Converged</div></div>
-          <div class="kpi"><div id="opfObj" class="v">-</div><div class="l">Objective</div></div>
-          <div class="kpi"><div id="opfIter" class="v">-</div><div class="l">Iterations</div></div>
-        </div>
-        <div id="opfDispatchChart" class="chart"></div>
-        <div id="opfAuxChart" class="chart"></div>
-        <div id="opfLmpChart" class="chart"></div>
-        <div id="opfDcVoltChart" class="chart"></div>
-        <div id="opfConverterChart" class="chart"></div>
-      </section>
-
-      <!-- ========================== SC TAB =============================== -->
-      <section id="scPane" class="tabpane">
-        <div class="ctrl-row" style="margin-bottom:10px;">
-          <div><label>Domain</label>
-            <select id="scDomain">
-              <option value="AC">AC</option>
-              <option value="DC">DC</option>
-            </select>
-          </div>
-          <div><label>Fault type</label>
-            <select id="scFaultType">
-              <option value="ThreePhase">Three-Phase</option>
-              <option value="SinglePhaseGround">Single-Phase-Ground</option>
-              <option value="TwoPhase">Two-Phase</option>
-              <option value="TwoPhaseGround">Two-Phase-Ground</option>
-            </select>
-          </div>
-          <div><label>Calculation</label>
-            <select id="scCalcType">
-              <option value="Max">Maximum</option>
-              <option value="Min">Minimum</option>
-            </select>
-          </div>
-          <div><label>c-factor</label><input id="scCFactor" type="number" step=".01" value="1.10"/></div>
-          <div><label>Kappa method</label>
-            <select id="scKappaMethod">
-              <option value="B">IEC B</option>
-              <option value="A">IEC A</option>
-              <option value="C">IEC C</option>
-            </select>
-          </div>
-          <div><label>Topology</label>
-            <select id="scTopology">
-              <option value="Meshed">Meshed</option>
-              <option value="Radial">Radial</option>
-            </select>
-          </div>
-          <div><label>Fault Z (pu)</label><input id="scFaultImpedance" type="number" step=".001" value="0"/></div>
-          <div><label>Breaking t (s)</label><input id="scBreakingTime" type="number" step=".01" value="0.05"/></div>
-          <div><label>Thermal Tk (s)</label><input id="scIthDuration" type="number" step=".1" value="1.0"/></div>
-          <div><label>Frequency (Hz)</label><input id="scBaseFrequency" type="number" step="1" value="50"/></div>
-          <div><label>Default x''d (pu)</label><input id="scDefaultXdpp" type="number" step=".01" value="0.20"/></div>
-          <div><label>DC Vsrc (pu)</label><input id="dcScSourceVoltage" type="number" step=".01" value="0"/></div>
-          <div><label><input id="dcScConsiderBreakers" type="checkbox" checked/> DCCB topology</label></div>
-          <div><label><input id="dcScBreakerControlsBranch" type="checkbox" checked/> DCCB controls branch</label></div>
-          <div><label><input id="dcScAddBreakerEdges" type="checkbox" checked/> Closed DCCB edges</label></div>
-          <div><label><input id="scComputeBranchFlows" type="checkbox" checked/> Branch flows</label></div>
-          <div><label><input id="scComputeVoltageDrops" type="checkbox" checked/> Voltage drops</label></div>
-          <div><label><input id="scComputeIth" type="checkbox" checked/> Thermal Ith</label></div>
-          <div><label>Fault Bus (blank=all)</label><input id="scFaultBus" type="text" placeholder="e.g. 0,3,5 or blank" style="width:130px;"/></div>
-        </div>
-        <div class="btn-group">
-          <button class="btn btn-primary" id="runScBtn">Run Short Circuit (All Buses)</button>
-          <button class="btn btn-accent" id="runScDetailedBtn">Run Detailed SC (Selected Buses)</button>
-        </div>
-        <div class="kpis">
-          <div class="kpi"><div id="scFault" class="v">-</div><div class="l">Fault Type</div></div>
-          <div class="kpi"><div id="scBuses" class="v">-</div><div class="l">Buses</div></div>
-          <div class="kpi"><div id="scMaxIk" class="v">-</div><div class="l">Max Ik" kA</div></div>
-          <div class="kpi"><div id="scMinIk" class="v">-</div><div class="l">Min Ik" kA</div></div>
-        </div>
-        <div id="scIkChart" class="chart"></div>
-        <div id="scSkChart" class="chart"></div>
-        <div id="scDetailedChart" class="chart"></div>
-        <div id="scContribChart" class="chart"></div>
-        <div id="scVremainChart" class="chart"></div>
-      </section>
-
-      <!-- ======================== JSON EDITOR TAB ======================== -->
-      <section id="jsonPane" class="tabpane">
-        <div class="btn-group">
-          <button class="btn btn-primary btn-sm" id="applyJsonBtn">Apply JSON to System</button>
-          <button class="btn btn-secondary btn-sm" id="refreshJsonBtn">Refresh from System</button>
-        </div>
-        <textarea id="jsonEditor" style="min-height:500px;" placeholder="Load a case first..."></textarea>
-      </section>
-
-      <!-- =================== RPO (MINLP) TAB ========================= -->
-      <section id="rpoPane" class="tabpane">
-        <div class="ctrl-row" style="margin-bottom:10px;">
-          <div><label>Objective</label>
-            <select id="rpoObjective">
-              <option value="voltage" selected>Minimize Voltage Deviation</option>
-              <option value="loss">Minimize Active Power Loss</option>
-              <option value="combined">Combined (Loss + V-dev)</option>
-            </select>
-          </div>
-          <div><label>MIP Gap (%)</label><input id="rpoMipGap" type="number" step="0.001" value="0.01"></div>
-          <div><label>Time Limit (s)</label><input id="rpoTimeLimit" type="number" min="10" max="600" value="120"></div>
-          <div><label>V-dev weight</label><input id="rpoVdevWeight" type="number" step="0.1" value="1.0"></div>
-        </div>
-        <div class="btn-group">
-          <button class="btn btn-primary" id="runRPOBtn">Run RPO (Branch &amp; Bound + IPM)</button>
-          <button class="btn btn-secondary" id="runRPORelaxBtn">Run Continuous Relaxation Only</button>
-        </div>
-        <div class="kpis">
-          <div class="kpi"><div id="rpoConv" class="v">-</div><div class="l">Converged</div></div>
-          <div class="kpi"><div id="rpoObj" class="v">-</div><div class="l">Objective</div></div>
-          <div class="kpi"><div id="rpoGap" class="v">-</div><div class="l">MIP Gap %</div></div>
-          <div class="kpi"><div id="rpoNodes" class="v">-</div><div class="l">B&amp;B Nodes</div></div>
-          <div class="kpi"><div id="rpoLPSolves" class="v">-</div><div class="l">NLP Solves</div></div>
-          <div class="kpi"><div id="rpoTime" class="v">-</div><div class="l">Runtime (s)</div></div>
-          <div class="kpi"><div id="rpoLossBefore" class="v">-</div><div class="l">Loss Before MW</div></div>
-          <div class="kpi"><div id="rpoLossAfter" class="v">-</div><div class="l">Loss After MW</div></div>
-          <div class="kpi"><div id="rpoVdevBefore" class="v">-</div><div class="l">Max |V-1| Before</div></div>
-          <div class="kpi"><div id="rpoVdevAfter" class="v">-</div><div class="l">Max |V-1| After</div></div>
-          <div class="kpi"><div id="rpoStatus" class="v" style="font-size:11px;">-</div><div class="l">Status</div></div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-          <div id="rpoVoltChart" class="chart"></div>
-          <div id="rpoQgChart" class="chart"></div>
-          <div id="rpoPgChart" class="chart"></div>
-          <div id="rpoVaChart" class="chart"></div>
-          <div id="rpoTapChart" class="chart"></div>
-          <div id="rpoShuntChart" class="chart"></div>
-        </div>
-        <div id="rpoDetailsChart" class="chart" style="height:300px;margin-top:10px;"></div>
-        <div id="rpoResultTable" class="status mono" style="margin-top:8px;white-space:pre;overflow-x:auto;"></div>
-      </section>
-
-      <!-- =================== TIME-SERIES PF TAB ======================= -->
-      <section id="tsPane" class="tabpane">
-        <div class="ctrl-row" style="margin-bottom:10px;">
-          <div><label>Time Steps</label>
-            <select id="tsNumSteps">
-              <option value="4">4 steps (quick test)</option>
-              <option value="24" selected>24 hours (1 day)</option>
-              <option value="48">48 hours (2 days)</option>
-            </select>
-          </div>
-          <div><label>Pipeline options</label>
-            <label style="font-size:.82rem;margin:2px 0;"><input type="checkbox" id="tsSkipUC" style="width:auto;min-width:auto;"> Skip UC (PF only)</label>
-            <label style="font-size:.82rem;margin:2px 0;"><input type="checkbox" id="tsRunOPF" style="width:auto;min-width:auto;"> Include OPF validation</label>
-          </div>
-        </div>
-        <div class="btn-group">
-          <button class="btn btn-primary" id="runTsPfBtn">Run Time-Series PF</button>
-        </div>
-        <div class="kpis">
-          <div class="kpi"><div id="tsSteps" class="v">-</div><div class="l">Steps</div></div>
-          <div class="kpi"><div id="tsConv" class="v">-</div><div class="l">PF Converged</div></div>
-          <div class="kpi"><div id="tsOPFConv" class="v">-</div><div class="l">OPF Converged</div></div>
-          <div class="kpi"><div id="tsCost" class="v">-</div><div class="l">Total Gen Cost $</div></div>
-        </div>
-        <div id="tsGenDispatchChart" class="chart"></div>
-        <div id="tsVoltChart" class="chart"></div>
-        <div id="tsESSChart" class="chart"></div>
-      </section>
-
-      <!-- =================== UNIT COMMITMENT TAB ====================== -->
-      <section id="ucPane" class="tabpane">
-        <div class="ctrl-row" style="margin-bottom:10px;">
-          <div><label>Time Steps</label>
-            <select id="ucNumSteps">
-              <option value="4">4 steps (quick test)</option>
-              <option value="24" selected>24 hours (1 day)</option>
-              <option value="48">48 hours (2 days)</option>
-            </select>
-          </div>
-          <div><label>MILP Solver</label>
-            <select id="ucSolverChoice">
-              <option value="auto" selected>Auto (Gurobi &gt; HiGHS &gt; Native)</option>
-              <option value="native">Native Branch &amp; Cut</option>
-              <option value="highs">HiGHS</option>
-              <option value="gurobi">Gurobi</option>
-            </select>
-          </div>
-        </div>
-        <div class="btn-group">
-          <button class="btn btn-primary" id="runUCBtn">Run Unit Commitment</button>
-        </div>
-        <div class="kpis">
-          <div class="kpi"><div id="ucFeas" class="v">-</div><div class="l">Feasible</div></div>
-          <div class="kpi"><div id="ucCost" class="v">-</div><div class="l">Total Cost $</div></div>
-          <div class="kpi"><div id="ucNGen" class="v">-</div><div class="l">Generators</div></div>
-          <div class="kpi"><div id="ucNESS" class="v">-</div><div class="l">Storage Units</div></div>
-        </div>
-        <div id="ucDispatchChart" class="chart"></div>
-        <div id="ucCommitChart" class="chart"></div>
-        <div id="ucESSSOCChart" class="chart"></div>
-      </section>
-
-      <!-- =================== MARKET SIMULATION TAB ==================== -->
-      <section id="marketPane" class="tabpane">
-        <div class="ctrl-row" style="margin-bottom:10px;">
-          <div><label>Time Steps</label>
-            <select id="mktNumSteps">
-              <option value="4">4 steps (quick test)</option>
-              <option value="24" selected>24 hours (1 day)</option>
-              <option value="48">48 hours (2 days)</option>
-            </select>
-          </div>
-          <div><label>MILP Solver</label>
-            <select id="milpSolverChoice">
-              <option value="auto" selected>Auto (Gurobi &gt; HiGHS &gt; Native)</option>
-              <option value="native">Native Branch &amp; Cut</option>
-              <option value="highs">HiGHS</option>
-              <option value="gurobi">Gurobi</option>
-            </select>
-          </div>
-          <div><label><input type="checkbox" id="scenarioToggle"> Enable Scenario Generation</label></div>
-        </div>
-        <div id="scenarioConfigPanel" style="display:none;margin-bottom:10px;padding:8px;background:#f0f4f8;border-radius:6px;">
-          <div class="ctrl-row">
-            <div><label>Periods/Day</label><input type="number" id="scenPeriodsPerDay" value="96" style="width:70px;"></div>
-            <div><label>Period (min)</label><input type="number" id="scenPeriodLen" value="15" step="1" style="width:70px;"></div>
-            <div><label>Load Noise</label><input type="number" id="scenLoadNoise" value="0.05" step="0.01" style="width:70px;"></div>
-            <div><label>Wind Err</label><input type="number" id="scenWindErr" value="0.20" step="0.01" style="width:70px;"></div>
-            <div><label>Solar Err</label><input type="number" id="scenSolarErr" value="0.15" step="0.01" style="width:70px;"></div>
-            <div><label>Seed (0=rand)</label><input type="number" id="scenSeed" value="42" style="width:70px;"></div>
-            <div><label><input type="checkbox" id="scenWorkday" checked> Workday</label></div>
-          </div>
-        </div>
-        <div class="btn-group">
-          <button class="btn btn-accent" id="runMarketBtn">Run Market Clearing (§2 Pipeline)</button>
-        </div>
-        <!-- §2 Parameters (expandable) -->
-        <details style="margin:8px 0;padding:8px;background:#f0f4f8;border-radius:6px;">
-          <summary style="cursor:pointer;font-weight:600;font-size:13px;">§2 Market Parameters (click to expand)</summary>
-          <div class="ctrl-row" style="margin-top:8px;">
-            <div><label>§2.2 Bid Segments</label><input type="number" id="s22BidSegs" value="3" min="1" max="10" style="width:55px;"></div>
-            <div><label>§2.2 Price Cap (¥/MWh)</label><input type="number" id="s22PriceCap" value="1500" style="width:75px;"></div>
-            <div><label>§2.2 Price Floor (¥/MWh)</label><input type="number" id="s22PriceFloor" value="0" style="width:70px;"></div>
-          </div>
-          <div class="ctrl-row">
-            <div><label>§2.4 PTDF Threshold</label><input type="number" id="s24PtdfThresh" value="0.05" step="0.01" style="width:65px;"></div>
-            <div><label>§2.6 MIP Gap</label><input type="number" id="s26MipGap" value="0.0001" step="0.0001" style="width:75px;"></div>
-            <div><label>§2.6 Time Limit (s)</label><input type="number" id="s26TimeLimit" value="300" style="width:70px;"></div>
-          </div>
-          <div class="ctrl-row">
-            <div><label>§2.6 LMP Delta</label><input type="number" id="s26LmpDelta" value="0.10" step="0.01" style="width:65px;"></div>
-            <div><label>§2.8 N-1 Contingencies</label><input type="number" id="s28MaxN1" value="50" style="width:65px;"></div>
-            <div><label><input type="checkbox" id="s28EnableN1" checked> §2.8 N-1 Check</label></div>
-          </div>
-          <div class="ctrl-row">
-            <div><label>§2.9 VOLL ($/MWh)</label><input type="number" id="s29VOLL" value="10000" style="width:80px;"></div>
-            <div><label>Reserve Req (%)</label><input type="number" id="s29SpinReq" value="5" step="1" style="width:55px;"></div>
-          </div>
-        </details>
-        <!-- §2 Pipeline Progress (9 stages per market_rules.pdf) -->
-        <div id="pipelineStages" style="display:none;margin:10px 0;padding:8px;background:#f8f9fa;border-radius:6px;overflow-x:auto;">
-          <div style="display:flex;gap:3px;align-items:center;flex-wrap:wrap;font-size:11px;">
-            <span id="stg1" class="stg">§2.2 Bids</span>
-            <span style="color:#ccc;">&rarr;</span>
-            <span id="stg2" class="stg">§2.3-4 Bounds</span>
-            <span style="color:#ccc;">&rarr;</span>
-            <span id="stg3" class="stg">§2.6.1 SCUC</span>
-            <span style="color:#ccc;">&rarr;</span>
-            <span id="stg4" class="stg">§2.6.2 SCED</span>
-            <span style="color:#ccc;">&rarr;</span>
-            <span id="stg5" class="stg">§2.6.3 LMP</span>
-            <span style="color:#ccc;">&rarr;</span>
-            <span id="stg6" class="stg">§2.7 ACPF</span>
-            <span style="color:#ccc;">&rarr;</span>
-            <span id="stg7" class="stg">§2.8 Security</span>
-            <span style="color:#ccc;">&rarr;</span>
-            <span id="stg8" class="stg">§2.9 Settlement</span>
-            <span style="color:#ccc;">&rarr;</span>
-            <span id="stg9" class="stg">§2.10 Results</span>
-          </div>
-        </div>
-        <div class="kpis">
-          <div class="kpi"><div id="mktFeas" class="v">-</div><div class="l">Feasible</div></div>
-          <div class="kpi"><div id="mktCost" class="v">-</div><div class="l">Total Cost $</div></div>
-          <div class="kpi"><div id="mktNGen" class="v">-</div><div class="l">Generators</div></div>
-          <div class="kpi"><div id="mktSolver" class="v">-</div><div class="l">Solver</div></div>
-          <div class="kpi"><div id="mktValidation" class="v">-</div><div class="l">Validation</div></div>
-          <div class="kpi"><div id="mktAvgLmp" class="v">-</div><div class="l">Avg LMP $/MWh</div></div>
-        </div>
-        <div id="scenarioProfileChart" class="chart"></div>
-        <div id="mktDispatchChart" class="chart"></div>
-        <div id="marketBidChart" class="chart"></div>
-        <div id="marketLmpHeatmap" class="chart"></div>
-        <div id="marketGenCoProfit" class="chart"></div>
-        <div id="mktGenCoIncomeTable" style="margin:10px 0;"></div>
-        <div id="marketPfResidualChart" class="chart"></div>
-        <div id="mktVoltageProfileChart" class="chart"></div>
-        <div id="mktReactivePowerChart" class="chart"></div>
-        <div id="mktPtdfHeatmap" class="chart"></div>
-        <div id="mktPtdfVerifyChart" class="chart"></div>
-        <div id="mktViolationPanel" style="margin:10px 0;"></div>
-        <div id="mktSecurityPanel" style="margin:10px 0;"></div>
-        <div id="marketValidationPanel" style="margin:10px 0;"></div>
-        <div class="dtable-wrap"><table class="dtable" id="marketLmpDecompTable"></table></div>
-        <h3 style="margin:1.5rem 0 0.5rem;color:var(--accent);">GIS Network Map (LMP)</h3>
-        <div id="mktGeoMap" class="chart" style="height:550px;"></div>
-      </section>
-
-      <!-- =================== CARBON FLOW TAB ========================== -->
-      <section id="carbonPane" class="tabpane">
-        <div class="btn-group">
-          <button class="btn btn-primary" id="runCarbonBtn">Run Carbon Flow Analysis</button>
-        </div>
-        <div class="kpis">
-          <div class="kpi"><div id="carbonGenEmit" class="v">-</div><div class="l">Gen Emissions tCO&#x2082;</div></div>
-          <div class="kpi"><div id="carbonLoadEmit" class="v">-</div><div class="l">Load Emissions tCO&#x2082;</div></div>
-          <div class="kpi"><div id="carbonLossEmit" class="v">-</div><div class="l">Loss Emissions tCO&#x2082;</div></div>
-          <div class="kpi"><div id="carbonMatrix" class="v">-</div><div class="l">Matrix Solved</div></div>
-        </div>
-        <div id="carbonBusChart" class="chart"></div>
-        <div id="carbonDcBusChart" class="chart"></div>
-        <div id="carbonLoadChart" class="chart" style="height:260px;"></div>
-        <div id="carbonBranchChart" class="chart" style="height:260px;"></div>
-        <div id="carbonSankeyChart" class="chart" style="height:380px;"></div>
-      </section>
-
-      <!-- =================== NET. RECONFIGURATION TAB ================= -->
-      <section id="reconfigPane" class="tabpane">
-        <div class="ctrl-row" style="margin-bottom:10px;">
-          <div><label>Time Steps</label>
-            <select id="rcNumSteps">
-              <option value="4" selected>4 steps (quick test)</option>
-              <option value="24">24 hours (1 day)</option>
-            </select>
-          </div>
-          <div><label>Voltage Limits</label>
-            <div style="display:flex;gap:6px;">
-              <input id="rcVmin" type="number" step=".01" value="0.95" placeholder="Vmin" style="width:80px;">
-              <input id="rcVmax" type="number" step=".01" value="1.05" placeholder="Vmax" style="width:80px;">
-            </div>
-          </div>
-          <div><label>MIP Gap</label><input id="rcMipGap" type="number" step=".005" value="0.01"></div>
-          <div><label>Max time (s)</label><input id="rcMaxTime" type="number" min="10" max="600" value="60"></div>
-          <div><label>Power Flow</label>
-            <select id="rcEnablePF"><option value="1" selected>LinDistFlow (G3–G6)</option><option value="0">Connectivity only</option></select>
-          </div>
-          <div><label>Objective</label>
-            <select id="rcObjective" onchange="var p={loss:[10,1],switch:[5,20],restore:[10,1]}[this.value]||[10,1];rcLambdaLoss.value=p[0];rcLambdaSwitch.value=p[1];"><option value="loss" selected>Min loss</option><option value="switch">Min switching</option><option value="restore">Max restored</option></select>
-          </div>
-          <div><label>λ loss/sw/shed</label>
-            <span style="display:flex;gap:4px;"><input id="rcLambdaLoss" type="number" value="10" style="width:60px"><input id="rcLambdaSwitch" type="number" value="1" style="width:50px"><input id="rcLambdaShed" type="number" value="10000" style="width:70px"></span>
-          </div>
-          <div><label>Groups</label>
-            <span style="font-size:.85em;"><input type="checkbox" id="rcEnableVoltage" checked/>G4 <input type="checkbox" id="rcEnableThermal" checked/>G5 <input type="checkbox" id="rcSplitTrees"/>AC/DC <input type="checkbox" id="rcDcMesh"/>DCmesh <input type="checkbox" id="rcLossAware" checked/>I2R</span>
-          </div>
-          <div><label>Max switch ops</label><input id="rcMaxSwOps" type="number" min="0" value="0"></div>
-          <div><label>Solver</label><select id="rcSolver"><option value="auto" selected>Auto</option><option value="native">Native</option><option value="highs">HiGHS</option><option value="scip">SCIP</option></select></div>
-        </div>
-        <div class="btn-group">
-          <button class="btn btn-primary" id="runReconfigBtn">Run Network Reconfiguration</button>
-        </div>
-        <div class="kpis">
-          <div class="kpi"><div id="rcFeas" class="v">-</div><div class="l">Feasible</div></div>
-          <div class="kpi"><div id="rcObj" class="v">-</div><div class="l">Objective</div></div>
-          <div class="kpi"><div id="rcACLoss" class="v">-</div><div class="l">Curtailment MW</div></div>
-          <div class="kpi"><div id="rcShed" class="v">-</div><div class="l">Branches</div></div>
-          <div class="kpi"><div id="rcSwActions" class="v">-</div><div class="l">Switch Actions</div></div>
-        </div>
-        <div id="rcLossChart" class="chart"></div>
-        <div id="rcSwitchChart" class="chart"></div>
-        <div id="rcESSChart" class="chart"></div>
-        <div id="rcSwOps" style="margin-top:10px;"></div>
-      </section>
-
-      <!-- =================== ANNUAL PRODUCTION SIM TAB ================ -->
-      <section id="annualPane" class="tabpane">
-        <div class="ctrl-row" style="margin-bottom:10px;">
-          <div><label>Resolution</label>
-            <select id="annualResolution">
-              <option value="6h" selected>6-hour (1460 steps)</option>
-              <option value="1h">Hourly (8760 steps)</option>
-            </select>
-          </div>
-          <div><label>Block Type</label>
-            <select id="annualBlockType">
-              <option value="monthly" selected>Monthly (12 blocks)</option>
-              <option value="weekly">Weekly (52 blocks)</option>
-            </select>
-          </div>
-          <div><label>PF Snapshot Interval</label><input id="annualSnapshotInterval" type="number" min="0" max="168" value="24"/></div>
-          <div><label><input type="checkbox" id="annualRunOPF" checked style="width:auto;min-width:auto;"/> Include OPF</label></div>
-          <div><label><input type="checkbox" id="annualCyclicSOC" checked style="width:auto;min-width:auto;"/> Cyclic SOC</label></div>
-          <div><label><input type="checkbox" id="annualSkipReplay" style="width:auto;min-width:auto;"/> Schedule Only (skip replay)</label></div>
-        </div>
-        <div class="btn-group">
-          <button class="btn btn-primary" id="runAnnualBtn">Run Annual Production Simulation</button>
-        </div>
-        <!-- Animation Playback Controls -->
-        <div id="annAnimControls" style="display:none;margin:12px 0;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;">
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-            <button class="btn" id="annAnimPlayPause" style="width:80px;">&#9658; Play</button>
-            <button class="btn" id="annAnimReset" style="width:60px;">&#8634;</button>
-            <input type="range" id="annAnimSlider" min="0" max="100" value="0" style="flex:1;min-width:200px;"/>
-            <span id="annAnimTimeLabel" style="min-width:80px;font-weight:600;">Hour 0</span>
-            <select id="annAnimSpeed" style="width:100px;">
-              <option value="200">Fast</option>
-              <option value="500" selected>Medium</option>
-              <option value="1000">Slow</option>
-            </select>
-            <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="annAnimGeo" checked style="width:auto;min-width:auto;"/> GIS Map</label>
-          </div>
-        </div>
-        <div id="annGeoMap" class="chart" style="height:450px;display:none;"></div>
-        <div class="kpis">
-          <div class="kpi"><div id="annFeas" class="v">-</div><div class="l">Feasible</div></div>
-          <div class="kpi"><div id="annCost" class="v">-</div><div class="l">Annual Cost $</div></div>
-          <div class="kpi"><div id="annGenMWh" class="v">-</div><div class="l">Generation MWh</div></div>
-          <div class="kpi"><div id="annRenMWh" class="v">-</div><div class="l">Renewable MWh</div></div>
-          <div class="kpi"><div id="annCurtMWh" class="v">-</div><div class="l">Curtailed MWh</div></div>
-          <div class="kpi"><div id="annENSMWh" class="v">-</div><div class="l">ENS MWh</div></div>
-          <div class="kpi"><div id="annLossMWh" class="v">-</div><div class="l">Losses MWh</div></div>
-          <div class="kpi"><div id="annPFConv" class="v">-</div><div class="l">PF Converged</div></div>
-        </div>
-        <div id="annTimelineChart" class="chart"></div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-          <div id="annMonthlyChart" class="chart" style="height:320px;"></div>
-          <div id="annMonthlyCostChart" class="chart" style="height:320px;"></div>
-          <div id="annGenStatsChart" class="chart" style="height:320px;"></div>
-          <div id="annRenStatsChart" class="chart" style="height:320px;"></div>
-          <div id="annStorageStatsChart" class="chart" style="height:320px;"></div>
-          <div id="annVoltHeatmap" class="chart" style="height:320px;"></div>
-        </div>
-      </section>
-
-      <!-- =================== LIFECYCLE SIM TAB ======================== -->
-      <section id="lifecyclePane" class="tabpane">
-        <div class="ctrl-row" style="margin-bottom:10px;">
-          <div><label>Years</label><input id="lcNumYears" type="number" min="1" max="50" value="20"/></div>
-          <div><label>Discount Rate</label><input id="lcDiscountRate" type="number" min="0" max="0.2" step="0.01" value="0.05"/></div>
-          <div><label>Load Growth %/yr</label><input id="lcLoadGrowth" type="number" min="0" max="0.1" step="0.005" value="0.02"/></div>
-          <div><label>PV Derating %/yr</label><input id="lcPVDerating" type="number" min="0" max="0.05" step="0.001" value="0.005"/></div>
-          <div><label>Cal. Degrad. %/yr</label><input id="lcCalDegrad" type="number" min="0" max="0.1" step="0.005" value="0.02"/></div>
-          <div><label>Resolution</label>
-            <select id="lcResolution">
-              <option value="6h" selected>6-hour (1460 steps)</option>
-              <option value="1h">Hourly (8760 steps)</option>
-            </select>
-          </div>
-        </div>
-        <details style="margin-bottom:10px;border:1px solid var(--border);border-radius:6px;padding:8px 12px;">
-          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">&#9881; Capacity Scaling (Planning Parameters)</summary>
-          <div class="ctrl-row" style="margin-top:8px;">
-            <div><label>PV Scale</label><input id="lcPVScale" type="number" min="0" max="10" step="0.1" value="1.0"/></div>
-            <div><label>Wind Scale</label><input id="lcWindScale" type="number" min="0" max="10" step="0.1" value="1.0"/></div>
-            <div><label>BESS Power Scale</label><input id="lcBESSPowerScale" type="number" min="0" max="10" step="0.1" value="1.0"/></div>
-            <div><label>BESS Energy Scale</label><input id="lcBESSEnergyScale" type="number" min="0" max="10" step="0.1" value="1.0"/></div>
-            <div><label>Diesel/Gas Scale</label><input id="lcDieselScale" type="number" min="0" max="10" step="0.1" value="1.0"/></div>
-          </div>
-        </details>
-        <div class="btn-group" style="margin-bottom:10px;">
-          <button class="btn btn-primary" id="runLifecycleBtn">Run Lifecycle Simulation</button>
-        </div>
-        <details open style="margin-bottom:10px;border:1px solid var(--border);border-radius:6px;padding:8px 12px;">
-          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">&#128202; Capacity Comparison Sweep</summary>
-          <div class="ctrl-row" style="margin-top:8px;">
-            <div><label>Sweep Parameter</label>
-              <select id="lcSweepParam">
-                <option value="pv">PV Capacity</option>
-                <option value="wind">Wind Capacity</option>
-                <option value="bess_power">BESS Power (MW)</option>
-                <option value="bess_energy" selected>BESS Energy (MWh)</option>
-                <option value="diesel">Diesel/Gas</option>
-              </select>
-            </div>
-            <div><label>Min Scale</label><input id="lcSweepMin" type="number" min="0" max="10" step="0.25" value="0.5"/></div>
-            <div><label>Max Scale</label><input id="lcSweepMax" type="number" min="0.5" max="10" step="0.25" value="3.0"/></div>
-            <div><label>Steps</label><input id="lcSweepSteps" type="number" min="3" max="20" value="6"/></div>
-          </div>
-          <div class="btn-group" style="margin-top:6px;">
-            <button class="btn" id="runCapCompareBtn" style="background:#8e44ad;color:#fff;">&#9654; Run Capacity Comparison</button>
-          </div>
-        </details>
-        <div class="kpis" id="lcKPIs">
-          <div class="kpi"><div id="lcFeas" class="v">-</div><div class="l">Feasible</div></div>
-          <div class="kpi"><div id="lcNPV" class="v">-</div><div class="l">NPV Cost $</div></div>
-          <div class="kpi"><div id="lcTotalCarbon" class="v">-</div><div class="l">Total CO&#8322;</div></div>
-          <div class="kpi"><div id="lcReplacements" class="v">-</div><div class="l">Replacements</div></div>
-          <div class="kpi"><div id="lcReplCost" class="v">-</div><div class="l">Replacement $</div></div>
-          <div class="kpi"><div id="lcYears" class="v">-</div><div class="l">Years</div></div>
-        </div>
-        <div id="lcCostChart" class="chart" style="height:360px;"></div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-          <div id="lcCarbonChart" class="chart" style="height:320px;"></div>
-          <div id="lcCarbonIntensityChart" class="chart" style="height:320px;"></div>
-          <div id="lcEnergyChart" class="chart" style="height:320px;"></div>
-          <div id="lcSOHChart" class="chart" style="height:320px;"></div>
-          <div id="lcPVChart" class="chart" style="height:320px;"></div>
-          <div id="lcBoundsChart" class="chart" style="height:320px;"></div>
-          <div id="lcBoundsBreakdownChart" class="chart" style="height:320px;"></div>
-          <div id="lcCrossValChart" class="chart" style="height:320px;"></div>
-          <div id="lcTightnessChart" class="chart" style="height:320px;"></div>
-        </div>
-        <h3 style="margin-top:18px;color:var(--accent);">Capacity Comparison Results</h3>
-        <div id="lcCompareStatus" class="status mono" style="margin-bottom:6px;">Run a capacity comparison sweep above.</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-          <div id="lcCompNPVChart" class="chart" style="height:340px;"></div>
-          <div id="lcCompCarbonChart" class="chart" style="height:340px;"></div>
-          <div id="lcCompParetoChart" class="chart" style="height:340px;"></div>
-          <div id="lcCompCarbonTrajChart" class="chart" style="height:340px;"></div>
-        </div>
-      </section>
-
-      <!-- =================== RELIABILITY ASSESSMENT TAB ================ -->
-      <section id="reliabilityPane" class="tabpane">
-        <h3 style="color:var(--accent);margin-bottom:12px;">Monte Carlo Reliability Assessment</h3>
-        <div class="ctrl-row" style="margin-bottom:10px;">
-          <div><label>Load Scale Factor</label><input id="relLoadScale" type="number" min="0.5" max="3.0" step="0.05" value="1.0" title="Scale load (>1 reduces reserve margin)"/></div>
-          <div><label>CoV Threshold</label><input id="relCovThresh" type="number" min="0.01" max="0.5" step="0.01" value="0.05"/></div>
-          <div><label>Random Seed</label><input id="relSeed" type="number" min="0" max="999999" value="0" title="0 = non-deterministic"/></div>
-          <div><label title="Reliability data policy: how missing component data is treated. Named templates are opt-in (no longer auto-applied).">Data Policy</label>
-            <select id="relDataPolicy">
-              <option value="missing_only" selected>Missing &rarr; generic defaults</option>
-              <option value="case_data_only">Case data only (strict)</option>
-              <option value="overwrite_template">Overwrite with template</option>
-            </select>
-          </div>
-          <div><label title="Named reliability template (only applied in Overwrite mode).">Template</label>
-            <select id="relTemplate">
-              <option value="none" selected>None</option>
-              <option value="ieee-rts-24">IEEE RTS-24</option>
-              <option value="comprehensive">Comprehensive hybrid</option>
-            </select>
-          </div>
-        </div>
-        <!-- Advanced Options: Tail Risk -->
-        <div class="ctrl-row" style="margin-bottom:10px;background:#f5f7f5;padding:8px;border-radius:5px;">
-          <div style="display:flex;align-items:center;gap:4px;">
-            <input type="checkbox" id="relTailRisk"/>
-            <label for="relTailRisk" style="margin:0;">Compute Tail Risk (VaR/CVaR)</label>
-          </div>
-          <div><label>VaR Confidence</label><input id="relVarConf" type="number" min="0.80" max="0.99" step="0.01" value="0.95" title="Confidence level for VaR/CVaR"/></div>
-        </div>
-        <details open style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
-          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">Non-Sequential Monte Carlo (State Sampling)</summary>
-          <div class="ctrl-row" style="margin-top:10px;">
-            <div><label>Max Samples</label><input id="relNsqMaxIter" type="number" min="100" max="100000" value="5000"/></div>
-          </div>
-          <div class="btn-group" style="margin-top:8px;">
-            <button class="btn btn-primary" id="runNsqBtn">&#9654; Run NSQ Monte Carlo</button>
-          </div>
-        </details>
-        <details style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
-          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">Sequential Monte Carlo (Chronological Simulation)</summary>
-          <div class="ctrl-row" style="margin-top:10px;">
-            <div><label>Max Years</label><input id="relSeqMaxYears" type="number" min="10" max="5000" value="500"/></div>
-            <div><label>Hours/Year</label>
-              <select id="relSeqHours">
-                <option value="8736">8736 (52 weeks)</option>
-                <option value="8760">8760 (full year)</option>
-              </select>
-            </div>
-          </div>
-          <div class="btn-group" style="margin-top:8px;">
-            <button class="btn" style="background:#8e44ad;color:#fff;" id="runSeqBtn">&#9654; Run SEQ Monte Carlo</button>
-          </div>
-        </details>
-        <details style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
-          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">Frequency &amp; Duration (Analytical)</summary>
-          <p style="color:var(--muted);font-size:0.9em;margin:6px 0 10px 0;">Build COPT analytically (no simulation). Fast calculation of LOLP, LOLE, LOLF, LOLD.</p>
-          <div class="btn-group">
-            <button class="btn" style="background:#b57e2b;color:#fff;" id="runFDBtn">&#9654; Run F&amp;D Analysis</button>
-          </div>
-        </details>
-        <details style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
-          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">&#128270; FMEA (Failure Modes &amp; Effects Analysis)</summary>
-          <p style="color:var(--muted);font-size:0.9em;margin:6px 0 10px 0;">N-1 contingency enumeration for distribution system reliability. Evaluates each component failure individually.</p>
-          <p style="color:var(--muted);font-size:0.85em;margin:0 0 8px 0;">Uses the shared <b>Data Policy</b> / <b>Template</b> selectors at the top. To reproduce the comprehensive hybrid demo, choose <b>Overwrite with template</b> + <b>Comprehensive hybrid</b>.</p>
-          <div class="btn-group" style="margin-top:8px;">
-            <button class="btn" style="background:#c0392b;color:#fff;" id="runFmeaBtn">&#9654; Run FMEA</button>
-          </div>
-        </details>
-        <details open style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
-          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">&#128200; Cross-Validation (NSQ vs SEQ)</summary>
-          <p style="color:var(--muted);font-size:0.9em;margin:6px 0 10px 0;">Run both methods with the same settings and compare results.</p>
-          <div class="btn-group">
-            <button class="btn" style="background:#2c8c99;color:#fff;" id="runCrossValBtn">&#9654; Run Cross-Validation</button>
-          </div>
-        </details>
-        <div class="kpis" id="relKPIs">
-          <div class="kpi"><div id="relMethod" class="v">-</div><div class="l">Method</div></div>
-          <div class="kpi"><div id="relEENS" class="v">-</div><div class="l">EENS (MWh/yr)</div></div>
-          <div class="kpi"><div id="relLOLE" class="v">-</div><div class="l">LOLE (hr/yr)</div></div>
-          <div class="kpi"><div id="relLOLF" class="v">-</div><div class="l">LOLF (occ/yr)</div></div>
-          <div class="kpi"><div id="relPLC" class="v">-</div><div class="l">PLC (%)</div></div>
-          <div class="kpi"><div id="relCoV" class="v">-</div><div class="l">Final CoV</div></div>
-          <div class="kpi"><div id="relIters" class="v">-</div><div class="l">Iterations</div></div>
-        </div>
-        <!-- Tail Risk KPIs -->
-        <div class="kpis" id="relTailKPIs" style="display:none;margin-top:8px;background:#f5f7f5;border-radius:6px;padding:6px;">
-          <div class="kpi"><div id="relEENSVar" class="v">-</div><div class="l">EENS VaR</div></div>
-          <div class="kpi"><div id="relEENSCVar" class="v">-</div><div class="l">EENS CVaR</div></div>
-          <div class="kpi"><div id="relLOLEVar" class="v">-</div><div class="l">LOLE VaR</div></div>
-          <div class="kpi"><div id="relLOLECVar" class="v">-</div><div class="l">LOLE CVaR</div></div>
-        </div>
-        <div id="relStatus" class="status mono" style="margin-bottom:10px;">Set parameters above and run an analysis.</div>
-        <div id="relScopePanel" style="margin-bottom:10px;"></div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-          <div id="relConvergenceChart" class="chart" style="height:320px;"></div>
-          <div id="relNodalEENSChart" class="chart" style="height:320px;"></div>
-          <div id="relCriticalChart" class="chart" style="height:320px;"></div>
-          <div id="relCrossValChart" class="chart" style="height:320px;"></div>
-        </div>
-        <!-- FMEA Results Section -->
-        <div id="fmeaResultsSection" style="display:none;margin-top:14px;">
-          <h4 style="color:var(--accent);margin-bottom:8px;">FMEA Results</h4>
-          <div class="kpis" id="fmeaKPIs">
-            <div class="kpi"><div id="fmeaEENS" class="v">-</div><div class="l">EENS (MWh/yr)</div></div>
-            <div class="kpi"><div id="fmeaLOLE" class="v">-</div><div class="l">LOLE (hr/yr)</div></div>
-            <div class="kpi"><div id="fmeaLOLF" class="v">-</div><div class="l">LOLF (occ/yr)</div></div>
-            <div class="kpi"><div id="fmeaSAIFI" class="v">-</div><div class="l">SAIFI</div></div>
-            <div class="kpi"><div id="fmeaSAIDI" class="v">-</div><div class="l">SAIDI</div></div>
-            <div class="kpi"><div id="fmeaCAIDI" class="v">-</div><div class="l">CAIDI</div></div>
-            <div class="kpi"><div id="fmeaASAI" class="v">-</div><div class="l">ASAI</div></div>
-            <div class="kpi"><div id="fmeaContingencies" class="v">-</div><div class="l">Contingencies</div></div>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">
-            <div id="fmeaContChart" class="chart" style="height:320px;"></div>
-            <div id="fmeaTypeChart" class="chart" style="height:320px;"></div>
-          </div>
-        </div>
-      </section>
-
-      <!-- =================== RESILIENCE TAB ============================ -->
-      <section id="resiliencePane" class="tabpane">
-        <h3 style="color:var(--accent);margin-bottom:12px;">Distribution Resilience Assessment (MESS)</h3>
-        <p style="color:var(--muted);font-size:0.9em;margin:0 0 14px 0;">Multi-hour restoration study with time-varying load/RES profiles, feeder outages, repair windows, tie-switch reconfiguration, and mobile energy storage dispatch &amp; routing.</p>
-        <div class="ctrl-row" style="margin-bottom:10px;">
-          <div><label>Horizon (hr)</label><input id="resHorizonHours" type="number" min="1" max="168" value="24"/></div>
-          <div><label>Repair Time (hr)</label><input id="resRepairHours" type="number" min="1" max="72" value="6"/></div>
-          <div><label>Default Fault Count</label><input id="resFaultCount" type="number" min="1" max="10" value="1"/></div>
-          <div><label>MESS Speed (km/h)</label><input id="resMessSpeed" type="number" min="5" max="120" value="40"/></div>
-          <div><label>Load Scale Factor</label><input id="resLoadScale" type="number" min="0.5" max="3.0" step="0.05" value="1.0"/></div>
-        </div>
-        <div class="ctrl-row" style="margin-bottom:10px;">
-          <div style="min-width:260px;flex:1;"><label>Fault Branch IDs</label><input id="resFaultBranches" type="text" placeholder="e.g. 25,37 (blank = auto-select)"/></div>
-          <div><label>Fault Stagger (hr)</label><input id="resFaultStagger" type="number" min="0" max="24" step="0.5" value="0"/></div>
-          <div><label>First Fault at (hr)</label><input id="resFaultStartHr" type="number" min="0" max="48" step="0.5" value="0"/></div>
-          <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resApplyDemoData" checked/><label for="resApplyDemoData" style="margin:0;">Apply Demo Data</label></div>
-          <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resAllowReconfig"/><label for="resAllowReconfig" style="margin:0;">Allow Reconfiguration</label></div>
-          <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resAllowMess" checked/><label for="resAllowMess" style="margin:0;">Allow MESS Dispatch</label></div>
-          <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resRunPF"/><label for="resRunPF" style="margin:0;">Run Power Flow</label></div>
-        </div>
-        <details style="margin-bottom:10px;border:1px solid var(--border);border-radius:8px;padding:6px 12px;">
-          <summary style="cursor:pointer;font-weight:600;color:var(--accent);font-size:0.9em;">Advanced Fault / Stage Parameters</summary>
-          <div class="ctrl-row" style="margin-top:10px;">
-            <div><label>Model</label><select id="resModel"><option value="RAStyleStageMILP" selected>RA Stage MILP</option><option value="HeuristicSequential">Heuristic</option><option value="MultiPeriodMIPLinDistFlow">Strict MIP</option></select></div>
-            <div><label>Solver</label><select id="resSolver"><option value="Native">Native</option><option value="HiGHS">HiGHS</option><option value="Gurobi" selected>Gurobi</option></select></div>
-            <div><label>MIP Limit (s)</label><input id="resMipTimeLimit" type="number" min="10" step="10" value="180"/></div>
-            <div><label>MIP Gap</label><input id="resMipGap" type="number" min="0" max="1" step="0.01" value="0.03"/></div>
-            <div><label>Post-Fault Window (hr)</label><input id="resPostFaultWindow" type="number" min="0" step="0.5" value="2.0"/></div>
-            <div><label>AC Start (hr)</label><input id="resAcFaultStartHr" type="number" min="0" step="0.5" value="0"/></div>
-            <div><label>DC Start (hr)</label><input id="resDcFaultStartHr" type="number" min="0" step="0.5" value="0"/></div>
-            <div><label>AC Repair (hr)</label><input id="resAcRepairHours" type="number" min="0" step="0.5" value="6"/></div>
-            <div><label>DC Repair (hr)</label><input id="resDcRepairHours" type="number" min="0" step="0.5" value="8"/></div>
-            <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resConsiderSwitches" checked/><label for="resConsiderSwitches" style="margin:0;">Switch-Based Isolation</label></div>
-            <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resUseRemoteSwitchOnly"/><label for="resUseRemoteSwitchOnly" style="margin:0;">Remote Switches Only</label></div>
-            <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resAllowBranchWithoutSwitch"/><label for="resAllowBranchWithoutSwitch" style="margin:0;">Allow No-Switch Ops</label></div>
-          </div>
-        </details>
-        <details style="margin-bottom:10px;border:1px solid var(--border);border-radius:8px;padding:6px 12px;">
-          <summary style="cursor:pointer;font-weight:600;color:var(--accent);font-size:0.9em;">&#9881; Manual Fault Sequence Editor</summary>
-          <p style="color:var(--muted);font-size:0.82em;margin:4px 0 8px 0;">Define individual AC/DC branch faults with branch ID, start time and repair duration. Leave empty to use auto-generation above.</p>
-          <table id="resFaultTable" style="width:100%;border-collapse:collapse;font-size:0.85em;">
-            <thead><tr style="background:var(--bg2);"><th style="padding:4px 8px;">Type</th><th style="padding:4px 8px;">Branch ID</th><th style="padding:4px 8px;">Start (hr)</th><th style="padding:4px 8px;">Repair (hr)</th><th style="padding:4px 8px;">Label</th><th style="width:40px;"></th></tr></thead>
-            <tbody id="resFaultTableBody"></tbody>
-          </table>
-          <button class="btn" style="margin-top:6px;font-size:0.82em;padding:4px 12px;" onclick="addFaultRow()">+ Add Fault</button>
-        </details>
-        <div class="btn-group" style="margin-bottom:10px;">
-          <button class="btn" style="background:#0f766e;color:#fff;" id="runResilienceBtn">&#9654; Run Resilience Assessment</button>
-        </div>
-        <div id="resStatus" class="status mono" style="margin-bottom:10px;">Set parameters and click Run.</div>
-        <div id="resilienceResultsSection" style="display:none;">
-          <div class="kpis" id="resilienceKPIs">
-            <div class="kpi"><div id="resilienceRI" class="v">-</div><div class="l">Resilience Index</div></div>
-            <div class="kpi"><div id="resilienceDemand" class="v">-</div><div class="l">Total Demand (MWh)</div></div>
-            <div class="kpi"><div id="resilienceShed" class="v">-</div><div class="l">Total Shed (MWh)</div></div>
-            <div class="kpi"><div id="resilienceFinalRestore" class="v">-</div><div class="l">Final Restoration (%)</div></div>
-            <div class="kpi"><div id="resilienceAvgRestore" class="v">-</div><div class="l">Avg Restoration (%)</div></div>
-            <div class="kpi"><div id="resiliencePeakShed" class="v">-</div><div class="l">Peak Shed (MW)</div></div>
-            <div class="kpi"><div id="resilienceMessEnergy" class="v">-</div><div class="l">MESS Energy (MWh)</div></div>
-            <div class="kpi"><div id="resilienceMessTravel" class="v">-</div><div class="l">MESS Travel (km)</div></div>
-            <div class="kpi"><div id="resilienceSwitches" class="v">-</div><div class="l">Switch Actions</div></div>
-            <div class="kpi"><div id="resilienceRepairs" class="v">-</div><div class="l">Repaired Faults</div></div>
-          </div>
-          <div id="resilienceCompareKPIs" style="display:none;margin-top:6px;padding:8px 14px;background:linear-gradient(135deg,#f0fdf4,#ecfdf5);border:1px solid #86efac;border-radius:8px;">
-            <span style="font-weight:600;color:#166534;font-size:0.85em;">&#9650; MESS Improvement:</span>
-            <span id="resCompRI" style="margin-left:10px;font-weight:600;color:#166534;"></span>
-            <span id="resCompShed" style="margin-left:10px;font-weight:600;color:#166534;"></span>
-            <span id="resCompServed" style="margin-left:10px;font-weight:600;color:#166534;"></span>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">
-            <div id="resilienceRestorationChart" class="chart" style="height:340px;"></div>
-            <div id="resilienceMessChart" class="chart" style="height:340px;"></div>
-            <div id="resilienceEnergyChart" class="chart" style="height:340px;"></div>
-            <div id="resilienceIslandChart" class="chart" style="height:340px;"></div>
-            <div id="resilienceProfileChart" class="chart" style="height:340px;"></div>
-            <div id="resilienceTrajectoryChart" class="chart" style="height:340px;"></div>
-            <div id="resiliencePriorityChart" class="chart" style="height:340px;"></div>
-            <div id="resilienceMessSOCChart" class="chart" style="height:340px;"></div>
-            <div id="resilienceVoltageChart" class="chart" style="height:340px;display:none;"></div>
-            <div id="resilienceBranchFlowChart" class="chart" style="height:340px;display:none;"></div>
-          </div>
-        </div>
-      </section>
-
-      <!-- =================== DASHBOARD TAB ============================ -->
-      <section id="dashPane" class="tabpane">
-        <div class="btn-group">
-          <button class="btn btn-primary" id="runDashBtn">&#9654; Run Full Analysis (TS-PF + Carbon)</button>
-        </div>
-        <div id="dashStatus" class="status mono" style="margin-bottom:8px;">Not run yet. Load a case and click Run.</div>
-        <div id="dashKPIs" class="kpis"></div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;">
-          <div id="dashGenChart" class="chart" style="height:300px;"></div>
-          <div id="dashCarbonChart" class="chart" style="height:300px;"></div>
-          <div id="dashVoltChart" class="chart" style="height:300px;"></div>
-          <div id="dashLossChart" class="chart" style="height:300px;"></div>
-          <div id="dashESSChart" class="chart" style="height:300px;"></div>
-          <div id="dashLoadChart" class="chart" style="height:300px;"></div>
-        </div>
-      </section>
-
-    </div>
-  </div>
-
-  <div id="statusBox" class="status" style="display:flex;align-items:center;gap:10px;">
-    <span id="statusText">Ready. Load a case to begin.</span>
-    <button id="cancelBtn" style="display:none;padding:2px 12px;background:#c34d4d;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;" onclick="cancelAnalysis()">Cancel</button>
-  </div>
-</div>
-
-<script>
-let SYS=null, activeComp='ac_buses', lastPfBody=null, lastPfCompareRows=[];
-const statusBox=document.getElementById('statusBox');
-const statusText=document.getElementById('statusText');
-const cancelBtn=document.getElementById('cancelBtn');
-function setStatus(m,e=false){statusText.textContent=m;statusBox.style.borderColor=e?'#c34d4d':'#bcc5bf';statusBox.style.background=e?'#fff1f1':'#fbfaf6';cancelBtn.style.display=m.includes('Running')?'inline-block':'none';}
-async function cancelAnalysis(){try{await fetch('/api/session/cancel',{method:'POST'});setStatus('Cancellation requested...');}catch(e){console.error(e);}}
-async function api(p,d,method='POST'){const o={method,headers:{'Content-Type':'application/json'}};if(d!==undefined)o.body=JSON.stringify(d);const r=await fetch(p,o);const t=await r.text();let b={};try{b=JSON.parse(t);}catch{b={error:t};}if(!r.ok||b.error)throw new Error(b.error||'HTTP '+r.status);return b;}
-function fmt(v,d=4){if(v==null||v===undefined||Number.isNaN(Number(v)))return'-';return Number(v).toFixed(d);}
-
-/* Power unit conversion helpers */
-function getPowerUnit(){return document.getElementById('pfDisplayUnit').value||'MW';}
-function pScale(){const u=getPowerUnit();if(u==='kW')return 1e3;if(u==='W')return 1e6;return 1;}
-function pUnit(){return getPowerUnit();}
-function pConv(mw){return mw*pScale();}
-function pFmt(mw,d=2){return (mw*pScale()).toFixed(d);}
-function qUnit(){const u=getPowerUnit();if(u==='kW')return 'kVar';if(u==='W')return 'Var';return 'MVar';}
-
-document.querySelectorAll('.panel > .tabs > .tab').forEach(tab=>{
-  tab.addEventListener('click',()=>{
-    document.querySelectorAll('.panel > .tabs > .tab').forEach(t=>t.classList.remove('active'));
-    document.querySelectorAll('.panel > .tabpane').forEach(p=>p.classList.remove('active'));
-    tab.classList.add('active');
-    document.getElementById(tab.dataset.tab).classList.add('active');
-  });
-});
-
-/* Case lists */
-async function loadCaseLists(){
-  const [cases,mfiles]=await Promise.all([fetch('/api/cases').then(r=>r.json()),fetch('/api/matpower_files').then(r=>r.json())]);
-  document.getElementById('builtinSelect').innerHTML=cases.cases.map(c=>`<option value="${c}"${c===cases.default_case?' selected':''}>${c}</option>`).join('');
-  document.getElementById('matpowerSelect').innerHTML=mfiles.files.map(f=>`<option value="${f}">${f}</option>`).join('');
-}
-
-async function loadSystem(ep,payload){
-  setStatus('Loading system...');
-  try{const d=await api(ep,payload);SYS=d;updateSystemUI();setStatus('Loaded: '+SYS.name+' ('+SYS.counts.ac_buses+' AC buses, '+SYS.counts.generators+' gens)');}
-  catch(e){setStatus(e.message,true);}
-}
-
-function updateSystemUI(){
-  if(!SYS)return;
-  document.getElementById('sysLabel').textContent=SYS.name;
-  document.getElementById('sysLabel').className='badge badge-green';
-  const cb=document.getElementById('countsBar');
-  const c=SYS.counts;
-  cb.innerHTML=Object.entries(c).map(([k,v])=>'<div class="count-chip"><span class="n">'+v+'</span>'+k.replace(/_/g,' ')+'</div>').join('');
-  renderCompTable(activeComp);
-  document.getElementById('jsonEditor').value=SYS._raw_json||'(use Refresh to load JSON)';
-}
-
-document.getElementById('loadBuiltinBtn').onclick=()=>loadSystem('/api/session/load_builtin',{case:document.getElementById('builtinSelect').value});
-document.getElementById('loadMatpowerBtn').onclick=()=>loadSystem('/api/session/load_matpower',{filename:document.getElementById('matpowerSelect').value});
-document.getElementById('uploadJsonBtn').onclick=()=>{
-  const fi=document.getElementById('jsonFileInput');
-  if(!fi.files.length){setStatus('Select a JSON file first.',true);return;}
-  const reader=new FileReader();
-  reader.onload=()=>loadSystem('/api/session/load_json_string',{json_string:reader.result});
-  reader.readAsText(fi.files[0]);
-};
-document.getElementById('loadBpaDatBtn').onclick=()=>{
-  const fi=document.getElementById('bpaDatInput');
-  if(!fi.files.length){setStatus('Select a .dat card file first.',true);return;}
-  // Send raw bytes: .dat files may be GBK-encoded (Chinese bus names), the
-  // server converts names to UTF-8. Reading as text would corrupt them.
-  const reader=new FileReader();
-  reader.onload=async()=>{
-    setStatus('Importing BPA DAT...');
-    try{
-      const resp=await fetch('/api/session/load_bpa_dat',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:reader.result});
-      const d=await resp.json();
-      if(!resp.ok)throw new Error(d.error||('HTTP '+resp.status));
-      SYS=d;updateSystemUI();setStatus('Loaded: '+SYS.name+' ('+SYS.counts.ac_buses+' AC buses, '+SYS.counts.generators+' gens)');
-    }catch(e){setStatus(e.message,true);}
+json rpo_control_inventory_json(const hacdcpf::HybridPowerSystem& sys,
+                                const hacdcpf::opf::RPOOptions& opt = {}) {
+  const auto inventory = hacdcpf::opf::inspect_rpo_controls(sys, opt);
+  const auto bus_label = [&](int index) {
+    const auto it = std::find_if(sys.ac.buses.begin(), sys.ac.buses.end(),
+                                 [&](const auto& bus) {
+                                   return bus.index == index;
+                                 });
+    if (it == sys.ac.buses.end() || it->name.empty())
+      return std::string("Bus ") + std::to_string(index);
+    return it->name + " (" + std::to_string(index) + ")";
   };
-  reader.readAsArrayBuffer(fi.files[0]);
-};
-document.getElementById('loadEtapXmlBtn').onclick=()=>{
-  const fi=document.getElementById('etapXmlInput');
-  if(!fi.files.length){setStatus('Select an ETAP project .xml file first.',true);return;}
-  const reader=new FileReader();
-  reader.onload=()=>loadSystem('/api/session/load_etap_xml',{xml_string:reader.result});
-  reader.readAsText(fi.files[0]);
-};
-document.getElementById('exportJsonBtn').onclick=async()=>{
-  try{const d=await api('/api/session/export_json',{},'POST');
-  const blob=new Blob([d.json_string],{type:'application/json'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
-  a.download=(SYS?SYS.name.replace(/[^a-zA-Z0-9_-]/g,'_'):'system')+'.json';a.click();
-  setStatus('JSON exported.');}catch(e){setStatus(e.message,true);}
-};
-document.getElementById('exportEtapBtn').onclick=async()=>{
-  try{setStatus('Exporting ETAP workbook...');
-  const resp=await fetch('/api/session/export_etap',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
-  if(!resp.ok){let m='HTTP '+resp.status;try{const j=await resp.json();if(j&&j.error)m=j.error;}catch(e){}throw new Error(m);}
-  const blob=await resp.blob();let fn='system.xlsx';const cd=resp.headers.get('Content-Disposition');
-  if(cd){const mm=/filename="?([^"]+)"?/.exec(cd);if(mm&&mm[1])fn=mm[1];}
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=fn;a.click();URL.revokeObjectURL(a.href);
-  setStatus('ETAP workbook exported: '+fn);}catch(e){setStatus(e.message,true);}
-};
-document.getElementById('newCaseBtn').onclick=()=>loadSystem('/api/session/new_empty',{});
 
-/* Case Builder tables – grouped by domain */
-const COMP_GROUPS=[
-  {label:'AC Network',items:[
-    ['ac_buses','Buses'],['ac_branches','Branches'],['transformers_2w','Trafo 2W'],['transformers_3w','Trafo 3W'],['switches','Switches'],['circuit_breakers','Breakers'],
-  ]},
-  {label:'AC Devices',items:[
-    ['generators','Generators'],['loads','Loads'],['shunts','Shunts'],['storage','Storage'],
-    ['static_generators','Static Gens'],['flexible_loads','Flex Loads'],['asymmetric_loads','Asym Loads'],
-    ['renewable_gens','Renewables'],['pv_systems','PV Systems'],['external_grids','Ext Grids'],
-    ['charging_stations','EV Stations'],['chargers','Chargers'],['motors','Motors'],
-  ]},
-  {label:'DC Network',items:[
-    ['dc_buses','Buses'],['dc_branches','Branches'],['vsc_converters','VSC Conv'],['dcdc_converters','DC/DC Conv'],['dc_circuit_breakers','Breakers'],
-  ]},
-  {label:'DC Devices',items:[
-    ['dc_loads','Loads'],['dc_storage','Storage'],['dc_static_generators','Static Gens'],
-    ['dc_native_static_generators','Native SGs'],['pv_arrays','PV Arrays'],
-    ['energy_routers','E-Routers'],['mobile_storage','Mobile Stor'],['vpps','VPPs'],['microgrids','Microgrids'],
-  ]},
-  {label:'Three-Phase',items:[
-    ['tp_buses','Buses'],['tp_lines','Lines'],['tp_transformers','Trafos'],
-    ['tp_loads','Loads'],['tp_generators','Generators'],['tp_external_grids','Ext Grids'],
-  ]},
-];
-/* flat list for legacy compat */
-const COMP_META=COMP_GROUPS.flatMap(g=>g.items);
-
-const COMP_COLS={
-  ac_buses:[{key:'index',label:'#',type:'int'},{key:'name',label:'Name',type:'str'},{key:'bus_type',label:'Type',type:'select',options:['PQ','PV','SLACK','ISOLATED']},{key:'base_kv',label:'Base kV',type:'num'},{key:'vm_pu',label:'Vm pu',type:'num'},{key:'va_deg',label:'Va deg',type:'num'},{key:'pd_mw',label:'Pd MW',type:'num'},{key:'qd_mvar',label:'Qd MVAr',type:'num'},{key:'vmax_pu',label:'Vmax',type:'num'},{key:'vmin_pu',label:'Vmin',type:'num'},{key:'i_breaker_ka',label:'Ib kA',type:'num'},{key:'area',label:'Area',type:'int'},{key:'zone',label:'Zone',type:'int'},{key:'in_service',label:'In Svc',type:'bool'}],
-  dc_buses:[{key:'index',label:'#',type:'int'},{key:'name',label:'Name',type:'str'},{key:'bus_type',label:'Type',type:'select',options:['DC_P','DC_V']},{key:'vm_pu',label:'Vm pu',type:'num'},{key:'pd_mw',label:'Pd MW',type:'num'},{key:'base_kv',label:'Base kV',type:'num'},{key:'in_service',label:'In Svc',type:'bool'}],
-};
-
-const COMP_DEFAULTS={
-  ac_buses:{index:0,name:'',bus_type:'PQ',base_kv:110,vm_pu:1.0,va_deg:0,pd_mw:0,qd_mvar:0,vmax_pu:1.05,vmin_pu:0.95,i_breaker_ka:0,area:1,zone:1,in_service:true},
-  ac_branches:{index:0,name:'',from_bus:1,to_bus:2,r_pu:0.01,x_pu:0.1,b_pu:0,tap:1.0,shift_deg:0,rate_a_mva:100,in_service:true},
-  generators:{index:0,name:'',bus:1,is_slack:false,pg_mw:0,qg_mvar:0,vg_pu:1.0,pmax_mw:100,pmin_mw:0,qmax_mvar:50,qmin_mvar:-50,cost_c2:0,cost_c1:20,cost_c0:0,in_service:true},
-  loads:{index:0,name:'',bus:1,p_mw:10,q_mvar:5,in_service:true},
-  storage:{index:0,name:'',bus:1,p_mw:0,p_rated_mw:10,e_rated_mwh:40,soc_init:0.5,eta_charge:0.95,eta_discharge:0.95,in_service:true},
-  dc_buses:{index:0,name:'',bus_type:'DC_P',vm_pu:1.0,pd_mw:0,base_kv:320,in_service:true},
-  dc_branches:{index:0,name:'',from_bus:1,to_bus:2,r_pu:0.01,rate_a_mva:100,in_service:true},
-  vsc_converters:{index:0,name:'',bus_ac:1,bus_dc:1,p_set_mw:0,q_set_mvar:0,v_dc_set_pu:1.0,eta:0.98,pmax_mw:100,p_rated_mw:100,in_service:true},
-  dcdc_converters:{index:0,name:'',bus_in:1,bus_out:2,p_ref_mw:0,v_ref_pu:1.0,eta:0.98,in_service:true},
-  energy_routers:{index:0,name:'',router_type:'SST',num_ports:0,ports:[],in_service:true},
-  mobile_storage:{index:0,name:'',bus:1,p_mw:0,e_rated_mwh:20,soc_init:0.5,in_service:true},
-  vpps:{index:0,name:'',pcc_bus:1,p_output_mw:0,q_output_mvar:0,in_service:true,aggregated_gen_ids:[],aggregated_storage_ids:[],aggregated_load_ids:[]},
-  microgrids:{index:0,name:'',pcc_bus:1,p_exchange_mw:0,in_service:true},
-  circuit_breakers:{index:0,name:'',bus_from:1,bus_to:2,breaker_type:'CB',closed:true,z_ohm:0,rated_voltage_kv:110,i_rated_ka:2.0,i_breaking_ka:40,element_type:'l',element_id:0,in_service:true},
-  dc_circuit_breakers:{index:0,name:'',bus_from:1,bus_to:2,breaker_type:'CB',closed:true,r_ohm:0,rated_voltage_kv:320,i_rated_ka:2.0,i_breaking_ka:20,element_type:'l',element_id:0,in_service:true},
-  transformers_2w:{index:0,name:'',std_type:'',hv_bus:1,lv_bus:2,in_service:true,sn_mva:25,vn_hv_kv:110,vn_lv_kv:20,vk_percent:10,vkr_percent:0.3,pk_kw:30,pfe_kw:20,i0_percent:0.5,tap_side:'hv',tap_pos:0,tap_min:-10,tap_max:10,tap_neutral:0,tap_step_percent:1.5,shift_deg:0,vector_group:'Dyn'},
-  transformers_3w:{index:0,name:'',std_type:'',hv_bus:1,mv_bus:2,lv_bus:3,in_service:true,sn_hv_mva:40,sn_mv_mva:20,sn_lv_mva:10,vn_hv_kv:110,vn_mv_kv:20,vn_lv_kv:10,vk_hv_mv_percent:10,vk_hv_lv_percent:10,vk_mv_lv_percent:10,vkr_hv_mv_percent:0.3,vkr_hv_lv_percent:0.3,vkr_mv_lv_percent:0.3,pfe_kw:30,i0_percent:0.5,tap_side:'hv',tap_pos:0,tap_step_percent:1.5,shift_mv_deg:0,shift_lv_deg:0},
-  switches:{index:0,name:'',bus_from:1,bus_to:2,in_service:true,switch_type:'CB',closed:true,r_contact_ohm:0,z_ohm:0,i_rated_ka:2.0,i_breaking_ka:40,element_type:'l',element_id:0},
-  shunts:{index:0,name:'',bus:1,in_service:true,gs_mw:0,bs_mvar:0,switchable:false,n_steps:1,current_step:1,bs_per_step:0},
-  static_generators:{index:0,name:'',bus:1,in_service:true,sgen_type:'PQ',p_mw:0,q_mvar:0,p_rated_mw:10,sn_mva:10,pmax_mw:10,pmin_mw:0,qmax_mvar:5,qmin_mvar:-5,scaling:1.0,controllable:false},
-  flexible_loads:{index:0,name:'',bus:1,in_service:true,p_mw:10,q_mvar:5,flex_up_mw:2,flex_down_mw:2,flex_duration_h:1,response_time_s:60,ramp_rate_mw_min:1,availability_pct:95,controllable:true,priority:1,control_area:''},
-  asymmetric_loads:{index:0,name:'',bus:1,in_service:true,connection:'wye',grounded:true,pa_mw:0,qa_mvar:0,pb_mw:0,qb_mvar:0,pc_mw:0,qc_mvar:0,scaling:1.0,controllable:false},
-  renewable_gens:{index:0,name:'',bus:1,in_service:true,type:'wind',p_mw:0,q_mvar:0,p_rated_mw:10,qmax_mvar:5,qmin_mvar:-5,curtailable:true,cost_curtail_mwh:0,capacity_factor:0.3,profile_id:''},
-  pv_systems:{index:0,name:'',bus:1,in_service:true,p_mw:0,q_mvar:0,sn_mva:10,pmax_mw:10,pmin_mw:0,qmax_mvar:5,qmin_mvar:-5,control_mode:'PQ',controllable:false},
-  external_grids:{index:0,name:'',bus:1,in_service:true,vm_pu:1.0,va_deg:0,s_sc_max_mva:1000,s_sc_min_mva:500,rx_max:0.1,rx_min:0.1},
-  charging_stations:{index:0,name:'',bus:1,location:'',in_service:true,n_fast:2,n_slow:4,num_chargers:6,p_fast_max_kw:150,p_slow_max_kw:22,max_power_kw:500,simultaneity_factor:0.8,power_factor:0.95,utilization_rate:0.3,p_total_kw:0,q_total_kvar:0},
-  chargers:{index:0,name:'',station_id:0,charger_type:'fast',in_service:true,p_rated_kw:150,p_ch_max_kw:150,p_ch_min_kw:0,eta:0.95,v2g_capable:false,p_dis_max_kw:0},
-  motors:{index:0,name:'',bus:1,in_service:true,vn_kv:0.4,sn_mva:0.1,r_pu:0.02,x_pu:0.15,x_r:7.5,lrc:6.0,poles:4,cos_phi:0.85,efficiency:0.9},
-  dc_loads:{index:0,name:'',bus:1,in_service:true,p_mw:10,controllable:false,p_min_mw:0,cost_mw:0,profile_id:''},
-  dc_storage:{index:0,name:'',bus:1,in_service:true,p_mw:0,p_rated_mw:10,e_rated_mwh:40,soc_init:0.5,eta_charge:0.95,eta_discharge:0.95},
-  dc_static_generators:{index:0,name:'',bus:1,in_service:true,sgen_type:'PQ',p_mw:0,q_mvar:0,p_rated_mw:10,sn_mva:10,pmax_mw:10,pmin_mw:0,qmax_mvar:5,qmin_mvar:-5,scaling:1.0,controllable:false},
-  dc_native_static_generators:{index:0,name:'',bus:1,in_service:true,type:'PQ',p_set_mw:0,scaling:1.0,profile_id:'',pmax_mw:10,pmin_mw:0,controllable:false},
-  pv_arrays:{index:0,name:'',bus:1,in_service:true,p_set_mw:0,profile_id:'',num_series:10,num_parallel:5,vmpp:30,impp:8,voc:37,isc:9,irradiance:1000,temperature:25},
-  tp_buses:{index:0,name:'',bus_type:'PQ',base_kv:20,in_service:true,vm_a_pu:1.0,va_a_deg:0,vm_b_pu:1.0,va_b_deg:-120,vm_c_pu:1.0,va_c_deg:120,vmin_pu:0.95,vmax_pu:1.05,area:1,zone:1},
-  tp_lines:{index:0,name:'',from_bus:1,to_bus:2,in_service:true,length_km:1,parallel:1,r1_ohm_per_km:0.1,x1_ohm_per_km:0.1,c1_nf_per_km:10,r0_ohm_per_km:0.3,x0_ohm_per_km:0.3,c0_nf_per_km:5,max_i_ka:0.5,rate_a_mva:20},
-  tp_transformers:{index:0,name:'',hv_bus:1,lv_bus:2,in_service:true,sn_mva:25,vn_hv_kv:110,vn_lv_kv:20,vk_percent:10,vkr_percent:0.3,pfe_kw:20,i0_percent:0.5,vector_group:'Dyn',tap_side:'hv',tap_pos:0,tap_min:-10,tap_max:10,tap_neutral:0,tap_step_percent:1.5,shift_deg:0},
-  tp_loads:{index:0,name:'',bus:1,in_service:true,connection:'wye',grounded:true,p_a_mw:0,q_a_mvar:0,p_b_mw:0,q_b_mvar:0,p_c_mw:0,q_c_mvar:0},
-  tp_generators:{index:0,name:'',bus:1,in_service:true,is_slack:false,p_mw:0,q_mvar:0,vm_pu:1.0,pmax_mw:100,pmin_mw:0,qmax_mvar:50,qmin_mvar:-50,mbase_mva:100},
-  tp_external_grids:{index:0,name:'',bus:1,in_service:true,vm_pu:1.0,va_deg:0,s_sc_max_mva:1000,s_sc_min_mva:500,rx_max:0.1,rx_min:0.1},
-};
-
-function prettyLabel(k){return k.replace(/_/g,' ').replace(/\b\w/g,m=>m.toUpperCase());}
-function inferType(v){if(typeof v==='boolean')return'bool';if(typeof v==='number')return'num';if(v===null||v===undefined)return'num';if(typeof v==='object')return'json';return'str';}
-function inferCols(comp,rows){
-  if(COMP_COLS[comp])return COMP_COLS[comp];
-  const keys=new Set(Object.keys(COMP_DEFAULTS[comp]||{}));
-  rows.forEach(r=>Object.keys(r||{}).forEach(k=>keys.add(k)));
-  return [...keys].map(k=>{
-    let sample=null;
-    for(const r of rows){if(r&&r[k]!==undefined&&r[k]!==null){sample=r[k];break;}}
-    if(sample===null&&COMP_DEFAULTS[comp]&&COMP_DEFAULTS[comp][k]!==undefined)sample=COMP_DEFAULTS[comp][k];
-    return {key:k,label:(k==='index'?'#':prettyLabel(k)),type:inferType(sample)};
-  });
-}
-
-function initCompTabs(){
-  const ct=document.getElementById('compTabs');
-  let html='',first=true;
-  COMP_GROUPS.forEach(g=>{
-    html+='<div style="display:flex;flex-wrap:wrap;align-items:center;margin-bottom:2px;">';
-    html+='<span style="margin:2px 6px 2px 0;padding:2px 6px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;border-left:3px solid var(--accent);user-select:none;white-space:nowrap;">'+g.label+'</span>';
-    g.items.forEach(([k,l])=>{
-      html+='<div class="tab'+(first?' active':'')+'" data-comp="'+k+'">'+l+'</div>';
-      first=false;
-    });
-    html+='</div>';
-  });
-  ct.innerHTML=html;
-  ct.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>{
-    ct.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-    tab.classList.add('active');
-    activeComp=tab.dataset.comp;
-    renderCompTable(activeComp);
-  }));
-}
-initCompTabs();
-
-function renderCompTable(comp){
-  const area=document.getElementById('compTableArea');
-  if(!SYS){area.innerHTML='<div style="padding:20px;color:var(--muted);">Load a system first.</div>';return;}
-  if(!SYS[comp]||!Array.isArray(SYS[comp]))SYS[comp]=[];
-  const rows=SYS[comp];
-  const cols=inferCols(comp,rows);
-  let h='<div class="dtable-wrap"><table class="dtable"><thead><tr>';
-  cols.forEach(c=>h+='<th>'+c.label+'</th>');h+='<th></th></tr></thead><tbody>';
-  rows.forEach((row,ri)=>{
-    h+='<tr data-ri="'+ri+'">';
-    cols.forEach(c=>{
-      const v=row[c.key]??'';
-      if(c.type==='bool')h+='<td><input type="checkbox" data-key="'+c.key+'" '+(v?'checked':'')+' style="width:auto;min-width:auto;"/></td>';
-      else if(c.type==='select'){h+='<td><select data-key="'+c.key+'">';c.options.forEach(o=>h+='<option'+(o===String(v)?' selected':'')+'>'+o+'</option>');h+='</select></td>';}
-      else if(c.type==='json')h+='<td><input type="text" data-key="'+c.key+'" value="'+String(JSON.stringify(v)).replace(/"/g,'&quot;')+'"/></td>';
-      else h+='<td><input type="'+(c.type==='str'?'text':'number')+'" data-key="'+c.key+'" value="'+v+'" '+(c.type==='num'?'step="any"':'')+'/></td>';
-    });
-    h+='<td><button class="row-del" data-ri="'+ri+'" title="Delete row">&times;</button></td></tr>';
-  });
-  h+='</tbody></table></div>';area.innerHTML=h;
-  area.querySelectorAll('.row-del').forEach(btn=>btn.addEventListener('click',()=>{SYS[comp].splice(parseInt(btn.dataset.ri),1);renderCompTable(comp);}));
-  area.querySelectorAll('input,select').forEach(el=>el.addEventListener('change',()=>{
-    const ri=parseInt(el.closest('tr').dataset.ri),key=el.dataset.key,col=cols.find(c=>c.key===key);
-    if(col.type==='bool')SYS[comp][ri][key]=el.checked;
-    else if(col.type==='int')SYS[comp][ri][key]=parseInt(el.value)||0;
-    else if(col.type==='num')SYS[comp][ri][key]=parseFloat(el.value)||0;
-    else if(col.type==='json'){try{SYS[comp][ri][key]=JSON.parse(el.value);}catch{SYS[comp][ri][key]=el.value;}}
-    else SYS[comp][ri][key]=el.value;
-  }));
-}
-
-document.getElementById('addRowBtn').onclick=()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  if(!SYS[activeComp])SYS[activeComp]=[];
-  const def={index:0,name:'',in_service:true,...(COMP_DEFAULTS[activeComp]||{})};
-  def.index=SYS[activeComp].reduce((mx,r)=>Math.max(mx,r.index||0),0)+1;
-  SYS[activeComp].push(def);renderCompTable(activeComp);
-  const w=document.querySelector('.dtable-wrap');if(w)w.scrollTop=w.scrollHeight;
-};
-
-document.getElementById('commitBtn').onclick=async()=>{
-  if(!SYS){setStatus('No system to commit.',true);return;}
-  try{setStatus('Committing changes...');const d=await api('/api/session/update_components',SYS);SYS=d;updateSystemUI();setStatus('Changes committed successfully.');}
-  catch(e){setStatus(e.message,true);}
-};
-
-/* JSON editor */
-document.getElementById('refreshJsonBtn').onclick=async()=>{try{const d=await api('/api/session/export_json',{},'POST');document.getElementById('jsonEditor').value=d.json_string;setStatus('JSON refreshed.');}catch(e){setStatus(e.message,true);}};
-document.getElementById('applyJsonBtn').onclick=async()=>{const j=document.getElementById('jsonEditor').value.trim();if(!j){setStatus('JSON editor is empty.',true);return;}loadSystem('/api/session/load_json_string',{json_string:j});};
-
-/* Power Flow */
-const PF_METHOD_LABEL={
-  ac_newton:'AC Newton-Raphson',dc:'DC PF',hybrid_linearized:'Hybrid AC/DC Linearized',fdpf:'Fast-Decoupled PF',
-  adaptive:'Adaptive PF',islanded:'Islanded PF',distributed_slack:'Distributed Slack PF',three_phase:'Three-Phase PF',
-};
-
-async function runPfMethod(method){
-  const body=await api('/api/session/pf',{method,options:{
-    max_iter:Number(document.getElementById('pfMaxIter').value||80),
-    tol:Number(document.getElementById('pfTol').value||1e-8),
-    fdpf_max_iter:Number(document.getElementById('pfFdpfMaxIter').value||1000),
-    enable_pv_pq_conversion:document.getElementById('pfPvPq').checked,
-    enable_auto_swing_selection:document.getElementById('pfAutoSwing').checked,
-    enable_converter_mode_switching:document.getElementById('pfConvSwitch').checked,
-    enable_converter_coordination_check:true,
-    verbose:document.getElementById('pfVerbose').checked,
-    pv_q_hysteresis_pu:Number(document.getElementById('pfPvQHyst').value||0.01),
-    max_delta_va_rad:Number(document.getElementById('pfMaxDVa').value||1.5),
-    max_delta_vm_pu:Number(document.getElementById('pfMaxDVm').value||0.5),
-    loss_model:document.getElementById('pfLossModel').value,
-  }});
-  body.method=method;
-  return body;
-}
-
-function renderPf(body){
-  document.getElementById('pfConv').textContent=body.converged?'Yes':'No';
-  document.getElementById('pfIter').textContent=body.iterations;
-  document.getElementById('pfRes').textContent=fmt(body.residual,3);
-  document.getElementById('pfNBus').textContent=(body.vm||[]).length;
-  const coord=body.converter_coordination;
-  if(coord&&coord.enabled){
-    const blocking=(coord.blocking_count!=null)?coord.blocking_count:((coord.fatal_count||0)+(coord.error_count||0));
-    const lines=[`Converter coordination: ${coord.feasible?'feasible':'infeasible'}; blocking=${blocking||0}; fatal=${coord.fatal_count||0}; error=${coord.error_count||0}; warnings=${coord.warning_count||0}`];
-    (coord.issues||[]).forEach(i=>lines.push(`${i.severity||''} ${i.rule_id||''} ${i.component_type||''}${i.component_index>=0?'#'+i.component_index:''}: ${i.message||''}`));
-    document.getElementById('pfCompareTable').textContent=lines.join('\n');
-  }
-
-  const u=pUnit(), sc=pScale(), qu=qUnit();
-  const vm=body.vm||[];
-  const branch=body.branch_abs||[];
-  const geoBuses=body.geo_buses||[];
-  const acBusIds=geoBuses.filter(b=>b.type==='AC').map(b=>b.id);
-  const dcBusIds=geoBuses.filter(b=>b.type==='DC').map(b=>b.id);
-  const acVoltX=vm.map((_,i)=>acBusIds[i]??`pos ${i}`);
-  const dcVoltX=(body.vdc||[]).map((_,i)=>dcBusIds[i]??`pos ${i}`);
-  const branchX=(body.geo_ac_branches||[]).length
-    ? (body.geo_ac_branches||[]).map(b=>b.index??`${b.from}->${b.to}`)
-    : branch.map((_,i)=>`pos ${i}`);
-  Plotly.newPlot('pfVoltChart',[{x:acVoltX,y:vm,mode:'lines+markers',line:{color:'#0b6e4f',width:2},marker:{size:5},name:'Vm'}],
-    {title:`AC Voltage Magnitude (${PF_METHOD_LABEL[body.method]||body.method})`,xaxis:{title:'AC Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-
-  /* DC Bus Voltages */
-  const vdc=body.vdc||[];
-  if(vdc.length>0){
-    Plotly.newPlot('pfDcVoltChart',[{x:dcVoltX,y:vdc,mode:'lines+markers',line:{color:'#6a0dad',width:2},marker:{size:5,color:'#6a0dad'},name:'Vdc'}],
-      {title:'DC Bus Voltage',xaxis:{title:'DC Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-  } else { Plotly.purge('pfDcVoltChart'); }
-
-  /* VSC Converter Transfers */
-  const vsc=body.vsc_transfers||[];
-  if(vsc.length>0){
-    const labels=vsc.map(v=>'VSC'+v.index+' (AC'+v.bus_ac+'↔DC'+v.bus_dc+')');
-    Plotly.newPlot('pfConverterChart',[
-      {x:labels,y:vsc.map(v=>pConv(v.p_ac_mw)),type:'bar',name:`P_ac (${u})`,marker:{color:'#0b6e4f'}},
-      {x:labels,y:vsc.map(v=>pConv(v.p_dc_mw)),type:'bar',name:`P_dc (${u})`,marker:{color:'#6a0dad'}},
-      {x:labels,y:vsc.map(v=>pConv(v.loss_mw)),type:'bar',name:`Loss (${u})`,marker:{color:'#c34d4d'}}
-    ],{title:'VSC Converter Power Transfers',barmode:'group',xaxis:{title:'Converter'},yaxis:{title:u},margin:{l:55,r:15,t:45,b:80}},{responsive:true});
-  } else { Plotly.purge('pfConverterChart'); }
-
-  Plotly.newPlot('pfBranchChart',[{x:branchX,y:branch.map(v=>pConv(v)),type:'bar',marker:{color:'#2c8c99'}}],
-    {title:`Branch |P|`,xaxis:{title:'Branch'},yaxis:{title:u},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-
-  // GIS Map
-  renderGeoMap(body);
-}
-
-function renderPfCompare(rows){
-  if(!rows.length){document.getElementById('pfCompareTable').textContent='No comparison results yet.';return;}
-  const methods=rows.map(r=>PF_METHOD_LABEL[r.method]||r.method);
-  const iters=rows.map(r=>r.iterations||0);
-  const residuals=rows.map(r=>Number(r.residual||0));
-  Plotly.newPlot('pfCompareChart',[
-    {x:methods,y:iters,type:'bar',name:'Iterations',marker:{color:'#0b6e4f'}},
-    {x:methods,y:residuals,type:'scatter',mode:'lines+markers',name:'Residual',yaxis:'y2',line:{color:'#b5651d',width:2}},
-  ],{title:'PF Method Comparison',yaxis:{title:'Iterations'},yaxis2:{title:'Residual',overlaying:'y',side:'right'},margin:{l:55,r:55,t:45,b:80}}, {responsive:true});
-  const lines=['Method | Conv | Iter | Residual | |Vm| count'];
-  rows.forEach(r=>lines.push(`${PF_METHOD_LABEL[r.method]||r.method} | ${r.converged?'Y':'N'} | ${r.iterations} | ${fmt(r.residual,4)} | ${(r.vm||[]).length}`));
-  document.getElementById('pfCompareTable').textContent=lines.join('\n');
-}
-
-function renderGeoMap(body){
-  const buses=body.geo_buses||[];
-  const acBranches=body.geo_ac_branches||[];
-  const dcBranches=body.geo_dc_branches||[];
-  const vsc=body.geo_vsc||[];
-  const dcdc=body.geo_dcdc||[];
-  const u=pUnit(), qu=qUnit();
-  
-  if(!buses.length){Plotly.purge('pfGeoMap');return;}
-  
-  // Check if we have valid geo coordinates (not all zeros)
-  const hasGeo=buses.some(b=>Math.abs(b.lat)>0.001||Math.abs(b.lon)>0.001);
-  
-  const traces=[];
-  
-  // AC Branches as lines
-  for(const br of acBranches){
-    traces.push({
-      type:'scattergeo',
-      mode:'lines',
-      lon:[br.from_lon,br.to_lon],
-      lat:[br.from_lat,br.to_lat],
-      line:{width:Math.max(1,Math.min(6,(br.loading_pct||0)/20)),color:'#0b6e4f'},
-      hoverinfo:'text',
-      text:`AC ${br.from}-${br.to}: Pf=${pFmt(br.pf_mw||0)} Pt=${pFmt(br.pt_mw||0)} Loss=${pFmt(br.loss_mw||0,3)} ${u} (${(br.loading_pct||0).toFixed(1)}%)`,
-      showlegend:false
-    });
-  }
-  
-  // DC Branches as lines
-  for(const br of dcBranches){
-    traces.push({
-      type:'scattergeo',
-      mode:'lines',
-      lon:[br.from_lon,br.to_lon],
-      lat:[br.from_lat,br.to_lat],
-      line:{width:2,color:'#6a0dad',dash:'dash'},
-      hoverinfo:'text',
-      text:`DC ${br.from}-${br.to}: ${pFmt(br.pf_mw||0)} ${u}`,
-      showlegend:false
-    });
-  }
-  
-  // VSC connections
-  for(const v of vsc){
-    traces.push({
-      type:'scattergeo',
-      mode:'lines',
-      lon:[v.ac_lon,v.dc_lon],
-      lat:[v.ac_lat,v.dc_lat],
-      line:{width:3,color:'#b5651d'},
-      hoverinfo:'text',
-      text:`VSC: AC${v.bus_ac}↔DC${v.bus_dc} P=${pFmt(v.p_ac_mw||0)}${u}`,
-      showlegend:false
-    });
-  }
-  
-  // DC-DC converter connections
-  for(const d of dcdc){
-    traces.push({
-      type:'scattergeo',
-      mode:'lines',
-      lon:[d.in_lon,d.out_lon],
-      lat:[d.in_lat,d.out_lat],
-      line:{width:3,color:'#c34d4d',dash:'dot'},
-      hoverinfo:'text',
-      text:`DCDC: DC${d.bus_in}↔DC${d.bus_out} P=${pFmt(d.p_in_mw||0)}${u}`,
-      showlegend:false
-    });
-  }
-  
-  // AC buses with dynamic voltage color range
-  const acBuses=buses.filter(b=>b.type==='AC');
-  if(acBuses.length){
-    const vmVals=acBuses.map(b=>b.vm_pu||1.0);
-    const vmMin=Math.min(...vmVals);
-    const vmMax=Math.max(...vmVals);
-    const vmRange=Math.max(vmMax-vmMin,0.005);
-    const cmin=Math.max(0.9, vmMin-vmRange*0.3);
-    const cmax=Math.min(1.1, vmMax+vmRange*0.3);
-    traces.push({
-      type:'scattergeo',
-      mode:'markers+text',
-      lon:acBuses.map(b=>b.lon),
-      lat:acBuses.map(b=>b.lat),
-      marker:{size:acBuses.map(b=>b.bus_type==='SLACK'?14:10),color:vmVals,colorscale:'RdYlGn',cmin:cmin,cmax:cmax,colorbar:{title:'Vm (pu)',x:1.02,thickness:12,len:0.7}},
-      text:acBuses.map(b=>b.name||'AC'+b.id),
-      textposition:'top center',
-      textfont:{size:9},
-      hoverinfo:'text',
-      hovertext:acBuses.map(b=>`AC${b.id} ${b.name||''}<br>Vm=${(b.vm_pu||1.0).toFixed(4)} Va=${((b.va_rad||0)*180/Math.PI).toFixed(2)}°<br>P=${pFmt(b.pd_mw||0)}${u} Q=${pFmt(b.qd_mvar||0)}${qu}`),
-      name:'AC Buses',
-      showlegend:true
-    });
-  }
-  
-  // DC buses with voltage-based coloring
-  const dcBuses=buses.filter(b=>b.type==='DC');
-  if(dcBuses.length){
-    const vdcVals=dcBuses.map(b=>b.vm_pu||1.0);
-    const vdcMin=Math.min(...vdcVals);
-    const vdcMax=Math.max(...vdcVals);
-    const vdcRange=Math.max(vdcMax-vdcMin,0.005);
-    traces.push({
-      type:'scattergeo',
-      mode:'markers+text',
-      lon:dcBuses.map(b=>b.lon),
-      lat:dcBuses.map(b=>b.lat),
-      marker:{size:12,color:vdcVals,colorscale:'Purples',cmin:Math.max(0.9,vdcMin-vdcRange*0.3),cmax:Math.min(1.1,vdcMax+vdcRange*0.3),symbol:'square'},
-      text:dcBuses.map(b=>b.name||'DC'+b.id),
-      textposition:'top center',
-      textfont:{size:9},
-      hoverinfo:'text',
-      hovertext:dcBuses.map(b=>`DC${b.id} ${b.name||''}<br>Vdc=${(b.vm_pu||1.0).toFixed(4)}<br>P=${pFmt(b.pd_mw||0)}${u}`),
-      name:'DC Buses',
-      showlegend:true
-    });
-  }
-  
-  const layout={
-    title:'Network GIS Visualization',
-    geo:{
-      scope:hasGeo?undefined:'usa',
-      projection:{type:hasGeo?'mercator':'albers usa'},
-      showland:true,landcolor:'#f5f5dc',
-      showlakes:true,lakecolor:'#a0d2db',
-      showcountries:true,countrycolor:'#888',
-      showsubunits:true,subunitcolor:'#aaa',
-      resolution:hasGeo?50:110,
-      lonaxis:hasGeo?(()=>{const lons=buses.map(b=>b.lon);const minL=Math.min(...lons),maxL=Math.max(...lons);const span=maxL-minL;const pad=Math.max(0.002,span*0.08);return{range:[minL-pad,maxL+pad]};})():undefined,
-      lataxis:hasGeo?(()=>{const lats=buses.map(b=>b.lat);const minL=Math.min(...lats),maxL=Math.max(...lats);const span=maxL-minL;const pad=Math.max(0.002,span*0.08);return{range:[minL-pad,maxL+pad]};})():undefined
-    },
-    margin:{l:0,r:0,t:40,b:0},
-    legend:{x:0,y:1,bgcolor:'rgba(255,255,255,0.7)'}
+  json taps = json::array();
+  json shunts = json::array();
+  int adjustable_taps = 0;
+  int selected_taps = 0;
+  int adjustable_shunts = 0;
+  long double log10_combinations = 0.0L;
+  std::uint64_t exact_combinations = 1;
+  bool exact_available = true;
+  constexpr std::uint64_t kMaxExactJsonInteger = 9007199254740991ULL;
+  const auto accumulate_space = [&](int positions) {
+    if (positions <= 0) return;
+    log10_combinations += std::log10(static_cast<long double>(positions));
+    if (exact_available) {
+      const auto p = static_cast<std::uint64_t>(positions);
+      if (exact_combinations > kMaxExactJsonInteger / p)
+        exact_available = false;
+      else
+        exact_combinations *= p;
+    }
   };
-  
-  Plotly.newPlot('pfGeoMap',traces,layout,{responsive:true});
+
+  for (const auto& row : inventory.taps) {
+    if (row.adjustable) ++adjustable_taps;
+    if (row.selected_for_optimization) {
+      ++selected_taps;
+      accumulate_space(row.optimization_position_count);
+    }
+    taps.push_back(json{
+        {"trafo_index", row.trafo_index},
+        {"authored_index", row.authored_index},
+        {"source_branch_idx", row.source_branch_idx},
+        {"name", row.name},
+        {"hv_bus", row.hv_bus},
+        {"lv_bus", row.lv_bus},
+        {"hv_bus_label", bus_label(row.hv_bus)},
+        {"lv_bus_label", bus_label(row.lv_bus)},
+        {"tap_side", row.tap_side},
+        {"tap_side_label", row.tap_side == 0 ? "HV" : "LV"},
+        {"in_service", row.in_service},
+        {"adjustable", row.adjustable},
+        {"selected_for_optimization", row.selected_for_optimization},
+        {"exclusion_reason", row.exclusion_reason},
+        {"tap_pos", row.tap_pos},
+        {"tap_min", row.tap_min},
+        {"tap_max", row.tap_max},
+        {"tap_neutral", row.tap_neutral},
+        {"tap_number", row.tap_pos - row.tap_neutral},
+        {"position_count", row.position_count},
+        {"optimization_tap_min", row.optimization_tap_min},
+        {"optimization_tap_max", row.optimization_tap_max},
+        {"optimization_position_count", row.optimization_position_count},
+        {"tap_step_percent", row.tap_step_percent},
+        {"ratio_current", row.ratio_current},
+        {"ratio_min", row.ratio_min},
+        {"ratio_max", row.ratio_max},
+        {"electrical_tap_current", row.electrical_tap_current},
+        {"electrical_tap_min", row.electrical_tap_min},
+        {"electrical_tap_max", row.electrical_tap_max},
+        {"at_lower_limit", row.tap_pos == row.tap_min},
+        {"at_upper_limit", row.tap_pos == row.tap_max}});
+  }
+  for (const auto& row : inventory.shunts) {
+    if (row.adjustable) {
+      ++adjustable_shunts;
+      accumulate_space(row.position_count);
+    }
+    shunts.push_back(json{
+        {"shunt_index", row.shunt_index},
+        {"authored_index", row.authored_index},
+        {"name", row.name},
+        {"bus", row.bus},
+        {"bus_label", bus_label(row.bus)},
+        {"in_service", row.in_service},
+        {"switchable", row.switchable},
+        {"adjustable", row.adjustable},
+        {"exclusion_reason", row.exclusion_reason},
+        {"current_step", row.current_step},
+        {"n_steps", row.n_steps},
+        {"position_count", row.position_count},
+        {"bs_per_step_mvar", row.bs_per_step_mvar},
+        {"bs_current_mvar", row.bs_current_mvar}});
+  }
+
+  return json{
+      {"eligibility_contract",
+       "OLTC: in_service && tap_max > tap_min && tap_step_percent > 0 && "
+       "tap_min <= tap_pos <= tap_max; shunt: in_service && switchable && "
+       "n_steps > 1 && abs(bs_per_step) > 0 && 0 <= current_step <= n_steps"},
+      {"tap_ratio_formula",
+       "ratio = 1 + (tap_pos - tap_neutral) * tap_step_percent / 100"},
+      {"optimization_range_contract",
+       "selected OLTC range = nameplate range intersected with "
+       "[tap_pos-max_tap_move, tap_pos+max_tap_move]; max_tap_move < 0 "
+       "uses the full nameplate range"},
+      {"transformer_count", inventory.taps.size()},
+      {"adjustable_oltc_count", adjustable_taps},
+      {"selected_oltc_count", selected_taps},
+      {"unselected_adjustable_oltc_count", adjustable_taps - selected_taps},
+      {"excluded_transformer_count",
+       static_cast<int>(inventory.taps.size()) - adjustable_taps},
+      {"shunt_count", inventory.shunts.size()},
+      {"adjustable_shunt_count", adjustable_shunts},
+      {"discrete_variable_count", selected_taps + adjustable_shunts},
+      {"max_tap_move", opt.max_tap_move},
+      {"search_space_log10", static_cast<double>(log10_combinations)},
+      {"search_space_exact",
+       exact_available ? json(exact_combinations) : json(nullptr)},
+      {"oltc", std::move(taps)},
+      {"shunts", std::move(shunts)}};
 }
 
-// --- Market GIS Map: buses coloured by average LMP, branches/DC links overlaid ---
-function renderMktGeoMap(body, lmp, sced){
-  const el=document.getElementById('mktGeoMap');
-  if(!el)return;
-  if(!SYS||!SYS.ac_buses||!SYS.ac_buses.length){el.innerHTML='<p style=\"color:#999\">No system loaded.</p>';return;}
-
-  // Build bus coord map from the loaded system
-  const busList=SYS.ac_buses||[];
-  const brList=SYS.ac_branches||[];
-  const dcBusList=SYS.dc_buses||[];
-  const dcBrList=SYS.dc_branches||[];
-  const vscList=SYS.vsc_converters||[];
-
-  const hasGeo=busList.some(b=>(Math.abs(b.latitude||0)>0.001||Math.abs(b.longitude||0)>0.001));
-  if(!hasGeo){el.innerHTML='<p style=\"color:#999\">No geographic coordinates available for this case.</p>';return;}
-
-  // Average LMP per bus across all periods
-  const nodalLmp=lmp.nodal_lmp||[];
-  const T=nodalLmp.length>0?(nodalLmp[0]||[]).length:0;
-  const avgLmp=nodalLmp.map(arr=>{
-    if(!arr||!arr.length)return 0;
-    return arr.reduce((s,v)=>s+Number(v||0),0)/arr.length;
-  });
-  const maxLmp=Math.max(1,...avgLmp);
-  const minLmp=Math.min(0,...avgLmp);
-
-  // Province colour palette
-  const areaColors=['#666','#2c8c99','#ff9800','#6a0dad','#27ae60','#d32f2f'];
-
-  const traces=[];
-
-  // AC Branches
-  for(const br of brList){
-    const fb=busList.find(b=>b.index===br.from_bus);
-    const tb=busList.find(b=>b.index===br.to_bus);
-    if(!fb||!tb)continue;
-    const fromArea=fb.area||0, toArea=tb.area||0;
-    const isInterArea=fromArea!==toArea;
-    traces.push({
-      type:'scattergeo',mode:'lines',
-      lon:[fb.longitude,tb.longitude],lat:[fb.latitude,tb.latitude],
-      line:{width:isInterArea?2.5:1.5,color:isInterArea?'#333':'#aaa',dash:isInterArea?'solid':'solid'},
-      hoverinfo:'text',
-      text:'AC '+(br.name||br.index)+' ('+fmt(br.rate_a_mva||0,0)+' MVA)',
-      showlegend:false
-    });
-  }
-
-  // DC Branches (dashed purple)
-  for(const dbr of dcBrList){
-    const fb=dcBusList.find(b=>b.index===dbr.from_bus);
-    const tb=dcBusList.find(b=>b.index===dbr.to_bus);
-    if(!fb||!tb)continue;
-    traces.push({
-      type:'scattergeo',mode:'lines',
-      lon:[fb.longitude,tb.longitude],lat:[fb.latitude,tb.latitude],
-      line:{width:3,color:'#6a0dad',dash:'dash'},
-      hoverinfo:'text',
-      text:'HVDC '+(dbr.name||dbr.index)+' ('+fmt(dbr.rate_a_mva||dbr.s_max_mva||0,0)+' MW)',
-      showlegend:false
-    });
-  }
-
-  // AC buses coloured by average LMP
-  if(busList.length){
-    traces.push({
-      type:'scattergeo',mode:'markers+text',
-      lon:busList.map(b=>b.longitude||0),
-      lat:busList.map(b=>b.latitude||0),
-      marker:{
-        size:busList.map((b,i)=>{const bt=b.bus_type||'PQ';return(bt==='SLACK'||bt===3||bt==='3')?14:10;}),
-        color:avgLmp.length>=busList.length?avgLmp.slice(0,busList.length):busList.map(()=>0),
-        colorscale:[[0,'#2166ac'],[0.25,'#67a9cf'],[0.5,'#f7f7f7'],[0.75,'#ef8a62'],[1,'#b2182b']],
-        cmin:minLmp,cmax:maxLmp,
-        colorbar:{title:'Avg LMP ($/MWh)',x:1.02,thickness:12,len:0.7},
-        line:{width:1,color:'#333'}
-      },
-      text:busList.map(b=>b.name||('Bus '+b.index)),
-      textposition:'top center',
-      textfont:{size:8},
-      hoverinfo:'text',
-      hovertext:busList.map((b,i)=>{
-        const al=avgLmp[i]||0;
-        return (b.name||'Bus '+b.index)+'<br>Area '+b.area+', Zone '+b.zone+
-          '<br>Avg LMP: $'+fmt(al,2)+'/MWh'+
-          '<br>Load: '+fmt(b.pd_mw||0,1)+' MW';
-      }),
-      name:'AC Buses (LMP)',
-      showlegend:true
-    });
-  }
-
-  // DC buses (squares)
-  if(dcBusList.length&&dcBusList.some(b=>Math.abs(b.latitude||0)>0.001)){
-    traces.push({
-      type:'scattergeo',mode:'markers+text',
-      lon:dcBusList.map(b=>b.longitude||0),
-      lat:dcBusList.map(b=>b.latitude||0),
-      marker:{size:10,color:'#6a0dad',symbol:'square'},
-      text:dcBusList.map(b=>b.name||('DC '+b.index)),
-      textposition:'top center',
-      textfont:{size:8},
-      hoverinfo:'text',
-      hovertext:dcBusList.map(b=>(b.name||'DC '+b.index)),
-      name:'DC Buses',
-      showlegend:true
-    });
-  }
-
-  const lons=busList.map(b=>b.longitude||0).concat(dcBusList.map(b=>b.longitude||0));
-  const lats=busList.map(b=>b.latitude||0).concat(dcBusList.map(b=>b.latitude||0));
-  const lonMin=Math.min(...lons),lonMax=Math.max(...lons);
-  const latMin=Math.min(...lats),latMax=Math.max(...lats);
-  const lonPad=Math.max(0.5,(lonMax-lonMin)*0.08);
-  const latPad=Math.max(0.3,(latMax-latMin)*0.08);
-
-  Plotly.newPlot('mktGeoMap',traces,{
-    title:'GIS Network Map — Average LMP by Bus',
-    geo:{
-      projection:{type:'mercator'},
-      showland:true,landcolor:'#f5f5dc',
-      showlakes:true,lakecolor:'#a0d2db',
-      showcountries:true,countrycolor:'#888',
-      showsubunits:true,subunitcolor:'#aaa',
-      resolution:50,
-      lonaxis:{range:[lonMin-lonPad,lonMax+lonPad]},
-      lataxis:{range:[latMin-latPad,latMax+latPad]}
-    },
-    margin:{l:0,r:0,t:40,b:0},
-    legend:{x:0,y:1,bgcolor:'rgba(255,255,255,0.7)'}
-  },{responsive:true});
-}
-
-document.getElementById('runPfBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  const method=document.getElementById('pfMethod').value;
-  try{
-    setStatus('Running '+(PF_METHOD_LABEL[method]||method)+'...');
-    const body=await runPfMethod(method);
-    lastPfBody=body; lastPfCompareRows=[body];
-    renderPf(body);
-    renderPfCompare([body]);
-    setStatus('Power flow completed: '+(PF_METHOD_LABEL[method]||method));
-  }catch(e){setStatus(e.message,true);}
-};
-
-document.getElementById('runPfCompareBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  const methods=['ac_newton','dc','hybrid_linearized','fdpf','adaptive','islanded','distributed_slack','three_phase'];
-  setStatus('Running comparison across PF methods...');
-  const rows=[];
-  for(const m of methods){
-    try{rows.push(await runPfMethod(m));}
-    catch(e){rows.push({method:m,converged:false,iterations:0,residual:NaN,vm:[],_error:e.message});}
-  }
-  const selected=rows.find(r=>r.method===document.getElementById('pfMethod').value)||rows[0];
-  if(selected){lastPfBody=selected;renderPf(selected);}
-  lastPfCompareRows=rows;
-  renderPfCompare(rows);
-  const ok=rows.filter(r=>r.converged).length;
-  setStatus(`PF comparison complete: ${ok}/${rows.length} methods converged.`);
-};
-
-document.getElementById('runSpptAgentBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  const outBox=document.getElementById('spptAgentOut');
-  try{
-    setStatus('Running SPPT guarded agent loop...');
-    const body=await api('/api/session/sppt_agent',{},'POST');
-    const m=body.metrics||{};
-    const steps=(body.steps||[]).map((s,i)=>
-      `${i+1}. ${s.edit}: ${s.accepted?'ACCEPT':'REJECT'}${s.reason?` (${s.reason})`:''}`+
-      `${s.analysis_ran?` | analysis ${s.analysis_converged?'ok':'fail'} | attributed ${s.attributed_buses}`:''}`
-    ).join('\n');
-    outBox.style.display='block';
-    outBox.textContent=
-      `sound=${body.sound?'true':'false'}\n`+
-      `tp=${m.tp??0} tn=${m.tn??0} fp=${m.fp??0} fn=${m.fn??0}\n`+
-      `precision=${fmt(m.precision??0,3)} recall=${fmt(m.recall??0,3)} catch=${fmt(m.catch_rate??0,3)}\n\n`+
-      steps;
-    setStatus(`SPPT agent loop complete: sound=${body.sound?'true':'false'}, catch=${fmt(m.catch_rate??0,3)}.`);
-  }catch(e){
-    outBox.style.display='block';
-    outBox.textContent=`SPPT agent loop failed: ${e.message}`;
-    setStatus(e.message,true);
-  }
-};
-
-/* Re-render on display unit change */
-document.getElementById('pfDisplayUnit').onchange=()=>{
-  if(lastPfBody)renderPf(lastPfBody);
-  if(lastPfCompareRows.length)renderPfCompare(lastPfCompareRows);
-};
-
-/* OPF */
-function renderOpfDcResults(body){
-  const acBusX=(n)=>Array.from({length:n},(_,i)=>(SYS&&SYS.ac_buses&&SYS.ac_buses[i]&&SYS.ac_buses[i].index!=null)?SYS.ac_buses[i].index:`pos ${i}`);
-  const dcBusX=(n)=>Array.from({length:n},(_,i)=>(SYS&&SYS.dc_buses&&SYS.dc_buses[i]&&SYS.dc_buses[i].index!=null)?SYS.dc_buses[i].index:`pos ${i}`);
-  const vdc=body.vdc||[];
-  if(vdc.length>0){
-    Plotly.newPlot('opfDcVoltChart',[{x:dcBusX(vdc.length),y:vdc,mode:'lines+markers',line:{color:'#6a0dad',width:2},marker:{size:5,color:'#6a0dad'},name:'Vdc'}],
-      {title:'DC Bus Voltage',xaxis:{title:'DC Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-  } else { Plotly.purge('opfDcVoltChart'); }
-  const pac=body.pac_mw||[], qac=body.qac_mvar||[];
-  if(pac.length>0){
-    const u=pUnit(), qu=qUnit();
-    Plotly.newPlot('opfConverterChart',[
-      {x:pac.map((_,i)=>'VSC'+(i+1)),y:pac.map(v=>pConv(v)),type:'bar',name:`P_ac (${u})`,marker:{color:'#0b6e4f'}},
-      {x:qac.map((_,i)=>'VSC'+(i+1)),y:qac.map(v=>pConv(v)),type:'bar',name:`Q_ac (${qu})`,marker:{color:'#2c8c99'}}
-    ],{title:'Converter Operating Points',barmode:'group',xaxis:{title:'Converter'},yaxis:{title:`${u} / ${qu}`},margin:{l:55,r:15,t:45,b:65}},{responsive:true});
-  } else { Plotly.purge('opfConverterChart'); }
-  // LMP chart
-  const lp=body.lmp_p||[], lq=body.lmp_q||[], lmp=body.lmp||[];
-  if(lp.length>0){
-    const busX=acBusX(lp.length);
-    const traces=[{x:busX,y:lp,type:'bar',name:'Active LMP ($/MWh)',marker:{color:'#0b6e4f'}}];
-    if(lq.length>0) traces.push({x:busX,y:lq,type:'bar',name:'Reactive LMP ($/MVArh)',marker:{color:'#2c8c99'}});
-    Plotly.newPlot('opfLmpChart',traces,{title:'Locational Marginal Prices',barmode:'group',xaxis:{title:'Bus'},yaxis:{title:'$/MWh'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.15}},{responsive:true});
-  } else if(lmp.length>0){
-    Plotly.newPlot('opfLmpChart',[{x:dcBusX(lmp.length),y:lmp,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5},name:'LMP ($/MWh)'}],
-      {title:'Locational Marginal Prices (DC OPF)',xaxis:{title:'Bus'},yaxis:{title:'$/MWh'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-  } else { Plotly.purge('opfLmpChart'); }
-}
-document.getElementById('runAcOpfBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  const solver=document.getElementById('opfSolver').value;
-  try{setStatus('Running AC OPF ('+solver+')...');const body=await api('/api/session/opf_ac',{solver});
-  document.getElementById('opfType').textContent=body.solver_backend?body.solver_backend:('AC ('+solver+')');
-  document.getElementById('opfConv').textContent=body.converged?'Yes':'No';
-  document.getElementById('opfObj').textContent=fmt(body.objective,2);
-  document.getElementById('opfIter').textContent=body.iterations;
-  Plotly.newPlot('opfDispatchChart',[{x:body.pg_mw.map((_,i)=>i+1),y:body.pg_mw.map(v=>pConv(v)),type:'bar',marker:{color:'#0b6e4f'}}],{title:'AC OPF Dispatch',xaxis:{title:'Gen'},yaxis:{title:pUnit()},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-  if(body.vm)Plotly.newPlot('opfAuxChart',[{x:Array.from({length:body.vm.length},(_,i)=>(SYS&&SYS.ac_buses&&SYS.ac_buses[i]&&SYS.ac_buses[i].index!=null)?SYS.ac_buses[i].index:`pos ${i}`),y:body.vm,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5}}],{title:'AC OPF Voltage',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-  renderOpfDcResults(body);
-  setStatus(body.converged?('AC OPF completed ('+(body.solver_backend||solver)+').'):('AC OPF did not converge: '+(body.status||'')) ,!body.converged);}catch(e){setStatus(e.message,true);}
-};
-
-document.getElementById('runDcOpfBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{setStatus('Running DC OPF...');const body=await api('/api/session/opf_dc',{});
-  document.getElementById('opfType').textContent='DC';
-  document.getElementById('opfConv').textContent=body.converged?'Yes':'No';
-  document.getElementById('opfObj').textContent=fmt(body.objective,2);
-  document.getElementById('opfIter').textContent=body.iterations;
-  Plotly.newPlot('opfDispatchChart',[{x:body.pg_mw.map((_,i)=>i+1),y:body.pg_mw.map(v=>pConv(v)),type:'bar',marker:{color:'#2c8c99'}}],{title:'DC OPF Dispatch',xaxis:{title:'Gen'},yaxis:{title:pUnit()},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-  Plotly.purge('opfAuxChart');
-  renderOpfDcResults(body);
-  setStatus('DC OPF completed.');}catch(e){setStatus(e.message,true);}
-};
-
-document.getElementById('runParityOpfBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{setStatus('Running Parity OPF (full-space IPM)...');const body=await api('/api/session/opf_parity',{});
-  document.getElementById('opfType').textContent='Parity IPM';
-  document.getElementById('opfConv').textContent=body.converged?'Yes':'No';
-  document.getElementById('opfObj').textContent=fmt(body.objective,2);
-  document.getElementById('opfIter').textContent=body.iterations;
-  Plotly.newPlot('opfDispatchChart',[{x:body.pg_mw.map((_,i)=>i+1),y:body.pg_mw.map(v=>pConv(v)),type:'bar',marker:{color:'#6a0dad'}}],{title:'Parity OPF Dispatch',xaxis:{title:'Gen'},yaxis:{title:pUnit()},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-  if(body.vm)Plotly.newPlot('opfAuxChart',[{x:Array.from({length:body.vm.length},(_,i)=>(SYS&&SYS.ac_buses&&SYS.ac_buses[i]&&SYS.ac_buses[i].index!=null)?SYS.ac_buses[i].index:`pos ${i}`),y:body.vm,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5}}],{title:'Parity OPF AC Voltage',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-  renderOpfDcResults(body);
-  setStatus('Parity OPF completed.');}catch(e){setStatus(e.message,true);}
-};
-
-/* Short Circuit */
-function scNumber(id,fallback){const el=document.getElementById(id);const v=Number(el&&el.value);return Number.isFinite(v)?v:fallback;}
-function scChecked(id,fallback){const el=document.getElementById(id);return el?!!el.checked:!!fallback;}
-function scOptions(detailed){
-  return {
-    fault_type:document.getElementById('scFaultType').value,
-    calc_type:document.getElementById('scCalcType').value,
-    c_factor:scNumber('scCFactor',1.1),
-    kappa_method:document.getElementById('scKappaMethod').value,
-    topology:document.getElementById('scTopology').value,
-    fault_impedance_pu:scNumber('scFaultImpedance',0),
-    breaking_time_s:scNumber('scBreakingTime',0.05),
-    ith_duration_s:scNumber('scIthDuration',1),
-    base_frequency_hz:scNumber('scBaseFrequency',50),
-    default_xdpp:scNumber('scDefaultXdpp',0.2),
-    compute_branch_flows:!!detailed&&scChecked('scComputeBranchFlows',true),
-    compute_voltage_drops:!!detailed&&scChecked('scComputeVoltageDrops',true),
-    compute_ith:scChecked('scComputeIth',true)
-  };
-}
-function dcScOptions(){
-  return {
-    fault_resistance_pu:scNumber('scFaultImpedance',0),
-    source_voltage_pu:scNumber('dcScSourceVoltage',0),
-    consider_dc_breakers:scChecked('dcScConsiderBreakers',true),
-    dc_breakers_control_branches:scChecked('dcScBreakerControlsBranch',true),
-    add_unassigned_closed_breaker_edges:scChecked('dcScAddBreakerEdges',true)
-  };
-}
-document.getElementById('runScBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  if(document.getElementById('scDomain').value==='DC'){
-    const ids=(SYS.dc&&SYS.dc.buses?SYS.dc.buses:[]).map(b=>b.index);
-    if(!ids.length){setStatus('No DC buses available.',true);return;}
-    try{
-      setStatus('Running DC short circuit...');
-      const body=await api('/api/session/dc_sc',{fault_bus_ids:ids,options:dcScOptions()});
-      document.getElementById('scFault').textContent='DC';
-      document.getElementById('scBuses').textContent=body.results.length;
-      const ik=body.results.map(r=>r.i_fault_ka||0);
-      document.getElementById('scMaxIk').textContent=fmt(Math.max(...ik),3);
-      document.getElementById('scMinIk').textContent=fmt(Math.min(...ik),3);
-      Plotly.newPlot('scIkChart',[{x:body.results.map(r=>'DC '+r.fault_bus_id),y:ik,type:'bar',name:'If',marker:{color:'#0b6e4f'}}],
-        {title:'DC Short Circuit Fault Current (kA)',xaxis:{title:'DC Bus'},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60}},{responsive:true});
-      document.getElementById('scSkChart').innerHTML='';
-      document.getElementById('scDetailedChart').innerHTML='';
-      document.getElementById('scContribChart').innerHTML='';
-      document.getElementById('scVremainChart').innerHTML='';
-      setStatus('DC short circuit completed. '+body.results.length+' buses analyzed.');
-    }catch(e){setStatus(e.message,true);}
-    return;
-  }
-  try{setStatus('Running short circuit (all buses)...');
-  const body=await api('/api/session/sc',{options:scOptions(false)});
-  document.getElementById('scFault').textContent=body.fault_type;
-  document.getElementById('scBuses').textContent=body.bus_results.length;
-  const ik=body.bus_results.map(r=>r.ikpp_ka);
-  document.getElementById('scMaxIk').textContent=fmt(Math.max(...ik),3);
-  document.getElementById('scMinIk').textContent=fmt(Math.min(...ik),3);
-  const busIds=body.bus_results.map(r=>'Bus '+r.bus_id);
-  Plotly.newPlot('scIkChart',[
-    {x:busIds,y:body.bus_results.map(r=>r.ikpp_ka),type:'bar',name:"Ik'' (initial)",marker:{color:'#0b6e4f'}},
-    {x:busIds,y:body.bus_results.map(r=>r.ip_ka||0),type:'bar',name:'ip (peak)',marker:{color:'#e74c3c'}},
-    {x:busIds,y:body.bus_results.map(r=>r.ib_ka||0),type:'bar',name:'Ib (breaking)',marker:{color:'#2980b9'}},
-    {x:busIds,y:body.bus_results.map(r=>r.ik_ka||0),type:'bar',name:'Ik (steady)',marker:{color:'#f39c12'}},
-    {x:busIds,y:body.bus_results.map(r=>r.ith_ka||0),type:'bar',name:'Ith (thermal)',marker:{color:'#8e44ad'}},
-  ],{title:'Short Circuit Currents by Bus (kA)',barmode:'group',xaxis:{title:'Bus'},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60},legend:{orientation:'h',y:-0.2}},{responsive:true});
-  Plotly.newPlot('scSkChart',[{x:body.bus_results.map(r=>r.bus_id),y:body.bus_results.map(r=>r.sk_mva),mode:'lines+markers',line:{color:'#2c8c99',width:2}}],{title:'Sk (SC Power) by Bus',xaxis:{title:'Bus'},yaxis:{title:'MVA'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-  document.getElementById('scDetailedChart').innerHTML='';
-  document.getElementById('scContribChart').innerHTML='';
-  document.getElementById('scVremainChart').innerHTML='';
-  setStatus('Short circuit completed. '+body.bus_results.length+' buses analyzed.');}catch(e){setStatus(e.message,true);}
-};
-
-/* Detailed Short Circuit at Selected Buses */
-document.getElementById('runScDetailedBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  const busInput=document.getElementById('scFaultBus').value.trim();
-  if(!busInput){setStatus('Enter bus IDs (e.g. 0,3,5) for detailed SC analysis.',true);return;}
-  const busIds=busInput.split(/[,\s]+/).map(Number).filter(n=>!isNaN(n));
-  if(!busIds.length){setStatus('Invalid bus IDs.',true);return;}
-  if(document.getElementById('scDomain').value==='DC'){
-    try{
-      setStatus('Running detailed DC SC at bus(es): '+busIds.join(', ')+'...');
-      const body=await api('/api/session/dc_sc',{fault_bus_ids:busIds,options:dcScOptions()});
-      const ik=body.results.map(r=>r.i_fault_ka||0);
-      document.getElementById('scFault').textContent='DC';
-      document.getElementById('scBuses').textContent=body.results.length+' (dc)';
-      document.getElementById('scMaxIk').textContent=fmt(Math.max(...ik),3);
-      document.getElementById('scMinIk').textContent=fmt(Math.min(...ik),3);
-      Plotly.newPlot('scDetailedChart',[{x:body.results.map(r=>'DC Fault@Bus '+r.fault_bus_id),y:ik,type:'bar',name:'If',marker:{color:'#0b6e4f'}}],
-        {title:'DC Detailed Fault Current (kA)',xaxis:{title:''},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60}},{responsive:true});
-      setStatus('Detailed DC SC completed.');
-    }catch(e){setStatus(e.message,true);}
-    return;
-  }
-  try{
-    setStatus('Running detailed SC at bus(es): '+busIds.join(', ')+'...');
-    const body=await api('/api/session/sc_detailed',{
-      fault_bus_ids:busIds,
-      ...scOptions(true),
-    });
-    document.getElementById('scFault').textContent=body.fault_type;
-    document.getElementById('scBuses').textContent=body.results.length+' (detailed)';
-    // Grouped bar: ikss, ip, ib, ik, ith for each fault bus
-    const faultBuses=body.results.map(r=>'Fault@Bus '+r.fault_bus_id);
-    const fb=body.results.map(r=>{const b=r.bus_results.find(x=>x.bus_id===r.fault_bus_id)||{};return b;});
-    Plotly.newPlot('scDetailedChart',[
-      {x:faultBuses,y:fb.map(b=>b.ikss_ka||0),type:'bar',name:'Ik\" (initial)',marker:{color:'#0b6e4f'}},
-      {x:faultBuses,y:fb.map(b=>b.ip_ka||0),type:'bar',name:'ip (peak)',marker:{color:'#e74c3c'}},
-      {x:faultBuses,y:fb.map(b=>b.ib_ka||0),type:'bar',name:'Ib (breaking)',marker:{color:'#2980b9'}},
-      {x:faultBuses,y:fb.map(b=>b.ik_ka||0),type:'bar',name:'Ik (steady)',marker:{color:'#f39c12'}},
-      {x:faultBuses,y:fb.map(b=>b.ith_ka||0),type:'bar',name:'Ith (thermal)',marker:{color:'#8e44ad'}},
-    ],{title:'Detailed SC Currents at Fault Buses (kA)',barmode:'group',
-       xaxis:{title:''},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60},
-       legend:{orientation:'h',y:-0.2}},{responsive:true});
-    document.getElementById('scMaxIk').textContent=fmt(Math.max(...fb.map(b=>b.ikss_ka||0)),3);
-    document.getElementById('scMinIk').textContent=fmt(Math.min(...fb.map(b=>b.ikss_ka||0)),3);
-    // Source contributions stacked bar
-    Plotly.newPlot('scContribChart',[
-      {x:faultBuses,y:fb.map(b=>b.ikss_gen_contrib_ka||0),type:'bar',name:'Generators',marker:{color:'#0b6e4f'}},
-      {x:faultBuses,y:fb.map(b=>b.ikss_motor_contrib_ka||0),type:'bar',name:'Motors',marker:{color:'#2c8c99'}},
-      {x:faultBuses,y:fb.map(b=>b.ikss_extgrid_contrib_ka||0),type:'bar',name:'External Grid',marker:{color:'#b5651d'}},
-      {x:faultBuses,y:fb.map(b=>b.ikss_converter_contrib_ka||0),type:'bar',name:'Converters',marker:{color:'#8e44ad'}},
-      {x:faultBuses,y:fb.map(b=>b.ikss_sgen_contrib_ka||0),type:'bar',name:'Static Gens',marker:{color:'#27ae60'}},
-      {x:faultBuses,y:fb.map(b=>b.ikss_load_contrib_ka||0),type:'bar',name:'Loads',marker:{color:'#f39c12'}},
-    ],{title:'SC Current Source Contributions (kA)',barmode:'stack',
-       xaxis:{title:''},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60},
-       legend:{orientation:'h',y:-0.2}},{responsive:true});
-    // Remaining voltage profile for the first fault
-    if(body.results.length>0){
-      const r0=body.results[0];
-      const allBus=r0.bus_results.map(b=>b.bus_id);
-      const vr=r0.bus_results.map(b=>b.v_remaining_pu);
-      Plotly.newPlot('scVremainChart',[{x:allBus,y:vr,type:'bar',
-        marker:{color:vr.map(v=>v<0.8?'#e74c3c':v<0.9?'#f39c12':'#27ae60')}}],
-        {title:'Remaining Voltage During Fault at Bus '+r0.fault_bus_id+' (p.u.)',
-         xaxis:{title:'Bus'},yaxis:{title:'V (pu)',range:[0,1.2]},margin:{l:55,r:15,t:45,b:45},
-         shapes:[{type:'line',y0:0.8,y1:0.8,x0:-0.5,x1:allBus.length-0.5,line:{color:'#e74c3c',dash:'dash',width:1}}]
-        },{responsive:true});
-    }
-    setStatus('Detailed SC complete for bus(es): '+busIds.join(', ')+'.');
-  }catch(e){setStatus(e.message,true);}
-};
-
-/* Init */
-(async function(){await loadCaseLists();setStatus('Ready. Load a built-in case, MATPOWER file, or upload a JSON file.');})();
-
-/* Time-Series PF */
-document.getElementById('runTsPfBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{
-    setStatus('Running Time-Series PF pipeline (UC \u2192 PF)...');
-    const numSteps=parseInt(document.getElementById('tsNumSteps').value)||24;
-    const skipUC=document.getElementById('tsSkipUC').checked;
-    const runOPF=document.getElementById('tsRunOPF').checked;
-    const body=await api('/api/session/run_ts_pf',{num_steps:numSteps,skip_uc:skipUC,run_opf:runOPF});
-    document.getElementById('tsSteps').textContent=body.num_steps;
-    document.getElementById('tsConv').textContent=body.num_converged+'/'+body.num_steps;
-    document.getElementById('tsOPFConv').textContent=body.num_opf_converged+'/'+body.num_steps;
-    document.getElementById('tsCost').textContent='$'+fmt(body.total_generation_cost,0);
-    const hrs=Array.from({length:body.num_steps},(_,i)=>i);
-    const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12'];
-    // Generation dispatch stacked bar
-    const dtraces=(body.gen_dispatch||[]).map((d,gi)=>({x:hrs,y:d,type:'bar',name:body.gen_names[gi]||'Gen '+gi,marker:{color:pal[gi%pal.length]}}));
-    (body.renewable_dispatch||[]).forEach((rd,ri)=>dtraces.push({x:hrs,y:rd,type:'bar',name:body.ren_names[ri]||'Ren '+ri,marker:{color:'#27ae60'}}));
-    Plotly.newPlot('tsGenDispatchChart',dtraces,{title:'Generation Dispatch (MW)',barmode:'stack',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
-    // Voltage mean time series (with min/max band)
-    if(body.vm_mean&&body.vm_mean.length){
-      const vtraces=[];
-      if(body.vm_max&&body.vm_min){
-        vtraces.push({x:hrs,y:body.vm_max,mode:'lines',line:{width:0,color:'rgba(11,110,79,0.3)'},name:'Vm max',showlegend:false});
-        vtraces.push({x:hrs,y:body.vm_min,mode:'lines',line:{width:0,color:'rgba(11,110,79,0.3)'},fill:'tonexty',fillcolor:'rgba(11,110,79,0.1)',name:'Vm range'});
-      }
-      vtraces.push({x:hrs,y:body.vm_mean,mode:'lines+markers',line:{color:'#0b6e4f',width:2},name:'Mean Vm'});
-      const allV=[...body.vm_mean,...(body.vm_min||[]),...(body.vm_max||[])].filter(v=>v>0);
-      const vLo=Math.min(...allV),vHi=Math.max(...allV),vP=Math.max((vHi-vLo)*0.15,0.005);
-      Plotly.newPlot('tsVoltChart',vtraces,{title:'Bus Voltage p.u. per Hour',xaxis:{title:'Hour'},yaxis:{title:'p.u.',range:[vLo-vP,vHi+vP]},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-    }
-    // ESS SOC
-    if(body.ess_soc&&body.ess_soc.length)
-      Plotly.newPlot('tsESSChart',(body.ess_soc||[]).map((soc,si)=>({x:hrs,y:soc,mode:'lines+markers',name:body.ess_names[si]||'ESS '+si,line:{width:2}})),{title:'ESS State of Charge',xaxis:{title:'Hour'},yaxis:{title:'SOC',range:[0,1]},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-    setStatus('Time-Series PF complete: '+body.num_converged+'/'+body.num_steps+' steps converged. Cost: $'+fmt(body.total_generation_cost,0)+'.');
-  }catch(e){setStatus(e.message,true);}
-};
-
-/* Unit Commitment */
-document.getElementById('runUCBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{
-    setStatus('Running Unit Commitment MILP...');
-    const numSteps=parseInt(document.getElementById('ucNumSteps').value)||24;
-    const body=await api('/api/session/run_uc',{num_steps:numSteps});
-    document.getElementById('ucFeas').textContent=body.feasible?'Yes':'No';
-    document.getElementById('ucCost').textContent='$'+fmt(body.total_cost,0);
-    document.getElementById('ucNGen').textContent=(body.gen_names||[]).length;
-    document.getElementById('ucNESS').textContent=(body.ess_names||[]).length;
-    const hrs=Array.from({length:(body.gen_dispatch[0]||[]).length},(_,i)=>i);
-    const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12'];
-    const dtraces=(body.gen_dispatch||[]).map((d,gi)=>({x:hrs,y:d,type:'bar',name:body.gen_names[gi]||'Gen '+gi,marker:{color:pal[gi%pal.length]}}));
-    (body.renewable_dispatch||[]).forEach((rd,ri)=>dtraces.push({x:hrs,y:rd,type:'bar',name:body.ren_names[ri]||'Ren '+ri,marker:{color:'#27ae60'}}));
-    Plotly.newPlot('ucDispatchChart',dtraces,{title:'UC Generator Dispatch (MW)',barmode:'stack',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
-    if(body.gen_commit&&body.gen_commit.length)
-      Plotly.newPlot('ucCommitChart',[{z:body.gen_commit,x:hrs,y:body.gen_names,type:'heatmap',colorscale:[[0,'#f5f5f5'],[1,'#0b6e4f']],showscale:true,colorbar:{title:'Commit',tickvals:[0,1],ticktext:['Off','On']}}],{title:'Commitment Schedule',xaxis:{title:'Hour'},margin:{l:110,r:15,t:45,b:45}},{responsive:true});
-    if(body.ess_soc&&body.ess_soc.length)
-      Plotly.newPlot('ucESSSOCChart',(body.ess_soc||[]).map((soc,si)=>({x:hrs,y:soc,mode:'lines+markers',name:body.ess_names[si]||'ESS '+si})),{title:'ESS State of Charge',xaxis:{title:'Hour'},yaxis:{title:'SOC',range:[0,1]},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-    setStatus('Unit Commitment complete. Feasible: '+body.feasible+'. Total cost: $'+fmt(body.total_cost,0));
-  }catch(e){setStatus(e.message,true);}
-};
-
-/* Market Clearing (SCUC -> SCED -> ACPF -> LMP -> Settlement) */
-document.getElementById('scenarioToggle').onchange=function(){
-  document.getElementById('scenarioConfigPanel').style.display=this.checked?'block':'none';
-};
-document.getElementById('runMarketBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{
-    const useScenario=document.getElementById('scenarioToggle').checked;
-    setStatus('Running market clearing pipeline'+(useScenario?' with scenario generation':'')+'...');
-    const numSteps=parseInt(document.getElementById('mktNumSteps').value)||24;
-    const solverSel=document.getElementById('milpSolverChoice');
-    const milpSolver=solverSel?solverSel.value:'auto';
-    const payload={num_steps:numSteps,period_length_hr:1.0,milp_solver:milpSolver,
-      n_segments:parseInt(document.getElementById('s22BidSegs').value)||3,
-      price_cap:parseFloat(document.getElementById('s22PriceCap').value)||1500,
-      price_floor:parseFloat(document.getElementById('s22PriceFloor').value)||0,
-      mip_gap:parseFloat(document.getElementById('s26MipGap').value)||0.0001,
-      time_limit_sec:parseFloat(document.getElementById('s26TimeLimit').value)||300,
-      lmp_delta:parseFloat(document.getElementById('s26LmpDelta').value)||0.10,
-      enable_n1:document.getElementById('s28EnableN1').checked,
-      max_n1_contingencies:parseInt(document.getElementById('s28MaxN1').value)||50,
-      voll:parseFloat(document.getElementById('s29VOLL').value)||10000,
-      spinning_reserve_req:parseFloat(document.getElementById('s29SpinReq').value)/100.0||0.05,
-    };
-    if(useScenario){
-      payload.scenario={
-        periods_per_day:parseInt(document.getElementById('scenPeriodsPerDay').value)||96,
-        period_length_min:parseFloat(document.getElementById('scenPeriodLen').value)||15,
-        is_workday:document.getElementById('scenWorkday').checked,
-        load_variation_std:parseFloat(document.getElementById('scenLoadNoise').value)||0.05,
-        wind_forecast_error:parseFloat(document.getElementById('scenWindErr').value)||0.20,
-        solar_forecast_error:parseFloat(document.getElementById('scenSolarErr').value)||0.15,
-        seed:parseInt(document.getElementById('scenSeed').value)||0,
-      };
-    }
-    // Show pipeline stages
-    const stgPanel=document.getElementById('pipelineStages');
-    stgPanel.style.display='flex';
-    for(let i=1;i<=9;i++){const el=document.getElementById('stg'+i);el.className='stg';if(i===1)el.className='stg active';}
-
-    const body=await api('/api/session/run_market_clearing',payload);
-
-    // Update pipeline stages based on stages_completed
-    const sc=(body.summary||{}).stages_completed||0;
-    for(let i=1;i<=9;i++){
-      const el=document.getElementById('stg'+i);
-      el.className=i<=sc?'stg done':'stg';
-    }
-
-    const sced=body.sced||{};
-    const lmp=body.lmp||{};
-    const settlements=body.genco_settlements||[];
-    const bids=body.bids||[];
-
-    const scuc=body.scuc||{};
-    document.getElementById('mktFeas').textContent=
-      (scuc.converged?'\u2705':'\u274c')+'SCUC '+
-      (sced.converged?'\u2705':'\u274c')+'SCED '+
-      (lmp.converged?'\u2705':'\u274c')+'LMP';
-    document.getElementById('mktFeas').style.fontSize='11px';
-    document.getElementById('mktCost').textContent='$'+fmt((body.summary||{}).total_system_cost||0,0);
-    document.getElementById('mktNGen').textContent=(settlements||[]).length;
-    const solverEl=document.getElementById('mktSolver');
-    if(solverEl) solverEl.textContent=(body.summary||{}).solver_name||'N/A';
-    const valEl=document.getElementById('mktValidation');
-    const val=body.validation||{};
-    if(valEl) valEl.textContent=val.all_checks_passed?'\u2705 PASS':'\u274c FAIL';
-    document.getElementById('mktAvgLmp').textContent=fmt(lmp.avg_lmp||0,2);
-
-    // SCED dispatch stacked‐bar chart (generators × time steps)
-    const dsp=sced.dispatch||[];
-    if(dsp.length){
-      const T2=dsp[0].length;
-      const hrs2=Array.from({length:T2},(_,i)=>i);
-      const dspTraces=dsp.map((row,gi)=>({
-        x:hrs2,y:row,type:'bar',name:settlements[gi]?settlements[gi].name:('Gen '+gi)
-      }));
-      Plotly.newPlot('mktDispatchChart',dspTraces,{title:'SCED Generator Dispatch (MW)',barmode:'stack',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.25}},{responsive:true});
-    } else { document.getElementById('mktDispatchChart').innerHTML=''; }
-
-    /* --- Validation panel --- */
-    const vp=document.getElementById('marketValidationPanel');
-    if(vp && val.sced_power_balance){
-      let html='<h3 style="margin:0 0 8px">Market Validation Results</h3>';
-      // Power Balance (use SCED result)
-      const pb=val.sced_power_balance||{};
-      html+='<h4>Power Balance Check '+(pb.balanced?'\u2705':'\u274c')+'</h4>';
-      html+='<table class="tbl"><thead><tr><th>Hour</th><th>Gen (MW)</th><th>Load (MW)</th><th>Mismatch (MW)</th></tr></thead><tbody>';
-      const pmm=pb.mismatch||[];
-      const pGen=pb.gen_total||[];
-      const pLoad=pb.load_total||[];
-      for(let t=0;t<pmm.length;t++){
-        const mm=pmm[t], gn=pGen[t]||0, ld=pLoad[t]||0;
-        const cls=Math.abs(mm)>1e-3?'style="color:red"':'';
-        html+=`<tr><td>${t}</td><td>${fmt(gn,2)}</td><td>${fmt(ld,2)}</td><td ${cls}>${fmt(mm,4)}</td></tr>`;
-      }
-      html+='</tbody></table>';
-      html+='<p>Max mismatch: '+fmt(pb.max_abs_mismatch||0,4)+' MW</p>';
-      // Budget Balance
-      const bb=val.lmp_budget||{};
-      html+='<h4>LMP Budget Balance '+(bb.balanced?'\u2705':'\u274c')+'</h4>';
-      html+='<table class="tbl"><thead><tr><th>Metric</th><th>Value ($)</th></tr></thead><tbody>';
-      html+='<tr><td>Total Load Payment</td><td>'+fmt(bb.total_load_payment||0,2)+'</td></tr>';
-      html+='<tr><td>Total Gen Payment</td><td>'+fmt(bb.total_gen_payment||0,2)+'</td></tr>';
-      html+='<tr><td>Total Congestion Rent</td><td>'+fmt(bb.total_congestion_rent||0,2)+'</td></tr>';
-      html+='<tr><td>Imbalance</td><td>'+fmt(bb.max_abs_imbalance||0,4)+'</td></tr>';
-      html+='</tbody></table>';
-      html+='<p>Balance: Load Payment \u2248 Gen Payment + Congestion Rent</p>';
-      // Generator Income
-      const gens=val.gen_income||[];
-      const allProfitable=gens.every(g=>g.profitable);
-      html+='<h4>Generator Income '+(allProfitable?'\u2705':'\u274c')+'</h4>';
-      html+='<table class="tbl"><thead><tr><th>Generator</th><th>LMP Revenue ($)</th><th>Bid Cost ($)</th><th>Startup ($)</th><th>No-Load ($)</th><th>Profit ($)</th><th>Profitable</th></tr></thead><tbody>';
-      gens.forEach(g=>{
-        html+=`<tr><td>${g.name||''}</td><td>${fmt(g.lmp_revenue||0,2)}</td><td>${fmt(g.bid_cost||0,2)}</td><td>${fmt(g.startup_cost||0,2)}</td><td>${fmt(g.no_load_cost||0,2)}</td><td>${fmt(g.profit||0,2)}</td><td>${g.profitable?'\u2705':'\u274c'}</td></tr>`;
-      });
-      html+='</tbody></table>';
-      // ACPF Adjustment Summary
-      const adj=body.acpf_adjustment||{};
-      if(adj.enabled){
-        html+='<h4>AC Power Flow Post-Check</h4>';
-        html+='<table class="tbl"><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>';
-        html+='<tr><td>Converged Before Adjustment</td><td>'+adj.num_converged_before+' / '+(adj.periods||[]).length+'</td></tr>';
-        html+='<tr><td>Converged After Adjustment</td><td>'+adj.num_converged_after+' / '+(adj.periods||[]).length+'</td></tr>';
-        html+='<tr><td>Periods Adjusted</td><td>'+adj.num_adjusted+'</td></tr>';
-        html+='<tr><td>Max Adjustment</td><td>'+fmt(adj.max_adjustment_mw||0,4)+' MW</td></tr>';
-        html+='</tbody></table>';
-      }
-      vp.innerHTML=html;
-      vp.style.display='block';
-    } else if(vp){
-      vp.style.display='none';
-    }
-
-    // Bid curves by GenCo
-    const bidTraces=[];
-    (bids||[]).forEach((b,gi)=>{
-      let x=[0], y=[0], cum=0;
-      (b.segments||[]).forEach(seg=>{
-        const q=Number(seg.quantity||0), p=Number(seg.price||0);
-        x.push(cum); y.push(p);
-        cum+=q;
-        x.push(cum); y.push(p);
-      });
-      bidTraces.push({x,y,mode:'lines',name:b.generator_name||('Gen '+gi),line:{shape:'hv',width:2}});
-    });
-    Plotly.newPlot('marketBidChart',bidTraces,{title:'GenCo Bidding Curves (Piecewise Linear)',xaxis:{title:'MW'},yaxis:{title:'$/MWh'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.25}},{responsive:true});
-
-    // Scenario profile charts (if scenario generation was used)
-    const scen=body.scenario||{};
-    if(scen.num_periods>0){
-      const nT=scen.num_periods;
-      const dt=scen.period_length_hr||0.25;
-      const hrs=Array.from({length:nT},(_,i)=>(i*dt).toFixed(2));
-      const traces=[];
-      if(scen.aggregate_load_profile) traces.push({x:hrs,y:scen.aggregate_load_profile,mode:'lines',name:'Agg Load (multiplier)',line:{color:'#e74c3c',width:2}});
-      // Show all wind source profiles (wind_profile_0, wind_profile_1, ...)
-      for(let w=0;w<20;w++){
-        const key='wind_profile_'+w;
-        if(scen[key]) traces.push({x:hrs,y:scen[key],mode:'lines',name:'Wind #'+w+' CF',line:{color:'hsl('+(200+w*30)+',70%,50%)',width:1.5,dash:w>0?'dot':'solid'}});
-        else break;
-      }
-      // Show all solar source profiles
-      for(let s=0;s<20;s++){
-        const key='solar_profile_'+s;
-        if(scen[key]) traces.push({x:hrs,y:scen[key],mode:'lines',name:'Solar #'+s+' CF',line:{color:'hsl('+(30+s*20)+',80%,50%)',width:1.5,dash:s>0?'dot':'solid'}});
-        else break;
-      }
-      if(traces.length) Plotly.newPlot('scenarioProfileChart',traces,{title:'Scenario-Generated Profiles ('+nT+' periods, '+dt+'h each)'+(scen.bus_load_types?' — Load types: '+scen.bus_load_types.join(', '):''),xaxis:{title:'Hour'},yaxis:{title:'Profile Value'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
-      else document.getElementById('scenarioProfileChart').innerHTML='';
-    } else {
-      document.getElementById('scenarioProfileChart').innerHTML='';
-    }
-
-    // LMP heatmap: bus x hour
-    if(lmp.nodal_lmp && lmp.nodal_lmp.length){
-      const nb=lmp.nodal_lmp.length;
-      const T=(lmp.nodal_lmp[0]||[]).length;
-      const hrs=Array.from({length:T},(_,i)=>i);
-      const buses=Array.from({length:nb},(_,i)=>'Bus '+i);
-      Plotly.newPlot('marketLmpHeatmap',[{z:lmp.nodal_lmp,x:hrs,y:buses,type:'heatmap',colorscale:'YlGnBu',colorbar:{title:'$/MWh'}}],{title:'LMP Heatmap',xaxis:{title:'Hour'},margin:{l:80,r:35,t:45,b:45}},{responsive:true});
-
-      const eLmp=lmp.energy_lmp||[];
-      const cLmp=lmp.congestion_lmp||[];
-      let table='<thead><tr><th>Bus</th><th>Hour</th><th>Energy LMP</th><th>Congestion LMP</th><th>Total LMP</th></tr></thead><tbody>';
-      for(let b=0;b<nb;b++){
-        for(let t=0;t<T;t++){
-          const e=Number((eLmp[b]||[])[t]||0);
-          const c=Number((cLmp[b]||[])[t]||0);
-          const total=Number((lmp.nodal_lmp[b]||[])[t]||0);
-          table += `<tr><td>${b}</td><td>${t}</td><td>${fmt(e,3)}</td><td>${fmt(c,3)}</td><td>${fmt(total,3)}</td></tr>`;
-        }
-      }
-      table += '</tbody>';
-      document.getElementById('marketLmpDecompTable').innerHTML=table;
-    } else {
-      document.getElementById('marketLmpHeatmap').innerHTML='';
-      document.getElementById('marketLmpDecompTable').innerHTML='';
-    }
-
-    // GenCo profit bars (§2.9 settlement with uplift)
-    Plotly.newPlot('marketGenCoProfit',[
-      {x:settlements.map(s=>s.name||('Gen '+s.generator_index)),y:settlements.map(s=>s.energy_revenue||0),type:'bar',name:'Energy Rev.',marker:{color:'#2c8c99'}},
-      {x:settlements.map(s=>s.name||('Gen '+s.generator_index)),y:settlements.map(s=>(s.uplift_payment||0)),type:'bar',name:'Uplift (§2.9)',marker:{color:'#27ae60'}},
-      {x:settlements.map(s=>s.name||('Gen '+s.generator_index)),y:settlements.map(s=>s.total_cost||0),type:'bar',name:'Total Cost',marker:{color:'#b5651d'}},
-      {x:settlements.map(s=>s.name||('Gen '+s.generator_index)),y:settlements.map(s=>s.market_profit||0),type:'scatter',mode:'markers+lines',name:'Market Profit',marker:{color:'#d32f2f',size:9},line:{color:'#d32f2f',dash:'dot'}},
-      {x:settlements.map(s=>s.name||('Gen '+s.generator_index)),y:settlements.map(s=>s.profit||0),type:'scatter',mode:'markers+lines',name:'Net Profit (after uplift)',marker:{color:'#0b6e4f',size:9},line:{color:'#0b6e4f'}}
-    ],{title:'§2.9 GenCo Settlement (Revenue / Uplift / Cost / Market Profit / Net Profit)',barmode:'group',xaxis:{tickangle:-35},margin:{l:55,r:15,t:45,b:70}},{responsive:true});
-
-    // GenCo Income Derivation Table — direct per-generator income breakdown
-    if(settlements.length){
-      let ht='<h3 style="margin:0 0 8px">§2.9 GenCo Income Derivation</h3>';
-      ht+='<table class="tbl"><thead><tr><th>Generator</th><th>Energy Revenue ($)</th><th>Reserve Revenue ($)</th>';
-      ht+='<th>Market Income ($)</th><th>Energy Cost ($)</th><th>Startup ($)</th><th>No-Load ($)</th>';
-      ht+='<th>Total Cost ($)</th><th>Market Profit ($)</th><th>Uplift ($)</th><th>Total Revenue ($)</th><th>Net Profit ($)</th></tr></thead><tbody>';
-      let totIncome=0,totCost=0,totMktProfit=0,totUplift=0,totProfit=0;
-      settlements.forEach(s=>{
-        const mi=s.market_income||((s.energy_revenue||0)+(s.reserve_revenue||0));
-        const tc=s.total_cost||0;
-        const mp=s.market_profit||(mi-tc);
-        totIncome+=mi; totCost+=tc; totMktProfit+=mp; totUplift+=(s.uplift_payment||0); totProfit+=(s.profit||0);
-        ht+=`<tr><td>${s.name||('Gen '+s.generator_index)}</td><td>${fmt(s.energy_revenue||0,2)}</td><td>${fmt(s.reserve_revenue||0,2)}</td>`;
-        ht+=`<td style="font-weight:bold">${fmt(mi,2)}</td><td>${fmt(s.energy_cost||0,2)}</td><td>${fmt(s.startup_cost||0,2)}</td><td>${fmt(s.no_load_cost||0,2)}</td>`;
-        ht+=`<td>${fmt(tc,2)}</td><td style="color:${mp>=0?'green':'red'};font-weight:bold">${fmt(mp,2)}</td><td>${fmt(s.uplift_payment||0,2)}</td><td>${fmt(s.total_revenue||0,2)}</td>`;
-        ht+=`<td style="color:${(s.profit||0)>=0?'green':'red'}">${fmt(s.profit||0,2)}</td></tr>`;
-      });
-      ht+=`<tr style="font-weight:bold;border-top:2px solid #333"><td>Total</td><td></td><td></td>`;
-      ht+=`<td>${fmt(totIncome,2)}</td><td></td><td></td><td></td>`;
-      ht+=`<td>${fmt(totCost,2)}</td><td style="color:${totMktProfit>=0?'green':'red'}">${fmt(totMktProfit,2)}</td><td>${fmt(totUplift,2)}</td><td>${fmt(totIncome+totUplift,2)}</td>`;
-      ht+=`<td style="color:${totProfit>=0?'green':'red'}">${fmt(totProfit,2)}</td></tr>`;
-      ht+='</tbody></table>';
-      ht+='<p style="font-size:11px;color:#666">Market Profit = Market Income \u2212 Total Cost (pre-uplift, can be negative). Uplift = max(0, \u2212Market Profit). Net Profit = Market Profit + Uplift (always \u2265 0 by §2.9).</p>';
-      document.getElementById('mktGenCoIncomeTable').innerHTML=ht;
-    } else { document.getElementById('mktGenCoIncomeTable').innerHTML=''; }
-
-    const pfPost=body.pf_post_check||{};
-    const pfResiduals=pfPost.residuals||[];
-    const pfConv=pfPost.converged||[];
-    if(pfResiduals.length){
-      const hrs=Array.from({length:pfResiduals.length},(_,i)=>i);
-      Plotly.newPlot('marketPfResidualChart',[
-        {x:hrs,y:pfResiduals,type:'scatter',mode:'lines+markers',name:'Residual',line:{color:'#b5651d',width:2}},
-        {x:hrs,y:pfConv.map(v=>v?1:0),type:'bar',name:'Converged',yaxis:'y2',marker:{color:'#0b6e4f',opacity:0.35}}
-      ],{title:'Nonlinear PF Post-Check by Hour',xaxis:{title:'Hour'},yaxis:{title:'Residual'},yaxis2:{title:'Converged (0/1)',overlaying:'y',side:'right',range:[-0.05,1.05]},margin:{l:60,r:60,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
-    } else {
-      document.getElementById('marketPfResidualChart').innerHTML='';
-    }
-
-    // --- Voltage Profile Chart (bus voltage magnitudes across converged periods) ---
-    const adjPeriods=(body.acpf_adjustment||{}).periods||[];
-    const convPeriods=adjPeriods.filter(p=>p.converged_after&&p.vm_pu&&p.vm_pu.length>0);
-    if(convPeriods.length>0){
-      // Heatmap: buses × periods
-      const nb2=convPeriods[0].vm_pu.length;
-      const vmMatrix=convPeriods.map(p=>p.vm_pu);
-      const periods=convPeriods.map(p=>p.period);
-      const buses=Array.from({length:nb2},(_,i)=>'Bus '+i);
-      Plotly.newPlot('mktVoltageProfileChart',[{
-        z:vmMatrix,x:buses,y:periods,type:'heatmap',
-        colorscale:[[0,'#d32f2f'],[0.25,'#ff9800'],[0.5,'#4caf50'],[0.75,'#ff9800'],[1,'#d32f2f']],
-        zmin:0.90,zmax:1.10,
-        colorbar:{title:'V (pu)',len:0.7}
-      }],{title:'Bus Voltage Profile (pu) — AC PF',
-          xaxis:{title:'Bus'},yaxis:{title:'Period'},
-          margin:{l:55,r:80,t:45,b:55}},{responsive:true});
-
-      // Reactive power chart: bus Q injection for last converged period
-      const lastP=convPeriods[convPeriods.length-1];
-      if(lastP.bus_q_mvar&&lastP.bus_q_mvar.length>0){
-        const busLabels=Array.from({length:lastP.bus_q_mvar.length},(_,i)=>'Bus '+i);
-        Plotly.newPlot('mktReactivePowerChart',[{
-          x:busLabels,y:lastP.bus_q_mvar,type:'bar',
-          marker:{color:lastP.bus_q_mvar.map(v=>v>=0?'#2c8c99':'#b5651d')}
-        }],{title:'Bus Reactive Power Injection (Mvar) — Last Converged Period',
-            xaxis:{title:'Bus',tickangle:-45},yaxis:{title:'Mvar'},
-            margin:{l:55,r:15,t:45,b:55}},{responsive:true});
-      } else { document.getElementById('mktReactivePowerChart').innerHTML=''; }
-    } else {
-      document.getElementById('mktVoltageProfileChart').innerHTML='';
-      document.getElementById('mktReactivePowerChart').innerHTML='';
-    }
-
-    // --- Voltage & Thermal Violation Summary ---
-    const violPanel=document.getElementById('mktViolationPanel');
-    const adjInfo=body.acpf_adjustment||{};
-    const totalVV=adjInfo.total_voltage_violations||0;
-    const totalTV=adjInfo.total_thermal_violations||0;
-    if(totalVV>0||totalTV>0){
-      let vhtml='<h3 style="margin:0 0 8px">AC PF Violation Summary</h3>';
-      vhtml+='<p>Total voltage violations: <b>'+totalVV+'</b>, Total thermal violations: <b>'+totalTV+'</b></p>';
-      // Collect violations across periods
-      let vRows=[];let tRows=[];
-      (adjInfo.periods||[]).forEach(p=>{
-        (p.voltage_violations||[]).forEach(v=>{
-          vRows.push({period:p.period,bus:v.bus,vm:v.vm_pu,limit:v.limit,type:v.is_low?'Under-voltage':'Over-voltage'});
-        });
-        (p.thermal_violations||[]).forEach(v=>{
-          tRows.push({period:p.period,branch:v.branch,flow:v.flow_mva,rating:v.rating_mva});
-        });
-      });
-      if(vRows.length){
-        vhtml+='<h4>Voltage Violations \u26a0\ufe0f</h4>';
-        vhtml+='<table class="tbl"><thead><tr><th>Period</th><th>Bus</th><th>V (pu)</th><th>Limit (pu)</th><th>Type</th></tr></thead><tbody>';
-        vRows.slice(0,50).forEach(r=>{vhtml+=`<tr><td>${r.period}</td><td>${r.bus}</td><td style="color:red">${fmt(r.vm,4)}</td><td>${fmt(r.limit,3)}</td><td>${r.type}</td></tr>`;});
-        if(vRows.length>50)vhtml+='<tr><td colspan="5">... '+(vRows.length-50)+' more</td></tr>';
-        vhtml+='</tbody></table>';
-      }
-      if(tRows.length){
-        vhtml+='<h4>Thermal Violations \u26a0\ufe0f</h4>';
-        vhtml+='<table class="tbl"><thead><tr><th>Period</th><th>Branch</th><th>Flow (MVA)</th><th>Rating (MVA)</th><th>Overload %</th></tr></thead><tbody>';
-        tRows.slice(0,50).forEach(r=>{const pct=r.rating>0?100*(r.flow/r.rating-1):0;vhtml+=`<tr><td>${r.period}</td><td>${r.branch}</td><td style="color:red">${fmt(r.flow,2)}</td><td>${fmt(r.rating,2)}</td><td>${fmt(pct,1)}%</td></tr>`;});
-        if(tRows.length>50)vhtml+='<tr><td colspan="5">... '+(tRows.length-50)+' more</td></tr>';
-        vhtml+='</tbody></table>';
-      }
-      violPanel.innerHTML=vhtml;violPanel.style.display='block';
-    } else { violPanel.innerHTML='';violPanel.style.display='none'; }
-
-    // --- §2.8 Security Check Panel ---
-    const secPanel=document.getElementById('mktSecurityPanel');
-    const secData=body.security_check||{};
-    if(secPanel && secData.enabled){
-      let shtml='<h3 style="margin:0 0 8px">§2.8 Security Check Results '+(secData.all_secure?'\u2705':'\u274c')+'</h3>';
-      shtml+='<table class="tbl"><thead><tr><th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>';
-      shtml+='<tr><td>Power Balance Adequacy</td><td>'+(secData.power_balance_adequate?'\u2705 Pass':'\u274c Fail')+'</td>';
-      shtml+='<td>Reserve margin: '+fmt(secData.reserve_margin_mw||0,1)+' MW (required: '+fmt(secData.reserve_requirement_mw||0,1)+' MW)</td></tr>';
-      shtml+='<tr><td>Base Case AC PF</td><td>'+(secData.base_case_secure?'\u2705 Secure':'\u274c Insecure')+'</td>';
-      shtml+='<td>Voltage violations: '+(secData.base_voltage_violations||0)+', Thermal violations: '+(secData.base_thermal_violations||0)+'</td></tr>';
-      shtml+='<tr><td>N-1 Contingency</td><td>'+((secData.n1_contingencies_failed||0)===0?'\u2705 Secure':'\u274c '+(secData.n1_contingencies_failed)+' failures')+'</td>';
-      shtml+='<td>Checked: '+(secData.n1_contingencies_checked||0)+', Failed: '+(secData.n1_contingencies_failed||0)+'</td></tr>';
-      shtml+='<tr><td>Curtailment Fairness</td><td>'+(secData.curtailment_fair?'\u2705 Fair':'\u274c Unfair')+'</td>';
-      shtml+='<td>Fairness index: '+fmt(secData.curtailment_fairness_index||0,3)+' (max ratio: '+fmt(secData.max_curtailment_ratio||0,3)+', min: '+fmt(secData.min_curtailment_ratio||0,3)+')</td></tr>';
-      shtml+='</tbody></table>';
-      // N-1 detail table for failed contingencies
-      const n1r=(secData.n1_results||[]).filter(r=>!r.secure);
-      if(n1r.length){
-        shtml+='<h4>N-1 Contingency Failures</h4>';
-        shtml+='<table class="tbl"><thead><tr><th>Branch</th><th>Name</th><th>Converged</th><th>Max Loading %</th><th>Max V Dev (pu)</th><th>V Viol</th><th>Thermal Viol</th></tr></thead><tbody>';
-        n1r.slice(0,30).forEach(r=>{
-          shtml+=`<tr><td>${r.branch}</td><td>${r.branch_name||''}</td><td>${r.converged?'Yes':'No'}</td>`;
-          shtml+=`<td style="color:${r.max_loading_pct>100?'red':'inherit'}">${fmt(r.max_loading_pct,1)}</td>`;
-          shtml+=`<td>${fmt(r.max_v_deviation_pu,4)}</td><td>${r.v_violations}</td><td>${r.thermal_violations}</td></tr>`;
-        });
-        if(n1r.length>30)shtml+='<tr><td colspan="7">... '+(n1r.length-30)+' more</td></tr>';
-        shtml+='</tbody></table>';
-      }
-      secPanel.innerHTML=shtml;secPanel.style.display='block';
-    } else if(secPanel){ secPanel.innerHTML='';secPanel.style.display='none'; }
-
-    // --- PTDF Heatmap ---
-    const ptdfV=body.ptdf_verification||{};
-    if(ptdfV.computed&&ptdfV.ptdf_matrix&&ptdfV.ptdf_matrix.length){
-      const bLabels=Array.from({length:ptdfV.num_buses},(_,i)=>'Bus '+i);
-      const lLabels=ptdfV.branch_labels||Array.from({length:ptdfV.num_branches},(_,i)=>'Br '+i);
-      Plotly.newPlot('mktPtdfHeatmap',[{
-        z:ptdfV.ptdf_matrix,x:bLabels,y:lLabels,type:'heatmap',
-        colorscale:'RdBu',zmid:0,
-        colorbar:{title:'PTDF',len:0.7}
-      }],{title:'Power Transfer Distribution Factors (PTDF)',
-          xaxis:{title:'Bus'},yaxis:{title:'Branch'},
-          margin:{l:90,r:60,t:45,b:55}},{responsive:true});
-
-      // PTDF vs ACPF verification bar chart
-      if(ptdfV.max_error_mw&&ptdfV.max_error_mw.length){
-        Plotly.newPlot('mktPtdfVerifyChart',[{
-          x:lLabels,y:ptdfV.max_error_mw,type:'bar',
-          marker:{color:ptdfV.max_error_mw.map(e=>e>5?'#d32f2f':e>1?'#ff9800':'#4caf50')}
-        }],{title:'PTDF vs AC PF Verification — Max Error per Branch (MW)<br>Overall Max: '+fmt(ptdfV.overall_max_error_mw,3)+' MW ('+fmt(ptdfV.overall_max_error_pct,1)+'% of rating), Mean: '+fmt(ptdfV.overall_mean_error_mw,3)+' MW',
-            xaxis:{title:'Branch',tickangle:-45},yaxis:{title:'Max Error (MW)'},
-            margin:{l:55,r:15,t:65,b:70}},{responsive:true});
-      } else { document.getElementById('mktPtdfVerifyChart').innerHTML=''; }
-    } else {
-      document.getElementById('mktPtdfHeatmap').innerHTML='';
-      document.getElementById('mktPtdfVerifyChart').innerHTML='';
-    }
-
-    // --- GIS Network Map with LMP colouring ---
-    renderMktGeoMap(body, lmp, sced);
-
-    setStatus('Market clearing complete. Avg LMP: $'+fmt(lmp.avg_lmp||0,2)+', renewable penetration: '+fmt((body.summary||{}).renewable_penetration||0,1)+'%, PF max residual: '+fmt(pfPost.max_residual||0,4)+
-      (totalVV>0?', \u26a0 '+totalVV+' voltage violations':'')+
-      (totalTV>0?', \u26a0 '+totalTV+' thermal violations':'')+
-      (secData.enabled?(secData.all_secure?', \u2705 Security check passed':' \u274c Security check failed'):'')+'.');
-  }catch(e){setStatus(e.message,true);}
-};
-
-/* Carbon Flow Analysis */
-document.getElementById('runCarbonBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{
-    setStatus('Running Carbon Flow Analysis (proportional tracing + matrix method)...');
-    const body=await api('/api/session/run_carbon',{});
-    const ts=body.tracing_summary||{};
-    document.getElementById('carbonGenEmit').textContent=fmt(ts.total_generation_emissions_tco2,2);
-    document.getElementById('carbonLoadEmit').textContent=fmt(ts.total_load_emissions_tco2,2);
-    document.getElementById('carbonLossEmit').textContent=fmt(ts.total_loss_emissions_tco2,3);
-    document.getElementById('carbonMatrix').textContent=body.matrix_solved?'Yes':'No';
-    // Carbon intensity by bus
-    if(body.bus_carbon&&body.bus_carbon.length){
-      const acRows=body.bus_carbon.filter(b=>b.carbon_potential_valid!==false&&Number(b.sink_power_mw||0)>1e-9&&Number.isFinite(Number(b.carbon_intensity_tco2_mwh)));
-      if(!acRows.length){document.getElementById('carbonBusChart').innerHTML='';}
-      else{
-      const ci=acRows.map(b=>b.carbon_intensity_tco2_mwh);
-      const mx=Math.max(...ci)||1;
-      Plotly.newPlot('carbonBusChart',[{x:acRows.map(b=>'Bus '+b.bus_index),y:ci,type:'bar',
-        marker:{color:ci,colorscale:'RdYlGn',reversescale:true,cmin:0,cmax:mx,showscale:true,colorbar:{title:'tCO\u2082/MWh',len:0.7}},
-        text:ci.map(v=>v.toFixed(4)),textposition:'auto'}],
-        {title:'AC Bus Carbon Intensity (tCO\u2082/MWh)',xaxis:{title:'Bus',tickangle:-45},yaxis:{title:'tCO\u2082/MWh'},margin:{l:55,r:80,t:45,b:60}},{responsive:true});
-      }
-    }
-    // DC bus carbon intensity
-    if(body.dc_bus_carbon&&body.dc_bus_carbon.length){
-      const dcRows=body.dc_bus_carbon.filter(b=>b.carbon_potential_valid!==false&&Number(b.sink_power_mw||0)>1e-9&&Number.isFinite(Number(b.carbon_intensity_tco2_mwh)));
-      if(!dcRows.length){document.getElementById('carbonDcBusChart').innerHTML='';}
-      else{
-      const dci=dcRows.map(b=>b.carbon_intensity_tco2_mwh);
-      const dmx=Math.max(...dci)||1;
-      Plotly.newPlot('carbonDcBusChart',[{x:dcRows.map(b=>'DC Bus '+b.bus_index),y:dci,type:'bar',
-        marker:{color:dci,colorscale:'RdYlGn',reversescale:true,cmin:0,cmax:dmx,showscale:true,colorbar:{title:'tCO\u2082/MWh',len:0.7}},
-        text:dci.map(v=>v.toFixed(4)),textposition:'auto'}],
-        {title:'DC Bus Carbon Intensity (tCO\u2082/MWh)',xaxis:{title:'DC Bus',tickangle:-45},yaxis:{title:'tCO\u2082/MWh'},margin:{l:55,r:80,t:45,b:60}},{responsive:true});
-      }
-    } else { document.getElementById('carbonDcBusChart').innerHTML=''; }
-    // Per-load total emissions bar
-    if(body.load_carbon&&body.load_carbon.length){
-      Plotly.newPlot('carbonLoadChart',[{x:body.load_carbon.map(l=>'Load '+l.load_index+' B'+l.bus),
-        y:body.load_carbon.map(l=>l.total_emissions_tco2),type:'bar',
-        marker:{color:'#c34d4d'}}],
-        {title:'Load Carbon Emissions (tCO\u2082)',xaxis:{title:'',tickangle:-35},yaxis:{title:'tCO\u2082'},margin:{l:55,r:15,t:45,b:70}},{responsive:true});
-    }
-    // Branch carbon emissions
-    if(body.branch_carbon&&body.branch_carbon.length){
-      const bc=body.branch_carbon.filter(b=>b.total_emissions_tco2>1e-6);
-      if(bc.length) Plotly.newPlot('carbonBranchChart',[
-        {x:bc.map(b=>b.from_bus+'\u2192'+b.to_bus),y:bc.map(b=>b.loss_mw),type:'bar',name:'Loss MW',marker:{color:'#b5651d'}},
-        {x:bc.map(b=>b.from_bus+'\u2192'+b.to_bus),y:bc.map(b=>b.total_emissions_tco2),type:'bar',name:'Emissions tCO\u2082',marker:{color:'#8e44ad'},yaxis:'y2'},
-      ],{title:'Branch Loss & Carbon Emissions',barmode:'group',xaxis:{title:'Branch',tickangle:-45},
-         yaxis:{title:'Loss MW',side:'left'},yaxis2:{title:'tCO\u2082',overlaying:'y',side:'right'},
-         margin:{l:55,r:55,t:45,b:70},legend:{orientation:'h',y:-0.3}},{responsive:true});
-      else document.getElementById('carbonBranchChart').innerHTML='';
-    } else { document.getElementById('carbonBranchChart').innerHTML=''; }
-    // Sankey: generators -> loads
-    if(body.sankey_sources&&body.sankey_sources.length){
-      Plotly.newPlot('carbonSankeyChart',[{type:'sankey',orientation:'h',
-        node:{pad:12,thickness:18,line:{color:'#ccc',width:0.5},label:body.sankey_labels,
-          color:body.sankey_labels.map((_,i)=>i<(SYS.generators||[]).length?'#0b6e4f':'#2c8c99')},
-        link:{source:body.sankey_sources,target:body.sankey_targets,value:body.sankey_values,
-          color:'rgba(44,140,153,0.3)'}}],
-        {title:'Carbon Flow Sankey: Generators \u2192 Loads (MW)',margin:{l:20,r:20,t:45,b:20}},{responsive:true});
-    } else {
-      document.getElementById('carbonSankeyChart').innerHTML='<div style="padding:20px;color:var(--muted);">No generator-load supply data for Sankey (run AC power flow first or check case data).</div>';
-    }
-    setStatus('Carbon analysis complete. Gen: '+fmt(ts.total_generation_emissions_tco2,2)+' tCO\u2082, Load: '+fmt(ts.total_load_emissions_tco2,2)+' tCO\u2082. Balance err: '+fmt(ts.balance_error_pct,4)+'%.');
-  }catch(e){setStatus(e.message,true);}
-};
-
-/* Reliability Assessment (Monte Carlo) */
-let relLastNSQ=null, relLastSEQ=null, relLastFD=null, relLastResilience=null;
-
-function getRelOpts(){
-  return {
-    load_scale_factor: parseFloat(document.getElementById('relLoadScale').value)||1.0,
-    cov_threshold: parseFloat(document.getElementById('relCovThresh').value)||0.05,
-    seed: parseInt(document.getElementById('relSeed').value)||0,
-    data_policy: (document.getElementById('relDataPolicy')||{}).value||'missing_only',
-    reliability_template: (document.getElementById('relTemplate')||{}).value||'none',
-    compute_tail_risk: document.getElementById('relTailRisk').checked,
-    var_confidence: parseFloat(document.getElementById('relVarConf').value)||0.95,
-  };
-}
-
-function relBadge(text,color){return '<span style="display:inline-block;padding:2px 8px;margin:2px 4px 2px 0;border-radius:10px;font-size:0.8em;background:'+color+';color:#fff;">'+text+'</span>';}
-function renderRelScope(body){
-  const el=document.getElementById('relScopePanel'); if(!el) return;
-  if(!body||!body.model_scope){el.innerHTML='';return;}
-  const yn=(b)=>b?'#27ae60':'#c0392b';
-  let h='<div style="border:1px solid var(--border);border-radius:6px;padding:8px 12px;background:#fafbfc;">';
-  h+='<b>Physical model:</b> '+relBadge(body.model_scope,'#34495e');
-  if(body.data_policy){h+=' &nbsp;<b>Data policy:</b> '+relBadge(body.data_policy,'#7f8c8d');}
-  const v=body.validity||{};
-  if('dc_load_curtailment_included' in v){
-    h+='<br><b>Validity:</b> ';
-    h+=relBadge('DC load '+(v.dc_load_curtailment_included?'included':'excluded'),yn(v.dc_load_curtailment_included));
-    h+=relBadge('VSC DC PF '+(v.vsc_dc_power_flow_modelled?'modelled':'not modelled'),yn(v.vsc_dc_power_flow_modelled));
-    h+=relBadge('AC OPF curtailment '+(v.ac_opf_curtailment?'yes':'no'),yn(v.ac_opf_curtailment));
-    h+=relBadge('AC voltage/Q '+(v.ac_voltage_reactive_feasibility_certified?'certified':'not certified'),yn(v.ac_voltage_reactive_feasibility_certified));
-    if('repair_ac_switch_reconfiguration_modelled' in v){h+=relBadge('AC switch reconfig '+(v.repair_ac_switch_reconfiguration_modelled?'on':'off'),yn(v.repair_ac_switch_reconfiguration_modelled));}
-  }
-  if(v.generation_adequacy_only){h+='<br>'+relBadge('Generation adequacy only — no network/DC/customer indices','#b57e2b');}
-  const dq=body.data_quality;
-  if(dq){
-    h+='<br><b>Data quality:</b> '+dq.components_with_reliability_data+'/'+dq.components_total+' with case data, '+dq.components_defaulted+' defaulted';
-    if(dq.missing_required_data&&dq.missing_required_data.length){h+=' '+relBadge(dq.missing_required_data.length+' missing data','#c0392b');}
-  }
-  if(body.model_limitations){h+='<div style="color:var(--muted);font-size:0.85em;margin-top:6px;">'+body.model_limitations+'</div>';}
-  h+='</div>';
-  el.innerHTML=h;
-}
-
-function updateRelKPIs(body, method){
-  document.getElementById('relMethod').textContent=method;
-  document.getElementById('relEENS').textContent=fmt(body.eens_mwh_yr,1);
-  document.getElementById('relLOLE').textContent=fmt(body.lole_hr_yr,2);
-  document.getElementById('relLOLF').textContent=body.lolf_occ_yr!==undefined?fmt(body.lolf_occ_yr,2):'N/A';
-  document.getElementById('relPLC').textContent=fmt(body.plc*100,2);
-  document.getElementById('relCoV').textContent=fmt(body.final_cov,4);
-  document.getElementById('relIters').textContent=body.iterations_used;
-  
-  // Update tail risk KPIs if available
-  const tailKPIs=document.getElementById('relTailKPIs');
-  if(body.tail_risk&&(body.tail_risk.eens_var>0||body.tail_risk.eens_cvar>0)){
-    tailKPIs.style.display='flex';
-    document.getElementById('relEENSVar').textContent=fmt(body.tail_risk.eens_var,1);
-    document.getElementById('relEENSCVar').textContent=fmt(body.tail_risk.eens_cvar,1);
-    document.getElementById('relLOLEVar').textContent=fmt(body.tail_risk.lole_var,2);
-    document.getElementById('relLOLECVar').textContent=fmt(body.tail_risk.lole_cvar,2);
-  } else {
-    tailKPIs.style.display='none';
-  }
-  renderRelScope(body);
-}
-
-function updateFDKPIs(body){
-  document.getElementById('relMethod').textContent='F&D';
-  document.getElementById('relEENS').textContent='N/A';  // F&D doesn't compute EENS
-  document.getElementById('relLOLE').textContent=fmt(body.lole_fd,2);
-  document.getElementById('relLOLF').textContent=fmt(body.lolf_fd,2);
-  document.getElementById('relPLC').textContent=fmt(body.lolp*100,4);
-  document.getElementById('relCoV').textContent='N/A';
-  document.getElementById('relIters').textContent='Analytical';
-  document.getElementById('relTailKPIs').style.display='none';
-  renderRelScope(body);
-}
-
-function plotRelConvergence(body, title){
-  if(body.eens_history&&body.eens_history.length){
-    const iters=body.eens_history.map((_,i)=>i+1);
-    Plotly.newPlot('relConvergenceChart',[
-      {x:iters,y:body.eens_history,mode:'lines',name:'EENS (MWh/yr)',line:{color:'#0b6e4f'}},
-      {x:iters,y:body.cov_history,mode:'lines',name:'CoV',yaxis:'y2',line:{color:'#c34d4d',dash:'dot'}}
-    ],{title:title+' Convergence',xaxis:{title:'Iteration'},yaxis:{title:'EENS (MWh/yr)',side:'left'},
-       yaxis2:{title:'CoV',overlaying:'y',side:'right',rangemode:'tozero'},
-       margin:{l:60,r:60,t:45,b:50},legend:{orientation:'h',y:-0.15}},{responsive:true});
-  }
-}
-
-function plotNodalEENS(body){
-  if(body.nodal_eens_mwh_yr&&body.nodal_eens_mwh_yr.length){
-    const nz=body.nodal_eens_mwh_yr.map((v,i)=>({bus:i+1,eens:v})).filter(x=>x.eens>0.01);
-    if(nz.length){
-      Plotly.newPlot('relNodalEENSChart',[{x:nz.map(x=>'Bus '+x.bus),y:nz.map(x=>x.eens),type:'bar',
-        marker:{color:'#c34d4d'}}],{title:'Nodal EENS (MWh/yr)',xaxis:{title:'Bus',tickangle:-45},
-        yaxis:{title:'MWh/yr'},margin:{l:60,r:15,t:45,b:60}},{responsive:true});
-    } else {
-      document.getElementById('relNodalEENSChart').innerHTML='<div style="padding:40px;color:var(--muted);text-align:center;">No nodal EENS (all buses have zero curtailment)</div>';
-    }
-  }
-}
-
-function plotCriticalComponents(body){
-  if(body.critical_components&&body.critical_components.length){
-    const top10=body.critical_components.slice(0,10);
-    Plotly.newPlot('relCriticalChart',[{
-      x:top10.map(c=>c.importance*100),
-      y:top10.map(c=>(c.is_generator?'Gen ':'Br ')+c.index),
-      type:'bar',orientation:'h',
-      marker:{color:top10.map(c=>c.is_generator?'#0b6e4f':'#2c8c99')}
-    }],{title:'Top Critical Components (% importance)',xaxis:{title:'Importance (%)'},
-       yaxis:{autorange:'reversed'},margin:{l:80,r:15,t:45,b:50}},{responsive:true});
-  } else {
-    document.getElementById('relCriticalChart').innerHTML='<div style="padding:40px;color:var(--muted);text-align:center;">No critical component data (no loss events detected)</div>';
-  }
-}
-
-document.getElementById('runNsqBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{
-    const opts=getRelOpts();
-    opts.max_iterations=parseInt(document.getElementById('relNsqMaxIter').value)||5000;
-    setStatus('Running Non-Sequential Monte Carlo ('+opts.max_iterations+' samples)...');
-    document.getElementById('relStatus').textContent='Running NSQ MC...';
-    const body=await api('/api/session/run_reliability_nsq',opts);
-    relLastNSQ=body;
-    updateRelKPIs(body,'NSQ');
-    plotRelConvergence(body,'NSQ MC');
-    plotNodalEENS(body);
-    plotCriticalComponents(body);
-    document.getElementById('relCrossValChart').innerHTML='';
-    const conv=body.converged?'Converged':'Max iterations';
-    document.getElementById('relStatus').textContent='NSQ MC complete ('+conv+'). EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, LOLE='+fmt(body.lole_hr_yr,2)+' hr/yr';
-    setStatus('NSQ MC complete. EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, LOLE='+fmt(body.lole_hr_yr,2)+' hr/yr, PLC='+fmt(body.plc*100,2)+'%');
-  }catch(e){setStatus(e.message,true);document.getElementById('relStatus').textContent='Error: '+e.message;}
-};
-
-document.getElementById('runSeqBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{
-    const opts=getRelOpts();
-    opts.max_years=parseInt(document.getElementById('relSeqMaxYears').value)||500;
-    opts.hours_per_year=parseInt(document.getElementById('relSeqHours').value)||8736;
-    setStatus('Running Sequential Monte Carlo ('+opts.max_years+' years, '+opts.hours_per_year+' hr/yr)...');
-    document.getElementById('relStatus').textContent='Running SEQ MC (this may take a while)...';
-    const body=await api('/api/session/run_reliability_seq',opts);
-    relLastSEQ=body;
-    updateRelKPIs(body,'SEQ');
-    plotRelConvergence(body,'SEQ MC');
-    plotNodalEENS(body);
-    plotCriticalComponents(body);
-    document.getElementById('relCrossValChart').innerHTML='';
-    const conv=body.converged?'Converged':'Max years';
-    document.getElementById('relStatus').textContent='SEQ MC complete ('+conv+'). EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, LOLF='+fmt(body.lolf_occ_yr,2)+' occ/yr';
-    setStatus('SEQ MC complete. EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, LOLE='+fmt(body.lole_hr_yr,2)+' hr/yr, LOLF='+fmt(body.lolf_occ_yr,2)+' occ/yr');
-  }catch(e){setStatus(e.message,true);document.getElementById('relStatus').textContent='Error: '+e.message;}
-};
-
-document.getElementById('runCrossValBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{
-    const opts=getRelOpts();
-    opts.max_iterations=parseInt(document.getElementById('relNsqMaxIter').value)||5000;
-    opts.max_years=parseInt(document.getElementById('relSeqMaxYears').value)||500;
-    opts.hours_per_year=parseInt(document.getElementById('relSeqHours').value)||8736;
-    
-    // Run NSQ
-    setStatus('Cross-validation: Running NSQ MC...');
-    document.getElementById('relStatus').textContent='Running NSQ MC for cross-validation...';
-    const nsq=await api('/api/session/run_reliability_nsq',opts);
-    relLastNSQ=nsq;
-    
-    // Run SEQ
-    setStatus('Cross-validation: Running SEQ MC...');
-    document.getElementById('relStatus').textContent='Running SEQ MC for cross-validation...';
-    const seq=await api('/api/session/run_reliability_seq',opts);
-    relLastSEQ=seq;
-    
-    // Display comparison
-    updateRelKPIs(nsq,'NSQ vs SEQ');
-    plotRelConvergence(nsq,'NSQ MC');
-    plotNodalEENS(nsq);
-    plotCriticalComponents(nsq);
-    
-    // Cross-validation comparison chart
-    const indices=['EENS (MWh/yr)','LOLE (hr/yr)','PLC (%)'];
-    const nsqVals=[nsq.eens_mwh_yr, nsq.lole_hr_yr, nsq.plc*100];
-    const seqVals=[seq.eens_mwh_yr, seq.lole_hr_yr, seq.plc*100];
-    Plotly.newPlot('relCrossValChart',[
-      {x:indices,y:nsqVals,type:'bar',name:'NSQ MC',marker:{color:'#0b6e4f'}},
-      {x:indices,y:seqVals,type:'bar',name:'SEQ MC',marker:{color:'#8e44ad'}}
-    ],{title:'Cross-Validation: NSQ vs SEQ',barmode:'group',yaxis:{title:'Value'},
-       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.15}},{responsive:true});
-    
-    // Calculate differences
-    const eensDiff=Math.abs(nsq.eens_mwh_yr-seq.eens_mwh_yr);
-    const eensPct=seq.eens_mwh_yr>0?(eensDiff/seq.eens_mwh_yr*100):0;
-    const loleDiff=Math.abs(nsq.lole_hr_yr-seq.lole_hr_yr);
-    const lolePct=seq.lole_hr_yr>0?(loleDiff/seq.lole_hr_yr*100):0;
-    
-    document.getElementById('relStatus').textContent='Cross-validation complete. EENS diff: '+fmt(eensDiff,1)+' MWh/yr ('+fmt(eensPct,1)+'%), LOLE diff: '+fmt(loleDiff,2)+' hr/yr ('+fmt(lolePct,1)+'%)';
-    setStatus('Cross-validation complete. NSQ: EENS='+fmt(nsq.eens_mwh_yr,0)+', SEQ: EENS='+fmt(seq.eens_mwh_yr,0)+'. Diff: '+fmt(eensPct,1)+'%');
-  }catch(e){setStatus(e.message,true);document.getElementById('relStatus').textContent='Error: '+e.message;}
-};
-
-document.getElementById('runFDBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{
-    const opts=getRelOpts();
-    setStatus('Running Frequency & Duration analysis (analytical)...');
-    document.getElementById('relStatus').textContent='Running F&D analysis...';
-    const body=await api('/api/session/run_reliability_fd',opts);
-    relLastFD=body;
-    updateFDKPIs(body);
-    
-    // Plot COPT
-    if(body.capacity_outage_levels&&body.cumulative_probability){
-      Plotly.newPlot('relConvergenceChart',[
-        {x:body.capacity_outage_levels,y:body.cumulative_probability,mode:'lines',name:'Cum. Probability',line:{color:'#0b6e4f'}},
-        {x:body.capacity_outage_levels,y:body.cumulative_frequency,mode:'lines',name:'Cum. Frequency',yaxis:'y2',line:{color:'#c34d4d',dash:'dot'}}
-      ],{title:'Capacity Outage Probability Table (COPT)',xaxis:{title:'Outage Level (MW)'},
-         yaxis:{title:'Cumulative Probability',side:'left'},yaxis2:{title:'Cumulative Frequency (occ/hr)',overlaying:'y',side:'right'},
-         margin:{l:60,r:60,t:45,b:50},legend:{orientation:'h',y:-0.15}},{responsive:true});
-    }
-    
-    document.getElementById('relNodalEENSChart').innerHTML='<div style="padding:40px;color:var(--muted);text-align:center;">F&D is a system-level method (no nodal breakdown)</div>';
-    document.getElementById('relCriticalChart').innerHTML='<div style="padding:40px;color:var(--muted);text-align:center;">F&D is an analytical method (no component breakdown)</div>';
-    document.getElementById('relCrossValChart').innerHTML='';
-    
-    document.getElementById('relStatus').textContent='F&D complete. LOLP='+fmt(body.lolp,6)+', LOLE='+fmt(body.lole_fd,2)+' hr/yr, LOLF='+fmt(body.lolf_fd,2)+' occ/yr, LOLD='+fmt(body.lold,2)+' hr/occ';
-    setStatus('F&D complete. LOLP='+fmt(body.lolp*100,4)+'%, LOLE='+fmt(body.lole_fd,2)+' hr/yr, LOLF='+fmt(body.lolf_fd,2)+' occ/yr');
-  }catch(e){setStatus(e.message,true);document.getElementById('relStatus').textContent='Error: '+e.message;}
-};
-
-/* FMEA (Failure Modes & Effects Analysis) */
-let relLastFMEA=null;
-document.getElementById('runFmeaBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{
-    const opts=getRelOpts();
-    opts.verbose=false;
-    setStatus('Running FMEA (N-1 contingency enumeration)...');
-    document.getElementById('relStatus').textContent='Running FMEA analysis...';
-    const body=await api('/api/session/run_reliability_fmea',opts);
-    relLastFMEA=body;
-    
-    // Update FMEA KPIs
-    document.getElementById('fmeaResultsSection').style.display='block';
-    document.getElementById('fmeaEENS').textContent=fmt(body.eens_mwh_yr,1);
-    document.getElementById('fmeaLOLE').textContent=fmt(body.lole_hr_yr,2);
-    document.getElementById('fmeaLOLF').textContent=fmt(body.lolf_occ_yr,2);
-    document.getElementById('fmeaSAIFI').textContent=fmt(body.saifi,4);
-    document.getElementById('fmeaSAIDI').textContent=fmt(body.saidi,4);
-    var caidiEl=document.getElementById('fmeaCAIDI'); if(caidiEl) caidiEl.textContent=fmt(body.caidi,4);
-    document.getElementById('fmeaASAI').textContent=fmt(body.asai,6);
-    document.getElementById('fmeaContingencies').textContent=body.n_contingencies+' ('+body.n_with_loss+' with loss'+((body.n_with_loss_switching_only!=null&&body.n_with_loss_switching_only>0)?(', '+body.n_with_loss_switching_only+' switching-only'):'')+')';
-    renderRelScope(body);
-    
-    // Plot top contingencies (bar chart)
-    if(body.contingencies&&body.contingencies.length>0){
-      const top=body.contingencies.slice(0,15);
-      Plotly.newPlot('fmeaContChart',[{
-        x:top.map(c=>c.display_name||c.component_name),
-        y:top.map(c=>c.eens_contribution),
-        type:'bar',
-        marker:{color:top.map(c=>c.shed_mw>0?'#c0392b':'#95a5a6')},
-        text:top.map(c=>c.display_type||c.component_type),
-        hovertemplate:'%{x}<br>Type: %{text}<br>EENS: %{y:.2f} MWh/yr<extra></extra>'
-      }],{title:'Top Contingencies by EENS Contribution',xaxis:{tickangle:-45},
-          yaxis:{title:'EENS (MWh/yr)'},margin:{l:60,r:15,t:45,b:120}},{responsive:true});
-    }
-    
-    // Plot EENS by component type (pie chart)
-    const eensByType=body.eens_by_display_type||body.eens_by_type;
-    if(eensByType){
-      const types=Object.keys(eensByType).filter(k=>eensByType[k]>0);
-      const vals=types.map(k=>eensByType[k]);
-      Plotly.newPlot('fmeaTypeChart',[{
-        labels:types,values:vals,type:'pie',
-        marker:{colors:['#c0392b','#e67e22','#2ecc71','#3498db','#9b59b6','#1abc9c','#34495e','#e74c3c','#f39c12']},
-        textinfo:'label+percent',hovertemplate:'%{label}<br>EENS: %{value:.2f} MWh/yr<extra></extra>'
-      }],{title:'EENS Breakdown by Component Type',margin:{l:20,r:20,t:45,b:20}},{responsive:true});
-    }
-    
-    document.getElementById('relStatus').textContent='FMEA complete. EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, SAIFI='+fmt(body.saifi,4)+', SAIDI='+fmt(body.saidi,4)+', ASAI='+fmt(body.asai,6);
-    setStatus('FMEA: '+body.n_contingencies+' contingencies, EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, SAIFI='+fmt(body.saifi,4));
-  }catch(e){setStatus(e.message,true);document.getElementById('relStatus').textContent='Error: '+e.message;}
-};
-
-/* Distribution Resilience (MESS) */
-function addFaultRow(bid,shr,rhr,lbl,kind){
-  const tbody=document.getElementById('resFaultTableBody');
-  const tr=document.createElement('tr');
-  const branchKind=(String(kind||'AC').toUpperCase()==='DC')?'DC':'AC';
-  tr.innerHTML='<td><select style="width:70px;"><option value="AC"'+(branchKind==='AC'?' selected':'')+'>AC</option><option value="DC"'+(branchKind==='DC'?' selected':'')+'>DC</option></select></td>'
-    +'<td><input type="number" min="1" value="'+(bid||'')+'" style="width:70px;"/></td>'
-    +'<td><input type="number" min="0" step="0.5" value="'+(shr||0)+'" style="width:70px;"/></td>'
-    +'<td><input type="number" min="1" step="0.5" value="'+(rhr||6)+'" style="width:70px;"/></td>'
-    +'<td><input type="text" value="'+(lbl||'')+'" style="width:120px;"/></td>'
-    +'<td><button onclick="this.closest(\'tr\').remove()" style="cursor:pointer;border:none;background:none;color:#ef4444;font-size:1.1em;">&#10005;</button></td>';
-  tbody.appendChild(tr);
-}
-function collectManualFaults(){
-  const rows=document.querySelectorAll('#resFaultTableBody tr');
-  const arr=[];
-  rows.forEach(r=>{
-    const cells=r.querySelectorAll('input');
-    const kind=(r.querySelector('select')||{}).value||'AC';
-    const bid=parseInt(cells[0].value,10);
-    if(!Number.isFinite(bid)||bid<=0) return;
-    arr.push({branch_type:kind,branch_id:bid,start_hr:parseFloat(cells[1].value)||0,repair_hr:parseFloat(cells[2].value)||6,label:cells[3].value||''});
-  });
-  return arr;
-}
-async function runResilienceSingle(overrides={}){
-  const faultIds=(document.getElementById('resFaultBranches').value||'')
-    .split(',').map(s=>parseInt(s.trim(),10)).filter(v=>Number.isFinite(v));
-  const manualFaults=collectManualFaults();
-  const params=Object.assign({
-    horizon_hours: parseInt(document.getElementById('resHorizonHours').value)||8,
-    time_step_hr: 1.0,
-    load_scale_factor: parseFloat(document.getElementById('resLoadScale').value)||1.0,
-    repair_time_hr: parseFloat(document.getElementById('resRepairHours').value)||6.0,
-    default_fault_count: parseInt(document.getElementById('resFaultCount').value)||1,
-    fault_branch_ids: faultIds,
-    ac_fault_branch_ids: faultIds,
-    manual_faults: manualFaults,
-    auto_fault_stagger_hr: parseFloat(document.getElementById('resFaultStagger').value)||0,
-    auto_fault_start_hr: parseFloat(document.getElementById('resFaultStartHr').value)||0,
-    ac_fault_start_hr: parseFloat(document.getElementById('resAcFaultStartHr').value)||0,
-    dc_fault_start_hr: parseFloat(document.getElementById('resDcFaultStartHr').value)||0,
-    ac_repair_time_hr: parseFloat(document.getElementById('resAcRepairHours').value)||6.0,
-    dc_repair_time_hr: parseFloat(document.getElementById('resDcRepairHours').value)||8.0,
-    mess_travel_speed_kmph: parseFloat(document.getElementById('resMessSpeed').value)||40.0,
-    allow_reconfiguration: document.getElementById('resAllowReconfig').checked,
-    allow_mess_dispatch: document.getElementById('resAllowMess').checked,
-    apply_demo_data: document.getElementById('resApplyDemoData').checked,
-    run_power_flow: document.getElementById('resRunPF').checked,
-    model: document.getElementById('resModel').value,
-    mip_solver: document.getElementById('resSolver').value,
-    mip_time_limit_s: parseFloat(document.getElementById('resMipTimeLimit').value)||180,
-    mip_gap: parseFloat(document.getElementById('resMipGap').value)||0.03,
-    consider_switches: document.getElementById('resConsiderSwitches').checked,
-    enable_disaster_stages: document.getElementById('resConsiderSwitches').checked,
-    use_switch_based_fault_isolation: document.getElementById('resConsiderSwitches').checked,
-    allow_stage1_open_switches: document.getElementById('resConsiderSwitches').checked,
-    allow_stage2_close_ties: document.getElementById('resConsiderSwitches').checked,
-    require_switch_for_nonfault_branch_operation: document.getElementById('resConsiderSwitches').checked&&!document.getElementById('resAllowBranchWithoutSwitch').checked,
-    allow_branch_operation_without_switch: document.getElementById('resAllowBranchWithoutSwitch').checked||!document.getElementById('resConsiderSwitches').checked,
-    use_remote_switch_only: document.getElementById('resUseRemoteSwitchOnly').checked,
-    post_fault_reconfig_window_hr: parseFloat(document.getElementById('resPostFaultWindow').value)||2.0,
-    disaster_post_fault_reconfig_window_hr: parseFloat(document.getElementById('resPostFaultWindow').value)||2.0,
-  },overrides);
-  return await api('/api/session/run_distribution_resilience',params);
-}
-
-function plotResilienceResults(body,baseBody){
-  document.getElementById('resilienceResultsSection').style.display='block';
-  document.getElementById('resilienceRI').textContent=fmt(body.resilience_index,4);
-  document.getElementById('resilienceDemand').textContent=fmt(body.total_demand_mwh,2);
-  document.getElementById('resilienceShed').textContent=fmt(body.total_shed_mwh,2);
-  document.getElementById('resilienceFinalRestore').textContent=fmt(body.final_restoration_ratio*100,2);
-  document.getElementById('resilienceAvgRestore').textContent=fmt(body.avg_restoration_ratio*100,2);
-  document.getElementById('resiliencePeakShed').textContent=fmt(body.peak_shed_mw,2);
-  document.getElementById('resilienceMessEnergy').textContent=fmt(body.mess_energy_delivered_mwh,2);
-  document.getElementById('resilienceMessTravel').textContent=fmt(body.mess_travel_distance_km,1);
-  document.getElementById('resilienceSwitches').textContent=body.total_switch_actions;
-  document.getElementById('resilienceRepairs').textContent=body.total_repaired_faults;
-
-  // Populate fault sequence table from response (so user can see & edit for re-run).
-  if(body.fault_sequence&&body.fault_sequence.length>0){
-    const tbody=document.getElementById('resFaultTableBody');
-    tbody.innerHTML='';
-    body.fault_sequence.forEach(f=>{addFaultRow(f.branch_index,f.start_hr,f.repair_hr,f.name,f.branch_type||f.branch_kind||'AC');});
-  }
-
-  // Comparison improvement banner
-  const compDiv=document.getElementById('resilienceCompareKPIs');
-  if(baseBody&&baseBody.feasible){
-    compDiv.style.display='block';
-    const dRI=body.resilience_index-baseBody.resilience_index;
-    const dShed=baseBody.total_shed_mwh-body.total_shed_mwh;
-    const dServed=body.total_served_mwh-baseBody.total_served_mwh;
-    document.getElementById('resCompRI').textContent='RI: '+(dRI>=0?'+':'')+fmt(dRI,4);
-    document.getElementById('resCompShed').textContent='Shed: '+(dShed>=0?'\u2212':'+' )+fmt(Math.abs(dShed),2)+' MWh';
-    document.getElementById('resCompServed').textContent='Served: '+(dServed>=0?'+':'')+fmt(dServed,2)+' MWh';
-  }else{compDiv.style.display='none';}
-
-  // Chart 1: Restoration Timeline with optional baseline overlay
-  const restoTraces=[
-    {x:body.hours,y:body.demand_mw,mode:'lines+markers',name:'Demand',line:{color:'#475569',width:2}},
-    {x:body.hours,y:body.served_mw,mode:'lines+markers',name:'Served (MESS)',line:{color:'#0b6e4f',width:2},fill:'tozeroy',fillcolor:'rgba(11,110,79,0.08)'},
-    {x:body.hours,y:body.shed_mw,mode:'lines+markers',name:'Shed (MESS)',line:{color:'#c34d4d',width:2}},
-    {x:body.hours,y:body.restoration_ratio.map(v=>v*100),mode:'lines',name:'Restoration %',yaxis:'y2',line:{color:'#0f766e',dash:'dot',width:2}}
-  ];
-  if(baseBody&&baseBody.feasible){
-    restoTraces.push({x:baseBody.hours,y:baseBody.served_mw,mode:'lines',name:'Served (baseline)',line:{color:'#94a3b8',dash:'dash',width:1.5}});
-    restoTraces.push({x:baseBody.hours,y:baseBody.shed_mw,mode:'lines',name:'Shed (baseline)',line:{color:'#f87171',dash:'dash',width:1.5}});
-    restoTraces.push({x:baseBody.hours,y:baseBody.restoration_ratio.map(v=>v*100),mode:'lines',name:'Restoration % (base)',yaxis:'y2',line:{color:'#a7f3d0',dash:'dashdot',width:1}});
-  }
-  Plotly.newPlot('resilienceRestorationChart',restoTraces,{title:'Restoration Timeline'+(baseBody?' (MESS vs Baseline)':''),
-    xaxis:{title:'Hour'},yaxis:{title:'MW'},yaxis2:{title:'Restoration (%)',overlaying:'y',side:'right',range:[0,105]},
-    margin:{l:60,r:60,t:45,b:55},legend:{orientation:'h',y:-0.22}},{responsive:true});
-
-  // Chart 2: MESS Dispatch + Faults/Switching
-  const messTraces=[];
-  (body.mess_traces||[]).forEach((tr)=>{
-    messTraces.push({x:body.hours,y:tr.dispatch_mw,mode:'lines+markers',name:tr.name||('MESS '+tr.storage_index),line:{width:2}});
-  });
-  messTraces.push({x:body.hours,y:body.active_faults,type:'bar',name:'Active Faults',yaxis:'y2',marker:{color:'#f59e0b',opacity:0.35}});
-  messTraces.push({x:body.hours,y:body.switch_actions,mode:'lines+markers',name:'Switch Actions',yaxis:'y2',line:{color:'#7c3aed',dash:'dot'}});
-  Plotly.newPlot('resilienceMessChart',messTraces,{title:'MESS Dispatch & Restoration Actions',xaxis:{title:'Hour'},
-    yaxis:{title:'MESS Dispatch (MW)'},yaxis2:{title:'Faults / Switching',overlaying:'y',side:'right',rangemode:'tozero'},
-    margin:{l:60,r:60,t:45,b:55},legend:{orientation:'h',y:-0.25}},{responsive:true});
-
-  // Chart 3: MESS Energy / SOC timeline
-  const energyTraces=[];
-  (body.mess_traces||[]).forEach((tr)=>{
-    energyTraces.push({x:body.hours,y:tr.energy_mwh,mode:'lines+markers',name:(tr.name||'MESS')+' Energy',line:{width:2}});
-  });
-  if(energyTraces.length>0){
-    Plotly.newPlot('resilienceEnergyChart',energyTraces,{title:'MESS Stored Energy Over Time',
-      xaxis:{title:'Hour'},yaxis:{title:'Energy (MWh)',rangemode:'tozero'},
-      margin:{l:60,r:30,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
-  }else{
-    document.getElementById('resilienceEnergyChart').innerHTML='<div style="padding:60px;color:var(--muted);text-align:center;">No MESS units active</div>';
-  }
-
-  // Chart 4: Island count + fault/repair status over time
-  const islandCounts=(body.island_counts||body.hours.map(()=>0));
-  const repairCounts=(body.repaired_faults_arr||body.hours.map(()=>0));
-  Plotly.newPlot('resilienceIslandChart',[
-    {x:body.hours,y:body.active_faults,type:'bar',name:'Active Faults',marker:{color:'#fbbf24',opacity:0.5}},
-    {x:body.hours,y:repairCounts,type:'bar',name:'Repaired',marker:{color:'#34d399',opacity:0.5}},
-    {x:body.hours,y:islandCounts,mode:'lines+markers',name:'Islands',yaxis:'y2',line:{color:'#6366f1',width:2}}
-  ],{title:'Network Topology Over Time',xaxis:{title:'Hour'},
-    yaxis:{title:'Fault Count',rangemode:'tozero'},yaxis2:{title:'Island Count',overlaying:'y',side:'right',rangemode:'tozero'},
-    barmode:'stack',margin:{l:60,r:60,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
-
-  // Chart 5: Load & RES multiplier profiles
-  const loadMults=body.load_multipliers||[];
-  const resMults=body.res_multipliers||[];
-  const resMwArr=body.res_mw||[];
-  if(loadMults.length>0 || resMults.length>0){
-    const profTraces=[];
-    if(loadMults.length>0) profTraces.push({x:body.hours,y:loadMults,mode:'lines+markers',name:'Load Multiplier',line:{color:'#0369a1',width:2}});
-    if(resMults.length>0)  profTraces.push({x:body.hours,y:resMults,mode:'lines+markers',name:'RES Multiplier',line:{color:'#f59e0b',width:2}});
-    if(resMwArr.length>0)  profTraces.push({x:body.hours,y:resMwArr,mode:'lines+markers',name:'RES Output (MW)',yaxis:'y2',line:{color:'#22c55e',width:2,dash:'dot'}});
-    const profLayout={title:'Load & Renewable Profiles',xaxis:{title:'Hour'},
-      yaxis:{title:'Multiplier',rangemode:'tozero'},margin:{l:60,r:60,t:45,b:55},legend:{orientation:'h',y:-0.22}};
-    if(resMwArr.length>0) Object.assign(profLayout,{yaxis2:{title:'RES MW',overlaying:'y',side:'right',rangemode:'tozero'}});
-    Plotly.newPlot('resilienceProfileChart',profTraces,profLayout,{responsive:true});
-  }else{
-    document.getElementById('resilienceProfileChart').innerHTML='<div style="padding:60px;color:var(--muted);text-align:center;">No profile data</div>';
-  }
-
-  // Chart 6: MESS spatial trajectory (bus location over time)
-  const trajTraces=[];
-  (body.mess_traces||[]).forEach((tr,i)=>{
-    const buses=tr.target_bus||tr.bus||[];
-    if(buses.length>0){
-      trajTraces.push({x:body.hours.slice(0,buses.length),y:buses,mode:'lines+markers',name:(tr.name||'MESS '+tr.storage_index)+' Bus',
-        line:{width:2,shape:'hv'},marker:{size:7}});
-    }
-  });
-  if(trajTraces.length>0){
-    Plotly.newPlot('resilienceTrajectoryChart',trajTraces,{title:'MESS Spatial Trajectory (Bus Location)',
-      xaxis:{title:'Hour'},yaxis:{title:'Bus ID',dtick:1},
-      margin:{l:60,r:30,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
-  }else{
-    document.getElementById('resilienceTrajectoryChart').innerHTML='<div style="padding:60px;color:var(--muted);text-align:center;">No MESS trajectory data</div>';
-  }
-
-  // Chart 7: Load Shed by Priority Tier (stacked bar)
-  const sCrit=body.shed_critical||[];
-  const sHigh=body.shed_high||[];
-  const sMed=body.shed_medium||[];
-  const sLow=body.shed_low||[];
-  if(sCrit.length>0){
-    Plotly.newPlot('resiliencePriorityChart',[
-      {x:body.hours,y:sCrit,type:'bar',name:'Critical',marker:{color:'#dc2626'}},
-      {x:body.hours,y:sHigh,type:'bar',name:'High',marker:{color:'#f59e0b'}},
-      {x:body.hours,y:sMed,type:'bar',name:'Medium',marker:{color:'#3b82f6'}},
-      {x:body.hours,y:sLow,type:'bar',name:'Low',marker:{color:'#94a3b8'}},
-    ],{title:'Load Shed by Priority Tier',barmode:'stack',xaxis:{title:'Hour'},
-      yaxis:{title:'Shed (MW)',rangemode:'tozero'},
-      margin:{l:60,r:30,t:45,b:55},legend:{orientation:'h',y:-0.22}},{responsive:true});
-  }else{
-    document.getElementById('resiliencePriorityChart').innerHTML='<div style="padding:60px;color:var(--muted);text-align:center;">No shed data</div>';
-  }
-
-  // Chart 8: MESS Dispatch vs SOC (dual-axis)
-  const messSOCTraces=[];
-  (body.mess_traces||[]).forEach((tr)=>{
-    const nm=tr.name||('MESS '+tr.storage_index);
-    messSOCTraces.push({x:body.hours,y:tr.dispatch_mw,mode:'lines+markers',name:nm+' Dispatch',line:{width:2}});
-    messSOCTraces.push({x:body.hours,y:(tr.soc||[]).map(v=>v*100),mode:'lines',name:nm+' SOC%',yaxis:'y2',line:{width:2,dash:'dot'}});
-  });
-  if(messSOCTraces.length>0){
-    Plotly.newPlot('resilienceMessSOCChart',messSOCTraces,{title:'MESS Dispatch vs SOC',
-      xaxis:{title:'Hour'},yaxis:{title:'Dispatch (MW)',rangemode:'tozero'},
-      yaxis2:{title:'SOC (%)',overlaying:'y',side:'right',range:[0,105]},
-      margin:{l:60,r:60,t:45,b:55},legend:{orientation:'h',y:-0.25}},{responsive:true});
-  }else{
-    document.getElementById('resilienceMessSOCChart').innerHTML='<div style="padding:60px;color:var(--muted);text-align:center;">No MESS units active</div>';
-  }
-
-  // Chart 9: Bus Voltage Profile from Power Flow
-  const bvTraces=body.bus_voltage_traces||[];
-  const vChartDiv=document.getElementById('resilienceVoltageChart');
-  if(bvTraces.length>0){
-    vChartDiv.style.display='';
-    const vTraces=[];
-    bvTraces.forEach(bv=>{
-      vTraces.push({x:body.hours.slice(0,bv.vm_pu.length),y:bv.vm_pu,mode:'lines',name:'Bus '+bv.bus_index,line:{width:1.5}});
-    });
-    // Upper and lower voltage limits
-    vTraces.push({x:body.hours,y:body.hours.map(()=>1.05),mode:'lines',name:'V_max',line:{color:'#c34d4d',dash:'dash',width:1},showlegend:true});
-    vTraces.push({x:body.hours,y:body.hours.map(()=>0.95),mode:'lines',name:'V_min',line:{color:'#c34d4d',dash:'dash',width:1},showlegend:false});
-    Plotly.newPlot('resilienceVoltageChart',vTraces,{title:'Bus Voltage Magnitude (from Power Flow)',
-      xaxis:{title:'Hour'},yaxis:{title:'Vm (p.u.)',range:[0.85,1.10]},
-      margin:{l:60,r:30,t:45,b:55},legend:{orientation:'h',y:-0.25}},{responsive:true});
-  }else{
-    vChartDiv.style.display='none';
-  }
-
-  // Chart 10: Branch Power Flow (MW) from Power Flow
-  const bfTraces=body.branch_flow_traces||[];
-  const fChartDiv=document.getElementById('resilienceBranchFlowChart');
-  if(bfTraces.length>0){
-    fChartDiv.style.display='';
-    const flowTraces=[];
-    bfTraces.forEach(bf=>{
-      flowTraces.push({x:body.hours.slice(0,bf.pf_mw.length),y:bf.pf_mw,mode:'lines',
-        name:'Br '+bf.branch_index+' ('+bf.from_bus+'\u2192'+bf.to_bus+')',line:{width:1.5}});
-    });
-    Plotly.newPlot('resilienceBranchFlowChart',flowTraces,{title:'Branch Active Power Flow (from Power Flow)',
-      xaxis:{title:'Hour'},yaxis:{title:'Pf (MW)'},
-      margin:{l:60,r:30,t:45,b:55},legend:{orientation:'h',y:-0.25}},{responsive:true});
-  }else{
-    fChartDiv.style.display='none';
-  }
-}
-
-document.getElementById('runResilienceBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{
-    setStatus('Running resilience assessment...');
-    document.getElementById('resStatus').textContent='Running resilience assessment...';
-    const useMess=document.getElementById('resAllowMess').checked;
-    let baseBody=null;
-    // Always run a baseline (no MESS) first for comparison if MESS is enabled
-    if(useMess){
-      setStatus('Running baseline (no MESS) for comparison...');
-      baseBody=await runResilienceSingle({allow_mess_dispatch:false});
-    }
-    setStatus('Running resilience with current settings...');
-    const body=await runResilienceSingle();
-    relLastResilience=body;
-    plotResilienceResults(body,baseBody);
-    document.getElementById('resStatus').textContent='Resilience complete. RI='+fmt(body.resilience_index,4)+', shed='+fmt(body.total_shed_mwh,2)+' MWh, MESS='+fmt(body.mess_energy_delivered_mwh,2)+' MWh';
-    setStatus('Resilience complete. RI='+fmt(body.resilience_index,4)+', shed='+fmt(body.total_shed_mwh,2)+' MWh, final='+fmt(body.final_restoration_ratio*100,1)+'%');
-  }catch(e){setStatus(e.message,true);document.getElementById('resStatus').textContent='Error: '+e.message;}
-};
-
-/* Reactive Power Optimization (RPO) */
-async function runRPO(relaxOnly){
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{
-    setStatus('Running RPO '+(relaxOnly?'(continuous relaxation)':'(MINLP B&B + IPM)')+'...');
-    const body=await api('/api/session/run_rpo',{
-      objective:document.getElementById('rpoObjective').value,
-      mip_gap:parseFloat(document.getElementById('rpoMipGap').value)||0.01,
-      time_limit_s:parseInt(document.getElementById('rpoTimeLimit').value)||120,
-      vdev_weight:parseFloat(document.getElementById('rpoVdevWeight').value)||1.0,
-      relax_only:!!relaxOnly,
-    });
-    /* KPI cards */
-    document.getElementById('rpoConv').textContent=body.converged?'Yes':'No';
-    document.getElementById('rpoObj').textContent=fmt(body.objective,4);
-    document.getElementById('rpoGap').textContent=fmt(body.gap*100,2);
-    document.getElementById('rpoNodes').textContent=body.nodes_explored;
-    document.getElementById('rpoLPSolves').textContent=body.nlp_solves;
-    document.getElementById('rpoTime').textContent=fmt(body.runtime_sec,2);
-    document.getElementById('rpoLossBefore').textContent=fmt(body.total_loss_before,2);
-    document.getElementById('rpoLossAfter').textContent=fmt(body.total_loss_after,2);
-    document.getElementById('rpoVdevBefore').textContent=fmt(body.max_vdev_before,4);
-    document.getElementById('rpoVdevAfter').textContent=fmt(body.max_vdev_after,4);
-    document.getElementById('rpoStatus').textContent=body.status||'-';
-    const busIdx=(body.vm_before||[]).map((_,i)=>i+1);
-    /* 1. Bus Voltage Profile */
-    Plotly.newPlot('rpoVoltChart',[
-      {x:busIdx,y:body.vm_before||[],mode:'lines+markers',name:'Vm Before',line:{color:'#b5651d',width:2,dash:'dot'},marker:{size:4}},
-      {x:busIdx,y:body.vm_after||[],mode:'lines+markers',name:'Vm After',line:{color:'#0b6e4f',width:2},marker:{size:4}},
-      {x:busIdx,y:busIdx.map(()=>body.v_min||0.95),mode:'lines',name:'Vmin',line:{color:'#c34d4d',width:1,dash:'dash'},showlegend:true},
-      {x:busIdx,y:busIdx.map(()=>body.v_max||1.05),mode:'lines',name:'Vmax',line:{color:'#c34d4d',width:1,dash:'dash'},showlegend:false},
-    ],{title:'Bus Voltage Magnitude (p.u.)',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
-    /* 2. Generator Reactive Power */
-    const genNames=body.gen_names||(body.qg_before||[]).map((_,i)=>'Gen '+i);
-    Plotly.newPlot('rpoQgChart',[
-      {x:genNames,y:body.qg_before||[],type:'bar',name:'Qg Before',marker:{color:'#b5651d'}},
-      {x:genNames,y:body.qg_after||[],type:'bar',name:'Qg After',marker:{color:'#0b6e4f'}},
-    ],{title:'Generator Reactive Power Qg (MVAr)',barmode:'group',xaxis:{title:''},yaxis:{title:'MVAr'},margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.25}},{responsive:true});
-    /* 3. Generator Active Power */
-    Plotly.newPlot('rpoPgChart',[
-      {x:genNames,y:body.pg_before||[],type:'bar',name:'Pg Before',marker:{color:'#8e6f3e'}},
-      {x:genNames,y:body.pg_after||[],type:'bar',name:'Pg After',marker:{color:'#2c8c99'}},
-    ],{title:'Generator Active Power Pg (MW)',barmode:'group',xaxis:{title:''},yaxis:{title:'MW'},margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.25}},{responsive:true});
-    /* 4. Bus Voltage Angle */
-    Plotly.newPlot('rpoVaChart',[
-      {x:busIdx,y:(body.va_before||[]).map(a=>a*180/Math.PI),mode:'lines+markers',name:'Va Before (deg)',line:{color:'#b5651d',width:2,dash:'dot'},marker:{size:3}},
-      {x:busIdx,y:(body.va_after||[]).map(a=>a*180/Math.PI),mode:'lines+markers',name:'Va After (deg)',line:{color:'#0b6e4f',width:2},marker:{size:3}},
-    ],{title:'Bus Voltage Angle (degrees)',xaxis:{title:'Bus'},yaxis:{title:'deg'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
-    /* 5. Tap Changer Positions */
-    if(body.tap_names&&body.tap_names.length){
-      Plotly.newPlot('rpoTapChart',[
-        {x:body.tap_names,y:body.tap_before||[],type:'bar',name:'Ratio Before',marker:{color:'#8e44ad'}},
-        {x:body.tap_names,y:body.tap_after||[],type:'bar',name:'Ratio After',marker:{color:'#2c8c99'}},
-      ],{title:'OLTC Tap Ratio (p.u.)',barmode:'group',xaxis:{title:''},yaxis:{title:'Tap Ratio'},margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.25}},{responsive:true});
-    } else {
-      document.getElementById('rpoTapChart').innerHTML='<div style="padding:20px;color:var(--muted);">No OLTC transformers detected.</div>';
-    }
-    /* 6. Switchable Shunt Steps */
-    if(body.shunt_names&&body.shunt_names.length){
-      Plotly.newPlot('rpoShuntChart',[
-        {x:body.shunt_names,y:body.shunt_mvar_before||body.shunt_before||[],type:'bar',name:'Before (MVAr)',marker:{color:'#e67e22'}},
-        {x:body.shunt_names,y:body.shunt_mvar_after||body.shunt_after||[],type:'bar',name:'After (MVAr)',marker:{color:'#27ae60'}},
-      ],{title:'Switchable Shunt Output (MVAr)',barmode:'group',xaxis:{title:''},yaxis:{title:'MVAr'},margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.25}},{responsive:true});
-    } else {
-      document.getElementById('rpoShuntChart').innerHTML='<div style="padding:20px;color:var(--muted);">No switchable shunts detected.</div>';
-    }
-    /* 7. Voltage Deviation |V-1| per Bus */
-    const vdev_before=(body.vm_before||[]).map(v=>Math.abs(v-1.0));
-    const vdev_after=(body.vm_after||[]).map(v=>Math.abs(v-1.0));
-    Plotly.newPlot('rpoDetailsChart',[
-      {x:busIdx,y:vdev_before,type:'bar',name:'|V-1| Before',marker:{color:'rgba(181,101,29,0.6)'}},
-      {x:busIdx,y:vdev_after,type:'bar',name:'|V-1| After',marker:{color:'rgba(11,110,79,0.6)'}},
-    ],{title:'Voltage Deviation |V - 1.0| per Bus',barmode:'group',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
-    /* Debug summary table */
-    const L=s=>s;  // line helper
-    const lines=[];
-    lines.push('╔══════════════════════════════════════════════════════════════════╗');
-    lines.push('║  RPO (MINLP) Debug Summary                                     ║');
-    lines.push('╠══════════════════════════════════════════════════════════════════╣');
-    lines.push('  Solver:     Branch & Bound + Parity IPM');
-    lines.push('  Status:     '+(body.status||'N/A'));
-    lines.push('  Objective:  '+body.objective_type+' = '+fmt(body.objective,6));
-    lines.push('  Converged:  '+body.converged+'  |  Gap: '+fmt(body.gap*100,4)+'%');
-    lines.push('  B&B Nodes:  '+body.nodes_explored+'  |  NLP Solves: '+body.nlp_solves+'  |  Time: '+fmt(body.runtime_sec,2)+'s');
-    lines.push('');
-    lines.push('── Loss ─────────────────────────────────────────────────');
-    const dLoss=body.total_loss_after-body.total_loss_before;
-    const pLoss=body.total_loss_before?((dLoss/body.total_loss_before)*100):0;
-    lines.push('  Before: '+fmt(body.total_loss_before,3)+' MW  |  After: '+fmt(body.total_loss_after,3)+' MW  |  Δ: '+(dLoss>=0?'+':'')+fmt(dLoss,3)+' MW ('+fmt(pLoss,2)+'%)');
-    lines.push('');
-    lines.push('── Voltage Deviation ────────────────────────────────────');
-    const svb=vdev_before.reduce((a,b)=>a+b*b,0), sva=vdev_after.reduce((a,b)=>a+b*b,0);
-    lines.push('  Max |V-1|  Before: '+fmt(Math.max(...vdev_before),4)+' p.u.  |  After: '+fmt(Math.max(...vdev_after),4)+' p.u.');
-    lines.push('  Σ(V-1)²   Before: '+fmt(svb,6)+'  |  After: '+fmt(sva,6)+'  |  Δ: '+fmt(sva-svb,6)+' ('+(svb?fmt((sva-svb)/svb*100,2):'N/A')+'%)');
-    lines.push('');
-    if(body.tap_names&&body.tap_names.length){
-      lines.push('── OLTC Tap Changers ────────────────────────────────────');
-      lines.push('  Name              Pos Before  Pos After  Ratio Before  Ratio After');
-      body.tap_names.forEach((n,i)=>{
-        const pb=(body.tap_pos_before||[])[i], pa=(body.tap_pos_after||[])[i];
-        lines.push('  '+n.padEnd(18)+(pb!=null?String(pb).padStart(6):' ??   ')+'       '+(pa!=null?String(pa).padStart(6):' ??   ')+'       '+fmt(body.tap_before[i],4).padStart(10)+'    '+fmt(body.tap_after[i],4).padStart(10));
-      });
-      lines.push('');
-    }
-    if(body.shunt_names&&body.shunt_names.length){
-      lines.push('── Switchable Shunts ────────────────────────────────────');
-      lines.push('  Name                Step Before  Step After   MVAr Before   MVAr After');
-      body.shunt_names.forEach((n,i)=>{
-        const mb=(body.shunt_mvar_before||[])[i], ma=(body.shunt_mvar_after||[])[i];
-        lines.push('  '+n.padEnd(20)+String(body.shunt_before[i]).padStart(8)+'       '+String(body.shunt_after[i]).padStart(8)+'       '+(mb!=null?fmt(mb,2).padStart(10):' ??       ')+'    '+(ma!=null?fmt(ma,2).padStart(10):' ??       '));
-      });
-      lines.push('');
-    }
-    lines.push('── Generator Dispatch ───────────────────────────────────');
-    lines.push('  Name                 Pg Before    Pg After   ΔPg (MW)   Qg Before    Qg After   ΔQg (MVAr)');
-    (body.gen_names||[]).forEach((n,i)=>{
-      const pgb=(body.pg_before||[])[i]||0, pga=(body.pg_after||[])[i]||0;
-      const qgb=(body.qg_before||[])[i]||0, qga=(body.qg_after||[])[i]||0;
-      lines.push('  '+n.padEnd(20)+fmt(pgb,2).padStart(9)+'    '+fmt(pga,2).padStart(9)+'   '+(pga-pgb>=0?'+':'')+fmt(pga-pgb,2).padStart(8)+'   '+fmt(qgb,2).padStart(9)+'    '+fmt(qga,2).padStart(9)+'   '+(qga-qgb>=0?'+':'')+fmt(qga-qgb,2).padStart(8));
-    });
-    lines.push('');
-    lines.push('── Bus Voltages ─────────────────────────────────────────');
-    lines.push('  Bus   Vm Before   Vm After   ΔVm        Va Before°   Va After°   ΔVa°');
-    busIdx.forEach((b,i)=>{
-      const vmb=(body.vm_before||[])[i]||0, vma=(body.vm_after||[])[i]||0;
-      const vab=((body.va_before||[])[i]||0)*180/Math.PI, vaa=((body.va_after||[])[i]||0)*180/Math.PI;
-      lines.push('  '+String(b).padStart(3)+'    '+fmt(vmb,4).padStart(8)+'   '+fmt(vma,4).padStart(8)+'  '+(vma-vmb>=0?'+':'')+fmt(vma-vmb,4).padStart(7)+'     '+fmt(vab,2).padStart(8)+'    '+fmt(vaa,2).padStart(8)+'  '+(vaa-vab>=0?'+':'')+fmt(vaa-vab,2).padStart(7));
-    });
-    lines.push('╚══════════════════════════════════════════════════════════════════╝');
-    document.getElementById('rpoResultTable').textContent=lines.join('\n');
-    setStatus('RPO complete. Obj='+fmt(body.objective,4)+' ('+body.objective_type+'), Status: '+(body.status||'OK')+', Nodes='+body.nodes_explored+', Time='+fmt(body.runtime_sec,2)+'s');
-  }catch(e){setStatus(e.message,true);}
-}
-document.getElementById('runRPOBtn').onclick=()=>runRPO(false);
-document.getElementById('runRPORelaxBtn').onclick=()=>runRPO(true);
-
-/* Network Reconfiguration */
-document.getElementById('runReconfigBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{
-    setStatus('Running Network Reconfiguration (TS-TR MILP)...');
-    const numSteps=parseInt(document.getElementById('rcNumSteps').value)||4;
-    const body=await api('/api/session/run_reconfig',{
-      num_steps:numSteps,
-      v_min:parseFloat(document.getElementById('rcVmin').value)||0.95,
-      v_max:parseFloat(document.getElementById('rcVmax').value)||1.05,
-      mip_gap:parseFloat(document.getElementById('rcMipGap').value)||0.01,
-      max_time_s:parseInt(document.getElementById('rcMaxTime').value)||60,
-      enable_pf:(document.getElementById('rcEnablePF')||{}).value!=='0',
-      enable_voltage:(document.getElementById('rcEnableVoltage')||{}).checked!==false,
-      enable_thermal:(document.getElementById('rcEnableThermal')||{}).checked!==false,
-      split_domain_trees:(document.getElementById('rcSplitTrees')||{}).checked===true,
-      allow_dc_mesh:(document.getElementById('rcDcMesh')||{}).checked===true,
-      loss_aware:(document.getElementById('rcLossAware')||{}).checked!==false,
-      max_switch_ops:parseInt((document.getElementById('rcMaxSwOps')||{}).value)||0,
-      lambda_loss:parseFloat((document.getElementById('rcLambdaLoss')||{}).value)||10,
-      lambda_switch:parseFloat((document.getElementById('rcLambdaSwitch')||{}).value)||1,
-      lambda_shed:parseFloat((document.getElementById('rcLambdaShed')||{}).value)||1e4,
-    });
-    document.getElementById('rcFeas').textContent=body.feasible?'Yes':'No';
-    document.getElementById('rcObj').textContent=fmt(body.total_objective,2);
-    const totalCurt=(body.curt_per_step||[]).reduce((a,b)=>a+b,0);
-    const totalSwOn=(body.sw_on_per_step||[]).reduce((a,b)=>a+b,0);
-    const totalSwOff=(body.sw_off_per_step||[]).reduce((a,b)=>a+b,0);
-    document.getElementById('rcACLoss').textContent=fmt(totalCurt,2);
-    document.getElementById('rcShed').textContent=body.num_branches;
-    document.getElementById('rcSwActions').textContent=totalSwOn+totalSwOff;
-    const T=body.num_steps||numSteps;
-    const hrs=Array.from({length:T},(_,i)=>i);
-    Plotly.newPlot('rcLossChart',[
-      {x:hrs,y:body.curt_per_step||[],mode:'lines+markers',name:'Curtailment MW',line:{color:'#b5651d',width:2}},
-      {x:hrs,y:body.sw_on_per_step||[],mode:'lines+markers',name:'Switch-On',line:{color:'#27ae60',width:2,dash:'dot'}},
-      {x:hrs,y:body.sw_off_per_step||[],mode:'lines+markers',name:'Switch-Off',line:{color:'#e74c3c',width:2,dash:'dash'}},
-    ],{title:'Curtailment & Switching per Step',xaxis:{title:'Step'},yaxis:{title:'Count / MW'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-    Plotly.newPlot('rcSwitchChart',[
-      {x:hrs,y:body.sw_on_per_step||[],type:'bar',name:'Close (AC)',marker:{color:'#27ae60'}},
-      {x:hrs,y:body.sw_off_per_step||[],type:'bar',name:'Open (AC)',marker:{color:'#e74c3c'}},
-    ],{title:'AC Switching Actions per Step',barmode:'group',xaxis:{title:'Step'},yaxis:{title:'Count'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-    const essSoc=body.ess_soc_by_step||[];
-    const nESS=body.num_ess||0;
-    const essSocData=nESS>0
-      ? Array.from({length:nESS},(_,si)=>({x:hrs,y:essSoc.map(row=>(row&&row[si])||0),mode:'lines+markers',name:'ESS '+(si+1)}))
-      : [];
-    if(essSocData.length)
-      Plotly.newPlot('rcESSChart',essSocData,{title:'ESS SOC during Reconfiguration',xaxis:{title:'Step'},yaxis:{title:'SOC',range:[0,1]},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-    else
-      document.getElementById('rcESSChart').innerHTML='<div style="padding:20px;color:var(--muted);">No storage units in this case.</div>';
-    const ops=body.switch_operations||[];const sumr=body.switch_op_summary||{};const opEl=document.getElementById('rcSwOps');
-    if(opEl){var ot=body.obj_terms||{};var hdr='<div style="font-size:.85em;margin:4px 0;">目标: 损耗='+(ot.loss||0).toFixed(3)+' 开关='+(ot.switching||0).toFixed(0)+' 切荷='+(ot.shed||0).toFixed(1)+' 孤岛='+(ot.island||0).toFixed(0)+' | 校验 PF='+(body.reconfig_pf_converged?'✓':'✗')+' OPF='+(body.opf_converged?'✓':'✗')+'</div>';if(ops.length){const kn={circuit_breaker:'CB',switch:'Switch',branch:'Branch'};let h='<table class="tbl"><thead><tr><th>Device</th><th>ID</th><th>From</th><th>To</th><th>Action</th></tr></thead><tbody>';ops.forEach(o=>{h+='<tr><td>'+(kn[o.kind]||o.kind)+'</td><td>'+o.index+'</td><td>'+o.from_bus+'</td><td>'+o.to_bus+'</td><td>'+(o.close?'CLOSE':'OPEN')+'</td></tr>';});h+='</tbody></table><div style="color:var(--muted);font-size:.85em;">Switch +'+(sumr.switch_close||0)+'/-'+(sumr.switch_open||0)+', CB +'+(sumr.cb_close||0)+'/-'+(sumr.cb_open||0)+'</div>';opEl.innerHTML=hdr+h;}else{opEl.innerHTML=hdr+'<div style="color:var(--muted);">No device-mapped switch operations.</div>';}}
-    setStatus('Reconfiguration done. Feasible: '+body.feasible+'. Obj: '+fmt(body.total_objective,2)+'. Switch actions: '+(totalSwOn+totalSwOff)+'. Solver: '+(body.solver_name||'native')+'.');
-  }catch(e){setStatus(e.message,true);}
-};
-
-/* Annual Production Simulation */
-document.getElementById('runAnnualBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{
-    setStatus('Running Annual Production Simulation (this may take a while)...');
-    const body=await api('/api/session/run_annual_sim',{
-      resolution:document.getElementById('annualResolution').value,
-      block_type:document.getElementById('annualBlockType').value,
-      snapshot_interval:parseInt(document.getElementById('annualSnapshotInterval').value)||24,
-      run_opf:document.getElementById('annualRunOPF').checked,
-      cyclic_soc:document.getElementById('annualCyclicSOC').checked,
-      skip_replay:document.getElementById('annualSkipReplay').checked,
-    });
-    document.getElementById('annFeas').textContent=body.feasible?'Yes':'No';
-    document.getElementById('annCost').textContent='$'+fmt(body.total_cost,0);
-    document.getElementById('annGenMWh').textContent=fmt(body.total_gen_mwh,0);
-    document.getElementById('annRenMWh').textContent=fmt(body.total_renewable_mwh,0);
-    document.getElementById('annCurtMWh').textContent=fmt(body.total_curtailment_mwh,0);
-    document.getElementById('annENSMWh').textContent=fmt(body.total_ens_mwh,0);
-    document.getElementById('annLossMWh').textContent=fmt(body.total_loss_mwh,0);
-    document.getElementById('annPFConv').textContent=body.num_pf_converged+'/'+body.num_steps;
-    const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12'];
-    // Timeline chart
-    const hrs=body.timeline_hours||[];
-    Plotly.newPlot('annTimelineChart',[
-      {x:hrs,y:body.timeline_gen,mode:'lines',name:'Generation',line:{color:pal[0],width:1.5}},
-      {x:hrs,y:body.timeline_load,mode:'lines',name:'Load',line:{color:pal[1],width:1.5}},
-      {x:hrs,y:body.timeline_ren,mode:'lines',name:'Renewable',line:{color:pal[6],width:1.5}},
-      {x:hrs,y:body.timeline_curt,mode:'lines',name:'Curtailment',line:{color:pal[5],width:1}},
-      {x:hrs,y:body.timeline_ess,mode:'lines',name:'ESS (net)',line:{color:pal[3],width:1,dash:'dot'}},
-    ],{title:'Annual Generation & Load Timeline (MW)',xaxis:{title:'Hour of Year'},yaxis:{title:'MW'},
-       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.15}},{responsive:true});
-    // Monthly energy breakdown
-    const mo=body.monthly_summaries||[];
-    const mLabels=mo.map(m=>'Month '+(m.block_id+1));
-    Plotly.newPlot('annMonthlyChart',[
-      {x:mLabels,y:mo.map(m=>m.total_gen_mwh),type:'bar',name:'Generation',marker:{color:pal[0]}},
-      {x:mLabels,y:mo.map(m=>m.total_renewable_mwh),type:'bar',name:'Renewable',marker:{color:pal[6]}},
-      {x:mLabels,y:mo.map(m=>m.total_curtailment_mwh),type:'bar',name:'Curtailment',marker:{color:pal[5]}},
-      {x:mLabels,y:mo.map(m=>m.total_loss_mwh),type:'bar',name:'Losses',marker:{color:pal[2]}},
-    ],{title:'Monthly Energy Breakdown (MWh)',barmode:'group',xaxis:{title:''},yaxis:{title:'MWh'},
-       margin:{l:60,r:15,t:45,b:60},legend:{orientation:'h',y:-0.25}},{responsive:true});
-    // Monthly cost
-    Plotly.newPlot('annMonthlyCostChart',[
-      {x:mLabels,y:mo.map(m=>m.total_cost),type:'bar',name:'Cost',marker:{color:pal[3]}},
-    ],{title:'Monthly Cost ($)',xaxis:{title:''},yaxis:{title:'$'},
-       margin:{l:60,r:15,t:45,b:60}},{responsive:true});
-    // Generator stats
-    const gs=body.gen_stats||[];
-    if(gs.length) Plotly.newPlot('annGenStatsChart',[
-      {x:gs.map(g=>g.name||'Gen'),y:gs.map(g=>g.capacity_factor*100),type:'bar',name:'Capacity Factor %',marker:{color:pal[0]}},
-    ],{title:'Generator Capacity Factors (%)',xaxis:{title:''},yaxis:{title:'%'},
-       margin:{l:55,r:15,t:45,b:80}},{responsive:true});
-    // Renewable stats
-    const rns=body.renewable_stats||[];
-    if(rns.length) Plotly.newPlot('annRenStatsChart',[
-      {x:rns.map(r=>r.name||'Ren'),y:rns.map(r=>r.total_energy_mwh),type:'bar',name:'Energy MWh',marker:{color:pal[6]}},
-      {x:rns.map(r=>r.name||'Ren'),y:rns.map(r=>r.total_curtailed_mwh),type:'bar',name:'Curtailed MWh',marker:{color:pal[5]}},
-    ],{title:'Renewable Energy vs Curtailment (MWh)',barmode:'group',xaxis:{title:''},yaxis:{title:'MWh'},
-       margin:{l:60,r:15,t:45,b:80},legend:{orientation:'h',y:-0.25}},{responsive:true});
-    // Storage stats
-    const stg=body.storage_stats||[];
-    if(stg.length) Plotly.newPlot('annStorageStatsChart',[
-      {x:stg.map(s=>s.name||'ESS'),y:stg.map(s=>s.total_charge_mwh),type:'bar',name:'Charge MWh',marker:{color:pal[1]}},
-      {x:stg.map(s=>s.name||'ESS'),y:stg.map(s=>s.total_discharge_mwh),type:'bar',name:'Discharge MWh',marker:{color:pal[2]}},
-    ],{title:'Storage Charge/Discharge (MWh) — Cycles: '+stg.map(s=>fmt(s.cycles,1)).join(', '),
-       barmode:'group',xaxis:{title:''},yaxis:{title:'MWh'},
-       margin:{l:60,r:15,t:45,b:80},legend:{orientation:'h',y:-0.25}},{responsive:true});
-    // Voltage heatmap from PF snapshots
-    const snapHrs=body.snapshot_hours||[];
-    const snapVm=body.snapshot_vm||[];
-    if(snapHrs.length&&snapVm.length){
-      const nBus=snapVm[0].length;
-      const busLabels=Array.from({length:nBus},(_,i)=>'Bus '+i);
-      Plotly.newPlot('annVoltHeatmap',[{z:snapVm,x:busLabels,y:snapHrs,type:'heatmap',
-        colorscale:'RdYlGn',zmin:0.9,zmax:1.1,colorbar:{title:'Vm (pu)',len:0.7}}],
-        {title:'Bus Voltage Heatmap over Year',xaxis:{title:'Bus'},yaxis:{title:'Hour'},
-         margin:{l:60,r:80,t:45,b:50}},{responsive:true});
-    }
-    setStatus('Annual simulation complete. Feasible: '+body.feasible+'. Annual cost: $'+fmt(body.total_cost,0)+'. Gen: '+fmt(body.total_gen_mwh,0)+' MWh.');
-    // Setup animation data
-    setupAnnualAnimation(body);
-  }catch(e){setStatus(e.message,true);}
-};
-
-/* Annual Animation Controls */
-let annAnimData=null;
-let annAnimPlaying=false;
-let annAnimFrame=0;
-let annAnimTimer=null;
-
-function setupAnnualAnimation(body){
-  // Store time-series data for animation
-  annAnimData={
-    hours:body.timeline_hours||[],
-    gen:body.timeline_gen||[],
-    load:body.timeline_load||[],
-    ren:body.timeline_ren||[],
-    curt:body.timeline_curt||[],
-    ess:body.timeline_ess||[],
-    snapshot_hours:body.snapshot_hours||[],
-    snapshot_vm:body.snapshot_vm||[],
-    geo_buses:body.geo_buses||[],
-    geo_ac_branches:body.geo_ac_branches||[],
-  };
-  annAnimFrame=0;
-  annAnimPlaying=false;
-  if(annAnimTimer)clearInterval(annAnimTimer);
-  annAnimTimer=null;
-  
-  const ctrl=document.getElementById('annAnimControls');
-  const slider=document.getElementById('annAnimSlider');
-  const geoMap=document.getElementById('annGeoMap');
-  
-  if(annAnimData.hours.length>0){
-    ctrl.style.display='block';
-    slider.max=annAnimData.hours.length-1;
-    slider.value=0;
-    document.getElementById('annAnimTimeLabel').textContent='Hour '+annAnimData.hours[0];
-    document.getElementById('annAnimPlayPause').innerHTML='&#9658; Play';
-    geoMap.style.display=document.getElementById('annAnimGeo').checked?'block':'none';
-    renderAnnualGeoFrame(0);
-  } else {
-    ctrl.style.display='none';
-    geoMap.style.display='none';
-  }
-}
-
-function renderAnnualGeoFrame(idx){
-  if(!annAnimData||!annAnimData.geo_buses.length)return;
-  
-  const buses=annAnimData.geo_buses;
-  const branches=annAnimData.geo_ac_branches||[];
-  const hasGeo=buses.some(b=>Math.abs(b.lat)>0.001||Math.abs(b.lon)>0.001);
-  
-  // Interpolate voltage from snapshots if available
-  let vmVals=null;
-  if(annAnimData.snapshot_vm.length>0&&annAnimData.snapshot_hours.length>0){
-    const hr=annAnimData.hours[idx];
-    // Find closest snapshot
-    let closest=0;
-    let minDiff=Math.abs(annAnimData.snapshot_hours[0]-hr);
-    for(let i=1;i<annAnimData.snapshot_hours.length;i++){
-      const d=Math.abs(annAnimData.snapshot_hours[i]-hr);
-      if(d<minDiff){minDiff=d;closest=i;}
-    }
-    vmVals=annAnimData.snapshot_vm[closest];
-  }
-  
-  const traces=[];
-  
-  // Branch traces
-  for(const br of branches){
-    traces.push({
-      type:'scattergeo',
-      mode:'lines',
-      lon:[br.from_lon,br.to_lon],
-      lat:[br.from_lat,br.to_lat],
-      line:{width:2,color:'#0b6e4f'},
-      hoverinfo:'text',
-      text:`${br.from_bus}-${br.to_bus}`,
-      showlegend:false
-    });
-  }
-  
-  // Bus markers with dynamic voltage coloring
-  const acBuses=buses.filter(b=>b.type==='AC');
-  if(acBuses.length){
-    const colors=vmVals?acBuses.map(b=>{const v=vmVals[b.id-1];return v!==undefined?v:1.0;}):acBuses.map(b=>1.0);
-    // Compute dynamic color range based on actual voltage spread
-    const vmMin=Math.min(...colors);
-    const vmMax=Math.max(...colors);
-    const vmRange=Math.max(vmMax-vmMin,0.01);  // At least 0.01 spread
-    const cmin=Math.max(0.9, vmMin-vmRange*0.2);
-    const cmax=Math.min(1.1, vmMax+vmRange*0.2);
-    traces.push({
-      type:'scattergeo',
-      mode:'markers',
-      lon:acBuses.map(b=>b.lon),
-      lat:acBuses.map(b=>b.lat),
-      marker:{size:12,color:colors,colorscale:'RdYlGn',cmin:cmin,cmax:cmax,colorbar:{title:'Vm (pu)',x:1.02,thickness:12,len:0.7}},
-      hoverinfo:'text',
-      hovertext:acBuses.map((b,i)=>`AC${b.id} ${b.name||''}<br>Vm=${colors[i].toFixed(4)} pu`),
-      name:'AC Buses',
-      showlegend:true
-    });
-  }
-  
-  const dcBuses=buses.filter(b=>b.type==='DC');
-  if(dcBuses.length){
-    // DC buses also get voltage-based coloring from vdc data
-    const dcColors=annAnimData.snapshot_vdc&&annAnimData.snapshot_vdc[Math.floor(idx*annAnimData.snapshot_vdc.length/Math.max(1,annAnimData.hours.length))]||dcBuses.map(()=>1.0);
-    const dcMin=Math.min(...dcColors);
-    const dcMax=Math.max(...dcColors);
-    const dcRange=Math.max(dcMax-dcMin,0.01);
-    traces.push({
-      type:'scattergeo',
-      mode:'markers',
-      lon:dcBuses.map(b=>b.lon),
-      lat:dcBuses.map(b=>b.lat),
-      marker:{size:12,color:dcColors.slice(0,dcBuses.length),colorscale:'Purples',cmin:Math.max(0.9,dcMin-dcRange*0.2),cmax:Math.min(1.1,dcMax+dcRange*0.2),symbol:'square'},
-      hoverinfo:'text',
-      hovertext:dcBuses.map((b,i)=>`DC${b.id} ${b.name||''}<br>Vdc=${(dcColors[i]||1.0).toFixed(4)} pu`),
-      name:'DC Buses',
-      showlegend:true
-    });
-  }
-  
-  // Summary text annotation
-  const genVal=annAnimData.gen[idx]||0;
-  const loadVal=annAnimData.load[idx]||0;
-  const renVal=annAnimData.ren[idx]||0;
-  
-  const layout={
-    title:`Network State @ Hour ${annAnimData.hours[idx]} | Gen: ${genVal.toFixed(0)} MW | Load: ${loadVal.toFixed(0)} MW | Ren: ${renVal.toFixed(0)} MW`,
-    geo:{
-      scope:hasGeo?undefined:'usa',
-      projection:{type:hasGeo?'mercator':'albers usa'},
-      showland:true,landcolor:'#f5f5dc',
-      showlakes:true,lakecolor:'#a0d2db',
-      showcountries:true,countrycolor:'#888',
-      resolution:hasGeo?50:110,
-      lonaxis:hasGeo?(()=>{const lons=buses.map(b=>b.lon);const minL=Math.min(...lons),maxL=Math.max(...lons);const span=maxL-minL;const pad=Math.max(0.002,span*0.08);return{range:[minL-pad,maxL+pad]};})():undefined,
-      lataxis:hasGeo?(()=>{const lats=buses.map(b=>b.lat);const minL=Math.min(...lats),maxL=Math.max(...lats);const span=maxL-minL;const pad=Math.max(0.002,span*0.08);return{range:[minL-pad,maxL+pad]};})():undefined
-    },
-    margin:{l:0,r:0,t:50,b:0},
-    legend:{x:0,y:1,bgcolor:'rgba(255,255,255,0.7)'}
-  };
-  
-  Plotly.react('annGeoMap',traces,layout);
-  
-  // Update timeline chart marker
-  Plotly.relayout('annTimelineChart',{
-    shapes:[{type:'line',x0:annAnimData.hours[idx],x1:annAnimData.hours[idx],y0:0,y1:1,yref:'paper',
-             line:{color:'red',width:2,dash:'dot'}}]
-  });
-}
-
-function stepAnnualAnimation(){
-  if(!annAnimData||annAnimData.hours.length===0)return;
-  annAnimFrame++;
-  if(annAnimFrame>=annAnimData.hours.length){
-    annAnimFrame=0;
-  }
-  document.getElementById('annAnimSlider').value=annAnimFrame;
-  document.getElementById('annAnimTimeLabel').textContent='Hour '+annAnimData.hours[annAnimFrame];
-  if(document.getElementById('annAnimGeo').checked){
-    renderAnnualGeoFrame(annAnimFrame);
-  }
-}
-
-document.getElementById('annAnimPlayPause').onclick=function(){
-  if(!annAnimData||annAnimData.hours.length===0)return;
-  annAnimPlaying=!annAnimPlaying;
-  this.innerHTML=annAnimPlaying?'&#10074;&#10074; Pause':'&#9658; Play';
-  if(annAnimPlaying){
-    const speed=parseInt(document.getElementById('annAnimSpeed').value)||500;
-    annAnimTimer=setInterval(stepAnnualAnimation,speed);
-  } else {
-    if(annAnimTimer)clearInterval(annAnimTimer);
-    annAnimTimer=null;
-  }
-};
-
-document.getElementById('annAnimReset').onclick=function(){
-  annAnimPlaying=false;
-  if(annAnimTimer)clearInterval(annAnimTimer);
-  annAnimTimer=null;
-  annAnimFrame=0;
-  document.getElementById('annAnimPlayPause').innerHTML='&#9658; Play';
-  if(annAnimData&&annAnimData.hours.length){
-    document.getElementById('annAnimSlider').value=0;
-    document.getElementById('annAnimTimeLabel').textContent='Hour '+annAnimData.hours[0];
-    renderAnnualGeoFrame(0);
-  }
-};
-
-document.getElementById('annAnimSlider').oninput=function(){
-  if(!annAnimData||annAnimData.hours.length===0)return;
-  annAnimFrame=parseInt(this.value);
-  document.getElementById('annAnimTimeLabel').textContent='Hour '+annAnimData.hours[annAnimFrame];
-  if(document.getElementById('annAnimGeo').checked){
-    renderAnnualGeoFrame(annAnimFrame);
-  }
-};
-
-document.getElementById('annAnimSpeed').onchange=function(){
-  if(annAnimPlaying&&annAnimTimer){
-    clearInterval(annAnimTimer);
-    const speed=parseInt(this.value)||500;
-    annAnimTimer=setInterval(stepAnnualAnimation,speed);
-  }
-};
-
-document.getElementById('annAnimGeo').onchange=function(){
-  const geoMap=document.getElementById('annGeoMap');
-  geoMap.style.display=this.checked?'block':'none';
-  if(this.checked&&annAnimData)renderAnnualGeoFrame(annAnimFrame);
-};
-
-/* Lifecycle Simulation */
-document.getElementById('runLifecycleBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{
-    setStatus('Running Lifecycle Simulation (multi-year, may take a while)...');
-    const body=await api('/api/session/run_lifecycle_sim',{
-      num_years:parseInt(document.getElementById('lcNumYears').value)||20,
-      discount_rate:parseFloat(document.getElementById('lcDiscountRate').value)||0.05,
-      load_growth_rate:parseFloat(document.getElementById('lcLoadGrowth').value)||0.02,
-      pv_annual_derating:parseFloat(document.getElementById('lcPVDerating').value)||0.005,
-      calendar_degradation:parseFloat(document.getElementById('lcCalDegrad').value)||0.02,
-      resolution:document.getElementById('lcResolution').value,
-      pv_scale:parseFloat(document.getElementById('lcPVScale').value)||1.0,
-      wind_scale:parseFloat(document.getElementById('lcWindScale').value)||1.0,
-      bess_power_scale:parseFloat(document.getElementById('lcBESSPowerScale').value)||1.0,
-      bess_energy_scale:parseFloat(document.getElementById('lcBESSEnergyScale').value)||1.0,
-      diesel_scale:parseFloat(document.getElementById('lcDieselScale').value)||1.0,
-    });
-    document.getElementById('lcFeas').textContent=body.feasible?'Yes':'No';
-    document.getElementById('lcNPV').textContent='$'+fmt(body.npv_total_cost,0);
-    document.getElementById('lcTotalCarbon').textContent=fmt(body.total_carbon_tco2,0)+' tCO\u2082';
-    document.getElementById('lcReplacements').textContent=body.total_replacements;
-    document.getElementById('lcReplCost').textContent='$'+fmt(body.total_replacement_cost,0);
-    document.getElementById('lcYears').textContent=body.num_years;
-    const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12'];
-    const yrs=(body.years||[]).map(y=>y.year);
-    // Cost trajectory with replacement markers
-    const costs=(body.years||[]).map(y=>y.annual_cost);
-    const replYears=(body.replacements||[]).map(r=>r.year);
-    const replCosts=(body.replacements||[]).map(r=>r.replacement_cost_usd);
-    Plotly.newPlot('lcCostChart',[
-      {x:yrs,y:costs,mode:'lines+markers',name:'Annual Cost',line:{color:pal[0],width:2},marker:{size:5}},
-      {x:replYears,y:replCosts,mode:'markers',name:'Replacement Cost',marker:{color:pal[5],size:12,symbol:'diamond'}},
-    ],{title:'Annual Cost Trajectory with Replacements',xaxis:{title:'Year',dtick:Math.max(1,Math.floor(yrs.length/10))},yaxis:{title:'$ Cost'},
-       margin:{l:70,r:15,t:45,b:50},legend:{orientation:'h',y:-0.15}},{responsive:true});
-    // Carbon trajectory with bounds
-    const carbon=(body.years||[]).map(y=>y.annual_carbon_tco2);
-    const boundUpper=(body.years||[]).map(y=>y.annual_carbon_tco2+y.bounds.total_bound_tco2);
-    const boundLower=(body.years||[]).map(y=>Math.max(0,y.annual_carbon_tco2-y.bounds.total_bound_tco2));
-    Plotly.newPlot('lcCarbonChart',[
-      {x:yrs,y:boundUpper,mode:'lines',line:{color:'rgba(231,76,60,0.2)',width:0},showlegend:false},
-      {x:yrs,y:boundLower,mode:'lines',fill:'tonexty',fillcolor:'rgba(231,76,60,0.12)',line:{color:'rgba(231,76,60,0.2)',width:0},name:'Error Bound'},
-      {x:yrs,y:carbon,mode:'lines+markers',name:'Annual CO\u2082',line:{color:pal[5],width:2},marker:{size:5}},
-    ],{title:'Annual Carbon Emissions with Theoretical Bounds',xaxis:{title:'Year'},yaxis:{title:'tCO\u2082'},
-       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
-    // Carbon intensity trajectory
-    const carbonIntensity=(body.years||[]).map(y=>y.avg_carbon_intensity);
-    const cumCarbon=(body.years||[]).reduce((acc,y)=>{const prev=acc.length>0?acc[acc.length-1]:0;acc.push(prev+y.annual_carbon_tco2);return acc;},[]);
-    Plotly.newPlot('lcCarbonIntensityChart',[
-      {x:yrs,y:carbonIntensity,mode:'lines+markers',name:'Avg Intensity (tCO\u2082/MWh)',line:{color:pal[2],width:2},marker:{size:5},yaxis:'y'},
-      {x:yrs,y:cumCarbon,mode:'lines',name:'Cumulative CO\u2082 (tCO\u2082)',line:{color:pal[5],width:2,dash:'dot'},yaxis:'y2'},
-    ],{title:'Carbon Intensity & Cumulative Emissions',
-       xaxis:{title:'Year',dtick:Math.max(1,Math.floor(yrs.length/10))},
-       yaxis:{title:'tCO\u2082/MWh',rangemode:'tozero',side:'left'},
-       yaxis2:{title:'Cumulative tCO\u2082',overlaying:'y',side:'right',rangemode:'tozero'},
-       margin:{l:60,r:60,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
-    // Energy breakdown
-    const gen=(body.years||[]).map(y=>y.annual_gen_mwh);
-    const ren=(body.years||[]).map(y=>y.annual_renewable_mwh);
-    const load=(body.years||[]).map(y=>y.annual_load_mwh);
-    const curt=(body.years||[]).map(y=>y.annual_curtailment_mwh);
-    Plotly.newPlot('lcEnergyChart',[
-      {x:yrs,y:gen,mode:'lines',name:'Generation',line:{color:pal[0],width:2}},
-      {x:yrs,y:load,mode:'lines',name:'Load',line:{color:pal[1],width:2}},
-      {x:yrs,y:ren,mode:'lines',name:'Renewable',line:{color:pal[6],width:2}},
-      {x:yrs,y:curt,mode:'lines',name:'Curtailment',line:{color:pal[5],width:1,dash:'dot'}},
-    ],{title:'Energy Trajectories (MWh)',xaxis:{title:'Year'},yaxis:{title:'MWh'},
-       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
-    // Battery SOH curves
-    const storNames=[...new Set((body.years||[]).flatMap(y=>(y.storage_states||[]).map(s=>s.name)))];
-    const sohTraces=storNames.map((nm,si)=>{
-      const sohVals=yrs.map(yr=>{const y=(body.years||[]).find(yy=>yy.year===yr);if(!y)return null;const s=(y.storage_states||[]).find(ss=>ss.name===nm);return s?s.soh:null;});
-      return {x:yrs,y:sohVals,mode:'lines+markers',name:nm,line:{color:pal[si%pal.length],width:2},marker:{size:4}};
-    });
-    // Add EOL threshold line
-    sohTraces.push({x:[yrs[0],yrs[yrs.length-1]],y:[0.8,0.8],mode:'lines',name:'EOL Threshold',line:{color:'#c34d4d',width:1,dash:'dash'}});
-    Plotly.newPlot('lcSOHChart',sohTraces,{title:'Battery State of Health',xaxis:{title:'Year'},yaxis:{title:'SOH',range:[0,1.05]},
-       margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
-    // PV derating curves
-    const pvNames=[...new Set((body.years||[]).flatMap(y=>(y.renewable_states||[]).map(r=>r.name)))];
-    const pvTraces=pvNames.map((nm,ri)=>{
-      const capVals=yrs.map(yr=>{const y=(body.years||[]).find(yy=>yy.year===yr);if(!y)return null;const r=(y.renewable_states||[]).find(rr=>rr.name===nm);return r?r.derated_capacity_mw:null;});
-      return {x:yrs,y:capVals,mode:'lines+markers',name:nm,line:{color:pal[(ri+2)%pal.length],width:2},marker:{size:4}};
-    });
-    Plotly.newPlot('lcPVChart',pvTraces,{title:'PV Capacity Derating (MW)',xaxis:{title:'Year'},yaxis:{title:'MW'},
-       margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
-    // Theoretical bounds breakdown
-    const bDispatch=(body.years||[]).map(y=>y.bounds.dispatch_bound_tco2);
-    const bSampling=(body.years||[]).map(y=>y.bounds.sampling_bound_tco2);
-    const bStorage=(body.years||[]).map(y=>y.bounds.storage_carbon_bound_tco2);
-    Plotly.newPlot('lcBoundsChart',[
-      {x:yrs,y:bDispatch,type:'bar',name:'Dispatch Approx.',marker:{color:pal[2]}},
-      {x:yrs,y:bSampling,type:'bar',name:'Sampling Error',marker:{color:pal[3]}},
-      {x:yrs,y:bStorage,type:'bar',name:'Storage Carbon',marker:{color:pal[4]}},
-    ],{title:'Theoretical Error Bounds Breakdown (tCO\u2082)',barmode:'stack',xaxis:{title:'Year'},yaxis:{title:'tCO\u2082'},
-       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
-    // Cross-validation: sampling gap (dense vs sampled)
-    const cvDense=(body.years||[]).map(y=>(y.cross_validation||{}).dense_carbon_tco2||0);
-    const cvSampled=(body.years||[]).map(y=>(y.cross_validation||{}).sampled_carbon_tco2||0);
-    const cvGapPct=(body.years||[]).map(y=>(y.cross_validation||{}).sampling_gap_pct||0);
-    const cvBoundPct=(body.years||[]).map(y=>(y.cross_validation||{}).total_bound_pct||0);
-    const cvDispPct=(body.years||[]).map(y=>(y.cross_validation||{}).dispatch_bound_pct||0);
-    const cvSampPct=(body.years||[]).map(y=>(y.cross_validation||{}).sampling_bound_pct||0);
-    const cvStorPct=(body.years||[]).map(y=>(y.cross_validation||{}).storage_bound_pct||0);
-    Plotly.newPlot('lcBoundsBreakdownChart',[
-      {x:yrs,y:cvDispPct,type:'bar',name:'Dispatch Bound %',marker:{color:pal[2]}},
-      {x:yrs,y:cvSampPct,type:'bar',name:'Sampling Bound %',marker:{color:pal[3]}},
-      {x:yrs,y:cvStorPct,type:'bar',name:'Storage Bound %',marker:{color:pal[4]}},
-    ],{title:'Theoretical Error Bounds as % of Annual Carbon',barmode:'stack',
-       xaxis:{title:'Year'},yaxis:{title:'%',rangemode:'tozero'},
-       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
-    // Dense vs sampled carbon comparison
-    Plotly.newPlot('lcCrossValChart',[
-      {x:yrs,y:cvDense,mode:'lines+markers',name:'Dense (All Hours)',line:{color:pal[1],width:2},marker:{size:5}},
-      {x:yrs,y:cvSampled,mode:'lines+markers',name:'Stratified Sample',line:{color:pal[3],width:2,dash:'dash'},marker:{size:5}},
-    ],{title:'Carbon Cross-Validation: Dense vs Sampled Estimate (tCO\u2082)',
-       xaxis:{title:'Year'},yaxis:{title:'tCO\u2082'},
-       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}
-    },{responsive:true});
-    // Sampling gap % vs total bound %
-    Plotly.newPlot('lcTightnessChart',[
-      {x:yrs,y:cvBoundPct,mode:'lines+markers',name:'Total Bound / Carbon %',line:{color:pal[5],width:2,dash:'dash'},marker:{size:5},fill:'tozeroy',fillcolor:'rgba(231,76,60,0.08)'},
-      {x:yrs,y:cvGapPct,mode:'lines+markers',name:'Sampling Gap / Carbon %',line:{color:pal[0],width:2},marker:{size:5},fill:'tozeroy',fillcolor:'rgba(11,110,79,0.08)'},
-    ],{title:'Validation: Theoretical Bound vs Sampling Gap (% of Carbon)',
-       xaxis:{title:'Year'},yaxis:{title:'%',rangemode:'tozero'},
-       margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}
-    },{responsive:true});
-    setStatus('Lifecycle simulation complete. '+body.num_years+' years. NPV: $'+fmt(body.npv_total_cost,0)+'. Carbon: '+fmt(body.total_carbon_tco2,0)+' tCO\u2082.');
-  }catch(e){setStatus(e.message,true);}
-};
-
-/* Capacity Comparison Sweep */
-document.getElementById('runCapCompareBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{
-    const sweepParam=document.getElementById('lcSweepParam').value;
-    const minS=parseFloat(document.getElementById('lcSweepMin').value)||0.5;
-    const maxS=parseFloat(document.getElementById('lcSweepMax').value)||3.0;
-    const steps=parseInt(document.getElementById('lcSweepSteps').value)||6;
-    document.getElementById('lcCompareStatus').textContent='Running '+steps+' scenarios for '+sweepParam+'...';
-    setStatus('Capacity comparison: sweeping '+sweepParam+' ('+steps+' scenarios)...');
-    const body=await api('/api/session/run_lifecycle_compare',{
-      num_years:parseInt(document.getElementById('lcNumYears').value)||20,
-      discount_rate:parseFloat(document.getElementById('lcDiscountRate').value)||0.05,
-      load_growth_rate:parseFloat(document.getElementById('lcLoadGrowth').value)||0.02,
-      pv_annual_derating:parseFloat(document.getElementById('lcPVDerating').value)||0.005,
-      calendar_degradation:parseFloat(document.getElementById('lcCalDegrad').value)||0.02,
-      resolution:document.getElementById('lcResolution').value,
-      pv_scale:parseFloat(document.getElementById('lcPVScale').value)||1.0,
-      wind_scale:parseFloat(document.getElementById('lcWindScale').value)||1.0,
-      bess_power_scale:parseFloat(document.getElementById('lcBESSPowerScale').value)||1.0,
-      bess_energy_scale:parseFloat(document.getElementById('lcBESSEnergyScale').value)||1.0,
-      diesel_scale:parseFloat(document.getElementById('lcDieselScale').value)||1.0,
-      sweep_param:sweepParam,
-      sweep_min:minS,
-      sweep_max:maxS,
-      sweep_steps:steps,
-    });
-    const scens=body.scenarios||[];
-    const labels=scens.map(s=>s.label);
-    const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12','#1abc9c','#d35400'];
-    const paramLabel={pv:'PV (MW)',wind:'Wind (MW)',bess_power:'BESS Power (MW)',bess_energy:'BESS Energy (MWh)',diesel:'Diesel (MW)'}[sweepParam]||sweepParam;
-    const capVals=scens.map(s=>{
-      if(sweepParam==='pv') return s.total_pv_mw;
-      if(sweepParam==='wind') return s.total_wind_mw;
-      if(sweepParam==='bess_power') return s.total_bess_mw;
-      if(sweepParam==='bess_energy') return s.total_bess_mwh;
-      if(sweepParam==='diesel') return s.total_diesel_mw;
-      return 0;
-    });
-    // NPV vs capacity
-    Plotly.newPlot('lcCompNPVChart',[
-      {x:capVals,y:scens.map(s=>s.npv_total_cost),mode:'lines+markers',name:'NPV Cost',line:{color:pal[0],width:2},marker:{size:8}},
-    ],{title:'NPV Total Cost vs '+paramLabel,xaxis:{title:paramLabel},yaxis:{title:'$ NPV Cost'},
-       margin:{l:70,r:15,t:45,b:50}},{responsive:true});
-    // Total carbon vs capacity
-    Plotly.newPlot('lcCompCarbonChart',[
-      {x:capVals,y:scens.map(s=>s.total_carbon_tco2),mode:'lines+markers',name:'Total CO\u2082',line:{color:pal[5],width:2},marker:{size:8}},
-    ],{title:'Total Carbon vs '+paramLabel,xaxis:{title:paramLabel},yaxis:{title:'tCO\u2082'},
-       margin:{l:60,r:15,t:45,b:50}},{responsive:true});
-    // Pareto: NPV vs Carbon
-    Plotly.newPlot('lcCompParetoChart',[
-      {x:scens.map(s=>s.total_carbon_tco2),y:scens.map(s=>s.npv_total_cost),
-       mode:'markers+text',text:labels,textposition:'top center',textfont:{size:9},
-       marker:{size:12,color:capVals,colorscale:'Viridis',showscale:true,colorbar:{title:paramLabel,len:0.7}},
-       name:'Scenarios'},
-    ],{title:'Pareto Front: NPV Cost vs Total Carbon',xaxis:{title:'Total tCO\u2082'},yaxis:{title:'$ NPV Cost'},
-       margin:{l:70,r:70,t:45,b:50}},{responsive:true});
-    // Carbon trajectory comparison (each scenario as a line)
-    const trajTraces=scens.map((s,si)=>{
-      const yrs=s.yearly_carbon.map((_,i)=>i+1);
-      return {x:yrs,y:s.yearly_carbon,mode:'lines',name:s.label,line:{color:pal[si%pal.length],width:1.5}};
-    });
-    Plotly.newPlot('lcCompCarbonTrajChart',trajTraces,{title:'Annual Carbon Trajectories by Scenario',
-       xaxis:{title:'Year'},yaxis:{title:'tCO\u2082'},
-       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
-    document.getElementById('lcCompareStatus').textContent='\u2705 Comparison complete: '+scens.length+' scenarios for '+paramLabel;
-    setStatus('Capacity comparison complete. '+scens.length+' scenarios.');
-  }catch(e){setStatus(e.message,true);document.getElementById('lcCompareStatus').textContent='Error: '+e.message;}
-};
-
-/* Dashboard */
-document.getElementById('runDashBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  const ds=document.getElementById('dashStatus');
-  ds.textContent='Running Time-Series PF...'; setStatus('Dashboard: running full analysis...');
-  const numSteps=24; const hrs=Array.from({length:numSteps},(_,i)=>i);
-  const results={};
-  try{results.tspf=await api('/api/session/run_ts_pf',{num_steps:numSteps,skip_uc:false,run_opf:false});}
-  catch(e){results.tspf=null;ds.textContent='TS-PF failed: '+e.message;}
-  ds.textContent='Running Carbon Analysis...';
-  try{results.carbon=await api('/api/session/run_carbon',{});}
-  catch(e){results.carbon=null;}
-  // KPI row
-  const kd=[];
-  if(results.tspf){
-    kd.push({v:results.tspf.num_converged+'/'+results.tspf.num_steps,l:'TS-PF Conv.'});
-    kd.push({v:'$'+fmt(results.tspf.total_generation_cost,0),l:'Gen Cost'});
-    const avgLoss=results.tspf.losses_mw?(results.tspf.losses_mw.reduce((a,b)=>a+b,0)/numSteps).toFixed(2):'-';
-    kd.push({v:avgLoss+' MW',l:'Avg Losses'});
-  }
-  if(results.carbon){
-    const ts2=results.carbon.tracing_summary||{};
-    kd.push({v:fmt(ts2.total_generation_emissions_tco2,1)+' tCO\u2082',l:'Gen Emissions'});
-    kd.push({v:fmt(ts2.total_load_emissions_tco2,1)+' tCO\u2082',l:'Load Emissions'});
-    if(results.carbon.bus_carbon&&results.carbon.bus_carbon.length){
-      const avgCI=results.carbon.bus_carbon.reduce((a,b)=>a+b.carbon_intensity_tco2_mwh,0)/results.carbon.bus_carbon.length;
-      kd.push({v:fmt(avgCI,3)+' tCO\u2082/MWh',l:'Avg Carbon Int.'});
-    }
-  }
-  document.getElementById('dashKPIs').innerHTML=kd.map(k=>'<div class="kpi"><div class="v">'+k.v+'</div><div class="l">'+k.l+'</div></div>').join('');
-  const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12'];
-  const M={l:50,r:15,t:40,b:45};
-  if(results.tspf){
-    const dtraces=(results.tspf.gen_dispatch||[]).map((d,gi)=>({x:hrs,y:d,type:'bar',name:results.tspf.gen_names[gi]||'Gen '+gi,marker:{color:pal[gi%pal.length]}}));
-    (results.tspf.renewable_dispatch||[]).forEach((rd,ri)=>dtraces.push({x:hrs,y:rd,type:'bar',name:results.tspf.ren_names[ri]||'Ren '+ri,marker:{color:'#27ae60'}}));
-    Plotly.newPlot('dashGenChart',dtraces,{title:'Generation Dispatch',barmode:'stack',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:M,showlegend:false,height:300},{responsive:true});
-    if(results.tspf.vm_mean){
-      const vt=[];const d2=results.tspf;
-      if(d2.vm_max&&d2.vm_min){vt.push({x:hrs,y:d2.vm_max,mode:'lines',line:{width:0},showlegend:false});vt.push({x:hrs,y:d2.vm_min,mode:'lines',line:{width:0},fill:'tonexty',fillcolor:'rgba(11,110,79,0.12)',name:'Range'});}
-      vt.push({x:hrs,y:d2.vm_mean,mode:'lines',line:{color:'#0b6e4f',width:2},name:'Mean'});
-      const allV2=[...d2.vm_mean,...(d2.vm_min||[]),...(d2.vm_max||[])].filter(v=>v>0);
-      const vL=Math.min(...allV2),vH=Math.max(...allV2),vP2=Math.max((vH-vL)*0.15,0.005);
-      Plotly.newPlot('dashVoltChart',vt,{title:'Bus Voltage (p.u.)',xaxis:{title:'Hour'},yaxis:{title:'p.u.',range:[vL-vP2,vH+vP2]},margin:M,height:300},{responsive:true});
-    }
-    if(results.tspf.losses_mw)
-      Plotly.newPlot('dashLossChart',[{x:hrs,y:results.tspf.losses_mw,type:'bar',marker:{color:'#b5651d'}}],{title:'System Losses per Hour (MW)',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:M,height:300},{responsive:true});
-    if(results.tspf.ess_soc&&results.tspf.ess_soc.length)
-      Plotly.newPlot('dashESSChart',(results.tspf.ess_soc||[]).map((s,si)=>({x:hrs,y:s,mode:'lines',name:results.tspf.ess_names[si]||'ESS '+si})),{title:'ESS State of Charge',xaxis:{title:'Hour'},yaxis:{title:'SOC',range:[0,1]},margin:M,height:300},{responsive:true});
-    else
-      document.getElementById('dashESSChart').innerHTML='<div style="padding:20px;color:var(--muted);">No storage data.</div>';
-    // Load demand profile (from load profile 0 scalings × total load)
-    const loadFromLoads=(SYS.loads||[]).reduce((s,l)=>s+(l.p_mw||0),0);
-    const loadFromBuses=(SYS.ac_buses||[]).reduce((s,b)=>s+(b.pd_mw||0),0);
-    const totalLoad=loadFromLoads>0?loadFromLoads:loadFromBuses;
-    const lpVals=[0.50,0.45,0.42,0.40,0.42,0.50,0.60,0.72,0.80,0.85,0.88,0.90,0.88,0.85,0.82,0.85,0.90,1.00,1.10,1.05,0.95,0.85,0.72,0.60];
-    Plotly.newPlot('dashLoadChart',[{x:hrs,y:lpVals.map(s=>s*totalLoad),mode:'lines',fill:'tozeroy',fillcolor:'rgba(44,140,153,0.1)',line:{color:'#2c8c99',width:2},name:'Load'}],{title:'Total Load Demand (MW)',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:M,height:300},{responsive:true});
-  }
-  if(results.carbon&&results.carbon.bus_carbon&&results.carbon.bus_carbon.length){
-    const carbonBusRows=results.carbon.bus_carbon.filter(b=>b.carbon_potential_valid!==false&&Number(b.sink_power_mw||0)>1e-9&&Number.isFinite(Number(b.carbon_intensity_tco2_mwh)));
-    if(!carbonBusRows.length){document.getElementById('dashCarbonChart').innerHTML='<div style="padding:20px;color:var(--muted);">No valid carbon sink bus data.</div>';}
-    else{
-    const ci=carbonBusRows.map(b=>b.carbon_intensity_tco2_mwh);
-    const mx=Math.max(...ci)||1;
-    Plotly.newPlot('dashCarbonChart',[{x:carbonBusRows.map(b=>'B'+b.bus_index),y:ci,type:'bar',
-      marker:{color:ci,colorscale:'RdYlGn',reversescale:true,cmin:0,cmax:mx,showscale:true,colorbar:{len:0.8}}}],
-      {title:'Carbon Intensity by Bus (tCO\u2082/MWh)',xaxis:{title:''},yaxis:{title:'tCO\u2082/MWh'},margin:{l:50,r:70,t:40,b:50},height:300},{responsive:true});
-    }
-  } else {
-    document.getElementById('dashCarbonChart').innerHTML='<div style="padding:20px;color:var(--muted);">Carbon data unavailable.</div>';
-  }
-  ds.textContent='\u2705 Full analysis complete! TS-PF: '+(results.tspf?results.tspf.num_converged+'/'+results.tspf.num_steps+' conv.':'failed')+'. Carbon: '+(results.carbon?(fmt(results.carbon.tracing_summary.total_generation_emissions_tco2,1)+' tCO\u2082'):'failed')+'.'
-  setStatus('Dashboard analysis complete.');
-};
-</script>
-</body>
-</html>)html";
-}
-#endif
 
 }  // namespace
 
@@ -12713,6 +9098,62 @@ int main(int argc, char** argv) {
     }
   });
 
+  // ---- Session: import a browser-uploaded PSD-BPA / DSP .dat card file ----
+  // The request body is intentionally raw binary: legacy files can be GBK and
+  // decoding them as browser text would corrupt both names and fixed columns.
+  svr.Post("/api/session/load_bpa_dat",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      if (req.body.empty()) throw std::runtime_error("Empty BPA/DSP DAT upload");
+      auto imported = hacdcpf::io::parse_bpa_dat_string(req.body);
+      if (imported.report.has_errors()) {
+        std::string message = "BPA/DSP DAT import failed";
+        for (const auto& record : imported.report.records) {
+          if (record.severity == hacdcpf::io::ImportSeverity::Error) {
+            message += ": " + record.message;
+            break;
+          }
+        }
+        throw std::runtime_error(message);
+      }
+
+      json warnings = json::array();
+      json records = json::array();
+      for (const auto& record : imported.report.records) {
+        records.push_back({{"source_locator", record.source_locator},
+                           {"disposition", hacdcpf::io::to_string(record.disposition)},
+                           {"reason_code", hacdcpf::io::to_string(record.reason_code)},
+                           {"severity", hacdcpf::io::to_string(record.severity)},
+                           {"message", record.message}});
+        if (record.severity == hacdcpf::io::ImportSeverity::Warning) {
+          warnings.push_back(record.message);
+        }
+      }
+
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      g_session.current_system = std::move(imported.system);
+      g_session.current_name = g_session.current_system->name;
+      clear_preserved_three_phase(g_session);
+      g_session.external_grid_carbon_profiles.clear();
+      clear_cached_analysis(g_session);
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_io_warnings"] = std::move(warnings);
+      summary["_bpa_import_report"] = {
+          {"binding_level", hacdcpf::io::to_string(imported.report.binding_level)},
+          {"unit_assertion", hacdcpf::io::to_string(imported.report.unit_assertion)},
+          {"accepted", imported.report.summary.accepted},
+          {"coerced", imported.report.summary.coerced},
+          {"rejected", imported.report.summary.rejected},
+          {"skipped", imported.report.summary.skipped},
+          {"records", std::move(records)}};
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
   svr.Post("/api/session/load_json_string",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
@@ -12879,6 +9320,66 @@ int main(int argc, char** argv) {
 
       res.set_content(json{{"matpower_string", matpower},
                            {"name", safe},
+                           {"warnings", warnings}}
+                          .dump(),
+                      "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: export the BPA-representable steady-state subset ----
+  svr.Post("/api/session/export_bpa_dat",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system) throw std::runtime_error("No system loaded");
+      const auto& sys = *g_session.current_system;
+      hacdcpf::HybridPowerSystem export_sys = sys;
+      json warnings = json::array();
+      const bool has_rich_series = !sys.ac.transformers_2w.empty() ||
+          !sys.ac.transformers_3w.empty() || !sys.ac.switches.empty() ||
+          !sys.ac.circuit_breakers.empty();
+      if (has_rich_series) {
+        try {
+          export_sys = hacdcpf::project_to_canonical_models(sys, /*strip_dead=*/false);
+          warnings.push_back(
+              "AC变压器、开关和断路器已按canonical等值支路导出；原始设备铭牌与控制字段不属于BPA基础卡片范围。");
+        } catch (const std::exception& e) {
+          warnings.push_back(std::string(
+              "canonical等值转换失败，已退回原始支路子集；部分rich串联设备可能被省略：") + e.what());
+        }
+      }
+      warnings.push_back(
+          "BPA母线名限8字节；导出文件使用稳定ASCII标识A0000001...，原始UTF-8名称不写入固定列。");
+      if (!sys.ac.static_generators.empty() || !sys.ac.renewable_gens.empty() ||
+          !sys.ac.pv_systems.empty() || !sys.ac.external_grids.empty() ||
+          !sys.ac.storage.empty()) {
+        warnings.push_back(
+            "部分rich AC电源/储能类型不能由BPA基础B卡完整表达；仅canonical发电机聚合值可导出。");
+      }
+      if (!sys.dc.loads.empty() || !sys.dc.static_generators.empty() ||
+          !sys.dc.dc_static_generators.empty() || !sys.dc.pv_arrays.empty() ||
+          !sys.dc.storage.empty() || !sys.dc.dc_storage.empty() ||
+          !sys.dc.dcdc_converters.empty() || !sys.energy_routers.empty()) {
+        warnings.push_back(
+            "DAT导出仅表示两端直流线路及其AC/DC换流端；其他DC资产、DC/DC和能量路由器被省略。");
+      }
+      if (!sys.dc.branches.empty() && !sys.vsc_converters.empty()) {
+        warnings.push_back(
+            "两端直流链路按BPA BD/LD卡片导出；VSC控制、损耗和限值会退化为LCC式定功率/定直流电压近似。");
+      }
+      const std::string dat = hacdcpf::io::to_bpa_dat(export_sys);
+      std::string safe;
+      for (char ch : g_session.current_name) {
+        safe += (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')
+                    ? ch : '_';
+      }
+      if (safe.empty()) safe = "system";
+      res.set_content(json{{"dat_string", dat},
+                           {"name", safe},
+                           {"format", "PSD-BPA/DSP fixed-column DAT"},
                            {"warnings", warnings}}
                           .dump(),
                       "application/json");
@@ -18049,6 +14550,7 @@ int main(int argc, char** argv) {
       g_session.cancel.store(false);
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       const std::string solver = j.value("solver", std::string("parity"));
+      const bool robust_strategy = solver == "robust";
       const std::string network_model =
           j.value("network_model", std::string("balanced_aggregate"));
       if (network_model != "balanced_aggregate" &&
@@ -18084,8 +14586,10 @@ int main(int argc, char** argv) {
 	        conv.p_is_hard_constraint = false;
 	      }
 
-	      json out;
+      json out;
       out["solver"] = solver;
+      out["strategy_requested"] = solver;
+      out["strategy_effective"] = robust_strategy ? "robust_auto" : solver;
       out["network_model"] = network_model;
       out["analysis_scope"] =
           json{{"optimization_model",
@@ -18119,9 +14623,10 @@ int main(int argc, char** argv) {
 	                                "variant", std::string("graph_reduced")) == "full"
 	                                ? hacdcpf::opf::phase_hybrid::ModelVariant::Full
 	                                : hacdcpf::opf::phase_hybrid::ModelVariant::GraphReduced;
-	        phase_opt.backend = solver == "ipopt"
-	                                ? hacdcpf::opf::phase_hybrid::SolverBackend::Ipopt
-	                                : hacdcpf::opf::phase_hybrid::SolverBackend::NativeIPM;
+        phase_opt.backend = solver == "ipopt"
+                                ? hacdcpf::opf::phase_hybrid::SolverBackend::Ipopt
+                                : hacdcpf::opf::phase_hybrid::SolverBackend::NativeIPM;
+        phase_opt.warm_start_with_ipopt = robust_strategy;
 	        phase_opt.max_iterations = std::clamp(
 	            opf_request_options.value("max_iterations", 400), 1, 100000);
 	        phase_opt.tolerance = std::clamp(
@@ -18142,7 +14647,7 @@ int main(int argc, char** argv) {
 	            hacdcpf::opf::phase_hybrid::solve_three_phase_hybrid_opf(
 	                phase_model.opf, phase_opt);
 	        bool phase_auto_fallback = false;
-	        if (solver == "auto" && !phase_result.converged) {
+        if ((solver == "auto" || robust_strategy) && !phase_result.converged) {
 	          phase_opt.backend = hacdcpf::opf::phase_hybrid::SolverBackend::Ipopt;
 	          phase_result =
 	              hacdcpf::opf::phase_hybrid::solve_three_phase_hybrid_opf(
@@ -18158,7 +14663,10 @@ int main(int argc, char** argv) {
 	        out["solver_backend"] =
 	            phase_opt.backend == hacdcpf::opf::phase_hybrid::SolverBackend::Ipopt
 	                ? "phase_hybrid_ipopt" : "phase_hybrid_native_ipm";
-	        out["fallback_used"] = phase_auto_fallback;
+        out["fallback_used"] = phase_auto_fallback;
+        if (robust_strategy) {
+          out["strategy_effective"] = "robust_phase_warm_start_and_fallback";
+        }
 	        out["max_constraint_violation_pu"] = phase_result.primal_residual;
 	        out["max_stationarity"] = phase_result.dual_residual;
 	        out["vdc"] = phase_result.dc_voltage;
@@ -18298,8 +14806,9 @@ int main(int argc, char** argv) {
 	            json{{"max_iterations", phase_opt.max_iterations},
 	                 {"tolerance", phase_opt.tolerance},
 	                 {"variant", out["analysis_scope"]["phase_graph_variant"]},
-	                 {"backend", out["solver_backend"]},
-	                 {"vuf_max", vuf_max},
+                 {"backend", out["solver_backend"]},
+                 {"warm_start_with_ipopt", phase_opt.warm_start_with_ipopt},
+                 {"vuf_max", vuf_max},
 	                 {"constraint_oracle", phase_opt.use_constraint_oracle},
 	                 {"include_shunts", include_shunts}};
 
@@ -18397,7 +14906,7 @@ int main(int argc, char** argv) {
 	              json{{"ran", false},
 	                   {"reason", "three_phase_validation_requires_ac_or_hybrid_ac_dc_opf"}};
 	        }
-	      } else {
+      } else {
         hacdcpf::opf::ACOPFOptions opt;
         // Map the GUI solver selector onto the modern backend enum.  The parity
         // full-space formulation is shared by the native IPM and Ipopt; only the
@@ -18405,10 +14914,22 @@ int main(int argc, char** argv) {
         // + single AC PF path (pure-AC).  Unknown / legacy values default to the
         // native parity IPM.
         using SB = hacdcpf::opf::ACOPFSolverBackend;
+        const bool has_hybrid_case =
+            !sys.dc.buses.empty() || !sys.dc.branches.empty() ||
+            !sys.vsc_converters.empty() || !sys.dc.dcdc_converters.empty();
         if (solver == "ipopt") {
           opt.ac_solver_backend = SB::Ipopt;
         } else if (solver == "dispatch") {
           opt.ac_solver_backend = SB::EconomicDispatch;
+        } else if (solver == "robust") {
+          // Robust mode starts with an AC-feasible point, follows the objective
+          // from feasibility to cost, and keeps the native-to-Ipopt fallback.
+          opt.ac_solver_backend = SB::Auto;
+          opt.enable_primal_dual = true;
+          opt.use_parity_ipm = true;
+          opt.allow_fallback = true;
+          opt.ac_pf_warm_start = true;
+          opt.objective_homotopy = true;
         } else if (solver == "auto") {
           // Auto = parity-first with an Ipopt fallback.  Force a real OPF so a
           // pure-AC system does not silently degrade to economic dispatch.
@@ -18416,6 +14937,11 @@ int main(int argc, char** argv) {
           opt.enable_primal_dual = true;
           opt.use_parity_ipm = true;
           opt.allow_fallback = true;
+          // A coupled PF start is essential for the two built-in hybrid
+          // showcase cases whose DC/VSC balance is far from the flat OPF
+          // point.  This is a standalone recovery start; objective homotopy
+          // remains a Native-IPM-only feature of the robust strategy.
+          opt.ac_pf_warm_start = has_hybrid_case;
         } else {  // "parity" (default)
           opt.ac_solver_backend = SB::ParityIPM;
         }
@@ -18433,9 +14959,19 @@ int main(int argc, char** argv) {
 	        set_if_double(opf_request_options, "regularization", opt.regularization);
 	        set_if_double(opf_request_options, "step_backoff", opt.step_backoff);
 	        set_if_double(opf_request_options, "interior_fraction", opt.interior_fraction);
-	        set_if_int(opf_request_options, "ac_eval_threads", opt.ac_eval_threads);
-	        set_if_bool(opf_request_options, "allow_fallback", opt.allow_fallback);
-	        set_if_bool(opf_request_options, "verbose", opt.verbose);
+        set_if_int(opf_request_options, "ac_eval_threads", opt.ac_eval_threads);
+        set_if_bool(opf_request_options, "allow_fallback", opt.allow_fallback);
+        set_if_bool(opf_request_options, "ac_pf_warm_start", opt.ac_pf_warm_start);
+        set_if_bool(opf_request_options, "objective_homotopy", opt.objective_homotopy);
+        set_if_double(opf_request_options, "homotopy_dt0", opt.homotopy_dt0);
+        set_if_bool(opf_request_options, "verbose", opt.verbose);
+        if (robust_strategy) {
+          // The strategy is an explicit user choice; request-level toggles
+          // cannot accidentally turn off its convergence safeguards.
+          opt.allow_fallback = true;
+          opt.ac_pf_warm_start = true;
+          opt.objective_homotopy = true;
+        }
 	        opt.max_inner_iterations = std::clamp(opt.max_inner_iterations, 1, 100000);
 	        opt.max_outer_iterations = std::clamp(opt.max_outer_iterations, 1, 10000);
 	        opt.max_line_search_steps = std::clamp(opt.max_line_search_steps, 1, 10000);
@@ -18446,13 +14982,20 @@ int main(int argc, char** argv) {
 	        opt.barrier_mu_min = std::clamp(opt.barrier_mu_min, 1.0e-16, opt.barrier_mu0);
 	        opt.merit_penalty = std::clamp(opt.merit_penalty, 1.0e-12, 1.0e12);
 	        opt.regularization = std::clamp(opt.regularization, 0.0, 1.0e6);
-	        opt.step_backoff = std::clamp(opt.step_backoff, 1.0e-6, 0.999999);
-	        opt.interior_fraction = std::clamp(opt.interior_fraction, 1.0e-6, 0.999999);
-	        opt.ac_eval_threads = std::clamp(opt.ac_eval_threads, 1, 1024);
+        opt.step_backoff = std::clamp(opt.step_backoff, 1.0e-6, 0.999999);
+        opt.interior_fraction = std::clamp(opt.interior_fraction, 1.0e-6, 0.999999);
+        opt.homotopy_dt0 = std::clamp(opt.homotopy_dt0, 1.0e-3, 1.0);
+        opt.ac_eval_threads = std::clamp(opt.ac_eval_threads, 1, 1024);
         opt.enforce_branch_limits = en_branch;
         opt.enforce_converter_capacity = en_cap;
         opt.enforce_converter_current_limits = en_iac;
         opt.enforce_converter_modulation_limits = en_mod;
+        if (opt.ac_solver_backend == SB::Ipopt) {
+          // Objective continuation is a Native-IPM feature.  Keep explicit
+          // Ipopt requests as standalone solves even when a stale GUI request
+          // still contains objective_homotopy=true.
+          opt.objective_homotopy = false;
+        }
 	        out["options_effective"] =
 	            json{{"max_inner_iterations", opt.max_inner_iterations},
 	                 {"max_outer_iterations", opt.max_outer_iterations},
@@ -18466,9 +15009,12 @@ int main(int argc, char** argv) {
 	                 {"regularization", opt.regularization},
 	                 {"step_backoff", opt.step_backoff},
 	                 {"interior_fraction", opt.interior_fraction},
-	                 {"ac_eval_threads", opt.ac_eval_threads},
-	                 {"allow_fallback", opt.allow_fallback},
-	                 {"verbose", opt.verbose}};
+		                 {"ac_eval_threads", opt.ac_eval_threads},
+		                 {"allow_fallback", opt.allow_fallback},
+		                 {"ac_pf_warm_start", opt.ac_pf_warm_start},
+		                 {"objective_homotopy", opt.objective_homotopy},
+		                 {"homotopy_dt0", opt.homotopy_dt0},
+		                 {"verbose", opt.verbose}};
         auto r = hacdcpf::solve_ac_opf(sys, opt);
         out["converged"]=r.converged; out["iterations"]=r.iterations;
         out["objective"]=r.objective; out["status"]=r.status;
@@ -18477,6 +15023,8 @@ int main(int argc, char** argv) {
         // Report the engine that actually ran (e.g. parity_ipm:sparse_umfpack
         // or ipopt_filter_linesearch) so the GUI can show the realized backend.
         out["solver_backend"]=r.profiling.linear_solver_backend;
+        out["fallback_used"] = r.profiling.linear_solver_backend.find("auto-fallback") != std::string::npos;
+        if (robust_strategy) out["strategy_effective"] = "robust_auto";
         out["ipm_profiling"] = opf_ipm_profiling_json(r);
         out["solver_path"]=(r.solver_path==hacdcpf::opf::OPFSolverPath::ParityIPM)?"parity":
                            (r.solver_path==hacdcpf::opf::OPFSolverPath::NativeAC)?"native_ac":"other";
@@ -19108,6 +15656,7 @@ int main(int argc, char** argv) {
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         if (j.contains("solver") && j["solver"].is_string()) solver = j["solver"].get<std::string>();
       } catch (...) {}
+      const bool robust_strategy = solver == "robust";
       if (solver == "parity") {
         opt.ac_solver_backend = hacdcpf::opf::ACOPFSolverBackend::ParityIPM;
       } else if (solver == "ipopt") {
@@ -19117,12 +15666,19 @@ int main(int argc, char** argv) {
       } else {
         opt.ac_solver_backend = hacdcpf::opf::ACOPFSolverBackend::Auto;
         opt.enable_primal_dual = true; opt.use_parity_ipm = true;
+        if (robust_strategy) {
+          opt.ac_pf_warm_start = true;
+          opt.objective_homotopy = true;
+        }
       }
       auto r = hacdcpf::solve_ac_opf(sys, opt);
       json out;
+      out["strategy_requested"] = solver;
+      out["strategy_effective"] = robust_strategy ? "robust_auto" : solver;
       out["converged"]=r.converged; out["iterations"]=r.iterations;
       out["objective"]=r.objective; out["status"]=r.status;
       out["solver_backend"]=r.profiling.linear_solver_backend;
+      out["fallback_used"] = r.profiling.linear_solver_backend.find("auto-fallback") != std::string::npos;
       out["ipm_profiling"] = opf_ipm_profiling_json(r);
       out["vm"]=r.vm; out["va"]=r.va; out["pg_mw"]=r.pg_mw; out["qg_mvar"]=r.qg_mvar;
       out["vdc"]=r.vdc; out["pac_mw"]=r.pac_mw; out["qac_mvar"]=r.qac_mvar;
@@ -21896,14 +18452,26 @@ int main(int argc, char** argv) {
         // separate from the RPO's inner solves so agreement is auditable.
         hacdcpf::HybridPowerSystem optimized_sys = sys;
         hacdcpf::opf::apply_rpo_discrete_solution(optimized_sys, result);
+        const bool independent_uses_unit_cost =
+            result.effective_inner_nlp_objective ==
+            hacdcpf::opf::RPOInnerObjective::LossEconomic;
+        if (independent_uses_unit_cost) {
+          for (auto& generator : optimized_sys.ac.generators) {
+            generator.cost_c0 = 0.0;
+            generator.cost_c1 = 1.0;
+            generator.cost_c2 = 0.0;
+          }
+        }
 
         hacdcpf::opf::ACOPFOptions independent_opt;
         independent_opt.ac_solver_backend =
-            hacdcpf::opf::ACOPFSolverBackend::Ipopt;
+            hacdcpf::opf::ACOPFSolverBackend::Auto;
         independent_opt.enable_primal_dual = true;
         independent_opt.use_parity_ipm = true;
         independent_opt.allow_fallback = true;
-        if (rpo_opt.objective == hacdcpf::opf::RPOObjective::MinActiveLoss) {
+        if (independent_uses_unit_cost) {
+          independent_opt.objective = hacdcpf::opf::ACOPFObjective::Economic;
+        } else if (rpo_opt.objective == hacdcpf::opf::RPOObjective::MinActiveLoss) {
           independent_opt.objective = hacdcpf::opf::ACOPFObjective::ActiveLoss;
         } else if (rpo_opt.objective == hacdcpf::opf::RPOObjective::Combined) {
           independent_opt.objective =
@@ -22081,8 +18649,7 @@ int main(int argc, char** argv) {
             "离散坐标搜索(两绕组OLTC/可投切并联补偿)+以所选电压/网损"
             "目标直接求解的连续AC/DC OPF；"
             "返回可行局部最优点，不提供全局MINLP最优性证明。";
-        // TODO: rpo_control_inventory_json is not implemented yet.
-        out["control_inventory"] = "not implemented";
+        out["control_inventory"] = rpo_control_inventory_json(sys, rpo_opt);
 
         out["cross_validation"] = json{
             {"rpo_converged", result.converged},

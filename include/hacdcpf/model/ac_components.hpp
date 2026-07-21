@@ -667,6 +667,7 @@ struct MobileStorage {
   double e_mwh{0.0};
 
   bool controllable{true};
+  bool grid_forming{false};
   std::string type;
 
   bool is_mobile{true};

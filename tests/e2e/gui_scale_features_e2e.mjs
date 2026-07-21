@@ -180,6 +180,45 @@ async function main() {
           coreModules.annualWindow.first === 0 && coreModules.annualWindow.last === 8759 &&
           coreModules.annualWindow.hasPeak && coreModules.annualWindow.hasTrough,
       `annual window preserves endpoints and extrema in ${coreModules.annualWindow.rendered} rendered points`);
+    const cancellationScheduler = await page.evaluate(async () => {
+      let cancelRequests = 0;
+      let idleChecks = 0;
+      const manager = new HySimCore.AnalysisTaskManager({
+        cancelBackend: async () => { cancelRequests += 1; },
+        waitForIdle: async () => {
+          idleChecks += 1;
+          return idleChecks >= 2;
+        },
+        settlementRetryMs: 10,
+      });
+      const first = manager.start({
+        path: '/api/session/pf', requestId: 'cancel-first',
+        modelRevision: 1, analysis: 'power_flow',
+      });
+      const firstCancelAccepted = manager.cancel();
+      const duplicateCancelRejected = manager.cancel() === false;
+      manager.finish(first);
+      const deadline = Date.now() + 2000;
+      while (manager.settling && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      const second = manager.start({
+        path: '/api/session/opf', requestId: 'cancel-second',
+        modelRevision: 1, analysis: 'optimal_power_flow',
+      });
+      return {
+        cancelRequests, idleChecks, settling: manager.settling,
+        firstCancelAccepted, duplicateCancelRejected,
+        secondAccepted: second.duplicate === false,
+      };
+    });
+    check(cancellationScheduler.firstCancelAccepted &&
+          cancellationScheduler.duplicateCancelRejected &&
+          cancellationScheduler.cancelRequests === 1 &&
+          cancellationScheduler.idleChecks >= 2 &&
+          cancellationScheduler.settling === false &&
+          cancellationScheduler.secondAccepted,
+      'cancelled task polls through backend settlement and releases the next task');
     const resilienceLabel = await page.locator('#moduleResilience').textContent();
     check(resilienceLabel?.trim() === '弹性分析',
       'resilience module uses the 弹性分析 label');
@@ -262,6 +301,29 @@ async function main() {
           runtimeGuard.networkFailure?.last_error?.type === 'network' &&
           runtimeGuard.networkFailure?.last_error?.source === '/phase6-network-test',
       'ApiClient network failures flow into the runtime diagnostics contract');
+
+    // ---- Model IO: binary-safe BPA/DSP DAT upload and DAT download. ----
+    await page.evaluate(() => App.setActiveModule('modelIO'));
+    const bpaImportResponse = page.waitForResponse(response =>
+      response.url().includes('/api/session/load_bpa_dat') && response.status() === 200);
+    await page.locator('#fileImportBpaDat').setInputFiles(path.join(REPO_ROOT, 'data', 'dsp', '39.dat'));
+    await bpaImportResponse;
+    await page.waitForFunction(() => Canvas.getSystemSummary().buses === 39);
+    const bpaImport = await page.evaluate(() => ({
+      buses: Canvas.getSystemSummary().buses,
+      importButton: !!document.getElementById('btnIoImportBpaDat'),
+      exportButton: !!document.getElementById('btnIoExportBpaDat'),
+    }));
+    check(bpaImport.buses === 39 && bpaImport.importButton && bpaImport.exportButton,
+      'model IO imports a BPA/DSP DAT file through the binary-safe frontend path');
+    const bpaDownloadPromise = page.waitForEvent('download');
+    await page.locator('#btnIoExportBpaDat').click();
+    const bpaDownload = await bpaDownloadPromise;
+    const bpaDownloadPath = await bpaDownload.path();
+    const bpaExportText = bpaDownloadPath ? readFileSync(bpaDownloadPath, 'utf8') : '';
+    check(bpaDownload.suggestedFilename().endsWith('.dat') &&
+          bpaExportText.includes('A0000001') && bpaExportText.includes('(END)'),
+      'model IO downloads a fixed-column BPA/DSP DAT export');
 
     // ---- 1) Large case -> WebGL overview, PF + OPF run against the backend ----
     const big = await page.evaluate(async (caseName) => {
@@ -462,9 +524,7 @@ async function main() {
 
     // ---- 5) Medium case uses viewport culling and RAF-batched pointer work ----
     const medium = await page.evaluate(async (caseName) => {
-      const sel = document.getElementById('ioCaseSelect');
-      sel.value = caseName; sel.dispatchEvent(new Event('change', { bubbles: true }));
-      document.getElementById('btnIoLoadBuiltin').click();
+      await App.loadBuiltinCase(caseName);
       const t0 = Date.now();
       while (Date.now() - t0 < 20000 && Canvas.state.components.length <= 350) {
         await new Promise((resolve) => setTimeout(resolve, 150));
@@ -483,26 +543,27 @@ async function main() {
       }
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       const after = Canvas.getPerformanceStats();
+      const summary = Canvas.getSystemSummary();
       return {
         headless: Canvas.isHeadless(),
+        summary,
+        status: document.getElementById('statusBadge')?.textContent || '',
         ...after,
         pointerEventDelta: after.pointer_events - before.pointer_events,
         pointerFrameDelta: after.pointer_frames - before.pointer_frames,
       };
     }, MEDIUM_CASE);
     check(medium.headless === false && medium.components > medium.cull_threshold,
-      `medium case (${MEDIUM_CASE}) renders ${medium.components} Canvas glyphs`);
+      `medium case (${MEDIUM_CASE}) state=${JSON.stringify(medium)}`);
     check(medium.schema === 'hysim_canvas_performance_v1' && medium.culling_active &&
           medium.hidden_components > 0 && medium.hidden_connections > 0,
-      `viewport culls ${medium.hidden_components} glyphs and ${medium.hidden_connections} connections`);
+      `viewport culling state=${JSON.stringify(medium)}`);
     check(medium.pointerEventDelta === 50 && medium.pointerFrameDelta <= 3,
       `50 pointer events coalesce into ${medium.pointerFrameDelta} render frame(s)`);
 
     // ---- 6) Small case returns to canvas mode + minimap visible ----
     const small = await page.evaluate(async (caseName) => {
-      const sel = document.getElementById('ioCaseSelect');
-      sel.value = caseName; sel.dispatchEvent(new Event('change', { bubbles: true }));
-      document.getElementById('btnIoLoadBuiltin').click();
+      await App.loadBuiltinCase(caseName);
       const t0 = Date.now();
       while (Date.now() - t0 < 15000 &&
              (Canvas.isHeadless() || Canvas.state.components.length <= 20 ||
@@ -533,6 +594,8 @@ async function main() {
       } catch { /* request was intentionally aborted */ }
     };
     await page.route('**/api/session/pf', delayedPfRoute);
+    const backendCancelRequest = page.waitForRequest(request =>
+      request.url().includes('/api/session/cancel') && request.method() === 'POST');
     const cancelledTask = await page.evaluate(async () => {
       App.setActiveModule('powerFlow');
       const pending = App.runPowerFlow();
@@ -556,6 +619,7 @@ async function main() {
         cancelHiddenAfter: cancelButton?.hidden === true,
       };
     });
+    const cancelRequest = await backendCancelRequest;
     await new Promise((resolve) => setTimeout(resolve, 850));
     await page.unroute('**/api/session/pf', delayedPfRoute);
     check(cancelledTask.during?.state === 'running' && cancelledTask.during?.cancellable === true &&
@@ -564,6 +628,8 @@ async function main() {
     check(cancelledTask.resultWasDiscarded && cancelledTask.after?.state === 'cancelled' &&
           cancelledTask.after?.cancellable === false && cancelledTask.cancelHiddenAfter,
       'cancelled analysis discards its response and enters the cancelled state');
+    check(cancelRequest.method() === 'POST',
+      'frontend cancellation notifies the backend cancellation endpoint');
 
     const stalePfRoute = async (route) => {
       await new Promise((resolve) => setTimeout(resolve, 500));
@@ -644,10 +710,7 @@ async function main() {
     // ---- 9) Frontend↔backend wiring: edited TSPF horizon must win over an
     //         imported scenario's length (regression for the 8760->N bug) ----
     const scenarioStr = await page.evaluate(() => {
-      const sel = document.getElementById('ioCaseSelect');
-      sel.value = 'ieee14_acdc'; sel.dispatchEvent(new Event('change', { bubbles: true }));
-      document.getElementById('btnIoLoadBuiltin').click();
-      return new Promise((resolve) => {
+      return App.loadBuiltinCase('ieee14_acdc').then(() => new Promise((resolve) => {
         const t0 = Date.now();
         const wait = () => {
           if (Canvas.state.components.length > 0 || Date.now() - t0 > 15000) {
@@ -669,7 +732,7 @@ async function main() {
           } else { setTimeout(wait, 150); }
         };
         wait();
-      });
+      }));
     });
     const scenarioPath = path.join(tmpdir(), `hacdcpf_e2e_scenario_${process.pid}.json`);
     writeFileSync(scenarioPath, scenarioStr);
@@ -860,10 +923,7 @@ async function main() {
 
     // ---- 11) Rich-component Dashboard mapping + OPF core panels ----
     const richGui = await page.evaluate(async () => {
-      const sel = document.getElementById('ioCaseSelect');
-      sel.value = 'multiscale_comprehensive_acdc';
-      sel.dispatchEvent(new Event('change', { bubbles: true }));
-      document.getElementById('btnIoLoadBuiltin').click();
+      await App.loadBuiltinCase('multiscale_comprehensive_acdc');
       const loadStarted = Date.now();
       while (Date.now() - loadStarted < 15000 &&
              !Canvas.state.components.some(c => c.type === 'mobile_storage')) {
@@ -964,8 +1024,8 @@ async function main() {
         dcRows: document.querySelectorAll('#topoResults table tbody tr').length,
       };
     });
-    check(hybridReconfig.active === 'topology' && /可行\s*✓ 是/.test(hybridReconfig.summary),
-      'multiscale hybrid topology reconfiguration is feasible');
+    check(hybridReconfig.active === 'topology' && /MILP候选\s*✓ 可行/.test(hybridReconfig.summary),
+      `multiscale hybrid topology reconfiguration summary=${JSON.stringify(hybridReconfig)}`);
     check(/负荷削减\(MW\)\s*0\.0000/.test(hybridReconfig.summary),
       'hybrid topology reconfiguration serves all load');
     check(/AC\/DC分域辐射状/.test(hybridReconfig.details) && /连通/.test(hybridReconfig.details),
@@ -973,7 +1033,7 @@ async function main() {
     check(/DC支路状态/.test(hybridReconfig.details) && /VSC耦合状态/.test(hybridReconfig.details),
       'Dashboard exports DC branch and VSC topology results');
     check(/验证潮流:\s*收敛/.test(hybridReconfig.details),
-      'reconfigured hybrid topology passes power-flow validation');
+      `reconfigured hybrid topology validation=${JSON.stringify(hybridReconfig)}`);
 
     // ---- 11) Reduced-network export: hybrid terminal integrity + reload ----
     const reducedRoundTrip = await page.evaluate(async () => {

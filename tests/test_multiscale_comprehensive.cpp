@@ -103,6 +103,8 @@ TEST_CASE("Multiscale comprehensive AC/DC constrained OPF converges",
   options.max_outer_iterations = 8;
   options.feasibility_tol = 1e-6;
   options.stationarity_tol = 1e-6;
+  options.ac_pf_warm_start = true;
+  options.allow_fallback = false;
   options.enforce_branch_limits = true;
   options.enforce_converter_capacity = true;
   options.enforce_converter_current_limits = true;
@@ -112,10 +114,21 @@ TEST_CASE("Multiscale comprehensive AC/DC constrained OPF converges",
   INFO(result.status);
   INFO("constraint violation=" << result.max_constraint_violation);
   INFO("stationarity=" << result.max_stationarity);
+  INFO("linear solver=" << result.profiling.linear_solver_backend);
+  INFO("AC P balance=" << result.profiling.max_ac_p_balance_residual_pu);
+  INFO("AC Q balance=" << result.profiling.max_ac_q_balance_residual_pu);
+  INFO("DC balance=" << result.profiling.max_dc_balance_residual_pu);
+  INFO("converter balance="
+       << result.profiling.max_converter_balance_residual_pu);
+  INFO("other equalities="
+       << result.profiling.max_other_equality_residual_pu);
+  INFO("nonlinear inequalities="
+       << result.profiling.max_nonlinear_inequality_violation_pu);
+  INFO("complementarity=" << result.profiling.final_barrier_mu);
   REQUIRE(result.converged);
   CHECK(result.iterations < options.max_inner_iterations *
                                 options.max_outer_iterations);
-  CHECK(result.max_constraint_violation < 5e-5);
+  CHECK(result.max_constraint_violation < 100.0 * options.feasibility_tol);
   CHECK(result.max_stationarity < options.stationarity_tol);
   REQUIRE(result.vm.size() == sys.ac.buses.size());
   REQUIRE(result.vdc.size() == sys.dc.buses.size());

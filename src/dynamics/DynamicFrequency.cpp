@@ -46,6 +46,10 @@ struct IslandAccumulator {
   bool has_source{false};
   double sum_hs{0.0};      // Sum of H*S               [MW*s]
   double sum_hs_omega{0.0};  // Sum of H*S*omega        [MW*s]
+  double sum_hs_domega{0.0}; // Sum of H*S*domega/dt    [MW]
+  double sum_anchor_s{0.0};
+  double sum_anchor_s_omega{0.0};
+  double sum_anchor_s_domega{0.0};
 };
 
 }  // namespace
@@ -95,10 +99,17 @@ DynamicFrequencyReport computeFrequencyReport(const DynamicSystem& sys) {
     IslandAccumulator& acc = accs[static_cast<std::size_t>(island)];
     acc.has_source |= fp.is_source;
     acc.has_anchor |= fp.is_anchor;
+    if (fp.is_anchor && fp.base_mva > 0.0) {
+      acc.sum_anchor_s += fp.base_mva;
+      acc.sum_anchor_s_omega += fp.base_mva * fp.speed_pu;
+      acc.sum_anchor_s_domega +=
+          fp.base_mva * fp.speed_derivative_pu_s;
+    }
     if (fp.contributes_coi && fp.inertia_h > 0.0 && fp.base_mva > 0.0) {
       const double weight = fp.inertia_h * fp.base_mva;
       acc.sum_hs += weight;
       acc.sum_hs_omega += weight * fp.speed_pu;
+      acc.sum_hs_domega += weight * fp.speed_derivative_pu_s;
     }
   }
 
@@ -106,10 +117,18 @@ DynamicFrequencyReport computeFrequencyReport(const DynamicSystem& sys) {
   //    inertia-weighted system COI across all islands.
   double sys_sum_hs = 0.0;
   double sys_sum_hs_omega = 0.0;
+  double sys_sum_hs_domega = 0.0;
+  double sys_sum_anchor_s = 0.0;
+  double sys_sum_anchor_s_omega = 0.0;
+  double sys_sum_anchor_s_domega = 0.0;
   int next_island_id = 0;
   for (const auto& acc : accs) {
     sys_sum_hs += acc.sum_hs;
     sys_sum_hs_omega += acc.sum_hs_omega;
+    sys_sum_hs_domega += acc.sum_hs_domega;
+    sys_sum_anchor_s += acc.sum_anchor_s;
+    sys_sum_anchor_s_omega += acc.sum_anchor_s_omega;
+    sys_sum_anchor_s_domega += acc.sum_anchor_s_domega;
     if (!acc.has_source) continue;  // dead / passive component: no frequency
 
     DynamicIslandFrequency island;
@@ -118,8 +137,20 @@ DynamicFrequencyReport computeFrequencyReport(const DynamicSystem& sys) {
     island.has_anchor = acc.has_anchor;
     island.has_source = acc.has_source;
     island.total_inertia_mws = acc.sum_hs;
-    island.coi_frequency_hz =
-        acc.sum_hs > 0.0 ? nominal * (acc.sum_hs_omega / acc.sum_hs) : nominal;
+    if (acc.sum_hs > 0.0) {
+      island.coi_frequency_hz =
+          nominal * (acc.sum_hs_omega / acc.sum_hs);
+      island.coi_rocof_hz_s =
+          nominal * (acc.sum_hs_domega / acc.sum_hs);
+    } else if (acc.sum_anchor_s > 0.0) {
+      island.coi_frequency_hz =
+          nominal * (acc.sum_anchor_s_omega / acc.sum_anchor_s);
+      island.coi_rocof_hz_s =
+          nominal * (acc.sum_anchor_s_domega / acc.sum_anchor_s);
+    } else {
+      island.coi_frequency_hz = nominal;
+      island.coi_rocof_hz_s = 0.0;
+    }
     report.islands.push_back(island);
 
     if (acc.has_source && !acc.has_anchor) {
@@ -127,8 +158,17 @@ DynamicFrequencyReport computeFrequencyReport(const DynamicSystem& sys) {
     }
   }
 
-  report.system_coi_frequency_hz =
-      sys_sum_hs > 0.0 ? nominal * (sys_sum_hs_omega / sys_sum_hs) : nominal;
+  if (sys_sum_hs > 0.0) {
+    report.system_coi_frequency_hz =
+        nominal * (sys_sum_hs_omega / sys_sum_hs);
+    report.system_coi_rocof_hz_s =
+        nominal * (sys_sum_hs_domega / sys_sum_hs);
+  } else if (sys_sum_anchor_s > 0.0) {
+    report.system_coi_frequency_hz =
+        nominal * (sys_sum_anchor_s_omega / sys_sum_anchor_s);
+    report.system_coi_rocof_hz_s =
+        nominal * (sys_sum_anchor_s_domega / sys_sum_anchor_s);
+  }
   return report;
 }
 

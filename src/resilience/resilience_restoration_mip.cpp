@@ -141,6 +141,7 @@ struct MESSData {
   double eta_discharge{1.0};
   double e_travel_mwh_km{0.0};
   double max_travel_distance_km{kInf};
+  bool grid_forming{false};
 };
 
 struct FaultData {
@@ -744,7 +745,8 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
                         std::max(0.0, st.e_rated_mwh),
                         st.eta_discharge > 0.0 ? st.eta_discharge : 1.0,
                         std::max(0.0, st.e_consumption_mwh_km),
-                        st.max_travel_distance_km > 0.0 ? st.max_travel_distance_km : kInf});
+                        st.max_travel_distance_km > 0.0 ? st.max_travel_distance_km : kInf,
+                        st.grid_forming});
   }
 
   const Adj transport_graph = build_transport_graph(sys, opts, bus_pos);
@@ -879,7 +881,10 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
                                          "mx_" + std::to_string(m) + "_" + std::to_string(i) + "_" + std::to_string(t), 0.0));
         out.idx.mess_root.push_back(add_var(solver::VarType::Binary,
                                             0.0,
-                                            opts.mip.allow_mess_black_start ? 1.0 : 0.0,
+                                            opts.mip.allow_mess_black_start &&
+                                                    out.mess[m].grid_forming
+                                                ? 1.0
+                                                : 0.0,
                                             "mr_" + std::to_string(m) + "_" + std::to_string(i) + "_" + std::to_string(t), 0.0));
         out.idx.mess_dis.push_back(add_var(solver::VarType::Continuous,
                                            0.0,
@@ -1200,6 +1205,11 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
   bc_opts.stall_node_window = 1500;
   bc_opts.stall_gap_min_improvement = 0.02;
   bc_opts.verbose = opts.mip.verbose;
+  if (opts.mip.solver == DistributionResilienceMIPSolver::Native) {
+    // Native B&C remains responsible for the tree; use its supported HiGHS
+    // LP kernel until the 240ad84 native dual-simplex root regression is fixed.
+    bc_opts.use_vendored_highs_lp_kernel = true;
+  }
   // A/B gate: enable CGLP disjunctive cuts when the caller requests it.
   // Has no effect unless solver == Native (other adapters ignore BCOptions).
   bc_opts.enable_cglp_cuts = opts.mip.enable_cglp_cuts;

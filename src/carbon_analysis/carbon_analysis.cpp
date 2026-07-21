@@ -698,10 +698,17 @@ std::vector<FlowEdge> build_directed_flows(const HybridPowerSystem& sys,
   // transfer. Recover radial DC terminal flows from solved nodal injections so
   // carbon tracing uses the same KCL-consistent operating point as PF output.
   std::unordered_map<int, double> dc_net_export;
-  for (const auto& bus : sys.dc.buses)
-    if (bus.in_service) dc_net_export[bus.index] -= bus.pd_mw;
-  for (const auto& ld : sys.dc.loads)
-    if (ld.in_service) dc_net_export[ld.bus] -= ld.p_mw * ld.scaling;
+  // Match build_unified_dc_loads(): an explicit DCLoad table is authoritative
+  // and DC bus pd_mw is only a fallback representation.  Mixing both here
+  // double-counts demand and makes an otherwise balanced carbon snapshot fail
+  // the node-balance gate.
+  if (sys.dc.loads.empty()) {
+    for (const auto& bus : sys.dc.buses)
+      if (bus.in_service) dc_net_export[bus.index] -= bus.pd_mw;
+  } else {
+    for (const auto& ld : sys.dc.loads)
+      if (ld.in_service) dc_net_export[ld.bus] -= model::effective_load_p_mw(ld);
+  }
   for (const auto& pv : sys.dc.pv_arrays)
     if (pv.in_service) dc_net_export[pv.bus] += pv.p_set_mw;
   for (const auto& sg : sys.dc.static_generators)

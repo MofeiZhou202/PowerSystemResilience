@@ -435,6 +435,22 @@ Eigen::Matrix3cd sequence_admittance_block(Complex y0, Complex y1, Complex y2) {
   return t * d * t.inverse();
 }
 
+Eigen::Matrix3cd gfm_phase_admittance(const GridFormingInverterParams& params,
+                                      Complex yv) {
+  if (params.phase_domain_control && !params.allow_zero_sequence_current) {
+    return sequence_admittance_block(Complex(0.0, 0.0), yv, yv);
+  }
+  return diagonal_admittance(yv);
+}
+
+Eigen::Vector3cd gfm_terminal_current(const GridFormingInverterParams& params,
+                                      Complex yv,
+                                      const Eigen::Vector3cd& internal_voltage,
+                                      const Eigen::Vector3cd& terminal_voltage) {
+  return gfm_phase_admittance(params, yv) *
+         (internal_voltage - terminal_voltage);
+}
+
 // Machine Norton admittance as a phase-domain block. With the sequence
 // parameters unset (x2_pu = x0_pu = 0) this returns the balanced diagonal
 // y1 * I (previous behavior); otherwise it stamps the sequence-coupled block so
@@ -717,7 +733,64 @@ int gfl_state_count(const GridFollowingInverterParams& params) {
     // +2 outer-PI integrators, +2 inner-PI integrators, +6 differential LCL.
     count += (uses_kaura_pll(params.frequency_estimator) ? 0 : 1) + 2 + 2 + 6;
   }
+  if (params.phase_domain_control) count += 6;
   return count;
+}
+
+int gfl_phase_current_base_local(const GridFollowingInverterParams& params) {
+  int count = gfl_state_count(params);
+  return params.phase_domain_control ? count - 6 : -1;
+}
+
+int gfl_phase_current_re_local(const GridFollowingInverterParams& params, int phase) {
+  const int base = gfl_phase_current_base_local(params);
+  return base >= 0 && phase >= 0 && phase < 3 ? base + 2 * phase : -1;
+}
+
+int gfl_phase_current_im_local(const GridFollowingInverterParams& params, int phase) {
+  const int re = gfl_phase_current_re_local(params, phase);
+  return re >= 0 ? re + 1 : -1;
+}
+
+Eigen::Vector3cd phase_domain_gfl_current_command(
+    const GridFollowingInverterParams& params,
+    const Eigen::Vector3cd& voltage,
+    double p_ref,
+    double q_ref) {
+  Eigen::Vector3cd current = Eigen::Vector3cd::Zero();
+  for (int phase = 0; phase < 3; ++phase) {
+    const double vm = std::max(params.v_min_current_pu, std::abs(voltage[phase]));
+    const double angle = std::arg(voltage[phase]);
+    current[phase] = phasor_from_dq(p_ref / vm, -q_ref / vm, angle);
+  }
+  if (!params.allow_zero_sequence_current) {
+    const Complex i0 = zero_sequence_voltage(current);
+    current.array() -= i0;
+  }
+  // A three-wire converter has one coupled current budget. Apply a common
+  // scale after zero-sequence projection so the phase relationship and the
+  // zero-sequence constraint are both preserved.
+  if (params.current_limit_pu > 0.0) {
+    const double phase_max =
+        std::max({std::abs(current[0]), std::abs(current[1]), std::abs(current[2])});
+    if (phase_max > params.current_limit_pu) {
+      current *= params.current_limit_pu / phase_max;
+    }
+  }
+  return current;
+}
+
+Eigen::Vector3cd gfl_phase_state_current(const GridFollowingInverterParams& params,
+                                         const StateIndexRange& range,
+                                         const DynamicState& x) {
+  Eigen::Vector3cd current = Eigen::Vector3cd::Zero();
+  if (!params.phase_domain_control) return current;
+  for (int phase = 0; phase < 3; ++phase) {
+    current[phase] =
+        Complex(x.x[state_index(range, gfl_phase_current_re_local(params, phase))],
+                x.x[state_index(range, gfl_phase_current_im_local(params, phase))]);
+  }
+  return current;
 }
 
 // ── Full-fidelity block layout (appended after every legacy block) ────────
@@ -3634,6 +3707,9 @@ FrequencyParticipation SynchronousMachine::frequencyParticipation(
   const int omega_idx = link_.omegaIndex();
   if (omega_idx >= 0 && omega_idx < x.x.size()) {
     fp.speed_pu = x.x[omega_idx];
+    if (omega_idx < x.dxdt.size()) {
+      fp.speed_derivative_pu_s = x.dxdt[omega_idx];
+    }
     fp.contributes_coi = fp.inertia_h > 0.0;
   }
   return fp;
@@ -5621,9 +5697,17 @@ bool GridFormingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkState
   const double vt = std::max(kMinVoltage, avg_voltage_mag(vabc));
   const double p_ref = params_.p_ref_mw / safe_base(params_.base_mva);
   const double q_ref = params_.q_ref_mvar / safe_base(params_.base_mva);
+  // A grid-connected GFM source generally exchanges reactive power to satisfy
+  // its Q-V droop equilibrium.  Forcing q_filtered=q_ref leaves the voltage
+  // integrator with a permanent residual whenever the live bus differs from
+  // v_ref.  Solve the algebraic droop relation for the equilibrium Q instead.
+  const double q_equilibrium =
+      std::abs(params_.q_droop_pu) > 1e-12
+          ? q_ref + (params_.v_ref_pu - vt) / params_.q_droop_pu
+          : q_ref;
   const Complex z(params_.virtual_r_pu, std::max(1e-5, params_.virtual_x_pu));
   const Complex yv = Complex(1.0, 0.0) / z;
-  const Complex s_ref(p_ref, q_ref);
+  const Complex s_ref(p_ref, q_equilibrium);
   const Complex a = std::polar(1.0, 2.0 * kPi / 3.0);
   const Complex rotation[3] = {Complex(1.0, 0.0), a * a, a};
   Complex denominator(0.0, 0.0);
@@ -5649,7 +5733,8 @@ bool GridFormingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkState
   const double overload =
       (std::isfinite(pmax) ? std::max(0.0, p_ref - pmax) : 0.0) -
       (std::isfinite(pmin) ? std::max(0.0, pmin - p_ref) : 0.0);
-  const double e_droop = params_.v_ref_pu;
+  const double e_droop =
+      params_.v_ref_pu - params_.q_droop_pu * (q_equilibrium - q_ref);
   const double voltage_error = e_droop - vt;
   double xi_v = x.x[state_index(range_, 4)];
   if (std::abs(params_.voltage_ki) > 1e-9) {
@@ -5668,7 +5753,8 @@ bool GridFormingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkState
                            params_.control_kind == GridFormingControlKind::VirtualInertia
                                ? 1.0
                                : p_ref) || changed;
-  changed = set_if_changed(x.x, state_index(range_, 3), q_ref) || changed;
+  changed =
+      set_if_changed(x.x, state_index(range_, 3), q_equilibrium) || changed;
   changed = set_if_changed(x.x, state_index(range_, 4), finite_value(xi_v)) || changed;
   changed = set_if_changed(x.x, state_index(range_, 5), finite_value(xi_ol)) || changed;
   if (range_.size > 6) {
@@ -5676,7 +5762,8 @@ bool GridFormingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkState
     if (params_.dc_bus_pos >= 0 && params_.dc_bus_pos < y.Vdc.size()) {
       vdc = y.Vdc[params_.dc_bus_pos];
     }
-    const Eigen::Vector3cd i = yv * (balanced_phasors(e_mag, theta) - vabc);
+    const Eigen::Vector3cd i =
+        gfm_terminal_current(params_, yv, balanced_phasors(e_mag, theta), vabc);
     const double p_ac = finite_value(inverter_complex_power(vabc, i).real(), p_ref);
     vdc = dc_link_voltage_for_power_balance(y,
                                             params_.dc_bus_pos,
@@ -5704,7 +5791,7 @@ void GridFormingInverter::computeDerivatives(double,
   const Complex yv = Complex(1.0, 0.0) / z;
   const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
   const Eigen::Vector3cd e = balanced_phasors(e_mag, theta);
-  const Eigen::Vector3cd i = yv * (e - v);
+  const Eigen::Vector3cd i = gfm_terminal_current(params_, yv, e, v);
   const Complex s = inverter_complex_power(v, i);
   const double p = finite_value(s.real());
   const double q = finite_value(s.imag());
@@ -5745,10 +5832,14 @@ void GridFormingInverter::computeDerivatives(double,
   const double voltage_error = e_droop - vt;
   double e_cmd = e_droop + params_.voltage_kp * voltage_error + params_.voltage_ki * xi_v;
   if (params_.current_limit_pu > 0.0) {
-    const double irms =
-        std::sqrt((std::norm(i[0]) + std::norm(i[1]) + std::norm(i[2])) / 3.0);
-    if (irms > params_.current_limit_pu) {
-      const double scale = params_.current_limit_pu / std::max(irms, 1e-9);
+    const double current_metric = params_.phase_domain_control
+                                      ? std::max({std::abs(i[0]), std::abs(i[1]),
+                                                  std::abs(i[2])})
+                                      : std::sqrt((std::norm(i[0]) + std::norm(i[1]) +
+                                                   std::norm(i[2])) /
+                                                  3.0);
+    if (current_metric > params_.current_limit_pu) {
+      const double scale = params_.current_limit_pu / std::max(current_metric, 1e-9);
       e_cmd = vt + scale * (e_cmd - vt);
     }
   }
@@ -5832,7 +5923,7 @@ void GridFormingInverter::stamp(double,
   const Complex yv = Complex(1.0, 0.0) / z;
   const Eigen::Vector3cd e = balanced_phasors(x.x[state_index(range_, 1)],
                                               x.x[state_index(range_, 0)]);
-  add_balanced_admittance(stamp, params_.bus_pos, diagonal_admittance(yv));
+  add_balanced_admittance(stamp, params_.bus_pos, gfm_phase_admittance(params_, yv));
   add_balanced_current(stamp, params_.bus_pos, yv * e);
 
   if (params_.dc_bus_pos >= 0) {
@@ -5967,15 +6058,33 @@ FrequencyParticipation GridFormingInverter::frequencyParticipation(
   fp.is_anchor = true;  // grid-forming: sets island frequency and voltage
   fp.ac_bus_pos = params_.bus_pos;
   fp.base_mva = safe_base(params_.base_mva);
-  // Only the virtual-synchronous-machine mode carries a true inertia/speed
-  // state; droop and virtual-oscillator anchors are inertia-less (they set
-  // frequency algebraically) and therefore do not weight the COI average.
+  // A VSM contributes physical/virtual inertia. In an island without any
+  // inertial participant, DynamicFrequency falls back to a base-MVA-weighted
+  // aggregate of the frequency-forming anchors below.
   if (params_.control_kind == GridFormingControlKind::VirtualInertia) {
     fp.inertia_h = std::max(0.0, 0.5 * params_.vsm_ta_s);  // Ta = 2H
     const int omega_idx = state_index(range_, 2);
     if (omega_idx >= 0 && omega_idx < x.x.size()) {
       fp.speed_pu = x.x[omega_idx];
+      if (omega_idx < x.dxdt.size()) {
+        fp.speed_derivative_pu_s = x.dxdt[omega_idx];
+      }
       fp.contributes_coi = fp.inertia_h > 0.0;
+    }
+  } else if (!range_.empty() && state_index(range_, 3) < x.x.size()) {
+    const int theta_idx = state_index(range_, 0);
+    const int active_power_idx = state_index(range_, 2);
+    if (params_.control_kind == GridFormingControlKind::Droop) {
+      const double p_ref = params_.p_ref_mw / safe_base(params_.base_mva);
+      fp.speed_pu =
+          1.0 - params_.p_droop_pu * (x.x[active_power_idx] - p_ref);
+      if (active_power_idx < x.dxdt.size()) {
+        fp.speed_derivative_pu_s =
+            -params_.p_droop_pu * x.dxdt[active_power_idx];
+      }
+    } else if (theta_idx < x.dxdt.size() && params_.frequency_hz > 0.0) {
+      fp.speed_pu =
+          1.0 + x.dxdt[theta_idx] / (kTwoPi * params_.frequency_hz);
     }
   }
   return fp;
@@ -5990,6 +6099,7 @@ DynamicDeviceOutput GridFormingInverter::output(const DynamicState& x,
                                              params_.source_type);
   out.values["control_mode"] = 1.0;
   out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
+  out.values["phase_domain_control"] = params_.phase_domain_control ? 1.0 : 0.0;
   InverterInnerVariableSnapshot inner;
   if (!range_.empty() && state_index(range_, 5) < x.x.size()) {
     const double theta = x.x[state_index(range_, 0)];
@@ -6003,7 +6113,7 @@ DynamicDeviceOutput GridFormingInverter::output(const DynamicState& x,
     const Complex yv = Complex(1.0, 0.0) / z;
     const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
     const Eigen::Vector3cd e = balanced_phasors(e_mag, theta);
-    const Eigen::Vector3cd i = yv * (e - v);
+    const Eigen::Vector3cd i = gfm_terminal_current(params_, yv, e, v);
     const Complex s = inverter_complex_power(v, i);
     const double p_ref = params_.p_ref_mw / safe_base(params_.base_mva);
     const double pmax = params_.pmax_mw > 0.0
@@ -6047,8 +6157,38 @@ DynamicDeviceOutput GridFormingInverter::output(const DynamicState& x,
         is_vsm ? 2.0 : (is_voc ? 3.0 : 1.0);
     out.values["i_rms_pu"] =
         std::sqrt((std::norm(i[0]) + std::norm(i[1]) + std::norm(i[2])) / 3.0);
+    const double i_phase_max =
+        std::max({std::abs(i[0]), std::abs(i[1]), std::abs(i[2])});
+    out.values["i_phase_max_pu"] = i_phase_max;
+    static constexpr const char* kPhaseName[3] = {"a", "b", "c"};
+    for (int phase = 0; phase < 3; ++phase) {
+      const std::string suffix = kPhaseName[phase];
+      out.values["i_" + suffix + "_re_pu"] = i[phase].real();
+      out.values["i_" + suffix + "_im_pu"] = i[phase].imag();
+      out.values["i_" + suffix + "_mag_pu"] = std::abs(i[phase]);
+    }
+    out.values["v_negative_sequence_pu"] =
+        std::abs(negative_sequence_voltage(v));
+    out.values["v_zero_sequence_pu"] = std::abs(zero_sequence_voltage(v));
+    out.values["i_positive_sequence_pu"] =
+        std::abs(positive_sequence_voltage(i));
+    out.values["i_negative_sequence_pu"] =
+        std::abs(negative_sequence_voltage(i));
+    out.values["i_zero_sequence_pu"] = std::abs(zero_sequence_voltage(i));
+    out.values["virtual_r_pu"] = params_.virtual_r_pu;
+    out.values["virtual_x_pu"] = params_.virtual_x_pu;
+    out.values["p_droop_pu"] = params_.p_droop_pu;
+    out.values["q_droop_pu"] = params_.q_droop_pu;
+    out.values["current_limit_pu"] = params_.current_limit_pu;
+    out.values["current_loading_ratio"] =
+        params_.current_limit_pu > 0.0
+            ? (params_.phase_domain_control ? i_phase_max : out.values["i_rms_pu"]) /
+                  params_.current_limit_pu
+            : 0.0;
     out.values["current_limit_active"] =
-        (params_.current_limit_pu > 0.0 && out.values["i_rms_pu"] > params_.current_limit_pu)
+        (params_.current_limit_pu > 0.0 &&
+         (params_.phase_domain_control ? i_phase_max : out.values["i_rms_pu"]) >
+             params_.current_limit_pu)
             ? 1.0
             : 0.0;
     out.values["overload_pu"] = overload;
@@ -6142,7 +6282,7 @@ void GridFollowingInverter::assignStateIndices(int& offset) {
 void GridFollowingInverter::initializeFromPowerFlow(const PowerFlowResult& pf,
                                                    DynamicState& x,
                                                    NetworkState& y) {
-  if (params_.full_fidelity) {
+  if (params_.full_fidelity && !params_.phase_domain_control) {
     seedFullFidelityEquilibrium(x, y, true);
     return;
   }
@@ -6195,11 +6335,21 @@ void GridFollowingInverter::initializeFromPowerFlow(const PowerFlowResult& pf,
     x.x[state_index(range_, vdc_local)] =
         clamp_voltage_window(vdc, params_.vdc_min_pu, params_.vdc_max_pu);
   }
+  if (params_.phase_domain_control) {
+    const Eigen::Vector3cd phase_current =
+        phase_domain_gfl_current_command(params_, v, p, q);
+    for (int phase = 0; phase < 3; ++phase) {
+      x.x[state_index(range_, gfl_phase_current_re_local(params_, phase))] =
+          phase_current[phase].real();
+      x.x[state_index(range_, gfl_phase_current_im_local(params_, phase))] =
+          phase_current[phase].imag();
+    }
+  }
 }
 
 bool GridFollowingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
   if (!params_.in_service || range_.empty() || params_.bus_pos < 0) return false;
-  if (params_.full_fidelity) {
+  if (params_.full_fidelity && !params_.phase_domain_control) {
     const DynamicState before = x;
     seedFullFidelityEquilibrium(x, y, false);
     bool changed = false;
@@ -6253,6 +6403,20 @@ bool GridFollowingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkSta
   changed = set_if_changed(x.x, state_index(range_, 3), iq) || changed;
   changed = set_if_changed(x.x, state_index(range_, 4), p_ref) || changed;
   changed = set_if_changed(x.x, state_index(range_, 5), q_ref) || changed;
+  if (params_.phase_domain_control) {
+    const Eigen::Vector3cd phase_current =
+        phase_domain_gfl_current_command(params_, vabc, p_ref, q_ref);
+    for (int phase = 0; phase < 3; ++phase) {
+      changed = set_if_changed(
+                    x.x,
+                    state_index(range_, gfl_phase_current_re_local(params_, phase)),
+                    phase_current[phase].real()) || changed;
+      changed = set_if_changed(
+                    x.x,
+                    state_index(range_, gfl_phase_current_im_local(params_, phase)),
+                    phase_current[phase].imag()) || changed;
+    }
+  }
   if (gfl_uses_lcl_filter(params_)) {
     const Complex iconv = phasor_from_dq(id, iq, theta);
     const Complex z_grid(params_.filter_grid_r_pu,
@@ -6271,7 +6435,10 @@ bool GridFollowingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkSta
     if (params_.dc_bus_pos >= 0 && params_.dc_bus_pos < y.Vdc.size()) {
       vdc = y.Vdc[params_.dc_bus_pos];
     }
-    const Eigen::Vector3cd current = balanced_current_from_dq(id, iq, theta);
+    const Eigen::Vector3cd current =
+        params_.phase_domain_control
+            ? gfl_phase_state_current(params_, range_, x)
+            : balanced_current_from_dq(id, iq, theta);
     const double p_ac = finite_value(inverter_complex_power(vabc, current).real(), p_ref);
     vdc = dc_link_voltage_for_power_balance(y,
                                             params_.dc_bus_pos,
@@ -6514,7 +6681,7 @@ void GridFollowingInverter::computeDerivatives(double,
                                                const NetworkState& y,
                                                Eigen::Ref<Eigen::VectorXd> dxdt) const {
   if (!params_.in_service || range_.empty()) return;
-  if (params_.full_fidelity) {
+  if (params_.full_fidelity && !params_.phase_domain_control) {
     computeDerivativesFullFidelity(x, y, dxdt);
     return;
   }
@@ -6566,10 +6733,30 @@ void GridFollowingInverter::computeDerivatives(double,
   dxdt[state_index(range_, 0)] = kTwoPi * params_.f_ref_hz * freq_error_pu;
   dxdt[state_index(range_, 1)] =
       params_.frequency_estimator == FrequencyEstimatorKind::FixedFrequency ? 0.0 : vq;
-  dxdt[state_index(range_, 2)] = (id_cmd - id) / tau_i;
-  dxdt[state_index(range_, 3)] = (iq_cmd - iq) / tau_i;
-  dxdt[state_index(range_, 4)] = (p_ref - pf) / tau_p;
-  dxdt[state_index(range_, 5)] = (q_ref - qf) / tau_p;
+  if (params_.phase_domain_control) {
+    const Eigen::Vector3cd command =
+        phase_domain_gfl_current_command(params_, vabc, p_ref, q_ref);
+    const Eigen::Vector3cd current =
+        gfl_phase_state_current(params_, range_, x);
+    const Complex i_pos = positive_sequence_voltage(current);
+    const auto [id_phase, iq_phase] = dq_from_phasor(i_pos, theta);
+    const Complex measured_power = inverter_complex_power(vabc, current);
+    dxdt[state_index(range_, 2)] = (id_phase - id) / tau_i;
+    dxdt[state_index(range_, 3)] = (iq_phase - iq) / tau_i;
+    dxdt[state_index(range_, 4)] = (measured_power.real() - pf) / tau_p;
+    dxdt[state_index(range_, 5)] = (measured_power.imag() - qf) / tau_p;
+    for (int phase = 0; phase < 3; ++phase) {
+      dxdt[state_index(range_, gfl_phase_current_re_local(params_, phase))] =
+          (command[phase].real() - current[phase].real()) / tau_i;
+      dxdt[state_index(range_, gfl_phase_current_im_local(params_, phase))] =
+          (command[phase].imag() - current[phase].imag()) / tau_i;
+    }
+  } else {
+    dxdt[state_index(range_, 2)] = (id_cmd - id) / tau_i;
+    dxdt[state_index(range_, 3)] = (iq_cmd - iq) / tau_i;
+    dxdt[state_index(range_, 4)] = (p_ref - pf) / tau_p;
+    dxdt[state_index(range_, 5)] = (q_ref - qf) / tau_p;
+  }
   if (uses_kaura_pll(params_.frequency_estimator)) {
     const double tau_pll_filter = std::max(kMinTimeConstant, params_.pll_lpf_t_s);
     dxdt[state_index(range_, gfl_vdf_local(params_))] =
@@ -6577,7 +6764,7 @@ void GridFollowingInverter::computeDerivatives(double,
     dxdt[state_index(range_, gfl_vqf_local(params_))] =
         (vq_raw - x.x[state_index(range_, gfl_vqf_local(params_))]) / tau_pll_filter;
   }
-  if (gfl_uses_lcl_filter(params_)) {
+  if (gfl_uses_lcl_filter(params_) && !params_.phase_domain_control) {
     const Complex iconv = phasor_from_dq(id, iq, theta);
     const Complex z_grid(params_.filter_grid_r_pu,
                          std::max(1e-5, params_.filter_grid_x_pu));
@@ -6591,7 +6778,10 @@ void GridFollowingInverter::computeDerivatives(double,
   }
   const int vdc_local = gfl_vdc_local(params_);
   if (vdc_local >= 0) {
-    const Eigen::Vector3cd current = balanced_current_from_dq(id, iq, theta);
+    const Eigen::Vector3cd current =
+        params_.phase_domain_control
+            ? gfl_phase_state_current(params_, range_, x)
+            : balanced_current_from_dq(id, iq, theta);
     const double p_ac = finite_value(inverter_complex_power(vabc, current).real());
     const double vdc_link = x.x[state_index(range_, vdc_local)];
     const double pdc_net =
@@ -6624,7 +6814,12 @@ void GridFollowingInverter::stamp(double,
   // no reconnect is in progress.
   const double der_scale =
       params_.protection.enabled ? protection_state_.restore_scale : 1.0;
-  if (params_.full_fidelity) {
+  if (params_.phase_domain_control) {
+    add_balanced_current(
+        stamp,
+        params_.bus_pos,
+        der_scale * gfl_phase_state_current(params_, range_, x));
+  } else if (params_.full_fidelity) {
     // Inject the grid-side LCL current (network RI frame) directly.
     const Complex i_grid(x.x[state_index(range_, gfl_ff_ir_filter_local(params_))],
                          x.x[state_index(range_, gfl_ff_ii_filter_local(params_))]);
@@ -6680,7 +6875,21 @@ void GridFollowingInverter::addJacobian(
   const int theta_col = state_index(range_, 0);
   const int id_col = state_index(range_, 2);
   const int iq_col = state_index(range_, 3);
-  if (params_.full_fidelity) {
+  if (params_.phase_domain_control) {
+    for (int phase = 0; phase < 3; ++phase) {
+      const int node = 3 * params_.bus_pos + phase;
+      const int re_col =
+          state_index(range_, gfl_phase_current_re_local(params_, phase));
+      const int im_col =
+          state_index(range_, gfl_phase_current_im_local(params_, phase));
+      if (context.validStateIndex(re_col)) {
+        add_ac_current_derivative(context, node, re_col, Complex(1.0, 0.0), triplets);
+      }
+      if (context.validStateIndex(im_col)) {
+        add_ac_current_derivative(context, node, im_col, Complex(0.0, 1.0), triplets);
+      }
+    }
+  } else if (params_.full_fidelity) {
     const int ifr_col = state_index(range_, gfl_ff_ir_filter_local(params_));
     const int ifi_col = state_index(range_, gfl_ff_ii_filter_local(params_));
     const Eigen::Vector3cd d_i_d_ifr =
@@ -6845,9 +7054,10 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
   out.values["protection_v_meas_pu"] = protection_state_.v_meas_pu;
   out.values["protection_f_meas_hz"] = protection_state_.f_meas_hz;
   out.values["protection_restore_scale"] = protection_state_.restore_scale;
+  out.values["phase_domain_control"] = params_.phase_domain_control ? 1.0 : 0.0;
   InverterInnerVariableSnapshot inner;
   if (!range_.empty() && state_index(range_, 5) < x.x.size() &&
-      params_.full_fidelity) {
+      params_.full_fidelity && !params_.phase_domain_control) {
     const double theta = x.x[state_index(range_, 0)];
     const double xi_pll = x.x[state_index(range_, 1)];
     const Eigen::Vector3cd vabc = bus_voltage(y, params_.bus_pos);
@@ -6924,7 +7134,10 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
     const Complex vpos = positive_sequence_voltage(vabc);
     const auto [vd_raw, vq_raw] = dq_from_phasor(vpos, theta);
     const auto [vd, vq] = pll_measurement(params_, x, range_, vd_raw, vq_raw);
-    const Eigen::Vector3cd current = balanced_current_from_dq(id, iq, theta);
+    const Eigen::Vector3cd current =
+        params_.phase_domain_control
+            ? gfl_phase_state_current(params_, range_, x)
+            : balanced_current_from_dq(id, iq, theta);
     const Complex s = inverter_complex_power(vabc, current);
     const double freq_error_pu =
         params_.frequency_estimator == FrequencyEstimatorKind::FixedFrequency
@@ -6985,6 +7198,32 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
     out.values["q_ref_mvar"] = params_.q_ref_mvar;
     out.values["p_filtered_mw"] = x.x[state_index(range_, 4)] * safe_base(params_.base_mva);
     out.values["q_filtered_mvar"] = x.x[state_index(range_, 5)] * safe_base(params_.base_mva);
+    if (params_.phase_domain_control) {
+      static constexpr const char* kPhaseName[3] = {"a", "b", "c"};
+      double phase_max = 0.0;
+      for (int phase = 0; phase < 3; ++phase) {
+        const std::string suffix = kPhaseName[phase];
+        out.values["i_" + suffix + "_re_pu"] = current[phase].real();
+        out.values["i_" + suffix + "_im_pu"] = current[phase].imag();
+        out.values["i_" + suffix + "_mag_pu"] = std::abs(current[phase]);
+        phase_max = std::max(phase_max, std::abs(current[phase]));
+      }
+      out.values["i_phase_max_pu"] = phase_max;
+      out.values["i_positive_sequence_pu"] =
+          std::abs(positive_sequence_voltage(current));
+      out.values["i_negative_sequence_pu"] =
+          std::abs(negative_sequence_voltage(current));
+      out.values["i_zero_sequence_pu"] =
+          std::abs(zero_sequence_voltage(current));
+      out.values["current_limit_active"] =
+          params_.current_limit_pu > 0.0 && phase_max >= params_.current_limit_pu * (1.0 - 1e-9)
+              ? 1.0
+              : 0.0;
+      out.values["i_mag_pu"] =
+          std::sqrt((std::norm(current[0]) + std::norm(current[1]) +
+                     std::norm(current[2])) /
+                    3.0);
+    }
     const Complex i_pos = phasor_from_dq(id, iq, theta);
     inner.set(InverterInnerVar::PllAngle, theta);
     inner.set(InverterInnerVar::PllOmega, 1.0 + freq_error_pu);
@@ -7100,6 +7339,8 @@ GridFormingInverterParams make_gfm_params(const VSCConverterDynamicParams& param
   gfm.voc_psi_rad = params.voc_psi_rad;
   gfm.voc_k2 = params.voc_k2;
   gfm.reference_frame_locked = params.reference_frame_locked;
+  gfm.phase_domain_control = params.phase_domain_control;
+  gfm.allow_zero_sequence_current = params.allow_zero_sequence_current;
   gfm.dc_link_mode = params.dc_link_mode;
   gfm.in_service = params.in_service;
   gfm.protection = params.protection;
