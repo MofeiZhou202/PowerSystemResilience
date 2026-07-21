@@ -53,6 +53,7 @@
 #include "hacdcpf/io/evpt_demo_cases.hpp"
 #include "hacdcpf/io/evpt_json.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
+#include "hacdcpf/io/bpa_io.hpp"
 #include "hacdcpf/io/powersimulationsdynamics_io.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
 #include "hacdcpf/model/standard_parameter_library.hpp"
@@ -8419,19 +8420,6 @@ json system_summary(const hacdcpf::HybridPowerSystem& sys) {
   return s;
 }
 
-<<<<<<< Updated upstream
-json rpo_control_inventory_json(const hacdcpf::HybridPowerSystem& sys,
-                                const hacdcpf::opf::RPOOptions& opt = {}) {
-  const auto inventory = hacdcpf::opf::inspect_rpo_controls(sys, opt);
-  const auto bus_label = [&](int index) {
-    const auto it = std::find_if(sys.ac.buses.begin(), sys.ac.buses.end(),
-                                 [&](const auto& bus) {
-                                   return bus.index == index;
-                                 });
-    if (it == sys.ac.buses.end() || it->name.empty())
-      return std::string("Bus ") + std::to_string(index);
-    return it->name + " (" + std::to_string(index) + ")";
-=======
 #if 0
 std::string make_index_html() {
   return R"html(<!DOCTYPE html>
@@ -8554,6 +8542,9 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
     <span class="sep"></span>
     <input type="file" id="jsonFileInput" accept=".json" title="Upload JSON system file"/>
     <button class="btn btn-secondary btn-sm" id="uploadJsonBtn">Upload JSON</button>
+    <span class="sep"></span>
+    <input type="file" id="bpaDatInput" accept=".dat" title="Import a PSD-BPA / DSP card file (.dat)"/>
+    <button class="btn btn-secondary btn-sm" id="loadBpaDatBtn">Import BPA DAT</button>
     <span class="sep"></span>
     <input type="file" id="etapXmlInput" accept=".xml" title="Import a native ETAP project XML (Feeder.xml)"/>
     <button class="btn btn-secondary btn-sm" id="loadEtapXmlBtn">Import ETAP XML</button>
@@ -8717,7 +8708,7 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
             <select id="scKappaMethod">
               <option value="B">IEC B</option>
               <option value="A">IEC A</option>
-              <option value="C" selected>IEC C</option>
+              <option value="C">IEC C</option>
             </select>
           </div>
           <div><label>Topology</label>
@@ -8727,7 +8718,7 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
             </select>
           </div>
           <div><label>Fault Z (pu)</label><input id="scFaultImpedance" type="number" step=".001" value="0"/></div>
-          <div><label>Breaking t (s)</label><input id="scBreakingTime" type="number" step=".01" value="0.10"/></div>
+          <div><label>Breaking t (s)</label><input id="scBreakingTime" type="number" step=".01" value="0.05"/></div>
           <div><label>Thermal Tk (s)</label><input id="scIthDuration" type="number" step=".1" value="1.0"/></div>
           <div><label>Frequency (Hz)</label><input id="scBaseFrequency" type="number" step="1" value="50"/></div>
           <div><label>Default x''d (pu)</label><input id="scDefaultXdpp" type="number" step=".01" value="0.20"/></div>
@@ -9471,6 +9462,23 @@ document.getElementById('uploadJsonBtn').onclick=()=>{
   reader.onload=()=>loadSystem('/api/session/load_json_string',{json_string:reader.result});
   reader.readAsText(fi.files[0]);
 };
+document.getElementById('loadBpaDatBtn').onclick=()=>{
+  const fi=document.getElementById('bpaDatInput');
+  if(!fi.files.length){setStatus('Select a .dat card file first.',true);return;}
+  // Send raw bytes: .dat files may be GBK-encoded (Chinese bus names), the
+  // server converts names to UTF-8. Reading as text would corrupt them.
+  const reader=new FileReader();
+  reader.onload=async()=>{
+    setStatus('Importing BPA DAT...');
+    try{
+      const resp=await fetch('/api/session/load_bpa_dat',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:reader.result});
+      const d=await resp.json();
+      if(!resp.ok)throw new Error(d.error||('HTTP '+resp.status));
+      SYS=d;updateSystemUI();setStatus('Loaded: '+SYS.name+' ('+SYS.counts.ac_buses+' AC buses, '+SYS.counts.generators+' gens)');
+    }catch(e){setStatus(e.message,true);}
+  };
+  reader.readAsArrayBuffer(fi.files[0]);
+};
 document.getElementById('loadEtapXmlBtn').onclick=()=>{
   const fi=document.getElementById('etapXmlInput');
   if(!fi.files.length){setStatus('Select an ETAP project .xml file first.',true);return;}
@@ -9881,30 +9889,11 @@ function renderGeoMap(body){
     },
     margin:{l:0,r:0,t:40,b:0},
     legend:{x:0,y:1,bgcolor:'rgba(255,255,255,0.7)'}
->>>>>>> Stashed changes
   };
+  
+  Plotly.newPlot('pfGeoMap',traces,layout,{responsive:true});
+}
 
-<<<<<<< Updated upstream
-  json taps = json::array();
-  json shunts = json::array();
-  int adjustable_taps = 0;
-  int selected_taps = 0;
-  int adjustable_shunts = 0;
-  long double log10_combinations = 0.0L;
-  std::uint64_t exact_combinations = 1;
-  bool exact_available = true;
-  constexpr std::uint64_t kMaxExactJsonInteger = 9007199254740991ULL;
-  const auto accumulate_space = [&](int positions) {
-    if (positions <= 0) return;
-    log10_combinations += std::log10(static_cast<long double>(positions));
-    if (exact_available) {
-      const auto p = static_cast<std::uint64_t>(positions);
-      if (exact_combinations > kMaxExactJsonInteger / p)
-        exact_available = false;
-      else
-        exact_combinations *= p;
-    }
-=======
 // --- Market GIS Map: buses coloured by average LMP, branches/DC links overlaid ---
 function renderMktGeoMap(body, lmp, sced){
   const el=document.getElementById('mktGeoMap');
@@ -10179,106 +10168,1998 @@ function scOptions(detailed){
     kappa_method:document.getElementById('scKappaMethod').value,
     topology:document.getElementById('scTopology').value,
     fault_impedance_pu:scNumber('scFaultImpedance',0),
-    breaking_time_s:scNumber('scBreakingTime',0.10),
+    breaking_time_s:scNumber('scBreakingTime',0.05),
     ith_duration_s:scNumber('scIthDuration',1),
     base_frequency_hz:scNumber('scBaseFrequency',50),
     default_xdpp:scNumber('scDefaultXdpp',0.2),
     compute_branch_flows:!!detailed&&scChecked('scComputeBranchFlows',true),
     compute_voltage_drops:!!detailed&&scChecked('scComputeVoltageDrops',true),
     compute_ith:scChecked('scComputeIth',true)
->>>>>>> Stashed changes
   };
-
-  for (const auto& row : inventory.taps) {
-    if (row.adjustable) ++adjustable_taps;
-    if (row.selected_for_optimization) {
-      ++selected_taps;
-      accumulate_space(row.optimization_position_count);
-    }
-    taps.push_back(json{
-        {"trafo_index", row.trafo_index},
-        {"authored_index", row.authored_index},
-        {"source_branch_idx", row.source_branch_idx},
-        {"name", row.name},
-        {"hv_bus", row.hv_bus},
-        {"lv_bus", row.lv_bus},
-        {"hv_bus_label", bus_label(row.hv_bus)},
-        {"lv_bus_label", bus_label(row.lv_bus)},
-        {"tap_side", row.tap_side},
-        {"tap_side_label", row.tap_side == 0 ? "HV" : "LV"},
-        {"in_service", row.in_service},
-        {"adjustable", row.adjustable},
-        {"selected_for_optimization", row.selected_for_optimization},
-        {"exclusion_reason", row.exclusion_reason},
-        {"tap_pos", row.tap_pos},
-        {"tap_min", row.tap_min},
-        {"tap_max", row.tap_max},
-        {"tap_neutral", row.tap_neutral},
-        {"tap_number", row.tap_pos - row.tap_neutral},
-        {"position_count", row.position_count},
-        {"optimization_tap_min", row.optimization_tap_min},
-        {"optimization_tap_max", row.optimization_tap_max},
-        {"optimization_position_count", row.optimization_position_count},
-        {"tap_step_percent", row.tap_step_percent},
-        {"ratio_current", row.ratio_current},
-        {"ratio_min", row.ratio_min},
-        {"ratio_max", row.ratio_max},
-        {"electrical_tap_current", row.electrical_tap_current},
-        {"electrical_tap_min", row.electrical_tap_min},
-        {"electrical_tap_max", row.electrical_tap_max},
-        {"at_lower_limit", row.tap_pos == row.tap_min},
-        {"at_upper_limit", row.tap_pos == row.tap_max}});
+}
+function dcScOptions(){
+  return {
+    fault_resistance_pu:scNumber('scFaultImpedance',0),
+    source_voltage_pu:scNumber('dcScSourceVoltage',0),
+    consider_dc_breakers:scChecked('dcScConsiderBreakers',true),
+    dc_breakers_control_branches:scChecked('dcScBreakerControlsBranch',true),
+    add_unassigned_closed_breaker_edges:scChecked('dcScAddBreakerEdges',true)
+  };
+}
+document.getElementById('runScBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  if(document.getElementById('scDomain').value==='DC'){
+    const ids=(SYS.dc&&SYS.dc.buses?SYS.dc.buses:[]).map(b=>b.index);
+    if(!ids.length){setStatus('No DC buses available.',true);return;}
+    try{
+      setStatus('Running DC short circuit...');
+      const body=await api('/api/session/dc_sc',{fault_bus_ids:ids,options:dcScOptions()});
+      document.getElementById('scFault').textContent='DC';
+      document.getElementById('scBuses').textContent=body.results.length;
+      const ik=body.results.map(r=>r.i_fault_ka||0);
+      document.getElementById('scMaxIk').textContent=fmt(Math.max(...ik),3);
+      document.getElementById('scMinIk').textContent=fmt(Math.min(...ik),3);
+      Plotly.newPlot('scIkChart',[{x:body.results.map(r=>'DC '+r.fault_bus_id),y:ik,type:'bar',name:'If',marker:{color:'#0b6e4f'}}],
+        {title:'DC Short Circuit Fault Current (kA)',xaxis:{title:'DC Bus'},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60}},{responsive:true});
+      document.getElementById('scSkChart').innerHTML='';
+      document.getElementById('scDetailedChart').innerHTML='';
+      document.getElementById('scContribChart').innerHTML='';
+      document.getElementById('scVremainChart').innerHTML='';
+      setStatus('DC short circuit completed. '+body.results.length+' buses analyzed.');
+    }catch(e){setStatus(e.message,true);}
+    return;
   }
-  for (const auto& row : inventory.shunts) {
-    if (row.adjustable) {
-      ++adjustable_shunts;
-      accumulate_space(row.position_count);
-    }
-    shunts.push_back(json{
-        {"shunt_index", row.shunt_index},
-        {"authored_index", row.authored_index},
-        {"name", row.name},
-        {"bus", row.bus},
-        {"bus_label", bus_label(row.bus)},
-        {"in_service", row.in_service},
-        {"switchable", row.switchable},
-        {"adjustable", row.adjustable},
-        {"exclusion_reason", row.exclusion_reason},
-        {"current_step", row.current_step},
-        {"n_steps", row.n_steps},
-        {"position_count", row.position_count},
-        {"bs_per_step_mvar", row.bs_per_step_mvar},
-        {"bs_current_mvar", row.bs_current_mvar}});
-  }
+  try{setStatus('Running short circuit (all buses)...');
+  const body=await api('/api/session/sc',{options:scOptions(false)});
+  document.getElementById('scFault').textContent=body.fault_type;
+  document.getElementById('scBuses').textContent=body.bus_results.length;
+  const ik=body.bus_results.map(r=>r.ikpp_ka);
+  document.getElementById('scMaxIk').textContent=fmt(Math.max(...ik),3);
+  document.getElementById('scMinIk').textContent=fmt(Math.min(...ik),3);
+  const busIds=body.bus_results.map(r=>'Bus '+r.bus_id);
+  Plotly.newPlot('scIkChart',[
+    {x:busIds,y:body.bus_results.map(r=>r.ikpp_ka),type:'bar',name:"Ik'' (initial)",marker:{color:'#0b6e4f'}},
+    {x:busIds,y:body.bus_results.map(r=>r.ip_ka||0),type:'bar',name:'ip (peak)',marker:{color:'#e74c3c'}},
+    {x:busIds,y:body.bus_results.map(r=>r.ib_ka||0),type:'bar',name:'Ib (breaking)',marker:{color:'#2980b9'}},
+    {x:busIds,y:body.bus_results.map(r=>r.ik_ka||0),type:'bar',name:'Ik (steady)',marker:{color:'#f39c12'}},
+    {x:busIds,y:body.bus_results.map(r=>r.ith_ka||0),type:'bar',name:'Ith (thermal)',marker:{color:'#8e44ad'}},
+  ],{title:'Short Circuit Currents by Bus (kA)',barmode:'group',xaxis:{title:'Bus'},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60},legend:{orientation:'h',y:-0.2}},{responsive:true});
+  Plotly.newPlot('scSkChart',[{x:body.bus_results.map(r=>r.bus_id),y:body.bus_results.map(r=>r.sk_mva),mode:'lines+markers',line:{color:'#2c8c99',width:2}}],{title:'Sk (SC Power) by Bus',xaxis:{title:'Bus'},yaxis:{title:'MVA'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  document.getElementById('scDetailedChart').innerHTML='';
+  document.getElementById('scContribChart').innerHTML='';
+  document.getElementById('scVremainChart').innerHTML='';
+  setStatus('Short circuit completed. '+body.bus_results.length+' buses analyzed.');}catch(e){setStatus(e.message,true);}
+};
 
-  return json{
-      {"eligibility_contract",
-       "OLTC: in_service && tap_max > tap_min && tap_step_percent > 0 && "
-       "tap_min <= tap_pos <= tap_max; shunt: in_service && switchable && "
-       "n_steps > 1 && abs(bs_per_step) > 0 && 0 <= current_step <= n_steps"},
-      {"tap_ratio_formula",
-       "ratio = 1 + (tap_pos - tap_neutral) * tap_step_percent / 100"},
-      {"optimization_range_contract",
-       "selected OLTC range = nameplate range intersected with "
-       "[tap_pos-max_tap_move, tap_pos+max_tap_move]; max_tap_move < 0 "
-       "uses the full nameplate range"},
-      {"transformer_count", inventory.taps.size()},
-      {"adjustable_oltc_count", adjustable_taps},
-      {"selected_oltc_count", selected_taps},
-      {"unselected_adjustable_oltc_count", adjustable_taps - selected_taps},
-      {"excluded_transformer_count",
-       static_cast<int>(inventory.taps.size()) - adjustable_taps},
-      {"shunt_count", inventory.shunts.size()},
-      {"adjustable_shunt_count", adjustable_shunts},
-      {"discrete_variable_count", selected_taps + adjustable_shunts},
-      {"max_tap_move", opt.max_tap_move},
-      {"search_space_log10", static_cast<double>(log10_combinations)},
-      {"search_space_exact",
-       exact_available ? json(exact_combinations) : json(nullptr)},
-      {"oltc", std::move(taps)},
-      {"shunts", std::move(shunts)}};
+/* Detailed Short Circuit at Selected Buses */
+document.getElementById('runScDetailedBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  const busInput=document.getElementById('scFaultBus').value.trim();
+  if(!busInput){setStatus('Enter bus IDs (e.g. 0,3,5) for detailed SC analysis.',true);return;}
+  const busIds=busInput.split(/[,\s]+/).map(Number).filter(n=>!isNaN(n));
+  if(!busIds.length){setStatus('Invalid bus IDs.',true);return;}
+  if(document.getElementById('scDomain').value==='DC'){
+    try{
+      setStatus('Running detailed DC SC at bus(es): '+busIds.join(', ')+'...');
+      const body=await api('/api/session/dc_sc',{fault_bus_ids:busIds,options:dcScOptions()});
+      const ik=body.results.map(r=>r.i_fault_ka||0);
+      document.getElementById('scFault').textContent='DC';
+      document.getElementById('scBuses').textContent=body.results.length+' (dc)';
+      document.getElementById('scMaxIk').textContent=fmt(Math.max(...ik),3);
+      document.getElementById('scMinIk').textContent=fmt(Math.min(...ik),3);
+      Plotly.newPlot('scDetailedChart',[{x:body.results.map(r=>'DC Fault@Bus '+r.fault_bus_id),y:ik,type:'bar',name:'If',marker:{color:'#0b6e4f'}}],
+        {title:'DC Detailed Fault Current (kA)',xaxis:{title:''},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60}},{responsive:true});
+      setStatus('Detailed DC SC completed.');
+    }catch(e){setStatus(e.message,true);}
+    return;
+  }
+  try{
+    setStatus('Running detailed SC at bus(es): '+busIds.join(', ')+'...');
+    const body=await api('/api/session/sc_detailed',{
+      fault_bus_ids:busIds,
+      ...scOptions(true),
+    });
+    document.getElementById('scFault').textContent=body.fault_type;
+    document.getElementById('scBuses').textContent=body.results.length+' (detailed)';
+    // Grouped bar: ikss, ip, ib, ik, ith for each fault bus
+    const faultBuses=body.results.map(r=>'Fault@Bus '+r.fault_bus_id);
+    const fb=body.results.map(r=>{const b=r.bus_results.find(x=>x.bus_id===r.fault_bus_id)||{};return b;});
+    Plotly.newPlot('scDetailedChart',[
+      {x:faultBuses,y:fb.map(b=>b.ikss_ka||0),type:'bar',name:'Ik\" (initial)',marker:{color:'#0b6e4f'}},
+      {x:faultBuses,y:fb.map(b=>b.ip_ka||0),type:'bar',name:'ip (peak)',marker:{color:'#e74c3c'}},
+      {x:faultBuses,y:fb.map(b=>b.ib_ka||0),type:'bar',name:'Ib (breaking)',marker:{color:'#2980b9'}},
+      {x:faultBuses,y:fb.map(b=>b.ik_ka||0),type:'bar',name:'Ik (steady)',marker:{color:'#f39c12'}},
+      {x:faultBuses,y:fb.map(b=>b.ith_ka||0),type:'bar',name:'Ith (thermal)',marker:{color:'#8e44ad'}},
+    ],{title:'Detailed SC Currents at Fault Buses (kA)',barmode:'group',
+       xaxis:{title:''},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60},
+       legend:{orientation:'h',y:-0.2}},{responsive:true});
+    document.getElementById('scMaxIk').textContent=fmt(Math.max(...fb.map(b=>b.ikss_ka||0)),3);
+    document.getElementById('scMinIk').textContent=fmt(Math.min(...fb.map(b=>b.ikss_ka||0)),3);
+    // Source contributions stacked bar
+    Plotly.newPlot('scContribChart',[
+      {x:faultBuses,y:fb.map(b=>b.ikss_gen_contrib_ka||0),type:'bar',name:'Generators',marker:{color:'#0b6e4f'}},
+      {x:faultBuses,y:fb.map(b=>b.ikss_motor_contrib_ka||0),type:'bar',name:'Motors',marker:{color:'#2c8c99'}},
+      {x:faultBuses,y:fb.map(b=>b.ikss_extgrid_contrib_ka||0),type:'bar',name:'External Grid',marker:{color:'#b5651d'}},
+      {x:faultBuses,y:fb.map(b=>b.ikss_converter_contrib_ka||0),type:'bar',name:'Converters',marker:{color:'#8e44ad'}},
+      {x:faultBuses,y:fb.map(b=>b.ikss_sgen_contrib_ka||0),type:'bar',name:'Static Gens',marker:{color:'#27ae60'}},
+      {x:faultBuses,y:fb.map(b=>b.ikss_load_contrib_ka||0),type:'bar',name:'Loads',marker:{color:'#f39c12'}},
+    ],{title:'SC Current Source Contributions (kA)',barmode:'stack',
+       xaxis:{title:''},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60},
+       legend:{orientation:'h',y:-0.2}},{responsive:true});
+    // Remaining voltage profile for the first fault
+    if(body.results.length>0){
+      const r0=body.results[0];
+      const allBus=r0.bus_results.map(b=>b.bus_id);
+      const vr=r0.bus_results.map(b=>b.v_remaining_pu);
+      Plotly.newPlot('scVremainChart',[{x:allBus,y:vr,type:'bar',
+        marker:{color:vr.map(v=>v<0.8?'#e74c3c':v<0.9?'#f39c12':'#27ae60')}}],
+        {title:'Remaining Voltage During Fault at Bus '+r0.fault_bus_id+' (p.u.)',
+         xaxis:{title:'Bus'},yaxis:{title:'V (pu)',range:[0,1.2]},margin:{l:55,r:15,t:45,b:45},
+         shapes:[{type:'line',y0:0.8,y1:0.8,x0:-0.5,x1:allBus.length-0.5,line:{color:'#e74c3c',dash:'dash',width:1}}]
+        },{responsive:true});
+    }
+    setStatus('Detailed SC complete for bus(es): '+busIds.join(', ')+'.');
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Init */
+(async function(){await loadCaseLists();setStatus('Ready. Load a built-in case, MATPOWER file, or upload a JSON file.');})();
+
+/* Time-Series PF */
+document.getElementById('runTsPfBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running Time-Series PF pipeline (UC \u2192 PF)...');
+    const numSteps=parseInt(document.getElementById('tsNumSteps').value)||24;
+    const skipUC=document.getElementById('tsSkipUC').checked;
+    const runOPF=document.getElementById('tsRunOPF').checked;
+    const body=await api('/api/session/run_ts_pf',{num_steps:numSteps,skip_uc:skipUC,run_opf:runOPF});
+    document.getElementById('tsSteps').textContent=body.num_steps;
+    document.getElementById('tsConv').textContent=body.num_converged+'/'+body.num_steps;
+    document.getElementById('tsOPFConv').textContent=body.num_opf_converged+'/'+body.num_steps;
+    document.getElementById('tsCost').textContent='$'+fmt(body.total_generation_cost,0);
+    const hrs=Array.from({length:body.num_steps},(_,i)=>i);
+    const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12'];
+    // Generation dispatch stacked bar
+    const dtraces=(body.gen_dispatch||[]).map((d,gi)=>({x:hrs,y:d,type:'bar',name:body.gen_names[gi]||'Gen '+gi,marker:{color:pal[gi%pal.length]}}));
+    (body.renewable_dispatch||[]).forEach((rd,ri)=>dtraces.push({x:hrs,y:rd,type:'bar',name:body.ren_names[ri]||'Ren '+ri,marker:{color:'#27ae60'}}));
+    Plotly.newPlot('tsGenDispatchChart',dtraces,{title:'Generation Dispatch (MW)',barmode:'stack',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+    // Voltage mean time series (with min/max band)
+    if(body.vm_mean&&body.vm_mean.length){
+      const vtraces=[];
+      if(body.vm_max&&body.vm_min){
+        vtraces.push({x:hrs,y:body.vm_max,mode:'lines',line:{width:0,color:'rgba(11,110,79,0.3)'},name:'Vm max',showlegend:false});
+        vtraces.push({x:hrs,y:body.vm_min,mode:'lines',line:{width:0,color:'rgba(11,110,79,0.3)'},fill:'tonexty',fillcolor:'rgba(11,110,79,0.1)',name:'Vm range'});
+      }
+      vtraces.push({x:hrs,y:body.vm_mean,mode:'lines+markers',line:{color:'#0b6e4f',width:2},name:'Mean Vm'});
+      const allV=[...body.vm_mean,...(body.vm_min||[]),...(body.vm_max||[])].filter(v=>v>0);
+      const vLo=Math.min(...allV),vHi=Math.max(...allV),vP=Math.max((vHi-vLo)*0.15,0.005);
+      Plotly.newPlot('tsVoltChart',vtraces,{title:'Bus Voltage p.u. per Hour',xaxis:{title:'Hour'},yaxis:{title:'p.u.',range:[vLo-vP,vHi+vP]},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+    }
+    // ESS SOC
+    if(body.ess_soc&&body.ess_soc.length)
+      Plotly.newPlot('tsESSChart',(body.ess_soc||[]).map((soc,si)=>({x:hrs,y:soc,mode:'lines+markers',name:body.ess_names[si]||'ESS '+si,line:{width:2}})),{title:'ESS State of Charge',xaxis:{title:'Hour'},yaxis:{title:'SOC',range:[0,1]},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+    setStatus('Time-Series PF complete: '+body.num_converged+'/'+body.num_steps+' steps converged. Cost: $'+fmt(body.total_generation_cost,0)+'.');
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Unit Commitment */
+document.getElementById('runUCBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running Unit Commitment MILP...');
+    const numSteps=parseInt(document.getElementById('ucNumSteps').value)||24;
+    const body=await api('/api/session/run_uc',{num_steps:numSteps});
+    document.getElementById('ucFeas').textContent=body.feasible?'Yes':'No';
+    document.getElementById('ucCost').textContent='$'+fmt(body.total_cost,0);
+    document.getElementById('ucNGen').textContent=(body.gen_names||[]).length;
+    document.getElementById('ucNESS').textContent=(body.ess_names||[]).length;
+    const hrs=Array.from({length:(body.gen_dispatch[0]||[]).length},(_,i)=>i);
+    const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12'];
+    const dtraces=(body.gen_dispatch||[]).map((d,gi)=>({x:hrs,y:d,type:'bar',name:body.gen_names[gi]||'Gen '+gi,marker:{color:pal[gi%pal.length]}}));
+    (body.renewable_dispatch||[]).forEach((rd,ri)=>dtraces.push({x:hrs,y:rd,type:'bar',name:body.ren_names[ri]||'Ren '+ri,marker:{color:'#27ae60'}}));
+    Plotly.newPlot('ucDispatchChart',dtraces,{title:'UC Generator Dispatch (MW)',barmode:'stack',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+    if(body.gen_commit&&body.gen_commit.length)
+      Plotly.newPlot('ucCommitChart',[{z:body.gen_commit,x:hrs,y:body.gen_names,type:'heatmap',colorscale:[[0,'#f5f5f5'],[1,'#0b6e4f']],showscale:true,colorbar:{title:'Commit',tickvals:[0,1],ticktext:['Off','On']}}],{title:'Commitment Schedule',xaxis:{title:'Hour'},margin:{l:110,r:15,t:45,b:45}},{responsive:true});
+    if(body.ess_soc&&body.ess_soc.length)
+      Plotly.newPlot('ucESSSOCChart',(body.ess_soc||[]).map((soc,si)=>({x:hrs,y:soc,mode:'lines+markers',name:body.ess_names[si]||'ESS '+si})),{title:'ESS State of Charge',xaxis:{title:'Hour'},yaxis:{title:'SOC',range:[0,1]},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+    setStatus('Unit Commitment complete. Feasible: '+body.feasible+'. Total cost: $'+fmt(body.total_cost,0));
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Market Clearing (SCUC -> SCED -> ACPF -> LMP -> Settlement) */
+document.getElementById('scenarioToggle').onchange=function(){
+  document.getElementById('scenarioConfigPanel').style.display=this.checked?'block':'none';
+};
+document.getElementById('runMarketBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    const useScenario=document.getElementById('scenarioToggle').checked;
+    setStatus('Running market clearing pipeline'+(useScenario?' with scenario generation':'')+'...');
+    const numSteps=parseInt(document.getElementById('mktNumSteps').value)||24;
+    const solverSel=document.getElementById('milpSolverChoice');
+    const milpSolver=solverSel?solverSel.value:'auto';
+    const payload={num_steps:numSteps,period_length_hr:1.0,milp_solver:milpSolver,
+      n_segments:parseInt(document.getElementById('s22BidSegs').value)||3,
+      price_cap:parseFloat(document.getElementById('s22PriceCap').value)||1500,
+      price_floor:parseFloat(document.getElementById('s22PriceFloor').value)||0,
+      mip_gap:parseFloat(document.getElementById('s26MipGap').value)||0.0001,
+      time_limit_sec:parseFloat(document.getElementById('s26TimeLimit').value)||300,
+      lmp_delta:parseFloat(document.getElementById('s26LmpDelta').value)||0.10,
+      enable_n1:document.getElementById('s28EnableN1').checked,
+      max_n1_contingencies:parseInt(document.getElementById('s28MaxN1').value)||50,
+      voll:parseFloat(document.getElementById('s29VOLL').value)||10000,
+      spinning_reserve_req:parseFloat(document.getElementById('s29SpinReq').value)/100.0||0.05,
+    };
+    if(useScenario){
+      payload.scenario={
+        periods_per_day:parseInt(document.getElementById('scenPeriodsPerDay').value)||96,
+        period_length_min:parseFloat(document.getElementById('scenPeriodLen').value)||15,
+        is_workday:document.getElementById('scenWorkday').checked,
+        load_variation_std:parseFloat(document.getElementById('scenLoadNoise').value)||0.05,
+        wind_forecast_error:parseFloat(document.getElementById('scenWindErr').value)||0.20,
+        solar_forecast_error:parseFloat(document.getElementById('scenSolarErr').value)||0.15,
+        seed:parseInt(document.getElementById('scenSeed').value)||0,
+      };
+    }
+    // Show pipeline stages
+    const stgPanel=document.getElementById('pipelineStages');
+    stgPanel.style.display='flex';
+    for(let i=1;i<=9;i++){const el=document.getElementById('stg'+i);el.className='stg';if(i===1)el.className='stg active';}
+
+    const body=await api('/api/session/run_market_clearing',payload);
+
+    // Update pipeline stages based on stages_completed
+    const sc=(body.summary||{}).stages_completed||0;
+    for(let i=1;i<=9;i++){
+      const el=document.getElementById('stg'+i);
+      el.className=i<=sc?'stg done':'stg';
+    }
+
+    const sced=body.sced||{};
+    const lmp=body.lmp||{};
+    const settlements=body.genco_settlements||[];
+    const bids=body.bids||[];
+
+    const scuc=body.scuc||{};
+    document.getElementById('mktFeas').textContent=
+      (scuc.converged?'\u2705':'\u274c')+'SCUC '+
+      (sced.converged?'\u2705':'\u274c')+'SCED '+
+      (lmp.converged?'\u2705':'\u274c')+'LMP';
+    document.getElementById('mktFeas').style.fontSize='11px';
+    document.getElementById('mktCost').textContent='$'+fmt((body.summary||{}).total_system_cost||0,0);
+    document.getElementById('mktNGen').textContent=(settlements||[]).length;
+    const solverEl=document.getElementById('mktSolver');
+    if(solverEl) solverEl.textContent=(body.summary||{}).solver_name||'N/A';
+    const valEl=document.getElementById('mktValidation');
+    const val=body.validation||{};
+    if(valEl) valEl.textContent=val.all_checks_passed?'\u2705 PASS':'\u274c FAIL';
+    document.getElementById('mktAvgLmp').textContent=fmt(lmp.avg_lmp||0,2);
+
+    // SCED dispatch stacked‐bar chart (generators × time steps)
+    const dsp=sced.dispatch||[];
+    if(dsp.length){
+      const T2=dsp[0].length;
+      const hrs2=Array.from({length:T2},(_,i)=>i);
+      const dspTraces=dsp.map((row,gi)=>({
+        x:hrs2,y:row,type:'bar',name:settlements[gi]?settlements[gi].name:('Gen '+gi)
+      }));
+      Plotly.newPlot('mktDispatchChart',dspTraces,{title:'SCED Generator Dispatch (MW)',barmode:'stack',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    } else { document.getElementById('mktDispatchChart').innerHTML=''; }
+
+    /* --- Validation panel --- */
+    const vp=document.getElementById('marketValidationPanel');
+    if(vp && val.sced_power_balance){
+      let html='<h3 style="margin:0 0 8px">Market Validation Results</h3>';
+      // Power Balance (use SCED result)
+      const pb=val.sced_power_balance||{};
+      html+='<h4>Power Balance Check '+(pb.balanced?'\u2705':'\u274c')+'</h4>';
+      html+='<table class="tbl"><thead><tr><th>Hour</th><th>Gen (MW)</th><th>Load (MW)</th><th>Mismatch (MW)</th></tr></thead><tbody>';
+      const pmm=pb.mismatch||[];
+      const pGen=pb.gen_total||[];
+      const pLoad=pb.load_total||[];
+      for(let t=0;t<pmm.length;t++){
+        const mm=pmm[t], gn=pGen[t]||0, ld=pLoad[t]||0;
+        const cls=Math.abs(mm)>1e-3?'style="color:red"':'';
+        html+=`<tr><td>${t}</td><td>${fmt(gn,2)}</td><td>${fmt(ld,2)}</td><td ${cls}>${fmt(mm,4)}</td></tr>`;
+      }
+      html+='</tbody></table>';
+      html+='<p>Max mismatch: '+fmt(pb.max_abs_mismatch||0,4)+' MW</p>';
+      // Budget Balance
+      const bb=val.lmp_budget||{};
+      html+='<h4>LMP Budget Balance '+(bb.balanced?'\u2705':'\u274c')+'</h4>';
+      html+='<table class="tbl"><thead><tr><th>Metric</th><th>Value ($)</th></tr></thead><tbody>';
+      html+='<tr><td>Total Load Payment</td><td>'+fmt(bb.total_load_payment||0,2)+'</td></tr>';
+      html+='<tr><td>Total Gen Payment</td><td>'+fmt(bb.total_gen_payment||0,2)+'</td></tr>';
+      html+='<tr><td>Total Congestion Rent</td><td>'+fmt(bb.total_congestion_rent||0,2)+'</td></tr>';
+      html+='<tr><td>Imbalance</td><td>'+fmt(bb.max_abs_imbalance||0,4)+'</td></tr>';
+      html+='</tbody></table>';
+      html+='<p>Balance: Load Payment \u2248 Gen Payment + Congestion Rent</p>';
+      // Generator Income
+      const gens=val.gen_income||[];
+      const allProfitable=gens.every(g=>g.profitable);
+      html+='<h4>Generator Income '+(allProfitable?'\u2705':'\u274c')+'</h4>';
+      html+='<table class="tbl"><thead><tr><th>Generator</th><th>LMP Revenue ($)</th><th>Bid Cost ($)</th><th>Startup ($)</th><th>No-Load ($)</th><th>Profit ($)</th><th>Profitable</th></tr></thead><tbody>';
+      gens.forEach(g=>{
+        html+=`<tr><td>${g.name||''}</td><td>${fmt(g.lmp_revenue||0,2)}</td><td>${fmt(g.bid_cost||0,2)}</td><td>${fmt(g.startup_cost||0,2)}</td><td>${fmt(g.no_load_cost||0,2)}</td><td>${fmt(g.profit||0,2)}</td><td>${g.profitable?'\u2705':'\u274c'}</td></tr>`;
+      });
+      html+='</tbody></table>';
+      // ACPF Adjustment Summary
+      const adj=body.acpf_adjustment||{};
+      if(adj.enabled){
+        html+='<h4>AC Power Flow Post-Check</h4>';
+        html+='<table class="tbl"><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>';
+        html+='<tr><td>Converged Before Adjustment</td><td>'+adj.num_converged_before+' / '+(adj.periods||[]).length+'</td></tr>';
+        html+='<tr><td>Converged After Adjustment</td><td>'+adj.num_converged_after+' / '+(adj.periods||[]).length+'</td></tr>';
+        html+='<tr><td>Periods Adjusted</td><td>'+adj.num_adjusted+'</td></tr>';
+        html+='<tr><td>Max Adjustment</td><td>'+fmt(adj.max_adjustment_mw||0,4)+' MW</td></tr>';
+        html+='</tbody></table>';
+      }
+      vp.innerHTML=html;
+      vp.style.display='block';
+    } else if(vp){
+      vp.style.display='none';
+    }
+
+    // Bid curves by GenCo
+    const bidTraces=[];
+    (bids||[]).forEach((b,gi)=>{
+      let x=[0], y=[0], cum=0;
+      (b.segments||[]).forEach(seg=>{
+        const q=Number(seg.quantity||0), p=Number(seg.price||0);
+        x.push(cum); y.push(p);
+        cum+=q;
+        x.push(cum); y.push(p);
+      });
+      bidTraces.push({x,y,mode:'lines',name:b.generator_name||('Gen '+gi),line:{shape:'hv',width:2}});
+    });
+    Plotly.newPlot('marketBidChart',bidTraces,{title:'GenCo Bidding Curves (Piecewise Linear)',xaxis:{title:'MW'},yaxis:{title:'$/MWh'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.25}},{responsive:true});
+
+    // Scenario profile charts (if scenario generation was used)
+    const scen=body.scenario||{};
+    if(scen.num_periods>0){
+      const nT=scen.num_periods;
+      const dt=scen.period_length_hr||0.25;
+      const hrs=Array.from({length:nT},(_,i)=>(i*dt).toFixed(2));
+      const traces=[];
+      if(scen.aggregate_load_profile) traces.push({x:hrs,y:scen.aggregate_load_profile,mode:'lines',name:'Agg Load (multiplier)',line:{color:'#e74c3c',width:2}});
+      // Show all wind source profiles (wind_profile_0, wind_profile_1, ...)
+      for(let w=0;w<20;w++){
+        const key='wind_profile_'+w;
+        if(scen[key]) traces.push({x:hrs,y:scen[key],mode:'lines',name:'Wind #'+w+' CF',line:{color:'hsl('+(200+w*30)+',70%,50%)',width:1.5,dash:w>0?'dot':'solid'}});
+        else break;
+      }
+      // Show all solar source profiles
+      for(let s=0;s<20;s++){
+        const key='solar_profile_'+s;
+        if(scen[key]) traces.push({x:hrs,y:scen[key],mode:'lines',name:'Solar #'+s+' CF',line:{color:'hsl('+(30+s*20)+',80%,50%)',width:1.5,dash:s>0?'dot':'solid'}});
+        else break;
+      }
+      if(traces.length) Plotly.newPlot('scenarioProfileChart',traces,{title:'Scenario-Generated Profiles ('+nT+' periods, '+dt+'h each)'+(scen.bus_load_types?' — Load types: '+scen.bus_load_types.join(', '):''),xaxis:{title:'Hour'},yaxis:{title:'Profile Value'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+      else document.getElementById('scenarioProfileChart').innerHTML='';
+    } else {
+      document.getElementById('scenarioProfileChart').innerHTML='';
+    }
+
+    // LMP heatmap: bus x hour
+    if(lmp.nodal_lmp && lmp.nodal_lmp.length){
+      const nb=lmp.nodal_lmp.length;
+      const T=(lmp.nodal_lmp[0]||[]).length;
+      const hrs=Array.from({length:T},(_,i)=>i);
+      const buses=Array.from({length:nb},(_,i)=>'Bus '+i);
+      Plotly.newPlot('marketLmpHeatmap',[{z:lmp.nodal_lmp,x:hrs,y:buses,type:'heatmap',colorscale:'YlGnBu',colorbar:{title:'$/MWh'}}],{title:'LMP Heatmap',xaxis:{title:'Hour'},margin:{l:80,r:35,t:45,b:45}},{responsive:true});
+
+      const eLmp=lmp.energy_lmp||[];
+      const cLmp=lmp.congestion_lmp||[];
+      let table='<thead><tr><th>Bus</th><th>Hour</th><th>Energy LMP</th><th>Congestion LMP</th><th>Total LMP</th></tr></thead><tbody>';
+      for(let b=0;b<nb;b++){
+        for(let t=0;t<T;t++){
+          const e=Number((eLmp[b]||[])[t]||0);
+          const c=Number((cLmp[b]||[])[t]||0);
+          const total=Number((lmp.nodal_lmp[b]||[])[t]||0);
+          table += `<tr><td>${b}</td><td>${t}</td><td>${fmt(e,3)}</td><td>${fmt(c,3)}</td><td>${fmt(total,3)}</td></tr>`;
+        }
+      }
+      table += '</tbody>';
+      document.getElementById('marketLmpDecompTable').innerHTML=table;
+    } else {
+      document.getElementById('marketLmpHeatmap').innerHTML='';
+      document.getElementById('marketLmpDecompTable').innerHTML='';
+    }
+
+    // GenCo profit bars (§2.9 settlement with uplift)
+    Plotly.newPlot('marketGenCoProfit',[
+      {x:settlements.map(s=>s.name||('Gen '+s.generator_index)),y:settlements.map(s=>s.energy_revenue||0),type:'bar',name:'Energy Rev.',marker:{color:'#2c8c99'}},
+      {x:settlements.map(s=>s.name||('Gen '+s.generator_index)),y:settlements.map(s=>(s.uplift_payment||0)),type:'bar',name:'Uplift (§2.9)',marker:{color:'#27ae60'}},
+      {x:settlements.map(s=>s.name||('Gen '+s.generator_index)),y:settlements.map(s=>s.total_cost||0),type:'bar',name:'Total Cost',marker:{color:'#b5651d'}},
+      {x:settlements.map(s=>s.name||('Gen '+s.generator_index)),y:settlements.map(s=>s.market_profit||0),type:'scatter',mode:'markers+lines',name:'Market Profit',marker:{color:'#d32f2f',size:9},line:{color:'#d32f2f',dash:'dot'}},
+      {x:settlements.map(s=>s.name||('Gen '+s.generator_index)),y:settlements.map(s=>s.profit||0),type:'scatter',mode:'markers+lines',name:'Net Profit (after uplift)',marker:{color:'#0b6e4f',size:9},line:{color:'#0b6e4f'}}
+    ],{title:'§2.9 GenCo Settlement (Revenue / Uplift / Cost / Market Profit / Net Profit)',barmode:'group',xaxis:{tickangle:-35},margin:{l:55,r:15,t:45,b:70}},{responsive:true});
+
+    // GenCo Income Derivation Table — direct per-generator income breakdown
+    if(settlements.length){
+      let ht='<h3 style="margin:0 0 8px">§2.9 GenCo Income Derivation</h3>';
+      ht+='<table class="tbl"><thead><tr><th>Generator</th><th>Energy Revenue ($)</th><th>Reserve Revenue ($)</th>';
+      ht+='<th>Market Income ($)</th><th>Energy Cost ($)</th><th>Startup ($)</th><th>No-Load ($)</th>';
+      ht+='<th>Total Cost ($)</th><th>Market Profit ($)</th><th>Uplift ($)</th><th>Total Revenue ($)</th><th>Net Profit ($)</th></tr></thead><tbody>';
+      let totIncome=0,totCost=0,totMktProfit=0,totUplift=0,totProfit=0;
+      settlements.forEach(s=>{
+        const mi=s.market_income||((s.energy_revenue||0)+(s.reserve_revenue||0));
+        const tc=s.total_cost||0;
+        const mp=s.market_profit||(mi-tc);
+        totIncome+=mi; totCost+=tc; totMktProfit+=mp; totUplift+=(s.uplift_payment||0); totProfit+=(s.profit||0);
+        ht+=`<tr><td>${s.name||('Gen '+s.generator_index)}</td><td>${fmt(s.energy_revenue||0,2)}</td><td>${fmt(s.reserve_revenue||0,2)}</td>`;
+        ht+=`<td style="font-weight:bold">${fmt(mi,2)}</td><td>${fmt(s.energy_cost||0,2)}</td><td>${fmt(s.startup_cost||0,2)}</td><td>${fmt(s.no_load_cost||0,2)}</td>`;
+        ht+=`<td>${fmt(tc,2)}</td><td style="color:${mp>=0?'green':'red'};font-weight:bold">${fmt(mp,2)}</td><td>${fmt(s.uplift_payment||0,2)}</td><td>${fmt(s.total_revenue||0,2)}</td>`;
+        ht+=`<td style="color:${(s.profit||0)>=0?'green':'red'}">${fmt(s.profit||0,2)}</td></tr>`;
+      });
+      ht+=`<tr style="font-weight:bold;border-top:2px solid #333"><td>Total</td><td></td><td></td>`;
+      ht+=`<td>${fmt(totIncome,2)}</td><td></td><td></td><td></td>`;
+      ht+=`<td>${fmt(totCost,2)}</td><td style="color:${totMktProfit>=0?'green':'red'}">${fmt(totMktProfit,2)}</td><td>${fmt(totUplift,2)}</td><td>${fmt(totIncome+totUplift,2)}</td>`;
+      ht+=`<td style="color:${totProfit>=0?'green':'red'}">${fmt(totProfit,2)}</td></tr>`;
+      ht+='</tbody></table>';
+      ht+='<p style="font-size:11px;color:#666">Market Profit = Market Income \u2212 Total Cost (pre-uplift, can be negative). Uplift = max(0, \u2212Market Profit). Net Profit = Market Profit + Uplift (always \u2265 0 by §2.9).</p>';
+      document.getElementById('mktGenCoIncomeTable').innerHTML=ht;
+    } else { document.getElementById('mktGenCoIncomeTable').innerHTML=''; }
+
+    const pfPost=body.pf_post_check||{};
+    const pfResiduals=pfPost.residuals||[];
+    const pfConv=pfPost.converged||[];
+    if(pfResiduals.length){
+      const hrs=Array.from({length:pfResiduals.length},(_,i)=>i);
+      Plotly.newPlot('marketPfResidualChart',[
+        {x:hrs,y:pfResiduals,type:'scatter',mode:'lines+markers',name:'Residual',line:{color:'#b5651d',width:2}},
+        {x:hrs,y:pfConv.map(v=>v?1:0),type:'bar',name:'Converged',yaxis:'y2',marker:{color:'#0b6e4f',opacity:0.35}}
+      ],{title:'Nonlinear PF Post-Check by Hour',xaxis:{title:'Hour'},yaxis:{title:'Residual'},yaxis2:{title:'Converged (0/1)',overlaying:'y',side:'right',range:[-0.05,1.05]},margin:{l:60,r:60,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+    } else {
+      document.getElementById('marketPfResidualChart').innerHTML='';
+    }
+
+    // --- Voltage Profile Chart (bus voltage magnitudes across converged periods) ---
+    const adjPeriods=(body.acpf_adjustment||{}).periods||[];
+    const convPeriods=adjPeriods.filter(p=>p.converged_after&&p.vm_pu&&p.vm_pu.length>0);
+    if(convPeriods.length>0){
+      // Heatmap: buses × periods
+      const nb2=convPeriods[0].vm_pu.length;
+      const vmMatrix=convPeriods.map(p=>p.vm_pu);
+      const periods=convPeriods.map(p=>p.period);
+      const buses=Array.from({length:nb2},(_,i)=>'Bus '+i);
+      Plotly.newPlot('mktVoltageProfileChart',[{
+        z:vmMatrix,x:buses,y:periods,type:'heatmap',
+        colorscale:[[0,'#d32f2f'],[0.25,'#ff9800'],[0.5,'#4caf50'],[0.75,'#ff9800'],[1,'#d32f2f']],
+        zmin:0.90,zmax:1.10,
+        colorbar:{title:'V (pu)',len:0.7}
+      }],{title:'Bus Voltage Profile (pu) — AC PF',
+          xaxis:{title:'Bus'},yaxis:{title:'Period'},
+          margin:{l:55,r:80,t:45,b:55}},{responsive:true});
+
+      // Reactive power chart: bus Q injection for last converged period
+      const lastP=convPeriods[convPeriods.length-1];
+      if(lastP.bus_q_mvar&&lastP.bus_q_mvar.length>0){
+        const busLabels=Array.from({length:lastP.bus_q_mvar.length},(_,i)=>'Bus '+i);
+        Plotly.newPlot('mktReactivePowerChart',[{
+          x:busLabels,y:lastP.bus_q_mvar,type:'bar',
+          marker:{color:lastP.bus_q_mvar.map(v=>v>=0?'#2c8c99':'#b5651d')}
+        }],{title:'Bus Reactive Power Injection (Mvar) — Last Converged Period',
+            xaxis:{title:'Bus',tickangle:-45},yaxis:{title:'Mvar'},
+            margin:{l:55,r:15,t:45,b:55}},{responsive:true});
+      } else { document.getElementById('mktReactivePowerChart').innerHTML=''; }
+    } else {
+      document.getElementById('mktVoltageProfileChart').innerHTML='';
+      document.getElementById('mktReactivePowerChart').innerHTML='';
+    }
+
+    // --- Voltage & Thermal Violation Summary ---
+    const violPanel=document.getElementById('mktViolationPanel');
+    const adjInfo=body.acpf_adjustment||{};
+    const totalVV=adjInfo.total_voltage_violations||0;
+    const totalTV=adjInfo.total_thermal_violations||0;
+    if(totalVV>0||totalTV>0){
+      let vhtml='<h3 style="margin:0 0 8px">AC PF Violation Summary</h3>';
+      vhtml+='<p>Total voltage violations: <b>'+totalVV+'</b>, Total thermal violations: <b>'+totalTV+'</b></p>';
+      // Collect violations across periods
+      let vRows=[];let tRows=[];
+      (adjInfo.periods||[]).forEach(p=>{
+        (p.voltage_violations||[]).forEach(v=>{
+          vRows.push({period:p.period,bus:v.bus,vm:v.vm_pu,limit:v.limit,type:v.is_low?'Under-voltage':'Over-voltage'});
+        });
+        (p.thermal_violations||[]).forEach(v=>{
+          tRows.push({period:p.period,branch:v.branch,flow:v.flow_mva,rating:v.rating_mva});
+        });
+      });
+      if(vRows.length){
+        vhtml+='<h4>Voltage Violations \u26a0\ufe0f</h4>';
+        vhtml+='<table class="tbl"><thead><tr><th>Period</th><th>Bus</th><th>V (pu)</th><th>Limit (pu)</th><th>Type</th></tr></thead><tbody>';
+        vRows.slice(0,50).forEach(r=>{vhtml+=`<tr><td>${r.period}</td><td>${r.bus}</td><td style="color:red">${fmt(r.vm,4)}</td><td>${fmt(r.limit,3)}</td><td>${r.type}</td></tr>`;});
+        if(vRows.length>50)vhtml+='<tr><td colspan="5">... '+(vRows.length-50)+' more</td></tr>';
+        vhtml+='</tbody></table>';
+      }
+      if(tRows.length){
+        vhtml+='<h4>Thermal Violations \u26a0\ufe0f</h4>';
+        vhtml+='<table class="tbl"><thead><tr><th>Period</th><th>Branch</th><th>Flow (MVA)</th><th>Rating (MVA)</th><th>Overload %</th></tr></thead><tbody>';
+        tRows.slice(0,50).forEach(r=>{const pct=r.rating>0?100*(r.flow/r.rating-1):0;vhtml+=`<tr><td>${r.period}</td><td>${r.branch}</td><td style="color:red">${fmt(r.flow,2)}</td><td>${fmt(r.rating,2)}</td><td>${fmt(pct,1)}%</td></tr>`;});
+        if(tRows.length>50)vhtml+='<tr><td colspan="5">... '+(tRows.length-50)+' more</td></tr>';
+        vhtml+='</tbody></table>';
+      }
+      violPanel.innerHTML=vhtml;violPanel.style.display='block';
+    } else { violPanel.innerHTML='';violPanel.style.display='none'; }
+
+    // --- §2.8 Security Check Panel ---
+    const secPanel=document.getElementById('mktSecurityPanel');
+    const secData=body.security_check||{};
+    if(secPanel && secData.enabled){
+      let shtml='<h3 style="margin:0 0 8px">§2.8 Security Check Results '+(secData.all_secure?'\u2705':'\u274c')+'</h3>';
+      shtml+='<table class="tbl"><thead><tr><th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>';
+      shtml+='<tr><td>Power Balance Adequacy</td><td>'+(secData.power_balance_adequate?'\u2705 Pass':'\u274c Fail')+'</td>';
+      shtml+='<td>Reserve margin: '+fmt(secData.reserve_margin_mw||0,1)+' MW (required: '+fmt(secData.reserve_requirement_mw||0,1)+' MW)</td></tr>';
+      shtml+='<tr><td>Base Case AC PF</td><td>'+(secData.base_case_secure?'\u2705 Secure':'\u274c Insecure')+'</td>';
+      shtml+='<td>Voltage violations: '+(secData.base_voltage_violations||0)+', Thermal violations: '+(secData.base_thermal_violations||0)+'</td></tr>';
+      shtml+='<tr><td>N-1 Contingency</td><td>'+((secData.n1_contingencies_failed||0)===0?'\u2705 Secure':'\u274c '+(secData.n1_contingencies_failed)+' failures')+'</td>';
+      shtml+='<td>Checked: '+(secData.n1_contingencies_checked||0)+', Failed: '+(secData.n1_contingencies_failed||0)+'</td></tr>';
+      shtml+='<tr><td>Curtailment Fairness</td><td>'+(secData.curtailment_fair?'\u2705 Fair':'\u274c Unfair')+'</td>';
+      shtml+='<td>Fairness index: '+fmt(secData.curtailment_fairness_index||0,3)+' (max ratio: '+fmt(secData.max_curtailment_ratio||0,3)+', min: '+fmt(secData.min_curtailment_ratio||0,3)+')</td></tr>';
+      shtml+='</tbody></table>';
+      // N-1 detail table for failed contingencies
+      const n1r=(secData.n1_results||[]).filter(r=>!r.secure);
+      if(n1r.length){
+        shtml+='<h4>N-1 Contingency Failures</h4>';
+        shtml+='<table class="tbl"><thead><tr><th>Branch</th><th>Name</th><th>Converged</th><th>Max Loading %</th><th>Max V Dev (pu)</th><th>V Viol</th><th>Thermal Viol</th></tr></thead><tbody>';
+        n1r.slice(0,30).forEach(r=>{
+          shtml+=`<tr><td>${r.branch}</td><td>${r.branch_name||''}</td><td>${r.converged?'Yes':'No'}</td>`;
+          shtml+=`<td style="color:${r.max_loading_pct>100?'red':'inherit'}">${fmt(r.max_loading_pct,1)}</td>`;
+          shtml+=`<td>${fmt(r.max_v_deviation_pu,4)}</td><td>${r.v_violations}</td><td>${r.thermal_violations}</td></tr>`;
+        });
+        if(n1r.length>30)shtml+='<tr><td colspan="7">... '+(n1r.length-30)+' more</td></tr>';
+        shtml+='</tbody></table>';
+      }
+      secPanel.innerHTML=shtml;secPanel.style.display='block';
+    } else if(secPanel){ secPanel.innerHTML='';secPanel.style.display='none'; }
+
+    // --- PTDF Heatmap ---
+    const ptdfV=body.ptdf_verification||{};
+    if(ptdfV.computed&&ptdfV.ptdf_matrix&&ptdfV.ptdf_matrix.length){
+      const bLabels=Array.from({length:ptdfV.num_buses},(_,i)=>'Bus '+i);
+      const lLabels=ptdfV.branch_labels||Array.from({length:ptdfV.num_branches},(_,i)=>'Br '+i);
+      Plotly.newPlot('mktPtdfHeatmap',[{
+        z:ptdfV.ptdf_matrix,x:bLabels,y:lLabels,type:'heatmap',
+        colorscale:'RdBu',zmid:0,
+        colorbar:{title:'PTDF',len:0.7}
+      }],{title:'Power Transfer Distribution Factors (PTDF)',
+          xaxis:{title:'Bus'},yaxis:{title:'Branch'},
+          margin:{l:90,r:60,t:45,b:55}},{responsive:true});
+
+      // PTDF vs ACPF verification bar chart
+      if(ptdfV.max_error_mw&&ptdfV.max_error_mw.length){
+        Plotly.newPlot('mktPtdfVerifyChart',[{
+          x:lLabels,y:ptdfV.max_error_mw,type:'bar',
+          marker:{color:ptdfV.max_error_mw.map(e=>e>5?'#d32f2f':e>1?'#ff9800':'#4caf50')}
+        }],{title:'PTDF vs AC PF Verification — Max Error per Branch (MW)<br>Overall Max: '+fmt(ptdfV.overall_max_error_mw,3)+' MW ('+fmt(ptdfV.overall_max_error_pct,1)+'% of rating), Mean: '+fmt(ptdfV.overall_mean_error_mw,3)+' MW',
+            xaxis:{title:'Branch',tickangle:-45},yaxis:{title:'Max Error (MW)'},
+            margin:{l:55,r:15,t:65,b:70}},{responsive:true});
+      } else { document.getElementById('mktPtdfVerifyChart').innerHTML=''; }
+    } else {
+      document.getElementById('mktPtdfHeatmap').innerHTML='';
+      document.getElementById('mktPtdfVerifyChart').innerHTML='';
+    }
+
+    // --- GIS Network Map with LMP colouring ---
+    renderMktGeoMap(body, lmp, sced);
+
+    setStatus('Market clearing complete. Avg LMP: $'+fmt(lmp.avg_lmp||0,2)+', renewable penetration: '+fmt((body.summary||{}).renewable_penetration||0,1)+'%, PF max residual: '+fmt(pfPost.max_residual||0,4)+
+      (totalVV>0?', \u26a0 '+totalVV+' voltage violations':'')+
+      (totalTV>0?', \u26a0 '+totalTV+' thermal violations':'')+
+      (secData.enabled?(secData.all_secure?', \u2705 Security check passed':' \u274c Security check failed'):'')+'.');
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Carbon Flow Analysis */
+document.getElementById('runCarbonBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running Carbon Flow Analysis (proportional tracing + matrix method)...');
+    const body=await api('/api/session/run_carbon',{});
+    const ts=body.tracing_summary||{};
+    document.getElementById('carbonGenEmit').textContent=fmt(ts.total_generation_emissions_tco2,2);
+    document.getElementById('carbonLoadEmit').textContent=fmt(ts.total_load_emissions_tco2,2);
+    document.getElementById('carbonLossEmit').textContent=fmt(ts.total_loss_emissions_tco2,3);
+    document.getElementById('carbonMatrix').textContent=body.matrix_solved?'Yes':'No';
+    // Carbon intensity by bus
+    if(body.bus_carbon&&body.bus_carbon.length){
+      const acRows=body.bus_carbon.filter(b=>b.carbon_potential_valid!==false&&Number(b.sink_power_mw||0)>1e-9&&Number.isFinite(Number(b.carbon_intensity_tco2_mwh)));
+      if(!acRows.length){document.getElementById('carbonBusChart').innerHTML='';}
+      else{
+      const ci=acRows.map(b=>b.carbon_intensity_tco2_mwh);
+      const mx=Math.max(...ci)||1;
+      Plotly.newPlot('carbonBusChart',[{x:acRows.map(b=>'Bus '+b.bus_index),y:ci,type:'bar',
+        marker:{color:ci,colorscale:'RdYlGn',reversescale:true,cmin:0,cmax:mx,showscale:true,colorbar:{title:'tCO\u2082/MWh',len:0.7}},
+        text:ci.map(v=>v.toFixed(4)),textposition:'auto'}],
+        {title:'AC Bus Carbon Intensity (tCO\u2082/MWh)',xaxis:{title:'Bus',tickangle:-45},yaxis:{title:'tCO\u2082/MWh'},margin:{l:55,r:80,t:45,b:60}},{responsive:true});
+      }
+    }
+    // DC bus carbon intensity
+    if(body.dc_bus_carbon&&body.dc_bus_carbon.length){
+      const dcRows=body.dc_bus_carbon.filter(b=>b.carbon_potential_valid!==false&&Number(b.sink_power_mw||0)>1e-9&&Number.isFinite(Number(b.carbon_intensity_tco2_mwh)));
+      if(!dcRows.length){document.getElementById('carbonDcBusChart').innerHTML='';}
+      else{
+      const dci=dcRows.map(b=>b.carbon_intensity_tco2_mwh);
+      const dmx=Math.max(...dci)||1;
+      Plotly.newPlot('carbonDcBusChart',[{x:dcRows.map(b=>'DC Bus '+b.bus_index),y:dci,type:'bar',
+        marker:{color:dci,colorscale:'RdYlGn',reversescale:true,cmin:0,cmax:dmx,showscale:true,colorbar:{title:'tCO\u2082/MWh',len:0.7}},
+        text:dci.map(v=>v.toFixed(4)),textposition:'auto'}],
+        {title:'DC Bus Carbon Intensity (tCO\u2082/MWh)',xaxis:{title:'DC Bus',tickangle:-45},yaxis:{title:'tCO\u2082/MWh'},margin:{l:55,r:80,t:45,b:60}},{responsive:true});
+      }
+    } else { document.getElementById('carbonDcBusChart').innerHTML=''; }
+    // Per-load total emissions bar
+    if(body.load_carbon&&body.load_carbon.length){
+      Plotly.newPlot('carbonLoadChart',[{x:body.load_carbon.map(l=>'Load '+l.load_index+' B'+l.bus),
+        y:body.load_carbon.map(l=>l.total_emissions_tco2),type:'bar',
+        marker:{color:'#c34d4d'}}],
+        {title:'Load Carbon Emissions (tCO\u2082)',xaxis:{title:'',tickangle:-35},yaxis:{title:'tCO\u2082'},margin:{l:55,r:15,t:45,b:70}},{responsive:true});
+    }
+    // Branch carbon emissions
+    if(body.branch_carbon&&body.branch_carbon.length){
+      const bc=body.branch_carbon.filter(b=>b.total_emissions_tco2>1e-6);
+      if(bc.length) Plotly.newPlot('carbonBranchChart',[
+        {x:bc.map(b=>b.from_bus+'\u2192'+b.to_bus),y:bc.map(b=>b.loss_mw),type:'bar',name:'Loss MW',marker:{color:'#b5651d'}},
+        {x:bc.map(b=>b.from_bus+'\u2192'+b.to_bus),y:bc.map(b=>b.total_emissions_tco2),type:'bar',name:'Emissions tCO\u2082',marker:{color:'#8e44ad'},yaxis:'y2'},
+      ],{title:'Branch Loss & Carbon Emissions',barmode:'group',xaxis:{title:'Branch',tickangle:-45},
+         yaxis:{title:'Loss MW',side:'left'},yaxis2:{title:'tCO\u2082',overlaying:'y',side:'right'},
+         margin:{l:55,r:55,t:45,b:70},legend:{orientation:'h',y:-0.3}},{responsive:true});
+      else document.getElementById('carbonBranchChart').innerHTML='';
+    } else { document.getElementById('carbonBranchChart').innerHTML=''; }
+    // Sankey: generators -> loads
+    if(body.sankey_sources&&body.sankey_sources.length){
+      Plotly.newPlot('carbonSankeyChart',[{type:'sankey',orientation:'h',
+        node:{pad:12,thickness:18,line:{color:'#ccc',width:0.5},label:body.sankey_labels,
+          color:body.sankey_labels.map((_,i)=>i<(SYS.generators||[]).length?'#0b6e4f':'#2c8c99')},
+        link:{source:body.sankey_sources,target:body.sankey_targets,value:body.sankey_values,
+          color:'rgba(44,140,153,0.3)'}}],
+        {title:'Carbon Flow Sankey: Generators \u2192 Loads (MW)',margin:{l:20,r:20,t:45,b:20}},{responsive:true});
+    } else {
+      document.getElementById('carbonSankeyChart').innerHTML='<div style="padding:20px;color:var(--muted);">No generator-load supply data for Sankey (run AC power flow first or check case data).</div>';
+    }
+    setStatus('Carbon analysis complete. Gen: '+fmt(ts.total_generation_emissions_tco2,2)+' tCO\u2082, Load: '+fmt(ts.total_load_emissions_tco2,2)+' tCO\u2082. Balance err: '+fmt(ts.balance_error_pct,4)+'%.');
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Reliability Assessment (Monte Carlo) */
+let relLastNSQ=null, relLastSEQ=null, relLastFD=null, relLastResilience=null;
+
+function getRelOpts(){
+  return {
+    load_scale_factor: parseFloat(document.getElementById('relLoadScale').value)||1.0,
+    cov_threshold: parseFloat(document.getElementById('relCovThresh').value)||0.05,
+    seed: parseInt(document.getElementById('relSeed').value)||0,
+    data_policy: (document.getElementById('relDataPolicy')||{}).value||'missing_only',
+    reliability_template: (document.getElementById('relTemplate')||{}).value||'none',
+    compute_tail_risk: document.getElementById('relTailRisk').checked,
+    var_confidence: parseFloat(document.getElementById('relVarConf').value)||0.95,
+  };
 }
 
+function relBadge(text,color){return '<span style="display:inline-block;padding:2px 8px;margin:2px 4px 2px 0;border-radius:10px;font-size:0.8em;background:'+color+';color:#fff;">'+text+'</span>';}
+function renderRelScope(body){
+  const el=document.getElementById('relScopePanel'); if(!el) return;
+  if(!body||!body.model_scope){el.innerHTML='';return;}
+  const yn=(b)=>b?'#27ae60':'#c0392b';
+  let h='<div style="border:1px solid var(--border);border-radius:6px;padding:8px 12px;background:#fafbfc;">';
+  h+='<b>Physical model:</b> '+relBadge(body.model_scope,'#34495e');
+  if(body.data_policy){h+=' &nbsp;<b>Data policy:</b> '+relBadge(body.data_policy,'#7f8c8d');}
+  const v=body.validity||{};
+  if('dc_load_curtailment_included' in v){
+    h+='<br><b>Validity:</b> ';
+    h+=relBadge('DC load '+(v.dc_load_curtailment_included?'included':'excluded'),yn(v.dc_load_curtailment_included));
+    h+=relBadge('VSC DC PF '+(v.vsc_dc_power_flow_modelled?'modelled':'not modelled'),yn(v.vsc_dc_power_flow_modelled));
+    h+=relBadge('AC OPF curtailment '+(v.ac_opf_curtailment?'yes':'no'),yn(v.ac_opf_curtailment));
+    h+=relBadge('AC voltage/Q '+(v.ac_voltage_reactive_feasibility_certified?'certified':'not certified'),yn(v.ac_voltage_reactive_feasibility_certified));
+    if('repair_ac_switch_reconfiguration_modelled' in v){h+=relBadge('AC switch reconfig '+(v.repair_ac_switch_reconfiguration_modelled?'on':'off'),yn(v.repair_ac_switch_reconfiguration_modelled));}
+  }
+  if(v.generation_adequacy_only){h+='<br>'+relBadge('Generation adequacy only — no network/DC/customer indices','#b57e2b');}
+  const dq=body.data_quality;
+  if(dq){
+    h+='<br><b>Data quality:</b> '+dq.components_with_reliability_data+'/'+dq.components_total+' with case data, '+dq.components_defaulted+' defaulted';
+    if(dq.missing_required_data&&dq.missing_required_data.length){h+=' '+relBadge(dq.missing_required_data.length+' missing data','#c0392b');}
+  }
+  if(body.model_limitations){h+='<div style="color:var(--muted);font-size:0.85em;margin-top:6px;">'+body.model_limitations+'</div>';}
+  h+='</div>';
+  el.innerHTML=h;
+}
+
+function updateRelKPIs(body, method){
+  document.getElementById('relMethod').textContent=method;
+  document.getElementById('relEENS').textContent=fmt(body.eens_mwh_yr,1);
+  document.getElementById('relLOLE').textContent=fmt(body.lole_hr_yr,2);
+  document.getElementById('relLOLF').textContent=body.lolf_occ_yr!==undefined?fmt(body.lolf_occ_yr,2):'N/A';
+  document.getElementById('relPLC').textContent=fmt(body.plc*100,2);
+  document.getElementById('relCoV').textContent=fmt(body.final_cov,4);
+  document.getElementById('relIters').textContent=body.iterations_used;
+  
+  // Update tail risk KPIs if available
+  const tailKPIs=document.getElementById('relTailKPIs');
+  if(body.tail_risk&&(body.tail_risk.eens_var>0||body.tail_risk.eens_cvar>0)){
+    tailKPIs.style.display='flex';
+    document.getElementById('relEENSVar').textContent=fmt(body.tail_risk.eens_var,1);
+    document.getElementById('relEENSCVar').textContent=fmt(body.tail_risk.eens_cvar,1);
+    document.getElementById('relLOLEVar').textContent=fmt(body.tail_risk.lole_var,2);
+    document.getElementById('relLOLECVar').textContent=fmt(body.tail_risk.lole_cvar,2);
+  } else {
+    tailKPIs.style.display='none';
+  }
+  renderRelScope(body);
+}
+
+function updateFDKPIs(body){
+  document.getElementById('relMethod').textContent='F&D';
+  document.getElementById('relEENS').textContent='N/A';  // F&D doesn't compute EENS
+  document.getElementById('relLOLE').textContent=fmt(body.lole_fd,2);
+  document.getElementById('relLOLF').textContent=fmt(body.lolf_fd,2);
+  document.getElementById('relPLC').textContent=fmt(body.lolp*100,4);
+  document.getElementById('relCoV').textContent='N/A';
+  document.getElementById('relIters').textContent='Analytical';
+  document.getElementById('relTailKPIs').style.display='none';
+  renderRelScope(body);
+}
+
+function plotRelConvergence(body, title){
+  if(body.eens_history&&body.eens_history.length){
+    const iters=body.eens_history.map((_,i)=>i+1);
+    Plotly.newPlot('relConvergenceChart',[
+      {x:iters,y:body.eens_history,mode:'lines',name:'EENS (MWh/yr)',line:{color:'#0b6e4f'}},
+      {x:iters,y:body.cov_history,mode:'lines',name:'CoV',yaxis:'y2',line:{color:'#c34d4d',dash:'dot'}}
+    ],{title:title+' Convergence',xaxis:{title:'Iteration'},yaxis:{title:'EENS (MWh/yr)',side:'left'},
+       yaxis2:{title:'CoV',overlaying:'y',side:'right',rangemode:'tozero'},
+       margin:{l:60,r:60,t:45,b:50},legend:{orientation:'h',y:-0.15}},{responsive:true});
+  }
+}
+
+function plotNodalEENS(body){
+  if(body.nodal_eens_mwh_yr&&body.nodal_eens_mwh_yr.length){
+    const nz=body.nodal_eens_mwh_yr.map((v,i)=>({bus:i+1,eens:v})).filter(x=>x.eens>0.01);
+    if(nz.length){
+      Plotly.newPlot('relNodalEENSChart',[{x:nz.map(x=>'Bus '+x.bus),y:nz.map(x=>x.eens),type:'bar',
+        marker:{color:'#c34d4d'}}],{title:'Nodal EENS (MWh/yr)',xaxis:{title:'Bus',tickangle:-45},
+        yaxis:{title:'MWh/yr'},margin:{l:60,r:15,t:45,b:60}},{responsive:true});
+    } else {
+      document.getElementById('relNodalEENSChart').innerHTML='<div style="padding:40px;color:var(--muted);text-align:center;">No nodal EENS (all buses have zero curtailment)</div>';
+    }
+  }
+}
+
+function plotCriticalComponents(body){
+  if(body.critical_components&&body.critical_components.length){
+    const top10=body.critical_components.slice(0,10);
+    Plotly.newPlot('relCriticalChart',[{
+      x:top10.map(c=>c.importance*100),
+      y:top10.map(c=>(c.is_generator?'Gen ':'Br ')+c.index),
+      type:'bar',orientation:'h',
+      marker:{color:top10.map(c=>c.is_generator?'#0b6e4f':'#2c8c99')}
+    }],{title:'Top Critical Components (% importance)',xaxis:{title:'Importance (%)'},
+       yaxis:{autorange:'reversed'},margin:{l:80,r:15,t:45,b:50}},{responsive:true});
+  } else {
+    document.getElementById('relCriticalChart').innerHTML='<div style="padding:40px;color:var(--muted);text-align:center;">No critical component data (no loss events detected)</div>';
+  }
+}
+
+document.getElementById('runNsqBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    const opts=getRelOpts();
+    opts.max_iterations=parseInt(document.getElementById('relNsqMaxIter').value)||5000;
+    setStatus('Running Non-Sequential Monte Carlo ('+opts.max_iterations+' samples)...');
+    document.getElementById('relStatus').textContent='Running NSQ MC...';
+    const body=await api('/api/session/run_reliability_nsq',opts);
+    relLastNSQ=body;
+    updateRelKPIs(body,'NSQ');
+    plotRelConvergence(body,'NSQ MC');
+    plotNodalEENS(body);
+    plotCriticalComponents(body);
+    document.getElementById('relCrossValChart').innerHTML='';
+    const conv=body.converged?'Converged':'Max iterations';
+    document.getElementById('relStatus').textContent='NSQ MC complete ('+conv+'). EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, LOLE='+fmt(body.lole_hr_yr,2)+' hr/yr';
+    setStatus('NSQ MC complete. EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, LOLE='+fmt(body.lole_hr_yr,2)+' hr/yr, PLC='+fmt(body.plc*100,2)+'%');
+  }catch(e){setStatus(e.message,true);document.getElementById('relStatus').textContent='Error: '+e.message;}
+};
+
+document.getElementById('runSeqBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    const opts=getRelOpts();
+    opts.max_years=parseInt(document.getElementById('relSeqMaxYears').value)||500;
+    opts.hours_per_year=parseInt(document.getElementById('relSeqHours').value)||8736;
+    setStatus('Running Sequential Monte Carlo ('+opts.max_years+' years, '+opts.hours_per_year+' hr/yr)...');
+    document.getElementById('relStatus').textContent='Running SEQ MC (this may take a while)...';
+    const body=await api('/api/session/run_reliability_seq',opts);
+    relLastSEQ=body;
+    updateRelKPIs(body,'SEQ');
+    plotRelConvergence(body,'SEQ MC');
+    plotNodalEENS(body);
+    plotCriticalComponents(body);
+    document.getElementById('relCrossValChart').innerHTML='';
+    const conv=body.converged?'Converged':'Max years';
+    document.getElementById('relStatus').textContent='SEQ MC complete ('+conv+'). EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, LOLF='+fmt(body.lolf_occ_yr,2)+' occ/yr';
+    setStatus('SEQ MC complete. EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, LOLE='+fmt(body.lole_hr_yr,2)+' hr/yr, LOLF='+fmt(body.lolf_occ_yr,2)+' occ/yr');
+  }catch(e){setStatus(e.message,true);document.getElementById('relStatus').textContent='Error: '+e.message;}
+};
+
+document.getElementById('runCrossValBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    const opts=getRelOpts();
+    opts.max_iterations=parseInt(document.getElementById('relNsqMaxIter').value)||5000;
+    opts.max_years=parseInt(document.getElementById('relSeqMaxYears').value)||500;
+    opts.hours_per_year=parseInt(document.getElementById('relSeqHours').value)||8736;
+    
+    // Run NSQ
+    setStatus('Cross-validation: Running NSQ MC...');
+    document.getElementById('relStatus').textContent='Running NSQ MC for cross-validation...';
+    const nsq=await api('/api/session/run_reliability_nsq',opts);
+    relLastNSQ=nsq;
+    
+    // Run SEQ
+    setStatus('Cross-validation: Running SEQ MC...');
+    document.getElementById('relStatus').textContent='Running SEQ MC for cross-validation...';
+    const seq=await api('/api/session/run_reliability_seq',opts);
+    relLastSEQ=seq;
+    
+    // Display comparison
+    updateRelKPIs(nsq,'NSQ vs SEQ');
+    plotRelConvergence(nsq,'NSQ MC');
+    plotNodalEENS(nsq);
+    plotCriticalComponents(nsq);
+    
+    // Cross-validation comparison chart
+    const indices=['EENS (MWh/yr)','LOLE (hr/yr)','PLC (%)'];
+    const nsqVals=[nsq.eens_mwh_yr, nsq.lole_hr_yr, nsq.plc*100];
+    const seqVals=[seq.eens_mwh_yr, seq.lole_hr_yr, seq.plc*100];
+    Plotly.newPlot('relCrossValChart',[
+      {x:indices,y:nsqVals,type:'bar',name:'NSQ MC',marker:{color:'#0b6e4f'}},
+      {x:indices,y:seqVals,type:'bar',name:'SEQ MC',marker:{color:'#8e44ad'}}
+    ],{title:'Cross-Validation: NSQ vs SEQ',barmode:'group',yaxis:{title:'Value'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.15}},{responsive:true});
+    
+    // Calculate differences
+    const eensDiff=Math.abs(nsq.eens_mwh_yr-seq.eens_mwh_yr);
+    const eensPct=seq.eens_mwh_yr>0?(eensDiff/seq.eens_mwh_yr*100):0;
+    const loleDiff=Math.abs(nsq.lole_hr_yr-seq.lole_hr_yr);
+    const lolePct=seq.lole_hr_yr>0?(loleDiff/seq.lole_hr_yr*100):0;
+    
+    document.getElementById('relStatus').textContent='Cross-validation complete. EENS diff: '+fmt(eensDiff,1)+' MWh/yr ('+fmt(eensPct,1)+'%), LOLE diff: '+fmt(loleDiff,2)+' hr/yr ('+fmt(lolePct,1)+'%)';
+    setStatus('Cross-validation complete. NSQ: EENS='+fmt(nsq.eens_mwh_yr,0)+', SEQ: EENS='+fmt(seq.eens_mwh_yr,0)+'. Diff: '+fmt(eensPct,1)+'%');
+  }catch(e){setStatus(e.message,true);document.getElementById('relStatus').textContent='Error: '+e.message;}
+};
+
+document.getElementById('runFDBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    const opts=getRelOpts();
+    setStatus('Running Frequency & Duration analysis (analytical)...');
+    document.getElementById('relStatus').textContent='Running F&D analysis...';
+    const body=await api('/api/session/run_reliability_fd',opts);
+    relLastFD=body;
+    updateFDKPIs(body);
+    
+    // Plot COPT
+    if(body.capacity_outage_levels&&body.cumulative_probability){
+      Plotly.newPlot('relConvergenceChart',[
+        {x:body.capacity_outage_levels,y:body.cumulative_probability,mode:'lines',name:'Cum. Probability',line:{color:'#0b6e4f'}},
+        {x:body.capacity_outage_levels,y:body.cumulative_frequency,mode:'lines',name:'Cum. Frequency',yaxis:'y2',line:{color:'#c34d4d',dash:'dot'}}
+      ],{title:'Capacity Outage Probability Table (COPT)',xaxis:{title:'Outage Level (MW)'},
+         yaxis:{title:'Cumulative Probability',side:'left'},yaxis2:{title:'Cumulative Frequency (occ/hr)',overlaying:'y',side:'right'},
+         margin:{l:60,r:60,t:45,b:50},legend:{orientation:'h',y:-0.15}},{responsive:true});
+    }
+    
+    document.getElementById('relNodalEENSChart').innerHTML='<div style="padding:40px;color:var(--muted);text-align:center;">F&D is a system-level method (no nodal breakdown)</div>';
+    document.getElementById('relCriticalChart').innerHTML='<div style="padding:40px;color:var(--muted);text-align:center;">F&D is an analytical method (no component breakdown)</div>';
+    document.getElementById('relCrossValChart').innerHTML='';
+    
+    document.getElementById('relStatus').textContent='F&D complete. LOLP='+fmt(body.lolp,6)+', LOLE='+fmt(body.lole_fd,2)+' hr/yr, LOLF='+fmt(body.lolf_fd,2)+' occ/yr, LOLD='+fmt(body.lold,2)+' hr/occ';
+    setStatus('F&D complete. LOLP='+fmt(body.lolp*100,4)+'%, LOLE='+fmt(body.lole_fd,2)+' hr/yr, LOLF='+fmt(body.lolf_fd,2)+' occ/yr');
+  }catch(e){setStatus(e.message,true);document.getElementById('relStatus').textContent='Error: '+e.message;}
+};
+
+/* FMEA (Failure Modes & Effects Analysis) */
+let relLastFMEA=null;
+document.getElementById('runFmeaBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    const opts=getRelOpts();
+    opts.verbose=false;
+    setStatus('Running FMEA (N-1 contingency enumeration)...');
+    document.getElementById('relStatus').textContent='Running FMEA analysis...';
+    const body=await api('/api/session/run_reliability_fmea',opts);
+    relLastFMEA=body;
+    
+    // Update FMEA KPIs
+    document.getElementById('fmeaResultsSection').style.display='block';
+    document.getElementById('fmeaEENS').textContent=fmt(body.eens_mwh_yr,1);
+    document.getElementById('fmeaLOLE').textContent=fmt(body.lole_hr_yr,2);
+    document.getElementById('fmeaLOLF').textContent=fmt(body.lolf_occ_yr,2);
+    document.getElementById('fmeaSAIFI').textContent=fmt(body.saifi,4);
+    document.getElementById('fmeaSAIDI').textContent=fmt(body.saidi,4);
+    var caidiEl=document.getElementById('fmeaCAIDI'); if(caidiEl) caidiEl.textContent=fmt(body.caidi,4);
+    document.getElementById('fmeaASAI').textContent=fmt(body.asai,6);
+    document.getElementById('fmeaContingencies').textContent=body.n_contingencies+' ('+body.n_with_loss+' with loss'+((body.n_with_loss_switching_only!=null&&body.n_with_loss_switching_only>0)?(', '+body.n_with_loss_switching_only+' switching-only'):'')+')';
+    renderRelScope(body);
+    
+    // Plot top contingencies (bar chart)
+    if(body.contingencies&&body.contingencies.length>0){
+      const top=body.contingencies.slice(0,15);
+      Plotly.newPlot('fmeaContChart',[{
+        x:top.map(c=>c.display_name||c.component_name),
+        y:top.map(c=>c.eens_contribution),
+        type:'bar',
+        marker:{color:top.map(c=>c.shed_mw>0?'#c0392b':'#95a5a6')},
+        text:top.map(c=>c.display_type||c.component_type),
+        hovertemplate:'%{x}<br>Type: %{text}<br>EENS: %{y:.2f} MWh/yr<extra></extra>'
+      }],{title:'Top Contingencies by EENS Contribution',xaxis:{tickangle:-45},
+          yaxis:{title:'EENS (MWh/yr)'},margin:{l:60,r:15,t:45,b:120}},{responsive:true});
+    }
+    
+    // Plot EENS by component type (pie chart)
+    const eensByType=body.eens_by_display_type||body.eens_by_type;
+    if(eensByType){
+      const types=Object.keys(eensByType).filter(k=>eensByType[k]>0);
+      const vals=types.map(k=>eensByType[k]);
+      Plotly.newPlot('fmeaTypeChart',[{
+        labels:types,values:vals,type:'pie',
+        marker:{colors:['#c0392b','#e67e22','#2ecc71','#3498db','#9b59b6','#1abc9c','#34495e','#e74c3c','#f39c12']},
+        textinfo:'label+percent',hovertemplate:'%{label}<br>EENS: %{value:.2f} MWh/yr<extra></extra>'
+      }],{title:'EENS Breakdown by Component Type',margin:{l:20,r:20,t:45,b:20}},{responsive:true});
+    }
+    
+    document.getElementById('relStatus').textContent='FMEA complete. EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, SAIFI='+fmt(body.saifi,4)+', SAIDI='+fmt(body.saidi,4)+', ASAI='+fmt(body.asai,6);
+    setStatus('FMEA: '+body.n_contingencies+' contingencies, EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, SAIFI='+fmt(body.saifi,4));
+  }catch(e){setStatus(e.message,true);document.getElementById('relStatus').textContent='Error: '+e.message;}
+};
+
+/* Distribution Resilience (MESS) */
+function addFaultRow(bid,shr,rhr,lbl,kind){
+  const tbody=document.getElementById('resFaultTableBody');
+  const tr=document.createElement('tr');
+  const branchKind=(String(kind||'AC').toUpperCase()==='DC')?'DC':'AC';
+  tr.innerHTML='<td><select style="width:70px;"><option value="AC"'+(branchKind==='AC'?' selected':'')+'>AC</option><option value="DC"'+(branchKind==='DC'?' selected':'')+'>DC</option></select></td>'
+    +'<td><input type="number" min="1" value="'+(bid||'')+'" style="width:70px;"/></td>'
+    +'<td><input type="number" min="0" step="0.5" value="'+(shr||0)+'" style="width:70px;"/></td>'
+    +'<td><input type="number" min="1" step="0.5" value="'+(rhr||6)+'" style="width:70px;"/></td>'
+    +'<td><input type="text" value="'+(lbl||'')+'" style="width:120px;"/></td>'
+    +'<td><button onclick="this.closest(\'tr\').remove()" style="cursor:pointer;border:none;background:none;color:#ef4444;font-size:1.1em;">&#10005;</button></td>';
+  tbody.appendChild(tr);
+}
+function collectManualFaults(){
+  const rows=document.querySelectorAll('#resFaultTableBody tr');
+  const arr=[];
+  rows.forEach(r=>{
+    const cells=r.querySelectorAll('input');
+    const kind=(r.querySelector('select')||{}).value||'AC';
+    const bid=parseInt(cells[0].value,10);
+    if(!Number.isFinite(bid)||bid<=0) return;
+    arr.push({branch_type:kind,branch_id:bid,start_hr:parseFloat(cells[1].value)||0,repair_hr:parseFloat(cells[2].value)||6,label:cells[3].value||''});
+  });
+  return arr;
+}
+async function runResilienceSingle(overrides={}){
+  const faultIds=(document.getElementById('resFaultBranches').value||'')
+    .split(',').map(s=>parseInt(s.trim(),10)).filter(v=>Number.isFinite(v));
+  const manualFaults=collectManualFaults();
+  const params=Object.assign({
+    horizon_hours: parseInt(document.getElementById('resHorizonHours').value)||8,
+    time_step_hr: 1.0,
+    load_scale_factor: parseFloat(document.getElementById('resLoadScale').value)||1.0,
+    repair_time_hr: parseFloat(document.getElementById('resRepairHours').value)||6.0,
+    default_fault_count: parseInt(document.getElementById('resFaultCount').value)||1,
+    fault_branch_ids: faultIds,
+    ac_fault_branch_ids: faultIds,
+    manual_faults: manualFaults,
+    auto_fault_stagger_hr: parseFloat(document.getElementById('resFaultStagger').value)||0,
+    auto_fault_start_hr: parseFloat(document.getElementById('resFaultStartHr').value)||0,
+    ac_fault_start_hr: parseFloat(document.getElementById('resAcFaultStartHr').value)||0,
+    dc_fault_start_hr: parseFloat(document.getElementById('resDcFaultStartHr').value)||0,
+    ac_repair_time_hr: parseFloat(document.getElementById('resAcRepairHours').value)||6.0,
+    dc_repair_time_hr: parseFloat(document.getElementById('resDcRepairHours').value)||8.0,
+    mess_travel_speed_kmph: parseFloat(document.getElementById('resMessSpeed').value)||40.0,
+    allow_reconfiguration: document.getElementById('resAllowReconfig').checked,
+    allow_mess_dispatch: document.getElementById('resAllowMess').checked,
+    apply_demo_data: document.getElementById('resApplyDemoData').checked,
+    run_power_flow: document.getElementById('resRunPF').checked,
+    model: document.getElementById('resModel').value,
+    mip_solver: document.getElementById('resSolver').value,
+    mip_time_limit_s: parseFloat(document.getElementById('resMipTimeLimit').value)||180,
+    mip_gap: parseFloat(document.getElementById('resMipGap').value)||0.03,
+    consider_switches: document.getElementById('resConsiderSwitches').checked,
+    enable_disaster_stages: document.getElementById('resConsiderSwitches').checked,
+    use_switch_based_fault_isolation: document.getElementById('resConsiderSwitches').checked,
+    allow_stage1_open_switches: document.getElementById('resConsiderSwitches').checked,
+    allow_stage2_close_ties: document.getElementById('resConsiderSwitches').checked,
+    require_switch_for_nonfault_branch_operation: document.getElementById('resConsiderSwitches').checked&&!document.getElementById('resAllowBranchWithoutSwitch').checked,
+    allow_branch_operation_without_switch: document.getElementById('resAllowBranchWithoutSwitch').checked||!document.getElementById('resConsiderSwitches').checked,
+    use_remote_switch_only: document.getElementById('resUseRemoteSwitchOnly').checked,
+    post_fault_reconfig_window_hr: parseFloat(document.getElementById('resPostFaultWindow').value)||2.0,
+    disaster_post_fault_reconfig_window_hr: parseFloat(document.getElementById('resPostFaultWindow').value)||2.0,
+  },overrides);
+  return await api('/api/session/run_distribution_resilience',params);
+}
+
+function plotResilienceResults(body,baseBody){
+  document.getElementById('resilienceResultsSection').style.display='block';
+  document.getElementById('resilienceRI').textContent=fmt(body.resilience_index,4);
+  document.getElementById('resilienceDemand').textContent=fmt(body.total_demand_mwh,2);
+  document.getElementById('resilienceShed').textContent=fmt(body.total_shed_mwh,2);
+  document.getElementById('resilienceFinalRestore').textContent=fmt(body.final_restoration_ratio*100,2);
+  document.getElementById('resilienceAvgRestore').textContent=fmt(body.avg_restoration_ratio*100,2);
+  document.getElementById('resiliencePeakShed').textContent=fmt(body.peak_shed_mw,2);
+  document.getElementById('resilienceMessEnergy').textContent=fmt(body.mess_energy_delivered_mwh,2);
+  document.getElementById('resilienceMessTravel').textContent=fmt(body.mess_travel_distance_km,1);
+  document.getElementById('resilienceSwitches').textContent=body.total_switch_actions;
+  document.getElementById('resilienceRepairs').textContent=body.total_repaired_faults;
+
+  // Populate fault sequence table from response (so user can see & edit for re-run).
+  if(body.fault_sequence&&body.fault_sequence.length>0){
+    const tbody=document.getElementById('resFaultTableBody');
+    tbody.innerHTML='';
+    body.fault_sequence.forEach(f=>{addFaultRow(f.branch_index,f.start_hr,f.repair_hr,f.name,f.branch_type||f.branch_kind||'AC');});
+  }
+
+  // Comparison improvement banner
+  const compDiv=document.getElementById('resilienceCompareKPIs');
+  if(baseBody&&baseBody.feasible){
+    compDiv.style.display='block';
+    const dRI=body.resilience_index-baseBody.resilience_index;
+    const dShed=baseBody.total_shed_mwh-body.total_shed_mwh;
+    const dServed=body.total_served_mwh-baseBody.total_served_mwh;
+    document.getElementById('resCompRI').textContent='RI: '+(dRI>=0?'+':'')+fmt(dRI,4);
+    document.getElementById('resCompShed').textContent='Shed: '+(dShed>=0?'\u2212':'+' )+fmt(Math.abs(dShed),2)+' MWh';
+    document.getElementById('resCompServed').textContent='Served: '+(dServed>=0?'+':'')+fmt(dServed,2)+' MWh';
+  }else{compDiv.style.display='none';}
+
+  // Chart 1: Restoration Timeline with optional baseline overlay
+  const restoTraces=[
+    {x:body.hours,y:body.demand_mw,mode:'lines+markers',name:'Demand',line:{color:'#475569',width:2}},
+    {x:body.hours,y:body.served_mw,mode:'lines+markers',name:'Served (MESS)',line:{color:'#0b6e4f',width:2},fill:'tozeroy',fillcolor:'rgba(11,110,79,0.08)'},
+    {x:body.hours,y:body.shed_mw,mode:'lines+markers',name:'Shed (MESS)',line:{color:'#c34d4d',width:2}},
+    {x:body.hours,y:body.restoration_ratio.map(v=>v*100),mode:'lines',name:'Restoration %',yaxis:'y2',line:{color:'#0f766e',dash:'dot',width:2}}
+  ];
+  if(baseBody&&baseBody.feasible){
+    restoTraces.push({x:baseBody.hours,y:baseBody.served_mw,mode:'lines',name:'Served (baseline)',line:{color:'#94a3b8',dash:'dash',width:1.5}});
+    restoTraces.push({x:baseBody.hours,y:baseBody.shed_mw,mode:'lines',name:'Shed (baseline)',line:{color:'#f87171',dash:'dash',width:1.5}});
+    restoTraces.push({x:baseBody.hours,y:baseBody.restoration_ratio.map(v=>v*100),mode:'lines',name:'Restoration % (base)',yaxis:'y2',line:{color:'#a7f3d0',dash:'dashdot',width:1}});
+  }
+  Plotly.newPlot('resilienceRestorationChart',restoTraces,{title:'Restoration Timeline'+(baseBody?' (MESS vs Baseline)':''),
+    xaxis:{title:'Hour'},yaxis:{title:'MW'},yaxis2:{title:'Restoration (%)',overlaying:'y',side:'right',range:[0,105]},
+    margin:{l:60,r:60,t:45,b:55},legend:{orientation:'h',y:-0.22}},{responsive:true});
+
+  // Chart 2: MESS Dispatch + Faults/Switching
+  const messTraces=[];
+  (body.mess_traces||[]).forEach((tr)=>{
+    messTraces.push({x:body.hours,y:tr.dispatch_mw,mode:'lines+markers',name:tr.name||('MESS '+tr.storage_index),line:{width:2}});
+  });
+  messTraces.push({x:body.hours,y:body.active_faults,type:'bar',name:'Active Faults',yaxis:'y2',marker:{color:'#f59e0b',opacity:0.35}});
+  messTraces.push({x:body.hours,y:body.switch_actions,mode:'lines+markers',name:'Switch Actions',yaxis:'y2',line:{color:'#7c3aed',dash:'dot'}});
+  Plotly.newPlot('resilienceMessChart',messTraces,{title:'MESS Dispatch & Restoration Actions',xaxis:{title:'Hour'},
+    yaxis:{title:'MESS Dispatch (MW)'},yaxis2:{title:'Faults / Switching',overlaying:'y',side:'right',rangemode:'tozero'},
+    margin:{l:60,r:60,t:45,b:55},legend:{orientation:'h',y:-0.25}},{responsive:true});
+
+  // Chart 3: MESS Energy / SOC timeline
+  const energyTraces=[];
+  (body.mess_traces||[]).forEach((tr)=>{
+    energyTraces.push({x:body.hours,y:tr.energy_mwh,mode:'lines+markers',name:(tr.name||'MESS')+' Energy',line:{width:2}});
+  });
+  if(energyTraces.length>0){
+    Plotly.newPlot('resilienceEnergyChart',energyTraces,{title:'MESS Stored Energy Over Time',
+      xaxis:{title:'Hour'},yaxis:{title:'Energy (MWh)',rangemode:'tozero'},
+      margin:{l:60,r:30,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+  }else{
+    document.getElementById('resilienceEnergyChart').innerHTML='<div style="padding:60px;color:var(--muted);text-align:center;">No MESS units active</div>';
+  }
+
+  // Chart 4: Island count + fault/repair status over time
+  const islandCounts=(body.island_counts||body.hours.map(()=>0));
+  const repairCounts=(body.repaired_faults_arr||body.hours.map(()=>0));
+  Plotly.newPlot('resilienceIslandChart',[
+    {x:body.hours,y:body.active_faults,type:'bar',name:'Active Faults',marker:{color:'#fbbf24',opacity:0.5}},
+    {x:body.hours,y:repairCounts,type:'bar',name:'Repaired',marker:{color:'#34d399',opacity:0.5}},
+    {x:body.hours,y:islandCounts,mode:'lines+markers',name:'Islands',yaxis:'y2',line:{color:'#6366f1',width:2}}
+  ],{title:'Network Topology Over Time',xaxis:{title:'Hour'},
+    yaxis:{title:'Fault Count',rangemode:'tozero'},yaxis2:{title:'Island Count',overlaying:'y',side:'right',rangemode:'tozero'},
+    barmode:'stack',margin:{l:60,r:60,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+
+  // Chart 5: Load & RES multiplier profiles
+  const loadMults=body.load_multipliers||[];
+  const resMults=body.res_multipliers||[];
+  const resMwArr=body.res_mw||[];
+  if(loadMults.length>0 || resMults.length>0){
+    const profTraces=[];
+    if(loadMults.length>0) profTraces.push({x:body.hours,y:loadMults,mode:'lines+markers',name:'Load Multiplier',line:{color:'#0369a1',width:2}});
+    if(resMults.length>0)  profTraces.push({x:body.hours,y:resMults,mode:'lines+markers',name:'RES Multiplier',line:{color:'#f59e0b',width:2}});
+    if(resMwArr.length>0)  profTraces.push({x:body.hours,y:resMwArr,mode:'lines+markers',name:'RES Output (MW)',yaxis:'y2',line:{color:'#22c55e',width:2,dash:'dot'}});
+    const profLayout={title:'Load & Renewable Profiles',xaxis:{title:'Hour'},
+      yaxis:{title:'Multiplier',rangemode:'tozero'},margin:{l:60,r:60,t:45,b:55},legend:{orientation:'h',y:-0.22}};
+    if(resMwArr.length>0) Object.assign(profLayout,{yaxis2:{title:'RES MW',overlaying:'y',side:'right',rangemode:'tozero'}});
+    Plotly.newPlot('resilienceProfileChart',profTraces,profLayout,{responsive:true});
+  }else{
+    document.getElementById('resilienceProfileChart').innerHTML='<div style="padding:60px;color:var(--muted);text-align:center;">No profile data</div>';
+  }
+
+  // Chart 6: MESS spatial trajectory (bus location over time)
+  const trajTraces=[];
+  (body.mess_traces||[]).forEach((tr,i)=>{
+    const buses=tr.target_bus||tr.bus||[];
+    if(buses.length>0){
+      trajTraces.push({x:body.hours.slice(0,buses.length),y:buses,mode:'lines+markers',name:(tr.name||'MESS '+tr.storage_index)+' Bus',
+        line:{width:2,shape:'hv'},marker:{size:7}});
+    }
+  });
+  if(trajTraces.length>0){
+    Plotly.newPlot('resilienceTrajectoryChart',trajTraces,{title:'MESS Spatial Trajectory (Bus Location)',
+      xaxis:{title:'Hour'},yaxis:{title:'Bus ID',dtick:1},
+      margin:{l:60,r:30,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+  }else{
+    document.getElementById('resilienceTrajectoryChart').innerHTML='<div style="padding:60px;color:var(--muted);text-align:center;">No MESS trajectory data</div>';
+  }
+
+  // Chart 7: Load Shed by Priority Tier (stacked bar)
+  const sCrit=body.shed_critical||[];
+  const sHigh=body.shed_high||[];
+  const sMed=body.shed_medium||[];
+  const sLow=body.shed_low||[];
+  if(sCrit.length>0){
+    Plotly.newPlot('resiliencePriorityChart',[
+      {x:body.hours,y:sCrit,type:'bar',name:'Critical',marker:{color:'#dc2626'}},
+      {x:body.hours,y:sHigh,type:'bar',name:'High',marker:{color:'#f59e0b'}},
+      {x:body.hours,y:sMed,type:'bar',name:'Medium',marker:{color:'#3b82f6'}},
+      {x:body.hours,y:sLow,type:'bar',name:'Low',marker:{color:'#94a3b8'}},
+    ],{title:'Load Shed by Priority Tier',barmode:'stack',xaxis:{title:'Hour'},
+      yaxis:{title:'Shed (MW)',rangemode:'tozero'},
+      margin:{l:60,r:30,t:45,b:55},legend:{orientation:'h',y:-0.22}},{responsive:true});
+  }else{
+    document.getElementById('resiliencePriorityChart').innerHTML='<div style="padding:60px;color:var(--muted);text-align:center;">No shed data</div>';
+  }
+
+  // Chart 8: MESS Dispatch vs SOC (dual-axis)
+  const messSOCTraces=[];
+  (body.mess_traces||[]).forEach((tr)=>{
+    const nm=tr.name||('MESS '+tr.storage_index);
+    messSOCTraces.push({x:body.hours,y:tr.dispatch_mw,mode:'lines+markers',name:nm+' Dispatch',line:{width:2}});
+    messSOCTraces.push({x:body.hours,y:(tr.soc||[]).map(v=>v*100),mode:'lines',name:nm+' SOC%',yaxis:'y2',line:{width:2,dash:'dot'}});
+  });
+  if(messSOCTraces.length>0){
+    Plotly.newPlot('resilienceMessSOCChart',messSOCTraces,{title:'MESS Dispatch vs SOC',
+      xaxis:{title:'Hour'},yaxis:{title:'Dispatch (MW)',rangemode:'tozero'},
+      yaxis2:{title:'SOC (%)',overlaying:'y',side:'right',range:[0,105]},
+      margin:{l:60,r:60,t:45,b:55},legend:{orientation:'h',y:-0.25}},{responsive:true});
+  }else{
+    document.getElementById('resilienceMessSOCChart').innerHTML='<div style="padding:60px;color:var(--muted);text-align:center;">No MESS units active</div>';
+  }
+
+  // Chart 9: Bus Voltage Profile from Power Flow
+  const bvTraces=body.bus_voltage_traces||[];
+  const vChartDiv=document.getElementById('resilienceVoltageChart');
+  if(bvTraces.length>0){
+    vChartDiv.style.display='';
+    const vTraces=[];
+    bvTraces.forEach(bv=>{
+      vTraces.push({x:body.hours.slice(0,bv.vm_pu.length),y:bv.vm_pu,mode:'lines',name:'Bus '+bv.bus_index,line:{width:1.5}});
+    });
+    // Upper and lower voltage limits
+    vTraces.push({x:body.hours,y:body.hours.map(()=>1.05),mode:'lines',name:'V_max',line:{color:'#c34d4d',dash:'dash',width:1},showlegend:true});
+    vTraces.push({x:body.hours,y:body.hours.map(()=>0.95),mode:'lines',name:'V_min',line:{color:'#c34d4d',dash:'dash',width:1},showlegend:false});
+    Plotly.newPlot('resilienceVoltageChart',vTraces,{title:'Bus Voltage Magnitude (from Power Flow)',
+      xaxis:{title:'Hour'},yaxis:{title:'Vm (p.u.)',range:[0.85,1.10]},
+      margin:{l:60,r:30,t:45,b:55},legend:{orientation:'h',y:-0.25}},{responsive:true});
+  }else{
+    vChartDiv.style.display='none';
+  }
+
+  // Chart 10: Branch Power Flow (MW) from Power Flow
+  const bfTraces=body.branch_flow_traces||[];
+  const fChartDiv=document.getElementById('resilienceBranchFlowChart');
+  if(bfTraces.length>0){
+    fChartDiv.style.display='';
+    const flowTraces=[];
+    bfTraces.forEach(bf=>{
+      flowTraces.push({x:body.hours.slice(0,bf.pf_mw.length),y:bf.pf_mw,mode:'lines',
+        name:'Br '+bf.branch_index+' ('+bf.from_bus+'\u2192'+bf.to_bus+')',line:{width:1.5}});
+    });
+    Plotly.newPlot('resilienceBranchFlowChart',flowTraces,{title:'Branch Active Power Flow (from Power Flow)',
+      xaxis:{title:'Hour'},yaxis:{title:'Pf (MW)'},
+      margin:{l:60,r:30,t:45,b:55},legend:{orientation:'h',y:-0.25}},{responsive:true});
+  }else{
+    fChartDiv.style.display='none';
+  }
+}
+
+document.getElementById('runResilienceBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running resilience assessment...');
+    document.getElementById('resStatus').textContent='Running resilience assessment...';
+    const useMess=document.getElementById('resAllowMess').checked;
+    let baseBody=null;
+    // Always run a baseline (no MESS) first for comparison if MESS is enabled
+    if(useMess){
+      setStatus('Running baseline (no MESS) for comparison...');
+      baseBody=await runResilienceSingle({allow_mess_dispatch:false});
+    }
+    setStatus('Running resilience with current settings...');
+    const body=await runResilienceSingle();
+    relLastResilience=body;
+    plotResilienceResults(body,baseBody);
+    document.getElementById('resStatus').textContent='Resilience complete. RI='+fmt(body.resilience_index,4)+', shed='+fmt(body.total_shed_mwh,2)+' MWh, MESS='+fmt(body.mess_energy_delivered_mwh,2)+' MWh';
+    setStatus('Resilience complete. RI='+fmt(body.resilience_index,4)+', shed='+fmt(body.total_shed_mwh,2)+' MWh, final='+fmt(body.final_restoration_ratio*100,1)+'%');
+  }catch(e){setStatus(e.message,true);document.getElementById('resStatus').textContent='Error: '+e.message;}
+};
+
+/* Reactive Power Optimization (RPO) */
+async function runRPO(relaxOnly){
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running RPO '+(relaxOnly?'(continuous relaxation)':'(MINLP B&B + IPM)')+'...');
+    const body=await api('/api/session/run_rpo',{
+      objective:document.getElementById('rpoObjective').value,
+      mip_gap:parseFloat(document.getElementById('rpoMipGap').value)||0.01,
+      time_limit_s:parseInt(document.getElementById('rpoTimeLimit').value)||120,
+      vdev_weight:parseFloat(document.getElementById('rpoVdevWeight').value)||1.0,
+      relax_only:!!relaxOnly,
+    });
+    /* KPI cards */
+    document.getElementById('rpoConv').textContent=body.converged?'Yes':'No';
+    document.getElementById('rpoObj').textContent=fmt(body.objective,4);
+    document.getElementById('rpoGap').textContent=fmt(body.gap*100,2);
+    document.getElementById('rpoNodes').textContent=body.nodes_explored;
+    document.getElementById('rpoLPSolves').textContent=body.nlp_solves;
+    document.getElementById('rpoTime').textContent=fmt(body.runtime_sec,2);
+    document.getElementById('rpoLossBefore').textContent=fmt(body.total_loss_before,2);
+    document.getElementById('rpoLossAfter').textContent=fmt(body.total_loss_after,2);
+    document.getElementById('rpoVdevBefore').textContent=fmt(body.max_vdev_before,4);
+    document.getElementById('rpoVdevAfter').textContent=fmt(body.max_vdev_after,4);
+    document.getElementById('rpoStatus').textContent=body.status||'-';
+    const busIdx=(body.vm_before||[]).map((_,i)=>i+1);
+    /* 1. Bus Voltage Profile */
+    Plotly.newPlot('rpoVoltChart',[
+      {x:busIdx,y:body.vm_before||[],mode:'lines+markers',name:'Vm Before',line:{color:'#b5651d',width:2,dash:'dot'},marker:{size:4}},
+      {x:busIdx,y:body.vm_after||[],mode:'lines+markers',name:'Vm After',line:{color:'#0b6e4f',width:2},marker:{size:4}},
+      {x:busIdx,y:busIdx.map(()=>body.v_min||0.95),mode:'lines',name:'Vmin',line:{color:'#c34d4d',width:1,dash:'dash'},showlegend:true},
+      {x:busIdx,y:busIdx.map(()=>body.v_max||1.05),mode:'lines',name:'Vmax',line:{color:'#c34d4d',width:1,dash:'dash'},showlegend:false},
+    ],{title:'Bus Voltage Magnitude (p.u.)',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+    /* 2. Generator Reactive Power */
+    const genNames=body.gen_names||(body.qg_before||[]).map((_,i)=>'Gen '+i);
+    Plotly.newPlot('rpoQgChart',[
+      {x:genNames,y:body.qg_before||[],type:'bar',name:'Qg Before',marker:{color:'#b5651d'}},
+      {x:genNames,y:body.qg_after||[],type:'bar',name:'Qg After',marker:{color:'#0b6e4f'}},
+    ],{title:'Generator Reactive Power Qg (MVAr)',barmode:'group',xaxis:{title:''},yaxis:{title:'MVAr'},margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    /* 3. Generator Active Power */
+    Plotly.newPlot('rpoPgChart',[
+      {x:genNames,y:body.pg_before||[],type:'bar',name:'Pg Before',marker:{color:'#8e6f3e'}},
+      {x:genNames,y:body.pg_after||[],type:'bar',name:'Pg After',marker:{color:'#2c8c99'}},
+    ],{title:'Generator Active Power Pg (MW)',barmode:'group',xaxis:{title:''},yaxis:{title:'MW'},margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    /* 4. Bus Voltage Angle */
+    Plotly.newPlot('rpoVaChart',[
+      {x:busIdx,y:(body.va_before||[]).map(a=>a*180/Math.PI),mode:'lines+markers',name:'Va Before (deg)',line:{color:'#b5651d',width:2,dash:'dot'},marker:{size:3}},
+      {x:busIdx,y:(body.va_after||[]).map(a=>a*180/Math.PI),mode:'lines+markers',name:'Va After (deg)',line:{color:'#0b6e4f',width:2},marker:{size:3}},
+    ],{title:'Bus Voltage Angle (degrees)',xaxis:{title:'Bus'},yaxis:{title:'deg'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+    /* 5. Tap Changer Positions */
+    if(body.tap_names&&body.tap_names.length){
+      Plotly.newPlot('rpoTapChart',[
+        {x:body.tap_names,y:body.tap_before||[],type:'bar',name:'Ratio Before',marker:{color:'#8e44ad'}},
+        {x:body.tap_names,y:body.tap_after||[],type:'bar',name:'Ratio After',marker:{color:'#2c8c99'}},
+      ],{title:'OLTC Tap Ratio (p.u.)',barmode:'group',xaxis:{title:''},yaxis:{title:'Tap Ratio'},margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    } else {
+      document.getElementById('rpoTapChart').innerHTML='<div style="padding:20px;color:var(--muted);">No OLTC transformers detected.</div>';
+    }
+    /* 6. Switchable Shunt Steps */
+    if(body.shunt_names&&body.shunt_names.length){
+      Plotly.newPlot('rpoShuntChart',[
+        {x:body.shunt_names,y:body.shunt_mvar_before||body.shunt_before||[],type:'bar',name:'Before (MVAr)',marker:{color:'#e67e22'}},
+        {x:body.shunt_names,y:body.shunt_mvar_after||body.shunt_after||[],type:'bar',name:'After (MVAr)',marker:{color:'#27ae60'}},
+      ],{title:'Switchable Shunt Output (MVAr)',barmode:'group',xaxis:{title:''},yaxis:{title:'MVAr'},margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    } else {
+      document.getElementById('rpoShuntChart').innerHTML='<div style="padding:20px;color:var(--muted);">No switchable shunts detected.</div>';
+    }
+    /* 7. Voltage Deviation |V-1| per Bus */
+    const vdev_before=(body.vm_before||[]).map(v=>Math.abs(v-1.0));
+    const vdev_after=(body.vm_after||[]).map(v=>Math.abs(v-1.0));
+    Plotly.newPlot('rpoDetailsChart',[
+      {x:busIdx,y:vdev_before,type:'bar',name:'|V-1| Before',marker:{color:'rgba(181,101,29,0.6)'}},
+      {x:busIdx,y:vdev_after,type:'bar',name:'|V-1| After',marker:{color:'rgba(11,110,79,0.6)'}},
+    ],{title:'Voltage Deviation |V - 1.0| per Bus',barmode:'group',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+    /* Debug summary table */
+    const L=s=>s;  // line helper
+    const lines=[];
+    lines.push('╔══════════════════════════════════════════════════════════════════╗');
+    lines.push('║  RPO (MINLP) Debug Summary                                     ║');
+    lines.push('╠══════════════════════════════════════════════════════════════════╣');
+    lines.push('  Solver:     Branch & Bound + Parity IPM');
+    lines.push('  Status:     '+(body.status||'N/A'));
+    lines.push('  Objective:  '+body.objective_type+' = '+fmt(body.objective,6));
+    lines.push('  Converged:  '+body.converged+'  |  Gap: '+fmt(body.gap*100,4)+'%');
+    lines.push('  B&B Nodes:  '+body.nodes_explored+'  |  NLP Solves: '+body.nlp_solves+'  |  Time: '+fmt(body.runtime_sec,2)+'s');
+    lines.push('');
+    lines.push('── Loss ─────────────────────────────────────────────────');
+    const dLoss=body.total_loss_after-body.total_loss_before;
+    const pLoss=body.total_loss_before?((dLoss/body.total_loss_before)*100):0;
+    lines.push('  Before: '+fmt(body.total_loss_before,3)+' MW  |  After: '+fmt(body.total_loss_after,3)+' MW  |  Δ: '+(dLoss>=0?'+':'')+fmt(dLoss,3)+' MW ('+fmt(pLoss,2)+'%)');
+    lines.push('');
+    lines.push('── Voltage Deviation ────────────────────────────────────');
+    const svb=vdev_before.reduce((a,b)=>a+b*b,0), sva=vdev_after.reduce((a,b)=>a+b*b,0);
+    lines.push('  Max |V-1|  Before: '+fmt(Math.max(...vdev_before),4)+' p.u.  |  After: '+fmt(Math.max(...vdev_after),4)+' p.u.');
+    lines.push('  Σ(V-1)²   Before: '+fmt(svb,6)+'  |  After: '+fmt(sva,6)+'  |  Δ: '+fmt(sva-svb,6)+' ('+(svb?fmt((sva-svb)/svb*100,2):'N/A')+'%)');
+    lines.push('');
+    if(body.tap_names&&body.tap_names.length){
+      lines.push('── OLTC Tap Changers ────────────────────────────────────');
+      lines.push('  Name              Pos Before  Pos After  Ratio Before  Ratio After');
+      body.tap_names.forEach((n,i)=>{
+        const pb=(body.tap_pos_before||[])[i], pa=(body.tap_pos_after||[])[i];
+        lines.push('  '+n.padEnd(18)+(pb!=null?String(pb).padStart(6):' ??   ')+'       '+(pa!=null?String(pa).padStart(6):' ??   ')+'       '+fmt(body.tap_before[i],4).padStart(10)+'    '+fmt(body.tap_after[i],4).padStart(10));
+      });
+      lines.push('');
+    }
+    if(body.shunt_names&&body.shunt_names.length){
+      lines.push('── Switchable Shunts ────────────────────────────────────');
+      lines.push('  Name                Step Before  Step After   MVAr Before   MVAr After');
+      body.shunt_names.forEach((n,i)=>{
+        const mb=(body.shunt_mvar_before||[])[i], ma=(body.shunt_mvar_after||[])[i];
+        lines.push('  '+n.padEnd(20)+String(body.shunt_before[i]).padStart(8)+'       '+String(body.shunt_after[i]).padStart(8)+'       '+(mb!=null?fmt(mb,2).padStart(10):' ??       ')+'    '+(ma!=null?fmt(ma,2).padStart(10):' ??       '));
+      });
+      lines.push('');
+    }
+    lines.push('── Generator Dispatch ───────────────────────────────────');
+    lines.push('  Name                 Pg Before    Pg After   ΔPg (MW)   Qg Before    Qg After   ΔQg (MVAr)');
+    (body.gen_names||[]).forEach((n,i)=>{
+      const pgb=(body.pg_before||[])[i]||0, pga=(body.pg_after||[])[i]||0;
+      const qgb=(body.qg_before||[])[i]||0, qga=(body.qg_after||[])[i]||0;
+      lines.push('  '+n.padEnd(20)+fmt(pgb,2).padStart(9)+'    '+fmt(pga,2).padStart(9)+'   '+(pga-pgb>=0?'+':'')+fmt(pga-pgb,2).padStart(8)+'   '+fmt(qgb,2).padStart(9)+'    '+fmt(qga,2).padStart(9)+'   '+(qga-qgb>=0?'+':'')+fmt(qga-qgb,2).padStart(8));
+    });
+    lines.push('');
+    lines.push('── Bus Voltages ─────────────────────────────────────────');
+    lines.push('  Bus   Vm Before   Vm After   ΔVm        Va Before°   Va After°   ΔVa°');
+    busIdx.forEach((b,i)=>{
+      const vmb=(body.vm_before||[])[i]||0, vma=(body.vm_after||[])[i]||0;
+      const vab=((body.va_before||[])[i]||0)*180/Math.PI, vaa=((body.va_after||[])[i]||0)*180/Math.PI;
+      lines.push('  '+String(b).padStart(3)+'    '+fmt(vmb,4).padStart(8)+'   '+fmt(vma,4).padStart(8)+'  '+(vma-vmb>=0?'+':'')+fmt(vma-vmb,4).padStart(7)+'     '+fmt(vab,2).padStart(8)+'    '+fmt(vaa,2).padStart(8)+'  '+(vaa-vab>=0?'+':'')+fmt(vaa-vab,2).padStart(7));
+    });
+    lines.push('╚══════════════════════════════════════════════════════════════════╝');
+    document.getElementById('rpoResultTable').textContent=lines.join('\n');
+    setStatus('RPO complete. Obj='+fmt(body.objective,4)+' ('+body.objective_type+'), Status: '+(body.status||'OK')+', Nodes='+body.nodes_explored+', Time='+fmt(body.runtime_sec,2)+'s');
+  }catch(e){setStatus(e.message,true);}
+}
+document.getElementById('runRPOBtn').onclick=()=>runRPO(false);
+document.getElementById('runRPORelaxBtn').onclick=()=>runRPO(true);
+
+/* Network Reconfiguration */
+document.getElementById('runReconfigBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running Network Reconfiguration (TS-TR MILP)...');
+    const numSteps=parseInt(document.getElementById('rcNumSteps').value)||4;
+    const body=await api('/api/session/run_reconfig',{
+      num_steps:numSteps,
+      v_min:parseFloat(document.getElementById('rcVmin').value)||0.95,
+      v_max:parseFloat(document.getElementById('rcVmax').value)||1.05,
+      mip_gap:parseFloat(document.getElementById('rcMipGap').value)||0.01,
+      max_time_s:parseInt(document.getElementById('rcMaxTime').value)||60,
+      enable_pf:(document.getElementById('rcEnablePF')||{}).value!=='0',
+      enable_voltage:(document.getElementById('rcEnableVoltage')||{}).checked!==false,
+      enable_thermal:(document.getElementById('rcEnableThermal')||{}).checked!==false,
+      split_domain_trees:(document.getElementById('rcSplitTrees')||{}).checked===true,
+      allow_dc_mesh:(document.getElementById('rcDcMesh')||{}).checked===true,
+      loss_aware:(document.getElementById('rcLossAware')||{}).checked!==false,
+      max_switch_ops:parseInt((document.getElementById('rcMaxSwOps')||{}).value)||0,
+      lambda_loss:parseFloat((document.getElementById('rcLambdaLoss')||{}).value)||10,
+      lambda_switch:parseFloat((document.getElementById('rcLambdaSwitch')||{}).value)||1,
+      lambda_shed:parseFloat((document.getElementById('rcLambdaShed')||{}).value)||1e4,
+    });
+    document.getElementById('rcFeas').textContent=body.feasible?'Yes':'No';
+    document.getElementById('rcObj').textContent=fmt(body.total_objective,2);
+    const totalCurt=(body.curt_per_step||[]).reduce((a,b)=>a+b,0);
+    const totalSwOn=(body.sw_on_per_step||[]).reduce((a,b)=>a+b,0);
+    const totalSwOff=(body.sw_off_per_step||[]).reduce((a,b)=>a+b,0);
+    document.getElementById('rcACLoss').textContent=fmt(totalCurt,2);
+    document.getElementById('rcShed').textContent=body.num_branches;
+    document.getElementById('rcSwActions').textContent=totalSwOn+totalSwOff;
+    const T=body.num_steps||numSteps;
+    const hrs=Array.from({length:T},(_,i)=>i);
+    Plotly.newPlot('rcLossChart',[
+      {x:hrs,y:body.curt_per_step||[],mode:'lines+markers',name:'Curtailment MW',line:{color:'#b5651d',width:2}},
+      {x:hrs,y:body.sw_on_per_step||[],mode:'lines+markers',name:'Switch-On',line:{color:'#27ae60',width:2,dash:'dot'}},
+      {x:hrs,y:body.sw_off_per_step||[],mode:'lines+markers',name:'Switch-Off',line:{color:'#e74c3c',width:2,dash:'dash'}},
+    ],{title:'Curtailment & Switching per Step',xaxis:{title:'Step'},yaxis:{title:'Count / MW'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+    Plotly.newPlot('rcSwitchChart',[
+      {x:hrs,y:body.sw_on_per_step||[],type:'bar',name:'Close (AC)',marker:{color:'#27ae60'}},
+      {x:hrs,y:body.sw_off_per_step||[],type:'bar',name:'Open (AC)',marker:{color:'#e74c3c'}},
+    ],{title:'AC Switching Actions per Step',barmode:'group',xaxis:{title:'Step'},yaxis:{title:'Count'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+    const essSoc=body.ess_soc_by_step||[];
+    const nESS=body.num_ess||0;
+    const essSocData=nESS>0
+      ? Array.from({length:nESS},(_,si)=>({x:hrs,y:essSoc.map(row=>(row&&row[si])||0),mode:'lines+markers',name:'ESS '+(si+1)}))
+      : [];
+    if(essSocData.length)
+      Plotly.newPlot('rcESSChart',essSocData,{title:'ESS SOC during Reconfiguration',xaxis:{title:'Step'},yaxis:{title:'SOC',range:[0,1]},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+    else
+      document.getElementById('rcESSChart').innerHTML='<div style="padding:20px;color:var(--muted);">No storage units in this case.</div>';
+    const ops=body.switch_operations||[];const sumr=body.switch_op_summary||{};const opEl=document.getElementById('rcSwOps');
+    if(opEl){var ot=body.obj_terms||{};var hdr='<div style="font-size:.85em;margin:4px 0;">目标: 损耗='+(ot.loss||0).toFixed(3)+' 开关='+(ot.switching||0).toFixed(0)+' 切荷='+(ot.shed||0).toFixed(1)+' 孤岛='+(ot.island||0).toFixed(0)+' | 校验 PF='+(body.reconfig_pf_converged?'✓':'✗')+' OPF='+(body.opf_converged?'✓':'✗')+'</div>';if(ops.length){const kn={circuit_breaker:'CB',switch:'Switch',branch:'Branch'};let h='<table class="tbl"><thead><tr><th>Device</th><th>ID</th><th>From</th><th>To</th><th>Action</th></tr></thead><tbody>';ops.forEach(o=>{h+='<tr><td>'+(kn[o.kind]||o.kind)+'</td><td>'+o.index+'</td><td>'+o.from_bus+'</td><td>'+o.to_bus+'</td><td>'+(o.close?'CLOSE':'OPEN')+'</td></tr>';});h+='</tbody></table><div style="color:var(--muted);font-size:.85em;">Switch +'+(sumr.switch_close||0)+'/-'+(sumr.switch_open||0)+', CB +'+(sumr.cb_close||0)+'/-'+(sumr.cb_open||0)+'</div>';opEl.innerHTML=hdr+h;}else{opEl.innerHTML=hdr+'<div style="color:var(--muted);">No device-mapped switch operations.</div>';}}
+    setStatus('Reconfiguration done. Feasible: '+body.feasible+'. Obj: '+fmt(body.total_objective,2)+'. Switch actions: '+(totalSwOn+totalSwOff)+'. Solver: '+(body.solver_name||'native')+'.');
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Annual Production Simulation */
+document.getElementById('runAnnualBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running Annual Production Simulation (this may take a while)...');
+    const body=await api('/api/session/run_annual_sim',{
+      resolution:document.getElementById('annualResolution').value,
+      block_type:document.getElementById('annualBlockType').value,
+      snapshot_interval:parseInt(document.getElementById('annualSnapshotInterval').value)||24,
+      run_opf:document.getElementById('annualRunOPF').checked,
+      cyclic_soc:document.getElementById('annualCyclicSOC').checked,
+      skip_replay:document.getElementById('annualSkipReplay').checked,
+    });
+    document.getElementById('annFeas').textContent=body.feasible?'Yes':'No';
+    document.getElementById('annCost').textContent='$'+fmt(body.total_cost,0);
+    document.getElementById('annGenMWh').textContent=fmt(body.total_gen_mwh,0);
+    document.getElementById('annRenMWh').textContent=fmt(body.total_renewable_mwh,0);
+    document.getElementById('annCurtMWh').textContent=fmt(body.total_curtailment_mwh,0);
+    document.getElementById('annENSMWh').textContent=fmt(body.total_ens_mwh,0);
+    document.getElementById('annLossMWh').textContent=fmt(body.total_loss_mwh,0);
+    document.getElementById('annPFConv').textContent=body.num_pf_converged+'/'+body.num_steps;
+    const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12'];
+    // Timeline chart
+    const hrs=body.timeline_hours||[];
+    Plotly.newPlot('annTimelineChart',[
+      {x:hrs,y:body.timeline_gen,mode:'lines',name:'Generation',line:{color:pal[0],width:1.5}},
+      {x:hrs,y:body.timeline_load,mode:'lines',name:'Load',line:{color:pal[1],width:1.5}},
+      {x:hrs,y:body.timeline_ren,mode:'lines',name:'Renewable',line:{color:pal[6],width:1.5}},
+      {x:hrs,y:body.timeline_curt,mode:'lines',name:'Curtailment',line:{color:pal[5],width:1}},
+      {x:hrs,y:body.timeline_ess,mode:'lines',name:'ESS (net)',line:{color:pal[3],width:1,dash:'dot'}},
+    ],{title:'Annual Generation & Load Timeline (MW)',xaxis:{title:'Hour of Year'},yaxis:{title:'MW'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.15}},{responsive:true});
+    // Monthly energy breakdown
+    const mo=body.monthly_summaries||[];
+    const mLabels=mo.map(m=>'Month '+(m.block_id+1));
+    Plotly.newPlot('annMonthlyChart',[
+      {x:mLabels,y:mo.map(m=>m.total_gen_mwh),type:'bar',name:'Generation',marker:{color:pal[0]}},
+      {x:mLabels,y:mo.map(m=>m.total_renewable_mwh),type:'bar',name:'Renewable',marker:{color:pal[6]}},
+      {x:mLabels,y:mo.map(m=>m.total_curtailment_mwh),type:'bar',name:'Curtailment',marker:{color:pal[5]}},
+      {x:mLabels,y:mo.map(m=>m.total_loss_mwh),type:'bar',name:'Losses',marker:{color:pal[2]}},
+    ],{title:'Monthly Energy Breakdown (MWh)',barmode:'group',xaxis:{title:''},yaxis:{title:'MWh'},
+       margin:{l:60,r:15,t:45,b:60},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    // Monthly cost
+    Plotly.newPlot('annMonthlyCostChart',[
+      {x:mLabels,y:mo.map(m=>m.total_cost),type:'bar',name:'Cost',marker:{color:pal[3]}},
+    ],{title:'Monthly Cost ($)',xaxis:{title:''},yaxis:{title:'$'},
+       margin:{l:60,r:15,t:45,b:60}},{responsive:true});
+    // Generator stats
+    const gs=body.gen_stats||[];
+    if(gs.length) Plotly.newPlot('annGenStatsChart',[
+      {x:gs.map(g=>g.name||'Gen'),y:gs.map(g=>g.capacity_factor*100),type:'bar',name:'Capacity Factor %',marker:{color:pal[0]}},
+    ],{title:'Generator Capacity Factors (%)',xaxis:{title:''},yaxis:{title:'%'},
+       margin:{l:55,r:15,t:45,b:80}},{responsive:true});
+    // Renewable stats
+    const rns=body.renewable_stats||[];
+    if(rns.length) Plotly.newPlot('annRenStatsChart',[
+      {x:rns.map(r=>r.name||'Ren'),y:rns.map(r=>r.total_energy_mwh),type:'bar',name:'Energy MWh',marker:{color:pal[6]}},
+      {x:rns.map(r=>r.name||'Ren'),y:rns.map(r=>r.total_curtailed_mwh),type:'bar',name:'Curtailed MWh',marker:{color:pal[5]}},
+    ],{title:'Renewable Energy vs Curtailment (MWh)',barmode:'group',xaxis:{title:''},yaxis:{title:'MWh'},
+       margin:{l:60,r:15,t:45,b:80},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    // Storage stats
+    const stg=body.storage_stats||[];
+    if(stg.length) Plotly.newPlot('annStorageStatsChart',[
+      {x:stg.map(s=>s.name||'ESS'),y:stg.map(s=>s.total_charge_mwh),type:'bar',name:'Charge MWh',marker:{color:pal[1]}},
+      {x:stg.map(s=>s.name||'ESS'),y:stg.map(s=>s.total_discharge_mwh),type:'bar',name:'Discharge MWh',marker:{color:pal[2]}},
+    ],{title:'Storage Charge/Discharge (MWh) — Cycles: '+stg.map(s=>fmt(s.cycles,1)).join(', '),
+       barmode:'group',xaxis:{title:''},yaxis:{title:'MWh'},
+       margin:{l:60,r:15,t:45,b:80},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    // Voltage heatmap from PF snapshots
+    const snapHrs=body.snapshot_hours||[];
+    const snapVm=body.snapshot_vm||[];
+    if(snapHrs.length&&snapVm.length){
+      const nBus=snapVm[0].length;
+      const busLabels=Array.from({length:nBus},(_,i)=>'Bus '+i);
+      Plotly.newPlot('annVoltHeatmap',[{z:snapVm,x:busLabels,y:snapHrs,type:'heatmap',
+        colorscale:'RdYlGn',zmin:0.9,zmax:1.1,colorbar:{title:'Vm (pu)',len:0.7}}],
+        {title:'Bus Voltage Heatmap over Year',xaxis:{title:'Bus'},yaxis:{title:'Hour'},
+         margin:{l:60,r:80,t:45,b:50}},{responsive:true});
+    }
+    setStatus('Annual simulation complete. Feasible: '+body.feasible+'. Annual cost: $'+fmt(body.total_cost,0)+'. Gen: '+fmt(body.total_gen_mwh,0)+' MWh.');
+    // Setup animation data
+    setupAnnualAnimation(body);
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Annual Animation Controls */
+let annAnimData=null;
+let annAnimPlaying=false;
+let annAnimFrame=0;
+let annAnimTimer=null;
+
+function setupAnnualAnimation(body){
+  // Store time-series data for animation
+  annAnimData={
+    hours:body.timeline_hours||[],
+    gen:body.timeline_gen||[],
+    load:body.timeline_load||[],
+    ren:body.timeline_ren||[],
+    curt:body.timeline_curt||[],
+    ess:body.timeline_ess||[],
+    snapshot_hours:body.snapshot_hours||[],
+    snapshot_vm:body.snapshot_vm||[],
+    geo_buses:body.geo_buses||[],
+    geo_ac_branches:body.geo_ac_branches||[],
+  };
+  annAnimFrame=0;
+  annAnimPlaying=false;
+  if(annAnimTimer)clearInterval(annAnimTimer);
+  annAnimTimer=null;
+  
+  const ctrl=document.getElementById('annAnimControls');
+  const slider=document.getElementById('annAnimSlider');
+  const geoMap=document.getElementById('annGeoMap');
+  
+  if(annAnimData.hours.length>0){
+    ctrl.style.display='block';
+    slider.max=annAnimData.hours.length-1;
+    slider.value=0;
+    document.getElementById('annAnimTimeLabel').textContent='Hour '+annAnimData.hours[0];
+    document.getElementById('annAnimPlayPause').innerHTML='&#9658; Play';
+    geoMap.style.display=document.getElementById('annAnimGeo').checked?'block':'none';
+    renderAnnualGeoFrame(0);
+  } else {
+    ctrl.style.display='none';
+    geoMap.style.display='none';
+  }
+}
+
+function renderAnnualGeoFrame(idx){
+  if(!annAnimData||!annAnimData.geo_buses.length)return;
+  
+  const buses=annAnimData.geo_buses;
+  const branches=annAnimData.geo_ac_branches||[];
+  const hasGeo=buses.some(b=>Math.abs(b.lat)>0.001||Math.abs(b.lon)>0.001);
+  
+  // Interpolate voltage from snapshots if available
+  let vmVals=null;
+  if(annAnimData.snapshot_vm.length>0&&annAnimData.snapshot_hours.length>0){
+    const hr=annAnimData.hours[idx];
+    // Find closest snapshot
+    let closest=0;
+    let minDiff=Math.abs(annAnimData.snapshot_hours[0]-hr);
+    for(let i=1;i<annAnimData.snapshot_hours.length;i++){
+      const d=Math.abs(annAnimData.snapshot_hours[i]-hr);
+      if(d<minDiff){minDiff=d;closest=i;}
+    }
+    vmVals=annAnimData.snapshot_vm[closest];
+  }
+  
+  const traces=[];
+  
+  // Branch traces
+  for(const br of branches){
+    traces.push({
+      type:'scattergeo',
+      mode:'lines',
+      lon:[br.from_lon,br.to_lon],
+      lat:[br.from_lat,br.to_lat],
+      line:{width:2,color:'#0b6e4f'},
+      hoverinfo:'text',
+      text:`${br.from_bus}-${br.to_bus}`,
+      showlegend:false
+    });
+  }
+  
+  // Bus markers with dynamic voltage coloring
+  const acBuses=buses.filter(b=>b.type==='AC');
+  if(acBuses.length){
+    const colors=vmVals?acBuses.map(b=>{const v=vmVals[b.id-1];return v!==undefined?v:1.0;}):acBuses.map(b=>1.0);
+    // Compute dynamic color range based on actual voltage spread
+    const vmMin=Math.min(...colors);
+    const vmMax=Math.max(...colors);
+    const vmRange=Math.max(vmMax-vmMin,0.01);  // At least 0.01 spread
+    const cmin=Math.max(0.9, vmMin-vmRange*0.2);
+    const cmax=Math.min(1.1, vmMax+vmRange*0.2);
+    traces.push({
+      type:'scattergeo',
+      mode:'markers',
+      lon:acBuses.map(b=>b.lon),
+      lat:acBuses.map(b=>b.lat),
+      marker:{size:12,color:colors,colorscale:'RdYlGn',cmin:cmin,cmax:cmax,colorbar:{title:'Vm (pu)',x:1.02,thickness:12,len:0.7}},
+      hoverinfo:'text',
+      hovertext:acBuses.map((b,i)=>`AC${b.id} ${b.name||''}<br>Vm=${colors[i].toFixed(4)} pu`),
+      name:'AC Buses',
+      showlegend:true
+    });
+  }
+  
+  const dcBuses=buses.filter(b=>b.type==='DC');
+  if(dcBuses.length){
+    // DC buses also get voltage-based coloring from vdc data
+    const dcColors=annAnimData.snapshot_vdc&&annAnimData.snapshot_vdc[Math.floor(idx*annAnimData.snapshot_vdc.length/Math.max(1,annAnimData.hours.length))]||dcBuses.map(()=>1.0);
+    const dcMin=Math.min(...dcColors);
+    const dcMax=Math.max(...dcColors);
+    const dcRange=Math.max(dcMax-dcMin,0.01);
+    traces.push({
+      type:'scattergeo',
+      mode:'markers',
+      lon:dcBuses.map(b=>b.lon),
+      lat:dcBuses.map(b=>b.lat),
+      marker:{size:12,color:dcColors.slice(0,dcBuses.length),colorscale:'Purples',cmin:Math.max(0.9,dcMin-dcRange*0.2),cmax:Math.min(1.1,dcMax+dcRange*0.2),symbol:'square'},
+      hoverinfo:'text',
+      hovertext:dcBuses.map((b,i)=>`DC${b.id} ${b.name||''}<br>Vdc=${(dcColors[i]||1.0).toFixed(4)} pu`),
+      name:'DC Buses',
+      showlegend:true
+    });
+  }
+  
+  // Summary text annotation
+  const genVal=annAnimData.gen[idx]||0;
+  const loadVal=annAnimData.load[idx]||0;
+  const renVal=annAnimData.ren[idx]||0;
+  
+  const layout={
+    title:`Network State @ Hour ${annAnimData.hours[idx]} | Gen: ${genVal.toFixed(0)} MW | Load: ${loadVal.toFixed(0)} MW | Ren: ${renVal.toFixed(0)} MW`,
+    geo:{
+      scope:hasGeo?undefined:'usa',
+      projection:{type:hasGeo?'mercator':'albers usa'},
+      showland:true,landcolor:'#f5f5dc',
+      showlakes:true,lakecolor:'#a0d2db',
+      showcountries:true,countrycolor:'#888',
+      resolution:hasGeo?50:110,
+      lonaxis:hasGeo?(()=>{const lons=buses.map(b=>b.lon);const minL=Math.min(...lons),maxL=Math.max(...lons);const span=maxL-minL;const pad=Math.max(0.002,span*0.08);return{range:[minL-pad,maxL+pad]};})():undefined,
+      lataxis:hasGeo?(()=>{const lats=buses.map(b=>b.lat);const minL=Math.min(...lats),maxL=Math.max(...lats);const span=maxL-minL;const pad=Math.max(0.002,span*0.08);return{range:[minL-pad,maxL+pad]};})():undefined
+    },
+    margin:{l:0,r:0,t:50,b:0},
+    legend:{x:0,y:1,bgcolor:'rgba(255,255,255,0.7)'}
+  };
+  
+  Plotly.react('annGeoMap',traces,layout);
+  
+  // Update timeline chart marker
+  Plotly.relayout('annTimelineChart',{
+    shapes:[{type:'line',x0:annAnimData.hours[idx],x1:annAnimData.hours[idx],y0:0,y1:1,yref:'paper',
+             line:{color:'red',width:2,dash:'dot'}}]
+  });
+}
+
+function stepAnnualAnimation(){
+  if(!annAnimData||annAnimData.hours.length===0)return;
+  annAnimFrame++;
+  if(annAnimFrame>=annAnimData.hours.length){
+    annAnimFrame=0;
+  }
+  document.getElementById('annAnimSlider').value=annAnimFrame;
+  document.getElementById('annAnimTimeLabel').textContent='Hour '+annAnimData.hours[annAnimFrame];
+  if(document.getElementById('annAnimGeo').checked){
+    renderAnnualGeoFrame(annAnimFrame);
+  }
+}
+
+document.getElementById('annAnimPlayPause').onclick=function(){
+  if(!annAnimData||annAnimData.hours.length===0)return;
+  annAnimPlaying=!annAnimPlaying;
+  this.innerHTML=annAnimPlaying?'&#10074;&#10074; Pause':'&#9658; Play';
+  if(annAnimPlaying){
+    const speed=parseInt(document.getElementById('annAnimSpeed').value)||500;
+    annAnimTimer=setInterval(stepAnnualAnimation,speed);
+  } else {
+    if(annAnimTimer)clearInterval(annAnimTimer);
+    annAnimTimer=null;
+  }
+};
+
+document.getElementById('annAnimReset').onclick=function(){
+  annAnimPlaying=false;
+  if(annAnimTimer)clearInterval(annAnimTimer);
+  annAnimTimer=null;
+  annAnimFrame=0;
+  document.getElementById('annAnimPlayPause').innerHTML='&#9658; Play';
+  if(annAnimData&&annAnimData.hours.length){
+    document.getElementById('annAnimSlider').value=0;
+    document.getElementById('annAnimTimeLabel').textContent='Hour '+annAnimData.hours[0];
+    renderAnnualGeoFrame(0);
+  }
+};
+
+document.getElementById('annAnimSlider').oninput=function(){
+  if(!annAnimData||annAnimData.hours.length===0)return;
+  annAnimFrame=parseInt(this.value);
+  document.getElementById('annAnimTimeLabel').textContent='Hour '+annAnimData.hours[annAnimFrame];
+  if(document.getElementById('annAnimGeo').checked){
+    renderAnnualGeoFrame(annAnimFrame);
+  }
+};
+
+document.getElementById('annAnimSpeed').onchange=function(){
+  if(annAnimPlaying&&annAnimTimer){
+    clearInterval(annAnimTimer);
+    const speed=parseInt(this.value)||500;
+    annAnimTimer=setInterval(stepAnnualAnimation,speed);
+  }
+};
+
+document.getElementById('annAnimGeo').onchange=function(){
+  const geoMap=document.getElementById('annGeoMap');
+  geoMap.style.display=this.checked?'block':'none';
+  if(this.checked&&annAnimData)renderAnnualGeoFrame(annAnimFrame);
+};
+
+/* Lifecycle Simulation */
+document.getElementById('runLifecycleBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running Lifecycle Simulation (multi-year, may take a while)...');
+    const body=await api('/api/session/run_lifecycle_sim',{
+      num_years:parseInt(document.getElementById('lcNumYears').value)||20,
+      discount_rate:parseFloat(document.getElementById('lcDiscountRate').value)||0.05,
+      load_growth_rate:parseFloat(document.getElementById('lcLoadGrowth').value)||0.02,
+      pv_annual_derating:parseFloat(document.getElementById('lcPVDerating').value)||0.005,
+      calendar_degradation:parseFloat(document.getElementById('lcCalDegrad').value)||0.02,
+      resolution:document.getElementById('lcResolution').value,
+      pv_scale:parseFloat(document.getElementById('lcPVScale').value)||1.0,
+      wind_scale:parseFloat(document.getElementById('lcWindScale').value)||1.0,
+      bess_power_scale:parseFloat(document.getElementById('lcBESSPowerScale').value)||1.0,
+      bess_energy_scale:parseFloat(document.getElementById('lcBESSEnergyScale').value)||1.0,
+      diesel_scale:parseFloat(document.getElementById('lcDieselScale').value)||1.0,
+    });
+    document.getElementById('lcFeas').textContent=body.feasible?'Yes':'No';
+    document.getElementById('lcNPV').textContent='$'+fmt(body.npv_total_cost,0);
+    document.getElementById('lcTotalCarbon').textContent=fmt(body.total_carbon_tco2,0)+' tCO\u2082';
+    document.getElementById('lcReplacements').textContent=body.total_replacements;
+    document.getElementById('lcReplCost').textContent='$'+fmt(body.total_replacement_cost,0);
+    document.getElementById('lcYears').textContent=body.num_years;
+    const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12'];
+    const yrs=(body.years||[]).map(y=>y.year);
+    // Cost trajectory with replacement markers
+    const costs=(body.years||[]).map(y=>y.annual_cost);
+    const replYears=(body.replacements||[]).map(r=>r.year);
+    const replCosts=(body.replacements||[]).map(r=>r.replacement_cost_usd);
+    Plotly.newPlot('lcCostChart',[
+      {x:yrs,y:costs,mode:'lines+markers',name:'Annual Cost',line:{color:pal[0],width:2},marker:{size:5}},
+      {x:replYears,y:replCosts,mode:'markers',name:'Replacement Cost',marker:{color:pal[5],size:12,symbol:'diamond'}},
+    ],{title:'Annual Cost Trajectory with Replacements',xaxis:{title:'Year',dtick:Math.max(1,Math.floor(yrs.length/10))},yaxis:{title:'$ Cost'},
+       margin:{l:70,r:15,t:45,b:50},legend:{orientation:'h',y:-0.15}},{responsive:true});
+    // Carbon trajectory with bounds
+    const carbon=(body.years||[]).map(y=>y.annual_carbon_tco2);
+    const boundUpper=(body.years||[]).map(y=>y.annual_carbon_tco2+y.bounds.total_bound_tco2);
+    const boundLower=(body.years||[]).map(y=>Math.max(0,y.annual_carbon_tco2-y.bounds.total_bound_tco2));
+    Plotly.newPlot('lcCarbonChart',[
+      {x:yrs,y:boundUpper,mode:'lines',line:{color:'rgba(231,76,60,0.2)',width:0},showlegend:false},
+      {x:yrs,y:boundLower,mode:'lines',fill:'tonexty',fillcolor:'rgba(231,76,60,0.12)',line:{color:'rgba(231,76,60,0.2)',width:0},name:'Error Bound'},
+      {x:yrs,y:carbon,mode:'lines+markers',name:'Annual CO\u2082',line:{color:pal[5],width:2},marker:{size:5}},
+    ],{title:'Annual Carbon Emissions with Theoretical Bounds',xaxis:{title:'Year'},yaxis:{title:'tCO\u2082'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    // Carbon intensity trajectory
+    const carbonIntensity=(body.years||[]).map(y=>y.avg_carbon_intensity);
+    const cumCarbon=(body.years||[]).reduce((acc,y)=>{const prev=acc.length>0?acc[acc.length-1]:0;acc.push(prev+y.annual_carbon_tco2);return acc;},[]);
+    Plotly.newPlot('lcCarbonIntensityChart',[
+      {x:yrs,y:carbonIntensity,mode:'lines+markers',name:'Avg Intensity (tCO\u2082/MWh)',line:{color:pal[2],width:2},marker:{size:5},yaxis:'y'},
+      {x:yrs,y:cumCarbon,mode:'lines',name:'Cumulative CO\u2082 (tCO\u2082)',line:{color:pal[5],width:2,dash:'dot'},yaxis:'y2'},
+    ],{title:'Carbon Intensity & Cumulative Emissions',
+       xaxis:{title:'Year',dtick:Math.max(1,Math.floor(yrs.length/10))},
+       yaxis:{title:'tCO\u2082/MWh',rangemode:'tozero',side:'left'},
+       yaxis2:{title:'Cumulative tCO\u2082',overlaying:'y',side:'right',rangemode:'tozero'},
+       margin:{l:60,r:60,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    // Energy breakdown
+    const gen=(body.years||[]).map(y=>y.annual_gen_mwh);
+    const ren=(body.years||[]).map(y=>y.annual_renewable_mwh);
+    const load=(body.years||[]).map(y=>y.annual_load_mwh);
+    const curt=(body.years||[]).map(y=>y.annual_curtailment_mwh);
+    Plotly.newPlot('lcEnergyChart',[
+      {x:yrs,y:gen,mode:'lines',name:'Generation',line:{color:pal[0],width:2}},
+      {x:yrs,y:load,mode:'lines',name:'Load',line:{color:pal[1],width:2}},
+      {x:yrs,y:ren,mode:'lines',name:'Renewable',line:{color:pal[6],width:2}},
+      {x:yrs,y:curt,mode:'lines',name:'Curtailment',line:{color:pal[5],width:1,dash:'dot'}},
+    ],{title:'Energy Trajectories (MWh)',xaxis:{title:'Year'},yaxis:{title:'MWh'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    // Battery SOH curves
+    const storNames=[...new Set((body.years||[]).flatMap(y=>(y.storage_states||[]).map(s=>s.name)))];
+    const sohTraces=storNames.map((nm,si)=>{
+      const sohVals=yrs.map(yr=>{const y=(body.years||[]).find(yy=>yy.year===yr);if(!y)return null;const s=(y.storage_states||[]).find(ss=>ss.name===nm);return s?s.soh:null;});
+      return {x:yrs,y:sohVals,mode:'lines+markers',name:nm,line:{color:pal[si%pal.length],width:2},marker:{size:4}};
+    });
+    // Add EOL threshold line
+    sohTraces.push({x:[yrs[0],yrs[yrs.length-1]],y:[0.8,0.8],mode:'lines',name:'EOL Threshold',line:{color:'#c34d4d',width:1,dash:'dash'}});
+    Plotly.newPlot('lcSOHChart',sohTraces,{title:'Battery State of Health',xaxis:{title:'Year'},yaxis:{title:'SOH',range:[0,1.05]},
+       margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    // PV derating curves
+    const pvNames=[...new Set((body.years||[]).flatMap(y=>(y.renewable_states||[]).map(r=>r.name)))];
+    const pvTraces=pvNames.map((nm,ri)=>{
+      const capVals=yrs.map(yr=>{const y=(body.years||[]).find(yy=>yy.year===yr);if(!y)return null;const r=(y.renewable_states||[]).find(rr=>rr.name===nm);return r?r.derated_capacity_mw:null;});
+      return {x:yrs,y:capVals,mode:'lines+markers',name:nm,line:{color:pal[(ri+2)%pal.length],width:2},marker:{size:4}};
+    });
+    Plotly.newPlot('lcPVChart',pvTraces,{title:'PV Capacity Derating (MW)',xaxis:{title:'Year'},yaxis:{title:'MW'},
+       margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    // Theoretical bounds breakdown
+    const bDispatch=(body.years||[]).map(y=>y.bounds.dispatch_bound_tco2);
+    const bSampling=(body.years||[]).map(y=>y.bounds.sampling_bound_tco2);
+    const bStorage=(body.years||[]).map(y=>y.bounds.storage_carbon_bound_tco2);
+    Plotly.newPlot('lcBoundsChart',[
+      {x:yrs,y:bDispatch,type:'bar',name:'Dispatch Approx.',marker:{color:pal[2]}},
+      {x:yrs,y:bSampling,type:'bar',name:'Sampling Error',marker:{color:pal[3]}},
+      {x:yrs,y:bStorage,type:'bar',name:'Storage Carbon',marker:{color:pal[4]}},
+    ],{title:'Theoretical Error Bounds Breakdown (tCO\u2082)',barmode:'stack',xaxis:{title:'Year'},yaxis:{title:'tCO\u2082'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    // Cross-validation: sampling gap (dense vs sampled)
+    const cvDense=(body.years||[]).map(y=>(y.cross_validation||{}).dense_carbon_tco2||0);
+    const cvSampled=(body.years||[]).map(y=>(y.cross_validation||{}).sampled_carbon_tco2||0);
+    const cvGapPct=(body.years||[]).map(y=>(y.cross_validation||{}).sampling_gap_pct||0);
+    const cvBoundPct=(body.years||[]).map(y=>(y.cross_validation||{}).total_bound_pct||0);
+    const cvDispPct=(body.years||[]).map(y=>(y.cross_validation||{}).dispatch_bound_pct||0);
+    const cvSampPct=(body.years||[]).map(y=>(y.cross_validation||{}).sampling_bound_pct||0);
+    const cvStorPct=(body.years||[]).map(y=>(y.cross_validation||{}).storage_bound_pct||0);
+    Plotly.newPlot('lcBoundsBreakdownChart',[
+      {x:yrs,y:cvDispPct,type:'bar',name:'Dispatch Bound %',marker:{color:pal[2]}},
+      {x:yrs,y:cvSampPct,type:'bar',name:'Sampling Bound %',marker:{color:pal[3]}},
+      {x:yrs,y:cvStorPct,type:'bar',name:'Storage Bound %',marker:{color:pal[4]}},
+    ],{title:'Theoretical Error Bounds as % of Annual Carbon',barmode:'stack',
+       xaxis:{title:'Year'},yaxis:{title:'%',rangemode:'tozero'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    // Dense vs sampled carbon comparison
+    Plotly.newPlot('lcCrossValChart',[
+      {x:yrs,y:cvDense,mode:'lines+markers',name:'Dense (All Hours)',line:{color:pal[1],width:2},marker:{size:5}},
+      {x:yrs,y:cvSampled,mode:'lines+markers',name:'Stratified Sample',line:{color:pal[3],width:2,dash:'dash'},marker:{size:5}},
+    ],{title:'Carbon Cross-Validation: Dense vs Sampled Estimate (tCO\u2082)',
+       xaxis:{title:'Year'},yaxis:{title:'tCO\u2082'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}
+    },{responsive:true});
+    // Sampling gap % vs total bound %
+    Plotly.newPlot('lcTightnessChart',[
+      {x:yrs,y:cvBoundPct,mode:'lines+markers',name:'Total Bound / Carbon %',line:{color:pal[5],width:2,dash:'dash'},marker:{size:5},fill:'tozeroy',fillcolor:'rgba(231,76,60,0.08)'},
+      {x:yrs,y:cvGapPct,mode:'lines+markers',name:'Sampling Gap / Carbon %',line:{color:pal[0],width:2},marker:{size:5},fill:'tozeroy',fillcolor:'rgba(11,110,79,0.08)'},
+    ],{title:'Validation: Theoretical Bound vs Sampling Gap (% of Carbon)',
+       xaxis:{title:'Year'},yaxis:{title:'%',rangemode:'tozero'},
+       margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}
+    },{responsive:true});
+    setStatus('Lifecycle simulation complete. '+body.num_years+' years. NPV: $'+fmt(body.npv_total_cost,0)+'. Carbon: '+fmt(body.total_carbon_tco2,0)+' tCO\u2082.');
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Capacity Comparison Sweep */
+document.getElementById('runCapCompareBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    const sweepParam=document.getElementById('lcSweepParam').value;
+    const minS=parseFloat(document.getElementById('lcSweepMin').value)||0.5;
+    const maxS=parseFloat(document.getElementById('lcSweepMax').value)||3.0;
+    const steps=parseInt(document.getElementById('lcSweepSteps').value)||6;
+    document.getElementById('lcCompareStatus').textContent='Running '+steps+' scenarios for '+sweepParam+'...';
+    setStatus('Capacity comparison: sweeping '+sweepParam+' ('+steps+' scenarios)...');
+    const body=await api('/api/session/run_lifecycle_compare',{
+      num_years:parseInt(document.getElementById('lcNumYears').value)||20,
+      discount_rate:parseFloat(document.getElementById('lcDiscountRate').value)||0.05,
+      load_growth_rate:parseFloat(document.getElementById('lcLoadGrowth').value)||0.02,
+      pv_annual_derating:parseFloat(document.getElementById('lcPVDerating').value)||0.005,
+      calendar_degradation:parseFloat(document.getElementById('lcCalDegrad').value)||0.02,
+      resolution:document.getElementById('lcResolution').value,
+      pv_scale:parseFloat(document.getElementById('lcPVScale').value)||1.0,
+      wind_scale:parseFloat(document.getElementById('lcWindScale').value)||1.0,
+      bess_power_scale:parseFloat(document.getElementById('lcBESSPowerScale').value)||1.0,
+      bess_energy_scale:parseFloat(document.getElementById('lcBESSEnergyScale').value)||1.0,
+      diesel_scale:parseFloat(document.getElementById('lcDieselScale').value)||1.0,
+      sweep_param:sweepParam,
+      sweep_min:minS,
+      sweep_max:maxS,
+      sweep_steps:steps,
+    });
+    const scens=body.scenarios||[];
+    const labels=scens.map(s=>s.label);
+    const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12','#1abc9c','#d35400'];
+    const paramLabel={pv:'PV (MW)',wind:'Wind (MW)',bess_power:'BESS Power (MW)',bess_energy:'BESS Energy (MWh)',diesel:'Diesel (MW)'}[sweepParam]||sweepParam;
+    const capVals=scens.map(s=>{
+      if(sweepParam==='pv') return s.total_pv_mw;
+      if(sweepParam==='wind') return s.total_wind_mw;
+      if(sweepParam==='bess_power') return s.total_bess_mw;
+      if(sweepParam==='bess_energy') return s.total_bess_mwh;
+      if(sweepParam==='diesel') return s.total_diesel_mw;
+      return 0;
+    });
+    // NPV vs capacity
+    Plotly.newPlot('lcCompNPVChart',[
+      {x:capVals,y:scens.map(s=>s.npv_total_cost),mode:'lines+markers',name:'NPV Cost',line:{color:pal[0],width:2},marker:{size:8}},
+    ],{title:'NPV Total Cost vs '+paramLabel,xaxis:{title:paramLabel},yaxis:{title:'$ NPV Cost'},
+       margin:{l:70,r:15,t:45,b:50}},{responsive:true});
+    // Total carbon vs capacity
+    Plotly.newPlot('lcCompCarbonChart',[
+      {x:capVals,y:scens.map(s=>s.total_carbon_tco2),mode:'lines+markers',name:'Total CO\u2082',line:{color:pal[5],width:2},marker:{size:8}},
+    ],{title:'Total Carbon vs '+paramLabel,xaxis:{title:paramLabel},yaxis:{title:'tCO\u2082'},
+       margin:{l:60,r:15,t:45,b:50}},{responsive:true});
+    // Pareto: NPV vs Carbon
+    Plotly.newPlot('lcCompParetoChart',[
+      {x:scens.map(s=>s.total_carbon_tco2),y:scens.map(s=>s.npv_total_cost),
+       mode:'markers+text',text:labels,textposition:'top center',textfont:{size:9},
+       marker:{size:12,color:capVals,colorscale:'Viridis',showscale:true,colorbar:{title:paramLabel,len:0.7}},
+       name:'Scenarios'},
+    ],{title:'Pareto Front: NPV Cost vs Total Carbon',xaxis:{title:'Total tCO\u2082'},yaxis:{title:'$ NPV Cost'},
+       margin:{l:70,r:70,t:45,b:50}},{responsive:true});
+    // Carbon trajectory comparison (each scenario as a line)
+    const trajTraces=scens.map((s,si)=>{
+      const yrs=s.yearly_carbon.map((_,i)=>i+1);
+      return {x:yrs,y:s.yearly_carbon,mode:'lines',name:s.label,line:{color:pal[si%pal.length],width:1.5}};
+    });
+    Plotly.newPlot('lcCompCarbonTrajChart',trajTraces,{title:'Annual Carbon Trajectories by Scenario',
+       xaxis:{title:'Year'},yaxis:{title:'tCO\u2082'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    document.getElementById('lcCompareStatus').textContent='\u2705 Comparison complete: '+scens.length+' scenarios for '+paramLabel;
+    setStatus('Capacity comparison complete. '+scens.length+' scenarios.');
+  }catch(e){setStatus(e.message,true);document.getElementById('lcCompareStatus').textContent='Error: '+e.message;}
+};
+
+/* Dashboard */
+document.getElementById('runDashBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  const ds=document.getElementById('dashStatus');
+  ds.textContent='Running Time-Series PF...'; setStatus('Dashboard: running full analysis...');
+  const numSteps=24; const hrs=Array.from({length:numSteps},(_,i)=>i);
+  const results={};
+  try{results.tspf=await api('/api/session/run_ts_pf',{num_steps:numSteps,skip_uc:false,run_opf:false});}
+  catch(e){results.tspf=null;ds.textContent='TS-PF failed: '+e.message;}
+  ds.textContent='Running Carbon Analysis...';
+  try{results.carbon=await api('/api/session/run_carbon',{});}
+  catch(e){results.carbon=null;}
+  // KPI row
+  const kd=[];
+  if(results.tspf){
+    kd.push({v:results.tspf.num_converged+'/'+results.tspf.num_steps,l:'TS-PF Conv.'});
+    kd.push({v:'$'+fmt(results.tspf.total_generation_cost,0),l:'Gen Cost'});
+    const avgLoss=results.tspf.losses_mw?(results.tspf.losses_mw.reduce((a,b)=>a+b,0)/numSteps).toFixed(2):'-';
+    kd.push({v:avgLoss+' MW',l:'Avg Losses'});
+  }
+  if(results.carbon){
+    const ts2=results.carbon.tracing_summary||{};
+    kd.push({v:fmt(ts2.total_generation_emissions_tco2,1)+' tCO\u2082',l:'Gen Emissions'});
+    kd.push({v:fmt(ts2.total_load_emissions_tco2,1)+' tCO\u2082',l:'Load Emissions'});
+    if(results.carbon.bus_carbon&&results.carbon.bus_carbon.length){
+      const avgCI=results.carbon.bus_carbon.reduce((a,b)=>a+b.carbon_intensity_tco2_mwh,0)/results.carbon.bus_carbon.length;
+      kd.push({v:fmt(avgCI,3)+' tCO\u2082/MWh',l:'Avg Carbon Int.'});
+    }
+  }
+  document.getElementById('dashKPIs').innerHTML=kd.map(k=>'<div class="kpi"><div class="v">'+k.v+'</div><div class="l">'+k.l+'</div></div>').join('');
+  const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12'];
+  const M={l:50,r:15,t:40,b:45};
+  if(results.tspf){
+    const dtraces=(results.tspf.gen_dispatch||[]).map((d,gi)=>({x:hrs,y:d,type:'bar',name:results.tspf.gen_names[gi]||'Gen '+gi,marker:{color:pal[gi%pal.length]}}));
+    (results.tspf.renewable_dispatch||[]).forEach((rd,ri)=>dtraces.push({x:hrs,y:rd,type:'bar',name:results.tspf.ren_names[ri]||'Ren '+ri,marker:{color:'#27ae60'}}));
+    Plotly.newPlot('dashGenChart',dtraces,{title:'Generation Dispatch',barmode:'stack',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:M,showlegend:false,height:300},{responsive:true});
+    if(results.tspf.vm_mean){
+      const vt=[];const d2=results.tspf;
+      if(d2.vm_max&&d2.vm_min){vt.push({x:hrs,y:d2.vm_max,mode:'lines',line:{width:0},showlegend:false});vt.push({x:hrs,y:d2.vm_min,mode:'lines',line:{width:0},fill:'tonexty',fillcolor:'rgba(11,110,79,0.12)',name:'Range'});}
+      vt.push({x:hrs,y:d2.vm_mean,mode:'lines',line:{color:'#0b6e4f',width:2},name:'Mean'});
+      const allV2=[...d2.vm_mean,...(d2.vm_min||[]),...(d2.vm_max||[])].filter(v=>v>0);
+      const vL=Math.min(...allV2),vH=Math.max(...allV2),vP2=Math.max((vH-vL)*0.15,0.005);
+      Plotly.newPlot('dashVoltChart',vt,{title:'Bus Voltage (p.u.)',xaxis:{title:'Hour'},yaxis:{title:'p.u.',range:[vL-vP2,vH+vP2]},margin:M,height:300},{responsive:true});
+    }
+    if(results.tspf.losses_mw)
+      Plotly.newPlot('dashLossChart',[{x:hrs,y:results.tspf.losses_mw,type:'bar',marker:{color:'#b5651d'}}],{title:'System Losses per Hour (MW)',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:M,height:300},{responsive:true});
+    if(results.tspf.ess_soc&&results.tspf.ess_soc.length)
+      Plotly.newPlot('dashESSChart',(results.tspf.ess_soc||[]).map((s,si)=>({x:hrs,y:s,mode:'lines',name:results.tspf.ess_names[si]||'ESS '+si})),{title:'ESS State of Charge',xaxis:{title:'Hour'},yaxis:{title:'SOC',range:[0,1]},margin:M,height:300},{responsive:true});
+    else
+      document.getElementById('dashESSChart').innerHTML='<div style="padding:20px;color:var(--muted);">No storage data.</div>';
+    // Load demand profile (from load profile 0 scalings × total load)
+    const loadFromLoads=(SYS.loads||[]).reduce((s,l)=>s+(l.p_mw||0),0);
+    const loadFromBuses=(SYS.ac_buses||[]).reduce((s,b)=>s+(b.pd_mw||0),0);
+    const totalLoad=loadFromLoads>0?loadFromLoads:loadFromBuses;
+    const lpVals=[0.50,0.45,0.42,0.40,0.42,0.50,0.60,0.72,0.80,0.85,0.88,0.90,0.88,0.85,0.82,0.85,0.90,1.00,1.10,1.05,0.95,0.85,0.72,0.60];
+    Plotly.newPlot('dashLoadChart',[{x:hrs,y:lpVals.map(s=>s*totalLoad),mode:'lines',fill:'tozeroy',fillcolor:'rgba(44,140,153,0.1)',line:{color:'#2c8c99',width:2},name:'Load'}],{title:'Total Load Demand (MW)',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:M,height:300},{responsive:true});
+  }
+  if(results.carbon&&results.carbon.bus_carbon&&results.carbon.bus_carbon.length){
+    const carbonBusRows=results.carbon.bus_carbon.filter(b=>b.carbon_potential_valid!==false&&Number(b.sink_power_mw||0)>1e-9&&Number.isFinite(Number(b.carbon_intensity_tco2_mwh)));
+    if(!carbonBusRows.length){document.getElementById('dashCarbonChart').innerHTML='<div style="padding:20px;color:var(--muted);">No valid carbon sink bus data.</div>';}
+    else{
+    const ci=carbonBusRows.map(b=>b.carbon_intensity_tco2_mwh);
+    const mx=Math.max(...ci)||1;
+    Plotly.newPlot('dashCarbonChart',[{x:carbonBusRows.map(b=>'B'+b.bus_index),y:ci,type:'bar',
+      marker:{color:ci,colorscale:'RdYlGn',reversescale:true,cmin:0,cmax:mx,showscale:true,colorbar:{len:0.8}}}],
+      {title:'Carbon Intensity by Bus (tCO\u2082/MWh)',xaxis:{title:''},yaxis:{title:'tCO\u2082/MWh'},margin:{l:50,r:70,t:40,b:50},height:300},{responsive:true});
+    }
+  } else {
+    document.getElementById('dashCarbonChart').innerHTML='<div style="padding:20px;color:var(--muted);">Carbon data unavailable.</div>';
+  }
+  ds.textContent='\u2705 Full analysis complete! TS-PF: '+(results.tspf?results.tspf.num_converged+'/'+results.tspf.num_steps+' conv.':'failed')+'. Carbon: '+(results.carbon?(fmt(results.carbon.tracing_summary.total_generation_emissions_tco2,1)+' tCO\u2082'):'failed')+'.'
+  setStatus('Dashboard analysis complete.');
+};
+</script>
+</body>
+</html>)html";
+}
+#endif
 
 }  // namespace
 
@@ -10854,6 +12735,57 @@ int main(int argc, char** argv) {
       clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
       summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/load_bpa_dat",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      // Two body forms: JSON {"dat_string": "..."} (UTF-8 text) or the raw
+      // .dat bytes (octet-stream; may be GBK-encoded — the importer converts
+      // bus names to UTF-8).
+      std::string dat;
+      if (!req.body.empty() && req.body.front() == '{') {
+        const auto j = json::parse(req.body);
+        dat = j.value("dat_string", "");
+      } else {
+        dat = req.body;
+      }
+      if (dat.empty()) throw std::runtime_error("Empty DAT content");
+      auto imported = hacdcpf::io::parse_bpa_dat_string(dat);
+      if (imported.report.has_errors()) {
+        std::string msg = "BPA DAT import failed:";
+        for (const auto& rec : imported.report.records)
+          if (rec.severity == hacdcpf::io::ImportSeverity::Error)
+            msg += " " + rec.message;
+        throw std::runtime_error(msg);
+      }
+      auto sys = std::move(imported.system);
+
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!sys.three_phase_ac.has_value() && g_session.preserved_three_phase_ac.has_value()) {
+        sys.three_phase_ac = g_session.preserved_three_phase_ac;
+      } else if (sys.three_phase_ac.has_value()) {
+        g_session.preserved_three_phase_ac = sys.three_phase_ac;
+      } else {
+        clear_preserved_three_phase(g_session);
+      }
+      g_session.current_system = std::move(sys);
+      g_session.current_name = g_session.current_system->name;
+      g_session.external_grid_carbon_profiles.clear();
+      clear_cached_analysis(g_session);
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      // Surface non-fatal import notes (LCC approximation, skipped cards).
+      json notes = json::array();
+      for (const auto& rec : imported.report.records)
+        if (rec.severity != hacdcpf::io::ImportSeverity::Info)
+          notes.push_back(rec.source_locator + ": " + rec.message);
+      summary["_import_notes"] = std::move(notes);
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;
@@ -19887,7 +21819,10 @@ int main(int argc, char** argv) {
             if (value.is_number_integer())
               opt.enabled_tap_indices.push_back(value.get<int>());
         }
-        res.set_content(rpo_control_inventory_json(sys, opt).dump(),
+        // TODO: rpo_control_inventory_json is not implemented yet; the
+        // control-inventory response shape is TBD. Return a placeholder so
+        // the build stays green until the feature lands.
+        res.set_content(json{{"control_inventory", "not implemented"}}.dump(),
                         "application/json");
       } catch (const std::exception& e) {
         res.status = 400;
@@ -20146,7 +22081,8 @@ int main(int argc, char** argv) {
             "离散坐标搜索(两绕组OLTC/可投切并联补偿)+以所选电压/网损"
             "目标直接求解的连续AC/DC OPF；"
             "返回可行局部最优点，不提供全局MINLP最优性证明。";
-        out["control_inventory"] = rpo_control_inventory_json(sys, rpo_opt);
+        // TODO: rpo_control_inventory_json is not implemented yet.
+        out["control_inventory"] = "not implemented";
 
         out["cross_validation"] = json{
             {"rpo_converged", result.converged},

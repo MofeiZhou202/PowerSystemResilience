@@ -166,6 +166,11 @@ TEST_CASE("BPA import: cigre HVDC structure", "[bpa][structure]") {
   REQUIRE(sys.dc.branches.size() == 1);
   REQUIRE(sys.vsc_converters.size() == 2);
   REQUIRE_THAT(sys.dc.branches.front().r_pu, WithinAbs(0.004, 1e-9));
+  // Valve-drop station loss from the BD card: 100 V * 3000 A * 2 bridges,
+  // mapped onto eta for the default Linear loss model (0.6 / 1500 = 4e-4).
+  REQUIRE_THAT(sys.vsc_converters[0].loss_mw, WithinAbs(0.6, 1e-9));
+  REQUIRE_THAT(sys.vsc_converters[1].loss_mw, WithinAbs(0.6, 1e-9));
+  REQUIRE_THAT(sys.vsc_converters[0].eta, WithinAbs(0.9996, 1e-9));
 }
 
 TEST_CASE("BPA import: JSON round-trip", "[bpa][roundtrip]") {

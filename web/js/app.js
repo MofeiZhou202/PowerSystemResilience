@@ -2729,6 +2729,40 @@ const App = (() => {
     }
   }
 
+  // Import a PSD-BPA / DSP card file (.dat). Raw bytes are uploaded so the
+  // server can decode GBK bus names; the importer converts them to UTF-8.
+  async function loadBpaDat(file) {
+    if (!file) return;
+    setStatus('导入BPA DAT...', 'busy');
+    try {
+      const buf = await file.arrayBuffer();
+      const res = await fetch(`${API_BASE}/api/session/load_bpa_dat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: buf,
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        log(`导入BPA DAT失败: ${data.error || res.statusText}`, 'error');
+        setStatus('加载失败', 'error');
+        return;
+      }
+      log(`已导入BPA DAT: ${file.name}`, 'success');
+      applyLoadedSystem(data, 'BPA DAT');
+      showModelIoStatus('BPA DAT 导入完成', [
+        ['文件', file.name],
+        ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
+        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+        ['DC母线', data.counts?.dc_buses ?? data.dc_buses ?? ''],
+        ['VSC', data.counts?.vsc_converters ?? data.vsc_converters ?? ''],
+      ], { subtitle: 'PSD-BPA / DSP 卡片转换到当前系统', warnings: data._import_notes || [] });
+      setStatus('就绪');
+    } catch (e) {
+      log(`导入BPA DAT失败: ${e.message}`, 'error');
+      setStatus('加载失败', 'error');
+    }
+  }
+
   async function createNewSystem() {
     setStatus('创建中...', 'busy');
     const data = await apiPost('/api/session/new_empty');
@@ -15853,6 +15887,14 @@ const App = (() => {
     });
     document.getElementById('btnIoImportPsdJulia')?.addEventListener('click', () => {
       document.getElementById('fileImportPsdJulia')?.click();
+    });
+    document.getElementById('btnIoImportBpaDat')?.addEventListener('click', () => {
+      document.getElementById('fileImportBpaDat')?.click();
+    });
+    document.getElementById('fileImportBpaDat')?.addEventListener('change', (e) => {
+      const f = e.target.files[0];
+      e.target.value = '';
+      if (f) loadBpaDat(f);
     });
     document.getElementById('fileImportPsdJulia')?.addEventListener('change', (e) => {
       const f = e.target.files[0];

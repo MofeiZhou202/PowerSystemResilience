@@ -1,6 +1,6 @@
 # Documentation Index
 
-Updated: 2026-07-19
+Updated: 2026-07-20
 
 This directory separates implementation contracts from mathematical references.
 When documentation and runtime behavior differ, `include/`, `src/`,
@@ -15,6 +15,7 @@ When documentation and runtime behavior differ, `include/`, `src/`,
 | Built-in case catalog: capability-oriented showcase guide | [case_catalog.md](case_catalog.md) |
 | Python SDK and AI enhancement architecture | [python_api.md](python_api.md) |
 | Editable parameter registry and effective values | [parameter_system.md](parameter_system.md) |
+| 中文 LaTeX：元件模型技术手册（41 类元件的参数、单位制、典型范围与等值电路） | [component_models/component_models.tex](component_models/component_models.tex) |
 | Rich/canonical projection and result attribution | [projection_and_results.md](projection_and_results.md) |
 | WebGL/SVG rendering, large-model interaction, and time playback | [gui_canvas_runtime.md](gui_canvas_runtime.md) |
 | TSPF, annual simulation, storage, and profiles | [sequential_production_simulation_rich_models.md](sequential_production_simulation_rich_models.md) |

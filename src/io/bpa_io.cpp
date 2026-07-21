@@ -142,6 +142,8 @@ struct BdStation {
   int dc_bus{0};          // DC bus index created for this station
   double dc_kv{0.0};      // rated DC voltage from the BD card (may be 0)
   double bridges{0.0};
+  double vdrop_v{0.0};    // valve voltage drop per bridge (V), cols 41-45
+  double bridge_in_a{0.0};// rated bridge current (A), cols 46-50
 };
 
 struct Importer {
@@ -379,6 +381,8 @@ struct Importer {
     st.name = name;
     st.ac_bus = ensure_ac_bus(name, kv, locator, /*quiet=*/true);
     st.bridges = num(field(line, 21, 25), present);
+    st.vdrop_v = num(field(line, 41, 45), present);
+    st.bridge_in_a = num(field(line, 46, 50), present);
     st.dc_kv = num(field(line, 63, 66), present);
     st.dc_bus = ensure_dc_bus(name, st.dc_kv);
     bd_by_name.emplace(name, st);
@@ -446,12 +450,25 @@ struct Importer {
     //     island balance (= Psch - line losses), as in DSP.  A hard VDC
     //     converter is also what the engine requires: a bare DC_V bus is only
     //     a declaration and fixed-P converters get auto-promoted otherwise.
-    // Converter efficiency is 1.0 (the cards carry no station-loss data), so
-    // the inverter delivers Psch - I^2*R exactly.  Both stations absorb Q
-    // estimated as lcc_q_ratio * P (typical LCC reactive consumption).
+    // Converter efficiency is 1.0 unless the BD card specifies a valve drop
+    // (mapped onto eta / loss_mw below), so the DC line R carries essentially
+    // all of the link loss — matching the DSP solution (1410 = 1500 - I^2R).
+    // Both stations absorb Q estimated as lcc_q_ratio * P (typical LCC
+    // reactive consumption).
     const double i_est = (p_sch > 0.0 && vdc_kv > 0.0) ? p_sch / vdc_kv : 0.0;
     const double line_loss = i_est * i_est * r_ohm;  // MW (kA^2 * ohm)
     const double p_recv = std::max(0.0, p_sch - line_loss);
+    // Station losses from the BD card valve drop: P_loss = Vdrop * Id * bridges
+    // (0.6 MW per station for the CIGRE card's 100 V / 3 kA / 2 bridges; the
+    // 2DC card leaves Vdrop blank -> 0).  The loss is mapped onto eta because
+    // the engine's default Linear loss model reads eta only (loss = (1-eta)*P,
+    // which for constant-voltage valve drop has exactly the right ∝I shape);
+    // loss_mw is also set for users of the CurrentBased loss model.
+    const double id_a = i_est * 1000.0;
+    const double rect_loss_mw = rect.vdrop_v * id_a * std::max(1.0, rect.bridges) / 1e6;
+    const double inv_loss_mw = inv.vdrop_v * id_a * std::max(1.0, inv.bridges) / 1e6;
+    const double rect_eta = p_sch > 0.0 ? std::max(0.9, 1.0 - rect_loss_mw / p_sch) : 1.0;
+    const double inv_eta = p_recv > 0.0 ? std::max(0.9, 1.0 - inv_loss_mw / p_recv) : 1.0;
 
     VSCConverter crect;
     crect.index = static_cast<int>(result.system.vsc_converters.size());
@@ -460,7 +477,8 @@ struct Importer {
     crect.control_mode = ConverterMode::PQ_MODE;
     crect.p_set_mw = -p_sch;
     crect.q_set_mvar = -options.lcc_q_ratio * p_sch;
-    crect.eta = 1.0;
+    crect.eta = rect_eta;
+    crect.loss_mw = rect_loss_mw;
     crect.vn_ac_kv = result.system.ac.buses[static_cast<size_t>(rect.ac_bus) - 1].base_kv;
     crect.vn_dc_kv = vdc_kv;
     crect.name = "LCC_" + n_rect;
@@ -483,7 +501,8 @@ struct Importer {
     cinv.p_set_mw = p_recv;
     cinv.p_schedule_mw = p_recv;
     cinv.p_initial_mw = p_recv;
-    cinv.eta = 1.0;
+    cinv.eta = inv_eta;
+    cinv.loss_mw = inv_loss_mw;
     cinv.vn_ac_kv = result.system.ac.buses[static_cast<size_t>(inv.ac_bus) - 1].base_kv;
     cinv.vn_dc_kv = vdc_kv;
     cinv.name = "LCC_" + n_inv;
@@ -495,7 +514,8 @@ struct Importer {
         << " MW, V=" << vdc_kv << " kV) approximated by VSC converters: "
            "rectifier PQ (draws scheduled P), inverter VDC_Q (forms Vdc; "
            "delivers ~" << p_recv << " MW = Psch - I^2R). Station Q estimated "
-           "as " << options.lcc_q_ratio << " * P.";
+           "as " << options.lcc_q_ratio << " * P; valve-drop station loss "
+           << rect_loss_mw << " / " << inv_loss_mw << " MW (rect/inv).";
     warn(ImportDisposition::Coerced, ImportReasonCode::StructuralLoss, locator,
          msg.str());
   }
@@ -575,7 +595,8 @@ struct Importer {
                       "supported by this importer; skipped.");
       } else {
         warn(ImportDisposition::Skipped, ImportReasonCode::UnknownField, locator,
-             "Unrecognized card type '" + trim(type) + "'; line skipped.");
+             "Unrecognized card type '" + name_of(raw_field(line, 1, 2)) +
+                 "'; line skipped.");
       }
     }
 
@@ -585,6 +606,9 @@ struct Importer {
     sys.dc.base_mva = mva_base;
     sys.name = !project.empty() ? project
                : (!case_id.empty() ? case_id : "BPA case");
+    // Control-card PROJECT/CASEID values may carry GBK bytes; the model name
+    // must be valid UTF-8 for JSON serialisation.
+    if (!is_valid_utf8(sys.name)) sys.name = gbk_to_utf8(sys.name);
     sys.ac.name = sys.name + " AC";
     sys.dc.name = sys.name + " DC";
     if (names_need_gbk) {
@@ -627,7 +651,22 @@ BpaImportResult parse_bpa_dat(const std::string& filepath,
   std::ostringstream ss;
   ss << in.rdbuf();
   BpaImportResult res = parse_bpa_dat_string(ss.str(), options);
-  if (res.system.name == "BPA case") res.system.name = filepath;
+  if (res.system.name == "BPA case") {
+    // Fall back to the file stem; on a GBK-locale Windows host argv arrives
+    // in the ANSI codepage, so re-encode to UTF-8 for the JSON output.
+    const size_t slash = filepath.find_last_of("/\\");
+    const size_t dot = filepath.find_last_of('.');
+    std::string stem = filepath.substr(
+        slash == std::string::npos ? 0 : slash + 1,
+        (dot == std::string::npos ? filepath.size() : dot) -
+            (slash == std::string::npos ? 0 : slash + 1));
+    res.system.name = stem;
+  }
+  // Control-card PROJECT/CASEID values may carry GBK bytes too; the model
+  // name must be valid UTF-8 for JSON serialisation.
+  if (!is_valid_utf8(res.system.name)) {
+    res.system.name = gbk_to_utf8(res.system.name);
+  }
   return res;
 }
 

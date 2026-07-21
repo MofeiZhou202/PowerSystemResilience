@@ -727,6 +727,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/matpower_pf_compare.cpp")
   hacdcpf_copy_opendss_runtime(matpower_pf_compare)
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/bpa_dat_convert.cpp")
+  add_executable(bpa_dat_convert tools/bpa_dat_convert.cpp)
+  target_link_libraries(bpa_dat_convert PRIVATE hacdcpf::hacdcpf)
+  hacdcpf_copy_opendss_runtime(bpa_dat_convert)
+endif()
+
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/gridlabd_validation_matrix.cpp")
   add_executable(gridlabd_validation_matrix tools/gridlabd_validation_matrix.cpp)
   target_link_libraries(gridlabd_validation_matrix PRIVATE hacdcpf::hacdcpf)
