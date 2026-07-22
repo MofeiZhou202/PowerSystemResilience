@@ -105,6 +105,23 @@ struct JacobianPattern {
     int dc_in_vdc_out_nz{-1};   // DC-row(bus_in)  → Vdc-col(bus_out): spec deriv = -k_droop/eta
   };
 
+  /// Always-on coupling entry for an LCC station (quasi-steady, dat manual
+  /// ch.4).  The station's AC P/Q injections at the valve-side bus and its DC
+  /// injection depend on both the valve-side AC voltage (through U_d0) and
+  /// the DC terminal voltage; these derivatives are required for the Newton
+  /// iteration to converge with stiff CEA characteristics, so the entries
+  /// are built regardless of enable_coupled_jacobian.
+  struct LCCEntry {
+    int lcc_index{0};
+    int ac_bus{0};
+    int dc_bus{0};
+    int p_vm_nz{-1};    // P-row(ac_bus) → Vm-col(ac_bus)
+    int q_vm_nz{-1};    // Q-row(ac_bus) → Vm-col(ac_bus)
+    int p_vdc_nz{-1};   // P-row(ac_bus) → Vdc-col(dc_bus)
+    int q_vdc_nz{-1};   // Q-row(ac_bus) → Vdc-col(dc_bus)
+    int dc_vm_nz{-1};   // DC-row(dc_bus) → Vm-col(ac_bus)
+  };
+
   Eigen::SparseMatrix<double> matrix;
   std::unordered_map<std::uint64_t, int> entry_to_nz;
   std::vector<ACEntry> ac_entries;
@@ -112,6 +129,7 @@ struct JacobianPattern {
   std::vector<CouplingEntry> coupling_entries;
   std::vector<DCDCCouplingEntry> dcdc_coupling_entries;
   std::vector<DCDroopEntry> dcdc_droop_entries;  ///< always built; droop diagonal + cross-term
+  std::vector<LCCEntry> lcc_entries;  ///< always built; LCC AC↔DC coupling
   std::vector<int> p_va_diag_nz;
   std::vector<int> p_vm_diag_nz;
   std::vector<int> q_va_diag_nz;

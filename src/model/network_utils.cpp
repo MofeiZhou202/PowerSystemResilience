@@ -1528,6 +1528,17 @@ void strip_dead_islands(HybridPowerSystem& sys) {
     sys.vsc_converters = std::move(kept);
   }
 
+  // LCC converters: AC (valve-side) bus - same treatment as VSC bus_ac.
+  {
+    std::vector<LCCConverter> kept;
+    for (auto& conv : sys.lcc_converters) {
+      if (is_dead(conv.ac_bus)) continue;
+      conv.ac_bus = remap(conv.ac_bus);
+      kept.push_back(std::move(conv));
+    }
+    sys.lcc_converters = std::move(kept);
+  }
+
   // Energy routers: AC ports
   for (auto& er : sys.energy_routers) {
     for (auto& p : er.ports) {
@@ -1787,6 +1798,10 @@ static void merge_zero_impedance_buses_impl(
 
   // VSC converters: only the AC side
   for (auto& conv : sys.vsc_converters) conv.bus_ac = remap_ac(conv.bus_ac);
+
+  // LCC converters: only the AC (valve-side) side; the DC bus keeps its
+  // stable identity like VSC bus_dc.
+  for (auto& conv : sys.lcc_converters) conv.ac_bus = remap_ac(conv.ac_bus);
 
   // Energy routers: only AC ports
   for (auto& er : sys.energy_routers) {

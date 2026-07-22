@@ -21,6 +21,7 @@
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/bpa_io.hpp"
 #include "hacdcpf/io/json_io.hpp"
+#include "hacdcpf/validation/validate_system.hpp"
 
 using Catch::Matchers::WithinAbs;
 using Catch::Matchers::WithinRel;
@@ -124,7 +125,9 @@ TEST_CASE("BPA import: IEEE90 structure and GBK names", "[bpa][structure]") {
 }
 
 TEST_CASE("BPA import: 2DC HVDC structure", "[bpa][structure]") {
-  auto res = hacdcpf::io::parse_bpa_dat(dat_path("2DC.dat"));
+  hacdcpf::io::BpaImportOptions options;
+  options.lcc_model = hacdcpf::io::BpaLccModel::VscApprox;  // legacy VSC path
+  auto res = hacdcpf::io::parse_bpa_dat(dat_path("2DC.dat"), options);
   REQUIRE_FALSE(res.report.has_errors());
   const auto& sys = res.system;
 
@@ -156,7 +159,9 @@ TEST_CASE("BPA import: 2DC HVDC structure", "[bpa][structure]") {
 }
 
 TEST_CASE("BPA import: cigre HVDC structure", "[bpa][structure]") {
-  auto res = hacdcpf::io::parse_bpa_dat(dat_path("cigre.dat"));
+  hacdcpf::io::BpaImportOptions options;
+  options.lcc_model = hacdcpf::io::BpaLccModel::VscApprox;  // legacy VSC path
+  auto res = hacdcpf::io::parse_bpa_dat(dat_path("cigre.dat"), options);
   REQUIRE_FALSE(res.report.has_errors());
   const auto& sys = res.system;
 
@@ -181,6 +186,156 @@ TEST_CASE("BPA import: JSON round-trip", "[bpa][roundtrip]") {
   REQUIRE(back.ac.branches.size() == res.system.ac.branches.size());
   REQUIRE(back.ac.generators.size() == res.system.ac.generators.size());
   REQUIRE(back.ac.loads.size() == res.system.ac.loads.size());
+}
+
+TEST_CASE("BPA import: 2DC LCC quasi-steady structure", "[bpa][lcc]") {
+  hacdcpf::io::BpaImportOptions options;
+  options.lcc_model = hacdcpf::io::BpaLccModel::LccQuasiSteady;
+  auto res = hacdcpf::io::parse_bpa_dat(dat_path("2DC.dat"), options);
+  REQUIRE_FALSE(res.report.has_errors());
+  const auto& sys = res.system;
+
+  // Native LCC elements replace the VSC stand-ins; the DC line is unchanged.
+  REQUIRE(sys.vsc_converters.empty());
+  REQUIRE(sys.lcc_converters.size() == 2);
+  REQUIRE(sys.dc.buses.size() == 2);
+  REQUIRE(sys.dc.branches.size() == 1);
+  REQUIRE_THAT(sys.dc.branches.front().r_pu, WithinAbs(0.004, 1e-9));
+
+  // Roles follow the LD card terminal order: RECTFIER first, INVERTER second.
+  const auto& rect = sys.lcc_converters[0];
+  const auto& inv = sys.lcc_converters[1];
+  REQUIRE(rect.station_role == hacdcpf::LCCStationRole::Rectifier);
+  REQUIRE(inv.station_role == hacdcpf::LCCStationRole::Inverter);
+
+  // BD card physical parameters (both stations share the same card values).
+  for (const auto* st : {&rect, &inv}) {
+    REQUIRE(st->n_bridges == 2);
+    REQUIRE_THAT(st->alpha_min_deg, WithinAbs(5.0, 1e-9));
+    REQUIRE_THAT(st->alpha_stop_deg, WithinAbs(140.0, 1e-9));
+    REQUIRE_THAT(st->rated_current_a, WithinAbs(3000.0, 1e-9));
+    REQUIRE_THAT(st->smoothing_reactor_mh, WithinAbs(200.0, 1e-9));
+    REQUIRE_THAT(st->vn_ac_kv, WithinAbs(217.0, 1e-9));
+    REQUIRE_THAT(st->rated_dc_kv, WithinAbs(500.0, 1e-9));
+    REQUIRE_FALSE(st->model_scope.empty());
+    REQUIRE_FALSE(st->model_limitations.empty());
+  }
+  // 2DC leaves the valve drop blank.
+  REQUIRE_THAT(rect.v_drop_v, WithinAbs(0.0, 1e-9));
+
+  // LD card control data: Psch = 1500 MW, rectifier-side Vdc = 500 kV,
+  // AlphaN = 15 deg, GamaN = 17 deg.
+  REQUIRE(rect.control_mode == hacdcpf::LCCControlMode::ConstantPower);
+  REQUIRE_THAT(rect.p_set_mw, WithinAbs(1500.0, 1e-9));
+  REQUIRE_THAT(rect.v_dc_set_kv, WithinAbs(500.0, 1e-9));
+  REQUIRE_THAT(rect.alpha_set_deg, WithinAbs(15.0, 1e-9));
+  REQUIRE(inv.control_mode == hacdcpf::LCCControlMode::ConstantGamma);
+  REQUIRE_THAT(inv.gamma_set_deg, WithinAbs(17.0, 1e-9));
+
+  // Commutation reactance from the converter transformer T card: 0.00833 pu
+  // on the 1800 MVA transformer base (NOT the system base — dat card manual
+  // ch3), ~0.218 ohm referred to the 217 kV valve side.
+  for (const auto* st : {&rect, &inv}) {
+    REQUIRE(st->converter_transformer_branch >= 0);
+    REQUIRE_THAT(st->x_comm_pu, WithinAbs(0.00833, 1e-6));
+    REQUIRE_THAT(st->x_comm_base_mva, WithinAbs(1800.0, 1e-9));
+    REQUIRE_THAT(st->x_comm_ohm,
+                 WithinAbs(0.00833 * 217.0 * 217.0 / 1800.0, 1e-6));
+  }
+
+  // Static validation accepts the reconstructed model.
+  const auto vrep = hacdcpf::validation::validate(sys);
+  REQUIRE(vrep.ok());
+}
+
+TEST_CASE("BPA import: cigre LCC quasi-steady structure", "[bpa][lcc]") {
+  hacdcpf::io::BpaImportOptions options;
+  options.lcc_model = hacdcpf::io::BpaLccModel::LccQuasiSteady;
+  auto res = hacdcpf::io::parse_bpa_dat(dat_path("cigre.dat"), options);
+  REQUIRE_FALSE(res.report.has_errors());
+  const auto& sys = res.system;
+
+  REQUIRE(sys.vsc_converters.empty());
+  REQUIRE(sys.lcc_converters.size() == 2);
+  REQUIRE(sys.dc.branches.size() == 1);
+  REQUIRE_THAT(sys.dc.branches.front().r_pu, WithinAbs(0.004, 1e-9));
+
+  const auto& rect = sys.lcc_converters[0];
+  const auto& inv = sys.lcc_converters[1];
+  REQUIRE(rect.station_role == hacdcpf::LCCStationRole::Rectifier);
+  REQUIRE(inv.station_role == hacdcpf::LCCStationRole::Inverter);
+  // cigre BD cards carry the 100 V valve drop and 525 kV primary base.
+  for (const auto* st : {&rect, &inv}) {
+    REQUIRE_THAT(st->v_drop_v, WithinAbs(100.0, 1e-9));
+    REQUIRE_THAT(st->rated_current_a, WithinAbs(3000.0, 1e-9));
+    REQUIRE_THAT(st->x_comm_pu, WithinAbs(0.00833, 1e-6));
+    REQUIRE_THAT(st->x_comm_base_mva, WithinAbs(1800.0, 1e-9));
+    REQUIRE(st->converter_transformer_branch >= 0);
+  }
+  REQUIRE_THAT(rect.p_set_mw, WithinAbs(1500.0, 1e-9));
+  REQUIRE_THAT(rect.v_dc_set_kv, WithinAbs(500.0, 1e-9));
+  REQUIRE_THAT(rect.alpha_set_deg, WithinAbs(15.0, 1e-9));
+  REQUIRE_THAT(inv.gamma_set_deg, WithinAbs(17.0, 1e-9));
+
+  const auto vrep = hacdcpf::validation::validate(sys);
+  REQUIRE(vrep.ok());
+}
+
+TEST_CASE("BPA import: LCC JSON round-trip", "[bpa][lcc][roundtrip]") {
+  hacdcpf::io::BpaImportOptions options;
+  options.lcc_model = hacdcpf::io::BpaLccModel::LccQuasiSteady;
+  auto res = hacdcpf::io::parse_bpa_dat(dat_path("cigre.dat"), options);
+  REQUIRE(res.system.lcc_converters.size() == 2);
+
+  const auto json = hacdcpf::io::to_json(res.system, 2);
+  auto back = hacdcpf::io::from_json(json);
+  REQUIRE(back.lcc_converters.size() == 2);
+  REQUIRE(back.vsc_converters.empty());
+  for (size_t i = 0; i < 2; ++i) {
+    const auto& a = res.system.lcc_converters[i];
+    const auto& b = back.lcc_converters[i];
+    REQUIRE(b.index == a.index);
+    REQUIRE(b.name == a.name);
+    REQUIRE(b.ac_bus == a.ac_bus);
+    REQUIRE(b.dc_bus == a.dc_bus);
+    REQUIRE(b.station_role == a.station_role);
+    REQUIRE(b.control_mode == a.control_mode);
+    REQUIRE(b.n_bridges == a.n_bridges);
+    REQUIRE_THAT(b.alpha_min_deg, WithinAbs(a.alpha_min_deg, 1e-12));
+    REQUIRE_THAT(b.alpha_stop_deg, WithinAbs(a.alpha_stop_deg, 1e-12));
+    REQUIRE_THAT(b.gamma_min_deg, WithinAbs(a.gamma_min_deg, 1e-12));
+    REQUIRE_THAT(b.v_drop_v, WithinAbs(a.v_drop_v, 1e-12));
+    REQUIRE_THAT(b.rated_current_a, WithinAbs(a.rated_current_a, 1e-12));
+    REQUIRE_THAT(b.x_comm_pu, WithinAbs(a.x_comm_pu, 1e-12));
+    REQUIRE_THAT(b.x_comm_base_mva, WithinAbs(a.x_comm_base_mva, 1e-12));
+    REQUIRE_THAT(b.x_comm_ohm, WithinAbs(a.x_comm_ohm, 1e-12));
+    REQUIRE_THAT(b.rated_dc_kv, WithinAbs(a.rated_dc_kv, 1e-12));
+    REQUIRE_THAT(b.vn_ac_kv, WithinAbs(a.vn_ac_kv, 1e-12));
+    REQUIRE_THAT(b.smoothing_reactor_mh,
+                 WithinAbs(a.smoothing_reactor_mh, 1e-12));
+    REQUIRE_THAT(b.p_set_mw, WithinAbs(a.p_set_mw, 1e-12));
+    REQUIRE_THAT(b.i_set_ka, WithinAbs(a.i_set_ka, 1e-12));
+    REQUIRE_THAT(b.alpha_set_deg, WithinAbs(a.alpha_set_deg, 1e-12));
+    REQUIRE_THAT(b.gamma_set_deg, WithinAbs(a.gamma_set_deg, 1e-12));
+    REQUIRE_THAT(b.v_dc_set_kv, WithinAbs(a.v_dc_set_kv, 1e-12));
+    REQUIRE(b.converter_transformer_branch == a.converter_transformer_branch);
+    REQUIRE(b.model_scope == a.model_scope);
+    REQUIRE(b.model_limitations == a.model_limitations);
+  }
+}
+
+TEST_CASE("BPA import: default is LccQuasiSteady", "[bpa][lcc]") {
+  // The default options import the native quasi-steady LCC model; the legacy
+  // VSC approximation remains available as an explicit option.
+  auto res = hacdcpf::io::parse_bpa_dat(dat_path("2DC.dat"));
+  REQUIRE(res.system.vsc_converters.empty());
+  REQUIRE(res.system.lcc_converters.size() == 2);
+
+  hacdcpf::io::BpaImportOptions legacy;
+  legacy.lcc_model = hacdcpf::io::BpaLccModel::VscApprox;
+  auto res_vsc = hacdcpf::io::parse_bpa_dat(dat_path("2DC.dat"), legacy);
+  REQUIRE(res_vsc.system.vsc_converters.size() == 2);
+  REQUIRE(res_vsc.system.lcc_converters.empty());
 }
 
 TEST_CASE("BPA export: fixed-column round-trip", "[bpa][roundtrip][export]") {
@@ -284,23 +439,31 @@ TEST_CASE("BPA import: IEEE90 PF matches DSP solution", "[bpa][pf]") {
 }
 
 TEST_CASE("BPA import: 2DC HVDC link transfers scheduled power", "[bpa][pf]") {
-  auto res = hacdcpf::io::parse_bpa_dat(dat_path("2DC.dat"));
+  auto res = hacdcpf::io::parse_bpa_dat(dat_path("2DC.dat"));  // default: LccQuasiSteady
   hacdcpf::PowerFlowOptions opt;  // default solver options (as used by the GUI)
   auto pf = hacdcpf::solve_power_flow(res.system, opt);
   REQUIRE(pf.converged);
-  REQUIRE(pf.vsc_transfers.size() == 2);
-  // Rectifier (converter 0) draws the scheduled 1500 MW from its AC system,
-  // exactly as in the DSP solution.
-  REQUIRE_THAT(pf.vsc_transfers[0].p_ac_mw, WithinAbs(-1500.0, 1.0));
-  // Inverter delivers Psch - I^2*R = 1410 MW, matching DSP's 1410 MW label.
-  REQUIRE_THAT(pf.vsc_transfers[1].p_ac_mw, WithinAbs(1410.0, 15.0));
-  // Both stations absorb reactive power (LCC estimate 0.5 * P).
-  REQUIRE(pf.vsc_transfers[0].q_ac_mvar < 0.0);
-  REQUIRE(pf.vsc_transfers[1].q_ac_mvar < 0.0);
-  // Inverter-side DC voltage held at ~0.94 pu (470 kV) by the VDC_Q station.
-  const auto& inv = res.system.vsc_converters[1];
-  REQUIRE_THAT(pf.vdc[static_cast<size_t>(inv.bus_dc) - 1],
-               WithinAbs(0.94, 0.02));
+  // Native LCC quasi-steady stations replace the legacy VSC stand-ins.
+  REQUIRE(pf.vsc_transfers.empty());
+  REQUIRE(pf.lcc_transfers.size() == 2);
+  // Rectifier (station 0) draws the scheduled 1500 MW from its AC system,
+  // exactly as in the DSP solution (constant-power control).
+  REQUIRE(pf.lcc_transfers[0].station_role ==
+          static_cast<int>(hacdcpf::LCCStationRole::Rectifier));
+  REQUIRE_THAT(pf.lcc_transfers[0].p_ac_mw, WithinAbs(-1500.0, 1.0));
+  // The inverter runs at its rated current (3 kA — the current order), so
+  // the DC side lands on the DSP operating point exactly (470 kV, 1410 MW);
+  // with fixed taps the CEA setpoint becomes a lower bound and the physical
+  // gamma floats above it (see test_bpa_dsp_compare.cpp for the full
+  // DSP comparison and the documented mechanism).
+  REQUIRE(pf.lcc_transfers[1].station_role ==
+          static_cast<int>(hacdcpf::LCCStationRole::Inverter));
+  REQUIRE(pf.lcc_transfers[1].id_at_limit);
+  REQUIRE_THAT(pf.lcc_transfers[1].p_ac_mw, WithinAbs(1410.0, 1.0));
+  REQUIRE_THAT(pf.lcc_transfers[1].ud_kv, WithinAbs(470.0, 1.0));
+  // Both stations absorb reactive power (Q = P*tan(phi)).
+  REQUIRE(pf.lcc_transfers[0].q_ac_mvar < 0.0);
+  REQUIRE(pf.lcc_transfers[1].q_ac_mvar < 0.0);
 }
 
 TEST_CASE("BPA import: cigre HVDC link transfers scheduled power", "[bpa][pf]") {
@@ -308,7 +471,9 @@ TEST_CASE("BPA import: cigre HVDC link transfers scheduled power", "[bpa][pf]") 
   hacdcpf::PowerFlowOptions opt;
   auto pf = hacdcpf::solve_power_flow(res.system, opt);
   REQUIRE(pf.converged);
-  REQUIRE(pf.vsc_transfers.size() == 2);
-  REQUIRE_THAT(pf.vsc_transfers[0].p_ac_mw, WithinAbs(-1500.0, 1.0));
-  REQUIRE_THAT(pf.vsc_transfers[1].p_ac_mw, WithinAbs(1410.0, 15.0));
+  REQUIRE(pf.vsc_transfers.empty());
+  REQUIRE(pf.lcc_transfers.size() == 2);
+  REQUIRE_THAT(pf.lcc_transfers[0].p_ac_mw, WithinAbs(-1500.0, 1.0));
+  REQUIRE_THAT(pf.lcc_transfers[1].p_ac_mw, WithinAbs(1410.0, 1.0));
+  REQUIRE(pf.lcc_transfers[1].id_at_limit);
 }

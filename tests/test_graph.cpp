@@ -13,6 +13,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <cmath>
+// MinGW GCC in strict -std=c++20 mode does not define M_PI via <cmath>.
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #include "hacdcpf/graph/graph.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 

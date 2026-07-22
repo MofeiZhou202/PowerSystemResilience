@@ -1078,6 +1078,72 @@ static VSCConverter vsc_from_json(const json& j) {
   return c;
 }
 
+static json lcc_to_json(const LCCConverter& c) {
+  json j;
+  j["index"] = c.index;
+  j["name"] = c.name;
+  j["ac_bus"] = c.ac_bus;
+  j["dc_bus"] = c.dc_bus;
+  j["in_service"] = c.in_service;
+  j["station_role"] = lcc_station_role_str(c.station_role);
+  j["n_bridges"] = c.n_bridges;
+  j["alpha_min_deg"] = c.alpha_min_deg;
+  j["alpha_stop_deg"] = c.alpha_stop_deg;
+  j["gamma_min_deg"] = c.gamma_min_deg;
+  j["v_drop_v"] = c.v_drop_v;
+  j["rated_current_a"] = c.rated_current_a;
+  j["x_comm_pu"] = c.x_comm_pu;
+  j["x_comm_base_mva"] = c.x_comm_base_mva;
+  j["x_comm_ohm"] = c.x_comm_ohm;
+  j["rated_dc_kv"] = c.rated_dc_kv;
+  j["vn_ac_kv"] = c.vn_ac_kv;
+  j["smoothing_reactor_mh"] = c.smoothing_reactor_mh;
+  j["control_mode"] = lcc_control_mode_str(c.control_mode);
+  j["p_set_mw"] = c.p_set_mw;
+  j["i_set_ka"] = c.i_set_ka;
+  j["alpha_set_deg"] = c.alpha_set_deg;
+  j["gamma_set_deg"] = c.gamma_set_deg;
+  j["v_dc_set_kv"] = c.v_dc_set_kv;
+  j["converter_transformer_branch"] = c.converter_transformer_branch;
+  j["model_scope"] = c.model_scope;
+  j["model_limitations"] = c.model_limitations;
+  return j;
+}
+
+static LCCConverter lcc_from_json(const json& j) {
+  LCCConverter c;
+  c.index = j.at("index").get<int>();
+  c.name = jget<std::string>(j, "name", "");
+  c.ac_bus = j.at("ac_bus").get<int>();
+  c.dc_bus = j.at("dc_bus").get<int>();
+  c.in_service = jget(j, "in_service", true);
+  c.station_role = lcc_station_role_from_str(
+      jget<std::string>(j, "station_role", "RECTIFIER"));
+  c.n_bridges = jget(j, "n_bridges", 1);
+  c.alpha_min_deg = jget(j, "alpha_min_deg", 5.0);
+  c.alpha_stop_deg = jget(j, "alpha_stop_deg", 140.0);
+  c.gamma_min_deg = jget(j, "gamma_min_deg", 0.0);
+  c.v_drop_v = jget(j, "v_drop_v", 0.0);
+  c.rated_current_a = jget(j, "rated_current_a", 0.0);
+  c.x_comm_pu = jget(j, "x_comm_pu", 0.0);
+  c.x_comm_base_mva = jget(j, "x_comm_base_mva", 0.0);
+  c.x_comm_ohm = jget(j, "x_comm_ohm", 0.0);
+  c.rated_dc_kv = jget(j, "rated_dc_kv", 0.0);
+  c.vn_ac_kv = jget(j, "vn_ac_kv", 0.0);
+  c.smoothing_reactor_mh = jget(j, "smoothing_reactor_mh", 0.0);
+  c.control_mode = lcc_control_mode_from_str(
+      jget<std::string>(j, "control_mode", "CONSTANT_POWER"));
+  c.p_set_mw = jget(j, "p_set_mw", 0.0);
+  c.i_set_ka = jget(j, "i_set_ka", 0.0);
+  c.alpha_set_deg = jget(j, "alpha_set_deg", 0.0);
+  c.gamma_set_deg = jget(j, "gamma_set_deg", 0.0);
+  c.v_dc_set_kv = jget(j, "v_dc_set_kv", 0.0);
+  c.converter_transformer_branch = jget(j, "converter_transformer_branch", -1);
+  c.model_scope = jget<std::string>(j, "model_scope", "");
+  c.model_limitations = jget<std::string>(j, "model_limitations", "");
+  return c;
+}
+
 static json static_generator_to_json(const StaticGenerator& g) {
   json j;
   j["index"] = g.index;
@@ -3051,6 +3117,9 @@ std::string to_json(const HybridPowerSystem& sys, int indent) {
   root["vsc_converters"] = json::array();
   for (const auto& c : sys.vsc_converters) root["vsc_converters"].push_back(vsc_to_json(c));
 
+  root["lcc_converters"] = json::array();
+  for (const auto& c : sys.lcc_converters) root["lcc_converters"].push_back(lcc_to_json(c));
+
   root["energy_routers"] = json::array();
   for (const auto& r : sys.energy_routers) root["energy_routers"].push_back(energy_router_to_json(r));
 
@@ -3166,6 +3235,9 @@ HybridPowerSystem from_json(const std::string& json_str) {
 
   if (root.contains("vsc_converters"))
     for (const auto& j : root["vsc_converters"]) sys.vsc_converters.push_back(vsc_from_json(j));
+
+  if (root.contains("lcc_converters"))
+    for (const auto& j : root["lcc_converters"]) sys.lcc_converters.push_back(lcc_from_json(j));
 
   if (root.contains("dcdc_converters"))
     for (const auto& j : root["dcdc_converters"]) sys.dc.dcdc_converters.push_back(dcdc_from_json(j));

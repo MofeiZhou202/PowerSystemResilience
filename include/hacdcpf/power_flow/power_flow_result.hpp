@@ -161,6 +161,43 @@ struct VSCTransfer {
   double loss_mw{0.0};
 };
 
+// LCC (line-commutated converter) quasi-steady station result (dat manual
+// ch.4).  One entry per in-service LCCConverter, keyed by the stable
+// component `.index`; bus_ac/bus_dc are AUTHORED component ids (restored
+// across the canonical projection).  Units: kV, kA, MW, Mvar, degrees.
+// Sign conventions (same as VSCTransfer): p_ac_mw > 0 delivers power to the
+// AC grid (inverter), < 0 absorbs (rectifier); q_ac_mvar < 0 always (an LCC
+// consumes reactive power); p_dc_mw > 0 injects into the DC network
+// (rectifier), < 0 draws (inverter).
+struct LCCTransfer {
+  int index{0};          // LCCConverter.index (stable component id)
+  int bus_ac{0};         // authored valve-side AC bus .index
+  int bus_dc{0};         // authored DC bus .index
+  int station_role{0};   // LCCStationRole: 0 = Rectifier, 1 = Inverter
+  int control_mode{0};   // LCCControlMode of the station
+  double alpha_deg{0.0}; // firing angle, back-calculated from the solved
+                         // state (fixed taps: departs from the scheduled
+                         // AlphaN a tap changer would hold)
+  double gamma_deg{0.0}; // extinction angle: the CEA control value while the
+                         // characteristic holds; back-calculated physical
+                         // value when the rated-current limit binds (then
+                         // gamma >= gamma_set — see id_at_limit)
+  double ud0_kv{0.0};    // ideal no-load DC voltage (3*sqrt(2)/pi)*n_b*E at
+                         // the solved valve-side voltage
+  double ud_kv{0.0};     // solved DC terminal voltage
+  double id_ka{0.0};     // DC current (positive in power direction)
+  double p_ac_mw{0.0};
+  double q_ac_mvar{0.0};
+  double p_dc_mw{0.0};
+  bool id_at_limit{false};           // DC current clamped at rated_current_a:
+                                     // the current order/limit binds, so a
+                                     // CEA/constant-alpha setpoint is NOT
+                                     // held (gamma/alpha then float above
+                                     // their minimum — physically safe)
+  bool alpha_within_limits{true};  // alpha_min_deg <= alpha <= alpha_stop_deg
+  bool gamma_within_limits{true};  // gamma >= gamma_min_deg (when specified)
+};
+
 struct DCDCTransfer {
   int index{0};
   int bus_in{0};
@@ -212,6 +249,7 @@ struct PowerFlowResult {
   SolverDiagnostics diagnostics;
   std::vector<BranchFlow> branch_flows;
   std::vector<VSCTransfer> vsc_transfers;
+  std::vector<LCCTransfer> lcc_transfers;
   std::vector<DCDCTransfer> dcdc_transfers;
   std::vector<Trafo3WFlow> trafo3w_flows;
   std::vector<ERPortTransfer> er_port_transfers;

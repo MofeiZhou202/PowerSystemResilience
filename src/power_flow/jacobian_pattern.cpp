@@ -153,8 +153,7 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
   // diagonal + input-bus cross-column. Needed regardless of enable_coupled_jacobian
   // because the former modifies the DC spec (pdc_spec[bout] and pdc_spec[bin] both
   // depend on Vdc_out via the droop / voltage-forming law).
-  for (const auto& dcdc : data.dcdc_converters) {
-    if (!dcdc.in_service) continue;
+  for (const auto& dcdc : data.dcdc_converters) {    if (!dcdc.in_service) continue;
     const bool forms =
         dcdc.control_mode == DCDCControlMode::Voltage ||
         (dcdc.control_mode == DCDCControlMode::Droop && dcdc.k_droop != 0.0);
@@ -170,6 +169,28 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
     add_pattern_position(ctx.dc_row[static_cast<size_t>(bin)],
                          ctx.vdc_col[static_cast<size_t>(bout)],
                          triplets, seen);
+  }
+
+  // Always reserve pattern slots for LCC station coupling (not gated by
+  // enable_coupled_jacobian — the CEA/constant-alpha characteristic makes the
+  // injections strongly state-dependent and Newton needs the exact blocks):
+  //   P/Q-row(ac) → Vdc-col(dc), DC-row(dc) → Vm-col(ac).
+  // (The P/Q-row → Vm-col diagonal slots already exist from the ensure above.)
+  for (const auto& lcc : data.lcc_converters) {
+    if (!lcc.in_service) continue;
+    const int ac_bus = lcc.ac_bus - 1;
+    const int dc_bus = lcc.dc_bus - 1;
+    if (ac_bus < 0 || ac_bus >= ctx.n || dc_bus < 0 || dc_bus >= ctx.ndc) {
+      continue;
+    }
+    const int p_row = ctx.p_row[static_cast<size_t>(ac_bus)];
+    const int q_row = ctx.q_row[static_cast<size_t>(ac_bus)];
+    const int dc_row = ctx.dc_row[static_cast<size_t>(dc_bus)];
+    const int vdc_col = ctx.vdc_col[static_cast<size_t>(dc_bus)];
+    const int vm_col = ctx.vm_col[static_cast<size_t>(ac_bus)];
+    add_pattern_position(p_row, vdc_col, triplets, seen);
+    add_pattern_position(q_row, vdc_col, triplets, seen);
+    add_pattern_position(dc_row, vm_col, triplets, seen);
   }
 
   pattern.matrix.setFromTriplets(triplets.begin(), triplets.end());
@@ -360,6 +381,43 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
       }
       pattern.dcdc_coupling_entries.push_back(de);
     }
+  }
+
+  // Build LCC station coupling entries (always built).
+  pattern.lcc_entries.clear();
+  for (size_t li = 0; li < data.lcc_converters.size(); ++li) {
+    const auto& lcc = data.lcc_converters[li];
+    if (!lcc.in_service) continue;
+    const int ac_bus = lcc.ac_bus - 1;
+    const int dc_bus = lcc.dc_bus - 1;
+    if (ac_bus < 0 || ac_bus >= ctx.n || dc_bus < 0 || dc_bus >= ctx.ndc) {
+      continue;
+    }
+    JacobianPattern::LCCEntry le;
+    le.lcc_index = static_cast<int>(li);
+    le.ac_bus = ac_bus;
+    le.dc_bus = dc_bus;
+    const int p_row = ctx.p_row[static_cast<size_t>(ac_bus)];
+    const int q_row = ctx.q_row[static_cast<size_t>(ac_bus)];
+    const int dc_row = ctx.dc_row[static_cast<size_t>(dc_bus)];
+    const int vdc_col = ctx.vdc_col[static_cast<size_t>(dc_bus)];
+    const int vm_col = ctx.vm_col[static_cast<size_t>(ac_bus)];
+    if (p_row >= 0 && vm_col >= 0) {
+      le.p_vm_nz = lookup_nz(pattern, p_row, vm_col);
+    }
+    if (q_row >= 0 && vm_col >= 0) {
+      le.q_vm_nz = lookup_nz(pattern, q_row, vm_col);
+    }
+    if (p_row >= 0 && vdc_col >= 0) {
+      le.p_vdc_nz = lookup_nz(pattern, p_row, vdc_col);
+    }
+    if (q_row >= 0 && vdc_col >= 0) {
+      le.q_vdc_nz = lookup_nz(pattern, q_row, vdc_col);
+    }
+    if (dc_row >= 0 && vm_col >= 0) {
+      le.dc_vm_nz = lookup_nz(pattern, dc_row, vm_col);
+    }
+    pattern.lcc_entries.push_back(le);
   }
 
   // The sparse index map is only needed during pattern construction.

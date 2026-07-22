@@ -462,7 +462,6 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
         Ybus0(ti, fi) += -y0 / t;
       }
     }
-  }
   }  // for (const auto& br : ac.branches)
 
   // --- generators (subtransient or steady-state shunt with KG correction) ---

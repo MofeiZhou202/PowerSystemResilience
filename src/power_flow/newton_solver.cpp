@@ -14,6 +14,7 @@
 
 #include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
+#include "hacdcpf/power_flow/lcc_model.hpp"
 #include "hacdcpf/power_flow/jacobian_builder.hpp"
 #include "hacdcpf/power_flow/nonlinear_scaling.hpp"
 #include "hacdcpf/power_flow/nonmonotone_linesearch.hpp"
@@ -297,14 +298,29 @@ DcSlackPlan plan_dc_island_references(const SolverData& data,
       }
     }
 
+    // An LCC station in a characteristic control mode (CEA inverter /
+    // constant-alpha rectifier) anchors its DC island's voltage through its
+    // external characteristic U_d = U_d0*cos(gamma) - R_c*I_d, playing the
+    // same role as a droop VSC — no bus pin or promotion is needed.
+    bool lcc_regulates = false;
+    for (const auto& lcc : data.lcc_converters) {
+      if (!powerflow::lcc_forms_dc_voltage(lcc)) continue;
+      const int db = lcc.dc_bus - 1;
+      if (db >= 0 && db < ndc && component[static_cast<size_t>(db)] == c) {
+        lcc_regulates = true;
+        break;
+      }
+    }
+
     // 1. DC_V bus present -> pin it.
     if (dc_v_bus >= 0) {
       plan.dc_slacks.push_back(dc_v_bus);
       continue;
     }
-    // 2. A VSC holds Vdc via droop, or a droop DC/DC forms this island's
-    //    output bus -> no bus pin needed.
-    if (converter_regulates || dcdc_regulates) continue;
+    // 2. A VSC holds Vdc via droop, a droop DC/DC forms this island's
+    //    output bus, or an LCC station's characteristic anchors Vdc ->
+    //    no bus pin needed.
+    if (converter_regulates || dcdc_regulates || lcc_regulates) continue;
 
     // 3. No reference: try to promote the largest in-service PQ converter.
     int best_idx = -1;

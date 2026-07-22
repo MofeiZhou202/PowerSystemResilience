@@ -12,11 +12,21 @@
 /// Control cards ((...), /..., >...<, comments) are consumed for MVA base and
 /// case id; unsupported cards are skipped with a report record.
 ///
-/// LCC converter stations are approximated by VSC converters (the model
-/// library has no LCC element): the rectifier runs PQ_MODE drawing the
-/// scheduled power, the inverter runs VDC_Q forming the DC voltage so the
-/// delivered power emerges from the island balance.  The approximation and
-/// every skipped record are documented in the uniform ImportReport (docs §8).
+/// LCC converter stations can be imported two ways (see BpaImportOptions::
+/// lcc_model):
+///   * VscApprox (default) — each station is approximated by a VSC converter:
+///     the rectifier runs PQ_MODE drawing the scheduled power, the inverter
+///     runs VDC_Q forming the DC voltage so the delivered power emerges from
+///     the island balance.
+///   * LccQuasiSteady — each LD link produces a DCBranch plus two native
+///     LCCConverter elements carrying the full BD/LD quasi-steady parameters
+///     (bridge count, alpha/gamma limits, valve drop, commutation reactance
+///     from the converter transformer T card, control setpoints).  Native
+///     solvers do not consume LCCConverter yet; the mode is a faithful model
+///     layer import, and that limitation is recorded on each element's
+///     model_scope / model_limitations.
+/// The approximation and every skipped record are documented in the uniform
+/// ImportReport (docs §8).
 
 #include <string>
 
@@ -25,6 +35,15 @@
 
 namespace hacdcpf::io {
 
+/// How two-terminal LCC HVDC links (BD/LD cards) are represented.
+enum class BpaLccModel {
+  /// Approximate each station by a VSC converter (legacy behavior).
+  VscApprox = 0,
+  /// Import native LCCConverter quasi-steady elements; consumed by the
+  /// unified Newton power flow (lcc-quasi-steady model, fixed taps).
+  LccQuasiSteady = 1,
+};
+
 /// Options controlling BPA/DSP import.
 struct BpaImportOptions {
   /// Strict rejects the import when any record is coerced / skipped;
@@ -32,8 +51,13 @@ struct BpaImportOptions {
   ImportMode mode{ImportMode::Permissive};
   /// Reactive-power absorption estimate of an LCC converter station as a
   /// fraction of its active-power transfer (Q = ratio * P).  LCC stations
-  /// typically consume 50-60% of the transmitted active power.
+  /// typically consume 50-60% of the transmitted active power.  Only used by
+  /// the VscApprox path.
   double lcc_q_ratio{0.5};
+  /// LCC station representation for BD/LD links; default imports the native
+  /// quasi-steady LCC model (the legacy VSC approximation remains available
+  /// via VscApprox).
+  BpaLccModel lcc_model{BpaLccModel::LccQuasiSteady};
 };
 
 /// BPA/DSP import result carrying the reconstructed system and a uniform

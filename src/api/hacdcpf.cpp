@@ -15,6 +15,7 @@
 #include "hacdcpf/power_flow/branch_flow.hpp"
 #include "hacdcpf/power_flow/converter_coordination.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
+#include "hacdcpf/power_flow/lcc_model.hpp"
 #include "hacdcpf/power_flow/dc_solver.hpp"
 #include "hacdcpf/power_flow/fdpf_solver.hpp"
 #include "hacdcpf/power_flow/newton_solver.hpp"
@@ -59,6 +60,7 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
   h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.branches.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.loads.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.vsc_converters.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.lcc_converters.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.dcdc_converters.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.energy_routers.size()));
 
@@ -137,6 +139,26 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
     h = hash_combine(h, hash_double(c.k_m_modulation));
     h = hash_combine(h, hash_double(c.m_min));
     h = hash_combine(h, hash_double(c.m_max));
+  }
+  // LCC quasi-steady stations: every field that enters the power-flow
+  // injections must invalidate the cached SolverData when changed.
+  for (const auto& c : sys.lcc_converters) {
+    h = hash_combine(h, static_cast<std::uint64_t>(c.ac_bus));
+    h = hash_combine(h, static_cast<std::uint64_t>(c.dc_bus));
+    h = hash_combine(h, static_cast<std::uint64_t>(c.station_role));
+    h = hash_combine(h, static_cast<std::uint64_t>(c.control_mode));
+    h = hash_combine(h, static_cast<std::uint64_t>(c.in_service));
+    h = hash_combine(h, static_cast<std::uint64_t>(c.n_bridges));
+    h = hash_combine(h, hash_double(c.v_drop_v));
+    h = hash_combine(h, hash_double(c.rated_current_a));
+    h = hash_combine(h, hash_double(c.x_comm_ohm));
+    h = hash_combine(h, hash_double(c.rated_dc_kv));
+    h = hash_combine(h, hash_double(c.vn_ac_kv));
+    h = hash_combine(h, hash_double(c.p_set_mw));
+    h = hash_combine(h, hash_double(c.i_set_ka));
+    h = hash_combine(h, hash_double(c.alpha_set_deg));
+    h = hash_combine(h, hash_double(c.gamma_set_deg));
+    h = hash_combine(h, hash_double(c.v_dc_set_kv));
   }
   for (const auto& c : sys.dc.dcdc_converters) {
     h = hash_combine(h, static_cast<std::uint64_t>(c.bus_in));
@@ -520,6 +542,7 @@ void populate_derived_results(const powerflow::SolverData& data,
                               LossModelType loss_model) {
   result.branch_flows.clear();
   result.vsc_transfers.clear();
+  result.lcc_transfers.clear();
   result.dcdc_transfers.clear();
   result.er_port_transfers.clear();
   if (!result.converged) {
@@ -767,6 +790,82 @@ void populate_derived_results(const powerflow::SolverData& data,
       result.er_port_transfers.push_back(tr);
     }
   }
+
+  // ── LCC stations (quasi-steady, dat manual ch.4) ─────────────────────────
+  // Re-evaluate each station at the converged state and report the full
+  // operating point.  Firing/extinction angles are back-calculated; with
+  // fixed converter-transformer taps the rectifier alpha departs from the
+  // scheduled AlphaN a tap changer would hold (declared limitation).
+  result.lcc_transfers.reserve(data.lcc_converters.size());
+  for (const auto& lcc : data.lcc_converters) {
+    if (!lcc.in_service) continue;
+    const int aci = ac_pos(lcc.ac_bus);
+    const int dci = dc_pos(lcc.dc_bus);
+    if (aci < 0 || dci < 0) continue;
+    const double e_kv = vm[aci] * lcc.vn_ac_kv;
+    const double ud_kv = vdc[dci] * powerflow::lcc_dc_base_kv(data, lcc);
+    const auto op = powerflow::lcc_operating_point(lcc, e_kv, ud_kv);
+    if (!op.valid) continue;
+
+    LCCTransfer tr;
+    tr.index = lcc.index;
+    tr.bus_ac = lcc.ac_bus;
+    tr.bus_dc = lcc.dc_bus;
+    tr.station_role = static_cast<int>(lcc.station_role);
+    tr.control_mode = static_cast<int>(lcc.control_mode);
+    tr.alpha_deg = op.alpha_deg;
+    tr.gamma_deg = op.gamma_deg;
+    tr.ud0_kv = op.ud0_kv;
+    tr.ud_kv = op.ud_kv;
+    tr.id_ka = op.id_ka;
+    tr.p_ac_mw = op.p_ac_mw;
+    tr.q_ac_mvar = op.q_ac_mvar;
+    tr.p_dc_mw = op.p_dc_mw;
+    tr.id_at_limit = op.id_at_limit;
+    tr.alpha_within_limits =
+        op.alpha_deg >= lcc.alpha_min_deg - 1e-6 &&
+        op.alpha_deg <= lcc.alpha_stop_deg + 1e-6;
+    tr.gamma_within_limits =
+        lcc.gamma_min_deg <= 0.0 || op.gamma_deg >= lcc.gamma_min_deg - 1e-6;
+    result.lcc_transfers.push_back(tr);
+
+    // Honest post-solve angle-limit diagnostics (no silent wrong solution):
+    // outside the alpha/gamma window the physical response would be tap
+    // action or mode degradation, neither of which this model simulates.
+    if (!tr.alpha_within_limits &&
+        lcc.station_role == LCCStationRole::Rectifier) {
+      result.diagnostics.warnings.push_back(
+          "[LCC-PHYS-01] LCC rectifier " + std::to_string(lcc.index) +
+          " back-calculated alpha=" + std::to_string(op.alpha_deg) +
+          " deg is outside [alpha_min=" + std::to_string(lcc.alpha_min_deg) +
+          ", alpha_stop=" + std::to_string(lcc.alpha_stop_deg) +
+          "] deg; with fixed converter-transformer taps the model cannot "
+          "restore alpha — treat the reported operating point as the "
+          "no-tap-action solution.");
+    }
+    if (!tr.gamma_within_limits &&
+        lcc.station_role == LCCStationRole::Inverter) {
+      result.diagnostics.warnings.push_back(
+          "[LCC-PHYS-02] LCC inverter " + std::to_string(lcc.index) +
+          " extinction angle gamma=" + std::to_string(op.gamma_deg) +
+          " deg violates gamma_min=" + std::to_string(lcc.gamma_min_deg) +
+          " deg (commutation-failure risk); no tap/control remedial action "
+          "is modelled.");
+    }
+    if (op.id_at_limit && op.id_ka > 0.0 &&
+        powerflow::lcc_forms_dc_voltage(lcc)) {
+      // Honest control-mode note: the rated-current clamp (current order)
+      // binds, so the declared CEA / constant-alpha setpoint is not held;
+      // the reported gamma/alpha is the back-calculated physical value
+      // (>= the minimum, so commutation margin is preserved).
+      result.diagnostics.warnings.push_back(
+          "[LCC-PHYS-03] LCC station " + std::to_string(lcc.index) +
+          " runs at its rated current (" + std::to_string(op.id_ka) +
+          " kA): the current limit binds and the CEA/constant-alpha setpoint "
+          "is not held with fixed converter-transformer taps; back-calculated "
+          "gamma/alpha is reported instead.");
+    }
+  }
 }
 
 void restore_original_vsc_bus_ac(PowerFlowResult& result,
@@ -787,6 +886,23 @@ void restore_original_vsc_bus_ac(PowerFlowResult& result,
 
 void restore_original_vsc_bus_ac(PowerFlowResult& result, const HybridPowerSystem& sys) {
   restore_original_vsc_bus_ac(result, build_original_vsc_ac_bus_map(sys));
+}
+
+// LCC valve-side AC buses go through the same canonical reindexing as VSC
+// bus_ac; restore the AUTHORED component ids for reporting (three-ID rule:
+// results are attributed back to stable component ids).
+void restore_original_lcc_bus_ac(PowerFlowResult& result,
+                                 const HybridPowerSystem& sys) {
+  if (sys.lcc_converters.empty() || result.lcc_transfers.empty()) return;
+  std::unordered_map<int, int> bus_by_index;
+  bus_by_index.reserve(sys.lcc_converters.size());
+  for (const auto& lcc : sys.lcc_converters) {
+    bus_by_index[lcc.index] = lcc.ac_bus;
+  }
+  for (auto& tr : result.lcc_transfers) {
+    const auto it = bus_by_index.find(tr.index);
+    if (it != bus_by_index.end()) tr.bus_ac = it->second;
+  }
 }
 
 void unproject_branch_flows(PowerFlowResult& result, const BusMergeMap& map,
@@ -902,6 +1018,61 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
     return result;
   }
 
+  // ── LCC station readiness pre-check (honest failure, no silent wrong
+  // solution): every in-service LCC station must resolve its valve-side AC
+  // bus and DC bus, carry a valve-side voltage base, use a supported
+  // role/control-mode combination, and have a commutation reactance for the
+  // characteristic (CEA / constant-alpha) control modes.
+  if (!sys.lcc_converters.empty()) {
+    std::unordered_map<int, int> ac_bus_ids, dc_bus_ids;
+    for (const auto& b : sys.ac.buses) ac_bus_ids.emplace(b.index, 1);
+    for (const auto& b : sys.dc.buses) dc_bus_ids.emplace(b.index, 1);
+    std::vector<std::string> lcc_errors;
+    for (const auto& lcc : sys.lcc_converters) {
+      if (!lcc.in_service) continue;
+      if (ac_bus_ids.find(lcc.ac_bus) == ac_bus_ids.end()) {
+        lcc_errors.push_back("LCC station " + std::to_string(lcc.index) +
+                             " references missing valve-side AC bus " +
+                             std::to_string(lcc.ac_bus) + ".");
+      }
+      if (dc_bus_ids.find(lcc.dc_bus) == dc_bus_ids.end()) {
+        lcc_errors.push_back("LCC station " + std::to_string(lcc.index) +
+                             " references missing DC bus " +
+                             std::to_string(lcc.dc_bus) + ".");
+      }
+      if (lcc.vn_ac_kv <= 0.0) {
+        lcc_errors.push_back("LCC station " + std::to_string(lcc.index) +
+                             " has no valve-side AC base voltage (vn_ac_kv); "
+                             "U_d0 cannot be evaluated.");
+      }
+      if (!powerflow::lcc_control_supported(lcc)) {
+        lcc_errors.push_back(
+            "LCC station " + std::to_string(lcc.index) +
+            ": control mode " + std::to_string(static_cast<int>(lcc.control_mode)) +
+            " is not supported for station role " +
+            std::to_string(static_cast<int>(lcc.station_role)) +
+            " (rectifier: ConstantPower/ConstantCurrent/ConstantAlpha; "
+            "inverter: ConstantGamma/ConstantPower/ConstantCurrent).");
+      }
+      if (powerflow::lcc_forms_dc_voltage(lcc) && lcc.x_comm_ohm <= 0.0) {
+        lcc_errors.push_back(
+            "LCC station " + std::to_string(lcc.index) +
+            " runs a characteristic control mode (CEA/constant-alpha) but has "
+            "no commutation reactance (converter transformer not identified); "
+            "its DC voltage characteristic is undefined.");
+      }
+    }
+    if (!lcc_errors.empty()) {
+      PowerFlowResult result;
+      result.converged = false;
+      result.diagnostics.termination_reason = "LCC station readiness check failed";
+      for (auto& e : lcc_errors) {
+        result.diagnostics.warnings.push_back(std::move(e));
+      }
+      return result;
+    }
+  }
+
   // ── Graph topology pre-check ──────────────────────────────────────────────
   // Return immediately (before Y-bus assembly) if no island has a slack bus.
   if (!sys.ac.buses.empty()) {
@@ -977,6 +1148,7 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
     }
   }
   restore_original_vsc_bus_ac(result, sys);
+  restore_original_lcc_bus_ac(result, sys);
   if (data.bus_merge_map) {
     unproject_pf_result(result, *data.bus_merge_map, sys.ac.branches.size());
   } else if (result.branch_flows.size() > sys.ac.branches.size()) {
@@ -1001,7 +1173,9 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
   // solve honored (multi-converter model, docs/multiple_converter.md).
   {
     auto& sc = result.converter_model_scope;
-    sc.model_scope = "steady-state-newton:vsc-3mode+dcdc-power-transfer";
+    sc.model_scope = sys.lcc_converters.empty()
+                         ? "steady-state-newton:vsc-3mode+dcdc-power-transfer"
+                         : "steady-state-newton:vsc-3mode+dcdc-power-transfer+lcc-quasi-steady";
     sc.validity.vsc_loss_modelled = true;
     sc.validity.vsc_ac_conduction_loss_modelled = true;  // r_conv_ac_pu coupling (opt-in)
     sc.validity.vsc_vdc_control_modelled = true;          // VDC_Q/VDC_VAC + stiff droop forming
@@ -1012,6 +1186,11 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
     sc.validity.vsc_capacity_circle_enforced = opt.enforce_converter_physical_limits;
     sc.validity.vsc_current_limits_enforced = opt.enforce_converter_physical_limits;
     sc.validity.vsc_modulation_limits_enforced = opt.enforce_converter_physical_limits;
+    sc.validity.lcc_quasi_steady_modelled = !sys.lcc_converters.empty();
+    // Not yet enforced inside the Newton solve (post-hoc checks only):
+    sc.validity.vsc_capacity_circle_enforced = false;
+    sc.validity.vsc_current_limits_enforced = false;
+    sc.validity.vsc_modulation_limits_enforced = false;
     sc.validity.dc_multisource_coordination_modelled = true;  // is_master + participation in solve
     sc.validity.dcdc_duty_ratio_enforced = opt.enforce_converter_physical_limits;
     sc.validity.equation_closure_checked = result.diagnostics.equation_closure_checked;
@@ -1167,6 +1346,7 @@ PowerFlowResult solve_power_flow_fdpf(const HybridPowerSystem& sys,
   PowerFlowResult result = solver.solve(data, opt);
   populate_derived_results(data, result, opt.loss_model);
   restore_original_vsc_bus_ac(result, sys);
+  restore_original_lcc_bus_ac(result, sys);
   if (data.bus_merge_map) {
     unproject_pf_result(result, *data.bus_merge_map, sys.ac.branches.size());
   } else if (result.branch_flows.size() > sys.ac.branches.size()) {

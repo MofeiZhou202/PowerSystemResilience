@@ -9,6 +9,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <cmath>  // std::isfinite (GCC 15 no longer provides it transitively)
+
 #include "hacdcpf/power_flow/power_flow_options.hpp"
 #include "hacdcpf/power_flow/hybrid.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"

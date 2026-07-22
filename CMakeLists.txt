@@ -397,6 +397,7 @@ set(HACDCPF_SOURCES
   src/power_flow/island_detector.cpp
   src/power_flow/jacobian_builder.cpp
   src/power_flow/jacobian_pattern.cpp
+  src/power_flow/lcc_model.cpp
   src/power_flow/lm_trust_region.cpp
   src/power_flow/newton_krylov.cpp
   src/power_flow/nonlinear_scaling.cpp

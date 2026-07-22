@@ -170,10 +170,30 @@ struct BdStation {
   std::string name;       // valve-side node name (also the AC bus name)
   int ac_bus{0};          // AC bus index of the valve-side node
   int dc_bus{0};          // DC bus index created for this station
+  double ac_kv{0.0};      // valve-side AC base voltage (kV), cols 15-18
   double dc_kv{0.0};      // rated DC voltage from the BD card (may be 0)
   double bridges{0.0};
+  double sr_mh{0.0};      // smoothing reactor (mH), cols 26-30 (dynamic only)
+  double alpha_min_deg{0.0};  // min firing angle (deg), cols 31-35
+  double alpha_stop_deg{0.0}; // max firing angle (deg), cols 36-40
   double vdrop_v{0.0};    // valve voltage drop per bridge (V), cols 41-45
   double bridge_in_a{0.0};// rated bridge current (A), cols 46-50
+  std::string primary_name; // converter-transformer primary AC bus, cols 51-58
+  double primary_kv{0.0}; // primary-side AC base voltage (kV), cols 59-62
+};
+
+/// Pending LCC link (LccQuasiSteady path): the LD card has been consumed and
+/// the DCBranch created, but the LCCConverter pair is materialized only after
+/// the whole file is parsed, because the converter-transformer T card may
+/// follow the LD card (e.g. 2DC.dat).
+struct PendingLccLink {
+  std::string locator;
+  std::string rect_name;
+  std::string inv_name;
+  double p_sch{0.0};
+  double vdc_kv{0.0};
+  double alpha_n_deg{0.0};
+  double gamma_n_deg{0.0};
 };
 
 struct Importer {
@@ -189,6 +209,7 @@ struct Importer {
   std::unordered_map<std::string, int> ac_bus_by_name;
   std::unordered_map<std::string, int> dc_bus_by_name;
   std::unordered_map<std::string, BdStation> bd_by_name;
+  std::vector<PendingLccLink> pending_lcc_links;
   bool g_half_note_emitted{false};
   bool magnetizing_note_emitted{false};
 
@@ -410,12 +431,116 @@ struct Importer {
     BdStation st;
     st.name = name;
     st.ac_bus = ensure_ac_bus(name, kv, locator, /*quiet=*/true);
+    st.ac_kv = kv;
     st.bridges = num(field(line, 21, 25), present);
+    st.sr_mh = num(field(line, 26, 30), present);
+    st.alpha_min_deg = num(field(line, 31, 35), present);
+    st.alpha_stop_deg = num(field(line, 36, 40), present);
     st.vdrop_v = num(field(line, 41, 45), present);
     st.bridge_in_a = num(field(line, 46, 50), present);
+    st.primary_name = name_of(raw_field(line, 51, 58));
+    st.primary_kv = num(field(line, 59, 62), present);
     st.dc_kv = num(field(line, 63, 66), present);
     st.dc_bus = ensure_dc_bus(name, st.dc_kv);
     bd_by_name.emplace(name, st);
+  }
+
+  // ── LCC quasi-steady station construction (LccQuasiSteady path) ─────────
+  // Builds one LCCConverter from the pending BD data of one LD terminal.
+  // The commutation reactance is taken from the converter-transformer T card
+  // connecting the BD primary-side bus (cols 51-58) to the valve-side bus.
+  // NOTE on bases: per the dat card manual (ch3, T card) the T-card R/X is
+  // in pu on the transformer Sn base — NOT on the system base (the legacy AC
+  // branch import above reads it verbatim into ACBranch::x_pu, which is a
+  // separate known approximation).  Here the card value is divided by the
+  // parallel-unit count and stored on the transformer Sn base, exactly as the
+  // manual's X_c = X_T' formula prescribes; x_comm_ohm refers it to the
+  // valve-side voltage: X_ohm = X_pu * V_valve^2 / S_N.
+  void make_lcc_station(const BdStation& st, LCCStationRole role,
+                        const std::string& locator, double p_sch,
+                        double vdc_kv, double alpha_n_deg,
+                        double gamma_n_deg) {
+    LCCConverter c;
+    c.index = static_cast<int>(result.system.lcc_converters.size());
+    c.name = "LCC_" + st.name;
+    c.ac_bus = st.ac_bus;
+    c.dc_bus = st.dc_bus;
+    c.station_role = role;
+    c.n_bridges = std::max(1, static_cast<int>(std::lround(st.bridges)));
+    if (st.alpha_min_deg > 0.0) c.alpha_min_deg = st.alpha_min_deg;
+    if (st.alpha_stop_deg > 0.0) c.alpha_stop_deg = st.alpha_stop_deg;
+    c.v_drop_v = st.vdrop_v;
+    c.rated_current_a = st.bridge_in_a;
+    c.rated_dc_kv = vdc_kv;
+    c.vn_ac_kv = st.ac_kv;
+    c.smoothing_reactor_mh = st.sr_mh;
+
+    // Converter transformer: the AC branch between the primary-side bus and
+    // the valve-side bus named on the BD card.
+    const ACBranch* xfmr = nullptr;
+    int primary_bus = 0;
+    if (!st.primary_name.empty()) {
+      const auto it = ac_bus_by_name.find(st.primary_name);
+      if (it != ac_bus_by_name.end()) primary_bus = it->second;
+    }
+    for (const auto& br : result.system.ac.branches) {
+      const bool touches_valve =
+          br.from_bus == st.ac_bus || br.to_bus == st.ac_bus;
+      if (!touches_valve) continue;
+      if (primary_bus != 0 && br.from_bus != primary_bus &&
+          br.to_bus != primary_bus) {
+        continue;
+      }
+      xfmr = &br;
+      break;
+    }
+    if (xfmr != nullptr) {
+      c.converter_transformer_branch = xfmr->index;
+      const double n_par = std::max(1.0, static_cast<double>(xfmr->n_parallel));
+      c.x_comm_pu = xfmr->x_pu / n_par;
+      c.x_comm_base_mva = xfmr->sn_mva > 0.0 ? xfmr->sn_mva : mva_base;
+      if (xfmr->sn_mva <= 0.0) {
+        warn(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
+             locator, "Converter transformer '" + xfmr->name +
+                      "' has no rated capacity (Sn); commutation reactance "
+                      "kept on the system base instead of the transformer "
+                      "base.");
+      }
+      if (st.ac_kv > 0.0 && c.x_comm_base_mva > 0.0) {
+        c.x_comm_ohm =
+            c.x_comm_pu * st.ac_kv * st.ac_kv / c.x_comm_base_mva;
+      }
+    } else {
+      warn(ImportDisposition::Coerced, ImportReasonCode::StructuralLoss,
+           locator, "LCC station '" + st.name +
+                    "': converter transformer T card not found; commutation "
+                    "reactance left 0.");
+    }
+
+    // Control mode by station role (BPA two-terminal convention): the
+    // rectifier regulates the scheduled DC power at the rectifier-side
+    // voltage setpoint (alpha free, AlphaN is the expected operating point);
+    // the inverter runs constant extinction angle (CEA) at GamaN.
+    c.p_set_mw = p_sch;
+    if (role == LCCStationRole::Rectifier) {
+      c.control_mode = LCCControlMode::ConstantPower;
+      c.v_dc_set_kv = vdc_kv;
+      c.alpha_set_deg = alpha_n_deg;
+    } else {
+      c.control_mode = LCCControlMode::ConstantGamma;
+      c.gamma_set_deg = gamma_n_deg;
+    }
+
+    c.model_scope = "lcc-quasi-steady";
+    c.model_limitations =
+        "Quasi-steady LCC station model (BD/LD card import): no commutation "
+        "overlap-angle iteration, no converter-transformer tap control, "
+        "smoothing reactor ignored (dynamic-only). Consumed by the unified "
+        "Newton power flow (Q = P*tan(phi), cos(phi) ~= U_d/U_d0). With "
+        "fixed taps the back-calculated alpha departs from AlphaN and the DC "
+        "voltage level floats with the solved valve-side voltage — no tap "
+        "action is simulated.";
+    result.system.lcc_converters.push_back(std::move(c));
   }
 
   // ── Two-terminal HVDC line card: LD ────────────────────────────────────
@@ -441,9 +566,12 @@ struct Importer {
 
     const double i_rated = num(field(line, 34, 37), present);
     const double r_ohm = num(field(line, 38, 41), present);
+    const std::string ctrl_point = field(line, 56, 56);
     const double p_sch = num(field(line, 57, 61), present);
     const double vdc_rect = num(field(line, 62, 66), present);
-    const double length = num(field(line, 77, 81), present);
+    const double alpha_n_deg = num(field(line, 67, 70), present);
+    const double gamma_n_deg = num(field(line, 71, 74), present);
+    const double length = num(field(line, 75, 78), present);
     const double vdc_kv = vdc_rect > 0.0 ? vdc_rect
                           : (rect.dc_kv > 0.0 ? rect.dc_kv : inv.dc_kv);
 
@@ -471,8 +599,36 @@ struct Importer {
     br.name = "LD_" + n_rect + "_" + n_inv;
     result.system.dc.branches.push_back(std::move(br));
 
-    // LCC link approximated by VSC converters (the model library has no LCC
-    // element).  Station roles mirror the physical LCC link:
+    // Native quasi-steady LCC import (opt-in via BpaImportOptions::lcc_model):
+    // the LD pairing produces the DCBranch above plus two LCCConverter
+    // elements — no VSC stand-ins.  Station roles follow the LD card terminal
+    // order (first terminal = rectifier), same convention as the VSC path.
+    // The station elements are materialized after the whole file is parsed
+    // (see run()) because the converter-transformer T card may follow the LD
+    // card (e.g. 2DC.dat).
+    if (options.lcc_model == BpaLccModel::LccQuasiSteady) {
+      if (!ctrl_point.empty() && ctrl_point != "R") {
+        warn(ImportDisposition::Coerced, ImportReasonCode::UnsupportedControl,
+             locator, "LD card: power control point '" + ctrl_point +
+                      "' is not rectifier-side ('R'); only rectifier-side "
+                      "constant-power control is supported — control modes "
+                      "assigned as if the flag were 'R'.");
+      }
+      PendingLccLink link;
+      link.locator = locator;
+      link.rect_name = n_rect;
+      link.inv_name = n_inv;
+      link.p_sch = p_sch;
+      link.vdc_kv = vdc_kv;
+      link.alpha_n_deg = alpha_n_deg;
+      link.gamma_n_deg = gamma_n_deg;
+      pending_lcc_links.push_back(std::move(link));
+      return;
+    }
+
+    // LCC link approximated by VSC converters (default VscApprox path; the
+    // native LCCConverter import above is opt-in via BpaImportOptions::
+    // lcc_model).  Station roles mirror the physical LCC link:
     //   * Rectifier (sending end): PQ_MODE, draws the scheduled power from
     //     its AC system (p_set = -Psch) — matches the DSP solution exactly.
     //   * Inverter (receiving end): VDC_Q, forms the inverter-side DC voltage
@@ -630,6 +786,29 @@ struct Importer {
       }
     }
 
+    // Materialize pending LCC links now that every T card has been seen (the
+    // converter transformer may be declared after the LD card).
+    for (const auto& link : pending_lcc_links) {
+      const auto it_r = bd_by_name.find(link.rect_name);
+      const auto it_i = bd_by_name.find(link.inv_name);
+      if (it_r == bd_by_name.end() || it_i == bd_by_name.end()) continue;
+      make_lcc_station(it_r->second, LCCStationRole::Rectifier, link.locator,
+                       link.p_sch, link.vdc_kv, link.alpha_n_deg,
+                       link.gamma_n_deg);
+      make_lcc_station(it_i->second, LCCStationRole::Inverter, link.locator,
+                       link.p_sch, link.vdc_kv, link.alpha_n_deg,
+                       link.gamma_n_deg);
+      std::ostringstream lcc_msg;
+      lcc_msg << "LCC HVDC link '" << link.rect_name << "' -> '"
+              << link.inv_name << "' (P=" << link.p_sch
+              << " MW, V=" << link.vdc_kv
+              << " kV) imported as two quasi-steady LCCConverter elements "
+                 "(consumed by the unified Newton power flow; fixed taps, "
+                 "see model_limitations on each element).";
+      result.report.add(ImportDisposition::Accepted, ImportReasonCode::Ok,
+                        ImportSeverity::Info, link.locator, lcc_msg.str());
+    }
+
     HybridPowerSystem& sys = result.system;
     sys.base_mva = mva_base;
     sys.ac.base_mva = mva_base;
@@ -653,7 +832,8 @@ struct Importer {
        << sys.ac.generators.size() << " generators, " << sys.ac.loads.size()
        << " loads, " << sys.dc.buses.size() << " DC buses, "
        << sys.dc.branches.size() << " DC branches, "
-       << sys.vsc_converters.size() << " converters (base " << mva_base
+       << sys.vsc_converters.size() << " VSC + "
+       << sys.lcc_converters.size() << " LCC converters (base " << mva_base
        << " MVA).";
     result.report.add(ImportDisposition::Accepted, ImportReasonCode::Ok,
                       ImportSeverity::Info, "file", ok.str());
@@ -844,6 +1024,48 @@ std::string to_bpa_dat(const HybridPowerSystem& system) {
     output << card << '\n';
   }
 
+  // Native LCC stations (quasi-steady model): one BD card per station.  The
+  // primary-side bus is recovered through the converter-transformer branch
+  // (the end that is not the valve-side bus), mirroring the import logic.
+  std::unordered_map<int, const LCCConverter*> lcc_by_dc_bus;
+  for (const auto& lcc : system.lcc_converters) {
+    if (lcc.in_service && ac_name.count(lcc.ac_bus)) {
+      lcc_by_dc_bus.emplace(lcc.dc_bus, &lcc);
+    }
+  }
+  for (const auto& dc_bus : system.dc.buses) {
+    const auto lcc_it = lcc_by_dc_bus.find(dc_bus.index);
+    if (lcc_it == lcc_by_dc_bus.end()) continue;
+    const auto* lcc = lcc_it->second;
+    std::string card(81, ' ');
+    put(card, 1, 2, "BD", false);
+    put(card, 7, 14, ac_name.at(lcc->ac_bus), false);
+    put(card, 15, 18, number(lcc->vn_ac_kv, 4));
+    if (lcc->n_bridges > 0) put(card, 21, 25, number(lcc->n_bridges, 4));
+    if (lcc->smoothing_reactor_mh > 0.0) {
+      put(card, 26, 30, number(lcc->smoothing_reactor_mh, 4));
+    }
+    if (lcc->alpha_min_deg > 0.0) put(card, 31, 35, number(lcc->alpha_min_deg, 4));
+    if (lcc->alpha_stop_deg > 0.0) put(card, 36, 40, number(lcc->alpha_stop_deg, 4));
+    if (lcc->v_drop_v > 0.0) put(card, 41, 45, number(lcc->v_drop_v, 4));
+    if (lcc->rated_current_a > 0.0) put(card, 46, 50, number(lcc->rated_current_a, 4));
+    if (lcc->converter_transformer_branch >= 0) {
+      for (const auto& br : system.ac.branches) {
+        if (br.index != lcc->converter_transformer_branch) continue;
+        const int primary = (br.from_bus == lcc->ac_bus) ? br.to_bus : br.from_bus;
+        if (ac_name.count(primary)) {
+          put(card, 51, 58, ac_name.at(primary), false);
+          const auto pb = ac_bus.find(primary);
+          if (pb != ac_bus.end()) put(card, 59, 62, number(pb->second->base_kv, 4));
+        }
+        break;
+      }
+    }
+    const double dc_kv = dc_bus.base_kv > 0.0 ? dc_bus.base_kv : lcc->rated_dc_kv;
+    put(card, 63, 66, number(dc_kv, 4));
+    output << card << '\n';
+  }
+
   for (const auto& branch : system.ac.branches) {
     if (!branch.in_service || !ac_name.count(branch.from_bus) ||
         !ac_name.count(branch.to_bus)) continue;
@@ -883,31 +1105,66 @@ std::string to_bpa_dat(const HybridPowerSystem& system) {
   const double mva_base = system.base_mva > 0.0 ? system.base_mva : 100.0;
   for (const auto& branch : system.dc.branches) {
     if (!branch.in_service) continue;
-    const auto from_converter = dc_converter.find(branch.from_bus);
-    const auto to_converter = dc_converter.find(branch.to_bus);
-    if (from_converter == dc_converter.end() || to_converter == dc_converter.end()) continue;
-    const auto* rectifier = from_converter->second;
-    const auto* inverter = to_converter->second;
-    const double dc_kv = branch.base_kv > 0.0
-                             ? branch.base_kv
-                             : std::max(rectifier->vn_dc_kv, inverter->vn_dc_kv);
-    const double resistance = dc_kv > 0.0
-                                  ? branch.r_pu * dc_kv * dc_kv / mva_base
-                                  : 0.0;
-    double scheduled = rectifier->p_set_mw < 0.0
-                           ? -rectifier->p_set_mw
-                           : std::abs(rectifier->p_schedule_mw);
-    if (scheduled == 0.0) scheduled = std::abs(inverter->p_schedule_mw);
+    const double dc_kv_fallback = [&] {
+      double kv = 0.0;
+      for (const auto& dc_bus : system.dc.buses) {
+        if ((dc_bus.index == branch.from_bus || dc_bus.index == branch.to_bus) &&
+            dc_bus.base_kv > kv) {
+          kv = dc_bus.base_kv;
+        }
+      }
+      return kv;
+    }();
+    const double dc_kv = branch.base_kv > 0.0 ? branch.base_kv : dc_kv_fallback;
+    const double resistance =
+        dc_kv > 0.0 ? branch.r_pu * dc_kv * dc_kv / mva_base : 0.0;
+    double scheduled = 0.0;
+    double alpha_n = 0.0, gamma_n = 0.0, rated_a = 0.0;
+    std::string rect_name, inv_name;
+
+    const auto from_vsc = dc_converter.find(branch.from_bus);
+    const auto to_vsc = dc_converter.find(branch.to_bus);
+    const auto from_lcc = lcc_by_dc_bus.find(branch.from_bus);
+    const auto to_lcc = lcc_by_dc_bus.find(branch.to_bus);
+    if (from_vsc != dc_converter.end() && to_vsc != dc_converter.end()) {
+      const auto* rectifier = from_vsc->second;
+      const auto* inverter = to_vsc->second;
+      scheduled = rectifier->p_set_mw < 0.0
+                      ? -rectifier->p_set_mw
+                      : std::abs(rectifier->p_schedule_mw);
+      if (scheduled == 0.0) scheduled = std::abs(inverter->p_schedule_mw);
+      rect_name = ac_name.at(rectifier->bus_ac);
+      inv_name = ac_name.at(inverter->bus_ac);
+    } else if (from_lcc != lcc_by_dc_bus.end() &&
+               to_lcc != lcc_by_dc_bus.end()) {
+      // Native LCC link: from-bus station is the rectifier (LD convention).
+      const auto* rectifier = from_lcc->second;
+      const auto* inverter = to_lcc->second;
+      scheduled = std::abs(rectifier->p_set_mw);
+      alpha_n = rectifier->alpha_set_deg;
+      gamma_n = inverter->gamma_set_deg;
+      rated_a = std::max(rectifier->rated_current_a, inverter->rated_current_a);
+      rect_name = ac_name.at(rectifier->ac_bus);
+      inv_name = ac_name.at(inverter->ac_bus);
+    } else {
+      continue;  // DC branch without a converter pair on both ends
+    }
+    if (rated_a <= 0.0 && branch.rate_a_mva > 0.0 && dc_kv > 0.0) {
+      rated_a = branch.rate_a_mva * 1000.0 / dc_kv;
+    }
     std::string card(81, ' ');
     put(card, 1, 2, "LD", false);
-    put(card, 7, 14, ac_name.at(rectifier->bus_ac), false);
-    put(card, 20, 27, ac_name.at(inverter->bus_ac), false);
-    if (branch.rate_a_mva > 0.0 && dc_kv > 0.0) {
-      put(card, 34, 37, number(branch.rate_a_mva * 1000.0 / dc_kv, 4));
-    }
+    put(card, 7, 14, rect_name, false);
+    put(card, 20, 27, inv_name, false);
+    if (rated_a > 0.0) put(card, 34, 37, number(rated_a, 4));
     put(card, 38, 41, number(resistance, 4));
-    put(card, 57, 61, number(scheduled, 5));
-    put(card, 62, 66, number(dc_kv, 5));
+    if (scheduled > 0.0) {
+      put(card, 56, 56, "R", false);
+      put(card, 57, 61, number(scheduled, 5));
+    }
+    if (dc_kv > 0.0) put(card, 62, 66, number(dc_kv, 5));
+    if (alpha_n > 0.0) put(card, 67, 70, number(alpha_n, 4));
+    if (gamma_n > 0.0) put(card, 71, 74, number(gamma_n, 4));
     put(card, 77, 81, number(branch.length_km, 5));
     output << card << '\n';
   }
