@@ -9,7 +9,7 @@
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
 - 已删除被实现取代的阶段计划、一次性代码审查和重复暂态设计稿；不再用历史 roadmap 描述当前行为。
-- 本次同步（2026-07-18）补入 2026 年 5–7 月新增能力域：电力市场、园区综合能源、承载力/薄弱环节/反事实规划、场景生成与台风弹性、年度碳/GEC、SPPT 可执行理论层、三相混合 OPF、电压稳定 CPF，以及 CIM/GridLAB-D/PSD.jl 等 IO 通道；并修正两处过时表述（ETAP 默认开关、短路分析入口名）。
+- 本次同步（2026-07-22）补入 2026 年 5–7 月新增能力域：电力市场、园区综合能源、承载力/薄弱环节/反事实规划、场景生成与台风弹性、年度碳/GEC、SPPT 可执行理论层、三相混合 OPF、电压稳定 CPF，以及 CIM/GridLAB-D/PSD.jl 等 IO 通道；并补齐高级潮流求解器专属回归、CPF 弧长增广、FDPF 稀疏注入与统一求解器接口。
 - 2026-07-19 增加 `/api/v1` 多会话、模型 revision/ETag、异步 PF/OPF 作业，以及对应 Python SDK 与 AI 工具层；设计边界见 `docs/python_api.md`。
 - 同步依据为当前 `CMakeLists.txt`、`CMakePresets.json`、`tests/CMakeLists.txt`、`src/`、`include/`、GUI 路由和 E2E 验证。
 - 如文档描述与代码行为冲突，以仓库实现为准：`src/`、`include/`、`tests/`、`CMake` 配置优先。
@@ -44,17 +44,17 @@ ctest --preset windows-vcpkg-release
 
 | 能力域 | 当前状态 | 说明 |
 |---|---|---|
-| 混合 AC/DC 潮流与聚合建模 | 已实现并持续回归 | 覆盖 canonical projection、AC/DC 潮流、换流器协调与图分析链路；求解器族含 Newton、FDPF、DC、自适应孤岛、分布式松弛、HELM、同伦延拓与 Newton-Krylov，并有 LM 信赖域/非单调线搜索/非线性缩放全局化层。 |
-| OPF 与约束优化 | 已实现并持续回归 | AC OPF / DC OPF / RPO（含 OLTC 离散档位控制）已集成，支持 Native AC、Parity IPM、嵌入式 Ipopt 等多后端路径。 |
+| 混合 AC/DC 潮流与聚合建模 | 已实现并持续回归 | 覆盖 canonical projection、AC/DC 潮流、换流器协调与图分析链路；求解器族含 Newton、FDPF（稀疏 Ybus 注入）、DC、自适应孤岛、分布式松弛、HELM、同伦延拓与 Newton-Krylov，并有 LM 信赖域/非单调线搜索/非线性缩放全局化层。`PowerFlowSolverFactory` 六类入口已接线，Newton 跨调用复用 `SolverWorkspace` 与 Jacobian pattern。 |
+| OPF 与约束优化 | 已实现并持续回归 | AC OPF / DC OPF / RPO（含 OLTC 离散档位控制）已集成，支持 Native AC、Parity IPM、嵌入式 Ipopt 等多后端路径；GUI 回显参数用途、请求值/生效值、对偶有效性和模型边界。 |
 | 三相混合 PF / OPF | 活跃研发中，GUI 已接入 | `powerflow::solve_three_phase_hybrid_pf` 与 `opf::phase_hybrid` 已接入 `/xjtu/` 潮流/OPF 工具栏；OPF 提供 Full 与 GraphReduced（稀疏 Kron 降阶）、Ipopt/NativeIPM 双后端。GUI rich-model 适配范围见下文。 |
-| 电压稳定 | 已实现 | 连续潮流（CPF）P-V 曲线与 VSI 指标。 |
+| 电压稳定 | 已实现 | 连续潮流（CPF）采用增广 `[state, lambda]` 弧长预测-校正，可越过 P-V 鼻点并保留下支采样；输出 P-V 曲线与 VSI 指标。 |
 | 图建模、网络降阶、重构 | 已实现并持续回归 | 支持连通性、开关收缩、Kron/series/pendant/sparse-Kron reduction、ONR。 |
 | 可靠性与弹性分析 | 已实现并持续回归 | 包含 MC、FMEA（含 failure-mode 目录路径与信息物理 Level 1 调节）、三阶段可靠性与配电弹性分析（含 MIP 路径），以及有限恢复动作目录的 cyber/MESS 可执行性--多保真动态 oracle 主从循环；后者明确区分采样常数与全局证明。 |
 | 三相与短路分析 | 已实现并持续回归 | 三相 NR 与 AC/DC 短路分析（IEC 60909 简化与详细路径、DC 故障水平估计）均有独立测试族。 |
 | 谐波分析 | 已实现（持续增强） | 频域穿透、Newton 非线性、三相 abc 与 AC/DC 耦合谐波潮流，频扫/谐振检测与 IEEE 519 / GB/T 14549 合规校核。 |
 | 暂态动力学 | 已实现基础框架（持续增强） | 动态建模、事件、7 类求解器（含 MassMatrixDae 同时式 DAE）、DAE 诊断、小信号与频率观测；设备模型覆盖同步机/调速器/励磁/PSS、GFM/GFL 逆变器、DER 与 IEEE 1547 保护。显式三相网络自动启用 GFL 逐相电流状态与相域限流，GFM 采用序耦合 Norton 端口和最大相电流限流；三线制默认阻断零序电流。 |
 | 时序与年度生产模拟 | 已实现并持续回归 | UC MILP → AC-OPF → PF 校验流水线；年度分层分解（支持按日并行）、多年生命周期仿真与容量扫描对比。 |
-| 电力市场 | 已实现（AC-only 垂直切片） | 日前 SCUC → 固定组合 SCED/LMP → LODF N-1 安全割 → AC 认证 → 结算/uplift；实时双结算与重复博弈；混合 AC/DC 资产显式拒绝。 |
+| 电力市场 | 已实现（交直流线性商业模型） | 日前混合 SCUC → 固定组合/换流与储能方向 SCED → AC/DC LMP → DC 储能跨期优化 → 结算/uplift → 非线性交直流认证；实时双结算与重复博弈。N-1 采用 AC 支路预防式切平面、发电机能力约束和全覆盖元件纠正式 SCED 校核。 |
 | 园区综合能源 | 已实现 | 电-热-氢-燃料多能流 MILP 调度（CHP、热泵、电解/燃料电池、多层氢储能、CCUS、碳预算）。 |
 | 承载力、薄弱环节与反事实规划 | 已实现 | DL/T 2041-2025 分布式电源承载力（含工程校核）、多维薄弱环节辨识、五类措施反事实对比。 |
 | 场景生成与台风弹性 | 已实现 | 常规/可靠性/弹性三族场景生成与聚类缩减，Holland 风场台风故障序列。 |
@@ -88,7 +88,9 @@ ctest --preset windows-vcpkg-release
 
 - 对可选 IO（ETAP/OpenDSS）和外部比较（GridLAB-D/OpenDSS/PSD.jl）应明确“需启用对应编译开关和运行时依赖”。
 - 对暂态/谐波/跨引擎一致性类结论，建议标注“持续增强中”，避免描述为已完全定型。
-- 电力市场当前刻意限定为 AC-only：混合 AC/DC 资产会被显式拒绝并列入 `unsupported_assets`，不要表述为已支持混合资产出清。
+- 电力市场已覆盖 DC 母线/支路/固定资源、VSC、DC/DC 双向传输、DC 储能跨期优化和 AC/DC LMP；N-1 覆盖发电机、AC/DC 支路、VSC、DC/DC 与两类 DC 储能，但只有 AC 支路 LODF 割进入定价 LP，其余采用固定组合纠正式 SCED 校核。DC 支路商业网损、换流器报价、母线/负荷/开关与保护故障仍未建模，外部电网和能量路由器仍显式拒绝。
+- 省级市场规模尚无无条件在线时延承诺：SCUC 已注入机组时序/容量/备用/报价结构、经固定整数 LP 验证的 MIP start 和分支优先级；大型模型自适应使用 StrictHiGHS，并在当前分支树内尝试提交 AC 基态热限全局割，最终执行全候选复核，未完成时拒绝定价。不能通过 presolve 精确投影的热限进入外层轮次，并复用原空间根割、配套 root basis 和伪成本；新增热限后的旧开放节点树不直接沿用。默认显式 1% MIP gap 与 120 s 总时限，并返回实际 gap、树内提交、状态复用、树重建、候选/激活/剩余超限和证明口径。大型定价 LP 按变量阈值直达 HiGHS；LODF 使用稀疏因子复用与候选列按需计算，全元件事故 SCED 使用默认 4-worker 有界并行。异步取消、滚动时域、跨运行 artifact 缓存、可认证树 checkpoint 和注册规模基准仍是生产化缺口；大系统应限制 `n1_max_contingencies` 并分层运行。
+- OPF 结果按实际路径声明有效边界：DC OPF 的凸二次成本在 LP 回退时使用 `pwl_segments` 分段，QP 路径回显有效分段为 0；节点 LMP 与支路拥塞 `mu` 分开认证，当前支路 `mu` 始终未认证。AC OPF 是非凸局部 KKT 求解，Ipopt 适配器不返回乘子因而无 LMP；RPO 是受时限/评估预算约束的离散邻域搜索，不提供全局 MINLP 证书。快照 OPF 不含跨时段 SOC，能量路由器端口守恒不含内部损耗。AML builders 标记为实验链路，其中 AML SCUC 无网络约束且 MILP 价格未认证。`HACDCPF_OPF_*` 环境变量仅为调试通道，不是稳定 API。
 - 三相混合 OPF 与 SPPT 层属活跃研发/论文验证性质，接口与产物格式仍可能调整。
 - 当文档、报告、UI 文案与实现不一致时，以本仓库 `src/`、`include/`、`tests/` 与 CMake 配置为最终依据。
 
@@ -212,7 +214,7 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 | 暂态仿真 | `run_transient_simulation`, `small_signal_analysis`, `computeFrequencyReport` | 机电暂态 DAE（7 类求解器，含 MassMatrixDae 同时式） | 轨迹、事件、COI/孤岛频率、小信号摘要 |
 | 碳分析 | `run_carbon_analysis`, `compute_annual_carbon_analysis`, `compute_annual_user_gec_accounting` | PF result + proportional / matrix tracing；年度时序含储能碳库存 | 节点、支路、负荷碳流；年度碳与用户/节点 GEC 核算 |
 | 时序/生产模拟 | `solve_time_series_pf`, `solve_unit_commitment`, `solve_annual_production_simulation`, `run_lifecycle_simulation`, `run_lifecycle_comparison` | 多时段负荷/资源曲线 + OPF/UC | 年度生产、成本、生命周期指标、容量扫描对比 |
-| 电力市场 | `market::run_day_ahead_market`, `run_real_time_market`, `run_repeated_market_game` | SCUC → 固定组合 SCED/LMP → LODF N-1 安全割 → AC 认证 → 结算/uplift（AC-only） | LMP、结算与 uplift、HHI 等市场力指标；混合资产显式拒绝 |
+| 电力市场 | `market::run_day_ahead_market`, `run_real_time_market`, `run_repeated_market_game` | 混合 AC/DC SCUC → 固定组合/换流与储能方向 SCED → AC/DC LMP → DC 储能跨期优化 → 混合口径全元件 N-1 → 非线性交直流认证 → 结算/uplift | AC/DC LMP 与分域结算、DC 储能 SOC/结算、全元件事故校核、换流器传输/损耗、模型边界、HHI 等市场力指标 |
 | 园区综合能源 | `integrated_energy::solve_campus_ies` | 电-热-氢-燃料多能流 MILP（CHP、热泵、电解/燃料电池、氢储能、CCUS） | 多能流调度、成本/碳目标 |
 | 承载力评估 | `assess_hosting_capacity`（DL/T 2041-2025） | 设备级区间公式 + 可选 PF/短路/谐波工程校核 | 逐变压器/逐区域承载区间与分级 |
 | 薄弱环节辨识 | `run_multidimensional_weak_link_assessment` | 多维压力证据评分（severity / consensus / Pareto） | 薄弱环节排序与模式对比 |
@@ -256,6 +258,8 @@ import/load system
 对于可靠性、弹性和网络重构这类组合优化任务，还应把求解器状态、MIP gap、time limit、模型规模和 fallback 状态写入结果对象，避免把启发式、近似可行和最优解混为一谈。
 
 潮流结果的 `SolverDiagnostics` 还会携带 `converter_coordination`、结构闭合扫描、自动提升的 VSC 索引和 `effective_converters`。下游报告应优先解释这些最终生效的换流器状态，而不是只看输入 JSON 中的原始控制模式。
+
+换流器容量圆、AC/DC 电流、调制比和 DC/DC 占空比在确定型 PF 中没有可自动重调度的自由量。默认模式保持兼容口径（数值根收敛并发出 `ACDC-PHYS-*` / `DCDC-PHYS-*` 告警）；启用 `PowerFlowOptions::enforce_converter_physical_limits` 后，任何超限根会被硬性拒绝并报告物理不可行。需要在约束下调整 P/Q 或电压设定时应使用 OPF，而不是由 PF 静默改写设定值。
 
 ## 7. Projection Back 与结果归因
 

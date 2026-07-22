@@ -506,14 +506,17 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
     auto& sr = steps[static_cast<size_t>(g_idx)];
     double base_cost_rate = 0.0;
 
-    // PF convergence
-    if (t < static_cast<int>(sub_result.pf_results.size())) {
-      sr.pf_converged = sub_result.pf_results[static_cast<size_t>(t)].converged;
-    }
+    const bool opf_stage_present = !sub_result.opf_results.empty();
     // OPF convergence
     if (t < static_cast<int>(sub_result.opf_results.size())) {
       const auto& opf = sub_result.opf_results[static_cast<size_t>(t)];
       sr.opf_converged = opf.converged;
+      if (opf.converged) {
+        sr.load_shed_mw = 0.0;
+        for (double shed : opf.dpd_mw) {
+          sr.load_shed_mw += std::max(0.0, shed);
+        }
+      }
       base_cost_rate =
           (opf.converged && !opf.pg_mw.empty())
               ? generator_operating_cost_rate_from_opf(sys, opf.pg_mw)
@@ -526,6 +529,15 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
       base_cost_rate = generator_operating_cost_rate_from_uc(
           sys, sub_result.uc_schedule, t);
       sr.opf_converged = sub_result.uc_schedule.feasible;
+    }
+
+    // A PF fallback after failed OPF is diagnostic only. Replay requires every
+    // preceding stage to have completed at the same operating point.
+    if (t < static_cast<int>(sub_result.pf_results.size())) {
+      const bool pf_solved =
+          sub_result.pf_results[static_cast<size_t>(t)].converged;
+      sr.pf_converged =
+          pf_solved && (!opf_stage_present || sr.opf_converged);
     }
 
     const ReportedProfileDispatch reported =
@@ -588,7 +600,7 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
 
     // Loss from PF result
     if (t < static_cast<int>(sub_result.pf_results.size()) &&
-        sub_result.pf_results[static_cast<size_t>(t)].converged) {
+        sr.pf_converged) {
       const auto& pfr = sub_result.pf_results[static_cast<size_t>(t)];
       double loss = 0.0;
       for (const auto& bf : pfr.branch_flows)
@@ -1478,8 +1490,8 @@ AnnualProductionSimResult solve_annual_production_simulation(
             storage_bid_cost_rate(sys, ws.uc, t) +
             grid.cost_rate_per_hr +
             import_mw * reported_external_grid_price(sys, pmap, g_idx);
-        sr.opf_converged = true;
-        sr.pf_converged = true;
+        sr.opf_converged = false;
+        sr.pf_converged = false;
       }
     }
   }

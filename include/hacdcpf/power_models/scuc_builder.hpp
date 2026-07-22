@@ -83,6 +83,13 @@ struct SCUCData {
 // ════════════════════════════════════════════════════════════════════════════
 
 struct SCUCResult {
+  std::string model_scope{"experimental-aml-scuc:system-balance-no-network"};
+  std::vector<std::string> model_limitations{
+      "The AML SCUC builder enforces system-wide balance but no transmission or distribution network constraints.",
+      "MILP balance duals are not certified as market-clearing prices; re-price the fixed commitment with an LP before using prices."};
+  bool price_valid{false};
+  std::string price_validity_reason{
+      "MILP dual prices are unavailable or economically uncertified."};
   aml::SolveResult solve_result;
 
   /// Commitment status (0 or 1), keyed by (gen_id, period_id).

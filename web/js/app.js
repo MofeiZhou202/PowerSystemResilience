@@ -58,6 +58,7 @@ const App = (() => {
   // Cache for re-rendering on unit change without re-running solver
   let _lastPfData = null;
   let _lastOpfData = null;
+  let _opfParameterContract = null;
   let _lastRpoData = null;
   let _lastRpoInputInventory = null;
   let _rpoSelectedTapIndices = null;
@@ -4394,6 +4395,78 @@ const App = (() => {
   }
 
   // ========== Optimal Power Flow ==========
+  const OPF_PARAMETER_INPUTS = {
+    solver: ['opfSolver'], network_model: ['opfNetworkModel'],
+    branch_limits: ['opfBranchLimits'], converter_capacity: ['opfConvCapacity'],
+    converter_current: ['opfConvCurrent'], converter_modulation: ['opfConvModulation'],
+    check_consistency: ['opfCheckConsistency'], max_inner_iterations: ['opfMaxIterations'],
+    max_iterations: ['opfMaxIterations', 'opfThreePhaseMaxIter'],
+    max_outer_iterations: ['opfMaxOuterIterations'],
+    max_line_search_steps: ['opfMaxLineSearch'], feasibility_tol: ['opfFeasibilityTol'],
+    stationarity_tol: ['opfStationarityTol'], barrier_mu0: ['opfBarrierMu0'],
+    barrier_mu_reduction: ['opfBarrierReduction'], regularization: ['opfRegularization'],
+    ac_eval_threads: ['opfAcEvalThreads'], allow_fallback: ['opfAllowFallback'],
+    ac_pf_warm_start: ['opfAcPfWarmStart'], objective_homotopy: ['opfObjectiveHomotopy'],
+    homotopy_dt0: ['opfHomotopyDt0'], pwl_segments: ['opfPwlSegments'],
+    branch_limit_margin: ['opfBranchLimitMargin'], load_shedding: ['opfLoadShedding'],
+    voll: ['opfVoll'], compute_lmp: ['opfComputeLmp'], variant: ['opfThreePhaseVariant'],
+    vuf_max: ['opfThreePhaseVufMax'], constraint_oracle: ['opfThreePhaseOracle'],
+    include_shunts: ['opfThreePhaseShunts'], compare_opendss: ['opfThreePhaseOpenDss'],
+    verbose: ['opfVerbose'],
+  };
+
+  function opfParameterMode() {
+    if (document.getElementById('opfSolver')?.value === 'dc') return 'dc';
+    if (document.getElementById('opfNetworkModel')?.value === 'three_phase_hybrid') return 'phase';
+    return 'ac';
+  }
+
+  function formatOpfParameterValue(value) {
+    if (value === undefined || value === null || value === '') return '—';
+    if (typeof value === 'boolean') return value ? '开' : '关';
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  }
+
+  function renderOpfParameterGuide() {
+    const div = document.getElementById('opfParameterGuideTable');
+    if (!div) return;
+    const rows = Array.isArray(_opfParameterContract?.parameters)
+      ? _opfParameterContract.parameters : [];
+    const query = String(document.getElementById('opfParameterSearch')?.value || '')
+      .trim().toLowerCase();
+    const mode = opfParameterMode();
+    const visible = rows.filter(row => !query || [row.key, row.label, row.unit, row.description]
+      .some(value => String(value || '').toLowerCase().includes(query)));
+    if (!visible.length) {
+      div.innerHTML = '<p class="empty-hint">没有匹配的 OPF 参数。</p>';
+      return;
+    }
+    div.innerHTML = `<table><thead><tr><th>参数</th><th>键</th><th>默认值</th><th>单位</th><th>用途与影响</th><th>适用路径</th></tr></thead><tbody>${visible.map(row => {
+      const applies = Array.isArray(row.applies_to) ? row.applies_to : [];
+      const active = applies.includes('all') || applies.includes(mode);
+      return `<tr${active ? '' : ' class="is-muted"'}><td>${escapeHtml(row.label || row.key)}</td><td><code>${escapeHtml(row.key)}</code></td><td>${escapeHtml(formatOpfParameterValue(row.default))}</td><td>${escapeHtml(row.unit || '—')}</td><td>${escapeHtml(row.description || '')}</td><td>${escapeHtml(applies.join(' / '))}${active ? '' : '（当前不适用）'}</td></tr>`;
+    }).join('')}</tbody></table>`;
+  }
+
+  async function loadOpfParameterContract() {
+    if (_opfParameterContract) return _opfParameterContract;
+    const data = await apiGet('/api/opf/parameter_contract', { quiet: true });
+    if (!data || !Array.isArray(data.parameters)) return null;
+    _opfParameterContract = data;
+    data.parameters.forEach(row => {
+      (OPF_PARAMETER_INPUTS[row.key] || []).forEach(id => {
+        const control = document.getElementById(id);
+        const target = control?.closest('label') || control;
+        if (target && !target.title) {
+          target.title = `${row.description}${row.unit ? ` 单位：${row.unit}` : ''}`;
+        }
+      });
+    });
+    renderOpfParameterGuide();
+    return data;
+  }
+
   // Reads the OPF sub-toolbar (solver + 4 constraint families) and posts to the
   // unified /api/session/opf endpoint, which routes to the parity-IPM hybrid
   // AC/DC formulation (default), the AC OPF, or the DC OPF. The constraint
@@ -4418,6 +4491,7 @@ const App = (() => {
     }
     return withAnalysisQueue(async () => {
       setStatus('最优潮流计算中...', 'busy');
+      await loadOpfParameterContract();
       const solver = document.getElementById('opfSolver')?.value || 'parity';
       const robustStrategy = solver === 'robust';
       const checkConsistency = !!(document.getElementById('opfCheckConsistency')?.checked);
@@ -4445,6 +4519,13 @@ const App = (() => {
         homotopy_dt0: pfNumber('opfHomotopyDt0', 0.10),
         verbose: pfBool('opfVerbose', false),
       };
+      if (solver === 'dc') {
+        options.pwl_segments = pfInteger('opfPwlSegments', 4);
+        options.branch_limit_margin = pfNumber('opfBranchLimitMargin', 1.0);
+        options.load_shedding = pfBool('opfLoadShedding', true);
+        options.voll = pfNumber('opfVoll', 0.0);
+        options.compute_lmp = pfBool('opfComputeLmp', true);
+      }
       const threePhase = {
         algorithm: document.getElementById('opfThreePhaseAlgorithm')?.value || 'compact',
         max_iter: pfInteger('opfThreePhaseMaxIter', 100),
@@ -4489,6 +4570,9 @@ const App = (() => {
       if (data) {
         data._constraints = constraints;
         data._options = options;
+        data._solver = solver;
+        data._threePhase = threePhase;
+        data._checkConsistency = checkConsistency;
         data._networkModel = networkModel;
         const backendTag = data.solver_backend ? ` · ${data.solver_backend}` : '';
         if (data.converged) {
@@ -4690,7 +4774,69 @@ const App = (() => {
           <tr><td>换流器调制限值 (m_min/m_max)</td><td>${yn(scope.modulation)}</td></tr>
           <tr><td>DC/DC占空比限值 (d_min/d_max)</td><td>${yn(scope.dcdc_duty)}</td></tr>
           <tr><td>直流电压控制</td><td>${escapeHtml(scope.vdc_control || '-')}</td></tr>
+          <tr><td>节点电价乘子</td><td>${data.lmp_valid ? '<span style="color:#15803d">已认证</span>' : '<span style="color:#d19a66">不可用/未认证</span>'} ${escapeHtml(data.lmp_validity_reason || '')}</td></tr>
+          ${data.solver === 'dc' || data._solver === 'dc' ? `<tr><td>支路拥塞 μ</td><td>${data.branch_mu_valid ? '<span style="color:#15803d">已认证</span>' : '<span style="color:#d19a66">未认证</span>'} ${escapeHtml(data.branch_mu_validity_reason || '')}</td></tr>` : ''}
         </tbody></table>`;
+      const limitations = Array.isArray(data.model_limitations) ? data.model_limitations : [];
+      if (limitations.length) {
+        scopeDiv.innerHTML += `<table style="margin-top:8px"><thead><tr><th>模型边界</th></tr></thead><tbody>${limitations.map(text => `<tr><td>${escapeHtml(text)}</td></tr>`).join('')}</tbody></table>`;
+      }
+      const debugValues = data.debug_environment?.values || {};
+      const debugRows = Object.entries(debugValues);
+      if (debugRows.length) {
+        scopeDiv.innerHTML += `<table style="margin-top:8px"><thead><tr><th>调试环境变量</th><th>当前值</th><th>接口等级</th></tr></thead><tbody>${debugRows.map(([key, value]) => `<tr><td><code>${escapeHtml(key)}</code></td><td>${escapeHtml(String(value))}</td><td>仅调试，不是稳定接口</td></tr>`).join('')}</tbody></table>`;
+      }
+    }
+
+    const parameterDiv = document.getElementById('opfParameterResults');
+    if (parameterDiv) {
+      const contractRows = Array.isArray(_opfParameterContract?.parameters)
+        ? _opfParameterContract.parameters : [];
+      const requestedOptions = data.options_requested || data._options || {};
+      const effective = data.options_effective || {};
+      const requestedConstraints = data._constraints || data.constraints || {};
+      const requestedPhase = data._threePhase || {};
+      const mode = (data.solver === 'dc' || data._solver === 'dc') ? 'dc'
+        : ((data.network_model || data._networkModel) === 'three_phase_hybrid' ? 'phase' : 'ac');
+      const requestedValue = key => {
+        if (key === 'solver') return data.strategy_requested || data._solver;
+        if (key === 'network_model') return data.network_model || data._networkModel;
+        if (key === 'check_consistency') return data._checkConsistency;
+        if (Object.prototype.hasOwnProperty.call(requestedConstraints, key)) return requestedConstraints[key];
+        if (Object.prototype.hasOwnProperty.call(requestedOptions, key)) return requestedOptions[key];
+        if (Object.prototype.hasOwnProperty.call(requestedPhase, key)) return requestedPhase[key];
+        return undefined;
+      };
+      const effectiveValue = key => {
+        if (key === 'solver') return data.strategy_effective || data.solver_backend || data.solver;
+        if (key === 'network_model') return data.network_model || data._networkModel;
+        if (key === 'check_consistency') return !!data.consistency?.ran;
+        const scopeMap = {
+          branch_limits: scope.branch_limits,
+          converter_capacity: scope.capacity,
+          converter_current: scope.current,
+          converter_modulation: scope.modulation,
+        };
+        if (scopeMap[key] !== undefined) return scopeMap[key];
+        if (key === 'pwl_segments' && data.pwl_segments_effective != null)
+          return data.pwl_segments_effective;
+        if (Object.prototype.hasOwnProperty.call(effective, key)) return effective[key];
+        return undefined;
+      };
+      const rows = contractRows.filter(row => {
+        const applies = Array.isArray(row.applies_to) ? row.applies_to : [];
+        return applies.includes('all') || applies.includes(mode);
+      }).map(row => {
+        const requested = requestedValue(row.key);
+        const actual = effectiveValue(row.key);
+        if (requested === undefined && actual === undefined) return '';
+        const same = JSON.stringify(requested) === JSON.stringify(actual);
+        const verdict = actual === undefined ? '未回显' : (same ? '按请求生效' : '后端调整/路径决定');
+        return `<tr><td>${escapeHtml(row.label || row.key)}</td><td><code>${escapeHtml(row.key)}</code></td><td>${escapeHtml(formatOpfParameterValue(requested))}</td><td>${escapeHtml(formatOpfParameterValue(actual))}</td><td>${escapeHtml(row.unit || '—')}</td><td>${verdict}</td><td>${escapeHtml(row.description || '')}</td></tr>`;
+      }).filter(Boolean);
+      parameterDiv.innerHTML = rows.length
+        ? `<table><thead><tr><th>参数</th><th>键</th><th>请求值</th><th>实际值</th><th>单位</th><th>判定</th><th>用途</th></tr></thead><tbody>${rows.join('')}</tbody></table>`
+        : '<p class="empty-hint">后端未返回可核对的参数值。</p>';
     }
 
     let opfSystem = { ac: {}, dc: {} };
@@ -5148,12 +5294,14 @@ const App = (() => {
       <div class="result-item"><span class="result-label">算法</span><span class="result-value">${escapeHtml(data.algorithm || '')}</span></div>
       <div class="result-item"><span class="result-label">目标值</span><span class="result-value">${fmt(data.objective)}</span></div>
       <div class="result-item"><span class="result-label">NLP求解</span><span class="result-value">${Number(data.nlp_solves || 0)}</span></div>
+      <div class="result-item"><span class="result-label">搜索终止</span><span class="result-value">${data.terminated_by_time_limit ? '达到时限' : (data.terminated_by_evaluation_limit ? '达到评估上限' : '局部邻域完成')}</span></div>
       <div class="result-item"><span class="result-label">运行时间</span><span class="result-value">${fmt(data.runtime_sec, 3)} s</span></div>
       <div class="result-item"><span class="result-label">最大电压偏差</span><span class="result-value">${fmt(data.max_vdev_before)} → ${fmt(data.max_vdev_after)} pu</span></div>
       <div class="result-item"><span class="result-label">损耗代理值</span><span class="result-value">${fmt(data.total_loss_before)} → ${fmt(data.total_loss_after)} MW</span></div>
       <div class="result-item"><span class="result-label">全过程验证</span><span class="result-value ${cv.overall_pass ? 'converged' : 'failed'}">${cv.overall_pass ? (cv.hybrid_dispatch_replay_partial ? '通过（部分覆盖）' : '通过') : '未完整通过'}</span></div>
       <div class="result-item"><span class="result-label">状态说明</span><span class="result-value">${escapeHtml(data.status || '')}</span></div>
-      <div class="result-item" style="flex-basis:100%"><span class="result-label">模型口径</span><span class="result-value">${escapeHtml(data.model_statement || '')}</span></div>`;
+      <div class="result-item" style="flex-basis:100%"><span class="result-label">模型口径</span><span class="result-value">${escapeHtml(data.model_statement || '')}</span></div>
+      ${(Array.isArray(data.model_limitations) ? data.model_limitations : []).map(text => `<div class="result-item" style="flex-basis:100%"><span class="result-label">能力边界</span><span class="result-value">${escapeHtml(text)}</span></div>`).join('')}`;
 
     const tapsChanged = (data.tap_pos_before || []).filter((value, i) => value !== data.tap_pos_after?.[i]).length;
     const shuntsChanged = (data.shunt_before || []).filter((value, i) => value !== data.shunt_after?.[i]).length;
@@ -11677,7 +11825,14 @@ const App = (() => {
     }
     const phaseOpf = phaseChoices.some(choice => choice.value === opfNetwork?.value);
     const monolithicPhaseOpf = opfNetwork?.value === 'three_phase_hybrid';
+    const dcOpf = opfSolver === 'dc';
     document.getElementById('opfThreePhaseOptions')?.toggleAttribute('hidden', !phaseOpf);
+    document.getElementById('opfDcOptions')?.toggleAttribute('hidden', !dcOpf);
+    document.getElementById('opfBarrierOptions')?.toggleAttribute('hidden', dcOpf || monolithicPhaseOpf);
+    ['opfMaxOuterIterations', 'opfMaxLineSearch', 'opfStationarityTol'].forEach(id => {
+      document.getElementById(id)?.closest('label')
+        ?.toggleAttribute('hidden', dcOpf || monolithicPhaseOpf);
+    });
     document.getElementById('opfThreePhaseAlgorithmControl')?.toggleAttribute('hidden', monolithicPhaseOpf);
     document.getElementById('opfThreePhaseVariantControl')?.toggleAttribute('hidden', !monolithicPhaseOpf);
     document.getElementById('opfThreePhaseVufControl')?.toggleAttribute('hidden', !monolithicPhaseOpf);
@@ -11686,6 +11841,7 @@ const App = (() => {
       const control = document.getElementById(id);
       if (control) control.disabled = monolithicPhaseOpf;
     });
+    renderOpfParameterGuide();
   }
 
   function updatePfMethodAvailability(sys) {
@@ -13242,10 +13398,38 @@ const App = (() => {
     return {
       num_steps: Math.round(marketNumber('marketNumSteps', 24, 1, 8760)),
       offer_segments: Math.round(marketNumber('marketOfferSegments', 8, 1, 64)),
+      uc_solver: document.getElementById('marketUcSolver')?.value || 'auto',
+      pricing_native_max_variables:
+        Math.round(marketNumber('marketPricingNativeMaxVariables', 5000, 0, 100000000)),
+      structured_scuc_branching: marketChecked('marketStructuredScuc', true),
+      structured_scuc_min_binary_variables:
+        Math.round(marketNumber('marketStructuredScucMinBinaries', 1000, 0, 100000000)),
+      scuc_mip_relative_gap:
+        marketNumber('marketScucMipGapPct', 1, 0, 100) / 100,
+      scuc_time_limit_sec:
+        marketNumber('marketScucTimeLimit', 120, 0, 86400),
       reserve_fraction: marketNumber('marketReservePct', 5, 0, 100) / 100,
       exogenous_curtailment_penalty_per_mwh:
         marketNumber('marketCurtailmentPenalty', 0, 0, 1e9),
       network_constraints: marketChecked('marketNetworkConstraints', true),
+      enable_scuc_network_constraint_generation:
+        marketChecked('marketScucNetworkGeneration', true),
+      enable_scuc_cross_round_solver_state_reuse:
+        marketChecked('marketScucCrossRoundStateReuse', true),
+      enable_scuc_in_solve_network_constraint_generation:
+        marketChecked('marketScucInSolveNetworkGeneration', true),
+      scuc_network_constraint_generation_min_candidates:
+        Math.round(marketNumber(
+          'marketScucNetworkGenerationMinCandidates', 10000, 0, 100000000)),
+      scuc_network_constraint_generation_max_iterations:
+        Math.round(marketNumber(
+          'marketScucNetworkGenerationIterations', 8, 1, 100)),
+      scuc_network_constraint_generation_max_new_per_iteration:
+        Math.round(marketNumber(
+          'marketScucNetworkGenerationMaxNew', 0, 0, 100000000)),
+      optimize_dc_storage: marketChecked('marketOptimizeDCStorage', true),
+      enforce_terminal_dc_storage_soc:
+        marketChecked('marketTerminalDCStorageSoc', true),
       run_ac_validation: marketChecked('marketAcValidation', true),
       enable_n1_security: marketChecked('marketEnableN1'),
       n1_max_iterations: Math.round(marketNumber('marketN1Iterations', 8, 0, 100)),
@@ -13253,6 +13437,9 @@ const App = (() => {
         Math.round(marketNumber('marketN1Cuts', 200, 0, 10000)),
       n1_max_contingencies:
         Math.round(marketNumber('marketN1Contingencies', 0, 0, 100000)),
+      parallel_component_n1: marketChecked('marketParallelComponentN1', true),
+      component_n1_parallel_workers:
+        Math.round(marketNumber('marketComponentN1Workers', 4, 0, 256)),
       n1_emergency_rating_multiplier:
         marketNumber('marketEmergencyMultiplier', 1, 0, 100),
       run_ac_contingency_validation: marketChecked('marketAcContingency'),
@@ -13273,6 +13460,7 @@ const App = (() => {
       n1_security_failed: 'N-1 未通过',
       ac_contingency_failed: '事故后 AC 未通过',
       ac_validation_failed: '基态 AC 未通过',
+      real_time_dc_storage_policy_mismatch: '实时储能策略与日前不一致',
       scuc_infeasible: 'SCUC 不可行',
       unsupported_hybrid_market_assets: '存在市场模型不支持的设备',
       empty_ac_market: '缺少交流母线或市场机组',
@@ -13307,16 +13495,25 @@ const App = (() => {
     const lmpDiv = document.getElementById('marketLmpChart');
     if (lmpDiv) {
       const busCount = pricing[0]?.lmp_per_mwh?.length || 0;
+      const dcBusCount = pricing[0]?.dc_lmp_per_mwh?.length || 0;
       let traces = [];
-      if (busCount <= 12) {
-        traces = Array.from({ length: busCount }, (_, bus) => ({
+      if (busCount + dcBusCount <= 12) {
+        const acTraces = Array.from({ length: busCount }, (_, bus) => ({
           x,
           y: pricing.map(period => Number(period.lmp_per_mwh?.[bus] || 0)),
-          type: 'scatter', mode: 'lines+markers', name: `Bus ${bus + 1}`,
+          type: 'scatter', mode: 'lines+markers', name: `AC Bus ${bus + 1}`,
         }));
+        const dcTraces = Array.from({ length: dcBusCount }, (_, bus) => ({
+          x,
+          y: pricing.map(period => Number(period.dc_lmp_per_mwh?.[bus] || 0)),
+          type: 'scatter', mode: 'lines+markers', name: `DC Bus ${bus + 1}`,
+          line: { dash: 'dot' },
+        }));
+        traces = [...acTraces, ...dcTraces];
       } else {
-        const rows = pricing.map(period => (period.lmp_per_mwh || []).map(Number)
-          .filter(Number.isFinite));
+        const rows = pricing.map(period => [
+          ...(period.lmp_per_mwh || []), ...(period.dc_lmp_per_mwh || []),
+        ].map(Number).filter(Number.isFinite));
         traces = [
           ['最低 LMP', rows.map(values => values.length ? Math.min(...values) : 0)],
           ['平均 LMP', rows.map(values => values.length ?
@@ -13358,33 +13555,84 @@ const App = (() => {
     switchTab('results');
     const security = data.security || {};
     const ledger = data.settlement || {};
+    const performance = data.performance || {};
     const acValidation = Array.isArray(data.ac_validation)
       ? data.ac_validation : [];
     const acSecureCount = acValidation.filter(row => row.secure).length;
     const statusClass = data.feasible ? 'converged' : 'failed';
+    const n1Passed = Boolean(security.dc_n1_secured) &&
+      (!security.full_component_validation_run ||
+       Boolean(security.full_component_contingencies_secure));
     document.getElementById('marketSummary').innerHTML = `
       <div class="result-item"><span class="result-label">市场状态</span><span class="result-value ${statusClass}">${escapeHtml(marketStatusLabel(data.status))}</span></div>
       <div class="result-item"><span class="result-label">定价目标</span><span class="result-value">${marketFmt(data.pricing_objective, 2)}</span></div>
       <div class="result-item"><span class="result-label">机组组合成本</span><span class="result-value">${marketFmt(data.commitment?.cost, 2)}</span></div>
-      <div class="result-item"><span class="result-label">N-1</span><span class="result-value ${security.enabled ? (security.dc_n1_secured ? 'converged' : 'failed') : ''}">${security.enabled ? (security.dc_n1_secured ? '通过' : '未通过') : '未启用'}</span></div>
+      <div class="result-item"><span class="result-label">总耗时</span><span class="result-value">${marketFmt(performance.total_sec, 3)} s</span></div>
+      <div class="result-item"><span class="result-label">市场网络模型</span><span class="result-value">${escapeHtml(data.model_scope?.model_scope || 'ac-only')}</span></div>
+      <div class="result-item"><span class="result-label">全元件N-1</span><span class="result-value ${security.enabled ? (n1Passed ? 'converged' : 'failed') : ''}">${security.enabled ? (n1Passed ? '通过' : '未通过') : '未启用'}</span></div>
       <div class="result-item"><span class="result-label">切平面</span><span class="result-value">${Number(security.cuts_added || 0)} 条 / ${Number(security.iterations || 0)} 轮</span></div>
       <div class="result-item"><span class="result-label">安全再调度成本</span><span class="result-value">${marketFmt(security.preventive_redispatch_cost, 2)}</span></div>
       <div class="result-item"><span class="result-label">安全增量Uplift</span><span class="result-value">${marketFmt(security.incremental_security_uplift, 2)}</span></div>
-      <div class="result-item"><span class="result-label">基态AC安全</span><span class="result-value ${acValidation.length ? (acSecureCount === acValidation.length ? 'converged' : 'failed') : ''}">${acValidation.length ? `${acSecureCount} / ${acValidation.length}` : '未启用'}</span></div>
+      <div class="result-item"><span class="result-label">基态物理认证</span><span class="result-value ${acValidation.length ? (acSecureCount === acValidation.length ? 'converged' : 'failed') : ''}">${acValidation.length ? `${acSecureCount} / ${acValidation.length}` : '未启用'}</span></div>
       <div class="result-item"><span class="result-label">资金残差</span><span class="result-value">${marketFmt(ledger.cashflow_residual, 6)}</span></div>`;
 
     const pricing = Array.isArray(data.pricing) ? data.pricing : [];
-    let pricingHtml = '<table><thead><tr><th>时段</th><th>需求(MW)</th><th>发电(MW)</th><th>备用需求(MW)</th><th>备用价格</th><th>LMP最低</th><th>LMP平均</th><th>LMP最高</th><th>切负荷(MW)</th><th>弃电(MW)</th><th>目标</th></tr></thead><tbody>';
+    let pricingHtml = '<table><thead><tr><th>时段</th><th>AC需求</th><th>DC需求</th><th>发电</th><th>DC储能净出力</th><th>DC储能SOC</th><th>备用需求</th><th>备用价格</th><th>AC LMP均值</th><th>DC LMP均值</th><th>AC/DC切负荷</th><th>AC/DC弃电</th><th>目标</th></tr></thead><tbody>';
     pricing.forEach((period, index) => {
       const lmps = (period.lmp_per_mwh || []).map(Number).filter(Number.isFinite);
       const average = lmps.length ? lmps.reduce((sum, value) => sum + value, 0) / lmps.length : 0;
+      const dcLmps = (period.dc_lmp_per_mwh || []).map(Number).filter(Number.isFinite);
+      const dcAverage = dcLmps.length ? dcLmps.reduce((sum, value) => sum + value, 0) / dcLmps.length : 0;
       const generation = (period.generator_dispatch_mw || []).reduce((sum, value) => sum + Number(value || 0), 0);
       const shedding = (period.load_shedding_mw || []).reduce((sum, value) => sum + Number(value || 0), 0);
+      const dcShedding = (period.dc_load_shedding_mw || []).reduce((sum, value) => sum + Number(value || 0), 0);
       const curtailment = (period.exogenous_curtailment_mw || []).reduce((sum, value) => sum + Number(value || 0), 0);
-      pricingHtml += `<tr><td>${index + 1}</td><td>${marketFmt(period.gross_demand_mw)}</td><td>${marketFmt(generation)}</td><td>${marketFmt(period.reserve_requirement_mw)}</td><td>${marketFmt(period.upward_reserve_price_per_mwh)}</td><td>${marketFmt(lmps.length ? Math.min(...lmps) : 0)}</td><td>${marketFmt(average)}</td><td>${marketFmt(lmps.length ? Math.max(...lmps) : 0)}</td><td>${marketFmt(shedding)}</td><td>${marketFmt(curtailment)}</td><td>${marketFmt(period.objective)}</td></tr>`;
+      const dcCurtailment = (period.dc_exogenous_curtailment_mw || []).reduce((sum, value) => sum + Number(value || 0), 0);
+      const storageDispatch = [
+        ...(period.legacy_dc_storage_dispatch_mw || []),
+        ...(period.dc_storage_dispatch_mw || []),
+      ].reduce((sum, value) => sum + Number(value || 0), 0);
+      const storageSoc = [
+        ...(period.legacy_dc_storage_soc_mwh || []),
+        ...(period.dc_storage_soc_mwh || []),
+      ].map(Number).filter(Number.isFinite);
+      pricingHtml += `<tr><td>${index + 1}</td><td>${marketFmt(period.gross_demand_mw)}</td><td>${marketFmt(period.gross_dc_demand_mw)}</td><td>${marketFmt(generation)}</td><td>${storageSoc.length ? marketFmt(storageDispatch) : '—'}</td><td>${storageSoc.length ? storageSoc.map(value => marketFmt(value)).join(' / ') : '—'}</td><td>${marketFmt(period.reserve_requirement_mw)}</td><td>${marketFmt(period.upward_reserve_price_per_mwh)}</td><td>${marketFmt(average)}</td><td>${dcLmps.length ? marketFmt(dcAverage) : '—'}</td><td>${marketFmt(shedding)} / ${marketFmt(dcShedding)}</td><td>${marketFmt(curtailment)} / ${marketFmt(dcCurtailment)}</td><td>${marketFmt(period.objective)}</td></tr>`;
     });
-    pricingHtml += pricing.length ? '</tbody></table>' : '<tr><td colspan="11">无定价结果</td></tr></tbody></table>';
+    pricingHtml += pricing.length ? '</tbody></table>' : '<tr><td colspan="13">无定价结果</td></tr></tbody></table>';
     document.getElementById('marketPricingResults').innerHTML = pricingHtml;
+
+    const performanceRows = [
+      ['SCUC变量', Number(performance.estimated_scuc_variables || 0), ''],
+      ['SCUC二进制变量', Number(performance.estimated_scuc_binary_variables || 0), ''],
+      ['SCED变量', Number(performance.estimated_sced_variables || 0), ''],
+      ['旧稠密LODF基线', Number(performance.estimated_lodf_dense_bytes || 0) / 1048576, 'MiB'],
+      ['稀疏LODF工作估算', Number(performance.estimated_lodf_sparse_bytes || 0) / 1048576, 'MiB'],
+      ['实际LODF列', Number(performance.lodf_computed_columns || 0), ''],
+      ['SCUC', performance.scuc_sec, 's'],
+      ['SCUC热启动生成', performance.scuc_warm_start_generation_sec, 's'],
+      ['热限生成轮数', Number(performance.scuc_network_constraint_generation_iterations || 0), ''],
+      ['跨轮状态复用轮数', Number(performance.scuc_cross_round_solver_state_reuse_rounds || 0), ''],
+      ['复用根割', Number(performance.scuc_root_cuts_reused_count || 0), ''],
+      ['树内热限回调', Number(performance.scuc_in_solve_network_constraint_callback_calls || 0), ''],
+      ['树内提交热限', Number(performance.scuc_in_solve_network_constraints_submitted || 0), ''],
+      ['热限候选', Number(performance.scuc_network_constraint_candidates || 0), ''],
+      ['热限已激活', Number(performance.scuc_network_constraints_activated || 0), ''],
+      ['热限剩余超限', Number(performance.scuc_network_constraint_remaining_violations || 0), ''],
+      ['热限最坏超限', Number(performance.scuc_network_constraint_worst_violation_mw || 0), 'MW'],
+      ['基础SCED', performance.base_sced_sec, 's'],
+      ['LODF构建', performance.lodf_build_sec, 's'],
+      ['N-1切平面', performance.n1_cut_loop_sec, 's'],
+      ['全元件N-1', performance.component_n1_sec, 's'],
+      ['非线性认证', performance.nonlinear_validation_sec, 's'],
+      ['结算', performance.settlement_sec, 's'],
+    ];
+    const pricingRoute = performance.pricing_solver_fallback_used
+      ? ' (fallback)'
+      : (performance.pricing_large_model_direct_highs_used ? ' (large-model direct)' : '');
+    const solverText = `${performance.scuc_solver_name || '—'} / ${performance.pricing_solver_name || '—'}${pricingRoute}`;
+    document.getElementById('marketPerformanceResults').innerHTML =
+      `<div class="sub-hint">求解器 SCUC / SCED：${escapeHtml(solverText)}；SCUC结构提示 ${performance.scuc_structure_hint_provided ? '已注入' : '无'}，可行MIP start ${performance.scuc_mip_start_provided ? '已注入' : '未生成'}，结构化分支 ${performance.scuc_structured_branching_used ? '已启用' : '未启用'}，树内热限 ${performance.scuc_in_solve_network_constraint_generation_used ? `已启用，提交 ${Number(performance.scuc_in_solve_network_constraints_submitted || 0)}` : '未启用'}，跨轮状态 ${performance.scuc_cross_round_solver_state_reuse_used ? `已复用 ${Number(performance.scuc_cross_round_solver_state_reuse_rounds || 0)} 轮` : '未复用'}，搜索树 ${performance.scuc_search_tree_rebuilt ? '已重建' : '未重建'}，gap ${marketFmt(100 * Number(performance.scuc_mip_gap || 0), 3)}%；热限生成 ${performance.scuc_network_constraint_generation_run ? (performance.scuc_network_constraint_generation_converged ? '已收敛' : '未完成') : '未触发'}；全元件事故求解 ${Number(performance.component_contingency_solves || 0)} 次；事故并行 ${performance.component_n1_parallel_effective ? `${Number(performance.component_n1_parallel_workers || 1)} workers` : '未生效'}</div>` +
+      `<table><thead><tr><th>指标/阶段</th><th>数值</th><th>单位</th></tr></thead><tbody>${performanceRows.map(([label, value, unit]) => `<tr><td>${label}</td><td>${marketFmt(value, unit ? 3 : 0)}</td><td>${unit}</td></tr>`).join('')}</tbody></table>`;
 
     const participants = Array.isArray(data.participant_settlement)
       ? data.participant_settlement : [];
@@ -13395,17 +13643,28 @@ const App = (() => {
     participantHtml += participants.length ? '</tbody></table>' : '<tr><td colspan="12">无主体结算结果</td></tr></tbody></table>';
     document.getElementById('marketParticipantResults').innerHTML = participantHtml;
 
-    let acHtml = '<table><thead><tr><th>时段</th><th>潮流收敛</th><th>安全</th><th>电压越限(pu)</th><th>线路过载(MVA)</th><th>最大负载率</th><th>Slack调整(MW)</th><th>机组P越限(MW)</th><th>状态</th></tr></thead><tbody>';
+    const storages = Array.isArray(data.dc_storage_settlement)
+      ? data.dc_storage_settlement : [];
+    let storageHtml = '<table><thead><tr><th>储能</th><th>类型/位置</th><th>DC母线</th><th>充电(MWh)</th><th>放电(MWh)</th><th>净注入(MWh)</th><th>初始/终端SOC(MWh)</th><th>能量收入</th><th>申报成本</th><th>利润</th></tr></thead><tbody>';
+    storages.forEach(row => {
+      storageHtml += `<tr><td>${escapeHtml(row.component_name || `Index ${row.component_index}`)}</td><td>${escapeHtml(row.component_type || '')} / Pos ${Number(row.component_position)}</td><td>${Number(row.dc_bus)}</td><td>${marketFmt(row.charge_mwh)}</td><td>${marketFmt(row.discharge_mwh)}</td><td>${marketFmt(row.net_injection_mwh)}</td><td>${marketFmt(row.initial_soc_mwh)} / ${marketFmt(row.terminal_soc_mwh)}</td><td>${marketFmt(row.energy_revenue)}</td><td>${marketFmt(row.as_bid_cost)}</td><td>${marketFmt(row.profit)}</td></tr>`;
+    });
+    storageHtml += storages.length ? '</tbody></table>' : '<tr><td colspan="10">无可优化 DC 储能</td></tr></tbody></table>';
+    document.getElementById('marketStorageResults').innerHTML = storageHtml;
+
+    let acHtml = '<table><thead><tr><th>时段</th><th>潮流收敛</th><th>安全</th><th>AC电压越限</th><th>AC线路过载</th><th>DC电压越限</th><th>DC支路过载</th><th>VSC计划偏差</th><th>Slack调整</th><th>状态</th></tr></thead><tbody>';
     acValidation.forEach(row => {
-      acHtml += `<tr><td>${Number(row.period || 0) + 1}</td><td>${row.converged ? '是' : '否'}</td><td class="${row.secure ? 'converged' : 'failed'}">${row.secure ? '通过' : '未通过'}</td><td>${marketFmt(row.maximum_voltage_violation_pu, 6)}</td><td>${marketFmt(row.maximum_branch_overload_mva, 4)}</td><td>${marketFmt(row.maximum_branch_loading_percent, 2)}%</td><td>${marketFmt(row.slack_adjustment_mw, 4)}</td><td>${marketFmt(row.maximum_generator_active_violation_mw, 4)}</td><td>${escapeHtml(row.status || '')}</td></tr>`;
+      acHtml += `<tr><td>${Number(row.period || 0) + 1}</td><td>${row.converged ? '是' : '否'}</td><td class="${row.secure ? 'converged' : 'failed'}">${row.secure ? '通过' : '未通过'}</td><td>${marketFmt(row.maximum_voltage_violation_pu, 6)}</td><td>${marketFmt(row.maximum_branch_overload_mva, 4)}</td><td>${marketFmt(row.maximum_dc_voltage_violation_pu, 6)}</td><td>${marketFmt(row.maximum_dc_branch_overload_mw, 4)}</td><td>${marketFmt(row.maximum_vsc_schedule_deviation_mw, 4)}</td><td>${marketFmt(row.slack_adjustment_mw, 4)}</td><td>${escapeHtml(row.status || '')}</td></tr>`;
     });
     acHtml += acValidation.length ? '</tbody></table>' : '<tr><td colspan="9">本次未运行基态 AC 安全认证</td></tr></tbody></table>';
     document.getElementById('marketAcValidationResults').innerHTML = acHtml;
 
     const categoryLabels = {
       bus_voltage: '母线电压', branch_thermal: '线路热稳',
+      dc_bus_voltage: 'DC母线电压', dc_branch_thermal: 'DC支路热稳',
       generator_active: '机组有功', unsupported_asset: '模型范围',
       n1_branch_overload: 'N-1线路过载', solver_nonconvergence: '方程未收敛',
+      n1_load_shedding: 'N-1新增失负荷',
       market_model: '市场模型', pricing_infeasible: 'SCED不可行',
     };
     const issues = [];
@@ -13490,6 +13749,22 @@ const App = (() => {
         });
       });
     });
+    const componentChecks = Array.isArray(security.component_checks)
+      ? security.component_checks : [];
+    componentChecks.filter(check => !check.secure).forEach(check => issues.push({
+      stage: '全元件N-1纠正校核', period: '全时域',
+      category: check.sced_converged ? 'n1_load_shedding' : 'pricing_infeasible',
+      object: check.component_name || `${check.component_type} ${check.component_index}`,
+      location: componentLocation(check),
+      actual: check.sced_converged
+        ? `${marketFmt(check.incremental_load_shedding_mwh, 6)} MWh`
+        : 'SCED未收敛',
+      limit: '新增失负荷 ≤ 容差',
+      violation: check.sced_converged
+        ? `${marketFmt(check.incremental_load_shedding_mwh, 6)} MWh`
+        : '—',
+      reason: check.status || '元件故障后的固定组合纠正式 SCED 不安全',
+    }));
     if (!data.feasible && !issues.length) issues.push({
       stage: '市场模型', period: '—', category: 'market_model',
       object: '系统约束集', location: '系统级', actual: '不可行', limit: '应可行', violation: '—',
@@ -13503,12 +13778,17 @@ const App = (() => {
     document.getElementById('marketFailureDetails').innerHTML = issueHtml;
 
     const trajectory = Array.isArray(security.trajectory) ? security.trajectory : [];
-    let securityHtml = `<div class="sub-hint">候选事故 ${Number(security.candidate_contingencies || 0)}；跳过孤岛支路位置 ${(security.skipped_islanding_branch_positions || []).join(', ') || '无'}；基线目标 ${marketFmt(security.baseline_pricing_objective)}；安全目标 ${marketFmt(security.secured_pricing_objective)}；用户支付影响 ${marketFmt(security.customer_payment_impact)}</div>`;
+    let securityHtml = `<div class="sub-hint">AC支路预防式候选 ${Number(security.candidate_contingencies || 0)}；全元件纠正式候选 ${Number(security.full_component_candidate_contingencies || 0)}；跳过孤岛支路位置 ${(security.skipped_islanding_branch_positions || []).join(', ') || '无'}；基线目标 ${marketFmt(security.baseline_pricing_objective)}；安全目标 ${marketFmt(security.secured_pricing_objective)}；用户支付影响 ${marketFmt(security.customer_payment_impact)}</div>`;
     securityHtml += '<table><thead><tr><th>迭代</th><th>违约数</th><th>本轮切平面</th><th>累计切平面</th><th>最严重过载(MW)</th></tr></thead><tbody>';
     trajectory.forEach(row => {
       securityHtml += `<tr><td>${row.iteration}</td><td>${row.violations}</td><td>${row.cuts_added}</td><td>${row.cumulative_cuts}</td><td>${marketFmt(row.worst_overload_mw, 4)}</td></tr>`;
     });
     securityHtml += trajectory.length ? '</tbody></table>' : '<tr><td colspan="5">本次未运行 N-1 预防控制</td></tr></tbody></table>';
+    securityHtml += '<table><thead><tr><th>故障元件</th><th>类型/位置</th><th>位置</th><th>SCED收敛</th><th>安全</th><th>新增失负荷(MWh)</th><th>总弃电(MWh)</th><th>状态</th></tr></thead><tbody>';
+    componentChecks.forEach(check => {
+      securityHtml += `<tr><td>${escapeHtml(check.component_name || `Index ${check.component_index}`)}</td><td>${escapeHtml(check.component_type || '')} / Pos ${Number(check.component_position)}</td><td>${escapeHtml(componentLocation(check))}</td><td>${check.sced_converged ? '是' : '否'}</td><td class="${check.secure ? 'converged' : 'failed'}">${check.secure ? '通过' : '未通过'}</td><td>${marketFmt(check.incremental_load_shedding_mwh, 6)}</td><td>${marketFmt(check.total_exogenous_curtailment_mwh, 6)}</td><td>${escapeHtml(check.status || '')}</td></tr>`;
+    });
+    securityHtml += componentChecks.length ? '</tbody></table>' : '<tr><td colspan="8">本次未运行全元件纠正式 N-1 校核</td></tr></tbody></table>';
     document.getElementById('marketSecurityResults').innerHTML = securityHtml;
 
     const checks = Array.isArray(security.ac_checks) ? security.ac_checks : [];
@@ -13521,10 +13801,14 @@ const App = (() => {
 
     const ledgerRows = [
       ['用户能量支付', ledger.customer_energy_payment],
+      ['用户AC能量支付', ledger.customer_ac_energy_payment],
+      ['用户DC能量支付', ledger.customer_dc_energy_payment],
       ['用户备用费用', ledger.customer_reserve_charge],
       ['用户Uplift费用', ledger.customer_uplift_charge],
       ['用户总支付', ledger.customer_total_payment],
       ['资源能量收入', ledger.resource_energy_revenue],
+      ['资源AC能量收入', ledger.resource_ac_energy_revenue],
+      ['资源DC能量收入', ledger.resource_dc_energy_revenue],
       ['资源备用收入', ledger.resource_reserve_revenue],
       ['资源Uplift收入', ledger.resource_uplift_revenue],
       ['资源总收入', ledger.resource_total_revenue],
@@ -13658,11 +13942,11 @@ const App = (() => {
       <div class="result-item"><span class="result-label">资金残差</span><span class="result-value">${marketFmt(ledger.cashflow_residual, 8)}</span></div>`;
 
     const periods = Array.isArray(data.periods) ? data.periods : [];
-    let periodHtml = '<table><thead><tr><th>时段</th><th>日前需求(MW)</th><th>实际需求(MW)</th><th>需求偏差(MW)</th><th>机组绝对偏差(MW)</th><th>备用激活需求(MW)</th><th>备用指令(MW)</th><th>已履约(MW)</th><th>未履约(MW)</th><th>负荷考核电量(MWh)</th><th>负荷偏差惩罚</th><th>日前LMP</th><th>实时LMP</th><th>用户偏差支付</th><th>资源偏差收入</th><th>偏差拥塞租金</th></tr></thead><tbody>';
+    let periodHtml = '<table><thead><tr><th>时段</th><th>日前需求(MW)</th><th>实际需求(MW)</th><th>需求偏差(MW)</th><th>机组绝对偏差(MW)</th><th>备用激活需求(MW)</th><th>备用指令(MW)</th><th>已履约(MW)</th><th>未履约(MW)</th><th>负荷考核电量(MWh)</th><th>负荷偏差惩罚</th><th>日前LMP</th><th>实时LMP</th><th>用户偏差支付</th><th>资源偏差收入</th><th>其中DC储能</th><th>偏差拥塞租金</th></tr></thead><tbody>';
     periods.forEach(row => {
-      periodHtml += `<tr><td>${Number(row.period) + 1}</td><td>${marketFmt(row.day_ahead_demand_mw)}</td><td>${marketFmt(row.realized_demand_mw)}</td><td>${marketFmt(row.demand_deviation_mw)}</td><td>${marketFmt(row.absolute_generator_deviation_mw)}</td><td>${marketFmt(row.reserve_activation_requirement_mw)}</td><td>${marketFmt(row.reserve_instruction_mw)}</td><td>${marketFmt(row.reserve_delivered_mw)}</td><td>${marketFmt(row.reserve_shortfall_mw)}</td><td>${marketFmt(row.load_penalized_imbalance_mwh)}</td><td>${marketFmt(row.load_imbalance_penalty)}</td><td>${marketFmt(row.average_day_ahead_lmp_per_mwh)}</td><td>${marketFmt(row.average_real_time_lmp_per_mwh)}</td><td>${marketFmt(row.customer_deviation_payment)}</td><td>${marketFmt(row.resource_deviation_revenue)}</td><td>${marketFmt(row.deviation_congestion_rent, 6)}</td></tr>`;
+      periodHtml += `<tr><td>${Number(row.period) + 1}</td><td>${marketFmt(row.day_ahead_demand_mw)}</td><td>${marketFmt(row.realized_demand_mw)}</td><td>${marketFmt(row.demand_deviation_mw)}</td><td>${marketFmt(row.absolute_generator_deviation_mw)}</td><td>${marketFmt(row.reserve_activation_requirement_mw)}</td><td>${marketFmt(row.reserve_instruction_mw)}</td><td>${marketFmt(row.reserve_delivered_mw)}</td><td>${marketFmt(row.reserve_shortfall_mw)}</td><td>${marketFmt(row.load_penalized_imbalance_mwh)}</td><td>${marketFmt(row.load_imbalance_penalty)}</td><td>${marketFmt(row.average_day_ahead_lmp_per_mwh)}</td><td>${marketFmt(row.average_real_time_lmp_per_mwh)}</td><td>${marketFmt(row.customer_deviation_payment)}</td><td>${marketFmt(row.resource_deviation_revenue)}</td><td>${marketFmt(row.dc_storage_deviation_revenue)}</td><td>${marketFmt(row.deviation_congestion_rent, 6)}</td></tr>`;
     });
-    periodHtml += periods.length ? '</tbody></table>' : '<tr><td colspan="16">无实时偏差结果</td></tr></tbody></table>';
+    periodHtml += periods.length ? '</tbody></table>' : '<tr><td colspan="17">无实时偏差结果</td></tr></tbody></table>';
     document.getElementById('marketRealTimePeriodResults').innerHTML = periodHtml;
 
     const participants = Array.isArray(data.participant_deviation_settlement)
@@ -16125,6 +16409,22 @@ const App = (() => {
       btn.classList.toggle('active', nextOpen);
       btn.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
     });
+    document.getElementById('btnOpfParameterGuide')?.addEventListener('click', async () => {
+      const advanced = document.getElementById('opfAdvancedPanel');
+      const guide = document.getElementById('opfParameterGuide');
+      const btn = document.getElementById('btnOpfParameterGuide');
+      if (!advanced || !guide || !btn) return;
+      advanced.removeAttribute('hidden');
+      const advancedBtn = document.getElementById('btnOpfAdvanced');
+      advancedBtn?.classList.add('active');
+      advancedBtn?.setAttribute('aria-expanded', 'true');
+      const nextOpen = guide.hasAttribute('hidden');
+      guide.toggleAttribute('hidden', !nextOpen);
+      btn.classList.toggle('active', nextOpen);
+      btn.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+      if (nextOpen) await loadOpfParameterContract();
+    });
+    document.getElementById('opfParameterSearch')?.addEventListener('input', renderOpfParameterGuide);
     document.getElementById('btnCarbonFlow')?.addEventListener('click', runCarbonFlow);
     document.getElementById('carbonSankeyMetric')?.addEventListener('change', () => {
       if (_lastCarbonData) renderCarbonSankey(_lastCarbonData);

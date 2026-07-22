@@ -96,6 +96,11 @@ struct ACOPFResult {
   std::vector<double> lmp_p;
   std::vector<double> lmp_q;
 
+  /// True only when the returned nodal prices came from certified equality
+  /// multipliers for the formulation that produced this primal solution.
+  bool lmp_valid{false};
+  std::string lmp_validity_reason;
+
   /// Opaque native-IPM continuation state.  Callers normally leave these
   /// untouched and pass this result through ACOPFOptions::warm_start.  The
   /// solver validates all dimensions before reuse and otherwise falls back to
@@ -148,6 +153,11 @@ struct ACOPFResult {
   /// Declares which parts of the unified converter model this OPF honored.
   ConverterModelScope converter_model_scope{};
 
+  /// Honest capability boundary for this particular solve path.  Entries are
+  /// intended for API/GUI display and must describe omitted physics,
+  /// approximations, or unavailable certificates rather than numerical hints.
+  std::vector<std::string> model_limitations;
+
   // Switch / circuit-breaker terminal flows at the OPF dispatch point.
   std::vector<DeviceTerminalFlow> ac_switch_flows;
   std::vector<DeviceTerminalFlow> ac_circuit_breaker_flows;
@@ -188,6 +198,12 @@ struct DCOPFResult {
   /// Current native supporting-LP extraction does not recover bounded Pf
   /// variable duals robustly, so this remains false for branch-limit studies.
   bool branch_mu_valid{false};
+  std::string branch_mu_validity_reason;
+
+  /// True when lmp[] was recovered from equality-row duals for the reported
+  /// primal solution.  This does not imply branch congestion dual validity.
+  bool lmp_valid{false};
+  std::string lmp_validity_reason;
 
   std::vector<double> load_shedding_mw;
   double total_load_shedding_mw{0.0};
@@ -204,9 +220,14 @@ struct DCOPFResult {
   /// Disambiguates QP-vs-LP semantics across fallback paths.
   std::string objective_model;
 
+  /// Effective number of linear intervals used for a quadratic-cost LP
+  /// approximation. Zero means the selected backend used the true QP cost.
+  int pwl_segments_effective{0};
+
   /// Declares converter-model fidelity.  DC-OPF models no converter physics,
   /// so all converter flags here stay false.
   ConverterModelScope converter_model_scope{};
+  std::vector<std::string> model_limitations;
 };
 
 }  // namespace hacdcpf::opf

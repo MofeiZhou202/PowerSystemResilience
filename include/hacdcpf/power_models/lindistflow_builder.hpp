@@ -12,8 +12,8 @@
 ///     v_i   — squared voltage magnitude at bus i [p.u.²]
 ///
 ///   Power balance at each non-root bus i:
-///     Σ_{j: (i,j)∈E} P_ij - Σ_{k: (k,i)∈E} P_ki = p_dg_i - p_load_i
-///     Σ_{j: (i,j)∈E} Q_ij - Σ_{k: (k,i)∈E} Q_ki = q_dg_i - q_load_i
+///     Σ_{j: (i,j)∈E} P_ij - Σ_{k: (k,i)∈E} P_ki = -p_load_i
+///     Σ_{j: (i,j)∈E} Q_ij - Σ_{k: (k,i)∈E} Q_ki = -q_load_i
 ///
 ///   LinDistFlow voltage drop for branch (i→j):
 ///     v_j = v_i - 2*(r_ij*P_ij + x_ij*Q_ij)
@@ -25,8 +25,10 @@
 ///     v_min² ≤ v_i ≤ v_max²
 ///
 ///   Objective: minimize total real power loss = Σ p_load_i - v_root = 0 (feasibility)
-///              OR minimise total load-shedding if DG variables are provided.
 ///              Default: minimise Σ (v_max - v_i) as a proxy for voltage regulation.
+///
+/// Scope: this basic AML builder has fixed loads only; it does not create DG,
+/// controllable source, or load-shedding variables.
 
 #include <map>
 #include <string>

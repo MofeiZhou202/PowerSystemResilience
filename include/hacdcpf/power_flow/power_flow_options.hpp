@@ -125,6 +125,13 @@ struct PowerFlowOptions {
   bool enable_auto_swing_selection{true};
   bool enable_converter_mode_switching{true};
   bool enable_converter_coordination_check{false};
+  // Treat converter capacity/current/modulation/duty limits as hard feasibility
+  // constraints. A determined power flow has no dispatch freedom with which to
+  // repair an incompatible setpoint, so a violating Newton root is rejected as
+  // physically infeasible instead of being reported as converged. The default
+  // warning-only mode preserves legacy behavior; use OPF when redispatch is
+  // required to find a feasible operating point.
+  bool enforce_converter_physical_limits{false};
   // When true, a converter that is the *sole* voltage former of a single-DC-bus
   // island holds its DC bus voltage rigidly at the setpoint (DC-slack converter
   // mode, multi-converter model §6.3) instead of forming it through a stiff

@@ -1,6 +1,6 @@
 # Documentation Index
 
-Updated: 2026-07-20
+Updated: 2026-07-22
 
 This directory separates implementation contracts from mathematical references.
 When documentation and runtime behavior differ, `include/`, `src/`,
@@ -20,7 +20,8 @@ When documentation and runtime behavior differ, `include/`, `src/`,
 | WebGL/SVG rendering, large-model interaction, and time playback | [gui_canvas_runtime.md](gui_canvas_runtime.md) |
 | TSPF, annual simulation, storage, and profiles | [sequential_production_simulation_rich_models.md](sequential_production_simulation_rich_models.md) |
 | Time-series PF pipeline: math models + analysis | [time_series_power_flow_models.md](time_series_power_flow_models.md) |
-| Native day-ahead market: SCUC, SCED/LMP, AC validation, settlement | [market_simulation_runtime.md](market_simulation_runtime.md) |
+| Native hybrid AC/DC market: SCUC, DC storage, full-component N-1, settlement | [market_simulation_runtime.md](market_simulation_runtime.md) |
+| 中文：当前市场模拟数学模型实现审核稿（含 DC 储能与全元件 N-1） | [market_simulation_mathematical_models.md](market_simulation_mathematical_models.md) |
 | Annual simulation + lifecycle: math models + analysis | [annual_simulation_models.md](annual_simulation_models.md) |
 | 中文 LaTeX：时序潮流/年度模拟数学模型 + 需求响应效应 | [latex/time_series_annual_simulation_zh.tex](latex/time_series_annual_simulation_zh.tex) |
 | Transient runtime and validation boundary | [transient_runtime.md](transient_runtime.md) |

@@ -6,6 +6,7 @@
 
 #include <map>
 #include <string>
+#include <vector>
 
 #include "hacdcpf/aml/aml.hpp"
 
@@ -13,6 +14,9 @@ namespace hacdcpf::power_models {
 
 /// Result from an AML power model solve (AC/DC/hybrid OPF).
 struct AMLBuildResult {
+  std::string model_scope{"experimental-aml-builder:not-production-runtime"};
+  std::vector<std::string> model_limitations{
+      "The AML builder is an experimental formulation path and is not used by the production solve_ac_opf/solve_dc_opf runtime."};
   aml::SolveResult solve_result;
   double obj_per_h{0.0};
 

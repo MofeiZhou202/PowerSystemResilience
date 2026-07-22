@@ -8,6 +8,7 @@
 #include <catch2/catch_approx.hpp>
 
 #include "hacdcpf/io/matpower_parser.hpp"
+#include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/market/market_simulation.hpp"
 
 #ifndef HACDCPF_TEST_DATA_DIR
@@ -73,6 +74,22 @@ TEST_CASE("Case9 24-hour native market closes SCUC-SCED-LMP-ACPF-settlement",
   REQUIRE(result.num_ac_secure == 24);
   REQUIRE(result.offers.size() == 3);
   REQUIRE(result.generator_settlement.size() == 3);
+  CHECK(result.performance.periods == 24);
+  CHECK(result.performance.active_generators == 3);
+  CHECK(result.performance.active_ac_branches == 9);
+  CHECK(result.performance.estimated_scuc_variables == 2088);
+  CHECK(result.performance.estimated_scuc_binary_variables == 72);
+  CHECK(result.performance.scuc_mip_start_provided);
+  CHECK(result.performance.scuc_structure_hint_provided);
+  CHECK(result.performance.scuc_branching_priorities_provided);
+  CHECK(result.performance.scuc_warm_start_generation_sec >= 0.0);
+  CHECK(result.performance.estimated_sced_variables == 1872);
+  CHECK(result.performance.estimated_lodf_dense_bytes == 2456);
+  CHECK_FALSE(result.performance.scuc_solver_name.empty());
+  CHECK_FALSE(result.performance.pricing_solver_name.empty());
+  CHECK(result.performance.scuc_sec >= 0.0);
+  CHECK(result.performance.base_sced_sec >= 0.0);
+  CHECK(result.performance.total_sec > 0.0);
 
   for (const auto& period : result.pricing) {
     REQUIRE(period.converged);
@@ -175,6 +192,94 @@ TEST_CASE("Base AC certification rejects converged voltage-limit violations",
       }));
   CHECK_FALSE(thermal_result.feasible);
   CHECK(thermal_result.status == "ac_validation_failed");
+}
+
+TEST_CASE("SCUC exact network constraint generation matches the full thermal model",
+          "[market][scuc][network-constraint-generation]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  for (auto& branch : system.ac.branches) branch.rate_a_mva = 60.0;
+  auto time_series = case9_day_profile();
+  time_series.num_steps = 1;
+  time_series.profiles.front().values = {1.0};
+
+  auto full_options = market_options();
+  full_options.energy_offer_segments = 2;
+  full_options.upward_reserve_fraction = 0.0;
+  full_options.run_ac_validation = false;
+  full_options.uc_options.uc_solver = hacdcpf::UCSolverChoice::HiGHS;
+  full_options.enable_scuc_network_constraint_generation = false;
+  const auto full = hacdcpf::market::run_day_ahead_market(
+      system, time_series, full_options);
+  REQUIRE(full.feasible);
+
+  auto generated_options = full_options;
+  generated_options.enable_scuc_network_constraint_generation = true;
+  generated_options.scuc_network_constraint_generation_min_candidates = 0;
+  generated_options.scuc_network_constraint_generation_max_iterations = 20;
+  generated_options.structured_scuc_min_binary_variables = 0;
+  const auto generated = hacdcpf::market::run_day_ahead_market(
+      system, time_series, generated_options);
+
+  INFO("generated SCUC status=" << generated.commitment.solver_status);
+  REQUIRE(generated.feasible);
+  CHECK(generated.commitment.total_cost ==
+        Catch::Approx(full.commitment.total_cost).margin(1e-5));
+  CHECK(generated.commitment.network_constraint_generation_run);
+  CHECK(generated.commitment.network_constraint_generation_converged);
+  CHECK(generated.commitment.network_constraint_generation_iterations >= 1);
+  CHECK(generated.commitment.in_solve_network_constraint_generation_used);
+  CHECK(generated.commitment.in_solve_network_constraint_callback_calls >= 1);
+  CHECK(generated.commitment.in_solve_network_constraints_submitted > 0);
+  CHECK(generated.commitment.cross_round_solver_state_reuse_enabled);
+  CHECK(generated.commitment.search_tree_rebuilt ==
+        (generated.commitment.network_constraint_generation_iterations > 1));
+  if (generated.commitment.network_constraint_generation_iterations > 1) {
+    CHECK(generated.commitment.cross_round_solver_state_reuse_used);
+  }
+  CHECK(generated.commitment.network_constraint_candidates == 9);
+  CHECK(generated.commitment.network_constraints_activated > 0);
+  CHECK(generated.commitment.network_constraints_activated <=
+        generated.commitment.network_constraint_candidates);
+  CHECK(generated.commitment.network_constraint_remaining_violations == 0);
+  CHECK(generated.commitment.network_constraint_worst_violation_mw <= 1e-5);
+  REQUIRE(generated.pricing.size() == 1);
+  for (size_t l = 0; l < system.ac.branches.size(); ++l) {
+    CHECK(std::abs(generated.pricing.front().branch_flow_mw[l]) <=
+          system.ac.branches[l].rate_a_mva + 1e-5);
+  }
+
+  auto restarted_options = generated_options;
+  restarted_options.enable_scuc_in_solve_network_constraint_generation = false;
+  const auto restarted = hacdcpf::market::run_day_ahead_market(
+      system, time_series, restarted_options);
+  REQUIRE(restarted.feasible);
+  CHECK(restarted.commitment.total_cost ==
+        Catch::Approx(full.commitment.total_cost).margin(1e-5));
+  CHECK_FALSE(restarted.commitment.in_solve_network_constraint_generation_used);
+  CHECK(restarted.commitment.cross_round_solver_state_reuse_used);
+  CHECK(restarted.commitment.cross_round_solver_state_reuse_rounds >= 1);
+  CHECK(restarted.commitment.search_tree_rebuilt);
+  CHECK((restarted.commitment.root_cuts_reused ||
+         restarted.commitment.pseudocosts_reused));
+  if (restarted.commitment.root_basis_reused) {
+    CHECK(restarted.commitment.root_cuts_reused);
+  }
+
+  auto incomplete_options = generated_options;
+  incomplete_options.enable_scuc_in_solve_network_constraint_generation = false;
+  incomplete_options.scuc_network_constraint_generation_max_iterations = 1;
+  incomplete_options.scuc_network_constraint_generation_max_new_per_iteration = 1;
+  const auto incomplete = hacdcpf::market::run_day_ahead_market(
+      system, time_series, incomplete_options);
+  CHECK_FALSE(incomplete.feasible);
+  CHECK_FALSE(incomplete.commitment.feasible);
+  CHECK(incomplete.commitment.network_constraint_generation_run);
+  CHECK_FALSE(incomplete.commitment.network_constraint_generation_converged);
+  CHECK(incomplete.commitment.network_constraint_remaining_violations > 0);
+  CHECK(incomplete.commitment.network_constraint_worst_violation_mw > 0.0);
+  CHECK(incomplete.commitment.solver_status.find(
+            "network constraint generation incomplete") != std::string::npos);
 }
 
 TEST_CASE("Cost-based offers preserve true cost separately from physical assets",
@@ -316,25 +421,149 @@ TEST_CASE("Load shedding settlement charges only served demand",
   CHECK(result.settlement.cashflow_residual == Catch::Approx(0.0).margin(1e-6));
 }
 
-TEST_CASE("First market slice rejects hybrid assets explicitly",
-          "[market][scope]") {
-  auto system = hacdcpf::io::parse_matpower(
-      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
-  hacdcpf::DCBus dc_bus;
-  dc_bus.index = 101;
-  dc_bus.in_service = true;
-  system.dc.buses.push_back(dc_bus);
+TEST_CASE("Hybrid market clears remote DC load through VSC and DC branch",
+          "[market][hybrid][pricing]") {
+  auto system = hacdcpf::io::build_market_5bus_acdc_toy();
+  system.vsc_converters[0].control_mode = hacdcpf::ConverterMode::VDC_Q;
+  system.vsc_converters[1].in_service = false;
+  system.dc.buses[0].bus_type = hacdcpf::DCBusType::DC_V;
+  system.dc.buses[1].bus_type = hacdcpf::DCBusType::DC_P;
+  hacdcpf::DCLoad load;
+  load.index = 77;
+  load.bus = system.dc.buses[1].index;
+  load.p_mw = 20.0;
+  load.scaling = 1.0;
+  load.in_service = true;
+  system.dc.loads = {load};
+
+  hacdcpf::TimeSeriesData time_series;
+  time_series.num_steps = 1;
+  time_series.step_duration_hr = 1.0;
+  auto options = market_options();
+  options.upward_reserve_fraction = 0.0;
+  options.run_ac_validation = false;
 
   const auto result = hacdcpf::market::run_day_ahead_market(
-      system, case9_day_profile(), market_options());
+      system, time_series, options);
+  INFO("status=" << result.status);
+  for (const auto& warning : result.warnings) INFO(warning);
+  REQUIRE(result.feasible);
+  REQUIRE(result.pricing.size() == 1);
+  const auto& period = result.pricing.front();
+  REQUIRE(period.dc_lmp_per_mwh.size() == system.dc.buses.size());
+  REQUIRE(period.dc_bus_voltage_pu.size() == system.dc.buses.size());
+  REQUIRE(period.dc_branch_flow_mw.size() == system.dc.branches.size());
+  REQUIRE(period.vsc_ac_injection_mw.size() == system.vsc_converters.size());
+  CHECK(period.dc_load_shedding_mw[1] == Catch::Approx(0.0).margin(1e-7));
+  CHECK(period.dc_branch_flow_mw[0] == Catch::Approx(20.0).margin(1e-5));
+  CHECK(period.vsc_dc_injection_mw[0] == Catch::Approx(20.0).margin(1e-5));
+  CHECK(period.vsc_ac_injection_mw[0] < -20.0);
+  CHECK(period.vsc_loss_mw[0] > 0.0);
+  CHECK(period.dc_bus_voltage_pu[0] > period.dc_bus_voltage_pu[1]);
+  CHECK(std::isfinite(period.dc_lmp_per_mwh[0]));
+  CHECK(std::isfinite(period.dc_lmp_per_mwh[1]));
+  CHECK(result.model_scope.dc_network_modelled);
+  CHECK(result.model_scope.dc_voltage_linearized);
+  CHECK(result.model_scope.energy_prices_valid);
+  CHECK(result.settlement.customer_dc_energy_payment > 0.0);
+  CHECK(result.settlement.cashflow_residual == Catch::Approx(0.0).margin(1e-6));
+}
+
+TEST_CASE("Hybrid market dispatch receives nonlinear AC-DC certification",
+          "[market][hybrid][validation]") {
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case9.m");
+  system.dc.base_mva = system.base_mva;
+  hacdcpf::DCBus dc1;
+  dc1.index = 1;
+  dc1.bus_type = hacdcpf::DCBusType::DC_V;
+  dc1.vm_pu = 1.0;
+  dc1.vmin_pu = 0.9;
+  dc1.vmax_pu = 1.1;
+  hacdcpf::DCBus dc2 = dc1;
+  dc2.index = 2;
+  dc2.bus_type = hacdcpf::DCBusType::DC_P;
+  system.dc.buses = {dc1, dc2};
+  hacdcpf::DCBranch dc_line;
+  dc_line.index = 41;
+  dc_line.from_bus = 1;
+  dc_line.to_bus = 2;
+  dc_line.r_pu = 0.01;
+  dc_line.rate_a_mva = 50.0;
+  system.dc.branches = {dc_line};
+  hacdcpf::DCLoad dc_load;
+  dc_load.index = 51;
+  dc_load.bus = 2;
+  dc_load.p_mw = 8.0;
+  system.dc.loads = {dc_load};
+  hacdcpf::VSCConverter vsc;
+  vsc.index = 61;
+  vsc.bus_ac = system.ac.buses.front().index;
+  vsc.bus_dc = 1;
+  vsc.control_mode = hacdcpf::ConverterMode::VDC_Q;
+  vsc.v_dc_set_pu = 1.0;
+  vsc.eta = 0.98;
+  vsc.k_vdc = 10.0;
+  vsc.pmin_mw = -30.0;
+  vsc.pmax_mw = 30.0;
+  vsc.qmin_mvar = -20.0;
+  vsc.qmax_mvar = 20.0;
+  system.vsc_converters = {vsc};
+
+  hacdcpf::TimeSeriesData time_series;
+  time_series.num_steps = 1;
+  time_series.step_duration_hr = 1.0;
+  auto options = market_options();
+  options.upward_reserve_fraction = 0.0;
+  options.ac_validation_voltage_tolerance_pu = 1e-4;
+  options.ac_validation_thermal_tolerance_mva = 1e-3;
+
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, time_series, options);
+  INFO("status=" << result.status);
+  for (const auto& warning : result.warnings) INFO(warning);
+  REQUIRE(result.pricing.size() == 1);
+  REQUIRE(result.ac_validation.size() == 1);
+  const auto& validation = result.ac_validation.front();
+  INFO("validation=" << validation.status
+       << " residual=" << validation.residual
+       << " dc_v=" << validation.maximum_dc_voltage_violation_pu
+       << " dc_branch=" << validation.maximum_dc_branch_overload_mw);
+  REQUIRE(validation.converged);
+  CHECK(validation.secure);
+  CHECK(result.feasible);
+  CHECK(validation.converter_model_scope.validity.vsc_loss_modelled);
+  CHECK(validation.maximum_dc_voltage_violation_pu <= 1e-4);
+  CHECK(validation.maximum_dc_branch_overload_mw <= 1e-3);
+  CHECK(result.ac_power_flow_results.front().vdc.size() == 2);
+}
+
+TEST_CASE("Hybrid market requires a voltage reference on every DC island",
+          "[market][hybrid][reference]") {
+  auto system = hacdcpf::io::build_market_5bus_acdc_toy();
+  hacdcpf::DCBus unreferenced;
+  unreferenced.index = 99;
+  unreferenced.bus_type = hacdcpf::DCBusType::DC_P;
+  unreferenced.vm_pu = 1.0;
+  unreferenced.vmin_pu = 0.9;
+  unreferenced.vmax_pu = 1.1;
+  system.dc.buses.push_back(unreferenced);
+
+  hacdcpf::TimeSeriesData time_series;
+  time_series.num_steps = 1;
+  time_series.step_duration_hr = 1.0;
+  auto options = market_options();
+  options.run_ac_validation = false;
+
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, time_series, options);
   CHECK_FALSE(result.feasible);
-  CHECK(result.status == "unsupported_hybrid_market_assets");
-  REQUIRE_FALSE(result.warnings.empty());
-  REQUIRE(result.unsupported_assets.size() == 1);
-  CHECK(result.unsupported_assets.front().component_type == "dc_bus");
-  CHECK(result.unsupported_assets.front().component_index == 101);
-  CHECK(result.unsupported_assets.front().bus == 101);
-  CHECK_FALSE(result.unsupported_assets.front().reason.empty());
+  CHECK(result.status == "invalid_dc_reference");
+  CHECK(std::any_of(result.warnings.begin(), result.warnings.end(),
+                    [](const std::string& warning) {
+                      return warning.find("DC island") != std::string::npos &&
+                             warning.find("buses 99") != std::string::npos;
+                    }));
 }
 
 TEST_CASE("Strategic policy marks up offers and withholds flexible capacity",
@@ -499,6 +728,10 @@ TEST_CASE("Case9 final dispatch reports nonlinear AC contingency certification",
   options.run_ac_validation = false;
   options.run_ac_contingency_validation = true;
   options.max_ac_contingencies = 2;
+  options.pricing_native_max_variables = 0;
+  options.uc_options.uc_solver = hacdcpf::UCSolverChoice::HiGHS;
+  options.structured_scuc_min_binary_variables = 0;
+  options.scuc_mip_relative_gap = 0.01;
   const auto result = hacdcpf::market::run_day_ahead_market(
       system, time_series, options);
 
@@ -507,6 +740,14 @@ TEST_CASE("Case9 final dispatch reports nonlinear AC contingency certification",
   REQUIRE(result.security.lodf_available);
   REQUIRE(result.security.ac_contingency_validation_run);
   REQUIRE(result.security.ac_checks.size() == 2);
+  CHECK(result.performance.lodf_computed_columns == 2);
+  CHECK(result.performance.estimated_lodf_sparse_bytes > 0);
+  CHECK(result.performance.estimated_lodf_sparse_bytes <
+        result.performance.estimated_lodf_dense_bytes);
+  CHECK(result.performance.pricing_large_model_direct_highs_used);
+  CHECK_FALSE(result.performance.pricing_solver_fallback_used);
+  CHECK(result.performance.scuc_structured_branching_used);
+  CHECK(result.performance.scuc_mip_gap_target_met);
   for (const auto& check : result.security.ac_checks) {
     CHECK(check.outage_branch_position >= 0);
     CHECK(std::isfinite(check.maximum_voltage_violation_pu));
@@ -590,6 +831,240 @@ TEST_CASE("Case9 real-time fixed-commitment market closes two-settlement deviati
   }
   for (size_t g = 0; g < system.ac.generators.size(); ++g) {
     CHECK(system.ac.generators[g].pg_mw == original.ac.generators[g].pg_mw);
+  }
+}
+
+TEST_CASE("Hybrid real-time market settles DC load forecast deviations",
+          "[market][hybrid][real-time][settlement]") {
+  auto system = hacdcpf::io::build_market_5bus_acdc_toy();
+  system.vsc_converters[0].control_mode = hacdcpf::ConverterMode::VDC_Q;
+  system.vsc_converters[1].in_service = false;
+  system.dc.buses[0].bus_type = hacdcpf::DCBusType::DC_V;
+  system.dc.buses[1].bus_type = hacdcpf::DCBusType::DC_P;
+  hacdcpf::DCLoad dc_load;
+  dc_load.index = 177;
+  dc_load.bus = system.dc.buses[1].index;
+  dc_load.p_mw = 20.0;
+  dc_load.profile_id = 77;
+  system.dc.loads = {dc_load};
+
+  hacdcpf::TimeSeriesData day_ahead_series;
+  day_ahead_series.num_steps = 2;
+  day_ahead_series.step_duration_hr = 1.0;
+  day_ahead_series.profiles.push_back(
+      hacdcpf::TimeSeriesProfile{77, "dc_load_forecast", {1.0, 1.0}});
+  auto realized_series = day_ahead_series;
+  realized_series.profiles.front().values = {1.2, 0.8};
+
+  auto day_ahead_options = market_options();
+  day_ahead_options.upward_reserve_fraction = 0.0;
+  day_ahead_options.run_ac_validation = false;
+  const auto day_ahead = hacdcpf::market::run_day_ahead_market(
+      system, day_ahead_series, day_ahead_options);
+  REQUIRE(day_ahead.feasible);
+
+  hacdcpf::market::RealTimeMarketOptions real_time_options;
+  real_time_options.market_options = day_ahead_options;
+  const auto real_time = hacdcpf::market::run_real_time_market(
+      system, day_ahead_series, realized_series, day_ahead,
+      real_time_options);
+
+  INFO("hybrid real-time status=" << real_time.status);
+  for (const auto& warning : real_time.warnings) INFO(warning);
+  REQUIRE(real_time.feasible);
+  REQUIRE(real_time.periods.size() == 2);
+  REQUIRE(real_time.real_time_market.pricing.size() == 2);
+  CHECK(real_time.periods[0].demand_deviation_mw ==
+        Catch::Approx(4.0).margin(1e-7));
+  CHECK(real_time.periods[1].demand_deviation_mw ==
+        Catch::Approx(-4.0).margin(1e-7));
+  CHECK(std::abs(real_time.periods[0].customer_deviation_payment) > 1e-6);
+  CHECK(std::abs(real_time.periods[1].customer_deviation_payment) > 1e-6);
+  CHECK(real_time.real_time_market.pricing[0].dc_lmp_per_mwh.size() ==
+        system.dc.buses.size());
+  CHECK(real_time.settlement.cashflow_residual ==
+        Catch::Approx(0.0).margin(1e-6));
+}
+
+TEST_CASE("DC storage co-optimizes charge discharge and cyclic SOC",
+          "[market][hybrid][storage]") {
+  auto system = hacdcpf::io::build_market_5bus_acdc_toy();
+  system.vsc_converters[0].control_mode = hacdcpf::ConverterMode::VDC_Q;
+  system.vsc_converters[1].in_service = false;
+  for (auto& generator : system.ac.generators) {
+    if (generator.bus <= 2) generator.cost_c2 = 0.5;
+  }
+  hacdcpf::DCLoad dc_load;
+  dc_load.index = 201;
+  dc_load.bus = system.dc.buses[1].index;
+  dc_load.p_mw = 20.0;
+  dc_load.profile_id = 91;
+  system.dc.loads = {dc_load};
+
+  hacdcpf::DCStorage storage;
+  storage.index = 301;
+  storage.bus = system.dc.buses[1].index;
+  storage.name = "DC market battery";
+  storage.pmin_mw = -15.0;
+  storage.pmax_mw = 15.0;
+  storage.p_rated_mw = 15.0;
+  storage.e_rated_mwh = 40.0;
+  storage.soc_init = 0.5;
+  storage.soc_min = 0.1;
+  storage.soc_max = 0.9;
+  storage.eta_charge = 1.0;
+  storage.eta_discharge = 1.0;
+  storage.daily_cycle_limit = 1.0;
+  system.dc.dc_storage = {storage};
+
+  hacdcpf::TimeSeriesData time_series;
+  time_series.num_steps = 3;
+  time_series.step_duration_hr = 1.0;
+  time_series.profiles.push_back(
+      hacdcpf::TimeSeriesProfile{91, "dc_peak", {0.5, 1.5, 0.5}});
+  auto options = market_options();
+  options.upward_reserve_fraction = 0.0;
+  options.run_ac_validation = false;
+
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, time_series, options);
+  INFO("storage market status=" << result.status);
+  for (const auto& warning : result.warnings) INFO(warning);
+  REQUIRE(result.feasible);
+  REQUIRE(result.pricing.size() == 3);
+  CHECK(result.model_scope.dc_storage_optimized);
+  CHECK(result.model_scope.dc_storage_intertemporal_modelled);
+  bool charged = false;
+  bool discharged = false;
+  for (const auto& period : result.pricing) {
+    REQUIRE(period.dc_storage_dispatch_mw.size() == 1);
+    REQUIRE(period.dc_storage_soc_mwh.size() == 1);
+    charged = charged || period.dc_storage_dispatch_mw[0] < -1e-6;
+    discharged = discharged || period.dc_storage_dispatch_mw[0] > 1e-6;
+    CHECK(period.dc_storage_soc_mwh[0] >= 4.0 - 1e-7);
+    CHECK(period.dc_storage_soc_mwh[0] <= 36.0 + 1e-7);
+  }
+  CHECK(charged);
+  CHECK(discharged);
+  CHECK(result.pricing.back().dc_storage_soc_mwh[0] ==
+        Catch::Approx(20.0).margin(1e-7));
+  REQUIRE(result.dc_storage_settlement.size() == 1);
+  CHECK(result.dc_storage_settlement[0].charge_mwh > 1e-6);
+  CHECK(result.dc_storage_settlement[0].discharge_mwh > 1e-6);
+  CHECK(result.dc_storage_settlement[0].terminal_soc_mwh ==
+        Catch::Approx(20.0).margin(1e-7));
+  CHECK(result.settlement.cashflow_residual ==
+        Catch::Approx(0.0).margin(1e-6));
+
+  auto realized_series = time_series;
+  realized_series.profiles.front().values = {1.5, 0.5, 0.5};
+  hacdcpf::market::RealTimeMarketOptions real_time_options;
+  real_time_options.market_options = options;
+  const auto real_time = hacdcpf::market::run_real_time_market(
+      system, time_series, realized_series, result, real_time_options);
+  INFO("storage real-time status=" << real_time.status);
+  for (const auto& warning : real_time.warnings) INFO(warning);
+  REQUIRE(real_time.feasible);
+  double expected_storage_deviation_revenue = 0.0;
+  bool storage_dispatch_changed = false;
+  for (size_t t = 0; t < real_time.periods.size(); ++t) {
+    const auto& day_ahead_period = result.pricing[t];
+    const auto& real_time_period = real_time.real_time_market.pricing[t];
+    const double deviation = real_time_period.dc_storage_dispatch_mw[0] -
+        day_ahead_period.dc_storage_dispatch_mw[0];
+    storage_dispatch_changed = storage_dispatch_changed ||
+        std::abs(deviation) > 1e-6;
+    expected_storage_deviation_revenue += deviation *
+        real_time_period.dc_lmp_per_mwh[1] * time_series.step_duration_hr;
+  }
+  CHECK(storage_dispatch_changed);
+  const double reported_storage_deviation_revenue = std::accumulate(
+      real_time.periods.begin(), real_time.periods.end(), 0.0,
+      [](double total, const auto& period) {
+        return total + period.dc_storage_deviation_revenue;
+      });
+  CHECK(reported_storage_deviation_revenue ==
+        Catch::Approx(expected_storage_deviation_revenue).margin(1e-7));
+  const double period_resource_deviation_revenue = std::accumulate(
+      real_time.periods.begin(), real_time.periods.end(), 0.0,
+      [](double total, const auto& period) {
+        return total + period.resource_deviation_revenue;
+      });
+  CHECK(period_resource_deviation_revenue ==
+        Catch::Approx(real_time.settlement.resource_real_time_deviation_revenue)
+            .margin(1e-7));
+  CHECK(real_time.settlement.cashflow_residual ==
+        Catch::Approx(0.0).margin(1e-6));
+}
+
+TEST_CASE("Full-component N-1 enumerates AC DC converter generator and storage",
+          "[market][hybrid][n-1][all-components]") {
+  auto system = hacdcpf::io::build_market_5bus_acdc_toy();
+  system.ac.loads.back().p_mw = 0.0;
+  system.ac.loads.back().q_mvar = 0.0;
+
+  hacdcpf::DCDCConverter dcdc;
+  dcdc.index = 401;
+  dcdc.bus_in = system.dc.buses[0].index;
+  dcdc.bus_out = system.dc.buses[1].index;
+  dcdc.control_mode = hacdcpf::DCDCControlMode::Power;
+  dcdc.p_ref_mw = 0.0;
+  dcdc.pmin_mw = -10.0;
+  dcdc.pmax_mw = 10.0;
+  dcdc.eta = 0.98;
+  system.dc.dcdc_converters = {dcdc};
+
+  hacdcpf::DCStorage storage;
+  storage.index = 402;
+  storage.bus = system.dc.buses[1].index;
+  storage.pmin_mw = -5.0;
+  storage.pmax_mw = 5.0;
+  storage.e_rated_mwh = 10.0;
+  storage.soc_init = 0.5;
+  storage.soc_min = 0.1;
+  storage.soc_max = 0.9;
+  system.dc.dc_storage = {storage};
+
+  hacdcpf::TimeSeriesData time_series;
+  time_series.num_steps = 1;
+  time_series.step_duration_hr = 1.0;
+  auto options = market_options();
+  options.upward_reserve_fraction = 0.0;
+  options.run_ac_validation = false;
+  options.enable_n1_security = true;
+  options.n1_max_contingencies = 0;
+
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, time_series, options);
+  INFO("full N-1 status=" << result.status);
+  for (const auto& warning : result.warnings) INFO(warning);
+  REQUIRE(result.security.full_component_validation_run);
+  CHECK(result.model_scope.hybrid_n1_modelled);
+  CHECK(result.model_scope.full_component_n1_modelled);
+  CHECK(result.model_scope.n1_recourse_policy.find("corrective") !=
+        std::string::npos);
+  const auto has_type = [&](const std::string& type) {
+    return std::any_of(
+        result.security.component_checks.begin(),
+        result.security.component_checks.end(),
+        [&](const auto& check) { return check.component_type == type; });
+  };
+  CHECK(has_type("ac_generator"));
+  CHECK(has_type("ac_branch"));
+  CHECK(has_type("dc_branch"));
+  CHECK(has_type("vsc_converter"));
+  CHECK(has_type("dcdc_converter"));
+  CHECK(has_type("dc_storage"));
+  CHECK(result.security.full_component_candidate_contingencies ==
+        static_cast<int>(result.security.component_checks.size()));
+  CHECK(result.performance.component_n1_parallel_requested);
+  CHECK(result.performance.component_n1_parallel_workers >= 1);
+  CHECK(result.performance.component_n1_parallel_effective ==
+        (result.performance.component_n1_parallel_workers > 1));
+  for (const auto& check : result.security.component_checks) {
+    CHECK(check.component_position >= 0);
+    CHECK(check.component_index >= 0);
+    CHECK_FALSE(check.status.empty());
   }
 }
 

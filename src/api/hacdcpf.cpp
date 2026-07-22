@@ -949,6 +949,33 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
       }
     }
   }
+
+  // A load-flow root and a physically feasible converter operating point are
+  // different contracts. In strict mode, enforce the declared inequality set
+  // as an acceptance guard. Redispatch is deliberately not attempted here:
+  // changing PQ setpoints would turn this determined PF into an optimization.
+  if (result.converged && opt.enforce_converter_physical_limits) {
+    const bool vsc_violation = std::any_of(
+        result.diagnostics.warnings.begin(), result.diagnostics.warnings.end(),
+        [](const std::string& warning) {
+          return warning.rfind("[ACDC-PHYS-", 0) == 0;
+        });
+    const bool dcdc_violation = std::any_of(
+        result.dcdc_transfers.begin(), result.dcdc_transfers.end(),
+        [](const DCDCTransfer& transfer) {
+          return transfer.duty_defined && !transfer.duty_feasible;
+        });
+    if (vsc_violation || dcdc_violation) {
+      result.converged = false;
+      result.diagnostics.converged = false;
+      result.diagnostics.termination_reason =
+          "Converter physical-limit feasibility check failed";
+      result.diagnostics.warnings.push_back(
+          "[CONVERTER-PHYS-HARD] Newton equations converged, but the operating "
+          "point was rejected because a declared converter inequality was violated; "
+          "use OPF or revise converter controls/setpoints to obtain a feasible point.");
+    }
+  }
   restore_original_vsc_bus_ac(result, sys);
   if (data.bus_merge_map) {
     unproject_pf_result(result, *data.bus_merge_map, sys.ac.branches.size());
@@ -979,12 +1006,14 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
     sc.validity.vsc_ac_conduction_loss_modelled = true;  // r_conv_ac_pu coupling (opt-in)
     sc.validity.vsc_vdc_control_modelled = true;          // VDC_Q/VDC_VAC + stiff droop forming
     sc.validity.dcdc_loss_modelled = true;
-    // Not yet enforced inside the Newton solve (post-hoc checks only):
-    sc.validity.vsc_capacity_circle_enforced = false;
-    sc.validity.vsc_current_limits_enforced = false;
-    sc.validity.vsc_modulation_limits_enforced = false;
+    // Strict PF enforcement is an acceptance guard rather than redispatch: a
+    // violating Newton root is rejected. OPF remains the path for finding a new
+    // feasible setpoint under these inequalities.
+    sc.validity.vsc_capacity_circle_enforced = opt.enforce_converter_physical_limits;
+    sc.validity.vsc_current_limits_enforced = opt.enforce_converter_physical_limits;
+    sc.validity.vsc_modulation_limits_enforced = opt.enforce_converter_physical_limits;
     sc.validity.dc_multisource_coordination_modelled = true;  // is_master + participation in solve
-    sc.validity.dcdc_duty_ratio_enforced = false;  // computed post-solve, reported as warning
+    sc.validity.dcdc_duty_ratio_enforced = opt.enforce_converter_physical_limits;
     sc.validity.equation_closure_checked = result.diagnostics.equation_closure_checked;
   }
   return result;

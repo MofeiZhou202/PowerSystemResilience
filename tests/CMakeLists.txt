@@ -117,6 +117,13 @@ hacdcpf_add_test(test_solver_capabilities test_solver_capabilities.cpp)
 # HybridACDCPowerSystemsPlanning.
 hacdcpf_add_test(test_advanced_pf         test_advanced_pf.cpp)
 
+# Dedicated regression coverage for the non-default power-flow algorithms and
+# the unified solver/workspace contracts.
+hacdcpf_add_test(test_helm_solver         test_helm_solver.cpp)
+hacdcpf_add_test(test_homotopy_continuation test_homotopy_continuation.cpp)
+hacdcpf_add_test(test_voltage_stability   test_voltage_stability.cpp)
+hacdcpf_add_test(test_newton_krylov       test_newton_krylov.cpp)
+
 # DC island voltage-reference planning: a PQ VSC converter feeding a
 # reference-less DC island is auto-promoted to regulate Vdc (regulate + warn).
 hacdcpf_add_test(test_dc_island_reference test_dc_island_reference.cpp)

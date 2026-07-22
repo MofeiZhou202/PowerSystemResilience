@@ -347,11 +347,47 @@ TEST_CASE("DC OPF: Native LP objective and LMP use MW scale",
     REQUIRE(r.converged);
     REQUIRE(r.pg_mw.size() >= 1);
     REQUIRE(r.lmp.size() == sys.ac.buses.size());
+    CHECK(r.lmp_valid);
+    CHECK_FALSE(r.branch_mu_valid);
+    CHECK_FALSE(r.branch_mu_validity_reason.empty());
 
     CHECK_THAT(r.pg_mw[0], WithinAbs(10.0, 1e-4));
     CHECK_THAT(r.objective, WithinAbs(250.0, 1e-3));
     CHECK_THAT(r.lmp[0], WithinAbs(25.0, 1e-6));
     CHECK_THAT(r.lmp[1], WithinAbs(25.0, 1e-6));
+}
+
+TEST_CASE("DC OPF: pwl_segments controls the LP quadratic-cost approximation",
+          "[opf][dc][native][pwl]")
+{
+    auto sys = make_light_2bus_ac();
+    auto& gen = sys.ac.generators[0];
+    gen.cost_c0 = 0.0;
+    gen.cost_c1 = 0.0;
+    gen.cost_c2 = 1.0;
+
+    opf::DCOPFOptions coarse_opt;
+    coarse_opt.solver = opf::DCOPFSolverBackend::Native;
+    coarse_opt.include_branch_limits = false;
+    coarse_opt.load_shedding = false;
+    coarse_opt.compute_lmp = false;
+    coarse_opt.pwl_segments = 2;
+    const auto coarse = opf::solve_dc_opf(sys, coarse_opt);
+
+    opf::DCOPFOptions fine_opt = coarse_opt;
+    fine_opt.pwl_segments = 20;
+    const auto fine = opf::solve_dc_opf(sys, fine_opt);
+
+    REQUIRE(coarse.converged);
+    REQUIRE(fine.converged);
+    CHECK(coarse.objective_model == "LP-PWL");
+    CHECK(fine.objective_model == "LP-PWL");
+    CHECK(coarse.pwl_segments_effective == 2);
+    CHECK(fine.pwl_segments_effective == 20);
+    REQUIRE(fine.pg_mw.size() == 1);
+    const double exact = fine.pg_mw[0] * fine.pg_mw[0];
+    CHECK(std::abs(fine.objective - exact) <
+          std::abs(coarse.objective - exact));
 }
 
 TEST_CASE("DC OPF: single generator covers load within limits",
@@ -367,6 +403,24 @@ TEST_CASE("DC OPF: single generator covers load within limits",
     CHECK(r.pg_mw[0] >= g.pmin_mw - 1e-3);
     CHECK(r.pg_mw[0] <= g.pmax_mw + 1e-3);
     CHECK(std::isfinite(r.objective));
+}
+
+TEST_CASE("OPFProblem is wired to the production default solver adapter",
+          "[opf][interface]")
+{
+    auto sys = make_light_2bus_ac();
+    opf::OPFProblem problem;
+    problem.sys = &sys;
+    problem.is_ac = false;
+    problem.is_dc = true;
+    problem.dc_opts.solver = opf::DCOPFSolverBackend::Native;
+    problem.dc_opts.include_branch_limits = false;
+    problem.dc_opts.load_shedding = false;
+
+    const opf::DefaultOPFSolver solver;
+    const auto result = solver.solve(problem);
+    REQUIRE(std::holds_alternative<opf::DCOPFResult>(result));
+    CHECK(std::get<opf::DCOPFResult>(result).converged);
 }
 
 TEST_CASE("DC OPF: case9 economic dispatch is feasible",

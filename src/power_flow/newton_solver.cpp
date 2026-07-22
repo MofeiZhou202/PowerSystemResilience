@@ -869,6 +869,20 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
   using Clock = std::chrono::steady_clock;
   PowerFlowResult out;
 
+  // The public facade keeps one NewtonSolver per thread. Reuse its state
+  // workspace across ordinary solves, but use a local workspace for recursive
+  // homotopy calls so an inner solve cannot overwrite the outer state.
+  powerflow::SolverWorkspace nested_workspace;
+  const bool owns_cached_workspace = !workspace_in_use_;
+  powerflow::SolverWorkspace& workspace =
+      owns_cached_workspace ? workspace_ : nested_workspace;
+  if (owns_cached_workspace) workspace_in_use_ = true;
+  struct WorkspaceGuard {
+    bool& in_use;
+    bool owns;
+    ~WorkspaceGuard() { if (owns) in_use = false; }
+  } workspace_guard{workspace_in_use_, owns_cached_workspace};
+
   std::vector<ACBus> ac_buses = data.ac_buses;
   std::vector<VSCConverter> converters = data.converters;
   const int n = static_cast<int>(ac_buses.size());
@@ -887,9 +901,10 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
     return out;
   }
 
-  Eigen::VectorXd vm = Eigen::VectorXd::Ones(n);
-  Eigen::VectorXd va = Eigen::VectorXd::Zero(n);
-  Eigen::VectorXd vdc = Eigen::VectorXd::Ones(ndc);
+  workspace.prepare_state(n, ndc);
+  Eigen::VectorXd& vm = workspace.vm;
+  Eigen::VectorXd& va = workspace.va;
+  Eigen::VectorXd& vdc = workspace.vdc;
   Eigen::VectorXd pg_state = data.pg;
   Eigen::VectorXd qg_state = data.qg;
 
@@ -992,10 +1007,11 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
   Eigen::VectorXd pdc_linear = Eigen::VectorXd::Zero(ndc);
   Eigen::VectorXd pdc_calc = Eigen::VectorXd::Zero(ndc);
   Eigen::VectorXd pdc_spec = Eigen::VectorXd::Zero(ndc);
-  Eigen::VectorXd mismatch = Eigen::VectorXd::Zero(jac_ctx.nvar);
+  workspace.prepare_equations(jac_ctx.np, jac_ctx.nq, jac_ctx.ndc_eq);
+  Eigen::VectorXd& mismatch = workspace.residual;
   Eigen::VectorXd mismatch_scaled = Eigen::VectorXd::Zero(jac_ctx.nvar);
 
-  Eigen::VectorXd dx = Eigen::VectorXd::Zero(jac_ctx.nvar);
+  Eigen::VectorXd& dx = workspace.dx;
   Eigen::VectorXd dx_scaled = Eigen::VectorXd::Zero(jac_ctx.nvar);
   Eigen::VectorXd vm_best = vm;
   Eigen::VectorXd va_best = va;

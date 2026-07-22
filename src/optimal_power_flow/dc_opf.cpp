@@ -78,12 +78,17 @@ struct DCOPFFormulation {
   int nvar{0};
   int pf_offset{0};  // starting index of Pf variables
   int shed_offset{0}; // starting index of dpd variables
+  int pwl_offset{0};  // starting index of convex-combination lambda variables
+  int pwl_segments_effective{0};
   
   // Index helpers
   int i_theta(int bus) const { return bus; }
   int i_pg(int gen) const { return nb + gen; }
   int i_pf(int br) const { return pf_offset + br; }
   int i_dpd(int bus) const { return shed_offset + bus; }
+  int i_pwl(int gen, int point) const {
+    return pwl_point_offset_by_gen[static_cast<size_t>(gen)] + point;
+  }
   
   // LP model (for linearized costs)
   engine::LPModel lp;
@@ -96,6 +101,11 @@ struct DCOPFFormulation {
   
   // Branch map: branch_var -> original index in sys.ac.branches
   std::vector<int> branch_map;
+
+  // Per active generator: offset/count of PWL lambda points, or -1/0 when the
+  // generator has no convex quadratic term and remains linear in Pg.
+  std::vector<int> pwl_point_offset_by_gen;
+  std::vector<int> pwl_point_count_by_gen;
   
   // Bus map: bus_id -> position
   std::unordered_map<int, int> bus_map;
@@ -144,20 +154,34 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
     }
   }
   
-  // Variable layout: [theta(nb), Pg(ng), Pf(n_active_br), dpd(n_shed)]
+  // Variable layout: [theta(nb), Pg(ng), Pf(n_active_br), dpd(n_shed), lambda]
   const bool include_pf = opt.include_branch_limits;
   const int n_pf_vars = include_pf ? n_active_br : 0;
   form.n_shed = opt.load_shedding ? form.nb : 0;
   form.pf_offset = form.nb + form.ng;
   form.shed_offset = form.nb + form.ng + n_pf_vars;
-  form.nvar = form.nb + form.ng + n_pf_vars + form.n_shed;
+  form.pwl_offset = form.shed_offset + form.n_shed;
+  form.pwl_point_offset_by_gen.assign(static_cast<size_t>(form.ng), -1);
+  form.pwl_point_count_by_gen.assign(static_cast<size_t>(form.ng), 0);
+  const int requested_segments = std::clamp(opt.pwl_segments, 1, 1000);
+  int n_pwl_vars = 0;
+  for (int k = 0; k < form.ng; ++k) {
+    const auto& gen = gens[static_cast<size_t>(form.gen_map[k])];
+    if (gen.cost_c2 <= 1e-12 || !(gen.pmax_mw > gen.pmin_mw)) continue;
+    const int point_count = requested_segments + 1;
+    form.pwl_point_offset_by_gen[static_cast<size_t>(k)] =
+        form.pwl_offset + n_pwl_vars;
+    form.pwl_point_count_by_gen[static_cast<size_t>(k)] = point_count;
+    n_pwl_vars += point_count;
+    form.pwl_segments_effective = requested_segments;
+  }
+  form.nvar = form.pwl_offset + n_pwl_vars;
   
   // --------------------------------------------------------------------------
-  // Objective: min Σ c_i * Pg_i
-  // For quadratic costs (c2*Pg^2 + c1*Pg + c0), we linearize using the 
-  // marginal cost at the midpoint of the operating range:
-  //   c_linear = c1 + 2*c2 * (Pmin + Pmax)/2 = c1 + c2*(Pmin + Pmax)
-  // This provides a reasonable approximation for economic dispatch.
+  // Objective: min Σ c_i(Pg_i). Convex quadratic generator costs use a
+  // lambda-form piecewise-linear interpolation with `pwl_segments` intervals;
+  // linear costs stay directly on Pg. The QP builder below replaces this
+  // objective with the exact quadratic while retaining equivalent Pg bounds.
   // --------------------------------------------------------------------------
   form.lp.sense = engine::Sense::Minimize;
   form.lp.c = Eigen::VectorXd::Zero(form.nvar);
@@ -165,15 +189,8 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
   for (int k = 0; k < form.ng; ++k) {
     const int gi = form.gen_map[k];
     const auto& gen = gens[gi];
-    // Linearize quadratic cost: use c1 + 2*c2*Pmax as a conservative upper
-    // bound on the marginal cost, giving a valid LP that does not under-dispatch
-    // cheap units (BUG-4 fix: was always using the midpoint (Pmin+Pmax)/2 which
-    // produces wrong marginal costs whenever the actual dispatch != midpoint).
-    // For a pure quadratic cost c2*Pg^2 + c1*Pg the true marginal at any Pg is
-    // c1 + 2*c2*Pg.  Using Pmax as the linearization point is conservative but
-    // correct: it never underestimates the cost, so the LP still minimises total
-    // cost subject to the correct ordering of generators.
-    double c_linear = gen.cost_c1 + 2.0 * gen.cost_c2 * gen.pmax_mw;
+    if (form.pwl_point_count_by_gen[static_cast<size_t>(k)] > 0) continue;
+    double c_linear = gen.cost_c1;
     // If c_linear is still zero (no cost data), use a small positive value
     // to ensure the problem has a meaningful objective
     if (std::abs(c_linear) < 1e-9) {
@@ -209,6 +226,24 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
     pmin = std::max(pmin, -kHugeBound);
     pmax = std::min(pmax, kHugeBound);
     form.lp.vars[form.i_pg(k)] = {engine::VarType::Continuous, pmin, pmax, ""};
+  }
+
+  // PWL lambda bounds and objective samples. Convexity plus minimization makes
+  // the lower hull select adjacent breakpoints without binary/SOS2 variables.
+  for (int k = 0; k < form.ng; ++k) {
+    const int point_count =
+        form.pwl_point_count_by_gen[static_cast<size_t>(k)];
+    if (point_count == 0) continue;
+    const auto& gen = gens[static_cast<size_t>(form.gen_map[k])];
+    for (int p = 0; p < point_count; ++p) {
+      const double alpha = static_cast<double>(p) /
+                           static_cast<double>(point_count - 1);
+      const double pg_mw = gen.pmin_mw + alpha * (gen.pmax_mw - gen.pmin_mw);
+      const int col = form.i_pwl(k, p);
+      form.lp.vars[col] = {engine::VarType::Continuous, 0.0, 1.0, ""};
+      form.lp.c[col] = gen.cost_c2 * pg_mw * pg_mw +
+                       gen.cost_c1 * pg_mw + gen.cost_c0;
+    }
   }
   
   // Pf bounds: |Pf| ≤ rate_a (in p.u.)
@@ -298,7 +333,11 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
   //   Constraint 1 (balance): Σ Pg - Pd = Σ Pf (at each bus)
   //   Constraint 2 (flow def): Pf_ij = (θ_i - θ_j) / x_ij
   // --------------------------------------------------------------------------
-  const int n_eq = form.nb + (include_pf ? n_active_br : 0);
+  int n_pwl_generators = 0;
+  for (int count : form.pwl_point_count_by_gen)
+    if (count > 0) ++n_pwl_generators;
+  const int n_eq = form.nb + (include_pf ? n_active_br : 0) +
+                   2 * n_pwl_generators;
   
   std::vector<Triplet> eq_trips;
   eq_trips.reserve(static_cast<size_t>(n_eq) * 4);
@@ -426,6 +465,28 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
           eq_trips.emplace_back(eq_row, form.i_theta(j), bij);
         }
       }
+    }
+  }
+
+  // Convex-combination cost interpolation:
+  //   sum_p lambda_gp = 1
+  //   Pg_g = sum_p breakpoint_gp * lambda_gp
+  for (int k = 0; k < form.ng; ++k) {
+    const int point_count =
+        form.pwl_point_count_by_gen[static_cast<size_t>(k)];
+    if (point_count == 0) continue;
+    const auto& gen = gens[static_cast<size_t>(form.gen_map[k])];
+    const int convexity_row = row++;
+    const int interpolation_row = row++;
+    beq[convexity_row] = 1.0;
+    eq_trips.emplace_back(interpolation_row, form.i_pg(k), 1.0);
+    for (int p = 0; p < point_count; ++p) {
+      const double alpha = static_cast<double>(p) /
+                           static_cast<double>(point_count - 1);
+      const double pg_pu =
+          (gen.pmin_mw + alpha * (gen.pmax_mw - gen.pmin_mw)) / base_mva;
+      eq_trips.emplace_back(convexity_row, form.i_pwl(k, p), 1.0);
+      eq_trips.emplace_back(interpolation_row, form.i_pwl(k, p), -pg_pu);
     }
   }
   
@@ -616,6 +677,15 @@ DCOPFResult extract_dc_opf_result(const DCOPFFormulation& form,
 
   // DC-OPF is a linearised AC+DC LP with no converter physics modelled.
   result.converter_model_scope.model_scope = "dc-opf:linear-no-converter-model";
+  result.branch_mu_valid = false;
+  result.branch_mu_validity_reason =
+      "Branch-flow box duals are not KKT-certified by the current native supporting-LP extraction.";
+  result.model_limitations.push_back(
+      "DC OPF uses a lossless linearized AC network and does not model AC voltage magnitude, reactive power, or converter physics.");
+  if (!sys.ac.storage.empty() || !sys.dc.storage.empty()) {
+    result.model_limitations.push_back(
+        "Storage dispatch is a fixed single-period injection; intertemporal SOC dynamics are outside snapshot DC OPF.");
+  }
 
   result.runtime_sec = runtime_sec;
   result.converged = sol.stats.success;
@@ -687,6 +757,13 @@ DCOPFResult extract_dc_opf_result(const DCOPFFormulation& form,
         result.lmp[i] = sol.constraint_duals[dual_idx] / base_mva;
       }
     }
+    result.lmp_valid = true;
+    result.lmp_validity_reason =
+        "Nodal prices were recovered from the supporting LP balance-row duals.";
+  } else {
+    result.lmp_valid = false;
+    result.lmp_validity_reason =
+        "The selected backend did not provide a complete balance-row dual certificate.";
   }
 
   if (sol.box_dual_lb.size() >= form.nvar &&
@@ -1110,6 +1187,12 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
   std::vector<std::string> chain_snapshot = std::move(solver_chain);
   result = extract_dc_opf_result(form, sol, *sys_ptr, runtime_sec);
   result.solver_chain = std::move(chain_snapshot);
+  if (!opt.compute_lmp) {
+    result.lmp.clear();
+    result.lmp_valid = false;
+    result.lmp_validity_reason =
+        "Nodal-price extraction was disabled by DCOPFOptions::compute_lmp.";
+  }
 
   // For QP solvers, recompute the true quadratic objective including constant
   // terms. `objective_model` records which cost model the reported objective
@@ -1117,8 +1200,10 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
   if (use_qp && result.converged && sol.x.size() >= form.nvar) {
     result.objective = compute_qp_objective(form, sol.x, *sys_ptr);
     result.objective_model = "QP";
+    result.pwl_segments_effective = 0;
   } else {
-    result.objective_model = "LP";
+    result.objective_model = form.pwl_segments_effective > 0 ? "LP-PWL" : "LP";
+    result.pwl_segments_effective = form.pwl_segments_effective;
   }
   
   if (opt.verbose) {

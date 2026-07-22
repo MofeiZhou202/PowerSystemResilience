@@ -60,6 +60,7 @@ struct ACDCOPFDCDCData {
   std::string out_bus_id;
   DCDCControlMode control_mode{DCDCControlMode::Voltage};
   double eta{0.98};
+  double r_eq_pu{0.0};
   double p_ref_pu{0.0};
   double v_ref_pu{1.0};
   double k_droop{0.0};
@@ -79,6 +80,10 @@ struct ACDCOPFData {
 
 /// Hybrid AC/DC OPF result (AML model builder output).
 struct ACDCOPFBuilderResult {
+  std::string model_scope{"experimental-aml-hybrid-acdc-opf"};
+  std::vector<std::string> model_limitations{
+      "Experimental AML path; production hybrid OPF uses the parity formulation.",
+      "DC/DC conversion uses a smooth forward-transfer efficiency/I2R model; bidirectional sign switching is not represented."};
   AMLBuildResult ac_result;
   std::map<std::string, double> vdc_pu;
   std::map<std::string, double> pac_mw;

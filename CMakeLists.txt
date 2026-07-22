@@ -405,6 +405,7 @@ set(HACDCPF_SOURCES
   src/power_flow/residual_evaluator.cpp
   src/power_flow/robust_nonlinear_options.cpp
   src/power_flow/solver_data.cpp
+  src/power_flow/solver_interface.cpp
   src/power_flow/voltage_stability.cpp
   src/power_flow/workspace.cpp
   src/power_flow/newton_solver.cpp

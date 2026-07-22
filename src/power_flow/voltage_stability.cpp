@@ -7,9 +7,13 @@
 #include <string>
 #include <vector>
 
+#include <Eigen/Dense>
+
 #include "hacdcpf/power_flow/power_flow_options.hpp"
 #include "hacdcpf/power_flow/power_flow_result.hpp"
 #include "hacdcpf/power_flow/newton_solver.hpp"
+#include "hacdcpf/power_flow/pf_utils.hpp"
+#include "hacdcpf/power_flow/residual_evaluator.hpp"
 #include "hacdcpf/assembly/solver_data.hpp"
 
 namespace hacdcpf::powerflow {
@@ -27,8 +31,12 @@ CpfDirection CpfDirection::proportional(const SolverData& data) {
 
   // Load direction: proportional to base-case demand at each bus.
   for (int i = 0; i < N; ++i) {
-    dir.dp_load[static_cast<size_t>(i)] = data.ac_buses[static_cast<size_t>(i)].pd_mw;
-    dir.dq_load[static_cast<size_t>(i)] = data.ac_buses[static_cast<size_t>(i)].qd_mvar;
+    dir.dp_load[static_cast<size_t>(i)] = data.has_component_loads
+        ? data.pd_pu[i] * data.base_mva
+        : data.ac_buses[static_cast<size_t>(i)].pd_mw;
+    dir.dq_load[static_cast<size_t>(i)] = data.has_component_loads
+        ? data.qd_pu[i] * data.base_mva
+        : data.ac_buses[static_cast<size_t>(i)].qd_mvar;
   }
 
   // Generation direction: all non-slack generators scale proportionally to
@@ -40,8 +48,7 @@ CpfDirection CpfDirection::proportional(const SolverData& data) {
     total_nonslack_gen += g.pg_mw;
   }
   const double total_load = std::accumulate(
-      data.ac_buses.begin(), data.ac_buses.end(), 0.0,
-      [](double s, const ACBus& b) { return s + b.pd_mw; });
+      dir.dp_load.begin(), dir.dp_load.end(), 0.0);
 
   for (const auto& g : data.generators) {
     if (!g.in_service || g.is_slack) continue;
@@ -84,6 +91,10 @@ static SolverData apply_direction(const SolverData& base,
     const size_t si = static_cast<size_t>(i);
     d.ac_buses[si].pd_mw   += lambda * dir.dp_load[si];
     d.ac_buses[si].qd_mvar += lambda * dir.dq_load[si];
+    if (d.has_component_loads) {
+      d.pd_pu[i] += lambda * dir.dp_load[si] / d.base_mva;
+      d.qd_pu[i] += lambda * dir.dq_load[si] / d.base_mva;
+    }
   }
   for (auto& g : d.generators) {
     if (!g.in_service || g.is_slack) continue;
@@ -125,10 +136,148 @@ static std::pair<double, double> total_load(const SolverData& base,
   const int N = static_cast<int>(base.ac_buses.size());
   for (int i = 0; i < N; ++i) {
     const size_t si = static_cast<size_t>(i);
-    p += base.ac_buses[si].pd_mw   + lambda * dir.dp_load[si];
-    q += base.ac_buses[si].qd_mvar + lambda * dir.dq_load[si];
+    const double p0 = base.has_component_loads
+        ? base.pd_pu[i] * base.base_mva
+        : base.ac_buses[si].pd_mw;
+    const double q0 = base.has_component_loads
+        ? base.qd_pu[i] * base.base_mva
+        : base.ac_buses[si].qd_mvar;
+    p += p0 + lambda * dir.dp_load[si];
+    q += q0 + lambda * dir.dq_load[si];
   }
   return {p, q};
+}
+
+struct CpfStateLayout {
+  std::vector<int> non_slack;
+  std::vector<int> pq;
+  std::vector<int> dc_non_slack;
+
+  [[nodiscard]] int size() const noexcept {
+    return static_cast<int>(non_slack.size() + pq.size() + dc_non_slack.size());
+  }
+};
+
+static CpfStateLayout make_state_layout(const SolverData& data) {
+  CpfStateLayout layout;
+  const AcBusSets ac = classify_ac_buses(data);
+  layout.non_slack = ac.non_slack;
+  layout.pq = ac.pq;
+  const int dc_slack = first_dc_slack_or_default(data);
+  for (int i = 0; i < static_cast<int>(data.dc_buses.size()); ++i) {
+    if (i != dc_slack &&
+        data.dc_buses[static_cast<size_t>(i)].bus_type != DCBusType::DC_ISOLATED) {
+      layout.dc_non_slack.push_back(i);
+    }
+  }
+  return layout;
+}
+
+static Eigen::VectorXd pack_augmented_state(const CpfStateLayout& layout,
+                                            const std::vector<double>& vm,
+                                            const std::vector<double>& va,
+                                            const std::vector<double>& vdc,
+                                            double lambda) {
+  Eigen::VectorXd y(layout.size() + 1);
+  int k = 0;
+  for (int bus : layout.non_slack) y[k++] = va[static_cast<size_t>(bus)];
+  for (int bus : layout.pq) y[k++] = vm[static_cast<size_t>(bus)];
+  for (int bus : layout.dc_non_slack) y[k++] = vdc[static_cast<size_t>(bus)];
+  y[k] = lambda;
+  return y;
+}
+
+static void unpack_augmented_state(const SolverData& base,
+                                   const CpfStateLayout& layout,
+                                   const Eigen::VectorXd& y,
+                                   Eigen::VectorXd& vm,
+                                   Eigen::VectorXd& va,
+                                   Eigen::VectorXd& vdc) {
+  const int n = static_cast<int>(base.ac_buses.size());
+  const int ndc = static_cast<int>(base.dc_buses.size());
+  vm.resize(n);
+  va.resize(n);
+  vdc.resize(ndc);
+  for (int i = 0; i < n; ++i) {
+    vm[i] = base.ac_buses[static_cast<size_t>(i)].vm_pu;
+    va[i] = base.ac_buses[static_cast<size_t>(i)].va_deg *
+            3.14159265358979323846 / 180.0;
+  }
+  for (int i = 0; i < ndc; ++i) {
+    vdc[i] = base.dc_buses[static_cast<size_t>(i)].vm_pu;
+  }
+  int k = 0;
+  for (int bus : layout.non_slack) va[bus] = y[k++];
+  for (int bus : layout.pq) vm[bus] = std::max(0.02, y[k++]);
+  for (int bus : layout.dc_non_slack) vdc[bus] = std::max(0.02, y[k++]);
+}
+
+static Eigen::VectorXd evaluate_cpf_residual(const SolverData& base,
+                                             const CpfDirection& dir,
+                                             const CpfStateLayout& layout,
+                                             const Eigen::VectorXd& y) {
+  Eigen::VectorXd vm, va, vdc;
+  unpack_augmented_state(base, layout, y, vm, va, vdc);
+  const SolverData parameterized = apply_direction(base, y[layout.size()], dir);
+  return evaluate_power_flow_residual(parameterized, vm, va, vdc).full;
+}
+
+static bool arc_length_correct(const SolverData& base,
+                               const CpfDirection& dir,
+                               const CpfStateLayout& layout,
+                               const Eigen::VectorXd& tangent,
+                               const Eigen::VectorXd& predicted,
+                               const CpfOptions& opts,
+                               Eigen::VectorXd& corrected) {
+  const int nstate = layout.size();
+  corrected = predicted;
+  for (int iter = 0; iter < opts.corrector_max_iter; ++iter) {
+    const Eigen::VectorXd f = evaluate_cpf_residual(base, dir, layout, corrected);
+    if (f.size() != nstate || !f.allFinite()) return false;
+
+    Eigen::VectorXd augmented(nstate + 1);
+    augmented.head(nstate) = f;
+    augmented[nstate] = tangent.dot(corrected - predicted);
+    if (augmented.cwiseAbs().maxCoeff() < opts.corrector_tol) return true;
+
+    Eigen::MatrixXd jacobian(nstate + 1, nstate + 1);
+    for (int col = 0; col <= nstate; ++col) {
+      Eigen::VectorXd perturbed = corrected;
+      const double h = 1e-6 * std::max(1.0, std::abs(corrected[col]));
+      perturbed[col] += h;
+      const Eigen::VectorXd f_perturbed =
+          evaluate_cpf_residual(base, dir, layout, perturbed);
+      if (f_perturbed.size() != nstate || !f_perturbed.allFinite()) return false;
+      jacobian.block(0, col, nstate, 1) = (f_perturbed - f) / h;
+    }
+    jacobian.row(nstate) = tangent.transpose();
+
+    Eigen::FullPivLU<Eigen::MatrixXd> lu(jacobian);
+    if (!lu.isInvertible()) return false;
+    const Eigen::VectorXd delta = lu.solve(-augmented);
+    if (!delta.allFinite()) return false;
+
+    // Backtrack on the augmented residual to keep difficult nose corrections
+    // inside the local convergence basin.
+    const double base_norm = augmented.cwiseAbs().maxCoeff();
+    bool accepted = false;
+    for (int ls = 0; ls < 10; ++ls) {
+      const double alpha = std::ldexp(1.0, -ls);
+      Eigen::VectorXd trial = corrected + alpha * delta;
+      Eigen::VectorXd f_trial = evaluate_cpf_residual(base, dir, layout, trial);
+      if (f_trial.size() != nstate || !f_trial.allFinite()) continue;
+      Eigen::VectorXd aug_trial(nstate + 1);
+      aug_trial.head(nstate) = f_trial;
+      aug_trial[nstate] = tangent.dot(trial - predicted);
+      if (aug_trial.cwiseAbs().maxCoeff() < base_norm) {
+        corrected = std::move(trial);
+        accepted = true;
+        break;
+      }
+    }
+    if (!accepted) return false;
+  }
+  return false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,6 +341,7 @@ CpfResult CpfSolver::solve(const SolverData& base_data,
     if (opts.trace_all_buses) {
       pt.vm = pf.vm;
       pt.va = pf.va;
+      pt.vdc = pf.vdc;
     }
     result.trace.push_back(std::move(pt));
   };
@@ -206,117 +356,133 @@ CpfResult CpfSolver::solve(const SolverData& base_data,
   }
   record(0.0, pf_base);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // State for the secant predictor: keep the two most recent accepted points.
-  // ─────────────────────────────────────────────────────────────────────────
-  struct SolPoint {
-    double lambda{0.0};
-    std::vector<double> vm;
-    std::vector<double> va;
-    std::vector<double> vdc;
-  };
+  // Obtain a second point with the ordinary Newton solver. It establishes the
+  // first secant tangent; all following arc-length corrections solve lambda as
+  // part of the augmented system.
+  double step = std::min(opts.step_init, opts.lambda_max);
+  double lambda_first = 0.0;
+  PowerFlowResult pf_first;
+  while (step >= opts.step_min) {
+    lambda_first = step;
+    SolverData first_data = apply_direction(base_data, lambda_first, dir);
+    const InitialState init = make_init(pf_base, NDC);
+    pf_first = run_nr(first_data, &init);
+    if (pf_first.converged) break;
+    step *= opts.step_shrink;
+  }
+  if (!pf_first.converged) {
+    result.nose_found = true;
+    result.termination_reason = "no continuation step converged from base case";
+  } else {
+    record(lambda_first, pf_first);
+  }
 
-  SolPoint prev{ 0.0, pf_base.vm, pf_base.va, pf_base.vdc };
-  SolPoint curr = prev;
+  const CpfStateLayout layout = make_state_layout(base_data);
+  if (pf_first.converged && layout.size() > 0) {
+    Eigen::VectorXd y_prev = pack_augmented_state(
+        layout, pf_base.vm, pf_base.va, pf_base.vdc, 0.0);
+    Eigen::VectorXd y_curr = pack_augmented_state(
+        layout, pf_first.vm, pf_first.va, pf_first.vdc, lambda_first);
 
-  double lambda  = 0.0;
-  double step    = opts.step_init;
-  bool   first_step = true;  // use constant predictor for the first step
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Main predictor–corrector loop.
-  // ─────────────────────────────────────────────────────────────────────────
-  for (int iter = 0; iter < opts.max_steps; ++iter) {
-
-    if (lambda + step * 0.5 > opts.lambda_max) {
-      // Clamp so that we land exactly on lambda_max, then stop.
-      step = opts.lambda_max - lambda;
-      if (step < opts.step_min) {
-        result.termination_reason = "lambda_max reached";
-        break;
-      }
-    }
-
-    const double lam_pred = lambda + step;
-
-    // ── Predictor ──────────────────────────────────────────────────────────
-    InitialState init_pred;
-    if (!first_step && opts.use_secant_predictor) {
-      const double dlam = curr.lambda - prev.lambda;
-      if (dlam > 1e-14) {
-        const double scale = step / dlam;
-        init_pred.vm.resize(static_cast<size_t>(N));
-        init_pred.va.resize(static_cast<size_t>(N));
-        for (int i = 0; i < N; ++i) {
-          const size_t si = static_cast<size_t>(i);
-          init_pred.vm[si] = curr.vm[si] + scale * (curr.vm[si] - prev.vm[si]);
-          init_pred.va[si] = curr.va[si] + scale * (curr.va[si] - prev.va[si]);
-          // Clamp to physically reasonable range.
-          init_pred.vm[si] = std::max(0.05, std::min(1.5, init_pred.vm[si]));
+    auto record_state = [&](const Eigen::VectorXd& y) {
+      Eigen::VectorXd vm, va, vdc;
+      unpack_augmented_state(base_data, layout, y, vm, va, vdc);
+      CpfPoint pt;
+      pt.lambda = y[layout.size()];
+      pt.vm_monitor = vm[monitor_bus];
+      auto [p, q] = total_load(base_data, pt.lambda, dir);
+      pt.p_total_mw = p;
+      pt.q_total_mvar = q;
+      if (opts.trace_all_buses) {
+        pt.vm.assign(vm.data(), vm.data() + vm.size());
+        pt.va.assign(va.data(), va.data() + va.size());
+        if (vdc.size() > 0) {
+          pt.vdc.assign(vdc.data(), vdc.data() + vdc.size());
         }
-        // DC buses: secant on DC voltages if available.
-        if (!curr.vdc.empty()) {
-          init_pred.vdc.resize(curr.vdc.size());
-          for (size_t k = 0; k < curr.vdc.size(); ++k) {
-            const double dv = curr.vdc[k] - prev.vdc[k];
-            init_pred.vdc[k] = std::max(0.1, curr.vdc[k] + scale * dv);
+      }
+      result.trace.push_back(std::move(pt));
+    };
+
+    if (!opts.enable_arc_length) {
+      // Explicit legacy mode: retain natural parameterization for callers that
+      // require strictly increasing lambda samples.
+      double lambda = lambda_first;
+      PowerFlowResult current = pf_first;
+      for (int iter = 1; iter < opts.max_steps && lambda < opts.lambda_max; ++iter) {
+        const double trial_lambda = std::min(opts.lambda_max, lambda + step);
+        const InitialState init = make_init(current, NDC);
+        PowerFlowResult trial = run_nr(apply_direction(base_data, trial_lambda, dir), &init);
+        if (!trial.converged) {
+          step *= opts.step_shrink;
+          if (step < opts.step_min) {
+            result.nose_found = true;
+            result.termination_reason = "natural parameterization stalled";
+            break;
           }
-        } else if (NDC > 0) {
-          init_pred.vdc.assign(NDC, 1.0);
+          continue;
         }
-      } else {
-        init_pred = make_init(pf_base, NDC);
-        // Overwrite with current vm/va.
-        init_pred.vm  = curr.vm;
-        init_pred.va  = curr.va;
-        init_pred.vdc = curr.vdc;
-        if (init_pred.vdc.empty() && NDC > 0)
-          init_pred.vdc.assign(NDC, 1.0);
+        record(trial_lambda, trial);
+        current = std::move(trial);
+        lambda = trial_lambda;
+        step = std::min(step * opts.step_grow, opts.step_max);
       }
-    } else {
-      // Constant predictor: warm-start from current solution.
-      init_pred.vm  = curr.vm;
-      init_pred.va  = curr.va;
-      init_pred.vdc = curr.vdc;
-      if (init_pred.vdc.empty() && NDC > 0)
-        init_pred.vdc.assign(NDC, 1.0);
-    }
-
-    // ── Corrector ─────────────────────────────────────────────────────────
-    SolverData d_corr = apply_direction(base_data, lam_pred, dir);
-    PowerFlowResult pf_corr = run_nr(d_corr, &init_pred);
-
-    if (pf_corr.converged) {
-      // Check voltage floor.
-      bool vm_ok = true;
-      for (double v : pf_corr.vm) {
-        if (v < opts.vm_min_pu) { vm_ok = false; break; }
-      }
-      if (!vm_ok) {
-        result.nose_found         = true;
-        result.termination_reason = "voltage below vm_min_pu";
-        break;
-      }
-
-      record(lam_pred, pf_corr);
-
-      prev  = curr;
-      curr  = { lam_pred, pf_corr.vm, pf_corr.va, pf_corr.vdc };
-      lambda = lam_pred;
-      step   = std::min(step * opts.step_grow, opts.step_max);
-      first_step = false;
-
-      if (lambda >= opts.lambda_max) {
+      if (result.termination_reason.empty() && lambda >= opts.lambda_max)
         result.termination_reason = "lambda_max reached";
-        break;
-      }
     } else {
-      // Corrector failed: shrink the step.
-      step *= opts.step_shrink;
-      if (step < opts.step_min) {
-        result.nose_found         = true;
-        result.termination_reason = "nose point found (step below step_min)";
-        break;
+      step = std::clamp((y_curr - y_prev).norm(), opts.step_min, opts.step_max);
+      Eigen::VectorXd previous_tangent = (y_curr - y_prev).normalized();
+      bool lower_branch = false;
+      int lower_branch_points = 0;
+
+      for (int iter = 1; iter < opts.max_steps; ++iter) {
+        Eigen::VectorXd tangent = opts.use_secant_predictor
+            ? (y_curr - y_prev).normalized()
+            : previous_tangent;
+        if (tangent.dot(previous_tangent) < 0.0) tangent = -tangent;
+        previous_tangent = tangent;
+
+        const Eigen::VectorXd predicted = y_curr + step * tangent;
+        if (!lower_branch && predicted[layout.size()] > opts.lambda_max) {
+          result.termination_reason = "lambda_max reached";
+          break;
+        }
+
+        Eigen::VectorXd corrected;
+        ++result.total_pf_solves;
+        if (!arc_length_correct(base_data, dir, layout, tangent, predicted,
+                                opts, corrected)) {
+          step *= opts.step_shrink;
+          if (step < opts.step_min) {
+            result.termination_reason = "arc-length corrector step below step_min";
+            break;
+          }
+          continue;
+        }
+
+        Eigen::VectorXd vm, va, vdc;
+        unpack_augmented_state(base_data, layout, corrected, vm, va, vdc);
+        if (vm.minCoeff() < opts.vm_min_pu) {
+          result.termination_reason = "voltage below vm_min_pu";
+          break;
+        }
+
+        record_state(corrected);
+        if (!lower_branch && corrected[layout.size()] < y_curr[layout.size()]) {
+          lower_branch = true;
+          result.nose_found = true;
+          lower_branch_points = 1;
+        } else if (lower_branch) {
+          ++lower_branch_points;
+        }
+
+        y_prev = std::move(y_curr);
+        y_curr = std::move(corrected);
+        step = std::min(step * opts.step_grow, opts.step_max);
+
+        if (lower_branch && lower_branch_points >= std::max(1, opts.lower_branch_steps)) {
+          result.termination_reason = "nose point passed by arc-length continuation";
+          break;
+        }
       }
     }
   }
@@ -326,10 +492,12 @@ CpfResult CpfSolver::solve(const SolverData& base_data,
 
   // ── Fill summary fields ───────────────────────────────────────────────────
   if (!result.trace.empty()) {
-    const CpfPoint& last = result.trace.back();
-    result.lambda_max   = last.lambda;
-    result.p_max_mw     = last.p_total_mw;
-    result.vm_at_nose   = last.vm_monitor;
+    const auto nose = std::max_element(
+        result.trace.begin(), result.trace.end(),
+        [](const CpfPoint& a, const CpfPoint& b) { return a.lambda < b.lambda; });
+    result.lambda_max   = nose->lambda;
+    result.p_max_mw     = nose->p_total_mw;
+    result.vm_at_nose   = nose->vm_monitor;
   }
 
   return result;

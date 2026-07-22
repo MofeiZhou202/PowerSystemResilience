@@ -253,6 +253,9 @@ struct RPOResult {
   std::string algorithm{"discrete_coordinate_search_with_ac_opf"};
   bool globally_certified{false};
   bool optimality_gap_available{false};
+  bool terminated_by_time_limit{false};
+  bool terminated_by_evaluation_limit{false};
+  std::vector<std::string> model_limitations;
   RPOInnerObjective effective_inner_nlp_objective{
       RPOInnerObjective::MatchRPO};
 

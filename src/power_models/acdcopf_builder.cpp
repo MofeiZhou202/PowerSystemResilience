@@ -161,9 +161,9 @@ ACDCOPFData to_acdcopf_data(const HybridPowerSystem& sys) {
   // Each in-service DC/DC couples two DC buses. In the OPF it draws Pout/eta from
   // its input bus and injects Pout into its output bus; the control mode fixes
   // Pout (Power), the output-bus voltage (Voltage), or a Vdc droop (Droop). The
-  // I²R (r_eq) term is intentionally dropped here — a second-order effect that
-  // would couple the loss to Vdc and stiffen the OPF; eta captures the first-order
-  // conversion loss (consistent with the power flow's dominant loss term).
+  // The AML formulation includes both first-order efficiency and the equivalent
+  // series-resistance I²R term so its DC balance audit matches the production
+  // parity formulation for forward transfer.
   for (const auto& dc : sys.dc.dcdc_converters) {
     if (!dc.in_service) continue;
     auto fi = dc_idx_to_id.find(dc.bus_in);
@@ -176,6 +176,7 @@ ACDCOPFData to_acdcopf_data(const HybridPowerSystem& sys) {
     dd.out_bus_id = ti->second;
     dd.control_mode = dc.control_mode;
     dd.eta = std::clamp(dc.eta, 0.01, 1.0);
+    dd.r_eq_pu = std::max(0.0, dc.r_eq_pu);
     dd.p_ref_pu = dc.p_ref_mw / Sb;
     dd.v_ref_pu = (dc.v_ref_pu > 0.0) ? dc.v_ref_pu : 1.0;
     dd.k_droop = dc.k_droop;
@@ -580,8 +581,15 @@ ACDCOPFBuilderResult solve_acdcopf(const ACDCOPFData& data,
     NonlinearExpr nl_Pout = m.nl_var(Pdcdc(dk));
 
     Pdc_acc[out_idx] = m.nl_add(Pdc_acc[out_idx], nl_Pout);
-    Pdc_acc[in_idx] =
-        m.nl_sub(Pdc_acc[in_idx], m.nl_mul(m.nl_const(1.0 / dd.eta), nl_Pout));
+    NonlinearExpr nl_Pin =
+        m.nl_mul(m.nl_const(1.0 / dd.eta), nl_Pout);
+    if (dd.r_eq_pu > 0.0) {
+      const NonlinearExpr nl_I2r = m.nl_div(
+          m.nl_mul(m.nl_const(dd.r_eq_pu), m.nl_sq(nl_Pin)),
+          m.nl_sq(nl_Vdc[in_idx]));
+      nl_Pin = m.nl_add(nl_Pin, nl_I2r);
+    }
+    Pdc_acc[in_idx] = m.nl_sub(Pdc_acc[in_idx], nl_Pin);
 
     if (dd.control_mode == DCDCControlMode::Power) {
       m.add_nl_constraint("dcdc_p_" + dd.id, nl_Pout, CompareOp::Equal, dd.p_ref_pu);
@@ -732,6 +740,21 @@ ACDCOPFBuilderResult solve_acdcopf(const ACDCOPFData& data,
     for (const auto& cd : data.converters) {
       if (cd.dc_bus_id == bd.id) {
         pbal += res.pdc_mw.at(cd.id) / Sb;
+      }
+    }
+    // DC/DC injections must be included in the reported residual using the
+    // same efficiency and I²R convention as the AML constraints above.
+    for (const auto& dd : data.dcdc_converters) {
+      const double pout = res.pdcdc_mw.at(dd.id) / Sb;
+      const double pin_eta = pout / dd.eta;
+      if (dd.out_bus_id == bd.id) pbal += pout;
+      if (dd.in_bus_id == bd.id) {
+        double pin = pin_eta;
+        if (dd.r_eq_pu > 0.0) {
+          const double vin = std::max(res.vdc_pu.at(dd.in_bus_id), 0.1);
+          pin += dd.r_eq_pu * pin_eta * pin_eta / (vin * vin);
+        }
+        pbal -= pin;
       }
     }
     res.max_dc_p_viol_pu = std::max(res.max_dc_p_viol_pu, std::abs(pbal));
