@@ -92,6 +92,9 @@ struct UCSchedule {
   bool root_basis_reused{false};
   bool pseudocosts_reused{false};
   bool search_tree_rebuilt{false};
+  bool in_solve_network_constraint_generation_used{false};
+  int in_solve_network_constraint_callback_calls{0};
+  int in_solve_network_constraints_submitted{0};
   bool network_constraint_generation_run{false};
   bool network_constraint_generation_converged{false};
   int network_constraint_generation_iterations{0};

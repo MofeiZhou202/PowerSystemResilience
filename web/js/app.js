@@ -58,6 +58,7 @@ const App = (() => {
   // Cache for re-rendering on unit change without re-running solver
   let _lastPfData = null;
   let _lastOpfData = null;
+  let _opfParameterContract = null;
   let _lastRpoData = null;
   let _lastRpoInputInventory = null;
   let _rpoSelectedTapIndices = null;
@@ -4360,6 +4361,78 @@ const App = (() => {
   }
 
   // ========== Optimal Power Flow ==========
+  const OPF_PARAMETER_INPUTS = {
+    solver: ['opfSolver'], network_model: ['opfNetworkModel'],
+    branch_limits: ['opfBranchLimits'], converter_capacity: ['opfConvCapacity'],
+    converter_current: ['opfConvCurrent'], converter_modulation: ['opfConvModulation'],
+    check_consistency: ['opfCheckConsistency'], max_inner_iterations: ['opfMaxIterations'],
+    max_iterations: ['opfMaxIterations', 'opfThreePhaseMaxIter'],
+    max_outer_iterations: ['opfMaxOuterIterations'],
+    max_line_search_steps: ['opfMaxLineSearch'], feasibility_tol: ['opfFeasibilityTol'],
+    stationarity_tol: ['opfStationarityTol'], barrier_mu0: ['opfBarrierMu0'],
+    barrier_mu_reduction: ['opfBarrierReduction'], regularization: ['opfRegularization'],
+    ac_eval_threads: ['opfAcEvalThreads'], allow_fallback: ['opfAllowFallback'],
+    ac_pf_warm_start: ['opfAcPfWarmStart'], objective_homotopy: ['opfObjectiveHomotopy'],
+    homotopy_dt0: ['opfHomotopyDt0'], pwl_segments: ['opfPwlSegments'],
+    branch_limit_margin: ['opfBranchLimitMargin'], load_shedding: ['opfLoadShedding'],
+    voll: ['opfVoll'], compute_lmp: ['opfComputeLmp'], variant: ['opfThreePhaseVariant'],
+    vuf_max: ['opfThreePhaseVufMax'], constraint_oracle: ['opfThreePhaseOracle'],
+    include_shunts: ['opfThreePhaseShunts'], compare_opendss: ['opfThreePhaseOpenDss'],
+    verbose: ['opfVerbose'],
+  };
+
+  function opfParameterMode() {
+    if (document.getElementById('opfSolver')?.value === 'dc') return 'dc';
+    if (document.getElementById('opfNetworkModel')?.value === 'three_phase_hybrid') return 'phase';
+    return 'ac';
+  }
+
+  function formatOpfParameterValue(value) {
+    if (value === undefined || value === null || value === '') return '—';
+    if (typeof value === 'boolean') return value ? '开' : '关';
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  }
+
+  function renderOpfParameterGuide() {
+    const div = document.getElementById('opfParameterGuideTable');
+    if (!div) return;
+    const rows = Array.isArray(_opfParameterContract?.parameters)
+      ? _opfParameterContract.parameters : [];
+    const query = String(document.getElementById('opfParameterSearch')?.value || '')
+      .trim().toLowerCase();
+    const mode = opfParameterMode();
+    const visible = rows.filter(row => !query || [row.key, row.label, row.unit, row.description]
+      .some(value => String(value || '').toLowerCase().includes(query)));
+    if (!visible.length) {
+      div.innerHTML = '<p class="empty-hint">没有匹配的 OPF 参数。</p>';
+      return;
+    }
+    div.innerHTML = `<table><thead><tr><th>参数</th><th>键</th><th>默认值</th><th>单位</th><th>用途与影响</th><th>适用路径</th></tr></thead><tbody>${visible.map(row => {
+      const applies = Array.isArray(row.applies_to) ? row.applies_to : [];
+      const active = applies.includes('all') || applies.includes(mode);
+      return `<tr${active ? '' : ' class="is-muted"'}><td>${escapeHtml(row.label || row.key)}</td><td><code>${escapeHtml(row.key)}</code></td><td>${escapeHtml(formatOpfParameterValue(row.default))}</td><td>${escapeHtml(row.unit || '—')}</td><td>${escapeHtml(row.description || '')}</td><td>${escapeHtml(applies.join(' / '))}${active ? '' : '（当前不适用）'}</td></tr>`;
+    }).join('')}</tbody></table>`;
+  }
+
+  async function loadOpfParameterContract() {
+    if (_opfParameterContract) return _opfParameterContract;
+    const data = await apiGet('/api/opf/parameter_contract', { quiet: true });
+    if (!data || !Array.isArray(data.parameters)) return null;
+    _opfParameterContract = data;
+    data.parameters.forEach(row => {
+      (OPF_PARAMETER_INPUTS[row.key] || []).forEach(id => {
+        const control = document.getElementById(id);
+        const target = control?.closest('label') || control;
+        if (target && !target.title) {
+          target.title = `${row.description}${row.unit ? ` 单位：${row.unit}` : ''}`;
+        }
+      });
+    });
+    renderOpfParameterGuide();
+    return data;
+  }
+
   // Reads the OPF sub-toolbar (solver + 4 constraint families) and posts to the
   // unified /api/session/opf endpoint, which routes to the parity-IPM hybrid
   // AC/DC formulation (default), the AC OPF, or the DC OPF. The constraint
@@ -4384,6 +4457,7 @@ const App = (() => {
     }
     return withAnalysisQueue(async () => {
       setStatus('最优潮流计算中...', 'busy');
+      await loadOpfParameterContract();
       const solver = document.getElementById('opfSolver')?.value || 'parity';
       const robustStrategy = solver === 'robust';
       const checkConsistency = !!(document.getElementById('opfCheckConsistency')?.checked);
@@ -4411,6 +4485,13 @@ const App = (() => {
         homotopy_dt0: pfNumber('opfHomotopyDt0', 0.10),
         verbose: pfBool('opfVerbose', false),
       };
+      if (solver === 'dc') {
+        options.pwl_segments = pfInteger('opfPwlSegments', 4);
+        options.branch_limit_margin = pfNumber('opfBranchLimitMargin', 1.0);
+        options.load_shedding = pfBool('opfLoadShedding', true);
+        options.voll = pfNumber('opfVoll', 0.0);
+        options.compute_lmp = pfBool('opfComputeLmp', true);
+      }
       const threePhase = {
         algorithm: document.getElementById('opfThreePhaseAlgorithm')?.value || 'compact',
         max_iter: pfInteger('opfThreePhaseMaxIter', 100),
@@ -4455,6 +4536,9 @@ const App = (() => {
       if (data) {
         data._constraints = constraints;
         data._options = options;
+        data._solver = solver;
+        data._threePhase = threePhase;
+        data._checkConsistency = checkConsistency;
         data._networkModel = networkModel;
         const backendTag = data.solver_backend ? ` · ${data.solver_backend}` : '';
         if (data.converged) {
@@ -4656,7 +4740,69 @@ const App = (() => {
           <tr><td>换流器调制限值 (m_min/m_max)</td><td>${yn(scope.modulation)}</td></tr>
           <tr><td>DC/DC占空比限值 (d_min/d_max)</td><td>${yn(scope.dcdc_duty)}</td></tr>
           <tr><td>直流电压控制</td><td>${escapeHtml(scope.vdc_control || '-')}</td></tr>
+          <tr><td>节点电价乘子</td><td>${data.lmp_valid ? '<span style="color:#15803d">已认证</span>' : '<span style="color:#d19a66">不可用/未认证</span>'} ${escapeHtml(data.lmp_validity_reason || '')}</td></tr>
+          ${data.solver === 'dc' || data._solver === 'dc' ? `<tr><td>支路拥塞 μ</td><td>${data.branch_mu_valid ? '<span style="color:#15803d">已认证</span>' : '<span style="color:#d19a66">未认证</span>'} ${escapeHtml(data.branch_mu_validity_reason || '')}</td></tr>` : ''}
         </tbody></table>`;
+      const limitations = Array.isArray(data.model_limitations) ? data.model_limitations : [];
+      if (limitations.length) {
+        scopeDiv.innerHTML += `<table style="margin-top:8px"><thead><tr><th>模型边界</th></tr></thead><tbody>${limitations.map(text => `<tr><td>${escapeHtml(text)}</td></tr>`).join('')}</tbody></table>`;
+      }
+      const debugValues = data.debug_environment?.values || {};
+      const debugRows = Object.entries(debugValues);
+      if (debugRows.length) {
+        scopeDiv.innerHTML += `<table style="margin-top:8px"><thead><tr><th>调试环境变量</th><th>当前值</th><th>接口等级</th></tr></thead><tbody>${debugRows.map(([key, value]) => `<tr><td><code>${escapeHtml(key)}</code></td><td>${escapeHtml(String(value))}</td><td>仅调试，不是稳定接口</td></tr>`).join('')}</tbody></table>`;
+      }
+    }
+
+    const parameterDiv = document.getElementById('opfParameterResults');
+    if (parameterDiv) {
+      const contractRows = Array.isArray(_opfParameterContract?.parameters)
+        ? _opfParameterContract.parameters : [];
+      const requestedOptions = data.options_requested || data._options || {};
+      const effective = data.options_effective || {};
+      const requestedConstraints = data._constraints || data.constraints || {};
+      const requestedPhase = data._threePhase || {};
+      const mode = (data.solver === 'dc' || data._solver === 'dc') ? 'dc'
+        : ((data.network_model || data._networkModel) === 'three_phase_hybrid' ? 'phase' : 'ac');
+      const requestedValue = key => {
+        if (key === 'solver') return data.strategy_requested || data._solver;
+        if (key === 'network_model') return data.network_model || data._networkModel;
+        if (key === 'check_consistency') return data._checkConsistency;
+        if (Object.prototype.hasOwnProperty.call(requestedConstraints, key)) return requestedConstraints[key];
+        if (Object.prototype.hasOwnProperty.call(requestedOptions, key)) return requestedOptions[key];
+        if (Object.prototype.hasOwnProperty.call(requestedPhase, key)) return requestedPhase[key];
+        return undefined;
+      };
+      const effectiveValue = key => {
+        if (key === 'solver') return data.strategy_effective || data.solver_backend || data.solver;
+        if (key === 'network_model') return data.network_model || data._networkModel;
+        if (key === 'check_consistency') return !!data.consistency?.ran;
+        const scopeMap = {
+          branch_limits: scope.branch_limits,
+          converter_capacity: scope.capacity,
+          converter_current: scope.current,
+          converter_modulation: scope.modulation,
+        };
+        if (scopeMap[key] !== undefined) return scopeMap[key];
+        if (key === 'pwl_segments' && data.pwl_segments_effective != null)
+          return data.pwl_segments_effective;
+        if (Object.prototype.hasOwnProperty.call(effective, key)) return effective[key];
+        return undefined;
+      };
+      const rows = contractRows.filter(row => {
+        const applies = Array.isArray(row.applies_to) ? row.applies_to : [];
+        return applies.includes('all') || applies.includes(mode);
+      }).map(row => {
+        const requested = requestedValue(row.key);
+        const actual = effectiveValue(row.key);
+        if (requested === undefined && actual === undefined) return '';
+        const same = JSON.stringify(requested) === JSON.stringify(actual);
+        const verdict = actual === undefined ? '未回显' : (same ? '按请求生效' : '后端调整/路径决定');
+        return `<tr><td>${escapeHtml(row.label || row.key)}</td><td><code>${escapeHtml(row.key)}</code></td><td>${escapeHtml(formatOpfParameterValue(requested))}</td><td>${escapeHtml(formatOpfParameterValue(actual))}</td><td>${escapeHtml(row.unit || '—')}</td><td>${verdict}</td><td>${escapeHtml(row.description || '')}</td></tr>`;
+      }).filter(Boolean);
+      parameterDiv.innerHTML = rows.length
+        ? `<table><thead><tr><th>参数</th><th>键</th><th>请求值</th><th>实际值</th><th>单位</th><th>判定</th><th>用途</th></tr></thead><tbody>${rows.join('')}</tbody></table>`
+        : '<p class="empty-hint">后端未返回可核对的参数值。</p>';
     }
 
     let opfSystem = { ac: {}, dc: {} };
@@ -5114,12 +5260,14 @@ const App = (() => {
       <div class="result-item"><span class="result-label">算法</span><span class="result-value">${escapeHtml(data.algorithm || '')}</span></div>
       <div class="result-item"><span class="result-label">目标值</span><span class="result-value">${fmt(data.objective)}</span></div>
       <div class="result-item"><span class="result-label">NLP求解</span><span class="result-value">${Number(data.nlp_solves || 0)}</span></div>
+      <div class="result-item"><span class="result-label">搜索终止</span><span class="result-value">${data.terminated_by_time_limit ? '达到时限' : (data.terminated_by_evaluation_limit ? '达到评估上限' : '局部邻域完成')}</span></div>
       <div class="result-item"><span class="result-label">运行时间</span><span class="result-value">${fmt(data.runtime_sec, 3)} s</span></div>
       <div class="result-item"><span class="result-label">最大电压偏差</span><span class="result-value">${fmt(data.max_vdev_before)} → ${fmt(data.max_vdev_after)} pu</span></div>
       <div class="result-item"><span class="result-label">损耗代理值</span><span class="result-value">${fmt(data.total_loss_before)} → ${fmt(data.total_loss_after)} MW</span></div>
       <div class="result-item"><span class="result-label">全过程验证</span><span class="result-value ${cv.overall_pass ? 'converged' : 'failed'}">${cv.overall_pass ? (cv.hybrid_dispatch_replay_partial ? '通过（部分覆盖）' : '通过') : '未完整通过'}</span></div>
       <div class="result-item"><span class="result-label">状态说明</span><span class="result-value">${escapeHtml(data.status || '')}</span></div>
-      <div class="result-item" style="flex-basis:100%"><span class="result-label">模型口径</span><span class="result-value">${escapeHtml(data.model_statement || '')}</span></div>`;
+      <div class="result-item" style="flex-basis:100%"><span class="result-label">模型口径</span><span class="result-value">${escapeHtml(data.model_statement || '')}</span></div>
+      ${(Array.isArray(data.model_limitations) ? data.model_limitations : []).map(text => `<div class="result-item" style="flex-basis:100%"><span class="result-label">能力边界</span><span class="result-value">${escapeHtml(text)}</span></div>`).join('')}`;
 
     const tapsChanged = (data.tap_pos_before || []).filter((value, i) => value !== data.tap_pos_after?.[i]).length;
     const shuntsChanged = (data.shunt_before || []).filter((value, i) => value !== data.shunt_after?.[i]).length;
@@ -11643,7 +11791,14 @@ const App = (() => {
     }
     const phaseOpf = phaseChoices.some(choice => choice.value === opfNetwork?.value);
     const monolithicPhaseOpf = opfNetwork?.value === 'three_phase_hybrid';
+    const dcOpf = opfSolver === 'dc';
     document.getElementById('opfThreePhaseOptions')?.toggleAttribute('hidden', !phaseOpf);
+    document.getElementById('opfDcOptions')?.toggleAttribute('hidden', !dcOpf);
+    document.getElementById('opfBarrierOptions')?.toggleAttribute('hidden', dcOpf || monolithicPhaseOpf);
+    ['opfMaxOuterIterations', 'opfMaxLineSearch', 'opfStationarityTol'].forEach(id => {
+      document.getElementById(id)?.closest('label')
+        ?.toggleAttribute('hidden', dcOpf || monolithicPhaseOpf);
+    });
     document.getElementById('opfThreePhaseAlgorithmControl')?.toggleAttribute('hidden', monolithicPhaseOpf);
     document.getElementById('opfThreePhaseVariantControl')?.toggleAttribute('hidden', !monolithicPhaseOpf);
     document.getElementById('opfThreePhaseVufControl')?.toggleAttribute('hidden', !monolithicPhaseOpf);
@@ -11652,6 +11807,7 @@ const App = (() => {
       const control = document.getElementById(id);
       if (control) control.disabled = monolithicPhaseOpf;
     });
+    renderOpfParameterGuide();
   }
 
   function updatePfMethodAvailability(sys) {
@@ -13226,6 +13382,8 @@ const App = (() => {
         marketChecked('marketScucNetworkGeneration', true),
       enable_scuc_cross_round_solver_state_reuse:
         marketChecked('marketScucCrossRoundStateReuse', true),
+      enable_scuc_in_solve_network_constraint_generation:
+        marketChecked('marketScucInSolveNetworkGeneration', true),
       scuc_network_constraint_generation_min_candidates:
         Math.round(marketNumber(
           'marketScucNetworkGenerationMinCandidates', 10000, 0, 100000000)),
@@ -13421,6 +13579,8 @@ const App = (() => {
       ['热限生成轮数', Number(performance.scuc_network_constraint_generation_iterations || 0), ''],
       ['跨轮状态复用轮数', Number(performance.scuc_cross_round_solver_state_reuse_rounds || 0), ''],
       ['复用根割', Number(performance.scuc_root_cuts_reused_count || 0), ''],
+      ['树内热限回调', Number(performance.scuc_in_solve_network_constraint_callback_calls || 0), ''],
+      ['树内提交热限', Number(performance.scuc_in_solve_network_constraints_submitted || 0), ''],
       ['热限候选', Number(performance.scuc_network_constraint_candidates || 0), ''],
       ['热限已激活', Number(performance.scuc_network_constraints_activated || 0), ''],
       ['热限剩余超限', Number(performance.scuc_network_constraint_remaining_violations || 0), ''],
@@ -13437,7 +13597,7 @@ const App = (() => {
       : (performance.pricing_large_model_direct_highs_used ? ' (large-model direct)' : '');
     const solverText = `${performance.scuc_solver_name || '—'} / ${performance.pricing_solver_name || '—'}${pricingRoute}`;
     document.getElementById('marketPerformanceResults').innerHTML =
-      `<div class="sub-hint">求解器 SCUC / SCED：${escapeHtml(solverText)}；SCUC结构提示 ${performance.scuc_structure_hint_provided ? '已注入' : '无'}，可行MIP start ${performance.scuc_mip_start_provided ? '已注入' : '未生成'}，结构化分支 ${performance.scuc_structured_branching_used ? '已启用' : '未启用'}，跨轮状态 ${performance.scuc_cross_round_solver_state_reuse_used ? `已复用 ${Number(performance.scuc_cross_round_solver_state_reuse_rounds || 0)} 轮` : '未复用'}，搜索树 ${performance.scuc_search_tree_rebuilt ? '已重建' : '未重建'}，gap ${marketFmt(100 * Number(performance.scuc_mip_gap || 0), 3)}%；热限生成 ${performance.scuc_network_constraint_generation_run ? (performance.scuc_network_constraint_generation_converged ? '已收敛' : '未完成') : '未触发'}；全元件事故求解 ${Number(performance.component_contingency_solves || 0)} 次；事故并行 ${performance.component_n1_parallel_effective ? `${Number(performance.component_n1_parallel_workers || 1)} workers` : '未生效'}</div>` +
+      `<div class="sub-hint">求解器 SCUC / SCED：${escapeHtml(solverText)}；SCUC结构提示 ${performance.scuc_structure_hint_provided ? '已注入' : '无'}，可行MIP start ${performance.scuc_mip_start_provided ? '已注入' : '未生成'}，结构化分支 ${performance.scuc_structured_branching_used ? '已启用' : '未启用'}，树内热限 ${performance.scuc_in_solve_network_constraint_generation_used ? `已启用，提交 ${Number(performance.scuc_in_solve_network_constraints_submitted || 0)}` : '未启用'}，跨轮状态 ${performance.scuc_cross_round_solver_state_reuse_used ? `已复用 ${Number(performance.scuc_cross_round_solver_state_reuse_rounds || 0)} 轮` : '未复用'}，搜索树 ${performance.scuc_search_tree_rebuilt ? '已重建' : '未重建'}，gap ${marketFmt(100 * Number(performance.scuc_mip_gap || 0), 3)}%；热限生成 ${performance.scuc_network_constraint_generation_run ? (performance.scuc_network_constraint_generation_converged ? '已收敛' : '未完成') : '未触发'}；全元件事故求解 ${Number(performance.component_contingency_solves || 0)} 次；事故并行 ${performance.component_n1_parallel_effective ? `${Number(performance.component_n1_parallel_workers || 1)} workers` : '未生效'}</div>` +
       `<table><thead><tr><th>指标/阶段</th><th>数值</th><th>单位</th></tr></thead><tbody>${performanceRows.map(([label, value, unit]) => `<tr><td>${label}</td><td>${marketFmt(value, unit ? 3 : 0)}</td><td>${unit}</td></tr>`).join('')}</tbody></table>`;
 
     const participants = Array.isArray(data.participant_settlement)
@@ -16207,6 +16367,22 @@ const App = (() => {
       btn.classList.toggle('active', nextOpen);
       btn.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
     });
+    document.getElementById('btnOpfParameterGuide')?.addEventListener('click', async () => {
+      const advanced = document.getElementById('opfAdvancedPanel');
+      const guide = document.getElementById('opfParameterGuide');
+      const btn = document.getElementById('btnOpfParameterGuide');
+      if (!advanced || !guide || !btn) return;
+      advanced.removeAttribute('hidden');
+      const advancedBtn = document.getElementById('btnOpfAdvanced');
+      advancedBtn?.classList.add('active');
+      advancedBtn?.setAttribute('aria-expanded', 'true');
+      const nextOpen = guide.hasAttribute('hidden');
+      guide.toggleAttribute('hidden', !nextOpen);
+      btn.classList.toggle('active', nextOpen);
+      btn.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+      if (nextOpen) await loadOpfParameterContract();
+    });
+    document.getElementById('opfParameterSearch')?.addEventListener('input', renderOpfParameterGuide);
     document.getElementById('btnCarbonFlow')?.addEventListener('click', runCarbonFlow);
     document.getElementById('carbonSankeyMetric')?.addEventListener('change', () => {
       if (_lastCarbonData) renderCarbonSankey(_lastCarbonData);

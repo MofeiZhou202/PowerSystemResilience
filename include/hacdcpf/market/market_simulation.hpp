@@ -175,6 +175,9 @@ struct MarketPerformanceProfile {
   bool scuc_root_basis_reused{false};
   bool scuc_pseudocosts_reused{false};
   bool scuc_search_tree_rebuilt{false};
+  bool scuc_in_solve_network_constraint_generation_used{false};
+  int scuc_in_solve_network_constraint_callback_calls{0};
+  int scuc_in_solve_network_constraints_submitted{0};
   bool scuc_network_constraint_generation_run{false};
   bool scuc_network_constraint_generation_converged{false};
   int scuc_network_constraint_generation_iterations{0};
@@ -428,6 +431,7 @@ struct MarketOptions {
   double scuc_time_limit_sec{120.0};
   int scuc_max_nodes{50000};
   bool enable_scuc_cross_round_solver_state_reuse{true};
+  bool enable_scuc_in_solve_network_constraint_generation{true};
   bool enable_scuc_network_constraint_generation{true};
   int scuc_network_constraint_generation_min_candidates{10000};
   int scuc_network_constraint_generation_max_iterations{8};

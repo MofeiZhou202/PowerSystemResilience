@@ -260,8 +260,10 @@ $$
 
 将 $v_{\ell t}^k>\epsilon$ 的候选按超限量降序恢复为真实双边界；每轮最多加入
 `scuc_network_constraint_generation_max_new_per_iteration` 个，值为 0 时加入本轮全部违反项。
-上一轮整数解会固定后解一个当前约束集的 LP，只有修复成功才作为下一轮 MIP start。默认
-$\epsilon=10^{-5}$ MW、最多 8 轮，且 `scuc_time_limit_sec` 是热启动和全部外层轮次共享的总预算。
+初始 MIP start 也会在第一次 MILP 前执行同一全候选分离；命中的真实变量界先恢复，再固定其
+整数部分解一次当前约束集 LP，修复成功后才送入求解器。后续外层轮次采用相同的固定整数 LP
+修复。默认 $\epsilon=10^{-5}$ MW、最多 8 轮，且 `scuc_time_limit_sec` 是热启动、预分离和
+全部外层轮次共享的总预算。
 
 该过程不是忽略网络的启发式。若终止时对所有未激活候选都有
 $v_{\ell t}^k\le\epsilon$，当前解满足完整热限模型；受限主问题的下界不高于完整模型下界，
@@ -269,7 +271,28 @@ $v_{\ell t}^k\le\epsilon$，当前解满足完整热限模型；受限主问题�
 `network_constraint_generation_converged=false` 且 SCUC 必须返回不可行，不能进入 SCED/LMP。
 当前仅 AC 热限采用该外层生成；DC 支路限额仍在每轮完整保留。
 
-#### 4.3.2 跨轮根状态复用
+#### 4.3.2 搜索树内热限分离与精确回退
+
+`enable_scuc_in_solve_network_constraint_generation=true` 且使用结构化 StrictHiGHS 时，热限
+分离器通过动态节点割回调运行。回调取得节点 LP 在原模型列空间恢复的 $f_{\ell t}$，对全部
+尚未提交的候选计算 $v_{\ell t}$。对支路 $\ell=(i,j)$，提交与潮流方程等价的相角差双边
+全局割：
+
+$$
+-F_\ell^A+b_\ell\phi_\ell
+\le b_\ell(\theta_{it}-\theta_{jt})
+\le F_\ell^A+b_\ell\phi_\ell,
+\qquad
+b_\ell=\frac{S_{base}}{x_\ell\tau_\ell}.
+$$
+
+这些割在节点 LP 求解之后、接受 incumbent/剪枝/分支之前提交；能够通过 presolve 精确投影并
+被接受的割可留在当前树中。`in_solve_network_constraints_submitted` 只统计提交数，不冒充求解器
+接受数。最终解仍由外层全候选扫描复核。若原列无法从 presolve 空间可靠恢复、动态割被拒绝
+或最终仍有超限，代码恢复对应真实变量界并进入跨轮精确回退，而不是接受未认证解。非
+StrictHiGHS 后端继续使用外层生成。
+
+#### 4.3.3 跨轮根状态复用
 
 `enable_scuc_cross_round_solver_state_reuse=true` 时，结构化 StrictHiGHS 在第 $k$ 轮结束后
 导出三类原模型空间 artifact，并在第 $k+1$ 轮注入：根节点有效割、与这些割配套的 simplex
@@ -1129,17 +1152,19 @@ SCED、LODF、切平面、全元件 N-1、非线性认证、结算和总耗时�
 | ACTIVSg500，同上，24 时段、1% gap | 超过 120 s | 总计 2.13 s；SCUC 1.74 s；实际 gap 0.760% | 结构化分支与显式 gap 契约 |
 | ACTIVSg2000，432 台投运机组，3206 支路，1 时段，1 报价段，无 N-1 | 总计 28.52 s；SCED 24.70 s | 总计 4.05 s；SCED 0.092 s | 大 LP 直达 HiGHS |
 | ACTIVSg2000，同上，10 个 N-1 候选、0 轮 AC 割 | 总计 26.29 s；SCUC 25.90 s | 总计 7.97 s；SCUC 7.59 s | 发电机能力矩阵 $O(TG^2)\to O(TG)$ |
-| ACTIVSg2000，24 时段，1 报价段，启用热限，无 N-1，1% gap / 120 s | 全量热限超过 135 s | 约束生成 2 轮，激活 34 / 76944；120.92 s 未完成，诚实返回不可行 | 活跃集很稀疏，但外层重启未复用搜索树 |
+| ACTIVSg2000，24 时段，1 报价段，启用热限，无 N-1，1% gap / 120 s | 全量热限超过 135 s；旧生成路径 2 轮、120.92 s 未完成 | MIP start 预分离激活 34 / 76944；1 轮、剩余超限 0、无树重建；120.83 s 仍未达到 MIP gap | 网络约束已闭合，瓶颈转为单次 284520 变量 / 10560 二进制 SCUC |
 | ACTIVSg500，1 时段，10 个纠正式事故 | 事故 SCED 串行 0.961 s | 4-worker 0.367 s | 有界并行，约 2.6 倍阶段加速 |
 
 在 ACTIVSg2000 的 10 列 LODF 运行中，旧稠密基线估算约 197.49 MB，当前稀疏工作估算约
 0.704 MB，LODF 构建约 0.003 s。若设置全覆盖，列存储会重新增长到 $O(L^2)$，不能用该
 10 列结果推断全覆盖内存与时延。
 
-ACTIVSg2000 的热限基线说明约束数量已不再是唯一瓶颈：只需激活 34 个候选，但第二轮重新
-启动 StrictHiGHS 后仍耗尽总预算。当前轮次已接通根割、root basis 和伪成本复用，但开放
-节点树仍必须重建，因此不能把“34 个活跃热限”直接解释为已解决省级 24 h 在线出清。若复测
-仍不能达到预算，下一性能任务应针对持久化主问题或原生 lazy-constraint 回调。
+ACTIVSg2000 复测进一步排除了网络生成重启：MIP start 在第一次 MILP 前命中并恢复 34 个
+热限，最后一份 incumbent 的 76944 个候选全扫描无超限，`search_tree_rebuilt=false`；但
+StrictHiGHS 仍在单次主问题上耗尽 120 s，未给出满足 1% 目标的 gap。该运行没有第二轮，故
+root cuts、root basis 和伪成本没有可复用机会；这不等于复用接口失效，而是说明此算例的当前
+主瓶颈已经是单次大规模 SCUC 的根松弛、启发式和树搜索。下一性能任务应优先做滚动时域/时段
+分解、根松弛计时剖析和可认证 incumbent/dual-bound 改进，而不是继续优化外层热限扫描。
 
 ## 13. 代码与测试对应关系
 

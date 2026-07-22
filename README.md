@@ -45,7 +45,7 @@ ctest --preset windows-vcpkg-release
 | 能力域 | 当前状态 | 说明 |
 |---|---|---|
 | 混合 AC/DC 潮流与聚合建模 | 已实现并持续回归 | 覆盖 canonical projection、AC/DC 潮流、换流器协调与图分析链路；求解器族含 Newton、FDPF（稀疏 Ybus 注入）、DC、自适应孤岛、分布式松弛、HELM、同伦延拓与 Newton-Krylov，并有 LM 信赖域/非单调线搜索/非线性缩放全局化层。`PowerFlowSolverFactory` 六类入口已接线，Newton 跨调用复用 `SolverWorkspace` 与 Jacobian pattern。 |
-| OPF 与约束优化 | 已实现并持续回归 | AC OPF / DC OPF / RPO（含 OLTC 离散档位控制）已集成，支持 Native AC、Parity IPM、嵌入式 Ipopt 等多后端路径。 |
+| OPF 与约束优化 | 已实现并持续回归 | AC OPF / DC OPF / RPO（含 OLTC 离散档位控制）已集成，支持 Native AC、Parity IPM、嵌入式 Ipopt 等多后端路径；GUI 回显参数用途、请求值/生效值、对偶有效性和模型边界。 |
 | 三相混合 PF / OPF | 活跃研发中，GUI 已接入 | `powerflow::solve_three_phase_hybrid_pf` 与 `opf::phase_hybrid` 已接入 `/xjtu/` 潮流/OPF 工具栏；OPF 提供 Full 与 GraphReduced（稀疏 Kron 降阶）、Ipopt/NativeIPM 双后端。GUI rich-model 适配范围见下文。 |
 | 电压稳定 | 已实现 | 连续潮流（CPF）采用增广 `[state, lambda]` 弧长预测-校正，可越过 P-V 鼻点并保留下支采样；输出 P-V 曲线与 VSI 指标。 |
 | 图建模、网络降阶、重构 | 已实现并持续回归 | 支持连通性、开关收缩、Kron/series/pendant/sparse-Kron reduction、ONR。 |
@@ -89,7 +89,8 @@ ctest --preset windows-vcpkg-release
 - 对可选 IO（ETAP/OpenDSS）和外部比较（GridLAB-D/OpenDSS/PSD.jl）应明确“需启用对应编译开关和运行时依赖”。
 - 对暂态/谐波/跨引擎一致性类结论，建议标注“持续增强中”，避免描述为已完全定型。
 - 电力市场已覆盖 DC 母线/支路/固定资源、VSC、DC/DC 双向传输、DC 储能跨期优化和 AC/DC LMP；N-1 覆盖发电机、AC/DC 支路、VSC、DC/DC 与两类 DC 储能，但只有 AC 支路 LODF 割进入定价 LP，其余采用固定组合纠正式 SCED 校核。DC 支路商业网损、换流器报价、母线/负荷/开关与保护故障仍未建模，外部电网和能量路由器仍显式拒绝。
-- 省级市场规模尚无无条件在线时延承诺：SCUC 已注入机组时序/容量/备用/报价结构、经固定整数 LP 验证的 MIP start 和分支优先级；大型模型自适应使用 StrictHiGHS，并对 AC 基态热限执行全候选复核的精确约束生成，未完成时拒绝进入定价。约束生成后续轮次复用原空间根割、配套 root basis 和伪成本；新增热限后开放搜索树仍须重建并重新认证。默认显式 1% MIP gap 与 120 s 总时限，并返回实际 gap、状态复用、树重建、热限候选/激活/剩余超限和证明口径。大型定价 LP 按变量阈值直达 HiGHS；LODF 使用稀疏因子复用与候选列按需计算，全元件事故 SCED 使用默认 4-worker 有界并行。异步取消、滚动时域、跨运行 artifact 缓存、持久搜索树和注册规模基准仍是生产化缺口；大系统应限制 `n1_max_contingencies` 并分层运行。
+- 省级市场规模尚无无条件在线时延承诺：SCUC 已注入机组时序/容量/备用/报价结构、经固定整数 LP 验证的 MIP start 和分支优先级；大型模型自适应使用 StrictHiGHS，并在当前分支树内尝试提交 AC 基态热限全局割，最终执行全候选复核，未完成时拒绝定价。不能通过 presolve 精确投影的热限进入外层轮次，并复用原空间根割、配套 root basis 和伪成本；新增热限后的旧开放节点树不直接沿用。默认显式 1% MIP gap 与 120 s 总时限，并返回实际 gap、树内提交、状态复用、树重建、候选/激活/剩余超限和证明口径。大型定价 LP 按变量阈值直达 HiGHS；LODF 使用稀疏因子复用与候选列按需计算，全元件事故 SCED 使用默认 4-worker 有界并行。异步取消、滚动时域、跨运行 artifact 缓存、可认证树 checkpoint 和注册规模基准仍是生产化缺口；大系统应限制 `n1_max_contingencies` 并分层运行。
+- OPF 结果按实际路径声明有效边界：DC OPF 的凸二次成本在 LP 回退时使用 `pwl_segments` 分段，QP 路径回显有效分段为 0；节点 LMP 与支路拥塞 `mu` 分开认证，当前支路 `mu` 始终未认证。AC OPF 是非凸局部 KKT 求解，Ipopt 适配器不返回乘子因而无 LMP；RPO 是受时限/评估预算约束的离散邻域搜索，不提供全局 MINLP 证书。快照 OPF 不含跨时段 SOC，能量路由器端口守恒不含内部损耗。AML builders 标记为实验链路，其中 AML SCUC 无网络约束且 MILP 价格未认证。`HACDCPF_OPF_*` 环境变量仅为调试通道，不是稳定 API。
 - 三相混合 OPF 与 SPPT 层属活跃研发/论文验证性质，接口与产物格式仍可能调整。
 - 当文档、报告、UI 文案与实现不一致时，以本仓库 `src/`、`include/`、`tests/` 与 CMake 配置为最终依据。
 

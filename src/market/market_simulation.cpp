@@ -7,6 +7,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <set>
 #include <stdexcept>
@@ -1834,6 +1835,11 @@ struct SCUCNetworkLimitCandidate {
   int flow_variable{-1};
   double lower{-kLargeBound};
   double upper{kLargeBound};
+  int from_angle_variable{-1};
+  int to_angle_variable{-1};
+  double angle_coefficient{0.0};
+  double angle_lower{-kLargeBound};
+  double angle_upper{kLargeBound};
   bool activated{false};
 };
 
@@ -1859,7 +1865,21 @@ UCSchedule solve_market_commitment(
   std::vector<SCUCNetworkLimitCandidate> network_candidates;
   if (options.enable_network_constraints) {
     network_candidates.reserve(static_cast<size_t>(build.L * build.T));
+    const auto bus_positions = make_bus_position_map(system);
+    const double base_mva =
+        std::max({system.base_mva, system.ac.base_mva, 1.0});
     for (int l = 0; l < build.L; ++l) {
+      const auto& branch = system.ac.branches[static_cast<size_t>(
+          build.branch_positions[static_cast<size_t>(l)])];
+      double x = branch.x_pu;
+      if (std::abs(x) < 1e-12) {
+        x = (x < 0.0 ? -1.0 : 1.0) * 1e-6;
+      }
+      const double tap = std::abs(branch.tap) > 1e-12 ? branch.tap : 1.0;
+      const double coefficient = base_mva / (x * tap);
+      const double shift = branch.shift_deg * kPi / 180.0;
+      const int from = bus_positions.at(branch.from_bus);
+      const int to = bus_positions.at(branch.to_bus);
       for (int t = 0; t < build.T; ++t) {
         const int variable = build.flow(l, t);
         const auto& metadata =
@@ -1869,7 +1889,15 @@ UCSchedule solve_market_commitment(
           continue;
         }
         network_candidates.push_back(SCUCNetworkLimitCandidate{
-            variable, metadata.lb, metadata.ub, false});
+            variable,
+            metadata.lb,
+            metadata.ub,
+            build.theta(from, t),
+            build.theta(to, t),
+            coefficient,
+            metadata.lb + coefficient * shift,
+            metadata.ub + coefficient * shift,
+            false});
       }
     }
   }
@@ -1941,6 +1969,20 @@ UCSchedule solve_market_commitment(
   if (build.T > 1) {
     build.model.initial_solution = build_market_scuc_warm_start(
         build, offers, options);
+    if (generate_network_constraints &&
+        build.model.initial_solution.size() ==
+            build.model.linear_part.c.size()) {
+      double warm_start_worst_violation = 0.0;
+      const auto warm_start_violations = find_network_violations(
+          build.model.initial_solution, &warm_start_worst_violation);
+      const int warm_start_limits =
+          activate_network_limits(warm_start_violations);
+      network_activated += warm_start_limits;
+      if (warm_start_limits > 0) {
+        build.model.initial_solution = repair_market_scuc_fixed_integers(
+            build, build.model.initial_solution);
+      }
+    }
   }
   const double warm_start_generation_sec = std::chrono::duration<double>(
       std::chrono::steady_clock::now() - warm_start_started).count();
@@ -1958,6 +2000,14 @@ UCSchedule solve_market_commitment(
   int root_cuts_reused_count = 0;
   bool root_basis_reused = false;
   bool pseudocosts_reused = false;
+  const bool enable_in_solve_generation =
+      generate_network_constraints &&
+      options.enable_scuc_in_solve_network_constraint_generation;
+  std::vector<bool> in_solve_constraint_submitted(
+      network_candidates.size(), false);
+  std::mutex in_solve_constraint_mutex;
+  int in_solve_callback_calls = 0;
+  int in_solve_constraints_submitted = 0;
   engine::SolveResult solved;
   for (int iteration = 1;
        iteration <= (generate_network_constraints ? max_network_iterations : 1);
@@ -2019,7 +2069,83 @@ UCSchedule solve_market_commitment(
         solver_state_reuse_used = true;
         ++solver_state_reuse_rounds;
       }
-      auto bc_result = engine::solve_milp_bc(build.model, bc_options);
+      engine::BCCallbacks callbacks;
+      if (enable_in_solve_generation) {
+        callbacks.policy_tag = "market-scuc-exact-network-limits";
+        callbacks.dynamic_node_cut = [&, maximum_new =
+            options.scuc_network_constraint_generation_max_new_per_iteration](
+                const engine::BCDynamicNodeCutContext& context,
+                std::vector<engine::BCDynamicNodeCut>& cuts) {
+          std::lock_guard<std::mutex> lock(in_solve_constraint_mutex);
+          ++in_solve_callback_calls;
+          if (context.original_col_value.empty()) return;
+          std::vector<SCUCNetworkLimitViolation> violations;
+          violations.reserve(network_candidates.size());
+          for (int index = 0;
+               index < static_cast<int>(network_candidates.size()); ++index) {
+            if (in_solve_constraint_submitted[static_cast<size_t>(index)]) {
+              continue;
+            }
+            const auto& candidate =
+                network_candidates[static_cast<size_t>(index)];
+            if (candidate.activated) continue;
+            if (candidate.flow_variable < 0 ||
+                candidate.flow_variable >=
+                    static_cast<int>(context.original_col_value.size())) {
+              continue;
+            }
+            const double flow = context.original_col_value[
+                static_cast<size_t>(candidate.flow_variable)];
+            if (!std::isfinite(flow)) continue;
+            const double violation = std::max(
+                {0.0, candidate.lower - flow, flow - candidate.upper});
+            if (violation <= std::max(
+                    0.0,
+                    options.scuc_network_constraint_generation_tolerance_mw)) {
+              continue;
+            }
+            violations.push_back({index, violation});
+          }
+          std::stable_sort(
+              violations.begin(), violations.end(),
+              [](const auto& lhs, const auto& rhs) {
+                return lhs.violation_mw > rhs.violation_mw;
+              });
+          for (const auto& violation : violations) {
+            if (maximum_new > 0 &&
+                static_cast<int>(cuts.size()) >= maximum_new) {
+              break;
+            }
+            const auto& candidate = network_candidates[
+                static_cast<size_t>(violation.candidate_index)];
+            engine::BCDynamicNodeCut cut;
+            cut.indices = {candidate.from_angle_variable,
+                           candidate.to_angle_variable};
+            cut.values = {candidate.angle_coefficient,
+                          -candidate.angle_coefficient};
+            cut.lower = candidate.angle_lower;
+            cut.upper = candidate.angle_upper;
+            cut.column_space =
+                engine::BCDynamicNodeCut::ColumnSpace::Original;
+            cut.validity_scope = engine::ValidityScope::GlobalCut;
+            cut.propagate = true;
+            cut.audit_family = "market_ac_thermal_limit";
+            cut.audit_key = "flow_" +
+                std::to_string(candidate.flow_variable);
+            cuts.push_back(std::move(cut));
+            in_solve_constraint_submitted[
+                static_cast<size_t>(violation.candidate_index)] = true;
+            ++in_solve_constraints_submitted;
+          }
+        };
+      }
+      engine::BCResult bc_result;
+      if (callbacks.dynamic_node_cut) {
+        bc_result = engine::solve_milp_bc(
+            build.model, bc_options, engine::BCWarmStart{}, callbacks);
+      } else {
+        bc_result = engine::solve_milp_bc(build.model, bc_options);
+      }
       solved.x = std::move(bc_result.x);
       solved.stats = std::move(bc_result.stats);
       solved.stats.solver_name = "StrictHiGHS";
@@ -2043,22 +2169,35 @@ UCSchedule solve_market_commitment(
     structured_branching_used =
         structured_branching_used || iteration_structured;
     ++network_iterations;
-    if (!solved.stats.success ||
-        solved.x.size() < build.model.linear_part.c.size()) {
-      break;
+    const bool has_full_solution =
+        solved.x.size() >= build.model.linear_part.c.size();
+    std::vector<SCUCNetworkLimitViolation> violations;
+    if (generate_network_constraints && has_full_solution) {
+      violations = find_network_violations(
+          solved.x, &network_worst_violation);
+      network_remaining = static_cast<int>(violations.size());
+      network_converged = violations.empty();
     }
-    if (!generate_network_constraints) break;
+    if (!solved.stats.success || !has_full_solution) break;
+    if (!generate_network_constraints || network_converged) break;
 
-    auto violations = find_network_violations(
-        solved.x, &network_worst_violation);
-    network_remaining = static_cast<int>(violations.size());
-    if (violations.empty()) {
-      network_converged = true;
-      break;
+    int restored_callback_limits = 0;
+    for (int index = 0;
+         index < static_cast<int>(network_candidates.size()); ++index) {
+      if (!in_solve_constraint_submitted[static_cast<size_t>(index)]) continue;
+      auto& candidate = network_candidates[static_cast<size_t>(index)];
+      if (candidate.activated) continue;
+      auto& metadata = build.model.linear_part.vars[
+          static_cast<size_t>(candidate.flow_variable)];
+      metadata.lb = candidate.lower;
+      metadata.ub = candidate.upper;
+      candidate.activated = true;
+      ++restored_callback_limits;
     }
+    network_activated += restored_callback_limits;
     const int added = activate_network_limits(violations);
     network_activated += added;
-    if (added == 0) break;
+    if (added == 0 && restored_callback_limits == 0) break;
     build.model.initial_solution = repair_market_scuc_fixed_integers(
         build, solved.x);
     any_mip_start = any_mip_start ||
@@ -2092,6 +2231,12 @@ UCSchedule solve_market_commitment(
   schedule.pseudocosts_reused = pseudocosts_reused;
   schedule.search_tree_rebuilt = generate_network_constraints &&
       network_iterations > 1;
+  schedule.in_solve_network_constraint_generation_used =
+      enable_in_solve_generation && structured_branching_used;
+  schedule.in_solve_network_constraint_callback_calls =
+      in_solve_callback_calls;
+  schedule.in_solve_network_constraints_submitted =
+      in_solve_constraints_submitted;
   schedule.network_constraint_generation_run = generate_network_constraints;
   schedule.network_constraint_generation_converged = network_converged;
   schedule.network_constraint_generation_iterations = network_iterations;
@@ -4607,6 +4752,12 @@ MarketResult run_day_ahead_market(
         result.commitment.pseudocosts_reused;
     performance.scuc_search_tree_rebuilt =
         result.commitment.search_tree_rebuilt;
+    performance.scuc_in_solve_network_constraint_generation_used =
+        result.commitment.in_solve_network_constraint_generation_used;
+    performance.scuc_in_solve_network_constraint_callback_calls =
+        result.commitment.in_solve_network_constraint_callback_calls;
+    performance.scuc_in_solve_network_constraints_submitted =
+        result.commitment.in_solve_network_constraints_submitted;
     performance.scuc_network_constraint_generation_run =
         result.commitment.network_constraint_generation_run;
     performance.scuc_network_constraint_generation_converged =

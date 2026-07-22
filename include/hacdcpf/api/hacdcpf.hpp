@@ -9,6 +9,7 @@
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
 #include "hacdcpf/optimal_power_flow/opf_result.hpp"
+#include "hacdcpf/optimal_power_flow/opf_solver_interface.hpp"
 #include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
 #include "hacdcpf/optimal_power_flow/reactive_power_opt.hpp"
 #include "hacdcpf/power_flow/ac_linearized_pf.hpp"

@@ -127,6 +127,7 @@ async function main() {
     await page.evaluate(() => App.setActiveModule('market'));
     if (!(await page.locator('#marketScucNetworkGeneration').isVisible()) ||
         !(await page.locator('#marketScucCrossRoundStateReuse').isVisible()) ||
+        !(await page.locator('#marketScucInSolveNetworkGeneration').isVisible()) ||
         !(await page.locator('#marketScucNetworkGenerationMinCandidates').isVisible()) ||
         !(await page.locator('#marketScucNetworkGenerationIterations').isVisible()) ||
         !(await page.locator('#marketScucNetworkGenerationMaxNew').isVisible())) {
@@ -134,6 +135,7 @@ async function main() {
     }
     await page.locator('#marketScucNetworkGeneration').check();
     await page.locator('#marketScucCrossRoundStateReuse').check();
+    await page.locator('#marketScucInSolveNetworkGeneration').check();
     await page.locator('#marketScucNetworkGenerationMinCandidates').fill('0');
 
     await page.evaluate(() => App.setActiveModule('marketSecurity'));
@@ -169,6 +171,7 @@ async function main() {
         !market.performance?.scuc_network_constraint_generation_converged ||
         !(market.performance?.scuc_network_constraint_candidates > 0) ||
         market.performance?.scuc_cross_round_solver_state_reuse_enabled !== true ||
+        typeof market.performance?.scuc_in_solve_network_constraint_generation_used !== 'boolean' ||
         typeof market.performance?.scuc_search_tree_rebuilt !== 'boolean' ||
         market.performance?.scuc_network_constraint_remaining_violations !== 0 ||
         !market.commitment?.network_constraint_generation_run ||

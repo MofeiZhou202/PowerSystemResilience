@@ -643,6 +643,7 @@ struct BranchLimitEntry {
   double bs{0.0};
   double bc{0.0};
   double tap{1.0};
+  double shift_rad{0.0};
   double smax2{0.0};
 };
 
@@ -681,6 +682,7 @@ NonlinearLimitWorkspace build_nonlinear_limit_workspace(const core::SolverData& 
     e.bs = -br.x_pu / den;
     e.bc = br.b_pu * 0.5;
     e.tap = (br.tap == 0.0) ? 1.0 : br.tap;
+    e.shift_rad = br.shift_deg * kDegToRad;
     const double smax_pu = br.rate_a_mva / data.base_mva;
     e.smax2 = smax_pu * smax_pu;
     ws.branch_limits.push_back(e);
@@ -886,7 +888,9 @@ NonlinearConstraintMetrics accumulate_nonlinear_limit_terms(const ACOPFIndex& id
     const int j = br.to_bus;
     const double vi = vm[i];
     const double vj = vm[j];
-    const double theta = va[i] - va[j];
+    // Match the complex off-nominal tap used by Ybus/branch-flow assembly:
+    // tap = |t| exp(j*shift), hence the from-end angle is θi-θj-shift.
+    const double theta = va[i] - va[j] - br.shift_rad;
     const double ctheta = std::cos(theta);
     const double stheta = std::sin(theta);
     const double tap = br.tap;
@@ -2612,6 +2616,15 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
         out.lmp_q[static_cast<size_t>(i)] =
             ipm_res.lambda_eq[cidx.i_qbal_ac + i] * prob.scale_q / base;
       }
+      out.lmp_valid = true;
+      out.lmp_validity_reason =
+          "AC nodal prices were extracted from the solved formulation's equality multipliers.";
+    } else {
+      out.lmp_valid = false;
+      out.lmp_validity_reason =
+          backend_label.find("ipopt") != std::string::npos
+              ? "The embedded Ipopt adapter does not return constraint multipliers; LMPs are unavailable."
+              : "The selected solve path did not return a complete equality-dual vector; LMPs are unavailable.";
     }
 
     parity::EvalWorkspace eq_ws;
@@ -2815,6 +2828,24 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
 
   auto separate_external_grid_dispatch =
       [&](ACOPFResult result) -> ACOPFResult {
+    result.model_limitations.push_back(
+        "AC OPF is a non-convex nonlinear program; convergence certifies a local KKT point, not a global optimum.");
+    if (!sys.ac.storage.empty() || !sys.dc.storage.empty()) {
+      result.model_limitations.push_back(
+          "Storage is optimized as a single-period power injection; intertemporal SOC dynamics are not modelled by snapshot OPF.");
+    }
+    if (!sys.energy_routers.empty()) {
+      result.model_limitations.push_back(
+          "Energy-router port balance is lossless; internal router conversion losses are not represented.");
+    }
+    if (!result.lmp_valid && result.lmp_validity_reason.empty()) {
+      result.lmp_validity_reason =
+          "The selected OPF path did not provide certified nodal-price multipliers.";
+    }
+    if (result.solver_path == OPFSolverPath::NativeAC) {
+      result.model_limitations.push_back(
+          "The legacy Native AC path handles nonlinear engineering limits through an external barrier/penalty loop; prefer ParityIPM for the production hybrid formulation.");
+    }
     result.external_grid_p_mw.assign(sys.ac.external_grids.size(), 0.0);
     result.external_grid_q_mvar.assign(sys.ac.external_grids.size(), 0.0);
     std::vector<double> authored_pg(original_generator_count, 0.0);

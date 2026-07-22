@@ -868,4 +868,6 @@ TEST_CASE("DC OPF LMP: congestion re-dispatch and feasibility",
   // Branch congestion duals are intentionally not certified until a KKT-based
   // extraction is implemented.  Callers must gate branch_mu_lower/upper on this.
   CHECK_FALSE(result.branch_mu_valid);
+  CHECK_FALSE(result.branch_mu_validity_reason.empty());
+  CHECK(result.lmp_valid);
 }

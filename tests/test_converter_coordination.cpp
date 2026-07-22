@@ -1538,6 +1538,7 @@ TEST_CASE("Hybrid AC/DC OPF models DC/DC converters in all three control modes",
     DCDCConverter dc; dc.index = 1; dc.bus_in = 1; dc.bus_out = 2;
     dc.control_mode = mode; dc.p_ref_mw = p_ref_mw; dc.v_ref_pu = v_ref_pu;
     dc.k_droop = k_droop; dc.eta = 0.97; dc.pmax_mw = 20; dc.pmin_mw = -20;
+    dc.r_eq_pu = 0.01;
     dc.in_service = true;
     sys.dc.dcdc_converters = {dc};
     return sys;
@@ -1551,6 +1552,7 @@ TEST_CASE("Hybrid AC/DC OPF models DC/DC converters in all three control modes",
     CHECK(data.dcdc_converters[0].in_bus_id == "DC1");
     CHECK(data.dcdc_converters[0].out_bus_id == "DC2");
     CHECK(data.dcdc_converters[0].forms_out_voltage);
+    CHECK(data.dcdc_converters[0].r_eq_pu == Catch::Approx(0.01));
   }
 
   // Voltage mode: the DC/DC holds its output-bus voltage at v_ref.
@@ -1570,6 +1572,7 @@ TEST_CASE("Hybrid AC/DC OPF models DC/DC converters in all three control modes",
     REQUIRE(res.ac_result.solve_result.has_primal());
     REQUIRE(res.pdcdc_mw.count("DCDC1") == 1);
     CHECK(res.pdcdc_mw.at("DCDC1") == Catch::Approx(p_ref).margin(1e-2));
+    CHECK(res.max_dc_p_viol_pu < 1e-4);
   }
 
   // Droop mode: Pout = p_ref + k_droop·(Vdc_out − v_ref)  (all per-unit; MW = pu·Sb).

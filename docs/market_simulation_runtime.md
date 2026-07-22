@@ -235,6 +235,22 @@ The last restricted-master lower bound is also a valid lower bound for the full
 model, so its reported gap remains conservative once the incumbent passes the
 complete thermal scan.
 
+Before the first MILP, the feasible MIP-start candidate receives the same full
+thermal scan. Violated physical bounds are activated immediately and the fixed
+integer assignment is repaired once against that tighter master. This reuses
+work already paid for by warm-start construction to avoid a known-loose first
+MILP without weakening the final certificate.
+
+For structured StrictHiGHS, omitted thermal bounds are first submitted inside
+the active branch-and-bound tree as equivalent angle-difference global cuts.
+The callback runs after a node LP is solved and before incumbent acceptance,
+pruning or branching. Each branch-period limit is submitted once per solve;
+the reported submission count is not presented as an acceptance count. The
+returned incumbent still receives the complete external scan. If the row
+cannot be projected exactly through presolve or is not enforced, the violated
+physical bound is restored and the exact outer loop remains the fallback.
+Other MILP backends use the outer loop directly.
+
 Structured StrictHiGHS rounds reuse original-space root cuts, the paired root
 simplex basis, and original-column pseudocost statistics. Tightening omitted
 flow bounds only shrinks the feasible set, so globally valid cuts from the
@@ -263,13 +279,17 @@ On the same build, a 56-generator ACTIVSg500 24-period run that exceeded 120 s
 at a `1e-3` target completed in about 2.13 s at an explicit `1e-2` target; its
 reported final gap was about 0.760%, so it met the configured target but did
 not constitute a zero-gap proof.
-The pre-reuse baseline with AC thermal limits enabled on the 24-period ACTIVSg2000 case generated only
-34 active bounds from 76,944 candidates, but the second master restart still
-exhausted the shared 120 s budget (120.92 s measured). It correctly returned
-infeasible/incomplete rather than pricing an unchecked schedule. Root-cut,
-basis and pseudocost reuse now targets that restart cost; a persistent search
-tree or native lazy-constraint callback remains the next escalation if the new
-benchmark still misses the latency target.
+The pre-reuse baseline with AC thermal limits enabled on the 24-period
+ACTIVSg2000 case generated only 34 active bounds from 76,944 candidates, but a
+second master restart exhausted the shared 120 s budget (120.92 s measured).
+The current path separates the feasible MIP start before the first MILP: the
+same 34 bounds were activated, the final incumbent passed all 76,944 thermal
+checks, and no outer tree rebuild was needed. Even so, the 284,520-variable,
+10,560-binary StrictHiGHS solve consumed 120.83 s without reporting a gap that
+met the 1% target. It therefore still refused pricing. Cross-round root cuts,
+basis and pseudocosts remain available when another exact outer round is
+needed, but this benchmark now identifies the single large SCUC solve, rather
+than network-constraint restart, as the limiting stage.
 
 ## Real-time market and deviation settlement
 
@@ -368,6 +388,7 @@ no configured participant has a profitable local deviation.
   "scuc_time_limit_sec": 120,
   "scuc_max_nodes": 50000,
   "enable_scuc_cross_round_solver_state_reuse": true,
+  "enable_scuc_in_solve_network_constraint_generation": true,
   "enable_scuc_network_constraint_generation": true,
   "scuc_network_constraint_generation_min_candidates": 10000,
   "scuc_network_constraint_generation_max_iterations": 8,

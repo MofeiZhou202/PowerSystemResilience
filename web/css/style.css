@@ -3115,6 +3115,37 @@ tr.topo-clickable:focus-visible {
   border-top: 1px solid rgba(255,255,255,0.1);
 }
 .pf-advanced-panel[hidden] { display: none; }
+.opf-parameter-guide {
+  grid-column: 1 / -1;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--sub-bar-border);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.025);
+}
+.opf-parameter-guide[hidden] { display: none; }
+.opf-parameter-guide-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 7px;
+  color: var(--sub-bar-text);
+  font-size: 12px;
+}
+.opf-parameter-guide-head input {
+  width: min(260px, 45vw);
+  padding: 4px 7px;
+  color: var(--tb-text);
+  background: var(--tb-bg);
+  border: 1px solid var(--tb-border);
+  border-radius: 3px;
+}
+.opf-parameter-guide td:nth-child(5) {
+  min-width: 260px;
+  white-space: normal;
+  line-height: 1.45;
+}
 .pf-option-group {
   display: flex;
   align-items: center;
@@ -3126,6 +3157,7 @@ tr.topo-clickable:focus-visible {
   border-radius: 6px;
   background: rgba(255,255,255,0.025);
 }
+.pf-option-group[hidden] { display: none; }
 .pf-option-title {
   align-self: stretch;
   display: inline-flex;
@@ -3306,6 +3338,7 @@ tr.topo-clickable:focus-visible {
   color: var(--sub-bar-text);
   white-space: nowrap;
 }
+.sub-label[hidden] { display: none; }
 .sub-label select,
 .sub-label input,
 .sub-label textarea {

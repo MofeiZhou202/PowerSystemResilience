@@ -819,6 +819,8 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
   out.effective_inner_nlp_objective = opt.inner_nlp_objective;
   out.baseline_opf = base_r;
   if (!baseline_ok) {
+    out.model_limitations.push_back(
+        "Discrete coordinate/neighbourhood search provides no global MINLP optimality certificate.");
     out.status = "Baseline AC OPF failed: " + base_r.status;
     out.runtime_sec = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();
@@ -853,6 +855,13 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
     out.runtime_sec = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();
     out.status = "Feasible OPF point (no adjustable discrete devices)";
+    out.model_limitations.push_back(
+        "No adjustable OLTC or switchable-shunt variables were available; the result is the continuous OPF baseline, not a global MINLP certificate.");
+    if (out.effective_inner_nlp_objective == RPOInnerObjective::LossEconomic &&
+        opt.objective != RPOObjective::MinActiveLoss) {
+      out.model_limitations.push_back(
+          "LossEconomic does not directly optimize the requested voltage-deviation objective in the continuous inner solve.");
+    }
     return out;
   }
 
@@ -1284,6 +1293,27 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
   rpo_phase_log("phase3 pairwise", t0);
 
   // ── Fill results ──
+  const double final_elapsed = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - t0).count();
+  out.terminated_by_time_limit =
+      opt.time_limit_sec > 0.0 && final_elapsed >= opt.time_limit_sec;
+  out.terminated_by_evaluation_limit = out.nlp_solves >= opt.max_nodes;
+  out.model_limitations.push_back(
+      "Discrete coordinate/neighbourhood search returns a feasible local incumbent; no global MINLP optimality certificate is available.");
+  if (out.terminated_by_time_limit) {
+    out.model_limitations.push_back(
+        "The discrete search stopped at the wall-clock limit before the complete neighbourhood could be evaluated.");
+  }
+  if (out.terminated_by_evaluation_limit) {
+    out.model_limitations.push_back(
+        "The discrete search stopped at the OPF-evaluation limit before the complete neighbourhood could be evaluated.");
+  }
+  if (out.effective_inner_nlp_objective == RPOInnerObjective::LossEconomic &&
+      opt.objective != RPOObjective::MinActiveLoss) {
+    out.model_limitations.push_back(
+        "LossEconomic optimizes the continuous inner point for generation/loss, not directly for the requested voltage-deviation objective; voltage quality is ranked by the outer discrete search.");
+  }
+
   if (incumbent_obj < 1e20) {
     out.converged           = true;
     out.objective           = incumbent_obj;
@@ -1295,11 +1325,9 @@ RPOResult solve_rpo(const HybridPowerSystem& sys, const RPOOptions& opt_in) {
     out.total_loss_after_mw = compute_loss(incumbent_result, sys);
     out.max_vdev_after      = max_voltage_deviation(incumbent_result.vm, opt.v_target);
 
-    double elapsed = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - t0).count();
-    if (elapsed >= opt.time_limit_sec)
+    if (out.terminated_by_time_limit)
       out.status = "Feasible incumbent at time limit";
-    else if (out.nlp_solves >= opt.max_nodes)
+    else if (out.terminated_by_evaluation_limit)
       out.status = "Feasible incumbent at evaluation limit";
     else
       out.status = "Feasible local optimum (heuristic search)";

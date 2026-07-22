@@ -55,6 +55,27 @@ TimeSeriesData daily_profiles() {
   return data;
 }
 
+TimeSeriesData weekly_profiles() {
+  TimeSeriesData data;
+  data.num_steps = 168;
+  data.step_duration_hr = 1.0;
+  data.profiles = {{0, "load", {}}, {1, "wind", {}}, {2, "solar", {}}};
+  const std::vector<double> load_scale = {0.95, 1.00, 1.04, 1.08,
+                                          1.02, 0.92, 0.88};
+  const std::vector<double> wind_scale = {1.05, 0.92, 0.84, 0.78,
+                                          0.90, 1.08, 1.15};
+  const std::vector<double> solar_scale = {0.82, 0.90, 1.00, 1.08,
+                                           1.02, 0.95, 0.88};
+  for (size_t day = 0; day < 7; ++day) {
+    for (size_t hour = 0; hour < 24; ++hour) {
+      data.profiles[0].values.push_back(kDailyLoad[hour] * load_scale[day]);
+      data.profiles[1].values.push_back(kDailyWind[hour] * wind_scale[day]);
+      data.profiles[2].values.push_back(kDailySolar[hour] * solar_scale[day]);
+    }
+  }
+  return data;
+}
+
 TimeSeriesData annual_daily_profiles() {
   TimeSeriesData data;
   data.num_steps = 365;
@@ -88,6 +109,60 @@ TimeSeriesPFOptions rich_dispatch_options() {
   options.pf_options.max_iter = 150;
   options.pf_options.tol = 1e-7;
   return options;
+}
+
+struct ReplayStats {
+  double max_pf_residual{0.0};
+  double max_voltage_violation{0.0};
+  double max_branch_loading_pct{0.0};
+  double max_vsc_loading_pct{0.0};
+};
+
+ReplayStats replay_stats(const HybridPowerSystem& sys,
+                         const TimeSeriesPFResult& result) {
+  ReplayStats stats;
+  for (const auto& pf : result.pf_results) {
+    if (!pf.converged) continue;
+    stats.max_pf_residual = std::max(stats.max_pf_residual, pf.residual);
+    for (size_t i = 0; i < pf.vm.size() && i < sys.ac.buses.size(); ++i) {
+      stats.max_voltage_violation = std::max(
+          stats.max_voltage_violation,
+          std::max({sys.ac.buses[i].vmin_pu - pf.vm[i],
+                    pf.vm[i] - sys.ac.buses[i].vmax_pu, 0.0}));
+    }
+    for (size_t i = 0; i < pf.vdc.size() && i < sys.dc.buses.size(); ++i) {
+      stats.max_voltage_violation = std::max(
+          stats.max_voltage_violation,
+          std::max({sys.dc.buses[i].vmin_pu - pf.vdc[i],
+                    pf.vdc[i] - sys.dc.buses[i].vmax_pu, 0.0}));
+    }
+    for (size_t i = 0;
+         i < pf.branch_flows.size() && i < sys.ac.branches.size(); ++i) {
+      const double rating = sys.ac.branches[i].rate_a_mva;
+      if (rating <= 0.0) continue;
+      const auto& flow = pf.branch_flows[i];
+      const double apparent = std::max(
+          std::hypot(flow.pf_mw, flow.qf_mvar),
+          std::hypot(flow.pt_mw, flow.qt_mvar));
+      stats.max_branch_loading_pct = std::max(
+          stats.max_branch_loading_pct, 100.0 * apparent / rating);
+    }
+    for (const auto& transfer : pf.vsc_transfers) {
+      const auto converter = std::find_if(
+          sys.vsc_converters.begin(), sys.vsc_converters.end(),
+          [&](const auto& item) { return item.index == transfer.index; });
+      if (converter == sys.vsc_converters.end()) continue;
+      const double rating = converter->p_rated_mw > 0.0
+                                ? converter->p_rated_mw
+                                : std::max(std::abs(converter->pmax_mw),
+                                           std::abs(converter->pmin_mw));
+      if (rating <= 0.0) continue;
+      stats.max_vsc_loading_pct = std::max(
+          stats.max_vsc_loading_pct,
+          100.0 * std::hypot(transfer.p_ac_mw, transfer.q_ac_mvar) / rating);
+    }
+  }
+  return stats;
 }
 
 }  // namespace
@@ -125,6 +200,14 @@ TEST_CASE("Multiscale comprehensive AC/DC constrained OPF converges",
   INFO("nonlinear inequalities="
        << result.profiling.max_nonlinear_inequality_violation_pu);
   INFO("complementarity=" << result.profiling.final_barrier_mu);
+  if (!result.vm.empty()) {
+    const auto ac_range = std::minmax_element(result.vm.begin(), result.vm.end());
+    INFO("OPF AC voltage range=" << *ac_range.first << "," << *ac_range.second);
+  }
+  if (!result.vdc.empty()) {
+    const auto dc_range = std::minmax_element(result.vdc.begin(), result.vdc.end());
+    INFO("OPF DC voltage range=" << *dc_range.first << "," << *dc_range.second);
+  }
   REQUIRE(result.converged);
   CHECK(result.iterations < options.max_inner_iterations *
                                 options.max_outer_iterations);
@@ -208,13 +291,37 @@ TEST_CASE("Multiscale comprehensive AC/DC case runs from milliseconds to a year"
   const TimeSeriesPFResult daily =
       solve_time_series_pf(sys, daily_profiles(), rich_dispatch_options());
   INFO("daily converged=" << daily.num_converged << "/" << daily.num_steps);
+  const ReplayStats daily_stats = replay_stats(sys, daily);
+  INFO("maximum PF residual=" << daily_stats.max_pf_residual);
+  INFO("maximum voltage violation=" << daily_stats.max_voltage_violation);
+  INFO("maximum AC branch loading (%)="
+       << daily_stats.max_branch_loading_pct);
+  INFO("maximum VSC loading (%)=" << daily_stats.max_vsc_loading_pct);
   REQUIRE(daily.num_steps == 24);
   REQUIRE(daily.num_converged == 24);
   REQUIRE(daily.uc_schedule.feasible);
   REQUIRE_FALSE(daily.uc_schedule.solver_name.empty());
 
+  const TimeSeriesPFResult weekly =
+      solve_time_series_pf(sys, weekly_profiles(), rich_dispatch_options());
+  const ReplayStats weekly_stats = replay_stats(sys, weekly);
+  INFO("weekly converged=" << weekly.num_converged << "/" << weekly.num_steps);
+  INFO("weekly maximum PF residual=" << weekly_stats.max_pf_residual);
+  INFO("weekly maximum voltage violation="
+       << weekly_stats.max_voltage_violation);
+  INFO("weekly maximum AC branch loading (%)="
+       << weekly_stats.max_branch_loading_pct);
+  INFO("weekly maximum VSC loading (%)="
+       << weekly_stats.max_vsc_loading_pct);
+  REQUIRE(weekly.num_steps == 168);
+  REQUIRE(weekly.num_converged == 168);
+  REQUIRE(weekly.uc_schedule.feasible);
+  CHECK(weekly_stats.max_voltage_violation <= 1e-9);
+  CHECK(weekly_stats.max_branch_loading_pct < 100.0);
+  CHECK(weekly_stats.max_vsc_loading_pct < 100.0);
+
   // Use schedule-only replay for the full calendar year so this regression
-  // remains fast. Nodal AC/DC balance is checked above by the 24 full PF runs;
+  // remains fast. Nodal AC/DC balance is checked above by the 168 full PF runs;
   // the annual stage validates chronology, dispatch feasibility, and energy.
   analysis::AnnualProductionSimOptions annual_options;
   annual_options.skip_replay = true;
@@ -232,6 +339,12 @@ TEST_CASE("Multiscale comprehensive AC/DC case runs from milliseconds to a year"
   CHECK(annual.step_duration_hr * annual.num_steps ==
         Approx(8760.0).margin(1e-9));
   REQUIRE(annual.step_results.size() == 365);
+  CHECK(annual.num_opf_converged == 0);
+  CHECK(annual.num_pf_converged == 0);
+  CHECK(std::none_of(annual.step_results.begin(), annual.step_results.end(),
+                     [](const analysis::AnnualStepResult& step) {
+                       return step.opf_converged || step.pf_converged;
+                     }));
   CHECK(annual.total_load_mwh > 0.0);
   CHECK(std::isfinite(annual.total_cost));
   CHECK(std::isfinite(annual.power_balance_error_mwh));

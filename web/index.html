@@ -454,10 +454,11 @@
         <span class="control-param-title">运行</span>
         <button id="btnRunOpf" class="toolbar-btn run-btn" title="运行最优潮流">运行最优潮流</button>
         <button id="btnOpfAdvanced" class="toolbar-btn" type="button" aria-expanded="false" aria-controls="opfAdvancedPanel" title="展开高级最优潮流参数">高级OPF</button>
+        <button id="btnOpfParameterGuide" class="toolbar-btn" type="button" aria-expanded="false" aria-controls="opfParameterGuide" title="查看每个 OPF 参数的用途、单位和适用求解器">参数说明</button>
       </div>
     </div>
     <div id="opfAdvancedPanel" class="pf-advanced-panel" hidden>
-      <div class="pf-option-group">
+      <div id="opfConvergenceOptions" class="pf-option-group">
         <div class="pf-option-title">收敛</div>
         <label class="sub-label">内层迭代<input id="opfMaxIterations" type="number" min="1" step="1" value="400"/></label>
         <label class="sub-label">外层迭代<input id="opfMaxOuterIterations" type="number" min="1" step="1" value="8"/></label>
@@ -465,7 +466,7 @@
         <label class="sub-label">可行性容差<input id="opfFeasibilityTol" type="number" min="1e-12" step="1e-7" value="1e-6"/></label>
         <label class="sub-label">驻点容差<input id="opfStationarityTol" type="number" min="1e-12" step="1e-7" value="1e-6"/></label>
       </div>
-      <div class="pf-option-group">
+      <div id="opfBarrierOptions" class="pf-option-group">
         <div class="pf-option-title">障碍法</div>
         <label class="sub-label">μ0<input id="opfBarrierMu0" type="number" min="1e-12" step="0.001" value="0.01"/></label>
         <label class="sub-label">μ缩减<input id="opfBarrierReduction" type="number" min="0.01" max="0.99" step="0.05" value="0.2"/></label>
@@ -500,6 +501,21 @@
         <label id="opfThreePhaseOracleControl" class="sub-label sub-checkbox"><input id="opfThreePhaseOracle" type="checkbox"/><span>约束筛选</span></label>
         <label class="sub-label sub-checkbox"><input id="opfThreePhaseShunts" type="checkbox" checked/><span>并联支路</span></label>
         <label class="sub-label sub-checkbox"><input id="opfThreePhaseOpenDss" type="checkbox" checked/><span>OpenDSS对比</span></label>
+      </div>
+      <div id="opfDcOptions" class="pf-option-group" hidden>
+        <div class="pf-option-title">DC OPF</div>
+        <label class="sub-label">成本分段<input id="opfPwlSegments" type="number" min="1" max="1000" step="1" value="4"/></label>
+        <label class="sub-label">热限倍率<input id="opfBranchLimitMargin" type="number" min="0.000001" max="10" step="0.05" value="1"/></label>
+        <label class="sub-label sub-checkbox"><input id="opfLoadShedding" type="checkbox" checked/><span>允许切负荷</span></label>
+        <label class="sub-label">VOLL<input id="opfVoll" type="number" min="0" step="10" value="0"/></label>
+        <label class="sub-label sub-checkbox"><input id="opfComputeLmp" type="checkbox" checked/><span>计算节点电价</span></label>
+      </div>
+      <div id="opfParameterGuide" class="opf-parameter-guide" hidden>
+        <div class="opf-parameter-guide-head">
+          <strong>OPF 参数契约</strong>
+          <input id="opfParameterSearch" type="search" placeholder="筛选参数" aria-label="筛选 OPF 参数说明"/>
+        </div>
+        <div id="opfParameterGuideTable" class="topo-table-wrap"></div>
       </div>
     </div>
   </div>
@@ -1285,6 +1301,9 @@
       </label>
       <label class="sub-label sub-checkbox" title="约束生成后续轮次复用 StrictHiGHS 根割、根基和伪成本；新增热限后搜索树仍安全重建">
         <input id="marketScucCrossRoundStateReuse" type="checkbox" checked/><span>跨轮求解状态复用</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="在 StrictHiGHS 节点内尝试提交精确热限全局割；无法精确投影时自动进入外层回退">
+        <input id="marketScucInSolveNetworkGeneration" type="checkbox" checked/><span>树内热限分离</span>
       </label>
       <label class="sub-label">热限候选阈值
         <input id="marketScucNetworkGenerationMinCandidates" type="number" value="10000" min="0" step="1000" title="AC支路×时段候选数达到该值后启用；0表示任何规模均启用"/>
@@ -2642,6 +2661,10 @@
         <div class="topo-section">
           <h4>最优潮流 — 约束启用情况</h4>
           <div id="opfScope" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section">
+          <h4>最优潮流 — 参数请求与实际生效值</h4>
+          <div id="opfParameterResults" class="topo-table-wrap"></div>
         </div>
         <div class="topo-section">
           <h4>最优潮流 — 发电机出力</h4>

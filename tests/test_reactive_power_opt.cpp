@@ -30,6 +30,7 @@ TEST_CASE("RPO reports an honest local certificate and a physical loss ledger",
   REQUIRE(result.converged);
   CHECK_FALSE(result.globally_certified);
   CHECK_FALSE(result.optimality_gap_available);
+  CHECK_FALSE(result.model_limitations.empty());
   CHECK(result.algorithm == "discrete_coordinate_search_with_ac_opf");
   CHECK(result.baseline_opf.converged);
   CHECK(result.optimized_opf.converged);

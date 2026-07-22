@@ -227,13 +227,16 @@ TEST_CASE("SCUC exact network constraint generation matches the full thermal mod
         Catch::Approx(full.commitment.total_cost).margin(1e-5));
   CHECK(generated.commitment.network_constraint_generation_run);
   CHECK(generated.commitment.network_constraint_generation_converged);
-  CHECK(generated.commitment.network_constraint_generation_iterations >= 2);
+  CHECK(generated.commitment.network_constraint_generation_iterations >= 1);
+  CHECK(generated.commitment.in_solve_network_constraint_generation_used);
+  CHECK(generated.commitment.in_solve_network_constraint_callback_calls >= 1);
+  CHECK(generated.commitment.in_solve_network_constraints_submitted > 0);
   CHECK(generated.commitment.cross_round_solver_state_reuse_enabled);
-  CHECK(generated.commitment.cross_round_solver_state_reuse_used);
-  CHECK(generated.commitment.cross_round_solver_state_reuse_rounds >= 1);
-  CHECK(generated.commitment.search_tree_rebuilt);
-  CHECK((generated.commitment.root_cuts_reused ||
-         generated.commitment.pseudocosts_reused));
+  CHECK(generated.commitment.search_tree_rebuilt ==
+        (generated.commitment.network_constraint_generation_iterations > 1));
+  if (generated.commitment.network_constraint_generation_iterations > 1) {
+    CHECK(generated.commitment.cross_round_solver_state_reuse_used);
+  }
   CHECK(generated.commitment.network_constraint_candidates == 9);
   CHECK(generated.commitment.network_constraints_activated > 0);
   CHECK(generated.commitment.network_constraints_activated <=
@@ -246,7 +249,25 @@ TEST_CASE("SCUC exact network constraint generation matches the full thermal mod
           system.ac.branches[l].rate_a_mva + 1e-5);
   }
 
+  auto restarted_options = generated_options;
+  restarted_options.enable_scuc_in_solve_network_constraint_generation = false;
+  const auto restarted = hacdcpf::market::run_day_ahead_market(
+      system, time_series, restarted_options);
+  REQUIRE(restarted.feasible);
+  CHECK(restarted.commitment.total_cost ==
+        Catch::Approx(full.commitment.total_cost).margin(1e-5));
+  CHECK_FALSE(restarted.commitment.in_solve_network_constraint_generation_used);
+  CHECK(restarted.commitment.cross_round_solver_state_reuse_used);
+  CHECK(restarted.commitment.cross_round_solver_state_reuse_rounds >= 1);
+  CHECK(restarted.commitment.search_tree_rebuilt);
+  CHECK((restarted.commitment.root_cuts_reused ||
+         restarted.commitment.pseudocosts_reused));
+  if (restarted.commitment.root_basis_reused) {
+    CHECK(restarted.commitment.root_cuts_reused);
+  }
+
   auto incomplete_options = generated_options;
+  incomplete_options.enable_scuc_in_solve_network_constraint_generation = false;
   incomplete_options.scuc_network_constraint_generation_max_iterations = 1;
   incomplete_options.scuc_network_constraint_generation_max_new_per_iteration = 1;
   const auto incomplete = hacdcpf::market::run_day_ahead_market(
