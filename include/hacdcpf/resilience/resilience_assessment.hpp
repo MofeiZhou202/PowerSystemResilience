@@ -206,6 +206,11 @@ struct DistributionResilienceOptions {
 
   std::vector<DistributionResilienceFault> faults;
   std::vector<TransportEdge> transport_edges;
+  /// Earliest time at which an externally routed mobile-storage resource can
+  /// participate in restoration, keyed by the resource's stable index.  The
+  /// resource cannot dispatch, form an island, or depart before this time;
+  /// once available it may wait and retains every later service interval.
+  std::unordered_map<int, double> mobile_storage_available_from_hr;
   std::function<bool(int, double, double)> progress_callback;
 
   /// If true, run full AC power flow at each step to obtain bus voltages

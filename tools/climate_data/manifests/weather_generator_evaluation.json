@@ -1,0 +1,88 @@
+{
+  "schema_version": "1.0",
+  "evaluation_id": "shaanxi_weather_generator_blocked_ablation_v1",
+  "role": "historical_distributional_validation_and_component_ablation",
+  "target": "held_out_NEX_GDDP_CMIP6_days_are_a_generator_target_not_observational_truth",
+  "period": {"start": "1985-01-01", "end": "2014-12-31"},
+  "cross_validation": {
+    "method": "leave_one_nonoverlapping_five_year_block_out",
+    "block_years": 5,
+    "folds": 6,
+    "exclude_transitions_across_removed_blocks": true
+  },
+  "members_per_fold": 20,
+  "base_seed": 20260724,
+  "member_seed_pairing": "common_within_fold_and_member_across_variants",
+  "score_definition": "gcm_skill_screening.json",
+  "aggregation": "score_each_five_year_member_against_the_held_out_block_then_average_members_within_fold_and_equal_weight_the_six_folds",
+  "variants": [
+    {
+      "id": "full",
+      "description": "four states, full VAR, joint seven-day residual-vector blocks",
+      "state_count": 4,
+      "diagonal_autoregression": false,
+      "block_length_days": 7,
+      "independent_residual_columns": false,
+      "monthly_iid": false
+    },
+    {
+      "id": "no_state",
+      "description": "one state with full VAR and joint seven-day residual-vector blocks",
+      "state_count": 1,
+      "diagonal_autoregression": false,
+      "block_length_days": 7,
+      "independent_residual_columns": false,
+      "monthly_iid": false
+    },
+    {
+      "id": "diagonal_var",
+      "description": "remove cross-variable lag coefficients while retaining states and joint residual blocks",
+      "state_count": 4,
+      "diagonal_autoregression": true,
+      "block_length_days": 7,
+      "independent_residual_columns": false,
+      "monthly_iid": false
+    },
+    {
+      "id": "independent_residual_columns",
+      "description": "resample each residual column from independently selected seasonal blocks while retaining states and full VAR",
+      "state_count": 4,
+      "diagonal_autoregression": false,
+      "block_length_days": 7,
+      "independent_residual_columns": true,
+      "monthly_iid": false
+    },
+    {
+      "id": "iid_residual_vectors",
+      "description": "replace seven-day blocks by daily joint residual-vector resampling",
+      "state_count": 4,
+      "diagonal_autoregression": false,
+      "block_length_days": 1,
+      "independent_residual_columns": false,
+      "monthly_iid": false
+    },
+    {
+      "id": "monthly_iid",
+      "description": "independent draws from each monthly empirical marginal without states, lag dependence, or residual coupling",
+      "state_count": 1,
+      "diagonal_autoregression": true,
+      "block_length_days": 1,
+      "independent_residual_columns": true,
+      "monthly_iid": true
+    }
+  ],
+  "reporting": {
+    "primary": "mean_composite_score_across_equal_weight_fold_means",
+    "uncertainty": ["fold_standard_deviation", "fold_minimum", "fold_maximum"],
+    "pairing": "report_foldwise_score_delta_from_full",
+    "automatic_method_selection": false,
+    "significance_claim": false
+  },
+  "interpretation_limits": [
+    "This evaluation measures reproduction of a held-out GCM distribution, not agreement with observed climate.",
+    "Five-year held-out blocks give noisy tail and compound-event estimates; preserve fold-level results.",
+    "Ablations identify component contributions but do not establish causal physical weather regimes.",
+    "Results from one GCM and one site cannot select a province-wide generator.",
+    "No result assigns probabilities to GCMs or SSPs."
+  ]
+}

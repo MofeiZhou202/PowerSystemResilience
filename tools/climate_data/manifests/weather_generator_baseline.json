@@ -1,0 +1,78 @@
+{
+  "schema_version": "1.0",
+  "method_id": "seasonal_state_var_block_ecdf_v1",
+  "method_role": "first_reproducible_baseline_for_ablation_not_final_selected_generator",
+  "conditioning": {
+    "dimensions": ["gcm", "experiment", "site", "thirty_year_epoch"],
+    "probability_statement": "P(weather_path | GCM, experiment, site, epoch)",
+    "pool_gcms_or_ssps": false,
+    "assign_gcm_or_ssp_probabilities": false
+  },
+  "calendar": {
+    "generated_calendar": "365_day",
+    "alignment": "remove_february_29_before_fitting",
+    "days_per_path_year": 365
+  },
+  "model_variables": ["tasmax", "dtr", "hurs", "sfcWind", "rsds", "pr"],
+  "derived_variables": {
+    "dtr": "tasmax - tasmin",
+    "tasmin": "tasmax - dtr"
+  },
+  "marginal_model": {
+    "conditioning": "calendar_month",
+    "forward_transform": "empirical_midrank_then_standard_normal_inverse_cdf",
+    "inverse_transform": "empirical_step_inverse_cdf",
+    "tie_handling": "average_midrank",
+    "reason_for_step_inverse": "retain_the_discrete_zero_precipitation_mass"
+  },
+  "weather_state_model": {
+    "states": 4,
+    "estimator": "deterministic_farthest_point_kmeans_in_gaussian_rank_space",
+    "maximum_iterations": 200,
+    "convergence_tolerance": 1e-08,
+    "transition_conditioning": "month_of_destination_day",
+    "laplace_smoothing": 1.0
+  },
+  "dynamic_dependence_model": {
+    "form": "z_t = A z_t_minus_1 + b_state_t + epsilon_t",
+    "estimator": "joint_ridge_least_squares",
+    "ridge_penalty": 1.0,
+    "maximum_spectral_radius": 0.98,
+    "stabilization": "scale_A_only_if_fitted_spectral_radius_exceeds_limit_then_refit_state_intercepts"
+  },
+  "innovation_model": {
+    "method": "moving_block_resampling_of_complete_multivariate_residual_vectors",
+    "block_length_days": 7,
+    "conditioning": "meteorological_season",
+    "seasons": {"DJF": [12, 1, 2], "MAM": [3, 4, 5], "JJA": [6, 7, 8], "SON": [9, 10, 11]}
+  },
+  "physical_constraints": {
+    "dtr": "nonnegative_by_empirical_support",
+    "tasmin_not_greater_than_tasmax": true,
+    "hurs": [0.0, 100.0],
+    "sfcWind_minimum": 0.0,
+    "rsds_minimum": 0.0,
+    "pr_minimum": 0.0
+  },
+  "randomness": {
+    "generator": "numpy_PCG64_via_default_rng",
+    "member_seed": "first_64_bits_of_SHA256_over_base_seed_method_climate_state_site_member"
+  },
+  "required_provenance": [
+    "definition_sha256",
+    "input_file_sha256",
+    "parameter_archive_sha256",
+    "base_seed",
+    "member_seed",
+    "software_versions",
+    "conditioning_state"
+  ],
+  "interpretation_limits": [
+    "This is a baseline for controlled ablation, not the final selected weather generator.",
+    "The four latent states are statistical clusters and must not be assigned physical labels post hoc without diagnostics.",
+    "Monthly empirical marginals reproduce the fitted epoch distribution and do not extrapolate beyond its sampled support.",
+    "The generator does not assign probabilities to GCMs or SSPs.",
+    "Site-wise fitting does not represent spatial dependence between the four Shaanxi sites.",
+    "Daily NEX-GDDP-CMIP6 humidity cannot validate concurrent hourly humid-heat extremes."
+  ]
+}

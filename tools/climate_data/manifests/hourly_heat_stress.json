@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0",
+  "derivation_id": "shaanxi_era5_land_concurrent_hourly_heat_stress_v1",
+  "source_role": "internal_reanalysis_baseline_not_independent_observation_validation",
+  "relative_humidity": {
+    "method": "Magnus_formula_from_concurrent_2m_temperature_and_2m_dewpoint",
+    "coefficients": {"a": 17.625, "b_degC": 243.04},
+    "range_percent": [0.0, 100.0]
+  },
+  "wet_bulb_temperature": {
+    "method": "Stull_2011_empirical_approximation",
+    "citation": "Stull R. 2011. Wet-Bulb Temperature from Relative Humidity and Air Temperature. Journal of Applied Meteorology and Climatology 50:2267-2269. doi:10.1175/JAMC-D-11-0143.1",
+    "valid_air_temperature_degC": [-20.0, 50.0],
+    "valid_relative_humidity_percent": [5.0, 99.0],
+    "outside_domain_rule": "set_wet_bulb_to_missing_and_report_count",
+    "daily_aggregation": "maximum_of_valid_concurrent_utc_hours"
+  },
+  "apparent_temperature": {
+    "method": "shade_apparent_temperature_from_air_temperature_vapour_pressure_and_10m_wind",
+    "formula": "AT_degC = T_degC + 0.33 * vapour_pressure_hPa - 0.70 * wind_m_s - 4.00",
+    "vapour_pressure": "6.105 * exp(17.27 * dewpoint_degC / (237.7 + dewpoint_degC))",
+    "solar_radiation_scope": "not_included_shade_metric",
+    "daily_aggregation": "maximum_of_concurrent_utc_hours"
+  },
+  "humid_heat_event": {
+    "season_months": [5, 6, 7, 8, 9],
+    "threshold": "site_specific_reference_period_q90_of_daily_maximum_wet_bulb_temperature",
+    "comparison": "strictly_greater_than",
+    "minimum_consecutive_days": 2,
+    "annual_boundary_rule": "reset_at_calendar_year_boundary"
+  },
+  "interpretation_limits": [
+    "The Stull approximation is used only inside its declared temperature and relative-humidity domain.",
+    "The apparent-temperature formula is a shade metric and does not include solar radiation or clothing physiology.",
+    "UTC-day aggregation may differ from China-standard-time daily extrema near day boundaries.",
+    "These diagnostics screen weather stress and are not medical heat-health thresholds."
+  ]
+}

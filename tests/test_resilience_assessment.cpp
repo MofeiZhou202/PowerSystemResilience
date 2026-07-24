@@ -282,7 +282,7 @@ TEST_CASE("Resilience: single fault causes shedding on downstream island", "[res
   DistributionResilienceOptions opts;
   opts.horizon_hours = 6;
   opts.time_step_hr = 1.0;
-  opts.allow_reconfiguration = false;
+  opts.allow_reconfiguration = true;
   opts.allow_mess_dispatch = false;
 
   // Fault branch 1 for the entire horizon.
@@ -812,6 +812,87 @@ TEST_CASE("Resilience strict MIP: no-fault MESS does not move without benefit", 
     CHECK(ms.dispatch_mw == Approx(0.0).margin(1e-9));
     CHECK(ms.energy_mwh == Approx(mess.e_mwh).margin(1e-9));
   }
+}
+
+TEST_CASE("Resilience strict MIP honors external MESS availability",
+          "[resilience][mess]") {
+  auto sys = make_radial_3bus();
+
+  MobileStorage mess;
+  mess.index = 18;
+  mess.name = "Externally routed MESS";
+  mess.bus = 2;
+  mess.target_bus = 2;
+  mess.in_service = true;
+  mess.pmax_mw = 1.0;
+  mess.p_rated_mw = 1.0;
+  mess.e_rated_mwh = 4.0;
+  mess.e_mwh = 4.0;
+  mess.soc_init = 1.0;
+  mess.soc_min = 0.0;
+  mess.soc_max = 1.0;
+  mess.eta_discharge = 1.0;
+  mess.grid_forming = true;
+  sys.mobile_storage = {mess};
+
+  DistributionResilienceOptions opts;
+  opts.model = DistributionResilienceModel::MultiPeriodMIPLinDistFlow;
+  opts.horizon_hours = 4;
+  opts.time_step_hr = 1.0;
+  opts.allow_reconfiguration = false;
+  opts.allow_mess_dispatch = true;
+  opts.default_fault_count = 0;
+  opts.faults = {{1, 2.0, 2.0, "upstream outage"}};
+  opts.mobile_storage_available_from_hr[mess.index] = 2.0;
+  opts.mip.solver = DistributionResilienceMIPSolver::Native;
+  opts.mip.max_nodes = 20000;
+  opts.mip.max_time_s = 20;
+
+  const auto result = run_distribution_resilience_mip_assessment(sys, opts);
+  INFO(result.status);
+  REQUIRE(result.feasible);
+  REQUIRE(result.steps.size() == 4u);
+  REQUIRE(result.steps[0].mess_states.size() == 1u);
+  CHECK(result.steps[0].mess_states[0].dispatch_mw == Approx(0.0).margin(1e-9));
+  CHECK(result.steps[1].mess_states[0].dispatch_mw == Approx(0.0).margin(1e-9));
+  CHECK(result.steps[2].mess_states[0].dispatch_mw > 0.0);
+}
+
+TEST_CASE("Resilience sequential model honors external MESS availability",
+          "[resilience][mess]") {
+  auto sys = make_radial_3bus();
+  MobileStorage mess;
+  mess.index = 19;
+  mess.bus = 2;
+  mess.target_bus = 2;
+  mess.in_service = true;
+  mess.pmax_mw = 1.0;
+  mess.p_rated_mw = 1.0;
+  mess.e_rated_mwh = 4.0;
+  mess.e_mwh = 4.0;
+  mess.soc_init = 1.0;
+  mess.soc_min = 0.0;
+  mess.soc_max = 1.0;
+  mess.eta_discharge = 1.0;
+  mess.max_travel_distance_km = 1e-6;
+  sys.mobile_storage = {mess};
+
+  DistributionResilienceOptions opts;
+  opts.model = DistributionResilienceModel::HeuristicSequential;
+  opts.horizon_hours = 4;
+  opts.time_step_hr = 1.0;
+  opts.default_fault_count = 0;
+  opts.faults = {{1, 0.0, 4.0, "upstream outage"}};
+  opts.mobile_storage_available_from_hr[mess.index] = 2.0;
+
+  const auto result = run_distribution_resilience_assessment(sys, opts);
+  REQUIRE(result.feasible);
+  REQUIRE(result.steps.size() == 4u);
+  REQUIRE(result.steps[0].mess_states.size() == 1u);
+  CHECK(result.steps[0].mess_states[0].status == "AwaitingArrival");
+  CHECK(result.steps[1].mess_states[0].dispatch_mw == Approx(0.0).margin(1e-9));
+  CHECK(result.steps[2].mess_states[0].dispatch_mw > 0.0);
+  CHECK(result.steps[0].shed_mw > result.steps[2].shed_mw);
 }
 
 TEST_CASE("Resilience: demo data injection runs without crash", "[resilience]") {

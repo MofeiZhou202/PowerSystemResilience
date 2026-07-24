@@ -1,0 +1,78 @@
+{
+  "schema_version": "1.0",
+  "evaluation_id": "shaanxi_weather_generator_knn_development_v1",
+  "role": "knn_neighbor_count_development_against_frozen_v2_baseline",
+  "target": "held_out_NEX_GDDP_CMIP6_days_are_a_generator_target_not_observational_truth",
+  "period": {"start": "1985-01-01", "end": "2014-12-31"},
+  "cross_validation": {
+    "method": "leave_one_nonoverlapping_five_year_block_out",
+    "block_years": 5,
+    "folds": 6,
+    "exclude_transitions_across_removed_blocks": true
+  },
+  "members_per_fold": 20,
+  "base_seed": 20260724,
+  "member_seed_pairing": "common_within_fold_and_member_across_variants",
+  "score_definition": "gcm_skill_screening.json",
+  "aggregation": "score_each_five_year_member_against_the_held_out_block_then_average_members_within_fold_and_equal_weight_the_six_folds",
+  "variants": [
+    {
+      "id": "full",
+      "generator": "frozen_var_block_v2",
+      "description": "frozen one-state full-VAR seven-day residual-block baseline",
+      "state_count": 1,
+      "diagonal_autoregression": false,
+      "block_length_days": 7,
+      "independent_residual_columns": false,
+      "monthly_iid": false
+    },
+    {
+      "id": "knn_k10",
+      "generator": "seasonal_multivariate_knn_analog",
+      "description": "season-conditioned multivariate analog with 10 neighbors",
+      "neighbor_count": 10,
+      "rank_weight_exponent": 1.0
+    },
+    {
+      "id": "knn_k25",
+      "generator": "seasonal_multivariate_knn_analog",
+      "description": "season-conditioned multivariate analog with 25 neighbors",
+      "neighbor_count": 25,
+      "rank_weight_exponent": 1.0
+    },
+    {
+      "id": "knn_k50",
+      "generator": "seasonal_multivariate_knn_analog",
+      "description": "season-conditioned multivariate analog with 50 neighbors",
+      "neighbor_count": 50,
+      "rank_weight_exponent": 1.0
+    },
+    {
+      "id": "knn_k100",
+      "generator": "seasonal_multivariate_knn_analog",
+      "description": "season-conditioned multivariate analog with 100 neighbors",
+      "neighbor_count": 100,
+      "rank_weight_exponent": 1.0
+    }
+  ],
+  "reporting": {
+    "primary": "mean_composite_score_across_equal_weight_fold_means",
+    "uncertainty": ["fold_standard_deviation", "fold_minimum", "fold_maximum"],
+    "pairing": "common_seed_foldwise_comparison",
+    "automatic_method_selection": false,
+    "significance_claim": false
+  },
+  "selection_guard": {
+    "development_gcms": ["EC-Earth3", "MPI-ESM1-2-HR", "GFDL-ESM4"],
+    "select_neighbor_count_only_after_all_12_gcm_site_units_complete": true,
+    "freeze_before_knn_results_on_ACCESS_CM2_and_MRI_ESM2_0": true,
+    "final_publication_requires_additional_gcm_level_outer_evaluation": true
+  },
+  "interpretation_limits": [
+    "This tunes KNN hyperparameters and is not final generalization evidence.",
+    "The same units cannot both tune neighbor count and provide an unbiased final performance claim.",
+    "ACCESS-CM2 and MRI-ESM2-0 KNN results must remain unseen until the neighbor count is frozen.",
+    "Additional GCMs are required for the final GCM-level outer comparison.",
+    "No result assigns probabilities to GCMs or SSPs."
+  ]
+}

@@ -1,0 +1,245 @@
+{
+  "schema_version": "1.0",
+  "study_id": "shaanxi_climate_state_conditioned_pilot",
+  "created_utc": "2026-07-24T00:00:00Z",
+  "coordinate_reference_system": "EPSG:4326",
+  "coordinate_order": ["west", "south", "east", "north"],
+  "data_root": "data/climate_shaanxi",
+  "spatial_design": {
+    "mode": "representative_points",
+    "acquisition_extent": [105.0, 31.2, 111.8, 40.1],
+    "bulk_nex_request_extent": [106.9, 32.6, 109.8, 38.4],
+    "bulk_nex_request_strategy": {
+      "method": "annual_variable_corridor_bbox_then_nearest_point_subset",
+      "rationale": "Reduce the full pilot from 10800 point requests to 2700 annual corridor requests while retaining all four registered sites.",
+      "measured_smoke_object": "ACCESS-CM2 historical pr 1985 v2.0",
+      "measured_content_length_bytes": 231453,
+      "measured_utc": "2026-07-24T01:55:09Z",
+      "estimated_full_pilot_transfer_mib": 596.0,
+      "estimate_warning": "Single-variable compression extrapolation only; enforce a preflight quota before bulk retrieval."
+    },
+    "province_extent_unbuffered": [105.5, 31.7, 111.3, 39.6],
+    "buffer_degrees": 0.5,
+    "disclaimer": "Bounding boxes are acquisition supports, not administrative boundaries or asset-scale exposure polygons.",
+    "zones": [
+      {
+        "id": "northern_shaanxi",
+        "label": "Northern Shaanxi / Yulin-Loess Plateau",
+        "bbox": [107.2, 35.5, 111.3, 39.6],
+        "pathways": ["heat", "drought", "low_wind", "pv_temperature", "pv_soiling", "water_stress"],
+        "sites": [
+          {"id": "yulin", "label": "Yulin", "longitude": 109.7346, "latitude": 38.2854}
+        ]
+      },
+      {
+        "id": "guanzhong",
+        "label": "Guanzhong / Xi'an load center",
+        "bbox": [106.5, 33.5, 110.6, 35.5],
+        "pathways": ["heatwave", "warm_night", "cooling_load", "thermal_derating"],
+        "sites": [
+          {"id": "xian", "label": "Xi'an", "longitude": 108.9398, "latitude": 34.3416}
+        ]
+      },
+      {
+        "id": "qinba",
+        "label": "Southern Shaanxi / Qinba",
+        "bbox": [105.5, 31.7, 110.2, 33.8],
+        "pathways": ["extreme_precipitation", "flood", "landslide", "correlated_outage", "repair_access"],
+        "sites": [
+          {"id": "hanzhong", "label": "Hanzhong", "longitude": 107.0238, "latitude": 33.0676},
+          {"id": "ankang", "label": "Ankang", "longitude": 109.0293, "latitude": 32.6847}
+        ]
+      }
+    ]
+  },
+  "periods": {
+    "reference": {"start": "1985-01-01", "end": "2014-12-31", "role": "bias_adjustment_and_training"},
+    "future_pilot": {"start": "2031-01-01", "end": "2060-12-31", "role": "initial_future_evaluation"},
+    "future_extension": {"start": "2071-01-01", "end": "2100-12-31", "role": "post_pilot_extension"}
+  },
+  "climate_states": {
+    "pilot_ssps": ["ssp245", "ssp585"],
+    "extension_ssps": ["ssp126", "ssp370"],
+    "pilot_gcms": ["ACCESS-CM2", "EC-Earth3", "GFDL-ESM4", "MPI-ESM1-2-HR", "MRI-ESM2-0"],
+    "outer_evaluation_gcms": ["CanESM5", "CNRM-CM6-1", "IPSL-CM6A-LR", "MIROC6", "NorESM2-MM", "FGOALS-g3"],
+    "gcm_realizations": {
+      "ACCESS-CM2": "r1i1p1f1",
+      "EC-Earth3": "r1i1p1f1",
+      "GFDL-ESM4": "r1i1p1f1",
+      "MPI-ESM1-2-HR": "r1i1p1f1",
+      "MRI-ESM2-0": "r1i1p1f1",
+      "CanESM5": "r1i1p1f1",
+      "CNRM-CM6-1": "r1i1p1f2",
+      "IPSL-CM6A-LR": "r1i1p1f1",
+      "MIROC6": "r1i1p1f1",
+      "NorESM2-MM": "r1i1p1f1",
+      "FGOALS-g3": "r3i1p1f1"
+    },
+    "weather_generator_evaluation_roles": {
+      "method_development": ["EC-Earth3", "MPI-ESM1-2-HR", "GFDL-ESM4"],
+      "frozen_confirmation": ["ACCESS-CM2", "MRI-ESM2-0"],
+      "outer_evaluation": ["CanESM5", "CNRM-CM6-1", "IPSL-CM6A-LR", "MIROC6", "NorESM2-MM", "FGOALS-g3"]
+    },
+    "outer_evaluation_exclusions": [
+      {
+        "model": "CESM2",
+        "realization": "r4i1p1f1",
+        "reason": "NEX-GDDP-CMIP6 exposes tas but no tasmax or tasmin directories for historical, ssp245, or ssp585; it fails the frozen six-variable completeness gate.",
+        "catalog_audit_utc": "2026-07-24T10:43:12Z"
+      },
+      {
+        "model": "UKESM1-0-LL",
+        "realization": "r1i1p1f2",
+        "reason": "The complete 360_day archive passed acquisition QC, but the frozen generator protocol only defines 365-day fitting and five-year blocks. No UKESM generator score was produced; introducing an unplanned 360-to-365 transform after outer evaluation began was prohibited.",
+        "eligibility_decision_utc": "2026-07-24T12:09:00Z"
+      },
+      {
+        "model": "BCC-CSM2-MR",
+        "realization": "r1i1p1f1",
+        "reason": "Replacement screening found no hurs directory for historical, ssp245, or ssp585, so the model fails the frozen six-variable gate.",
+        "catalog_screen_utc": "2026-07-24T12:10:00Z"
+      }
+    ],
+    "outer_evaluation_access_rule": "The outer-evaluation GCMs may be catalog-audited and staged only after the KNN K=10 and seasonal VAR baselines are frozen; no hyperparameter or method choice may use their evaluation scores.",
+    "outer_evaluation_status": "complete_24_GCM_site_units_mixed_result_no_post_outer_selection",
+    "selection_status": "pre_screening_pilot",
+    "selection_rule": "Retain or replace models only after historical marginal, dependence, spell-duration, and regional-change-signal screening; do not treat GCMs or SSPs as equiprobable outcomes."
+  },
+  "variables": [
+    {
+      "id": "tasmax",
+      "standard_name": "air_temperature",
+      "target_units": "degC",
+      "target_frequency": "daily",
+      "required": true,
+      "role": ["heatwave", "load", "equipment_derating"],
+      "era5_land": {"inputs": ["2m_temperature"], "aggregation": "daily_max"},
+      "nex_gddp_cmip6": {"variable": "tasmax", "native_units": "K"}
+    },
+    {
+      "id": "tasmin",
+      "standard_name": "air_temperature",
+      "target_units": "degC",
+      "target_frequency": "daily",
+      "required": true,
+      "role": ["warm_night", "load", "recovery"],
+      "era5_land": {"inputs": ["2m_temperature"], "aggregation": "daily_min"},
+      "nex_gddp_cmip6": {"variable": "tasmin", "native_units": "K"}
+    },
+    {
+      "id": "hurs",
+      "standard_name": "relative_humidity",
+      "target_units": "%",
+      "target_frequency": "daily",
+      "required": true,
+      "role": ["humid_heat", "load"],
+      "era5_land": {"inputs": ["2m_temperature", "2m_dewpoint_temperature"], "aggregation": "derive_hourly_then_daily_mean"},
+      "nex_gddp_cmip6": {"variable": "hurs", "native_units": "%"}
+    },
+    {
+      "id": "sfcWind",
+      "standard_name": "wind_speed",
+      "target_units": "m s-1",
+      "target_frequency": "daily",
+      "required": true,
+      "role": ["low_wind", "wind_generation", "thermal_cooling"],
+      "era5_land": {"inputs": ["10m_u_component_of_wind", "10m_v_component_of_wind"], "aggregation": "vector_magnitude_then_daily_mean"},
+      "nex_gddp_cmip6": {"variable": "sfcWind", "native_units": "m s-1"}
+    },
+    {
+      "id": "rsds",
+      "standard_name": "surface_downwelling_shortwave_flux_in_air",
+      "target_units": "W m-2",
+      "target_frequency": "daily",
+      "required": true,
+      "role": ["pv_generation", "heat_balance", "potential_evapotranspiration"],
+      "era5_land": {"inputs": ["surface_solar_radiation_downwards"], "aggregation": "clip_declared_packing_noise_to_zero_then_sum_hourly_deaccumulated_energy_by_utc_day_and_divide_by_86400"},
+      "nex_gddp_cmip6": {"variable": "rsds", "native_units": "W m-2"}
+    },
+    {
+      "id": "pr",
+      "standard_name": "precipitation_flux",
+      "target_units": "mm day-1",
+      "target_frequency": "daily",
+      "required": true,
+      "role": ["dry_spell", "extreme_precipitation", "flood", "drought"],
+      "era5_land": {"inputs": ["total_precipitation"], "aggregation": "clip_declared_packing_noise_to_zero_then_sum_hourly_deaccumulated_depth_by_utc_day_and_convert_m_to_mm"},
+      "nex_gddp_cmip6": {"variable": "pr", "native_units": "kg m-2 s-1"}
+    },
+    {
+      "id": "rootzone_soil_moisture",
+      "standard_name": "volume_fraction_of_water_in_soil",
+      "target_units": "m3 m-3",
+      "target_frequency": "daily",
+      "required": false,
+      "role": ["historical_drought_evaluation"],
+      "era5_land": {"inputs": ["volumetric_soil_water_level_1", "volumetric_soil_water_level_2", "volumetric_soil_water_level_3"], "aggregation": "depth_weighted_daily_mean"},
+      "nex_gddp_cmip6": null
+    },
+    {
+      "id": "drought_index",
+      "standard_name": "standardized_climatic_water_balance_index",
+      "target_units": "1",
+      "target_frequency": "monthly_and_daily_state",
+      "required": true,
+      "role": ["hot_dry_low_wind_compound_state"],
+      "derived_from": ["pr", "tasmax", "tasmin", "hurs", "sfcWind", "rsds"],
+      "method_status": "to_be_locked_after_PET_and_accumulation_scale_sensitivity_analysis"
+    }
+  ],
+  "quality_gates": {
+    "maximum_missing_fraction": 0.001,
+    "require_monotonic_unique_time": true,
+    "require_expected_time_coverage": true,
+    "require_declared_calendar": true,
+    "accepted_calendars": ["proleptic_gregorian", "gregorian", "standard", "365_day", "noleap", "360_day"],
+    "reject_mixed_calendars_within_series": true,
+    "reject_unit_conflicts": true,
+    "require_sha256": true,
+    "require_query_record": true,
+    "require_dataset_version_or_retrieval_date": true
+  },
+  "harmonization": {
+    "daily_time_anchor_utc": "12:00:00",
+    "nex_gddp_cmip6": {
+      "tasmax": "degC = K - 273.15",
+      "tasmin": "degC = K - 273.15",
+      "hurs": "clip_to_0_100_percent_and_report_count",
+      "sfcWind": "identity_m_s-1",
+      "rsds": "identity_W_m-2",
+      "pr": "mm_day-1 = kg_m-2_s-1 * 86400"
+    },
+    "cross_variable_gates": [
+      "identical_daily_time_axis",
+      "identical_selected_grid_cell",
+      "tasmin_not_greater_than_tasmax"
+    ],
+    "era5_land_accumulation_status": "time_series_product_labels_precipitation_and_solar_radiation_as_deaccumulated; verify units and hourly semantics in retrieved files before harmonization"
+  },
+  "acquisition_sharding": {
+    "era5_land": {
+      "dataset_id": "reanalysis-era5-land-timeseries",
+      "unit": "site_variable_group_reference_period_then_lossless_annual_partition",
+      "groups": ["temperature_humidity", "precipitation", "solar_radiation", "wind"],
+      "reason": "The ordinary gridded ERA5-Land request exceeded CDS cost limits. The ARCO time-series product accepts exact point coordinates and is optimized for long point series.",
+      "expected_pilot_request_count": 16
+    },
+    "nex_gddp_cmip6": {
+      "unit": "model_experiment_variable_year_corridor_bbox",
+      "expected_pilot_request_count": 2700
+    }
+  },
+  "compound_diagnostic_smoke_test": {
+    "tasmax_hot_day_threshold_degC": 35.0,
+    "tasmin_warm_night_threshold_degC": 25.0,
+    "dry_day_threshold_mm_day-1": 1.0,
+    "low_wind_threshold_m_s-1": 2.0,
+    "status": "pipeline_smoke_test_only_not_final_event_definition"
+  },
+  "probability_semantics": {
+    "conditional_distribution": "P(weather_path | SSP, GCM, epoch)",
+    "ssp_probabilities": null,
+    "gcm_probabilities": null,
+    "instruction": "Never pool SSP or GCM states with equal probability unless an explicit, justified ambiguity model is declared."
+  }
+}

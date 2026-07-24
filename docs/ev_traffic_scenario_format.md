@@ -31,7 +31,7 @@ must be unique within their own collection.
 | Collection | Required fields | Meaning and units |
 |---|---|---|
 | `traffic.nodes[]` | `index` | Traffic vertex. Optional `name`, `x`, `y` control the GUI layout. |
-| `traffic.links[]` | `index`, `from_node`, `to_node`, `length_km`, `free_flow_time_hr`, `capacity_veh_per_hr` | Directed road segment. `jam_vehicles` is the maximum segment occupancy used by CTM. |
+| `traffic.links[]` | `index`, `from_node`, `to_node`, `length_km`, `free_flow_time_hr`, `capacity_veh_per_hr` | Directed road segment. `jam_vehicles` is the maximum segment occupancy used by CTM. Optional `free_flow_time_profile_hr`, `capacity_profile_veh_per_hr`, and `availability_profile` arrays are indexed by the simulation step; CTM substeps inherit the value of their parent simulation step. |
 | `routes[]` | `index`, `origin_node`, `destination_node`, `link_indices` | Ordered directed path. Consecutive links must form a continuous origin-to-destination chain. |
 | `routes[].charging_stops[]` | `station_id`, `requested_energy_kwh_per_vehicle` | Charging action along the route. `station_id` must match an AC charging station in the current power-system model. |
 | `demands[]` | `index`, `origin_node`, `destination_node`, `departure_step`, `vehicles` | EV OD demand. `candidate_route_indices` selects eligible routes; an empty list uses every matching OD route. |

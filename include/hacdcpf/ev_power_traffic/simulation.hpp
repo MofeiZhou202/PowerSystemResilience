@@ -92,6 +92,33 @@ EVPowerTrafficResult simulate_ev_power_traffic(
     const EVPowerTrafficProblem& problem,
     const EVPowerTrafficOptions& options = {});
 
+/// Fixed route-flow input for a single CTM forward evaluation.  Values are
+/// vehicles assigned to a route for each demand; omitted demand is unassigned.
+struct CTMForwardAssignment {
+  std::unordered_map<int, std::unordered_map<int, double>> ev_route_flow;
+  std::unordered_map<int, std::unordered_map<int, double>> icv_route_flow;
+};
+
+struct CTMForwardResult {
+  bool valid{false};
+  std::string status;
+  double requested_vehicles{0.0};
+  double assigned_vehicles{0.0};
+  double admitted_vehicles{0.0};
+  double unassigned_vehicles{0.0};
+  double source_entry_shortfall_vehicles{0.0};
+  CTMSimulationResult simulation;
+};
+
+/// Evaluate a fixed route assignment under CTM congestion dynamics without
+/// a DUE or route-choice iteration.  This is the forward traffic oracle used
+/// by route-committed two-stage studies.
+CTMForwardResult simulate_ev_power_traffic_ctm_forward(
+    const EVPowerTrafficProblem& problem,
+    const CTMForwardAssignment& assignment,
+    const EVPowerTrafficOptions& ev_options = {},
+    const CTMOptions& ctm_options = {});
+
 // CTM-based propagation with Dynamic User Equilibrium (DUE).
 //
 // Uses Daganzo's Cell Transmission Model for traffic dynamics and

@@ -47,6 +47,37 @@ inline double link_free_flow_speed(const TrafficLink& link) noexcept {
   return 1.0e6;
 }
 
+inline double link_free_flow_time_hr(const TrafficLink& link,
+                                     int simulation_step) noexcept {
+  if (simulation_step >= 0 &&
+      simulation_step <
+          static_cast<int>(link.free_flow_time_profile_hr.size())) {
+    const double value = link.free_flow_time_profile_hr[
+        static_cast<std::size_t>(simulation_step)];
+    if (value > kTol) return value;
+  }
+  return link.free_flow_time_hr;
+}
+
+inline double link_free_flow_speed(const TrafficLink& link,
+                                   int simulation_step) noexcept {
+  const double time_hr = link_free_flow_time_hr(link, simulation_step);
+  if (link.length_km > kTol && time_hr > kTol) {
+    return link.length_km / time_hr;
+  }
+  return 1.0e6;
+}
+
+inline double link_max_free_flow_speed(const TrafficLink& link) noexcept {
+  double speed = link_free_flow_speed(link);
+  for (const double time_hr : link.free_flow_time_profile_hr) {
+    if (link.length_km > kTol && time_hr > kTol) {
+      speed = std::max(speed, link.length_km / time_hr);
+    }
+  }
+  return speed;
+}
+
 /// Choose CTM sub-step Δt_ctm satisfying the CFL stability condition.
 ///
 /// The returned step is always an exact integer divisor of dt_sim, so that
@@ -60,7 +91,7 @@ inline double choose_ctm_dt(const EVPowerTrafficProblem& problem,
   if (ctm_opts.dt_ctm_hr > kTol) return ctm_opts.dt_ctm_hr;
   double min_cfl = dt_sim;
   for (const auto& lnk : problem.traffic.links) {
-    const double vf = link_free_flow_speed(lnk);
+    const double vf = link_max_free_flow_speed(lnk);
     if (vf < kTol) continue;
     const double delta = lnk.length_km > kTol
         ? lnk.length_km / static_cast<double>(ctm_opts.n_cells_per_link > 0
@@ -1208,7 +1239,7 @@ struct GenerateRoutesOptions {
   double default_max_charge_kw{50.0};
 };
 
-inline EVPowerTrafficProblem generate_candidate_routes(
+inline EVPowerTrafficProblem generate_candidate_routes_internal(
     const EVPowerTrafficProblem& problem,
     const EVPowerTrafficOptions& opts,
     const GenerateRoutesOptions& gen = {})
@@ -1311,7 +1342,7 @@ inline EVPowerTrafficProblem maybe_generate_candidate_routes(
   if (!opts.auto_generate_routes) return problem;
   GenerateRoutesOptions gen;
   gen.K = opts.k_shortest_paths;
-  return generate_candidate_routes(problem, opts, gen);
+  return generate_candidate_routes_internal(problem, opts, gen);
 }
 
 // ── Station spillback helper (eq:spillback-receiving) ─────────────────────

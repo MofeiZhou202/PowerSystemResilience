@@ -1,0 +1,99 @@
+{
+  "schema_version": "1.0",
+  "sources": [
+    {
+      "id": "era5_land",
+      "title": "ERA5 Land hourly time-series data from 1950 to present",
+      "provider": "Copernicus Climate Change Service",
+      "dataset_id": "reanalysis-era5-land-timeseries",
+      "temporal_resolution": "hourly",
+      "nominal_spatial_resolution_degrees": 0.1,
+      "access_method": "CDS API",
+      "access_url": "https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land-timeseries?tab=overview",
+      "credential_requirement": "CDS account, accepted terms, and configured ~/.cdsapirc",
+      "license_note": "Record the CDS dataset terms and citation shown at retrieval time.",
+      "version_policy": "Record retrieval timestamp and CDS request because the service exposes a continuously maintained product.",
+      "variables": {
+        "2m_temperature": {"netcdf_names": ["t2m", "2m_temperature"], "accepted_units": ["K"], "physical_range": [180.0, 350.0]},
+        "2m_dewpoint_temperature": {"netcdf_names": ["d2m", "2m_dewpoint_temperature"], "accepted_units": ["K"], "physical_range": [150.0, 350.0]},
+        "10m_u_component_of_wind": {"netcdf_names": ["u10", "10m_u_component_of_wind"], "accepted_units": ["m s**-1", "m s-1"], "physical_range": [-100.0, 100.0]},
+        "10m_v_component_of_wind": {"netcdf_names": ["v10", "10m_v_component_of_wind"], "accepted_units": ["m s**-1", "m s-1"], "physical_range": [-100.0, 100.0]},
+        "surface_solar_radiation_downwards": {"netcdf_names": ["ssrd", "surface_solar_radiation_downwards"], "accepted_units": ["J m**-2", "J m-2"], "physical_range": [0.0, 10000000.0], "physical_range_tolerance": 5.0, "accumulation_semantics": "Hourly de-accumulated energy according to the CDS time-series product label; divide by 3600 for hourly mean W m-2 or sum by UTC day and divide by 86400 for daily mean W m-2."},
+        "total_precipitation": {"netcdf_names": ["tp", "total_precipitation"], "accepted_units": ["m"], "physical_range": [0.0, 1.0], "physical_range_tolerance": 1e-7, "accumulation_semantics": "Hourly de-accumulated depth according to the CDS time-series product label; clip packing noise within the declared tolerance to zero before daily summation."},
+        "volumetric_soil_water_level_1": {"netcdf_names": ["swvl1", "volumetric_soil_water_level_1"], "accepted_units": ["m**3 m**-3", "m3 m-3"], "physical_range": [0.0, 1.0]},
+        "volumetric_soil_water_level_2": {"netcdf_names": ["swvl2", "volumetric_soil_water_level_2"], "accepted_units": ["m**3 m**-3", "m3 m-3"], "physical_range": [0.0, 1.0]},
+        "volumetric_soil_water_level_3": {"netcdf_names": ["swvl3", "volumetric_soil_water_level_3"], "accepted_units": ["m**3 m**-3", "m3 m-3"], "physical_range": [0.0, 1.0]}
+      },
+      "pilot_status": "authenticated_point_request_verified"
+    },
+    {
+      "id": "nex_gddp_cmip6",
+      "title": "NASA Earth Exchange Global Daily Downscaled Projections CMIP6",
+      "provider": "NASA Center for Climate Simulation",
+      "dataset_id": "NEX-GDDP-CMIP6",
+      "temporal_resolution": "daily",
+      "nominal_spatial_resolution_degrees": 0.25,
+      "access_method": "NCCS THREDDS NetCDF Subset Service; AWS S3 is a secondary full-object source",
+      "access_url": "https://ds.nccs.nasa.gov/thredds/catalog/AMES/NEX/GDDP-CMIP6/catalog.html",
+      "credential_requirement": "No credential was required for the NCCS catalog and point-subset smoke request on 2026-07-24; recheck if service policy changes.",
+      "license_note": "CMIP6 model licensing can differ by institution; preserve source model license and citation metadata.",
+      "version_policy": "Use annual v2.0 files and pin product version, model-specific realization from the study registry, grid label, variable, experiment, year, catalog URL, and exact NCSS request URL.",
+      "pilot_product_version": "2.0",
+      "pilot_realization": "r1i1p1f1",
+      "catalog_checked_utc": "2026-07-24T01:05:47Z",
+      "variables": {
+        "tasmax": {"netcdf_names": ["tasmax"], "accepted_units": ["K"], "physical_range": [180.0, 350.0]},
+        "tasmin": {"netcdf_names": ["tasmin"], "accepted_units": ["K"], "physical_range": [180.0, 350.0]},
+        "hurs": {"netcdf_names": ["hurs"], "accepted_units": ["%", "percent"], "physical_range": [0.0, 100.0], "physical_range_tolerance": 2.0, "harmonization_rule": "preserve raw values; clip values outside 0-100 percent only in canonical products and report the count"},
+        "sfcWind": {"netcdf_names": ["sfcWind"], "accepted_units": ["m s-1", "m s**-1"], "physical_range": [0.0, 100.0]},
+        "rsds": {"netcdf_names": ["rsds"], "accepted_units": ["W m-2", "W m**-2"], "physical_range": [0.0, 1500.0]},
+        "pr": {"netcdf_names": ["pr"], "accepted_units": ["kg m-2 s-1", "kg m**-2 s**-1"], "physical_range": [0.0, 0.02]}
+      },
+      "metadata_repairs": [
+        {
+          "id": "nex_v2_fgoals_g3_tasmin_missing_units_k",
+          "model": "FGOALS-g3",
+          "variable": "tasmin",
+          "match_declared_units": "",
+          "effective_units": "K",
+          "scope": "NEX-GDDP-CMIP6 annual v2.0 files for all declared experiments",
+          "policy": "Apply only when the upstream units attribute is absent. Preserve the immutable source file and reject every non-empty unit outside the accepted-unit list.",
+          "evidence_checked_utc": "2026-07-24T12:30:00Z",
+          "evidence": [
+            "NASA NCCS OPeNDAP DAS for FGOALS-g3 historical r3i1p1f1 tasmin 1985 omits all descriptive tasmin attributes including units: https://ds.nccs.nasa.gov/thredds/dodsC/AMES/NEX/GDDP-CMIP6/FGOALS-g3/historical/r3i1p1f1/tasmin/tasmin_day_FGOALS-g3_historical_r3i1p1f1_gn_1985_v2.0.nc.das",
+            "The companion FGOALS-g3 historical r3i1p1f1 tasmax 1985 DAS declares standard_name air_temperature and units K: https://ds.nccs.nasa.gov/thredds/dodsC/AMES/NEX/GDDP-CMIP6/FGOALS-g3/historical/r3i1p1f1/tasmax/tasmax_day_FGOALS-g3_historical_r3i1p1f1_gn_1985_v2.0.nc.das",
+            "All 90 staged FGOALS-g3 tasmin annual subsets across historical, ssp245, and ssp585 omit units and have temperature-scale values within the registered 180-350 K physical gate."
+          ]
+        }
+      ],
+      "pilot_status": "bulk_catalog_coverage_verified"
+    },
+    {
+      "id": "cma_station",
+      "title": "China Meteorological Administration station observations",
+      "provider": "China Meteorological Data Service Centre",
+      "dataset_id": "dataset_to_be_selected_with_access_holder",
+      "temporal_resolution": "daily_or_hourly",
+      "access_method": "licensed portal download",
+      "access_url": "https://data.cma.cn/",
+      "credential_requirement": "Institutional or personal CMA account and dataset-specific authorization.",
+      "license_note": "Do not redistribute station data unless the selected dataset license explicitly permits it.",
+      "version_policy": "Archive the dataset title, station list, variables, QC version, order identifier, and download date.",
+      "pilot_status": "manual_access_required"
+    },
+    {
+      "id": "cn05_1",
+      "title": "CN05.1 gridded observation product",
+      "provider": "Chinese research data provider; verify the authoritative distribution channel",
+      "dataset_id": "CN05.1",
+      "temporal_resolution": "daily",
+      "nominal_spatial_resolution_degrees": 0.25,
+      "access_method": "request or licensed research distribution",
+      "access_url": null,
+      "credential_requirement": "Confirm access with the authoritative custodian before use.",
+      "license_note": "Citation does not imply redistribution permission; record the supplied terms.",
+      "version_policy": "Record the exact release, variables, grid, QC statement, and supplying organization.",
+      "pilot_status": "authoritative_access_channel_unresolved"
+    }
+  ]
+}

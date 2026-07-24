@@ -62,7 +62,7 @@ CTMLinkState build_link_state(const TrafficLink& link,
   CTMLinkState ls;
   ls.link_index = link.index;
 
-  const double v_f = link_free_flow_speed(link);
+  const double v_f = link_max_free_flow_speed(link);
   ls.free_flow_speed_km_hr = v_f;
 
   const double q_max = link.capacity_veh_per_hr > kTol
@@ -199,7 +199,8 @@ CTMSimulationResult ctm_forward_pass(
     const std::unordered_map<int, int>& route_pos,
     const CTMOptions& ctm_opts,
     double dt_ctm,
-    int T_ctm) {
+    int T_ctm,
+    int steps_per_sim_step) {
 
   const int n_links = static_cast<int>(problem.traffic.links.size());
   const int n_routes = static_cast<int>(problem.routes.size());
@@ -259,10 +260,26 @@ CTMSimulationResult ctm_forward_pass(
       }
     }
   }
+  std::vector<int> route_terminal_link(static_cast<std::size_t>(n_routes), -1);
+  for (int ri = 0; ri < n_routes; ++ri) {
+    const auto& links =
+        problem.routes[static_cast<std::size_t>(ri)].link_indices;
+    if (!links.empty()) {
+      route_terminal_link[static_cast<std::size_t>(ri)] = links.back();
+    }
+  }
 
   // ── Initialise result ─────────────────────────────────────────────────
   CTMSimulationResult res;
   res.dt_ctm_hr = dt_ctm;
+  for (const auto& route : problem.routes) {
+    res.route_requested_departures[route.index] =
+        std::vector<double>(static_cast<std::size_t>(T_ctm), 0.0);
+    res.route_admitted_departures[route.index] =
+        std::vector<double>(static_cast<std::size_t>(T_ctm), 0.0);
+    res.route_terminal_arrivals[route.index] =
+        std::vector<double>(static_cast<std::size_t>(T_ctm), 0.0);
+  }
   for (const auto& lnk : problem.traffic.links) {
     (void)lnk;
     res.step_link_results.emplace_back(
@@ -295,46 +312,19 @@ CTMSimulationResult ctm_forward_pass(
 
   // ── Main time loop ────────────────────────────────────────────────────
   for (int k = 0; k < T_ctm; ++k) {
-    // 4a. Inject entering vehicles at entry cells from OD flows
-    if (k < static_cast<int>(route_flow.size())) {
-      for (int ri = 0; ri < n_routes; ++ri) {
-        const double x_rk =
-            static_cast<std::size_t>(ri) < route_flow[static_cast<std::size_t>(k)].size()
-                ? route_flow[static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)]
-                : 0.0;
-        if (x_rk <= kTol) continue;
-        const int entry_link = route_entry_link[static_cast<std::size_t>(ri)];
-        if (!link_pos.count(entry_link)) continue;
-        const std::size_t li = link_pos.at(entry_link);
-        CTMLinkState& ls = link_states[li];
-        const double q_eff = ctm_effective_capacity_veh_hr(
-          problem.traffic.links[li], k, dt_ctm);
-        const double recv = receiving(ls.cells[0].n,
-                                      ls.backward_wave_speed_km_hr,
-                                      ls.cell_length_km,
-                        q_eff,
-                                      ls.jam_occupancy_per_cell,
-                                      dt_ctm);
-        const double enter = std::min(x_rk, recv);
-        ls.cells[0].n += enter;
-        if (route_specific && !ls.cells[0].n_route.empty()) {
-          ls.cells[0].n_route[static_cast<std::size_t>(ri)] += enter;
-        }
-        res.step_link_results[static_cast<std::size_t>(k)][li].total_inflow_veh += enter;
-        // Contribute to experienced travel time (free-flow cost of entry, updated later)
-        tt_veh[static_cast<std::size_t>(ri)][static_cast<std::size_t>(k)] += enter;
-      }
-    }
-
-    // 4b. Intra-link cell propagation (cell 0 -> M-1 for each link)
+    const int profile_step = k / std::max(1, steps_per_sim_step);
+    std::vector<double> actual_link_outflow(
+        static_cast<std::size_t>(n_links), 0.0);
+    // 4a. Intra-link cell propagation (cell 0 -> M-1 for each link)
     for (std::size_t li = 0; li < static_cast<std::size_t>(n_links); ++li) {
       CTMLinkState& ls = link_states[li];
       const int M = ls.n_cells;
-      const double vf = ls.free_flow_speed_km_hr;
+      const double vf = link_free_flow_speed(
+          problem.traffic.links[li], profile_step);
       const double w  = ls.backward_wave_speed_km_hr;
       const double delta = ls.cell_length_km;
-        const double q_max = ctm_effective_capacity_veh_hr(
-          problem.traffic.links[li], k, dt_ctm);
+      const double q_max = ctm_effective_capacity_veh_hr(
+          problem.traffic.links[li], profile_step, dt_ctm);
       const double n_jam = ls.jam_occupancy_per_cell;
 
       // Compute inter-cell flows y_{a,m->m+1} for m = 0..M-2
@@ -348,6 +338,28 @@ CTMSimulationResult ctm_forward_pass(
         y[static_cast<std::size_t>(m)] = std::min(S, R);
       }
 
+      // Commodity flows must move with the aggregate CTM flow.  Scaling each
+      // cell's old commodity vector after changing only aggregate occupancy
+      // loses every route when an initially empty downstream cell receives
+      // its first vehicles.  Snapshot the pre-flow state and transport the
+      // route proportions explicitly across each cell boundary.
+      std::vector<std::vector<double>> y_route;
+      if (route_specific) {
+        y_route.assign(
+            static_cast<std::size_t>(M - 1),
+            std::vector<double>(static_cast<std::size_t>(n_routes), 0.0));
+        for (int m = 0; m < M - 1; ++m) {
+          const auto& upstream = ls.cells[static_cast<std::size_t>(m)];
+          if (upstream.n <= kTol || upstream.n_route.empty()) continue;
+          for (int ri = 0; ri < n_routes; ++ri) {
+            y_route[static_cast<std::size_t>(m)]
+                   [static_cast<std::size_t>(ri)] =
+                y[static_cast<std::size_t>(m)] *
+                upstream.n_route[static_cast<std::size_t>(ri)] / upstream.n;
+          }
+        }
+      }
+
       // Update cell occupancies: n_{a,m,k+1} = n_{a,m,k} + inflow - outflow
       for (int m = 0; m < M; ++m) {
         const double in_flow  = (m == 0)     ? 0.0 : y[static_cast<std::size_t>(m - 1)];
@@ -356,12 +368,23 @@ CTMSimulationResult ctm_forward_pass(
         ls.cells[static_cast<std::size_t>(m)].n =
             std::max(0.0, ls.cells[static_cast<std::size_t>(m)].n + delta_n);
 
-        // Propagate per-route shares proportionally
         if (route_specific) {
           auto& nr = ls.cells[static_cast<std::size_t>(m)].n_route;
           if (!nr.empty()) {
+            for (int ri = 0; ri < n_routes; ++ri) {
+              const double route_in = m == 0
+                  ? 0.0
+                  : y_route[static_cast<std::size_t>(m - 1)]
+                           [static_cast<std::size_t>(ri)];
+              const double route_out = m == M - 1
+                  ? 0.0
+                  : y_route[static_cast<std::size_t>(m)]
+                           [static_cast<std::size_t>(ri)];
+              nr[static_cast<std::size_t>(ri)] = std::max(
+                  0.0, nr[static_cast<std::size_t>(ri)] +
+                           route_in - route_out);
+            }
             const double n_tot = ls.cells[static_cast<std::size_t>(m)].n;
-            // Scale per-route to sum to aggregate (renormalise)
             double sum_r = 0.0;
             for (double v : nr) sum_r += v;
             if (sum_r > kTol) {
@@ -375,7 +398,7 @@ CTMSimulationResult ctm_forward_pass(
       }
     }
 
-    // 4c. Inter-link flows at nodes — SMCA diverge/merge general node model
+    // 4b. Inter-link flows at nodes — SMCA diverge/merge general node model
     //
     // Implements the simultaneous multi-link capacity allocation (SMCA) node
     // model from Daganzo (1995).  For each network node:
@@ -427,7 +450,81 @@ CTMSimulationResult ctm_forward_pass(
         if (lnk.to_node == nid)   in_links.push_back(li);
         if (lnk.from_node == nid) out_links.push_back(li);
       }
-      if (in_links.empty() || out_links.empty()) continue;
+      if (in_links.empty()) continue;
+
+      // Remove route commodities that have reached their terminal node.  A
+      // terminal exit and a continuing turn share the same link sending
+      // capacity, so the residual node-model budget is reduced accordingly.
+      std::vector<double> continuing_sending_budget(
+          static_cast<std::size_t>(n_links),
+          std::numeric_limits<double>::infinity());
+      for (const std::size_t a_li : in_links) {
+        CTMLinkState& a_ls = link_states[a_li];
+        CTMLinkCell& last_cell =
+            a_ls.cells[static_cast<std::size_t>(a_ls.n_cells - 1)];
+        const double total_sending = sending(
+            last_cell.n,
+            link_free_flow_speed(problem.traffic.links[a_li], profile_step),
+            a_ls.cell_length_km,
+            ctm_effective_capacity_veh_hr(
+                problem.traffic.links[a_li], profile_step, dt_ctm),
+            dt_ctm);
+        continuing_sending_budget[a_li] = total_sending;
+        if (!route_specific || last_cell.n_route.empty() ||
+            total_sending <= kTol || last_cell.n <= kTol) {
+          continue;
+        }
+
+        const int physical_link = problem.traffic.links[a_li].index;
+        double terminal_occupancy = 0.0;
+        for (int ri = 0; ri < n_routes; ++ri) {
+          if (route_terminal_link[static_cast<std::size_t>(ri)] ==
+              physical_link) {
+            terminal_occupancy +=
+                last_cell.n_route[static_cast<std::size_t>(ri)];
+          }
+        }
+        if (terminal_occupancy <= kTol) continue;
+
+        const double terminal_exit = std::min(
+            terminal_occupancy,
+            total_sending * terminal_occupancy / last_cell.n);
+        double removed = 0.0;
+        for (int ri = 0; ri < n_routes; ++ri) {
+          if (route_terminal_link[static_cast<std::size_t>(ri)] !=
+              physical_link) {
+            continue;
+          }
+          const double route_occupancy =
+              last_cell.n_route[static_cast<std::size_t>(ri)];
+          if (route_occupancy <= kTol) continue;
+          const double route_exit = std::min(
+              route_occupancy,
+              terminal_exit * route_occupancy / terminal_occupancy);
+          last_cell.n_route[static_cast<std::size_t>(ri)] =
+              std::max(0.0, route_occupancy - route_exit);
+          removed += route_exit;
+          const int route_id =
+              problem.routes[static_cast<std::size_t>(ri)].index;
+          res.route_terminal_arrivals.at(route_id)
+              [static_cast<std::size_t>(k)] += route_exit;
+          if (route_stop_link.count(ri)) {
+            for (const auto& [approach_link, station_id] :
+                 route_stop_link.at(ri)) {
+              if (approach_link == physical_link &&
+                  res.station_arrivals.count(station_id)) {
+                res.station_arrivals.at(station_id)
+                    [static_cast<std::size_t>(k)] += route_exit;
+              }
+            }
+          }
+        }
+        last_cell.n = std::max(0.0, last_cell.n - removed);
+        actual_link_outflow[a_li] += removed;
+        continuing_sending_budget[a_li] =
+            std::max(0.0, total_sending - removed);
+      }
+      if (out_links.empty()) continue;
 
       // Compute R_b for each out-link (first-cell receiving capacity).
       // Apply spillback reduction for access links (eq:spillback-receiving).
@@ -438,7 +535,8 @@ CTMSimulationResult ctm_forward_pass(
                             b_ls.backward_wave_speed_km_hr,
                             b_ls.cell_length_km,
                             ctm_effective_capacity_veh_hr(
-                                problem.traffic.links[out_links[oi]], k, dt_ctm),
+                                problem.traffic.links[out_links[oi]],
+                                profile_step, dt_ctm),
                             b_ls.jam_occupancy_per_cell,
                             dt_ctm);
         // Spillback: reduce receiving capacity of access links
@@ -458,6 +556,7 @@ CTMSimulationResult ctm_forward_pass(
         std::vector<double> demand;   // demand_per_out (unnormalized)
         std::vector<double> n_route_last;  // per-route occupancy in last cell
         double n_last{0.0};                // total last-cell occupancy
+        double route_demand_total{0.0};
       };
       std::vector<InLinkData> in_data;
       in_data.reserve(in_links.size());
@@ -471,11 +570,14 @@ CTMSimulationResult ctm_forward_pass(
         InLinkData d;
         d.li = a_li;
         d.S_a = sending(last_cell.n,
-                        a_ls.free_flow_speed_km_hr,
+                        link_free_flow_speed(problem.traffic.links[a_li],
+                                             profile_step),
                         a_ls.cell_length_km,
                         ctm_effective_capacity_veh_hr(
-                            problem.traffic.links[a_li], k, dt_ctm),
+                            problem.traffic.links[a_li], profile_step,
+                            dt_ctm),
                         dt_ctm);
+        d.S_a = std::min(d.S_a, continuing_sending_budget[a_li]);
         d.n_last = last_cell.n;
         d.n_route_last = last_cell.n_route;
         d.demand.resize(out_links.size(), 0.0);
@@ -515,6 +617,7 @@ CTMSimulationResult ctm_forward_pass(
 
         const double total_dem =
             std::accumulate(d.demand.begin(), d.demand.end(), 0.0);
+        d.route_demand_total = total_dem;
         if (total_dem <= kTol) {
           d.y_a = 0.0;
           in_data.push_back(std::move(d));
@@ -559,8 +662,12 @@ CTMSimulationResult ctm_forward_pass(
         const int M_a        = a_ls.n_cells;
         CTMLinkCell& last_cell = a_ls.cells[static_cast<std::size_t>(M_a - 1)];
 
+        std::vector<double> route_exit(
+            static_cast<std::size_t>(n_routes), 0.0);
+
         // Remove from last cell
         last_cell.n = std::max(0.0, last_cell.n - d.y_a);
+        actual_link_outflow[d.li] += d.y_a;
 
         // Distribute to downstream first cells
         for (std::size_t oi = 0; oi < out_links.size(); ++oi) {
@@ -572,13 +679,26 @@ CTMSimulationResult ctm_forward_pass(
           // Attribute to routes
           if (route_specific && !b_ls.cells[0].n_route.empty() &&
               !d.n_route_last.empty()) {
-            const double sum_r = d.n_last;  // total last-cell occ before exit
+            const int a_idx = problem.traffic.links[d.li].index;
+            const int b_idx = problem.traffic.links[out_links[oi]].index;
             for (int ri = 0; ri < n_routes; ++ri) {
               const double frac_r =
-                  (sum_r > kTol && ri < static_cast<int>(d.n_route_last.size()))
-                      ? d.n_route_last[static_cast<std::size_t>(ri)] / sum_r
+                  (d.route_demand_total > kTol &&
+                   ri < static_cast<int>(d.n_route_last.size()))
+                      ? d.n_route_last[static_cast<std::size_t>(ri)] /
+                            d.route_demand_total
                       : (n_routes > 0 ? 1.0 / n_routes : 0.0);
-              b_ls.cells[0].n_route[static_cast<std::size_t>(ri)] += add * frac_r;
+              double turn = 0.0;
+              if (tfm.count(nid) && tfm.at(nid).count(a_idx) &&
+                  tfm.at(nid).at(a_idx).count(b_idx)) {
+                const auto& theta = tfm.at(nid).at(a_idx).at(b_idx);
+                if (ri < static_cast<int>(theta.size())) {
+                  turn = theta[static_cast<std::size_t>(ri)];
+                }
+              }
+              const double route_add = d.y_a * frac_r * turn;
+              b_ls.cells[0].n_route[static_cast<std::size_t>(ri)] += route_add;
+              route_exit[static_cast<std::size_t>(ri)] += route_add;
             }
           }
 
@@ -586,40 +706,59 @@ CTMSimulationResult ctm_forward_pass(
               .total_inflow_veh += add;
         }
 
-        // Update per-route last-cell occupancy (scale by exit fraction)
-        if (!last_cell.n_route.empty() && d.n_last > kTol) {
-          const double scale = last_cell.n / (d.n_last + kTol);
-          for (double& v : last_cell.n_route) v = std::max(0.0, v * scale);
+        // Remove exactly the same commodity flows that were inserted into
+        // downstream cells.  This preserves every route total through merges
+        // and diverges instead of changing class shares by renormalisation.
+        if (!last_cell.n_route.empty()) {
+          for (int ri = 0; ri < n_routes; ++ri) {
+            last_cell.n_route[static_cast<std::size_t>(ri)] = std::max(
+                0.0, last_cell.n_route[static_cast<std::size_t>(ri)] -
+                         route_exit[static_cast<std::size_t>(ri)]);
+          }
         }
       }
     }
 
-    // 4d. Station arrival collection: last-cell exit flows attributed to stations
-    for (int ri = 0; ri < n_routes; ++ri) {
-      if (!route_stop_link.count(ri)) continue;
-      for (const auto& [approach_link, station_id] : route_stop_link.at(ri)) {
-        if (!link_pos.count(approach_link)) continue;
-        const std::size_t li = link_pos.at(approach_link);
-        const CTMLinkState& ls = link_states[li];
-        if (!res.station_arrivals.count(station_id)) continue;
-        // Estimate arrivals as sending function from last cell attributed to route r
-        const int M = ls.n_cells;
-        const double n_last = route_specific && !ls.cells[static_cast<std::size_t>(M - 1)].n_route.empty()
-                                  ? ls.cells[static_cast<std::size_t>(M - 1)].n_route[static_cast<std::size_t>(ri)]
-                                  : ls.cells[static_cast<std::size_t>(M - 1)].n;
-        const double arr = sending(n_last,
-                                    ls.free_flow_speed_km_hr,
-                                    ls.cell_length_km,
-                      ctm_effective_capacity_veh_hr(
-                        problem.traffic.links[li], k, dt_ctm),
-                                    dt_ctm);
-        if (k < static_cast<int>(res.station_arrivals.at(station_id).size())) {
-          res.station_arrivals.at(station_id)[static_cast<std::size_t>(k)] += arr;
+    // 4c. Inject source flows after propagation. A vehicle admitted during
+    // substep k enters the state at k+1 and cannot traverse the first cell or
+    // leave a one-cell entry link retroactively in the same substep.
+    if (k < static_cast<int>(route_flow.size())) {
+      for (int ri = 0; ri < n_routes; ++ri) {
+        const double x_rk =
+            static_cast<std::size_t>(ri) <
+                    route_flow[static_cast<std::size_t>(k)].size()
+                ? route_flow[static_cast<std::size_t>(k)]
+                            [static_cast<std::size_t>(ri)]
+                : 0.0;
+        if (x_rk <= kTol) continue;
+        const int route_id =
+            problem.routes[static_cast<std::size_t>(ri)].index;
+        res.route_requested_departures[route_id][static_cast<std::size_t>(k)] +=
+            x_rk;
+        const int entry_link = route_entry_link[static_cast<std::size_t>(ri)];
+        if (!link_pos.count(entry_link)) continue;
+        const std::size_t li = link_pos.at(entry_link);
+        CTMLinkState& ls = link_states[li];
+        const double q_eff = ctm_effective_capacity_veh_hr(
+            problem.traffic.links[li], profile_step, dt_ctm);
+        const double recv = receiving(
+            ls.cells[0].n, ls.backward_wave_speed_km_hr,
+            ls.cell_length_km, q_eff, ls.jam_occupancy_per_cell, dt_ctm);
+        const double enter = std::min(x_rk, recv);
+        res.route_admitted_departures[route_id][static_cast<std::size_t>(k)] +=
+            enter;
+        ls.cells[0].n += enter;
+        if (route_specific && !ls.cells[0].n_route.empty()) {
+          ls.cells[0].n_route[static_cast<std::size_t>(ri)] += enter;
         }
+        res.step_link_results[static_cast<std::size_t>(k)][li]
+            .total_inflow_veh += enter;
+        tt_veh[static_cast<std::size_t>(ri)][static_cast<std::size_t>(k)] +=
+            enter;
       }
     }
 
-    // 4e. Collect per-link step summaries
+    // 4d. Collect per-link step summaries
     for (std::size_t li = 0; li < static_cast<std::size_t>(n_links); ++li) {
       const CTMLinkState& ls = link_states[li];
       CTMLinkStepResult& lr = res.step_link_results[static_cast<std::size_t>(k)][li];
@@ -628,12 +767,8 @@ CTMSimulationResult ctm_forward_pass(
       lr.total_occupancy_veh = tot_occ;
       // Experienced travel time: Little's law  T = N / q_out
       const double q_eff_li = ctm_effective_capacity_veh_hr(
-          problem.traffic.links[li], k, dt_ctm);
-      const double last_exit = sending(ls.cells[static_cast<std::size_t>(ls.n_cells - 1)].n,
-                                        ls.free_flow_speed_km_hr,
-                                        ls.cell_length_km,
-                        q_eff_li,
-                        dt_ctm);
+          problem.traffic.links[li], profile_step, dt_ctm);
+      const double last_exit = actual_link_outflow[li];
       lr.total_outflow_veh = last_exit;
       if (q_eff_li <= kTol) {
         // Link is unavailable (capacity = 0): report infinite travel time so
@@ -642,9 +777,11 @@ CTMSimulationResult ctm_forward_pass(
       } else if (last_exit > kTol) {
         lr.mean_travel_time_hr = tot_occ * dt_ctm / last_exit;
       } else {
+        const double vf = link_free_flow_speed(
+            problem.traffic.links[li], profile_step);
         lr.mean_travel_time_hr =
-            ls.free_flow_speed_km_hr > kTol
-                ? ls.cell_length_km * ls.n_cells / ls.free_flow_speed_km_hr
+            vf > kTol
+                ? ls.cell_length_km * ls.n_cells / vf
                 : 0.0;
       }
     }
@@ -667,12 +804,136 @@ CTMSimulationResult ctm_forward_pass(
     res.route_travel_time[route.index] = tt_dep;
   }
 
+  for (const auto& [route, admitted] : res.route_admitted_departures) {
+    (void)route;
+    res.admitted_vehicles +=
+        std::accumulate(admitted.begin(), admitted.end(), 0.0);
+  }
+  for (const auto& [route, arrivals] : res.route_terminal_arrivals) {
+    (void)route;
+    res.terminal_arrivals_vehicles +=
+        std::accumulate(arrivals.begin(), arrivals.end(), 0.0);
+  }
+  for (const auto& link : link_states) {
+    for (const auto& cell : link.cells) {
+      res.final_occupancy_vehicles += cell.n;
+    }
+  }
+  res.vehicle_conservation_error_vehicles =
+      res.admitted_vehicles - res.terminal_arrivals_vehicles -
+      res.final_occupancy_vehicles;
+
   // Optionally save cell history
   if (ctm_opts.record_cell_history) {
     res.cell_history.push_back(link_states);
   }
 
   return res;
+}
+
+CTMForwardResult simulate_ev_power_traffic_ctm_forward(
+    const EVPowerTrafficProblem& problem,
+    const CTMForwardAssignment& assignment,
+    const EVPowerTrafficOptions& ev_options,
+    const CTMOptions& ctm_options) {
+  CTMForwardResult result;
+  if (ev_options.num_steps <= 0 || ev_options.time_step_hr <= kTol) {
+    result.status = "invalid simulation horizon";
+    return result;
+  }
+
+  std::unordered_map<int, std::size_t> link_pos;
+  for (std::size_t i = 0; i < problem.traffic.links.size(); ++i) {
+    if (!link_pos.emplace(problem.traffic.links[i].index, i).second) {
+      result.status = "duplicate traffic link index";
+      return result;
+    }
+  }
+  std::unordered_map<int, int> route_pos;
+  for (int i = 0; i < static_cast<int>(problem.routes.size()); ++i) {
+    if (!route_pos.emplace(problem.routes[static_cast<std::size_t>(i)].index, i)
+             .second) {
+      result.status = "duplicate route index";
+      return result;
+    }
+  }
+
+  const double dt_ctm =
+      choose_ctm_dt(problem, ctm_options, ev_options.time_step_hr);
+  const int steps_per_sim = std::max(
+      1, static_cast<int>(std::round(ev_options.time_step_hr / dt_ctm)));
+  const int ctm_steps = ev_options.num_steps * steps_per_sim;
+  std::vector<std::vector<double>> route_flow(
+      static_cast<std::size_t>(ctm_steps),
+      std::vector<double>(problem.routes.size(), 0.0));
+
+  auto add_demands = [&](const auto& demands, const auto& assigned) -> bool {
+    for (const auto& demand : demands) {
+      result.requested_vehicles += std::max(0.0, demand.vehicles);
+      const auto demand_it = assigned.find(demand.index);
+      double demand_assigned = 0.0;
+      if (demand_it != assigned.end()) {
+        for (const auto& [route_id, vehicles] : demand_it->second) {
+          if (vehicles < -kTol || !route_pos.count(route_id)) {
+            result.status = "assignment contains an invalid route flow";
+            return false;
+          }
+          const auto& route =
+              problem.routes[static_cast<std::size_t>(route_pos.at(route_id))];
+          if (route.origin_node != demand.origin_node ||
+              route.destination_node != demand.destination_node) {
+            result.status = "assigned route is incompatible with demand OD";
+            return false;
+          }
+          demand_assigned += std::max(0.0, vehicles);
+          const int departure = demand.departure_step * steps_per_sim;
+          if (departure < 0 ||
+              departure + steps_per_sim > ctm_steps) {
+            result.status = "demand departure is outside simulation horizon";
+            return false;
+          }
+          const double substep_flow =
+              std::max(0.0, vehicles) / static_cast<double>(steps_per_sim);
+          for (int offset = 0; offset < steps_per_sim; ++offset) {
+            route_flow[static_cast<std::size_t>(departure + offset)]
+                      [static_cast<std::size_t>(route_pos.at(route_id))] +=
+                substep_flow;
+          }
+        }
+      }
+      if (demand_assigned > demand.vehicles + kTol) {
+        result.status = "assigned route flow exceeds demand";
+        return false;
+      }
+      result.assigned_vehicles += demand_assigned;
+      result.unassigned_vehicles +=
+          std::max(0.0, demand.vehicles - demand_assigned);
+    }
+    return true;
+  };
+
+  if (!add_demands(problem.demands, assignment.ev_route_flow) ||
+      !add_demands(problem.icv_demands, assignment.icv_route_flow)) {
+    return result;
+  }
+
+  result.simulation = ctm_forward_pass(
+      problem, route_flow, link_pos, route_pos, ctm_options, dt_ctm,
+      ctm_steps, steps_per_sim);
+  result.simulation.steps_per_sim_step = steps_per_sim;
+  for (const auto& [route_id, admitted] :
+       result.simulation.route_admitted_departures) {
+    (void)route_id;
+    result.admitted_vehicles +=
+        std::accumulate(admitted.begin(), admitted.end(), 0.0);
+  }
+  result.source_entry_shortfall_vehicles =
+      std::max(0.0, result.assigned_vehicles - result.admitted_vehicles);
+  result.valid = true;
+  result.status = result.source_entry_shortfall_vehicles <= kTol
+                      ? "all assigned traffic admitted"
+                      : "source-entry shortfall reported";
+  return result;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1877,7 +2138,7 @@ CTMDUEResult simulate_ev_power_traffic_ctm_due(
   for (int iter = 1; iter <= due_opts.max_iterations; ++iter) {
     // Step 1: Forward CTM pass with current route_flow
     ctm_res = ctm_forward_pass(problem, route_flow, link_pos, route_pos_map,
-                               ctm_opts, dt_ctm, T_ctm);
+                               ctm_opts, dt_ctm, T_ctm, R);
 
     // Step 1b: Station waiting times W_{s,k} from current arrivals (eq:ev-wait-cost).
     // Used in Ψ^E when queueing_weight > 0; otherwise an empty map is passed.
@@ -1981,7 +2242,7 @@ CTMDUEResult simulate_ev_power_traffic_ctm_due(
 
   // ── Final forward pass with converged flows ───────────────────────────
   result.final_ctm = ctm_forward_pass(problem, route_flow, link_pos, route_pos_map,
-                                       ctm_opts, dt_ctm, T_ctm);
+                                       ctm_opts, dt_ctm, T_ctm, R);
   result.final_ctm.steps_per_sim_step = R;
   result.full_due_enabled = full_due;
 

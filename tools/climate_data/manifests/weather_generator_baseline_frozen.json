@@ -1,0 +1,89 @@
+{
+  "schema_version": "1.0",
+  "method_id": "seasonal_var_block_ecdf_v2",
+  "method_role": "frozen_baseline_after_development_and_untouched_gcm_confirmation",
+  "predecessor_method_id": "seasonal_state_var_block_ecdf_v1",
+  "method_change": "remove_the_unsupported_four_state_layer_and_retain_full_VAR_and_joint_seven_day_residual_blocks",
+  "freeze_evidence": {
+    "development_report": "data/climate_shaanxi/processed/weather_generator_evaluation/evaluation=shaanxi_weather_generator_state_count_sensitivity_v1/aggregate=method_development_gcms_four_sites/aggregate_report.json",
+    "development_report_sha256": "d0af39809d25d555738ca5b9dab3c37b5db1d57a11fa1784ed38fcc0b7add1f8",
+    "confirmation_report": "data/climate_shaanxi/processed/weather_generator_evaluation/evaluation=shaanxi_weather_generator_frozen_confirmation_v1/aggregate=confirmation_gcms_four_sites/aggregate_report.json",
+    "confirmation_report_sha256": "f7c0c1f3601c95fac42135b4087447e0c0cb32d80e3cdca661d53ea5bc97da06",
+    "development_units_where_k1_ranked_first": 12,
+    "confirmation_units_where_k1_ranked_first": 8,
+    "selection_was_preregistered": false
+  },
+  "conditioning": {
+    "dimensions": ["gcm", "experiment", "site", "thirty_year_epoch"],
+    "probability_statement": "P(weather_path | GCM, experiment, site, epoch)",
+    "pool_gcms_or_ssps": false,
+    "assign_gcm_or_ssp_probabilities": false
+  },
+  "calendar": {
+    "generated_calendar": "365_day",
+    "alignment": "remove_february_29_before_fitting",
+    "days_per_path_year": 365
+  },
+  "model_variables": ["tasmax", "dtr", "hurs", "sfcWind", "rsds", "pr"],
+  "derived_variables": {
+    "dtr": "tasmax - tasmin",
+    "tasmin": "tasmax - dtr"
+  },
+  "marginal_model": {
+    "conditioning": "calendar_month",
+    "forward_transform": "empirical_midrank_then_standard_normal_inverse_cdf",
+    "inverse_transform": "empirical_step_inverse_cdf",
+    "tie_handling": "average_midrank",
+    "reason_for_step_inverse": "retain_the_discrete_zero_precipitation_mass"
+  },
+  "weather_state_model": {
+    "states": 1,
+    "estimator": "single_state_no_latent_weather_regime",
+    "maximum_iterations": 1,
+    "convergence_tolerance": 1e-08,
+    "transition_conditioning": "trivial_single_state",
+    "laplace_smoothing": 1.0
+  },
+  "dynamic_dependence_model": {
+    "form": "z_t = A z_t_minus_1 + b + epsilon_t",
+    "estimator": "joint_ridge_least_squares",
+    "ridge_penalty": 1.0,
+    "maximum_spectral_radius": 0.98,
+    "stabilization": "scale_A_only_if_fitted_spectral_radius_exceeds_limit_then_refit_intercept"
+  },
+  "innovation_model": {
+    "method": "moving_block_resampling_of_complete_multivariate_residual_vectors",
+    "block_length_days": 7,
+    "conditioning": "meteorological_season",
+    "seasons": {"DJF": [12, 1, 2], "MAM": [3, 4, 5], "JJA": [6, 7, 8], "SON": [9, 10, 11]}
+  },
+  "physical_constraints": {
+    "dtr": "nonnegative_by_empirical_support",
+    "tasmin_not_greater_than_tasmax": true,
+    "hurs": [0.0, 100.0],
+    "sfcWind_minimum": 0.0,
+    "rsds_minimum": 0.0,
+    "pr_minimum": 0.0
+  },
+  "randomness": {
+    "generator": "numpy_PCG64_via_default_rng",
+    "member_seed": "first_64_bits_of_SHA256_over_base_seed_method_climate_state_site_member"
+  },
+  "required_provenance": [
+    "definition_sha256",
+    "input_file_sha256",
+    "parameter_archive_sha256",
+    "base_seed",
+    "member_seed",
+    "software_versions",
+    "conditioning_state"
+  ],
+  "interpretation_limits": [
+    "This is the frozen simple baseline, not the final advanced candidate.",
+    "The K1 choice was data-driven rather than preregistered and must be reported as such.",
+    "Monthly empirical marginals reproduce the fitted epoch distribution and do not extrapolate beyond its sampled support.",
+    "The generator does not assign probabilities to GCMs or SSPs.",
+    "Site-wise fitting does not represent spatial dependence between the four Shaanxi sites.",
+    "Daily NEX-GDDP-CMIP6 humidity cannot validate concurrent hourly humid-heat extremes."
+  ]
+}

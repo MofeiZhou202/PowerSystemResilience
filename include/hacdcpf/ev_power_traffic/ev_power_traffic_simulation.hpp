@@ -8,3 +8,4 @@
 #include "hacdcpf/ev_power_traffic/options.hpp"
 #include "hacdcpf/ev_power_traffic/simulation.hpp"
 #include "hacdcpf/ev_power_traffic/joint_social_welfare.hpp"
+#include "hacdcpf/ev_power_traffic/route_generation.hpp"

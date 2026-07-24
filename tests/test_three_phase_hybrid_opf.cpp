@@ -7,6 +7,7 @@
 #include "hacdcpf/dynamics/NetworkState.hpp"
 #include "hacdcpf/dynamics/devices/BasicDynamicDevices.hpp"
 #include "hacdcpf/optimal_power_flow/three_phase_hybrid_opf.hpp"
+#include "hacdcpf/optimal_power_flow/three_phase_hybrid_relaxation.hpp"
 #include "hacdcpf/power_flow/power_flow_result.hpp"
 
 namespace {
@@ -118,6 +119,10 @@ TEST_CASE("Monolithic phase hybrid OPF Full and GR recover the same solution",
   INFO("reduced status=" << reduced.status << " residual=" << reduced.primal_residual);
   REQUIRE(full.converged);
   REQUIRE(reduced.converged);
+  CHECK(full.generator_active_power_pu.size() == c.generators.size());
+  CHECK(full.generator_reactive_power_pu.size() == c.generators.size());
+  CHECK(reduced.generator_active_power_pu.size() == c.generators.size());
+  CHECK(reduced.generator_reactive_power_pu.size() == c.generators.size());
   CHECK(reduced.eliminated_phase_nodes == 3);
   CHECK(std::abs(full.objective - reduced.objective) <=
         1e-6 * std::max(1.0, std::abs(full.objective)));
@@ -131,6 +136,35 @@ TEST_CASE("Monolithic phase hybrid OPF Full and GR recover the same solution",
   CHECK(reduced.max_converter_current_vuf > 0.0);
   CHECK(std::abs(full.max_converter_current_vuf -
                  reduced.max_converter_current_vuf) < 1e-6);
+}
+
+TEST_CASE("Graph-reduced OPF sequence retains every time-varying load node",
+          "[opf][three_phase][hybrid][sequence][kron]") {
+  auto first = make_small_hybrid_case();
+  auto second = first;
+  second.p_load_pu[3] = 0.035;
+  second.q_load_pu[3] = 0.010;
+
+  ThreePhaseHybridOPFOptions options;
+  options.variant = ModelVariant::GraphReduced;
+  options.backend = SolverBackend::Ipopt;
+  options.max_iterations = 300;
+  options.tolerance = 1e-7;
+  options.reduction_options.max_front = 8;
+  options.reduction_options.max_nnz_ratio = 10.0;
+
+  const auto sequence =
+      solve_three_phase_hybrid_opf_sequence({first, second}, options);
+  const auto standalone = solve_three_phase_hybrid_opf(second, options);
+  REQUIRE(sequence.size() == 2);
+  REQUIRE(sequence[0].converged);
+  REQUIRE(sequence[1].converged);
+  REQUIRE(standalone.converged);
+  CHECK(std::abs(sequence[1].objective - standalone.objective) <=
+        1e-7 * std::max(1.0, std::abs(standalone.objective)));
+  CHECK((sequence[1].full_voltage - standalone.full_voltage)
+            .cwiseAbs()
+            .maxCoeff() < 1e-6);
 }
 
 TEST_CASE("Sequence-aware VSC ports recover GFL and GFM dynamic equilibria",
@@ -420,4 +454,65 @@ TEST_CASE("Exact constraint oracle preserves the graph-reduced OPF solution",
   CHECK(seeded.enforced_inequality_rows == oracle.enforced_inequality_rows);
   CHECK(std::abs(seeded.objective - oracle.objective) <=
         1e-8 * std::max(1.0, std::abs(oracle.objective)));
+}
+
+TEST_CASE("Lifted phase-hybrid relaxation gives a certified OPF lower bound",
+          "[opf][three_phase][hybrid][relaxation]") {
+  const auto c = make_small_hybrid_case();
+
+  ThreePhaseHybridOPFOptions nonlinear_options;
+  nonlinear_options.variant = ModelVariant::Full;
+  nonlinear_options.backend = SolverBackend::Ipopt;
+  nonlinear_options.max_iterations = 400;
+  nonlinear_options.tolerance = 1e-8;
+  const auto nonlinear = solve_three_phase_hybrid_opf(c, nonlinear_options);
+  INFO("nonlinear status=" << nonlinear.status);
+  REQUIRE(nonlinear.converged);
+
+  ThreePhaseHybridRelaxationOptions coarse_options;
+  coarse_options.max_outer_approximation_rounds = 0;
+  const auto coarse =
+      solve_three_phase_hybrid_opf_relaxation(c, coarse_options);
+  INFO("coarse status=" << coarse.status);
+  REQUIRE(coarse.solved);
+  REQUIRE(coarse.outer_relaxation_valid);
+  REQUIRE(coarse.dual_certificate_available);
+  CHECK(coarse.objective_lower_bound <= nonlinear.objective + 1e-7);
+
+  ThreePhaseHybridRelaxationOptions refined_options = coarse_options;
+  refined_options.max_outer_approximation_rounds = 10;
+  refined_options.cone_tolerance = 1e-7;
+  const auto refined =
+      solve_three_phase_hybrid_opf_relaxation(c, refined_options);
+  INFO("refined status=" << refined.status
+       << " lower=" << refined.objective_lower_bound
+       << " nonlinear=" << nonlinear.objective
+       << " cone=" << refined.max_soc_violation);
+  REQUIRE(refined.solved);
+  REQUIRE(refined.outer_relaxation_valid);
+  REQUIRE(refined.dual_certificate_available);
+  CHECK(refined.objective_lower_bound + 1e-8 >=
+        coarse.objective_lower_bound);
+  CHECK(refined.objective_lower_bound <= nonlinear.objective + 1e-7);
+  CHECK(refined.lp_primal_objective + 1e-8 >=
+        refined.objective_lower_bound);
+  REQUIRE_FALSE(refined.round_lower_bounds.empty());
+  for (std::size_t round = 1; round < refined.round_lower_bounds.size();
+       ++round) {
+    CHECK(refined.round_lower_bounds[round] + 1e-9 >=
+          refined.round_lower_bounds[round - 1]);
+  }
+  CHECK(refined.max_soc_violation <= coarse.max_soc_violation + 1e-9);
+}
+
+TEST_CASE("Phase-hybrid relaxation rejects unsupported fixed-current loads",
+          "[opf][three_phase][hybrid][relaxation][limitations]") {
+  auto c = make_small_hybrid_case();
+  c.i_ac_fixed[4] = Complex{0.01, -0.02};
+  const auto result = solve_three_phase_hybrid_opf_relaxation(c);
+  CHECK_FALSE(result.solved);
+  CHECK_FALSE(result.outer_relaxation_valid);
+  CHECK(result.status.find("fixed-current") != std::string::npos);
+  CHECK_FALSE(result.model_limitations.empty());
+  CHECK(result.runtime_ms >= 0.0);
 }

@@ -107,6 +107,7 @@ struct MobileStorageState {
   double max_travel_distance_km{kInf};
   double eta_discharge{1.0};
   double arrival_time_hr{0.0};
+  double external_available_from_hr{0.0};
   double dispatch_mw{0.0};
   double cumulative_travel_km{0.0};
   std::vector<int> route_bus_positions;
@@ -423,8 +424,10 @@ std::vector<FixedStorageState> collect_fixed_storage(const HybridPowerSystem& sy
   return out;
 }
 
-std::vector<MobileStorageState> collect_mobile_storage(const HybridPowerSystem& sys,
-                                                       const std::unordered_map<int, int>& bus_pos) {
+std::vector<MobileStorageState> collect_mobile_storage(
+    const HybridPowerSystem& sys,
+    const std::unordered_map<int, int>& bus_pos,
+    const DistributionResilienceOptions& opts) {
   std::vector<MobileStorageState> out;
   out.reserve(sys.mobile_storage.size());
   for (size_t i = 0; i < sys.mobile_storage.size(); ++i) {
@@ -448,6 +451,12 @@ std::vector<MobileStorageState> collect_mobile_storage(const HybridPowerSystem& 
     s.max_travel_distance_km = st.max_travel_distance_km > 0.0 ? st.max_travel_distance_km : kInf;
     s.eta_discharge = st.eta_discharge > 0.0 ? st.eta_discharge : 1.0;
     s.arrival_time_hr = st.arrival_time;
+    const auto available_it =
+        opts.mobile_storage_available_from_hr.find(s.storage_index);
+    s.external_available_from_hr = available_it ==
+            opts.mobile_storage_available_from_hr.end()
+        ? 0.0
+        : std::max(0.0, available_it->second);
     out.push_back(s);
   }
   return out;
@@ -604,6 +613,7 @@ struct StepContext {
   const std::vector<MobileStorageState>& mess;
   bool enable_mess_dispatch;
   double dt_hr;
+  double hour;
   double res_multiplier;
   double pv_multiplier;
   double wind_multiplier;
@@ -686,6 +696,7 @@ ComponentEvaluation evaluate_island(const StepContext& ctx,
   if (ctx.enable_mess_dispatch) {
     for (size_t i = 0; i < ctx.mess.size() && remaining > kEps; ++i) {
       const auto& st = ctx.mess[i];
+      if (ctx.hour + kEps < st.external_available_from_hr) continue;
       if (st.status == MobileStorageStatus::InTransit) continue;
       if (static_cast<size_t>(st.bus_pos) >= comp.size() || comp[static_cast<size_t>(st.bus_pos)] != island_comp) continue;
       const double deliverable_mw = std::min(st.pmax_mw,
@@ -776,6 +787,13 @@ void advance_mess_transit(double hour,
   const double speed = std::max(opts.mess_travel_speed_kmph, 1.0);
   for (auto& st : mess) {
     st.dispatch_mw = 0.0;
+    if (hour + kEps < st.external_available_from_hr) {
+      st.leg_remaining_hr = 0.0;
+      st.remaining_travel_hr =
+          st.external_available_from_hr - hour;
+      st.arrival_time_hr = st.external_available_from_hr;
+      continue;
+    }
     if (st.status != MobileStorageStatus::InTransit) {
       st.leg_remaining_hr = 0.0;
       st.remaining_travel_hr = 0.0;
@@ -861,6 +879,7 @@ void assign_mess_movements(double hour,
   };
 
   for (auto& st : mess) {
+    if (hour + kEps < st.external_available_from_hr) continue;
     if (st.status == MobileStorageStatus::InTransit) continue;
     if (st.dispatch_mw > kEps) continue;  // already serving load
     const int current_comp = comp[static_cast<size_t>(st.bus_pos)];
@@ -1191,7 +1210,7 @@ DistributionResilienceResult run_distribution_resilience_assessment(
   const auto base_loads = collect_bus_loads(sys, opts.load_scale_factor, bus_pos);
   const auto source_bus = identify_grid_source_buses(sys, bus_pos);
   auto fixed_storage = collect_fixed_storage(sys, bus_pos);
-  auto mess = collect_mobile_storage(sys, bus_pos);
+  auto mess = collect_mobile_storage(sys, bus_pos, opts);
   const auto faults = build_faults(sys, opts, branch_pos);
   const auto transport_graph = build_transport_graph(sys, opts, bus_pos);
 
@@ -1289,7 +1308,7 @@ DistributionResilienceResult run_distribution_resilience_assessment(
 
     std::vector<ComponentEvaluation> evals(islands.size());
     const StepContext ctx{sys, loads, comp, bus_pos, fixed_storage, mess,
-                          opts.allow_mess_dispatch, opts.time_step_hr,
+                          opts.allow_mess_dispatch, opts.time_step_hr, hour,
                           res_mult, pv_mult, wind_mult};
     for (size_t i = 0; i < islands.size(); ++i) {
       evals[i] = evaluate_island(ctx, islands[i]);
@@ -1332,7 +1351,9 @@ DistributionResilienceResult run_distribution_resilience_assessment(
       ms.storage_index = st.storage_index;
       ms.bus = sys.ac.buses[static_cast<size_t>(st.bus_pos)].index;
       ms.target_bus = sys.ac.buses[static_cast<size_t>(st.target_bus_pos)].index;
-      ms.status = mobile_storage_status_str(st.status);
+      ms.status = hour + kEps < st.external_available_from_hr
+          ? "AwaitingArrival"
+          : mobile_storage_status_str(st.status);
       ms.dispatch_mw = st.dispatch_mw;
       ms.energy_mwh = st.energy_mwh;
       ms.soc = st.e_rated_mwh > kEps ? st.energy_mwh / st.e_rated_mwh : 0.0;

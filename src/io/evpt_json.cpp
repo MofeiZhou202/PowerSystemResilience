@@ -185,6 +185,8 @@ void evpt_problem_from_json(const json& j, EVPowerTrafficProblem& problem) {
         l.to_node = int_or(lj, "to_node", 0);
         l.length_km = num_or(lj, "length_km", l.length_km);
         l.free_flow_time_hr = num_or(lj, "free_flow_time_hr", l.free_flow_time_hr);
+        l.free_flow_time_profile_hr =
+            vec_or(lj, "free_flow_time_profile_hr");
         l.capacity_veh_per_hr =
             num_or(lj, "capacity_veh_per_hr", l.capacity_veh_per_hr);
         l.jam_vehicles = num_or(lj, "jam_vehicles", l.jam_vehicles);
@@ -295,6 +297,7 @@ json evpt_scenario_to_json(const EVPowerTrafficProblem& problem) {
     lj["to_node"] = l.to_node;
     lj["length_km"] = l.length_km;
     lj["free_flow_time_hr"] = l.free_flow_time_hr;
+    lj["free_flow_time_profile_hr"] = l.free_flow_time_profile_hr;
     lj["capacity_veh_per_hr"] = l.capacity_veh_per_hr;
     lj["jam_vehicles"] = l.jam_vehicles;
     lj["available"] = l.available;

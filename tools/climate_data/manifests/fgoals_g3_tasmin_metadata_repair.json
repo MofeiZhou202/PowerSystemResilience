@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.0",
+  "qualification_id": "nex_v2_fgoals_g3_tasmin_missing_units_k",
+  "source": "NEX-GDDP-CMIP6",
+  "product_version": "2.0",
+  "model": "FGOALS-g3",
+  "realization": "r3i1p1f1",
+  "variable": "tasmin",
+  "experiments": ["historical", "ssp245", "ssp585"],
+  "decision_stage": "after_acquisition_and_before_any_FGOALS_generator_score",
+  "upstream_issue": "The upstream annual tasmin variables omit descriptive attributes including units.",
+  "repair": {
+    "match_declared_units": "",
+    "effective_units": "K",
+    "scope": "FGOALS-g3 tasmin annual v2.0 files only",
+    "reject_nonempty_conflicts": true,
+    "preserve_immutable_source_files": true,
+    "record_repair_id_in_extracted_point_and_harmonization_provenance": true
+  },
+  "evidence": {
+    "upstream_tasmin_das": "https://ds.nccs.nasa.gov/thredds/dodsC/AMES/NEX/GDDP-CMIP6/FGOALS-g3/historical/r3i1p1f1/tasmin/tasmin_day_FGOALS-g3_historical_r3i1p1f1_gn_1985_v2.0.nc.das",
+    "upstream_tasmin_das_finding": "The tasmin variable has only _FillValue and _ChunkSizes; units, standard_name, and long_name are absent.",
+    "companion_tasmax_das": "https://ds.nccs.nasa.gov/thredds/dodsC/AMES/NEX/GDDP-CMIP6/FGOALS-g3/historical/r3i1p1f1/tasmax/tasmax_day_FGOALS-g3_historical_r3i1p1f1_gn_1985_v2.0.nc.das",
+    "companion_tasmax_das_finding": "The same model, realization, experiment, year, and product version declare tasmax standard_name air_temperature and units K.",
+    "staged_file_check": "All 90 annual tasmin subsets across the three experiments omit units and remain within the registered 180-350 K temperature gate.",
+    "source_manifest": "tools/climate_data/manifests/sources.json",
+    "source_manifest_sha256": "9b5428d42fe2fe9f45809bb21ad32347f1617e3b0e741968bc74b4b7ed195f96"
+  },
+  "qualification_results": {
+    "download_report": "data/climate_shaanxi/provenance/nex_gddp_cmip6_download_fgoals_repaired.json",
+    "download_report_sha256": "b36809310878d015364ca6d592e749ca1da51603a33c0ca4917ffbb950690fc8",
+    "catalogs_completed": 18,
+    "annual_corridor_objects_completed": 540,
+    "annual_corridor_objects_failed": 0,
+    "harmonization_report": "data/climate_shaanxi/provenance/nex_gddp_cmip6_harmonization_fgoals_repaired.json",
+    "harmonization_report_sha256": "5b86895d48382035e200ba8c04d5c45f9cdde2259fd71cf6940fb1b76c317ec8",
+    "canonical_site_year_records_completed": 360,
+    "canonical_site_year_records_failed": 0
+  },
+  "generator_scores_computed_before_qualification": 0,
+  "method_or_hyperparameter_change": false,
+  "qualified_utc": "2026-07-24T12:37:03Z"
+}

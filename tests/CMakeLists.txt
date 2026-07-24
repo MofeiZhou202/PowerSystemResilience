@@ -265,6 +265,7 @@ hacdcpf_add_test(test_hosting_capacity test_hosting_capacity.cpp)
 hacdcpf_add_test(test_multidimensional_weak_link test_multidimensional_weak_link.cpp)
 hacdcpf_add_test(test_counterfactual_planning test_counterfactual_planning.cpp)
 hacdcpf_add_test(test_scenario_generation test_scenario_generation.cpp)
+hacdcpf_add_test(test_typhoon_traffic_impact test_typhoon_traffic_impact.cpp)
 hacdcpf_add_test(test_scenario_bundle_schema test_scenario_bundle_schema.cpp)
 
 # ── Graph analysis & reduction ──────────────────────────────────────────────
@@ -314,6 +315,24 @@ hacdcpf_add_test(test_ev_power_traffic_joint_opt test_ev_power_traffic_joint_opt
 #   4-node 2-route network, symmetric and asymmetric cases, logit assignment,
 #   multi-departure-step, and auto CFL time-step selection.
 hacdcpf_add_test(test_ev_power_traffic_ctm_due test_ev_power_traffic_ctm_due.cpp)
+
+# Fidelity-bound numerical validation (TSN<->CTM oracle): checks Prop. 2
+# exactness (uncongested -> Delta_tau=0) and Lemma 2 congestion prediction
+# (loaded -> Delta_tau>0, monotone).  See docs/.../BOUND_SKETCH.md.
+hacdcpf_add_test(test_evpt_fidelity_bound test_evpt_fidelity_bound.cpp)
+
+# Free-flow TSN approximation-error study: cumulative-count FIFO corridor CTM,
+# exhaustive coupled small case, partial-loading branch-and-bound, and
+# demand/capacity sensitivity sweep.
+hacdcpf_add_test(test_evpt_approximation_error test_evpt_approximation_error.cpp)
+target_include_directories(test_evpt_approximation_error PRIVATE
+  "${_HACDCDSS_MIPSOLVERS_DIR}/highs"
+  "${CMAKE_BINARY_DIR}/_deps/mipsolvers_build/_deps/embedded_highs")
+
+# Transportation Networks for Research (TNTP) import: network metadata,
+# directed links, node coordinates, OD table, and explicit unit conversion.
+hacdcpf_add_test(test_tntp_parser test_tntp_parser.cpp)
+hacdcpf_add_test(test_sioux_falls_ieee123_case test_sioux_falls_ieee123_case.cpp)
 
 # Formulation C: CTM-DUE jointly coupled with DC-OPF LMP price feedback.
 #   2-bus grid, 4-node 2-route traffic, 4 EV vehicles, WTP=50 $/veh.

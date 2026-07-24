@@ -438,6 +438,8 @@ set(HACDCPF_SOURCES
   src/optimal_power_flow/parity_formulation.cpp
   src/optimal_power_flow/parity_ipm.cpp
   src/optimal_power_flow/three_phase_hybrid_opf.cpp
+  src/optimal_power_flow/three_phase_hybrid_adapter.cpp
+  src/optimal_power_flow/three_phase_hybrid_relaxation.cpp
   src/optimal_power_flow/reactive_power_opt.cpp
   # ── io (always-available: JSON / MATPOWER / case builders) ───────────────
   src/io/import_report.cpp
@@ -446,6 +448,8 @@ set(HACDCPF_SOURCES
   src/io/cim_io.cpp
   src/io/cim_dist_io.cpp
   src/io/matpower_parser.cpp
+  src/io/tntp_parser.cpp
+  src/io/sioux_falls_ieee123_case.cpp
   src/io/bpa_io.cpp
   src/io/case_builders.cpp
   src/io/scenario_bundle_io.cpp
@@ -465,6 +469,7 @@ set(HACDCPF_SOURCES
   src/ev_power_traffic/assignment_lp.cpp
   src/ev_power_traffic/joint_social_welfare.cpp
   src/ev_power_traffic/ctm_propagation.cpp
+  src/ev_power_traffic/route_generation.cpp
   src/ev_power_traffic/ltm_propagation.cpp
   src/ev_power_traffic/ctm_joint_welfare.cpp
   src/ev_power_traffic/joint_optimizer.cpp
@@ -500,6 +505,7 @@ set(HACDCPF_SOURCES
 
   # ── analysis ────────────────────────────────────────────────────────
   src/scenario_generation/typhoon_resilience.cpp
+  src/scenario_generation/typhoon_traffic_impact.cpp
   src/reliability/three_stage_reliability.cpp
   # ── analysis stubs ───────────────────────────────────────────────────
   src/carbon_analysis/carbon_analysis.cpp
@@ -843,6 +849,41 @@ add_executable(three_phase_hybrid_pf_external_case
   tools/three_phase_hybrid_pf_external_case.cpp)
 target_link_libraries(three_phase_hybrid_pf_external_case PRIVATE hacdcpf::hacdcpf)
 hacdcpf_copy_opendss_runtime(three_phase_hybrid_pf_external_case)
+
+add_executable(sioux_falls_ieee123_experiment
+  tools/sioux_falls_ieee123_experiment.cpp)
+target_link_libraries(sioux_falls_ieee123_experiment PRIVATE hacdcpf::hacdcpf)
+target_include_directories(sioux_falls_ieee123_experiment PRIVATE
+  "${MIPSOLVERS_SOURCE_DIR}/highs"
+  "${CMAKE_BINARY_DIR}/_deps/mipsolvers_build/_deps/embedded_highs")
+target_compile_definitions(sioux_falls_ieee123_experiment PRIVATE
+  HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+hacdcpf_copy_opendss_runtime(sioux_falls_ieee123_experiment)
+add_test(
+  NAME evpt_sioux_route_search_smoke
+  COMMAND $<TARGET_FILE:sioux_falls_ieee123_experiment>
+    --route-search --search-exhaustive --typhoon-road-impact
+    --selected-od-pairs 2 --paths-per-od 3
+    --search-scenarios 1 --search-threads 1 --search-max-nodes 100
+    --num-steps 12 --road-capacity-scale 0.08 --station-power-kw 2400)
+set_tests_properties(evpt_sioux_route_search_smoke PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\\"optimality_proven\\\": true")
+
+add_test(
+  NAME evpt_sioux_route_search_exhaustive_regression
+  COMMAND $<TARGET_FILE:sioux_falls_ieee123_experiment>
+    --route-search --search-exhaustive --typhoon-road-impact
+    --selected-od-pairs 3 --paths-per-od 3 --od-demand-scale 0.20
+    --search-scenarios 1 --search-threads 1 --search-max-nodes 200
+    --num-steps 12 --road-capacity-scale 0.08 --station-power-kw 2400)
+set_tests_properties(evpt_sioux_route_search_exhaustive_regression PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\\"search_matches\\\": true")
+
+add_executable(weather_resilience_case_study
+  tools/weather_resilience_case_study.cpp)
+target_link_libraries(weather_resilience_case_study PRIVATE hacdcpf::hacdcpf)
+target_compile_definitions(weather_resilience_case_study PRIVATE
+  HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
 
 # Phase-node graph-reduction paper benchmark and reproducibility audit.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/phase_graph_reduction_benchmark.cpp")

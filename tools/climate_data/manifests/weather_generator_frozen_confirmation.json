@@ -1,0 +1,63 @@
+{
+  "schema_version": "1.0",
+  "evaluation_id": "shaanxi_weather_generator_frozen_confirmation_v1",
+  "role": "confirmation_of_frozen_state_count_on_untouched_gcms",
+  "target": "held_out_NEX_GDDP_CMIP6_days_are_a_generator_target_not_observational_truth",
+  "period": {"start": "1985-01-01", "end": "2014-12-31"},
+  "development_freeze": {
+    "status": "frozen_before_confirmation_gcm_evaluation",
+    "development_gcms": ["EC-Earth3", "MPI-ESM1-2-HR", "GFDL-ESM4"],
+    "development_sites": ["yulin", "xian", "hanzhong", "ankang"],
+    "evidence_report": "data/climate_shaanxi/processed/weather_generator_evaluation/evaluation=shaanxi_weather_generator_state_count_sensitivity_v1/aggregate=method_development_gcms_four_sites/aggregate_report.json",
+    "evidence_report_sha256": "d0af39809d25d555738ca5b9dab3c37b5db1d57a11fa1784ed38fcc0b7add1f8",
+    "selected_variant": "frozen_k1",
+    "selected_formulation": "one_state_full_VAR_joint_seven_day_residual_vector_blocks",
+    "selection_observation": "K1 ranked first in all 12 development GCM-site units",
+    "selection_was_preregistered": false,
+    "confirmation_gcms_not_used_for_selection": ["ACCESS-CM2", "MRI-ESM2-0"]
+  },
+  "cross_validation": {
+    "method": "leave_one_nonoverlapping_five_year_block_out",
+    "block_years": 5,
+    "folds": 6,
+    "exclude_transitions_across_removed_blocks": true
+  },
+  "members_per_fold": 20,
+  "base_seed": 20260724,
+  "member_seed_pairing": "common_within_fold_and_member_across_variants",
+  "score_definition": "gcm_skill_screening.json",
+  "aggregation": "score_each_five_year_member_against_the_held_out_block_then_average_members_within_fold_and_equal_weight_the_six_folds",
+  "variants": [
+    {
+      "id": "frozen_k1",
+      "description": "frozen one-state baseline with full VAR and joint seven-day residual-vector blocks",
+      "state_count": 1,
+      "diagonal_autoregression": false,
+      "block_length_days": 7,
+      "independent_residual_columns": false,
+      "monthly_iid": false
+    },
+    {
+      "id": "full",
+      "description": "legacy four-state baseline retained as a fixed comparator",
+      "state_count": 4,
+      "diagonal_autoregression": false,
+      "block_length_days": 7,
+      "independent_residual_columns": false,
+      "monthly_iid": false
+    }
+  ],
+  "reporting": {
+    "primary": "frozen_k1_composite_score_and_paired_delta_of_legacy_k4",
+    "uncertainty": ["fold_standard_deviation", "fold_minimum", "fold_maximum"],
+    "pairing": "common_seed_foldwise_comparison",
+    "automatic_method_selection": false,
+    "significance_claim": false
+  },
+  "interpretation_limits": [
+    "The confirmation GCMs were not used to select K=1, but all data remain model simulations rather than observations.",
+    "The K1 selection was data-driven and not preregistered; report that distinction explicitly.",
+    "Confirmation assesses statistical transport across GCMs at four representative points, not province-wide spatial validity.",
+    "No result assigns probabilities to GCMs or SSPs."
+  ]
+}

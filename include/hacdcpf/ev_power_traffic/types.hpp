@@ -104,7 +104,9 @@ struct TrafficLink {
   double jam_vehicles{0.0};
   bool available{true};
 
-  // Optional time-indexed overrides.  Empty vectors use the scalar fields.
+  // Optional simulation-step overrides. Empty vectors use the scalar fields.
+  // CTM substeps inherit the value of their parent simulation step.
+  std::vector<double> free_flow_time_profile_hr;
   std::vector<double> capacity_profile_veh_per_hr;
   std::vector<bool> availability_profile;
 
@@ -196,6 +198,21 @@ struct CTMSimulationResult {
   // at each departure step (used as cost in DUE iterations).
   // Indexed as route_travel_time[route_index][departure_step].
   std::unordered_map<int, std::vector<double>> route_travel_time;
+
+  // Requested and admitted source flows by route and CTM departure step.
+  // Their difference is source-entry shortfall; the current forward model
+  // does not retain a point queue outside the first cell.
+  std::unordered_map<int, std::vector<double>> route_requested_departures;
+  std::unordered_map<int, std::vector<double>> route_admitted_departures;
+
+  // Route-specific terminal sink flows [vehicles per CTM step].  These are
+  // the physical exits used for station-arrival attribution and conservation
+  // diagnostics; routes without a charging stop are included as well.
+  std::unordered_map<int, std::vector<double>> route_terminal_arrivals;
+  double admitted_vehicles{0.0};
+  double terminal_arrivals_vehicles{0.0};
+  double final_occupancy_vehicles{0.0};
+  double vehicle_conservation_error_vehicles{0.0};
 };
 
 // Forward declarations needed by CTMDUEResult (defined later in this file).

@@ -781,6 +781,13 @@ double holland_wind_ms(const TyphoonTrackPoint& storm, double site_lat, double s
   return holland_wind_ms_impl(storm, site_lat, site_lon);
 }
 
+double typhoon_rainfall_mm_hr(const TyphoonTrackPoint& storm,
+                             const TyphoonTrackPoint* previous,
+                             double site_lat,
+                             double site_lon) {
+  return typhoon_rain_mm_hr(storm, previous, site_lat, site_lon);
+}
+
 TyphoonScenarioOptions::TyphoonScenarioOptions() {
   default_overhead_fragility = TyphoonSegmentFragility{};
   default_cable_fragility = cable_defaults();

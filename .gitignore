@@ -119,3 +119,21 @@ tests/short_circuit/*
 paper/phase_graph_reduced_hybrid_opf/
 
 docs/latex
+# !docs/latex/
+docs/latex/*
+# !docs/latex/paper/
+docs/latex/paper/*
+# !docs/latex/paper/ev_power_traffic_joint_opt/
+docs/latex/paper/ev_power_traffic_joint_opt/*
+# !docs/latex/paper/ev_power_traffic_joint_opt/*.md
+# !docs/latex/paper/ev_power_traffic_joint_opt/main.tex
+# !docs/latex/paper/ev_power_traffic_joint_opt/references.bib
+# !docs/latex/paper/ev_power_traffic_joint_opt/main.pdf
+# !docs/latex/paper/ev_power_traffic_joint_opt/data/
+# !docs/latex/paper/ev_power_traffic_joint_opt/data/*.json
+# !docs/latex/paper/ev_power_traffic_joint_opt/figures/
+# !docs/latex/paper/ev_power_traffic_joint_opt/figures/*.pdf
+# !docs/latex/paper/ev_power_traffic_joint_opt/raw_results/
+# !docs/latex/paper/ev_power_traffic_joint_opt/raw_results/*.json
+# !docs/latex/paper/ev_power_traffic_joint_opt/scripts/
+# !docs/latex/paper/ev_power_traffic_joint_opt/scripts/*.py

@@ -2859,6 +2859,16 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
   if (solved.x.size() == data->layout.nvar && solved.x.allFinite()) {
     result.full_voltage = full_voltage(*data, solved.x);
     result.dc_voltage = solved.x.segment(data->layout.i_udc, data->layout.ndc);
+    result.generator_active_power_pu.resize(
+        static_cast<std::size_t>(data->layout.ng));
+    result.generator_reactive_power_pu.resize(
+        static_cast<std::size_t>(data->layout.ng));
+    for (int gi = 0; gi < data->layout.ng; ++gi) {
+      result.generator_active_power_pu[static_cast<std::size_t>(gi)] =
+          solved.x[data->layout.i_pg + gi];
+      result.generator_reactive_power_pu[static_cast<std::size_t>(gi)] =
+          solved.x[data->layout.i_qg + gi];
+    }
     result.converter_phase_power_pu.clear();
     result.converter_dc_power_pu.clear();
     result.converter_phase_power_pu.reserve(data->converters.size());
@@ -3016,17 +3026,8 @@ std::vector<ThreePhaseHybridOPFResult> solve_three_phase_hybrid_opf_sequence(
   std::vector<ThreePhaseHybridOPFResult> results;
   if (problems.empty()) return results;
 
-  const auto preparation_start = std::chrono::steady_clock::now();
-  ThreePhaseHybridOPFOptions preparation_options = options;
-  preparation_options.use_constraint_oracle = false;
-  preparation_options.enforced_inequality_rows.clear();
-  const auto prepared = build_model_data(problems.front(), preparation_options);
-  const double preparation_ms = std::chrono::duration<double, std::milli>(
-      std::chrono::steady_clock::now() - preparation_start).count();
-
-  results.reserve(problems.size());
-  for (std::size_t index = 0; index < problems.size(); ++index) {
-    const auto& problem = problems[index];
+  ThreePhaseHybridOPFCase preparation_problem = problems.front();
+  for (const auto& problem : problems) {
     validate_case(problem);
     if (problem.y_ac.rows() != problems.front().y_ac.rows() ||
         problem.y_ac.nonZeros() != problems.front().y_ac.nonZeros() ||
@@ -3037,6 +3038,34 @@ std::vector<ThreePhaseHybridOPFResult> solve_three_phase_hybrid_opf_sequence(
       throw std::invalid_argument(
           "hybrid OPF sequence requires a fixed network and device topology");
     }
+    for (int node = 0; node < problem.p_load_pu.size(); ++node) {
+      if (std::abs(problem.p_load_pu[node]) >
+          std::abs(preparation_problem.p_load_pu[node])) {
+        preparation_problem.p_load_pu[node] = problem.p_load_pu[node];
+      }
+      if (std::abs(problem.q_load_pu[node]) >
+          std::abs(preparation_problem.q_load_pu[node])) {
+        preparation_problem.q_load_pu[node] = problem.q_load_pu[node];
+      }
+      if (std::abs(problem.i_ac_fixed[node]) >
+          std::abs(preparation_problem.i_ac_fixed[node])) {
+        preparation_problem.i_ac_fixed[node] = problem.i_ac_fixed[node];
+      }
+    }
+  }
+
+  const auto preparation_start = std::chrono::steady_clock::now();
+  ThreePhaseHybridOPFOptions preparation_options = options;
+  preparation_options.use_constraint_oracle = false;
+  preparation_options.enforced_inequality_rows.clear();
+  const auto prepared =
+      build_model_data(preparation_problem, preparation_options);
+  const double preparation_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - preparation_start).count();
+
+  results.reserve(problems.size());
+  for (std::size_t index = 0; index < problems.size(); ++index) {
+    const auto& problem = problems[index];
     auto step_data = std::make_shared<ModelData>(*prepared);
     step_data->source = &problem;
     for (int pos = 0;

@@ -1,0 +1,105 @@
+{
+  "schema_version": "1.0",
+  "study_id": "shaanxi_future_weather_generator_resilience_case_v1",
+  "scope": "paired_future_weather_generation_with_fixed_downstream_resilience_case",
+  "weather_generation": {
+    "model_set": "outer",
+    "experiments": ["ssp245", "ssp585"],
+    "sites": ["yulin", "xian", "hanzhong", "ankang"],
+    "members_per_state": 10,
+    "base_seed": 20260725,
+    "methods": [
+      {
+        "id": "seasonal_var_block_ecdf_v2",
+        "role": "frozen_VAR_baseline",
+        "script": "tools/climate_data/weather_generator.py",
+        "definition": "tools/climate_data/manifests/weather_generator_baseline_frozen.json",
+        "definition_sha256": "fb8b8683f47ac39c9be0007dbac2b8ea19a439f02a7bedf424e4eb4737105942"
+      },
+      {
+        "id": "seasonal_multivariate_knn_analog_k10_frozen_v1",
+        "role": "frozen_KNN_K10_candidate",
+        "script": "tools/climate_data/weather_generator_knn.py",
+        "definition": "tools/climate_data/manifests/weather_generator_knn_k10_frozen.json",
+        "definition_sha256": "7e01fea5a34f65955c18685c63baf1bc970b76959720063959a90fd4211a7cae"
+      }
+    ],
+    "generator_probability_weights": null,
+    "GCM_probability_weights": null,
+    "SSP_probability_weights": null,
+    "automatic_method_selection": false,
+    "expected_state_method_tasks": 96,
+    "expected_generated_members": 960
+  },
+  "weather_to_grid": {
+    "mapping_status": "frozen_before_resilience_outputs",
+    "case_site": "xian",
+    "event_window_days": 3,
+    "event_selection": "maximum_three_day_mean_of_fixed_compound_stress_index",
+    "temperature": {
+      "hourly_reconstruction": "daily_mean_plus_half_daily_range_times_cosine_with_maximum_at_15_local_time"
+    },
+    "load": {
+      "base_hourly_profile": [0.72, 0.68, 0.65, 0.63, 0.64, 0.70, 0.80, 0.90, 0.96, 0.98, 0.96, 0.94, 0.92, 0.90, 0.91, 0.95, 1.02, 1.10, 1.16, 1.18, 1.12, 1.02, 0.90, 0.80],
+      "cooling_balance_temperature_degC": 24.0,
+      "heating_balance_temperature_degC": 16.0,
+      "cooling_slope_per_degC": 0.018,
+      "heating_slope_per_degC": 0.012,
+      "humidity_threshold_percent": 70.0,
+      "humidity_slope_per_percent": 0.002,
+      "multiplier_limits": [0.6, 1.8]
+    },
+    "pv": {
+      "daily_mean_rsds_to_hourly_GHI": "normalized_positive_sine_between_06_and_18_local_time",
+      "nominal_operating_cell_temperature_degC": 45.0,
+      "temperature_coefficient_per_degC": -0.004,
+      "reference_irradiance_W_m2": 1000.0,
+      "capacity_factor_limits": [0.0, 1.0]
+    },
+    "wind": {
+      "measurement_height_m": 10.0,
+      "hub_height_m": 80.0,
+      "shear_exponent": 0.14,
+      "cut_in_m_s": 3.0,
+      "rated_m_s": 12.0,
+      "cut_out_m_s": 25.0,
+      "between_cut_in_and_rated": "cubic_normalized_power_curve"
+    },
+    "compound_stress": {
+      "components": {
+        "heat": {"logistic_midpoint": 35.0, "logistic_scale": 3.0, "weight": 0.30},
+        "humidity": {"logistic_midpoint": 75.0, "logistic_scale": 8.0, "weight": 0.15},
+        "wind": {"logistic_midpoint": 12.0, "logistic_scale": 3.0, "weight": 0.25},
+        "precipitation": {"logistic_midpoint": 30.0, "logistic_scale": 12.0, "weight": 0.30}
+      }
+    },
+    "faults": {
+      "AC_branch_indices": [2, 18],
+      "outage_start_hours": [0.0, 6.0],
+      "base_repair_hours": [8.0, 6.0],
+      "repair_duration_formula": "base_repair_hours_times_one_plus_two_times_event_compound_stress",
+      "fault_count_is_fixed": true
+    }
+  },
+  "resilience_case": {
+    "network": "tests/data/reliability/case33bw_acdc.json",
+    "network_projection": "AC_only_for_the_fixed_case",
+    "algorithm": "DistributionResilienceModel::HeuristicSequential",
+    "algorithm_tuning_from_weather_results": false,
+    "horizon_hours": 72,
+    "time_step_hours": 1.0,
+    "allow_reconfiguration": true,
+    "allow_MESS_dispatch": false,
+    "run_power_flow": false,
+    "added_PV": {"bus": 18, "rated_MW": 0.8},
+    "added_wind": {"bus": 33, "rated_MW": 0.6},
+    "reported_metrics": ["total_demand_mwh", "total_served_mwh", "total_shed_mwh", "weighted_unserved_mwh", "resilience_index", "peak_shed_mw", "total_switch_actions", "total_repaired_faults"]
+  },
+  "reporting": {
+    "retain_every_generator_GCM_SSP_member_case": true,
+    "paired_by_GCM_SSP_site_member": true,
+    "pseudo_replication_significance_claim": false,
+    "generator_selection_from_resilience_case": false,
+    "interpretation": "The resilience case is a fixed downstream sensitivity demonstration, not a new resilience algorithm or a calibrated Shaanxi asset fragility model."
+  }
+}

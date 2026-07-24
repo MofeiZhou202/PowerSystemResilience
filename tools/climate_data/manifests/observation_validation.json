@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "validation_id": "shaanxi_independent_observation_evaluation_v1",
+  "status": "awaiting_licensed_cma_station_or_authorized_cn05_1_data",
+  "permitted_sources": ["cma_station", "cn05_1"],
+  "minimum_overlap_years": 20,
+  "preferred_overlap_period": {"start": "1985-01-01", "end": "2014-12-31"},
+  "required_variables": ["tasmax", "tasmin", "pr"],
+  "optional_variables": ["hurs", "sfcWind", "rsds"],
+  "canonical_units": {
+    "tasmax": "degC",
+    "tasmin": "degC",
+    "pr": "mm day-1",
+    "hurs": "%",
+    "sfcWind": "m s-1",
+    "rsds": "W m-2"
+  },
+  "observation_table_contract": {
+    "required_columns": ["date", "location_id", "longitude", "latitude", "elevation_m", "tasmax", "tasmin", "pr", "quality_flag"],
+    "location_id_semantics": "CMA station identifier or stable CN05.1 extracted-grid-cell identifier",
+    "cardinality": "one_location_per_file",
+    "date_format": "YYYY-MM-DD",
+    "coordinate_reference_system": "EPSG:4326",
+    "missing_value": "empty_or_NaN",
+    "quality_rule": "Only provider-approved observations may enter quantitative validation; preserve original provider flags."
+  },
+  "coverage_gates": {
+    "maximum_missing_fraction_overall": 0.1,
+    "maximum_missing_fraction_per_season": 0.15,
+    "maximum_missing_fraction_per_year": 0.1,
+    "minimum_valid_wet_days_for_precipitation_quantiles": 100,
+    "require_complete_station_metadata": true
+  },
+  "spatial_matching": {
+    "station_method": "distance_from_cma_station_to_downloaded_era5_representative_grid_cell",
+    "cn05_1_method": "distance_from_extracted_cn05_1_grid_cell_to_downloaded_era5_representative_grid_cell",
+    "maximum_station_to_grid_distance_km": 25.0,
+    "require_distance_report": true,
+    "require_elevation_difference_report": true,
+    "forbid_unreported_lapse_rate_correction": true
+  },
+  "metrics": {
+    "marginal": ["mean_bias", "mae", "rmse", "pearson_correlation", "spearman_correlation", "q05_bias", "q50_bias", "q95_bias", "q99_bias"],
+    "precipitation": ["wet_day_frequency_bias", "wet_day_intensity_bias", "rx1day_bias", "r95p_bias"],
+    "temporal": ["lag1_autocorrelation_bias", "monthly_climatology_bias", "spell_length_distribution_distance"],
+    "dependence": ["rank_correlation_matrix_error", "upper_tail_coexceedance_error", "lower_tail_coexceedance_error"],
+    "events": ["frequency_bias", "duration_bias", "severity_bias", "probability_of_detection", "false_alarm_ratio", "critical_success_index"]
+  },
+  "bias_adjustment_guard": {
+    "evaluation_must_precede_adjustment": true,
+    "require_year_blocked_cross_validation": true,
+    "forbid_training_on_held_out_years": true,
+    "report_raw_and_adjusted_results": true
+  },
+  "licensing": {
+    "forbid_redistribution_without_permission": true,
+    "required_provenance": ["source_id", "dataset_title", "provider", "release_or_version", "station_or_grid_ids", "target_site", "order_or_access_identifier", "download_date", "license_or_terms", "file_sha256", "canonical_units", "approved_quality_flags", "quality_flag_meanings", "transformation_history", "reference_grid_elevation_m", "reference_grid_elevation_source"]
+  }
+}

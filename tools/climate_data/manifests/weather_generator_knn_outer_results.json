@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0",
+  "result_id": "shaanxi_weather_generator_knn_gcm_outer_evaluation_v1_final",
+  "status": "frozen_method_GCM_outer_evaluation_not_observational_validation",
+  "protocol": "tools/climate_data/manifests/weather_generator_knn_outer_evaluation_calendar_amended.json",
+  "protocol_sha256": "b5253985faa97829c0a631fa4cea5aecbaa4c16337fba0d668b3fd5304e88468",
+  "aggregate_report": "data/climate_shaanxi/processed/weather_generator_evaluation/evaluation=shaanxi_weather_generator_knn_gcm_outer_evaluation_v1/aggregate=frozen_gcm_outer_calendar_eligible_six_gcms_four_sites/aggregate_report.json",
+  "aggregate_report_sha256": "68dcaabcb4a14c37c755ebfeb36c7672ba194bc02ac638e305311af4fac8c757",
+  "unit_score_table_sha256": "b625d090a383ed7d6436d203681a766081b7c35ca1bf0c7a988b09f473eff830",
+  "design": {
+    "GCMs": 6,
+    "sites_per_GCM": 4,
+    "GCM_site_units": 24,
+    "five_year_folds_per_unit": 6,
+    "members_per_fold": 20,
+    "member_score_rows": 5760,
+    "comparison": "seasonal multivariate KNN analog K=10 minus frozen full VAR(1) with seven-day residual blocks"
+  },
+  "primary_result": {
+    "KNN_mean_composite": 0.08848422473330786,
+    "VAR_mean_composite": 0.08901699534284573,
+    "KNN_minus_VAR": -0.0005327706095378469,
+    "relative_change_from_VAR": -0.005985043874696046,
+    "KNN_rank_one_GCM_site_units": 12,
+    "VAR_rank_one_GCM_site_units": 12
+  },
+  "mean_composite_delta_KNN_minus_VAR_by_GCM": {
+    "CanESM5": -0.0024419440336414418,
+    "CNRM-CM6-1": 0.002315434743904384,
+    "IPSL-CM6A-LR": 0.00003152601832711113,
+    "MIROC6": -0.0006210839068562027,
+    "NorESM2-MM": -0.0007044147300424297,
+    "FGOALS-g3": -0.001776141748918502
+  },
+  "mean_composite_delta_KNN_minus_VAR_by_site": {
+    "yulin": -0.00010682703570013645,
+    "xian": 0.0018134280793955515,
+    "hanzhong": -0.001209575229749187,
+    "ankang": -0.0026281082520976154
+  },
+  "mean_category_delta_KNN_minus_VAR": {
+    "annual_extremes_and_compound_events": -0.007850688713540659,
+    "daily_persistence": 0.0033791002353818207,
+    "marginal_distribution": -0.00009196206004345962,
+    "multivariate_dependence": 0.0008533764280372865,
+    "seasonal_cycle": -0.0000255950270421935
+  },
+  "interpretation": "KNN has a small mean composite advantage driven mainly by annual extremes and compound events, but it worsens the mean daily-persistence and multivariate-dependence scores. Results are heterogeneous across GCM-site units and do not establish universal superiority.",
+  "selection_guard": {
+    "automatic_method_selection_completed": false,
+    "post_outer_tuning_or_unit_deletion": false,
+    "significance_claim": false,
+    "GCM_or_SSP_probabilities_assigned": false
+  },
+  "completed_utc": "2026-07-24T12:43:30Z"
+}

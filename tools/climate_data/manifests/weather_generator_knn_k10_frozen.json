@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0",
+  "method_id": "seasonal_multivariate_knn_analog_k10_frozen_v1",
+  "method_role": "frozen_nonparametric_candidate_for_paired_future_scenario_generation",
+  "freeze_evidence": {
+    "development_report": "data/climate_shaanxi/processed/weather_generator_evaluation/evaluation=shaanxi_weather_generator_knn_development_v1/aggregate=knn_development_gcms_four_sites/aggregate_report.json",
+    "development_report_sha256": "e72559676a47ae7675aa054fe8be6a68d69c4f68c48fc477a3da0e9122ebce85",
+    "outer_result_snapshot": "tools/climate_data/manifests/weather_generator_knn_outer_results.json",
+    "outer_results_used_for_selection": false,
+    "selected_neighbor_count": 10
+  },
+  "conditioning": {
+    "dimensions": ["gcm", "experiment", "site", "thirty_year_epoch"],
+    "probability_statement": "P(weather_path | GCM, experiment, site, epoch, generator)",
+    "pool_gcms_or_ssps": false,
+    "assign_gcm_or_ssp_probabilities": false
+  },
+  "calendar": {
+    "generated_calendar": "365_day",
+    "alignment": "remove_february_29_before_fitting",
+    "days_per_path_year": 365
+  },
+  "model_variables": ["tasmax", "dtr", "hurs", "sfcWind", "rsds", "pr"],
+  "marginal_model": {
+    "conditioning": "calendar_month",
+    "forward_transform": "empirical_midrank_then_standard_normal_inverse_cdf",
+    "inverse_transform": "empirical_step_inverse_cdf",
+    "tie_handling": "average_midrank"
+  },
+  "analog_model": {
+    "transition_library": "complete_consecutive_day_pairs_only",
+    "candidate_conditioning": "meteorological_season_of_destination_day",
+    "distance_space": "six_variable_monthly_gaussian_rank_space",
+    "distance_metric": "euclidean_equal_variable_weight",
+    "neighbor_count": 10,
+    "neighbor_selection": "inverse_rank_probability",
+    "rank_weight_exponent": 1.0,
+    "successor_sampling": "sample_complete_multivariate_successor_vector",
+    "initialization": "uniform_complete_historical_vector_from_target_calendar_month",
+    "jitter": false,
+    "index_backend": "scipy_spatial_cKDTree_exact_query"
+  },
+  "physical_constraints": {
+    "dtr": "nonnegative_by_empirical_support",
+    "tasmin_not_greater_than_tasmax": true,
+    "hurs": [0.0, 100.0],
+    "sfcWind_minimum": 0.0,
+    "rsds_minimum": 0.0,
+    "pr_minimum": 0.0
+  },
+  "randomness": {
+    "generator": "numpy_PCG64_via_default_rng",
+    "member_seed": "first_64_bits_of_SHA256_over_base_seed_method_climate_state_site_member"
+  },
+  "hyperparameter_status": {
+    "neighbor_count": "frozen_at_10_before_GCM_level_outer_evaluation",
+    "post_outer_tuning": false
+  },
+  "interpretation_limits": [
+    "The generator is retained alongside the frozen VAR baseline as structural uncertainty and is not selected from outer results.",
+    "The nonparametric generator cannot exceed fitted marginal support without an explicit tail model.",
+    "Exact fitted successor vectors can recur because this is an analog bootstrap.",
+    "Season conditioning is discontinuous at meteorological-season boundaries.",
+    "Site-wise fitting does not model spatial dependence between Shaanxi locations.",
+    "No result assigns probabilities to GCMs, SSPs, or generator methods."
+  ]
+}

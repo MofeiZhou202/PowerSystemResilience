@@ -1,0 +1,2 @@
+date,location_id,longitude,latitude,elevation_m,tasmax,tasmin,pr,hurs,sfcWind,rsds,quality_flag
+1985-01-01,REPLACE_WITH_STATION_OR_GRID_ID,108.9,34.3,REPLACE_WITH_ELEVATION,REPLACE,REPLACE,REPLACE,,,,REPLACE_WITH_PROVIDER_FLAG

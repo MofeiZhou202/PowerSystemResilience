@@ -175,6 +175,8 @@ struct ThreePhaseHybridOPFResult {
   Eigen::VectorXd inequality_slack;
   Eigen::VectorXcd full_voltage;
   Eigen::VectorXd dc_voltage;
+  std::vector<double> generator_active_power_pu;
+  std::vector<double> generator_reactive_power_pu;
   std::vector<std::vector<std::complex<double>>> converter_phase_power_pu;
   std::vector<double> converter_dc_power_pu;
   std::vector<int> enforced_inequality_rows;

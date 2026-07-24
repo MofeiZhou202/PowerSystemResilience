@@ -1,0 +1,92 @@
+{
+  "schema_version": "1.0",
+  "evaluation_id": "shaanxi_weather_generator_knn_gcm_outer_evaluation_v1",
+  "role": "calendar_eligibility_amendment_to_gcm_level_outer_evaluation_of_frozen_knn_k10_against_frozen_v2_baseline",
+  "target": "held_out_NEX_GDDP_CMIP6_days_are_a_generator_target_not_observational_truth",
+  "period": {"start": "1985-01-01", "end": "2014-12-31"},
+  "gcm_access": {
+    "model_set": "outer",
+    "allowed_gcms": ["CanESM5", "CNRM-CM6-1", "IPSL-CM6A-LR", "MIROC6", "NorESM2-MM", "FGOALS-g3"]
+  },
+  "protocol_amendment": {
+    "original_protocol": "tools/climate_data/manifests/weather_generator_knn_outer_evaluation.json",
+    "original_protocol_sha256": "25b6cce707af4db98fb2535e22e22971bc27d9fdabe2438ed1672fadb40a0dd6",
+    "decision_stage": "after_complete_acquisition_and_before_any_UKESM_generator_score",
+    "excluded_model": "UKESM1-0-LL",
+    "exclusion_reason": "The source uses a 360_day calendar, while the frozen generator protocol defines 365-day fitting and six equal five-year blocks. An unplanned 360-to-365 interpolation was prohibited after outer evaluation began.",
+    "replacement_model": "FGOALS-g3",
+    "replacement_rule": "Previously unused GCM with all six variables in historical, ssp245, and ssp585; one realization across experiments; non-360-day calendar; and distinct model-family and East-Asia institutional representation.",
+    "replacement_realization": "r3i1p1f1",
+    "replacement_calendar_smoke_result": "365_day_with_365_complete_daily_values_in_1985",
+    "replacement_data_qualification": "tools/climate_data/manifests/fgoals_g3_tasmin_metadata_repair.json",
+    "replacement_data_qualification_sha256": "f73864272e8265dbbcc1101815b84c04cb13a3bae40bb6b59c9418ab1e076e00",
+    "replacement_data_qualification_stage": "upstream_tasmin_metadata_omission_resolved_before_any_FGOALS_generator_score",
+    "methods_hyperparameters_scores_seeds_and_aggregation_changed": false,
+    "amended_utc": "2026-07-24T12:16:30Z"
+  },
+  "outer_evaluation_freeze": {
+    "status": "methods_and_hyperparameters_frozen_before_outer_GCM_weather_data_evaluation",
+    "frozen_variants": ["full", "knn_k10"],
+    "development_report": "data/climate_shaanxi/processed/weather_generator_evaluation/evaluation=shaanxi_weather_generator_knn_development_v1/aggregate=knn_development_gcms_four_sites/aggregate_report.json",
+    "development_report_sha256": "e72559676a47ae7675aa054fe8be6a68d69c4f68c48fc477a3da0e9122ebce85",
+    "confirmation_report": "data/climate_shaanxi/processed/weather_generator_evaluation/evaluation=shaanxi_weather_generator_knn_frozen_confirmation_v1/aggregate=knn_confirmation_gcms_four_sites/aggregate_report.json",
+    "confirmation_report_sha256": "a07f38d1c6e08a4f239a09f30fb32a7a15514ee78ee713a193933ba1fb70c626",
+    "baseline_definition_sha256": "fb8b8683f47ac39c9be0007dbac2b8ea19a439f02a7bedf424e4eb4737105942",
+    "knn_definition_sha256": "73da519a5a1c18b7fa2155b69aef37a3adc6235a8b9cf433c0ac51dd6b1bb2d5",
+    "catalog_audit": "data/climate_shaanxi/provenance/nex_gddp_cmip6_catalog_audit_outer_amended.json",
+    "catalog_audit_sha256": "56ec2f5e9d7d701d2779f3ca7c3812f23865c52e57a8c6392daff1da374c110f",
+    "outer_gcms": ["CanESM5", "CNRM-CM6-1", "IPSL-CM6A-LR", "MIROC6", "NorESM2-MM", "FGOALS-g3"],
+    "method_selection_after_outer_evaluation": false
+  },
+  "cross_validation": {
+    "method": "leave_one_nonoverlapping_five_year_block_out",
+    "block_years": 5,
+    "folds": 6,
+    "exclude_transitions_across_removed_blocks": true
+  },
+  "members_per_fold": 20,
+  "base_seed": 20260724,
+  "member_seed_pairing": "common_within_fold_and_member_across_variants",
+  "score_definition": "gcm_skill_screening.json",
+  "aggregation": "score_each_five_year_member_against_the_held_out_block_then_average_members_within_fold_and_equal_weight_the_six_folds",
+  "variants": [
+    {
+      "id": "full",
+      "generator": "frozen_var_block_v2",
+      "description": "frozen one-state full-VAR seven-day residual-block baseline",
+      "state_count": 1,
+      "diagonal_autoregression": false,
+      "block_length_days": 7,
+      "independent_residual_columns": false,
+      "monthly_iid": false
+    },
+    {
+      "id": "knn_k10",
+      "generator": "seasonal_multivariate_knn_analog",
+      "description": "frozen season-conditioned multivariate analog with 10 neighbors",
+      "neighbor_count": 10,
+      "rank_weight_exponent": 1.0
+    }
+  ],
+  "reporting": {
+    "primary": "paired_composite_delta_of_frozen_KNN_K10_from_frozen_v2_baseline",
+    "uncertainty": ["fold_standard_deviation", "fold_minimum", "fold_maximum"],
+    "pairing": "common_seed_foldwise_comparison",
+    "unit": "GCM_site_with_GCM_level_outer_role",
+    "automatic_method_selection": false,
+    "significance_claim": false
+  },
+  "selection_guard": {
+    "do_not_tune_or_select_after_outer_results": true,
+    "report_all_outer_GCM_site_units": true,
+    "retain_GCM_level_results": true
+  },
+  "interpretation_limits": [
+    "The six eligible outer GCMs were not used for state-count or KNN-neighbor selection; only catalog, variable, realization, and calendar eligibility were inspected before staging.",
+    "UKESM1-0-LL was excluded before any generator score because the frozen protocol lacks a 360-to-365-day transform; FGOALS-g3 replaced it without changing the methods.",
+    "The target remains held-out GCM-simulated weather rather than observational truth.",
+    "A GCM-site score is not an independent identically distributed observation and no pseudo-replication p-value is reported.",
+    "No result assigns probabilities to GCMs or SSPs.",
+    "Representative sites do not support province-wide asset-scale exposure claims."
+  ]
+}

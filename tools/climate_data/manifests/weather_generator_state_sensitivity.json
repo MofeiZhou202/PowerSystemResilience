@@ -1,0 +1,85 @@
+{
+  "schema_version": "1.0",
+  "evaluation_id": "shaanxi_weather_generator_state_count_sensitivity_v1",
+  "role": "state_count_method_development_not_final_performance_estimation",
+  "target": "held_out_NEX_GDDP_CMIP6_days_are_a_generator_target_not_observational_truth",
+  "period": {"start": "1985-01-01", "end": "2014-12-31"},
+  "cross_validation": {
+    "method": "leave_one_nonoverlapping_five_year_block_out",
+    "block_years": 5,
+    "folds": 6,
+    "exclude_transitions_across_removed_blocks": true
+  },
+  "members_per_fold": 20,
+  "base_seed": 20260724,
+  "member_seed_pairing": "common_within_fold_and_member_across_state_counts",
+  "score_definition": "gcm_skill_screening.json",
+  "aggregation": "score_each_five_year_member_against_the_held_out_block_then_average_members_within_fold_and_equal_weight_the_six_folds",
+  "variants": [
+    {
+      "id": "state_k1",
+      "description": "one state, full VAR, joint seven-day residual-vector blocks",
+      "state_count": 1,
+      "diagonal_autoregression": false,
+      "block_length_days": 7,
+      "independent_residual_columns": false,
+      "monthly_iid": false
+    },
+    {
+      "id": "state_k2",
+      "description": "two states, full VAR, joint seven-day residual-vector blocks",
+      "state_count": 2,
+      "diagonal_autoregression": false,
+      "block_length_days": 7,
+      "independent_residual_columns": false,
+      "monthly_iid": false
+    },
+    {
+      "id": "state_k3",
+      "description": "three states, full VAR, joint seven-day residual-vector blocks",
+      "state_count": 3,
+      "diagonal_autoregression": false,
+      "block_length_days": 7,
+      "independent_residual_columns": false,
+      "monthly_iid": false
+    },
+    {
+      "id": "full",
+      "description": "four states, full VAR, joint seven-day residual-vector blocks",
+      "state_count": 4,
+      "diagonal_autoregression": false,
+      "block_length_days": 7,
+      "independent_residual_columns": false,
+      "monthly_iid": false
+    },
+    {
+      "id": "state_k5",
+      "description": "five states, full VAR, joint seven-day residual-vector blocks",
+      "state_count": 5,
+      "diagonal_autoregression": false,
+      "block_length_days": 7,
+      "independent_residual_columns": false,
+      "monthly_iid": false
+    }
+  ],
+  "reporting": {
+    "primary": "mean_composite_score_across_equal_weight_fold_means",
+    "uncertainty": ["fold_standard_deviation", "fold_minimum", "fold_maximum"],
+    "pairing": "report_foldwise_score_delta_from_four_state_full_reference",
+    "automatic_method_selection": false,
+    "significance_claim": false
+  },
+  "selection_guard": {
+    "use": "method_development_only",
+    "required_after_selection": "nested_outer_validation_or_frozen_method_evaluation_on_additional_GCM_site_units",
+    "forbid_reporting_tuned_inner_fold_score_as_final_generalization_performance": true
+  },
+  "interpretation_limits": [
+    "This sweep tunes a statistical hyperparameter and is not final out-of-sample performance evidence.",
+    "The same folds cannot both select the state count and support an unbiased final performance claim.",
+    "A state count should not be selected from one site or one GCM.",
+    "State clusters have no physical labels without separate diagnostics.",
+    "This evaluation measures reproduction of a held-out GCM distribution, not agreement with observed climate.",
+    "No result assigns probabilities to GCMs or SSPs."
+  ]
+}

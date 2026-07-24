@@ -226,6 +226,10 @@ TyphoonFaultSequenceResult generate_typhoon_fault_sequence(
 
 TyphoonIntensityCategory classify_typhoon_intensity(double max_vmax_ms);
 double holland_wind_ms(const TyphoonTrackPoint& storm, double site_lat, double site_lon);
+double typhoon_rainfall_mm_hr(const TyphoonTrackPoint& storm,
+                             const TyphoonTrackPoint* previous,
+                             double site_lat,
+                             double site_lon);
 double max_track_vmax_ms(const std::vector<TyphoonTrackPoint>& track, bool skip_first_point = true);
 TyphoonTrackSample generate_typhoon_track_sample(const TyphoonScenarioOptions& opts = {});
 TyphoonCatalog build_typhoon_catalog(const TyphoonCatalogOptions& opts = {});

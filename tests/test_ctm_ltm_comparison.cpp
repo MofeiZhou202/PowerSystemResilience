@@ -557,8 +557,8 @@ TEST_CASE("XXIV: LTM vs CTM — 4-link urban arterial corridor",
 //   tau_ff=2, true free-flow time = 10/100 h = 6 min ~= 1.2 steps (dt=5min)
 //   LTM first exit at step tau_ff+2 = 4 = 20 min. True = 6 min. Overestimate.
 //
-// CTM (both links): inject+propagate+inter-link in same step -> step-0 exit.
-//   True delay = 1.2 min (short) or 6 min (long).  CTM reports 0 min.
+// CTM source flow enters the state at the end of its release step and must not
+// propagate to the downstream link retroactively in step 0.
 
 TEST_CASE("XXV: LTM vs CTM — free-flow travel-time accuracy",
           "[ctm_ltm][travel_time][accuracy]") {
@@ -598,10 +598,14 @@ TEST_CASE("XXV: LTM vs CTM — free-flow travel-time accuracy",
     DUEOptions dO_s; dO_s.max_iterations=1;
     const CTMDUEResult ctm_s_res =
         simulate_ev_power_traffic_ctm_due(ctm_prob_s, ev_s, co_s, dO_s);
-    double ctm_s_step0 = 0;
-    if (!ctm_s_res.final_ctm.step_link_results.empty() &&
-        ctm_s_res.final_ctm.step_link_results[0].size() > 1)
-        ctm_s_step0 = ctm_s_res.final_ctm.step_link_results[0][1].total_inflow_veh;
+    int ctm_s_first = T_S;
+    for (int k = 0; k < T_S; ++k) {
+      if (ctm_s_res.final_ctm.step_link_results[static_cast<std::size_t>(k)]
+              [1].total_inflow_veh > 1e-9) {
+        ctm_s_first = k;
+        break;
+      }
+    }
 
     // ── Long link (B) ──────────────────────────────────────────────────
     constexpr double L_L   = 10.0;
@@ -636,10 +640,14 @@ TEST_CASE("XXV: LTM vs CTM — free-flow travel-time accuracy",
     DUEOptions dO_l; dO_l.max_iterations=1;
     const CTMDUEResult ctm_l_res =
         simulate_ev_power_traffic_ctm_due(ctm_prob_l, ev_l, co_l, dO_l);
-    double ctm_l_step0 = 0;
-    if (!ctm_l_res.final_ctm.step_link_results.empty() &&
-        ctm_l_res.final_ctm.step_link_results[0].size() > 1)
-        ctm_l_step0 = ctm_l_res.final_ctm.step_link_results[0][1].total_inflow_veh;
+    int ctm_l_first = T_L;
+    for (int k = 0; k < T_L; ++k) {
+      if (ctm_l_res.final_ctm.step_link_results[static_cast<std::size_t>(k)]
+              [1].total_inflow_veh > 1e-9) {
+        ctm_l_first = k;
+        break;
+      }
+    }
 
     // ── Reporting ──────────────────────────────────────────────────────
     const double true_ff_s_min = L_S / VFF_S * 60;   // 1.2 min
@@ -648,15 +656,15 @@ TEST_CASE("XXV: LTM vs CTM — free-flow travel-time accuracy",
     const double ltm_l_min     = ltm_l_first * DT_L * 60;
 
     std::printf("[ctm_ltm] XXV-short  true_ff=%.1fmin  LTM_first_exit=step%d=%.0fmin  "
-                "CTM_step0_exit=%.1fveh  [overestimate=%.0f%%]\n",
+                "CTM_first_downstream_step=%d  [overestimate=%.0f%%]\n",
                 true_ff_s_min, ltm_s_first, ltm_s_min,
-                ctm_s_step0, 100.0*(ltm_s_min-true_ff_s_min)/true_ff_s_min);
+                ctm_s_first, 100.0*(ltm_s_min-true_ff_s_min)/true_ff_s_min);
     std::printf("[ctm_ltm] XXV-long   true_ff=%.1fmin  LTM_first_exit=step%d=%.0fmin  "
-                "CTM_step0_exit=%.1fveh  [overestimate=%.0f%%]\n",
+                "CTM_first_downstream_step=%d  [overestimate=%.0f%%]\n",
                 true_ff_l_min, ltm_l_first, ltm_l_min,
-                ctm_l_step0, 100.0*(ltm_l_min-true_ff_l_min)/true_ff_l_min);
+                ctm_l_first, 100.0*(ltm_l_min-true_ff_l_min)/true_ff_l_min);
     std::printf("[ctm_ltm] XXV  LTM overestimates by tau_ff+2=%d steps; "
-                "CTM exits at step 0 (artefact). True delay is between them.\n",
+                "CTM source flow is causal; true delay is between the two discretizations.\n",
                 tau_ff_s + 2);
 
     // CFL checks
@@ -671,9 +679,9 @@ TEST_CASE("XXV: LTM vs CTM — free-flow travel-time accuracy",
     CHECK(ltm_s_first == tau_ff_s + 2);
     CHECK(ltm_l_first == tau_ff_l + 2);
 
-    // CTM zero-delay artefact: pulse exits at step 0 for both links
-    CHECK(ctm_s_step0 > 0.0);
-    CHECK(ctm_l_step0 > 0.0);
+    // CTM source flow cannot reach the downstream link in its release step.
+    CHECK(ctm_s_first >= 1);
+    CHECK(ctm_l_first >= 1);
 
     // Conservation: all injected vehicles exit by end (T >> tau_bw)
     const double ltm_s_ent = ltm_s.N_in.back();

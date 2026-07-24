@@ -1,0 +1,61 @@
+{
+  "schema_version": "1.0",
+  "method_id": "seasonal_multivariate_knn_analog_v1",
+  "method_role": "advanced_nonparametric_candidate_for_preregistered_comparison",
+  "conditioning": {
+    "dimensions": ["gcm", "experiment", "site", "thirty_year_epoch"],
+    "probability_statement": "P(weather_path | GCM, experiment, site, epoch)",
+    "pool_gcms_or_ssps": false,
+    "assign_gcm_or_ssp_probabilities": false
+  },
+  "calendar": {
+    "generated_calendar": "365_day",
+    "alignment": "remove_february_29_before_fitting",
+    "days_per_path_year": 365
+  },
+  "model_variables": ["tasmax", "dtr", "hurs", "sfcWind", "rsds", "pr"],
+  "marginal_model": {
+    "conditioning": "calendar_month",
+    "forward_transform": "empirical_midrank_then_standard_normal_inverse_cdf",
+    "inverse_transform": "empirical_step_inverse_cdf",
+    "tie_handling": "average_midrank"
+  },
+  "analog_model": {
+    "transition_library": "complete_consecutive_day_pairs_only",
+    "candidate_conditioning": "meteorological_season_of_destination_day",
+    "distance_space": "six_variable_monthly_gaussian_rank_space",
+    "distance_metric": "euclidean_equal_variable_weight",
+    "neighbor_count": 50,
+    "neighbor_selection": "inverse_rank_probability",
+    "rank_weight_exponent": 1.0,
+    "successor_sampling": "sample_complete_multivariate_successor_vector",
+    "initialization": "uniform_complete_historical_vector_from_target_calendar_month",
+    "jitter": false,
+    "index_backend": "scipy_spatial_cKDTree_exact_query"
+  },
+  "physical_constraints": {
+    "dtr": "nonnegative_by_empirical_support",
+    "tasmin_not_greater_than_tasmax": true,
+    "hurs": [0.0, 100.0],
+    "sfcWind_minimum": 0.0,
+    "rsds_minimum": 0.0,
+    "pr_minimum": 0.0
+  },
+  "randomness": {
+    "generator": "numpy_PCG64_via_default_rng",
+    "member_seed": "first_64_bits_of_SHA256_over_base_seed_method_climate_state_site_member"
+  },
+  "hyperparameter_status": {
+    "neighbor_count": "development_value_not_finally_selected",
+    "required_sensitivity": [10, 25, 50, 100],
+    "selection_rule": "select_on_development_units_then_freeze_before_new_GCM_level_outer_evaluation"
+  },
+  "interpretation_limits": [
+    "This is an advanced candidate and has not yet displaced the frozen v2 baseline.",
+    "The generator is nonparametric and cannot exceed the fitted marginal support without an explicit tail model.",
+    "Exact historical successor vectors can recur; this is a stochastic analog bootstrap rather than a novel-value simulator.",
+    "Season conditioning has discontinuities at meteorological-season boundaries.",
+    "Site-wise fitting does not model spatial dependence between Shaanxi locations.",
+    "No result assigns probabilities to GCMs or SSPs."
+  ]
+}

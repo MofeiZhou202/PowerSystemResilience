@@ -134,6 +134,7 @@ struct FixedStorageData {
 struct MESSData {
   int index{0};
   int init_bus_pos{0};
+  int available_step{0};
   double pmax_mw{0.0};
   double e_init_mwh{0.0};
   double e_min_mwh{0.0};
@@ -737,8 +738,19 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
     const auto it = bus_pos.find(st.bus);
     if (it == bus_pos.end()) continue;
     const double e0 = st.e_mwh > 0.0 ? st.e_mwh : st.soc_init * st.e_rated_mwh;
-    out.mess.push_back({st.index != 0 ? st.index : static_cast<int>(i + 1),
+    const int stable_index =
+        st.index != 0 ? st.index : static_cast<int>(i + 1);
+    const auto available_it =
+        opts.mobile_storage_available_from_hr.find(stable_index);
+    const double available_hr = available_it ==
+            opts.mobile_storage_available_from_hr.end()
+        ? 0.0
+        : std::max(0.0, available_it->second);
+    const int available_step = std::clamp(
+        static_cast<int>(std::ceil(available_hr / dt - kEps)), 0, T);
+    out.mess.push_back({stable_index,
                         it->second,
+                        available_step,
                         std::max({0.0, st.pmax_mw, st.p_rated_mw, st.p_mw}),
                         std::max(0.0, e0),
                         st.soc_min * st.e_rated_mwh,
@@ -881,14 +893,18 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
                                          "mx_" + std::to_string(m) + "_" + std::to_string(i) + "_" + std::to_string(t), 0.0));
         out.idx.mess_root.push_back(add_var(solver::VarType::Binary,
                                             0.0,
-                                            opts.mip.allow_mess_black_start &&
+                                            t >= out.mess[m].available_step &&
+                                                    opts.mip.allow_mess_black_start &&
                                                     out.mess[m].grid_forming
                                                 ? 1.0
                                                 : 0.0,
                                             "mr_" + std::to_string(m) + "_" + std::to_string(i) + "_" + std::to_string(t), 0.0));
         out.idx.mess_dis.push_back(add_var(solver::VarType::Continuous,
                                            0.0,
-                                           opts.allow_mess_dispatch ? out.mess[m].pmax_mw : 0.0,
+                                           opts.allow_mess_dispatch &&
+                                                   t >= out.mess[m].available_step
+                                               ? out.mess[m].pmax_mw
+                                               : 0.0,
                                            "md_" + std::to_string(m) + "_" + std::to_string(i) + "_" + std::to_string(t),
                                            kMessDispatchTieBreakCostPerMWh * dt));
       }
@@ -916,7 +932,11 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
                 kMessMoveTieBreakCost;
       out.idx.mess_arc_var[m].push_back(add_var(solver::VarType::Binary,
                                                 0.0,
-                                                1.0,
+                                                mess_arcs[m][a].is_stay ||
+                                                        mess_arcs[m][a].depart_t >=
+                                                            out.mess[m].available_step
+                                                    ? 1.0
+                                                    : 0.0,
                                                 "ma_" + std::to_string(m) + "_" + std::to_string(a),
                                                 arc_cost));
     }

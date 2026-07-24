@@ -1,0 +1,29 @@
+{
+  "source_id": "cma_station",
+  "dataset_title": "REPLACE_WITH_LICENSED_DATASET_TITLE",
+  "provider": "REPLACE_WITH_PROVIDER",
+  "release_or_version": "REPLACE_WITH_RELEASE_OR_VERSION",
+  "station_or_grid_ids": ["REPLACE_WITH_STATION_OR_GRID_ID"],
+  "target_site": "xian",
+  "order_or_access_identifier": "REPLACE_WITH_ORDER_OR_ACCESS_ID",
+  "download_date": "YYYY-MM-DD",
+  "license_or_terms": "REPLACE_WITH_LICENSE_OR_TERMS_REFERENCE",
+  "file_sha256": "REPLACE_WITH_SHA256_OF_CANONICAL_CSV",
+  "canonical_units": {
+    "tasmax": "degC",
+    "tasmin": "degC",
+    "pr": "mm day-1",
+    "hurs": "%",
+    "sfcWind": "m s-1",
+    "rsds": "W m-2"
+  },
+  "approved_quality_flags": ["REPLACE_WITH_PROVIDER_APPROVED_FLAG"],
+  "quality_flag_meanings": {
+    "REPLACE_WITH_PROVIDER_APPROVED_FLAG": "REPLACE_WITH_PROVIDER_DOCUMENTED_MEANING"
+  },
+  "transformation_history": [
+    "REPLACE_WITH_NATIVE_TO_CANONICAL_COLUMN_AND_UNIT_TRANSFORMATIONS"
+  ],
+  "reference_grid_elevation_m": "REPLACE_WITH_FINITE_NUMBER",
+  "reference_grid_elevation_source": "REPLACE_WITH_VERSIONED_OROGRAPHY_SOURCE"
+}
