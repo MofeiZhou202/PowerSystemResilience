@@ -293,18 +293,19 @@ target_compile_options(ipopt_local PRIVATE
 
 # ── 6. Link libraries ─────────────────────────────────────────────────────────
 # BLAS/LAPACK backend:
-# - macOS: Accelerate
 # - Windows: Intel MKL (required for embedded Ipopt build)
-target_link_libraries(ipopt_local PRIVATE
-  "$<$<PLATFORM_ID:Darwin>:-framework Accelerate>")
-
+# - macOS/Linux: MIPSOLVERS_BLAS_LIBRARIES, resolved once in
+#   cmake/Dependencies.cmake (Accelerate on macOS, system BLAS/LAPACK on Linux,
+#   vendored reference LAPACK as offline fallback)
 if(WIN32)
   target_include_directories(ipopt_local PRIVATE ${MIPSOLVERS_MKL_INCLUDE_DIRS})
   target_link_libraries(ipopt_local PRIVATE ${MIPSOLVERS_MKL_LIBRARIES})
-elseif(UNIX AND NOT APPLE)
-  find_package(BLAS REQUIRED)
-  find_package(LAPACK REQUIRED)
-  target_link_libraries(ipopt_local PRIVATE ${BLAS_LIBRARIES} ${LAPACK_LIBRARIES})
+elseif(MIPSOLVERS_BLAS_LIBRARIES)
+  target_link_libraries(ipopt_local PRIVATE ${MIPSOLVERS_BLAS_LIBRARIES})
+else()
+  message(FATAL_ERROR
+    "Embedded Ipopt requires BLAS/LAPACK (IPOPT_HAS_LAPACK=1) but "
+    "MIPSOLVERS_BLAS_LIBRARIES is empty — see cmake/Dependencies.cmake.")
 endif()
 
 if(_MIPSOLVERS_IPOPT_LINEAR_SOLVER STREQUAL "mumps")

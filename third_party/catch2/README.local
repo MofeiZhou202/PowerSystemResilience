@@ -1,0 +1,15 @@
+Vendored dependency — Catch2 v3.7.1 (amalgamated distribution)
+Origin:     https://raw.githubusercontent.com/catchorg/Catch2/v3.7.1/extras/catch_amalgamated.hpp
+            https://raw.githubusercontent.com/catchorg/Catch2/v3.7.1/extras/catch_amalgamated.cpp
+Version:    3.7.1
+Fetched:    2026-07-25
+License:    BSL-1.0 (see LICENSE.txt)
+
+Contents: the official amalgamated single-translation-unit distribution.
+catch_amalgamated.cpp provides a default main() unless
+CATCH_AMALGAMATED_CUSTOM_MAIN is defined — see cmake/Dependencies.cmake for
+how the Catch2 / Catch2WithMain static libraries are produced.
+
+The catch2/ subdirectory contains thin forwarding headers
+(catch_test_macros.hpp, catch_approx.hpp, catch_all.hpp) so that test sources
+can keep including <catch2/...> exactly as with a full Catch2 checkout.

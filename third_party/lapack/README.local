@@ -1,0 +1,15 @@
+Vendored dependency — Reference LAPACK 3.12.1 (reference BLAS + LAPACK)
+Origin:     https://github.com/Reference-LAPACK/lapack/archive/refs/tags/v3.12.1.tar.gz
+Version:    3.12.1
+Fetched:    2026-07-25
+License:    BSD-3-Clause (see LICENSE)
+
+Fallback BLAS/LAPACK for hermetic builds when no system BLAS/LAPACK is
+available (see MIPSOLVERS_USE_VENDORED_BLAS in cmake/Dependencies.cmake and
+cmake/BuildRefLAPACK.cmake).
+
+Pruned for size: CBLAS/, LAPACKE/, TESTING/, DOCS/, INSTALL/, top-level
+build scripts.  Kept: BLAS/, SRC/, CMAKE/, LICENSE, README.md.
+BLAS/SRC/xerbla.f is excluded from the build glob (duplicate of SRC/xerbla.f).
+SRC/*.f90 (la_constants/la_xisnan modules and the F90 rewrites of *lartg/
+*lassq/*gedmd) are required — they are the only copies of those routines.

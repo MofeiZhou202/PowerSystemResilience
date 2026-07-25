@@ -1,7 +1,7 @@
 # cmake/BuildMUMPS.cmake
 # Builds MUMPS 5.7.3 from source (sequential, double-precision only).
-# Downloads the official MUMPS tarball from https://mumps-solver.org/
-# No GitHub dependency; all CMake build logic is inlined here.
+# Uses only the vendored mumps/ source tree; no network fallback exists.
+# All CMake build logic is inlined here.
 #
 # Requirements:
 #   Fortran compiler  — gfortran from 'brew install gcc' on macOS CI
@@ -10,86 +10,50 @@
 #   dmumps        — static library: PORD + mpiseq + mumps_common + dmumps (double)
 #   MUMPS::MUMPS  — interface alias for dmumps
 
-include(FetchContent)
 include(GNUInstallDirs)
 
-# ── Enable Fortran (project uses only CXX C; we enable Fortran here) ──────────
-# Support explicit toolchain wiring via cache/env so the same repo can be
-# configured consistently on Windows/macOS/Linux.
-if(NOT CMAKE_Fortran_COMPILER)
-  set(_MIPSOLVERS_FORTRAN_HINTS)
-
-  if(DEFINED MIPSOLVERS_FORTRAN_COMPILER AND NOT MIPSOLVERS_FORTRAN_COMPILER STREQUAL "")
-    list(APPEND _MIPSOLVERS_FORTRAN_HINTS "${MIPSOLVERS_FORTRAN_COMPILER}")
-  endif()
-  if(DEFINED ENV{MIPSOLVERS_FORTRAN_COMPILER} AND NOT "$ENV{MIPSOLVERS_FORTRAN_COMPILER}" STREQUAL "")
-    list(APPEND _MIPSOLVERS_FORTRAN_HINTS "$ENV{MIPSOLVERS_FORTRAN_COMPILER}")
-  endif()
-  if(DEFINED ENV{FC} AND NOT "$ENV{FC}" STREQUAL "")
-    list(APPEND _MIPSOLVERS_FORTRAN_HINTS "$ENV{FC}")
-  endif()
-
-  if(WIN32)
-    list(APPEND _MIPSOLVERS_FORTRAN_HINTS
-      "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/bin/ifx.exe"
-      "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/bin/ifort.exe"
-      "C:/msys64/mingw64/bin/gfortran.exe")
-    set(_MIPSOLVERS_FORTRAN_NAMES ifx ifort gfortran)
-  elseif(APPLE)
-    list(APPEND _MIPSOLVERS_FORTRAN_HINTS
-      "/opt/homebrew/bin/gfortran"
-      "/usr/local/bin/gfortran")
-    set(_MIPSOLVERS_FORTRAN_NAMES gfortran ifx ifort)
-  else()
-    list(APPEND _MIPSOLVERS_FORTRAN_HINTS
-      "/usr/bin/gfortran"
-      "/usr/local/bin/gfortran")
-    set(_MIPSOLVERS_FORTRAN_NAMES gfortran ifx ifort)
-  endif()
-
-  set(_MIPSOLVERS_FORTRAN_CANDIDATE "")
-  foreach(_fc_hint IN LISTS _MIPSOLVERS_FORTRAN_HINTS)
-    if(EXISTS "${_fc_hint}")
-      set(_MIPSOLVERS_FORTRAN_CANDIDATE "${_fc_hint}")
-      break()
-    endif()
-  endforeach()
-
-  if(NOT _MIPSOLVERS_FORTRAN_CANDIDATE)
-    find_program(_MIPSOLVERS_FORTRAN_CANDIDATE NAMES ${_MIPSOLVERS_FORTRAN_NAMES})
-  endif()
-
-  if(_MIPSOLVERS_FORTRAN_CANDIDATE)
-    set(CMAKE_Fortran_COMPILER "${_MIPSOLVERS_FORTRAN_CANDIDATE}" CACHE FILEPATH "Fortran compiler for embedded MUMPS/Ipopt" FORCE)
-    message(STATUS "mipsolvers: using Fortran compiler ${CMAKE_Fortran_COMPILER}")
-  endif()
+# Export set for the vendored targets installed below: mipsolversTargets in a
+# normal build, mipsolversThirdPartyTargets in MIPSOLVERS_THIRD_PARTY_ONLY mode
+# (set by the top-level CMakeLists.txt before Dependencies.cmake is included).
+if(NOT DEFINED MIPSOLVERS_THIRD_PARTY_EXPORT_SET)
+  set(MIPSOLVERS_THIRD_PARTY_EXPORT_SET mipsolversTargets)
 endif()
 
-enable_language(Fortran)
+# ── Enable Fortran (project uses only CXX C; we enable Fortran here) ──────────
+# Compiler detection shared with the vendored reference-LAPACK build.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/DetectFortranCompiler.cmake")
 
-# ── MUMPS 5.7.3 — vendored in-tree sources (offline; no download, no Homebrew) ─
+# ── MUMPS 5.7.3 — vendored in-tree sources only (offline; no network) ─────────
 # The MUMPS source tree is committed under mumps/ (mirrors the highs/, scip/,
 # ipopt/, suitesparse/ vendoring convention) so configure/build/deploy never
-# touch the network.  FetchContent is kept only as a fallback for checkouts
-# that predate the vendored copy.
+# touch the network.  There is intentionally NO download fallback: a missing
+# vendored tree is a checkout error, not a reason to hit the network.
 set(_M "${CMAKE_CURRENT_SOURCE_DIR}/mumps")
 if(NOT EXISTS "${_M}/include/dmumps_c.h")
-  FetchContent_Declare(
-    mumps_upstream
-    URL      "https://mumps-solver.org/MUMPS_5.7.3.tar.gz"
-    URL_HASH "SHA256=84a47f7c4231b9efdf4d4f631a2cae2bdd9adeaabc088261d15af040143ed112"
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-  )
-  FetchContent_GetProperties(mumps_upstream)
-  if(NOT mumps_upstream_POPULATED)
-    FetchContent_Populate(mumps_upstream)
-  endif()
-  set(_M "${mumps_upstream_SOURCE_DIR}")
+  message(FATAL_ERROR
+    "vendored MUMPS sources missing (expected ${_M}/include/dmumps_c.h). "
+    "The mumps/ tree (MUMPS 5.7.3) is committed to this repository — restore "
+    "it. Network downloads are disabled by design (hermetic build).")
 endif()
 
 # ── Generate mumps_int_def.h (32-bit integer variant) ────────────────────────
-file(WRITE "${_M}/include/mumps_int_def.h"
+# Avoid touching the tracked header on every configure: changing its timestamp
+# needlessly recompiles all MUMPS C sources and the Ipopt MUMPS interface.
+set(_ms_mumps_int_def
   "#ifndef MUMPS_INT_H\n#define MUMPS_INT_H\n#define MUMPS_INTSIZE32\n#endif\n")
+set(_ms_write_mumps_int_def TRUE)
+if(EXISTS "${_M}/include/mumps_int_def.h")
+  file(READ "${_M}/include/mumps_int_def.h" _ms_existing_mumps_int_def)
+  if(_ms_existing_mumps_int_def STREQUAL _ms_mumps_int_def)
+    set(_ms_write_mumps_int_def FALSE)
+  endif()
+endif()
+if(_ms_write_mumps_int_def)
+  file(WRITE "${_M}/include/mumps_int_def.h" "${_ms_mumps_int_def}")
+endif()
+unset(_ms_existing_mumps_int_def)
+unset(_ms_mumps_int_def)
+unset(_ms_write_mumps_int_def)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MUMPS is built from the vendored in-tree sources (mumps/) by default — the
@@ -104,6 +68,11 @@ file(WRITE "${_M}/include/mumps_int_def.h"
 # ─────────────────────────────────────────────────────────────────────────────
 option(MIPSOLVERS_FORCE_BUILD_MUMPS
   "Build MUMPS from the vendored in-tree sources (offline default)" ON)
+
+# Records (for the installed mipsolversConfig.cmake) whether the MUMPS runtime
+# came from the Homebrew ipopt cellar — only then may the consumer config
+# append those /opt/homebrew paths.
+set(MIPSOLVERS_CONSUMER_NEEDS_BREW_MUMPS OFF)
 
 set(_ms_use_brew_mumps OFF)
 if(APPLE AND NOT MIPSOLVERS_FORCE_BUILD_MUMPS)
@@ -125,7 +94,7 @@ if(APPLE AND NOT MIPSOLVERS_FORCE_BUILD_MUMPS)
 endif()
 
 if(_ms_use_brew_mumps)
-  # dmumps as an INTERFACE target: downloaded headers for build-time includes,
+  # dmumps as an INTERFACE target: vendored headers for build-time includes,
   # Homebrew dylibs for linking.  No MUMPS sources are compiled.
   add_library(dmumps INTERFACE)
   target_include_directories(dmumps INTERFACE
@@ -160,11 +129,18 @@ if(_ms_use_brew_mumps)
   endif()
 
   install(TARGETS dmumps MUMPS
-    EXPORT  mipsolversTargets
+    EXPORT  ${MIPSOLVERS_THIRD_PARTY_EXPORT_SET}
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 
+  set(MIPSOLVERS_CONSUMER_NEEDS_BREW_MUMPS ON)
+  message(WARNING
+    "mipsolvers: using Homebrew MUMPS at ${_ms_brew_mumps_dir}. This is "
+    "NON-HERMETIC (depends on Homebrew dylibs and the gcc Fortran runtime) "
+    "and intended for local debugging only — do not use for deployable "
+    "builds. Use -DMIPSOLVERS_FORCE_BUILD_MUMPS=ON (the default) for the "
+    "vendored, offline MUMPS build.")
   message(STATUS
     "mipsolvers: using Homebrew MUMPS at ${_ms_brew_mumps_dir} "
     "(from-source build skipped; -DMIPSOLVERS_FORCE_BUILD_MUMPS=ON to override)")
@@ -176,7 +152,7 @@ endif()
 # CMake's built-in Fortran module dependency scanner handles ordering of
 # module-definition files automatically; no manual OBJECT-target chains needed.
 # ─────────────────────────────────────────────────────────────────────────────
-if(WIN32 AND CMAKE_Fortran_COMPILER_ID STREQUAL "IntelLLVM")
+if(WIN32 AND CMAKE_Fortran_COMPILER_ID MATCHES "^(Intel|IntelLLVM)$")
   set(_MIPSOLVERS_FORTRAN_MAIN_STUB "${CMAKE_CURRENT_BINARY_DIR}/_mumps_main_stub.c")
   file(WRITE "${_MIPSOLVERS_FORTRAN_MAIN_STUB}"
     "void MAIN__(void) {}\n"
@@ -397,8 +373,8 @@ target_compile_options(dmumps PRIVATE
         -fallow-invalid-boz
       >
     >
-    $<$<AND:$<PLATFORM_ID:Windows>,$<Fortran_COMPILER_ID:IntelLLVM>>:
-      -nofor-main
+    $<$<AND:$<PLATFORM_ID:Windows>,$<OR:$<Fortran_COMPILER_ID:Intel>,$<Fortran_COMPILER_ID:IntelLLVM>>>:
+      /nofor_main
     >
   >
   $<$<COMPILE_LANGUAGE:C>:
@@ -410,13 +386,20 @@ target_compile_options(dmumps PRIVATE
 )
 
 # ── Compile definitions ───────────────────────────────────────────────────────
-# Add_ = Fortran trailing-underscore name mangling (GNU/macOS standard)
+# Intel Fortran on Windows uses uppercase external names without a trailing
+# underscore; GNU/MinGW and Unix compilers use the Add_ convention here.
 # pord  = use the PORD fill-reducing ordering (the only one we build)
+if(WIN32 AND CMAKE_Fortran_COMPILER_ID MATCHES "^(Intel|IntelLLVM)$")
+  set(_MIPSOLVERS_MUMPS_C_MANGLING MUMPS_WIN32)
+else()
+  set(_MIPSOLVERS_MUMPS_C_MANGLING Add_)
+endif()
 target_compile_definitions(dmumps PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:Add_>
+  $<$<COMPILE_LANGUAGE:C>:${_MIPSOLVERS_MUMPS_C_MANGLING}>
   $<$<COMPILE_LANGUAGE:C>:pord>
   $<$<COMPILE_LANGUAGE:Fortran>:pord>
 )
+unset(_MIPSOLVERS_MUMPS_C_MANGLING)
 # MUMPS_ARITH=MUMPS_ARITH_d selects double-precision types in mumps_c.c / dmumps_gpu.c
 set_source_files_properties(
   "${_M}/src/mumps_c.c"
@@ -424,17 +407,31 @@ set_source_files_properties(
   PROPERTIES COMPILE_DEFINITIONS "MUMPS_ARITH=MUMPS_ARITH_d"
 )
 
-# ── Runtime dependencies: BLAS/LAPACK via Accelerate (macOS), plus the
-# Fortran runtime for the from-source Fortran objects.  CMake only injects
-# the implicit Fortran link libraries when the *final* link is Fortran-aware;
-# a CXX-only executable (e.g. a downstream consumer's server binary) fails
-# with undefined __gfortran_os_error_at/__gfortran_runtime_error_at without
-# this explicit interface dependency.
-target_link_libraries(dmumps PUBLIC
-  "$<$<PLATFORM_ID:Darwin>:-framework Accelerate>")
-if(CMAKE_Fortran_IMPLICIT_LINK_LIBRARIES)
-  target_link_libraries(dmumps PUBLIC ${CMAKE_Fortran_IMPLICIT_LINK_LIBRARIES})
-  target_link_directories(dmumps PUBLIC ${CMAKE_Fortran_IMPLICIT_LINK_DIRECTORIES})
+# ── Runtime dependencies: BLAS/LAPACK (unified via MIPSOLVERS_BLAS_LIBRARIES,
+# resolved in cmake/Dependencies.cmake), plus the Fortran runtime for the
+# from-source Fortran objects (see mipsolvers_link_fortran_runtime in
+# cmake/DetectFortranCompiler.cmake — static archives on macOS, implicit
+# runtime elsewhere).
+if(MIPSOLVERS_BLAS_LIBRARIES)
+  target_link_libraries(dmumps PUBLIC ${MIPSOLVERS_BLAS_LIBRARIES})
+else()
+  message(FATAL_ERROR
+    "The vendored MUMPS build requires BLAS/LAPACK, but "
+    "MIPSOLVERS_BLAS_LIBRARIES is empty. On Windows, either use the default "
+    "Ipopt MKL/Pardiso backend, provide a system BLAS/LAPACK discoverable by "
+    "CMake, or configure with -DMIPSOLVERS_FORCE_VENDORED_BLAS=ON and a "
+    "supported Fortran compiler (Intel oneAPI ifx/ifort or MinGW gfortran).")
+endif()
+
+# Static-link the GCC Fortran runtime into the final executables on Linux
+# (deployment convenience); macOS always uses static runtime archives.
+option(MIPSOLVERS_STATIC_LIBGFORTRAN
+  "Link libgfortran/libgcc statically for Linux deployment" OFF)
+
+mipsolvers_link_fortran_runtime(dmumps PUBLIC)
+
+if(NOT APPLE AND NOT WIN32 AND MIPSOLVERS_STATIC_LIBGFORTRAN)
+  target_link_options(dmumps INTERFACE -static-libgfortran -static-libgcc)
 endif()
 
 if(TARGET mipsolvers_fortran_main_stub)
@@ -450,7 +447,7 @@ endif()
 
 # ── Export dmumps and MUMPS so ipopt_local's install(EXPORT) succeeds ─────────
 install(TARGETS dmumps MUMPS
-  EXPORT  mipsolversTargets
+  EXPORT  ${MIPSOLVERS_THIRD_PARTY_EXPORT_SET}
   ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
@@ -458,7 +455,7 @@ install(TARGETS dmumps MUMPS
 
 if(TARGET mipsolvers_fortran_main_stub)
   install(TARGETS mipsolvers_fortran_main_stub
-  EXPORT  mipsolversTargets
+  EXPORT  ${MIPSOLVERS_THIRD_PARTY_EXPORT_SET}
   ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"

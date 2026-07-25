@@ -13,6 +13,110 @@ foreach(_MIPSOLVERS_FORBIDDEN_SOLVER_CACHE
 endforeach()
 unset(_MIPSOLVERS_FORBIDDEN_SOLVER_CACHE)
 
+# ── Prebuilt third-party package (AUTO/ON/OFF) ───────────────────────────────
+# When third_party/install (built by third_party/build_third_party.sh with
+# -DMIPSOLVERS_THIRD_PARTY_ONLY=ON) is present and toolchain-compatible, load
+# it and skip every Build*.cmake module and all vendored find/add logic below.
+# MIPSOLVERS_THIRD_PARTY_PREBUILT is read by the top-level CMakeLists.txt to
+# skip the install rules that would re-export the (imported) vendored targets.
+set(MIPSOLVERS_USE_PREBUILT_THIRD_PARTY "AUTO" CACHE STRING
+  "Use a prebuilt third-party package (AUTO/ON/OFF)")
+set_property(CACHE MIPSOLVERS_USE_PREBUILT_THIRD_PARTY
+  PROPERTY STRINGS AUTO ON OFF)
+set(MIPSOLVERS_PREBUILT_THIRD_PARTY_PREFIX
+  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/install" CACHE PATH
+  "Prefix containing the prebuilt mipsolvers third-party package")
+set(MIPSOLVERS_THIRD_PARTY_PREBUILT OFF)
+if(NOT MIPSOLVERS_THIRD_PARTY_ONLY AND
+   NOT MIPSOLVERS_USE_PREBUILT_THIRD_PARTY STREQUAL "OFF")
+  if(NOT MIPSOLVERS_USE_PREBUILT_THIRD_PARTY MATCHES "^(AUTO|ON)$")
+    message(FATAL_ERROR
+      "MIPSOLVERS_USE_PREBUILT_THIRD_PARTY must be AUTO, ON or OFF "
+      "(got '${MIPSOLVERS_USE_PREBUILT_THIRD_PARTY}').")
+  endif()
+  include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/UsePrebuiltThirdParty.cmake")
+endif()
+if(MIPSOLVERS_THIRD_PARTY_PREBUILT)
+  return()
+endif()
+
+# ── BLAS/LAPACK resolution (unified) ─────────────────────────────────────────
+# Single variable — MIPSOLVERS_BLAS_LIBRARIES — consumed by BuildCHOLMOD.cmake,
+# BuildIpopt.cmake, and BuildMUMPS.cmake instead of their own ad-hoc probes.
+# Resolution order:
+#   macOS : Accelerate framework → vendored reference LAPACK
+#   Linux : system BLAS/LAPACK  → vendored reference LAPACK (third_party/lapack)
+#   Windows: system BLAS/LAPACK when available; MKL/Pardiso is the default
+#            Ipopt path, while the vendored fallback is explicit opt-in
+# MIPSOLVERS_USE_VENDORED_BLAS (default ON) merely *allows* the vendored
+# fallback; MIPSOLVERS_FORCE_VENDORED_BLAS (hidden, for testing) skips the
+# Accelerate/system probes entirely.  Runs before the Ipopt/MUMPS/CHOLMOD
+# includes below so the variable is set when those modules consume it.
+set(MIPSOLVERS_BLAS_LIBRARIES "")
+set(_MIPSOLVERS_BLAS_SOURCE "none")
+option(MIPSOLVERS_USE_VENDORED_BLAS
+  "Allow the vendored reference BLAS/LAPACK (third_party/lapack) as a fallback" ON)
+option(MIPSOLVERS_FORCE_VENDORED_BLAS
+  "Force the vendored reference BLAS/LAPACK (skip Accelerate/system probes)" OFF)
+
+if(NOT MIPSOLVERS_FORCE_VENDORED_BLAS)
+  if(APPLE)
+    # Accelerate is always present on macOS and is the preferred BLAS/LAPACK.
+    # Single string: separate list items would make CMake render the bare name
+    # "Accelerate" as "-lAccelerate".
+    set(MIPSOLVERS_BLAS_LIBRARIES "-framework Accelerate")
+    set(_MIPSOLVERS_BLAS_SOURCE "Accelerate framework")
+  else()
+    find_package(BLAS QUIET)
+    find_package(LAPACK QUIET)
+    if(BLAS_FOUND AND LAPACK_FOUND)
+      set(MIPSOLVERS_BLAS_LIBRARIES ${BLAS_LIBRARIES} ${LAPACK_LIBRARIES})
+      set(_MIPSOLVERS_BLAS_SOURCE "system BLAS/LAPACK")
+    endif()
+  endif()
+endif()
+
+if(WIN32 AND NOT MIPSOLVERS_BLAS_LIBRARIES AND
+   NOT MIPSOLVERS_FORCE_VENDORED_BLAS)
+  message(STATUS
+    "mipsolvers: no standalone Windows BLAS/LAPACK found; the default embedded "
+    "Ipopt build uses Intel MKL/Pardiso. For the MUMPS backend, provide a "
+    "system BLAS/LAPACK or set MIPSOLVERS_FORCE_VENDORED_BLAS=ON with Intel "
+    "oneAPI ifx/ifort or MinGW gfortran.")
+endif()
+
+if(NOT MIPSOLVERS_BLAS_LIBRARIES AND
+   MIPSOLVERS_USE_VENDORED_BLAS AND
+   (NOT WIN32 OR MIPSOLVERS_FORCE_VENDORED_BLAS) AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lapack/BLAS/SRC/dgemm.f")
+  # Windows keeps the pre-existing tolerance for "no BLAS anywhere" (CHOLMOD
+  # degrades to NSUPERNODAL, Ipopt uses MKL Pardiso) rather than hard
+  # requiring a Fortran compiler for the vendored fallback; the hidden
+  # FORCE flag overrides that tolerance for testing.
+  include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildRefLAPACK.cmake")
+  set(MIPSOLVERS_BLAS_LIBRARIES reflapack_vendored)
+  set(_MIPSOLVERS_BLAS_SOURCE "vendored reference BLAS/LAPACK (third_party/lapack)")
+endif()
+
+if(NOT MIPSOLVERS_BLAS_LIBRARIES AND NOT WIN32)
+  # Non-Windows embedded Ipopt hard-requires LAPACK (IPOPT_HAS_LAPACK=1), so
+  # having no BLAS/LAPACK at all is a configure-time error.  On Windows the
+  # MKL Pardiso path supplies BLAS/LAPACK for Ipopt and CHOLMOD degrades
+  # gracefully (NSUPERNODAL), so an empty value is tolerated there.
+  if(MIPSOLVERS_USE_VENDORED_BLAS)
+    message(FATAL_ERROR
+      "No BLAS/LAPACK available: no system BLAS/LAPACK found and the vendored "
+      "fallback is missing (expected third_party/lapack/BLAS/SRC/dgemm.f). "
+      "Restore the vendored third_party/lapack tree or install a system "
+      "BLAS/LAPACK.")
+  else()
+    message(FATAL_ERROR
+      "No system BLAS/LAPACK found and MIPSOLVERS_USE_VENDORED_BLAS=OFF. "
+      "Install a system BLAS/LAPACK or re-enable the vendored fallback.")
+  endif()
+endif()
+message(STATUS "mipsolvers: BLAS/LAPACK = ${_MIPSOLVERS_BLAS_SOURCE}")
+
 # ── HiGHS in-process library ─────────────────────────────────────────────────
 set(MIPSOLVERS_HAVE_HIGHS_LIB OFF)
 set(MIPSOLVERS_HIGHS_LIB_SOURCE "none")
@@ -130,6 +234,9 @@ endif()
 
 # ── Ipopt NLP solver ──────────────────────────────────────────────────────────
 set(MIPSOLVERS_HAVE_IPOPT OFF)
+# Default for the consumer config; BuildMUMPS.cmake flips this ON only when a
+# Homebrew MUMPS is actually used (Apple opt-out path).
+set(MIPSOLVERS_CONSUMER_NEEDS_BREW_MUMPS OFF)
 set(_MIPSOLVERS_BUILD_LOCAL_IPOPT_DEFAULT ON)
 option(MIPSOLVERS_BUILD_LOCAL_IPOPT
   "Build embedded Ipopt source (ipopt/) from this repository"
@@ -202,7 +309,10 @@ if(POLICY CMP0167)
   cmake_policy(SET CMP0167 NEW)
 endif()
 set(MIPSOLVERS_HAVE_PAPILO OFF)
-option(MIPSOLVERS_USE_PAPILO "Enable PaPILO presolve when available" ON)
+# Default OFF: PaPILO is only available via Homebrew/system packages and drags
+# in ~11 shared-library dependencies (boost, TBB, GMP, OpenBLAS, clusol), which
+# breaks the hermetic build.  Opt back in with -DMIPSOLVERS_USE_PAPILO=ON.
+option(MIPSOLVERS_USE_PAPILO "Enable PaPILO presolve when available" OFF)
 if(MIPSOLVERS_USE_PAPILO)
   find_package(papilo CONFIG QUIET
     HINTS
@@ -229,6 +339,10 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildCHOLMOD.cmake")
 # ── SuiteSparse (optional) ───────────────────────────────────────────────────
 set(MIPSOLVERS_HAVE_SUITESPARSE OFF)
 set(MIPSOLVERS_SUITESPARSE_LIBRARIES "")
+# ON when SuiteSparse support comes from the exported in-tree vendored targets
+# (umfpack_vendored/klu_vendored) — the consumer config then skips system
+# SuiteSparse rediscovery.
+set(MIPSOLVERS_SUITESPARSE_VENDORED OFF)
 option(MIPSOLVERS_USE_SUITESPARSE "Enable SuiteSparse backends when available" ON)
 
 # Vendored SuiteSparse (CHOLMOD/UMFPACK/KLU from in-tree sources via
@@ -236,6 +350,7 @@ option(MIPSOLVERS_USE_SUITESPARSE "Enable SuiteSparse backends when available" O
 # active we do not look for a system/Homebrew SuiteSparse at all.
 if(MIPSOLVERS_USE_SUITESPARSE AND MIPSOLVERS_HAVE_CHOLMOD)
   set(MIPSOLVERS_HAVE_SUITESPARSE ON)
+  set(MIPSOLVERS_SUITESPARSE_VENDORED ON)
   message(STATUS "mipsolvers: SuiteSparse via vendored in-tree sources (offline)")
 elseif(MIPSOLVERS_USE_SUITESPARSE)
   set(MIPSOLVERS_HAVE_UMFPACK OFF)
@@ -427,171 +542,213 @@ elseif(MIPSOLVERS_HAVE_MKL_PARDISO)
   message(STATUS "mipsolvers: Intel MKL detected at ${MIPSOLVERS_MKL_INCLUDE_DIRS}")
 endif()
 
-# ── Eigen3 (header-only) — prefer vcpkg, then system include path, then local sibling ──
-set(_EIGEN_VCPKG_TRIPLET_HINTS)
-if(WIN32)
-  if(DEFINED VCPKG_TARGET_TRIPLET)
-    list(APPEND _EIGEN_VCPKG_TRIPLET_HINTS "${VCPKG_TARGET_TRIPLET}")
-  endif()
-  list(APPEND _EIGEN_VCPKG_TRIPLET_HINTS "x64-windows")
-endif()
-
-set(_EIGEN_VCPKG_CONFIG_HINTS)
-set(_EIGEN_VCPKG_INCLUDE_HINTS)
-set(_EIGEN_VCPKG_INCLUDE_DIR "")
-if(DEFINED ENV{VCPKG_ROOT})
-  foreach(_triplet IN LISTS _EIGEN_VCPKG_TRIPLET_HINTS)
-    list(APPEND _EIGEN_VCPKG_CONFIG_HINTS "$ENV{VCPKG_ROOT}/installed/${_triplet}/share/eigen3")
-    list(APPEND _EIGEN_VCPKG_INCLUDE_HINTS "$ENV{VCPKG_ROOT}/installed/${_triplet}/include/eigen3")
-    if(NOT _EIGEN_VCPKG_INCLUDE_DIR AND EXISTS "$ENV{VCPKG_ROOT}/installed/${_triplet}/include/eigen3/Eigen/Core")
-      set(_EIGEN_VCPKG_INCLUDE_DIR "$ENV{VCPKG_ROOT}/installed/${_triplet}/include/eigen3")
-    endif()
-  endforeach()
-endif()
-
-if(_EIGEN_VCPKG_INCLUDE_DIR)
-  if(NOT TARGET Eigen3::Eigen)
-    add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
-    target_include_directories(Eigen3::Eigen INTERFACE "${_EIGEN_VCPKG_INCLUDE_DIR}")
-  endif()
+# ── Eigen3 (header-only) — vendored in third_party/eigen, then system ─────────
+# The vendored copy is authoritative (hermetic build); system/vcpkg installs are
+# only a fallback for checkouts that lack third_party/eigen.  No network access.
+if(NOT TARGET Eigen3::Eigen AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/eigen/Eigen/Core")
+  # IMPORTED GLOBAL (not ALIAS of a local target) so install(EXPORT) passes the
+  # name through to consumers, who recreate Eigen3::Eigen via
+  # mipsolversConfig.cmake (system package or bundled headers).
+  add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
+  target_include_directories(Eigen3::Eigen INTERFACE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/eigen")
   set(Eigen3_FOUND TRUE)
-  message(STATUS "mipsolvers: Eigen3 found via vcpkg at ${_EIGEN_VCPKG_INCLUDE_DIR}")
+  message(STATUS "mipsolvers: Eigen3 = vendored (third_party/eigen, 3.4.1)")
 endif()
 
 if(NOT Eigen3_FOUND)
-  find_package(Eigen3 3.3 CONFIG QUIET PATHS ${_EIGEN_VCPKG_CONFIG_HINTS} NO_DEFAULT_PATH)
-endif()
-if(NOT Eigen3_FOUND)
-  find_package(Eigen3 3.3 CONFIG QUIET)
-endif()
-
-if(NOT Eigen3_FOUND)
-  find_path(MIPSOLVERS_EIGEN3_INCLUDE_DIR
-    NAMES Eigen/Core
-    HINTS
-      $ENV{EIGEN3_ROOT}
-      $ENV{EIGEN_ROOT}
-      ${_EIGEN_VCPKG_INCLUDE_HINTS}
-      /usr/include/eigen3
-      /usr/local/include/eigen3
-      /opt/homebrew/include/eigen3
-      "C:/vcpkg/installed/x64-windows/include/eigen3"
-      "C:/Program Files/eigen3/include/eigen3"
-    PATH_SUFFIXES
-      include
-      include/eigen3
-      eigen3)
-
-  if(MIPSOLVERS_EIGEN3_INCLUDE_DIR)
-    if(NOT TARGET Eigen3::Eigen)
-      add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
-      target_include_directories(Eigen3::Eigen INTERFACE
-        "${MIPSOLVERS_EIGEN3_INCLUDE_DIR}")
+  set(_EIGEN_VCPKG_TRIPLET_HINTS)
+  if(WIN32)
+    if(DEFINED VCPKG_TARGET_TRIPLET)
+      list(APPEND _EIGEN_VCPKG_TRIPLET_HINTS "${VCPKG_TARGET_TRIPLET}")
     endif()
-    set(Eigen3_FOUND TRUE)
-    message(STATUS "mipsolvers: Eigen3 found via include path at ${MIPSOLVERS_EIGEN3_INCLUDE_DIR}")
+    list(APPEND _EIGEN_VCPKG_TRIPLET_HINTS "x64-windows")
   endif()
-endif()
 
-if(NOT Eigen3_FOUND)
-  # Try sibling project's fetched copy (offline-friendly)
-  set(_EIGEN_LOCAL_HINTS
-    "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build_rel/_deps/eigen-src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build/_deps/eigen-src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build_engine_rel/_deps/eigen-src"
-  )
-  set(_EIGEN_FOUND_LOCAL FALSE)
-  foreach(_EIGEN_DIR IN LISTS _EIGEN_LOCAL_HINTS)
-    if(EXISTS "${_EIGEN_DIR}/Eigen/Core")
-      if(NOT TARGET Eigen3::Eigen)
-        add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
-        target_include_directories(Eigen3::Eigen INTERFACE "${_EIGEN_DIR}")
-      endif()
-      set(_EIGEN_FOUND_LOCAL TRUE)
-      set(Eigen3_FOUND TRUE)
-      message(STATUS "mipsolvers: Eigen3 found locally at ${_EIGEN_DIR}")
-      break()
-    endif()
-  endforeach()
-  if(NOT _EIGEN_FOUND_LOCAL)
-    # Last resort: fetch Eigen3 from GitLab (works on CI without any pre-installed packages)
-    message(STATUS "mipsolvers: Eigen3 not found locally; downloading via FetchContent...")
-    include(FetchContent)
-    FetchContent_Declare(
-      eigen
-      GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-      GIT_TAG        3.4.0
-      GIT_SHALLOW    TRUE)
-    # Disable Eigen's own install/test targets to keep the build clean
-    set(EIGEN_BUILD_DOC     OFF CACHE BOOL "" FORCE)
-    set(BUILD_TESTING       OFF CACHE BOOL "" FORCE)
-    set(EIGEN_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(eigen)
-    set(Eigen3_FOUND TRUE)
-    message(STATUS "mipsolvers: Eigen3 fetched via FetchContent")
-  endif()
-endif()
-
-# ── fmt (formatting) ─────────────────────────────────────────────────────────
-find_package(fmt CONFIG QUIET)
-if(NOT fmt_FOUND)
-  message(FATAL_ERROR
-    "fmt library not found. Install via: brew install fmt  (macOS) or "
-    "apt install libfmt-dev  (Ubuntu).")
-endif()
-
-# ── nlohmann/json (header-only) ──────────────────────────────────────────────
-find_package(nlohmann_json 3.11 CONFIG QUIET)
-if(NOT nlohmann_json_FOUND)
-  # Try sibling project's fetched copy
-  set(_JSON_LOCAL_HINTS
-    "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build_rel/_deps/nlohmann_json-src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build/_deps/nlohmann_json-src"
-  )
-  set(_JSON_FOUND_LOCAL FALSE)
-  foreach(_JSON_DIR IN LISTS _JSON_LOCAL_HINTS)
-    if(EXISTS "${_JSON_DIR}/include/nlohmann/json.hpp")
-      add_library(nlohmann_json::nlohmann_json INTERFACE IMPORTED GLOBAL)
-      target_include_directories(nlohmann_json::nlohmann_json INTERFACE "${_JSON_DIR}/include")
-      set(_JSON_FOUND_LOCAL TRUE)
-      message(STATUS "mipsolvers: nlohmann_json found locally at ${_JSON_DIR}")
-      break()
-    endif()
-  endforeach()
-  if(NOT _JSON_FOUND_LOCAL)
-    message(FATAL_ERROR
-      "nlohmann_json not found. Install via: brew install nlohmann-json  (macOS) or "
-      "apt install nlohmann-json3-dev  (Ubuntu).")
-  endif()
-endif()
-
-# ── Catch2 (test framework) — use local sibling or installed ─────────────────
-if(MIPSOLVERS_BUILD_TESTS)
-  find_package(Catch2 3 CONFIG QUIET)
-  if(NOT Catch2_FOUND)
-    set(_CATCH2_LOCAL_HINTS
-      "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build_rel/_deps/catch2-src"
-      "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build/_deps/catch2-src"
-    )
-    set(_CATCH2_FOUND_LOCAL FALSE)
-    foreach(_CATCH2_DIR IN LISTS _CATCH2_LOCAL_HINTS)
-      if(EXISTS "${_CATCH2_DIR}/CMakeLists.txt")
-        set(CATCH_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
-        set(CATCH_INSTALL_EXTRAS OFF CACHE BOOL "" FORCE)
-        set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-        add_subdirectory("${_CATCH2_DIR}"
-                         "${CMAKE_CURRENT_BINARY_DIR}/_deps/catch2-build"
-                         EXCLUDE_FROM_ALL)
-        set(_CATCH2_FOUND_LOCAL TRUE)
-        message(STATUS "mipsolvers: Catch2 found locally at ${_CATCH2_DIR}")
-        break()
+  set(_EIGEN_VCPKG_CONFIG_HINTS)
+  set(_EIGEN_VCPKG_INCLUDE_HINTS)
+  set(_EIGEN_VCPKG_INCLUDE_DIR "")
+  if(DEFINED ENV{VCPKG_ROOT})
+    foreach(_triplet IN LISTS _EIGEN_VCPKG_TRIPLET_HINTS)
+      list(APPEND _EIGEN_VCPKG_CONFIG_HINTS "$ENV{VCPKG_ROOT}/installed/${_triplet}/share/eigen3")
+      list(APPEND _EIGEN_VCPKG_INCLUDE_HINTS "$ENV{VCPKG_ROOT}/installed/${_triplet}/include/eigen3")
+      if(NOT _EIGEN_VCPKG_INCLUDE_DIR AND EXISTS "$ENV{VCPKG_ROOT}/installed/${_triplet}/include/eigen3/Eigen/Core")
+        set(_EIGEN_VCPKG_INCLUDE_DIR "$ENV{VCPKG_ROOT}/installed/${_triplet}/include/eigen3")
       endif()
     endforeach()
-    if(NOT _CATCH2_FOUND_LOCAL)
-      message(FATAL_ERROR
-        "Catch2 not found. Install via: brew install catch2  (macOS) or "
-        "apt install catch2  (Ubuntu), or ensure "
-        "HybridACDCPowerSystemsPlanning build dirs contain catch2-src/.")
+  endif()
+
+  if(_EIGEN_VCPKG_INCLUDE_DIR)
+    if(NOT TARGET Eigen3::Eigen)
+      add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
+      target_include_directories(Eigen3::Eigen INTERFACE "${_EIGEN_VCPKG_INCLUDE_DIR}")
+    endif()
+    set(Eigen3_FOUND TRUE)
+    message(STATUS "mipsolvers: Eigen3 found via vcpkg at ${_EIGEN_VCPKG_INCLUDE_DIR}")
+  endif()
+
+  if(NOT Eigen3_FOUND)
+    find_package(Eigen3 3.3 CONFIG QUIET PATHS ${_EIGEN_VCPKG_CONFIG_HINTS} NO_DEFAULT_PATH)
+  endif()
+  if(NOT Eigen3_FOUND)
+    find_package(Eigen3 3.3 CONFIG QUIET)
+  endif()
+
+  if(NOT Eigen3_FOUND)
+    find_path(MIPSOLVERS_EIGEN3_INCLUDE_DIR
+      NAMES Eigen/Core
+      HINTS
+        $ENV{EIGEN3_ROOT}
+        $ENV{EIGEN_ROOT}
+        ${_EIGEN_VCPKG_INCLUDE_HINTS}
+        /usr/include/eigen3
+        /usr/local/include/eigen3
+        /opt/homebrew/include/eigen3
+        "C:/vcpkg/installed/x64-windows/include/eigen3"
+        "C:/Program Files/eigen3/include/eigen3"
+      PATH_SUFFIXES
+        include
+        include/eigen3
+        eigen3)
+
+    if(MIPSOLVERS_EIGEN3_INCLUDE_DIR)
+      if(NOT TARGET Eigen3::Eigen)
+        add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
+        target_include_directories(Eigen3::Eigen INTERFACE
+          "${MIPSOLVERS_EIGEN3_INCLUDE_DIR}")
+      endif()
+      set(Eigen3_FOUND TRUE)
+      message(STATUS "mipsolvers: Eigen3 found via include path at ${MIPSOLVERS_EIGEN3_INCLUDE_DIR}")
+    endif()
+  endif()
+endif()
+
+if(NOT Eigen3_FOUND)
+  message(FATAL_ERROR
+    "Eigen3 not found. The vendored copy third_party/eigen is missing or "
+    "incomplete (expected third_party/eigen/Eigen/Core) — restore it from the "
+    "repository. No network fallback exists by design (hermetic build); a "
+    "system Eigen3 (brew install eigen / apt install libeigen3-dev) is also "
+    "accepted as a fallback.")
+endif()
+
+# ── fmt (formatting) — vendored in third_party/fmt by default ────────────────
+# Vendored fmt is compiled in-tree and exported with mipsolversTargets, so
+# consumers need no system fmt.  A system fmt is used only on explicit opt-in.
+option(MIPSOLVERS_USE_SYSTEM_FMT
+  "Use a system-installed fmt instead of the vendored third_party/fmt" OFF)
+set(MIPSOLVERS_FMT_VENDORED OFF)
+if(MIPSOLVERS_USE_SYSTEM_FMT)
+  find_package(fmt CONFIG REQUIRED)
+  message(STATUS "mipsolvers: fmt = system (MIPSOLVERS_USE_SYSTEM_FMT=ON)")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fmt/CMakeLists.txt")
+  set(FMT_MASTER_PROJECT OFF CACHE BOOL "" FORCE)
+  set(FMT_INSTALL OFF CACHE BOOL "" FORCE)  # exported via mipsolversTargets instead
+  set(FMT_TEST OFF CACHE BOOL "" FORCE)
+  set(FMT_DOC OFF CACHE BOOL "" FORCE)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/third_party/fmt"
+                   "${CMAKE_CURRENT_BINARY_DIR}/_deps/fmt_vendored"
+                   EXCLUDE_FROM_ALL)
+  if(NOT TARGET fmt::fmt)
+    message(FATAL_ERROR
+      "vendored fmt at third_party/fmt did not create the fmt::fmt target")
+  endif()
+  # fmt links into a static library that may later land in shared objects.
+  # INSTALL_INTERFACE include dir: fmt headers are installed alongside the
+  # export (public mipsolvers headers include <fmt/format.h>).
+  set_target_properties(fmt PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    PUBLIC_HEADER ""
+    INTERFACE_INCLUDE_DIRECTORIES
+      "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/fmt/include>;$<INSTALL_INTERFACE:include>")
+  set(MIPSOLVERS_FMT_VENDORED ON)
+  message(STATUS "mipsolvers: fmt = vendored (third_party/fmt, 12.1.0)")
+else()
+  message(FATAL_ERROR
+    "vendored fmt missing (expected third_party/fmt/CMakeLists.txt) — restore "
+    "it from the repository, or configure with -DMIPSOLVERS_USE_SYSTEM_FMT=ON "
+    "to use a system-installed fmt.")
+endif()
+
+# ── nlohmann/json (header-only) — vendored single header, then system ────────
+if(NOT TARGET nlohmann_json::nlohmann_json AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann_json/include/nlohmann/json.hpp")
+  # IMPORTED GLOBAL so install(EXPORT) passes the name through to consumers,
+  # who recreate it via mipsolversConfig.cmake (system package or bundled header).
+  add_library(nlohmann_json::nlohmann_json INTERFACE IMPORTED GLOBAL)
+  target_include_directories(nlohmann_json::nlohmann_json INTERFACE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann_json/include")
+  message(STATUS "mipsolvers: nlohmann_json = vendored (third_party/nlohmann_json, 3.11.3)")
+endif()
+if(NOT TARGET nlohmann_json::nlohmann_json)
+  find_package(nlohmann_json 3.11 CONFIG QUIET)
+endif()
+if(NOT TARGET nlohmann_json::nlohmann_json)
+  message(FATAL_ERROR
+    "nlohmann_json not found. The vendored copy third_party/nlohmann_json is "
+    "missing or incomplete (expected "
+    "third_party/nlohmann_json/include/nlohmann/json.hpp) — restore it from "
+    "the repository. A system nlohmann_json (brew install nlohmann-json / "
+    "apt install nlohmann-json3-dev) is also accepted as a fallback.")
+endif()
+
+# ── Catch2 (test framework) — vendored amalgamated v3.7.1 in third_party/catch2 ──
+if(MIPSOLVERS_BUILD_TESTS)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/catch2/catch_amalgamated.cpp")
+    # Official amalgamated single-TU distribution.  catch_amalgamated.cpp
+    # provides a default main() unless CATCH_AMALGAMATED_CUSTOM_MAIN is
+    # defined, so one compilation serves each variant.  The forwarding headers
+    # under third_party/catch2/catch2/ keep <catch2/...> includes working.
+    find_package(Threads REQUIRED)
+
+    add_library(Catch2 STATIC
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/catch2/catch_amalgamated.cpp")
+    target_include_directories(Catch2 PUBLIC
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/catch2")
+    target_compile_definitions(Catch2 PRIVATE CATCH_AMALGAMATED_CUSTOM_MAIN)
+    target_link_libraries(Catch2 PUBLIC Threads::Threads)
+    set_target_properties(Catch2 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    add_library(Catch2::Catch2 ALIAS Catch2)
+
+    add_library(Catch2WithMain STATIC
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/catch2/catch_amalgamated.cpp")
+    target_include_directories(Catch2WithMain PUBLIC
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/catch2")
+    target_link_libraries(Catch2WithMain PUBLIC Threads::Threads)
+    set_target_properties(Catch2WithMain PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    add_library(Catch2::Catch2WithMain ALIAS Catch2WithMain)
+
+    set(Catch2_FOUND TRUE)
+    message(STATUS "mipsolvers: Catch2 = vendored (third_party/catch2, 3.7.1 amalgamated)")
+  else()
+    find_package(Catch2 3 CONFIG QUIET)
+    if(NOT Catch2_FOUND)
+      set(_CATCH2_LOCAL_HINTS
+        "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build_rel/_deps/catch2-src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build/_deps/catch2-src"
+      )
+      set(_CATCH2_FOUND_LOCAL FALSE)
+      foreach(_CATCH2_DIR IN LISTS _CATCH2_LOCAL_HINTS)
+        if(EXISTS "${_CATCH2_DIR}/CMakeLists.txt")
+          set(CATCH_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
+          set(CATCH_INSTALL_EXTRAS OFF CACHE BOOL "" FORCE)
+          set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+          add_subdirectory("${_CATCH2_DIR}"
+                           "${CMAKE_CURRENT_BINARY_DIR}/_deps/catch2-build"
+                           EXCLUDE_FROM_ALL)
+          set(_CATCH2_FOUND_LOCAL TRUE)
+          message(STATUS "mipsolvers: Catch2 found locally at ${_CATCH2_DIR}")
+          break()
+        endif()
+      endforeach()
+      if(NOT _CATCH2_FOUND_LOCAL)
+        message(FATAL_ERROR
+          "Catch2 not found. The vendored copy third_party/catch2 is missing or "
+          "incomplete (expected third_party/catch2/catch_amalgamated.cpp) — "
+          "restore it from the repository. A system Catch2 v3 (brew install "
+          "catch2 / apt install catch2) is also accepted as a fallback.")
+      endif()
     endif()
   endif()
 endif()

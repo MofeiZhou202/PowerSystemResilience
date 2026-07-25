@@ -31,6 +31,8 @@ option(MIPSOLVERS_ENABLE_NATIVE_ARCH
 option(MIPSOLVERS_BUILD_SCUC "Build scuc_solve command-line tool"              ON)
 option(MIPSOLVERS_BUILD_SCUC_CASE_BUILDER "Build scuc_case_builder tool"       ON)
 option(MIPSOLVERS_BUILD_PYTHON "Build Python (pybind11) bindings"              OFF)
+option(MIPSOLVERS_THIRD_PARTY_ONLY
+       "Build/install only the vendored third-party dependencies"           OFF)
 set(MIPSOLVERS_EIGEN_MAX_ALIGN_BYTES "32" CACHE STRING
     "Eigen max alignment bytes (16/32/64; empty = Eigen default)")
 
@@ -49,7 +51,27 @@ if(MIPSOLVERS_ENABLE_IPO)
 endif()
 
 # ── Dependencies ─────────────────────────────────────────────────────────────
+# Export set used by the Build*.cmake modules for their vendored targets:
+# mipsolversTargets normally, mipsolversThirdPartyTargets in third-party-only
+# mode (installed with no namespace so imported names equal in-tree names).
+if(MIPSOLVERS_THIRD_PARTY_ONLY)
+  # Catch2 is part of the third-party package; make Dependencies.cmake build it
+  # even though this mode defines no test targets.
+  set(MIPSOLVERS_BUILD_TESTS ON)
+  set(MIPSOLVERS_THIRD_PARTY_EXPORT_SET mipsolversThirdPartyTargets)
+else()
+  set(MIPSOLVERS_THIRD_PARTY_EXPORT_SET mipsolversTargets)
+endif()
 include(cmake/Dependencies.cmake)
+
+# ── Third-party-only mode: install the vendored deps and stop ────────────────
+# No mipsolvers library, tests, tools, benchmarks, SCUC apps, bundled archive
+# or python bindings are defined in this mode; `cmake --install` produces the
+# prebuilt package consumed via MIPSOLVERS_USE_PREBUILT_THIRD_PARTY.
+if(MIPSOLVERS_THIRD_PARTY_ONLY)
+  include(cmake/InstallThirdParty.cmake)
+  return()
+endif()
 
 # ── Engine source files ───────────────────────────────────────────────────────
 add_library(mipsolvers STATIC
@@ -91,6 +113,11 @@ add_library(mipsolvers STATIC
   src/aml/model.cpp
   src/aml/set.cpp
 )
+
+# Public headers use C++20 language/library features.  Propagate that contract
+# to installed consumers instead of relying only on this project's global
+# CMAKE_CXX_STANDARD setting.
+target_compile_features(mipsolvers PUBLIC cxx_std_20)
 
 add_library(mipsolvers::mipsolvers ALIAS mipsolvers)
 
@@ -349,6 +376,9 @@ endif()
 # Parallelizes the big embarrassingly-parallel kernel loops (SpMV, theta/residual
 # builds) with threshold guards; serial fallback when unavailable.
 option(MIPSOLVERS_USE_OPENMP "Enable OpenMP in numerical kernels" ON)
+# Recorded for the consumer config: when ON the exported static archive has a
+# LINK_ONLY reference to OpenMP::OpenMP_CXX that consumers must recreate.
+set(MIPSOLVERS_OPENMP_ENABLED OFF)
 if(MIPSOLVERS_USE_OPENMP)
   find_package(OpenMP QUIET COMPONENTS CXX)
   if(NOT OpenMP_CXX_FOUND AND APPLE)
@@ -371,6 +401,7 @@ if(MIPSOLVERS_USE_OPENMP)
   if(OpenMP_CXX_FOUND)
     target_link_libraries(mipsolvers PRIVATE OpenMP::OpenMP_CXX)
     target_compile_definitions(mipsolvers PRIVATE MIPSOLVERS_USE_OPENMP=1)
+    set(MIPSOLVERS_OPENMP_ENABLED ON)
     message(STATUS "mipsolvers: OpenMP enabled in numerical kernels")
   else()
     message(STATUS "mipsolvers: OpenMP not found; numerical kernels stay serial")
@@ -455,17 +486,19 @@ target_link_libraries(mipsolvers PUBLIC
 
 # ── Bundled single static archive ─────────────────────────────────────────────
 # Merge libmipsolvers.a with every static dependency we build in-tree (HiGHS,
-# SCIP, Ipopt, MUMPS, HiGHS-factor) plus the static LUSOL archive into a single
-# self-contained archive `libmipsolvers_bundled.a`, for downstream applications
-# that want one .a to link.  External *shared* libraries (SuiteSparse, OpenBLAS,
-# fmt, GMP, TBB, Boost, Gurobi, gfortran/quadmath, Accelerate) cannot be merged
-# into a static archive and must still be provided by the consumer at link time;
-# see docs/build_and_deploy.md for the full consumer link line.
+# SCIP, Ipopt, MUMPS, HiGHS-factor, vendored fmt, vendored reference LAPACK)
+# into a single self-contained archive `libmipsolvers_bundled.a`, for
+# downstream applications that want one .a to link.  External *shared*
+# libraries (SuiteSparse when not vendored, OpenBLAS, GMP, TBB, Boost, Gurobi,
+# gfortran/quadmath on non-Apple, Accelerate) cannot be merged into a static
+# archive and must still be provided by the consumer at link time; see
+# docs/build_and_deploy.md for the full consumer link line.
 option(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE
   "Produce a single bundled static archive (libmipsolvers_bundled.a)" ON)
 if(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE)
   set(_bundle_inputs "$<TARGET_FILE:mipsolvers>")
-  foreach(_dep IN ITEMS mipsolvers_hfactor highs libscip ipopt_local dmumps)
+  foreach(_dep IN ITEMS mipsolvers_hfactor highs libscip ipopt_local dmumps
+                       fmt reflapack_vendored)
     if(TARGET ${_dep})
       # Only static-library targets have an archive file to bundle.  When a
       # dependency is provided as an INTERFACE target (e.g. dmumps wrapping a
@@ -478,12 +511,15 @@ if(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE)
     endif()
   endforeach()
   # Static LUSOL archive pulled in transitively via PaPILO (not a CMake target).
-  find_library(MIPSOLVERS_CLUSOL_STATIC_LIB
-    NAMES clusol libclusol
-    PATHS /opt/homebrew/lib /usr/local/lib
-    NO_CACHE)
-  if(MIPSOLVERS_CLUSOL_STATIC_LIB AND MIPSOLVERS_CLUSOL_STATIC_LIB MATCHES "\\.a$")
-    list(APPEND _bundle_inputs "${MIPSOLVERS_CLUSOL_STATIC_LIB}")
+  # Only relevant when PaPILO support is actually enabled (off by default).
+  if(MIPSOLVERS_HAVE_PAPILO)
+    find_library(MIPSOLVERS_CLUSOL_STATIC_LIB
+      NAMES clusol libclusol
+      PATHS /opt/homebrew/lib /usr/local/lib
+      NO_CACHE)
+    if(MIPSOLVERS_CLUSOL_STATIC_LIB AND MIPSOLVERS_CLUSOL_STATIC_LIB MATCHES "\\.a$")
+      list(APPEND _bundle_inputs "${MIPSOLVERS_CLUSOL_STATIC_LIB}")
+    endif()
   endif()
 
   # Multi-config generators (e.g., Visual Studio) need config-specific outputs
@@ -564,9 +600,19 @@ if(MIPSOLVERS_BUILD_TESTS)
       target_link_libraries(${_name} PRIVATE mipsolvers Catch2::Catch2WithMain)
       target_include_directories(${_name} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/highs
-        ${CMAKE_CURRENT_BINARY_DIR}/_deps/embedded_highs
         ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+      if(MIPSOLVERS_THIRD_PARTY_PREBUILT)
+        # A few regression tests include HiGHS headers directly. Use the
+        # installed target's complete interface here; its include directory
+        # contains the generated HConfig.h that is absent from a fresh dev
+        # build's _deps directory.
+        target_include_directories(${_name} PRIVATE
+          $<TARGET_PROPERTY:highs,INTERFACE_INCLUDE_DIRECTORIES>)
+      else()
+        target_include_directories(${_name} PRIVATE
+          ${CMAKE_CURRENT_SOURCE_DIR}/highs
+          ${CMAKE_CURRENT_BINARY_DIR}/_deps/embedded_highs)
+      endif()
       add_test(NAME ${_name} COMMAND ${_name})
       set(_tier "")
       set(_margs ${ARGN})
@@ -755,6 +801,17 @@ if(MIPSOLVERS_BUILD_PYTHON)
 endif()
 
 # ── Install rules ─────────────────────────────────────────────────────────────
+# In prebuilt third-party mode the vendored dependencies are IMPORTED targets:
+# they cannot be installed/re-exported, and install(EXPORT) would reject the
+# imported targets referenced by the mipsolvers link interface.  Installable
+# packages are produced by the normal in-tree build (or by a
+# MIPSOLVERS_THIRD_PARTY_ONLY build for the third-party package alone).
+if(MIPSOLVERS_THIRD_PARTY_PREBUILT)
+  message(STATUS
+    "mipsolvers: prebuilt third-party mode — install/export rules skipped "
+    "(use an in-tree build to produce installable packages)")
+  return()
+endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
@@ -811,6 +868,19 @@ if(TARGET klu_vendored)
   install(TARGETS klu_vendored
     EXPORT mipsolversTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
+if(MIPSOLVERS_FMT_VENDORED)
+  # Vendored fmt is exported with the package so consumers need no system fmt.
+  # Public mipsolvers headers include <fmt/...>, so ship the headers too
+  # (matches the fmt target's INSTALL_INTERFACE include dir set in
+  # cmake/Dependencies.cmake).
+  install(TARGETS fmt
+    EXPORT mipsolversTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+  install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fmt/include/fmt"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 endif()
 if(TARGET highs)
   install(TARGETS highs

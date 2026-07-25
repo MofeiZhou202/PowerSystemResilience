@@ -130,3 +130,15 @@ tests/*
 !tests/*.h
 !tests/baselines/
 !tests/data/
+
+# Hermetic-build scratch dirs (vendored sources under third_party/ stay tracked)
+_deps/
+third_party/build/
+third_party/install/
+
+# Root in-source build remnants (kept on disk, ignored by git)
+/CMakeCache.txt
+/CMakeFiles/
+/cmake_install.cmake
+/Makefile
+/libmipsolvers/

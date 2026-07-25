@@ -11,8 +11,9 @@
 #   Excluded: Partition/Modify/MatrixOps (NPARTITION/NMODIFY/NMATRIXOPS),
 #   GPU/CUDA, and the Fortran-only AMD helpers.
 #
-# BLAS/LAPACK (supernodal kernels): Accelerate framework on macOS;
-# find_package(BLAS/LAPACK) elsewhere (system OpenBLAS etc. — no download).
+# BLAS/LAPACK (supernodal kernels): consumed via MIPSOLVERS_BLAS_LIBRARIES,
+# resolved once in cmake/Dependencies.cmake (Accelerate on macOS, system
+# BLAS/LAPACK elsewhere, vendored reference LAPACK as fallback).
 #
 # Targets/vars created:
 #   cholmod_vendored           — static library
@@ -77,20 +78,16 @@ target_compile_definitions(cholmod_vendored PRIVATE
   NPARTITION NMODIFY NMATRIXOPS)
 
 # ── BLAS/LAPACK for the supernodal kernels ────────────────────────────────────
-if(APPLE)
-  target_link_libraries(cholmod_vendored PRIVATE "-framework Accelerate")
+# Unified resolution lives in cmake/Dependencies.cmake (Accelerate on macOS,
+# system BLAS/LAPACK elsewhere, vendored reference LAPACK as fallback) and is
+# consumed here via MIPSOLVERS_BLAS_LIBRARIES.
+if(MIPSOLVERS_BLAS_LIBRARIES)
+  target_link_libraries(cholmod_vendored PRIVATE ${MIPSOLVERS_BLAS_LIBRARIES})
 else()
-  find_package(BLAS QUIET)
-  find_package(LAPACK QUIET)
-  if(BLAS_FOUND AND LAPACK_FOUND)
-    target_link_libraries(cholmod_vendored PRIVATE
-      ${BLAS_LIBRARIES} ${LAPACK_LIBRARIES})
-  else()
-    # Degrade gracefully to the simplicial method (no BLAS) — CHOLMOD stays
-    # usable, just without the supernodal BLAS-3 kernels.
-    message(STATUS "mipsolvers: BLAS/LAPACK not found — CHOLMOD supernodal module disabled")
-    target_compile_definitions(cholmod_vendored PRIVATE NSUPERNODAL)
-  endif()
+  # Degrade gracefully to the simplicial method (no BLAS) — CHOLMOD stays
+  # usable, just without the supernodal BLAS-3 kernels.
+  message(STATUS "mipsolvers: BLAS/LAPACK not found — CHOLMOD supernodal module disabled")
+  target_compile_definitions(cholmod_vendored PRIVATE NSUPERNODAL)
 endif()
 if(UNIX AND NOT APPLE)
   target_link_libraries(cholmod_vendored PRIVATE m)

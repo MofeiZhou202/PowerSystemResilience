@@ -1,0 +1,9 @@
+Vendored dependency — nlohmann/json 3.11.3 (single-header form)
+Origin:     https://raw.githubusercontent.com/nlohmann/json/v3.11.3/single_include/nlohmann/json.hpp
+Version:    3.11.3
+Fetched:    2026-07-25
+License:    MIT (see LICENSE.MIT)
+
+Contents: include/nlohmann/json.hpp (amalgamated single header) + LICENSE.MIT.
+Exposed as the INTERFACE target nlohmann_json::nlohmann_json; see
+cmake/Dependencies.cmake.
