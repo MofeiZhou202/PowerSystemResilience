@@ -1463,3 +1463,7 @@ CertifiedRestorationResult CertifiedRestorationCoordinator::solve(
 }
 
 }  // namespace hacdcpf::analysis
+
+// Kept in the certified-restoration translation unit so adding the MIP-to-DAE
+// bridge does not create a second heavy Eigen matrix-functions compilation.
+#include "resilience_dynamic_certification.inc"

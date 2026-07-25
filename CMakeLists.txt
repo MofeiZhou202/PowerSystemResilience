@@ -793,6 +793,17 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/cyber_dynamic_safe_restoration_scal
   hacdcpf_copy_opendss_runtime(cyber_dynamic_safe_restoration_scale)
 endif()
 
+# Reproducible end-to-end case study for the distribution-resilience review.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/distribution_resilience_review_case.cpp")
+  add_executable(distribution_resilience_review_case
+    tools/distribution_resilience_review_case.cpp)
+  target_link_libraries(distribution_resilience_review_case
+    PRIVATE hacdcpf::hacdcpf)
+  target_compile_definitions(distribution_resilience_review_case PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  hacdcpf_copy_opendss_runtime(distribution_resilience_review_case)
+endif()
+
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/short_circuit_validation_matrix.cpp")
   add_executable(short_circuit_validation_matrix
     tools/short_circuit_validation_matrix.cpp)

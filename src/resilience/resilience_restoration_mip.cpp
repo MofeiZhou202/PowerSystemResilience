@@ -18,6 +18,8 @@
 
 #include "hacdcpf/engine/solver/external/adapters.hpp"
 #include "hacdcpf/engine/native_adapters.hpp"
+#include "hacdcpf/model/effective_capacity.hpp"
+#include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/solver/branch_and_cut.hpp"
 
 namespace hacdcpf::analysis {
@@ -73,11 +75,12 @@ std::unordered_map<int, int> make_bus_pos_map(const HybridPowerSystem& sys) {
   return out;
 }
 
-std::unordered_map<int, int> make_branch_pos_map(const HybridPowerSystem& sys) {
+std::unordered_map<int, int> make_dc_bus_pos_map(const HybridPowerSystem& sys,
+                                                  int offset) {
   std::unordered_map<int, int> out;
-  out.reserve(sys.ac.branches.size());
-  for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
-    out[sys.ac.branches[i].index] = static_cast<int>(i);
+  out.reserve(sys.dc.buses.size());
+  for (size_t i = 0; i < sys.dc.buses.size(); ++i) {
+    out[sys.dc.buses[i].index] = offset + static_cast<int>(i);
   }
   return out;
 }
@@ -103,6 +106,7 @@ PriorityTier priority_from_importance(double importance) {
 
 struct BusData {
   int index{0};
+  bool dc_side{false};
   bool base_source_available{false};
   double base_source_cap_mw{0.0};
   double dispatchable_gen_cap_mw{0.0};
@@ -113,15 +117,21 @@ struct BusData {
 
 struct BranchData {
   int index{0};
+  int canonical_index{0};
+  int pair_number{0};
+  ResilienceBranchKind domain{ResilienceBranchKind::AC};
+  std::string component_type{"ac_branch"};
   int from_pos{0};
   int to_pos{0};
   double r_pu{0.01};
   double rate_mw{10.0};
   bool initial_closed{true};
+  bool enforce_voltage_drop{true};
 };
 
 struct FixedStorageData {
   int index{0};
+  bool dc_side{false};
   int bus_pos{0};
   double pmax_mw{0.0};
   double e_init_mwh{0.0};
@@ -148,6 +158,7 @@ struct MESSData {
 struct FaultData {
   int branch_pos{0};
   int branch_index{0};
+  ResilienceBranchKind branch_kind{ResilienceBranchKind::AC};
   double start_hr{0.0};
   double repair_hr{0.0};
   std::string name;
@@ -161,8 +172,9 @@ using Adj = std::vector<std::vector<std::pair<int, double>>>;
 
 Adj build_transport_graph(const HybridPowerSystem& sys,
                           const DistributionResilienceOptions& opts,
-                          const std::unordered_map<int, int>& bus_pos) {
-  Adj graph(sys.ac.buses.size());
+                          const std::unordered_map<int, int>& bus_pos,
+                          int node_count) {
+  Adj graph(static_cast<size_t>(node_count));
   auto add_edge = [&](int fb, int tb, double dist) {
     const auto it_f = bus_pos.find(fb);
     const auto it_t = bus_pos.find(tb);
@@ -204,37 +216,51 @@ std::vector<double> shortest_path_distances(const Adj& graph, int start) {
   return dist;
 }
 
-std::vector<FaultData> build_faults(const HybridPowerSystem& sys,
-                                    const DistributionResilienceOptions& opts,
-                                    const std::unordered_map<int, int>& branch_pos) {
+std::vector<FaultData> build_faults(const std::vector<BranchData>& branches,
+                                    const DistributionResilienceOptions& opts) {
   std::vector<FaultData> out;
   if (!opts.faults.empty()) {
     out.reserve(opts.faults.size());
     for (const auto& f : opts.faults) {
-      const auto it = branch_pos.find(requested_branch_index(f));
-      if (it == branch_pos.end()) continue;
-      const auto& br = sys.ac.branches[static_cast<size_t>(it->second)];
-      out.push_back({it->second,
-                     br.index,
+      const int requested = requested_branch_index(f);
+      const auto it = std::find_if(
+          branches.begin(), branches.end(), [&](const BranchData& branch) {
+            return branch.index == requested && branch.domain == f.branch_kind &&
+                   (branch.component_type == "ac_branch" ||
+                    branch.component_type == "dc_branch");
+          });
+      if (it == branches.end()) continue;
+      const int branch_pos = static_cast<int>(std::distance(branches.begin(), it));
+      out.push_back({branch_pos,
+                     it->index,
+                     it->domain,
                      f.outage_start_hr,
                      std::max(opts.time_step_hr, f.repair_duration_hr),
-                     f.name.empty() ? br.name : f.name});
+                     f.name.empty() ? it->component_type + "_" +
+                                          std::to_string(it->index)
+                                    : f.name});
     }
     return out;
   }
   std::vector<int> candidates;
-  for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
-    if (sys.ac.branches[i].in_service) candidates.push_back(static_cast<int>(i));
+  for (size_t i = 0; i < branches.size(); ++i) {
+    const auto& branch = branches[i];
+    if (branch.initial_closed &&
+        (branch.component_type == "ac_branch" ||
+         branch.component_type == "dc_branch")) {
+      candidates.push_back(static_cast<int>(i));
+    }
   }
   const int count = std::min(opts.default_fault_count, static_cast<int>(candidates.size()));
   for (int k = 0; k < count; ++k) {
     const int pos = candidates[static_cast<size_t>(k)];
-    const auto& br = sys.ac.branches[static_cast<size_t>(pos)];
+    const auto& br = branches[static_cast<size_t>(pos)];
     out.push_back({pos,
-                   br.index,
+                     br.index,
+                     br.domain,
                    opts.auto_fault_start_hr + k * std::max(0.0, opts.auto_fault_stagger_hr),
                    std::max(opts.time_step_hr, opts.default_repair_time_hr),
-                   br.name});
+                   br.component_type + "_" + std::to_string(br.index)});
   }
   return out;
 }
@@ -433,9 +459,10 @@ DistributionResilienceResult make_no_fault_baseline_result(
   result.model_stats.model = DistributionResilienceModel::MultiPeriodMIPLinDistFlow;
   result.model_stats.model_built = true;
   result.model_stats.model_solved = true;
-  result.model_stats.model_scope = "ac-only-lindistflow";
+  result.model_stats.model_scope = "hybrid-acdc-restoration-milp";
   result.model_stats.solver_name = "no-fault-baseline";
-  result.model_stats.solver_status = "No explicit faults; evaluated intact AC topology without MILP search";
+  result.model_stats.solver_status =
+      "No explicit faults; evaluated intact hybrid topology without MILP search";
   result.model_stats.validity.mip_gap_within_tolerance = true;
   result.model_stats.mip_gap = 0.0;
   result.feasible = true;
@@ -511,7 +538,8 @@ DistributionResilienceResult make_no_fault_baseline_result(
         sr.shed_by_priority[static_cast<size_t>(pidx)] += shed;
       }
 
-      sr.bus_supply_kind.push_back("AC");
+      sr.bus_supply_kind.push_back(
+          built.buses[static_cast<size_t>(i)].dc_side ? "DC" : "AC");
       sr.bus_supply_index.push_back(built.buses[static_cast<size_t>(i)].index);
       sr.bus_supply_demand_mw.push_back(demand);
       sr.bus_supply_served_mw.push_back(served);
@@ -521,7 +549,29 @@ DistributionResilienceResult make_no_fault_baseline_result(
     }
 
     for (size_t b = 0; b < built.branches.size(); ++b) {
-      if (!closed[b]) sr.open_ac_branch_ids.push_back(built.branches[b].index);
+      const auto& branch = built.branches[b];
+      if (!closed[b] && branch.component_type == "dc_branch") {
+        sr.open_dc_branch_ids.push_back(branch.index);
+      } else if (!closed[b] && branch.component_type == "ac_branch") {
+        sr.open_ac_branch_ids.push_back(branch.index);
+      }
+      const std::string domain =
+          branch.component_type == "vsc_converter" ||
+                  branch.component_type == "lcc_converter"
+              ? "AC-DC"
+              : (branch.domain == ResilienceBranchKind::DC ? "DC" : "AC");
+      sr.component_states.push_back(
+          {branch.component_type,
+           domain,
+           branch.index,
+           branch.canonical_index,
+           branch.pair_number,
+           built.buses[static_cast<size_t>(branch.from_pos)].index,
+           built.buses[static_cast<size_t>(branch.to_pos)].index,
+           true,
+           closed[b] != 0,
+           false,
+           0.0});
     }
     sr.island_count = count_islands(built.branches, closed, energized);
     sr.restoration_ratio = sr.total_demand_mw > kEps ? sr.served_mw / sr.total_demand_mw : 1.0;
@@ -559,47 +609,47 @@ DistributionResilienceResult make_no_fault_baseline_result(
   return result;
 }
 
-// ── AC-ONLY MODEL SCOPE ───────────────────────────────────────────────────────
-// build_mip_skeleton() and run_distribution_resilience_mip_assessment() model
-// the AC distribution network only (sys.ac.buses, sys.ac.branches).
-// DC buses, DC branches, VSC converters, and DC loads are NOT represented in
-// the MILP; their energy cannot be dispatched and their faults cannot be
-// scheduled.  The restoration result therefore applies only to the AC side.
-// Do not advertise this as a full hybrid AC/DC restoration MIP.
-// ─────────────────────────────────────────────────────────────────────────────
+// The strict model consumes a canonical rich-system projection. AC and DC
+// nodes share only internal positions; all external lookups remain domain
+// qualified. Converter edges carry bounded active power between domains.
 BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
                                   const DistributionResilienceOptions& opts) {
   BuildArtifacts out;
   out.stats.model = DistributionResilienceModel::MultiPeriodMIPLinDistFlow;
   out.stats.model_built = false;
   out.stats.formulation_notes =
-      "Strict unexpected-fault restoration skeleton (AC network only): "
-      "multi-period MILP with forest radiality, active-power LinDistFlow "
-      "voltage envelopes, fixed storage energy dynamics, and time-space MESS "
-      "routing arcs.  DC buses / branches / VSC not modelled.";
+      "Strict hybrid AC/DC unexpected-fault restoration MILP: canonical rich-"
+      "component projection, multi-period forest topology, active-power "
+      "LinDistFlow-style AC/DC voltage envelopes, bounded VSC/LCC/DC-DC "
+      "transfers, fixed AC/DC storage energy dynamics, and time-space MESS "
+      "routing. Reactive power, converter losses, protection logic, and "
+      "transient limits require downstream verification.";
 
   const auto bus_pos = make_bus_pos_map(sys);
-  const auto branch_pos = make_branch_pos_map(sys);
-  const auto faults = build_faults(sys, opts, branch_pos);
-  out.faults = faults;
+  const int n_ac_bus = static_cast<int>(sys.ac.buses.size());
+  const auto dc_bus_pos = make_dc_bus_pos_map(sys, n_ac_bus);
 
   const int T = std::max(1, static_cast<int>(std::ceil(opts.horizon_hours / opts.time_step_hr)));
-  const int n_bus = static_cast<int>(sys.ac.buses.size());
-  const int n_branch = static_cast<int>(sys.ac.branches.size());
+  const int n_bus = n_ac_bus + static_cast<int>(sys.dc.buses.size());
   const double dt = opts.time_step_hr;
 
   out.steps = T;
   out.buses.resize(static_cast<size_t>(n_bus));
-  out.branches.resize(static_cast<size_t>(n_branch));
   out.demand_mw.assign(static_cast<size_t>(T), std::vector<double>(static_cast<size_t>(n_bus), 0.0));
   out.renewable_avail_mw.assign(static_cast<size_t>(T), std::vector<double>(static_cast<size_t>(n_bus), 0.0));
-  out.branch_available.assign(static_cast<size_t>(T), std::vector<bool>(static_cast<size_t>(n_branch), true));
 
   double system_peak_demand_mw = 0.0;
-  for (int i = 0; i < n_bus; ++i) {
+  for (int i = 0; i < n_ac_bus; ++i) {
     out.buses[static_cast<size_t>(i)].index = sys.ac.buses[static_cast<size_t>(i)].index;
     out.buses[static_cast<size_t>(i)].importance = std::max(1.0, sys.ac.buses[static_cast<size_t>(i)].importance);
     out.buses[static_cast<size_t>(i)].priority = priority_from_importance(out.buses[static_cast<size_t>(i)].importance);
+  }
+  for (size_t i = 0; i < sys.dc.buses.size(); ++i) {
+    auto& bus = out.buses[static_cast<size_t>(n_ac_bus) + i];
+    bus.index = sys.dc.buses[i].index;
+    bus.dc_side = true;
+    bus.importance = std::max(1.0, sys.dc.buses[i].importance);
+    bus.priority = priority_from_importance(bus.importance);
   }
 
   const auto& load_prof = opts.load_profile;
@@ -615,7 +665,7 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
     // P1b: DC-OPF formulation adds bus.pd_mw and ac.loads additively as demand;
     // the demand matrix must mirror the same convention.  Both sources are
     // always accumulated unconditionally so neither is silently omitted.
-    for (int i = 0; i < n_bus; ++i) {
+    for (int i = 0; i < n_ac_bus; ++i) {
       const double demand = std::max(0.0, sys.ac.buses[static_cast<size_t>(i)].pd_mw * opts.load_scale_factor * load_mult);
       out.demand_mw[static_cast<size_t>(t)][static_cast<size_t>(i)] += demand;
     }
@@ -636,6 +686,45 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
             break;
           case LoadPriority::Low: break;
         }
+    }
+    for (const auto& station : sys.ac.charging_stations) {
+      if (!station.in_service) continue;
+      const auto it = bus_pos.find(station.bus);
+      if (it == bus_pos.end()) continue;
+      double demand = station.p_total_kw / 1000.0;
+      if (demand <= kEps) {
+        demand = station.max_power_kw * std::max(0.0, station.utilization_rate) /
+                 1000.0;
+      }
+      out.demand_mw[static_cast<size_t>(t)][static_cast<size_t>(it->second)] +=
+          std::max(0.0, demand * opts.load_scale_factor * load_mult);
+    }
+    for (size_t i = 0; i < sys.dc.buses.size(); ++i) {
+      const int pos = n_ac_bus + static_cast<int>(i);
+      out.demand_mw[static_cast<size_t>(t)][static_cast<size_t>(pos)] +=
+          std::max(0.0, sys.dc.buses[i].pd_mw * opts.load_scale_factor * load_mult);
+    }
+    for (const auto& ld : sys.dc.loads) {
+      if (!ld.in_service) continue;
+      const auto it = dc_bus_pos.find(ld.bus);
+      if (it == dc_bus_pos.end()) continue;
+      out.demand_mw[static_cast<size_t>(t)][static_cast<size_t>(it->second)] +=
+          std::max(0.0, model::effective_load_p_mw(ld) *
+                            opts.load_scale_factor * load_mult);
+      switch (ld.priority) {
+        case LoadPriority::Critical:
+          out.buses[static_cast<size_t>(it->second)].priority = PriorityTier::Critical;
+          break;
+        case LoadPriority::High:
+          if (out.buses[static_cast<size_t>(it->second)].priority != PriorityTier::Critical)
+            out.buses[static_cast<size_t>(it->second)].priority = PriorityTier::High;
+          break;
+        case LoadPriority::Medium:
+          if (out.buses[static_cast<size_t>(it->second)].priority == PriorityTier::Low)
+            out.buses[static_cast<size_t>(it->second)].priority = PriorityTier::Medium;
+          break;
+        case LoadPriority::Low: break;
+      }
     }
     // Track true system-wide peak demand: total demand across all buses at
     // time t, max'd over t.  Earlier this variable was named "peak" but only
@@ -661,18 +750,32 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
       out.renewable_avail_mw[static_cast<size_t>(t)][static_cast<size_t>(it->second)] +=
           std::max(0.0, (pv.pmax_mw > 0.0 ? pv.pmax_mw : pv.p_mw) * pv_mult);
     }
+    for (const auto& pv : sys.dc.pv_arrays) {
+      if (!pv.in_service) continue;
+      const auto it = dc_bus_pos.find(pv.bus);
+      if (it == dc_bus_pos.end()) continue;
+      out.renewable_avail_mw[static_cast<size_t>(t)][static_cast<size_t>(it->second)] +=
+          std::max(0.0, pv.p_set_mw * pv_mult);
+    }
   }
 
-  for (int i = 0; i < n_bus; ++i) {
+  for (int i = 0; i < n_ac_bus; ++i) {
     auto& bus = out.buses[static_cast<size_t>(i)];
-    if (sys.ac.buses[static_cast<size_t>(i)].bus_type == BusType::SLACK) bus.base_source_available = true;
-    bus.base_source_cap_mw = system_peak_demand_mw > 0.0 ? 1.5 * system_peak_demand_mw : 10.0;
+    if (sys.ac.buses[static_cast<size_t>(i)].bus_type == BusType::SLACK) {
+      bus.base_source_available = true;
+      bus.base_source_cap_mw =
+          system_peak_demand_mw > 0.0 ? 1.5 * system_peak_demand_mw : 10.0;
+    }
   }
   for (const auto& eg : sys.ac.external_grids) {
     if (!eg.in_service) continue;
     const auto it = bus_pos.find(eg.bus);
     if (it == bus_pos.end()) continue;
-    out.buses[static_cast<size_t>(it->second)].base_source_available = true;
+    auto& bus = out.buses[static_cast<size_t>(it->second)];
+    bus.base_source_available = true;
+    bus.base_source_cap_mw = std::max(
+        bus.base_source_cap_mw,
+        system_peak_demand_mw > 0.0 ? 1.5 * system_peak_demand_mw : 10.0);
   }
   for (const auto& g : sys.ac.generators) {
     if (!g.in_service) continue;
@@ -681,7 +784,6 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
     auto& bus = out.buses[static_cast<size_t>(it->second)];
     const double cap = std::max({0.0, g.pmax_mw, g.pg_mw});
     bus.dispatchable_gen_cap_mw += cap;
-    bus.base_source_cap_mw += cap;
     bus.base_source_available = bus.base_source_available || g.is_slack || cap > kEps;
   }
   for (const auto& sg : sys.ac.static_generators) {
@@ -691,23 +793,168 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
     auto& bus = out.buses[static_cast<size_t>(it->second)];
     const double cap = std::max(0.0, (sg.pmax_mw > 0.0 ? sg.pmax_mw : sg.p_mw) * std::max(0.0, sg.scaling));
     bus.dispatchable_gen_cap_mw += cap;
-    bus.base_source_cap_mw += cap;
     bus.base_source_available = bus.base_source_available || cap > kEps;
   }
 
-  for (int b = 0; b < n_branch; ++b) {
-    const auto& br = sys.ac.branches[static_cast<size_t>(b)];
-    const auto it_f = bus_pos.find(br.from_bus);
-    const auto it_t = bus_pos.find(br.to_bus);
-    out.branches[static_cast<size_t>(b)] = {
-        br.index,
-        it_f != bus_pos.end() ? it_f->second : 0,
-        it_t != bus_pos.end() ? it_t->second : 0,
-        std::max(1e-4, std::abs(br.r_pu)),
-        br.rate_a_mva > 1e-9 ? br.rate_a_mva : opts.mip.default_branch_rate_mva,
-        br.in_service};
+  for (size_t i = 0; i < sys.dc.buses.size(); ++i) {
+    auto& bus = out.buses[static_cast<size_t>(n_ac_bus) + i];
+    if (sys.dc.buses[i].bus_type == DCBusType::DC_V) {
+      bus.base_source_available = true;
+      bus.base_source_cap_mw = system_peak_demand_mw > 0.0
+                                   ? 1.5 * system_peak_demand_mw
+                                   : 10.0;
+    }
+  }
+  for (const auto& sg : sys.dc.static_generators) {
+    if (!sg.in_service) continue;
+    const auto it = dc_bus_pos.find(sg.bus);
+    if (it == dc_bus_pos.end()) continue;
+    auto& bus = out.buses[static_cast<size_t>(it->second)];
+    const double cap = std::max(0.0, (sg.pmax_mw > 0.0 ? sg.pmax_mw : sg.p_mw) *
+                                         std::max(0.0, sg.scaling));
+    bus.dispatchable_gen_cap_mw += cap;
+    bus.base_source_available = bus.base_source_available || cap > kEps;
+  }
+  for (const auto& sg : sys.dc.dc_static_generators) {
+    if (!sg.in_service) continue;
+    const auto it = dc_bus_pos.find(sg.bus);
+    if (it == dc_bus_pos.end()) continue;
+    auto& bus = out.buses[static_cast<size_t>(it->second)];
+    const double cap = std::max({0.0, sg.pmax_mw, sg.p_set_mw}) *
+                       model::sanitize_scaling(sg.scaling);
+    bus.dispatchable_gen_cap_mw += cap;
+    bus.base_source_available = bus.base_source_available || cap > kEps;
   }
 
+  std::unordered_map<int, BranchExpandEntry> ac_branch_origins;
+  if (sys.branch_expand_map.has_value()) {
+    for (const auto& entry : sys.branch_expand_map->entries) {
+      ac_branch_origins[entry.branch_index] = entry;
+    }
+  }
+  auto origin_component_type = [](BranchOriginType origin) {
+    switch (origin) {
+      case BranchOriginType::Transformer2W: return std::string{"transformer_2w"};
+      case BranchOriginType::Transformer3W: return std::string{"transformer_3w"};
+      case BranchOriginType::Switch: return std::string{"switch"};
+      case BranchOriginType::CircuitBreaker: return std::string{"circuit_breaker"};
+    }
+    return std::string{"ac_branch"};
+  };
+
+  auto add_branch = [&](int index, int canonical_index, int pair_number,
+                        ResilienceBranchKind domain,
+                        std::string component_type, int from_pos, int to_pos,
+                        double r_pu, double rate_mw, bool initial_closed,
+                        bool enforce_voltage_drop) {
+    if (from_pos < 0 || to_pos < 0 || from_pos == to_pos) return;
+    out.branches.push_back({index, canonical_index, pair_number, domain,
+                            std::move(component_type), from_pos, to_pos,
+                            std::max(1e-4, std::abs(r_pu)),
+                            rate_mw > kEps ? rate_mw
+                                           : opts.mip.default_branch_rate_mva,
+                            initial_closed, enforce_voltage_drop});
+  };
+
+  for (const auto& br : sys.ac.branches) {
+    const auto it_f = bus_pos.find(br.from_bus);
+    const auto it_t = bus_pos.find(br.to_bus);
+    if (it_f == bus_pos.end() || it_t == bus_pos.end()) continue;
+    int stable_index = br.index;
+    int pair_number = 0;
+    std::string component_type = "ac_branch";
+    if (const auto origin = ac_branch_origins.find(br.index);
+        origin != ac_branch_origins.end()) {
+      stable_index = origin->second.origin_index;
+      pair_number = origin->second.pair_number;
+      component_type = origin_component_type(origin->second.origin_type);
+    }
+    add_branch(stable_index, br.index, pair_number, ResilienceBranchKind::AC,
+               std::move(component_type), it_f->second, it_t->second, br.r_pu,
+               br.rate_a_mva > kEps ? br.rate_a_mva : br.sn_mva,
+               br.in_service, true);
+  }
+  for (const auto& br : sys.dc.branches) {
+    const auto it_f = dc_bus_pos.find(br.from_bus);
+    const auto it_t = dc_bus_pos.find(br.to_bus);
+    if (it_f == dc_bus_pos.end() || it_t == dc_bus_pos.end()) continue;
+    add_branch(br.index, br.index, 0, ResilienceBranchKind::DC, "dc_branch",
+               it_f->second, it_t->second, br.r_pu,
+               br.rate_a_mva > kEps ? br.rate_a_mva : br.s_max_mva,
+               br.in_service, true);
+  }
+  for (const auto& converter : sys.vsc_converters) {
+    if (!converter.in_service) continue;
+    const auto ac = bus_pos.find(converter.bus_ac);
+    const auto dc = dc_bus_pos.find(converter.bus_dc);
+    if (ac == bus_pos.end() || dc == dc_bus_pos.end()) continue;
+    const double cap = std::max({std::abs(converter.pmax_mw),
+                                 std::abs(converter.pmin_mw),
+                                 std::abs(converter.p_set_mw),
+                                 converter.p_rated_mw});
+    add_branch(converter.index, converter.index, 0, ResilienceBranchKind::AC,
+               "vsc_converter", ac->second, dc->second, 1e-4, cap, true,
+               false);
+  }
+  for (const auto& converter : sys.lcc_converters) {
+    if (!converter.in_service) continue;
+    const auto ac = bus_pos.find(converter.ac_bus);
+    const auto dc = dc_bus_pos.find(converter.dc_bus);
+    if (ac == bus_pos.end() || dc == dc_bus_pos.end()) continue;
+    double cap = std::abs(converter.p_set_mw);
+    if (cap <= kEps && converter.rated_current_a > 0.0 &&
+        converter.rated_dc_kv > 0.0) {
+      cap = converter.rated_current_a * converter.rated_dc_kv / 1000.0;
+    }
+    add_branch(converter.index, converter.index, 0, ResilienceBranchKind::AC,
+               "lcc_converter", ac->second, dc->second, 1e-4, cap, true,
+               false);
+  }
+  for (const auto& converter : sys.dc.dcdc_converters) {
+    if (!converter.in_service) continue;
+    const auto from = dc_bus_pos.find(converter.bus_in);
+    const auto to = dc_bus_pos.find(converter.bus_out);
+    if (from == dc_bus_pos.end() || to == dc_bus_pos.end()) continue;
+    const double cap = std::max({std::abs(converter.pmax_mw),
+                                 std::abs(converter.pmin_mw),
+                                 std::abs(converter.p_ref_mw),
+                                 converter.sn_mva});
+    add_branch(converter.index, converter.index, 0, ResilienceBranchKind::DC,
+               "dcdc_converter", from->second, to->second, 1e-4, cap, true,
+               false);
+  }
+  for (const auto& breaker : sys.dc.dc_circuit_breakers) {
+    if (!breaker.in_service) continue;
+    const bool controls_existing = breaker.element_id > 0 &&
+        std::any_of(sys.dc.branches.begin(), sys.dc.branches.end(),
+                    [&](const DCBranch& branch) {
+                      return branch.index == breaker.element_id;
+                    });
+    if (controls_existing) {
+      for (auto& branch : out.branches) {
+        if (branch.component_type == "dc_branch" &&
+            branch.index == breaker.element_id) {
+          branch.initial_closed = branch.initial_closed && breaker.closed;
+        }
+      }
+      continue;
+    }
+    const auto from = dc_bus_pos.find(breaker.bus_from);
+    const auto to = dc_bus_pos.find(breaker.bus_to);
+    if (from == dc_bus_pos.end() || to == dc_bus_pos.end()) continue;
+    add_branch(breaker.index, breaker.index, 0, ResilienceBranchKind::DC,
+               "dc_circuit_breaker", from->second, to->second, 1e-4,
+               breaker.i_rated_ka > 0.0 && breaker.rated_voltage_kv > 0.0
+                   ? breaker.i_rated_ka * breaker.rated_voltage_kv
+                   : opts.mip.default_branch_rate_mva,
+               breaker.closed, false);
+  }
+
+  const int n_branch = static_cast<int>(out.branches.size());
+  const auto faults = build_faults(out.branches, opts);
+  out.faults = faults;
+  out.branch_available.assign(static_cast<size_t>(T),
+                              std::vector<bool>(static_cast<size_t>(n_branch), true));
   for (int t = 0; t < T; ++t) {
     const double hour = static_cast<double>(t) * dt;
     for (const auto& f : faults) {
@@ -724,6 +971,7 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
     if (it == bus_pos.end()) continue;
     const double e0 = st.e_mwh > 0.0 ? st.e_mwh : st.soc_init * st.e_rated_mwh;
     out.fixed_storage.push_back({st.index != 0 ? st.index : static_cast<int>(i + 1),
+                                 false,
                                  it->second,
                                  std::max({0.0, st.pmax_mw, st.p_rated_mw, st.p_mw}),
                                  std::max(0.0, e0),
@@ -731,6 +979,38 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
                                  std::max(0.0, st.e_rated_mwh),
                                  st.eta_discharge > 0.0 ? st.eta_discharge : 1.0,
                                  st.grid_forming});
+  }
+  for (size_t i = 0; i < sys.dc.storage.size(); ++i) {
+    const auto& st = sys.dc.storage[i];
+    if (!st.in_service) continue;
+    const auto it = dc_bus_pos.find(st.bus);
+    if (it == dc_bus_pos.end()) continue;
+    const double e0 = st.e_mwh > 0.0 ? st.e_mwh : st.soc_init * st.e_rated_mwh;
+    out.fixed_storage.push_back({st.index != 0 ? st.index : static_cast<int>(i + 1),
+                                 true,
+                                 it->second,
+                                 std::max({0.0, st.pmax_mw, st.p_rated_mw, st.p_mw}),
+                                 std::max(0.0, e0),
+                                 st.soc_min * st.e_rated_mwh,
+                                 std::max(0.0, st.e_rated_mwh),
+                                 st.eta_discharge > 0.0 ? st.eta_discharge : 1.0,
+                                 st.grid_forming});
+  }
+  for (size_t i = 0; i < sys.dc.dc_storage.size(); ++i) {
+    const auto& st = sys.dc.dc_storage[i];
+    if (!st.in_service) continue;
+    const auto it = dc_bus_pos.find(st.bus);
+    if (it == dc_bus_pos.end()) continue;
+    const double e0 = st.e_mwh > 0.0 ? st.e_mwh : st.soc_init * st.e_rated_mwh;
+    out.fixed_storage.push_back({st.index != 0 ? st.index : static_cast<int>(i + 1),
+                                 true,
+                                 it->second,
+                                 std::max({0.0, st.pmax_mw, st.p_rated_mw, st.p_mw}),
+                                 std::max(0.0, e0),
+                                 st.soc_min * st.e_rated_mwh,
+                                 std::max(0.0, st.e_rated_mwh),
+                                 st.eta_discharge > 0.0 ? st.eta_discharge : 1.0,
+                                 false});
   }
   for (size_t i = 0; i < sys.mobile_storage.size(); ++i) {
     const auto& st = sys.mobile_storage[i];
@@ -761,7 +1041,7 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
                         st.grid_forming});
   }
 
-  const Adj transport_graph = build_transport_graph(sys, opts, bus_pos);
+  const Adj transport_graph = build_transport_graph(sys, opts, bus_pos, n_bus);
   std::vector<std::vector<double>> distance_matrix(static_cast<size_t>(n_bus), std::vector<double>(static_cast<size_t>(n_bus), kInf));
   for (int i = 0; i < n_bus; ++i) distance_matrix[static_cast<size_t>(i)] = shortest_path_distances(transport_graph, i);
 
@@ -987,16 +1267,18 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
       add_le({{out.idx.bt(b, t), 1.0}, {out.idx.ub(br.from_pos, t), -1.0}}, 0.0);
       add_le({{out.idx.bt(b, t), 1.0}, {out.idx.ub(br.to_pos, t), -1.0}}, 0.0);
 
-      add_le({{out.idx.vb(br.to_pos, t), 1.0},
-              {out.idx.vb(br.from_pos, t), -1.0},
-              {out.idx.pb(b, t), 2.0 * br.r_pu},
-              {out.idx.bt(b, t), opts.mip.big_m_voltage}},
-             opts.mip.big_m_voltage);
-      add_le({{out.idx.vb(br.to_pos, t), -1.0},
-              {out.idx.vb(br.from_pos, t), 1.0},
-              {out.idx.pb(b, t), -2.0 * br.r_pu},
-              {out.idx.bt(b, t), opts.mip.big_m_voltage}},
-             opts.mip.big_m_voltage);
+      if (br.enforce_voltage_drop) {
+        add_le({{out.idx.vb(br.to_pos, t), 1.0},
+                {out.idx.vb(br.from_pos, t), -1.0},
+                {out.idx.pb(b, t), 2.0 * br.r_pu},
+                {out.idx.bt(b, t), opts.mip.big_m_voltage}},
+               opts.mip.big_m_voltage);
+        add_le({{out.idx.vb(br.to_pos, t), -1.0},
+                {out.idx.vb(br.from_pos, t), 1.0},
+                {out.idx.pb(b, t), -2.0 * br.r_pu},
+                {out.idx.bt(b, t), opts.mip.big_m_voltage}},
+               opts.mip.big_m_voltage);
+      }
     }
 
     for (int i = 0; i < n_bus; ++i) {
@@ -1065,6 +1347,10 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
     add_eq({{out.idx.fse(static_cast<int>(s), 0), 1.0}}, st.e_init_mwh);
     for (int t = 0; t < T; ++t) {
       add_le({{out.idx.fsd(static_cast<int>(s), t), 1.0}, {out.idx.ub(st.bus_pos, t), -st.pmax_mw}}, 0.0);
+      add_le({{out.idx.fsd(static_cast<int>(s), t),
+               dt / std::max(st.eta_discharge, 1e-6)},
+              {out.idx.fse(static_cast<int>(s), t), -1.0}},
+             -st.e_min_mwh);
       add_le({{out.idx.fsr(static_cast<int>(s), t), 1.0}, {out.idx.rb(st.bus_pos, t), -1.0}}, 0.0);
       add_le({{out.idx.fse(static_cast<int>(s), t), -1.0}, {out.idx.fsr(static_cast<int>(s), t), 1e-3}}, -st.e_min_mwh);
       if (t > 0) {
@@ -1098,6 +1384,15 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
       std::vector<std::pair<int, double>> energy_root{{out.idx.me(static_cast<int>(m), t), -1.0}};
       for (int i = 0; i < n_bus; ++i) energy_root.push_back({out.idx.mr(static_cast<int>(m), i, t), 1e-3});
       add_le(energy_root, -ms.e_min_mwh);
+
+      std::vector<std::pair<int, double>> dispatch_energy{
+          {out.idx.me(static_cast<int>(m), t), -1.0}};
+      for (int i = 0; i < n_bus; ++i) {
+        dispatch_energy.push_back(
+            {out.idx.md(static_cast<int>(m), i, t),
+             dt / std::max(ms.eta_discharge, 1e-6)});
+      }
+      add_le(dispatch_energy, -ms.e_min_mwh);
 
       if (t > 0) {
         std::vector<std::pair<int, double>> eterms{{out.idx.me(static_cast<int>(m), t), 1.0}, {out.idx.me(static_cast<int>(m), t - 1), -1.0}};
@@ -1152,6 +1447,39 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
   out.stats.num_eq_constraints = static_cast<int>(beq_vals.size());
   out.stats.num_ineq_constraints = static_cast<int>(b_vals.size());
   out.stats.model_built = true;
+  out.stats.model_scope = "hybrid-acdc-restoration-milp";
+  auto& validity = out.stats.validity;
+  validity.canonical_projection_used = sys.projection_certificate.has_value();
+  validity.dc_network_modelled = !sys.dc.buses.empty();
+  validity.vsc_dispatch_modelled = !sys.vsc_converters.empty();
+  validity.lcc_dispatch_modelled = !sys.lcc_converters.empty();
+  validity.dcdc_dispatch_modelled = !sys.dc.dcdc_converters.empty();
+  validity.dc_branch_flow_limits_enforced = !sys.dc.branches.empty();
+  validity.converter_transfer_limits_enforced =
+      validity.vsc_dispatch_modelled || validity.lcc_dispatch_modelled ||
+      validity.dcdc_dispatch_modelled;
+  validity.ac_dc_storage_modelled =
+      !sys.ac.storage.empty() || !sys.dc.storage.empty() ||
+      !sys.dc.dc_storage.empty() || !sys.mobile_storage.empty();
+  if (sys.projection_report.has_value()) {
+    const auto& report = *sys.projection_report;
+    validity.energy_router_modelled = report.count_source("EnergyRouter") > 0;
+    validity.transformers_modelled =
+        report.count_source("Transformer2W") > 0 ||
+        report.count_source("Transformer3W") > 0;
+    validity.switches_and_breakers_modelled =
+        report.count_source("Switch") > 0 ||
+        report.count_source("CircuitBreaker") > 0 ||
+        !sys.dc.dc_circuit_breakers.empty();
+    validity.rich_loads_modelled =
+        report.count_source("FlexibleLoad") > 0 ||
+        report.count_source("AsymmetricLoad") > 0 ||
+        report.count_source("AsynchronousMotor") > 0 ||
+        !sys.ac.charging_stations.empty();
+    validity.aggregated_resources_modelled =
+        report.count_source("VirtualPowerPlant") > 0 ||
+        report.count_source("Microgrid") > 0;
+  }
   return out;
 }
 
@@ -1168,15 +1496,41 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
     result.status = "Invalid horizon or timestep for strict resilience MIP";
     return result;
   }
-  if (sys.ac.buses.empty() || sys.ac.branches.empty()) {
+  if (sys.ac.buses.empty() && sys.dc.buses.empty()) {
     result.feasible = false;
-    result.status = "System has no AC distribution network for strict resilience MIP";
+    result.status = "System has no AC or DC distribution network for strict resilience MIP";
     return result;
   }
 
-  auto built = build_mip_skeleton(sys, opts);
+  HybridPowerSystem model_system;
+  if (sys.projection_certificate.has_value()) {
+    model_system = sys;
+  } else {
+    auto projection_input = sys;
+    const auto mobile_storage = projection_input.mobile_storage;
+    projection_input.mobile_storage.clear();
+    ProjectionOptions projection_options;
+    projection_options.mode = ProjectionMode::ExactIdeal;
+    projection_options.strip_dead_islands = false;
+    projection_options.preserve_switch_branches = true;
+    model_system = project_to_canonical_models(std::move(projection_input),
+                                                projection_options);
+    model_system.mobile_storage = mobile_storage;
+  }
+
+  auto built = build_mip_skeleton(model_system, opts);
   result.model_stats = built.stats;
-  for (const auto& f : built.faults) result.fault_sequence.push_back({ResilienceBranchKind::AC, f.branch_index, f.start_hr, f.repair_hr, f.name});
+  for (const auto& f : built.faults) {
+    result.fault_sequence.push_back(
+        {f.branch_kind, f.branch_index, f.start_hr, f.repair_hr, f.name});
+  }
+  if (!opts.faults.empty() && built.faults.size() != opts.faults.size()) {
+    result.feasible = false;
+    result.status =
+        "One or more explicit faults do not match an authored AC/DC branch "
+        "in the canonical restoration model";
+    return result;
+  }
   if (built.faults.empty() && opts.faults.empty() && opts.default_fault_count <= 0) {
     return make_no_fault_baseline_result(built, opts);
   }
@@ -1262,14 +1616,10 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
   result.model_stats.solver_status = solve_result.stats.status;
   result.model_stats.cglp_cuts_added = solve_result.stats.cglp_cuts_added;
 
-  // Post-solve capability flags.  AC-only model_scope is hard-coded because
-  // the MIP skeleton does not represent DC components; flipping this string
-  // requires actually adding DC/VSC variables and constraints.  The
-  // `mip_solved_to_proven_optimum` flag is set only when the solver reports
-  // a closed optimality gap; non-zero gap means the incumbent is feasible
-  // but its global optimality is unproven.
-  result.model_stats.model_scope = "ac-only-lindistflow";
-  result.model_stats.validity = DistributionResilienceModelStats::ValidityFlags{};
+  // Preserve the component-level capability flags populated while building
+  // the canonical hybrid model. A non-zero gap means the incumbent is
+  // feasible but its global optimality is unproven.
+  result.model_stats.model_scope = "hybrid-acdc-restoration-milp";
   result.model_stats.validity.mip_gap_within_tolerance =
       solve_result.stats.success && solve_result.stats.mip_gap <= opts.mip.mip_gap + 1.0e-9;
 
@@ -1344,16 +1694,68 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
       sr.shed_by_priority[static_cast<size_t>(pidx)] += shed;
       result.weighted_unserved_mwh += penalty_from_priority(built.buses[i].priority, opts.mip) * shed * opts.time_step_hr;
       sr.total_res_mw += std::max(0.0, x[idx.ren(static_cast<int>(i), t)]);
+      sr.bus_supply_kind.push_back(built.buses[i].dc_side ? "DC" : "AC");
+      sr.bus_supply_index.push_back(built.buses[i].index);
+      sr.bus_supply_demand_mw.push_back(demand);
+      sr.bus_supply_served_mw.push_back(served);
+      sr.bus_supply_shed_mw.push_back(shed);
+      sr.bus_supply_priority_tier.push_back(pidx);
+      sr.bus_supply_importance.push_back(built.buses[i].importance);
+
+      BusVoltageStep voltage;
+      voltage.bus_index = built.buses[i].index;
+      voltage.domain = built.buses[i].dc_side ? "DC" : "AC";
+      voltage.vm_pu = std::sqrt(std::max(0.0, x[idx.vb(static_cast<int>(i), t)]));
+      sr.bus_voltages.push_back(std::move(voltage));
     }
     for (size_t b = 0; b < built.branches.size(); ++b) {
+      const auto& branch = built.branches[b];
       const bool is_closed = x[idx.bt(static_cast<int>(b), t)] > 0.5;
       closed[b] = is_closed ? 1 : 0;
       if (is_closed) {
-        if (!built.branches[b].initial_closed) sr.closed_tie_branch_ids.push_back(built.branches[b].index);
-      } else {
-        sr.open_ac_branch_ids.push_back(built.branches[b].index);
+        if (!branch.initial_closed && branch.component_type == "dc_branch") {
+          sr.closed_dc_tie_branch_ids.push_back(branch.index);
+        } else if (!branch.initial_closed && branch.component_type == "ac_branch") {
+          sr.closed_tie_branch_ids.push_back(branch.index);
+        }
+      } else if (branch.component_type == "dc_branch") {
+        sr.open_dc_branch_ids.push_back(branch.index);
+      } else if (branch.component_type == "ac_branch") {
+        sr.open_ac_branch_ids.push_back(branch.index);
       }
       sr.switch_actions += static_cast<int>(std::lround(std::max(0.0, x[idx.yon(static_cast<int>(b), t)]) + std::max(0.0, x[idx.yoff(static_cast<int>(b), t)])));
+      const double flow = x[idx.pb(static_cast<int>(b), t)];
+      const std::string domain =
+          branch.component_type == "vsc_converter" ||
+                  branch.component_type == "lcc_converter"
+              ? "AC-DC"
+              : (branch.domain == ResilienceBranchKind::DC ? "DC" : "AC");
+      sr.component_states.push_back(
+          {branch.component_type,
+           domain,
+           branch.index,
+           branch.canonical_index,
+           branch.pair_number,
+           built.buses[static_cast<size_t>(branch.from_pos)].index,
+           built.buses[static_cast<size_t>(branch.to_pos)].index,
+           built.branch_available[static_cast<size_t>(t)][b],
+           is_closed,
+           true,
+           flow});
+      BranchFlowStep flow_result;
+      flow_result.branch_index = branch.index;
+      flow_result.canonical_branch_index = branch.canonical_index;
+      flow_result.pair_number = branch.pair_number;
+      flow_result.component_type = branch.component_type;
+      flow_result.domain = domain;
+      flow_result.from_bus = built.buses[static_cast<size_t>(branch.from_pos)].index;
+      flow_result.to_bus = built.buses[static_cast<size_t>(branch.to_pos)].index;
+      flow_result.pf_mw = flow;
+      flow_result.pt_mw = -flow;
+      flow_result.loading_percent = branch.rate_mw > kEps
+                                        ? 100.0 * std::abs(flow) / branch.rate_mw
+                                        : 0.0;
+      sr.branch_flows.push_back(std::move(flow_result));
     }
     sr.active_faults = 0;
     sr.repaired_faults = 0;

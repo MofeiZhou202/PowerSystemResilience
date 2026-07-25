@@ -26,6 +26,7 @@
 #include "hacdcpf/market/market_simulation.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
 #include "hacdcpf/resilience/resilience_assessment.hpp"
+#include "hacdcpf/resilience/resilience_dynamic_certification.hpp"
 #include "hacdcpf/time_series/time_series_pf.hpp"
 #include "hacdcpf/validation/validate_system.hpp"
 #include "hacdcpf/model/typical_parameters.hpp"

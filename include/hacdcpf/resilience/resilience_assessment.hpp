@@ -84,11 +84,10 @@ struct DistributionResilienceModelStats {
   /// Number of CGLP disjunctive cuts admitted.
   int cglp_cuts_added{0};
 
-  /// Structured model-capability declaration.  Always "ac-only-lindistflow"
-  /// for the strict MIP path; DC buses / branches / VSC / DC loads are NOT
-  /// modelled in the restoration MILP and their contingencies cannot be
-  /// scheduled here.  Use this string to gate downstream consumers.
-  std::string model_scope{"ac-only-lindistflow"};
+  /// Structured model-capability declaration for the strict restoration MIP.
+  /// The hybrid path uses canonical projection for rich AC devices and an
+  /// explicit active-power network for AC, DC, and converter components.
+  std::string model_scope{"hybrid-acdc-restoration-milp"};
 
   /// Per-feature validity flags so consumers can branch on whether a given
   /// physical constraint was actually enforced.  These reflect what the
@@ -96,9 +95,24 @@ struct DistributionResilienceModelStats {
   struct ValidityFlags {
     bool dc_network_modelled{false};
     bool vsc_dispatch_modelled{false};
+    bool lcc_dispatch_modelled{false};
+    bool dcdc_dispatch_modelled{false};
+    bool energy_router_modelled{false};
+    bool transformers_modelled{false};
+    bool switches_and_breakers_modelled{false};
+    bool rich_loads_modelled{false};
+    bool ac_dc_storage_modelled{false};
+    bool aggregated_resources_modelled{false};
+    bool canonical_projection_used{false};
     bool ac_branch_flow_limits_enforced{true};
+    bool dc_branch_flow_limits_enforced{false};
+    bool converter_transfer_limits_enforced{false};
     bool lindistflow_voltage_envelope_enforced{true};
     bool radial_topology_enforced{true};
+    bool converter_losses_modelled{false};
+    bool reactive_power_modelled{false};
+    bool protection_logic_modelled{false};
+    bool transient_limits_modelled{false};
     /// True when the MIP gap reported by the solver is within the requested
     /// tolerance (`DistributionResilienceMIPOptions::mip_gap`).  This does NOT
     /// mean the solution is the global optimum; it means the best known
@@ -270,7 +284,15 @@ struct MESSStateStep {
 };
 
 struct BranchFlowStep {
+  /// Stable rich-component ID. For an authored branch this equals the
+  /// canonical branch ID; for projected devices it is the source device ID.
   int branch_index{0};
+  /// AC/DC equivalent branch ID used internally by the restoration MIP.
+  int canonical_branch_index{0};
+  /// Transformer3W equivalent pair (0=HV-MV, 1=HV-LV, 2=MV-LV).
+  int pair_number{0};
+  std::string component_type{"ac_branch"};
+  std::string domain{"AC"};
   int from_bus{0};
   int to_bus{0};
   double pf_mw{0.0};
@@ -280,8 +302,28 @@ struct BranchFlowStep {
   double loading_percent{0.0};
 };
 
+/// Generic per-step state for every network transfer element represented by
+/// the strict restoration MIP.  Stable component IDs are retained separately
+/// from the model's internal edge positions.
+struct ResilienceComponentStateStep {
+  std::string component_type;
+  std::string domain;
+  /// Stable ID in the authored rich model.
+  int component_index{0};
+  /// ID of the canonical transfer element used by the MIP.
+  int canonical_component_index{0};
+  int pair_number{0};
+  int from_bus{0};
+  int to_bus{0};
+  bool available{true};
+  bool closed{true};
+  bool active_power_valid{false};
+  double active_power_mw{0.0};
+};
+
 struct BusVoltageStep {
   int bus_index{0};
+  std::string domain{"AC"};
   double vm_pu{1.0};
   double va_deg{0.0};
 };
@@ -343,6 +385,7 @@ struct DistributionResilienceStepResult {
   double pf_residual{0.0};
   std::vector<BusVoltageStep> bus_voltages;
   std::vector<BranchFlowStep> branch_flows;
+  std::vector<ResilienceComponentStateStep> component_states;
 
   /// Bus IDs of cut-vertices (articulation points) in the current topology.
   /// Removing any of these buses would split the connected network further.

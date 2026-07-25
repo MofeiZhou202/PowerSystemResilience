@@ -11,9 +11,11 @@
 #include <Eigen/LU>
 
 #include "hacdcpf/api/hacdcpf.hpp"
+#include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/dynamics/devices/BasicDynamicDevices.hpp"
 #include "hacdcpf/model/device_control_role.hpp"
 #include "hacdcpf/model/enums.hpp"
+#include "hacdcpf/power_flow/newton_solver.hpp"
 #include "hacdcpf/projection/result_attribution.hpp"
 
 namespace hacdcpf::dynamics {
@@ -1521,9 +1523,21 @@ DynamicDCBranch make_dc_branch(const DCBranch& branch,
 }
 
 PowerFlowResult nominal_power_flow(const HybridPowerSystem& sys,
-                                   const DynamicSolverOptions& options) {
+                                   const DynamicSolverOptions& options,
+                                   bool already_canonical) {
   if (options.run_power_flow_initialization) {
-    PowerFlowResult pf = solve_power_flow(sys, options.power_flow_options);
+    PowerFlowResult pf;
+    if (already_canonical) {
+      auto data = powerflow::make_solver_data_projected(
+          HybridPowerSystem(sys), options.power_flow_options.loss_model);
+      powerflow::NewtonSolver solver;
+      const InitialState* initial = options.power_flow_options.initial_state
+                                        ? &*options.power_flow_options.initial_state
+                                        : nullptr;
+      pf = solver.solve(data, options.power_flow_options, initial);
+    } else {
+      pf = solve_power_flow(sys, options.power_flow_options);
+    }
     if (pf.converged) return pf;
     pf.diagnostics.warnings.push_back(
         "Transient initialization used model voltage setpoints because static power flow did not converge");
@@ -1666,7 +1680,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
           : sys;
   dyn.initial_power_flow = nominal_power_flow(
       options.project_to_canonical ? sys : dyn.canonical_system,
-      options);
+      options, !options.project_to_canonical);
   dyn.initialization = make_initialization_summary(options, dyn.initial_power_flow);
 
   // Multi-machine rule (PSD semantics): with >= 2 in-service synchronous

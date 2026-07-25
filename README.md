@@ -49,7 +49,7 @@ ctest --preset windows-vcpkg-release
 | 三相混合 PF / OPF | 活跃研发中，GUI 已接入 | `powerflow::solve_three_phase_hybrid_pf` 与 `opf::phase_hybrid` 已接入 `/xjtu/` 潮流/OPF 工具栏；OPF 提供 Full 与 GraphReduced（稀疏 Kron 降阶）、Ipopt/NativeIPM 双后端。GUI rich-model 适配范围见下文。 |
 | 电压稳定 | 已实现 | 连续潮流（CPF）采用增广 `[state, lambda]` 弧长预测-校正，可越过 P-V 鼻点并保留下支采样；输出 P-V 曲线与 VSI 指标。 |
 | 图建模、网络降阶、重构 | 已实现并持续回归 | 支持连通性、开关收缩、Kron/series/pendant/sparse-Kron reduction、ONR。 |
-| 可靠性与弹性分析 | 已实现并持续回归 | 包含 MC、FMEA（含 failure-mode 目录路径与信息物理 Level 1 调节）、三阶段可靠性与配电弹性分析（含 MIP 路径），以及有限恢复动作目录的 cyber/MESS 可执行性--多保真动态 oracle 主从循环；后者明确区分采样常数与全局证明。 |
+| 可靠性与弹性分析 | 已实现并持续回归 | 包含 MC、FMEA（含 failure-mode 目录路径与信息物理 Level 1 调节）、三阶段可靠性与交直流配电弹性严格 MIP，以及 MIP 拓扑/MESS 状态到场景特定 DAE 二次证书的回放桥；证书明确区分 L1/L2 数值诊断、L3 场景阈值证明与未支持的动态动作。 |
 | 三相与短路分析 | 已实现并持续回归 | 三相 NR 与 AC/DC 短路分析（IEC 60909 简化与详细路径、DC 故障水平估计）均有独立测试族。 |
 | 谐波分析 | 已实现（持续增强） | 频域穿透、Newton 非线性、三相 abc 与 AC/DC 耦合谐波潮流，频扫/谐振检测与 IEEE 519 / GB/T 14549 合规校核。 |
 | 暂态动力学 | 已实现基础框架（持续增强） | 动态建模、事件、7 类求解器（含 MassMatrixDae 同时式 DAE）、DAE 诊断、小信号与频率观测；设备模型覆盖同步机/调速器/励磁/PSS、GFM/GFL 逆变器、DER 与 IEEE 1547 保护。显式三相网络自动启用 GFL 逐相电流状态与相域限流，GFM 采用序耦合 Norton 端口和最大相电流限流；三线制默认阻断零序电流。 |
@@ -208,7 +208,7 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 | 可靠性 MC | `run_nonsequential_mc`, `run_sequential_mc` | component outage sampling + DC OPF state evaluation | EENS、LOLE、LOLF、CoV、VaR/CVaR、关键元件 |
 | FMEA 可靠性 | `run_distribution_fmea`, `run_failure_mode_fmea` | N-1/N-2 enumeration + switching/repair stage evaluation；可选信息物理 Level 1 调节（`CyberPhysicalFMEAOptions`） | contingency detail、EENS/EDNS/SAIFI/SAIDI |
 | 三阶段可靠性 | `run_three_stage_reliability` | native C++ MILP via MIPSolvers | 三阶段失负荷、SOP 动作、节点可靠性指标 |
-| 配电弹性 | `run_distribution_resilience_assessment`, `run_distribution_resilience_mip_assessment` | heuristic sequential 或 multi-period MIP LinDistFlow | 恢复曲线、MESS 状态、故障序列、弹性指标 |
+| 配电弹性 | `run_distribution_resilience_assessment`, `run_distribution_resilience_mip_assessment`, `run_certified_distribution_resilience_mip` | heuristic sequential 或 multi-period hybrid AC/DC MIP；可将拓扑/MESS 转换送入多保真 DAE oracle | 恢复曲线、元件/MESS 状态、故障序列、弹性指标、逐转换动态证书及模型边界 |
 | 短路分析 | `compute_short_circuit`, `run_short_circuit_detailed`, `dc_bus_fault_level` | Z-bus IEC 60909 简化 / 完整 IEC（c 因子、κ/ip/ib/ik/ith、变压器修正、电机与换流器贡献）；DC 为戴维南保守上限估计 | 故障电流、IEC 指标、DC 故障水平与开断 duty |
 | 谐波潮流 | `solve_harmonic_power_flow`（及 `_newton` / `_3ph` / `_3ph_hybrid` / `_hybrid_newton` 变体）, `frequency_scan`, `check_harmonic_limits` | 频域穿透（NIC 双端口桥）、Newton 非线性、三相 abc、AC/DC 耦合 | 谐波电压/电流、频扫/谐振、IEEE 519 / GB/T 14549 合规、K 因子/TDD |
 | 暂态仿真 | `run_transient_simulation`, `small_signal_analysis`, `computeFrequencyReport` | 机电暂态 DAE（7 类求解器，含 MassMatrixDae 同时式） | 轨迹、事件、COI/孤岛频率、小信号摘要 |
@@ -304,7 +304,9 @@ HybridPowerSystem
   -> LinDistFlow / connectivity MILP or heuristic restoration
   -> solve with native B&C / HiGHS / selected backend
   -> report BranchRef / switch actions / restoration metrics
-  -> optional PF validation on restored topology
+  -> replay represented topology/MESS transitions on the same canonical model
+  -> L3 scenario-specific DAE threshold certificate
+  -> unresolved/failed when an action lacks an exact dynamic event or required evidence
 ```
 
 ### 8.3 可靠性流程

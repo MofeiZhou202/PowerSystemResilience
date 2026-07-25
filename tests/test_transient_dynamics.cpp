@@ -9593,3 +9593,224 @@ TEST_CASE("Executable MESS is materialized as a dynamic target-bus device",
   CHECK(certificate.mess_materialized_in_dae);
   CHECK(certificate.mess_dynamic_device_observed);
 }
+
+TEST_CASE("Strict MIP topology steps map to DAE trip and restoration events",
+          "[resilience][certificate][mip_bridge]") {
+  const auto system = make_transient_2bus();
+  analysis::DistributionResilienceResult restoration;
+  restoration.feasible = true;
+
+  analysis::DistributionResilienceStepResult faulted;
+  faulted.step_index = 0;
+  faulted.component_states.push_back(
+      {"ac_branch", "AC", 1, 1, 0, 1, 2, false, false, true, 0.0});
+  analysis::DistributionResilienceStepResult restored = faulted;
+  restored.step_index = 1;
+  restored.component_states.front().available = true;
+  restored.component_states.front().closed = true;
+  restoration.steps = {faulted, restored};
+
+  analysis::DistributionResilienceDAECertificationOptions options;
+  options.switching_time_s = 0.05;
+  options.certify_final_state = false;
+  const auto transitions =
+      analysis::build_distribution_resilience_dae_transitions(
+          system, restoration, options);
+
+  REQUIRE(transitions.size() == 2);
+  REQUIRE(transitions[0].action.dynamic_events.size() == 1);
+  CHECK(transitions[0].action.dynamic_events.front().type ==
+        DynamicEventType::ACBranchTrip);
+  REQUIRE(transitions[1].action.dynamic_events.size() == 1);
+  CHECK(transitions[1].action.dynamic_events.front().type ==
+        DynamicEventType::ACBranchClose);
+  REQUIRE(transitions[1].initial_system.ac.branches.size() == 1);
+  CHECK_FALSE(transitions[1].initial_system.ac.branches.front().in_service);
+  CHECK(transitions[0].unsupported_transitions.empty());
+  CHECK(transitions[1].unsupported_transitions.empty());
+}
+
+TEST_CASE("Strict MIP bus service maps to domain-qualified DAE load scaling",
+          "[resilience][certificate][mip_bridge][load_service]") {
+  auto system = make_transient_2bus();
+  DCBus dc_bus;
+  dc_bus.index = 101;
+  dc_bus.base_kv = 20.0;
+  dc_bus.pd_mw = 0.4;
+  system.dc.buses.push_back(dc_bus);
+  DCLoad dc_load;
+  dc_load.index = 101;
+  dc_load.bus = 101;
+  dc_load.p_mw = 0.4;
+  system.dc.loads.push_back(dc_load);
+
+  analysis::DistributionResilienceResult restoration;
+  restoration.feasible = true;
+  analysis::DistributionResilienceStepResult first;
+  first.step_index = 0;
+  first.bus_supply_kind = {"AC", "DC"};
+  first.bus_supply_index = {2, 101};
+  first.bus_supply_demand_mw = {1.0, 0.4};
+  first.bus_supply_served_mw = {0.5, 0.1};
+  analysis::DistributionResilienceStepResult second = first;
+  second.step_index = 1;
+  second.bus_supply_served_mw = {1.0, 0.1};
+  restoration.steps = {first, second};
+
+  analysis::DistributionResilienceDAECertificationOptions options;
+  options.switching_time_s = 0.05;
+  options.certify_final_state = false;
+  const auto transitions =
+      analysis::build_distribution_resilience_dae_transitions(
+          system, restoration, options);
+
+  REQUIRE(transitions.size() == 2);
+  REQUIRE(transitions[0].action.dynamic_events.size() == 2);
+  const auto initial_ac = std::find_if(
+      transitions[0].action.dynamic_events.begin(),
+      transitions[0].action.dynamic_events.end(),
+      [](const DynamicEvent& event) {
+        return event.type == DynamicEventType::ACLoadScale;
+      });
+  const auto initial_dc = std::find_if(
+      transitions[0].action.dynamic_events.begin(),
+      transitions[0].action.dynamic_events.end(),
+      [](const DynamicEvent& event) {
+        return event.type == DynamicEventType::DCLoadScale;
+      });
+  REQUIRE(initial_ac != transitions[0].action.dynamic_events.end());
+  REQUIRE(initial_dc != transitions[0].action.dynamic_events.end());
+  CHECK(initial_ac->bus == 2);
+  CHECK(initial_ac->value == Catch::Approx(0.5));
+  CHECK(initial_dc->bus == 101);
+  CHECK(initial_dc->value == Catch::Approx(0.25));
+
+  REQUIRE(transitions[1].action.dynamic_events.size() == 1);
+  CHECK(transitions[1].action.dynamic_events.front().type ==
+        DynamicEventType::ACLoadScale);
+  CHECK(transitions[1].action.dynamic_events.front().bus == 2);
+  CHECK(transitions[1].action.dynamic_events.front().value == Catch::Approx(2.0));
+  REQUIRE_FALSE(transitions[1].initial_system.ac.loads.empty());
+  CHECK(transitions[1].initial_system.ac.loads.front().scaling ==
+        Catch::Approx(0.5));
+  REQUIRE_FALSE(transitions[1].initial_system.dc.loads.empty());
+  CHECK(transitions[1].initial_system.dc.loads.front().scaling ==
+        Catch::Approx(0.25));
+  CHECK(transitions[1].unsupported_transitions.empty());
+}
+
+TEST_CASE("Unchanged MIP bus service creates no DAE load event",
+          "[resilience][certificate][mip_bridge][load_service]") {
+  const auto system = make_transient_2bus();
+  analysis::DistributionResilienceResult restoration;
+  restoration.feasible = true;
+  analysis::DistributionResilienceStepResult first;
+  first.step_index = 0;
+  first.bus_supply_kind = {"AC"};
+  first.bus_supply_index = {2};
+  first.bus_supply_demand_mw = {1.0};
+  first.bus_supply_served_mw = {0.5};
+  auto second = first;
+  second.step_index = 1;
+  restoration.steps = {first, second};
+
+  analysis::DistributionResilienceDAECertificationOptions options;
+  options.certify_initial_transition = false;
+  options.certify_final_state = false;
+  const auto transitions =
+      analysis::build_distribution_resilience_dae_transitions(
+          system, restoration, options);
+  CHECK(transitions.empty());
+}
+
+TEST_CASE("Strict restoration MIP runs scenario-specific DAE secondary certification",
+          "[resilience][certificate][mip_dae_e2e]") {
+  const auto system = make_transient_2bus();
+  analysis::DistributionResilienceOptions restoration_options;
+  restoration_options.horizon_hours = 1;
+  restoration_options.time_step_hr = 1.0;
+  restoration_options.default_fault_count = 0;
+
+  DynamicSolverOptions dynamic_options;
+  dynamic_options.t_end_s = 0.02;
+  dynamic_options.dt_s = 0.01;
+  dynamic_options.solver_type = DynamicSolverType::TrapezoidalNewton;
+  dynamic_options.run_power_flow_initialization = true;
+
+  analysis::MultiFidelityCertificateOptions certificate_options;
+  certificate_options.max_residual_samples = 4;
+  certificate_options.max_jacobian_samples = 1;
+  certificate_options.require_converter_current_observation = false;
+
+  analysis::DistributionResilienceDAECertificationOptions bridge_options;
+  bridge_options.switching_time_s = 0.01;
+  const auto result = analysis::run_certified_distribution_resilience_mip(
+      system, restoration_options, dynamic_options, certificate_options,
+      bridge_options);
+
+  INFO(result.restoration.status);
+  INFO(result.dynamic_certification.status);
+  REQUIRE(result.restoration.feasible);
+  REQUIRE(result.dynamic_certification.attempted);
+  REQUIRE(result.dynamic_certification.transitions.size() == 1);
+  const auto& transition = result.dynamic_certification.transitions.front();
+  CHECK(transition.action.dynamic_events.empty());
+  CHECK(transition.certificate.simulation_success);
+  CHECK(transition.certificate.fidelity_level == 3);
+  CHECK(transition.certificate.proof_valid);
+  CHECK(transition.certificate.label == analysis::CertificateLabel::Safe);
+  CHECK(result.dynamic_certification.all_transitions_safe);
+  CHECK(result.dynamic_certification.proof_valid);
+}
+
+TEST_CASE("Unsupported MIP converter closure cannot receive a DAE safety proof",
+          "[resilience][certificate][mip_bridge][unsupported]") {
+  auto system = make_transient_2bus();
+  DCBus dc_bus;
+  dc_bus.index = 101;
+  dc_bus.base_kv = 20.0;
+  dc_bus.bus_type = DCBusType::DC_V;
+  system.dc.buses.push_back(dc_bus);
+
+  LCCConverter lcc;
+  lcc.index = 91;
+  lcc.ac_bus = 2;
+  lcc.dc_bus = 101;
+  lcc.in_service = true;
+  system.lcc_converters.push_back(lcc);
+
+  analysis::DistributionResilienceResult restoration;
+  restoration.feasible = true;
+  analysis::DistributionResilienceStepResult open;
+  open.step_index = 0;
+  open.component_states.push_back(
+      {"lcc_converter", "AC-DC", 91, 91, 0, 2, 101,
+       true, false, true, 0.0});
+  analysis::DistributionResilienceStepResult closed = open;
+  closed.step_index = 1;
+  closed.component_states.front().closed = true;
+  restoration.steps = {open, closed};
+
+  DynamicSolverOptions dynamic_options;
+  dynamic_options.t_end_s = 0.02;
+  dynamic_options.dt_s = 0.01;
+  analysis::DistributionResilienceDAECertificationOptions bridge_options;
+  bridge_options.certify_initial_transition = false;
+  bridge_options.certify_final_state = false;
+  bridge_options.require_supported_transitions = true;
+
+  const auto result = analysis::certify_distribution_resilience_dynamics(
+      system, restoration, dynamic_options, {}, bridge_options);
+
+  REQUIRE(result.attempted);
+  REQUIRE(result.transitions.size() == 1);
+  const auto& transition = result.transitions.front();
+  REQUIRE(transition.unsupported_transitions.size() == 1);
+  CHECK(transition.certificate.label == analysis::CertificateLabel::Unresolved);
+  CHECK_FALSE(transition.certificate.proof_valid);
+  CHECK_FALSE(result.proof_valid);
+  REQUIRE(result.feedback.size() == 1);
+  CHECK(result.feedback.front().feedback_type ==
+        "model_resolution_cut_candidate");
+  CHECK_FALSE(result.feedback.front().applied_to_restoration_mip);
+}

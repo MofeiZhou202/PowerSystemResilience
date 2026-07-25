@@ -1020,7 +1020,7 @@ TEST_CASE("Resilience: MIP solver returns feasible on zero-fault system", "[resi
 
   CHECK(r.feasible);
   CHECK(r.model == DistributionResilienceModel::MultiPeriodMIPLinDistFlow);
-  CHECK(r.model_stats.model_scope == "ac-only-lindistflow");
+  CHECK(r.model_stats.model_scope == "hybrid-acdc-restoration-milp");
   CHECK_FALSE(r.model_stats.validity.dc_network_modelled);
   CHECK_FALSE(r.model_stats.validity.vsc_dispatch_modelled);
   CHECK(r.model_stats.validity.ac_branch_flow_limits_enforced);
@@ -1028,6 +1028,349 @@ TEST_CASE("Resilience: MIP solver returns feasible on zero-fault system", "[resi
   CHECK(r.model_stats.validity.radial_topology_enforced);
   CHECK(stdout_text.empty());
   CHECK(stderr_text.empty());
+}
+
+TEST_CASE("Resilience: strict MIP models hybrid transfer components and DC faults",
+          "[resilience][mip][hybrid]") {
+  auto sys = make_hybrid_no_switch_bus_load_case();
+
+  DCBus dc3;
+  dc3.index = 3;
+  dc3.bus_type = DCBusType::DC_P;
+  dc3.in_service = true;
+  sys.dc.buses.push_back(dc3);
+
+  DCLoad dc_load;
+  dc_load.index = 10;
+  dc_load.bus = 3;
+  dc_load.p_mw = 0.3;
+  dc_load.priority = LoadPriority::Critical;
+  sys.dc.loads.push_back(dc_load);
+
+  DCDCConverter dcdc;
+  dcdc.index = 20;
+  dcdc.bus_in = 2;
+  dcdc.bus_out = 3;
+  dcdc.pmax_mw = 2.0;
+  dcdc.pmin_mw = -2.0;
+  dcdc.sn_mva = 2.0;
+  sys.dc.dcdc_converters.push_back(dcdc);
+
+  DCStorage storage;
+  storage.index = 30;
+  storage.bus = 3;
+  storage.pmax_mw = 0.2;
+  storage.p_rated_mw = 0.2;
+  storage.e_rated_mwh = 0.5;
+  storage.e_mwh = 0.4;
+  storage.soc_min = 0.1;
+  storage.eta_discharge = 0.95;
+  sys.dc.dc_storage.push_back(storage);
+
+  DistributionResilienceFault fault;
+  fault.branch_kind = ResilienceBranchKind::DC;
+  fault.branch_index = 1;
+  fault.outage_start_hr = 0.0;
+  fault.repair_duration_hr = 1.0;
+  fault.name = "dc_feeder_fault";
+
+  DistributionResilienceOptions opts;
+  opts.horizon_hours = 2;
+  opts.time_step_hr = 1.0;
+  opts.default_fault_count = 0;
+  opts.faults = {fault};
+  opts.mip.solver = DistributionResilienceMIPSolver::HiGHS;
+
+  const auto r = run_distribution_resilience_mip_assessment(sys, opts);
+  INFO(r.status);
+  INFO(r.model_stats.solver_status);
+  REQUIRE(r.feasible);
+  REQUIRE(r.steps.size() == 2);
+  REQUIRE(r.fault_sequence.size() == 1);
+  CHECK(r.fault_sequence.front().branch_kind == ResilienceBranchKind::DC);
+  CHECK(r.model_stats.model_scope == "hybrid-acdc-restoration-milp");
+  CHECK(r.model_stats.validity.canonical_projection_used);
+  CHECK(r.model_stats.validity.dc_network_modelled);
+  CHECK(r.model_stats.validity.vsc_dispatch_modelled);
+  CHECK(r.model_stats.validity.dcdc_dispatch_modelled);
+  CHECK(r.model_stats.validity.dc_branch_flow_limits_enforced);
+  CHECK(r.model_stats.validity.converter_transfer_limits_enforced);
+  CHECK(r.model_stats.validity.ac_dc_storage_modelled);
+  CHECK_FALSE(r.model_stats.validity.converter_losses_modelled);
+  CHECK_FALSE(r.model_stats.validity.reactive_power_modelled);
+  CHECK_FALSE(r.model_stats.validity.protection_logic_modelled);
+  CHECK_FALSE(r.model_stats.validity.transient_limits_modelled);
+
+  const auto has_component = [&](const std::string& type) {
+    return std::any_of(
+        r.steps.back().component_states.begin(),
+        r.steps.back().component_states.end(),
+        [&](const ResilienceComponentStateStep& state) {
+          return state.component_type == type;
+        });
+  };
+  CHECK(has_component("ac_branch"));
+  CHECK(has_component("dc_branch"));
+  CHECK(has_component("vsc_converter"));
+  CHECK(has_component("dcdc_converter"));
+  CHECK(std::all_of(r.steps.back().component_states.begin(),
+                    r.steps.back().component_states.end(),
+                    [](const ResilienceComponentStateStep& state) {
+                      return state.active_power_valid;
+                    }));
+
+  CHECK(std::find(r.steps.front().open_dc_branch_ids.begin(),
+                  r.steps.front().open_dc_branch_ids.end(),
+                  1) != r.steps.front().open_dc_branch_ids.end());
+  CHECK(std::find(r.steps.back().open_dc_branch_ids.begin(),
+                  r.steps.back().open_dc_branch_ids.end(),
+                  1) == r.steps.back().open_dc_branch_ids.end());
+  CHECK(std::find(r.steps.back().bus_supply_kind.begin(),
+                  r.steps.back().bus_supply_kind.end(),
+                  "AC") != r.steps.back().bus_supply_kind.end());
+  CHECK(std::find(r.steps.back().bus_supply_kind.begin(),
+                  r.steps.back().bus_supply_kind.end(),
+                  "DC") != r.steps.back().bus_supply_kind.end());
+  CHECK(std::any_of(r.steps.back().bus_voltages.begin(),
+                    r.steps.back().bus_voltages.end(),
+                    [](const BusVoltageStep& voltage) {
+                      return voltage.domain == "DC" && voltage.bus_index == 1;
+                    }));
+}
+
+TEST_CASE("Resilience: strict MIP rejects unmatched domain-qualified faults",
+          "[resilience][mip][fault-validation]") {
+  auto sys = make_hybrid_no_switch_bus_load_case();
+  DistributionResilienceFault fault;
+  fault.branch_kind = ResilienceBranchKind::DC;
+  fault.branch_index = 999;
+
+  DistributionResilienceOptions opts;
+  opts.horizon_hours = 1;
+  opts.time_step_hr = 1.0;
+  opts.default_fault_count = 0;
+  opts.faults = {fault};
+
+  const auto r = run_distribution_resilience_mip_assessment(sys, opts);
+  CHECK_FALSE(r.feasible);
+  CHECK(r.fault_sequence.empty());
+  CHECK(r.status.find("do not match") != std::string::npos);
+}
+
+TEST_CASE("Resilience: strict MIP canonicalizes rich distribution components",
+          "[resilience][mip][projection]") {
+  HybridPowerSystem sys;
+  for (int index = 1; index <= 4; ++index) {
+    ACBus bus;
+    bus.index = index;
+    bus.bus_type = index == 1 ? BusType::SLACK : BusType::PQ;
+    bus.base_kv = index == 1 ? 20.0 : 10.0;
+    sys.ac.buses.push_back(bus);
+  }
+
+  Transformer2W transformer;
+  transformer.index = 101;
+  transformer.hv_bus = 1;
+  transformer.lv_bus = 2;
+  transformer.sn_mva = 20.0;
+  transformer.vn_hv_kv = 20.0;
+  transformer.vn_lv_kv = 10.0;
+  transformer.vk_percent = 6.0;
+  transformer.vkr_percent = 0.6;
+  sys.ac.transformers_2w.push_back(transformer);
+
+  Transformer3W transformer_3w;
+  transformer_3w.index = 104;
+  transformer_3w.hv_bus = 1;
+  transformer_3w.mv_bus = 3;
+  transformer_3w.lv_bus = 4;
+  transformer_3w.sn_hv_mva = 15.0;
+  transformer_3w.sn_mv_mva = 10.0;
+  transformer_3w.sn_lv_mva = 5.0;
+  transformer_3w.vn_hv_kv = 20.0;
+  transformer_3w.vn_mv_kv = 10.0;
+  transformer_3w.vn_lv_kv = 10.0;
+  transformer_3w.vk_hv_mv_percent = 7.0;
+  transformer_3w.vk_hv_lv_percent = 8.0;
+  transformer_3w.vk_mv_lv_percent = 5.0;
+  transformer_3w.vkr_hv_mv_percent = 0.7;
+  transformer_3w.vkr_hv_lv_percent = 0.8;
+  transformer_3w.vkr_mv_lv_percent = 0.5;
+  sys.ac.transformers_3w.push_back(transformer_3w);
+
+  Switch sw;
+  sw.index = 102;
+  sw.bus_from = 2;
+  sw.bus_to = 3;
+  sw.closed = true;
+  sw.r_contact_ohm = 0.001;
+  sys.ac.switches.push_back(sw);
+
+  CircuitBreaker breaker;
+  breaker.index = 103;
+  breaker.bus_from = 3;
+  breaker.bus_to = 4;
+  breaker.closed = true;
+  breaker.z_ohm = 0.001;
+  sys.ac.circuit_breakers.push_back(breaker);
+
+  FlexibleLoad flexible;
+  flexible.index = 201;
+  flexible.bus = 2;
+  flexible.p_mw = 0.4;
+  flexible.priority = LoadPriority::High;
+  sys.ac.flexible_loads.push_back(flexible);
+
+  AsymmetricLoad asymmetric;
+  asymmetric.index = 202;
+  asymmetric.bus = 3;
+  asymmetric.pa_mw = 0.1;
+  asymmetric.pb_mw = 0.1;
+  asymmetric.pc_mw = 0.1;
+  asymmetric.priority = LoadPriority::Critical;
+  sys.ac.asymmetric_loads.push_back(asymmetric);
+
+  AsynchronousMotor motor;
+  motor.index = 203;
+  motor.bus = 4;
+  motor.sn_mva = 0.25;
+  motor.cos_phi = 0.9;
+  motor.efficiency = 0.95;
+  sys.ac.motors.push_back(motor);
+
+  VirtualPowerPlant vpp;
+  vpp.index = 301;
+  vpp.pcc_bus = 3;
+  vpp.p_output_mw = 0.2;
+  vpp.pmax_mw = 0.3;
+  sys.vpps.push_back(vpp);
+
+  Microgrid microgrid;
+  microgrid.index = 302;
+  microgrid.pcc_bus = 4;
+  microgrid.operating_mode = MicrogridMode::GridConnected;
+  microgrid.p_exchange_mw = 0.1;
+  microgrid.p_exchange_max_mw = 0.2;
+  microgrid.p_exchange_min_mw = -0.2;
+  sys.microgrids.push_back(microgrid);
+
+  EnergyRouter router;
+  router.index = 401;
+  router.name = "restoration_router";
+  router.num_ports = 2;
+  router.p_rated_mw = 0.5;
+  router.pmax_mw = 0.5;
+  router.pmin_mw = -0.5;
+  EnergyRouterPort port_a;
+  port_a.index = 1;
+  port_a.bus = 2;
+  port_a.side = 0;
+  port_a.port_type = ERPortType::AC;
+  port_a.pmax_mw = 0.5;
+  port_a.pmin_mw = -0.5;
+  EnergyRouterPort port_b = port_a;
+  port_b.index = 2;
+  port_b.bus = 4;
+  port_b.side = 1;
+  router.ports = {port_a, port_b};
+  sys.energy_routers.push_back(router);
+
+  DCBus dc_bus_a;
+  dc_bus_a.index = 901;
+  dc_bus_a.bus_type = DCBusType::DC_P;
+  DCBus dc_bus_b = dc_bus_a;
+  dc_bus_b.index = 902;
+  dc_bus_b.pd_mw = 0.05;
+  sys.dc.buses = {dc_bus_a, dc_bus_b};
+
+  LCCConverter lcc;
+  lcc.index = 501;
+  lcc.ac_bus = 1;
+  lcc.dc_bus = 901;
+  lcc.p_set_mw = 0.2;
+  sys.lcc_converters.push_back(lcc);
+
+  DCCircuitBreaker dc_breaker;
+  dc_breaker.index = 502;
+  dc_breaker.bus_from = 901;
+  dc_breaker.bus_to = 902;
+  dc_breaker.closed = true;
+  dc_breaker.rated_voltage_kv = 10.0;
+  dc_breaker.i_rated_ka = 0.1;
+  sys.dc.dc_circuit_breakers.push_back(dc_breaker);
+
+  DistributionResilienceOptions opts;
+  opts.horizon_hours = 1;
+  opts.time_step_hr = 1.0;
+  opts.default_fault_count = 0;
+
+  const auto r = run_distribution_resilience_mip_assessment(sys, opts);
+  INFO(r.status);
+  REQUIRE(r.feasible);
+  CHECK(r.model_stats.validity.canonical_projection_used);
+  CHECK(r.model_stats.validity.energy_router_modelled);
+  CHECK(r.model_stats.validity.transformers_modelled);
+  CHECK(r.model_stats.validity.switches_and_breakers_modelled);
+  CHECK(r.model_stats.validity.rich_loads_modelled);
+  CHECK(r.model_stats.validity.aggregated_resources_modelled);
+  CHECK(r.model_stats.validity.vsc_dispatch_modelled);
+  CHECK(r.model_stats.validity.lcc_dispatch_modelled);
+  CHECK(r.model_stats.validity.dcdc_dispatch_modelled);
+  CHECK(std::any_of(r.steps.front().component_states.begin(),
+                    r.steps.front().component_states.end(),
+                    [](const ResilienceComponentStateStep& state) {
+                      return state.component_type == "vsc_converter";
+                    }));
+  CHECK(std::any_of(r.steps.front().component_states.begin(),
+                    r.steps.front().component_states.end(),
+                    [](const ResilienceComponentStateStep& state) {
+                      return state.component_type == "dcdc_converter";
+                    }));
+  CHECK(std::none_of(r.steps.front().component_states.begin(),
+                     r.steps.front().component_states.end(),
+                     [](const ResilienceComponentStateStep& state) {
+                       return state.active_power_valid;
+                     }));
+  CHECK(std::any_of(r.steps.front().component_states.begin(),
+                    r.steps.front().component_states.end(),
+                    [](const ResilienceComponentStateStep& state) {
+                      return state.component_type == "transformer_2w" &&
+                             state.component_index == 101 &&
+                             state.canonical_component_index != 0;
+                    }));
+  CHECK(std::any_of(r.steps.front().component_states.begin(),
+                    r.steps.front().component_states.end(),
+                    [](const ResilienceComponentStateStep& state) {
+                      return state.component_type == "switch" &&
+                             state.component_index == 102;
+                    }));
+  CHECK(std::any_of(r.steps.front().component_states.begin(),
+                    r.steps.front().component_states.end(),
+                    [](const ResilienceComponentStateStep& state) {
+                      return state.component_type == "circuit_breaker" &&
+                             state.component_index == 103;
+                    }));
+  CHECK(std::any_of(r.steps.front().component_states.begin(),
+                    r.steps.front().component_states.end(),
+                    [](const ResilienceComponentStateStep& state) {
+                      return state.component_type == "transformer_3w" &&
+                             state.component_index == 104 &&
+                             state.pair_number >= 0 && state.pair_number <= 2;
+                    }));
+  CHECK(std::any_of(r.steps.front().component_states.begin(),
+                    r.steps.front().component_states.end(),
+                    [](const ResilienceComponentStateStep& state) {
+                      return state.component_type == "lcc_converter" &&
+                             state.component_index == 501 &&
+                             state.domain == "AC-DC";
+                    }));
+  CHECK(std::any_of(r.steps.front().component_states.begin(),
+                    r.steps.front().component_states.end(),
+                    [](const ResilienceComponentStateStep& state) {
+                      return state.component_type == "dc_circuit_breaker" &&
+                             state.component_index == 502 &&
+                             state.domain == "DC";
+                    }));
 }
 
 TEST_CASE("Resilience: peak shed non-negative", "[resilience]") {

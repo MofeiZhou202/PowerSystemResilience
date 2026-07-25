@@ -5,8 +5,10 @@
 The executable implementation is in
 `include/hacdcpf/resilience/certified_restoration.hpp` and
 `src/resilience/certified_restoration.cpp`. It solves a finite restoration
-action catalog. It is not the internal decomposition of the full multi-period
-AC-only LinDistFlow restoration MIP.
+action catalog. The separate bridge in
+`include/hacdcpf/resilience/resilience_dynamic_certification.hpp` consumes the
+time sequence produced by the strict multi-period hybrid AC/DC restoration MIP;
+it does not change the finite-catalog master-oracle algorithm described below.
 
 Each catalog action carries:
 
@@ -20,6 +22,32 @@ solution is used as an upper bound only when its MIP gap is zero. L3-safe
 actions update the incumbent. A no-good cut is added only for an L3 result with
 `proof_valid=true` and label `unsafe`. An unresolved or failed oracle stops the
 loop without a cut.
+
+## Strict MIP to DAE bridge
+
+`run_certified_distribution_resilience_mip` first calls the strict restoration
+MIP and then converts each represented state change into a
+`CertifiedRestorationAction`. The DAE initial system uses the same
+`ExactIdeal` canonical projection as the MIP, retains dead islands, and
+preserves explicit switch branches. Stable authored component IDs and
+canonical dynamic-event IDs remain separate.
+
+The exact event mapping currently covers AC branches, projected two- and
+three-winding transformers, AC switches and circuit breakers, DC branches,
+VSC trips, DC/DC trips, and qualified MESS materialization. VSC or DC/DC
+closure, LCC topology changes, and standalone DC-breaker actions have no exact
+dynamic event implementation. With `require_supported_transitions=true`, any
+such transition is labeled `unresolved` and cannot set `proof_valid`.
+
+The bridge replays topology-driven energization, not the full MIP operating
+point. Aggregated generator, renewable, and fixed-storage dispatch is not
+assigned back to individual dynamic devices; MIP load shedding is not converted
+to artificial load scaling; and an outage is represented as a trip/closure
+rather than an explicit fault waveform. These limits are returned in
+`DistributionResilienceDAECertificateResult::limitations`. Consequently, a
+safe L3 result is a scenario-, horizon-, threshold-, and authored-model-specific
+certificate for the represented transitions, not a global transient-stability
+proof.
 
 ## Certificate quantities
 
