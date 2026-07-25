@@ -52,7 +52,7 @@ Rich HybridPowerSystem（工程语义层）
 | `integrated_energy/` | 园区电-热-氢多能流 MILP |
 | `market/` | 日前市场 SCUC→SCED/LMP→N-1 割→结算，实时双结算，重复博弈（AC-only） |
 | `sppt/` | 语义保持投影理论的可执行验证层：MR1–MR8、证书语料、准入守卫、agent 循环 |
-| `io/` | JSON、MATPOWER、CIM（CGMES3+配电）、GridLAB-D、PSD.jl；ETAP（OpenXLSX）与 OpenDSS（dss_capi）可选 |
+| `io/` | JSON、MATPOWER、CIM（CGMES3+配电）、GridLAB-D、PSD.jl、BPA/DSP dat（含 LCC 直流卡）；ETAP（OpenXLSX）与 OpenDSS（dss_capi）可选 |
 | `api/` | 公共门面 `hacdcpf.hpp` + `solver_capabilities.hpp`（运行时后端查询） |
 | `aml/`、`engine/`、`solver/` | **header-only 转发层**到 MIPSolvers；唯一例外 `engine/solver/native/nle/newton_solver.hpp` 是本项目 NR 潮流头 |
 

@@ -4,9 +4,13 @@
 ///
 /// Usage:
 ///   bpa_dat_convert <input.dat> [output.json] [--strict] [--q-ratio R]
+///                   [--lcc] [--vsc-approx]
 ///
 /// When output.json is omitted, the input path with a .json extension is
 /// used.  The import report (skipped / coerced records) is printed to stdout.
+/// BD/LD links import as native quasi-steady LCCConverter elements by
+/// default; --vsc-approx selects the legacy VSC-approximation path
+/// (--q-ratio sets its reactive estimate), --lcc is kept for compatibility.
 
 #include <filesystem>
 #include <iostream>
@@ -21,7 +25,7 @@ namespace fs = std::filesystem;
 int main(int argc, char** argv) {
   if (argc < 2) {
     std::cerr << "Usage: bpa_dat_convert <input.dat> [output.json] "
-                 "[--strict] [--q-ratio R]\n";
+                 "[--strict] [--q-ratio R] [--lcc] [--vsc-approx]\n";
     return 2;
   }
 
@@ -32,6 +36,10 @@ int main(int argc, char** argv) {
     const std::string arg = argv[i];
     if (arg == "--strict") {
       options.mode = hacdcpf::io::ImportMode::Strict;
+    } else if (arg == "--lcc") {
+      options.lcc_model = hacdcpf::io::BpaLccModel::LccQuasiSteady;
+    } else if (arg == "--vsc-approx") {
+      options.lcc_model = hacdcpf::io::BpaLccModel::VscApprox;
     } else if (arg == "--q-ratio" && i + 1 < argc) {
       options.lcc_q_ratio = std::stod(argv[++i]);
     } else if (output.empty() && arg.rfind("--", 0) != 0) {
@@ -71,7 +79,8 @@ int main(int argc, char** argv) {
             << " shunts\n"
             << "  DC:   " << sys.dc.buses.size() << " buses, "
             << sys.dc.branches.size() << " branches, "
-            << sys.vsc_converters.size() << " converters\n"
+            << sys.vsc_converters.size() << " VSC + "
+            << sys.lcc_converters.size() << " LCC converters\n"
             << "  report: " << rep.summary.accepted << " accepted, "
             << rep.summary.coerced << " coerced, " << rep.summary.skipped
             << " skipped, " << rep.summary.rejected << " rejected\n";

@@ -58,6 +58,7 @@ hacdcpf_add_test(test_io_matpower         test_io_matpower.cpp)
 
 # I/O: PSD-BPA / DSP card-file (.dat) importer (structure + DSP-solution parity).
 hacdcpf_add_test(test_bpa_io              test_bpa_io.cpp)
+hacdcpf_add_test(test_bpa_dsp_compare     test_bpa_dsp_compare.cpp)
 
 # I/O: round-trip / conformance contract (§7).
 hacdcpf_add_test(test_io_roundtrip        test_io_roundtrip.cpp)

@@ -1,0 +1,7 @@
+BPASOLV1.0
+>>>Bus Voltage
+RECGEN  525.      1.005000     0.000000      1
+RECAC   525.      1.004962    -0.085094      2
+INVAC   525.      0.999950     0.080791      3
+INVGEN  525.      1.000000     0.000000      4
+EOD / end of bus voltage

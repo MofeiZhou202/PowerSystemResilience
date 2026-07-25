@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "hacdcpf/power_flow/converter_model.hpp"
+#include "hacdcpf/power_flow/lcc_model.hpp"
 #include "hacdcpf/power_flow/pf_injection_assembly.hpp"
 #include "hacdcpf/power_flow/pf_utils.hpp"
 
@@ -106,6 +107,19 @@ ResidualBlocks evaluate_power_flow_residual(const SolverData& data,
     if (ac_bus >= 0 && ac_bus < n) {
       const auto [pac, qac] =
           converter_ac_injection(conv, vm, va, vdc, data.base_mva, data.loss_model);
+      p_spec[ac_bus] += pac;
+      q_spec[ac_bus] += qac;
+    }
+  }
+
+  // LCC stations: quasi-steady P/Q injection at the valve-side AC bus.
+  for (const auto& lcc : data.lcc_converters) {
+    if (!lcc.in_service) {
+      continue;
+    }
+    const int ac_bus = lcc.ac_bus - 1;
+    if (ac_bus >= 0 && ac_bus < n) {
+      const auto [pac, qac] = lcc_ac_injection(data, lcc, vm, vdc);
       p_spec[ac_bus] += pac;
       q_spec[ac_bus] += qac;
     }

@@ -128,6 +128,70 @@ struct VSCConverter {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
+// LCC Converter (line-commutated, thyristor HVDC — AC-DC coupling)
+// ═══════════════════════════════════════════════════════════════════════
+// Quasi-steady model of a classic grid-commutated converter station
+// (dat card manual §4, BD/LD cards).  Physics carried per station:
+//   U_d0 = (3*sqrt(2)/pi) * n_bridges * E          (E = valve-side no-load
+//   rectifier: U_d = U_d0*cos(alpha) - (3/pi)*n_bridges*X_c*I_d - n_b*dU_v
+//   inverter:  U_d = U_d0*cos(gamma) - (3/pi)*n_bridges*X_c*I_d + n_b*dU_v
+// The commutation reactance X_c comes from the converter transformer leakage
+// (T card); per the manual the T-card R/X is on the transformer Sn base, so
+// x_comm_pu below is explicitly tied to x_comm_base_mva.
+struct LCCConverter {
+  int index{0};              // stable component id
+  std::string name;
+  int ac_bus{0};             // valve-side AC bus (ACBus.index)
+  int dc_bus{0};             // DC bus (DCBus.index)
+  bool in_service{true};
+  LCCStationRole station_role{LCCStationRole::Rectifier};
+
+  // ── Physical parameters (BD card) ──────────────────────────────────────
+  int n_bridges{1};          // series 6-pulse bridges per pole
+  double alpha_min_deg{5.0};   // minimum firing angle, rectifier limit (deg)
+  double alpha_stop_deg{140.0};// maximum firing angle / inversion limit (deg)
+  // Minimum extinction angle, inverter CEA limit (deg).  The BD card carries
+  // no gamma_min (only BM cards do); 0 = unspecified by the data source.
+  double gamma_min_deg{0.0};
+  double v_drop_v{0.0};        // forward voltage drop per bridge valve (V)
+  double rated_current_a{0.0}; // rated bridge (DC) current (A)
+  // Commutation reactance per phase, in pu on x_comm_base_mva at the
+  // valve-side voltage (T-card convention: leakage on transformer Sn base,
+  // divided by the parallel transformer count).  x_comm_ohm is the same
+  // quantity in ohms referred to the valve side, derived as
+  // x_comm_pu * vn_ac_kv^2 / x_comm_base_mva.  0 = not available (the
+  // converter transformer was not identified).
+  double x_comm_pu{0.0};
+  double x_comm_base_mva{0.0};
+  double x_comm_ohm{0.0};
+  double rated_dc_kv{0.0};     // rated DC voltage of the link (kV)
+  double vn_ac_kv{0.0};        // valve-side AC base voltage (kV)
+  // Smoothing reactor inductance (mH).  Dynamic simulations only; it does
+  // not enter the quasi-steady power-flow equations.
+  double smoothing_reactor_mh{0.0};
+
+  // ── Control mode and setpoints (LD card) ───────────────────────────────
+  // Exactly the setpoint matching control_mode is meaningful; the others are
+  // informational defaults (0 = unset).
+  LCCControlMode control_mode{LCCControlMode::ConstantPower};
+  double p_set_mw{0.0};        // scheduled DC power at the control point (MW)
+  double i_set_ka{0.0};        // DC current setpoint (kA)
+  double alpha_set_deg{0.0};   // normal firing angle, rectifier (deg)
+  double gamma_set_deg{0.0};   // normal extinction angle, inverter CEA (deg)
+  double v_dc_set_kv{0.0};     // scheduled rectifier-side DC voltage (kV)
+
+  // Converter transformer reference: ACBranch.index of the T-card branch
+  // between the primary AC bus and the valve-side bus; -1 = not identified.
+  int converter_transformer_branch{-1};
+
+  // Honest-result bookkeeping (project convention): this is a quasi-steady
+  // model — no commutation overlap iteration, no tap-changer control, no
+  // reactive-power equation yet; see model_limitations.
+  std::string model_scope;
+  std::string model_limitations;
+};
+
+// ═══════════════════════════════════════════════════════════════════════
 // DC-DC Converter
 // ═══════════════════════════════════════════════════════════════════════
 struct DCDCConverter {

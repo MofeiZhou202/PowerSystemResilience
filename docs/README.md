@@ -1,6 +1,6 @@
 # Documentation Index
 
-Updated: 2026-07-22
+Updated: 2026-07-25
 
 This directory separates implementation contracts from mathematical references.
 When documentation and runtime behavior differ, `include/`, `src/`,
@@ -40,6 +40,7 @@ When documentation and runtime behavior differ, `include/`, `src/`,
 | Digital-twin and IO architecture | [digital_twin_data_io_architecture.md](digital_twin_data_io_architecture.md) |
 | EV/traffic scenario schema | [ev_traffic_scenario_format.md](ev_traffic_scenario_format.md) |
 | Code commenting conventions | [commenting_guide.md](commenting_guide.md) |
+| BPA/DSP 元件卡片对照、LCCConverter 集成与四案例潮流对比 | [bpa_dsp_component_mapping.md](bpa_dsp_component_mapping.md) |
 
 ## Technical notebook
 

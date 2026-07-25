@@ -5,6 +5,7 @@
 
 #include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
+#include "hacdcpf/power_flow/lcc_model.hpp"
 #include "hacdcpf/power_flow/pf_utils.hpp"
 
 namespace hacdcpf::powerflow {
@@ -70,6 +71,16 @@ void assemble_dc_injections(const SolverData& data,
     if (dc_bus >= 0 && dc_bus < ndc) {
       pdc_spec[dc_bus] += converter_dc_injection(
           conv, vm, va, vdc, data.base_mva, data.loss_model);
+    }
+  }
+
+  // LCC converter DC-side injections (quasi-steady operating point evaluated
+  // at the current iterate; rectifier positive, inverter negative).
+  for (const auto& lcc : data.lcc_converters) {
+    if (!lcc.in_service) continue;
+    const int dc_bus = lcc.dc_bus - 1;
+    if (dc_bus >= 0 && dc_bus < ndc) {
+      pdc_spec[dc_bus] += lcc_dc_injection(data, lcc, vm, vdc);
     }
   }
 

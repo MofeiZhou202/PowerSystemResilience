@@ -9421,6 +9421,57 @@ int main(int argc, char** argv) {
     }
   });
 
+  svr.Post("/api/session/load_bpa_dat",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      // Two body forms: JSON {"dat_string": "..."} (UTF-8 text) or the raw
+      // .dat bytes (octet-stream; may be GBK-encoded — the importer converts
+      // bus names to UTF-8).
+      std::string dat;
+      if (!req.body.empty() && req.body.front() == '{') {
+        const auto j = json::parse(req.body);
+        dat = j.value("dat_string", "");
+      } else {
+        dat = req.body;
+      }
+      if (dat.empty()) throw std::runtime_error("Empty DAT content");
+      auto imported = hacdcpf::io::parse_bpa_dat_string(dat);
+      if (imported.report.has_errors()) {
+        std::string msg = "BPA DAT import failed:";
+        for (const auto& rec : imported.report.records)
+          if (rec.severity == hacdcpf::io::ImportSeverity::Error)
+            msg += " " + rec.message;
+        throw std::runtime_error(msg);
+      }
+      auto sys = std::move(imported.system);
+
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!sys.three_phase_ac.has_value() && g_session.preserved_three_phase_ac.has_value()) {
+        sys.three_phase_ac = g_session.preserved_three_phase_ac;
+      } else if (sys.three_phase_ac.has_value()) {
+        g_session.preserved_three_phase_ac = sys.three_phase_ac;
+      } else {
+        clear_preserved_three_phase(g_session);
+      }
+      g_session.current_system = std::move(sys);
+      g_session.current_name = g_session.current_system->name;
+      g_session.external_grid_carbon_profiles.clear();
+      clear_cached_analysis(g_session);
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      // Surface non-fatal import notes (LCC approximation, skipped cards).
+      json notes = json::array();
+      for (const auto& rec : imported.report.records)
+        if (rec.severity != hacdcpf::io::ImportSeverity::Info)
+          notes.push_back(rec.source_locator + ": " + rec.message);
+      summary["_import_notes"] = std::move(notes);
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
   svr.Post("/api/session/new_empty",
            [](const httplib::Request&, httplib::Response& res) {
     try {

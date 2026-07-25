@@ -12,6 +12,7 @@
 #include "hacdcpf/model/device_control_role.hpp"
 #include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
+#include "hacdcpf/power_flow/lcc_model.hpp"
 
 namespace hacdcpf::powerflow {
 
@@ -918,13 +919,42 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
     }
   }
 
+  // LCC stations (quasi-steady HVDC, dat manual ch.4): a station in a
+  // characteristic control mode (CEA ConstantGamma inverter / ConstantAlpha
+  // rectifier) anchors its DC island's voltage like a droop source; other
+  // modes are fixed-power devices from the island's point of view (rectifier
+  // feeds the DC network, inverter draws from it).
+  for (const auto& lcc : sys.lcc_converters) {
+    if (!lcc.in_service) continue;
+    const int island = island_for_bus(lcc.dc_bus);
+    if (island < 0) continue;
+    auto& summary = report.dc_islands[static_cast<size_t>(island)];
+    if (lcc_forms_dc_voltage(lcc)) {
+      add_voltage_source(summary,
+                         "lcc_converter",
+                         lcc.index,
+                         lcc.dc_bus,
+                         /*v_set_pu=*/0.0,
+                         /*has_v_set=*/false,
+                         /*droop=*/true,
+                         /*group_id=*/"",
+                         /*is_master=*/false,
+                         /*participation_factor=*/0.0,
+                         /*droop_gain=*/1.0);
+    } else {
+      summary.fixed_power_devices += 1;
+      summary.fixed_power_mw +=
+          (lcc.station_role == LCCStationRole::Rectifier) ? lcc.p_set_mw
+                                                          : -lcc.p_set_mw;
+    }
+  }
+
   for (const auto& dcdc : sys.dc.dcdc_converters) {
     if (!dcdc.in_service) continue;
     const int island_in = island_for_bus(dcdc.bus_in);
     const int island_out = island_for_bus(dcdc.bus_out);
     const DCDCTransferMw transfer = dcdc_scheduled_transfer_mw(dcdc);
-    if (island_in >= 0 && island_out >= 0 && island_in == island_out) {
-      add_issue(report,
+    if (island_in >= 0 && island_out >= 0 && island_in == island_out) {      add_issue(report,
                 CoordinationSeverity::Warning,
                 "DCDC-TOPO-01",
                 "dcdc_converter",

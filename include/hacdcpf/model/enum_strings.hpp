@@ -119,6 +119,43 @@ inline ACDCControlMode to_acdc_control_mode(ConverterMode m) {
 }
 
 // ── FuelType ────────────────────────────────────────────────────────────
+// ── LCCStationRole / LCCControlMode ─────────────────────────────────────
+inline std::string lcc_station_role_str(LCCStationRole r) {
+  switch (r) {
+    case LCCStationRole::Rectifier: return "RECTIFIER";
+    case LCCStationRole::Inverter: return "INVERTER";
+  }
+  return "RECTIFIER";
+}
+inline LCCStationRole lcc_station_role_from_str(const std::string& s) {
+  const std::string k = enum_parse_key(s);
+  if (k == "INVERTER" || k == "INV" || k == "I") return LCCStationRole::Inverter;
+  return LCCStationRole::Rectifier;
+}
+
+inline std::string lcc_control_mode_str(LCCControlMode m) {
+  switch (m) {
+    case LCCControlMode::ConstantPower: return "CONSTANT_POWER";
+    case LCCControlMode::ConstantCurrent: return "CONSTANT_CURRENT";
+    case LCCControlMode::ConstantAlpha: return "CONSTANT_ALPHA";
+    case LCCControlMode::ConstantGamma: return "CONSTANT_GAMMA";
+  }
+  return "CONSTANT_POWER";
+}
+inline LCCControlMode lcc_control_mode_from_str(const std::string& s) {
+  const std::string k = enum_parse_key(s);
+  if (k == "CONSTANT_CURRENT" || k == "CC" || k == "CURRENT") {
+    return LCCControlMode::ConstantCurrent;
+  }
+  if (k == "CONSTANT_ALPHA" || k == "ALPHA" || k == "CIA") {
+    return LCCControlMode::ConstantAlpha;
+  }
+  if (k == "CONSTANT_GAMMA" || k == "GAMMA" || k == "CEA") {
+    return LCCControlMode::ConstantGamma;
+  }
+  return LCCControlMode::ConstantPower;
+}
+
 inline std::string fuel_type_str(FuelType f) {
   switch (f) {
     case FuelType::Coal: return "Coal";

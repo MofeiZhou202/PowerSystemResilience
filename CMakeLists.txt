@@ -397,6 +397,7 @@ set(HACDCPF_SOURCES
   src/power_flow/island_detector.cpp
   src/power_flow/jacobian_builder.cpp
   src/power_flow/jacobian_pattern.cpp
+  src/power_flow/lcc_model.cpp
   src/power_flow/lm_trust_region.cpp
   src/power_flow/newton_krylov.cpp
   src/power_flow/nonlinear_scaling.cpp
@@ -738,6 +739,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/matpower_pf_compare.cpp")
   add_executable(matpower_pf_compare tools/matpower_pf_compare.cpp)
   target_link_libraries(matpower_pf_compare PRIVATE hacdcpf::hacdcpf)
   hacdcpf_copy_opendss_runtime(matpower_pf_compare)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/bpa_dat_convert.cpp")
+  add_executable(bpa_dat_convert tools/bpa_dat_convert.cpp)
+  target_link_libraries(bpa_dat_convert PRIVATE hacdcpf::hacdcpf)
+  hacdcpf_copy_opendss_runtime(bpa_dat_convert)
 endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/gridlabd_validation_matrix.cpp")

@@ -48,6 +48,27 @@ enum class LossModelType {
   CurrentBased,
 };
 
+// LCC (line-commutated converter) station role in a two-terminal HVDC link.
+// For BPA/DSP imports the role follows the LD card terminal order: the first
+// terminal is the rectifier, the second the inverter.
+enum class LCCStationRole {
+  Rectifier = 0,
+  Inverter = 1,
+};
+
+// LCC quasi-steady control mode (BPA/DSP convention, dat card manual §4):
+//   ConstantPower  — rectifier regulates the DC power at the control point
+//                    (firing angle alpha is the free variable).
+//   ConstantCurrent— constant DC current (current regulator).
+//   ConstantAlpha  — constant firing angle (rectifier backup mode).
+//   ConstantGamma  — constant extinction angle (CEA, the normal inverter mode).
+enum class LCCControlMode {
+  ConstantPower = 0,
+  ConstantCurrent = 1,
+  ConstantAlpha = 2,
+  ConstantGamma = 3,
+};
+
 // DC-DC converter control mode
 enum class DCDCControlMode {
   Voltage = 0,

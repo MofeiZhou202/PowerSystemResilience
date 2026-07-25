@@ -7,6 +7,7 @@
 
 #include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
+#include "hacdcpf/power_flow/lcc_model.hpp"
 #include "hacdcpf/power_flow/ncp_functions.hpp"
 #include "hacdcpf/power_flow/pf_utils.hpp"
 
@@ -176,6 +177,26 @@ void build_power_spec(const SolverData& data,
       }
     }
   }
+
+  // LCC stations (quasi-steady, dat manual ch.4): P/Q injection at the
+  // valve-side AC bus and the DC-terminal power at the DC bus, both evaluated
+  // from the current iterate (rectifier absorbs AC power / feeds the DC
+  // network; the inverter does the reverse).
+  for (const auto& lcc : data.lcc_converters) {
+    if (!lcc.in_service) {
+      continue;
+    }
+    const int ac_bus = lcc.ac_bus - 1;
+    const int dc_bus = lcc.dc_bus - 1;
+    if (ac_bus >= 0 && ac_bus < n) {
+      const auto [pac, qac] = lcc_ac_injection(data, lcc, vm, vdc);
+      p_spec[ac_bus] += pac;
+      q_spec[ac_bus] += qac;
+    }
+    if (dc_bus >= 0 && dc_bus < ndc) {
+      pdc_spec[dc_bus] += lcc_dc_injection(data, lcc, vm, vdc);
+    }
+  }
 }
 
 double evaluate_residual_impl(const SolverData& data,
@@ -335,6 +356,35 @@ double evaluate_residual_impl(const SolverData& data,
       if (dc_jac.dpdc_dvdc != 0.0) {
         values[nz] -= dc_jac.dpdc_dvdc;
       }
+    }
+    // LCC stations: the CEA (ConstantGamma) inverter's DC injection depends on
+    // its terminal voltage through the external characteristic, which is what
+    // anchors the DC island voltage — the derivative must be exact for the DC
+    // Newton equations to converge.
+    for (const auto& lcc : data.lcc_converters) {
+      if (!lcc.in_service) continue;
+      const int dc_bus = lcc.dc_bus - 1;
+      if (dc_bus < 0 || dc_bus >= ctx.ndc) continue;
+      const int nz = pattern.dc_vdc_diag_nz[static_cast<size_t>(dc_bus)];
+      if (nz < 0) continue;
+      const double dpdc_dvdc = lcc_dc_jacobian_vdc(data, lcc, vm, vdc);
+      if (dpdc_dvdc != 0.0) {
+        values[nz] -= dpdc_dvdc;
+      }
+    }
+    // Always-on: LCC AC↔DC coupling blocks.  The station's AC P/Q injections
+    // depend on the valve-side voltage (through U_d0) and the DC terminal
+    // voltage; omitting these derivatives stalls the Newton iteration on
+    // stiff CEA characteristics (measured on the cigre two-island case).
+    for (const auto& le : pattern.lcc_entries) {
+      const auto& lcc = data.lcc_converters[static_cast<size_t>(le.lcc_index)];
+      if (!lcc.in_service) continue;
+      const auto jac = lcc_ac_dc_jacobian(data, lcc, vm, vdc);
+      if (le.p_vm_nz >= 0) values[le.p_vm_nz] -= jac.dpac_dvm;
+      if (le.q_vm_nz >= 0) values[le.q_vm_nz] -= jac.dqac_dvm;
+      if (le.p_vdc_nz >= 0) values[le.p_vdc_nz] -= jac.dpac_dvdc;
+      if (le.q_vdc_nz >= 0) values[le.q_vdc_nz] -= jac.dqac_dvdc;
+      if (le.dc_vm_nz >= 0) values[le.dc_vm_nz] -= jac.dpdc_dvm;
     }
     for (const auto& de : pattern.dcdc_coupling_entries) {
       const auto& dcdc = data.dcdc_converters[static_cast<size_t>(de.dcdc_index)];

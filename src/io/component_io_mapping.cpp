@@ -968,6 +968,20 @@ const std::vector<ComponentParameterRule>& parameter_registry() {
                              Sev::Warning);
     add_common_reliability_rules(rules, "VSCConverter", "vsc_converters");
 
+    rules.push_back(bounded_rule("LCCConverter", "lcc_converters",
+                                 "alpha_min_deg", C::Static, 0.0, 90.0,
+                                 S::HACDCPF, "LCC firing-angle limit", "deg"));
+    rules.push_back(bounded_rule("LCCConverter", "lcc_converters",
+                                 "alpha_stop_deg", C::Static, 90.0, 180.0,
+                                 S::HACDCPF, "LCC inversion limit", "deg"));
+    rules.push_back(bounded_rule("LCCConverter", "lcc_converters",
+                                 "gamma_min_deg", C::Static, 0.0, 90.0,
+                                 S::HACDCPF, "LCC extinction-angle limit",
+                                 "deg"));
+    rules.push_back(nonnegative_rule("LCCConverter", "lcc_converters",
+                                     "x_comm_pu", C::Static, S::HACDCPF,
+                                     "LCC commutation reactance", "pu"));
+
     rules.push_back(bounded_rule("DCDCConverter", "dc.dcdc_converters", "eta",
                                  C::Static, 0.0, 1.0, S::HACDCPF,
                                  "DC/DC converter efficiency", "pu", false,
@@ -2755,6 +2769,11 @@ const std::vector<ComponentIOMapping>& registry() {
           "VSCConverter", "scheduled AC boundary injection", "",
           "Native solver keeps AC/DC coupling; GridLAB-D can optionally see the "
           "AC boundary injection only."),
+      row("LCCConverter", "lcc_converters", D::Hybrid, P::Exact,
+          P::Unsupported, P::Unsupported, P::Unsupported, V::NativeSolver,
+          "LCCConverter (model only)", "", "",
+          "Quasi-steady LCC HVDC station (BD/LD card model); native solvers do "
+          "not consume it yet — solver coupling is the next milestone."),
       row("EnergyRouter", "energy_routers", D::Hybrid, P::Exact, P::Projected,
           P::BoundaryInjection, P::Unsupported, V::NativeSolver,
           "VSCConverter/DCDCConverter expansion", "boundary injection", "",
@@ -2858,6 +2877,7 @@ std::size_t count_for_path(const HybridPowerSystem& sys,
     return sys.dc.dc_circuit_breakers.size();
   }
   if (path == "vsc_converters") return sys.vsc_converters.size();
+  if (path == "lcc_converters") return sys.lcc_converters.size();
   if (path == "energy_routers") return sys.energy_routers.size();
   if (path == "mobile_storage") return sys.mobile_storage.size();
   if (path == "vpps") return sys.vpps.size();
@@ -3527,6 +3547,22 @@ ComponentParameterAuditReport analyze_component_parameter_quality(
                      check_registered(report, id, "t_scheduled_hr",
                                       c.t_scheduled_hr);
                      audit_dynamic_profile(report, id, c.dynamic_model);
+                   });
+
+  audit_collection(report, sys.lcc_converters, "LCCConverter",
+                   "lcc_converters",
+                   [&](const ComponentIdentity& id, const LCCConverter& c) {
+                     check_registered(report, id, "alpha_min_deg",
+                                      c.alpha_min_deg);
+                     check_registered(report, id, "alpha_stop_deg",
+                                      c.alpha_stop_deg);
+                     check_registered(report, id, "gamma_min_deg",
+                                      c.gamma_min_deg);
+                     check_registered(report, id, "x_comm_pu", c.x_comm_pu);
+                     check_order(report, id, "alpha_min_deg <= alpha_stop_deg",
+                                 c.alpha_min_deg, c.alpha_stop_deg, C::Static,
+                                 S::HACDCPF, "LCC firing-angle window", "deg",
+                                 Sev::Warning);
                    });
 
   audit_collection(report, sys.energy_routers, "EnergyRouter",

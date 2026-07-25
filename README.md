@@ -131,7 +131,7 @@ Rich HybridPowerSystem
 | 充电设施 | `ChargingStation`, `Charger` | 站级或桩级 EV 负荷 | 桩级可投影到站级；作为恒功率负荷进入组装 |
 | DC 网络 | `DCBus`, `DCBranch`, `DCLoad` | DC 母线（`DC_P` 有功母线 / `DC_V` 电压参考母线 / `DC_ISOLATED` 停电隔离母线）、线路、负荷 | 进入 DC 电导矩阵和混合潮流/优化模型；`DC_ISOLATED` 母线在图/孤岛分析中按停电处理，不作为电压参考，且在潮流方程组中以固定电压剔除，避免雅可比奇异 |
 | DC 电源/设备 | `StaticGeneratorDC`, `PVArrayDC`, `DCDCConverter`, `DCCircuitBreaker`, DC storage | DC 电源、PV 阵列、DC/DC、DC 开断设备 | 投影到 DC 注入、DC 边或耦合设备；DC/DC 保留拓扑和占空比可行性字段 |
-| AC/DC 耦合 | `VSCConverter`, `EnergyRouter` | 换流器、能量路由器、多端口耦合 | VSC 保留为带控制角色的耦合元件；EnergyRouter 展开为内部 DC 母线、VSC 和 DC/DC |
+| AC/DC 耦合 | `VSCConverter`, `LCCConverter`, `EnergyRouter` | VSC/LCC 换流器、能量路由器、多端口耦合 | VSC 保留为带控制角色的耦合元件；LCC 为准稳态外特性模型（α/γ 角、换相电抗、内生无功），用于 BPA/DSP 的 BD/LD 直流卡；EnergyRouter 展开为内部 DC 母线、VSC 和 DC/DC |
 | 聚合资源 | `VirtualPowerPlant`, `Microgrid`, `MobileStorage` | VPP、微电网、移动储能 | VPP/Microgrid 可转换为 PCC 注入；移动储能按位置和状态注入 |
 | 三相系统 | `ThreePhaseACSystem` | abc 三相馈线和设备 | 可投影或单独由三相 NR 分析处理 |
 

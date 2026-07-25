@@ -24,6 +24,7 @@ struct SolverData {
   std::vector<DCBus> dc_buses;
   std::vector<DCBranch> dc_branches;
   std::vector<VSCConverter> converters;
+  std::vector<LCCConverter> lcc_converters;
   std::vector<DCDCConverter> dcdc_converters;
   std::vector<EnergyRouter> energy_routers;
   std::vector<Generator> generators;

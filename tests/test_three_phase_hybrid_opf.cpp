@@ -1,4 +1,8 @@
 #include <cmath>
+// MinGW GCC in strict -std=c++20 mode does not define M_PI via <cmath>.
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <complex>
 #include <limits>
 

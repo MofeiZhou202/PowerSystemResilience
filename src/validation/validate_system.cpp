@@ -528,6 +528,41 @@ ValidationReport validate(const HybridPowerSystem& sys) {
                   "loss_percent must be in [0,100]");
     }
 
+    // ── 11b. LCC converter bus references and quasi-steady limits ────────────
+    for (const auto& c : sys.lcc_converters) {
+        if (ac_ids.find(c.ac_bus) == ac_ids.end())
+            r.add(S::Error, "LCCConverter", std::to_string(c.index),
+                  "ac_bus", "ac_bus " + std::to_string(c.ac_bus) + " not found");
+        if (dc_ids.find(c.dc_bus) == dc_ids.end())
+            r.add(S::Error, "LCCConverter", std::to_string(c.index),
+                  "dc_bus", "dc_bus " + std::to_string(c.dc_bus) + " not found");
+        if (c.converter_transformer_branch >= 0 &&
+            ac_branch_ids.find(c.converter_transformer_branch) == ac_branch_ids.end())
+            r.add(S::Error, "LCCConverter", std::to_string(c.index),
+                  "converter_transformer_branch",
+                  "converter_transformer_branch " +
+                  std::to_string(c.converter_transformer_branch) + " not found");
+        if (c.n_bridges < 1)
+            r.add(S::Error, "LCCConverter", std::to_string(c.index),
+                  "n_bridges", "n_bridges must be >= 1");
+        if (c.alpha_min_deg < 0.0 || c.alpha_min_deg > 90.0)
+            r.add(S::Warning, "LCCConverter", std::to_string(c.index),
+                  "alpha_min_deg",
+                  "alpha_min_deg outside the typical [0,90] deg range");
+        require_order("LCCConverter", c.index, "alpha_min_deg", "alpha_stop_deg",
+                      c.alpha_min_deg, c.alpha_stop_deg);
+        if (c.gamma_min_deg < 0.0 || c.gamma_min_deg > 90.0)
+            r.add(S::Warning, "LCCConverter", std::to_string(c.index),
+                  "gamma_min_deg",
+                  "gamma_min_deg outside the typical [0,90] deg range");
+        require_nonnegative("LCCConverter", c.index, "v_drop_v", c.v_drop_v);
+        require_nonnegative("LCCConverter", c.index, "rated_current_a",
+                            c.rated_current_a);
+        require_nonnegative("LCCConverter", c.index, "x_comm_pu", c.x_comm_pu);
+        require_nonnegative("LCCConverter", c.index, "rated_dc_kv",
+                            c.rated_dc_kv);
+    }
+
     // ── 12. base_mva sub-system consistency ───────────────────────────────────
     if (!sys.ac.buses.empty() && std::fabs(sys.ac.base_mva - sys.base_mva) > 0.1)
         r.add(S::Warning, "ACSystem", "", "base_mva",

@@ -168,6 +168,7 @@ struct HybridPowerSystem {
   ACSystem ac;
   DCSystem dc;
   std::vector<VSCConverter> vsc_converters;
+  std::vector<LCCConverter> lcc_converters;
   std::vector<EnergyRouter> energy_routers;
   std::vector<MobileStorage> mobile_storage;
   std::vector<VirtualPowerPlant> vpps;
