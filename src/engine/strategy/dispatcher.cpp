@@ -54,6 +54,11 @@ SolveResult solve_with_adapter(const SolverAdapterPtr& adapter,
       return p ? adapter->solve_minlp(*p)
                : unsupported("Problem payload mismatch for MINLP dispatch");
     }
+    case ProblemClass::CONIC: {
+      const auto* p = std::get_if<ConicModel>(&problem);
+      return p ? adapter->solve_conic(*p)
+               : unsupported("Problem payload mismatch for CONIC dispatch");
+    }
   }
   return unsupported("Unsupported problem class dispatch");
 }
@@ -78,6 +83,8 @@ std::vector<std::string> default_priority_for(ProblemClass cls) {
       return {"StrictHiGHS", "HiGHS", "Gurobi", "NativeBranchAndCut"};
     case ProblemClass::MINLP:
       return {"Scip", "NativeBranchAndCut"};
+    case ProblemClass::CONIC:
+      return {"NativeConicIPM"};
   }
   return {};
 }

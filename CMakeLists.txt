@@ -85,6 +85,7 @@ add_library(mipsolvers STATIC
   src/engine/solver/solver_adapter.cpp
   src/engine/solver/adapter_registry.cpp
   src/engine/solver/native/native_adapters.cpp
+  src/engine/solver/native/conic_ipm_adapter.cpp
   src/engine/solver/external/adapters.cpp
   src/engine/solver/native/lp/pdlp_solver.cpp
   src/engine/solver/native/nle/nle_solver.cpp
@@ -96,6 +97,8 @@ add_library(mipsolvers STATIC
   src/engine/kernel/lp_kernel/dual_simplex_api.cpp
   src/engine/kernel/kkt/kkt_system.cpp
   src/engine/kernel/ipm/lcqp_solver.cpp
+  src/engine/kernel/ipm/cones.cpp
+  src/engine/kernel/ipm/conic_ipm_solver.cpp
   src/engine/kernel/ipm/ipm_lp_solver.cpp
   src/engine/kernel/ipm/ipm_solver.cpp
   src/engine/kernel/ipm/ipm_filter.cpp
@@ -634,6 +637,13 @@ if(MIPSOLVERS_BUILD_TESTS)
   mipsolvers_add_test(test_lp_solver           TIER unit)
   mipsolvers_add_test(test_milp_solver         TIER unit)
   mipsolvers_add_test(test_ipm_solver          TIER unit)
+  mipsolvers_add_test(test_conic_ipm           TIER unit)
+  mipsolvers_add_test(test_aml_conic           TIER unit)
+  # The OpenMP guard macro is PRIVATE to the library; expose it to the conic
+  # test so its OpenMP-only sections (parallel determinism) are compiled.
+  if(TARGET test_conic_ipm AND OpenMP_CXX_FOUND)
+    target_compile_definitions(test_conic_ipm PRIVATE MIPSOLVERS_USE_OPENMP=1)
+  endif()
   mipsolvers_add_test(test_dual_simplex        TIER unit)
   mipsolvers_add_test(test_branch_and_cut      TIER integration)
   mipsolvers_add_test(test_problem_validation  TIER unit)
@@ -651,6 +661,31 @@ if(MIPSOLVERS_BUILD_TESTS)
     target_link_libraries(opf_scale_probe PRIVATE mipsolvers)
     target_include_directories(opf_scale_probe PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  endif()
+
+  # Conic IPM benchmark driver: synthetic SOCP/SDP suites with planted
+  # self-dual solutions; prints per-case timing and a thread-scaling table,
+  # optionally writes JSON.  Doubles as a smoke test (exits non-zero unless
+  # every run reports status "optimal").
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/conic_benchmark.cpp")
+    add_executable(conic_benchmark benchmark/conic_benchmark.cpp)
+    set_target_properties(conic_benchmark PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    target_link_libraries(conic_benchmark PRIVATE mipsolvers)
+    target_include_directories(conic_benchmark PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(NOT MSVC)
+      target_compile_options(conic_benchmark PRIVATE -Wall -Wextra -Wpedantic
+        $<$<CONFIG:Release>:-O3 -DNDEBUG>
+        $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
+    endif()
+    # The OpenMP guard macro is PRIVATE to the library; expose it to the
+    # benchmark (mirrors test_conic_ipm above) so it can pick an
+    # OpenMP-aware default --threads-list.  Thread control itself goes
+    # through ConicIPMOptions::num_threads.
+    if(OpenMP_CXX_FOUND)
+      target_compile_definitions(conic_benchmark PRIVATE MIPSOLVERS_USE_OPENMP=1)
+    endif()
   endif()
 
   # SCUC module test requires scuc.cpp (not in base mipsolvers lib)

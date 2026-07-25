@@ -20,5 +20,6 @@ ValidationReport validate(const QPModel& model);
 ValidationReport validate(const NLPModel& model);
 ValidationReport validate(const MIPModel& model);
 ValidationReport validate(const MINLPModel& model);
+ValidationReport validate(const ConicModel& model);
 
 }  // namespace mipsolvers::engine

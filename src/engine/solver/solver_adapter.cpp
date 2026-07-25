@@ -19,6 +19,8 @@ const char* class_name(ProblemClass cls) {
       return "MILP";
     case ProblemClass::MINLP:
       return "MINLP";
+    case ProblemClass::CONIC:
+      return "CONIC";
   }
   return "Unknown";
 }
@@ -60,6 +62,10 @@ SolveResult SolverAdapter::solve_milp(const MIPModel&) const {
 
 SolveResult SolverAdapter::solve_minlp(const MINLPModel&) const {
   return unsupported_result(ProblemClass::MINLP);
+}
+
+SolveResult SolverAdapter::solve_conic(const ConicModel&) const {
+  return unsupported_result(ProblemClass::CONIC);
 }
 
 }  // namespace mipsolvers::engine

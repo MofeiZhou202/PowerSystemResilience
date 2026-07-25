@@ -172,6 +172,29 @@ class Model {
     return arr;
   }
 
+  // ── Conic constraint addition (SOCP / SDP) ──────────────────────────────
+
+  /// Second-order cone constraint: ||xs||_2 <= t, with t and xs affine in the
+  /// model variables. t >= 0 is implied by the cone.
+  ConstraintRef add_soc_constraint(const LinearExpr& t,
+                                    const std::vector<LinearExpr>& xs,
+                                    const std::string& name = "");
+
+  /// Rotated second-order cone: ||xs||_2^2 <= 2*a*b, a,b >= 0 implied.
+  /// Reformulated into a standard SOC at compile time.
+  ConstraintRef add_rotated_soc_constraint(const LinearExpr& a,
+                                            const LinearExpr& b,
+                                            const std::vector<LinearExpr>& xs,
+                                            const std::string& name = "");
+
+  /// Semidefinite constraint: the symmetric n-by-n matrix F(x) with lower-
+  /// triangular entries F(i,j) = entries[i][j] (i >= j) is affine in the model
+  /// variables; constraint is F(x) ⪰ 0. entries[i] must have exactly i+1
+  /// elements.
+  ConstraintRef add_psd_constraint(
+      int order, const std::vector<std::vector<LinearExpr>>& entries,
+      const std::string& name = "");
+
   // ── Compile / solve ────────────────────────────────────────────────────
 
   struct CompileOptions {

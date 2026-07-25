@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mipsolvers/engine/branch_and_cut.hpp"
+#include "mipsolvers/engine/kernel/ipm/conic_ipm_solver.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
 #include "mipsolvers/engine/solver/solver_adapter.hpp"
 
@@ -53,6 +54,19 @@ class NativeNLPAdapter final : public SolverAdapter {
 
  private:
   NativeNLPOptions opt_;
+};
+
+/// Native conic (LP/SOCP/SDP) interior-point solver adapter, cvxopt form.
+class NativeConicIPMAdapter final : public SolverAdapter {
+ public:
+  explicit NativeConicIPMAdapter(ConicIPMOptions opt = {});
+
+  std::string name() const override;
+  bool supports(ProblemClass cls) const override;
+  SolveResult solve_conic(const ConicModel& prob) const override;
+
+ private:
+  ConicIPMOptions opt_;
 };
 
 BCOptions make_strict_highs_production_options(BCOptions opt = {});

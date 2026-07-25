@@ -41,6 +41,14 @@ class CholmodLDLT {
   /// Solve A x = b with the current factorization into `out` (length m).
   bool solve(const double* rhs, double* out);
 
+  /// Select CHOLMOD's simplicial LDLᵀ mode instead of the default
+  /// (auto/supernodal) mode.  Simplicial LDLᵀ factorizes quasidefinite
+  /// systems (e.g. IPM saddle-point matrices [B+δI, A'; A, -δI], which are
+  /// indefinite but admit an unpivoted LDLᵀ), while the supernodal path is
+  /// strictly SPD.  Opt-in so existing SPD callers keep the faster
+  /// supernodal path; call before analyze().
+  void set_simplicial(bool simplicial);
+
   bool valid() const;
   int64_t dim() const;
 

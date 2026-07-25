@@ -86,6 +86,7 @@ All problem types live in `mipsolvers::engine` (include `problem_types.hpp`).
 | `NLP` | Nonlinear program |
 | `MILP` | Mixed-integer linear program |
 | `MINLP` | Mixed-integer nonlinear program |
+| `CONIC` | Conic program (LP/SOCP/SDP, cvxopt standard form) |
 
 ### `VarType` enum
 
@@ -233,6 +234,28 @@ and fixing heuristics.
 | `pmin`, `pmax`, `ramp` | `vector<double>` | Power limits and ramp rate |
 | `ig_cols`, `su_cols`, `sd_cols`, `pg_cols` | `vector<int>` | Column maps into the reduced model (`-1` = eliminated) |
 
+### `ConicModel`
+
+$$\min_{x} \; c^\top x \quad \text{s.t.} \quad Gx + s = h, \; Ax = b, \; s \in \mathcal{K}$$
+
+```cpp
+struct ConicModel {
+  Sense   sense{Sense::Minimize};
+  Eigen::VectorXd             c;       // objective coefficients (n)
+  Eigen::SparseMatrix<double> G;       // conic constraint matrix (dims.total() × n)
+  Eigen::VectorXd             h;       // conic RHS (dims.total())
+  Eigen::SparseMatrix<double> A;       // equality constraint matrix (m_eq × n)
+  Eigen::VectorXd             b;       // equality RHS (m_eq)
+  ConeDims                    dims;    // cone dims {l, q, s}; K = R^l_+ × ∏ Q^{q_i} × ∏ S^{s_i}
+  std::vector<VariableMeta>   vars;
+};
+```
+
+Rows of `G`/`h` are ordered by cone block: `[l | q blocks | svec-packed s blocks]`.
+SDP blocks use the svec packing (column-major lower triangle, off-diagonals
+scaled by $\sqrt{2}$, so $\operatorname{tr}(SZ) = \mathrm{svec}(S)^\top \mathrm{svec}(Z)$).
+See `docs/conic_sdp.md` for the solver design and derivations.
+
 ### `MINLPModel`
 
 ```cpp
@@ -279,6 +302,7 @@ public:
   api::Result solve_nlp  (const NLPModel&      p, const SolveOptions& o = {}) const;
   api::Result solve_milp (const MIPModel&      p, const SolveOptions& o = {}) const;
   api::Result solve_minlp(const MINLPModel&    p, const SolveOptions& o = {}) const;
+  api::Result solve_conic(const ConicModel&    p, const SolveOptions& o = {}) const;
 };
 
 } // namespace mipsolvers::engine
@@ -295,6 +319,7 @@ public:
 | `NativeLCQPAdapter` | QP |
 | `NativeIPMAdapter` | NLP |
 | `NativeNLPAdapter` | NLP |
+| `NativeConicIPM` | CONIC |
 | `StrictHiGHS` | MILP |
 | `NativeBranchAndCut` | MILP, MINLP |
 | `Gurobi` *(if available)* | LP, QP, MILP |
@@ -339,6 +364,7 @@ struct SolveOptions {
 | `"NativeNewton"` | Newton NLE solver |
 | `"NativeIPMAdapter"` | Interior-point NLP |
 | `"NativeNLPAdapter"` | SQP-style NLP solver |
+| `"NativeConicIPM"` | Conic (LP/SOCP/SDP) interior-point solver |
 
 Example — force HiGHS for LP but Gurobi for MILP:
 
@@ -426,6 +452,7 @@ public:
   virtual SolveResult solve_nlp  (const NLPModel& prob) const;
   virtual SolveResult solve_milp (const MIPModel& prob) const;
   virtual SolveResult solve_minlp(const MINLPModel& prob) const;
+  virtual SolveResult solve_conic(const ConicModel& prob) const;
 };
 ```
 
@@ -495,6 +522,12 @@ LP-specific adapters:
 | `NativePDLPAdapter` | `"NativePDLPAdapter"` | First-order (PDLP) for large sparse LP |
 | `NativeLCQPAdapter` | `"NativeLCQPAdapter"` | Linearly-constrained QP |
 | `NativeIPMAdapter` | `"NativeIPMAdapter"` | Interior-point NLP solver |
+
+Conic adapters:
+
+| Adapter class | `name()` | Notes |
+|---|---|---|
+| `NativeConicIPMAdapter` | `"NativeConicIPM"` | Mehrotra predictor-corrector conic IPM (LP/SOCP/SDP); returns duals (`constraint_duals = [z | y]`), see `docs/conic_sdp.md` |
 
 ---
 

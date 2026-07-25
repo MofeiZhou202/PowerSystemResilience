@@ -162,6 +162,16 @@ bool CholmodLDLT::valid() const {
 #endif
 }
 
+void CholmodLDLT::set_simplicial(bool simplicial) {
+#ifdef MIPSOLVERS_HAVE_CHOLMOD
+  if (impl_->started) {
+    impl_->c.supernodal = simplicial ? CHOLMOD_SIMPLICIAL : CHOLMOD_AUTO;
+  }
+#else
+  (void)simplicial;
+#endif
+}
+
 int64_t CholmodLDLT::dim() const {
 #ifdef MIPSOLVERS_HAVE_CHOLMOD
   return impl_->m;

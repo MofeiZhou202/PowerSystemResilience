@@ -72,6 +72,17 @@ void normalize_qp_matrices(QPModel& qp) {
   }
 }
 
+void normalize_conic_matrices(ConicModel& cm) {
+  const int n = static_cast<int>(cm.c.size());
+  if (n <= 0) return;
+  if (cm.G.rows() == 0 && cm.G.cols() != n) {
+    cm.G.resize(0, n);
+  }
+  if (cm.A.rows() == 0 && cm.A.cols() != n) {
+    cm.A.resize(0, n);
+  }
+}
+
 api::ProblemVariant normalize_problem(api::ProblemVariant problem) {
   std::visit(
       [](auto& p) {
@@ -82,6 +93,8 @@ api::ProblemVariant normalize_problem(api::ProblemVariant problem) {
           normalize_qp_matrices(p);
         } else if constexpr (std::is_same_v<T, MIPModel>) {
           normalize_lp_matrices(p.linear_part);
+        } else if constexpr (std::is_same_v<T, ConicModel>) {
+          normalize_conic_matrices(p);
         }
       },
       problem);
@@ -151,6 +164,7 @@ std::size_t SolverEngine::register_default_adapters() {
   register_if_missing(std::make_shared<NativeLCQPAdapter>());
   register_if_missing(std::make_shared<NativeIPMAdapter>());
   register_if_missing(std::make_shared<NativeNLPAdapter>());
+  register_if_missing(std::make_shared<NativeConicIPMAdapter>());
   register_if_missing(std::make_shared<StrictHighsBranchAndCutAdapter>());
   register_if_missing(std::make_shared<NativeBranchAndCutAdapter>());
 
@@ -241,6 +255,13 @@ api::Result SolverEngine::solve_milp(const MIPModel& problem,
 api::Result SolverEngine::solve_minlp(const MINLPModel& problem,
                                       const SolveOptions& options) const {
   return solve(api::ProblemVariant{problem}, options);
+}
+
+api::Result SolverEngine::solve_conic(const ConicModel& problem,
+                                      const SolveOptions& options) const {
+  ConicModel normalized = problem;
+  normalize_conic_matrices(normalized);
+  return solve(api::ProblemVariant{std::move(normalized)}, options);
 }
 
 }  // namespace mipsolvers::engine

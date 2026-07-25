@@ -1,0 +1,998 @@
+{
+  "case": {
+    "time_steps": 156,
+    "d1_15min": 96,
+    "d2_d3_hourly": 48,
+    "d4_d7_blocks": 12,
+    "local_buses": 24,
+    "local_branches": 38,
+    "dc_links": 4,
+    "scenario_leaves": 4
+  },
+  "information_boundary": {
+    "jurisdiction": "Yunnan provincial dispatch",
+    "planner_observes": [
+      "Yunnan RTS-24 resources and network",
+      "regional market-state labels inferred from public/history data",
+      "published historical boundary prices and forecast intervals",
+      "Yunnan's historical HVDC schedules and fitted acceptance envelopes",
+      "Yunnan-side HVDC equipment availability"
+    ],
+    "planner_does_not_observe": [
+      "other-province buses and branches",
+      "other-province generators, loads, bids, and unit status",
+      "other-province dispatch and reserve decisions"
+    ],
+    "ieee118_role": "hidden synthetic-observation generator; not an optimizer input"
+  },
+  "hidden_benchmark_environment": {
+    "system": "IEEE-118",
+    "buses": 118,
+    "branches": 186,
+    "exported_to_planner": false
+  },
+  "observable_external_proxy": {
+    "tight": {
+      "valley_price": [
+        63.0,
+        70.21974999999998,
+        70.21974999999996,
+        63.0
+      ],
+      "valley_capacity": [
+        459.74438400000014,
+        496.0,
+        496.0,
+        448.2787390511014
+      ],
+      "flat_price": [
+        63.0,
+        70.21975000000018,
+        70.09194404485127,
+        63.0
+      ],
+      "flat_capacity": [
+        477.7432320000001,
+        496.0,
+        496.0,
+        472.89197762327547
+      ],
+      "peak_price": [
+        63.0,
+        70.03332827109274,
+        70.06845270366276,
+        63.0
+      ],
+      "peak_capacity": [
+        493.49222400000014,
+        496.0,
+        496.0,
+        494.4280235213154
+      ]
+    },
+    "loose": {
+      "valley_price": [
+        26.0,
+        28.001550000000073,
+        28.001549999999767,
+        26.0
+      ],
+      "valley_capacity": [
+        435.44496174701527,
+        496.0,
+        496.0,
+        426.036528563629
+      ],
+      "flat_price": [
+        26.0,
+        28.00155000000011,
+        28.001549999999924,
+        26.0
+      ],
+      "flat_capacity": [
+        457.9163760000001,
+        496.0,
+        496.0,
+        446.0347849035215
+      ],
+      "peak_price": [
+        26.0,
+        28.00155000000007,
+        28.001549999999973,
+        26.0
+      ],
+      "peak_capacity": [
+        470.71243200000004,
+        496.0,
+        496.0,
+        463.5332592009266
+      ]
+    }
+  },
+  "uncertainty_quantification": {
+    "calibration_status": "synthetic benchmark; empirical calibration required",
+    "physical_method": "probabilistic forecast trajectories",
+    "market_method": "conditional reduced market simulation",
+    "market_scenarios": [
+      {
+        "name": "tight",
+        "probability": 0.55,
+        "export_appetite": 1.0,
+        "description": "High receiving-side demand and strong Yunnan export acceptance"
+      },
+      {
+        "name": "loose",
+        "probability": 0.45,
+        "export_appetite": 0.15,
+        "description": "Low receiving-side demand and weak Yunnan export acceptance"
+      }
+    ],
+    "physical_scenarios": [
+      {
+        "name": "dry",
+        "parent_market": "tight",
+        "conditional_probability": 0.4,
+        "load_factor_by_day": [
+          1.03,
+          1.04,
+          1.05,
+          1.055,
+          1.06,
+          1.07,
+          1.08
+        ],
+        "wind_factor_by_day": [
+          0.76,
+          0.73,
+          0.7,
+          0.68,
+          0.66,
+          0.63,
+          0.61
+        ],
+        "solar_factor_by_day": [
+          0.75,
+          0.73,
+          0.71,
+          0.69,
+          0.67,
+          0.65,
+          0.63
+        ],
+        "inflow_factor_by_day": [
+          0.78,
+          0.74,
+          0.7,
+          0.68,
+          0.64,
+          0.6,
+          0.57
+        ],
+        "dc_factor_by_day": [
+          1.0,
+          0.72,
+          0.72,
+          0.8,
+          0.85,
+          0.9,
+          0.9
+        ],
+        "failed_link": 2,
+        "failure_days": [
+          1,
+          2
+        ]
+      },
+      {
+        "name": "normal",
+        "parent_market": "tight",
+        "conditional_probability": 0.6,
+        "load_factor_by_day": [
+          1.005,
+          1.01,
+          1.015,
+          1.015,
+          1.02,
+          1.02,
+          1.025
+        ],
+        "wind_factor_by_day": [
+          0.97,
+          0.96,
+          0.95,
+          0.94,
+          0.93,
+          0.92,
+          0.91
+        ],
+        "solar_factor_by_day": [
+          0.98,
+          0.97,
+          0.96,
+          0.95,
+          0.94,
+          0.93,
+          0.92
+        ],
+        "inflow_factor_by_day": [
+          0.95,
+          0.93,
+          0.91,
+          0.9,
+          0.89,
+          0.88,
+          0.87
+        ],
+        "dc_factor_by_day": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "failed_link": -1,
+        "failure_days": []
+      },
+      {
+        "name": "normal",
+        "parent_market": "loose",
+        "conditional_probability": 0.4444444444444444,
+        "load_factor_by_day": [
+          0.995,
+          0.99,
+          0.985,
+          0.985,
+          0.98,
+          0.98,
+          0.975
+        ],
+        "wind_factor_by_day": [
+          1.03,
+          1.04,
+          1.06,
+          1.07,
+          1.08,
+          1.08,
+          1.07
+        ],
+        "solar_factor_by_day": [
+          1.02,
+          1.04,
+          1.05,
+          1.07,
+          1.08,
+          1.07,
+          1.06
+        ],
+        "inflow_factor_by_day": [
+          1.01,
+          1.03,
+          1.04,
+          1.05,
+          1.06,
+          1.07,
+          1.07
+        ],
+        "dc_factor_by_day": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "failed_link": -1,
+        "failure_days": []
+      },
+      {
+        "name": "wet",
+        "parent_market": "loose",
+        "conditional_probability": 0.5555555555555556,
+        "load_factor_by_day": [
+          0.98,
+          0.97,
+          0.96,
+          0.955,
+          0.95,
+          0.945,
+          0.94
+        ],
+        "wind_factor_by_day": [
+          1.12,
+          1.17,
+          1.23,
+          1.28,
+          1.3,
+          1.27,
+          1.22
+        ],
+        "solar_factor_by_day": [
+          1.1,
+          1.16,
+          1.22,
+          1.28,
+          1.3,
+          1.28,
+          1.22
+        ],
+        "inflow_factor_by_day": [
+          1.12,
+          1.18,
+          1.24,
+          1.3,
+          1.34,
+          1.34,
+          1.3
+        ],
+        "dc_factor_by_day": [
+          1.0,
+          0.88,
+          0.88,
+          0.9,
+          0.95,
+          1.0,
+          1.0
+        ],
+        "failed_link": 0,
+        "failure_days": [
+          1,
+          2
+        ]
+      }
+    ],
+    "joint_tree": [
+      {
+        "leaf": "tight_dry",
+        "market": "tight",
+        "physical": "dry",
+        "market_probability": 0.55,
+        "conditional_probability": 0.4,
+        "joint_probability": 0.22000000000000003
+      },
+      {
+        "leaf": "tight_normal",
+        "market": "tight",
+        "physical": "normal",
+        "market_probability": 0.55,
+        "conditional_probability": 0.6,
+        "joint_probability": 0.33
+      },
+      {
+        "leaf": "loose_normal",
+        "market": "loose",
+        "physical": "normal",
+        "market_probability": 0.45,
+        "conditional_probability": 0.4444444444444444,
+        "joint_probability": 0.19999999999999998
+      },
+      {
+        "leaf": "loose_wet",
+        "market": "loose",
+        "physical": "wet",
+        "market_probability": 0.45,
+        "conditional_probability": 0.5555555555555556,
+        "joint_probability": 0.25
+      }
+    ]
+  },
+  "selected_market_simulation_summary": [
+    {
+      "market": "tight",
+      "probability": 0.55,
+      "mean_committed_thermal_units_d1_d3": 6.0,
+      "mean_active_hydro_zones_d1_d3": 4.0,
+      "mean_dc_schedule_mw_d1_d3": 1937.7524402403942,
+      "p10_dc_schedule_mw_d1_d3": 1900.0231230511015,
+      "p90_dc_schedule_mw_d1_d3": 1979.9202475213156
+    },
+    {
+      "market": "loose",
+      "probability": 0.45,
+      "mean_committed_thermal_units_d1_d3": 2.2291666666666665,
+      "mean_active_hydro_zones_d1_d3": 4.0,
+      "mean_dc_schedule_mw_d1_d3": 283.40523549203704,
+      "p10_dc_schedule_mw_d1_d3": 278.0222235465966,
+      "p90_dc_schedule_mw_d1_d3": 288.936853680139
+    }
+  ],
+  "algorithm": {
+    "method": "finite-package logic decomposition with independent LP recourse",
+    "lp_subproblems": 80,
+    "candidate_set_gap": 0.0,
+    "sum_lp_solve_seconds": 12.792346006,
+    "wall_seconds": 12.994476125,
+    "risk_budgets": {
+      "eens_cvar90_gwh": 0.05,
+      "curtailment_cvar90_gwh": 1.5,
+      "expected_reserve_shortfall_gwh": 0.01
+    },
+    "selection_rule": "risk-feasible first, then minimum expected objective"
+  },
+  "package_evaluations": [
+    {
+      "package": "economic_D2",
+      "hydro_maint_start_day": 2,
+      "thermal_maint_start_day": 2,
+      "dr_reserve_mw": 0,
+      "d1_boundary_scale": 1.0,
+      "reserve_fraction": 0.05,
+      "terminal_water_gwh": 12.0,
+      "central_objective_musd": 44.538335790686794,
+      "expected_objective_musd": 26.52713649738952,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.026048699149032472,
+      "curtailment_cvar90_gwh": 0.10419479659612989,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": true,
+      "expected_export_gwh": 78.30353261657172
+    },
+    {
+      "package": "economic_dr_D2",
+      "hydro_maint_start_day": 2,
+      "thermal_maint_start_day": 2,
+      "dr_reserve_mw": 140,
+      "d1_boundary_scale": 1.0,
+      "reserve_fraction": 0.05,
+      "terminal_water_gwh": 12.0,
+      "central_objective_musd": 44.553297358488635,
+      "expected_objective_musd": 26.427025187856984,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.026048699149032472,
+      "curtailment_cvar90_gwh": 0.10419479659612989,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": true,
+      "expected_export_gwh": 78.31535530786883
+    },
+    {
+      "package": "balanced_D2",
+      "hydro_maint_start_day": 2,
+      "thermal_maint_start_day": 3,
+      "dr_reserve_mw": 80,
+      "d1_boundary_scale": 0.85,
+      "reserve_fraction": 0.09,
+      "terminal_water_gwh": 24.0,
+      "central_objective_musd": 59.546300322985935,
+      "expected_objective_musd": 40.2610312042051,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.026256641660962487,
+      "curtailment_cvar90_gwh": 0.10502656664384995,
+      "expected_reserve_shortfall_gwh": 0.021540652174833128,
+      "risk_feasible": false,
+      "expected_export_gwh": 70.74995356768876
+    },
+    {
+      "package": "secure_D2",
+      "hydro_maint_start_day": 2,
+      "thermal_maint_start_day": 3,
+      "dr_reserve_mw": 140,
+      "d1_boundary_scale": 0.7,
+      "reserve_fraction": 0.13,
+      "terminal_water_gwh": 34.0,
+      "central_objective_musd": 71.60458997249802,
+      "expected_objective_musd": 50.61603452585417,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.02595231486846751,
+      "curtailment_cvar90_gwh": 0.10380925947387004,
+      "expected_reserve_shortfall_gwh": 0.06518938800451232,
+      "risk_feasible": false,
+      "expected_export_gwh": 59.14022532814686
+    },
+    {
+      "package": "economic_D3",
+      "hydro_maint_start_day": 3,
+      "thermal_maint_start_day": 2,
+      "dr_reserve_mw": 0,
+      "d1_boundary_scale": 1.0,
+      "reserve_fraction": 0.05,
+      "terminal_water_gwh": 12.0,
+      "central_objective_musd": 44.5080350085951,
+      "expected_objective_musd": 26.483692311499563,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.026048699149032472,
+      "curtailment_cvar90_gwh": 0.10419479659612989,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": true,
+      "expected_export_gwh": 78.438285605762
+    },
+    {
+      "package": "economic_dr_D3",
+      "hydro_maint_start_day": 3,
+      "thermal_maint_start_day": 2,
+      "dr_reserve_mw": 140,
+      "d1_boundary_scale": 1.0,
+      "reserve_fraction": 0.05,
+      "terminal_water_gwh": 12.0,
+      "central_objective_musd": 44.54902160301814,
+      "expected_objective_musd": 26.398310490848232,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.026048699149032472,
+      "curtailment_cvar90_gwh": 0.10419479659612989,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": true,
+      "expected_export_gwh": 78.44645014479802
+    },
+    {
+      "package": "balanced_D3",
+      "hydro_maint_start_day": 3,
+      "thermal_maint_start_day": 4,
+      "dr_reserve_mw": 80,
+      "d1_boundary_scale": 0.85,
+      "reserve_fraction": 0.09,
+      "terminal_water_gwh": 24.0,
+      "central_objective_musd": 59.53520021031178,
+      "expected_objective_musd": 40.252033742184146,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.023498509137541986,
+      "curtailment_cvar90_gwh": 0.09399403655016794,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": true,
+      "expected_export_gwh": 70.7468389955532
+    },
+    {
+      "package": "secure_D3",
+      "hydro_maint_start_day": 3,
+      "thermal_maint_start_day": 4,
+      "dr_reserve_mw": 140,
+      "d1_boundary_scale": 0.7,
+      "reserve_fraction": 0.13,
+      "terminal_water_gwh": 34.0,
+      "central_objective_musd": 71.60554208060877,
+      "expected_objective_musd": 50.455030648425144,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.023644957012700616,
+      "curtailment_cvar90_gwh": 0.09457982805080246,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": true,
+      "expected_export_gwh": 59.28210964291067
+    },
+    {
+      "package": "economic_D4",
+      "hydro_maint_start_day": 4,
+      "thermal_maint_start_day": 3,
+      "dr_reserve_mw": 0,
+      "d1_boundary_scale": 1.0,
+      "reserve_fraction": 0.05,
+      "terminal_water_gwh": 12.0,
+      "central_objective_musd": 44.49288985850309,
+      "expected_objective_musd": 26.509339517952682,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.026227544630382908,
+      "curtailment_cvar90_gwh": 0.10491017852153163,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": true,
+      "expected_export_gwh": 78.79657021122097
+    },
+    {
+      "package": "economic_dr_D4",
+      "hydro_maint_start_day": 4,
+      "thermal_maint_start_day": 3,
+      "dr_reserve_mw": 140,
+      "d1_boundary_scale": 1.0,
+      "reserve_fraction": 0.05,
+      "terminal_water_gwh": 12.0,
+      "central_objective_musd": 44.54328985850304,
+      "expected_objective_musd": 26.421312769114387,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.026227544630382908,
+      "curtailment_cvar90_gwh": 0.10491017852153163,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": true,
+      "expected_export_gwh": 78.8003905988624
+    },
+    {
+      "package": "balanced_D4",
+      "hydro_maint_start_day": 4,
+      "thermal_maint_start_day": 5,
+      "dr_reserve_mw": 80,
+      "d1_boundary_scale": 0.85,
+      "reserve_fraction": 0.09,
+      "terminal_water_gwh": 24.0,
+      "central_objective_musd": 59.55925316916322,
+      "expected_objective_musd": 40.586028852404695,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.02314379030499549,
+      "curtailment_cvar90_gwh": 0.09257516121998197,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": true,
+      "expected_export_gwh": 70.6630244075777
+    },
+    {
+      "package": "secure_D4",
+      "hydro_maint_start_day": 4,
+      "thermal_maint_start_day": 5,
+      "dr_reserve_mw": 140,
+      "d1_boundary_scale": 0.7,
+      "reserve_fraction": 0.13,
+      "terminal_water_gwh": 34.0,
+      "central_objective_musd": 71.61737804561994,
+      "expected_objective_musd": 50.78491967027392,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.023290238180168673,
+      "curtailment_cvar90_gwh": 0.09316095272067469,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": true,
+      "expected_export_gwh": 59.00565534781974
+    },
+    {
+      "package": "economic_D5",
+      "hydro_maint_start_day": 5,
+      "thermal_maint_start_day": 4,
+      "dr_reserve_mw": 0,
+      "d1_boundary_scale": 1.0,
+      "reserve_fraction": 0.05,
+      "terminal_water_gwh": 12.0,
+      "central_objective_musd": 44.490202316812905,
+      "expected_objective_musd": 26.513632826112083,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.02559051630196336,
+      "curtailment_cvar90_gwh": 0.10236206520785343,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": true,
+      "expected_export_gwh": 78.83847271678414
+    },
+    {
+      "package": "economic_dr_D5",
+      "hydro_maint_start_day": 5,
+      "thermal_maint_start_day": 4,
+      "dr_reserve_mw": 140,
+      "d1_boundary_scale": 1.0,
+      "reserve_fraction": 0.05,
+      "terminal_water_gwh": 12.0,
+      "central_objective_musd": 44.54060231681264,
+      "expected_objective_musd": 26.564032826111987,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.02559051630196336,
+      "curtailment_cvar90_gwh": 0.10236206520785343,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": true,
+      "expected_export_gwh": 78.83847271678424
+    },
+    {
+      "package": "balanced_D5",
+      "hydro_maint_start_day": 5,
+      "thermal_maint_start_day": 6,
+      "dr_reserve_mw": 80,
+      "d1_boundary_scale": 0.85,
+      "reserve_fraction": 0.09,
+      "terminal_water_gwh": 24.0,
+      "central_objective_musd": 62.13210790957289,
+      "expected_objective_musd": 44.502393522042155,
+      "expected_eens_gwh": 0.26375623460205383,
+      "eens_cvar90_gwh": 1.198891975463881,
+      "expected_curtailment_gwh": 0.02314379030499549,
+      "curtailment_cvar90_gwh": 0.09257516121998197,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": false,
+      "expected_export_gwh": 71.02922912393652
+    },
+    {
+      "package": "secure_D5",
+      "hydro_maint_start_day": 5,
+      "thermal_maint_start_day": 6,
+      "dr_reserve_mw": 140,
+      "d1_boundary_scale": 0.7,
+      "reserve_fraction": 0.13,
+      "terminal_water_gwh": 34.0,
+      "central_objective_musd": 74.19211823074131,
+      "expected_objective_musd": 54.70165895240219,
+      "expected_eens_gwh": 0.26375623460205383,
+      "eens_cvar90_gwh": 1.198891975463881,
+      "expected_curtailment_gwh": 0.023290238180168673,
+      "curtailment_cvar90_gwh": 0.09316095272067469,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": false,
+      "expected_export_gwh": 59.869304673880464
+    },
+    {
+      "package": "economic_D6",
+      "hydro_maint_start_day": 6,
+      "thermal_maint_start_day": 5,
+      "dr_reserve_mw": 0,
+      "d1_boundary_scale": 1.0,
+      "reserve_fraction": 0.05,
+      "terminal_water_gwh": 12.0,
+      "central_objective_musd": 44.498526870471295,
+      "expected_objective_musd": 26.890911475427327,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.02559051630196336,
+      "curtailment_cvar90_gwh": 0.10236206520785343,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": true,
+      "expected_export_gwh": 78.64993084115142
+    },
+    {
+      "package": "economic_dr_D6",
+      "hydro_maint_start_day": 6,
+      "thermal_maint_start_day": 5,
+      "dr_reserve_mw": 140,
+      "d1_boundary_scale": 1.0,
+      "reserve_fraction": 0.05,
+      "terminal_water_gwh": 12.0,
+      "central_objective_musd": 44.54892687047108,
+      "expected_objective_musd": 26.94131147542727,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.02559051630196336,
+      "curtailment_cvar90_gwh": 0.10236206520785343,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": true,
+      "expected_export_gwh": 78.64993084115146
+    },
+    {
+      "package": "balanced_D6",
+      "hydro_maint_start_day": 6,
+      "thermal_maint_start_day": 6,
+      "dr_reserve_mw": 80,
+      "d1_boundary_scale": 0.85,
+      "reserve_fraction": 0.09,
+      "terminal_water_gwh": 24.0,
+      "central_objective_musd": 62.13211454106572,
+      "expected_objective_musd": 44.55312623196181,
+      "expected_eens_gwh": 0.26375623460205383,
+      "eens_cvar90_gwh": 1.198891975463881,
+      "expected_curtailment_gwh": 0.02314379030499549,
+      "curtailment_cvar90_gwh": 0.09257516121998197,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": false,
+      "expected_export_gwh": 71.10125040912651
+    },
+    {
+      "package": "secure_D6",
+      "hydro_maint_start_day": 6,
+      "thermal_maint_start_day": 6,
+      "dr_reserve_mw": 140,
+      "d1_boundary_scale": 0.7,
+      "reserve_fraction": 0.13,
+      "terminal_water_gwh": 34.0,
+      "central_objective_musd": 74.19212486223421,
+      "expected_objective_musd": 54.75239170079485,
+      "expected_eens_gwh": 0.26375623460205383,
+      "eens_cvar90_gwh": 1.198891975463881,
+      "expected_curtailment_gwh": 0.023290238180168673,
+      "curtailment_cvar90_gwh": 0.09316095272067469,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "risk_feasible": false,
+      "expected_export_gwh": 59.91650467388048
+    }
+  ],
+  "schemes": [
+    {
+      "name": "逐日滚动基线",
+      "package": "rolling_DA",
+      "expected_objective_musd": 76.32962203914556,
+      "expected_eens_gwh": 3.619946443204394,
+      "eens_cvar90_gwh": 14.496074566457105,
+      "expected_curtailment_gwh": 0.7910820999383031,
+      "expected_export_gwh": 88.60386262545977,
+      "expected_export_value_musd": 5.19861990453342,
+      "expected_hydro_gwh": 120.31127199999999,
+      "expected_dr_gwh": 0.0,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "expected_terminal_water_gwh": 0.0,
+      "solve_seconds": 0.5082893749999999,
+      "leaves": {
+        "tight_dry": {
+          "objective_musd": 237.08616604541862,
+          "eens_gwh": 14.496074566457105,
+          "curtailment_gwh": 0.0,
+          "export_gwh": 86.28833463523299,
+          "export_value_musd": 5.845593118847022,
+          "hydro_gwh": 100.45599999999985,
+          "thermal_gwh": 266.4156678359994,
+          "dr_gwh": 0.0,
+          "reserve_shortfall_gwh": 0.0,
+          "terminal_water_gwh": 0.0,
+          "terminal_soc_gwh": 0.15,
+          "solve_seconds": 0.148783
+        },
+        "tight_normal": {
+          "objective_musd": 64.46313128523381,
+          "eens_gwh": 0.28693757146615645,
+          "curtailment_gwh": 0.0,
+          "export_gwh": 148.15902321714555,
+          "export_value_musd": 10.149953511180204,
+          "hydro_gwh": 116.01039999999999,
+          "thermal_gwh": 257.700872464533,
+          "dr_gwh": 0.0,
+          "reserve_shortfall_gwh": 0.0,
+          "terminal_water_gwh": 0.0,
+          "terminal_soc_gwh": 0.15,
+          "solve_seconds": 0.148544291
+        },
+        "loose_normal": {
+          "objective_musd": 33.0092693794539,
+          "eens_gwh": 1.680603199999995,
+          "curtailment_gwh": 0.0,
+          "export_gwh": 34.799975619142785,
+          "export_value_musd": 0.9455984265076878,
+          "hydro_gwh": 125.30560000000006,
+          "thermal_gwh": 98.61682051601564,
+          "dr_gwh": 0.0,
+          "reserve_shortfall_gwh": 0.0,
+          "terminal_water_gwh": 0.0,
+          "terminal_soc_gwh": 0.15,
+          "solve_seconds": 0.10718045899999984
+        },
+        "loose_wet": {
+          "objective_musd": -14.816086763457939,
+          "eens_gwh": 0.0,
+          "curtailment_gwh": 3.1643283997532126,
+          "export_gwh": 55.07182488088767,
+          "export_value_musd": 1.4959402975842815,
+          "hydro_gwh": 139.46560000000005,
+          "thermal_gwh": 69.50475821282483,
+          "dr_gwh": 0.0,
+          "reserve_shortfall_gwh": 0.0,
+          "terminal_water_gwh": 0.0,
+          "terminal_soc_gwh": 0.15,
+          "solve_seconds": 0.1037816250000001
+        }
+      }
+    },
+    {
+      "name": "确定性周前瞻",
+      "package": "economic_D5",
+      "expected_objective_musd": 26.513632826112083,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.02559051630196336,
+      "expected_export_gwh": 78.83847271678414,
+      "expected_export_value_musd": 4.795403416899637,
+      "expected_hydro_gwh": 108.3112719999999,
+      "expected_dr_gwh": 0.0,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "expected_terminal_water_gwh": 12.0,
+      "solve_seconds": 0.611581374,
+      "leaves": {
+        "tight_dry": {
+          "objective_musd": 82.94142869757967,
+          "eens_gwh": 0.0,
+          "curtailment_gwh": 0.0,
+          "export_gwh": 63.62603178600021,
+          "export_value_musd": 4.465431686270611,
+          "hydro_gwh": 88.45599999999996,
+          "thermal_gwh": 270.93995296723836,
+          "dr_gwh": 0.0,
+          "reserve_shortfall_gwh": 0.0,
+          "terminal_water_gwh": 12.0,
+          "terminal_soc_gwh": 0.75,
+          "solve_seconds": 0.15324533300000098
+        },
+        "tight_normal": {
+          "objective_musd": 44.490202316812905,
+          "eens_gwh": 0.0,
+          "curtailment_gwh": 0.0,
+          "export_gwh": 146.16872352666127,
+          "export_value_musd": 10.187034784992692,
+          "hydro_gwh": 104.01039999999979,
+          "thermal_gwh": 268.28656599663475,
+          "dr_gwh": 0.0,
+          "reserve_shortfall_gwh": 0.0,
+          "terminal_water_gwh": 12.0,
+          "terminal_soc_gwh": 0.75,
+          "solve_seconds": 0.17379029099999954
+        },
+        "loose_normal": {
+          "objective_musd": -0.04735960859988986,
+          "eens_gwh": 0.0,
+          "curtailment_gwh": 0.0,
+          "export_gwh": 35.64864542385716,
+          "export_value_musd": 0.9670216714712879,
+          "hydro_gwh": 113.30559999999991,
+          "thermal_gwh": 113.57747275451663,
+          "dr_gwh": 0.0,
+          "reserve_shortfall_gwh": 0.0,
+          "terminal_water_gwh": 12.0,
+          "terminal_soc_gwh": 0.75,
+          "solve_seconds": 0.1434569579999998
+        },
+        "loose_wet": {
+          "objective_musd": -25.62310532073492,
+          "eens_gwh": 0.0,
+          "curtailment_gwh": 0.10236206520785344,
+          "export_gwh": 37.901351501177786,
+          "export_value_musd": 1.0315305303130284,
+          "hydro_gwh": 127.46560000000001,
+          "thermal_gwh": 60.91816777852562,
+          "dr_gwh": 0.0,
+          "reserve_shortfall_gwh": 0.0,
+          "terminal_water_gwh": 12.0,
+          "terminal_soc_gwh": 0.75,
+          "solve_seconds": 0.14108879199999969
+        }
+      }
+    },
+    {
+      "name": "随机周前瞻",
+      "package": "economic_dr_D3",
+      "expected_objective_musd": 26.398310490848232,
+      "expected_eens_gwh": 0.0,
+      "eens_cvar90_gwh": 0.0,
+      "expected_curtailment_gwh": 0.026048699149032472,
+      "expected_export_gwh": 78.44645014479802,
+      "expected_export_value_musd": 4.786133550954429,
+      "expected_hydro_gwh": 108.31127200000003,
+      "expected_dr_gwh": 0.13446786207740566,
+      "expected_reserve_shortfall_gwh": 0.0,
+      "expected_terminal_water_gwh": 12.0,
+      "solve_seconds": 0.6445777919999989,
+      "leaves": {
+        "tight_dry": {
+          "objective_musd": 82.18791083656602,
+          "eens_gwh": 0.0,
+          "curtailment_gwh": 0.0,
+          "export_gwh": 63.690194165512715,
+          "export_value_musd": 4.471841912446052,
+          "hydro_gwh": 88.45599999999992,
+          "thermal_gwh": 270.9713186850941,
+          "dr_gwh": 0.56,
+          "reserve_shortfall_gwh": 0.0,
+          "terminal_water_gwh": 12.0,
+          "terminal_soc_gwh": 0.75,
+          "solve_seconds": 0.18167145800000029
+        },
+        "tight_normal": {
+          "objective_musd": 44.54902160301814,
+          "eens_gwh": 0.0,
+          "curtailment_gwh": 0.0,
+          "export_gwh": 146.06978850466626,
+          "export_value_musd": 10.184645839787152,
+          "hydro_gwh": 104.01040000000008,
+          "thermal_gwh": 268.27169750688597,
+          "dr_gwh": 0.03414503659819886,
+          "reserve_shortfall_gwh": 0.0,
+          "terminal_water_gwh": 12.0,
+          "terminal_soc_gwh": 0.75,
+          "solve_seconds": 0.1663679999999994
+        },
+        "loose_normal": {
+          "objective_musd": 0.021955315603162547,
+          "eens_gwh": 0.0,
+          "curtailment_gwh": 0.0,
+          "export_gwh": 33.6035584895879,
+          "export_value_musd": 0.9130348579822171,
+          "hydro_gwh": 113.30560000000004,
+          "thermal_gwh": 111.54006669414679,
+          "dr_gwh": 0.0,
+          "reserve_shortfall_gwh": 0.0,
+          "terminal_water_gwh": 12.0,
+          "terminal_soc_gwh": 0.75,
+          "solve_seconds": 0.1591284169999998
+        },
+        "loose_wet": {
+          "objective_musd": -25.554392341251685,
+          "eens_gwh": 0.0,
+          "curtailment_gwh": 0.10419479659612989,
+          "export_gwh": 38.04346209571112,
+          "export_value_musd": 1.035152925960378,
+          "hydro_gwh": 127.46560000000007,
+          "thermal_gwh": 61.131989574252984,
+          "dr_gwh": 0.0,
+          "reserve_shortfall_gwh": 0.0,
+          "terminal_water_gwh": 12.0,
+          "terminal_soc_gwh": 0.75,
+          "solve_seconds": 0.13740991699999938
+        }
+      }
+    }
+  ],
+  "disclaimer": "Synthetic Yunnan-oriented modification; mechanism benchmark, not an empirical forecast."
+}

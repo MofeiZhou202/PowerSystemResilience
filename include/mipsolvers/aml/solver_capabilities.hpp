@@ -13,6 +13,8 @@ struct SolverCapabilities {
   bool supports_milp            = false;
   bool supports_qp              = false;
   bool supports_qcp             = false;
+  bool supports_socp            = false;
+  bool supports_sdp             = false;
   bool supports_nlp             = false;
   bool supports_minlp           = false;
 
@@ -39,6 +41,7 @@ struct ProblemFeatures {
   bool has_binary_vars           = false;
   bool has_quadratic_objective   = false;
   bool has_quadratic_constraints = false;
+  bool has_conic_constraints     = false;
   bool has_nonlinear_objective   = false;
   bool has_nonlinear_constraints = false;
   bool has_indicator_constraints = false;

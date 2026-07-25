@@ -292,4 +292,57 @@ ValidationReport validate(const MINLPModel& model) {
   return out;
 }
 
+ValidationReport validate(const ConicModel& model) {
+  ValidationReport out;
+  const int n = static_cast<int>(model.c.size());
+  if (n <= 0) {
+    add_error(out, "Objective vector c must be non-empty");
+    return out;
+  }
+
+  if (model.dims.l < 0) {
+    add_error(out, "dims.l must be nonnegative");
+  }
+  for (size_t i = 0; i < model.dims.q.size(); ++i) {
+    if (model.dims.q[i] < 1) {
+      add_error(out, "dims.q entries must be >= 1 at index " + std::to_string(i));
+    }
+  }
+  for (size_t i = 0; i < model.dims.s.size(); ++i) {
+    if (model.dims.s[i] < 1) {
+      add_error(out, "dims.s entries must be >= 1 at index " + std::to_string(i));
+    }
+  }
+
+  const int cone_rows = model.dims.total();
+  if (model.G.rows() != cone_rows) {
+    add_error(out, "G.rows must equal dims.total()");
+  }
+  if (model.G.rows() > 0 && model.G.cols() != n) {
+    add_error(out, "G.cols must equal c.size");
+  }
+  if (model.h.size() != cone_rows) {
+    add_error(out, "h.size must equal dims.total()");
+  }
+
+  if (model.A.rows() > 0 && model.A.cols() != n) {
+    add_error(out, "A.cols must equal c.size");
+  }
+  if (model.A.rows() != model.b.size()) {
+    add_error(out, "A.rows must equal b.size");
+  }
+
+  if (cone_rows <= 0 && model.A.rows() <= 0) {
+    add_error(out, "Model has neither conic rows nor equality rows");
+  }
+
+  if (!model.vars.empty() && static_cast<int>(model.vars.size()) != n) {
+    add_error(out, "vars size must equal c.size when provided");
+  } else if (!model.vars.empty()) {
+    validate_variable_meta(model.vars, out);
+  }
+
+  return out;
+}
+
 }  // namespace mipsolvers::engine

@@ -32,6 +32,7 @@ class SolverEngine {
   api::Result solve_nlp(const NLPModel& problem, const SolveOptions& options = {}) const;
   api::Result solve_milp(const MIPModel& problem, const SolveOptions& options = {}) const;
   api::Result solve_minlp(const MINLPModel& problem, const SolveOptions& options = {}) const;
+  api::Result solve_conic(const ConicModel& problem, const SolveOptions& options = {}) const;
 
  private:
   AdapterRegistry registry_;

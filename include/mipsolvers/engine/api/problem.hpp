@@ -14,7 +14,8 @@ using ProblemVariant = std::variant<SparseLinSys,
                                     QPModel,
                                     NLPModel,
                                     MIPModel,
-                                    MINLPModel>;
+                                    MINLPModel,
+                                    ConicModel>;
 
 inline ProblemClass problem_class(const ProblemVariant& problem) {
   return std::visit(
@@ -32,8 +33,10 @@ inline ProblemClass problem_class(const ProblemVariant& problem) {
           return ProblemClass::NLP;
         } else if constexpr (std::is_same_v<T, MIPModel>) {
           return ProblemClass::MILP;
+        } else if constexpr (std::is_same_v<T, MINLPModel>) {
+          return ProblemClass::MINLP;
         }
-        return ProblemClass::MINLP;
+        return ProblemClass::CONIC;
       },
       problem);
 }
@@ -54,6 +57,8 @@ inline std::string problem_class_name(ProblemClass cls) {
       return "MILP";
     case ProblemClass::MINLP:
       return "MINLP";
+    case ProblemClass::CONIC:
+      return "CONIC";
   }
   return "Unknown";
 }

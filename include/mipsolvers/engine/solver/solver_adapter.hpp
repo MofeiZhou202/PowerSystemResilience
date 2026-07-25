@@ -71,6 +71,7 @@ class SolverAdapter {
   virtual SolveResult solve_nlp(const NLPModel& prob) const;
   virtual SolveResult solve_milp(const MIPModel& prob) const;
   virtual SolveResult solve_minlp(const MINLPModel& prob) const;
+  virtual SolveResult solve_conic(const ConicModel& prob) const;
 
  protected:
   SolveResult unsupported_result(ProblemClass cls) const;

@@ -93,6 +93,17 @@ class SolveResult {
   std::unordered_map<ConId, double> dual_vals;
   std::unordered_map<VarId, double> rc_vals;  ///< reduced costs
 
+  // ---- Conic dual storage (SOCP / SDP path) ------------------------------
+  /// Dual multipliers of conic constraints, keyed by the ConId returned from
+  /// Model::add_soc_constraint / add_rotated_soc_constraint /
+  /// add_psd_constraint.  Vector layout per entry:
+  ///   - standard SOC (k xs entries): k+1 duals, cone head first;
+  ///   - rotated SOC (k xs entries): k+2 duals of the compiled
+  ///     (a+b, a-b, sqrt(2)*xs) standard SOC block;
+  ///   - PSD cone of order n: n*(n+1)/2 svec-packed duals (column-major
+  ///     lower triangle, off-diagonal entries scaled by sqrt(2)).
+  std::unordered_map<ConId, std::vector<double>> conic_dual_vals;
+
   // ---- Primal access helpers ---------------------------------------------
   [[nodiscard]] double var_value(VarId vid) const {
     auto it = primal_vals.find(vid);

@@ -13,7 +13,7 @@
 
 namespace mipsolvers::engine {
 
-enum class ProblemClass { LE, NLE, LP, QP, NLP, MILP, MINLP };
+enum class ProblemClass { LE, NLE, LP, QP, NLP, MILP, MINLP, CONIC };
 
 enum class VarType { Continuous, Integer, Binary };
 
@@ -170,6 +170,45 @@ struct QPModel {
   Eigen::VectorXd b;
   Eigen::SparseMatrix<double> Aeq;  // Equality constraints Aeq*x = beq
   Eigen::VectorXd beq;
+  std::vector<VariableMeta> vars;
+};
+
+/// Cone dimensions, cvxopt-style: K = R^l_+ x Q^{q[0]} x ... x Q^{q[k]} x
+/// S^{s[0]} x ... x S^{s[m]}.  SDP blocks use the svec (symmetric
+/// vectorization) convention: a p x p symmetric matrix occupies
+/// p*(p+1)/2 rows with off-diagonal entries scaled by sqrt(2), so that
+/// tr(SZ) = svec(S)' * svec(Z).  SOCP is the special case with empty s;
+/// LP is the special case with empty q and s.
+struct ConeDims {
+  int l{0};             ///< Dimension of the nonnegative orthant block.
+  std::vector<int> q;   ///< Sizes of second-order (Lorentz) cone blocks.
+  std::vector<int> s;   ///< Orders of positive-semidefinite cone blocks.
+
+  /// Total number of conic rows: l + sum(q) + sum(s_i*(s_i+1)/2).
+  int total() const {
+    int t = l;
+    for (int v : q) {
+      t += v;
+    }
+    for (int v : s) {
+      t += v * (v + 1) / 2;
+    }
+    return t;
+  }
+};
+
+/// Conic linear program in cvxopt standard form:
+///   (P) min c'x  s.t.  G x + s = h,  A x = b,  s in K
+///   (D) max -h'z - b'y  s.t.  G'z + A'y + c = 0,  z in K
+/// Rows of G/h are ordered by cone block: [l | q blocks | svec-packed s blocks].
+struct ConicModel {
+  Sense sense{Sense::Minimize};
+  Eigen::VectorXd c;
+  Eigen::SparseMatrix<double> G;  ///< Conic constraint matrix (dims.total() x n).
+  Eigen::VectorXd h;              ///< Conic right-hand side (dims.total()).
+  Eigen::SparseMatrix<double> A;  ///< Equality constraint matrix (m_eq x n).
+  Eigen::VectorXd b;              ///< Equality right-hand side.
+  ConeDims dims;
   std::vector<VariableMeta> vars;
 };
 

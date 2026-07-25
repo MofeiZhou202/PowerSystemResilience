@@ -21,6 +21,7 @@ namespace mipsolvers::aml {
 // Per-row record stored during model building
 // ════════════════════════════════════════════════════════════════════════════
 struct RowRecord {
+  ConId      id = kInvalidCon;
   LinearExpr lhs;
   LinearExpr rhs;
   CompareOp  sense = CompareOp::Equal;
@@ -72,6 +73,27 @@ class ModelImpl {
   // ── NLP warm-start ──────────────────────────────────────────────────────
   std::vector<double> nlp_x0_;  // empty → use midpoint
 
+  // ── Conic constraint records (SOCP / SDP) ───────────────────────────────
+  // ConIds are allocated from the same next_con_id counter as linear and
+  // nonlinear rows, so dual maps stay unique across constraint kinds.
+  struct SocRecord {
+    ConId                   id = kInvalidCon;
+    LinearExpr              t;  ///< cone head (a for rotated cones)
+    LinearExpr              b;  ///< second head (rotated cones only)
+    std::vector<LinearExpr> xs;
+    bool                    rotated = false;
+    std::string             name;
+  };
+  struct PsdRecord {
+    ConId                                id = kInvalidCon;
+    int                                  order = 0;
+    /// Lower triangle of F(x): entries[i] holds F(i,0..i) (i+1 elements).
+    std::vector<std::vector<LinearExpr>> entries;
+    std::string                          name;
+  };
+  std::vector<SocRecord> soc_rows_;
+  std::vector<PsdRecord> psd_rows_;
+
   // ── Variable id counter ─────────────────────────────────────────────────
   VarId next_var_id = 0;
   ConId next_con_id = 0;
@@ -106,7 +128,7 @@ class ModelImpl {
 
   ConId add_row(const TempConstr& tc, const std::string& name) {
     ConId id = next_con_id++;
-    rows.push_back({tc.lhs, tc.rhs, tc.sense, name});
+    rows.push_back({id, tc.lhs, tc.rhs, tc.sense, name});
     return id;
   }
 
@@ -131,6 +153,25 @@ class ModelImpl {
       if (std::fabs(c) >= 1e-14) terms.emplace_back(v, c);
     }
     (void)constant_out;
+  }
+
+  /// Return the terms of `e` sorted by VarId with duplicates summed — the
+  /// same aggregation rule compile_lp applies to every constraint row.
+  /// Near-zero coefficients are kept; callers filter them at emission.
+  static std::vector<std::pair<VarId, double>> aggregate_linear(
+      const LinearExpr& e) {
+    auto terms = e.terms;
+    std::sort(terms.begin(), terms.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<std::pair<VarId, double>> agg;
+    for (const auto& [v, c] : terms) {
+      if (!agg.empty() && agg.back().first == v) {
+        agg.back().second += c;
+      } else {
+        agg.emplace_back(v, c);
+      }
+    }
+    return agg;
   }
 
   engine::LPModel compile_lp() const {
@@ -307,6 +348,181 @@ class ModelImpl {
         return true;
     }
     return false;
+  }
+
+  bool has_conic() const { return !soc_rows_.empty() || !psd_rows_.empty(); }
+
+  /// Cone dimensions implied by the current records, in compile order:
+  /// [linear inequality rows | SOC blocks in insertion order | PSD blocks].
+  /// Rotated cones compile to standard SOC blocks of size k+2 (see
+  /// compile_conic), PSD blocks of order n occupy n*(n+1)/2 svec rows.
+  engine::ConeDims conic_dims() const {
+    engine::ConeDims d;
+    for (const auto& r : rows)
+      if (r.sense != CompareOp::Equal) ++d.l;
+    for (const auto& srec : soc_rows_)
+      d.q.push_back(srec.rotated ? static_cast<int>(srec.xs.size()) + 2
+                                 : static_cast<int>(srec.xs.size()) + 1);
+    for (const auto& prec : psd_rows_) d.s.push_back(prec.order);
+    return d;
+  }
+
+  // ── compile_conic: assemble engine::ConicModel (cvxopt standard form) ───
+  //
+  //   (P) min c'x   s.t.  G x + s = h,  A x = b,  s in K
+  //   K = R^l_+ x Π Q^{q_i} x Π S^{s_i}    (rows of G/h ordered [l | q | s])
+  //
+  // Every conic row encodes a slack s_i = h_i − (G x)_i that must reproduce a
+  // target affine expression e(x) = c0 + Σ c_j x_j, hence h_i = c0 and
+  // G_ij = −c_j.  Linear inequality rows keep compile_lp's sign convention
+  // (≥ rows are negated into ≤ form), so the l block is exactly the LP
+  // inequality system.  PSD blocks are emitted in svec order (column-major
+  // lower triangle, off-diagonal entries scaled by √2).
+  engine::ConicModel compile_conic() const {
+    if (has_nl_obj || !nl_rows_.empty()) {
+      throw std::invalid_argument(
+          "Model '" + model_name + "': conic constraints cannot be combined "
+          "with a nonlinear objective or nonlinear constraints; drop the "
+          "conic constraints and use the NLP path instead.");
+    }
+    if (has_quad_obj) {
+      throw std::invalid_argument(
+          "Model '" + model_name + "': conic constraints cannot be combined "
+          "with a quadratic objective; use the QP path without conic "
+          "constraints, or reformulate the quadratic term as an SOC epigraph "
+          "via add_rotated_soc_constraint.");
+    }
+    if (is_milp()) {
+      throw std::invalid_argument(
+          "Model '" + model_name + "': conic constraints with integer or "
+          "binary variables are not supported by the conic path; use the "
+          "MILP path without conic constraints.");
+    }
+
+    const int nv = next_var_id;
+    const engine::ConeDims dims = conic_dims();
+    const int n_cone = dims.total();
+    int nc_eq = 0;
+    for (const auto& r : rows)
+      if (r.sense == CompareOp::Equal) ++nc_eq;
+
+    // Objective (linear only).  The kernel form is minimization-only, so a
+    // Maximize sense is baked in here and flipped back in build_conic_result.
+    Eigen::VectorXd c = Eigen::VectorXd::Zero(nv);
+    for (const auto& [v, coef] : obj_expr.terms) c[v] += coef;
+    if (sense == engine::Sense::Maximize) c = -c;
+
+    using T3 = Eigen::Triplet<double>;
+    std::vector<T3> g_trip, eq_trip;
+    Eigen::VectorXd h = Eigen::VectorXd::Zero(n_cone);
+    Eigen::VectorXd b = Eigen::VectorXd::Zero(nc_eq);
+
+    // Emit one conic slack row:  s_i = h_val − Σ_j (g_sign·coef_j)·x_j.
+    auto emit_row = [&](int i, double h_val,
+                        const std::vector<std::pair<VarId, double>>& agg,
+                        double g_sign) {
+      h[i] = h_val;
+      for (const auto& [v, coef] : agg)
+        if (std::fabs(coef) >= 1e-14)
+          g_trip.emplace_back(i, v, g_sign * coef);
+    };
+
+    int row = 0, ei = 0;
+
+    // l block (linear inequalities) and equalities — same canonicalization
+    // as compile_lp:  cl(x) = lhs − rhs [sense] 0  ⇔  Σ c_j x_j [sense] rhs_val.
+    for (const auto& r : rows) {
+      LinearExpr cl = r.lhs;
+      cl -= r.rhs;
+      const auto agg = aggregate_linear(cl);
+      const double rhs_val = -cl.constant;
+      if (r.sense == CompareOp::Equal) {
+        for (const auto& [v, coef] : agg)
+          if (std::fabs(coef) >= 1e-14) eq_trip.emplace_back(ei, v, coef);
+        b[ei] = rhs_val;
+        ++ei;
+      } else {
+        // LessEq:    row <= rhs_val  → s = rhs_val − row ≥ 0
+        // GreaterEq: row >= rhs_val  → flip to −row <= −rhs_val
+        const double sign = (r.sense == CompareOp::LessEq) ? 1.0 : -1.0;
+        emit_row(row++, rhs_val * sign, agg, sign);
+      }
+    }
+
+    // q blocks: SOC head row is t, then one row per xs entry.  Rotated cones
+    // ‖x‖² ≤ 2ab are reformulated as (a+b, a−b, √2·x₁, …, √2·xₖ) ∈ Q^{k+2}.
+    const double kSqrt2 = std::sqrt(2.0);
+    for (const auto& srec : soc_rows_) {
+      if (srec.rotated) {
+        const LinearExpr e0 = srec.t + srec.b;
+        const LinearExpr e1 = srec.t - srec.b;
+        emit_row(row++, e0.constant, aggregate_linear(e0), -1.0);
+        emit_row(row++, e1.constant, aggregate_linear(e1), -1.0);
+        for (const auto& x : srec.xs) {
+          const LinearExpr ek = kSqrt2 * x;
+          emit_row(row++, ek.constant, aggregate_linear(ek), -1.0);
+        }
+      } else {
+        emit_row(row++, srec.t.constant, aggregate_linear(srec.t), -1.0);
+        for (const auto& x : srec.xs)
+          emit_row(row++, x.constant, aggregate_linear(x), -1.0);
+      }
+    }
+
+    // s blocks — svec packing: column-major lower triangle of F(x) with
+    // off-diagonal entries scaled by √2 so that tr(FZ) = svec(F)'·svec(Z).
+    for (const auto& prec : psd_rows_) {
+      const int n = prec.order;
+      for (int j = 0; j < n; ++j) {
+        for (int i = j; i < n; ++i) {
+          const double scale = (i == j) ? 1.0 : kSqrt2;
+          const LinearExpr e =
+              scale * prec.entries[static_cast<std::size_t>(i)]
+                                  [static_cast<std::size_t>(j)];
+          emit_row(row++, e.constant, aggregate_linear(e), -1.0);
+        }
+      }
+    }
+
+    // Variable metadata — mirrors compile_lp: bounds are re-queried from the
+    // VarArrays so set_lb/set_ub/fix calls after add_var are honored, and
+    // bounds stay in VariableMeta (no extra bound rows are generated).
+    std::unordered_map<VarId, std::pair<double, double>> bound_overrides;
+    bound_overrides.reserve(static_cast<std::size_t>(nv));
+    for (const auto& arr : var_arrays) {
+      for (const auto& [k, vid] : arr->key_to_id()) {
+        bound_overrides[vid] = {arr->lb(k), arr->ub(k)};
+      }
+    }
+
+    std::vector<engine::VariableMeta> vmeta(nv);
+    for (int i = 0; i < nv; ++i) {
+      const auto& m = var_meta[static_cast<std::size_t>(i)];
+      auto it = bound_overrides.find(i);
+      if (it != bound_overrides.end()) {
+        vmeta[i].lb = it->second.first;
+        vmeta[i].ub = it->second.second;
+      } else {
+        vmeta[i].lb = m.lb;
+        vmeta[i].ub = m.ub;
+      }
+      vmeta[i].name = m.family + "[" + (m.key.values.empty() ? "" : m.key.values[0]) + "]";
+      // The conic path rejects integer/binary variables above.
+      vmeta[i].type = engine::VarType::Continuous;
+    }
+
+    engine::ConicModel cm;
+    cm.sense = engine::Sense::Minimize;  // Maximize was baked into c above
+    cm.c     = std::move(c);
+    cm.G.resize(n_cone, nv);
+    cm.G.setFromTriplets(g_trip.begin(), g_trip.end());
+    cm.h     = std::move(h);
+    cm.A.resize(nc_eq, nv);
+    cm.A.setFromTriplets(eq_trip.begin(), eq_trip.end());
+    cm.b     = std::move(b);
+    cm.dims  = dims;
+    cm.vars  = std::move(vmeta);
+    return cm;
   }
 
   // ── Nonlinear expression arena helpers ───────────────────────────────────
@@ -823,6 +1039,70 @@ class ModelImpl {
     }
     return sr;
   }
+
+  // ── build_conic_result: map an engine conic result back to AML values ───
+  //
+  // The engine returns duals in conic layout [z (cone, dims.total()) | y
+  // (equalities)].  The l block of z follows the linear inequality rows in
+  // insertion order; q blocks (SOC, in insertion order) and svec-packed s
+  // blocks (PSD, in insertion order) come next, then the equality duals y.
+  SolveResult build_conic_result(const engine::api::Result& r) const {
+    // Reuse the common status / objective / primal mapping; the LP-layout
+    // duals it fills do not apply to the conic layout, so they are remapped
+    // below.
+    SolveResult sr = build_result(r, /*milp_mode=*/false);
+    sr.dual_vals.clear();
+
+    // Maximize was compiled as negated minimization; flip the objective back.
+    if (sense == engine::Sense::Maximize) {
+      sr.objective_value = -sr.objective_value;
+      sr.objective_bound = -sr.objective_bound;
+    }
+
+    const engine::ConeDims dims = conic_dims();
+    const int n_cone = dims.total();
+    int nc_eq = 0;
+    for (const auto& rec : rows)
+      if (rec.sense == CompareOp::Equal) ++nc_eq;
+
+    const auto& duals = r.constraint_duals;
+    if (duals.size() < static_cast<Eigen::Index>(n_cone + nc_eq)) return sr;
+
+    int row = 0;
+    // l block: linear inequality rows in insertion order.
+    for (const auto& rec : rows) {
+      if (rec.sense == CompareOp::Equal) continue;
+      double raw = duals[row++];
+      // >= rows were negated at compile time; flip the dual sign back.
+      if (rec.sense == CompareOp::GreaterEq) raw = -raw;
+      sr.dual_vals[rec.id] = raw;
+    }
+    // q blocks (SOC / rotated SOC).
+    for (const auto& srec : soc_rows_) {
+      const int len = srec.rotated ? static_cast<int>(srec.xs.size()) + 2
+                                   : static_cast<int>(srec.xs.size()) + 1;
+      std::vector<double> z(static_cast<std::size_t>(len));
+      for (int k = 0; k < len; ++k)
+        z[static_cast<std::size_t>(k)] = duals[row + k];
+      sr.conic_dual_vals[srec.id] = std::move(z);
+      row += len;
+    }
+    // s blocks (PSD, svec-packed).
+    for (const auto& prec : psd_rows_) {
+      const int len = prec.order * (prec.order + 1) / 2;
+      std::vector<double> z(static_cast<std::size_t>(len));
+      for (int k = 0; k < len; ++k)
+        z[static_cast<std::size_t>(k)] = duals[row + k];
+      sr.conic_dual_vals[prec.id] = std::move(z);
+      row += len;
+    }
+    // Equality duals (y block) in insertion order.
+    for (const auto& rec : rows) {
+      if (rec.sense != CompareOp::Equal) continue;
+      sr.dual_vals[rec.id] = duals[row++];
+    }
+    return sr;
+  }
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1032,6 +1312,63 @@ ConId Model::add_constraint_internal(const TempConstr& c,
   return impl_->add_row(c, name);
 }
 
+// ── Conic constraints ────────────────────────────────────────────────────
+
+ConstraintRef Model::add_soc_constraint(const LinearExpr& t,
+                                         const std::vector<LinearExpr>& xs,
+                                         const std::string& name) {
+  if (xs.empty()) {
+    throw std::invalid_argument(
+        "Model '" + impl_->model_name +
+        "': add_soc_constraint requires at least one affine expression in "
+        "'xs' (a simple bound on t can be stated as a linear row)");
+  }
+  ConId id = impl_->next_con_id++;
+  impl_->soc_rows_.push_back({id, t, LinearExpr{}, xs, /*rotated=*/false, name});
+  return ConstraintRef(id, name);
+}
+
+ConstraintRef Model::add_rotated_soc_constraint(
+    const LinearExpr& a, const LinearExpr& b,
+    const std::vector<LinearExpr>& xs, const std::string& name) {
+  if (xs.empty()) {
+    throw std::invalid_argument(
+        "Model '" + impl_->model_name +
+        "': add_rotated_soc_constraint requires at least one affine "
+        "expression in 'xs'");
+  }
+  ConId id = impl_->next_con_id++;
+  impl_->soc_rows_.push_back({id, a, b, xs, /*rotated=*/true, name});
+  return ConstraintRef(id, name);
+}
+
+ConstraintRef Model::add_psd_constraint(
+    int order, const std::vector<std::vector<LinearExpr>>& entries,
+    const std::string& name) {
+  if (order < 1) {
+    throw std::invalid_argument(
+        "Model '" + impl_->model_name +
+        "': add_psd_constraint requires order >= 1");
+  }
+  if (static_cast<int>(entries.size()) != order) {
+    throw std::invalid_argument(
+        "Model '" + impl_->model_name +
+        "': add_psd_constraint expects entries.size() == order (one row per "
+        "lower-triangular matrix row)");
+  }
+  for (int i = 0; i < order; ++i) {
+    if (static_cast<int>(entries[static_cast<std::size_t>(i)].size()) != i + 1) {
+      throw std::invalid_argument(
+          "Model '" + impl_->model_name +
+          "': add_psd_constraint expects entries[i] to have exactly i+1 "
+          "elements (lower-triangular packing)");
+    }
+  }
+  ConId id = impl_->next_con_id++;
+  impl_->psd_rows_.push_back({id, order, entries, name});
+  return ConstraintRef(id, name);
+}
+
 // ── Solve ────────────────────────────────────────────────────────────────
 
 SolveResult Model::solve(const SolveOptions& opts) const {
@@ -1045,7 +1382,14 @@ SolveResult Model::solve(const SolveOptions& opts) const {
 
   engine::SolverEngine engine(/*register_defaults=*/true);
 
-  if (nlp) {
+  if (impl_->has_conic()) {
+    // Conic path (SOCP / SDP): compile_conic rejects incompatible model
+    // features (quadratic/nonlinear objective, nonlinear constraints,
+    // integer/binary variables) with std::invalid_argument.
+    engine::ConicModel cm = impl_->compile_conic();
+    auto result = engine.solve_conic(cm, eng_opts);
+    return impl_->build_conic_result(result);
+  } else if (nlp) {
     // NLP path: assemble NLPModel from arena and dispatch
     engine::NLPModel nlpm = impl_->compile_nlp();
     auto result = engine.solve_nlp(nlpm, eng_opts);
