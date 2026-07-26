@@ -546,7 +546,8 @@ endif()
 # The vendored copy is authoritative (hermetic build); system/vcpkg installs are
 # only a fallback for checkouts that lack third_party/eigen.  No network access.
 if(NOT TARGET Eigen3::Eigen AND
-   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/eigen/Eigen/Core")
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/eigen/Eigen/Core" AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/eigen/unsupported/Eigen/MatrixFunctions")
   # IMPORTED GLOBAL (not ALIAS of a local target) so install(EXPORT) passes the
   # name through to consumers, who recreate Eigen3::Eigen via
   # mipsolversConfig.cmake (system package or bundled headers).
@@ -627,7 +628,8 @@ endif()
 if(NOT Eigen3_FOUND)
   message(FATAL_ERROR
     "Eigen3 not found. The vendored copy third_party/eigen is missing or "
-    "incomplete (expected third_party/eigen/Eigen/Core) — restore it from the "
+    "incomplete (expected Eigen/Core and unsupported/Eigen/MatrixFunctions) "
+    "— restore it from the "
     "repository. No network fallback exists by design (hermetic build); a "
     "system Eigen3 (brew install eigen / apt install libeigen3-dev) is also "
     "accepted as a fallback.")
@@ -639,7 +641,9 @@ endif()
 option(MIPSOLVERS_USE_SYSTEM_FMT
   "Use a system-installed fmt instead of the vendored third_party/fmt" OFF)
 set(MIPSOLVERS_FMT_VENDORED OFF)
-if(MIPSOLVERS_USE_SYSTEM_FMT)
+if(TARGET fmt::fmt)
+  message(STATUS "mipsolvers: fmt = existing parent target")
+elseif(MIPSOLVERS_USE_SYSTEM_FMT)
   find_package(fmt CONFIG REQUIRED)
   message(STATUS "mipsolvers: fmt = system (MIPSOLVERS_USE_SYSTEM_FMT=ON)")
 elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fmt/CMakeLists.txt")
