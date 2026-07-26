@@ -106,13 +106,14 @@ set_target_properties(umfpack_vendored PROPERTIES
   C_STANDARD 11
   C_STANDARD_REQUIRED ON
   POSITION_INDEPENDENT_CODE ON)
-target_include_directories(umfpack_vendored PRIVATE
-  "${_SS_ROOT}/SuiteSparse_config"
-  "${_SS_ROOT}/AMD/Include"
-  "${_SS_ROOT}/CHOLMOD/Include"
-  "${_SS_ROOT}/UMFPACK/Include"
-  "${_SS_ROOT}/UMFPACK/Source")
+target_include_directories(umfpack_vendored PUBLIC
+  "$<BUILD_INTERFACE:${_SS_ROOT}/SuiteSparse_config>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/AMD/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/CHOLMOD/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/UMFPACK/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/UMFPACK/Source>")
 target_link_libraries(umfpack_vendored PRIVATE cholmod_vendored)
+add_library(mipsolvers::umfpack_vendored ALIAS umfpack_vendored)
 
 # ── KLU + BTF (sparse LU for circuit-type systems) ───────────────────────────
 # KLU depends on AMD, BTF, COLAMD, CAMD, CCOLAMD, SuiteSparse_config — all in
@@ -124,15 +125,16 @@ set_target_properties(klu_vendored PROPERTIES
   C_STANDARD 11
   C_STANDARD_REQUIRED ON
   POSITION_INDEPENDENT_CODE ON)
-target_include_directories(klu_vendored PRIVATE
-  "${_SS_ROOT}/SuiteSparse_config"
-  "${_SS_ROOT}/AMD/Include"
-  "${_SS_ROOT}/BTF/Include"
-  "${_SS_ROOT}/COLAMD/Include"
-  "${_SS_ROOT}/CAMD/Include"
-  "${_SS_ROOT}/CCOLAMD/Include"
-  "${_SS_ROOT}/KLU/Include")
+target_include_directories(klu_vendored PUBLIC
+  "$<BUILD_INTERFACE:${_SS_ROOT}/SuiteSparse_config>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/AMD/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/BTF/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/COLAMD/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/CAMD/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/CCOLAMD/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/KLU/Include>")
 target_link_libraries(klu_vendored PRIVATE cholmod_vendored)
+add_library(mipsolvers::klu_vendored ALIAS klu_vendored)
 
 set(MIPSOLVERS_HAVE_UMFPACK ON)
 set(MIPSOLVERS_HAVE_KLU ON)

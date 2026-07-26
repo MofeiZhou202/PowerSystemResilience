@@ -2,6 +2,8 @@
 /// Tests for the AdapterRegistry.
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+
 #include "mipsolvers/engine/solver/adapter_registry.hpp"
 #include "mipsolvers/engine/solver/native/native_adapters.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
@@ -93,6 +95,9 @@ TEST_CASE("SolverEngine: list_solvers returns names after registration", "[regis
   const auto milp_solvers = eng.list_solvers(ProblemClass::MILP);
   CHECK_FALSE(milp_solvers.empty());
   REQUIRE_FALSE(milp_solvers.empty());
-  CHECK(milp_solvers.front() == "StrictHiGHS");
+  const bool gurobi_registered =
+      std::find(milp_solvers.begin(), milp_solvers.end(), "Gurobi") !=
+      milp_solvers.end();
+  CHECK(milp_solvers.front() ==
+        (gurobi_registered ? "Gurobi" : "StrictHiGHS"));
 }
-

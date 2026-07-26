@@ -226,10 +226,9 @@ endif()
 set(Eigen3_FOUND TRUE)
 set(Catch2_FOUND TRUE)
 
-# System-optional adapters are orthogonal to the prebuilt package; keep them
-# off here (they resolve off in the default hermetic configuration).  Opting
-# into them requires the in-tree path (MIPSOLVERS_USE_PREBUILT_THIRD_PARTY=OFF).
-foreach(_MIPSOLVERS_TP_OPT_OPT GUROBI PAPILO SUPERLU MKL)
+# System numeric backends are not part of the prebuilt package. Gurobi and the
+# bundled PaPILO headers are resolved after this file returns.
+foreach(_MIPSOLVERS_TP_OPT_OPT SUPERLU MKL)
   if(MIPSOLVERS_USE_${_MIPSOLVERS_TP_OPT_OPT})
     message(WARNING
       "mipsolvers: MIPSOLVERS_USE_${_MIPSOLVERS_TP_OPT_OPT}=ON is ignored in "
@@ -238,10 +237,6 @@ foreach(_MIPSOLVERS_TP_OPT_OPT GUROBI PAPILO SUPERLU MKL)
   endif()
 endforeach()
 unset(_MIPSOLVERS_TP_OPT_OPT)
-set(MIPSOLVERS_HAVE_GUROBI OFF)
-set(MIPSOLVERS_GUROBI_INCLUDE_DIRS "")
-set(MIPSOLVERS_GUROBI_LIBRARIES "")
-set(MIPSOLVERS_HAVE_PAPILO OFF)
 set(MIPSOLVERS_HAVE_SUPERLU OFF)
 set(MIPSOLVERS_SUPERLU_INCLUDE_DIR "")
 set(MIPSOLVERS_SUPERLU_LIBRARIES "")

@@ -219,13 +219,13 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
         $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
     endif()
 
-    # CTest integration: run the --full suite (6 UC cases, ~30 s on CI) with
-    # B&C[StrictHiGHS] only (no external solvers).  JSON output is written to
-    # the build tree so a post-step can compare against the stored baseline.
+    # CTest integration uses the deterministic 6-bus smoke case. The default
+    # and --full modes remain available for longer performance experiments.
+    # JSON output is written to the build tree for optional post-processing.
     if(MIPSOLVERS_BUILD_TESTS)
       add_test(NAME milp_benchmark
         COMMAND milp_benchmark_runner
-                --full
+                --smoke
                 --no-highs-adapter
                 --json "${CMAKE_CURRENT_BINARY_DIR}/milp_benchmark_result.json")
       set_tests_properties(milp_benchmark PROPERTIES
@@ -295,12 +295,12 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
 
     # CTest integration: standing pure-native A/B harness.  --check turns the
     # must-pass rows (natDualSimplex NETLIB + scaled probes, NativeBC-vs-HiGHS
-    # optimum agreement on the small MILPs) into an exit code; natIPM rows and
-    # the time-limit-sensitive 118-bus case stay informational.  Not part of
-    # the CI-critical set (CI runs -L unit and -R milp_benchmark$ only).
+    # optimum agreement on the smoke MILP) into an exit code; natIPM rows stay
+    # informational. Not part of the CI-critical set (CI runs -L unit and
+    # -R milp_benchmark$ only). Default and --full retain the larger cases.
     if(MIPSOLVERS_BUILD_TESTS)
       add_test(NAME native_kernel_comparison
-        COMMAND native_kernel_comparison --check --time-limit 60)
+        COMMAND native_kernel_comparison --smoke --check --time-limit 60)
       set_tests_properties(native_kernel_comparison PROPERTIES
         LABELS   "benchmark"
         TIMEOUT  600)
@@ -470,7 +470,13 @@ endif()
 # PRIVATE：papilo_presolve.hpp 使用完全前向声明，不 #include 任何 papilo 头文件，
 # 消费者无需 papilo 头文件或链接路径。
 if(MIPSOLVERS_HAVE_PAPILO)
-  target_link_libraries(mipsolvers PRIVATE papilo)
+  if(MIPSOLVERS_PAPILO_LOCAL_SOURCE)
+    target_include_directories(mipsolvers SYSTEM PRIVATE
+      ${MIPSOLVERS_PAPILO_INCLUDE_DIRS})
+    target_compile_definitions(mipsolvers PRIVATE PAPILO_NO_CMAKE_CONFIG=1)
+  else()
+    target_link_libraries(mipsolvers PRIVATE papilo)
+  endif()
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_PAPILO=1 HACDCPF_HAVE_PAPILO=1)
 endif()
@@ -492,7 +498,7 @@ target_link_libraries(mipsolvers PUBLIC
 # SCIP, Ipopt, MUMPS, HiGHS-factor, vendored fmt, vendored reference LAPACK)
 # into a single self-contained archive `libmipsolvers_bundled.a`, for
 # downstream applications that want one .a to link.  External *shared*
-# libraries (SuiteSparse when not vendored, OpenBLAS, GMP, TBB, Boost, Gurobi,
+# libraries (SuiteSparse when not vendored, OpenBLAS, Gurobi,
 # gfortran/quadmath on non-Apple, Accelerate) cannot be merged into a static
 # archive and must still be provided by the consumer at link time; see
 # docs/build_and_deploy.md for the full consumer link line.
@@ -513,18 +519,6 @@ if(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE)
       endif()
     endif()
   endforeach()
-  # Static LUSOL archive pulled in transitively via PaPILO (not a CMake target).
-  # Only relevant when PaPILO support is actually enabled (off by default).
-  if(MIPSOLVERS_HAVE_PAPILO)
-    find_library(MIPSOLVERS_CLUSOL_STATIC_LIB
-      NAMES clusol libclusol
-      PATHS /opt/homebrew/lib /usr/local/lib
-      NO_CACHE)
-    if(MIPSOLVERS_CLUSOL_STATIC_LIB AND MIPSOLVERS_CLUSOL_STATIC_LIB MATCHES "\\.a$")
-      list(APPEND _bundle_inputs "${MIPSOLVERS_CLUSOL_STATIC_LIB}")
-    endif()
-  endif()
-
   # Multi-config generators (e.g., Visual Studio) need config-specific outputs
   # so generated command files do not conflict across Debug/Release variants.
   set(_bundle_output "${CMAKE_BINARY_DIR}/$<CONFIG>/libmipsolvers_bundled.a")

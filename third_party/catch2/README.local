@@ -10,6 +10,7 @@ catch_amalgamated.cpp provides a default main() unless
 CATCH_AMALGAMATED_CUSTOM_MAIN is defined — see cmake/Dependencies.cmake for
 how the Catch2 / Catch2WithMain static libraries are produced.
 
-The catch2/ subdirectory contains thin forwarding headers
-(catch_test_macros.hpp, catch_approx.hpp, catch_all.hpp) so that test sources
-can keep including <catch2/...> exactly as with a full Catch2 checkout.
+The catch2/ subdirectory contains thin forwarding headers for the public test
+macros, Approx, floating-point matchers, and string matchers used by MIPSolvers
+and source consumers. The extras/ directory contains the official CMake test
+discovery modules, so an offline parent project can use catch_discover_tests.

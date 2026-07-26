@@ -21,7 +21,8 @@
         "MIPSOLVERS_USE_SUITESPARSE": "ON",
         "MIPSOLVERS_USE_SUPERLU": "ON",
         "MIPSOLVERS_USE_MKL": "ON",
-        "MIPSOLVERS_USE_GUROBI": "OFF"
+        "MIPSOLVERS_USE_GUROBI": "ON",
+        "MIPSOLVERS_USE_PAPILO": "ON"
       }
     },
     {
@@ -51,7 +52,6 @@
         "MIPSOLVERS_BUILD_LOCAL_IPOPT": "ON",
         "MIPSOLVERS_IPOPT_LINEAR_SOLVER": "pardisomkl",
         "MIPSOLVERS_ENABLE_IPO": "OFF",
-        "MIPSOLVERS_USE_PAPILO": "OFF",
         "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
       }
     },

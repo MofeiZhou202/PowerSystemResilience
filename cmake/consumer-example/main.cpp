@@ -15,6 +15,7 @@
  */
 
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 
 #include "mipsolvers/aml/aml.hpp"
@@ -32,9 +33,8 @@ int main() {
     auto& xv = model.add_var("x", S, mipsolvers::aml::VarType::Continuous, 0.0, 1e30);
     auto& yv = model.add_var("y", S, mipsolvers::aml::VarType::Continuous, 0.0, 1e30);
 
-    mipsolvers::aml::Key k{"i0"};
-    auto x = xv[k];
-    auto y = yv[k];
+    const auto x = xv("i0");
+    const auto y = yv("i0");
 
     // 约束
     model.add_constraint(x + y >= 4.0, "resource");

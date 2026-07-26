@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <stdexcept>
+#include <utility>
 
 #include "mipsolvers/engine/api/solver.hpp"
 #include "mipsolvers/engine/api/problem.hpp"
@@ -18,6 +20,49 @@
 
 using namespace mipsolvers::engine;
 using Catch::Approx;
+
+namespace {
+
+class RecordingLPAdapter final : public SolverAdapter {
+ public:
+  RecordingLPAdapter(std::string adapter_name, bool succeed,
+                     std::shared_ptr<int> calls)
+      : adapter_name_(std::move(adapter_name)),
+        succeed_(succeed),
+        calls_(std::move(calls)) {}
+
+  std::string name() const override { return adapter_name_; }
+  bool supports(ProblemClass cls) const override {
+    return cls == ProblemClass::LP;
+  }
+  SolveResult solve_lp(const LPModel&) const override {
+    ++*calls_;
+    SolveResult out;
+    out.stats.success = succeed_;
+    out.stats.solver_name = adapter_name_;
+    out.stats.status = succeed_ ? "Optimal" : "Synthetic failure";
+    out.x = Eigen::VectorXd::Zero(1);
+    return out;
+  }
+
+ private:
+  std::string adapter_name_;
+  bool succeed_{false};
+  std::shared_ptr<int> calls_;
+};
+
+LPModel make_dispatch_lp() {
+  LPModel lp;
+  lp.c = Eigen::VectorXd::Zero(1);
+  lp.vars.push_back({VarType::Continuous, 0.0, 1.0});
+  lp.A.resize(0, 1);
+  lp.b.resize(0);
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  return lp;
+}
+
+}  // namespace
 
 #ifdef HACDCPF_HAVE_IPOPT
 namespace {
@@ -95,6 +140,31 @@ TEST_CASE("SolverEngine adapter registration", "[engine][api]") {
 
   eng.register_default_adapters();
   CHECK_FALSE(eng.list_solvers(ProblemClass::LP).empty());
+}
+
+TEST_CASE("Gurobi is preferred and packaged LP fallback remains automatic",
+          "[engine][api][gurobi][fallback]") {
+  auto gurobi_calls = std::make_shared<int>(0);
+  auto native_calls = std::make_shared<int>(0);
+  SolverEngine eng(false);
+  eng.register_adapter(std::make_shared<RecordingLPAdapter>(
+      "NativeIPMLP", true, native_calls));
+  eng.register_adapter(std::make_shared<RecordingLPAdapter>(
+      "Gurobi", false, gurobi_calls));
+
+  const auto listed = eng.list_solvers(ProblemClass::LP);
+  REQUIRE(listed.size() == 2);
+  CHECK(listed[0] == "Gurobi");
+  CHECK(listed[1] == "NativeIPMLP");
+
+  SolveOptions options;
+  options.preferred_solver = "Gurobi";
+  options.allow_fallback = true;
+  const auto result = eng.solve_lp(make_dispatch_lp(), options);
+  REQUIRE(result.stats.success);
+  CHECK(result.stats.solver_name == "NativeIPMLP");
+  CHECK(*gurobi_calls == 1);
+  CHECK(*native_calls == 1);
 }
 
 #ifdef HACDCPF_HAVE_IPOPT

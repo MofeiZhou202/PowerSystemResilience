@@ -37,6 +37,7 @@ if(NOT MIPSOLVERS_THIRD_PARTY_ONLY AND
   include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/UsePrebuiltThirdParty.cmake")
 endif()
 if(MIPSOLVERS_THIRD_PARTY_PREBUILT)
+  include(${CMAKE_CURRENT_LIST_DIR}/DetectOptionalAdapters.cmake)
   return()
 endif()
 
@@ -269,81 +270,28 @@ elseif(NOT MIPSOLVERS_BUILD_LOCAL_IPOPT)
     "mipsolvers: embedded Ipopt disabled; TNLP bridge will be unavailable")
 endif()
 
-# ── Gurobi (optional, detect only) ───────────────────────────────────────────
-set(MIPSOLVERS_HAVE_GUROBI OFF)
-set(MIPSOLVERS_GUROBI_INCLUDE_DIRS "")
-set(MIPSOLVERS_GUROBI_LIBRARIES "")
-option(MIPSOLVERS_USE_GUROBI
-  "Enable Gurobi detection and native C API adapter when available" OFF)
-if(MIPSOLVERS_USE_GUROBI)
-  find_path(MIPSOLVERS_GUROBI_INCLUDE_DIR NAMES gurobi_c.h
-    HINTS /Library/gurobi1300/macos_universal2 /Library/gurobi1200/macos_universal2
-          /opt/gurobi/macos_universal2
-          "C:/gurobi1300/win64" "C:/gurobi1200/win64" "C:/gurobi1100/win64"
-          $ENV{GUROBI_HOME}
-    PATH_SUFFIXES include)
-  foreach(_grb_ver 130 120 110 100 95)
-    if(NOT MIPSOLVERS_GUROBI_LIBRARY)
-      find_library(MIPSOLVERS_GUROBI_LIBRARY NAMES gurobi${_grb_ver}
-        HINTS /Library/gurobi1300/macos_universal2 /Library/gurobi1200/macos_universal2
-              /opt/gurobi/macos_universal2
-              "C:/gurobi1300/win64" "C:/gurobi1200/win64" "C:/gurobi1100/win64"
-              $ENV{GUROBI_HOME}
-        PATH_SUFFIXES lib)
-    endif()
-  endforeach()
-  if(MIPSOLVERS_GUROBI_INCLUDE_DIR AND MIPSOLVERS_GUROBI_LIBRARY)
-    set(MIPSOLVERS_HAVE_GUROBI ON)
-    set(MIPSOLVERS_GUROBI_INCLUDE_DIRS ${MIPSOLVERS_GUROBI_INCLUDE_DIR})
-    set(MIPSOLVERS_GUROBI_LIBRARIES ${MIPSOLVERS_GUROBI_LIBRARY})
-    message(STATUS "mipsolvers: Gurobi detected: ${MIPSOLVERS_GUROBI_LIBRARY}")
-  else()
-    message(STATUS "mipsolvers: Gurobi enabled but not detected; Gurobi adapter will be unavailable")
-  endif()
-else()
-  message(STATUS "mipsolvers: Gurobi disabled (MIPSOLVERS_USE_GUROBI=OFF)")
-endif()
-
-# ── PaPILO (optional) ────────────────────────────────────────────────────────
-if(POLICY CMP0167)
-  cmake_policy(SET CMP0167 NEW)
-endif()
-set(MIPSOLVERS_HAVE_PAPILO OFF)
-# Default OFF: PaPILO is only available via Homebrew/system packages and drags
-# in ~11 shared-library dependencies (boost, TBB, GMP, OpenBLAS, clusol), which
-# breaks the hermetic build.  Opt back in with -DMIPSOLVERS_USE_PAPILO=ON.
-option(MIPSOLVERS_USE_PAPILO "Enable PaPILO presolve when available" OFF)
-if(MIPSOLVERS_USE_PAPILO)
-  find_package(papilo CONFIG QUIET
-    HINTS
-      $ENV{PAPILO_ROOT}
-      /opt/homebrew
-      /opt/homebrew/lib/cmake/papilo
-      "C:/vcpkg/installed/x64-windows")
-  if(papilo_FOUND)
-    set(MIPSOLVERS_HAVE_PAPILO ON)
-    message(STATUS "mipsolvers: PaPILO detected")
-  else()
-    message(STATUS "mipsolvers: PaPILO not found; using native MILP presolve only")
-  endif()
-else()
-  message(STATUS "mipsolvers: PaPILO disabled (MIPSOLVERS_USE_PAPILO=OFF)")
-endif()
-
-# ── Vendored CHOLMOD (offline, in-tree SuiteSparse sources) ─────────────────
-# Sets MIPSOLVERS_HAVE_CHOLMOD and creates the cholmod_vendored target.
-# Must run before the system SuiteSparse block below, which skips the system
-# cholmod library when the vendored build is active (no duplicate symbols).
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildCHOLMOD.cmake")
+# ── Optional solver adapters ─────────────────────────────────────────────────
+include(${CMAKE_CURRENT_LIST_DIR}/DetectOptionalAdapters.cmake)
 
 # ── SuiteSparse (optional) ───────────────────────────────────────────────────
+option(MIPSOLVERS_USE_SUITESPARSE "Enable SuiteSparse backends when available" ON)
 set(MIPSOLVERS_HAVE_SUITESPARSE OFF)
 set(MIPSOLVERS_SUITESPARSE_LIBRARIES "")
 # ON when SuiteSparse support comes from the exported in-tree vendored targets
 # (umfpack_vendored/klu_vendored) — the consumer config then skips system
 # SuiteSparse rediscovery.
 set(MIPSOLVERS_SUITESPARSE_VENDORED OFF)
-option(MIPSOLVERS_USE_SUITESPARSE "Enable SuiteSparse backends when available" ON)
+
+# Build vendored CHOLMOD/UMFPACK/KLU only when the SuiteSparse family is
+# enabled. This keeps the Eigen-only fallback free of SuiteSparse headers,
+# targets, and feature macros.
+if(MIPSOLVERS_USE_SUITESPARSE)
+  include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildCHOLMOD.cmake")
+else()
+  set(MIPSOLVERS_HAVE_CHOLMOD OFF)
+  set(MIPSOLVERS_CHOLMOD_INCLUDE_DIRS "")
+  message(STATUS "mipsolvers: SuiteSparse disabled")
+endif()
 
 # Vendored SuiteSparse (CHOLMOD/UMFPACK/KLU from in-tree sources via
 # cmake/BuildCHOLMOD.cmake) is the authoritative offline path — when it is

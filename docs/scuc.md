@@ -815,7 +815,7 @@ Line flow inequality duals are tracked per row index during formulation.
 
 | Value | Adapter | Notes |
 |---|---|---|
-| `"Auto"` | Engine heuristic | MILP priority: StrictHiGHS → HiGHS → Gurobi → NativeBranchAndCut |
+| `"Auto"` | Engine heuristic | MILP priority: Gurobi → StrictHiGHS → HiGHS → NativeBranchAndCut |
 | `"StrictHiGHS"` | StrictHighsBranchAndCutAdapter | Embedded HiGHS state machine with MIPSolvers production contract; large roots use IPM with crossover by default |
 | `"Gurobi"` | GurobiAdapter | Requires Gurobi licence; returns duals |
 | `"HiGHS"` | HighsAdapter | Open-source; **no constraint duals** (LMP uses fallback) |
@@ -1006,8 +1006,8 @@ Environment: macOS ARM64 (Apple M4), Release build, MIP gap 1%, HiGHS 4.x.
 >   framework.
 > - All three solvers agree on objective values (differences < 1 $ within MIP
 >   tolerance).
-> - `"Auto"` mode selects StrictHiGHS first for MILP, then falls back to
->   HiGHS → Gurobi → NativeBranchAndCut.
+> - `"Auto"` mode selects an installed/licensed Gurobi first for MILP, then
+>   falls back to StrictHiGHS → HiGHS → NativeBranchAndCut.
 > - Zero load-shed for all IEEE 39-bus cases (VOLL penalty = $0).
 > - The wind+solar case objective (891,466 $) is lower than wind-only (976,359 $):
 >   solar generation displaces expensive peak-period thermal capacity.

@@ -11,12 +11,19 @@ Do not configure in the source root. Use a separate build directory.
 The following sources are part of the repository and are built locally:
 
 - HiGHS, SCIP, Ipopt, MUMPS 5.7.3, and SuiteSparse
-- Eigen 3.4.1, fmt 12.1.0, nlohmann/json 3.11.3, and Catch2 3.7.1
+- complete Eigen 3.4.1 (core and `unsupported/`), fmt 12.1.0,
+  nlohmann/json 3.11.3, and Catch2 3.7.1
+- PaPILO 3.0.0 and the Boost header subset needed by PaPILO
 - reference BLAS and LAPACK 3.12.1 as the final numeric fallback
 
 The configure step does not download dependencies. A missing vendored source
-tree is a fatal checkout error. PaPILO is disabled by default because its
-system packages pull a large shared-library dependency chain.
+tree is a fatal checkout error. The bundled PaPILO integration is header-only:
+GMP, TBB, LUSOL, Boost binaries, OpenBLAS, and Fortran are not required.
+`MIPSOLVERS_USE_PAPILO=OFF` keeps the native presolver as an explicit fallback.
+
+`third_party/eigen/unsupported/Eigen/MatrixFunctions` is checked during
+configuration. This prevents a reduced Eigen header subset from silently
+passing the offline dependency check.
 
 BLAS/LAPACK selection is:
 
@@ -94,8 +101,7 @@ the current shell.
 ```bash
 cmake -S . -B build/release \
   -DCMAKE_BUILD_TYPE=Release \
-  -DMIPSOLVERS_USE_PREBUILT_THIRD_PARTY=OFF \
-  -DMIPSOLVERS_USE_PAPILO=OFF
+  -DMIPSOLVERS_USE_PREBUILT_THIRD_PARTY=OFF
 cmake --build build/release --parallel
 ctest --test-dir build/release -L unit --output-on-failure --parallel 4
 ```
@@ -107,8 +113,7 @@ implementation:
 cmake -S . -B build/reference-blas \
   -DCMAKE_BUILD_TYPE=Release \
   -DMIPSOLVERS_USE_PREBUILT_THIRD_PARTY=OFF \
-  -DMIPSOLVERS_FORCE_VENDORED_BLAS=ON \
-  -DMIPSOLVERS_USE_PAPILO=OFF
+  -DMIPSOLVERS_FORCE_VENDORED_BLAS=ON
 cmake --build build/reference-blas --parallel
 ```
 
@@ -129,7 +134,6 @@ The equivalent explicit configuration is:
 ```powershell
 cmake -S . -B build/windows-msvc -G "Ninja Multi-Config" `
   -DMIPSOLVERS_IPOPT_LINEAR_SOLVER=pardisomkl `
-  -DMIPSOLVERS_USE_PAPILO=OFF `
   -DMIPSOLVERS_USE_PREBUILT_THIRD_PARTY=OFF
 cmake --build build/windows-msvc --config Release --parallel 8
 ctest --test-dir build/windows-msvc -C Release -L unit --output-on-failure
@@ -145,7 +149,6 @@ cmake -S . -B build/windows-source -G "Ninja Multi-Config" `
   -DMIPSOLVERS_FORTRAN_COMPILER="C:/Program Files (x86)/Intel/oneAPI/compiler/latest/bin/ifx.exe" `
   -DMIPSOLVERS_IPOPT_LINEAR_SOLVER=mumps `
   -DMIPSOLVERS_FORCE_VENDORED_BLAS=ON `
-  -DMIPSOLVERS_USE_PAPILO=OFF `
   -DMIPSOLVERS_USE_MKL=OFF
 cmake --build build/windows-source --config Release --parallel 8
 ```
@@ -222,11 +225,22 @@ Release dependency package from being linked into a Debug MSVC build.
 | `MIPSOLVERS_FORCE_BUILD_MUMPS` | `ON` | Build vendored MUMPS instead of Homebrew MUMPS |
 | `MIPSOLVERS_STATIC_LIBGFORTRAN` | `OFF` | Static GNU Fortran runtime flags on Linux |
 | `MIPSOLVERS_IPOPT_LINEAR_SOLVER` | platform dependent | `mumps`, or `pardisomkl` on Windows |
-| `MIPSOLVERS_USE_PAPILO` | `OFF` | Opt in to system PaPILO |
+| `MIPSOLVERS_USE_PAPILO` | `ON` | Use bundled local PaPILO; native presolve remains available |
+| `MIPSOLVERS_PAPILO_SOURCE_DIR` | bundled | Override with another local PaPILO source tree |
+| `MIPSOLVERS_PAPILO_BOOST_DIR` | bundled | Override the local Boost include root for PaPILO |
+| `MIPSOLVERS_PAPILO_ROOT` | empty | Explicit local installed PaPILO prefix when no source tree is used |
+| `MIPSOLVERS_USE_GUROBI` | `ON` | Detect installed Gurobi; absence is nonfatal |
 | `MIPSOLVERS_USE_SYSTEM_FMT` | `OFF` | Opt in to system fmt |
 | `MIPSOLVERS_USE_OPENMP` | `ON` | Enable OpenMP when detected |
 
 ## Runtime deployment
+
+Gurobi is never bundled. When its headers and library are detected at build
+time and `GRBloadenv()` can initialize a valid runtime licence, it is the
+preferred LP/QP/MILP backend. Missing installation, missing/expired licence,
+or a failed solve automatically falls back to bundled HiGHS and native
+solvers when `SolveOptions::allow_fallback` is true (the default). Set
+`MIPSOLVERS_USE_GUROBI=OFF` for a package that must not link Gurobi.
 
 ### macOS
 
@@ -300,11 +314,12 @@ For a release candidate:
 
 1. Configure in a new build directory with
    `MIPSOLVERS_USE_PREBUILT_THIRD_PARTY=OFF` and confirm no download activity.
-2. Build and run `ctest -L unit` with PaPILO disabled.
-3. Build and test once with `MIPSOLVERS_FORCE_VENDORED_BLAS=ON`.
-4. Build the third-party-only package, then configure another new directory
+2. Build and run `ctest -L unit` with the default bundled PaPILO enabled.
+3. Repeat with `MIPSOLVERS_USE_PAPILO=OFF` to validate native presolve fallback.
+4. Build and test once with `MIPSOLVERS_FORCE_VENDORED_BLAS=ON`.
+5. Build the third-party-only package, then configure another new directory
    with `MIPSOLVERS_USE_PREBUILT_THIRD_PARTY=ON` and run the unit tests.
-5. Inspect the final executable with `otool -L`, `ldd`, or
+6. Inspect the final executable with `otool -L`, `ldd`, or
    `dumpbin /DEPENDENTS`; static-library inspection alone is insufficient.
-6. Repeat the Windows build on the deployment toolchain. Cross-platform CMake
+7. Repeat the Windows build on the deployment toolchain. Cross-platform CMake
    configuration from macOS or Linux does not validate MSVC/ifx ABI behavior.

@@ -455,7 +455,7 @@ print(mipsolvers.engine.list_solvers("NLP"))
 | `Ipopt` | NLP / MINLP | 内置非线性求解器 |
 | `Auto` | 任意 | 按内置优先级自动选择 |
 
-> **`"Auto"` 优先级（MILP）**：StrictHiGHS → HiGHS → Gurobi → NativeBranchAndCut
+> **`"Auto"` 优先级（MILP）**：Gurobi → StrictHiGHS → HiGHS → NativeBranchAndCut
 
 ---
 

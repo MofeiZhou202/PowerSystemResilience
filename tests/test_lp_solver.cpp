@@ -10,6 +10,11 @@
 
 #include "mipsolvers/engine/api/solver.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/solver/external/adapters.hpp"
+
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+#include "Highs.h"
+#endif
 
 using namespace mipsolvers::engine;
 using Catch::Approx;
@@ -74,6 +79,37 @@ TEST_CASE("LP: 1-variable bounded", "[lp]") {
       }
     }
   }
+}
+
+TEST_CASE("LP: HiGHS adapter resets a preinitialized global scheduler",
+          "[lp][highs][scheduler]") {
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+  Highs::resetGlobalScheduler(/*blocking=*/true);
+  {
+    Highs initializer;
+    REQUIRE(initializer.setOptionValue("output_flag", false) == HighsStatus::kOk);
+    REQUIRE(initializer.setOptionValue("threads", 2) == HighsStatus::kOk);
+    REQUIRE(initializer.run() == HighsStatus::kOk);
+  }
+
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Constant(1, -1.0);
+  lp.A.resize(1, 1);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Constant(1, 5.0);
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, 0.0, 1e20});
+
+  const auto result = HighsAdapter{}.solve_lp(lp);
+  REQUIRE(result.stats.success);
+  CHECK(result.x[0] == Approx(5.0).margin(1e-8));
+  Highs::resetGlobalScheduler(/*blocking=*/true);
+#else
+  SUCCEED("Embedded HiGHS is not enabled");
+#endif
 }
 
 // ─── 2-variable LP: classic example ───────────────────────────────────────

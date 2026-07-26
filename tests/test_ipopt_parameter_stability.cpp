@@ -270,7 +270,7 @@ TEST_CASE("Ipopt handles active bounds without synthetic Jacobian entries",
   CHECK(result.x[0] == Approx(0.0).margin(1e-7));
 }
 
-TEST_CASE("Ipopt solves moderate scaling and rejects twelve-order false convergence",
+TEST_CASE("Ipopt solves moderate scaling and reports extreme-scaling termination",
           "[ipopt][stability][scaling]") {
   IpoptAdapter ipopt;
   for (const double scale : {1.0, 10.0, 100.0, 1000.0}) {
@@ -297,7 +297,9 @@ TEST_CASE("Ipopt solves moderate scaling and rejects twelve-order false converge
   require_finite_stats(extreme);
   CHECK_FALSE(extreme.stats.success);
   CHECK(extreme.stats.status == "Ipopt search direction too small");
-  CHECK(extreme.stats.unscaled_dual_feas > 1e-8);
+  CHECK(extreme.stats.unscaled_primal_feas <= 1e-8);
+  CHECK(extreme.stats.unscaled_dual_feas <= 1e-8);
+  CHECK(extreme.stats.unscaled_complementarity <= 1e-8);
 }
 
 TEST_CASE("Ipopt reports finite diagnostics for nearly dependent equalities",

@@ -24,6 +24,7 @@
 /// integrality violation) computed independently from the returned x.
 ///
 /// Usage:
+///   native_kernel_comparison --smoke         # deterministic 6-bus CTest case
 ///   native_kernel_comparison                 # quick cases
 ///   native_kernel_comparison --full          # + 118-bus/24T MILP + SCUC LPs
 ///   native_kernel_comparison --time-limit 60 # per-solve wall clock cap
@@ -1032,6 +1033,7 @@ int run_warm_probe(bool use_118) {
 
 int main(int argc, char** argv) {
     bool   full_mode      = false;
+    bool   smoke_mode     = false;
     bool   skip_milp      = false;
     bool   skip_lp        = false;
     bool   check_mode     = false;
@@ -1041,7 +1043,9 @@ int main(int argc, char** argv) {
                                 // through natDualSimplex (fast profiling loop)
     double time_limit_sec = 120.0;
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--full") == 0) {
+        if (std::strcmp(argv[i], "--smoke") == 0) {
+            smoke_mode = true;
+        } else if (std::strcmp(argv[i], "--full") == 0) {
             full_mode = true;
         } else if (std::strcmp(argv[i], "--skip-milp") == 0) {
             skip_milp = true;
@@ -1104,19 +1108,19 @@ int main(int argc, char** argv) {
             inp.config.solve_lmp  = false;
             cases.push_back({"UC_6bus_3G_4T", std::move(inp)});
         }
-        {
+        if (!smoke_mode) {
             SCUCInput inp = build_ieee39_case(/*T=*/4);
             inp.config.solve_sced = false;
             inp.config.solve_lmp  = false;
             cases.push_back({"UC_39bus_10G_4T", std::move(inp)});
         }
-        {
+        if (!smoke_mode) {
             SCUCInput inp = build_ieee39_case(/*T=*/24);
             inp.config.solve_sced = false;
             inp.config.solve_lmp  = false;
             cases.push_back({"UC_39bus_10G_24T", std::move(inp)});
         }
-        if (full_mode) {
+        if (full_mode && !smoke_mode) {
             SCUCInput inp = build_ieee118_case(/*T=*/24);
             inp.config.solve_sced = false;
             inp.config.solve_lmp  = false;
@@ -1230,13 +1234,13 @@ int main(int argc, char** argv) {
             inp.config.solve_lmp  = false;
             run_relax("UC_6bus_4T-relax", inp);
         }
-        {
+        if (!smoke_mode) {
             SCUCInput inp = build_ieee39_case(24);
             inp.config.solve_sced = false;
             inp.config.solve_lmp  = false;
             run_relax("UC_39bus_24T-relax", inp);
         }
-        if (full_mode) {
+        if (full_mode && !smoke_mode) {
             SCUCInput inp = build_ieee118_case(24);
             inp.config.solve_sced = false;
             inp.config.solve_lmp  = false;

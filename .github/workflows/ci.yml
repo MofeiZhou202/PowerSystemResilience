@@ -13,14 +13,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install Ubuntu dependencies
+      - name: Install compiler dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libeigen3-dev \
-            libfmt-dev \
-            nlohmann-json3-dev \
-            catch2 \
+            gfortran \
             python3
 
       - name: Configure
@@ -32,6 +29,9 @@ jobs:
           -DMIPSOLVERS_BUILD_SCUC=OFF
           -DMIPSOLVERS_BUILD_SCUC_CASE_BUILDER=OFF
           -DMIPSOLVERS_ENABLE_WERROR=OFF
+          -DCMAKE_DISABLE_FIND_PACKAGE_Eigen3=TRUE
+          -DCMAKE_DISABLE_FIND_PACKAGE_fmt=TRUE
+          -DCMAKE_DISABLE_FIND_PACKAGE_nlohmann_json=TRUE
 
       - name: Build
         run: cmake --build build --parallel 2
@@ -65,9 +65,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install macOS dependencies
+      - name: Install compiler dependencies
         run: |
-          brew install eigen fmt nlohmann-json catch2 python3 gcc
+          brew install python3 gcc
 
       - name: Locate gfortran
         run: |
@@ -98,6 +98,9 @@ jobs:
           -DMIPSOLVERS_BUILD_SCUC=OFF
           -DMIPSOLVERS_BUILD_SCUC_CASE_BUILDER=OFF
           -DMIPSOLVERS_ENABLE_WERROR=OFF
+          -DCMAKE_DISABLE_FIND_PACKAGE_Eigen3=TRUE
+          -DCMAKE_DISABLE_FIND_PACKAGE_fmt=TRUE
+          -DCMAKE_DISABLE_FIND_PACKAGE_nlohmann_json=TRUE
 
       - name: Build
         run: cmake --build build --parallel 3
@@ -131,20 +134,18 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install Windows dependencies (vcpkg)
-        run: vcpkg install --triplet x64-windows eigen3 fmt nlohmann-json catch2
-
       - name: Configure Windows build
         shell: pwsh
         run: |
           cmake -S . -B build-win -A x64 `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DMIPSOLVERS_BUILD_TESTS=ON `
             -DMIPSOLVERS_BUILD_PYTHON=OFF `
             -DMIPSOLVERS_BUILD_SCUC=ON `
             -DMIPSOLVERS_BUILD_SCUC_CASE_BUILDER=OFF `
-            -DMIPSOLVERS_ENABLE_WERROR=OFF
+            -DMIPSOLVERS_ENABLE_WERROR=OFF `
+            -DCMAKE_DISABLE_FIND_PACKAGE_Eigen3=TRUE `
+            -DCMAKE_DISABLE_FIND_PACKAGE_fmt=TRUE `
+            -DCMAKE_DISABLE_FIND_PACKAGE_nlohmann_json=TRUE
 
       - name: Build Windows targets
         shell: pwsh

@@ -25,6 +25,7 @@
 ///   Seed+A/B[S]  : NativeSeed[S] + warm-start incumbent
 ///
 /// Usage:
+///   milp_benchmark_runner --smoke          # deterministic 6-bus CTest case
 ///   milp_benchmark_runner                  # quick (6G/4T + 10G/24T)
 ///   milp_benchmark_runner --full           # + 10G/4T + 39-bus/24T + 118-bus
 ///   milp_benchmark_runner --json out.json  # write JSON result
@@ -1291,6 +1292,7 @@ static int run_production_118_test(double time_limit_sec,
 int main(int argc, char** argv)
 {
     bool        full_mode           = false;
+    bool        smoke_mode          = false;
     bool        large_only          = false;
     bool        gurobi_start_mode   = false;
     bool        two_phase_mode      = false;
@@ -1305,7 +1307,9 @@ int main(int argc, char** argv)
     std::string json_path;
 
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--full") == 0) {
+        if (std::strcmp(argv[i], "--smoke") == 0) {
+            smoke_mode = true;
+        } else if (std::strcmp(argv[i], "--full") == 0) {
             full_mode = true;
         } else if (std::strcmp(argv[i], "--large-only") == 0) {
             full_mode  = true;   // implies --full
@@ -1374,7 +1378,8 @@ int main(int argc, char** argv)
 
     std::printf("=== MIPSolvers MILP benchmark — A/B/H improvement test ===\n");
     std::printf("Mode: %s  Time limit: %.0fs per run\n\n",
-                full_mode ? "full" : "quick", time_limit);
+                smoke_mode ? "smoke" : (full_mode ? "full" : "quick"),
+                time_limit);
 
     // ── Build test cases ──────────────────────────────────────────────────────
 
@@ -1387,7 +1392,7 @@ int main(int argc, char** argv)
         inp.config.solve_lmp  = false;
         cases.push_back({"UC_6bus_3G_4T", std::move(inp)});
     }
-    if (!large_only) {
+    if (!large_only && !smoke_mode) {
         SCUCInput inp = build_ieee39_case(/*T=*/24);
         inp.config.solve_sced = false;
         inp.config.solve_lmp  = false;
@@ -1395,7 +1400,7 @@ int main(int argc, char** argv)
     }
 
     // Full cases (added when --full is given)
-    if (full_mode) {
+    if (full_mode && !smoke_mode) {
         {
             SCUCInput inp = build_ieee39_case(/*T=*/4);
             inp.config.solve_sced = false;

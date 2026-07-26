@@ -1724,6 +1724,10 @@ const std::string& HighsAdapter::executable() const {
 SolveResult HighsAdapter::solve_lp(const LPModel& prob) const {
   const auto t0 = std::chrono::steady_clock::now();
 #ifdef HACDCPF_HAVE_HIGHS_LIB
+  // A previous MILP solve can initialize HiGHS's process-global scheduler
+  // with a different thread count. Reset it before the LP helper requests its
+  // deterministic single-thread configuration.
+  Highs::resetGlobalScheduler(/*blocking=*/true);
   if (auto embedded = solve_lp_with_embedded_highs(prob, false, name(), nullptr)) {
     return *embedded;
   }

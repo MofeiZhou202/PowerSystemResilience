@@ -844,8 +844,8 @@ Selection order when `preferred_solver` is `""` (Auto):
 1. If the user set a per-class preference via `set_solver_preference`, that
    adapter is tried first.
 2. Otherwise, `StrategyPolicy` governs the ordering:
-   - `Auto` — MILP uses `StrictHiGHS` first, then direct `HiGHS`, `Gurobi`,
-     and `NativeBranchAndCut` as fallbacks.
+   - `Auto` — LP/QP/MILP prefer an installed/licensed `Gurobi`; MILP then
+     falls back to `StrictHiGHS`, direct `HiGHS`, and `NativeBranchAndCut`.
    - `NativeFirst` — all native adapters come before external ones.
    - `ExternalFirst` — external adapters (Gurobi, HiGHS) come before native.
 3. If the chosen adapter fails and `allow_fallback = true`, the dispatcher
@@ -923,4 +923,3 @@ objective values and cut counts at equal or lower wall-clock times.
 | IEEE-39 T=24 full | 0.131 | 0.087 | 0.077 | 891 465.7 | 900 |
 
 MIP gap = 0.000 % for all cases; 261 assertions across all test binaries pass.
-

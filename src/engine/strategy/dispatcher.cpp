@@ -70,17 +70,13 @@ std::vector<std::string> default_priority_for(ProblemClass cls) {
     case ProblemClass::NLE:
       return {"NativeNewton"};
     case ProblemClass::LP:
-      // Keep LP default behavior: native IPM-LP first.
-      return {"NativeIPMLP", "NativePDLP", "NativeLCQP", "Gurobi", "HiGHS"};
+      return {"Gurobi", "NativeIPMLP", "NativePDLP", "NativeLCQP", "HiGHS"};
     case ProblemClass::QP:
       return {"Gurobi", "NativeLCQP"};
     case ProblemClass::NLP:
       return {"Ipopt", "NativeIPM", "NativeNLP"};
     case ProblemClass::MILP:
-      // Production MILP default: use the embedded StrictHiGHS state machine
-      // first so MIP starts, callbacks, status mapping, and option plumbing
-      // follow the same bounded deployment contract.
-      return {"StrictHiGHS", "HiGHS", "Gurobi", "NativeBranchAndCut"};
+      return {"Gurobi", "StrictHiGHS", "HiGHS", "NativeBranchAndCut"};
     case ProblemClass::MINLP:
       return {"Scip", "NativeBranchAndCut"};
     case ProblemClass::CONIC:

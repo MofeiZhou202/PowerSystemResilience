@@ -334,7 +334,7 @@ std::ofstream("/tmp/ieee39_24h.json") << json;
 
 > **说明**：
 > - SCIP 在本框架中仅支持 MINLP，不参与 MILP 调度。
-> - Auto 模式（`solver="Auto"`）默认优先选用 StrictHiGHS（含生产级参数），如不可用则依次回退到 HiGHS → Gurobi → NativeBranchAndCut。
+> - Auto 模式（`solver="Auto"`）默认优先选用已安装且许可证有效的 Gurobi，如不可用则依次回退到 StrictHiGHS → HiGHS → NativeBranchAndCut。
 > - MIP 间隙均为 0.000%，所有算例均收敛，切负荷为零。
 > - 「风+光」目标函数（891,466 $）低于纯风案例（976,359 $）：光伏日间出力替代了高价调峰机组。
 > - 「风+光+储」在风+光基础上添加 2 台电池（bus 3: 200 MW/800 MWh，bus 19: 150 MW/600 MWh），目标函数不变，割平面增 2 条。

@@ -117,7 +117,7 @@
 
 | 字段 | 类型 | 默认值 | 有效范围 | 说明 |
 |------|------|--------|----------|------|
-| `solver` | `string` | `"Auto"` | `"Auto"`, `"StrictHiGHS"`, `"Gurobi"`, `"HiGHS"`, `"NativeBranchAndCut"`, `"SCIP"` | MILP 求解器。`"Auto"` 优先级：StrictHiGHS → HiGHS → Gurobi → NativeBranchAndCut；`"SCIP"` 仅支持 MINLP 不适用于 MILP 调度 |
+| `solver` | `string` | `"Auto"` | `"Auto"`, `"StrictHiGHS"`, `"Gurobi"`, `"HiGHS"`, `"NativeBranchAndCut"`, `"SCIP"` | MILP 求解器。`"Auto"` 优先级：Gurobi → StrictHiGHS → HiGHS → NativeBranchAndCut；`"SCIP"` 仅支持 MINLP 不适用于 MILP 调度 |
 | `allow_fallback` | `bool` | `true` | — | 主求解器失败时是否自动降级 |
 | `num_periods` | `int` | `24` | ≥ 1 | 时间步数 T |
 | `period_length_hr` | `float` | `1.0` | > 0 | 每个时间步的小时数 Δt |

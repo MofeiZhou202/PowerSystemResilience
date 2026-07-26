@@ -1,0 +1,10 @@
+# Boost headers for bundled PaPILO
+
+- Upstream: https://www.boost.org/
+- Version: 1.90.0
+- License: Boost Software License 1.0 (`LICENSE_1_0.txt`)
+
+This is the transitive, header-only subset used by PaPILO 3.0.0. It contains
+all textual Boost include dependencies plus generated/preprocessed headers for
+the supported compiler families. No Boost binary library is included or
+linked.
