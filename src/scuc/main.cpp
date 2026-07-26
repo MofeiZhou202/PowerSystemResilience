@@ -20,7 +20,7 @@ static void print_usage(const char* progname) {
   std::cerr
     << "Usage: " << progname
     << " <input.json> [output.json]"
-    << " [--solver <Auto|StrictHiGHS|Gurobi|HiGHS|SCIP|NativeBranchAndCut>]"
+    << " [--solver <Auto|StrictHiGHS|HiGHS|SCIP|NativeBranchAndCut>]"
     << " [--no-sced] [--no-lmp]"
     << " [--indent <n>]\n"
     << "\n"
@@ -30,7 +30,6 @@ static void print_usage(const char* progname) {
     << "  HiGHS               — direct open-source LP/MILP (HiGHS)\n"
     << "  SCIP                — open-source MILP/MINLP (SCIP)\n"
     << "  NativeBranchAndCut  — built-in B&C in MIPSolvers\n"
-    << "  Gurobi              — commercial MILP (requires licence)\n"
     << "\n"
     << "The input JSON must contain at minimum:\n"
     << "  config        — solver settings (optional; defaults shown below)\n"

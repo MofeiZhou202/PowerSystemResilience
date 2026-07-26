@@ -142,8 +142,8 @@ TEST_CASE("SolverEngine adapter registration", "[engine][api]") {
   CHECK_FALSE(eng.list_solvers(ProblemClass::LP).empty());
 }
 
-TEST_CASE("Gurobi is preferred and packaged LP fallback remains automatic",
-          "[engine][api][gurobi][fallback]") {
+TEST_CASE("Auto dispatch excludes Gurobi while explicit fallback remains available",
+          "[engine][api][dispatch][fallback]") {
   auto gurobi_calls = std::make_shared<int>(0);
   auto native_calls = std::make_shared<int>(0);
   SolverEngine eng(false);
@@ -154,8 +154,8 @@ TEST_CASE("Gurobi is preferred and packaged LP fallback remains automatic",
 
   const auto listed = eng.list_solvers(ProblemClass::LP);
   REQUIRE(listed.size() == 2);
-  CHECK(listed[0] == "Gurobi");
-  CHECK(listed[1] == "NativeIPMLP");
+  CHECK(listed[0] == "NativeIPMLP");
+  CHECK(listed[1] == "Gurobi");
 
   SolveOptions options;
   options.preferred_solver = "Gurobi";

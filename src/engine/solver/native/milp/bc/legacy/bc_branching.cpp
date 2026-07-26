@@ -27,9 +27,10 @@ double directional_branch_cost(const PseudoCost& pseudocost,
   return std::max(fractionality * std::max(base + offset, eps) * history, eps);
 }
 
+template <typename PseudoCosts>
 double pseudocost_branch_score(int j,
                                const Eigen::VectorXd& x,
-                               const std::vector<PseudoCost>& pc) {
+                               const PseudoCosts& pc) {
   const double frac = x[j] - std::floor(x[j]);
   const double qd = directional_branch_cost(pc[j], frac, false);
   const double qu = directional_branch_cost(pc[j], 1.0 - frac, true);
@@ -100,11 +101,12 @@ double most_infeasible_score(int j, const Eigen::VectorXd& x) {
   return 0.5 - std::abs(frac - 0.5);
 }
 
+template <typename PseudoCosts>
 double base_branch_score(BranchingStrategy strategy,
                          int ordinal,
                          int j,
                          const Eigen::VectorXd& x,
-                         const std::vector<PseudoCost>& pc) {
+                         const PseudoCosts& pc) {
   switch (strategy) {
     case BranchingStrategy::FirstFractional:
       return -static_cast<double>(ordinal) * 1e-9;
@@ -116,10 +118,11 @@ double base_branch_score(BranchingStrategy strategy,
   }
 }
 
+template <typename PseudoCosts>
 int choose_branch_var_with_dynamic_prior(const BCOptions& opt,
                                          const std::vector<int>& cand,
                                          const Eigen::VectorXd& x,
-                                         const std::vector<PseudoCost>& pc,
+                                         const PseudoCosts& pc,
                                          const std::vector<int>& priority,
                                          const BCBranchingPriorFn& dynamic_prior,
                                          const BCBranchContext& context) {
@@ -161,6 +164,14 @@ double compute_branch_var_score(int j,
   return pseudocost_branch_score(j, x, pc);
 }
 
+double compute_branch_var_score(int j,
+                                const Eigen::VectorXd& x,
+                                const CompactPseudoCostTable& pc,
+                                const std::vector<int>* priority) {
+  (void)priority;
+  return pseudocost_branch_score(j, x, pc);
+}
+
 int choose_branch_var_most_infeasible(const std::vector<int>& cand,
                                       const Eigen::VectorXd& x) {
   int best = cand.front();
@@ -179,6 +190,21 @@ int choose_branch_var_most_infeasible(const std::vector<int>& cand,
 int choose_branch_var_pseudocost(const std::vector<int>& cand,
                                  const Eigen::VectorXd& x,
                                  const std::vector<PseudoCost>& pc) {
+  int best = cand.front();
+  double best_score = -1.0;
+  for (int j : cand) {
+    const double score = pseudocost_branch_score(j, x, pc);
+    if (score > best_score) {
+      best_score = score;
+      best = j;
+    }
+  }
+  return best;
+}
+
+int choose_branch_var_pseudocost(const std::vector<int>& cand,
+                                 const Eigen::VectorXd& x,
+                                 const CompactPseudoCostTable& pc) {
   int best = cand.front();
   double best_score = -1.0;
   for (int j : cand) {
@@ -213,7 +239,41 @@ int choose_branch_var_pseudocost(const std::vector<int>& cand,
 
 int choose_branch_var_pseudocost(const std::vector<int>& cand,
                                  const Eigen::VectorXd& x,
+                                 const CompactPseudoCostTable& pc,
+                                 const std::vector<int>& priority) {
+  if (priority.empty()) return choose_branch_var_pseudocost(cand, x, pc);
+  int best = cand.front();
+  double best_score = -1.0;
+  int best_priority = branch_priority_value(best, priority);
+  for (int j : cand) {
+    const int prio = branch_priority_value(j, priority);
+    const double score = pseudocost_branch_score(j, x, pc);
+    if (prio > best_priority || (prio == best_priority && score > best_score)) {
+      best_score = score;
+      best = j;
+      best_priority = prio;
+    }
+  }
+  return best;
+}
+
+int choose_branch_var_pseudocost(const std::vector<int>& cand,
+                                 const Eigen::VectorXd& x,
                                  const std::vector<PseudoCost>& pc,
+                                 const std::vector<int>& priority,
+                                 const BCBranchingPriorFn& dynamic_prior,
+                                 const BCBranchContext& context) {
+  if (cand.empty()) return -1;
+  if (!dynamic_prior) return choose_branch_var_pseudocost(cand, x, pc, priority);
+  BCOptions opt;
+  opt.branching = BranchingStrategy::Pseudocost;
+  return choose_branch_var_with_dynamic_prior(
+      opt, cand, x, pc, priority, dynamic_prior, context);
+}
+
+int choose_branch_var_pseudocost(const std::vector<int>& cand,
+                                 const Eigen::VectorXd& x,
+                                 const CompactPseudoCostTable& pc,
                                  const std::vector<int>& priority,
                                  const BCBranchingPriorFn& dynamic_prior,
                                  const BCBranchContext& context) {
@@ -232,6 +292,22 @@ int choose_branch_var(const BCOptions& opt,
   if (cand.empty()) {
     return -1;
   }
+  switch (opt.branching) {
+    case BranchingStrategy::FirstFractional:
+      return cand.front();
+    case BranchingStrategy::MostInfeasible:
+      return choose_branch_var_most_infeasible(cand, x);
+    case BranchingStrategy::Pseudocost:
+    default:
+      return choose_branch_var_pseudocost(cand, x, pc);
+  }
+}
+
+int choose_branch_var(const BCOptions& opt,
+                      const std::vector<int>& cand,
+                      const Eigen::VectorXd& x,
+                      const CompactPseudoCostTable& pc) {
+  if (cand.empty()) return -1;
   switch (opt.branching) {
     case BranchingStrategy::FirstFractional:
       return cand.front();
@@ -265,6 +341,23 @@ int choose_branch_var(const BCOptions& opt,
 int choose_branch_var(const BCOptions& opt,
                       const std::vector<int>& cand,
                       const Eigen::VectorXd& x,
+                      const CompactPseudoCostTable& pc,
+                      const std::vector<int>& priority) {
+  if (cand.empty()) return -1;
+  switch (opt.branching) {
+    case BranchingStrategy::FirstFractional:
+      return cand.front();
+    case BranchingStrategy::MostInfeasible:
+      return choose_branch_var_most_infeasible(cand, x);
+    case BranchingStrategy::Pseudocost:
+    default:
+      return choose_branch_var_pseudocost(cand, x, pc, priority);
+  }
+}
+
+int choose_branch_var(const BCOptions& opt,
+                      const std::vector<int>& cand,
+                      const Eigen::VectorXd& x,
                       const std::vector<PseudoCost>& pc,
                       const std::vector<int>& priority,
                       const BCBranchingPriorFn& dynamic_prior,
@@ -279,10 +372,24 @@ int choose_branch_var(const BCOptions& opt,
       opt, cand, x, pc, priority, dynamic_prior, context);
 }
 
-int choose_branch_var_reliability(
+int choose_branch_var(const BCOptions& opt,
+                      const std::vector<int>& cand,
+                      const Eigen::VectorXd& x,
+                      const CompactPseudoCostTable& pc,
+                      const std::vector<int>& priority,
+                      const BCBranchingPriorFn& dynamic_prior,
+                      const BCBranchContext& context) {
+  if (cand.empty()) return -1;
+  if (!dynamic_prior) return choose_branch_var(opt, cand, x, pc, priority);
+  return choose_branch_var_with_dynamic_prior(
+      opt, cand, x, pc, priority, dynamic_prior, context);
+}
+
+template <typename PseudoCosts>
+int choose_branch_var_reliability_impl(
     const std::vector<int>& cand,
     const Eigen::VectorXd& x,
-    std::vector<PseudoCost>& pc,
+    PseudoCosts& pc,
     const LPModel& base_lp,
     const StandardFormLP& base_sf,
     const Eigen::VectorXd& node_lb,
@@ -329,6 +436,8 @@ int choose_branch_var_reliability(
     });
     const int probes = std::min(effective_probes, static_cast<int>(unreliable.size()));
     StandardFormLP probe_sf = base_sf;
+    Eigen::VectorXd probe_lb = node_lb;
+    Eigen::VectorXd probe_ub = node_ub;
 
     for (int k = 0; k < probes; ++k) {
       const int j = unreliable[k];
@@ -337,10 +446,10 @@ int choose_branch_var_reliability(
 
       // Probe down branch: ub[j] = floor(xj)
       {
-        Eigen::VectorXd plb = node_lb, pub = node_ub;
-        pub[j] = std::min(pub[j], floor_xj);
-        if (bounds_consistent(plb, pub)) {
-          update_standard_form_bounds(probe_sf, base_lp, plb, pub);
+        const double saved_ub = probe_ub[j];
+        probe_ub[j] = std::min(probe_ub[j], floor_xj);
+        if (probe_lb[j] <= probe_ub[j] + 1e-12) {
+          update_standard_form_bounds(probe_sf, base_lp, probe_lb, probe_ub);
           auto res = solve_lp_from_sf(probe_sf, simplex_opt, basis_hint);
           ++lp_solves;
           if (res.result.stats.success) {
@@ -357,14 +466,15 @@ int choose_branch_var_reliability(
             pc[j].add_down(1e6);
           }
         }
+        probe_ub[j] = saved_ub;
       }
 
       // Probe up branch: lb[j] = ceil(xj)
       {
-        Eigen::VectorXd plb = node_lb, pub = node_ub;
-        plb[j] = std::max(plb[j], floor_xj + 1.0);
-        if (bounds_consistent(plb, pub)) {
-          update_standard_form_bounds(probe_sf, base_lp, plb, pub);
+        const double saved_lb = probe_lb[j];
+        probe_lb[j] = std::max(probe_lb[j], floor_xj + 1.0);
+        if (probe_lb[j] <= probe_ub[j] + 1e-12) {
+          update_standard_form_bounds(probe_sf, base_lp, probe_lb, probe_ub);
           auto res = solve_lp_from_sf(probe_sf, simplex_opt, basis_hint);
           ++lp_solves;
           if (res.result.stats.success) {
@@ -381,11 +491,54 @@ int choose_branch_var_reliability(
             pc[j].add_up(1e6);
           }
         }
+        probe_lb[j] = saved_lb;
       }
     }
   }
 
   return choose_branch_var_pseudocost(cand, x, pc);
+}
+
+int choose_branch_var_reliability(
+    const std::vector<int>& cand,
+    const Eigen::VectorXd& x,
+    std::vector<PseudoCost>& pc,
+    const LPModel& base_lp,
+    const StandardFormLP& base_sf,
+    const Eigen::VectorXd& node_lb,
+    const Eigen::VectorXd& node_ub,
+    const SimplexBasis* basis_hint,
+    const SimplexOptions& simplex_opt,
+    double parent_bound,
+    int& lp_solves,
+    int node_depth,
+    int reliability_limit,
+    int max_probes) {
+  return choose_branch_var_reliability_impl(
+      cand, x, pc, base_lp, base_sf, node_lb, node_ub, basis_hint,
+      simplex_opt, parent_bound, lp_solves, node_depth, reliability_limit,
+      max_probes);
+}
+
+int choose_branch_var_reliability(
+    const std::vector<int>& cand,
+    const Eigen::VectorXd& x,
+    CompactPseudoCostTable& pc,
+    const LPModel& base_lp,
+    const StandardFormLP& base_sf,
+    const Eigen::VectorXd& node_lb,
+    const Eigen::VectorXd& node_ub,
+    const SimplexBasis* basis_hint,
+    const SimplexOptions& simplex_opt,
+    double parent_bound,
+    int& lp_solves,
+    int node_depth,
+    int reliability_limit,
+    int max_probes) {
+  return choose_branch_var_reliability_impl(
+      cand, x, pc, base_lp, base_sf, node_lb, node_ub, basis_hint,
+      simplex_opt, parent_bound, lp_solves, node_depth, reliability_limit,
+      max_probes);
 }
 
 double compute_node_estimate(const std::vector<VariableMeta>& vars,
@@ -415,6 +568,72 @@ double compute_node_estimate(const std::vector<VariableMeta>& vars,
     estimate += std::min(down, up);
   }
 
+  return std::max(node_bound, estimate);
+}
+
+double compute_node_estimate(const std::vector<int>& branchable_cols,
+                             const Eigen::VectorXd& x,
+                             const std::vector<PseudoCost>& pc,
+                             double int_tol,
+                             double node_bound) {
+  if (!std::isfinite(node_bound)) return kInf;
+
+  int fractional_count = 0;
+  for (int j : branchable_cols) {
+    if (j >= 0 && j < x.size() && j < static_cast<int>(pc.size()) &&
+        !is_integral(x[j], int_tol)) {
+      ++fractional_count;
+    }
+  }
+  if (fractional_count == 0) return node_bound;
+
+  const double offset = std::max(
+      1e-6,
+      int_tol * std::max(1.0, std::abs(node_bound)) / fractional_count);
+  double estimate = node_bound;
+  for (int j : branchable_cols) {
+    if (j < 0 || j >= x.size() || j >= static_cast<int>(pc.size()) ||
+        is_integral(x[j], int_tol)) {
+      continue;
+    }
+    const double frac_part = x[j] - std::floor(x[j]);
+    const double down = directional_branch_cost(pc[j], frac_part, false, offset);
+    const double up = directional_branch_cost(pc[j], 1.0 - frac_part, true, offset);
+    estimate += std::min(down, up);
+  }
+  return std::max(node_bound, estimate);
+}
+
+double compute_node_estimate(const std::vector<int>& branchable_cols,
+                             const Eigen::VectorXd& x,
+                             const CompactPseudoCostTable& pc,
+                             double int_tol,
+                             double node_bound) {
+  if (!std::isfinite(node_bound)) return kInf;
+
+  int fractional_count = 0;
+  for (int j : branchable_cols) {
+    if (j >= 0 && j < x.size() && j < static_cast<int>(pc.size()) &&
+        !is_integral(x[j], int_tol)) {
+      ++fractional_count;
+    }
+  }
+  if (fractional_count == 0) return node_bound;
+
+  const double offset = std::max(
+      1e-6,
+      int_tol * std::max(1.0, std::abs(node_bound)) / fractional_count);
+  double estimate = node_bound;
+  for (int j : branchable_cols) {
+    if (j < 0 || j >= x.size() || j >= static_cast<int>(pc.size()) ||
+        is_integral(x[j], int_tol)) {
+      continue;
+    }
+    const double frac_part = x[j] - std::floor(x[j]);
+    const double down = directional_branch_cost(pc[j], frac_part, false, offset);
+    const double up = directional_branch_cost(pc[j], 1.0 - frac_part, true, offset);
+    estimate += std::min(down, up);
+  }
   return std::max(node_bound, estimate);
 }
 

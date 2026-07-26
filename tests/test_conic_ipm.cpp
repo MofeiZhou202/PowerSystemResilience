@@ -127,6 +127,48 @@ ConicModel make_mixed_model() {
   return cm;
 }
 
+/// Sparse path-graph SDP:
+///   min x  s.t. [[x,a,0,0],[a,1,a,0],[0,a,1,a],[0,0,a,1]] psd.
+/// Its chordal extension has maximal cliques {0,1}, {1,2}, {2,3}.
+ConicModel make_chordal_path_model(double a) {
+  constexpr int p = 4;
+  ConicModel cm;
+  cm.c = Eigen::VectorXd::Ones(1);
+  cm.G = make_sparse(svec_size(p), 1,
+                     {{svec_index(0, 0, p), 0, -1.0}});
+  cm.h = Eigen::VectorXd::Zero(svec_size(p));
+  for (int i = 1; i < p; ++i) cm.h[svec_index(i, i, p)] = 1.0;
+  for (int i = 1; i < p; ++i) {
+    cm.h[svec_index(i, i - 1, p)] = std::sqrt(2.0) * a;
+  }
+  cm.A.resize(0, 1);
+  cm.b.resize(0);
+  cm.dims.s = {p};
+  return cm;
+}
+
+/// Non-chordal four-cycle SDP: min x subject to x*I + a*Adj(C4) psd.
+/// A chordal extension adds one diagonal and produces two order-3 cliques.
+ConicModel make_chordal_cycle_model(double a) {
+  constexpr int p = 4;
+  ConicModel cm;
+  cm.c = Eigen::VectorXd::Ones(1);
+  std::vector<std::tuple<int, int, double>> gtriplets;
+  for (int i = 0; i < p; ++i) {
+    gtriplets.emplace_back(svec_index(i, i, p), 0, -1.0);
+  }
+  cm.G = make_sparse(svec_size(p), 1, gtriplets);
+  cm.h = Eigen::VectorXd::Zero(svec_size(p));
+  for (const auto [i, j] :
+       std::vector<std::pair<int, int>>{{1, 0}, {2, 1}, {3, 2}, {3, 0}}) {
+    cm.h[svec_index(i, j, p)] = std::sqrt(2.0) * a;
+  }
+  cm.A.resize(0, 1);
+  cm.b.resize(0);
+  cm.dims.s = {p};
+  return cm;
+}
+
 }  // namespace
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -443,6 +485,101 @@ TEST_CASE("conic ipm: SDP min X11 with fixed off-diagonal", "[conic][ipm]") {
   const Eigen::VectorXd rc = cm.G.transpose() * res.z + cm.c;
   CHECK(rc.cwiseAbs().maxCoeff() < 1e-6);
   CHECK(res.gap < 1e-6);
+}
+
+TEST_CASE("conic ipm: exact chordal decomposition of sparse SDP",
+          "[conic][ipm][chordal]") {
+  constexpr double a = 0.2;
+  const ConicModel cm = make_chordal_path_model(a);
+
+  ConicIPMOptions dense_options;
+  dense_options.chordal_decomposition = false;
+  const ConicIPMResult dense = ConicIPMSolver(dense_options).solve(cm);
+  REQUIRE(dense.status == "optimal");
+
+  ConicIPMOptions chordal_options;
+  chordal_options.chordal_min_order = 2;
+  chordal_options.chordal_max_clique_ratio = 0.9;
+  chordal_options.chordal_max_expansion_ratio = 3.0;
+  const ConicIPMResult chordal = ConicIPMSolver(chordal_options).solve(cm);
+  REQUIRE(chordal.status == "optimal");
+  REQUIRE(chordal.chordal_decomposition_used);
+  CHECK(chordal.chordal_clique_count == 3);
+  CHECK(chordal.chordal_max_clique_order == 2);
+  REQUIRE(chordal.x.size() == 1);
+  REQUIRE(chordal.s.size() == svec_size(4));
+  REQUIRE(chordal.z.size() == svec_size(4));
+
+  Eigen::Matrix3d trailing = Eigen::Matrix3d::Identity();
+  trailing(0, 1) = trailing(1, 0) = a;
+  trailing(1, 2) = trailing(2, 1) = a;
+  const double analytic = a * a * trailing.inverse()(0, 0);
+  CHECK(chordal.primal_objective == Approx(analytic).margin(2e-5));
+  CHECK(chordal.primal_objective ==
+        Approx(dense.primal_objective).margin(2e-5));
+  CHECK(chordal.primal_infeasibility < 1e-7);
+  CHECK(chordal.dual_infeasibility < 1e-6);
+
+  const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> zes(smat(chordal.z, 4));
+  CHECK(zes.eigenvalues().minCoeff() >= -1e-7);
+}
+
+TEST_CASE("conic ipm: chordal extension preserves non-chordal SDP",
+          "[conic][ipm][chordal]") {
+  constexpr double a = 0.2;
+  const ConicModel cm = make_chordal_cycle_model(a);
+  ConicIPMOptions options;
+  options.chordal_min_order = 2;
+  options.chordal_max_clique_ratio = 0.9;
+  options.chordal_max_expansion_ratio = 3.0;
+  const ConicIPMResult result = ConicIPMSolver(options).solve(cm);
+
+  REQUIRE(result.status == "optimal");
+  REQUIRE(result.chordal_decomposition_used);
+  CHECK(result.chordal_clique_count == 2);
+  CHECK(result.chordal_max_clique_order == 3);
+  CHECK(result.primal_objective == Approx(2.0 * a).margin(2e-5));
+  CHECK(result.primal_infeasibility < 1e-7);
+  CHECK(result.dual_infeasibility < 1e-6);
+  const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> zes(smat(result.z, 4));
+  CHECK(zes.eigenvalues().minCoeff() >= -1e-7);
+}
+
+TEST_CASE("conic ipm: chordal recovery preserves mixed rows and equalities",
+          "[conic][ipm][chordal]") {
+  constexpr int p = 4;
+  constexpr double a = 0.2;
+  ConicModel cm;
+  cm.c = Eigen::VectorXd::Zero(2);
+  cm.c[0] = 1.0;
+  std::vector<std::tuple<int, int, double>> gtriplets{
+      {0, 1, -1.0}, {1 + svec_index(0, 0, p), 0, -1.0}};
+  cm.G = make_sparse(1 + svec_size(p), 2, gtriplets);
+  cm.h = Eigen::VectorXd::Zero(1 + svec_size(p));
+  for (int i = 1; i < p; ++i) {
+    cm.h[1 + svec_index(i, i, p)] = 1.0;
+    cm.h[1 + svec_index(i, i - 1, p)] = std::sqrt(2.0) * a;
+  }
+  cm.A = make_sparse(1, 2, {{0, 1, 1.0}});
+  cm.b = Eigen::VectorXd::Constant(1, 2.0);
+  cm.dims.l = 1;
+  cm.dims.s = {p};
+
+  ConicIPMOptions options;
+  options.chordal_min_order = 2;
+  options.chordal_max_clique_ratio = 0.9;
+  options.chordal_max_expansion_ratio = 3.0;
+  const ConicIPMResult result = ConicIPMSolver(options).solve(cm);
+  REQUIRE(result.status == "optimal");
+  REQUIRE(result.chordal_decomposition_used);
+  REQUIRE(result.x.size() == 2);
+  REQUIRE(result.y.size() == 1);
+  REQUIRE(result.s.size() == 1 + svec_size(p));
+  REQUIRE(result.z.size() == 1 + svec_size(p));
+  CHECK(result.x[1] == Approx(2.0).margin(1e-7));
+  CHECK(result.s[0] == Approx(2.0).margin(1e-7));
+  CHECK(result.primal_infeasibility < 1e-7);
+  CHECK(result.dual_infeasibility < 1e-6);
 }
 
 // ───────────────────────────────────────────────────────────────────────────

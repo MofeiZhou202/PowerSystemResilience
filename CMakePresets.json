@@ -21,7 +21,7 @@
         "MIPSOLVERS_USE_SUITESPARSE": "ON",
         "MIPSOLVERS_USE_SUPERLU": "ON",
         "MIPSOLVERS_USE_MKL": "ON",
-        "MIPSOLVERS_USE_GUROBI": "ON",
+        "MIPSOLVERS_USE_GUROBI": "OFF",
         "MIPSOLVERS_USE_PAPILO": "ON"
       }
     },

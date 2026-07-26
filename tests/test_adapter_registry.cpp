@@ -95,9 +95,5 @@ TEST_CASE("SolverEngine: list_solvers returns names after registration", "[regis
   const auto milp_solvers = eng.list_solvers(ProblemClass::MILP);
   CHECK_FALSE(milp_solvers.empty());
   REQUIRE_FALSE(milp_solvers.empty());
-  const bool gurobi_registered =
-      std::find(milp_solvers.begin(), milp_solvers.end(), "Gurobi") !=
-      milp_solvers.end();
-  CHECK(milp_solvers.front() ==
-        (gurobi_registered ? "Gurobi" : "StrictHiGHS"));
+  CHECK(milp_solvers.front() == "StrictHiGHS");
 }

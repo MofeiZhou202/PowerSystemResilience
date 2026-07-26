@@ -21,6 +21,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -29,6 +30,7 @@
 
 #include <fmt/core.h>
 
+#include "mipsolvers/engine/kernel/ipm/chordal_decomposition.hpp"
 #include "mipsolvers/engine/kernel/ipm/cones.hpp"
 #include "mipsolvers/engine/kernel/linear_algebra/cholmod_ldlt.hpp"
 #if defined(MIPSOLVERS_HAVE_MUMPS)
@@ -55,6 +57,7 @@ constexpr double kInf = std::numeric_limits<double>::infinity();
 constexpr double kDelta0 = 1e-9;     ///< Initial KKT diagonal regularization.
 constexpr double kDeltaMax = 1e-6;   ///< Largest delta tried before fallback.
 constexpr double kStepDamp = 0.99;   ///< Damping factor on the max step.
+constexpr double kSqrt2 = 1.41421356237309504880168872420969808;
 [[maybe_unused]] constexpr long kSchurParallelThreshold = 4096;  ///< Work gate for OpenMP.
 
 /// Sets the OpenMP thread count for the lifetime of the object (no-op when
@@ -87,7 +90,25 @@ struct KktAssembler {
     int idx;
     double val;
   };
+  struct FlatEntries {
+    std::vector<int> outer;
+    std::vector<Entry> entries;
+
+    [[nodiscard]] std::size_t size() const {
+      return outer.empty() ? 0 : outer.size() - 1;
+    }
+    [[nodiscard]] std::span<const Entry> operator[](std::size_t i) const {
+      const std::size_t begin = static_cast<std::size_t>(outer[i]);
+      const std::size_t end = static_cast<std::size_t>(outer[i + 1]);
+      if (begin == end) return {};
+      return {entries.data() + begin, end - begin};
+    }
+  };
   struct QColRef {      ///< Membership of a column in a q-block clique.
+    int block;
+    int jidx;
+  };
+  struct SColRef {      ///< Membership of a column in an s-block clique.
     int block;
     int jidx;
   };
@@ -105,6 +126,8 @@ struct KktAssembler {
     std::vector<int> clique;
     std::vector<std::vector<Entry>> col_entries;  ///< [clique idx] -> (local packed row, value)
     std::vector<std::vector<int>> schur_pos;      ///< [jidx] -> CSC positions of (clique[iidx>=jidx], j)
+    std::vector<int> row_i;  ///< Packed row -> lower-triangle matrix row.
+    std::vector<int> row_j;  ///< Packed row -> lower-triangle matrix column.
   };
 
   int n = 0;
@@ -112,13 +135,14 @@ struct KktAssembler {
   int dim = 0;  ///< N = n + meq.
 
   // Cached static entries (G/A are fixed across iterations).
-  std::vector<std::vector<Entry>> scalar_rows;   ///< l rows, then size-1 q rows.
+  FlatEntries scalar_rows;                       ///< l rows, then size-1 q rows.
   std::vector<int> scalar_extra;                 ///< l_extra_ index for size-1 q rows (-1 for l rows).
-  std::vector<std::vector<Entry>> scalar_cols;   ///< [column] -> (scalar row, value).
+  FlatEntries scalar_cols;                       ///< [column] -> (scalar row, value).
   std::vector<QBlock> q_blocks;                  ///< Size >= 2 blocks only.
   std::vector<std::vector<QColRef>> q_col_blocks;///< [column] -> clique memberships.
   std::vector<SBlock> s_blocks;
-  std::vector<std::vector<Entry>> a_cols;        ///< [column] -> (eq row, value).
+  std::vector<std::vector<SColRef>> s_col_blocks;///< [column] -> clique memberships.
+  FlatEntries a_cols;                            ///< [column] -> (eq row, value).
 
   // CSC of K (lower triangle, sorted rows per column).
   std::vector<int> outer;
@@ -146,37 +170,56 @@ void KktAssembler::build(const ConicModel& model, const ConeLayout& lay) {
   gt.makeCompressed();
 
   // ── Scalar (l-style) rows: orthant rows first, then size-1 q blocks ────
+  scalar_rows.outer.reserve(static_cast<std::size_t>(lay.l) +
+                            lay.q_sizes.size() + 1);
+  scalar_rows.outer.push_back(0);
   for (int r = 0; r < lay.l; ++r) {
-    std::vector<Entry> entries;
-    entries.reserve(static_cast<std::size_t>(gt.outerIndexPtr()[r + 1] -
-                                             gt.outerIndexPtr()[r]));
     for (Eigen::SparseMatrix<double>::InnerIterator it(gt, r); it; ++it) {
-      entries.push_back({static_cast<int>(it.row()), it.value()});
+      scalar_rows.entries.push_back({static_cast<int>(it.row()), it.value()});
     }
-    scalar_rows.push_back(std::move(entries));
+    scalar_rows.outer.push_back(static_cast<int>(scalar_rows.entries.size()));
     scalar_extra.push_back(-1);
   }
   int extra_idx = 0;
   for (std::size_t b = 0; b < lay.q_sizes.size(); ++b) {
     if (lay.q_sizes[b] != 1) continue;
     const int r = lay.q_offsets[b];
-    std::vector<Entry> entries;
     for (Eigen::SparseMatrix<double>::InnerIterator it(gt, r); it; ++it) {
-      entries.push_back({static_cast<int>(it.row()), it.value()});
+      scalar_rows.entries.push_back({static_cast<int>(it.row()), it.value()});
     }
-    scalar_rows.push_back(std::move(entries));
+    scalar_rows.outer.push_back(static_cast<int>(scalar_rows.entries.size()));
     scalar_extra.push_back(extra_idx++);
   }
-  scalar_cols.assign(static_cast<std::size_t>(n), {});
+  scalar_cols.outer.assign(static_cast<std::size_t>(n) + 1, 0);
   for (std::size_t sr = 0; sr < scalar_rows.size(); ++sr) {
     for (const Entry& e : scalar_rows[sr]) {
-      scalar_cols[static_cast<std::size_t>(e.idx)].push_back(
-          {static_cast<int>(sr), e.val});
+      ++scalar_cols.outer[static_cast<std::size_t>(e.idx) + 1];
+    }
+  }
+  for (int j = 0; j < n; ++j) {
+    scalar_cols.outer[static_cast<std::size_t>(j) + 1] +=
+        scalar_cols.outer[static_cast<std::size_t>(j)];
+  }
+  scalar_cols.entries.resize(scalar_rows.entries.size());
+  std::vector<int> scalar_cursor = scalar_cols.outer;
+  for (std::size_t sr = 0; sr < scalar_rows.size(); ++sr) {
+    for (const Entry& e : scalar_rows[sr]) {
+      const int dst = scalar_cursor[static_cast<std::size_t>(e.idx)]++;
+      scalar_cols.entries[static_cast<std::size_t>(dst)] =
+          {static_cast<int>(sr), e.val};
     }
   }
 
   // ── SOC blocks of size >= 2 ────────────────────────────────────────────
-  q_col_blocks.assign(static_cast<std::size_t>(n), {});
+  const bool has_q_blocks = std::any_of(
+      lay.q_sizes.begin(), lay.q_sizes.end(), [](int k) { return k >= 2; });
+  // Reuse one sparse-reset column-to-clique map across all non-scalar cone
+  // blocks.  Pure orthant models do not allocate this O(n) workspace.
+  std::vector<int> clique_index;
+  if (has_q_blocks || !lay.s_orders.empty()) {
+    clique_index.assign(static_cast<std::size_t>(n), -1);
+  }
+  if (has_q_blocks) q_col_blocks.resize(static_cast<std::size_t>(n));
   for (std::size_t b = 0; b < lay.q_sizes.size(); ++b) {
     const int k = lay.q_sizes[b];
     if (k < 2) continue;
@@ -185,14 +228,13 @@ void KktAssembler::build(const ConicModel& model, const ConeLayout& lay) {
     qb.offset = off;
     qb.size = k;
     qb.row_entries.resize(static_cast<std::size_t>(k));
-    std::vector<char> in_clique(static_cast<std::size_t>(n), 0);
     for (int lr = 0; lr < k; ++lr) {
       for (Eigen::SparseMatrix<double>::InnerIterator it(gt, off + lr); it;
            ++it) {
         const int col = static_cast<int>(it.row());
         qb.row_entries[static_cast<std::size_t>(lr)].push_back({col, it.value()});
-        if (!in_clique[static_cast<std::size_t>(col)]) {
-          in_clique[static_cast<std::size_t>(col)] = 1;
+        if (clique_index[static_cast<std::size_t>(col)] < 0) {
+          clique_index[static_cast<std::size_t>(col)] = 0;
           qb.clique.push_back(col);
         }
       }
@@ -201,21 +243,23 @@ void KktAssembler::build(const ConicModel& model, const ConeLayout& lay) {
     qb.col_entries.resize(qb.clique.size());
     for (std::size_t jidx = 0; jidx < qb.clique.size(); ++jidx) {
       const int col = qb.clique[jidx];
+      clique_index[static_cast<std::size_t>(col)] = static_cast<int>(jidx);
       q_col_blocks[static_cast<std::size_t>(col)].push_back(
           {static_cast<int>(q_blocks.size()), static_cast<int>(jidx)});
     }
     for (int lr = 0; lr < k; ++lr) {
       for (const Entry& e : qb.row_entries[static_cast<std::size_t>(lr)]) {
-        const auto it = std::lower_bound(qb.clique.begin(), qb.clique.end(), e.idx);
-        qb.col_entries[static_cast<std::size_t>(it - qb.clique.begin())].push_back(
-            {lr, e.val});
+        const int jidx = clique_index[static_cast<std::size_t>(e.idx)];
+        qb.col_entries[static_cast<std::size_t>(jidx)].push_back({lr, e.val});
       }
     }
+    for (int col : qb.clique) clique_index[static_cast<std::size_t>(col)] = -1;
     qb.rank1_pos.resize(qb.clique.size());
     q_blocks.push_back(std::move(qb));
   }
 
   // ── SDP blocks ─────────────────────────────────────────────────────────
+  if (!lay.s_orders.empty()) s_col_blocks.resize(static_cast<std::size_t>(n));
   for (std::size_t b = 0; b < lay.s_orders.size(); ++b) {
     const int p = lay.s_orders[b];
     const int off = lay.s_offsets[b];
@@ -223,39 +267,61 @@ void KktAssembler::build(const ConicModel& model, const ConeLayout& lay) {
     SBlock sb;
     sb.offset = off;
     sb.order = p;
-    std::vector<char> in_clique(static_cast<std::size_t>(n), 0);
+    sb.row_i.resize(static_cast<std::size_t>(mp));
+    sb.row_j.resize(static_cast<std::size_t>(mp));
+    int packed_row = 0;
+    for (int j = 0; j < p; ++j) {
+      for (int i = j; i < p; ++i) {
+        sb.row_i[static_cast<std::size_t>(packed_row)] = i;
+        sb.row_j[static_cast<std::size_t>(packed_row)] = j;
+        ++packed_row;
+      }
+    }
     for (int lr = 0; lr < mp; ++lr) {
       for (Eigen::SparseMatrix<double>::InnerIterator it(gt, off + lr); it;
            ++it) {
         const int col = static_cast<int>(it.row());
-        if (!in_clique[static_cast<std::size_t>(col)]) {
-          in_clique[static_cast<std::size_t>(col)] = 1;
+        if (clique_index[static_cast<std::size_t>(col)] < 0) {
+          clique_index[static_cast<std::size_t>(col)] = 0;
           sb.clique.push_back(col);
         }
       }
     }
     std::sort(sb.clique.begin(), sb.clique.end());
     sb.col_entries.resize(sb.clique.size());
+    for (std::size_t jidx = 0; jidx < sb.clique.size(); ++jidx) {
+      const int col = sb.clique[jidx];
+      clique_index[static_cast<std::size_t>(col)] = static_cast<int>(jidx);
+      s_col_blocks[static_cast<std::size_t>(col)].push_back(
+          {static_cast<int>(s_blocks.size()), static_cast<int>(jidx)});
+    }
     for (int lr = 0; lr < mp; ++lr) {
       for (Eigen::SparseMatrix<double>::InnerIterator it(gt, off + lr); it;
            ++it) {
         const int col = static_cast<int>(it.row());
-        const auto it2 = std::lower_bound(sb.clique.begin(), sb.clique.end(), col);
-        sb.col_entries[static_cast<std::size_t>(it2 - sb.clique.begin())].push_back(
-            {lr, it.value()});
+        const int jidx = clique_index[static_cast<std::size_t>(col)];
+        sb.col_entries[static_cast<std::size_t>(jidx)].push_back({lr, it.value()});
       }
     }
+    for (int col : sb.clique) clique_index[static_cast<std::size_t>(col)] = -1;
     sb.schur_pos.resize(sb.clique.size());
     s_blocks.push_back(std::move(sb));
   }
 
   // ── Equality rows ──────────────────────────────────────────────────────
-  a_cols.assign(static_cast<std::size_t>(n), {});
-  for (int j = 0; j < n; ++j) {
-    for (Eigen::SparseMatrix<double>::InnerIterator it(model.A, j); it; ++it) {
-      a_cols[static_cast<std::size_t>(j)].push_back(
-          {static_cast<int>(it.row()), it.value()});
+  if (meq > 0) {
+    a_cols.outer.resize(static_cast<std::size_t>(n) + 1);
+    a_cols.entries.reserve(static_cast<std::size_t>(model.A.nonZeros()));
+    for (int j = 0; j < n; ++j) {
+      a_cols.outer[static_cast<std::size_t>(j)] =
+          static_cast<int>(a_cols.entries.size());
+      for (Eigen::SparseMatrix<double>::InnerIterator it(model.A, j); it; ++it) {
+        a_cols.entries.push_back(
+            {static_cast<int>(it.row()), it.value()});
+      }
     }
+    a_cols.outer[static_cast<std::size_t>(n)] =
+        static_cast<int>(a_cols.entries.size());
   }
 
   // ── CSC pattern of the lower triangle of K ─────────────────────────────
@@ -269,21 +335,26 @@ void KktAssembler::build(const ConicModel& model, const ConeLayout& lay) {
         if (e.idx >= j) rows.push_back(e.idx);
       }
     }
-    for (const QColRef& mem : q_col_blocks[static_cast<std::size_t>(j)]) {
-      const QBlock& qb = q_blocks[static_cast<std::size_t>(mem.block)];
-      for (int col : qb.clique) {
-        if (col >= j) rows.push_back(col);
+    if (!q_col_blocks.empty()) {
+      for (const QColRef& mem : q_col_blocks[static_cast<std::size_t>(j)]) {
+        const QBlock& qb = q_blocks[static_cast<std::size_t>(mem.block)];
+        for (int col : qb.clique) {
+          if (col >= j) rows.push_back(col);
+        }
       }
     }
-    for (const SBlock& sb : s_blocks) {
-      if (std::binary_search(sb.clique.begin(), sb.clique.end(), j)) {
+    if (!s_col_blocks.empty()) {
+      for (const SColRef& mem : s_col_blocks[static_cast<std::size_t>(j)]) {
+        const SBlock& sb = s_blocks[static_cast<std::size_t>(mem.block)];
         for (int col : sb.clique) {
           if (col >= j) rows.push_back(col);
         }
       }
     }
-    for (const Entry& e : a_cols[static_cast<std::size_t>(j)]) {
-      rows.push_back(n + e.idx);
+    if (meq > 0) {
+      for (const Entry& e : a_cols[static_cast<std::size_t>(j)]) {
+        rows.push_back(n + e.idx);
+      }
     }
     std::sort(rows.begin(), rows.end());
     rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
@@ -314,22 +385,24 @@ void KktAssembler::build(const ConicModel& model, const ConeLayout& lay) {
     for (int p = begin; p < end; ++p) {
       scatter_[static_cast<std::size_t>(inner[static_cast<std::size_t>(p)])] = p;
     }
-    for (const QColRef& mem : q_col_blocks[static_cast<std::size_t>(j)]) {
-      QBlock& qb = q_blocks[static_cast<std::size_t>(mem.block)];
-      auto& pos = qb.rank1_pos[static_cast<std::size_t>(mem.jidx)];
-      for (std::size_t iidx = static_cast<std::size_t>(mem.jidx);
-           iidx < qb.clique.size(); ++iidx) {
-        pos.push_back(scatter_[static_cast<std::size_t>(qb.clique[iidx])]);
+    if (!q_col_blocks.empty()) {
+      for (const QColRef& mem : q_col_blocks[static_cast<std::size_t>(j)]) {
+        QBlock& qb = q_blocks[static_cast<std::size_t>(mem.block)];
+        auto& pos = qb.rank1_pos[static_cast<std::size_t>(mem.jidx)];
+        for (std::size_t iidx = static_cast<std::size_t>(mem.jidx);
+             iidx < qb.clique.size(); ++iidx) {
+          pos.push_back(scatter_[static_cast<std::size_t>(qb.clique[iidx])]);
+        }
       }
     }
-    for (SBlock& sb : s_blocks) {
-      const auto it = std::lower_bound(sb.clique.begin(), sb.clique.end(), j);
-      if (it == sb.clique.end() || *it != j) continue;
-      const int jidx = static_cast<int>(it - sb.clique.begin());
-      auto& pos = sb.schur_pos[static_cast<std::size_t>(jidx)];
-      for (std::size_t iidx = static_cast<std::size_t>(jidx);
-           iidx < sb.clique.size(); ++iidx) {
-        pos.push_back(scatter_[static_cast<std::size_t>(sb.clique[iidx])]);
+    if (!s_col_blocks.empty()) {
+      for (const SColRef& mem : s_col_blocks[static_cast<std::size_t>(j)]) {
+        SBlock& sb = s_blocks[static_cast<std::size_t>(mem.block)];
+        auto& pos = sb.schur_pos[static_cast<std::size_t>(mem.jidx)];
+        for (std::size_t iidx = static_cast<std::size_t>(mem.jidx);
+             iidx < sb.clique.size(); ++iidx) {
+          pos.push_back(scatter_[static_cast<std::size_t>(sb.clique[iidx])]);
+        }
       }
     }
     for (int p = begin; p < end; ++p) {
@@ -386,64 +459,120 @@ void KktAssembler::assemble(const ConeNtScaling& sc, double delta) {
         }
       }
     }
-    for (const QColRef& mem : q_col_blocks[static_cast<std::size_t>(j)]) {
-      const QBlock& qb = q_blocks[static_cast<std::size_t>(mem.block)];
-      const auto& qs = sc.q_scalings()[static_cast<std::size_t>(mem.block)];
-      const double beta2inv = 1.0 / (qs.beta * qs.beta);
-      for (const Entry& ce : qb.col_entries[static_cast<std::size_t>(mem.jidx)]) {
-        const double wr = -beta2inv * ((ce.idx == 0) ? 1.0 : -1.0);
-        for (const Entry& e : qb.row_entries[static_cast<std::size_t>(ce.idx)]) {
-          if (e.idx >= j) {
-            values[static_cast<std::size_t>(scatter_[static_cast<std::size_t>(e.idx)])] +=
-                wr * e.val * ce.val;
+    if (!q_col_blocks.empty()) {
+      for (const QColRef& mem : q_col_blocks[static_cast<std::size_t>(j)]) {
+        const QBlock& qb = q_blocks[static_cast<std::size_t>(mem.block)];
+        const auto& qs = sc.q_scalings()[static_cast<std::size_t>(mem.block)];
+        const double beta2inv = 1.0 / (qs.beta * qs.beta);
+        for (const Entry& ce : qb.col_entries[static_cast<std::size_t>(mem.jidx)]) {
+          const double wr = -beta2inv * ((ce.idx == 0) ? 1.0 : -1.0);
+          for (const Entry& e : qb.row_entries[static_cast<std::size_t>(ce.idx)]) {
+            if (e.idx >= j) {
+              values[static_cast<std::size_t>(scatter_[static_cast<std::size_t>(e.idx)])] +=
+                  wr * e.val * ce.val;
+            }
           }
         }
-      }
-      const std::vector<double>& u = q_u[static_cast<std::size_t>(mem.block)];
-      const auto& pos = qb.rank1_pos[static_cast<std::size_t>(mem.jidx)];
-      for (std::size_t iidx = static_cast<std::size_t>(mem.jidx);
-           iidx < qb.clique.size(); ++iidx) {
-        values[static_cast<std::size_t>(pos[iidx - static_cast<std::size_t>(mem.jidx)])] +=
-            2.0 * beta2inv * u[static_cast<std::size_t>(mem.jidx)] * u[iidx];
+        const std::vector<double>& u = q_u[static_cast<std::size_t>(mem.block)];
+        const auto& pos = qb.rank1_pos[static_cast<std::size_t>(mem.jidx)];
+        for (std::size_t iidx = static_cast<std::size_t>(mem.jidx);
+             iidx < qb.clique.size(); ++iidx) {
+          values[static_cast<std::size_t>(pos[iidx - static_cast<std::size_t>(mem.jidx)])] +=
+              2.0 * beta2inv * u[static_cast<std::size_t>(mem.jidx)] * u[iidx];
+        }
       }
     }
-    for (const Entry& e : a_cols[static_cast<std::size_t>(j)]) {
-      values[static_cast<std::size_t>(scatter_[static_cast<std::size_t>(n + e.idx)])] =
-          e.val;
+    if (meq > 0) {
+      for (const Entry& e : a_cols[static_cast<std::size_t>(j)]) {
+        values[static_cast<std::size_t>(
+            scatter_[static_cast<std::size_t>(n + e.idx)])] = e.val;
+      }
     }
     for (int p = begin; p < end; ++p) {
       scatter_[static_cast<std::size_t>(inner[static_cast<std::size_t>(p)])] = -1;
     }
   }
 
-  // SDP Schur complements, parallel over clique columns.  Each column j
-  // writes only its own CSC positions (schur_pos), so the loop is
-  // deterministic under any thread count.
+  // SDP Schur complements, parallel over clique columns.  Sparse G columns
+  // use the analytic svec basis kernel below, avoiding one zero-filled p x p
+  // matrix and two dense GEMMs per column.  Dense blocks retain the BLAS path.
   for (std::size_t b = 0; b < s_blocks.size(); ++b) {
     const SBlock& sb = s_blocks[b];
     const Eigen::MatrixXd& m = sc.s_scalings()[b].h_inv_cong;
     const int p = sb.order;
-    const int mp = svec_size(p);
     const int ncols = static_cast<int>(sb.clique.size());
-    [[maybe_unused]] const long work =
-        static_cast<long>(ncols) * ncols * mp;
-    MIPSOLVERS_OMP_PARALLEL_IF(work > kSchurParallelThreshold)
-    for (int jidx = 0; jidx < ncols; ++jidx) {
-      Eigen::VectorXd x = Eigen::VectorXd::Zero(mp);
-      for (const Entry& e : sb.col_entries[static_cast<std::size_t>(jidx)]) {
-        x[e.idx] = e.val;
-      }
-      const Eigen::MatrixXd xm = smat(x, p);
-      const Eigen::VectorXd pv = svec(m * xm * m);
-      const auto& pos = sb.schur_pos[static_cast<std::size_t>(jidx)];
-      for (std::size_t iidx = static_cast<std::size_t>(jidx);
-           iidx < sb.clique.size(); ++iidx) {
-        double dot = 0.0;
-        for (const Entry& e : sb.col_entries[iidx]) {
-          dot += e.val * pv[e.idx];
+    long double suffix_nnz = 0.0L;
+    long double sparse_work = 0.0L;
+    for (int jidx = ncols - 1; jidx >= 0; --jidx) {
+      const long double nnz = static_cast<long double>(
+          sb.col_entries[static_cast<std::size_t>(jidx)].size());
+      suffix_nnz += nnz;
+      sparse_work += nnz * suffix_nnz;
+    }
+    const long double dense_work =
+        2.0L * ncols * p * p * p + suffix_nnz * ncols;
+    // A scalar analytic kernel has substantially less arithmetic but poorer
+    // locality than GEMM.  Require a clear flop advantage before selecting it.
+    const bool use_sparse_kernel = 4.0L * sparse_work <= dense_work;
+    [[maybe_unused]] const bool run_parallel =
+        std::max(sparse_work, dense_work) > kSchurParallelThreshold;
+
+    if (use_sparse_kernel) {
+      MIPSOLVERS_OMP_PARALLEL_IF(run_parallel)
+      for (int jidx = 0; jidx < ncols; ++jidx) {
+        const auto& jentries = sb.col_entries[static_cast<std::size_t>(jidx)];
+        const auto& pos = sb.schur_pos[static_cast<std::size_t>(jidx)];
+        for (int iidx = jidx; iidx < ncols; ++iidx) {
+          double dot = 0.0;
+          for (const Entry& je : jentries) {
+            const int ji = sb.row_i[static_cast<std::size_t>(je.idx)];
+            const int jj = sb.row_j[static_cast<std::size_t>(je.idx)];
+            for (const Entry& ie :
+                 sb.col_entries[static_cast<std::size_t>(iidx)]) {
+              const int ii = sb.row_i[static_cast<std::size_t>(ie.idx)];
+              const int ij = sb.row_j[static_cast<std::size_t>(ie.idx)];
+              double kernel;
+              if (ji == jj) {
+                kernel = (ii == ij)
+                             ? m(ji, ii) * m(ji, ii)
+                             : kSqrt2 * m(ji, ii) * m(ji, ij);
+              } else if (ii == ij) {
+                kernel = kSqrt2 * m(ji, ii) * m(jj, ii);
+              } else {
+                kernel = m(ji, ii) * m(jj, ij) +
+                         m(ji, ij) * m(jj, ii);
+              }
+              dot += je.val * ie.val * kernel;
+            }
+          }
+          values[static_cast<std::size_t>(pos[static_cast<std::size_t>(
+              iidx - jidx)])] += dot;
         }
-        values[static_cast<std::size_t>(pos[iidx - static_cast<std::size_t>(jidx)])] +=
-            dot;
+      }
+    } else {
+      MIPSOLVERS_OMP_PARALLEL_IF(run_parallel)
+      for (int jidx = 0; jidx < ncols; ++jidx) {
+        Eigen::MatrixXd xm = Eigen::MatrixXd::Zero(p, p);
+        for (const Entry& e : sb.col_entries[static_cast<std::size_t>(jidx)]) {
+          const int i = sb.row_i[static_cast<std::size_t>(e.idx)];
+          const int j = sb.row_j[static_cast<std::size_t>(e.idx)];
+          const double v = (i == j) ? e.val : e.val / kSqrt2;
+          xm(i, j) = v;
+          xm(j, i) = v;
+        }
+        const Eigen::MatrixXd transformed = m * xm * m;
+        const auto& pos = sb.schur_pos[static_cast<std::size_t>(jidx)];
+        for (int iidx = jidx; iidx < ncols; ++iidx) {
+          double dot = 0.0;
+          for (const Entry& e : sb.col_entries[static_cast<std::size_t>(iidx)]) {
+            const int i = sb.row_i[static_cast<std::size_t>(e.idx)];
+            const int j = sb.row_j[static_cast<std::size_t>(e.idx)];
+            dot += e.val * ((i == j) ? transformed(i, j)
+                                     : kSqrt2 * transformed(i, j));
+          }
+          values[static_cast<std::size_t>(pos[static_cast<std::size_t>(
+              iidx - jidx)])] += dot;
+        }
       }
     }
   }
@@ -560,6 +689,27 @@ struct KktBackend {
   return out;
 }
 
+/// SDP boundary step when the current matrix is diagonal.  NT-scaled lambda
+/// always has this form, so forming an LLT and doing two triangular solves in
+/// the generic s_max_step() is redundant in every IPM line search.
+[[nodiscard]] double s_diagonal_max_step(
+    const Eigen::Ref<const Eigen::VectorXd>& diagonal_point,
+    const Eigen::Ref<const Eigen::VectorXd>& direction, int p) {
+  Eigen::VectorXd inv_sqrt(p);
+  for (int j = 0; j < p; ++j) {
+    const double d = diagonal_point[svec_index(j, j, p)];
+    if (d <= 0.0) return 0.0;
+    inv_sqrt[j] = 1.0 / std::sqrt(d);
+  }
+  Eigen::MatrixXd scaled = smat(direction, p);
+  scaled.array().colwise() *= inv_sqrt.array();
+  scaled.array().rowwise() *= inv_sqrt.transpose().array();
+  const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(
+      scaled, Eigen::EigenvaluesOnly);
+  const double lambda_min = es.eigenvalues()[0];
+  return (lambda_min >= 0.0) ? kInf : -1.0 / lambda_min;
+}
+
 /// Maximum step over all cone blocks (min of the per-block steps).
 [[nodiscard]] double cone_max_step(const ConeLayout& lay,
                                    const Eigen::VectorXd& lam,
@@ -584,8 +734,8 @@ struct KktBackend {
       const int off = lay.s_offsets[static_cast<std::size_t>(si)];
       const int p = lay.s_orders[static_cast<std::size_t>(si)];
       block_alpha[static_cast<std::size_t>(bi)] =
-          s_max_step(lam.segment(off, svec_size(p)),
-                     dlam.segment(off, svec_size(p)), p);
+          s_diagonal_max_step(lam.segment(off, svec_size(p)),
+                              dlam.segment(off, svec_size(p)), p);
     }
   }
   for (double a : block_alpha) alpha = std::min(alpha, a);
@@ -713,6 +863,75 @@ ConicIPMResult ConicIPMSolver::solve(const ConicModel& model) const {
     return res;
   }
 
+  if (options_.chordal_decomposition && !lay.s_orders.empty()) {
+    ChordalDecompositionOptions chordal_options;
+    chordal_options.enabled = true;
+    chordal_options.min_block_order = options_.chordal_min_order;
+    chordal_options.max_clique_ratio = options_.chordal_max_clique_ratio;
+    chordal_options.max_expansion_ratio =
+        options_.chordal_max_expansion_ratio;
+    ConicModel transformed;
+    ChordalDecompositionMap chordal_map;
+    if (chordal_decompose(model, chordal_options, transformed, chordal_map)) {
+      ConicIPMOptions inner_options = options_;
+      inner_options.chordal_decomposition = false;
+      ConicIPMResult inner = ConicIPMSolver(inner_options).solve(transformed);
+      if (inner.x.size() >= n &&
+          inner.y.size() >= chordal_map.original_num_equalities &&
+          inner.z.size() == transformed.dims.total()) {
+        chordal_recover(model, chordal_map, inner.x, inner.y, inner.z, res.x,
+                        res.y, res.s, res.z);
+        const Eigen::VectorXd c_min = sense_sign * model.c;
+        const Eigen::VectorXd rx = model.A * res.x - model.b;
+        const Eigen::VectorXd rs = model.G * res.x + res.s - model.h;
+        const Eigen::VectorXd rc = model.G.transpose() * res.z +
+                                   model.A.transpose() * res.y + c_min;
+        const double norm_b1 = 1.0 + model.b.norm();
+        const double norm_h1 = 1.0 + model.h.norm();
+        const double norm_c1 = 1.0 + c_min.norm();
+        const double pobj = c_min.dot(res.x);
+        const double dobj = -model.h.dot(res.z) - model.b.dot(res.y);
+        res.status = inner.status;
+        res.primal_objective = sense_sign * pobj;
+        res.dual_objective = sense_sign * dobj;
+        res.gap = res.s.dot(res.z);
+        if (pobj < 0.0) {
+          res.relative_gap = res.gap / (-pobj);
+        } else if (dobj > 0.0) {
+          res.relative_gap = res.gap / dobj;
+        } else {
+          res.relative_gap = kInf;
+        }
+        res.primal_infeasibility =
+            std::max(rx.norm() / norm_b1, rs.norm() / norm_h1);
+        res.dual_infeasibility = rc.norm() / norm_c1;
+        res.iterations = inner.iterations;
+        res.chordal_decomposition_used = true;
+        res.chordal_clique_count = chordal_map.clique_count;
+        res.chordal_max_clique_order = chordal_map.max_clique_order;
+        const bool gap_ok = res.gap <= options_.abstol ||
+                            res.relative_gap <= options_.reltol;
+        if (res.status == "optimal" &&
+            (res.primal_infeasibility > 10.0 * options_.feastol ||
+             res.dual_infeasibility > 10.0 * options_.feastol || !gap_ok)) {
+          res.status = "unknown";
+        }
+        res.runtime_sec = std::chrono::duration<double>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+        if (options_.verbose) {
+          fmt::print("chordal: {} cliques, max order {}\n",
+                     res.chordal_clique_count,
+                     res.chordal_max_clique_order);
+        }
+        return res;
+      }
+      ConicIPMOptions fallback_options = options_;
+      fallback_options.chordal_decomposition = false;
+      return ConicIPMSolver(fallback_options).solve(model);
+    }
+  }
+
   const Eigen::VectorXd c = sense_sign * model.c;
   const Eigen::VectorXd& h = model.h;
   const Eigen::VectorXd& b = model.b;
@@ -749,7 +968,6 @@ ConicIPMResult ConicIPMSolver::solve(const ConicModel& model) const {
                "a_pri", "a_dual");
   }
 
-  Eigen::VectorXd lambda;
   ConeNtScaling scaling;
   double sigma = 1.0;
   double alpha_p = 0.0;
@@ -776,11 +994,8 @@ ConicIPMResult ConicIPMSolver::solve(const ConicModel& model) const {
       relgap = gap / dobj;
     }
 
-    // Report the current (best) iterate.
-    res.x = x;
-    res.y = y;
-    res.s = s;
-    res.z = z;
+    // Report scalar progress now; the potentially very large iterate vectors
+    // are copied once after the loop instead of once per iteration.
     res.primal_objective = sense_sign * pobj;
     res.dual_objective = sense_sign * dobj;
     res.gap = gap;
@@ -796,8 +1011,7 @@ ConicIPMResult ConicIPMSolver::solve(const ConicModel& model) const {
     }
     const double g_dual = h.dot(z) + b.dot(y);
     if (g_dual < 0.0) {
-      const Eigen::VectorXd cert =
-          model.G.transpose() * z + model.A.transpose() * y;
+      const Eigen::VectorXd cert = rc - c;
       const double nrm = (cert.size() > 0) ? cert.cwiseAbs().maxCoeff() : 0.0;
       if (nrm / (-g_dual) <= options_.feastol) {
         res.status = "primal infeasible";
@@ -806,8 +1020,8 @@ ConicIPMResult ConicIPMSolver::solve(const ConicModel& model) const {
     }
     const double ctx = c.dot(x);
     if (ctx < 0.0) {
-      const Eigen::VectorXd ax = model.A * x;
-      const Eigen::VectorXd gxs = model.G * x + s;
+      const Eigen::VectorXd ax = rx + b;
+      const Eigen::VectorXd gxs = rs + h;
       const double nrm = std::max(
           (ax.size() > 0) ? ax.cwiseAbs().maxCoeff() : 0.0,
           gxs.cwiseAbs().maxCoeff());
@@ -826,7 +1040,7 @@ ConicIPMResult ConicIPMSolver::solve(const ConicModel& model) const {
       res.status = "unknown";
       break;
     }
-    lambda = scaling.lambda();
+    const Eigen::VectorXd& lambda = scaling.lambda();
 
     // ── Factor K for this scaling ────────────────────────────────────────
     if (!kkt.factor(scaling)) {
@@ -854,8 +1068,9 @@ ConicIPMResult ConicIPMSolver::solve(const ConicModel& model) const {
       if (!kkt.solve(rhs, sol)) return false;
       dx = sol.head(n);
       dy = sol.tail(meq);
-      dz = scaled_h_inv(scaling, model.G * dx - t);
-      ds = -r_s - model.G * dx;
+      const Eigen::VectorXd gdx = model.G * dx;
+      dz = scaled_h_inv(scaling, gdx - t);
+      ds = -r_s - gdx;
       if (refine) {
         // Iterative refinement on the 3x3 KKT residual.
         for (int ref = 0; ref < options_.refinement; ++ref) {
@@ -876,8 +1091,9 @@ ConicIPMResult ConicIPMSolver::solve(const ConicModel& model) const {
           const Eigen::VectorXd cdx = sol3.head(n);
           dx += cdx;
           dy += sol3.tail(meq);
-          dz += scaled_h_inv(scaling, model.G * cdx - t3);
-          ds -= model.G * cdx;  // keep G dx + ds = -rs exact
+          const Eigen::VectorXd gcdx = model.G * cdx;
+          dz += scaled_h_inv(scaling, gcdx - t3);
+          ds -= gcdx;  // keep G dx + ds = -rs exact
         }
       }
       return true;
@@ -932,6 +1148,10 @@ ConicIPMResult ConicIPMSolver::solve(const ConicModel& model) const {
   }
 
   const auto t1 = std::chrono::steady_clock::now();
+  res.x = std::move(x);
+  res.y = std::move(y);
+  res.s = std::move(s);
+  res.z = std::move(z);
   res.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
   return res;
 }

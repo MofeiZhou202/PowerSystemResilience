@@ -32,6 +32,7 @@ struct ConcurrentTreeState {
   std::atomic<int> active_explorers{0};
   ActiveNodeBounds active_bounds;
   std::mutex pc_mtx;
+  std::vector<PseudoCost> pseudocosts;
   FallbackLogger fallback_logger;
   SimplexOptions par_simplex_opt;
   std::unique_ptr<WorkStealingPool> steal_pool;
@@ -53,6 +54,7 @@ struct ConcurrentTreeState {
         shared_queue(opt.node_sel),
         cut_req_queue(opt.cut_worker_queue_size),
         active_bounds(std::max(1, resolve_num_threads(opt))),
+        pseudocosts(static_cast<std::size_t>(std::max(0, cut_coeff_size))),
         fallback_logger(t0) {
     par_simplex_opt.max_iter = std::max(opt.max_lp_iter * 10, 2000);
     par_simplex_opt.feasibility_tol = std::max(1e-10, opt.lp_tol * 0.1);

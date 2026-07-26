@@ -28,6 +28,7 @@
 ///   milp_benchmark_runner --smoke          # deterministic 6-bus CTest case
 ///   milp_benchmark_runner                  # quick (6G/4T + 10G/24T)
 ///   milp_benchmark_runner --full           # + 10G/4T + 39-bus/24T + 118-bus
+///   milp_benchmark_runner --million-hotpath # 1M-column B&B memory/scan kernel
 ///   milp_benchmark_runner --json out.json  # write JSON result
 ///   milp_benchmark_runner --full --json out.json
 
@@ -53,6 +54,7 @@
 #include "mipsolvers/engine/bc/api.hpp"
 #include "mipsolvers/engine/bc/options.hpp"
 #include "mipsolvers/engine/bc/stats.hpp"
+#include "mipsolvers/engine/detail/bc_types.hpp"
 #include "mipsolvers/engine/solver/external/adapters.hpp"
 #include "mipsolvers/engine/solver/native/native_adapters.hpp"
 #include "mipsolvers/scuc/case_builder.hpp"
@@ -62,6 +64,97 @@ using namespace mipsolvers::scuc;
 using json = nlohmann::json;
 
 namespace {
+
+int run_million_hotpath_benchmark() {
+    constexpr int n = 1'000'000;
+    constexpr int n_branchable = 20'000;
+    constexpr int scan_repeats = 64;
+
+    engine::detail::Node root;
+    root.lb = Eigen::VectorXd::Zero(n);
+    root.ub = Eigen::VectorXd::Constant(n, 1000.0);
+    root.x_relax = Eigen::VectorXd::Constant(n, 0.25);
+    root.bound = 1.0;
+
+    std::vector<char> branchable(static_cast<std::size_t>(n), 0);
+    std::vector<int> branchable_indices;
+    branchable_indices.reserve(n_branchable);
+    for (int k = 0; k < n_branchable; ++k) {
+        const int j = static_cast<int>((static_cast<std::int64_t>(k) * n) /
+                                       n_branchable);
+        branchable[static_cast<std::size_t>(j)] = 1;
+        branchable_indices.push_back(j);
+    }
+    engine::detail::CompactPseudoCostTable compact_pc(n, branchable_indices);
+
+    volatile double checksum = 0.0;
+    const auto old_branch_start = std::chrono::steady_clock::now();
+    {
+        auto down = root.branch_child();
+        auto up = root.branch_child();
+        down.ub[branchable_indices.front()] = 0.0;
+        up.lb[branchable_indices.front()] = 1.0;
+        checksum += down.ub[0] + up.lb[0];
+    }
+    const auto old_branch_end = std::chrono::steady_clock::now();
+
+    engine::detail::Node movable_parent = root;
+    const auto new_branch_start = std::chrono::steady_clock::now();
+    {
+        auto down = movable_parent.branch_child();
+        auto up = std::move(movable_parent);
+        up.x_relax.resize(0);
+        up.x_seed.resize(0);
+        down.ub[branchable_indices.front()] = 0.0;
+        up.lb[branchable_indices.front()] = 1.0;
+        checksum += down.ub[0] + up.lb[0];
+    }
+    const auto new_branch_end = std::chrono::steady_clock::now();
+
+    const auto full_scan_start = std::chrono::steady_clock::now();
+    for (int r = 0; r < scan_repeats; ++r) {
+        for (int j = 0; j < n; ++j) {
+            if (branchable[static_cast<std::size_t>(j)] != 0) {
+                checksum += root.x_relax[j];
+            }
+        }
+    }
+    const auto full_scan_end = std::chrono::steady_clock::now();
+
+    const auto compact_scan_start = std::chrono::steady_clock::now();
+    for (int r = 0; r < scan_repeats; ++r) {
+        for (int j : branchable_indices) checksum += root.x_relax[j];
+    }
+    const auto compact_scan_end = std::chrono::steady_clock::now();
+
+    const auto ms = [](auto begin, auto end) {
+        return std::chrono::duration<double, std::milli>(end - begin).count();
+    };
+    const double old_branch_ms = ms(old_branch_start, old_branch_end);
+    const double new_branch_ms = ms(new_branch_start, new_branch_end);
+    const double full_scan_ms = ms(full_scan_start, full_scan_end);
+    const double compact_scan_ms = ms(compact_scan_start, compact_scan_end);
+
+    std::printf("=== Million-column B&B hot path ===\n");
+    std::printf("columns=%d branchable=%d repeats=%d\n", n, n_branchable,
+                scan_repeats);
+    std::printf("branch old(two full children): %.3f ms, copied %.1f MiB\n",
+                old_branch_ms, 4.0 * n * sizeof(double) / 1048576.0);
+    std::printf("branch new(one copy + move):   %.3f ms, copied %.1f MiB, speedup %.2fx\n",
+                new_branch_ms, 2.0 * n * sizeof(double) / 1048576.0,
+                old_branch_ms / std::max(1e-9, new_branch_ms));
+    std::printf("candidate full scan:           %.3f ms\n", full_scan_ms);
+    std::printf("candidate compact scan:        %.3f ms, speedup %.2fx\n",
+                compact_scan_ms,
+                full_scan_ms / std::max(1e-9, compact_scan_ms));
+    std::printf("pseudocost dense/compact:      %.1f MiB / %.1f MiB (%.2fx smaller)\n",
+                n * sizeof(engine::detail::PseudoCost) / 1048576.0,
+                compact_pc.storage_bytes() / 1048576.0,
+                static_cast<double>(n * sizeof(engine::detail::PseudoCost)) /
+                    std::max<std::size_t>(1, compact_pc.storage_bytes()));
+    std::printf("checksum=%.1f\n", checksum);
+    return 0;
+}
 
 void set_env_var(const char* name, const char* value) {
 #if defined(_WIN32)
@@ -1301,6 +1394,7 @@ int main(int argc, char** argv)
     bool        inject_test_mode    = false;
     bool        bound_test_mode     = false;
     bool        production_118_mode = false;
+    bool        million_hotpath_mode = false;
     bool        skip_native_start   = false;
     bool        force_strict_root_ipm = false;
     double      time_limit = 120.0;
@@ -1328,6 +1422,8 @@ int main(int argc, char** argv)
             bound_test_mode = true;
         } else if (std::strcmp(argv[i], "--production-118") == 0) {
             production_118_mode = true;
+        } else if (std::strcmp(argv[i], "--million-hotpath") == 0) {
+            million_hotpath_mode = true;
         } else if (std::strcmp(argv[i], "--skip-native-start") == 0) {
             skip_native_start = true;
         } else if (std::strcmp(argv[i], "--force-strict-root-ipm") == 0) {
@@ -1356,6 +1452,9 @@ int main(int argc, char** argv)
     if (gurobi_start_mode) {
         return run_gurobi_start_experiment(time_limit, skip_native_start,
                                            force_strict_root_ipm);
+    }
+    if (million_hotpath_mode) {
+        return run_million_hotpath_benchmark();
     }
     if (two_phase_mode) {
         return run_two_phase_experiment(time_limit);

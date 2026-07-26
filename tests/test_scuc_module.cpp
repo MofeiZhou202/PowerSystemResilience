@@ -130,6 +130,48 @@ TEST_CASE("SCUC: small 2-bus problem converges", "[scuc][integration]") {
   REQUIRE(output.scuc.total_cost  > 0.0);
 }
 
+TEST_CASE("SCUC: Benders decomposition matches monolithic objective",
+          "[scuc][integration][benders]") {
+  SCUCInput monolithic = scuc_from_json(make_small_problem_json("Auto"));
+  monolithic.config.solve_sced = false;
+  monolithic.config.solve_lmp = false;
+  monolithic.config.benders_auto_min_variables = 0;
+  const SCUCOutput reference = scuc_solve(monolithic);
+  REQUIRE(reference.scuc.converged);
+
+  SCUCInput decomposed = monolithic;
+  decomposed.config.enable_benders_decomposition = true;
+  decomposed.config.benders_max_iterations = 100;
+  const SCUCOutput result = scuc_solve(decomposed);
+
+  REQUIRE(result.scuc.converged);
+  REQUIRE(result.scuc.solver_name == "Branch-and-Benders-Cut");
+  REQUIRE(result.scuc.benders_iterations > 0);
+  REQUIRE(result.scuc.benders_cuts_added > 0);
+  REQUIRE(result.scuc.benders_master_variables == 2 * 3 * 3 + 1);
+  REQUIRE(result.scuc.benders_master_nodes >= 0);
+  REQUIRE(result.scuc.benders_master_lp_solves > 0);
+  REQUIRE(result.scuc.benders_master_warm_starts > 0);
+  REQUIRE(result.scuc.benders_master_pseudocost_reuses > 0);
+  REQUIRE(result.scuc.benders_master_solve_time_sec >= 0.0);
+  REQUIRE(result.scuc.benders_subproblem_variables >
+          result.scuc.benders_master_variables);
+  REQUIRE(result.scuc.benders_subproblem_variables == 69 - 18);
+  REQUIRE(result.scuc.benders_subproblem_rows > 0);
+  REQUIRE(result.scuc.benders_eliminated_binary_variables == 18);
+  REQUIRE(result.scuc.benders_coupled_binary_variables > 0);
+  REQUIRE(result.scuc.benders_coupled_binary_variables <=
+          result.scuc.benders_eliminated_binary_variables);
+  REQUIRE(result.scuc.benders_binary_coupling_nonzeros > 0);
+  REQUIRE(result.scuc.benders_incremental_rhs_updates > 0);
+  REQUIRE(result.scuc.benders_subproblem_solves > 1);
+  REQUIRE(result.scuc.benders_subproblem_warm_starts > 0);
+  REQUIRE(result.scuc.benders_subproblem_simplex_iterations >= 0);
+  REQUIRE(result.scuc.benders_subproblem_solve_time_sec >= 0.0);
+  REQUIRE(result.scuc.objective ==
+          Catch::Approx(reference.scuc.objective).margin(1e-3));
+}
+
 TEST_CASE("SCUC: SCED LP refines dispatch", "[scuc][integration]") {
   const std::string json_str = make_small_problem_json("Auto");
   const SCUCInput input = scuc_from_json(json_str);

@@ -70,13 +70,13 @@ std::vector<std::string> default_priority_for(ProblemClass cls) {
     case ProblemClass::NLE:
       return {"NativeNewton"};
     case ProblemClass::LP:
-      return {"Gurobi", "NativeIPMLP", "NativePDLP", "NativeLCQP", "HiGHS"};
+      return {"NativeIPMLP", "NativePDLP", "NativeLCQP", "HiGHS"};
     case ProblemClass::QP:
-      return {"Gurobi", "NativeLCQP"};
+      return {"NativeLCQP"};
     case ProblemClass::NLP:
       return {"Ipopt", "NativeIPM", "NativeNLP"};
     case ProblemClass::MILP:
-      return {"Gurobi", "StrictHiGHS", "HiGHS", "NativeBranchAndCut"};
+      return {"StrictHiGHS", "HiGHS", "NativeBranchAndCut"};
     case ProblemClass::MINLP:
       return {"Scip", "NativeBranchAndCut"};
     case ProblemClass::CONIC:

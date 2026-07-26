@@ -2227,6 +2227,21 @@ double compute_node_estimate(const std::vector<VariableMeta>& vars,
                              double int_tol,
                              double node_bound);
 
+/// Compute a node estimate by scanning only precomputed branchable columns.
+/// This avoids an O(number-of-all-columns) pass at every B&B node when a large
+/// model has comparatively few integer variables.
+double compute_node_estimate(const std::vector<int>& branchable_cols,
+                             const Eigen::VectorXd& x,
+                             const std::vector<PseudoCost>& pc,
+                             double int_tol,
+                             double node_bound);
+
+double compute_node_estimate(const std::vector<int>& branchable_cols,
+                             const Eigen::VectorXd& x,
+                             const CompactPseudoCostTable& pc,
+                             double int_tol,
+                             double node_bound);
+
 /// @brief Append or strengthen a branch-domain reason on a node.
 void append_branch_reason(Node& node,
                           int var_idx,
@@ -2274,12 +2289,28 @@ int choose_branch_var_pseudocost(const std::vector<int>& cand,
                                  const Eigen::VectorXd& x,
                                  const std::vector<PseudoCost>& pc);
 
+int choose_branch_var_pseudocost(const std::vector<int>& cand,
+                                 const Eigen::VectorXd& x,
+                                 const CompactPseudoCostTable& pc);
+
 /// @brief Select branch variable by pseudo-cost scoring with priority weighting.
 /// Priority values > 0 give a soft multiplicative bonus to the pseudocost score.
 int choose_branch_var_pseudocost(const std::vector<int>& cand,
                                  const Eigen::VectorXd& x,
                                  const std::vector<PseudoCost>& pc,
                                  const std::vector<int>& priority);
+
+int choose_branch_var_pseudocost(const std::vector<int>& cand,
+                                 const Eigen::VectorXd& x,
+                                 const CompactPseudoCostTable& pc,
+                                 const std::vector<int>& priority);
+
+int choose_branch_var_pseudocost(const std::vector<int>& cand,
+                                 const Eigen::VectorXd& x,
+                                 const CompactPseudoCostTable& pc,
+                                 const std::vector<int>& priority,
+                                 const BCBranchingPriorFn& dynamic_prior,
+                                 const BCBranchContext& context);
 
 /// @brief Select branch variable by pseudo-cost, static priority, and a dynamic prior callback.
 int choose_branch_var_pseudocost(const std::vector<int>& cand,
@@ -2294,11 +2325,21 @@ double compute_branch_var_score(int j,
                                 const std::vector<PseudoCost>& pc,
                                 const std::vector<int>* priority = nullptr);
 
+double compute_branch_var_score(int j,
+                                const Eigen::VectorXd& x,
+                                const CompactPseudoCostTable& pc,
+                                const std::vector<int>* priority = nullptr);
+
 /// @brief Select branch variable using the configured strategy.
 int choose_branch_var(const BCOptions& opt,
                       const std::vector<int>& cand,
                       const Eigen::VectorXd& x,
                       const std::vector<PseudoCost>& pc);
+
+int choose_branch_var(const BCOptions& opt,
+                      const std::vector<int>& cand,
+                      const Eigen::VectorXd& x,
+                      const CompactPseudoCostTable& pc);
 
 /// @brief Select branch variable using the configured strategy with priority.
 int choose_branch_var(const BCOptions& opt,
@@ -2306,6 +2347,20 @@ int choose_branch_var(const BCOptions& opt,
                       const Eigen::VectorXd& x,
                       const std::vector<PseudoCost>& pc,
                       const std::vector<int>& priority);
+
+int choose_branch_var(const BCOptions& opt,
+                      const std::vector<int>& cand,
+                      const Eigen::VectorXd& x,
+                      const CompactPseudoCostTable& pc,
+                      const std::vector<int>& priority);
+
+int choose_branch_var(const BCOptions& opt,
+                      const std::vector<int>& cand,
+                      const Eigen::VectorXd& x,
+                      const CompactPseudoCostTable& pc,
+                      const std::vector<int>& priority,
+                      const BCBranchingPriorFn& dynamic_prior,
+                      const BCBranchContext& context);
 
 /// @brief Select branch variable using static priorities and a dynamic prior callback.
 int choose_branch_var(const BCOptions& opt,
@@ -2338,6 +2393,22 @@ int choose_branch_var_reliability(
     const std::vector<int>& cand,
     const Eigen::VectorXd& x,
     std::vector<PseudoCost>& pc,
+    const LPModel& base_lp,
+    const StandardFormLP& base_sf,
+    const Eigen::VectorXd& node_lb,
+    const Eigen::VectorXd& node_ub,
+    const SimplexBasis* basis_hint,
+    const SimplexOptions& simplex_opt,
+    double parent_bound,
+    int& lp_solves,
+    int node_depth,
+    int reliability_limit = 1,
+    int max_probes = 4);
+
+int choose_branch_var_reliability(
+    const std::vector<int>& cand,
+    const Eigen::VectorXd& x,
+    CompactPseudoCostTable& pc,
     const LPModel& base_lp,
     const StandardFormLP& base_sf,
     const Eigen::VectorXd& node_lb,

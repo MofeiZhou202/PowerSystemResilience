@@ -386,9 +386,10 @@ struct BCResult {
   /// Root simplex basis extracted from the same solve, in original row/column
   /// space.  Pass with highs_root_cuts to warm-start the augmented root LP.
   std::shared_ptr<BCRootBasis> highs_root_basis;
-  /// Pseudocost data extracted from this solve's B&B tree, in original column
-  /// space.  Pass as BCOptions::highs_pseudocost_warm_start on the next solve
-  /// of the same problem to seed branching decisions from node 1.
+  /// Pseudocost data extracted from this solve's HiGHS or native B&C tree, in
+  /// original column space.  Pass as BCOptions::highs_pseudocost_warm_start on
+  /// the next solve of the same problem to seed branching decisions from node
+  /// 1.  The field retains its historical name for API compatibility.
   std::shared_ptr<BCPseudocostInit> highs_pseudocost_init;
 };
 

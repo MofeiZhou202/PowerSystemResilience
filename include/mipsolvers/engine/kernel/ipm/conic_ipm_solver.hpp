@@ -29,6 +29,10 @@ struct ConicIPMOptions {
   int refinement{1};        ///< Iterative-refinement steps on the 3x3 KKT residual
                             ///< (only applied when q/s blocks are present).
   int num_threads{0};       ///< OpenMP threads for parallel regions (0 = library default).
+  bool chordal_decomposition{true};  ///< Decompose beneficial sparse SDP blocks.
+  int chordal_min_order{32};  ///< Smallest SDP order considered for decomposition.
+  double chordal_max_clique_ratio{0.75};  ///< Required max-clique/order reduction.
+  double chordal_max_expansion_ratio{2.0};  ///< Max clique/original entry ratio.
   bool verbose{false};      ///< Print the per-iteration progress table.
 };
 
@@ -48,6 +52,9 @@ struct ConicIPMResult {
   double dual_infeasibility{0.0};    ///< Scaled dual residual.
   int iterations{0};                 ///< Newton iterations performed.
   double runtime_sec{0.0};           ///< Wall-clock time of solve().
+  bool chordal_decomposition_used{false};  ///< At least one decomposed SDP block.
+  int chordal_clique_count{0};             ///< Generated maximal PSD cliques.
+  int chordal_max_clique_order{0};         ///< Largest generated clique order.
 };
 
 /// Mehrotra predictor-corrector conic IPM (cvxopt conelp algorithm).

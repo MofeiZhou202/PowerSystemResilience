@@ -65,13 +65,20 @@ void detail::explorer_thread(
     DeterministicTurnToken* det_token,
     const std::atomic<double>* optimality_limit) {
 
-		  const int n = static_cast<int>(base_lp.vars.size());
-		  const bool strict_highs_lp_contract = opt.use_vendored_highs_lp_kernel;
-		  auto is_branchable_col = [&](int j) {
+	  const int n = static_cast<int>(base_lp.vars.size());
+	  const bool strict_highs_lp_contract = opt.use_vendored_highs_lp_kernel;
+	  auto is_branchable_col = [&](int j) {
 	    return j >= 0 && j < n &&
 	           j < static_cast<int>(branchable_cols.size()) &&
 	           branchable_cols[static_cast<std::size_t>(j)] != 0;
 	  };
+	  std::vector<int> branchable_indices;
+	  branchable_indices.reserve(branchable_cols.size());
+	  for (int j = 0; j < n && j < static_cast<int>(branchable_cols.size()); ++j) {
+	    if (branchable_cols[static_cast<std::size_t>(j)] != 0) {
+	      branchable_indices.push_back(j);
+	    }
+	  }
 	  auto fractional_branchable_indices =
 	      [&](const Eigen::VectorXd& x, const Eigen::VectorXd& lb,
 	          const Eigen::VectorXd& ub, double int_tol,
@@ -85,8 +92,8 @@ void detail::explorer_thread(
 	                            std::min(static_cast<int>(lb.size()),
 	                                     static_cast<int>(ub.size())))))));
 	    const double split_tol = std::max(1e-9, int_tol);
-	    for (int j = 0; j < limit; ++j) {
-	      if (!is_branchable_col(j)) continue;
+	    for (int j : branchable_indices) {
+	      if (j >= limit) break;
 	      if (ub[j] - lb[j] <= split_tol) continue;
 	      const double v = std::min(ub[j], std::max(lb[j], x[j]));
 	      if (is_integral(v, int_tol)) continue;
@@ -1126,7 +1133,9 @@ void detail::explorer_thread(
     }
 
     int j = -1;
-    if (role == WorkerRole::Prover && cur.depth <= opt.max_plunge_depth) {
+    const bool compact_pc_path = n >= 100000;
+    if (role == WorkerRole::Prover && cur.depth <= opt.max_plunge_depth &&
+        !compact_pc_path) {
       // Prover: reliability branching (copy shared PCs, probe, merge back).
       std::vector<PseudoCost> local_pc;
       std::vector<PseudoCost> base_pc;  // baseline snapshot for delta-merge
@@ -1153,7 +1162,7 @@ void detail::explorer_thread(
         // samples (SCIP parallel-UG style). See
         // docs/parallel_bc_sharing_improvements_2026q2.md §4.
         std::lock_guard<std::mutex> lk(pc_mtx);
-        for (int i = 0; i < n; ++i) {
+        for (int i : branchable_indices) {
           const int d_cnt = local_pc[i].down_cnt - base_pc[i].down_cnt;
           if (d_cnt > 0) {
             pc[i].down_cnt += d_cnt;
@@ -1177,7 +1186,7 @@ void detail::explorer_thread(
         }
       } else {
         std::lock_guard<std::mutex> lk(pc_mtx);
-        for (int i = 0; i < n; ++i) {
+        for (int i : branchable_indices) {
           if (local_pc[i].down_cnt > pc[i].down_cnt) {
             pc[i].down_sum = local_pc[i].down_sum;
             pc[i].down_sq = local_pc[i].down_sq;
@@ -1212,12 +1221,24 @@ void detail::explorer_thread(
         for (size_t fi = 0; fi < frac.size(); ++fi)
           frac_pc[fi] = pc[frac[fi]];
       }
-      // Build a minimal local_pc indexed by frac index for pseudocost branching.
-      // choose_branch_var_pseudocost expects full-size pc vector, so reconstruct.
-      std::vector<PseudoCost> local_pc(n);
-      for (size_t fi = 0; fi < frac.size(); ++fi)
-        local_pc[frac[fi]] = frac_pc[fi];
-      j = choose_branch_var_pseudocost(frac, cur.x_relax, local_pc);
+      double best_score = -1.0;
+      for (std::size_t fi = 0; fi < frac.size(); ++fi) {
+        const int cand = frac[fi];
+        const double frac_part = cur.x_relax[cand] - std::floor(cur.x_relax[cand]);
+        const double qd = std::max(
+            frac_part * std::max(frac_pc[fi].down_lcb(), 1e-6) *
+                frac_pc[fi].down_history_multiplier(),
+            1e-6);
+        const double qu = std::max(
+            (1.0 - frac_part) * std::max(frac_pc[fi].up_lcb(), 1e-6) *
+                frac_pc[fi].up_history_multiplier(),
+            1e-6);
+        const double score = qd * qu;
+        if (score > best_score) {
+          best_score = score;
+          j = cand;
+        }
+      }
     }
     if (j < 0) {
       stats.nodes_explored.fetch_add(1, std::memory_order_relaxed);
@@ -1225,18 +1246,26 @@ void detail::explorer_thread(
     }
 
     const double xj = cur.x_relax[j];
+    const double parent_bound = cur.bound;
+    const int parent_depth = cur.depth;
+    Eigen::VectorXd parent_x_relax = std::move(cur.x_relax);
     pc_updates_buffer.clear();
 
     Node child_down = cur.branch_child();
     child_down.ub[j] = std::min(child_down.ub[j], std::floor(xj));
       append_branch_reason(child_down, j, false, child_down.ub[j]);
 
-    Node child_up = cur.branch_child();
+    Node child_up = std::move(cur);
+    child_up.x_relax.resize(0);
+    child_up.x_seed.resize(0);
+    child_up.ipm_iterations = 0;
+    child_up.lp_refresh_needed = false;
+    child_up.depth = parent_depth + 1;
     child_up.lb[j] = std::max(child_up.lb[j], std::ceil(xj));
       append_branch_reason(child_up, j, true, child_up.lb[j]);
 
-    bool down_valid = process_child(child_down, false, j, cur.bound, cur.x_relax);
-    bool up_valid = process_child(child_up, true, j, cur.bound, cur.x_relax);
+    bool down_valid = process_child(child_down, false, j, parent_bound, parent_x_relax);
+    bool up_valid = process_child(child_up, true, j, parent_bound, parent_x_relax);
 
     // Refresh incumbent snapshot: the LP solves above may have published
     // a better incumbent, and using the fresh value here tightens the
@@ -1280,14 +1309,17 @@ void detail::explorer_thread(
       }
       pc_updates_buffer.clear();
       if (down_valid) {
-        child_down.estimate = compute_node_estimate(base_lp.vars, child_down.x_relax,
+        child_down.estimate = compute_node_estimate(branchable_indices, child_down.x_relax,
                                                     pc, opt.int_tol, child_down.bound);
       }
       if (up_valid) {
-        child_up.estimate = compute_node_estimate(base_lp.vars, child_up.x_relax,
+        child_up.estimate = compute_node_estimate(branchable_indices, child_up.x_relax,
                                                   pc, opt.int_tol, child_up.bound);
       }
     }
+
+    if (down_valid) child_down.x_seed.resize(0);
+    if (up_valid) child_up.x_seed.resize(0);
 
     // Deterministic-parallel: re-acquire the token before publishing
     // children so push order is a deterministic function of the round-

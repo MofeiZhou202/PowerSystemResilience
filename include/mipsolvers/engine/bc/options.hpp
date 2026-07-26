@@ -54,7 +54,8 @@ struct BCRootBasis {
 /// All arrays are in the **original** (pre-presolve) LP column space.
 /// Populated by BCResult::highs_pseudocost_init after a solve; pass as
 /// BCOptions::highs_pseudocost_warm_start to the next solve to seed the
-/// HiGHS pseudocost table with data learned during the previous B&B.
+/// HiGHS or native B&C pseudocost table with data learned during the previous
+/// tree search.  The field retains its historical name for API compatibility.
 struct BCPseudocostInit {
   std::vector<double> pseudocostup;
   std::vector<double> pseudocostdown;
@@ -806,10 +807,11 @@ struct BCOptions {
   /// Automatically set to 50 when highs_root_cut_warm_start is non-null
   /// and this field is 0 (i.e. not explicitly overridden).
   int highs_max_root_sepa_rounds{0};
-  /// When non-null, seed the HiGHS pseudocost table with branching data
-  /// learned during a previous solve of the same (or structurally identical)
-  /// problem.  This lets the warm run make near-optimal branching decisions
-  /// from the very first node, rather than spending ~50 nodes learning them.
+  /// When non-null, seed the HiGHS or native B&C pseudocost table with
+  /// branching data learned during a previous solve of the same (or
+  /// structurally identical) problem.  This lets the warm run make informed
+  /// branching decisions from the first node.  The field retains its
+  /// historical name for API compatibility.
   std::shared_ptr<const BCPseudocostInit> highs_pseudocost_warm_start;
 
   // ═══════════════════════════════════════════════════════════════════════

@@ -22,6 +22,7 @@
 #include "mipsolvers/engine/engine.hpp"
 #include "mipsolvers/engine/api/options.hpp"
 #include "mipsolvers/engine/api/result.hpp"
+#include "mipsolvers/engine/decomposition/benders.hpp"
 #include "mipsolvers/engine/solver/native/native_adapters.hpp"
 #include "mipsolvers/scuc/case_builder.hpp"
 
@@ -2431,17 +2432,17 @@ engine::api::Result run_milp(const engine::MIPModel& mip, const SCUCConfig& cfg)
 }
 
 /// LP solve that returns constraint duals (needed for LMP extraction).
-/// Prefers solvers known to return duals: Gurobi, then native IPM/dual-simplex.
+/// Prefers native solvers known to return duals.
 /// Falls back to the user-preferred solver if those are unavailable.
 engine::api::Result run_lp_with_duals(const engine::LPModel& lp, const SCUCConfig& cfg) {
   engine::SolverEngine eng;
   eng.register_default_adapters();
 
   // Solvers that return constraint_duals from solve_lp():
-  // NativeIPMLPAdapter, NativeBranchAndCut (LP path), Gurobi.
+  // NativeBranchAndCut (LP path) and NativeIPMLP return constraint duals.
   // HiGHS file-based adapter does NOT return duals.
   const std::vector<std::string> dual_solvers = {
-      "Gurobi", "NativeBranchAndCut", "NativeIPMLPAdapter"};
+      "NativeBranchAndCut", "NativeIPMLP"};
 
   auto available = eng.list_solvers(engine::ProblemClass::LP);
   std::string preferred;
@@ -2471,6 +2472,96 @@ engine::api::Result run_lp(const engine::LPModel& lp, const SCUCConfig& cfg) {
   return eng.solve_lp(lp, opts);
 }
 
+SCUCSolveResult solve_scuc_benders(Formulation fm, const SCUCInput& inp) {
+  const auto tic = Clock::now();
+  const std::vector<int> master_columns = fm.mip.binary_idx;
+  engine::BendersPartition partition = engine::partition_benders_model(
+      std::move(fm.mip), master_columns, kEps);
+  const int n_binary = static_cast<int>(partition.master_to_original.size());
+  const int subproblem_variables =
+      static_cast<int>(partition.subproblem_to_original.size());
+  const int subproblem_ineq_rows =
+      static_cast<int>(partition.model.subproblem.A.rows());
+  const int subproblem_eq_rows =
+      static_cast<int>(partition.model.subproblem.Aeq.rows());
+  const long long coupling_nonzeros =
+      static_cast<long long>(partition.model.coupling_ineq.nonZeros()) +
+      static_cast<long long>(partition.model.coupling_eq.nonZeros());
+  if (!partition.success) {
+    auto out = extract_result({}, inp, fm, false, 0.0);
+    out.solver_name = "Branch-and-Benders-Cut: " + partition.status;
+    out.solve_time_sec =
+        std::chrono::duration<double>(Clock::now() - tic).count();
+    return out;
+  }
+
+  engine::BendersOptions options;
+  options.max_iterations = inp.config.benders_max_iterations;
+  options.time_limit_sec = inp.config.time_limit_sec;
+  options.gap_tolerance = inp.config.mip_gap;
+  options.cut_tolerance = inp.config.benders_cut_tolerance;
+  options.verbose = inp.config.verbose;
+  options.reuse_master_incumbent = true;
+  options.master_options.gap_tol = 0.0;
+  options.master_options.use_vendored_highs_lp_kernel = false;
+  options.master_options.accept_verified_warm_start_incumbent = true;
+  options.subproblem_options.max_iter = 20000;
+  options.subproblem_options.feasibility_tol = 1e-8;
+  options.subproblem_options.optimality_tol = 1e-8;
+  engine::BendersResult solved =
+      engine::solve_benders(std::move(partition.model), options);
+
+  Eigen::VectorXd full_solution;
+  if (solved.has_incumbent && solved.master_x.size() == n_binary + 1 &&
+      solved.subproblem_x.size() == subproblem_variables) {
+    full_solution = Eigen::VectorXd::Zero(partition.original_variables);
+    for (int k = 0; k < n_binary; ++k) {
+      const int original_col =
+          partition.master_to_original[static_cast<size_t>(k)];
+      full_solution[original_col] = solved.master_x[k];
+    }
+    for (int col = 0; col < subproblem_variables; ++col) {
+      const int original_col =
+          partition.subproblem_to_original[static_cast<size_t>(col)];
+      full_solution[original_col] = solved.subproblem_x[col];
+    }
+  }
+
+  const bool have_incumbent = full_solution.size() == fm.v.nx;
+  auto out = extract_result(full_solution, inp, fm,
+                            solved.success && have_incumbent,
+                            have_incumbent ? solved.objective : 0.0);
+  out.solver_name = "Branch-and-Benders-Cut";
+  out.mip_gap = solved.relative_gap;
+  out.benders_iterations = solved.stats.iterations;
+  out.benders_cuts_added = solved.stats.cuts_added;
+  out.benders_master_variables = n_binary + 1;
+  out.benders_master_nodes = solved.stats.master_nodes;
+  out.benders_master_lp_solves = solved.stats.master_lp_solves;
+  out.benders_master_warm_starts =
+      solved.stats.master_incumbent_warm_starts;
+  out.benders_master_pseudocost_reuses =
+      solved.stats.master_pseudocost_reuses;
+  out.benders_master_solve_time_sec = solved.stats.master_solve_time_sec;
+  out.benders_subproblem_variables = subproblem_variables;
+  out.benders_subproblem_rows = subproblem_ineq_rows + subproblem_eq_rows;
+  out.benders_eliminated_binary_variables = n_binary;
+  out.benders_coupled_binary_variables =
+      solved.stats.coupled_master_variables;
+  out.benders_binary_coupling_nonzeros = coupling_nonzeros;
+  out.benders_incremental_rhs_updates =
+      solved.stats.incremental_rhs_updates;
+  out.benders_subproblem_solves = solved.stats.subproblem_solves;
+  out.benders_subproblem_warm_starts =
+      solved.stats.subproblem_basis_warm_starts;
+  out.benders_subproblem_simplex_iterations =
+      solved.stats.subproblem_simplex_iterations;
+  out.benders_subproblem_solve_time_sec =
+      solved.stats.subproblem_solve_time_sec;
+  out.solve_time_sec = std::chrono::duration<double>(Clock::now() - tic).count();
+  return out;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SCUC stage (MILP)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2478,6 +2569,12 @@ SCUCSolveResult solve_scuc_stage(const SCUCInput& inp) {
   const auto tic = Clock::now();
 
   auto fm = build_formulation(inp);
+  const bool use_benders = inp.config.enable_benders_decomposition ||
+      (inp.config.benders_auto_min_variables > 0 &&
+       fm.v.nx >= inp.config.benders_auto_min_variables);
+  if (use_benders && !fm.mip.binary_idx.empty()) {
+    return solve_scuc_benders(std::move(fm), inp);
+  }
   auto sol = run_milp(fm.mip, inp.config);
 
   auto out = extract_result(sol.x, inp, fm, sol.stats.success, sol.stats.objective);
@@ -2673,6 +2770,31 @@ static json solve_result_to_json(const SCUCSolveResult& r) {
   j["solve_time_sec"]= r.solve_time_sec;
   j["mip_gap"]       = r.mip_gap;
   j["n_cuts_added"]  = r.n_cuts_added;
+  j["benders_iterations"] = r.benders_iterations;
+  j["benders_cuts_added"] = r.benders_cuts_added;
+  j["benders_master_variables"] = r.benders_master_variables;
+  j["benders_master_nodes"] = r.benders_master_nodes;
+  j["benders_master_lp_solves"] = r.benders_master_lp_solves;
+  j["benders_master_warm_starts"] = r.benders_master_warm_starts;
+  j["benders_master_pseudocost_reuses"] =
+      r.benders_master_pseudocost_reuses;
+  j["benders_master_solve_time_sec"] = r.benders_master_solve_time_sec;
+  j["benders_subproblem_variables"] = r.benders_subproblem_variables;
+  j["benders_subproblem_rows"] = r.benders_subproblem_rows;
+  j["benders_eliminated_binary_variables"] =
+      r.benders_eliminated_binary_variables;
+  j["benders_coupled_binary_variables"] =
+      r.benders_coupled_binary_variables;
+  j["benders_binary_coupling_nonzeros"] =
+      r.benders_binary_coupling_nonzeros;
+  j["benders_incremental_rhs_updates"] =
+      r.benders_incremental_rhs_updates;
+  j["benders_subproblem_solves"] = r.benders_subproblem_solves;
+  j["benders_subproblem_warm_starts"] = r.benders_subproblem_warm_starts;
+  j["benders_subproblem_simplex_iterations"] =
+      r.benders_subproblem_simplex_iterations;
+  j["benders_subproblem_solve_time_sec"] =
+      r.benders_subproblem_solve_time_sec;
   j["commitment"]    = matrix2d_to_json(r.commitment);
   j["startup"]       = matrix2d_to_json(r.startup);
   j["shutdown"]      = matrix2d_to_json(r.shutdown);
@@ -2727,6 +2849,10 @@ SCUCInput scuc_from_json(const std::string& json_str) {
     gs("renewable_min_output_coeff",inp.config.renewable_min_output_coeff);
     gs("enable_market_cuts",        inp.config.enable_market_cuts);
     gs("enable_primal_repair",      inp.config.enable_primal_repair);
+    gs("enable_benders_decomposition", inp.config.enable_benders_decomposition);
+    gs("benders_auto_min_variables", inp.config.benders_auto_min_variables);
+    gs("benders_max_iterations",     inp.config.benders_max_iterations);
+    gs("benders_cut_tolerance",      inp.config.benders_cut_tolerance);
     gs("M1_line_slack_penalty",            inp.config.M1_line_slack_penalty);
     gs("M2_renewable_curtail_penalty",      inp.config.M2_renewable_curtail_penalty);
     gs("neg_reserve_req",                   inp.config.neg_reserve_req);

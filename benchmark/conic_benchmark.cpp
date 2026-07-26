@@ -1,10 +1,12 @@
 /// conic_benchmark.cpp
 ///
 /// Benchmark driver for the native conic interior-point solver
-/// (mipsolvers::engine::ConicIPMSolver) on synthetic SOCP and SDP suites.
+/// (mipsolvers::engine::ConicIPMSolver) on synthetic sparse LP, SOCP and SDP
+/// suites.
 ///
-/// All cases use a planted self-dual construction (standard benchmark
-/// trick): pick a random primal point x0, random equality multipliers y0
+/// The SOCP/SDP cases use a planted self-dual construction (standard
+/// benchmark trick): pick a random primal point x0, random equality
+/// multipliers y0
 /// and strictly interior, well-centered cone points s0, z0 (every cone
 /// "eigenvalue" comfortably away from 0), then set
 ///
@@ -43,6 +45,8 @@
 ///   conic_benchmark                          # all suites, full sizes
 ///   conic_benchmark --quick                  # small sizes only
 ///   conic_benchmark --suite socp             # socp | sdp | all
+///   conic_benchmark --suite chordal_sdp      # sparse path-graph SDP
+///   conic_benchmark --suite sparse_lp        # 100k and 1m structured cases
 ///   conic_benchmark --threads-list 1,2,4,8   # thread counts to sweep
 ///   conic_benchmark --with-equalities        # add m_eq = n/10 equality rows
 ///   conic_benchmark --json out.json          # write JSON records
@@ -88,7 +92,7 @@ constexpr bool kOpenMP = false;
 #endif
 
 struct BenchCase {
-  std::string suite;  ///< "socp" | "sdp".
+  std::string suite;  ///< "sparse_lp" | "socp" | "sdp" | "chordal_sdp".
   std::string name;
   ConicModel model;
 };
@@ -102,6 +106,8 @@ struct RunRecord {
   long nnz{0};        ///< nnz(G) + nnz(A).
   int threads{1};
   int iterations{0};
+  int chordal_cliques{0};
+  int chordal_max_order{0};
   double time_s{0.0};
   double gap{0.0};         ///< Absolute duality gap s'z.
   double rel_gap{0.0};     ///< Solver-reported relative gap.
@@ -226,6 +232,32 @@ Eigen::SparseMatrix<double> no_equalities(int n) {
   return A;
 }
 
+/// Large structured orthant case with G = -I.  Its KKT matrix is diagonal,
+/// so this isolates the solver's linear-memory path from fill-in effects and
+/// provides a reproducible million-variable scalability check.
+BenchCase make_sparse_lp_case(int n) {
+  Eigen::SparseMatrix<double> G(n, n);
+  G.setIdentity();
+  G *= -1.0;
+  G.makeCompressed();
+
+  ConeDims dims;
+  dims.l = n;
+  ConicModel cm;
+  cm.G = std::move(G);
+  cm.A = no_equalities(n);
+  cm.dims = dims;
+  cm.h = Eigen::VectorXd::Ones(n);
+  cm.c = Eigen::VectorXd::Ones(n);
+  cm.b.resize(0);
+
+  BenchCase bc;
+  bc.suite = "sparse_lp";
+  bc.name = "sparse_lp_n" + std::to_string(n);
+  bc.model = std::move(cm);
+  return bc;
+}
+
 /// SOCP suite: n variables, l = n/2 nonnegative rows, 10 SOC blocks of
 /// size 10, G ~1% dense; with equalities, m_eq = n/10 rows of A (~1% dense).
 BenchCase make_socp_case(int n, bool with_eq) {
@@ -282,6 +314,55 @@ BenchCase make_sdp_case(int p, bool with_eq) {
   bc.suite = "sdp";
   bc.name = "sdp_p" + std::to_string(p);
   bc.model = plant_model(G, A, dims, s0, z0, rng);
+  return bc;
+}
+
+/// Sparse tridiagonal SDP with a path aggregate graph.  The original order-p
+/// block decomposes exactly into p-1 overlapping order-2 PSD cliques.
+BenchCase make_chordal_sdp_case(int p) {
+  std::mt19937_64 rng(42);
+  std::normal_distribution<double> gauss(0.0, 1.0);
+  const int packed = mipsolvers::engine::svec_size(p);
+  const int n = 2 * p;
+  std::vector<int> active_rows;
+  active_rows.reserve(static_cast<std::size_t>(2 * p - 1));
+  for (int i = 0; i < p; ++i) {
+    active_rows.push_back(mipsolvers::engine::svec_index(i, i, p));
+  }
+  for (int i = 1; i < p; ++i) {
+    active_rows.push_back(mipsolvers::engine::svec_index(i, i - 1, p));
+  }
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(3 * n));
+  for (int col = 0; col < n; ++col) {
+    for (int k = 0; k < 3; ++k) {
+      const int row = active_rows[static_cast<std::size_t>(
+          (3 * col + k) % static_cast<int>(active_rows.size()))];
+      triplets.emplace_back(row, col, gauss(rng));
+    }
+  }
+  Eigen::SparseMatrix<double> G(packed, n);
+  G.setFromTriplets(triplets.begin(), triplets.end());
+  G.makeCompressed();
+
+  Eigen::VectorXd s0 = Eigen::VectorXd::Zero(packed);
+  Eigen::VectorXd z0 = Eigen::VectorXd::Zero(packed);
+  for (int i = 0; i < p; ++i) {
+    s0[mipsolvers::engine::svec_index(i, i, p)] = 2.0;
+    z0[mipsolvers::engine::svec_index(i, i, p)] = 1.5;
+  }
+  for (int i = 1; i < p; ++i) {
+    s0[mipsolvers::engine::svec_index(i, i - 1, p)] =
+        std::sqrt(2.0) * 0.1;
+    z0[mipsolvers::engine::svec_index(i, i - 1, p)] =
+        std::sqrt(2.0) * 0.05;
+  }
+  ConeDims dims;
+  dims.s = {p};
+  BenchCase bc;
+  bc.suite = "chordal_sdp";
+  bc.name = "chordal_p" + std::to_string(p);
+  bc.model = plant_model(G, no_equalities(n), dims, s0, z0, rng);
   return bc;
 }
 
@@ -349,18 +430,19 @@ void print_scaling_summary(const std::vector<RunRecord>& records,
 
 void print_usage(const char* prog) {
   std::printf(
-      "Usage: %s [--suite socp|sdp|all] [--threads-list 1,2,4,8]\n"
+      "Usage: %s [--suite sparse_lp|socp|sdp|chordal_sdp|all] "
+      "[--threads-list 1,2,4,8]\n"
       "          [--json path] [--quick] [--help]\n"
       "\n"
       "  --suite         Which case suite to run (default: all).\n"
       "  --threads-list  Comma-separated thread counts to sweep (default:\n"
       "                  1,2,4,8 with OpenMP, else 1).\n"
       "  --json          Write per-run records as JSON to <path>.\n"
-      "  --with-equalities  Add m_eq = n/10 equality rows (expected to FAIL;\n"
-      "                  reproducer for the indefinite-KKT path, see header).\n"
+      "  --with-equalities  Add m_eq = n/10 equality rows to exercise the\n"
+      "                  indefinite-KKT path described in the header.\n"
       "  --verbose       Print the solver's per-iteration table.\n"
-      "  --quick         Small sizes only (socp n in {100,400}, sdp p in "
-      "{10,20}).\n",
+      "  --quick         Small sizes only (sparse LP n in {10k,100k}, "
+      "socp n in {100,400}, sdp p in {10,20}, chordal p in {40,80}).\n",
       prog);
 }
 
@@ -415,8 +497,11 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (suite != "all" && suite != "socp" && suite != "sdp") {
-    std::fprintf(stderr, "Invalid --suite '%s' (expected socp|sdp|all)\n",
+  if (suite != "all" && suite != "sparse_lp" && suite != "socp" &&
+      suite != "sdp" && suite != "chordal_sdp") {
+    std::fprintf(stderr,
+                 "Invalid --suite '%s' (expected sparse_lp|socp|sdp|"
+                 "chordal_sdp|all)\n",
                  suite.c_str());
     return 2;
   }
@@ -425,7 +510,7 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  std::printf("# conic_benchmark — native conic IPM (SOCP/SDP) suites\n");
+  std::printf("# conic_benchmark — native conic IPM (LP/SOCP/SDP) suites\n");
   std::printf("# OpenMP: %s | hardware threads: %u | mode: %s | equalities: %s\n",
               kOpenMP ? "yes" : "no", std::thread::hardware_concurrency(),
               quick ? "quick" : "full", with_eq ? "on" : "off");
@@ -448,6 +533,13 @@ int main(int argc, char** argv) {
   }
 
   std::vector<BenchCase> cases;
+  // Deliberately opt-in: the million-variable case should not make the
+  // historical "all" suite unexpectedly expensive.
+  if (suite == "sparse_lp") {
+    const std::vector<int> sizes = quick ? std::vector<int>{10'000, 100'000}
+                                         : std::vector<int>{100'000, 1'000'000};
+    for (const int n : sizes) cases.push_back(make_sparse_lp_case(n));
+  }
   if (suite == "all" || suite == "socp") {
     const std::vector<int> sizes =
         quick ? std::vector<int>{100, 400} : std::vector<int>{100, 400, 1600};
@@ -457,6 +549,11 @@ int main(int argc, char** argv) {
     const std::vector<int> orders =
         quick ? std::vector<int>{10, 20} : std::vector<int>{10, 20, 40};
     for (const int p : orders) cases.push_back(make_sdp_case(p, with_eq));
+  }
+  if (suite == "chordal_sdp") {
+    const std::vector<int> orders =
+        quick ? std::vector<int>{40, 80} : std::vector<int>{80, 200};
+    for (const int p : orders) cases.push_back(make_chordal_sdp_case(p));
   }
 
   std::vector<RunRecord> records;
@@ -482,13 +579,16 @@ int main(int argc, char** argv) {
       rec.nnz = cm.G.nonZeros() + cm.A.nonZeros();
       rec.threads = t;
       rec.iterations = res.iterations;
+      rec.chordal_cliques = res.chordal_clique_count;
+      rec.chordal_max_order = res.chordal_max_clique_order;
       rec.time_s = dt;
       rec.gap = res.gap;
       rec.rel_gap = res.relative_gap;
       rec.primal_objective = res.primal_objective;
       rec.status = res.status;
       records.push_back(rec);
-      if (res.status != "optimal") {
+      if (res.status != "optimal" ||
+          (bc.suite == "chordal_sdp" && !res.chordal_decomposition_used)) {
         ++failures;
         std::printf("FAIL: %s threads=%d status=%s iters=%d\n",
                     bc.name.c_str(), t, res.status.c_str(), res.iterations);
@@ -496,8 +596,18 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (suite == "sparse_lp") {
+    print_suite_table("Sparse LP", "sparse_lp", records);
+  }
   if (suite == "all" || suite == "socp") print_suite_table("SOCP", "socp", records);
   if (suite == "all" || suite == "sdp") print_suite_table("SDP", "sdp", records);
+  if (suite == "chordal_sdp") {
+    print_suite_table("Chordal SDP", "chordal_sdp", records);
+    for (const RunRecord& r : records) {
+      std::printf("# %s: cliques=%d max_order=%d\n", r.problem.c_str(),
+                  r.chordal_cliques, r.chordal_max_order);
+    }
+  }
   print_scaling_summary(records, threads_list);
 
   if (!json_path.empty()) {
@@ -511,6 +621,8 @@ int main(int argc, char** argv) {
                       {"nnz", r.nnz},
                       {"threads", r.threads},
                       {"iterations", r.iterations},
+                      {"chordal_cliques", r.chordal_cliques},
+                      {"chordal_max_order", r.chordal_max_order},
                       {"time_s", r.time_s},
                       {"gap", r.gap},
                       {"rel_gap", r.rel_gap},

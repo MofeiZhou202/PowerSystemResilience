@@ -11,6 +11,7 @@
 #include "mipsolvers/engine/api/solver.hpp"
 #include "mipsolvers/engine/api/options.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/detail/bc_utils.hpp"
 
 using namespace mipsolvers::engine;
 using Catch::Approx;
@@ -23,20 +24,40 @@ static SolveOptions solver_opts(const std::string& name) {
   return opts;
 }
 
-// Helper: return SolveOptions that prefers Gurobi (if available) for MILP.
-static SolveOptions milp_options(const SolverEngine& eng) {
+// Use the engine's production MILP order (StrictHiGHS, HiGHS, native B&C).
+static SolveOptions milp_options(const SolverEngine&) {
   SolveOptions opts;
-  auto solvers = eng.list_solvers(ProblemClass::MILP);
-  for (auto& s : solvers) {
-    if (s.find("urobi") != std::string::npos) {
-      opts.preferred_solver = s;
-      opts.allow_fallback = true;
-      return opts;
-    }
-  }
-  // Fallback to whatever is first
   opts.allow_fallback = true;
   return opts;
+}
+
+TEST_CASE("MILP: compact pseudocost table preserves branching scores",
+          "[milp][performance]") {
+  constexpr int n = 100000;
+  const std::vector<int> branchable{7, 50000, 99999};
+  std::vector<detail::PseudoCost> dense(static_cast<std::size_t>(n));
+  detail::CompactPseudoCostTable compact(n, branchable);
+
+  for (std::size_t k = 0; k < branchable.size(); ++k) {
+    const int col = branchable[k];
+    dense[col].add_down(2.0 + k);
+    dense[col].add_up(5.0 - k);
+    compact[col] = dense[col];
+  }
+
+  Eigen::VectorXd x = Eigen::VectorXd::Zero(n);
+  x[7] = 0.2;
+  x[50000] = 0.5;
+  x[99999] = 0.8;
+  const std::vector<int> priority(static_cast<std::size_t>(n), 0);
+
+  CHECK(detail::choose_branch_var_pseudocost(branchable, x, dense, priority) ==
+        detail::choose_branch_var_pseudocost(branchable, x, compact, priority));
+  CHECK(detail::compute_node_estimate(branchable, x, dense, 1e-6, 10.0) ==
+        Approx(detail::compute_node_estimate(
+            branchable, x, compact, 1e-6, 10.0)).margin(1e-12));
+  CHECK(compact.active_size() == branchable.size());
+  CHECK(compact.storage_bytes() < dense.size() * sizeof(detail::PseudoCost) / 8);
 }
 
 // ─── Simple binary knapsack ────────────────────────────────────────────────
@@ -256,6 +277,45 @@ TEST_CASE("MILP: StrictHiGHS [D] mip_detect_symmetry=false preserves correctness
   // Objective must be a finite positive value.
   CHECK(res.stats.objective > 0.0);
   CHECK(res.stats.objective < 1e9);
+}
+
+TEST_CASE("MILP: native B&C reuses exported pseudocosts",
+          "[milp][native][warmstart]") {
+  BCOptions opt;
+  opt.use_vendored_highs_lp_kernel = false;
+  opt.use_papilo_presolve = false;
+  opt.root_cut_rounds = 0;
+  opt.use_feasibility_pump = false;
+  opt.use_progressive_rounding = false;
+  opt.enable_feasibility_jump = false;
+
+  MIPModel mip = make_knapsack_10();
+  auto cold = solve_milp_bc(mip, opt);
+  REQUIRE(cold.stats.success);
+  REQUIRE(cold.highs_pseudocost_init);
+  REQUIRE(cold.highs_pseudocost_init->n_orig_cols == 10);
+  REQUIRE(cold.highs_pseudocost_init->pseudocostup.size() == 10);
+  REQUIRE(cold.highs_pseudocost_init->nsamplesup.size() == 10);
+
+  auto seed = std::make_shared<BCPseudocostInit>(
+      *cold.highs_pseudocost_init);
+  for (int col : mip.binary_idx) {
+    seed->pseudocostup[static_cast<size_t>(col)] = 3.0 + col;
+    seed->pseudocostdown[static_cast<size_t>(col)] = 4.0 + col;
+    seed->nsamplesup[static_cast<size_t>(col)] = 17;
+    seed->nsamplesdown[static_cast<size_t>(col)] = 19;
+  }
+  opt.highs_pseudocost_warm_start = seed;
+  mip.initial_solution = cold.x;
+
+  auto warm = solve_milp_bc(mip, opt);
+  REQUIRE(warm.stats.success);
+  REQUIRE(warm.highs_pseudocost_init);
+  CHECK(warm.stats.objective == Approx(cold.stats.objective).margin(1e-6));
+  for (int col : mip.binary_idx) {
+    CHECK(warm.highs_pseudocost_init->nsamplesup[static_cast<size_t>(col)] >= 17);
+    CHECK(warm.highs_pseudocost_init->nsamplesdown[static_cast<size_t>(col)] >= 19);
+  }
 }
 
 TEST_CASE("MILP: StrictHiGHS [A+B] warm-start injection correctness and node reduction",

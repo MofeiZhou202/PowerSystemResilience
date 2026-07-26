@@ -3170,6 +3170,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       }
     }
   }
+  std::vector<int> declared_branchable_indices;
+  declared_branchable_indices.reserve(static_cast<std::size_t>(n));
+  for (int j = 0; j < n; ++j) {
+    if (declared_branchable_cols[static_cast<std::size_t>(j)] != 0) {
+      declared_branchable_indices.push_back(j);
+    }
+  }
   auto fractional_branchable_indices =
       [&](const Eigen::VectorXd& x, const Eigen::VectorXd& lb,
           const Eigen::VectorXd& ub, double int_tol,
@@ -3183,10 +3190,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                             std::min(static_cast<int>(lb.size()),
                                      static_cast<int>(ub.size())))))));
     const double split_tol = std::max(1e-9, int_tol);
-    for (int j = 0; j < limit; ++j) {
-      if (declared_branchable_cols[static_cast<std::size_t>(j)] == 0) {
-        continue;
-      }
+    for (int j : declared_branchable_indices) {
+      if (j >= limit) break;
       if (ub[j] - lb[j] <= split_tol) {
         continue;
       }
@@ -3210,10 +3215,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         std::min(n, static_cast<int>(std::min<std::size_t>(
                         declared_branchable_cols.size(),
                         static_cast<std::size_t>(x.size()))));
-    for (int j = 0; j < limit; ++j) {
-      if (declared_branchable_cols[static_cast<std::size_t>(j)] == 0) {
-        continue;
-      }
+    for (int j : declared_branchable_indices) {
+      if (j >= limit) break;
       x[j] = std::min(ub[j], std::max(lb[j], std::round(x[j])));
     }
   };
@@ -3512,16 +3515,22 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   // Root always gets full probing for branching quality (applied per-node below).
   const int base_m = static_cast<int>(base_lp.A.rows()) +
                      static_cast<int>(base_lp.Aeq.rows());
+  const bool huge_column_model = n >= 100000;
   const bool disable_uc_tree_probing = reduced_uc_hint.has_value() && (base_m > 2000);
-  const int probe_reliability = (base_m > opt.large_problem_threshold) ? 0 : (base_m > 12000) ? 1 : opt.probe_reliability;
-  const int probe_max = disable_uc_tree_probing ? 0
+  const int probe_reliability = huge_column_model ? 0
+                         : (base_m > opt.large_problem_threshold) ? 0
+                         : (base_m > 12000) ? 1 : opt.probe_reliability;
+  const int probe_max = huge_column_model ? 0
+                         : disable_uc_tree_probing ? 0
                          : (base_m > opt.large_problem_threshold) ? 0
                          : (base_m > 12000) ? 1
                          : (base_m > 2000) ? std::max(1, opt.probe_max_candidates - 1)
                          : opt.probe_max_candidates;
-  const int root_probe_max = (base_m > 12000) ? 0 : opt.probe_max_candidates;
+  const int root_probe_max = huge_column_model || base_m > 12000
+                                 ? 0
+                                 : opt.probe_max_candidates;
 
-  std::vector<PseudoCost> pc(static_cast<size_t>(n));
+  CompactPseudoCostTable pc(n, declared_branchable_indices);
 
   Node root;
   root.lb = Eigen::VectorXd(n);
@@ -5192,20 +5201,17 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   // ─────────────────────────────────────────────────────────────────────
   {
     std::vector<double> abs_c;
-    abs_c.reserve(static_cast<std::size_t>(n));
-    for (int i = 0; i < n; ++i) {
-      if (is_integer_type(base_lp.vars[i])) {
-        const double a = std::abs(base_lp.c[i]);
-        if (a > 0.0) abs_c.push_back(a);
-      }
+    abs_c.reserve(declared_branchable_indices.size());
+    for (int i : declared_branchable_indices) {
+      const double a = std::abs(base_lp.c[i]);
+      if (a > 0.0) abs_c.push_back(a);
     }
     double cost_median = 1.0;
     if (!abs_c.empty()) {
       std::nth_element(abs_c.begin(), abs_c.begin() + abs_c.size() / 2, abs_c.end());
       cost_median = std::max(1e-6, abs_c[abs_c.size() / 2]);
     }
-    for (int i = 0; i < n; ++i) {
-      if (!is_integer_type(base_lp.vars[i])) continue;
+    for (int i : declared_branchable_indices) {
       const double cj = std::abs(base_lp.c[i]);
       const double prior = std::max(1e-6, 0.5 * cost_median + cj);
       pc[i].add_down(prior);
@@ -5213,7 +5219,56 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     }
   }
 
-  root.estimate = compute_node_estimate(base_lp.vars, root.x_relax, pc,
+  // Repeated native solves (for example, a Benders master with one new row)
+  // keep the same original columns.  Import learned directional pseudocosts
+  // through the PaPILO original-to-reduced map instead of relearning them.
+  if (opt.highs_pseudocost_warm_start &&
+      !opt.highs_pseudocost_warm_start->empty()) {
+    const auto& seed = *opt.highs_pseudocost_warm_start;
+    const auto full_size = [orig_n](const auto& values) {
+      return static_cast<int>(values.size()) == orig_n;
+    };
+    if (seed.n_orig_cols == orig_n && full_size(seed.pseudocostup) &&
+        full_size(seed.pseudocostdown) && full_size(seed.nsamplesup) &&
+        full_size(seed.nsamplesdown)) {
+      for (int orig_col = 0; orig_col < orig_n; ++orig_col) {
+        const int col = map_original_col_to_reduced(orig_col);
+        if (col < 0 || col >= n || !is_integer_type(base_lp.vars[col])) continue;
+        PseudoCost& p = pc[col];
+        p.up_cnt = std::max(0, seed.nsamplesup[static_cast<size_t>(orig_col)]);
+        p.down_cnt =
+            std::max(0, seed.nsamplesdown[static_cast<size_t>(orig_col)]);
+        const double up = seed.pseudocostup[static_cast<size_t>(orig_col)];
+        const double down = seed.pseudocostdown[static_cast<size_t>(orig_col)];
+        p.up_sum = std::max(0.0, up) * p.up_cnt;
+        p.down_sum = std::max(0.0, down) * p.down_cnt;
+        p.up_sq = std::max(0.0, up * up) * p.up_cnt;
+        p.down_sq = std::max(0.0, down * down) * p.down_cnt;
+        if (full_size(seed.inferencesup) && full_size(seed.ninferencesup)) {
+          p.up_inference_cnt =
+              std::max(0, seed.ninferencesup[static_cast<size_t>(orig_col)]);
+          p.up_inference_sum =
+              std::max(0.0, seed.inferencesup[static_cast<size_t>(orig_col)]) *
+              p.up_inference_cnt;
+        }
+        if (full_size(seed.inferencesdown) && full_size(seed.ninferencesdown)) {
+          p.down_inference_cnt =
+              std::max(0, seed.ninferencesdown[static_cast<size_t>(orig_col)]);
+          p.down_inference_sum =
+              std::max(0.0, seed.inferencesdown[static_cast<size_t>(orig_col)]) *
+              p.down_inference_cnt;
+        }
+        if (full_size(seed.conflictscoreup))
+          p.up_conflict_score =
+              std::max(0.0, seed.conflictscoreup[static_cast<size_t>(orig_col)]);
+        if (full_size(seed.conflictscoredown))
+          p.down_conflict_score = std::max(
+              0.0, seed.conflictscoredown[static_cast<size_t>(orig_col)]);
+      }
+    }
+  }
+
+  root.estimate = compute_node_estimate(declared_branchable_indices, root.x_relax, pc,
                                         opt.int_tol, root.bound);
 
   // Count fractional binaries at root
@@ -13705,7 +13760,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   out.bc_stats.root_implication_arcs =
       static_cast<std::uint64_t>(implication_graph.size());
 
-  root.estimate = compute_node_estimate(base_lp.vars, root.x_relax, pc,
+  root.estimate = compute_node_estimate(declared_branchable_indices, root.x_relax, pc,
                                         opt.int_tol, root.bound);
 
   const LPModel pre_cut_root_lp = root_lp;
@@ -14756,8 +14811,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    last_objective_source_refresh_ineq_rows = base_lp.A.rows();
 	    last_objective_source_refresh_eq_rows = base_lp.Aeq.rows();
 
-	    if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-	        stats.total_published() > 0) {
+	    if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
 	      fmt::print(stderr,
 	                 "[B&C-OBJ-SRC-REFRESH] source={} setup={} pub={}/{} "
 	                 "domainEpoch={} objectiveEpoch={} objParts={} objEvents={} "
@@ -17695,6 +17749,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   if (allow_concurrent_tree) {
     const int num_threads = std::max(1, resolve_num_threads(opt));
     cts = std::make_unique<ConcurrentTreeState>(opt, t0, n);
+    for (int col : declared_branchable_indices) cts->pseudocosts[col] = pc[col];
 
     // Seed shared cut pool with root cuts.
     if (out.bc_stats.cuts_added > 0) {
@@ -17810,7 +17865,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	          std::cref(implication_graph),
           std::cref(cts->par_simplex_opt),
           std::cref(opt),
-          std::ref(pc),
+          std::ref(cts->pseudocosts),
           std::ref(cts->pc_mtx),
           std::ref(cts->atomic_stats),
           std::ref(cts->should_stop),
@@ -20360,7 +20415,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    const Eigen::SparseMatrix<double, Eigen::RowMajor> sub_Aeq_row = sub_lp_source.Aeq;
 	    RowPropagationIndex sub_row_index;
 	    sub_row_index.build(n, sub_A_row, sub_Aeq_row);
-	    std::vector<PseudoCost> sub_pc = pc;
+	    CompactPseudoCostTable sub_pc = pc;
 	    NodeQueue sub_queue(local_trail_completion ? NodeSelection::DepthFirst
 	                                               : NodeSelection::Hybrid);
 
@@ -23072,7 +23127,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                                         root.ub, std::max(1e-9, opt.int_tol));
 	  // For concurrent mode, root was already pushed to cts->shared_queue.
 	  if (!concurrent_tree_launched) {
-	    node_queue.push(root, root_incumbent_good_enough());
+    // A queued node already owns x_relax; retaining an identical x_seed costs
+    // another 8 bytes per column and is unnecessary for basis warm starts.
+    root.x_seed.resize(0);
+    node_queue.push(root, root_incumbent_good_enough());
   }
 
   double global_lb = node_queue.lower_bound();
@@ -25942,8 +26000,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 			      root.objective_artifact_epoch = current_objective_artifact_epoch();
 			      root.domain_closure_epoch = current_domain_closure_epoch();
 			    }
-			    if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-			        published > 0) {
+			    if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
 			      fmt::print(stderr,
 			                 "[B&C ROOT-CERT-PUBLISH] source={} range={}:{} "
 			                 "candidates={} rejected={} published={} totalCert={}\n",
@@ -34247,14 +34304,39 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     const auto loop_t2 = std::chrono::steady_clock::now();
 
     const double xj = cur.x_relax[j];
+    const double parent_bound = cur.bound;
+    const int parent_depth = cur.depth;
+    const bool run_crossover_this_node =
+        solution_pool.size() >= 2 && opt.crossover_heuristic_freq > 0 &&
+        out.bc_stats.nodes_explored % opt.crossover_heuristic_freq == 0;
+    const bool run_rins_this_node =
+        has_incumbent && opt.rins_frequency > 0 &&
+        out.bc_stats.nodes_explored % opt.rins_frequency == 0;
+    const bool retain_parent_for_heuristics =
+        run_crossover_this_node || run_rins_this_node;
+    Eigen::VectorXd parent_x_relax = retain_parent_for_heuristics
+        ? cur.x_relax
+        : std::move(cur.x_relax);
     Node child_down = cur.branch_child();
     child_down.ub[j] = std::min(child_down.ub[j], std::floor(xj));
-    child_down.x_seed = clamp_to_bounds(cur.x_relax, child_down.lb, child_down.ub);
+    child_down.x_seed = clamp_to_bounds(parent_x_relax, child_down.lb, child_down.ub);
     append_branch_reason(child_down, j, false, child_down.ub[j]);
 
-    Node child_up = cur.branch_child();
+    // The popped parent is dead after branching. Move its O(n) domain and
+    // proof state into one sibling instead of copying both lb and ub again.
+    Node child_up;
+    if (retain_parent_for_heuristics) {
+      child_up = cur.branch_child();
+    } else {
+      child_up = std::move(cur);
+      child_up.x_relax.resize(0);
+      child_up.x_seed.resize(0);
+      child_up.ipm_iterations = 0;
+      child_up.lp_refresh_needed = false;
+      child_up.depth = parent_depth + 1;
+    }
     child_up.lb[j] = std::max(child_up.lb[j], std::ceil(xj));
-    child_up.x_seed = clamp_to_bounds(cur.x_relax, child_up.lb, child_up.ub);
+    child_up.x_seed = clamp_to_bounds(parent_x_relax, child_up.lb, child_up.ub);
     append_branch_reason(child_up, j, true, child_up.lb[j]);
 
 		    bool down_valid, up_valid;
@@ -34265,7 +34347,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 // previous solve left it cuts-augmented; bounds are re-applied inside.
 if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = false; }
 				      auto [valid, pcu, sols, ncuts, lps, ca, ps] =
-		          process_single_child(child_down, false, j, cur.bound,
+	          process_single_child(child_down, false, j, parent_bound,
 		                                node_sf, cut_pool, incumbent_obj, has_incumbent,
 		                                &retained_down_probe);
       down_valid = valid;
@@ -34310,7 +34392,7 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
 // previous solve left it cuts-augmented; bounds are re-applied inside.
 if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = false; }
 		      auto [valid, pcu, sols, ncuts, lps, ca, ps] =
-		          process_single_child(child_up, true, j, cur.bound,
+	          process_single_child(child_up, true, j, parent_bound,
 		                                node_sf, cut_pool, incumbent_obj, has_incumbent,
 		                                &retained_up_probe);
       up_valid = valid;
@@ -34361,8 +34443,8 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
 			    }
 		    if (incumbent_changed_this_node) {
 		      highs_style_post_incumbent_domain_closure(
-		          "child_solution", cur.depth);
-	      maybe_run_post_incumbent_local_branching(cur.depth);
+	          "child_solution", parent_depth);
+	      maybe_run_post_incumbent_local_branching(parent_depth);
 	    }
 
 		    if (has_incumbent) {
@@ -34425,13 +34507,18 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
     }
 
     if (down_valid) {
-      child_down.estimate = compute_node_estimate(base_lp.vars, child_down.x_relax,
+      child_down.estimate = compute_node_estimate(declared_branchable_indices, child_down.x_relax,
                                                   pc, opt.int_tol, child_down.bound);
     }
     if (up_valid) {
-      child_up.estimate = compute_node_estimate(base_lp.vars, child_up.x_relax,
+      child_up.estimate = compute_node_estimate(declared_branchable_indices, child_up.x_relax,
                                                 pc, opt.int_tol, child_up.bound);
     }
+
+    // The next branch reconstructs a seed from x_relax. Do not retain a second
+    // full primal vector in the live-node frontier.
+    if (down_valid) child_down.x_seed.resize(0);
+    if (up_valid) child_up.x_seed.resize(0);
 
 	    if (down_valid && up_valid) {
 	      const bool push_proof_queue_mode = hybrid_queue_mode_active();
@@ -34461,7 +34548,7 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
     }
 
     // Crossover heuristic: every 100 nodes.
-    if (solution_pool.size() >= 2 && opt.crossover_heuristic_freq > 0 && out.bc_stats.nodes_explored % opt.crossover_heuristic_freq == 0) {
+    if (run_crossover_this_node) {
       const auto& s0 = solution_pool[0];
       const auto& s1 = solution_pool[1];
       Eigen::VectorXd xc = s0.x;
@@ -34493,7 +34580,7 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
     // Cheap RINS-like rounded-point check.  The full RINS sub-MIP is reserved
     // for the near-termination gate below, where improving the incumbent can
     // immediately change the proof/queue termination inequality.
-    if (has_incumbent && opt.rins_frequency > 0 && out.bc_stats.nodes_explored % opt.rins_frequency == 0) {
+    if (run_rins_this_node) {
       Eigen::VectorXd xr = cur.x_relax;
       for (int i = 0; i < n; ++i) {
         if (!is_integer_type(base_lp.vars[i])) continue;
@@ -34600,6 +34687,7 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
     // Late launch: create CTS and launch threads (same logic as early launch).
     const int num_threads_late = std::max(1, resolve_num_threads(opt));
 	    cts = std::make_unique<ConcurrentTreeState>(opt, t0, n);
+    for (int col : declared_branchable_indices) cts->pseudocosts[col] = pc[col];
     cts->shared_queue.configure_domain_signature(
         declared_branchable_cols, root.lb, root.ub, std::max(1e-9, opt.int_tol));
 	    if (out.bc_stats.cuts_added > 0) {
@@ -34673,7 +34761,7 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
 	          std::cref(declared_branchable_cols),
 	          std::cref(clique_table), std::cref(implication_graph),
           std::cref(cts->par_simplex_opt), std::cref(opt),
-          std::ref(pc), std::ref(cts->pc_mtx),
+	          std::ref(cts->pseudocosts), std::ref(cts->pc_mtx),
           std::ref(cts->atomic_stats), std::ref(cts->should_stop),
           std::ref(cts->active_explorers), std::ref(cts->active_bounds),
           std::ref(cts->fallback_logger),
@@ -35399,6 +35487,58 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
         out.bc_stats.best_bound_at_last_incumbent += obj_delta;
     }
     out.stats.objective = obj_val;
+  }
+
+  // Export native pseudocost learning in original column space.  The same
+  // payload is already used by the strict HiGHS path; keeping one public
+  // representation lets repeated callers warm either LP/MIP backend.
+  {
+    auto exported = std::make_shared<BCPseudocostInit>();
+    exported->n_orig_cols = orig_n;
+    exported->pseudocostup.assign(static_cast<size_t>(orig_n), 0.0);
+    exported->pseudocostdown.assign(static_cast<size_t>(orig_n), 0.0);
+    exported->nsamplesup.assign(static_cast<size_t>(orig_n), 0);
+    exported->nsamplesdown.assign(static_cast<size_t>(orig_n), 0);
+    exported->inferencesup.assign(static_cast<size_t>(orig_n), 0.0);
+    exported->inferencesdown.assign(static_cast<size_t>(orig_n), 0.0);
+    exported->ninferencesup.assign(static_cast<size_t>(orig_n), 0);
+    exported->ninferencesdown.assign(static_cast<size_t>(orig_n), 0);
+    exported->conflictscoreup.assign(static_cast<size_t>(orig_n), 0.0);
+    exported->conflictscoredown.assign(static_cast<size_t>(orig_n), 0.0);
+    for (int col : declared_branchable_indices) {
+      int orig_col = col;
+#ifdef MIPSOLVERS_HAVE_PAPILO
+      if (papilo_ps.success && !papilo_ps.reduced_to_orig_col.empty()) {
+        if (col < 0 ||
+            col >= static_cast<int>(papilo_ps.reduced_to_orig_col.size()))
+          continue;
+        orig_col = papilo_ps.reduced_to_orig_col[static_cast<size_t>(col)];
+      }
+#endif
+      if (orig_col < 0 || orig_col >= orig_n) continue;
+      const PseudoCost& p = pc[col];
+      exported->pseudocostup[static_cast<size_t>(orig_col)] = p.up_avg();
+      exported->pseudocostdown[static_cast<size_t>(orig_col)] = p.down_avg();
+      exported->nsamplesup[static_cast<size_t>(orig_col)] = p.up_cnt;
+      exported->nsamplesdown[static_cast<size_t>(orig_col)] = p.down_cnt;
+      exported->inferencesup[static_cast<size_t>(orig_col)] =
+          p.up_inference_avg();
+      exported->inferencesdown[static_cast<size_t>(orig_col)] =
+          p.down_inference_avg();
+      exported->ninferencesup[static_cast<size_t>(orig_col)] =
+          p.up_inference_cnt;
+      exported->ninferencesdown[static_cast<size_t>(orig_col)] =
+          p.down_inference_cnt;
+      exported->conflictscoreup[static_cast<size_t>(orig_col)] =
+          p.up_conflict_score;
+      exported->conflictscoredown[static_cast<size_t>(orig_col)] =
+          p.down_conflict_score;
+      exported->nsamplestotal += p.up_cnt + p.down_cnt;
+      exported->ninferencestotal +=
+          p.up_inference_cnt + p.down_inference_cnt;
+    }
+    if (exported->nsamplestotal > 0)
+      out.highs_pseudocost_init = std::move(exported);
   }
 
   out.bc_stats.status = out.stats.status;

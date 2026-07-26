@@ -520,6 +520,61 @@ struct PseudoCost {
   void add_up_conflict(double score = 1.0) { up_conflict_score += score; }
 };
 
+/// Dense global-column lookup backed by statistics for branchable columns only.
+/// Slot zero is a harmless sentinel for non-branchable columns, allowing legacy
+/// pc[col] call sites to retain their global indexing contract.
+class CompactPseudoCostTable {
+ public:
+  CompactPseudoCostTable() = default;
+
+  CompactPseudoCostTable(int num_cols,
+                         const std::vector<int>& branchable_cols)
+      : num_cols_(std::max(0, num_cols)),
+        col_to_slot_(static_cast<std::size_t>(num_cols_), 0),
+        values_(1) {
+    values_.reserve(branchable_cols.size() + 1);
+    active_cols_.reserve(branchable_cols.size());
+    for (int col : branchable_cols) {
+      if (col < 0 || col >= num_cols_ ||
+          col_to_slot_[static_cast<std::size_t>(col)] != 0) {
+        continue;
+      }
+      col_to_slot_[static_cast<std::size_t>(col)] =
+          static_cast<int>(values_.size());
+      values_.emplace_back();
+      active_cols_.push_back(col);
+    }
+  }
+
+  PseudoCost& operator[](int col) {
+    return values_[slot(col)];
+  }
+  const PseudoCost& operator[](int col) const {
+    return values_[slot(col)];
+  }
+
+  std::size_t size() const { return static_cast<std::size_t>(num_cols_); }
+  std::size_t active_size() const { return active_cols_.size(); }
+  const std::vector<int>& active_cols() const { return active_cols_; }
+  std::size_t storage_bytes() const {
+    return col_to_slot_.capacity() * sizeof(int) +
+           active_cols_.capacity() * sizeof(int) +
+           values_.capacity() * sizeof(PseudoCost);
+  }
+
+ private:
+  std::size_t slot(int col) const {
+    if (col < 0 || col >= num_cols_) return 0;
+    return static_cast<std::size_t>(
+        col_to_slot_[static_cast<std::size_t>(col)]);
+  }
+
+  int num_cols_{0};
+  std::vector<int> col_to_slot_;
+  std::vector<int> active_cols_;
+  std::vector<PseudoCost> values_;
+};
+
 /// @brief Check if a variable has integer or binary type.
 inline bool is_integer_type(const VariableMeta& v) {
   return v.type == VarType::Integer || v.type == VarType::Binary;

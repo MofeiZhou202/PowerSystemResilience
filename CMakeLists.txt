@@ -97,6 +97,7 @@ add_library(mipsolvers STATIC
   src/engine/kernel/lp_kernel/dual_simplex_api.cpp
   src/engine/kernel/kkt/kkt_system.cpp
   src/engine/kernel/ipm/lcqp_solver.cpp
+  src/engine/kernel/ipm/chordal_decomposition.cpp
   src/engine/kernel/ipm/cones.cpp
   src/engine/kernel/ipm/conic_ipm_solver.cpp
   src/engine/kernel/ipm/ipm_lp_solver.cpp
@@ -169,6 +170,7 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
 
   # Native B&C: strict HiGHS + dynamic cutting planes
   target_sources(mipsolvers PRIVATE
+    src/engine/decomposition/benders.cpp
     src/engine/solver/native/milp/bc/legacy/branch_and_cut.cpp
     src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp
     src/engine/solver/native/milp/bc/legacy/bc_parallel.cpp
@@ -640,6 +642,9 @@ if(MIPSOLVERS_BUILD_TESTS)
   endif()
   mipsolvers_add_test(test_dual_simplex        TIER unit)
   mipsolvers_add_test(test_branch_and_cut      TIER integration)
+  if(MIPSOLVERS_HAVE_HIGHS_LIB)
+    mipsolvers_add_test(test_benders_decomposition TIER integration)
+  endif()
   mipsolvers_add_test(test_problem_validation  TIER unit)
   mipsolvers_add_test(test_adapter_registry    TIER unit)
   mipsolvers_add_test(test_presolve            TIER unit)

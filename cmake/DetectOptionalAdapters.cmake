@@ -2,7 +2,7 @@
 # is built in-tree or loaded from a local prebuilt package.
 
 option(MIPSOLVERS_USE_GUROBI
-  "Enable Gurobi detection and native C API adapter when available" ON)
+  "Enable Gurobi detection and native C API adapter when available" OFF)
 option(MIPSOLVERS_USE_PAPILO
   "Enable local PaPILO presolve when available" ON)
 

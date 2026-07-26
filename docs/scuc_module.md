@@ -31,7 +31,8 @@ SCUC 模块实现了安全约束机组组合（Security-Constrained Unit Commitm
 | 储能模型 | 分离充放电效率、SOC 约束、二进制充放电指示变量 |
 | 新能源 | 风电/光伏预测出力，可选消纳下限与弃电惩罚 |
 | 备用 | 正备用（旋转/调频上/调频下）、负备用、一次调频（PFR）需求 |
-| 求解器 | 自动选择 Gurobi / SCIP / HiGHS / NativeBranchAndCut |
+| 求解器 | 自动选择 StrictHiGHS / HiGHS / SCIP / NativeBranchAndCut，不依赖 Gurobi |
+| 大规模分解 | 启停紧凑主问题 + 连续调度/网络 LP，支持稀疏增量割、跨轮伪成本复用、对偶最优性割和 Farkas 可行性割 |
 | 接口 | JSON 输入/输出，CLI 工具 `scuc_solve` |
 
 ---
@@ -44,7 +45,7 @@ SCUC 模块实现了安全约束机组组合（Security-Constrained Unit Commitm
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `solver` | string | `"Auto"` | 求解器：Auto / StrictHiGHS / Gurobi / HiGHS / SCIP |
+| `solver` | string | `"Auto"` | 求解器：Auto / StrictHiGHS / HiGHS / SCIP / NativeBranchAndCut |
 | `allow_fallback` | bool | true | 首选求解器失败时自动回退 |
 | `num_periods` | int | 24 | 调度时段数 $T$ |
 | `period_length_hr` | float | 1.0 | 每时段小时数 $\Delta t$ |
@@ -63,6 +64,10 @@ SCUC 模块实现了安全约束机组组合（Security-Constrained Unit Commitm
 | `renewable_min_output_coeff` | float | 0.0 | 新能源最小出力系数 $\alpha$（§2.6.3.20）|
 | `wheeling_fee_per_mwh` | float | 0.0 | 过网费 \$/MWh（§2.6.3.7 目标函数 $P_{gwf}$ 项）|
 | `enable_market_cuts` | bool | true | 是否添加预建 LP 有效不等式（见§4.6）|
+| `enable_benders_decomposition` | bool | false | 强制启用 Branch-and-Benders-Cut 分解 |
+| `benders_auto_min_variables` | int | 250000 | 单体模型达到该列数时自动分解，0=关闭自动选择 |
+| `benders_max_iterations` | int | 200 | 主问题/子问题最大迭代次数 |
+| `benders_cut_tolerance` | float | 1e-6 | Farkas 证书与割有效性容差 |
 | `solve_sced` | bool | true | SCUC 后是否求解 SCED（LP，固定组合）|
 | `solve_lmp` | bool | true | 是否计算节点 LMP |
 | `lmp_delta` | float | 0.10 | LMP 再调度邻域系数（§2.6.5.5）|
@@ -196,6 +201,24 @@ SCUC 模块实现了安全约束机组组合（Security-Constrained Unit Commitm
 | `solver_name` | string | 实际使用的求解器 |
 | `mip_gap` | float | 相对 MIP 间隙 |
 | `n_cuts_added` | int | 添加的预建有效不等式数量 |
+| `benders_iterations` | int | 分解迭代次数 |
+| `benders_cuts_added` | int | 已添加的最优性割、可行性割和兜底割数量 |
+| `benders_master_variables` | int | 紧凑主问题变量数 |
+| `benders_master_nodes` | int64 | 紧凑主问题累计原生 B&C 节点数 |
+| `benders_master_lp_solves` | int64 | 紧凑主问题累计 LP 松弛求解次数 |
+| `benders_master_warm_starts` | int | 使用可行 incumbent 热启动的主问题次数 |
+| `benders_master_pseudocost_reuses` | int | 复用上一轮分支伪成本的主问题次数 |
+| `benders_master_solve_time_sec` | float | 紧凑主问题累计求解耗时（秒）|
+| `benders_subproblem_variables` | int | 连续调度子问题变量数 |
+| `benders_subproblem_rows` | int | 消元后连续子问题约束行数 |
+| `benders_eliminated_binary_variables` | int | 从连续 LP 中消除的二进制列数 |
+| `benders_coupled_binary_variables` | int | 实际参与连续 RHS 耦合的二进制列数；稀疏割梯度只遍历该支撑集 |
+| `benders_binary_coupling_nonzeros` | int64 | 二进制到 RHS 稀疏耦合矩阵非零元数 |
+| `benders_incremental_rhs_updates` | int64 | 二进制取值变化实际触达的 RHS 耦合非零元数 |
+| `benders_subproblem_solves` | int | 连续子问题求解次数 |
+| `benders_subproblem_warm_starts` | int | 成功复用持久化 basis 的子问题次数 |
+| `benders_subproblem_simplex_iterations` | int64 | 连续子问题累计单纯形 pivot 数 |
+| `benders_subproblem_solve_time_sec` | float | 连续子问题累计求解耗时（秒）|
 | `commitment[g][t]` | float | 机组开机状态 0/1 |
 | `startup[g][t]` / `shutdown[g][t]` | float | 启动/停机指示变量 |
 | `dispatch[g][t]` | float | 发电出力 MW |
@@ -418,7 +441,7 @@ SCUCInput (JSON)
        │  - 等式/不等式约束矩阵
        │  - 预建 LP 割平面
        ▼
-  SolverEngine::solve_milp()   ← SCUC (MILP)
+  单体 MILP 或 Branch-and-Benders-Cut
        │
        ▼
   extract_result()             ← 提取 MILP 解 → scuc
@@ -441,10 +464,19 @@ SCUCInput (JSON)
   scuc_output_to_json()        ← 序列化输出 (JSON)
 ```
 
-**MILP 求解器优先级**（`solver = "Auto"`）：Gurobi → StrictHiGHS → HiGHS → NativeBranchAndCut
+当单体模型变量数达到 `benders_auto_min_variables` 时，SCUC 阶段自动改用
+Branch-and-Benders-Cut。主问题仅包含启停、启动/停机、可选储能模式二进制变量
+以及一个调度成本变量；出力、备用和网络约束保留在连续 LP 子问题。二进制列从
+连续 LP 中精确消元，混合约束系数形成稀疏耦合矩阵，每轮按 `b-A_binary*x`
+原位更新 RHS。LP 对偶与耦合矩阵生成最优性割，Farkas 证书生成可行性割；纯
+二进制约束留在主问题。连续子问题的标准形、缩放、basis 和稀疏分解在迭代间
+持久化，再由对偶单纯形增量重优化；标准形建立后会释放原连续 LP 矩阵副本。
+该路径不使用 Gurobi。
 
-> 注：SCIP 在本框架中仅支持 MINLP，不参与 MILP 调度。HiGHS 不返回对偶变量，
-> 因此当 `solve_lmp = true` 时 LMP 阶段会自动回退到 Gurobi 或 NativeBranchAndCut。
+算法循环和稀疏自动分块由求解器层公共接口
+`engine::partition_benders_model()` / `engine::solve_benders()` 实现，详见
+[通用 Benders 模块](benders_decomposition.md)。SCUC 层只选择一阶段二进制列并
+完成结果回映射，不包含 RHS 更新、割生成或收敛判断。
 
 ---
 
@@ -505,7 +537,7 @@ SCUCInput (JSON)
   "scuc": {
     "converged": true,
     "objective": 12450.3,
-    "solver_name": "Gurobi",
+    "solver_name": "StrictHiGHS",
     "mip_gap": 0.00031,
     "commitment":  [[1,1,1], [0,1,1]],
     "dispatch":    [[...], [...]],
@@ -591,24 +623,24 @@ inp.initial_status.dispatch   = {500,300,0,0,200,0,0,0,0,600};
 | 标签 | 测试名称 | 说明 |
 |------|---------|------|
 | `[market][viz]` | TC-1 … TC-9 | 端到端功能验证（共 161 个断言，100% 通过）|
-| `[market][benchmark]` | TEST 1b … TEST 3b | 各求解器性能基准（HiGHS / Gurobi / NativeBranchAndCut）|
+| `[market][benchmark]` | TEST 1b … TEST 3b | 各求解器性能基准（HiGHS / NativeBranchAndCut）|
 
 ### 8.2 多求解器性能基准
 
-**测试环境**：macOS ARM64（Apple M4），Release 模式，MIP 间隙 1%，HiGHS 4.x / Gurobi 12
+**测试环境**：macOS ARM64（Apple M4），Release 模式，MIP 间隙 1%，HiGHS 4.x
 
-| 算例 | T | 新能源/储能 | HiGHS | Gurobi | NativeBranchAndCut | 目标函数 ($) | 割平面 |
-|------|---|----------|-------|--------|--------------------|------------|------|
-| 3-bus | 6 | 无 | 22 ms | 4 ms | 48 ms | 746,316 | 32 |
-| 6-bus | 8 | 风+储 | 22 ms | 6 ms | 70 ms | 76,478 | 86 |
-| IEEE 39-bus | 4 | 风 | 21 ms | 5 ms | 16 ms | 203,130 | 122 |
-| IEEE 39-bus | 24 | 风+光 | 91 ms | 77 ms | 96 ms | 891,466 | 898 |
-| **IEEE 39-bus** | **24** | **风+光+储** | **96 ms** | **84 ms** | **147 ms** | **891,466** | **900** |
+| 算例 | T | 新能源/储能 | HiGHS | NativeBranchAndCut | 目标函数 ($) | 割平面 |
+|------|---|----------|-------|--------------------|------------|------|
+| 3-bus | 6 | 无 | 22 ms | 48 ms | 746,316 | 32 |
+| 6-bus | 8 | 风+储 | 22 ms | 70 ms | 76,478 | 86 |
+| IEEE 39-bus | 4 | 风 | 21 ms | 16 ms | 203,130 | 122 |
+| IEEE 39-bus | 24 | 风+光 | 91 ms | 96 ms | 891,466 | 898 |
+| **IEEE 39-bus** | **24** | **风+光+储** | **96 ms** | **147 ms** | **891,466** | **900** |
 
 > **说明**：
 > - SCIP 在本框架中仅支持 MINLP，不参与 MILP 基准。
-> - 三个求解器目标函数差异 < 1 $（MIP 间隙范围内），结果一致。
-> - Auto 模式（`solver="Auto"`）默认优先已安装且许可证有效的 Gurobi，否则依次回退到 StrictHiGHS → HiGHS → NativeBranchAndCut。
+> - 开源/原生求解器目标函数差异 < 1 $（MIP 间隙范围内），结果一致。
+> - Auto 模式（`solver="Auto"`）仅使用开源/原生求解路径。
 > - 「风+光」案例目标函数（891,466 $）低于纯风案例（976,359 $）：光伏日间出力替代了边际成本较高的调峰机组。
 > - 「风+光+储」在「风+光」基础上增加 2 台电池（bus 3: 200MW/800MWh，bus 19: 150MW/600MWh），目标函数相同，割平面增加 2 条（SOC 约束）。
 

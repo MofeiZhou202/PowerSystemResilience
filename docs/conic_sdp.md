@@ -49,6 +49,8 @@ Engine 问题类型       engine::ConicModel + ProblemClass::CONIC
         ▼
 内核                  ConicIPMSolver —— Mehrotra 预测-校正 IPM
   (src/engine/kernel/ipm/conic_ipm_solver.cpp)
+   ├─ 弦预处理 精确 Agler 团分解 + 一致性等式 + 对偶 completion
+   │  (src/engine/kernel/ipm/chordal_decomposition.cpp)
    ├─ 锥代数 ConeNtScaling / max_step / svec        (src/engine/kernel/ipm/cones.cpp)
    └─ KKT 后端  CHOLMOD 超节点 LLᵀ（SPD 快路径）→ MUMPS 对称不定 LDLᵀ（回退）
 ```
@@ -59,6 +61,7 @@ Engine 问题类型       engine::ConicModel + ProblemClass::CONIC
 |---|---|
 | `include/mipsolvers/engine/problem_types.hpp` | `ConeDims`、`ConicModel`（cvxopt 标准型） |
 | `include/mipsolvers/engine/kernel/ipm/cones.hpp` / `src/engine/kernel/ipm/cones.cpp` | svec/smat、SOC Jordan 代数、NT 缩放、max_step、内部点检验 |
+| `include/mipsolvers/engine/kernel/ipm/chordal_decomposition.hpp` / `src/engine/kernel/ipm/chordal_decomposition.cpp` | 稀疏 SDP 的弦扩展、最大团、精确模型转换与结果回映射 |
 | `include/mipsolvers/engine/kernel/ipm/conic_ipm_solver.hpp` / `src/engine/kernel/ipm/conic_ipm_solver.cpp` | `ConicIPMOptions`、`ConicIPMResult`、主迭代、KKT 装配与分解 |
 | `src/engine/solver/native/conic_ipm_adapter.cpp` | `NativeConicIPMAdapter`，`constraint_duals = [z | y]` |
 | `include/mipsolvers/aml/model.hpp` / `src/aml/model.cpp` | AML 锥约束 API 与 `compile_conic()` |
@@ -362,7 +365,7 @@ $$
            = \operatorname{tr}\big(X_i\, M\, X_j\, M\big).
 $$
 
-实现按列 $j$ 先算稠密合同 $P_j = M X_j M$，再与团内各 $i \ge j$ 列做点积（`conic_ipm_solver.cpp:419-449`）。同一锥块触及的所有变量构成一个稠密团——这是 §8 中 SDP 装配成本的来源。
+实现按块自适应选择两条路径：稠密列先算合同 $P_j = M X_j M$，再与团内各 $i \ge j$ 列做点积；超稀疏列则直接使用 svec 标准化基函数的解析双线性核计算 $\operatorname{tr}(X_i M X_j M)$，避免逐列创建零填充矩阵和两次 GEMM。选择器用估算工作量并为 GEMM 的局部性保留安全系数。同一锥块触及的所有变量仍构成一个稠密团——这是 §8 中 SDP 装配和分解成本的来源。
 
 > 实现锚点：`conic_ipm_solver.cpp:85-138`（`KktAssembler` 数据结构）、`conic_ipm_solver.cpp:341-467`（`assemble` / `apply_delta`）。
 
@@ -463,7 +466,7 @@ $\max\text{\_step}(u, du) = \sup\{\alpha \ge 0 : u + \alpha\, du \in \operatorna
   - $a \ne 0$ 且判别式 $b^2 - ac \ge 0$（涵盖 $a < 0$ 的开口向下抛物线与 $a > 0, b < 0$ 的开口向上情形）：取数值稳定形式 $\alpha = c/(-b + \sqrt{b^2 - ac})$（$b < 0$ 时）或 $\alpha = (-b - \sqrt{b^2 - ac})/a$（$b \ge 0$ 时），为正则采纳；
   - $a = 0,\ b < 0$（线性退化）：$\alpha = -c/(2b)$；
   - 首分量约束：$du_0 < 0$ 时再与 $-u_0/du_0$ 取小。
-  
+
   与二分搜索的数值对照见 `tests/test_conic_ipm.cpp:279`。
 - **半定锥**（`s_max_step`，`cones.cpp:231`）：$X = LL^\top$，构造 $E = L^{-1} dX\, L^{-T}$（对舍入对称化），则 $X + \alpha\, dX \succeq 0 \iff I + \alpha E \succeq 0$，故
 
@@ -483,8 +486,8 @@ $$
 
 $K$ 的稀疏模式逐迭代**不变**：$G$、$A$ 固定，每迭代只有 $H^{-1}$ 的数值与 $\delta$ 变化。`KktAssembler` 因此遵循与 LP-IPM 相同的 analyze-once/factorize-many 契约（参见 `docs/numerical_methods.md` §4）：
 
-- `build()`（每问题一次）：从 $G^\top$ 的行表、各锥块变量团与 $A$ 的列表生成 $K$ 下三角 CSC 模式，并为每类贡献预计算 **scatter map**（源条目 → CSC 值数组位置），包括 SOC 秩 1 项与 SDP Schur 项的位置表（`conic_ipm_solver.cpp:140-339`）；
-- `assemble()`（每迭代）：`values` 清零后按缓存的条目表直接累加数值，零分配、无模式重建；
+- `build()`（每问题一次）：从 $G^\top$ 的连续行表、各锥块变量团与 $A$ 的连续列表生成 $K$ 下三角 CSC 模式，并为每类贡献预计算 **scatter map**（源条目 → CSC 值数组位置），包括 SOC 秩 1 项与 SDP Schur 项的位置表；变量到 SDP 块的成员关系也直接索引，避免 $O(n\,n_s)$ 扫描；
+- `assemble()`（每迭代）：`values` 清零后按缓存的条目表直接累加数值，无模式重建；
 - `apply_delta()`：只改对角（$B$ 对角加 $\delta$、等式块置 $-\delta$），不动非对角——δ 升级时免重装配（`conic_ipm_solver.cpp:459-467`）。
 
 ### 7.2 SPD 快路径：CHOLMOD 超节点 LLᵀ
@@ -499,6 +502,20 @@ simplicial LDLᵀ 遇到（近）零主元仍可能失败：δ 升级到上限�
 
 > 实现锚点：`conic_ipm_solver.cpp:469-542`（`KktBackend`）、`include/mipsolvers/engine/kernel/linear_algebra/cholmod_ldlt.hpp`。
 
+### 7.4 稀疏 SDP 的精确弦分解
+
+对聚合稀疏图为 $E$ 的半定松弛矩阵，预处理器先用确定性最小度消元生成弦扩展 $E^+$ 和最大团 $C_k$。实现采用稀疏 PSD 锥的 Agler 分解
+
+$$
+S(x) = \sum_k E_{C_k}^\top S_k E_{C_k}, \qquad S_k \succeq 0,
+$$
+
+并把原仿射矩阵的每个弦边（包括填充边）写成线性一致性等式。填充边右端为零，所以非弦原图也保持**精确等价**；仅检查 $S(x)[C_k,C_k] \succeq 0$ 会得到 PSD-completion 松弛，本实现没有采用该近似。
+
+自动收益门控由 `ConicIPMOptions` 控制：`chordal_decomposition=true`、`chordal_min_order=32`、`chordal_max_clique_ratio=0.75`、`chordal_max_expansion_ratio=2.0`。小块、稠密块或团变量膨胀过大的块保留原路径。转换后的求解结果通过完美消元序列完成原对偶矩阵，并在**原模型**上重算可行性、对偶残差和 gap；`ConicIPMResult` 的 `chordal_*` 字段报告是否启用、团数及最大团阶。
+
+测试覆盖原生路径图（三个重叠二阶团）、需填充边的四环图（两个三阶团）以及混合标量锥/原等式回映射。性能基准 `conic_benchmark --suite chordal_sdp` 构造严格可行的三对角 SDP；阶 200 的原块会转换为 199 个二阶块。
+
 ---
 
 ## 8. 每迭代复杂度
@@ -510,12 +527,12 @@ simplicial LDLᵀ 遇到（近）零主元仍可能失败：δ 升级到上限�
 | NT 缩放 | $l$ 块 $O(l)$；SOC 每块 $O(k)$；半定每块 2 次 Cholesky + 1 次 SVD $O(p_b^3)$ | q/s 块可并行（§9） |
 | $B$ 装配：标量行 | $O\big(\sum_j \sum_{r \ni j} \mathrm{nnz}(g_r)\big)$ | 稀疏 scatter |
 | $B$ 装配：SOC 块 | 稀疏部分同量级 + 秩 1 $O(|{\rm clique}_b|^2)$ | 每块 |
-| $B$ 装配：半定块 | $O\big(n_b p_b^3 + n_b^2 \cdot \overline{\mathrm{nnz}}_b\big)$ | 每列稠密合同 $M X_j M$ 为 $O(p_b^3)$；成对点积按团内列对 |
+| $B$ 装配：半定块 | $\min\{O(n_b p_b^3 + n_b^2\bar k_b),\ O(n_b^2\bar k_b^2)\}$ | 自适应稠密合同 / 稀疏解析核，$\bar k_b$ 为每列块内平均非零数 |
 | KKT 分解 | CHOLMOD 超节点 LLᵀ（SPD）或 MUMPS LDLᵀ（不定），问题相关 | 符号分解摊还，数值分解每迭代 |
-| max_step | SOC $O(k)$；半定每块 Cholesky + 特征分解 $O(p_b^3)$ | 每迭代调用 4 次（仿射/组合 × s/z） |
+| max_step | SOC $O(k)$；半定每块对角合同 + 特征分解 $O(p_b^3)$ | NT 空间的 $\lambda$ 为对角阵，省去 Cholesky 与三角求解；每迭代调用 4 次 |
 | 迭代精化 | 每次 1 回代 + 数次 SpMV | 仅 q/s 块存在时 |
 
-**说明。** 半定块的 Schur 补对变量团是**稠密**的（同一 $\mathcal{S}^p$ 块触及的变量两两耦合），$O(n_b^2)$ 个元素、每元素来自 $O(p_b^3)$ 合同——这是 NT 框架下 SDP 的固有成本，CVXOPT 的 `sdp` 求解器同级；它决定了单个大阶半定块主导全部迭代时间。可行的缓解（chordal decomposition 等）见 §11。
+**说明。** 稀疏解析核降低 Schur 数值装配常数；弦分解进一步改变锥块和 KKT 图结构，使聚合图最大团较小的大阶 SDP 按团规模计算。无法通过收益门控的稠密 SDP 仍产生 $O(n_b^2)$ Schur 元素。`conic_benchmark --suite sparse_lp` 的 $10^6$ 对角 KKT 用例验证线性内存路径，`--suite chordal_sdp` 验证大阶稀疏 SDP 的团解耦路径。
 
 ---
 
@@ -614,7 +631,7 @@ m.minimize(X11);   // X11* = 4
 
 - **仅线性目标（v1）**。内核标准型目标是 $c^\top x$；AML 侧二次目标 + 锥约束、整数变量 + 锥约束、非线性 + 锥约束均在 `compile_conic` 显式拒绝（`std::invalid_argument`，`src/aml/model.cpp:381-400`）。凸 QP 目标请改走 SOC 图中表示（§10.2 的旋转锥换算）或不带锥的 QP 路径。
 - **无指数锥 / 幂锥**：三锥以外的锥需要新的自尺度障碍与 NT 缩放推导，非局部改动。
-- **无 chordal decomposition**：单个大阶半定块的稠密 Schur（§8）目前无解耦手段；聚合型 SDP（如电网 SDP 松弛的团树结构）是下一步的主要性能项。
+- **弦分解只改善稀疏聚合图**：单个最大团接近原阶数的 SDP 会被收益门控拒绝，仍走稠密 Schur 路径；分解还会增加团变量和一致性等式，因此性能取决于最大团阶、团重叠和 KKT 填充，而不只取决于原矩阵 nnz。
 - **外部锥求解器未接线**：AML 能力标志 `supports_socp` / `supports_sdp` 已定义（`include/mipsolvers/aml/solver_capabilities.hpp:16-17`），但尚无适配器（Clarabel、SCS 等）声明它们；`NativeConicIPM` 是当前唯一的 CONIC 后端。
 - **Python 绑定未暴露**：锥路径目前只有 C++ API。
 - **Homebrew MUMPS 与内置头文件版本错位（构建层已知问题）**：`cmake/BuildMUMPS.cmake` 的 brew 路径（`MIPSOLVERS_FORCE_BUILD_MUMPS=OFF`）用**内置 5.7.3 头文件**链接 **Homebrew Ipopt 自带的 libdmumps 5.6.2**，`DMUMPS_STRUC_C` 布局跨版本不一致，导致 `MumpsSolver` 的 solve 返回错误解（`INFOG(12)` 惯性读取也错位）——不只是锥路径，任何走 MUMPS 回退的模块都受影响。规避：以 `-DMIPSOLVERS_FORCE_BUILD_MUMPS=ON` 重新配置（内置 5.7.3 源码构建，同矩阵实测解残差 $8\times10^{-13}$）；锥 KKT 自 §7.3 起默认走 simplicial LDLᵀ，正常情形不再触碰 MUMPS。
