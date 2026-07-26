@@ -53,6 +53,48 @@ BendersModel make_generic_capacity_model() {
   return model;
 }
 
+BendersModel make_infeasible_then_feasible_model() {
+  // min x + theta
+  // s.t. y = 1, y <= 2*x, x binary, y >= 0.
+  // The first master optimum x=0 has infeasible recourse.  The feasibility
+  // cut must move the master to x=1, where y=1 and the objective is 1.
+  BendersModel model;
+  auto& master = model.master;
+  master.linear_part.sense = Sense::Minimize;
+  master.linear_part.c.resize(2);
+  master.linear_part.c << 1.0, 1.0;
+  master.linear_part.A.resize(0, 2);
+  master.linear_part.b.resize(0);
+  master.linear_part.Aeq.resize(0, 2);
+  master.linear_part.beq.resize(0);
+  master.linear_part.vars = {
+      {VarType::Binary, 0.0, 1.0, "enable_capacity"},
+      {VarType::Continuous, 0.0, 1e20, "theta"}};
+  master.binary_idx = {0};
+  model.theta_col = 1;
+
+  auto& sub = model.subproblem;
+  sub.sense = Sense::Minimize;
+  sub.c = Eigen::VectorXd::Zero(1);
+  sub.A.resize(1, 1);
+  sub.A.insert(0, 0) = 1.0;
+  sub.A.makeCompressed();
+  sub.b.resize(1);
+  sub.b << 0.0;
+  sub.Aeq.resize(1, 1);
+  sub.Aeq.insert(0, 0) = 1.0;
+  sub.Aeq.makeCompressed();
+  sub.beq.resize(1);
+  sub.beq << 1.0;
+  sub.vars = {{VarType::Continuous, 0.0, 1e20, "recourse"}};
+
+  model.coupling_ineq.resize(1, 2);
+  model.coupling_ineq.insert(0, 0) = -2.0;
+  model.coupling_ineq.makeCompressed();
+  model.coupling_eq.resize(1, 2);
+  return model;
+}
+
 MIPModel make_monolithic_facility_model() {
   // Original column order is [y0, x1, y2, x3].  The requested master order is
   // deliberately [x3, x1] to exercise the explicit mapping contract.
@@ -134,6 +176,44 @@ TEST_CASE("Generic Benders module rejects malformed coupling dimensions",
   const BendersResult result = solve_benders(std::move(model));
   CHECK_FALSE(result.success);
   CHECK(result.status.find("coupling dimensions") != std::string::npos);
+}
+
+TEST_CASE("Benders rebuilds recourse after an infeasible Phase-I solve",
+          "[benders][integration][regression]") {
+  BendersOptions options;
+  options.max_iterations = 20;
+  options.time_limit_sec = 30.0;
+  options.gap_tolerance = 1e-8;
+  options.master_options.use_vendored_highs_lp_kernel = true;
+  options.master_options.gap_tol = 0.0;
+  options.master_options.root_cut_rounds = 0;
+  options.cold_master_cut_rounds = 0;
+  options.warm_master_cut_rounds = 0;
+  options.master_options.use_feasibility_pump = false;
+  options.master_options.use_progressive_rounding = false;
+  options.master_options.enable_feasibility_jump = false;
+  options.subproblem_options.max_iter = 1000;
+  options.subproblem_options.feasibility_tol = 1e-9;
+  options.subproblem_options.optimality_tol = 1e-9;
+
+  const BendersResult result =
+      solve_benders(make_infeasible_then_feasible_model(), options);
+
+  INFO("status=" << result.status << " iterations=" << result.stats.iterations
+                 << " cuts=" << result.stats.cuts_added
+                 << " lower=" << result.lower_bound
+                 << " upper=" << result.upper_bound
+                 << " gap=" << result.relative_gap);
+  REQUIRE(result.success);
+  REQUIRE(result.has_incumbent);
+  REQUIRE(result.master_x.size() == 2);
+  REQUIRE(result.subproblem_x.size() == 1);
+  CHECK(result.objective == Approx(1.0).margin(1e-6));
+  CHECK(result.master_x[0] == Approx(1.0).margin(1e-6));
+  CHECK(result.subproblem_x[0] == Approx(1.0).margin(1e-6));
+  CHECK(result.stats.iterations >= 2);
+  CHECK(result.stats.cuts_added >= 1);
+  CHECK(result.stats.subproblem_solves >= 2);
 }
 
 TEST_CASE("Generic partitioner extracts a compact model from a monolithic MILP",

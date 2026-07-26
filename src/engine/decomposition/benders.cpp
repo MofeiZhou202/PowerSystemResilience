@@ -467,7 +467,6 @@ BendersResult solve_benders(BendersModel model,
   StandardFormLP sub_sf = build_standard_form_lp(model.subproblem);
   if (options.scaling_rounds > 0)
     ruiz_scale_standard_form(sub_sf, options.scaling_rounds);
-  model.subproblem = {};
 
   Eigen::VectorXd previous_master = Eigen::VectorXd::Zero(master_cols);
   Eigen::VectorXd latest_master;
@@ -476,6 +475,7 @@ BendersResult solve_benders(BendersModel model,
   std::shared_ptr<const BCPseudocostInit> pseudocost;
   SimplexBasis sub_basis;
   bool have_sub_basis = false;
+  bool rebuild_subproblem = false;
 
   auto remaining_seconds = [&]() {
     const double elapsed =
@@ -548,26 +548,44 @@ BendersResult solve_benders(BendersModel model,
       break;
     }
 
-    for (int col : coupled_cols) {
-      const double delta = latest_master[col] - previous_master[col];
-      if (delta == 0.0) continue;
-      for (Eigen::SparseMatrix<double>::InnerIterator it(
-               model.coupling_ineq, col); it; ++it) {
-        update_standard_form_rhs(
-            sub_sf, it.row(),
-            sub_sf.row_rhs_value[it.row()] - it.value() * delta);
-        ++out.stats.incremental_rhs_updates;
+    if (rebuild_subproblem) {
+      LPModel current_subproblem = model.subproblem;
+      const Eigen::VectorXd coupled_ineq_rhs =
+          model.coupling_ineq * latest_master;
+      current_subproblem.b -= coupled_ineq_rhs;
+      if (current_subproblem.row_lhs.size() ==
+          current_subproblem.b.size()) {
+        current_subproblem.row_lhs -= coupled_ineq_rhs;
       }
-      for (Eigen::SparseMatrix<double>::InnerIterator it(
-               model.coupling_eq, col); it; ++it) {
-        const int sf_row = sub_ineq_rows + it.row();
-        update_standard_form_rhs(
-            sub_sf, sf_row,
-            sub_sf.row_rhs_value[sf_row] - it.value() * delta);
-        ++out.stats.incremental_rhs_updates;
+      current_subproblem.beq -= model.coupling_eq * latest_master;
+      sub_sf = build_standard_form_lp(current_subproblem);
+      if (options.scaling_rounds > 0)
+        ruiz_scale_standard_form(sub_sf, options.scaling_rounds);
+      previous_master = latest_master;
+      have_sub_basis = false;
+      rebuild_subproblem = false;
+    } else {
+      for (int col : coupled_cols) {
+        const double delta = latest_master[col] - previous_master[col];
+        if (delta == 0.0) continue;
+        for (Eigen::SparseMatrix<double>::InnerIterator it(
+                 model.coupling_ineq, col); it; ++it) {
+          update_standard_form_rhs(
+              sub_sf, it.row(),
+              sub_sf.row_rhs_value[it.row()] - it.value() * delta);
+          ++out.stats.incremental_rhs_updates;
+        }
+        for (Eigen::SparseMatrix<double>::InnerIterator it(
+                 model.coupling_eq, col); it; ++it) {
+          const int sf_row = sub_ineq_rows + it.row();
+          update_standard_form_rhs(
+              sub_sf, sf_row,
+              sub_sf.row_rhs_value[sf_row] - it.value() * delta);
+          ++out.stats.incremental_rhs_updates;
+        }
       }
+      for (int col : coupled_cols) previous_master[col] = latest_master[col];
     }
-    for (int col : coupled_cols) previous_master[col] = latest_master[col];
 
     SimplexOptions sub_options = options.subproblem_options;
     sub_options.verbose = options.verbose || sub_options.verbose;
@@ -586,12 +604,18 @@ BendersResult solve_benders(BendersModel model,
         sub_result.result.stats.iterations;
     if (sub_result.solved_from_hint)
       ++out.stats.subproblem_basis_warm_starts;
-    if (sub_result.basis.rows == sub_sf.A.rows() &&
+    if (sub_result.result.stats.success &&
+        sub_result.basis.rows == sub_sf.A.rows() &&
         sub_result.basis.cols == sub_sf.A.cols() &&
         sub_result.basis.index_count() ==
             static_cast<std::size_t>(sub_sf.A.rows())) {
       sub_basis = std::move(sub_result.basis);
       have_sub_basis = true;
+    } else if (!sub_result.result.stats.success) {
+      // A Phase-I/infeasibility basis is not a valid reoptimization hint for
+      // the next master assignment. Reusing it can publish a stale feasible
+      // solution after the coupled RHS changes.
+      have_sub_basis = false;
     }
 
     const SolveResult& sub_solve = sub_result.result;
@@ -688,7 +712,7 @@ BendersResult solve_benders(BendersModel model,
         // A Farkas row ray alone is insufficient when recourse columns or
         // ranged-row slacks have finite bounds.  Compute the minimum of
         // (A' y)'z over every non-artificial standard-form column.  This adds
-        // the missing box-bound support without retaining the original LP.
+        // the missing box-bound support directly from the standard-form bounds.
         const Eigen::VectorXd ray_column = sub_sf.A.transpose() * y_scaled;
         std::vector<char> artificial(
             static_cast<std::size_t>(sub_sf.A.cols()), 0);
@@ -770,6 +794,10 @@ BendersResult solve_benders(BendersModel model,
       }
       append_cut(model.master, *cut);
       ++out.stats.cuts_added;
+      // The native Phase-I solve may leave artificial columns active in the
+      // reusable standard form. Rebuild at the next master assignment so a
+      // stale artificial solution cannot be accepted as feasible recourse.
+      rebuild_subproblem = true;
     }
   }
 
