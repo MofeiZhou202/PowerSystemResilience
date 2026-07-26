@@ -1,34 +1,64 @@
-> Documentation Sync (2026-07-12)
-> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
+> Documentation Sync (2026-07-26)
+> Scope: offline source builds on macOS, Linux, and Windows.
 > Status: implementation-backed reference.
-> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+> Source of truth: `CMakeLists.txt`, `CMakePresets.json`, and
+> `cmake/Dependencies.cmake` override this document if they diverge.
 
-# Cross-Platform Build Configuration
+# Cross-Platform Offline Build
 
-This project consumes `MIPSolvers` as source, usually from the sibling checkout
-`../MIPSolvers`.  The project CMake configures the solver dependency with a
-portable default profile so the same checkout can build on macOS, Linux, and
-Windows without editing vendored solver sources.
+The normal build does not download dependencies. `MIPSolvers` supplies complete
+local source copies of Eigen 3.4.1, fmt, nlohmann/json, HiGHS, SCIP, MUMPS,
+Ipopt, SuiteSparse, Catch2, PaPILO 3.0.0, and PaPILO's required Boost headers.
+This repository supplies OpenXLSX for ETAP Excel I/O. Eigen includes both the
+core tree and `unsupported/`, including
+`unsupported/Eigen/MatrixFunctions`.
 
-## Dependency Layout
+## Source Package Layout
 
-Recommended layout:
+The default layout is:
 
 ```text
-Codes/
+package/
   HybridACDCDistributionSystemsSimulation/
   MIPSolvers/
 ```
 
-If `MIPSolvers` is somewhere else, pass:
+The `MIPSolvers` directory may instead be placed inside the main repository or
+selected explicitly:
 
 ```bash
-cmake -S . -B build -DMIPSOLVERS_SOURCE_DIR=/absolute/path/to/MIPSolvers
+cmake -S . -B build/release \
+  -DMIPSOLVERS_SOURCE_DIR=/absolute/path/to/MIPSolvers
 ```
 
-## Presets
+Release and CI builds reject a dirty Git checkout of MIPSolvers. A distributed
+source archive without `.git` metadata is accepted and reported as such; the
+archive producer is responsible for preserving the pinned contents.
 
-From `HybridACDCDistributionSystemsSimulation`:
+Do not omit these paths from an offline package:
+
+```text
+MIPSolvers/third_party/eigen/
+MIPSolvers/third_party/fmt/
+MIPSolvers/third_party/nlohmann_json/
+MIPSolvers/third_party/catch2/
+MIPSolvers/third_party/papilo/
+MIPSolvers/third_party/boost_papilo/
+MIPSolvers/highs/  MIPSolvers/scip/  MIPSolvers/mumps/
+MIPSolvers/ipopt/  MIPSolvers/suitesparse/
+HybridACDCDistributionSystemsSimulation/third_party/OpenXLSX-master/
+```
+
+## Toolchain Prerequisites
+
+Only build tools and platform runtimes are prerequisites. CMake 3.20 or newer
+and a C++20 compiler are required on every platform.
+
+### macOS
+
+Use Xcode Command Line Tools. The default embedded Ipopt/MUMPS profile also
+needs a Fortran compiler such as `gfortran`. Homebrew libraries are not build
+dependencies; Homebrew may still be used to install CMake or the compiler.
 
 ```bash
 cmake --preset macos-release
@@ -36,110 +66,96 @@ cmake --build --preset macos-release
 ctest --preset macos-release
 ```
 
+### Linux
+
+Use GCC or Clang with the standard C/C++ build tools. The main Linux preset
+keeps embedded Ipopt off, so a Fortran compiler is not required for the default
+profile.
+
 ```bash
 cmake --preset linux-release
 cmake --build --preset linux-release
 ctest --preset linux-release
 ```
 
-```powershell
-cmake --preset windows-vcpkg-release
-cmake --build --preset windows-vcpkg-release
-ctest --preset windows-vcpkg-release
-```
-
-## Platform Prerequisites
-
-### macOS
-
-```bash
-brew install cmake ninja fmt nlohmann-json suite-sparse
-```
-
-The `macos-release` preset enables embedded Ipopt through `MIPSolvers`, matching
-the currently supported Ipopt path in that checkout.
-
-### Linux
-
-```bash
-sudo apt update
-sudo apt install -y \
-  build-essential cmake ninja-build \
-  libfmt-dev nlohmann-json3-dev libeigen3-dev \
-  libsuitesparse-dev libsuperlu-dev
-```
-
-Embedded Ipopt is OFF by default on Linux because the current
-`MIPSolvers/cmake/BuildIpopt.cmake` path is macOS-specific.
-
 ### Windows
 
-Use an x64 Native Tools Prompt or a Developer PowerShell for Visual Studio 2022.
+Use an x64 Native Tools Prompt or Developer PowerShell for Visual Studio 2022.
+The default preset builds vendored dependencies directly and does not require
+vcpkg, system Eigen, or a Unix compatibility layer.
 
 ```powershell
-git clone https://github.com/microsoft/vcpkg C:\vcpkg
-C:\vcpkg\bootstrap-vcpkg.bat
-C:\vcpkg\vcpkg install fmt:x64-windows nlohmann-json:x64-windows eigen3:x64-windows suitesparse:x64-windows superlu:x64-windows
-
-$env:VCPKG_ROOT = "C:\vcpkg"
-$env:SUITESPARSE_ROOT = "C:\vcpkg\installed\x64-windows"
-cmake --preset windows-vcpkg-release
-cmake --build --preset windows-vcpkg-release
+cmake --preset windows-msvc-release
+cmake --build --preset windows-msvc-release
+ctest --preset windows-msvc-release
 ```
 
-The Windows preset uses the dynamic MSVC runtime (`/MD`) so vcpkg
-`x64-windows` packages link consistently.  If you intentionally use
-`x64-windows-static`, configure manually with the matching triplet and
-`CMAKE_MSVC_RUNTIME_LIBRARY`.
+The preset uses the dynamic MSVC runtime (`/MD` in Release). Embedded Ipopt is
+off in the main Windows profile; Native/Parity IPM and the local HiGHS/SCIP
+paths remain available. `windows-vcpkg-release` is retained only as a
+compatibility profile for sites that deliberately supply additional packages.
 
-## OPF Linear Solver Runtime Switch
+## Hermetic Verification
+
+Validate a release from a fresh build directory and an MIPSolvers source copy
+without `.git` metadata. The following switch prevents any accidental
+FetchContent network operation; the build is expected to succeed without it as
+well.
+
+```bash
+cmake -S . -B build/offline \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DMIPSOLVERS_SOURCE_DIR=/path/to/MIPSolvers-source-archive \
+  -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+cmake --build build/offline --parallel
+ctest --test-dir build/offline --output-on-failure --parallel 4
+```
+
+The configure log must identify Eigen, fmt, nlohmann/json, Catch2, OpenXLSX,
+HiGHS, SCIP, PaPILO, MUMPS/Ipopt when enabled, and SuiteSparse as vendored
+sources. A missing required source tree must fail at configure time instead of
+triggering a download.
+
+Gurobi detection is enabled by default but remains optional and is never
+bundled. Set `GUROBI_HOME` before configuring when it is installed outside the
+standard Gurobi locations. At runtime an unavailable/expired licence, failed
+environment initialization, or failed solve falls back to packaged HiGHS and
+native solvers. The reported solver name and DC OPF `solver_chain` identify the
+backend that actually produced the result.
+
+External comparison tools such as GridLAB-D, Julia, OpenDSS, Chromium, and
+Playwright are runtime test integrations rather than C++ build dependencies.
+Their tests skip when the executable is absent. To enable the OpenDSS bridge,
+provide a local DSS C-API bundle and set `HACDCPF_ENABLE_OPENDSS=ON`.
+
+## OPF Linear Solver Selection
 
 The parity OPF IPM supports:
 
 ```text
-HACDCPF_OPF_LINEAR_SOLVER=auto|dense|umfpack|klu|eigen
+HACDCPF_OPF_LINEAR_SOLVER=auto|dense|mumps|umfpack|klu|eigen
 ```
 
-For Windows deployment:
+`auto` uses dense pivoted LU for small KKT systems and local sparse backends for
+larger systems. `umfpack` and `klu` use MIPSolvers' vendored SuiteSparse targets;
+`eigen` forces the vendored Eigen SparseLU fallback. Use the environment switch
+for diagnostics, not as a stable application API.
 
-- `auto` uses dense LU for small KKT systems on Windows and sparse solvers for
-  larger systems when available.
-- `umfpack` is the preferred explicit sparse choice when SuiteSparse is
-  installed and linked correctly.
-- `klu` is the second sparse choice.
-- `eigen` forces Eigen `SparseLU` and needs no external sparse library.
-
-PowerShell examples:
-
-```powershell
-$env:HACDCPF_OPF_LINEAR_SOLVER = "umfpack"
-.\build\windows-vcpkg-release\Release\opf_numerical_benchmark.exe data case9.m case30.m
-```
-
-```powershell
-$env:HACDCPF_OPF_LINEAR_SOLVER = "dense"
-.\build\windows-vcpkg-release\Release\opf_numerical_benchmark.exe data case9.m case30.m
-```
-
-Check the benchmark output field `linear_solver_backend`.  If a forced
-`umfpack` run reports `sparse_eigen_lu`, SuiteSparse was not discovered by CMake
-or the executable was not linked to the SuiteSparse libraries.
-
-## CMake Options Owned by This Project
+## Project Options
 
 | Option | Default | Meaning |
 |---|---:|---|
-| `HACDCPF_DEPENDENCY_PROFILE` | `portable` | Controls how much of `MIPSolvers` is built: `portable`, `full`, or `minimal`. |
-| `HACDCPF_USE_SUITESPARSE` | `ON` | Enables SuiteSparse discovery for both `MIPSolvers` and the OPF KKT backend. |
-| `HACDCPF_USE_GUROBI` | `OFF` | Keeps Gurobi disabled even when it is installed locally; set `ON` only for deliberate Gurobi validation. |
-| `HACDCPF_SUITESPARSE_ROOT` | empty | SuiteSparse prefix; also exported as `SUITESPARSE_ROOT` for `MIPSolvers`. |
-| `HACDCPF_ENABLE_IPOPT` | `ON` on macOS, `OFF` elsewhere | Builds embedded Ipopt only where the current `MIPSolvers` CMake supports it. |
-| `HACDCPF_ENABLE_NATIVE_ARCH` | `OFF` | Propagates host-specific CPU tuning to this project and `MIPSolvers`. |
+| `HACDCPF_DEPENDENCY_PROFILE` | `portable` | Builds the solver subset needed by the application; `full` also builds MIPSolvers developer targets. |
+| `HACDCPF_USE_SUITESPARSE` | `ON` | Uses vendored UMFPACK/KLU; `OFF` selects Eigen SparseLU fallback. |
+| `HACDCPF_ENABLE_IPOPT` | macOS `ON`, Linux/Windows `OFF` | Enables the embedded Ipopt path where the main project currently validates it. |
+| `HACDCPF_ENABLE_ETAP` | `ON` | Builds against vendored OpenXLSX. |
+| `HACDCPF_ENABLE_OPENDSS` | `OFF` | Requires a separately supplied local DSS C-API. |
+| `HACDCPF_ENABLE_NATIVE_ARCH` | `OFF` | Enables host-specific CPU instructions; keep `OFF` for portable binaries. |
+| `HACDCPF_USE_GUROBI` | `ON` | Detect and prefer an installed/licensed Gurobi; absence is nonfatal. |
+| `HACDCPF_USE_PAPILO` | `ON` | Use MIPSolvers' bundled header-only PaPILO; `minimal` profile or `OFF` uses native presolve. |
 
-The `portable` profile builds embedded HiGHS/SCIP/HFactor but disables
-MIPSolvers tests, SCUC command-line tools, and Python bindings while used as a
-subproject.  Use `full-dev` when actively developing the solver dependency too.
-
-Gurobi is intentionally disabled by default on macOS, Linux, and Windows.  The
-Auto solver chains should therefore use native/HiGHS/SCIP paths and report
-`has_gurobi=false` from `get_solver_capabilities()`.
+Native builds on all three target operating systems remain required before a
+release: configuring a Windows preset on macOS does not validate MSVC ABI or
+runtime packaging. Inspect final executables with `otool -L`, `ldd`, or
+`dumpbin /DEPENDENTS` to identify compiler and platform runtime libraries that
+must accompany the deployment.

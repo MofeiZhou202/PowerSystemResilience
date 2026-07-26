@@ -777,15 +777,27 @@ engine::BCOptions market_scuc_bc_options(
   return options;
 }
 
+bool market_gurobi_available();
+
 bool market_uses_structured_highs(
     UCSolverChoice choice,
     const MarketOptions& market_options,
     int binary_variables) {
-  return (choice == UCSolverChoice::Auto ||
-          choice == UCSolverChoice::HiGHS) &&
+  const bool use_highs = choice == UCSolverChoice::HiGHS ||
+      (choice == UCSolverChoice::Auto && !market_gurobi_available());
+  return use_highs &&
       market_options.structured_scuc_branching &&
       binary_variables >=
           std::max(0, market_options.structured_scuc_min_binary_variables);
+}
+
+bool market_gurobi_available() {
+  static const bool available = [] {
+    engine::GurobiAdapter adapter;
+    return adapter.available() &&
+        adapter.supports(engine::ProblemClass::MILP);
+  }();
+  return available;
 }
 
 engine::SolverAdapterPtr create_market_milp_adapter(
@@ -823,11 +835,67 @@ engine::SolverAdapterPtr create_market_milp_adapter(
     return native();
   }
   if (choice == UCSolverChoice::Gurobi) {
+    auto adapter = std::make_shared<GurobiAdapter>();
+    if (adapter->available() && adapter->supports(ProblemClass::MILP)) {
+      return adapter;
+    }
+    return highs();
+  }
+  if (market_gurobi_available()) {
     return std::make_shared<GurobiAdapter>();
   }
   auto highs_adapter = highs();
   if (highs_adapter->supports(ProblemClass::MILP)) return highs_adapter;
   return native();
+}
+
+engine::SolveResult solve_market_milp_with_fallback(
+    const engine::MIPModel& model,
+    UCSolverChoice choice,
+    const MarketOptions& market_options,
+    int binary_variables,
+    bool* structured_branching_used = nullptr) {
+  using namespace engine;
+  if (structured_branching_used != nullptr) {
+    *structured_branching_used = false;
+  }
+
+  if (choice != UCSolverChoice::Auto &&
+      choice != UCSolverChoice::Gurobi) {
+    auto adapter = create_market_milp_adapter(
+        choice, market_options, binary_variables,
+        structured_branching_used);
+    return adapter->solve_milp(model);
+  }
+
+  std::string gurobi_failure = "unavailable or unlicensed";
+  GurobiAdapter gurobi;
+  if (gurobi.available() && gurobi.supports(ProblemClass::MILP)) {
+    auto solved = gurobi.solve_milp(model);
+    if (solved.stats.success) return solved;
+    gurobi_failure = solved.stats.status;
+  }
+
+  bool used_structured = false;
+  auto packaged = create_market_milp_adapter(
+      UCSolverChoice::HiGHS, market_options, binary_variables,
+      &used_structured);
+  auto solved = packaged->solve_milp(model);
+  if (structured_branching_used != nullptr) {
+    *structured_branching_used = used_structured;
+  }
+  if (solved.stats.success) {
+    solved.stats.status += " (fallback after Gurobi: " + gurobi_failure + ")";
+    return solved;
+  }
+
+  auto native = create_market_milp_adapter(
+      UCSolverChoice::Native, market_options, binary_variables);
+  auto native_solved = native->solve_milp(model);
+  native_solved.stats.status +=
+      " (fallback after Gurobi: " + gurobi_failure +
+      "; packaged MILP: " + solved.stats.status + ")";
+  return native_solved;
 }
 
 engine::SolveResult solve_market_pricing_lp(
@@ -2161,10 +2229,10 @@ UCSchedule solve_market_commitment(
       }
     } else {
       bool adapter_structured = false;
-      auto adapter = create_market_milp_adapter(
+      solved = solve_market_milp_with_fallback(
+          build.model,
           options.uc_options.uc_solver, iteration_options,
           binary_variables, &adapter_structured);
-      solved = adapter->solve_milp(build.model);
     }
     structured_branching_used =
         structured_branching_used || iteration_structured;

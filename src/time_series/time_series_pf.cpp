@@ -2894,20 +2894,54 @@ engine::SolverAdapterPtr create_milp_adapter(UCSolverChoice choice) {
     return make_tuned_native();
   }
   if (choice == UCSolverChoice::Gurobi) {
-    return std::make_shared<GurobiAdapter>();
-  }
-
-  // Auto: keep the portable in-tree path first. Gurobi remains available only
-  // through the explicit UCSolverChoice::Gurobi selection when compiled in.
-  AdapterRegistry reg;
-  reg.register_adapter(std::make_shared<HighsAdapter>());
-  reg.register_adapter(make_tuned_native());
-
-  auto adapter = reg.first_for(ProblemClass::MILP);
-  if (!adapter) {
+    auto gurobi = std::make_shared<GurobiAdapter>();
+    if (gurobi->available() && gurobi->supports(ProblemClass::MILP)) {
+      return gurobi;
+    }
+    auto highs = std::make_shared<HighsAdapter>();
+    if (highs->available() && highs->supports(ProblemClass::MILP)) {
+      return highs;
+    }
     return make_tuned_native();
   }
-  return adapter;
+
+  auto gurobi = std::make_shared<GurobiAdapter>();
+  if (gurobi->available() && gurobi->supports(ProblemClass::MILP)) {
+    return gurobi;
+  }
+  auto highs = std::make_shared<HighsAdapter>();
+  if (highs->available() && highs->supports(ProblemClass::MILP)) return highs;
+  return make_tuned_native();
+}
+
+engine::SolveResult solve_uc_milp_with_fallback(
+    const engine::MIPModel& model, UCSolverChoice choice) {
+  using namespace engine;
+  if (choice != UCSolverChoice::Auto && choice != UCSolverChoice::Gurobi) {
+    return create_milp_adapter(choice)->solve_milp(model);
+  }
+
+  std::string gurobi_failure = "unavailable or unlicensed";
+  GurobiAdapter gurobi;
+  if (gurobi.available() && gurobi.supports(ProblemClass::MILP)) {
+    auto solved = gurobi.solve_milp(model);
+    if (solved.stats.success) return solved;
+    gurobi_failure = solved.stats.status;
+  }
+
+  HighsAdapter highs;
+  if (highs.available() && highs.supports(ProblemClass::MILP)) {
+    auto solved = highs.solve_milp(model);
+    if (solved.stats.success) {
+      solved.stats.status += " (fallback after Gurobi: " +
+          gurobi_failure + ")";
+      return solved;
+    }
+  }
+
+  auto solved = create_milp_adapter(UCSolverChoice::Native)->solve_milp(model);
+  solved.stats.status += " (fallback after Gurobi: " + gurobi_failure + ")";
+  return solved;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -3577,8 +3611,7 @@ UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
   build.model.initial_solution =
       priority_list_uc_heuristic(sys, ts_data, build, total_load);
 
-  auto adapter = create_milp_adapter(opts.uc_solver);
-  auto result = adapter->solve_milp(build.model);
+  auto result = solve_uc_milp_with_fallback(build.model, opts.uc_solver);
 
   // Validate solver produced a usable solution vector
   const int expected_size = build.model.linear_part.c.size();

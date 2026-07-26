@@ -77,7 +77,7 @@ extern CTMSimulationResult ctm_forward_pass(
     const std::unordered_map<int, std::size_t>&,
     const std::unordered_map<int, int>&,
     const CTMOptions&,
-    double, int);
+    double, int, int);
 
 namespace {
 
@@ -1776,7 +1776,7 @@ JointOptimizerResult solve_joint_optimizer(
     }
 
     auto ctm_pre = ctm_forward_pass(problem, x0, link_pos, route_pos_ctm,
-                                    opts.ctm_opts, dt, T);
+                                    opts.ctm_opts, dt, T, 1);
     ctm_route_tt = std::move(ctm_pre.route_travel_time);
   }
 

@@ -4,6 +4,7 @@ data/
 data/*
 !data/dsp/
 !data/dsp/**
+!data/test.xml
 
 build_codex/
 build-*/

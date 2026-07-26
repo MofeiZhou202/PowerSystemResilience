@@ -333,7 +333,9 @@ target_include_directories(test_evpt_approximation_error PRIVATE
 # Transportation Networks for Research (TNTP) import: network metadata,
 # directed links, node coordinates, OD table, and explicit unit conversion.
 hacdcpf_add_test(test_tntp_parser test_tntp_parser.cpp)
-hacdcpf_add_test(test_sioux_falls_ieee123_case test_sioux_falls_ieee123_case.cpp)
+if(HACDCPF_HAVE_OPENDSS)
+  hacdcpf_add_test(test_sioux_falls_ieee123_case test_sioux_falls_ieee123_case.cpp)
+endif()
 
 # Formulation C: CTM-DUE jointly coupled with DC-OPF LMP price feedback.
 #   2-bus grid, 4-node 2-route traffic, 4 EV vehicles, WTP=50 $/veh.

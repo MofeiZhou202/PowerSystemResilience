@@ -26,7 +26,7 @@ extern CTMSimulationResult ctm_forward_pass(
     const std::unordered_map<int, std::size_t>&,
     const std::unordered_map<int, int>&,
     const CTMOptions&,
-    double, int);
+    double, int, int);
 
 extern double wardrop_relative_gap(
     const EVPowerTrafficProblem&,
@@ -271,7 +271,7 @@ CTMDUEResult solve_ctm_due_vi(
   for (int iter = 1; iter <= vi_opts.max_iterations; ++iter) {
     const auto combined = make_combined_flow(x, x_icv);
     ctm_res = ctm_forward_pass(problem, combined, link_pos, route_pos_map,
-                                ctm_opts, dt_ctm, T_ctm);
+                                ctm_opts, dt_ctm, T_ctm, R);
     const double rg_ev = wardrop_relative_gap(problem, x, ctm_res,
                                                route_pos_map, ev_opts,
                                                due_opts_aon, T_ctm, R);
@@ -344,9 +344,9 @@ CTMDUEResult solve_ctm_due_vi(
       auto xf1 = make_flow(a1);
       auto xf2 = make_flow(a2);
       auto cf1 = ctm_forward_pass(problem, xf1, link_pos, route_pos_map,
-                                   ctm_opts, dt_ctm, T_ctm);
+                                   ctm_opts, dt_ctm, T_ctm, R);
       auto cf2 = ctm_forward_pass(problem, xf2, link_pos, route_pos_map,
-                                   ctm_opts, dt_ctm, T_ctm);
+                                   ctm_opts, dt_ctm, T_ctm, R);
       double f1 = compute_tstt(xf1, cf1);
       double f2 = compute_tstt(xf2, cf2);
 
@@ -356,14 +356,14 @@ CTMDUEResult solve_ctm_due_vi(
           a1 = lo + phi * (hi - lo);
           xf1 = make_flow(a1);
           cf1 = ctm_forward_pass(problem, xf1, link_pos, route_pos_map,
-                                  ctm_opts, dt_ctm, T_ctm);
+                                  ctm_opts, dt_ctm, T_ctm, R);
           f1 = compute_tstt(xf1, cf1);
         } else {
           lo = a1; a1 = a2; f1 = f2;
           a2 = hi - phi * (hi - lo);
           xf2 = make_flow(a2);
           cf2 = ctm_forward_pass(problem, xf2, link_pos, route_pos_map,
-                                  ctm_opts, dt_ctm, T_ctm);
+                                  ctm_opts, dt_ctm, T_ctm, R);
           f2 = compute_tstt(xf2, cf2);
         }
       }
@@ -388,7 +388,7 @@ CTMDUEResult solve_ctm_due_vi(
 
   const auto final_combined = make_combined_flow(x, x_icv);
   result.final_ctm = ctm_forward_pass(problem, final_combined, link_pos, route_pos_map,
-                                       ctm_opts, dt_ctm, T_ctm);
+                                       ctm_opts, dt_ctm, T_ctm, R);
   result.final_ctm.steps_per_sim_step = R;
   result.full_due_enabled = true;
 

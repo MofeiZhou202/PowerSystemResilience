@@ -202,6 +202,9 @@ TEST_CASE("EVPT JSON: mode B (CTM-DUE) run and serialize", "[evpt][gui][ctm_due]
       simulate_ev_power_traffic_ctm_due(prob, ev_opts, ctm_opts, due_opts);
   const json out = io::evpt_ctm_due_result_to_json(res);
 
+  INFO("route flows=" << out.at("flow_by_demand_route").dump());
+  INFO("sessions=" << out.at("sessions").dump());
+
   CHECK(out.at("iterations").get<int>() >= 1);
   CHECK(out.at("total_delivered_energy_kwh").get<double>() > 0.0);
   REQUIRE(out.contains("ctm"));

@@ -130,8 +130,8 @@ Function & Description \\
 \label{sec:tests}
 % ============================================================
 
-All tests use the Catch2 framework (fetched automatically by CMake via
-\texttt{FetchContent}).  The current macOS release tree used by GUI and IO
+All tests use the Catch2 framework supplied by the local MIPSolvers source
+tree; configuration performs no network fetch.  The current macOS release tree used by GUI and IO
 verification is \texttt{build/macos-release}; build and run focused IO checks
 with:
 \begin{verbatim}

@@ -17,7 +17,8 @@
         "HACDCPF_ENABLE_NATIVE_ARCH": "OFF",
         "HACDCPF_ENABLE_WERROR": "OFF",
         "HACDCPF_USE_SUITESPARSE": "ON",
-        "HACDCPF_USE_GUROBI": "OFF",
+        "HACDCPF_USE_GUROBI": "ON",
+        "HACDCPF_USE_PAPILO": "ON",
         "MIPSOLVERS_SOURCE_DIR": "${sourceDir}/../MIPSolvers"
       }
     },

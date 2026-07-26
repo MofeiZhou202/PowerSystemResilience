@@ -1135,11 +1135,14 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
       
     case DCOPFSolverBackend::Gurobi:
       solved = try_gurobi_qp();  // Prefer QP with Gurobi
-      if (!solved) {
-        result.status = "Gurobi not available";
-        result.converged = false;
-        apply_direct_shed_to_result();
-        return separate_external_grid_dispatch(std::move(result));
+      if (!solved || !sol.stats.success) {
+        solved = try_native_qp();
+      }
+      if (!solved || !sol.stats.success) {
+        solved = try_highs();
+      }
+      if (!solved || !sol.stats.success) {
+        solved = try_native_simplex();
       }
       break;
       
@@ -1159,10 +1162,10 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
       
     case DCOPFSolverBackend::Auto:
     default:
-      // Try NativeQP first (best for quadratic costs), then Gurobi QP, then LP solvers
-      solved = try_native_qp();
+      // Prefer an installed/licensed Gurobi, then use packaged QP/LP solvers.
+      solved = try_gurobi_qp();
       if (!solved || !sol.stats.success) {
-        solved = try_gurobi_qp();
+        solved = try_native_qp();
       }
       if (!solved || !sol.stats.success) {
         solved = try_highs();

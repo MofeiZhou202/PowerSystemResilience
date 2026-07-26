@@ -20,7 +20,7 @@
 #     environments where the tree layout differs from the default.
 #
 # Last verified compatible commit (update when upgrading MIPSolvers):
-set(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT "240ad84f8689d60c19007a29e93945efa8d18dea"
+set(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT "2ede2a1d28d5480930a0c2d27295877d168708d3"
   CACHE STRING "Expected MIPSolvers HEAD commit (empty = skip check)" FORCE)
 
 set(MIPSOLVERS_SOURCE_DIR "" CACHE PATH
@@ -46,7 +46,7 @@ endif()
 # Optionally verify the MIPSolvers commit matches the recorded pin.
 if(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
   find_package(Git QUIET)
-  if(Git_FOUND)
+  if(Git_FOUND AND EXISTS "${_HACDCDSS_MIPSOLVERS_DIR}/.git")
     option(HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK
            "Suppress the local dirty-workspace warning for MIPSolvers in non-release builds"
            OFF)
@@ -118,6 +118,10 @@ if(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
         endif()
       endif()
     endif()
+  elseif(NOT EXISTS "${_HACDCDSS_MIPSOLVERS_DIR}/.git")
+    message(STATUS
+      "MIPSolvers source archive has no Git metadata; commit and dirty-tree "
+      "checks are skipped.")
   endif()
 endif()
 
@@ -142,95 +146,66 @@ if(NOT TARGET mipsolvers::mipsolvers)
     "target.  Check the MIPSolvers CMakeLists.txt.")
 endif()
 
-# ── Catch2 (test framework – fetched only when tests are enabled) ─────────────
+# ── Catch2 (test framework, vendored by MIPSolvers) ──────────────────────────
 if(HACDCPF_BUILD_TESTS)
-  include(FetchContent)
-
-  # Prefer a pre-existing local source tree over a network download to avoid
-  # depending on GitHub connectivity.
-  set(_CATCH2_LOCAL_CANDIDATES
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/catch2-src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build_rel/_deps/catch2-src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build/_deps/catch2-src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers/build_mipsolvers/_deps/catch2-src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers/_deps/catch2-src")
-
-  set(_CATCH2_LOCAL_DIR "")
-  foreach(_dir IN LISTS _CATCH2_LOCAL_CANDIDATES)
-    if(EXISTS "${_dir}/CMakeLists.txt")
-      set(_CATCH2_LOCAL_DIR "${_dir}")
-      break()
+  set(_HACDCDSS_CATCH2_DIR
+      "${_HACDCDSS_MIPSOLVERS_DIR}/third_party/catch2")
+  if(NOT TARGET Catch2::Catch2WithMain)
+    if(NOT EXISTS "${_HACDCDSS_CATCH2_DIR}/catch_amalgamated.cpp" OR
+       NOT EXISTS "${_HACDCDSS_CATCH2_DIR}/catch2/catch_test_macros.hpp")
+      message(FATAL_ERROR
+        "MIPSolvers vendored Catch2 is incomplete at "
+        "${_HACDCDSS_CATCH2_DIR}. Restore third_party/catch2; network "
+        "downloads are disabled for hermetic builds.")
     endif()
-  endforeach()
+    find_package(Threads REQUIRED)
+    add_library(Catch2 STATIC
+      "${_HACDCDSS_CATCH2_DIR}/catch_amalgamated.cpp")
+    target_include_directories(Catch2 PUBLIC "${_HACDCDSS_CATCH2_DIR}")
+    target_compile_definitions(Catch2 PRIVATE CATCH_AMALGAMATED_CUSTOM_MAIN)
+    target_link_libraries(Catch2 PUBLIC Threads::Threads)
+    set_target_properties(Catch2 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    add_library(Catch2::Catch2 ALIAS Catch2)
 
-  if(_CATCH2_LOCAL_DIR)
-    message(STATUS "hacdcdss: using local Catch2 source at ${_CATCH2_LOCAL_DIR}")
-    FetchContent_Declare(
-      Catch2
-      SOURCE_DIR "${_CATCH2_LOCAL_DIR}"
-      EXCLUDE_FROM_ALL)
-  else()
-    message(STATUS "hacdcdss: downloading Catch2 v3.5.4 from GitHub")
-    FetchContent_Declare(
-      Catch2
-      GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-      GIT_TAG        v3.5.4
-      EXCLUDE_FROM_ALL)
+    add_library(Catch2WithMain STATIC
+      "${_HACDCDSS_CATCH2_DIR}/catch_amalgamated.cpp")
+    target_include_directories(Catch2WithMain PUBLIC "${_HACDCDSS_CATCH2_DIR}")
+    target_link_libraries(Catch2WithMain PUBLIC Threads::Threads)
+    set_target_properties(Catch2WithMain PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    add_library(Catch2::Catch2WithMain ALIAS Catch2WithMain)
   endif()
-
-  FetchContent_MakeAvailable(Catch2)
-  list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
+  if(NOT EXISTS "${_HACDCDSS_CATCH2_DIR}/extras/Catch.cmake")
+    message(FATAL_ERROR
+      "MIPSolvers vendored Catch2 is missing extras/Catch.cmake, required for "
+      "test discovery in an offline build.")
+  endif()
+  message(STATUS "hacdcdss: Catch2 = MIPSolvers vendored (3.7.1)")
+  list(APPEND CMAKE_MODULE_PATH "${_HACDCDSS_CATCH2_DIR}/extras")
   include(CTest)
   include(Catch)
 endif()
 
-# ── OpenXLSX (ETAP Excel I/O — resolved only when ETAP support is enabled) ─────
-# Mirrors the Catch2 strategy: prefer a pre-existing local source tree over a
-# network download.  The companion planning repository vendors OpenXLSX under
-# third_party/OpenXLSX-master, so a sibling checkout satisfies this with no
-# GitHub connectivity.  Sets HACDCPF_HAVE_OPENXLSX in the including scope.
+# ── OpenXLSX (ETAP Excel I/O, local-only) ────────────────────────────────────
 set(HACDCPF_HAVE_OPENXLSX OFF)
 if(HACDCPF_ENABLE_ETAP)
-  include(FetchContent)
-
   set(OPENXLSX_CREATE_DOCS      OFF CACHE BOOL "" FORCE)
   set(OPENXLSX_BUILD_TESTS      OFF CACHE BOOL "" FORCE)
   set(OPENXLSX_BUILD_SAMPLES    OFF CACHE BOOL "" FORCE)
   set(OPENXLSX_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
 
-  find_package(OpenXLSX CONFIG QUIET)
-  if(OpenXLSX_FOUND)
-    message(STATUS "hacdcdss: using system OpenXLSX")
+  set(_HACDCDSS_OPENXLSX_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/OpenXLSX-master")
+  if(EXISTS "${_HACDCDSS_OPENXLSX_DIR}/CMakeLists.txt")
+    add_subdirectory(
+      "${_HACDCDSS_OPENXLSX_DIR}"
+      "${CMAKE_CURRENT_BINARY_DIR}/_deps/openxlsx-build"
+      EXCLUDE_FROM_ALL)
+    message(STATUS "hacdcdss: OpenXLSX = vendored (third_party/OpenXLSX-master)")
     set(HACDCPF_HAVE_OPENXLSX ON)
   else()
-    set(_OPENXLSX_LOCAL_CANDIDATES
-      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/OpenXLSX-master"
-      "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/third_party/OpenXLSX-master"
-      "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build_rel/_deps/openxlsx-src"
-      "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build/_deps/openxlsx-src")
-
-    set(_OPENXLSX_LOCAL_DIR "")
-    foreach(_dir IN LISTS _OPENXLSX_LOCAL_CANDIDATES)
-      if(EXISTS "${_dir}/CMakeLists.txt")
-        set(_OPENXLSX_LOCAL_DIR "${_dir}")
-        break()
-      endif()
-    endforeach()
-
-    if(_OPENXLSX_LOCAL_DIR)
-      message(STATUS "hacdcdss: using local OpenXLSX source at ${_OPENXLSX_LOCAL_DIR}")
-      FetchContent_Declare(OpenXLSX SOURCE_DIR "${_OPENXLSX_LOCAL_DIR}" EXCLUDE_FROM_ALL)
-    else()
-      message(STATUS "hacdcdss: downloading OpenXLSX (master) from GitHub")
-      FetchContent_Declare(
-        OpenXLSX
-        GIT_REPOSITORY https://github.com/troldal/OpenXLSX.git
-        GIT_TAG        master
-        GIT_SHALLOW    TRUE
-        EXCLUDE_FROM_ALL)
-    endif()
-    FetchContent_MakeAvailable(OpenXLSX)
-    if(TARGET OpenXLSX OR TARGET OpenXLSX::OpenXLSX)
+    find_package(OpenXLSX CONFIG QUIET)
+    if(OpenXLSX_FOUND)
+      message(STATUS "hacdcdss: OpenXLSX = local system package")
       set(HACDCPF_HAVE_OPENXLSX ON)
     endif()
   endif()
@@ -241,9 +216,8 @@ if(HACDCPF_ENABLE_ETAP)
 
   if(NOT HACDCPF_HAVE_OPENXLSX)
     message(FATAL_ERROR
-      "HACDCPF_ENABLE_ETAP=ON but OpenXLSX could not be "
-      "located or fetched. Provide a local checkout (e.g. "
-      "../HybridACDCPowerSystemsPlanning/third_party/OpenXLSX-master) or enable "
-      "network access.")
+      "HACDCPF_ENABLE_ETAP=ON but OpenXLSX is unavailable. Restore vendored "
+      "third_party/OpenXLSX-master or provide a local OpenXLSX package. "
+      "Network downloads are disabled for hermetic builds.")
   endif()
 endif()

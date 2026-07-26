@@ -69,9 +69,9 @@ unset(_HACDCPF_ENABLE_IPOPT_DEFAULT)
 option(HACDCPF_USE_SUITESPARSE
        "Use SuiteSparse-backed sparse linear solvers when available"        ON)
 option(HACDCPF_USE_GUROBI
-       "Enable Gurobi detection through MIPSolvers when available"          OFF)
+       "Enable Gurobi detection through MIPSolvers when available"          ON)
 option(HACDCPF_USE_PAPILO
-       "Enable PaPILO presolve through MIPSolvers when available"           OFF)
+       "Enable bundled local PaPILO presolve through MIPSolvers"            ON)
 option(HACDCPF_USE_HFACTOR
        "Build MIPSolvers vendored HiGHS HFactor backend"                   ON)
 option(HACDCPF_BUILD_MIPSOLVERS_BUNDLED_ARCHIVE
@@ -90,7 +90,7 @@ if(HACDCPF_SUITESPARSE_ROOT)
   set(ENV{SUITESPARSE_ROOT} "${HACDCPF_SUITESPARSE_ROOT}")
   list(PREPEND CMAKE_PREFIX_PATH "${HACDCPF_SUITESPARSE_ROOT}")
 endif()
-# IO optional features: OpenDSS and Excel require external libs not bundled here
+# Optional I/O features: OpenXLSX is vendored; OpenDSS still needs DSS C-API.
 option(HACDCPF_ENABLE_OPENDSS "Build OpenDSS bridge (requires dss_capi)"   OFF)
 option(HACDCPF_ENABLE_OPENDSS_COMPARE
        "Build OpenDSS comparison tools and tests (requires dss_capi)"       OFF)
@@ -124,60 +124,6 @@ if(HACDCPF_ENABLE_IPOPT AND NOT APPLE)
     "HACDCPF_ENABLE_IPOPT=ON was requested, but the current MIPSolvers "
     "embedded Ipopt CMake path is macOS-only. Keep it OFF on Windows/Linux "
     "or extend MIPSolvers/cmake/BuildIpopt.cmake for that platform.")
-endif()
-
-include(FetchContent)
-
-set(_hacdcpf_fmt_source "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fmt-10.2.1")
-set(_hacdcpf_fmt_build "${CMAKE_CURRENT_BINARY_DIR}/_deps/fmt-build")
-file(TO_CMAKE_PATH "${_hacdcpf_fmt_build}" _hacdcpf_fmt_build_norm)
-if(DEFINED fmt_DIR)
-  file(TO_CMAKE_PATH "${fmt_DIR}" _hacdcpf_fmt_dir_norm)
-  if(_hacdcpf_fmt_dir_norm STREQUAL _hacdcpf_fmt_build_norm)
-    unset(fmt_DIR CACHE)
-  endif()
-endif()
-
-find_package(fmt CONFIG QUIET)
-if(NOT fmt_FOUND)
-  if(EXISTS "${_hacdcpf_fmt_source}/CMakeLists.txt")
-    set(FMT_INSTALL ON CACHE BOOL "" FORCE)
-    set(FMT_TEST OFF CACHE BOOL "" FORCE)
-    add_subdirectory("${_hacdcpf_fmt_source}"
-                     "${_hacdcpf_fmt_build}"
-                     EXCLUDE_FROM_ALL)
-    set(fmt_DIR "${_hacdcpf_fmt_build}")
-    list(PREPEND CMAKE_PREFIX_PATH "${_hacdcpf_fmt_build}")
-  else()
-    FetchContent_Declare(
-      fmt
-      GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-      GIT_TAG        11.0.2
-      EXCLUDE_FROM_ALL)
-    FetchContent_MakeAvailable(fmt)
-  endif()
-endif()
-
-find_package(nlohmann_json 3.11 CONFIG QUIET)
-if(NOT nlohmann_json_FOUND)
-  set(_hacdcpf_json_source "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann_json-3.11.3")
-  if(EXISTS "${_hacdcpf_json_source}/CMakeLists.txt")
-    set(_hacdcpf_json_build "${CMAKE_CURRENT_BINARY_DIR}/_deps/nlohmann_json-build")
-    set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
-    set(JSON_Install ON CACHE BOOL "" FORCE)
-    add_subdirectory("${_hacdcpf_json_source}"
-                     "${_hacdcpf_json_build}"
-                     EXCLUDE_FROM_ALL)
-    set(nlohmann_json_DIR "${_hacdcpf_json_build}" CACHE PATH "" FORCE)
-    list(PREPEND CMAKE_PREFIX_PATH "${_hacdcpf_json_build}")
-  else()
-    FetchContent_Declare(
-      nlohmann_json
-      GIT_REPOSITORY https://github.com/nlohmann/json.git
-      GIT_TAG        v3.11.3
-      EXCLUDE_FROM_ALL)
-    FetchContent_MakeAvailable(nlohmann_json)
-  endif()
 endif()
 
 if(HACDCPF_DEPENDENCY_PROFILE STREQUAL "minimal")
@@ -586,11 +532,22 @@ endif()
 target_link_libraries(hacdcpf PUBLIC mipsolvers::mipsolvers)
 
 # ── SuiteSparse for the OPF sparse-KKT solver (UMFPACK/KLU) ───────────────────
-# MIPSolvers uses SuiteSparse privately, while the native OPF IPM includes
-# Eigen's UmfPackLU/KLU wrappers directly. Re-discover both headers and link
-# libraries here so an OPF sparse backend is enabled only when this target can
-# compile and link it on the current machine.
+# Prefer the exact vendored SuiteSparse targets already built by MIPSolvers.
+# System discovery remains as a compatibility fallback for older MIPSolvers
+# source trees that do not export those targets.
 set(HACDCPF_OPF_SUITESPARSE_LIBRARIES "")
+if(HACDCPF_USE_SUITESPARSE AND
+   TARGET mipsolvers::umfpack_vendored AND
+   TARGET mipsolvers::klu_vendored)
+  target_link_libraries(hacdcpf PRIVATE
+    mipsolvers::umfpack_vendored
+    mipsolvers::klu_vendored)
+  target_compile_definitions(hacdcpf PRIVATE
+    HACDCPF_OPF_HAVE_UMFPACK=1
+    HACDCPF_OPF_HAVE_KLU=1)
+  message(STATUS
+    "hacdcpf: OPF sparse KKT = MIPSolvers vendored UMFPACK/KLU")
+else()
 set(_HACDCPF_SUITESPARSE_HINTS
   ${HACDCPF_SUITESPARSE_ROOT}
   $ENV{SUITESPARSE_ROOT}
@@ -675,6 +632,7 @@ if(HACDCPF_USE_SUITESPARSE AND HACDCPF_SUITESPARSE_INCLUDE_DIR)
 else()
   message(STATUS
     "hacdcpf: SuiteSparse disabled or not found; OPF sparse KKT will use Eigen SparseLU")
+endif()
 endif()
 
 # ── ETAP Excel I/O backend (OpenXLSX) ────────────────────────────────────
@@ -868,34 +826,36 @@ add_executable(three_phase_hybrid_pf_external_case
 target_link_libraries(three_phase_hybrid_pf_external_case PRIVATE hacdcpf::hacdcpf)
 hacdcpf_copy_opendss_runtime(three_phase_hybrid_pf_external_case)
 
-add_executable(sioux_falls_ieee123_experiment
-  tools/sioux_falls_ieee123_experiment.cpp)
-target_link_libraries(sioux_falls_ieee123_experiment PRIVATE hacdcpf::hacdcpf)
-target_include_directories(sioux_falls_ieee123_experiment PRIVATE
-  "${MIPSOLVERS_SOURCE_DIR}/highs"
-  "${CMAKE_BINARY_DIR}/_deps/mipsolvers_build/_deps/embedded_highs")
-target_compile_definitions(sioux_falls_ieee123_experiment PRIVATE
-  HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
-hacdcpf_copy_opendss_runtime(sioux_falls_ieee123_experiment)
-add_test(
-  NAME evpt_sioux_route_search_smoke
-  COMMAND $<TARGET_FILE:sioux_falls_ieee123_experiment>
-    --route-search --search-exhaustive --typhoon-road-impact
-    --selected-od-pairs 2 --paths-per-od 3
-    --search-scenarios 1 --search-threads 1 --search-max-nodes 100
-    --num-steps 12 --road-capacity-scale 0.08 --station-power-kw 2400)
-set_tests_properties(evpt_sioux_route_search_smoke PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\\"optimality_proven\\\": true")
+if(HACDCPF_HAVE_OPENDSS)
+  add_executable(sioux_falls_ieee123_experiment
+    tools/sioux_falls_ieee123_experiment.cpp)
+  target_link_libraries(sioux_falls_ieee123_experiment PRIVATE hacdcpf::hacdcpf)
+  target_include_directories(sioux_falls_ieee123_experiment PRIVATE
+    "${MIPSOLVERS_SOURCE_DIR}/highs"
+    "${CMAKE_BINARY_DIR}/_deps/mipsolvers_build/_deps/embedded_highs")
+  target_compile_definitions(sioux_falls_ieee123_experiment PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  hacdcpf_copy_opendss_runtime(sioux_falls_ieee123_experiment)
+  add_test(
+    NAME evpt_sioux_route_search_smoke
+    COMMAND $<TARGET_FILE:sioux_falls_ieee123_experiment>
+      --route-search --search-exhaustive --typhoon-road-impact
+      --selected-od-pairs 2 --paths-per-od 3
+      --search-scenarios 1 --search-threads 1 --search-max-nodes 100
+      --num-steps 12 --road-capacity-scale 0.08 --station-power-kw 2400)
+  set_tests_properties(evpt_sioux_route_search_smoke PROPERTIES
+    PASS_REGULAR_EXPRESSION "\\\"optimality_proven\\\": true")
 
-add_test(
-  NAME evpt_sioux_route_search_exhaustive_regression
-  COMMAND $<TARGET_FILE:sioux_falls_ieee123_experiment>
-    --route-search --search-exhaustive --typhoon-road-impact
-    --selected-od-pairs 3 --paths-per-od 3 --od-demand-scale 0.20
-    --search-scenarios 1 --search-threads 1 --search-max-nodes 200
-    --num-steps 12 --road-capacity-scale 0.08 --station-power-kw 2400)
-set_tests_properties(evpt_sioux_route_search_exhaustive_regression PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\\"search_matches\\\": true")
+  add_test(
+    NAME evpt_sioux_route_search_exhaustive_regression
+    COMMAND $<TARGET_FILE:sioux_falls_ieee123_experiment>
+      --route-search --search-exhaustive --typhoon-road-impact
+      --selected-od-pairs 3 --paths-per-od 3 --od-demand-scale 0.20
+      --search-scenarios 1 --search-threads 1 --search-max-nodes 200
+      --num-steps 12 --road-capacity-scale 0.08 --station-power-kw 2400)
+  set_tests_properties(evpt_sioux_route_search_exhaustive_regression PROPERTIES
+    PASS_REGULAR_EXPRESSION "\\\"search_matches\\\": true")
+endif()
 
 add_executable(weather_resilience_case_study
   tools/weather_resilience_case_study.cpp)

@@ -2096,65 +2096,50 @@ ACOPFResult build_hybrid_power_flow_warm_start(
   return warm;
 }
 
-// Solve the assembled parity OPF nonlinear program with the embedded Ipopt
-// filter line-search NLP solver.  The parity `Problem` already exposes every
-// callback Ipopt needs (objective, gradient, equality/inequality residuals and
-// Jacobians, and the Lagrangian Hessian), so the model maps 1:1 onto
-// engine::NLPModel.  Box bounds are passed as variable bounds; only the
-// nonlinear inequalities (`h(x) <= 0`) become general constraints.
-//
-// `available` is set false when Ipopt is not compiled in; callers then keep the
-// native-IPM result.  Ipopt does not return constraint multipliers through this
-// adapter, so `lambda_eq` is left empty (LMP extraction is skipped downstream).
-parity::IPMResult solve_parity_with_ipopt(const parity::Problem& prob,
-                                          const parity::IPMOptions& ipm_opt,
-                                          bool& available) {
-  parity::IPMResult res;
 #ifdef HACDCPF_HAVE_IPOPT
-  // The embedded Ipopt links MUMPS 5.6.2 (homebrew).  The Ipopt MUMPS interface
-  // struct in MIPSolvers was corrected to the matching 5.6.2 ABI, so the former
-  // heap corruption is resolved and this path is enabled by default.  It can
-  // still be force-disabled with HACDCPF_DISABLE_IPOPT_OPF if a future toolchain
-  // reintroduces an Ipopt/MUMPS ABI mismatch.
-  if (std::getenv("HACDCPF_DISABLE_IPOPT_OPF") != nullptr) {
-    available = false;
-    res.converged = false;
-    res.status = "Ipopt disabled (HACDCPF_DISABLE_IPOPT_OPF set)";
-    return res;
-  }
-  available = true;
+struct ParityNLPInput {
+  engine::NLPModel model;
+  Eigen::VectorXd x0;
+  bool warm_start_used{false};
+  double initial_primal_inf{0.0};
+};
 
+ParityNLPInput build_parity_nlp_input(const parity::Problem& prob,
+                                      const parity::IPMOptions& ipm_opt) {
+  ParityNLPInput input;
   Eigen::VectorXd xmin;
   Eigen::VectorXd xmax;
-  Eigen::VectorXd x0;
   parity::build_variable_bounds(prob, xmin, xmax);
   if (ipm_opt.primal_start != nullptr &&
       ipm_opt.primal_start->size() == prob.vidx.n_total &&
       ipm_opt.primal_start->allFinite()) {
-    x0 = *ipm_opt.primal_start;
-    for (int i = 0; i < x0.size(); ++i) {
-      if (std::isfinite(xmin[i])) x0[i] = std::max(x0[i], xmin[i] + 1e-8);
-      if (std::isfinite(xmax[i])) x0[i] = std::min(x0[i], xmax[i] - 1e-8);
+    input.x0 = *ipm_opt.primal_start;
+    for (int i = 0; i < input.x0.size(); ++i) {
+      if (std::isfinite(xmin[i])) {
+        input.x0[i] = std::max(input.x0[i], xmin[i] + 1e-8);
+      }
+      if (std::isfinite(xmax[i])) {
+        input.x0[i] = std::min(input.x0[i], xmax[i] - 1e-8);
+      }
     }
-    res.warm_start_used = true;
+    input.warm_start_used = true;
   } else {
-    parity::build_initial_point(prob, xmin, xmax, x0);
+    parity::build_initial_point(prob, xmin, xmax, input.x0);
   }
 
   {
     parity::EvalWorkspace ws0;
     Eigen::VectorXd g0;
     Eigen::VectorXd h0;
-    parity::equality_constraints(prob, x0, ws0, g0);
-    parity::nonlinear_inequality_constraints(prob, x0, h0);
+    parity::equality_constraints(prob, input.x0, ws0, g0);
+    parity::nonlinear_inequality_constraints(prob, input.x0, h0);
     const double eq0 = g0.size() ? g0.cwiseAbs().maxCoeff() : 0.0;
     const double ineq0 = h0.size() ? std::max(0.0, h0.maxCoeff()) : 0.0;
-    res.initial_primal_inf = std::max(eq0, ineq0);
+    input.initial_primal_inf = std::max(eq0, ineq0);
   }
 
   const int n = prob.vidx.n_total;
-
-  engine::NLPModel nlp;
+  auto& nlp = input.model;
   nlp.sense = engine::Sense::Minimize;
   nlp.vars.resize(static_cast<size_t>(n));
   for (int i = 0; i < n; ++i) {
@@ -2164,7 +2149,7 @@ parity::IPMResult solve_parity_with_ipopt(const parity::Problem& prob,
     vm.ub = std::isfinite(xmax[i]) ? xmax[i] : 1e20;
     nlp.vars[static_cast<size_t>(i)] = vm;
   }
-  nlp.x0 = x0;
+  nlp.x0 = input.x0;
   nlp.solver_options.max_iterations = std::max(1, ipm_opt.max_iter);
   nlp.solver_options.tolerance = std::min(
       {ipm_opt.tol_primal, ipm_opt.tol_dual,
@@ -2172,6 +2157,17 @@ parity::IPMResult solve_parity_with_ipopt(const parity::Problem& prob,
   nlp.solver_options.acceptable_tolerance = std::max(
       {ipm_opt.tol_primal, ipm_opt.tol_dual,
        ipm_opt.tol_complementarity});
+  const double backend_primal_tol = std::min(
+      ipm_opt.tol_primal, nlp.solver_options.tolerance);
+  nlp.solver_options.constraint_violation_tolerance = backend_primal_tol;
+  nlp.solver_options.dual_infeasibility_tolerance = ipm_opt.tol_dual;
+  nlp.solver_options.complementarity_tolerance = ipm_opt.tol_complementarity;
+  nlp.solver_options.acceptable_constraint_violation_tolerance =
+      backend_primal_tol;
+  nlp.solver_options.acceptable_dual_infeasibility_tolerance =
+      100.0 * ipm_opt.tol_dual;
+  nlp.solver_options.acceptable_complementarity_tolerance = std::max(
+      1e-2, 100.0 * ipm_opt.tol_complementarity);
 
   nlp.f = [&prob](const Eigen::VectorXd& x) -> double {
     return parity::objective(prob, x);
@@ -2184,10 +2180,8 @@ parity::IPMResult solve_parity_with_ipopt(const parity::Problem& prob,
     parity::EvalWorkspace ws;
     parity::equality_constraints(prob, x, ws, g);
   };
-  nlp.jac_g = [&prob](const Eigen::VectorXd& x, Eigen::SparseMatrix<double>& J) {
-    // equality_jacobian reads intermediate quantities (p_calc/q_calc, ...) that
-    // equality_constraints populates in the shared workspace, so it must run
-    // first on the same workspace and point.
+  nlp.jac_g = [&prob](const Eigen::VectorXd& x,
+                       Eigen::SparseMatrix<double>& J) {
     parity::EvalWorkspace ws;
     Eigen::VectorXd g_tmp;
     parity::equality_constraints(prob, x, ws, g_tmp);
@@ -2196,7 +2190,8 @@ parity::IPMResult solve_parity_with_ipopt(const parity::Problem& prob,
   nlp.h = [&prob](const Eigen::VectorXd& x, Eigen::VectorXd& h) {
     parity::nonlinear_inequality_constraints(prob, x, h);
   };
-  nlp.jac_h = [&prob](const Eigen::VectorXd& x, Eigen::SparseMatrix<double>& J) {
+  nlp.jac_h = [&prob](const Eigen::VectorXd& x,
+                       Eigen::SparseMatrix<double>& J) {
     parity::nonlinear_inequality_jacobian(prob, x, J);
   };
   nlp.lagrangian_hess = [&prob](const Eigen::VectorXd& x,
@@ -2205,11 +2200,42 @@ parity::IPMResult solve_parity_with_ipopt(const parity::Problem& prob,
                                 Eigen::SparseMatrix<double>& H) {
     parity::lagrangian_hessian(prob, x, lambda, nu, H, 0.0);
   };
+  return input;
+}
+#endif
 
+// Solve the assembled parity OPF nonlinear program with the embedded Ipopt
+// filter line-search NLP solver.  The parity `Problem` already exposes every
+// callback Ipopt needs (objective, gradient, equality/inequality residuals and
+// Jacobians, and the Lagrangian Hessian), so the model maps 1:1 onto
+// engine::NLPModel.  Box bounds are passed as variable bounds; only the
+// nonlinear inequalities (`h(x) <= 0`) become general constraints.
+//
+// `available` is set false when Ipopt is not compiled in; callers then keep the
+// native-IPM result.
+parity::IPMResult solve_parity_with_ipopt(const parity::Problem& prob,
+                                          const parity::IPMOptions& ipm_opt,
+                                          bool& available) {
+  parity::IPMResult res;
+#ifdef HACDCPF_HAVE_IPOPT
+  // Ipopt and MUMPS are built from the pinned MIPSolvers source tree. The path
+  // can still be force-disabled for backend isolation and diagnostics.
+  if (std::getenv("HACDCPF_DISABLE_IPOPT_OPF") != nullptr) {
+    available = false;
+    res.converged = false;
+    res.status = "Ipopt disabled (HACDCPF_DISABLE_IPOPT_OPF set)";
+    return res;
+  }
+  available = true;
+
+  ParityNLPInput input = build_parity_nlp_input(prob, ipm_opt);
+  res.warm_start_used = input.warm_start_used;
+  res.initial_primal_inf = input.initial_primal_inf;
+  const int n = prob.vidx.n_total;
   engine::IpoptAdapter ipopt;
-  const engine::SolveResult sol = ipopt.solve_nlp(nlp);
+  const engine::SolveResult sol = ipopt.solve_nlp(input.model);
 
-  res.x = (sol.x.size() == n) ? sol.x : x0;
+  res.x = (sol.x.size() == n) ? sol.x : input.x0;
   // Ipopt can return Maximum_Iterations_Exceeded after reaching a highly
   // usable point on large hybrid models.  Keep the termination code in the
   // status, but accept the point when feasibility is strict and the remaining
@@ -2236,6 +2262,45 @@ parity::IPMResult solve_parity_with_ipopt(const parity::Problem& prob,
   res.primal_inf = sol.stats.primal_feas;
   res.dual_inf = sol.stats.dual_feas;
   res.complementarity = sol.stats.complementarity;
+  const int m_nonlin = prob.cidx.n_ineq_nonlin;
+  const int meq = prob.cidx.n_eq_total;
+  if (sol.constraint_duals.size() == m_nonlin + meq &&
+      sol.box_dual_lb.size() == n && sol.box_dual_ub.size() == n) {
+    Eigen::VectorXd xmin;
+    Eigen::VectorXd xmax;
+    parity::build_variable_bounds(prob, xmin, xmax);
+    std::vector<int> lb_cols;
+    std::vector<int> ub_cols;
+    for (int i = 0; i < n; ++i) {
+      if (std::isfinite(xmin[i])) lb_cols.push_back(i);
+      if (std::isfinite(xmax[i])) ub_cols.push_back(i);
+    }
+    const int niq = m_nonlin + static_cast<int>(lb_cols.size()) +
+                    static_cast<int>(ub_cols.size());
+    constexpr double kInteriorFloor = 2e-12;
+    res.lambda_eq = sol.constraint_duals.tail(meq);
+    res.mu = Eigen::VectorXd::Constant(niq, kInteriorFloor);
+    res.z = Eigen::VectorXd::Constant(niq, kInteriorFloor);
+    Eigen::VectorXd h_nonlin;
+    parity::nonlinear_inequality_constraints(prob, res.x, h_nonlin);
+    if (m_nonlin > 0) {
+      res.mu.head(m_nonlin) =
+          sol.constraint_duals.head(m_nonlin).array().max(kInteriorFloor);
+      res.z.head(m_nonlin) =
+          (-h_nonlin.array()).max(kInteriorFloor);
+    }
+    int row = m_nonlin;
+    for (int col : lb_cols) {
+      res.mu[row] = std::max(sol.box_dual_lb[col], kInteriorFloor);
+      res.z[row] = std::max(res.x[col] - xmin[col], kInteriorFloor);
+      ++row;
+    }
+    for (int col : ub_cols) {
+      res.mu[row] = std::max(sol.box_dual_ub[col], kInteriorFloor);
+      res.z[row] = std::max(xmax[col] - res.x[col], kInteriorFloor);
+      ++row;
+    }
+  }
   res.status = std::string("Ipopt: ") + sol.stats.status;
   if (!sol.stats.success && acceptable_residuals) {
     res.status = "Ipopt: acceptable residuals after " + sol.stats.status;
@@ -2373,9 +2438,9 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
         ipm_res.x.size() == prob.vidx.n_total && ipm_res.x.allFinite()) {
       parity::IPMOptions refine_opt = ipm_opt;
       refine_opt.primal_start = &ipm_res.x;
-      refine_opt.equality_dual_start = nullptr;
-      refine_opt.inequality_dual_start = nullptr;
-      refine_opt.slack_start = nullptr;
+      refine_opt.equality_dual_start = &ipm_res.lambda_eq;
+      refine_opt.inequality_dual_start = &ipm_res.mu;
+      refine_opt.slack_start = &ipm_res.z;
       const parity::IPMResult refined =
           parity::solve_primal_dual_ipm(prob, refine_opt);
       if (refined.converged) {

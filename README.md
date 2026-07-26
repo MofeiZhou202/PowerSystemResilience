@@ -5,9 +5,13 @@
 
 本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。文档入口见 `docs/README.md`，更底层的公式和接口见 `docs/technical_notebook/`。
 
-## 文档同步状态（2026-07-19）
+## 文档同步状态（2026-07-26）
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
+- 2026-07-26 完成 MIPSolvers 系统升级回归：Eigen 3.4.1（含
+  `unsupported/`）、fmt、nlohmann/json、HiGHS、SCIP、MUMPS、Ipopt、
+  SuiteSparse、Catch2、PaPILO 3.0.0 与所需 Boost 头均从本地源码解析；ETAP 所需 OpenXLSX 也已纳入本仓库，
+  配置和构建过程不再下载依赖。
 - 已删除被实现取代的阶段计划、一次性代码审查和重复暂态设计稿；不再用历史 roadmap 描述当前行为。
 - 本次同步（2026-07-22）补入 2026 年 5–7 月新增能力域：电力市场、园区综合能源、承载力/薄弱环节/反事实规划、场景生成与台风弹性、年度碳/GEC、SPPT 可执行理论层、三相混合 OPF、电压稳定 CPF，以及 CIM/GridLAB-D/PSD.jl 等 IO 通道；并补齐高级潮流求解器专属回归、CPF 弧长增广、FDPF 稀疏注入与统一求解器接口。
 - 2026-07-19 增加 `/api/v1` 多会话、模型 revision/ETag、异步 PF/OPF 作业，以及对应 Python SDK 与 AI 工具层；设计边界见 `docs/python_api.md`。
@@ -31,9 +35,9 @@ ctest --preset linux-release
 ```
 
 ```powershell
-cmake --preset windows-vcpkg-release
-cmake --build --preset windows-vcpkg-release
-ctest --preset windows-vcpkg-release
+cmake --preset windows-msvc-release
+cmake --build --preset windows-msvc-release
+ctest --preset windows-msvc-release
 ```
 
 ## 当前建模与仿真包状态快照（2026-07-19）
@@ -69,15 +73,17 @@ ctest --preset windows-vcpkg-release
 | 项 | 当前默认 | 影响 |
 |---|---|---|
 | 依赖模式 `HACDCPF_DEPENDENCY_PROFILE` | `portable` | 默认构建核心能力，避免强绑定开发型附加组件。 |
-| ETAP Excel IO `HACDCPF_ENABLE_ETAP` | `ON` | 需要 OpenXLSX：依次尝试系统包、本仓库/兄弟规划仓库的 vendored 副本，最后回退到 GitHub 下载；全部失败则 configure 报错，可显式 `-DHACDCPF_ENABLE_ETAP=OFF` 关闭。 |
+| ETAP Excel IO `HACDCPF_ENABLE_ETAP` | `ON` | 默认使用 `third_party/OpenXLSX-master`；不进行网络下载。源码副本缺失时配置失败，也可显式 `-DHACDCPF_ENABLE_ETAP=OFF` 关闭。 |
 | OpenDSS bridge `HACDCPF_ENABLE_OPENDSS` | `OFF` | 需显式开启并提供 DSS C-API。 |
 | OpenDSS compare `HACDCPF_ENABLE_OPENDSS_COMPARE` | `OFF` | 依赖 OpenDSS bridge。 |
-| SuiteSparse `HACDCPF_USE_SUITESPARSE` | `ON` | 找到 UMFPACK/KLU 时作为 OPF 稀疏 KKT 后端；未找到自动回退 Eigen SparseLU。MIPSolvers 提供 MUMPS（LDLᵀ）时其为默认后端（可用 `HACDCPF_OPF_LINEAR_SOLVER=mumps/umfpack/klu/eigen` 指定）；Parity IPM 默认采用增广 Newton 形式（`HACDCPF_OPF_KKT_FORM=condensed` 可切回）。 |
+| SuiteSparse `HACDCPF_USE_SUITESPARSE` | `ON` | 默认复用 MIPSolvers vendored UMFPACK/KLU；关闭时回退到 vendored Eigen SparseLU。MIPSolvers 提供 MUMPS（LDLᵀ）时其为默认后端（可用 `HACDCPF_OPF_LINEAR_SOLVER=mumps/umfpack/klu/eigen` 指定）；Parity IPM 默认采用增广 Newton 形式（`HACDCPF_OPF_KKT_FORM=condensed` 可切回）。 |
 | IPOPT `HACDCPF_ENABLE_IPOPT` | macOS 默认 `ON`，其他平台默认 `OFF` | 当前嵌入式 IPOPT 路径按平台受限。 |
+| PaPILO `HACDCPF_USE_PAPILO` | `ON` | 默认使用 MIPSolvers 包内 PaPILO 与 Boost 头；关闭或 minimal profile 时回退到原生 presolve。 |
+| Gurobi `HACDCPF_USE_GUROBI` | `ON` | 默认探测并优先使用本机 Gurobi；未安装、许可证不可用或求解失败时自动回退到包内 HiGHS/原生求解器。 |
 
 ### 3) 测试覆盖信号（如何判断“不是纸面功能”）
 
-- 当前 `tests/CMakeLists.txt` 已注册 100 余个 C++ 测试目标（约 1250 个 Catch2 用例），覆盖 IO、PF/OPF、图分析、重构、可靠性、弹性、短路、谐波、三相、暂态、EV-交通耦合、市场、综合能源、SPPT 与跨模块一致性；另有 Node/Playwright 浏览器 E2E 与 Python GUI HTTP E2E 注册进 CTest。
+- 当前 `tests/CMakeLists.txt` 已注册 100 余个 C++ 测试目标（1300 余个 Catch2 用例），覆盖 IO、PF/OPF、图分析、重构、可靠性、弹性、短路、谐波、三相、暂态、EV-交通耦合、市场、综合能源、SPPT 与跨模块一致性；另有 Node/Playwright 浏览器 E2E 与 Python GUI HTTP E2E 注册进 CTest。
 - 部分测试有运行时外部依赖门控（gridlabd 可执行、Julia、OpenDSS、Playwright/chromium 等），依赖缺失时自动 skip，不构成失败。
 - 这表示“代码路径已工程化并具备回归入口”，但不等同于“你当前机器/当前配置已全部跑通”。
 - 对外汇报建议使用两层口径：
@@ -223,7 +229,11 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 | EV-交通耦合 | `simulate_ev_power_traffic`（A）、`_ctm_due`（B+）、`_ctm_joint`（C）、`solve_joint_optimizer`（D）、`solve_ctm_so_lp`/`solve_ltm_so_lp`（E）、`solve_ctm_due_vi`（F）、`solve_infra_design_milp`（G）、`solve_ltm_mpc`（H） | CTM/LTM 交通传播 + DC-OPF/LMP 联合优化 | 耦合仿真结果与最优性证书（区分全局/局部/启发式） |
 | SPPT 验证层 | `sppt::run_core_metamorphic_suite`, `certify_corpus`, `guard_system`, `run_agent_loop` | MR1–MR8 蜕变关系、独立残差证书、三道准入守卫 | 证伪/认证产物（CSV/LaTeX，研究验证性质） |
 
-优化和 MILP 模块依赖 sibling directory `../MIPSolvers` 提供的 Eigen、HiGHS、Ipopt 和 native branch-and-cut 后端。项目 CMake 默认从该 sibling 路径解析依赖，而不是搜索系统 solver。
+优化和 MILP 模块依赖 sibling directory `../MIPSolvers`。该源码树自带完整
+Eigen 3.4.1（包括 `unsupported/Eigen/MatrixFunctions`）、fmt、nlohmann/json、
+HiGHS、SCIP、MUMPS、Ipopt、SuiteSparse、PaPILO 与所需 Boost 头；项目默认从本地源码解析这些依赖，
+无需系统 Eigen 或网络包管理器。封闭环境须同时交付两个源码目录，也可通过
+`MIPSOLVERS_SOURCE_DIR` 指向包内其他位置。
 
 跨平台构建建议使用仓库内的 CMake presets；macOS/Linux/Windows 的依赖安装、
 `MIPSolvers` 源码路径、SuiteSparse 稀疏求解器和 Windows OPF 后端选择见

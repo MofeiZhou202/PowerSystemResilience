@@ -223,11 +223,24 @@ def maybe_run_opendss_ieee13_smoke(c: Client, chk: Checker) -> None:
         },
     )
     scope = staged.get("analysis_scope") or {}
+    boundary = staged.get("hybrid_boundary") or {}
+    if using_opendss:
+        scope_ok = (
+            scope.get("model_scope") == "three_phase_abc_ac_only" and
+            "hybrid_boundary" not in staged
+        )
+        scope_label = "pure-AC staged request"
+    else:
+        scope_ok = (
+            scope.get("model_scope") == "staged_three_phase_abc_plus_aggregate_ac_dc" and
+            boundary.get("ran") is True and
+            boundary.get("converged") is True and
+            boundary.get("vsc_transfer_count") == 2
+        )
+        scope_label = "native hybrid staged request"
     chk.check(
-        st == 200 and scope.get("monolithic_abc_dc_jacobian") is False and
-        scope.get("model_scope") == "three_phase_abc_ac_only" and
-        "hybrid_boundary" not in staged,
-        f"pure-AC staged request scope={scope.get('model_scope')} boundary={staged.get('hybrid_boundary')}",
+        st == 200 and scope.get("monolithic_abc_dc_jacobian") is False and scope_ok,
+        f"{scope_label} scope={scope.get('model_scope')} boundary={staged.get('hybrid_boundary')}",
     )
 
     st, _ = c.post_json("/api/session/load_matpower", {"filename": "case9.m"})

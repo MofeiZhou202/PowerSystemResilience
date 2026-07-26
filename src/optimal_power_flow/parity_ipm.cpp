@@ -1058,20 +1058,11 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   double best_comp = compcond;
   int best_iter = 0;
 
-  // Sparse KKT is the default path: it carries Ruiz equilibration + robust
-  // SuiteSparse backends with escalation for large / badly scaled hybrid AC/DC
-  // KKTs.  On Windows deployments, SuiteSparse/KLU/UMFPACK availability and
-  // runtime behavior vary more than on Linux/macOS; small pure-AC MATPOWER
-  // cases should not fail solely because the sparse factorizer stack is absent
-  // or brittle.  Use dense pivoted LU for small Windows KKTs unless the operator
-  // explicitly requests a sparse backend.  The same dense path can be forced
-  // everywhere with HACDCPF_OPF_LINEAR_SOLVER=dense for diagnostics.
-  constexpr int kDenseAutoKktDim =
-#if defined(_WIN32)
-      1024;
-#else
-      0;
-#endif
+  // Dense pivoted LU is faster and materially more stable for small hybrid
+  // KKTs, where sparse condensation can amplify extreme mu/z ratios. Larger
+  // systems retain Ruiz-scaled sparse factorization and backend escalation.
+  // HACDCPF_OPF_LINEAR_SOLVER can still force either path for diagnostics.
+  constexpr int kDenseAutoKktDim = 512;
   const int kkt_dim = n + meq;
   const bool use_dense =
       dense_backend_forced() ||

@@ -68,8 +68,8 @@ HybridPowerSystem make_two_bus_demo_system() {
 
   {
     ChargingStation cs; cs.index = 101; cs.bus = 1; cs.in_service = true;
-    cs.name = "CS-101"; cs.n_fast = 2; cs.p_fast_max_kw = 20.0;
-    cs.max_power_kw = 40.0;
+    cs.name = "CS-101"; cs.n_fast = 4; cs.p_fast_max_kw = 20.0;
+    cs.max_power_kw = 80.0;
     sys.ac.charging_stations.push_back(cs);
   }
   {
@@ -125,6 +125,7 @@ EVPowerTrafficProblem build_evpt_demo_small() {
     RouteChargingStop s; s.station_id = 101;
     s.requested_energy_kwh_per_vehicle = 10.0;
     s.dwell_steps = 2; s.max_charge_kw_per_vehicle = 20.0;
+    s.v2g_capable = true; s.max_discharge_kw_per_vehicle = 10.0;
     r.charging_stops.push_back(s);
     prob.routes.push_back(r);
   }
@@ -151,7 +152,7 @@ EVPowerTrafficProblem build_evpt_demo_small() {
   // Fixed price spread so mode B exercises smart charging + V2G directly.
   {
     StationPriceProfile p; p.station_id = 101;
-    p.price_per_kwh = {0.10, 0.10, 0.30, 0.30, 0.10, 0.10};
+    p.price_per_kwh = {0.10, 0.10, 0.50, 0.50, 0.10, 0.10};
     prob.station_prices.push_back(p);
   }
   {

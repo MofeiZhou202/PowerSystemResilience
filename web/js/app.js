@@ -16259,14 +16259,6 @@ const App = (() => {
     document.getElementById('btnIoImportPsdJulia')?.addEventListener('click', () => {
       document.getElementById('fileImportPsdJulia')?.click();
     });
-    document.getElementById('btnIoImportBpaDat')?.addEventListener('click', () => {
-      document.getElementById('fileImportBpaDat')?.click();
-    });
-    document.getElementById('fileImportBpaDat')?.addEventListener('change', (e) => {
-      const f = e.target.files[0];
-      e.target.value = '';
-      if (f) loadBpaDat(f);
-    });
     document.getElementById('fileImportPsdJulia')?.addEventListener('change', (e) => {
       const f = e.target.files[0];
       e.target.value = '';
