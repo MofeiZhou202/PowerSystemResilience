@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <iomanip>
 #include <sstream>
@@ -400,6 +402,8 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     }
     statistics.bound_flips +=
         static_cast<int>(transaction.flips.size());
+    if (std::abs(entering.theta) < 1e-9) ++statistics.degenerate_dual_steps;
+    if (std::abs(primal_step) < 1e-9) ++statistics.degenerate_primal_steps;
     ++statistics.iterations;
     ++state.updates_since_rebuild;
     state.fresh_rebuild = false;
@@ -761,7 +765,23 @@ Result solve_phase2(const StandardFormLP& sf, const SimplexOptions& options,
 
 Result solve(const StandardFormLP& sf, const SimplexOptions& options,
              const SimplexBasis* basis_hint) {
-  return solve_impl(sf, options, basis_hint, true);
+  Result result = solve_impl(sf, options, basis_hint, true);
+  if (std::getenv("MIPSOLVERS_DS_VERBOSE") != nullptr) {
+    const Statistics& s = result.statistics;
+    std::fprintf(
+        stderr,
+        "DS %s: m=%d n=%d iters=%d degen_dual=%d degen_primal=%d "
+        "bound_flips=%d cost_shifts=%d devex_frameworks=%d devex_restarts=%d "
+        "cycles=%d taboo_rej=%d taboo_row_rej=%d stab_blocked=%d "
+        "major_rebuilds=%d reinversions=%d\n",
+        status_name(result.status), static_cast<int>(result.basis.size()),
+        static_cast<int>(result.reduced_costs.size()), s.iterations,
+        s.degenerate_dual_steps, s.degenerate_primal_steps, s.bound_flips,
+        s.cost_shifts, s.devex_frameworks, s.devex_restarts, s.cycles_detected,
+        s.taboo_rejections, s.taboo_row_rejections, s.stability_blocked_rows,
+        s.major_rebuilds, s.reinversions);
+  }
+  return result;
 }
 
 Result solve(const StandardFormLP& sf, const SimplexOptions& options,

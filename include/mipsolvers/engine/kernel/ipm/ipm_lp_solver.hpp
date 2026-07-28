@@ -36,6 +36,13 @@ struct IPMLPOptions {
   bool presolve{true};       ///< Enable presolve (fixed vars, singleton rows, etc.)
   bool crossover{false};     ///< Purify solution to a vertex (for simplex warm-start)
   bool verbose{false};       ///< Print per-iteration log
+  /// Opt-in: run adaptive HiGHS presolve before the IPM, solve the reduced LP,
+  /// then postsolve the primal back to original space (primal-only, no basis
+  /// needed).  Only applied on cold solves (no warm-start).  On any failure the
+  /// solver falls back to a direct solve, so a wrong or infeasible answer is
+  /// never published.  MIPSOLVERS_PRESOLVE* env vars override the effective
+  /// config (see highs_lp_presolve_config_from_env).
+  bool use_highs_presolve{false};
 };
 
 /// Forward declaration for Apple Accelerate sparse Cholesky cache.

@@ -368,6 +368,11 @@ LpRow run_native_simplex_lp(const std::string& case_name, const engine::LPModel&
     engine::SimplexOptions opts;
     opts.lp_kernel_backend = engine::LpKernelBackend::ExperimentalNative;
     opts.max_iter = 100000;
+    // Adaptive HiGHS presolve is a fair production comparison: HiGHS-LP presolves
+    // internally, so the native kernels get the same lever.  Primal + objective
+    // are all this LP-relaxation row reports, so primal-only postsolve suffices.
+    // Disable for A/B with MIPSOLVERS_PRESOLVE=0.
+    opts.use_highs_presolve = true;
     // [ITER-TIMING] / [SIMPLEX-DIAG] on the pure-LP rows (same env as the
     // MILP-level BCOptions::verbose plumbing).
     if (std::getenv("MIPSOLVERS_NKC_VERBOSE") != nullptr) opts.verbose = true;
@@ -396,7 +401,9 @@ LpRow run_native_ipm_lp(const std::string& case_name, const engine::LPModel& lp,
     r.case_name = case_name;
     r.solver    = "natIPM";
 
-    engine::NativeIPMLPAdapter ipm{};
+    engine::IPMLPOptions ipmopt;
+    ipmopt.use_highs_presolve = true;  // fair vs HiGHS-LP; see natDualSimplex note
+    engine::NativeIPMLPAdapter ipm{ipmopt};
     const auto t0 = std::chrono::steady_clock::now();
     engine::SolveResult res = ipm.solve_lp(lp);
     const auto t1 = std::chrono::steady_clock::now();

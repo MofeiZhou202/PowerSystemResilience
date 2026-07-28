@@ -19,6 +19,7 @@
 
 #include "mipsolvers/engine/kernel/linear_algebra/cholmod_ldlt.hpp"
 #include "mipsolvers/engine/kernel/kkt/kkt_system.hpp"
+#include "mipsolvers/engine/strategy/highs_presolve_side_state.hpp"
 
 #if defined(HACDCPF_HAVE_ACCELERATE) && defined(__APPLE__)
 #define MIPSOLVERS_USE_ACCELERATE 1
@@ -373,24 +374,81 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob) const {
 }
 
 SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::VectorXd& x0) const {
-  // Scaling fallback: solve with the configured Ruiz rounds first; if it
-  // fails to converge, retry without scaling.  Equilibration helps most
-  // problems (e.g. NETLIB afiro) but stalls some degenerate ones
-  // (e.g. stocfor1) — retrying unscaled is the standard robustness answer.
-  SolveResult res = solve_lp_impl(prob, x0, opt_.ruiz_rounds);
-  if (!res.stats.success && opt_.ruiz_rounds > 0) {
-    SolveResult raw = solve_lp_impl(prob, x0, 0);
-    if (raw.stats.success) {
-      res = std::move(raw);
-    } else {
-      // Extreme-scaling escalation: tighter Ruiz equilibration shrinks the
-      // residual column-scale range that otherwise leaves the barrier
-      // ill-conditioned and stalled (adversarial 10^6-scaled probes).
-      SolveResult more = solve_lp_impl(prob, x0, std::max(opt_.ruiz_rounds * 4, 40));
-      if (more.stats.success) res = std::move(more);
+  // Direct solve with the standard Ruiz-escalation robustness ladder.
+  auto direct_solve = [this](const LPModel& p,
+                             const Eigen::VectorXd& start) -> SolveResult {
+    // Scaling fallback: solve with the configured Ruiz rounds first; if it
+    // fails to converge, retry without scaling.  Equilibration helps most
+    // problems (e.g. NETLIB afiro) but stalls some degenerate ones
+    // (e.g. stocfor1) — retrying unscaled is the standard robustness answer.
+    SolveResult res = solve_lp_impl(p, start, opt_.ruiz_rounds);
+    if (!res.stats.success && opt_.ruiz_rounds > 0) {
+      SolveResult raw = solve_lp_impl(p, start, 0);
+      if (raw.stats.success) {
+        res = std::move(raw);
+      } else {
+        // Extreme-scaling escalation: tighter Ruiz equilibration shrinks the
+        // residual column-scale range that otherwise leaves the barrier
+        // ill-conditioned and stalled (adversarial 10^6-scaled probes).
+        SolveResult more =
+            solve_lp_impl(p, start, std::max(opt_.ruiz_rounds * 4, 40));
+        if (more.stats.success) res = std::move(more);
+      }
+    }
+    return res;
+  };
+
+  // Adaptive HiGHS presolve (opt-in via IPMLPOptions::use_highs_presolve or the
+  // MIPSOLVERS_PRESOLVE env var).  Solve the reduced LP with the IPM, then
+  // postsolve the primal to original space.  Only on cold solves (a warm start
+  // refers to the original variable space).  Any failure falls through to a
+  // direct solve, so a wrong or infeasible answer is never published.
+  {
+    HighsLpPresolveConfig pcfg;
+    pcfg.enabled = opt_.use_highs_presolve;
+    pcfg = highs_lp_presolve_config_from_env(pcfg);
+    const bool has_warm_start = (x0.size() == prob.c.size());
+    if (pcfg.enabled && !has_warm_start) {
+      HighsLpPresolveResult ps = highs_presolve_lp(prob, pcfg);
+      if (ps.infeasible) {
+        SolveResult r;
+        r.stats.solver_name = name();
+        r.stats.success = false;
+        r.stats.status = "Infeasible (presolve)";
+        return r;
+      }
+      if (ps.solved_by_presolve || ps.use_reduced) {
+        Eigen::VectorXd x_reduced;
+        int iters = 0;
+        bool reduced_ok = true;
+        if (ps.use_reduced) {
+          static const Eigen::VectorXd empty;
+          SolveResult rr = direct_solve(ps.reduced, empty);
+          reduced_ok = rr.stats.success;
+          x_reduced = rr.x;
+          iters = rr.stats.iterations;
+        }  // else: reduced-to-empty -> postsolve an empty primal.
+        if (reduced_ok) {
+          Eigen::VectorXd x_orig;
+          double obj = 0.0;
+          if (highs_presolve_recover_primal(prob, ps, x_reduced, 1e-6, x_orig,
+                                            obj)) {
+            SolveResult r;
+            r.x = std::move(x_orig);
+            r.stats.solver_name = name();
+            r.stats.success = true;
+            r.stats.status = "Optimal";
+            r.stats.objective = obj;
+            r.stats.iterations = iters;
+            return r;
+          }
+        }
+        // Postsolve/audit/reduced-solve failure: fall through to a direct solve.
+      }
     }
   }
-  return res;
+
+  return direct_solve(prob, x0);
 }
 
 SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::VectorXd& x0, int ruiz_rounds) const {

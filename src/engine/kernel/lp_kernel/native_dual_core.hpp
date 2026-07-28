@@ -23,6 +23,8 @@ enum class Status {
 
 struct Statistics {
   int iterations{0};
+  int degenerate_dual_steps{0};
+  int degenerate_primal_steps{0};
   int major_rebuilds{0};
   int reinversions{0};
   int rank_repairs{0};

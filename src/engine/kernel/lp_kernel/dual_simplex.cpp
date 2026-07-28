@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <string>
@@ -22,6 +23,7 @@
 #endif
 
 #include "mipsolvers/core/logging.hpp"
+#include "mipsolvers/engine/strategy/highs_presolve_side_state.hpp"
 
 namespace mipsolvers::engine {
 
@@ -1691,6 +1693,142 @@ bool lp_solution_residual_acceptable(const LPModel& lp,
 SimplexResult solve_lp_with_basis(const LPModel& lp,
                                   const SimplexOptions& input_opt,
                                   const SimplexBasis* basis_hint) {
+  if (std::getenv("MIPSOLVERS_PRESOLVE_ANALYZE") != nullptr) {
+    const int n = static_cast<int>(lp.vars.size());
+    const int mi = static_cast<int>(lp.A.rows());
+    const int me = static_cast<int>(lp.Aeq.rows());
+    std::vector<int> ineq_nnz(static_cast<std::size_t>(mi), 0);
+    std::vector<int> eq_nnz(static_cast<std::size_t>(me), 0);
+    std::vector<int> col_nnz(static_cast<std::size_t>(n), 0);
+    for (int k = 0; k < lp.A.outerSize(); ++k) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, k); it; ++it) {
+        if (it.value() != 0.0) {
+          ++ineq_nnz[static_cast<std::size_t>(it.row())];
+          ++col_nnz[static_cast<std::size_t>(it.col())];
+        }
+      }
+    }
+    for (int k = 0; k < lp.Aeq.outerSize(); ++k) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, k); it; ++it) {
+        if (it.value() != 0.0) {
+          ++eq_nnz[static_cast<std::size_t>(it.row())];
+          ++col_nnz[static_cast<std::size_t>(it.col())];
+        }
+      }
+    }
+    int ineq_empty = 0, ineq_single = 0, ineq_free = 0;
+    for (int i = 0; i < mi; ++i) {
+      if (ineq_nnz[static_cast<std::size_t>(i)] == 0) ++ineq_empty;
+      else if (ineq_nnz[static_cast<std::size_t>(i)] == 1) ++ineq_single;
+      const bool ub_inf = std::abs(lp.b[i]) >= 1e19;
+      const double lhs = lp_row_lhs_or_neg_inf(lp, i);
+      if (ub_inf && !std::isfinite(lhs)) ++ineq_free;
+    }
+    // Redundant inequality rows: activity range implied by variable bounds is
+    // already inside [lhs, b].  min/max activity accumulated per row.
+    std::vector<double> min_act(static_cast<std::size_t>(mi), 0.0);
+    std::vector<double> max_act(static_cast<std::size_t>(mi), 0.0);
+    for (int k = 0; k < lp.A.outerSize(); ++k) {
+      const auto& v = lp.vars[static_cast<std::size_t>(k)];
+      const double lo = v.lb, hi = v.ub;
+      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, k); it; ++it) {
+        const double a = it.value();
+        if (a == 0.0) continue;
+        const std::size_t r = static_cast<std::size_t>(it.row());
+        min_act[r] += (a > 0.0) ? a * lo : a * hi;
+        max_act[r] += (a > 0.0) ? a * hi : a * lo;
+      }
+    }
+    int ineq_redundant = 0;
+    for (int i = 0; i < mi; ++i) {
+      const double bi = lp.b[i];
+      const double lhs = lp_row_lhs_or_neg_inf(lp, i);
+      const bool ub_ok = (std::abs(bi) >= 1e19) ||
+                         (max_act[static_cast<std::size_t>(i)] <= bi + 1e-9);
+      const bool lb_ok = !std::isfinite(lhs) ||
+                         (min_act[static_cast<std::size_t>(i)] >= lhs - 1e-9);
+      if (ub_ok && lb_ok && ineq_nnz[static_cast<std::size_t>(i)] > 0) {
+        ++ineq_redundant;
+      }
+    }
+    int eq_empty = 0, eq_single = 0, eq_double = 0;
+    for (int i = 0; i < me; ++i) {
+      if (eq_nnz[static_cast<std::size_t>(i)] == 0) ++eq_empty;
+      else if (eq_nnz[static_cast<std::size_t>(i)] == 1) ++eq_single;
+      else if (eq_nnz[static_cast<std::size_t>(i)] == 2) ++eq_double;
+    }
+    int col_empty = 0, col_fixed = 0, col_singleton = 0;
+    for (int j = 0; j < n; ++j) {
+      if (col_nnz[static_cast<std::size_t>(j)] == 0) ++col_empty;
+      else if (col_nnz[static_cast<std::size_t>(j)] == 1) ++col_singleton;
+      const auto& v = lp.vars[static_cast<std::size_t>(j)];
+      if (std::isfinite(v.lb) && std::isfinite(v.ub) &&
+          v.ub - v.lb <= 1e-11 * std::max(1.0, std::abs(v.lb))) {
+        ++col_fixed;
+      }
+    }
+    std::fprintf(stderr,
+                 "PRESOLVE-ANALYZE: n=%d m_ineq=%d m_eq=%d || ineq_empty=%d "
+                 "ineq_single=%d ineq_free=%d ineq_redundant=%d || eq_empty=%d "
+                 "eq_single=%d eq_double=%d || col_empty=%d col_single=%d "
+                 "col_fixed=%d\n",
+                 n, mi, me, ineq_empty, ineq_single, ineq_free, ineq_redundant,
+                 eq_empty, eq_single, eq_double, col_empty, col_singleton,
+                 col_fixed);
+  }
+
+  // Adaptive HiGHS presolve (opt-in via SimplexOptions::use_highs_presolve or
+  // the MIPSOLVERS_PRESOLVE env var).  Solve the reduced LP with the native
+  // kernel, then postsolve the primal to original space.  Only applied on cold
+  // solves (a basis hint refers to the original LP, not the reduced one).  Any
+  // failure falls through to a direct solve, so a wrong or infeasible answer is
+  // never published.
+  {
+    HighsLpPresolveConfig pcfg;
+    pcfg.enabled = input_opt.use_highs_presolve;
+    pcfg = highs_lp_presolve_config_from_env(pcfg);
+    if (pcfg.enabled && basis_hint == nullptr) {
+      HighsLpPresolveResult ps = highs_presolve_lp(lp, pcfg);
+      if (ps.infeasible) {
+        SimplexResult r;
+        r.result.stats.solver_name = "natDualSimplex+HiGHSpresolve";
+        r.result.stats.success = false;
+        r.result.stats.status = "Infeasible (presolve)";
+        return r;
+      }
+      if (ps.solved_by_presolve || ps.use_reduced) {
+        Eigen::VectorXd x_reduced;
+        int iters = 0;
+        bool reduced_ok = true;
+        if (ps.use_reduced) {
+          // Solve the reduced LP directly via the impl (no re-entrant presolve).
+          SimplexResult rr =
+              solve_lp_with_basis_impl(ps.reduced, input_opt, nullptr);
+          reduced_ok = rr.result.stats.success;
+          x_reduced = rr.result.x;
+          iters = rr.result.stats.iterations;
+        }  // else: reduced-to-empty -> postsolve an empty primal.
+        if (reduced_ok) {
+          Eigen::VectorXd x_orig;
+          double obj = 0.0;
+          if (highs_presolve_recover_primal(lp, ps, x_reduced,
+                                            input_opt.escalation_residual_tol,
+                                            x_orig, obj)) {
+            SimplexResult r;
+            r.result.x = std::move(x_orig);
+            r.result.stats.solver_name = "natDualSimplex+HiGHSpresolve";
+            r.result.stats.success = true;
+            r.result.stats.status = "Optimal";
+            r.result.stats.objective = obj;
+            r.result.stats.iterations = iters;
+            return r;
+          }
+        }
+        // Postsolve/audit/reduced-solve failure: fall through to a direct solve.
+      }
+    }
+  }
+
   SimplexResult res =
       solve_lp_with_basis_impl(lp, input_opt, basis_hint);
   if (res.result.stats.success &&

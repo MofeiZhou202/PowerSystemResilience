@@ -21,9 +21,13 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -1071,6 +1075,298 @@ HiGHSRootLpStateStats highs_standard_form_lp_state_stats(
 #endif
 
   return stats;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Adaptive HiGHS presolve wrapper for the native LP kernels
+// ─────────────────────────────────────────────────────────────────────────────
+
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
+namespace {
+
+/// Build a HiGHS model (minimize sense) from a native LPModel. Returns false if
+/// passModel failed. Mirrors the construction in highs_presolve_model_stats.
+bool native_lp_to_highs(const LPModel& lp, Highs& highs) {
+  const int ncols = static_cast<int>(lp.vars.size());
+  const int m_ineq = static_cast<int>(lp.A.rows());
+  const int m_eq = static_cast<int>(lp.Aeq.rows());
+  const int nrows = m_ineq + m_eq;
+  if (ncols == 0) return false;
+
+  std::vector<double> col_cost(static_cast<std::size_t>(ncols), 0.0);
+  std::vector<double> col_lower(static_cast<std::size_t>(ncols), -kHighsInf);
+  std::vector<double> col_upper(static_cast<std::size_t>(ncols), kHighsInf);
+  std::vector<HighsInt> integrality(
+      static_cast<std::size_t>(ncols),
+      static_cast<HighsInt>(HighsVarType::kContinuous));
+  for (int j = 0; j < ncols; ++j) {
+    const auto& v = lp.vars[static_cast<std::size_t>(j)];
+    col_cost[static_cast<std::size_t>(j)] =
+        (lp.sense == Sense::Maximize ? -lp.c[j] : lp.c[j]);
+    col_lower[static_cast<std::size_t>(j)] = highs_bound_or_inf(v.lb, -1.0);
+    col_upper[static_cast<std::size_t>(j)] = highs_bound_or_inf(v.ub, 1.0);
+    if (v.type != VarType::Continuous) {
+      integrality[static_cast<std::size_t>(j)] =
+          static_cast<HighsInt>(HighsVarType::kInteger);
+    }
+  }
+
+  std::vector<double> row_lower(static_cast<std::size_t>(nrows), -kHighsInf);
+  std::vector<double> row_upper(static_cast<std::size_t>(nrows), kHighsInf);
+  for (int r = 0; r < m_ineq; ++r) {
+    row_lower[static_cast<std::size_t>(r)] =
+        highs_bound_or_inf(lp_row_lhs_or_neg_inf(lp, r), -1.0);
+    row_upper[static_cast<std::size_t>(r)] = highs_bound_or_inf(lp.b[r], 1.0);
+  }
+  for (int r = 0; r < m_eq; ++r) {
+    const double rhs = highs_bound_or_inf(lp.beq[r], 1.0);
+    row_lower[static_cast<std::size_t>(m_ineq + r)] = rhs;
+    row_upper[static_cast<std::size_t>(m_ineq + r)] = rhs;
+  }
+
+  std::vector<HighsInt> start(static_cast<std::size_t>(ncols + 1), 0);
+  std::vector<HighsInt> index;
+  std::vector<double> value;
+  index.reserve(static_cast<std::size_t>(lp.A.nonZeros() + lp.Aeq.nonZeros()));
+  value.reserve(index.capacity());
+  for (int j = 0; j < ncols; ++j) {
+    start[static_cast<std::size_t>(j)] = static_cast<HighsInt>(index.size());
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, j); it; ++it) {
+      if (it.value() == 0.0) continue;
+      index.push_back(static_cast<HighsInt>(it.row()));
+      value.push_back(it.value());
+    }
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, j); it; ++it) {
+      if (it.value() == 0.0) continue;
+      index.push_back(static_cast<HighsInt>(m_ineq + it.row()));
+      value.push_back(it.value());
+    }
+  }
+  start[static_cast<std::size_t>(ncols)] = static_cast<HighsInt>(index.size());
+
+  const auto pass_status = highs.passModel(
+      static_cast<HighsInt>(ncols), static_cast<HighsInt>(nrows),
+      static_cast<HighsInt>(index.size()),
+      static_cast<HighsInt>(MatrixFormat::kColwise),
+      static_cast<HighsInt>(ObjSense::kMinimize), 0.0, col_cost.data(),
+      col_lower.data(), col_upper.data(), row_lower.data(), row_upper.data(),
+      start.data(), index.data(), value.data(), integrality.data());
+  return pass_status == HighsStatus::kOk;
+}
+
+}  // namespace
+#endif  // MIPSOLVERS_HAVE_HIGHS_LIB
+
+HighsLpPresolveConfig highs_lp_presolve_config_from_env(
+    HighsLpPresolveConfig base) {
+  if (const char* e = std::getenv("MIPSOLVERS_PRESOLVE")) {
+    base.enabled = !(e[0] == '0' && e[1] == '\0');
+  }
+  if (const char* e = std::getenv("MIPSOLVERS_PRESOLVE_NNZ_FLOOR")) {
+    char* end = nullptr;
+    const long v = std::strtol(e, &end, 10);
+    if (end != e) base.nnz_floor = v;
+  }
+  if (const char* e = std::getenv("MIPSOLVERS_PRESOLVE_NNZ_CAP")) {
+    char* end = nullptr;
+    const long v = std::strtol(e, &end, 10);
+    if (end != e) base.nnz_cap = v;
+  }
+  if (const char* e = std::getenv("MIPSOLVERS_PRESOLVE_MIN_SHRINK")) {
+    char* end = nullptr;
+    const double v = std::strtod(e, &end);
+    if (end != e) base.min_shrink = v;
+  }
+  if (std::getenv("MIPSOLVERS_PRESOLVE_VERBOSE")) base.verbose = true;
+  return base;
+}
+
+HighsLpPresolveResult highs_presolve_lp(const LPModel& lp,
+                                        const HighsLpPresolveConfig& cfg) {
+  HighsLpPresolveResult out;
+  out.orig_rows = static_cast<int>(lp.A.rows() + lp.Aeq.rows());
+  out.orig_cols = static_cast<int>(lp.vars.size());
+  out.orig_nnz = lp.A.nonZeros() + lp.Aeq.nonZeros();
+  out.status = "disabled";
+  if (!cfg.enabled) return out;
+  if (out.orig_cols == 0) return out;
+  if (cfg.nnz_floor > 0 && out.orig_nnz < cfg.nnz_floor) {
+    out.status = "skipped_nnz_floor";
+    if (cfg.verbose) {
+      std::fprintf(
+          stderr,
+          "[HIGHS-PRESOLVE] skip: nnz %ld < floor %ld (rows=%d cols=%d)\n",
+          out.orig_nnz, cfg.nnz_floor, out.orig_rows, out.orig_cols);
+    }
+    return out;
+  }
+  if (cfg.nnz_cap > 0 && out.orig_nnz > cfg.nnz_cap) {
+    out.status = "skipped_nnz_cap";
+    if (cfg.verbose) {
+      std::fprintf(
+          stderr,
+          "[HIGHS-PRESOLVE] skip: nnz %ld > cap %ld (rows=%d cols=%d)\n",
+          out.orig_nnz, cfg.nnz_cap, out.orig_rows, out.orig_cols);
+    }
+    return out;
+  }
+
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
+  const auto bridge = highs_presolve_bridge_info();
+  if (!bridge.available) {
+    out.status = "bridge_unavailable";
+    return out;
+  }
+
+  const auto t0 = std::chrono::steady_clock::now();
+  auto highs = std::make_shared<Highs>();
+  highs->setOptionValue("output_flag", false);
+  highs->setOptionValue("log_to_console", false);
+  highs->setOptionValue("threads", 1);
+  if (!native_lp_to_highs(lp, *highs)) {
+    out.status = "pass_error";
+    return out;
+  }
+
+  const auto presolve_status = highs->presolve();
+  out.presolve_ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+  out.status = highs_presolve_status_name(highs->getModelPresolveStatus());
+  if (!(presolve_status == HighsStatus::kOk ||
+        presolve_status == HighsStatus::kWarning)) {
+    return out;
+  }
+
+  const HighsPresolveStatus mps = highs->getModelPresolveStatus();
+  out.impl = highs;  // retain the HiGHS instance for a later postsolve
+  out.attempted = true;
+
+  switch (mps) {
+    case HighsPresolveStatus::kInfeasible:
+      out.infeasible = true;
+      break;
+    case HighsPresolveStatus::kReducedToEmpty:
+      out.solved_by_presolve = true;
+      break;
+    case HighsPresolveStatus::kReduced: {
+      const HighsLp& presolved = highs->getPresolvedLp();
+      const bool sizes_ok =
+          presolved.num_col_ >= 0 && presolved.num_row_ >= 0 &&
+          static_cast<int>(presolved.col_cost_.size()) >= presolved.num_col_ &&
+          static_cast<int>(presolved.col_lower_.size()) >= presolved.num_col_ &&
+          static_cast<int>(presolved.col_upper_.size()) >= presolved.num_col_ &&
+          static_cast<int>(presolved.row_lower_.size()) >= presolved.num_row_ &&
+          static_cast<int>(presolved.row_upper_.size()) >= presolved.num_row_;
+      if (!sizes_ok) {
+        out.status = "presolved_lp_invalid";
+        break;
+      }
+      LPModel reduced =
+          convert_highs_presolved_lp_to_native(presolved, lp.sense);
+      out.reduced_rows =
+          static_cast<int>(reduced.A.rows() + reduced.Aeq.rows());
+      out.reduced_cols = static_cast<int>(reduced.vars.size());
+      out.reduced_nnz = reduced.A.nonZeros() + reduced.Aeq.nonZeros();
+      const bool worth_it =
+          cfg.min_shrink <= 0.0 ||
+          out.reduced_nnz <
+              static_cast<long>(cfg.min_shrink * static_cast<double>(out.orig_nnz));
+      if (worth_it) {
+        out.reduced = std::move(reduced);
+        out.use_reduced = true;
+      }
+      break;
+    }
+    case HighsPresolveStatus::kNotReduced:
+    default:
+      break;
+  }
+
+  if (cfg.verbose) {
+    std::fprintf(stderr,
+                 "[HIGHS-PRESOLVE] %s: rows %d->%d cols %d->%d nnz %ld->%ld "
+                 "use_reduced=%d %.1fms\n",
+                 out.status.c_str(), out.orig_rows, out.reduced_rows,
+                 out.orig_cols, out.reduced_cols, out.orig_nnz, out.reduced_nnz,
+                 static_cast<int>(out.use_reduced), out.presolve_ms);
+  }
+  return out;
+#else
+  out.status = "no_highs";
+  return out;
+#endif
+}
+
+Eigen::VectorXd highs_postsolve_primal(const HighsLpPresolveResult& ps,
+                                       const Eigen::VectorXd& x_reduced) {
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
+  if (!ps.impl) return {};
+  auto* highs = static_cast<Highs*>(ps.impl.get());
+  HighsSolution sol;
+  sol.col_value.assign(x_reduced.data(), x_reduced.data() + x_reduced.size());
+  sol.value_valid = true;
+  const auto st = highs->postsolve(sol);
+  if (!(st == HighsStatus::kOk || st == HighsStatus::kWarning)) return {};
+  const HighsSolution& full = highs->getSolution();
+  if (!full.value_valid ||
+      static_cast<int>(full.col_value.size()) != ps.orig_cols) {
+    return {};
+  }
+  Eigen::VectorXd x(ps.orig_cols);
+  for (int j = 0; j < ps.orig_cols; ++j) {
+    x[j] = full.col_value[static_cast<std::size_t>(j)];
+  }
+  return x;
+#else
+  (void)ps;
+  (void)x_reduced;
+  return {};
+#endif
+}
+
+bool highs_presolve_recover_primal(const LPModel& lp,
+                                   const HighsLpPresolveResult& ps,
+                                   const Eigen::VectorXd& x_reduced,
+                                   double audit_tol,
+                                   Eigen::VectorXd& x_orig_out,
+                                   double& objective_out) {
+  Eigen::VectorXd x = highs_postsolve_primal(ps, x_reduced);
+  if (x.size() != static_cast<int>(lp.vars.size())) return false;
+
+  // Original-space feasibility audit (sentinel-aware), mirroring the native
+  // simplex publication audit: reject unless
+  //   max(row viol, bound viol) <= audit_tol * max(1, |b|_inf, |beq|_inf).
+  constexpr double kSideSentinel = 1e19;
+  double viol = 0.0;
+  double scale = 1.0;
+  const Eigen::VectorXd ax = lp.A * x;
+  for (int i = 0; i < ax.size(); ++i) {
+    if (std::abs(lp.b[i]) < kSideSentinel) {
+      viol = std::max(viol, ax[i] - lp.b[i]);
+      scale = std::max(scale, std::abs(lp.b[i]));
+    }
+    const double lhs = lp_row_lhs_or_neg_inf(lp, i);
+    if (std::isfinite(lhs) && std::abs(lhs) < kSideSentinel) {
+      viol = std::max(viol, lhs - ax[i]);
+      scale = std::max(scale, std::abs(lhs));
+    }
+  }
+  const Eigen::VectorXd aeqx = lp.Aeq * x;
+  for (int i = 0; i < aeqx.size(); ++i) {
+    viol = std::max(viol, std::abs(aeqx[i] - lp.beq[i]));
+    scale = std::max(scale, std::abs(lp.beq[i]));
+  }
+  for (int j = 0; j < x.size(); ++j) {
+    const auto& v = lp.vars[static_cast<std::size_t>(j)];
+    if (std::isfinite(v.lb)) viol = std::max(viol, v.lb - x[j]);
+    if (std::isfinite(v.ub)) viol = std::max(viol, x[j] - v.ub);
+  }
+  if (!(viol <= audit_tol * scale)) return false;
+
+  objective_out = lp.c.dot(x);
+  x_orig_out = std::move(x);
+  return true;
 }
 
 }  // namespace mipsolvers::engine

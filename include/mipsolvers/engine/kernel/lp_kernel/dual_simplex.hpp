@@ -161,6 +161,13 @@ struct SimplexOptions {
   // Legacy ABI fields; numerical escalation and rescue backends were removed.
   int escalation_start_level{0};
   int escalation_max_level_sf{2};
+  // Opt-in: run adaptive HiGHS presolve before the native solve, solve the
+  // reduced LP, then postsolve the primal back to original space (primal-only,
+  // no basis needed).  Only applied on cold solves (no basis hint).  On any
+  // failure the solver falls back to a direct solve, so a wrong or infeasible
+  // answer is never published.  The MIPSOLVERS_PRESOLVE* env vars override the
+  // effective config (see highs_lp_presolve_config_from_env).
+  bool use_highs_presolve{false};
 };
 
 struct SimplexBasis {
