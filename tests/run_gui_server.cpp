@@ -10656,6 +10656,11 @@ int main(int argc, char** argv) {
     json out;
     out["busy"] = g_session.busy.load();
     out["cancel"] = g_session.cancel.load();
+    out["gui_backend_contract"] = "hysim_gui_backend_20260728_v3";
+    out["capabilities"] = json{
+        {"pf_compact_response_v1", true},
+        {"large_matpower_structured_load_v1", true},
+        {"analysis_server_timing_v1", true}};
     res.set_content(out.dump(), "application/json");
   });
 

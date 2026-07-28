@@ -91,6 +91,7 @@ const App = (() => {
   let _transientEvents = [];
   let _analysisQueue = Promise.resolve();
   let _activeLoadPromise = null;
+  let _lastBackendStatus = null;
   let _lastStatusText = '就绪';
   let _lastStatusType = '';
   let _modelRevision = 0;
@@ -334,6 +335,7 @@ const App = (() => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const status = await apiGet('/api/session/status', { quiet: true });
+      _lastBackendStatus = status || null;
       if (!status || status.busy !== true) return true;
       await sleep(250);
     }
@@ -4456,6 +4458,12 @@ const App = (() => {
       const systemSummary = Canvas.getSystemSummary?.() || {};
       const compactResponse = Canvas.isHeadless?.() &&
         Number(systemSummary.buses || 0) >= 5000;
+      if (compactResponse &&
+          _lastBackendStatus?.capabilities?.pf_compact_response_v1 !== true) {
+        log('当前后端版本不支持大模型紧凑潮流响应；请停止旧服务并重新构建、启动最新 run_gui_server。', 'error');
+        setStatus('后端版本过旧', 'error');
+        return null;
+      }
       const data = await apiPost('/api/session/pf', {
         method: method,
         options: pfOptions,

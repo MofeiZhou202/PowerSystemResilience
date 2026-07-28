@@ -307,6 +307,16 @@ def main() -> int:
         st, cases = c.get("/api/cases")
         chk.check(st == 200 and len(cases.get("cases", [])) > 0,
                   f"GET /api/cases -> {len(cases.get('cases', []))} cases")
+        st, session_status = c.get("/api/session/status")
+        chk.check(
+            st == 200 and
+            session_status.get("capabilities", {}).get(
+                "pf_compact_response_v1"
+            ) is True and
+            session_status.get("gui_backend_contract") ==
+                "hysim_gui_backend_20260728_v3",
+            "GUI/backend capability handshake advertises compact PF support",
+        )
 
         print("1a. load and solve internal urban LVNTS benchmark")
         st, body = c.post_json(
