@@ -168,6 +168,15 @@ struct SimplexOptions {
   // answer is never published.  The MIPSOLVERS_PRESOLVE* env vars override the
   // effective config (see highs_lp_presolve_config_from_env).
   bool use_highs_presolve{false};
+  // Numerical-audit tier for the per-pivot hot loop.  When true (default), the
+  // full long-double pivot-identity and row-solve-consistency audits run every
+  // pivot (safest; kept on for root/final/published B&C solves).  When false,
+  // those Tier-2 audits are skipped on the fast path and only run when a cheap
+  // Tier-0 guard trips — the checked FTRAN/BTRAN backward-error validation, the
+  // ratio-test stability preference, the BFRT analytical postcondition, and the
+  // final original-space feasibility audit all remain active, so a wrong answer
+  // is still never published.  Env MIPSOLVERS_DS_PARANOID=0/1 overrides.
+  bool paranoid{true};
 };
 
 struct SimplexBasis {

@@ -25,6 +25,21 @@ using detail::Phase;
 using detail::PivotTransaction;
 using detail::State;
 
+// Effective audit tier for the per-pivot hot loop.  SimplexOptions::paranoid,
+// overridable by MIPSOLVERS_DS_PARANOID (0 = force tiered, 1 = force paranoid).
+// Tiered mode skips the two long-double Tier-2 identity audits on the fast path
+// (they still run when a cheap Tier-0 guard trips); every other safety check
+// — checked FTRAN/BTRAN backward-error validation, ratio-test stability, BFRT
+// analytical postcondition, and the final original-space audit — stays active.
+bool resolve_paranoid(const State& state) {
+  static const int env = [] {
+    const char* e = std::getenv("MIPSOLVERS_DS_PARANOID");
+    return e ? (e[0] == '0' ? 0 : 1) : -1;
+  }();
+  if (env >= 0) return env != 0;
+  return state.options == nullptr ? true : state.options->paranoid;
+}
+
 Result empty_result(Status status, std::string message,
                     Statistics statistics = {}) {
   Result result;
@@ -82,6 +97,7 @@ MinorOutcome numerical_trouble(std::string message) {
 
 MinorOutcome minor_iteration(State& state, Statistics& statistics) {
   ++state.pricing_epoch;
+  const bool paranoid = resolve_paranoid(state);
   Leaving leaving;
   std::string failure;
   if (!detail::choose_leaving(state, leaving, failure)) {
@@ -149,32 +165,41 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
         state.factor->last_solve_diagnostics() + ")");
     }
     if (direction_solve.refined) ++statistics.iterative_refinements;
-    detail::PivotEvidence pivot_evidence = state.factor->pivot_evidence(
-        leaving.row, entering.col, direction, leaving.row_ep);
-    if (!pivot_evidence.accepted && !direction_solve.refined) {
-      direction_solve = state.factor->refine_ftran(column, direction);
-      if (direction_solve.accepted) {
-        direction = direction_solve.solution;
-        ++statistics.iterative_refinements;
-        ++statistics.pivot_identity_refinements;
-        pivot_evidence = state.factor->pivot_evidence(
-            leaving.row, entering.col, direction, leaving.row_ep);
+    // Tier 0 (every pivot): the checked FTRAN above already passed backward-error
+    // validation and the ratio test required a stable |alpha_r|, so only guard a
+    // zero / non-finite pivot cheaply here.  Escalate to the full long-double
+    // pivot-identity audit (Tier 2) under paranoid mode or when the guard trips.
+    const double tier0_pivot = direction[leaving.row];
+    const bool need_pivot_evidence =
+        paranoid || !std::isfinite(tier0_pivot) || tier0_pivot == 0.0;
+    if (need_pivot_evidence) {
+      detail::PivotEvidence pivot_evidence = state.factor->pivot_evidence(
+          leaving.row, entering.col, direction, leaving.row_ep);
+      if (!pivot_evidence.accepted && !direction_solve.refined) {
+        direction_solve = state.factor->refine_ftran(column, direction);
+        if (direction_solve.accepted) {
+          direction = direction_solve.solution;
+          ++statistics.iterative_refinements;
+          ++statistics.pivot_identity_refinements;
+          pivot_evidence = state.factor->pivot_evidence(
+              leaving.row, entering.col, direction, leaving.row_ep);
+        }
       }
-    }
-    if (!pivot_evidence.accepted) {
-      std::ostringstream message;
-      message << std::setprecision(18)
-              << "row-wise and column-wise pivot residual identity failed"
-              << " (row_pivot=" << pivot_evidence.row_pivot
-              << ", column_pivot=" << pivot_evidence.column_pivot
-              << ", discrepancy=" << pivot_evidence.discrepancy
-              << ", residual_envelope=" << pivot_evidence.residual_envelope
-              << ", arithmetic_guard=" << pivot_evidence.arithmetic_guard
-              << ", column_residual_inf="
-              << pivot_evidence.column_residual_inf
-              << ", row_residual_inf=" << pivot_evidence.row_residual_inf
-              << ')';
-      return numerical_trouble(message.str());
+      if (!pivot_evidence.accepted) {
+        std::ostringstream message;
+        message << std::setprecision(18)
+                << "row-wise and column-wise pivot residual identity failed"
+                << " (row_pivot=" << pivot_evidence.row_pivot
+                << ", column_pivot=" << pivot_evidence.column_pivot
+                << ", discrepancy=" << pivot_evidence.discrepancy
+                << ", residual_envelope=" << pivot_evidence.residual_envelope
+                << ", arithmetic_guard=" << pivot_evidence.arithmetic_guard
+                << ", column_residual_inf="
+                << pivot_evidence.column_residual_inf
+                << ", row_residual_inf=" << pivot_evidence.row_residual_inf
+                << ')';
+        return numerical_trouble(message.str());
+      }
     }
     const double column_pivot = direction[leaving.row];
 
@@ -246,9 +271,14 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
         (leaving.violation - transaction.covered_violation);
     long double solve_discrepancy = 0.0L;
     long double solve_envelope = 0.0L;
-    const bool solve_consistent = state.factor->row_solve_consistent(
-        leaving.row, transaction.bfrt_rhs, bfrt_delta, leaving.row_ep,
-        solve_discrepancy, solve_envelope);
+    // Tier 2 (paranoid only): long-double row-solve consistency of the BFRT
+    // flip FTRAN.  The cheap remaining-delta sign check below stays active in
+    // both tiers, and the BFRT analytical dual-feasibility postcondition above
+    // already validated the flip transaction.
+    const bool solve_consistent =
+        !paranoid || state.factor->row_solve_consistent(
+                         leaving.row, transaction.bfrt_rhs, bfrt_delta,
+                         leaving.row_ep, solve_discrepancy, solve_envelope);
     if (!solve_consistent || leaving.side * remaining_delta < 0.0) {
       long double rhs_projection = 0.0L;
       for (int row = 0; row < state.m; ++row) {

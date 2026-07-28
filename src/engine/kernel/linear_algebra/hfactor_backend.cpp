@@ -22,6 +22,26 @@
 
 namespace mipsolvers::engine {
 
+namespace {
+// FTRAN/BTRAN engage HFactor's hyper-sparse solve strategy only for bases at
+// least this large.  Small systems keep the exact dense solve path: hyper-
+// sparsity does not pay off there, and the dense solve is numerically steadier
+// on ill-conditioned small probes (the adversarial 1e6-scaled NETLIB cases,
+// where the hyper-sparse rounding otherwise tips dual Phase I over an
+// invariant).  Env-tunable via MIPSOLVERS_HFACTOR_HYPERSPARSE_MINROWS.
+int hyper_sparse_min_rows() {
+  static const int v = [] {
+    const char* e = std::getenv("MIPSOLVERS_HFACTOR_HYPERSPARSE_MINROWS");
+    if (e) {
+      const int x = std::atoi(e);
+      if (x >= 0) return x;
+    }
+    return 2000;
+  }();
+  return v;
+}
+}  // namespace
+
 struct HFactorBackend::Impl {
   struct UpdatePack {
     std::vector<HighsInt> index;
@@ -58,6 +78,10 @@ struct HFactorBackend::Impl {
   // Reusable scratch buffer for ftran/btran to avoid per-call heap allocation
   // in the dual-simplex inner loop.  Sized to num_row after each factorize().
   mutable std::vector<double> solve_buf;
+  // Reusable HVectors so the plain ftran/btran can drive HFactor's hyper-sparse
+  // solve path (real RHS density) without per-call HVector setup.
+  mutable HVector solve_vec_ftran;
+  mutable HVector solve_vec_btran;
   mutable UpdatePack aq_pack;
   mutable UpdatePack ep_pack;
   mutable std::vector<double> aq_rhs;
@@ -197,6 +221,8 @@ bool HFactorBackend::factorize(const Eigen::SparseMatrix<double>& A,
   }
 
   p_->solve_buf.assign(static_cast<size_t>(num_row), 0.0);
+  p_->solve_vec_ftran.setup(static_cast<HighsInt>(num_row));
+  p_->solve_vec_btran.setup(static_cast<HighsInt>(num_row));
 
   m = static_cast<int>(num_row);
   valid = true;
@@ -344,18 +370,40 @@ bool HFactorBackend::factorize_with_logicals(
 // ────────────────────────────────────────────────────────────────────────────
 void HFactorBackend::ftran(const double* rhs, double* result) const {
   if (!valid) return;
-  // Use pre-allocated scratch buffer to avoid per-call heap allocation.
-  std::vector<double>& buf = p_->solve_buf;
-  std::memcpy(buf.data(), rhs, static_cast<size_t>(m) * sizeof(double));
-  // ftranCall(std::vector<double>&) is non-const because it uses the internal
-  // rhs_ HVector workspace.  Cast away constness on the stored HFactor — the
-  // operation is logically const w.r.t. the factorization.
   HFactor& nc = const_cast<HFactor&>(p_->f);
-  nc.ftranCall(buf, /*factor_timer_clock_pointer*/ nullptr);
+  if (m < hyper_sparse_min_rows()) {
+    // Small system: exact dense path (byte-identical to pre-hyper-sparse).
+    std::vector<double>& buf = p_->solve_buf;
+    std::memcpy(buf.data(), rhs, static_cast<size_t>(m) * sizeof(double));
+    nc.ftranCall(buf, /*factor_timer_clock_pointer*/ nullptr);
+    for (int external = 0; external < m; ++external) {
+      const int internal = static_cast<int>(
+          p_->external_to_internal[static_cast<std::size_t>(external)]);
+      result[external] = buf[static_cast<std::size_t>(internal)];
+    }
+    return;
+  }
+  // Large system: hyper-sparse FTRAN via a reused HVector.  Overwrite every
+  // array entry (so no stale solution leaks in) and record the nonzero pattern;
+  // the real RHS density selects sparse vs dense internally.  Same permutation
+  // convention as the dense path (no input remap, output remapped).
+  HVector& vector = p_->solve_vec_ftran;
+  vector.count = 0;
+  vector.packFlag = false;
+  for (int row = 0; row < m; ++row) {
+    const double value = rhs[row];
+    vector.array[static_cast<std::size_t>(row)] = value;
+    if (value != 0.0) {
+      vector.index[static_cast<std::size_t>(vector.count++)] = row;
+    }
+  }
+  const double density =
+      static_cast<double>(vector.count) / static_cast<double>(m);
+  nc.ftranCall(vector, density, nullptr);
   for (int external = 0; external < m; ++external) {
     const int internal = static_cast<int>(
         p_->external_to_internal[static_cast<std::size_t>(external)]);
-    result[external] = buf[static_cast<std::size_t>(internal)];
+    result[external] = vector.array[static_cast<std::size_t>(internal)];
   }
 }
 
@@ -371,8 +419,16 @@ void HFactorBackend::ftran_for_update(const double* rhs, double* result) const {
       vector.index[static_cast<std::size_t>(vector.count++)] = row;
     }
   }
+  // Pass the true RHS density so HFactor selects its hyper-sparse FTRAN
+  // strategy on sparse right-hand sides (SCUC pivotal columns are sparse);
+  // the solve result is identical to the dense strategy, only faster.  Small
+  // bases force density 1.0 (dense) for numerical steadiness (size gate).
+  const double density =
+      m >= hyper_sparse_min_rows()
+          ? static_cast<double>(vector.count) / static_cast<double>(m)
+          : 1.0;
   HFactor& nc = const_cast<HFactor&>(p_->f);
-  nc.ftranCall(vector, 1.0, nullptr);
+  nc.ftranCall(vector, density, nullptr);
   p_->aq_rhs.assign(rhs, rhs + m);
   p_->aq_solution_internal = vector.array;
   for (int external = 0; external < m; ++external) {
@@ -390,17 +446,39 @@ void HFactorBackend::ftran_for_update(const double* rhs, double* result) const {
 
 void HFactorBackend::btran(const double* rhs, double* result) const {
   if (!valid) return;
-  // Use pre-allocated scratch buffer to avoid per-call heap allocation.
-  std::vector<double>& buf = p_->solve_buf;
+  HFactor& nc = const_cast<HFactor&>(p_->f);
+  if (m < hyper_sparse_min_rows()) {
+    // Small system: exact dense path (byte-identical to pre-hyper-sparse).
+    std::vector<double>& buf = p_->solve_buf;
+    for (int external = 0; external < m; ++external) {
+      const int internal = static_cast<int>(
+          p_->external_to_internal[static_cast<std::size_t>(external)]);
+      buf[static_cast<std::size_t>(internal)] = rhs[external];
+    }
+    nc.btranCall(buf, /*factor_timer_clock_pointer*/ nullptr);
+    std::memcpy(result, buf.data(), static_cast<size_t>(m) * sizeof(double));
+    return;
+  }
+  // Large system: hyper-sparse BTRAN via a reused HVector.  Same permutation
+  // convention as the dense path (input remapped external->internal, output not
+  // remapped).  Overwrite every array entry so no stale solution leaks in.
+  HVector& vector = p_->solve_vec_btran;
+  vector.count = 0;
+  vector.packFlag = false;
   for (int external = 0; external < m; ++external) {
     const int internal = static_cast<int>(
         p_->external_to_internal[static_cast<std::size_t>(external)]);
-    buf[static_cast<std::size_t>(internal)] =
-        rhs[external];
+    const double value = rhs[external];
+    vector.array[static_cast<std::size_t>(internal)] = value;
+    if (value != 0.0) {
+      vector.index[static_cast<std::size_t>(vector.count++)] = internal;
+    }
   }
-  HFactor& nc = const_cast<HFactor&>(p_->f);
-  nc.btranCall(buf, /*factor_timer_clock_pointer*/ nullptr);
-  std::memcpy(result, buf.data(), static_cast<size_t>(m) * sizeof(double));
+  const double density =
+      static_cast<double>(vector.count) / static_cast<double>(m);
+  nc.btranCall(vector, density, nullptr);
+  std::memcpy(result, vector.array.data(),
+              static_cast<size_t>(m) * sizeof(double));
 }
 
 void HFactorBackend::btran_for_update(const double* rhs, double* result) const {
@@ -417,8 +495,16 @@ void HFactorBackend::btran_for_update(const double* rhs, double* result) const {
       vector.index[static_cast<std::size_t>(vector.count++)] = internal;
     }
   }
+  // Pass the true RHS density so HFactor selects its hyper-sparse BTRAN
+  // strategy.  CHUZR's BTRAN RHS is a unit vector (count==1) — the canonical
+  // hyper-sparse case — where this is a large win; result is identical.  Small
+  // bases force density 1.0 (dense) for numerical steadiness (size gate).
+  const double density =
+      m >= hyper_sparse_min_rows()
+          ? static_cast<double>(vector.count) / static_cast<double>(m)
+          : 1.0;
   HFactor& nc = const_cast<HFactor&>(p_->f);
-  nc.btranCall(vector, 1.0, nullptr);
+  nc.btranCall(vector, density, nullptr);
   p_->ep_rhs.assign(rhs, rhs + m);
   std::memcpy(result, vector.array.data(), static_cast<size_t>(m) * sizeof(double));
   p_->ep_pack.index.assign(vector.packIndex.begin(),
