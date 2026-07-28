@@ -1280,6 +1280,26 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
   std::vector<int> aug_ko, aug_ki, aug_diag;      // lower-tri CSC of K + diag positions
   std::vector<double> aug_kv, aug_rhsbuf, aug_solbuf;
   bool aug_use_cholmod = false;
+  int aug_kdim = 0;
+  bool aug_use_accel = false;  // Apple Accelerate unpivoted LDLᵀ (parallel, quasidefinite)
+#if MIPSOLVERS_USE_ACCELERATE
+  // Factor the quasidefinite augmented KKT [diag(d)+reg, -Ae'; -Ae, -reg] with
+  // Accelerate's multithreaded unpivoted LDLᵀ instead of the serial CHOLMOD
+  // simplicial LDLᵀ.  Measured ~4x faster on the 39-/118-bus SCUC LP
+  // relaxations; the parallel factorization only pays off for large systems, so
+  // gate on the KKT dimension (nn+m) — small augmented systems (e.g. the 6-bus)
+  // keep CHOLMOD, which has less per-factor overhead.  The quasidefinite matrix
+  // makes the unpivoted factorization numerically stable.  MIPSOLVERS_IPM_AUG_ACCEL
+  // forces it on ("1"/present) or off ("0").
+  const char* aug_accel_env = std::getenv("MIPSOLVERS_IPM_AUG_ACCEL");
+  const bool aug_prefer_accel =
+      aug_accel_env ? (aug_accel_env[0] != '0') : (nn + m >= 5000);
+  std::vector<long> aug_accel_colstarts;
+  SparseOpaqueSymbolicFactorization aug_accel_symbolic{};
+  SparseOpaqueFactorization_Double aug_accel_numeric{};
+  bool aug_accel_symbolic_valid = false;
+  bool aug_accel_numeric_valid = false;
+#endif
   if (use_augmented) {
     std::vector<Eigen::Triplet<double>> tri;
     tri.reserve(static_cast<size_t>(prob.A.nonZeros() + prob.Aeq.nonZeros() + mi));
@@ -1301,7 +1321,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     aug_w.setFromTriplets(wtri.begin(), wtri.end());
     aug_w.makeCompressed();
     aug_rhs.resize(nn + m);
-#ifdef MIPSOLVERS_HAVE_CHOLMOD
+#if defined(MIPSOLVERS_HAVE_CHOLMOD) || MIPSOLVERS_USE_ACCELERATE
     // Lower-triangle CSC of K = [ diag(d)+reg  -Ae'; -Ae  -reg ] (dim nn+m).
     // Column j<nn: diagonal (row j) then the -Ae entries (rows nn+i, sorted);
     // column nn+i: the single -reg diagonal.  Only diagonals change per iter.
@@ -1336,13 +1356,37 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
       ++pos;
     }
     aug_ko[static_cast<size_t>(kdim)] = pos;
-    aug_chol.set_simplicial(true);  // quasidefinite (indefinite, unpivoted) LDLᵀ
-    aug_use_cholmod = aug_chol.analyze(kdim, aug_ko.data(), aug_ki.data(),
-                                       aug_kv.data(), static_cast<int64_t>(pos));
-    if (aug_use_cholmod) {
-      aug_rhsbuf.resize(static_cast<size_t>(kdim));
-      aug_solbuf.resize(static_cast<size_t>(kdim));
+    aug_kdim = kdim;
+    aug_rhsbuf.resize(static_cast<size_t>(kdim));
+    aug_solbuf.resize(static_cast<size_t>(kdim));
+#if MIPSOLVERS_USE_ACCELERATE
+    if (aug_prefer_accel) {
+      // Apple Sparse symbolic factor of the symmetric (lower-triangle stored)
+      // quasidefinite K, unpivoted LDLᵀ (multithreaded on Apple Silicon).
+      aug_accel_colstarts.assign(aug_ko.begin(), aug_ko.end());
+      SparseMatrixStructure s{};
+      s.rowCount = kdim;
+      s.columnCount = kdim;
+      s.columnStarts = aug_accel_colstarts.data();
+      s.rowIndices = aug_ki.data();
+      s.attributes.transpose = false;
+      s.attributes.triangle = SparseLowerTriangle;
+      s.attributes.kind = SparseSymmetric;
+      s.attributes._reserved = 0;
+      s.attributes._allocatedBySparse = false;
+      s.blockSize = 1;
+      aug_accel_symbolic = SparseFactor(SparseFactorizationLDLTUnpivoted, s);
+      aug_accel_symbolic_valid = true;
+      aug_use_accel = (aug_accel_symbolic.status == SparseStatusOK);
     }
+#endif
+#ifdef MIPSOLVERS_HAVE_CHOLMOD
+    if (!aug_use_accel) {
+      aug_chol.set_simplicial(true);  // quasidefinite (indefinite, unpivoted) LDLᵀ
+      aug_use_cholmod = aug_chol.analyze(kdim, aug_ko.data(), aug_ki.data(),
+                                         aug_kv.data(), static_cast<int64_t>(pos));
+    }
+#endif
 #endif
   }
 
@@ -1554,8 +1598,44 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
   //   augmented: [diag(d)+reg, -Ae'; -Ae, -reg] [dx;dy] = [xi; -r_p]
   std::vector<double> xi_store(nn);
   double* xi_d = xi_store.data();
+#if MIPSOLVERS_USE_ACCELERATE
+  // Apple Sparse matrix view over the augmented KKT CSC (values are refreshed
+  // in place each iteration; the structure is fixed).
+  auto make_aug_apple_matrix = [&]() {
+    SparseMatrixStructure s{};
+    s.rowCount = aug_kdim;
+    s.columnCount = aug_kdim;
+    s.columnStarts = aug_accel_colstarts.data();
+    s.rowIndices = aug_ki.data();
+    s.attributes.transpose = false;
+    s.attributes.triangle = SparseLowerTriangle;
+    s.attributes.kind = SparseSymmetric;
+    s.attributes._reserved = 0;
+    s.attributes._allocatedBySparse = false;
+    s.blockSize = 1;
+    SparseMatrix_Double mat{};
+    mat.structure = s;
+    mat.data = aug_kv.data();
+    return mat;
+  };
+#endif
   auto solve_step = [&](const double* xi, double* dx_out, double* dy_out) {
     if (use_augmented) {
+#if MIPSOLVERS_USE_ACCELERATE
+      if (aug_use_accel) {
+        for (int j = 0; j < nn; ++j) aug_solbuf[static_cast<size_t>(j)] = xi[j];
+        for (int i = 0; i < m; ++i)
+          aug_solbuf[static_cast<size_t>(nn + i)] = -r_p_d[i];
+        DenseVector_Double bx{};
+        bx.count = aug_kdim;
+        bx.data = aug_solbuf.data();
+        SparseSolve(aug_accel_numeric, bx);  // in-place: b <- K^{-1} b
+        for (int j = 0; j < nn; ++j) dx_out[j] = aug_solbuf[static_cast<size_t>(j)];
+        for (int i = 0; i < m; ++i)
+          dy_out[i] = aug_solbuf[static_cast<size_t>(nn + i)];
+        return;
+      }
+#endif
       if (aug_use_cholmod) {
         for (int j = 0; j < nn; ++j) aug_rhsbuf[static_cast<size_t>(j)] = xi[j];
         for (int i = 0; i < m; ++i) aug_rhsbuf[static_cast<size_t>(nn + i)] = -r_p_d[i];
@@ -1666,21 +1746,39 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
 
     bool factor_ok;
     if (use_augmented) {
-      if (aug_use_cholmod) {
-        // Refresh the KKT diagonal (d[j]+reg on the primal block, -reg on the
-        // dual block) and factor with CHOLMOD simplicial LDLᵀ.
-        for (int j = 0; j < nn; ++j)
-          aug_kv[static_cast<size_t>(aug_diag[static_cast<size_t>(j)])] = dvec[j] + reg;
-        for (int i = 0; i < m; ++i)
-          aug_kv[static_cast<size_t>(aug_diag[static_cast<size_t>(nn + i)])] = -reg;
-        factor_ok = aug_chol.factorize(aug_kv.data());
+      if (aug_use_cholmod || aug_use_accel) {
+        // Refresh the KKT diagonal (d[j]+rr on the primal block, -rr on the
+        // dual block) and factor the quasidefinite system (CHOLMOD simplicial
+        // LDLᵀ, or Accelerate unpivoted LDLᵀ when aug_use_accel).
+        auto set_aug_diag = [&](double rr) {
+          for (int j = 0; j < nn; ++j)
+            aug_kv[static_cast<size_t>(aug_diag[static_cast<size_t>(j)])] =
+                dvec[j] + rr;
+          for (int i = 0; i < m; ++i)
+            aug_kv[static_cast<size_t>(aug_diag[static_cast<size_t>(nn + i)])] =
+                -rr;
+        };
+        auto aug_numeric_factor = [&]() -> bool {
+#if MIPSOLVERS_USE_ACCELERATE
+          if (aug_use_accel) {
+            SparseMatrix_Double K = make_aug_apple_matrix();
+            if (aug_accel_numeric_valid) {
+              SparseRefactor(K, &aug_accel_numeric);
+            } else {
+              aug_accel_numeric = SparseFactor(aug_accel_symbolic, K);
+              aug_accel_numeric_valid = true;
+            }
+            return aug_accel_numeric.status == SparseStatusOK;
+          }
+#endif
+          return aug_chol.factorize(aug_kv.data());
+        };
+        set_aug_diag(reg);
+        factor_ok = aug_numeric_factor();
         for (int retry = 0; retry < 4 && !factor_ok; ++retry) {
           const double dyn = reg * std::pow(100.0, retry + 1);
-          for (int j = 0; j < nn; ++j)
-            aug_kv[static_cast<size_t>(aug_diag[static_cast<size_t>(j)])] = dvec[j] + dyn;
-          for (int i = 0; i < m; ++i)
-            aug_kv[static_cast<size_t>(aug_diag[static_cast<size_t>(nn + i)])] = -dyn;
-          factor_ok = aug_chol.factorize(aug_kv.data());
+          set_aug_diag(dyn);
+          factor_ok = aug_numeric_factor();
         }
       } else {
         // Portable fallback: unsymmetric LU via factor_kkt_sparse.
@@ -1905,6 +2003,12 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
            t_init_overhead, t_resid, t_setup, t_pred, t_corr, t_update);
     printf("    setup_sub: fill=%.3f factor=%.3f\n", t_fill, t_factor);
   }
+
+#if MIPSOLVERS_USE_ACCELERATE
+  // Release the Accelerate augmented-KKT factorizations (numeric + symbolic).
+  if (aug_accel_numeric_valid) SparseCleanup(aug_accel_numeric);
+  if (aug_accel_symbolic_valid) SparseCleanup(aug_accel_symbolic);
+#endif
 
   // === Extract solution ===
 #if MIPSOLVERS_USE_ACCELERATE
