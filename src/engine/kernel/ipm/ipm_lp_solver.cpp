@@ -1167,12 +1167,18 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
   std::vector<double> dvec(nn, 0.0);  // barrier Hessian diagonal d (augmented path)
 
   // Augmented-KKT operands, built once when use_augmented.  jg = -Ae (m x nn);
-  // aug_w = diag(d) (nn x nn, values refreshed per iteration); the cache holds
-  // the sparse factorization reused for the predictor and corrector solves.
+  // aug_w = diag(d) (nn x nn, values refreshed per iteration).  When CHOLMOD is
+  // available the symmetric quasidefinite system is factored with its
+  // simplicial LDLᵀ (fast, exploits symmetry); otherwise factor_kkt_sparse
+  // (unsymmetric LU) is the portable fallback.
   Eigen::SparseMatrix<double> aug_negAe;
   Eigen::SparseMatrix<double> aug_w;
   SparseKKTCache aug_cache;
   Eigen::VectorXd aug_rhs, aug_dx, aug_dy;
+  CholmodLDLT aug_chol;
+  std::vector<int> aug_ko, aug_ki, aug_diag;      // lower-tri CSC of K + diag positions
+  std::vector<double> aug_kv, aug_rhsbuf, aug_solbuf;
+  bool aug_use_cholmod = false;
   if (use_augmented) {
     std::vector<Eigen::Triplet<double>> tri;
     tri.reserve(static_cast<size_t>(prob.A.nonZeros() + prob.Aeq.nonZeros() + mi));
@@ -1194,6 +1200,49 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     aug_w.setFromTriplets(wtri.begin(), wtri.end());
     aug_w.makeCompressed();
     aug_rhs.resize(nn + m);
+#ifdef MIPSOLVERS_HAVE_CHOLMOD
+    // Lower-triangle CSC of K = [ diag(d)+reg  -Ae'; -Ae  -reg ] (dim nn+m).
+    // Column j<nn: diagonal (row j) then the -Ae entries (rows nn+i, sorted);
+    // column nn+i: the single -reg diagonal.  Only diagonals change per iter.
+    const int* nAo = aug_negAe.outerIndexPtr();
+    const int* nAi = aug_negAe.innerIndexPtr();
+    const double* nAv = aug_negAe.valuePtr();
+    const int kdim = nn + m;
+    aug_ko.assign(static_cast<size_t>(kdim + 1), 0);
+    aug_diag.assign(static_cast<size_t>(kdim), 0);
+    aug_ki.reserve(static_cast<size_t>(nn) +
+                   static_cast<size_t>(aug_negAe.nonZeros()) +
+                   static_cast<size_t>(m));
+    aug_kv.reserve(aug_ki.capacity());
+    int pos = 0;
+    for (int j = 0; j < nn; ++j) {
+      aug_ko[static_cast<size_t>(j)] = pos;
+      aug_diag[static_cast<size_t>(j)] = pos;
+      aug_ki.push_back(j);
+      aug_kv.push_back(0.0);
+      ++pos;
+      for (int p = nAo[j]; p < nAo[j + 1]; ++p) {
+        aug_ki.push_back(nn + nAi[p]);
+        aug_kv.push_back(nAv[p]);
+        ++pos;
+      }
+    }
+    for (int i = 0; i < m; ++i) {
+      aug_ko[static_cast<size_t>(nn + i)] = pos;
+      aug_diag[static_cast<size_t>(nn + i)] = pos;
+      aug_ki.push_back(nn + i);
+      aug_kv.push_back(0.0);
+      ++pos;
+    }
+    aug_ko[static_cast<size_t>(kdim)] = pos;
+    aug_chol.set_simplicial(true);  // quasidefinite (indefinite, unpivoted) LDLᵀ
+    aug_use_cholmod = aug_chol.analyze(kdim, aug_ko.data(), aug_ki.data(),
+                                       aug_kv.data(), static_cast<int64_t>(pos));
+    if (aug_use_cholmod) {
+      aug_rhsbuf.resize(static_cast<size_t>(kdim));
+      aug_solbuf.resize(static_cast<size_t>(kdim));
+    }
+#endif
   }
 
   double* theta_d = theta.data();
@@ -1406,6 +1455,18 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
   double* xi_d = xi_store.data();
   auto solve_step = [&](const double* xi, double* dx_out, double* dy_out) {
     if (use_augmented) {
+      if (aug_use_cholmod) {
+        for (int j = 0; j < nn; ++j) aug_rhsbuf[static_cast<size_t>(j)] = xi[j];
+        for (int i = 0; i < m; ++i) aug_rhsbuf[static_cast<size_t>(nn + i)] = -r_p_d[i];
+        if (!aug_chol.solve(aug_rhsbuf.data(), aug_solbuf.data())) {
+          for (int j = 0; j < nn; ++j) dx_out[j] = std::numeric_limits<double>::quiet_NaN();
+          for (int i = 0; i < m; ++i) dy_out[i] = std::numeric_limits<double>::quiet_NaN();
+          return;
+        }
+        for (int j = 0; j < nn; ++j) dx_out[j] = aug_solbuf[static_cast<size_t>(j)];
+        for (int i = 0; i < m; ++i) dy_out[i] = aug_solbuf[static_cast<size_t>(nn + i)];
+        return;
+      }
       for (int j = 0; j < nn; ++j) aug_rhs[j] = xi[j];
       for (int i = 0; i < m; ++i) aug_rhs[nn + i] = -r_p_d[i];
       if (!solve_kkt_sparse(aug_cache, aug_rhs, aug_dx, aug_dy) ||
@@ -1504,14 +1565,31 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
 
     bool factor_ok;
     if (use_augmented) {
-      // Refresh diag(d) and factor the sparse augmented KKT
-      //   [ diag(d)+reg   -Ae' ; -Ae   -reg ].
-      double* wv = aug_w.valuePtr();
-      for (int j = 0; j < nn; ++j) wv[j] = dvec[j];
-      factor_ok = factor_kkt_sparse(aug_cache, aug_w, aug_negAe, reg);
-      for (int retry = 0; retry < 4 && !factor_ok; ++retry) {
-        const double dyn_reg = reg * std::pow(100.0, retry + 1);
-        factor_ok = factor_kkt_sparse(aug_cache, aug_w, aug_negAe, dyn_reg);
+      if (aug_use_cholmod) {
+        // Refresh the KKT diagonal (d[j]+reg on the primal block, -reg on the
+        // dual block) and factor with CHOLMOD simplicial LDLᵀ.
+        for (int j = 0; j < nn; ++j)
+          aug_kv[static_cast<size_t>(aug_diag[static_cast<size_t>(j)])] = dvec[j] + reg;
+        for (int i = 0; i < m; ++i)
+          aug_kv[static_cast<size_t>(aug_diag[static_cast<size_t>(nn + i)])] = -reg;
+        factor_ok = aug_chol.factorize(aug_kv.data());
+        for (int retry = 0; retry < 4 && !factor_ok; ++retry) {
+          const double dyn = reg * std::pow(100.0, retry + 1);
+          for (int j = 0; j < nn; ++j)
+            aug_kv[static_cast<size_t>(aug_diag[static_cast<size_t>(j)])] = dvec[j] + dyn;
+          for (int i = 0; i < m; ++i)
+            aug_kv[static_cast<size_t>(aug_diag[static_cast<size_t>(nn + i)])] = -dyn;
+          factor_ok = aug_chol.factorize(aug_kv.data());
+        }
+      } else {
+        // Portable fallback: unsymmetric LU via factor_kkt_sparse.
+        double* wv = aug_w.valuePtr();
+        for (int j = 0; j < nn; ++j) wv[j] = dvec[j];
+        factor_ok = factor_kkt_sparse(aug_cache, aug_w, aug_negAe, reg);
+        for (int retry = 0; retry < 4 && !factor_ok; ++retry) {
+          const double dyn_reg = reg * std::pow(100.0, retry + 1);
+          factor_ok = factor_kkt_sparse(aug_cache, aug_w, aug_negAe, dyn_reg);
+        }
       }
     } else {
       factor_ok = use_banded ? fill_and_factor_banded()
