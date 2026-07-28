@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -385,6 +386,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
 
 SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::VectorXd& x0, int ruiz_rounds) const {
   const bool has_warm_start = (x0.size() == prob.c.size());
+  const bool ipm_verbose_env = (std::getenv("MIPSOLVERS_IPM_VERBOSE") != nullptr);
   SolveResult out;
   out.stats.solver_name = name();
   const auto t0 = std::chrono::steady_clock::now();
@@ -1070,14 +1072,23 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
       std::fill(yv.begin(), yv.end(), 0.0);
     }
 
-    // Clamp original variables to bounds, then recompute slacks.
+    // Clamp original variables strictly inside their bounds, then recompute
+    // slacks.  For one-sided variables the interior point must be built from
+    // the *bounded* side only: the old `hi = x + 10` (lb-only case) fell below
+    // lb whenever the least-squares init was negative, seeding x < lb and
+    // leaving a permanent bound violation that the barrier gl = max(x-lb, eps)
+    // silently hid (observed on afiro variable 24: x=-50, lb=0).
     for (int j = 0; j < n_orig; ++j) {
       if (is_fixed[j]) continue;  // already locked
-      double lo = flb[j] ? lb[j] : (x_d[j] - 10.0);
-      double hi = fub[j] ? ub[j] : (x_d[j] + 10.0);
-      double range = hi - lo;
-      x_d[j] = std::clamp(x_d[j], lo + 0.01 * range, hi - 0.01 * range);
-      if (x_d[j] <= lo || x_d[j] >= hi) x_d[j] = 0.5 * (lo + hi);
+      if (flb[j] && fub[j]) {
+        const double range = ub[j] - lb[j];
+        x_d[j] = std::clamp(x_d[j], lb[j] + 0.01 * range, ub[j] - 0.01 * range);
+      } else if (flb[j]) {
+        x_d[j] = std::max(x_d[j], lb[j] + 1.0);
+      } else if (fub[j]) {
+        x_d[j] = std::min(x_d[j], ub[j] - 1.0);
+      }
+      // free variables: keep the least-squares value as-is
     }
     // Recompute inequality slack variables: s_i = b_i - A_i * x (must be > 0)
     for (int i = 0; i < mi; ++i) {
@@ -1094,8 +1105,46 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     for (int j = 0; j < nn; ++j) {
       gl_d[j] = flb[j] ? std::max(x_d[j] - lb[j], 1e-4) : kBig;
       gu_d[j] = fub[j] ? std::max(ub[j] - x_d[j], 1e-4) : kBig;
-      zl_d[j] = flb[j] ? 1.0 : 0.0;
-      zu_d[j] = fub[j] ? 1.0 : 0.0;
+    }
+    // Mehrotra-style dual start (Mehrotra 1992).  Setting zl=zu=1 arbitrarily
+    // leaves the initial dual residual rd = c - Ae'y - flb*zl + fub*zu huge
+    // (df ~ 1e7 on SCUC / scaled LPs) — the dominant cause of divergence.
+    // Instead choose zl - zu = rc := c - Ae'y so rd starts near zero, then
+    // shift both toward strict positivity and center the products g*z.
+    {
+      std::vector<double> mh_rp(m), mh_rc(nn);
+      compute_residuals(x_d, y_d, mh_rp.data(), mh_rc.data());  // mh_rc = c - Ae'y
+      double zmin = 0.0;
+      for (int j = 0; j < nn; ++j) {
+        if (j < n_orig && is_fixed[j]) { zl_d[j] = 0.0; zu_d[j] = 0.0; continue; }
+        const double rcj = mh_rc[j];
+        double zl0 = 0.0, zu0 = 0.0;
+        if (flb[j] && fub[j]) {
+          zl0 = std::max(rcj, 0.0);
+          zu0 = std::max(-rcj, 0.0);
+        } else if (flb[j]) {
+          zl0 = rcj;
+        } else if (fub[j]) {
+          zu0 = -rcj;
+        }
+        zl_d[j] = zl0;
+        zu_d[j] = zu0;
+        if (flb[j]) zmin = std::min(zmin, zl0);
+        if (fub[j]) zmin = std::min(zmin, zu0);
+      }
+      const double dz = std::max(-1.5 * zmin, 0.0);
+      double gz = 0.0, gsum = 0.0;
+      for (int j = 0; j < nn; ++j) {
+        if (j < n_orig && is_fixed[j]) continue;
+        if (flb[j] && gl_d[j] < kBig) { gz += gl_d[j] * (zl_d[j] + dz); gsum += gl_d[j]; }
+        if (fub[j] && gu_d[j] < kBig) { gz += gu_d[j] * (zu_d[j] + dz); gsum += gu_d[j]; }
+      }
+      const double dzc = dz + ((gsum > 1e-30) ? 0.5 * gz / gsum : 1.0);
+      for (int j = 0; j < nn; ++j) {
+        if (j < n_orig && is_fixed[j]) continue;
+        if (flb[j]) zl_d[j] = std::max(zl_d[j] + dzc, 1e-6);
+        if (fub[j]) zu_d[j] = std::max(zu_d[j] + dzc, 1e-6);
+      }
     }
   }
 
@@ -1125,7 +1174,14 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
   const double* lb_d = lb.data();
   const double* ub_d = ub.data();
 
-  const double reg = (n_fixed_vars > n_orig / 4) ? 1e-6 : 1e-10;
+  // Primal-dual regularization (IP-PMM style).  reg is the diagonal added to
+  // the normal equations (dual reg delta) and, via 1/(d+reg), also bounds
+  // theta (primal reg rho).  It starts at reg_floor and is refreshed each
+  // iteration to track the barrier scale mu (see the loop), so it stabilizes
+  // the near-singular degenerate-LP normal equations early then vanishes as
+  // mu -> 0 to keep the solution accurate.
+  const double reg_floor = (n_fixed_vars > n_orig / 4) ? 1e-6 : 1e-10;
+  double reg = reg_floor;
   const int max_iter = std::min(opt_.max_iter, 200);
   bool converged = false;
 
@@ -1334,8 +1390,8 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     }
     double mu = (n_compl > 0) ? comp_sum / n_compl : 0.0;
 
-    if (opt_.verbose && (iter < 3 || iter % 5 == 0))
-      printf("IPM-LP %3d: pf=%.2e df=%.2e mu=%.2e\n", iter, pfeas, dfeas, mu);
+    if ((opt_.verbose || ipm_verbose_env) && (iter < 3 || iter % 5 == 0))
+      fprintf(stderr, "IPM-LP %3d: pf=%.2e df=%.2e mu=%.2e\n", iter, pfeas, dfeas, mu);
 
     if (pfeas < opt_.tol_primal && dfeas < opt_.tol_dual && mu < opt_.tol_gap) {
       out.stats.success = true;
@@ -1351,6 +1407,13 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
 
     // Build Θ, precompute inv_gl, inv_gu, and factorize
     auto t_su = tnow();
+    // Refresh the primal-dual regularization to track the barrier scale mu.
+    // reg damps the (otherwise unbounded on degenerate LPs) Newton step early
+    // then vanishes as mu -> 0.  Applied as primal reg in theta = 1/(d+reg) —
+    // bounding theta at 1/reg instead of the old hard 1e14 cap that amplified
+    // dx = theta*(Ae'dy) into 1e25+ garbage — and as dual reg on the
+    // normal-equations diagonal (added inside fill_and_factor).
+    reg = std::clamp(1e-6 * mu, reg_floor, 1e-2);
     MIPSOLVERS_OMP_PARALLEL_IF(nn > MIPSOLVERS_OMP_THRESHOLD)
     for (int j = 0; j < nn; ++j) {
       if (j < n_orig && is_fixed[j]) {
@@ -1364,7 +1427,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
       inv_gl_d[j] = igl;
       inv_gu_d[j] = igu;
       double d = zl_d[j] * igl + zu_d[j] * igu;
-      theta_d[j] = (d > kMinVal) ? 1.0 / d : 1e14;
+      theta_d[j] = 1.0 / (d + reg);
     }
 
     bool factor_ok = use_banded ? fill_and_factor_banded()
@@ -1608,6 +1671,39 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
   for (int j = 0; j < n_orig; ++j)
     out.x(j) = scal.active ? x_d[j] * scal.dc[static_cast<size_t>(j)] : x_d[j];
   out.stats.objective = prob.c.dot(out.x);
+  // Original-space feasibility audit.  A scaled (Ruiz) solve can converge in
+  // scaled coordinates yet map back to an infeasible original-space point
+  // (observed on afiro).  Reject such false-optima so solve_lp's unscaled retry
+  // can recover, and so "Optimal" is never reported for a violated solution.
+  if (out.stats.success) {
+    double bnd_viol = 0.0;
+    for (int j = 0; j < n_orig; ++j) {
+      const double lbj = prob.vars[static_cast<size_t>(j)].lb;
+      const double ubj = prob.vars[static_cast<size_t>(j)].ub;
+      if (lbj > -1e19) bnd_viol = std::max(bnd_viol, lbj - out.x(j));
+      if (ubj < 1e19) bnd_viol = std::max(bnd_viol, out.x(j) - ubj);
+    }
+    double row_viol = 0.0;
+    if (prob.A.rows() > 0) {
+      const Eigen::VectorXd ax = prob.A * out.x;
+      for (int i = 0; i < ax.size(); ++i)
+        row_viol = std::max(row_viol, ax(i) - prob.b(i));
+    }
+    if (prob.Aeq.rows() > 0) {
+      const Eigen::VectorXd ae = prob.Aeq * out.x;
+      for (int i = 0; i < ae.size(); ++i)
+        row_viol = std::max(row_viol, std::abs(ae(i) - prob.beq(i)));
+    }
+    double scale = 1.0;
+    if (prob.b.size()) scale = std::max(scale, prob.b.cwiseAbs().maxCoeff());
+    if (prob.beq.size()) scale = std::max(scale, prob.beq.cwiseAbs().maxCoeff());
+    if (out.x.size()) scale = std::max(scale, out.x.cwiseAbs().maxCoeff());
+    const double audit_tol = 1e-6 * scale;
+    if (std::max(bnd_viol, row_viol) > audit_tol) {
+      out.stats.success = false;
+      out.stats.status = "Residual audit rejected";
+    }
+  }
   if (m > 0) {
     out.constraint_duals.resize(m);
     for (int i = 0; i < m; ++i) {
