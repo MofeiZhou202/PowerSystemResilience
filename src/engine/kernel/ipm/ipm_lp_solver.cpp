@@ -18,6 +18,7 @@
 #include <Eigen/SparseCholesky>
 
 #include "mipsolvers/engine/kernel/linear_algebra/cholmod_ldlt.hpp"
+#include "mipsolvers/engine/kernel/kkt/kkt_system.hpp"
 
 #if defined(HACDCPF_HAVE_ACCELERATE) && defined(__APPLE__)
 #define MIPSOLVERS_USE_ACCELERATE 1
@@ -624,6 +625,15 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
 
   const bool use_banded = (bandwidth <= kBandedThreshold);
   bool use_dense = false;  // set below when scatter table would exceed kDenseScatterThreshold
+  // Sparse augmented-KKT path.  When the normal equations N = Ae*Ae' would be
+  // too dense to form (large SCUC/DC-power-flow LPs — the ProblemTooLarge gate
+  // below), solve the sparse quasidefinite augmented system
+  //   [ diag(d)+reg   -Ae' ] [dx]   [ xi ]
+  //   [ -Ae           -reg ] [dy] = [-r_p]
+  // directly via factor_kkt_sparse/solve_kkt_sparse instead — this avoids the
+  // dense Ae*Ae' fill entirely.  Off by default (env override for testing).
+  bool use_augmented =
+      !use_banded && (std::getenv("MIPSOLVERS_IPM_FORCE_AUGMENTED") != nullptr);
 
   // === Banded storage: band[(row-col)*m + col] for row >= col, row-col <= bw ===
   const int bw = bandwidth;
@@ -736,17 +746,17 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
       use_dense = (estimated_scatter > kDenseScatterThreshold) &&
                   (dense_bytes <= kDenseMaxBytes);
       if (!use_dense && estimated_scatter > kMaxScatterEntries) {
-        // Neither path is memory-feasible: the dense matrices exceed the
-        // byte budget and the sparse scatter map (Theta(estimated_scatter)
-        // entries, also a proxy for nnz of N = Ae*Ae') exceeds its cap.
-        // Fail cleanly instead of dying in reserve() with bad_alloc.
-        out.stats.status = "ProblemTooLarge";
-        out.stats.success = false;
-        return out;
+        // The dense normal-equations matrices exceed the byte budget and the
+        // sparse N = Ae*Ae' scatter map exceeds its cap.  Rather than fail,
+        // route to the sparse augmented-KKT path, which never forms Ae*Ae'.
+        use_augmented = true;
       }
     }
 
-    if (use_dense) {
+    if (use_augmented) {
+      // Skip all normal-equations setup; the augmented path builds its own
+      // operands (Ae, diag(d)) below.
+    } else if (use_dense) {
       // Dense BLAS path: build Ae_dense (m x nn) once.  Each IPM iteration computes
       //   N = Ae_sqrt * Ae_sqrt'  where Ae_sqrt[:,k] = sqrt(theta[k]) * Ae[:,k]
       // via Eigen (backed by BLAS/Accelerate), then factorizes with dense LDLT.
@@ -857,7 +867,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     return mat;
   };
 
-  if (!use_banded && !use_dense && !cholmod_ok) {
+  if (!use_banded && !use_dense && !use_augmented && !cholmod_ok) {
     // Convert Eigen CSC column starts (int) to Apple format (long)
     const int* No = N_sparse.outerIndexPtr();
     accel_col_starts.resize(m + 1);
@@ -983,7 +993,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
         std::fill(xv.begin(), xv.end(), 0.5);
         std::fill(yv.begin(), yv.end(), 0.0);
       }
-    } else {
+    } else if (!use_augmented) {
 #if MIPSOLVERS_HAVE_CHOLMOD
       if (cholmod_ok) {
         // N_sparse currently holds the theta=1 fill (N = Ae*Ae' + reg).
@@ -1154,6 +1164,37 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
   std::vector<double> rhs(m), tmp_n(nn), Atdy(nn);
   std::vector<double> r_p(m), r_d(nn);
   std::vector<double> inv_gl(nn), inv_gu(nn);  // precomputed reciprocals
+  std::vector<double> dvec(nn, 0.0);  // barrier Hessian diagonal d (augmented path)
+
+  // Augmented-KKT operands, built once when use_augmented.  jg = -Ae (m x nn);
+  // aug_w = diag(d) (nn x nn, values refreshed per iteration); the cache holds
+  // the sparse factorization reused for the predictor and corrector solves.
+  Eigen::SparseMatrix<double> aug_negAe;
+  Eigen::SparseMatrix<double> aug_w;
+  SparseKKTCache aug_cache;
+  Eigen::VectorXd aug_rhs, aug_dx, aug_dy;
+  if (use_augmented) {
+    std::vector<Eigen::Triplet<double>> tri;
+    tri.reserve(static_cast<size_t>(prob.A.nonZeros() + prob.Aeq.nonZeros() + mi));
+    for (int j = 0; j < n_orig; ++j) {
+      for (int p = A_o[j]; p < A_o[j + 1]; ++p)
+        tri.emplace_back(A_i[p], j, -A_v[p]);
+      if (me > 0)
+        for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p)
+          tri.emplace_back(mi + Aeq_i[p], j, -Aeq_v[p]);
+    }
+    for (int i = 0; i < mi; ++i) tri.emplace_back(i, n_orig + i, -1.0);
+    aug_negAe.resize(m, nn);
+    aug_negAe.setFromTriplets(tri.begin(), tri.end());
+    aug_negAe.makeCompressed();
+    std::vector<Eigen::Triplet<double>> wtri;
+    wtri.reserve(static_cast<size_t>(nn));
+    for (int j = 0; j < nn; ++j) wtri.emplace_back(j, j, 1.0);
+    aug_w.resize(nn, nn);
+    aug_w.setFromTriplets(wtri.begin(), wtri.end());
+    aug_w.makeCompressed();
+    aug_rhs.resize(nn + m);
+  }
 
   double* theta_d = theta.data();
   double* dx_d = dx.data();
@@ -1356,6 +1397,35 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     }
   };
 
+  // Compute the Newton step (dx, dy) from the per-variable rhs xi and the
+  // current primal residual r_p, dispatching to the normal-equations path or
+  // the sparse augmented-KKT path.  Both solve the same system:
+  //   normal:    N dy = r_p - Ae*(theta*xi);  dx = theta*(Ae'dy) + theta*xi
+  //   augmented: [diag(d)+reg, -Ae'; -Ae, -reg] [dx;dy] = [xi; -r_p]
+  std::vector<double> xi_store(nn);
+  double* xi_d = xi_store.data();
+  auto solve_step = [&](const double* xi, double* dx_out, double* dy_out) {
+    if (use_augmented) {
+      for (int j = 0; j < nn; ++j) aug_rhs[j] = xi[j];
+      for (int i = 0; i < m; ++i) aug_rhs[nn + i] = -r_p_d[i];
+      if (!solve_kkt_sparse(aug_cache, aug_rhs, aug_dx, aug_dy) ||
+          aug_dx.size() != nn || aug_dy.size() != m) {
+        for (int j = 0; j < nn; ++j) dx_out[j] = std::numeric_limits<double>::quiet_NaN();
+        for (int i = 0; i < m; ++i) dy_out[i] = std::numeric_limits<double>::quiet_NaN();
+        return;
+      }
+      for (int j = 0; j < nn; ++j) dx_out[j] = aug_dx[j];
+      for (int i = 0; i < m; ++i) dy_out[i] = aug_dy[i];
+      return;
+    }
+    for (int j = 0; j < nn; ++j) tmp_d[j] = theta_d[j] * xi[j];
+    std::memcpy(rhs_d, r_p_d, sizeof(double) * m);
+    ae_mul_sub(tmp_d, rhs_d);
+    solve_normal(rhs_d, dy_out);
+    aet_mul(dy_out, Atdy_d);
+    simd_fma(theta_d, Atdy_d, tmp_d, dx_out, nn);  // dx = theta*Atdy + theta*xi
+  };
+
   for (int iter = 0; iter < max_iter; ++iter) {
     if (opt_.time_limit_sec > 0.0 && std::isfinite(opt_.time_limit_sec)) {
       const double elapsed =
@@ -1420,6 +1490,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
         inv_gl_d[j] = 0.0;
         inv_gu_d[j] = 0.0;
         theta_d[j] = 0.0;  // remove fixed var from normal equations
+        dvec[j] = 1e12;    // pin dx~0 for fixed vars in the augmented system
         continue;
       }
       double igl = flb_d[j] / gl_d[j];  // 0 if no lb (flb=0, gl=kBig)
@@ -1427,14 +1498,28 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
       inv_gl_d[j] = igl;
       inv_gu_d[j] = igu;
       double d = zl_d[j] * igl + zu_d[j] * igu;
+      dvec[j] = d;
       theta_d[j] = 1.0 / (d + reg);
     }
 
-    bool factor_ok = use_banded ? fill_and_factor_banded()
-                                : (use_dense ? fill_and_factor_dense() : fill_and_factor_sparse());
+    bool factor_ok;
+    if (use_augmented) {
+      // Refresh diag(d) and factor the sparse augmented KKT
+      //   [ diag(d)+reg   -Ae' ; -Ae   -reg ].
+      double* wv = aug_w.valuePtr();
+      for (int j = 0; j < nn; ++j) wv[j] = dvec[j];
+      factor_ok = factor_kkt_sparse(aug_cache, aug_w, aug_negAe, reg);
+      for (int retry = 0; retry < 4 && !factor_ok; ++retry) {
+        const double dyn_reg = reg * std::pow(100.0, retry + 1);
+        factor_ok = factor_kkt_sparse(aug_cache, aug_w, aug_negAe, dyn_reg);
+      }
+    } else {
+      factor_ok = use_banded ? fill_and_factor_banded()
+                             : (use_dense ? fill_and_factor_dense() : fill_and_factor_sparse());
+    }
     // Dynamic regularization retry: if Cholesky fails (ill-conditioned normal
     // equations from near-parallel constraints), increase diagonal perturbation.
-    if (!factor_ok) {
+    if (!factor_ok && !use_augmented) {
       double dyn_reg = std::max(reg * 1e4, 1e-8);
       for (int retry = 0; retry < 4 && !factor_ok; ++retry) {
         if (use_banded) {
@@ -1491,20 +1576,10 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     // ---- Predictor (affine, σ=0) ----
     auto t_p = tnow();
 
-    // ξ_aff = -r_d - z_l + z_u  →  tmp_n = Θ * ξ_aff
-    for (int j = 0; j < nn; ++j) {
-      double xi = -r_d_d[j] - flb_d[j] * zl_d[j] + fub_d[j] * zu_d[j];
-      tmp_d[j] = theta_d[j] * xi;
-    }
-
-    // rhs = r_p - Ae*tmp_n
-    std::memcpy(rhs_d, r_p_d, sizeof(double) * m);
-    ae_mul_sub(tmp_d, rhs_d);
-    solve_normal(rhs_d, dy_aff_d);
-
-    // Δx_aff = Θ(Ae'Δy_aff) + tmp_n
-    aet_mul(dy_aff_d, Atdy_d);
-    simd_fma(theta_d, Atdy_d, tmp_d, dx_aff_d, nn);  // dx_aff = theta * Atdy + tmp
+    // ξ_aff = -r_d - z_l + z_u; solve for (Δx_aff, Δy_aff).
+    for (int j = 0; j < nn; ++j)
+      xi_d[j] = -r_d_d[j] - flb_d[j] * zl_d[j] + fub_d[j] * zu_d[j];
+    solve_step(xi_d, dx_aff_d, dy_aff_d);
 
     // Δz_aff from complementarity
     for (int j = 0; j < nn; ++j) {
@@ -1571,14 +1646,9 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
         double xi = -r_d_d[j];
         xi += flb_d[j] * (sigma_mu * inv_gl_d[j] - zl_d[j] - dzl_aff_d[j] * dx_aff_d[j] * inv_gl_d[j]);
         xi -= fub_d[j] * (sigma_mu * inv_gu_d[j] - zu_d[j] + dzu_aff_d[j] * dx_aff_d[j] * inv_gu_d[j]);
-        tmp_d[j] = theta_d[j] * xi;
+        xi_d[j] = xi;
       }
-      std::memcpy(rhs_d, r_p_d, sizeof(double) * m);
-      ae_mul_sub(tmp_d, rhs_d);
-      solve_normal(rhs_d, dy_d);
-
-      aet_mul(dy_d, Atdy_d);
-      simd_fma(theta_d, Atdy_d, tmp_d, dx_d, nn);  // dx = theta * Atdy + tmp
+      solve_step(xi_d, dx_d, dy_d);
 
       for (int j = 0; j < nn; ++j) {
         dzl[j] = flb_d[j] * ((sigma_mu - dzl_aff_d[j] * dx_aff_d[j]) * inv_gl_d[j] - zl_d[j] - zl_d[j] * inv_gl_d[j] * dx_d[j]);
