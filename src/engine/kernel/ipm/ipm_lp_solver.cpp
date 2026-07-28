@@ -660,6 +660,17 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
   // dense Ae*Ae' fill entirely.  Off by default (env override for testing).
   bool use_augmented =
       !use_banded && (std::getenv("MIPSOLVERS_IPM_FORCE_AUGMENTED") != nullptr);
+#ifdef MIPSOLVERS_HAVE_CHOLMOD
+  // Dense normal equations (nearly-full bandwidth — SCUC / DC power flow, whose
+  // transmission constraints couple everything) make N = Ae*Ae' expensive to
+  // form and ill-conditioned.  The sparse augmented KKT is both better
+  // conditioned (fewer IPM iterations) and cheaper (no Ae*Ae' fill), so route
+  // there whenever CHOLMOD's simplicial LDLT can factor the quasidefinite
+  // system.  Measured ~1.7x faster on 39-bus (55 vs 114 iters) and ~10x on the
+  // 6-bus relaxation.  Small/sparse-normal problems keep the parallel
+  // Accelerate Cholesky path where it is faster.
+  if (!use_banded && m > 256 && bandwidth > m / 4) use_augmented = true;
+#endif
 
   // === Banded storage: band[(row-col)*m + col] for row >= col, row-col <= bw ===
   const int bw = bandwidth;
@@ -1827,11 +1838,11 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     t_update += std::chrono::duration<double, std::milli>(tnow() - t_u).count();
   }
 
-  if (opt_.verbose) {
+  if (opt_.verbose || ipm_verbose_env) {
     auto t_end = std::chrono::steady_clock::now();
     printf("  IPM timing: total=%.3f ms (m=%d, nn=%d, bw=%d, %s)\n",
            std::chrono::duration<double, std::milli>(t_end - t0).count(), m, nn, bandwidth,
-           use_banded ? "BANDED" : (use_dense ? "DENSE" : "SPARSE"));
+           use_banded ? "BANDED" : (use_dense ? "DENSE" : (use_augmented ? "AUGMENTED" : "SPARSE")));
     printf("    init=%.3f resid=%.3f setup=%.3f pred=%.3f corr=%.3f update=%.3f\n",
            t_init_overhead, t_resid, t_setup, t_pred, t_corr, t_update);
     printf("    setup_sub: fill=%.3f factor=%.3f\n", t_fill, t_factor);
