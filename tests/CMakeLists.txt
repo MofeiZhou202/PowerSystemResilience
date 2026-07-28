@@ -65,6 +65,7 @@ hacdcpf_add_test(test_io_roundtrip        test_io_roundtrip.cpp)
 
 # I/O: bounded CIM / CGMES 3.0 (EQ+SSH) import/export (§5).
 hacdcpf_add_test(test_io_cim              test_io_cim.cpp)
+hacdcpf_add_test(test_io_svg_distribution test_io_svg_distribution.cpp)
 
 # I/O: text-format conversion for OpenDSS/GridLAB-D without requiring external
 # engines, used by component-level cross-check and benchmark harnesses.

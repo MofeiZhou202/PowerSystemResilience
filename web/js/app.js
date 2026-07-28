@@ -2954,6 +2954,41 @@ const App = (() => {
     }
   }
 
+  async function loadSvgDistribution(file) {
+    if (!file) return;
+    setStatus('导入配电SVG...', 'busy');
+    try {
+      const data = await apiPost('/api/session/load_svg_distribution', {
+        svg_string: await file.text(),
+        name: String(file.name || '配电 SVG').replace(/\.svg$/i, ''),
+      });
+      if (!data) { setStatus('加载失败', 'error'); return; }
+      if (data.error) throw new Error(data.error);
+      log(`已导入配电SVG: ${file.name}`, 'success');
+      applyLoadedSystem(data, '配电IEC-CGE SVG');
+      showModelIoStatus('配电 SVG 导入完成', [
+        ['文件', file.name],
+        ['拓扑节点', data._svg_recovered_nodes ?? ''],
+        ['源导线对象', data._svg_source_lines ?? ''],
+        ['源开关对象', data._svg_source_switches ?? ''],
+        ['源配变对象', data._svg_source_transformers ?? ''],
+        ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
+        ['开关', data.counts?.switches ?? data.switches?.length ?? ''],
+        ['配变/估算负荷', `${data.counts?.transformers_2w ?? 0} / ${data.counts?.loads ?? 0}`],
+        ['合成外部电网', data._svg_synthetic_external_grids ?? 0],
+        ['孤立分量/母线', `${data._svg_isolated_components ?? 0} / ${data._svg_isolated_buses ?? 0}`],
+        ['未恢复对象', data._svg_unresolved_objects ?? 0],
+      ], {
+        subtitle: 'IEC-CGE 元数据识别；几何拓扑恢复；缺失电气参数按工程默认值估算',
+        warnings: data._svg_warnings || [],
+      });
+      setStatus('就绪');
+    } catch (error) {
+      log(`导入配电SVG失败: ${error.message}`, 'error');
+      setStatus('加载失败', 'error');
+    }
+  }
+
   // Export the current system as a distribution-grid CIM/RDF (.xml) document in
   // the same dialect. Generated server-side by save_cim_dist().
   async function exportCimDist() {
@@ -16221,6 +16256,14 @@ const App = (() => {
     });
     document.getElementById('btnIoImportCimDistProject')?.addEventListener('click', () => {
       document.getElementById('fileImportCimDistProject')?.click();
+    });
+    document.getElementById('btnIoImportSvgDistribution')?.addEventListener('click', () => {
+      document.getElementById('fileImportSvgDistribution')?.click();
+    });
+    document.getElementById('fileImportSvgDistribution')?.addEventListener('change', (e) => {
+      const file = e.target.files?.[0];
+      e.target.value = '';
+      if (file) loadSvgDistribution(file);
     });
     document.getElementById('fileImportCimDist')?.addEventListener('change', (e) => {
       const files = Array.from(e.target.files || []);

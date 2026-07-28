@@ -48,6 +48,7 @@
 #include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/io/etap_io.hpp"
 #include "hacdcpf/io/cim_dist_io.hpp"
+#include "hacdcpf/io/svg_distribution_io.hpp"
 #include "hacdcpf/io/scenario_bundle_io.hpp"
 #include "hacdcpf/io/external_grid_io.hpp"
 #include "hacdcpf/io/evpt_demo_cases.hpp"
@@ -10136,6 +10137,71 @@ int main(int argc, char** argv) {
           imported.has_explicit_phase_data;
       summary["_cim_is_unbalanced"] = imported.is_unbalanced;
       summary["_recommended_reliability_model"] = "restoration_milp";
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: import an IEC-CGE annotated distribution feeder SVG ----
+  // Unlike CIM/RDF this format carries equipment identity in cge:psr_ref and
+  // connectivity in drawing geometry. The importer reports all inferred
+  // topology and electrical parameters explicitly.
+  svr.Post("/api/session/load_svg_distribution",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      const std::string svg = j.value("svg_string", "");
+      if (svg.empty()) throw std::runtime_error("Empty distribution SVG string");
+      hacdcpf::io::SvgDistributionImportOptions opts;
+      opts.model_name = j.value("name", opts.model_name);
+      if (j.contains("base_mva"))
+        opts.base_mva = j.value("base_mva", opts.base_mva);
+      if (j.contains("nominal_mv_kv"))
+        opts.nominal_mv_kv = j.value("nominal_mv_kv", opts.nominal_mv_kv);
+      if (j.contains("transformer_load_factor"))
+        opts.transformer_load_factor = j.value(
+            "transformer_load_factor", opts.transformer_load_factor);
+      if (j.contains("power_factor"))
+        opts.power_factor = j.value("power_factor", opts.power_factor);
+      auto imported = hacdcpf::io::from_svg_distribution(
+          svg, hacdcpf::io::ImportMode::Permissive, opts);
+      if (imported.report.has_errors()) {
+        std::string message = "配电 SVG 导入失败";
+        for (const auto& record : imported.report.records) {
+          if (record.severity == hacdcpf::io::ImportSeverity::Error) {
+            message = record.message;
+            break;
+          }
+        }
+        throw std::runtime_error(message);
+      }
+
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      g_session.current_system = std::move(imported.system);
+      g_session.current_name = g_session.current_system->name.empty()
+                                   ? "配电 IEC-CGE SVG"
+                                   : g_session.current_system->name;
+      clear_preserved_three_phase(g_session);
+      g_session.external_grid_carbon_profiles.clear();
+      clear_cached_analysis(g_session);
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] =
+          hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_svg_warnings"] = imported.warnings;
+      summary["_svg_source_lines"] = imported.source_line_objects;
+      summary["_svg_source_switches"] = imported.source_switch_objects;
+      summary["_svg_source_transformers"] =
+          imported.source_transformer_objects;
+      summary["_svg_recovered_nodes"] = imported.recovered_nodes;
+      summary["_svg_unresolved_objects"] = imported.unresolved_objects;
+      summary["_svg_synthetic_external_grids"] =
+          imported.synthetic_external_grids;
+      summary["_svg_isolated_components"] = imported.isolated_components;
+      summary["_svg_isolated_buses"] = imported.isolated_buses;
+      summary["_svg_model_scope"] =
+          "cge-metadata+geometry-topology; estimated electrical parameters";
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;

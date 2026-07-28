@@ -394,6 +394,7 @@ set(HACDCPF_SOURCES
   src/io/roundtrip.cpp
   src/io/cim_io.cpp
   src/io/cim_dist_io.cpp
+  src/io/svg_distribution_io.cpp
   src/io/matpower_parser.cpp
   src/io/tntp_parser.cpp
   src/io/sioux_falls_ieee123_case.cpp

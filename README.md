@@ -5,9 +5,13 @@
 
 本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。文档入口见 `docs/README.md`，更底层的公式和接口见 `docs/technical_notebook/`。
 
-## 文档同步状态（2026-07-26）
+## 文档同步状态（2026-07-28）
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
+- 2026-07-28 增加 IEC-CGE 注释配电单线图 SVG 导入：从
+  `cge:psr_ref` 与几何端点恢复导线、母线、开关、母联和配变拓扑，按
+  `BestEffort` 口径补齐缺失电气参数，源外孤岛保持隔离；两个真实馈线
+  SVG 已纳入结构与 AC 潮流回归。边界见 `docs/svg_distribution_import.md`。
 - 2026-07-26 完成 MIPSolvers 系统升级回归：Eigen 3.4.1（含
   `unsupported/`）、fmt、nlohmann/json、HiGHS、SCIP、MUMPS、Ipopt、
   SuiteSparse、Catch2、PaPILO 3.0.0 与所需 Boost 头均从本地源码解析；ETAP 所需 OpenXLSX 也已纳入本仓库，
@@ -107,7 +111,7 @@ ctest --preset windows-msvc-release
 - 城市/园区配电网：AC 馈线、DC 母线、VSC 换流器、DC/DC 变换器、联络开关、断路器、分布式电源、储能和充电设施。
 - 主动配电网：PV、风电等可再生电源，静态发电机、柔性负荷、可控负荷、移动储能、微电网和虚拟电厂。
 - 故障恢复和运行优化：N-1 故障枚举、三阶段故障恢复、网络重构、弹性恢复、多时段生产模拟、OPF 和碳流追踪。
-- 标准算例和工程导入：MATPOWER、JPC JSON、CIM/CGMES 3.0 与配电 CIM XML、GridLAB-D GLM、PowerSimulationsDynamics.jl snapshot、Excel(ETAP)/OpenDSS 可选接口，以及项目内部 rich component schema。
+- 标准算例和工程导入：MATPOWER、JPC JSON、CIM/CGMES 3.0 与配电 CIM XML、IEC-CGE 注释配电 SVG、GridLAB-D GLM、PowerSimulationsDynamics.jl snapshot、Excel(ETAP)/OpenDSS 可选接口，以及项目内部 rich component schema。
 - 内置案例目录：能力导向的两级内置案例体系——旗舰 13 个（GUI「模型IO → 内置/算例」工具栏下拉）+ 扩展 8 个（「加载算例」模态框"更多算例"组，`GET /api/cases` 全量 21 个结构化目录均含 `featured` 标记）；每个案例的规模、数据亮点与推荐演示路径见 [docs/case_catalog.md](docs/case_catalog.md)，19 个能力域 × 案例 × 断言的覆盖矩阵由 `tools/validate_case_capabilities.py` 一键验证（输出 `output/capability_coverage.md`）。
 
 工程上，本项目不直接把所有复杂设备塞进一个求解器模型，而是采用分层流程：
@@ -333,7 +337,7 @@ HybridPowerSystem + reliability data
 ### 8.4 I/O 流程
 
 ```text
-MATPOWER / JPC JSON / CIM（CGMES 3.0 与配电 CIM）/ GridLAB-D / PSD.jl / Excel(ETAP) / OpenDSS
+MATPOWER / JPC JSON / CIM（CGMES 3.0 与配电 CIM）/ IEC-CGE 配电 SVG / GridLAB-D / PSD.jl / Excel(ETAP) / OpenDSS
   -> rich HybridPowerSystem
   -> validation and projection
   -> analysis
@@ -473,7 +477,7 @@ fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到
 | 网络重构 | `include/hacdcpf/network_reconfiguration/`, `src/network_reconfiguration/` |
 | 可靠性 | `include/hacdcpf/reliability/`, `include/hacdcpf/analysis/three_stage_reliability.hpp`, `src/reliability/` |
 | 弹性恢复 | `include/hacdcpf/resilience/resilience_assessment.hpp`, `src/resilience/` |
-| I/O | `include/hacdcpf/io/`, `src/io/`（JSON、MATPOWER、CIM、GridLAB-D、PSD.jl；ETAP/OpenDSS 可选） |
+| I/O | `include/hacdcpf/io/`, `src/io/`（JSON、MATPOWER、CIM、IEC-CGE 配电 SVG、GridLAB-D、PSD.jl；ETAP/OpenDSS 可选） |
 | 并行工具 | `include/hacdcpf/util/thread_pool.hpp`（`ThreadPool`、`parallel_for`） |
 | GUI 后端服务 | `tests/run_gui_server.cpp`（独立可执行，旧 GUI API + 静态挂载 `web/`） |
 | v1 运行时 API | `src/server/runtime_api_v1.hpp`, `src/server/runtime_api_v1.cpp`（多会话、ETag、异步作业） |

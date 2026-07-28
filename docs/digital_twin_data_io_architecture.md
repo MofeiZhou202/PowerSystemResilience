@@ -47,7 +47,8 @@ richer, and more asymmetric, than earlier drafts of this document acknowledged.
 | OpenDSS `.dss` | Balanced-AC subset | Full canonical | **Asymmetric** | Text import + C-API snapshot solve; export projects canonical model. |
 | PowerSimulationsDynamics.jl wrapper | Diagnostic/profile manifest | Full profile manifest + rich-model round-trip payload | Manifest-level | Direct Julia IO surface: `hacdcpf_psd_julia.v1` embeds `hacdcpf_psd_snapshot.v1` for PSD trace validation and `HACDCPF_RICH_MODEL_JSON` for GUI import. |
 | ETAP `.xlsx` / native XML | Full | Full | Fidelity-checked | Conditional on `-DHACDCPF_ENABLE_ETAP=ON`; otherwise stubbed. |
-| CIM (IEC 61970) | None | None | N/A | Standards profile referenced in registry only; no parser. |
+| CIM (IEC 61970) | Bounded CGMES 3.0 EQ+SSH | Bounded CGMES 3.0 EQ+SSH | Profile round-trip | `cim_io`; separate State Grid/CSG distribution CIM dialect in `cim_dist_io`. |
+| IEC-CGE distribution `.svg` | Rich topology, estimated parameters | None | N/A | `cge:psr_ref` identity plus geometry-derived connectivity; `BestEffort`, with source-disconnected components isolated. |
 | CSV / telemetry / event catalog | None | None | N/A | Roadmap. |
 
 Two facts drive the rest of this document:
@@ -176,7 +177,7 @@ that MUST be filled from the controlled vocabulary below.
 
 | Standard | Bounded target profile | Scope | Status |
 | --- | --- | --- | --- |
-| IEC 61970/61968 CIM | **CGMES 3.0**, EQ + SSH (TP/SV later) | Topology, assets, terminals, base voltage, operational limits, naming. | [ROADMAP] — crosswalk required before parser (§13). |
+| IEC 61970/61968 CIM | **CGMES 3.0**, EQ + SSH (TP/SV later) | Topology, assets, terminals, base voltage, operational limits, naming. | Bounded importer/exporter built; see `cim_cgmes3_crosswalk.md`. |
 | IEC 61850 | Logical-node subset for MMXU/MMTR + telemetry binding | Measurement binding, protection/control semantics. | [ROADMAP] — see §10. |
 | IEC 60909 | Short-circuit source model | SC sources, motors, converter current contribution, equivalent Z. | Partial (transient params governed). |
 | IEEE 1547 | DER interconnection profile | Ride-through, V/f support, trip curves, inverter functions. | [ROADMAP] validator. |
@@ -385,7 +386,7 @@ are parameterized control blocks, not strings) and `TelemetryObservability`
 
 IO is the primary attack surface and must be hardened:
 
-- **Parser hardening:** disable XML external entities (XXE) in ETAP/CIM XML;
+- **Parser hardening:** disable XML external entities (XXE) in ETAP/CIM/SVG XML;
   guard against zip/formula bombs in `.xlsx`; enforce file-size and
   element-count caps; reject path traversal in embedded references.
 - **External solvers:** invocations of `gridlabd` / `opendss` run in a

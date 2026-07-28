@@ -61,6 +61,7 @@
     <input type="file" id="fileImportPsdJulia" accept=".jl,text/x-julia,text/plain" style="display:none"/>
     <input type="file" id="fileImportCimDist" accept=".xml" style="display:none"/>
     <input type="file" id="fileImportCimDistProject" accept=".xml" webkitdirectory directory multiple style="display:none"/>
+    <input type="file" id="fileImportSvgDistribution" accept=".svg,image/svg+xml" style="display:none"/>
     <input type="file" id="fileImportParameterLibrary" accept=".json,application/json" style="display:none"/>
     <button id="btnToggleTheme" class="btn btn-sm" title="切换浅色 / 深色背景主题">🌓 主题</button>
     <span id="canvasInfo" class="canvas-info">0 元件 | 0 连接</span>
@@ -159,9 +160,10 @@
       <button id="btnIoImportBpaDat" class="toolbar-btn" title="导入 PSD-BPA / DSP 固定列模型 (.dat)">导入BPA DAT</button>
     </div>
     <div class="io-toolbar-group io-group-cim">
-      <div class="io-toolbar-group-title">CIM / GLM</div>
+      <div class="io-toolbar-group-title">CIM / SVG / GLM</div>
       <button id="btnIoImportCimDist" class="toolbar-btn" title="导入单个配电台区 CIM/RDF (国网/南网 .xml)">导入配电CIM</button>
       <button id="btnIoImportCimDistProject" class="toolbar-btn" title="拼接导入一个文件夹内的配电 CIM XML">导入CIM文件夹</button>
+      <button id="btnIoImportSvgDistribution" class="toolbar-btn" title="导入带 IEC-CGE 设备元数据的配电网单线图 (.svg)">导入配电SVG</button>
       <button id="btnIoImportGridlabd" class="toolbar-btn" title="导入 GridLAB-D GLM 文本">导入GLM</button>
     </div>
     <div class="io-toolbar-group io-group-dss">
