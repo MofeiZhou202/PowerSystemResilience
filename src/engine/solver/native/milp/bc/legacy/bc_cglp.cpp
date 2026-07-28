@@ -62,10 +62,10 @@ bool optimize_var_on_branch(const CGLPContext& ctx,
   side_lp.c[target_var] = 1.0;
 
   SimplexOptions opt;
+  opt.lp_kernel_backend = ctx.opt.lp_kernel_backend;
   opt.max_iter = 2500;
   opt.feasibility_tol = 1e-8;
   opt.optimality_tol = 1e-8;
-  opt.prefer_dual_simplex_reopt = true;
   opt.allow_cold_start = true;
   opt.verbose = false;
   opt.factor_backend = simplex_factor_backend_from_id(ctx.opt.simplex_factor_backend);
@@ -201,10 +201,10 @@ bool validate_cut_on_branch(const CGLPContext& ctx,
   side_lp.vars[static_cast<std::size_t>(branch_var)].ub = branch_value;
 
   SimplexOptions opt;
+  opt.lp_kernel_backend = ctx.opt.lp_kernel_backend;
   opt.max_iter = 2000;
   opt.feasibility_tol = 1e-8;
   opt.optimality_tol = 1e-8;
-  opt.prefer_dual_simplex_reopt = true;
   opt.allow_cold_start = true;
   opt.verbose = false;
   opt.factor_backend = simplex_factor_backend_from_id(ctx.opt.simplex_factor_backend);
@@ -261,10 +261,10 @@ CGLPResult generate_cglp_cut(const CGLPContext& ctx, int j) {
   }
 
   SimplexOptions sopt;
+  sopt.lp_kernel_backend = ctx.opt.lp_kernel_backend;
   sopt.max_iter = 40000;
   sopt.feasibility_tol = 1e-8;
   sopt.optimality_tol = 1e-8;
-  sopt.prefer_dual_simplex_reopt = true;
   sopt.allow_cold_start = true;
   sopt.verbose = false;
   sopt.factor_backend = simplex_factor_backend_from_id(ctx.opt.simplex_factor_backend);

@@ -250,6 +250,32 @@ klu_vendored/fast:
 .PHONY : klu_vendored/fast
 
 #=============================================================================
+# Target rules for targets named Catch2
+
+# Build rule for target.
+Catch2: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 Catch2
+.PHONY : Catch2
+
+# fast build rule for target.
+Catch2/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Catch2.dir/build.make CMakeFiles/Catch2.dir/build
+.PHONY : Catch2/fast
+
+#=============================================================================
+# Target rules for targets named Catch2WithMain
+
+# Build rule for target.
+Catch2WithMain: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 Catch2WithMain
+.PHONY : Catch2WithMain
+
+# fast build rule for target.
+Catch2WithMain/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Catch2WithMain.dir/build.make CMakeFiles/Catch2WithMain.dir/build
+.PHONY : Catch2WithMain/fast
+
+#=============================================================================
 # Target rules for targets named mipsolvers
 
 # Build rule for target.
@@ -380,6 +406,32 @@ test_ipm_solver/fast:
 .PHONY : test_ipm_solver/fast
 
 #=============================================================================
+# Target rules for targets named test_conic_ipm
+
+# Build rule for target.
+test_conic_ipm: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_conic_ipm
+.PHONY : test_conic_ipm
+
+# fast build rule for target.
+test_conic_ipm/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_conic_ipm.dir/build.make CMakeFiles/test_conic_ipm.dir/build
+.PHONY : test_conic_ipm/fast
+
+#=============================================================================
+# Target rules for targets named test_aml_conic
+
+# Build rule for target.
+test_aml_conic: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_aml_conic
+.PHONY : test_aml_conic
+
+# fast build rule for target.
+test_aml_conic/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_aml_conic.dir/build.make CMakeFiles/test_aml_conic.dir/build
+.PHONY : test_aml_conic/fast
+
+#=============================================================================
 # Target rules for targets named test_dual_simplex
 
 # Build rule for target.
@@ -495,6 +547,19 @@ opf_scale_probe: cmake_check_build_system
 opf_scale_probe/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/opf_scale_probe.dir/build.make CMakeFiles/opf_scale_probe.dir/build
 .PHONY : opf_scale_probe/fast
+
+#=============================================================================
+# Target rules for targets named conic_benchmark
+
+# Build rule for target.
+conic_benchmark: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 conic_benchmark
+.PHONY : conic_benchmark
+
+# fast build rule for target.
+conic_benchmark/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/conic_benchmark.dir/build.make CMakeFiles/conic_benchmark.dir/build
+.PHONY : conic_benchmark/fast
 
 #=============================================================================
 # Target rules for targets named test_scuc_module
@@ -627,30 +692,17 @@ scip/fast:
 .PHONY : scip/fast
 
 #=============================================================================
-# Target rules for targets named Catch2
+# Target rules for targets named fmt
 
 # Build rule for target.
-Catch2: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 Catch2
-.PHONY : Catch2
+fmt: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 fmt
+.PHONY : fmt
 
 # fast build rule for target.
-Catch2/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/catch2-build/src/CMakeFiles/Catch2.dir/build.make _deps/catch2-build/src/CMakeFiles/Catch2.dir/build
-.PHONY : Catch2/fast
-
-#=============================================================================
-# Target rules for targets named Catch2WithMain
-
-# Build rule for target.
-Catch2WithMain: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 Catch2WithMain
-.PHONY : Catch2WithMain
-
-# fast build rule for target.
-Catch2WithMain/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/catch2-build/src/CMakeFiles/Catch2WithMain.dir/build.make _deps/catch2-build/src/CMakeFiles/Catch2WithMain.dir/build
-.PHONY : Catch2WithMain/fast
+fmt/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/fmt_vendored/CMakeFiles/fmt.dir/build.make _deps/fmt_vendored/CMakeFiles/fmt.dir/build
+.PHONY : fmt/fast
 
 #=============================================================================
 # Target rules for targets named mipsolvers_hfactor
@@ -664,6 +716,30 @@ mipsolvers_hfactor: cmake_check_build_system
 mipsolvers_hfactor/fast:
 	$(MAKE) $(MAKESILENT) -f src/engine/kernel/linear_algebra/highs_factor/CMakeFiles/mipsolvers_hfactor.dir/build.make src/engine/kernel/linear_algebra/highs_factor/CMakeFiles/mipsolvers_hfactor.dir/build
 .PHONY : mipsolvers_hfactor/fast
+
+benchmark/conic_benchmark.o: benchmark/conic_benchmark.cpp.o
+.PHONY : benchmark/conic_benchmark.o
+
+# target to build an object file
+benchmark/conic_benchmark.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/conic_benchmark.dir/build.make CMakeFiles/conic_benchmark.dir/benchmark/conic_benchmark.cpp.o
+.PHONY : benchmark/conic_benchmark.cpp.o
+
+benchmark/conic_benchmark.i: benchmark/conic_benchmark.cpp.i
+.PHONY : benchmark/conic_benchmark.i
+
+# target to preprocess a source file
+benchmark/conic_benchmark.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/conic_benchmark.dir/build.make CMakeFiles/conic_benchmark.dir/benchmark/conic_benchmark.cpp.i
+.PHONY : benchmark/conic_benchmark.cpp.i
+
+benchmark/conic_benchmark.s: benchmark/conic_benchmark.cpp.s
+.PHONY : benchmark/conic_benchmark.s
+
+# target to generate assembly for a file
+benchmark/conic_benchmark.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/conic_benchmark.dir/build.make CMakeFiles/conic_benchmark.dir/benchmark/conic_benchmark.cpp.s
+.PHONY : benchmark/conic_benchmark.cpp.s
 
 benchmark/milp_benchmark_runner.o: benchmark/milp_benchmark_runner.cpp.o
 .PHONY : benchmark/milp_benchmark_runner.o
@@ -7697,6 +7773,78 @@ src/engine/api/solver.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/api/solver.cpp.s
 .PHONY : src/engine/api/solver.cpp.s
 
+src/engine/kernel/ipm/chordal_decomposition.o: src/engine/kernel/ipm/chordal_decomposition.cpp.o
+.PHONY : src/engine/kernel/ipm/chordal_decomposition.o
+
+# target to build an object file
+src/engine/kernel/ipm/chordal_decomposition.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/ipm/chordal_decomposition.cpp.o
+.PHONY : src/engine/kernel/ipm/chordal_decomposition.cpp.o
+
+src/engine/kernel/ipm/chordal_decomposition.i: src/engine/kernel/ipm/chordal_decomposition.cpp.i
+.PHONY : src/engine/kernel/ipm/chordal_decomposition.i
+
+# target to preprocess a source file
+src/engine/kernel/ipm/chordal_decomposition.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/ipm/chordal_decomposition.cpp.i
+.PHONY : src/engine/kernel/ipm/chordal_decomposition.cpp.i
+
+src/engine/kernel/ipm/chordal_decomposition.s: src/engine/kernel/ipm/chordal_decomposition.cpp.s
+.PHONY : src/engine/kernel/ipm/chordal_decomposition.s
+
+# target to generate assembly for a file
+src/engine/kernel/ipm/chordal_decomposition.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/ipm/chordal_decomposition.cpp.s
+.PHONY : src/engine/kernel/ipm/chordal_decomposition.cpp.s
+
+src/engine/kernel/ipm/cones.o: src/engine/kernel/ipm/cones.cpp.o
+.PHONY : src/engine/kernel/ipm/cones.o
+
+# target to build an object file
+src/engine/kernel/ipm/cones.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/ipm/cones.cpp.o
+.PHONY : src/engine/kernel/ipm/cones.cpp.o
+
+src/engine/kernel/ipm/cones.i: src/engine/kernel/ipm/cones.cpp.i
+.PHONY : src/engine/kernel/ipm/cones.i
+
+# target to preprocess a source file
+src/engine/kernel/ipm/cones.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/ipm/cones.cpp.i
+.PHONY : src/engine/kernel/ipm/cones.cpp.i
+
+src/engine/kernel/ipm/cones.s: src/engine/kernel/ipm/cones.cpp.s
+.PHONY : src/engine/kernel/ipm/cones.s
+
+# target to generate assembly for a file
+src/engine/kernel/ipm/cones.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/ipm/cones.cpp.s
+.PHONY : src/engine/kernel/ipm/cones.cpp.s
+
+src/engine/kernel/ipm/conic_ipm_solver.o: src/engine/kernel/ipm/conic_ipm_solver.cpp.o
+.PHONY : src/engine/kernel/ipm/conic_ipm_solver.o
+
+# target to build an object file
+src/engine/kernel/ipm/conic_ipm_solver.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/ipm/conic_ipm_solver.cpp.o
+.PHONY : src/engine/kernel/ipm/conic_ipm_solver.cpp.o
+
+src/engine/kernel/ipm/conic_ipm_solver.i: src/engine/kernel/ipm/conic_ipm_solver.cpp.i
+.PHONY : src/engine/kernel/ipm/conic_ipm_solver.i
+
+# target to preprocess a source file
+src/engine/kernel/ipm/conic_ipm_solver.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/ipm/conic_ipm_solver.cpp.i
+.PHONY : src/engine/kernel/ipm/conic_ipm_solver.cpp.i
+
+src/engine/kernel/ipm/conic_ipm_solver.s: src/engine/kernel/ipm/conic_ipm_solver.cpp.s
+.PHONY : src/engine/kernel/ipm/conic_ipm_solver.s
+
+# target to generate assembly for a file
+src/engine/kernel/ipm/conic_ipm_solver.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/ipm/conic_ipm_solver.cpp.s
+.PHONY : src/engine/kernel/ipm/conic_ipm_solver.cpp.s
+
 src/engine/kernel/ipm/ipm_filter.o: src/engine/kernel/ipm/ipm_filter.cpp.o
 .PHONY : src/engine/kernel/ipm/ipm_filter.o
 
@@ -8009,6 +8157,150 @@ src/engine/kernel/lp_kernel/dual_simplex_api.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/dual_simplex_api.cpp.s
 .PHONY : src/engine/kernel/lp_kernel/dual_simplex_api.cpp.s
 
+src/engine/kernel/lp_kernel/native_dual/certificate.o: src/engine/kernel/lp_kernel/native_dual/certificate.cpp.o
+.PHONY : src/engine/kernel/lp_kernel/native_dual/certificate.o
+
+# target to build an object file
+src/engine/kernel/lp_kernel/native_dual/certificate.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/certificate.cpp.o
+.PHONY : src/engine/kernel/lp_kernel/native_dual/certificate.cpp.o
+
+src/engine/kernel/lp_kernel/native_dual/certificate.i: src/engine/kernel/lp_kernel/native_dual/certificate.cpp.i
+.PHONY : src/engine/kernel/lp_kernel/native_dual/certificate.i
+
+# target to preprocess a source file
+src/engine/kernel/lp_kernel/native_dual/certificate.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/certificate.cpp.i
+.PHONY : src/engine/kernel/lp_kernel/native_dual/certificate.cpp.i
+
+src/engine/kernel/lp_kernel/native_dual/certificate.s: src/engine/kernel/lp_kernel/native_dual/certificate.cpp.s
+.PHONY : src/engine/kernel/lp_kernel/native_dual/certificate.s
+
+# target to generate assembly for a file
+src/engine/kernel/lp_kernel/native_dual/certificate.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/certificate.cpp.s
+.PHONY : src/engine/kernel/lp_kernel/native_dual/certificate.cpp.s
+
+src/engine/kernel/lp_kernel/native_dual/factor.o: src/engine/kernel/lp_kernel/native_dual/factor.cpp.o
+.PHONY : src/engine/kernel/lp_kernel/native_dual/factor.o
+
+# target to build an object file
+src/engine/kernel/lp_kernel/native_dual/factor.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/factor.cpp.o
+.PHONY : src/engine/kernel/lp_kernel/native_dual/factor.cpp.o
+
+src/engine/kernel/lp_kernel/native_dual/factor.i: src/engine/kernel/lp_kernel/native_dual/factor.cpp.i
+.PHONY : src/engine/kernel/lp_kernel/native_dual/factor.i
+
+# target to preprocess a source file
+src/engine/kernel/lp_kernel/native_dual/factor.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/factor.cpp.i
+.PHONY : src/engine/kernel/lp_kernel/native_dual/factor.cpp.i
+
+src/engine/kernel/lp_kernel/native_dual/factor.s: src/engine/kernel/lp_kernel/native_dual/factor.cpp.s
+.PHONY : src/engine/kernel/lp_kernel/native_dual/factor.s
+
+# target to generate assembly for a file
+src/engine/kernel/lp_kernel/native_dual/factor.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/factor.cpp.s
+.PHONY : src/engine/kernel/lp_kernel/native_dual/factor.cpp.s
+
+src/engine/kernel/lp_kernel/native_dual/pricing.o: src/engine/kernel/lp_kernel/native_dual/pricing.cpp.o
+.PHONY : src/engine/kernel/lp_kernel/native_dual/pricing.o
+
+# target to build an object file
+src/engine/kernel/lp_kernel/native_dual/pricing.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/pricing.cpp.o
+.PHONY : src/engine/kernel/lp_kernel/native_dual/pricing.cpp.o
+
+src/engine/kernel/lp_kernel/native_dual/pricing.i: src/engine/kernel/lp_kernel/native_dual/pricing.cpp.i
+.PHONY : src/engine/kernel/lp_kernel/native_dual/pricing.i
+
+# target to preprocess a source file
+src/engine/kernel/lp_kernel/native_dual/pricing.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/pricing.cpp.i
+.PHONY : src/engine/kernel/lp_kernel/native_dual/pricing.cpp.i
+
+src/engine/kernel/lp_kernel/native_dual/pricing.s: src/engine/kernel/lp_kernel/native_dual/pricing.cpp.s
+.PHONY : src/engine/kernel/lp_kernel/native_dual/pricing.s
+
+# target to generate assembly for a file
+src/engine/kernel/lp_kernel/native_dual/pricing.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/pricing.cpp.s
+.PHONY : src/engine/kernel/lp_kernel/native_dual/pricing.cpp.s
+
+src/engine/kernel/lp_kernel/native_dual/primal.o: src/engine/kernel/lp_kernel/native_dual/primal.cpp.o
+.PHONY : src/engine/kernel/lp_kernel/native_dual/primal.o
+
+# target to build an object file
+src/engine/kernel/lp_kernel/native_dual/primal.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/primal.cpp.o
+.PHONY : src/engine/kernel/lp_kernel/native_dual/primal.cpp.o
+
+src/engine/kernel/lp_kernel/native_dual/primal.i: src/engine/kernel/lp_kernel/native_dual/primal.cpp.i
+.PHONY : src/engine/kernel/lp_kernel/native_dual/primal.i
+
+# target to preprocess a source file
+src/engine/kernel/lp_kernel/native_dual/primal.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/primal.cpp.i
+.PHONY : src/engine/kernel/lp_kernel/native_dual/primal.cpp.i
+
+src/engine/kernel/lp_kernel/native_dual/primal.s: src/engine/kernel/lp_kernel/native_dual/primal.cpp.s
+.PHONY : src/engine/kernel/lp_kernel/native_dual/primal.s
+
+# target to generate assembly for a file
+src/engine/kernel/lp_kernel/native_dual/primal.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/primal.cpp.s
+.PHONY : src/engine/kernel/lp_kernel/native_dual/primal.cpp.s
+
+src/engine/kernel/lp_kernel/native_dual/solver.o: src/engine/kernel/lp_kernel/native_dual/solver.cpp.o
+.PHONY : src/engine/kernel/lp_kernel/native_dual/solver.o
+
+# target to build an object file
+src/engine/kernel/lp_kernel/native_dual/solver.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/solver.cpp.o
+.PHONY : src/engine/kernel/lp_kernel/native_dual/solver.cpp.o
+
+src/engine/kernel/lp_kernel/native_dual/solver.i: src/engine/kernel/lp_kernel/native_dual/solver.cpp.i
+.PHONY : src/engine/kernel/lp_kernel/native_dual/solver.i
+
+# target to preprocess a source file
+src/engine/kernel/lp_kernel/native_dual/solver.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/solver.cpp.i
+.PHONY : src/engine/kernel/lp_kernel/native_dual/solver.cpp.i
+
+src/engine/kernel/lp_kernel/native_dual/solver.s: src/engine/kernel/lp_kernel/native_dual/solver.cpp.s
+.PHONY : src/engine/kernel/lp_kernel/native_dual/solver.s
+
+# target to generate assembly for a file
+src/engine/kernel/lp_kernel/native_dual/solver.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/solver.cpp.s
+.PHONY : src/engine/kernel/lp_kernel/native_dual/solver.cpp.s
+
+src/engine/kernel/lp_kernel/native_dual/state.o: src/engine/kernel/lp_kernel/native_dual/state.cpp.o
+.PHONY : src/engine/kernel/lp_kernel/native_dual/state.o
+
+# target to build an object file
+src/engine/kernel/lp_kernel/native_dual/state.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/state.cpp.o
+.PHONY : src/engine/kernel/lp_kernel/native_dual/state.cpp.o
+
+src/engine/kernel/lp_kernel/native_dual/state.i: src/engine/kernel/lp_kernel/native_dual/state.cpp.i
+.PHONY : src/engine/kernel/lp_kernel/native_dual/state.i
+
+# target to preprocess a source file
+src/engine/kernel/lp_kernel/native_dual/state.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/state.cpp.i
+.PHONY : src/engine/kernel/lp_kernel/native_dual/state.cpp.i
+
+src/engine/kernel/lp_kernel/native_dual/state.s: src/engine/kernel/lp_kernel/native_dual/state.cpp.s
+.PHONY : src/engine/kernel/lp_kernel/native_dual/state.s
+
+# target to generate assembly for a file
+src/engine/kernel/lp_kernel/native_dual/state.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/lp_kernel/native_dual/state.cpp.s
+.PHONY : src/engine/kernel/lp_kernel/native_dual/state.cpp.s
+
 src/engine/solver/adapter_registry.o: src/engine/solver/adapter_registry.cpp.o
 .PHONY : src/engine/solver/adapter_registry.o
 
@@ -8056,6 +8348,30 @@ src/engine/solver/external/adapters.s: src/engine/solver/external/adapters.cpp.s
 src/engine/solver/external/adapters.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/external/adapters.cpp.s
 .PHONY : src/engine/solver/external/adapters.cpp.s
+
+src/engine/solver/native/conic_ipm_adapter.o: src/engine/solver/native/conic_ipm_adapter.cpp.o
+.PHONY : src/engine/solver/native/conic_ipm_adapter.o
+
+# target to build an object file
+src/engine/solver/native/conic_ipm_adapter.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/conic_ipm_adapter.cpp.o
+.PHONY : src/engine/solver/native/conic_ipm_adapter.cpp.o
+
+src/engine/solver/native/conic_ipm_adapter.i: src/engine/solver/native/conic_ipm_adapter.cpp.i
+.PHONY : src/engine/solver/native/conic_ipm_adapter.i
+
+# target to preprocess a source file
+src/engine/solver/native/conic_ipm_adapter.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/conic_ipm_adapter.cpp.i
+.PHONY : src/engine/solver/native/conic_ipm_adapter.cpp.i
+
+src/engine/solver/native/conic_ipm_adapter.s: src/engine/solver/native/conic_ipm_adapter.cpp.s
+.PHONY : src/engine/solver/native/conic_ipm_adapter.s
+
+# target to generate assembly for a file
+src/engine/solver/native/conic_ipm_adapter.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/conic_ipm_adapter.cpp.s
+.PHONY : src/engine/solver/native/conic_ipm_adapter.cpp.s
 
 src/engine/solver/native/lp/pdlp_solver.o: src/engine/solver/native/lp/pdlp_solver.cpp.o
 .PHONY : src/engine/solver/native/lp/pdlp_solver.o
@@ -24575,6 +24891,30 @@ tests/test_adapter_registry.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_adapter_registry.dir/build.make CMakeFiles/test_adapter_registry.dir/tests/test_adapter_registry.cpp.s
 .PHONY : tests/test_adapter_registry.cpp.s
 
+tests/test_aml_conic.o: tests/test_aml_conic.cpp.o
+.PHONY : tests/test_aml_conic.o
+
+# target to build an object file
+tests/test_aml_conic.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_aml_conic.dir/build.make CMakeFiles/test_aml_conic.dir/tests/test_aml_conic.cpp.o
+.PHONY : tests/test_aml_conic.cpp.o
+
+tests/test_aml_conic.i: tests/test_aml_conic.cpp.i
+.PHONY : tests/test_aml_conic.i
+
+# target to preprocess a source file
+tests/test_aml_conic.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_aml_conic.dir/build.make CMakeFiles/test_aml_conic.dir/tests/test_aml_conic.cpp.i
+.PHONY : tests/test_aml_conic.cpp.i
+
+tests/test_aml_conic.s: tests/test_aml_conic.cpp.s
+.PHONY : tests/test_aml_conic.s
+
+# target to generate assembly for a file
+tests/test_aml_conic.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_aml_conic.dir/build.make CMakeFiles/test_aml_conic.dir/tests/test_aml_conic.cpp.s
+.PHONY : tests/test_aml_conic.cpp.s
+
 tests/test_branch_and_cut.o: tests/test_branch_and_cut.cpp.o
 .PHONY : tests/test_branch_and_cut.o
 
@@ -24598,6 +24938,30 @@ tests/test_branch_and_cut.s: tests/test_branch_and_cut.cpp.s
 tests/test_branch_and_cut.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_branch_and_cut.dir/build.make CMakeFiles/test_branch_and_cut.dir/tests/test_branch_and_cut.cpp.s
 .PHONY : tests/test_branch_and_cut.cpp.s
+
+tests/test_conic_ipm.o: tests/test_conic_ipm.cpp.o
+.PHONY : tests/test_conic_ipm.o
+
+# target to build an object file
+tests/test_conic_ipm.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_conic_ipm.dir/build.make CMakeFiles/test_conic_ipm.dir/tests/test_conic_ipm.cpp.o
+.PHONY : tests/test_conic_ipm.cpp.o
+
+tests/test_conic_ipm.i: tests/test_conic_ipm.cpp.i
+.PHONY : tests/test_conic_ipm.i
+
+# target to preprocess a source file
+tests/test_conic_ipm.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_conic_ipm.dir/build.make CMakeFiles/test_conic_ipm.dir/tests/test_conic_ipm.cpp.i
+.PHONY : tests/test_conic_ipm.cpp.i
+
+tests/test_conic_ipm.s: tests/test_conic_ipm.cpp.s
+.PHONY : tests/test_conic_ipm.s
+
+# target to generate assembly for a file
+tests/test_conic_ipm.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_conic_ipm.dir/build.make CMakeFiles/test_conic_ipm.dir/tests/test_conic_ipm.cpp.s
+.PHONY : tests/test_conic_ipm.cpp.s
 
 tests/test_dual_simplex.o: tests/test_dual_simplex.cpp.o
 .PHONY : tests/test_dual_simplex.o
@@ -24911,6 +25275,33 @@ tests/test_scuc_module.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_scuc_module.dir/build.make CMakeFiles/test_scuc_module.dir/tests/test_scuc_module.cpp.s
 .PHONY : tests/test_scuc_module.cpp.s
 
+third_party/catch2/catch_amalgamated.o: third_party/catch2/catch_amalgamated.cpp.o
+.PHONY : third_party/catch2/catch_amalgamated.o
+
+# target to build an object file
+third_party/catch2/catch_amalgamated.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Catch2.dir/build.make CMakeFiles/Catch2.dir/third_party/catch2/catch_amalgamated.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Catch2WithMain.dir/build.make CMakeFiles/Catch2WithMain.dir/third_party/catch2/catch_amalgamated.cpp.o
+.PHONY : third_party/catch2/catch_amalgamated.cpp.o
+
+third_party/catch2/catch_amalgamated.i: third_party/catch2/catch_amalgamated.cpp.i
+.PHONY : third_party/catch2/catch_amalgamated.i
+
+# target to preprocess a source file
+third_party/catch2/catch_amalgamated.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Catch2.dir/build.make CMakeFiles/Catch2.dir/third_party/catch2/catch_amalgamated.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Catch2WithMain.dir/build.make CMakeFiles/Catch2WithMain.dir/third_party/catch2/catch_amalgamated.cpp.i
+.PHONY : third_party/catch2/catch_amalgamated.cpp.i
+
+third_party/catch2/catch_amalgamated.s: third_party/catch2/catch_amalgamated.cpp.s
+.PHONY : third_party/catch2/catch_amalgamated.s
+
+# target to generate assembly for a file
+third_party/catch2/catch_amalgamated.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Catch2.dir/build.make CMakeFiles/Catch2.dir/third_party/catch2/catch_amalgamated.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Catch2WithMain.dir/build.make CMakeFiles/Catch2WithMain.dir/third_party/catch2/catch_amalgamated.cpp.s
+.PHONY : third_party/catch2/catch_amalgamated.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -24929,7 +25320,9 @@ help:
 	@echo "... Catch2"
 	@echo "... Catch2WithMain"
 	@echo "... cholmod_vendored"
+	@echo "... conic_benchmark"
 	@echo "... dmumps"
+	@echo "... fmt"
 	@echo "... highs"
 	@echo "... ipopt_local"
 	@echo "... klu_vendored"
@@ -24947,7 +25340,9 @@ help:
 	@echo "... scuc_solve"
 	@echo "... solver_comparison"
 	@echo "... test_adapter_registry"
+	@echo "... test_aml_conic"
 	@echo "... test_branch_and_cut"
+	@echo "... test_conic_ipm"
 	@echo "... test_dual_simplex"
 	@echo "... test_engine_api"
 	@echo "... test_ipm_solver"
@@ -24962,6 +25357,9 @@ help:
 	@echo "... test_problem_validation"
 	@echo "... test_scuc_module"
 	@echo "... umfpack_vendored"
+	@echo "... benchmark/conic_benchmark.o"
+	@echo "... benchmark/conic_benchmark.i"
+	@echo "... benchmark/conic_benchmark.s"
 	@echo "... benchmark/milp_benchmark_runner.o"
 	@echo "... benchmark/milp_benchmark_runner.i"
 	@echo "... benchmark/milp_benchmark_runner.s"
@@ -25841,6 +26239,15 @@ help:
 	@echo "... src/engine/api/solver.o"
 	@echo "... src/engine/api/solver.i"
 	@echo "... src/engine/api/solver.s"
+	@echo "... src/engine/kernel/ipm/chordal_decomposition.o"
+	@echo "... src/engine/kernel/ipm/chordal_decomposition.i"
+	@echo "... src/engine/kernel/ipm/chordal_decomposition.s"
+	@echo "... src/engine/kernel/ipm/cones.o"
+	@echo "... src/engine/kernel/ipm/cones.i"
+	@echo "... src/engine/kernel/ipm/cones.s"
+	@echo "... src/engine/kernel/ipm/conic_ipm_solver.o"
+	@echo "... src/engine/kernel/ipm/conic_ipm_solver.i"
+	@echo "... src/engine/kernel/ipm/conic_ipm_solver.s"
 	@echo "... src/engine/kernel/ipm/ipm_filter.o"
 	@echo "... src/engine/kernel/ipm/ipm_filter.i"
 	@echo "... src/engine/kernel/ipm/ipm_filter.s"
@@ -25880,12 +26287,33 @@ help:
 	@echo "... src/engine/kernel/lp_kernel/dual_simplex_api.o"
 	@echo "... src/engine/kernel/lp_kernel/dual_simplex_api.i"
 	@echo "... src/engine/kernel/lp_kernel/dual_simplex_api.s"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/certificate.o"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/certificate.i"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/certificate.s"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/factor.o"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/factor.i"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/factor.s"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/pricing.o"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/pricing.i"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/pricing.s"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/primal.o"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/primal.i"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/primal.s"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/solver.o"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/solver.i"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/solver.s"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/state.o"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/state.i"
+	@echo "... src/engine/kernel/lp_kernel/native_dual/state.s"
 	@echo "... src/engine/solver/adapter_registry.o"
 	@echo "... src/engine/solver/adapter_registry.i"
 	@echo "... src/engine/solver/adapter_registry.s"
 	@echo "... src/engine/solver/external/adapters.o"
 	@echo "... src/engine/solver/external/adapters.i"
 	@echo "... src/engine/solver/external/adapters.s"
+	@echo "... src/engine/solver/native/conic_ipm_adapter.o"
+	@echo "... src/engine/solver/native/conic_ipm_adapter.i"
+	@echo "... src/engine/solver/native/conic_ipm_adapter.s"
 	@echo "... src/engine/solver/native/lp/pdlp_solver.o"
 	@echo "... src/engine/solver/native/lp/pdlp_solver.i"
 	@echo "... src/engine/solver/native/lp/pdlp_solver.s"
@@ -27947,9 +28375,15 @@ help:
 	@echo "... tests/test_adapter_registry.o"
 	@echo "... tests/test_adapter_registry.i"
 	@echo "... tests/test_adapter_registry.s"
+	@echo "... tests/test_aml_conic.o"
+	@echo "... tests/test_aml_conic.i"
+	@echo "... tests/test_aml_conic.s"
 	@echo "... tests/test_branch_and_cut.o"
 	@echo "... tests/test_branch_and_cut.i"
 	@echo "... tests/test_branch_and_cut.s"
+	@echo "... tests/test_conic_ipm.o"
+	@echo "... tests/test_conic_ipm.i"
+	@echo "... tests/test_conic_ipm.s"
 	@echo "... tests/test_dual_simplex.o"
 	@echo "... tests/test_dual_simplex.i"
 	@echo "... tests/test_dual_simplex.s"
@@ -27989,6 +28423,9 @@ help:
 	@echo "... tests/test_scuc_module.o"
 	@echo "... tests/test_scuc_module.i"
 	@echo "... tests/test_scuc_module.s"
+	@echo "... third_party/catch2/catch_amalgamated.o"
+	@echo "... third_party/catch2/catch_amalgamated.i"
+	@echo "... third_party/catch2/catch_amalgamated.s"
 .PHONY : help
 
 

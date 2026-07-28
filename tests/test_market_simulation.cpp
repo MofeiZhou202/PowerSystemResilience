@@ -1209,7 +1209,7 @@ TEST_CASE("StrictHiGHS IEEE 39-bus 24h: root IPM + crossover correctness",
 
     // ── Simplex-root baseline ─────────────────────────────────────────────
     BCOptions simplex_opt;
-    simplex_opt.use_vendored_highs_lp_kernel = true;
+    simplex_opt.lp_kernel_backend = LpKernelBackend::HiGHS;
     simplex_opt.auto_highs_root_pipeline     = true;
     simplex_opt.highs_mip_lp_solver          = "choose";  // simplex at root
     simplex_opt.gap_tol                      = 1e-3;
@@ -1221,7 +1221,7 @@ TEST_CASE("StrictHiGHS IEEE 39-bus 24h: root IPM + crossover correctness",
 
     // ── IPM-root + crossover ──────────────────────────────────────────────
     BCOptions ipm_opt;
-    ipm_opt.use_vendored_highs_lp_kernel = true;
+    ipm_opt.lp_kernel_backend = LpKernelBackend::HiGHS;
     ipm_opt.auto_highs_root_pipeline     = true;
     ipm_opt.highs_mip_lp_solver          = "ipm";
     ipm_opt.highs_mip_root_crossover     = "on";
@@ -1279,7 +1279,7 @@ TEST_CASE("StrictHiGHS IEEE 39-bus 24h: pure IPM no-crossover (root+nodes)",
 
     // ── IPM root + crossover (baseline) ───────────────────────────────────
     BCOptions xover_opt;
-    xover_opt.use_vendored_highs_lp_kernel = true;
+    xover_opt.lp_kernel_backend = LpKernelBackend::HiGHS;
     xover_opt.auto_highs_root_pipeline     = true;
     xover_opt.highs_mip_lp_solver          = "ipm";
     xover_opt.highs_mip_root_crossover     = "on";   // crossover → basis
@@ -1292,7 +1292,7 @@ TEST_CASE("StrictHiGHS IEEE 39-bus 24h: pure IPM no-crossover (root+nodes)",
 
     // ── Pure IPM: no crossover → IPM for every node LP ────────────────────
     BCOptions pure_ipm_opt;
-    pure_ipm_opt.use_vendored_highs_lp_kernel = true;
+    pure_ipm_opt.lp_kernel_backend = LpKernelBackend::HiGHS;
     pure_ipm_opt.auto_highs_root_pipeline     = true;
     pure_ipm_opt.highs_mip_lp_solver          = "ipm";
     pure_ipm_opt.highs_mip_root_crossover     = "off";  // no basis → cold IPM at every node

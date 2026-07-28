@@ -16,6 +16,18 @@ namespace mipsolvers::engine {
 
 namespace {
 constexpr double kInf = std::numeric_limits<double>::infinity();
+// VariableMeta uses +/-1e20 as its public no-bound sentinel.  Canonical LP
+// state must contain mathematical infinities, never huge finite pseudo-bounds
+// that contaminate bound-side selection and residual reconstruction.
+constexpr double kModelBoundSentinel = 1e19;
+
+bool has_finite_lower_bound(double value) {
+  return std::isfinite(value) && value > -kModelBoundSentinel;
+}
+
+bool has_finite_upper_bound(double value) {
+  return std::isfinite(value) && value < kModelBoundSentinel;
+}
 }  // namespace
 
 StandardFormLP build_standard_form_lp(const LPModel& lp) {
@@ -37,7 +49,8 @@ StandardFormLP build_standard_form_lp(const LPModel& lp) {
   // Compute lb_shift.
   for (int i = 0; i < n; ++i) {
     sf.original_types.push_back(lp.vars[i].type);
-    sf.lb_shift[i] = std::isfinite(lp.vars[i].lb) ? lp.vars[i].lb : 0.0;
+    sf.lb_shift[i] =
+        has_finite_lower_bound(lp.vars[i].lb) ? lp.vars[i].lb : 0.0;
   }
 
   // Count rows: inequality + equality only (upper bounds handled implicitly).
@@ -215,7 +228,7 @@ StandardFormLP build_standard_form_lp(const LPModel& lp) {
   // columns are +inf.
   sf.var_ub = Eigen::VectorXd::Constant(cols, kInf);
   for (int i = 0; i < n; ++i) {
-    if (std::isfinite(lp.vars[i].ub)) {
+    if (has_finite_upper_bound(lp.vars[i].ub)) {
       sf.var_ub[i] = lp.vars[i].ub - sf.lb_shift[i];
     }
   }
@@ -698,7 +711,7 @@ bool append_leq_rows_to_canonical_standard_form(
 // col_scale on the original columns.
 //
 // Callers reusing a SimplexBasis hint across this change MUST clear its
-// cached_reduced_costs and has_cached_obj_offset — those depend on c_max.
+// cached_reduced_costs because it depends on c_max.
 // The SparseBasis LU factorization and cached B^{-1} depend only on A and
 // basis indices; they remain valid.
 void update_standard_form_cost(StandardFormLP& sf,

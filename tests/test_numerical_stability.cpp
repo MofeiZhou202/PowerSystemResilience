@@ -50,6 +50,12 @@ LPModel make_scaled_lp(double r1, double r2, double c1, double c2) {
   return lp;
 }
 
+SimplexOptions native_simplex_options() {
+  SimplexOptions options;
+  options.lp_kernel_backend = LpKernelBackend::ExperimentalNative;
+  return options;
+}
+
 }  // namespace
 
 // ─── Ruiz rescues an ill-scaled LP ─────────────────────────────────────────
@@ -201,9 +207,10 @@ TEST_CASE("Dual simplex stays accurate on ill-conditioned basis",
   lp.vars.push_back({VarType::Continuous, 0.0, 1e20});
   lp.vars.push_back({VarType::Continuous, 0.0, 1e20});
 
-  SimplexOptions opts;
+  auto opts = native_simplex_options();
   opts.max_iter = 100;
   const auto res = solve_lp_with_basis(lp, opts);
+  INFO("ill-conditioned status=" << res.result.stats.status);
   REQUIRE(res.result.stats.success);
   CHECK(res.result.stats.objective == Approx(2.0).margin(1e-6));
   CHECK(res.result.x[0] == Approx(1.0).margin(1e-5));
@@ -445,13 +452,13 @@ TEST_CASE("KLU rescue backend solves a large degenerate assignment LP",
   lp.Aeq.setFromTriplets(trips_eq.begin(), trips_eq.end());
   lp.beq = Eigen::VectorXd::Ones(T);
 
-  SimplexOptions def;
+  auto def = native_simplex_options();
   def.max_iter = 100000;
   const auto res_def = solve_lp_with_basis(lp, def);
   REQUIRE(res_def.result.stats.success);
   CHECK(res_def.result.stats.objective == Approx(0.0).margin(1e-6));
 
-  SimplexOptions klu;
+  auto klu = native_simplex_options();
   klu.max_iter = 100000;
   klu.escalation_start_level = 2;  // force FactorBackendKind::KluRescue
   const auto res_klu = solve_lp_with_basis(lp, klu);
@@ -503,14 +510,14 @@ TEST_CASE("Cold-start escalation chain agrees with default solve",
   lp.Aeq.setFromTriplets(trips_eq.begin(), trips_eq.end());
   lp.beq = Eigen::VectorXd::Ones(T);
 
-  SimplexOptions opt;
+  auto opt = native_simplex_options();
   opt.max_iter = 100000;
   opt.escalation_max_level = 2;
   const auto res = solve_lp_with_basis(lp, opt);
   REQUIRE(res.result.stats.success);
   CHECK(res.result.stats.objective == Approx(0.0).margin(1e-6));
 
-  SimplexOptions off;
+  auto off = native_simplex_options();
   off.max_iter = 100000;
   off.escalation_max_level = 0;  // legacy behaviour
   const auto res_off = solve_lp_with_basis(lp, off);
@@ -518,7 +525,7 @@ TEST_CASE("Cold-start escalation chain agrees with default solve",
   CHECK(res.result.stats.objective ==
         Approx(res_off.result.stats.objective).margin(1e-9));
 
-  SimplexOptions start1;
+  auto start1 = native_simplex_options();
   start1.max_iter = 100000;
   start1.escalation_start_level = 1;  // begin directly at the hardened level
   const auto res_start1 = solve_lp_with_basis(lp, start1);
@@ -534,7 +541,7 @@ TEST_CASE("Cold-start escalation chain agrees with default solve",
 TEST_CASE("Residual audit accepts true solutions and rejects corrupted ones",
           "[numerical][escalation][audit]") {
   LPModel lp = make_scaled_lp(1.0, 1.0, 1.0, 1.0);  // optimum (2, 4), obj -14
-  const auto res = solve_lp_with_basis(lp, SimplexOptions{});
+  const auto res = solve_lp_with_basis(lp, native_simplex_options());
   REQUIRE(res.result.stats.success);
   CHECK(res.result.stats.objective == Approx(-14.0).margin(1e-8));
 
@@ -556,7 +563,7 @@ TEST_CASE("Residual audit accepts true solutions and rejects corrupted ones",
   // A cold-start "Optimal" that fails the audit at every escalation level is
   // demoted to an honest failure, never returned as a false optimum (the
   // stocfor1-1e6 scaling probe is the deterministic real-world trigger).
-  SimplexOptions paranoid;
+  auto paranoid = native_simplex_options();
   // Negative tol rejects even an exact zero-residual solution (viol >= 0 by
   // construction), forcing the audit to fail at every escalation level.
   paranoid.escalation_residual_tol = -1.0;
@@ -609,9 +616,10 @@ TEST_CASE("solve_lp_from_sf escalation levels agree with the default path",
   StandardFormLP sf = build_standard_form_lp(lp);
   ruiz_scale_standard_form(sf, 10);
 
-  SimplexOptions base;
+  auto base = native_simplex_options();
   base.max_iter = 100000;
   const auto res0 = solve_lp_from_sf(sf, base);
+  INFO("cold status=" << res0.result.stats.status);
   REQUIRE(res0.result.stats.success);
   CHECK(res0.result.stats.objective == Approx(0.0).margin(1e-6));
 
@@ -638,10 +646,11 @@ TEST_CASE("solve_lp_from_sf escalation publishes in caller sf space",
   StandardFormLP sf = build_standard_form_lp(lp);
   ruiz_scale_standard_form(sf, 10);
 
-  SimplexOptions lvl1;
+  auto lvl1 = native_simplex_options();
   lvl1.max_iter = 100000;
   lvl1.escalation_start_level = 1;  // forces the copy-solve + publish path
   const auto res = solve_lp_from_sf(sf, lvl1);
+  INFO("publish status=" << res.result.stats.status);
   REQUIRE(res.result.stats.success);
 
   // x_std must satisfy the CALLER's scaled system, not the re-equilibrated
@@ -658,9 +667,10 @@ TEST_CASE("solve_lp_from_sf warm hints are never audited or escalated",
   StandardFormLP sf = build_standard_form_lp(lp);
   ruiz_scale_standard_form(sf, 10);
 
-  SimplexOptions opt;
+  auto opt = native_simplex_options();
   opt.max_iter = 100000;
   const auto cold = solve_lp_from_sf(sf, opt);
+  INFO("warm-root status=" << cold.result.stats.status);
   REQUIRE(cold.result.stats.success);
 
   // Absurd residual tolerance: if the chain audited warm-hint results, this

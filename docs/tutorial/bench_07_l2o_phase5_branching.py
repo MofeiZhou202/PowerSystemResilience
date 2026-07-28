@@ -35,25 +35,28 @@ def parse_budgets(text):
     return [float(item) for item in text.split(",") if item.strip()]
 
 
-def make_options(limit, gap, seed, use_vendored_highs_lp_kernel=False):
+def make_options(limit, gap, seed, lp_kernel_backend=None):
     opt = mipsolvers.engine.BCOptions()
     opt.time_limit_sec = limit
     opt.gap_tol = gap
     opt.num_threads = 1
     opt.deterministic_parallel = True
     opt.random_seed = seed
-    opt.use_vendored_highs_lp_kernel = bool(use_vendored_highs_lp_kernel)
+    if lp_kernel_backend is not None:
+        opt.lp_kernel_backend = lp_kernel_backend
     return opt
 
 
-def native_uses_vendored_kernel(args, strict_highs):
-    return (not strict_highs) and args.native_lp_kernel == "highs"
+def selected_native_lp_backend(args):
+    if args.native_lp_kernel == "highs":
+        return mipsolvers.engine.LpKernelBackend.HiGHS
+    return mipsolvers.engine.LpKernelBackend.ExperimentalNative
 
 
-def solver_path_name(strict_highs, use_vendored_highs_lp_kernel):
+def solver_path_name(strict_highs, lp_kernel_backend):
     if strict_highs:
         return "StrictHiGHS(vendored_highs_mip_lifecycle)"
-    if use_vendored_highs_lp_kernel:
+    if lp_kernel_backend == mipsolvers.engine.LpKernelBackend.HiGHS:
         return "NativeBranchAndCut(vendored_highs_lp_kernel)"
     return "NativeBranchAndCut(self_developed_lp_kernel)"
 
@@ -403,10 +406,10 @@ def extract_pseudocost_training_labels(case, result, beta, min_observed):
 
 
 def solve_label_case(case, budget, gap, seed, strict_highs, include_artifact_vectors,
-                     use_vendored_highs_lp_kernel):
+                     lp_kernel_backend):
     return mipsolvers.l2o.solve_scuc_mip(
         case,
-        options=make_options(budget, gap, seed, use_vendored_highs_lp_kernel),
+        options=make_options(budget, gap, seed, lp_kernel_backend),
         strict_highs=strict_highs,
         include_artifact_vectors=include_artifact_vectors,
     )
@@ -426,9 +429,10 @@ def collect_training_data(periods_list, scenarios, label_budget, gap, seed, stri
             if feature_names is None:
                 feature_names = list(feature_pack["feature_names"])
             need_artifacts = args.label_source == "pseudocost"
-            use_vendored = native_uses_vendored_kernel(args, strict_highs)
+            lp_kernel_backend = selected_native_lp_backend(args)
             result = solve_label_case(
-                case, label_budget, gap, seed, strict_highs, need_artifacts, use_vendored)
+                case, label_budget, gap, seed, strict_highs, need_artifacts,
+                lp_kernel_backend)
             try:
                 if args.label_source == "pseudocost":
                     labels, weights, label_metadata = extract_pseudocost_training_labels(
@@ -452,7 +456,7 @@ def collect_training_data(periods_list, scenarios, label_budget, gap, seed, stri
                 "solver_sec": float(result.get("runtime_sec", label_budget)),
                 "samples": int(features.shape[0] * features.shape[1]),
                 "nodes": int(result.get("bc_stats", {}).get("nodes_explored", 0)),
-                "solver_path": solver_path_name(strict_highs, use_vendored),
+                "solver_path": solver_path_name(strict_highs, lp_kernel_backend),
                 "native_lp_kernel": args.native_lp_kernel if not strict_highs else "strict_highs",
                 "label_metadata": label_metadata,
             })
@@ -482,7 +486,7 @@ def train_branching_model(args, strict_highs):
         "train_scenarios": [name for name, _, _ in scenarios],
         "label_budget_sec": float(args.label_budget),
         "strict_highs_labels": bool(strict_highs),
-        "solver_path": solver_path_name(strict_highs, native_uses_vendored_kernel(args, strict_highs)),
+        "solver_path": solver_path_name(strict_highs, selected_native_lp_backend(args)),
         "native_lp_kernel": args.native_lp_kernel if not strict_highs else "strict_highs",
         "label_runs": label_runs,
         "training": training,
@@ -563,16 +567,16 @@ def gated_baseline_result(baseline_result):
 
 
 def gate_neural_policy(case, scores, policy, budget, gap, seed, strict_highs, tolerance,
-                       min_nodes, force_neural, use_vendored_highs_lp_kernel):
+                       min_nodes, force_neural, lp_kernel_backend):
     if force_neural:
         return {"mode": "forced", "use_neural_policy": True, "message": "forced by --force-neural"}
     if budget <= 0.0:
         return {"mode": "disabled", "use_neural_policy": True, "message": "gate budget is zero"}
 
-    options = make_options(budget, gap, seed, use_vendored_highs_lp_kernel)
+    options = make_options(budget, gap, seed, lp_kernel_backend)
     baseline = solve_baseline(case, options, strict_highs)
     neural = solve_phase5(
-        case, scores, make_options(budget, gap, seed, use_vendored_highs_lp_kernel),
+        case, scores, make_options(budget, gap, seed, lp_kernel_backend),
         policy, strict_highs)
     if max(baseline["nodes"], neural["nodes"]) < min_nodes:
         return {
@@ -665,7 +669,7 @@ def main():
 
     budgets = parse_budgets(args.budgets)
     strict_highs = not args.native
-    use_vendored_highs_lp_kernel = native_uses_vendored_kernel(args, strict_highs)
+    lp_kernel_backend = selected_native_lp_backend(args)
     case = mipsolvers.scuc.build_ieee118_case(T=args.periods, with_wind=True, with_solar=True)
     summary = compact_mip_summary(mipsolvers.l2o.scuc_mip_summary(case))
 
@@ -699,7 +703,7 @@ def main():
     }, sort_keys=True))
     print("POLICY", json.dumps({
         "strict_highs": strict_highs,
-        "solver_path": solver_path_name(strict_highs, use_vendored_highs_lp_kernel),
+        "solver_path": solver_path_name(strict_highs, lp_kernel_backend),
         "native_lp_kernel": args.native_lp_kernel if not strict_highs else "strict_highs",
         "periods": args.periods,
         "mip_summary": summary,
@@ -711,7 +715,7 @@ def main():
     gate = gate_neural_policy(
         case, scores, policy, args.gate_budget, args.gap, args.seed,
         strict_highs, args.gate_gap_tolerance, args.gate_min_nodes, args.force_neural,
-        use_vendored_highs_lp_kernel)
+        lp_kernel_backend)
     use_neural_policy = bool(gate["use_neural_policy"])
     print("GATE", json.dumps(gate, sort_keys=True))
 
@@ -721,13 +725,13 @@ def main():
         phase5_runs = []
         for _ in range(args.repeats):
             baseline = solve_baseline(
-                case, make_options(budget, args.gap, args.seed, use_vendored_highs_lp_kernel),
+                case, make_options(budget, args.gap, args.seed, lp_kernel_backend),
                 strict_highs)
             baseline_runs.append(baseline)
             if use_neural_policy:
                 phase5_runs.append(solve_phase5(
                     case, scores,
-                    make_options(budget, args.gap, args.seed, use_vendored_highs_lp_kernel),
+                    make_options(budget, args.gap, args.seed, lp_kernel_backend),
                     policy, strict_highs))
             else:
                 phase5_runs.append(gated_baseline_result(baseline))
@@ -751,7 +755,7 @@ def main():
             "phase5_neural_policy_used": bool(phase5_runs[-1]["neural_policy_used"]),
             "gate_mode": gate["mode"],
             "gate_message": gate["message"],
-            "solver_path": solver_path_name(strict_highs, use_vendored_highs_lp_kernel),
+            "solver_path": solver_path_name(strict_highs, lp_kernel_backend),
             "native_lp_kernel": args.native_lp_kernel if not strict_highs else "strict_highs",
         }
         row["gap_reduction"] = row["baseline_gap"] - row["phase5_gap"]

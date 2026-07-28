@@ -3,12 +3,12 @@
 /// Pure-native vs HiGHS comparison driver.
 ///
 /// Unlike milp_benchmark_runner.cpp / solver_comparison.cpp — which force
-/// BCOptions::use_vendored_highs_lp_kernel = true and therefore exercise
+/// BCOptions::lp_kernel_backend = LpKernelBackend::HiGHS and therefore exercise
 /// HiGHS LP numerics inside the native B&C — this driver benchmarks the
 /// *fully native* numerical stack:
 ///
 ///   MILP level : native branch-and-cut with the native dual simplex as the
-///                LP relaxation kernel (use_vendored_highs_lp_kernel=false),
+///                LP relaxation kernel (ExperimentalNative),
 ///                optionally with the native IPM at the root
 ///                vs. raw-API HiGHS MIP as the reference.
 ///   LP level   : native dual simplex (UMFPACK LU + eta updates, Ruiz
@@ -66,10 +66,6 @@ namespace {
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Passed to the native simplex LP runs (SimplexOptions::phase1_strategy),
-/// set by --phase1 N for A/B evaluation of the HiGHS-style Phase I.
-int g_phase1_strategy = 0;
 
 struct TestCase {
     std::string name;
@@ -306,7 +302,7 @@ MilpRow run_native_bc(const TestCase& tc, bool ipm_root, double time_limit_sec) 
     engine::MIPModel mip = build_scuc_mip(tc.inp);
 
     engine::BCOptions opt;
-    opt.use_vendored_highs_lp_kernel = false;   // <-- the whole point
+    opt.lp_kernel_backend = engine::LpKernelBackend::ExperimentalNative;
     opt.use_ipm_root                 = ipm_root;
     opt.time_limit_sec               = time_limit_sec;
     opt.gap_tol                      = 1e-3;
@@ -370,8 +366,8 @@ LpRow run_native_simplex_lp(const std::string& case_name, const engine::LPModel&
     r.solver    = "natDualSimplex";
 
     engine::SimplexOptions opts;
+    opts.lp_kernel_backend = engine::LpKernelBackend::ExperimentalNative;
     opts.max_iter = 100000;
-    opts.phase1_strategy = g_phase1_strategy;
     // [ITER-TIMING] / [SIMPLEX-DIAG] on the pure-LP rows (same env as the
     // MILP-level BCOptions::verbose plumbing).
     if (std::getenv("MIPSOLVERS_NKC_VERBOSE") != nullptr) opts.verbose = true;
@@ -740,7 +736,7 @@ int run_warm_probe(bool use_118) {
                     Eigen::VectorXd col = Eigen::VectorXd::Zero(m);
                     for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, q); it; ++it)
                         col[it.row()] = it.value();
-                    hfb.ftran(col.data(), aq.data());
+                    hfb.ftran_for_update(col.data(), aq.data());
                     // Verify the input aq against the reference factor BEFORE
                     // applying the update (catches ftran-after-update errors
                     // that the b-RHS check is blind to).
@@ -764,7 +760,7 @@ int run_warm_probe(bool use_118) {
                     // ep = B^{-T} e_p
                     e_row.setZero();
                     e_row[p] = 1.0;
-                    hfb.btran(e_row.data(), ep.data());
+                    hfb.btran_for_update(e_row.data(), ep.data());
                     if (ref_inputs && lu_ref_ok) ep = lu_ref.transpose().solve(e_row);
                     const bool refact_mode =
                         std::getenv("MIPSOLVERS_HFACTOR_SELFTEST_REFACT") != nullptr;
@@ -773,7 +769,7 @@ int run_warm_probe(bool use_118) {
                         basis[p] = q;
                         if (!hfb.factorize(sf.A, basis.data(), m)) { ++bad_update; break; }
                     } else {
-                        if (!hfb.update(p, aq.data(), ep.data())) { ++bad_update; break; }
+                        if (!hfb.update(p, q, aq.data(), ep.data())) { ++bad_update; break; }
                         basis[p] = q;
                     }
                     in_basis[q] = 1;
@@ -871,6 +867,7 @@ int run_warm_probe(bool use_118) {
     }
 
     engine::SimplexOptions cold_opt;
+    cold_opt.lp_kernel_backend = engine::LpKernelBackend::ExperimentalNative;
     cold_opt.max_iter = 100000;
     const auto t0 = std::chrono::steady_clock::now();
     engine::SimplexResult r0 = engine::solve_lp_from_sf(sf, cold_opt);
@@ -901,6 +898,7 @@ int run_warm_probe(bool use_118) {
         engine::StandardFormLP sf_k = sf;
         engine::update_standard_form_bounds(sf_k, lp, lb, ub);
         engine::SimplexOptions node_opt;
+        node_opt.lp_kernel_backend = engine::LpKernelBackend::ExperimentalNative;
         node_opt.max_iter = 100000;
         node_opt.allow_cold_start = false;  // tree-node semantics: warm or fail
         const auto t1 = std::chrono::steady_clock::now();
@@ -949,6 +947,7 @@ int run_warm_probe(bool use_118) {
             ub[j] = v;
             engine::update_standard_form_bounds(sf_chain, lp, lb, ub);
             engine::SimplexOptions chain_opt;
+            chain_opt.lp_kernel_backend = engine::LpKernelBackend::ExperimentalNative;
             chain_opt.max_iter = 100000;
             chain_opt.allow_cold_start = false;  // tree-node semantics
             const auto t1 = std::chrono::steady_clock::now();
@@ -1012,6 +1011,7 @@ int run_warm_probe(bool use_118) {
                 break;
             }
             engine::SimplexOptions cut_opt;
+            cut_opt.lp_kernel_backend = engine::LpKernelBackend::ExperimentalNative;
             cut_opt.max_iter = 100000;
             cut_opt.allow_cold_start = false;  // cut re-solve: warm or fail
             const auto tc = std::chrono::steady_clock::now();
@@ -1063,8 +1063,6 @@ int main(int argc, char** argv) {
             lp_native_only = 39;
         } else if (std::strcmp(argv[i], "--time-limit") == 0 && i + 1 < argc) {
             time_limit_sec = std::atof(argv[++i]);
-        } else if (std::strcmp(argv[i], "--phase1") == 0 && i + 1 < argc) {
-            g_phase1_strategy = std::atoi(argv[++i]);
         }
     }
     if (warm_probe) return run_warm_probe(true);

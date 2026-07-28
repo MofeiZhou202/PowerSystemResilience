@@ -67,49 +67,30 @@ bool bc_first_class_lp_state_conformance_enabled() {
 }
 
 bool bc_vendored_highs_lp_kernel_enabled(const BCOptions& opt) {
-  return opt.use_vendored_highs_lp_kernel ||
-         bc_env_options().use_vendored_highs_lp;
+  return uses_highs_lp_kernel(opt.lp_kernel_backend);
 }
 
 bool bc_vendored_highs_root_frontier_enabled(const BCOptions& opt) {
-  return !opt.suppress_vendored_highs_root_frontier &&
-         !bc_env_options().suppress_vendored_highs_root_frontier;
+  return !opt.suppress_vendored_highs_root_frontier;
 }
 
 BcStrictHighsContractState apply_bc_strict_highs_contract(BCOptions& opt) {
   BcStrictHighsContractState state;
   state.domain_heuristics = opt.enable_domain_heuristics;
   state.requested_vendored_highs_lp = bc_vendored_highs_lp_kernel_enabled(opt);
-  if (state.requested_vendored_highs_lp) {
-    opt.use_vendored_highs_lp_kernel = true;
+  if (opt.strict_highs_mip_contract) {
+    state.requested_vendored_highs_lp = true;
   }
-  state.strict_highs_lp_contract = state.requested_vendored_highs_lp;
+  if (state.requested_vendored_highs_lp) {
+    opt.lp_kernel_backend = LpKernelBackend::HiGHS;
+  }
+  state.strict_highs_lp_contract = opt.strict_highs_mip_contract;
   state.allow_vendored_root_frontier =
       bc_vendored_highs_root_frontier_enabled(opt);
 
-  if (state.requested_vendored_highs_lp) {
-    const bool strict_tree_exhaustion =
-        bc_env_options().require_strict_tree_exhaustion;
-    // Suppressing the vendored root frontier only removes the direct
-    // HiGHS-root certificate.  It must not also disable HiGHS' normal MIP
-    // optimality-limit lifecycle: HighsMipSolverData keeps upper_limit for
-    // incumbent cutoff propagation and optimality_limit for gap-valid node/root
-    // pruning.  A strict live-tree exhaustion audit is still available through
-    // MIPSOLVERS_REQUIRE_STRICT_TREE_EXHAUSTION.
-    opt.require_tree_exhaustion_certificate = strict_tree_exhaustion;
-  }
-  if (state.requested_vendored_highs_lp) {
-    // HiGHS does not turn local proof artifacts into ad-hoc node LP rows.
-    // Reduced-cost/domain proofs are resolved through the local domain trail
-    // and published as reconvergence/bound-lifting certificates; when domain
-    // bounds change, the LP is re-evaluated from the same HiGHS kernel state.
-    // This must remain enabled in suppress-root proof-tail mode as well:
-    // strict tree exhaustion removes the root MIP certificate, not the
-    // ConflictSet::resolveLinearLeq/Geq-style local trail resolver.
-    opt.enable_reduced_cost_conflict_learning = true;
-    opt.enable_reduced_cost_proof_conflict_minimization = true;
-  }
   if (state.strict_highs_lp_contract) {
+    opt.require_tree_exhaustion_certificate =
+        bc_env_options().require_strict_tree_exhaustion;
     // Strict HiGHS LP-oracle mode: the native tree may consume the vendored
     // HiGHS LP kernel, reduced-cost fixing, and local-domain certificates, but
     // all proof/frontier artifacts must live in the same original column space.
@@ -213,12 +194,6 @@ std::shared_ptr<SimplexBasis> persist_bc_node_basis_from_simplex(
   auto basis = std::make_shared<SimplexBasis>(std::move(simplex.basis));
   if (previous_basis) basis->try_share_indices_from(*previous_basis);
   basis->compact_indices_storage();
-  if (simplex.shared_binv) {
-    basis->cached_inverse = simplex.shared_binv;
-  } else if (simplex.basis_inverse.rows() > 0) {
-    basis->cached_inverse =
-        std::make_shared<const Eigen::MatrixXd>(std::move(simplex.basis_inverse));
-  }
   basis->cached_reduced_costs =
       std::make_shared<const Eigen::VectorXd>(std::move(simplex.reduced_costs));
   if (simplex.form.col_scale.size() == simplex.form.A.cols()) {
@@ -514,15 +489,5 @@ void apply_bc_first_class_simplex_state(SimplexOptions& opt,
     opt.suppress_degenerate_frontier_remap = true;
   }
 }
-
-VendoredHighsSfBackendScope::VendoredHighsSfBackendScope(bool enabled)
-    : old_(set_vendored_highs_sf_backend_thread_enabled(
-          enabled || vendored_highs_sf_backend_thread_enabled())) {}
-
-VendoredHighsSfBackendScope::~VendoredHighsSfBackendScope() {
-  set_vendored_highs_sf_backend_thread_enabled(old_);
-}
-
-
 
 }  // namespace mipsolvers::engine::detail

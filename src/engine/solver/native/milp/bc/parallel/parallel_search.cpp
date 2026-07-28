@@ -156,10 +156,7 @@ void ParallelSearchDriver::launch_workers(
   par_simplex_opt.feasibility_tol = std::max(1e-10, opt.lp_tol * 0.1);
   par_simplex_opt.optimality_tol = std::max(1e-10, opt.lp_tol * 0.1);
   par_simplex_opt.allow_cold_start = false;
-  par_simplex_opt.allow_vendored_highs_sf_backend =
-      opt.use_vendored_highs_lp_kernel;
-  par_simplex_opt.require_vendored_highs_sf_backend =
-      opt.use_vendored_highs_lp_kernel;
+  par_simplex_opt.lp_kernel_backend = opt.lp_kernel_backend;
   par_simplex_opt.factor_backend =
       simplex_factor_backend_from_id(opt.simplex_factor_backend);
 

@@ -46,10 +46,7 @@ bool root_simplex_conformance_enabled() {
 }
 
 bool vendored_highs_lp_kernel_enabled(const BCOptions& opt) {
-  const char* env = std::getenv("MIPSOLVERS_USE_VENDORED_HIGHS_LP");
-  const bool env_enabled =
-      env != nullptr && env[0] != '\0' && env[0] != '0';
-  return opt.use_vendored_highs_lp_kernel || env_enabled;
+  return uses_highs_lp_kernel(opt.lp_kernel_backend);
 }
 
 void apply_root_simplex_conformance_options(SimplexOptions& opt,
@@ -240,10 +237,6 @@ make_first_class_basis_hint_from_simplex(const SimplexResult& simplex) {
   basis->sf_n_slack = simplex.form.n_slack;
   basis->sf_n_surplus = simplex.form.n_surplus;
   basis->sf_n_artificial = simplex.form.n_artificial;
-  if (simplex.basis_inverse.rows() > 0) {
-    basis->cached_inverse =
-        std::make_shared<const Eigen::MatrixXd>(simplex.basis_inverse);
-  }
   if (simplex.reduced_costs.size() == simplex.form.A.cols()) {
     basis->cached_reduced_costs =
         std::make_shared<const Eigen::VectorXd>(simplex.reduced_costs);
@@ -252,16 +245,6 @@ make_first_class_basis_hint_from_simplex(const SimplexResult& simplex) {
     basis->cached_col_scale =
         std::make_shared<const Eigen::VectorXd>(simplex.form.col_scale);
   }
-  if (simplex.x_basic.size() == simplex.form.A.rows()) {
-    basis->cached_x_basic =
-        std::make_shared<const Eigen::VectorXd>(simplex.x_basic);
-  }
-  if (simplex.x_std.size() == simplex.form.A.cols()) {
-    basis->cached_x_std =
-        std::make_shared<const Eigen::VectorXd>(simplex.x_std);
-  }
-  basis->cached_max_objective = simplex.max_objective;
-  basis->has_cached_max_objective = simplex.x_basic.size() == simplex.form.A.rows();
   if (simplex.basis.cached_sparse_basis) {
     basis->cached_sparse_basis = simplex.basis.cached_sparse_basis;
     basis->persist_eta_count = simplex.basis.persist_eta_count;
@@ -389,8 +372,6 @@ class DirectHighsLpBasisOps : public BasisOps {
 
   SparseFactorTelemetry factor_telemetry() const override {
     SparseFactorTelemetry t;
-    t.backend_id = 100;
-    t.ft_backend = false;
     t.ft_valid = true;
     return t;
   }
@@ -1047,9 +1028,7 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
       basis_hint->rows < live_append_candidate_rows;
   const bool require_live_append =
       opt.auto_highs_root_pipeline && has_appended_rows;
-  if ((require_live_append ||
-       std::getenv("MIPSOLVERS_VENDORED_HIGHS_LIVE_APPEND") != nullptr) &&
-      basis_hint != nullptr) {
+  if (require_live_append && basis_hint != nullptr) {
     const int n = static_cast<int>(lp.vars.size());
     const int m_ineq = static_cast<int>(lp.A.rows());
     const int m_eq = static_cast<int>(lp.Aeq.rows());
@@ -1156,9 +1135,7 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
       return false;
     }
   }
-  const bool use_direct_highs_lp =
-      opt.auto_highs_root_pipeline ||
-      std::getenv("MIPSOLVERS_VENDORED_HIGHS_DIRECT_LP") != nullptr;
+  const bool use_direct_highs_lp = opt.auto_highs_root_pipeline;
   if (use_direct_highs_lp) {
     auto highs = std::make_shared<Highs>();
     highs->setOptionValue("output_flag", false);
@@ -1295,8 +1272,7 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
   sf_opt.allow_cold_start = true;
   sf_opt.use_partial_pricing = false;
   sf_opt.perturb_degenerate_primal = false;
-  sf_opt.allow_vendored_highs_sf_backend = true;
-  sf_opt.require_vendored_highs_sf_backend = true;
+  sf_opt.lp_kernel_backend = LpKernelBackend::HiGHS;
   sf_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
   apply_root_simplex_conformance_options(sf_opt, /*force=*/true);
 
@@ -1567,11 +1543,9 @@ CrashBasisRecoveryStats recover_primal_activity_basis_impl(const StandardFormLP&
   out_basis.cols = sf_n;
   out_basis.indices.resize(sf_m);
   out_basis.at_upper.assign(sf_n, 0);
-  out_basis.cached_inverse.reset();
   out_basis.cached_sparse_basis.reset();
   out_basis.cached_reduced_costs.reset();
   out_basis.persist_eta_count = 0;
-  out_basis.has_cached_obj_offset = false;
 
   std::vector<double> interior_score(static_cast<size_t>(sf.n_original), 0.0);
   std::vector<double> partition_score(static_cast<size_t>(sf.n_original), 0.0);
@@ -1885,8 +1859,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     warm_opt.allow_cold_start = false;
     warm_opt.use_partial_pricing = true;
     warm_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
-    warm_opt.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
-    warm_opt.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+    warm_opt.lp_kernel_backend = opt.lp_kernel_backend;
     apply_simplex_budget(warm_opt);
     apply_root_simplex_conformance_options(warm_opt, opt.use_simplex_lp_nodes);
 
@@ -2300,8 +2273,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
         push_opt.allow_cold_start = true;   // Fallback to cold-start if warm-start fails
         push_opt.use_partial_pricing = huge_warmstart_root;
         push_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
-        push_opt.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
-        push_opt.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+        push_opt.lp_kernel_backend = opt.lp_kernel_backend;
         apply_simplex_budget(push_opt);
         apply_root_simplex_conformance_options(push_opt, require_simplex_crossover);
 
@@ -2364,8 +2336,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
           cleanup_opt.allow_cold_start = false;
           cleanup_opt.use_partial_pricing = false; // Full pricing for consistent basis
           cleanup_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
-          cleanup_opt.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
-          cleanup_opt.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+          cleanup_opt.lp_kernel_backend = opt.lp_kernel_backend;
           apply_simplex_budget(cleanup_opt);
           apply_root_simplex_conformance_options(cleanup_opt, require_simplex_crossover);
 
@@ -2408,8 +2379,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
         sx_opt.allow_cold_start = true;  // Fall back to cold-start if warm fails
         sx_opt.use_partial_pricing = false;
         sx_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
-        sx_opt.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
-        sx_opt.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+        sx_opt.lp_kernel_backend = opt.lp_kernel_backend;
         apply_simplex_budget(sx_opt);
         apply_root_simplex_conformance_options(sx_opt, require_simplex_crossover);
         if (lp_basis_trace_enabled()) {
@@ -2560,8 +2530,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     simplex_opt.optimality_tol = std::max(1e-10, opt.lp_tol * 0.1);
     simplex_opt.verbose = false;
     simplex_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
-    simplex_opt.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
-    simplex_opt.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+    simplex_opt.lp_kernel_backend = opt.lp_kernel_backend;
     apply_simplex_budget(simplex_opt);
     apply_root_simplex_conformance_options(simplex_opt, opt.use_simplex_lp_nodes);
 
@@ -2651,7 +2620,6 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
         SimplexOptions repair_opt = simplex_opt;
         repair_opt.max_iter = std::max(opt.max_lp_iter * 20, 5000);
         repair_opt.allow_cold_start = true;
-        repair_opt.prefer_dual_simplex_reopt = false;
         repair_opt.use_partial_pricing = false;
         apply_simplex_budget(repair_opt);
         apply_root_simplex_conformance_options(repair_opt, true);

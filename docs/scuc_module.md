@@ -64,10 +64,6 @@ SCUC 模块实现了安全约束机组组合（Security-Constrained Unit Commitm
 | `renewable_min_output_coeff` | float | 0.0 | 新能源最小出力系数 $\alpha$（§2.6.3.20）|
 | `wheeling_fee_per_mwh` | float | 0.0 | 过网费 \$/MWh（§2.6.3.7 目标函数 $P_{gwf}$ 项）|
 | `enable_market_cuts` | bool | true | 是否添加预建 LP 有效不等式（见§4.6）|
-| `enable_benders_decomposition` | bool | false | 强制启用 Branch-and-Benders-Cut 分解 |
-| `benders_auto_min_variables` | int | 250000 | 单体模型达到该列数时自动分解，0=关闭自动选择 |
-| `benders_max_iterations` | int | 200 | 主问题/子问题最大迭代次数 |
-| `benders_cut_tolerance` | float | 1e-6 | Farkas 证书与割有效性容差 |
 | `solve_sced` | bool | true | SCUC 后是否求解 SCED（LP，固定组合）|
 | `solve_lmp` | bool | true | 是否计算节点 LMP |
 | `lmp_delta` | float | 0.10 | LMP 再调度邻域系数（§2.6.5.5）|
@@ -201,24 +197,6 @@ SCUC 模块实现了安全约束机组组合（Security-Constrained Unit Commitm
 | `solver_name` | string | 实际使用的求解器 |
 | `mip_gap` | float | 相对 MIP 间隙 |
 | `n_cuts_added` | int | 添加的预建有效不等式数量 |
-| `benders_iterations` | int | 分解迭代次数 |
-| `benders_cuts_added` | int | 已添加的最优性割、可行性割和兜底割数量 |
-| `benders_master_variables` | int | 紧凑主问题变量数 |
-| `benders_master_nodes` | int64 | 紧凑主问题累计原生 B&C 节点数 |
-| `benders_master_lp_solves` | int64 | 紧凑主问题累计 LP 松弛求解次数 |
-| `benders_master_warm_starts` | int | 使用可行 incumbent 热启动的主问题次数 |
-| `benders_master_pseudocost_reuses` | int | 复用上一轮分支伪成本的主问题次数 |
-| `benders_master_solve_time_sec` | float | 紧凑主问题累计求解耗时（秒）|
-| `benders_subproblem_variables` | int | 连续调度子问题变量数 |
-| `benders_subproblem_rows` | int | 消元后连续子问题约束行数 |
-| `benders_eliminated_binary_variables` | int | 从连续 LP 中消除的二进制列数 |
-| `benders_coupled_binary_variables` | int | 实际参与连续 RHS 耦合的二进制列数；稀疏割梯度只遍历该支撑集 |
-| `benders_binary_coupling_nonzeros` | int64 | 二进制到 RHS 稀疏耦合矩阵非零元数 |
-| `benders_incremental_rhs_updates` | int64 | 二进制取值变化实际触达的 RHS 耦合非零元数 |
-| `benders_subproblem_solves` | int | 连续子问题求解次数 |
-| `benders_subproblem_warm_starts` | int | 成功复用持久化 basis 的子问题次数 |
-| `benders_subproblem_simplex_iterations` | int64 | 连续子问题累计单纯形 pivot 数 |
-| `benders_subproblem_solve_time_sec` | float | 连续子问题累计求解耗时（秒）|
 | `commitment[g][t]` | float | 机组开机状态 0/1 |
 | `startup[g][t]` / `shutdown[g][t]` | float | 启动/停机指示变量 |
 | `dispatch[g][t]` | float | 发电出力 MW |
@@ -441,7 +419,7 @@ SCUCInput (JSON)
        │  - 等式/不等式约束矩阵
        │  - 预建 LP 割平面
        ▼
-  单体 MILP 或 Branch-and-Benders-Cut
+  单体 MILP
        │
        ▼
   extract_result()             ← 提取 MILP 解 → scuc
@@ -463,20 +441,6 @@ SCUCInput (JSON)
        ▼
   scuc_output_to_json()        ← 序列化输出 (JSON)
 ```
-
-当单体模型变量数达到 `benders_auto_min_variables` 时，SCUC 阶段自动改用
-Branch-and-Benders-Cut。主问题仅包含启停、启动/停机、可选储能模式二进制变量
-以及一个调度成本变量；出力、备用和网络约束保留在连续 LP 子问题。二进制列从
-连续 LP 中精确消元，混合约束系数形成稀疏耦合矩阵，每轮按 `b-A_binary*x`
-原位更新 RHS。LP 对偶与耦合矩阵生成最优性割，Farkas 证书生成可行性割；纯
-二进制约束留在主问题。连续子问题的标准形、缩放、basis 和稀疏分解在迭代间
-持久化，再由对偶单纯形增量重优化；标准形建立后会释放原连续 LP 矩阵副本。
-该路径不使用 Gurobi。
-
-算法循环和稀疏自动分块由求解器层公共接口
-`engine::partition_benders_model()` / `engine::solve_benders()` 实现，详见
-[通用 Benders 模块](benders_decomposition.md)。SCUC 层只选择一阶段二进制列并
-完成结果回映射，不包含 RHS 更新、割生成或收敛判断。
 
 ---
 

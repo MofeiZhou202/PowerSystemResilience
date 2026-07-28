@@ -176,7 +176,7 @@ ResultRow run_native(const TestCase& tc, bool strict_highs, double time_limit_se
     // The native B&C orchestration drives its LP relaxations through the
     // vendored HiGHS LP kernel in both configurations; StrictHiGHS adds the
     // strict root pipeline (IPM seeding + dynamic cut separation) on top.
-    opt.use_vendored_highs_lp_kernel = true;
+    opt.lp_kernel_backend = LpKernelBackend::HiGHS;
     if (strict_highs) {
         opt.auto_highs_root_pipeline = true;
         opt = engine::make_strict_highs_problem_options(mip, opt);

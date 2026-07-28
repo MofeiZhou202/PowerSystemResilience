@@ -14,9 +14,7 @@ namespace mipsolvers::engine {
 /// *_STATS, HACDCPF_*) are intentionally NOT captured — they are diagnostics,
 /// not algorithm choices, and stay env-driven until the tree split lands.
 struct BcEnvOptions {
-  // Vendored-HiGHS kernel selection and root pipeline.
-  bool use_vendored_highs_lp{false};              ///< MIPSOLVERS_USE_VENDORED_HIGHS_LP
-  bool suppress_vendored_highs_root_frontier{false};  ///< MIPSOLVERS_SUPPRESS_VENDORED_HIGHS_ROOT_FRONTIER
+  // StrictHiGHS diagnostics and root-pipeline experiments.
   bool require_strict_tree_exhaustion{false};     ///< MIPSOLVERS_REQUIRE_STRICT_TREE_EXHAUSTION
   bool root_separation_only{false};               ///< MIPSOLVERS_ROOT_SEPARATION_ONLY
   bool strict_full_retain_root_lp{false};         ///< MIPSOLVERS_STRICT_FULL_RETAIN_ROOT_LP

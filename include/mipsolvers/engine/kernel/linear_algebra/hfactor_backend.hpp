@@ -71,17 +71,37 @@ class HFactorBackend {
                  const int* basic_index,
                  int n_basic);
 
+  // Factorize a standard-form basis while representing one +1 unit column
+  // per row as HFactor's implicit logical variable.  This is the same model
+  // used by HiGHS: if rank deficiency is detected, HFactor replaces only the
+  // columns without pivots by the corresponding logicals. `repaired_basis`
+  // preserves the caller's basis-position order exactly, except at positions
+  // whose input columns received no pivot. The backend refactorizes those real
+  // (possibly scaled) columns and keeps HFactor's internal pivot permutation
+  // private from FTRAN, BTRAN, and update callers. A true return therefore
+  // means that the final factor is usable, not that the input basis was full
+  // rank;
+  // `rank_deficiency` records how many columns were repaired.
+  bool factorize_with_logicals(
+      const Eigen::SparseMatrix<double>& A,
+      const int* basic_index,
+      int n_basic,
+      const std::vector<int>& logical_col_by_row,
+      std::vector<int>& repaired_basis);
+
   // ── FTRAN: solve B x = rhs ─────────────────────────────────────────────
   // `rhs` and `result` are dense pointers of length m.  In-place is
   // permitted (`rhs == result`).
   //
   // On entry, `result` need not be initialised.  On exit it holds B^{-1} rhs.
   void ftran(const double* rhs, double* result) const;
+  void ftran_for_update(const double* rhs, double* result) const;
 
   // ── BTRAN: solve B^T y = rhs ───────────────────────────────────────────
   void btran(const double* rhs, double* result) const;
+  void btran_for_update(const double* rhs, double* result) const;
 
-  // ── Forrest-Tomlin update ──────────────────────────────────────────────
+  // ── Product-form basis update ──────────────────────────────────────────
   //
   // Replace basis column at `pivot_row` (row index in [0,m)) with the new
   // column whose FTRAN-image is `a_q_after_ftran` and BTRAN-image of the
@@ -89,9 +109,13 @@ class HFactorBackend {
   // this matches the calling convention of the dual-simplex driver where
   // FTRAN(a_q) and BTRAN(e_p) are computed prior to the update.
   //
-  // Returns `true` on numerically stable update; on `false`, `valid` is
-  // cleared and the caller must refactorise.
+  // The final vectors identify E_p(v), but HFactor's sparse FT update also
+  // consumes triangular-solve intermediate packs captured by the matching
+  // ftran_for_update()/btran_for_update() calls. Captures are generation-bound
+  // and must not be used if either pivotal solve is subsequently refined; the
+  // simplex driver then commits the exchange and INVERTs the new basis.
   bool update(int pivot_row,
+              int entering_col,
               const double* a_q_after_ftran,
               const double* btran_e_p);
 

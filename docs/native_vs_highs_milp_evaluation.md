@@ -10,14 +10,14 @@
 ## 1. Why a new benchmark driver was needed
 
 `benchmark/solver_comparison.cpp` and `benchmark/milp_benchmark_runner.cpp` both force
-`BCOptions::use_vendored_highs_lp_kernel = true`, i.e. the "native" rows exercise HiGHS LP numerics
+`BCOptions::lp_kernel_backend = LpKernelBackend::HiGHS`, i.e. the "native" rows exercise HiGHS LP numerics
 inside the native B&C — they benchmark HiGHS against itself. `native_kernel_comparison` instead runs:
 
-- **MILP level:** native B&C with `use_vendored_highs_lp_kernel = false` (native dual simplex, or native IPM at the root) vs raw-API HiGHS MIP.
+- **MILP level:** native B&C with `lp_kernel_backend = ExperimentalNative` (native dual simplex, or native IPM at the root) vs raw-API HiGHS MIP.
 - **LP level:** native dual simplex and native IPM-LP vs HiGHS LP on NETLIB (published optima), the SCUC LP relaxations (large, highly degenerate), and diagonally scaled NETLIB problems (dynamic range 10^k, exact objective invariant) as a numerical-stability probe.
 - Every run is cross-checked with an independent solution audit (max row / bound / integrality violation of the returned `x`).
 
-Usage: `--full` (adds 118-bus), `--skip-milp`, `--skip-lp`, `--time-limit N`, `--phase1 N` (A/B for the HiGHS-style Phase I).
+Usage: `--full` (adds 118-bus), `--skip-milp`, `--skip-lp`, `--time-limit N`.
 
 ---
 
@@ -118,7 +118,6 @@ All changes are uncommitted working-tree edits. Files: `src/engine/kernel/lp_ker
 
 ### 5.3 Stage 3 — HiGHS-style Phase I (flag-gated, A/B)
 
-- `SimplexOptions::phase1_strategy` (0 = native legacy default; 1 = HiGHS-style; env `MIPSOLVERS_SIMPLEX_PHASE1=1` override), driver flag `--phase1 N`.
 - Mirrors `HEkk.cpp:2440` / `HEkkDual.cpp:2076` / cleanup: magnitude-aware deterministic perturbations (`highs_style_perturb`), exact-zero cost shifts pinned at the dual boundary, and `dual_cleanup_resolve` restoration back to the unperturbed problem before Phase II.
 - **Bug found & fixed during A/B:** the initial implementation also perturbed the RHS (±1e-7); on tightly-balanced SCUC equality systems (power-balance rows where capacity barely meets demand) that made the perturbed LP *genuinely infeasible* and produced false "LP infeasible" certificates. Now only costs and finite variable upper bounds are perturbed (matching HiGHS).
 - **A/B verdict: NOT a win — default stays 0.** ~2× slower on 39-bus relaxation; turns a strategy-0-solvable 118-bus relaxation into "Phase II failed"; no better than strategy 0 on the presolved root LP either.
@@ -264,8 +263,8 @@ cmake . && cmake --build . --target native_kernel_comparison -j$(nproc)
 ctest -R "native_kernel_comparison|milp_benchmark" --output-on-failure
 
 # HiGHS-style Phase I A/B
-./tests/native_kernel_comparison --full --skip-milp --phase1 1
-MIPSOLVERS_SIMPLEX_PHASE1=1 ./tests/native_kernel_comparison --full --skip-lp
+./tests/native_kernel_comparison --full --skip-milp
+./tests/native_kernel_comparison --full --skip-lp
 
 # Presolve scaling diagnostics (round 2, Stage E)
 MIPSOLVERS_PRESOLVE_SCALING_DIAG=1 ./tests/native_kernel_comparison --full --skip-lp --time-limit 300 2> presolve_scaling.txt

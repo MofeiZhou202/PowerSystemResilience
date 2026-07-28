@@ -6,6 +6,12 @@ logs).  It is written for engineers who need to understand *why* the code
 looks the way it does before changing it — each section states the problem,
 derives the method, and gives the engineering guidance that follows.
 
+The revised dual-simplex replacement has its own frozen algorithm contract in
+`docs/native_dual_simplex_rewrite.md`, with a Chinese decision record in
+`docs/native_dual_simplex_rewrite_zh.md`. Those documents define the canonical
+sign convention, Phase I/II state machine, Harris/BFRT transactions,
+certificate requirements, implementation boundaries, and test gates.
+
 Contents
 - [1. One-sided (G-type) constraint rows](#1-one-sided-g-type-constraint-rows)
 - [2. Ruiz equilibration](#2-ruiz-equilibration)
@@ -736,3 +742,30 @@ convergence** (viol 6.1e-6, stat 2.1e-7, 0.02 s).  Freeze is the default;
 Side benefits: no per-iteration Ruiz sweeps (~5×nnz per iteration saved —
 case9241 homotopy 721 → 606 s), and several trajectories improve
 (case1888rte 168 → 89 iterations).
+
+---
+
+## 15. Forrest-Tomlin updates require triangular-solve intermediates
+
+For a simplex exchange `B'=BE_p(v)`, `v=B^-1 A_q` proves the product-form
+identity, but it is not by itself the data layout consumed by HFactor's sparse
+Forrest-Tomlin implementation. The FT column pack is the state after the L
+solve and before the U solve; the row pack is the state after `U^-T` and before
+`L^-T`. Repacking the final FTRAN/BTRAN vectors therefore constructs a
+different update even though the final pivot value is correct.
+
+The native LP factor wrapper captures both intermediates during their original
+solves. HFactor's INVERT also permutes basis positions into pivot-row order, so
+the leaving position and FTRAN result are mapped into that coordinate space;
+the BTRAN result remains in physical row space. Captures carry the factor
+generation. A same-basis reinversion regenerates stale packs from their saved
+right-hand sides before committing the selected exchange.
+
+This contract is tested from non-diagonal, permuted bases through ten column
+exchanges, with every FTRAN and BTRAN compared against both fresh HFactor and
+dense LU. Diagonal crash bases alone are insufficient because they collapse
+the caller-basis, pivot-row, and physical-row mappings into the same indices.
+The private HFactor port also retains every nonzero produced by factorization,
+triangular solves, and FT replay. Upstream `kHighsTiny` dropping remains in the
+embedded HiGHS target, but is incompatible with checking native solves against
+the true explicit basis matrix at an unchanged backward-error bound.

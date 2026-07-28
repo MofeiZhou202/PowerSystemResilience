@@ -4344,24 +4344,27 @@ HighsStatus Highs::callSolveMip() {
     const HighsLpRelaxation& lp_relax = solver.mipdata_->lp;
     const HighsInt n_model_rows = lp_relax.getNumModelRows();
     const HighsInt n_total_rows = lp_relax.numRows();
-    const HighsInt n_cuts = n_total_rows - n_model_rows;
+    HighsInt cut_num_col = 0;
+    HighsInt n_cuts = 0;
+    std::vector<double> cut_lower;
+    std::vector<double> cut_upper;
+    HighsSparseMatrix cut_matrix;
+    lp_relax.getCutPool(cut_num_col, n_cuts, cut_lower, cut_upper,
+                        cut_matrix);
     const HighsInt orig_n_col =
         solver.mipdata_->postSolveStack.getOrigNumCol();
     if (n_cuts > 0) {
       auto& cuts = hacdcpf_extracted_root_cuts_;
       cuts.start.push_back(0);
-      for (HighsInt r = n_model_rows; r < n_total_rows; ++r) {
-        HighsInt len = 0;
-        const HighsInt* inds = nullptr;
-        const double* vals = nullptr;
-        lp_relax.getRow(r, len, inds, vals);
+      for (HighsInt r = 0; r < n_cuts; ++r) {
         double rhs_adjust = 0.0;
         bool row_valid = true;
         const HighsInt old_nz =
             static_cast<HighsInt>(cuts.index.size());
-        for (HighsInt k = 0; k < len && row_valid; ++k) {
-          const HighsInt pc = inds[k];
-          const double   pv = vals[k];
+        for (HighsInt k = cut_matrix.start_[r];
+             k < cut_matrix.start_[r + 1] && row_valid; ++k) {
+          const HighsInt pc = cut_matrix.index_[k];
+          const double pv = cut_matrix.value_[k];
           const HighsInt orig_col =
               solver.mipdata_->postSolveStack.getOrigColIndex(pc);
           if (orig_col < 0 || orig_col >= orig_n_col) {
@@ -4390,8 +4393,8 @@ HighsStatus Highs::callSolveMip() {
         }
         if (row_valid) {
           cuts.start.push_back(static_cast<HighsInt>(cuts.index.size()));
-          const double rl = lp_relax.rowLower(r);
-          const double ru = lp_relax.rowUpper(r);
+          const double rl = cut_lower[static_cast<std::size_t>(r)];
+          const double ru = cut_upper[static_cast<std::size_t>(r)];
           cuts.lower.push_back(
               std::isfinite(rl) ? rl + rhs_adjust : -kHighsInf);
           cuts.upper.push_back(
@@ -4417,7 +4420,8 @@ HighsStatus Highs::callSolveMip() {
         root_basis.row_status.size() ==
             static_cast<std::size_t>(n_total_rows);
     const bool all_cut_rows_extracted =
-        n_cuts >= 0 && hacdcpf_extracted_root_cuts_.numCuts() == n_cuts;
+        n_total_rows == n_model_rows + n_cuts &&
+        hacdcpf_extracted_root_cuts_.numCuts() == n_cuts;
     if (root_basis_rows_match && all_cut_rows_extracted) {
       auto& basis = hacdcpf_extracted_root_basis_;
       basis.clear();

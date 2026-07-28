@@ -51,17 +51,6 @@ std::shared_ptr<SimplexBasis> persist_bc_node_basis_from_simplex(
     SimplexResult& simplex,
     const std::shared_ptr<SimplexBasis>& previous_basis);
 
-class VendoredHighsSfBackendScope {
- public:
-  explicit VendoredHighsSfBackendScope(bool enabled);
-  ~VendoredHighsSfBackendScope();
-  VendoredHighsSfBackendScope(const VendoredHighsSfBackendScope&) = delete;
-  VendoredHighsSfBackendScope& operator=(const VendoredHighsSfBackendScope&) = delete;
-
- private:
-  bool old_{false};
-};
-
 #ifdef MIPSOLVERS_HAVE_HIGHS_LIB
 const char* bc_highs_model_status_label(HighsModelStatus status);
 

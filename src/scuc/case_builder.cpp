@@ -755,10 +755,6 @@ std::string scuc_input_to_json(const SCUCInput& inp, int indent) {
     jc["wheeling_fee_per_mwh"]      = inp.config.wheeling_fee_per_mwh;
     jc["enable_market_cuts"]        = inp.config.enable_market_cuts;
     jc["enable_primal_repair"]      = inp.config.enable_primal_repair;
-    jc["enable_benders_decomposition"] = inp.config.enable_benders_decomposition;
-    jc["benders_auto_min_variables"] = inp.config.benders_auto_min_variables;
-    jc["benders_max_iterations"]    = inp.config.benders_max_iterations;
-    jc["benders_cut_tolerance"]     = inp.config.benders_cut_tolerance;
     jc["solve_sced"]                = inp.config.solve_sced;
     jc["solve_lmp"]                 = inp.config.solve_lmp;
     jc["lmp_delta"]                 = inp.config.lmp_delta;

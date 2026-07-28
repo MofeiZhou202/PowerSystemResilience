@@ -223,6 +223,7 @@ TEST_CASE("NETLIB: published optima via native kernels directly",
 
     DYNAMIC_SECTION(kase.file << " via dual simplex (UMFPACK dl + IR)") {
       SimplexOptions opts;
+      opts.lp_kernel_backend = LpKernelBackend::ExperimentalNative;
       opts.max_iter = 100000;
       const auto res = solve_lp_with_basis(lp, opts);
       INFO(kase.file << " dual_simplex status=" << res.result.stats.status

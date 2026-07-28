@@ -13,9 +13,6 @@ bool env_flag(const char* name) {
 
 BcEnvOptions parse_env_options() {
   BcEnvOptions o;
-  o.use_vendored_highs_lp = env_flag("MIPSOLVERS_USE_VENDORED_HIGHS_LP");
-  o.suppress_vendored_highs_root_frontier =
-      env_flag("MIPSOLVERS_SUPPRESS_VENDORED_HIGHS_ROOT_FRONTIER");
   o.require_strict_tree_exhaustion =
       env_flag("MIPSOLVERS_REQUIRE_STRICT_TREE_EXHAUSTION");
   o.root_separation_only = env_flag("MIPSOLVERS_ROOT_SEPARATION_ONLY");

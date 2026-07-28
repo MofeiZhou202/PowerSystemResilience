@@ -53,15 +53,18 @@ if(NOT TARGET Eigen3::Eigen)
 endif()
 
 # ── fmt ───────────────────────────────────────────────────────────────────────
-# fmt 含编译产物（libfmt.a），无法仅靠头文件分发，需要在消费者环境中安装。
-if(NOT TARGET fmt::fmt AND NOT TARGET fmt::fmt-header-only)
-  find_package(fmt QUIET)
-  if(NOT fmt_FOUND)
-    message(FATAL_ERROR
-      "mipsolvers: fmt 未找到。请通过以下方式安装：\n"
-      "  macOS:   brew install fmt\n"
-      "  Ubuntu:  apt install libfmt-dev\n"
-      "  Windows: vcpkg install fmt")
+# 当 fmt 以 vendored 方式构建时，它已作为本包导出目标（mipsolvers::fmt）随
+# mipsolversTargets 一起安装，消费者无需系统 fmt；否则在消费者环境查找系统 fmt。
+if(NOT ON)
+  if(NOT TARGET fmt::fmt AND NOT TARGET fmt::fmt-header-only)
+    find_package(fmt QUIET)
+    if(NOT fmt_FOUND)
+      message(FATAL_ERROR
+        "mipsolvers: fmt 未找到。请通过以下方式安装：\n"
+        "  macOS:   brew install fmt\n"
+        "  Ubuntu:  apt install libfmt-dev\n"
+        "  Windows: vcpkg install fmt")
+    endif()
   endif()
 endif()
 
@@ -87,6 +90,31 @@ if(NOT TARGET nlohmann_json::nlohmann_json)
   unset(_mipsolvers_json_bundled)
 endif()
 
+# ── OpenMP（静态归档的 LINK_ONLY 传递依赖）────────────────────────────────────
+# 构建时 OpenMP::OpenMP_CXX 以 PRIVATE 链接进静态库，导出接口中保留为
+# $<LINK_ONLY:OpenMP::OpenMP_CXX>，消费者侧必须重建该目标，否则 generate 报错。
+if(ON AND NOT TARGET OpenMP::OpenMP_CXX)
+  find_package(OpenMP QUIET COMPONENTS CXX)
+  if(NOT OpenMP_CXX_FOUND AND APPLE)
+    # Apple Clang：需要 -Xpreprocessor -fopenmp + 显式 libomp 路径（与构建侧一致）。
+    find_path(_ms_omp_include omp.h
+      HINTS /opt/homebrew/opt/libomp/include /usr/local/opt/libomp/include)
+    find_library(_ms_omp_lib NAMES omp
+      HINTS /opt/homebrew/opt/libomp/lib /usr/local/opt/libomp/lib)
+    if(_ms_omp_include AND _ms_omp_lib)
+      add_library(OpenMP::OpenMP_CXX INTERFACE IMPORTED)
+      set_target_properties(OpenMP::OpenMP_CXX PROPERTIES
+        INTERFACE_COMPILE_OPTIONS "-Xpreprocessor;-fopenmp"
+        INTERFACE_INCLUDE_DIRECTORIES "${_ms_omp_include}"
+        INTERFACE_LINK_LIBRARIES "${_ms_omp_lib}")
+    endif()
+  endif()
+  if(NOT TARGET OpenMP::OpenMP_CXX)
+    message(WARNING
+      "mipsolvers: 本包构建时启用了 OpenMP，但当前环境未找到 OpenMP，最终链接可能失败。")
+  endif()
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/mipsolversTargets.cmake")
 
 # ── 可选系统依赖：在消费者机器上重新发现 ─────────────────────────────────────────
@@ -94,7 +122,9 @@ include("${CMAKE_CURRENT_LIST_DIR}/mipsolversTargets.cmake")
 # 消费者需要在自己的系统上安装对应库，此处尝试自动定位并注入到链接接口。
 
 # ── SuiteSparse ────────────────────────────────────────────────────────────────
-if(ON)
+# 当 SuiteSparse 支持来自 vendored 导出目标（umfpack_vendored/klu_vendored，
+# 随 mipsolversTargets 安装）时，跳过系统 SuiteSparse 的重新发现。
+if(ON AND NOT ON)
   set(_ms_ss_libs)
   find_package(PkgConfig QUIET)
   if(PKG_CONFIG_FOUND)
@@ -156,7 +186,9 @@ if(OFF)
 endif()
 
 # ── Ipopt / MUMPS（Apple 平台）────────────────────────────────────────────────
-if(ON AND APPLE)
+# 仅当构建时确实使用了 Homebrew ipopt cellar 的 MUMPS（非 vendored 构建）时，
+# 才在消费者机器上追加这些 /opt/homebrew 传递依赖路径。
+if(ON AND APPLE AND OFF)
   # 在 Homebrew ipopt cellar 中查找 MUMPS 等传递依赖
   set(_ms_ipopt_mumps_dir "/opt/homebrew/opt/ipopt/lib")
   set(_ms_ipopt_deps)

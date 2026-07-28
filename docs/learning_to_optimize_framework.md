@@ -1022,7 +1022,7 @@ selection, and solver-state representation learning.
 
 The intended solver roles are now:
 
-- Native branch-and-cut with `BCOptions::use_vendored_highs_lp_kernel=false`:
+- Native branch-and-cut with `BCOptions::lp_kernel_backend=LpKernelBackend::ExperimentalNative`:
   primary L2O trace generator and policy-integration workbench. It uses the
   in-repository dual-simplex/IPM machinery, gives full observability, and can
   call learned callbacks at every native decision point.
@@ -1067,7 +1067,7 @@ guarded subset of the policy in StrictHiGHS or a production native profile.
 Native cut selector path:
 
 1. Run the native branch-and-cut path with the self-developed LP kernel:
-   `use_vendored_highs_lp_kernel=false`, `use_simplex_lp_nodes=true`, and
+   `lp_kernel_backend=LpKernelBackend::ExperimentalNative`, `use_simplex_lp_nodes=true`, and
    deterministic single-thread settings during trace generation.
 2. Wire `BCCallbacks::cut_selector` into the candidate-cut admission pipeline.
 3. Expose `BCCutCandidate` features for every generated candidate: cut family,

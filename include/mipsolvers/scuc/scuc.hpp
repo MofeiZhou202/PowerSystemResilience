@@ -211,15 +211,6 @@ struct SCUCConfig {
   /// continuous dispatch before branch-and-bound.
   bool enable_primal_repair{true};
 
-  /// Solve large SCUC instances with a compact commitment master and a
-  /// continuous dispatch/network subproblem.  The decomposition is also
-  /// enabled automatically when the monolithic formulation reaches
-  /// benders_auto_min_variables columns.
-  bool enable_benders_decomposition{false};
-  int benders_auto_min_variables{250000};  ///< 0 disables automatic selection
-  int benders_max_iterations{200};
-  double benders_cut_tolerance{1e-6};
-
   /// Big-M penalty for line/section flow slack variables (§2.6.3.14–2.6.3.15)
   double M1_line_slack_penalty{1.0e5};
 
@@ -290,24 +281,6 @@ struct SCUCSolveResult {
   double solve_time_sec{0.0};
   double mip_gap{0.0};
   int n_cuts_added{0};  ///< Pre-formulation market cuts added
-  int benders_iterations{0};
-  int benders_cuts_added{0};
-  int benders_master_variables{0};
-  long long benders_master_nodes{0};
-  long long benders_master_lp_solves{0};
-  int benders_master_warm_starts{0};
-  int benders_master_pseudocost_reuses{0};
-  double benders_master_solve_time_sec{0.0};
-  int benders_subproblem_variables{0};
-  int benders_subproblem_rows{0};
-  int benders_eliminated_binary_variables{0};
-  int benders_coupled_binary_variables{0};
-  long long benders_binary_coupling_nonzeros{0};
-  long long benders_incremental_rhs_updates{0};
-  int benders_subproblem_solves{0};
-  int benders_subproblem_warm_starts{0};
-  long long benders_subproblem_simplex_iterations{0};
-  double benders_subproblem_solve_time_sec{0.0};
 
   // Commitment-horizon variables: [ng][T_commit]
   Matrix2D commitment;  ///< Binary on/off per generator per commit-period

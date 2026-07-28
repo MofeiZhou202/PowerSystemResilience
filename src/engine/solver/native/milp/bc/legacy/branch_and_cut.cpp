@@ -582,8 +582,6 @@ class RootHighsOracleBasisOps : public BasisOps {
 
   SparseFactorTelemetry factor_telemetry() const override {
     SparseFactorTelemetry t;
-    t.backend_id = 101;
-    t.ft_backend = false;
     t.ft_valid = true;
     return t;
   }
@@ -1576,14 +1574,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   const bool strict_highs_lp_contract =
       highs_contract.strict_highs_lp_contract;
   const bool strict_highs_root_fixed_point =
-      requested_vendored_highs_lp && opt.auto_highs_root_pipeline;
+      strict_highs_lp_contract && opt.auto_highs_root_pipeline;
   const double highs_mip_feastol = strict_highs_lp_contract
       ? kHighsDefaultMipFeasibilityTolerance
       : opt.int_tol;
   const bool allow_vendored_root_frontier =
       highs_contract.allow_vendored_root_frontier;
   bool domain_heuristics = highs_contract.domain_heuristics;
-  VendoredHighsSfBackendScope vendored_sf_scope(requested_vendored_highs_lp);
 
   // ── P9.1: Forrest--Tomlin activation ──────────────────────────────────
   // When use_forrest_tomlin_updates is true, force the simplex factor
@@ -4993,23 +4990,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	  }
 
 	  root.x_relax = clamp_to_bounds(root_relax.primal.x, root.lb, root.ub);
+	  const Eigen::VectorXd certified_root_primal_x = root.x_relax;
 	  Eigen::VectorXd root_lp_source_x = root_relax.primal.x;
 	  auto refresh_root_lp_source_solution = [&]() {
-	    if (root_relax.simplex &&
-	        root_relax.simplex->basis.cached_sparse_basis) {
-	      if (auto highs =
-	              root_relax.simplex->basis.cached_sparse_basis->highs_handle()) {
-	        const HighsSolution& highs_sol = highs->getSolution();
-	        if (static_cast<int>(highs_sol.col_value.size()) >= n) {
-	          root_lp_source_x.resize(n);
-	          for (int j = 0; j < n; ++j) {
-	            root_lp_source_x[j] =
-	                highs_sol.col_value[static_cast<std::size_t>(j)];
-	          }
-	          return;
-	        }
-	      }
-	    }
+	    // The basis handle may own the scaled canonical standard-form model;
+	    // its first n columns are not an original-space primal vector. The LP
+	    // kernel publication audit already reconstructs root_relax.primal.x,
+	    // which is the only valid source for branching and heuristics.
 	    if (root_relax.primal.stats.success &&
 	        root_relax.primal.x.size() == n) {
 	      root_lp_source_x = root_relax.primal.x;
@@ -5100,6 +5087,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   if (!std::isfinite(root.bound)) {
     root.bound = objective_value(base_lp.c, root.x_relax, base_lp.sense);
   }
+	  if (bc_env_flag_enabled("MIPSOLVERS_BC_TIMELINE")) {
+	    fmt::print(stderr, "[B&C-ROOT-PRIMAL] bound={:.12g} x=[", root.bound);
+	    for (int j = 0; j < std::min(n, 8); ++j) {
+	      fmt::print(stderr, "{}{}", j == 0 ? "" : ",", root.x_relax[j]);
+	    }
+	    fmt::print(stderr, "]\n");
+	  }
 	  if (!std::isfinite(root.bound)) {
 	    out.stats.status = bc_status::kRootRelaxationNanObjective;
 	    join_root_background_tasks();
@@ -5219,8 +5213,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     }
   }
 
-  // Repeated native solves (for example, a Benders master with one new row)
-  // keep the same original columns.  Import learned directional pseudocosts
+  // Repeated native solves with unchanged original columns can import learned
+  // directional pseudocosts
   // through the PaPILO original-to-reduced map instead of relearning them.
   if (opt.highs_pseudocost_warm_start &&
       !opt.highs_pseudocost_warm_start->empty()) {
@@ -8996,12 +8990,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    if (simplex->basis.cached_sparse_basis) {
 	      bh->cached_sparse_basis = simplex->basis.cached_sparse_basis;
 	    }
-	    bh->cached_x_basic =
-	        std::make_shared<const Eigen::VectorXd>(simplex->x_basic);
-	    bh->cached_x_std =
-	        std::make_shared<const Eigen::VectorXd>(simplex->x_std);
-		    bh->cached_max_objective = -oracle_obj_with_offset;
-	    bh->has_cached_max_objective = true;
 	    imported.simplex = simplex;
 	    imported.basis_hint = bh;
 		    root_lp = oracle_lp;
@@ -10172,10 +10160,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        compact_sf_opt.allow_cold_start = false;
 	        compact_sf_opt.use_partial_pricing = false;
 	        compact_sf_opt.perturb_degenerate_primal = false;
-	        compact_sf_opt.allow_vendored_highs_sf_backend =
-	            requested_vendored_highs_lp;
-	        compact_sf_opt.require_vendored_highs_sf_backend =
-	            requested_vendored_highs_lp;
+	        compact_sf_opt.lp_kernel_backend = root_solve_opt.lp_kernel_backend;
 	        compact_sf_opt.factor_backend =
 	            simplex_factor_backend_from_id(
 	                root_solve_opt.simplex_factor_backend);
@@ -10209,17 +10194,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	              compact_relax.basis_hint->cached_sparse_basis =
 	                  sf_res->basis.cached_sparse_basis;
 	            }
-	            if (sf_res->x_basic.size() > 0) {
-	              compact_relax.basis_hint->cached_x_basic =
-	                  std::make_shared<const Eigen::VectorXd>(sf_res->x_basic);
-	            }
-	            if (sf_res->x_std.size() > 0) {
-	              compact_relax.basis_hint->cached_x_std =
-	                  std::make_shared<const Eigen::VectorXd>(sf_res->x_std);
-	            }
-	            compact_relax.basis_hint->cached_max_objective =
-	                sf_res->max_objective;
-	            compact_relax.basis_hint->has_cached_max_objective = true;
 	          } else if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr ||
 	                     opt.verbose) {
 	            fmt::print(stderr,
@@ -12185,8 +12159,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           sf_opt.exact_dse_initialization = xpool_exact_dse;
           sf_opt.use_partial_pricing = false;
           sf_opt.perturb_degenerate_primal = false;
-          sf_opt.allow_vendored_highs_sf_backend = requested_vendored_highs_lp;
-          sf_opt.require_vendored_highs_sf_backend = requested_vendored_highs_lp;
+          sf_opt.lp_kernel_backend = root_solve_opt.lp_kernel_backend;
           sf_opt.factor_backend =
               simplex_factor_backend_from_id(root_solve_opt.simplex_factor_backend);
           StandardFormLP trial_sf;
@@ -12844,16 +12817,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             if (sf_res->basis.cached_sparse_basis) {
               bh->cached_sparse_basis = sf_res->basis.cached_sparse_basis;
             }
-            if (sf_res->x_basic.size() > 0) {
-              bh->cached_x_basic =
-                  std::make_shared<const Eigen::VectorXd>(sf_res->x_basic);
-            }
-            if (sf_res->x_std.size() > 0) {
-              bh->cached_x_std =
-                  std::make_shared<const Eigen::VectorXd>(sf_res->x_std);
-            }
-            bh->cached_max_objective = sf_res->max_objective;
-            bh->has_cached_max_objective = true;
             pool_relax.basis_hint = bh;
 	          } else {
 	            // Warm-start failed — fall back to full solve with IPM
@@ -14382,7 +14345,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         extended_hint->rows = cut_sf_m;
         extended_hint->cols = cut_sf_n;
         // Invalidate cached data that doesn't match new dimensions.
-        extended_hint->cached_inverse.reset();
         extended_hint->cached_sparse_basis.reset();
         extended_hint->cached_reduced_costs.reset();
 
@@ -14404,6 +14366,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       }
 
       SimplexOptions simplex_opt;
+      simplex_opt.lp_kernel_backend = opt.lp_kernel_backend;
       simplex_opt.max_iter = std::max(opt.max_lp_iter * 10, 2000);
       simplex_opt.feasibility_tol = std::max(1e-10, opt.lp_tol * 0.1);
       simplex_opt.optimality_tol = std::max(1e-10, opt.lp_tol * 0.1);
@@ -14464,10 +14427,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       root_relax.dual_bound = simplex_res->result.stats.objective;
       root_relax.simplex = simplex_res;
       auto cut_basis = std::make_shared<SimplexBasis>(simplex_res->basis);
-      if (simplex_res->basis_inverse.rows() > 0) {
-        cut_basis->cached_inverse =
-            std::make_shared<const Eigen::MatrixXd>(simplex_res->basis_inverse);
-      }
       cut_basis->cached_reduced_costs =
           std::make_shared<const Eigen::VectorXd>(simplex_res->reduced_costs);
       if (simplex_res->basis.cached_sparse_basis) {
@@ -14892,7 +14851,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       extended_hint->at_upper = std::move(new_at_upper);
       extended_hint->rows = xo_m;
       extended_hint->cols = xo_n;
-      extended_hint->cached_inverse.reset();
       extended_hint->cached_sparse_basis.reset();
       extended_hint->cached_reduced_costs.reset();
       // Validate basis
@@ -14929,6 +14887,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     }
 
     SimplexOptions xo_opt;
+    xo_opt.lp_kernel_backend = opt.lp_kernel_backend;
     xo_opt.max_iter = std::max(opt.max_lp_iter * 10, 2000);
     xo_opt.feasibility_tol = std::max(1e-10, opt.lp_tol * 0.1);
     xo_opt.optimality_tol = std::max(1e-10, opt.lp_tol * 0.1);
@@ -14963,9 +14922,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       xo_basis->sf_n_slack = xover_res->form.n_slack;
       xo_basis->sf_n_surplus = xover_res->form.n_surplus;
       xo_basis->sf_n_artificial = xover_res->form.n_artificial;
-      if (xover_res->basis_inverse.rows() > 0)
-        xo_basis->cached_inverse =
-            std::make_shared<const Eigen::MatrixXd>(xover_res->basis_inverse);
       xo_basis->cached_reduced_costs =
           std::make_shared<const Eigen::VectorXd>(xover_res->reduced_costs);
       if (xover_res->basis.cached_sparse_basis) {
@@ -14985,6 +14941,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   if (opt.use_ipm_root && out.bc_stats.cuts_added == 0 &&
       presolved_m > 5000 && presolved_m <= 10000) {
     SimplexOptions handoff_opt;
+    handoff_opt.lp_kernel_backend = opt.lp_kernel_backend;
     handoff_opt.max_iter = std::max(opt.max_lp_iter * 10, 4000);
     handoff_opt.feasibility_tol = std::max(1e-10, opt.lp_tol * 0.1);
     handoff_opt.optimality_tol = std::max(1e-10, opt.lp_tol * 0.1);
@@ -15009,10 +14966,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       handoff_basis->sf_n_slack = handoff_res->form.n_slack;
       handoff_basis->sf_n_surplus = handoff_res->form.n_surplus;
       handoff_basis->sf_n_artificial = handoff_res->form.n_artificial;
-      if (handoff_res->basis_inverse.rows() > 0) {
-        handoff_basis->cached_inverse =
-            std::make_shared<const Eigen::MatrixXd>(handoff_res->basis_inverse);
-      }
       handoff_basis->cached_reduced_costs =
           std::make_shared<const Eigen::VectorXd>(handoff_res->reduced_costs);
       if (handoff_res->basis.cached_sparse_basis) {
@@ -16382,10 +16335,46 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 
 	  root_incumbent_fixed_point_hook = run_root_incumbent_propagation;
 
-		  note_root_subsolve(
+	  note_root_subsolve(
 	      "root_relax",
 	      std::chrono::duration<double, std::milli>(t_root1 - t_root0).count(),
 	      root_relax.primal.stats.success && root_relax.primal.x.size() == n);
+
+	  // An integral optimal root LP is already a globally valid MIP incumbent.
+	  // Register it before repair heuristics: their feasibility objectives may
+	  // return a different, worse integral point even when no repair is needed.
+	  bool integral_root_lp = certified_root_primal_x.size() == n;
+	  for (int col : declared_branchable_indices) {
+	    if (col < 0 || col >= n ||
+	        std::abs(certified_root_primal_x[col] -
+	                 std::round(certified_root_primal_x[col])) >
+	            opt.int_tol) {
+	      integral_root_lp = false;
+	      break;
+	    }
+	  }
+	  if (integral_root_lp &&
+	      satisfies_with_bounds(base_lp, certified_root_primal_x, root.lb, root.ub,
+	                            std::max(1e-7, opt.heuristic_feasibility_tol))) {
+	    const double root_incumbent_obj =
+	        objective_value(base_lp.c, certified_root_primal_x, base_lp.sense);
+	    const bool adopted_integral_root = adopt_root_incumbent(
+	        "integral_root_lp", certified_root_primal_x, root_incumbent_obj);
+	    if (trace_bc_timeline) {
+	      fmt::print(stderr,
+	                 "[B&C-INTEGRAL-ROOT] adopted={} obj={:.12g} "
+	                 "current_bound={:.12g}\n",
+	                 adopted_integral_root ? 1 : 0, root_incumbent_obj,
+	                 root.bound);
+	    }
+	  } else if (trace_bc_timeline) {
+	    fmt::print(stderr,
+	               "[B&C-INTEGRAL-ROOT] adopted=0 integral={} feasible=0 "
+	               "bounds0=[{:.12g},{:.12g}] bounds1=[{:.12g},{:.12g}]\n",
+	               integral_root_lp ? 1 : 0,
+	               n > 0 ? root.lb[0] : 0.0, n > 0 ? root.ub[0] : 0.0,
+	               n > 1 ? root.lb[1] : 0.0, n > 1 ? root.ub[1] : 0.0);
+	  }
 
 	  if (!strict_highs_lp_contract &&
       has_verified_root_cutoff && verified_root_cutoff_x.size() == n) {
@@ -16619,6 +16608,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       StandardFormLP repair_sf = ensure_base_sf();
       update_standard_form_bounds(repair_sf, base_lp, repair_lb, repair_ub);
       SimplexOptions repair_opt;
+      repair_opt.lp_kernel_backend = opt.lp_kernel_backend;
       repair_opt.max_iter = std::min(300, std::max(50, static_cast<int>(repair_sf.A.rows()) / 8));
       repair_opt.feasibility_tol = 1e-7;
       repair_opt.optimality_tol = 1e-7;
@@ -16917,6 +16907,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       StandardFormLP repair_sf = ensure_base_sf();
       update_standard_form_bounds(repair_sf, base_lp, repair_lb, repair_ub);
       SimplexOptions repair_opt;
+      repair_opt.lp_kernel_backend = opt.lp_kernel_backend;
       repair_opt.max_iter = std::min(200, static_cast<int>(ensure_base_sf().A.rows()) / 10);
       repair_opt.feasibility_tol = 1e-7;
       repair_opt.optimality_tol = 1e-7;
@@ -17137,6 +17128,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           StandardFormLP pump_sf = ensure_base_sf();
           update_standard_form_bounds(pump_sf, base_lp, pump_lb, pump_ub);
           SimplexOptions pump_opt;
+          pump_opt.lp_kernel_backend = opt.lp_kernel_backend;
           pump_opt.max_iter = std::max(opt.max_lp_iter * 5, 1000);
           pump_opt.feasibility_tol = 1e-7;
           pump_opt.optimality_tol = 1e-7;
@@ -17390,9 +17382,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           }
         }
         // Solve the pump LP with primal simplex, reusing the warm basis.
-        // Cost-only change: basis is primal feasible, dual-infeasible → primal
-        // simplex path is natural. reuse_factorization=true skips UMFPACK
-        // refactor (A unchanged). Pump cost is in LP user convention — pass
+        // Cost-only change: basis is primal feasible and dual-infeasible.
+        // Pump cost is in LP user convention — pass
         // via update_standard_form_cost which applies sense + Ruiz scaling.
         update_standard_form_cost(pump_sf, base_lp.sense, pump_c);
 
@@ -17400,11 +17391,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         SimplexBasis* hint_raw = nullptr;
         if (pump_basis) {
           pump_basis->cached_reduced_costs.reset();
-          pump_basis->has_cached_obj_offset = false;
           hint_raw = pump_basis.get();
         }
 
         SimplexOptions pump_sopt;
+        pump_sopt.lp_kernel_backend = opt.lp_kernel_backend;
         // Pump simplex: tight iter cap. After a cost swap the basis is
         // primal feasible / dual infeasible, and primal simplex must pivot
         // away every wrong-sign reduced cost. On large m this can be tens
@@ -17417,8 +17408,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         pump_sopt.feasibility_tol = 1e-7;
         pump_sopt.optimality_tol = 1e-7;
         pump_sopt.allow_cold_start = false;  // don't let simplex burn time on cold start
-        pump_sopt.prefer_dual_simplex_reopt = false;
-        pump_sopt.reuse_factorization = (hint_raw != nullptr);
         pump_sopt.verbose = false;
 
         auto t_obj_pump0 = std::chrono::steady_clock::now();
@@ -17434,7 +17423,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         if (simplex_pump_enabled) {
           update_standard_form_cost(pump_sf, base_lp.sense, pump_c);
           hint_raw->cached_reduced_costs.reset();
-          hint_raw->has_cached_obj_offset = false;
           spx_res = solve_lp_from_sf(pump_sf, pump_sopt, hint_raw);
           tried_simplex = true;
         }
@@ -17623,7 +17611,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           sub_opt.branching = opt.branching;
           sub_opt.node_sel = opt.node_sel;
           sub_opt.use_simplex_lp_nodes = true;
-          sub_opt.use_vendored_highs_lp_kernel = requested_vendored_highs_lp;
+          sub_opt.lp_kernel_backend = opt.lp_kernel_backend;
           sub_opt.use_ipm_root = false;
           sub_opt.use_ipm_nodes = false;
           sub_opt.use_feasibility_pump = false;
@@ -17801,10 +17789,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     // cutoff only exposes an intermediate objective, not a certified bound.
     cts->par_simplex_opt.incumbent_bound = nullptr;
     cts->par_simplex_opt.incumbent_check_interval = 0;
-    cts->par_simplex_opt.allow_vendored_highs_sf_backend =
-        requested_vendored_highs_lp;
-    cts->par_simplex_opt.require_vendored_highs_sf_backend =
-        requested_vendored_highs_lp;
+    cts->par_simplex_opt.lp_kernel_backend = opt.lp_kernel_backend;
     cts->par_simplex_opt.factor_backend =
         simplex_factor_backend_from_id(opt.simplex_factor_backend);
     apply_bc_first_class_simplex_state(cts->par_simplex_opt,
@@ -17907,8 +17892,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   // Two-phase strategy:
   //   Phase 1 (IPM): Use IPM with warm-start for fast LP re-solves (~20ms
   //     each vs ~100ms with simplex). Tries fix-all-first before batches.
-  //   Phase 2 (Simplex fallback): If IPM fails, uses simplex with
-  //     reuse_factorization for reduced per-LP cost.
+  //   Phase 2 (Simplex fallback): If IPM fails, uses a simplex warm start.
   // ════════════════════════════════════════════════════════════════════════
 	  // Always run prog-round when the incumbent gap is proof-relevant.
 	  // On low-fractionality roots a very small incumbent improvement can close
@@ -18095,6 +18079,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       auto solve_fast_prog_lp = [&]() -> bool {
         update_standard_form_bounds(fast_prog_sf, base_lp, fast_lb, fast_ub);
         SimplexOptions spx_opt;
+        spx_opt.lp_kernel_backend = opt.lp_kernel_backend;
         spx_opt.max_iter = 2000;
         spx_opt.feasibility_tol = 1e-7;
         spx_opt.optimality_tol = 1e-7;
@@ -18112,9 +18097,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         if (!res.result.stats.success || res.result.x.size() != n) return false;
         last_good_x = clamp_to_bounds(res.result.x, root.lb, root.ub);
         auto nb = std::make_shared<SimplexBasis>(res.basis);
-        if (res.shared_binv) nb->cached_inverse = res.shared_binv;
-        else if (res.basis_inverse.rows() > 0)
-          nb->cached_inverse = std::make_shared<const Eigen::MatrixXd>(std::move(res.basis_inverse));
         nb->cached_reduced_costs =
             std::make_shared<const Eigen::VectorXd>(std::move(res.reduced_costs));
         fast_basis = nb;
@@ -18284,6 +18266,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         auto solve_prog_lp = [&]() -> bool {
           update_standard_form_bounds(prog_sf, base_lp, prog_lb, prog_ub);
           SimplexOptions spx_opt;
+          spx_opt.lp_kernel_backend = opt.lp_kernel_backend;
           spx_opt.max_iter = 2000;
           spx_opt.feasibility_tol = 1e-7;
           spx_opt.optimality_tol = 1e-7;
@@ -18301,9 +18284,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           if (!res.result.stats.success || res.result.x.size() != n) return false;
           last_good_x = clamp_to_bounds(res.result.x, root.lb, root.ub);
           auto nb = std::make_shared<SimplexBasis>(res.basis);
-          if (res.shared_binv) nb->cached_inverse = res.shared_binv;
-          else if (res.basis_inverse.rows() > 0)
-            nb->cached_inverse = std::make_shared<const Eigen::MatrixXd>(std::move(res.basis_inverse));
           nb->cached_reduced_costs =
               std::make_shared<const Eigen::VectorXd>(std::move(res.reduced_costs));
           prog_basis = nb;
@@ -18517,6 +18497,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           auto solve_polish_lp = [&]() -> bool {
             update_standard_form_bounds(prog_sf, base_lp, prog_lb, prog_ub);
             SimplexOptions spx_opt;
+            spx_opt.lp_kernel_backend = opt.lp_kernel_backend;
             spx_opt.max_iter = 2000;
             spx_opt.feasibility_tol = 1e-7;
             spx_opt.optimality_tol = 1e-7;
@@ -18534,9 +18515,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             if (!res.result.stats.success || res.result.x.size() != n) return false;
             last_good_x = clamp_to_bounds(res.result.x, root.lb, root.ub);
             auto nb = std::make_shared<SimplexBasis>(res.basis);
-            if (res.shared_binv) nb->cached_inverse = res.shared_binv;
-            else if (res.basis_inverse.rows() > 0)
-              nb->cached_inverse = std::make_shared<const Eigen::MatrixXd>(std::move(res.basis_inverse));
             nb->cached_reduced_costs =
                 std::make_shared<const Eigen::VectorXd>(std::move(res.reduced_costs));
             prog_basis = nb;
@@ -19080,6 +19058,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   {  // LP Diving Heuristic scope
     StandardFormLP dive_sf = ensure_base_sf();
     SimplexOptions dive_opt;
+    dive_opt.lp_kernel_backend = opt.lp_kernel_backend;
     dive_opt.max_iter = 1000;  // Aggressive cap: normal dive LPs need 30-450 iters.
     dive_opt.allow_cold_start = false;  // Prevents expensive cold start fallback.
     dive_opt.feasibility_tol = std::max(1e-10, opt.lp_tol * 0.1);
@@ -19227,7 +19206,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             if (repair_res.result.stats.success && repair_res.result.x.size() == n) {
               dive_x = clamp_to_bounds(repair_res.result.x, dive_lb, dive_ub);
               auto db = std::make_shared<SimplexBasis>(repair_res.basis);
-              if (repair_res.shared_binv) db->cached_inverse = repair_res.shared_binv;
               db->cached_reduced_costs =
                   std::make_shared<const Eigen::VectorXd>(std::move(repair_res.reduced_costs));
               dive_basis = db;
@@ -19432,7 +19410,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             if (!has_incumbent || dive_lp_obj < incumbent_obj - 1e-9) {
               dive_x = clamp_to_bounds(dive_res.result.x, dive_lb, dive_ub);
               auto db = std::make_shared<SimplexBasis>(dive_res.basis);
-              if (dive_res.shared_binv) db->cached_inverse = dive_res.shared_binv;
               db->cached_reduced_costs =
                   std::make_shared<const Eigen::VectorXd>(std::move(dive_res.reduced_costs));
               dive_basis = db;
@@ -19487,7 +19464,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                 (!has_incumbent || alt_res.result.stats.objective < incumbent_obj - 1e-9)) {
               dive_x = clamp_to_bounds(alt_res.result.x, dive_lb, dive_ub);
               auto db = std::make_shared<SimplexBasis>(alt_res.basis);
-              if (alt_res.shared_binv) db->cached_inverse = alt_res.shared_binv;
               db->cached_reduced_costs =
                   std::make_shared<const Eigen::VectorXd>(std::move(alt_res.reduced_costs));
               dive_basis = db;
@@ -19541,7 +19517,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
               if (fl_res.result.stats.success && fl_res.result.x.size() == n) {
                 dive_x = clamp_to_bounds(fl_res.result.x, dive_lb, dive_ub);
                 auto db = std::make_shared<SimplexBasis>(fl_res.basis);
-                if (fl_res.shared_binv) db->cached_inverse = fl_res.shared_binv;
                 db->cached_reduced_costs =
                     std::make_shared<const Eigen::VectorXd>(std::move(fl_res.reduced_costs));
                 dive_basis = db;
@@ -19909,7 +19884,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           std::string rd_status = rd_sx.result.stats.status;
           if (rd_ok && rd_x.size() == n) {
             auto db = std::make_shared<SimplexBasis>(rd_sx.basis);
-            if (rd_sx.shared_binv) db->cached_inverse = rd_sx.shared_binv;
             dive_basis = db;
           }
           if (!rd_ok) {
@@ -20108,7 +20082,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         lns_opt.branching = opt.branching;
         lns_opt.node_sel = opt.node_sel;
         lns_opt.use_simplex_lp_nodes = true;
-        lns_opt.use_vendored_highs_lp_kernel = requested_vendored_highs_lp;
+        lns_opt.lp_kernel_backend = opt.lp_kernel_backend;
         lns_opt.use_ipm_root = false;
         lns_opt.use_ipm_nodes = false;
         lns_opt.use_feasibility_pump = false;
@@ -20288,7 +20262,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       sub_opt.branching = opt.branching;
       sub_opt.node_sel = opt.node_sel;
       sub_opt.use_simplex_lp_nodes = true;
-      sub_opt.use_vendored_highs_lp_kernel = requested_vendored_highs_lp;
+      sub_opt.lp_kernel_backend = opt.lp_kernel_backend;
       sub_opt.use_ipm_root = false;
       sub_opt.use_ipm_nodes = false;
       sub_opt.use_feasibility_pump = false;
@@ -20391,15 +20365,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    sub_lp_opt.optimality_tol = std::max(1e-10, opt.lp_tol * 0.1);
     sub_lp_opt.verbose = false;
     sub_lp_opt.allow_cold_start = true;
-    sub_lp_opt.reuse_factorization = false;
     sub_lp_opt.factor_backend =
         simplex_factor_backend_from_id(opt.simplex_factor_backend);
     sub_lp_opt.incumbent_bound = &sub_incumbent_bound;
     sub_lp_opt.incumbent_check_interval = 5;
 	    sub_lp_opt.fallback_basis = seed_basis.get();
-	    sub_lp_opt.allow_vendored_highs_sf_backend = requested_vendored_highs_lp;
-	    sub_lp_opt.require_vendored_highs_sf_backend =
-	        requested_vendored_highs_lp && !has_lp_override;
+	    sub_lp_opt.lp_kernel_backend = opt.lp_kernel_backend;
 
 	    const LPModel& sub_lp_source = has_lp_override ? *lp_override : base_lp;
 	    if (static_cast<int>(sub_lp_source.vars.size()) != n) {
@@ -20693,7 +20664,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		        apply_node_bounds(node_lp.vars, cur.lb, cur.ub);
 		        BCOptions node_lp_opt = root_solve_opt;
 		        node_lp_opt.use_simplex_lp_nodes = true;
-		        node_lp_opt.use_vendored_highs_lp_kernel = true;
+		        node_lp_opt.lp_kernel_backend = LpKernelBackend::HiGHS;
 		        node_lp_opt.use_ipm_root = false;
 		        node_lp_opt.use_ipm_nodes = false;
 		        node_lp_opt.suppress_vendored_highs_root_frontier = false;
@@ -20759,7 +20730,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		          apply_node_bounds(retry_lp.vars, cur.lb, cur.ub);
 		          BCOptions retry_opt = root_solve_opt;
 		          retry_opt.use_simplex_lp_nodes = true;
-		          retry_opt.use_vendored_highs_lp_kernel = true;
+		          retry_opt.lp_kernel_backend = LpKernelBackend::HiGHS;
 		          retry_opt.use_ipm_root = false;
 		          retry_opt.use_ipm_nodes = false;
 		          retry_opt.suppress_vendored_highs_root_frontier = false;
@@ -20821,30 +20792,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		      cur_basis->sf_n_artificial = lp_res.form.n_artificial;
 		      if (cur.basis_hint) cur_basis->try_share_indices_from(*cur.basis_hint);
 		      cur_basis->compact_indices_storage();
-		      if (lp_res.shared_binv) {
-		        cur_basis->cached_inverse = lp_res.shared_binv;
-		      } else if (lp_res.basis_inverse.rows() > 0) {
-		        cur_basis->cached_inverse =
-		            std::make_shared<const Eigen::MatrixXd>(
-		                std::move(lp_res.basis_inverse));
-		      }
 		      if (lp_res.reduced_costs.size() > 0) {
 		        cur_basis->cached_reduced_costs =
 		            std::make_shared<const Eigen::VectorXd>(
 		                std::move(lp_res.reduced_costs));
 		      }
-		      if (lp_res.x_basic.size() > 0) {
-		        cur_basis->cached_x_basic =
-		            std::make_shared<const Eigen::VectorXd>(
-		                std::move(lp_res.x_basic));
-		      }
-		      if (lp_res.x_std.size() > 0) {
-		        cur_basis->cached_x_std =
-		            std::make_shared<const Eigen::VectorXd>(
-		                std::move(lp_res.x_std));
-		      }
-		      cur_basis->cached_max_objective = lp_res.max_objective;
-		      cur_basis->has_cached_max_objective = lp_res.x_basic.size() > 0;
 		      cur.basis_hint = cur_basis;
 
 		      if (!local_trail_completion && std::isfinite(local_best) &&
@@ -21135,7 +21087,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     sub_opt.branching = opt.branching;
     sub_opt.node_sel = NodeSelection::Hybrid;
     sub_opt.use_simplex_lp_nodes = true;
-    sub_opt.use_vendored_highs_lp_kernel = requested_vendored_highs_lp;
+    sub_opt.lp_kernel_backend = opt.lp_kernel_backend;
     sub_opt.use_ipm_root = false;
     sub_opt.use_ipm_nodes = false;
     sub_opt.use_feasibility_pump = false;
@@ -22041,8 +21993,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     probe_opt.optimality_tol = std::max(1e-10, opt.lp_tol * 0.1);
     probe_opt.verbose = false;
     probe_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
-    probe_opt.allow_vendored_highs_sf_backend = requested_vendored_highs_lp;
-    probe_opt.require_vendored_highs_sf_backend = requested_vendored_highs_lp;
+    probe_opt.lp_kernel_backend = opt.lp_kernel_backend;
     apply_bc_first_class_simplex_state(probe_opt, /*allow_frontier_remap=*/true);
     auto ensure_probe_sf = [&]() -> StandardFormLP& {
       if (!probe_sf_ptr) probe_sf_ptr = std::make_unique<StandardFormLP>(ensure_base_sf());
@@ -22432,13 +22383,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                 root.bound = cutoff_candidate_bound;
                 auto cutoff_basis = std::make_shared<SimplexBasis>(cutoff_res.basis);
                 cutoff_basis->compact_indices_storage();
-                if (cutoff_res.shared_binv) {
-                  cutoff_basis->cached_inverse = cutoff_res.shared_binv;
-                } else if (cutoff_res.basis_inverse.rows() > 0) {
-                  cutoff_basis->cached_inverse =
-                      std::make_shared<const Eigen::MatrixXd>(
-                          cutoff_res.basis_inverse);
-                }
                 cutoff_basis->cached_reduced_costs =
                     std::make_shared<const Eigen::VectorXd>(
                         cutoff_res.reduced_costs);
@@ -22601,12 +22545,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           root.bound = ib_candidate_bound;
           auto ib_basis = std::make_shared<SimplexBasis>(ib_res.basis);
           ib_basis->compact_indices_storage();
-          if (ib_res.shared_binv) {
-            ib_basis->cached_inverse = ib_res.shared_binv;
-          } else if (ib_res.basis_inverse.rows() > 0) {
-            ib_basis->cached_inverse =
-                std::make_shared<const Eigen::MatrixXd>(ib_res.basis_inverse);
-          }
           ib_basis->cached_reduced_costs =
               std::make_shared<const Eigen::VectorXd>(ib_res.reduced_costs);
           root.basis_hint = ib_basis;
@@ -22855,9 +22793,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             root_basis->try_share_indices_from(*root.basis_hint);
           }
           root_basis->compact_indices_storage();
-          if (res.shared_binv) {
-            root_basis->cached_inverse = res.shared_binv;
-          }
           root_basis->cached_reduced_costs =
               std::make_shared<const Eigen::VectorXd>(std::move(res.reduced_costs));
           root.basis_hint = root_basis;
@@ -23030,7 +22965,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             root_basis->try_share_indices_from(*rc_root_basis_before);
           }
           root_basis->compact_indices_storage();
-          if (rc_res->shared_binv) root_basis->cached_inverse = rc_res->shared_binv;
           root_basis->cached_reduced_costs =
               std::make_shared<const Eigen::VectorXd>(rc_res->reduced_costs);
           rc_accept_relax.basis_hint = root_basis;
@@ -23446,8 +23380,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   simplex_opt.incumbent_bound = nullptr;
   simplex_opt.incumbent_check_interval = 0;
   simplex_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
-  simplex_opt.allow_vendored_highs_sf_backend = requested_vendored_highs_lp;
-  simplex_opt.require_vendored_highs_sf_backend = requested_vendored_highs_lp;
+  simplex_opt.lp_kernel_backend = opt.lp_kernel_backend;
   apply_bc_first_class_simplex_state(simplex_opt, /*allow_frontier_remap=*/true);
 
   // Pre-compute row-major sparse matrices for bound propagation (avoids
@@ -23478,8 +23411,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   int seq_node_id = 0;
 
   // Unified solver dispatcher for sequential path.
-  // Always enable simplex fallback chain — with reuse_factorization=false,
-  // failures are rare (~14 out of 40K) and the chain handles them well.
+  // Always enable the simplex fallback chain; failures are rare and the
+  // chain handles them without changing the node proof contract.
   DispatcherConfig disp_config = DispatcherConfig::from_bc_options(opt);
   if (bc_first_class_lp_state_conformance_enabled()) {
     disp_config.exact_dse_initialization = true;
@@ -29110,7 +29043,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     sub_opt.branching = opt.branching;
     sub_opt.node_sel = NodeSelection::Hybrid;
     sub_opt.use_simplex_lp_nodes = true;
-    sub_opt.use_vendored_highs_lp_kernel = requested_vendored_highs_lp;
+    sub_opt.lp_kernel_backend = opt.lp_kernel_backend;
     sub_opt.use_ipm_root = false;
     sub_opt.use_ipm_nodes = false;
     sub_opt.use_feasibility_pump = false;
@@ -32893,6 +32826,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         node_sf_ref = build_node_sf_with_bounds(child, fix_lb, fix_ub);
         node_sf_cuts_augmented = true;
         SimplexOptions round_opt;
+        round_opt.lp_kernel_backend = opt.lp_kernel_backend;
         // Progressive iter budget: shallow nodes get fewer iters since the
         // rounding LP rarely converges before enough branching decisions.
         round_opt.max_iter = (child.depth < 6) ? 50 :
@@ -32946,6 +32880,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           node_sf_ref = build_node_sf_with_bounds(child, fix_lb, fix_ub);
         node_sf_cuts_augmented = true;
           SimplexOptions repair_opt;
+          repair_opt.lp_kernel_backend = opt.lp_kernel_backend;
           repair_opt.max_iter = (child.depth < 16) ? 120 : 300;
           repair_opt.allow_cold_start = false;
           repair_opt.feasibility_tol = 1e-8;
@@ -34268,7 +34203,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       StandardFormLP audit_sf = ensure_base_sf();
       update_standard_form_bounds(audit_sf, base_lp, cur.lb, cur.ub);
       SimplexOptions audit_opt = simplex_opt;
-      audit_opt.reuse_factorization = false;
       audit_opt.allow_cold_start = true;
       audit_opt.incumbent_bound = nullptr;
       auto audit_res = solve_lp_from_sf(audit_sf, audit_opt, cur.basis_hint.get());
@@ -34724,10 +34658,7 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
     // cutoff only exposes an intermediate objective, not a certified bound.
     cts->par_simplex_opt.incumbent_bound = nullptr;
     cts->par_simplex_opt.incumbent_check_interval = 0;
-    cts->par_simplex_opt.allow_vendored_highs_sf_backend =
-        requested_vendored_highs_lp;
-    cts->par_simplex_opt.require_vendored_highs_sf_backend =
-        requested_vendored_highs_lp;
+    cts->par_simplex_opt.lp_kernel_backend = opt.lp_kernel_backend;
     cts->par_simplex_opt.factor_backend =
         simplex_factor_backend_from_id(opt.simplex_factor_backend);
     apply_bc_first_class_simplex_state(cts->par_simplex_opt,

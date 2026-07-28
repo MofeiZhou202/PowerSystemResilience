@@ -11,6 +11,7 @@
 #include <Eigen/Sparse>
 
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/kernel/lp_kernel/backend.hpp"
 #include "mipsolvers/engine/solver/solver_adapter.hpp"
 
 class Highs;
@@ -101,15 +102,10 @@ inline SimplexFactorBackend simplex_factor_backend_from_id(int id) {
 }
 
 struct SparseFactorTelemetry {
-  int backend_id{0};
-  bool ft_backend{false};
   bool ft_valid{false};
   int ft_updates{0};
-  int eta_updates{0};
-  double min_pivot{0.0};
   double max_growth{1.0};
   double u_fill_ratio{1.0};
-  int refactor_generation{0};
 };
 
 struct SimplexOptions {
@@ -118,50 +114,27 @@ struct SimplexOptions {
   bool* time_limit_hit{nullptr};
   double feasibility_tol{1e-8};
   double optimality_tol{1e-8};
-  bool prefer_dual_simplex_reopt{true};
   bool verbose{false};
-  // When false, skip expensive cold-start for large problems when warm-start
-  // fails.  Set to false for tree node LPs (B&C prunes instead).
-  // Keep true for root LP / root cut re-solves where cold-start is required.
+  // Legacy ABI field. Cold versus warm is determined solely by whether a
+  // basis hint is supplied; a failed warm solve is never restarted cold.
   bool allow_cold_start{true};
   // Pointer to atomic incumbent bound for early termination in parallel B&C.
   // When non-null, simplex checks every incumbent_check_interval iterations and
   // aborts if obj >= *incumbent_bound (node will be pruned by caller).
   const std::atomic<double>* incumbent_bound{nullptr};
   int incumbent_check_interval{50};
-  // When true, primal simplex uses sector-based partial pricing for large LPs
-  // (n > 2000).  Disable for crossover cleanup where full pricing produces
-  // a more consistent basis for downstream Gomory cut generation.
+  // Legacy ABI field; the rewritten kernels use deterministic full pricing.
   bool use_partial_pricing{true};
-  // When true, sparse primal simplex applies the legacy 1e-6 primal
-  // perturbation to degenerate basic variables.  The first-class root LP path
-  // keeps this false and relies on deterministic pivot tie-breaking instead,
-  // since perturbing x_B changes the degenerate vertex/frontier consumed by
-  // cut and proof generation.
+  // Legacy ABI field; primal perturbation was removed.
   bool perturb_degenerate_primal{false};
-  // Fallback basis (e.g., root basis) to try warm-starting from before
-  // expensive cold-start.  When PATH_A fails with the primary hint, this
-  // basis is tried next.  Set by B&C dispatcher for tree node LPs.
+  // ABI compatibility only. The rewritten native kernel never retries a
+  // different basis after a failed warm start.
   const SimplexBasis* fallback_basis{nullptr};
-  // When true, reuse the cached SparseBasis LU factorization from the hint
-  // without refactorizing.  Safe when only bounds/RHS changed (A unchanged).
-  // Saves ~30ms per LP at m≈14000 by skipping UMFPACK numeric factorization.
-  bool reuse_factorization{false};
-  // When true, initialize dual steepest-edge weights exactly from the current
-  // basis by BTRAN instead of starting from unit weights when no persisted DSE
-  // state is available.  This is expensive, so callers use it only for
-  // root-LP conformance and HiGHS-style DSE/edge-weight diagnostics.
+  // Legacy ABI field. DSE state is reused only with an exact basis match;
+  // otherwise it is initialized exactly.
   bool exact_dse_initialization{false};
-  // When true, perform the guarded zero-step remap of degenerate original
-  // basic variables onto logical columns after optimality.  This is separate
-  // from DSE initialization: xpool append/refactor conformance should compare
-  // the native pivot state directly, while the first-class root LP path may
-  // explicitly conform the degenerate frontier consumed by cut generation.
+  // Legacy ABI fields; post-optimal frontier remapping was removed.
   bool enable_degenerate_frontier_remap{false};
-  // Explicitly suppress post-optimal degenerate frontier remap even when
-  // global conformance diagnostics are enabled.  Xpool append/refactor/full
-  // A/B solves use this so the consume gate observes the raw native pivot
-  // frontier instead of a repeatedly conformed diagnostic state.
   bool suppress_degenerate_frontier_remap{false};
   // Opt-in for root cut-pool resolves where the caller has appended only
   // <= rows to a scale-compatible standard form and made the new row slacks
@@ -169,53 +142,25 @@ struct SimplexOptions {
   // basis, so SparseBasis can reuse the parent factor for FTRAN/BTRAN instead
   // of rebuilding a large factorization.
   bool allow_incremental_row_append_factor{false};
-  // Use the vendored HiGHS simplex kernel for this already-built canonical
-  // standard-form LP. HiGHS is used only as an LP kernel; B&C ownership stays
-  // in native code. The result is accepted only after the SF audit passes.
-  bool allow_vendored_highs_sf_backend{false};
-  // When true, do not fall back to native simplex if the vendored SF backend
-  // rejects the solve. Root sub-MIP heuristics use this to keep the LP oracle
-  // and basis/frontier state identical to the main vendored HiGHS path.
-  bool require_vendored_highs_sf_backend{false};
+  // A HiGHS rejection is terminal; this field never describes a fallback
+  // chain. ExperimentalNative is an explicit development-only selection.
+  LpKernelBackend lp_kernel_backend{LpKernelBackend::HiGHS};
   // Selects which basis-factor backend SparseBasis should use.
   // Defaults to current production backend (A).
   SimplexFactorBackend factor_backend{SimplexFactorBackend::BackendA_UmfpackNative};
-  // ── Cold-start escalation chain (root-LP rescue) ─────────────────────────
-  // When a cold-start solve fails (or returns a numerically false "Optimal"
-  // whose original-space residual exceeds escalation_residual_tol), retry
-  // with increasingly conservative numerics:
-  //   level 0 — current behaviour (Ruiz 10 rounds, UMFPACK pivot tol 0.1);
-  //   level 1 — rebuild + Ruiz escalation_ruiz_rounds, UMFPACK pivot tol
-  //             escalation_umfpack_pivot_tolerance (true partial pivoting);
-  //   level 2 — KLU rescue backend (when compiled in; Stage 2).
-  // Escalation only applies to cold-start solves (allow_cold_start == true);
-  // warm-started tree node LPs are never retried.  0 disables escalation.
+  // Legacy ABI fields retained while downstream callers migrate. The rewritten
+  // native simplex executes exactly one numerical attempt and ignores all
+  // escalation level/backend fields. escalation_residual_tol remains the
+  // fail-closed original-space publication audit tolerance.
   int escalation_max_level{2};
   double escalation_umfpack_pivot_tolerance{1.0};
   int escalation_ruiz_rounds{25};
   // Acceptance threshold for the original-space feasibility audit applied to
   // cold-start results: max violation <= tol * max(1, |b|_inf, |beq|_inf).
   double escalation_residual_tol{1e-6};
-  // First escalation level attempted (default 0 = normal path).  Values > 0
-  // skip the cheaper levels; used to exercise the rescue backends directly
-  // (e.g. 2 = KLU rescue) in tests and diagnostics.
+  // Legacy ABI fields; numerical escalation and rescue backends were removed.
   int escalation_start_level{0};
-  // Separate escalation cap for the standard-form entry point
-  // (solve_lp_from_sf: cut re-solves, IPM-repair crossover).  Same level
-  // semantics as escalation_max_level; 0 disables SF-path escalation
-  // independently of the LPModel path.  Cold-start gating applies unchanged
-  // (warm node LPs with allow_cold_start == false are never retried).
   int escalation_max_level_sf{2};
-  // ── Phase I strategy (cold start) ────────────────────────────────────────
-  // 0 = Native legacy: uniform ±(|rc|+1) cost shifts in Dual Phase I.
-  // 1 = HiGHS-style: magnitude-aware randomized perturbations of costs / RHS
-  //     / finite bounds (mirroring HEkk::initialiseCost / initialiseBound,
-  //     deterministic seed), exact-zero cost shifts pinned at the dual
-  //     boundary (HEkkDual::shiftCost), and a restoration pass back to the
-  //     unperturbed problem before Phase II (HiGHS cleanup + continue).
-  //     Flag-gated for A/B evaluation; default stays 0 until benchmarks
-  //     justify a flip.  Overridable via env MIPSOLVERS_SIMPLEX_PHASE1.
-  int phase1_strategy{0};
 };
 
 struct SimplexBasis {
@@ -225,10 +170,6 @@ struct SimplexBasis {
   std::shared_ptr<const std::vector<int>> shared_indices;
   int rows{0};
   int cols{0};
-  // Cached basis inverse from the parent solve.  When present, child nodes
-  // can skip the O(m³) B.inverse() and reuse this directly (A is unchanged,
-  // only b/bounds differ between parent and child).
-  std::shared_ptr<const Eigen::MatrixXd> cached_inverse;
   // Cached reduced costs (depend only on basis/binv/c, not b).
   std::shared_ptr<const Eigen::VectorXd> cached_reduced_costs;
   // Column scale used by cached_reduced_costs. Native simplex stores reduced
@@ -236,24 +177,17 @@ struct SimplexBasis {
   // propagation consumes unscaled minimization col_dual, recovered as
   // col_dual[j] = -reduced_costs[j] / cached_col_scale[j].
   std::shared_ptr<const Eigen::VectorXd> cached_col_scale;
-  // Optional live simplex state for first-class root LP debugging.  These are
-  // deliberately optional because tree-node basis hints are numerous; root
-  // xpool code fills them only when it wants to continue from the same vertex
-  // after appending slack-basic rows.
-  std::shared_ptr<const Eigen::VectorXd> cached_x_basic;
-  std::shared_ptr<const Eigen::VectorXd> cached_x_std;
-  double cached_max_objective{0.0};
-  bool has_cached_max_objective{false};
   // Non-basic variable status: 1 = at upper bound, 0 = at lower bound.
   std::vector<char> at_upper;
-  // Cached max objective from dual variables (c_B^T * B^{-1} contribution
-  // that is independent of b, used to compute obj = this->dot(b)).
-  double cached_obj_offset{0.0};
-  bool has_cached_obj_offset{false};
   // Cached first-class standard-form basis operations.
   // Persisted across B&C node solves to avoid re-factorization when basis
   // indices are unchanged (only bounds differ between parent and child).
   std::shared_ptr<BasisOps> cached_sparse_basis;
+  // Move-safe dual steepest-edge state. Unlike cached_sparse_basis, these
+  // vectors do not retain a pointer to the StandardFormLP matrix and can be
+  // carried through LPModel-level result/certificate caches safely.
+  std::shared_ptr<const std::vector<double>> cached_dse_weights;
+  std::shared_ptr<const std::vector<int>> cached_dse_basis;
   // Eta count at the time cached_sparse_basis was persisted.
   // Siblings can detect mutation: if current eta_count > this, another consumer modified it.
   int persist_eta_count{0};
@@ -347,8 +281,6 @@ struct SimplexResult {
   StandardFormLP form;
   SimplexBasis basis;
   Eigen::MatrixXd basis_inverse;
-  // Shared basis inverse (avoids copy when parent basis yields primal feasibility).
-  std::shared_ptr<const Eigen::MatrixXd> shared_binv;
   Eigen::VectorXd x_std;
   Eigen::VectorXd x_basic;
   Eigen::VectorXd reduced_costs;
@@ -409,11 +341,10 @@ void update_standard_form_bounds(StandardFormLP& sf,
 // SimplexBasis hint referencing this sf remains structurally valid.
 //
 // Callers reusing a basis hint after a cost change MUST clear its stale
-// reduced-cost cache (hint.cached_reduced_costs.reset();
-// hint.has_cached_obj_offset = false;) because those depend on c_max.
+// reduced-cost cache (hint.cached_reduced_costs.reset()) because it depends
+// on c_max.
 // After a cost-only change, the basis is generally primal feasible but
-// dual-infeasible, so the primal simplex path is the natural re-optimizer
-// (pass SimplexOptions::prefer_dual_simplex_reopt = false).
+// dual-infeasible, so solve_lp_from_sf selects primal simplex reoptimization.
 void update_standard_form_cost(StandardFormLP& sf,
                                Sense sense,
                                const Eigen::VectorXd& new_c);
@@ -439,15 +370,13 @@ void update_standard_form_bounds_incremental(
 // Solve an LP from a pre-built StandardFormLP (avoids rebuilding from LPModel).
 SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
                                const SimplexOptions& opt = {},
-                               const SimplexBasis* basis_hint = nullptr,
-                               const std::vector<BoundChangeInfo>* bound_changes = nullptr);
+                               const SimplexBasis* basis_hint = nullptr);
 
 // Original-units feasibility audit for a standard-form solution x_std (the
 // scaled standard-form variable vector, as returned in SimplexResult::x_std).
 // Undoes the Ruiz row/column scaling recorded on sf, then accepts iff
 //   max(row residual, bound violation) <= tol * max(1, |b_orig|_inf).
-// Used by the solve_lp_from_sf escalation chain to reject numerically false
-// "Optimal" results; exposed for tests.
+// Used as the fail-closed publication audit; exposed for tests.
 bool sf_solution_residual_acceptable(const StandardFormLP& sf,
                                      const Eigen::VectorXd& x_std,
                                      double tol);
@@ -455,18 +384,12 @@ bool sf_solution_residual_acceptable(const StandardFormLP& sf,
 // Original-space feasibility audit for an LPModel solution x (as returned in
 // SolveResult::x).  Accepts iff
 //   max(row violation, bound violation) <= tol * max(1, |b|_inf, |beq|_inf).
-// Used by the cold-start escalation chain to reject numerically false
-// "Optimal" results; exposed for tests.
+// Used as the fail-closed publication audit; exposed for tests.
 bool lp_solution_residual_acceptable(const LPModel& lp,
                                      const Eigen::VectorXd& x,
                                      double tol);
 
-// Thread-local B&C integration switch for vendored HiGHS standard-form LPs.
-// Returns the previous value so callers can restore it with RAII.
-bool set_vendored_highs_sf_backend_thread_enabled(bool enabled);
-bool vendored_highs_sf_backend_thread_enabled();
-
-/// Dump and reset per-LP solve counters (warm-start / cold-start statistics).
+/// ABI-compatible no-op; the legacy PATH_A counters no longer exist.
 void dump_solve_lp_counters();
 
 // Perform BTRAN (B^{-T} * rhs) using a type-erased SparseBasis.

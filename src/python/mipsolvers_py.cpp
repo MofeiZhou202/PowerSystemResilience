@@ -1256,6 +1256,11 @@ Quick start
     .value("ImpliedBound", mipsolvers::engine::CutType::ImpliedBound)
     .value("All", mipsolvers::engine::CutType::All);
 
+  py::enum_<mipsolvers::engine::LpKernelBackend>(m_eng, "LpKernelBackend")
+    .value("HiGHS", mipsolvers::engine::LpKernelBackend::HiGHS)
+    .value("ExperimentalNative",
+           mipsolvers::engine::LpKernelBackend::ExperimentalNative);
+
   py::class_<mipsolvers::engine::BCOptions>(m_eng, "BCOptions", R"doc(
 Focused branch-and-cut options for L2O experiments and policy evaluation.
 The production solver remains C++; Python only chooses safe public knobs.
@@ -1276,7 +1281,22 @@ The production solver remains C++; Python only chooses safe public knobs.
     .def_readwrite("use_simplex_lp_nodes", &mipsolvers::engine::BCOptions::use_simplex_lp_nodes)
     .def_readwrite("use_ipm_root", &mipsolvers::engine::BCOptions::use_ipm_root)
     .def_readwrite("use_ipm_nodes", &mipsolvers::engine::BCOptions::use_ipm_nodes)
-    .def_readwrite("use_vendored_highs_lp_kernel", &mipsolvers::engine::BCOptions::use_vendored_highs_lp_kernel)
+    .def_readwrite("lp_kernel_backend",
+                   &mipsolvers::engine::BCOptions::lp_kernel_backend)
+    .def_property(
+        "use_vendored_highs_lp_kernel",
+        [](const mipsolvers::engine::BCOptions& opt) {
+          return mipsolvers::engine::uses_highs_lp_kernel(
+              opt.lp_kernel_backend);
+        },
+        [](mipsolvers::engine::BCOptions& opt, bool enabled) {
+          opt.lp_kernel_backend =
+              enabled
+                  ? mipsolvers::engine::LpKernelBackend::HiGHS
+                  : mipsolvers::engine::LpKernelBackend::ExperimentalNative;
+        },
+        "Deprecated compatibility alias; use lp_kernel_backend.")
+    .def_readwrite("strict_highs_mip_contract", &mipsolvers::engine::BCOptions::strict_highs_mip_contract)
     .def_readwrite("verbose", &mipsolvers::engine::BCOptions::verbose)
     .def_readwrite("accept_verified_warm_start_incumbent", &mipsolvers::engine::BCOptions::accept_verified_warm_start_incumbent)
     .def_readwrite("enable_feasibility_jump", &mipsolvers::engine::BCOptions::enable_feasibility_jump)

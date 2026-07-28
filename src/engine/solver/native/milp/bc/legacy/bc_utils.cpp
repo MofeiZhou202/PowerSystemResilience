@@ -4955,6 +4955,9 @@ int node_bound_propagation(const LPModel& lp,
   const int m_eq = static_cast<int>(Aeq_row.rows());
   const int n_vars = static_cast<int>(node_lb.size());
   int total_tightened = 0;
+  auto finite_domain_bound = [](double value) {
+    return std::isfinite(value) && std::abs(value) < 1e19;
+  };
 
   // Build column-to-row watchlists (O(nnz)) so subsequent rounds only revisit
   // rows affected by a bound change. This replaces the O(m * nnz_per_row)
@@ -5004,10 +5007,10 @@ int node_bound_propagation(const LPModel& lp,
           const double a = row_sign * it.value();
           if (std::abs(a) <= 1e-15) continue;
           if (a > 0.0) {
-            if (!std::isfinite(node_lb[j])) { has_inf = true; break; }
+            if (!finite_domain_bound(node_lb[j])) { has_inf = true; break; }
             min_activity += a * node_lb[j];
           } else {
-            if (!std::isfinite(node_ub[j])) { has_inf = true; break; }
+            if (!finite_domain_bound(node_ub[j])) { has_inf = true; break; }
             min_activity += a * node_ub[j];
           }
         }
@@ -5052,14 +5055,14 @@ int node_bound_propagation(const LPModel& lp,
         const double a = it.value();
         if (std::abs(a) <= 1e-15) continue;
         if (a > 0.0) {
-          if (!std::isfinite(node_lb[j])) has_inf_min = true;
+          if (!finite_domain_bound(node_lb[j])) has_inf_min = true;
           else min_activity += a * node_lb[j];
-          if (!std::isfinite(node_ub[j])) has_inf_max = true;
+          if (!finite_domain_bound(node_ub[j])) has_inf_max = true;
           else max_activity += a * node_ub[j];
         } else {
-          if (!std::isfinite(node_ub[j])) has_inf_min = true;
+          if (!finite_domain_bound(node_ub[j])) has_inf_min = true;
           else min_activity += a * node_ub[j];
-          if (!std::isfinite(node_lb[j])) has_inf_max = true;
+          if (!finite_domain_bound(node_lb[j])) has_inf_max = true;
           else max_activity += a * node_lb[j];
         }
       }
@@ -5137,6 +5140,9 @@ int node_bound_propagation_tracked(
   const int m_ineq = static_cast<int>(A_row.rows());
   const int m_eq = static_cast<int>(Aeq_row.rows());
   int total_tightened = 0;
+  auto finite_domain_bound = [](double value) {
+    return std::isfinite(value) && std::abs(value) < 1e19;
+  };
 
   for (int round = 0; round < max_rounds; ++round) {
     int round_tightened = 0;
@@ -5149,10 +5155,10 @@ int node_bound_propagation_tracked(
         const double a = it.value();
         if (std::abs(a) <= 1e-15) continue;
         if (a > 0.0) {
-          if (!std::isfinite(node_lb[j])) { has_inf = true; break; }
+          if (!finite_domain_bound(node_lb[j])) { has_inf = true; break; }
           min_activity += a * node_lb[j];
         } else {
-          if (!std::isfinite(node_ub[j])) { has_inf = true; break; }
+          if (!finite_domain_bound(node_ub[j])) { has_inf = true; break; }
           min_activity += a * node_ub[j];
         }
       }
@@ -5192,14 +5198,14 @@ int node_bound_propagation_tracked(
         const double a = it.value();
         if (std::abs(a) <= 1e-15) continue;
         if (a > 0.0) {
-          if (!std::isfinite(node_lb[j])) has_inf_min = true;
+          if (!finite_domain_bound(node_lb[j])) has_inf_min = true;
           else min_activity += a * node_lb[j];
-          if (!std::isfinite(node_ub[j])) has_inf_max = true;
+          if (!finite_domain_bound(node_ub[j])) has_inf_max = true;
           else max_activity += a * node_ub[j];
         } else {
-          if (!std::isfinite(node_ub[j])) has_inf_min = true;
+          if (!finite_domain_bound(node_ub[j])) has_inf_min = true;
           else min_activity += a * node_ub[j];
-          if (!std::isfinite(node_lb[j])) has_inf_max = true;
+          if (!finite_domain_bound(node_lb[j])) has_inf_max = true;
           else max_activity += a * node_lb[j];
         }
       }

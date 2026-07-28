@@ -393,7 +393,7 @@ SolveResult NativeNLPAdapter::solve_nlp(const NLPModel& prob) const {
 NativeBranchAndCutAdapter::NativeBranchAndCutAdapter(BCOptions opt) : opt_(std::move(opt)) {}
 
 BCOptions make_strict_highs_production_options(BCOptions opt) {
-  opt.use_vendored_highs_lp_kernel = true;
+  opt.lp_kernel_backend = LpKernelBackend::HiGHS;
   opt.auto_highs_root_pipeline = true;
   opt.enable_domain_heuristics = false;
   opt.accept_verified_warm_start_incumbent = true;

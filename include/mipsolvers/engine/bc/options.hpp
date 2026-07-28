@@ -12,6 +12,7 @@
 /// umbrella header `branch_and_cut.hpp`.
 
 #include "mipsolvers/engine/bc/enums.hpp"
+#include "mipsolvers/engine/kernel/lp_kernel/backend.hpp"
 
 #include <memory>
 #include <vector>
@@ -129,13 +130,15 @@ struct BCOptions {
   bool ipm_root_probe{true};
   int ipm_probe_max_iter{20};
   double ipm_probe_time_sec{5.0};
-  /// Use the self-contained embedded HiGHS simplex kernel for native B&C LP
-  /// relaxations.  The MIP tree, cuts, proof frontier, scheduling, and domain
-  /// heuristics remain native; HiGHS is used only as the LP numerical kernel.
-  bool use_vendored_highs_lp_kernel{false};
-  /// Internal scheduling guard: keep root LP/cut frontier on native simplex
-  /// while allowing vendored HiGHS for node/proof LPs. This prevents the
-  /// vendored degenerate root frontier from starving root cuts.
+  /// LP numerical backend. HiGHS is the production default;
+  /// ExperimentalNative is for kernel development only.
+  LpKernelBackend lp_kernel_backend{LpKernelBackend::HiGHS};
+  /// Explicitly opt into the legacy StrictHiGHS full-MIP state machine and
+  /// its associated MILP policy overrides. LP-kernel selection alone never
+  /// changes branching, cuts, heuristics, presolve, or full-MIP ownership.
+  bool strict_highs_mip_contract{false};
+  /// Development diagnostic only. Production keeps the HiGHS root frontier;
+  /// suppressing it would violate the selected LP-backend contract.
   bool suppress_vendored_highs_root_frontier{false};
   // Dual-simplex factor backend selector passed through to SimplexOptions.
   // 0 = BackendA_UmfpackNative (default)
@@ -597,7 +600,9 @@ struct BCOptions {
   /// on large generic roots: analytic-centre background LP, line-search
   /// rounding, and lock-count biased rounding. The trigger is based only on
   /// problem size, not on benchmark/domain metadata.
-  bool auto_highs_root_pipeline{true};
+  /// Explicit full-MIP delegation policy. This is independent of the LP
+  /// kernel choice above: native B&C with HiGHS LP numerics is the default.
+  bool auto_highs_root_pipeline{false};
 
   /// [D] Disable HiGHS symmetry detection (Nauty/Nauty-like).  UC/SCUC
   /// variables are not interchangeable (distinct cost curves, ramp rates,

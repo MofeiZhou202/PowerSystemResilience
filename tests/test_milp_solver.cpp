@@ -11,6 +11,7 @@
 #include "mipsolvers/engine/api/solver.hpp"
 #include "mipsolvers/engine/api/options.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/detail/bc_legacy_helpers.hpp"
 #include "mipsolvers/engine/detail/bc_utils.hpp"
 
 using namespace mipsolvers::engine;
@@ -220,13 +221,76 @@ TEST_CASE("MILP: warm start is accepted and maintains solution quality", "[milp]
 // ─── StrictHiGHS tests (improvements A, B, D) ─────────────────────────────
 //
 // These tests exercise the vendored-HiGHS LP kernel path
-// (BCOptions::use_vendored_highs_lp_kernel = true).  They verify:
+// (BCOptions::lp_kernel_backend = LpKernelBackend::HiGHS). They verify:
 //
 //   [D] mip_detect_symmetry=false – still finds the correct optimum.
 //   [A+B] Warm-start via dispatch LP + setSolution() – still finds the correct
 //         optimum, and nodes_explored with warm start <= nodes_explored cold.
 
 #include "mipsolvers/engine/bc/api.hpp"
+
+TEST_CASE("MILP LP backend selection is independent of StrictHiGHS policy",
+          "[milp][dispatch]") {
+  BCOptions opt;
+  REQUIRE(opt.lp_kernel_backend == LpKernelBackend::HiGHS);
+  REQUIRE_FALSE(opt.strict_highs_mip_contract);
+
+  opt.use_papilo_presolve = true;
+  opt.use_feasibility_pump = true;
+  opt.enable_reduced_cost_conflict_learning = false;
+  opt.require_tree_exhaustion_certificate = true;
+
+  const auto state = detail::apply_bc_strict_highs_contract(opt);
+  CHECK(state.requested_vendored_highs_lp);
+  CHECK_FALSE(state.strict_highs_lp_contract);
+  CHECK(opt.lp_kernel_backend == LpKernelBackend::HiGHS);
+  CHECK(opt.use_papilo_presolve);
+  CHECK(opt.use_feasibility_pump);
+  CHECK_FALSE(opt.enable_reduced_cost_conflict_learning);
+  CHECK(opt.require_tree_exhaustion_certificate);
+}
+
+TEST_CASE("MILP row propagation treats 1e20 bounds as infinity",
+          "[milp][propagation][regression]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(2);
+  lp.A.resize(1, 2);
+  lp.A.insert(0, 0) = -10.0;
+  lp.A.insert(0, 1) = -1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Constant(1, -10.0);
+  lp.Aeq.resize(0, 2);
+  lp.beq.resize(0);
+  lp.vars = {{VarType::Binary, 0.0, 1.0},
+             {VarType::Continuous, 0.0, 1e20}};
+
+  Eigen::VectorXd lb(2), ub(2);
+  lb << 0.0, 0.0;
+  ub << 1.0, 1e20;
+  CHECK(detail::node_bound_propagation(lp, lb, ub, 4) == 0);
+  CHECK(lb[0] == Approx(0.0));
+  CHECK(lb[1] == Approx(0.0));
+
+  Eigen::SparseMatrix<double, Eigen::RowMajor> a_row = lp.A;
+  Eigen::SparseMatrix<double, Eigen::RowMajor> aeq_row = lp.Aeq;
+  std::vector<BoundChangeInfo> changes;
+  CHECK(detail::node_bound_propagation_tracked(
+            lp, a_row, aeq_row, lb, ub, 4, changes) == 0);
+  CHECK(changes.empty());
+}
+
+TEST_CASE("StrictHiGHS MIP policy explicitly normalizes the LP backend",
+          "[milp][dispatch]") {
+  BCOptions opt;
+  opt.lp_kernel_backend = LpKernelBackend::ExperimentalNative;
+  opt.strict_highs_mip_contract = true;
+
+  const auto state = detail::apply_bc_strict_highs_contract(opt);
+  CHECK(state.requested_vendored_highs_lp);
+  CHECK(state.strict_highs_lp_contract);
+  CHECK(opt.lp_kernel_backend == LpKernelBackend::HiGHS);
+}
 
 // 10-item 0-1 knapsack used by the StrictHiGHS tests.
 //
@@ -268,7 +332,7 @@ static MIPModel make_knapsack_10() {
 TEST_CASE("MILP: StrictHiGHS [D] mip_detect_symmetry=false preserves correctness",
           "[milp][strict_highs]") {
   BCOptions opt;
-  opt.use_vendored_highs_lp_kernel = true;
+  opt.lp_kernel_backend = LpKernelBackend::HiGHS;
 
   MIPModel mip = make_knapsack_10();
   auto res = solve_milp_bc(mip, opt);
@@ -282,7 +346,7 @@ TEST_CASE("MILP: StrictHiGHS [D] mip_detect_symmetry=false preserves correctness
 TEST_CASE("MILP: native B&C reuses exported pseudocosts",
           "[milp][native][warmstart]") {
   BCOptions opt;
-  opt.use_vendored_highs_lp_kernel = false;
+  opt.lp_kernel_backend = LpKernelBackend::ExperimentalNative;
   opt.use_papilo_presolve = false;
   opt.root_cut_rounds = 0;
   opt.use_feasibility_pump = false;
@@ -329,7 +393,7 @@ TEST_CASE("MILP: StrictHiGHS [A+B] warm-start injection correctness and node red
   //   (2) nodes_explored(warm) <= nodes_explored(cold) (effectiveness of
   //       upper_limit tightening from the injected incumbent).
   BCOptions opt;
-  opt.use_vendored_highs_lp_kernel = true;
+  opt.lp_kernel_backend = LpKernelBackend::HiGHS;
   opt.verbose = false;
 
   // Cold run.

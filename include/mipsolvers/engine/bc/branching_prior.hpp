@@ -9,7 +9,7 @@
 ///
 ///   * Machine-learning policies (GNN / tree-search value models),
 ///   * Known structural dominance relations (e.g. UC minimum-up-time),
-///   * Benders master-problem cut coefficients,
+///   * Repeated-solve model statistics,
 ///   * Prior runs on similar instances (transfer learning).
 ///
 /// The engine treats the prior as a *soft* hint: ties are broken by prior

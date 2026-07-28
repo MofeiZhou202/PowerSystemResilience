@@ -95,6 +95,12 @@ add_library(mipsolvers STATIC
   src/engine/kernel/linear_algebra/cholmod_ldlt.cpp
   src/engine/kernel/lp_kernel/dual_simplex.cpp
   src/engine/kernel/lp_kernel/dual_simplex_api.cpp
+  src/engine/kernel/lp_kernel/native_dual/factor.cpp
+  src/engine/kernel/lp_kernel/native_dual/state.cpp
+  src/engine/kernel/lp_kernel/native_dual/pricing.cpp
+  src/engine/kernel/lp_kernel/native_dual/primal.cpp
+  src/engine/kernel/lp_kernel/native_dual/certificate.cpp
+  src/engine/kernel/lp_kernel/native_dual/solver.cpp
   src/engine/kernel/kkt/kkt_system.cpp
   src/engine/kernel/ipm/lcqp_solver.cpp
   src/engine/kernel/ipm/chordal_decomposition.cpp
@@ -170,7 +176,6 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
 
   # Native B&C: strict HiGHS + dynamic cutting planes
   target_sources(mipsolvers PRIVATE
-    src/engine/decomposition/benders.cpp
     src/engine/solver/native/milp/bc/legacy/branch_and_cut.cpp
     src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp
     src/engine/solver/native/milp/bc/legacy/bc_parallel.cpp
@@ -274,8 +279,9 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
   endif()
 
   # Pure-native vs HiGHS comparison driver: benchmarks the native B&C with
-  # the native dual simplex / IPM as LP kernel (use_vendored_highs_lp_kernel
-  # = false) against raw-API HiGHS at both MILP and LP level, including
+  # the experimental native dual simplex / IPM as LP kernel
+  # (LpKernelBackend::ExperimentalNative) against raw-API HiGHS at both MILP
+  # and LP level, including
   # adversarially scaled LPs as a numerical-stability probe.
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/native_kernel_comparison.cpp")
     add_executable(native_kernel_comparison
@@ -641,10 +647,10 @@ if(MIPSOLVERS_BUILD_TESTS)
     target_compile_definitions(test_conic_ipm PRIVATE MIPSOLVERS_USE_OPENMP=1)
   endif()
   mipsolvers_add_test(test_dual_simplex        TIER unit)
-  mipsolvers_add_test(test_branch_and_cut      TIER integration)
-  if(MIPSOLVERS_HAVE_HIGHS_LIB)
-    mipsolvers_add_test(test_benders_decomposition TIER integration)
+  if(TARGET test_dual_simplex AND TARGET highs)
+    target_link_libraries(test_dual_simplex PRIVATE highs::highs)
   endif()
+  mipsolvers_add_test(test_branch_and_cut      TIER integration)
   mipsolvers_add_test(test_problem_validation  TIER unit)
   mipsolvers_add_test(test_adapter_registry    TIER unit)
   mipsolvers_add_test(test_presolve            TIER unit)

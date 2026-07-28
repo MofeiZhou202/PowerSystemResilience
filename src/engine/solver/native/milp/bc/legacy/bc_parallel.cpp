@@ -66,7 +66,8 @@ void detail::explorer_thread(
     const std::atomic<double>* optimality_limit) {
 
 	  const int n = static_cast<int>(base_lp.vars.size());
-	  const bool strict_highs_lp_contract = opt.use_vendored_highs_lp_kernel;
+	  const bool strict_highs_lp_contract =
+	      uses_highs_lp_kernel(opt.lp_kernel_backend);
 	  auto is_branchable_col = [&](int j) {
 	    return j >= 0 && j < n &&
 	           j < static_cast<int>(branchable_cols.size()) &&
@@ -681,12 +682,6 @@ void detail::explorer_thread(
           child_basis->try_share_indices_from(*child.basis_hint);
         }
         child_basis->compact_indices_storage();
-        if (simplex_res.shared_binv) {
-          child_basis->cached_inverse = simplex_res.shared_binv;
-        } else if (simplex_res.basis_inverse.rows() > 0) {
-          child_basis->cached_inverse =
-              std::make_shared<const Eigen::MatrixXd>(std::move(simplex_res.basis_inverse));
-        }
         child_basis->cached_reduced_costs =
             std::make_shared<const Eigen::VectorXd>(std::move(simplex_res.reduced_costs));
         if (simplex_res.form.col_scale.size() == simplex_res.form.A.cols()) {

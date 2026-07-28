@@ -585,7 +585,8 @@ BCResult result = solve_milp_bc(mip, opt, ws, cbs);
 | `use_simplex_lp_nodes` | `true` | Use dual simplex for tree node LPs |
 | `use_ipm_root` | `false` | Use IPM for root LP relaxation |
 | `use_ipm_nodes` | `false` | Use IPM for all node LPs |
-| `use_vendored_highs_lp_kernel` | `false` | Use embedded HiGHS simplex kernel for node LPs |
+| `lp_kernel_backend` | `HiGHS` | LP numerical kernel; `ExperimentalNative` is development-only |
+| `strict_highs_mip_contract` | `false` | Explicit full-MIP StrictHiGHS policy; independent from LP kernel selection |
 | `highs_mip_lp_solver` | `"choose"` | StrictHiGHS root LP solver; production auto-policy may set large roots to `"ipm"` |
 | `highs_mip_root_crossover` | `"on"` | Crossover policy for StrictHiGHS root IPM; keep `"on"` when following node LPs need simplex bases |
 | `highs_strict_auto_ipm_root_for_large_models` | `true` | If the root solver is still `"choose"`, use IPM for large StrictHiGHS roots |

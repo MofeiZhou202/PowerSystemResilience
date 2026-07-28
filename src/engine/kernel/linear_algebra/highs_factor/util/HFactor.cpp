@@ -42,7 +42,7 @@ static void solveMatrixT(const HighsInt X_Start, const HighsInt x_end,
     pivot_multiplier += t_value[k] * rhs_array[t_index[k]];
 
   // Scatter by Y
-  if (fabs(pivot_multiplier) > kHighsTiny) {
+  if (pivot_multiplier != 0.0) {
     HighsInt work_count = *rhs_count;
 
     pivot_multiplier /= t_pivot;
@@ -51,7 +51,7 @@ static void solveMatrixT(const HighsInt X_Start, const HighsInt x_end,
       const double value0 = rhs_array[index];
       const double value1 = value0 - pivot_multiplier * t_value[k];
       if (value0 == 0) rhs_index[work_count++] = index;
-      rhs_array[index] = (fabs(value1) < kHighsTiny) ? kHighsZero : value1;
+      rhs_array[index] = value1;
     }
 
     *rhs_count = work_count;
@@ -125,7 +125,7 @@ static void solveHyper(const HighsInt h_size, const HighsInt* h_lookup,
       list_mark[i] = 0;
       HighsInt pivotRow = h_pivot_index[i];
       double pivot_multiplier = rhs_array[pivotRow];
-      if (fabs(pivot_multiplier) > kHighsTiny) {
+      if (pivot_multiplier != 0.0) {
         rhs_index[rhs_count++] = pivotRow;
         const HighsInt start = h_start[i];
         const HighsInt end = h_end[i];
@@ -142,7 +142,7 @@ static void solveHyper(const HighsInt h_size, const HighsInt* h_lookup,
       list_mark[i] = 0;
       HighsInt pivotRow = h_pivot_index[i];
       double pivot_multiplier = rhs_array[pivotRow];
-      if (fabs(pivot_multiplier) > kHighsTiny) {
+      if (pivot_multiplier != 0.0) {
         pivot_multiplier /= h_pivot_value[i];
         rhs_array[pivotRow] = pivot_multiplier;
         rhs_index[rhs_count++] = pivotRow;
@@ -1168,7 +1168,7 @@ HighsInt HFactor::buildKernel() {
           mwz_column_mark[iRow] = 0;
           nFillin--;
           value -= my_pivot * mwz_column_array[iRow];
-          if (fabs(value) < kHighsTiny) {
+          if (value == 0.0) {
             value = 0;
             nCancel++;
           }
@@ -1567,7 +1567,7 @@ void HFactor::ftranL(HVector& rhs, const double expected_density,
     for (HighsInt i = 0; i < num_row; i++) {
       HighsInt pivotRow = l_pivot_index[i];
       const double pivot_multiplier = rhs_array[pivotRow];
-      if (fabs(pivot_multiplier) > kHighsTiny) {
+      if (pivot_multiplier != 0.0) {
         rhs_index[rhs_count++] = pivotRow;
         const HighsInt start = l_start[i];
         const HighsInt end = l_start[i + 1];
@@ -1615,7 +1615,7 @@ void HFactor::btranL(HVector& rhs, const double expected_density,
     for (HighsInt i = num_row - 1; i >= 0; i--) {
       HighsInt pivotRow = l_pivot_index[i];
       const double pivot_multiplier = rhs_array[pivotRow];
-      if (fabs(pivot_multiplier) > kHighsTiny) {
+      if (pivot_multiplier != 0.0) {
         rhs_index[rhs_count++] = pivotRow;
         rhs_array[pivotRow] = pivot_multiplier;
         const HighsInt start = lr_start[i];
@@ -1657,7 +1657,6 @@ void HFactor::ftranU(HVector& rhs, const double expected_density,
   if (update_method == kUpdateMethodFt) {
     factor_timer.start(FactorFtranUpperFT, factor_timer_clock_pointer);
     ftranFT(rhs);
-    rhs.tight();
     rhs.pack();
     factor_timer.stop(FactorFtranUpperFT, factor_timer_clock_pointer);
   } else if (update_method == kUpdateMethodMpf) {
@@ -1706,7 +1705,7 @@ void HFactor::ftranU(HVector& rhs, const double expected_density,
       // Normal part
       const HighsInt pivotRow = u_pivot_index[i_logic];
       double pivot_multiplier = rhs_array[pivotRow];
-      if (fabs(pivot_multiplier) > kHighsTiny) {
+      if (pivot_multiplier != 0.0) {
         pivot_multiplier /= u_pivot_value[i_logic];
         rhs_index[rhs_count++] = pivotRow;
         rhs_array[pivotRow] = pivot_multiplier;
@@ -1804,7 +1803,7 @@ void HFactor::btranU(HVector& rhs, const double expected_density,
       // Normal part
       const HighsInt pivotRow = u_pivot_index[i_logic];
       double pivot_multiplier = rhs_array[pivotRow];
-      if (fabs(pivot_multiplier) > kHighsTiny) {
+      if (pivot_multiplier != 0.0) {
         pivot_multiplier /= u_pivot_value[i_logic];
         rhs_index[rhs_count++] = pivotRow;
         rhs_array[pivotRow] = pivot_multiplier;
@@ -1835,10 +1834,8 @@ void HFactor::btranU(HVector& rhs, const double expected_density,
   assert(rhs.count >= 0);
   if (update_method == kUpdateMethodFt) {
     factor_timer.start(FactorBtranUpperFT, factor_timer_clock_pointer);
-    rhs.tight();
     rhs.pack();
     btranFT(rhs);
-    rhs.tight();
     factor_timer.stop(FactorBtranUpperFT, factor_timer_clock_pointer);
   }
   if (update_method == kUpdateMethodMpf) {
@@ -1876,7 +1873,7 @@ void HFactor::ftranFT(HVector& vector) const {
     // This would skip the situation where they are both zeros
     if (value0 || value1) {
       if (value0 == 0) rhs_index[rhs_count++] = iRow;
-      rhs_array[iRow] = (fabs(value1) < kHighsTiny) ? kHighsZero : value1;
+      rhs_array[iRow] = value1;
     }
   }
   // Save count back
@@ -1913,7 +1910,7 @@ void HFactor::btranFT(HVector& vector) const {
         double value0 = rhs_array[iRow];
         double value1 = value0 - pivot_multiplier * pf_value[k];
         if (value0 == 0) rhs_index[rhs_count++] = iRow;
-        rhs_array[iRow] = (fabs(value1) < kHighsTiny) ? kHighsZero : value1;
+        rhs_array[iRow] = value1;
       }
     }
   }

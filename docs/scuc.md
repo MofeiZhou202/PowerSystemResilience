@@ -79,28 +79,6 @@ registered with `mipsolvers::engine::SolverEngine`, chosen at runtime via the
           └─────────────────────────────────────────────────────┘
 ```
 
-For large formulations, Stage 1 automatically switches to Branch-and-Benders-Cut
-at `benders_auto_min_variables` columns.  The master contains only commitment,
-startup/shutdown, optional storage-mode binaries, and one dispatch-cost variable.
-Binary columns are eliminated exactly from the dispatch/network LP.  Their
-mixed-row coefficients form sparse coupling matrices, so each commitment updates
-the LP right-hand sides as `b - A_binary*x`.  LP duals and these coupling matrices
-generate optimality cuts; LP Farkas rays generate feasibility cuts.  Pure-binary
-rows remain in the master.  This keeps branch-and-bound away from the
-million-column continuous space while preserving a valid global lower bound.
-The reduced LP standard form, scaling, basis, and sparse factorization persist
-across Benders iterations; only affected right-hand sides are updated before
-dual-simplex reoptimization.  The original continuous `LPModel` matrix is
-released after the standard form is built.  The compact master is also kept
-alive across iterations: each Benders cut is appended as one sparse row without
-copying the base matrix or rebuilding prior cuts.  Native B&C pseudocosts are
-exported in original master-column space and imported into the following solve,
-so later trees retain learned variable and branch-direction information.
-The algorithm and automatic sparse partitioner are the domain-independent
-`engine::partition_benders_model()` and `engine::solve_benders()` APIs described
-in [benders_decomposition.md](benders_decomposition.md).  SCUC only selects its
-binary first-stage columns and maps the generic result back to SCUC fields.
-
 ---
 
 ## 2. Quick Start
@@ -303,10 +281,6 @@ Solver and model configuration.
 | `vocc` | `double` | 1 000.0 | Value of over-generation curtailment ($/MWh) |
 | `renewable_min_output_coeff` | `double` | 0.0 | Minimum renewable output: $\alpha \cdot \text{forecast}$ |
 | `enable_market_cuts` | `bool` | `true` | Add LP-valid pre-formulation cutting planes |
-| `enable_benders_decomposition` | `bool` | `false` | Force the compact commitment-master / dispatch-LP decomposition |
-| `benders_auto_min_variables` | `int` | `250000` | Automatically decompose at this monolithic column count; 0 disables auto selection |
-| `benders_max_iterations` | `int` | `200` | Maximum master/subproblem iterations |
-| `benders_cut_tolerance` | `double` | `1e-6` | Farkas certificate acceptance tolerance |
 | `M1_line_slack_penalty` | `double` | 1e5 | Big-M penalty for line flow slack variables |
 | `solve_sced` | `bool` | `true` | Run SCED LP after SCUC |
 | `solve_lmp` | `bool` | `true` | Compute LMPs after SCED |
@@ -383,24 +357,6 @@ Result from one MILP or LP stage (SCUC or SCED).
 | `solve_time_sec` | `double` | Wall-clock time for this stage |
 | `mip_gap` | `double` | Final relative MIP gap (MILP only) |
 | `n_cuts_added` | `int` | Pre-formulation market cuts added |
-| `benders_iterations` | `int` | Completed decomposition iterations |
-| `benders_cuts_added` | `int` | Optimality, feasibility, and fallback cuts added |
-| `benders_master_variables` | `int` | Compact master column count |
-| `benders_master_nodes` | `int64` | Accumulated native B&C nodes across compact-master solves |
-| `benders_master_lp_solves` | `int64` | Accumulated compact-master LP relaxations |
-| `benders_master_warm_starts` | `int` | Master solves supplied with a feasible incumbent |
-| `benders_master_pseudocost_reuses` | `int` | Master solves seeded with branching pseudocosts from the preceding solve |
-| `benders_master_solve_time_sec` | `double` | Accumulated compact-master wall time |
-| `benders_subproblem_variables` | `int` | Continuous dispatch subproblem column count |
-| `benders_subproblem_rows` | `int` | Reduced continuous subproblem row count |
-| `benders_eliminated_binary_variables` | `int` | Binary columns eliminated from the continuous LP |
-| `benders_coupled_binary_variables` | `int` | Eliminated binary columns with nonzeros in the continuous RHS coupling; sparse cut gradients iterate only this support |
-| `benders_binary_coupling_nonzeros` | `int64` | Nonzeros in the binary-to-RHS coupling matrices |
-| `benders_incremental_rhs_updates` | `int64` | Coupling nonzeros touched by changed binary assignments |
-| `benders_subproblem_solves` | `int` | Continuous subproblem solve count |
-| `benders_subproblem_warm_starts` | `int` | Subproblem solves completed from a persisted basis |
-| `benders_subproblem_simplex_iterations` | `int64` | Accumulated subproblem simplex pivots |
-| `benders_subproblem_solve_time_sec` | `double` | Accumulated continuous subproblem wall time |
 | `commitment` | `Matrix2D [ng][T_commit]` | Binary commitment status $u_{g,h}$ |
 | `startup` | `Matrix2D [ng][T_commit]` | Binary startup indicator $v_{g,h}$ |
 | `shutdown` | `Matrix2D [ng][T_commit]` | Binary shutdown indicator $w_{g,h}$ |

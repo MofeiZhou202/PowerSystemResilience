@@ -344,7 +344,7 @@ static RunRecord run_config(const TestCase& tc,
     }
 
     engine::BCOptions opt;
-    opt.use_vendored_highs_lp_kernel = true;
+    opt.lp_kernel_backend = engine::LpKernelBackend::HiGHS;
     opt.time_limit_sec               = time_limit_sec;
     opt.gap_tol                      = 1e-3;
     opt.verbose                      = false;
@@ -403,7 +403,9 @@ static RunRecord run_bc_start_reference(const TestCase& tc,
     }
 
     engine::BCOptions opt;
-    opt.use_vendored_highs_lp_kernel = strict_highs;
+    opt.lp_kernel_backend = strict_highs
+        ? engine::LpKernelBackend::HiGHS
+        : engine::LpKernelBackend::ExperimentalNative;
     opt.auto_highs_root_pipeline = strict_highs;
     opt.time_limit_sec = time_limit_sec;
     opt.gap_tol = 1e-3;
@@ -781,7 +783,7 @@ static int run_two_phase_experiment(double time_limit_sec)
     // Helper: build default BCOptions for our StrictHiGHS pipeline.
     auto make_opts = [](double tlimit) -> engine::BCOptions {
         engine::BCOptions opt;
-        opt.use_vendored_highs_lp_kernel = true;
+        opt.lp_kernel_backend = engine::LpKernelBackend::HiGHS;
         opt.time_limit_sec               = tlimit;
         opt.gap_tol                      = 1e-3;
         opt.verbose                      = false;
@@ -926,7 +928,7 @@ static int run_heuristic_experiment(double time_limit_sec)
     // Shared base: StrictHiGHS path with 50K root-LP iteration cap.
     auto make_base = [&]() -> engine::BCOptions {
         engine::BCOptions opt;
-        opt.use_vendored_highs_lp_kernel = true;
+        opt.lp_kernel_backend = engine::LpKernelBackend::HiGHS;
         opt.time_limit_sec               = time_limit_sec;
         opt.gap_tol                      = 1e-3;
         opt.verbose                      = false;
@@ -1044,7 +1046,7 @@ static int run_nocap_test(double long_time_sec)
     //    Always uses 120s so it matches the benchmark config exactly.
     {
         engine::BCOptions opt;
-        opt.use_vendored_highs_lp_kernel           = true;
+        opt.lp_kernel_backend = engine::LpKernelBackend::HiGHS;
         opt.time_limit_sec                         = 120.0;
         opt.gap_tol                                = 1e-3;
         opt.verbose                                = false;
@@ -1057,7 +1059,7 @@ static int run_nocap_test(double long_time_sec)
     //    the first branch node.  The remaining budget is available for tree.
     {
         engine::BCOptions opt;
-        opt.use_vendored_highs_lp_kernel = true;
+        opt.lp_kernel_backend = engine::LpKernelBackend::HiGHS;
         opt.time_limit_sec               = long_time_sec;
         opt.gap_tol                      = 1e-3;
         opt.verbose                      = false;
@@ -1142,7 +1144,7 @@ static int run_inject_test(double seed_time_sec)
     // in the subsequent capped solves as much as possible.
     std::printf("--- Phase 0: seed solve (%.0fs, no root LP cap) ---\n", seed_time_sec);
     engine::BCOptions seed_opt;
-    seed_opt.use_vendored_highs_lp_kernel = true;
+    seed_opt.lp_kernel_backend = engine::LpKernelBackend::HiGHS;
     seed_opt.time_limit_sec               = seed_time_sec;
     seed_opt.gap_tol                      = 1e-3;
     seed_opt.verbose                      = false;
@@ -1155,7 +1157,7 @@ static int run_inject_test(double seed_time_sec)
     std::printf("--- Phase 1: cold 120s capped solve (control) ---\n");
     {
         engine::BCOptions opt;
-        opt.use_vendored_highs_lp_kernel           = true;
+        opt.lp_kernel_backend = engine::LpKernelBackend::HiGHS;
         opt.time_limit_sec                         = 120.0;
         opt.gap_tol                                = 1e-3;
         opt.verbose                                = false;
@@ -1180,7 +1182,7 @@ static int run_inject_test(double seed_time_sec)
                         static_cast<long>(expected));
         }
         engine::BCOptions opt;
-        opt.use_vendored_highs_lp_kernel           = true;
+        opt.lp_kernel_backend = engine::LpKernelBackend::HiGHS;
         opt.time_limit_sec                         = 120.0;
         opt.gap_tol                                = 1e-3;
         opt.verbose                                = false;
@@ -1244,7 +1246,7 @@ static int run_bound_test(double time_limit_sec)
 
     auto make_base = [&]() -> engine::BCOptions {
         engine::BCOptions opt;
-        opt.use_vendored_highs_lp_kernel = true;
+        opt.lp_kernel_backend = engine::LpKernelBackend::HiGHS;
         opt.time_limit_sec               = time_limit_sec;
         opt.gap_tol                      = 1e-3;
         opt.verbose                      = false;
@@ -1584,7 +1586,7 @@ int main(int argc, char** argv)
         // Step 1: cold baseline run (also produces the warm-start solution)
         engine::MIPModel mip_cold = build_scuc_mip(tc.inp);
         engine::BCOptions cold_opt;
-        cold_opt.use_vendored_highs_lp_kernel = true;
+        cold_opt.lp_kernel_backend = engine::LpKernelBackend::HiGHS;
         cold_opt.time_limit_sec               = time_limit;
         cold_opt.gap_tol                      = 1e-3;
         cold_opt.verbose                      = false;
@@ -1653,7 +1655,7 @@ int main(int argc, char** argv)
               static_cast<int>(cold_res.x.size()) == static_cast<int>(mip_cuts.linear_part.vars.size()))
             mip_cuts.initial_solution = cold_res.x;
           engine::BCOptions cuts_opt;
-          cuts_opt.use_vendored_highs_lp_kernel = true;
+          cuts_opt.lp_kernel_backend = engine::LpKernelBackend::HiGHS;
           cuts_opt.time_limit_sec               = time_limit;
           cuts_opt.gap_tol                      = 1e-3;
           cuts_opt.verbose                      = false;
