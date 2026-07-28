@@ -12,6 +12,13 @@
   `cge:psr_ref` 与几何端点恢复导线、母线、开关、母联和配变拓扑，按
   `BestEffort` 口径补齐缺失电气参数，源外孤岛保持隔离；两个真实馈线
   SVG 已纳入结构与 AC 潮流回归。边界见 `docs/svg_distribution_import.md`。
+- 配电 SVG 默认接入统一标准参数补齐：线路电阻表、设备适用范围和短路
+  等值方法分别追溯至 GB/T 3956、GB/T 1179、GB/T 14049、GB/T 12706、
+  GB/T 1094、GB/T 6451、GB/T 15544.1 与 DL/T 5220；电抗、载流量、
+  电源强度和负荷系数仍明确标记为可配置工程假设。
+- 配电 SVG 支持从核心 API、HTTP 会话和 GUI 反向导出；生成文件保留
+  `cge:psr_ref` 稳定设备引用及 `hacdcpf:model` 电气参数扩展，可重新导入，
+  对未覆盖的独立负荷和非 AC 资产显式返回遗漏计数与警告。
 - 2026-07-26 完成 MIPSolvers 系统升级回归：Eigen 3.4.1（含
   `unsupported/`）、fmt、nlohmann/json、HiGHS、SCIP、MUMPS、Ipopt、
   SuiteSparse、Catch2、PaPILO 3.0.0 与所需 Boost 头均从本地源码解析；ETAP 所需 OpenXLSX 也已纳入本仓库，
@@ -422,7 +429,7 @@ GUI 第一阶段统一契约包括：`hysim_task_status_v1`（任务状态、耗
 
 第三阶段将共享前端基础设施从 `web/js/app.js` 拆分到 `web/js/core/`：`analysis_contracts.js` 维护分析端点和结果契约，`task_manager.js` 管理单活动任务、取消与后端收尾，`api_client.js` 统一请求 ID、错误和陈旧结果处理，`result_mapping.js` 维护 Dashboard 到 Canvas 的类型/索引映射。此后 `web/js/core/` 又扩展了 `timeseries_window.js`（长时序窗口化与保峰降采样）、`layout_graph.js` / `layout_engine.js`（布局语义投影与 ELK 异步布局客户端）、`accessibility.js`（键盘导航与可访问性审计）、`runtime_diagnostics.js`（前端运行时诊断）和 `network_overview.js`（WebGL2 全网 LOD 总览）。`app.js` 只保留 UI 状态回调和薄适配层，这些核心脚本必须在 `app.js` 之前加载。
 
-第四阶段针对中大型系统优化交互性能：普通规模仍使用 SVG 单线图编辑，并将连续鼠标移动合并到浏览器动画帧、对视口外元件执行可逆裁剪；超过规模阈值时不再显示空白“无画布”摘要，而由 WebGL2 点/线缓冲绘制 LOD0 域、LOD1 区域和 LOD2 母线全网总览，同时保持 SVG glyph 数为零。WebGL、局部 k 跳 SVG、虚拟拓扑表和结果导航统一使用 `{domain,index}` 母线引用。年度生产模拟按 7/30/90 天窗口浏览；选择全年时采用保留首尾及负荷极值的降采样，最多绘制 2000 点，同时保留完整原始序列供导出和后续分析使用。规模化 GUI E2E 对 WebGL 非空像素、选择同步、局部 SVG 和这些性能边界提供回归契约。
+第四阶段针对中大型系统优化交互性能：普通规模仍使用 SVG 单线图编辑，并将连续鼠标移动合并到浏览器动画帧、对视口外元件执行可逆裁剪；超过规模阈值时不再显示空白“无画布”摘要，而由 WebGL2 点/线缓冲绘制 LOD0 域、LOD1 区域和 LOD2 母线全网总览，同时保持 SVG glyph 数为零。WebGL、局部 k 跳 SVG、虚拟拓扑表和结果导航统一使用 `{domain,index}` 母线引用。5,000 节点以上的无画布潮流请求自动采用 `response_detail=compact`：保留完整 `vm`/`va`/`vdc`/`branch_abs` 数值向量，省略逐元件 GIS 与 rich attribution 展示行，并通过 `model_scope` / `model_limitations` 声明边界；小系统仍返回完整逐元件结果。年度生产模拟按 7/30/90 天窗口浏览；选择全年时采用保留首尾及负荷极值的降采样，最多绘制 2000 点，同时保留完整原始序列供导出和后续分析使用。规模化 GUI E2E 对 WebGL 非空像素、选择同步、局部 SVG 和这些性能边界提供回归契约。
 
 `/api/v1` 为大模型客户端提供后端分块：`sessions/{id}/topology` 支持 LOD、空间视口和分页，`sessions/{id}/subgraph` 按稳定母线引用提取有界邻域，`jobs/{id}/frames/{step}` 按时间/域/稳定索引/空间返回结果窗口，`jobs/{id}/violations` 返回最严重电压与负载率越限。静态 PF/OPF 使用第 0 帧，后续生产模拟沿同一帧协议扩展多时步。
 

@@ -4208,7 +4208,7 @@ const Canvas = (() => {
     const summary = summarizeSystemJson(jsonSys);
     if (shouldGoHeadless(summary, opts)) {
       state.headless = true;
-      state.headlessSystem = cloneJsonBlock(jsonSys) || jsonSys;
+      state.headlessSystem = opts.reuseInput ? jsonSys : (cloneJsonBlock(jsonSys) || jsonSys);
       state.headlessMeta = summary;
       renderHeadlessOverview(summary);
       updateInfo();
@@ -5279,6 +5279,7 @@ const Canvas = (() => {
 
     // Store last PF result for visualization mode changes
     _lastPfResult = result;
+    if (state.headless) return;
     applySolvedGeneratorDisplays(result);
     applySolvedGridAndBreakerDisplays(result);
     refreshSolvedGeneratorComponents();

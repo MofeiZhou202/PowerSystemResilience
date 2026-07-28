@@ -1,4 +1,4 @@
-# IEC-CGE Distribution SVG Import
+# IEC-CGE Distribution SVG Import and Export
 
 ## Implemented profile
 
@@ -43,7 +43,11 @@ coercions for:
 - transformer-terminal load factor and power factor;
 - synthetic external-grid equivalents.
 
-All values are configurable through `SvgDistributionImportOptions`. Strict mode
+All values are configurable through `SvgDistributionImportOptions`. By default,
+the importer then applies the shared standards-aware parameter completion only
+to fields marked as SVG estimates. The report contains line-level suggestions,
+confidence, changed-field counts, and national/industry/IEC references. Set
+`auto_complete_parameters=false` to retain the initial SVG estimates. Strict mode
 rejects the import because these inferences are unavoidable. Components not
 connected to a substation through currently closed switches remain
 `BusType::ISOLATED`; the importer does not add a source merely to make a dead
@@ -53,6 +57,23 @@ those isolated buses.
 Setting `auto_add_external_grids=false` disables source synthesis entirely and
 marks every recovered component as isolated until the caller provides an
 explicit source.
+
+## Export contract
+
+`hacdcpf::io::to_svg_distribution` and `save_svg_distribution` export the AC
+distribution subset as a layered IEC-CGE SVG. The document contains
+`cge:psr_ref` stable equipment identity and, by default, a
+`hacdcpf:model` extension with electrical parameters needed for lossless
+round-trip through this adapter. The exporter covers AC buses, branches,
+switches, two-winding transformers, external grids, and transformer-terminal
+loads. Standalone loads that cannot be embedded and non-AC assets are not
+silently approximated: their counts and warnings are returned in
+`SvgDistributionExportResult`.
+
+The generated layout is deterministic from the AC graph and configurable with
+`horizontal_spacing`, `vertical_spacing`, and `margin`. This is an engineering
+single-line layout, not preservation of an imported drawing's original visual
+coordinates.
 
 ## Runtime
 
@@ -68,8 +89,19 @@ The GUI Model IO toolbar exposes **导入配电SVG**. It posts:
 to `POST /api/session/load_svg_distribution`. The response includes the normal
 system summary plus `_svg_*` fields for source-object counts, recovered nodes,
 unresolved objects, synthetic sources, isolated components/buses, warnings, and
-model scope. After import, the ordinary session PF/OPF/analysis routes operate
+model scope. `_svg_parameter_completion` contains the full standards-aware
+completion report. After import, the ordinary session PF/OPF/analysis routes operate
 on the resulting `HybridPowerSystem`.
+
+The same toolbar exposes **导出配电SVG**. It synchronizes the canvas and posts to
+`POST /api/session/export_svg_distribution`; the response contains the SVG text,
+exported/omitted counts, warnings, and
+`model_scope=ac_distribution_iec_cge_svg`. The browser downloads the result as
+`*_distribution.svg`. Server-side layout and serialization run outside the
+session mutex after taking a model snapshot.
+
+The standards and assumptions crosswalk is maintained in
+`distribution_parameter_completion_standards.md`.
 
 ## Regression fixtures
 
@@ -81,7 +113,9 @@ on the resulting `HybridPowerSystem`.
 | `新区B259线-混合.svg` | 69 | 14 / 14 | 224 | converged |
 
 The tests also require zero unresolved recognized objects, cable/overhead type
-separation, explicit dead-island voltages, and rejection of plain SVG artwork.
+separation, explicit dead-island voltages, stable-ID and electrical-parameter
+round-trip, layered SVG export, and rejection of plain SVG artwork. The GUI API
+smoke test covers export followed by re-import.
 
 ## Security
 

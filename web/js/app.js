@@ -951,8 +951,13 @@ const App = (() => {
     </tr>`).join('') || '<tr><td colspan="9">没有可补齐的线路；已有厂家或用户参数保持不变。</td></tr>';
     const warningRows = (report.warnings || []).map(w =>
       `<div class="transient-mini-card"><strong>Warning</strong><span>${escapeHtml(w)}</span></div>`).join('');
-    const references = (report.references || []).map(ref =>
-      `<a href="${parameterLibraryAttr(ref.url || '#')}" target="_blank" rel="noopener">${escapeHtml(ref.standard || '')}</a>`).join(' · ');
+    const references = (report.references || []).map(ref => {
+      const label = escapeHtml(ref.standard || '');
+      const title = parameterLibraryAttr(`${ref.role || ''}: ${ref.scope || ''}`);
+      return ref.url
+        ? `<a href="${parameterLibraryAttr(ref.url)}" target="_blank" rel="noopener" title="${title}">${label}</a>`
+        : `<span title="${title}">${label}</span>`;
+    }).join(' · ');
     const bindingRows = (report.switch_bindings || []).map(row => {
       const target = row.controlled_element_index >= 0
         ? `${row.controlled_element_type || '设备'} #${row.controlled_element_index}`
@@ -2037,6 +2042,9 @@ const App = (() => {
     const serverSeconds = Number(data.execution_time_sec ?? data.solve_time_sec ??
       (Number(data.timing?.total_ms) / 1000));
     const seconds = Number.isFinite(serverSeconds) ? serverSeconds : requestSeconds;
+    const coreSolveMs = Number(data.timing?.solve_ms ?? data.timing?.core_solve_ms);
+    const coreSolveSeconds = Number.isFinite(coreSolveMs) ? coreSolveMs / 1000 : NaN;
+    data.client_round_trip_sec = requestSeconds;
     if (!Number.isFinite(Number(data.execution_time_sec))) {
       data.execution_time_sec = seconds;
       data.execution_time_source = 'client_request';
@@ -2044,8 +2052,12 @@ const App = (() => {
     const el = document.getElementById('resultExecutionTime');
     if (el) {
       el.hidden = false;
-      el.textContent = `本次计算 ${seconds.toFixed(3)} s`;
-      el.title = Number.isFinite(serverSeconds) ? '后端计算墙钟时间' : '浏览器请求往返时间';
+      el.textContent = Number.isFinite(coreSolveSeconds)
+        ? `求解 ${coreSolveSeconds.toFixed(3)} s · 总计 ${seconds.toFixed(3)} s`
+        : `本次计算 ${seconds.toFixed(3)} s`;
+      el.title = Number.isFinite(coreSolveSeconds)
+        ? `后端核心求解 ${coreSolveSeconds.toFixed(3)} s；后端总计 ${seconds.toFixed(3)} s；请求往返 ${requestSeconds.toFixed(3)} s`
+        : (Number.isFinite(serverSeconds) ? '后端计算墙钟时间' : '浏览器请求往返时间');
     }
   }
 
@@ -2400,6 +2412,16 @@ const App = (() => {
     log(`已加载 ${(data.files || []).length} 个MATPOWER文件`, 'success');
   }
 
+  function systemJsonFromLoadResponse(data) {
+    if (data?._system_json && typeof data._system_json === 'object') {
+      return data._system_json;
+    }
+    if (typeof data?._raw_json === 'string' && data._raw_json) {
+      return JSON.parse(data._raw_json);
+    }
+    return null;
+  }
+
   async function loadMatpowerCase(filename) {
     if (!filename) return;
     return trackActiveLoad(async () => {
@@ -2407,10 +2429,10 @@ const App = (() => {
       const data = await apiPost('/api/session/load_matpower', { filename });
       if (data) {
         log(`已加载MATPOWER文件: ${filename}`, 'success');
-        if (data._raw_json) {
+        if (data._system_json || data._raw_json) {
           try {
-            const sys = JSON.parse(data._raw_json);
-            Canvas.loadFromSystemJson(sys);
+            const sys = systemJsonFromLoadResponse(data);
+            Canvas.loadFromSystemJson(sys, { reuseInput: !!data._system_json });
             _canvasDirty = false;  // backend already has the correct system
             updateResilienceSwitchDefault();
             invalidateAnalysisResults();
@@ -2445,9 +2467,9 @@ const App = (() => {
     if (data) {
       log(`已加载算例: ${caseName}`, 'success');
       // Parse and display on canvas
-      if (data._raw_json) {
+      if (data._system_json || data._raw_json) {
         try {
-          const sys = JSON.parse(data._raw_json);
+          const sys = systemJsonFromLoadResponse(data);
           Canvas.loadFromSystemJson(sys);
           _canvasDirty = false;  // backend already has the correct system
           updateResilienceSwitchDefault();
@@ -2473,9 +2495,9 @@ const App = (() => {
   // Render a freshly-loaded backend system onto the canvas (shared by the ETAP
   // import paths); logs any permissive-import warnings.
   function applyLoadedSystem(data, label) {
-    if (data._raw_json) {
+    if (data._system_json || data._raw_json) {
       try {
-        const sys = JSON.parse(data._raw_json);
+        const sys = systemJsonFromLoadResponse(data);
 	        Canvas.loadFromSystemJson(sys);
 	        _canvasDirty = false;  // backend already has the correct system
 	        const methodInput = document.getElementById('pfMethod');
@@ -2958,14 +2980,24 @@ const App = (() => {
     if (!file) return;
     setStatus('导入配电SVG...', 'busy');
     try {
+      const handbookOptions = designHandbookOptionsFromControls();
       const data = await apiPost('/api/session/load_svg_distribution', {
         svg_string: await file.text(),
         name: String(file.name || '配电 SVG').replace(/\.svg$/i, ''),
+        auto_complete_parameters: document.getElementById('ioSvgAutoComplete')?.checked !== false,
+        default_mv_cross_section_mm2: handbookOptions.default_mv_cross_section_mm2,
+        transformer_load_factor: 0.4,
+        power_factor: 0.9,
       });
       if (!data) { setStatus('加载失败', 'error'); return; }
       if (data.error) throw new Error(data.error);
       log(`已导入配电SVG: ${file.name}`, 'success');
       applyLoadedSystem(data, '配电IEC-CGE SVG');
+      const completion = data._svg_parameter_completion || {};
+      const standardNames = (completion.references || [])
+        .filter(ref => ref.role !== 'engineering_assumption')
+        .map(ref => ref.standard)
+        .filter(Boolean);
       showModelIoStatus('配电 SVG 导入完成', [
         ['文件', file.name],
         ['拓扑节点', data._svg_recovered_nodes ?? ''],
@@ -2978,8 +3010,14 @@ const App = (() => {
         ['合成外部电网', data._svg_synthetic_external_grids ?? 0],
         ['孤立分量/母线', `${data._svg_isolated_components ?? 0} / ${data._svg_isolated_buses ?? 0}`],
         ['未恢复对象', data._svg_unresolved_objects ?? 0],
+        ['参数自动补齐', data._svg_parameter_completion_applied
+          ? `${completion.fields_changed ?? 0} 字段 / ${completion.candidates ?? 0} 线路建议`
+          : '未启用'],
+        ['标准依据', standardNames.length
+          ? `${standardNames.length} 项国家/行业/IEC标准`
+          : '无'],
       ], {
-        subtitle: 'IEC-CGE 元数据识别；几何拓扑恢复；缺失电气参数按工程默认值估算',
+        subtitle: 'IEC-CGE 元数据识别；几何拓扑恢复；标准参数补齐保留来源与置信度',
         warnings: data._svg_warnings || [],
       });
       setStatus('就绪');
@@ -3013,6 +3051,40 @@ const App = (() => {
       setStatus('就绪');
     } catch (err) {
       log(`导出配电台区CIM失败: ${err.message}`, 'error');
+      setStatus('导出失败', 'error');
+    }
+  }
+
+  async function exportSvgDistribution() {
+    setStatus('导出配电SVG中...', 'busy');
+    try {
+      const ok = await syncToBackend();
+      if (!ok) { setStatus('导出失败', 'error'); return; }
+      const data = await apiPost('/api/session/export_svg_distribution', {
+        include_hacdcpf_parameters: true,
+      });
+      if (!data || data.error) throw new Error((data && data.error) || '导出失败');
+      const text = data.svg_string || '';
+      const filename = `${data.name || 'system'}_distribution.svg`;
+      downloadTextFile(filename, text, 'image/svg+xml;charset=utf-8');
+      const counts = data.counts || {};
+      const omitted = data.omitted || {};
+      log(`已导出配电SVG: ${filename}`, 'success');
+      showModelIoStatus('配电 SVG 导出完成', [
+        ['文件', filename],
+        ['母线/线路/开关', `${counts.buses ?? 0} / ${counts.branches ?? 0} / ${counts.switches ?? 0}`],
+        ['配变/外部电网', `${counts.transformers ?? 0} / ${counts.external_grids ?? 0}`],
+        ['嵌入配变负荷', counts.embedded_loads ?? 0],
+        ['未导出负荷', omitted.loads ?? 0],
+        ['未导出非AC元件', omitted.non_ac_components ?? 0],
+        ['大小', `${text.length} bytes`],
+      ], {
+        subtitle: 'IEC-CGE 分层 SVG；设备引用与电气参数可重新导入',
+        warnings: data.warnings || [],
+      });
+      setStatus('就绪');
+    } catch (error) {
+      log(`导出配电SVG失败: ${error.message}`, 'error');
       setStatus('导出失败', 'error');
     }
   }
@@ -4366,6 +4438,7 @@ const App = (() => {
 
   async function executePowerFlow(method) {
     return withAnalysisQueue(async () => {
+      const uiStartedAt = performance.now();
       setStatus('潮流计算中...', 'busy');
 
       // Sync canvas to backend first
@@ -4379,10 +4452,16 @@ const App = (() => {
         setStatus('后端繁忙', 'error');
         return null;
       }
+      const requestStartedAt = performance.now();
+      const systemSummary = Canvas.getSystemSummary?.() || {};
+      const compactResponse = Canvas.isHeadless?.() &&
+        Number(systemSummary.buses || 0) >= 5000;
       const data = await apiPost('/api/session/pf', {
         method: method,
-        options: pfOptions
+        options: pfOptions,
+        response_detail: compactResponse ? 'compact' : 'full'
       });
+      const requestFinishedAt = performance.now();
 
       if (data?._result_contract?.stale) {
         log('潮流计算期间模型已修改，已丢弃过期结果', 'warn');
@@ -4411,17 +4490,29 @@ const App = (() => {
         _pfInvalidated = false;
         _lastInvalidationReason = '';
         updateDependencyChips();
+        const tableStartedAt = performance.now();
         try {
           showPowerFlowResultsTables(pfData);
         } catch (err) {
           log(`潮流结果表刷新失败: ${err.message || err}`, 'error');
         }
+        const tableFinishedAt = performance.now();
         try {
           Canvas.showPowerFlowResults(pfData);
         } catch (err) {
           log(`潮流画布叠加刷新失败，结果表已更新: ${err.message || err}`, 'warn');
         }
+        const canvasFinishedAt = performance.now();
         switchTab('results');
+        pfData.client_timing = {
+          request_ms: requestFinishedAt - requestStartedAt,
+          table_render_ms: tableFinishedAt - tableStartedAt,
+          canvas_render_ms: canvasFinishedAt - tableFinishedAt,
+          total_to_results_ms: performance.now() - uiStartedAt,
+        };
+        window.__lastAnalysisTiming = { analysis: 'pf', ...pfData.client_timing };
+        document.documentElement.dataset.hysimAnalysisTiming = JSON.stringify(window.__lastAnalysisTiming);
+        log(`GUI耗时: 请求${pfData.client_timing.request_ms.toFixed(1)}ms，表格${pfData.client_timing.table_render_ms.toFixed(1)}ms，画布${pfData.client_timing.canvas_render_ms.toFixed(1)}ms`, 'info');
       } else {
         setStatus('计算失败', 'error');
       }
@@ -4525,11 +4616,13 @@ const App = (() => {
       await _activeLoadPromise.catch(() => null);
     }
     return withAnalysisQueue(async () => {
+      const uiStartedAt = performance.now();
       setStatus('最优潮流计算中...', 'busy');
       await loadOpfParameterContract();
       const solver = document.getElementById('opfSolver')?.value || 'parity';
       const robustStrategy = solver === 'robust';
       const checkConsistency = !!(document.getElementById('opfCheckConsistency')?.checked);
+      const includePostCarbon = !!(document.getElementById('opfPostCarbon')?.checked);
       const monolithicPhaseHybrid = networkModel === 'three_phase_hybrid';
       const constraints = {
         branch_limits:        !monolithicPhaseHybrid && !!(document.getElementById('opfBranchLimits')?.checked),
@@ -4584,15 +4677,18 @@ const App = (() => {
         setStatus('后端繁忙', 'error');
         return null;
       }
+      const requestStartedAt = performance.now();
       let resp = await apiPostResult('/api/session/opf',
         { solver, network_model: networkModel, constraints, options,
-          three_phase: threePhase, check_consistency: checkConsistency });
+          three_phase: threePhase, check_consistency: checkConsistency,
+          include_post_carbon: includePostCarbon });
       if (!resp.ok && resp.error === ANALYSIS_BUSY_ERROR) {
         setStatus('等待当前分析完成...', 'busy');
         if (await waitForBackendIdle()) {
           resp = await apiPostResult('/api/session/opf',
             { solver, network_model: networkModel, constraints, options,
-              three_phase: threePhase, check_consistency: checkConsistency },
+              three_phase: threePhase, check_consistency: checkConsistency,
+              include_post_carbon: includePostCarbon },
             { quiet: true });
         }
       }
@@ -4602,12 +4698,14 @@ const App = (() => {
         return null;
       }
       const data = resp.ok ? resp.data : null;
+      const requestFinishedAt = performance.now();
       if (data) {
         data._constraints = constraints;
         data._options = options;
         data._solver = solver;
         data._threePhase = threePhase;
         data._checkConsistency = checkConsistency;
+        data._includePostCarbon = includePostCarbon;
         data._networkModel = networkModel;
         const backendTag = data.solver_backend ? ` · ${data.solver_backend}` : '';
         if (data.converged) {
@@ -4706,17 +4804,29 @@ const App = (() => {
         normalizePowerFlowResult(data);
         // Result tables are the authoritative OPF output and must not depend on
         // the optional Canvas overlay succeeding for every rich component.
+        const tableStartedAt = performance.now();
         try {
           showOpfResults(data);
         } catch (err) {
           log(`最优潮流结果表刷新失败: ${err.message || err}`, 'error');
         }
+        const tableFinishedAt = performance.now();
         try {
           if (Canvas.showPowerFlowResults) Canvas.showPowerFlowResults(data);
         } catch (err) {
           log(`最优潮流画布叠加刷新失败，结果表已保留: ${err.message || err}`, 'warn');
         }
+        const canvasFinishedAt = performance.now();
         switchTab('results');
+        data.client_timing = {
+          request_ms: requestFinishedAt - requestStartedAt,
+          table_render_ms: tableFinishedAt - tableStartedAt,
+          canvas_render_ms: canvasFinishedAt - tableFinishedAt,
+          total_to_results_ms: performance.now() - uiStartedAt,
+        };
+        window.__lastAnalysisTiming = { analysis: 'opf', ...data.client_timing };
+        document.documentElement.dataset.hysimAnalysisTiming = JSON.stringify(window.__lastAnalysisTiming);
+        log(`GUI耗时: 请求${data.client_timing.request_ms.toFixed(1)}ms，表格${data.client_timing.table_render_ms.toFixed(1)}ms，画布${data.client_timing.canvas_render_ms.toFixed(1)}ms`, 'info');
       } else {
         if (resp.error) log(`最优潮流计算失败: ${resp.error}`, 'error');
         setStatus('计算失败', 'error');
@@ -4777,8 +4887,10 @@ const App = (() => {
           <span class="result-value">${fmt(data.objective)}</span></div>
         <div class="result-item"><span class="result-label">状态</span>
           <span class="result-value">${escapeHtml(data.status || '')}</span></div>
-        <div class="result-item"><span class="result-label">计算时间</span>
-          <span class="result-value">${Number.isFinite(Number(data.execution_time_sec)) ? Number(data.execution_time_sec).toFixed(3) + ' s' : '—'}</span></div>
+        <div class="result-item"><span class="result-label">求解 / 总计</span>
+          <span class="result-value">${Number.isFinite(Number(data.timing?.core_solve_ms))
+            ? `${(Number(data.timing.core_solve_ms) / 1000).toFixed(3)} / ${Number(data.execution_time_sec || 0).toFixed(3)} s`
+            : (Number.isFinite(Number(data.execution_time_sec)) ? Number(data.execution_time_sec).toFixed(3) + ' s' : '—')}</span></div>
         <div class="result-item"><span class="result-label">网络模型</span>
           <span class="result-value">${escapeHtml(data.analysis_scope?.optimization_model || data._networkModel || 'balanced_aggregate')}</span></div>
       `;
@@ -9389,81 +9501,108 @@ const App = (() => {
     Object.entries(maps.ac || {}).forEach(([idx, cid]) => { compToBus[Number(cid)] = { domain: 'ac', index: Number(idx) }; });
     Object.entries(maps.dc || {}).forEach(([idx, cid]) => { compToBus[Number(cid)] = { domain: 'dc', index: Number(idx) }; });
 
+    const connectedBusesByComp = new Map();
+    const addConnectedBus = (compId, otherId, portId) => {
+      const bus = compToBus[Number(otherId)];
+      if (!bus) return;
+      const key = Number(compId);
+      const rows = connectedBusesByComp.get(key) || [];
+      rows.push({ ...bus, portId: portId || '', compId: otherId });
+      connectedBusesByComp.set(key, rows);
+    };
+    for (const conn of Canvas.state.connections || []) {
+      addConnectedBus(conn.from.compId, conn.to.compId, conn.from.portId);
+      addConnectedBus(conn.to.compId, conn.from.compId, conn.to.portId);
+    }
     const resultConnectedBuses = (compId) => {
-      const out = [];
-      for (const conn of Canvas.state.connections || []) {
-        let otherId = null, portId = '';
-        if (Number(conn.from.compId) === Number(compId)) {
-          otherId = conn.to.compId;
-          portId = conn.from.portId || '';
-        } else if (Number(conn.to.compId) === Number(compId)) {
-          otherId = conn.from.compId;
-          portId = conn.to.portId || '';
-        }
-        if (otherId === null) continue;
-        const b = compToBus[Number(otherId)];
-        if (b) out.push({ ...b, portId, compId: otherId });
-      }
-      return out;
+      return connectedBusesByComp.get(Number(compId)) || [];
     };
 
     const backendRows = Array.isArray(data.component_results) ? data.component_results : [];
     if (backendRows.length) {
+      const componentDomainById = new Map();
       const domainOf = (comp) => {
+        const cached = componentDomainById.get(Number(comp.id));
+        if (cached) return cached;
+        let domain = 'AC';
         if (comp.type === 'ac_bus' || comp.type === 'external_grid' || comp.type === 'generator' ||
             comp.type === 'pv_system' || comp.type === 'renewable_gen' || comp.type === 'load' ||
             comp.type === 'flexible_load' || comp.type === 'asymmetric_load' || comp.type === 'shunt' ||
             comp.type === 'motor' || comp.type === 'charger' || comp.type === 'charging_station' ||
-            comp.type === 'vpp' || comp.type === 'microgrid') return 'AC';
-        if (comp.type === 'dc_bus' || comp.type === 'dc_branch' || comp.type === 'dc_load' ||
-            comp.type === 'dc_storage' || comp.type === 'dc_pv_array' || comp.type === 'dcdc_converter') return 'DC';
-        if (comp.type === 'vsc_converter' || comp.type === 'energy_router') return 'ACDC';
-        const buses = resultConnectedBuses(comp.id);
-        const hasAc = buses.some(b => b.domain === 'ac');
-        const hasDc = buses.some(b => b.domain === 'dc');
-        if (hasAc && hasDc) return 'ACDC';
-        if (hasDc) return 'DC';
-        return 'AC';
+            comp.type === 'vpp' || comp.type === 'microgrid') domain = 'AC';
+        else if (comp.type === 'dc_bus' || comp.type === 'dc_branch' || comp.type === 'dc_load' ||
+            comp.type === 'dc_storage' || comp.type === 'dc_pv_array' || comp.type === 'dcdc_converter') domain = 'DC';
+        else if (comp.type === 'vsc_converter' || comp.type === 'energy_router') domain = 'ACDC';
+        else {
+          const buses = resultConnectedBuses(comp.id);
+          const hasAc = buses.some(b => b.domain === 'ac');
+          const hasDc = buses.some(b => b.domain === 'dc');
+          domain = hasAc && hasDc ? 'ACDC' : (hasDc ? 'DC' : 'AC');
+        }
+        componentDomainById.set(Number(comp.id), domain);
+        return domain;
       };
       const rowTypeOf = (comp) => (comp.type === 'transformer_2w' && (comp.params || {})._from_branch)
         ? 'ac_branch'
         : comp.type;
       const orderByTypeDomain = {};
+      const positionByCompId = new Map();
       components.forEach(comp => {
         const key = `${rowTypeOf(comp)}|${domainOf(comp)}`;
         if (!orderByTypeDomain[key]) orderByTypeDomain[key] = [];
+        positionByCompId.set(Number(comp.id), orderByTypeDomain[key].length);
         orderByTypeDomain[key].push(comp.id);
       });
-      const positionOf = (comp) => {
-        const key = `${rowTypeOf(comp)}|${domainOf(comp)}`;
-        return (orderByTypeDomain[key] || []).findIndex(id => Number(id) === Number(comp.id));
-      };
+      const positionOf = (comp) => positionByCompId.get(Number(comp.id)) ?? -1;
       const usedRows = new Set();
-      const rowDomainMatches = (rowDomain, compDomain) => {
-        const rd = String(rowDomain || '').toUpperCase();
-        if (!rd || rd === compDomain) return true;
-        return compDomain === 'ACDC' && (rd === 'AC' || rd === 'DC');
+      const backendByIndex = new Map();
+      const backendByPosition = new Map();
+      const backendByGroup = new Map();
+      const addBackendLookup = (map, key, rowIndex) => {
+        if (!map.has(key)) map.set(key, rowIndex);
       };
+      backendRows.forEach((row, rowIndex) => {
+        const type = String(row.canvas_type || '');
+        const rowDomain = String(row.domain || '').toUpperCase();
+        const domains = rowDomain
+          ? [rowDomain, ...((rowDomain === 'AC' || rowDomain === 'DC') ? ['ACDC'] : [])]
+          : ['AC', 'DC', 'ACDC'];
+        domains.forEach(domain => {
+          const group = `${type}|${domain}`;
+          const rows = backendByGroup.get(group) || [];
+          rows.push(rowIndex);
+          backendByGroup.set(group, rows);
+          if (row.index !== undefined && row.index !== null) {
+            addBackendLookup(backendByIndex, `${group}|${Number(row.index)}`, rowIndex);
+          }
+          if (row.position !== undefined && row.position !== null) {
+            addBackendLookup(backendByPosition, `${group}|${Number(row.position)}`, rowIndex);
+          }
+        });
+      });
+      const fallbackCursorByGroup = new Map();
       const takeBackendRow = (comp) => {
         const t = rowTypeOf(comp);
         const d = domainOf(comp);
+        const group = `${t}|${d}`;
         const pos = positionOf(comp);
         const idx = Number((comp.params || {}).index);
-        const candidates = backendRows
-          .map((row, rowIndex) => ({ row, rowIndex }))
-          .filter(x => !usedRows.has(x.rowIndex) &&
-            String(x.row.canvas_type || '') === t &&
-            rowDomainMatches(x.row.domain, d));
-        let hit = null;
+        let hitIndex = null;
         if (Number.isFinite(idx)) {
-          hit = candidates.find(x => Number(x.row.index) === idx) || null;
+          hitIndex = backendByIndex.get(`${group}|${idx}`) ?? null;
         }
-        if (!hit && pos >= 0) {
-          hit = candidates.find(x => Number(x.row.position) === pos) || null;
+        if ((hitIndex === null || usedRows.has(hitIndex)) && pos >= 0) {
+          hitIndex = backendByPosition.get(`${group}|${pos}`) ?? null;
         }
-        if (!hit) hit = candidates[0] || null;
-        if (hit) usedRows.add(hit.rowIndex);
-        return hit ? hit.row : null;
+        if (hitIndex === null || usedRows.has(hitIndex)) {
+          const candidates = backendByGroup.get(group) || [];
+          let cursor = fallbackCursorByGroup.get(group) || 0;
+          while (cursor < candidates.length && usedRows.has(candidates[cursor])) cursor++;
+          hitIndex = cursor < candidates.length ? candidates[cursor] : null;
+          fallbackCursorByGroup.set(group, cursor + 1);
+        }
+        if (hitIndex !== null) usedRows.add(hitIndex);
+        return hitIndex !== null ? backendRows[hitIndex] : null;
       };
       const fmtMetric = (m) => {
         if (!m) return '';
@@ -9479,8 +9618,14 @@ const App = (() => {
         const suffix = unit ? ` ${unit}` : '';
         return `${label}=${n.toFixed(precision)}${suffix}`;
       };
+      const requestedLimit = Number(options.rowLimit);
+      const rowLimit = Number.isFinite(requestedLimit)
+        ? Math.max(1, Math.floor(requestedLimit))
+        : 300;
+      const visibleComponents = components.slice(0, rowLimit);
+      const truncated = visibleComponents.length < components.length;
       let html = '<table><thead><tr><th>ID</th><th>类型</th><th>名称</th><th>状态</th><th>连接</th><th>潮流/电压/功率</th><th>备注</th></tr></thead><tbody>';
-      components.forEach(comp => {
+      visibleComponents.forEach(comp => {
         const row = takeBackendRow(comp);
         const detail = row && Array.isArray(row.metrics) ? row.metrics.map(fmtMetric) : [];
         const notes = row && Array.isArray(row.notes) ? row.notes : [];
@@ -9498,7 +9643,7 @@ const App = (() => {
         html += `<td>${lineHtml(row ? notes : ['缺少潮流后元件行'])}</td>`;
         html += '</tr>';
       });
-      backendRows.forEach((row, rowIndex) => {
+      if (!truncated) backendRows.forEach((row, rowIndex) => {
         if (usedRows.has(rowIndex)) return;
         const detail = Array.isArray(row.metrics) ? row.metrics.map(fmtMetric) : [];
         const notes = Array.isArray(row.notes) ? row.notes : [];
@@ -9514,7 +9659,17 @@ const App = (() => {
         html += '</tr>';
       });
       html += '</tbody></table>';
+      if (truncated) {
+        html += `<p class="empty-hint">首屏显示 ${visibleComponents.length}/${components.length} 个元件，完整结果仍用于画布、诊断和导出。 ` +
+          '<button type="button" class="toolbar-btn" data-pf-show-all>显示全部</button></p>';
+      }
       div.innerHTML = html;
+      const showAll = div.querySelector('[data-pf-show-all]');
+      if (showAll) {
+        showAll.addEventListener('click', () => {
+          renderAllPowerFlowComponentStatus(data, maps, { ...options, rowLimit: components.length });
+        }, { once: true });
+      }
       return;
     }
 
@@ -10155,14 +10310,6 @@ const App = (() => {
 	      return;
 	    }
 
-    const sys = (typeof Canvas !== 'undefined' && Canvas.buildSystemJson)
-      ? Canvas.buildSystemJson() : null;
-    if (!sys) {
-      section.style.display = 'none';
-      div.innerHTML = '';
-      return;
-    }
-
     const num = (v, d = 0) => {
       const x = Number(v);
       return Number.isFinite(x) ? x : d;
@@ -10241,6 +10388,14 @@ const App = (() => {
 	      div.innerHTML = status + sourceHint + allTable + imbalanceTable + sourceTable;
 	      return;
 	    }
+
+    const sys = (typeof Canvas !== 'undefined' && Canvas.buildSystemJson)
+      ? Canvas.buildSystemJson() : null;
+    if (!sys) {
+      section.style.display = 'none';
+      div.innerHTML = '';
+      return;
+    }
 
     const ac = new Map();
     const dc = new Map();
@@ -10679,8 +10834,11 @@ const App = (() => {
     const voltageQualityText = voltageQuality.rate_pct != null && Number.isFinite(Number(voltageQuality.rate_pct))
       ? `${Number(voltageQuality.rate_pct).toFixed(2)}% (${voltageQuality.qualified_samples}/${voltageQuality.total_samples})`
       : '—';
-    const executionTimeText = Number.isFinite(Number(data.execution_time_sec))
-      ? `${Number(data.execution_time_sec).toFixed(3)} s` : '—';
+    const coreSolveMs = Number(data.timing?.solve_ms);
+    const executionTimeText = Number.isFinite(coreSolveMs)
+      ? `${(coreSolveMs / 1000).toFixed(3)} / ${Number(data.execution_time_sec || 0).toFixed(3)} s`
+      : (Number.isFinite(Number(data.execution_time_sec))
+          ? `${Number(data.execution_time_sec).toFixed(3)} s` : '—');
     const isThreePhase = !!(data.three_phase || data.method === 'three_phase');
     const solverCards = isThreePhase
       ? `<div class="result-item"><span class="result-label">abc求解器/范围</span>
@@ -10707,7 +10865,7 @@ const App = (() => {
         <span class="result-value">tol=${optNumber(opt.tol, 0).toExponential(1)}, max=${opt.max_iter ?? '-'}</span></div>
       <div class="result-item"><span class="result-label">电压合格率</span>
         <span class="result-value">${voltageQualityText}</span></div>
-      <div class="result-item"><span class="result-label">计算时间</span>
+      <div class="result-item"><span class="result-label">求解 / 总计</span>
         <span class="result-value">${executionTimeText}</span></div>
       ${solverCards}
     `;
@@ -10728,6 +10886,65 @@ const App = (() => {
         warningSection.style.display = 'none';
         warningResults.innerHTML = '';
       }
+    }
+
+    const compactHeadless = data.response_detail === 'compact' &&
+      Canvas.isHeadless?.();
+    if (compactHeadless) {
+      const vectorStats = (values) => {
+        let count = 0;
+        let min = Infinity;
+        let max = -Infinity;
+        let sum = 0;
+        for (const value of Array.isArray(values) ? values : []) {
+          const number = Number(value);
+          if (!Number.isFinite(number)) continue;
+          count++;
+          min = Math.min(min, number);
+          max = Math.max(max, number);
+          sum += number;
+        }
+        return { count, min, max, avg: count ? sum / count : NaN };
+      };
+      const vmStats = vectorStats(data.vm);
+      const vdcStats = vectorStats(data.vdc);
+      const branchStats = vectorStats(data.branch_abs);
+      const stat = (value, digits = 6) => Number.isFinite(value)
+        ? Number(value).toFixed(digits) : '-';
+      const rows = [
+        `<tr><td>AC节点电压</td><td>${vmStats.count}</td><td>${stat(vmStats.min)}</td><td>${stat(vmStats.avg)}</td><td>${stat(vmStats.max)}</td><td>pu</td></tr>`,
+        vdcStats.count
+          ? `<tr><td>DC节点电压</td><td>${vdcStats.count}</td><td>${stat(vdcStats.min)}</td><td>${stat(vdcStats.avg)}</td><td>${stat(vdcStats.max)}</td><td>pu</td></tr>`
+          : '',
+        `<tr><td>AC支路 |P|</td><td>${branchStats.count}</td><td>${stat(branchStats.min, 4)}</td><td>${stat(branchStats.avg, 4)}</td><td>${stat(branchStats.max, 4)}</td><td>${escapeHtml(pUnit())}</td></tr>`,
+      ].join('');
+      const limitations = (Array.isArray(data.model_limitations)
+        ? data.model_limitations : []).map(item => escapeHtml(String(item)));
+      const allSection = document.getElementById('pfAllComponentsSection');
+      const allResults = document.getElementById('pfAllComponentsResults');
+      if (allSection) allSection.style.display = '';
+      if (allResults) {
+        allResults.innerHTML = `<table><thead><tr><th>结果向量</th><th>数量</th><th>最小值</th><th>平均值</th><th>最大值</th><th>单位</th></tr></thead><tbody>${rows}</tbody></table>` +
+          '<p class="empty-hint">大规模系统紧凑结果：完整电压及支路 |P| 向量已保留，本次响应未生成逐元件展示归因。</p>' +
+          (limitations.length ? `<p class="empty-hint">${limitations.join('<br>')}</p>` : '');
+      }
+      const busResults = document.getElementById('pfBusResults');
+      if (busResults) {
+        busResults.innerHTML = `<p class="empty-hint">${vmStats.count} 个AC节点；Vm范围 ${stat(vmStats.min)} - ${stat(vmStats.max)} pu。</p>`;
+      }
+      const branchResults = document.getElementById('pfBranchResults');
+      if (branchResults) {
+        branchResults.innerHTML = `<p class="empty-hint">${branchStats.count} 条AC支路；最大 |P| ${stat(branchStats.max, 4)} ${escapeHtml(pUnit())}。</p>`;
+      }
+      ['pfBalanceSection', 'pfCoordSection', 'pfThreePhaseSection',
+        'pfDcBusSection', 'pfGenSection', 'pfDcBranchSection', 'pfVscSection',
+        'pfDcdcSection', 'pfTrafo3wSection'].forEach(id => {
+        const element = document.getElementById(id);
+        if (element) element.style.display = 'none';
+      });
+      document.getElementById('scResults').innerHTML = '';
+      document.getElementById('topoResults').innerHTML = '';
+      return;
     }
 
     let busMap = {};
@@ -10798,13 +11015,28 @@ const App = (() => {
       if (div) div.innerHTML = '<p class="empty-hint">全部元件计算结果渲染失败；其余潮流结果已继续显示。</p>';
     }
 
+    const componentRows = Array.isArray(data.component_results) ? data.component_results : [];
+    const acBusRowByPosition = new Map();
+    const dcBusRowByPosition = new Map();
+    const acBusRowById = new Map();
+    const dcBusRowById = new Map();
+    componentRows.forEach(row => {
+      if (row.canvas_type === 'ac_bus') {
+        acBusRowByPosition.set(Number(row.position), row);
+        acBusRowById.set(Number(row.index), row);
+      } else if (row.canvas_type === 'dc_bus') {
+        dcBusRowByPosition.set(Number(row.position), row);
+        dcBusRowById.set(Number(row.index), row);
+      }
+    });
+    const acGeoBuses = (data.geo_buses || []).filter(row => row.type === 'AC');
+    const dcGeoBuses = (data.geo_buses || []).filter(row => row.type === 'DC');
     const pfBusIdByPosition = (domain, i) => {
-      const type = domain === 'dc' ? 'dc_bus' : 'ac_bus';
-      const row = (data.component_results || []).find(r =>
-        r.canvas_type === type && Number(r.position) === Number(i));
+      const row = domain === 'dc'
+        ? dcBusRowByPosition.get(Number(i))
+        : acBusRowByPosition.get(Number(i));
       if (row && row.index !== undefined && row.index !== null) return Number(row.index);
-      const geoType = domain === 'dc' ? 'DC' : 'AC';
-      const geo = (data.geo_buses || []).filter(b => b.type === geoType);
+      const geo = domain === 'dc' ? dcGeoBuses : acGeoBuses;
       if (geo[i] && geo[i].id !== undefined && geo[i].id !== null) return Number(geo[i].id);
       return null;
     };
@@ -10812,10 +11044,7 @@ const App = (() => {
     // AC Bus voltage table
     const busDiv = document.getElementById('pfBusResults');
     if (data.vm && data.vm.length > 0) {
-      const voltageSystem = (typeof Canvas !== 'undefined' && Canvas.buildSystemJson)
-        ? Canvas.buildSystemJson() : { ac: { buses: [] } };
-      const voltageBusById = new Map((voltageSystem.ac?.buses || [])
-        .map(bus => [Number(bus.index), bus]));
+      const voltageBusById = new Map(acGeoBuses.map(bus => [Number(bus.id), bus]));
       let html = '<table><thead><tr><th>Bus</th><th>基准电压(kV)</th><th>实际电压(kV)</th><th>Vm(pu)</th><th>Va(°)</th></tr></thead><tbody>';
       data.vm.forEach((vm, i) => {
         const busId = pfBusIdByPosition('ac', i);
@@ -10824,8 +11053,7 @@ const App = (() => {
         const actualKv = Number.isFinite(baseKv) && baseKv > 0 ? vm * baseKv : NaN;
         const va = data.va ? (data.va[i] * 180 / Math.PI).toFixed(4) : '0';
         const color = vm < 0.95 ? 'color:#e06c75' : vm > 1.05 ? 'color:#d19a66' : '';
-        const resultRow = (data.component_results || []).find(r =>
-          r.canvas_type === 'ac_bus' && (Number(r.position) === Number(i) || Number(r.index) === Number(busId))) ||
+        const resultRow = acBusRowByPosition.get(Number(i)) || acBusRowById.get(Number(busId)) ||
           { canvas_type: 'ac_bus', index: busId, position: i };
         const attr = resultRowAttr(resultRow, busId != null && busMap.ac ? busMap.ac[busId] : undefined);
         html += `<tr${attr}><td>${busLabel}</td><td>${Number.isFinite(baseKv) ? baseKv.toFixed(3) : '—'}</td><td>${Number.isFinite(actualKv) ? actualKv.toFixed(3) : '—'}</td><td style="${color}">${vm.toFixed(6)}</td><td>${va}</td></tr>`;
@@ -10841,7 +11069,7 @@ const App = (() => {
     const dcBusDiv = document.getElementById('pfDcBusResults');
     if (data.vdc && data.vdc.length > 0) {
       dcBusSec.style.display = '';
-      const dcBusRows = (data.component_results || []).filter(r => r.canvas_type === 'dc_bus');
+      const dcBusRows = Array.from(dcBusRowByPosition.values());
       const dcMetric = (busId, label) => {
         const row = dcBusRows.find(r => Number(r.index) === Number(busId));
         const metric = row && Array.isArray(row.metrics)
@@ -10855,7 +11083,7 @@ const App = (() => {
         const busId = pfBusIdByPosition('dc', i);
         const busLabel = busId ?? `pos ${i}`;
         const color = vdc < 0.95 ? 'color:#e06c75' : vdc > 1.05 ? 'color:#d19a66' : '';
-        const resultRow = dcBusRows.find(r => Number(r.position) === Number(i) || Number(r.index) === Number(busId)) ||
+        const resultRow = dcBusRowByPosition.get(Number(i)) || dcBusRowById.get(Number(busId)) ||
           { canvas_type: 'dc_bus', index: busId, position: i };
         const attr = resultRowAttr(resultRow, busId != null && busMap.dc ? busMap.dc[busId] : undefined);
         const pNet = busId != null ? dcMetric(busId, 'P净注入') : null;
@@ -16314,6 +16542,7 @@ const App = (() => {
     document.getElementById('btnIoExportEtap')?.addEventListener('click', exportEtap);
     document.getElementById('btnIoExportEtapXml')?.addEventListener('click', exportEtapXml);
     document.getElementById('btnIoExportCimDist')?.addEventListener('click', exportCimDist);
+    document.getElementById('btnIoExportSvgDistribution')?.addEventListener('click', exportSvgDistribution);
     document.getElementById('btnIoExportGridlabd')?.addEventListener('click', () => exportExternalGrid('gridlabd'));
     document.getElementById('btnIoExportOpendss')?.addEventListener('click', () => exportExternalGrid('opendss'));
     document.getElementById('btnIoExportPsd')?.addEventListener('click', exportPowerSimulationsDynamics);

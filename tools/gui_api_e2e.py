@@ -441,14 +441,14 @@ def main() -> int:
         suggestion = suggestions[0] if suggestions else {}
         chk.check(
             st == 200 and
-            preview.get("schema") == "design_handbook_parameter_completion_v2" and
+            preview.get("schema") == "design_handbook_parameter_completion_v3" and
             preview.get("candidates") == 1 and
             preview.get("fields_changed") == 0 and
             suggestion.get("applied") is False and
             suggestion.get("conductor_material") == "copper" and
             suggestion.get("insulation") == "XLPE" and
             abs(float(suggestion.get("r20_ohm_per_km", 0.0)) - 0.0754) < 1e-10 and
-            len(preview.get("references", [])) == 3,
+            len(preview.get("references", [])) >= 8,
             "handbook preview identifies the 240 mm2 XLPE copper-cable rule",
         )
         st, preview_export = c.post_json("/api/session/export_json")
@@ -474,7 +474,7 @@ def main() -> int:
             completion.get("fields_changed", 0) >= 2 and
             completion.get("suggestions", [{}])[0].get("applied") is True and
             completed_branch.get("parameter_source") ==
-            "design_handbook_gbt3956_schneider_eig" and
+            "design_handbook_gbt3956_distribution_standards" and
             completed_branch.get("parameters_inferred") is True and
             abs(float(completed_branch.get("r_ohm_per_km", 0.0)) -
                 0.09614254) < 1e-8 and
@@ -658,7 +658,36 @@ def main() -> int:
             "exported distribution CIM re-imports without topology loss",
         )
 
-        print("2f. Spatiotemporal multidimensional weak-link identification")
+        print("2f. Distribution IEC-CGE SVG export/import round-trip")
+        st, svg_exported = c.post_json(
+            "/api/session/export_svg_distribution",
+            {"include_hacdcpf_parameters": True},
+        )
+        svg_text = svg_exported.get("svg_string", "")
+        svg_counts = svg_exported.get("counts", {})
+        chk.check(
+            st == 200 and "<svg" in svg_text and
+            "cge:psr_ref" in svg_text and "hacdcpf:model" in svg_text and
+            svg_counts.get("buses", 0) > 0,
+            "distribution SVG export emits IEC-CGE references and model parameters",
+        )
+        st, svg_reloaded = c.post_json(
+            "/api/session/load_svg_distribution",
+            {
+                "svg_string": svg_text,
+                "name": "GUI SVG round-trip",
+                "auto_complete_parameters": False,
+            },
+        )
+        svg_reloaded_counts = svg_reloaded.get("counts", {})
+        chk.check(
+            st == 200 and
+            svg_reloaded_counts.get("ac_buses") == svg_counts.get("buses") and
+            svg_reloaded.get("_svg_unresolved_objects", 1) == 0,
+            "exported distribution SVG re-imports without bus or object loss",
+        )
+
+        print("2g. Spatiotemporal multidimensional weak-link identification")
         weak_entities = [
             {
                 "key": "AC:ac_branch:1", "name": "Economic Carbon Corridor",
@@ -809,6 +838,13 @@ def main() -> int:
                       f"opf->pf {case_name} post_pf={opf.get('post_pf', {}).get('converged')} consistent={consistent}")
             chk.check(opf.get("options_effective", {}).get("max_inner_iterations") == 400,
                       f"opf options echoed for {case_name}")
+            opf_timing = opf.get("timing", {})
+            chk.check(
+                opf_timing.get("core_solve_ms", -1) >= 0 and
+                opf_timing.get("post_processing_ms", -1) >= 0 and
+                opf_timing.get("total_before_serialize_ms", -1) >= 0,
+                f"opf {case_name} reports solver and presentation timing",
+            )
 
         print("3a. power_system Canvas reprojection contract")
         power_system_path = (
@@ -849,6 +885,30 @@ def main() -> int:
         chk.check(
             st == 200 and pf.get("converged") is True and pf_grid is not None,
             "PF Canvas payload contains Grid 1 attribution",
+        )
+        pf_timing = pf.get("timing", {})
+        chk.check(
+            pf_timing.get("solve_ms", -1) >= 0 and
+            pf_timing.get("presentation_ms", -1) >= 0 and
+            pf_timing.get("total_before_serialize_ms", -1) >= 0,
+            "power-flow response separates solver and GUI presentation timing",
+        )
+        st, compact_pf = c.post_json(
+            "/api/session/pf",
+            {
+                "method": "ac_newton",
+                "response_detail": "compact",
+                "options": {"enable_converter_coordination_check": False},
+            },
+        )
+        chk.check(
+            st == 200 and compact_pf.get("converged") is True and
+            compact_pf.get("response_detail") == "compact" and
+            len(compact_pf.get("vm", [])) == len(pf.get("vm", [])) and
+            len(compact_pf.get("branch_abs", [])) == len(pf.get("branch_abs", [])) and
+            not compact_pf.get("component_results") and
+            compact_pf.get("presentation_omitted", {}).get("rich_attribution") is True,
+            "compact PF preserves numerical vectors and omits presentation attribution",
         )
         chk.check(
             pf_cb34 is not None

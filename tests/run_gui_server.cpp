@@ -2343,8 +2343,17 @@ json design_handbook_report_to_json(
         {"applied", row.applied},
     });
   }
+  json references = json::array();
+  for (const auto& reference : report.references) {
+    references.push_back({
+        {"standard", reference.standard},
+        {"scope", reference.scope},
+        {"role", reference.role},
+        {"url", reference.url},
+    });
+  }
   return {
-      {"schema", "design_handbook_parameter_completion_v2"},
+      {"schema", "design_handbook_parameter_completion_v3"},
       {"branches_scanned", report.branches_scanned},
       {"candidates", report.candidates},
       {"fields_changed", report.fields_changed},
@@ -2357,18 +2366,7 @@ json design_handbook_report_to_json(
       {"suggestions", std::move(suggestions)},
       {"switch_bindings", std::move(switch_bindings)},
       {"warnings", report.warnings},
-      {"references",
-       json::array({
-           {{"standard", "GB/T 3956-2008 / IEC 60228:2004"},
-            {"scope", "20 C maximum DC conductor resistance"},
-            {"url", "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=149B3068D059EFD9BCFB8A8AF57E5B1C"}},
-           {{"standard", "GB/T 12706.1-2020"},
-            {"scope", "PVC/XLPE power-cable construction and temperature context"},
-            {"url", "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=7593C7389ACDA76E0D40F6985E3A839D"}},
-           {{"standard", "Schneider Electrical Installation Guide"},
-            {"scope", "Voltage-drop resistance and default cable reactance"},
-            {"url", "https://www.electrical-installation.org/enwiki/Calculation_of_voltage_drop_in_steady_load_conditions"}},
-       })},
+      {"references", std::move(references)},
   };
 }
 
@@ -8586,19 +8584,21 @@ std::vector<std::string> list_matpower_files(const std::string& dir) {
 }
 
 // Build a component-level summary of a HybridPowerSystem
-json system_summary(const hacdcpf::HybridPowerSystem& sys) {
-  const json root = json::parse(hacdcpf::io::to_json(sys, 2));
+json system_summary(const hacdcpf::HybridPowerSystem& sys,
+                    bool include_component_arrays = true,
+                    bool include_system_json = false) {
+  json root = json::parse(hacdcpf::io::to_json(sys, 2));
   json s;
   s["name"] = sys.name;
   s["base_mva"] = sys.base_mva;
 
-  auto get_nested_array = [&root](const std::vector<std::string>& path) -> json {
+  auto find_nested_array = [&root](const std::vector<std::string>& path) -> const json* {
     const json* cur = &root;
     for (const auto& k : path) {
-      if (!cur->is_object() || !cur->contains(k)) return json::array();
+      if (!cur->is_object() || !cur->contains(k)) return nullptr;
       cur = &((*cur)[k]);
     }
-    return cur->is_array() ? *cur : json::array();
+    return cur->is_array() ? cur : nullptr;
   };
 
   const std::vector<std::pair<std::string, std::vector<std::string>>> comp_map = {
@@ -8645,18 +8645,28 @@ json system_summary(const hacdcpf::HybridPowerSystem& sys) {
 
   json counts = json::object();
   for (const auto& [k, path] : comp_map) {
-    s[k] = get_nested_array(path);
-    counts[k] = s[k].size();
+    const json* rows = find_nested_array(path);
+    counts[k] = rows == nullptr ? 0 : rows->size();
+    if (include_component_arrays) {
+      s[k] = rows == nullptr ? json::array() : *rows;
+    }
   }
-  if (s["dc_storage"].empty()) {
-    s["dc_storage"] = get_nested_array({"dc", "storage"});
-    counts["dc_storage"] = s["dc_storage"].size();
+  if (counts["dc_storage"].get<std::size_t>() == 0) {
+    const json* rows = find_nested_array({"dc", "storage"});
+    counts["dc_storage"] = rows == nullptr ? 0 : rows->size();
+    if (include_component_arrays) {
+      s["dc_storage"] = rows == nullptr ? json::array() : *rows;
+    }
   }
-  if (s["dcdc_converters"].empty()) {
-    s["dcdc_converters"] = get_nested_array({"dc", "dcdc_converters"});
-    counts["dcdc_converters"] = s["dcdc_converters"].size();
+  if (counts["dcdc_converters"].get<std::size_t>() == 0) {
+    const json* rows = find_nested_array({"dc", "dcdc_converters"});
+    counts["dcdc_converters"] = rows == nullptr ? 0 : rows->size();
+    if (include_component_arrays) {
+      s["dcdc_converters"] = rows == nullptr ? json::array() : *rows;
+    }
   }
   s["counts"] = counts;
+  if (include_system_json) s["_system_json"] = std::move(root);
   return s;
 }
 
@@ -9328,8 +9338,19 @@ int main(int argc, char** argv) {
 	      clear_preserved_three_phase(g_session);
 	      g_session.external_grid_carbon_profiles.clear();
 	      clear_cached_analysis(g_session);
-      auto summary = system_summary(*g_session.current_system);
-      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      // Large MATPOWER cases use one structured model payload.  Returning the
+      // same model both as flattened arrays and as an escaped JSON string more
+      // than doubles response size and forces an additional browser JSON parse.
+      // Keep the legacy shape for smaller API clients that consume its flattened
+      // component arrays directly.
+      const bool compact_load = g_session.current_system->ac.buses.size() >= 5000;
+      auto summary = compact_load
+                         ? system_summary(*g_session.current_system, false, true)
+                         : system_summary(*g_session.current_system);
+      if (!compact_load) {
+        summary["_raw_json"] =
+            hacdcpf::io::to_json(*g_session.current_system, 2);
+      }
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;
@@ -10165,6 +10186,24 @@ int main(int argc, char** argv) {
             "transformer_load_factor", opts.transformer_load_factor);
       if (j.contains("power_factor"))
         opts.power_factor = j.value("power_factor", opts.power_factor);
+      if (j.contains("auto_complete_parameters"))
+        opts.auto_complete_parameters = j.value(
+            "auto_complete_parameters", opts.auto_complete_parameters);
+      if (j.contains("default_mv_cross_section_mm2"))
+        opts.default_mv_cross_section_mm2 = j.value(
+            "default_mv_cross_section_mm2",
+            opts.default_mv_cross_section_mm2);
+      if (j.contains("synthetic_source_s_sc_max_mva"))
+        opts.synthetic_source_s_sc_max_mva = j.value(
+            "synthetic_source_s_sc_max_mva",
+            opts.synthetic_source_s_sc_max_mva);
+      if (j.contains("synthetic_source_s_sc_min_mva"))
+        opts.synthetic_source_s_sc_min_mva = j.value(
+            "synthetic_source_s_sc_min_mva",
+            opts.synthetic_source_s_sc_min_mva);
+      if (j.contains("synthetic_source_rx"))
+        opts.synthetic_source_rx = j.value(
+            "synthetic_source_rx", opts.synthetic_source_rx);
       auto imported = hacdcpf::io::from_svg_distribution(
           svg, hacdcpf::io::ImportMode::Permissive, opts);
       if (imported.report.has_errors()) {
@@ -10200,6 +10239,10 @@ int main(int argc, char** argv) {
           imported.synthetic_external_grids;
       summary["_svg_isolated_components"] = imported.isolated_components;
       summary["_svg_isolated_buses"] = imported.isolated_buses;
+      summary["_svg_parameter_completion_applied"] =
+          imported.parameter_completion_applied;
+      summary["_svg_parameter_completion"] =
+          design_handbook_report_to_json(imported.parameter_completion);
       summary["_svg_model_scope"] =
           "cge-metadata+geometry-topology; estimated electrical parameters";
       res.set_content(summary.dump(), "application/json");
@@ -10232,6 +10275,72 @@ int main(int argc, char** argv) {
       if (safe.empty()) safe = "system";
       res.set_content(json{{"xml_string", xml}, {"name", safe}}.dump(),
                       "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: export the current AC distribution model as IEC-CGE SVG ----
+  // Snapshot the session under the mutex and perform layout/XML generation
+  // outside it so a large drawing does not block unrelated session reads.
+  svr.Post("/api/session/export_svg_distribution",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      hacdcpf::HybridPowerSystem system;
+      std::string name;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system)
+          throw std::runtime_error("No system loaded");
+        system = *g_session.current_system;
+        name = g_session.current_name;
+      }
+
+      hacdcpf::io::SvgDistributionExportOptions opts;
+      opts.title = j.value("title", name);
+      if (j.contains("horizontal_spacing"))
+        opts.horizontal_spacing = j.value(
+            "horizontal_spacing", opts.horizontal_spacing);
+      if (j.contains("vertical_spacing"))
+        opts.vertical_spacing = j.value(
+            "vertical_spacing", opts.vertical_spacing);
+      if (j.contains("margin"))
+        opts.margin = j.value("margin", opts.margin);
+      if (j.contains("include_hacdcpf_parameters"))
+        opts.include_hacdcpf_parameters = j.value(
+            "include_hacdcpf_parameters",
+            opts.include_hacdcpf_parameters);
+      auto exported = hacdcpf::io::to_svg_distribution(system, opts);
+
+      std::string safe;
+      for (char ch : name) {
+        safe += (static_cast<unsigned char>(ch) >= 0x80 ||
+                 std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' ||
+                 ch == '_')
+                    ? ch
+                    : '_';
+      }
+      if (safe.empty()) safe = "system";
+      res.set_content(
+          json{{"svg_string", std::move(exported.svg)},
+               {"name", safe},
+               {"counts",
+                {{"buses", exported.exported_buses},
+                 {"branches", exported.exported_branches},
+                 {"switches", exported.exported_switches},
+                 {"transformers", exported.exported_transformers},
+                 {"external_grids", exported.exported_external_grids},
+                 {"embedded_loads", exported.embedded_loads}}},
+               {"omitted",
+                {{"loads", exported.omitted_loads},
+                 {"non_ac_components",
+                  exported.omitted_non_ac_components}}},
+               {"warnings", exported.warnings},
+               {"model_scope", "ac_distribution_iec_cge_svg"}}
+              .dump(),
+          "application/json");
     } catch (const std::exception& e) {
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
@@ -10630,6 +10739,7 @@ int main(int argc, char** argv) {
            [](const httplib::Request& req, httplib::Response& res) {
     try {
       const auto request_started = std::chrono::steady_clock::now();
+      double presentation_ms = 0.0;
       // Copy system under short lock, then release
       hacdcpf::HybridPowerSystem sys;
       {
@@ -10637,6 +10747,7 @@ int main(int argc, char** argv) {
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
         sys = *g_session.current_system;
       }
+      const auto snapshot_finished = std::chrono::steady_clock::now();
       if (g_session.busy.exchange(true)) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -10646,6 +10757,13 @@ int main(int argc, char** argv) {
 
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       const std::string method = j.value("method", std::string("ac_newton"));
+      const std::string response_detail =
+          j.value("response_detail", std::string("full"));
+      if (response_detail != "full" && response_detail != "compact") {
+        throw std::runtime_error(
+            "response_detail must be either 'full' or 'compact'");
+      }
+      const bool compact_response = response_detail == "compact";
 
       hacdcpf::PowerFlowOptions opt;
       apply_power_flow_request_options(j, opt);
@@ -10667,6 +10785,18 @@ int main(int argc, char** argv) {
       json out;
       out["schema"] = "power_flow_result_v1";
       out["method"] = method;
+      out["response_detail"] = response_detail;
+      out["model_scope"] = json{
+          {"analysis", "steady_state_power_flow"},
+          {"response_detail", response_detail},
+          {"numerical_vectors", "complete"}};
+      out["model_limitations"] = json::array();
+      if (compact_response) {
+        out["model_limitations"].push_back(
+            "Large-model compact response omits per-component presentation and "
+            "rich-model attribution rows; complete bus-voltage and branch-|P| "
+            "vectors remain available.");
+      }
       out["vm"] = json::array();
       out["va"] = json::array();
       out["vdc"] = json::array();
@@ -10861,6 +10991,18 @@ int main(int argc, char** argv) {
 
       // Helper to add GIS/geographic data for map visualization
       auto add_geo_data = [&](const hacdcpf::PowerFlowResult& pf) {
+        const auto presentation_started = std::chrono::steady_clock::now();
+        if (compact_response) {
+          out["presentation_omitted"] = json{
+              {"geo_buses", pf.vm.size() + pf.vdc.size()},
+              {"geo_ac_branches", pf.branch_flows.size()},
+              {"component_results", "all"},
+              {"rich_attribution", true},
+              {"reason", "large_model_compact_response"}};
+          presentation_ms += std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - presentation_started).count();
+          return;
+        }
         json geo_buses = json::array();
         json geo_ac_branches = json::array();
         json geo_dc_branches = json::array();
@@ -13350,34 +13492,47 @@ int main(int argc, char** argv) {
 	                sys, projection, nullptr, nullptr, &pf);
 	        const json attributed_rows =
 	            rich_attribution_to_component_results(attribution);
+	        std::unordered_map<std::string, std::size_t> component_row_by_key;
+	        component_row_by_key.reserve(component_results.size());
+	        const auto component_key = [](const json& row, bool attributed_row) {
+	          return row.value("canvas_type", std::string{}) + '\x1f' +
+	                 row.value("domain", std::string{}) + '\x1f' +
+	                 std::to_string(attributed_row
+	                                    ? row.value("canvas_index", -2)
+	                                    : row.value("canvas_index",
+	                                                row.value("index", -1)));
+	        };
+	        for (std::size_t i = 0; i < component_results.size(); ++i) {
+	          component_row_by_key.try_emplace(
+	              component_key(component_results[i], false), i);
+	        }
 	        for (const auto& attributed : attributed_rows) {
-	          const auto existing = std::find_if(
-	              component_results.begin(), component_results.end(),
-	              [&](const json& row) {
-	                return row.value("canvas_type", std::string{}) ==
-	                           attributed.value("canvas_type", std::string{}) &&
-	                       row.value("domain", std::string{}) ==
-	                           attributed.value("domain", std::string{}) &&
-	                       row.value("canvas_index", row.value("index", -1)) ==
-	                           attributed.value("canvas_index", -2);
-	              });
-	          if (existing == component_results.end()) {
+	          const auto existing = component_row_by_key.find(
+	              component_key(attributed, true));
+	          if (existing == component_row_by_key.end()) {
+	            const std::size_t pos = component_results.size();
 	            component_results.push_back(attributed);
+	            component_row_by_key.try_emplace(
+	                component_key(attributed, true), pos);
 	            continue;
 	          }
-	          (*existing)["canvas_index"] = attributed["canvas_index"];
-	          (*existing)["in_service"] = attributed["in_service"];
-	          (*existing)["recovery_class"] = attributed["recovery_class"];
-	          (*existing)["recovery_reason"] = attributed["recovery_reason"];
-	          (*existing)["canonical_sources"] = attributed["canonical_sources"];
-	          (*existing)["terminals"] = attributed["terminals"];
+	          auto& row = component_results[existing->second];
+	          row["canvas_index"] = attributed["canvas_index"];
+	          row["in_service"] = attributed["in_service"];
+	          row["recovery_class"] = attributed["recovery_class"];
+	          row["recovery_reason"] = attributed["recovery_reason"];
+	          row["canonical_sources"] = attributed["canonical_sources"];
+	          row["terminals"] = attributed["terminals"];
 	        }
 	        out["component_results"] = std::move(component_results);
 	        out["attribution_coverage"] =
 	            rich_attribution_coverage_json(attribution.coverage);
 	        out["attribution_diagnostics"] = attribution.diagnostics;
+	        presentation_ms += std::chrono::duration<double, std::milli>(
+	            std::chrono::steady_clock::now() - presentation_started).count();
 	      };
 
+      const auto analysis_started = std::chrono::steady_clock::now();
       if (method == "ac_newton") {
         // Island detection: dead islands (no generation source) are
         // automatically stripped during canonical projection
@@ -13857,6 +14012,7 @@ int main(int argc, char** argv) {
 	      } else {
 	        throw std::runtime_error("Unsupported power flow method: " + method);
 	      }
+      const auto analysis_finished = std::chrono::steady_clock::now();
 
       add_dc_branch_flows();
       // Surface solver diagnostics (e.g. auto-promoted converters, Vdc-limit
@@ -13927,8 +14083,31 @@ int main(int argc, char** argv) {
       }
       out["voltage_qualification"] = voltage_qualification_json(voltage_metrics);
       out["voltage_qualification"]["basis"] = "converged_snapshot";
-      out["execution_time_sec"] = elapsed_seconds(request_started);
-      res.set_content(out.dump(), "application/json");
+      const auto response_ready = std::chrono::steady_clock::now();
+      const auto elapsed_ms = [](auto a, auto b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+      };
+      const double analysis_ms = elapsed_ms(analysis_started, analysis_finished);
+      const double solve_ms = std::max(0.0, analysis_ms - presentation_ms);
+      out["timing"] = json{{"snapshot_ms", elapsed_ms(request_started, snapshot_finished)},
+                           {"request_setup_ms", elapsed_ms(snapshot_finished, analysis_started)},
+                           {"solve_ms", solve_ms},
+                           {"presentation_ms", presentation_ms},
+                           {"response_finalize_ms", elapsed_ms(analysis_finished, response_ready)},
+                           {"total_before_serialize_ms", elapsed_ms(request_started, response_ready)}};
+      out["execution_time_sec"] = elapsed_ms(request_started, response_ready) / 1000.0;
+      const auto serialization_started = std::chrono::steady_clock::now();
+      std::string payload = out.dump();
+      const double serialization_ms = elapsed_ms(
+          serialization_started, std::chrono::steady_clock::now());
+      res.set_header("Server-Timing",
+                     "snapshot;dur=" + std::to_string(out["timing"]["snapshot_ms"].get<double>()) +
+                         ", setup;dur=" + std::to_string(out["timing"]["request_setup_ms"].get<double>()) +
+                         ", solve;dur=" + std::to_string(solve_ms) +
+                         ", presentation;dur=" + std::to_string(presentation_ms) +
+                         ", serialize;dur=" + std::to_string(serialization_ms));
+      res.set_header("X-HySim-Response-Bytes", std::to_string(payload.size()));
+      res.set_content(std::move(payload), "application/json");
       g_session.busy.store(false);
     } catch (const std::exception& e) {
       g_session.busy.store(false);
@@ -14843,6 +15022,7 @@ int main(int argc, char** argv) {
            [](const httplib::Request& req, httplib::Response& res) {
     try {
       const auto request_started = std::chrono::steady_clock::now();
+      double core_solver_ms = 0.0;
       hacdcpf::HybridPowerSystem sys;
       std::string dss_source_path;
       {
@@ -14851,6 +15031,7 @@ int main(int argc, char** argv) {
         sys = *g_session.current_system;
         dss_source_path = g_session.preserved_three_phase_source_path;
       }
+      const auto snapshot_finished = std::chrono::steady_clock::now();
       if (g_session.busy.exchange(true)) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -14869,6 +15050,7 @@ int main(int argc, char** argv) {
       }
       // Optional post-OPF power-flow consistency audit (OPF ↔ PF model/parameters).
       const bool want_consistency = j.value("check_consistency", false);
+      const bool include_post_carbon = j.value("include_post_carbon", false);
       const json cons = j.contains("constraints") ? j["constraints"] : json::object();
       const bool en_branch = cons.value("branch_limits", true);
       const bool en_cap    = cons.value("converter_capacity", true);
@@ -14916,6 +15098,14 @@ int main(int argc, char** argv) {
                             {"converter_capacity", en_cap},
                             {"converter_current", en_iac},
                             {"converter_modulation", en_mod}};
+      out["analysis_scope"]["post_carbon_requested"] = include_post_carbon;
+      const auto timed_core_solve = [&](auto&& solve) {
+        const auto started = std::chrono::steady_clock::now();
+        auto result = solve();
+        core_solver_ms += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        return result;
+      };
 
 	      if (network_model == "three_phase_hybrid") {
 	        if (solver == "dc" || solver == "dispatch") {
@@ -14955,15 +15145,17 @@ int main(int argc, char** argv) {
 	            phase_request.value("reduction_max_front", 64), 1, 100000);
 	        phase_opt.reduction_options.max_nnz_ratio = std::clamp(
 	            phase_request.value("reduction_max_nnz_ratio", 10.0), 1.0, 1.0e6);
-	        auto phase_result =
-	            hacdcpf::opf::phase_hybrid::solve_three_phase_hybrid_opf(
-	                phase_model.opf, phase_opt);
+	        auto phase_result = timed_core_solve([&] {
+	          return hacdcpf::opf::phase_hybrid::solve_three_phase_hybrid_opf(
+	              phase_model.opf, phase_opt);
+	        });
 	        bool phase_auto_fallback = false;
         if ((solver == "auto" || robust_strategy) && !phase_result.converged) {
 	          phase_opt.backend = hacdcpf::opf::phase_hybrid::SolverBackend::Ipopt;
-	          phase_result =
-	              hacdcpf::opf::phase_hybrid::solve_three_phase_hybrid_opf(
-	                  phase_model.opf, phase_opt);
+	          phase_result = timed_core_solve([&] {
+	            return hacdcpf::opf::phase_hybrid::solve_three_phase_hybrid_opf(
+	                phase_model.opf, phase_opt);
+	          });
 	          phase_auto_fallback = true;
 	        }
 
@@ -15207,7 +15399,7 @@ int main(int argc, char** argv) {
 	                 {"voll", opt.voll},
 	                 {"compute_lmp", opt.compute_lmp},
 	                 {"verbose", opt.verbose}};
-	        auto r = hacdcpf::solve_dc_opf(sys, opt);
+	        auto r = timed_core_solve([&] { return hacdcpf::solve_dc_opf(sys, opt); });
 	        out["converged"]=r.converged; out["iterations"]=r.iterations;
 	        out["objective"]=r.objective; out["status"]=r.status;
 	        out["pg_mw"]=r.pg_mw; out["external_grid_p_mw"]=r.external_grid_p_mw;
@@ -15345,7 +15537,7 @@ int main(int argc, char** argv) {
 		                 {"objective_homotopy", opt.objective_homotopy},
 		                 {"homotopy_dt0", opt.homotopy_dt0},
 		                 {"verbose", opt.verbose}};
-        auto r = hacdcpf::solve_ac_opf(sys, opt);
+        auto r = timed_core_solve([&] { return hacdcpf::solve_ac_opf(sys, opt); });
         out["converged"]=r.converged; out["iterations"]=r.iterations;
         out["objective"]=r.objective; out["status"]=r.status;
         out["max_constraint_violation_pu"] = r.max_constraint_violation;
@@ -15835,11 +16027,17 @@ int main(int argc, char** argv) {
 	            out["post_pf"] = post_pf;
             // Post-OPF carbon flow: static carbon-emission-flow analysis on the OPF
             // dispatch (same engine as /api/session/run_carbon, fed the OPF PF).
-            try {
-              hacdcpf::analysis::CarbonAnalysisOptions ca_opt; ca_opt.verbose = false;
-              auto carbon = hacdcpf::analysis::compute_carbon_analysis(carbon_sys, ac_pf, ca_opt);
-              out["post_carbon"] = carbon_analysis_to_json(carbon_sys, carbon);
-            } catch (const std::exception&) { /* carbon view is best-effort */ }
+            if (include_post_carbon) {
+              try {
+                hacdcpf::analysis::CarbonAnalysisOptions ca_opt;
+                ca_opt.verbose = false;
+                auto carbon = hacdcpf::analysis::compute_carbon_analysis(
+                    carbon_sys, ac_pf, ca_opt);
+                out["post_carbon"] = carbon_analysis_to_json(carbon_sys, carbon);
+              } catch (const std::exception&) {
+                // Carbon view is optional and best-effort.
+              }
+            }
           }
           // ── OPF ↔ PF consistency audit ──────────────────────────────────
           // Re-solve a plain power flow at the OPF dispatch (generation + voltage
@@ -15953,8 +16151,32 @@ int main(int argc, char** argv) {
           }
         }
       }
-      out["execution_time_sec"] = elapsed_seconds(request_started);
-      res.set_content(out.dump(), "application/json");
+      const auto response_ready = std::chrono::steady_clock::now();
+      const auto duration_ms = [](auto a, auto b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+      };
+      const double total_before_serialize_ms =
+          duration_ms(request_started, response_ready);
+      out["timing"] = json{
+          {"snapshot_ms", duration_ms(request_started, snapshot_finished)},
+          {"core_solve_ms", core_solver_ms},
+          {"post_processing_ms",
+           std::max(0.0, total_before_serialize_ms - core_solver_ms)},
+          {"total_before_serialize_ms", total_before_serialize_ms}};
+      out["execution_time_sec"] = total_before_serialize_ms / 1000.0;
+      const auto serialization_started = std::chrono::steady_clock::now();
+      std::string payload = out.dump();
+      const double serialization_ms = duration_ms(
+          serialization_started, std::chrono::steady_clock::now());
+      res.set_header("Server-Timing",
+                     "snapshot;dur=" + std::to_string(
+                         out["timing"]["snapshot_ms"].get<double>()) +
+                         ", solve;dur=" + std::to_string(core_solver_ms) +
+                         ", post;dur=" + std::to_string(
+                             out["timing"]["post_processing_ms"].get<double>()) +
+                         ", serialize;dur=" + std::to_string(serialization_ms));
+      res.set_header("X-HySim-Response-Bytes", std::to_string(payload.size()));
+      res.set_content(std::move(payload), "application/json");
       g_session.busy.store(false);
     } catch (const std::exception& e) {
       g_session.busy.store(false);
@@ -23325,7 +23547,8 @@ int main(int argc, char** argv) {
     {"Access-Control-Allow-Headers",
      "Content-Type, Authorization, If-Match, If-None-Match, X-HySim-Request-ID"},
     {"Access-Control-Expose-Headers",
-     "ETag, Location, Retry-After, X-HySim-Session-ID, X-HySim-Model-Revision"}
+     "ETag, Location, Retry-After, X-HySim-Session-ID, X-HySim-Model-Revision, "
+     "X-HySim-Response-Bytes, Server-Timing"}
   });
 
   // Handle OPTIONS preflight requests

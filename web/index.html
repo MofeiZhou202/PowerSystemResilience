@@ -165,6 +165,9 @@
       <button id="btnIoImportCimDistProject" class="toolbar-btn" title="拼接导入一个文件夹内的配电 CIM XML">导入CIM文件夹</button>
       <button id="btnIoImportSvgDistribution" class="toolbar-btn" title="导入带 IEC-CGE 设备元数据的配电网单线图 (.svg)">导入配电SVG</button>
       <button id="btnIoImportGridlabd" class="toolbar-btn" title="导入 GridLAB-D GLM 文本">导入GLM</button>
+      <label class="sub-label sub-checkbox" title="导入配电 SVG 后，按国家/行业标准和明确标记的工程假设自动补齐估算参数；不覆盖厂家或用户参数">
+        <input id="ioSvgAutoComplete" type="checkbox" checked/><span>SVG自动补齐</span>
+      </label>
     </div>
     <div class="io-toolbar-group io-group-dss">
       <div class="io-toolbar-group-title">OpenDSS / PSD.jl</div>
@@ -186,8 +189,9 @@
       <button id="btnIoExportOpendss" class="toolbar-btn" title="导出 OpenDSS DSS">导出DSS</button>
     </div>
     <div class="io-toolbar-group io-group-out-cim">
-      <div class="io-toolbar-group-title">导出 CIM / PSD.jl</div>
+      <div class="io-toolbar-group-title">导出 CIM / SVG / PSD.jl</div>
       <button id="btnIoExportCimDist" class="toolbar-btn" title="导出配电台区 CIM/RDF (.xml)">导出配电CIM</button>
+      <button id="btnIoExportSvgDistribution" class="toolbar-btn" title="导出带 IEC-CGE 设备元数据和 HACDCPF 参数的配电网单线图 (.svg)">导出配电SVG</button>
       <button id="btnIoExportPsd" class="toolbar-btn" title="导出 PowerSimulationsDynamics.jl / PowerSystems.jl Julia 文件 (.jl)">导出PSD.jl</button>
     </div>
     <div class="io-toolbar-group io-group-compat">
@@ -197,7 +201,7 @@
       <span class="sub-hint">统一入口：输入、输出、模型标准兼容性集中在这里。</span>
     </div>
     <div class="io-toolbar-group io-group-handbook">
-      <div class="io-toolbar-group-title">手册参数</div>
+      <div class="io-toolbar-group-title">标准参数补齐</div>
       <label class="sub-label">低压架空(mm²)
         <input id="ioHandbookLvOverheadArea" type="number" value="35" min="1" step="1" style="width:58px"/>
       </label>
@@ -450,6 +454,9 @@
         <span class="control-param-title">验证</span>
         <label class="sub-label sub-checkbox" title="OPF 收敛后，在 OPF 调度点固定发电出力与电压设定，独立再求解一次潮流，校验 OPF 与潮流的建模/参数一致性">
           <input id="opfCheckConsistency" type="checkbox"/><span>潮流一致性校验</span>
+        </label>
+        <label class="sub-label sub-checkbox" title="OPF 后额外运行静态碳流追踪；该后处理不影响 OPF 解，按需启用">
+          <input id="opfPostCarbon" type="checkbox"/><span>OPF后碳流</span>
         </label>
       </div>
       <div class="control-param-group opf-param-group opf-param-group-actions" title="运行最优潮流、展开高级最优潮流参数">
@@ -3479,6 +3486,6 @@
   <script src="js/core/layout_engine.js?v=20260712-hysim-layout-v1"></script>
   <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
-  <script src="js/app.js?v=20260716-switch-binding-v1"></script>
+  <script src="js/app.js?v=20260728-gui-performance-v2"></script>
 </body>
 </html>

@@ -21,8 +21,13 @@ compiled profile defaults
   -> numerical analysis
 ```
 
-Importers remain source-faithful. Missing engineering data is not silently
-filled during import. Defaults are applied only through the explicit apply API.
+General importers remain source-faithful. Missing engineering data is not
+silently filled through the generic registry. The IEC-CGE SVG adapter is an
+explicit `BestEffort` exception because the source has no calculable electrical
+asset record: it marks estimates by provenance and, by default, invokes the
+same standards-aware design-handbook completion workflow. That behavior is
+controllable through `auto_complete_parameters` and is returned in the import
+report.
 
 ## Profiles and rule fields
 
@@ -53,6 +58,10 @@ validation, and applies the selected profile. API responses expose
 `effective_parameters` with value, origin, unit, source, editability, bounds,
 and whether a rule was applied.
 
+The field-level distinction between standard tables, standard calculation
+methods, and engineering assumptions is documented in
+`distribution_parameter_completion_standards.md`.
+
 ## Numerical responsibility
 
 Registry coverage does not mean every solver option is a model parameter.
@@ -73,4 +82,3 @@ stages:
 
 The registry API E2E tests validate profile enumeration, invalid-parameter
 diagnosis, explicit application, changed-field reporting, and effective bounds.
-

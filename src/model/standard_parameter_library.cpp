@@ -113,7 +113,40 @@ bool contains_text(const std::string& value, const std::string& token) {
 
 bool source_is_import_estimate(const std::string& source) {
   return source.rfind("cim_", 0) == 0 ||
+         source.rfind("svg_geometry_estimate", 0) == 0 ||
+         source.rfind("svg_estimate", 0) == 0 ||
          source.rfind("design_handbook", 0) == 0;
+}
+
+std::vector<DesignHandbookReference> design_handbook_references() {
+  return {
+      {"GB/T 3956-2008 / IEC 60228:2004",
+       "20 C conductor maximum DC resistance tables",
+       "normative_parameter_table",
+       "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=149B3068D059EFD9BCFB8A8AF57E5B1C"},
+      {"GB/T 12706.1-2020",
+       "Extruded-insulation power-cable construction and thermal context",
+       "normative_product_context",
+       "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=7593C7389ACDA76E0D40F6985E3A839D"},
+      {"GB/T 1179-2017",
+       "Round-wire concentric-lay overhead conductor product context",
+       "normative_product_context", "https://openstd.samr.gov.cn/"},
+      {"GB/T 14049-2008",
+       "10 kV and 35 kV aerial insulated cable product context",
+       "normative_product_context", "https://openstd.samr.gov.cn/"},
+      {"DL/T 5220-2021",
+       "10 kV and below overhead distribution-line design context",
+       "industry_design_context", "https://www.nea.gov.cn/"},
+      {"GB/T 1094.1-2013; GB/T 6451-2015",
+       "Transformer nameplate, losses and impedance-voltage context",
+       "normative_equipment_context", "https://openstd.samr.gov.cn/"},
+      {"GB/T 15544.1-2013 / IEC 60909-0:2016",
+       "Short-circuit source equivalent and impedance conversion",
+       "normative_calculation_method", "https://openstd.samr.gov.cn/"},
+      {"HACDCPF distribution screening assumptions",
+       "Default reactance, current-density rating and missing asset metadata",
+       "engineering_assumption", ""},
+  };
 }
 
 double standard_r20_ohm_per_km(double area_mm2, bool aluminium) {
@@ -313,7 +346,13 @@ StandardParameterLibrary make_standard_parameter_library(
       "substitute for manufacturer nameplates or project-specific studies.";
   const std::string baseline = "HACDCPF engineering baseline; verify against nameplate";
   const std::string voltage_source =
-      "IEC 60038 voltage context; project-specific nominal voltage required";
+      "GB/T 156-2017 / IEC 60038 voltage context; project nominal voltage required";
+  const std::string voltage_quality_source =
+      "GB/T 12325-2008 voltage-deviation context; project operating limits required";
+  const std::string frequency_source =
+      "GB/T 15945-2008 power-system frequency-deviation context";
+  const std::string transformer_source =
+      "GB/T 1094.1-2013; GB/T 6451-2015; verify manufacturer nameplate";
   const std::string reliability_source =
       "HACDCPF comprehensive distribution reliability baseline; replace with utility statistics";
 
@@ -322,19 +361,20 @@ StandardParameterLibrary make_standard_parameter_library(
            "MVA", 0.1, 10000.0, ParameterIssueSeverity::Error, baseline,
            "Positive system power base used for per-unit conversion."),
       rule("system.frequency_hz", "System", "frequency_hz", "Nominal frequency",
-           50.0, "Hz", 45.0, 65.0, ParameterIssueSeverity::Warning, baseline,
+           50.0, "Hz", 45.0, 65.0, ParameterIssueSeverity::Warning,
+           frequency_source,
            "Nominal network frequency."),
       rule("ac_bus.base_kv", "AC bus", "base_kv", "Nominal line voltage",
            lv ? 0.4 : 10.0, "kV", 0.1, 1200.0, ParameterIssueSeverity::Error,
            voltage_source, "Positive line-to-line voltage base."),
       rule("ac_bus.vm_pu", "AC bus", "vm_pu", "Initial voltage", 1.0, "pu",
-           0.5, 1.5, ParameterIssueSeverity::Warning, baseline,
+           0.5, 1.5, ParameterIssueSeverity::Warning, voltage_quality_source,
            "Initial positive-sequence voltage magnitude."),
       rule("ac_bus.vmin_pu", "AC bus", "vmin_pu", "Minimum voltage", 0.9, "pu",
-           0.5, 1.1, ParameterIssueSeverity::Warning, baseline,
+           0.5, 1.1, ParameterIssueSeverity::Warning, voltage_quality_source,
            "Operational lower voltage bound."),
       rule("ac_bus.vmax_pu", "AC bus", "vmax_pu", "Maximum voltage", 1.1, "pu",
-           0.9, 1.5, ParameterIssueSeverity::Warning, baseline,
+           0.9, 1.5, ParameterIssueSeverity::Warning, voltage_quality_source,
            "Operational upper voltage bound."),
       rule("ac_branch.r_pu", "AC branch", "r_pu", "Series resistance",
            lv ? 0.02 : 0.01, "pu", 0.0, 2.0,
@@ -356,15 +396,15 @@ StandardParameterLibrary make_standard_parameter_library(
            "Transformer reactance on the active model base."),
       rule("transformer.sn_mva", "Transformer", "sn_mva", "Rated power",
            lv ? 0.5 : 10.0, "MVA", 0.001, 10000.0,
-           ParameterIssueSeverity::Error, baseline,
+           ParameterIssueSeverity::Error, transformer_source,
            "Transformer nameplate apparent power."),
       rule("transformer.vk_percent", "Transformer", "vk_percent",
            "Short-circuit voltage", 6.0, "%", 0.1, 30.0,
-           ParameterIssueSeverity::Error, baseline,
+           ParameterIssueSeverity::Error, transformer_source,
            "Transformer short-circuit voltage."),
       rule("transformer.vkr_percent", "Transformer", "vkr_percent",
            "Resistive short-circuit voltage", 0.6, "%", 0.01, 10.0,
-           ParameterIssueSeverity::Warning, baseline,
+           ParameterIssueSeverity::Warning, transformer_source,
            "Resistive part of transformer short-circuit voltage."),
       rule("dc_bus.base_kv", "DC bus", "base_kv", "Nominal DC voltage",
            lv ? 0.75 : 1.5, "kV", 0.05, 1000.0,
@@ -1086,6 +1126,7 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
     HybridPowerSystem& system,
     const DesignHandbookCompletionOptions& options) {
   DesignHandbookCompletionReport report;
+  report.references = design_handbook_references();
   const double base_mva = system.ac.base_mva > kMissing
                               ? system.ac.base_mva
                               : system.base_mva;
@@ -1126,7 +1167,10 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
     }
 
     const std::string model = uppercase_ascii(branch.conductor_model);
-    const bool type_overhead = contains_text(branch.line_type, "架空");
+    const std::string geometry = uppercase_ascii(branch.line_type);
+    const bool type_overhead = contains_text(branch.line_type, "架空") ||
+                               contains_text(geometry, "OVERHEAD") ||
+                               contains_text(geometry, "OHL");
     const bool model_overhead = contains_text(model, "LGJ") ||
                                 contains_text(model, "JKL") ||
                                 contains_text(model, "JL/") ||
@@ -1161,8 +1205,10 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
       continue;
     }
 
+    const bool explicitly_insulated_overhead = contains_text(model, "JKL");
     const bool xlpe = contains_text(model, "YJ") ||
-                      (model.empty() && !contains_text(branch.line_type, "架空裸线"));
+                      (model.empty() && !overhead) ||
+                      explicitly_insulated_overhead;
     const double temperature_c = xlpe ? 90.0 : 70.0;
     const double alpha = aluminium ? 0.00403 : 0.00393;
     const double temperature_factor =
@@ -1172,7 +1218,8 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
     if (r20 > kMissing) {
       resistance = r20 * temperature_factor;
     } else {
-      // Schneider Electrical Installation Guide voltage-drop design values.
+      // Resistivity-based screening fallback for a non-tabulated area. This is
+      // reported as an engineering assumption, not a product-standard value.
       resistance = (aluminium ? 37.6 : 23.7) / area;
       r20 = resistance / temperature_factor;
     }
@@ -1200,8 +1247,9 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
                                        : "high");
     suggestion.action = has_impedance ? "replace_import_estimate"
                                       : "fill_missing";
-    suggestion.source =
-        "GB/T 3956-2008; GB/T 12706.1-2020; Schneider Electrical Installation Guide";
+    suggestion.source = overhead
+        ? "GB/T 3956-2008; GB/T 1179-2017; GB/T 14049-2008; DL/T 5220-2021; engineering screening assumptions"
+        : "GB/T 3956-2008; GB/T 12706.1-2020; engineering screening assumptions";
     suggestion.base_kv = base_kv;
     suggestion.length_km = branch.length_km;
     suggestion.cross_section_mm2 = area;
@@ -1239,6 +1287,13 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
     if (options.apply && any_change) {
       const double old_r_pu = branch.r_pu;
       const double old_x_pu = branch.x_pu;
+      const double old_rate_a_mva = branch.rate_a_mva;
+      const bool rate_b_followed_a =
+          !(branch.rate_b_mva > kMissing) ||
+          !changed(branch.rate_b_mva, old_rate_a_mva);
+      const bool rate_c_followed_a =
+          !(branch.rate_c_mva > kMissing) ||
+          !changed(branch.rate_c_mva, old_rate_a_mva);
       if (changed(branch.r_ohm_per_km, resistance)) ++report.fields_changed;
       if (changed(branch.x_ohm_per_km, reactance)) ++report.fields_changed;
       if (changed(branch.r_pu, new_r_pu)) ++report.fields_changed;
@@ -1250,9 +1305,20 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
       branch.r_pu = new_r_pu;
       branch.x_pu = new_x_pu;
       branch.rate_a_mva = new_rate_a_mva;
+      if (rate_b_followed_a) {
+        if (changed(branch.rate_b_mva, new_rate_a_mva))
+          ++report.fields_changed;
+        branch.rate_b_mva = new_rate_a_mva;
+      }
+      if (rate_c_followed_a) {
+        if (changed(branch.rate_c_mva, new_rate_a_mva))
+          ++report.fields_changed;
+        branch.rate_c_mva = new_rate_a_mva;
+      }
       branch.cross_section_mm2 = area;
       branch.cross_section_inferred = inferred_area;
-      branch.parameter_source = "design_handbook_gbt3956_schneider_eig";
+      branch.parameter_source =
+          "design_handbook_gbt3956_distribution_standards";
       branch.parameters_inferred = true;
       suggestion.applied = true;
 

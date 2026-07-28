@@ -141,6 +141,13 @@ struct DesignHandbookLineSuggestion {
   bool applied{false};
 };
 
+struct DesignHandbookReference {
+  std::string standard;
+  std::string scope;
+  std::string role;
+  std::string url;
+};
+
 struct DesignHandbookCompletionReport {
   int branches_scanned{0};
   int candidates{0};
@@ -153,6 +160,7 @@ struct DesignHandbookCompletionReport {
   int skipped_ambiguous_bindings{0};
   std::vector<DesignHandbookLineSuggestion> suggestions;
   std::vector<DesignHandbookSwitchBindingSuggestion> switch_bindings;
+  std::vector<DesignHandbookReference> references;
   std::vector<std::string> warnings;
 };
 

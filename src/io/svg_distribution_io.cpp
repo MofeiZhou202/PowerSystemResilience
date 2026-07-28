@@ -6,17 +6,22 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <numeric>
 #include <optional>
+#include <queue>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include "hacdcpf/model/enum_strings.hpp"
 
 namespace hacdcpf::io {
 namespace {
@@ -236,6 +241,14 @@ std::string normalized_id(const std::string& value) {
   return result;
 }
 
+std::string uppercase_ascii(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char ch) {
+                   return static_cast<char>(std::toupper(ch));
+                 });
+  return value;
+}
+
 struct Point {
   double x{0.0};
   double y{0.0};
@@ -282,6 +295,7 @@ struct GraphicObject {
   Point terminal_a{};
   Point terminal_b{};
   bool has_terminals{false};
+  std::map<std::string, std::string> model_attrs;
 };
 
 std::optional<GraphicObject> parse_graphic_object(
@@ -296,6 +310,8 @@ std::optional<GraphicObject> parse_graphic_object(
   if (object.object_id.empty() || object.class_name.empty()) return std::nullopt;
   const auto label = labels.find(normalized_id(object.object_id));
   if (label != labels.end()) object.label = label->second;
+  if (const auto* model = find_first(group, "model"))
+    object.model_attrs = model->attrs;
 
   if (const auto* polyline = find_first(group, "polyline"))
     object.points = parse_points(polyline->attr("points"));
@@ -459,6 +475,47 @@ bool whole_number(const std::string& value, double& result) {
   return end && *end == '\0' && std::isfinite(result);
 }
 
+std::optional<double> model_number(const GraphicObject& object,
+                                   const std::string& name) {
+  const auto it = object.model_attrs.find(name);
+  if (it == object.model_attrs.end()) return std::nullopt;
+  double value = 0.0;
+  return whole_number(it->second, value) ? std::optional<double>(value)
+                                         : std::nullopt;
+}
+
+std::string model_string(const GraphicObject& object,
+                         const std::string& name,
+                         const std::string& fallback = {}) {
+  const auto it = object.model_attrs.find(name);
+  return it == object.model_attrs.end() ? fallback : it->second;
+}
+
+bool model_bool(const GraphicObject& object,
+                const std::string& name,
+                bool fallback) {
+  const std::string value = model_string(object, name);
+  if (value == "true" || value == "1") return true;
+  if (value == "false" || value == "0") return false;
+  return fallback;
+}
+
+int model_index(const GraphicObject& object,
+                const std::string& name,
+                std::set<int>& claimed,
+                int& next_index) {
+  const auto embedded = model_number(object, name);
+  int candidate = embedded.has_value()
+                      ? static_cast<int>(std::llround(*embedded))
+                      : -1;
+  if (candidate < 0 || claimed.count(candidate) != 0) {
+    while (claimed.count(next_index) != 0) ++next_index;
+    candidate = next_index++;
+  }
+  claimed.insert(candidate);
+  return candidate;
+}
+
 double transformer_capacity_mva(const GraphicObject& object,
                                 double fallback) {
   // Utility SVG labels conventionally end with transformer capacity in kVA.
@@ -507,6 +564,113 @@ void add_warning(SvgDistributionImportResult& result,
                     ImportSeverity::Warning, std::move(locator), message);
 }
 
+std::string xml_escape(const std::string& value) {
+  std::string result;
+  result.reserve(value.size());
+  for (char ch : value) {
+    switch (ch) {
+      case '&': result += "&amp;"; break;
+      case '<': result += "&lt;"; break;
+      case '>': result += "&gt;"; break;
+      case '"': result += "&quot;"; break;
+      case '\'': result += "&apos;"; break;
+      default: result.push_back(ch); break;
+    }
+  }
+  return result;
+}
+
+std::string svg_number(double value) {
+  std::ostringstream output;
+  output << std::setprecision(12) << value;
+  return output.str();
+}
+
+std::map<int, Point> distribution_export_layout(
+    const HybridPowerSystem& system,
+    const SvgDistributionExportOptions& opts) {
+  std::set<int> bus_ids;
+  for (const auto& bus : system.ac.buses)
+    bus_ids.insert(bus.index);
+
+  std::unordered_map<int, std::vector<int>> adjacency;
+  const auto add_edge = [&](int from, int to) {
+    if (from == to || bus_ids.count(from) == 0 || bus_ids.count(to) == 0)
+      return;
+    adjacency[from].push_back(to);
+    adjacency[to].push_back(from);
+  };
+  for (const auto& branch : system.ac.branches)
+    add_edge(branch.from_bus, branch.to_bus);
+  for (const auto& sw : system.ac.switches)
+    add_edge(sw.bus_from, sw.bus_to);
+  for (const auto& transformer : system.ac.transformers_2w)
+    add_edge(transformer.hv_bus, transformer.lv_bus);
+  for (auto& [bus, neighbours] : adjacency) {
+    std::sort(neighbours.begin(), neighbours.end());
+    neighbours.erase(std::unique(neighbours.begin(), neighbours.end()),
+                     neighbours.end());
+  }
+
+  std::vector<int> starts;
+  for (const auto& grid : system.ac.external_grids)
+    if (bus_ids.count(grid.bus) != 0)
+      starts.push_back(grid.bus);
+  for (const auto& bus : system.ac.buses)
+    if (bus.bus_type == BusType::SLACK)
+      starts.push_back(bus.index);
+  starts.insert(starts.end(), bus_ids.begin(), bus_ids.end());
+
+  std::unordered_set<int> visited;
+  std::map<int, Point> positions;
+  double component_top = opts.margin;
+  for (int start : starts) {
+    if (visited.count(start) != 0) continue;
+    std::queue<int> queue;
+    std::map<int, int> depth;
+    queue.push(start);
+    visited.insert(start);
+    depth[start] = 0;
+    while (!queue.empty()) {
+      const int at = queue.front();
+      queue.pop();
+      for (int next : adjacency[at]) {
+        if (!visited.insert(next).second) continue;
+        depth[next] = depth[at] + 1;
+        queue.push(next);
+      }
+    }
+    std::map<int, std::vector<int>> levels;
+    for (const auto& [bus, level] : depth) levels[level].push_back(bus);
+    std::size_t max_rows = 1;
+    for (auto& [level, buses] : levels) {
+      std::sort(buses.begin(), buses.end());
+      max_rows = std::max(max_rows, buses.size());
+      for (std::size_t row = 0; row < buses.size(); ++row) {
+        positions[buses[row]] = {
+            opts.margin + level * opts.horizontal_spacing,
+            component_top + row * opts.vertical_spacing};
+      }
+    }
+    component_top += max_rows * opts.vertical_spacing + opts.vertical_spacing;
+  }
+  return positions;
+}
+
+std::pair<std::string, std::string> svg_switch_class(const Switch& sw) {
+  switch (sw.switch_type) {
+    case SwitchType::Fuse: return {"PWOPFusePSR", "0401009"};
+    case SwitchType::Disconnector: return {"PWDisconnectorPSR", "0401006"};
+    case SwitchType::LoadBreakSwitch: return {"PWLoadSwitchPSR", "0401004"};
+    case SwitchType::CircuitBreaker: return {"PWBreakerPSR", "0401005"};
+    case SwitchType::Recloser:
+    case SwitchType::Sectionalizer:
+      return {"PWOPBreakerPSR", "0401005"};
+    case SwitchType::Unknown: return {"PWLoadSwitchPSR", "0401004"};
+  }
+  return {"PWLoadSwitchPSR", "0401004"};
+}
+
 }  // namespace
 
 SvgDistributionImportResult from_svg_distribution(
@@ -530,13 +694,20 @@ SvgDistributionImportResult from_svg_distribution(
       !(opts.cable_r_ohm_per_km >= 0.0) ||
       !(opts.cable_x_ohm_per_km >= 0.0) ||
       !(opts.default_line_rate_mva > 0.0) ||
+      !(opts.default_mv_cross_section_mm2 > 0.0) ||
       !(opts.default_transformer_sn_mva > 0.0) ||
       !(opts.default_transformer_vk_percent > 0.0) ||
       !(opts.default_transformer_vkr_percent >= 0.0) ||
       opts.default_transformer_vkr_percent >
           opts.default_transformer_vk_percent ||
       !(opts.transformer_load_factor >= 0.0) ||
-      !(opts.power_factor > 0.0 && opts.power_factor <= 1.0)) {
+      !(opts.power_factor > 0.0 && opts.power_factor <= 1.0) ||
+      !(opts.synthetic_source_s_sc_max_mva > 0.0) ||
+      !(opts.synthetic_source_s_sc_min_mva > 0.0) ||
+      opts.synthetic_source_s_sc_min_mva >
+          opts.synthetic_source_s_sc_max_mva ||
+      !(opts.synthetic_source_rx > 0.0) ||
+      !(opts.synthetic_source_zero_sequence_multiplier > 0.0)) {
     result.report.add(ImportDisposition::Rejected,
                       ImportReasonCode::RangeCoerced,
                       ImportSeverity::Error, "options",
@@ -580,9 +751,10 @@ SvgDistributionImportResult from_svg_distribution(
   };
   std::vector<DeviceRef> switches;
   std::vector<DeviceRef> transformers;
-  std::vector<Point> substations;
+  std::vector<const GraphicObject*> substations;
 
   for (const auto& object : objects) {
+    if (!object.model_attrs.empty()) ++result.embedded_parameter_objects;
     if (is_line(object) || is_ideal_conductor(object)) {
       if (object.points.size() < 2) {
         ++result.unresolved_objects;
@@ -620,7 +792,7 @@ SvgDistributionImportResult from_svg_distribution(
         transformers.push_back(ref);
       }
     } else if (object.class_name == "Substation") {
-      substations.push_back(object.center);
+      substations.push_back(&object);
     }
   }
 
@@ -643,6 +815,10 @@ SvgDistributionImportResult from_svg_distribution(
 
   std::set<int> used_roots;
   auto use_root = [&](int point_id) { used_roots.insert(pool.root(point_id)); };
+  for (const auto& line : ideal_lines) {
+    if (!model_bool(*line.object, "preserve_node", false)) continue;
+    for (int point : line.point_ids) use_root(point);
+  }
   for (const auto& line : physical_lines)
     for (int point : line.point_ids) use_root(point);
   for (const auto& device : switches) {
@@ -662,19 +838,56 @@ SvgDistributionImportResult from_svg_distribution(
   }
 
   std::unordered_map<int, int> root_to_bus;
-  int bus_index = 0;
+  std::unordered_map<int, const GraphicObject*> bus_models;
+  for (const auto& line : ideal_lines) {
+    if (!model_bool(*line.object, "preserve_node", false)) continue;
+    for (int point : line.point_ids)
+      bus_models[pool.root(point)] = line.object;
+  }
+  std::set<int> claimed_bus_ids;
+  int next_bus_index = 1;
   for (int root : used_roots) {
     ACBus bus;
-    bus.index = ++bus_index;
-    bus.base_kv = opts.nominal_mv_kv;
-    bus.name = "SVG node " + std::to_string(bus.index);
+    const auto model = bus_models.find(root);
+    const GraphicObject* source =
+        model == bus_models.end() ? nullptr : model->second;
+    const auto embedded_index = source == nullptr
+                                    ? std::optional<double>{}
+                                    : model_number(*source, "source_index");
+    int requested_index = embedded_index.has_value()
+                              ? static_cast<int>(std::llround(*embedded_index))
+                              : -1;
+    if (requested_index < 0 || claimed_bus_ids.count(requested_index) != 0) {
+      while (claimed_bus_ids.count(next_bus_index) != 0) ++next_bus_index;
+      requested_index = next_bus_index++;
+    }
+    claimed_bus_ids.insert(requested_index);
+    bus.index = requested_index;
+    bus.base_kv = source == nullptr
+                      ? opts.nominal_mv_kv
+                      : model_number(*source, "base_kv")
+                            .value_or(opts.nominal_mv_kv);
+    bus.name = source == nullptr
+                   ? "SVG node " + std::to_string(bus.index)
+                   : model_string(*source, "name",
+                                  "SVG node " + std::to_string(bus.index));
+    if (source != nullptr) {
+      bus.in_service = model_bool(*source, "in_service", true);
+      bus.vm_pu = model_number(*source, "vm_pu").value_or(bus.vm_pu);
+      bus.va_deg = model_number(*source, "va_deg").value_or(bus.va_deg);
+      bus.vmin_pu = model_number(*source, "vmin_pu").value_or(bus.vmin_pu);
+      bus.vmax_pu = model_number(*source, "vmax_pu").value_or(bus.vmax_pu);
+      bus.bus_type = bus_type_from_str(
+          model_string(*source, "bus_type", bus_type_str(bus.bus_type)));
+    }
     result.system.ac.buses.push_back(bus);
     root_to_bus[root] = bus.index;
   }
   result.recovered_nodes = result.system.ac.buses.size();
   auto bus_of = [&](int point_id) { return root_to_bus.at(pool.root(point_id)); };
 
-  int branch_index = 0;
+  int branch_index = 1;
+  std::set<int> claimed_branch_ids;
   for (const auto& line : physical_lines) {
     for (std::size_t i = 1; i < line.point_ids.size(); ++i) {
       const int from = bus_of(line.point_ids[i - 1]);
@@ -685,48 +898,91 @@ SvgDistributionImportResult from_svg_distribution(
                    pool.points()[line.point_ids[i]]);
       const bool cable = line.object->class_name == "PWCableSecPSR";
       ACBranch branch;
-      branch.index = ++branch_index;
+      branch.index = model_index(*line.object, "source_index",
+                                 claimed_branch_ids, branch_index);
       branch.from_bus = from;
       branch.to_bus = to;
+      branch.in_service = model_bool(*line.object, "in_service", true);
       branch.name = object_name(*line.object);
       if (line.point_ids.size() > 2)
         branch.name += " [" + std::to_string(i) + "]";
-      branch.length_km = std::max(1e-4, svg_length * opts.km_per_svg_unit);
-      branch.r_ohm_per_km = cable ? opts.cable_r_ohm_per_km
-                                  : opts.overhead_r_ohm_per_km;
-      branch.x_ohm_per_km = cable ? opts.cable_x_ohm_per_km
-                                  : opts.overhead_x_ohm_per_km;
+      branch.length_km = model_number(*line.object, "length_km")
+                             .value_or(std::max(
+                                 1e-4, svg_length * opts.km_per_svg_unit));
+      branch.r_ohm_per_km = model_number(*line.object, "r_ohm_per_km")
+                                .value_or(cable ? opts.cable_r_ohm_per_km
+                                                : opts.overhead_r_ohm_per_km);
+      branch.x_ohm_per_km = model_number(*line.object, "x_ohm_per_km")
+                                .value_or(cable ? opts.cable_x_ohm_per_km
+                                                : opts.overhead_x_ohm_per_km);
       const double z_base = opts.nominal_mv_kv * opts.nominal_mv_kv /
                             opts.base_mva;
-      branch.r_pu = branch.r_ohm_per_km * branch.length_km / z_base;
-      branch.x_pu = branch.x_ohm_per_km * branch.length_km / z_base;
-      branch.rate_a_mva = opts.default_line_rate_mva;
-      branch.rate_b_mva = branch.rate_a_mva;
-      branch.rate_c_mva = branch.rate_a_mva;
-      branch.line_type = cable ? "cable" : "overhead";
-      branch.parameter_source = "svg-geometry-default";
-      branch.parameters_inferred = true;
+      branch.r_pu = model_number(*line.object, "r_pu")
+                        .value_or(branch.r_ohm_per_km * branch.length_km /
+                                  z_base);
+      branch.x_pu = model_number(*line.object, "x_pu")
+                        .value_or(branch.x_ohm_per_km * branch.length_km /
+                                  z_base);
+      branch.rate_a_mva = model_number(*line.object, "rate_a_mva")
+                              .value_or(opts.default_line_rate_mva);
+      branch.rate_b_mva = model_number(*line.object, "rate_b_mva")
+                              .value_or(branch.rate_a_mva);
+      branch.rate_c_mva = model_number(*line.object, "rate_c_mva")
+                              .value_or(branch.rate_a_mva);
+      branch.line_type = model_string(
+          *line.object, "line_type", cable ? "cable" : "overhead");
+      branch.conductor_model = model_string(*line.object, "conductor_model");
+      branch.cross_section_mm2 =
+          model_number(*line.object, "cross_section_mm2")
+              .value_or(opts.default_mv_cross_section_mm2);
+      branch.cross_section_inferred = model_bool(
+          *line.object, "cross_section_inferred",
+          model_number(*line.object, "cross_section_mm2") == std::nullopt);
+      branch.parameter_source = model_string(
+          *line.object, "parameter_source", "svg_geometry_estimate");
+      branch.parameters_inferred = model_bool(
+          *line.object, "parameters_inferred",
+          line.object->model_attrs.empty());
       result.system.ac.branches.push_back(std::move(branch));
     }
   }
 
-  int switch_index = 0;
+  int switch_index = 1;
+  std::set<int> claimed_switch_ids;
   for (const auto& ref : switches) {
     const int from = bus_of(ref.terminal_a);
     const int to = bus_of(ref.terminal_b);
     if (from == to) continue;
     Switch sw;
-    sw.index = ++switch_index;
+    sw.index = model_index(*ref.object, "source_index",
+                           claimed_switch_ids, switch_index);
     sw.name = object_name(*ref.object);
     sw.bus_from = from;
     sw.bus_to = to;
+    sw.in_service = model_bool(*ref.object, "in_service", true);
     sw.switch_type = switch_type(*ref.object);
-    sw.closed = ref.object->href.find("@1") == knpos;
-    sw.normal_closed = sw.closed;
+    sw.closed = model_bool(*ref.object, "closed",
+                           ref.object->href.find("@1") == knpos);
+    sw.normal_closed = model_bool(*ref.object, "normal_closed", sw.closed);
     sw.normal_state_explicit = true;
-    sw.role = switch_role(sw.switch_type, sw.closed);
-    sw.binding_inferred = true;
-    sw.binding_source = "svg-symbol-state-and-geometry";
+    sw.role = switch_role_from_str(model_string(
+        *ref.object, "role", switch_role_str(switch_role(sw.switch_type,
+                                                         sw.closed))));
+    sw.controlled_element_type =
+        model_string(*ref.object, "controlled_element_type");
+    sw.controlled_element_index = static_cast<int>(std::llround(
+        model_number(*ref.object, "controlled_element_index").value_or(-1.0)));
+    sw.controlled_branch_index = static_cast<int>(std::llround(
+        model_number(*ref.object, "controlled_branch_index").value_or(-1.0)));
+    sw.protection_zone_id = static_cast<int>(std::llround(
+        model_number(*ref.object, "protection_zone_id").value_or(0.0)));
+    sw.upstream_protective_switch_index = static_cast<int>(std::llround(
+        model_number(*ref.object, "upstream_protective_switch_index")
+            .value_or(-1.0)));
+    sw.binding_inferred = model_bool(*ref.object, "binding_inferred",
+                                     ref.object->model_attrs.empty());
+    sw.binding_source = model_string(
+        *ref.object, "binding_source", "svg-symbol-state-and-geometry");
     result.system.ac.switches.push_back(std::move(sw));
   }
 
@@ -742,40 +998,87 @@ SvgDistributionImportResult from_svg_distribution(
     ++mv_degree[sw.bus_to];
   }
 
-  int transformer_index = 0;
-  int load_index = 0;
+  int transformer_index = 1;
+  int load_index = 1;
+  std::set<int> claimed_transformer_ids;
+  std::set<int> claimed_load_ids;
   const double q_ratio =
       std::tan(std::acos(std::clamp(opts.power_factor, 1e-6, 1.0)));
   for (const auto& ref : transformers) {
     int hv_bus = bus_of(ref.terminal_a);
     int lv_bus = bus_of(ref.terminal_b);
-    if (mv_degree[lv_bus] > mv_degree[hv_bus]) std::swap(hv_bus, lv_bus);
+    if (!model_bool(*ref.object, "terminal_a_is_hv", false) &&
+        mv_degree[lv_bus] > mv_degree[hv_bus])
+      std::swap(hv_bus, lv_bus);
     if (hv_bus == lv_bus) continue;
     for (auto& bus : result.system.ac.buses)
       if (bus.index == lv_bus) bus.base_kv = opts.nominal_lv_kv;
 
-    const double sn_mva = transformer_capacity_mva(
-        *ref.object, opts.default_transformer_sn_mva);
+    const double sn_mva = model_number(*ref.object, "sn_mva")
+                              .value_or(transformer_capacity_mva(
+                                  *ref.object,
+                                  opts.default_transformer_sn_mva));
     Transformer2W transformer;
-    transformer.index = ++transformer_index;
+    transformer.index = model_index(*ref.object, "source_index",
+                                    claimed_transformer_ids,
+                                    transformer_index);
     transformer.name = object_name(*ref.object);
     transformer.hv_bus = hv_bus;
     transformer.lv_bus = lv_bus;
+    transformer.in_service = model_bool(*ref.object, "in_service", true);
     transformer.sn_mva = sn_mva;
-    transformer.vn_hv_kv = opts.nominal_mv_kv;
-    transformer.vn_lv_kv = opts.nominal_lv_kv;
-    transformer.vk_percent = opts.default_transformer_vk_percent;
-    transformer.vkr_percent = opts.default_transformer_vkr_percent;
-    transformer.i0_percent = 0.5;
+    transformer.std_type = model_string(*ref.object, "std_type");
+    transformer.vn_hv_kv = model_number(*ref.object, "vn_hv_kv")
+                               .value_or(opts.nominal_mv_kv);
+    transformer.vn_lv_kv = model_number(*ref.object, "vn_lv_kv")
+                               .value_or(opts.nominal_lv_kv);
+    transformer.vk_percent = model_number(*ref.object, "vk_percent")
+                                 .value_or(opts.default_transformer_vk_percent);
+    transformer.vkr_percent = model_number(*ref.object, "vkr_percent")
+                                  .value_or(opts.default_transformer_vkr_percent);
+    transformer.pk_kw = model_number(*ref.object, "pk_kw")
+                            .value_or(transformer.sn_mva * 1000.0 *
+                                      transformer.vkr_percent / 100.0);
+    transformer.pfe_kw = model_number(*ref.object, "pfe_kw").value_or(0.0);
+    transformer.i0_percent =
+        model_number(*ref.object, "i0_percent").value_or(0.5);
+    transformer.vector_group = model_string(*ref.object, "vector_group");
+    transformer.z0_percent =
+        model_number(*ref.object, "z0_percent").value_or(0.0);
+    transformer.x0_r0 = model_number(*ref.object, "x0_r0").value_or(0.0);
+    transformer.tap_side = static_cast<int>(std::llround(
+        model_number(*ref.object, "tap_side").value_or(0.0)));
+    transformer.tap_pos = static_cast<int>(std::llround(
+        model_number(*ref.object, "tap_pos").value_or(0.0)));
+    transformer.tap_min = static_cast<int>(std::llround(
+        model_number(*ref.object, "tap_min").value_or(0.0)));
+    transformer.tap_max = static_cast<int>(std::llround(
+        model_number(*ref.object, "tap_max").value_or(0.0)));
+    transformer.tap_neutral = static_cast<int>(std::llround(
+        model_number(*ref.object, "tap_neutral").value_or(0.0)));
+    transformer.tap_step_percent =
+        model_number(*ref.object, "tap_step_percent").value_or(0.0);
+    transformer.shift_deg =
+        model_number(*ref.object, "shift_deg").value_or(0.0);
+    transformer.n_parallel = static_cast<int>(std::llround(
+        model_number(*ref.object, "n_parallel").value_or(1.0)));
+    transformer.source_branch_idx = static_cast<int>(std::llround(
+        model_number(*ref.object, "source_branch_idx").value_or(0.0)));
     result.system.ac.transformers_2w.push_back(std::move(transformer));
 
     Load load;
-    load.index = ++load_index;
+    load.index = model_index(*ref.object, "load_source_index",
+                             claimed_load_ids, load_index);
     load.bus = lv_bus;
-    load.name = object_name(*ref.object) + " estimated load";
-    load.sn_mva = sn_mva * opts.transformer_load_factor;
-    load.p_mw = load.sn_mva * opts.power_factor;
-    load.q_mvar = load.p_mw * q_ratio;
+    load.in_service = model_bool(*ref.object, "load_in_service", true);
+    load.name = model_string(
+        *ref.object, "load_name", object_name(*ref.object) + " estimated load");
+    load.sn_mva = model_number(*ref.object, "load_sn_mva")
+                      .value_or(sn_mva * opts.transformer_load_factor);
+    load.p_mw = model_number(*ref.object, "load_p_mw")
+                    .value_or(load.sn_mva * opts.power_factor);
+    load.q_mvar = model_number(*ref.object, "load_q_mvar")
+                      .value_or(load.p_mw * q_ratio);
     result.system.ac.loads.push_back(std::move(load));
   }
 
@@ -784,29 +1087,40 @@ SvgDistributionImportResult from_svg_distribution(
   // substation symbol exists, the largest component is the explicit fallback.
   DisjointSet electrical;
   for (std::size_t i = 0; i < result.system.ac.buses.size(); ++i) electrical.add();
-  auto bus_pos = [](int bus) { return bus - 1; };
+  std::unordered_map<int, int> electrical_position;
+  for (int position = 0;
+       position < static_cast<int>(result.system.ac.buses.size()); ++position)
+    electrical_position[result.system.ac.buses[position].index] = position;
+  const auto bus_pos = [&](int bus) { return electrical_position.at(bus); };
   for (const auto& branch : result.system.ac.branches)
-    electrical.unite(bus_pos(branch.from_bus), bus_pos(branch.to_bus));
+    if (branch.in_service)
+      electrical.unite(bus_pos(branch.from_bus), bus_pos(branch.to_bus));
   for (const auto& sw : result.system.ac.switches)
-    if (sw.closed) electrical.unite(bus_pos(sw.bus_from), bus_pos(sw.bus_to));
+    if (sw.in_service && sw.closed)
+      electrical.unite(bus_pos(sw.bus_from), bus_pos(sw.bus_to));
   for (const auto& transformer : result.system.ac.transformers_2w)
-    electrical.unite(bus_pos(transformer.hv_bus), bus_pos(transformer.lv_bus));
+    if (transformer.in_service)
+      electrical.unite(bus_pos(transformer.hv_bus), bus_pos(transformer.lv_bus));
 
   std::map<int, std::vector<int>> components;
   for (const auto& bus : result.system.ac.buses)
     components[electrical.find(bus_pos(bus.index))].push_back(bus.index);
   std::set<int> preferred_source_buses;
-  for (Point substation : substations) {
+  std::unordered_map<int, const GraphicObject*> source_models_by_bus;
+  for (const auto* substation : substations) {
     double best = std::numeric_limits<double>::infinity();
     int best_bus = 0;
     for (const auto& [root, bus] : root_to_bus) {
-      const double candidate = distance(substation, pool.points()[root]);
+      const double candidate = distance(substation->center, pool.points()[root]);
       if (candidate < best) {
         best = candidate;
         best_bus = bus;
       }
     }
-    if (best_bus != 0) preferred_source_buses.insert(best_bus);
+    if (best_bus != 0) {
+      preferred_source_buses.insert(best_bus);
+      source_models_by_bus[best_bus] = substation;
+    }
   }
 
   std::set<int> source_components;
@@ -825,7 +1139,8 @@ SvgDistributionImportResult from_svg_distribution(
     preferred_source_buses.clear();
   }
 
-  int grid_index = 0;
+  int grid_index = 1;
+  std::set<int> claimed_grid_ids;
   if (opts.auto_add_external_grids) {
     for (int component : source_components) {
       int source_bus = components.at(component).front();
@@ -836,18 +1151,77 @@ SvgDistributionImportResult from_svg_distribution(
           });
       if (preferred != preferred_source_buses.end()) source_bus = *preferred;
       ExternalGrid grid;
-      grid.index = ++grid_index;
       grid.bus = source_bus;
-      grid.name = "SVG synthetic source " + std::to_string(grid.index);
-      grid.vn_kv = opts.nominal_mv_kv;
-      grid.s_sc_max_mva = 100.0;
-      grid.s_sc_min_mva = 50.0;
+      const auto source_model = source_models_by_bus.find(source_bus);
+      const GraphicObject* source = source_model == source_models_by_bus.end()
+                                        ? nullptr
+                                        : source_model->second;
+      if (source == nullptr) {
+        while (claimed_grid_ids.count(grid_index) != 0) ++grid_index;
+        grid.index = grid_index++;
+        claimed_grid_ids.insert(grid.index);
+      } else {
+        grid.index = model_index(*source, "source_index", claimed_grid_ids,
+                                 grid_index);
+      }
+      grid.in_service = source == nullptr
+                            ? true
+                            : model_bool(*source, "in_service", true);
+      grid.name = source == nullptr
+                      ? "SVG synthetic source " + std::to_string(grid.index)
+                      : model_string(*source, "name", object_name(*source));
+      grid.vn_kv = source == nullptr
+                       ? opts.nominal_mv_kv
+                       : model_number(*source, "vn_kv")
+                             .value_or(opts.nominal_mv_kv);
+      grid.s_sc_max_mva = source == nullptr
+                              ? opts.synthetic_source_s_sc_max_mva
+                              : model_number(*source, "s_sc_max_mva")
+                                    .value_or(opts.synthetic_source_s_sc_max_mva);
+      grid.s_sc_min_mva = source == nullptr
+                              ? opts.synthetic_source_s_sc_min_mva
+                              : model_number(*source, "s_sc_min_mva")
+                                    .value_or(opts.synthetic_source_s_sc_min_mva);
+      grid.rx_max = source == nullptr
+                        ? opts.synthetic_source_rx
+                        : model_number(*source, "rx_max")
+                              .value_or(opts.synthetic_source_rx);
+      grid.rx_min = source == nullptr
+                        ? opts.synthetic_source_rx
+                        : model_number(*source, "rx_min")
+                              .value_or(opts.synthetic_source_rx);
+      const double z_pu = opts.base_mva / grid.s_sc_max_mva;
+      grid.x_pu = source == nullptr
+                      ? z_pu / std::sqrt(1.0 + grid.rx_max * grid.rx_max)
+                      : model_number(*source, "x_pu")
+                            .value_or(z_pu / std::sqrt(
+                                1.0 + grid.rx_max * grid.rx_max));
+      grid.r_pu = source == nullptr
+                      ? grid.rx_max * grid.x_pu
+                      : model_number(*source, "r_pu")
+                            .value_or(grid.rx_max * grid.x_pu);
+      grid.x0_pu = source == nullptr
+                       ? grid.x_pu *
+                             opts.synthetic_source_zero_sequence_multiplier
+                       : model_number(*source, "x0_pu")
+                             .value_or(grid.x_pu *
+                                       opts.synthetic_source_zero_sequence_multiplier);
+      grid.r0_pu = source == nullptr
+                       ? grid.r_pu *
+                             opts.synthetic_source_zero_sequence_multiplier
+                       : model_number(*source, "r0_pu")
+                             .value_or(grid.r_pu *
+                                       opts.synthetic_source_zero_sequence_multiplier);
+      grid.x_r = grid.x_pu / grid.r_pu;
+      if (source != nullptr && !source->model_attrs.empty())
+        ++result.restored_external_grids;
+      else
+        ++result.synthetic_external_grids;
       result.system.ac.external_grids.push_back(std::move(grid));
       for (auto& bus : result.system.ac.buses)
         if (bus.index == source_bus) bus.bus_type = BusType::SLACK;
     }
   }
-  result.synthetic_external_grids = result.system.ac.external_grids.size();
   for (const auto& [component, buses] : components) {
     if (source_components.count(component) != 0) continue;
     ++result.isolated_components;
@@ -858,6 +1232,23 @@ SvgDistributionImportResult from_svg_distribution(
     }
   }
 
+  if (opts.auto_complete_parameters) {
+    DesignHandbookCompletionOptions completion_options;
+    completion_options.apply = true;
+    completion_options.overwrite_import_estimates = true;
+    completion_options.infer_switch_bindings = true;
+    completion_options.overwrite_inferred_switch_bindings = true;
+    completion_options.default_mv_cross_section_mm2 =
+        opts.default_mv_cross_section_mm2;
+    completion_options.cable_reactance_ohm_per_km =
+        opts.cable_x_ohm_per_km;
+    completion_options.overhead_reactance_ohm_per_km =
+        opts.overhead_x_ohm_per_km;
+    result.parameter_completion = complete_design_handbook_parameters(
+        result.system, completion_options);
+    result.parameter_completion_applied = true;
+  }
+
   result.report.add(
       ImportDisposition::Accepted, ImportReasonCode::Ok,
       ImportSeverity::Info, "svg/cge:psr_ref",
@@ -866,12 +1257,28 @@ SvgDistributionImportResult from_svg_distribution(
           " switch, and " +
           std::to_string(result.source_transformer_objects) +
           " transformer objects from IEC-CGE metadata");
+  if (result.embedded_parameter_objects > 0)
+    result.report.add(
+        ImportDisposition::Accepted, ImportReasonCode::Ok,
+        ImportSeverity::Info, "svg/hacdcpf:model",
+        "Restored HACDCPF parameter extensions from " +
+            std::to_string(result.embedded_parameter_objects) +
+            " SVG object(s).");
   add_warning(result, ImportReasonCode::UnitInferred, "svg/geometry",
               "Electrical connectivity was recovered from SVG coordinates; "
               "the source does not provide CIM Terminal/ConnectivityNode links.");
   add_warning(result, ImportReasonCode::UnitInferred, "svg/line-parameters",
-              "Line lengths and impedances were estimated from drawing geometry "
-              "and configurable overhead/cable defaults.");
+              "Line lengths were estimated from drawing geometry; electrical "
+              "parameters use standards-aware conductor tables plus explicit "
+              "engineering screening assumptions.");
+  if (result.parameter_completion_applied)
+    add_warning(result, ImportReasonCode::UnitInferred,
+                "svg/parameter-completion",
+                "Applied standards-aware completion to " +
+                    std::to_string(result.parameter_completion.candidates) +
+                    " line candidate(s), changing " +
+                    std::to_string(result.parameter_completion.fields_changed) +
+                    " field(s); manufacturer nameplates remain authoritative.");
   if (!result.system.ac.transformers_2w.empty())
     add_warning(result, ImportReasonCode::MissingRequired,
                 "svg/transformer-loads",
@@ -882,6 +1289,12 @@ SvgDistributionImportResult from_svg_distribution(
                 "Added " + std::to_string(result.synthetic_external_grids) +
                     " synthetic external-grid equivalent(s) at substation "
                     "drawing component(s).");
+  if (result.restored_external_grids > 0)
+    result.report.add(
+        ImportDisposition::Accepted, ImportReasonCode::Ok,
+        ImportSeverity::Info, "svg/source",
+        "Restored " + std::to_string(result.restored_external_grids) +
+            " external-grid equivalent(s) from embedded HACDCPF parameters.");
   if (!opts.auto_add_external_grids)
     add_warning(result, ImportReasonCode::MissingRequired, "svg/source",
                 "Synthetic external-grid creation was disabled; all recovered "
@@ -928,6 +1341,419 @@ SvgDistributionImportResult load_svg_distribution(
   if (options.model_name == "SVG distribution feeder")
     options.model_name = path.stem().string();
   return from_svg_distribution(svg, mode, options);
+}
+
+SvgDistributionExportResult to_svg_distribution(
+    const HybridPowerSystem& system,
+    const SvgDistributionExportOptions& opts) {
+  if (system.ac.buses.empty())
+    throw std::invalid_argument(
+        "SVG distribution export requires at least one AC bus");
+  if (!(opts.horizontal_spacing > 0.0) ||
+      !(opts.vertical_spacing > 0.0) || !(opts.margin >= 0.0))
+    throw std::invalid_argument("Invalid SVG distribution export layout options");
+
+  SvgDistributionExportResult result;
+  const auto positions = distribution_export_layout(system, opts);
+  result.exported_buses = positions.size();
+  double max_x = opts.margin;
+  double max_y = opts.margin;
+  for (const auto& [bus, point] : positions) {
+    (void)bus;
+    max_x = std::max(max_x, point.x);
+    max_y = std::max(max_y, point.y);
+  }
+  const double width = max_x + opts.margin;
+  const double height = max_y + opts.margin;
+  const std::string title = opts.title.empty()
+                                ? (system.name.empty()
+                                       ? "HACDCPF distribution model"
+                                       : system.name)
+                                : opts.title;
+
+  using Attributes = std::vector<std::pair<std::string, std::string>>;
+  struct Label {
+    std::string object_id;
+    Point point;
+    std::string text;
+  };
+  std::vector<Label> labels;
+  std::ostringstream output;
+  output << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+         << "<svg xmlns=\"http://www.w3.org/2000/svg\" "
+         << "xmlns:xlink=\"http://www.w3.org/1999/xlink\" "
+         << "xmlns:cge=\"http://iec.ch/TC57/2005/SVG-schema#\" "
+         << "xmlns:hacdcpf=\"https://xjtu.edu.cn/hacdcpf/svg-model/1\" "
+         << "width=\"" << svg_number(width) << "\" height=\""
+         << svg_number(height) << "\" viewBox=\"0 0 "
+         << svg_number(width) << ' ' << svg_number(height) << "\">\n"
+         << "  <title>" << xml_escape(title) << "</title>\n"
+         << "  <defs>\n"
+         << "    <symbol id=\"TerminalSpan\" viewBox=\"0 0 1 1\"><path d=\"M0 0 L0 1\"/></symbol>\n"
+         << "    <symbol id=\"Switch\" viewBox=\"0 0 1 1\"><path d=\"M0 0 L0 1\"/></symbol>\n"
+         << "    <symbol id=\"Switch@1\" viewBox=\"0 0 1 1\"><path d=\"M0 0 L0 1\"/></symbol>\n"
+         << "    <symbol id=\"Transformer\" viewBox=\"0 0 1 1\"><path d=\"M0 0 L0 1\"/></symbol>\n"
+         << "    <symbol id=\"Substation\" viewBox=\"0 0 1 1\"><path d=\"M0 0 L0 1\"/></symbol>\n"
+         << "  </defs>\n"
+         << "  <g id=\"BackGround_Layer\"><rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/></g>\n";
+
+  const auto write_metadata = [&](const std::string& object_id,
+                                  const std::string& class_name,
+                                  const std::string& psr_type,
+                                  const Attributes& attributes) {
+    output << "      <metadata><cge:psr_ref objectid=\""
+           << xml_escape(object_id) << "\" globeid=\""
+           << xml_escape(object_id) << "\" psrtype=\""
+           << xml_escape(psr_type) << "\" classname=\""
+           << xml_escape(class_name) << "\"/>";
+    if (opts.include_hacdcpf_parameters) {
+      output << "<hacdcpf:model";
+      for (const auto& [name, value] : attributes)
+        output << ' ' << name << "=\"" << xml_escape(value) << "\"";
+      output << "/>";
+    }
+    output << "</metadata>\n";
+  };
+  const auto point_of = [&](int bus) -> std::optional<Point> {
+    const auto it = positions.find(bus);
+    return it == positions.end() ? std::nullopt
+                                 : std::optional<Point>(it->second);
+  };
+  const auto bool_text = [](bool value) { return value ? "true" : "false"; };
+
+  output << "  <g id=\"BusbarSection_Layer\" stroke=\"#1f2937\" stroke-width=\"3\" fill=\"none\">\n";
+  for (const auto& bus : system.ac.buses) {
+    const auto point = point_of(bus.index);
+    if (!point) continue;
+    const std::string object_id =
+        "hacdcpf-ac-bus-" + std::to_string(bus.index);
+    output << "    <g id=\"PD_" << xml_escape(object_id) << "\">\n";
+    write_metadata(object_id, "PWBusbarPSR", "0401001",
+                   {{"source_index", std::to_string(bus.index)},
+                    {"name", bus.name},
+                    {"base_kv", svg_number(bus.base_kv)},
+                    {"in_service", bool_text(bus.in_service)},
+                    {"bus_type", bus_type_str(bus.bus_type)},
+                    {"vm_pu", svg_number(bus.vm_pu)},
+                    {"va_deg", svg_number(bus.va_deg)},
+                    {"vmin_pu", svg_number(bus.vmin_pu)},
+                    {"vmax_pu", svg_number(bus.vmax_pu)},
+                    {"preserve_node", "true"}});
+    output << "      <polyline points=\"" << svg_number(point->x - 10.0)
+           << ',' << svg_number(point->y) << ' '
+           << svg_number(point->x + 10.0) << ',' << svg_number(point->y)
+           << "\"/>\n    </g>\n";
+    labels.push_back({object_id, {point->x + 12.0, point->y - 8.0},
+                      bus.name.empty() ? "AC bus " + std::to_string(bus.index)
+                                       : bus.name});
+  }
+  output << "  </g>\n";
+
+  output << "  <g id=\"ACLineSegment_Layer\" stroke=\"#2563eb\" stroke-width=\"2\" fill=\"none\">\n";
+  for (const auto& branch : system.ac.branches) {
+    const auto from = point_of(branch.from_bus);
+    const auto to = point_of(branch.to_bus);
+    if (!from || !to) {
+      result.warnings.push_back(
+          "Skipped AC branch " + std::to_string(branch.index) +
+          " because an endpoint bus is missing from the AC index space.");
+      continue;
+    }
+    const bool cable = uppercase_ascii(branch.line_type).find("CABLE") != knpos ||
+                       branch.line_type.find("电缆") != knpos;
+    const std::string object_id =
+        "hacdcpf-ac-branch-" + std::to_string(branch.index);
+    const std::string source = branch.parameter_source.empty()
+                                   ? (branch.parameters_inferred
+                                          ? "svg_estimate_embedded"
+                                          : "svg_embedded_authored")
+                                   : branch.parameter_source;
+    output << "    <g id=\"PD_" << xml_escape(object_id) << "\">\n";
+    write_metadata(
+        object_id, cable ? "PWCableSecPSR" : "PWConductorSecPSR",
+        cable ? "0402002" : "0401002",
+        {{"source_index", std::to_string(branch.index)},
+         {"name", branch.name},
+         {"in_service", bool_text(branch.in_service)},
+         {"length_km", svg_number(branch.length_km)},
+         {"r_ohm_per_km", svg_number(branch.r_ohm_per_km)},
+         {"x_ohm_per_km", svg_number(branch.x_ohm_per_km)},
+         {"r_pu", svg_number(branch.r_pu)},
+         {"x_pu", svg_number(branch.x_pu)},
+         {"rate_a_mva", svg_number(branch.rate_a_mva)},
+         {"rate_b_mva", svg_number(branch.rate_b_mva)},
+         {"rate_c_mva", svg_number(branch.rate_c_mva)},
+         {"line_type", branch.line_type},
+         {"conductor_model", branch.conductor_model},
+         {"cross_section_mm2", svg_number(branch.cross_section_mm2)},
+         {"cross_section_inferred", bool_text(branch.cross_section_inferred)},
+         {"parameter_source", source},
+         {"parameters_inferred", bool_text(branch.parameters_inferred)}});
+    output << "      <polyline points=\"" << svg_number(from->x) << ','
+           << svg_number(from->y) << ' ' << svg_number(to->x) << ','
+           << svg_number(to->y) << "\""
+           << (branch.in_service ? "" : " stroke-dasharray=\"5 4\"")
+           << "/>\n    </g>\n";
+    labels.push_back({object_id,
+                      {(from->x + to->x) * 0.5 + 6.0,
+                       (from->y + to->y) * 0.5 - 6.0},
+                      branch.name.empty()
+                          ? "AC branch " + std::to_string(branch.index)
+                          : branch.name});
+    ++result.exported_branches;
+  }
+  output << "  </g>\n";
+
+  const auto write_device_span = [&](const std::string& href, Point from,
+                                     Point to) {
+    const double dx = to.x - from.x;
+    const double dy = to.y - from.y;
+    const double length = std::max(1e-6, std::hypot(dx, dy));
+    const double angle = std::atan2(-dx, dy) * 180.0 / kPi;
+    const Point center{(from.x + to.x) * 0.5, (from.y + to.y) * 0.5};
+    output << "      <use xlink:href=\"" << href
+           << "\" width=\"1\" height=\"" << svg_number(length)
+           << "\" transform=\"scale(1) translate(" << svg_number(center.x)
+           << ' ' << svg_number(center.y) << ") rotate(" << svg_number(angle)
+           << ")\" opacity=\"0\"/>\n";
+    return center;
+  };
+
+  output << "  <g id=\"Breaker_Layer\" stroke=\"#111827\" stroke-width=\"2\" fill=\"#ffffff\">\n";
+  for (const auto& sw : system.ac.switches) {
+    const auto from = point_of(sw.bus_from);
+    const auto to = point_of(sw.bus_to);
+    if (!from || !to) {
+      result.warnings.push_back(
+          "Skipped switch " + std::to_string(sw.index) +
+          " because an endpoint bus is missing from the AC index space.");
+      continue;
+    }
+    const auto [class_name, psr_type] = svg_switch_class(sw);
+    const std::string object_id =
+        "hacdcpf-switch-" + std::to_string(sw.index);
+    output << "    <g id=\"PD_" << xml_escape(object_id) << "\">\n";
+    write_metadata(object_id, class_name, psr_type,
+                   {{"source_index", std::to_string(sw.index)},
+                    {"name", sw.name},
+                    {"in_service", bool_text(sw.in_service)},
+                    {"closed", bool_text(sw.closed)},
+                    {"normal_closed", bool_text(sw.normal_closed)},
+                    {"role", switch_role_str(sw.role)},
+                    {"controlled_element_type", sw.controlled_element_type},
+                    {"controlled_element_index",
+                     std::to_string(sw.controlled_element_index)},
+                    {"controlled_branch_index",
+                     std::to_string(sw.controlled_branch_index)},
+                    {"protection_zone_id",
+                     std::to_string(sw.protection_zone_id)},
+                    {"upstream_protective_switch_index",
+                     std::to_string(sw.upstream_protective_switch_index)},
+                    {"binding_inferred", bool_text(sw.binding_inferred)},
+                    {"binding_source", sw.binding_source}});
+    const Point center = write_device_span(
+        sw.closed ? "#Switch" : "#Switch@1", *from, *to);
+    output << "      <line x1=\"" << svg_number(from->x) << "\" y1=\""
+           << svg_number(from->y) << "\" x2=\"" << svg_number(to->x)
+           << "\" y2=\"" << svg_number(to->y) << "\""
+           << (sw.closed ? "" : " stroke-dasharray=\"7 5\"") << "/>\n"
+           << "      <rect x=\"" << svg_number(center.x - 5.0)
+           << "\" y=\"" << svg_number(center.y - 5.0)
+           << "\" width=\"10\" height=\"10\"/>\n    </g>\n";
+    labels.push_back({object_id, {center.x + 8.0, center.y - 8.0},
+                      sw.name.empty() ? "Switch " + std::to_string(sw.index)
+                                      : sw.name});
+    ++result.exported_switches;
+  }
+  output << "  </g>\n";
+
+  std::unordered_map<int, std::vector<std::size_t>> loads_by_bus;
+  for (std::size_t i = 0; i < system.ac.loads.size(); ++i)
+    loads_by_bus[system.ac.loads[i].bus].push_back(i);
+  std::vector<bool> embedded_load(system.ac.loads.size(), false);
+
+  output << "  <g id=\"PowerTransformer_Layer\" stroke=\"#7c3aed\" stroke-width=\"2\" fill=\"none\">\n";
+  for (const auto& transformer : system.ac.transformers_2w) {
+    const auto hv = point_of(transformer.hv_bus);
+    const auto lv = point_of(transformer.lv_bus);
+    if (!hv || !lv) {
+      result.warnings.push_back(
+          "Skipped transformer " + std::to_string(transformer.index) +
+          " because a terminal bus is missing from the AC index space.");
+      continue;
+    }
+    double load_p = 0.0;
+    double load_q = 0.0;
+    double load_sn = 0.0;
+    int load_source_index = -1;
+    bool load_in_service = true;
+    std::string load_name;
+    const auto at_lv = loads_by_bus.find(transformer.lv_bus);
+    if (at_lv != loads_by_bus.end()) {
+      for (std::size_t position : at_lv->second) {
+        if (embedded_load[position]) continue;
+        const auto& load = system.ac.loads[position];
+        embedded_load[position] = true;
+        ++result.embedded_loads;
+        load_p += load.p_mw;
+        load_q += load.q_mvar;
+        load_sn += load.sn_mva;
+        load_in_service = load_in_service && load.in_service;
+        if (load_source_index < 0) load_source_index = load.index;
+        if (!load.name.empty()) {
+          if (!load_name.empty()) load_name += " + ";
+          load_name += load.name;
+        }
+      }
+    }
+    const std::string object_id =
+        "hacdcpf-transformer-" + std::to_string(transformer.index);
+    Attributes attributes{
+        {"source_index", std::to_string(transformer.index)},
+        {"name", transformer.name},
+        {"in_service", bool_text(transformer.in_service)},
+        {"terminal_a_is_hv", "true"},
+        {"std_type", transformer.std_type},
+        {"sn_mva", svg_number(transformer.sn_mva)},
+        {"vn_hv_kv", svg_number(transformer.vn_hv_kv)},
+        {"vn_lv_kv", svg_number(transformer.vn_lv_kv)},
+        {"vk_percent", svg_number(transformer.vk_percent)},
+        {"vkr_percent", svg_number(transformer.vkr_percent)},
+        {"pk_kw", svg_number(transformer.pk_kw)},
+        {"pfe_kw", svg_number(transformer.pfe_kw)},
+        {"i0_percent", svg_number(transformer.i0_percent)},
+        {"vector_group", transformer.vector_group},
+        {"z0_percent", svg_number(transformer.z0_percent)},
+        {"x0_r0", svg_number(transformer.x0_r0)},
+        {"tap_side", std::to_string(transformer.tap_side)},
+        {"tap_pos", std::to_string(transformer.tap_pos)},
+        {"tap_min", std::to_string(transformer.tap_min)},
+        {"tap_max", std::to_string(transformer.tap_max)},
+        {"tap_neutral", std::to_string(transformer.tap_neutral)},
+        {"tap_step_percent", svg_number(transformer.tap_step_percent)},
+        {"shift_deg", svg_number(transformer.shift_deg)},
+        {"n_parallel", std::to_string(transformer.n_parallel)},
+        {"source_branch_idx", std::to_string(transformer.source_branch_idx)}};
+    if (load_source_index >= 0) {
+      attributes.insert(attributes.end(),
+                        {{"load_source_index", std::to_string(load_source_index)},
+                         {"load_name", load_name},
+                         {"load_in_service", bool_text(load_in_service)},
+                         {"load_p_mw", svg_number(load_p)},
+                         {"load_q_mvar", svg_number(load_q)},
+                         {"load_sn_mva", svg_number(load_sn)}});
+    }
+    output << "    <g id=\"PD_" << xml_escape(object_id) << "\">\n";
+    write_metadata(object_id, "PWOPTransformerPSR", "0301001", attributes);
+    const Point center = write_device_span("#Transformer", *hv, *lv);
+    output << "      <line x1=\"" << svg_number(hv->x) << "\" y1=\""
+           << svg_number(hv->y) << "\" x2=\"" << svg_number(lv->x)
+           << "\" y2=\"" << svg_number(lv->y) << "\"/>\n"
+           << "      <circle cx=\"" << svg_number(center.x - 4.0)
+           << "\" cy=\"" << svg_number(center.y)
+           << "\" r=\"6\"/><circle cx=\"" << svg_number(center.x + 4.0)
+           << "\" cy=\"" << svg_number(center.y)
+           << "\" r=\"6\"/>\n    </g>\n";
+    labels.push_back({object_id, {center.x + 10.0, center.y - 10.0},
+                      (transformer.name.empty()
+                           ? "Transformer " + std::to_string(transformer.index)
+                           : transformer.name) +
+                          " " + svg_number(transformer.sn_mva * 1000.0)});
+    ++result.exported_transformers;
+  }
+  output << "  </g>\n";
+
+  result.omitted_loads = static_cast<std::size_t>(std::count(
+      embedded_load.begin(), embedded_load.end(), false));
+  if (result.omitted_loads > 0)
+    result.warnings.push_back(
+        std::to_string(result.omitted_loads) +
+        " AC load(s) are not on an exported transformer LV bus and cannot be "
+        "represented by this IEC-CGE SVG profile.");
+
+  output << "  <g id=\"Substation_Layer\" stroke=\"#dc2626\" stroke-width=\"2\" fill=\"#fee2e2\">\n";
+  for (const auto& grid : system.ac.external_grids) {
+    const auto point = point_of(grid.bus);
+    if (!point) {
+      result.warnings.push_back(
+          "Skipped external grid " + std::to_string(grid.index) +
+          " because its AC bus is missing.");
+      continue;
+    }
+    const std::string object_id =
+        "hacdcpf-external-grid-" + std::to_string(grid.index);
+    output << "    <g id=\"PD_" << xml_escape(object_id) << "\">\n";
+    write_metadata(object_id, "Substation", "0201001",
+                   {{"source_index", std::to_string(grid.index)},
+                    {"name", grid.name},
+                    {"in_service", bool_text(grid.in_service)},
+                    {"vn_kv", svg_number(grid.vn_kv)},
+                    {"s_sc_max_mva", svg_number(grid.s_sc_max_mva)},
+                    {"s_sc_min_mva", svg_number(grid.s_sc_min_mva)},
+                    {"rx_max", svg_number(grid.rx_max)},
+                    {"rx_min", svg_number(grid.rx_min)},
+                    {"r_pu", svg_number(grid.r_pu)},
+                    {"x_pu", svg_number(grid.x_pu)},
+                    {"r0_pu", svg_number(grid.r0_pu)},
+                    {"x0_pu", svg_number(grid.x0_pu)}});
+    output << "      <use xlink:href=\"#Substation\" width=\"1\" height=\"1\" transform=\"scale(1) translate("
+           << svg_number(point->x) << ' ' << svg_number(point->y)
+           << ")\" opacity=\"0\"/>\n"
+           << "      <polygon points=\"" << svg_number(point->x) << ','
+           << svg_number(point->y - 12.0) << ' '
+           << svg_number(point->x - 12.0) << ',' << svg_number(point->y + 10.0)
+           << ' ' << svg_number(point->x + 12.0) << ','
+           << svg_number(point->y + 10.0) << "\"/>\n    </g>\n";
+    labels.push_back({object_id, {point->x + 14.0, point->y + 14.0},
+                      grid.name.empty()
+                          ? "External grid " + std::to_string(grid.index)
+                          : grid.name});
+    ++result.exported_external_grids;
+  }
+  output << "  </g>\n";
+
+  if (result.exported_external_grids > 1)
+    result.warnings.push_back(
+        "The bounded SVG importer restores at most one external-grid equivalent "
+        "per connected component; parallel sources require JSON/CIM for a "
+        "lossless round trip.");
+
+  output << "  <g id=\"Text_Layer\" fill=\"#111827\" font-family=\"sans-serif\" font-size=\"11\">\n";
+  for (const auto& label : labels) {
+    output << "    <g id=\"TXT-PD_" << xml_escape(label.object_id)
+           << "\"><text x=\"" << svg_number(label.point.x) << "\" y=\""
+           << svg_number(label.point.y) << "\">" << xml_escape(label.text)
+           << "</text></g>\n";
+  }
+  output << "  </g>\n</svg>\n";
+
+  result.omitted_non_ac_components =
+      system.dc.buses.size() + system.dc.branches.size() +
+      system.dc.loads.size() + system.vsc_converters.size() +
+      system.dc.dcdc_converters.size();
+  if (result.omitted_non_ac_components > 0)
+    result.warnings.push_back(
+        std::to_string(result.omitted_non_ac_components) +
+        " DC/converter component(s) are outside the AC IEC-CGE distribution "
+        "SVG export profile; use rich JSON or CIM for those assets.");
+  result.svg = output.str();
+  return result;
+}
+
+SvgDistributionExportResult save_svg_distribution(
+    const HybridPowerSystem& system,
+    const std::filesystem::path& path,
+    const SvgDistributionExportOptions& opts) {
+  auto result = to_svg_distribution(system, opts);
+  std::ofstream output(path, std::ios::binary);
+  if (!output)
+    throw std::runtime_error("Cannot open SVG distribution export path: " +
+                             path.string());
+  output.write(result.svg.data(), static_cast<std::streamsize>(result.svg.size()));
+  if (!output)
+    throw std::runtime_error("Failed to write SVG distribution export: " +
+                             path.string());
+  return result;
 }
 
 }  // namespace hacdcpf::io

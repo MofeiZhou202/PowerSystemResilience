@@ -702,7 +702,7 @@ TEST_CASE("design handbook completion previews and applies CIM line parameters",
   CHECK(restored.ac.branches.front().cross_section_mm2 == 240.0);
   CHECK_FALSE(restored.ac.branches.front().cross_section_inferred);
   CHECK(restored.ac.branches.front().parameter_source ==
-        "design_handbook_gbt3956_schneider_eig");
+        "design_handbook_gbt3956_distribution_standards");
   CHECK_THAT(restored.ac.branches.front().r_ohm_per_km,
              WithinAbs(sys.ac.branches.front().r_ohm_per_km, 1e-12));
 }

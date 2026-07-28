@@ -36,7 +36,8 @@ When documentation and runtime behavior differ, `include/`, `src/`,
 | Multidimensional weak-link identification | [multidimensional_weak_link_identification.md](multidimensional_weak_link_identification.md) |
 | Hosting capacity (DL/T 2041-2025) implementation | [../capacity_analysis_implementation.md](../capacity_analysis_implementation.md) |
 | CIM/CGMES 3.0 field crosswalk and round-trip contract | [cim_cgmes3_crosswalk.md](cim_cgmes3_crosswalk.md) |
-| IEC-CGE annotated distribution SVG import contract | [svg_distribution_import.md](svg_distribution_import.md) |
+| IEC-CGE annotated distribution SVG import/export contract | [svg_distribution_import.md](svg_distribution_import.md) |
+| Distribution parameter completion standards crosswalk | [distribution_parameter_completion_standards.md](distribution_parameter_completion_standards.md) |
 | PowerSimulationsDynamics.jl interop validation | [powersimulationsdynamics_interop.md](powersimulationsdynamics_interop.md) |
 | Digital-twin and IO architecture | [digital_twin_data_io_architecture.md](digital_twin_data_io_architecture.md) |
 | EV/traffic scenario schema | [ev_traffic_scenario_format.md](ev_traffic_scenario_format.md) |
