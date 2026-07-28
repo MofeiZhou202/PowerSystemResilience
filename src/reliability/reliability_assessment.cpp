@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <numeric>
@@ -3311,6 +3312,7 @@ struct FMEANetworkEdge {
   // voltage law).  0 = equipotential edge (zero-impedance switch/breaker/
   // transformer) whose endpoints are angle-tied but flow is free (a bus merge).
   double susceptance{0.0};
+  bool active{true};
 };
 
 struct FMEANetworkTransfer {
@@ -3319,6 +3321,7 @@ struct FMEANetworkTransfer {
   double pmin_mw{0.0};
   double pmax_mw{0.0};
   std::string name;
+  bool active{true};
 };
 
 struct FMEANetworkDCDC {
@@ -3327,6 +3330,15 @@ struct FMEANetworkDCDC {
   double pmin_mw{0.0};
   double pmax_mw{0.0};
   std::string name;
+  bool active{true};
+};
+
+struct FMEASimplexCache {
+  std::optional<engine::SimplexBasis> basis;
+  std::optional<engine::SimplexBasis> fallback_basis;
+  std::string component_type;
+  int component_index{-1};
+  std::string component_name;
 };
 
 double positive_or_zero(double value) {
@@ -3346,12 +3358,14 @@ void add_fmea_source(std::vector<FMEANetworkSource>& sources,
                      int bus_pos,
                      double pmin_mw,
                      double pmax_mw,
+                     bool active,
                      double cost_mwh,
                      std::string name) {
   if (bus_pos < 0 || !std::isfinite(pmax_mw)) return;
   if (pmax_mw <= 1e-9) return;
   if (!std::isfinite(pmin_mw)) pmin_mw = 0.0;
   pmin_mw = std::clamp(pmin_mw, 0.0, pmax_mw);
+  if (!active) pmin_mw = pmax_mw = 0.0;
   sources.push_back({ac_side, bus_pos, pmin_mw, pmax_mw,
                      std::max(0.0, cost_mwh), std::move(name)});
 }
@@ -3427,7 +3441,8 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
     const HybridPowerSystem& sys,
     const FMEAOptions& options,
     double stage_duration_hr,
-    double curtail_threshold_mw = 0.01) {
+    double curtail_threshold_mw = 0.01,
+    FMEASimplexCache* simplex_cache = nullptr) {
   const size_t ac_bus_count = sys.ac.buses.size();
   const size_t dc_bus_count = sys.dc.buses.size();
   std::unordered_map<int, int> ac_bus_pos;
@@ -3478,86 +3493,88 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
   std::vector<FMEANetworkDCDC> dcdc_transfers;
 
   for (const auto& generator : sys.ac.generators) {
-    if (!generator.in_service) continue;
     auto bus_it = ac_bus_pos.find(generator.bus);
     if (bus_it == ac_bus_pos.end()) continue;
     double pmax = generator.pmax_mw > 0.0 ? generator.pmax_mw : positive_or_zero(generator.pg_mw);
-    add_fmea_source(sources, true, bus_it->second,
-                    positive_or_zero(generator.pmin_mw), pmax,
+    // Emergency reliability dispatch may decommit or curtail a surviving
+    // generator. Keeping its normal-operation Pmin can make an isolated
+    // surplus island artificially infeasible even though zero generation and
+    // local load shedding are always physically available.
+    add_fmea_source(sources, true, bus_it->second, 0.0, pmax,
+                    generator.in_service,
                     generator.cost_c1,
                     generator.name.empty() ? "gen_" + std::to_string(generator.index)
                                            : generator.name);
   }
   for (const auto& source : sys.ac.static_generators) {
-    if (!source.in_service) continue;
     auto bus_it = ac_bus_pos.find(source.bus);
     if (bus_it == ac_bus_pos.end()) continue;
     double pmax = source.pmax_mw > 0.0 ? source.pmax_mw : source.p_rated_mw;
     if (pmax <= 1e-9) pmax = positive_or_zero(source.p_mw * source.scaling);
-    add_fmea_source(sources, true, bus_it->second, 0.0, pmax, 1.0,
+    add_fmea_source(sources, true, bus_it->second, 0.0, pmax,
+                    source.in_service, 1.0,
                     source.name.empty() ? "sgen_" + std::to_string(source.index)
                                         : source.name);
   }
   for (const auto& renewable : sys.ac.renewable_gens) {
-    if (!renewable.in_service) continue;
     auto bus_it = ac_bus_pos.find(renewable.bus);
     if (bus_it == ac_bus_pos.end()) continue;
     double pmax = renewable.p_mw > 0.0 ? renewable.p_mw : renewable.p_rated_mw;
-    add_fmea_source(sources, true, bus_it->second, 0.0, pmax, 1.0,
+    add_fmea_source(sources, true, bus_it->second, 0.0, pmax,
+                    renewable.in_service, 1.0,
                     renewable.name.empty() ? "ren_" + std::to_string(renewable.index)
                                            : renewable.name);
   }
   for (const auto& pv : sys.ac.pv_systems) {
-    if (!pv.in_service) continue;
     auto bus_it = ac_bus_pos.find(pv.bus);
     if (bus_it == ac_bus_pos.end()) continue;
     double pmax = pv.pmax_mw > 0.0 ? pv.pmax_mw : pv.p_mw;
-    add_fmea_source(sources, true, bus_it->second, 0.0, pmax, 1.0,
+    add_fmea_source(sources, true, bus_it->second, 0.0, pmax,
+                    pv.in_service, 1.0,
                     pv.name.empty() ? "pv_" + std::to_string(pv.index) : pv.name);
   }
   for (const auto& storage : sys.ac.storage) {
-    if (!storage.in_service || !storage.controllable) continue;
     auto bus_it = ac_bus_pos.find(storage.bus);
     if (bus_it == ac_bus_pos.end()) continue;
     add_fmea_source(sources, true, bus_it->second, 0.0,
-                    storage_available_mw(storage, stage_duration_hr), 1.0,
+                    storage_available_mw(storage, stage_duration_hr),
+                    storage.in_service && storage.controllable, 1.0,
                     storage.name.empty() ? "storage_" + std::to_string(storage.index)
                                          : storage.name);
   }
 
   for (const auto& source : sys.dc.static_generators) {
-    if (!source.in_service) continue;
     auto bus_it = dc_bus_pos.find(source.bus);
     if (bus_it == dc_bus_pos.end()) continue;
     double pmax = source.pmax_mw > 0.0 ? source.pmax_mw : source.p_rated_mw;
     if (pmax <= 1e-9) pmax = positive_or_zero(source.p_mw * source.scaling);
-    add_fmea_source(sources, false, bus_it->second, 0.0, pmax, 1.0,
+    add_fmea_source(sources, false, bus_it->second, 0.0, pmax,
+                    source.in_service, 1.0,
                     source.name.empty() ? "dc_sgen_ac_" + std::to_string(source.index)
                                         : source.name);
   }
   for (const auto& source : sys.dc.dc_static_generators) {
-    if (!source.in_service) continue;
     auto bus_it = dc_bus_pos.find(source.bus);
     if (bus_it == dc_bus_pos.end()) continue;
     double pmax = source.pmax_mw > 0.0 ? source.pmax_mw : positive_or_zero(source.p_set_mw * source.scaling);
-    add_fmea_source(sources, false, bus_it->second, 0.0, pmax, 1.0,
+    add_fmea_source(sources, false, bus_it->second, 0.0, pmax,
+                    source.in_service, 1.0,
                     source.name.empty() ? "dc_sgen_" + std::to_string(source.index)
                                         : source.name);
   }
   for (const auto& pv : sys.dc.pv_arrays) {
-    if (!pv.in_service) continue;
     auto bus_it = dc_bus_pos.find(pv.bus);
     if (bus_it == dc_bus_pos.end()) continue;
     add_fmea_source(sources, false, bus_it->second, 0.0,
-                    positive_or_zero(pv.p_set_mw), 1.0,
+                    positive_or_zero(pv.p_set_mw), pv.in_service, 1.0,
                     pv.name.empty() ? "dc_pv_" + std::to_string(pv.index) : pv.name);
   }
   for (const auto& storage : sys.dc.storage) {
-    if (!storage.in_service || !storage.controllable) continue;
     auto bus_it = dc_bus_pos.find(storage.bus);
     if (bus_it == dc_bus_pos.end()) continue;
     add_fmea_source(sources, false, bus_it->second, 0.0,
-                    storage_available_mw(storage, stage_duration_hr), 1.0,
+                    storage_available_mw(storage, stage_duration_hr),
+                    storage.in_service && storage.controllable, 1.0,
                     storage.name.empty() ? "dc_storage_" + std::to_string(storage.index)
                                          : storage.name);
   }
@@ -3568,17 +3585,17 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
                       int to_pos,
                       double capacity_mw,
                       std::string name,
-                      double susceptance = 0.0) {
+                      double susceptance = 0.0,
+                      bool active = true) {
     if (from_pos < 0 || to_pos < 0 || from_pos == to_pos) return;
     if (!std::isfinite(capacity_mw) || capacity_mw <= 1e-9) {
       capacity_mw = reserve_capacity_mw;
     }
     edges.push_back({ac_side, from_pos, to_pos, capacity_mw, std::move(name),
-                     susceptance});
+                     susceptance, active});
   };
 
   for (const auto& branch : sys.ac.branches) {
-    if (!branch.in_service) continue;
     auto from_it = ac_bus_pos.find(branch.from_bus);
     auto to_it = ac_bus_pos.find(branch.to_bus);
     if (from_it == ac_bus_pos.end() || to_it == ac_bus_pos.end()) continue;
@@ -3589,19 +3606,18 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
     add_edge(ac_edges, true, from_it->second, to_it->second, capacity,
              branch.name.empty() ? "ac_branch_" + std::to_string(branch.index)
                                  : branch.name,
-             b_pu);
+             b_pu, branch.in_service);
   }
   for (const auto& transformer : sys.ac.transformers_2w) {
-    if (!transformer.in_service) continue;
     auto from_it = ac_bus_pos.find(transformer.hv_bus);
     auto to_it = ac_bus_pos.find(transformer.lv_bus);
     if (from_it == ac_bus_pos.end() || to_it == ac_bus_pos.end()) continue;
     add_edge(ac_edges, true, from_it->second, to_it->second, transformer.sn_mva,
              transformer.name.empty() ? "trafo2w_" + std::to_string(transformer.index)
-                                      : transformer.name);
+                                      : transformer.name,
+             0.0, transformer.in_service);
   }
   for (const auto& transformer : sys.ac.transformers_3w) {
-    if (!transformer.in_service) continue;
     auto hv_it = ac_bus_pos.find(transformer.hv_bus);
     auto mv_it = ac_bus_pos.find(transformer.mv_bus);
     auto lv_it = ac_bus_pos.find(transformer.lv_bus);
@@ -3612,54 +3628,55 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
     if (mv_it != ac_bus_pos.end()) {
       add_edge(ac_edges, true, hv_it->second, mv_it->second, capacity,
                transformer.name.empty() ? "trafo3w_hm_" + std::to_string(transformer.index)
-                                        : transformer.name + "_hm");
+                                        : transformer.name + "_hm",
+               0.0, transformer.in_service);
     }
     if (lv_it != ac_bus_pos.end()) {
       add_edge(ac_edges, true, hv_it->second, lv_it->second, capacity,
                transformer.name.empty() ? "trafo3w_hl_" + std::to_string(transformer.index)
-                                        : transformer.name + "_hl");
+                                        : transformer.name + "_hl",
+               0.0, transformer.in_service);
     }
   }
   for (const auto& sw : sys.ac.switches) {
-    if (!sw.in_service || !sw.closed) continue;
     auto from_it = ac_bus_pos.find(sw.bus_from);
     auto to_it = ac_bus_pos.find(sw.bus_to);
     if (from_it == ac_bus_pos.end() || to_it == ac_bus_pos.end()) continue;
     add_edge(ac_edges, true, from_it->second, to_it->second, reserve_capacity_mw,
-             sw.name.empty() ? "switch_" + std::to_string(sw.index) : sw.name);
+             sw.name.empty() ? "switch_" + std::to_string(sw.index) : sw.name,
+             0.0, sw.in_service && sw.closed);
   }
   for (const auto& breaker : sys.ac.circuit_breakers) {
-    if (!breaker.in_service || !breaker.closed) continue;
     auto from_it = ac_bus_pos.find(breaker.bus_from);
     auto to_it = ac_bus_pos.find(breaker.bus_to);
     if (from_it == ac_bus_pos.end() || to_it == ac_bus_pos.end()) continue;
     add_edge(ac_edges, true, from_it->second, to_it->second, reserve_capacity_mw,
              breaker.name.empty() ? "ac_cb_" + std::to_string(breaker.index)
-                                  : breaker.name);
+                                  : breaker.name,
+             0.0, breaker.in_service && breaker.closed);
   }
 
   for (const auto& branch : sys.dc.branches) {
-    if (!branch.in_service) continue;
     auto from_it = dc_bus_pos.find(branch.from_bus);
     auto to_it = dc_bus_pos.find(branch.to_bus);
     if (from_it == dc_bus_pos.end() || to_it == dc_bus_pos.end()) continue;
     double capacity = branch.rate_a_mva > 0.0 ? branch.rate_a_mva : branch.s_max_mva;
     add_edge(dc_edges, false, from_it->second, to_it->second, capacity,
              branch.name.empty() ? "dc_branch_" + std::to_string(branch.index)
-                                 : branch.name);
+                                 : branch.name,
+             0.0, branch.in_service);
   }
   for (const auto& breaker : sys.dc.dc_circuit_breakers) {
-    if (!breaker.in_service || !breaker.closed) continue;
     auto from_it = dc_bus_pos.find(breaker.bus_from);
     auto to_it = dc_bus_pos.find(breaker.bus_to);
     if (from_it == dc_bus_pos.end() || to_it == dc_bus_pos.end()) continue;
     add_edge(dc_edges, false, from_it->second, to_it->second, reserve_capacity_mw,
              breaker.name.empty() ? "dc_cb_" + std::to_string(breaker.index)
-                                  : breaker.name);
+                                  : breaker.name,
+             0.0, breaker.in_service && breaker.closed);
   }
 
   for (const auto& converter : sys.vsc_converters) {
-    if (!converter.in_service) continue;
     auto ac_it = ac_bus_pos.find(converter.bus_ac);
     auto dc_it = dc_bus_pos.find(converter.bus_dc);
     if (ac_it == ac_bus_pos.end() || dc_it == dc_bus_pos.end()) continue;
@@ -3667,10 +3684,10 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
     if (std::abs(pmax - pmin) <= 1e-9 && std::abs(pmax) <= 1e-9) continue;
     vsc_transfers.push_back({ac_it->second, dc_it->second, pmin, pmax,
                              converter.name.empty() ? "vsc_" + std::to_string(converter.index)
-                                                    : converter.name});
+                                                    : converter.name,
+                             converter.in_service});
   }
   for (const auto& converter : sys.dc.dcdc_converters) {
-    if (!converter.in_service) continue;
     auto from_it = dc_bus_pos.find(converter.bus_in);
     auto to_it = dc_bus_pos.find(converter.bus_out);
     if (from_it == dc_bus_pos.end() || to_it == dc_bus_pos.end()) continue;
@@ -3678,7 +3695,8 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
     if (std::abs(pmax - pmin) <= 1e-9 && std::abs(pmax) <= 1e-9) continue;
     dcdc_transfers.push_back({from_it->second, to_it->second, pmin, pmax,
                               converter.name.empty() ? "dcdc_" + std::to_string(converter.index)
-                                                     : converter.name});
+                                                     : converter.name,
+                              converter.in_service});
   }
 
   const int source_offset = 0;
@@ -3735,9 +3753,10 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
   for (size_t edge_pos = 0; edge_pos < ac_edges.size(); ++edge_pos) {
     const auto& edge = ac_edges[edge_pos];
     const int var = ac_edge_offset + static_cast<int>(edge_pos);
+    const double capacity = edge.active ? edge.capacity_mw / base_mva : 0.0;
     lp.vars[var] = {engine::VarType::Continuous,
-                    -edge.capacity_mw / base_mva,
-                    edge.capacity_mw / base_mva,
+                    -capacity,
+                    capacity,
                     edge.name};
     equality_triplets.emplace_back(edge.from_pos, var, -1.0);
     equality_triplets.emplace_back(edge.to_pos, var, 1.0);
@@ -3745,9 +3764,10 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
   for (size_t edge_pos = 0; edge_pos < dc_edges.size(); ++edge_pos) {
     const auto& edge = dc_edges[edge_pos];
     const int var = dc_edge_offset + static_cast<int>(edge_pos);
+    const double capacity = edge.active ? edge.capacity_mw / base_mva : 0.0;
     lp.vars[var] = {engine::VarType::Continuous,
-                    -edge.capacity_mw / base_mva,
-                    edge.capacity_mw / base_mva,
+                    -capacity,
+                    capacity,
                     edge.name};
     const int from_row = static_cast<int>(ac_bus_count) + edge.from_pos;
     const int to_row = static_cast<int>(ac_bus_count) + edge.to_pos;
@@ -3757,9 +3777,11 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
   for (size_t transfer_pos = 0; transfer_pos < vsc_transfers.size(); ++transfer_pos) {
     const auto& transfer = vsc_transfers[transfer_pos];
     const int var = vsc_offset + static_cast<int>(transfer_pos);
+    const double pmin = transfer.active ? transfer.pmin_mw / base_mva : 0.0;
+    const double pmax = transfer.active ? transfer.pmax_mw / base_mva : 0.0;
     lp.vars[var] = {engine::VarType::Continuous,
-                    transfer.pmin_mw / base_mva,
-                    transfer.pmax_mw / base_mva,
+                    pmin,
+                    pmax,
                     transfer.name};
     equality_triplets.emplace_back(transfer.ac_pos, var, 1.0);
     equality_triplets.emplace_back(static_cast<int>(ac_bus_count) + transfer.dc_pos, var, -1.0);
@@ -3767,9 +3789,11 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
   for (size_t transfer_pos = 0; transfer_pos < dcdc_transfers.size(); ++transfer_pos) {
     const auto& transfer = dcdc_transfers[transfer_pos];
     const int var = dcdc_offset + static_cast<int>(transfer_pos);
+    const double pmin = transfer.active ? transfer.pmin_mw / base_mva : 0.0;
+    const double pmax = transfer.active ? transfer.pmax_mw / base_mva : 0.0;
     lp.vars[var] = {engine::VarType::Continuous,
-                    transfer.pmin_mw / base_mva,
-                    transfer.pmax_mw / base_mva,
+                    pmin,
+                    pmax,
                     transfer.name};
     equality_triplets.emplace_back(static_cast<int>(ac_bus_count) + transfer.from_pos, var, -1.0);
     equality_triplets.emplace_back(static_cast<int>(ac_bus_count) + transfer.to_pos, var, 1.0);
@@ -3811,7 +3835,12 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
     const int row = flow_row_offset + static_cast<int>(edge_pos);
     const int theta_from = theta_offset + edge.from_pos;
     const int theta_to = theta_offset + edge.to_pos;
-    if (edge.susceptance > 0.0) {
+    if (!edge.active) {
+      // Preserve the row/column index space across N-1 states without
+      // retaining any electrical coupling for the outaged element.
+      const int flow_var = ac_edge_offset + static_cast<int>(edge_pos);
+      equality_triplets.emplace_back(row, flow_var, 1.0);
+    } else if (edge.susceptance > 0.0) {
       // Pf - B*(theta_from - theta_to) = 0
       const int flow_var = ac_edge_offset + static_cast<int>(edge_pos);
       equality_triplets.emplace_back(row, flow_var, 1.0);
@@ -3834,11 +3863,28 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
   simplex_options.max_iter = std::max(1000, options.opf_options.max_iterations);
   simplex_options.feasibility_tol = std::max(1e-9, options.opf_options.feasibility_tol);
   simplex_options.optimality_tol = std::max(1e-9, options.opf_options.optimality_tol);
-  auto solve_certificate = engine::solve_lp_with_basis(lp, simplex_options, nullptr);
+  simplex_options.verbose = std::getenv("HACDCPF_FMEA_SIMPLEX_DIAG") != nullptr;
+  if (simplex_cache != nullptr && simplex_cache->fallback_basis.has_value()) {
+    simplex_options.fallback_basis = &*simplex_cache->fallback_basis;
+  }
+  const engine::SimplexBasis* basis_hint =
+      simplex_cache != nullptr && simplex_cache->basis.has_value()
+          ? &*simplex_cache->basis
+          : nullptr;
+  auto solve_certificate =
+      engine::solve_lp_with_basis(lp, simplex_options, basis_hint);
   const auto& solve_result = solve_certificate.result;
   if (!solve_result.stats.success || solve_result.x.size() < variable_count) {
-    spdlog::warn("FMEA hybrid AC/DC LP failed (status='{}'); applying conservative full-load shed",
-                 solve_result.stats.status);
+    if (simplex_cache != nullptr) {
+      simplex_cache->basis = simplex_cache->fallback_basis;
+    }
+    spdlog::warn(
+        "FMEA hybrid AC/DC LP failed for {}[{}] '{}' (status='{}'); "
+        "applying conservative full-load shed",
+        simplex_cache != nullptr ? simplex_cache->component_type : "unknown",
+        simplex_cache != nullptr ? simplex_cache->component_index : -1,
+        simplex_cache != nullptr ? simplex_cache->component_name : "unknown",
+        solve_result.stats.status);
     return conservative_hybrid_shed(sys, ac_load_mw, dc_load_mw, curtail_threshold_mw);
   }
 
@@ -3855,6 +3901,19 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
     result.curtailment_mw += shed;
   }
   result.is_loss_state = result.curtailment_mw > curtail_threshold_mw;
+  if (simplex_cache != nullptr) {
+    engine::SimplexBasis next_basis;
+    next_basis.indices = solve_certificate.basis.basis_indices();
+    next_basis.rows = solve_certificate.basis.rows;
+    next_basis.cols = solve_certificate.basis.cols;
+    next_basis.at_upper = solve_certificate.basis.at_upper;
+    next_basis.cached_dse_weights = solve_certificate.basis.cached_dse_weights;
+    next_basis.cached_dse_basis = solve_certificate.basis.cached_dse_basis;
+    next_basis.sf_n_slack = solve_certificate.basis.sf_n_slack;
+    next_basis.sf_n_surplus = solve_certificate.basis.sf_n_surplus;
+    next_basis.sf_n_artificial = solve_certificate.basis.sf_n_artificial;
+    simplex_cache->basis = std::move(next_basis);
+  }
   return result;
 }
 
@@ -4081,9 +4140,11 @@ StateEvalResult evaluate_prepared_fmea_system(
     const HybridPowerSystem& sys,
     const FMEAOptions& options,
     const opf::DCOPFOptions& opf_opt,
-    double stage_duration_hr) {
+    double stage_duration_hr,
+    FMEASimplexCache* simplex_cache = nullptr) {
   if (has_hybrid_fmea_components(sys)) {
-    return evaluate_hybrid_fmea_network_lp(sys, options, stage_duration_hr);
+    return evaluate_hybrid_fmea_network_lp(
+        sys, options, stage_duration_hr, 0.01, simplex_cache);
   }
   std::vector<bool> no_failures(ComponentOffsets(sys).total, false);
   return evaluate_state(sys, no_failures, opf_opt, 1.0);
@@ -4133,7 +4194,8 @@ FMEAStageEval evaluate_contingency_stage(
     const opf::DCOPFOptions& opf_opt,
     double stage_duration_hr,
     bool repair_stage,
-    bool cyber_control_frozen = false) {
+    bool cyber_control_frozen = false,
+    FMEASimplexCache* simplex_cache = nullptr) {
   
   HybridPowerSystem sys_copy = sys;
   scale_fmea_loads(sys_copy, options.load_scale_factor);
@@ -4153,7 +4215,7 @@ FMEAStageEval evaluate_contingency_stage(
     best.fault_isolation_message = isolation.message;
   }
   best.eval = evaluate_prepared_fmea_system(
-      sys_copy, options, opf_opt, stage_duration_hr);
+      sys_copy, options, opf_opt, stage_duration_hr, simplex_cache);
 
   if (!repair_stage || !options.enable_switch_reconfiguration ||
       options.max_repair_switch_actions <= 0) {
@@ -4182,7 +4244,7 @@ FMEAStageEval evaluate_contingency_stage(
     HybridPowerSystem cand = sys_copy;
     close_repair_actions(cand, switches, branches);
     StateEvalResult ev = evaluate_prepared_fmea_system(
-      cand, options, opf_opt, stage_duration_hr);
+      cand, options, opf_opt, stage_duration_hr, simplex_cache);
     ++opf_calls;
     if (ev.curtailment_mw + 1e-9 < best.eval.curtailment_mw) {
       best.eval = std::move(ev);
@@ -4442,13 +4504,19 @@ FMEAResult run_distribution_fmea(
     double eens_control_increment{0.0};
   };
 
+  thread_local FMEASimplexCache simplex_cache;
   auto evaluate_fmea_contingency = [&](const FMEAComponent& comp) {
     FMEAContingencyWorkResult work;
+    // Each serial evaluator / worker keeps the last compatible basis. Catalog
+    // entries share a stable index space and differ mainly by one outage.
     FMEAContingencyDetail detail;
     detail.component_index = comp.idx;
     detail.component_name = comp.name;
     detail.failure_rate = comp.lambda;
     detail.component_type = fmea_component_type_name(comp.type);
+    simplex_cache.component_type = detail.component_type;
+    simplex_cache.component_index = comp.idx;
+    simplex_cache.component_name = comp.name;
 
     double automation_availability = 1.0;
     if (options.cyber_physical.enabled) {
@@ -4519,7 +4587,7 @@ FMEAResult run_distribution_fmea(
           std::max(0.0, comp.tau_rep_hr - class_eval.tau_sw_hr);
       class_eval.switching = evaluate_contingency_stage(
           sys, comp, class_options, opf_opt, class_eval.tau_sw_hr, false,
-          cyber_control_frozen);
+          cyber_control_frozen, &simplex_cache);
       // The physical repair horizon is retained for storage-energy feasibility;
       // only the frequency-weighted stage duration uses tau_rep_hr.  The repair
       // evaluation depends on (options, horizon, freeze) but NOT on tau_sw, so
@@ -4528,7 +4596,7 @@ FMEAResult run_distribution_fmea(
           ? *reuse_repair
           : evaluate_contingency_stage(
                 sys, comp, class_options, opf_opt, comp.tau_rep_hr, true,
-                cyber_control_frozen);
+                cyber_control_frozen, &simplex_cache);
       class_eval.ens_mwh =
           class_eval.switching.eval.curtailment_mw * class_eval.tau_sw_hr +
           class_eval.repair.eval.curtailment_mw * class_eval.tau_rep_hr;
@@ -4726,15 +4794,30 @@ FMEAResult run_distribution_fmea(
   if (result.parallel_effective) {
     spdlog::info("FMEA: evaluating contingencies in parallel with {} workers",
                  fmea_workers);
+    // Establish one validated cold-start basis before launching workers. All
+    // N-1 formulations use the same row/column index space, so workers can
+    // begin with sparse dual reoptimization instead of racing through separate
+    // cold Phase-I solves.
+    work_results[0] = evaluate_fmea_contingency(catalog[0]);
+    const auto seed_basis = simplex_cache.basis;
+    simplex_cache.fallback_basis = seed_basis;
+    const auto seed_token = std::make_shared<int>(0);
     util::ThreadPool pool(fmea_workers);
     pool.parallel_for_dynamic(
-        catalog.size(),
+        catalog.size() - 1U,
         [&](size_t i) {
-          work_results[i] = evaluate_fmea_contingency(catalog[i]);
+          thread_local std::weak_ptr<int> applied_seed_token;
+          if (applied_seed_token.lock() != seed_token) {
+            simplex_cache.basis = seed_basis;
+            simplex_cache.fallback_basis = seed_basis;
+            applied_seed_token = seed_token;
+          }
+          work_results[i + 1U] = evaluate_fmea_contingency(catalog[i + 1U]);
         },
         fmea_workers);
     result.parallel_execution.actual_parallel_evaluations =
-        static_cast<long long>(catalog.size());
+        static_cast<long long>(catalog.size() - 1U);
+    result.parallel_execution.serial_evaluations = 1;
   } else {
     for (size_t i = 0; i < catalog.size(); ++i) {
       work_results[i] = evaluate_fmea_contingency(catalog[i]);
