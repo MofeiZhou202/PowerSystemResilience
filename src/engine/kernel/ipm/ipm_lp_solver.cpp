@@ -380,7 +380,15 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   SolveResult res = solve_lp_impl(prob, x0, opt_.ruiz_rounds);
   if (!res.stats.success && opt_.ruiz_rounds > 0) {
     SolveResult raw = solve_lp_impl(prob, x0, 0);
-    if (raw.stats.success) res = std::move(raw);
+    if (raw.stats.success) {
+      res = std::move(raw);
+    } else {
+      // Extreme-scaling escalation: tighter Ruiz equilibration shrinks the
+      // residual column-scale range that otherwise leaves the barrier
+      // ill-conditioned and stalled (adversarial 10^6-scaled probes).
+      SolveResult more = solve_lp_impl(prob, x0, std::max(opt_.ruiz_rounds * 4, 40));
+      if (more.stats.success) res = std::move(more);
+    }
   }
   return res;
 }
@@ -500,6 +508,24 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     b[i] = (scal.active ? scal.dr[static_cast<size_t>(i)] : 1.0) * lp.b(i);
   for (int i = 0; i < me; ++i)
     b[mi + i] = (scal.active ? scal.dr[static_cast<size_t>(mi + i)] : 1.0) * lp.beq(i);
+
+  // Deactivate spurious far bounds.  After Ruiz the constraint matrix is O(1),
+  // so the solution magnitude is O(||b||inf); a variable bound many orders
+  // beyond that scale cannot be active and only injects a huge barrier gap
+  // (gu ~ 1e18) that pollutes mu and stalls the method.  This notably rescues
+  // originally-infinite bounds whose 1e20 sentinel was scaled below kBig by a
+  // large column factor (the adversarial 10^6 scaling probe).  Treating them as
+  // unbounded is safe: the original-space feasibility audit rejects the rare
+  // case where such a bound was genuinely active.
+  {
+    double bscale = 1.0;
+    for (int i = 0; i < m; ++i) bscale = std::max(bscale, std::abs(b[i]));
+    const double bound_cap = 1e8 * bscale;
+    for (int j = 0; j < n_orig; ++j) {
+      if (flb[j] != 0.0 && std::abs(lb[j]) > bound_cap) flb[j] = 0.0;
+      if (fub[j] != 0.0 && std::abs(ub[j]) > bound_cap) fub[j] = 0.0;
+    }
+  }
 
   // CSC pointers — from the scaled copies when Ruiz is active, else direct
   const Eigen::SparseMatrix<double>& A_mat = scal.active ? scal.A : lp.A;
@@ -1092,7 +1118,13 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
       if (is_fixed[j]) continue;  // already locked
       if (flb[j] && fub[j]) {
         const double range = ub[j] - lb[j];
-        x_d[j] = std::clamp(x_d[j], lb[j] + 0.01 * range, ub[j] - 0.01 * range);
+        // Keep the (accurate) least-squares value when it is already interior;
+        // only pull it off a bound by a small margin.  A fixed 1%-of-range
+        // margin is catastrophic when the range is huge (extreme column
+        // scaling): it would force x ~ 1e16 and destroy a good x_LS ~ 1e4,
+        // seeding a starting point with pf ~ 1e18.
+        const double margin = std::min(0.01 * range, 1.0);
+        x_d[j] = std::clamp(x_d[j], lb[j] + margin, ub[j] - margin);
       } else if (flb[j]) {
         x_d[j] = std::max(x_d[j], lb[j] + 1.0);
       } else if (fub[j]) {
