@@ -51,7 +51,15 @@ struct PresolveStats {
 /// Options controlling presolve behavior.
 struct PresolveOptions {
   int max_rounds{20};
-  bool do_probing{true};
+  // NOTE: singleton-row, forcing-row and probing reductions are currently
+  // UNSOUND on SCUC MIPs (they remove the integer optimum — validated via
+  // native_kernel_comparison --check: 39bus_24T 1452678.4038 -> 1455085/1453758)
+  // and default OFF pending a soundness fix.  The remaining reductions (fixed,
+  // empty, singleton-column, tighten, doubleton, dominated, parallel, coeff
+  // strengthen) are validated sound.
+  bool do_singleton_rows{false};
+  bool do_forcing_rows{false};
+  bool do_probing{false};
   int max_probing_candidates{500};
   int probing_depth{3};
   bool do_coefficient_strengthen{true};

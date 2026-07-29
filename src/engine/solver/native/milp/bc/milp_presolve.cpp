@@ -733,6 +733,13 @@ int MILPPresolve::detect_forcing_rows() {
 
   for (int r = 0; r < m_orig_; ++r) {
     if (row_deleted_[r]) continue;
+    // Recompute this row's activity from current bounds/deletions.  Earlier
+    // forcing rows in this same pass call fix_variable(), which deletes columns
+    // and adjusts the bounds of every row sharing those columns — leaving the
+    // start-of-pass activities stale.  Using a stale min/max activity against an
+    // already-adjusted row bound fires spurious forcing/redundancy and cuts off
+    // the true optimum.  A per-row refresh keeps the two consistent.
+    update_activity(r);
     const auto& ac = row_activity_[r];
 
     // Redundant row: max_activity <= row_ub AND min_activity >= row_lb
@@ -1400,11 +1407,11 @@ PresolveStats MILPPresolve::run(LPModel& lp,
 
     changes += remove_fixed_variables();
     changes += remove_empty_rows_and_cols();
-    changes += process_singleton_rows();
+    if (opts_.do_singleton_rows) changes += process_singleton_rows();
     changes += process_singleton_columns();
     changes += tighten_bounds();
     changes += remove_fixed_variables();  // new fixings from tightening
-    changes += detect_forcing_rows();
+    if (opts_.do_forcing_rows) changes += detect_forcing_rows();
     changes += remove_fixed_variables();
     changes += remove_empty_rows_and_cols();
 
